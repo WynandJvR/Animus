@@ -1,0 +1,17 @@
+{
+  "name": "mc-bot-lab",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI-controllable Minecraft bot (swappable brain: Claude or a local llama.cpp/Ollama model)",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "brain:llm": "node brain-llm.js"
+  },
+  "dependencies": {
+    "bedrock-protocol": "^3.57.0",
+    "mineflayer": "^4.34.0",
+    "mineflayer-pathfinder": "^2.4.5"
+  }
+}

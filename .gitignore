@@ -1,0 +1,36 @@
+# Node
+bot/node_modules/
+
+# Bundled Node runtime (downloaded per-machine, not source)
+node/
+
+# Paper jar (copied from the live server; do not redistribute)
+testserver/*.jar
+
+# Generated server runtime / worlds / logs
+testserver/botworld*/
+testserver/world*/
+testserver/version_history.json
+testserver/logs/
+testserver/cache/
+testserver/libraries/
+testserver/versions/
+testserver/plugins/
+testserver/crash-reports/
+testserver/*.log
+testserver/usercache.json
+testserver/banned-*.json
+testserver/ops.json
+testserver/whitelist.json
+testserver/permissions.yml
+testserver/help.yml
+testserver/commands.yml
+testserver/bukkit.yml
+testserver/spigot.yml
+testserver/paper-*/
+testserver/config/
+testserver/.console_history
+
+# misc
+logs/
+*.pid
