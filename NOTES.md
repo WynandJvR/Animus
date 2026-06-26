@@ -106,7 +106,8 @@ These were real incidents on the live server — keep them fixed:
 ## 7. Current capabilities (all natural-language driven via the brain)
 
 perceive (state/scan/find/block/entities/inventory/look) · move (come/goto/follow/stop/turn) ·
-break|mine (right tool, whole tree, natural-only far / crafted ≤4) · collect · plant (replants at last chop spot) ·
+remember/forget/waypoints + `goto <name>` (persistent named places, see §9) ·
+break|mine (right tool, whole tree, natural-only far / crafted ≤4) · collect (+auto-collect) · plant (replants at last chop spot) ·
 place · craft (walks to a table) · hunt (food animals) · sleep/wake · attack/defend (+auto-defend, creeper-flee) ·
 eat (+auto-eat) · drop · equip · say · anti-AFK. Operator-only via in-game `!`: build/give/gamemode/tp.
 
@@ -117,5 +118,15 @@ eat (+auto-eat) · drop · equip · say · anti-AFK. Operator-only via in-game `
 - **Can't go to a player it can't see** (vanilla client only knows nearby entity positions). Needs coords, or an op `tpto` (declined — cheat).
 - **No strip-mining** — only mines *exposed* ore. "go mine iron" on the surface → "no iron nearby". A real `stripmine` (dig down, branch-mine, follow veins) is a possible future feature.
 - **Bedrock body (`index-bedrock.js`) is written but NOT live-tested.** It now has the `CHEAT_CMDS` confinement block on its `/cmd` path (added 2026-06-26, mirrors the Java body), but still lacks auto-eat/auto-defend/anti-AFK.
-- Growing the toolset further → use **grammar / tool-calling** (constrained output) so a small model reliably picks from a big menu.
+- Growing the toolset further → use **grammar / tool-calling** (constrained output) so a small model reliably picks from a big menu. (Next up — biggest reliability win for the local model.)
 - ~~Make the mineflayer patch durable~~ — DONE (see §4, `installDigTimeGuard`).
+- **Auto-torch (deferred, on purpose).** A companion that lights the way at night is very "natural", but it's an autonomous *block-placer* — exactly what the anti-grief ethos says not to ship default-on hastily. Planned as opt-in (`AUTO_TORCH=1`), conservative (night + low light + torches in inv + natural ground only, throttled, no torch-spam). Pairs with a "leash / stuck-while-following" detector.
+
+---
+
+## 9. Persistent memory & natural-companion reflexes (2026-06-26)
+
+Borrowed the genuinely-fitting ideas from the wider LLM-Minecraft ecosystem (Mindcraft's always-on "modes", JARVIS-1-style persistent memory) — adapted to this bot's minimal/fast/anti-grief philosophy.
+
+- **Persistent waypoints (`bot/memory.js`).** Named places saved to `bot/memory.json` (gitignored — personal/runtime data), surviving restarts so the bot "knows your world". Commands: `remember <name>` (saves current spot), `forget <name>`, `waypoints` (list), and `goto <name>` walks to one. The state exposes a `waypoints` name list so the brain knows what it can recall; the prompt maps "remember this as home" → `remember home` and "go home" → `goto home`. Verified live: full save/list/goto/forget flow + the unknown-name path.
+- **Auto-collect reflex (`index.js`, `AUTO_COLLECT`, default on).** When IDLE (no active pathfinder goal) and a dropped item is within ~8 blocks, the bot walks over and picks it up — tidies up after a chop/hunt with zero brain involvement. Gated on `bot.pathfinder.goal` being null so it **never** yanks itself off a follow/goto. Verified live: an idle bot auto-picked 5 dropped dirt (inventory `[]` → `dirt x5`).

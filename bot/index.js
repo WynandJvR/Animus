@@ -250,6 +250,29 @@ if (process.env.AUTO_DEFEND !== '0') {
   }, 700)
 }
 
+// Auto-collect: when idle (no active pathfinder goal) and a dropped item is close
+// by, walk over and pick it up — so the bot tidies up after a chop/hunt without the
+// brain micromanaging it. Skipped whenever it already has a goal (following / going
+// somewhere) so it never yanks itself off-task. Disable with AUTO_COLLECT=0.
+let collecting = false
+if (process.env.AUTO_COLLECT !== '0') {
+  setInterval(async () => {
+    if (collecting || !bot.entity || !bot.pathfinder || bot.pathfinder.goal) return
+    try {
+      const me = bot.entity.position
+      let best = null; let bestD = 8
+      for (const e of Object.values(bot.entities || {})) {
+        if (!e || !e.position) continue
+        if (e.name !== 'item' && e.objectType !== 'Item') continue // real drops only
+        const d = e.position.distanceTo(me); if (d > 1.3 && d < bestD) { bestD = d; best = e }
+      }
+      if (!best) return
+      collecting = true
+      await bot.pathfinder.goto(new goals.GoalNear(best.position.x, best.position.y, best.position.z, 1))
+    } catch { /* item vanished / unreachable — retry next tick */ } finally { collecting = false }
+  }, 3000)
+}
+
 // ---- control API -----------------------------------------------------------
 
 function send (res, code, body) {

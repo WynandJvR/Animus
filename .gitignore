@@ -1,6 +1,9 @@
 # Node
 bot/node_modules/
 
+# Runtime/personal bot memory (saved waypoints) — not source
+bot/memory.json
+
 # Bundled Node runtime (downloaded per-machine, not source)
 node/
 

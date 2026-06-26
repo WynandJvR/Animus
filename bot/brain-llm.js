@@ -62,8 +62,10 @@ Respond with EXACTLY ONE JSON object: {"command": "<one command>", "reason": "<s
 Valid commands — your "command" MUST begin with exactly one of these verbs.
 Do NOT prefix it with a category word like "perceive", "move", "build", or "chat":
   state | scan [radius] | find <block> [radius] | block <x> <y> <z> | entities | inventory | look <x> <y> <z>
-  come [player] | goto <x> <y> <z> | follow <player> | stop
+  come [player] | goto <x> <y> <z> | goto <waypoint> | follow <player> | stop
   turn <around|left|right|north|south|east|west>   (rotate to look that way)
+  remember <name> | forget <name> | waypoints   (save/recall named places; the state's
+    "waypoints" lists what you know. "remember this as home" -> remember home; "go home" -> goto home)
   attack | defend   (fight the nearest hostile mob — also happens automatically)
   mine <x> <y> <z> | break [blocktype]   (break a block; bare "break" chops the nearest tree, walking to it; uses the right tool)
   collect   (walk over and pick up nearby dropped items)

@@ -7,6 +7,7 @@
 
 const { goals, Movements } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
+const memory = require('./memory.js') // persistent named waypoints
 
 // entity names treated as hostile for attack/defend and auto-defense
 const HOSTILE = /zombie|skeleton|spider|creeper|enderman|witch|husk|drowned|pillager|vindicator|ravager|slime|magma_cube|blaze|piglin|hoglin|phantom|zoglin|stray|silverfish|guardian|vex|wither|warden|ghast|shulker|illusioner|evoker|breeze|bogged/i
@@ -165,8 +166,10 @@ async function handle (bot, line) {
         '  inventory', '  look <x> <y> <z>',
         ' movement:',
         '  come [player]            walk to a player (nearest if omitted)',
-        '  goto <x> <y> <z>', '  follow <player>', '  stop',
+        '  goto <x> <y> <z> | goto <waypoint>', '  follow <player>', '  stop',
         '  turn <around|left|right|north|south|east|west>',
+        '  remember <name>          save current spot as a waypoint',
+        '  forget <name> | waypoints   manage saved places',
         ' survival/actions:',
         '  mine|break [block|x y z]  break a block; bare "break" chops nearest tree',
         '  collect                   pick up nearby dropped items',
@@ -325,10 +328,37 @@ async function handle (bot, line) {
       return `arrived at ${a[0] || 'player'}`
     }
     case 'goto': {
+      // a named waypoint ("goto home") or explicit coords ("goto 10 -60 4")
+      if (a[0] && Number.isNaN(Number(a[0]))) {
+        const wp = memory.getWaypoint(a[0])
+        if (!wp) return `no waypoint "${a[0]}" (known: ${memory.waypointNames().join(', ') || 'none'})`
+        try { await bot.pathfinder.goto(new goals.GoalNear(wp.x, wp.y, wp.z, 1)) } catch (e) { return `couldn't reach ${a[0]}: ${e.message}` }
+        return `arrived at ${a[0].toLowerCase()} (${wp.x},${wp.y},${wp.z})`
+      }
       const [x, y, z] = a.map(Number)
-      if ([x, y, z].some(Number.isNaN)) return 'usage: goto <x> <y> <z>'
+      if ([x, y, z].some(Number.isNaN)) return 'usage: goto <x> <y> <z> | goto <waypoint>'
       try { await bot.pathfinder.goto(new goals.GoalNear(x, y, z, 1)) } catch (e) { return `couldn't reach ${x},${y},${z}: ${e.message}` }
       return `arrived at ${x},${y},${z}`
+    }
+    case 'remember':
+    case 'savepoint': {
+      // save the bot's current spot as a named waypoint (persists across restarts)
+      const name = a[0]
+      if (!name) return 'usage: remember <name>  (saves your current location)'
+      const wp = memory.setWaypoint(name, bot.entity.position)
+      return wp ? `remembered "${name.toLowerCase()}" at ${wp.x},${wp.y},${wp.z}` : 'usage: remember <name>'
+    }
+    case 'forget': {
+      const name = a[0]
+      if (!name) return 'usage: forget <name>'
+      return memory.removeWaypoint(name) ? `forgot "${name.toLowerCase()}"` : `no waypoint "${name}"`
+    }
+    case 'waypoints':
+    case 'places': {
+      const wps = memory.listWaypoints()
+      const names = Object.keys(wps)
+      if (!names.length) return 'no waypoints saved yet (use "remember <name>")'
+      return JSON.stringify(Object.fromEntries(names.map(n => [n, `${wps[n].x},${wps[n].y},${wps[n].z}`])))
     }
     case 'follow': {
       const t = findPlayer(bot, a[0])
@@ -722,6 +752,7 @@ function state (bot) {
     players,
     alone: players.length === 0, // no OTHER players nearby (you are never in this list)
     threat: nearestThreat(bot),   // nearest hostile, or null
+    waypoints: memory.waypointNames(), // named places you can "goto <name>"
     entities: summariseEntities(bot)
   }
 }
