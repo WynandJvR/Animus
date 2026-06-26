@@ -369,6 +369,46 @@ if (process.env.GAZE !== '0') {
   }, 500)
 }
 
+// Leash / stuck-recovery reflex: while FOLLOWING a player, if the bot stops making
+// progress but the target is still far (e.g. the player climbed somewhere the bot
+// can't path with canDig off), kick the pathfinder by re-issuing the follow goal.
+// If it stays stuck, note it once and stop hammering — the dynamic follow will pick
+// back up on its own once the target moves somewhere reachable. Off with LEASH=0.
+let leashLastPos = null
+let leashStuckSince = 0
+let leashLastKick = 0
+let leashGaveUp = null
+if (process.env.LEASH !== '0') {
+  setInterval(() => {
+    if (!bot.entity || !bot.pathfinder) return
+    try {
+      const goal = bot.pathfinder.goal
+      const target = goal && goal.entity // only entity-follows (not goto-to-coords)
+      if (!target || !target.position) { leashLastPos = null; leashStuckSince = 0; leashGaveUp = null; return }
+      const me = bot.entity.position
+      const dist = target.position.distanceTo(me)
+      if (dist <= 6) { leashLastPos = me.clone(); leashStuckSince = 0; leashGaveUp = null; return } // following fine
+      const moved = leashLastPos ? me.distanceTo(leashLastPos) : Infinity
+      leashLastPos = me.clone()
+      if (moved > 0.6) { leashStuckSince = 0; leashGaveUp = null; return } // making progress toward them
+      if (!leashStuckSince) { leashStuckSince = Date.now(); leashLastKick = 0; return } // just stalled — start the clock
+      const stuck = Date.now() - leashStuckSince
+      const who = target.username || target.name || 'target'
+      if (stuck < 12000) {
+        if (Date.now() - leashLastKick > 3000) { // re-path at most every ~3s
+          const range = Math.max(1, Math.round(Math.sqrt(goal.rangeSq || 9)))
+          bot.pathfinder.setGoal(new goals.GoalFollow(target, range), true)
+          leashLastKick = Date.now()
+          note(`(leash) re-pathing to ${who} (${dist.toFixed(0)}m, stuck ${(stuck / 1000).toFixed(0)}s)`)
+        }
+      } else if (leashGaveUp !== target) { // genuinely blocked -> note once, stop kicking
+        note(`(leash) can't reach ${who} (${dist.toFixed(0)}m) — blocked, holding`)
+        leashGaveUp = target
+      }
+    } catch { /* not ready */ }
+  }, 1500)
+}
+
 // ---- control API -----------------------------------------------------------
 
 function send (res, code, body) {
