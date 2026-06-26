@@ -1,4 +1,4 @@
-# mc-bot-lab — Findings & Operating Notes
+# Animus — Findings & Operating Notes
 
 Hard-won notes from getting the AI bot running well on this machine + the live server.
 Read this before debugging "it's slow / it griefs / it ignores me" again.

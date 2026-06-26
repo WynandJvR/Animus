@@ -1,5 +1,5 @@
 {
-  "name": "mc-bot-lab",
+  "name": "animus",
   "version": "0.1.0",
   "private": true,
   "description": "AI-controllable Minecraft bot (swappable brain: Claude or a local llama.cpp/Ollama model)",

@@ -1,4 +1,6 @@
-# mc-bot-lab
+# Animus
+
+*The mind that animates the body — an AI-controllable Minecraft bot with a swappable brain.*
 
 An AI-controllable Minecraft bot that joins a server as its own player, walks
 around, and builds things on command. The **body** (the bot) is separate from
@@ -26,7 +28,7 @@ Same body, same command surface, two brains.
 ## Layout
 
 ```
-mc-bot-lab/
+animus/
 ├── testserver/        isolated Paper 1.21.11 test server (localhost, offline-mode, :25599)
 │   ├── start.sh       small heap, no pre-touch — won't disturb a live server
 │   └── server.properties
