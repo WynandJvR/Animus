@@ -29,10 +29,19 @@ function recordChatLog (line) { chatLog.push(line); if (chatLog.length > 40) cha
 const MAX_DELIVERIES = parseInt(process.env.CHAT_MAX_DELIVERIES || '6', 10)
 let lastAddressedAt = 0 // when a player last addressed the bot (gates brain chatter)
 let lastReplyAt = 0     // when the bot last spoke a reply
+// gaze/attention state (see the gaze reflex below): who last spoke to us (eye
+// contact while replying), and a window where a manual look/turn owns the head.
+let gazeFocusPlayer = null
+let gazeFocusAt = 0
+let gazeSuppressUntil = 0
+function noteManualLook (line) { // a deliberate look/turn should not be overridden by gaze
+  if (/^(look|turn|lookbehind)\b/i.test(String(line).trim())) gazeSuppressUntil = Date.now() + 6000
+}
 function recordChat (from, text) {
   recentChat.push({ from, text, ts: Date.now(), deliveries: 0 })
   if (recentChat.length > 6) recentChat.shift()
   lastAddressedAt = Date.now()
+  gazeFocusPlayer = from; gazeFocusAt = Date.now() // look at whoever just addressed us
 }
 function clearPendingChat () { recentChat.forEach(c => { c.deliveries = MAX_DELIVERIES }) }
 // Outgoing-chat gate: a "say" is only actually sent if it isn't a duplicate and
@@ -153,6 +162,7 @@ bot.on('chat', (username, message) => {
     const line = message.slice(1)
     const drop = gateSay(line, false) // operators speak freely
     if (drop) { note(`(chat-cmd) ${line} -> skipped (${drop})`); return }
+    noteManualLook(line)
     commands.handle(bot, line)
       .then(r => note(`(chat-cmd) ${r}`))
       .catch(e => note(`(chat-cmd error) ${e.message}`))
@@ -263,14 +273,100 @@ if (process.env.AUTO_COLLECT !== '0') {
       let best = null; let bestD = 8
       for (const e of Object.values(bot.entities || {})) {
         if (!e || !e.position) continue
-        if (e.name !== 'item' && e.objectType !== 'Item') continue // real drops only
+        if (e.name !== 'item') continue // real drops only (the 'item' entity type)
         const d = e.position.distanceTo(me); if (d > 1.3 && d < bestD) { bestD = d; best = e }
       }
       if (!best) return
       collecting = true
-      await bot.pathfinder.goto(new goals.GoalNear(best.position.x, best.position.y, best.position.z, 1))
+      // range 0: actually walk ONTO the item's block — range 1 can count as "arrived"
+      // a block short, so the bot never touches the drop and never picks it up.
+      await bot.pathfinder.goto(new goals.GoalNear(best.position.x, best.position.y, best.position.z, 0))
     } catch { /* item vanished / unreachable — retry next tick */ } finally { collecting = false }
   }, 3000)
+}
+
+// Auto-torch (OPT-IN, default OFF — set AUTO_TORCH=1): a companion that lights the
+// way at night. Deliberately conservative because it's an autonomous block-placer:
+// only at night, only on natural ground (placeTorchNearby), throttled, and skipped
+// if a torch/lantern is already close — so it never spams or decorates builds.
+let lastTorchAt = 0
+let _torchIds = null
+function torchBlockIds (bot) {
+  if (_torchIds) return _torchIds
+  try {
+    const md = require('minecraft-data')(bot.version)
+    const ids = Object.values(md.blocksByName).filter(b => /torch|lantern/.test(b.name)).map(b => b.id)
+    if (ids.length) _torchIds = ids // cache only on success; leave null to retry if mcData wasn't ready
+    return ids
+  } catch { return [] } // don't cache a failure — a permanently-empty list would disable the dedup guard
+}
+const AUTO_TORCH_MS = parseInt(process.env.AUTO_TORCH_MS || '8000', 10)
+if (process.env.AUTO_TORCH === '1') {
+  setInterval(async () => {
+    if (!bot.entity || !bot.time || bot.time.timeOfDay < 13000) return // daytime — skip
+    if (Date.now() - lastTorchAt < AUTO_TORCH_MS) return
+    try {
+      const ids = torchBlockIds(bot)
+      if (ids.length && bot.findBlock({ matching: ids, maxDistance: 6 })) return // already lit nearby
+      const r = await commands.placeTorchNearby(bot)
+      if (/placed torch/.test(r)) { lastTorchAt = Date.now(); note(`(auto-torch) ${r}`) }
+    } catch { /* not ready / placement raced — retry next tick */ }
+  }, 3000)
+}
+
+// Gaze / attention reflex: make the bot's head behave like a real player's instead
+// of staring into space. Priority each tick: (1) face an attacker just after being
+// hurt, (2) yield to auto-defend when a hostile is in melee range, (3) make eye
+// contact with whoever just spoke to us, (4) otherwise watch the nearest player or
+// glance at nearby motion. While walking, the pathfinder already aims the head
+// toward travel, so we yield to it. A manual look/turn also owns the head briefly.
+// LLM-free and smooth (lookAt force=false tracks targets without snapping). GAZE=0 off.
+let lastHealth = null
+let lastHurtAt = 0
+bot.on('health', () => {
+  if (lastHealth != null && bot.health < lastHealth) lastHurtAt = Date.now()
+  lastHealth = bot.health
+})
+function gazeNearest (pred, maxDist) {
+  if (!bot.entity) return null
+  const me = bot.entity.position
+  let best = null; let bestD = maxDist
+  for (const e of Object.values(bot.entities || {})) {
+    if (!e || !e.position || e === bot.entity) continue
+    if (!pred(e)) continue
+    const d = e.position.distanceTo(me); if (d < bestD) { bestD = d; best = e }
+  }
+  return best
+}
+const gazeIsHostile = e => (e.type === 'mob' || e.type === 'hostile') && HOSTILE_RE.test(e.name || '')
+const gazeMoving = e => e.velocity && (Math.abs(e.velocity.x) + Math.abs(e.velocity.z)) > 0.03
+function gazeLookAt (e) { bot.lookAt(e.position.offset(0, (e.height || 1.6) * 0.9, 0), false).catch(() => {}) }
+if (process.env.GAZE !== '0') {
+  setInterval(() => {
+    if (!bot.entity) return
+    try {
+      if (Date.now() < gazeSuppressUntil) return            // a manual look/turn owns the head
+      if (bot.pathfinder && bot.pathfinder.isMoving()) return // pathfinder aims toward travel
+      const now = Date.now()
+      // 1) just hurt -> face the attacker (a hostile at any range, or a close player)
+      if (now - lastHurtAt < 2500) {
+        const attacker = gazeNearest(gazeIsHostile, 16) || gazeNearest(e => e.type === 'player', 5)
+        if (attacker) { gazeLookAt(attacker); return }
+      }
+      // 2) hostile in melee range -> auto-defend owns the head, don't fight it
+      if (gazeNearest(gazeIsHostile, 4.5)) return
+      // 3) someone just spoke to us -> eye contact while it's fresh
+      if (gazeFocusPlayer && now - gazeFocusAt < 5000) {
+        const p = bot.players[gazeFocusPlayer] && bot.players[gazeFocusPlayer].entity
+        if (p) { gazeLookAt(p); return }
+      }
+      // 4) otherwise attend to the nearest player, or glance at nearby motion
+      const focus = gazeNearest(e => e.type === 'player', 12) ||
+                    gazeNearest(e => (e.type === 'mob' || e.type === 'animal') && gazeMoving(e), 10)
+      if (focus) gazeLookAt(focus)
+      // 5) nothing to attend to -> hold (no fidget)
+    } catch { /* not ready */ }
+  }, 500)
 }
 
 // ---- control API -----------------------------------------------------------
@@ -315,6 +411,7 @@ const server = http.createServer((req, res) => {
       }
       const drop = gateSay(line, true) || gateImpactful(line) // brain: gated chat + repeat-guard
       if (drop) { note(`(cmd) ${line} -> skipped (${drop})`); return send(res, 200, `skipped: ${drop}`) }
+      noteManualLook(line)
       try {
         const result = await commands.handle(bot, line)
         // A non-perception command is the brain's response to any waiting player,

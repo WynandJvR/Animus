@@ -130,6 +130,45 @@ async function eatFood (bot) {
   return `ate ${food.name} (food ${bot.food})`
 }
 
+// Natural ground a torch may be auto-placed on. Anchored/explicit so crafted or
+// build blocks (planks, bricks, wool, glass, concrete...) never qualify — the
+// auto-torch reflex must light natural terrain, never decorate someone's build.
+const TORCH_GROUND = /grass_block|^dirt$|coarse_dirt|podzol|rooted_dirt|^stone$|deepslate$|^tuff$|^andesite$|^diorite$|^granite$|^sand$|^red_sand$|^gravel$|^netherrack$|^cobblestone$|moss_block|^mud$|^sandstone$|^snow_block$|^calcite$|^basalt$|^blackstone$|grass_path|dirt_path/
+
+// Place ONE torch on natural ground next to the bot (for the opt-in auto-torch
+// reflex). Returns a status string; safe to call often — no-ops cleanly if there's
+// no torch in hand-reach inventory or no suitable natural spot adjacent.
+async function placeTorchNearby (bot) {
+  const items = bot.inventory ? bot.inventory.items() : []
+  const torch = items.find(i => i.name === 'torch')
+  if (!torch) return 'no torch in inventory'
+  const b = blockPos(bot)
+  let ref = null
+  for (let r = 1; r <= 2 && !ref; r++) {
+    for (let dx = -r; dx <= r && !ref; dx++) {
+      for (let dz = -r; dz <= r && !ref; dz++) {
+        if (dx === 0 && dz === 0) continue // not under our own feet
+        const ground = bot.blockAt(new Vec3(b.x + dx, b.y - 1, b.z + dz))
+        const above = bot.blockAt(new Vec3(b.x + dx, b.y, b.z + dz))
+        if (ground && TORCH_GROUND.test(ground.name) && above && above.name === 'air') ref = ground
+      }
+    }
+  }
+  if (!ref) return 'no natural ground nearby for a torch'
+  await bot.equip(torch, 'hand').catch(() => {})
+  await bot.lookAt(ref.position.offset(0.5, 1, 0.5), true).catch(() => {})
+  try {
+    await bot.placeBlock(ref, new Vec3(0, 1, 0))
+  } catch (e) {
+    // Paper/creative sometimes doesn't echo the blockUpdate in time even though the
+    // torch WAS placed — read the spot back before reporting failure, so the reflex
+    // doesn't log a false "couldn't place" (and then retry-spam).
+    const placed = bot.blockAt(ref.position.offset(0, 1, 0))
+    if (!placed || !/torch/.test(placed.name)) return `couldn't place torch: ${e.message}`
+  }
+  return `placed torch at ${ref.position.x},${ref.position.y + 1},${ref.position.z}`
+}
+
 // Pick the best tool in inventory for a block (axe/pickaxe/shovel, best material).
 function bestTool (bot, blockName) {
   const items = bot.inventory ? bot.inventory.items() : []
@@ -453,12 +492,12 @@ async function handle (bot, line) {
       let target = null; let best = 32
       for (const e of Object.values(bot.entities || {})) {
         if (!e || !e.position) continue
-        if (e.name !== 'item' && e.objectType !== 'Item') continue // real drops only (not item_frames)
+        if (e.name !== 'item') continue // real drops only (the 'item' entity type, not item_frames)
         const d = e.position.distanceTo(bot.entity.position)
         if (d < best) { best = d; target = e }
       }
       if (!target) return 'no dropped items nearby'
-      try { await bot.pathfinder.goto(new goals.GoalNear(target.position.x, target.position.y, target.position.z, 1)) } catch (e) { return `couldn't reach item: ${e.message}` }
+      try { await bot.pathfinder.goto(new goals.GoalNear(target.position.x, target.position.y, target.position.z, 0)) } catch (e) { return `couldn't reach item: ${e.message}` }
       return 'went to pick up nearby items'
     }
 
@@ -768,4 +807,4 @@ function setupMovements (bot) {
   bot.pathfinder.setMovements(m)
 }
 
-module.exports = { handle, state, setupMovements, eatFood }
+module.exports = { handle, state, setupMovements, eatFood, placeTorchNearby }
