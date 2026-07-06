@@ -47,16 +47,25 @@ function clearPendingChat () { recentChat.forEach(c => { c.deliveries = MAX_DELI
 // Outgoing-chat gate: a "say" is only actually sent if it isn't a duplicate and
 // the cooldown elapsed — kills repeated/again-spam chat and server anti-spam
 // kicks. Returns null to send, or a reason string to suppress.
+// Brain chat comes in two kinds: a REPLY (a player addressed it since it last
+// spoke) is always allowed; an UNPROMPTED quip ("vibe") is allowed at most once
+// per VIBE_CHAT_MS so the bot feels alive without ever spamming itself into a
+// kick. Set VIBE_CHAT_MS huge to restore the old hard-block on unprompted chat.
 const CHAT_COOLDOWN_MS = parseInt(process.env.CHAT_COOLDOWN_MS || '2500', 10)
+const VIBE_CHAT_MS = parseInt(process.env.VIBE_CHAT_MS || '90000', 10)
 let lastSayAt = 0
+let lastVibeAt = 0
 function gateSay (line, fromBrain) {
   if (!/^say\b/i.test(String(line).trim())) return null // not a chat line — allow
   const now = Date.now()
-  // The autonomous brain may speak ONLY in reply to a fresh player address
-  // (lastAddressedAt advances when addressed; lastReplyAt when it replies) —
-  // this hard-stops unprompted/random chatter. Operators (!say) speak freely.
-  if (fromBrain && lastAddressedAt <= lastReplyAt) return 'nothing to respond to'
   if (now - lastSayAt < CHAT_COOLDOWN_MS) return `cooldown ${CHAT_COOLDOWN_MS}ms`
+  if (fromBrain && lastAddressedAt <= lastReplyAt) {
+    // unprompted quip — budgeted, and it does NOT count as a reply (leaves
+    // lastReplyAt/pending untouched so a real answer is still owed if asked)
+    if (now - lastVibeAt < VIBE_CHAT_MS) return `vibe budget ${Math.ceil((VIBE_CHAT_MS - (now - lastVibeAt)) / 1000)}s`
+    lastVibeAt = now; lastSayAt = now
+    return null
+  }
   lastSayAt = now; lastReplyAt = now
   clearPendingChat() // a reply resolves the pending request(s)
   return null

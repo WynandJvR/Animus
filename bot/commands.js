@@ -8,12 +8,20 @@
 const { goals, Movements } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
 const memory = require('./memory.js') // persistent named waypoints
+const schematic = require('./schematic.js') // download/parse + survival physical building
 
 // entity names treated as hostile for attack/defend and auto-defense
 const HOSTILE = /zombie|skeleton|spider|creeper|enderman|witch|husk|drowned|pillager|vindicator|ravager|slime|magma_cube|blaze|piglin|hoglin|phantom|zoglin|stray|silverfish|guardian|vex|wither|warden|ghast|shulker|illusioner|evoker|breeze|bogged/i
 
 // remembered spot of the last block/tree broken, so "plant where you chopped" works
 let lastBrokeAt = null
+
+// schematic build state (one bot per process, so module-level is fine).
+// loadedSchem: the parsed schematic ready to build; building: a build is running;
+// buildAbort: set by `stop` to halt an in-progress build cleanly.
+let loadedSchem = null
+let building = false
+let buildAbort = false
 
 // How close the bot trails a player when following. Range 2 settles right on top of
 // them (felt crowding); ~3 blocks reads as walking alongside. Tunable via FOLLOW_RANGE.
@@ -225,6 +233,9 @@ async function handle (bot, line) {
         '  wall <material> <length> <height>',
         '  tower <material> [height=10] [size=3]',
         '  house <material> [w=7] [l=7] [h=4]',
+        '  schematic load <url|file>   load a .schem (direct link or local file)',
+        '  schematic materials         list blocks the loaded build needs',
+        '  schematic build [here|x y z]  build it in SURVIVAL from inventory (asks for materials)',
         '  clear [radius=8]', '  give <item> [count]',
         ' admin:  tp <x> <y> <z> | gamemode <mode> | say <msg>'
       ].join('\n')
@@ -406,6 +417,7 @@ async function handle (bot, line) {
       return `following ${a[0] || 'nearest player'}`
     }
     case 'stop':
+      buildAbort = true // also halts an in-progress schematic build
       bot.pathfinder.setGoal(null); return 'stopped'
 
     case 'attack':
@@ -675,6 +687,66 @@ async function handle (bot, line) {
       fill(bot, b.x - r, b.y, b.z - r, b.x + r, b.y + r, b.z + r, 'air')
       return `cleared r${r} around ${b.x},${b.y},${b.z}`
     }
+    case 'schem':
+    case 'schematic': {
+      // Load and physically build a schematic IN SURVIVAL (real blocks from
+      // inventory, placed by hand — no /fill or creative). Operator-only (in
+      // CHEAT_CMDS) so the autonomous brain can't fetch URLs / build on its own.
+      const sub = (a[0] || '').toLowerCase()
+      if (sub === 'load') {
+        const src = a[1]
+        if (!src) return 'usage: schematic load <url|file>  (url must be a DIRECT .schem link, e.g. buildingguide.app/schematics/<name>.schem)'
+        try {
+          if (/^https?:\/\//i.test(src)) {
+            const buf = await schematic.download(src)
+            const name = schematic.nameFromUrl(src)
+            schematic.saveLocal(name, buf) // cache locally so a rebuild needs no re-download
+            loadedSchem = { schem: await schematic.readSchematic(buf, bot.version), name }
+          } else {
+            loadedSchem = { schem: await schematic.loadFile(src, bot.version), name: src }
+          }
+        } catch (e) { return `couldn't load schematic: ${e.message}` }
+        const s = loadedSchem.schem.size
+        const m = schematic.materialsSummary(loadedSchem.schem)
+        // Anything taller than ~3 blocks needs scaffolding to reach — the bot
+        // pillars up with cheap filler blocks (verified live: no dirt = no roof).
+        const scaffold = s.y > 3 ? ' — and a stack of dirt/cobblestone so I can scaffold up to reach the top' : ''
+        return `loaded "${loadedSchem.name}" (${s.x}x${s.y}x${s.z}). Bring me — ${m.text}${scaffold}`
+      }
+      if (sub === 'materials' || sub === 'mats' || sub === 'bom') {
+        if (!loadedSchem) return 'no schematic loaded — schematic load <url|file> first'
+        return schematic.materialsSummary(loadedSchem.schem).text
+      }
+      if (sub === 'build') {
+        if (!loadedSchem) return 'no schematic loaded — schematic load <url|file> first'
+        if (building) return 'already building — say "stop" to cancel first'
+        // Origin: "here" (bot's feet) or explicit coords.
+        const rest = a.slice(1)
+        let at
+        if (!rest.length || rest[0] === 'here') { const p = blockPos(bot); at = new Vec3(p.x, p.y, p.z) } else {
+          const n = rest.slice(0, 3).map(Number)
+          if (n.some(Number.isNaN)) return 'usage: schematic build [here | <x> <y> <z>]'
+          at = new Vec3(n[0], n[1], n[2])
+        }
+        building = true; buildAbort = false
+        // Long-running (minutes) — run detached, chat progress, and return the
+        // kickoff line now so the command/HTTP call doesn't block for the whole build.
+        schematic.buildSurvival(bot, loadedSchem.schem, at, {
+          say: msg => bot.chat(String(msg).slice(0, 256)),
+          isStopped: () => buildAbort,
+          restoreMovements: () => setupMovements(bot)
+        }).then(r => {
+          building = false
+          bot.chat(`build ${r.stopped ? 'stopped' : 'done'}: ${r.placed}/${r.total} placed${r.skipped ? `, ${r.skipped} skipped` : ''}`)
+        }).catch(e => {
+          building = false; setupMovements(bot)
+          bot.chat(`build error: ${e.message}`)
+        })
+        return `building "${loadedSchem.name}" at ${at.x},${at.y},${at.z} in survival — I'll ask for materials as I go. Say "stop" to cancel.`
+      }
+      return 'usage: schematic <load <url|file> | materials | build [here|x y z]>'
+    }
+
     case 'tp': {
       const [x, y, z] = a.map(Number)
       if ([x, y, z].some(Number.isNaN)) return 'usage: tp <x> <y> <z>'

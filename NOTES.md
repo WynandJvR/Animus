@@ -100,6 +100,11 @@ These were real incidents on the live server — keep them fixed:
 - **Equip-first rule was misfiring.** Asked "what are you holding?", the model would `equip <random item>` first (the prompt's old literal `diamond_shovel` example leaked into the action). Prompt now scopes equip-first to explicit hold/show/equip *requests* and says a "what are you holding?" question is answered straight from `heldItem`.
 - **Follow distance.** `GoalFollow` range was `2` → bot crowded the player ("too close"). Now `FOLLOW_RANGE` (default `3`, env-tunable) → measured ~4 blocks while walking, settling ~2.8 standing. Note `GoalFollow` only ever *closes* distance, never backs away, so a player walking into the parked bot is briefly close — inherent, not worth a custom goal. (`hunt` keeps range 2 — it needs to be in melee.)
 - **New perception fields the brain can reason on:** `biome` (now actually populated — read from the solid block below, not the air at the feet), `threat` (`{type,dist,flee}` for the nearest hostile, so it can retreat/flee vs. fight instead of relying only on the reflex auto-defend), and `alone`.
+- **Persona + "vibe chat" (2026-07-06) — making it feel ALIVE, not just functional.** The SYSTEM prompt now opens with a wild-gamer persona (lowercase, slang, profanity, trash-talk, roasts gameplay; hard line: no slurs / identity hate — also `LLM_TEMP` env, default **0.8**, was 0.3). The old "brain may only speak when addressed" gate is now a **rate-limited budget**: unprompted one-liners pass at most once per `VIBE_CHAT_MS` (default 90s); a quip does NOT count as a reply (doesn't clear pending requests). Lessons re-learned while tuning against qwen3:14b:
+  - **Literal strings in the prompt leak into output** (again — see equip-first above). A concrete example sentence for the say format got parroted verbatim; `say "nothing" if null` produced the literal chat line `nothing`. Use placeholders (`say <the words you want>`) and "in your own words" phrasing. Style samples are OK if explicitly marked "never copy verbatim" (dedupe gate backstops).
+  - **The model put chat text in `"reason"`** (bare `{"command":"say"}` = says nothing in game) until the prompt spelled out that reason is private and the message goes inside the command.
+  - **Persona and accuracy rules fight each other** — any rule worded like "say so plainly" flattens the voice; word accuracy rules as "in your own voice".
+  - Verified with 5 realistic prompt scenarios straight at Ollama (reply-to-question, roast-back, action request, threat, idle heartbeat): in-character, valid JSON, correct commands, ~0.5–1s unchanged.
 
 ---
 
@@ -134,3 +139,45 @@ Borrowed the genuinely-fitting ideas from the wider LLM-Minecraft ecosystem (Min
 - **Leash / stuck-recovery reflex (`index.js`, `LEASH`, default on).** While *following a player*, if the bot stops making progress (`moved < 0.6` per 1.5s tick) while the target is still far (`> 6` blocks), it re-issues the follow goal to kick the pathfinder — recovering from transient give-ups (e.g. the player climbed somewhere it can't path with `canDig=false`). Re-paths at most every ~3s; after ~12s genuinely stuck it logs `(leash) can't reach … — blocked, holding` **once** and stops hammering (the dynamic follow resumes on its own once the target moves somewhere reachable). Only acts on entity-follows (ignores `goto`-to-coords). Verified live: bot followed a watcher who flew 10m up → re-pathed at stuck 2s/6s/9s → "blocked, holding" at 12s.
 - **Gaze / attention reflex (`index.js`, `GAZE`, default on) — the biggest "natural player" win so far.** Makes the head behave like a real player's instead of staring into space. Priority each 500ms tick: (1) face an attacker for ~2.5s after being hurt (a hostile at range, or a close player puncher), (2) yield to auto-defend when a hostile is in melee range, (3) make eye contact with whoever just spoke (`recordChat` sets the focus), (4) otherwise track the nearest player / glance at nearby motion. **Yields the head to the pathfinder while walking** (`isMoving()` → pathfinder already aims toward travel) and to a manual `look`/`turn` for 6s (`noteManualLook`). Smooth (`lookAt` force=false, no snapping); LLM-free; doesn't touch goals so it never affects the brain or pathing. Verified live: the bot's yaw tracked a moving watcher to 4 distinct positions (diff ~0.02 rad ≈ 1°) and faced the player after a punch; head stays still when alone (no fidget).
 - **Auto-torch reflex (`index.js`, `AUTO_TORCH`, OPT-IN / default OFF).** A companion that lights the way at night — but an autonomous block-placer, so it's off by default and deliberately conservative: only at night (`timeOfDay >= 13000`), only via `commands.placeTorchNearby` which places on a **natural-ground allowlist** (never planks/bricks/wool/glass — never your builds), throttled (`AUTO_TORCH_MS`, default 8s), and skipped if a torch/lantern is already within 6 blocks (no spam). `placeTorchNearby` verifies the block after a `placeBlock` timeout (Paper sometimes doesn't echo the `blockUpdate` even when the torch placed) so it doesn't log a false failure and retry-spam. Verified live: 3 consecutive natural-ground placements; the first place-after-spawn is flaky in mineflayer (one-time), which the 3s reflex cadence rides out.
+
+---
+
+## 10. Schematic building — SURVIVAL, like a real player (2026-07-06)
+
+Goal: paste a schematic link (or point at a local file) and have the bot **build it in survival, by hand**, from materials the player supplies — no `/fill`, `/setblock`, `/give`, creative, tp or fly anywhere. The player provides blocks; when the bot runs short it **pauses and asks for exactly what it needs**, then resumes. This is the [natural-player goal] applied to building.
+
+**Tooling (in `bot/`, versions pinned in package.json):**
+- `prismarine-schematic` 1.3.0 — parse `.schem`. **Only reads Sponge v1/v2 + mcedit.**
+- `mineflayer-builder` 1.0.1 — we reuse **only its `lib/Build`** class (action ordering, face/orientation math). Its own build loop is **creative-only** (`bot.creative.setInventorySlot`) and unusable for survival — the placement loop is ours (`bot/schematic.js` → `buildSurvival`).
+- Compat with mineflayer 4.37.1 / MC 1.21.11 verified statically + with an offline `Build` spike (all internal APIs present: `_placeBlockWithOptions`, `GoalPlaceBlock.getFaceAndRef`, `shapes.getShapeFaceCenters`).
+
+**Download — the key finding:** most schematic sites gate downloads and won't work with "paste a link":
+- **`mineschematic.com` does NOT work** — Next.js **Server Action** (`DownloadAction`) behind Cloudflare, no static/presigned `.schem` URL (only thumbnails are pre-signed). Automating it needs a headless browser (rejected — too heavy).
+- **`buildingguide.app` WORKS** — serves clean **direct** URLs: `https://buildingguide.app/schematics/<name>.schem` → gzipped-NBT file, `application/octet-stream`, no login/JS. This is the recommended paste-a-link source.
+- The `schematic load <url>` command accepts **any DIRECT file URL** (validates gzip `1f8b` / NBT `0a` magic, rejects HTML), so GitHub raw / Discord CDN / Dropbox-direct links also work.
+
+**Sponge v3 adapter (the second key finding):** modern exporters (WorldEdit 7.3+, buildingguide) write **Sponge Schematic v3** — blocks nested under `Blocks.{Palette,Data}`, wrapped in a `Schematic` root — which prismarine-schematic 1.3.0 can't read. `bot/schematic.js` carries a small **v3 reader** (`readSchematic`) that adapts v3 into a prismarine-schematic `Schematic`, resolving block states against the **server** version (1.21.11) so stateIds match what we build on. Falls back to the stock reader for v1/v2/mcedit. Verified: bank.schem (32×14×23, 1606 blocks, 14 types) + barrel-house.schem (24×9×16, 432 blocks) parse with **0 unmapped blocks**.
+
+**Commands (operator-only — in `CHEAT_CMDS`, so the brain can't fetch URLs / build autonomously):**
+- `schematic load <url|file>` — download (or read local), parse, cache under `bot/schematics/` (gitignored), report size + **bill of materials** ("Bring me — 432 blocks: 126x stone, 82x spruce_stairs, …").
+- `schematic materials` — re-print the BOM.
+- `schematic build [here | <x y z>]` — build in survival at the origin. Runs detached (builds take minutes), chats progress every 25 blocks, asks for materials when short, `stop` cancels (sets `buildAbort`).
+
+**Build-mode movement (`buildMovements`):** a temporary `Movements` profile used only during a build — `canDig=false` stays (never breaks existing blocks) but `allow1by1towers=true` + `scafoldingBlocks` (cheap fillers only: dirt/cobble/…) let it pillar/bridge to reach height like a survival player. Restored to the anti-grief profile in a `finally` via `restoreMovements()`.
+
+**STATUS — what's verified vs not:**
+- ✅ **VERIFIED offline:** download from buildingguide, v3 + v1/v2 parse on 1.21.11, bill-of-materials, HTML rejection, and the `schematic load`/`materials` command paths through the real dispatcher.
+- ✅ **VERIFIED LIVE (2026-07-06)** on a local Paper 1.21.11 test server (superflat, survival, bot fed materials via op `/give`): the bot physically placed a 44-block oak_planks box (4×3×4: floor+walls+roof) **44/44 by hand in survival** — walked to each spot, equipped from real inventory, placed against a face, and **pillared up with dirt to reach the roof**.
+
+**Live-test findings (each fixed/documented):**
+1. **Single-pass loop left gaps (38/44).** Blocks that only become reachable after neighbours exist were dropped permanently. **Fixed:** `buildSurvival` now re-computes placeable actions every iteration (adaptive nearest-pick) + a `deferred` set retried after any progress → floor/walls went to 100%.
+2. **A racy post-place confirmation made it WORSE (28/44)** — reading `getBlockStateId` immediately after placing raced Paper's block-update and tripped early termination. **Fixed:** trust place-on-no-exception + a 120ms settle delay.
+3. **Roof needs scaffolding (0/16 → 16/16).** The bot builds from the ground outside the box and can't reach roof height without **pillaring up**, which needs cheap filler blocks in inventory. `buildMovements.scafoldingBlocks` = dirt/cobble/etc.; with only oak_planks it couldn't climb (0 roof). Give it dirt → it pillars and finishes the roof. **`schematic load` now tells the player to also bring dirt/cobble when the build is >3 tall.**
+
+**Remaining gaps (real, not yet fixed):**
+- **Scaffold litter:** ~3 dirt blocks left behind after pillaring — no cleanup pass yet (pathfinder places them internally, so tracking/removing them needs work).
+- `dig` actions are skipped → **build site must be pre-cleared/flat.**
+- Multi-block / oriented pieces (doors, beds, stairs facing, tall flowers, gravity blocks like sand) **unproven** — the test was single-material full blocks. Next: test a real downloaded house (e.g. buildingguide `barrel-house`, 432 blocks / 8 types incl. stairs+doors+trapdoors).
+- **Test harness:** local server in `testserver/` (Paper 1.21.11, :25599, offline-mode, flat, peaceful); op the bot in `ops.json`; run bot with `BRAIN_ALLOW_CHEATS=1` and drive via `curl` to the `:3001` control API (`/cmd`, `/state`). Synthetic test schematic generated at `bot/schematics/testbox.schem`.
+
+[natural-player goal]: the bot should behave indistinguishably from a real human player; believability beats raw capability.
