@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Animus - control</title>
+<style>
+  :root{
+    --bg:#0e1116; --card:#161b22; --card2:#1c2330; --line:#2a3240;
+    --tx:#e6edf3; --dim:#8b98a8; --accent:#4aa3ff; --good:#3fb950; --warn:#e3b341; --bad:#f85149;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.45 system-ui,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--tx)}
+  header{display:flex;align-items:center;gap:12px;padding:12px 18px;border-bottom:1px solid var(--line);background:#0b0e13;position:sticky;top:0;z-index:5}
+  header h1{font-size:17px;margin:0;letter-spacing:.5px}
+  header h1 span{color:var(--accent)}
+  .dot{width:10px;height:10px;border-radius:50%;background:var(--bad);box-shadow:0 0 8px var(--bad)}
+  .dot.on{background:var(--good);box-shadow:0 0 8px var(--good)}
+  .who{color:var(--dim);font-size:13px}
+  main{display:grid;grid-template-columns:340px 1fr;gap:16px;padding:16px;max-width:1200px;margin:0 auto}
+  @media(max-width:820px){main{grid-template-columns:1fr}}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px}
+  .card h2{font-size:12px;text-transform:uppercase;letter-spacing:.8px;color:var(--dim);margin:0 0 10px}
+  .row{display:flex;justify-content:space-between;gap:8px;padding:3px 0}
+  .row b{color:var(--dim);font-weight:500}
+  .bar{height:9px;border-radius:5px;background:var(--card2);overflow:hidden;margin-top:3px}
+  .bar>i{display:block;height:100%;border-radius:5px}
+  .inv{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
+  .slot{background:var(--card2);border:1px solid var(--line);border-radius:6px;padding:5px 8px;font-size:12px}
+  .slot em{color:var(--accent);font-style:normal;font-weight:600}
+  .muted{color:var(--dim)}
+  #log{height:280px;overflow:auto;background:#0b0e13;border:1px solid var(--line);border-radius:8px;padding:10px;font:12px/1.5 ui-monospace,Consolas,monospace;white-space:pre-wrap;word-break:break-word}
+  #log .me{color:var(--accent)}
+  #log .sys{color:var(--dim)}
+  .cmdrow{display:flex;gap:8px;margin-top:10px}
+  input[type=text],select,textarea{background:var(--card2);border:1px solid var(--line);color:var(--tx);border-radius:7px;padding:8px 10px;font:inherit;width:100%}
+  textarea{resize:vertical;min-height:52px}
+  button{background:var(--accent);color:#04121f;border:0;border-radius:7px;padding:8px 14px;font-weight:600;cursor:pointer;white-space:nowrap}
+  button.ghost{background:var(--card2);color:var(--tx);border:1px solid var(--line);font-weight:500}
+  button:active{transform:translateY(1px)}
+  .quick{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+  .quick button{padding:6px 11px;font-size:12px}
+  .brainrow{display:flex;gap:8px;align-items:center;margin-bottom:8px}
+  .brainrow label{color:var(--dim);min-width:52px}
+  .cfgrow{display:flex;gap:8px;align-items:center;margin-bottom:8px}
+  .cfgrow label{color:var(--dim);min-width:74px;font-size:13px}
+  .toggle{display:inline-flex;align-items:center;gap:6px;cursor:pointer;user-select:none}
+  .pill{font-size:11px;padding:2px 8px;border-radius:20px;background:var(--card2);border:1px solid var(--line);color:var(--dim)}
+  .pill.on{color:var(--good);border-color:#264d31}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:560px){.grid2{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header>
+  <div class="dot" id="conn"></div>
+  <h1>ANI<span>MUS</span></h1>
+  <div class="who" id="who">connecting…</div>
+</header>
+
+<main>
+  <!-- LEFT: status + inventory -->
+  <div>
+    <div class="card" id="statusCard">
+      <h2>Status</h2>
+      <div class="row"><b>Health</b><span id="hpTxt">-</span></div>
+      <div class="bar"><i id="hpBar" style="width:0;background:var(--good)"></i></div>
+      <div class="row" style="margin-top:8px"><b>Food</b><span id="foodTxt">-</span></div>
+      <div class="bar"><i id="foodBar" style="width:0;background:var(--warn)"></i></div>
+      <div class="row" style="margin-top:10px"><b>Position</b><span id="pos" class="muted">-</span></div>
+      <div class="row"><b>Gamemode</b><span id="gm" class="muted">-</span></div>
+      <div class="row"><b>Biome</b><span id="biome" class="muted">-</span></div>
+      <div class="row"><b>Holding</b><span id="held" class="muted">-</span></div>
+      <div class="row"><b>Time</b><span id="time" class="muted">-</span></div>
+      <div class="row"><b>Threat</b><span id="threat" class="muted">none</span></div>
+      <div class="row"><b>Players near</b><span id="players" class="muted">-</span></div>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <h2>Inventory</h2>
+      <div class="inv" id="inv"><span class="muted">-</span></div>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <h2>Connection <span class="pill" id="connPill">?</span></h2>
+      <div class="cfgrow"><label>Server</label><input type="text" id="cHost" placeholder="your.server.address"></div>
+      <div class="cfgrow"><label>Port</label><input type="text" id="cPort" placeholder="25565" style="max-width:110px"></div>
+      <div class="cfgrow"><label>Version</label><input type="text" id="cVersion" placeholder="1.21.11 or auto" style="max-width:150px"></div>
+      <div class="cfgrow"><label>Login</label>
+        <select id="cAuth" style="max-width:130px"><option value="offline">offline</option><option value="microsoft">microsoft</option></select>
+      </div>
+      <div class="cfgrow"><label>Account</label><input type="text" id="cUser" placeholder="bot name / MS email"></div>
+      <div class="cfgrow"><label>Operators</label><input type="text" id="cOps" placeholder="YourName, Friend"></div>
+      <p class="muted" id="msHint" style="font-size:11px;margin:6px 0 10px;display:none">Microsoft login: after reconnecting, complete the <b>microsoft.com/link</b> code shown in the bot terminal window (first time only).</p>
+      <div style="display:flex;gap:8px">
+        <button class="ghost" id="saveCfg">Save</button>
+        <button id="reconnectCfg">Save &amp; Reconnect</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT: brain + activity + command -->
+  <div>
+    <div class="card">
+      <h2>Brain <span class="pill" id="brainPill">?</span></h2>
+      <div class="brainrow">
+        <label>Model</label>
+        <select id="model"></select>
+        <button class="ghost" id="refreshModels" title="reload model list">↻</button>
+      </div>
+      <div class="brainrow" style="align-items:flex-start">
+        <label style="margin-top:8px">Goal</label>
+        <textarea id="goal" placeholder="what should it try to do on its own?"></textarea>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px">
+        <span class="toggle" id="enableToggle"><input type="checkbox" id="enabled"> <span>brain on</span></span>
+        <button id="applyBrain">Apply</button>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <h2>Activity</h2>
+      <div id="log"></div>
+      <div class="cmdrow">
+        <input type="text" id="cmd" placeholder='type a command… e.g. come · follow Steve · gather oak_log 10 · schematic build here' autocomplete="off">
+        <button id="sendBtn">Send</button>
+      </div>
+      <div class="quick" id="quick"></div>
+    </div>
+  </div>
+</main>
+
+<script>
+const $ = s => document.querySelector(s)
+const api = (p, opt) => fetch(p, opt)
+
+// ---- live status polling ---------------------------------------------------
+let alive = false
+async function poll(){
+  try{
+    const s = await (await api('/state')).json()
+    alive = true; $('#conn').classList.add('on')
+    $('#who').textContent = s.name + (s.dimension ? ' · ' + s.dimension : '')
+    const hp = s.health ?? 0, food = s.food ?? 0
+    $('#hpTxt').textContent = hp + ' / 20'; $('#hpBar').style.width = (hp/20*100)+'%'
+    $('#hpBar').style.background = hp>12?'var(--good)':hp>6?'var(--warn)':'var(--bad)'
+    $('#foodTxt').textContent = food + ' / 20'; $('#foodBar').style.width = (food/20*100)+'%'
+    $('#pos').textContent = s.pos ? `${s.pos.x|0}, ${s.pos.y|0}, ${s.pos.z|0}` : '-'
+    $('#gm').textContent = s.gameMode || '-'
+    $('#biome').textContent = s.biome || '-'
+    $('#held').textContent = s.heldItem || 'nothing'
+    $('#time').textContent = (s.isDay?'day':'night') + (s.isRaining?' · raining':'')
+    $('#threat').innerHTML = s.threat ? `<span style="color:var(--bad)">${s.threat.type} (${s.threat.dist}m)${s.threat.flee?' - fleeing':''}</span>` : 'none'
+    $('#players').textContent = (s.players&&s.players.length) ? s.players.map(p=>p.name).join(', ') : (s.alone?'alone':'-')
+    const inv = s.inventory||[]
+    $('#inv').innerHTML = inv.length ? inv.map(i=>{const [n,c]=i.split(' x');return `<span class="slot">${n} <em>×${c||1}</em></span>`}).join('') : '<span class="muted">empty</span>'
+  }catch(e){ alive=false; $('#conn').classList.remove('on'); $('#who').textContent='bot offline - is index.js running?' }
+}
+
+// ---- activity / chat log ---------------------------------------------------
+let lastLog=''
+async function pollLog(){
+  try{
+    const t = await (await api('/log')).text()
+    if(t!==lastLog){ lastLog=t; const el=$('#log'); const near = el.scrollHeight-el.scrollTop-el.clientHeight < 40
+      el.innerHTML = t.split('\n').map(line=>{
+        const cls = /\(ui-cmd\)|\(chat-cmd\)/.test(line)?'me':/control API|spawned|error/.test(line)?'sys':''
+        return `<div class="${cls}">${line.replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]))}</div>`
+      }).join('')
+      if(near) el.scrollTop = el.scrollHeight
+    }
+  }catch{}
+}
+
+// ---- commands --------------------------------------------------------------
+async function send(cmd){
+  if(!cmd) return
+  try{ await api('/op/cmd',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:cmd})}) }catch{}
+  pollLog()
+}
+$('#sendBtn').onclick = ()=>{ const v=$('#cmd').value.trim(); if(v){ send(v); $('#cmd').value='' } }
+$('#cmd').addEventListener('keydown',e=>{ if(e.key==='Enter'){ $('#sendBtn').click() } })
+
+const QUICK = ['come','stop','collect','eat','follow','sleep','wake','defend','inventory','state']
+$('#quick').innerHTML = QUICK.map(q=>`<button class="ghost" data-c="${q}">${q}</button>`).join('')
+$('#quick').addEventListener('click',e=>{ const c=e.target.dataset.c; if(c) send(c) })
+
+// ---- brain control ---------------------------------------------------------
+async function loadBrain(){
+  try{
+    const {settings,models} = await (await api('/brain')).json()
+    const sel=$('#model'); const cur=settings.model
+    sel.innerHTML = (models&&models.length?models:[cur]).map(m=>`<option ${m===cur?'selected':''}>${m}</option>`).join('')
+    if(![...sel.options].some(o=>o.value===cur)) sel.insertAdjacentHTML('afterbegin',`<option selected>${cur}</option>`)
+    if(document.activeElement!==$('#goal')) $('#goal').value = settings.goal||''
+    $('#enabled').checked = !!settings.enabled
+    const pill=$('#brainPill'); pill.textContent = settings.enabled?'on':'paused'; pill.classList.toggle('on',!!settings.enabled)
+  }catch{ $('#brainPill').textContent='n/a' }
+}
+$('#applyBrain').onclick = async ()=>{
+  const body = { model:$('#model').value, goal:$('#goal').value, enabled:$('#enabled').checked }
+  try{ await api('/brain',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}) }catch{}
+  loadBrain()
+}
+$('#refreshModels').onclick = loadBrain
+
+// ---- connection settings ---------------------------------------------------
+let cfgEdited = false
+;['cHost','cPort','cVersion','cUser','cOps'].forEach(id=>$('#'+id).addEventListener('input',()=>cfgEdited=true))
+$('#cAuth').addEventListener('change',()=>{ cfgEdited=true; $('#msHint').style.display = $('#cAuth').value==='microsoft'?'block':'none' })
+async function loadConfig(){
+  try{
+    const c = await (await api('/config')).json()
+    if(!cfgEdited && document.activeElement.tagName!=='INPUT'){
+      $('#cHost').value=c.host||''; $('#cPort').value=c.port||''; $('#cVersion').value=c.version||''
+      $('#cAuth').value=c.auth||'offline'; $('#cUser').value=c.username||''; $('#cOps').value=(c.operators||[]).join(', ')
+      $('#msHint').style.display = c.auth==='microsoft'?'block':'none'
+    }
+    const pill=$('#connPill'); pill.textContent = c.connected?'in-world':'not connected'; pill.classList.toggle('on',!!c.connected)
+  }catch{ $('#connPill').textContent='n/a' }
+}
+function cfgBody(){
+  return { host:$('#cHost').value.trim(), port:$('#cPort').value.trim(), version:$('#cVersion').value.trim(),
+    auth:$('#cAuth').value, username:$('#cUser').value.trim(),
+    operators:$('#cOps').value.split(',').map(s=>s.trim()).filter(Boolean) }
+}
+async function saveConfig(reconnect){
+  const body = cfgBody(); body.reconnect = reconnect
+  try{ await api('/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}) }catch{}
+  cfgEdited = false
+  if(reconnect){ $('#who').textContent='reconnecting…'; $('#conn').classList.remove('on') }
+  setTimeout(loadConfig, reconnect?3000:300)
+}
+$('#saveCfg').onclick = ()=>saveConfig(false)
+$('#reconnectCfg').onclick = ()=>saveConfig(true)
+
+// ---- loops -----------------------------------------------------------------
+poll(); pollLog(); loadBrain(); loadConfig()
+setInterval(poll, 1000)
+setInterval(pollLog, 1500)
+setInterval(loadBrain, 4000)
+setInterval(loadConfig, 3000)
+</script>
+</body>
+</html>

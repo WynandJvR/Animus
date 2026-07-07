@@ -1,5 +1,5 @@
 'use strict'
-// Tiny PERSISTENT memory for the bot — named waypoints that survive restarts, so
+// Tiny PERSISTENT memory for the bot - named waypoints that survive restarts, so
 // it "knows your world" across sessions ("remember this as home" -> later "go
 // home"). Stored as JSON next to the bot. Deliberately small and self-contained;
 // room to grow into other remembered facts later.
@@ -12,7 +12,7 @@ let data = { waypoints: {} }
 try {
   const j = JSON.parse(fs.readFileSync(FILE, 'utf8'))
   if (j && typeof j === 'object') data = { waypoints: j.waypoints || {} }
-} catch { /* no memory file yet — start fresh */ }
+} catch { /* no memory file yet - start fresh */ }
 
 function save () {
   try { fs.writeFileSync(FILE, JSON.stringify(data, null, 2)) } catch { /* best-effort; never crash the bot over memory */ }

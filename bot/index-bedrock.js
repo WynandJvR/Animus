@@ -1,9 +1,9 @@
 'use strict'
-// The "body" — BEDROCK edition. A drop-in alternative to index.js that connects
+// The "body" - BEDROCK edition. A drop-in alternative to index.js that connects
 // to a Bedrock endpoint (e.g. a Java server fronted by Geyser/Floodgate) instead
 // of the Java protocol, while exposing the EXACT SAME local control API and
 // command surface. The brain (brain-llm.js) and the human (ctl.sh) talk to it
-// identically — they cannot tell which body is running.
+// identically - they cannot tell which body is running.
 //
 //   GET  /health          -> { ok, spawned }
 //   GET  /state           -> JSON world/self state
@@ -112,7 +112,7 @@ client.on('join', () => note('joined (server accepted login)'))
 client.on('spawn', () => {
   self.spawned = true
   note(`spawned as ${USERNAME} at ${self.pos ? `${self.pos.x},${self.pos.y},${self.pos.z}` : '?'}`)
-  // Do NOT change gamemode by default — just join and idle. Opt in for the lab
+  // Do NOT change gamemode by default - just join and idle. Opt in for the lab
   // with AUTO_CREATIVE=1 or config.autoCreative.
   if (process.env.AUTO_CREATIVE === '1' || cfg.autoCreative) sendCommand('/gamemode creative @s').catch(() => {})
 })
@@ -261,10 +261,10 @@ function sendCommand (command) {
   })
 }
 
-// Send normal player chat (a text packet) — works WITHOUT op, unlike /say.
+// Send normal player chat (a text packet) - works WITHOUT op, unlike /say.
 // Used for conversational replies; drops duplicates and respects the cooldown.
 function sendChat (message) {
-  // chat only — strip leading slashes/newlines and bound length (defense in depth)
+  // chat only - strip leading slashes/newlines and bound length (defense in depth)
   const text = String(message).replace(/^[\s/]+/, '').replace(/[\r\n]/g, ' ').trim().slice(0, 256)
   const now = Date.now()
   if (text && text === lastSayText) { note('chat suppressed (duplicate)'); return false }
@@ -347,7 +347,7 @@ function findPlayer (name) {
 
 // ---- command dispatch (same surface as commands.js) ------------------------
 
-const PERCEPTION_NOTE = 'block-perception (scan/find/block) is unavailable on the bedrock body — no world model. Use state/entities, then build or move.'
+const PERCEPTION_NOTE = 'block-perception (scan/find/block) is unavailable on the bedrock body - no world model. Use state/entities, then build or move.'
 
 async function handle (line) {
   const parts = String(line).trim().split(/\s+/)
@@ -360,7 +360,7 @@ async function handle (line) {
       return [
         'bedrock body commands:',
         ' perception: state | entities | inventory(limited) | look(no-op)',
-        '   (scan/find/block are NOT supported here — no world model)',
+        '   (scan/find/block are NOT supported here - no world model)',
         ' movement (teleport-based): come [player] | goto <x> <y> <z> | follow <player> | stop',
         ' building: setblock <x y z> <block> | fill <x1 y1 z1 x2 y2 z2> <block>',
         '   wall <material> <length> <height> | tower <material> [h] [size] | house <material> [w] [l] [h]',
@@ -374,7 +374,7 @@ async function handle (line) {
     case 'inventory': return JSON.stringify([]) // not tracked on bedrock body
     case 'look': return 'ok (look is a no-op on the bedrock body)'
 
-    // perception that needs a world model — degrade gracefully (don't loop the brain)
+    // perception that needs a world model - degrade gracefully (don't loop the brain)
     case 'scan': return JSON.stringify({ note: PERCEPTION_NOTE, self: { pos: self.pos, facing: facing(self.yaw) }, players: nearbyPlayers(), entities: summariseEntities(12) })
     case 'find': return PERCEPTION_NOTE
     case 'block': return PERCEPTION_NOTE

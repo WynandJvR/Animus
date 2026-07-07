@@ -14,7 +14,7 @@ JAR="$LAB/testserver/paper-1.21.11-69.jar"
 if [ ! -f "$JAR" ]; then
   SRC="${PAPER_JAR_SRC:-/opt/minecraft/server/paper-1.21.11-69.jar}"
   if [ -r "$SRC" ]; then echo "restoring Paper jar from $SRC ..."; cp "$SRC" "$JAR"
-  else echo "ERROR: $JAR missing and PAPER_JAR_SRC ($SRC) not readable — download a Paper 1.21.11 jar into testserver/"; exit 1; fi
+  else echo "ERROR: $JAR missing and PAPER_JAR_SRC ($SRC) not readable - download a Paper 1.21.11 jar into testserver/"; exit 1; fi
 fi
 
 if ss -tln 2>/dev/null | grep -q 25599; then

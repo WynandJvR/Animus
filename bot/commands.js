@@ -1,7 +1,7 @@
 'use strict'
 // Action layer ("what the body can do"). Every command is plain text in,
 // text result out, so the same surface works for a human, for Claude (curl),
-// and for a local model. Building uses server commands (/fill, /setblock) —
+// and for a local model. Building uses server commands (/fill, /setblock) -
 // the bot is op+creative on the lab server, which makes structures reliable
 // instead of fighting physical block-placement reach/inventory rules.
 
@@ -9,6 +9,7 @@ const { goals, Movements } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
 const memory = require('./memory.js') // persistent named waypoints
 const schematic = require('./schematic.js') // download/parse + survival physical building
+const provision = require('./provision.js') // BOM -> gather/craft plan + execution
 
 // entity names treated as hostile for attack/defend and auto-defense
 const HOSTILE = /zombie|skeleton|spider|creeper|enderman|witch|husk|drowned|pillager|vindicator|ravager|slime|magma_cube|blaze|piglin|hoglin|phantom|zoglin|stray|silverfish|guardian|vex|wither|warden|ghast|shulker|illusioner|evoker|breeze|bogged/i
@@ -21,7 +22,8 @@ let lastBrokeAt = null
 // buildAbort: set by `stop` to halt an in-progress build cleanly.
 let loadedSchem = null
 let building = false
-let buildAbort = false
+let buildAbort = false // set by `stop`; watched by schematic builds AND provision runs
+let provisioning = false
 
 // How close the bot trails a player when following. Range 2 settles right on top of
 // them (felt crowding); ~3 blocks reads as walking alongside. Tunable via FOLLOW_RANGE.
@@ -123,7 +125,7 @@ function buildHouse (bot, material, w, l, h, a) {
 }
 
 // Eat the best food in inventory so the bot doesn't starve. Returns a status
-// string. Safe to call often — no-ops if already full or no food on hand.
+// string. Safe to call often - no-ops if already full or no food on hand.
 async function eatFood (bot) {
   if (bot.food != null && bot.food >= 20) return 'not hungry'
   const mcData = require('minecraft-data')(bot.version)
@@ -139,12 +141,12 @@ async function eatFood (bot) {
 }
 
 // Natural ground a torch may be auto-placed on. Anchored/explicit so crafted or
-// build blocks (planks, bricks, wool, glass, concrete...) never qualify — the
+// build blocks (planks, bricks, wool, glass, concrete...) never qualify - the
 // auto-torch reflex must light natural terrain, never decorate someone's build.
 const TORCH_GROUND = /grass_block|^dirt$|coarse_dirt|podzol|rooted_dirt|^stone$|deepslate$|^tuff$|^andesite$|^diorite$|^granite$|^sand$|^red_sand$|^gravel$|^netherrack$|^cobblestone$|moss_block|^mud$|^sandstone$|^snow_block$|^calcite$|^basalt$|^blackstone$|grass_path|dirt_path/
 
 // Place ONE torch on natural ground next to the bot (for the opt-in auto-torch
-// reflex). Returns a status string; safe to call often — no-ops cleanly if there's
+// reflex). Returns a status string; safe to call often - no-ops cleanly if there's
 // no torch in hand-reach inventory or no suitable natural spot adjacent.
 async function placeTorchNearby (bot) {
   const items = bot.inventory ? bot.inventory.items() : []
@@ -169,7 +171,7 @@ async function placeTorchNearby (bot) {
     await bot.placeBlock(ref, new Vec3(0, 1, 0))
   } catch (e) {
     // Paper/creative sometimes doesn't echo the blockUpdate in time even though the
-    // torch WAS placed — read the spot back before reporting failure, so the reflex
+    // torch WAS placed - read the spot back before reporting failure, so the reflex
     // doesn't log a false "couldn't place" (and then retry-spam).
     const placed = bot.blockAt(ref.position.offset(0, 1, 0))
     if (!placed || !/torch/.test(placed.name)) return `couldn't place torch: ${e.message}`
@@ -219,6 +221,7 @@ async function handle (bot, line) {
         '  forget <name> | waypoints   manage saved places',
         ' survival/actions:',
         '  mine|break [block|x y z]  break a block; bare "break" chops nearest tree',
+        '  gather <item> [count<=64] gather natural resources until count reached',
         '  collect                   pick up nearby dropped items',
         '  plant <item>              place a sapling on grass/dirt',
         '  place <item> [x y z]      place a block on a solid surface',
@@ -236,13 +239,14 @@ async function handle (bot, line) {
         '  schematic load <url|file>   load a .schem (direct link or local file)',
         '  schematic materials         list blocks the loaded build needs',
         '  schematic build [here|x y z]  build it in SURVIVAL from inventory (asks for materials)',
+        '  provision [run]             plan/execute gathering+crafting the whole bill of materials',
         '  clear [radius=8]', '  give <item> [count]',
         ' admin:  tp <x> <y> <z> | gamemode <mode> | say <msg>'
       ].join('\n')
 
     case 'say': {
       // CHAT ONLY. mineflayer runs a leading "/" as a server command, and the
-      // bot is op — so a brain-issued "say /stop" or "say /op x" would escape
+      // bot is op - so a brain-issued "say /stop" or "say /op x" would escape
       // normal play into server admin. Strip leading slashes so say can only
       // ever produce plain chat, never a command. Also bound the length.
       const msg = a.join(' ').replace(/^[\s/]+/, '').replace(/[\r\n]/g, ' ').trim()
@@ -344,7 +348,7 @@ async function handle (bot, line) {
 
     case 'drop':
     case 'toss': {
-      // toss REAL items from inventory (not duped) — the legit way to share
+      // toss REAL items from inventory (not duped) - the legit way to share
       const name = a[0]
       if (!name) return 'usage: drop <item> [count]'
       const items = bot.inventory ? bot.inventory.items() : []
@@ -465,7 +469,7 @@ async function handle (bot, line) {
         else if (all.length) target = bot.findBlock({ matching: all.map(b => b.id), maxDistance: 4 })
         else return `I don't recognize the block "${a[0]}"`
       }
-      // If a SPECIFIC block was requested but not found, STOP — never fall back to
+      // If a SPECIFIC block was requested but not found, STOP - never fall back to
       // breaking whatever the bot happens to look at (that's how it broke a window).
       if (requested && !target) return `no ${requested === 'there' ? 'block there' : requested + ' nearby'}`
       if (!target && typeof bot.blockAtCursor === 'function') {
@@ -596,7 +600,7 @@ async function handle (bot, line) {
       const tableId = mcData.blocksByName.crafting_table && mcData.blocksByName.crafting_table.id
       let table = tableId ? bot.findBlock({ matching: tableId, maxDistance: 4 }) : null
       let recipe = bot.recipesFor(def.id, null, 1, table)[0]
-      if (!recipe && tableId) { // need a table — walk to the nearest one
+      if (!recipe && tableId) { // need a table - walk to the nearest one
         table = bot.findBlock({ matching: tableId, maxDistance: 48 })
         if (table) {
           try { await bot.pathfinder.goto(new goals.GoalNear(table.position.x, table.position.y, table.position.z, 2)) } catch {}
@@ -690,7 +694,7 @@ async function handle (bot, line) {
     case 'schem':
     case 'schematic': {
       // Load and physically build a schematic IN SURVIVAL (real blocks from
-      // inventory, placed by hand — no /fill or creative). Operator-only (in
+      // inventory, placed by hand - no /fill or creative). Operator-only (in
       // CHEAT_CMDS) so the autonomous brain can't fetch URLs / build on its own.
       const sub = (a[0] || '').toLowerCase()
       if (sub === 'load') {
@@ -708,18 +712,18 @@ async function handle (bot, line) {
         } catch (e) { return `couldn't load schematic: ${e.message}` }
         const s = loadedSchem.schem.size
         const m = schematic.materialsSummary(loadedSchem.schem)
-        // Anything taller than ~3 blocks needs scaffolding to reach — the bot
+        // Anything taller than ~3 blocks needs scaffolding to reach - the bot
         // pillars up with cheap filler blocks (verified live: no dirt = no roof).
-        const scaffold = s.y > 3 ? ' — and a stack of dirt/cobblestone so I can scaffold up to reach the top' : ''
-        return `loaded "${loadedSchem.name}" (${s.x}x${s.y}x${s.z}). Bring me — ${m.text}${scaffold}`
+        const scaffold = s.y > 3 ? ' - and a stack of dirt/cobblestone so I can scaffold up to reach the top' : ''
+        return `loaded "${loadedSchem.name}" (${s.x}x${s.y}x${s.z}). Bring me - ${m.text}${scaffold}`
       }
       if (sub === 'materials' || sub === 'mats' || sub === 'bom') {
-        if (!loadedSchem) return 'no schematic loaded — schematic load <url|file> first'
+        if (!loadedSchem) return 'no schematic loaded - schematic load <url|file> first'
         return schematic.materialsSummary(loadedSchem.schem).text
       }
       if (sub === 'build') {
-        if (!loadedSchem) return 'no schematic loaded — schematic load <url|file> first'
-        if (building) return 'already building — say "stop" to cancel first'
+        if (!loadedSchem) return 'no schematic loaded - schematic load <url|file> first'
+        if (building) return 'already building - say "stop" to cancel first'
         // Origin: "here" (bot's feet) or explicit coords.
         const rest = a.slice(1)
         let at
@@ -729,7 +733,7 @@ async function handle (bot, line) {
           at = new Vec3(n[0], n[1], n[2])
         }
         building = true; buildAbort = false
-        // Long-running (minutes) — run detached, chat progress, and return the
+        // Long-running (minutes) - run detached, chat progress, and return the
         // kickoff line now so the command/HTTP call doesn't block for the whole build.
         schematic.buildSurvival(bot, loadedSchem.schem, at, {
           say: msg => bot.chat(String(msg).slice(0, 256)),
@@ -742,11 +746,69 @@ async function handle (bot, line) {
           building = false; setupMovements(bot)
           bot.chat(`build error: ${e.message}`)
         })
-        return `building "${loadedSchem.name}" at ${at.x},${at.y},${at.z} in survival — I'll ask for materials as I go. Say "stop" to cancel.`
+        return `building "${loadedSchem.name}" at ${at.x},${at.y},${at.z} in survival - I'll ask for materials as I go. Say "stop" to cancel.`
       }
       return 'usage: schematic <load <url|file> | materials | build [here|x y z]>'
     }
 
+    case 'gather': {
+      // Gather natural resources by hand (chop trees / mine natural blocks) until
+      // a count is reached. Natural-player action, so brain-accessible - but
+      // capped per call so it can't strip a landscape on one decision.
+      const item = a[0]
+      const count = Math.min(parseInt(a[1] || '16', 10) || 16, 64)
+      if (!item) return `usage: gather <item> [count<=64]  (know how: ${Object.keys(provision.GATHER_SOURCES).join(', ')})`
+      if (!provision.GATHER_SOURCES[item]) return `I don't know how to gather ${item} (know: ${Object.keys(provision.GATHER_SOURCES).join(', ')})`
+      buildAbort = false // a PREVIOUS stop must not abort this fresh gather
+      const r = await provision.runGather(bot, item, count, { isStopped: () => buildAbort, restoreMovements: () => setupMovements(bot) })
+      return `gathered ${r.gathered}/${count} ${item} (${r.reason})`
+    }
+
+    case 'provision': {
+      // Plan (and run) acquiring the loaded schematic's ENTIRE bill of materials
+      // from nothing: gather -> craft tools/basics -> mine -> smelt -> strip ->
+      // craft finals. Operator-only like schematic - a long autonomous action.
+      if (!loadedSchem) return 'no schematic loaded - schematic load <url|file> first'
+      const mcData = require('minecraft-data')(bot.version)
+      const bom = { ...schematic.billOfMaterials(loadedSchem.schem).counts }
+      // scaffold dirt for anything the bot can't reach from the ground - verified
+      // live: without pillar blocks the roof of even a 3-tall box is unreachable
+      if (loadedSchem.schem.size.y > 2) bom.dirt = (bom.dirt || 0) + 8 + 2 * loadedSchem.schem.size.y
+      const plan = provision.planProvision(mcData, bom, provision.inventoryCounts(bot))
+      const planLines = plan.tasks.map(t =>
+        t.type === 'gather' ? `gather ${t.count}x ${t.item}${t.tool ? ` [${t.tool}]` : ''}`
+          : t.type === 'craft' ? `craft ${t.crafts * t.perCraft}x ${t.item}${t.needsTable ? ' (table)' : ''}`
+            : t.type === 'smelt' ? `smelt ${t.count}x ${t.output}`
+              : t.type === 'strip' ? `strip ${t.count}x ${t.output}`
+                : JSON.stringify(t))
+      const unob = Object.entries(plan.unobtainable).map(([n, c]) => `${c}x ${n}`)
+      if ((a[0] || '').toLowerCase() !== 'run') {
+        if (!plan.tasks.length && !unob.length) return 'inventory already covers the bill of materials - ready to build'
+        return `plan (${plan.tasks.length} steps): ${planLines.join('; ')}${unob.length ? ` | CAN'T OBTAIN: ${unob.join(', ')}` : ''} - "provision run" to execute`
+      }
+      if (provisioning) return 'already provisioning - say "stop" to cancel first'
+      if (unob.length) return `can't provision: no way to obtain ${unob.join(', ')}`
+      if (!plan.tasks.length) return 'inventory already covers the bill of materials - ready to build'
+      provisioning = true; buildAbort = false
+      // long-running: run detached (like schematic build), chat progress
+      provision.runPlan(bot, plan, {
+        say: msg => bot.chat(String(msg).slice(0, 256)),
+        isStopped: () => buildAbort,
+        restoreMovements: () => setupMovements(bot)
+      }).then(results => {
+        provisioning = false
+        const bad = results.filter(r => !r.ok)
+        bot.chat(bad.length
+          ? `provisioning stopped: ${bad.map(r => `${r.task.type} ${r.task.item || r.task.output}: ${r.note}`).join('; ')}`.slice(0, 256)
+          : 'provisioning done - I have everything, ready to build')
+      }).catch(e => { provisioning = false; bot.chat(`provisioning error: ${e.message}`.slice(0, 250)) })
+      return `provisioning ${plan.tasks.length} steps - I'll gather and craft everything myself. Say "stop" to cancel.`
+    }
+
+    case 'clearinv': {
+      // wipe the bot's own inventory (op /clear) - for clean provisioning tests
+      bot.chat(`/clear ${bot.username}`); return 'cleared inventory'
+    }
     case 'tp': {
       const [x, y, z] = a.map(Number)
       if ([x, y, z].some(Number.isNaN)) return 'usage: tp <x> <y> <z>'
@@ -832,7 +894,7 @@ function state (bot) {
   const below = p ? bot.blockAt(p.offset(0, -1, 0)) : null
   const atFeet = p ? bot.blockAt(p) : null
   // blockAtCursor ray-traces nearby entities and throws if one lacks a position
-  // (e.g. just after join, before the world settles) — never let that break /state
+  // (e.g. just after join, before the world settles) - never let that break /state
   let looking = null
   try { if (typeof bot.blockAtCursor === 'function') looking = bot.blockAtCursor(6) } catch { looking = null }
   const biome = p ? biomeName(bot, p) : null
@@ -879,4 +941,8 @@ function setupMovements (bot) {
   bot.pathfinder.setMovements(m)
 }
 
-module.exports = { handle, state, setupMovements, eatFood, placeTorchNearby }
+// busy = a long autonomous flow (schematic build / provisioning) is running;
+// idle reflexes (auto-collect...) must not steal the bot's movement meanwhile
+function isBusy () { return building || provisioning }
+
+module.exports = { handle, state, setupMovements, eatFood, placeTorchNearby, isBusy }

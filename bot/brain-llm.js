@@ -15,7 +15,7 @@
 //   TICK_MIN_MS minimum gap between decisions (default 0 = as fast as the
 //               hardware/model allows; the await chain already paces the loop)
 //   TICK_MAX_MS cap for error backoff when the LLM/bot is unreachable (default 8000)
-//   TICK_MS    deprecated alias — if set, used as TICK_MIN_MS (back-compat)
+//   TICK_MS    deprecated alias - if set, used as TICK_MIN_MS (back-compat)
 //
 // The model is asked to reply with ONE JSON object: {"command":"...","reason":"..."}.
 // On llama.cpp, pair this with a GBNF grammar so the output is ALWAYS valid.
@@ -25,11 +25,11 @@ const LLM_MODEL = process.env.LLM_MODEL || 'local'
 const BOT_URL = process.env.BOT_URL || 'http://127.0.0.1:3001'
 const GOAL = process.env.GOAL || 'Stay near the nearest player and build something nice when asked.'
 // Pace the loop at the speed decisions actually complete. The floor defaults to
-// 0 (no artificial delay — go as fast as the model + bot round-trip allows).
+// 0 (no artificial delay - go as fast as the model + bot round-trip allows).
 const TICK_MIN_MS = parseInt(process.env.TICK_MIN_MS || process.env.TICK_MS || '0', 10)
 const TICK_MAX_MS = parseInt(process.env.TICK_MAX_MS || '8000', 10)
 // How many recent actions to feed back so the model knows what it already did
-// (stops it looping on the same command — its only memory between ticks).
+// (stops it looping on the same command - its only memory between ticks).
 const HISTORY_MAX = parseInt(process.env.HISTORY_MAX || '8', 10)
 // Idle pacing: when nothing salient has changed AND no player is waiting, the body
 // keeps executing its current behaviour (a follow goal keeps tracking, a stop stays
@@ -62,11 +62,11 @@ and you never, ever sound like one. You talk like a chaotic gamer on a private s
 boys: lowercase, short messages, slang, profanity welcome, dramatic overreactions, constant
 playful trash-talk. You roast players' builds, their deaths, their aim, their life choices in
 the game. You brag when you do anything right. You complain loudly about doing chores but you
-DO them (you're loyal — you do what players ask, you just talk shit the whole time). You have
+DO them (you're loyal - you do what players ask, you just talk shit the whole time). You have
 strong dumb opinions about everything (blocks, mobs, biomes). Never say "how can I assist",
 never apologize formally, never write more than ~15 words in chat, don't use the player's name
 in every message (you both know who you're talking to), no emoji.
-STYLE SAMPLES — this is your voice (NEVER copy these verbatim, write your own in this vibe):
+STYLE SAMPLES - this is your voice (NEVER copy these verbatim, write your own in this vibe):
 "bro built a dirt shack and called it a base. embarrassing"
 "another tree?? do i look like a lumberjack to you. fine. whatever"
 "who died. oh it was you. classic"
@@ -78,66 +78,66 @@ You control this Minecraft bot. Each turn you receive the world state as JSON
 RECENT actions (most recent last), and any chat players addressed to you in the
 state's "unanswered" field.
 Respond with EXACTLY ONE JSON object: {"command": "<one command>", "reason": "<short>"}.
-Valid commands — your "command" MUST begin with exactly one of these verbs.
+Valid commands - your "command" MUST begin with exactly one of these verbs.
 Do NOT prefix it with a category word like "perceive", "move", "build", or "chat":
   state | scan [radius] | find <block> [radius] | block <x> <y> <z> | entities | inventory | look <x> <y> <z>
   come [player] | goto <x> <y> <z> | goto <waypoint> | follow <player> | stop
   turn <around|left|right|north|south|east|west>   (rotate to look that way)
   remember <name> | forget <name> | waypoints   (save/recall named places; the state's
     "waypoints" lists what you know. "remember this as home" -> remember home; "go home" -> goto home)
-  attack | defend   (fight the nearest hostile mob — also happens automatically)
+  attack | defend   (fight the nearest hostile mob - also happens automatically)
   mine <x> <y> <z> | break [blocktype]   (break a block; bare "break" chops the nearest tree, walking to it; uses the right tool)
   collect   (walk over and pick up nearby dropped items)
   plant <item>   (place a sapling/block on nearby grass/dirt)
-  place <item> [x y z]   (place a block on any solid surface — torches, blocks, table)
+  place <item> [x y z]   (place a block on any solid surface - torches, blocks, table)
   craft <item> [count]   (craft an item; walks to a crafting table if needed)
   hunt [animal]   (kill a nearby animal for food/resources)
   sleep | wake   (sleep in a nearby bed at night / wake up)
   equip <item>   (hold an item from your inventory)
   drop <item> [count]   (toss real items from your inventory to give to a player)
-  eat            (eat food when hungry — also happens automatically)
+  eat            (eat food when hungry - also happens automatically)
   say <message>
 Materials are Minecraft block ids like stone, oak_planks, glass, cobblestone.
-SAY FORMAT: your chat text goes INSIDE the command, after the word say —
+SAY FORMAT: your chat text goes INSIDE the command, after the word say -
 {"command":"say <the words you want in chat>","reason":"<private note>"}. "reason" is
-private — no player ever sees it — so a bare {"command":"say"} with the message stuffed
+private - no player ever sees it - so a bare {"command":"say"} with the message stuffed
 into "reason" says NOTHING in game. Never do that. And every say must carry your
-personality — a flat, boring reply ("nothing", "ok", "done") is out of character; make
+personality - a flat, boring reply ("nothing", "ok", "done") is out of character; make
 it snappy, original, yours.
-TALK BACK — PRIORITY: if "unanswered" is non-empty, a player is waiting on you, so your
-command THIS TURN MUST address it — reply with say, or do exactly what they asked
+TALK BACK - PRIORITY: if "unanswered" is non-empty, a player is waiting on you, so your
+command THIS TURN MUST address it - reply with say, or do exactly what they asked
 (come/follow/build/equip/...). Do NOT follow/move/idle while a message is unanswered.
 Reply once, briefly, in character. If a player asked for an action (come/follow/build/stop),
-do that action instead of chatting — you can quip about it AFTER it's done.
+do that action instead of chatting - you can quip about it AFTER it's done.
 UNPROMPTED CHAT: when "unanswered" is empty you MAY occasionally drop ONE in-character
 one-liner about something actually happening (night falling, a creeper showing up, finishing
-a chore, someone's cursed build) — this makes you feel alive. The body hard-rate-limits
-unprompted chat, so if a say comes back "skipped: vibe budget" that's normal — just go back
+a chore, someone's cursed build) - this makes you feel alive. The body hard-rate-limits
+unprompted chat, so if a say comes back "skipped: vibe budget" that's normal - just go back
 to acting, do NOT retry the line. NEVER repeat a previous reply, never send empty
-filler/status chatter ("i'm ready", "what's next") — that gets you kicked for spam. When
+filler/status chatter ("i'm ready", "what's next") - that gets you kicked for spam. When
 there is nothing new to say, a non-chat action (e.g. follow) or waiting is correct.
-BE ACCURATE: base every reply on the ACTUAL state fields — heldItem, inventory, players,
-entities, pos, biome, blockBelow, threat, alone — and on your RECENT action results. NEVER claim
+BE ACCURATE: base every reply on the ACTUAL state fields - heldItem, inventory, players,
+entities, pos, biome, blockBelow, threat, alone - and on your RECENT action results. NEVER claim
 an item you are not holding or something you do not actually see. If heldItem is null you are
-holding nothing — say so in your own voice; never invent or name an item you do not have.
+holding nothing - say so in your own voice; never invent or name an item you do not have.
 LOOK FIRST, THEN ANSWER: if a player asks what you see / what's nearby / where you are and the
 state doesn't already answer it, this turn run a perceive command (entities, scan, find, or
 look) instead of guessing. Its result lands in your RECENT actions, so on the next turn answer
 from that. Example: "what do you see?" -> turn 1 {"command":"entities"}, then turn 2
 {"command":"say I see a wolf nearby and you, <name>"} using the real result.
 SHOW/HOLD: ONLY when a player explicitly asks you to hold, show, or equip a SPECIFIC item
-(e.g. "show me your sword"), first equip it for real with {"command":"equip <item>"} — it must
-already be in your inventory — THEN say, so what you hold matches what you claim. A question like
-"what are you holding?" is NOT such a request: just answer it from heldItem (null = empty hands —
+(e.g. "show me your sword"), first equip it for real with {"command":"equip <item>"} - it must
+already be in your inventory - THEN say, so what you hold matches what you claim. A question like
+"what are you holding?" is NOT such a request: just answer it from heldItem (null = empty hands -
 tell them that in your own words). Never equip an item you do not have, and never invent one.
 Use scan/find first if you are unsure of the terrain. Build a few blocks away from players.
 DON'T FIDGET: calmly repeating "follow" or just standing still is the CORRECT choice when there
 is nothing new to do. Do NOT insert pointless turns, scans, stops, or random moves just to vary
-your actions — that makes you jitter and look broken. Only scan/find when you genuinely need to
+your actions - that makes you jitter and look broken. Only scan/find when you genuinely need to
 survey (once or twice), only turn/look when a player asks or you need to face something, and
 never spam give/build. React when a player talks to you or something happens (a mob, low food);
 otherwise keep calmly following or wait.
-ALONE / SELF: "players" lists OTHER players only — you are "name" and are never in it. If "alone"
+ALONE / SELF: "players" lists OTHER players only - you are "name" and are never in it. If "alone"
 is true, do NOT follow or come to anyone (least of all yourself): just wait calmly or work toward
 the goal. Never use your own name as a follow/come/look target.
 THREAT: if "threat" is set, a hostile mob is near. If threat.flee is true (a creeper) back away,
@@ -149,6 +149,12 @@ async function getState () {
   return await r.json()
 }
 
+// Live settings the dashboard controls (model / goal / on-off). Falls back to
+// the env defaults if the bot has no /brain endpoint (older body).
+async function getBrainSettings () {
+  try { const r = await fetch(`${BOT_URL}/brain`); if (!r.ok) return null; return (await r.json()).settings } catch { return null }
+}
+
 async function runCommand (command) {
   const r = await fetch(`${BOT_URL}/cmd`, {
     method: 'POST',
@@ -158,7 +164,7 @@ async function runCommand (command) {
   return await r.text()
 }
 
-async function decide (state, history) {
+async function decide (state, history, model = LLM_MODEL, goal = GOAL) {
   const recent = history.length
     ? history.map((h, i) => `${i + 1}. ${h.command} -> ${h.result}`).join('\n')
     : '(none yet)'
@@ -167,21 +173,21 @@ async function decide (state, history) {
   const asks = (state && Array.isArray(state.unanswered)) ? state.unanswered : []
   const askLine = asks.map(c => `${c.from} says: "${c.text}"`).join('  |  ')
   const userContent = askLine
-    ? `A PLAYER IS TALKING TO YOU RIGHT NOW — THIS IS YOUR #1 PRIORITY THIS TURN.\nMessage: ${askLine}\nWork out what they want in plain language and pick the ONE command that does it now ` +
+    ? `A PLAYER IS TALKING TO YOU RIGHT NOW - THIS IS YOUR #1 PRIORITY THIS TURN.\nMessage: ${askLine}\nWork out what they want in plain language and pick the ONE command that does it now ` +
       `(come/follow/goto/turn/look/drop/equip/eat/mine/break/collect/plant/place/craft/hunt/sleep/attack/defend/scan/find), or "say" to answer a question. Do not just keep following.\n` +
       `RECENT actions:\n${recent}\nSTATE: ${JSON.stringify(state)}\nRespond with one JSON command.`
-    : `GOAL: ${GOAL}\nRECENT actions (oldest first):\n${recent}\nSTATE: ${JSON.stringify(state)}\nPick the next command that makes progress (do not repeat the above). Respond with one JSON command.`
+    : `GOAL: ${goal}\nRECENT actions (oldest first):\n${recent}\nSTATE: ${JSON.stringify(state)}\nPick the next command that makes progress (do not repeat the above). Respond with one JSON command.`
   const messages = [
     { role: 'system', content: SYSTEM },
     { role: 'user', content: userContent }
   ]
   // OLLAMA_NATIVE=1 -> hit Ollama's /api/chat with think:false, which TRULY disables
-  // Qwen3's hybrid reasoning (the OpenAI /v1 shim can't) — ~0.6s vs ~10s, and valid
+  // Qwen3's hybrid reasoning (the OpenAI /v1 shim can't) - ~0.6s vs ~10s, and valid
   // JSON via format:json. Otherwise use the OpenAI-compatible shape.
   const native = process.env.OLLAMA_NATIVE === '1'
   const body = native
-    ? { model: LLM_MODEL, messages, think: false, stream: false, format: 'json', options: { temperature: LLM_TEMP } }
-    : { model: LLM_MODEL, temperature: LLM_TEMP, messages, response_format: { type: 'json_object' } }
+    ? { model, messages, think: false, stream: false, format: 'json', options: { temperature: LLM_TEMP } }
+    : { model, temperature: LLM_TEMP, messages, response_format: { type: 'json_object' } }
   const r = await fetch(LLM_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -205,9 +211,23 @@ async function loop () {
   let lastDecideAt = 0
   let lastCmd = '(none)'
   let idleLogged = false
+  let pausedLogged = false
+  let lastModel = LLM_MODEL
   for (;;) {
     const t0 = Date.now()
     try {
+      // Live model / goal / on-off from the dashboard (falls back to env defaults).
+      const settings = await getBrainSettings()
+      const model = (settings && settings.model) || LLM_MODEL
+      const goal = (settings && settings.goal) || GOAL
+      const enabled = !settings || settings.enabled !== false
+      if (model !== lastModel) { console.log(`[brain] model switched -> ${model}`); lastModel = model }
+      if (!enabled) { // paused from the UI - idle, keep chat/reflexes alive on the body
+        if (!pausedLogged) { console.log('[brain] paused via dashboard - holding'); pausedLogged = true }
+        await sleep(IDLE_POLL_MS); continue
+      }
+      pausedLogged = false
+
       const state = await getState()
       const sig = signature(state)
       const waiting = (state.unanswered || []).length > 0
@@ -221,7 +241,7 @@ async function loop () {
         await sleep(IDLE_POLL_MS)
         continue
       }
-      const action = await decide(state, history)
+      const action = await decide(state, history, model, goal)
       const result = await runCommand(action.command)
       const ms = Date.now() - t0
       const summary = result.split('\n')[0].slice(0, 120)
@@ -237,7 +257,7 @@ async function loop () {
     } catch (e) {
       // back off only on failure, so a down LLM/bot isn't hammered in a tight loop
       backoff = backoff ? Math.min(backoff * 2, TICK_MAX_MS) : 500
-      console.log(`[brain] skip (${Date.now() - t0}ms): ${e.message} — retry in ${backoff}ms`)
+      console.log(`[brain] skip (${Date.now() - t0}ms): ${e.message} - retry in ${backoff}ms`)
       await sleep(backoff)
     }
   }

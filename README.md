@@ -1,13 +1,13 @@
 # Animus
 
-*The mind that animates the body — an AI-controllable Minecraft bot with a swappable brain.*
+*The mind that animates the body - an AI-controllable Minecraft bot with a swappable brain.*
 
 An AI-controllable Minecraft bot that joins a server as its own player, walks
 around, and builds things on command. The **body** (the bot) is separate from
 the **brain** (what decides). The brain is swappable:
 
-- **Claude** — drives the bot interactively over a small local HTTP API.
-- **A local model** (llama.cpp or Ollama) — drives it autonomously, offline.
+- **Claude** - drives the bot interactively over a small local HTTP API.
+- **A local model** (llama.cpp or Ollama) - drives it autonomously, offline.
 
 Same body, same command surface, two brains.
 
@@ -30,14 +30,14 @@ Same body, same command surface, two brains.
 ```
 animus/
 ├── testserver/        isolated Paper 1.21.11 test server (localhost, offline-mode, :25599)
-│   ├── start.sh       small heap, no pre-touch — won't disturb a live server
+│   ├── start.sh       small heap, no pre-touch - won't disturb a live server
 │   └── server.properties
 ├── bot/
 │   ├── index.js       the body: Mineflayer + HTTP control API (:3001)
 │   ├── index-bedrock.js  alternative body over the Bedrock protocol (Geyser/Floodgate)
 │   ├── commands.js    actions + building primitives (wall/tower/house/fill/...)
 │   ├── brain-llm.js   optional local-model driver (llama.cpp / Ollama)
-│   ├── command.gbnf   llama.cpp grammar — forces valid JSON commands
+│   ├── command.gbnf   llama.cpp grammar - forces valid JSON commands
 │   ├── access.js      operator allowlist + "is this addressed to me?" logic
 │   └── config.json    host/port/username/operators
 ├── start-lab.sh       bring the whole lab up (test server + bot)
@@ -48,12 +48,12 @@ animus/
 ## Requirements
 
 - **Node.js 18+** (for the bot).
-- **bash** environment for the helper scripts — Linux, macOS, WSL, or Git Bash on
+- **bash** environment for the helper scripts - Linux, macOS, WSL, or Git Bash on
   Windows. `ctl.sh` also uses `curl` and `python3`.
-- **A Paper 1.21.11 server jar** for the local test server (not bundled — see below).
+- **A Paper 1.21.11 server jar** for the local test server (not bundled - see below).
 - *Optional, for the local-model brain:* [Ollama](https://ollama.com) or
   [llama.cpp](https://github.com/ggerganov/llama.cpp), plus a GPU with enough VRAM
-  (~16 GB runs a 14B model well — see [NOTES.md](NOTES.md)).
+  (~16 GB runs a 14B model well - see [NOTES.md](NOTES.md)).
 
 ## Quickstart (local test server)
 
@@ -79,12 +79,12 @@ cd ..
 ./ctl.sh cmd "tower stone 12 3"
 ```
 
-In-game you can also type `!house oak_planks` etc. in chat (operators only — see
+In-game you can also type `!house oak_planks` etc. in chat (operators only - see
 [In-game players & access](#in-game-players--access)).
 
 ### One-command lab
 
-`start-lab.sh` does steps 3–4 for you (starts the test server, waits for it, then
+`start-lab.sh` does steps 3-4 for you (starts the test server, waits for it, then
 starts the bot, both backgrounded with logs in `logs/`). If the Paper jar is
 missing it tells you where to get one, or set `PAPER_JAR_SRC=/path/to/paper.jar`
 to copy from a local source:
@@ -118,10 +118,10 @@ cd bot && \
 ```
 
 > **Use Ollama's native `/api/chat` with a non-thinking model.** Qwen3's "thinking"
-> mode makes each decision take 5–40 s; the OpenAI-compatible `/v1` endpoint can't
+> mode makes each decision take 5-40 s; the OpenAI-compatible `/v1` endpoint can't
 > turn it off, but native `/api/chat` (`OLLAMA_NATIVE=1`) sends `think:false` and
 > drops it to ~1 s. See [NOTES.md §2](NOTES.md) for the full model comparison and
-> hardware notes — this is the single biggest factor in whether the bot feels good.
+> hardware notes - this is the single biggest factor in whether the bot feels good.
 
 Or with llama.cpp, using the bundled grammar to force valid JSON commands:
 
@@ -135,7 +135,7 @@ cd bot && LLM_URL=http://127.0.0.1:8080/v1/chat/completions \
 
 - **Localhost only.** The test server (`:25599`) and the bot control API (`:3001`)
   are bound to `127.0.0.1` and must stay that way. The lab runs **`online-mode=false`**
-  with an **op + creative** bot — fine on loopback, trivially abusable if you expose
+  with an **op + creative** bot - fine on loopback, trivially abusable if you expose
   those ports to the internet. Don't port-forward them; don't bind to `0.0.0.0`.
 - The control API has **no authentication** by design (local dev tool). Anything that
   can reach `:3001` can drive the bot. Keep it local.
@@ -148,7 +148,7 @@ cd bot && LLM_URL=http://127.0.0.1:8080/v1/chat/completions \
 
 Players interact with the bot two ways, on **both** bodies:
 
-- **Commands** — type `!<command>` in chat (`!house oak_planks`, `!come`,
+- **Commands** - type `!<command>` in chat (`!house oak_planks`, `!come`,
   `!follow Steve`, `!tower stone 12`, `!stop`). These run only for **allowlisted
   operators**:
 
@@ -160,7 +160,7 @@ Players interact with the bot two ways, on **both** bodies:
   Also overridable with env: `OPERATORS="Steve,Alex"` and `FLOODGATE_PREFIX="."`.
   An **empty list = nobody** can command the bot (locked down by default).
 
-- **Natural conversation** — anyone can talk to the bot by **mentioning its name**
+- **Natural conversation** - anyone can talk to the bot by **mentioning its name**
   (or a configured alias): "hey Claudebot, what are you building?". The body
   surfaces these in `/state.unanswered`; the brain (`brain-llm.js`) replies
   in-character with `say`. Requires the brain + a local model running. Replies use
@@ -171,10 +171,10 @@ Players interact with the bot two ways, on **both** bodies:
 `bot/index-bedrock.js` is an alternative **body** that connects over the
 **Bedrock** protocol (e.g. a Java server fronted by Geyser/Floodgate) instead of
 Java. It exposes the *same* control API (`:3001`) and command names, so the brain
-and `ctl.sh` work against it unchanged — only the body differs.
+and `ctl.sh` work against it unchanged - only the body differs.
 
 ```bash
-# offline (no account) — for a Bedrock/Floodgate server in offline mode
+# offline (no account) - for a Bedrock/Floodgate server in offline mode
 cd bot && MC_HOST=your-server.example.com MC_PORT=19132 node index-bedrock.js
 
 # with a real Microsoft account (prints a device-code link on first run)
@@ -184,15 +184,15 @@ cd bot && MC_HOST=your-server.example.com MC_AUTH=microsoft node index-bedrock.j
 Env: `MC_HOST`, `MC_PORT` (default 19132/UDP), `MC_USERNAME`, `MC_AUTH`
 (`offline`|`microsoft`), `BEDROCK_VERSION` (pin if auto-negotiation fails).
 
-**What works vs. what doesn't** — `bedrock-protocol` is low-level (no Mineflayer
+**What works vs. what doesn't** - `bedrock-protocol` is low-level (no Mineflayer
 world model or pathfinder), so this body is deliberately honest:
 
 | Capability | Bedrock body |
 |---|---|
-| build / admin (`wall`/`tower`/`house`/`fill`/`setblock`/`give`/`gamemode`/`say`) | ✅ full — sent as server commands |
+| build / admin (`wall`/`tower`/`house`/`fill`/`setblock`/`give`/`gamemode`/`say`) | ✅ full - sent as server commands |
 | movement (`goto`/`come`/`follow`/`stop`) | ✅ teleport-based (`/tp`), not physical |
 | self + nearby players/entities (`state`/`entities`) | ✅ tracked from packets |
-| block perception (`scan`/`find`/`block`) | ❌ no world model — returns a clear note instead of looping the brain |
+| block perception (`scan`/`find`/`block`) | ❌ no world model - returns a clear note instead of looping the brain |
 
 For full perception + physical pathfinding, use the Java body (`index.js`); on a
 dual Java+Bedrock server the bot can run on Java while you play on Bedrock.
@@ -222,4 +222,4 @@ autodetect; pin the version if the server disables status pings). See
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT - see [LICENSE](LICENSE).

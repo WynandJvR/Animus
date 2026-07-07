@@ -1,7 +1,7 @@
 'use strict'
 // The "body": connects to the Minecraft server and exposes a tiny local HTTP
-// control API. Whatever drives the bot — Claude over curl, the local-model
-// brain (brain-llm.js), or you by hand — all speak to the same API:
+// control API. Whatever drives the bot - Claude over curl, the local-model
+// brain (brain-llm.js), or you by hand - all speak to the same API:
 //
 //   GET  /state           -> JSON world/self state
 //   GET  /health          -> { ok: true }
@@ -11,11 +11,34 @@
 // Nothing here is autonomous; the brain decides, the body acts.
 
 const http = require('http')
+const fs = require('fs')
+const path = require('path')
+const { execFile } = require('child_process')
 const mineflayer = require('mineflayer')
 const { pathfinder, goals } = require('mineflayer-pathfinder')
 const cfg = require('./config.json')
 const commands = require('./commands.js')
 const access = require('./access.js')
+
+// Live brain settings the dashboard can change on the fly; brain-llm.js polls
+// GET /brain each tick and switches model / goal / on-off without a restart.
+const brainSettings = {
+  model: process.env.LLM_MODEL || 'qwen3:14b',
+  goal: process.env.GOAL || 'Stay near players, help when asked, and behave like a normal survival player.',
+  enabled: true
+}
+// Cached `ollama list` so the UI can offer a model dropdown (refreshed periodically).
+let ollamaModels = []
+function refreshOllamaModels () {
+  execFile('ollama', ['list'], { timeout: 5000 }, (err, stdout) => {
+    if (err) return
+    ollamaModels = stdout.split('\n').slice(1).map(l => l.trim().split(/\s+/)[0]).filter(Boolean)
+  })
+}
+refreshOllamaModels(); setInterval(refreshOllamaModels, 30000).unref?.()
+// Dashboard HTML, loaded once at startup and served at GET /.
+let uiHtml = ''
+try { uiHtml = fs.readFileSync(path.join(__dirname, 'ui.html'), 'utf8') } catch {}
 
 // short-term memory of chat addressed to the bot, surfaced in /state. Each
 // message is offered for up to MAX_DELIVERIES ticks so the brain reliably gets a
@@ -45,7 +68,7 @@ function recordChat (from, text) {
 }
 function clearPendingChat () { recentChat.forEach(c => { c.deliveries = MAX_DELIVERIES }) }
 // Outgoing-chat gate: a "say" is only actually sent if it isn't a duplicate and
-// the cooldown elapsed — kills repeated/again-spam chat and server anti-spam
+// the cooldown elapsed - kills repeated/again-spam chat and server anti-spam
 // kicks. Returns null to send, or a reason string to suppress.
 // Brain chat comes in two kinds: a REPLY (a player addressed it since it last
 // spoke) is always allowed; an UNPROMPTED quip ("vibe") is allowed at most once
@@ -56,11 +79,11 @@ const VIBE_CHAT_MS = parseInt(process.env.VIBE_CHAT_MS || '90000', 10)
 let lastSayAt = 0
 let lastVibeAt = 0
 function gateSay (line, fromBrain) {
-  if (!/^say\b/i.test(String(line).trim())) return null // not a chat line — allow
+  if (!/^say\b/i.test(String(line).trim())) return null // not a chat line - allow
   const now = Date.now()
   if (now - lastSayAt < CHAT_COOLDOWN_MS) return `cooldown ${CHAT_COOLDOWN_MS}ms`
   if (fromBrain && lastAddressedAt <= lastReplyAt) {
-    // unprompted quip — budgeted, and it does NOT count as a reply (leaves
+    // unprompted quip - budgeted, and it does NOT count as a reply (leaves
     // lastReplyAt/pending untouched so a real answer is still owed if asked)
     if (now - lastVibeAt < VIBE_CHAT_MS) return `vibe budget ${Math.ceil((VIBE_CHAT_MS - (now - lastVibeAt)) / 1000)}s`
     lastVibeAt = now; lastSayAt = now
@@ -71,7 +94,7 @@ function gateSay (line, fromBrain) {
   return null
 }
 
-// Block spamming the same world-changing command — caps any single impactful
+// Block spamming the same world-changing command - caps any single impactful
 // command (give/build) to once per IMPACT_COOLDOWN_MS, so a fixated model can't
 // dupe items or re-build the same thing on a loop. Returns a reason or null.
 // World-edit/admin block list is shared from access.js so both bodies stay in sync.
@@ -79,7 +102,7 @@ const CHEAT_CMDS = access.CHEAT_CMDS
 // Perception commands are PREPARATORY ("look first, then answer"): they don't
 // resolve a player's request, so a pending message stays offered until the brain
 // actually answers. Any OTHER command (follow/come/equip/say/...) IS the response,
-// so it clears the pending request — stops one "follow me" from re-firing for
+// so it clears the pending request - stops one "follow me" from re-firing for
 // every redelivery tick while still letting scan->say sequences complete.
 const PREP_CMDS = /^(scan|find|entities|block|look|state|inventory)\b/i
 const IMPACTFUL = /^(give|fill|setblock|clear|wall|tower|house|drop|toss)\b/i
@@ -122,7 +145,7 @@ bot.loadPlugin(pathfinder)
 // DURABLE enchant-crash guard (replaces the fragile node_modules edit, see NOTES §4).
 // mineflayer's digTime does `heldItem.enchants.concat(helmetEnchants)` and throws
 // "enchantments.concat is not a function" on 1.21 enchanted tools when `enchants`
-// isn't an array — crashing every dig while holding enchanted gear. A future
+// isn't an array - crashing every dig while holding enchanted gear. A future
 // `npm install` wipes the node_modules patch, so we re-apply it here by overriding
 // bot.digTime (which bot.dig calls) with an Array.isArray-guarded version. Self-
 // contained in the repo, so it can never be lost on reinstall.
@@ -152,7 +175,7 @@ bot.once('spawn', () => {
   commands.setupMovements(bot)
   installDigTimeGuard(bot)
   note(`spawned as ${bot.username} at ${bot.entity.position}`)
-  // Do NOT change gamemode by default — just join and idle. The lab can opt in
+  // Do NOT change gamemode by default - just join and idle. The lab can opt in
   // to creative (for /fill building) with AUTO_CREATIVE=1 or config.autoCreative.
   if (process.env.AUTO_CREATIVE === '1' || cfg.autoCreative) bot.chat('/gamemode creative')
 })
@@ -161,7 +184,7 @@ bot.on('chat', (username, message) => {
   if (username === bot.username) return
   note(`<${username}> ${message}`)
   recordChatLog(`<${username}> ${message}`)
-  // "!<command>" drives the bot — but only for allowlisted operators
+  // "!<command>" drives the bot - but only for allowlisted operators
   if (message.startsWith('!')) {
     if (!access.isOperator(username, cfg)) {
       note(`(denied) ${username} is not an operator`)
@@ -176,7 +199,7 @@ bot.on('chat', (username, message) => {
       .then(r => note(`(chat-cmd) ${r}`))
       .catch(e => note(`(chat-cmd error) ${e.message}`))
   } else if (access.isAddressed(message, bot.username, cfg)) {
-    // chat aimed at the bot — surface it so the brain can reply conversationally
+    // chat aimed at the bot - surface it so the brain can reply conversationally
     recordChat(username, message)
   }
 })
@@ -215,7 +238,7 @@ if (process.env.ANTI_AFK !== '0') {
 }
 
 // Self-defense: swing at any hostile mob that gets close, independent of the
-// brain — so the bot fights back when attacked. Disable with AUTO_DEFEND=0.
+// brain - so the bot fights back when attacked. Disable with AUTO_DEFEND=0.
 const HOSTILE_RE = /zombie|skeleton|spider|creeper|enderman|witch|husk|drowned|pillager|vindicator|ravager|slime|magma_cube|blaze|piglin|hoglin|phantom|zoglin|stray|silverfish|guardian|vex|wither|warden|ghast|shulker|illusioner|evoker|breeze|bogged/i
 // never AUTO-melee these: creepers explode point-blank, ghast/warden/wither are ranged/deadly
 const NO_AUTO_MELEE = /creeper|ghast|warden|wither_boss|^wither$/i
@@ -270,13 +293,16 @@ if (process.env.AUTO_DEFEND !== '0') {
 }
 
 // Auto-collect: when idle (no active pathfinder goal) and a dropped item is close
-// by, walk over and pick it up — so the bot tidies up after a chop/hunt without the
+// by, walk over and pick it up - so the bot tidies up after a chop/hunt without the
 // brain micromanaging it. Skipped whenever it already has a goal (following / going
 // somewhere) so it never yanks itself off-task. Disable with AUTO_COLLECT=0.
 let collecting = false
 if (process.env.AUTO_COLLECT !== '0') {
   setInterval(async () => {
     if (collecting || !bot.entity || !bot.pathfinder || bot.pathfinder.goal) return
+    // never wander off mid-provision/build - those flows manage their own
+    // movement and pickups, and surprise walks force inventory desyncs
+    if (commands.isBusy && commands.isBusy()) return
     try {
       const me = bot.entity.position
       let best = null; let bestD = 8
@@ -287,17 +313,17 @@ if (process.env.AUTO_COLLECT !== '0') {
       }
       if (!best) return
       collecting = true
-      // range 0: actually walk ONTO the item's block — range 1 can count as "arrived"
+      // range 0: actually walk ONTO the item's block - range 1 can count as "arrived"
       // a block short, so the bot never touches the drop and never picks it up.
       await bot.pathfinder.goto(new goals.GoalNear(best.position.x, best.position.y, best.position.z, 0))
-    } catch { /* item vanished / unreachable — retry next tick */ } finally { collecting = false }
+    } catch { /* item vanished / unreachable - retry next tick */ } finally { collecting = false }
   }, 3000)
 }
 
-// Auto-torch (OPT-IN, default OFF — set AUTO_TORCH=1): a companion that lights the
+// Auto-torch (OPT-IN, default OFF - set AUTO_TORCH=1): a companion that lights the
 // way at night. Deliberately conservative because it's an autonomous block-placer:
 // only at night, only on natural ground (placeTorchNearby), throttled, and skipped
-// if a torch/lantern is already close — so it never spams or decorates builds.
+// if a torch/lantern is already close - so it never spams or decorates builds.
 let lastTorchAt = 0
 let _torchIds = null
 function torchBlockIds (bot) {
@@ -307,19 +333,19 @@ function torchBlockIds (bot) {
     const ids = Object.values(md.blocksByName).filter(b => /torch|lantern/.test(b.name)).map(b => b.id)
     if (ids.length) _torchIds = ids // cache only on success; leave null to retry if mcData wasn't ready
     return ids
-  } catch { return [] } // don't cache a failure — a permanently-empty list would disable the dedup guard
+  } catch { return [] } // don't cache a failure - a permanently-empty list would disable the dedup guard
 }
 const AUTO_TORCH_MS = parseInt(process.env.AUTO_TORCH_MS || '8000', 10)
 if (process.env.AUTO_TORCH === '1') {
   setInterval(async () => {
-    if (!bot.entity || !bot.time || bot.time.timeOfDay < 13000) return // daytime — skip
+    if (!bot.entity || !bot.time || bot.time.timeOfDay < 13000) return // daytime - skip
     if (Date.now() - lastTorchAt < AUTO_TORCH_MS) return
     try {
       const ids = torchBlockIds(bot)
       if (ids.length && bot.findBlock({ matching: ids, maxDistance: 6 })) return // already lit nearby
       const r = await commands.placeTorchNearby(bot)
       if (/placed torch/.test(r)) { lastTorchAt = Date.now(); note(`(auto-torch) ${r}`) }
-    } catch { /* not ready / placement raced — retry next tick */ }
+    } catch { /* not ready / placement raced - retry next tick */ }
   }, 3000)
 }
 
@@ -381,7 +407,7 @@ if (process.env.GAZE !== '0') {
 // Leash / stuck-recovery reflex: while FOLLOWING a player, if the bot stops making
 // progress but the target is still far (e.g. the player climbed somewhere the bot
 // can't path with canDig off), kick the pathfinder by re-issuing the follow goal.
-// If it stays stuck, note it once and stop hammering — the dynamic follow will pick
+// If it stays stuck, note it once and stop hammering - the dynamic follow will pick
 // back up on its own once the target moves somewhere reachable. Off with LEASH=0.
 let leashLastPos = null
 let leashStuckSince = 0
@@ -400,7 +426,7 @@ if (process.env.LEASH !== '0') {
       const moved = leashLastPos ? me.distanceTo(leashLastPos) : Infinity
       leashLastPos = me.clone()
       if (moved > 0.6) { leashStuckSince = 0; leashGaveUp = null; return } // making progress toward them
-      if (!leashStuckSince) { leashStuckSince = Date.now(); leashLastKick = 0; return } // just stalled — start the clock
+      if (!leashStuckSince) { leashStuckSince = Date.now(); leashLastKick = 0; return } // just stalled - start the clock
       const stuck = Date.now() - leashStuckSince
       const who = target.username || target.name || 'target'
       if (stuck < 12000) {
@@ -411,7 +437,7 @@ if (process.env.LEASH !== '0') {
           note(`(leash) re-pathing to ${who} (${dist.toFixed(0)}m, stuck ${(stuck / 1000).toFixed(0)}s)`)
         }
       } else if (leashGaveUp !== target) { // genuinely blocked -> note once, stop kicking
-        note(`(leash) can't reach ${who} (${dist.toFixed(0)}m) — blocked, holding`)
+        note(`(leash) can't reach ${who} (${dist.toFixed(0)}m) - blocked, holding`)
         leashGaveUp = target
       }
     } catch { /* not ready */ }
@@ -458,6 +484,12 @@ const server = http.createServer((req, res) => {
         note(`(cmd) ${line} -> BLOCKED (world-edit/admin is operator-only)`)
         return send(res, 200, 'blocked: world-editing/admin commands are operator-only')
       }
+      // While an operator-triggered build/provision is driving the body, don't let
+      // the brain's own movement/gather commands fight it - allow only perception
+      // + chat so the brain holds (and can still talk) until the build finishes.
+      if (commands.isBusy && commands.isBusy() && !/^(state|scan|find|block|entities|inventory|look|say|stop)\b/i.test(String(line).trim())) {
+        return send(res, 200, "busy building right now - I'll hold until it's done")
+      }
       const drop = gateSay(line, true) || gateImpactful(line) // brain: gated chat + repeat-guard
       if (drop) { note(`(cmd) ${line} -> skipped (${drop})`); return send(res, 200, `skipped: ${drop}`) }
       noteManualLook(line)
@@ -472,6 +504,86 @@ const server = http.createServer((req, res) => {
         note(`(cmd error) ${line} -> ${e.message}`)
         send(res, 500, `error: ${e.message}`)
       }
+    })
+    return
+  }
+  // ---- dashboard UI ---------------------------------------------------------
+  if (req.method === 'GET' && (req.url === '/' || req.url === '/ui' || req.url === '/ui.html')) {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+    return res.end(uiHtml || '<h1>ui.html not found next to index.js</h1>')
+  }
+  // Live brain settings (model / goal / on-off) for the dashboard + the brain.
+  if (req.method === 'GET' && req.url === '/brain') {
+    return send(res, 200, { settings: brainSettings, models: ollamaModels })
+  }
+  if (req.method === 'POST' && req.url === '/brain') {
+    let data = ''
+    req.on('data', c => { data += c })
+    req.on('end', () => {
+      try {
+        const j = JSON.parse(data)
+        if (j.model != null) brainSettings.model = String(j.model)
+        if (j.goal != null) brainSettings.goal = String(j.goal)
+        if (j.enabled != null) brainSettings.enabled = !!j.enabled
+        note(`(brain) settings -> model=${brainSettings.model} enabled=${brainSettings.enabled}`)
+      } catch { return send(res, 400, 'bad json') }
+      send(res, 200, brainSettings)
+    })
+    return
+  }
+  // ---- connection config (server + account) the dashboard can edit ----------
+  if (req.method === 'GET' && req.url === '/config') {
+    let saved = {}
+    try { saved = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8')) } catch {}
+    return send(res, 200, {
+      host: saved.host, port: saved.port, version: saved.version, auth: saved.auth,
+      username: saved.username, operators: saved.operators || [],
+      connected: !!bot.entity, // is it actually in-world right now?
+      liveHost: process.env.MC_HOST || saved.host, livePort: process.env.MC_PORT || saved.port
+    })
+  }
+  if (req.method === 'POST' && req.url === '/config') {
+    let data = ''
+    req.on('data', c => { data += c })
+    req.on('end', () => {
+      let j
+      try { j = JSON.parse(data) } catch { return send(res, 400, 'bad json') }
+      const file = path.join(__dirname, 'config.json')
+      let saved = {}
+      try { saved = JSON.parse(fs.readFileSync(file, 'utf8')) } catch {}
+      // merge only the connection fields; validate lightly
+      if (j.host != null) saved.host = String(j.host).trim()
+      if (j.port != null) { const p = parseInt(j.port, 10); if (Number.isFinite(p)) saved.port = p }
+      if (j.version != null) saved.version = String(j.version).trim()
+      if (j.auth != null && ['offline', 'microsoft'].includes(j.auth)) saved.auth = j.auth
+      if (j.username != null) saved.username = String(j.username).trim()
+      if (Array.isArray(j.operators)) saved.operators = j.operators.map(s => String(s).trim()).filter(Boolean)
+      try { fs.writeFileSync(file, JSON.stringify(saved, null, 2) + '\n') } catch (e) { return send(res, 500, `couldn't save: ${e.message}`) }
+      note(`(config) saved -> ${saved.host}:${saved.port} auth=${saved.auth}${j.reconnect ? ' (reconnecting)' : ''}`)
+      send(res, 200, { ok: true, reconnect: !!j.reconnect })
+      // Reconnect = restart the process so mineflayer makes a fresh connection with
+      // the new settings. The supervisor (run.js) brings it right back up. NOTE:
+      // env vars (MC_HOST/...) override config.json, so this only takes effect if
+      // the bot was launched WITHOUT those overrides (which the launcher does).
+      if (j.reconnect) setTimeout(() => { note('(config) restarting to apply new connection...'); process.exit(0) }, 400)
+    })
+    return
+  }
+  // OPERATOR command path for the LOCAL dashboard - full power, NOT brain-confined
+  // (you're the human at the console; the autonomous brain still uses /cmd).
+  if (req.method === 'POST' && req.url === '/op/cmd') {
+    let data = ''
+    req.on('data', c => { data += c })
+    req.on('end', async () => {
+      let line = data
+      try { const j = JSON.parse(data); if (j && typeof j.command === 'string') line = j.command } catch {}
+      noteManualLook(line)
+      try {
+        const result = await commands.handle(bot, line)
+        clearPendingChat()
+        note(`(ui-cmd) ${line} -> ${result.split('\n')[0]}`)
+        send(res, 200, result)
+      } catch (e) { note(`(ui-cmd error) ${line} -> ${e.message}`); send(res, 500, `error: ${e.message}`) }
     })
     return
   }

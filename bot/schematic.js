@@ -2,20 +2,20 @@
 // Schematic loading + SURVIVAL physical building.
 //
 // Philosophy (see NOTES §natural-player): the bot builds like a NORMAL SURVIVAL
-// PLAYER — it places real blocks from its own inventory, one by one, by hand.
+// PLAYER - it places real blocks from its own inventory, one by one, by hand.
 // NO /fill, /setblock, /give, creative spawn, tp or fly anywhere. The player
 // supplies materials; when the bot runs short it PAUSES and asks for exactly
 // what it needs, then resumes.
 //
 // Parsing: modern sites export Sponge Schematic v3 (blocks nested under
-// `Blocks.{Palette,Data}`), which prismarine-schematic 1.3.0 can't read — so we
+// `Blocks.{Palette,Data}`), which prismarine-schematic 1.3.0 can't read - so we
 // carry a small v3 adapter here and fall back to the stock reader for v1/v2/mcedit.
 // Planning: we reuse mineflayer-builder's `Build` class ONLY for action ordering
 // and face/orientation math. Its own build loop is creative-only (spawns items
 // via bot.creative), so the placement loop below is our own, survival version.
 //
 // STATUS: download + parse + bill-of-materials are VERIFIED offline against real
-// files. The buildSurvival() executor is written but UNTESTED — it needs live
+// files. The buildSurvival() executor is written but UNTESTED - it needs live
 // tuning on the server (reach, timing, pillar-up, scaffold cleanup).
 
 const fs = require('fs')
@@ -28,7 +28,7 @@ const { goals, Movements } = require('mineflayer-pathfinder')
 const Build = require('mineflayer-builder/lib/Build')
 const interactable = require('mineflayer-builder/lib/interactable.json')
 
-// Where local .schem files live (also the download cache). Gitignored — runtime data.
+// Where local .schem files live (also the download cache). Gitignored - runtime data.
 const SCHEM_DIR = path.join(__dirname, 'schematics')
 
 const AIR = /(^|_)air$/
@@ -38,7 +38,7 @@ const AIR = /(^|_)air$/
 // Fetch a DIRECT url to a .schem/.litematic/.nbt file. Works with sites that
 // serve real file URLs (e.g. https://buildingguide.app/schematics/<name>.schem).
 // Sites that gate downloads behind JS / Cloudflare "server actions"
-// (e.g. mineschematic.com) are NOT supported — paste a direct file link instead.
+// (e.g. mineschematic.com) are NOT supported - paste a direct file link instead.
 async function download (url) {
   const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Animus bot)' } })
   if (!r.ok) throw new Error(`download ${r.status} ${r.statusText}`)
@@ -47,7 +47,7 @@ async function download (url) {
   // HTML error page) is rejected so we fail loudly instead of parsing garbage.
   const gzip = buf[0] === 0x1f && buf[1] === 0x8b
   const rawNbt = buf[0] === 0x0a
-  if (!gzip && !rawNbt) throw new Error(`not a schematic file (got ${buf.slice(0, 16).toString('utf8').replace(/[^\x20-\x7e]/g, '.')}…) — is this a DIRECT file link?`)
+  if (!gzip && !rawNbt) throw new Error(`not a schematic file (got ${buf.slice(0, 16).toString('utf8').replace(/[^\x20-\x7e]/g, '.')}…) - is this a DIRECT file link?`)
   return buf
 }
 
@@ -100,7 +100,7 @@ async function readSchematic (buffer, version) {
   const root = s.Schematic || s // v3 wraps everything under a "Schematic" compound
   const isV3 = root && root.Version === 3 && root.Blocks && root.Blocks.Data
   if (!isV3) {
-    // v1/v2 (sponge) or mcedit — the stock reader handles these.
+    // v1/v2 (sponge) or mcedit - the stock reader handles these.
     return Schematic.read(buffer, version)
   }
   const mcData = require('minecraft-data')(version)
@@ -132,7 +132,7 @@ function billOfMaterials (schem) {
     for (let z = st.z; z <= en.z; z++) {
       for (let x = st.x; x <= en.x; x++) {
         const b = schem.getBlock(new Vec3(x, y, z))
-        if (!b || AIR.test(b.name)) continue
+        if (!b || !b.name || AIR.test(b.name)) continue // skip air / unresolved states
         counts[b.name] = (counts[b.name] || 0) + 1
         solid++
       }
@@ -148,10 +148,16 @@ function materialsSummary (schem) {
   return { text: `${solid} blocks, ${types} types: ${lines.join(', ')}`, counts, solid, types }
 }
 
-// ---- SURVIVAL build executor (UNTESTED — needs live tuning) -----------------
+// ---- SURVIVAL build executor -----------------------------------------------
+
+// Cheap filler blocks the bot may pillar/bridge with (and which we clean up after).
+const SCAFFOLD_BLOCKS = ['dirt', 'cobblestone', 'cobbled_deepslate', 'netherrack', 'stone', 'andesite']
+// Natural obstructions we may clear from the build footprint before building
+// (vegetation + soft terrain). NEVER crafted blocks - anti-grief holds.
+const CLEARABLE = /grass|fern|flower|dandelion|poppy|tulip|orchid|allium|bluet|daisy|cornflower|lily|rose|sunflower|lilac|peony|snow|leaves|vine|mushroom|sapling|dead_bush|sugar_cane|bamboo|sweet_berry|seagrass|moss_carpet|_carpet$|sprouts|roots|dripleaf|azalea/
 
 // Movement profile used ONLY while building. Preserves the anti-grief rule that
-// matters — canDig stays false, so the bot NEVER breaks existing blocks to path —
+// matters - canDig stays false, so the bot NEVER breaks existing blocks to path -
 // but permits the *placement* a survival player uses to gain height: pillar-up and
 // bridging with real blocks pulled from inventory. Restored afterwards by caller.
 function buildMovements (bot) {
@@ -160,13 +166,93 @@ function buildMovements (bot) {
   m.allow1by1towers = true   // may pillar up to reach height (real blocks, survival)
   m.canOpenDoors = true
   m.allowParkour = true
-  // Scaffolding/bridging consumes real inventory blocks — restrict to cheap fillers
+  // Scaffolding/bridging consumes real inventory blocks - restrict to cheap fillers
   // the player is likely to hand over, so it never spends build materials to walk.
   const md = require('minecraft-data')(bot.version)
-  const SCAFFOLD = ['dirt', 'cobblestone', 'cobbled_deepslate', 'netherrack', 'stone', 'andesite']
-  const ids = SCAFFOLD.map(n => md.itemsByName[n] && md.itemsByName[n].id).filter(x => x != null)
+  const ids = SCAFFOLD_BLOCKS.map(n => md.itemsByName[n] && md.itemsByName[n].id).filter(x => x != null)
   if ('scafoldingBlocks' in m) m.scafoldingBlocks = ids
   return m
+}
+
+// World-position set of the schematic's SOLID cells, "x,y,z" keys.
+function solidCellSet (schem, at) {
+  const set = new Set()
+  const st = schem.start(); const en = schem.end()
+  for (let y = st.y; y <= en.y; y++) {
+    for (let z = st.z; z <= en.z; z++) {
+      for (let x = st.x; x <= en.x; x++) {
+        const b = schem.getBlock(new Vec3(x, y, z))
+        if (b && !AIR.test(b.name)) set.add(`${at.x + x},${at.y + y},${at.z + z}`)
+      }
+    }
+  }
+  return set
+}
+
+// Clear NATURAL obstructions (grass/flowers/leaves/snow…) inside the build
+// footprint so vegetation/soft cover doesn't block placements or poke through.
+// Only clearable blocks; never crafted ones. Best-effort.
+async function prepSite (bot, schem, at, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const st = schem.start(); const en = schem.end()
+  let cleared = 0
+  for (let y = at.y + st.y; y <= at.y + en.y && !isStopped(); y++) {
+    for (let z = at.z + st.z; z <= at.z + en.z; z++) {
+      for (let x = at.x + st.x; x <= at.x + en.x; x++) {
+        const b = bot.blockAt(new Vec3(x, y, z))
+        if (!b || AIR.test(b.name) || !CLEARABLE.test(b.name)) continue
+        try {
+          if (bot.entity.position.distanceTo(b.position) > 4) await gotoWithTimeout(bot, new goals.GoalNear(x, y, z, 3), 12000)
+          if (bot.canDigBlock && bot.canDigBlock(b)) { await bot.dig(b); cleared++ }
+        } catch {}
+      }
+    }
+  }
+  return cleared
+}
+
+// Remove scaffold blocks the bot placed to gain height. We can't see what the
+// pathfinder placed, so we diff: any block now present in the footprint (+margin)
+// that WASN'T there before, isn't a schematic cell, and is a scaffold material.
+async function cleanupScaffold (bot, schem, at, beforeSet, solidSet, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const md = require('minecraft-data')(bot.version)
+  const scaffoldNames = new Set(SCAFFOLD_BLOCKS)
+  const st = schem.start(); const en = schem.end()
+  const M = 2 // horizontal margin (bridging can step just outside)
+  let removed = 0
+  for (let y = at.y + en.y; y >= at.y + st.y && !isStopped(); y--) { // top-down so towers unstack safely
+    for (let z = at.z + st.z - M; z <= at.z + en.z + M; z++) {
+      for (let x = at.x + st.x - M; x <= at.x + en.x + M; x++) {
+        const key = `${x},${y},${z}`
+        if (solidSet.has(key) || beforeSet.has(key)) continue // part of the build, or pre-existing
+        const b = bot.blockAt(new Vec3(x, y, z))
+        if (!b || AIR.test(b.name) || !scaffoldNames.has(b.name)) continue
+        try {
+          if (bot.entity.position.distanceTo(b.position) > 4) await gotoWithTimeout(bot, new goals.GoalNear(x, y, z, 3), 12000)
+          if (bot.canDigBlock && bot.canDigBlock(b)) { await bot.dig(b); removed++ }
+        } catch {}
+      }
+    }
+  }
+  return removed
+}
+
+// Snapshot non-air blocks in the footprint (+margin) - the baseline for scaffold
+// cleanup (so we only remove blocks WE added).
+function snapshotRegion (bot, schem, at) {
+  const set = new Set()
+  const st = schem.start(); const en = schem.end()
+  const M = 2
+  for (let y = at.y + st.y; y <= at.y + en.y; y++) {
+    for (let z = at.z + st.z - M; z <= at.z + en.z + M; z++) {
+      for (let x = at.x + st.x - M; x <= at.x + en.x + M; x++) {
+        const b = bot.blockAt(new Vec3(x, y, z))
+        if (b && !AIR.test(b.name)) set.add(`${x},${y},${z}`)
+      }
+    }
+  }
+  return set
 }
 
 function haveItem (bot, name) {
@@ -182,7 +268,7 @@ async function waitForMaterial (bot, name, { say, isStopped }, needed) {
     if (haveItem(bot, name)) return true
     const now = Date.now()
     if (say && now - last > 15000) {
-      say(`I need ${needed ? needed + ' ' : 'more '}${name} to keep building — drop some by me?`)
+      say(`I need ${needed ? needed + ' ' : 'more '}${name} to keep building - drop some by me?`)
       last = now
     }
     await new Promise(r => setTimeout(r, 2000))
@@ -191,7 +277,7 @@ async function waitForMaterial (bot, name, { say, isStopped }, needed) {
 
 // pathfinder.goto with a hard deadline. Verified live: an unresolvable
 // GoalPlaceBlock can hang goto FOREVER (froze a 432-block build at 50 for 10+
-// minutes) — so we race it against a timer and cancel the goal on timeout.
+// minutes) - so we race it against a timer and cancel the goal on timeout.
 function gotoWithTimeout (bot, goal, ms) {
   return new Promise((resolve, reject) => {
     let settled = false
@@ -209,12 +295,12 @@ function gotoWithTimeout (bot, goal, ms) {
 }
 
 // Attempt ONE placement. Returns true if the block was placed, false on a
-// transient failure (couldn't reach it yet / no valid face right now) — the
+// transient failure (couldn't reach it yet / no valid face right now) - the
 // caller leaves it in the queue for a later pass. Never removes the action.
 async function tryPlace (bot, build, action, item) {
   // Geometry (reused from the Build planner): valid faces + orientation. These
   // depend on which neighbours already exist, so a block with no face NOW may
-  // gain one after adjacent blocks are placed — hence retried, not dropped.
+  // gain one after adjacent blocks are placed - hence retried, not dropped.
   const properties = build.properties[action.state]
   const half = properties.half ? properties.half : properties.type
   const faces = build.getPossibleDirections(action.state, action.pos)
@@ -248,7 +334,7 @@ async function tryPlace (bot, build, action, item) {
 // Build `schem` with its origin at world position `at`. Places blocks physically
 // from inventory in survival, in repeated passes so blocks that only become
 // reachable/placeable after their neighbours exist get retried (a single pass
-// leaves gaps — verified live). opts: { say(msg), isStopped(), restoreMovements() }.
+// leaves gaps - verified live). opts: { say(msg), isStopped(), restoreMovements() }.
 // Returns { placed, total, skipped, stopped, passes }.
 async function buildSurvival (bot, schem, at, opts = {}) {
   const say = opts.say || (() => {})
@@ -262,7 +348,14 @@ async function buildSurvival (bot, schem, at, opts = {}) {
   const key = p => `${p.x},${p.y},${p.z}`
   const deferred = new Set() // positions that failed THIS round; retried after progress
   let placedSinceDrain = 0
+  let cleared = 0; let scaffoldRemoved = 0
+  // Baselines for scaffold cleanup + the schematic's own solid cells.
+  const solidSet = solidCellSet(schem, at)
+  const beforeSet = snapshotRegion(bot, schem, at)
   try {
+    // Clear natural cover (grass/flowers/leaves…) from the footprint first.
+    if (opts.prep !== false) { try { cleared = await prepSite(bot, schem, at, { isStopped }) } catch {} }
+    if (cleared) say(`cleared ${cleared} bit(s) of vegetation`)
     for (;;) {
       if (isStopped()) { stopped = true; break }
       // Re-compute placeable actions EVERY iteration (adaptive: a block becomes
@@ -272,7 +365,7 @@ async function buildSurvival (bot, schem, at, opts = {}) {
         .filter(a => a.type === 'place' && !deferred.has(key(a.pos)))
       if (avail.length === 0) {
         // Drained what's reachable right now. If we placed something since the last
-        // drain, the deferred blocks may be reachable now — clear and retry them.
+        // drain, the deferred blocks may be reachable now - clear and retry them.
         if (deferred.size && placedSinceDrain > 0) { deferred.clear(); placedSinceDrain = 0; passes++; continue }
         break // nothing reachable and no progress -> the rest is genuinely blocked
       }
@@ -284,7 +377,7 @@ async function buildSurvival (bot, schem, at, opts = {}) {
 
       const item = build.getItemForState(action.state)
       if (!item) { build.removeAction(action); continue } // truly unplaceable (tech block)
-      // Ensure we hold the material — pause and ask the player if we're out.
+      // Ensure we hold the material - pause and ask the player if we're out.
       if (!haveItem(bot, item.name)) {
         const got = await waitForMaterial(bot, item.name, { say, isStopped })
         if (!got) { stopped = true; break }
@@ -295,8 +388,13 @@ async function buildSurvival (bot, schem, at, opts = {}) {
         placed++; placedSinceDrain++
         if (placed % 25 === 0) say(`…${placed}/${total} blocks placed`)
       } else {
-        deferred.add(key(action.pos)) // couldn't reach/place now — retry after progress
+        deferred.add(key(action.pos)) // couldn't reach/place now - retry after progress
       }
+    }
+    // Tidy up: pull down the scaffold blocks we placed to gain height.
+    if (opts.cleanup !== false && !isStopped()) {
+      try { scaffoldRemoved = await cleanupScaffold(bot, schem, at, beforeSet, solidSet, { isStopped }) } catch {}
+      if (scaffoldRemoved) say(`removed ${scaffoldRemoved} scaffold block(s)`)
     }
   } finally {
     bot.setControlState('sneak', false)
@@ -304,7 +402,7 @@ async function buildSurvival (bot, schem, at, opts = {}) {
     if (opts.restoreMovements) opts.restoreMovements() // back to the anti-grief profile
   }
   const skipped = build.actions.filter(a => a.type === 'place').length
-  return { placed, total, skipped, stopped, passes }
+  return { placed, total, skipped, stopped, passes, cleared, scaffoldRemoved }
 }
 
 module.exports = {

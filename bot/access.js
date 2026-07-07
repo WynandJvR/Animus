@@ -24,7 +24,7 @@ function variants (name, cfg) {
 }
 
 // Only players on the allowlist may run !commands. Empty list = nobody (locked
-// down by default — configure operators to enable chat control).
+// down by default - configure operators to enable chat control).
 function isOperator (name, cfg) {
   const ops = operatorSet(cfg)
   if (ops.size === 0) return false
@@ -33,7 +33,7 @@ function isOperator (name, cfg) {
 }
 
 // A non-command message counts as "addressed to the bot" if it mentions the
-// bot's name — or any configured alias — as a whole word. Word-boundary match
+// bot's name - or any configured alias - as a whole word. Word-boundary match
 // avoids false hits like "Bot" inside "robot"/"about". Aliases let players use a
 // friendly name instead of an awkward account name (e.g. "claude" for "Claudebot").
 function isAddressed (message, botName, cfg = {}) {
@@ -49,9 +49,9 @@ function isAddressed (message, botName, cfg = {}) {
 }
 
 // World-editing / admin commands the autonomous brain is NEVER allowed to run on
-// the HTTP /cmd path (it can only move, perceive, equip, eat, chat) — so it can't
+// the HTTP /cmd path (it can only move, perceive, equip, eat, chat) - so it can't
 // grief or dupe. Operators keep full access via in-game !commands. Lift with
 // BRAIN_ALLOW_CHEATS=1. Shared by BOTH bodies so the two lists can't drift apart.
-const CHEAT_CMDS = /^(give|fill|setblock|clear|wall|tower|house|schem|schematic|gamemode|tp)\b/i
+const CHEAT_CMDS = /^(give|fill|setblock|clear|clearinv|wall|tower|house|schem|schematic|provision|gamemode|tp)\b/i
 
 module.exports = { operatorSet, isOperator, isAddressed, CHEAT_CMDS }
