@@ -17,14 +17,19 @@ const { Vec3 } = require('vec3')
 // Anti-grief holds: it can never break through builds or terrain.
 function gatherMovements (bot) {
   const m = new Movements(bot)
-  m.allow1by1towers = false
-  if ('scafoldingBlocks' in m) m.scafoldingBlocks = []
+  const md = require('minecraft-data')(bot.version)
+  // May PILLAR back up out of a dip/ledge so mining can never strand the bot below
+  // ground (verified: chasing exposed stone into a ravine left it trapped at y48,
+  // unable to climb to the surface for the next gather step). Scaffolds only with
+  // cheap blocks it's likely to be holding while mining (dirt/cobble/stone family).
+  m.allow1by1towers = true
+  const SCAFFOLD = ['dirt', 'grass_block', 'cobblestone', 'cobbled_deepslate', 'gravel', 'andesite', 'diorite', 'granite', 'tuff', 'stone']
+  if ('scafoldingBlocks' in m) m.scafoldingBlocks = SCAFFOLD.map(n => md.itemsByName[n] && md.itemsByName[n].id).filter(x => x != null)
   m.canOpenDoors = true
   m.allowParkour = true
   m.maxDropDown = 8 // hop down ledges like a player would (plateau spawns; verified live: default 4 = "No path" to a tree below a cliff)
   m.canDig = true
   m.digCost = 10 // strongly prefer walking around over chewing through a canopy
-  const md = require('minecraft-data')(bot.version)
   m.blocksCantBreak = new Set(
     Object.values(md.blocksByName).filter(b => !/_leaves$/.test(b.name)).map(b => b.id)
   )
@@ -365,9 +370,35 @@ async function gatherLoop (bot, item, count, opts = {}) {
   const MAX_EXPLORE = 12 // wander this many times before truly giving up
   const NO_YIELD_LIMIT = 10 // mine-with-no-pickup before relocating to better ground
   const cap = count * 4 + 80 // ultimate backstop against grinding forever
+  // Depth cap for MINING (tool-required) gathers: chasing exposed stone down into a
+  // cave/ravine strands the bot (can't climb ~30 blocks back). Track the highest
+  // ground we've stood on and never target stone/ore more than MAX_MINE_DEPTH below
+  // it, so mining stays near the surface. Surface resources (logs/dirt) are exempt.
+  let surfaceY = bot.entity.position.y
+  // Generous enough to reach hillside/plateau-edge stone, tight enough to refuse the
+  // 30+ block dive into a cave/ravine that stranded the bot. Pillar-up (gatherMovements)
+  // is the real climb-back guarantee; this just stops the runaway descent.
+  const MAX_MINE_DEPTH = parseInt(process.env.GATHER_MAX_DEPTH || '16', 10)
+  const belowCap = y => reqTool && y < surfaceY - MAX_MINE_DEPTH
+
+  // Surface to breathe when air runs low - mining near/into water otherwise drowns
+  // us (verified live: the bot drowned mid-cobble-run in cratered savanna, losing
+  // the whole provisioning run). Jumping swims us upward toward air.
+  async function breathe () {
+    if ((bot.oxygenLevel ?? 20) >= 8) return
+    const deadline = Date.now() + 8000
+    try {
+      while ((bot.oxygenLevel ?? 20) < 16 && Date.now() < deadline && !isStopped()) {
+        bot.setControlState('jump', true)
+        await new Promise(r => setTimeout(r, 200))
+      }
+    } finally { bot.setControlState('jump', false) }
+  }
 
   // Break one block: walk in reach, equip the right tool, dig. Returns true/throws.
   async function breakBlock (blk) {
+    await breathe()
+    if ((bot.oxygenLevel ?? 20) < 4) throw new Error('too deep underwater - surfacing') // never drown for a block
     if (bot.entity.position.distanceTo(blk.position) > 4.2) {
       await gotoWithTimeout(bot, new goals.GoalNear(blk.position.x, blk.position.y, blk.position.z, 2), 15000)
     }
@@ -384,8 +415,13 @@ async function gatherLoop (bot, item, count, opts = {}) {
     if (!haveReqTool()) return { gathered: countItem(bot, item) - start, reason: `my ${toolKind} broke` } // ran out mid-job
     if (mined >= cap) { await collectDrops(bot, 12); if (countItem(bot, item) - start < count) return { gathered: countItem(bot, item) - start, reason: `mined ${mined} blocks but couldn't collect enough (drops lost?)` } }
 
+    surfaceY = Math.max(surfaceY, bot.entity.position.y) // highest ground we've stood on
     const candidates = bot.findBlocks({ matching: ids, maxDistance: 64, count: 24 })
       .filter(p => (failed.get(pkey(p)) || 0) < 2)
+      // Skip SUBMERGED targets (water on top): mining into water is how we drowned.
+      .filter(p => { const a = bot.blockAt(p.offset(0, 1, 0)); return !(a && /water/i.test(a.name)) })
+      // Don't chase stone/ore deep below the surface (cave-descent stranding).
+      .filter(p => !belowCap(p.y))
     const target = candidates[0] && bot.blockAt(candidates[0])
     if (!target) {
       // Nothing reachable here - grab any nearby drops, then WANDER to fresh terrain.
@@ -406,12 +442,14 @@ async function gatherLoop (bot, item, count, opts = {}) {
     // Mine the LOCAL cluster (adjacent same-type blocks) so we stay put and drops
     // land at our feet for proximity pickup - works for both trees and stone.
     let cur = bot.findBlock({ matching: ids, maxDistance: 4 })
+    if (cur && belowCap(cur.position.y)) cur = null // don't descend via the cluster either
     let n = 0
     while (cur && n < 8 && countItem(bot, item) - start < count && haveReqTool()) {
       if (isStopped()) break
       try { await breakBlock(cur) } catch { failed.set(pkey(cur.position), (failed.get(pkey(cur.position)) || 0) + 1); break }
       n++
       cur = bot.findBlock({ matching: ids, maxDistance: 4 })
+      if (cur && belowCap(cur.position.y)) cur = null
     }
     await collectDrops(bot, 8) // sweep up what the cluster dropped
 

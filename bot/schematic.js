@@ -363,6 +363,11 @@ async function clearVolume (bot, schem, at, opts = {}) {
           for (let x = at.x + st.x; x <= at.x + en.x; x++) {
             const b = bot.blockAt(new Vec3(x, y, z))
             if (!b || AIR.test(b.name)) continue
+            // Don't destroy a cell that ALREADY matches the schematic - it's part of
+            // the finished build (the Build planner skips such cells, so clearing them
+            // just punches permanent holes; seen live: stone box on stone terrain).
+            const want = schem.getBlock(new Vec3(x - at.x, y - at.y, z - at.z))
+            if (want && !AIR.test(want.name) && want.name === b.name) continue
             try {
               // WALK to the block first - canDigBlock includes a REACH check, so
               // testing it before approaching would skip every out-of-reach block.

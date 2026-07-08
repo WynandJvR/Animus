@@ -274,4 +274,48 @@ the real gaps were robustness and site-flatness, not intelligence. Fixed:
   provision plan (glass alone) can pick `cobbled_deepslate` for the furnace and call it
   unobtainable instead of falling back to cobblestone (minor planner variant-choice bug).
 
+## 13. Stone-from-nothing: drowning + cave-descent + clean clearing (2026-07-08)
+
+Pushing the [natural-player goal] onto the FULL mineral tech tree - a `stone` build
+from an empty inventory (generated `stonebox.schem` by swapping testbox's palette
+oak_planks→stone). This exercises the part the wood builds never did: mine cobblestone
+→ craft+fuel a furnace → smelt to stone. It works, but only after fixing three
+survival hazards the mining path hit live (all in `provision.js` / `schematic.js`):
+
+- **Drowning (FIXED).** First run: `cobblestone 0/52 (pickaxe broke)` was actually
+  `Claudebot drowned` - it mined into water in the cratered savanna and lost the whole
+  run (empty inv + spawn respawn). `runGather` now has a breath guard: `breathe()`
+  swims up (jump) when `oxygenLevel < 8` and refuses to dig at `<4`; candidates whose
+  block-above is water are skipped. Verified: the retry mined all 52 cobble, no death.
+- **Cave-descent stranding (FIXED - the "proper" fix, no more tp).** Chasing exposed
+  stone, the bot mined DOWN a ravine to y48 and couldn't climb ~30 blocks back (gather
+  movements didn't pillar) - the dirt step then failed with "no reachable dirt" because
+  it was underground. First time I escaped with an op `tp` (a workaround, not a fix).
+  Proper fix, two parts: (1) **depth cap** - tool-required (mining) gathers never target
+  stone/ore more than `GATHER_MAX_DEPTH` (default 16) below the highest ground stood on,
+  so it won't dive into caves; (2) **pillar-up** - `gatherMovements` now `allow1by1towers`
+  + cheap `scafoldingBlocks` (dirt/cobble/stone family) so it can ALWAYS climb back out.
+  The net-count gather loop auto-compensates for scaffold it consumes (it over-gathered
+  cobble to 82 to still net 52). GOTCHA: cap must be generous (16, not 10) or plateau/mesa
+  spawns where surface stone sits ~12 below get "no reachable stone" stalls.
+- **Clear destroyed correct cells (FIXED).** `clearVolume` was clearing EVERY solid in
+  the box - including cells that already matched the schematic (stone box on stone
+  terrain), which the Build planner had skipped - punching permanent holes (a stone run
+  came out 25/40). Now it leaves a cell alone when the world block already equals the
+  schematic's desired block. Also recall the earlier `canDigBlock`-ordering gotcha (§12):
+  walk to the block BEFORE the reach-gated dig test.
+
+**VERIFIED LIVE (2026-07-08), empty inventory → finished stone structure, zero
+intervention:** gather oak → craft 2 pickaxes → mine 52 cobble (ended y108 up a mesa,
+never trapped) → gather dirt → furnace → smelt 44 stone → walked to a flat spot →
+`schematic build here clear` → **44/44 placed, 1 cleared, 3 scaffold cleaned**. No op,
+no `/give`, no tp, no drowning, no stranding. The mineral tech tree is now proven clean
+end-to-end, same as the wood tech tree.
+
+Env-litter lesson: after ~6 runs the savanna was full of pits/half-builds/pillars and
+depleted of oak; a wedged bot in that mess mimicked a movement bug. For a clean run,
+reset the bot to a fresh spawn (delete its `world-gather/playerdata/<uuid>.dat*` → it
+respawns empty at world spawn). Savanna oak is sparse - the planner still hard-prefers
+oak for planks; picking whatever wood is local is a future planner improvement.
+
 [natural-player goal]: the bot should behave indistinguishably from a real human player; believability beats raw capability.
