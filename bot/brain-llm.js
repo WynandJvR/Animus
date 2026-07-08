@@ -44,6 +44,16 @@ const LLM_TEMP = parseFloat(process.env.LLM_TEMP || '0.8')
 
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 
+// fetch with a hard deadline. Without this a hung body/LLM call blocks the whole
+// loop forever (no backoff, no log) - one stuck request = a catatonic brain. On
+// timeout the fetch aborts and the loop's catch drops into its normal backoff.
+async function fetchT (url, opts = {}, ms = 30000) {
+  const ac = new AbortController()
+  const timer = setTimeout(() => ac.abort(), ms)
+  try { return await fetch(url, { ...opts, signal: ac.signal }) }
+  finally { clearTimeout(timer) }
+}
+
 // A compact fingerprint of the SALIENT world state. Player *presence* (names) and
 // danger matter; exact distances of a player we're already following do not, so
 // they're left out / coarsely bucketed to avoid waking the LLM on every step.
@@ -145,22 +155,26 @@ never melee it. Otherwise stay calm if it's far; only attack/defend when it's cl
 Do not explain outside the JSON. Pick the single best next command toward the goal.`
 
 async function getState () {
-  const r = await fetch(`${BOT_URL}/state`)
+  // ?brain=1 marks this as the brain's poll so the body counts it toward the
+  // per-message delivery budget (a dashboard /state read must not drain it).
+  const r = await fetchT(`${BOT_URL}/state?brain=1`, {}, 10000)
   return await r.json()
 }
 
 // Live settings the dashboard controls (model / goal / on-off). Falls back to
 // the env defaults if the bot has no /brain endpoint (older body).
 async function getBrainSettings () {
-  try { const r = await fetch(`${BOT_URL}/brain`); if (!r.ok) return null; return (await r.json()).settings } catch { return null }
+  try { const r = await fetchT(`${BOT_URL}/brain`, {}, 5000); if (!r.ok) return null; return (await r.json()).settings } catch { return null }
 }
 
 async function runCommand (command) {
-  const r = await fetch(`${BOT_URL}/cmd`, {
+  // 60s ceiling: with the body's own goto timeouts a /cmd should return well
+  // inside this; the cap is a backstop so a wedged command can't freeze the loop.
+  const r = await fetchT(`${BOT_URL}/cmd`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ command })
-  })
+  }, 60000)
   return await r.text()
 }
 
@@ -188,14 +202,18 @@ async function decide (state, history, model = LLM_MODEL, goal = GOAL) {
   const body = native
     ? { model, messages, think: false, stream: false, format: 'json', options: { temperature: LLM_TEMP } }
     : { model, temperature: LLM_TEMP, messages, response_format: { type: 'json_object' } }
-  const r = await fetch(LLM_URL, {
+  const r = await fetchT(LLM_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
-  })
+  }, 60000)
   if (!r.ok) throw new Error(`LLM ${r.status}: ${await r.text()}`)
   const j = await r.json()
   const content = native ? (j.message?.content ?? '') : (j.choices?.[0]?.message?.content ?? '')
+  // format:json (native) yields a single valid object - parse it straight. The
+  // greedy {..} regex is only the fallback for the OpenAI-shim path, where it can
+  // misgrab across two blobs; direct parse first avoids that when possible.
+  try { return JSON.parse(content.trim()) } catch {}
   const match = content.match(/\{[\s\S]*\}/)
   if (!match) throw new Error(`no JSON in model reply: ${content.slice(0, 120)}`)
   return JSON.parse(match[0])
@@ -213,11 +231,22 @@ async function loop () {
   let idleLogged = false
   let pausedLogged = false
   let lastModel = LLM_MODEL
+  let cachedSettings = null
+  let lastSettingsAt = 0
+  const SETTINGS_POLL_MS = parseInt(process.env.SETTINGS_POLL_MS || '3000', 10)
   for (;;) {
     const t0 = Date.now()
     try {
       // Live model / goal / on-off from the dashboard (falls back to env defaults).
-      const settings = await getBrainSettings()
+      // Polled on its own slow cadence, not every tick - these almost never change,
+      // so a round-trip per idle poll was pure overhead. A failed poll keeps the
+      // last good settings rather than snapping back to env defaults.
+      if (Date.now() - lastSettingsAt > SETTINGS_POLL_MS) {
+        const s = await getBrainSettings()
+        if (s !== null) cachedSettings = s
+        lastSettingsAt = Date.now()
+      }
+      const settings = cachedSettings
       const model = (settings && settings.model) || LLM_MODEL
       const goal = (settings && settings.goal) || GOAL
       const enabled = !settings || settings.enabled !== false
@@ -233,6 +262,16 @@ async function loop () {
       const waiting = (state.unanswered || []).length > 0
       const changed = sig !== lastSig
       const heartbeat = Date.now() - lastDecideAt > IDLE_HEARTBEAT_MS
+      // During an operator build/provision the BODY is driven externally and the
+      // /cmd path rejects the brain's movement anyway - so don't burn inferences
+      // re-deciding. Hold cheaply; still answer a waiting player, and let the slow
+      // heartbeat through so it can still drop an occasional in-character quip.
+      if (state.busy && !waiting && !heartbeat) {
+        if (!idleLogged) { console.log('[brain] body busy (build/provision) - holding'); idleLogged = true }
+        lastSig = sig
+        await sleep(IDLE_POLL_MS)
+        continue
+      }
       // Nothing to react to and nothing changed -> hold the current behaviour and
       // poll cheaply, instead of burning an inference to re-decide the same thing.
       if (!waiting && !changed && !heartbeat) {

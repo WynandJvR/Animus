@@ -66,7 +66,13 @@ function recordChat (from, text) {
   lastAddressedAt = Date.now()
   gazeFocusPlayer = from; gazeFocusAt = Date.now() // look at whoever just addressed us
 }
-function clearPendingChat () { recentChat.forEach(c => { c.deliveries = MAX_DELIVERIES }) }
+// Resolve the OLDEST still-pending message - one fulfilling action answers one
+// request. Clearing ALL of them dropped a second player's message unanswered when
+// two people spoke in the same window; now each message gets its own turn.
+function clearPendingChat () {
+  const pending = recentChat.filter(c => c.deliveries < MAX_DELIVERIES)
+  if (pending.length) pending[0].deliveries = MAX_DELIVERIES
+}
 // Outgoing-chat gate: a "say" is only actually sent if it isn't a duplicate and
 // the cooldown elapsed - kills repeated/again-spam chat and server anti-spam
 // kicks. Returns null to send, or a reason string to suppress.
@@ -454,7 +460,7 @@ function send (res, code, body) {
 
 const server = http.createServer((req, res) => {
   if (req.method === 'GET' && req.url === '/health') return send(res, 200, { ok: true, spawned: !!bot.entity })
-  if (req.method === 'GET' && req.url === '/state') {
+  if (req.method === 'GET' && (req.url === '/state' || req.url.startsWith('/state?'))) {
     // guard like /cmd: the brain polls this constantly; a state-assembly throw
     // must never become an uncaught exception that kills the process
     try {
@@ -466,7 +472,10 @@ const server = http.createServer((req, res) => {
       // offered so a "look first, then answer" sequence can still complete.
       const pending = recentChat.filter(c => c.deliveries < MAX_DELIVERIES)
       s.unanswered = pending.map(c => ({ from: c.from, text: c.text }))
-      pending.forEach(c => { c.deliveries++ })
+      // Only the BRAIN's poll (?brain=1) spends the delivery budget. A generic
+      // /state read (the dashboard polls every ~1s) must NOT drain it, or a
+      // player's message expires before the brain gets its MAX_DELIVERIES turns.
+      if (/[?&]brain=1(?:&|$)/.test(req.url)) pending.forEach(c => { c.deliveries++ })
       return send(res, 200, s)
     } catch (e) { return send(res, 500, `error: ${e.message}`) }
   }

@@ -331,10 +331,61 @@ async function tryPlace (bot, build, action, item) {
   }
 }
 
+// Equip the best available tool for a block KIND (pickaxe/shovel/axe) so clearing
+// is fast; barehanded if we own no matching tool. Never fails the caller.
+async function equipToolFor (bot, blockName) {
+  let kind = null
+  if (/stone|cobble|ore|deepslate|granite|diorite|andesite|tuff|basalt|blackstone|furnace|obsidian|brick|concrete|terracotta/.test(blockName)) kind = 'pickaxe'
+  else if (/dirt|grass|sand|gravel|clay|soul|podzol|mycelium|farmland|_path|mud|snow/.test(blockName)) kind = 'shovel'
+  else if (/log|_wood|plank|leaves|fence|_door|slab|stairs|planks/.test(blockName)) kind = 'axe'
+  if (!kind) return
+  const tool = (bot.inventory ? bot.inventory.items() : []).find(i => i.name.endsWith('_' + kind))
+  if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
+}
+
+// CLEAR the schematic's whole volume down to air, so a build can go up on unflat
+// ground (the placer skips digs, so terrain intruding into the box otherwise
+// permanently blocks those cells - the cause of low placement rates on slopes).
+// Removes every breakable solid in the [start..end] box, top-down, in a few
+// passes (some blocks only become reachable after those above them are gone).
+// Scoped to the build footprint the operator chose - it never touches anything
+// outside the box. Returns the number of blocks removed.
+async function clearVolume (bot, schem, at, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const st = schem.start(); const en = schem.end()
+  bot.pathfinder.setMovements(buildMovements(bot)) // may pillar/bridge to reach; we dig manually
+  let removed = 0
+  try {
+    for (let pass = 0; pass < 4; pass++) {
+      let did = 0
+      for (let y = at.y + en.y; y >= at.y + st.y && !isStopped(); y--) {
+        for (let z = at.z + st.z; z <= at.z + en.z; z++) {
+          for (let x = at.x + st.x; x <= at.x + en.x; x++) {
+            const b = bot.blockAt(new Vec3(x, y, z))
+            if (!b || AIR.test(b.name)) continue
+            try {
+              // WALK to the block first - canDigBlock includes a REACH check, so
+              // testing it before approaching would skip every out-of-reach block.
+              if (bot.entity.position.distanceTo(b.position) > 4) await gotoWithTimeout(bot, new goals.GoalNear(x, y, z, 3), 12000)
+              if (bot.canDigBlock && bot.canDigBlock(b)) { // now in range: bedrock/liquid still false
+                await equipToolFor(bot, b.name)
+                await bot.dig(b); removed++; did++
+              }
+            } catch { /* unreachable this pass - retried next pass */ }
+          }
+        }
+      }
+      if (!did) break // nothing left reachable -> done
+    }
+  } finally { bot.pathfinder.setGoal(null) }
+  return removed
+}
+
 // Build `schem` with its origin at world position `at`. Places blocks physically
 // from inventory in survival, in repeated passes so blocks that only become
 // reachable/placeable after their neighbours exist get retried (a single pass
-// leaves gaps - verified live). opts: { say(msg), isStopped(), restoreMovements() }.
+// leaves gaps - verified live). opts: { say(msg), isStopped(), restoreMovements(),
+// clear(bool) - flatten the footprint first }.
 // Returns { placed, total, skipped, stopped, passes }.
 async function buildSurvival (bot, schem, at, opts = {}) {
   const say = opts.say || (() => {})
@@ -348,11 +399,21 @@ async function buildSurvival (bot, schem, at, opts = {}) {
   const key = p => `${p.x},${p.y},${p.z}`
   const deferred = new Set() // positions that failed THIS round; retried after progress
   let placedSinceDrain = 0
-  let cleared = 0; let scaffoldRemoved = 0
-  // Baselines for scaffold cleanup + the schematic's own solid cells.
+  let cleared = 0; let clearedSolids = 0; let scaffoldRemoved = 0
+  // The schematic's own solid cells (never scaffold-cleaned).
   const solidSet = solidCellSet(schem, at)
-  const beforeSet = snapshotRegion(bot, schem, at)
+  let beforeSet
   try {
+    // Optional: flatten the site by emptying the whole build box first, so builds
+    // on unflat ground still complete (terrain intruding into the box would else
+    // permanently block those cells). Then snapshot the (now-cleared) region as
+    // the scaffold-cleanup baseline.
+    if (opts.clear) {
+      try { clearedSolids = await clearVolume(bot, schem, at, { isStopped }) } catch {}
+      if (clearedSolids) say(`cleared ${clearedSolids} block(s) to flatten the site`)
+      bot.pathfinder.setMovements(moves) // clearVolume reset movements; restore build profile
+    }
+    beforeSet = snapshotRegion(bot, schem, at)
     // Clear natural cover (grass/flowers/leaves…) from the footprint first.
     if (opts.prep !== false) { try { cleared = await prepSite(bot, schem, at, { isStopped }) } catch {} }
     if (cleared) say(`cleared ${cleared} bit(s) of vegetation`)
@@ -414,5 +475,6 @@ module.exports = {
   loadFile,
   billOfMaterials,
   materialsSummary,
-  buildSurvival
+  buildSurvival,
+  clearVolume
 }

@@ -25,6 +25,27 @@ let building = false
 let buildAbort = false // set by `stop`; watched by schematic builds AND provision runs
 let provisioning = false
 
+// pathfinder.goto with a hard deadline. An unreachable target (a player who flew
+// somewhere unpathable, an item across a ravine) can otherwise hang goto FOREVER,
+// and because the brain awaits each /cmd, that one stuck call freezes the WHOLE
+// brain loop with no recovery. Racing a timer + cancelling the goal turns "the bot
+// went catatonic" into a normal "couldn't reach" result that the caller handles.
+function gotoTimed (bot, goal, ms = 20000) {
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      try { bot.pathfinder.setGoal(null) } catch {}
+      reject(new Error('goto timed out'))
+    }, ms)
+    bot.pathfinder.goto(goal).then(
+      () => { if (!settled) { settled = true; clearTimeout(timer); resolve() } },
+      e => { if (!settled) { settled = true; clearTimeout(timer); reject(e) } }
+    )
+  })
+}
+
 // How close the bot trails a player when following. Range 2 settles right on top of
 // them (felt crowding); ~3 blocks reads as walking alongside. Tunable via FOLLOW_RANGE.
 const FOLLOW_RANGE = Math.max(1, parseInt(process.env.FOLLOW_RANGE || '3', 10))
@@ -378,7 +399,7 @@ async function handle (bot, line) {
       const p = t.position
       // BLOCK until we actually arrive, so the brain can't revert to following
       // someone else mid-walk and run back.
-      try { await bot.pathfinder.goto(new goals.GoalNear(p.x, p.y, p.z, 2)) } catch (e) { return `couldn't reach ${a[0] || 'player'}: ${e.message}` }
+      try { await gotoTimed(bot, new goals.GoalNear(p.x, p.y, p.z, 2), 20000) } catch (e) { return `couldn't reach ${a[0] || 'player'}: ${e.message}` }
       return `arrived at ${a[0] || 'player'}`
     }
     case 'goto': {
@@ -386,12 +407,12 @@ async function handle (bot, line) {
       if (a[0] && Number.isNaN(Number(a[0]))) {
         const wp = memory.getWaypoint(a[0])
         if (!wp) return `no waypoint "${a[0]}" (known: ${memory.waypointNames().join(', ') || 'none'})`
-        try { await bot.pathfinder.goto(new goals.GoalNear(wp.x, wp.y, wp.z, 1)) } catch (e) { return `couldn't reach ${a[0]}: ${e.message}` }
+        try { await gotoTimed(bot, new goals.GoalNear(wp.x, wp.y, wp.z, 1), 20000) } catch (e) { return `couldn't reach ${a[0]}: ${e.message}` }
         return `arrived at ${a[0].toLowerCase()} (${wp.x},${wp.y},${wp.z})`
       }
       const [x, y, z] = a.map(Number)
       if ([x, y, z].some(Number.isNaN)) return 'usage: goto <x> <y> <z> | goto <waypoint>'
-      try { await bot.pathfinder.goto(new goals.GoalNear(x, y, z, 1)) } catch (e) { return `couldn't reach ${x},${y},${z}: ${e.message}` }
+      try { await gotoTimed(bot, new goals.GoalNear(x, y, z, 1), 20000) } catch (e) { return `couldn't reach ${x},${y},${z}: ${e.message}` }
       return `arrived at ${x},${y},${z}`
     }
     case 'remember':
@@ -491,7 +512,7 @@ async function handle (bot, line) {
         const tool = bestTool(bot, cur.name)
         if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
         if (bot.entity.position.distanceTo(cur.position) > 4) {
-          try { await bot.pathfinder.goto(new goals.GoalNear(cur.position.x, cur.position.y, cur.position.z, 2)) } catch { break }
+          try { await gotoTimed(bot, new goals.GoalNear(cur.position.x, cur.position.y, cur.position.z, 2), 15000) } catch { break }
         }
         if (bot.canDigBlock && !bot.canDigBlock(cur)) break
         if (broke === 0) lastBrokeAt = cur.position.clone() // remember the base, for replanting
@@ -513,7 +534,7 @@ async function handle (bot, line) {
         if (d < best) { best = d; target = e }
       }
       if (!target) return 'no dropped items nearby'
-      try { await bot.pathfinder.goto(new goals.GoalNear(target.position.x, target.position.y, target.position.z, 0)) } catch (e) { return `couldn't reach item: ${e.message}` }
+      try { await gotoTimed(bot, new goals.GoalNear(target.position.x, target.position.y, target.position.z, 0), 15000) } catch (e) { return `couldn't reach item: ${e.message}` }
       return 'went to pick up nearby items'
     }
 
@@ -553,7 +574,7 @@ async function handle (bot, line) {
         }
       }
       if (!ref) return 'no grass/dirt with open space nearby to plant on'
-      if (bot.entity.position.distanceTo(ref.position) > 4) { try { await bot.pathfinder.goto(new goals.GoalNear(ref.position.x, ref.position.y, ref.position.z, 2)) } catch {} }
+      if (bot.entity.position.distanceTo(ref.position) > 4) { try { await gotoTimed(bot, new goals.GoalNear(ref.position.x, ref.position.y, ref.position.z, 2), 15000) } catch {} }
       await bot.equip(item, 'hand').catch(() => {})
       await bot.lookAt(ref.position.offset(0.5, 1, 0.5), true).catch(() => {})
       try { await bot.placeBlock(ref, new Vec3(0, 1, 0)) } catch (e) { return `couldn't plant ${item.name}: ${e.message}` }
@@ -603,7 +624,7 @@ async function handle (bot, line) {
       if (!recipe && tableId) { // need a table - walk to the nearest one
         table = bot.findBlock({ matching: tableId, maxDistance: 48 })
         if (table) {
-          try { await bot.pathfinder.goto(new goals.GoalNear(table.position.x, table.position.y, table.position.z, 2)) } catch {}
+          try { await gotoTimed(bot, new goals.GoalNear(table.position.x, table.position.y, table.position.z, 2), 15000) } catch {}
           recipe = bot.recipesFor(def.id, null, 1, table)[0]
         }
       }
@@ -644,7 +665,7 @@ async function handle (bot, line) {
       const bedIds = Object.values(mcData.blocksByName).filter(b => /_bed$/.test(b.name)).map(b => b.id)
       const bed = bedIds.length ? bot.findBlock({ matching: bedIds, maxDistance: 16 }) : null
       if (!bed) return 'no bed nearby'
-      if (bot.entity.position.distanceTo(bed.position) > 3) { try { await bot.pathfinder.goto(new goals.GoalNear(bed.position.x, bed.position.y, bed.position.z, 2)) } catch {} }
+      if (bot.entity.position.distanceTo(bed.position) > 3) { try { await gotoTimed(bot, new goals.GoalNear(bed.position.x, bed.position.y, bed.position.z, 2), 12000) } catch {} }
       try { await bot.sleep(bed) } catch (e) { return `can't sleep: ${e.message}` }
       return 'sleeping'
     }
@@ -724,12 +745,15 @@ async function handle (bot, line) {
       if (sub === 'build') {
         if (!loadedSchem) return 'no schematic loaded - schematic load <url|file> first'
         if (building) return 'already building - say "stop" to cancel first'
-        // Origin: "here" (bot's feet) or explicit coords.
+        // Origin: "here" (bot's feet) or explicit coords. Optional trailing "clear"
+        // flattens the footprint first so the build completes on unflat ground.
         const rest = a.slice(1)
+        const doClear = rest.some(t => t.toLowerCase() === 'clear')
+        const originArgs = rest.filter(t => t.toLowerCase() !== 'clear')
         let at
-        if (!rest.length || rest[0] === 'here') { const p = blockPos(bot); at = new Vec3(p.x, p.y, p.z) } else {
-          const n = rest.slice(0, 3).map(Number)
-          if (n.some(Number.isNaN)) return 'usage: schematic build [here | <x> <y> <z>]'
+        if (!originArgs.length || originArgs[0] === 'here') { const p = blockPos(bot); at = new Vec3(p.x, p.y, p.z) } else {
+          const n = originArgs.slice(0, 3).map(Number)
+          if (n.some(Number.isNaN)) return 'usage: schematic build [here | <x> <y> <z>] [clear]'
           at = new Vec3(n[0], n[1], n[2])
         }
         building = true; buildAbort = false
@@ -738,7 +762,8 @@ async function handle (bot, line) {
         schematic.buildSurvival(bot, loadedSchem.schem, at, {
           say: msg => bot.chat(String(msg).slice(0, 256)),
           isStopped: () => buildAbort,
-          restoreMovements: () => setupMovements(bot)
+          restoreMovements: () => setupMovements(bot),
+          clear: doClear
         }).then(r => {
           building = false
           bot.chat(`build ${r.stopped ? 'stopped' : 'done'}: ${r.placed}/${r.total} placed${r.skipped ? `, ${r.skipped} skipped` : ''}`)
@@ -746,9 +771,26 @@ async function handle (bot, line) {
           building = false; setupMovements(bot)
           bot.chat(`build error: ${e.message}`)
         })
-        return `building "${loadedSchem.name}" at ${at.x},${at.y},${at.z} in survival - I'll ask for materials as I go. Say "stop" to cancel.`
+        return `building "${loadedSchem.name}" at ${at.x},${at.y},${at.z} in survival${doClear ? ' (clearing the site first)' : ''} - I'll ask for materials as I go. Say "stop" to cancel.`
       }
-      return 'usage: schematic <load <url|file> | materials | build [here|x y z]>'
+      if (sub === 'clear') {
+        // Flatten a build site by hand: empty the loaded schematic's whole box.
+        if (!loadedSchem) return 'no schematic loaded - schematic load <url|file> first'
+        if (building) return 'already building - say "stop" to cancel first'
+        const rest = a.slice(1)
+        let at
+        if (!rest.length || rest[0] === 'here') { const p = blockPos(bot); at = new Vec3(p.x, p.y, p.z) } else {
+          const n = rest.slice(0, 3).map(Number)
+          if (n.some(Number.isNaN)) return 'usage: schematic clear [here | <x> <y> <z>]'
+          at = new Vec3(n[0], n[1], n[2])
+        }
+        building = true; buildAbort = false
+        schematic.clearVolume(bot, loadedSchem.schem, at, { isStopped: () => buildAbort })
+          .then(rm => { building = false; setupMovements(bot); bot.chat(`cleared ${rm} block(s) - site flat at ${at.x},${at.y},${at.z}, ready to build`) })
+          .catch(e => { building = false; setupMovements(bot); bot.chat(`clear error: ${e.message}`) })
+        return `clearing the build site at ${at.x},${at.y},${at.z} in survival - say "stop" to cancel.`
+      }
+      return 'usage: schematic <load <url|file> | materials | build [here|x y z] [clear] | clear [here|x y z]>'
     }
 
     case 'gather': {
@@ -890,27 +932,27 @@ function nearbyPlayers (bot) {
 function state (bot) {
   const ent = bot.entity
   const p = ent ? ent.position : null
-  const eye = p ? p.offset(0, ent.height || 1.62, 0) : null
   const below = p ? bot.blockAt(p.offset(0, -1, 0)) : null
-  const atFeet = p ? bot.blockAt(p) : null
   // blockAtCursor ray-traces nearby entities and throws if one lacks a position
   // (e.g. just after join, before the world settles) - never let that break /state
   let looking = null
   try { if (typeof bot.blockAtCursor === 'function') looking = bot.blockAtCursor(6) } catch { looking = null }
   const biome = p ? biomeName(bot, p) : null
   const players = nearbyPlayers(bot)
+  // Ground truth about what the BODY is doing right now, so the brain's idle-hold
+  // can tell when a goal silently died and skip inferences during long autonomous
+  // flows instead of assuming "the body is still executing my last behaviour".
+  const pf = bot.pathfinder
+  const moving = pf && typeof pf.isMoving === 'function' ? pf.isMoving() : false
+  const goal = pf && pf.goal ? ((pf.goal.constructor && pf.goal.constructor.name) || 'goal') : null
 
   return {
     name: bot.username,
     pos: p ? { x: +p.x.toFixed(1), y: +p.y.toFixed(1), z: +p.z.toFixed(1) } : null,
-    eye: eye ? { x: +eye.x.toFixed(1), y: +eye.y.toFixed(1), z: +eye.z.toFixed(1) } : null,
     facing: ent ? facing(ent.yaw) : null,
-    yaw: ent ? +ent.yaw.toFixed(2) : null,
-    pitch: ent ? +ent.pitch.toFixed(2) : null,
     health: bot.health,
     food: bot.food,
     oxygen: bot.oxygenLevel,
-    onGround: ent ? ent.onGround : null,
     gameMode: bot.game ? bot.game.gameMode : null,
     dimension: bot.game ? bot.game.dimension : null,
     biome,
@@ -918,13 +960,15 @@ function state (bot) {
     isDay: bot.time ? bot.time.timeOfDay < 13000 : null,
     isRaining: bot.isRaining,
     blockBelow: below ? below.name : null,
-    blockAtFeet: atFeet ? atFeet.name : null,
     lookingAt: looking ? { name: looking.name, pos: { x: looking.position.x, y: looking.position.y, z: looking.position.z } } : null,
     heldItem: bot.heldItem ? bot.heldItem.name : null,
     inventory: (bot.inventory ? bot.inventory.items() : []).map(i => `${i.name} x${i.count}`),
     players,
     alone: players.length === 0, // no OTHER players nearby (you are never in this list)
     threat: nearestThreat(bot),   // nearest hostile, or null
+    moving,                       // is the body currently pathing somewhere?
+    goal,                         // current pathfinder goal type (GoalFollow/GoalNear/...) or null
+    busy: isBusy(),               // an operator build/provision is driving the body - the brain should hold
     waypoints: memory.waypointNames(), // named places you can "goto <name>"
     entities: summariseEntities(bot)
   }

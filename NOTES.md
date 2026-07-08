@@ -228,6 +228,50 @@ Directly addressed the grand-test bottleneck. `gatherLoop` (provision.js) upgrad
 
 **Remaining:** vertical reachability (trees on cliffs/ledges above a valley the bot dropped into - it can't climb back in gather mode); uneven-site build leveling; oriented-block skips. But **big-scale gathering is now robust** - the grand test's cobble-stall would now self-recover via lost-drop relocation.
 
-**Still open:** **uneven-terrain site leveling** (biggest builder gap - build sites must be flat/clear); occasional single oriented-block (stair) skip; scaffold cleanup relies on a diff (misses blocks pushed >2 outside footprint); food/hunger on very long gathers; and the **full barrel-house-from-nothing single run** (validated in all its components - gather/tools/mine/smelt/strip/build - but a ~1hr end-to-end run needs a spruce biome and un-cratered terrain; deferred, not a code gap). Sparse-biome gathering also needs the bot near resources (64-block search) - no long-range exploration yet.
+**Still open:** occasional single oriented-block (stair) skip; scaffold cleanup relies on a diff (misses blocks pushed >2 outside footprint); food/hunger on very long gathers; and the **full barrel-house-from-nothing single run** (validated in all its components - gather/tools/mine/smelt/strip/build - but a ~1hr end-to-end run needs a spruce biome and un-cratered terrain; deferred, not a code gap). Sparse-biome gathering also needs the bot near resources (64-block search) - no long-range exploration yet.
+
+## 12. Body-brain bridge hardening + self-clearing build sites (2026-07-08)
+
+A Sonnet review of the body-brain bridge (`/state` + `/cmd` + `brain-llm.js`) plus a
+fresh end-to-end pass on a local terrain server (`world-gather`, savanna, survival,
+empty-handed start - gather→craft→build, no op/give). Verdict: the bridge was sound
+(idle change-detector, confinement, "surface the ask loudly" prompt all measured wins);
+the real gaps were robustness and site-flatness, not intelligence. Fixed:
+
+**Bridge (verified live):**
+- **⚠️ The brain loop could hang FOREVER.** `come`/`goto`/`collect`/craft-walk/sleep all
+  called `pathfinder.goto` unguarded, and `brain-llm.js` fetched with no timeout - one
+  unreachable target froze the *entire* loop (no backoff, no log). Now `gotoTimed()`
+  (commands.js, mirrors schematic's `gotoWithTimeout`) caps all 8 movement verbs, and
+  `fetchT()` (AbortController) caps every brain↔body/LLM call (state 10s, cmd/LLM 60s).
+  Verified: an unreachable `goto` returns in ~5s instead of hanging.
+- **Delivery budget was drained by ANY `/state` poll** (the dashboard's 1s poll expired a
+  player's message before the brain answered). Now only the brain's poll - tagged
+  `/state?brain=1` - spends the budget. Verified: plain polls hold `unanswered` at 1;
+  `?brain=1` polls drain it to 0 after `MAX_DELIVERIES` (6).
+- **`clearPendingChat()` cleared ALL pending msgs** when one action answered one → a 2nd
+  player's message got dropped. Now resolves the **oldest** only; each gets its own turn.
+- **New `/state` fields:** `moving`, `goal` (pathfinder goal type), `busy` (build/provision
+  running). The brain now **holds** instead of burning heartbeat inferences while busy
+  (logged `body busy - holding` 13× during a build). Trimmed noise the prompt never used:
+  `eye`, `yaw`, `pitch`, `onGround`, `blockAtFeet`.
+- **Cheaper idle loop:** `/brain` settings polled every 3s + cached (not every tick);
+  `decide()` tries `JSON.parse` directly before the greedy `{…}` regex.
+
+**Self-clearing build sites (closes the "sites must be flat" gap):**
+- `schematic.clearVolume()` empties the schematic's whole box by hand before building -
+  right tool per block (`equipToolFor`: pickaxe/shovel/axe, barehanded fallback), top-down,
+  multi-pass (blocks become reachable as those above them go). Scoped to the footprint the
+  operator chose; never touches anything outside the box. Exposed as **`schematic clear
+  [here|x y z]`** and a **`clear`** flag on build: `schematic build here clear`.
+- **GOTCHA (found + fixed live):** the reach test `bot.canDigBlock(b)` must run **after**
+  walking to the block, not before - it includes a range check, so testing it first skips
+  every out-of-reach block (`cleared 0`). Order it goto→canDigBlock→dig, like `prepSite`.
+- **VERIFIED LIVE:** the exact sloped savanna spot that gave **18/44** without clearing now
+  builds **43/44** with `build … clear` (cleared 6 intruding blocks, 2 scaffold cleaned) -
+  still fully self-provisioned (gathered/crafted its own 44 planks + dirt first).
+- Remaining: 1 oriented/floating cell still skipped on steep ground; a smelt-only
+  provision plan (glass alone) can pick `cobbled_deepslate` for the furnace and call it
+  unobtainable instead of falling back to cobblestone (minor planner variant-choice bug).
 
 [natural-player goal]: the bot should behave indistinguishably from a real human player; believability beats raw capability.
