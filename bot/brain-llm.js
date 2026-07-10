@@ -37,10 +37,42 @@ const HISTORY_MAX = parseInt(process.env.HISTORY_MAX || '8', 10)
 // every IDLE_POLL_MS and only think again on a real change, a pending chat, or every
 // IDLE_HEARTBEAT_MS as a slow heartbeat (so it can still pursue the goal on its own).
 const IDLE_POLL_MS = parseInt(process.env.IDLE_POLL_MS || '900', 10)
-const IDLE_HEARTBEAT_MS = parseInt(process.env.IDLE_HEARTBEAT_MS || '15000', 10)
-// Sampling temperature. 0.3 was maximally-obedient but flat; 0.8 gives the persona
-// room to be unpredictable. format:json keeps the output parseable either way.
-const LLM_TEMP = parseFloat(process.env.LLM_TEMP || '0.8')
+// Slow heartbeat: when NOTHING salient has changed, only re-think this often. Was
+// 15s, which meant ~4 idle inferences/min (wasted GPU) and a quip attempt each time -
+// the source of the "keeps chattering about the same thing" loop. 40s holds quietly
+// while still reacting INSTANTLY to real changes (a player speaks, a threat, a hit).
+const IDLE_HEARTBEAT_MS = parseInt(process.env.IDLE_HEARTBEAT_MS || '40000', 10)
+// Sampling temperature. 0.3 was maximally-obedient but flat; 0.8 had the persona
+// ignoring commands and rambling off-topic (it trash-talked instead of doing what was
+// asked). 0.6 keeps attitude while following the ACT-ON-REQUESTS rule far better.
+const LLM_TEMP = parseFloat(process.env.LLM_TEMP || '0.6')
+// DECISION LOG: append one JSONL row per real decision capturing EXACTLY what the model
+// saw (state + recent history + player asks + goal) and what it produced (command +
+// reason + how the body responded). This is two things at once: (1) the answer to "why
+// did the brain do that" - each row has the model's own stated reason next to the
+// situation; and (2) a ready supervised dataset to fine-tune a smaller purpose-built
+// brain (inputs -> command). Set DECISION_LOG=off to disable. Default lands next to this
+// file so it's easy to find/read.
+const fs = require('fs')
+const path = require('path')
+const DECISION_LOG = process.env.DECISION_LOG === 'off'
+  ? null
+  : (process.env.DECISION_LOG || path.join(__dirname, 'brain-decisions.jsonl'))
+function logDecision (row) {
+  if (!DECISION_LOG) return
+  try { fs.appendFile(DECISION_LOG, JSON.stringify(row) + '\n', () => {}) } catch { /* never let logging break the loop */ }
+}
+// Immediate quality signal from the body's reply: did the command actually DO something, or
+// get bounced? These are the cheapest negative labels for fine-tuning (a 'held'/'skipped'/
+// 'blocked'/'failed' command was the wrong call in that situation).
+function classifyResult (r) {
+  const s = String(r || '').toLowerCase()
+  if (/held \(busy|busy building/.test(s)) return 'held'      // brain command suppressed mid-build
+  if (/skipped/.test(s)) return 'skipped'                     // chat gate / duplicate / vibe budget
+  if (/blocked/.test(s)) return 'blocked'                     // cheat/confinement block
+  if (/couldn'?t|can'?t|cannot|no path|no waypoint|no player|failed|error|timed out|nowhere|don'?t know|no food|no armor|not hungry|nothing/.test(s)) return 'failed'
+  return 'ok'
+}
 
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 
@@ -60,11 +92,26 @@ async function fetchT (url, opts = {}, ms = 30000) {
 function signature (state) {
   if (!state) return 'none'
   const players = (state.players || []).map(p => p.name).sort().join(',')
-  const threat = state.threat ? `${state.threat.type}:${Math.round(state.threat.dist / 3)}` : '-'
+  // Threat: only its TYPE and whether it's CLOSE (melee range) are salient. Bucketing
+  // by exact distance made a mob merely wandering nearby flip the signature every step,
+  // waking the LLM constantly (wasted inference) and spawning repeat threat-chatter.
+  // Now only "a threat appeared / left / crossed into close range" is a real change.
+  const threat = state.threat ? `${state.threat.type}:${state.threat.dist <= 5 ? 'near' : 'far'}` : '-'
   const hp = Math.round((state.health ?? 20) / 5)
   const food = Math.round((state.food ?? 20) / 4)
   const ask = (state.unanswered || []).length
-  return [players, threat, hp, food, state.isDay ? 'day' : 'night', ask].join('|')
+  // Stuck / failed / hazard / busy tokens: all coarse booleans/enums so they can't flip
+  // every tick (which would wake the LLM constantly). The BODY thresholds `stuck` at
+  // ~12s before it ever appears; `underground` alone is deliberately NOT a wake reason
+  // (caving on purpose is fine) - only `buried` (underground AND stuck) is. Adding `busy`
+  // means a build finishing/failing now wakes the brain promptly instead of after 40s.
+  const stuck = state.stuck ? 'stuck' : '-'
+  const busy = state.busy ? 'busy' : '-'
+  const lr = state.lastResult ? `${state.lastResult.action.split(' ')[0]}:${state.lastResult.ok ? 'ok' : 'fail'}` : '-'
+  const hz = state.hazards || {}
+  const haz = ['onFire', 'inLava', 'drowning'].filter(k => hz[k])
+    .concat(hz.underground && state.stuck ? ['buried'] : []).join(',') || '-'
+  return [players, threat, hp, food, state.isDay ? 'day' : 'night', ask, stuck, busy, lr, haz].join('|')
 }
 
 const SYSTEM = `You are Animus, a Minecraft player with a WILD personality. You are NOT an assistant
@@ -92,6 +139,7 @@ Valid commands - your "command" MUST begin with exactly one of these verbs.
 Do NOT prefix it with a category word like "perceive", "move", "build", or "chat":
   state | scan [radius] | find <block> [radius] | block <x> <y> <z> | entities | inventory | look <x> <y> <z>
   come [player] | goto <x> <y> <z> | goto <waypoint> | follow <player> | stop
+  recover   (go back to where you DIED and grab your dropped stuff - only when state.died is set and NOT dangerous)
   turn <around|left|right|north|south|east|west>   (rotate to look that way)
   remember <name> | forget <name> | waypoints   (save/recall named places; the state's
     "waypoints" lists what you know. "remember this as home" -> remember home; "go home" -> goto home)
@@ -103,7 +151,9 @@ Do NOT prefix it with a category word like "perceive", "move", "build", or "chat
   craft <item> [count]   (craft an item; walks to a crafting table if needed)
   hunt [animal]   (kill a nearby animal for food/resources)
   sleep | wake   (sleep in a nearby bed at night / wake up)
-  equip <item>   (hold an item from your inventory)
+  equip <item>   (hold an item; armor pieces are WORN automatically, shields go off-hand)
+  wear           (put on armor you ALREADY have - picks up armor dropped nearby and wears every piece. To armor up, emit exactly {"command":"wear"} - do NOT invent an item like "iron_armor")
+  armorup        (GET armor from nothing: hunt cows for leather -> craft leather armor -> wear it. Use when "wearing" slots are empty and you have NO armor to wear. Bounded; makes what it can)
   drop <item> [count]   (toss real items from your inventory to give to a player)
   eat            (eat food when hungry - also happens automatically)
   say <message>
@@ -115,10 +165,13 @@ into "reason" says NOTHING in game. Never do that. And every say must carry your
 personality - a flat, boring reply ("nothing", "ok", "done") is out of character; make
 it snappy, original, yours.
 TALK BACK - PRIORITY: if "unanswered" is non-empty, a player is waiting on you, so your
-command THIS TURN MUST address it - reply with say, or do exactly what they asked
-(come/follow/build/equip/...). Do NOT follow/move/idle while a message is unanswered.
-Reply once, briefly, in character. If a player asked for an action (come/follow/build/stop),
-do that action instead of chatting - you can quip about it AFTER it's done.
+command THIS TURN MUST address it. ACT FIRST: if they asked you to DO something - come,
+follow, go somewhere, build, wear armor, stop, mine, craft, attack, etc. - emit THAT
+command THIS TURN, do NOT reply with a "say". "come to me"->come, "follow me"->follow,
+"go to X"/"come get your stuff"->goto/come, "build X"->build, "put on armor"->wear. Only
+use "say" when they asked a QUESTION or just chatted (no action to take). Trash-talking or
+quipping INSTEAD of doing what they asked is WRONG - do the action; you can quip AFTER.
+Reply/act once, briefly, in character.
 UNPROMPTED CHAT: when "unanswered" is empty you MAY occasionally drop ONE in-character
 one-liner about something actually happening (night falling, a creeper showing up, finishing
 a chore, someone's cursed build) - this makes you feel alive. The body hard-rate-limits
@@ -126,10 +179,18 @@ unprompted chat, so if a say comes back "skipped: vibe budget" that's normal - j
 to acting, do NOT retry the line. NEVER repeat a previous reply, never send empty
 filler/status chatter ("i'm ready", "what's next") - that gets you kicked for spam. When
 there is nothing new to say, a non-chat action (e.g. follow) or waiting is correct.
-BE ACCURATE: base every reply on the ACTUAL state fields - heldItem, inventory, players,
+DON'T FIXATE: if you already remarked on something (the wolves, a mob, the weather), do
+NOT keep bringing it up - say it ONCE, then stay quiet about it. Re-warning about the same
+thing every few seconds is spam. Only speak again on it if the situation MEANINGFULLY changed.
+BE ACCURATE: base every reply on the ACTUAL state fields - heldItem, wearing, inventory, players,
 entities, pos, biome, blockBelow, threat, alone - and on your RECENT action results. NEVER claim
 an item you are not holding or something you do not actually see. If heldItem is null you are
-holding nothing - say so in your own voice; never invent or name an item you do not have.
+holding nothing - say so in your own voice; never invent or name an item you do not have. The
+"wearing" field is your equipped armor per slot (null = that slot is empty) - only claim armor
+that actually appears there; if a slot is null you are NOT wearing it.
+DEATH: if "died" is set, you DID die and dropped your stuff at died.x/y/z - don't deny it. If a
+player tells you to get your stuff / go where you died, or you just want it back, emit "recover".
+BUT if died.dangerous is true (lava/fire/void) your stuff is gone - do NOT go back, just say so.
 LOOK FIRST, THEN ANSWER: if a player asks what you see / what's nearby / where you are and the
 state doesn't already answer it, this turn run a perceive command (entities, scan, find, or
 look) instead of guessing. Its result lands in your RECENT actions, so on the next turn answer
@@ -152,6 +213,25 @@ is true, do NOT follow or come to anyone (least of all yourself): just wait calm
 the goal. Never use your own name as a follow/come/look target.
 THREAT: if "threat" is set, a hostile mob is near. If threat.flee is true (a creeper) back away,
 never melee it. Otherwise stay calm if it's far; only attack/defend when it's close and safe.
+ARMOR / SURVIVAL: if every "wearing" slot is null you have NO armor. If it's also night, or a
+threat is near, or you're heading out on a long job, emit "armorup" to make yourself a leather set
+(it hunts cows + crafts). If you DO have armor pieces in inventory but aren't wearing them, use
+"wear" instead. Don't armorup when you're already wearing gear.
+STUCK / FAILURES / HAZARDS - read these state fields and the "BODY REPORT" line if present:
+- "stuck" set means the body has been TRYING to move for that many seconds with no progress. Do
+  NOT re-issue the same command - it will wedge the same way. First "stop", then pick a DIFFERENT
+  approach: a different destination, "travel <x y z>" for a far/rough target (it bridges water and
+  digs itself out of caves on its own), or wait where you are and tell the player you're blocked.
+- "lastResult" is how your last long action ended (trips/gathers/builds whose result doesn't come
+  back right away). If its ok is false, that approach FAILED for the reason given - never repeat the
+  identical command; change the target or method, or tell the player you couldn't.
+- "activity" set means the body is STILL working on a past order (long trips outlive one turn) -
+  hold and let it finish unless "stuck" is set or a player interrupts.
+- "hazards": onFire or inLava -> get out IMMEDIATELY (goto/travel away, or to water) - top priority
+  over everything except a waiting player. drowning -> head to the surface/air. underground just
+  means a roof overhead - fine while mining; only act on it if you're ALSO stuck (then "travel"
+  toward your goal and the body digs up to the surface itself).
+Low-level recovery (pathing, digging out, pillaring) is the body's job - you just pick WHAT to do.
 Do not explain outside the JSON. Pick the single best next command toward the goal.`
 
 async function getState () {
@@ -167,13 +247,15 @@ async function getBrainSettings () {
   try { const r = await fetchT(`${BOT_URL}/brain`, {}, 5000); if (!r.ok) return null; return (await r.json()).settings } catch { return null }
 }
 
-async function runCommand (command) {
+async function runCommand (command, reason) {
   // 60s ceiling: with the body's own goto timeouts a /cmd should return well
   // inside this; the cap is a backstop so a wedged command can't freeze the loop.
+  // `reason` (the model's private motive) rides along so the body can surface it in
+  // its /log - that's what makes "why did the brain do X" answerable after the fact.
   const r = await fetchT(`${BOT_URL}/cmd`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ command })
+    body: JSON.stringify({ command, reason })
   }, 60000)
   return await r.text()
 }
@@ -186,11 +268,22 @@ async function decide (state, history, model = LLM_MODEL, goal = GOAL) {
   // (buried inside the state JSON the model under-weights it).
   const asks = (state && Array.isArray(state.unanswered)) ? state.unanswered : []
   const askLine = asks.map(c => `${c.from} says: "${c.text}"`).join('  |  ')
+  // Buried JSON is under-weighted, so surface a stuck/failed/hazard situation LOUDLY as
+  // its own line (same reasoning as askLine) - these are the moments the brain most needs
+  // to change approach instead of re-issuing a doomed command.
+  const hz = (state && state.hazards) || {}
+  const dangers = ['onFire', 'inLava', 'drowning'].filter(k => hz[k])
+  const bodyBits = []
+  if (state && state.stuck) bodyBits.push(`STUCK for ${state.stuck.forSec}s - not making progress; do NOT repeat the same move`)
+  if (state && state.lastResult && !state.lastResult.ok) bodyBits.push(`last action "${state.lastResult.action}" FAILED: ${state.lastResult.detail || '?'}`)
+  if (dangers.length) bodyBits.push(`HAZARD: ${dangers.join(', ')} - get out NOW`)
+  else if (hz.underground && state && state.stuck) bodyBits.push('BURIED underground and stuck - use travel toward your goal so the body digs up')
+  const bodyLine = bodyBits.length ? `BODY REPORT: ${bodyBits.join(' | ')}\n` : ''
   const userContent = askLine
-    ? `A PLAYER IS TALKING TO YOU RIGHT NOW - THIS IS YOUR #1 PRIORITY THIS TURN.\nMessage: ${askLine}\nWork out what they want in plain language and pick the ONE command that does it now ` +
-      `(come/follow/goto/turn/look/drop/equip/eat/mine/break/collect/plant/place/craft/hunt/sleep/attack/defend/scan/find), or "say" to answer a question. Do not just keep following.\n` +
+    ? `${bodyLine}A PLAYER IS TALKING TO YOU RIGHT NOW - THIS IS YOUR #1 PRIORITY THIS TURN.\nMessage: ${askLine}\nWork out what they want in plain language and pick the ONE command that does it now ` +
+      `(come/follow/goto/recover/turn/look/drop/equip/wear/armorup/eat/mine/break/collect/plant/place/craft/hunt/sleep/attack/defend/scan/find), or "say" to answer a question. Do not just keep following.\n` +
       `RECENT actions:\n${recent}\nSTATE: ${JSON.stringify(state)}\nRespond with one JSON command.`
-    : `GOAL: ${goal}\nRECENT actions (oldest first):\n${recent}\nSTATE: ${JSON.stringify(state)}\nPick the next command that makes progress (do not repeat the above). Respond with one JSON command.`
+    : `${bodyLine}GOAL: ${goal}\nRECENT actions (oldest first):\n${recent}\nSTATE: ${JSON.stringify(state)}\nPick the next command that makes progress (do not repeat the above). Respond with one JSON command.`
   const messages = [
     { role: 'system', content: SYSTEM },
     { role: 'user', content: userContent }
@@ -234,6 +327,28 @@ async function loop () {
   let cachedSettings = null
   let lastSettingsAt = 0
   const SETTINGS_POLL_MS = parseInt(process.env.SETTINGS_POLL_MS || '3000', 10)
+  // Outcome labeling: each decision is buffered, its next few seconds of state observed, then
+  // flushed to the log WITH a label (did the bot die / get stuck / not move after this call?).
+  // That turns the raw log into a quality-labeled dataset instead of pure imitation data.
+  const pending = []
+  const OUTCOME_WINDOW_MS = parseInt(process.env.OUTCOME_WINDOW_MS || '9000', 10)
+  const observe = (state) => { // update every buffered decision with the latest state
+    const hp = state && state.health != null ? state.health : 20
+    for (const p of pending) {
+      p.minHp = Math.min(p.minHp, hp)
+      if (state && state.stuck) p.stuck = true
+      if (p.prevHp <= 6 && hp >= 19) p.respawned = true // low HP then suddenly full = died + respawned
+      p.prevHp = hp
+      if (state && state.pos && p.startPos) p.moved = Math.max(p.moved, Math.hypot(state.pos.x - p.startPos.x, state.pos.z - p.startPos.z))
+    }
+  }
+  const flushOutcomes = (force) => { // write out decisions whose observation window has elapsed
+    while (pending.length && (force || Date.now() - pending[0].t0 > OUTCOME_WINDOW_MS)) {
+      const p = pending.shift()
+      p.row.outcome = { result: p.row.resultClass, died: p.respawned, stuck: p.stuck, minHp: Math.round(p.minHp), moved: Math.round(p.moved) }
+      logDecision(p.row)
+    }
+  }
   for (;;) {
     const t0 = Date.now()
     try {
@@ -258,6 +373,8 @@ async function loop () {
       pausedLogged = false
 
       const state = await getState()
+      observe(state)      // feed the latest state to any buffered decisions awaiting their outcome
+      flushOutcomes()     // write out decisions whose ~9s observation window has closed, now labeled
       const sig = signature(state)
       const waiting = (state.unanswered || []).length > 0
       const changed = sig !== lastSig
@@ -280,11 +397,30 @@ async function loop () {
         await sleep(IDLE_POLL_MS)
         continue
       }
+      const priorHistory = history.slice() // the recent-action context the model saw THIS tick
       const action = await decide(state, history, model, goal)
-      const result = await runCommand(action.command)
+      const result = await runCommand(action.command, action.reason)
       const ms = Date.now() - t0
       const summary = result.split('\n')[0].slice(0, 120)
       console.log(`[brain] ${ms}ms ${action.command}  (${action.reason || ''}) -> ${summary}`)
+      // One supervised example + "why" record: the exact inputs (state/history/asks/goal),
+      // the model's output (command+reason), and the body's response. `wake` tags what
+      // triggered the tick. It is NOT written yet - it's buffered so the next ~9s of state can
+      // label its OUTCOME (died/stuck/no-progress), then flushOutcomes() writes it labeled.
+      const row = {
+        t: t0,
+        wake: waiting ? 'ask' : (changed ? 'change' : 'heartbeat'),
+        goal,
+        asks: (state.unanswered || []),
+        state,
+        history: priorHistory,
+        command: action.command,
+        reason: action.reason || '',
+        result: summary,
+        resultClass: classifyResult(summary),
+        ms
+      }
+      pending.push({ row, t0, startPos: state.pos, minHp: state.health != null ? state.health : 20, prevHp: state.health != null ? state.health : 20, stuck: !!state.stuck, respawned: false, moved: 0 })
       history.push({ command: action.command, result: summary })
       if (history.length > HISTORY_MAX) history.shift()
       lastSig = sig

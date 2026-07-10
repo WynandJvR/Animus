@@ -28,6 +28,21 @@ const { goals, Movements } = require('mineflayer-pathfinder')
 const Build = require('mineflayer-builder/lib/Build')
 const interactable = require('mineflayer-builder/lib/interactable.json')
 
+// DURABLE crash guard (re-applied here so a future `npm install` can't lose it, like
+// the digTime guard in index.js). Build.getPossibleDirections reads a NEIGHBOUR block's
+// `.shapes` (Build.js:114) to test placement faces; when that neighbour is null (an
+// unloaded chunk or a cell at the world edge) it throws "Cannot read properties of null
+// (reading 'shapes')" and kills the whole build. Wrap it so any such error just yields
+// "no placeable face this pass" - the action is deferred and retried once the chunk
+// loads / a neighbour is placed, instead of aborting the build.
+if (Build.prototype && !Build.prototype._gpdGuarded) {
+  const _gpd = Build.prototype.getPossibleDirections
+  Build.prototype.getPossibleDirections = function (stateId, pos) {
+    try { return _gpd.call(this, stateId, pos) } catch { return [] }
+  }
+  Build.prototype._gpdGuarded = true
+}
+
 // Where local .schem files live (also the download cache). Gitignored - runtime data.
 const SCHEM_DIR = path.join(__dirname, 'schematics')
 
@@ -121,6 +136,32 @@ async function loadFile (nameOrPath, version) {
   return readSchematic(fs.readFileSync(p), version)
 }
 
+// List the base names of every local .schem (no extension). Powers the
+// natural-language "build <name>" lookup and the "I have: ..." feedback.
+function listLocal () {
+  try {
+    return fs.readdirSync(SCHEM_DIR)
+      .filter(f => /\.schem$/i.test(f))
+      .map(f => f.replace(/\.schem$/i, ''))
+  } catch { return [] } // dir doesn't exist yet -> no schematics
+}
+
+// Resolve a spoken schematic name ("my castle") to a saved file's base name.
+// Match is fuzzy: compare on a normalized core (lowercase, alphanumeric only) so
+// "big castle" finds big_castle.schem. Exact core first, then either-contains.
+// Returns the base name (loadFile-ready) or null.
+function findLocal (query) {
+  const files = listLocal()
+  if (!files.length) return null
+  const norm = s => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '')
+  const q = norm(query)
+  if (!q) return null
+  let hit = files.find(f => norm(f) === q)
+  if (hit) return hit
+  hit = files.find(f => { const n = norm(f); return n && (n.includes(q) || q.includes(n)) })
+  return hit || null
+}
+
 // ---- bill of materials -----------------------------------------------------
 
 // Count every non-air block by name. Returns { counts: {name:n}, solid, types }.
@@ -154,7 +195,10 @@ function materialsSummary (schem) {
 const SCAFFOLD_BLOCKS = ['dirt', 'cobblestone', 'cobbled_deepslate', 'netherrack', 'stone', 'andesite']
 // Natural obstructions we may clear from the build footprint before building
 // (vegetation + soft terrain). NEVER crafted blocks - anti-grief holds.
-const CLEARABLE = /grass|fern|flower|dandelion|poppy|tulip|orchid|allium|bluet|daisy|cornflower|lily|rose|sunflower|lilac|peony|snow|leaves|vine|mushroom|sapling|dead_bush|sugar_cane|bamboo|sweet_berry|seagrass|moss_carpet|_carpet$|sprouts|roots|dripleaf|azalea/
+// NOTE: matches plant blocks only. Use short_grass|tall_grass (NOT bare "grass"),
+// or it also matches grass_block - which made prepSite strip the ground the build
+// sits on (and dig it bare-handed). snow_layer, not snow_block, for the same reason.
+const CLEARABLE = /short_grass|tall_grass|fern|flower|dandelion|poppy|tulip|orchid|allium|bluet|daisy|cornflower|lily|rose|sunflower|lilac|peony|snow_layer|leaves|vine|mushroom|sapling|dead_bush|sugar_cane|bamboo|sweet_berry|seagrass|moss_carpet|_carpet$|sprouts|roots|dripleaf|azalea/
 
 // Movement profile used ONLY while building. Preserves the anti-grief rule that
 // matters - canDig stays false, so the bot NEVER breaks existing blocks to path -
@@ -165,7 +209,8 @@ function buildMovements (bot) {
   m.canDig = false           // never destroy existing blocks (anti-grief preserved)
   m.allow1by1towers = true   // may pillar up to reach height (real blocks, survival)
   m.canOpenDoors = true
-  m.allowParkour = true
+  m.allowParkour = false     // WALK between placements instead of hopping every gap
+                             // (build jumping was mostly parkour; pillaring for height stays)
   // Scaffolding/bridging consumes real inventory blocks - restrict to cheap fillers
   // the player is likely to hand over, so it never spends build materials to walk.
   const md = require('minecraft-data')(bot.version)
@@ -203,7 +248,7 @@ async function prepSite (bot, schem, at, opts = {}) {
         if (!b || AIR.test(b.name) || !CLEARABLE.test(b.name)) continue
         try {
           if (bot.entity.position.distanceTo(b.position) > 4) await gotoWithTimeout(bot, new goals.GoalNear(x, y, z, 3), 12000)
-          if (bot.canDigBlock && bot.canDigBlock(b)) { await bot.dig(b); cleared++ }
+          if (bot.canDigBlock && bot.canDigBlock(b)) { await equipToolFor(bot, b.name); await bot.dig(b); cleared++ }
         } catch {}
       }
     }
@@ -230,7 +275,7 @@ async function cleanupScaffold (bot, schem, at, beforeSet, solidSet, opts = {}) 
         if (!b || AIR.test(b.name) || !scaffoldNames.has(b.name)) continue
         try {
           if (bot.entity.position.distanceTo(b.position) > 4) await gotoWithTimeout(bot, new goals.GoalNear(x, y, z, 3), 12000)
-          if (bot.canDigBlock && bot.canDigBlock(b)) { await bot.dig(b); removed++ }
+          if (bot.canDigBlock && bot.canDigBlock(b)) { await equipToolFor(bot, b.name); await bot.dig(b); removed++ }
         } catch {}
       }
     }
@@ -259,16 +304,31 @@ function haveItem (bot, name) {
   return (bot.inventory ? bot.inventory.items() : []).find(i => i.name === name) || null
 }
 
-// Pause and ask the player for a material, polling inventory until it arrives.
-// Re-announces every ~15s. Returns true once we have it, false if stopped/aborted.
-async function waitForMaterial (bot, name, { say, isStopped }, needed) {
+// Get a material we've run out of. FIRST try opts.fetch (e.g. withdraw a batch
+// from the build's chest); only if that can't supply it do we fall back to asking
+// the player and polling. Returns true once we have it, false if stopped/aborted.
+// Returns: true = have it now; false = operator stopped; null = gave up after the deadline
+// (caller should SKIP this material, not hang). The deadline is what stops an unattended
+// from-nothing run from begging chat FOREVER for a material it can never obtain (iron_bars,
+// wool, ...) - the old unbounded loop = a permanent stall / death-loop.
+async function waitForMaterial (bot, name, { say, isStopped, fetch, deadlineMs = 240000 }, needed) {
+  if (haveItem(bot, name)) return true
+  // Try our own stash (chest) first, so a self-provisioned build never begs.
+  if (fetch) {
+    try { await fetch(name) } catch { /* chest gone / empty - fall through to asking */ }
+    if (haveItem(bot, name)) return true
+  }
+  const start = Date.now()
   let last = 0
   for (;;) {
     if (isStopped && isStopped()) return false
     if (haveItem(bot, name)) return true
+    // retry the stash occasionally too (more may have been produced/stored)
+    if (fetch) { try { await fetch(name) } catch {} ; if (haveItem(bot, name)) return true }
+    if (Date.now() - start > deadlineMs) return null // gave up - skip this material and move on
     const now = Date.now()
     if (say && now - last > 15000) {
-      say(`I need ${needed ? needed + ' ' : 'more '}${name} to keep building - drop some by me?`)
+      say(`I need ${needed ? needed + ' ' : 'more '}${name} to keep building - drop some by me? (skipping it soon if not)`)
       last = now
     }
     await new Promise(r => setTimeout(r, 2000))
@@ -305,7 +365,12 @@ async function tryPlace (bot, build, action, item) {
   const half = properties.half ? properties.half : properties.type
   const faces = build.getPossibleDirections(action.state, action.pos)
   if (!faces.length) return false
-  const { facing, is3D } = build.getFacing(action.state, properties.facing)
+  // getFacing throws on any facing-bearing block missing from mineflayer-builder's stale
+  // facingData.json (newer 1.21 stairs/doors: cherry/bamboo/copper/pale_oak...). Unguarded
+  // that crash aborts the ENTIRE build (and clears the resume). Fall back to an unoriented
+  // placement - the block still goes down, at worst mis-rotated - never crash the build.
+  let facing, is3D
+  try { ({ facing, is3D } = build.getFacing(action.state, properties.facing)) } catch { facing = undefined; is3D = false }
   const goal = new goals.GoalPlaceBlock(action.pos, bot.world, { faces, facing, facing3D: is3D, half })
 
   if (!goal.isEnd(bot.entity.position.floored())) {
@@ -397,7 +462,7 @@ async function buildSurvival (bot, schem, at, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const build = new Build(schem, bot.world, at)
   const total = build.actions.filter(a => a.type === 'place').length
-  let placed = 0; let stopped = false; let passes = 0
+  let placed = 0; let stopped = false; let passes = 0; let matSkipped = 0
 
   const moves = buildMovements(bot)
   bot.pathfinder.setMovements(moves)
@@ -443,10 +508,19 @@ async function buildSurvival (bot, schem, at, opts = {}) {
 
       const item = build.getItemForState(action.state)
       if (!item) { build.removeAction(action); continue } // truly unplaceable (tech block)
-      // Ensure we hold the material - pause and ask the player if we're out.
+      // Ensure we hold the material - pull from our chest (opts.fetch) if we have one, else
+      // pause and ask the player. Materials the provisioner already flagged UNOBTAINABLE (or
+      // gave up on) are in opts.skip: don't even wait - drop those placements so the build
+      // finishes with what it CAN make instead of hanging forever on the first iron_bar.
       if (!haveItem(bot, item.name)) {
-        const got = await waitForMaterial(bot, item.name, { say, isStopped })
-        if (!got) { stopped = true; break }
+        if (opts.skip && opts.skip.has(item.name)) { build.removeAction(action); matSkipped++; continue }
+        const got = await waitForMaterial(bot, item.name, { say, isStopped, fetch: opts.fetch, deadlineMs: opts.materialDeadlineMs }, action.count)
+        if (got === false) { stopped = true; break }        // operator stopped
+        if (got === null) { // gave up after the deadline - skip this material everywhere
+          if (opts.skip) opts.skip.add(item.name)
+          say(`can't get ${item.name} - skipping it and finishing the rest`)
+          build.removeAction(action); matSkipped++; continue
+        }
       }
       const ok = await tryPlace(bot, build, action, item)
       if (ok) {
@@ -467,7 +541,7 @@ async function buildSurvival (bot, schem, at, opts = {}) {
     bot.pathfinder.setGoal(null)
     if (opts.restoreMovements) opts.restoreMovements() // back to the anti-grief profile
   }
-  const skipped = build.actions.filter(a => a.type === 'place').length
+  const skipped = build.actions.filter(a => a.type === 'place').length + matSkipped
   return { placed, total, skipped, stopped, passes, cleared, scaffoldRemoved }
 }
 
@@ -478,6 +552,8 @@ module.exports = {
   nameFromUrl,
   readSchematic,
   loadFile,
+  listLocal,
+  findLocal,
   billOfMaterials,
   materialsSummary,
   buildSurvival,

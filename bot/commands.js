@@ -24,6 +24,95 @@ let loadedSchem = null
 let building = false
 let buildAbort = false // set by `stop`; watched by schematic builds AND provision runs
 let provisioning = false
+let escaping = false   // true while digging UP out of a cave - the flee reflex must not
+                       // hijack the pathfinder sideways (rising IS the escape from mobs)
+// sticky-follow: who the bot was told to follow. Persists across the brain briefly
+// switching tasks (attack/goto/scan replace the follow goal), so a body-side reflex
+// can resume trailing them once idle. Cleared by `stop` (or a new follow retargets).
+let followTarget = null
+// death recovery: where we last died + whether it's dangerous to return to (lava/fire/
+// void). Set by the body's death handler; surfaced in /state so the BRAIN can decide
+// whether to `recover`. Cleared/marked once retrieved. Expires so it's not stale forever.
+let lastDeath = null
+function recordDeath (info) { lastDeath = info }
+// auto-resume: the build to pick back up after a death interrupts it. autoBuild
+// re-provisions whatever we lost and Build diffs world-vs-schematic, so resuming just
+// finishes the missing blocks. Kept across a death; cleared on finish or `stop`.
+let resumeJob = null       // { schem, at }
+let buildInterrupted = false
+
+// ---- observability: what the body is DOING, how the last long op ENDED, and whether
+// it's WEDGED. The brain reads /state to make high-level calls; without these a stuck
+// or failed body looks identical to a working one, so the brain re-issues the same
+// doomed command and idles up to a heartbeat before noticing. These surface enough for
+// the brain to change approach - the low-level recovery stays body-side.
+let activity = null    // { name, detail, startedAt } - a long op running RIGHT NOW
+let lastOutcome = null // { action, ok, detail, at } - how the last long op ended
+function beginActivity (name, detail) { activity = { name, detail: detail || '', startedAt: Date.now() } }
+// Record an outcome the brain should NOTICE: any FAILURE, a DETACHED flow (build/
+// provision/autobuild resolve after /cmd already returned, so their result never
+// reaches the brain otherwise), or anything that ran > 45s (likely outlived the brain's
+// 60s /cmd fetch). Short successful awaited commands already reach the brain via the
+// /cmd reply + history, so we skip those to avoid redundant wakes.
+function endActivity (ok, detail, opts = {}) {
+  const a = activity
+  if (a && (!ok || opts.detached || Date.now() - a.startedAt > 45000)) {
+    lastOutcome = { action: a.name + (a.detail ? ' ' + a.detail : ''), ok: !!ok, detail: String(detail || '').slice(0, 100), at: Date.now() }
+  }
+  activity = null
+}
+// Let non-command code (reflexes) record an outcome directly (e.g. a wedged follow).
+function recordOutcome (action, ok, detail) { lastOutcome = { action, ok: !!ok, detail: String(detail || '').slice(0, 100), at: Date.now() } }
+
+// Stuck detection: the body is TRYING to get somewhere but making no progress. Driven
+// by index.js on a 1s tick. "Trying" = a non-follow pathfinder goal is set, OR a travel/
+// gather/come/recover activity is running. "No progress" = moved < 1.5 blocks (3-D, so a
+// climb-out counts as progress) over the trailing ~12s. Excluded so we don't cry wolf:
+// operator builds (isBusy - they legitimately stand still and self-recover), cave-escape
+// climbs (escaping), active digs (targetDigBlock IS progress), and follow (a stationary
+// player is not "stuck" - the leash reflex owns that). Surfaced in /state.stuck.
+let posHist = []       // ring of { x, y, z, t }
+let stuckSince = 0
+let tryingSince = 0    // when the CURRENT move attempt began (goal/activity became active)
+const STUCK_WINDOW_MS = 12000
+const STUCK_DIST = 1.5
+function trackTick (bot) {
+  const ent = bot.entity
+  if (!ent || !ent.position) { stuckSince = 0; tryingSince = 0; posHist = []; return }
+  const now = Date.now()
+  const p = ent.position
+  posHist.push({ x: p.x, y: p.y, z: p.z, t: now })
+  while (posHist.length && now - posHist[0].t > STUCK_WINDOW_MS + 2000) posHist.shift()
+  const goal = bot.pathfinder && bot.pathfinder.goal
+  const following = goal && goal.constructor && goal.constructor.name === 'GoalFollow'
+  const trying = (goal && !following) || (activity && /^(travel|gather|come|recover)$/.test(activity.name))
+  if (!trying || bot.targetDigBlock || isBusy() || escaping) { stuckSince = 0; tryingSince = 0; return }
+  if (!tryingSince) tryingSince = now // just started this attempt - clock starts NOW, so idle time
+  // before the move began (pathfinding takes a second or two) never counts as "stuck".
+  if (now - tryingSince < STUCK_WINDOW_MS) return // give the attempt a full window to show progress
+  const cutoff = Math.max(now - STUCK_WINDOW_MS, tryingSince)
+  const old = posHist.find(h => h.t >= cutoff)
+  if (!old) return
+  const moved = Math.hypot(p.x - old.x, p.y - old.y, p.z - old.z)
+  if (moved < STUCK_DIST) { if (!stuckSince) stuckSince = now }
+  else stuckSince = 0
+}
+
+// Progress chatter from a long build/provision run calls bot.chat DIRECTLY (bypassing
+// the normal chat gate), so it spammed "smelting 5/96... 7/96..." every ~20s. Wrap the
+// say callback so routine progress is at most one line per ~40s, while IMPORTANT lines
+// (asking for a material, errors, "done", setup) always get through.
+function throttledSay (bot, minGapMs = 40000) {
+  let last = 0
+  return (msg) => {
+    const s = String(msg)
+    const important = /\b(need|drop|can'?t|couldn'?t|error|stopped|no schematic|setting up|done)\b/i.test(s)
+    const now = Date.now()
+    if (!important && now - last < minGapMs) return
+    last = now
+    bot.chat(s.slice(0, 256))
+  }
+}
 
 // pathfinder.goto with a hard deadline. An unreachable target (a player who flew
 // somewhere unpathable, an item across a ravine) can otherwise hang goto FOREVER,
@@ -44,6 +133,186 @@ function gotoTimed (bot, goal, ms = 20000) {
       e => { if (!settled) { settled = true; clearTimeout(timer); reject(e) } }
     )
   })
+}
+
+// Robust "walk to a player". A single GoalNear gives up the instant no exact path
+// exists (walled off, across water, too far to path in one shot), which reads as the
+// bot "running into a wall and freezing". Instead: try to arrive exactly, but on
+// failure progressively accept getting as CLOSE as reachable, re-reading the player's
+// live position each try (they keep moving). Doors are opened en route (setupMovements:
+// canOpenDoors) and we still never dig - so this can't grief.
+async function comeToPlayer (bot, name, deadlineMs = 30000) {
+  const started = Date.now()
+  let lastErr = 'no path'
+  // Always aim to get RIGHT NEXT to them (range 2). A wide accept-radius is tempting
+  // for "get as close as you can", but it lets the bot stop at whatever wall is nearest
+  // as-the-crow-flies ("close enough") instead of taking the real route through a door -
+  // that was the "ran to the glass" bug. Small range forces the actual path. We just
+  // retry with fresh compute + their live position; doors are opened en route, no digging.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const t = findPlayer(bot, name)
+    if (!t) return `lost sight of ${name || 'player'}`
+    const remaining = deadlineMs - (Date.now() - started)
+    if (remaining < 2000) break
+    const p = t.position
+    try {
+      await gotoTimed(bot, new goals.GoalNear(p.x, p.y, p.z, 2), Math.min(remaining, 15000))
+      return `arrived at ${name || 'player'}`
+    } catch (e) {
+      lastErr = e.message
+      await new Promise(r => setTimeout(r, 500)) // let them move / world settle, then retry
+    }
+  }
+  const cur = findPlayer(bot, name)
+  const d = cur ? Math.round(bot.entity.position.distanceTo(cur.position)) : '?'
+  return `couldn't reach ${name || 'player'} (~${d} blocks off): ${lastErr}. i won't smash blocks - clear a path or leave a door open`
+}
+
+// Long-distance travel. A single pathfinder goal can't reach a target hundreds of
+// blocks away: chunks past view distance aren't loaded (no terrain to path through)
+// and A* gives up before searching that far. So we WALK there in stages - repeatedly
+// path ~32 blocks toward the target (which streams in fresh chunks as we go) until
+// we're close. GoalNearXZ ignores Y, so unknown terrain height on each leg doesn't
+// make it unreachable. Returns { ok, reason, dist }. Honors an isStopped() abort.
+// Blocks the bot can bridge/pillar with. Count how many it's carrying so travel can
+// top up (gather dirt) before setting off, so a ravine/water gap can't strand it.
+const BRIDGE_MATERIALS = ['dirt', 'cobblestone', 'cobbled_deepslate', 'gravel', 'stone', 'dirt_path', 'andesite', 'granite', 'diorite', 'netherrack', 'coarse_dirt']
+function bridgingBlockCount (bot) {
+  const items = bot.inventory ? bot.inventory.items() : []
+  return items.filter(i => BRIDGE_MATERIALS.includes(i.name)).reduce((n, i) => n + i.count, 0)
+}
+
+async function travelFar (bot, dest, opts = {}) {
+  const arrive = opts.arrive || 16       // horizontal "close enough" to hand off
+  const hop = opts.hop || 32             // per-leg distance (well within view distance)
+  // Scale the deadline with distance (~2.5s/block + a 5-min floor). A fixed 5 min timed out
+  // a 600-block trek right at the surface, killing the whole build request; the survival/climb
+  // time is already credited out below so a legit slow trek isn't punished.
+  const d0 = (bot.entity && bot.entity.position) ? Math.hypot(dest.x - bot.entity.position.x, dest.z - bot.entity.position.z) : 0
+  const deadlineMs = opts.deadlineMs || Math.max(300000, Math.round(d0 * 2500))
+  const isStopped = opts.isStopped || (() => false)
+  const say = opts.say || (() => {})
+  const start = Date.now()
+  let lastD = Infinity
+  let stalls = 0
+  let gathers = 0
+  let climbs = 0
+  let lastSurvival = 0  // throttle the per-leg survival check
+  let climbTimeMs = 0   // time spent digging out of caves / sheltering - doesn't count against the travel clock
+  // Are we buried in a cave WELL below the (surface) target? We only ever climb for this -
+  // an open valley/ravine below the target (can see sky) is fine to just walk through.
+  const buried = () => opts.climbOut !== false && bot.entity &&
+    bot.entity.position.y < dest.y - 6 && provision.hasSolidCeiling(bot)
+  // Dig straight up to the surface. Holds off the sideways flee reflex (rising IS the
+  // escape) and doesn't bill the climb against the travel clock. Returns true if we rose.
+  const surfaceOut = async (reason) => {
+    if (climbs >= 8) return false
+    say(reason)
+    const cs = Date.now(); const yBefore = Math.floor(bot.entity.position.y)
+    escaping = true
+    try { await provision.climbToSurface(bot, Math.floor(dest.y), { isStopped }) }
+    catch { /* couldn't cut up from here */ } finally { escaping = false }
+    climbTimeMs += Date.now() - cs
+    bot.pathfinder.setMovements(travelMovements(bot))
+    climbs++
+    const gained = Math.floor(bot.entity.position.y) > yBefore
+    if (!gained) climbs = 8 // truly boxed in - stop retrying so we don't spin forever
+    return gained
+  }
+  // Cross-country movement: BRIDGE gaps/ravines and pillar with the cheap blocks the
+  // bot carries, swim across water, parkour small gaps - so terrain doesn't stop it or
+  // drop it into a ravine. Still never digs (anti-grief). Restored to the safe profile
+  // in finally. If it carries no bridging blocks it just routes around instead.
+  bot.pathfinder.setMovements(travelMovements(bot))
+  try {
+    // Starting buried (logged in / spawned inside a cave)? Get to the surface FIRST, before
+    // any horizontal legs. Otherwise the XZ-only pathing follows cave openings DOWNWARD
+    // chasing the target and can ride them to bedrock/lava - exactly how it died before.
+    if (buried()) await surfaceOut("i'm underground - digging up to the surface before i head out...")
+    for (;;) {
+      if (isStopped()) return { ok: false, reason: 'stopped', dist: lastD }
+      // SURVIVAL during the long trek: a far build site is a 600-block walk, and the idle
+      // reflexes are gated off while busy - so, like the gather loop, do it inline here.
+      // Without this the bot starved to 1 hp / got killed naked before it ever arrived.
+      // The time spent is credited against the travel clock (a night-shelter must not time
+      // out the trip). travelFar's movement profile is restored after.
+      if (Date.now() - lastSurvival > 12000 && (provision.needsFood(bot) || provision.shelterNeeded(bot))) {
+        lastSurvival = Date.now(); const sv0 = Date.now()
+        try {
+          if (provision.needsFood(bot)) { say('starving - grabbing something to eat before i push on'); await provision.huntForFood(bot, { isStopped }) }
+          else { say('mobs out and no armor - holing up till it\'s safe'); escaping = true; try { await provision.digInForNight(bot, { isStopped, say }) } finally { escaping = false } }
+        } catch { /* keep travelling regardless */ }
+        climbTimeMs += Date.now() - sv0
+        bot.pathfinder.setMovements(travelMovements(bot)); lastD = Infinity; continue
+      }
+      if (Date.now() - start - climbTimeMs > deadlineMs) {
+        const hd = Math.hypot(dest.x - bot.entity.position.x, dest.z - bot.entity.position.z)
+        return { ok: false, reason: 'timed out', dist: hd }
+      }
+      // A leg dropped us into a cave? Climb back out NOW instead of riding it deeper.
+      if (buried() && climbs < 8) { await surfaceOut("dropped into a cave - climbing back to the surface..."); stalls = 0; lastD = Infinity; continue }
+      const me = bot.entity.position
+      const dx = dest.x - me.x; const dz = dest.z - me.z
+      const d = Math.hypot(dx, dz)
+      // Arrive only when close horizontally AND not still stuck deep underground: arriving
+      // at bedrock under a surface target and handing off a precise goal is what walked us
+      // into the lava. If we're close but buried, the loop above climbs us out first.
+      if (d <= arrive && !buried()) return { ok: true, reason: 'arrived', dist: d }
+      const step = Math.min(hop, d)
+      const wx = me.x + (dx / d) * step
+      const wz = me.z + (dz / d) * step
+      try {
+        await gotoTimed(bot, new goals.GoalNearXZ(wx, wz, 4), 30000)
+      } catch { /* leg blocked/timed out - re-aim from wherever we ended up */ }
+      const nd = Math.hypot(dest.x - bot.entity.position.x, dest.z - bot.entity.position.z)
+      // no meaningful progress this leg -> count a stall
+      if (nd >= lastD - 3) {
+        stalls++
+        // Stalled AND out of blocks to bridge with? Dig some dirt on our own (like the
+        // build gathers its materials), then retry - so a ravine/water gap can't strand
+        // us. Only when actually stuck (not upfront), so open ground never triggers it.
+        if (stalls >= 2 && opts.gather !== false && gathers < 3 && bridgingBlockCount(bot) < 4) {
+          say("hit a gap and I'm out of blocks - digging some dirt to bridge with...")
+          try {
+            const r = await provision.runGather(bot, 'dirt', 12, { isStopped, restoreMovements: () => {} })
+            if (r && r.gathered) say(`got ${r.gathered} dirt, carrying on`)
+          } catch { /* nothing to dig right here */ }
+          bot.pathfinder.setMovements(travelMovements(bot)) // gather reset movements
+          gathers++; stalls = 0; lastD = Infinity; continue
+        }
+        // Stalled AND buried -> dig out (the per-leg buried() check usually gets this first).
+        if (stalls >= 2 && buried()) { await surfaceOut("stuck underground - digging up toward the surface..."); stalls = 0; lastD = Infinity; continue }
+        if (stalls >= 4) return { ok: false, reason: 'blocked', dist: nd }
+      } else stalls = 0
+      lastD = nd
+    }
+  } finally {
+    setupMovements(bot) // back to the safe anti-grief profile
+  }
+}
+
+// Movement profile for cross-country travel. Preserves the one rule that matters -
+// canDig stays FALSE, so it never breaks blocks to path (no griefing) - but permits
+// the things a survival player does to get past terrain: bridge gaps/ravines and
+// pillar with cheap filler blocks from inventory, parkour, open doors, and swim.
+function travelMovements (bot) {
+  const m = new Movements(bot)
+  m.canDig = false            // never destroy blocks (anti-grief)
+  m.allow1by1towers = true    // pillar up to climb out of / over things
+  m.canOpenDoors = true
+  m.allowParkour = true
+  m.maxDropDown = 4           // don't plunge into caves/ravines chasing the target's XZ
+  if ('infiniteLiquidDropdownDistance' in m) m.infiniteLiquidDropdownDistance = false
+  if ('allowSprinting' in m) m.allowSprinting = true
+  // Bridge gaps/ravines with cheap blocks the bot is carrying (dirt/cobble/gravel...).
+  // Only used where a bridge is actually needed; on open ground it just walks.
+  try {
+    const md = require('minecraft-data')(bot.version)
+    const bridge = ['dirt', 'cobblestone', 'cobbled_deepslate', 'netherrack', 'stone', 'gravel', 'dirt_path', 'andesite', 'granite', 'diorite']
+    const ids = bridge.map(n => md.itemsByName[n] && md.itemsByName[n].id).filter(x => x != null)
+    if ('scafoldingBlocks' in m) m.scafoldingBlocks = ids
+  } catch { /* mcData not ready - fall back to no bridging (routes around) */ }
+  return m
 }
 
 // How close the bot trails a player when following. Range 2 settles right on top of
@@ -214,6 +483,156 @@ function bestTool (bot, blockName) {
   return tools[0] || null
 }
 
+// Which body slot an item is WORN in (so armor is put on, not just held). Returns
+// 'head'|'torso'|'legs'|'feet' for armor, else null. mineflayer's bot.equip needs
+// this destination - equipping armor to 'hand' only holds it (the "put it on did
+// nothing" bug). Covers every armor material + turtle helmet, elytra, pumpkin hat.
+function armorSlot (name) {
+  if (/_helmet$|^turtle_helmet$|^carved_pumpkin$/.test(name)) return 'head'
+  if (/_chestplate$|^elytra$/.test(name)) return 'torso'
+  if (/_leggings$/.test(name)) return 'legs'
+  if (/_boots$/.test(name)) return 'feet'
+  return null
+}
+// Best armor piece among candidates for one slot (strongest material wins).
+function bestArmor (pieces) {
+  const order = ['netherite', 'diamond', 'iron', 'chainmail', 'golden', 'leather', 'turtle']
+  for (const m of order) { const p = pieces.find(i => i.name.startsWith(m)); if (p) return p }
+  return pieces[0] || null
+}
+
+// Leather-armor pieces in PROTECTION-PER-LEATHER order, so a partial haul still
+// guards the most valuable slots first: chestplate (3 armor / 8 leather) beats
+// leggings (2/7) beats helmet (1/5) beats boots (1/4). Leather armor is the
+// from-NOTHING tier - the recipes are pure leather (no sticks/planks), so the only
+// crafting prerequisite is a table.
+const LEATHER_PIECES = [
+  { item: 'leather_chestplate', slot: 'torso', leather: 8 },
+  { item: 'leather_leggings', slot: 'legs', leather: 7 },
+  { item: 'leather_helmet', slot: 'head', leather: 5 },
+  { item: 'leather_boots', slot: 'feet', leather: 4 }
+]
+
+// Get the bot ARMORED from nothing: wear any armor it already has, then craft
+// leather armor (hunting cows for leather as needed) for the still-bare slots and
+// put it on. Only fills EMPTY slots - never downgrades iron->leather. BOUNDED: if
+// cows/leather run short it makes what it can and returns. This is the survival
+// answer to "respawned naked, night mobs incoming" and mirrors autoBuild's tool
+// bootstrap. Returns a short status string. Never throws fatally.
+async function provisionArmor (bot, opts = {}) {
+  const say = opts.say || (() => {})
+  const isStopped = opts.isStopped || (() => false)
+  const restore = opts.restoreMovements || (() => setupMovements(bot))
+  const mcData = require('minecraft-data')(bot.version)
+  const inv = () => (bot.inventory ? bot.inventory.items() : [])
+  const wore = []
+  // 1) Wear anything already in the pack for a bare slot (best material first).
+  for (const slot of ['head', 'torso', 'legs', 'feet']) {
+    if (wornArmor(bot)[slot]) continue
+    const pick = bestArmor(inv().filter(i => armorSlot(i.name) === slot))
+    if (pick) { try { await bot.equip(pick, slot); wore.push(pick.name) } catch { /* transient */ } }
+  }
+  let stillMissing = LEATHER_PIECES.filter(p => !wornArmor(bot)[p.slot])
+  if (!stillMissing.length) return wore.length ? `armored up: ${wore.join(', ')}` : 'already wearing armor in every slot'
+
+  // 2) Need to CRAFT leather pieces. Gather leather if short.
+  const have = () => provision.inventoryCounts(bot).leather || 0
+  const needLeather = stillMissing.reduce((s, p) => s + p.leather, 0)
+  if (have() < needLeather && !isStopped()) {
+    say(`no armor on me - hunting cows for leather (${have()}/${needLeather})`)
+    try { await provision.gatherLeather(bot, needLeather - have(), { say, isStopped, restoreMovements: restore }) }
+    catch (e) { say(`(leather hunt cut short: ${e.message})`) }
+  }
+  // 3) Ensure a crafting table exists (leather armor needs only leather + a table).
+  //    ensureTable throws with no planks/table - chop a little wood for one first.
+  if (!isStopped() && have() >= LEATHER_PIECES[LEATHER_PIECES.length - 1].leather) {
+    try { await provision.ensureTable(bot, { say, isStopped }) }
+    catch {
+      try {
+        const wood = provision.detectWood(bot) || 'oak'
+        const plan = provision.planProvision(mcData, { crafting_table: 1 }, provision.inventoryCounts(bot), { primaryWood: wood })
+        if (plan.tasks.length) await provision.runPlan(bot, plan, { say, isStopped, restoreMovements: restore })
+      } catch (e) { say(`(no table and couldn't make one: ${e.message})`) }
+    }
+  }
+  // 4) Craft + wear whatever the leather affords, best slots first.
+  for (const p of stillMissing) {
+    if (isStopped() || have() < p.leather) continue
+    try {
+      await provision.runCraft(bot, p.item, 1, true, { say, isStopped, restoreMovements: restore })
+      const made = inv().find(i => i.name === p.item)
+      if (made) { await bot.equip(made, p.slot); wore.push(p.item) }
+    } catch (e) { say(`(couldn't make ${p.item}: ${e.message})`) }
+  }
+  restore()
+  if (wore.length) return `armored up: ${wore.join(', ')}`
+  return "couldn't scrape together any armor - no cows/leather around here"
+}
+
+// SURVIVAL PREP before a long trek to a far build site. The bot spawns with NOTHING and the
+// site is often ~600 blocks away - trekking there naked/unarmed/starving is where it kept
+// dying. So FIRST, near spawn (safer, and the gather flow shelters/eats itself), secure the
+// survival basics, THEN travel equipped: (1) a wooden SWORD + pickaxe + axe (fight + tools),
+// (2) a little food (hunt animals), (3) leather armor if cows are around. All bounded - if a
+// resource isn't available it makes what it can and moves on (never blocks the build). The
+// tool/armor bootstraps inside autoBuild then no-op (they check hasKind/wornArmor). Idempotent,
+// so it's also safe to re-run after a death mid-trek strips the gear.
+async function survivalPrep (bot, opts = {}) {
+  const say = opts.say || (() => {})
+  const isStopped = opts.isStopped || (() => false)
+  const restore = opts.restoreMovements || (() => setupMovements(bot))
+  const mcData = require('minecraft-data')(bot.version)
+  const primaryWood = provision.detectWood(bot) || 'oak'
+  const hasKind = k => (bot.inventory ? bot.inventory.items() : []).some(i => i.name.endsWith('_' + k))
+  // 1) tools + a SWORD (chop wood -> planks/sticks/table -> tools). The sword is the key add -
+  //    auto-defend with bare fists barely dents a mob; with a sword it kills what hunts it.
+  if (!isStopped() && (!hasKind('pickaxe') || !hasKind('axe') || !hasKind('sword'))) {
+    const want = {}
+    if (!hasKind('pickaxe')) want.wooden_pickaxe = 1
+    if (!hasKind('axe')) want.wooden_axe = 1
+    if (!hasKind('sword')) want.wooden_sword = 1
+    say(`gearing up before the trip - ${Object.keys(want).map(t => t.replace('wooden_', '')).join(' + ')}`)
+    try {
+      const p = provision.planProvision(mcData, want, provision.inventoryCounts(bot), { primaryWood })
+      if (p.tasks.length) await provision.runPlan(bot, p, { say, isStopped, restoreMovements: restore })
+    } catch (e) { say(`(couldn't make tools yet: ${e.message})`) }
+  }
+  // 2) food for the road - hunt a couple animals for meat (auto-eat feeds on it, raw is fine).
+  if (!isStopped() && !provision.hasFood(bot)) {
+    say('grabbing some food for the road')
+    try { for (let i = 0; i < 3 && !provision.hasFood(bot) && !isStopped(); i++) { if (!await provision.huntForFood(bot, { isStopped })) break } } catch { /* no animals - travel-phase hunt covers it */ }
+  }
+  // 3) leather armor if cows/leather are around (bounded; proceeds naked if not - the shelter
+  //    reflex covers a still-naked bot at night).
+  if (!isStopped() && Object.values(wornArmor(bot)).some(v => !v)) {
+    try { const r = await provisionArmor(bot, { say, isStopped, restoreMovements: restore }); if (r) say(r) } catch (e) { say(`(armor prep: ${e.message})`) }
+  }
+  restore()
+  return { armed: hasKind('sword'), fed: provision.hasFood(bot), armored: !Object.values(wornArmor(bot)).some(v => !v) }
+}
+
+// Walk onto nearby dropped items to pick them up (so "I dropped it, put it on"
+// works). Grabs up to `max` drops within `radius`, bounded by a deadline. Returns
+// the count collected. Best-effort - never throws.
+async function collectNearbyDrops (bot, { radius = 8, max = 6, deadlineMs = 12000 } = {}) {
+  const start = Date.now()
+  let got = 0
+  for (let n = 0; n < max; n++) {
+    if (Date.now() - start > deadlineMs) break
+    let target = null; let best = radius
+    for (const e of Object.values(bot.entities || {})) {
+      if (!e || !e.position || e.name !== 'item') continue
+      const d = e.position.distanceTo(bot.entity.position)
+      if (d < best) { best = d; target = e }
+    }
+    if (!target) break
+    try { await gotoTimed(bot, new goals.GoalNear(target.position.x, target.position.y, target.position.z, 0), 8000) } catch { break }
+    await new Promise(r => setTimeout(r, 400)) // let the pickup register in inventory
+    got++
+  }
+  return got
+}
+
 // ---- command dispatch ------------------------------------------------------
 
 async function handle (bot, line) {
@@ -251,6 +670,8 @@ async function handle (bot, line) {
         '  sleep | wake              sleep in a nearby bed / wake up',
         '  attack | defend           fight nearest hostile (flees creepers)',
         '  eat | drop <item> [n] | equip <item>',
+        '  wear [armor]              put on armor you have (grabs dropped armor nearby first)',
+        '  armorup                   get armor from nothing (hunt cows -> craft leather set)',
         ' building (op):',
         '  setblock <x> <y> <z> <block>',
         '  fill <x1 y1 z1 x2 y2 z2> <block>',
@@ -260,6 +681,7 @@ async function handle (bot, line) {
         '  schematic load <url|file>   load a .schem (direct link or local file)',
         '  schematic materials         list blocks the loaded build needs',
         '  schematic build [here|x y z]  build it in SURVIVAL from inventory (asks for materials)',
+        '   (operators can also just SAY "build <name>" in chat - no ! needed)',
         '  provision [run]             plan/execute gathering+crafting the whole bill of materials',
         '  clear [radius=8]', '  give <item> [count]',
         ' admin:  tp <x> <y> <z> | gamemode <mode> | say <msg>'
@@ -382,38 +804,172 @@ async function handle (bot, line) {
     }
 
     case 'equip':
+    case 'wear':
+    case 'armor':
+    case 'armour':
     case 'hold': {
-      // actually hold an item from inventory, so "show me your sword" is true
+      // Hold OR wear an item. Armor pieces are routed to their body slot (head/
+      // torso/legs/feet) so they're actually WORN, not just held; a shield goes to
+      // the off-hand; everything else to the hand. "wear"/"armor" with no item (or
+      // "equip armor"/"wear all") puts on EVERY armor piece you have - and first
+      // picks up any armor a player just dropped nearby, so "put it on" just works.
+      const arg = (a[0] || '').toLowerCase()
+      const argAll = a.join(' ').toLowerCase() // the whole request, not just the first word
+      // Treat as "put on ALL armor" when the request is about armor generally rather
+      // than one specific piece. The local LLM phrases this many ways - "wear",
+      // "wear armor", "wear iron_armor" (a made-up id), "equip gear", "wear my set",
+      // "put it on" - so the WHOLE arg string mentioning armo(u)r/gear/set/kit/suit/
+      // all/it counts, as does a bare wear/armor. A real piece ("wear diamond_helmet")
+      // does NOT match (no such word) and still takes the single-item path below.
+      const isArmorWord = /armo|gear|\bset\b|\bkit\b|\bsuit\b|\ball\b|everything|\bit\b/.test(argAll)
+      const wantAll = cmd === 'armor' || cmd === 'armour' || // the verb itself means "armor up"
+                      (cmd === 'wear' && !arg) ||             // bare "wear"
+                      isArmorWord                            // any "...armor/gear/set..." phrasing
+      if (wantAll) {
+        await collectNearbyDrops(bot, { radius: 8 }) // grab dropped armor first
+        const inv = bot.inventory ? bot.inventory.items() : []
+        const worn = []
+        let hadCandidate = false
+        for (const slot of ['head', 'torso', 'legs', 'feet']) {
+          const current = bot.inventory.slots[bot.getEquipmentDestSlot(slot)] || null
+          const candidates = inv.filter(i => armorSlot(i.name) === slot)
+          if (candidates.length) hadCandidate = true
+          if (current) candidates.push(current) // keep what's on unless we can beat it
+          const pick = bestArmor(candidates)
+          // skip if nothing to wear, or the best is already the piece we're wearing
+          // (never DOWNGRADE by putting on a weaker loose piece over a better worn one)
+          if (!pick || (current && pick.name === current.name)) continue
+          try { await bot.equip(pick, slot); worn.push(pick.name) } catch { /* slot busy / transient */ }
+        }
+        if (worn.length) return `put on ${worn.join(', ')}`
+        return hadCandidate ? 'already wearing my best armor' : 'no armor to put on (drop some by me first)'
+      }
       const name = a[0]
-      if (!name) return 'usage: equip <item>'
+      if (!name) return 'usage: equip <item>  (or "wear armor" to put on all your armor)'
       const items = bot.inventory ? bot.inventory.items() : []
       const item = items.find(i => i.name === name) || items.find(i => i.name.includes(name))
       if (!item) return `no ${name} in inventory (have: ${items.map(i => i.name).join(', ') || 'nothing'})`
-      await bot.equip(item, 'hand')
-      return `equipped ${item.name}`
+      const slot = armorSlot(item.name)
+      const dest = slot || (/shield/.test(item.name) ? 'off-hand' : 'hand')
+      await bot.equip(item, dest)
+      return slot ? `put on ${item.name}` : `equipped ${item.name}`
+    }
+    case 'armorup':
+    case 'gearup': {
+      // Actively GET armored from nothing: wear what we have, else hunt cows for
+      // leather -> craft leather armor -> put it on. Unlike `wear` (which only equips
+      // armor already in the pack), this ACQUIRES it. For "i'm naked and it's night".
+      buildAbort = false // a previous stop must not abort this fresh request
+      return await provisionArmor(bot, { say: m => bot.chat(String(m).slice(0, 256)), isStopped: () => buildAbort })
     }
 
     case 'come': {
       const t = findPlayer(bot, a[0])
       if (!t) return `no player ${a[0] || 'nearby'}`
-      const p = t.position
-      // BLOCK until we actually arrive, so the brain can't revert to following
-      // someone else mid-walk and run back.
-      try { await gotoTimed(bot, new goals.GoalNear(p.x, p.y, p.z, 2), 20000) } catch (e) { return `couldn't reach ${a[0] || 'player'}: ${e.message}` }
-      return `arrived at ${a[0] || 'player'}`
+      // FAR player? Stage-travel toward them first (a single pathfind can't cross
+      // hundreds of blocks - unloaded chunks + A* budget), bridging/climbing en route,
+      // then do the precise arrival. Re-reads their live position after travelling.
+      const me = bot.entity.position
+      if (Math.hypot(t.position.x - me.x, t.position.z - me.z) > 80) {
+        buildAbort = false
+        beginActivity('come', a[0] || 'player')
+        const r = await travelFar(bot, { x: t.position.x, y: t.position.y, z: t.position.z }, { isStopped: () => buildAbort, say: m => bot.chat(String(m).slice(0, 256)) })
+        if (!r.ok && r.dist > 80) { endActivity(false, r.reason); return `couldn't get to ${a[0] || 'you'}: ${r.reason} (~${Math.round(r.dist)} blocks off)` }
+        endActivity(true, 'reached travel range')
+      }
+      // Robust arrival: retries + settles for the nearest reachable spot instead of
+      // freezing at a wall. Blocks until done so the brain doesn't wander off mid-walk.
+      return await comeToPlayer(bot, a[0])
+    }
+    case 'recover':
+    case 'getstuff': {
+      // Go back to where we died and grab our stuff. SAFE: never returns to a lava/fire
+      // death (items are gone and we'd just die again), and bails if lava/fire has since
+      // appeared at the spot. Stage-travels if it's far. The BRAIN decides WHEN to call
+      // this (from the `died` field in state); this just does it safely.
+      if (!lastDeath) return "i haven't died recently - nothing to go get"
+      if (lastDeath.retrieved) return 'already went back for my stuff'
+      const d = lastDeath
+      if (d.dangerous) { lastDeath.retrieved = true; return `i died in lava/fire at ${d.x},${d.y},${d.z} - my stuff burned up, not walking back into that` }
+      buildAbort = false
+      const me = bot.entity.position
+      if (Math.hypot(d.x - me.x, d.z - me.z) > 80) {
+        beginActivity('recover', `${d.x},${d.y},${d.z}`)
+        const r = await travelFar(bot, { x: d.x, y: d.y, z: d.z }, { isStopped: () => buildAbort, say: m => bot.chat(String(m).slice(0, 256)) })
+        if (!r.ok && r.dist > 24) { endActivity(false, r.reason); return `couldn't get back to where i died (${d.x},${d.y},${d.z}): ${r.reason}` }
+        endActivity(true, 'reached death site')
+      }
+      try { await gotoTimed(bot, new goals.GoalNear(d.x, d.y, d.z, 2), 20000) } catch {}
+      // Safety re-check: if lava/fire is right here now, don't dive in for a few items.
+      const here = bot.entity.position.floored()
+      for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
+        const b = bot.blockAt(new Vec3(here.x + dx, here.y + dy, here.z + dz))
+        if (b && /lava|fire/.test(b.name)) { return `there's lava where i died - leaving my stuff, not worth dying again` }
+      }
+      // Grab loose drops (vanilla) AND try to open a grave block right here (AxGraves
+      // & similar keep items in a grave you right-click to reclaim).
+      await collectNearbyDrops(bot, { radius: 6 })
+      const graveBlk = bot.blockAt(new Vec3(d.x, d.y, d.z)) || bot.blockAt(new Vec3(d.x, d.y + 1, d.z))
+      if (graveBlk && graveBlk.name !== 'air') { try { await bot.activateBlock(graveBlk) } catch {} ; await collectNearbyDrops(bot, { radius: 6 }) }
+      lastDeath.retrieved = true
+      return `back where i died (${d.x},${d.y},${d.z}) - grabbed what i could`
     }
     case 'goto': {
       // a named waypoint ("goto home") or explicit coords ("goto 10 -60 4")
       if (a[0] && Number.isNaN(Number(a[0]))) {
         const wp = memory.getWaypoint(a[0])
-        if (!wp) return `no waypoint "${a[0]}" (known: ${memory.waypointNames().join(', ') || 'none'})`
+        if (!wp) {
+          // Not a waypoint - maybe the brain meant a PLAYER ("goto Steve"). Match an
+          // online player (tolerate a leading dot/@ the brain sometimes prepends) and
+          // just come to them instead of erroring.
+          const pname = a[0].replace(/^[.@]+/, '')
+          const t = findPlayer(bot, pname)
+          if (t) {
+            buildAbort = false
+            const me = bot.entity.position
+            if (Math.hypot(t.position.x - me.x, t.position.z - me.z) > 80) {
+              const r = await travelFar(bot, { x: t.position.x, y: t.position.y, z: t.position.z }, { isStopped: () => buildAbort, say: m => bot.chat(String(m).slice(0, 256)) })
+              if (!r.ok && r.dist > 80) return `couldn't get to ${pname}: ${r.reason} (~${Math.round(r.dist)} blocks off)`
+            }
+            return await comeToPlayer(bot, pname)
+          }
+          return `no waypoint "${a[0]}" (known: ${memory.waypointNames().join(', ') || 'none'})`
+        }
         try { await gotoTimed(bot, new goals.GoalNear(wp.x, wp.y, wp.z, 1), 20000) } catch (e) { return `couldn't reach ${a[0]}: ${e.message}` }
+        // gotoTimed can resolve without actually arriving (pathfinder settles at the
+        // closest reachable node) - verify the real distance so we never claim a lie.
+        { const dp = bot.entity.position; const dd = Math.hypot(dp.x - wp.x, dp.z - wp.z); if (dd > 3) return `couldn't reach ${a[0]} - blocked ~${Math.round(dd)} blocks short` }
         return `arrived at ${a[0].toLowerCase()} (${wp.x},${wp.y},${wp.z})`
       }
       const [x, y, z] = a.map(Number)
       if ([x, y, z].some(Number.isNaN)) return 'usage: goto <x> <y> <z> | goto <waypoint>'
-      try { await gotoTimed(bot, new goals.GoalNear(x, y, z, 1), 20000) } catch (e) { return `couldn't reach ${x},${y},${z}: ${e.message}` }
+      // FAR targets can't be reached by one pathfind (unloaded chunks + A* budget),
+      // so stage the trip: walk there in hops until close, then a precise approach.
+      const me0 = bot.entity.position
+      if (Math.hypot(x - me0.x, z - me0.z) > 80) {
+        buildAbort = false // a previous "stop" must not abort this fresh trip
+        const r = await travelFar(bot, { x, y, z }, { isStopped: () => buildAbort, say: m => bot.chat(String(m).slice(0, 256)) })
+        if (!r.ok) return `couldn't get to ${x},${y},${z}: ${r.reason} (~${Math.round(r.dist)} blocks away)`
+      }
+      try { await gotoTimed(bot, new goals.GoalNear(x, y, z, 1), 20000) } catch (e) { return `got near ${x},${y},${z} but couldn't settle: ${e.message}` }
+      // Verify we ACTUALLY arrived - gotoTimed can resolve at the closest reachable node
+      // (walled off / no path) without reaching the goal; claiming "arrived" then would
+      // feed the brain a false success.
+      { const dp = bot.entity.position; const dd = Math.hypot(dp.x - x, dp.z - z); if (dd > 3) return `couldn't reach ${x},${y},${z} - blocked ~${Math.round(dd)} blocks away` }
       return `arrived at ${x},${y},${z}`
+    }
+    case 'travel': {
+      // explicit long-distance walk (staged). Handy on its own and used before a
+      // far-away build. Same staged logic goto uses for distant targets.
+      const [x, y, z] = a.slice(0, 3).map(Number)
+      if ([x, y, z].some(Number.isNaN)) return 'usage: travel <x> <y> <z>'
+      buildAbort = false
+      beginActivity('travel', `${x},${y},${z}`)
+      const r = await travelFar(bot, { x, y, z }, { isStopped: () => buildAbort, say: m => bot.chat(String(m).slice(0, 256)) })
+      if (!r.ok) { endActivity(false, r.reason); return `couldn't get to ${x},${y},${z}: ${r.reason} (~${Math.round(r.dist)} blocks away)` }
+      try { await gotoTimed(bot, new goals.GoalNear(x, y, z, 2), 20000) } catch {}
+      endActivity(true, `arrived near ${x},${y},${z}`)
+      return `arrived near ${x},${y},${z}`
     }
     case 'remember':
     case 'savepoint': {
@@ -438,11 +994,14 @@ async function handle (bot, line) {
     case 'follow': {
       const t = findPlayer(bot, a[0])
       if (!t) return `no player ${a[0] || 'nearby'}`
+      followTarget = t.username // remember for sticky-follow (resume after interruptions)
       bot.pathfinder.setGoal(new goals.GoalFollow(t, FOLLOW_RANGE), true)
       return `following ${a[0] || 'nearest player'}`
     }
     case 'stop':
+      followTarget = null // end persistent follow - "stop" means stop
       buildAbort = true // also halts an in-progress schematic build
+      resumeJob = null; buildInterrupted = false // an explicit stop cancels auto-resume too
       bot.pathfinder.setGoal(null); return 'stopped'
 
     case 'attack':
@@ -749,18 +1308,34 @@ async function handle (bot, line) {
         // flattens the footprint first so the build completes on unflat ground.
         const rest = a.slice(1)
         const doClear = rest.some(t => t.toLowerCase() === 'clear')
-        const originArgs = rest.filter(t => t.toLowerCase() !== 'clear')
+        let originArgs = rest.filter(t => t.toLowerCase() !== 'clear')
+        // "center" makes the reference point (coords, or "here" = bot's feet) the
+        // MIDDLE of the footprint instead of the origin corner. The natural-language
+        // "build it here" path uses this so the build is centred on where you stand.
+        let center = false
+        if (originArgs[0] && originArgs[0].toLowerCase() === 'center') { center = true; originArgs = originArgs.slice(1) }
         let at
         if (!originArgs.length || originArgs[0] === 'here') { const p = blockPos(bot); at = new Vec3(p.x, p.y, p.z) } else {
           const n = originArgs.slice(0, 3).map(Number)
-          if (n.some(Number.isNaN)) return 'usage: schematic build [here | <x> <y> <z>] [clear]'
+          if (n.some(Number.isNaN)) return 'usage: schematic build [here | [center] <x> <y> <z>] [clear]'
           at = new Vec3(n[0], n[1], n[2])
         }
+        // Centre horizontally on the reference point; keep Y as the base so the
+        // build rises from the ground (centring Y too would bury the lower half).
+        if (center) {
+          const st = loadedSchem.schem.start(); const en = loadedSchem.schem.end()
+          at = new Vec3(
+            at.x - Math.floor((st.x + en.x) / 2),
+            at.y - st.y,
+            at.z - Math.floor((st.z + en.z) / 2)
+          )
+        }
+        at = snapToGround(bot, loadedSchem.schem, at) // sit it on the ground, never floating
         building = true; buildAbort = false
         // Long-running (minutes) - run detached, chat progress, and return the
         // kickoff line now so the command/HTTP call doesn't block for the whole build.
         schematic.buildSurvival(bot, loadedSchem.schem, at, {
-          say: msg => bot.chat(String(msg).slice(0, 256)),
+          say: throttledSay(bot),
           isStopped: () => buildAbort,
           restoreMovements: () => setupMovements(bot),
           clear: doClear
@@ -790,7 +1365,7 @@ async function handle (bot, line) {
           .catch(e => { building = false; setupMovements(bot); bot.chat(`clear error: ${e.message}`) })
         return `clearing the build site at ${at.x},${at.y},${at.z} in survival - say "stop" to cancel.`
       }
-      return 'usage: schematic <load <url|file> | materials | build [here|x y z] [clear] | clear [here|x y z]>'
+      return 'usage: schematic <load <url|file> | materials | build [here | [center] x y z] [clear] | clear [here|x y z]>'
     }
 
     case 'gather': {
@@ -802,7 +1377,9 @@ async function handle (bot, line) {
       if (!item) return `usage: gather <item> [count<=64]  (know how: ${Object.keys(provision.GATHER_SOURCES).join(', ')})`
       if (!provision.GATHER_SOURCES[item]) return `I don't know how to gather ${item} (know: ${Object.keys(provision.GATHER_SOURCES).join(', ')})`
       buildAbort = false // a PREVIOUS stop must not abort this fresh gather
-      const r = await provision.runGather(bot, item, count, { isStopped: () => buildAbort, restoreMovements: () => setupMovements(bot) })
+      beginActivity('gather', `${count}x ${item}`)
+      const r = await provision.runGather(bot, item, count, { isStopped: () => buildAbort, restoreMovements: () => setupMovements(bot), homeY: Math.floor(bot.entity.position.y) })
+      endActivity(r.gathered >= count, `${r.gathered}/${count} ${item}: ${r.reason}`)
       return `gathered ${r.gathered}/${count} ${item} (${r.reason})`
     }
 
@@ -832,19 +1409,83 @@ async function handle (bot, line) {
       if (unob.length) return `can't provision: no way to obtain ${unob.join(', ')}`
       if (!plan.tasks.length) return 'inventory already covers the bill of materials - ready to build'
       provisioning = true; buildAbort = false
+      beginActivity('provision', `${plan.tasks.length} steps`)
       // long-running: run detached (like schematic build), chat progress
       provision.runPlan(bot, plan, {
-        say: msg => bot.chat(String(msg).slice(0, 256)),
+        say: throttledSay(bot),
         isStopped: () => buildAbort,
         restoreMovements: () => setupMovements(bot)
       }).then(results => {
         provisioning = false
         const bad = results.filter(r => !r.ok)
+        endActivity(!bad.length, bad.length ? bad.map(r => `${r.task.item || r.task.output}: ${r.note}`).join('; ') : 'have everything', { detached: true })
         bot.chat(bad.length
           ? `provisioning stopped: ${bad.map(r => `${r.task.type} ${r.task.item || r.task.output}: ${r.note}`).join('; ')}`.slice(0, 256)
           : 'provisioning done - I have everything, ready to build')
-      }).catch(e => { provisioning = false; bot.chat(`provisioning error: ${e.message}`.slice(0, 250)) })
+      }).catch(e => { provisioning = false; endActivity(false, e.message, { detached: true }); bot.chat(`provisioning error: ${e.message}`.slice(0, 250)) })
       return `provisioning ${plan.tasks.length} steps - I'll gather and craft everything myself. Say "stop" to cancel.`
+    }
+
+    case 'autobuild': {
+      // Full self-provisioned build: gather/craft/smelt the whole bill of materials
+      // (stashing in a chest), then build. "Build it from nothing." Operator-only
+      // (in CHEAT_CMDS). Long-running - runs detached and chats progress.
+      if (!loadedSchem) return 'no schematic loaded - schematic load <url|file> first'
+      if (building) return 'already building - say "stop" to cancel first'
+      const rest = a // NOTE: unlike `schematic build`, autobuild has NO subcommand - a[0] is
+      // already the first real arg (center/clear/coords). a.slice(1) here dropped `center`,
+      // landing a centred castle ~20 blocks off the operator's point (offset build = grief).
+      const doClear = rest.some(t => t.toLowerCase() === 'clear')
+      let originArgs = rest.filter(t => t.toLowerCase() !== 'clear')
+      let center = false
+      if (originArgs[0] && originArgs[0].toLowerCase() === 'center') { center = true; originArgs = originArgs.slice(1) }
+      let at
+      if (!originArgs.length || originArgs[0] === 'here') { const p = blockPos(bot); at = new Vec3(p.x, p.y, p.z) } else {
+        const n = originArgs.slice(0, 3).map(Number)
+        if (n.some(Number.isNaN)) return 'usage: autobuild [here | [center] x y z] [clear]'
+        at = new Vec3(n[0], n[1], n[2])
+      }
+      if (center) {
+        const st = loadedSchem.schem.start(); const en = loadedSchem.schem.end()
+        at = new Vec3(at.x - Math.floor((st.x + en.x) / 2), at.y - st.y, at.z - Math.floor((st.z + en.z) / 2))
+      }
+      at = snapToGround(bot, loadedSchem.schem, at) // sit it on the ground, never floating
+      building = true; buildAbort = false; buildInterrupted = false
+      beginActivity('autobuild', loadedSchem.name)
+      resumeJob = { schem: loadedSchem.schem, at } // remembered so a death can't lose the build
+      autoBuild(bot, loadedSchem.schem, at, {
+        say: throttledSay(bot),
+        isStopped: () => buildAbort,
+        restoreMovements: () => setupMovements(bot),
+        clear: doClear
+      }).then(r => {
+        building = false; setupMovements(bot)
+        if (diedJustNow()) return // died mid-build - the respawn handler resumes it, don't clear/report
+        resumeJob = null
+        endActivity(!r.stopped, `${r.placed}/${r.total} placed${r.stopped ? ' (stopped)' : ''}`, { detached: true })
+        bot.chat(`autobuild ${r.stopped ? 'stopped' : 'done'}: ${r.placed}/${r.total} placed${r.skipped ? `, ${r.skipped} skipped` : ''}`.slice(0, 256))
+      }).catch(e => { building = false; setupMovements(bot); if (diedJustNow()) return; resumeJob = null; endActivity(false, e.message, { detached: true }); bot.chat(`autobuild error: ${e.message}`.slice(0, 256)) })
+      return `building "${loadedSchem.name}" from scratch at ${at.x},${at.y},${at.z} - I'll gather everything myself, stash it in a chest, then build. Say "stop" to cancel.`
+    }
+
+    case 'stash': {
+      // deposit all build materials into a nearby/crafted chest (keeps tools/food)
+      try {
+        const chest = await provision.ensureChest(bot, {})
+        const n = await provision.depositMaterials(bot, chest, { keepDirt: 8 })
+        return `stashed ${n} item(s) in the chest at ${chest.position.x},${chest.position.y},${chest.position.z}`
+      } catch (e) { return `couldn't stash: ${e.message}` }
+    }
+    case 'unstash': {
+      // withdraw <item> [count] from a nearby chest
+      const name = a[0]
+      if (!name) return 'usage: unstash <item> [count]'
+      const count = Math.max(1, parseInt(a[1] || '64', 10))
+      const mcData = require('minecraft-data')(bot.version)
+      const chestId = mcData.blocksByName.chest && mcData.blocksByName.chest.id
+      const chest = chestId ? bot.findBlock({ matching: chestId, maxDistance: 8 }) : null
+      if (!chest) return 'no chest within reach'
+      try { const got = await provision.withdrawItem(bot, chest, name, count); return got ? `took ${got} ${name}` : `no ${name} in the chest` } catch (e) { return `couldn't unstash: ${e.message}` }
     }
 
     case 'clearinv': {
@@ -928,6 +1569,20 @@ function nearbyPlayers (bot) {
     .sort((a, b) => a.dist - b.dist)
 }
 
+// The armor pieces the bot ACTUALLY has equipped, per slot (null if bare). Read
+// straight from the armor inventory slots, so /state reflects worn gear and the
+// brain can't claim to be wearing something it isn't (or re-wear what it has on).
+function wornArmor (bot) {
+  const out = { head: null, torso: null, legs: null, feet: null }
+  try {
+    for (const slot of ['head', 'torso', 'legs', 'feet']) {
+      const it = bot.inventory && bot.inventory.slots[bot.getEquipmentDestSlot(slot)]
+      if (it) out[slot] = it.name
+    }
+  } catch { /* not spawned / slots not ready */ }
+  return out
+}
+
 // Rich self+world snapshot so any brain can reason about what to do.
 function state (bot) {
   const ent = bot.entity
@@ -962,6 +1617,12 @@ function state (bot) {
     blockBelow: below ? below.name : null,
     lookingAt: looking ? { name: looking.name, pos: { x: looking.position.x, y: looking.position.y, z: looking.position.z } } : null,
     heldItem: bot.heldItem ? bot.heldItem.name : null,
+    wearing: wornArmor(bot),      // armor actually equipped {head,torso,legs,feet}, so the brain never claims armor it isn't wearing
+    // where we recently died + whether it's safe to go back (so the brain can choose to
+    // `recover`). Expires after 15 min; null once we've already been back for it.
+    died: (lastDeath && !lastDeath.retrieved && Date.now() - lastDeath.at < 900000)
+      ? { x: lastDeath.x, y: lastDeath.y, z: lastDeath.z, dangerous: lastDeath.dangerous }
+      : null,
     inventory: (bot.inventory ? bot.inventory.items() : []).map(i => `${i.name} x${i.count}`),
     players,
     alone: players.length === 0, // no OTHER players nearby (you are never in this list)
@@ -969,8 +1630,62 @@ function state (bot) {
     moving,                       // is the body currently pathing somewhere?
     goal,                         // current pathfinder goal type (GoalFollow/GoalNear/...) or null
     busy: isBusy(),               // an operator build/provision is driving the body - the brain should hold
+    // OBSERVABILITY so the brain can spot + break out of stuck/failed/hazardous states:
+    activity: activity ? { name: activity.name, detail: activity.detail, forSec: Math.round((Date.now() - activity.startedAt) / 1000) } : null, // a long op still running from a past turn
+    lastResult: (lastOutcome && Date.now() - lastOutcome.at < 180000) // how the last long/detached/failed op ended (results that don't come back via /cmd)
+      ? { action: lastOutcome.action, ok: lastOutcome.ok, detail: lastOutcome.detail, ageSec: Math.round((Date.now() - lastOutcome.at) / 1000) }
+      : null,
+    stuck: stuckSince ? { forSec: Math.round((Date.now() - stuckSince) / 1000) } : null, // body trying to move but not progressing
+    hazards: hazards(bot),        // { underground, onFire, inLava, inWater, drowning } - immediate dangers
     waypoints: memory.waypointNames(), // named places you can "goto <name>"
     entities: summariseEntities(bot)
+  }
+}
+
+// Does this block hold water at head height (so a submerged head = drowning)? True for
+// a water source/flow, a bubble column, aquatic plants that only grow underwater
+// (seagrass/kelp), and any WATERLOGGED block (waterlogged stairs/slabs/fences, coral,
+// etc.). Property name varies by mineflayer version, so probe both shapes defensively.
+function isWaterlogged (b) {
+  if (!b) return false
+  if (b.name === 'water' || b.name === 'bubble_column') return true
+  if (/seagrass|kelp/.test(b.name)) return true
+  try {
+    const props = (typeof b.getProperties === 'function' ? b.getProperties() : b._properties) || {}
+    if (props.waterlogged === true || props.waterlogged === 'true') return true
+  } catch { /* no props */ }
+  return false
+}
+
+// Immediate environmental dangers, so the brain can act (get out of the fire/lava,
+// surface for air, dig up if trapped). Uses the same block/entity/physics reads the
+// rest of state() uses; every field is best-effort and never throws.
+function hazards (bot) {
+  const ent = bot.entity
+  const p = ent && ent.position
+  let onFire = false
+  let headWater = false
+  try {
+    const at = p && bot.blockAt(p)
+    const head = p && bot.blockAt(p.offset(0, 1, 0))
+    if ((at && /^(fire|soul_fire)$/.test(at.name)) || (head && /^(fire|soul_fire)$/.test(head.name))) onFire = true
+    // entity "burning" flag (bit 0x01 of metadata index 0) - catches fire that clings
+    // after we step off the flames. Best-effort: metadata shape varies by version.
+    if (!onFire && ent && ent.metadata && (Number(ent.metadata[0]) & 0x01)) onFire = true
+    // Drowning = HEAD block holds water (terrain truth). We do NOT use bot.oxygenLevel:
+    // on a live 1.21 server it reads ~4 on DRY LAND (not the ~20 you'd expect), so an
+    // `oxygen <= 6` test fires drowning=true everywhere and floods the brain with a false
+    // "get out of the water" hazard. Head-block truth can't false-positive on land. Must
+    // count WATERLOGGED blocks too - a real river bottom is seagrass/kelp (waterlogged,
+    // NOT named "water"), so a bare /water/ name test would miss actual submersion.
+    if (isWaterlogged(head)) headWater = true
+  } catch { /* world/metadata not ready */ }
+  return {
+    underground: (() => { try { return provision.hasSolidCeiling(bot, 45, { ignoreLeaves: true }) } catch { return false } })(),
+    onFire,
+    inLava: !!(ent && ent.isInLava),
+    inWater: !!(ent && ent.isInWater),
+    drowning: headWater
   }
 }
 
@@ -982,11 +1697,244 @@ function setupMovements (bot) {
   m.canOpenDoors = true       // open doors instead of getting stuck / breaking them
   m.allowParkour = true
   if ('scafoldingBlocks' in m) m.scafoldingBlocks = [] // don't place blocks to bridge
+  // PATHFINDER FIX: mineflayer-pathfinder only auto-opens fence GATES (its "openable"
+  // set is built from block names containing "gate"). Plain doors are never added, so
+  // with digging off a door reads as an impassable WALL - the bot detours to a nearby
+  // solid block (the "ran to the glass" bug) and gives up. Add wooden doors + trapdoors
+  // to the openable set so it routes THROUGH them. Iron doors need redstone, so they
+  // stay walls. Keyed by block id to match how the lib tests `openable.has(block.type)`.
+  try {
+    for (const b of bot.registry.blocksArray) {
+      const n = b.name.toLowerCase()
+      if (n.includes('door') && !n.includes('trapdoor') && !n.includes('iron')) m.openable.add(b.id)
+    }
+  } catch (e) { /* registry shape changed - fall back to gates-only */ }
   bot.pathfinder.setMovements(m)
 }
 
 // busy = a long autonomous flow (schematic build / provisioning) is running;
-// idle reflexes (auto-collect...) must not steal the bot's movement meanwhile
-function isBusy () { return building || provisioning }
+// idle reflexes (auto-collect...) must not steal the bot's movement meanwhile.
+// buildReqActive covers an operator BUILD REQUEST end-to-end - including the
+// travel-to-site phase BEFORE autobuild flips `building` - so the brain's /cmd
+// stop is gated for the whole trip, not just the placing. Without it the brain
+// stopped the walk to the site 500 blocks out and the build never began.
+let buildReqActive = false
+function setBuildReqActive (v) { buildReqActive = !!v }
+function isBusy () { return building || provisioning || buildReqActive }
+function isEscaping () { return escaping }
 
-module.exports = { handle, state, setupMovements, eatFood, placeTorchNearby, isBusy }
+// Sticky-follow reflex (called on a timer by the body). If the bot was told to
+// follow someone but the follow goal got replaced by a transient brain action
+// (attack/goto/scan) and the body is now IDLE, re-issue the follow goal so it keeps
+// trailing them - the "why did it stop following me" fix. No-op while a follow/other
+// goal is active (won't fight the brain), while busy building, or if the target is
+// out of view. Cleared by `stop`. Returns a status string when it resumed, else null.
+function maybeResumeFollow (bot) {
+  if (!followTarget || isBusy()) return null
+  if (!bot || !bot.entity || !bot.pathfinder) return null
+  if (bot.pathfinder.goal) return null // already pathing (following or busy) - leave it be
+  const t = findPlayer(bot, followTarget)
+  if (!t) return null // can't see them right now - try again next tick
+  bot.pathfinder.setGoal(new goals.GoalFollow(t, FOLLOW_RANGE), true)
+  return `resumed following ${followTarget}`
+}
+
+// Highest SOLID (non-air, non-leaf) block Y at a column - the ground surface. Used to
+// sit a build on the ground instead of floating a block up (a floating foundation has
+// nothing to place against, so the whole build fails - verified: 0/44 when floating).
+function surfaceYAt (bot, x, z, fromY) {
+  for (let y = Math.floor(fromY) + 6; y > fromY - 48; y--) {
+    const b = bot.blockAt(new Vec3(x, y, z))
+    if (b && b.boundingBox === 'block' && !/air$|_leaves$/.test(b.name)) return y
+  }
+  return null
+}
+
+// Snap the build origin so its bottom solid layer rests on the ground at the footprint's
+// CENTRE column - kills "Y one block too high -> floating dud" builds. No-op if the
+// surface can't be read (chunk not loaded), so it can never make things worse.
+function snapToGround (bot, schem, at) {
+  const st = schem.start(); const en = schem.end()
+  const cx = at.x + Math.floor((st.x + en.x) / 2)
+  const cz = at.z + Math.floor((st.z + en.z) / 2)
+  const surf = surfaceYAt(bot, cx, cz, at.y + st.y)
+  if (surf == null) return at
+  return new Vec3(at.x, surf + 1 - st.y, at.z) // bottom layer (at.y+st.y) lands on surf+1
+}
+
+// Full self-provisioned build ("sent off with nothing -> builds it"): if we already
+// have the whole bill of materials, just build. Otherwise set up a CHEST by the site,
+// gather/craft/smelt the materials in BATCHES - depositing each finished batch so the
+// 36-slot pack never overflows on a 2000+ block build - then build, pulling materials
+// back out of the chest on demand. Long-running; chats progress. Returns build result.
+async function autoBuild (bot, schem, at, opts = {}) {
+  const say = opts.say || (() => {})
+  const isStopped = opts.isStopped || (() => false)
+  const restore = opts.restoreMovements || (() => setupMovements(bot))
+  const mcData = require('minecraft-data')(bot.version)
+  const bom = schematic.billOfMaterials(schem).counts
+  // SCAFFOLD DIRT must be PROVISIONED, not just reserved - a from-nothing bot arrives with 0
+  // dirt, so without adding it to the BOM the builder either can't reach upper layers (build
+  // finishes short + clears the resume) or cannibalises the BOM's own cobble as scaffold ->
+  // a shortfall that hangs in waitForMaterial. Mirror the standalone `provision` command.
+  if (schem.size.y > 2) bom.dirt = (bom.dirt || 0) + 8 + 2 * schem.size.y
+  const KEEP_DIRT = schem.size.y > 2 ? Math.min(200, 16 + 3 * schem.size.y) : 4 // scaffold reserve
+  // Use whatever WOOD is actually growing nearby for generic tool/fuel needs (so a
+  // savanna gathers acacia, not oak it can't find). null -> planner falls back to oak.
+  const primaryWood = provision.detectWood(bot)
+  if (primaryWood && primaryWood !== 'oak') say(`(using ${primaryWood} wood - it's what's around)`)
+
+  // Already have everything? Just build.
+  const inv0 = provision.inventoryCounts(bot)
+  if (!Object.entries(bom).some(([n, c]) => (inv0[n] || 0) < c)) {
+    say('i have all the materials - building')
+    return await schematic.buildSurvival(bot, schem, at, { say, isStopped, restoreMovements: restore, clear: opts.clear })
+  }
+  say('gonna gather everything myself first...')
+
+  // TOOL BOOTSTRAP: if we're starting with no digging tools (e.g. we died and lost our
+  // whole kit in lava), craft the basics FIRST - chop wood -> planks/table/sticks ->
+  // wooden pickaxe + axe - BEFORE trying to provision any build material. Without this a
+  // gearless bot reaches a stone material with no pickaxe and just spins (mining stone
+  // bare-handed drops nothing). The per-material planner also pulls in tools, but doing
+  // it up front makes a from-NOTHING (or lost-everything) run reliable.
+  const hasKind = k => (bot.inventory ? bot.inventory.items() : []).some(i => i.name.endsWith('_' + k))
+  const bomNeedsMining = Object.keys(bom).some(n => provision.GATHER_TOOL[n] || provision.SMELT_MAP[n])
+  if (!isStopped() && bomNeedsMining && (!hasKind('pickaxe') || !hasKind('axe') || !hasKind('sword'))) {
+    const want = {}
+    if (!hasKind('pickaxe')) want.wooden_pickaxe = 1
+    if (!hasKind('axe')) want.wooden_axe = 1
+    // A SWORD too: naked from-nothing, the bot has to survive mobs while it gathers/smelts
+    // for hours. auto-defend with bare fists barely scratches a zombie; a wooden sword lets
+    // it actually kill what's hunting it (it died to a creeper at a mob-heavy site unarmed).
+    if (!hasKind('sword')) want.wooden_sword = 1
+    say(`no tools on me - setting up a ${Object.keys(want).map(t => t.replace('wooden_', '')).join(' + ')} first`)
+    try {
+      const tplan = provision.planProvision(mcData, want, provision.inventoryCounts(bot), { primaryWood })
+      if (tplan.tasks.length) await provision.runPlan(bot, tplan, { say, isStopped, restoreMovements: restore, homeY: Math.floor(at.y) })
+    } catch (e) { say(`(couldn't make tools yet: ${e.message})`) }
+    if (!hasKind('pickaxe')) say("still couldn't get a pickaxe - is there any wood around here?")
+  }
+
+  // ARMOR BOOTSTRAP: a from-nothing / just-respawned bot is NAKED, and a long survival
+  // build runs through nights - it nearly died to mobs with no armor. So if we're bare
+  // in any slot, craft leather armor (hunting cows for leather) BEFORE the long haul.
+  // Bounded - if there are no cows it makes what it can (or nothing) and proceeds; the
+  // build isn't blocked on it. Only when we've got the tools to survive the hunt.
+  const anyBare = () => Object.values(wornArmor(bot)).some(v => !v)
+  if (!isStopped() && process.env.ARMOR_BOOTSTRAP !== '0' && anyBare()) {
+    try { const r = await provisionArmor(bot, { say, isStopped, restoreMovements: restore }); if (r) say(r) }
+    catch (e) { say(`(armor bootstrap skipped: ${e.message})`) }
+  }
+
+  // The chest is created LAZILY - only once we actually have materials to stash
+  // (crafting one needs planks the from-nothing bot doesn't have up front) and only
+  // when the pack is filling up. Small builds that fit in 36 slots never make one.
+  let chest = null
+  const chestBlk = () => (chest ? bot.blockAt(chest.position) : null)
+  async function stash () {
+    try {
+      if (!chest) chest = await provision.ensureChest(bot, { isStopped })
+      await provision.depositMaterials(bot, chestBlk(), { keepDirt: KEEP_DIRT })
+    } catch (e) { say(`(couldn't stash yet: ${e.message})`) }
+  }
+  const slotsUsed = () => (bot.inventory ? bot.inventory.items().length : 0)
+  const totalHave = async (name) => {
+    let c = 0
+    if (chest) { try { c = (await provision.chestCounts(bot, chestBlk()))[name] || 0 } catch {} }
+    return c + (provision.inventoryCounts(bot)[name] || 0)
+  }
+
+  // 1) provision each material, batch by batch; stash to the chest when the pack fills.
+  // `skip` collects materials we can't fully get (unobtainable / no-progress / stuck) so the
+  // BUILD phase drops those placements instead of hanging forever begging for them.
+  const skip = new Set()
+  const BATCH = 96
+  for (const [name, need] of Object.entries(bom)) {
+    let noProgress = 0
+    let lastHave = -1
+    while (!isStopped()) {
+      const have = await totalHave(name)
+      if (have >= need) break
+      // Give up only when we stop MAKING PROGRESS (a partial/slow smelt is fine as long
+      // as each round adds some), not after a fixed number of rounds - a fixed guard
+      // quit a slow 44-stone smelt at ~11 and then "built" with too little.
+      if (have <= lastHave) { if (++noProgress >= 4) { say(`giving up on ${name} at ${have}/${need}`); if (have < need) skip.add(name); break } } else noProgress = 0
+      lastHave = have
+      const batch = Math.min(BATCH, need - have)
+      say(`need ${name}: ${have}/${need} - gathering ${batch}`)
+      const plan = provision.planProvision(mcData, { [name]: batch }, provision.inventoryCounts(bot), { primaryWood })
+      if (Object.keys(plan.unobtainable || {}).length) { say(`can't obtain ${name} - skipping`); skip.add(name); break }
+      if (!plan.tasks.length) break
+      const before = await totalHave(name)
+      // homeY = the build-site SURFACE (the ground-snapped origin), a persistent anchor
+      // so strip-mining measures depth from the real surface and can't ratchet the bot
+      // down toward lava across batches.
+      const results = await provision.runPlan(bot, plan, { say, isStopped, restoreMovements: restore, homeY: Math.floor(at.y) })
+      const STASH_AT = parseInt(process.env.AUTOBUILD_STASH_SLOTS || '28', 10) // slots-used before offloading (tunable)
+      if (slotsUsed() >= STASH_AT) await stash() // pack filling up -> offload to the chest
+      const bad = results.filter(r => !r.ok)
+      if (bad.length && (await totalHave(name)) <= before) { say(`stuck getting ${name}: ${bad[0].note}`); if ((await totalHave(name)) < need) skip.add(name); break }
+    }
+    if (isStopped()) return { stopped: true, phase: 'provision', placed: 0, total: 0 }
+  }
+
+  // 2) build. If we used a chest, stash the rest and pull from it on demand (topping
+  // up scaffold dirt first); otherwise everything's in inventory - just build.
+  if (chest) {
+    await stash()
+    const invDirt = provision.inventoryCounts(bot).dirt || 0
+    if (invDirt < KEEP_DIRT) await provision.withdrawItem(bot, chestBlk(), 'dirt', KEEP_DIRT - invDirt).catch(() => {})
+    say('materials stashed - building now')
+    const fetch = async (n) => { await provision.withdrawItem(bot, chestBlk(), n, 128) }
+    return await schematic.buildSurvival(bot, schem, at, { say, isStopped, restoreMovements: restore, fetch, clear: opts.clear, skip })
+  }
+  say('got the materials - building now')
+  return await schematic.buildSurvival(bot, schem, at, { say, isStopped, restoreMovements: restore, clear: opts.clear, skip })
+}
+
+// Called by the body when the bot DIES mid-build: just stop the running loop. resumeJob
+// is KEPT because the build's .then/.catch below skip clearing it when a death is fresh
+// (a flag would race the loop's own rejection; a "died in the last few seconds?" check
+// is order-independent since recordDeath runs synchronously in the death event).
+const diedJustNow = () => lastDeath && Date.now() - lastDeath.at < 5000
+function markBuildInterrupted () { buildAbort = true }
+// Set the resume job EARLY (at build-request time, before the trek) so a death DURING the
+// long travel to the site still resumes - the most likely death window for a naked bot.
+// Uses the loaded schematic + the requested point (approximate origin); autoBuild later
+// overwrites `at` with the precise ground-snapped origin.
+function setResumeJob (pt) { if (loadedSchem && pt) resumeJob = { schem: loadedSchem.schem, at: new Vec3(pt.x, pt.y, pt.z) } }
+
+// Resume an interrupted build after respawn. Travels back to the site (we respawn far
+// away), then re-runs autoBuild - which RE-PROVISIONS whatever we lost (even if we
+// couldn't get our items back: it re-gathers/crafts from scratch, or pulls from the
+// build's chest if it survived) and Build diffs world-vs-schematic, so it just finishes
+// the missing blocks. Returns the result, or null if there's nothing to resume.
+async function resumeBuild (bot) {
+  if (!resumeJob) return null
+  // let any still-winding-down build loop fully exit before we reset buildAbort
+  for (let i = 0; i < 24 && building; i++) await new Promise(r => setTimeout(r, 500))
+  if (!resumeJob) return null
+  const job = resumeJob
+  const say = throttledSay(bot)
+  building = true; buildAbort = false
+  try {
+    say(`i died - heading back to finish the build at ${job.at.x},${job.at.y},${job.at.z}`)
+    const me = bot.entity.position
+    if (Math.hypot(job.at.x - me.x, job.at.z - me.z) > 40) {
+      // A post-death respawn is just as NAKED as first spawn - re-secure sword/food/armor
+      // near the respawn point BEFORE the trek back, or every death restarts the naked
+      // death-march. Idempotent + bounded, so it's ~free when gear survived.
+      try { await survivalPrep(bot, { say, isStopped: () => buildAbort }) } catch (e) { say(`(prep: ${e.message})`) }
+      await travelFar(bot, { x: job.at.x, y: job.at.y, z: job.at.z }, { isStopped: () => buildAbort, say })
+    }
+    return await autoBuild(bot, job.schem, job.at, {
+      say, isStopped: () => buildAbort, restoreMovements: () => setupMovements(bot), clear: false
+    })
+  } finally {
+    building = false; setupMovements(bot)
+    if (!diedJustNow()) resumeJob = null // died AGAIN mid-resume -> keep it for another go
+  }
+}
+
+module.exports = { handle, state, setupMovements, eatFood, placeTorchNearby, isBusy, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob }

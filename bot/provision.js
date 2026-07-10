@@ -26,7 +26,9 @@ function gatherMovements (bot) {
   const SCAFFOLD = ['dirt', 'grass_block', 'cobblestone', 'cobbled_deepslate', 'gravel', 'andesite', 'diorite', 'granite', 'tuff', 'stone']
   if ('scafoldingBlocks' in m) m.scafoldingBlocks = SCAFFOLD.map(n => md.itemsByName[n] && md.itemsByName[n].id).filter(x => x != null)
   m.canOpenDoors = true
-  m.allowParkour = true
+  m.allowParkour = false // WALK between resources instead of sprint-hopping every gap - the
+  // gather roams a lot and parkour made it jump constantly in the open (user report). It can
+  // still climb ledges (auto-step) and pillar out of dips; it just won't leap around.
   m.maxDropDown = 8 // hop down ledges like a player would (plateau spawns; verified live: default 4 = "No path" to a tree below a cliff)
   m.canDig = true
   m.digCost = 10 // strongly prefer walking around over chewing through a canopy
@@ -36,11 +38,71 @@ function gatherMovements (bot) {
   return m
 }
 
+// Blocks that mean "this is a STRUCTURE (village house / player build)", so a log
+// next to them must NOT be chopped for wood - that's griefing. Natural trees have
+// none of these around them.
+const STRUCTURE_RE = /planks$|stairs$|_slab$|fence|_door$|trapdoor$|_wall$|glass|_bed$|torch|lantern|crafting_table|^furnace$|chest|barrel|bookshelf|ladder|_sign$|_carpet$|wool$|brick|cobblestone|_wood$|smooth_|polished_|composter|loom|^bell$|dirt_path|farmland|hay_block|stripped_/
+// ANTI-GRIEF for EVERY dig primitive (strip-shaft, tunnel, staircase, pillar, shelter): the
+// ONLY blocks any of them may break are NATURAL terrain/ore - never a player-placed build
+// block. `canBreakNaturally` is the single gate; without it the climb-out/strip-mine punch
+// straight through a base's floor/wall (bot.canDigBlock is a reach/harvest test, NOT a
+// protection check). Note: `cobblestone` is deliberately EXCLUDED (it's a common player
+// block) - the strip-mine digs `stone` and gets cobble as the drop.
+const DIGGABLE_NATURAL = /^(dirt|coarse_dirt|rooted_dirt|grass_block|podzol|mycelium|moss_block|stone|deepslate|granite|diorite|andesite|tuff|calcite|dripstone_block|pointed_dripstone|sand|red_sand|gravel|clay|mud|sandstone|red_sandstone|snow_block|snow|powder_snow|ice|packed_ice|blue_ice|frosted_ice|netherrack|soul_sand|soul_soil|magma_block|blackstone|basalt|end_stone)$|terracotta$|_ore$/
+function canBreakNaturally (block) { return !!block && DIGGABLE_NATURAL.test(block.name) && !STRUCTURE_RE.test(block.name) }
+// Is a player-built structure within `r` of pos? Reused by the shelter + gather filters so
+// the bot never digs in / mines right next to someone's base.
+function structureNearby (bot, pos, r) {
+  for (let dx = -r; dx <= r; dx++) for (let dy = -1; dy <= 2; dy++) for (let dz = -r; dz <= r; dz++) {
+    const b = bot.blockAt(pos.offset(dx, dy, dz))
+    if (b && STRUCTURE_RE.test(b.name)) return true
+  }
+  return false
+}
+// Is this log a NATURAL tree (safe to chop) or part of a village/player build? A wild
+// tree ALWAYS has leaves nearby; a structure log has crafted blocks around it. Reject
+// on either signal so the wood-gatherer never strips a village or someone's cabin.
+function isWildTreeLog (bot, pos) {
+  for (let dy = -2; dy <= 3; dy++) {
+    for (let dx = -2; dx <= 2; dx++) {
+      for (let dz = -2; dz <= 2; dz++) {
+        const b = bot.blockAt(pos.offset(dx, dy, dz))
+        if (b && STRUCTURE_RE.test(b.name)) return false // a build is right here - leave it
+      }
+    }
+  }
+  for (let dy = -1; dy <= 6; dy++) {
+    for (let dx = -3; dx <= 3; dx++) {
+      for (let dz = -3; dz <= 3; dz++) {
+        const b = bot.blockAt(pos.offset(dx, dy, dz))
+        if (b && /_leaves$/.test(b.name)) return true // has a canopy -> real tree
+      }
+    }
+  }
+  return false // no leaves and no obvious structure -> be conservative, skip it
+}
+
+// Detect which WOOD is actually available nearby (nearest exposed log type), so a
+// treeless-of-oak biome (savanna=acacia, taiga=spruce...) doesn't strand a gather that
+// assumed oak. Returns the wood family (e.g. 'spruce') or null if no trees in range.
+function detectWood (bot) {
+  const md = require('minecraft-data')(bot.version)
+  const woods = ['oak', 'spruce', 'birch', 'jungle', 'acacia', 'dark_oak', 'cherry', 'mangrove', 'pale_oak']
+  let best = null; let bestD = Infinity
+  for (const w of woods) {
+    const def = md.blocksByName[`${w}_log`]
+    if (!def) continue
+    const b = bot.findBlock({ matching: def.id, maxDistance: 64 })
+    if (b) { const d = b.position.distanceTo(bot.entity.position); if (d < bestD) { bestD = d; best = w } }
+  }
+  return best
+}
+
 // ---- what the bot knows how to obtain directly from the world --------------
 // item name -> which BLOCKS to mine for it. Natural blocks only (anti-grief:
 // same philosophy as the MINABLE allowlist in commands.js).
 const GATHER_SOURCES = {
-  cobblestone: ['stone', 'cobblestone'], // mining stone drops cobblestone
+  cobblestone: ['stone'], // mine natural STONE (drops cobble); never target placed cobblestone (a common player block)
   dirt: ['dirt', 'grass_block'],
   sand: ['sand'],
   red_sand: ['red_sand'],
@@ -114,7 +176,7 @@ function recipeNeedsTable (recipe) {
 // in survival TECH-TREE order (phases): gather wood -> craft basics+tools ->
 // gather stone/other (now tooled) -> craft furnace -> smelt -> strip -> craft
 // finals. Returns { tasks, gathers, crafts, smelts, strips, tools, unobtainable, needsTable }.
-function planProvision (mcData, bom, inventory = {}) {
+function planProvision (mcData, bom, inventory = {}, opts = {}) {
   const avail = { ...inventory }
   const gathers = {}            // item -> count
   const craftReq = {}           // item -> {crafts, perCraft, needsTable}
@@ -129,9 +191,13 @@ function planProvision (mcData, bom, inventory = {}) {
   // The dominant wood in the BOM - used for all GENERIC wood needs (table,
   // sticks, tools, fuel) so we don't drag in a random third tree type for them
   // (those needs are resolved before the main build wood is registered).
+  // The BOM's own wood wins (a spruce build makes spruce planks); otherwise use the
+  // caller's biome hint (whatever wood is actually growing nearby); else oak. This is
+  // what lets a stonebox (no wood in its BOM) craft ACACIA tools/fuel in a savanna
+  // instead of stranding on oak that isn't there.
   const woodTally = {}
   for (const [n, c] of Object.entries(bom)) { const w = woodOf(n); if (w) woodTally[w] = (woodTally[w] || 0) + c }
-  const primaryWood = Object.entries(woodTally).sort((a, b) => b[1] - a[1])[0]?.[0] || 'oak'
+  const primaryWood = Object.entries(woodTally).sort((a, b) => b[1] - a[1])[0]?.[0] || opts.primaryWood || 'oak'
 
   function take (name, count) {
     const have = avail[name] || 0
@@ -168,8 +234,11 @@ function planProvision (mcData, bom, inventory = {}) {
     // smeltable (needs a furnace + fuel, planned once globally below)
     if (SMELT_MAP[name]) {
       furnaceNeeded = true
-      need(SMELT_MAP[name], remaining, [...stack, name])
-      smelts.push({ output: name, input: SMELT_MAP[name], count: remaining })
+      // charcoal's smelt input is a LOG - use the wood that's actually around (primaryWood),
+      // not a hard-coded oak_log, or torches are unobtainable in a savanna/taiga/spruce site.
+      const input = (name === 'charcoal') ? `${primaryWood}_log` : SMELT_MAP[name]
+      need(input, remaining, [...stack, name])
+      smelts.push({ output: name, input, count: remaining })
       return
     }
     // craftable - prefer a recipe variant whose ingredients we already stock/plan
@@ -177,14 +246,19 @@ function planProvision (mcData, bom, inventory = {}) {
     const recipes = [...((item && mcData.recipes[item.id]) || [])].sort((a, b) => {
       // prefer variants (1) whose ingredients we already stock/plan, then (2) that
       // use the primary build wood - so generic wood needs converge on one tree.
+      const obtainable = n => n && (GATHER_SOURCES[n] || SMELT_MAP[n] || STRIP_MAP[n] || (avail[n] || 0) > 0 || gathers[n] || craftReq[n] || (mcData.itemsByName[n] && (mcData.recipes[mcData.itemsByName[n].id] || []).length > 0))
       const score = r => {
         const names = Object.keys(recipeIngredients(r)).map(id => mcData.items[id] && mcData.items[id].name)
+        // HARD penalty for a variant with an ingredient we can't get any way (e.g. the
+        // furnace's cobbled_deepslate/blackstone variants) - else it can tie with and
+        // beat the cobblestone one and the whole material gets marked unobtainable.
+        const dead = names.some(n => !obtainable(n)) ? 8 : 0
         const planned = names.every(n => n && ((avail[n] || 0) > 0 || gathers[n] || craftReq[n])) ? 0 : 2
         // among wood-ingredient variants, REWARD the primary wood and penalise
         // any other specific wood; recipes with no wood ingredient are neutral.
         const usesWood = names.some(n => n && woodOf(n))
         const primary = !usesWood ? 0.5 : names.some(n => n && woodOf(n) === primaryWood) ? 0 : 1
-        return planned + primary
+        return dead + planned + primary
       }
       return score(a) - score(b)
     })
@@ -317,14 +391,486 @@ async function explore (bot, idx) {
 
 // Gather `count` of `item` by mining its source blocks (chops whole trees for
 // logs). opts: { say, isStopped, restoreMovements }. Returns {gathered, reason}.
-async function runGather (bot, item, count, opts = {}) {
-  bot.pathfinder.setMovements(gatherMovements(bot)) // may punch through leaves only
+const AIRISH = n => n === 'air' || n === 'cave_air' || n === 'void_air'
+
+const FILLER_RE = /^(cobblestone|dirt|coarse_dirt|stone|gravel|andesite|diorite|granite|cobbled_deepslate|netherrack|tuff|deepslate)$/
+
+// STRIP-MINE downward to reach buried stone (plains - it's all under dirt). Digs a SAFE
+// vertical shaft: only break the block underfoot when the block TWO below is solid and
+// non-dangerous, so we never drop into lava/water/a cave. One at a time, falling in,
+// with the right tool. Returns how deep it dug. Climb back out via pillarUpTo.
+async function digShaftDown (bot, maxDepth, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const DANGER = /lava|water/
+  let dug = 0
+  while (dug < maxDepth && !isStopped()) {
+    const feet = bot.entity.position.floored()
+    const below = bot.blockAt(feet.offset(0, -1, 0))
+    const below2 = bot.blockAt(feet.offset(0, -2, 0))
+    if (!below || AIRISH(below.name) || DANGER.test(below.name)) break
+    if (!below2 || AIRISH(below2.name) || DANGER.test(below2.name)) break // drop/lava/cave beneath -> STOP
+    if (!canBreakNaturally(below)) break // anti-grief: never dig a player-placed block
+    const tool = toolForBlock(bot, below.name)
+    if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
+    if (bot.canDigBlock && !bot.canDigBlock(below)) break
+    try { await bot.dig(below) } catch { break }
+    dug++
+    await new Promise(r => setTimeout(r, 250))
+  }
+  return dug
+}
+
+// Classic pillar-up: rise to targetY by clearing the 2 blocks above and placing a
+// filler block (cobble/dirt we carry) under our feet each hop. STOPS exactly at targetY
+// - how a player climbs out of a mine, reliable where the pathfinder's dig-straight-up
+// isn't. Out of filler -> stop (caller falls back to walking out).
+// Climb back to the surface by digging a SPIRAL STAIRCASE UP (walkable, deterministic -
+// scripted pillaring kept trapping the bot in the surface dirt). Each step rotates a
+// quarter-turn and rises one: place a floor block if the next step is over air, dig the
+// feet+head cells there and our own head clearance, then walk onto it. Stops at targetY.
+async function digStaircaseUp (bot, targetY, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const DIRS = [new Vec3(1, 0, 0), new Vec3(0, 0, 1), new Vec3(-1, 0, 0), new Vec3(0, 0, -1)]
+  const digIf = async (p) => {
+    const b = bot.blockAt(p)
+    if (!b || AIRISH(b.name)) return true
+    if (/lava|water/.test(b.name)) return false
+    if (!canBreakNaturally(b)) return false // anti-grief: don't cut through a player build
+    const tool = toolForBlock(bot, b.name)
+    if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
+    if (bot.canDigBlock && !bot.canDigBlock(b)) return false
+    try { await bot.dig(b); return true } catch { return false }
+  }
+  const startY = Math.floor(bot.entity.position.y)
+  let di = 0; let stuck = 0
+  while (Math.floor(bot.entity.position.y) < targetY && !isStopped() && stuck < 8) {
+    if (Math.floor(bot.entity.position.y) > startY && !hasSolidCeiling(bot, 20, { ignoreLeaves: true })) break // broke into open sky - done
+    const y0 = Math.floor(bot.entity.position.y)
+    const feet = bot.entity.position.floored()
+    const dir = DIRS[di % 4]; di++
+    const sFloor = feet.plus(dir)                 // block we'll stand on (same Y as feet)
+    const sFeet = feet.plus(dir).offset(0, 1, 0)  // new feet cell
+    const sHead = feet.plus(dir).offset(0, 2, 0)  // new head cell
+    await digIf(feet.offset(0, 2, 0))             // our own head-clearance to move up
+    const fb = bot.blockAt(sFloor)
+    if (!fb || AIRISH(fb.name)) { // no floor for the step -> place one
+      const filler = (bot.inventory ? bot.inventory.items() : []).find(i => FILLER_RE.test(i.name))
+      if (filler) {
+        await bot.equip(filler, 'hand').catch(() => {})
+        const under = bot.blockAt(sFloor.offset(0, -1, 0))
+        try { if (under && !AIRISH(under.name)) await bot.placeBlock(under, new Vec3(0, 1, 0)) } catch {}
+      }
+    }
+    if (!(await digIf(sFeet)) || !(await digIf(sHead))) { stuck++; continue }
+    try { await gotoWithTimeout(bot, new goals.GoalBlock(sFeet.x, sFeet.y, sFeet.z), 6000) } catch {}
+    if (Math.floor(bot.entity.position.y) <= y0) stuck++; else stuck = 0
+  }
+}
+
+// Movement profile for DIGGING OUR WAY BACK to the surface after strip-mining: it may
+// break the overburden (canDig) and pillar up, so a stone ceiling can't trap us. Only
+// used to escape a mine we dug ourselves - never near player builds.
+function climbMovements (bot) {
+  const m = new Movements(bot)
+  m.canDig = true
+  m.allow1by1towers = true    // pillar straight up through a stone ceiling...
+  m.canOpenDoors = true
+  m.allowParkour = true
+  m.maxDropDown = 4
+  m.digCost = 1
+  // ...but only if it has blocks to pillar WITH - give the pathfinder our cheap filler
+  // so allow1by1towers can actually place a tower (else it can't rise over a gap/void).
   try {
-    return await gatherLoop(bot, item, count, opts)
+    const md = require('minecraft-data')(bot.version)
+    const fill = ['dirt', 'cobblestone', 'cobbled_deepslate', 'netherrack', 'stone', 'gravel', 'andesite', 'granite', 'diorite', 'tuff']
+    const ids = fill.map(n => md.itemsByName[n] && md.itemsByName[n].id).filter(x => x != null)
+    if ('scafoldingBlocks' in m) m.scafoldingBlocks = ids
+    // ANTI-GRIEF: canDig=true here would otherwise let the pathfinder cut THROUGH a player
+    // build to climb out (bypassing the per-primitive canBreakNaturally guards). Deny every
+    // structural block so the climb-out routes around a base, never through it.
+    if (m.blocksCantBreak && typeof m.blocksCantBreak.add === 'function') {
+      for (const b of Object.values(md.blocksByName || {})) { if (STRUCTURE_RE.test(b.name)) m.blocksCantBreak.add(b.id) }
+    }
+  } catch { /* mcData not ready */ }
+  return m
+}
+
+// Is there a solid ceiling overhead? i.e. are we in a cave/underground rather than out in
+// the open under the sky. Scans the column above the head for a real (block-shaped) block.
+// Lets travel tell "dropped into a cave" (climb out) apart from "walking through a valley"
+// (fine - don't pointlessly pillar up in the open).
+function hasSolidCeiling (bot, upTo = 45, opts = {}) {
+  if (!bot.entity) return false
+  const base = bot.entity.position.floored()
+  for (let dy = 2; dy <= upTo; dy++) {
+    const b = bot.blockAt(base.offset(0, dy, 0))
+    if (!b || AIRISH(b.name) || b.boundingBox !== 'block') continue
+    // leaves have a 'block' bounding box but a canopy isn't a cave roof - so an
+    // "underground" check (opts.ignoreLeaves) sees through a tree, while travelFar's
+    // buried() check (default) still treats an overhang as cover.
+    if (opts.ignoreLeaves && /_leaves$/.test(b.name)) continue
+    return true
+  }
+  return false
+}
+
+// Escape UPWARD when stranded underground (e.g. cross-country travel dropped us into a
+// cave/ravine we can't path out of): dig a walkable staircase up to targetY with dig-
+// capable climb movements, then restore the caller's movement profile. Anti-grief-safe:
+// digStaircaseUp refuses lava/water and honours canDigBlock, so it cuts natural stone to
+// surface but won't chew through protected/player blocks. Stops early once we break out
+// into open sky even if that's below targetY (no point digging a hill from the inside).
+async function climbToSurface (bot, targetY, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const prev = bot.pathfinder && bot.pathfinder.movements
+  const need = () => bot.entity && Math.floor(bot.entity.position.y) < targetY - 1 &&
+    hasSolidCeiling(bot) && !isStopped()
+  try {
+    // 1) SPIRAL STAIRCASE up - cuts a WALKABLE ramp to the surface (fast, and once up we
+    //    can just walk on out). Proven to clear tens of blocks of solid overburden. The
+    //    flee reflex is held off (escaping flag) so mobs can't drag us off it mid-climb.
+    if (need()) {
+      if (bot.pathfinder) bot.pathfinder.setMovements(climbMovements(bot))
+      const y0 = bot.entity.position.y
+      try { await digStaircaseUp(bot, targetY, { isStopped }) } catch (e) { if (process.env.CLIMB_DEBUG) console.error('[climb] staircase threw', e.message) }
+      if (process.env.CLIMB_DEBUG) console.error(`[climb] staircase ${y0.toFixed(1)} -> ${bot.entity.position.y.toFixed(1)} (target ${targetY})`)
+    }
+    // 2) PILLAR STRAIGHT UP as a fallback - if the staircase stalls (awkward/open cavern
+    //    geometry it can step off of), rise on a 1-wide column that can't be fallen off.
+    if (need()) {
+      const y0 = bot.entity.position.y
+      try { await pillarUpTo(bot, targetY, { isStopped }) } catch (e) { if (process.env.CLIMB_DEBUG) console.error('[climb] pillar threw', e.message) }
+      if (process.env.CLIMB_DEBUG) console.error(`[climb] pillar ${y0.toFixed(1)} -> ${bot.entity.position.y.toFixed(1)}`)
+    }
   } finally {
+    if (prev && bot.pathfinder) bot.pathfinder.setMovements(prev)
+  }
+}
+
+// Pillar STRAIGHT UP to targetY: dig any block above the head, then jump and - at the top
+// of the hop, once we've actually cleared a block - place a filler block underfoot. The
+// mob-safest escape: you rise onto a 1-wide column above ground mobs and can't be walked
+// back down into the pit. Stops on lava/water above, out of filler, or protected blocks.
+async function pillarUpTo (bot, targetY, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const startY = Math.floor(bot.entity.position.y)
+  let stuck = 0
+  let equippedFiller = null
+  while (Math.floor(bot.entity.position.y) < targetY && !isStopped() && stuck < 15) {
+    // Stop the MOMENT we break into open sky (no ceiling) - keeping on to targetY builds a
+    // useless 1x1 tower into the air and strands the bot on top (targetY is a rough surface
+    // guess and overshoots in valleys). Once above where we started with clear sky, we're out.
+    if (Math.floor(bot.entity.position.y) > startY && !hasSolidCeiling(bot, 20, { ignoreLeaves: true })) break
+    const y0 = Math.floor(bot.entity.position.y)
+    const feet = bot.entity.position.floored()
+    // Clear TWO blocks above our head (y+2 and y+3): a full jump-up needs the head to pass
+    // y+3, so clearing only y+2 caps the hop just short of a block and placements miss.
+    for (const up of [2, 3]) {
+      const above = bot.blockAt(feet.offset(0, up, 0))
+      if (above && !AIRISH(above.name)) {
+        if (/lava|water/.test(above.name)) { bot.clearControlStates(); return }
+        if (!canBreakNaturally(above)) { bot.clearControlStates(); return } // anti-grief: don't pillar up through a build
+        if (bot.canDigBlock && !bot.canDigBlock(above)) { bot.clearControlStates(); return }
+        const tool = toolForBlock(bot, above.name)
+        if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
+        try { await bot.dig(above) } catch {}
+        equippedFiller = null // we swapped to a tool
+      }
+    }
+    const filler = (bot.inventory ? bot.inventory.items() : []).find(i => FILLER_RE.test(i.name))
+    if (!filler) { bot.clearControlStates(); return } // nothing to pillar with
+    if (equippedFiller !== filler.name) { await bot.equip(filler, 'hand').catch(() => {}); equippedFiller = filler.name }
+    const ref = bot.blockAt(feet.offset(0, -1, 0)) // the block we're standing on
+    if (ref && !AIRISH(ref.name)) {
+      try { await bot.lookAt(ref.position.offset(0.5, 0.5, 0.5), true) } catch {}
+      bot.setControlState('jump', true)
+      const t = Date.now()
+      // wait until we've genuinely risen ~1 block, THEN place (fixed sleeps miss the apex)
+      while (Date.now() - t < 1000 && !isStopped()) {
+        await new Promise(r => setTimeout(r, 15))
+        if (bot.entity.position.y - y0 >= 1.0) {
+          try { await bot.placeBlock(ref, new Vec3(0, 1, 0)) } catch {}
+          break
+        }
+      }
+      bot.setControlState('jump', false)
+    }
+    await new Promise(r => setTimeout(r, 90)) // settle onto the new block
+    if (Math.floor(bot.entity.position.y) <= y0) stuck++; else { stuck = 0 }
+  }
+  bot.clearControlStates()
+}
+
+// Mine a straight horizontal 1x2 TUNNEL forward, collecting drops at our feet so cobble
+// isn't lost down a pit (the generic loop mined the floor and dropped it into the hole).
+// Digs the two blocks ahead (feet + head level), sweeps drops, steps in, repeats. Safe:
+// stops at lava/water or a missing floor (cave). Returns net `itemName` gained.
+async function mineTunnel (bot, itemName, maxLen, dirIdx, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const DANGER = /lava|water/
+  const DIRS = [new Vec3(1, 0, 0), new Vec3(0, 0, 1), new Vec3(-1, 0, 0), new Vec3(0, 0, -1)]
+  const dir = DIRS[((dirIdx % 4) + 4) % 4]
+  const before = countItem(bot, itemName)
+  for (let i = 0; i < maxLen && !isStopped(); i++) {
+    const feet = bot.entity.position.floored()
+    const ahead = feet.plus(dir)
+    const aheadUp = ahead.offset(0, 1, 0)
+    const floor = ahead.offset(0, -1, 0)
+    const fB = bot.blockAt(floor)
+    if ([ahead, aheadUp, floor].some(p => { const b = bot.blockAt(p); return b && DANGER.test(b.name) })) break
+    if (!fB || AIRISH(fB.name)) break // drop/cave ahead -> stop (don't walk into a hole)
+    let dugAny = false
+    for (const p of [aheadUp, ahead]) {
+      const b = bot.blockAt(p)
+      if (!b || AIRISH(b.name)) continue
+      if (!canBreakNaturally(b)) { return countItem(bot, itemName) - before } // anti-grief: hit a player block -> stop tunnelling
+      const tool = toolForBlock(bot, b.name)
+      if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
+      if (bot.canDigBlock && !bot.canDigBlock(b)) { return countItem(bot, itemName) - before }
+      try { await bot.dig(b); dugAny = true } catch { return countItem(bot, itemName) - before }
+    }
+    await collectDrops(bot, 3)
+    try { await gotoWithTimeout(bot, new goals.GoalBlock(ahead.x, ahead.y, ahead.z), 5000) } catch { break }
+    if (!dugAny) break
+  }
+  return countItem(bot, itemName) - before
+}
+
+async function runGather (bot, item, count, opts = {}) {
+  // Anchor to the PERSISTENT surface (homeY, from the build/provision run) if given, not
+  // wherever we happen to be standing now - so a batch that starts underground (previous
+  // climb-out fell short, or we fell in a cave) still knows where the real surface is and
+  // won't sink deeper. Falls back to the current spot when there's no home reference.
+  const surfaceY = opts.homeY != null ? opts.homeY : Math.floor(bot.entity.position.y)
+  bot.pathfinder.setMovements(gatherMovements(bot)) // may punch through leaves + pillar up
+  try {
+    return await gatherLoop(bot, item, count, { ...opts, surfaceY })
+  } finally {
+    // Back to the surface if we're below it (strip-mined down OR fell into a cave). Try
+    // three ways, in order, until we're within a couple blocks of the top: a spiral
+    // staircase up, a straight pillar-up, then a pathfinder dig-out. Any one that works
+    // ends it - so a cave with awkward geometry can't strand us.
+    try {
+      const need = () => bot.entity && bot.entity.position.y < surfaceY - 2
+      if (need()) {
+        bot.pathfinder.setGoal(null)
+        for (const climb of [
+          () => digStaircaseUp(bot, surfaceY, { isStopped: opts.isStopped }),
+          () => pillarUpTo(bot, surfaceY, { isStopped: opts.isStopped }),
+          () => { bot.pathfinder.setMovements(climbMovements(bot)); return gotoWithTimeout(bot, new goals.GoalY(surfaceY), 30000) }
+        ]) { if (!need()) break; try { await climb() } catch {} }
+      }
+    } catch {}
     bot.pathfinder.setGoal(null)
     if (opts.restoreMovements) opts.restoreMovements() // back to the anti-grief profile
   }
+}
+
+// Animals that drop LEATHER when killed. Cows/mooshrooms are the reliable, common
+// source (0-2 leather each); we hunt those, not horses/llamas. This is the raw
+// material for leather armor - the "from nothing" armor tier (no mining/smelting).
+const LEATHER_ANIMALS = /^(cow|mooshroom)$/
+
+// Hunt nearby cows for LEATHER until we have `target` more in inventory, or we hit
+// the bounds (max kills / time / no-animals-found). BOUNDED on purpose: a survival
+// run must never HANG here when no cows are around - it returns whatever it got and
+// the caller proceeds with a partial (or empty) armor set. Returns {leather, killed}.
+// Same movement/anti-grief profile as gathering (can't tunnel through builds).
+async function gatherLeather (bot, target, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const say = opts.say || (() => {})
+  const deadline = Date.now() + (opts.timeMs || 120000) // 2 min hard cap
+  const maxKills = opts.maxKills || 16
+  const leatherNow = () => countItem(bot, 'leather')
+  const start = leatherNow()
+  bot.pathfinder.setMovements(gatherMovements(bot)) // anti-grief while chasing
+  let killed = 0
+  let explores = 0
+  try {
+    while (leatherNow() - start < target && killed < maxKills && Date.now() < deadline && !isStopped()) {
+      // nearest leather animal within a comfortable search radius
+      let tgt = null; let best = 32
+      for (const e of Object.values(bot.entities || {})) {
+        if (!e || !e.position || (e.type !== 'mob' && e.type !== 'animal')) continue
+        if (!LEATHER_ANIMALS.test((e.name || '').toLowerCase())) continue
+        const d = e.position.distanceTo(bot.entity.position); if (d < best) { best = d; tgt = e }
+      }
+      if (!tgt) { // none in range - roam to find some, but only a few times
+        if (explores++ >= 4) break
+        await explore(bot, explores)
+        continue
+      }
+      // wield the best melee we have (sword > axe > fist) and chase it down
+      const items = bot.inventory ? bot.inventory.items() : []
+      const weapon = items.find(i => i.name.endsWith('_sword')) || items.find(i => i.name.endsWith('_axe'))
+      if (weapon) await bot.equip(weapon, 'hand').catch(() => {})
+      const killStart = Date.now()
+      bot.pathfinder.setGoal(new goals.GoalFollow(tgt, 2), true)
+      while (tgt.isValid && Date.now() - killStart < 15000 && !isStopped()) {
+        if (bot.entity.position.distanceTo(tgt.position) <= 3.5) {
+          await bot.lookAt(tgt.position.offset(0, (tgt.height || 1) * 0.7, 0)).catch(() => {})
+          bot.attack(tgt)
+          await new Promise(r => setTimeout(r, 600)) // attack-cooldown cadence
+        } else {
+          await new Promise(r => setTimeout(r, 300))
+        }
+      }
+      bot.pathfinder.setGoal(null)
+      if (!tgt.isValid) killed++
+      await collectDrops(bot, 8) // grab the dropped leather (and beef)
+    }
+  } finally {
+    bot.pathfinder.setGoal(null)
+    if (opts.restoreMovements) opts.restoreMovements()
+  }
+  const got = leatherNow() - start
+  if (got > 0) say(`got ${got} leather off ${killed} ${killed === 1 ? 'cow' : 'cows'}`)
+  return { leather: got, killed }
+}
+
+// Animals whose drops FEED you (raw meat is edible). Used by the survival-hunt so a long
+// job in a food-poor area doesn't run the bot down to 0 food / 1 hp with nothing to eat.
+const FOOD_ANIMALS = /^(cow|mooshroom|pig|chicken|sheep|rabbit)$/
+function hasFood (bot) {
+  const md = require('minecraft-data')(bot.version)
+  const foods = (md && md.foodsByName) || {}
+  return (bot.inventory ? bot.inventory.items() : []).some(i => foods[i.name])
+}
+// The ONLY time the bot must go hunt: it's hungry AND has nothing to eat. (With food on
+// hand, auto-eat handles it; well-fed, no need.) food<=6 = hunger low enough that regen
+// has stopped, so act before it hits 0 and gets pinned at 1 hp.
+function needsFood (bot) { return bot.food != null && bot.food <= 6 && !hasFood(bot) }
+// Kill the nearest food animal and collect the meat (auto-eat then eats it, raw is fine).
+// Bounded: one animal within ~24 blocks, ~12s. Returns true if something died. Uses the
+// movement profile already set (chasing needs no digging, so anti-grief holds). No-op if
+// no animal is near - it can't conjure food from an empty field.
+async function huntForFood (bot, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  if (!bot.entity) return false
+  let tgt = null; let best = 24
+  for (const e of Object.values(bot.entities || {})) {
+    if (!e || !e.position || (e.type !== 'mob' && e.type !== 'animal')) continue
+    if (!FOOD_ANIMALS.test((e.name || '').toLowerCase())) continue
+    const d = e.position.distanceTo(bot.entity.position); if (d < best) { best = d; tgt = e }
+  }
+  if (!tgt) return false
+  const items = bot.inventory ? bot.inventory.items() : []
+  const weapon = items.find(i => i.name.endsWith('_sword')) || items.find(i => i.name.endsWith('_axe'))
+  if (weapon) await bot.equip(weapon, 'hand').catch(() => {})
+  const killStart = Date.now()
+  try {
+    bot.pathfinder.setGoal(new goals.GoalFollow(tgt, 2), true)
+    while (tgt.isValid && Date.now() - killStart < 12000 && !isStopped()) {
+      if (bot.entity.position.distanceTo(tgt.position) <= 3.5) {
+        await bot.lookAt(tgt.position.offset(0, (tgt.height || 1) * 0.7, 0)).catch(() => {})
+        bot.attack(tgt)
+        await new Promise(r => setTimeout(r, 600))
+      } else { await new Promise(r => setTimeout(r, 300)) }
+    }
+  } finally { bot.pathfinder.setGoal(null) }
+  await collectDrops(bot, 8)
+  return !tgt.isValid
+}
+
+// ---- night survival: dig-in shelter for a NAKED bot ------------------------------
+const SHELTER_HOSTILE = /zombie|skeleton|spider|creeper|husk|drowned|witch|pillager|vindicator|stray|bogged|phantom|slime|enderman|silverfish|cave_spider|warden/
+let _sheltering = false
+function isSheltering () { return _sheltering } // reflexes (flee/defend) yield while true
+function nearHostile (bot, r) {
+  const me = bot.entity && bot.entity.position; if (!me) return false
+  for (const e of Object.values(bot.entities || {})) {
+    if (!e || !e.position || (e.type !== 'mob' && e.type !== 'hostile')) continue
+    if (!SHELTER_HOSTILE.test((e.name || '').toLowerCase())) continue
+    if (e.position.distanceTo(me) <= r) return true
+  }
+  return false
+}
+function underArmored (bot) {
+  try { for (const s of ['head', 'torso', 'legs', 'feet']) { if (!(bot.inventory && bot.inventory.slots[bot.getEquipmentDestSlot(s)])) return true } return false } catch { return true }
+}
+function isNight (bot) { return !!(bot.time && bot.time.timeOfDay >= 13000 && bot.time.timeOfDay < 23500) }
+// Fire the shelter when it's genuinely dangerous: night, no full armor, and a hostile is
+// closing. (Not every night - only when actually threatened, so it doesn't burrow for nothing.)
+function shelterNeeded (bot) { return isNight(bot) && underArmored(bot) && nearHostile(bot, 12) }
+// (anti-grief helpers canBreakNaturally / structureNearby are defined up top, next to
+// STRUCTURE_RE, and shared by every dig primitive + the shelter + the gather filter.)
+
+// Place a block from inventory (name matching `match`) AT world position `target`, using any
+// solid neighbouring face to place against. Best-effort; returns whether a block landed.
+async function placeAt (bot, target, match) {
+  const item = (bot.inventory ? bot.inventory.items() : []).find(i => match.test(i.name))
+  if (!item) return false
+  await bot.equip(item, 'hand').catch(() => {})
+  for (const [dx, dy, dz] of [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]]) {
+    const ref = bot.blockAt(target.offset(dx, dy, dz))
+    if (ref && ref.boundingBox === 'block' && !AIRISH(ref.name)) {
+      try { await bot.lookAt(target.offset(0.5, 0.5, 0.5), true) } catch {}
+      try { await bot.placeBlock(ref, new Vec3(-dx, -dy, -dz)); return true } catch { /* try next face */ }
+    }
+  }
+  return false
+}
+
+// Emergency night bunker for a NAKED bot: dig 2 down into solid ground, seal the opening with
+// a block, and wait out the danger (until day AND no hostile near), then climb back out. A
+// sealed pit survives a creeper - it can't reach you underground - where fleeing didn't.
+// Deterministic + body-side (the brain is HELD during builds). Sets isSheltering() so the
+// flee/defend reflexes stand down instead of dragging us off. Returns true if it sheltered.
+async function digInForNight (bot, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const say = opts.say || (() => {})
+  if (!bot.entity || _sheltering) return false
+  // ANTI-GRIEF is handled PER-DIG below (canBreakNaturally): the shelter can only cut natural
+  // ground, never a placed block - so it can't punch through a base's floor, yet it CAN still
+  // dig a bunker in natural dirt right next to a build (incl. the bot's OWN castle at the build
+  // site, where it most needs to shelter). Standing ON a player floor -> the dig loop's natural
+  // check fails immediately -> no hole, it just flees instead.
+  _sheltering = true
+  try {
+    bot.pathfinder && bot.pathfinder.setGoal(null)
+    const surfaceY = Math.floor(bot.entity.position.y)
+    // 1) dig straight down 2, keeping the blocks (need one to cap with). NEVER dig into a
+    //    void/lava/water below, and ONLY natural terrain (never a player build block) - so
+    //    sheltering can't punch through someone's floor.
+    let dug = 0
+    for (let i = 0; i < 2 && !isStopped(); i++) {
+      const feet = bot.entity.position.floored()
+      const below = bot.blockAt(feet.offset(0, -1, 0))
+      const below2 = bot.blockAt(feet.offset(0, -2, 0))
+      if (!below || AIRISH(below.name) || /lava|water/.test(below.name) || !canBreakNaturally(below)) break
+      if (below2 && /lava|water/.test(below2.name)) break
+      const tool = toolForBlock(bot, below.name)
+      if (tool) await bot.equip(tool, 'hand').catch(() => {})
+      if (bot.canDigBlock && !bot.canDigBlock(below)) break
+      try { await bot.dig(below) } catch { break }
+      await new Promise(r => setTimeout(r, 250)) // fall into the hole
+      dug++
+    }
+    if (dug < 1) return false // couldn't dig in (bedrock/protected/edge) - the flee reflex covers it
+    await collectDrops(bot, 3)
+    // 2) cap the opening above the head with any spare block
+    const capPos = bot.entity.position.floored().offset(0, 2, 0)
+    // cap with ANY common terrain/building block we're holding (whatever the biome gave us
+    // when we dug in - terracotta, deepslate, tuff, etc. all count, not just dirt/cobble).
+    const capped = await placeAt(bot, capPos, /terracotta|dirt|cobble|stone|gravel|sand|netherrack|deepslate|tuff|granite|diorite|andesite|clay|mud|_planks$|_log$|_concrete/)
+    say(capped ? 'holed up till it\'s safe' : 'ducked into a hole till it\'s safe')
+    // 3) wait until DAY and no hostile near, or a hard timeout (~one full night)
+    const deadline = Date.now() + 600000
+    while (Date.now() < deadline && !isStopped()) {
+      if (!isNight(bot) && !nearHostile(bot, 10)) break
+      await new Promise(r => setTimeout(r, 3000))
+    }
+    // 4) break the cap and climb back to the surface. Use climbToSurface (staircase-up,
+    //    which cuts steps and needs NO filler blocks) - pillarUpTo alone stranded the bot
+    //    when it had no dirt left (deaths strip inventory), ratcheting it deeper each night.
+    try {
+      const cap = bot.blockAt(capPos)
+      if (cap && !AIRISH(cap.name) && (!bot.canDigBlock || bot.canDigBlock(cap))) { try { await bot.dig(cap) } catch {} }
+      await collectDrops(bot, 3) // recover the cap block as filler
+      await climbToSurface(bot, surfaceY, { isStopped })
+    } catch {}
+    return true
+  } finally { _sheltering = false; bot.clearControlStates && bot.clearControlStates() }
 }
 
 // Pick the right tool KIND in inventory for a block (pickaxe/axe/shovel), best
@@ -367,19 +913,42 @@ async function gatherLoop (bot, item, count, opts = {}) {
   let exploreIdx = 0
   let dryExplores = 0 // consecutive explores that turned up nothing new
   let noYield = 0     // blocks mined lately with NO item gain (drops lost to gaps)
+  let stripDug = 0    // times we've strip-mined DOWN this gather (bounded)
+  let reachFails = 0  // consecutive "found stone but couldn't reach it" (buried -> strip-mine)
+  let lastFoodHunt = 0 // throttle the survival-hunt so it doesn't chase every loop
+  let lastShelter = 0  // throttle the night-shelter check
+  const isLogGather = /_log$/.test(item) // logs get the natural-tree-only anti-grief filter
   const MAX_EXPLORE = 12 // wander this many times before truly giving up
+  // Whether this resource can be reached by digging DOWN (stone/ore under the surface).
+  // Plains/grassland have none exposed, so instead of wandering forever we mine a shaft.
+  const canStrip = sources.some(s => /stone|deepslate|cobble|granite|diorite|andesite|tuff|_ore$|ancient_debris/.test(s))
+  const MAX_STRIP = 5 // shafts per gather before giving up
   const NO_YIELD_LIMIT = 10 // mine-with-no-pickup before relocating to better ground
   const cap = count * 4 + 80 // ultimate backstop against grinding forever
   // Depth cap for MINING (tool-required) gathers: chasing exposed stone down into a
   // cave/ravine strands the bot (can't climb ~30 blocks back). Track the highest
   // ground we've stood on and never target stone/ore more than MAX_MINE_DEPTH below
   // it, so mining stays near the surface. Surface resources (logs/dirt) are exempt.
-  let surfaceY = bot.entity.position.y
+  // Anchor to the PERSISTENT surface (passed from the build/provision run) if we have
+  // it, NOT the current position - else each batch re-anchors to wherever we ended up
+  // (often already deep from a failed climb-out) and the depth cap slides down with us,
+  // ratcheting the bot toward lava (verified live: sank to y4 on deepslate). Only ever
+  // moves UP (Math.max), never down.
+  let surfaceY = opts.surfaceY != null ? opts.surfaceY : bot.entity.position.y
   // Generous enough to reach hillside/plateau-edge stone, tight enough to refuse the
-  // 30+ block dive into a cave/ravine that stranded the bot. Pillar-up (gatherMovements)
-  // is the real climb-back guarantee; this just stops the runaway descent.
+  // 30+ block dive into a cave/ravine that stranded the bot.
   const MAX_MINE_DEPTH = parseInt(process.env.GATHER_MAX_DEPTH || '16', 10)
-  const belowCap = y => reqTool && y < surfaceY - MAX_MINE_DEPTH
+  // ABSOLUTE floor: never mine/dig below this Y, so a runaway descent can't reach the
+  // deep lava layer no matter what. Well above 1.21 lava pockets.
+  const STRIP_FLOOR = parseInt(process.env.STRIP_FLOOR_Y || '30', 10)
+  const belowCap = y => (reqTool && y < surfaceY - MAX_MINE_DEPTH) || y <= STRIP_FLOOR
+  // How far we may still safely dig DOWN from here before hitting the depth cap or the
+  // absolute floor. <=0 means "already deep enough - do NOT dig, climb out instead".
+  // This is what stops the ratchet: even a failed climb-out can't make it sink further.
+  const stripBudget = () => {
+    const y = Math.floor(bot.entity.position.y)
+    return Math.min(6, y - (surfaceY - MAX_MINE_DEPTH), y - STRIP_FLOOR)
+  }
 
   // Surface to breathe when air runs low - mining near/into water otherwise drowns
   // us (verified live: the bot drowned mid-cobble-run in cratered savanna, losing
@@ -412,20 +981,66 @@ async function gatherLoop (bot, item, count, opts = {}) {
 
   while (countItem(bot, item) - start < count) {
     if (isStopped()) return { gathered: countItem(bot, item) - start, reason: 'stopped' }
+    // SURVIVAL: starving with nothing to eat -> break off and hunt an animal for meat
+    // (auto-eat feeds on it). Body-side because during a build the BRAIN is held and can't
+    // do this; a long gather in a food-poor area otherwise runs the bot to 0 food / 1 hp
+    // with no way back. Throttled so it doesn't chase every loop.
+    if (needsFood(bot) && Date.now() - lastFoodHunt > 20000) {
+      lastFoodHunt = Date.now()
+      if (opts.say) opts.say('starving - hunting something to eat first')
+      try { await huntForFood(bot, { isStopped }) } catch { /* keep gathering regardless */ }
+    }
+    // SHELTER: naked at night with a hostile bearing down -> dig in and wait it out. A sealed
+    // pit survives a creeper where fleeing didn't (it died to one, unarmed, mid-gather). Only
+    // when actually threatened + under-armored, so it doesn't burrow every night for nothing.
+    if (shelterNeeded(bot) && Date.now() - lastShelter > 15000) {
+      lastShelter = Date.now()
+      if (opts.say) opts.say('mobs out and no armor - digging in till it\'s safe')
+      try { await digInForNight(bot, { isStopped, say: opts.say }) } catch { /* keep going */ }
+    }
     if (!haveReqTool()) return { gathered: countItem(bot, item) - start, reason: `my ${toolKind} broke` } // ran out mid-job
     if (mined >= cap) { await collectDrops(bot, 12); if (countItem(bot, item) - start < count) return { gathered: countItem(bot, item) - start, reason: `mined ${mined} blocks but couldn't collect enough (drops lost?)` } }
 
     surfaceY = Math.max(surfaceY, bot.entity.position.y) // highest ground we've stood on
-    const candidates = bot.findBlocks({ matching: ids, maxDistance: 64, count: 24 })
+    const feetY = Math.floor(bot.entity.position.y)
+    let candidates = bot.findBlocks({ matching: ids, maxDistance: 64, count: 32 })
       .filter(p => (failed.get(pkey(p)) || 0) < 2)
       // Skip SUBMERGED targets (water on top): mining into water is how we drowned.
       .filter(p => { const a = bot.blockAt(p.offset(0, 1, 0)); return !(a && /water/i.test(a.name)) })
       // Don't chase stone/ore deep below the surface (cave-descent stranding).
       .filter(p => !belowCap(p.y))
+      // ANTI-GRIEF: logs must be NATURAL trees (never a village house / log build); every
+      // OTHER gather (stone/dirt/sand/...) must not be right next to a player structure, so a
+      // cobble/dirt run near a base can't dismantle a wall or crater a yard.
+      .filter(p => isLogGather ? isWildTreeLog(bot, p) : !structureNearby(bot, p, 3))
+    // Underground (we strip-mined down), mine HORIZONTALLY, not straight down: a block
+    // AT foot/head level drops cobble at our feet to auto-collect; mining the floor
+    // drops it into the pit below and loses it (verified: got 1 cobble in 90s digging
+    // down). Prefer targets at/above feet; only fall to lower ones if there are none.
+    if (feetY < surfaceY - 1) {
+      const level = candidates.filter(p => p.y >= feetY && p.y <= feetY + 2)
+      if (level.length) candidates = level
+    }
     const target = candidates[0] && bot.blockAt(candidates[0])
     if (!target) {
-      // Nothing reachable here - grab any nearby drops, then WANDER to fresh terrain.
+      // Nothing reachable here - grab any nearby drops first.
       await collectDrops(bot, 12)
+      // STRIP-MINE: for stone/ore, there may be none EXPOSED (plains) - dig our own
+      // shaft down to the stone layer instead of wandering, then re-scan (the shaft
+      // walls are now reachable stone). Bounded, and only while safely above bedrock.
+      if (canStrip && stripDug < MAX_STRIP && stripBudget() > 0) {
+        if (opts.say && stripDug === 0) opts.say(`no ${sources[0]} up here - digging down to reach it`)
+        const dug = await digShaftDown(bot, stripBudget(), { isStopped })
+        if (dug > 0) await mineTunnel(bot, item, 16, stripDug, { isStopped }) // mine a drop-safe tunnel
+        stripDug++
+        if (dug > 0) { dryExplores = 0; continue }
+        // couldn't dig down (bedrock/void/lava underfoot) -> fall through to wandering
+      } else if (canStrip && stripBudget() <= 0 && Math.floor(bot.entity.position.y) < surfaceY - 3) {
+        // already at the depth cap but no reachable stone -> we're stuck deep (a cave
+        // fall or tapped-out shaft). Bail so runGather's climb-out gets us back up.
+        return { gathered: countItem(bot, item) - start, reason: 'mined out down here - climbing back up' }
+      }
+      // WANDER to fresh terrain.
       if (dryExplores >= MAX_EXPLORE) return { gathered: countItem(bot, item) - start, reason: `searched far and wide, no reachable ${sources.join('/')}` }
       if (opts.say && dryExplores === 0) opts.say(`looking further afield for ${sources[0]}...`)
       await explore(bot, exploreIdx++)
@@ -437,8 +1052,19 @@ async function gatherLoop (bot, item, count, opts = {}) {
     const before = countItem(bot, item)
     try { await breakBlock(target) } catch (e) {
       failed.set(pkey(target.position), (failed.get(pkey(target.position)) || 0) + 1)
+      reachFails++
+      // Stone is FOUND but we keep failing to reach it -> it's buried (plains): the
+      // path can't dig dirt to get there. Strip-mine straight down to it instead of
+      // grinding through dozens of doomed gotos, then re-scan from inside the stone.
+      if (canStrip && reachFails >= 3 && stripDug < MAX_STRIP && stripBudget() > 0) {
+        if (opts.say && stripDug === 0) opts.say(`the ${sources[0]} is all buried - digging down to it`)
+        const dug = await digShaftDown(bot, stripBudget(), { isStopped })
+        if (dug > 0) await mineTunnel(bot, item, 16, stripDug, { isStopped }) // mine a drop-safe tunnel
+        stripDug++; reachFails = 0
+      }
       continue
     }
+    reachFails = 0 // reached one - reset the buried-stone counter
     // Mine the LOCAL cluster (adjacent same-type blocks) so we stay put and drops
     // land at our feet for proximity pickup - works for both trees and stone.
     let cur = bot.findBlock({ matching: ids, maxDistance: 4 })
@@ -608,7 +1234,11 @@ async function runSmelt (bot, output, input, count, opts = {}) {
       if (!furnace.inputItem() && stillNeed > 0 && inInv(input) > 0) {
         try { await furnace.putInput(inItem.id, null, Math.min(stillNeed, inInv(input), 64)) } catch {}
       }
-      if (!furnace.fuelItem() && (stillNeed - cooking) > 0) {
+      // Refuel whenever there's anything to smelt (already loaded as `cooking`, OR
+      // still sitting in our pack) and the furnace has no active fuel. The old
+      // condition (stillNeed - cooking > 0) stopped fueling once ALL the input was
+      // loaded, so the furnace burned one item then sat idle full of cobble.
+      if (!furnace.fuelItem() && stillNeed > 0 && (cooking > 0 || inInv(input) > 0)) {
         const fuelName = ['coal', 'charcoal'].find(n => inInv(n) > 0) || (furnace.slots || []).slice(3).find(s => s && isFuel(s))?.name
         if (fuelName) {
           const fid = mcData.itemsByName[fuelName].id
@@ -701,4 +1331,83 @@ async function runPlan (bot, plan, opts = {}) {
   return results
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace }
+// ---- chest storage (for builds too big to hold in 36 slots) ------------------
+
+// Items the bot KEEPS on itself and never stashes: tools, weapons, armor, food,
+// utility blocks, and a little scaffold dirt. Everything else is build material
+// that goes into the chest.
+const KEEP_ON_BOT = /_pickaxe$|_axe$|_shovel$|_sword$|_hoe$|^shears$|_helmet$|_chestplate$|_leggings$|_boots$|^cooked_|_apple$|^bread$|^carrot$|^potato$|beef|porkchop|mutton|chicken|^cod$|^salmon$|^torch$|flint_and_steel|_bucket$|^bucket$|^crafting_table$|^furnace$|^chest$|^coal$|^charcoal$/
+
+// Find a chest within range, or craft (8 planks) + place one next to us. Returns
+// the chest Block. Reuses the table/furnace placement pattern.
+async function ensureChest (bot, opts = {}) {
+  const mcData = require('minecraft-data')(bot.version)
+  const chestId = mcData.blocksByName.chest.id
+  let chest = bot.findBlock({ matching: chestId, maxDistance: 8 })
+  if (chest) return chest
+  if (countItem(bot, 'chest') === 0) {
+    const table = await ensureTable(bot, opts)
+    if (bot.entity.position.distanceTo(table.position) > 3) await gotoWithTimeout(bot, new goals.GoalNear(table.position.x, table.position.y, table.position.z, 2), 20000)
+    const recipe = bot.recipesFor(mcData.itemsByName.chest.id, null, 1, table)[0]
+    if (!recipe) throw new Error('cannot craft a chest (need 8 planks)')
+    await bot.craft(recipe, 1, table)
+    await new Promise(r => setTimeout(r, 250))
+  }
+  await placeFromInventory(bot, 'chest')
+  chest = bot.findBlock({ matching: chestId, maxDistance: 6 })
+  if (!chest) throw new Error('placed a chest but cannot find it')
+  return chest
+}
+
+async function gotoChest (bot, chestBlock) {
+  if (bot.entity.position.distanceTo(chestBlock.position) > 3) {
+    await gotoWithTimeout(bot, new goals.GoalNear(chestBlock.position.x, chestBlock.position.y, chestBlock.position.z, 2), 15000)
+  }
+}
+
+// Deposit all BUILD MATERIALS (everything not in KEEP_ON_BOT) into the chest, so
+// the pack doesn't overflow mid-provision. Keeps `keepDirt` dirt for bridging.
+// Returns the number of items deposited.
+async function depositMaterials (bot, chestBlock, opts = {}) {
+  const keepDirt = opts.keepDirt || 0
+  await gotoChest(bot, chestBlock)
+  const chest = await bot.openContainer(chestBlock)
+  let n = 0
+  try {
+    for (const it of bot.inventory.items()) {
+      if (KEEP_ON_BOT.test(it.name)) continue
+      let count = it.count
+      if (it.name === 'dirt' && keepDirt) count = Math.max(0, it.count - keepDirt)
+      if (count <= 0) continue
+      try { await chest.deposit(it.type, null, count); n += count } catch { /* chest full / slot race */ }
+    }
+  } finally { chest.close() }
+  return n
+}
+
+// Withdraw up to `count` of `itemName` from the chest. Returns how many came out.
+async function withdrawItem (bot, chestBlock, itemName, count) {
+  const mcData = require('minecraft-data')(bot.version)
+  const def = mcData.itemsByName[itemName]
+  if (!def || count <= 0) return 0
+  await gotoChest(bot, chestBlock)
+  const chest = await bot.openContainer(chestBlock)
+  let got = 0
+  try {
+    const have = chest.containerItems().filter(i => i.name === itemName).reduce((a, b) => a + b.count, 0)
+    const take = Math.min(count, have)
+    if (take > 0) { await chest.withdraw(def.id, null, take); got = take }
+  } finally { chest.close() }
+  return got
+}
+
+// Read chest contents as { name: count } (build materials the chest is holding).
+async function chestCounts (bot, chestBlock) {
+  await gotoChest(bot, chestBlock)
+  const chest = await bot.openContainer(chestBlock)
+  const out = {}
+  try { for (const i of chest.containerItems()) out[i.name] = (out[i.name] || 0) + i.count } finally { chest.close() }
+  return out
+}
+
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, hasSolidCeiling, gatherLeather, huntForFood, hasFood, needsFood, digInForNight, isSheltering, shelterNeeded }

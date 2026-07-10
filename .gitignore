@@ -40,3 +40,8 @@ testserver/.console_history
 # misc
 logs/
 *.pid
+
+# generated brain decision log (run data - player names/chat/coords)
+bot/brain-decisions.jsonl
+brain-decisions*.jsonl
+*.exe

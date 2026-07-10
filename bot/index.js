@@ -18,7 +18,9 @@ const mineflayer = require('mineflayer')
 const { pathfinder, goals } = require('mineflayer-pathfinder')
 const cfg = require('./config.json')
 const commands = require('./commands.js')
+const provision = require('./provision.js') // for the body-side survival-hunt reflex
 const access = require('./access.js')
+const schematic = require('./schematic.js')
 
 // Live brain settings the dashboard can change on the fly; brain-llm.js polls
 // GET /brain each tick and switches model / goal / on-off without a restart.
@@ -81,22 +83,70 @@ function clearPendingChat () {
 // per VIBE_CHAT_MS so the bot feels alive without ever spamming itself into a
 // kick. Set VIBE_CHAT_MS huge to restore the old hard-block on unprompted chat.
 const CHAT_COOLDOWN_MS = parseInt(process.env.CHAT_COOLDOWN_MS || '2500', 10)
-const VIBE_CHAT_MS = parseInt(process.env.VIBE_CHAT_MS || '90000', 10)
+// Budget for UNPROMPTED quips (a direct reply is never throttled). 90s felt spammy
+// when the model fixated on a topic; 150s keeps the bot feeling alive without
+// monologuing. Combined with the coarser brain heartbeat, idle chatter is now sparse.
+const VIBE_CHAT_MS = parseInt(process.env.VIBE_CHAT_MS || '150000', 10)
 let lastSayAt = 0
 let lastVibeAt = 0
+// Content de-dupe. A fixated model re-emits near-identical lines ("why are there so
+// many wolves here") every tick; the timing gates alone let one identical copy through
+// each window, so players see the same message on repeat. Track the last few sent
+// lines and suppress near-duplicates of UNPROMPTED chatter (a direct reply is never
+// blocked, but is recorded so the next quip can't just echo it).
+const RECENT_SAY_MAX = 10
+const SAY_DUP_WINDOW_MS = parseInt(process.env.SAY_DUP_WINDOW_MS || '360000', 10)
+const recentSaid = [] // { norm, at }
+function normSay (line) {
+  return String(line).replace(/^\s*say\b/i, '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim()
+}
+function tooSimilar (a, b) {
+  if (!a || !b) return false
+  if (a === b) return true
+  if (a.length > 6 && (a.includes(b) || b.includes(a))) return true // one contains the other
+  const A = new Set(a.split(' ')), B = new Set(b.split(' '))
+  let inter = 0
+  for (const t of A) if (B.has(t)) inter++
+  const uni = new Set([...A, ...B]).size
+  return uni > 0 && inter / uni >= 0.5 // Jaccard: mostly the same words (0.5 catches more rephrasings)
+}
+function isDupSay (norm) {
+  const now = Date.now()
+  for (const s of recentSaid) if (now - s.at < SAY_DUP_WINDOW_MS && tooSimilar(norm, s.norm)) return true
+  return false
+}
+function recordSaid (norm) {
+  if (!norm) return
+  recentSaid.push({ norm, at: Date.now() })
+  while (recentSaid.length > RECENT_SAY_MAX) recentSaid.shift()
+}
 function gateSay (line, fromBrain) {
   if (!/^say\b/i.test(String(line).trim())) return null // not a chat line - allow
   const now = Date.now()
   if (now - lastSayAt < CHAT_COOLDOWN_MS) return `cooldown ${CHAT_COOLDOWN_MS}ms`
+  const norm = normSay(line)
+  // Block near-duplicates of anything said recently - covers BOTH unprompted quips and
+  // replies (the model kept answering different messages with the same sentence). Short
+  // reactions ("lol", "ok bro") are exempt so natural interjections can still repeat.
+  // A blocked reply does NOT clear the pending request, so the brain must answer again
+  // with something new instead of parroting.
+  const substantial = norm.split(' ').filter(Boolean).length >= 3
+  if (substantial && isDupSay(norm)) return 'duplicate (already said that - say something new)'
   if (fromBrain && lastAddressedAt <= lastReplyAt) {
-    // unprompted quip - budgeted, and it does NOT count as a reply (leaves
-    // lastReplyAt/pending untouched so a real answer is still owed if asked)
+    // UNPROMPTED quip (nobody addressed it). This is the ONLY chatter we throttle -
+    // replies below are always free so conversation feels natural. Stay SILENT while
+    // busy working (building/gathering - it should focus, not narrate), and otherwise
+    // only an occasional line per VIBE_CHAT_MS.
+    if (commands.isBusy && commands.isBusy()) return 'busy - no idle chatter'
     if (now - lastVibeAt < VIBE_CHAT_MS) return `vibe budget ${Math.ceil((VIBE_CHAT_MS - (now - lastVibeAt)) / 1000)}s`
     lastVibeAt = now; lastSayAt = now
+    recordSaid(norm)
     return null
   }
+  // a REPLY (someone addressed it) - always allowed, natural conversation
   lastSayAt = now; lastReplyAt = now
   clearPendingChat() // a reply resolves the pending request(s)
+  recordSaid(norm)
   return null
 }
 
@@ -138,11 +188,19 @@ function note (msg) {
 let version = process.env.MC_VERSION || cfg.version
 if (version === 'auto' || version === 'false') version = false
 
+const auth = process.env.MC_AUTH || cfg.auth
+// If no username is set: for a Microsoft login the real account name is used
+// anyway (mineflayer sets bot.username from the signed-in profile - the value
+// here is just a token-cache label), so any stable label is fine. Offline mode
+// has no account, so it needs a literal name; fall back to a placeholder.
+let username = (process.env.MC_USERNAME || cfg.username || '').trim()
+if (!username) username = auth === 'microsoft' ? 'Animus' : 'Player'
+
 const bot = mineflayer.createBot({
   host: process.env.MC_HOST || cfg.host,
   port: parseInt(process.env.MC_PORT || cfg.port, 10),
-  username: process.env.MC_USERNAME || cfg.username,
-  auth: process.env.MC_AUTH || cfg.auth,
+  username,
+  auth,
   version
 })
 
@@ -204,15 +262,186 @@ bot.on('chat', (username, message) => {
     commands.handle(bot, line)
       .then(r => note(`(chat-cmd) ${r}`))
       .catch(e => note(`(chat-cmd error) ${e.message}`))
-  } else if (access.isAddressed(message, bot.username, cfg)) {
+    return
+  }
+  // Natural-language build: an OPERATOR can just SAY "can you build <name>" in
+  // plain chat (no "!") and the bot loads that saved schematic and builds it -
+  // same power as !schematic, without the command syntax. Operator-gated because
+  // building edits the world (identical gate to the !schematic command). Checked
+  // before isAddressed so the build request is acted on, not sent to the brain.
+  const buildReq = access.parseBuildRequest(message, bot.username, cfg)
+  if (buildReq) {
+    if (!access.isOperator(username, cfg)) {
+      note(`(build-req denied) ${username} is not an operator`)
+      recordChatLog(`   ^ DENIED build: ${username} is not an operator`)
+      return
+    }
+    startNaturalBuild(username, buildReq)
+    return
+  }
+  if (access.isAddressed(message, bot.username, cfg)) {
+    // A direct ORDER from an operator must be OBEYED deterministically - the brain used
+    // to "decide" whether to comply and would argue back ("bro you're 27 blocks away...")
+    // instead of stopping. Pull a recognized imperative out of the addressed message and
+    // run it straight through the body, bypassing the brain entirely. `stop` above all -
+    // it's the safety override the operator relies on.
+    const direct = directCommand(message)
+    if (direct && access.isOperator(username, cfg)) {
+      note(`(direct-cmd) ${username}: "${message}" -> ${direct}`)
+      commands.handle(bot, direct)
+        .then(r => note(`(direct-cmd) ${r}`))
+        .catch(e => note(`(direct-cmd error) ${e.message}`))
+      recordChat(username, message) // still let the brain see it (so it can ack in chat)
+      return
+    }
     // chat aimed at the bot - surface it so the brain can reply conversationally
     recordChat(username, message)
   }
 })
 
-bot.on('kicked', (reason) => note(`KICKED: ${reason}`))
+// Extract a deterministic command from a message an operator addressed to the bot, for
+// orders the brain must never second-guess. Returns a command string for commands.handle
+// or null. Deliberately conservative - only unambiguous imperatives, and never on a
+// negation ("don't stop", "keep going").
+function directCommand (message) {
+  const m = String(message).toLowerCase()
+  if (/\bdon'?t\s+stop\b|\bdo\s*n[o']?t\s+stop\b|\bkeep\s+going\b|\bnever\s+stop\b/.test(m)) return null
+  if (/\b(stop|halt|freeze|abort|cancel|hold on|hold up|cut it out|knock it off|quit it|stand down|stop it|stop moving|stop building)\b/.test(m)) return 'stop'
+  return null
+}
+
+// Look up a player's current position by (fuzzy) name, for "build it here" =
+// centre on where THEY are standing. Exact match first, then prefix-insensitive
+// (so "Steve" finds a Floodgate ".Steve"). null if they're not in view.
+function playerPos (name) {
+  const p = bot.players[name] && bot.players[name].entity
+  if (p && p.position) return p.position
+  const want = String(name || '').toLowerCase().replace(/^[^a-z0-9_]+/i, '')
+  for (const q of Object.values(bot.players || {})) {
+    if (q.entity && q.entity.position && q.username.toLowerCase().replace(/^[^a-z0-9_]+/i, '') === want) return q.entity.position
+  }
+  return null
+}
+
+// Load and build a saved schematic from a spoken request. Resolves the name to a
+// local .schem, picks the build origin (explicit coords, else the requesting
+// player's own spot for "here"), then runs the same load + centred-build pipeline
+// the !command path uses, relaying each step in chat. Operator-gated by caller.
+async function startNaturalBuild (username, req) {
+  const file = schematic.findLocal(req.name)
+  if (!file) {
+    const have = schematic.listLocal()
+    bot.chat((have.length
+      ? `I don't have a schematic called "${req.name}". I've got: ${have.slice(0, 8).join(', ')}`
+      : `I don't have any schematics saved yet - drop a .schem in ${path.basename(schematic.SCHEM_DIR)}/ first`).slice(0, 256))
+    note(`(build-req) ${username} asked for "${req.name}" - no match`)
+    return
+  }
+  // Where to build, always CENTRED on the reference point:
+  //  - explicit coords from the request ("build castle at 100 64 -30"), else
+  //  - the requesting operator's own position ("build it here" = where they stand),
+  //  - falling back to the bot's own feet if the player isn't in view.
+  let point = req.at
+  if (!point) {
+    const pp = playerPos(username)
+    if (pp) point = { x: Math.floor(pp.x), y: Math.floor(pp.y), z: Math.floor(pp.z) }
+  }
+  const where = point ? `${point.x} ${point.y} ${point.z}` : 'here'
+  note(`(build-req) ${username} -> building "${file}" centred at ${where}${req.clear ? ' (clear site)' : ''}`)
+  // Mark the WHOLE request busy (travel-to-site + build) so the autonomous brain can't
+  // stop it partway - it kept stopping the walk to the site (busy only turned on at the
+  // build step) and stranding the bot hundreds of blocks out. A real operator's "stop"
+  // still works (it goes through the directCommand path, which bypasses the brain gate).
+  commands.setBuildReqActive(true)
+  try {
+    const loadRes = await commands.handle(bot, `schematic load ${file}`)
+    bot.chat(String(loadRes).slice(0, 256))
+    // Set the resume job NOW (approximate origin = the requested point) so a death during the
+    // trek to the site resumes the build instead of being forgotten. autoBuild refines `at`.
+    if (point) commands.setResumeJob(point)
+    // If the site is far off, WALK there first (staged) - the placer can't path to a
+    // footprint hundreds of blocks away (unloaded chunks), so it must arrive on-site.
+    if (point) {
+      const me = bot.entity && bot.entity.position
+      const far = me && Math.hypot(point.x - me.x, point.z - me.z) > 80
+      if (far) {
+        // SURVIVAL PREP before the long naked trek: secure a sword + tools + food + (if cows
+        // are near) armor RIGHT HERE first, so the bot travels equipped instead of dying
+        // starving/unarmed on the way. Bounded - makes what it can and heads out regardless.
+        try { const prep = await commands.survivalPrep(bot, { say: m => bot.chat(String(m).slice(0, 200)) }); note(`(build-req) prep -> armed=${prep.armed} fed=${prep.fed} armored=${prep.armored}`) }
+        catch (e) { note(`(build-req) prep skipped: ${e.message}`) }
+        bot.chat(`that's a fair way off - heading to ${where} first...`)
+        const tr = await commands.handle(bot, `travel ${point.x} ${point.y} ${point.z}`)
+        note(`(build-req) travel -> ${tr}`)
+        if (/^couldn't get to/.test(tr)) { bot.chat(tr.slice(0, 256)); return } // never reached - don't churn
+      }
+    }
+    // autobuild = build from inventory if we have the materials, else gather/craft
+    // the whole bill of materials (stashing in a chest) first, then build.
+    const buildRes = await commands.handle(bot, `autobuild center ${where}${req.clear ? ' clear' : ''}`)
+    bot.chat(String(buildRes).slice(0, 256))
+  } catch (e) {
+    note(`(build-req error) ${e.message}`)
+    bot.chat(`couldn't start that build: ${e.message}`.slice(0, 256))
+  } finally {
+    commands.setBuildReqActive(false)
+  }
+}
+
+bot.on('kicked', (reason) => {
+  // the kick reason is usually a chat-component object; stringify it so the REAL reason
+  // (e.g. "kicked for spamming") is captured instead of a useless "[object Object]".
+  let r = reason
+  try { r = typeof reason === 'string' ? reason : JSON.stringify(reason) } catch {}
+  note(`KICKED: ${r}`)
+})
 bot.on('error', (err) => note(`ERROR: ${err.message}`))
 bot.on('end', (reason) => note(`disconnected: ${reason}`))
+
+// Death recovery: remember WHERE we died (last known spot) and whether it's DANGEROUS
+// to return to (lava/fire/void nearby - going back would just re-kill us and the items
+// are gone). Surfaced in /state as `died` so the BRAIN can choose to `recover`. We track
+// a slightly-stale "last alive" spot because by the death event the body may already be
+// respawning elsewhere.
+let lastAlivePos = null
+setInterval(() => { if (bot.entity && bot.health > 0) lastAlivePos = bot.entity.position.clone() }, 1000).unref?.()
+// Feed the stuck-detector: samples position + evaluates "trying but not progressing".
+// Surfaced in /state.stuck so the brain can change approach instead of re-wedging.
+setInterval(() => { try { commands.trackTick(bot) } catch {} }, 1000).unref?.()
+bot.on('death', () => {
+  const p = (bot.entity && bot.entity.position) || lastAlivePos
+  if (!p) return
+  let dangerous = p.y < -60 // void / deep
+  try {
+    for (let dx = -1; dx <= 1 && !dangerous; dx++) {
+      for (let dy = -1; dy <= 2 && !dangerous; dy++) {
+        for (let dz = -1; dz <= 1 && !dangerous; dz++) {
+          const b = bot.blockAt(p.offset(dx, dy, dz))
+          if (b && /lava|fire|magma/.test(b.name)) dangerous = true
+        }
+      }
+    }
+  } catch {}
+  const info = { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z), dangerous, at: Date.now(), retrieved: false }
+  commands.recordDeath(info)
+  commands.markBuildInterrupted && commands.markBuildInterrupted() // keep the build to resume
+  deathPending = true
+  note(`(death) at ${info.x},${info.y},${info.z}${dangerous ? ' - LAVA/FIRE/VOID, risky to return' : ' - can go recover'}`)
+})
+
+// After a DEATH -> RESPAWN, auto-resume any interrupted build. The build survives losing
+// everything: resumeBuild re-provisions from scratch (or the build's chest) and only
+// places the still-missing blocks. 'spawn' also fires on first join, so gate on a death.
+let deathPending = false
+bot.on('spawn', () => {
+  if (!deathPending) return // initial join is handled by the once('spawn') above
+  deathPending = false
+  note('(respawn) back alive - checking for a build to resume')
+  setTimeout(async () => { // let the world/chunks settle first
+    try { const r = commands.resumeBuild && await commands.resumeBuild(bot); if (r) note('(resume) build finished after respawn') }
+    catch (e) { note(`(resume) failed: ${e.message}`) }
+  }, 7000)
+})
 
 // Self-preservation: eat automatically when hungry, independent of the brain,
 // so the bot never starves on a survival server. Natural health regen resumes
@@ -229,16 +458,54 @@ if (process.env.AUTO_EAT !== '0') {
   }, 4000)
 }
 
-// Anti-AFK: a small hop + arm swing periodically so the server doesn't kick the
-// bot for inactivity while it's idle (e.g. between brain restarts). The brain
-// keeps it busy when running; this just covers the gaps. Disable with ANTI_AFK=0.
+// Survival hunt: auto-eat can only eat food you HAVE. When the bot runs OUT of food and is
+// getting hungry, go kill a nearby animal so auto-eat has something to eat - otherwise it
+// starves to 1 hp and stalls (seen live: 0 food / 1 hp mid-build). Only when IDLE: during
+// a build the gather loop does this itself, and a reflex must not fight its pathfinder.
+// Body-side on purpose - the brain is HELD during builds and (verified via the decision
+// log) misreads its own hunger as a nearby player's. Set SURVIVAL_HUNT=0 to disable.
+let survivalHunting = false
+if (process.env.SURVIVAL_HUNT !== '0') {
+  setInterval(async () => {
+    if (survivalHunting || !bot.entity) return
+    if (commands.isBusy && commands.isBusy()) return // the gather loop covers the build case
+    if (!provision.needsFood(bot)) return
+    survivalHunting = true
+    try { if (await provision.huntForFood(bot, {})) note('(survival) hunted an animal - starving with no food') }
+    catch (e) { /* transient - retry next tick */ } finally { survivalHunting = false }
+  }, 6000).unref?.()
+}
+
+// Night-shelter: a NAKED bot at night with a hostile closing digs into a sealed pit and waits
+// it out - a creeper can't reach you underground (it died to one, unarmed, mid-build). Only
+// when IDLE: during a build the gather loop does this itself (a reflex must not fight its
+// pathfinder). Body-side because the brain is HELD during builds. Set NIGHT_SHELTER=0 to off.
+let sheltering = false
+if (process.env.NIGHT_SHELTER !== '0') {
+  setInterval(async () => {
+    if (sheltering || !bot.entity) return
+    if (commands.isBusy && commands.isBusy()) return // the gather loop covers the build case
+    if (!provision.shelterNeeded(bot)) return
+    sheltering = true
+    try { if (await provision.digInForNight(bot, { say: m => bot.chat(String(m).slice(0, 200)) })) note('(shelter) dug in for the night - no armor, mobs about') }
+    catch (e) { /* transient */ } finally { sheltering = false }
+  }, 5000).unref?.()
+}
+
+// Anti-AFK: keep the connection alive during genuine idle gaps (e.g. between brain
+// restarts) so the server doesn't kick the bot. ONLY when truly idle - if it's
+// pathing/gathering/building it's already active, and a hop mid-task just reads as
+// random jumping (user report). Keep-alive is a small arm swing + a tiny turn, NOT
+// a jump. Disable with ANTI_AFK=0.
 if (process.env.ANTI_AFK !== '0') {
   setInterval(() => {
     if (!bot.entity) return
     try {
+      const moving = bot.pathfinder && typeof bot.pathfinder.isMoving === 'function' && bot.pathfinder.isMoving()
+      if (moving || (commands.isBusy && commands.isBusy())) return // already active - no nudge needed
       bot.swingArm('right')
-      bot.setControlState('jump', true)
-      setTimeout(() => { try { bot.setControlState('jump', false) } catch {} }, 250)
+      const yaw = bot.entity.yaw + (Math.PI / 16) * (bot.entity.position.x % 2 < 1 ? 1 : -1) // tiny look shift, no hop
+      bot.look(yaw, bot.entity.pitch, false).catch(() => {})
     } catch { /* not spawned yet */ }
   }, 20000)
 }
@@ -248,33 +515,52 @@ if (process.env.ANTI_AFK !== '0') {
 const HOSTILE_RE = /zombie|skeleton|spider|creeper|enderman|witch|husk|drowned|pillager|vindicator|ravager|slime|magma_cube|blaze|piglin|hoglin|phantom|zoglin|stray|silverfish|guardian|vex|wither|warden|ghast|shulker|illusioner|evoker|breeze|bogged/i
 // never AUTO-melee these: creepers explode point-blank, ghast/warden/wither are ranged/deadly
 const NO_AUTO_MELEE = /creeper|ghast|warden|wither_boss|^wither$/i
+// below this health, DISENGAGE from any hostile (retreat) instead of trading hits -
+// how it survived to death overnight was by fighting a skeleton while low. Tunable.
+const RETREAT_HP = parseInt(process.env.RETREAT_HP || '8', 10)
 let defendEquipped = false
 let lastDefendTarget = null
 let lastFleeAt = 0
 if (process.env.AUTO_DEFEND !== '0') {
   setInterval(() => {
     if (!bot.entity) return
+    // While digging UP out of a cave, don't let the flee reflex hijack the pathfinder
+    // sideways - rising out of the hole IS the escape (fleeing horizontally just keeps us
+    // in the mob-filled cave and pins us at depth).
+    if (commands.isEscaping && commands.isEscaping()) return
+    // While digging into a night bunker, the flee reflex must NOT drag us off - being sealed
+    // underground IS the escape (a sealed pit beats fleeing a creeper). Yield to the shelter.
+    if (provision.isSheltering && provision.isSheltering()) return
     try {
       const me = bot.entity.position
-      // FLEE from a nearby creeper instead of meleeing it (melee = it explodes).
-      // Runs even mid-chop, overriding the current goal so the bot backs off.
-      let creeper = null; let cbest = 6
+      const hp = bot.health == null ? 20 : bot.health
+      // FLEE from a nearby creeper (melee = it explodes), from FARTHER out now (8),
+      // and - when we're HURT - from ANY hostile: trading blows with a skeleton at low
+      // HP is exactly how it got whittled to death overnight. Retreat instead.
+      let flee = null; let fbest = 8; let why = 'creeper'
       for (const e of Object.values(bot.entities || {})) {
         if (!e || !e.position || (e.type !== 'mob' && e.type !== 'hostile')) continue
         if (!/creeper/.test(e.name || '')) continue
-        const d = e.position.distanceTo(me); if (d < cbest) { cbest = d; creeper = e }
+        const d = e.position.distanceTo(me); if (d < fbest) { fbest = d; flee = e }
       }
-      if (creeper) {
+      if (!flee && hp <= RETREAT_HP) { // low health -> disengage from whatever's hunting us
+        let best = 13
+        for (const e of Object.values(bot.entities || {})) {
+          if (!e || !e.position || (e.type !== 'mob' && e.type !== 'hostile')) continue
+          if (!HOSTILE_RE.test(e.name || '')) continue
+          const d = e.position.distanceTo(me); if (d < best) { best = d; flee = e; why = `low hp (${Math.round(hp)})` }
+        }
+        if (flee) fbest = flee.position.distanceTo(me)
+      }
+      if (flee) {
         const now = Date.now()
-        // throttle re-pathing so the retreat doesn't stutter (recompute every ~1.2s
-        // or when it's a newly-spotted creeper)
-        if (creeper !== lastDefendTarget || now - lastFleeAt > 1200) {
-          const away = me.minus(creeper.position)
-          const dest = me.plus(away.scaled(8 / (away.norm() || 1)))
+        if (flee !== lastDefendTarget || now - lastFleeAt > 1000) {
+          const away = me.minus(flee.position)
+          const dest = me.plus(away.scaled(10 / (away.norm() || 1))) // back off ~10 blocks
           bot.pathfinder.setGoal(new goals.GoalNear(Math.floor(dest.x), Math.floor(me.y), Math.floor(dest.z), 1))
           lastFleeAt = now
-          if (creeper !== lastDefendTarget) note(`(flee) creeper ${cbest.toFixed(1)}m`)
-          lastDefendTarget = creeper
+          if (flee !== lastDefendTarget) note(`(flee) ${why} ${fbest.toFixed(1)}m`)
+          lastDefendTarget = flee
         }
         return
       }
@@ -444,7 +730,26 @@ if (process.env.LEASH !== '0') {
         }
       } else if (leashGaveUp !== target) { // genuinely blocked -> note once, stop kicking
         note(`(leash) can't reach ${who} (${dist.toFixed(0)}m) - blocked, holding`)
+        commands.recordOutcome && commands.recordOutcome('follow', false, `can't reach ${who} - blocked (${dist.toFixed(0)}m)`)
         leashGaveUp = target
+      }
+    } catch { /* not ready */ }
+  }, 1500)
+}
+
+// Sticky-follow reflex: keep trailing whoever you told the bot to follow, even after
+// the autonomous brain briefly switches tasks (attack a mob / goto a spot / scan) -
+// those replace the follow goal, and previously the bot just stopped once they
+// finished ("why did it stop following me"). This re-issues the follow goal whenever
+// the body goes idle, until you say "stop". Complements the leash reflex (which only
+// fires while a follow goal is STILL active but stuck). Disable with STICKY_FOLLOW=0.
+let stickyFollowLogged = null
+if (process.env.STICKY_FOLLOW !== '0') {
+  setInterval(() => {
+    try {
+      const r = commands.maybeResumeFollow && commands.maybeResumeFollow(bot)
+      if (r) { // note only when the target changes, so we don't spam the log on each resume
+        if (stickyFollowLogged !== r) { note(`(sticky-follow) ${r}`); stickyFollowLogged = r }
       }
     } catch { /* not ready */ }
   }, 1500)
@@ -486,28 +791,36 @@ const server = http.createServer((req, res) => {
     req.on('data', c => { data += c })
     req.on('end', async () => {
       let line = data
-      try { const j = JSON.parse(data); if (j && typeof j.command === 'string') line = j.command } catch {}
+      let why = '' // the brain's stated motive for this command, if it sent one
+      try { const j = JSON.parse(data); if (j && typeof j.command === 'string') line = j.command; if (j && typeof j.reason === 'string') why = j.reason } catch {}
+      const rz = why ? ` «${String(why).slice(0, 80)}»` : '' // shown in /log so "why did it do X" is answerable
       // BRAIN CONFINEMENT: block world-editing/admin commands on the API path so
       // the autonomous brain can't grief or dupe. Operators use in-game !commands.
       if (process.env.BRAIN_ALLOW_CHEATS !== '1' && CHEAT_CMDS.test(String(line).trim())) {
-        note(`(cmd) ${line} -> BLOCKED (world-edit/admin is operator-only)`)
+        note(`(cmd) ${line}${rz} -> BLOCKED (world-edit/admin is operator-only)`)
         return send(res, 200, 'blocked: world-editing/admin commands are operator-only')
       }
       // While an operator-triggered build/provision is driving the body, don't let
-      // the brain's own movement/gather commands fight it - allow only perception
-      // + chat so the brain holds (and can still talk) until the build finishes.
-      if (commands.isBusy && commands.isBusy() && !/^(state|scan|find|block|entities|inventory|look|say|stop)\b/i.test(String(line).trim())) {
+      // the brain's own commands fight it - allow only perception + chat so the brain
+      // holds (and can still talk) until the build finishes. NOTE: `stop` is deliberately
+      // NOT whitelisted here - the autonomous brain must not be able to cancel an
+      // operator's build on a heartbeat whim (it did, repeatedly, stranding the bot far
+      // from the site). A real OPERATOR's "stop" still works: it comes through the
+      // bot.on('chat') directCommand path, which calls commands.handle directly and
+      // bypasses this gate entirely. So only the brain's self-issued stop is suppressed.
+      if (commands.isBusy && commands.isBusy() && !/^(state|scan|find|block|entities|inventory|look|say)\b/i.test(String(line).trim())) {
+        note(`(cmd) ${line}${rz} -> held (busy building) - brain command suppressed`)
         return send(res, 200, "busy building right now - I'll hold until it's done")
       }
       const drop = gateSay(line, true) || gateImpactful(line) // brain: gated chat + repeat-guard
-      if (drop) { note(`(cmd) ${line} -> skipped (${drop})`); return send(res, 200, `skipped: ${drop}`) }
+      if (drop) { note(`(cmd) ${line}${rz} -> skipped (${drop})`); return send(res, 200, `skipped: ${drop}`) }
       noteManualLook(line)
       try {
         const result = await commands.handle(bot, line)
         // A non-perception command is the brain's response to any waiting player,
         // so consider the request answered (perception commands keep it pending).
         if (!PREP_CMDS.test(String(line).trim())) clearPendingChat()
-        note(`(cmd) ${line} -> ${result.split('\n')[0]}`)
+        note(`(cmd) ${line}${rz} -> ${result.split('\n')[0]}`)
         send(res, 200, result)
       } catch (e) {
         note(`(cmd error) ${line} -> ${e.message}`)
@@ -599,6 +912,10 @@ const server = http.createServer((req, res) => {
   send(res, 404, 'not found')
 })
 
-server.listen(cfg.controlPort, cfg.controlHost, () => {
-  note(`control API on http://${cfg.controlHost}:${cfg.controlPort}`)
+// CONTROL_PORT/CONTROL_HOST env overrides let a second (test) instance run its
+// control API on a free port alongside a live bot that already holds cfg.controlPort.
+const controlPort = parseInt(process.env.CONTROL_PORT || cfg.controlPort, 10)
+const controlHost = process.env.CONTROL_HOST || cfg.controlHost
+server.listen(controlPort, controlHost, () => {
+  note(`control API on http://${controlHost}:${controlPort}`)
 })
