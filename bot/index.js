@@ -711,7 +711,10 @@ if (process.env.LEASH !== '0') {
     try {
       const goal = bot.pathfinder.goal
       const target = goal && goal.entity // only entity-follows (not goto-to-coords)
-      if (!target || !target.position) { leashLastPos = null; leashStuckSince = 0; leashGaveUp = null; return }
+      // ONLY leash a PLAYER-follow. A GoalFollow on a MOB (the survival/armor cow-hunt uses
+      // one) would otherwise trip this reflex: it re-paths to a fleeing cow every 3s, fighting
+      // the hunt loop and dragging the bot hundreds of blocks off the build (seen live).
+      if (!target || !target.position || target.type !== 'player') { leashLastPos = null; leashStuckSince = 0; leashGaveUp = null; return }
       const me = bot.entity.position
       const dist = target.position.distanceTo(me)
       if (dist <= 6) { leashLastPos = me.clone(); leashStuckSince = 0; leashGaveUp = null; return } // following fine
