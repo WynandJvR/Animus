@@ -1137,6 +1137,7 @@ function recallSpot (item, pos, visited) {
   let best = null; let bd = Infinity
   for (const sp of list) {
     if (visited.has(sp.x + ',' + sp.z)) continue
+    if (sp.rest && sp.rest > Date.now()) continue // growing grove on cooldown - let the trees grow
     const d = Math.hypot(sp.x - pos.x, sp.z - pos.z)
     if (d > 400 || d < 16) continue // too far to trek / already here
     if (d < bd) { bd = d; best = sp }
@@ -1446,6 +1447,7 @@ async function gatherLoop (bot, item, count, opts = {}) {
   // on water), a player walks FURTHER. waterAborts/failed shafts widen it in +32 steps.
   let maxRoam = MAX_ROAM
   let waterAborts = 0
+  let firstLoop = true // first iteration extends the fence over a far continuation start
   const widenFence = why => {
     if (maxRoam >= MAX_ROAM + 128) return
     maxRoam = Math.min(MAX_ROAM + 128, maxRoam + 32) // dry looks can ultimately reach ~288 blocks out
@@ -1524,6 +1526,10 @@ async function gatherLoop (bot, item, count, opts = {}) {
     }
     if (isStopped()) return { gathered: countItem(bot, item) - start, reason: 'stopped' }
     if (timedOut()) return { gathered: countItem(bot, item) - start, reason: 'out of time - building with what i have' }
+    // A round that CONTINUES far from home (autoBuild no longer forces the commute) begins
+    // outside the fence BY DESIGN - cover the starting spot once, or the first iteration
+    // walks halfway home and undoes the continuation (operator: "WHY the shuttling?????").
+    if (firstLoop) { firstLoop = false; const d0 = distHome(); if (d0 + 48 > maxRoam) { maxRoam = Math.ceil(d0 + 48); dbg('  gather fence extended to ' + maxRoam + ' (round continues ' + Math.round(d0) + 'b out)') } }
     // ROAM FENCE: drifted too far from the build site -> walk back inside the fence before
     // scanning again, so the gather converges to the site instead of wandering off for good.
     if (distHome() > maxRoam) {
@@ -1664,6 +1670,10 @@ async function gatherLoop (bot, item, count, opts = {}) {
           const sapId = (mcData.blocksByName[saplingFor(item)] || {}).id
           growing = sapId != null ? (bot.findBlocks({ matching: sapId, maxDistance: 24, count: 6 }) || []) : []
           for (const sp of growing.slice(0, 4)) { if (isStopped()) break; try { await boneMealSapling(bot, sp) } catch {} }
+          // Still just saplings (no bones to force them)? COOLDOWN the spot ~8 min - trees
+          // need time, and re-touring a nursery every round was half the shuttling.
+          const nowMinable = (bot.findBlocks({ matching: ids, maxDistance: 24, count: 4 }) || []).some(p => isWildTreeLog(bot, p))
+          if (!nowMinable && growing.length) { memSpot.rest = Date.now() + 8 * 60000; saveWorldMem(); dbg('  remembered spot is a GROWING grove - resting it 8 min') }
         }
         if (!minable && !growing.length) { dbg('  remembered spot is DRY on arrival (no minable ' + item + ') - dropping it'); forgetSpot(item, memSpot, true) }
         continue // rescan from here; not a dry look

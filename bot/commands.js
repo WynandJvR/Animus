@@ -2218,9 +2218,17 @@ async function autoBuild (bot, schem, at, opts = {}) {
         dbg('material', name, 'starting round buried at y=' + meY + ' - climbing to surface first')
         try { await provision.climbToSurface(bot, home.y, { isStopped }) } catch {}
       }
-      if (Math.hypot(bot.entity.position.x - home.x, bot.entity.position.z - home.z) > 24) {
-        dbg('material', name, 'starting round ' + Math.round(Math.hypot(bot.entity.position.x - home.x, bot.entity.position.z - home.z)) + 'b from home - walking back')
+      // Walk home ONLY when there's a reason: pack full enough to stash, or the last
+      // round made no progress (reset from a known-good anchor). Unconditionally walking
+      // back every round made the bot COMMUTE hundreds of blocks between the site and
+      // the forest for every batch (operator watched it shuttle for an hour, furious).
+      const distHome = Math.hypot(bot.entity.position.x - home.x, bot.entity.position.z - home.z)
+      const wantHome = slotsUsed() >= parseInt(process.env.AUTOBUILD_STASH_SLOTS || '28', 10) || noProgress > 0
+      if (distHome > 24 && wantHome) {
+        dbg('material', name, 'starting round ' + Math.round(distHome) + 'b from home - returning to ' + (noProgress > 0 ? 'reset' : 'stash'))
         try { await travelFar(bot, { x: home.x, y: home.y, z: home.z }, { isStopped, say: () => {}, gather: false }) } catch {}
+      } else if (distHome > 24) {
+        dbg('material', name, 'starting round ' + Math.round(distHome) + 'b out - CONTINUING from here (no reason to commute)')
       }
       const batch = Math.min(BATCH, need - have)
       buildProgress = { phase: 'gathering materials', material: name, have, need, materialsDone: Object.keys(bom).indexOf(name), materialsTotal: Object.keys(bom).length }
