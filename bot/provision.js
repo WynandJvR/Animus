@@ -1550,7 +1550,8 @@ async function gatherLoop (bot, item, count, opts = {}) {
     // OPPORTUNISTIC: a food animal is RIGHT THERE and the pack is light - take the free
     // meal before hunger ever forces a detour (operator ask). Close range only (<=12), so
     // it never wanders off-task chasing dinner; the reactive hunt above covers real need.
-    if (!needsFood(bot) && foodCount(bot) < 5 && Date.now() - lastFoodHunt > 30000 && !isStopped()) {
+    // Threshold 15 (operator-set): keep a deep larder - the creeper death started at 0 food.
+    if (!needsFood(bot) && foodCount(bot) < 15 && Date.now() - lastFoodHunt > 30000 && !isStopped()) {
       const snack = Object.values(bot.entities || {}).some(e => e && e.position &&
         /^(cow|pig|sheep|chicken|rabbit|mooshroom)$/.test((e.name || '').toLowerCase()) &&
         e.position.distanceTo(bot.entity.position) <= 12)
