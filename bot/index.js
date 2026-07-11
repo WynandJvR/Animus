@@ -559,9 +559,14 @@ if (process.env.NIGHT_SHELTER !== '0') {
   setInterval(async () => {
     if (sheltering || !bot.entity) return
     if (commands.isBusy && commands.isBusy()) return // the gather loop covers the build case
-    if (!provision.shelterNeeded(bot)) return
+    // Two triggers: VULNERABLE at night (naked - always rest, the death carousels were all
+    // naked), or simply IDLE at night with a bed on the map - a player with nothing to do
+    // goes to bed even in full iron (operator asked for exactly this). Armored + mid-task
+    // keeps working the night; armored + idle sleeps.
+    const idleNight = provision.isNight(bot) && !bot.pathfinder.goal && provision.knownBed && provision.knownBed()
+    if (!provision.shelterNeeded(bot) && !idleNight) return
     sheltering = true
-    try { if (await provision.nightRest(bot, { say: m => bot.chat(String(m).slice(0, 200)) })) note('(shelter) rested for the night (bed or pit) - no armor, mobs about') }
+    try { if (await provision.nightRest(bot, { say: m => bot.chat(String(m).slice(0, 200)) })) note('(shelter) rested for the night' + (provision.underArmored(bot) ? ' (bed or pit) - no armor, mobs about' : ' - nothing better to do than sleep')) }
     catch (e) { /* transient */ } finally { sheltering = false }
   }, 5000).unref?.()
 }

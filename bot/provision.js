@@ -1075,9 +1075,11 @@ function rememberSpot (item, pos) {
   if (list.length > 20) { list.sort((a, b) => (b.hits - a.hits) || (b.at - a.at)); list.length = 20 }
   saveWorldMem()
 }
-function forgetSpot (item, spot) {
+function forgetSpot (item, spot, hard) {
   const list = loadWorldMem()[item] || []
-  spot.hits = (spot.hits || 1) - 1
+  // hard: the spot was BONE-DRY on arrival after a deliberate trek - it's dead, remove it
+  // now. Decrement-decay made a stale 4-hit spot cost four wasted 200-block round trips.
+  spot.hits = hard ? 0 : (spot.hits || 1) - 1
   if (spot.hits <= 0) { const i = list.indexOf(spot); if (i >= 0) list.splice(i, 1) }
   saveWorldMem()
 }
@@ -1517,8 +1519,14 @@ async function gatherLoop (bot, item, count, opts = {}) {
         visitedMem.add(memSpot.x + ',' + memSpot.z)
         if (opts.say && dryExplores === 0) opts.say(`i remember ${sources[0]} over by ${memSpot.x},${memSpot.z} - heading there`)
         dbg('  gather heading to remembered spot ' + memSpot.x + ',' + memSpot.z + ' (hits ' + (memSpot.hits || 1) + ')')
+        // The memory doesn't just justify LEAVING the fence - it justifies WORKING out
+        // there. Extend the fence to cover the spot, or the loop-top fence-return drags
+        // us straight home on arrival and the next iteration treks out again (verified
+        // live: castle<->340,256 ping-pong, 0 logs gained).
+        const dSpot = Math.hypot(memSpot.x - home.x, memSpot.z - home.z)
+        if (dSpot + 48 > maxRoam) { maxRoam = Math.ceil(dSpot + 48); dbg('  gather fence extended to ' + maxRoam + ' (covers remembered spot)') }
         try { await gotoWithTimeout(bot, new goals.GoalNearXZ(memSpot.x, memSpot.z, 8), 120000) } catch {}
-        if (!(bot.findBlocks({ matching: ids, maxDistance: 24, count: 1 }) || []).length) { dbg('  remembered spot is dry - decaying it'); forgetSpot(item, memSpot) }
+        if (!(bot.findBlocks({ matching: ids, maxDistance: 24, count: 1 }) || []).length) { dbg('  remembered spot is DRY on arrival - dropping it'); forgetSpot(item, memSpot, true) }
         continue // rescan from here; not a dry look
       }
       if (opts.say && dryExplores === 0) opts.say(`looking further afield for ${sources[0]}...`)
