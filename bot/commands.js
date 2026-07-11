@@ -2218,7 +2218,17 @@ async function autoBuild (bot, schem, at, opts = {}) {
   if (!isStopped() && totalBom >= 500 && process.env.SITE_CAMP !== '0') {
     say('big build - setting up camp first (chest, furnace, bed)')
     dbg('camp: BOM total ' + totalBom + ' >= 500 - establishing site camp')
-    try { chest = await provision.ensureChest(bot, { isStopped, home: { x: at.x, y: at.y, z: at.z } }) } catch (e) { dbg('camp: chest skipped (' + e.message + ')') }
+    try {
+      // a chest needs 8 planks - craft them from carried logs first (live: camp skipped
+      // the chest with "need 8 planks" while holding 22 raw logs)
+      const invC = provision.inventoryCounts(bot)
+      const plankCount = Object.entries(invC).filter(([n]) => /_planks$/.test(n)).reduce((s, [, c]) => s + c, 0)
+      if (plankCount < 8) {
+        const logName = Object.keys(invC).find(n => /_log$/.test(n) && invC[n] >= 2)
+        if (logName) await handle(bot, `craft ${logName.replace('_log', '_planks')} 8`).catch(() => {})
+      }
+      chest = await provision.ensureChest(bot, { isStopped, home: { x: at.x, y: at.y, z: at.z } })
+    } catch (e) { dbg('camp: chest skipped (' + e.message + ')') }
     try { await provision.ensureFurnace(bot, { isStopped, home: { x: at.x, y: at.y, z: at.z } }) } catch (e) { dbg('camp: furnace skipped (' + e.message + ')') }
     try {
       const kb = provision.knownBed && provision.knownBed()

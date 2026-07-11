@@ -1306,7 +1306,17 @@ async function sleepInBedHere (bot, { say = () => {}, isStopped = () => false } 
   const mcData = require('minecraft-data')(bot.version)
   const bedIds = Object.values(mcData.blocksByName).filter(b => /_bed$/.test(b.name)).map(b => b.id)
   const bed = bot.findBlock({ matching: bedIds, maxDistance: 8 })
-  if (!bed) { dbg('nightRest: no bed where i remembered one - forgetting it'); forgetBed(); return false }
+  if (!bed) {
+    // Only forget the bed when we're actually STANDING at the remembered spot and it's
+    // gone - a trek that fell short (death, blocked path) used to wipe the memory
+    // permanently, and the bot pit-slept for hours with a perfectly good bed 76 blocks
+    // away (live, 18:01). Fell-short = keep the memory, pit tonight, try again tomorrow.
+    const kb = knownBed()
+    const there = kb && Math.hypot(kb.x - bot.entity.position.x, kb.z - bot.entity.position.z) <= 4
+    if (there) { dbg('nightRest: bed is GONE from ' + kb.x + ',' + kb.y + ',' + kb.z + ' - forgetting it'); forgetBed() }
+    else dbg('nightRest: fell short of the bed - keeping the memory, pitting tonight')
+    return false
+  }
   for (let tries = 0; tries < 3 && !isStopped(); tries++) {
     try {
       if (bot.entity.position.distanceTo(bed.position) > 2.5) { try { await gotoWithTimeout(bot, new goals.GoalNear(bed.position.x, bed.position.y, bed.position.z, 2), 20000) } catch {} }
