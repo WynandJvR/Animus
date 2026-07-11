@@ -93,7 +93,13 @@ function recordDeath (info) {
 function graveValue (d) { const it = d.items || {}; return (it.notable ? it.notable.length * 10 : 0) + (it.count || 0) }
 // A grave is WORTH a corpse run only if it holds gear (tools/armor/ingots) or a real pile
 // of loot. Dying with 1 dirt = let it go, like a player would - the trek itself is the risk.
-function graveWorthIt (d) { const it = d.items || {}; return (it.notable && it.notable.length > 0) || (it.count || 0) >= 10 }
+function graveWorthIt (d) {
+  const it = d.items || {}
+  // Wooden/stone tools cost less to recraft than the trek into whatever killed you -
+  // only REAL gear (iron+, any armor) or genuine bulk justifies a corpse run.
+  const realGear = (it.notable || []).some(n => /^(iron|diamond|netherite|golden)_|_(helmet|chestplate|leggings|boots)$/.test(n))
+  return realGear || (it.count || 0) >= 10
+}
 // The grave worth going back for: unretrieved, reachable (not lava), richest first.
 function bestGrave () {
   const c = deathLedger.filter(d => !d.retrieved && !d.dangerous && graveWorthIt(d) && Date.now() - (d.at || 0) < 24 * 3600 * 1000)
@@ -1112,20 +1118,22 @@ async function handle (bot, line) {
         if (junk) { junk.retrieved = true; persistDeath(); return `i died with nothing worth going back for - letting it go` }
         return "i haven't died recently - nothing to go get"
       }
-      buildAbort = false
+      // NOTE: recover deliberately does NOT touch the global buildAbort. Resetting it
+      // ("so an old stop doesn't kill the fresh recover") UN-ABORTED every zombie flow
+      // mid-flight - three trek loops resurrected and fought over the bot (live, 20:47).
+      // Recovery's own travels ignore stop; it's short and the operator can wait it out.
       // NIGHT GATE: a naked corpse-run in the dark is how death carousels start (the brain
       // fires `recover` the moment it sees the grave, respawn is at night, armor is IN the
       // grave). Sleep/shelter first - the grave keeps (AxGraves persists; vanilla despawn
       // already lost by the time a night passes anyway).
       if (provision.isNight(bot) && provision.underArmored(bot)) {
         try { bot.chat('night and no gear - resting before i go get my stuff') } catch {}
-        try { await provision.restUntilSafe(bot, { isStopped: () => buildAbort }) } catch {}
-        if (buildAbort) return 'stopped'
+        try { await provision.restUntilSafe(bot, { isStopped: () => false }) } catch {}
       }
       const me = bot.entity.position
       if (Math.hypot(d.x - me.x, d.z - me.z) > 80) {
         beginActivity('recover', `${d.x},${d.y},${d.z}`)
-        const r = await travelFar(bot, { x: d.x, y: d.y, z: d.z }, { isStopped: () => buildAbort, say: m => bot.chat(String(m).slice(0, 256)) })
+        const r = await travelFar(bot, { x: d.x, y: d.y, z: d.z }, { isStopped: () => false, say: m => bot.chat(String(m).slice(0, 256)) })
         if (!r.ok && r.dist > 24) { endActivity(false, r.reason); return `couldn't get back to where i died (${d.x},${d.y},${d.z}): ${r.reason}` }
         endActivity(true, 'reached death site')
       }
