@@ -1421,6 +1421,14 @@ async function prepOrchardCell (bot, cx, baseY, cz, { isStopped = () => false } 
     if (b && b.boundingBox === 'block' && a && REPLACEABLE.test(a.name)) { ground = b; break }
   }
   if (!ground) return null
+  // OPEN SKY, CLEAR COLUMN (operator rule: no caves, no obstructions): a sapling under a
+  // cave ceiling or overhang never grows into a usable tree. The full growing column must
+  // be free of solid blocks - vegetation gets cleared below, neighbour-crown leaves are OK.
+  for (let dy = 1; dy <= 14; dy++) {
+    const b = bot.blockAt(ground.position.offset(0, dy, 0))
+    if (!b) break // above loaded height - open enough
+    if (!AIRISH(b.name) && !/grass|fern|flower|dead_bush|snow|vine|_leaves$|_sapling$/.test(b.name)) return null
+  }
   if (bot.entity.position.distanceTo(ground.position) > 4) { try { await gotoWithTimeout(bot, new goals.GoalNear(cx, ground.position.y, cz, 3), 15000) } catch { return null } }
   // clear vegetation/soft cover above the cell (never crafted blocks)
   for (let dy = 1; dy <= 2 && !isStopped(); dy++) {
