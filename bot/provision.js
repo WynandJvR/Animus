@@ -1712,7 +1712,12 @@ async function gatherLoop (bot, item, count, opts = {}) {
       if (snack) {
         lastFoodHunt = Date.now()
         dbg('  gather opportunistic hunt (foodItems=' + foodCount(bot) + ')')
-        try { await huntForFood(bot, { isStopped }) } catch { /* keep gathering */ }
+        // an EMPTY pantry needs a batch, not a bite - one raw kill gets eaten on the
+        // spot and the larder never rebuilds (watched live: hand-to-mouth at 9hp)
+        const kills = foodCount(bot) <= 2 ? 3 : 1
+        try { for (let k = 0; k < kills && !isStopped(); k++) { if (!await huntForFood(bot, { isStopped })) break } } catch { /* keep gathering */ }
+        // cook the haul if a furnace is in reach - cooked meat feeds 3x raw
+        try { if (foodCount(bot) >= 2) await cookRawMeat(bot, { isStopped }) } catch {}
       }
     }
     // SHELTER: naked at night with a hostile bearing down -> dig in and wait it out. A sealed
