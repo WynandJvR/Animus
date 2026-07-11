@@ -1312,6 +1312,22 @@ async function dumpJunk (bot) {
   return tossed
 }
 
+// HOLD until the night is survived: a nightRest attempt returns false when another flow
+// already holds the shelter lock (the idle reflex sealed a pit while a resume was booting)
+// - and callers treated false as "carry on", walking straight back into the dark (died
+// that way at 350,64,36). This BLOCKS until day/armored/stopped, re-attempting rest
+// whenever nothing else is resting.
+async function restUntilSafe (bot, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  let waited = false
+  while (isNight(bot) && underArmored(bot) && !isStopped() && bot.entity) {
+    if (!isResting()) { try { if (await nightRest(bot, opts)) { waited = true; continue } } catch {} }
+    if (!waited) { waited = true; dbg('restUntilSafe: HOLDING for the night (another rest active or rest failed - not working in the dark)') }
+    await new Promise(r => setTimeout(r, 4000))
+  }
+  return true
+}
+
 // ---- TREE FARMING (user-approved): the castle region is chopped bare, so the bot keeps
 // its own wood supply alive like a player would - replant after every chop, fish saplings
 // out of the leaves when it has none, and when the land is truly dry, plant a grove near
@@ -1588,10 +1604,12 @@ async function gatherLoop (bot, item, count, opts = {}) {
     if (nightRestWanted(bot) && Date.now() - lastShelter > 15000) {
       lastShelter = Date.now()
       dbg('  gather night-rest (timeOfDay=' + (bot.time && bot.time.timeOfDay) + ')')
-      let rested = false
-      try { rested = await nightRest(bot, { isStopped, say: opts.say, home }) } catch { /* keep going */ }
-      dbg('  gather night-rest done (rested=' + rested + ')')
-      continue // it's morning (or we were interrupted) - rescan from wherever the night left us
+      // NAKED: this BLOCKS until day (rest failure must never mean "keep working in the
+      // dark"). Armored near the bed: one sleep attempt, then work on if it can't.
+      if (underArmored(bot)) { try { await restUntilSafe(bot, { isStopped, say: opts.say }) } catch {} }
+      else { try { await nightRest(bot, { isStopped, say: opts.say }) } catch {} }
+      dbg('  gather night-rest done (timeOfDay=' + (bot.time && bot.time.timeOfDay) + ')')
+      continue // morning (or interrupted) - rescan from wherever the night left us
     }
     // INVENTORY HYGIENE: junk drops crowd out the material we're gathering - toss them
     // once slots run low (keeps bones for the tree farm + a rotten-flesh famine reserve).
@@ -2385,4 +2403,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, hasSolidCeiling, gatherLeather, huntForFood, hasFood, needsFood, digInForNight, nightRest, nightRestWanted, isResting, rememberBed, knownBed, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, setDebugSink }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, hasSolidCeiling, gatherLeather, huntForFood, hasFood, needsFood, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, setDebugSink }

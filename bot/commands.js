@@ -411,7 +411,7 @@ async function travelFar (bot, dest, opts = {}) {
         lastSurvival = Date.now(); const sv0 = Date.now()
         try {
           if (provision.needsFood(bot)) { say('starving - grabbing something to eat before i push on'); await provision.huntForFood(bot, { isStopped }) }
-          else { escaping = true; try { await provision.nightRest(bot, { isStopped, say }) } finally { escaping = false } }
+          else { escaping = true; try { if (provision.underArmored(bot)) await provision.restUntilSafe(bot, { isStopped, say }); else await provision.nightRest(bot, { isStopped, say }) } finally { escaping = false } }
         } catch { /* keep travelling regardless */ }
         climbTimeMs += Date.now() - sv0
         bot.pathfinder.setMovements(travelMovements(bot)); lastD = Infinity; continue
@@ -1089,8 +1089,8 @@ async function handle (bot, line) {
       // grave). Sleep/shelter first - the grave keeps (AxGraves persists; vanilla despawn
       // already lost by the time a night passes anyway).
       if (provision.isNight(bot) && provision.underArmored(bot)) {
-        say('night and no gear - resting before i go get my stuff')
-        try { await provision.nightRest(bot, { isStopped: () => buildAbort }) } catch {}
+        try { bot.chat('night and no gear - resting before i go get my stuff') } catch {}
+        try { await provision.restUntilSafe(bot, { isStopped: () => buildAbort }) } catch {}
         if (buildAbort) return 'stopped'
       }
       const me = bot.entity.position
@@ -2364,8 +2364,8 @@ async function resumeBuild (bot) {
     // (verified live: 3 deaths in 90s at spawn). We respawn AT the bed - sleep in it (or
     // pit as fallback) until morning, THEN gear up and go.
     if (provision.isNight(bot) && provision.underArmored(bot)) {
-      dbg('resume: night + no armor - resting till morning before heading back')
-      try { await provision.nightRest(bot, { isStopped: () => buildAbort, say }) } catch {}
+      dbg('resume: night + no armor - resting till morning before heading back (BLOCKING)')
+      try { await provision.restUntilSafe(bot, { isStopped: () => buildAbort, say }) } catch {}
     }
     if (buildAbort) return (result = { stopped: true, placed: 0, total: 0 })
     // GET THE STUFF BACK first when it's safe: on servers with a graves plugin (the
