@@ -49,3 +49,6 @@ brain-decisions*.jsonl
 # build/death resume state (runtime - contains live-world coordinates)
 bot/resume-job.json
 bot/last-death.json
+
+# real connection config (holds the live server address) - copy config.example.json
+bot/config.json

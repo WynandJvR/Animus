@@ -16,6 +16,9 @@ const path = require('path')
 const { execFile } = require('child_process')
 const mineflayer = require('mineflayer')
 const { pathfinder, goals } = require('mineflayer-pathfinder')
+// config.json is UNTRACKED (it holds the real server address). Fresh clones get the
+// sanitized example copied into place automatically on first run.
+try { require('fs').accessSync(require('path').join(__dirname, 'config.json')) } catch { require('fs').copyFileSync(require('path').join(__dirname, 'config.example.json'), require('path').join(__dirname, 'config.json')) }
 const cfg = require('./config.json')
 const commands = require('./commands.js')
 const provision = require('./provision.js') // for the body-side survival-hunt reflex
