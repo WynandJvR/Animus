@@ -969,6 +969,7 @@ function shelterNeeded (bot) { return isNight(bot) && underArmored(bot) }
 function nightRestWanted (bot) {
   if (shelterNeeded(bot)) return true
   if (!isNight(bot) || !bot.entity) return false
+  if ((bot.health ?? 20) <= 8) return true // critically hurt at night: rest, armored or not (died at 1hp hunting in the dark)
   const bed = knownBed()
   return !!bed && Math.hypot(bed.x - bot.entity.position.x, bed.z - bot.entity.position.z) <= 100 // must COVER THE BUILD SITE: it died working the castle at night, 66 blocks from bed, 2 past the old radius
 }
@@ -1690,7 +1691,10 @@ async function gatherLoop (bot, item, count, opts = {}) {
     // (auto-eat feeds on it). Body-side because during a build the BRAIN is held and can't
     // do this; a long gather in a food-poor area otherwise runs the bot to 0 food / 1 hp
     // with no way back. Throttled so it doesn't chase every loop.
-    if (needsFood(bot) && Date.now() - lastFoodHunt > 20000) {
+    // NEVER hunt when rest is due: roaming for animals in the dark at 1hp is how it died
+    // at 479,67,85 (a sealed pit is safe at ANY hunger - starvation stops at half hearts;
+    // a night hunt doesn't). The night-rest check below runs first via this guard.
+    if (needsFood(bot) && !nightRestWanted(bot) && Date.now() - lastFoodHunt > 20000) {
       lastFoodHunt = Date.now()
       if (opts.say) opts.say('starving - hunting something to eat first')
       dbg('  gather food-hunt (food=' + bot.food + ')')
