@@ -1873,6 +1873,23 @@ async function runCraft (bot, item, count, needsTable, opts = {}) {
   }
   const made = countItem(bot, item) - before
   if (made < count) throw new Error(`crafting stalled: made ${made}/${count} ${item}`)
+  // TAKE YOUR TABLE WITH YOU: a field-craft far from home leaves a table in the middle
+  // of nowhere (operator complaint). If this table is OURS (infra registry) and we're
+  // far from the home anchor, break it and pocket it - next field craft places it from
+  // the pack. The home-area table stays put (it's the workshop).
+  if (table && opts.home && Math.hypot(table.position.x - opts.home.x, table.position.z - opts.home.z) > 64) {
+    const ours = recallInfra('table', table.position, 3)
+    if (ours) {
+      try {
+        const tool = toolForBlock(bot, 'oak_planks') // any axe speeds it; bare hand works
+        if (tool) await bot.equip(tool, 'hand').catch(() => {})
+        await bot.dig(bot.blockAt(table.position))
+        await collectDrops(bot, 4)
+        forgetInfra('table', ours)
+        dbg('  packed up my field crafting table (' + table.position.toString() + ')')
+      } catch (e) { dbg('  could not pack up field table (' + e.message + ')') }
+    }
+  }
   return made
 }
 
