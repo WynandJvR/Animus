@@ -1400,7 +1400,7 @@ async function fishSaplings (bot, around, logItem, { isStopped = () => false } =
   const leaf = mcData.blocksByName[logItem.replace(/_log$/, '_leaves')]
   if (!leaf) return
   let broken = 0
-  while (broken < 12 && !isStopped() && saplingCount(bot, logItem) < 2) {
+  while (broken < 16 && !isStopped() && saplingCount(bot, logItem) < 4) { // fish harder: the orchard wants stock
     const b = bot.findBlock({ matching: leaf.id, maxDistance: 4 })
     if (!b || !canBreakNaturally(b)) break
     try { await bot.dig(b) } catch { break }
@@ -1411,7 +1411,7 @@ async function fishSaplings (bot, around, logItem, { isStopped = () => false } =
 
 // Plant whatever saplings we hold in a spaced grove near (but not on) the home anchor.
 // Returns how many went in the ground.
-async function plantGrove (bot, home, logItem, { isStopped = () => false, say = () => {}, avoid = null } = {}) {
+async function plantGrove (bot, home, logItem, { isStopped = () => false, say = () => {}, avoid = null, max = 8 } = {}) {
   let have = saplingCount(bot, logItem)
   if (have < 1) return 0
   // Stand clear of the build: just past the keep-out box's east edge when we know it,
@@ -1420,7 +1420,7 @@ async function plantGrove (bot, home, logItem, { isStopped = () => false, say = 
   await walkStaged(bot, gx, gz, { isStopped, range: 6, timeoutMs: 90000 })
   if (isStopped()) return 0
   let planted = 0; let lastSpot = bot.entity.position
-  while (saplingCount(bot, logItem) > 0 && planted < 8 && !isStopped()) {
+  while (saplingCount(bot, logItem) > 0 && planted < max && !isStopped()) {
     if (!await plantSaplingNear(bot, lastSpot, logItem, { avoid })) {
       // no plantable cell here - shuffle a few blocks and try again, then give up
       const np = lastSpot.offset(4, 0, (planted % 2) ? 4 : -4)
@@ -1479,6 +1479,7 @@ async function gatherLoop (bot, item, count, opts = {}) {
   let maxRoam = MAX_ROAM
   let waterAborts = 0
   let firstLoop = true // first iteration extends the fence over a far continuation start
+  let orchardPlanted = false // orchard mode fires at most once per gather run
   const widenFence = why => {
     if (maxRoam >= MAX_ROAM + 128) return
     maxRoam = Math.min(MAX_ROAM + 128, maxRoam + 32) // dry looks can ultimately reach ~288 blocks out
@@ -1633,6 +1634,18 @@ async function gatherLoop (bot, item, count, opts = {}) {
       // ROAM FENCE: ignore targets outside the fence so a distant block can't lure the bot
       // out (findBlocks reaches ~64 past the bot). Strip-mining supplies stone inside the fence.
       .filter(p => Math.hypot(p.x - home.x, p.z - home.z) <= maxRoam + 8)
+    // ORCHARD MODE (operator rule): grinding one tree per chunk wastes the day. Sparse
+    // area (about one tree visible) + a real sapling stock + a big remaining need ->
+    // plant a 16-tree orchard near the site RIGHT NOW (don't wait for total dryness) and
+    // keep hunting while it grows; revisits bone-meal it into a mass harvest.
+    if (isLogGather && !orchardPlanted && candidates.length > 0 && candidates.length < 8 &&
+        (count - (countItem(bot, item) - start)) >= 24 && saplingCount(bot, item) >= 6 && !isStopped()) {
+      orchardPlanted = true
+      dbg('  sparse woods (' + candidates.length + ' logs visible) + ' + saplingCount(bot, item) + ' saplings - planting an ORCHARD near home')
+      if (opts.say) opts.say('these scattered trees are a waste of time - planting my own orchard by the site')
+      try { await plantGrove(bot, home, item, { isStopped, say: opts.say, avoid: opts.avoid, max: 16 }) } catch (e) { dbg('  orchard failed (' + e.message + ')') }
+      continue
+    }
     // Underground (we strip-mined down), mine HORIZONTALLY, not straight down: a block
     // AT foot/head level drops cobble at our feet to auto-collect; mining the floor
     // drops it into the pit below and loses it (verified: got 1 cobble in 90s digging
