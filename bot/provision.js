@@ -1544,6 +1544,7 @@ async function gatherLoop (bot, item, count, opts = {}) {
     const tool = toolForBlock(bot, blk.name)
     if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
     if (bot.canDigBlock && !bot.canDigBlock(blk)) throw new Error('cannot dig from here')
+    bot.pathfinder.setGoal(null) // a lingering goal lets the pathfinder steer mid-dig and ABORT it (dig-restart loops, operator report)
     await bot.dig(blk)
     mined++
   }

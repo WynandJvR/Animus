@@ -288,6 +288,7 @@ function installDigTimeGuard (bot) {
 bot.once('spawn', () => {
   commands.setupMovements(bot)
   installDigTimeGuard(bot)
+  require('./pathfix.js').installPathfinderTuning(bot) // patch layer over the pathfinder (self-scaffold guard etc.)
   note(`spawned as ${bot.username} at ${bot.entity.position}`)
   // Do NOT change gamemode by default - just join and idle. The lab can opt in
   // to creative (for /fill building) with AUTO_CREATIVE=1 or config.autoCreative.
@@ -645,6 +646,10 @@ if (process.env.AUTO_DEFEND !== '0') {
         }
         return
       }
+      // Mid-DIG with healthy hp: don't break off a 7-second dig to punch a zombie the
+      // armor can tank - every interruption resets the block's break progress, and the
+      // operator watched dig-abort-redig loops. Creepers/low-hp fled ABOVE this line.
+      if (bot.targetDigBlock && hp > 12) return
       let target = null; let best = 4 // only fight what's right next to us
       for (const e of Object.values(bot.entities || {})) {
         if (!e || !e.position || e === bot.entity) continue
@@ -712,6 +717,7 @@ const AUTO_TORCH_MS = parseInt(process.env.AUTO_TORCH_MS || '8000', 10)
 if (process.env.AUTO_TORCH === '1') {
   setInterval(async () => {
     if (!bot.entity || !bot.time || bot.time.timeOfDay < 13000) return // daytime - skip
+    if (bot.targetDigBlock) return // never interrupt a dig to decorate (aborts reset break progress)
     if (Date.now() - lastTorchAt < AUTO_TORCH_MS) return
     try {
       const ids = torchBlockIds(bot)
