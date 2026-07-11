@@ -684,7 +684,12 @@ async function pillarUpTo (bot, targetY, opts = {}) {
       while (Date.now() - t < 1000 && !isStopped()) {
         await new Promise(r => setTimeout(r, 15))
         if (bot.entity.position.y - y0 >= 1.0) {
-          try { await bot.placeBlock(ref, new Vec3(0, 1, 0)) } catch {}
+          try { await bot.placeBlock(ref, new Vec3(0, 1, 0)) } catch (e) {
+            // Paper often doesn't echo the blockUpdate on a SUCCESSFUL place (same quirk
+            // as placeAt/torches) - the "miss" made us jump again on top of a block that
+            // was already there: the operator-reported bunny-hop. Check the world.
+            if (/blockUpdate/.test(e.message)) { await new Promise(r => setTimeout(r, 250)) }
+          }
           break
         }
       }
@@ -1137,6 +1142,40 @@ function recallSpot (item, pos, visited) {
     if (d < bd) { bd = d; best = sp }
   }
   return best
+}
+
+// INFRASTRUCTURE MEMORY (operator-requested): remember our OWN tables/furnaces/chests and
+// walk back to them instead of littering the landscape with a fresh crafting table every
+// time the last one fell out of the loaded chunks or behind torn-up terrain.
+function rememberInfra (kind, pos) {
+  const m = loadWorldMem()
+  const s = m.infra = m.infra || {}
+  const list = s[kind] = s[kind] || []
+  for (const e of list) { if (Math.abs(e.x - pos.x) <= 2 && Math.abs(e.y - pos.y) <= 2 && Math.abs(e.z - pos.z) <= 2) { e.at = Date.now(); saveWorldMem(); return } }
+  list.push({ x: Math.floor(pos.x), y: Math.floor(pos.y), z: Math.floor(pos.z), at: Date.now() })
+  if (list.length > 12) { list.sort((a, b) => b.at - a.at); list.length = 12 }
+  saveWorldMem()
+}
+function recallInfra (kind, pos, maxDist) {
+  const list = (loadWorldMem().infra || {})[kind] || []
+  let best = null; let bd = Infinity
+  for (const e of list) { const d = Math.hypot(e.x - pos.x, e.z - pos.z); if (d <= maxDist && d < bd) { bd = d; best = e } }
+  return best
+}
+function forgetInfra (kind, entry) {
+  const list = (loadWorldMem().infra || {})[kind] || []
+  const i = list.indexOf(entry); if (i >= 0) { list.splice(i, 1); saveWorldMem() }
+}
+// Walk to the nearest REMEMBERED one and verify it still stands; forget it if gone.
+async function recallAndReach (bot, kind, blockId, maxDist, reach) {
+  const known = recallInfra(kind, bot.entity.position, maxDist)
+  if (!known) return null
+  dbg('  remembered ' + kind + ' at ' + known.x + ',' + known.y + ',' + known.z + ' - reusing it instead of placing a new one')
+  await walkStaged(bot, known.x, known.z, { range: 10, timeoutMs: 60000 })
+  const blk = bot.blockAt(new Vec3(known.x, known.y, known.z))
+  if (!blk || blk.type !== blockId) { dbg('  remembered ' + kind + ' is gone - forgetting it'); forgetInfra(kind, known); return null }
+  if (await reach(blk)) return blk
+  return null
 }
 
 // NEGATIVE MEMORY (roomba rule, operator-requested): remember 32-block cells that were
@@ -1712,11 +1751,15 @@ async function ensureTable (bot, opts = {}) {
     try { await gotoWithTimeout(bot, new goals.GoalNear(t.position.x, t.position.y, t.position.z, 2), 30000); return true } catch (e) { dbg('  ensureTable: cannot reach table at', t.position.toString(), '-', e.message); return false }
   }
   let table = bot.findBlock({ matching: tableId, maxDistance: 16 }) // `let`: the place path below reassigns it
-  if (table && await reach(table)) return table
+  if (table && await reach(table)) { rememberInfra('table', table.position); return table }
   if (!table) { // none close - check further out (the plan's table from before the roam)
     const far = bot.findBlock({ matching: tableId, maxDistance: 48 })
-    if (far && await reach(far)) return far
+    if (far && await reach(far)) { rememberInfra('table', far.position); return far }
   }
+  // Beyond loaded chunks: a table we REMEMBER placing may be a short walk away - reuse it
+  // rather than littering a new one every roam (operator complaint: tables everywhere).
+  const known = await recallAndReach(bot, 'table', tableId, 64, reach)
+  if (known) { rememberInfra('table', known.position); return known }
   // No reachable table -> place/craft a fresh one HERE (pack table, or 4 planks).
   if (countItem(bot, 'crafting_table') === 0) {
     const def = mcData.itemsByName.crafting_table
@@ -1756,6 +1799,7 @@ async function ensureTable (bot, opts = {}) {
   await bot.placeBlock(ref, new Vec3(0, 1, 0))
   table = bot.findBlock({ matching: tableId, maxDistance: 8 })
   if (!table) throw new Error('placed a table but cannot find it')
+  rememberInfra('table', table.position) // it's OURS now - future crafts come back here
   return table
 }
 
@@ -1823,11 +1867,15 @@ async function placeFromInventory (bot, itemName) {
 async function ensureFurnace (bot, opts = {}) {
   const mcData = require('minecraft-data')(bot.version)
   const furnaceId = mcData.blocksByName.furnace.id
-  let furnace = bot.findBlock({ matching: furnaceId, maxDistance: 12 })
-  if (furnace) {
-    if (bot.entity.position.distanceTo(furnace.position) <= 3) return furnace
-    try { await gotoWithTimeout(bot, new goals.GoalNear(furnace.position.x, furnace.position.y, furnace.position.z, 2), 30000); return furnace } catch (e) { dbg('  ensureFurnace: cannot reach furnace at', furnace.position.toString(), '- placing a new one:', e.message) }
+  const reach = async (f) => {
+    if (bot.entity.position.distanceTo(f.position) <= 3) return true
+    try { await gotoWithTimeout(bot, new goals.GoalNear(f.position.x, f.position.y, f.position.z, 2), 30000); return true } catch (e) { dbg('  ensureFurnace: cannot reach furnace at', f.position.toString(), '-', e.message); return false }
   }
+  let furnace = bot.findBlock({ matching: furnaceId, maxDistance: 12 })
+  if (furnace && await reach(furnace)) { rememberInfra('furnace', furnace.position); return furnace }
+  // Reuse a furnace we REMEMBER before smelting 8 more cobble into a new one.
+  const knownF = await recallAndReach(bot, 'furnace', furnaceId, 64, reach)
+  if (knownF) { rememberInfra('furnace', knownF.position); return knownF }
   if (countItem(bot, 'furnace') === 0) {
     const table = await ensureTable(bot, opts)
     if (bot.entity.position.distanceTo(table.position) > 3) await gotoWithTimeout(bot, new goals.GoalNear(table.position.x, table.position.y, table.position.z, 2), 20000)
@@ -1839,6 +1887,7 @@ async function ensureFurnace (bot, opts = {}) {
   await placeFromInventory(bot, 'furnace')
   furnace = bot.findBlock({ matching: furnaceId, maxDistance: 8 })
   if (!furnace) throw new Error('placed a furnace but cannot find it')
+  rememberInfra('furnace', furnace.position)
   return furnace
 }
 
@@ -2240,7 +2289,10 @@ async function ensureChest (bot, opts = {}) {
   const mcData = require('minecraft-data')(bot.version)
   const chestId = mcData.blocksByName.chest.id
   let chest = bot.findBlock({ matching: chestId, maxDistance: 8 })
-  if (chest) return chest
+  if (chest) { rememberInfra('chest', chest.position); return chest }
+  // Reuse the site chest we REMEMBER (tight radius - the stash chest belongs at the site).
+  const knownC = await recallAndReach(bot, 'chest', chestId, 24, async () => true)
+  if (knownC) { rememberInfra('chest', knownC.position); return knownC }
   if (countItem(bot, 'chest') === 0) {
     const table = await ensureTable(bot, opts)
     if (bot.entity.position.distanceTo(table.position) > 3) await gotoWithTimeout(bot, new goals.GoalNear(table.position.x, table.position.y, table.position.z, 2), 20000)
@@ -2252,6 +2304,7 @@ async function ensureChest (bot, opts = {}) {
   await placeFromInventory(bot, 'chest')
   chest = bot.findBlock({ matching: chestId, maxDistance: 6 })
   if (!chest) throw new Error('placed a chest but cannot find it')
+  rememberInfra('chest', chest.position)
   return chest
 }
 
