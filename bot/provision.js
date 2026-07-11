@@ -1005,6 +1005,14 @@ async function placeAt (bot, target, match) {
   return false
 }
 
+// ACTIVE BUILD ZONE (set by autoBuild, cleared when it ends): the shelter must never dig
+// its bunker inside the build footprint - a pit under the castle floor is a hole in the
+// build (operator rule). Module-level so every shelter entry point respects it without
+// threading a box through each caller.
+let buildZone = null
+function setBuildZone (box) { buildZone = box || null }
+function inBuildZone (x, z) { return !!buildZone && x >= buildZone.x1 && x <= buildZone.x2 && z >= buildZone.z1 && z <= buildZone.z2 }
+
 // Emergency night bunker for a NAKED bot: dig 2 down into solid ground, seal the opening with
 // a block, and wait out the danger (until day AND no hostile near), then climb back out. A
 // sealed pit survives a creeper - it can't reach you underground - where fleeing didn't.
@@ -1022,6 +1030,17 @@ async function digInForNight (bot, opts = {}) {
   _sheltering = true
   try {
     bot.pathfinder && bot.pathfinder.setGoal(null)
+    // NEVER dig the bunker inside the active build footprint - step just past the nearest
+    // edge first (a pit under the castle floor is a hole in the build, operator rule).
+    const p0 = bot.entity.position
+    if (inBuildZone(p0.x, p0.z)) {
+      const exits = [
+        { x: buildZone.x1 - 5, z: p0.z }, { x: buildZone.x2 + 5, z: p0.z },
+        { x: p0.x, z: buildZone.z1 - 5 }, { x: p0.x, z: buildZone.z2 + 5 }
+      ].sort((a, b) => Math.hypot(a.x - p0.x, a.z - p0.z) - Math.hypot(b.x - p0.x, b.z - p0.z))
+      dbg('shelter: inside the build footprint - stepping out to ' + Math.round(exits[0].x) + ',' + Math.round(exits[0].z) + ' before digging')
+      try { await gotoWithTimeout(bot, new goals.GoalNearXZ(exits[0].x, exits[0].z, 2), 20000) } catch (e) { dbg('shelter: footprint exit walk failed (' + e.message + ') - digging where i stand') }
+    }
     // ON A TREE CANOPY? The shelter can't dig leaves (not in DIGGABLE_NATURAL) and used to
     // NO-OP in a 5s loop all night (reproduced on test server, savanna oak). Leaves are
     // always natural: if the ground is close below, punch through and drop; if it's a tall
@@ -2570,4 +2589,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, hasSolidCeiling, gatherLeather, huntForFood, hasFood, needsFood, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, setDebugSink }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, hasSolidCeiling, gatherLeather, huntForFood, hasFood, needsFood, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, setBuildZone, setDebugSink }

@@ -1741,7 +1741,7 @@ async function handle (bot, line) {
         restoreMovements: () => setupMovements(bot),
         clear: doClear
       }).then(r => {
-        building = false; setupMovements(bot)
+        building = false; setupMovements(bot); provision.setBuildZone(null)
         if (buildInterrupted) { // died mid-build: keep resumeJob for the respawn handler, consume the flag
           buildInterrupted = false
           dbg('autobuild unwound after death - keeping resumeJob (deaths=' + resumeDeaths + ')')
@@ -1752,7 +1752,7 @@ async function handle (bot, line) {
         endActivity(!r.stopped, `${r.placed}/${r.total} placed${r.stopped ? ' (stopped)' : ''}`, { detached: true })
         bot.chat(`autobuild ${r.stopped ? 'stopped' : 'done'}: ${r.placed}/${r.total} placed${r.skipped ? `, ${r.skipped} skipped` : ''}`.slice(0, 256))
       }).catch(e => {
-        building = false; setupMovements(bot)
+        building = false; setupMovements(bot); provision.setBuildZone(null)
         if (buildInterrupted) { buildInterrupted = false; dbg('autobuild errored after death - keeping resumeJob:', e.message); endActivity(false, `interrupted by death (${e.message})`, { detached: true }); return }
         resumeJob = null; endActivity(false, e.message, { detached: true }); bot.chat(`autobuild error: ${e.message}`.slice(0, 256))
       })
@@ -2105,6 +2105,7 @@ async function autoBuild (bot, schem, at, opts = {}) {
   // Keep-out box for the TREE FARM: footprint + canopy margin. Threaded into every
   // gather so replants/groves never put a future tree inside (or leaning over) the build.
   const avoid = (() => { const st = schem.start(); const en = schem.end(); return { x1: at.x + st.x - 6, z1: at.z + st.z - 6, x2: at.x + en.x + 6, z2: at.z + en.z + 6 } })()
+  provision.setBuildZone(avoid) // shelters must dig OUTSIDE this while the build is active (cleared by the callers' settle handlers)
   // DIFF the BOM against what already STANDS at the site: a resume/re-run of a partial
   // build must only provision the MISSING blocks (the raw BOM sent the bot back into the
   // caves for 44 stone when 5 were missing - ten times the death exposure for nothing).
