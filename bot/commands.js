@@ -2332,7 +2332,10 @@ async function resumeBuild (bot) {
   beginActivity('autobuild', `resume @ ${job.at.x},${job.at.y},${job.at.z}`)
   let result = null
   try {
-    say(`i died - heading back to finish the build at ${job.at.x},${job.at.y},${job.at.z}`)
+    // Only claim a death when one actually happened - this same flow also runs after a
+    // plain process restart, and "i died" with no death confused the operator (live).
+    const justDied = lastDeath && Date.now() - (lastDeath.at || 0) < 120000
+    say(justDied ? `i died - heading back to finish the build at ${job.at.x},${job.at.y},${job.at.z}` : `back online - picking up my build at ${job.at.x},${job.at.y},${job.at.z}`)
     // NIGHT-FIRST: a fresh respawn is naked; prepping/trekking at night IS the death loop
     // (verified live: 3 deaths in 90s at spawn). We respawn AT the bed - sleep in it (or
     // pit as fallback) until morning, THEN gear up and go.
