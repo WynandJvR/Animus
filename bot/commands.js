@@ -32,6 +32,7 @@ let lastBrokeAt = null
 let loadedSchem = null
 let building = false
 let buildAbort = false // set by `stop`; watched by schematic builds AND provision runs
+let recovering = false // recover mutex - concurrent recovers raced inventory diffs (live)
 let provisioning = false
 let escaping = false   // true while digging UP out of a cave - the flee reflex must not
                        // hijack the pathfinder sideways (rising IS the escape from mobs)
@@ -1092,6 +1093,13 @@ async function handle (bot, line) {
     }
     case 'recover':
     case 'getstuff': {
+      // MUTEX: two concurrent recovers (brain fired twice + an operator one) raced each
+      // other's inventory diffs - "gained 90" that wasn't real, ledger marked done, 50
+      // oak despawned in the still-standing grave (live). One recovery at a time.
+      if (recovering) return 'already recovering - give me a second'
+      recovering = true
+      try { return await doRecover() } finally { recovering = false }
+      async function doRecover () {
       // Go back to the most VALUABLE unretrieved grave and actually reclaim it. SAFE: never
       // returns to a lava/fire death, bails if lava/fire has since appeared. Stage-travels
       // if far. HONEST: verifies items actually landed in the pack before marking the grave
@@ -1170,6 +1178,13 @@ async function handle (bot, line) {
       const gotNotable = !wantNotable || (bot.inventory ? bot.inventory.items() : []).some(i => d.items.notable.includes(i.name))
       dbg('recover: gained ' + gained + ' items, notable recovered: ' + gotNotable + ' (grave still present: ' + stillSomething + ')')
       if (gained > 0 && gotNotable) {
+        // PARTIAL recovery with the grave still standing: tools back but a fraction of
+        // the recorded count while the grave holds the rest = NOT done (live: tools came
+        // back, ledger marked done, 50 oak despawned in the still-standing grave).
+        const recorded = (d.items && d.items.count) || 0
+        if (stillSomething && recorded > 0 && gained < recorded * 0.5) {
+          return `got some of my stuff at ${d.x},${d.y},${d.z} (+${gained} of ~${recorded}) - the grave still has the rest, going back for it` // NOT retrieved
+        }
         d.retrieved = true; persistDeath()
         const left = unretrievedGraves()
         return `got my stuff back at ${d.x},${d.y},${d.z} (+${gained} items)${left ? ` - ${left} more grave${left > 1 ? 's' : ''} to visit` : ''}`
@@ -1180,6 +1195,7 @@ async function handle (bot, line) {
         return `nothing left where i died at ${d.x},${d.y},${d.z} - it's gone`
       }
       return `my grave at ${d.x},${d.y},${d.z} is right here but it won't open - my stuff's stuck in it` // NOT marked retrieved - worth another try
+      } // end doRecover
     }
     case 'goto': {
       // a named waypoint ("goto home") or explicit coords ("goto 10 -60 4")

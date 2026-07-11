@@ -950,6 +950,14 @@ const server = http.createServer((req, res) => {
       // out from under the shelter dig / bed trek - it must not fight the body for the
       // controls in the exact moments survival depends on them (death carousels, verified
       // on test server). Same read-only whitelist applies.
+      // The busy-gap loophole: between build phases isBusy() is briefly false, and the
+      // brain's `stop` slipped through and CLEARED the persisted castle job ("can't
+      // recover, stuck in maze" -> stopped, live). While a saved build job exists on
+      // disk, the brain's stop is always suppressed - that file is operator intent.
+      if (/^stop\b/i.test(String(line).trim()) && commands.persistedResume && commands.persistedResume()) {
+        note(`(cmd) ${line}${rz} -> held (a saved build job exists - the brain may not cancel it)`)
+        return send(res, 200, "held: there's a build to finish - i shouldn't stop it")
+      }
       const bodyBusy = (commands.isBusy && commands.isBusy()) || (provision.isResting && provision.isResting())
       if (bodyBusy && !/^(state|scan|find|block|entities|inventory|look|say)\b/i.test(String(line).trim())) {
         note(`(cmd) ${line}${rz} -> held (${commands.isBusy && commands.isBusy() ? 'busy building' : 'night-resting'}) - brain command suppressed`)
