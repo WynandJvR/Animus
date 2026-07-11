@@ -1048,6 +1048,15 @@ const server = http.createServer((req, res) => {
         const result = await commands.handle(bot, line)
         clearPendingChat()
         note(`(ui-cmd) ${line} -> ${result.split('\n')[0]}`)
+        // TRAINING DATA (human demonstrations): operator commands are gold-standard
+        // corrections - "in this exact state, the human chose THIS". Logged alongside
+        // the brain's decisions with source stamped for curation.
+        try {
+          fs.appendFile(path.join(__dirname, 'brain-decisions.jsonl'), JSON.stringify({
+            t: Date.now(), source: 'operator', command: String(line).slice(0, 120),
+            result: String(result).slice(0, 160), state: commands.state(bot)
+          }) + '\n', () => {})
+        } catch {}
         send(res, 200, result)
       } catch (e) { note(`(ui-cmd error) ${line} -> ${e.message}`); send(res, 500, `error: ${e.message}`) }
     })

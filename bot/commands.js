@@ -127,8 +127,25 @@ function endActivity (ok, detail, opts = {}) {
   if (a && (!ok || opts.detached || Date.now() - a.startedAt > 45000)) {
     lastOutcome = { action: a.name + (a.detail ? ' ' + a.detail : ''), ok: !!ok, detail: String(detail || '').slice(0, 100), at: Date.now() }
   }
+  // TRAINING DATA (episodes): the body's autonomous task-level competence - gathers,
+  // recoveries, travels, builds - with real outcomes and durations. The brain dataset
+  // only captures brain choices; this captures what the BODY can do (the richer skill).
+  if (a) {
+    try {
+      const b = globalBot
+      fs.appendFile(EPISODE_LOG, JSON.stringify({
+        t: Date.now(), episode: a.name, detail: String(a.detail || '').slice(0, 60), ok: !!ok,
+        note: String(detail || '').slice(0, 100), ms: Date.now() - a.startedAt,
+        hp: b && b.health != null ? Math.round(b.health * 10) / 10 : null,
+        food: b && b.food != null ? b.food : null,
+        pos: b && b.entity ? { x: Math.floor(b.entity.position.x), y: Math.floor(b.entity.position.y), z: Math.floor(b.entity.position.z) } : null
+      }) + '\n', () => {})
+    } catch {}
+  }
   activity = null
 }
+const EPISODE_LOG = process.env.EPISODE_LOG || path.join(__dirname, 'body-episodes.jsonl')
+let globalBot = null // set once by trackTick; lets endActivity snapshot vitals without threading bot everywhere
 // Let non-command code (reflexes) record an outcome directly (e.g. a wedged follow).
 function recordOutcome (action, ok, detail) { lastOutcome = { action, ok: !!ok, detail: String(detail || '').slice(0, 100), at: Date.now() } }
 
@@ -145,6 +162,7 @@ let tryingSince = 0    // when the CURRENT move attempt began (goal/activity bec
 const STUCK_WINDOW_MS = 12000
 const STUCK_DIST = 1.5
 function trackTick (bot) {
+  globalBot = bot // vitals reference for the episode logger
   snapInventory(bot) // rolling carried-items snapshot - stamps death records (grave value)
   const ent = bot.entity
   if (!ent || !ent.position) { stuckSince = 0; tryingSince = 0; posHist = []; return }

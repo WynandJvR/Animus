@@ -58,16 +58,34 @@ const path = require('path')
 const DECISION_LOG = process.env.DECISION_LOG === 'off'
   ? null
   : (process.env.DECISION_LOG || path.join(__dirname, 'brain-decisions.jsonl'))
+// ANTI-POISON at write time (dataset audit found 64% of say-records were near-identical
+// spam): each row gets its outcome LABEL stamped on it, and a repeated normalized command
+// is only written twice per 10-minute window - the first two instances are the example
+// and its negative; fifty copies teach nothing and drown the signal.
+const recentRows = new Map() // normalized command -> { count, at }
+function normCmd (c) { return String(c || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60) }
 function logDecision (row) {
   if (!DECISION_LOG) return
-  try { fs.appendFile(DECISION_LOG, JSON.stringify(row) + '\n', () => {}) } catch { /* never let logging break the loop */ }
+  try {
+    row.label = classifyResult(row.result)
+    const k = normCmd(row.command)
+    const now = Date.now()
+    const seen = recentRows.get(k)
+    if (seen && now - seen.at < 600000) {
+      seen.count++; seen.at = now
+      if (seen.count > 2) return // logged twice already this window - spam adds nothing
+      row.repeat = seen.count
+    } else recentRows.set(k, { count: 1, at: now })
+    if (recentRows.size > 200) { for (const [kk, v] of recentRows) { if (now - v.at > 600000) recentRows.delete(kk) } }
+    fs.appendFile(DECISION_LOG, JSON.stringify(row) + '\n', () => {})
+  } catch { /* never let logging break the loop */ }
 }
 // Immediate quality signal from the body's reply: did the command actually DO something, or
 // get bounced? These are the cheapest negative labels for fine-tuning (a 'held'/'skipped'/
 // 'blocked'/'failed' command was the wrong call in that situation).
 function classifyResult (r) {
   const s = String(r || '').toLowerCase()
-  if (/held \(|busy building/.test(s)) return 'held'      // brain command suppressed (mid-build or night-resting)
+  if (/held \(|busy building|i'?ll hold/.test(s)) return 'held' // brain command suppressed (mid-build/night-rest/busy-reply variant)
   if (/skipped/.test(s)) return 'skipped'                     // chat gate / duplicate / vibe budget
   if (/blocked/.test(s)) return 'blocked'                     // cheat/confinement block
   if (/couldn'?t|can'?t|cannot|no path|no waypoint|no player|failed|error|timed out|nowhere|don'?t know|no food|no armor|not hungry|nothing/.test(s)) return 'failed'

@@ -53,3 +53,4 @@ bot/last-death.json
 # real connection config (holds the live server address) - copy config.example.json
 bot/config.json
 bot/world-memory.json
+bot/body-episodes.jsonl
