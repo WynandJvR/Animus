@@ -509,7 +509,7 @@ async function buildSurvival (bot, schem, at, opts = {}) {
       // NIGHT SHELTER (same as gatherLoop/runSmelt): a naked bot placing blocks at night is
       // a stationary target - it died at 29/44 to night mobs (verified live). Dig in, wait
       // it out, then carry on building.
-      if (provision.shelterNeeded(bot) && Date.now() - lastShelter > 15000) {
+      if (provision.nightRestWanted(bot) && Date.now() - lastShelter > 15000) {
         lastShelter = Date.now()
         try { await provision.nightRest(bot, { isStopped, say }) } catch {}
         bot.pathfinder.setMovements(moves) // the night-rest reset movements - restore the build profile

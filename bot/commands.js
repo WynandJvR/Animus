@@ -407,7 +407,7 @@ async function travelFar (bot, dest, opts = {}) {
       // Without this the bot starved to 1 hp / got killed naked before it ever arrived.
       // The time spent is credited against the travel clock (a night-shelter must not time
       // out the trip). travelFar's movement profile is restored after.
-      if (Date.now() - lastSurvival > 12000 && (provision.needsFood(bot) || provision.shelterNeeded(bot))) {
+      if (Date.now() - lastSurvival > 12000 && (provision.needsFood(bot) || provision.nightRestWanted(bot))) {
         lastSurvival = Date.now(); const sv0 = Date.now()
         try {
           if (provision.needsFood(bot)) { say('starving - grabbing something to eat before i push on'); await provision.huntForFood(bot, { isStopped }) }
@@ -1113,7 +1113,8 @@ async function handle (bot, line) {
         /armor_stand|item_display|block_display|text_display|interaction|item_frame|glow_item_frame/.test(e.name || ''))
       dbg('recover: ' + cands.length + ' grave-candidate entities near ' + d.x + ',' + d.y + ',' + d.z + (cands.length ? ' (' + cands.map(e => e.name).join(',') + ')' : ''))
       for (const g of cands) {
-        if (invTotal() > before) break
+        // no early-exit on item gain: a coincidental pickup (the operator dropped food
+        // mid-recovery, live) aborted the loop before the grave was ever CLICKED
         try { await gotoTimed(bot, new goals.GoalNear(g.position.x, g.position.y, g.position.z, 2), 10000) } catch {}
         try { await bot.activateEntity(g) } catch (e) { dbg('recover: activateEntity ' + g.name + ' failed (' + e.message + ')') }
         await new Promise(r => setTimeout(r, 700))
@@ -1132,12 +1133,18 @@ async function handle (bot, line) {
       if (invTotal() === before && graveBlk && graveBlk.name !== 'air') { try { await bot.activateBlock(graveBlk) } catch {} ; await collectNearbyDrops(bot, { radius: 12, max: 40, deadlineMs: 30000 }) }
       const gained = invTotal() - before
       const stillSomething = cands.length > 0 || Object.values(bot.entities || {}).some(e => e && e.name === 'item' && e.position && e.position.distanceTo(bot.entity.position) < 8)
-      dbg('recover: gained ' + gained + ' items (grave still present: ' + stillSomething + ')')
-      if (gained > 0) {
+      // Success means getting the GEAR back, not just any items: the operator dropping
+      // food mid-recovery produced "+20 items" while the armor stayed in the grave, and
+      // the grave got marked retrieved (live). Require at least one recorded notable.
+      const wantNotable = d.items && d.items.notable && d.items.notable.length
+      const gotNotable = !wantNotable || (bot.inventory ? bot.inventory.items() : []).some(i => d.items.notable.includes(i.name))
+      dbg('recover: gained ' + gained + ' items, notable recovered: ' + gotNotable + ' (grave still present: ' + stillSomething + ')')
+      if (gained > 0 && gotNotable) {
         d.retrieved = true; persistDeath()
         const left = unretrievedGraves()
         return `got my stuff back at ${d.x},${d.y},${d.z} (+${gained} items)${left ? ` - ${left} more grave${left > 1 ? 's' : ''} to visit` : ''}`
       }
+      if (gained > 0 && stillSomething) return `picked up ${gained} loose items at ${d.x},${d.y},${d.z} but my gear is still in the grave - it won't open` // NOT retrieved
       if (!stillSomething) {
         d.retrieved = true; persistDeath()
         return `nothing left where i died at ${d.x},${d.y},${d.z} - it's gone`

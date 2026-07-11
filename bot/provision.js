@@ -43,10 +43,37 @@ function gatherMovements (bot) {
   m.maxDropDown = 8 // hop down ledges like a player would (plateau spawns; verified live: default 4 = "No path" to a tree below a cliff)
   m.canDig = true
   m.digCost = 10 // strongly prefer walking around over chewing through a canopy
+  m.liquidCost = 4 // route AROUND lakes: water was priced like land, so A* happily swam
+  // (slow, drowning risk, and the brain panics "get out of water" the whole time)
   m.blocksCantBreak = new Set(
     Object.values(md.blocksByName).filter(b => !/_leaves$/.test(b.name)).map(b => b.id)
   )
   return m
+}
+
+// Long treks in ~48-block legs. A single 200-block GoalNearXZ makes the pathfinder chew
+// an enormous search space in one solve - the operator watched the bot stand motionless
+// at a lake for two minutes while it "thought". Short legs solve instantly, follow the
+// terrain, and give stall detection something to measure. (commands.js's travelFar is the
+// full-featured cousin with door-assist; this is the light provision-side version for
+// memory/bed/grove treks that can't import it without a require cycle.)
+async function walkStaged (bot, tx, tz, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const deadline = Date.now() + (opts.timeoutMs || 180000)
+  let stalls = 0
+  while (!isStopped() && Date.now() < deadline) {
+    const p = bot.entity.position
+    const d = Math.hypot(tx - p.x, tz - p.z)
+    if (d <= (opts.range || 8)) return true
+    const step = Math.min(48, d)
+    const lx = p.x + ((tx - p.x) / d) * step
+    const lz = p.z + ((tz - p.z) / d) * step
+    const from = { x: p.x, z: p.z }
+    try { await gotoWithTimeout(bot, new goals.GoalNearXZ(lx, lz, 4), 30000) } catch {}
+    const np = bot.entity.position
+    if (Math.hypot(np.x - from.x, np.z - from.z) < 3) { if (++stalls >= 3) { dbg('walkStaged: stalled 3 legs at ' + Math.round(np.x) + ',' + Math.round(np.z)); return false } } else stalls = 0
+  }
+  return false
 }
 
 // Blocks that mean "this is a STRUCTURE (village house / player build)", so a log
@@ -879,6 +906,16 @@ function isNight (bot) { return !!(bot.time && bot.time.timeOfDay >= 13000 && bo
 // evening, several while "sheltering"). A naked player doesn't wait to be chased: at dusk
 // they go to bed or hole up BEFORE the mobs arrive.
 function shelterNeeded (bot) { return isNight(bot) && underArmored(bot) }
+// Rest is WANTED (not just needed) when night catches us with the bed close by - even in
+// full armor a player sleeps if home is right there (operator rule: safer overall). Far
+// from the bed and armored, keep working the night; the commute would cost more than the
+// safety buys.
+function nightRestWanted (bot) {
+  if (shelterNeeded(bot)) return true
+  if (!isNight(bot) || !bot.entity) return false
+  const bed = knownBed()
+  return !!bed && Math.hypot(bed.x - bot.entity.position.x, bed.z - bot.entity.position.z) <= 64 // 64, not 48: it died 55 blocks from the bed
+}
 // (anti-grief helpers canBreakNaturally / structureNearby are defined up top, next to
 // STRUCTURE_RE, and shared by every dig primitive + the shelter + the gather filter.)
 
@@ -1191,7 +1228,8 @@ async function nightRestInner (bot, opts = {}) {
       dbg('nightRest: bed remembered at ' + bed.x + ',' + bed.y + ',' + bed.z + ' (' + Math.round(d) + ' blocks) - heading there')
       if (d > 4) {
         say('night time - heading home to sleep')
-        try { await gotoWithTimeout(bot, new goals.GoalNear(bed.x, bed.y, bed.z, 2), 150000) } catch (e) { dbg('nightRest: trek to bed failed (' + e.message + ')') }
+        if (!await walkStaged(bot, bed.x, bed.z, { isStopped, range: 6, timeoutMs: 150000 })) dbg('nightRest: staged trek to bed fell short')
+        try { await gotoWithTimeout(bot, new goals.GoalNear(bed.x, bed.y, bed.z, 2), 20000) } catch (e) { dbg('nightRest: final approach to bed failed (' + e.message + ')') }
       }
       if (isStopped()) return false
       if (Math.hypot(bed.x - bot.entity.position.x, bed.z - bot.entity.position.z) <= 8) {
@@ -1308,7 +1346,7 @@ async function plantGrove (bot, home, logItem, { isStopped = () => false, say = 
   // Stand clear of the build: just past the keep-out box's east edge when we know it,
   // else ~18 blocks from home - the grove must never grow into the castle.
   const gx = avoid ? avoid.x2 + 8 : home.x + 18; const gz = home.z
-  try { await gotoWithTimeout(bot, new goals.GoalNearXZ(gx, gz, 6), 90000) } catch {}
+  await walkStaged(bot, gx, gz, { isStopped, range: 6, timeoutMs: 90000 })
   if (isStopped()) return 0
   let planted = 0; let lastSpot = bot.entity.position
   while (saplingCount(bot, logItem) > 0 && planted < 8 && !isStopped()) {
@@ -1470,10 +1508,23 @@ async function gatherLoop (bot, item, count, opts = {}) {
       try { for (let k = 0; k < 4 && foodCount(bot) < 5 && !isStopped(); k++) { if (!await huntForFood(bot, { isStopped })) break } } catch { /* keep gathering regardless */ }
       dbg('  gather food-hunt done (foodItems=' + foodCount(bot) + ')')
     }
+    // OPPORTUNISTIC: a food animal is RIGHT THERE and the pack is light - take the free
+    // meal before hunger ever forces a detour (operator ask). Close range only (<=12), so
+    // it never wanders off-task chasing dinner; the reactive hunt above covers real need.
+    if (!needsFood(bot) && foodCount(bot) < 5 && Date.now() - lastFoodHunt > 30000 && !isStopped()) {
+      const snack = Object.values(bot.entities || {}).some(e => e && e.position &&
+        /^(cow|pig|sheep|chicken|rabbit|mooshroom)$/.test((e.name || '').toLowerCase()) &&
+        e.position.distanceTo(bot.entity.position) <= 12)
+      if (snack) {
+        lastFoodHunt = Date.now()
+        dbg('  gather opportunistic hunt (foodItems=' + foodCount(bot) + ')')
+        try { await huntForFood(bot, { isStopped }) } catch { /* keep gathering */ }
+      }
+    }
     // SHELTER: naked at night with a hostile bearing down -> dig in and wait it out. A sealed
     // pit survives a creeper where fleeing didn't (it died to one, unarmed, mid-gather). Only
     // when actually threatened + under-armored, so it doesn't burrow every night for nothing.
-    if (shelterNeeded(bot) && Date.now() - lastShelter > 15000) {
+    if (nightRestWanted(bot) && Date.now() - lastShelter > 15000) {
       lastShelter = Date.now()
       dbg('  gather night-rest (timeOfDay=' + (bot.time && bot.time.timeOfDay) + ')')
       let rested = false
@@ -1559,7 +1610,7 @@ async function gatherLoop (bot, item, count, opts = {}) {
         // live: castle<->340,256 ping-pong, 0 logs gained).
         const dSpot = Math.hypot(memSpot.x - home.x, memSpot.z - home.z)
         if (dSpot + 48 > maxRoam) { maxRoam = Math.ceil(dSpot + 48); dbg('  gather fence extended to ' + maxRoam + ' (covers remembered spot)') }
-        try { await gotoWithTimeout(bot, new goals.GoalNearXZ(memSpot.x, memSpot.z, 8), 120000) } catch {}
+        await walkStaged(bot, memSpot.x, memSpot.z, { isStopped, range: 8, timeoutMs: 150000 })
         // Judge the spot by what the miner will actually TOUCH: village-house logs pass a
         // raw block scan but fail the wild-tree filter, so a chopped-out spot next to a
         // village never dropped and kept luring the bot back (verified live, 0-log tours).
@@ -1915,9 +1966,9 @@ async function runSmeltSingle (bot, output, input, count, opts = {}) {
       // DIED at the furnace (verified live, 26/44). Close the window, dig in, reopen.
       // Output keeps cooking while sheltered and is collected on reopen. (Shelter digging
       // can only yield terrain blocks / smelt INPUT, never the OUTPUT, so `made` is safe.)
-      if (shelterNeeded(bot) && Date.now() - lastShelter > 15000) {
+      if (nightRestWanted(bot) && Date.now() - lastShelter > 15000) {
         lastShelter = Date.now()
-        say('night and no armor - closing the furnace till it\'s safe')
+        say('night time - closing the furnace till it\'s safe')
         dbg('  smelt night-rest at', made + '/' + count, 'timeOfDay=' + (bot.time && bot.time.timeOfDay))
         try { furnace.close() } catch {}
         try { await nightRest(bot, { isStopped, say }) } catch {}
@@ -2038,7 +2089,7 @@ async function runSmeltMulti (bot, output, input, count, positions, opts = {}) {
   let idleRounds = 0
   while (made < count && !isStopped() && Date.now() < hardDeadline) {
     // NIGHT SHELTER between rotations (windows are all closed here)
-    if (shelterNeeded(bot)) {
+    if (nightRestWanted(bot)) {
       dbg('  multi: night-rest at', made + '/' + count)
       try { await nightRest(bot, { isStopped, say }) } catch {}
       lastProgressAt = Date.now() // shelter time is not a stall
@@ -2255,4 +2306,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, hasSolidCeiling, gatherLeather, huntForFood, hasFood, needsFood, digInForNight, nightRest, isResting, rememberBed, knownBed, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, setDebugSink }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, hasSolidCeiling, gatherLeather, huntForFood, hasFood, needsFood, digInForNight, nightRest, nightRestWanted, isResting, rememberBed, knownBed, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, setDebugSink }
