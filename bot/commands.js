@@ -2207,6 +2207,46 @@ async function autoBuild (bot, schem, at, opts = {}) {
       await provision.depositMaterials(bot, chestBlk(), { keepDirt: KEEP_DIRT })
     } catch (e) { say(`(couldn't stash yet: ${e.message})`) }
   }
+
+  // BASE CAMP (operator rule): a 500+-block build means days of on-site living - set up
+  // the essentials AT THE SITE before the long grind: chest (banking - carrying the haul
+  // lost 102 logs to one death), furnace (cooked food/smelting), bed if none is in range
+  // (nights + spawn), and torches if we have them (spawn-proofing). Each step best-effort
+  // and idempotent - a missing ingredient skips that piece, never blocks the build.
+  const totalBom = Object.values(bom).reduce((s, n) => s + n, 0)
+  if (!isStopped() && totalBom >= 500 && process.env.SITE_CAMP !== '0') {
+    say('big build - setting up camp first (chest, furnace, bed)')
+    dbg('camp: BOM total ' + totalBom + ' >= 500 - establishing site camp')
+    try { chest = await provision.ensureChest(bot, { isStopped, home: { x: at.x, y: at.y, z: at.z } }) } catch (e) { dbg('camp: chest skipped (' + e.message + ')') }
+    try { await provision.ensureFurnace(bot, { isStopped, home: { x: at.x, y: at.y, z: at.z } }) } catch (e) { dbg('camp: furnace skipped (' + e.message + ')') }
+    try {
+      const kb = provision.knownBed && provision.knownBed()
+      const bedNear = kb && Math.hypot(kb.x - at.x, kb.z - at.z) <= 120
+      if (!bedNear) {
+        // craft a bed if the pack affords it (3 wool + 3 planks); wool hunting is v2
+        const inv = provision.inventoryCounts(bot)
+        const woolName = Object.keys(inv).find(n => /_wool$/.test(n) && inv[n] >= 3)
+        if (woolName && (inv.oak_planks || 0) + (inv.birch_planks || 0) + (inv.spruce_planks || 0) >= 3) {
+          const r = await handle(bot, 'craft white_bed 1').catch(() => null)
+          dbg('camp: bed craft -> ' + r)
+        }
+        const bedItem = (bot.inventory ? bot.inventory.items() : []).find(i => /_bed$/.test(i.name))
+        if (bedItem) {
+          try {
+            await provision.dumpJunk(bot).catch(() => {})
+            await bot.equip(bedItem, 'hand')
+            const spot = bot.blockAt(bot.entity.position.floored().offset(2, -1, 0))
+            if (spot && spot.boundingBox === 'block') { await bot.placeBlock(spot, new (require('vec3').Vec3)(0, 1, 0)); await handle(bot, 'sleep').catch(() => {}) }
+          } catch (e) { dbg('camp: bed place failed (' + e.message + ')') }
+        } else dbg('camp: no bed and no wool for one - sleeping arrangements deferred (bed hunt is v2)')
+      } else dbg('camp: bed already in range at ' + kb.x + ',' + kb.z)
+    } catch (e) { dbg('camp: bed step failed (' + e.message + ')') }
+    try {
+      const torch = (bot.inventory ? bot.inventory.items() : []).find(i => i.name === 'torch')
+      if (torch && placeTorchNearby) { await placeTorchNearby(bot).catch(() => {}) }
+    } catch {}
+    dbg('camp: setup pass done')
+  }
   const slotsUsed = () => (bot.inventory ? bot.inventory.items().length : 0)
   const totalHave = async (name) => {
     let c = 0
