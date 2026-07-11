@@ -1052,6 +1052,39 @@ async function digInForNight (bot, opts = {}) {
       dbg('shelter: inside the build footprint - stepping out to ' + Math.round(exits[0].x) + ',' + Math.round(exits[0].z) + ' before digging')
       try { await gotoWithTimeout(bot, new goals.GoalNearXZ(exits[0].x, exits[0].z, 2), 20000) } catch (e) { dbg('shelter: footprint exit walk failed (' + e.message + ') - digging where i stand') }
     }
+    // REUSE MY BUNKER: four nights of fresh digs at one spot, each side-sealing against
+    // the previous night's holes, ENTOMBED the bot in a hillside (live - needed a rescue
+    // agent). If a registered shelter is within 12, go sit in it and re-cap instead.
+    const oldPit = recallInfra('shelter', bot.entity.position, 12)
+    if (oldPit) {
+      dbg('shelter: reusing my bunker at ' + oldPit.x + ',' + oldPit.y + ',' + oldPit.z)
+      try { await gotoWithTimeout(bot, new goals.GoalBlock(oldPit.x, oldPit.y, oldPit.z), 15000) } catch {}
+      const here = bot.entity.position.floored()
+      if (Math.abs(here.x - oldPit.x) <= 1 && Math.abs(here.z - oldPit.z) <= 1 && here.y <= oldPit.y + 1) {
+        // we're in the old hole - just seal the lid and wait like a normal night
+        const capPos0 = bot.entity.position.floored().offset(0, 2, 0)
+        const CAP0 = /terracotta|dirt|cobble|stone|gravel|sand|netherrack|deepslate|tuff|granite|diorite|andesite|clay|mud|_planks$|_log$|_concrete/
+        let recapped = await placeAt(bot, capPos0, CAP0)
+        if (!recapped) { await new Promise(r => setTimeout(r, 300)); recapped = await placeAt(bot, capPos0, CAP0) }
+        dbg('shelter: bunker re-entered, lid ' + (recapped ? 'SEALED' : 'OPEN'))
+        say(recapped ? 'back in my bunker for the night' : 'in my bunker (lid open)')
+        const dl = Date.now() + (recapped ? 600000 : 120000)
+        const hpX = bot.health || 20
+        while (Date.now() < dl && !isStopped()) {
+          if (!isNight(bot) && !nearHostile(bot, 10)) break
+          if (!recapped && (bot.health || 20) < hpX - 3) { dbg('shelter: hit in the open bunker - bailing'); break }
+          await new Promise(r => setTimeout(r, 3000))
+        }
+        try {
+          const cap = bot.blockAt(capPos0)
+          if (cap && !AIRISH(cap.name) && (!bot.canDigBlock || bot.canDigBlock(cap))) { try { await bot.dig(cap) } catch {} }
+          await collectDrops(bot, 3)
+          await climbToSurface(bot, Math.floor(bot.entity.position.y) + 4, { isStopped })
+        } catch {}
+        return true
+      }
+      dbg('shelter: could not re-enter the bunker - digging fresh')
+    }
     // ON A TREE CANOPY? The shelter can't dig leaves (not in DIGGABLE_NATURAL) and used to
     // NO-OP in a 5s loop all night (reproduced on test server, savanna oak). Leaves are
     // always natural: if the ground is close below, punch through and drop; if it's a tall
@@ -1419,6 +1452,9 @@ async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () =
   const mcData = require('minecraft-data')(bot.version)
   const m = loadWorldMem()
   if (m.wheatFarm && Math.hypot(m.wheatFarm.x - home.x, m.wheatFarm.z - home.z) <= 80) return true // one farm per site
+  // BAD MOMENT guard: the last attempt ran while being chased INTO A CAVE - it searched
+  // for grass from underground and found none. Farming is a peacetime surface job.
+  if (hasSolidCeiling(bot, 12) || nearHostile(bot, 16) || isNight(bot)) { dbg('  wheat farm: bad moment (cave/hostiles/night) - deferred'); return false }
   // 1) surface water within reach of home - farmland must sit beside it
   const waterId = mcData.blocksByName.water.id
   const waters = (bot.findBlocks({ matching: waterId, maxDistance: 48, count: 24 }) || [])
