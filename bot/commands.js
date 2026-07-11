@@ -42,15 +42,64 @@ let followTarget = null
 // death recovery: where we last died + whether it's dangerous to return to (lava/fire/
 // void). Set by the body's death handler; surfaced in /state so the BRAIN can decide
 // whether to `recover`. Cleared/marked once retrieved. Expires so it's not stale forever.
-let lastDeath = null
-// Death record PERSISTS to disk: it used to be memory-only, so a process restart
-// between dying and recovering forgot where the grave was (verified live - a restart
-// skipped grave recovery and the kit was abandoned). Loaded once at boot; cleared
-// when retrieved or when a new death overwrites it.
-const DEATH_FILE = path.join(__dirname, 'last-death.json')
-function persistDeath () { try { if (lastDeath && !lastDeath.retrieved) fs.writeFileSync(DEATH_FILE, JSON.stringify(lastDeath)); else fs.unlinkSync(DEATH_FILE) } catch {} }
-try { const d = JSON.parse(fs.readFileSync(DEATH_FILE, 'utf8')); if (d && !d.retrieved && Date.now() - (d.at || 0) < 24 * 3600 * 1000) lastDeath = d } catch {}
-function recordDeath (info) { lastDeath = info; persistDeath() }
+let lastDeath = null // NEWEST death (kept for quick checks); the LEDGER below is the real record
+// Death LEDGER, persisted to disk. It used to be a single slot - so dying on the way to a
+// recovery OVERWROTE the grave that mattered (verified live: died with full iron at 553,62,50,
+// died again trekking back, and the iron grave was forgotten forever while the bot faithfully
+// visited every worthless naked-death grave after it). Keep every unretrieved death, with a
+// snapshot of what was carried, and recover the most VALUABLE one first.
+const DEATH_FILE = process.env.DEATH_FILE || path.join(__dirname, 'last-death.json') // env-overridable (test isolation)
+let deathLedger = []
+function persistDeath () {
+  try {
+    const keep = deathLedger.filter(d => !d.retrieved).slice(-8)
+    if (keep.length) fs.writeFileSync(DEATH_FILE, JSON.stringify({ deaths: keep }))
+    else fs.unlinkSync(DEATH_FILE)
+  } catch {}
+}
+try {
+  const j = JSON.parse(fs.readFileSync(DEATH_FILE, 'utf8'))
+  const arr = Array.isArray(j.deaths) ? j.deaths : (j && j.x != null ? [j] : []) // old single-death shape migrates
+  deathLedger = arr.filter(d => d && !d.retrieved && Date.now() - (d.at || 0) < 24 * 3600 * 1000)
+  lastDeath = deathLedger[deathLedger.length - 1] || null
+} catch {}
+// Rolling snapshot of what the bot carries (armor slots included - items() skips them), so a
+// death can record what went into the grave. Read at death time it's already unreliable.
+let invSnap = { count: 0, notable: [], at: 0 }
+function snapInventory (bot) {
+  try {
+    const items = bot.inventory ? bot.inventory.items() : []
+    const worn = []
+    for (const s of ['head', 'torso', 'legs', 'feet']) { const it = bot.inventory && bot.inventory.slots[bot.getEquipmentDestSlot(s)]; if (it) worn.push(it.name) }
+    if (!items.length && !worn.length) return
+    const notable = items.filter(i => /_(pickaxe|axe|sword|shovel|hoe|helmet|chestplate|leggings|boots)$|_ingot$|^diamond|^emerald/.test(i.name)).map(i => i.name)
+    invSnap = { count: items.reduce((s, i) => s + i.count, 0) + worn.length, notable: notable.concat(worn), at: Date.now() }
+  } catch {}
+}
+function recordDeath (info) {
+  info.items = (Date.now() - invSnap.at < 90000) ? { count: invSnap.count, notable: invSnap.notable.slice(0, 12) } : { count: 0, notable: [] }
+  invSnap = { count: 0, notable: [], at: 0 } // consumed - the NEXT death starts naked until a new snap
+  deathLedger.push(info)
+  if (deathLedger.length > 16) deathLedger.shift()
+  lastDeath = info
+  persistDeath()
+  // A death ABORTS a standalone gather/provision: the loop has no death handling of its
+  // own and kept "gathering" from the respawn point through the night (verified on test
+  // server: count went NEGATIVE, then a 14-death carousel). Builds handle death via
+  // markBuildInterrupted/resume; this covers the op/brain-issued long ops.
+  if (activity && /^(gather|provision)$/.test(activity.name)) { buildAbort = true }
+}
+function graveValue (d) { const it = d.items || {}; return (it.notable ? it.notable.length * 10 : 0) + (it.count || 0) }
+// A grave is WORTH a corpse run only if it holds gear (tools/armor/ingots) or a real pile
+// of loot. Dying with 1 dirt = let it go, like a player would - the trek itself is the risk.
+function graveWorthIt (d) { const it = d.items || {}; return (it.notable && it.notable.length > 0) || (it.count || 0) >= 10 }
+// The grave worth going back for: unretrieved, reachable (not lava), richest first.
+function bestGrave () {
+  const c = deathLedger.filter(d => !d.retrieved && !d.dangerous && graveWorthIt(d) && Date.now() - (d.at || 0) < 24 * 3600 * 1000)
+  c.sort((a, b) => (graveValue(b) - graveValue(a)) || (b.at - a.at))
+  return c[0] || null
+}
+function unretrievedGraves () { return deathLedger.filter(d => !d.retrieved && !d.dangerous && graveWorthIt(d)).length } // only graves actually worth a trip
 // auto-resume: the build to pick back up after a death interrupts it. autoBuild
 // re-provisions whatever we lost and Build diffs world-vs-schematic, so resuming just
 // finishes the missing blocks. Kept across a death; cleared on finish or `stop`.
@@ -96,6 +145,7 @@ let tryingSince = 0    // when the CURRENT move attempt began (goal/activity bec
 const STUCK_WINDOW_MS = 12000
 const STUCK_DIST = 1.5
 function trackTick (bot) {
+  snapInventory(bot) // rolling carried-items snapshot - stamps death records (grave value)
   const ent = bot.entity
   if (!ent || !ent.position) { stuckSince = 0; tryingSince = 0; posHist = []; return }
   const now = Date.now()
@@ -361,7 +411,7 @@ async function travelFar (bot, dest, opts = {}) {
         lastSurvival = Date.now(); const sv0 = Date.now()
         try {
           if (provision.needsFood(bot)) { say('starving - grabbing something to eat before i push on'); await provision.huntForFood(bot, { isStopped }) }
-          else { say('mobs out and no armor - holing up till it\'s safe'); escaping = true; try { await provision.digInForNight(bot, { isStopped, say }) } finally { escaping = false } }
+          else { escaping = true; try { await provision.nightRest(bot, { isStopped, say }) } finally { escaping = false } }
         } catch { /* keep travelling regardless */ }
         climbTimeMs += Date.now() - sv0
         bot.pathfinder.setMovements(travelMovements(bot)); lastD = Infinity; continue
@@ -1021,14 +1071,18 @@ async function handle (bot, line) {
     }
     case 'recover':
     case 'getstuff': {
-      // Go back to where we died and grab our stuff. SAFE: never returns to a lava/fire
-      // death (items are gone and we'd just die again), and bails if lava/fire has since
-      // appeared at the spot. Stage-travels if it's far. The BRAIN decides WHEN to call
-      // this (from the `died` field in state); this just does it safely.
-      if (!lastDeath) return "i haven't died recently - nothing to go get"
-      if (lastDeath.retrieved) return 'already went back for my stuff'
-      const d = lastDeath
-      if (d.dangerous) { lastDeath.retrieved = true; persistDeath(); return `i died in lava/fire at ${d.x},${d.y},${d.z} - my stuff burned up, not walking back into that` }
+      // Go back to the most VALUABLE unretrieved grave and actually reclaim it. SAFE: never
+      // returns to a lava/fire death, bails if lava/fire has since appeared. Stage-travels
+      // if far. HONEST: verifies items actually landed in the pack before marking the grave
+      // done (it used to say "grabbed what i could" after picking up nothing, forever).
+      const d = bestGrave()
+      if (!d) {
+        const burned = deathLedger.find(x => !x.retrieved && x.dangerous)
+        if (burned) { burned.retrieved = true; persistDeath(); return `i died in lava/fire at ${burned.x},${burned.y},${burned.z} - my stuff burned up, not walking back into that` }
+        const junk = deathLedger.find(x => !x.retrieved && !x.dangerous)
+        if (junk) { junk.retrieved = true; persistDeath(); return `i died with nothing worth going back for - letting it go` }
+        return "i haven't died recently - nothing to go get"
+      }
       buildAbort = false
       const me = bot.entity.position
       if (Math.hypot(d.x - me.x, d.z - me.z) > 80) {
@@ -1044,13 +1098,51 @@ async function handle (bot, line) {
         const b = bot.blockAt(new Vec3(here.x + dx, here.y + dy, here.z + dz))
         if (b && /lava|fire/.test(b.name)) { return `there's lava where i died - leaving my stuff, not worth dying again` }
       }
-      // Grab loose drops (vanilla) AND try to open a grave block right here (AxGraves
-      // & similar keep items in a grave you right-click to reclaim).
-      await collectNearbyDrops(bot, { radius: 6 })
+      const invTotal = () => { try { return bot.inventory.items().reduce((s, i) => s + i.count, 0) } catch { return 0 } }
+      const before = invTotal()
+      // 1) loose VANILLA drops first (this must work on any server, graves plugin or not).
+      //    A full-inventory death scatters 30+ stacks down slopes/water - sweep wide and
+      //    keep sweeping until the area is clean, not the old 6-stacks-and-quit.
+      await collectNearbyDrops(bot, { radius: 12, max: 40, deadlineMs: 45000 })
+      // 2) the GRAVE: AxGraves graves are ENTITIES (item/text displays + an interaction
+      //    entity), NOT blocks - the old activateBlock at the death coords never opened one
+      //    (verified live: an uncollected grave with tools stood for hours). Right-click
+      //    every display-ish entity near the death point; if a grave GUI opens, empty it.
+      const cands = Object.values(bot.entities || {}).filter(e => e && e.position &&
+        Math.abs(e.position.y - d.y) <= 3 && Math.hypot(e.position.x - d.x, e.position.z - d.z) <= 4 &&
+        /armor_stand|item_display|block_display|text_display|interaction|item_frame|glow_item_frame/.test(e.name || ''))
+      dbg('recover: ' + cands.length + ' grave-candidate entities near ' + d.x + ',' + d.y + ',' + d.z + (cands.length ? ' (' + cands.map(e => e.name).join(',') + ')' : ''))
+      for (const g of cands) {
+        if (invTotal() > before) break
+        try { await gotoTimed(bot, new goals.GoalNear(g.position.x, g.position.y, g.position.z, 2), 10000) } catch {}
+        try { await bot.activateEntity(g) } catch (e) { dbg('recover: activateEntity ' + g.name + ' failed (' + e.message + ')') }
+        await new Promise(r => setTimeout(r, 700))
+        // grave GUI variant: shift-click every filled container slot into the pack
+        const w = bot.currentWindow
+        if (w) {
+          try {
+            const end = w.inventoryStart != null ? w.inventoryStart : w.slots.length - 36
+            for (let s = 0; s < end; s++) { if (w.slots[s]) { try { await bot.clickWindow(s, 0, 1) } catch {} ; await new Promise(r => setTimeout(r, 120)) } }
+          } finally { try { bot.closeWindow(w) } catch {} }
+        }
+        await collectNearbyDrops(bot, { radius: 12, max: 40, deadlineMs: 30000 })
+      }
+      // 3) legacy block-grave fallback (player heads etc.)
       const graveBlk = bot.blockAt(new Vec3(d.x, d.y, d.z)) || bot.blockAt(new Vec3(d.x, d.y + 1, d.z))
-      if (graveBlk && graveBlk.name !== 'air') { try { await bot.activateBlock(graveBlk) } catch {} ; await collectNearbyDrops(bot, { radius: 6 }) }
-      lastDeath.retrieved = true; persistDeath()
-      return `back where i died (${d.x},${d.y},${d.z}) - grabbed what i could`
+      if (invTotal() === before && graveBlk && graveBlk.name !== 'air') { try { await bot.activateBlock(graveBlk) } catch {} ; await collectNearbyDrops(bot, { radius: 12, max: 40, deadlineMs: 30000 }) }
+      const gained = invTotal() - before
+      const stillSomething = cands.length > 0 || Object.values(bot.entities || {}).some(e => e && e.name === 'item' && e.position && e.position.distanceTo(bot.entity.position) < 8)
+      dbg('recover: gained ' + gained + ' items (grave still present: ' + stillSomething + ')')
+      if (gained > 0) {
+        d.retrieved = true; persistDeath()
+        const left = unretrievedGraves()
+        return `got my stuff back at ${d.x},${d.y},${d.z} (+${gained} items)${left ? ` - ${left} more grave${left > 1 ? 's' : ''} to visit` : ''}`
+      }
+      if (!stillSomething) {
+        d.retrieved = true; persistDeath()
+        return `nothing left where i died at ${d.x},${d.y},${d.z} - it's gone`
+      }
+      return `my grave at ${d.x},${d.y},${d.z} is right here but it won't open - my stuff's stuck in it` // NOT marked retrieved - worth another try
     }
     case 'goto': {
       // a named waypoint ("goto home") or explicit coords ("goto 10 -60 4")
@@ -1361,15 +1453,23 @@ async function handle (bot, line) {
       const mcData = require('minecraft-data')(bot.version)
       const bedIds = Object.values(mcData.blocksByName).filter(b => /_bed$/.test(b.name)).map(b => b.id)
       const bed = bedIds.length ? bot.findBlock({ matching: bedIds, maxDistance: 48 }) : null // 16 was so tight 'go sleep' failed 19 blocks from the bed
-      if (!bed) return 'no bed nearby'
+      if (!bed) {
+        // no bed in scan range - but if we REMEMBER our bed, go sleep in it like a player
+        // (night only: nightRest's fallback digs a pit, which makes no sense at noon)
+        const kb = provision.knownBed && provision.knownBed()
+        if (kb && provision.isNight(bot)) { const ok = await provision.nightRest(bot, { say: m => bot.chat(String(m).slice(0, 200)) }); return ok ? 'slept in my own bed' : `couldn't make it to my bed at ${kb.x},${kb.y},${kb.z}` }
+        if (kb) return `no bed nearby (mine's at ${kb.x},${kb.y},${kb.z} - i'll head there at night)`
+        return 'no bed nearby'
+      }
       if (bot.entity.position.distanceTo(bed.position) > 3) { try { await gotoTimed(bot, new goals.GoalNear(bed.position.x, bed.position.y, bed.position.z, 2), 30000) } catch {} }
       try { await bot.sleep(bed) } catch (e) {
         // Can't sleep now (daytime / mobs) - but USING the bed still sets the respawn
         // point in modern MC, which is usually what the operator wants ("set your spawn
         // there"). Do that instead of just failing.
-        try { await bot.activateBlock(bed); return `can't sleep now (${e.message}) - but i set my spawn at this bed` } catch {}
+        try { await bot.activateBlock(bed); provision.rememberBed(bed.position); return `can't sleep now (${e.message}) - but i set my spawn at this bed` } catch {}
         return `can't sleep: ${e.message}`
       }
+      provision.rememberBed(bed.position) // bed memory: nights head here first from now on
       return 'sleeping (spawn set here)'
     }
     case 'wake':
@@ -1788,11 +1888,14 @@ function state (bot) {
     lookingAt: looking ? { name: looking.name, pos: { x: looking.position.x, y: looking.position.y, z: looking.position.z } } : null,
     heldItem: bot.heldItem ? bot.heldItem.name : null,
     wearing: wornArmor(bot),      // armor actually equipped {head,torso,legs,feet}, so the brain never claims armor it isn't wearing
-    // where we recently died + whether it's safe to go back (so the brain can choose to
-    // `recover`). Expires after 15 min; null once we've already been back for it.
-    died: (lastDeath && !lastDeath.retrieved && Date.now() - lastDeath.at < 900000)
-      ? { x: lastDeath.x, y: lastDeath.y, z: lastDeath.z, dangerous: lastDeath.dangerous }
-      : null,
+    // the best grave to go back for + how many stand unretrieved (so the brain can choose
+    // to `recover`). Graves persist on the live server (AxGraves), so a VALUABLE grave is
+    // surfaced for 6h; a worthless naked-death one only 15 min.
+    died: (() => {
+      const g = bestGrave()
+      if (!g || Date.now() - g.at > (graveValue(g) > 0 ? 6 * 3600000 : 900000)) return null
+      return { x: g.x, y: g.y, z: g.z, dangerous: g.dangerous, items: (g.items && g.items.notable && g.items.notable.length) ? g.items.notable.slice(0, 6) : undefined, graves: unretrievedGraves() }
+    })(),
     inventory: (bot.inventory ? bot.inventory.items() : []).map(i => `${i.name} x${i.count}`),
     players,
     alone: players.length === 0, // no OTHER players nearby (you are never in this list)
@@ -1962,6 +2065,9 @@ async function autoBuild (bot, schem, at, opts = {}) {
   const restore = opts.restoreMovements || (() => setupMovements(bot))
   const mcData = require('minecraft-data')(bot.version)
   const bom = schematic.billOfMaterials(schem).counts
+  // Keep-out box for the TREE FARM: footprint + canopy margin. Threaded into every
+  // gather so replants/groves never put a future tree inside (or leaning over) the build.
+  const avoid = (() => { const st = schem.start(); const en = schem.end(); return { x1: at.x + st.x - 6, z1: at.z + st.z - 6, x2: at.x + en.x + 6, z2: at.z + en.z + 6 } })()
   // DIFF the BOM against what already STANDS at the site: a resume/re-run of a partial
   // build must only provision the MISSING blocks (the raw BOM sent the bot back into the
   // caves for 44 stone when 5 were missing - ten times the death exposure for nothing).
@@ -2020,7 +2126,7 @@ async function autoBuild (bot, schem, at, opts = {}) {
     say(`no tools on me - setting up a ${Object.keys(want).map(t => t.replace('wooden_', '')).join(' + ')} first`)
     try {
       const tplan = provision.planProvision(mcData, want, provision.inventoryCounts(bot), { primaryWood })
-      if (tplan.tasks.length) await provision.runPlan(bot, tplan, { say, isStopped, restoreMovements: restore, homeY: Math.floor(at.y) })
+      if (tplan.tasks.length) await provision.runPlan(bot, tplan, { say, isStopped, restoreMovements: restore, homeY: Math.floor(at.y), avoid })
     } catch (e) { say(`(couldn't make tools yet: ${e.message})`) }
     if (!hasKind('pickaxe')) say("still couldn't get a pickaxe - is there any wood around here?")
   }
@@ -2032,7 +2138,7 @@ async function autoBuild (bot, schem, at, opts = {}) {
     say('quick stone pickaxe first - it mines way faster')
     try {
       const sp = provision.planProvision(mcData, { stone_pickaxe: 1 }, provision.inventoryCounts(bot), { primaryWood })
-      if (sp.tasks.length) await provision.runPlan(bot, sp, { say, isStopped, restoreMovements: restore, homeY: Math.floor(at.y), home: { x: Math.round(at.x), y: Math.floor(at.y), z: Math.round(at.z) } })
+      if (sp.tasks.length) await provision.runPlan(bot, sp, { say, isStopped, restoreMovements: restore, homeY: Math.floor(at.y), home: { x: Math.round(at.x), y: Math.floor(at.y), z: Math.round(at.z) }, avoid })
     } catch (e) { say(`(stone pick skipped: ${e.message})`) }
   }
 
@@ -2095,6 +2201,7 @@ async function autoBuild (bot, schem, at, opts = {}) {
       // quit a slow 44-stone smelt at ~11 and then "built" with too little.
       if (have <= lastHave) { if (++noProgress >= 4) { say(`giving up on ${name} at ${have}/${need}`); if (have < need) skip.add(name); break } } else noProgress = 0
       lastHave = have
+      try { await provision.dumpJunk(bot) } catch {} // free the slots the materials need (keeps bones/famine reserve)
       // START EACH ROUND FROM THE SITE, ON THE SURFACE. A failed gather can leave the bot
       // stranded deep in a cave 40+ blocks off (verified live: cobble round ended at y=61,
       // climb-out only reached y=62, and the NEXT round's log gather then started underground
@@ -2126,7 +2233,7 @@ async function autoBuild (bot, schem, at, opts = {}) {
       // homeY = the build-site SURFACE (the ground-snapped origin), a persistent anchor
       // so strip-mining measures depth from the real surface and can't ratchet the bot
       // down toward lava across batches.
-      const results = await provision.runPlan(bot, plan, { say, isStopped, restoreMovements: restore, homeY: Math.floor(at.y), home })
+      const results = await provision.runPlan(bot, plan, { say, isStopped, restoreMovements: restore, homeY: Math.floor(at.y), home, avoid })
       const STASH_AT = parseInt(process.env.AUTOBUILD_STASH_SLOTS || '28', 10) // slots-used before offloading (tunable)
       if (slotsUsed() >= STASH_AT) await stash() // pack filling up -> offload to the chest
       const bad = results.filter(r => !r.ok)
@@ -2179,7 +2286,7 @@ function setResumeJob (pt) { if (loadedSchem && pt) { resumeJob = { schem: loade
 // DISK-PERSISTED resume: the in-memory resumeJob dies with the process (restart/crash/
 // reboot), which lost the castle job twice live. Save {schematic name, origin} so a
 // fresh process can pick the build back up via the `resumebuild` command.
-const RESUME_FILE = path.join(__dirname, 'resume-job.json')
+const RESUME_FILE = process.env.RESUME_FILE || path.join(__dirname, 'resume-job.json') // env-overridable (test isolation)
 function persistResume (name, at) {
   try { fs.writeFileSync(RESUME_FILE, JSON.stringify({ name, at: { x: at.x, y: at.y, z: at.z }, savedAt: new Date().toISOString() })) } catch {}
 }
@@ -2199,10 +2306,14 @@ async function resumeBuild (bot) {
   // respawn area / unreachable site). Say so, clear the job, stop retrying - else every
   // respawn restarts the same naked death-march forever.
   if (resumeDeaths > RESUME_MAX_DEATHS) {
-    dbg('resume: gave up after', resumeDeaths, 'consecutive deaths')
-    bot.chat(`i keep dying trying to get back (${resumeDeaths}x) - giving up on that build`)
-    recordOutcome('autobuild resume', false, `gave up after ${resumeDeaths} deaths`)
-    resumeJob = null; buildInterrupted = false; resumeDeaths = 0; clearPersistedResume()
+    dbg('resume: gave up after', resumeDeaths, 'consecutive deaths (job stays on disk - send "resumebuild" to try again)')
+    bot.chat(`i keep dying trying to get back (${resumeDeaths}x) - giving up on that build for now`)
+    recordOutcome('autobuild resume', false, `gave up after ${resumeDeaths} deaths - "resumebuild" restarts it`)
+    // Stop RETRYING but keep the job ON DISK: giving up used to clearPersistedResume(),
+    // which erased the castle from existence and left "resumebuild" with nothing to load
+    // (had to hand-recreate the file, live). The auto-retry loop ends here; a human (or a
+    // calmer future respawn) can still say "resumebuild".
+    resumeJob = null; buildInterrupted = false; resumeDeaths = 0
     return null
   }
   // Wait until the OLD loop is FULLY out: its settle-handler sets building=false and
@@ -2223,26 +2334,29 @@ async function resumeBuild (bot) {
   try {
     say(`i died - heading back to finish the build at ${job.at.x},${job.at.y},${job.at.z}`)
     // NIGHT-FIRST: a fresh respawn is naked; prepping/trekking at night IS the death loop
-    // (verified live: 3 deaths in 90s at spawn). Shelter until day (digInForNight is
-    // internally bounded ~600s), THEN gear up and go.
+    // (verified live: 3 deaths in 90s at spawn). We respawn AT the bed - sleep in it (or
+    // pit as fallback) until morning, THEN gear up and go.
     if (provision.isNight(bot) && provision.underArmored(bot)) {
-      dbg('resume: night + no armor - sheltering before heading back')
-      say('night and no armor - digging in till morning before i head back')
-      try { await provision.digInForNight(bot, { isStopped: () => buildAbort, say }) } catch {}
+      dbg('resume: night + no armor - resting till morning before heading back')
+      try { await provision.nightRest(bot, { isStopped: () => buildAbort, say }) } catch {}
     }
     if (buildAbort) return (result = { stopped: true, placed: 0, total: 0 })
     // GET THE STUFF BACK first when it's safe: on servers with a graves plugin (the
     // live one runs AxGraves) drops don't despawn, so a recovery detour beats
     // re-gathering the whole kit. Skipped for lava/void deaths and best-effort -
     // a failed recovery must never block the resume itself.
-    if (lastDeath && !lastDeath.dangerous && !lastDeath.retrieved) {
-      // WRITE OFF deep-cave graves when respawning with nothing: a naked corpse-run to
-      // y<40 through the mobs that just killed you is how death carousels happen
-      // (verified live: died at y=4, then died AGAIN going back). A player lets it go.
-      const deep = lastDeath.y < job.at.y - 15
+    const grave = bestGrave()
+    if (grave) {
+      // WRITE OFF worthless or suicidal graves instead of trekking: a naked-death grave
+      // holds nothing (tonight's carousel made 5 pointless recovery treks), and a naked
+      // corpse-run to a deep cave through the mobs that just killed you is how death
+      // carousels happen (verified live: died at y=4, then died AGAIN going back).
+      // (bestGrave already filters out worthless deaths - dying with 1 dirt never
+      // triggers a corpse run at all; only gear/real loot is worth the trek.)
+      const deep = grave.y < job.at.y - 15
       const naked = !(bot.inventory ? bot.inventory.items() : []).some(i => /_(pickaxe|axe|sword)$|_chestplate$/.test(i.name))
       if (deep && naked) {
-        lastDeath.retrieved = true; persistDeath()
+        grave.retrieved = true; persistDeath()
         say("my stuff's too deep in that cave - not worth dying for, moving on")
       } else {
         try { const r = await handle(bot, 'recover'); dbg('resume: recover -> ' + String(r).split(String.fromCharCode(10))[0]) } catch (e) { dbg('resume: recover failed (' + e.message + ')') }

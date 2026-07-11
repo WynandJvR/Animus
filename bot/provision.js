@@ -866,25 +866,41 @@ function underArmored (bot) {
   try { for (const s of ['head', 'torso', 'legs', 'feet']) { if (!(bot.inventory && bot.inventory.slots[bot.getEquipmentDestSlot(s)])) return true } return false } catch { return true }
 }
 function isNight (bot) { return !!(bot.time && bot.time.timeOfDay >= 13000 && bot.time.timeOfDay < 23500) }
-// Fire the shelter when it's genuinely dangerous: night, no full armor, and a hostile is
-// closing. (Not every night - only when actually threatened, so it doesn't burrow for nothing.)
-function shelterNeeded (bot) { return isNight(bot) && underArmored(bot) && nearHostile(bot, 12) }
+// Fire night-rest whenever it's night and we're under-armored. This USED to also wait for a
+// hostile within 12 blocks - which meant the bot wandered exposed all night and only started
+// digging once a skeleton was already shooting it (verified live: 7 night deaths in one
+// evening, several while "sheltering"). A naked player doesn't wait to be chased: at dusk
+// they go to bed or hole up BEFORE the mobs arrive.
+function shelterNeeded (bot) { return isNight(bot) && underArmored(bot) }
 // (anti-grief helpers canBreakNaturally / structureNearby are defined up top, next to
 // STRUCTURE_RE, and shared by every dig primitive + the shelter + the gather filter.)
 
 // Place a block from inventory (name matching `match`) AT world position `target`, using any
 // solid neighbouring face to place against. Best-effort; returns whether a block landed.
 async function placeAt (bot, target, match) {
+  placeAt.lastFail = null // observability: WHY the last placement failed (cap-fail debugging)
   const item = (bot.inventory ? bot.inventory.items() : []).find(i => match.test(i.name))
-  if (!item) return false
+  if (!item) { placeAt.lastFail = 'no matching item in inventory'; return false }
   await bot.equip(item, 'hand').catch(() => {})
+  let sawRef = false
   for (const [dx, dy, dz] of [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]]) {
     const ref = bot.blockAt(target.offset(dx, dy, dz))
     if (ref && ref.boundingBox === 'block' && !AIRISH(ref.name)) {
+      sawRef = true
       try { await bot.lookAt(target.offset(0.5, 0.5, 0.5), true) } catch {}
-      try { await bot.placeBlock(ref, new Vec3(-dx, -dy, -dz)); return true } catch { /* try next face */ }
+      try { await bot.placeBlock(ref, new Vec3(-dx, -dy, -dz)); return true } catch (e) {
+        placeAt.lastFail = `place vs ${ref.name} face ${-dx},${-dy},${-dz}: ${e.message}`
+        // Paper often doesn't echo the blockUpdate even when the block PLACED (same quirk
+        // as the torch reflex, see NOTES.md) - check the world before calling it a miss.
+        if (/blockUpdate/.test(e.message)) {
+          await new Promise(r => setTimeout(r, 400))
+          const b = bot.blockAt(target)
+          if (b && !AIRISH(b.name)) return true
+        }
+      }
     }
   }
+  if (!sawRef) placeAt.lastFail = 'no solid neighbour to place against'
   return false
 }
 
@@ -905,7 +921,35 @@ async function digInForNight (bot, opts = {}) {
   _sheltering = true
   try {
     bot.pathfinder && bot.pathfinder.setGoal(null)
+    // ON A TREE CANOPY? The shelter can't dig leaves (not in DIGGABLE_NATURAL) and used to
+    // NO-OP in a 5s loop all night (reproduced on test server, savanna oak). Leaves are
+    // always natural: if the ground is close below, punch through and drop; if it's a tall
+    // tree (jungle!), walk off to real ground instead - never a lethal fall.
+    for (let i = 0; i < 8; i++) {
+      const under = bot.blockAt(bot.entity.position.floored().offset(0, -1, 0))
+      if (!under || !/_leaves$/.test(under.name)) break
+      let depth = 0 // how far we'd fall past this leaf layer
+      for (let dy = 2; dy <= 8; dy++) { const b = bot.blockAt(bot.entity.position.floored().offset(0, -dy, 0)); if (b && !AIRISH(b.name) && !/_leaves$/.test(b.name)) break; depth++ }
+      if (depth > 4) {
+        dbg('shelter: on a TALL canopy (' + depth + '+ drop) - walking to ground instead of punching through')
+        const mcData = require('minecraft-data')(bot.version)
+        const gids = Object.values(mcData.blocksByName).filter(b => /^(grass_block|dirt|coarse_dirt|podzol|sand|red_sand|gravel|stone)$/.test(b.name)).map(b => b.id)
+        const spots = (bot.findBlocks({ matching: gids, maxDistance: 16, count: 12 }) || [])
+          .filter(p => { const a = bot.blockAt(p.offset(0, 1, 0)); const a2 = bot.blockAt(p.offset(0, 2, 0)); return a && AIRISH(a.name) && a2 && AIRISH(a2.name) })
+        if (spots.length) { try { await gotoWithTimeout(bot, new goals.GoalBlock(spots[0].x, spots[0].y + 1, spots[0].z), 12000) } catch (e) { dbg('shelter: walk-to-ground failed (' + e.message + ')') } }
+        break
+      }
+      try { await bot.dig(under) } catch (e) { dbg('shelter: leaf-punch failed (' + e.message + ')'); break }
+      await new Promise(r => setTimeout(r, 400)) // drop through
+    }
+    // CENTER on the feet cell. Digging from a cell edge (x.5/z.5 boundary) digs the
+    // column under floored(feet) while the body stays supported by the NEIGHBOUR block -
+    // the bot opens a perfect pit and stands beside it all night with the "cap" aimed at
+    // thin air (root cause of every 'ducked into a hole' night death; reproduced on the
+    // test server at x=-330.5: "cap failed - no solid neighbour to place against").
+    try { const f0 = bot.entity.position.floored(); await gotoWithTimeout(bot, new goals.GoalBlock(f0.x, f0.y, f0.z), 4000) } catch {}
     const surfaceY = Math.floor(bot.entity.position.y)
+    const shaft = bot.entity.position.floored() // the column we dig - we must END UP inside it
     // 1) dig straight down 2, keeping the blocks (need one to cap with). NEVER dig into a
     //    void/lava/water below, and ONLY natural terrain (never a player build block) - so
     //    sheltering can't punch through someone's floor.
@@ -914,16 +958,22 @@ async function digInForNight (bot, opts = {}) {
       const feet = bot.entity.position.floored()
       const below = bot.blockAt(feet.offset(0, -1, 0))
       const below2 = bot.blockAt(feet.offset(0, -2, 0))
-      if (!below || AIRISH(below.name) || /lava|water/.test(below.name) || !canBreakNaturally(below)) break
-      if (below2 && /lava|water/.test(below2.name)) break
+      if (!below || AIRISH(below.name) || /lava|water/.test(below.name) || !canBreakNaturally(below)) { dbg('shelter: dig blocked at ' + i + ' (' + (below ? below.name : 'unloaded') + ')'); break }
+      if (below2 && /lava|water/.test(below2.name)) { dbg('shelter: liquid 2 below - not digging'); break }
       const tool = toolForBlock(bot, below.name)
       if (tool) await bot.equip(tool, 'hand').catch(() => {})
-      if (bot.canDigBlock && !bot.canDigBlock(below)) break
-      try { await bot.dig(below) } catch { break }
+      if (bot.canDigBlock && !bot.canDigBlock(below)) { dbg('shelter: canDigBlock=false for ' + below.name); break }
+      try { await bot.dig(below) } catch (e) { dbg('shelter: dig failed (' + e.message + ')'); break }
       await new Promise(r => setTimeout(r, 250)) // fall into the hole
+      // VERIFY we dropped in - a straddling bot digs without falling. Steer into the shaft.
+      if (Math.floor(bot.entity.position.y) > feet.y - 1) {
+        try { await gotoWithTimeout(bot, new goals.GoalBlock(shaft.x, feet.y - 1, shaft.z), 3000) } catch {}
+        await new Promise(r => setTimeout(r, 200))
+      }
       dug++
     }
-    if (dug < 1) return false // couldn't dig in (bedrock/protected/edge) - the flee reflex covers it
+    if (dug < 1) { dbg('shelter: NO-OP (dug 0) - caller must do something else'); return false } // couldn't dig in (bedrock/protected/edge)
+    if (Math.floor(bot.entity.position.y) >= surfaceY) { dbg('shelter: dug ' + dug + ' but NEVER FELL IN (still at surface) - aborting, not pretending'); return false }
     await collectDrops(bot, 3)
     // 2) cap the opening above the head with any spare block
     const capPos = bot.entity.position.floored().offset(0, 2, 0)
@@ -931,17 +981,42 @@ async function digInForNight (bot, opts = {}) {
     // when we dug in - terracotta, deepslate, tuff, etc. all count, not just dirt/cobble).
     const CAP_RE = /terracotta|dirt|cobble|stone|gravel|sand|netherrack|deepslate|tuff|granite|diorite|andesite|clay|mud|_planks$|_log$|_concrete/
     let capped = await placeAt(bot, capPos, CAP_RE)
+    if (!capped) dbg('shelter: cap attempt 1 failed - ' + (placeAt.lastFail || '?'))
     // VERIFY the cap landed (placement can miss from inside a 1x1 pit) and retry once -
     // an uncapped pit is a mob funnel: they fall in ON TOP of the bot (seen live).
     if (!capped || AIRISH((bot.blockAt(capPos) || {}).name || 'air')) {
       await new Promise(r => setTimeout(r, 300))
       capped = await placeAt(bot, capPos, CAP_RE)
+      if (!capped) dbg('shelter: cap attempt 2 failed - ' + (placeAt.lastFail || '?'))
     }
+    // Last resort: dig one deeper and try the cap one lower - a 3-deep shaft with a lid at
+    // -2 still seals (head has a 1-block air gap under the cap). Geometry matters: from the
+    // bottom of a 2-deep shaft the cap cell's solid neighbours sit at surface level, which
+    // some placements reject; one deeper gives a wall ring at head+1 to place against.
+    if (!capped || AIRISH((bot.blockAt(capPos) || {}).name || 'air')) {
+      const feet = bot.entity.position.floored()
+      const below = bot.blockAt(feet.offset(0, -1, 0))
+      const below2 = bot.blockAt(feet.offset(0, -2, 0))
+      if (below && !AIRISH(below.name) && !/lava|water/.test(below.name) && canBreakNaturally(below) &&
+          !(below2 && /lava|water/.test(below2.name))) {
+        try {
+          await bot.dig(below); await new Promise(r => setTimeout(r, 300)); await collectDrops(bot, 3)
+          const capPos2 = bot.entity.position.floored().offset(0, 2, 0)
+          capped = await placeAt(bot, capPos2, CAP_RE)
+          if (!capped) dbg('shelter: deep-cap attempt failed - ' + (placeAt.lastFail || '?'))
+        } catch (e) { dbg('shelter: deeper dig failed (' + e.message + ')') }
+      }
+    }
+    dbg('shelter: pit ' + (capped ? 'SEALED' : 'OPEN (cap failed - mob funnel risk)'))
     say(capped ? 'holed up till it\'s safe' : 'ducked into a hole till it\'s safe')
-    // 3) wait until DAY and no hostile near, or a hard timeout (~one full night)
-    const deadline = Date.now() + 600000
+    // 3) wait until DAY and no hostile near, or a hard timeout (~one full night). An OPEN
+    // pit is NOT a shelter - don't squat in a mob funnel for 10 minutes: short deadline,
+    // and bail immediately if we're taking hits down there (fight/flee reflexes resume).
+    const deadline = Date.now() + (capped ? 600000 : 120000)
+    const hp0 = bot.health || 20
     while (Date.now() < deadline && !isStopped()) {
       if (!isNight(bot) && !nearHostile(bot, 10)) break
+      if (!capped && (bot.health || 20) < hp0 - 3) { dbg('shelter: taking damage in an OPEN pit - bailing out to fight/flee'); break }
       await new Promise(r => setTimeout(r, 3000))
     }
     // 4) break the cap and climb back to the surface. Use climbToSurface (staircase-up,
@@ -977,7 +1052,7 @@ function toolForBlock (bot, blockName) {
 // then wandered off southwest and forgot it). Like a player, the bot now REMEMBERS where
 // it successfully gathered each resource (bot/world-memory.json), heads straight back
 // next time, and forgets spots that dry up.
-const WORLD_MEM_FILE = path.join(__dirname, 'world-memory.json')
+const WORLD_MEM_FILE = process.env.WORLD_MEM_FILE || path.join(__dirname, 'world-memory.json') // env-overridable so a TEST bot never treks to live-world coords / stomps live memory
 let worldMem = null
 let worldMemTimer = null
 function loadWorldMem () {
@@ -1016,6 +1091,203 @@ function recallSpot (item, pos, visited) {
     if (d < bd) { bd = d; best = sp }
   }
   return best
+}
+
+// BED MEMORY: the server knows the bot's spawn bed but never tells the client, and the
+// sleep command only scans 48 blocks around wherever the bot happens to stand - so at
+// dusk 150 blocks out it "had no bed" and dug a pit instead (7 night deaths in one
+// evening, live). Remember the bed like a player does: saved on every successful
+// sleep/spawn-set, consulted first every night.
+function rememberBed (pos) { const m = loadWorldMem(); m.bed = { x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z), at: Date.now() }; saveWorldMem() }
+function knownBed () { return loadWorldMem().bed || null }
+function forgetBed () { const m = loadWorldMem(); delete m.bed; saveWorldMem() }
+
+// Sleep in the remembered bed if we're standing near it. Returns true only if we actually
+// slept through to daylight (or the night got skipped) - anything else falls back to the pit.
+async function sleepInBedHere (bot, { say = () => {}, isStopped = () => false } = {}) {
+  const mcData = require('minecraft-data')(bot.version)
+  const bedIds = Object.values(mcData.blocksByName).filter(b => /_bed$/.test(b.name)).map(b => b.id)
+  const bed = bot.findBlock({ matching: bedIds, maxDistance: 8 })
+  if (!bed) { dbg('nightRest: no bed where i remembered one - forgetting it'); forgetBed(); return false }
+  for (let tries = 0; tries < 3 && !isStopped(); tries++) {
+    try {
+      if (bot.entity.position.distanceTo(bed.position) > 2.5) { try { await gotoWithTimeout(bot, new goals.GoalNear(bed.position.x, bed.position.y, bed.position.z, 2), 20000) } catch {} }
+      await bot.sleep(bed)
+      rememberBed(bed.position) // sleeping re-arms the spawn - keep the memory fresh
+      say('sleeping till morning')
+      dbg('nightRest: asleep in bed at ' + bed.position.toString())
+      while (bot.isSleeping && isNight(bot) && !isStopped()) { await new Promise(r => setTimeout(r, 2000)) }
+      if (!isNight(bot)) { try { await bot.wake() } catch {} ; dbg('nightRest: morning - up and about'); return true }
+      dbg('nightRest: woken early (still night) - falling back to shelter')
+      return false // kicked out of bed (attacked / player woke us)
+    } catch (e) {
+      dbg('nightRest: sleep failed (' + e.message + ')')
+      if (/monster/i.test(e.message)) {
+        // hostiles CLOSE while we're under-armored: don't stand at the bed taking hits
+        // for 3 retries (verified on test server: hp 20 -> 17 doing exactly that) - seal
+        // a pit right here and let the day burn them off.
+        if (nearHostile(bot, 10) && underArmored(bot)) { dbg('nightRest: hostiles at the bed - pitting NOW instead of waiting'); return false }
+        await new Promise(r => setTimeout(r, 6000)); continue // borderline-range mobs may wander off
+      }
+      return false
+    }
+  }
+  return false
+}
+
+// Night survival, in a player's order of preference: WALK HOME AND SLEEP if the bed is in
+// range, else seal a pit where we stand. Every digInForNight call site goes through this.
+// _resting covers the WHOLE span (bed trek + sleep + pit): the brain's goto/attack commands
+// were yanking the pathfinder out from under the shelter dig mid-carousel (test server:
+// 14 deaths in 6 min with the brain fighting the body for control). index.js holds brain
+// commands while isResting(), same as the build busy-guard.
+let _resting = false
+function isResting () { return _resting || _sheltering }
+async function nightRest (bot, opts = {}) {
+  _resting = true
+  try { return await nightRestInner(bot, opts) } finally { _resting = false }
+}
+async function nightRestInner (bot, opts = {}) {
+  const say = opts.say || (() => {})
+  const isStopped = opts.isStopped || (() => false)
+  const bed = knownBed()
+  if (bed && bot.entity && !_sheltering) {
+    const d = Math.hypot(bed.x - bot.entity.position.x, bed.z - bot.entity.position.z)
+    if (d <= (opts.bedRange || 200)) {
+      dbg('nightRest: bed remembered at ' + bed.x + ',' + bed.y + ',' + bed.z + ' (' + Math.round(d) + ' blocks) - heading there')
+      if (d > 4) {
+        say('night time - heading home to sleep')
+        try { await gotoWithTimeout(bot, new goals.GoalNear(bed.x, bed.y, bed.z, 2), 150000) } catch (e) { dbg('nightRest: trek to bed failed (' + e.message + ')') }
+      }
+      if (isStopped()) return false
+      if (Math.hypot(bed.x - bot.entity.position.x, bed.z - bot.entity.position.z) <= 8) {
+        if (await sleepInBedHere(bot, { say, isStopped })) return true
+      } else dbg('nightRest: never reached the bed - pitting where i stand')
+    } else dbg('nightRest: bed too far (' + Math.round(d) + ' > ' + (opts.bedRange || 200) + ') - pitting here')
+  }
+  return digInForNight(bot, opts)
+}
+
+// ---- INVENTORY HYGIENE: mob-drop junk (spider eyes, string, flint...) quietly eats the
+// slots the build materials need (seen live: ~8 slots of trash mid-castle-provision).
+// Toss what has no use; KEEP bones (they become bone meal for the tree farm) and a small
+// rotten-flesh famine reserve (the risky-food ranking eats it only when starving).
+const JUNK_RE = /^(rotten_flesh|spider_eye|poisonous_potato|string|flint|feather|egg|wheat_seeds|beetroot_seeds|melon_seeds|pumpkin_seeds|arrow|gunpowder|phantom_membrane|rabbit_hide|rabbit_foot|ink_sac|glow_ink_sac|slime_ball|fermented_spider_eye)$/
+async function dumpJunk (bot) {
+  let tossed = 0
+  for (const it of (bot.inventory ? bot.inventory.items() : [])) {
+    if (!JUNK_RE.test(it.name)) continue
+    const n = it.name === 'rotten_flesh' ? it.count - 3 : it.count
+    if (n <= 0) continue
+    try { await bot.toss(it.type, null, n); tossed += n; await new Promise(r => setTimeout(r, 250)) } catch {}
+  }
+  if (tossed) dbg('  dumped ' + tossed + ' junk items (slots free: ' + (bot.inventory ? bot.inventory.emptySlotCount() : '?') + ')')
+  return tossed
+}
+
+// ---- TREE FARMING (user-approved): the castle region is chopped bare, so the bot keeps
+// its own wood supply alive like a player would - replant after every chop, fish saplings
+// out of the leaves when it has none, and when the land is truly dry, plant a grove near
+// home and let it grow instead of wandering 300 blocks into the night.
+const PLANTABLE_GROUND = /^(grass_block|dirt|podzol|coarse_dirt|rooted_dirt|mud|moss_block)$/
+function saplingFor (logItem) { return logItem.replace(/_log$/, '_sapling') }
+function saplingCount (bot, logItem) { return (bot.inventory ? bot.inventory.items() : []).filter(i => i.name === saplingFor(logItem)).reduce((s, i) => s + i.count, 0) }
+
+// Is this XZ inside the current build's keep-out box? (footprint + canopy margin,
+// threaded down from autoBuild) - NEVER plant a future tree inside the castle.
+function inAvoidBox (avoid, x, z) { return !!avoid && x >= avoid.x1 && x <= avoid.x2 && z >= avoid.z1 && z <= avoid.z2 }
+
+// Plant one sapling on open ground near `around` (a just-felled trunk or a grove cell).
+async function plantSaplingNear (bot, around, logItem, opts = {}) {
+  const sap = (bot.inventory ? bot.inventory.items() : []).find(i => i.name === saplingFor(logItem))
+  if (!sap) return false
+  for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) for (let dy = -3; dy <= 1; dy++) {
+    const gp = new Vec3(Math.floor(around.x) + dx, Math.floor(around.y) + dy, Math.floor(around.z) + dz)
+    if (inAvoidBox(opts.avoid, gp.x, gp.z)) continue // a tree here would grow into the build
+    const ground = bot.blockAt(gp); const above = bot.blockAt(gp.offset(0, 1, 0))
+    if (!ground || !PLANTABLE_GROUND.test(ground.name) || !above || !AIRISH(above.name)) continue
+    if (bot.entity.position.distanceTo(gp) > 4) { try { await gotoWithTimeout(bot, new goals.GoalNear(gp.x, gp.y, gp.z, 2), 10000) } catch { continue } }
+    try {
+      await bot.equip(sap, 'hand')
+      await bot.placeBlock(ground, new Vec3(0, 1, 0))
+      dbg('  replanted ' + saplingFor(logItem) + ' at ' + gp.offset(0, 1, 0).toString())
+      await boneMealSapling(bot, gp.offset(0, 1, 0)) // bones -> bone meal -> instant tree (why we KEEP bones)
+      return true
+    } catch (e) { dbg('  replant failed at ' + gp.toString() + ' (' + e.message + ')') }
+  }
+  return false
+}
+
+// Bone-meal a planted sapling until it grows (or we run out) - turns the tree farm from
+// "wait ~20 min per tree" into "instant tree" whenever skeletons have paid their dues.
+// Crafts bone meal from bones on the fly (2x2 recipe, no table needed).
+async function boneMealSapling (bot, sapPos) {
+  const mcData = require('minecraft-data')(bot.version)
+  const items = () => bot.inventory ? bot.inventory.items() : []
+  for (let uses = 0; uses < 6; uses++) {
+    const sapBlock = bot.blockAt(sapPos)
+    if (!sapBlock || !/_sapling$/.test(sapBlock.name)) return uses > 0 // grew (or gone)
+    let meal = items().find(i => i.name === 'bone_meal')
+    if (!meal) {
+      const bone = items().find(i => i.name === 'bone')
+      if (!bone) return false
+      try {
+        const recipe = bot.recipesFor(mcData.itemsByName.bone_meal.id, null, 1, null)[0]
+        if (!recipe) return false
+        await bot.craft(recipe, 1, null)
+        meal = items().find(i => i.name === 'bone_meal')
+      } catch (e) { dbg('  bone meal craft failed (' + e.message + ')'); return false }
+      if (!meal) return false
+    }
+    try {
+      await bot.equip(meal, 'hand')
+      await bot.activateBlock(sapBlock)
+      await new Promise(r => setTimeout(r, 350))
+    } catch (e) { dbg('  bone-mealing failed (' + e.message + ')'); return false }
+  }
+  return !/_sapling$/.test((bot.blockAt(sapPos) || {}).name || '')
+}
+
+// No saplings in the pack? Break a handful of this tree's leaves (natural only) and sweep
+// the drops - oak leaves shed a sapling ~5% of the time, so 10-12 leaves is a fair shot.
+async function fishSaplings (bot, around, logItem, { isStopped = () => false } = {}) {
+  const mcData = require('minecraft-data')(bot.version)
+  const leaf = mcData.blocksByName[logItem.replace(/_log$/, '_leaves')]
+  if (!leaf) return
+  let broken = 0
+  while (broken < 12 && !isStopped() && saplingCount(bot, logItem) < 2) {
+    const b = bot.findBlock({ matching: leaf.id, maxDistance: 4 })
+    if (!b || !canBreakNaturally(b)) break
+    try { await bot.dig(b) } catch { break }
+    broken++
+  }
+  if (broken) { await collectDrops(bot, 6); dbg('  leaf-fished ' + broken + ' leaves -> ' + saplingCount(bot, logItem) + ' saplings') }
+}
+
+// Plant whatever saplings we hold in a spaced grove near (but not on) the home anchor.
+// Returns how many went in the ground.
+async function plantGrove (bot, home, logItem, { isStopped = () => false, say = () => {}, avoid = null } = {}) {
+  let have = saplingCount(bot, logItem)
+  if (have < 1) return 0
+  // Stand clear of the build: just past the keep-out box's east edge when we know it,
+  // else ~18 blocks from home - the grove must never grow into the castle.
+  const gx = avoid ? avoid.x2 + 8 : home.x + 18; const gz = home.z
+  try { await gotoWithTimeout(bot, new goals.GoalNearXZ(gx, gz, 6), 90000) } catch {}
+  if (isStopped()) return 0
+  let planted = 0; let lastSpot = bot.entity.position
+  while (saplingCount(bot, logItem) > 0 && planted < 8 && !isStopped()) {
+    if (!await plantSaplingNear(bot, lastSpot, logItem, { avoid })) {
+      // no plantable cell here - shuffle a few blocks and try again, then give up
+      const np = lastSpot.offset(4, 0, (planted % 2) ? 4 : -4)
+      try { await gotoWithTimeout(bot, new goals.GoalNearXZ(np.x, np.z, 2), 15000) } catch { break }
+      lastSpot = bot.entity.position
+      if (!await plantSaplingNear(bot, lastSpot, logItem, { avoid })) break
+    }
+    planted++
+    lastSpot = lastSpot.offset(4, 0, 0) // ~4-block spacing so crowns don't choke each other
+  }
+  if (planted) { say(`planted ${planted} saplings by the site - the wood will come to me`); dbg('  grove: planted ' + planted + ' ' + saplingFor(logItem)) }
+  return planted
 }
 
 async function gatherLoop (bot, item, count, opts = {}) {
@@ -1167,11 +1439,15 @@ async function gatherLoop (bot, item, count, opts = {}) {
     // when actually threatened + under-armored, so it doesn't burrow every night for nothing.
     if (shelterNeeded(bot) && Date.now() - lastShelter > 15000) {
       lastShelter = Date.now()
-      if (opts.say) opts.say('mobs out and no armor - digging in till it\'s safe')
-      dbg('  gather night-shelter (timeOfDay=' + (bot.time && bot.time.timeOfDay) + ')')
-      try { await digInForNight(bot, { isStopped, say: opts.say }) } catch { /* keep going */ }
-      dbg('  gather night-shelter done')
+      dbg('  gather night-rest (timeOfDay=' + (bot.time && bot.time.timeOfDay) + ')')
+      let rested = false
+      try { rested = await nightRest(bot, { isStopped, say: opts.say, home }) } catch { /* keep going */ }
+      dbg('  gather night-rest done (rested=' + rested + ')')
+      continue // it's morning (or we were interrupted) - rescan from wherever the night left us
     }
+    // INVENTORY HYGIENE: junk drops crowd out the material we're gathering - toss them
+    // once slots run low (keeps bones for the tree farm + a rotten-flesh famine reserve).
+    if (bot.inventory && bot.inventory.emptySlotCount() < 4) { try { await dumpJunk(bot) } catch {} }
     if (!haveReqTool()) return { gathered: countItem(bot, item) - start, reason: `my ${toolKind} broke` } // ran out mid-job
     if (mined >= cap) { await collectDrops(bot, 12); if (countItem(bot, item) - start < count) return { gathered: countItem(bot, item) - start, reason: `mined ${mined} blocks but couldn't collect enough (drops lost?)` } }
 
@@ -1224,7 +1500,16 @@ async function gatherLoop (bot, item, count, opts = {}) {
         return { gathered: countItem(bot, item) - start, reason: 'mined out down here - climbing back up' }
       }
       // WANDER to fresh terrain.
-      if (dryExplores >= MAX_EXPLORE) return { gathered: countItem(bot, item) - start, reason: `searched far and wide, no reachable ${sources.join('/')}` }
+      if (dryExplores >= MAX_EXPLORE) {
+        // Wood truly dry out here? Don't just give up - bank what we hold as a GROVE near
+        // home so the next round has trees growing where the bot already works. (This is
+        // the tree farm's seed step; grown trees are found by the normal scan next visit.)
+        if (isLogGather && saplingCount(bot, item) > 0 && !isStopped()) {
+          try { await plantGrove(bot, home, item, { isStopped, say: opts.say, avoid: opts.avoid }) } catch (e) { dbg('  grove planting failed (' + e.message + ')') }
+          return { gathered: countItem(bot, item) - start, reason: `no ${sources.join('/')} left standing nearby - planted a grove by the site, it needs time to grow` }
+        }
+        return { gathered: countItem(bot, item) - start, reason: `searched far and wide, no reachable ${sources.join('/')}` }
+      }
       // WORLD MEMORY first: walk to a remembered source before wandering blind. Memory
       // deliberately overrides the roam fence - a known resource IS the reason to leave.
       const memSpot = recallSpot(item, bot.entity.position, visitedMem)
@@ -1283,6 +1568,14 @@ async function gatherLoop (bot, item, count, opts = {}) {
       if (cur && belowCap(cur.position.y)) cur = null
     }
     await collectDrops(bot, 8) // sweep up what the cluster dropped
+    // TREE FARM: keep the forest alive - fish a sapling out of the leaves if the pack has
+    // none, then put one back where the trunk stood. A player who replants never runs dry.
+    if (isLogGather && n > 0 && !isStopped()) {
+      try {
+        if (saplingCount(bot, item) < 1) await fishSaplings(bot, target.position, item, { isStopped })
+        await plantSaplingNear(bot, target.position, item, { avoid: opts.avoid })
+      } catch (e) { dbg('  replant skipped (' + e.message + ')') }
+    }
 
     // Lost-drop detection: we broke blocks but gained NO items - drops are falling
     // into gaps/void here (verified live: mining a platform edge lost every cobble).
@@ -1565,10 +1858,10 @@ async function runSmeltSingle (bot, output, input, count, opts = {}) {
       // can only yield terrain blocks / smelt INPUT, never the OUTPUT, so `made` is safe.)
       if (shelterNeeded(bot) && Date.now() - lastShelter > 15000) {
         lastShelter = Date.now()
-        say('mobs out and no armor - closing the furnace and digging in')
-        dbg('  smelt night-shelter at', made + '/' + count, 'timeOfDay=' + (bot.time && bot.time.timeOfDay))
+        say('night and no armor - closing the furnace till it\'s safe')
+        dbg('  smelt night-rest at', made + '/' + count, 'timeOfDay=' + (bot.time && bot.time.timeOfDay))
         try { furnace.close() } catch {}
-        try { await digInForNight(bot, { isStopped, say }) } catch {}
+        try { await nightRest(bot, { isStopped, say }) } catch {}
         if (isStopped()) break // death/stop while sheltered - unwind now (window already closed)
         if (bot.entity.position.distanceTo(furnaceBlock.position) > 3) {
           await gotoWithTimeout(bot, new goals.GoalNear(furnaceBlock.position.x, furnaceBlock.position.y, furnaceBlock.position.z, 2), 20000).catch(() => {})
@@ -1687,9 +1980,8 @@ async function runSmeltMulti (bot, output, input, count, positions, opts = {}) {
   while (made < count && !isStopped() && Date.now() < hardDeadline) {
     // NIGHT SHELTER between rotations (windows are all closed here)
     if (shelterNeeded(bot)) {
-      say('mobs out and no armor - digging in till it\'s safe')
-      dbg('  multi: night-shelter at', made + '/' + count)
-      try { await digInForNight(bot, { isStopped, say }) } catch {}
+      dbg('  multi: night-rest at', made + '/' + count)
+      try { await nightRest(bot, { isStopped, say }) } catch {}
       lastProgressAt = Date.now() // shelter time is not a stall
     }
     await new Promise(r => setTimeout(r, 10000)) // ~1 item cooks per 10s; faster rotation is wasted walking
@@ -1904,4 +2196,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, hasSolidCeiling, gatherLeather, huntForFood, hasFood, needsFood, digInForNight, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, setDebugSink }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, hasSolidCeiling, gatherLeather, huntForFood, hasFood, needsFood, digInForNight, nightRest, isResting, rememberBed, knownBed, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, setDebugSink }

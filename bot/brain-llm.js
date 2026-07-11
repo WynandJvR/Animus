@@ -67,7 +67,7 @@ function logDecision (row) {
 // 'blocked'/'failed' command was the wrong call in that situation).
 function classifyResult (r) {
   const s = String(r || '').toLowerCase()
-  if (/held \(busy|busy building/.test(s)) return 'held'      // brain command suppressed mid-build
+  if (/held \(|busy building/.test(s)) return 'held'      // brain command suppressed (mid-build or night-resting)
   if (/skipped/.test(s)) return 'skipped'                     // chat gate / duplicate / vibe budget
   if (/blocked/.test(s)) return 'blocked'                     // cheat/confinement block
   if (/couldn'?t|can'?t|cannot|no path|no waypoint|no player|failed|error|timed out|nowhere|don'?t know|no food|no armor|not hungry|nothing/.test(s)) return 'failed'

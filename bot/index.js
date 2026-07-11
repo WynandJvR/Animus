@@ -187,7 +187,7 @@ const log = []
 // with its window - for post-mortems everything also lands in logs/bot-events.log
 // (rotated at ~5 MB so it can run for weeks). One file for body events, commands,
 // build progress, deaths - the first place to look when asking "what happened?".
-const EVENTS_LOG = path.join(__dirname, '..', 'logs', 'bot-events.log')
+const EVENTS_LOG = process.env.EVENTS_LOG || path.join(__dirname, '..', 'logs', 'bot-events.log') // env-overridable so a test instance doesn't interleave into the live flight recorder
 try { fs.mkdirSync(path.dirname(EVENTS_LOG), { recursive: true }) } catch {}
 function fileLog (line) {
   try {
@@ -561,7 +561,7 @@ if (process.env.NIGHT_SHELTER !== '0') {
     if (commands.isBusy && commands.isBusy()) return // the gather loop covers the build case
     if (!provision.shelterNeeded(bot)) return
     sheltering = true
-    try { if (await provision.digInForNight(bot, { say: m => bot.chat(String(m).slice(0, 200)) })) note('(shelter) dug in for the night - no armor, mobs about') }
+    try { if (await provision.nightRest(bot, { say: m => bot.chat(String(m).slice(0, 200)) })) note('(shelter) rested for the night (bed or pit) - no armor, mobs about') }
     catch (e) { /* transient */ } finally { sheltering = false }
   }, 5000).unref?.()
 }
@@ -885,8 +885,13 @@ const server = http.createServer((req, res) => {
       // from the site). A real OPERATOR's "stop" still works: it comes through the
       // bot.on('chat') directCommand path, which calls commands.handle directly and
       // bypasses this gate entirely. So only the brain's self-issued stop is suppressed.
-      if (commands.isBusy && commands.isBusy() && !/^(state|scan|find|block|entities|inventory|look|say)\b/i.test(String(line).trim())) {
-        note(`(cmd) ${line}${rz} -> held (busy building) - brain command suppressed`)
+      // Also held while NIGHT-RESTING: the brain's goto/attack was yanking the pathfinder
+      // out from under the shelter dig / bed trek - it must not fight the body for the
+      // controls in the exact moments survival depends on them (death carousels, verified
+      // on test server). Same read-only whitelist applies.
+      const bodyBusy = (commands.isBusy && commands.isBusy()) || (provision.isResting && provision.isResting())
+      if (bodyBusy && !/^(state|scan|find|block|entities|inventory|look|say)\b/i.test(String(line).trim())) {
+        note(`(cmd) ${line}${rz} -> held (${commands.isBusy && commands.isBusy() ? 'busy building' : 'night-resting'}) - brain command suppressed`)
         // If a PLAYER just asked for this (the held command is the brain answering them),
         // don't leave them on read - the BODY replies once with what it's doing. Verified
         // live: "digital go sleep" -> six silent holds and the player heard nothing.

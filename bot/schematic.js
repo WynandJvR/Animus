@@ -235,9 +235,23 @@ function solidCellSet (schem, at) {
   return set
 }
 
+// A log with leaves near it is a WILD TREE, not somebody's cabin - the same anti-grief
+// signal the wood gatherer trusts. Lets prepSite fell a tree standing in the footprint.
+function naturalTrunk (bot, b) {
+  if (!/_log$/.test(b.name)) return false
+  for (let dx = -2; dx <= 2; dx++) for (let dy = 0; dy <= 3; dy++) for (let dz = -2; dz <= 2; dz++) {
+    const n = bot.blockAt(b.position.offset(dx, dy, dz))
+    if (n && /_leaves$/.test(n.name)) return true
+  }
+  return false
+}
+
 // Clear NATURAL obstructions (grass/flowers/leaves/snow…) inside the build
 // footprint so vegetation/soft cover doesn't block placements or poke through.
-// Only clearable blocks; never crafted ones. Best-effort.
+// Also fells NATURAL TREES standing in the footprint (their trunk cells otherwise
+// skip-fail into holes in the walls; the logs are free build wood) - prepSite re-runs
+// on every resume, so a tree that GROWS into the footprint mid-build is caught too.
+// Only clearable/natural blocks; never crafted ones. Best-effort.
 async function prepSite (bot, schem, at, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const st = schem.start(); const en = schem.end()
@@ -246,7 +260,8 @@ async function prepSite (bot, schem, at, opts = {}) {
     for (let z = at.z + st.z; z <= at.z + en.z; z++) {
       for (let x = at.x + st.x; x <= at.x + en.x; x++) {
         const b = bot.blockAt(new Vec3(x, y, z))
-        if (!b || AIR.test(b.name) || !CLEARABLE.test(b.name)) continue
+        if (!b || AIR.test(b.name)) continue
+        if (!CLEARABLE.test(b.name) && !naturalTrunk(bot, b)) continue
         try {
           if (bot.entity.position.distanceTo(b.position) > 4) await gotoWithTimeout(bot, new goals.GoalNear(x, y, z, 3), 12000)
           if (bot.canDigBlock && bot.canDigBlock(b)) { await equipToolFor(bot, b.name); await bot.dig(b); cleared++ }
@@ -496,9 +511,8 @@ async function buildSurvival (bot, schem, at, opts = {}) {
       // it out, then carry on building.
       if (provision.shelterNeeded(bot) && Date.now() - lastShelter > 15000) {
         lastShelter = Date.now()
-        say('mobs out and no armor - digging in till it\'s safe')
-        try { await provision.digInForNight(bot, { isStopped, say }) } catch {}
-        bot.pathfinder.setMovements(moves) // the shelter reset movements - restore the build profile
+        try { await provision.nightRest(bot, { isStopped, say }) } catch {}
+        bot.pathfinder.setMovements(moves) // the night-rest reset movements - restore the build profile
         continue
       }
       // Re-compute placeable actions EVERY iteration (adaptive: a block becomes
