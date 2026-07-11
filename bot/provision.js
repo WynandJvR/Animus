@@ -71,7 +71,19 @@ async function walkStaged (bot, tx, tz, opts = {}) {
     const from = { x: p.x, z: p.z }
     try { await gotoWithTimeout(bot, new goals.GoalNearXZ(lx, lz, 4), 30000) } catch {}
     const np = bot.entity.position
-    if (Math.hypot(np.x - from.x, np.z - from.z) < 3) { if (++stalls >= 3) { dbg('walkStaged: stalled 3 legs at ' + Math.round(np.x) + ',' + Math.round(np.z)); return false } } else stalls = 0
+    if (Math.hypot(np.x - from.x, np.z - from.z) < 3) {
+      stalls++
+      if (stalls === 3) {
+        // WEDGED: a gully/hole the no-dig travel profile can't path out of - the bot
+        // stood at 401,62,2 retrying the same legs for 8+ minutes (live, operator
+        // caught it). ESCALATE like travelFar's rescue: climb/staircase up to open
+        // ground, then try the legs again.
+        dbg('walkStaged: stalled 3 legs at ' + Math.round(np.x) + ',' + Math.round(np.z) + ' - climbing out to open ground')
+        try { await climbToSurface(bot, Math.floor(np.y) + 10, { isStopped }) } catch (e) { dbg('walkStaged: climb-out failed (' + e.message + ')') }
+        if (Math.floor(bot.entity.position.y) > Math.floor(np.y)) { stalls = 0; continue } // rose - retry the legs from up here
+      }
+      if (stalls >= 5) { dbg('walkStaged: giving up wedged at ' + Math.round(np.x) + ',' + Math.round(np.z)); return false }
+    } else stalls = 0
   }
   return false
 }
