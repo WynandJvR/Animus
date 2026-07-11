@@ -51,6 +51,37 @@ function gatherMovements (bot) {
   return m
 }
 
+// MANUAL water escape: face the nearest bank cell (solid ground with headroom, up to +1
+// higher) and hold jump+sprint+forward until we're standing on it. Bypasses the
+// pathfinder entirely - in water it never registers "on ground", so its planned jumps
+// never fire and it bobs in a puddle forever (library flaw, watched live for 8 minutes).
+async function manualHopFromWater (bot) {
+  const feet = bot.entity.position.floored()
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1]]) {
+    for (const dy of [0, 1]) {
+      const bank = bot.blockAt(feet.offset(dx, dy - 1, dz))   // the block we'd stand ON
+      const space1 = bot.blockAt(feet.offset(dx, dy, dz))     // body space
+      const space2 = bot.blockAt(feet.offset(dx, dy + 1, dz)) // head space
+      if (!bank || bank.boundingBox !== 'block' || /water|lava/.test(bank.name)) continue
+      if (!space1 || (!AIRISH(space1.name) && !/water/.test(space1.name))) continue
+      if (!space2 || !AIRISH(space2.name)) continue
+      try {
+        bot.pathfinder.setGoal(null)
+        await bot.lookAt(bank.position.offset(0.5, 1.2, 0.5), true)
+        bot.setControlState('jump', true); bot.setControlState('forward', true); bot.setControlState('sprint', true)
+        const t0 = Date.now()
+        while (Date.now() - t0 < 2500) {
+          await new Promise(r => setTimeout(r, 100))
+          const f = bot.blockAt(bot.entity.position.floored().offset(0, -1, 0))
+          if (f && f.boundingBox === 'block' && !/water/.test(f.name) && bot.entity.onGround) { bot.clearControlStates(); dbg('  hopped out of the water onto ' + f.name); return true }
+        }
+      } finally { bot.clearControlStates() }
+    }
+  }
+  dbg('  manual water hop found no bank - still wet')
+  return false
+}
+
 // Long treks in ~48-block legs. A single 200-block GoalNearXZ makes the pathfinder chew
 // an enormous search space in one solve - the operator watched the bot stand motionless
 // at a lake for two minutes while it "thought". Short legs solve instantly, follow the
@@ -74,13 +105,21 @@ async function walkStaged (bot, tx, tz, opts = {}) {
     if (Math.hypot(np.x - from.x, np.z - from.z) < 3) {
       stalls++
       if (stalls === 3) {
-        // WEDGED: a gully/hole the no-dig travel profile can't path out of - the bot
-        // stood at 401,62,2 retrying the same legs for 8+ minutes (live, operator
-        // caught it). ESCALATE like travelFar's rescue: climb/staircase up to open
-        // ground, then try the legs again.
-        dbg('walkStaged: stalled 3 legs at ' + Math.round(np.x) + ',' + Math.round(np.z) + ' - climbing out to open ground')
-        try { await climbToSurface(bot, Math.floor(np.y) + 10, { isStopped }) } catch (e) { dbg('walkStaged: climb-out failed (' + e.message + ')') }
-        if (Math.floor(bot.entity.position.y) > Math.floor(np.y)) { stalls = 0; continue } // rose - retry the legs from up here
+        // WEDGED. Two known live cases: (a) bobbing in a 1-deep WATER trench - the
+        // pathfinder never jumps because in water it's never "on ground", so it stands
+        // in a puddle forever (operator watched 8 minutes of it); (b) a gully the
+        // no-dig travel profile can't cut out of. Water gets a MANUAL hop (direct
+        // controls, no pathfinder); land gets the climb/staircase rescue.
+        const feet = bot.blockAt(bot.entity.position.floored())
+        if (feet && /water/.test(feet.name)) {
+          dbg('walkStaged: stalled IN WATER at ' + Math.round(np.x) + ',' + Math.round(np.z) + ' - manual hop to the bank')
+          await manualHopFromWater(bot)
+        } else {
+          dbg('walkStaged: stalled 3 legs at ' + Math.round(np.x) + ',' + Math.round(np.z) + ' - climbing out to open ground')
+          try { await climbToSurface(bot, Math.floor(np.y) + 10, { isStopped }) } catch (e) { dbg('walkStaged: climb-out failed (' + e.message + ')') }
+        }
+        const now2 = bot.entity.position
+        if (Math.floor(now2.y) > Math.floor(np.y) || Math.hypot(now2.x - np.x, now2.z - np.z) >= 2) { stalls = 0; continue } // freed - retry the legs
       }
       if (stalls >= 5) { dbg('walkStaged: giving up wedged at ' + Math.round(np.x) + ',' + Math.round(np.z)); return false }
     } else stalls = 0
