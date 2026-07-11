@@ -601,6 +601,10 @@ const RETREAT_HP = parseInt(process.env.RETREAT_HP || '8', 10)
 let defendEquipped = false
 let lastDefendTarget = null
 let lastFleeAt = 0
+let dfLastHp = 20
+let dfHurtAt = 0 // when health last DROPPED - "someone is shooting me" detector
+let lastChargeNoteAt = 0
+const RANGED_RE = /skeleton|stray|bogged|pillager/i
 if (process.env.AUTO_DEFEND !== '0') {
   setInterval(() => {
     if (!bot.entity) return
@@ -614,6 +618,9 @@ if (process.env.AUTO_DEFEND !== '0') {
     try {
       const me = bot.entity.position
       const hp = bot.health == null ? 20 : bot.health
+      if (hp < dfLastHp - 0.5) dfHurtAt = Date.now() // health dropped - we're being HIT
+      dfLastHp = hp
+      const underFire = Date.now() - dfHurtAt < 8000
       // FLEE from a nearby creeper (melee = it explodes) from 12 out - it died twice
       // tonight to creepers first seen at 5-8m: they SPRINT the last stretch and 8m of
       // walking-flee isn't enough head start. And when we're HURT, flee ANY hostile:
@@ -646,10 +653,35 @@ if (process.env.AUTO_DEFEND !== '0') {
         }
         return
       }
-      // Mid-DIG with healthy hp: don't break off a 7-second dig to punch a zombie the
-      // armor can tank - every interruption resets the block's break progress, and the
-      // operator watched dig-abort-redig loops. Creepers/low-hp fled ABOVE this line.
-      if (bot.targetDigBlock && hp > 12) return
+      // Mid-DIG with healthy hp AND nobody actually hitting us: don't break off a
+      // 7-second dig to punch a zombie the armor can tank. Being SHOT overrides this.
+      if (bot.targetDigBlock && hp > 12 && !underFire) return
+      // BEING SHOT from range: melee-only defense ignored a skeleton sniping from 10+
+      // blocks - the bot just stood there taking arrows (operator report). Armored and
+      // healthy -> CHARGE the shooter (iron vs skeleton is a one-sided fight); naked ->
+      // break the line and get away.
+      if (underFire && hp > 10) {
+        let shooter = null; let sd = 20
+        for (const e of Object.values(bot.entities || {})) {
+          if (!e || !e.position || (e.type !== 'mob' && e.type !== 'hostile')) continue
+          if (!RANGED_RE.test(e.name || '')) continue
+          const d = e.position.distanceTo(me); if (d < sd) { sd = d; shooter = e }
+        }
+        if (shooter && sd > 3.5) {
+          const armored = !provision.underArmored(bot)
+          if (armored) {
+            bot.pathfinder.setGoal(new goals.GoalNear(shooter.position.x, shooter.position.y, shooter.position.z, 2))
+            if (Date.now() - lastChargeNoteAt > 5000) { lastChargeNoteAt = Date.now(); note(`(defend) being shot - charging the ${shooter.name} ${sd.toFixed(1)}m`) }
+          } else {
+            const away = me.minus(shooter.position)
+            const dest = me.plus(away.scaled(20 / (away.norm() || 1)))
+            bot.pathfinder.setGoal(new goals.GoalNear(Math.floor(dest.x), Math.floor(me.y), Math.floor(dest.z), 2))
+            bot.setControlState('sprint', true)
+            if (Date.now() - lastChargeNoteAt > 5000) { lastChargeNoteAt = Date.now(); note(`(defend) being shot with no armor - breaking away from the ${shooter.name}`) }
+          }
+          return // next ticks melee it when close / keep running
+        }
+      }
       let target = null; let best = 4 // only fight what's right next to us
       for (const e of Object.values(bot.entities || {})) {
         if (!e || !e.position || e === bot.entity) continue
