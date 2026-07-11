@@ -1128,6 +1128,7 @@ async function digInForNight (bot, opts = {}) {
     // pit is NOT a shelter - don't squat in a mob funnel for 10 minutes: short deadline,
     // and bail immediately if we're taking hits down there (fight/flee reflexes resume).
     const fullySealed = capped && !sideHoles
+    if (fullySealed) { try { rememberInfra('shelter', bot.entity.position.floored()) } catch {} } // bunkers are reusable knowledge
     const deadline = Date.now() + (fullySealed ? 600000 : 120000)
     const hp0 = bot.health || 20
     while (Date.now() < deadline && !isStopped()) {

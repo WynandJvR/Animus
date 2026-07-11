@@ -2245,6 +2245,9 @@ async function autoBuild (bot, schem, at, opts = {}) {
       const torch = (bot.inventory ? bot.inventory.items() : []).find(i => i.name === 'torch')
       if (torch && placeTorchNearby) { await placeTorchNearby(bot).catch(() => {}) }
     } catch {}
+    // REMEMBER the camp as a PLACE (operator rule): a named waypoint in persistent memory
+    // - the brain sees it in /state waypoints and can `goto camp`; it survives restarts.
+    try { const r = await handle(bot, 'remember camp'); dbg('camp: waypoint -> ' + r) } catch {}
     dbg('camp: setup pass done')
   }
   const slotsUsed = () => (bot.inventory ? bot.inventory.items().length : 0)
