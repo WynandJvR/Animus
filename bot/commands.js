@@ -12,7 +12,13 @@ const { Vec3 } = require('vec3')
 const memory = require('./memory.js') // persistent named waypoints
 const schematic = require('./schematic.js') // download/parse + survival physical building
 const provision = require('./provision.js') // BOM -> gather/craft plan + execution
-const dbg = process.env.BUILD_DEBUG ? (...a) => console.log('[build]', ...a) : () => {} // visible build trace (BUILD_DEBUG=1)
+let dbgSink = null // injected by index.js: debug lines persist to logs/bot-events.log
+function setDebugSink (fn) { dbgSink = fn }
+const dbg = (...a) => {
+  const line = '[build] ' + a.map(x => String(x)).join(' ')
+  if (process.env.BUILD_DEBUG) console.log(line)
+  if (dbgSink) dbgSink(line)
+}
 
 // entity names treated as hostile for attack/defend and auto-defense
 const HOSTILE = /zombie|skeleton|spider|creeper|enderman|witch|husk|drowned|pillager|vindicator|ravager|slime|magma_cube|blaze|piglin|hoglin|phantom|zoglin|stray|silverfish|guardian|vex|wither|warden|ghast|shulker|illusioner|evoker|breeze|bogged/i
@@ -2230,8 +2236,18 @@ async function resumeBuild (bot) {
     // re-gathering the whole kit. Skipped for lava/void deaths and best-effort -
     // a failed recovery must never block the resume itself.
     if (lastDeath && !lastDeath.dangerous && !lastDeath.retrieved) {
-      try { const r = await handle(bot, 'recover'); dbg('resume: recover -> ' + String(r).split(String.fromCharCode(10))[0]) } catch (e) { dbg('resume: recover failed (' + e.message + ')') }
-      if (buildAbort) return (result = { stopped: true, placed: 0, total: 0 })
+      // WRITE OFF deep-cave graves when respawning with nothing: a naked corpse-run to
+      // y<40 through the mobs that just killed you is how death carousels happen
+      // (verified live: died at y=4, then died AGAIN going back). A player lets it go.
+      const deep = lastDeath.y < job.at.y - 15
+      const naked = !(bot.inventory ? bot.inventory.items() : []).some(i => /_(pickaxe|axe|sword)$|_chestplate$/.test(i.name))
+      if (deep && naked) {
+        lastDeath.retrieved = true; persistDeath()
+        say("my stuff's too deep in that cave - not worth dying for, moving on")
+      } else {
+        try { const r = await handle(bot, 'recover'); dbg('resume: recover -> ' + String(r).split(String.fromCharCode(10))[0]) } catch (e) { dbg('resume: recover failed (' + e.message + ')') }
+        if (buildAbort) return (result = { stopped: true, placed: 0, total: 0 })
+      }
     }
     const me = bot.entity.position
     let near = Math.hypot(job.at.x - me.x, job.at.z - me.z) <= 40
@@ -2275,4 +2291,4 @@ async function resumeBuild (bot) {
   }
 }
 
-module.exports = { handle, state, setupMovements, eatFood, placeTorchNearby, isBusy, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume }
+module.exports = { handle, state, setupMovements, eatFood, placeTorchNearby, isBusy, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume, setDebugSink }

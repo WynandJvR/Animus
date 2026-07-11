@@ -203,6 +203,11 @@ function note (msg) {
   fileLog(line)
 }
 commands.setLogger(note) // build/provision progress lands in /log (GUI live panel), not chat
+// Debug traces ([prov]/[build]) always persist to the FILE (not the GUI ring buffer,
+// which they'd flood) - no more relaunching with BUILD_DEBUG=1 to see what happened.
+function noteDebug (msg) { fileLog(`[${new Date().toISOString()}] ${msg}`) }
+commands.setDebugSink(noteDebug)
+provision.setDebugSink(noteDebug)
 // A build job saved to disk survived a process restart - let the operator know it's resumable.
 try {
   const rj = commands.persistedResume && commands.persistedResume()

@@ -8,11 +8,19 @@
 // planProvision() is pure (mcData + counts in, task list out) and offline-
 // testable. run*() helpers execute against a live bot.
 
+const fs = require('fs')
+const path = require('path')
 const { goals, Movements } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
 // Visible, UNTHROTTLED build tracing to stdout (the say() progress goes through a 40s
 // throttle that hides failures). Enable with BUILD_DEBUG=1 to see every plan/task/smelt step.
-const dbg = process.env.BUILD_DEBUG ? (...a) => console.log('[prov]', ...a) : () => {}
+let dbgSink = null // injected by index.js: debug lines persist to logs/bot-events.log
+function setDebugSink (fn) { dbgSink = fn }
+const dbg = (...a) => {
+  const line = '[prov] ' + a.map(x => String(x)).join(' ')
+  if (process.env.BUILD_DEBUG) console.log(line)
+  if (dbgSink) dbgSink(line)
+}
 
 // Movement profile for GATHERING: like a real player it may punch through
 // LEAVES to reach a trunk - and nothing else. The pathfinder only has a global
@@ -963,6 +971,53 @@ function toolForBlock (bot, blockName) {
   return items[0] || null
 }
 
+// ---- WORLD MEMORY (semantic map, layer 1: resources) --------------------------------
+// Perception ends at loaded chunks (~64 blocks) and exploration was memoryless - every
+// batch re-searched the world at random (verified live: chopped oak at ~570,30 twice,
+// then wandered off southwest and forgot it). Like a player, the bot now REMEMBERS where
+// it successfully gathered each resource (bot/world-memory.json), heads straight back
+// next time, and forgets spots that dry up.
+const WORLD_MEM_FILE = path.join(__dirname, 'world-memory.json')
+let worldMem = null
+let worldMemTimer = null
+function loadWorldMem () {
+  if (worldMem) return worldMem
+  try { worldMem = JSON.parse(fs.readFileSync(WORLD_MEM_FILE, 'utf8')) } catch { worldMem = {} }
+  return worldMem
+}
+function saveWorldMem () {
+  clearTimeout(worldMemTimer)
+  worldMemTimer = setTimeout(() => { try { fs.writeFileSync(WORLD_MEM_FILE, JSON.stringify(worldMem, null, 1)) } catch {} }, 2000)
+  if (worldMemTimer.unref) worldMemTimer.unref()
+}
+function rememberSpot (item, pos) {
+  const m = loadWorldMem()
+  const list = m[item] = m[item] || []
+  for (const sp of list) {
+    if (Math.hypot(sp.x - pos.x, sp.z - pos.z) < 24) { sp.hits = (sp.hits || 1) + 1; sp.at = Date.now(); saveWorldMem(); return }
+  }
+  list.push({ x: Math.round(pos.x), z: Math.round(pos.z), at: Date.now(), hits: 1 })
+  if (list.length > 20) { list.sort((a, b) => (b.hits - a.hits) || (b.at - a.at)); list.length = 20 }
+  saveWorldMem()
+}
+function forgetSpot (item, spot) {
+  const list = loadWorldMem()[item] || []
+  spot.hits = (spot.hits || 1) - 1
+  if (spot.hits <= 0) { const i = list.indexOf(spot); if (i >= 0) list.splice(i, 1) }
+  saveWorldMem()
+}
+function recallSpot (item, pos, visited) {
+  const list = loadWorldMem()[item] || []
+  let best = null; let bd = Infinity
+  for (const sp of list) {
+    if (visited.has(sp.x + ',' + sp.z)) continue
+    const d = Math.hypot(sp.x - pos.x, sp.z - pos.z)
+    if (d > 400 || d < 16) continue // too far to trek / already here
+    if (d < bd) { bd = d; best = sp }
+  }
+  return best
+}
+
 async function gatherLoop (bot, item, count, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const mcData = require('minecraft-data')(bot.version)
@@ -984,6 +1039,7 @@ async function gatherLoop (bot, item, count, opts = {}) {
   // (e.g. a trunk boxed in by leaves the pathfinder won't break) loops FOREVER:
   // find it -> can't path -> find the same block again. Verified live.
   const failed = new Map()
+  const visitedMem = new Set() // remembered spots already tried this gather
   const pkey = p => `${p.x},${p.y},${p.z}`
   let mined = 0
   let exploreIdx = 0
@@ -994,20 +1050,20 @@ async function gatherLoop (bot, item, count, opts = {}) {
   let lastFoodHunt = 0 // throttle the survival-hunt so it doesn't chase every loop
   let lastShelter = 0  // throttle the night-shelter check
   const isLogGather = /_log$/.test(item) // logs get the natural-tree-only anti-grief filter
-  const MAX_EXPLORE = 12 // wander this many times before truly giving up
+  const MAX_EXPLORE = 20 // wander this many times before truly giving up (48-block hops; 20 spans a real trek to the next biome)
   // ROAM FENCE: stay within maxRoam (XZ) of the build anchor so gathering CONVERGES back to
   // the site instead of drifting 150 blocks off chasing one more tree/cow. Stone is under
   // every point (strip-mine), so it gets a tight fence; logs a looser one. Env-overridable.
   const home = opts.home || { x: Math.round(bot.entity.position.x), z: Math.round(bot.entity.position.z) }
-  const MAX_ROAM = parseInt(process.env.GATHER_MAX_ROAM || (reqTool ? '64' : (isLogGather ? '96' : '80')), 10)
+  const MAX_ROAM = parseInt(process.env.GATHER_MAX_ROAM || (reqTool ? '64' : (isLogGather ? '160' : '96')), 10) // logs 96->160: the castle site sits in a treeless pocket wider than the old leash
   // The fence is ADAPTIVE: when this site's resource is genuinely inaccessible inside it
   // (verified live: stone under the site was a flooded aquifer - every shaft/dive aborted
   // on water), a player walks FURTHER. waterAborts/failed shafts widen it in +32 steps.
   let maxRoam = MAX_ROAM
   let waterAborts = 0
   const widenFence = why => {
-    if (maxRoam >= MAX_ROAM + 64) return
-    maxRoam = Math.min(MAX_ROAM + 64, maxRoam + 32)
+    if (maxRoam >= MAX_ROAM + 128) return
+    maxRoam = Math.min(MAX_ROAM + 128, maxRoam + 32) // dry looks can ultimately reach ~288 blocks out
     dbg('  gather fence widened to', maxRoam, '(' + why + ')')
   }
   const distHome = () => Math.hypot(bot.entity.position.x - home.x, bot.entity.position.z - home.z)
@@ -1169,7 +1225,23 @@ async function gatherLoop (bot, item, count, opts = {}) {
       }
       // WANDER to fresh terrain.
       if (dryExplores >= MAX_EXPLORE) return { gathered: countItem(bot, item) - start, reason: `searched far and wide, no reachable ${sources.join('/')}` }
+      // WORLD MEMORY first: walk to a remembered source before wandering blind. Memory
+      // deliberately overrides the roam fence - a known resource IS the reason to leave.
+      const memSpot = recallSpot(item, bot.entity.position, visitedMem)
+      if (memSpot) {
+        visitedMem.add(memSpot.x + ',' + memSpot.z)
+        if (opts.say && dryExplores === 0) opts.say(`i remember ${sources[0]} over by ${memSpot.x},${memSpot.z} - heading there`)
+        dbg('  gather heading to remembered spot ' + memSpot.x + ',' + memSpot.z + ' (hits ' + (memSpot.hits || 1) + ')')
+        try { await gotoWithTimeout(bot, new goals.GoalNearXZ(memSpot.x, memSpot.z, 8), 120000) } catch {}
+        if (!(bot.findBlocks({ matching: ids, maxDistance: 24, count: 1 }) || []).length) { dbg('  remembered spot is dry - decaying it'); forgetSpot(item, memSpot) }
+        continue // rescan from here; not a dry look
+      }
       if (opts.say && dryExplores === 0) opts.say(`looking further afield for ${sources[0]}...`)
+      // The fence only widened for flooded STONE - a site picked clean of wood kept the
+      // bot pacing a barren 96-block circle while whole forests sat just outside it
+      // (verified live: every log round died in ~2 min of dry looks). Dry looks now
+      // widen the fence for ANY resource, so it walks to the next forest like a player.
+      if (dryExplores > 0 && dryExplores % 3 === 0) widenFence(dryExplores + ' dry looks for ' + sources[0])
       dbg('  gather explore #' + dryExplores)
       const moved = await explore(bot, exploreIdx++, home, maxRoam)
       dbg('  gather explore moved=' + moved)
@@ -1197,6 +1269,7 @@ async function gatherLoop (bot, item, count, opts = {}) {
       continue
     }
     reachFails = 0 // reached one - reset the buried-stone counter
+    rememberSpot(item, target.position) // world memory: this place yields this resource
     // Mine the LOCAL cluster (adjacent same-type blocks) so we stay put and drops
     // land at our feet for proximity pickup - works for both trees and stone.
     let cur = bot.findBlock({ matching: ids, maxDistance: 4 })
@@ -1831,4 +1904,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, hasSolidCeiling, gatherLeather, huntForFood, hasFood, needsFood, digInForNight, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, hasSolidCeiling, gatherLeather, huntForFood, hasFood, needsFood, digInForNight, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, setDebugSink }
