@@ -45,3 +45,7 @@ logs/
 bot/brain-decisions.jsonl
 brain-decisions*.jsonl
 *.exe
+
+# build/death resume state (runtime - contains live-world coordinates)
+bot/resume-job.json
+bot/last-death.json

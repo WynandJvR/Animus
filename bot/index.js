@@ -38,9 +38,8 @@ function refreshOllamaModels () {
   })
 }
 refreshOllamaModels(); setInterval(refreshOllamaModels, 30000).unref?.()
-// Dashboard HTML, loaded once at startup and served at GET /.
-let uiHtml = ''
-try { uiHtml = fs.readFileSync(path.join(__dirname, 'ui.html'), 'utf8') } catch {}
+// (The old browser dashboard is gone - the Animus GUI is the control surface now.
+// It uses the same local API: /state, /log, /brain, /config, /op/cmd.)
 
 // short-term memory of chat addressed to the bot, surfaced in /state. Each
 // message is offered for up to MAX_DELIVERIES ticks so the brain reliably gets a
@@ -83,12 +82,17 @@ function clearPendingChat () {
 // per VIBE_CHAT_MS so the bot feels alive without ever spamming itself into a
 // kick. Set VIBE_CHAT_MS huge to restore the old hard-block on unprompted chat.
 const CHAT_COOLDOWN_MS = parseInt(process.env.CHAT_COOLDOWN_MS || '2500', 10)
-// Budget for UNPROMPTED quips (a direct reply is never throttled). 90s felt spammy
-// when the model fixated on a topic; 150s keeps the bot feeling alive without
-// monologuing. Combined with the coarser brain heartbeat, idle chatter is now sparse.
-const VIBE_CHAT_MS = parseInt(process.env.VIBE_CHAT_MS || '150000', 10)
+// Budget for UNPROMPTED quips (a direct reply is never throttled). 90s felt spammy,
+// 150s STILL felt spammy on the live server ("i see a bunch of wolves..." every couple
+// of minutes) - a real player idles quietly. One ambient line per ~10 min feels alive.
+const VIBE_CHAT_MS = parseInt(process.env.VIBE_CHAT_MS || '600000', 10)
+// The spam is characteristically NARRATION - announcing what it sees or that it's
+// waiting. Those lines carry zero information for players; block the genre outright
+// for unprompted chat (replies are never filtered - if you ASK what it sees, it answers).
+const NARRATION_RE = /^(i (see|spot|notice|hear|found) |i'?m (still here|just|waiting|around|chilling)|just (waiting|hanging|chilling)|let me know if|anyone (need|want)|nothing (going on|happening)|all quiet)/i
 let lastSayAt = 0
 let lastVibeAt = 0
+let lastBusyReplyAt = 0 // rate-limits the body's own "can't right now - busy" replies
 // Content de-dupe. A fixated model re-emits near-identical lines ("why are there so
 // many wolves here") every tick; the timing gates alone let one identical copy through
 // each window, so players see the same message on repeat. Track the last few sent
@@ -138,6 +142,7 @@ function gateSay (line, fromBrain) {
     // busy working (building/gathering - it should focus, not narrate), and otherwise
     // only an occasional line per VIBE_CHAT_MS.
     if (commands.isBusy && commands.isBusy()) return 'busy - no idle chatter'
+    if (NARRATION_RE.test(norm)) return 'narration - players can see the world themselves, say something worth saying or nothing'
     if (now - lastVibeAt < VIBE_CHAT_MS) return `vibe budget ${Math.ceil((VIBE_CHAT_MS - (now - lastVibeAt)) / 1000)}s`
     lastVibeAt = now; lastSayAt = now
     recordSaid(norm)
@@ -175,12 +180,44 @@ function gateImpactful (line) {
 }
 
 const log = []
+// Persistent event log: the in-memory buffer dies on restart and the console dies
+// with its window - for post-mortems everything also lands in logs/bot-events.log
+// (rotated at ~5 MB so it can run for weeks). One file for body events, commands,
+// build progress, deaths - the first place to look when asking "what happened?".
+const EVENTS_LOG = path.join(__dirname, '..', 'logs', 'bot-events.log')
+try { fs.mkdirSync(path.dirname(EVENTS_LOG), { recursive: true }) } catch {}
+function fileLog (line) {
+  try {
+    try { if (fs.statSync(EVENTS_LOG).size > 5 * 1024 * 1024) fs.renameSync(EVENTS_LOG, EVENTS_LOG + '.old') } catch {}
+    fs.appendFileSync(EVENTS_LOG, line + String.fromCharCode(10))
+  } catch {}
+}
 function note (msg) {
   const line = `[${new Date().toISOString()}] ${msg}`
   log.push(line)
   if (log.length > 200) log.shift()
   console.log(line)
+  fileLog(line)
 }
+commands.setLogger(note) // build/provision progress lands in /log (GUI live panel), not chat
+// A build job saved to disk survived a process restart - let the operator know it's resumable.
+try {
+  const rj = commands.persistedResume && commands.persistedResume()
+  if (rj) {
+    note(`(resume) saved build found: "${rj.name}" at ${rj.at.x},${rj.at.y},${rj.at.z}`)
+    // AUTO-RESUME on boot (AUTO_RESUME=0 to disable): a saved job means the last process
+    // died/restarted mid-build - continue it unattended so the operator can walk away.
+    if (process.env.AUTO_RESUME !== '0') {
+      setTimeout(async () => {
+        try {
+          if (commands.isBusy && commands.isBusy()) return // something else already driving
+          const r = await commands.handle(bot, 'resumebuild')
+          note(`(resume) auto: ${String(r).split(String.fromCharCode(10))[0]}`)
+        } catch (e) { note(`(resume) auto failed: ${e.message}`) }
+      }, 25000) // let spawn/chunks settle first
+    }
+  }
+} catch {}
 
 // Env overrides (so the same body can target the lab or a live server without
 // editing config.json): MC_HOST / MC_PORT / MC_USERNAME / MC_AUTH / MC_VERSION.
@@ -201,7 +238,12 @@ const bot = mineflayer.createBot({
   port: parseInt(process.env.MC_PORT || cfg.port, 10),
   username,
   auth,
-  version
+  version,
+  // Send chat UNSIGNED: the chatty persona kept getting kicked with
+  // "chat_validation_failed" (signed-chat acknowledgement races in the protocol
+  // layer). Paper accepts unsigned chat; the supervisor reconnected after each
+  // kick but every kick dropped whatever the bot was doing mid-action.
+  disableChatSigning: true
 })
 
 bot.loadPlugin(pathfinder)
@@ -438,8 +480,16 @@ bot.on('spawn', () => {
   deathPending = false
   note('(respawn) back alive - checking for a build to resume')
   setTimeout(async () => { // let the world/chunks settle first
-    try { const r = commands.resumeBuild && await commands.resumeBuild(bot); if (r) note('(resume) build finished after respawn') }
-    catch (e) { note(`(resume) failed: ${e.message}`) }
+    try {
+      for (let attempt = 0; attempt < 3; attempt++) { // deferred = old build loop still unwinding
+        const r = commands.resumeBuild && await commands.resumeBuild(bot)
+        if (r && r.deferred) { note('(resume) old build still unwinding - retrying in 30s'); await new Promise(res => setTimeout(res, 30000)); continue }
+        if (r) note(`(resume) build ${r.stopped ? 'STOPPED' : 'finished'} after respawn: ${r.placed}/${r.total} placed`)
+        else note('(resume) nothing to resume')
+        return
+      }
+      note('(resume) gave up waiting for the old build loop - will try on the next respawn')
+    } catch (e) { note(`(resume) failed: ${e.message}`) }
   }, 7000)
 })
 
@@ -456,6 +506,22 @@ if (process.env.AUTO_EAT !== '0') {
       if (!/not hungry|no food/.test(r)) note(`(auto-eat) ${r}`)
     } catch (e) { /* transient eat errors are fine; retry next tick */ } finally { eating = false }
   }, 4000)
+}
+
+// Cook reflex: idle near a furnace with raw meat in the pack -> cook it, like a player
+// tidying up after a hunt. Opportunistic (existing furnace + pack fuel only; provision
+// runs also cook right after each smelt while the furnace is hot). Only when IDLE so it
+// never fights a build's pathfinder. Set AUTO_COOK=0 to disable.
+let cookingMeat = false
+if (process.env.AUTO_COOK !== '0') {
+  setInterval(async () => {
+    if (cookingMeat || !bot.entity || commands.isBusy() || (commands.isEscaping && commands.isEscaping())) return
+    cookingMeat = true
+    try {
+      const n = await provision.cookRawMeat(bot, {})
+      if (n > 0) note(`(auto-cook) cooked ${n} raw meat at the furnace`)
+    } catch { /* best-effort */ } finally { cookingMeat = false }
+  }, 30000).unref?.()
 }
 
 // Survival hunt: auto-eat can only eat food you HAVE. When the bot runs OUT of food and is
@@ -813,6 +879,16 @@ const server = http.createServer((req, res) => {
       // bypasses this gate entirely. So only the brain's self-issued stop is suppressed.
       if (commands.isBusy && commands.isBusy() && !/^(state|scan|find|block|entities|inventory|look|say)\b/i.test(String(line).trim())) {
         note(`(cmd) ${line}${rz} -> held (busy building) - brain command suppressed`)
+        // If a PLAYER just asked for this (the held command is the brain answering them),
+        // don't leave them on read - the BODY replies once with what it's doing. Verified
+        // live: "digital go sleep" -> six silent holds and the player heard nothing.
+        if (Date.now() - lastAddressedAt < 20000 && Date.now() - lastBusyReplyAt > 30000) {
+          lastBusyReplyAt = Date.now()
+          let doing = 'working'
+          try { const a = commands.state(bot).activity; if (a && a.name) doing = a.name + (a.detail ? ' (' + a.detail + ')' : '') } catch {}
+          bot.chat(`can't right now - busy with ${doing}. say "stop" first if you need me to drop it`.slice(0, 200))
+          clearPendingChat() // that IS the answer - stop the brain re-trying the same order
+        }
         return send(res, 200, "busy building right now - I'll hold until it's done")
       }
       const drop = gateSay(line, true) || gateImpactful(line) // brain: gated chat + repeat-guard
@@ -834,8 +910,8 @@ const server = http.createServer((req, res) => {
   }
   // ---- dashboard UI ---------------------------------------------------------
   if (req.method === 'GET' && (req.url === '/' || req.url === '/ui' || req.url === '/ui.html')) {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
-    return res.end(uiHtml || '<h1>ui.html not found next to index.js</h1>')
+    // the browser dashboard is retired - the Animus GUI talks to this same API
+    return send(res, 200, 'Animus control API. Use the Animus GUI (Animus.exe).')
   }
   // Live brain settings (model / goal / on-off) for the dashboard + the brain.
   if (req.method === 'GET' && req.url === '/brain') {
@@ -863,6 +939,8 @@ const server = http.createServer((req, res) => {
     return send(res, 200, {
       host: saved.host, port: saved.port, version: saved.version, auth: saved.auth,
       username: saved.username, operators: saved.operators || [],
+      aliases: saved.aliases || [], bedrockPort: saved.bedrockPort,
+      floodgatePrefix: saved.floodgatePrefix, controlHost: saved.controlHost, controlPort: saved.controlPort,
       connected: !!bot.entity, // is it actually in-world right now?
       liveHost: process.env.MC_HOST || saved.host, livePort: process.env.MC_PORT || saved.port
     })
@@ -883,6 +961,11 @@ const server = http.createServer((req, res) => {
       if (j.auth != null && ['offline', 'microsoft'].includes(j.auth)) saved.auth = j.auth
       if (j.username != null) saved.username = String(j.username).trim()
       if (Array.isArray(j.operators)) saved.operators = j.operators.map(s => String(s).trim()).filter(Boolean)
+      if (Array.isArray(j.aliases)) saved.aliases = j.aliases.map(s => String(s).trim()).filter(Boolean)
+      if (j.bedrockPort != null) { const p = parseInt(j.bedrockPort, 10); if (Number.isFinite(p)) saved.bedrockPort = p }
+      if (j.floodgatePrefix != null) saved.floodgatePrefix = String(j.floodgatePrefix).trim()
+      if (j.controlHost != null && String(j.controlHost).trim()) saved.controlHost = String(j.controlHost).trim()
+      if (j.controlPort != null) { const p = parseInt(j.controlPort, 10); if (Number.isFinite(p)) saved.controlPort = p }
       try { fs.writeFileSync(file, JSON.stringify(saved, null, 2) + '\n') } catch (e) { return send(res, 500, `couldn't save: ${e.message}`) }
       note(`(config) saved -> ${saved.host}:${saved.port} auth=${saved.auth}${j.reconnect ? ' (reconnecting)' : ''}`)
       send(res, 200, { ok: true, reconnect: !!j.reconnect })

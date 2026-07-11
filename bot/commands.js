@@ -5,11 +5,14 @@
 // the bot is op+creative on the lab server, which makes structures reliable
 // instead of fighting physical block-placement reach/inventory rules.
 
+const fs = require('fs')
+const path = require('path')
 const { goals, Movements } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
 const memory = require('./memory.js') // persistent named waypoints
 const schematic = require('./schematic.js') // download/parse + survival physical building
 const provision = require('./provision.js') // BOM -> gather/craft plan + execution
+const dbg = process.env.BUILD_DEBUG ? (...a) => console.log('[build]', ...a) : () => {} // visible build trace (BUILD_DEBUG=1)
 
 // entity names treated as hostile for attack/defend and auto-defense
 const HOSTILE = /zombie|skeleton|spider|creeper|enderman|witch|husk|drowned|pillager|vindicator|ravager|slime|magma_cube|blaze|piglin|hoglin|phantom|zoglin|stray|silverfish|guardian|vex|wither|warden|ghast|shulker|illusioner|evoker|breeze|bogged/i
@@ -34,12 +37,22 @@ let followTarget = null
 // void). Set by the body's death handler; surfaced in /state so the BRAIN can decide
 // whether to `recover`. Cleared/marked once retrieved. Expires so it's not stale forever.
 let lastDeath = null
-function recordDeath (info) { lastDeath = info }
+// Death record PERSISTS to disk: it used to be memory-only, so a process restart
+// between dying and recovering forgot where the grave was (verified live - a restart
+// skipped grave recovery and the kit was abandoned). Loaded once at boot; cleared
+// when retrieved or when a new death overwrites it.
+const DEATH_FILE = path.join(__dirname, 'last-death.json')
+function persistDeath () { try { if (lastDeath && !lastDeath.retrieved) fs.writeFileSync(DEATH_FILE, JSON.stringify(lastDeath)); else fs.unlinkSync(DEATH_FILE) } catch {} }
+try { const d = JSON.parse(fs.readFileSync(DEATH_FILE, 'utf8')); if (d && !d.retrieved && Date.now() - (d.at || 0) < 24 * 3600 * 1000) lastDeath = d } catch {}
+function recordDeath (info) { lastDeath = info; persistDeath() }
 // auto-resume: the build to pick back up after a death interrupts it. autoBuild
 // re-provisions whatever we lost and Build diffs world-vs-schematic, so resuming just
 // finishes the missing blocks. Kept across a death; cleared on finish or `stop`.
 let resumeJob = null       // { schem, at }
 let buildInterrupted = false
+let resumeDeaths = 0 // consecutive deaths since the resume job was set / bot last reached the site
+let buildProgress = null // REAL build progress for /state - the brain must answer from this, not vibes
+const RESUME_MAX_DEATHS = parseInt(process.env.RESUME_MAX_DEATHS || '4', 10)
 
 // ---- observability: what the body is DOING, how the last long op ENDED, and whether
 // it's WEDGED. The brain reads /state to make high-level calls; without these a stuck
@@ -102,13 +115,22 @@ function trackTick (bot) {
 // the normal chat gate), so it spammed "smelting 5/96... 7/96..." every ~20s. Wrap the
 // say callback so routine progress is at most one line per ~40s, while IMPORTANT lines
 // (asking for a material, errors, "done", setup) always get through.
-function throttledSay (bot, minGapMs = 40000) {
+// Build/provision progress is LOG-FIRST: the GUI's live panel streams the log, and
+// players don't want a play-by-play (verified live: "need stone: X/Y" matched the old
+// \bneed\b important-bypass EVERY material round and flooded public chat on the castle
+// run). Chat now gets only lines that need a PLAYER (asking for materials/help) plus at
+// most one progress heartbeat per BUILD_CHAT_MS (default 10 min) so watchers know it's
+// alive. Terminal results (done/error/stopped) are bot.chat'ed directly by the callers.
+let logFn = (msg) => { try { console.log(msg) } catch {} }
+function setLogger (fn) { logFn = fn } // index.js injects note() so say lines reach /log
+const CHAT_NEEDS_PLAYER = /drop (some|a few|it)|by me\?|can'?t (obtain|get) |giving up|keep dying|skipping it/i
+function throttledSay (bot, minGapMs = parseInt(process.env.BUILD_CHAT_MS || '600000', 10)) {
   let last = 0
   return (msg) => {
     const s = String(msg)
-    const important = /\b(need|drop|can'?t|couldn'?t|error|stopped|no schematic|setting up|done)\b/i.test(s)
+    logFn(`(build) ${s}`)
     const now = Date.now()
-    if (!important && now - last < minGapMs) return
+    if (!CHAT_NEEDS_PLAYER.test(s) && now - last < minGapMs) return
     last = now
     bot.chat(s.slice(0, 256))
   }
@@ -182,6 +204,98 @@ function bridgingBlockCount (bot) {
   return items.filter(i => BRIDGE_MATERIALS.includes(i.name)).reduce((n, i) => n + i.count, 0)
 }
 
+// Walk to the nearest CLOSED wooden door / fence gate within 16 blocks and open it,
+// like a player leaving a house. Iron doors need redstone - skipped. Returns whether
+// a door was opened (the caller re-plans its path afterwards).
+const OPENABLE_RE = /(_door|_fence_gate)$/
+async function openNearbyDoor (bot) {
+  try {
+    const md = require('minecraft-data')(bot.version)
+    const ids = Object.values(md.blocksByName).filter(b => OPENABLE_RE.test(b.name) && b.name !== 'iron_door').map(b => b.id)
+    const cands = (bot.findBlocks({ matching: ids, maxDistance: 16, count: 8 }) || [])
+      .sort((a, b) => a.distanceTo(bot.entity.position) - b.distanceTo(bot.entity.position))
+    dbg('door-assist: ' + cands.length + ' door/gate candidates within 16')
+    for (const p of cands) {
+      const blk = bot.blockAt(p)
+      if (!blk) continue
+      let open = false
+      try { const props = blk.getProperties(); open = props && (props.open === true || props.open === 'true') } catch {}
+      // NOTE: an already-OPEN door still gets the walk-through below - the pathfinder
+      // cannot ROUTE through door cells regardless of state (it only bumps them open on
+      // direct lines), so "it's open" doesn't mean the planner will use it.
+      try { await gotoTimed(bot, new goals.GoalNear(p.x, p.y, p.z, 2), 15000) } catch (e) { dbg('door-assist: cannot reach door at ' + p + ' (' + e.message + ')'); continue }
+      if (bot.entity.position.distanceTo(p) > 4) continue
+      try {
+        if (!open) {
+          await bot.activateBlock(bot.blockAt(p))
+          await new Promise(r => setTimeout(r, 350)) // let the door state land
+          dbg('door-assist: opened ' + blk.name + ' at ' + p)
+        } else dbg('door-assist: ' + blk.name + ' at ' + p + ' already open - walking through')
+        // WALK THROUGH the doorway before re-planning: the pathfinder won't ROUTE
+        // through even an open door that isn't on the direct line (verified in the hut
+        // test - door opened, travel still "blocked"). But it CAN step INTO an open
+        // doorway cell - so stand in the doorway first, then step out the far side
+        // along the door's facing axis (height-tolerant: outside ground is often ±1).
+        const base = p.y > Math.floor(bot.entity.position.y) ? p.offset(0, -1, 0) : p // upper half -> foot cell
+        const before = bot.entity.position.clone()
+        let facing = null
+        try { facing = (bot.blockAt(base) && bot.blockAt(base).getProperties().facing) || null } catch {}
+        const axis = (facing === 'east' || facing === 'west') ? [1, 0] : (facing === 'north' || facing === 'south') ? [0, 1] : [Math.abs(base.x + 0.5 - before.x) >= Math.abs(base.z + 0.5 - before.z) ? 1 : 0, 0]
+        const dx = axis[0]; const dz = axis[0] === 1 ? 0 : 1
+        // Exit toward OPEN SKY: "outside" is the side of the doorway with no ceiling.
+        // (Away-from-where-I-stand flips when the bot is mid-doorway - verified: it
+        // walked back INTO the hut. Ceiling check is position-independent.)
+        const skyless = (cell) => { // solid cover within 12 above? (leaves are canopy, not ceiling)
+          for (let dy = 2; dy <= 12; dy++) { const b = bot.blockAt(cell.offset(0, dy, 0)); if (b && b.boundingBox === 'block' && !/_leaves$/.test(b.name)) return true }
+          return false
+        }
+        const posSide = base.offset(dx * 2, 0, dz * 2); const negSide = base.offset(-dx * 2, 0, -dz * 2)
+        let sign
+        const posCovered = skyless(posSide); const negCovered = skyless(negSide)
+        if (posCovered !== negCovered) sign = posCovered ? -1 : 1 // walk to the uncovered (outdoor) side
+        else sign = Math.sign((base.x + 0.5 - before.x) * dx + (base.z + 0.5 - before.z) * dz) || 1
+        dbg('door-assist: exit side ' + (dx ? (sign > 0 ? 'east' : 'west') : (sign > 0 ? 'south' : 'north')) + (posCovered !== negCovered ? ' (open sky)' : ' (fallback)'))
+        // Align on the inside cell in front of the door (pathfinder CAN reach that).
+        try { await gotoTimed(bot, new goals.GoalBlock(base.x - dx * sign, base.y, base.z - dz * sign), 8000) } catch (e2) { dbg('door-assist: could not align (' + e2.message + ')') }
+        // FORCE-WALK through: the pathfinder cannot PLAN through door cells at all (even
+        // open ones - verified repeatedly in the hut test), so cross on manual controls.
+        // Thread the doorway CENTER-TO-CENTER - one long diagonal walk clipped the open
+        // door panel and slid the bot off sideways into the wall corner.
+        try { bot.pathfinder.setGoal(null) } catch {}
+        bot.setControlState('sprint', false)
+        bot.setControlState('jump', false)
+        const walkTo = async (tx, tz, doneDist, ms) => {
+          try { await bot.lookAt(new Vec3(tx, bot.entity.position.y + 1.2, tz), true) } catch {}
+          bot.setControlState('forward', true)
+          const t0 = Date.now()
+          let lastPos = bot.entity.position.clone(); let lastMove = Date.now()
+          while (Date.now() - t0 < ms) {
+            await new Promise(r => setTimeout(r, 80))
+            if (Math.hypot(bot.entity.position.x - tx, bot.entity.position.z - tz) < doneDist) break
+            const moved = bot.entity.position.distanceTo(lastPos)
+            if (moved > 0.15) { lastPos = bot.entity.position.clone(); lastMove = Date.now() }
+            else if (Date.now() - lastMove > 350) { // wedged on a step-up (e.g. higher ground outside) - hop
+              bot.setControlState('jump', true); await new Promise(r => setTimeout(r, 120)); bot.setControlState('jump', false)
+              lastMove = Date.now()
+            }
+            try { await bot.lookAt(new Vec3(tx, bot.entity.position.y + 1.2, tz), true) } catch {} // keep the line straight
+          }
+          bot.setControlState('forward', false)
+        }
+        // the pathfinder's native bump logic can TOGGLE the door shut again between our
+        // open and our walk - re-open if needed right before crossing
+        try { const b2 = bot.blockAt(base); const pr = b2 && b2.getProperties(); if (pr && !(pr.open === true || pr.open === 'true')) { await bot.activateBlock(b2); await new Promise(r => setTimeout(r, 250)); dbg('door-assist: re-opened before crossing') } } catch {}
+        await walkTo(base.x + 0.5, base.z + 0.5, 0.45, 2500)                                    // into the doorway
+        await walkTo(base.x + dx * sign * 2 + 0.5, base.z + dz * sign * 2 + 0.5, 0.6, 2500)     // out the far side
+        const prog = (bot.entity.position.x - (base.x + 0.5)) * dx * sign + (bot.entity.position.z - (base.z + 0.5)) * dz * sign
+        dbg('door-assist: force-walk ' + (prog > 1.2 ? 'THROUGH to ' : 'did not clear, at ') + bot.entity.position.floored())
+        return true
+      } catch { continue }
+    }
+  } catch { }
+  return false
+}
+
 async function travelFar (bot, dest, opts = {}) {
   const arrive = opts.arrive || 16       // horizontal "close enough" to hand off
   const hop = opts.hop || 32             // per-leg distance (well within view distance)
@@ -196,6 +310,7 @@ async function travelFar (bot, dest, opts = {}) {
   let lastD = Infinity
   let stalls = 0
   let gathers = 0
+  let doorAssists = 0
   let climbs = 0
   let lastSurvival = 0  // throttle the per-leg survival check
   let climbTimeMs = 0   // time spent digging out of caves / sheltering - doesn't count against the travel clock
@@ -268,6 +383,14 @@ async function travelFar (bot, dest, opts = {}) {
       // no meaningful progress this leg -> count a stall
       if (nd >= lastD - 3) {
         stalls++
+        // DOOR ASSIST first: the pathfinder PLANS closed doors as solid walls (canOpenDoors
+        // only opens ones it bumps into mid-path) - verified live: the bot sat "no path"
+        // INSIDE the operator's base with a working oak door 16 blocks away. Do what a
+        // player does: walk to the nearest closed door/gate, open it, re-plan. Must run
+        // BEFORE the dirt-bridge branch (that one resets `stalls`, starving this check).
+        if (stalls >= 2 && doorAssists < 4) {
+          if (await openNearbyDoor(bot)) { doorAssists++; stalls = 0; lastD = Infinity; continue }
+        }
         // Stalled AND out of blocks to bridge with? Dig some dirt on our own (like the
         // build gathers its materials), then retry - so a ravine/water gap can't strand
         // us. Only when actually stuck (not upfront), so open ground never triggers it.
@@ -416,15 +539,24 @@ function buildHouse (bot, material, w, l, h, a) {
 
 // Eat the best food in inventory so the bot doesn't starve. Returns a status
 // string. Safe to call often - no-ops if already full or no food on hand.
+// Foods with a status-effect downside (Hunger/poison). A real player only eats these
+// as a LAST RESORT - rotten flesh sorts above raw chicken by food points, so a pure
+// points sort had the bot giving itself the Hunger effect while carrying beef.
+const RISKY_FOOD = /^(rotten_flesh|chicken|spider_eye|poisonous_potato|pufferfish)$/
 async function eatFood (bot) {
   if (bot.food != null && bot.food >= 20) return 'not hungry'
   const mcData = require('minecraft-data')(bot.version)
   const foods = (mcData && mcData.foodsByName) || {}
   const items = bot.inventory ? bot.inventory.items() : []
-  // prefer the most filling food available
-  const edible = items.filter(i => foods[i.name]).sort((a, b) => (foods[b.name].foodPoints || 0) - (foods[a.name].foodPoints || 0))
+  // prefer the most filling SAFE food; risky food only when there's nothing else
+  const edible = items.filter(i => foods[i.name]).sort((a, b) => {
+    const risk = (RISKY_FOOD.test(a.name) ? 1 : 0) - (RISKY_FOOD.test(b.name) ? 1 : 0)
+    if (risk !== 0) return risk
+    return (foods[b.name].foodPoints || 0) - (foods[a.name].foodPoints || 0)
+  })
   if (!edible.length) return 'no food in inventory'
   const food = edible[0]
+  if (RISKY_FOOD.test(food.name) && bot.food > 6) return 'only risky food left - holding out'
   await bot.equip(food, 'hand')
   await bot.consume()
   return `ate ${food.name} (food ${bot.food})`
@@ -540,7 +672,7 @@ async function provisionArmor (bot, opts = {}) {
   const needLeather = stillMissing.reduce((s, p) => s + p.leather, 0)
   if (have() < needLeather && !isStopped()) {
     say(`no armor on me - hunting cows for leather (${have()}/${needLeather})`)
-    try { await provision.gatherLeather(bot, needLeather - have(), { say, isStopped, restoreMovements: restore }) }
+    try { await provision.gatherLeather(bot, needLeather - have(), { say, isStopped, restoreMovements: restore, home: opts.home, maxRoam: opts.maxRoam, maxExplores: opts.maxExplores, timeMs: opts.timeMs }) }
     catch (e) { say(`(leather hunt cut short: ${e.message})`) }
   }
   // 3) Ensure a crafting table exists (leather armor needs only leather + a table).
@@ -890,7 +1022,7 @@ async function handle (bot, line) {
       if (!lastDeath) return "i haven't died recently - nothing to go get"
       if (lastDeath.retrieved) return 'already went back for my stuff'
       const d = lastDeath
-      if (d.dangerous) { lastDeath.retrieved = true; return `i died in lava/fire at ${d.x},${d.y},${d.z} - my stuff burned up, not walking back into that` }
+      if (d.dangerous) { lastDeath.retrieved = true; persistDeath(); return `i died in lava/fire at ${d.x},${d.y},${d.z} - my stuff burned up, not walking back into that` }
       buildAbort = false
       const me = bot.entity.position
       if (Math.hypot(d.x - me.x, d.z - me.z) > 80) {
@@ -911,7 +1043,7 @@ async function handle (bot, line) {
       await collectNearbyDrops(bot, { radius: 6 })
       const graveBlk = bot.blockAt(new Vec3(d.x, d.y, d.z)) || bot.blockAt(new Vec3(d.x, d.y + 1, d.z))
       if (graveBlk && graveBlk.name !== 'air') { try { await bot.activateBlock(graveBlk) } catch {} ; await collectNearbyDrops(bot, { radius: 6 }) }
-      lastDeath.retrieved = true
+      lastDeath.retrieved = true; persistDeath()
       return `back where i died (${d.x},${d.y},${d.z}) - grabbed what i could`
     }
     case 'goto': {
@@ -1001,7 +1133,7 @@ async function handle (bot, line) {
     case 'stop':
       followTarget = null // end persistent follow - "stop" means stop
       buildAbort = true // also halts an in-progress schematic build
-      resumeJob = null; buildInterrupted = false // an explicit stop cancels auto-resume too
+      resumeJob = null; buildInterrupted = false; resumeDeaths = 0; clearPersistedResume() // an explicit stop cancels auto-resume too
       bot.pathfinder.setGoal(null); return 'stopped'
 
     case 'attack':
@@ -1222,11 +1354,17 @@ async function handle (bot, line) {
     case 'sleep': {
       const mcData = require('minecraft-data')(bot.version)
       const bedIds = Object.values(mcData.blocksByName).filter(b => /_bed$/.test(b.name)).map(b => b.id)
-      const bed = bedIds.length ? bot.findBlock({ matching: bedIds, maxDistance: 16 }) : null
+      const bed = bedIds.length ? bot.findBlock({ matching: bedIds, maxDistance: 48 }) : null // 16 was so tight 'go sleep' failed 19 blocks from the bed
       if (!bed) return 'no bed nearby'
-      if (bot.entity.position.distanceTo(bed.position) > 3) { try { await gotoTimed(bot, new goals.GoalNear(bed.position.x, bed.position.y, bed.position.z, 2), 12000) } catch {} }
-      try { await bot.sleep(bed) } catch (e) { return `can't sleep: ${e.message}` }
-      return 'sleeping'
+      if (bot.entity.position.distanceTo(bed.position) > 3) { try { await gotoTimed(bot, new goals.GoalNear(bed.position.x, bed.position.y, bed.position.z, 2), 30000) } catch {} }
+      try { await bot.sleep(bed) } catch (e) {
+        // Can't sleep now (daytime / mobs) - but USING the bed still sets the respawn
+        // point in modern MC, which is usually what the operator wants ("set your spawn
+        // there"). Do that instead of just failing.
+        try { await bot.activateBlock(bed); return `can't sleep now (${e.message}) - but i set my spawn at this bed` } catch {}
+        return `can't sleep: ${e.message}`
+      }
+      return 'sleeping (spawn set here)'
     }
     case 'wake':
     case 'wakeup': {
@@ -1393,7 +1531,7 @@ async function handle (bot, line) {
       // scaffold dirt for anything the bot can't reach from the ground - verified
       // live: without pillar blocks the roof of even a 3-tall box is unreachable
       if (loadedSchem.schem.size.y > 2) bom.dirt = (bom.dirt || 0) + 8 + 2 * loadedSchem.schem.size.y
-      const plan = provision.planProvision(mcData, bom, provision.inventoryCounts(bot))
+      const plan = provision.planProvision(mcData, bom, provision.inventoryCounts(bot), { furnacesNearby: provision.countFurnacesNear(bot) })
       const planLines = plan.tasks.map(t =>
         t.type === 'gather' ? `gather ${t.count}x ${t.item}${t.tool ? ` [${t.tool}]` : ''}`
           : t.type === 'craft' ? `craft ${t.crafts * t.perCraft}x ${t.item}${t.needsTable ? ' (table)' : ''}`
@@ -1450,9 +1588,10 @@ async function handle (bot, line) {
         at = new Vec3(at.x - Math.floor((st.x + en.x) / 2), at.y - st.y, at.z - Math.floor((st.z + en.z) / 2))
       }
       at = snapToGround(bot, loadedSchem.schem, at) // sit it on the ground, never floating
-      building = true; buildAbort = false; buildInterrupted = false
+      building = true; buildAbort = false; buildInterrupted = false; resumeDeaths = 0
       beginActivity('autobuild', loadedSchem.name)
       resumeJob = { schem: loadedSchem.schem, at } // remembered so a death can't lose the build
+      persistResume(loadedSchem.name, at) // ...and on DISK so a process restart can't either
       autoBuild(bot, loadedSchem.schem, at, {
         say: throttledSay(bot),
         isStopped: () => buildAbort,
@@ -1460,12 +1599,37 @@ async function handle (bot, line) {
         clear: doClear
       }).then(r => {
         building = false; setupMovements(bot)
-        if (diedJustNow()) return // died mid-build - the respawn handler resumes it, don't clear/report
-        resumeJob = null
+        if (buildInterrupted) { // died mid-build: keep resumeJob for the respawn handler, consume the flag
+          buildInterrupted = false
+          dbg('autobuild unwound after death - keeping resumeJob (deaths=' + resumeDeaths + ')')
+          endActivity(false, 'interrupted by death - resuming after respawn', { detached: true })
+          return
+        }
+        resumeJob = null; if (!r.stopped) clearPersistedResume() // done for real - nothing to resume
         endActivity(!r.stopped, `${r.placed}/${r.total} placed${r.stopped ? ' (stopped)' : ''}`, { detached: true })
         bot.chat(`autobuild ${r.stopped ? 'stopped' : 'done'}: ${r.placed}/${r.total} placed${r.skipped ? `, ${r.skipped} skipped` : ''}`.slice(0, 256))
-      }).catch(e => { building = false; setupMovements(bot); if (diedJustNow()) return; resumeJob = null; endActivity(false, e.message, { detached: true }); bot.chat(`autobuild error: ${e.message}`.slice(0, 256)) })
+      }).catch(e => {
+        building = false; setupMovements(bot)
+        if (buildInterrupted) { buildInterrupted = false; dbg('autobuild errored after death - keeping resumeJob:', e.message); endActivity(false, `interrupted by death (${e.message})`, { detached: true }); return }
+        resumeJob = null; endActivity(false, e.message, { detached: true }); bot.chat(`autobuild error: ${e.message}`.slice(0, 256))
+      })
       return `building "${loadedSchem.name}" from scratch at ${at.x},${at.y},${at.z} - I'll gather everything myself, stash it in a chest, then build. Say "stop" to cancel.`
+    }
+
+    case 'resumebuild':
+    case 'resume-build': {
+      // Pick up a build that a process RESTART lost (kick-restart, GUI stop/start,
+      // reboot): reload the schematic named in resume-job.json and run the full
+      // resume flow (gear up, travel back with retries, re-provision, finish).
+      const saved = persistedResume()
+      if (!saved) return 'no saved build to resume'
+      try { loadedSchem = { schem: await schematic.loadFile(saved.name, bot.version), name: saved.name } } catch (e) { return `couldn't reload schematic "${saved.name}": ${e.message}` }
+      resumeJob = { schem: loadedSchem.schem, at: new Vec3(saved.at.x, saved.at.y, saved.at.z) }
+      resumeDeaths = 0; buildAbort = false; buildInterrupted = false
+      resumeBuild(bot).then(r => {
+        if (r && !r.stopped) bot.chat(`resumed build done: ${r.placed}/${r.total} placed`.slice(0, 200))
+      }).catch(e => bot.chat(`resume failed: ${e.message}`.slice(0, 200)))
+      return `resuming "${saved.name}" at ${saved.at.x},${saved.at.y},${saved.at.z} - heading back to finish it`
     }
 
     case 'stash': {
@@ -1632,6 +1796,7 @@ function state (bot) {
     busy: isBusy(),               // an operator build/provision is driving the body - the brain should hold
     // OBSERVABILITY so the brain can spot + break out of stuck/failed/hazardous states:
     activity: activity ? { name: activity.name, detail: activity.detail, forSec: Math.round((Date.now() - activity.startedAt) / 1000) } : null, // a long op still running from a past turn
+    buildProgress, // REAL numbers (material have/need) - the brain answers progress questions from THIS
     lastResult: (lastOutcome && Date.now() - lastOutcome.at < 180000) // how the last long/detached/failed op ended (results that don't come back via /cmd)
       ? { action: lastOutcome.action, ok: lastOutcome.ok, detail: lastOutcome.detail, ageSec: Math.round((Date.now() - lastOutcome.at) / 1000) }
       : null,
@@ -1753,8 +1918,26 @@ function surfaceYAt (bot, x, z, fromY) {
 // Snap the build origin so its bottom solid layer rests on the ground at the footprint's
 // CENTRE column - kills "Y one block too high -> floating dud" builds. No-op if the
 // surface can't be read (chunk not loaded), so it can never make things worse.
+// PARTIAL-BUILD GUARD: if the schematic already visibly matches the world at the
+// REQUESTED origin (a prior run placed part of it), keep that origin - snapping would
+// sit the "ground" on the half-built walls and start a second, misaligned copy 2 up
+// (verified live: re-running a 29/44 stonebox snapped y79 -> y81).
 function snapToGround (bot, schem, at) {
   const st = schem.start(); const en = schem.end()
+  try {
+    let matches = 0
+    for (let y = st.y; y <= en.y && matches < 5; y++) {
+      for (let x = st.x; x <= en.x && matches < 5; x++) {
+        for (let z = st.z; z <= en.z && matches < 5; z++) {
+          const want = schem.getBlock(new Vec3(x, y, z))
+          if (!want || !want.name || /^(air|cave_air|void_air)$/.test(want.name)) continue
+          const got = bot.blockAt(new Vec3(at.x + x, at.y + y, at.z + z))
+          if (got && got.name === want.name) matches++
+        }
+      }
+    }
+    if (matches >= 5) return at // enough of the build already stands here - resume in place
+  } catch { /* schematic read hiccup - fall through to the normal snap */ }
   const cx = at.x + Math.floor((st.x + en.x) / 2)
   const cz = at.z + Math.floor((st.z + en.z) / 2)
   const surf = surfaceYAt(bot, cx, cz, at.y + st.y)
@@ -1773,6 +1956,26 @@ async function autoBuild (bot, schem, at, opts = {}) {
   const restore = opts.restoreMovements || (() => setupMovements(bot))
   const mcData = require('minecraft-data')(bot.version)
   const bom = schematic.billOfMaterials(schem).counts
+  // DIFF the BOM against what already STANDS at the site: a resume/re-run of a partial
+  // build must only provision the MISSING blocks (the raw BOM sent the bot back into the
+  // caves for 44 stone when 5 were missing - ten times the death exposure for nothing).
+  // Chunk not loaded -> blockAt null -> nothing subtracted, so it can never under-plan.
+  try {
+    const st = schem.start(); const en = schem.end()
+    let standing = 0
+    for (let y = st.y; y <= en.y; y++) {
+      for (let z = st.z; z <= en.z; z++) {
+        for (let x = st.x; x <= en.x; x++) {
+          const want = schem.getBlock(new Vec3(x, y, z))
+          if (!want || !want.name || /^(air|cave_air|void_air)$/.test(want.name)) continue
+          const got = bot.blockAt(new Vec3(at.x + x, at.y + y, at.z + z))
+          if (got && got.name === want.name && bom[want.name] > 0) { bom[want.name]--; standing++ }
+        }
+      }
+    }
+    for (const k of Object.keys(bom)) if (bom[k] <= 0) delete bom[k]
+    if (standing > 0) dbg('bom diffed vs world:', standing, 'blocks already standing ->', JSON.stringify(bom))
+  } catch { /* schematic read hiccup - provision the full BOM */ }
   // SCAFFOLD DIRT must be PROVISIONED, not just reserved - a from-nothing bot arrives with 0
   // dirt, so without adding it to the BOM the builder either can't reach upper layers (build
   // finishes short + clears the resume) or cannibalises the BOM's own cobble as scaffold ->
@@ -1815,15 +2018,32 @@ async function autoBuild (bot, schem, at, opts = {}) {
     } catch (e) { say(`(couldn't make tools yet: ${e.message})`) }
     if (!hasKind('pickaxe')) say("still couldn't get a pickaxe - is there any wood around here?")
   }
+  // STONE-PICK UPGRADE: with a wooden pick + a big cobble mine ahead, a stone pickaxe (3
+  // cobble + 2 sticks) mines 2x faster and lasts 131 vs 59 blocks - fewer mid-run breaks
+  // (each break forces a whole re-plan round). Big net win over a from-nothing stone build.
+  const hasStonePick = () => (bot.inventory ? bot.inventory.items() : []).some(i => /^(stone|iron|diamond|netherite)_pickaxe$/.test(i.name))
+  if (!isStopped() && process.env.STONE_PICK !== '0' && bomNeedsMining && hasKind('pickaxe') && !hasStonePick()) {
+    say('quick stone pickaxe first - it mines way faster')
+    try {
+      const sp = provision.planProvision(mcData, { stone_pickaxe: 1 }, provision.inventoryCounts(bot), { primaryWood })
+      if (sp.tasks.length) await provision.runPlan(bot, sp, { say, isStopped, restoreMovements: restore, homeY: Math.floor(at.y), home: { x: Math.round(at.x), y: Math.floor(at.y), z: Math.round(at.z) } })
+    } catch (e) { say(`(stone pick skipped: ${e.message})`) }
+  }
 
   // ARMOR BOOTSTRAP: a from-nothing / just-respawned bot is NAKED, and a long survival
   // build runs through nights - it nearly died to mobs with no armor. So if we're bare
   // in any slot, craft leather armor (hunting cows for leather) BEFORE the long haul.
   // Bounded - if there are no cows it makes what it can (or nothing) and proceeds; the
   // build isn't blocked on it. Only when we've got the tools to survive the hunt.
+  // OPPORTUNISTIC + bounded: armor is optional (the night-shelter covers a naked bot), so we
+  // do NOT chase a full set - only hunt if cows are actually VISIBLE near the site, take one
+  // tight local pass (fenced to 48b, ~1 explore, 60s), and craft whatever partial armor the
+  // leather affords. This stops the bot roaming 150 blocks for a full leather set (the #1
+  // reason a from-nothing build never converged).
   const anyBare = () => Object.values(wornArmor(bot)).some(v => !v)
-  if (!isStopped() && process.env.ARMOR_BOOTSTRAP !== '0' && anyBare()) {
-    try { const r = await provisionArmor(bot, { say, isStopped, restoreMovements: restore }); if (r) say(r) }
+  const cowsNear = () => Object.values(bot.entities || {}).some(e => e && e.position && /^(cow|mooshroom)$/.test((e.name || '').toLowerCase()) && Math.hypot(e.position.x - at.x, e.position.z - at.z) <= 48)
+  if (!isStopped() && process.env.ARMOR_BOOTSTRAP !== '0' && anyBare() && cowsNear()) {
+    try { const r = await provisionArmor(bot, { say, isStopped, restoreMovements: restore, home: { x: at.x, z: at.z }, maxRoam: 48, maxExplores: 1, timeMs: 60000 }); if (r) say(r) }
     catch (e) { say(`(armor bootstrap skipped: ${e.message})`) }
   }
 
@@ -1850,60 +2070,117 @@ async function autoBuild (bot, schem, at, opts = {}) {
   // BUILD phase drops those placements instead of hanging forever begging for them.
   const skip = new Set()
   const BATCH = 96
+  const home = { x: Math.round(at.x), y: Math.floor(at.y), z: Math.round(at.z) } // roam-fence anchor
+  const MATERIAL_MS = parseInt(process.env.AUTOBUILD_MATERIAL_MS || '720000', 10) // wall-clock budget per material
   for (const [name, need] of Object.entries(bom)) {
     let noProgress = 0
     let lastHave = -1
+    let badRounds = 0 // failed rounds with no gain - allow ONE retry (placement/pathing failures are transient)
+    const matDeadline = Date.now() + MATERIAL_MS
     while (!isStopped()) {
       const have = await totalHave(name)
       if (have >= need) break
+      // Hard wall-clock budget per material: a trickle of progress each round resets the
+      // no-progress counter, so without this a slow/roamy gather grinds for an hour. Take
+      // what we have and let the build phase skip the shortfall.
+      if (Date.now() > matDeadline) { say(`out of time on ${name} at ${have}/${need} - building with what i have`); if (have < need) skip.add(name); break }
       // Give up only when we stop MAKING PROGRESS (a partial/slow smelt is fine as long
       // as each round adds some), not after a fixed number of rounds - a fixed guard
       // quit a slow 44-stone smelt at ~11 and then "built" with too little.
       if (have <= lastHave) { if (++noProgress >= 4) { say(`giving up on ${name} at ${have}/${need}`); if (have < need) skip.add(name); break } } else noProgress = 0
       lastHave = have
+      // START EACH ROUND FROM THE SITE, ON THE SURFACE. A failed gather can leave the bot
+      // stranded deep in a cave 40+ blocks off (verified live: cobble round ended at y=61,
+      // climb-out only reached y=62, and the NEXT round's log gather then started underground
+      // and was doomed -> two bad rounds -> stone skipped -> 0/44 build). Recover first.
+      const meY = Math.floor(bot.entity.position.y)
+      if (meY < home.y - 6 && provision.hasSolidCeiling(bot)) {
+        dbg('material', name, 'starting round buried at y=' + meY + ' - climbing to surface first')
+        try { await provision.climbToSurface(bot, home.y, { isStopped }) } catch {}
+      }
+      if (Math.hypot(bot.entity.position.x - home.x, bot.entity.position.z - home.z) > 24) {
+        dbg('material', name, 'starting round ' + Math.round(Math.hypot(bot.entity.position.x - home.x, bot.entity.position.z - home.z)) + 'b from home - walking back')
+        try { await travelFar(bot, { x: home.x, y: home.y, z: home.z }, { isStopped, say: () => {}, gather: false }) } catch {}
+      }
       const batch = Math.min(BATCH, need - have)
+      buildProgress = { phase: 'gathering materials', material: name, have, need, materialsDone: Object.keys(bom).indexOf(name), materialsTotal: Object.keys(bom).length }
       say(`need ${name}: ${have}/${need} - gathering ${batch}`)
-      const plan = provision.planProvision(mcData, { [name]: batch }, provision.inventoryCounts(bot), { primaryWood })
+      // `batch` is already the TRUE shortfall (need minus pack+chest) - hide the target item
+      // from the planner's inventory or it nets the pack count out AGAIN and emits an empty
+      // plan (verified: dirt 8/14 -> batch 6 -> planner saw 8 dirt -> planned nothing -> loop
+      // broke and the build ran short). Dependencies still see the full inventory.
+      const planInv = provision.inventoryCounts(bot)
+      delete planInv[name]
+      const freshPicks = (bot.inventory ? bot.inventory.items() : []).filter(i => i.name === 'wooden_pickaxe' && !(i.durabilityUsed > 0)).length
+      const plan = provision.planProvision(mcData, { [name]: batch }, planInv, { primaryWood, freshPickaxes: freshPicks, furnacesNearby: provision.countFurnacesNear(bot) })
+      dbg('material', name, have + '/' + need, '-> plan:', plan.tasks.map(t => `${t.type}:${t.item || t.output}`).join(',') || '(empty)', '| unobtainable:', Object.keys(plan.unobtainable || {}).join(',') || 'none')
       if (Object.keys(plan.unobtainable || {}).length) { say(`can't obtain ${name} - skipping`); skip.add(name); break }
-      if (!plan.tasks.length) break
+      if (!plan.tasks.length) { dbg('material', name, 'EMPTY PLAN but have', have, '< need', need, '- breaking'); break }
       const before = await totalHave(name)
       // homeY = the build-site SURFACE (the ground-snapped origin), a persistent anchor
       // so strip-mining measures depth from the real surface and can't ratchet the bot
       // down toward lava across batches.
-      const results = await provision.runPlan(bot, plan, { say, isStopped, restoreMovements: restore, homeY: Math.floor(at.y) })
+      const results = await provision.runPlan(bot, plan, { say, isStopped, restoreMovements: restore, homeY: Math.floor(at.y), home })
       const STASH_AT = parseInt(process.env.AUTOBUILD_STASH_SLOTS || '28', 10) // slots-used before offloading (tunable)
       if (slotsUsed() >= STASH_AT) await stash() // pack filling up -> offload to the chest
       const bad = results.filter(r => !r.ok)
-      if (bad.length && (await totalHave(name)) <= before) { say(`stuck getting ${name}: ${bad[0].note}`); if ((await totalHave(name)) < need) skip.add(name); break }
+      if (bad.length && (await totalHave(name)) <= before) {
+        // One free retry: a failed round with no gain is often a TRANSIENT placement/pathing
+        // miss ("nowhere to place a crafting table", "No path to the goal!") that succeeds
+        // from the bot's next position - instantly skipping the material doomed whole builds.
+        if (++badRounds >= 2) { say(`stuck getting ${name}: ${bad[0].note}`); if ((await totalHave(name)) < need) skip.add(name); break }
+        say(`(retrying ${name}: ${bad[0].note})`)
+      } else badRounds = 0
     }
     if (isStopped()) return { stopped: true, phase: 'provision', placed: 0, total: 0 }
   }
 
   // 2) build. If we used a chest, stash the rest and pull from it on demand (topping
   // up scaffold dirt first); otherwise everything's in inventory - just build.
+  buildProgress = { phase: 'placing blocks', material: null, have: 0, need: 0 }
   if (chest) {
     await stash()
     const invDirt = provision.inventoryCounts(bot).dirt || 0
     if (invDirt < KEEP_DIRT) await provision.withdrawItem(bot, chestBlk(), 'dirt', KEEP_DIRT - invDirt).catch(() => {})
     say('materials stashed - building now')
     const fetch = async (n) => { await provision.withdrawItem(bot, chestBlk(), n, 128) }
-    return await schematic.buildSurvival(bot, schem, at, { say, isStopped, restoreMovements: restore, fetch, clear: opts.clear, skip })
+    try { return await schematic.buildSurvival(bot, schem, at, { say, isStopped, restoreMovements: restore, fetch, clear: opts.clear, skip }) } finally { buildProgress = null }
   }
   say('got the materials - building now')
-  return await schematic.buildSurvival(bot, schem, at, { say, isStopped, restoreMovements: restore, clear: opts.clear, skip })
+  try { return await schematic.buildSurvival(bot, schem, at, { say, isStopped, restoreMovements: restore, clear: opts.clear, skip }) } finally { buildProgress = null }
 }
 
 // Called by the body when the bot DIES mid-build: just stop the running loop. resumeJob
 // is KEPT because the build's .then/.catch below skip clearing it when a death is fresh
 // (a flag would race the loop's own rejection; a "died in the last few seconds?" check
 // is order-independent since recordDeath runs synchronously in the death event).
-const diedJustNow = () => lastDeath && Date.now() - lastDeath.at < 5000
-function markBuildInterrupted () { buildAbort = true }
+// Called by the body on DEATH: abort the running loop AND flag that its termination is an
+// interruption (not a stop). The flag - not a "died in the last 5s" window - is what the
+// unwinding promise checks: the real unwind took 33s live (smelt stall-detection latency),
+// blowing past any time window, so the old diedJustNow() check cleared resumeJob and
+// reported "stopped 0/0" on a genuine death. The flag is CONSUMED (set false) by whichever
+// settle-handler observes it, exactly once.
+function markBuildInterrupted () {
+  buildAbort = true
+  if (resumeJob) { buildInterrupted = true; resumeDeaths++; dbg('death: build interrupted (resumeDeaths=' + resumeDeaths + ', building=' + building + ')') }
+}
 // Set the resume job EARLY (at build-request time, before the trek) so a death DURING the
 // long travel to the site still resumes - the most likely death window for a naked bot.
 // Uses the loaded schematic + the requested point (approximate origin); autoBuild later
 // overwrites `at` with the precise ground-snapped origin.
-function setResumeJob (pt) { if (loadedSchem && pt) resumeJob = { schem: loadedSchem.schem, at: new Vec3(pt.x, pt.y, pt.z) } }
+function setResumeJob (pt) { if (loadedSchem && pt) { resumeJob = { schem: loadedSchem.schem, at: new Vec3(pt.x, pt.y, pt.z) }; resumeDeaths = 0; persistResume(loadedSchem.name, pt) } }
+
+// DISK-PERSISTED resume: the in-memory resumeJob dies with the process (restart/crash/
+// reboot), which lost the castle job twice live. Save {schematic name, origin} so a
+// fresh process can pick the build back up via the `resumebuild` command.
+const RESUME_FILE = path.join(__dirname, 'resume-job.json')
+function persistResume (name, at) {
+  try { fs.writeFileSync(RESUME_FILE, JSON.stringify({ name, at: { x: at.x, y: at.y, z: at.z }, savedAt: new Date().toISOString() })) } catch {}
+}
+function clearPersistedResume () { try { fs.unlinkSync(RESUME_FILE) } catch {} }
+function persistedResume () {
+  try { return JSON.parse(fs.readFileSync(RESUME_FILE, 'utf8')) } catch { return null }
+}
 
 // Resume an interrupted build after respawn. Travels back to the site (we respawn far
 // away), then re-runs autoBuild - which RE-PROVISIONS whatever we lost (even if we
@@ -1911,30 +2188,91 @@ function setResumeJob (pt) { if (loadedSchem && pt) resumeJob = { schem: loadedS
 // build's chest if it survived) and Build diffs world-vs-schematic, so it just finishes
 // the missing blocks. Returns the result, or null if there's nothing to resume.
 async function resumeBuild (bot) {
-  if (!resumeJob) return null
-  // let any still-winding-down build loop fully exit before we reset buildAbort
-  for (let i = 0; i < 24 && building; i++) await new Promise(r => setTimeout(r, 500))
-  if (!resumeJob) return null
+  if (!resumeJob) { buildInterrupted = false; return null } // nothing to do; clear any stale flag
+  // Give-up guard: N consecutive deaths without reaching the site = a death loop (lethal
+  // respawn area / unreachable site). Say so, clear the job, stop retrying - else every
+  // respawn restarts the same naked death-march forever.
+  if (resumeDeaths > RESUME_MAX_DEATHS) {
+    dbg('resume: gave up after', resumeDeaths, 'consecutive deaths')
+    bot.chat(`i keep dying trying to get back (${resumeDeaths}x) - giving up on that build`)
+    recordOutcome('autobuild resume', false, `gave up after ${resumeDeaths} deaths`)
+    resumeJob = null; buildInterrupted = false; resumeDeaths = 0; clearPersistedResume()
+    return null
+  }
+  // Wait until the OLD loop is FULLY out: its settle-handler sets building=false and
+  // consumes buildInterrupted in one synchronous block, so building===false proves the
+  // handler already ran (resumeJob preserved, activity ended). Bounded 90s (a mid-smelt
+  // death took ~33s to unwind live); if it's STILL unwinding, NEVER proceed concurrently
+  // - defer and let the respawn handler retry. (The old 12s-then-proceed-anyway version
+  // ran TWO autoBuilds at once and its buildAbort=false un-aborted the dying loop.)
+  for (let i = 0; i < 180 && building; i++) await new Promise(r => setTimeout(r, 500))
+  if (building) { dbg('resume: old build still unwinding after 90s - deferring'); return { deferred: true } }
+  if (!resumeJob) return null // finished/stopped while we waited
   const job = resumeJob
   const say = throttledSay(bot)
-  building = true; buildAbort = false
+  buildInterrupted = false // consumed: we ARE the resume now
+  building = true; buildAbort = false // safe: the old loop is provably gone
+  beginActivity('autobuild', `resume @ ${job.at.x},${job.at.y},${job.at.z}`)
+  let result = null
   try {
     say(`i died - heading back to finish the build at ${job.at.x},${job.at.y},${job.at.z}`)
-    const me = bot.entity.position
-    if (Math.hypot(job.at.x - me.x, job.at.z - me.z) > 40) {
-      // A post-death respawn is just as NAKED as first spawn - re-secure sword/food/armor
-      // near the respawn point BEFORE the trek back, or every death restarts the naked
-      // death-march. Idempotent + bounded, so it's ~free when gear survived.
-      try { await survivalPrep(bot, { say, isStopped: () => buildAbort }) } catch (e) { say(`(prep: ${e.message})`) }
-      await travelFar(bot, { x: job.at.x, y: job.at.y, z: job.at.z }, { isStopped: () => buildAbort, say })
+    // NIGHT-FIRST: a fresh respawn is naked; prepping/trekking at night IS the death loop
+    // (verified live: 3 deaths in 90s at spawn). Shelter until day (digInForNight is
+    // internally bounded ~600s), THEN gear up and go.
+    if (provision.isNight(bot) && provision.underArmored(bot)) {
+      dbg('resume: night + no armor - sheltering before heading back')
+      say('night and no armor - digging in till morning before i head back')
+      try { await provision.digInForNight(bot, { isStopped: () => buildAbort, say }) } catch {}
     }
-    return await autoBuild(bot, job.schem, job.at, {
+    if (buildAbort) return (result = { stopped: true, placed: 0, total: 0 })
+    // GET THE STUFF BACK first when it's safe: on servers with a graves plugin (the
+    // live one runs AxGraves) drops don't despawn, so a recovery detour beats
+    // re-gathering the whole kit. Skipped for lava/void deaths and best-effort -
+    // a failed recovery must never block the resume itself.
+    if (lastDeath && !lastDeath.dangerous && !lastDeath.retrieved) {
+      try { const r = await handle(bot, 'recover'); dbg('resume: recover -> ' + String(r).split(String.fromCharCode(10))[0]) } catch (e) { dbg('resume: recover failed (' + e.message + ')') }
+      if (buildAbort) return (result = { stopped: true, placed: 0, total: 0 })
+    }
+    const me = bot.entity.position
+    let near = Math.hypot(job.at.x - me.x, job.at.z - me.z) <= 40
+    if (!near) {
+      // A post-death respawn is just as NAKED as first spawn - re-secure sword/food/armor
+      // near the respawn point BEFORE the trek back. Idempotent + bounded. The trek gets
+      // a couple of retries - one blocked/aborted leg must NOT fall through to autoBuild
+      // 600 blocks from the site (verified live: it "finished" 0/2350 all-skipped from
+      // the respawn point and CLEARED the castle job).
+      try { await survivalPrep(bot, { say, isStopped: () => buildAbort }) } catch (e) { say(`(prep: ${e.message})`) }
+      for (let attempt = 0; attempt < 3 && !near && !buildAbort; attempt++) {
+        const tr = await travelFar(bot, { x: job.at.x, y: job.at.y, z: job.at.z }, { isStopped: () => buildAbort, say })
+        near = (tr && tr.ok) || Math.hypot(job.at.x - bot.entity.position.x, job.at.z - bot.entity.position.z) <= 40
+        if (!near && !buildAbort) dbg('resume: travel attempt ' + (attempt + 1) + ' fell short (' + (tr && tr.reason) + ') - retrying')
+      }
+    }
+    if (buildAbort) return (result = { stopped: true, placed: 0, total: 0 }) // died/stopped mid-travel
+    if (!near) {
+      // Still can't reach the site: KEEP the job for the next respawn/attempt instead of
+      // "building" from here - autoBuild far from the site skips everything and reports done.
+      say("can't reach the build site right now - i'll try again")
+      buildInterrupted = true // route the finally through the keep-the-job branch
+      return (result = { stopped: true, placed: 0, total: 0 })
+    }
+    resumeDeaths = 0; dbg('resume: back at the site - death counter reset')
+    result = await autoBuild(bot, job.schem, job.at, {
       say, isStopped: () => buildAbort, restoreMovements: () => setupMovements(bot), clear: false
     })
+    return result
   } finally {
     building = false; setupMovements(bot)
-    if (!diedJustNow()) resumeJob = null // died AGAIN mid-resume -> keep it for another go
+    if (buildInterrupted) { // died AGAIN mid-resume: keep the job for the next respawn
+      buildInterrupted = false
+      dbg('resume: died again mid-resume - keeping resumeJob (deaths=' + resumeDeaths + ')')
+      endActivity(false, 'died again mid-resume - will retry after respawn', { detached: true })
+    } else {
+      resumeJob = null
+      if (result && !result.stopped) clearPersistedResume() // resumed to a real finish
+      endActivity(!!result && !result.stopped, result ? `${result.placed}/${result.total} placed${result.stopped ? ' (stopped)' : ''}` : 'no result', { detached: true })
+    }
   }
 }
 
-module.exports = { handle, state, setupMovements, eatFood, placeTorchNearby, isBusy, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob }
+module.exports = { handle, state, setupMovements, eatFood, placeTorchNearby, isBusy, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume }

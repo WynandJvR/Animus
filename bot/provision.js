@@ -10,6 +10,9 @@
 
 const { goals, Movements } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
+// Visible, UNTHROTTLED build tracing to stdout (the say() progress goes through a 40s
+// throttle that hides failures). Enable with BUILD_DEBUG=1 to see every plan/task/smelt step.
+const dbg = process.env.BUILD_DEBUG ? (...a) => console.log('[prov]', ...a) : () => {}
 
 // Movement profile for GATHERING: like a real player it may punch through
 // LEAVES to reach a trunk - and nothing else. The pathfinder only has a global
@@ -144,6 +147,12 @@ for (const w of ['oak', 'spruce', 'birch', 'jungle', 'acacia', 'dark_oak', 'cher
 // fuel: a plank smelts ~1.5 items. We fuel with planks (4x more efficient per log
 // than burning raw logs). Value is exact for 1.21; we add a small buffer.
 const ITEMS_PER_PLANK = 1.5
+
+// How many furnaces a smelt of `count` items warrants: one per 16 items, capped at 4.
+// ONE shared definition for the planner (cobble budget) and runtime (ensureFurnaces) -
+// the previous parallel-furnace attempt failed partly because the runtime wanted
+// furnaces the planner never budgeted 8 cobble each for.
+function furnaceCountFor (count) { return Math.max(1, Math.min(4, Math.ceil(count / 16))) }
 
 function isPlank (name) { return /_planks$/.test(name) }
 function isTool (name) { return /_(pickaxe|axe|shovel|sword|hoe)$/.test(name) }
@@ -281,26 +290,42 @@ function planProvision (mcData, bom, inventory = {}, opts = {}) {
 
   for (const [name, count] of Object.entries(bom)) need(name, count, [])
 
-  // Furnace + fuel, once, for all smelting.
+  // Furnace(s) + fuel, once, for all smelting.
   const smeltTotal = smelts.reduce((s, x) => s + x.count, 0)
   if (furnaceNeeded && smeltTotal > 0) {
-    need('furnace', 1, []) // 8 cobblestone (adds pickaxe dep) + furnace craft
-    // fuel with the plank type we already make most of (else oak)
-    const plankCounts = {}
-    for (const n of craftOrder) if (isPlank(n)) plankCounts[n] = craftReq[n].crafts * craftReq[n].perCraft
-    const fuelPlank = Object.entries(plankCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || 'oak_planks'
-    const fuelCount = Math.ceil(smeltTotal / ITEMS_PER_PLANK) + 4 // small buffer
-    need(fuelPlank, fuelCount, [])
+    // PARALLEL FURNACES: big smelts run across up to 4 furnaces (N cook concurrently
+    // server-side; the bot shuttles loads). Budget 8 cobble per furnace we don't already
+    // have - `opts.furnacesNearby` = placed furnaces near the site (they're never dug up,
+    // so batch 2+ reuses batch 1's). Furnace ITEMS in the pack are netted by take().
+    const nWant = furnaceCountFor(smeltTotal)
+    const nHave = Math.min(nWant, opts.furnacesNearby || 0)
+    need('furnace', nWant - nHave, [])
+    // FUEL: net out coal/charcoal we already have (coal smelts 8 items vs 1.5 for a plank),
+    // so a coal vein hit while strip-mining kills most of the fuel-wood chopping. Each
+    // furnace can waste up to a partial burn -> buffer scales with nWant.
+    const coalUnits = ((avail.coal || 0) + (avail.charcoal || 0)) * 8 + (avail.coal_block || 0) * 80
+    const uncovered = smeltTotal - coalUnits
+    if (uncovered > 0) {
+      const plankCounts = {}
+      for (const n of craftOrder) if (isPlank(n)) plankCounts[n] = craftReq[n].crafts * craftReq[n].perCraft
+      const fuelPlank = Object.entries(plankCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || `${opts.primaryWood || 'oak'}_planks`
+      need(fuelPlank, Math.ceil(uncovered / ITEMS_PER_PLANK) + 2 + 2 * nWant, [])
+    }
   }
-  // A wooden pickaxe only survives ~59 blocks - craft enough FRESH ones for all
-  // the cobble. Don't count pickaxes already in inventory toward the budget: they
-  // may be nearly worn out (verified live: a worn leftover pickaxe broke after 4
-  // cobble because we assumed it was full and planned no spares).
+  // Pickaxes for the cobble mine. A wooden pick survives ~59 blocks (breaks mid-run ->
+  // re-plan churn), so craft enough FRESH ones - UNLESS we already hold a stone-or-better
+  // pick (2x faster, 131 uses); then don't waste wood on redundant wooden picks.
   if (gathers.cobblestone) {
-    const want = Math.max(1, Math.ceil(gathers.cobblestone / 50))
-    avail.wooden_pickaxe = 0 // ignore possibly-worn ones - craft `want` fresh
-    const planned = craftReq.wooden_pickaxe ? craftReq.wooden_pickaxe.crafts : 0
-    if (want > planned) need('wooden_pickaxe', want - planned, [])
+    const better = ['netherite', 'diamond', 'iron', 'stone'].some(m => (avail[m + '_pickaxe'] || 0) > 0)
+    if (!better) {
+      const want = Math.max(1, Math.ceil(gathers.cobblestone / 50))
+      // Ignore possibly-WORN picks (a leftover broke after 4 cobble, verified) - but count
+      // UNWORN ones the caller vouches for (opts.freshPickaxes), else every re-plan round
+      // crafts 2 more picks and the pack fills with them (verified live: 11 picks).
+      avail.wooden_pickaxe = opts.freshPickaxes || 0
+      const planned = craftReq.wooden_pickaxe ? craftReq.wooden_pickaxe.crafts : 0
+      if (want > planned) need('wooden_pickaxe', want - planned, [])
+    }
   }
   if (needsTable) need('crafting_table', 1, [])
 
@@ -309,7 +334,11 @@ function planProvision (mcData, bom, inventory = {}, opts = {}) {
   const logGathers = gEntries.filter(([n]) => /_log$/.test(n))
   const otherGathers = gEntries.filter(([n]) => !/_log$/.test(n))
   const basicPriority = n => (n === 'crafting_table' ? 1 : isPlank(n) ? 0 : n === 'stick' ? 2 : isTool(n) ? 3 : 99)
-  const isBasic = n => n === 'crafting_table' || isPlank(n) || n === 'stick' || isTool(n)
+  // Only WOODEN tools are "basics" (craftable from the log phase alone). A stone/iron tool
+  // needs a GATHERED (or smelted) ingredient, so it must come in `finals` AFTER the gather
+  // phase - sorting stone_pickaxe as a basic put its craft BEFORE gather:cobblestone and it
+  // failed with "no craftable recipe" every from-nothing run.
+  const isBasic = n => n === 'crafting_table' || isPlank(n) || n === 'stick' || (isTool(n) && /^wooden_/.test(n))
   const basics = craftOrder.filter(isBasic).sort((a, b) => basicPriority(a) - basicPriority(b))
   const finals = craftOrder.filter(n => !isBasic(n) && n !== 'furnace')
   const G = (n, c) => ({ type: 'gather', item: n, count: c, blocks: GATHER_SOURCES[n], tool: GATHER_TOOL[n] || null })
@@ -377,13 +406,37 @@ async function collectDrops (bot, radius = 10) {
 // terrain (loads new chunks) when the current area is tapped out. Returns whether
 // it moved. This is what lets gathering keep going instead of stalling with
 // "no reachable X within 64 blocks".
-async function explore (bot, idx) {
+async function explore (bot, idx, home, maxRoam) {
   const dirs = [[1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, -1]]
-  const [dx, dz] = dirs[((idx % 8) + 8) % 8]
-  const norm = Math.hypot(dx, dz) || 1
   const D = 48
-  const tx = Math.round(bot.entity.position.x + (dx / norm) * D)
-  const tz = Math.round(bot.entity.position.z + (dz / norm) * D)
+  const p = bot.entity.position
+  let tx; let tz
+  // ROAM FENCE: if we have a home anchor, only step to a spot still within maxRoam of it -
+  // else the rotating-compass walk drifts outward forever (one distant tree resets the
+  // give-up counter). If no direction fits (we're at/over the fence), head 48 toward home.
+  if (home && maxRoam) {
+    const overFence = Math.hypot(p.x - home.x, p.z - home.z) >= maxRoam - 8
+    if (overFence) {
+      const back = Math.hypot(home.x - p.x, home.z - p.z) || 1
+      tx = Math.round(p.x + ((home.x - p.x) / back) * D)
+      tz = Math.round(p.z + ((home.z - p.z) / back) * D)
+    } else {
+      let picked = null
+      for (let k = 0; k < 8 && !picked; k++) { // start at idx, rotate until one stays inside the fence
+        const [dx, dz] = dirs[(((idx + k) % 8) + 8) % 8]
+        const n = Math.hypot(dx, dz) || 1
+        const cx = Math.round(p.x + (dx / n) * D); const cz = Math.round(p.z + (dz / n) * D)
+        if (Math.hypot(cx - home.x, cz - home.z) <= maxRoam) picked = [cx, cz]
+      }
+      const back = Math.hypot(home.x - p.x, home.z - p.z) || 1
+      ;[tx, tz] = picked || [Math.round(p.x + ((home.x - p.x) / back) * D), Math.round(p.z + ((home.z - p.z) / back) * D)]
+    }
+  } else {
+    const [dx, dz] = dirs[((idx % 8) + 8) % 8]
+    const norm = Math.hypot(dx, dz) || 1
+    tx = Math.round(p.x + (dx / norm) * D)
+    tz = Math.round(p.z + (dz / norm) * D)
+  }
   const from = bot.entity.position.clone()
   try { await gotoWithTimeout(bot, new goals.GoalNearXZ(tx, tz, 6), 30000) } catch {}
   return bot.entity.position.distanceTo(from) > 8 // did we actually get somewhere?
@@ -642,9 +695,13 @@ async function runGather (bot, item, count, opts = {}) {
   // climb-out fell short, or we fell in a cave) still knows where the real surface is and
   // won't sink deeper. Falls back to the current spot when there's no home reference.
   const surfaceY = opts.homeY != null ? opts.homeY : Math.floor(bot.entity.position.y)
+  // XZ home anchor for the ROAM FENCE (keeps gathering from drifting away from the build).
+  // Prefer an explicit home {x,z}; else the homeY-implied spot; else where we stand now.
+  const home = opts.home || { x: Math.round(bot.entity.position.x), y: surfaceY, z: Math.round(bot.entity.position.z) }
   bot.pathfinder.setMovements(gatherMovements(bot)) // may punch through leaves + pillar up
+  dbg('runGather', item, 'x' + count, 'surfaceY=' + surfaceY, 'home=' + home.x + ',' + home.z, 'at', bot.entity.position.floored().toString())
   try {
-    return await gatherLoop(bot, item, count, { ...opts, surfaceY })
+    return await gatherLoop(bot, item, count, { ...opts, surfaceY, home })
   } finally {
     // Back to the surface if we're below it (strip-mined down OR fell into a cave). Try
     // three ways, in order, until we're within a couple blocks of the top: a spiral
@@ -653,12 +710,14 @@ async function runGather (bot, item, count, opts = {}) {
     try {
       const need = () => bot.entity && bot.entity.position.y < surfaceY - 2
       if (need()) {
+        dbg('  runGather climb-out from y=' + Math.floor(bot.entity.position.y) + ' to surfaceY=' + surfaceY)
         bot.pathfinder.setGoal(null)
         for (const climb of [
           () => digStaircaseUp(bot, surfaceY, { isStopped: opts.isStopped }),
           () => pillarUpTo(bot, surfaceY, { isStopped: opts.isStopped }),
           () => { bot.pathfinder.setMovements(climbMovements(bot)); return gotoWithTimeout(bot, new goals.GoalY(surfaceY), 30000) }
         ]) { if (!need()) break; try { await climb() } catch {} }
+        dbg('  runGather climb-out ended at y=' + Math.floor(bot.entity.position.y))
       }
     } catch {}
     bot.pathfinder.setGoal(null)
@@ -681,6 +740,9 @@ async function gatherLeather (bot, target, opts = {}) {
   const say = opts.say || (() => {})
   const deadline = Date.now() + (opts.timeMs || 120000) // 2 min hard cap
   const maxKills = opts.maxKills || 16
+  const maxExplores = opts.maxExplores != null ? opts.maxExplores : 2 // don't roam far for armor
+  const home = opts.home // roam fence anchor (build site), if given
+  const maxRoam = opts.maxRoam || 48
   const leatherNow = () => countItem(bot, 'leather')
   const start = leatherNow()
   bot.pathfinder.setMovements(gatherMovements(bot)) // anti-grief while chasing
@@ -688,16 +750,17 @@ async function gatherLeather (bot, target, opts = {}) {
   let explores = 0
   try {
     while (leatherNow() - start < target && killed < maxKills && Date.now() < deadline && !isStopped()) {
-      // nearest leather animal within a comfortable search radius
+      // nearest leather animal within the fence (never chase a cow beyond maxRoam of home)
       let tgt = null; let best = 32
       for (const e of Object.values(bot.entities || {})) {
         if (!e || !e.position || (e.type !== 'mob' && e.type !== 'animal')) continue
         if (!LEATHER_ANIMALS.test((e.name || '').toLowerCase())) continue
+        if (home && Math.hypot(e.position.x - home.x, e.position.z - home.z) > maxRoam) continue
         const d = e.position.distanceTo(bot.entity.position); if (d < best) { best = d; tgt = e }
       }
-      if (!tgt) { // none in range - roam to find some, but only a few times
-        if (explores++ >= 4) break
-        await explore(bot, explores)
+      if (!tgt) { // none in range - roam to find some, but only a couple times (armor is optional)
+        if (explores++ >= maxExplores) break
+        await explore(bot, explores, home, maxRoam)
         continue
       }
       // wield the best melee we have (sword > axe > fist) and chase it down
@@ -735,6 +798,12 @@ function hasFood (bot) {
   const md = require('minecraft-data')(bot.version)
   const foods = (md && md.foodsByName) || {}
   return (bot.inventory ? bot.inventory.items() : []).some(i => foods[i.name])
+}
+// How many edible items it's carrying (for "stock up" decisions, not just "any food?").
+function foodCount (bot) {
+  const md = require('minecraft-data')(bot.version)
+  const foods = (md && md.foodsByName) || {}
+  return (bot.inventory ? bot.inventory.items() : []).reduce((n, i) => n + (foods[i.name] ? i.count : 0), 0)
 }
 // The ONLY time the bot must go hunt: it's hungry AND has nothing to eat. (With food on
 // hand, auto-eat handles it; well-fed, no need.) food<=6 = hunger low enough that regen
@@ -852,7 +921,14 @@ async function digInForNight (bot, opts = {}) {
     const capPos = bot.entity.position.floored().offset(0, 2, 0)
     // cap with ANY common terrain/building block we're holding (whatever the biome gave us
     // when we dug in - terracotta, deepslate, tuff, etc. all count, not just dirt/cobble).
-    const capped = await placeAt(bot, capPos, /terracotta|dirt|cobble|stone|gravel|sand|netherrack|deepslate|tuff|granite|diorite|andesite|clay|mud|_planks$|_log$|_concrete/)
+    const CAP_RE = /terracotta|dirt|cobble|stone|gravel|sand|netherrack|deepslate|tuff|granite|diorite|andesite|clay|mud|_planks$|_log$|_concrete/
+    let capped = await placeAt(bot, capPos, CAP_RE)
+    // VERIFY the cap landed (placement can miss from inside a 1x1 pit) and retry once -
+    // an uncapped pit is a mob funnel: they fall in ON TOP of the bot (seen live).
+    if (!capped || AIRISH((bot.blockAt(capPos) || {}).name || 'air')) {
+      await new Promise(r => setTimeout(r, 300))
+      capped = await placeAt(bot, capPos, CAP_RE)
+    }
     say(capped ? 'holed up till it\'s safe' : 'ducked into a hole till it\'s safe')
     // 3) wait until DAY and no hostile near, or a hard timeout (~one full night)
     const deadline = Date.now() + 600000
@@ -919,6 +995,25 @@ async function gatherLoop (bot, item, count, opts = {}) {
   let lastShelter = 0  // throttle the night-shelter check
   const isLogGather = /_log$/.test(item) // logs get the natural-tree-only anti-grief filter
   const MAX_EXPLORE = 12 // wander this many times before truly giving up
+  // ROAM FENCE: stay within maxRoam (XZ) of the build anchor so gathering CONVERGES back to
+  // the site instead of drifting 150 blocks off chasing one more tree/cow. Stone is under
+  // every point (strip-mine), so it gets a tight fence; logs a looser one. Env-overridable.
+  const home = opts.home || { x: Math.round(bot.entity.position.x), z: Math.round(bot.entity.position.z) }
+  const MAX_ROAM = parseInt(process.env.GATHER_MAX_ROAM || (reqTool ? '64' : (isLogGather ? '96' : '80')), 10)
+  // The fence is ADAPTIVE: when this site's resource is genuinely inaccessible inside it
+  // (verified live: stone under the site was a flooded aquifer - every shaft/dive aborted
+  // on water), a player walks FURTHER. waterAborts/failed shafts widen it in +32 steps.
+  let maxRoam = MAX_ROAM
+  let waterAborts = 0
+  const widenFence = why => {
+    if (maxRoam >= MAX_ROAM + 64) return
+    maxRoam = Math.min(MAX_ROAM + 64, maxRoam + 32)
+    dbg('  gather fence widened to', maxRoam, '(' + why + ')')
+  }
+  const distHome = () => Math.hypot(bot.entity.position.x - home.x, bot.entity.position.z - home.z)
+  // Wall-clock deadline: even a legit strip-mine run must end (bounded so the BUILD phase runs).
+  const deadline = Date.now() + (opts.deadlineMs || Math.min(480000, 120000 + count * 4000))
+  const timedOut = () => Date.now() > deadline
   // Whether this resource can be reached by digging DOWN (stone/ore under the surface).
   // Plains/grassland have none exposed, so instead of wandering forever we mine a shaft.
   const canStrip = sources.some(s => /stone|deepslate|cobble|granite|diorite|andesite|tuff|_ore$|ancient_debris/.test(s))
@@ -979,8 +1074,23 @@ async function gatherLoop (bot, item, count, opts = {}) {
     mined++
   }
 
+  let lastBeat = 0 // throttled trace heartbeat - the LAST line before a hang names the branch
   while (countItem(bot, item) - start < count) {
+    if (Date.now() - lastBeat > 5000) {
+      lastBeat = Date.now()
+      const p = bot.entity.position.floored()
+      dbg('  gather', item, (countItem(bot, item) - start) + '/' + count, 'pos=' + p.x + ',' + p.y + ',' + p.z, 'mined=' + mined, 'dry=' + dryExplores, 'strip=' + stripDug, 'reachFails=' + reachFails, 'distHome=' + Math.round(distHome()))
+    }
     if (isStopped()) return { gathered: countItem(bot, item) - start, reason: 'stopped' }
+    if (timedOut()) return { gathered: countItem(bot, item) - start, reason: 'out of time - building with what i have' }
+    // ROAM FENCE: drifted too far from the build site -> walk back inside the fence before
+    // scanning again, so the gather converges to the site instead of wandering off for good.
+    if (distHome() > maxRoam) {
+      dbg('  gather fence-return: distHome=' + Math.round(distHome()) + ' > ' + maxRoam)
+      try { await gotoWithTimeout(bot, new goals.GoalNearXZ(home.x, home.z, Math.round(maxRoam * 0.5)), 30000) } catch {}
+      dryExplores++
+      if (dryExplores >= MAX_EXPLORE) return { gathered: countItem(bot, item) - start, reason: `gathered ${countItem(bot, item) - start}/${count} near the site` }
+    }
     // SURVIVAL: starving with nothing to eat -> break off and hunt an animal for meat
     // (auto-eat feeds on it). Body-side because during a build the BRAIN is held and can't
     // do this; a long gather in a food-poor area otherwise runs the bot to 0 food / 1 hp
@@ -988,7 +1098,13 @@ async function gatherLoop (bot, item, count, opts = {}) {
     if (needsFood(bot) && Date.now() - lastFoodHunt > 20000) {
       lastFoodHunt = Date.now()
       if (opts.say) opts.say('starving - hunting something to eat first')
-      try { await huntForFood(bot, { isStopped }) } catch { /* keep gathering regardless */ }
+      dbg('  gather food-hunt (food=' + bot.food + ')')
+      // STOCK UP like a player: one kill (~3 raw hunger points) barely dents the deficit
+      // and it's starving again minutes later (verified live: "starving - hunting" on
+      // repeat). Keep hunting (bounded) until a few meals are in the pack - the cook
+      // reflex turns the surplus into proper food at the next furnace.
+      try { for (let k = 0; k < 4 && foodCount(bot) < 5 && !isStopped(); k++) { if (!await huntForFood(bot, { isStopped })) break } } catch { /* keep gathering regardless */ }
+      dbg('  gather food-hunt done (foodItems=' + foodCount(bot) + ')')
     }
     // SHELTER: naked at night with a hostile bearing down -> dig in and wait it out. A sealed
     // pit survives a creeper where fleeing didn't (it died to one, unarmed, mid-gather). Only
@@ -996,7 +1112,9 @@ async function gatherLoop (bot, item, count, opts = {}) {
     if (shelterNeeded(bot) && Date.now() - lastShelter > 15000) {
       lastShelter = Date.now()
       if (opts.say) opts.say('mobs out and no armor - digging in till it\'s safe')
+      dbg('  gather night-shelter (timeOfDay=' + (bot.time && bot.time.timeOfDay) + ')')
       try { await digInForNight(bot, { isStopped, say: opts.say }) } catch { /* keep going */ }
+      dbg('  gather night-shelter done')
     }
     if (!haveReqTool()) return { gathered: countItem(bot, item) - start, reason: `my ${toolKind} broke` } // ran out mid-job
     if (mined >= cap) { await collectDrops(bot, 12); if (countItem(bot, item) - start < count) return { gathered: countItem(bot, item) - start, reason: `mined ${mined} blocks but couldn't collect enough (drops lost?)` } }
@@ -1013,6 +1131,9 @@ async function gatherLoop (bot, item, count, opts = {}) {
       // OTHER gather (stone/dirt/sand/...) must not be right next to a player structure, so a
       // cobble/dirt run near a base can't dismantle a wall or crater a yard.
       .filter(p => isLogGather ? isWildTreeLog(bot, p) : !structureNearby(bot, p, 3))
+      // ROAM FENCE: ignore targets outside the fence so a distant block can't lure the bot
+      // out (findBlocks reaches ~64 past the bot). Strip-mining supplies stone inside the fence.
+      .filter(p => Math.hypot(p.x - home.x, p.z - home.z) <= maxRoam + 8)
     // Underground (we strip-mined down), mine HORIZONTALLY, not straight down: a block
     // AT foot/head level drops cobble at our feet to auto-collect; mining the floor
     // drops it into the pit below and loses it (verified: got 1 cobble in 90s digging
@@ -1030,11 +1151,17 @@ async function gatherLoop (bot, item, count, opts = {}) {
       // walls are now reachable stone). Bounded, and only while safely above bedrock.
       if (canStrip && stripDug < MAX_STRIP && stripBudget() > 0) {
         if (opts.say && stripDug === 0) opts.say(`no ${sources[0]} up here - digging down to reach it`)
+        dbg('  gather strip-shaft #' + stripDug + ' budget=' + stripBudget() + ' at y=' + Math.floor(bot.entity.position.y))
         const dug = await digShaftDown(bot, stripBudget(), { isStopped })
-        if (dug > 0) await mineTunnel(bot, item, 16, stripDug, { isStopped }) // mine a drop-safe tunnel
-        stripDug++
-        if (dug > 0) { dryExplores = 0; continue }
-        // couldn't dig down (bedrock/void/lava underfoot) -> fall through to wandering
+        dbg('  gather strip-shaft dug=' + dug)
+        if (dug > 0) { const got = await mineTunnel(bot, item, 16, stripDug, { isStopped }); dbg('  gather tunnel got=' + got); stripDug++; dryExplores = 0; continue } // count only SUCCESSFUL shafts
+        // Couldn't dig down here (water/void/lava underfoot - e.g. a riverbed at the fence
+        // edge). Head back to the build SITE (dry ground the operator chose) and strip-mine
+        // THERE, instead of wandering to more possibly-wet spots and never getting stone.
+        if (distHome() > 6) { dbg('  gather shaft-failed: returning home to strip there (distHome=' + Math.round(distHome()) + ')'); try { await gotoWithTimeout(bot, new goals.GoalNearXZ(home.x, home.z, 4), 30000) } catch {}; continue }
+        dbg('  gather shaft-failed AT home - falling through to wander')
+        widenFence('cannot shaft down at home') // water/void right under the site - hunt further out
+        // already at home and STILL can't dig down -> fall through to wandering
       } else if (canStrip && stripBudget() <= 0 && Math.floor(bot.entity.position.y) < surfaceY - 3) {
         // already at the depth cap but no reachable stone -> we're stuck deep (a cave
         // fall or tapped-out shaft). Bail so runGather's climb-out gets us back up.
@@ -1043,7 +1170,9 @@ async function gatherLoop (bot, item, count, opts = {}) {
       // WANDER to fresh terrain.
       if (dryExplores >= MAX_EXPLORE) return { gathered: countItem(bot, item) - start, reason: `searched far and wide, no reachable ${sources.join('/')}` }
       if (opts.say && dryExplores === 0) opts.say(`looking further afield for ${sources[0]}...`)
-      await explore(bot, exploreIdx++)
+      dbg('  gather explore #' + dryExplores)
+      const moved = await explore(bot, exploreIdx++, home, maxRoam)
+      dbg('  gather explore moved=' + moved)
       dryExplores++
       continue
     }
@@ -1053,13 +1182,16 @@ async function gatherLoop (bot, item, count, opts = {}) {
     try { await breakBlock(target) } catch (e) {
       failed.set(pkey(target.position), (failed.get(pkey(target.position)) || 0) + 1)
       reachFails++
+      if (reachFails <= 3 || reachFails % 5 === 0) dbg('  gather breakBlock fail #' + reachFails + ' at ' + target.position.toString() + ': ' + e.message)
+      if (/underwater/.test(e.message) && ++waterAborts >= 3) { widenFence('approaches flooded'); waterAborts = 0 }
       // Stone is FOUND but we keep failing to reach it -> it's buried (plains): the
       // path can't dig dirt to get there. Strip-mine straight down to it instead of
       // grinding through dozens of doomed gotos, then re-scan from inside the stone.
       if (canStrip && reachFails >= 3 && stripDug < MAX_STRIP && stripBudget() > 0) {
         if (opts.say && stripDug === 0) opts.say(`the ${sources[0]} is all buried - digging down to it`)
+        dbg('  gather buried-strip #' + stripDug + ' budget=' + stripBudget() + ' at y=' + Math.floor(bot.entity.position.y))
         const dug = await digShaftDown(bot, stripBudget(), { isStopped })
-        if (dug > 0) await mineTunnel(bot, item, 16, stripDug, { isStopped }) // mine a drop-safe tunnel
+        if (dug > 0) { const got = await mineTunnel(bot, item, 16, stripDug, { isStopped }); dbg('  gather buried-strip dug=' + dug + ' tunnel got=' + got) } else dbg('  gather buried-strip dug=0')
         stripDug++; reachFails = 0
       }
       continue
@@ -1085,18 +1217,31 @@ async function gatherLoop (bot, item, count, opts = {}) {
     if (countItem(bot, item) === before) {
       failed.set(pkey(target.position), 2)
       noYield += n + 1
-      if (noYield >= NO_YIELD_LIMIT) { await explore(bot, exploreIdx++); noYield = 0 }
+      if (noYield >= NO_YIELD_LIMIT) { await explore(bot, exploreIdx++, home, maxRoam); noYield = 0 }
     } else { noYield = 0 }
   }
   return { gathered: countItem(bot, item) - start, reason: 'done' }
 }
 
-// Ensure a crafting table is reachable: use a nearby one, or craft + place one.
+// Ensure a crafting table is reachable: use a nearby one (WALKING to it - a found-but-
+// unpathable table is useless), or craft + place one right here. A roamy strip-mine
+// routinely ends 20-40 blocks from the plan's own table across torn-up ground the
+// anti-grief profile can't path ("No path to the goal!" killed the furnace craft twice,
+// live) - so reach failures fall through to building a FRESH table where we stand.
 async function ensureTable (bot, opts = {}) {
   const mcData = require('minecraft-data')(bot.version)
   const tableId = mcData.blocksByName.crafting_table.id
-  let table = bot.findBlock({ matching: tableId, maxDistance: 16 })
-  if (table) return table
+  const reach = async (t) => {
+    if (bot.entity.position.distanceTo(t.position) <= 3) return true
+    try { await gotoWithTimeout(bot, new goals.GoalNear(t.position.x, t.position.y, t.position.z, 2), 30000); return true } catch (e) { dbg('  ensureTable: cannot reach table at', t.position.toString(), '-', e.message); return false }
+  }
+  let table = bot.findBlock({ matching: tableId, maxDistance: 16 }) // `let`: the place path below reassigns it
+  if (table && await reach(table)) return table
+  if (!table) { // none close - check further out (the plan's table from before the roam)
+    const far = bot.findBlock({ matching: tableId, maxDistance: 48 })
+    if (far && await reach(far)) return far
+  }
+  // No reachable table -> place/craft a fresh one HERE (pack table, or 4 planks).
   if (countItem(bot, 'crafting_table') === 0) {
     const def = mcData.itemsByName.crafting_table
     const recipe = bot.recipesFor(def.id, null, 1, null)[0]
@@ -1104,17 +1249,29 @@ async function ensureTable (bot, opts = {}) {
     await bot.craft(recipe, 1, null)
   }
   // place it on solid ground next to us
-  const b = bot.entity.position.floored()
-  let ref = null
-  for (let r = 1; r <= 3 && !ref; r++) {
-    for (let dx = -r; dx <= r && !ref; dx++) {
-      for (let dz = -r; dz <= r && !ref; dz++) {
-        if (dx === 0 && dz === 0) continue
-        const ground = bot.blockAt(new Vec3(b.x + dx, b.y - 1, b.z + dz))
-        const above = bot.blockAt(new Vec3(b.x + dx, b.y, b.z + dz))
-        if (ground && ground.boundingBox === 'block' && above && above.name === 'air') ref = ground
+  const findSpot = () => {
+    const b = bot.entity.position.floored()
+    for (let r = 1; r <= 4; r++) {
+      for (let dx = -r; dx <= r; dx++) {
+        for (let dz = -r; dz <= r; dz++) {
+          if (dx === 0 && dz === 0) continue
+          for (const dy of [0, -1, 1]) { // slope-tolerant: a hillside ring has no cell at OUR exact y
+            const ground = bot.blockAt(new Vec3(b.x + dx, b.y - 1 + dy, b.z + dz))
+            const above = bot.blockAt(new Vec3(b.x + dx, b.y + dy, b.z + dz))
+            if (ground && ground.boundingBox === 'block' && above && REPLACEABLE.test(above.name)) return ground
+          }
+        }
       }
     }
+    return null
+  }
+  let ref = findSpot()
+  if (!ref && opts.home) {
+    // Nowhere here (e.g. up in a jungle canopy - leaves aren't placeable-into). Walk back
+    // to the home anchor (the build site is cleared, real ground) and look again there.
+    dbg('  ensureTable: no spot here (y=' + Math.floor(bot.entity.position.y) + ') - heading home to place')
+    try { await gotoWithTimeout(bot, new goals.GoalNearXZ(opts.home.x, opts.home.z, 4), 30000) } catch {}
+    ref = findSpot()
   }
   if (!ref) throw new Error('nowhere to place a crafting table')
   const item = (bot.inventory ? bot.inventory.items() : []).find(i => i.name === 'crafting_table')
@@ -1156,18 +1313,24 @@ async function runCraft (bot, item, count, needsTable, opts = {}) {
 
 // Place one block of `itemName` from inventory on solid ground nearby.
 // Returns the Vec3 where the new block landed.
+// A cell counts as OPEN if it's air OR replaceable vegetation (placing into grass
+// replaces it, like a player does) - requiring exactly 'air' made every table/furnace/
+// chest placement fail in grassy savanna ("nowhere to place a crafting table").
+const REPLACEABLE = /^(air|cave_air|void_air|short_grass|grass|tall_grass|fern|large_fern|dead_bush|snow|vine|seagrass)$/
 async function placeFromInventory (bot, itemName) {
   const item = (bot.inventory ? bot.inventory.items() : []).find(i => i.name === itemName)
   if (!item) throw new Error(`no ${itemName} to place`)
   const b = bot.entity.position.floored()
   let ref = null
-  for (let r = 1; r <= 3 && !ref; r++) {
+  for (let r = 1; r <= 4 && !ref; r++) {
     for (let dx = -r; dx <= r && !ref; dx++) {
       for (let dz = -r; dz <= r && !ref; dz++) {
         if (dx === 0 && dz === 0) continue
-        const ground = bot.blockAt(new Vec3(b.x + dx, b.y - 1, b.z + dz))
-        const above = bot.blockAt(new Vec3(b.x + dx, b.y, b.z + dz))
-        if (ground && ground.boundingBox === 'block' && above && above.name === 'air') ref = ground
+        for (const dy of [0, -1, 1]) { // slope-tolerant (same rationale as ensureTable's findSpot)
+          const ground = bot.blockAt(new Vec3(b.x + dx, b.y - 1 + dy, b.z + dz))
+          const above = bot.blockAt(new Vec3(b.x + dx, b.y + dy, b.z + dz))
+          if (ground && ground.boundingBox === 'block' && above && REPLACEABLE.test(above.name)) { ref = ground; break }
+        }
       }
     }
   }
@@ -1178,13 +1341,17 @@ async function placeFromInventory (bot, itemName) {
   return ref.position.offset(0, 1, 0)
 }
 
-// Ensure a furnace is reachable: find a nearby one, or craft (8 cobblestone at a
-// table) + place one. Returns the furnace block.
+// Ensure a furnace is reachable: find a nearby one (WALKING to it - same rationale as
+// ensureTable: found-but-unpathable is useless), or craft (8 cobblestone at a table) +
+// place one. Returns the furnace block.
 async function ensureFurnace (bot, opts = {}) {
   const mcData = require('minecraft-data')(bot.version)
   const furnaceId = mcData.blocksByName.furnace.id
   let furnace = bot.findBlock({ matching: furnaceId, maxDistance: 12 })
-  if (furnace) return furnace
+  if (furnace) {
+    if (bot.entity.position.distanceTo(furnace.position) <= 3) return furnace
+    try { await gotoWithTimeout(bot, new goals.GoalNear(furnace.position.x, furnace.position.y, furnace.position.z, 2), 30000); return furnace } catch (e) { dbg('  ensureFurnace: cannot reach furnace at', furnace.position.toString(), '- placing a new one:', e.message) }
+  }
   if (countItem(bot, 'furnace') === 0) {
     const table = await ensureTable(bot, opts)
     if (bot.entity.position.distanceTo(table.position) > 3) await gotoWithTimeout(bot, new goals.GoalNear(table.position.x, table.position.y, table.position.z, 2), 20000)
@@ -1199,45 +1366,153 @@ async function ensureFurnace (bot, opts = {}) {
   return furnace
 }
 
-// Smelt `count` of `input` into `output` in a furnace, fueling with planks/coal.
-// Returns number produced. opts: { say, isStopped }.
+// How many distinct furnace BLOCKS stand near the bot (for planProvision's
+// opts.furnacesNearby - placed furnaces are reused, never re-bought as 8 cobble).
+function countFurnacesNear (bot, maxDistance = 16) {
+  try {
+    const md = require('minecraft-data')(bot.version)
+    const id = md.blocksByName.furnace.id
+    const seen = new Set()
+    for (const p of bot.findBlocks({ matching: id, maxDistance, count: 8 }) || []) seen.add(`${p.x},${p.y},${p.z}`)
+    return seen.size
+  } catch { return 0 }
+}
+
+// Ensure up to `n` furnaces near us (find existing, craft+place the deficit). Returns
+// 1..n POSITIONS (Vec3 - Block objects go stale across window opens; re-resolve with
+// blockAt at each visit). Never throws for a deficit - degrades to what it achieved;
+// throws only if ZERO furnaces are possible (via the proven ensureFurnace fallback).
+// The old version failed silently (no dbg, break-on-everything, re-scan races) and
+// built 0 furnaces live - every exit here is logged and placements are VERIFIED.
+async function ensureFurnaces (bot, n, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const mcData = require('minecraft-data')(bot.version)
+  const furnaceId = mcData.blocksByName.furnace.id
+  const found = []
+  const seen = new Set()
+  for (const p of bot.findBlocks({ matching: furnaceId, maxDistance: 12, count: 8 }) || []) {
+    const k = `${p.x},${p.y},${p.z}`
+    if (!seen.has(k) && found.length < n) { seen.add(k); found.push(p.clone ? p.clone() : new Vec3(p.x, p.y, p.z)) }
+  }
+  dbg('  ensureFurnaces want=' + n + ' found=' + found.length + ' furnaceItems=' + countItem(bot, 'furnace'))
+  let attempts = 0
+  while (found.length < n && attempts++ < n * 2 + 2 && !isStopped()) {
+    // 1) a furnace ITEM in the pack, crafting one if needed (8 cobble at a table)
+    if (countItem(bot, 'furnace') === 0) {
+      let table
+      try { table = await ensureTable(bot, opts) } catch (e) { dbg('  ensureFurnaces: no table (' + e.message + ') - stopping at ' + found.length); break }
+      if (bot.entity.position.distanceTo(table.position) > 3) await gotoWithTimeout(bot, new goals.GoalNear(table.position.x, table.position.y, table.position.z, 2), 20000).catch(() => {})
+      const recipe = bot.recipesFor(mcData.itemsByName.furnace.id, null, 1, table)[0]
+      if (!recipe) { dbg('  ensureFurnaces: no cobble for furnace #' + (found.length + 1) + ' - stopping at ' + found.length); break }
+      try { await bot.craft(recipe, 1, table) } catch (e) { dbg('  ensureFurnaces: craft failed (' + e.message + ') - stopping at ' + found.length); break }
+      await new Promise(r => setTimeout(r, 250))
+    }
+    // 2) place it, with SPOT RECOVERY: the ring around a stationary bot fills up
+    //    (table + furnaces already placed) - step to fresh ground and retry.
+    let pos = null
+    const dirs = [[4, 0], [0, 4], [-4, 0], [0, -4]]
+    for (let step = 0; step <= 3 && !pos; step++) {
+      try { pos = await placeFromInventory(bot, 'furnace') } catch (e) {
+        dbg('  ensureFurnaces place fail (' + e.message + ') - stepping to fresh ground')
+        const p = bot.entity.position
+        await gotoWithTimeout(bot, new goals.GoalNearXZ(Math.round(p.x + dirs[step % 4][0]), Math.round(p.z + dirs[step % 4][1]), 1), 10000).catch(() => {})
+      }
+    }
+    if (!pos) { dbg('  ensureFurnaces: nowhere to place - stopping at ' + found.length); break }
+    // 3) VERIFY the block landed (block updates lag placement by 50-250ms) - never
+    //    count an unverified spot (the old helper's re-scan race counted ghosts).
+    let ok = false
+    for (let i = 0; i < 8 && !ok; i++) {
+      await new Promise(r => setTimeout(r, 250))
+      const b = bot.blockAt(pos)
+      if (b && b.name === 'furnace') ok = true
+    }
+    if (ok) { found.push(pos); dbg('  ensureFurnaces: placed #' + found.length + ' at ' + pos.toString()) } else dbg('  ensureFurnaces: placed but never saw a furnace block at ' + pos.toString())
+  }
+  if (!found.length) found.push((await ensureFurnace(bot, opts)).position) // proven fallback; may throw -> task fails loudly
+  return found
+}
+
+// Smelt `count` of `input` into `output`. Dispatcher: big smelts (per furnaceCountFor)
+// run across N furnaces in parallel when >=2 furnaces actually materialize; everything
+// else takes the PROVEN single-furnace path. Returns number produced. opts: {say,isStopped}.
 async function runSmelt (bot, output, input, count, opts = {}) {
+  const N = furnaceCountFor(count)
+  if (N < 2) return runSmeltSingle(bot, output, input, count, opts)
+  let positions = null
+  try { positions = await ensureFurnaces(bot, N, opts) } catch (e) { dbg('runSmelt: ensureFurnaces threw (' + e.message + ')') }
+  if (!positions || positions.length < 2) {
+    dbg('runSmelt: parallel not possible (' + (positions ? positions.length : 0) + ' furnaces) - single path')
+    return runSmeltSingle(bot, output, input, count, opts)
+  }
+  return runSmeltMulti(bot, output, input, count, positions, opts)
+}
+
+// The PROVEN single-furnace smelt loop (night-shelter + slot-6/stale-inventory handling).
+async function runSmeltSingle (bot, output, input, count, opts = {}) {
   const say = opts.say || (() => {})
   const isStopped = opts.isStopped || (() => false)
   const mcData = require('minecraft-data')(bot.version)
   const inItem = mcData.itemsByName[input]
+  dbg('runSmelt', output, 'x' + count, 'from', input, '- ensuring furnace... (have', countItem(bot, input), input + ',', countItem(bot, 'coal'), 'coal,', countItem(bot, 'furnace'), 'furnace item)')
   const furnaceBlock = await ensureFurnace(bot, opts)
+  dbg('  furnace at', furnaceBlock.position.toString())
   if (bot.entity.position.distanceTo(furnaceBlock.position) > 3) {
     await gotoWithTimeout(bot, new goals.GoalNear(furnaceBlock.position.x, furnaceBlock.position.y, furnaceBlock.position.z, 2), 20000)
   }
   const isFuel = i => /_planks$/.test(i.name) || i.name === 'coal' || i.name === 'charcoal' || i.name === 'coal_block' || /_log$/.test(i.name) || i.name === 'stick'
-  const furnace = await bot.openFurnace(furnaceBlock)
-  // While the furnace window is OPEN, bot.inventory is STALE - count everything
-  // from the live window slots instead (verified live: smelted output landed in
-  // window slot 6, invisible to countItem/outputItem() which read slot 2).
+  // openFurnace can time out when a mob is whacking the bot mid-open (verified live at
+  // hp 2) - re-approach and retry once before giving the task up to the re-plan loop.
+  let furnace
+  try { furnace = await bot.openFurnace(furnaceBlock) } catch (e) {
+    dbg('  openFurnace failed (' + e.message + ') - retrying once')
+    await new Promise(r => setTimeout(r, 2000))
+    await gotoWithTimeout(bot, new goals.GoalNear(furnaceBlock.position.x, furnaceBlock.position.y, furnaceBlock.position.z, 2), 20000).catch(() => {})
+    furnace = await bot.openFurnace(furnaceBlock)
+  }
+  dbg('  furnace window open')
+  // (closures read the `furnace` BINDING, so they follow the reopen-after-shelter reassignment)
   const slotSum = name => (furnace.slots || []).filter(s => s && s.name === name).reduce((a, s) => a + s.count, 0)
   const outSum = () => slotSum(output)
-  const inInv = name => { // window slots 3+ are the player inventory portion
+  const inInv = name => {
     let n = 0; const sl = furnace.slots || []
     for (let i = 3; i < sl.length; i++) if (sl[i] && sl[i].name === name) n += sl[i].count
     return n
   }
-  const before = outSum()
-  let stall = 0; let lastMade = 0; let lastSay = 0; let tick = 0
+  let before = outSum()
+  let made = 0
+  let stall = 0; let lastMade = 0; let lastSay = 0; let lastShelter = 0
   try {
-    while (outSum() - before < count) {
+    while (made < count) {
       if (isStopped()) break
-      try { await furnace.takeOutput() } catch {} // harmless if slot-2 output is empty
-      const made = outSum() - before
+      // NIGHT SHELTER (mirrors gatherLoop): while the furnace window is open the bot is
+      // AFK for minutes - naked at night with a hostile closing, it just stood there and
+      // DIED at the furnace (verified live, 26/44). Close the window, dig in, reopen.
+      // Output keeps cooking while sheltered and is collected on reopen. (Shelter digging
+      // can only yield terrain blocks / smelt INPUT, never the OUTPUT, so `made` is safe.)
+      if (shelterNeeded(bot) && Date.now() - lastShelter > 15000) {
+        lastShelter = Date.now()
+        say('mobs out and no armor - closing the furnace and digging in')
+        dbg('  smelt night-shelter at', made + '/' + count, 'timeOfDay=' + (bot.time && bot.time.timeOfDay))
+        try { furnace.close() } catch {}
+        try { await digInForNight(bot, { isStopped, say }) } catch {}
+        if (isStopped()) break // death/stop while sheltered - unwind now (window already closed)
+        if (bot.entity.position.distanceTo(furnaceBlock.position) > 3) {
+          await gotoWithTimeout(bot, new goals.GoalNear(furnaceBlock.position.x, furnaceBlock.position.y, furnaceBlock.position.z, 2), 20000).catch(() => {})
+        }
+        furnace = await bot.openFurnace(furnaceBlock) // throws if destroyed -> task fails, autoBuild re-plans
+        before = outSum() - made // rebase: shelter-time cooking counts as fresh progress next tick
+        stall = 0 // shelter time must NOT count toward the 90s stall break
+        dbg('  smelt reopened after shelter, rebased at made=' + made)
+        continue
+      }
+      try { await furnace.takeOutput() } catch {}
+      made = outSum() - before
       const stillNeed = count - made
       const cooking = furnace.inputItem() ? furnace.inputItem().count : 0
       if (!furnace.inputItem() && stillNeed > 0 && inInv(input) > 0) {
         try { await furnace.putInput(inItem.id, null, Math.min(stillNeed, inInv(input), 64)) } catch {}
       }
-      // Refuel whenever there's anything to smelt (already loaded as `cooking`, OR
-      // still sitting in our pack) and the furnace has no active fuel. The old
-      // condition (stillNeed - cooking > 0) stopped fueling once ALL the input was
-      // loaded, so the furnace burned one item then sat idle full of cobble.
       if (!furnace.fuelItem() && stillNeed > 0 && (cooking > 0 || inInv(input) > 0)) {
         const fuelName = ['coal', 'charcoal'].find(n => inInv(n) > 0) || (furnace.slots || []).slice(3).find(s => s && isFuel(s))?.name
         if (fuelName) {
@@ -1246,21 +1521,155 @@ async function runSmelt (bot, output, input, count, opts = {}) {
           try { await furnace.putFuel(fid, null, Math.min(inInv(fuelName), want)) } catch {}
         }
       }
-      if (made > lastMade) { lastMade = made; stall = 0 } else stall++
+      if (made > lastMade) { lastMade = made; stall = 0; dbg('  smelt progress', made + '/' + count) } else stall++
       const noFuel = !furnace.fuelItem() && !(furnace.slots || []).slice(3).some(s => s && isFuel(s))
       const noInput = !furnace.inputItem() && inInv(input) === 0
-      if ((noFuel || noInput) && !furnace.outputItem() && cooking === 0) break
-      if (stall > 90) break
+      if ((noFuel || noInput) && !furnace.outputItem() && cooking === 0) { dbg('  smelt BREAK: noFuel=' + noFuel + ' noInput=' + noInput + ' (made ' + made + '/' + count + ', fuelItem=' + !!furnace.fuelItem() + ' inputItem=' + !!furnace.inputItem() + ' invInput=' + inInv(input) + ' invCoal=' + inInv('coal') + ')'); break }
+      if (stall > 90) { dbg('  smelt BREAK: stalled 90s at', made + '/' + count); break }
       if (made > 0 && Date.now() - lastSay > 20000) { say(`smelting… ${made}/${count} ${output}`); lastSay = Date.now() }
-      tick++
       await new Promise(r => setTimeout(r, 1000))
     }
     for (let i = 0; i < 4; i++) { try { await furnace.takeOutput() } catch {} await new Promise(r => setTimeout(r, 200)) }
     var madeFinal = outSum() - before
   } finally { try { furnace.close() } catch {} }
-  await new Promise(r => setTimeout(r, 300)) // let inventory re-sync after close
+  await new Promise(r => setTimeout(r, 300))
   if ((madeFinal || 0) < count) throw new Error(`smelting stalled: ${madeFinal || 0}/${count} ${output} (out of fuel or input?)`)
   return madeFinal
+}
+
+// PARALLEL smelt across N furnace positions: load each furnace its share of input+fuel
+// (they cook concurrently server-side), then rotate collecting/topping-up every ~10s.
+// Only one window can be open at a time - the bot shuttles. All counts obey the furnace
+// gotchas: read the OPEN window's slots (bot.inventory is stale while open; output lands
+// in window slot 6 on 1.21.11). Same throw contract as the single path.
+async function runSmeltMulti (bot, output, input, count, positions, opts = {}) {
+  const say = opts.say || (() => {})
+  const isStopped = opts.isStopped || (() => false)
+  const mcData = require('minecraft-data')(bot.version)
+  const inItem = mcData.itemsByName[input]
+  const isFuel = i => /_planks$/.test(i.name) || i.name === 'coal' || i.name === 'charcoal' || i.name === 'coal_block' || /_log$/.test(i.name) || i.name === 'stick'
+  const unitsOf = n => (n === 'coal' || n === 'charcoal') ? 8 : n === 'coal_block' ? 80 : /_log$/.test(n) ? 1.5 : ITEMS_PER_PLANK
+  const F = positions.map(pos => ({ pos, loaded: 0, dead: 0, inputEmpty: false, outputResidue: false }))
+  const alive = () => F.filter(f => f.dead < 3)
+  let made = 0
+  let invOut0 = null // player-inventory output baseline, set at the FIRST window open
+  let lastMade = 0
+  let lastProgressAt = Date.now()
+  let lastSay = 0
+  const hardDeadline = Date.now() + 60000 + count * 12000 // generously above single-furnace pace
+  dbg('runSmeltMulti', output, 'x' + count, 'across', F.length, 'furnaces')
+
+  const totalLoaded = () => F.reduce((s, f) => s + f.loaded, 0)
+  // One visit: open, drain output, top up input to this furnace's fair share, refuel
+  // against ITS pending input (proportional fuel is emergent - no furnace can hoard).
+  async function service (f, i) {
+    const blk = bot.blockAt(f.pos)
+    if (!blk || blk.name !== 'furnace') { f.dead = 3; dbg('  multi: furnace', i, 'gone at', f.pos.toString()); return }
+    if (bot.entity.position.distanceTo(f.pos) > 2.5) {
+      try { await gotoWithTimeout(bot, new goals.GoalNear(f.pos.x, f.pos.y, f.pos.z, 2), 15000) } catch (e) { f.dead++; dbg('  multi: visit', i, 'goto fail (' + e.message + ')'); return }
+    }
+    let w
+    try { w = await bot.openFurnace(blk) } catch {
+      await new Promise(r => setTimeout(r, 500))
+      try { w = await bot.openFurnace(blk) } catch (e2) { f.dead++; dbg('  multi: visit', i, 'open fail (' + e2.message + ')'); return }
+    }
+    f.dead = 0
+    try {
+      const inInv = name => { let n = 0; const sl = w.slots || []; for (let k = 3; k < sl.length; k++) if (sl[k] && sl[k].name === name) n += sl[k].count; return n }
+      if (invOut0 === null) invOut0 = inInv(output) // baseline BEFORE any drain
+      for (let k = 0; k < 4; k++) { try { await w.takeOutput() } catch {} await new Promise(r => setTimeout(r, 200)) }
+      made = inInv(output) - invOut0 // exact: only window ops change inventory output
+      if (made > lastMade) { lastMade = made; lastProgressAt = Date.now(); dbg('  multi: collect furnace', i, '->', made + '/' + count) }
+      // top up input toward this furnace's share of what's still unloaded
+      const curIn = w.inputItem() ? w.inputItem().count : 0
+      const share = Math.ceil(Math.max(0, count - totalLoaded()) / Math.max(1, alive().length))
+      const put = Math.min(share, inInv(input), 64 - curIn)
+      if (put > 0) {
+        try { await w.putInput(inItem.id, null, put); f.loaded += put; dbg('  multi: load furnace', i, '+' + put, input, '(loaded ' + f.loaded + ', total ' + totalLoaded() + ')') } catch (e) { dbg('  multi: load fail furnace', i, e.message) }
+      }
+      // refuel against THIS furnace's pending input
+      const pending = (w.inputItem() ? w.inputItem().count : 0)
+      const fuelItem = w.fuelItem()
+      const fuelUnits = fuelItem ? fuelItem.count * unitsOf(fuelItem.name) : 0
+      if (pending > 0 && fuelUnits < pending) {
+        const fuelName = ['coal', 'charcoal'].find(n => inInv(n) > 0) || (w.slots || []).slice(3).find(s => s && isFuel(s))?.name
+        if (fuelName) {
+          const needUnits = pending - fuelUnits
+          const n = Math.min(inInv(fuelName), Math.max(1, Math.ceil(needUnits / unitsOf(fuelName))))
+          try { await w.putFuel(mcData.itemsByName[fuelName].id, null, n); dbg('  multi: fuel furnace', i, '+' + n, fuelName) } catch (e) { dbg('  multi: fuel fail furnace', i, e.message) }
+        }
+      }
+      f.inputEmpty = !w.inputItem()
+      f.outputResidue = ((w.slots || []).slice(0, 3).some(s => s && s.name === output))
+      f.noFuelLeft = !w.fuelItem() && !(w.slots || []).slice(3).some(s => s && isFuel(s))
+      f.noInputLeft = inInv(input) === 0
+    } finally { try { w.close() } catch {} }
+    await new Promise(r => setTimeout(r, 300)) // stale-inventory hygiene after close
+  }
+
+  // LOAD ROUND then COLLECT ROUNDS
+  for (let i = 0; i < F.length; i++) { if (isStopped()) break; await service(F[i], i) }
+  dbg('  multi: load round done, totalLoaded=' + totalLoaded())
+  let idleRounds = 0
+  while (made < count && !isStopped() && Date.now() < hardDeadline) {
+    // NIGHT SHELTER between rotations (windows are all closed here)
+    if (shelterNeeded(bot)) {
+      say('mobs out and no armor - digging in till it\'s safe')
+      dbg('  multi: night-shelter at', made + '/' + count)
+      try { await digInForNight(bot, { isStopped, say }) } catch {}
+      lastProgressAt = Date.now() // shelter time is not a stall
+    }
+    await new Promise(r => setTimeout(r, 10000)) // ~1 item cooks per 10s; faster rotation is wasted walking
+    for (let i = 0; i < F.length; i++) { if (isStopped()) break; if (F[i].dead < 3) await service(F[i], i) }
+    if (made >= count) break
+    const live = alive()
+    if (!live.length) { dbg('  multi BREAK: all furnaces dead at ' + made + '/' + count); break }
+    const allIdle = live.every(f => f.inputEmpty && !f.outputResidue)
+    const exhausted = live.every(f => f.noInputLeft) || live.every(f => f.noFuelLeft)
+    if (allIdle && exhausted) { if (++idleRounds >= 2) { dbg('  multi BREAK: exhausted at ' + made + '/' + count); break } } else idleRounds = 0
+    if (Date.now() - lastProgressAt > 90000) { dbg('  multi BREAK: stalled 90s at ' + made + '/' + count); break }
+    if (made > 0 && Date.now() - lastSay > 20000) { say(`smelting… ${made}/${count} ${output} (${live.length} furnaces)`); lastSay = Date.now() }
+  }
+  // final drain rotation
+  for (let i = 0; i < F.length; i++) { if (F[i].dead < 3) await service(F[i], i).catch(() => {}) }
+  if (made < count) throw new Error(`smelting stalled: ${made}/${count} ${output} (out of fuel or input?)`)
+  return made
+}
+
+// Raw meats a furnace can cook, and what they become. Fish included - the bot eats those too.
+const RAW_COOKABLE = {
+  beef: 'cooked_beef', porkchop: 'cooked_porkchop', chicken: 'cooked_chicken',
+  mutton: 'cooked_mutton', rabbit: 'cooked_rabbit', cod: 'cooked_cod', salmon: 'cooked_salmon'
+}
+
+// Cook whatever raw meat we're carrying in a NEARBY furnace - the player-like tidy-up
+// ("standing at the furnace anyway? toss the porkchops in"). Opportunistic on purpose:
+// never crafts/places a furnace for this, needs fuel already in the pack, bounded to two
+// meat types per pass. Returns how many items came out cooked (0 = nothing to do).
+async function cookRawMeat (bot, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const mcData = require('minecraft-data')(bot.version)
+  const raw = Object.keys(RAW_COOKABLE).filter(n => countItem(bot, n) > 0)
+  if (!raw.length) return 0
+  const furnaceId = mcData.blocksByName.furnace.id
+  const blk = bot.findBlock({ matching: furnaceId, maxDistance: 12 })
+  if (!blk) return 0
+  const hasFuel = (bot.inventory ? bot.inventory.items() : []).some(i =>
+    i.name === 'coal' || i.name === 'charcoal' || i.name === 'coal_block' || /_planks$/.test(i.name))
+  if (!hasFuel) return 0
+  if (bot.entity.position.distanceTo(blk.position) > 2.5) {
+    try { await gotoWithTimeout(bot, new goals.GoalNear(blk.position.x, blk.position.y, blk.position.z, 2), 15000) } catch { return 0 }
+  }
+  let cooked = 0
+  dbg('cookRawMeat:', raw.map(n => countItem(bot, n) + 'x ' + n).join(', '))
+  for (const name of raw.slice(0, 2)) { // bound the detour
+    if (isStopped()) break
+    const n = countItem(bot, name)
+    // runSmeltSingle throws on a shortfall (e.g. fuel ran out mid-cook) - whatever DID
+    // cook was already drained into the pack, so a partial pass is fine.
+    try { cooked += await runSmeltSingle(bot, RAW_COOKABLE[name], name, n, opts) } catch { break }
+  }
+  return cooked
 }
 
 // Strip `count` base logs into stripped logs: place a log, right-click with an
@@ -1300,14 +1709,21 @@ async function runPlan (bot, plan, opts = {}) {
   const say = opts.say || (() => {})
   const isStopped = opts.isStopped || (() => false)
   const results = []
+  dbg('runPlan:', plan.tasks.map(t => `${t.type}:${t.item || t.output}x${t.count || t.crafts || ''}`).join(' > '))
   for (const task of plan.tasks) {
     if (isStopped()) { results.push({ task, ok: false, note: 'stopped' }); break }
+    dbg('  task START', task.type, task.item || task.output)
     try {
       if (task.type === 'gather') {
         say(`gathering ${task.count}x ${task.item}...`)
         const r = await runGather(bot, task.item, task.count, opts)
         results.push({ task, ok: r.gathered >= task.count, note: `${r.gathered}/${task.count} (${r.reason})` })
-        if (r.gathered < task.count) break // downstream crafts would fail anyway
+        // A partial gather only DOOMS downstream when it's a tool-gated material (cobble/ore
+        // whose smelt/craft can't run short) or we got nothing. A short LOG haul (fuel/planks
+        // headroom) is fine - runSmelt burns whatever wood exists and autoBuild re-plans the
+        // shortfall - so continue instead of aborting the whole plan (which left builds with 0
+        // cobble because one fuel-wood gather came up short).
+        if (r.gathered < task.count && (GATHER_TOOL[task.item] || r.gathered === 0)) break
       } else if (task.type === 'craft') {
         say(`crafting ${task.crafts * task.perCraft}x ${task.item}...`)
         const made = await runCraft(bot, task.item, task.crafts * task.perCraft, task.needsTable, opts)
@@ -1316,6 +1732,9 @@ async function runPlan (bot, plan, opts = {}) {
         say(`smelting ${task.count}x ${task.output}...`)
         const made = await runSmelt(bot, task.output, task.input, task.count, opts)
         results.push({ task, ok: made >= task.count, note: `smelted ${made}` })
+        // Standing at a hot furnace anyway - cook any raw meat from the survival hunts
+        // before moving on, like a player would. Best-effort, never fails the plan.
+        try { const c = await cookRawMeat(bot, opts); if (c > 0) dbg('  cooked', c, 'raw meat after the smelt') } catch {}
         if (made < task.count) break
       } else if (task.type === 'strip') {
         say(`stripping ${task.count}x ${task.output}...`)
@@ -1324,9 +1743,11 @@ async function runPlan (bot, plan, opts = {}) {
         if (made < task.count) break
       }
     } catch (e) {
+      dbg('  task ERROR', task.type, task.item || task.output, '->', e.message)
       results.push({ task, ok: false, note: e.message })
       break
     }
+    dbg('  task done', task.type, task.item || task.output, '->', results[results.length - 1]?.note)
   }
   return results
 }
@@ -1336,7 +1757,7 @@ async function runPlan (bot, plan, opts = {}) {
 // Items the bot KEEPS on itself and never stashes: tools, weapons, armor, food,
 // utility blocks, and a little scaffold dirt. Everything else is build material
 // that goes into the chest.
-const KEEP_ON_BOT = /_pickaxe$|_axe$|_shovel$|_sword$|_hoe$|^shears$|_helmet$|_chestplate$|_leggings$|_boots$|^cooked_|_apple$|^bread$|^carrot$|^potato$|beef|porkchop|mutton|chicken|^cod$|^salmon$|^torch$|flint_and_steel|_bucket$|^bucket$|^crafting_table$|^furnace$|^chest$|^coal$|^charcoal$/
+const KEEP_ON_BOT = /_pickaxe$|_axe$|_shovel$|_sword$|_hoe$|^shears$|_helmet$|_chestplate$|_leggings$|_boots$|^cooked_|_apple$|^bread$|^carrot$|^potato$|beef|porkchop|mutton|chicken|^cod$|^salmon$|^torch$|flint_and_steel|_bucket$|^bucket$|^crafting_table$|^furnace$|^chest$|^coal$|^charcoal$|_planks$|^stick$/
 
 // Find a chest within range, or craft (8 planks) + place one next to us. Returns
 // the chest Block. Reuses the table/furnace placement pattern.
@@ -1410,4 +1831,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, hasSolidCeiling, gatherLeather, huntForFood, hasFood, needsFood, digInForNight, isSheltering, shelterNeeded }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, hasSolidCeiling, gatherLeather, huntForFood, hasFood, needsFood, digInForNight, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat }

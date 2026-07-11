@@ -27,6 +27,7 @@ const { parseBlockName, getStateId } = require('prismarine-schematic/lib/states'
 const { goals, Movements } = require('mineflayer-pathfinder')
 const Build = require('mineflayer-builder/lib/Build')
 const interactable = require('mineflayer-builder/lib/interactable.json')
+const provision = require('./provision.js') // night-shelter during builds (shelterNeeded/digInForNight)
 
 // DURABLE crash guard (re-applied here so a future `npm install` can't lose it, like
 // the digTime guard in index.js). Build.getPossibleDirections reads a NEIGHBOUR block's
@@ -487,8 +488,19 @@ async function buildSurvival (bot, schem, at, opts = {}) {
     // Clear natural cover (grass/flowers/leaves…) from the footprint first.
     if (opts.prep !== false) { try { cleared = await prepSite(bot, schem, at, { isStopped }) } catch {} }
     if (cleared) say(`cleared ${cleared} bit(s) of vegetation`)
+    let lastShelter = 0
     for (;;) {
       if (isStopped()) { stopped = true; break }
+      // NIGHT SHELTER (same as gatherLoop/runSmelt): a naked bot placing blocks at night is
+      // a stationary target - it died at 29/44 to night mobs (verified live). Dig in, wait
+      // it out, then carry on building.
+      if (provision.shelterNeeded(bot) && Date.now() - lastShelter > 15000) {
+        lastShelter = Date.now()
+        say('mobs out and no armor - digging in till it\'s safe')
+        try { await provision.digInForNight(bot, { isStopped, say }) } catch {}
+        bot.pathfinder.setMovements(moves) // the shelter reset movements - restore the build profile
+        continue
+      }
       // Re-compute placeable actions EVERY iteration (adaptive: a block becomes
       // placeable once its neighbours exist), excluding ones already deferred
       // this round. We never dig, so only 'place' actions.
