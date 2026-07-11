@@ -1533,6 +1533,26 @@ async function handle (bot, line) {
       provision.rememberBed(bed.position) // bed memory: nights head here first from now on
       return 'sleeping (spawn set here)'
     }
+    case 'shove':
+    case 'nudge': {
+      // DIRECT-CONTROL escape hatch for drivers (operator/Sonnet shepherd): face the
+      // given x z and jump+sprint at it for ~2s, no pathfinder involved. This is the
+      // manual maneuver that breaks physical wedges the planner can't solve (1-deep
+      // water, terrain lips, own-orchard pins - all seen live tonight).
+      const nx = Number(a[0]); const nz = Number(a[1])
+      if (Number.isNaN(nx) || Number.isNaN(nz)) return 'usage: shove <x> <z>'
+      const p0 = bot.entity.position.clone()
+      try {
+        bot.pathfinder.setGoal(null)
+        await bot.lookAt(new Vec3(nx, bot.entity.position.y + 1, nz), true)
+        bot.setControlState('jump', true); bot.setControlState('forward', true); bot.setControlState('sprint', true)
+        await new Promise(r => setTimeout(r, 2000))
+      } finally { bot.clearControlStates() }
+      const p1 = bot.entity.position
+      const moved = Math.hypot(p1.x - p0.x, p1.z - p0.z)
+      return `shoved ${moved.toFixed(1)} blocks toward ${nx},${nz}`
+    }
+
     case 'wake':
     case 'wakeup': {
       try { await bot.wake() } catch (e) { return `couldn't wake: ${e.message}` }
@@ -2299,10 +2319,16 @@ async function autoBuild (bot, schem, at, opts = {}) {
       if (seen.has(k)) continue
       seen.add(k)
       const blk = bot.blockAt(new Vec3(e.x, e.y, e.z))
-      if (blk && /chest/.test(blk.name)) { try { c += (await provision.chestCounts(bot, blk))[name] || 0 } catch {} }
+      if (blk && /chest/.test(blk.name)) {
+        // cache each chest's last good read - one failed open (mob, reach, night) made
+        // 80 banked oak read as 0 and sent the bot out to re-gather wood it owns (live)
+        try { const counts = await provision.chestCounts(bot, blk); chestCache[k] = counts; c += counts[name] || 0 }
+        catch { if (chestCache[k]) c += chestCache[k][name] || 0 }
+      }
     }
     return c
   }
+  const chestCache = {} // pos -> last successful contents read
 
   // 1) provision each material, batch by batch; stash to the chest when the pack fills.
   // `skip` collects materials we can't fully get (unobtainable / no-progress / stuck) so the
