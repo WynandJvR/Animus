@@ -2300,6 +2300,9 @@ async function autoBuild (bot, schem, at, opts = {}) {
       const torch = (bot.inventory ? bot.inventory.items() : []).find(i => i.name === 'torch')
       if (torch && placeTorchNearby) { await placeTorchNearby(bot).catch(() => {}) }
     } catch {}
+    // WHEAT FARM (operator order): renewable food at the camp - the region can run dry
+    // of animals and the bot starved to death working. Water-edge plot, best-effort.
+    try { const ok = await provision.ensureWheatFarm(bot, { x: at.x, z: at.z }, { isStopped, say, avoid }); dbg('camp: wheat farm -> ' + ok) } catch (e) { dbg('camp: wheat farm failed (' + e.message + ')') }
     // REMEMBER the camp as a PLACE (operator rule): a named waypoint in persistent memory
     // - the brain sees it in /state waypoints and can `goto camp`; it survives restarts.
     try { const r = await handle(bot, 'remember camp'); dbg('camp: waypoint -> ' + r) } catch {}

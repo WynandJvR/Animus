@@ -1394,6 +1394,141 @@ async function nightRestInner (bot, opts = {}) {
   return digInForNight(bot, opts)
 }
 
+// ---- WHEAT FARM (operator order: "make the wheat farm now so it stops starving").
+// The Sonnet shepherd proved the region can run dry of animals - the bot worked at 1hp
+// until death with no food fallback. Same pattern as the orchard: renewable supply at
+// the camp. Water-edge plot, tilled with a crafted hoe, seeded from grass, bone-mealed
+// when bones allow, harvested into bread.
+async function boneMealBlock (bot, pos, times) {
+  const mcData = require('minecraft-data')(bot.version)
+  for (let u = 0; u < times; u++) {
+    let meal = (bot.inventory ? bot.inventory.items() : []).find(i => i.name === 'bone_meal')
+    if (!meal) {
+      const bone = (bot.inventory ? bot.inventory.items() : []).find(i => i.name === 'bone')
+      if (!bone) return
+      try { const r = bot.recipesFor(mcData.itemsByName.bone_meal.id, null, 1, null)[0]; if (!r) return; await bot.craft(r, 1, null); meal = (bot.inventory ? bot.inventory.items() : []).find(i => i.name === 'bone_meal') } catch { return }
+      if (!meal) return
+    }
+    const b = bot.blockAt(pos)
+    if (!b || (b.getProperties && (b.getProperties().age ?? 0) >= 7)) return
+    try { await bot.equip(meal, 'hand'); await bot.activateBlock(b); await new Promise(r => setTimeout(r, 300)) } catch { return }
+  }
+}
+
+async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () => {}, avoid = null } = {}) {
+  const mcData = require('minecraft-data')(bot.version)
+  const m = loadWorldMem()
+  if (m.wheatFarm && Math.hypot(m.wheatFarm.x - home.x, m.wheatFarm.z - home.z) <= 80) return true // one farm per site
+  // 1) surface water within reach of home - farmland must sit beside it
+  const waterId = mcData.blocksByName.water.id
+  const waters = (bot.findBlocks({ matching: waterId, maxDistance: 48, count: 24 }) || [])
+    .filter(p => { const a = bot.blockAt(p.offset(0, 1, 0)); return a && AIRISH(a.name) })
+    .filter(p => !inAvoidBox(avoid, p.x, p.z))
+  if (!waters.length) { dbg('  wheat farm: no surface water within 48 - deferred'); return false }
+  const w = waters[0]
+  // 2) a hoe (wooden: 2 planks + 2 sticks)
+  let hoe = (bot.inventory ? bot.inventory.items() : []).find(i => /_hoe$/.test(i.name))
+  if (!hoe) {
+    try { await runCraft(bot, 'wooden_hoe', 1, true, { isStopped, home }) } catch (e) { dbg('  wheat farm: no hoe and cannot craft one (' + e.message + ') - deferred'); return false }
+    hoe = (bot.inventory ? bot.inventory.items() : []).find(i => /_hoe$/.test(i.name))
+    if (!hoe) return false
+  }
+  // 3) seeds - break grass near the water until we hold a handful
+  const seedCount = () => countItem(bot, 'wheat_seeds')
+  if (seedCount() < 6) {
+    const grassIds = ['short_grass', 'tall_grass', 'grass'].map(n => mcData.blocksByName[n] && mcData.blocksByName[n].id).filter(x => x != null)
+    try { await gotoWithTimeout(bot, new goals.GoalNear(w.x, w.y, w.z, 4), 60000) } catch {}
+    let broken = 0
+    while (seedCount() < 6 && broken < 40 && !isStopped()) {
+      const g = bot.findBlock({ matching: grassIds, maxDistance: 16 })
+      if (!g) break
+      try {
+        if (bot.entity.position.distanceTo(g.position) > 4) await gotoWithTimeout(bot, new goals.GoalNear(g.position.x, g.position.y, g.position.z, 2), 10000)
+        await bot.dig(g); broken++
+      } catch { break }
+      if (broken % 8 === 0) await collectDrops(bot, 6)
+    }
+    await collectDrops(bot, 8)
+    dbg('  wheat farm: broke ' + broken + ' grass -> ' + seedCount() + ' seeds')
+    if (seedCount() < 1) { dbg('  wheat farm: no seeds to be had here - deferred'); return false }
+  }
+  // 4) till + plant the water's bank: same-y neighbours of the waterline
+  say('setting up a wheat farm by the water - no more starving')
+  let planted = 0
+  const ring = []
+  const ringSeen = new Set()
+  for (const wp of waters.slice(0, 8)) {
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1]]) {
+      const gp = wp.offset(dx, 0, dz)
+      const k = gp.x + ',' + gp.z
+      if (ringSeen.has(k) || inAvoidBox(avoid, gp.x, gp.z)) continue
+      ringSeen.add(k)
+      const g = bot.blockAt(gp); const above = bot.blockAt(gp.offset(0, 1, 0))
+      if (g && /^(grass_block|dirt)$/.test(g.name) && above && REPLACEABLE.test(above.name)) ring.push(g)
+    }
+  }
+  for (const cell of ring.slice(0, 12)) {
+    if (isStopped() || seedCount() < 1) break
+    try {
+      if (bot.entity.position.distanceTo(cell.position) > 4) await gotoWithTimeout(bot, new goals.GoalNear(cell.position.x, cell.position.y, cell.position.z, 2), 12000)
+      const veg = bot.blockAt(cell.position.offset(0, 1, 0))
+      if (veg && !AIRISH(veg.name)) { try { await bot.dig(veg) } catch {} }
+      await bot.equip((bot.inventory ? bot.inventory.items() : []).find(i => /_hoe$/.test(i.name)), 'hand')
+      await bot.activateBlock(cell) // till to farmland
+      await new Promise(r => setTimeout(r, 150))
+      const tilled = bot.blockAt(cell.position)
+      if (!tilled || tilled.name !== 'farmland') continue
+      const seeds = (bot.inventory ? bot.inventory.items() : []).find(i => i.name === 'wheat_seeds')
+      if (!seeds) break
+      await bot.equip(seeds, 'hand')
+      await bot.placeBlock(tilled, new Vec3(0, 1, 0)) // plant
+      planted++
+      await boneMealBlock(bot, cell.position.offset(0, 1, 0), 2)
+    } catch (e) { dbg('  wheat farm: cell failed (' + e.message + ')') }
+  }
+  if (planted) {
+    m.wheatFarm = { x: w.x, y: w.y, z: w.z, at: Date.now() }
+    saveWorldMem()
+    dbg('  wheat farm: ' + planted + ' cells planted at the water near ' + w.x + ',' + w.z)
+    say(`wheat farm planted (${planted} cells) - bread incoming`)
+  } else dbg('  wheat farm: could not plant any cell')
+  return planted > 0
+}
+
+// Visit the farm: harvest ripe wheat (age 7), replant, bone-meal what's still growing,
+// and craft bread (3 wheat each) when the harvest allows. Called when hungry + huntless.
+async function tendWheatFarm (bot, { isStopped = () => false, say = () => {} } = {}) {
+  const m = loadWorldMem()
+  if (!m.wheatFarm) return false
+  const mcData = require('minecraft-data')(bot.version)
+  const wheatId = mcData.blocksByName.wheat.id
+  await walkStaged(bot, m.wheatFarm.x, m.wheatFarm.z, { isStopped, range: 6, timeoutMs: 120000 })
+  const crops = (bot.findBlocks({ matching: wheatId, maxDistance: 16, count: 24 }) || [])
+  let harvested = 0
+  for (const p of crops) {
+    if (isStopped()) break
+    const b = bot.blockAt(p)
+    if (!b) continue
+    const age = b.getProperties ? b.getProperties().age : null
+    if (age >= 7) {
+      try {
+        if (bot.entity.position.distanceTo(p) > 4) await gotoWithTimeout(bot, new goals.GoalNear(p.x, p.y, p.z, 2), 10000)
+        await bot.dig(b); harvested++
+        await collectDrops(bot, 4)
+        const farmland = bot.blockAt(p.offset(0, -1, 0))
+        const seeds = (bot.inventory ? bot.inventory.items() : []).find(i => i.name === 'wheat_seeds')
+        if (farmland && farmland.name === 'farmland' && seeds) { await bot.equip(seeds, 'hand'); await bot.placeBlock(farmland, new Vec3(0, 1, 0)).catch(() => {}) }
+      } catch (e) { dbg('  wheat harvest failed (' + e.message + ')') }
+    } else if (age != null) {
+      await boneMealBlock(bot, p, 2)
+    }
+  }
+  const wheatN = countItem(bot, 'wheat')
+  if (wheatN >= 3) { try { const made = await runCraft(bot, 'bread', Math.floor(wheatN / 3), true, { isStopped }); say('baked ' + made + ' bread - crisis over'); dbg('  baked ' + made + ' bread') } catch (e) { dbg('  bread craft failed (' + e.message + ')') } }
+  dbg('  wheat farm tended: harvested ' + harvested + ', wheat=' + countItem(bot, 'wheat') + ', bread=' + countItem(bot, 'bread'))
+  return harvested > 0 || countItem(bot, 'bread') > 0
+}
+
 // ---- INVENTORY HYGIENE: mob-drop junk (spider eyes, string, flint...) quietly eats the
 // slots the build materials need (seen live: ~8 slots of trash mid-castle-provision).
 // Toss what has no use; KEEP bones (they become bone meal for the tree farm) and a small
@@ -1752,6 +1887,15 @@ async function gatherLoop (bot, item, count, opts = {}) {
       // reflex turns the surplus into proper food at the next furnace.
       try { for (let k = 0; k < 4 && foodCount(bot) < 5 && !isStopped(); k++) { if (!await huntForFood(bot, { isStopped })) break } } catch { /* keep gathering regardless */ }
       dbg('  gather food-hunt done (foodItems=' + foodCount(bot) + ')')
+      // NO ANIMALS ANYWHERE (Sonnet shepherd finding: it worked at 1hp until death with
+      // no fallback): the wheat farm is the answer - harvest it, or plant it now.
+      if (foodCount(bot) === 0 && !isStopped()) {
+        try {
+          if (!await tendWheatFarm(bot, { isStopped, say: opts.say })) {
+            await ensureWheatFarm(bot, home, { isStopped, say: opts.say, avoid: opts.avoid })
+          }
+        } catch (e) { dbg('  wheat fallback failed (' + e.message + ')') }
+      }
     }
     // OPPORTUNISTIC: a food animal is RIGHT THERE and the pack is light - take the free
     // meal before hunger ever forces a detour (operator ask). Close range only (<=12), so
@@ -2631,4 +2775,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, hasSolidCeiling, gatherLeather, huntForFood, hasFood, needsFood, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, setBuildZone, setDebugSink }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, hasSolidCeiling, gatherLeather, huntForFood, hasFood, needsFood, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, ensureWheatFarm, tendWheatFarm, setBuildZone, setDebugSink }
