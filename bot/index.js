@@ -226,6 +226,22 @@ try {
     }
   }
 } catch {}
+// RE-ARM: the boot auto-resume is one-shot, and a resume whose travel retries all fail
+// ends SILENTLY with the job still on disk - the bot then idles forever while the brain
+// gets bored (verified live: 3 blocked travels at 19:09-19:14, then nothing for good).
+// Every 5 minutes: saved job + idle bot + not resting = try the resume again.
+if (process.env.AUTO_RESUME !== '0') {
+  setInterval(async () => {
+    try {
+      if (!bot.entity) return
+      if (!(commands.persistedResume && commands.persistedResume())) return
+      if (commands.isBusy && commands.isBusy()) return
+      if (provision.isResting && provision.isResting()) return
+      const r = await commands.handle(bot, 'resumebuild')
+      note(`(resume) re-arm: ${String(r).split(String.fromCharCode(10))[0]}`)
+    } catch (e) { note(`(resume) re-arm failed: ${e.message}`) }
+  }, 300000).unref?.()
+}
 
 // Env overrides (so the same body can target the lab or a live server without
 // editing config.json): MC_HOST / MC_PORT / MC_USERNAME / MC_AUTH / MC_VERSION.
