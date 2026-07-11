@@ -1722,7 +1722,18 @@ async function gatherLoop (bot, item, count, opts = {}) {
           const nowMinable = (bot.findBlocks({ matching: ids, maxDistance: 24, count: 4 }) || []).some(p => isWildTreeLog(bot, p))
           if (!nowMinable && growing.length) { memSpot.rest = Date.now() + 8 * 60000; saveWorldMem(); dbg('  remembered spot is a GROWING grove - resting it 8 min') }
         }
-        if (!minable && !growing.length) { dbg('  remembered spot is DRY on arrival (no minable ' + item + ') - dropping it'); forgetSpot(item, memSpot, true) }
+        if (!minable && !growing.length) {
+          // Before deleting: the SPOT may be dry while the FOREST it marked continues
+          // deeper in (verified live: it ate the edge of the big woods at 567,304, the
+          // 24-block re-scan missed the mass 30 blocks deeper, and the hard-drop deleted
+          // its only pointer to the forest). Probe wider and MIGRATE the spot inward.
+          const deeper = (bot.findBlocks({ matching: ids, maxDistance: 48, count: 8 }) || [])
+            .filter(p => !isLogGather || isWildTreeLog(bot, p))
+          if (deeper.length) {
+            memSpot.x = Math.round(deeper[0].x); memSpot.z = Math.round(deeper[0].z); memSpot.at = Date.now(); saveWorldMem()
+            dbg('  remembered spot edge is eaten - MIGRATING it deeper to ' + memSpot.x + ',' + memSpot.z)
+          } else { dbg('  remembered spot is DRY on arrival (no minable ' + item + ') - dropping it'); forgetSpot(item, memSpot, true) }
+        }
         continue // rescan from here; not a dry look
       }
       if (opts.say && dryExplores === 0) opts.say(`looking further afield for ${sources[0]}...`)
