@@ -414,7 +414,7 @@ async function collectDrops (bot, radius = 10) {
 // terrain (loads new chunks) when the current area is tapped out. Returns whether
 // it moved. This is what lets gathering keep going instead of stalling with
 // "no reachable X within 64 blocks".
-async function explore (bot, idx, home, maxRoam) {
+async function explore (bot, idx, home, maxRoam, isBad) {
   const dirs = [[1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, -1]]
   const D = 48
   const p = bot.entity.position
@@ -429,12 +429,19 @@ async function explore (bot, idx, home, maxRoam) {
       tx = Math.round(p.x + ((home.x - p.x) / back) * D)
       tz = Math.round(p.z + ((home.z - p.z) / back) * D)
     } else {
+      // ROOMBA: two passes over the compass - first prefer legs landing in UNSEARCHED
+      // cells (isBad = negative memory), only then settle for any in-fence leg. Without
+      // this the rotation re-swept the same barren ground round after round (live).
       let picked = null
-      for (let k = 0; k < 8 && !picked; k++) { // start at idx, rotate until one stays inside the fence
-        const [dx, dz] = dirs[(((idx + k) % 8) + 8) % 8]
-        const n = Math.hypot(dx, dz) || 1
-        const cx = Math.round(p.x + (dx / n) * D); const cz = Math.round(p.z + (dz / n) * D)
-        if (Math.hypot(cx - home.x, cz - home.z) <= maxRoam) picked = [cx, cz]
+      for (let pass = 0; pass < 2 && !picked; pass++) {
+        for (let k = 0; k < 8 && !picked; k++) { // start at idx, rotate until one fits
+          const [dx, dz] = dirs[(((idx + k) % 8) + 8) % 8]
+          const n = Math.hypot(dx, dz) || 1
+          const cx = Math.round(p.x + (dx / n) * D); const cz = Math.round(p.z + (dz / n) * D)
+          if (Math.hypot(cx - home.x, cz - home.z) > maxRoam) continue
+          if (pass === 0 && isBad && isBad(cx, cz)) continue
+          picked = [cx, cz]
+        }
       }
       const back = Math.hypot(home.x - p.x, home.z - p.z) || 1
       ;[tx, tz] = picked || [Math.round(p.x + ((home.x - p.x) / back) * D), Math.round(p.z + ((home.z - p.z) / back) * D)]
@@ -1095,6 +1102,31 @@ function recallSpot (item, pos, visited) {
   return best
 }
 
+// NEGATIVE MEMORY (roomba rule, operator-requested): remember 32-block cells that were
+// SEARCHED AND EMPTY, and stop re-sweeping them - the blind compass kept walking the same
+// barren ground round after round. A cell un-marks when we PLANT saplings there (that's a
+// reason to come back) or after 2h (world changes - players build, trees grow).
+const SEARCH_CELL = 32
+function searchCellKey (x, z) { return Math.floor(x / SEARCH_CELL) + ',' + Math.floor(z / SEARCH_CELL) }
+function markSearched (item, pos) {
+  const m = loadWorldMem()
+  const s = m.searched = m.searched || {}
+  const l = s[item] = s[item] || {}
+  l[searchCellKey(pos.x, pos.z)] = Date.now()
+  const keys = Object.keys(l)
+  if (keys.length > 300) { keys.sort((a, b) => l[a] - l[b]); for (const k of keys.slice(0, keys.length - 300)) delete l[k] }
+  saveWorldMem()
+}
+function isSearchedDry (item, x, z) {
+  const l = (loadWorldMem().searched || {})[item] || {}
+  const t = l[searchCellKey(x, z)]
+  return !!t && Date.now() - t < 2 * 3600 * 1000
+}
+function clearSearched (item, pos) {
+  const l = (loadWorldMem().searched || {})[item]
+  if (l && l[searchCellKey(pos.x, pos.z)]) { delete l[searchCellKey(pos.x, pos.z)]; saveWorldMem() }
+}
+
 // BED MEMORY: the server knows the bot's spawn bed but never tells the client, and the
 // sleep command only scans 48 blocks around wherever the bot happens to stand - so at
 // dusk 150 blocks out it "had no bed" and dug a pit instead (7 night deaths in one
@@ -1213,6 +1245,8 @@ async function plantSaplingNear (bot, around, logItem, opts = {}) {
       await bot.equip(sap, 'hand')
       await bot.placeBlock(ground, new Vec3(0, 1, 0))
       dbg('  replanted ' + saplingFor(logItem) + ' at ' + gp.offset(0, 1, 0).toString())
+      clearSearched(logItem, gp) // roomba rule: planting here makes this cell worth revisiting
+      rememberSpot(logItem, gp)  // ...and puts it back on the map as a future wood source
       await boneMealSapling(bot, gp.offset(0, 1, 0)) // bones -> bone meal -> instant tree (why we KEEP bones)
       return true
     } catch (e) { dbg('  replant failed at ' + gp.toString() + ' (' + e.message + ')') }
@@ -1526,7 +1560,21 @@ async function gatherLoop (bot, item, count, opts = {}) {
         const dSpot = Math.hypot(memSpot.x - home.x, memSpot.z - home.z)
         if (dSpot + 48 > maxRoam) { maxRoam = Math.ceil(dSpot + 48); dbg('  gather fence extended to ' + maxRoam + ' (covers remembered spot)') }
         try { await gotoWithTimeout(bot, new goals.GoalNearXZ(memSpot.x, memSpot.z, 8), 120000) } catch {}
-        if (!(bot.findBlocks({ matching: ids, maxDistance: 24, count: 1 }) || []).length) { dbg('  remembered spot is DRY on arrival - dropping it'); forgetSpot(item, memSpot, true) }
+        // Judge the spot by what the miner will actually TOUCH: village-house logs pass a
+        // raw block scan but fail the wild-tree filter, so a chopped-out spot next to a
+        // village never dropped and kept luring the bot back (verified live, 0-log tours).
+        const minable = (bot.findBlocks({ matching: ids, maxDistance: 24, count: 8 }) || [])
+          .some(p => !isLogGather || isWildTreeLog(bot, p))
+        // A GROWING grove counts as alive: saplings we (or anyone) planted here are the
+        // reason to return. Bone-meal them on the spot if we're carrying bones - that
+        // turns a revisit into an instant harvest.
+        let growing = []
+        if (!minable && isLogGather) {
+          const sapId = (mcData.blocksByName[saplingFor(item)] || {}).id
+          growing = sapId != null ? (bot.findBlocks({ matching: sapId, maxDistance: 24, count: 6 }) || []) : []
+          for (const sp of growing.slice(0, 4)) { if (isStopped()) break; try { await boneMealSapling(bot, sp) } catch {} }
+        }
+        if (!minable && !growing.length) { dbg('  remembered spot is DRY on arrival (no minable ' + item + ') - dropping it'); forgetSpot(item, memSpot, true) }
         continue // rescan from here; not a dry look
       }
       if (opts.say && dryExplores === 0) opts.say(`looking further afield for ${sources[0]}...`)
@@ -1535,8 +1583,11 @@ async function gatherLoop (bot, item, count, opts = {}) {
       // (verified live: every log round died in ~2 min of dry looks). Dry looks now
       // widen the fence for ANY resource, so it walks to the next forest like a player.
       if (dryExplores > 0 && dryExplores % 3 === 0) widenFence(dryExplores + ' dry looks for ' + sources[0])
+      // ROOMBA: this cell was searched and found empty - remember that, and steer the
+      // next leg toward ground we HAVEN'T swept (negative memory, cleared by replanting).
+      markSearched(item, bot.entity.position)
       dbg('  gather explore #' + dryExplores)
-      const moved = await explore(bot, exploreIdx++, home, maxRoam)
+      const moved = await explore(bot, exploreIdx++, home, maxRoam, (x, z) => isSearchedDry(item, x, z))
       dbg('  gather explore moved=' + moved)
       dryExplores++
       continue
@@ -1591,7 +1642,7 @@ async function gatherLoop (bot, item, count, opts = {}) {
     if (countItem(bot, item) === before) {
       failed.set(pkey(target.position), 2)
       noYield += n + 1
-      if (noYield >= NO_YIELD_LIMIT) { await explore(bot, exploreIdx++, home, maxRoam); noYield = 0 }
+      if (noYield >= NO_YIELD_LIMIT) { await explore(bot, exploreIdx++, home, maxRoam, (x, z) => isSearchedDry(item, x, z)); noYield = 0 }
     } else { noYield = 0 }
   }
   return { gathered: countItem(bot, item) - start, reason: 'done' }
