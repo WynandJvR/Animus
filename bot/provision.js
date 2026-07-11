@@ -1265,15 +1265,21 @@ function forgetInfra (kind, entry) {
   const list = (loadWorldMem().infra || {})[kind] || []
   const i = list.indexOf(entry); if (i >= 0) { list.splice(i, 1); saveWorldMem() }
 }
-// Walk to the nearest REMEMBERED one and verify it still stands; forget it if gone.
+function listInfra (kind) { return (((loadWorldMem().infra || {})[kind]) || []).slice() }
+// Walk to REMEMBERED ones (up to 3 nearest) and verify each still stands; forget the dead.
+// Trying only the single nearest made one stale entry cause a brand-new placement while a
+// perfectly good chest stood 9 blocks further (live: three chests at one site).
 async function recallAndReach (bot, kind, blockId, maxDist, reach) {
-  const known = recallInfra(kind, bot.entity.position, maxDist)
-  if (!known) return null
-  dbg('  remembered ' + kind + ' at ' + known.x + ',' + known.y + ',' + known.z + ' - reusing it instead of placing a new one')
-  await walkStaged(bot, known.x, known.z, { range: 10, timeoutMs: 60000 })
-  const blk = bot.blockAt(new Vec3(known.x, known.y, known.z))
-  if (!blk || blk.type !== blockId) { dbg('  remembered ' + kind + ' is gone - forgetting it'); forgetInfra(kind, known); return null }
-  if (await reach(blk)) return blk
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const known = recallInfra(kind, bot.entity.position, maxDist)
+    if (!known) return null
+    dbg('  remembered ' + kind + ' at ' + known.x + ',' + known.y + ',' + known.z + ' - reusing it instead of placing a new one')
+    await walkStaged(bot, known.x, known.z, { range: 10, timeoutMs: 60000 })
+    const blk = bot.blockAt(new Vec3(known.x, known.y, known.z))
+    if (!blk || blk.type !== blockId) { dbg('  remembered ' + kind + ' is gone - forgetting it'); forgetInfra(kind, known); continue }
+    if (await reach(blk)) return blk
+    return null // it stands but we can't reach it - placing fresh beats looping
+  }
   return null
 }
 
@@ -2625,4 +2631,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, hasSolidCeiling, gatherLeather, huntForFood, hasFood, needsFood, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, setBuildZone, setDebugSink }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, hasSolidCeiling, gatherLeather, huntForFood, hasFood, needsFood, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, setBuildZone, setDebugSink }

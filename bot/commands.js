@@ -2287,9 +2287,21 @@ async function autoBuild (bot, schem, at, opts = {}) {
   }
   const slotsUsed = () => (bot.inventory ? bot.inventory.items().length : 0)
   const totalHave = async (name) => {
-    let c = 0
-    if (chest) { try { c = (await provision.chestCounts(bot, chestBlk()))[name] || 0 } catch {} }
-    return c + (provision.inventoryCounts(bot)[name] || 0)
+    // Count EVERY remembered site chest, not just the one this run touched - banked
+    // materials landed in chest B while the loop counted only (empty) chest C, and 80
+    // banked oak read as 0/346 (live). Dedupes, verifies each block, walks to open.
+    let c = provision.inventoryCounts(bot)[name] || 0
+    const spots = (provision.listInfra ? provision.listInfra('chest') : []).filter(e => Math.hypot(e.x - home.x, e.z - home.z) <= 32)
+    if (chest && chestBlk()) spots.push({ x: chest.position.x, y: chest.position.y, z: chest.position.z })
+    const seen = new Set()
+    for (const e of spots) {
+      const k = `${e.x},${e.y},${e.z}`
+      if (seen.has(k)) continue
+      seen.add(k)
+      const blk = bot.blockAt(new Vec3(e.x, e.y, e.z))
+      if (blk && /chest/.test(blk.name)) { try { c += (await provision.chestCounts(bot, blk))[name] || 0 } catch {} }
+    }
+    return c
   }
 
   // 1) provision each material, batch by batch; stash to the chest when the pack fills.
