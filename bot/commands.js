@@ -612,7 +612,10 @@ async function eatFood (bot) {
   })
   if (!edible.length) return 'no food in inventory'
   const food = edible[0]
-  if (RISKY_FOOD.test(food.name) && bot.food > 6) return 'only risky food left - holding out'
+  // Risky food unlocks when STARVING - or when critically HURT with hunger below the
+  // regen threshold (18): it stood at 3hp refusing raw chicken, which costs hunger,
+  // never health. At death's door, food poisoning is a bargain (live incident).
+  if (RISKY_FOOD.test(food.name) && bot.food > 6 && !((bot.health ?? 20) <= 8 && bot.food < 18)) return 'only risky food left - holding out'
   await bot.equip(food, 'hand')
   await bot.consume()
   return `ate ${food.name} (food ${bot.food})`
