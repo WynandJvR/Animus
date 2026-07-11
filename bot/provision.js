@@ -1583,6 +1583,7 @@ async function plantGrove (bot, home, logItem, { isStopped = () => false, say = 
     }
   }
   if (planted) {
+    const m = loadWorldMem(); m.orchard = { x: gx, z: gz, at: Date.now() }; saveWorldMem() // dedup: one orchard per site per growth cycle
     rememberSpot(logItem, new Vec3(gx + 5, baseY, gz + 5)) // the plot is a wood source now
     // a torch in the plot: saplings keep growing through the night and mobs stay out
     try { await placeAt(bot, new Vec3(gx + 2, baseY + 1, gz + 2), /^torch$/) } catch {}
@@ -1806,6 +1807,13 @@ async function gatherLoop (bot, item, count, opts = {}) {
     if (isLogGather && !orchardPlanted && candidates.length > 0 && candidates.length < 8 &&
         (count - (countItem(bot, item) - start)) >= 24 && saplingCount(bot, item) >= 6 && !isStopped()) {
       orchardPlanted = true
+      // ONE orchard per site per growth cycle: the flag resets each round, and every
+      // round was re-walking the grid to plant into already-occupied cells (live, 3x).
+      const orch = loadWorldMem().orchard
+      if (orch && Math.hypot(orch.x - home.x, orch.z - home.z) <= 60 && Date.now() - orch.at < 40 * 60000) {
+        dbg('  orchard already growing near home (planted ' + Math.round((Date.now() - orch.at) / 60000) + ' min ago) - not replanting')
+        continue
+      }
       dbg('  sparse woods (' + candidates.length + ' logs visible) + ' + saplingCount(bot, item) + ' saplings - planting an ORCHARD near home')
       if (opts.say) opts.say('these scattered trees are a waste of time - planting my own orchard by the site')
       try { await plantGrove(bot, home, item, { isStopped, say: opts.say, avoid: opts.avoid, max: 16 }) } catch (e) { dbg('  orchard failed (' + e.message + ')') }
@@ -2057,7 +2065,14 @@ async function runCraft (bot, item, count, needsTable, opts = {}) {
   while (countItem(bot, item) - before < count && guard-- > 0) {
     const recipe = bot.recipesFor(def.id, null, 1, table)[0]
     if (!recipe) throw new Error(`no craftable recipe for ${item} (missing ingredients?)`)
-    await bot.craft(recipe, 1, table)
+    try { await bot.craft(recipe, 1, table) } catch (e) {
+      if (!/windowOpen/.test(e.message || '')) throw e
+      // Paper sometimes never opens the table window (same transient as openFurnace) -
+      // re-approach and retry once before failing the whole craft (live: camp chest)
+      dbg('  craft windowOpen timeout - re-approaching the table for one retry')
+      if (table) { try { await gotoWithTimeout(bot, new goals.GoalNear(table.position.x, table.position.y, table.position.z, 2), 15000) } catch {} }
+      await bot.craft(recipe, 1, table)
+    }
     await new Promise(r => setTimeout(r, 250)) // let the server's slot updates land
   }
   const made = countItem(bot, item) - before
