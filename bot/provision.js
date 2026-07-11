@@ -114,9 +114,20 @@ async function walkStaged (bot, tx, tz, opts = {}) {
         if (feet && /water/.test(feet.name)) {
           dbg('walkStaged: stalled IN WATER at ' + Math.round(np.x) + ',' + Math.round(np.z) + ' - manual hop to the bank')
           await manualHopFromWater(bot)
-        } else {
-          dbg('walkStaged: stalled 3 legs at ' + Math.round(np.x) + ',' + Math.round(np.z) + ' - climbing out to open ground')
+        } else if (hasSolidCeiling(bot, 12)) {
+          dbg('walkStaged: stalled UNDERGROUND at ' + Math.round(np.x) + ',' + Math.round(np.z) + ' - climbing out')
           try { await climbToSurface(bot, Math.floor(np.y) + 10, { isStopped }) } catch (e) { dbg('walkStaged: climb-out failed (' + e.message + ')') }
+        } else {
+          // SURFACE wedge (open sky): climbToSurface no-ops here - the pathfinder just
+          // can't solve a step it should walk (pinned at its own orchard cell, live).
+          // Take the controls: face the leg target, jump+sprint straight at it.
+          dbg('walkStaged: stalled on the SURFACE at ' + Math.round(np.x) + ',' + Math.round(np.z) + ' - manual nudge toward ' + Math.round(lx) + ',' + Math.round(lz))
+          try {
+            bot.pathfinder.setGoal(null)
+            await bot.lookAt(new Vec3(lx, bot.entity.position.y + 1, lz), true)
+            bot.setControlState('jump', true); bot.setControlState('forward', true); bot.setControlState('sprint', true)
+            await new Promise(r => setTimeout(r, 2000))
+          } catch {} finally { bot.clearControlStates() }
         }
         const now2 = bot.entity.position
         if (Math.floor(now2.y) > Math.floor(np.y) || Math.hypot(now2.x - np.x, now2.z - np.z) >= 2) { stalls = 0; continue } // freed - retry the legs
