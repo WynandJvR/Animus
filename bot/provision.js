@@ -1056,16 +1056,31 @@ async function digInForNight (bot, opts = {}) {
         } catch (e) { dbg('shelter: deeper dig failed (' + e.message + ')') }
       }
     }
-    dbg('shelter: pit ' + (capped ? 'SEALED' : 'OPEN (cap failed - mob funnel risk)'))
+    // SEAL THE SIDES TOO: digging beside a cave leaves a pit wall OPEN into it - a lid
+    // over a doorway (operator caught it live: "open on one side, dug into a cave").
+    // Wall off every airish horizontal neighbour of both body cells with spare blocks.
+    let sideHoles = 0
+    for (const dy of [0, 1]) {
+      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const cell = bot.entity.position.floored().offset(dx, dy, dz)
+        const b = bot.blockAt(cell)
+        if (b && AIRISH(b.name)) {
+          if (await placeAt(bot, cell, CAP_RE)) dbg('shelter: walled a side hole at ' + cell.toString())
+          else { sideHoles++; dbg('shelter: side hole at ' + cell.toString() + ' UNSEALED - ' + (placeAt.lastFail || '?')) }
+        }
+      }
+    }
+    dbg('shelter: pit ' + (capped ? 'SEALED' : 'OPEN (cap failed - mob funnel risk)') + (sideHoles ? ' with ' + sideHoles + ' open side(s)' : ''))
     say(capped ? 'holed up till it\'s safe' : 'ducked into a hole till it\'s safe')
     // 3) wait until DAY and no hostile near, or a hard timeout (~one full night). An OPEN
     // pit is NOT a shelter - don't squat in a mob funnel for 10 minutes: short deadline,
     // and bail immediately if we're taking hits down there (fight/flee reflexes resume).
-    const deadline = Date.now() + (capped ? 600000 : 120000)
+    const fullySealed = capped && !sideHoles
+    const deadline = Date.now() + (fullySealed ? 600000 : 120000)
     const hp0 = bot.health || 20
     while (Date.now() < deadline && !isStopped()) {
       if (!isNight(bot) && !nearHostile(bot, 10)) break
-      if (!capped && (bot.health || 20) < hp0 - 3) { dbg('shelter: taking damage in an OPEN pit - bailing out to fight/flee'); break }
+      if (!fullySealed && (bot.health || 20) < hp0 - 3) { dbg('shelter: taking damage in a LEAKY pit - bailing out to fight/flee'); break }
       await new Promise(r => setTimeout(r, 3000))
     }
     // 4) break the cap and climb back to the surface. Use climbToSurface (staircase-up,
