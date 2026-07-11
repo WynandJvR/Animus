@@ -1440,7 +1440,11 @@ async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () =
     try { await gotoWithTimeout(bot, new goals.GoalNear(w.x, w.y, w.z, 4), 60000) } catch {}
     let broken = 0
     while (seedCount() < 6 && broken < 40 && !isStopped()) {
-      const g = bot.findBlock({ matching: grassIds, maxDistance: 16 })
+      let g = bot.findBlock({ matching: grassIds, maxDistance: 32 }) // 16 found nothing at the pond edge (live) - grass grows patchily
+      if (!g) { // barren bank - one hop toward home usually lands in the meadow
+        try { await gotoWithTimeout(bot, new goals.GoalNearXZ(home.x, home.z, 8), 30000) } catch {}
+        g = bot.findBlock({ matching: grassIds, maxDistance: 32 })
+      }
       if (!g) break
       try {
         if (bot.entity.position.distanceTo(g.position) > 4) await gotoWithTimeout(bot, new goals.GoalNear(g.position.x, g.position.y, g.position.z, 2), 10000)

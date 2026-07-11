@@ -457,10 +457,14 @@ async function travelFar (bot, dest, opts = {}) {
       const step = Math.min(hop, d)
       const wx = me.x + (dx / d) * step
       const wz = me.z + (dz / d) * step
+      let legErr = null
       try {
         await gotoTimed(bot, new goals.GoalNearXZ(wx, wz, 4), 30000)
-      } catch { /* leg blocked/timed out - re-aim from wherever we ended up */ }
+      } catch (e) { legErr = e.message /* leg blocked/timed out - re-aim from wherever we ended up */ }
       const nd = Math.hypot(dest.x - bot.entity.position.x, dest.z - bot.entity.position.z)
+      // leg telemetry: the Sonnet shepherd watched "moving:true" while stationary for 90s
+      // on OPEN ground - these lines make the next such stall's anatomy readable
+      dbg('travel leg -> ' + Math.round(nd) + 'b left (was ' + (lastD === Infinity ? 'inf' : Math.round(lastD)) + ', stalls ' + stalls + (legErr ? ', err: ' + legErr : '') + ')')
       // no meaningful progress this leg -> count a stall
       if (nd >= lastD - 3) {
         stalls++
