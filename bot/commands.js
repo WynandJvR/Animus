@@ -2280,7 +2280,13 @@ async function autoBuild (bot, schem, at, opts = {}) {
       // down toward lava across batches.
       const results = await provision.runPlan(bot, plan, { say, isStopped, restoreMovements: restore, homeY: Math.floor(at.y), home, avoid })
       const STASH_AT = parseInt(process.env.AUTOBUILD_STASH_SLOTS || '28', 10) // slots-used before offloading (tunable)
-      if (slotsUsed() >= STASH_AT) await stash() // pack filling up -> offload to the chest
+      // BANK BY VALUE, not just slots: 103 oak logs fit in TWO slots, so the slot
+      // threshold never fired all evening - the bot carried its whole fortune into a
+      // skeleton chase and the grave despawned with it (oak 103 -> 1, live). Any
+      // meaningful pile of build material gets deposited whenever we're at the site;
+      // a death now costs at most one round's haul.
+      const invPile = (provision.inventoryCounts(bot)[name] || 0)
+      if (slotsUsed() >= STASH_AT || invPile >= 48) await stash()
       const bad = results.filter(r => !r.ok)
       if (bad.length && (await totalHave(name)) <= before) {
         // One free retry: a failed round with no gain is often a TRANSIENT placement/pathing
