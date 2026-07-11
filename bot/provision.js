@@ -1409,29 +1409,85 @@ async function fishSaplings (bot, around, logItem, { isStopped = () => false } =
   if (broken) { await collectDrops(bot, 6); dbg('  leaf-fished ' + broken + ' leaves -> ' + saplingCount(bot, logItem) + ' saplings') }
 }
 
-// Plant whatever saplings we hold in a spaced grove near (but not on) the home anchor.
-// Returns how many went in the ground.
+// PREP one orchard cell at (cx, ~baseY, cz): find the ground, clear vegetation above it,
+// shave natural bumps toward plot level, fill a shallow dip with dirt, and top non-soil
+// with dirt. Returns the plantable ground block, or null.
+async function prepOrchardCell (bot, cx, baseY, cz, { isStopped = () => false } = {}) {
+  // find ground: first solid block scanning down from a bit above plot level
+  let ground = null
+  for (let y = baseY + 3; y >= baseY - 3; y--) {
+    const b = bot.blockAt(new Vec3(cx, y, cz))
+    const a = bot.blockAt(new Vec3(cx, y + 1, cz))
+    if (b && b.boundingBox === 'block' && a && REPLACEABLE.test(a.name)) { ground = b; break }
+  }
+  if (!ground) return null
+  if (bot.entity.position.distanceTo(ground.position) > 4) { try { await gotoWithTimeout(bot, new goals.GoalNear(cx, ground.position.y, cz, 3), 15000) } catch { return null } }
+  // clear vegetation/soft cover above the cell (never crafted blocks)
+  for (let dy = 1; dy <= 2 && !isStopped(); dy++) {
+    const b = bot.blockAt(ground.position.offset(0, dy, 0))
+    if (b && !AIRISH(b.name) && /grass|fern|flower|dead_bush|snow|vine|_leaves$/.test(b.name)) { try { await bot.dig(b) } catch {} }
+  }
+  // shave a bump: ground sticking up past plot level gets cut down (natural blocks only)
+  let guard = 3
+  while (ground.position.y > baseY && guard-- > 0 && !isStopped()) {
+    if (!canBreakNaturally(ground) || (bot.canDigBlock && !bot.canDigBlock(ground))) break
+    try { await bot.dig(ground); await collectDrops(bot, 3) } catch { break }
+    const nb = bot.blockAt(new Vec3(cx, ground.position.y - 1, cz))
+    if (!nb || nb.boundingBox !== 'block') break
+    ground = nb
+  }
+  // fill a shallow dip with dirt so the row stays level
+  if (ground.position.y < baseY - 1) {
+    if (await placeAt(bot, ground.position.offset(0, 1, 0), /^(dirt|grass_block)$/)) {
+      const nb = bot.blockAt(ground.position.offset(0, 1, 0)); if (nb && nb.boundingBox === 'block') ground = nb
+    }
+  }
+  // saplings need soil - top stone/sand with a dirt block if we carry one
+  if (!PLANTABLE_GROUND.test(ground.name)) {
+    if (!await placeAt(bot, ground.position.offset(0, 1, 0), /^dirt$/)) return null
+    const nb = bot.blockAt(ground.position.offset(0, 1, 0))
+    if (!nb || !PLANTABLE_GROUND.test(nb.name)) return null
+    ground = nb
+  }
+  return ground
+}
+
+// Plant an ORCHARD: an even grid (5-block lanes) on prepped, level ground near - but
+// never inside - the build's keep-out box. Operator spec: "a nice opening with flat
+// ground, trees planted evenly so it's easy to navigate and use". Returns count planted.
 async function plantGrove (bot, home, logItem, { isStopped = () => false, say = () => {}, avoid = null, max = 8 } = {}) {
-  let have = saplingCount(bot, logItem)
-  if (have < 1) return 0
-  // Stand clear of the build: just past the keep-out box's east edge when we know it,
-  // else ~18 blocks from home - the grove must never grow into the castle.
-  const gx = avoid ? avoid.x2 + 8 : home.x + 18; const gz = home.z
+  if (saplingCount(bot, logItem) < 1) return 0
+  const gx = Math.floor(avoid ? avoid.x2 + 8 : home.x + 18); const gz = Math.floor(home.z)
   await walkStaged(bot, gx, gz, { isStopped, range: 6, timeoutMs: 90000 })
   if (isStopped()) return 0
-  let planted = 0; let lastSpot = bot.entity.position
-  while (saplingCount(bot, logItem) > 0 && planted < max && !isStopped()) {
-    if (!await plantSaplingNear(bot, lastSpot, logItem, { avoid })) {
-      // no plantable cell here - shuffle a few blocks and try again, then give up
-      const np = lastSpot.offset(4, 0, (planted % 2) ? 4 : -4)
-      try { await gotoWithTimeout(bot, new goals.GoalNearXZ(np.x, np.z, 2), 15000) } catch { break }
-      lastSpot = bot.entity.position
-      if (!await plantSaplingNear(bot, lastSpot, logItem, { avoid })) break
+  const baseY = Math.floor(bot.entity.position.y) - 1 // plot level = the ground we stand on
+  const cols = Math.min(4, Math.max(2, Math.ceil(Math.sqrt(max))))
+  const sap = () => (bot.inventory ? bot.inventory.items() : []).find(i => i.name === saplingFor(logItem))
+  let planted = 0
+  for (let r = 0; r < 4 && planted < max && !isStopped(); r++) {
+    for (let c = 0; c < cols && planted < max && !isStopped(); c++) {
+      if (!sap()) break
+      const cx = gx + c * 5; const cz = gz + r * 5 // 5-block lanes: walkable + crowns don't merge
+      if (inAvoidBox(avoid, cx, cz)) continue
+      const ground = await prepOrchardCell(bot, cx, baseY, cz, { isStopped })
+      if (!ground) { dbg('  orchard: cell ' + cx + ',' + cz + ' unusable - skipping'); continue }
+      try {
+        await bot.equip(sap(), 'hand')
+        await bot.placeBlock(ground, new Vec3(0, 1, 0))
+        planted++
+        clearSearched(logItem, ground.position)
+        dbg('  orchard: planted ' + saplingFor(logItem) + ' at ' + cx + ',' + (ground.position.y + 1) + ',' + cz + ' (' + planted + '/' + max + ')')
+        await boneMealSapling(bot, ground.position.offset(0, 1, 0))
+      } catch (e) { dbg('  orchard: plant failed at ' + cx + ',' + cz + ' (' + e.message + ')') }
     }
-    planted++
-    lastSpot = lastSpot.offset(4, 0, 0) // ~4-block spacing so crowns don't choke each other
   }
-  if (planted) { say(`planted ${planted} saplings by the site - the wood will come to me`); dbg('  grove: planted ' + planted + ' ' + saplingFor(logItem)) }
+  if (planted) {
+    rememberSpot(logItem, new Vec3(gx + 5, baseY, gz + 5)) // the plot is a wood source now
+    // a torch in the plot: saplings keep growing through the night and mobs stay out
+    try { await placeAt(bot, new Vec3(gx + 2, baseY + 1, gz + 2), /^torch$/) } catch {}
+    say(`planted a ${planted}-tree orchard by the site - rows are straight, come have a look`)
+    dbg('  orchard: ' + planted + ' planted in a ' + cols + '-wide grid at ' + gx + ',' + gz)
+  }
   return planted
 }
 
