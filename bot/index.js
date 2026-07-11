@@ -613,10 +613,11 @@ if (process.env.AUTO_DEFEND !== '0') {
     try {
       const me = bot.entity.position
       const hp = bot.health == null ? 20 : bot.health
-      // FLEE from a nearby creeper (melee = it explodes), from FARTHER out now (8),
-      // and - when we're HURT - from ANY hostile: trading blows with a skeleton at low
-      // HP is exactly how it got whittled to death overnight. Retreat instead.
-      let flee = null; let fbest = 8; let why = 'creeper'
+      // FLEE from a nearby creeper (melee = it explodes) from 12 out - it died twice
+      // tonight to creepers first seen at 5-8m: they SPRINT the last stretch and 8m of
+      // walking-flee isn't enough head start. And when we're HURT, flee ANY hostile:
+      // trading blows with a skeleton at low HP is how it got whittled down overnight.
+      let flee = null; let fbest = 12; let why = 'creeper'
       for (const e of Object.values(bot.entities || {})) {
         if (!e || !e.position || (e.type !== 'mob' && e.type !== 'hostile')) continue
         if (!/creeper/.test(e.name || '')) continue
@@ -635,8 +636,9 @@ if (process.env.AUTO_DEFEND !== '0') {
         const now = Date.now()
         if (flee !== lastDefendTarget || now - lastFleeAt > 1000) {
           const away = me.minus(flee.position)
-          const dest = me.plus(away.scaled(10 / (away.norm() || 1))) // back off ~10 blocks
+          const dest = me.plus(away.scaled(16 / (away.norm() || 1))) // back off ~16 blocks (past creeper aggro range)
           bot.pathfinder.setGoal(new goals.GoalNear(Math.floor(dest.x), Math.floor(me.y), Math.floor(dest.z), 1))
+          bot.setControlState('sprint', true) // RUN - creepers sprint the last stretch; a walking flee lost twice tonight
           lastFleeAt = now
           if (flee !== lastDefendTarget) note(`(flee) ${why} ${fbest.toFixed(1)}m`)
           lastDefendTarget = flee

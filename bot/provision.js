@@ -919,7 +919,7 @@ function nightRestWanted (bot) {
   if (shelterNeeded(bot)) return true
   if (!isNight(bot) || !bot.entity) return false
   const bed = knownBed()
-  return !!bed && Math.hypot(bed.x - bot.entity.position.x, bed.z - bot.entity.position.z) <= 64 // 64, not 48: it died 55 blocks from the bed
+  return !!bed && Math.hypot(bed.x - bot.entity.position.x, bed.z - bot.entity.position.z) <= 100 // must COVER THE BUILD SITE: it died working the castle at night, 66 blocks from bed, 2 past the old radius
 }
 // (anti-grief helpers canBreakNaturally / structureNearby are defined up top, next to
 // STRUCTURE_RE, and shared by every dig primitive + the shelter + the gather filter.)

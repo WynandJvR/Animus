@@ -1084,6 +1084,15 @@ async function handle (bot, line) {
         return "i haven't died recently - nothing to go get"
       }
       buildAbort = false
+      // NIGHT GATE: a naked corpse-run in the dark is how death carousels start (the brain
+      // fires `recover` the moment it sees the grave, respawn is at night, armor is IN the
+      // grave). Sleep/shelter first - the grave keeps (AxGraves persists; vanilla despawn
+      // already lost by the time a night passes anyway).
+      if (provision.isNight(bot) && provision.underArmored(bot)) {
+        say('night and no gear - resting before i go get my stuff')
+        try { await provision.nightRest(bot, { isStopped: () => buildAbort }) } catch {}
+        if (buildAbort) return 'stopped'
+      }
       const me = bot.entity.position
       if (Math.hypot(d.x - me.x, d.z - me.z) > 80) {
         beginActivity('recover', `${d.x},${d.y},${d.z}`)
