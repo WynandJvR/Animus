@@ -778,7 +778,10 @@ async function pillarUpTo (bot, targetY, opts = {}) {
     if (inFeet && !AIRISH(inFeet.name) && /sapling|_propagule$|grass|fern|flower|dead_bush|snow|vine/.test(inFeet.name)) {
       try { await bot.dig(inFeet); await new Promise(r => setTimeout(r, 150)) } catch {}
     }
-    const filler = (bot.inventory ? bot.inventory.items() : []).find(i => FILLER_RE.test(i.name))
+    // dirt FIRST: cobble towers in the orchard read as stone litter (operator), and the
+    // leveler has to shave them - dirt pockets back into scaffold supply instead.
+    const items = (bot.inventory ? bot.inventory.items() : [])
+    const filler = items.find(i => /^(dirt|coarse_dirt)$/.test(i.name)) || items.find(i => FILLER_RE.test(i.name))
     if (!filler) { bot.clearControlStates(); return } // nothing to pillar with
     if (equippedFiller !== filler.name) { await bot.equip(filler, 'hand').catch(() => {}); equippedFiller = filler.name }
     const ref = bot.blockAt(feet.offset(0, -1, 0)) // the block we're standing on
@@ -1728,7 +1731,7 @@ async function cleanupScaffold (bot, around, { isStopped = () => false } = {}) {
   let pf
   try { pf = require('./pathfix.js') } catch { return 0 }
   if (!pf.selfPlacedNear) return 0
-  const spots = pf.selfPlacedNear(around, 10, 300000)
+  const spots = pf.selfPlacedNear(around, 10, 1800000) // 30-min window (5 min expired mid-harvest, orphaning towers)
   if (!spots.length) return 0
   spots.sort((a, b) => b.y - a.y) // top-down: digging under our own feet rides us down
   let removed = 0

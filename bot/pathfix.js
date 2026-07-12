@@ -9,14 +9,35 @@
 // the planner's dig moves - it walks around/on them like anyone sane.
 
 const RECENT_MS = 60000  // dig-guard window (the planner may not break these)
-const TRAIL_MS = 300000  // trail window (scaffold cleanup may still find these)
+const TRAIL_MS = 1800000 // trail window - 30 min (5 min expired before slow harvests finished; towers orphaned)
 const recentlyPlaced = new Map() // "x,y,z" -> timestamp
+
+// PERSIST the trail: it lived only in memory, so every death-restart/deploy orphaned
+// whatever towers stood at that moment - the operator found COBBLE scaffolds abandoned
+// in the orchard after a restart-heavy morning. Loaded on boot, saved debounced.
+const fs = require('fs')
+const path = require('path')
+const TRAIL_FILE = process.env.TRAIL_FILE || path.join(__dirname, 'scaffold-trail.json')
+try {
+  const saved = JSON.parse(fs.readFileSync(TRAIL_FILE, 'utf8'))
+  const cut = Date.now() - TRAIL_MS
+  for (const [k, t] of Object.entries(saved)) { if (t >= cut) recentlyPlaced.set(k, t) }
+} catch {}
+let trailTimer = null
+function saveTrail () {
+  if (trailTimer) return
+  trailTimer = setTimeout(() => {
+    trailTimer = null
+    try { fs.writeFileSync(TRAIL_FILE, JSON.stringify(Object.fromEntries(recentlyPlaced))) } catch {}
+  }, 2000)
+}
 
 function key (p) { return `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}` }
 
 function sweep () {
   const cut = Date.now() - TRAIL_MS
   for (const [k, t] of recentlyPlaced) { if (t < cut) recentlyPlaced.delete(k) }
+  saveTrail()
 }
 
 // Point query: was THIS cell self-placed recently? The replant reflex was planting
@@ -62,14 +83,14 @@ function installPathfinderTuning (bot) {
     } catch {}
     try {
       const r = await origPlace(referenceBlock, faceVector)
-      try { recentlyPlaced.set(key(target), Date.now()); if (recentlyPlaced.size > 256) sweep() } catch {}
+      try { recentlyPlaced.set(key(target), Date.now()); saveTrail(); if (recentlyPlaced.size > 256) sweep() } catch {}
       return r
     } catch (e) {
       if (/blockUpdate/.test(e.message || '')) {
         await new Promise(r => setTimeout(r, 350))
         const b = bot.blockAt(target)
         if (b && !/^(air|cave_air|void_air)$/.test(b.name)) {
-          try { recentlyPlaced.set(key(target), Date.now()) } catch {}
+          try { recentlyPlaced.set(key(target), Date.now()); saveTrail() } catch {}
           return // it landed - swallow the phantom failure
         }
       }
