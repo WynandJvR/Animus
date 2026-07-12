@@ -505,6 +505,19 @@ bot.on('spawn', () => {
   if (!deathPending) return // initial join is handled by the once('spawn') above
   deathPending = false
   note('(respawn) back alive - checking for a build to resume')
+  // RE-TEACH the bed from the respawn itself: a bed-set spawn proves a bed is here even
+  // when the memory got lost (live: bot respawned at its bed all morning with m.bed
+  // EMPTY, so every nightRest pitted instead of walking to a real bed). World spawn is
+  // excluded - only a respawn far from it can be a bed/anchor.
+  try {
+    const ws = bot.spawnPoint
+    const here = bot.entity && bot.entity.position
+    if (here && ws && Math.hypot(here.x - ws.x, here.z - ws.z) > 12 &&
+        !(provision.knownBed && provision.knownBed())) {
+      provision.rememberBed(here)
+      note(`(respawn) bed memory was empty - re-learned my bed at ${Math.round(here.x)},${Math.round(here.y)},${Math.round(here.z)}`)
+    }
+  } catch {}
   setTimeout(async () => { // let the world/chunks settle first
     try {
       for (let attempt = 0; attempt < 3; attempt++) { // deferred = old build loop still unwinding

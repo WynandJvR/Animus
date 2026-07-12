@@ -1864,7 +1864,7 @@ async function levelPlotCell (bot, cx, baseY, cz, { isStopped = () => false } = 
     const v = bot.blockAt(ground.position.offset(0, dy, 0))
     if (v && !AIRISH(v.name) && /grass|fern|flower|dead_bush|snow|vine/.test(v.name)) { try { await bot.dig(v) } catch {} }
   }
-  let guard = 2
+  let guard = 3
   while (ground.position.y > baseY && guard-- > 0 && !isStopped()) { // shave bump
     if (!canBreakNaturally(ground) || (bot.canDigBlock && !bot.canDigBlock(ground))) break
     const tool = toolForBlock(bot, ground.name) // stone shaved wrong-tool drops nothing
@@ -1899,17 +1899,24 @@ async function plantGrove (bot, home, logItem, { isStopped = () => false, say = 
     const w = cols * 5; const h = 4 * 5
     let ops = 0
     say('leveling the orchard plot first')
-    outerLevel:
-    for (let dz = -1; dz <= h && !isStopped(); dz++) {
-      for (let dx = -1; dx <= w; dx++) {
-        const cx = gx + dx; const cz = gz + dz
-        if (inAvoidBox(avoid, cx, cz)) continue
-        const g0 = bot.blockAt(new Vec3(cx, baseY, cz))
-        const a0 = bot.blockAt(new Vec3(cx, baseY + 1, cz))
-        if (g0 && g0.boundingBox === 'block' && a0 && AIRISH(a0.name)) continue // flat already - free
-        try { if (await levelPlotCell(bot, cx, baseY, cz, { isStopped })) ops++ } catch {}
-        if (ops >= 60) { dbg('  orchard: leveling budget spent (' + ops + ' cells corrected) - planting on what we have'); break outerLevel }
+    // MULTI-PASS until actually flat (operator review: one 60-cell pass left "holes and
+    // a little bit of hill"). Each pass shaves deeper and fills another layer, so bumps
+    // and dips CONVERGE; stop when a full sweep corrects nothing or the budget is spent.
+    for (let pass = 0; pass < 4 && !isStopped() && ops < 240; pass++) {
+      let fixed = 0
+      outerLevel:
+      for (let dz = -1; dz <= h && !isStopped(); dz++) {
+        for (let dx = -1; dx <= w; dx++) {
+          const cx = gx + dx; const cz = gz + dz
+          if (inAvoidBox(avoid, cx, cz)) continue
+          const g0 = bot.blockAt(new Vec3(cx, baseY, cz))
+          const a0 = bot.blockAt(new Vec3(cx, baseY + 1, cz))
+          if (g0 && g0.boundingBox === 'block' && a0 && AIRISH(a0.name)) continue // flat already - free
+          try { if (await levelPlotCell(bot, cx, baseY, cz, { isStopped })) { ops++; fixed++ } } catch {}
+          if (ops >= 240) { dbg('  orchard: leveling budget spent (' + ops + ' cells corrected) - planting on what we have'); break outerLevel }
+        }
       }
+      if (!fixed) break // converged: the whole sweep found nothing to correct
     }
     dbg('  orchard: plot leveled (' + ops + ' cells corrected)')
   }
