@@ -206,25 +206,24 @@ async function openNearbyDoor (bot, opts = {}) {
     for (const p of cands) {
       const blk = bot.blockAt(p)
       if (!blk) continue
-      let open = false
-      try { const props = blk.getProperties(); open = props && (props.open === true || props.open === 'true') } catch {}
-      // NOTE: an already-OPEN door still gets the walk-through below - the pathfinder
-      // cannot ROUTE through door cells regardless of state (it only bumps them open on
-      // direct lines), so "it's open" doesn't mean the planner will use it.
+      // NOTE: the walk-through below runs regardless of the door's open/closed STATE -
+      // the pathfinder cannot ROUTE through door cells at all (it only bumps them open
+      // on direct lines), and "open" is normalized to "walk line clear" further down
+      // (for a sideways-hung door those are OPPOSITES - see passageClear).
       try { await gotoOnce(bot, new goals.GoalNear(p.x, p.y, p.z, 2), 15000) } catch (e) { dbg('door-assist: cannot reach door at ' + p + ' (' + e.message + ')'); continue }
       if (bot.entity.position.distanceTo(p) > 4) continue
       try {
-        if (!open) {
-          await bot.activateBlock(bot.blockAt(p))
-          await new Promise(r => setTimeout(r, 350)) // let the door state land
-          dbg('door-assist: opened ' + blk.name + ' at ' + p)
-        } else dbg('door-assist: ' + blk.name + ' at ' + p + ' already open - walking through')
         // WALK THROUGH the doorway before re-planning: the pathfinder won't ROUTE
         // through even an open door that isn't on the direct line (verified in the hut
         // test - door opened, travel still "blocked"). But it CAN step INTO an open
         // doorway cell - so stand in the doorway first, then step out the far side
-        // along the door's facing axis (height-tolerant: outside ground is often ±1).
-        const base = p.y > Math.floor(bot.entity.position.y) ? p.offset(0, -1, 0) : p // upper half -> foot cell
+        // (height-tolerant: outside ground is often ±1).
+        // Foot cell from the HALF property, never from the bot's y: a mid-hop read
+        // (feet momentarily at y+1) picked the UPPER half here and shifted every
+        // geometry probe one block up (live: bogus 'blocked side' flips at the hut).
+        let half = null
+        try { half = (blk.getProperties() || {}).half || null } catch {}
+        const base = half === 'upper' ? p.offset(0, -1, 0) : p
         const before = bot.entity.position.clone()
         // CROSSING AXIS from WALL GEOMETRY, not the door's facing blockstate. facing
         // encodes the PLACER'S YAW at hang time, not which way the wall runs - the bot
@@ -253,6 +252,30 @@ async function openNearbyDoor (bot, opts = {}) {
         else axis = [Math.abs(base.x + 0.5 - before.x) >= Math.abs(base.z + 0.5 - before.z) ? 1 : 0, 0]
         const dx = axis[0]; const dz = axis[0] === 1 ? 0 : 1
         dbg('door-assist: crossing axis ' + (dx ? 'x (east-west)' : 'z (north-south)') + ' - open sides x=' + xOpen + ' z=' + zOpen + ', facing=' + facing)
+        // PASSAGE CLEAR, not "open": a sideways-hung door (facing along the wall - THIS
+        // hut's door, hung by the builder, live) swings its OPEN panel flat ACROSS the
+        // doorway and rests its CLOSED panel parallel to the walk line - forcing
+        // open=true is exactly backwards there. The state's collision SHAPES are ground
+        // truth: the walk line is clear when no box crosses the corridor's center strip
+        // (bot body is 0.6 wide -> a panel overlapping [0.2, 0.8] of the perpendicular
+        // coordinate blocks the line). Toggle (bounded) until it clears.
+        const passageClear = () => {
+          const b = bot.blockAt(base)
+          if (!b) return true
+          let shapes = null
+          try { shapes = b.shapes } catch {}
+          if (!Array.isArray(shapes)) { // no shape data - old behavior (trust the open flag)
+            try { const pr = b.getProperties(); return !!pr && (pr.open === true || pr.open === 'true') } catch { return true }
+          }
+          return !shapes.some(s => dx ? (s[2] <= 0.8 && s[5] >= 0.2) : (s[0] <= 0.8 && s[3] >= 0.2))
+        }
+        const ensurePassage = async (when) => {
+          for (let i = 0; i < 2 && !passageClear(); i++) {
+            await bot.activateBlock(bot.blockAt(base))
+            await new Promise(r => setTimeout(r, 300)) // let the door state land
+            dbg('door-assist: toggled ' + blk.name + ' (' + when + ') - walk line ' + (passageClear() ? 'CLEAR' : 'still blocked'))
+          }
+        }
         // Exit toward OPEN SKY: "outside" is the side of the doorway with no ceiling.
         // (Away-from-where-I-stand flips when the bot is mid-doorway - verified: it
         // walked back INTO the hut. Ceiling check is position-independent.)
@@ -306,9 +329,11 @@ async function openNearbyDoor (bot, opts = {}) {
           }
           bot.setControlState('forward', false)
         }
-        // the pathfinder's native bump logic can TOGGLE the door shut again between our
-        // open and our walk - re-open if needed right before crossing
-        try { const b2 = bot.blockAt(base); const pr = b2 && b2.getProperties(); if (pr && !(pr.open === true || pr.open === 'true')) { await bot.activateBlock(b2); await new Promise(r => setTimeout(r, 250)); dbg('door-assist: re-opened before crossing') } } catch {}
+        // Normalize the door RIGHT BEFORE crossing (the align goto's native bump logic
+        // can toggle it behind our back) - and by SHAPES, not the open flag: this is
+        // where the sideways-hung door gets CLOSED so its panel swings out of the walk
+        // line (the old force-open here re-blocked the doorway every pass, live).
+        try { await ensurePassage('before crossing') } catch {}
         await walkTo(base.x + 0.5, base.z + 0.5, 0.45, 2500)                                    // into the doorway
         await walkTo(base.x + dx * sign * 2 + 0.5, base.z + dz * sign * 2 + 0.5, 0.6, 2500)     // out the far side
         const prog = (bot.entity.position.x - (base.x + 0.5)) * dx * sign + (bot.entity.position.z - (base.z + 0.5)) * dz * sign
