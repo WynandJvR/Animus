@@ -450,4 +450,4 @@ function honestFail (lastErr, counts, label, recoveryMs) {
   return e
 }
 
-module.exports = { navigateTo, gotoOnce, openNearbyDoor, isNavigating, isRecovering, setDebugSink, detectPit, goalWasChanged }
+module.exports = { navigateTo, gotoOnce, openNearbyDoor, swimToShore, isNavigating, isRecovering, setDebugSink, detectPit, goalWasChanged }

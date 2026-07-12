@@ -34,6 +34,54 @@ function saveTrail () {
 
 function key (p) { return `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}` }
 
+let dbgSink = null // injected by index.js: debug lines persist to logs/bot-events.log
+function setDebugSink (fn) { dbgSink = fn }
+const dbg = (...a) => {
+  const line = '[verify] ' + a.map(x => String(x)).join(' ')
+  if (process.env.BUILD_DEBUG) console.log(line)
+  if (dbgSink) dbgSink(line)
+}
+
+// ---- UNIVERSAL PLACE/BREAK VERIFICATION --------------------------------------------
+// On Paper a place/break is not "done" until the world says so: the server often never
+// echoes the blockUpdate for a SUCCESSFUL placement (phantom failures -> over-fill: a
+// threshold-fill stacked dirt to head height and walled its own door), and mineflayer
+// zeroes a dug cell LOCALLY when the dig timer elapses, so an instant post-dig read
+// reflects our own guess, not the server. These two polling primitives are the ONE way
+// to decide success, and the wrappers below make them mandatory for every
+// placeBlock/_placeBlockWithOptions/dig call in the codebase.
+const AIR_RE = /^(air|cave_air|void_air)$/
+
+// Did a block LAND at pos? Polls the world (Paper echo can lag). opts.before = the
+// cell's stateId snapshot from before the placement - required to catch a "place" into
+// a replaceable cell (tall grass) that silently failed: non-air alone would false-pass.
+async function placedOK (bot, pos, opts = {}) {
+  const deadline = Date.now() + (opts.timeoutMs != null ? opts.timeoutMs : 900)
+  for (;;) {
+    try {
+      const b = bot.blockAt(pos)
+      if (b && !AIR_RE.test(b.name) && (opts.before == null || b.stateId !== opts.before)) return true
+    } catch {}
+    if (Date.now() >= deadline) return false
+    await new Promise(r => setTimeout(r, 120))
+  }
+}
+
+// Is the cell at pos actually GONE (airish)? Polls, for symmetry with placedOK. Note
+// the local-zeroing caveat above: right after bot.dig resolves this reads our own
+// optimistic write - pass a timeoutMs of ~700+ and call it later when it matters.
+async function brokeOK (bot, pos, opts = {}) {
+  const deadline = Date.now() + (opts.timeoutMs != null ? opts.timeoutMs : 900)
+  for (;;) {
+    try {
+      const b = bot.blockAt(pos)
+      if (!b || AIR_RE.test(b.name)) return true
+    } catch {}
+    if (Date.now() >= deadline) return false
+    await new Promise(r => setTimeout(r, 120))
+  }
+}
+
 function sweep () {
   const cut = Date.now() - TRAIL_MS
   for (const [k, t] of recentlyPlaced) { if (t < cut) recentlyPlaced.delete(k) }
@@ -62,39 +110,100 @@ function selfPlacedNear (pos, r, maxAgeMs) {
 }
 
 function installPathfinderTuning (bot) {
-  // Wrap placeBlock once - three patches ride on it:
-  //  1. record self-placed cells (feeds the scaffold guard below)
-  //  2. TOWER TIMING: when placing the block under our own feet (1x1 tower), wait for
-  //     the jump APEX before sending - the lib fires at arbitrary jump phases and the
-  //     server rejects the mistimed ones, which is the bunny-hop spam the operator
-  //     watched ("jumps for a few seconds before it places one block")
-  //  3. PHANTOM FAILURES: Paper often never echoes the blockUpdate for a SUCCESSFUL
-  //     placement - the lib treats it as a miss and re-tries onto an existing block.
-  //     On that specific timeout, check the world before failing.
-  const origPlace = bot.placeBlock.bind(bot)
-  bot.placeBlock = async function (referenceBlock, faceVector) {
-    const target = referenceBlock.position.plus(faceVector)
-    try {
-      const feet = bot.entity.position.floored()
-      if (faceVector.y === 1 && target.x === feet.x && target.z === feet.z && target.y === feet.y) {
-        const t0 = Date.now()
-        while (Date.now() - t0 < 700 && (bot.entity.position.y - feet.y) < 0.95) await new Promise(r => setTimeout(r, 20))
+  if (!bot.__pathfixInstalled) {
+    bot.__pathfixInstalled = true
+    // Wrap the ONE placement primitive - bot._placeBlockWithOptions - and rebuild
+    // bot.placeBlock on top of it. (placeBlock is a closure over the lib-internal
+    // function, so wrapping placeBlock alone missed buildSurvival's tryPlace, which
+    // calls _placeBlockWithOptions directly - the verifier must catch BOTH.)
+    // Three patches ride on it:
+    //  1. record self-placed cells (feeds the scaffold guard below)
+    //  2. TOWER TIMING: when placing the block under our own feet (1x1 tower), wait for
+    //     the jump APEX before sending - the lib fires at arbitrary jump phases and the
+    //     server rejects the mistimed ones, which is the bunny-hop spam the operator
+    //     watched ("jumps for a few seconds before it places one block")
+    //  3. GROUNDED SUCCESS: the world re-read (placedOK) is the ONLY arbiter. The lib's
+    //     blockUpdate-timeout and "No block has been placed" both fall through to it -
+    //     Paper phantom failures resolve as the successes they are, and a place that
+    //     genuinely didn't land throws an honest error instead of trusting the ack.
+    const origPBWO = bot._placeBlockWithOptions.bind(bot)
+    async function verifiedPlace (referenceBlock, faceVector, options) {
+      const target = referenceBlock.position.plus(faceVector)
+      let before = null
+      try { const b0 = bot.blockAt(target); before = b0 ? b0.stateId : null } catch {}
+      try {
+        const feet = bot.entity.position.floored()
+        if (faceVector.y === 1 && target.x === feet.x && target.z === feet.z && target.y === feet.y) {
+          const t0 = Date.now()
+          while (Date.now() - t0 < 700 && (bot.entity.position.y - feet.y) < 0.95) await new Promise(r => setTimeout(r, 20))
+        }
+      } catch {}
+      try {
+        await origPBWO(referenceBlock, faceVector, options)
+      } catch (e) {
+        // real errors (not holding an item, no face, too far) stay errors; only the
+        // echo-shaped ones are re-judged against the world below
+        if (!/blockUpdate|No block has been placed/i.test(e.message || '')) throw e
       }
-    } catch {}
-    try {
-      const r = await origPlace(referenceBlock, faceVector)
-      try { recentlyPlaced.set(key(target), Date.now()); saveTrail(); if (recentlyPlaced.size > 256) sweep() } catch {}
-      return r
-    } catch (e) {
-      if (/blockUpdate/.test(e.message || '')) {
-        await new Promise(r => setTimeout(r, 350))
-        const b = bot.blockAt(target)
-        if (b && !/^(air|cave_air|void_air)$/.test(b.name)) {
-          try { recentlyPlaced.set(key(target), Date.now()); saveTrail() } catch {}
-          return // it landed - swallow the phantom failure
+      if (await placedOK(bot, target, { timeoutMs: 1200, before })) {
+        try { recentlyPlaced.set(key(target), Date.now()); saveTrail(); if (recentlyPlaced.size > 256) sweep() } catch {}
+        return
+      }
+      throw new Error(`place did not land at ${Math.floor(target.x)},${Math.floor(target.y)},${Math.floor(target.z)} (world re-read)`)
+    }
+    bot._placeBlockWithOptions = verifiedPlace
+    bot.placeBlock = (referenceBlock, faceVector) => verifiedPlace(referenceBlock, faceVector, { swingArm: 'right' })
+
+    // DIG VERIFICATION, same philosophy, different physics: mineflayer zeroes the cell
+    // locally when the dig timer elapses, so (a) a dig ERROR with the block actually
+    // gone is a phantom - swallow it; (b) a synchronous confirm would read our own
+    // optimistic write, and stalling every gather-dig ~700ms is unaffordable - so watch
+    // asynchronously for the server's CORRECTION and put it in the flight recorder:
+    // "which breaks did the server reject" was previously invisible, and grounded
+    // loops (buildSurvival passes, clear/fill re-reads) pick the truth up from there.
+    const origDig = bot.dig.bind(bot)
+    bot.dig = async function (block, ...rest) {
+      const pos = block && block.position && block.position.clone ? block.position.clone() : (block && block.position)
+      try {
+        await origDig(block, ...rest)
+      } catch (e) {
+        if (!pos) throw e
+        await new Promise(r => setTimeout(r, 150))
+        if (await brokeOK(bot, pos, { timeoutMs: 0 })) return // it broke - phantom failure
+        throw e
+      }
+      if (pos) {
+        setTimeout(() => {
+          try {
+            const b = bot.blockAt(pos)
+            if (b && !AIR_RE.test(b.name)) dbg('dig at ' + pos.x + ',' + pos.y + ',' + pos.z + ' REJECTED by the server (block back: ' + b.name + ')')
+          } catch {}
+        }, 700)
+      }
+    }
+
+    // WINDOW-OPEN VERIFICATION (same disease, container flavor): the lib's openBlock /
+    // openEntity fire activateBlock/Entity then await 'windowOpen' with NO TIMEOUT - a
+    // lost or rejected open (mob hit mid-open, lag, reach edge) hangs the caller
+    // FOREVER. Every chest count / withdraw / deposit / furnace open / grave GUI
+    // funnels through these two. Deadline + one clean retry + an honest error replace
+    // the scattered per-caller timeout hacks (openFurnace retry, grave "won't open").
+    for (const fname of ['openBlock', 'openEntity']) {
+      const orig = bot[fname].bind(bot)
+      bot[fname] = async function (target, ...rest) {
+        for (let attempt = 0; ; attempt++) {
+          const w = await Promise.race([
+            orig(target, ...rest).catch(e => ({ __err: e || new Error('open failed') })),
+            new Promise(resolve => setTimeout(() => resolve(null), 5000))
+          ])
+          if (w && !w.__err) return w
+          const why = w && w.__err ? (w.__err.message || 'open failed') : 'window did not open within 5s'
+          if (attempt >= 1) throw new Error(fname + ': ' + why + ' (2 attempts, world-verified)')
+          dbg(fname + ' attempt 1 failed (' + why + ') - closing any half-open window and retrying')
+          try { if (bot.currentWindow) bot.closeWindow(bot.currentWindow) } catch {}
+          await new Promise(r => setTimeout(r, 500))
         }
       }
-      throw e
     }
   }
   // forbid the planner from digging those cells: safeToBreak is the single gate every
@@ -123,4 +232,4 @@ function installPathfinderTuning (bot) {
   } catch {}
 }
 
-module.exports = { installPathfinderTuning, selfPlacedNear, isSelfPlaced }
+module.exports = { installPathfinderTuning, selfPlacedNear, isSelfPlaced, placedOK, brokeOK, setDebugSink }

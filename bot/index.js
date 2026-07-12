@@ -212,6 +212,7 @@ commands.setDebugSink(noteDebug)
 provision.setDebugSink(noteDebug)
 resources.setDebugSink(noteDebug)
 navigate.setDebugSink(noteDebug)
+require('./pathfix.js').setDebugSink(noteDebug) // [verify] place/dig world-recheck traces
 // A build job saved to disk survived a process restart - let the operator know it's resumable.
 try {
   const rj = commands.persistedResume && commands.persistedResume()
@@ -768,6 +769,13 @@ if (process.env.AUTO_COLLECT !== '0') {
       for (const e of Object.values(bot.entities || {})) {
         if (!e || !e.position) continue
         if (e.name !== 'item') continue // real drops only (the 'item' entity type)
+        // NEVER dive for drops: items sunk in water lured the idle bot to the river
+        // bottom and it drowned reclaiming its own death-drops (test server, verified
+        // by the server log). Submerged junk isn't worth a corpse-run either way.
+        try {
+          const at = bot.blockAt(e.position.floored()); const above = bot.blockAt(e.position.floored().offset(0, 1, 0))
+          if ((at && /water/.test(at.name)) || (above && /water/.test(above.name))) continue
+        } catch {}
         const d = e.position.distanceTo(me); if (d > 1.3 && d < bestD) { bestD = d; best = e }
       }
       if (!best) return
@@ -777,6 +785,32 @@ if (process.env.AUTO_COLLECT !== '0') {
       await bot.pathfinder.goto(new goals.GoalNear(best.position.x, best.position.y, best.position.z, 0))
     } catch { /* item vanished / unreachable - retry next tick */ } finally { collecting = false }
   }, 3000)
+}
+
+// SURFACE REFLEX (survival tier, like auto-defend): head underwater for 8+ seconds
+// means whatever flow is running is failing to keep the bot breathing - take the
+// controls and swim ashore. The rest/shelter flows carry their own ashore guards, and
+// navigation recoveries may be mid-maneuver, so those get right of way; everything
+// else (a build placing river-bank cells, a stray goto, an idle bob) gets rescued.
+// Disable with AUTO_SURFACE=0.
+if (process.env.AUTO_SURFACE !== '0') {
+  let wetTicks = 0
+  let surfacing = false
+  setInterval(async () => {
+    if (surfacing || !bot.entity) return
+    let headWet = false
+    try { const h = bot.blockAt(bot.entity.position.floored().offset(0, 1, 0)); headWet = !!(h && /water/.test(h.name)) } catch {}
+    if (!headWet) { wetTicks = 0; return }
+    wetTicks++
+    if (wetTicks < 4) return // 4 ticks x 2s = 8s submerged before intervening
+    if ((commands.isEscaping && commands.isEscaping()) || navigate.isRecovering() || (provision.isResting && provision.isResting())) return
+    surfacing = true
+    try {
+      note('(surface) head underwater 8s+ - taking the controls and swimming ashore')
+      try { bot.pathfinder.setGoal(null) } catch {}
+      await navigate.swimToShore(bot, () => false)
+    } catch {} finally { surfacing = false; wetTicks = 0 }
+  }, 2000)
 }
 
 // Auto-torch (OPT-IN, default OFF - set AUTO_TORCH=1): a companion that lights the

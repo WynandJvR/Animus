@@ -1029,6 +1029,31 @@ async function huntForFood (bot, opts = {}) {
 const SHELTER_HOSTILE = /zombie|skeleton|spider|creeper|husk|drowned|witch|pillager|vindicator|stray|bogged|phantom|slime|enderman|silverfish|cave_spider|warden/
 let _sheltering = false
 function isSheltering () { return _sheltering } // reflexes (flee/defend) yield while true
+
+// NEVER rest IN water. The night carousel drowned the bot in its own flooding pit
+// (observed on test server, hp 20 -> death while every command was held): resting flows
+// cycled dig attempts while it bobbed in a basin, and nothing ever LEFT the water.
+// Every rest/shelter entry point gets ashore first; bounded, honest about failure.
+function inWaterNow (bot) {
+  if (!bot.entity) return false
+  const f = bot.blockAt(bot.entity.position.floored())
+  const h = bot.blockAt(bot.entity.position.floored().offset(0, 1, 0))
+  return !!((f && /water/.test(f.name)) || (h && /water/.test(h.name)))
+}
+async function ensureAshore (bot, isStopped = () => false) {
+  if (!inWaterNow(bot)) return true
+  dbg('rest: in water - getting ashore before any resting')
+  try { if (await navigate.swimToShore(bot, isStopped)) return true } catch {}
+  try { await manualHopFromWater(bot) } catch {}
+  return !inWaterNow(bot)
+}
+// Where a shelter pit last FLOODED - do not dig another hole next to the same aquifer
+// for a while (the re-dig loop beside water is the entombment/drowning mechanism).
+let lastFlood = null // {x, z, at}
+function nearRecentFlood (bot) {
+  if (!lastFlood || Date.now() - lastFlood.at > 600000 || !bot.entity) return false
+  return Math.hypot(bot.entity.position.x - lastFlood.x, bot.entity.position.z - lastFlood.z) <= 6
+}
 function nearHostile (bot, r) {
   const me = bot.entity && bot.entity.position; if (!me) return false
   for (const e of Object.values(bot.entities || {})) {
@@ -1116,6 +1141,17 @@ async function digInForNight (bot, opts = {}) {
   _sheltering = true
   try {
     bot.pathfinder && bot.pathfinder.setGoal(null)
+    // IN WATER? Get ashore FIRST - digging attempts from a water column all fail while
+    // the bot drowns through the retry carousel (watched it die that way on the test
+    // server). If we can't reach land, say so honestly instead of pretending to shelter.
+    if (!(await ensureAshore(bot, isStopped))) { dbg('shelter: stuck in water - cannot dig in here'); return false }
+    // Don't dig a fresh hole beside the aquifer that just flooded the last one - walk
+    // clear of it first (re-digging at the same wet spot is the drowning loop).
+    if (nearRecentFlood(bot)) {
+      const away = { x: bot.entity.position.x + (bot.entity.position.x >= lastFlood.x ? 8 : -8), z: bot.entity.position.z + (bot.entity.position.z >= lastFlood.z ? 8 : -8) }
+      dbg('shelter: too close to the pit that flooded - moving to ' + Math.round(away.x) + ',' + Math.round(away.z) + ' first')
+      try { await gotoWithTimeout(bot, new goals.GoalNearXZ(away.x, away.z, 2), 15000) } catch {}
+    }
     // NEVER dig the bunker inside the active build footprint - step just past the nearest
     // edge first (a pit under the castle floor is a hole in the build, operator rule).
     const p0 = bot.entity.position
@@ -1148,6 +1184,13 @@ async function digInForNight (bot, opts = {}) {
         while (Date.now() < dl && !isStopped()) {
           if (!isNight(bot) && !nearHostile(bot, 10)) break
           if (!recapped && (bot.health || 20) < hpX - 3) { dbg('shelter: hit in the open bunker - bailing'); break }
+          // same flooding bail as the fresh-pit wait: a reused bunker beside an aquifer
+          // can flood too, and this loop had no way out (drowned sealed, test server)
+          if (inWaterNow(bot)) {
+            dbg('shelter: reused bunker is FLOODING - emergency exit')
+            lastFlood = { x: bot.entity.position.x, z: bot.entity.position.z, at: Date.now() }
+            break
+          }
           await new Promise(r => setTimeout(r, 3000))
         }
         try {
@@ -1284,10 +1327,12 @@ async function digInForNight (bot, opts = {}) {
       if (!fullySealed && (bot.health || 20) < hp0 - 3) { dbg('shelter: taking damage in a LEAKY pit - bailing out to fight/flee'); break }
       // DROWNING BAIL: water reaching the body cells means the pit is flooding - get out
       // NOW, sealed or not (a "sealed" pit beside an aquifer drowned the bot at 4hp, live)
-      const feetB = bot.blockAt(bot.entity.position.floored())
-      const headB = bot.blockAt(bot.entity.position.floored().offset(0, 1, 0))
-      if ((feetB && /water/.test(feetB.name)) || (headB && /water/.test(headB.name))) {
+      if (inWaterNow(bot)) {
         dbg('shelter: pit is FLOODING - emergency exit')
+        // remember the spot so the next shelter attempt digs somewhere DRY, and drop the
+        // registered bunker here - re-entering a flooded pit is not shelter
+        lastFlood = { x: bot.entity.position.x, z: bot.entity.position.z, at: Date.now() }
+        try { const reg = recallInfra('shelter', bot.entity.position, 3); if (reg) forgetInfra('shelter', listInfra('shelter').find(e => e.x === reg.x && e.z === reg.z)) } catch {}
         break
       }
       await new Promise(r => setTimeout(r, 3000))
@@ -1300,6 +1345,8 @@ async function digInForNight (bot, opts = {}) {
       if (cap && !AIRISH(cap.name) && (!bot.canDigBlock || bot.canDigBlock(cap))) { try { await bot.dig(cap) } catch {} }
       await collectDrops(bot, 3) // recover the cap block as filler
       await climbToSurface(bot, surfaceY, { isStopped })
+      // a FLOODED pit defeats climbToSurface (its dig primitives refuse water) - swim out
+      if (inWaterNow(bot)) await ensureAshore(bot, isStopped)
     } catch {}
     return true
   } finally { _sheltering = false; bot.clearControlStates && bot.clearControlStates() }
@@ -1530,6 +1577,9 @@ async function nightRest (bot, opts = {}) {
 async function nightRestInner (bot, opts = {}) {
   const say = opts.say || (() => {})
   const isStopped = opts.isStopped || (() => false)
+  // dusk catches the bot swimming often enough (rivers everywhere) - get to land BEFORE
+  // deciding bed-vs-pit, or the pit path dig-fails in a loop while it drowns
+  await ensureAshore(bot, isStopped)
   const bed = knownBed()
   if (bed && bot.entity && !_sheltering) {
     const d = Math.hypot(bed.x - bot.entity.position.x, bed.z - bot.entity.position.z)
@@ -1833,6 +1883,9 @@ async function restUntilSafe (bot, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   let waited = false
   while (isNight(bot) && underArmored(bot) && !isStopped() && bot.entity) {
+    // HOLDING must never mean holding UNDERWATER - the 4s waits between failed rest
+    // attempts are exactly where the bot drowned (test server, in its flooded basin)
+    if (inWaterNow(bot)) { try { await ensureAshore(bot, isStopped) } catch {} }
     if (!isResting()) { try { if (await nightRest(bot, opts)) { waited = true; continue } } catch {} }
     if (!waited) { waited = true; dbg('restUntilSafe: HOLDING for the night (another rest active or rest failed - not working in the dark)') }
     await new Promise(r => setTimeout(r, 4000))
