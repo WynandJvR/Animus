@@ -1141,6 +1141,14 @@ async function digInForNight (bot, opts = {}) {
       const below2 = bot.blockAt(feet.offset(0, -2, 0))
       if (!below || AIRISH(below.name) || /lava|water/.test(below.name) || !canBreakNaturally(below)) { dbg('shelter: dig blocked at ' + i + ' (' + (below ? below.name : 'unloaded') + ')'); break }
       if (below2 && /lava|water/.test(below2.name)) { dbg('shelter: liquid 2 below - not digging'); break }
+      // NEVER open a cell whose SIDE touches liquid - an aquifer beside the shaft floods
+      // the pit the instant the wall drops (drowned at 4hp in its own sealed pit, live).
+      let sideLiquid = null
+      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const s = bot.blockAt(below.position.offset(dx, 0, dz))
+        if (s && /lava|water/.test(s.name)) { sideLiquid = s.name; break }
+      }
+      if (sideLiquid) { dbg('shelter: ' + sideLiquid + ' beside the next cell - not digging deeper'); break }
       const tool = toolForBlock(bot, below.name)
       if (tool) await bot.equip(tool, 'hand').catch(() => {})
       if (bot.canDigBlock && !bot.canDigBlock(below)) { dbg('shelter: canDigBlock=false for ' + below.name); break }
@@ -1196,9 +1204,11 @@ async function digInForNight (bot, opts = {}) {
       for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
         const cell = bot.entity.position.floored().offset(dx, dy, dz)
         const b = bot.blockAt(cell)
-        if (b && AIRISH(b.name)) {
+        // liquid counts as a hole: AIRISH misses water, so an aquifer wall was silently
+        // skipped and flooded the sealed pit (drowning death, live)
+        if (b && (AIRISH(b.name) || /lava|water/.test(b.name))) {
           if (await placeAt(bot, cell, CAP_RE)) dbg('shelter: walled a side hole at ' + cell.toString())
-          else { sideHoles++; dbg('shelter: side hole at ' + cell.toString() + ' UNSEALED - ' + (placeAt.lastFail || '?')) }
+          else { sideHoles++; dbg('shelter: side hole at ' + cell.toString() + ' UNSEALED (' + b.name + ') - ' + (placeAt.lastFail || '?')) }
         }
       }
     }
@@ -1214,6 +1224,14 @@ async function digInForNight (bot, opts = {}) {
     while (Date.now() < deadline && !isStopped()) {
       if (!isNight(bot) && !nearHostile(bot, 10)) break
       if (!fullySealed && (bot.health || 20) < hp0 - 3) { dbg('shelter: taking damage in a LEAKY pit - bailing out to fight/flee'); break }
+      // DROWNING BAIL: water reaching the body cells means the pit is flooding - get out
+      // NOW, sealed or not (a "sealed" pit beside an aquifer drowned the bot at 4hp, live)
+      const feetB = bot.blockAt(bot.entity.position.floored())
+      const headB = bot.blockAt(bot.entity.position.floored().offset(0, 1, 0))
+      if ((feetB && /water/.test(feetB.name)) || (headB && /water/.test(headB.name))) {
+        dbg('shelter: pit is FLOODING - emergency exit')
+        break
+      }
       await new Promise(r => setTimeout(r, 3000))
     }
     // 4) break the cap and climb back to the surface. Use climbToSurface (staircase-up,
