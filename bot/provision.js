@@ -217,6 +217,7 @@ function detectWood (bot) {
 // same philosophy as the MINABLE allowlist in commands.js).
 const GATHER_SOURCES = {
   cobblestone: ['stone'], // mine natural STONE (drops cobble); never target placed cobblestone (a common player block)
+  raw_iron: ['iron_ore', 'deepslate_iron_ore'], // iron armor bootstrap (pillager patrols eat naked bots)
   dirt: ['dirt', 'grass_block'],
   sand: ['sand'],
   red_sand: ['red_sand'],
@@ -235,11 +236,13 @@ const GATHER_SOURCES = {
 // gathers that REQUIRE a tool or drop nothing / can't be mined. Stone mined with
 // bare hands drops NOTHING - a pickaxe is mandatory, not just faster.
 const GATHER_TOOL = {
-  cobblestone: 'wooden_pickaxe'
+  cobblestone: 'wooden_pickaxe',
+  raw_iron: 'stone_pickaxe' // iron ore drops nothing below stone tier
 }
 
 // smelt-only outputs: output item -> furnace input item (recursively provisioned)
 const SMELT_MAP = {
+  iron_ingot: 'raw_iron',
   glass: 'sand',
   stone: 'cobblestone',
   smooth_stone: 'stone',

@@ -2244,6 +2244,36 @@ async function autoBuild (bot, schem, at, opts = {}) {
     try { const r = await provisionArmor(bot, { say, isStopped, restoreMovements: restore, home: { x: at.x, z: at.z }, maxRoam: 48, maxExplores: 1, timeMs: 60000 }); if (r) say(r) }
     catch (e) { say(`(armor bootstrap skipped: ${e.message})`) }
   }
+  // IRON BOOTSTRAP (the root fix for the naked death-churn: a pillager patrol interdicted
+  // the site for hours and leather needs cows that don't exist here). When still bare
+  // with a stone pick available, mine/smelt/craft the iron set - the planner handles the
+  // whole chain now (raw_iron gather -> iron_ingot smelt -> armor crafts). Bounded by the
+  // plan's own budgets; the build continues with whatever it achieved.
+  if (!isStopped() && process.env.IRON_BOOTSTRAP !== '0' && anyBare()) {
+    try {
+      const want = {}
+      const worn = wornArmor(bot)
+      if (!worn.head) want.iron_helmet = 1
+      if (!worn.torso) want.iron_chestplate = 1
+      if (!worn.legs) want.iron_leggings = 1
+      if (!worn.feet) want.iron_boots = 1
+      // stage 1: a stone pick FIRST (the planner orders it after the iron gather that
+      // needs it - offline-verified); stage 2 then plans cleanly around the owned pick
+      if (!(bot.inventory ? bot.inventory.items() : []).some(i => /(stone|iron|diamond)_pickaxe/.test(i.name))) {
+        const pp = provision.planProvision(mcData, { stone_pickaxe: 1 }, provision.inventoryCounts(bot), { primaryWood })
+        if (pp.tasks.length) await provision.runPlan(bot, pp, { say, isStopped, restoreMovements: restore, homeY: Math.floor(at.y), home: { x: Math.round(at.x), y: Math.floor(at.y), z: Math.round(at.z) }, avoid })
+      }
+      const ip = provision.planProvision(mcData, want, provision.inventoryCounts(bot), { primaryWood, furnacesNearby: provision.countFurnacesNear(bot) })
+      if (Object.keys(ip.unobtainable || {}).length) { dbg('iron bootstrap: unobtainable ' + JSON.stringify(ip.unobtainable)) }
+      else if (ip.tasks.length) {
+        say('no cows around - mining iron for real armor before this patrol kills me again')
+        dbg('iron bootstrap plan: ' + ip.tasks.map(t => `${t.type}:${t.item || t.output}x${t.count || t.crafts || ''}`).join(' > '))
+        await provision.runPlan(bot, ip, { say, isStopped, restoreMovements: restore, homeY: Math.floor(at.y), home: { x: Math.round(at.x), y: Math.floor(at.y), z: Math.round(at.z) }, avoid })
+        const r = await handle(bot, 'wear')
+        say('armor status: ' + r)
+      }
+    } catch (e) { dbg('iron bootstrap failed (' + e.message + ') - continuing bare') }
+  }
 
   // The chest is created LAZILY - only once we actually have materials to stash
   // (crafting one needs planks the from-nothing bot doesn't have up front) and only
