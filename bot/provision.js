@@ -1825,6 +1825,36 @@ async function prepOrchardCell (bot, cx, baseY, cz, { isStopped = () => false } 
   return ground
 }
 
+// Level ONE plot cell toward baseY: clear soft cover, shave a bump (<=2, natural only),
+// fill a 1-deep dip with dirt. The whole-plot flattening pass (operator review: "very
+// uneven terrain, not a clean flat area") - each call is cheap when the cell's already flat.
+async function levelPlotCell (bot, cx, baseY, cz, { isStopped = () => false } = {}) {
+  let ground = null
+  for (let y = baseY + 3; y >= baseY - 2; y--) {
+    const b = bot.blockAt(new Vec3(cx, y, cz)); const a = bot.blockAt(new Vec3(cx, y + 1, cz))
+    if (b && b.boundingBox === 'block' && a && (AIRISH(a.name) || REPLACEABLE.test(a.name))) { ground = b; break }
+  }
+  if (!ground) return false
+  if (ground.position.y === baseY && AIRISH((bot.blockAt(ground.position.offset(0, 1, 0)) || { name: 'air' }).name)) return true // already flat
+  if (bot.entity.position.distanceTo(ground.position) > 4) { try { await gotoWithTimeout(bot, new goals.GoalNear(cx, ground.position.y, cz, 3), 8000) } catch { return false } }
+  for (let dy = 1; dy <= 2; dy++) { // soft cover off first
+    const v = bot.blockAt(ground.position.offset(0, dy, 0))
+    if (v && !AIRISH(v.name) && /grass|fern|flower|dead_bush|snow|vine/.test(v.name)) { try { await bot.dig(v) } catch {} }
+  }
+  let guard = 2
+  while (ground.position.y > baseY && guard-- > 0 && !isStopped()) { // shave bump
+    if (!canBreakNaturally(ground) || (bot.canDigBlock && !bot.canDigBlock(ground))) break
+    try { await bot.dig(ground); await collectDrops(bot, 3) } catch { break }
+    const nb = bot.blockAt(new Vec3(cx, ground.position.y - 1, cz))
+    if (!nb || nb.boundingBox !== 'block') break
+    ground = nb
+  }
+  if (ground.position.y < baseY) { // fill dip (one layer per pass)
+    await placeAt(bot, ground.position.offset(0, 1, 0), /^(dirt|grass_block|cobblestone)$/)
+  }
+  return true
+}
+
 // Plant an ORCHARD: an even grid (5-block lanes) on prepped, level ground near - but
 // never inside - the build's keep-out box. Operator spec: "a nice opening with flat
 // ground, trees planted evenly so it's easy to navigate and use". Returns count planted.
@@ -1835,6 +1865,27 @@ async function plantGrove (bot, home, logItem, { isStopped = () => false, say = 
   if (isStopped()) return 0
   const baseY = Math.floor(bot.entity.position.y) - 1 // plot level = the ground we stand on
   const cols = Math.min(4, Math.max(2, Math.ceil(Math.sqrt(max))))
+  // FLATTEN THE WHOLE PLOT first - lanes included (operator review: the per-cell-only
+  // prep left "very uneven terrain, not a clean flat area"). Bounded: corrective work
+  // is capped, flat cells cost one block-read each.
+  {
+    const w = cols * 5; const h = 4 * 5
+    let ops = 0
+    say('leveling the orchard plot first')
+    outerLevel:
+    for (let dz = -1; dz <= h && !isStopped(); dz++) {
+      for (let dx = -1; dx <= w; dx++) {
+        const cx = gx + dx; const cz = gz + dz
+        if (inAvoidBox(avoid, cx, cz)) continue
+        const g0 = bot.blockAt(new Vec3(cx, baseY, cz))
+        const a0 = bot.blockAt(new Vec3(cx, baseY + 1, cz))
+        if (g0 && g0.boundingBox === 'block' && a0 && AIRISH(a0.name)) continue // flat already - free
+        try { if (await levelPlotCell(bot, cx, baseY, cz, { isStopped })) ops++ } catch {}
+        if (ops >= 60) { dbg('  orchard: leveling budget spent (' + ops + ' cells corrected) - planting on what we have'); break outerLevel }
+      }
+    }
+    dbg('  orchard: plot leveled (' + ops + ' cells corrected)')
+  }
   const sap = () => (bot.inventory ? bot.inventory.items() : []).find(i => i.name === saplingFor(logItem))
   let planted = 0
   for (let r = 0; r < 4 && planted < max && !isStopped(); r++) {
