@@ -196,20 +196,36 @@ function cliffAhead (bot, tx, tz) {
 // the exit side is picked by open sky ("outside") - which can only ever LEAVE a building;
 // a goto INTO the hut needs to cross the other way (navigateTo passes the goal through).
 const OPENABLE_RE = /(_door|_fence_gate)$/
-function doorNearby (bot) { // cheap existence probe - gates the ladder rung
+function openableIds (bot) {
+  const md = require('minecraft-data')(bot.version)
+  return Object.values(md.blocksByName).filter(b => OPENABLE_RE.test(b.name) && b.name !== 'iron_door').map(b => b.id)
+}
+// Scan centers: around the BOT and around the GOAL. A goto into a doored building
+// times out wherever the planner happened to roam (live: 27 blocks off, hunting a way
+// into a closed box) - the door that matters is the one next to the GOAL, not the bot.
+function doorScanPoints (bot, towards) {
+  const pts = [bot.entity.position]
+  if (towards && typeof towards.x === 'number') pts.push(new Vec3(towards.x, towards.y != null ? towards.y : bot.entity.position.y, towards.z))
+  return pts
+}
+function doorNearby (bot, towards) { // cheap existence probe - gates the ladder rung
   try {
-    const md = require('minecraft-data')(bot.version)
-    const ids = Object.values(md.blocksByName).filter(b => OPENABLE_RE.test(b.name) && b.name !== 'iron_door').map(b => b.id)
-    return (bot.findBlocks({ matching: ids, maxDistance: 16, count: 1 }) || []).length > 0
+    const ids = openableIds(bot)
+    return doorScanPoints(bot, towards).some(pt => (bot.findBlocks({ point: pt, matching: ids, maxDistance: 16, count: 1 }) || []).length > 0)
   } catch { return false }
 }
 async function openNearbyDoor (bot, opts = {}) {
   try {
-    const md = require('minecraft-data')(bot.version)
-    const ids = Object.values(md.blocksByName).filter(b => OPENABLE_RE.test(b.name) && b.name !== 'iron_door').map(b => b.id)
-    const cands = (bot.findBlocks({ matching: ids, maxDistance: 16, count: 8 }) || [])
-      .sort((a, b) => a.distanceTo(bot.entity.position) - b.distanceTo(bot.entity.position))
-    dbg('door-assist: ' + cands.length + ' door/gate candidates within 16')
+    const ids = openableIds(bot)
+    const seen = new Set(); const cands = []
+    for (const pt of doorScanPoints(bot, opts.towards)) {
+      for (const c of (bot.findBlocks({ point: pt, matching: ids, maxDistance: 16, count: 8 }) || [])) {
+        const k = c.x + ',' + c.y + ',' + c.z
+        if (!seen.has(k)) { seen.add(k); cands.push(c) }
+      }
+    }
+    cands.sort((a, b) => a.distanceTo(bot.entity.position) - b.distanceTo(bot.entity.position))
+    dbg('door-assist: ' + cands.length + ' door/gate candidates near me/goal')
     for (const p of cands) {
       const blk = bot.blockAt(p)
       if (!blk) continue
@@ -367,6 +383,7 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
     return Math.hypot(p1.x - p0.x, p1.z - p0.z) >= 2 || Math.floor(p1.y) > Math.floor(p0.y)
   }
   const xz = goalXZ(goal)
+  const twd = xz ? { x: xz.x, z: xz.z, y: goalY(goal) } : null // door scans also look near the GOAL
   const ladder = [
     { // in water the pathfinder never registers "on ground", so its planned jumps never
       // fire - it stands in a puddle forever (watched live, 8 min). Shallow trench: hop
@@ -401,8 +418,8 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
       // its hut wall the rung was spent (live: re-entry died at (420,66,85), 3 blocks
       // from its own door, with 'door x3' all wasted 60+ blocks away).
       kind: 'door',
-      when: () => doorNearby(bot),
-      run: async () => openNearbyDoor(bot, { towards: xz })
+      when: () => doorNearby(bot, twd),
+      run: async () => openNearbyDoor(bot, { towards: twd })
     },
     { // buried underground (real ceiling, not a canopy): staircase/pillar up to daylight.
       kind: 'climb',
