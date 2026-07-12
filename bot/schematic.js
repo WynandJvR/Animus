@@ -474,6 +474,37 @@ async function clearVolume (bot, schem, at, opts = {}) {
       }
       if (!did) break // nothing left reachable -> done
     }
+    // FOUNDATION FILL (operator: "create even terrain with dirt"): after clearing the box,
+    // the bottom schematic layer may sit over holes/valley. Fill any air cell directly
+    // under the lowest solid schematic cells with dirt so the build rests on even ground
+    // instead of floating. Bounded, dirt only, footprint-scoped.
+    try {
+      let filled = 0
+      for (let z = at.z + st.z; z <= at.z + en.z && filled < 400; z++) {
+        for (let x = at.x + st.x; x <= at.x + en.x; x++) {
+          // the schematic's lowest SOLID cell in this column
+          let floorY = null
+          for (let sy = st.y; sy <= en.y; sy++) { const w = schem.getBlock(new Vec3(x - at.x, sy, z - at.z)); if (w && !AIR.test(w.name)) { floorY = at.y + sy; break } }
+          if (floorY == null) continue
+          const support = bot.blockAt(new Vec3(x, floorY - 1, z))
+          if (support && support.boundingBox === 'block') continue // already solid ground
+          if (support && /lava|water/.test(support.name)) continue // don't fight liquid here
+          const dirt = (bot.inventory ? bot.inventory.items() : []).find(i => /^(dirt|coarse_dirt|cobblestone)$/.test(i.name))
+          if (!dirt) break
+          try {
+            const cell = new Vec3(x, floorY - 1, z)
+            if (bot.entity.position.distanceTo(cell) > 4) await gotoWithTimeout(bot, new goals.GoalNear(x, floorY, z, 3), 10000)
+            await bot.equip(dirt, 'hand')
+            // place against whatever solid sits below the hole
+            let refY = floorY - 2
+            while (refY > floorY - 6) { const rb = bot.blockAt(new Vec3(x, refY, z)); if (rb && rb.boundingBox === 'block') break; refY-- }
+            const ref = bot.blockAt(new Vec3(x, refY, z))
+            if (ref && ref.boundingBox === 'block') { await bot.placeBlock(ref, new Vec3(0, 1, 0)); filled++ }
+          } catch { /* skip this column */ }
+        }
+      }
+      if (filled && opts.say) opts.say(`filled ${filled} dirt to even the ground under the build`)
+    } catch {}
   } finally { bot.pathfinder.setGoal(null) }
   return removed
 }

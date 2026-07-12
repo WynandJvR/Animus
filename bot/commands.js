@@ -2182,11 +2182,24 @@ function snapToGround (bot, schem, at) {
     }
     if (matches >= 5) return at // enough of the build already stands here - resume in place
   } catch { /* schematic read hiccup - fall through to the normal snap */ }
-  const cx = at.x + Math.floor((st.x + en.x) / 2)
-  const cz = at.z + Math.floor((st.z + en.z) / 2)
-  const surf = surfaceYAt(bot, cx, cz, at.y + st.y)
-  if (surf == null) return at
-  return new Vec3(at.x, surf + 1 - st.y, at.z) // bottom layer (at.y+st.y) lands on surf+1
+  // GROUND LEVEL, least clearing (operator: "find the Y with the least clearing - still
+  // ground level, not buried, not floating"): sample the surface across the WHOLE
+  // footprint and sit the base at the MEDIAN. The median is normal ground - hilltops
+  // above it get shaved by clearVolume, dips below get dirt-filled - so we never carve a
+  // build deep into a mountain (origin below surface) nor leave it floating on a spike.
+  const surfs = []
+  const sx = Math.max(1, Math.floor((en.x - st.x) / 4))
+  const sz = Math.max(1, Math.floor((en.z - st.z) / 4))
+  for (let x = st.x; x <= en.x; x += sx) {
+    for (let z = st.z; z <= en.z; z += sz) {
+      const s = surfaceYAt(bot, at.x + x, at.z + z, at.y + st.y)
+      if (s != null) surfs.push(s)
+    }
+  }
+  if (!surfs.length) return at
+  surfs.sort((a, b) => a - b)
+  const med = surfs[Math.floor(surfs.length / 2)]
+  return new Vec3(at.x, med + 1 - st.y, at.z) // bottom layer lands on median-surface + 1
 }
 
 // Full self-provisioned build ("sent off with nothing -> builds it"): if we already
@@ -2752,7 +2765,10 @@ async function resumeBuild (bot) {
     }
     resumeDeaths = 0; dbg('resume: back at the site - death counter reset')
     result = await autoBuild(bot, job.schem, job.at, {
-      say, isStopped: () => buildAbort, restoreMovements: () => setupMovements(bot), clear: false
+      // FLATTEN THE FOOTPRINT (operator: "if there's a mountain in the way, build inside
+      // it? flatten and make even terrain with dirt first"): empty the build box of any
+      // intruding terrain and fill holes under the floor with dirt before placing.
+      say, isStopped: () => buildAbort, restoreMovements: () => setupMovements(bot), clear: true
     })
     return result
   } finally {
