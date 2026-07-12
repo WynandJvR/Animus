@@ -1576,15 +1576,17 @@ async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () =
   const ringSeen = new Set()
   for (const wp of waters.slice(0, 8)) {
     for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1]]) {
-      const gp = wp.offset(dx, 0, dz)
-      const k = gp.x + ',' + gp.z
-      if (ringSeen.has(k) || inAvoidBox(avoid, gp.x, gp.z)) continue
+      const k = (wp.x + dx) + ',' + (wp.z + dz)
+      if (ringSeen.has(k) || inAvoidBox(avoid, wp.x + dx, wp.z + dz)) continue
       ringSeen.add(k)
-      const g = bot.blockAt(gp); const above = bot.blockAt(gp.offset(0, 1, 0))
-      // sand banks welcome too - most ponds here have them, and requiring grass/dirt made
-      // the ring EMPTY and the farm fail in 1ms every camp pass (live, all morning). Sand
-      // can't be tilled, so those cells get swapped for a carried dirt block below.
-      if (g && /^(grass_block|dirt|sand|red_sand)$/.test(g.name) && above && REPLACEABLE.test(above.name)) ring.push(g)
+      // sand/gravel/clay banks welcome (untillable ones get swapped for carried dirt), and
+      // the bank may sit level with, one below, or a step above the waterline - same-y
+      // grass/dirt-only made the ring EMPTY at every pond here (live: "0 bank cells").
+      for (const dy of [0, -1, 1]) {
+        const gp = wp.offset(dx, dy, dz)
+        const g = bot.blockAt(gp); const above = bot.blockAt(gp.offset(0, 1, 0))
+        if (g && /^(grass_block|dirt|sand|red_sand|gravel|clay)$/.test(g.name) && above && REPLACEABLE.test(above.name)) { ring.push(g); break }
+      }
     }
   }
   dbg('  wheat farm: ' + ring.length + ' bank cell(s) by the water at ' + w.x + ',' + w.z)
@@ -1594,7 +1596,7 @@ async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () =
       if (bot.entity.position.distanceTo(cell.position) > 4) await gotoWithTimeout(bot, new goals.GoalNear(cell.position.x, cell.position.y, cell.position.z, 2), 12000)
       const veg = bot.blockAt(cell.position.offset(0, 1, 0))
       if (veg && !AIRISH(veg.name)) { try { await bot.dig(veg) } catch {} }
-      if (/sand/.test(cell.name)) { // SAND-BANK SWAP: dig the sand, lay owned dirt, till that
+      if (/sand|gravel|clay/.test(cell.name)) { // UNTILLABLE-BANK SWAP: dig it, lay owned dirt, till that
         const dirtItem = (bot.inventory ? bot.inventory.items() : []).find(i => /^dirt$/.test(i.name))
         if (!dirtItem) continue
         try { await bot.dig(cell) } catch { continue }
