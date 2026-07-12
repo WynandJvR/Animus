@@ -255,13 +255,20 @@ function naturalTrunk (bot, b) {
 async function prepSite (bot, schem, at, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const st = schem.start(); const en = schem.end()
+  const scaffoldSet = new Set(SCAFFOLD_BLOCKS)
   let cleared = 0
   for (let y = at.y + st.y; y <= at.y + en.y && !isStopped(); y++) {
     for (let z = at.z + st.z; z <= at.z + en.z; z++) {
       for (let x = at.x + st.x; x <= at.x + en.x; x++) {
         const b = bot.blockAt(new Vec3(x, y, z))
         if (!b || AIR.test(b.name)) continue
-        if (!CLEARABLE.test(b.name) && !naturalTrunk(bot, b)) continue
+        // SCAFFOLD material squatting in a cell the schematic wants DIFFERENT gets dug:
+        // bridging dirt in a roof cell blocked its plank forever, and dirt filled the
+        // hut's doorway + interior (operator found all three, live). Box-scoped, scaffold
+        // names only - prepSite reruns each resume, so these self-heal.
+        const w = schem.getBlock(new Vec3(x - at.x, y - at.y, z - at.z))
+        const mismatchedScaffold = scaffoldSet.has(b.name) && (!w || !w.name || AIR.test(w.name) || w.name !== b.name)
+        if (!CLEARABLE.test(b.name) && !naturalTrunk(bot, b) && !mismatchedScaffold) continue
         try {
           if (bot.entity.position.distanceTo(b.position) > 4) await gotoWithTimeout(bot, new goals.GoalNear(x, y, z, 3), 12000)
           if (bot.canDigBlock && bot.canDigBlock(b)) { await equipToolFor(bot, b.name); await bot.dig(b); cleared++ }

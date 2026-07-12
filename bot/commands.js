@@ -2413,13 +2413,45 @@ async function autoBuild (bot, schem, at, opts = {}) {
         else {
           say('putting up my safehouse hut by the bed')
           if (hplan.tasks.length) await provision.runPlan(bot, hplan, { say, isStopped, restoreMovements: restore, homeY: hutAt.y, home: { x: hutAt.x, y: hutAt.y, z: hutAt.z }, avoid })
-          const hr = await schematic.buildSurvival(bot, hutSchem, hutAt, { say, isStopped, restoreMovements: restore })
+          // clear: the hut goes up on UNPREPARED ground - without emptying the box first,
+          // intruding terrain left half the floor in a hill (operator review)
+          const hr = await schematic.buildSurvival(bot, hutSchem, hutAt, { say, isStopped, restoreMovements: restore, clear: true })
           dbg('camp: hut built ' + (hr && hr.placed) + '/' + (hr && hr.total) + ' at ' + hutAt.x + ',' + hutAt.y + ',' + hutAt.z)
           if (hr && hr.placed >= 50) {
             provision.rememberInfra && provision.rememberInfra('hut', hutAt)
             try { await handle(bot, 'remember hut') } catch {}
             say('safehouse standing - bed, chest and furnace get walls now')
           }
+        }
+      } else if (hutKnown && process.env.SITE_HUT !== '0') {
+        // REPAIR pass on the REMEMBERED hut: count the shell's mismatches (dirt in plank
+        // cells, dirt in the doorway/interior, missing floor - all seen live). clearVolume
+        // digs only mismatched cells and keeps matching ones, then the placer fills gaps.
+        const hutSchem = await schematic.loadFile('hut.schem', bot.version)
+        const hAt = new Vec3(hutKnown.x, hutKnown.y, hutKnown.z)
+        const st = hutSchem.start(); const en = hutSchem.end()
+        const AIRRE = /^(air|cave_air|void_air)$/
+        let bad = 0
+        for (let y = st.y; y <= en.y; y++) {
+          for (let z = st.z; z <= en.z; z++) {
+            for (let x = st.x; x <= en.x; x++) {
+              const w = hutSchem.getBlock(new Vec3(x, y, z))
+              const g = bot.blockAt(new Vec3(hAt.x + x, hAt.y + y, hAt.z + z))
+              if (!g) continue // chunk edge - don't guess
+              const wantAir = !w || !w.name || AIRRE.test(w.name)
+              if (wantAir ? !AIRRE.test(g.name) : g.name !== w.name) bad++
+            }
+          }
+        }
+        if (bad > 2) {
+          say(`my hut needs repairs (${bad} cells off) - fixing it up`)
+          const hutBom = schematic.billOfMaterials(hutSchem).counts
+          const hplan = provision.planProvision(mcData, hutBom, provision.inventoryCounts(bot), { primaryWood })
+          if (hplan.tasks.length && !Object.keys(hplan.unobtainable || {}).length) {
+            await provision.runPlan(bot, hplan, { say, isStopped, restoreMovements: restore, homeY: hAt.y, home: { x: hAt.x, y: hAt.y, z: hAt.z }, avoid })
+          }
+          const hr = await schematic.buildSurvival(bot, hutSchem, hAt, { say, isStopped, restoreMovements: restore, clear: true })
+          dbg('camp: hut repaired -> ' + (hr && hr.placed) + ' placed (' + bad + ' cells were off)')
         }
       }
     } catch (e) { dbg('camp: hut failed (' + e.message + ') - continuing') }
