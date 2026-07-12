@@ -453,8 +453,10 @@ async function clearVolume (bot, schem, at, opts = {}) {
             if (!b || AIR.test(b.name)) continue
             // NEVER clear utility/container blocks: camp infra (bank chest, furnace, bed,
             // torches) legitimately lives inside footprints and reads as a "mismatch" -
-            // clearing would dump the treasury on the floor.
-            if (/chest$|barrel$|furnace$|smoker$|_bed$|^torch$|_torch$|crafting_table$|_door$/.test(b.name)) continue
+            // clearing would dump the treasury on the floor. EXCEPTION: opts.clearFurniture
+            // (the hut UPGRADE emptied the bank first, so old-position furniture SHOULD be
+            // cleared and re-placed clean from the schematic).
+            if (!opts.clearFurniture && /chest$|barrel$|furnace$|smoker$|_bed$|^torch$|_torch$|crafting_table$|_door$/.test(b.name)) continue
             // Don't destroy a cell that ALREADY matches the schematic - it's part of
             // the finished build (the Build planner skips such cells, so clearing them
             // just punches permanent holes; seen live: stone box on stone terrain).
@@ -537,7 +539,7 @@ async function buildSurvival (bot, schem, at, opts = {}) {
     // permanently block those cells). Then snapshot the (now-cleared) region as
     // the scaffold-cleanup baseline.
     if (opts.clear) {
-      try { clearedSolids = await clearVolume(bot, schem, at, { isStopped }) } catch {}
+      try { clearedSolids = await clearVolume(bot, schem, at, { isStopped, say: opts.say, clearFurniture: opts.clearFurniture }) } catch {}
       if (clearedSolids) say(`cleared ${clearedSolids} block(s) to flatten the site`)
       bot.pathfinder.setMovements(moves) // clearVolume reset movements; restore build profile
     }

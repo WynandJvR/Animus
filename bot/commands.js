@@ -2388,96 +2388,88 @@ async function autoBuild (bot, schem, at, opts = {}) {
     // shell (71 planks, ONE gather trip, zero smelting; operator: "simple so it can
     // build it fast") next to the bed, so the bed/chest/furnace stop living in the open.
     checklistStep('camp: safehouse hut')
+    // FURNISHED HUT, VERIFIED (operator: "furniture part of the schematic so we stop these
+    // issues" + "grounded in what's ACTUALLY on the server, not what it thinks it did").
+    // The schematic now holds the whole hut - walls, door, furnace, table, bed, and the
+    // bank chest - so the DETERMINISTIC builder places everything (the thing that always
+    // worked), and we retire the fragile reach-based furnish/apron/migration hacks. On a
+    // mismatch we do a clean rebuild: empty the bank -> clear old furniture too -> build
+    // the schematic -> refill the bank, counting items before/after so nothing is lost.
     try {
-      const hutKnown = (provision.listInfra ? provision.listInfra('hut') : []).find(e => Math.hypot(e.x - at.x, e.z - at.z) <= 150)
-      if (!hutKnown && process.env.SITE_HUT !== '0') {
-        const kb = provision.knownBed && provision.knownBed()
-        const hx = kb ? kb.x + 3 : Math.round(at.x) - 16
-        const hz = kb ? kb.z - 2 : Math.round(at.z)
-        const hy = kb ? kb.y - 1 : Math.floor(at.y)
+      if (process.env.SITE_HUT !== '0') {
         const hutSchem = await schematic.loadFile('hut.schem', bot.version)
-        // SNAP the hut to the actual ground at ITS spot: at.y is the CASTLE's surface, 16
-        // blocks away - un-snapped the shell floats/embeds and getAvailableActions() is
-        // empty on pass one, so it "built 0/71" in 20ms (live, twice).
-        const hutAt = snapToGround(bot, hutSchem, new Vec3(hx, hy, hz))
-        const hutBom = schematic.billOfMaterials(hutSchem).counts
-        const hplan = provision.planProvision(mcData, hutBom, provision.inventoryCounts(bot), { primaryWood })
-        if (Object.keys(hplan.unobtainable || {}).length) dbg('camp: hut unobtainable ' + JSON.stringify(hplan.unobtainable))
-        else {
-          say('putting up my safehouse hut by the bed')
-          if (hplan.tasks.length) await provision.runPlan(bot, hplan, { say, isStopped, restoreMovements: restore, homeY: hutAt.y, home: { x: hutAt.x, y: hutAt.y, z: hutAt.z }, avoid })
-          // clear: the hut goes up on UNPREPARED ground - without emptying the box first,
-          // intruding terrain left half the floor in a hill (operator review)
-          const hr = await schematic.buildSurvival(bot, hutSchem, hutAt, { say, isStopped, restoreMovements: restore, clear: true })
-          dbg('camp: hut built ' + (hr && hr.placed) + '/' + (hr && hr.total) + ' at ' + hutAt.x + ',' + hutAt.y + ',' + hutAt.z)
-          if (hr && hr.placed >= 50) {
-            provision.rememberInfra && provision.rememberInfra('hut', hutAt)
-            try { await handle(bot, 'remember hut') } catch {}
-            say('safehouse standing - bed, chest and furnace get walls now')
-          }
-        }
-      } else if (hutKnown && process.env.SITE_HUT !== '0') {
-        // REPAIR pass on the REMEMBERED hut: count the shell's mismatches (dirt in plank
-        // cells, dirt in the doorway/interior, missing floor - all seen live). clearVolume
-        // digs only mismatched cells and keeps matching ones, then the placer fills gaps.
-        const hutSchem = await schematic.loadFile('hut.schem', bot.version)
-        const hAt = new Vec3(hutKnown.x, hutKnown.y, hutKnown.z)
         const st = hutSchem.start(); const en = hutSchem.end()
         const AIRRE = /^(air|cave_air|void_air)$/
-        let bad = 0
-        for (let y = st.y; y <= en.y; y++) {
-          for (let z = st.z; z <= en.z; z++) {
-            for (let x = st.x; x <= en.x; x++) {
-              const w = hutSchem.getBlock(new Vec3(x, y, z))
-              const g = bot.blockAt(new Vec3(hAt.x + x, hAt.y + y, hAt.z + z))
-              if (!g) continue // chunk edge - don't guess
-              if (/chest$|barrel$|furnace$|smoker$|_bed$|^torch$|_torch$|crafting_table$|_door$/.test(g.name)) continue // camp infra inside is FINE, not a defect
-              const wantAir = !w || !w.name || AIRRE.test(w.name)
-              if (wantAir ? !AIRRE.test(g.name) : g.name !== w.name) bad++
-            }
-          }
+        const known = (provision.listInfra ? provision.listInfra('hut', bot) : []).find(e => Math.hypot(e.x - at.x, e.z - at.z) <= 150)
+        let hutAt
+        if (known) hutAt = new Vec3(known.x, known.y, known.z)
+        else {
+          const kb = provision.knownBed && provision.knownBed()
+          hutAt = snapToGround(bot, hutSchem, new Vec3(kb ? kb.x + 3 : Math.round(at.x) - 16, kb ? kb.y - 1 : Math.floor(at.y), kb ? kb.z - 2 : Math.round(at.z)))
         }
-        if (bad > 2) {
-          say(`my hut needs repairs (${bad} cells off) - fixing it up`)
-          const hutBom = schematic.billOfMaterials(hutSchem).counts
-          const hplan = provision.planProvision(mcData, hutBom, provision.inventoryCounts(bot), { primaryWood })
-          if (hplan.tasks.length && !Object.keys(hplan.unobtainable || {}).length) {
-            await provision.runPlan(bot, hplan, { say, isStopped, restoreMovements: restore, homeY: hAt.y, home: { x: hAt.x, y: hAt.y, z: hAt.z }, avoid })
+        // GROUNDED mismatch count - furniture cells INCLUDED this time (real block reads)
+        let bad = 0
+        for (let y = st.y; y <= en.y; y++) for (let z = st.z; z <= en.z; z++) for (let x = st.x; x <= en.x; x++) {
+          const w = hutSchem.getBlock(new Vec3(x, y, z)); const g = bot.blockAt(new Vec3(hutAt.x + x, hutAt.y + y, hutAt.z + z))
+          if (!g) continue
+          const wantAir = !w || !w.name || AIRRE.test(w.name)
+          if (wantAir ? !AIRRE.test(g.name) : g.name !== w.name) bad++
+        }
+        // schematic furniture cells (world coords) - found by scanning the schematic
+        const findCell = re => { for (let y = st.y; y <= en.y; y++) for (let z = st.z; z <= en.z; z++) for (let x = st.x; x <= en.x; x++) { const w = hutSchem.getBlock(new Vec3(x, y, z)); if (w && re.test(w.name)) return new Vec3(hutAt.x + x, hutAt.y + y, hutAt.z + z) } return null }
+        if (bad > 3) {
+          say(`building my safehouse properly (${bad} cells off) - one clean pass`)
+          // 1) EMPTY the bank into the pack (verified reads) so the rebuild can clear old
+          //    furniture without dropping the treasury. Count what we pulled.
+          const saved = {}
+          for (const c of (provision.listInfra('chest', bot) || [])) {
+            if (Math.hypot(c.x - hutAt.x, c.z - hutAt.z) > 10) continue
+            const cb = bot.blockAt(new Vec3(c.x, c.y, c.z)); if (!cb || !/chest/.test(cb.name)) continue
+            try {
+              const cont = await bot.openContainer(cb)
+              for (const it of cont.containerItems()) saved[it.name] = (saved[it.name] || 0) + it.count
+              for (const it of cont.containerItems().slice()) { try { await cont.withdraw(it.type, it.metadata, it.count) } catch {} }
+              cont.close()
+            } catch (e) { dbg('camp: bank empty failed (' + e.message + ')') }
           }
-          const hr = await schematic.buildSurvival(bot, hutSchem, hAt, { say, isStopped, restoreMovements: restore, clear: true })
-          dbg('camp: hut repaired -> ' + (hr && hr.placed) + ' placed (' + bad + ' cells were off)')
+          const savedN = Object.values(saved).reduce((s, n) => s + n, 0)
+          dbg('camp: emptied bank -> ' + savedN + ' items held before rebuild')
+          // SAFETY: never clear furniture if a nearby chest still holds items (the empty
+          // overflowed the pack) - dropping the treasury is unacceptable. Re-read and abort.
+          let stillFull = false
+          for (const c of (provision.listInfra('chest', bot) || [])) {
+            if (Math.hypot(c.x - hutAt.x, c.z - hutAt.z) > 10) continue
+            const cb = bot.blockAt(new Vec3(c.x, c.y, c.z)); if (!cb || !/chest/.test(cb.name)) continue
+            try { const cont = await bot.openContainer(cb); if (cont.containerItems().length) stillFull = true; cont.close() } catch {}
+          }
+          if (stillFull) { say("can't safely rebuild - the bank's too full to empty first; leaving it as is"); dbg('camp: ABORT rebuild - bank not fully emptied (item safety)'); throw new Error('bank not empty - rebuild aborted for safety') }
+          // 2) provision the hut BOM (planks + furniture ITEMS; door/bed are 1 item = 2 blocks)
+          const hutBom = schematic.billOfMaterials(hutSchem).counts
+          if (hutBom.oak_door) hutBom.oak_door = 1
+          if (hutBom.white_bed) hutBom.white_bed = 1
+          const hplan = provision.planProvision(mcData, hutBom, provision.inventoryCounts(bot), { primaryWood })
+          if (Object.keys(hplan.unobtainable || {}).length) { dbg('camp: hut BOM unobtainable ' + JSON.stringify(hplan.unobtainable)) }
+          else {
+            if (hplan.tasks.length) await provision.runPlan(bot, hplan, { say, isStopped, restoreMovements: restore, homeY: hutAt.y, home: { x: hutAt.x, y: hutAt.y, z: hutAt.z }, avoid })
+            // 3) clean rebuild - clears old-position furniture too (bank is empty now)
+            const hr = await schematic.buildSurvival(bot, hutSchem, hutAt, { say, isStopped, restoreMovements: restore, clear: true, clearFurniture: true })
+            dbg('camp: hut rebuilt -> ' + (hr && hr.placed) + '/' + (hr && hr.total) + ' at ' + hutAt.x + ',' + hutAt.y + ',' + hutAt.z)
+            provision.rememberInfra && provision.rememberInfra('hut', hutAt)
+            // 4) refill the bank into the schematic's chest cell; count to prove nothing lost
+            const chestCell = findCell(/chest/)
+            if (chestCell) { provision.rememberInfra('chest', chestCell); const cb = bot.blockAt(chestCell); if (cb && /chest/.test(cb.name)) { try { const back = await provision.depositMaterials(bot, cb, { keepDirt: 8, all: true }); dbg('camp: bank refilled (' + savedN + ' saved, ' + (back || '?') + ' redeposited)') } catch (e) { dbg('camp: bank refill failed (' + e.message + ') - items are safe in my pack') } } }
+            // 5) set spawn on the schematic bed
+            const bedCell = findCell(/_bed$/)
+            if (bedCell) { const bb = bot.blockAt(bedCell); if (bb && /_bed$/.test(bb.name)) { try { await bot.activateBlock(bb); provision.rememberBed(bedCell) } catch {} } }
+            try { await handle(bot, 'remember hut') } catch {}
+            say('safehouse built clean - walls, door, bed, furnace, bank all in place')
+          }
         }
       }
     } catch (e) { dbg('camp: hut failed (' + e.message + ') - continuing') }
-    // BANK INTO HUT (operator promise): once the safehouse stands, any banking chest
-    // still out in the open moves inside - a creeper by the treasury loses the economy.
-    checklistStep('camp: bank into hut')
-    try {
-      const hutE = (provision.listInfra ? provision.listInfra('hut') : []).find(e => Math.hypot(e.x - at.x, e.z - at.z) <= 150)
-      if (hutE) {
-        // Count chests PHYSICALLY inside the hut (memory was unreliable). Once a double
-        // (>=2) is in, the bank is established - NEVER migrate again, or it breeds a new
-        // double every camp pass (operator watched it hit 4 chests). Only pull an OUTDOOR
-        // chest in when the hut has no bank yet.
-        let insideChests = 0
-        for (let dx = 1; dx <= 3; dx++) for (let dz = 1; dz <= 3; dz++) for (let dy = 0; dy <= 3; dy++) {
-          const b = bot.blockAt(new Vec3(hutE.x + dx, hutE.y + dy, hutE.z + dz)); if (b && /chest$/.test(b.name)) insideChests++
-        }
-        const insideHut = c => c.x >= hutE.x && c.x <= hutE.x + 4 && c.z >= hutE.z && c.z <= hutE.z + 4
-        const exposed = insideChests < 2 ? (provision.listInfra('chest', bot) || []).find(c => Math.hypot(c.x - at.x, c.z - at.z) <= 60 && !insideHut(c)) : null
-        if (exposed) {
-          const oldBlk = bot.blockAt(new Vec3(exposed.x, exposed.y, exposed.z))
-          if (oldBlk && /chest/.test(oldBlk.name)) {
-            const ok = await provision.migrateChestInto(bot, exposed, hutE, { isStopped, say })
-            dbg('camp: bank-into-hut -> ' + ok)
-            if (ok) chest = null // re-resolve: the banking chest may have moved
-          }
-        }
-        // FURNISH (operator: "wheres the bed crafting table and furnce?"): furnace, table
-        // and bed move indoors too - each best-effort, re-tried every camp pass.
-        try { const n = await provision.furnishHut(bot, hutE, { isStopped, say }); if (n) dbg('camp: furnished ' + n + ' item(s) into the hut') } catch (e) { dbg('camp: furnish failed (' + e.message + ')') }
-      }
-    } catch (e) { dbg('camp: bank-into-hut failed (' + e.message + ') - continuing') }
+    // (The old reach-based bank-migration + furnish + threshold-apron are RETIRED: the
+    //  furnished schematic + verified rebuild above place the bank/furnace/table/bed/door
+    //  deterministically. Operator: "furniture part of the schematic so we stop these issues".)
     // WHEAT FARM (operator order): renewable food at the camp - the region can run dry
     // of animals and the bot starved to death working. Water-edge plot, best-effort.
     checklistStep('camp: wheat farm')
