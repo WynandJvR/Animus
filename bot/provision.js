@@ -1394,7 +1394,10 @@ function rememberInfra (kind, pos) {
   const m = loadWorldMem()
   const s = m.infra = m.infra || {}
   const list = s[kind] = s[kind] || []
-  for (const e of list) { if (Math.abs(e.x - pos.x) <= 2 && Math.abs(e.y - pos.y) <= 2 && Math.abs(e.z - pos.z) <= 2) { e.at = Date.now(); saveWorldMem(); return } }
+  // EXACT-cell dedup: the old radius-2 merge collapsed adjacent blocks into ONE entry, so
+  // a double chest (two adjacent) or a chest+table read as a single remembered thing and
+  // the bot lost track of what it had placed (operator: duplicate table, table on chest).
+  for (const e of list) { if (e.x === Math.floor(pos.x) && e.y === Math.floor(pos.y) && e.z === Math.floor(pos.z)) { e.at = Date.now(); saveWorldMem(); return } }
   list.push({ x: Math.floor(pos.x), y: Math.floor(pos.y), z: Math.floor(pos.z), at: Date.now() })
   if (list.length > 12) { list.sort((a, b) => b.at - a.at); list.length = 12 }
   saveWorldMem()
@@ -3248,11 +3251,23 @@ function hutFreeCells (bot, hut) {
       const p = new Vec3(hut.x + dx, hut.y + dy, hut.z + dz)
       if (threshold && p.x === threshold.x && p.z === threshold.z) break // keep the entrance walkable
       const b = bot.blockAt(p); const below = bot.blockAt(p.offset(0, -1, 0)); const above = bot.blockAt(p.offset(0, 1, 0))
-      if (b && AIRISH(b.name) && below && below.boundingBox === 'block' && above && AIRISH(above.name)) { out.push(p); break }
+      // the floor below must be a real BLOCK, not other furniture - a chest counts as
+      // "solid" so a table landed ON TOP of the chest (operator caught it live)
+      const belowIsFloor = below && below.boundingBox === 'block' && !HUT_FURNITURE.test(below.name)
+      if (b && AIRISH(b.name) && belowIsFloor && above && AIRISH(above.name)) { out.push(p); break }
     }
   }
   if (doorway) out.sort((a, b) => b.distanceTo(doorway) - a.distanceTo(doorway)) // furthest from the entrance first
   return out
+}
+const HUT_FURNITURE = /chest$|barrel$|furnace$|smoker$|crafting_table$|_bed$|_door$/
+// Is a block of kind `itemRe` already standing inside the hut interior?
+function furnitureInHut (bot, hut, itemRe) {
+  for (let dx = 1; dx <= 3; dx++) for (let dz = 1; dz <= 3; dz++) for (let dy = 0; dy <= 3; dy++) {
+    const b = bot.blockAt(new Vec3(hut.x + dx, hut.y + dy, hut.z + dz))
+    if (b && itemRe.test(b.name)) return new Vec3(hut.x + dx, hut.y + dy, hut.z + dz)
+  }
+  return null
 }
 async function furnishHut (bot, hut, { isStopped = () => false, say = () => {} } = {}) {
   const moved = []
@@ -3281,7 +3296,32 @@ async function furnishHut (bot, hut, { isStopped = () => false, say = () => {} }
       }
     }
   } catch (e) { dbg('  furnish: floor pass failed (' + e.message + ')') }
+  // DEDUPE furniture (operator: two tables; a table ON the chest blocked it from opening):
+  // keep one table + one furnace, dig any extra, and dig ANY furniture stacked on top of
+  // other furniture (a chest/furnace needs air above to open/use). Items pocketed.
+  try {
+    const seen = {}
+    for (let dx = 1; dx <= 3; dx++) for (let dz = 1; dz <= 3; dz++) for (let dy = 3; dy >= 0; dy--) { // top-down
+      const p = new Vec3(hut.x + dx, hut.y + dy, hut.z + dz)
+      const b = bot.blockAt(p)
+      if (!b || !/crafting_table$|furnace$/.test(b.name)) continue
+      const below = bot.blockAt(p.offset(0, -1, 0))
+      const onFurniture = below && HUT_FURNITURE.test(below.name)
+      const dupe = seen[b.name.replace(/^.*_/, '')]
+      if (onFurniture || dupe) {
+        try {
+          if (bot.entity.position.distanceTo(p) > 4) await gotoWithTimeout(bot, new goals.GoalNear(p.x, p.y, p.z, 2), 10000)
+          const t = toolForBlock(bot, b.name); if (t) await bot.equip(t, 'hand').catch(() => {})
+          await bot.dig(b); await collectDrops(bot, 2)
+          const entry = listInfra(/table/.test(b.name) ? 'table' : 'furnace').find(x => x.x === p.x && x.y === p.y && x.z === p.z)
+          if (entry) forgetInfra(/table/.test(b.name) ? 'table' : 'furnace', entry)
+          dbg('  furnish: removed a stray ' + b.name + (onFurniture ? ' (was on furniture)' : ' (duplicate)'))
+        } catch {}
+      } else seen[b.name.replace(/^.*_/, '')] = true
+    }
+  } catch (e) { dbg('  furnish: dedupe pass failed (' + e.message + ')') }
   const grab = async (kind, nameRe) => { // dig a remembered outdoor one and pocket it
+    if (furnitureInHut(bot, hut, nameRe)) return false // already have one inside - don't fetch another
     const e = listInfra(kind).find(x => Math.hypot(x.x - hut.x, x.z - hut.z) <= 60 && !insideHutBox(x, hut))
     if (!e) return false
     const blk = bot.blockAt(new Vec3(e.x, e.y, e.z))
@@ -3295,6 +3335,7 @@ async function furnishHut (bot, hut, { isStopped = () => false, say = () => {} }
   }
   const placeInside = async (kind, itemRe) => {
     if (!(bot.inventory ? bot.inventory.items() : []).some(i => itemRe.test(i.name))) return false
+    if (furnitureInHut(bot, hut, itemRe)) { dbg('  furnish: ' + kind + ' already inside - not duplicating'); return false }
     const cell = hutFreeCells(bot, hut)[0]
     if (!cell) { dbg('  furnish: no free cell for the ' + kind); return false }
     if (bot.entity.position.distanceTo(cell) > 3) { try { await gotoWithTimeout(bot, new goals.GoalNear(cell.x, cell.y, cell.z, 2), 20000) } catch {} }
