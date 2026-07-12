@@ -2177,6 +2177,9 @@ async function gatherLoop (bot, item, count, opts = {}) {
       // reflex turns the surplus into proper food at the next furnace.
       try { for (let k = 0; k < 4 && foodCount(bot) < 5 && !isStopped(); k++) { if (!await huntForFood(bot, { isStopped })) break } } catch { /* keep gathering regardless */ }
       dbg('  gather food-hunt done (foodItems=' + foodCount(bot) + ')')
+      // COOK the pack whenever we're hungry and a furnace is in reach (incl. the hut's,
+      // remembered) - eating raw wastes 2/3 of every catch (operator complaint).
+      try { if (Object.keys(RAW_COOKABLE).some(n => countItem(bot, n) > 0)) await cookRawMeat(bot, { isStopped }) } catch {}
       // NO ANIMALS ANYWHERE (Sonnet shepherd finding: it worked at 1hp until death with
       // no fallback): the wheat farm is the answer - harvest it, or plant it now.
       if (foodCount(bot) === 0 && !isStopped()) {
@@ -2888,7 +2891,16 @@ async function cookRawMeat (bot, opts = {}) {
   const raw = Object.keys(RAW_COOKABLE).filter(n => countItem(bot, n) > 0)
   if (!raw.length) return 0
   const furnaceId = mcData.blocksByName.furnace.id
-  const blk = bot.findBlock({ matching: furnaceId, maxDistance: 12 })
+  let blk = bot.findBlock({ matching: furnaceId, maxDistance: 12 })
+  if (!blk) {
+    // the camp furnace lives in the hut now - worth a short walk (operator: "now that
+    // it has a furnace why is it eating raw food?"); cooked feeds ~3x raw.
+    const known = recallInfra('furnace', bot.entity.position, 32)
+    if (known) {
+      try { await gotoWithTimeout(bot, new goals.GoalNear(known.x, known.y, known.z, 2), 30000) } catch {}
+      blk = bot.findBlock({ matching: furnaceId, maxDistance: 6 })
+    }
+  }
   if (!blk) return 0
   const hasFuel = (bot.inventory ? bot.inventory.items() : []).some(i =>
     i.name === 'coal' || i.name === 'charcoal' || i.name === 'coal_block' || /_planks$/.test(i.name))
@@ -3127,14 +3139,16 @@ const insideHutBox = (p, hut) => p.x >= hut.x && p.x <= hut.x + 4 && p.z >= hut.
 // The doorway = the non-corner rim column whose two wall cells are NOT solid wall
 // (air, or a bed/door mistakenly shoved into it - detection must survive clutter).
 function findHutDoorway (bot, hut) {
+  // hut.schem has NO floor layer: walls start AT origin.y, so the door hole is at
+  // dy 0..1 (scanning 1..2 found "no doorway" while the gap sat one block lower, live)
   for (let dx = 0; dx <= 4; dx++) {
     for (let dz = 0; dz <= 4; dz++) {
       const onRim = dx === 0 || dx === 4 || dz === 0 || dz === 4
       const corner = (dx === 0 || dx === 4) && (dz === 0 || dz === 4)
       if (!onRim || corner) continue
-      const lo = bot.blockAt(new Vec3(hut.x + dx, hut.y + 1, hut.z + dz))
-      const hi = bot.blockAt(new Vec3(hut.x + dx, hut.y + 2, hut.z + dz))
-      if (lo && hi && !/_planks$/.test(lo.name) && !/_planks$/.test(hi.name)) return new Vec3(hut.x + dx, hut.y + 1, hut.z + dz)
+      const lo = bot.blockAt(new Vec3(hut.x + dx, hut.y, hut.z + dz))
+      const hi = bot.blockAt(new Vec3(hut.x + dx, hut.y + 1, hut.z + dz))
+      if (lo && hi && !/_planks$/.test(lo.name) && !/_planks$/.test(hi.name)) return new Vec3(hut.x + dx, hut.y, hut.z + dz)
     }
   }
   return null
@@ -3158,6 +3172,31 @@ function hutFreeCells (bot, hut) {
 }
 async function furnishHut (bot, hut, { isStopped = () => false, say = () => {} } = {}) {
   const moved = []
+  // EVEN FLOOR first (operator: "half of the hut is in a hole so the floor isnt even"):
+  // the schematic has no floor layer, so the interior is raw terrain. Level each of the
+  // 9 interior columns to hut.y-1: shave natural bumps, fill holes with carried dirt.
+  // Columns carrying furniture are left alone.
+  const INFRA_RE = /chest$|barrel$|furnace$|smoker$|_bed$|^torch$|_torch$|crafting_table$|_door$/
+  try {
+    for (const [dx, dz] of [[1, 1], [2, 1], [3, 1], [1, 2], [2, 2], [3, 2], [1, 3], [2, 3], [3, 3]]) {
+      if (isStopped()) break
+      const colBusy = [0, 1].some(dy => { const b = bot.blockAt(new Vec3(hut.x + dx, hut.y + dy, hut.z + dz)); return b && INFRA_RE.test(b.name) })
+      if (colBusy) continue
+      for (const dy of [1, 0]) { // shave terrain poking above floor level (top-down)
+        const b = bot.blockAt(new Vec3(hut.x + dx, hut.y + dy, hut.z + dz))
+        if (b && !AIRISH(b.name) && canBreakNaturally(b)) {
+          if (bot.entity.position.distanceTo(b.position) > 4) { try { await gotoWithTimeout(bot, new goals.GoalNear(b.position.x, b.position.y, b.position.z, 2), 12000) } catch { break } }
+          const tool = toolForBlock(bot, b.name)
+          if (tool) await bot.equip(tool, 'hand').catch(() => {})
+          try { await bot.dig(b); await collectDrops(bot, 3) } catch {}
+        }
+      }
+      const fl = bot.blockAt(new Vec3(hut.x + dx, hut.y - 1, hut.z + dz))
+      if (fl && (AIRISH(fl.name) || /water/.test(fl.name))) { // fill a floor hole
+        if (await placeAt(bot, fl.position, /^(dirt|coarse_dirt|cobblestone)$/)) moved.includes('floor') || moved.push('floor')
+      }
+    }
+  } catch (e) { dbg('  furnish: floor pass failed (' + e.message + ')') }
   const grab = async (kind, nameRe) => { // dig a remembered outdoor one and pocket it
     const e = listInfra(kind).find(x => Math.hypot(x.x - hut.x, x.z - hut.z) <= 60 && !insideHutBox(x, hut))
     if (!e) return false
