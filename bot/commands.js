@@ -2400,6 +2400,7 @@ async function autoBuild (bot, schem, at, opts = {}) {
               const w = hutSchem.getBlock(new Vec3(x, y, z))
               const g = bot.blockAt(new Vec3(hAt.x + x, hAt.y + y, hAt.z + z))
               if (!g) continue // chunk edge - don't guess
+              if (/chest$|barrel$|furnace$|smoker$|_bed$|^torch$|_torch$|crafting_table$/.test(g.name)) continue // camp infra inside is FINE, not a defect
               const wantAir = !w || !w.name || AIRRE.test(w.name)
               if (wantAir ? !AIRRE.test(g.name) : g.name !== w.name) bad++
             }

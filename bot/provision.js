@@ -3055,7 +3055,7 @@ async function migrateChestInto (bot, oldPos, hut, { isStopped = () => false, sa
   // interior target: an air cell with a solid floor inside the 5x5 shell (1..3 = interior)
   let target = null
   for (const [dx, dz] of [[2, 2], [1, 2], [3, 2], [2, 1], [2, 3], [1, 1], [3, 1], [1, 3], [3, 3]]) {
-    for (let dy = 1; dy <= 2 && !target; dy++) {
+    for (let dy = 0; dy <= 3 && !target; dy++) { // origin y vs floor layer varies with the snap - scan the whole interior column
       const p = new Vec3(hut.x + dx, hut.y + dy, hut.z + dz)
       const b = bot.blockAt(p); const below = bot.blockAt(p.offset(0, -1, 0)); const above = bot.blockAt(p.offset(0, 1, 0))
       if (b && AIRISH(b.name) && below && below.boundingBox === 'block' && above && AIRISH(above.name)) target = p
