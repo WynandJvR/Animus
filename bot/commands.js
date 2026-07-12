@@ -2437,12 +2437,16 @@ async function autoBuild (bot, schem, at, opts = {}) {
     try {
       const hutE = (provision.listInfra ? provision.listInfra('hut') : []).find(e => Math.hypot(e.x - at.x, e.z - at.z) <= 150)
       if (hutE) {
-        const chests = provision.listInfra('chest') || []
+        // Count chests PHYSICALLY inside the hut (memory was unreliable). Once a double
+        // (>=2) is in, the bank is established - NEVER migrate again, or it breeds a new
+        // double every camp pass (operator watched it hit 4 chests). Only pull an OUTDOOR
+        // chest in when the hut has no bank yet.
+        let insideChests = 0
+        for (let dx = 1; dx <= 3; dx++) for (let dz = 1; dz <= 3; dz++) for (let dy = 0; dy <= 3; dy++) {
+          const b = bot.blockAt(new Vec3(hutE.x + dx, hutE.y + dy, hutE.z + dz)); if (b && /chest$/.test(b.name)) insideChests++
+        }
         const insideHut = c => c.x >= hutE.x && c.x <= hutE.x + 4 && c.z >= hutE.z && c.z <= hutE.z + 4
-        // the interior CENTRE cell (operator: "why did it place its chest in the middle") -
-        // relocate a centered chest to a wall double just like an exposed outdoor one.
-        const centered = chests.find(c => insideHut(c) && c.x === hutE.x + 2 && c.z === hutE.z + 2)
-        const exposed = chests.find(c => Math.hypot(c.x - at.x, c.z - at.z) <= 60 && !insideHut(c)) || centered
+        const exposed = insideChests < 2 ? (provision.listInfra('chest') || []).find(c => Math.hypot(c.x - at.x, c.z - at.z) <= 60 && !insideHut(c)) : null
         if (exposed) {
           const oldBlk = bot.blockAt(new Vec3(exposed.x, exposed.y, exposed.z))
           if (oldBlk && /chest/.test(oldBlk.name)) {
