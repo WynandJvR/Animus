@@ -405,12 +405,13 @@ async function openNearbyDoor (bot, opts = {}) {
           for (let i = 0; i < 2 && passageClear(); i++) { await bot.activateBlock(bot.blockAt(base)); await new Promise(r => setTimeout(r, 300)) }
           dbg('door-assist: door behind me ' + (passageClear() ? 'still open' : 'closed'))
         } catch {}
-        // FULL crater heal now that we're OUTSIDE and past the door: walk the rim and fill
-        // the whole footprint incl. the far EAST pit the doorway couldn't reach (live: the
-        // bot fell into the unhealed (419,62,84) and died; the same pit blocked re-entry).
-        // Only when we actually made it out (prog>1.2) - from inside we can't reach it.
+        // FULL crater heal whenever we're actually OUTSIDE the hut now (not just prog>1.2 -
+        // a "did not clear" exit still lands the bot outside and can reach the crater): walk
+        // the rim and bridge the whole footprint incl. the far EAST pit the doorway can't
+        // touch (live: the bot fell into the unhealed (419,62,84) and died). From inside
+        // (an entry crossing) this no-ops - it can't reach the outside cells anyway.
         try {
-          if (ownHut && prog > 1.2 && prov().healHomeCrater) {
+          if (ownHut && prov().healHomeCrater && !(prov().ownHutAt && prov().ownHutAt(bot.entity.position.floored()))) {
             const n = await prov().healHomeCrater(bot, ownHut, { isStopped: opts.isStopped, reposition: true })
             if (n) dbg('door-assist: full-healed ' + n + ' crater cell(s) around home')
           }
