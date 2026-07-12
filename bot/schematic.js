@@ -453,12 +453,17 @@ async function clearVolume (bot, schem, at, opts = {}) {
           for (let x = at.x + st.x; x <= at.x + en.x; x++) {
             const b = bot.blockAt(new Vec3(x, y, z))
             if (!b || AIR.test(b.name)) continue
-            // NEVER clear utility/container blocks: camp infra (bank chest, furnace, bed,
+            // NEVER clear the bed - ANY sweep, clearFurniture or not. The bed is NOT in
+            // the schematic and can't be re-crafted (needs wool), so a clearFurniture pass
+            // that breaks it has nothing to re-place and the drop despawns - the bed is lost
+            // for good (seen live twice: the flatten step ate the hut bed inside the footprint).
+            if (/_bed$/.test(b.name)) continue
+            // NEVER clear utility/container blocks: camp infra (bank chest, furnace,
             // torches) legitimately lives inside footprints and reads as a "mismatch" -
             // clearing would dump the treasury on the floor. EXCEPTION: opts.clearFurniture
             // (the hut UPGRADE emptied the bank first, so old-position furniture SHOULD be
-            // cleared and re-placed clean from the schematic).
-            if (!opts.clearFurniture && /chest$|barrel$|furnace$|smoker$|_bed$|^torch$|_torch$|crafting_table$|_door$/.test(b.name)) continue
+            // cleared and re-placed clean from the schematic - but NOT the bed, above).
+            if (!opts.clearFurniture && /chest$|barrel$|furnace$|smoker$|^torch$|_torch$|crafting_table$|_door$/.test(b.name)) continue
             // Don't destroy a cell that ALREADY matches the schematic - it's part of
             // the finished build (the Build planner skips such cells, so clearing them
             // just punches permanent holes; seen live: stone box on stone terrain).
