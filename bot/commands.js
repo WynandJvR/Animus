@@ -13,6 +13,7 @@ const memory = require('./memory.js') // persistent named waypoints
 const schematic = require('./schematic.js') // download/parse + survival physical building
 const provision = require('./provision.js') // BOM -> gather/craft plan + execution
 const resources = require('./resources.js') // unified resource model: pack + verified chests, withdraw>craft>gather
+const navigate = require('./navigate.js') // unified navigation: ONE goto + the full stuck-recovery ladder
 let dbgSink = null // injected by index.js: debug lines persist to logs/bot-events.log
 function setDebugSink (fn) { dbgSink = fn }
 const dbg = (...a) => {
@@ -240,37 +241,14 @@ function throttledSay (bot, minGapMs = parseInt(process.env.BUILD_CHAT_MS || '60
 // brain loop with no recovery. Racing a timer + cancelling the goal turns "the bot
 // went catatonic" into a normal "couldn't reach" result that the caller handles.
 function gotoTimed (bot, goal, ms = 20000) {
-  return new Promise((resolve, reject) => {
-    let settled = false
-    const timer = setTimeout(() => {
-      if (settled) return
-      settled = true
-      try { bot.pathfinder.setGoal(null) } catch {}
-      reject(new Error('goto timed out'))
-    }, ms)
-    bot.pathfinder.goto(goal).then(
-      () => { if (!settled) { settled = true; clearTimeout(timer); resolve() } },
-      e => { if (!settled) { settled = true; clearTimeout(timer); reject(e) } }
-    )
-  })
+  return navigate.gotoOnce(bot, goal, ms) // the one shared implementation (navigate.js)
 }
 
-// goto WITH door-assist (operator: "if it placed the door it knows where it is, why can't
-// it use its memory?"): the pathfinder plans a closed door as a solid WALL, so it reports
-// "no path" from inside its own hut. On a failed goto we bridge the two systems - walk to
-// the nearest known door, OPEN it, then retry the plan (now the gap is passable). A module
-// flag stops openNearbyDoor's own gotos from recursing back in here.
-let _inDoorAssist = false
+// goto WITH the full recovery ladder (door-assist, pit-escape, climb-out, nudge). The
+// old version bolted door-assist alone onto a failed goto; navigateTo applies the whole
+// consistent toolkit and resumes after reflex interruptions ("goal was changed").
 async function gotoTimedDA (bot, goal, ms = 20000) {
-  try { return await gotoTimed(bot, goal, ms) } catch (e) {
-    if (_inDoorAssist) throw e
-    _inDoorAssist = true
-    let opened = false
-    try { opened = await openNearbyDoor(bot) } catch {} finally { _inDoorAssist = false }
-    if (!opened) throw e
-    dbg('goto: retrying after opening a door')
-    return await gotoTimed(bot, goal, ms)
-  }
+  await navigate.navigateTo(bot, goal, { timeoutMs: ms })
 }
 
 // Robust "walk to a player". A single GoalNear gives up the instant no exact path
@@ -294,7 +272,9 @@ async function comeToPlayer (bot, name, deadlineMs = 30000) {
     if (remaining < 2000) break
     const p = t.position
     try {
-      await gotoTimed(bot, new goals.GoalNear(p.x, p.y, p.z, 2), Math.min(remaining, 15000))
+      // full recovery ladder per attempt: the player may be indoors (door-assist) or the
+      // bot may be starting from a pit/cave - the same rescues as every other flow.
+      await navigate.navigateTo(bot, new goals.GoalNear(p.x, p.y, p.z, 2), { timeoutMs: Math.min(remaining, 15000), deadlineMs: remaining, label: 'come' })
       return `arrived at ${name || 'player'}`
     } catch (e) {
       lastErr = e.message
@@ -320,97 +300,6 @@ function bridgingBlockCount (bot) {
   return items.filter(i => BRIDGE_MATERIALS.includes(i.name)).reduce((n, i) => n + i.count, 0)
 }
 
-// Walk to the nearest CLOSED wooden door / fence gate within 16 blocks and open it,
-// like a player leaving a house. Iron doors need redstone - skipped. Returns whether
-// a door was opened (the caller re-plans its path afterwards).
-const OPENABLE_RE = /(_door|_fence_gate)$/
-async function openNearbyDoor (bot) {
-  try {
-    const md = require('minecraft-data')(bot.version)
-    const ids = Object.values(md.blocksByName).filter(b => OPENABLE_RE.test(b.name) && b.name !== 'iron_door').map(b => b.id)
-    const cands = (bot.findBlocks({ matching: ids, maxDistance: 16, count: 8 }) || [])
-      .sort((a, b) => a.distanceTo(bot.entity.position) - b.distanceTo(bot.entity.position))
-    dbg('door-assist: ' + cands.length + ' door/gate candidates within 16')
-    for (const p of cands) {
-      const blk = bot.blockAt(p)
-      if (!blk) continue
-      let open = false
-      try { const props = blk.getProperties(); open = props && (props.open === true || props.open === 'true') } catch {}
-      // NOTE: an already-OPEN door still gets the walk-through below - the pathfinder
-      // cannot ROUTE through door cells regardless of state (it only bumps them open on
-      // direct lines), so "it's open" doesn't mean the planner will use it.
-      try { await gotoTimed(bot, new goals.GoalNear(p.x, p.y, p.z, 2), 15000) } catch (e) { dbg('door-assist: cannot reach door at ' + p + ' (' + e.message + ')'); continue }
-      if (bot.entity.position.distanceTo(p) > 4) continue
-      try {
-        if (!open) {
-          await bot.activateBlock(bot.blockAt(p))
-          await new Promise(r => setTimeout(r, 350)) // let the door state land
-          dbg('door-assist: opened ' + blk.name + ' at ' + p)
-        } else dbg('door-assist: ' + blk.name + ' at ' + p + ' already open - walking through')
-        // WALK THROUGH the doorway before re-planning: the pathfinder won't ROUTE
-        // through even an open door that isn't on the direct line (verified in the hut
-        // test - door opened, travel still "blocked"). But it CAN step INTO an open
-        // doorway cell - so stand in the doorway first, then step out the far side
-        // along the door's facing axis (height-tolerant: outside ground is often ±1).
-        const base = p.y > Math.floor(bot.entity.position.y) ? p.offset(0, -1, 0) : p // upper half -> foot cell
-        const before = bot.entity.position.clone()
-        let facing = null
-        try { facing = (bot.blockAt(base) && bot.blockAt(base).getProperties().facing) || null } catch {}
-        const axis = (facing === 'east' || facing === 'west') ? [1, 0] : (facing === 'north' || facing === 'south') ? [0, 1] : [Math.abs(base.x + 0.5 - before.x) >= Math.abs(base.z + 0.5 - before.z) ? 1 : 0, 0]
-        const dx = axis[0]; const dz = axis[0] === 1 ? 0 : 1
-        // Exit toward OPEN SKY: "outside" is the side of the doorway with no ceiling.
-        // (Away-from-where-I-stand flips when the bot is mid-doorway - verified: it
-        // walked back INTO the hut. Ceiling check is position-independent.)
-        const skyless = (cell) => { // solid cover within 12 above? (leaves are canopy, not ceiling)
-          for (let dy = 2; dy <= 12; dy++) { const b = bot.blockAt(cell.offset(0, dy, 0)); if (b && b.boundingBox === 'block' && !/_leaves$/.test(b.name)) return true }
-          return false
-        }
-        const posSide = base.offset(dx * 2, 0, dz * 2); const negSide = base.offset(-dx * 2, 0, -dz * 2)
-        let sign
-        const posCovered = skyless(posSide); const negCovered = skyless(negSide)
-        if (posCovered !== negCovered) sign = posCovered ? -1 : 1 // walk to the uncovered (outdoor) side
-        else sign = Math.sign((base.x + 0.5 - before.x) * dx + (base.z + 0.5 - before.z) * dz) || 1
-        dbg('door-assist: exit side ' + (dx ? (sign > 0 ? 'east' : 'west') : (sign > 0 ? 'south' : 'north')) + (posCovered !== negCovered ? ' (open sky)' : ' (fallback)'))
-        // Align on the inside cell in front of the door (pathfinder CAN reach that).
-        try { await gotoTimed(bot, new goals.GoalBlock(base.x - dx * sign, base.y, base.z - dz * sign), 8000) } catch (e2) { dbg('door-assist: could not align (' + e2.message + ')') }
-        // FORCE-WALK through: the pathfinder cannot PLAN through door cells at all (even
-        // open ones - verified repeatedly in the hut test), so cross on manual controls.
-        // Thread the doorway CENTER-TO-CENTER - one long diagonal walk clipped the open
-        // door panel and slid the bot off sideways into the wall corner.
-        try { bot.pathfinder.setGoal(null) } catch {}
-        bot.setControlState('sprint', false)
-        bot.setControlState('jump', false)
-        const walkTo = async (tx, tz, doneDist, ms) => {
-          try { await bot.lookAt(new Vec3(tx, bot.entity.position.y + 1.2, tz), true) } catch {}
-          bot.setControlState('forward', true)
-          const t0 = Date.now()
-          let lastPos = bot.entity.position.clone(); let lastMove = Date.now()
-          while (Date.now() - t0 < ms) {
-            await new Promise(r => setTimeout(r, 80))
-            if (Math.hypot(bot.entity.position.x - tx, bot.entity.position.z - tz) < doneDist) break
-            const moved = bot.entity.position.distanceTo(lastPos)
-            if (moved > 0.15) { lastPos = bot.entity.position.clone(); lastMove = Date.now() }
-            else if (Date.now() - lastMove > 350) { // wedged on a step-up (e.g. higher ground outside) - hop
-              bot.setControlState('jump', true); await new Promise(r => setTimeout(r, 120)); bot.setControlState('jump', false)
-              lastMove = Date.now()
-            }
-            try { await bot.lookAt(new Vec3(tx, bot.entity.position.y + 1.2, tz), true) } catch {} // keep the line straight
-          }
-          bot.setControlState('forward', false)
-        }
-        // the pathfinder's native bump logic can TOGGLE the door shut again between our
-        // open and our walk - re-open if needed right before crossing
-        try { const b2 = bot.blockAt(base); const pr = b2 && b2.getProperties(); if (pr && !(pr.open === true || pr.open === 'true')) { await bot.activateBlock(b2); await new Promise(r => setTimeout(r, 250)); dbg('door-assist: re-opened before crossing') } } catch {}
-        await walkTo(base.x + 0.5, base.z + 0.5, 0.45, 2500)                                    // into the doorway
-        await walkTo(base.x + dx * sign * 2 + 0.5, base.z + dz * sign * 2 + 0.5, 0.6, 2500)     // out the far side
-        const prog = (bot.entity.position.x - (base.x + 0.5)) * dx * sign + (bot.entity.position.z - (base.z + 0.5)) * dz * sign
-        dbg('door-assist: force-walk ' + (prog > 1.2 ? 'THROUGH to ' : 'did not clear, at ') + bot.entity.position.floored())
-        return true
-      } catch { continue }
-    }
-  } catch { }
-  return false
-}
 
 async function travelFar (bot, dest, opts = {}) {
   const arrive = opts.arrive || 16       // horizontal "close enough" to hand off
@@ -426,9 +315,7 @@ async function travelFar (bot, dest, opts = {}) {
   let lastD = Infinity
   let stalls = 0
   let gathers = 0
-  let doorAssists = 0
   let climbs = 0
-  let pitEscapes = 0
   let lastSurvival = 0  // throttle the per-leg survival check
   let climbTimeMs = 0   // time spent digging out of caves / sheltering - doesn't count against the travel clock
   // Are we buried in a cave WELL below the (surface) target? We only ever climb for this -
@@ -493,25 +380,35 @@ async function travelFar (bot, dest, opts = {}) {
       const step = Math.min(hop, d)
       const wx = me.x + (dx / d) * step
       const wz = me.z + (dz / d) * step
+      // Each leg goes through the UNIFIED navigator: door-assist, pit-escape, water-hop
+      // and the surface nudge all fire consistently mid-leg now (they used to be inline
+      // copies here, wired into this loop only). Rescue time is credited against the
+      // travel clock; the climb rung is off because this loop does its own proactive
+      // surfacing (surfaceOut) with dest-aware depth checks.
       let legErr = null
+      const legT0 = Date.now()
       try {
-        await gotoTimed(bot, new goals.GoalNearXZ(wx, wz, 4), 30000)
-      } catch (e) { legErr = e.message /* leg blocked/timed out - re-aim from wherever we ended up */ }
+        const nav = await navigate.navigateTo(bot, new goals.GoalNearXZ(wx, wz, 4), {
+          timeoutMs: 30000, deadlineMs: 75000, isStopped, climb: false, label: 'travel',
+          budgets: { water: 1, pit: 1, door: 1, nudge: 1 }, // one rescue of each kind per leg - the trip loop retries legs
+          movements: () => travelMovements(bot)
+        })
+        climbTimeMs += nav.recoveryMs
+      } catch (e) {
+        legErr = e.message /* leg blocked/timed out - re-aim from wherever we ended up */
+        if (e.nav) climbTimeMs += e.nav.recoveryMs || 0
+      }
       const nd = Math.hypot(dest.x - bot.entity.position.x, dest.z - bot.entity.position.z)
       // leg telemetry: the Sonnet shepherd watched "moving:true" while stationary for 90s
       // on OPEN ground - these lines make the next such stall's anatomy readable
       dbg('travel leg -> ' + Math.round(nd) + 'b left (was ' + (lastD === Infinity ? 'inf' : Math.round(lastD)) + ', stalls ' + stalls + (legErr ? ', err: ' + legErr : '') + ')')
-      // no meaningful progress this leg -> count a stall
+      // no meaningful progress this leg -> count a stall. A leg that FAST-FAILED (goto
+      // no-pathed in ms, every rescue declined) must still cost a beat - otherwise three
+      // stalls burn in ~2 seconds and the trek reports "blocked" before the world (a
+      // drifting boat gap, a mob shoving us ashore) gets any chance to change.
       if (nd >= lastD - 3) {
         stalls++
-        // DOOR ASSIST first: the pathfinder PLANS closed doors as solid walls (canOpenDoors
-        // only opens ones it bumps into mid-path) - verified live: the bot sat "no path"
-        // INSIDE the operator's base with a working oak door 16 blocks away. Do what a
-        // player does: walk to the nearest closed door/gate, open it, re-plan. Must run
-        // BEFORE the dirt-bridge branch (that one resets `stalls`, starving this check).
-        if (stalls >= 2 && doorAssists < 4) {
-          if (await openNearbyDoor(bot)) { doorAssists++; stalls = 0; lastD = Infinity; continue }
-        }
+        if (Date.now() - legT0 < 3000) await new Promise(r => setTimeout(r, 1500))
         // Stalled AND out of blocks to bridge with? Dig some dirt on our own (like the
         // build gathers its materials), then retry - so a ravine/water gap can't strand
         // us. Only when actually stuck (not upfront), so open ground never triggers it.
@@ -526,30 +423,7 @@ async function travelFar (bot, dest, opts = {}) {
         }
         // Stalled AND buried -> dig out (the per-leg buried() check usually gets this first).
         if (stalls >= 2 && buried()) { await surfaceOut("stuck underground - digging up toward the surface..."); stalls = 0; lastD = Infinity; continue }
-        // PIT ESCAPE: an open-sky hole (solid walls on 3+ sides at feet level) makes the
-        // no-dig travel profile no-path INSTANTLY - legs cycle in milliseconds and every
-        // rescue above is skipped (no door, blocks in pack, no ceiling). This was the
-        // "stalls on open ground" mystery: the bot idled 70s in its own orchard-leveling
-        // hole, live. Pillar out with carried blocks to the rim, then re-plan.
-        if (stalls >= 2 && pitEscapes < 3) {
-          const f0 = bot.entity.position.floored()
-          let pitWalls = 0; let rimY = f0.y
-          for (const [wdx, wdz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-            const w = bot.blockAt(f0.offset(wdx, 0, wdz))
-            if (w && w.boundingBox === 'block') pitWalls++
-            for (let dy = 2; dy >= 0; dy--) {
-              const t = bot.blockAt(f0.offset(wdx, dy, wdz))
-              if (t && t.boundingBox === 'block') { rimY = Math.max(rimY, f0.y + dy + 1); break }
-            }
-          }
-          if (pitWalls >= 3) {
-            dbg('travel: wedged in a PIT at ' + f0.x + ',' + f0.z + ' - pillaring out to y=' + rimY)
-            try { await provision.pillarUpTo(bot, rimY, { isStopped }) } catch (e) { dbg('travel: pillar-out failed (' + e.message + ')') }
-            bot.pathfinder.setMovements(travelMovements(bot))
-            if (Math.floor(bot.entity.position.y) > f0.y) { pitEscapes++; stalls = 0; lastD = Infinity; continue }
-          }
-        }
-        if (stalls >= 4) return { ok: false, reason: 'blocked', dist: nd }
+        if (stalls >= 3) return { ok: false, reason: 'blocked', dist: nd }
       } else stalls = 0
       lastD = nd
     }
@@ -1200,7 +1074,7 @@ async function handle (bot, line) {
         if (!r.ok && r.dist > 24) { endActivity(false, r.reason); return `couldn't get back to where i died (${d.x},${d.y},${d.z}): ${r.reason}` }
         endActivity(true, 'reached death site')
       }
-      try { await gotoTimed(bot, new goals.GoalNear(d.x, d.y, d.z, 2), 20000) } catch {}
+      try { await gotoTimedDA(bot, new goals.GoalNear(d.x, d.y, d.z, 2), 20000) } catch {} // full ladder - graves end up in pits/caves
       // Safety re-check: if lava/fire is right here now, don't dive in for a few items.
       const here = bot.entity.position.floored()
       for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
@@ -1322,7 +1196,7 @@ async function handle (bot, line) {
       beginActivity('travel', `${x},${y},${z}`)
       const r = await travelFar(bot, { x, y, z }, { isStopped: () => buildAbort, say: m => bot.chat(String(m).slice(0, 256)) })
       if (!r.ok) { endActivity(false, r.reason); return `couldn't get to ${x},${y},${z}: ${r.reason} (~${Math.round(r.dist)} blocks away)` }
-      try { await gotoTimed(bot, new goals.GoalNear(x, y, z, 2), 20000) } catch {}
+      try { await gotoTimedDA(bot, new goals.GoalNear(x, y, z, 2), 20000) } catch {} // final approach may need a door (travel into the hut)
       endActivity(true, `arrived near ${x},${y},${z}`)
       return `arrived near ${x},${y},${z}`
     }

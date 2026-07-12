@@ -23,6 +23,7 @@ const cfg = require('./config.json')
 const commands = require('./commands.js')
 const provision = require('./provision.js') // for the body-side survival-hunt reflex
 const resources = require('./resources.js') // unified pack+chest resource model (food withdraw)
+const navigate = require('./navigate.js') // unified navigation (isRecovering gates the reflexes)
 const access = require('./access.js')
 const schematic = require('./schematic.js')
 
@@ -210,6 +211,7 @@ function noteDebug (msg) { fileLog(`[${new Date().toISOString()}] ${msg}`) }
 commands.setDebugSink(noteDebug)
 provision.setDebugSink(noteDebug)
 resources.setDebugSink(noteDebug)
+navigate.setDebugSink(noteDebug)
 // A build job saved to disk survived a process restart - let the operator know it's resumable.
 try {
   const rj = commands.persistedResume && commands.persistedResume()
@@ -656,6 +658,9 @@ if (process.env.AUTO_DEFEND !== '0') {
     // sideways - rising out of the hole IS the escape (fleeing horizontally just keeps us
     // in the mob-filled cave and pins us at depth).
     if (commands.isEscaping && commands.isEscaping()) return
+    // Same rule while a navigation RECOVERY is maneuvering (pillaring out of a pit,
+    // threading a doorway, hopping from water) - the recovery IS the escape.
+    if (navigate.isRecovering()) return
     // While digging into a night bunker, the flee reflex must NOT drag us off - being sealed
     // underground IS the escape (a sealed pit beats fleeing a creeper). Yield to the shelter.
     if (provision.isSheltering && provision.isSheltering()) return

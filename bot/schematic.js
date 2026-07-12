@@ -28,6 +28,7 @@ const { goals, Movements } = require('mineflayer-pathfinder')
 const Build = require('mineflayer-builder/lib/Build')
 const interactable = require('mineflayer-builder/lib/interactable.json')
 const provision = require('./provision.js') // night-shelter during builds (shelterNeeded/digInForNight)
+const navigate = require('./navigate.js') // the ONE deadline-goto implementation
 
 // DURABLE crash guard (re-applied here so a future `npm install` can't lose it, like
 // the digTime guard in index.js). Build.getPossibleDirections reads a NEIGHBOUR block's
@@ -375,19 +376,7 @@ async function collectNearbyItems (bot, radius = 24, max = 60) {
   }
 }
 function gotoWithTimeout (bot, goal, ms) {
-  return new Promise((resolve, reject) => {
-    let settled = false
-    const timer = setTimeout(() => {
-      if (settled) return
-      settled = true
-      try { bot.pathfinder.setGoal(null) } catch {}
-      reject(new Error('goto timed out'))
-    }, ms)
-    bot.pathfinder.goto(goal).then(
-      () => { if (!settled) { settled = true; clearTimeout(timer); resolve() } },
-      e => { if (!settled) { settled = true; clearTimeout(timer); reject(e) } }
-    )
-  })
+  return navigate.gotoOnce(bot, goal, ms) // one shared implementation (navigate.js) - build loop semantics unchanged
 }
 
 // Attempt ONE placement. Returns true if the block was placed, false on a

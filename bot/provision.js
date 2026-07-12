@@ -12,6 +12,7 @@ const fs = require('fs')
 const path = require('path')
 const { goals, Movements } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
+const navigate = require('./navigate.js') // unified navigation (it lazy-requires us back for climb/pillar/water-hop)
 // Visible, UNTHROTTLED build tracing to stdout (the say() progress goes through a 40s
 // throttle that hides failures). Enable with BUILD_DEBUG=1 to see every plan/task/smelt step.
 let dbgSink = null // injected by index.js: debug lines persist to logs/bot-events.log
@@ -100,73 +101,19 @@ async function walkStaged (bot, tx, tz, opts = {}) {
     const lx = p.x + ((tx - p.x) / d) * step
     const lz = p.z + ((tz - p.z) / d) * step
     const from = { x: p.x, z: p.z }
-    try { await gotoWithTimeout(bot, new goals.GoalNearXZ(lx, lz, 4), 30000) } catch {}
+    // Each leg runs through the UNIFIED navigator (navigate.js): the water-hop, pit
+    // pillar-out, cave climb-out and cliff-checked surface nudge that used to be an
+    // inline ladder here now fire consistently for every caller.
+    try {
+      await navigate.navigateTo(bot, new goals.GoalNearXZ(lx, lz, 4), {
+        timeoutMs: 30000, deadlineMs: 75000, isStopped, label: 'walkStaged',
+        budgets: { water: 1, pit: 1, door: 1, climb: 1, nudge: 1 } // one rescue of each kind per leg - this loop retries legs
+      })
+    } catch {}
     const np = bot.entity.position
     if (Math.hypot(np.x - from.x, np.z - from.z) < 3) {
       stalls++
-      if (stalls === 3) {
-        // WEDGED. Two known live cases: (a) bobbing in a 1-deep WATER trench - the
-        // pathfinder never jumps because in water it's never "on ground", so it stands
-        // in a puddle forever (operator watched 8 minutes of it); (b) a gully the
-        // no-dig travel profile can't cut out of. Water gets a MANUAL hop (direct
-        // controls, no pathfinder); land gets the climb/staircase rescue.
-        const feet = bot.blockAt(bot.entity.position.floored())
-        if (feet && /water/.test(feet.name)) {
-          dbg('walkStaged: stalled IN WATER at ' + Math.round(np.x) + ',' + Math.round(np.z) + ' - manual hop to the bank')
-          await manualHopFromWater(bot)
-        } else if (hasSolidCeiling(bot, 12)) {
-          dbg('walkStaged: stalled UNDERGROUND at ' + Math.round(np.x) + ',' + Math.round(np.z) + ' - climbing out')
-          try { await climbToSurface(bot, Math.floor(np.y) + 10, { isStopped }) } catch (e) { dbg('walkStaged: climb-out failed (' + e.message + ')') }
-        } else {
-          // SURFACE wedge (open sky): climbToSurface no-ops here - the pathfinder just
-          // can't solve a step it should walk (pinned at its own orchard cell, live).
-          // Take the controls: face the leg target, jump+sprint straight at it.
-          // FLOOR CHECK before leaping: a blind sprint-jump launched the bot off an edge
-          // into a shaft to bedrock (died at y=1, live). Probe 2-4 blocks ahead along the
-          // nudge line - if there's a 4+ deep drop, don't jump that way this cycle.
-          // PIT CHECK first: solid walls on 3+ sides at feet level = standing in a HOLE
-          // (open sky, so the underground climb-out never fires - the bot idled 70s in
-          // its own orchard-leveling hole, live, and every travel retry no-pathed in
-          // milliseconds). A jump-nudge can't clear a 2-deep wall; pillar out instead.
-          const f0 = bot.entity.position.floored()
-          let pitWalls = 0; let rimY = f0.y
-          for (const [wdx, wdz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-            const w = bot.blockAt(f0.offset(wdx, 0, wdz))
-            if (w && w.boundingBox === 'block') pitWalls++
-            for (let dy = 2; dy >= 0; dy--) {
-              const t = bot.blockAt(f0.offset(wdx, dy, wdz))
-              if (t && t.boundingBox === 'block') { rimY = Math.max(rimY, f0.y + dy + 1); break }
-            }
-          }
-          if (pitWalls >= 3) {
-            dbg('walkStaged: wedged in a PIT at ' + Math.round(np.x) + ',' + Math.round(np.z) + ' - pillaring out to y=' + rimY)
-            try { await pillarUpTo(bot, rimY, { isStopped }) } catch (e) { dbg('walkStaged: pillar-out failed (' + e.message + ')') }
-            const outP = bot.entity.position
-            if (Math.floor(outP.y) > f0.y) { stalls = 0; continue } // freed - retry the legs
-          }
-          const fdx = (lx - np.x); const fdz = (lz - np.z); const fn = Math.hypot(fdx, fdz) || 1
-          let cliff = false
-          for (const dist of [2, 3, 4]) {
-            const cx = Math.floor(np.x + (fdx / fn) * dist); const cz = Math.floor(np.z + (fdz / fn) * dist)
-            let solid = false
-            for (let dy = -1; dy >= -4; dy--) { const b = bot.blockAt(new Vec3(cx, Math.floor(np.y) + dy, cz)); if (b && b.boundingBox === 'block') { solid = true; break } }
-            if (!solid) { cliff = true; break }
-          }
-          if (cliff) { dbg('walkStaged: nudge line has a DROP ahead - not jumping blind'); stalls = Math.max(stalls, 4) /* skip to give-up sooner */ }
-          else {
-            dbg('walkStaged: stalled on the SURFACE at ' + Math.round(np.x) + ',' + Math.round(np.z) + ' - manual nudge toward ' + Math.round(lx) + ',' + Math.round(lz))
-            try {
-              bot.pathfinder.setGoal(null)
-              await bot.lookAt(new Vec3(lx, bot.entity.position.y + 1, lz), true)
-              bot.setControlState('jump', true); bot.setControlState('forward', true); bot.setControlState('sprint', true)
-              await new Promise(r => setTimeout(r, 2000))
-            } catch {} finally { bot.clearControlStates() }
-          }
-        }
-        const now2 = bot.entity.position
-        if (Math.floor(now2.y) > Math.floor(np.y) || Math.hypot(now2.x - np.x, now2.z - np.z) >= 2) { stalls = 0; continue } // freed - retry the legs
-      }
-      if (stalls >= 5) { dbg('walkStaged: giving up wedged at ' + Math.round(np.x) + ',' + Math.round(np.z)); return false }
+      if (stalls >= 3) { dbg('walkStaged: giving up wedged at ' + Math.round(np.x) + ',' + Math.round(np.z)); return false }
     } else stalls = 0
   }
   return false
@@ -510,21 +457,10 @@ function inventoryCounts (bot) {
 
 function countItem (bot, name) { return inventoryCounts(bot)[name] || 0 }
 
-// pathfinder.goto with a deadline (same rationale as schematic.js: goto can hang).
+// pathfinder.goto with a deadline (goto can hang forever on an unreachable target).
+// One shared implementation now - navigate.js.
 function gotoWithTimeout (bot, goal, ms) {
-  return new Promise((resolve, reject) => {
-    let settled = false
-    const timer = setTimeout(() => {
-      if (settled) return
-      settled = true
-      try { bot.pathfinder.setGoal(null) } catch {}
-      reject(new Error('goto timed out'))
-    }, ms)
-    bot.pathfinder.goto(goal).then(
-      () => { if (!settled) { settled = true; clearTimeout(timer); resolve() } },
-      e => { if (!settled) { settled = true; clearTimeout(timer); reject(e) } }
-    )
-  })
+  return navigate.gotoOnce(bot, goal, ms)
 }
 
 // Walk onto nearby dropped items so they're picked up. Waits for drops to settle,
@@ -3550,4 +3486,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, migrateChestInto, furnishHut, hasSolidCeiling, gatherLeather, huntForFood, hasFood, needsFood, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, ensureWheatFarm, tendWheatFarm, fishForFood, setBuildZone, setDebugSink }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, migrateChestInto, furnishHut, hasSolidCeiling, gatherLeather, huntForFood, hasFood, needsFood, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, ensureWheatFarm, tendWheatFarm, fishForFood, setBuildZone, setDebugSink }
