@@ -8,14 +8,28 @@
 // (operator watched the full loop). Blocks self-placed in the last 60s are off-limits to
 // the planner's dig moves - it walks around/on them like anyone sane.
 
-const RECENT_MS = 60000
+const RECENT_MS = 60000  // dig-guard window (the planner may not break these)
+const TRAIL_MS = 300000  // trail window (scaffold cleanup may still find these)
 const recentlyPlaced = new Map() // "x,y,z" -> timestamp
 
 function key (p) { return `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}` }
 
 function sweep () {
-  const cut = Date.now() - RECENT_MS
+  const cut = Date.now() - TRAIL_MS
   for (const [k, t] of recentlyPlaced) { if (t < cut) recentlyPlaced.delete(k) }
+}
+
+// Self-placed blocks near a point (for scaffold teardown after tall-tree harvests -
+// the operator found dirt towers abandoned all over the forest).
+function selfPlacedNear (pos, r, maxAgeMs) {
+  const out = []
+  const cut = Date.now() - (maxAgeMs || TRAIL_MS)
+  for (const [k, t] of recentlyPlaced) {
+    if (t < cut) continue
+    const [x, y, z] = k.split(',').map(Number)
+    if (Math.hypot(x - pos.x, z - pos.z) <= r) out.push({ x, y, z, t })
+  }
+  return out
 }
 
 function installPathfinderTuning (bot) {
@@ -61,11 +75,11 @@ function installPathfinderTuning (bot) {
     const orig = Movements.prototype.safeToBreak
     Movements.prototype.safeToBreak = function (block) {
       const t = block && block.position && recentlyPlaced.get(key(block.position))
-      if (t && Date.now() - t < RECENT_MS) return false // our own fresh scaffold - walk, don't chew
+      if (t && Date.now() - t < RECENT_MS) return false // our own fresh scaffold - walk, don't chew (older trail entries are breakable again)
       return orig.call(this, block)
     }
     Movements.prototype.__selfScaffoldGuard = true
   }
 }
 
-module.exports = { installPathfinderTuning }
+module.exports = { installPathfinderTuning, selfPlacedNear }

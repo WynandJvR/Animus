@@ -1636,6 +1636,30 @@ async function fishForFood (bot, { isStopped = () => false, say = () => {}, targ
   return edible() > 0
 }
 
+// ---- SCAFFOLD TEARDOWN: the pathfinder pillars up to tall canopies and abandons the
+// dirt towers (operator: "a massive mess"). The patch layer remembers every self-placed
+// block; after a harvest, ride the tower back down and pocket the dirt.
+async function cleanupScaffold (bot, around, { isStopped = () => false } = {}) {
+  let pf
+  try { pf = require('./pathfix.js') } catch { return 0 }
+  if (!pf.selfPlacedNear) return 0
+  const spots = pf.selfPlacedNear(around, 10, 300000)
+  if (!spots.length) return 0
+  spots.sort((a, b) => b.y - a.y) // top-down: digging under our own feet rides us down
+  let removed = 0
+  for (const p of spots.slice(0, 24)) {
+    if (isStopped()) break
+    const b = bot.blockAt(new Vec3(p.x, p.y, p.z))
+    if (!b || !FILLER_RE.test(b.name)) continue // only our own filler blocks, never terrain
+    if (bot.entity.position.distanceTo(b.position) > 4.5) {
+      try { await gotoWithTimeout(bot, new goals.GoalNear(p.x, p.y, p.z, 3), 8000) } catch { continue }
+    }
+    try { await bot.dig(b); removed++; await new Promise(r => setTimeout(r, 150)) } catch {}
+  }
+  if (removed) { await collectDrops(bot, 6); dbg('  tore down ' + removed + ' scaffold blocks (dirt pocketed)') }
+  return removed
+}
+
 // ---- INVENTORY HYGIENE: mob-drop junk (spider eyes, string, flint...) quietly eats the
 // slots the build materials need (seen live: ~8 slots of trash mid-castle-provision).
 // Toss what has no use; KEEP bones (they become bone meal for the tree farm) and a small
@@ -2227,6 +2251,7 @@ async function gatherLoop (bot, item, count, opts = {}) {
       try {
         if (saplingCount(bot, item) < 1) await fishSaplings(bot, target.position, item, { isStopped })
         await plantSaplingNear(bot, target.position, item, { avoid: opts.avoid })
+        await cleanupScaffold(bot, target.position, { isStopped }) // no abandoned dirt towers (operator rule)
       } catch (e) { dbg('  replant skipped (' + e.message + ')') }
     }
 
