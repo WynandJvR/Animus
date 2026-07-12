@@ -587,6 +587,57 @@ async function ensureHutApron (bot, at, opts = {}) {
   return filled
 }
 
+// Make sure the hut has a usable BED and our spawn is set on it. Runs every camp pass
+// (decoupled from the bad>3 rebuild, where the only bed path used to live - so a recovered
+// bed rode around unplaced forever, no spawn). If a bed already stands in the hut, (re)assert
+// spawn on it once; else, if we're carrying one, walk inside (the apron is filled so entry
+// works) and lay it on an interior floor cell clear of the furniture, then set spawn. Every
+// place is verified (Fable's placedOK is live) - a fail just leaves the bed in the pack, no
+// worse than before. Returns 'present' | 'placed' | 'none' | 'fail'. `at` = hut anchor.
+async function ensureHutBed (bot, at, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const say = opts.say || (() => {})
+  // 1) already a bed standing in the footprint? assert spawn once, then leave it be.
+  for (let dy = 0; dy <= 3 && !isStopped(); dy++) for (let dz = 0; dz <= 5; dz++) for (let dx = 0; dx <= 5; dx++) {
+    const b = bot.blockAt(new Vec3(at.x + dx, at.y + dy, at.z + dz))
+    if (b && /_bed$/.test(b.name)) {
+      const kb = knownBed()
+      if (kb && kb.x === b.position.x && kb.y === b.position.y && kb.z === b.position.z) return 'present' // spawn already set here - don't re-trek every pass
+      try { await gotoWithTimeout(bot, new goals.GoalNear(b.position.x, b.position.y, b.position.z, 2), 15000) } catch {}
+      try { await bot.activateBlock(b); rememberBed(b.position) } catch {}
+      return 'present'
+    }
+  }
+  // 2) carrying a bed? lay it on an interior floor cell. foot (2,1,2) + head (2,1,3): both must
+  //    be air over a solid floor. (chest 4,1,1/2, furnace 4,1,4, table 1,1,4 are all clear of this.)
+  const bedItem = (bot.inventory ? bot.inventory.items() : []).find(i => /_bed$/.test(i.name))
+  if (!bedItem) return 'none'
+  const foot = new Vec3(at.x + 2, at.y + 1, at.z + 2)
+  const head = new Vec3(at.x + 2, at.y + 1, at.z + 3)
+  for (const c of [foot, head]) {
+    const cb = bot.blockAt(c); const fl = bot.blockAt(c.offset(0, -1, 0))
+    if (cb && !AIRISH(cb.name)) { dbg('  ensureHutBed: interior spot blocked by ' + cb.name); return 'fail' }
+    if (!fl || fl.boundingBox !== 'block') { dbg('  ensureHutBed: no solid floor under the bed spot'); return 'fail' }
+  }
+  try { await gotoWithTimeout(bot, new goals.GoalNear(foot.x, foot.y, foot.z, 2), 15000) } catch {}
+  try {
+    await bot.equip(bedItem, 'hand')
+    await bot.lookAt(head.offset(0.5, 0.0, 0.5), true) // face +z so the head lays toward (2,1,3)
+    await bot.placeBlock(bot.blockAt(foot.offset(0, -1, 0)), new Vec3(0, 1, 0))
+  } catch (e) { dbg('  ensureHutBed: place failed (' + e.message + ')'); return 'fail' }
+  await new Promise(r => setTimeout(r, 400))
+  for (let dz = 0; dz <= 5; dz++) for (let dx = 0; dx <= 5; dx++) { // verify a bed actually landed, then set spawn
+    const b = bot.blockAt(new Vec3(at.x + dx, at.y + 1, at.z + dz))
+    if (b && /_bed$/.test(b.name)) {
+      try { await bot.activateBlock(b); rememberBed(b.position) } catch {}
+      say('set my bed in the hut - spawn point secured')
+      return 'placed'
+    }
+  }
+  dbg('  ensureHutBed: placement did not verify - bed still in pack')
+  return 'fail'
+}
+
 async function digShaftDown (bot, maxDepth, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const DANGER = /lava|water/
@@ -3563,4 +3614,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, furnishHut, hasSolidCeiling, gatherLeather, huntForFood, hasFood, needsFood, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, ensureWheatFarm, tendWheatFarm, fishForFood, ensureHutApron, setBuildZone, setDebugSink }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, furnishHut, hasSolidCeiling, gatherLeather, huntForFood, hasFood, needsFood, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, ensureWheatFarm, tendWheatFarm, fishForFood, ensureHutApron, ensureHutBed, setBuildZone, setDebugSink }

@@ -2382,6 +2382,14 @@ async function autoBuild (bot, schem, at, opts = {}) {
             say('safehouse built clean - walls, door, bed, furnace, bank all in place')
           }
         }
+        // LIVEABILITY - runs EVERY camp pass, even when no rebuild is due (bad <= 3). The
+        // doorstep-fill and bed placement used to live INSIDE the bad>3 rebuild, so once the
+        // hut was built they never ran again: the front-door pit stayed open (the bot couldn't
+        // path in, so it fell back to an open-field chest and never entered) and a recovered bed
+        // rode around unplaced (no spawn -> night-death carousel). Both self-heal here now,
+        // decoupled from the rebuild. Idempotent: a filled apron / placed bed is a fast no-op.
+        try { await provision.ensureHutApron(bot, hutAt, { isStopped, say }) } catch (e) { dbg('camp: apron fill failed (' + e.message + ')') }
+        try { const bs = await provision.ensureHutBed(bot, hutAt, { isStopped, say }); dbg('camp: hut bed -> ' + bs) } catch (e) { dbg('camp: hut bed failed (' + e.message + ')') }
       }
     } catch (e) { dbg('camp: hut failed (' + e.message + ') - continuing') }
     // (The old reach-based bank-migration + furnish + threshold-apron are RETIRED: the
