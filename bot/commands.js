@@ -2391,6 +2391,9 @@ async function autoBuild (bot, schem, at, opts = {}) {
           }
           if (swept) { try { await handle(bot, 'collect') } catch {}; dbg('camp: interior sweep pocketed ' + swept + ' stray block(s)'); say(`tidied the hut - pocketed ${swept} stray block(s)`) }
         } catch (e) { dbg('camp: interior sweep failed (' + e.message + ')') }
+        // HOME BANK (operator promise): the hut chest is the ONE treasury - ferry every
+        // loose field chest within 64 into it and pack the empties up. Idempotent.
+        try { const nc = await provision.consolidateBank(bot, hutAt, { isStopped, say }); if (nc) dbg('camp: consolidated ' + nc + ' field chest(s) into the bank') } catch (e) { dbg('camp: bank consolidation failed (' + e.message + ')') }
       }
     } catch (e) { dbg('camp: hut failed (' + e.message + ') - continuing') }
     // (The old reach-based bank-migration + furnish + threshold-apron are RETIRED: the

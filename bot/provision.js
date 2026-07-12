@@ -3538,22 +3538,39 @@ async function ensureChest (bot, opts = {}) {
 }
 
 async function gotoChest (bot, chestBlock) {
+  // BANKING REACH: a single 15s goto times out on a far bank ("chest read failed (goto
+  // timed out)", live at 80b out) and the treasury reads as unreachable. Staged legs
+  // first when far, then the precise approach - through the hut door if need be.
+  const d = bot.entity.position.distanceTo(chestBlock.position)
+  if (d > 40) { try { await walkStaged(bot, chestBlock.position.x, chestBlock.position.z, { range: 8, timeoutMs: 120000 }) } catch {} }
   if (bot.entity.position.distanceTo(chestBlock.position) > 3) {
-    await gotoWithTimeout(bot, new goals.GoalNear(chestBlock.position.x, chestBlock.position.y, chestBlock.position.z, 2), 15000)
+    try {
+      await gotoWithTimeout(bot, new goals.GoalNear(chestBlock.position.x, chestBlock.position.y, chestBlock.position.z, 2), 15000)
+    } catch (e) {
+      // the bank lives INSIDE the hut now - a plain goto can't plan through the door
+      const nav = require('./navigate.js')
+      await nav.navigateTo(bot, new goals.GoalNear(chestBlock.position.x, chestBlock.position.y, chestBlock.position.z, 2), { timeoutMs: 15000, deadlineMs: 35000, climb: false, budgets: { door: 2, pit: 1, water: 1, nudge: 1 }, label: 'bank' })
+    }
   }
 }
 
 // Deposit all BUILD MATERIALS (everything not in KEEP_ON_BOT) into the chest, so
 // the pack doesn't overflow mid-provision. Keeps `keepDirt` dirt for bridging.
 // Returns the number of items deposited.
+// opts.all: deposit EVERYTHING except active gear/food (tools, weapons, armor, torches,
+// rod, a bite to eat) - for treasury refills and bank consolidation. The default keeps
+// the usual working set (KEEP_ON_BOT). NOTE: the camp rebuild always passed all:true;
+// it was silently ignored until now, leaving planks/coal stuck in the pack.
+const KEEP_WHEN_ALL = /_pickaxe$|_axe$|_shovel$|_sword$|_hoe$|^shears$|_helmet$|_chestplate$|_leggings$|_boots$|^torch$|flint_and_steel|_bucket$|^bucket$|^fishing_rod$|^cooked_|^bread$|_apple$/
 async function depositMaterials (bot, chestBlock, opts = {}) {
   const keepDirt = opts.keepDirt || 0
+  const keepRe = opts.all ? KEEP_WHEN_ALL : KEEP_ON_BOT
   await gotoChest(bot, chestBlock)
   const chest = await bot.openContainer(chestBlock)
   let n = 0
   try {
     for (const it of bot.inventory.items()) {
-      if (KEEP_ON_BOT.test(it.name)) continue
+      if (keepRe.test(it.name)) continue
       let count = it.count
       if (it.name === 'dirt' && keepDirt) count = Math.max(0, it.count - keepDirt)
       if (count <= 0) continue
@@ -3648,6 +3665,64 @@ async function migrateChestInto (bot, oldPos, hut, { isStopped = () => false, sa
     } catch (e) { dbg('  chest migration: old chest pickup failed (' + e.message + ')') }
   } else if (Object.keys(left).length) dbg('  chest migration: old chest NOT empty after trips - leaving it standing')
   return true
+}
+
+// ---- HOME BANK CONSOLIDATION (operator promise): ONE canonical treasury - the chest
+// inside the hut. Every other remembered chest within `radius` gets ferried into it and
+// dug up (item-safe: withdraw -> deposit round trips; the old chest is only removed once
+// it reads EMPTY). Field stashes from old camps stop rotting in the open where one
+// creeper audit loses the economy. Idempotent - runs every camp pass, fast no-op when
+// the bank is the only chest. Returns how many field chests were fully consolidated.
+async function consolidateBank (bot, hut, { isStopped = () => false, say = () => {}, radius = 64 } = {}) {
+  const chests = listInfra('chest', bot)
+  const bank = chests.find(e => ownHutAt({ x: e.x, y: e.y, z: e.z }))
+  if (!bank) { dbg('  consolidate: no bank chest inside the hut yet'); return 0 }
+  const bankBlk = () => bot.blockAt(new Vec3(bank.x, bank.y, bank.z))
+  const bb0 = bankBlk()
+  if (!bb0 || !/chest/.test(bb0.name)) { dbg('  consolidate: bank cell does not hold a chest'); return 0 }
+  let consolidated = 0
+  for (const e of chests) {
+    if (isStopped()) break
+    if (ownHutAt({ x: e.x, y: e.y, z: e.z })) continue // the bank itself / its double half
+    if (Math.hypot(e.x - hut.x, e.z - hut.z) > radius) continue
+    const blk = bot.blockAt(new Vec3(e.x, e.y, e.z))
+    if (!blk || !/chest/.test(blk.name)) continue // unloaded or pruned - a later pass gets it
+    dbg('  consolidate: ferrying field chest at ' + e.x + ',' + e.y + ',' + e.z + ' into the bank')
+    say('moving a field chest into the bank')
+    let trips = 0
+    while (!isStopped() && trips++ < 6) {
+      const ob = bot.blockAt(new Vec3(e.x, e.y, e.z))
+      if (!ob || !/chest/.test(ob.name)) break
+      let counts
+      try { counts = await chestCounts(bot, ob) } catch (err) { dbg('  consolidate: field chest read failed (' + err.message + ')'); break }
+      if (!Object.keys(counts).length) break
+      for (const n of Object.keys(counts)) {
+        if ((bot.inventory ? bot.inventory.emptySlotCount() : 36) < 2) break
+        try { await withdrawItem(bot, ob, n, counts[n]) } catch {}
+      }
+      const bb = bankBlk()
+      if (!bb || !/chest/.test(bb.name)) { dbg('  consolidate: bank vanished mid-ferry - stopping'); return consolidated }
+      try { await depositMaterials(bot, bb, { keepDirt: 8, all: true }) } catch (err) { dbg('  consolidate: bank deposit failed (' + err.message + ')') }
+    }
+    // remove the old chest only once it verifies EMPTY (world re-read is the arbiter)
+    const ob2 = bot.blockAt(new Vec3(e.x, e.y, e.z))
+    if (ob2 && /chest/.test(ob2.name)) {
+      let left = { unknown: 1 }
+      try { left = await chestCounts(bot, ob2) } catch {}
+      if (!Object.keys(left).length) {
+        try {
+          await bot.dig(ob2); await collectDrops(bot, 4)
+          forgetInfra('chest', e)
+          consolidated++
+          dbg('  consolidate: field chest at ' + e.x + ',' + e.z + ' emptied + packed up')
+        } catch (err) { dbg('  consolidate: empty chest pickup failed (' + err.message + ')') }
+      } else dbg('  consolidate: field chest not empty after trips - leaving it standing (pack full?)')
+    } else { forgetInfra('chest', e); consolidated++ }
+    // bank whatever the ferry left in the pack before moving to the next chest
+    try { const bb = bankBlk(); if (bb && /chest/.test(bb.name)) await depositMaterials(bot, bb, { keepDirt: 8, all: true }) } catch {}
+  }
+  if (consolidated) say(`bank consolidated - ${consolidated} field chest(s) moved into the hut`)
+  return consolidated
 }
 
 // ---- FURNISH THE HUT (operator: "wheres the bed crafting table and furnace?"): the
@@ -3946,4 +4021,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, furnishHut, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, gatherLeather, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, ensureSpawnBed, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, ensureWheatFarm, tendWheatFarm, fishForFood, ensureHutApron, ensureHutBed, setBuildZone, setDebugSink }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, consolidateBank, furnishHut, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, gatherLeather, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, ensureSpawnBed, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, ensureWheatFarm, tendWheatFarm, fishForFood, ensureHutApron, ensureHutBed, setBuildZone, setDebugSink }
