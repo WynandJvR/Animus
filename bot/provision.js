@@ -3466,6 +3466,9 @@ async function furnishHut (bot, hut, { isStopped = () => false, say = () => {} }
       const ox = dwF.x === hut.x ? -1 : dwF.x === hut.x + 4 ? 1 : 0
       const oz = dwF.z === hut.z ? -1 : dwF.z === hut.z + 4 ? 1 : 0
       const floorY = dwF.y - 1 // solid surface the door sits on
+      // stand at the doorway (inside the door cell) so we can reach the apron pit from
+      // above and build it up toward us - the bot can't stand IN the pit to fill it
+      try { await gotoWithTimeout(bot, new goals.GoalBlock(dwF.x, dwF.y, dwF.z), 15000) } catch {}
       for (let step = 1; step <= 2 && !isStopped(); step++) {
         const ax = dwF.x + ox * step; const az = dwF.z + oz * step
         // clear anything blocking the 2-high walkway at floor level and above
@@ -3479,12 +3482,21 @@ async function furnishHut (bot, hut, { isStopped = () => false, say = () => {} }
             } catch {}
           }
         }
-        // fill the ground up to floor level with dirt (stack from the first solid below)
-        let guard = 5
-        let g = bot.blockAt(new Vec3(ax, floorY, az))
-        while ((!g || AIRISH(g.name) || /water/.test(g.name)) && guard-- > 0 && !isStopped()) {
-          if (!await placeAt(bot, new Vec3(ax, floorY, az), /^(dirt|coarse_dirt|cobblestone)$/)) break
-          g = bot.blockAt(new Vec3(ax, floorY, az))
+        // fill the pit from the BOTTOM up to floor level (416,63 AND 416,64 were both air -
+        // a single top placement had no support and failed, live). Find the lowest air
+        // cell sitting on something solid and stack dirt upward.
+        let guard = 7
+        while (guard-- > 0 && !isStopped()) {
+          const top = bot.blockAt(new Vec3(ax, floorY, az))
+          if (top && !AIRISH(top.name) && !/water/.test(top.name)) break // walkway complete
+          let py = floorY
+          while (py > floorY - 6) {
+            const here = bot.blockAt(new Vec3(ax, py, az)); const below = bot.blockAt(new Vec3(ax, py - 1, az))
+            if (here && (AIRISH(here.name) || /water/.test(here.name)) && below && below.boundingBox === 'block') break
+            py--
+          }
+          if (py <= floorY - 6) break // no solid base within reach - give up on this cell
+          if (!await placeAt(bot, new Vec3(ax, py, az), /^(dirt|coarse_dirt|cobblestone)$/)) break
         }
       }
       dbg('  furnish: threshold apron levelled in front of the door')

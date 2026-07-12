@@ -109,6 +109,18 @@ function installPathfinderTuning (bot) {
     }
     Movements.prototype.__selfScaffoldGuard = true
   }
+
+  // PATH RELIABILITY (operator: "fix the pathfinding, it seems unreliable"): the stock
+  // 5s think budget throws "Took too long to decide path" in tight/cluttered terrain
+  // (getting into the cramped hut, around furniture). More compute per attempt + a bigger
+  // per-tick slice makes short indoor paths actually resolve instead of bailing.
+  try {
+    if (bot.pathfinder) {
+      bot.pathfinder.thinkTimeout = 20000 // ms to find a path (was 5000)
+      bot.pathfinder.tickTimeout = 80     // ms of compute per tick (was 40)
+      if ('searchRadius' in bot.pathfinder) bot.pathfinder.searchRadius = -1 // unbounded (default)
+    }
+  } catch {}
 }
 
 module.exports = { installPathfinderTuning, selfPlacedNear, isSelfPlaced }
