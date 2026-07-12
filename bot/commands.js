@@ -1537,6 +1537,14 @@ async function handle (bot, line) {
       provision.rememberBed(bed.position) // bed memory: nights head here first from now on
       return 'sleeping (spawn set here)'
     }
+    case 'fish': {
+      // fish until a few meals are in the pack (rod crafted from sticks+string if needed)
+      beginActivity('fish', 'nearest water')
+      const ok = await provision.fishForFood(bot, { isStopped: () => buildAbort, say: m => bot.chat(String(m).slice(0, 200)) })
+      endActivity(ok, ok ? 'caught dinner' : 'no luck')
+      return ok ? 'got some fish in the pack' : "couldn't fish here (no rod/string, no water, or no bites)"
+    }
+
     case 'shove':
     case 'nudge': {
       // DIRECT-CONTROL escape hatch for drivers (operator/Sonnet shepherd): face the

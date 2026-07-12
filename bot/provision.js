@@ -1474,7 +1474,7 @@ async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () =
   if (hasSolidCeiling(bot, 12) || nearHostile(bot, 16) || isNight(bot)) { dbg('  wheat farm: bad moment (cave/hostiles/night) - deferred'); return false }
   // 1) surface water within reach of home - farmland must sit beside it
   const waterId = mcData.blocksByName.water.id
-  const waters = (bot.findBlocks({ matching: waterId, maxDistance: 48, count: 24 }) || [])
+  const waters = (bot.findBlocks({ matching: waterId, maxDistance: 48, count: 64 }) || [])
     .filter(p => { const a = bot.blockAt(p.offset(0, 1, 0)); return a && AIRISH(a.name) })
     .filter(p => !inAvoidBox(avoid, p.x, p.z))
   if (!waters.length) { dbg('  wheat farm: no surface water within 48 - deferred'); return false }
@@ -1586,11 +1586,61 @@ async function tendWheatFarm (bot, { isStopped = () => false, say = () => {} } =
   return harvested > 0 || countItem(bot, 'bread') > 0
 }
 
+// ---- FISHING: the food of last resort that works ANYWHERE with water (the guardian
+// escort proved this region has no animals - one sheep in 40 minutes - and the bot
+// starved through every other fallback). A rod is 3 sticks + 2 string; spiders pay the
+// string; raw cod/salmon are safe food the auto-eat handles.
+async function ensureFishingRod (bot, { isStopped = () => false, home } = {}) {
+  const has = () => (bot.inventory ? bot.inventory.items() : []).find(i => i.name === 'fishing_rod')
+  if (has()) return true
+  const inv = inventoryCounts(bot)
+  if ((inv.string || 0) < 2) { dbg('  fishing: no rod and only ' + (inv.string || 0) + ' string - deferred'); return false }
+  try { await runCraft(bot, 'fishing_rod', 1, true, { isStopped, home }) } catch (e) { dbg('  fishing: rod craft failed (' + e.message + ')'); return false }
+  return !!has()
+}
+
+async function fishForFood (bot, { isStopped = () => false, say = () => {}, target = 6, home } = {}) {
+  if (hasSolidCeiling(bot, 12)) { dbg('  fishing: underground - not here'); return false }
+  const mcData = require('minecraft-data')(bot.version)
+  const edible = () => (bot.inventory ? bot.inventory.items() : []).filter(i => mcData.foodsByName && mcData.foodsByName[i.name] && !/rotten|spider_eye|poisonous/.test(i.name)).reduce((s, i) => s + i.count, 0)
+  if (!await ensureFishingRod(bot, { isStopped, home })) return false
+  const waterId = mcData.blocksByName.water.id
+  const waters = (bot.findBlocks({ matching: waterId, maxDistance: 48, count: 64 }) || []) // sample WIDE: the nearest N blocks of a lake are all submerged and fail the air-above filter
+    .filter(p => { const a = bot.blockAt(p.offset(0, 1, 0)); return a && AIRISH(a.name) })
+  if (!waters.length) { dbg('  fishing: no surface water within 48'); return false }
+  const w = waters[0]
+  try { await gotoWithTimeout(bot, new goals.GoalNear(w.x, w.y + 1, w.z, 3), 45000) } catch {}
+  if (isStopped()) return false
+  say('nothing to hunt around here - fishing for dinner instead')
+  dbg('  fishing at the water near ' + w.x + ',' + w.z + ' (edible now: ' + edible() + ', target ' + target + ')')
+  const deadline = Date.now() + 240000 // a real session, not forever
+  let catches = 0
+  while (edible() < target && Date.now() < deadline && !isStopped()) {
+    if (nearHostile(bot, 12)) { dbg('  fishing: hostile closing - reeling out'); break }
+    const rod = (bot.inventory ? bot.inventory.items() : []).find(i => i.name === 'fishing_rod')
+    if (!rod) break // rod broke
+    try { await bot.equip(rod, 'hand') } catch { break }
+    try { await bot.lookAt(new Vec3(w.x + 0.5, w.y, w.z + 0.5), true) } catch {}
+    try {
+      await Promise.race([bot.fish(), new Promise((resolve, reject) => setTimeout(() => reject(new Error('cast timeout')), 45000))])
+      catches++
+    } catch (e) {
+      try { bot.activateItem() } catch {} // reel a dangling line back in
+      dbg('  fishing: cast failed (' + e.message + ')')
+      await new Promise(r => setTimeout(r, 1500))
+    }
+    await collectDrops(bot, 4)
+  }
+  dbg('  fishing done: ' + catches + ' catches, edible=' + edible())
+  if (catches > 0) say(`caught ${catches} fish - that'll do`)
+  return edible() > 0
+}
+
 // ---- INVENTORY HYGIENE: mob-drop junk (spider eyes, string, flint...) quietly eats the
 // slots the build materials need (seen live: ~8 slots of trash mid-castle-provision).
 // Toss what has no use; KEEP bones (they become bone meal for the tree farm) and a small
 // rotten-flesh famine reserve (the risky-food ranking eats it only when starving).
-const JUNK_RE = /^(rotten_flesh|spider_eye|poisonous_potato|string|flint|feather|egg|wheat_seeds|beetroot_seeds|melon_seeds|pumpkin_seeds|arrow|gunpowder|phantom_membrane|rabbit_hide|rabbit_foot|ink_sac|glow_ink_sac|slime_ball|fermented_spider_eye)$/
+const JUNK_RE = /^(rotten_flesh|spider_eye|poisonous_potato|flint|feather|egg|beetroot_seeds|melon_seeds|pumpkin_seeds|arrow|gunpowder|phantom_membrane|rabbit_hide|rabbit_foot|ink_sac|glow_ink_sac|slime_ball|fermented_spider_eye)$/ // string STAYS (fishing rods!); wheat_seeds stay (the farm)
 async function dumpJunk (bot) {
   let tossed = 0
   for (const it of (bot.inventory ? bot.inventory.items() : [])) {
@@ -1952,6 +2002,11 @@ async function gatherLoop (bot, item, count, opts = {}) {
             await ensureWheatFarm(bot, home, { isStopped, say: opts.say, avoid: opts.avoid })
           }
         } catch (e) { dbg('  wheat fallback failed (' + e.message + ')') }
+        // FISHING: the last-resort food that works anywhere with water (guardian escort:
+        // this region has no animals, and it starved to death through every fallback)
+        if (foodCount(bot) === 0 && !isStopped()) {
+          try { await fishForFood(bot, { isStopped, say: opts.say, home }) } catch (e) { dbg('  fishing fallback failed (' + e.message + ')') }
+        }
       }
     }
     // OPPORTUNISTIC: a food animal is RIGHT THERE and the pack is light - take the free
@@ -2832,4 +2887,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, hasSolidCeiling, gatherLeather, huntForFood, hasFood, needsFood, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, ensureWheatFarm, tendWheatFarm, setBuildZone, setDebugSink }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, hasSolidCeiling, gatherLeather, huntForFood, hasFood, needsFood, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, ensureWheatFarm, tendWheatFarm, fishForFood, setBuildZone, setDebugSink }
