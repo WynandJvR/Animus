@@ -614,6 +614,13 @@ async function buildSurvival (bot, schem, at, opts = {}) {
     // Tidy up: pull down the scaffold blocks we placed to gain height.
     if (opts.cleanup !== false && !isStopped()) {
       try { scaffoldRemoved = await cleanupScaffold(bot, schem, at, beforeSet, solidSet, { isStopped }) } catch {}
+      // ...and the REGISTRY's towers just outside the snapshot region (approach pillars
+      // from gotos/recoveries) - never a schematic cell, never trail-based near a build.
+      try {
+        scaffoldRemoved += await require('./scaffold.js').teardown(bot, { x: at.x, z: at.z }, {
+          isStopped, radius: 20, max: 16, exclude: p => solidSet.has(`${p.x},${p.y},${p.z}`)
+        })
+      } catch {}
       if (scaffoldRemoved) say(`removed ${scaffoldRemoved} scaffold block(s)`)
     }
   } finally {

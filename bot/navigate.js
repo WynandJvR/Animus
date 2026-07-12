@@ -43,17 +43,22 @@ function isNavigating () { return navDepth > 0 }
 // (verified live: froze a 432-block build for 10+ minutes; froze the whole brain loop).
 // This used to exist as three identical copies (commands/provision/schematic).
 function gotoOnce (bot, goal, ms = 20000) {
+  // SCAFFOLD SESSION: any block the pathfinder places while EXECUTING a goto (bridge,
+  // 1x1 tower) is by definition movement scaffold, never build fabric - build blocks
+  // are placed after the goto completes. The bracket lets the scaffold manager tag and
+  // later tear down exactly those, even right next to a build made of the same material.
+  const scaffold = require('./scaffold.js')
+  scaffold.beginSession('goto')
   return new Promise((resolve, reject) => {
     let settled = false
+    const done = (fn, v) => { if (!settled) { settled = true; scaffold.endSession(); fn(v) } }
     const timer = setTimeout(() => {
-      if (settled) return
-      settled = true
       try { bot.pathfinder.setGoal(null) } catch {}
-      reject(new Error('goto timed out'))
+      done(reject, new Error('goto timed out'))
     }, ms)
     bot.pathfinder.goto(goal).then(
-      () => { if (!settled) { settled = true; clearTimeout(timer); resolve() } },
-      e => { if (!settled) { settled = true; clearTimeout(timer); reject(e) } }
+      () => { clearTimeout(timer); done(resolve) },
+      e => { clearTimeout(timer); done(reject, e) }
     )
   })
 }

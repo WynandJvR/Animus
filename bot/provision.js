@@ -13,6 +13,7 @@ const path = require('path')
 const { goals, Movements } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
 const navigate = require('./navigate.js') // unified navigation (it lazy-requires us back for climb/pillar/water-hop)
+const scaffold = require('./scaffold.js') // scaffold manager: temp-block registry, filler policy, teardown
 // Visible, UNTHROTTLED build tracing to stdout (the say() progress goes through a 40s
 // throttle that hides failures). Enable with BUILD_DEBUG=1 to see every plan/task/smelt step.
 let dbgSink = null // injected by index.js: debug lines persist to logs/bot-events.log
@@ -796,12 +797,9 @@ async function pillarUpTo (bot, targetY, opts = {}) {
       while (Date.now() - t < 1000 && !isStopped()) {
         await new Promise(r => setTimeout(r, 15))
         if (bot.entity.position.y - y0 >= 1.0) {
-          try { await bot.placeBlock(ref, new Vec3(0, 1, 0)) } catch (e) {
-            // Paper often doesn't echo the blockUpdate on a SUCCESSFUL place (same quirk
-            // as placeAt/torches) - the "miss" made us jump again on top of a block that
-            // was already there: the operator-reported bunny-hop. Check the world.
-            if (/blockUpdate/.test(e.message)) { await new Promise(r => setTimeout(r, 250)) }
-          }
+          // the placeBlock wrapper (pathfix) verifies against the world - no exception
+          // means the block is really there; register it as tower scaffold for teardown
+          try { await bot.placeBlock(ref, new Vec3(0, 1, 0)); scaffold.add(feet, 'pillar') } catch { await new Promise(r => setTimeout(r, 150)) }
           break
         }
       }
@@ -1838,25 +1836,10 @@ async function fishForFood (bot, { isStopped = () => false, say = () => {}, targ
 // dirt towers (operator: "a massive mess"). The patch layer remembers every self-placed
 // block; after a harvest, ride the tower back down and pocket the dirt.
 async function cleanupScaffold (bot, around, { isStopped = () => false } = {}) {
-  let pf
-  try { pf = require('./pathfix.js') } catch { return 0 }
-  if (!pf.selfPlacedNear) return 0
-  const spots = pf.selfPlacedNear(around, 10, 1800000) // 30-min window (5 min expired mid-harvest, orphaning towers)
-  if (!spots.length) return 0
-  spots.sort((a, b) => b.y - a.y) // top-down: digging under our own feet rides us down
-  let removed = 0
-  for (const p of spots.slice(0, 24)) {
-    if (isStopped()) break
-    const b = bot.blockAt(new Vec3(p.x, p.y, p.z))
-    if (!b || !FILLER_RE.test(b.name)) continue // only our own filler blocks, never terrain
-    if (bot.entity.position.distanceTo(b.position) > 4.5) {
-      try { await gotoWithTimeout(bot, new goals.GoalNear(p.x, p.y, p.z, 3), 8000) } catch { continue }
-    }
-    const tool = toolForBlock(bot, b.name) // cobble dug bare/wrong-tool drops NOTHING (live: hoe-dug scaffold vanished)
-    if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
-    try { await bot.dig(b); removed++; await new Promise(r => setTimeout(r, 150)) } catch {}
-  }
-  if (removed) { await collectDrops(bot, 6); dbg('  tore down ' + removed + ' scaffold blocks (dirt pocketed)') }
+  // Registry-driven (bot/scaffold.js) + the legacy trail for towers placed before the
+  // registry existed. Away from builds only (alsoTrail sweeps ALL own placements).
+  const removed = await scaffold.teardown(bot, around, { isStopped, radius: 10, max: 24, alsoTrail: true })
+  if (removed) await collectDrops(bot, 6)
   return removed
 }
 
@@ -1916,6 +1899,7 @@ async function plantSaplingNear (bot, around, logItem, opts = {}) {
     const gp = new Vec3(Math.floor(around.x) + dx, Math.floor(around.y) + dy, Math.floor(around.z) + dz)
     if (inAvoidBox(opts.avoid, gp.x, gp.z)) continue // a tree here would grow into the build
     try { const pf = require('./pathfix.js'); if (pf.isSelfPlaced && pf.isSelfPlaced(gp)) continue } catch {} // own scaffold dirt is NOT ground (sapling on the tower, live)
+    if (scaffold.isScaffold(gp)) continue // registry outlives the 30-min trail (6h) - old towers aren't ground either
     const ground = bot.blockAt(gp); const above = bot.blockAt(gp.offset(0, 1, 0))
     if (!ground || !PLANTABLE_GROUND.test(ground.name) || !above || !AIRISH(above.name)) continue
     if (bot.entity.position.distanceTo(gp) > 4) { try { await gotoWithTimeout(bot, new goals.GoalNear(gp.x, gp.y, gp.z, 2), 10000) } catch { continue } }

@@ -57,3 +57,4 @@ bot/body-episodes.jsonl
 bot/chest-cache.json
 bot/.*-tmp.js
 bot/scaffold-trail.json
+bot/scaffold-registry.json

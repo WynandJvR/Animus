@@ -147,6 +147,7 @@ function installPathfinderTuning (bot) {
       }
       if (await placedOK(bot, target, { timeoutMs: 1200, before })) {
         try { recentlyPlaced.set(key(target), Date.now()); saveTrail(); if (recentlyPlaced.size > 256) sweep() } catch {}
+        try { require('./scaffold.js').onPlaced(target) } catch {} // files it as scaffold IF a movement session is open
         return
       }
       throw new Error(`place did not land at ${Math.floor(target.x)},${Math.floor(target.y)},${Math.floor(target.z)} (world re-read)`)

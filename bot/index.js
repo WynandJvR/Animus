@@ -213,6 +213,7 @@ provision.setDebugSink(noteDebug)
 resources.setDebugSink(noteDebug)
 navigate.setDebugSink(noteDebug)
 require('./pathfix.js').setDebugSink(noteDebug) // [verify] place/dig world-recheck traces
+require('./scaffold.js').setDebugSink(noteDebug) // [scaffold] registry/teardown traces
 // A build job saved to disk survived a process restart - let the operator know it's resumable.
 try {
   const rj = commands.persistedResume && commands.persistedResume()
@@ -785,6 +786,27 @@ if (process.env.AUTO_COLLECT !== '0') {
       await bot.pathfinder.goto(new goals.GoalNear(best.position.x, best.position.y, best.position.z, 0))
     } catch { /* item vanished / unreachable - retry next tick */ } finally { collecting = false }
   }, 3000)
+}
+
+// IDLE SCAFFOLD SWEEP: orphaned towers (a death or restart mid-harvest abandons them;
+// the operator kept finding dirt/cobble columns all over the forest) get torn down
+// whenever the bot idles near one - the registry persists, so restarts can't orphan.
+// Only registry entries older than 2 min (never yank scaffold a flow just placed).
+if (process.env.AUTO_SCAFFOLD_SWEEP !== '0') {
+  let sweeping = false
+  setInterval(async () => {
+    if (sweeping || !bot.entity || !bot.pathfinder || bot.pathfinder.goal) return
+    if ((commands.isBusy && commands.isBusy()) || (provision.isResting && provision.isResting())) return
+    if (navigate.isNavigating() || navigate.isRecovering()) return
+    try {
+      const scaffold = require('./scaffold.js')
+      const stale = scaffold.near(bot.entity.position, 20).filter(e => Date.now() - e.t > 120000)
+      if (!stale.length) return
+      sweeping = true
+      const n = await scaffold.teardown(bot, bot.entity.position, { radius: 20, max: 12 })
+      if (n) note(`(scaffold) idle sweep tore down ${n} orphaned block(s)`)
+    } catch {} finally { sweeping = false }
+  }, 45000)
 }
 
 // SURFACE REFLEX (survival tier, like auto-defend): head underwater for 8+ seconds
