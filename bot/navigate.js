@@ -336,20 +336,6 @@ async function openNearbyDoor (bot, opts = {}) {
         }
         if (blockedSolid(base.offset(dx * sign * 2, 0, dz * sign * 2)) && !blockedSolid(base.offset(-dx * sign * 2, 0, -dz * sign * 2))) { sign = -sign; how += ' FLIPPED (chosen side blocked)' }
         dbg('door-assist: exit side ' + (dx ? (sign > 0 ? 'east' : 'west') : (sign > 0 ? 'south' : 'north')) + how)
-        // CRATERED DOORSTEP: if a threshold cell of MY OWN hut door is unwalkable (a
-        // creeper blast ate the apron, live: every crossing dropped into a 2-deep pit
-        // at (416,64,84) and wedged under the sill), heal it with carried filler FIRST -
-        // the same dirt-first idempotent sealer the camp pass runs (ensureHutApron).
-        // Own hut only (ownHutAt gates it): never place a block on someone else's build.
-        try {
-          if (!walkable(base.offset(dx * sign, 0, dz * sign)) || !walkable(base.offset(-dx * sign, 0, -dz * sign))) {
-            const anchor = prov().ownHutAt && prov().ownHutAt(base)
-            if (anchor && prov().ensureHutApron) {
-              const n = await prov().ensureHutApron(bot, anchor, { isStopped: opts.isStopped })
-              dbg('door-assist: doorstep unwalkable - apron heal filled ' + (n || 0) + ' cell(s)')
-            }
-          }
-        } catch (e3) { dbg('door-assist: apron heal failed (' + e3.message + ')') }
         // Align on the inside cell in front of the door (pathfinder CAN reach that).
         try { await gotoOnce(bot, new goals.GoalBlock(base.x - dx * sign, base.y, base.z - dz * sign), 8000) } catch (e2) { dbg('door-assist: could not align (' + e2.message + ')') }
         // FORCE-WALK through on manual controls. Thread the doorway CENTER-TO-CENTER -
@@ -382,9 +368,31 @@ async function openNearbyDoor (bot, opts = {}) {
         // line (the old force-open here re-blocked the doorway every pass, live).
         try { await ensurePassage('before crossing') } catch {}
         await walkTo(base.x + 0.5, base.z + 0.5, 0.45, 2500)                                    // into the doorway
+        // OWN-HUT crater heal, from THE DOORWAY: standing on the solid door floor the bot
+        // reaches the whole exit lane, so fill any creeper crater HERE - before the second
+        // step walks it off the doorstep edge into the pit. A blast turned the exit lane
+        // into a hole the pathfinder can't cross, so the re-plan gave up at the threshold
+        // (live: trapped at 418,67,89). ownHutAt-gated + survival place from our own filler
+        // + skips solids => anti-grief and a no-op on a healthy apron. The step-out below
+        // then lands on solid ground and the retry routes across.
+        try {
+          const anchor = prov().ownHutAt && prov().ownHutAt(p)
+          if (anchor && prov().healHomeCrater) {
+            const n = await prov().healHomeCrater(bot, anchor, { isStopped: opts.isStopped })
+            if (n) dbg('door-assist: healed ' + n + ' crater cell(s) from the doorway')
+          }
+        } catch (e3) { dbg('door-assist: crater heal skipped (' + e3.message + ')') }
         await walkTo(base.x + dx * sign * 2 + 0.5, base.z + dz * sign * 2 + 0.5, 0.6, 2500)     // out the far side
         const prog = (bot.entity.position.x - (base.x + 0.5)) * dx * sign + (bot.entity.position.z - (base.z + 0.5)) * dz * sign
         dbg('door-assist: force-walk ' + (prog > 1.2 ? 'THROUGH to ' : 'did not clear, at ') + bot.entity.position.floored())
+        // CLOSE THE DOOR BEHIND US so the hut stays sealed to mobs (it was opened/toggled
+        // to pass). "Sealed" = the door's collision shape SPANS the doorway (passageClear
+        // false) - the inverse of ensurePassage, same shape ground-truth. We're past the
+        // door now, so closing it can't lock us out; the re-plan doesn't route back through.
+        try {
+          for (let i = 0; i < 2 && passageClear(); i++) { await bot.activateBlock(bot.blockAt(base)); await new Promise(r => setTimeout(r, 300)) }
+          dbg('door-assist: door behind me ' + (passageClear() ? 'still open' : 'closed'))
+        } catch {}
         return true
       } catch { continue }
     }

@@ -607,6 +607,42 @@ async function ensureHutApron (bot, at, opts = {}) {
   return filled
 }
 
+// Heal a CREEPER CRATER in the exit lane just outside the north door - the wider cousin
+// of ensureHutApron. A blast ate the terrain in front of the door into a multi-deep pit
+// (live: (416,64-65,83)=air, bowl spanning ~x417-421/z82-85); the pathfinder then can't
+// route ACROSS it and the bot is trapped at its own threshold. Unlike ensureHutApron this
+// does NOT navigate - it fills from WHERE THE BOT STANDS (door-assist calls it the moment
+// the force-walk lands the bot on the doorstep, outside), reach-gated so it only touches
+// cells it can actually place. Bottom-up so each layer has support; fills the walk surface
+// flush at floorY. Own-hut only (caller gates on ownHutAt) + survival place from the bot's
+// own filler + skips solid cells => anti-grief and idempotent (0 places on a healthy apron).
+// `at` = hut anchor. Returns cells placed.
+async function healHomeCrater (bot, at, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const say = opts.say || (() => {})
+  const floorY = at.y; const doorX = at.x + 2
+  const DIRTLIKE = /^(dirt|coarse_dirt|cobblestone|cobbled_deepslate|stone|granite|diorite|andesite|tuff|gravel|netherrack)$/
+  const ANYFILL = /(_planks|dirt|cobblestone|cobbled_deepslate|stone)$/
+  let filled = 0; let holes = 0
+  // outside the north wall only (z <= at.z-1): NEVER the structure footprint (z>=at.z).
+  for (let wy = floorY - 2; wy <= floorY && !isStopped(); wy++) {            // bottom-up: 63,64,65
+    for (let wz = at.z - 1; wz >= at.z - 4 && !isStopped(); wz--) {          // 84,83,82,81
+      for (let wx = doorX - 2; wx <= doorX + 2; wx++) {                      // 414..418 (door-centred lane)
+        const pos = new Vec3(wx, wy, wz)
+        const b = bot.blockAt(pos)
+        if (b && b.boundingBox === 'block' && !AIRISH(b.name)) continue      // already solid - skip
+        holes++
+        if (bot.entity.position.distanceTo(pos.offset(0.5, 0.5, 0.5)) > 4.6) continue // out of reach from here
+        let ok = await placeAt(bot, pos, DIRTLIKE)                           // cheap filler first (save planks)
+        if (!ok) ok = await placeAt(bot, pos, ANYFILL)
+        if (ok) filled++
+      }
+    }
+  }
+  if (filled) { say(`patched the creeper crater at my door - dropped ${filled} block(s) so i can get out`); dbg('  crater heal: placed ' + filled + ' of ' + holes + ' hole cell(s) around ' + doorX + ',' + floorY + ',' + (at.z - 1)) }
+  return filled
+}
+
 // Make sure the hut has a usable BED and our spawn is set on it. Runs every camp pass
 // (decoupled from the bad>3 rebuild, where the only bed path used to live - so a recovered
 // bed rode around unplaced forever, no spawn). If a bed already stands in the hut, (re)assert
@@ -4021,4 +4057,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, consolidateBank, furnishHut, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, gatherLeather, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, ensureSpawnBed, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, ensureWheatFarm, tendWheatFarm, fishForFood, ensureHutApron, ensureHutBed, setBuildZone, setDebugSink }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, consolidateBank, furnishHut, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, ensureSpawnBed, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, ensureWheatFarm, tendWheatFarm, fishForFood, ensureHutApron, ensureHutBed, setBuildZone, setDebugSink }
