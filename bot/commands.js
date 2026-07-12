@@ -2435,6 +2435,9 @@ async function autoBuild (bot, schem, at, opts = {}) {
             if (ok) chest = null // re-resolve: the banking chest may have moved
           }
         }
+        // FURNISH (operator: "wheres the bed crafting table and furnce?"): furnace, table
+        // and bed move indoors too - each best-effort, re-tried every camp pass.
+        try { const n = await provision.furnishHut(bot, hutE, { isStopped, say }); if (n) dbg('camp: furnished ' + n + ' item(s) into the hut') } catch (e) { dbg('camp: furnish failed (' + e.message + ')') }
       }
     } catch (e) { dbg('camp: bank-into-hut failed (' + e.message + ') - continuing') }
     // WHEAT FARM (operator order): renewable food at the camp - the region can run dry

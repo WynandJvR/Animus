@@ -3107,6 +3107,82 @@ async function migrateChestInto (bot, oldPos, hut, { isStopped = () => false, sa
   return true
 }
 
+// ---- FURNISH THE HUT (operator: "wheres the bed crafting table and furnace?"): the
+// camp's loose infra moves indoors with the bank. Furnace and table get dug up and
+// re-placed inside; the remembered bed is relocated and re-activated (spawn re-set).
+const insideHutBox = (p, hut) => p.x >= hut.x && p.x <= hut.x + 4 && p.z >= hut.z && p.z <= hut.z + 4
+function hutFreeCells (bot, hut) {
+  const out = []
+  for (const [dx, dz] of [[1, 1], [2, 1], [3, 1], [1, 2], [2, 2], [3, 2], [1, 3], [2, 3], [3, 3]]) {
+    for (let dy = 0; dy <= 3; dy++) {
+      const p = new Vec3(hut.x + dx, hut.y + dy, hut.z + dz)
+      const b = bot.blockAt(p); const below = bot.blockAt(p.offset(0, -1, 0)); const above = bot.blockAt(p.offset(0, 1, 0))
+      if (b && AIRISH(b.name) && below && below.boundingBox === 'block' && above && AIRISH(above.name)) { out.push(p); break }
+    }
+  }
+  return out
+}
+async function furnishHut (bot, hut, { isStopped = () => false, say = () => {} } = {}) {
+  const moved = []
+  const grab = async (kind, nameRe) => { // dig a remembered outdoor one and pocket it
+    const e = listInfra(kind).find(x => Math.hypot(x.x - hut.x, x.z - hut.z) <= 60 && !insideHutBox(x, hut))
+    if (!e) return false
+    const blk = bot.blockAt(new Vec3(e.x, e.y, e.z))
+    if (!blk || !nameRe.test(blk.name)) { forgetInfra(kind, listInfra(kind).find(x => x.x === e.x && x.y === e.y && x.z === e.z)); return false }
+    if (bot.entity.position.distanceTo(blk.position) > 4) { try { await gotoWithTimeout(bot, new goals.GoalNear(e.x, e.y, e.z, 2), 30000) } catch { return false } }
+    const tool = toolForBlock(bot, /furnace/.test(blk.name) ? 'stone' : 'oak_planks')
+    if (tool) await bot.equip(tool, 'hand').catch(() => {})
+    try { await bot.dig(blk); await collectDrops(bot, 4) } catch (err) { dbg('  furnish: could not dig ' + kind + ' (' + err.message + ')'); return false }
+    forgetInfra(kind, listInfra(kind).find(x => x.x === e.x && x.y === e.y && x.z === e.z))
+    return true
+  }
+  const placeInside = async (kind, itemRe) => {
+    if (!(bot.inventory ? bot.inventory.items() : []).some(i => itemRe.test(i.name))) return false
+    const cell = hutFreeCells(bot, hut)[0]
+    if (!cell) { dbg('  furnish: no free cell for the ' + kind); return false }
+    if (bot.entity.position.distanceTo(cell) > 3) { try { await gotoWithTimeout(bot, new goals.GoalNear(cell.x, cell.y, cell.z, 2), 20000) } catch {} }
+    if (!await placeAt(bot, cell, itemRe)) { dbg('  furnish: could not place ' + kind + ' - ' + (placeAt.lastFail || '?')); return false }
+    rememberInfra(kind, cell); moved.push(kind)
+    return true
+  }
+  try { if (await grab('furnace', /furnace/)) await placeInside('furnace', /^furnace$/) } catch (e) { dbg('  furnish: furnace move failed (' + e.message + ')') }
+  try {
+    let haveTable = (bot.inventory ? bot.inventory.items() : []).some(i => i.name === 'crafting_table')
+    if (!haveTable) haveTable = await grab('table', /crafting_table/)
+    if (haveTable) await placeInside('table', /^crafting_table$/)
+  } catch (e) { dbg('  furnish: table move failed (' + e.message + ')') }
+  // BED last and only when it's SAFE: digging the bed clears the spawn point until it's
+  // re-placed and used - dying in that window means a world-spawn respawn far away.
+  try {
+    const kb = knownBed()
+    if (kb && !insideHutBox(kb, hut) && Math.hypot(kb.x - hut.x, kb.z - hut.z) <= 150 && (bot.health || 20) >= 12 && !isNight(bot)) {
+      await walkStaged(bot, kb.x, kb.z, { isStopped, range: 4, timeoutMs: 120000 })
+      const bblk = bot.findBlock({ matching: b => /_bed$/.test(b.name), maxDistance: 6 })
+      if (bblk) { try { await bot.dig(bblk); await collectDrops(bot, 4); forgetBed() } catch (e) { dbg('  furnish: bed dig failed (' + e.message + ')') } }
+    }
+    const bedItem = (bot.inventory ? bot.inventory.items() : []).find(i => /_bed$/.test(i.name))
+    if (bedItem) {
+      await walkStaged(bot, hut.x + 2, hut.z + 2, { isStopped, range: 4, timeoutMs: 120000 })
+      const cells = hutFreeCells(bot, hut)
+      let foot = null; let head = null
+      for (const c of cells) { const n = cells.find(o => o.y === c.y && Math.abs(o.x - c.x) + Math.abs(o.z - c.z) === 1); if (n) { foot = c; head = n; break } }
+      if (!foot) { dbg('  furnish: no 2-cell space for the bed') } else {
+        const below = bot.blockAt(foot.offset(0, -1, 0))
+        await bot.equip(bedItem, 'hand')
+        try { await bot.lookAt(head.offset(0.5, 0.5, 0.5), true) } catch {}
+        try { await bot.placeBlock(below, new Vec3(0, 1, 0)) } catch (e) { dbg('  furnish: bed place failed (' + e.message + ')') }
+        const nb = bot.blockAt(foot)
+        if (nb && /_bed$/.test(nb.name)) {
+          try { await bot.activateBlock(nb) } catch {} // day = sets spawn; night = sleeps
+          rememberBed(foot); moved.push('bed')
+        }
+      }
+    }
+  } catch (e) { dbg('  furnish: bed move failed (' + e.message + ')') }
+  if (moved.length) say('hut furnished - ' + moved.join(' + ') + ' moved indoors')
+  return moved.length
+}
+
 // Read chest contents as { name: count } (build materials the chest is holding).
 async function chestCounts (bot, chestBlock) {
   await gotoChest(bot, chestBlock)
@@ -3116,4 +3192,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, migrateChestInto, hasSolidCeiling, gatherLeather, huntForFood, hasFood, needsFood, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, ensureWheatFarm, tendWheatFarm, fishForFood, setBuildZone, setDebugSink }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, migrateChestInto, furnishHut, hasSolidCeiling, gatherLeather, huntForFood, hasFood, needsFood, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, ensureWheatFarm, tendWheatFarm, fishForFood, setBuildZone, setDebugSink }
