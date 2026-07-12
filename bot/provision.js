@@ -124,6 +124,26 @@ async function walkStaged (bot, tx, tz, opts = {}) {
           // FLOOR CHECK before leaping: a blind sprint-jump launched the bot off an edge
           // into a shaft to bedrock (died at y=1, live). Probe 2-4 blocks ahead along the
           // nudge line - if there's a 4+ deep drop, don't jump that way this cycle.
+          // PIT CHECK first: solid walls on 3+ sides at feet level = standing in a HOLE
+          // (open sky, so the underground climb-out never fires - the bot idled 70s in
+          // its own orchard-leveling hole, live, and every travel retry no-pathed in
+          // milliseconds). A jump-nudge can't clear a 2-deep wall; pillar out instead.
+          const f0 = bot.entity.position.floored()
+          let pitWalls = 0; let rimY = f0.y
+          for (const [wdx, wdz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            const w = bot.blockAt(f0.offset(wdx, 0, wdz))
+            if (w && w.boundingBox === 'block') pitWalls++
+            for (let dy = 2; dy >= 0; dy--) {
+              const t = bot.blockAt(f0.offset(wdx, dy, wdz))
+              if (t && t.boundingBox === 'block') { rimY = Math.max(rimY, f0.y + dy + 1); break }
+            }
+          }
+          if (pitWalls >= 3) {
+            dbg('walkStaged: wedged in a PIT at ' + Math.round(np.x) + ',' + Math.round(np.z) + ' - pillaring out to y=' + rimY)
+            try { await pillarUpTo(bot, rimY, { isStopped }) } catch (e) { dbg('walkStaged: pillar-out failed (' + e.message + ')') }
+            const outP = bot.entity.position
+            if (Math.floor(outP.y) > f0.y) { stalls = 0; continue } // freed - retry the legs
+          }
           const fdx = (lx - np.x); const fdz = (lz - np.z); const fn = Math.hypot(fdx, fdz) || 1
           let cliff = false
           for (const dist of [2, 3, 4]) {
@@ -1821,10 +1841,13 @@ async function prepOrchardCell (bot, cx, baseY, cz, { isStopped = () => false } 
     const b = bot.blockAt(ground.position.offset(0, dy, 0))
     if (b && !AIRISH(b.name) && /grass|fern|flower|dead_bush|snow|vine|_leaves$/.test(b.name)) { try { await bot.dig(b) } catch {} }
   }
-  // shave a bump: ground sticking up past plot level gets cut down (natural blocks only)
+  // shave a bump: ground sticking up past plot level gets cut down (natural blocks only,
+  // plus loose cobble - pathfinder bridging litters plots with scaffold cobblestone that
+  // "natural-only" could never remove, operator review)
   let guard = 3
   while (ground.position.y > baseY && guard-- > 0 && !isStopped()) {
-    if (!canBreakNaturally(ground) || (bot.canDigBlock && !bot.canDigBlock(ground))) break
+    const shaveable = canBreakNaturally(ground) || /^(cobblestone|cobbled_deepslate)$/.test(ground.name)
+    if (!shaveable || (bot.canDigBlock && !bot.canDigBlock(ground))) break
     const tool = toolForBlock(bot, ground.name) // stone shaved wrong-tool drops nothing
     if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
     try { await bot.dig(ground); await collectDrops(bot, 3) } catch { break }
@@ -1865,8 +1888,9 @@ async function levelPlotCell (bot, cx, baseY, cz, { isStopped = () => false } = 
     if (v && !AIRISH(v.name) && /grass|fern|flower|dead_bush|snow|vine/.test(v.name)) { try { await bot.dig(v) } catch {} }
   }
   let guard = 3
-  while (ground.position.y > baseY && guard-- > 0 && !isStopped()) { // shave bump
-    if (!canBreakNaturally(ground) || (bot.canDigBlock && !bot.canDigBlock(ground))) break
+  while (ground.position.y > baseY && guard-- > 0 && !isStopped()) { // shave bump (incl. scaffold cobble litter)
+    const shaveable = canBreakNaturally(ground) || /^(cobblestone|cobbled_deepslate)$/.test(ground.name)
+    if (!shaveable || (bot.canDigBlock && !bot.canDigBlock(ground))) break
     const tool = toolForBlock(bot, ground.name) // stone shaved wrong-tool drops nothing
     if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
     try { await bot.dig(ground); await collectDrops(bot, 3) } catch { break }

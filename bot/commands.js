@@ -2601,6 +2601,7 @@ async function resumeBuild (bot) {
   checklistBegin(JOB_STEPS)
   checklistStep('travel to site') // covers rest-first + grave detour + the trek itself
   let result = null
+  let travelBlocked = false // so the finally reports "unreachable", not a phantom death
   try {
     // Only claim a death when one actually happened - this same flow also runs after a
     // plain process restart, and "i died" with no death confused the operator (live).
@@ -2656,6 +2657,7 @@ async function resumeBuild (bot) {
       // Still can't reach the site: KEEP the job for the next respawn/attempt instead of
       // "building" from here - autoBuild far from the site skips everything and reports done.
       say("can't reach the build site right now - i'll try again")
+      travelBlocked = true
       buildInterrupted = true // route the finally through the keep-the-job branch
       return (result = { stopped: true, placed: 0, total: 0 })
     }
@@ -2666,10 +2668,11 @@ async function resumeBuild (bot) {
     return result
   } finally {
     building = false; setupMovements(bot)
-    if (buildInterrupted) { // died AGAIN mid-resume: keep the job for the next respawn
+    if (buildInterrupted) { // interrupted (death or unreachable site): keep the job
       buildInterrupted = false
-      dbg('resume: died again mid-resume - keeping resumeJob (deaths=' + resumeDeaths + ')')
-      endActivity(false, 'died again mid-resume - will retry after respawn', { detached: true })
+      const why = travelBlocked ? 'site unreachable - will retry' : 'died again mid-resume - will retry after respawn'
+      dbg('resume: ' + (travelBlocked ? 'site unreachable' : 'died again mid-resume') + ' - keeping resumeJob (deaths=' + resumeDeaths + ')')
+      endActivity(false, why, { detached: true })
     } else {
       resumeJob = null
       if (result && !result.stopped) clearPersistedResume() // resumed to a real finish
