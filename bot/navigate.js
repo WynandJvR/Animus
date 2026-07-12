@@ -383,11 +383,14 @@ async function openNearbyDoor (bot, opts = {}) {
         // (live: trapped at 418,67,89). ownHutAt-gated + survival place from our own filler
         // + skips solids => anti-grief and a no-op on a healthy apron. The step-out below
         // then lands on solid ground and the retry routes across.
+        const ownHut = prov().ownHutAt && prov().ownHutAt(p)
         try {
-          const anchor = prov().ownHutAt && prov().ownHutAt(p)
-          if (anchor && prov().healHomeCrater) {
-            const n = await prov().healHomeCrater(bot, anchor, { isStopped: opts.isStopped })
-            if (n) dbg('door-assist: healed ' + n + ' crater cell(s) from the doorway')
+          if (ownHut && prov().healHomeCrater) {
+            // QUICK patch from the doorway (no repositioning - a rim walk here would pull
+            // us off the crossing line): fill only the reachable western lane so the
+            // step-out below lands on solid ground.
+            const n = await prov().healHomeCrater(bot, ownHut, { isStopped: opts.isStopped, reposition: false })
+            if (n) dbg('door-assist: quick-healed ' + n + ' crater cell(s) from the doorway')
           }
         } catch (e3) { dbg('door-assist: crater heal skipped (' + e3.message + ')') }
         await walkTo(base.x + dx * sign * 2 + 0.5, base.z + dz * sign * 2 + 0.5, 0.6, 2500)     // out the far side
@@ -395,12 +398,23 @@ async function openNearbyDoor (bot, opts = {}) {
         dbg('door-assist: force-walk ' + (prog > 1.2 ? 'THROUGH to ' : 'did not clear, at ') + bot.entity.position.floored())
         // CLOSE THE DOOR BEHIND US so the hut stays sealed to mobs (it was opened/toggled
         // to pass). "Sealed" = the door's collision shape SPANS the doorway (passageClear
-        // false) - the inverse of ensurePassage, same shape ground-truth. We're past the
-        // door now, so closing it can't lock us out; the re-plan doesn't route back through.
+        // false) - the inverse of ensurePassage, same shape ground-truth. Do this BEFORE
+        // the full crater heal (which walks the rim away from the door), while we're still
+        // in reach; we're past the door now, so closing it can't lock us out.
         try {
           for (let i = 0; i < 2 && passageClear(); i++) { await bot.activateBlock(bot.blockAt(base)); await new Promise(r => setTimeout(r, 300)) }
           dbg('door-assist: door behind me ' + (passageClear() ? 'still open' : 'closed'))
         } catch {}
+        // FULL crater heal now that we're OUTSIDE and past the door: walk the rim and fill
+        // the whole footprint incl. the far EAST pit the doorway couldn't reach (live: the
+        // bot fell into the unhealed (419,62,84) and died; the same pit blocked re-entry).
+        // Only when we actually made it out (prog>1.2) - from inside we can't reach it.
+        try {
+          if (ownHut && prog > 1.2 && prov().healHomeCrater) {
+            const n = await prov().healHomeCrater(bot, ownHut, { isStopped: opts.isStopped, reposition: true })
+            if (n) dbg('door-assist: full-healed ' + n + ' crater cell(s) around home')
+          }
+        } catch (e5) { dbg('door-assist: full crater heal skipped (' + e5.message + ')') }
         return true
       } catch { continue }
     }

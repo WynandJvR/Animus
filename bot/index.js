@@ -697,6 +697,12 @@ const RANGED_RE = /skeleton|stray|bogged|pillager/i
 if (process.env.AUTO_DEFEND !== '0') {
   setInterval(() => {
     if (!bot.entity) return
+    // Track being-HIT first, so the shelter gate below can tell "safely holed up" from
+    // "under attack" (health dropped in the last 8s).
+    const hpNow = bot.health == null ? 20 : bot.health
+    if (hpNow < dfLastHp - 0.5) dfHurtAt = Date.now()
+    dfLastHp = hpNow
+    const beingHit = Date.now() - dfHurtAt < 8000
     // While digging UP out of a cave, don't let the flee reflex hijack the pathfinder
     // sideways - rising out of the hole IS the escape (fleeing horizontally just keeps us
     // in the mob-filled cave and pins us at depth).
@@ -704,15 +710,16 @@ if (process.env.AUTO_DEFEND !== '0') {
     // Same rule while a navigation RECOVERY is maneuvering (pillaring out of a pit,
     // threading a doorway, hopping from water) - the recovery IS the escape.
     if (navigate.isRecovering()) return
-    // While digging into a night bunker, the flee reflex must NOT drag us off - being sealed
-    // underground IS the escape (a sealed pit beats fleeing a creeper). Yield to the shelter.
-    if (provision.isSheltering && provision.isSheltering()) return
+    // While sheltering (sealed bunker / hut night-wait) stand down - UNLESS something is
+    // actually HITTING us. A sealed pit takes no hits (the mob can't reach), so this still
+    // yields there; but an enderman teleported into the hut, or a leaky pit, must be FOUGHT
+    // - we're armored and win - not passively absorbed to death (live: 'attack enderman
+    // suppressed' then died). The moment we take damage, defense/flee re-engages.
+    if (provision.isSheltering && provision.isSheltering() && !beingHit) return
     try {
       const me = bot.entity.position
-      const hp = bot.health == null ? 20 : bot.health
-      if (hp < dfLastHp - 0.5) dfHurtAt = Date.now() // health dropped - we're being HIT
-      dfLastHp = hp
-      const underFire = Date.now() - dfHurtAt < 8000
+      const hp = hpNow
+      const underFire = beingHit
       // FLEE from a nearby creeper (melee = it explodes) from 12 out - it died twice
       // tonight to creepers first seen at 5-8m: they SPRINT the last stretch and 8m of
       // walking-flee isn't enough head start. And when we're HURT, flee ANY hostile:

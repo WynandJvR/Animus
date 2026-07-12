@@ -607,39 +607,53 @@ async function ensureHutApron (bot, at, opts = {}) {
   return filled
 }
 
-// Heal a CREEPER CRATER in the exit lane just outside the north door - the wider cousin
-// of ensureHutApron. A blast ate the terrain in front of the door into a multi-deep pit
-// (live: (416,64-65,83)=air, bowl spanning ~x417-421/z82-85); the pathfinder then can't
-// route ACROSS it and the bot is trapped at its own threshold. Unlike ensureHutApron this
-// does NOT navigate - it fills from WHERE THE BOT STANDS (door-assist calls it the moment
-// the force-walk lands the bot on the doorstep, outside), reach-gated so it only touches
-// cells it can actually place. Bottom-up so each layer has support; fills the walk surface
-// flush at floorY. Own-hut only (caller gates on ownHutAt) + survival place from the bot's
-// own filler + skips solid cells => anti-grief and idempotent (0 places on a healthy apron).
-// `at` = hut anchor. Returns cells placed.
+// Heal a CREEPER CRATER around the home's exit - the wider cousin of ensureHutApron. A
+// blast ate the terrain in front of the door into a multi-deep bowl (live: air down to
+// y62 spanning ~x414-421 / z81-85, incl. an EAST pit at x419-420 the door lane misses);
+// the pathfinder can't route ACROSS it, so the bot is trapped at its threshold AND falls
+// into the far side and dies (live: fell into (419,62,84)). Fills the FULL footprint flush
+// at floorY, bottom-up (each layer sits on the one below). Two modes:
+//   reposition=false: place only what's reachable from WHERE THE BOT STANDS (the doorway,
+//     mid-crossing) - a fast western-lane patch so the step-out lands solid.
+//   reposition=true: also walk the rim (GoalNearXZ settles on reachable ground, never in
+//     the pit - canDig=false) to reach the far EAST columns the doorway can't touch.
+// Own-hut only (caller gates on ownHutAt) + survival place from the bot's own filler +
+// skips solid cells => anti-grief and idempotent (0 places on a healthy apron). Returns
+// cells placed. `at` = hut anchor.
 async function healHomeCrater (bot, at, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const say = opts.say || (() => {})
+  const reposition = opts.reposition !== false
   const floorY = at.y; const doorX = at.x + 2
   const DIRTLIKE = /^(dirt|coarse_dirt|cobblestone|cobbled_deepslate|stone|granite|diorite|andesite|tuff|gravel|netherrack)$/
   const ANYFILL = /(_planks|dirt|cobblestone|cobbled_deepslate|stone)$/
-  let filled = 0; let holes = 0
-  // outside the north wall only (z <= at.z-1): NEVER the structure footprint (z>=at.z).
-  for (let wy = floorY - 2; wy <= floorY && !isStopped(); wy++) {            // bottom-up: 63,64,65
-    for (let wz = at.z - 1; wz >= at.z - 4 && !isStopped(); wz--) {          // 84,83,82,81
-      for (let wx = doorX - 2; wx <= doorX + 2; wx++) {                      // 414..418 (door-centred lane)
+  const X0 = doorX - 2; const X1 = doorX + 5    // 414..421 - FULL crater width incl. the east pit
+  const Z1 = at.z - 1; const Z0 = at.z - 4      // 84..81 - out to the crater's north edge
+  const Y0 = floorY - 3; const Y1 = floorY      // 62..65 - down to the deepest air pocket
+  let filled = 0; let holes = 0; let moves = 0; const MAXMOVES = 12; let unreached = 0
+  // bottom-up so each layer sits on solid support (and repositioning onto a filled lower
+  // layer extends reach into the pit).
+  for (let wy = Y0; wy <= Y1 && !isStopped(); wy++) {
+    for (let wz = Z1; wz >= Z0 && !isStopped(); wz--) {
+      for (let wx = X0; wx <= X1 && !isStopped(); wx++) {
         const pos = new Vec3(wx, wy, wz)
+        if (wz >= at.z || ownHutAt(pos)) continue                           // NEVER inside the hut footprint (belt + braces: no filler on interior cells)
         const b = bot.blockAt(pos)
-        if (b && b.boundingBox === 'block' && !AIRISH(b.name)) continue      // already solid - skip
+        if (b && b.boundingBox === 'block' && !AIRISH(b.name)) continue     // already solid - skip
         holes++
-        if (bot.entity.position.distanceTo(pos.offset(0.5, 0.5, 0.5)) > 4.6) continue // out of reach from here
-        let ok = await placeAt(bot, pos, DIRTLIKE)                           // cheap filler first (save planks)
+        if (bot.entity.position.distanceTo(pos.offset(0.5, 0.5, 0.5)) > 4.3 && reposition && moves < MAXMOVES) {
+          moves++
+          try { await gotoWithTimeout(bot, new goals.GoalNearXZ(wx, wz, 2), 5000) } catch {}
+        }
+        if (bot.entity.position.distanceTo(pos.offset(0.5, 0.5, 0.5)) > 4.6) { unreached++; continue } // still out of reach - leave for a later pass
+        let ok = await placeAt(bot, pos, DIRTLIKE)                          // cheap filler first (save planks)
         if (!ok) ok = await placeAt(bot, pos, ANYFILL)
         if (ok) filled++
       }
     }
   }
-  if (filled) { say(`patched the creeper crater at my door - dropped ${filled} block(s) so i can get out`); dbg('  crater heal: placed ' + filled + ' of ' + holes + ' hole cell(s) around ' + doorX + ',' + floorY + ',' + (at.z - 1)) }
+  if (filled) { say(`patched the creeper crater at my door - dropped ${filled} block(s) so it's walkable`); dbg('  crater heal: placed ' + filled + ' of ' + holes + ' hole cell(s), x' + X0 + '-' + X1 + ' z' + Z0 + '-' + Z1 + (unreached ? ' (' + unreached + ' out of reach this pass)' : '')) }
+  else if (holes) dbg('  crater heal: ' + holes + ' hole(s), none placeable from here' + (reposition ? '' : ' (no-reposition pass)'))
   return filled
 }
 
@@ -1298,11 +1312,17 @@ async function digInForNight (bot, opts = {}) {
       let hurtInside = false
       while (Date.now() < dl && !isStopped()) {
         if (!isNight(bot) && !nearHostile(bot, 10)) break
-        if ((bot.health || 20) < hpIn - 3) { dbg('shelter: taking damage INSIDE the hut - falling back to a pit'); hurtInside = true; break }
+        if ((bot.health || 20) < hpIn - 3) { dbg('shelter: taking damage INSIDE the hut - releasing shelter to FIGHT'); hurtInside = true; break }
         if (inWaterNow(bot)) { dbg('shelter: hut interior flooding - bailing'); hurtInside = true; break }
         await new Promise(r => setTimeout(r, 3000))
       }
       if (!hurtInside) return true
+      // Hurt while holed up inside the hut (an enderman teleported in, a mob at the door):
+      // do NOT abandon the walls to dig a pit - RELEASE the shelter so the now-ungated
+      // flee/defend reflexes take over. Armored, inside its own walls, the bot wins the
+      // fight; a creeper it flees. Standing still absorbing hits killed it (live: enderman
+      // -> 'attack suppressed' -> dead). restUntilSafe re-shelters once the threat clears.
+      if (inWaterNow(bot)) { /* flooding: fall through to relocate/pit below */ } else return false
     }
     // Near (but not in) the hut with no way inside: dig AWAY from the walls/apron, never
     // against them - same rule as the build footprint below.
@@ -3863,6 +3883,26 @@ async function furnishHut (bot, hut, { isStopped = () => false, say = () => {} }
       } else seen[b.name.replace(/^.*_/, '')] = true
     }
   } catch (e) { dbg('  furnish: dedupe pass failed (' + e.message + ')') }
+  // POCKET STRAY FILLER on the interior floor. The floor pass above only levels the 3x3
+  // INNER columns and only shaves NATURAL terrain, so a self-placed dirt/cobble dropped by
+  // nav flailing (a nudge/pillar/heal) on the CHEST column or any interior cell slips
+  // through and sits there (operator: stray dirt at 418,66,88 by the double chest). Sweep
+  // the FULL interior box (x+1..x+4, z+1..z+4) at standing height and dig+pocket any loose
+  // filler that isn't furniture - it's the bot's own placed block on its own floor, so
+  // anti-grief safe (natural intrusion via canBreakNaturally, or self-placed via pathfix).
+  try {
+    const pf = (() => { try { return require('./pathfix.js') } catch { return null } })()
+    const STRAY_FILLER = /^(dirt|coarse_dirt|cobblestone|cobbled_deepslate|stone|granite|diorite|andesite|tuff|gravel|sand|netherrack|clay|mud)$/
+    for (let dx = 1; dx <= 4 && !isStopped(); dx++) for (let dz = 1; dz <= 4; dz++) for (const dy of [0, 1]) {
+      const p = new Vec3(hut.x + dx, hut.y + dy, hut.z + dz)
+      const b = bot.blockAt(p)
+      if (!b || AIRISH(b.name) || INFRA_RE.test(b.name) || !STRAY_FILLER.test(b.name)) continue // only loose filler, never furniture
+      if (!(canBreakNaturally(b) || (pf && pf.isSelfPlaced && pf.isSelfPlaced(p)))) continue     // own placed / natural only
+      if (bot.entity.position.distanceTo(p) > 4) { try { await gotoWithTimeout(bot, new goals.GoalNear(p.x, p.y, p.z, 2), 10000) } catch { continue } }
+      const tool = toolForBlock(bot, b.name); if (tool) await bot.equip(tool, 'hand').catch(() => {})
+      try { await bot.dig(b); await collectDrops(bot, 2); moved.includes('declutter') || moved.push('declutter'); dbg('  furnish: pocketed stray ' + b.name + ' on the interior floor at ' + p.toString()) } catch {}
+    }
+  } catch (e) { dbg('  furnish: declutter pass failed (' + e.message + ')') }
   const grab = async (kind, nameRe) => { // dig a remembered outdoor one and pocket it
     if (furnitureInHut(bot, hut, nameRe)) return false // already have one inside - don't fetch another
     const e = listInfra(kind, bot).find(x => Math.hypot(x.x - hut.x, x.z - hut.z) <= 60 && !insideHutBox(x, hut))
