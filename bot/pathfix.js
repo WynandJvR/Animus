@@ -19,6 +19,14 @@ function sweep () {
   for (const [k, t] of recentlyPlaced) { if (t < cut) recentlyPlaced.delete(k) }
 }
 
+// Point query: was THIS cell self-placed recently? The replant reflex was planting
+// saplings on the bot's own scaffold dirt (operator caught it live) - scaffold is
+// temporary by definition, nothing should treat it as real ground.
+function isSelfPlaced (pos, maxAgeMs) {
+  const t = recentlyPlaced.get(key(pos))
+  return !!t && t >= Date.now() - (maxAgeMs || TRAIL_MS)
+}
+
 // Self-placed blocks near a point (for scaffold teardown after tall-tree harvests -
 // the operator found dirt towers abandoned all over the forest).
 function selfPlacedNear (pos, r, maxAgeMs) {
@@ -82,4 +90,4 @@ function installPathfinderTuning (bot) {
   }
 }
 
-module.exports = { installPathfinderTuning, selfPlacedNear }
+module.exports = { installPathfinderTuning, selfPlacedNear, isSelfPlaced }

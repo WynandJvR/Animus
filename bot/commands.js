@@ -149,12 +149,28 @@ function endActivity (ok, detail, opts = {}) {
       }) + '\n', () => {})
     } catch {}
   }
+  if (a && a.name === 'autobuild') jobList = null // the job's checklist dies with the job
   activity = null
 }
 const EPISODE_LOG = process.env.EPISODE_LOG || path.join(__dirname, 'body-episodes.jsonl')
 let globalBot = null // set once by trackTick; lets endActivity snapshot vitals without threading bot everywhere
 // Let non-command code (reflexes) record an outcome directly (e.g. a wedged follow).
 function recordOutcome (action, ok, detail) { lastOutcome = { action, ok: !!ok, detail: String(detail || '').slice(0, 100), at: Date.now() } }
+
+// ---- JOB CHECKLIST (operator order: a goal gets a CHECKLIST and is worked step by
+// step - only survival may interrupt). Observational, not a scheduler: each phase of a
+// job announces itself, so the flight recorder and /state always show exactly which
+// step the job is on ("what is it doing" is never a guess). Cleared when the autobuild
+// activity ends; each step's own code still decides whether it applies (no-op = quick).
+let jobList = null // { steps: [names], current, startedAt }
+const JOB_STEPS = ['travel to site', 'survey the site', 'basic tools', 'stone pickaxe', 'armor up',
+  'camp: chest/furnace/bed', 'camp: safehouse hut', 'camp: wheat farm', 'gather materials', 'build']
+function checklistBegin (steps) { jobList = { steps: steps.slice(), current: null, startedAt: Date.now() } }
+function checklistStep (name) {
+  if (!jobList) return
+  jobList.current = name
+  dbg(`[job] step ${jobList.steps.indexOf(name) + 1}/${jobList.steps.length}: ${name}`)
+}
 
 // Stuck detection: the body is TRYING to get somewhere but making no progress. Driven
 // by index.js on a 1s tick. "Trying" = a non-follow pathfinder goal is set, OR a travel/
@@ -2000,6 +2016,7 @@ function state (bot) {
     // OBSERVABILITY so the brain can spot + break out of stuck/failed/hazardous states:
     activity: activity ? { name: activity.name, detail: activity.detail, forSec: Math.round((Date.now() - activity.startedAt) / 1000) } : null, // a long op still running from a past turn
     buildProgress, // REAL numbers (material have/need) - the brain answers progress questions from THIS
+    checklist: jobList ? { step: jobList.current, n: jobList.steps.indexOf(jobList.current) + 1, of: jobList.steps.length, steps: jobList.steps } : null, // the job's step-by-step plan + where it is (operator order: goals get checklists)
     lastResult: (lastOutcome && Date.now() - lastOutcome.at < 180000) // how the last long/detached/failed op ended (results that don't come back via /cmd)
       ? { action: lastOutcome.action, ok: lastOutcome.ok, detail: lastOutcome.detail, ageSec: Math.round((Date.now() - lastOutcome.at) / 1000) }
       : null,
@@ -2163,6 +2180,8 @@ async function autoBuild (bot, schem, at, opts = {}) {
   // gather so replants/groves never put a future tree inside (or leaning over) the build.
   const avoid = (() => { const st = schem.start(); const en = schem.end(); return { x1: at.x + st.x - 6, z1: at.z + st.z - 6, x2: at.x + en.x + 6, z2: at.z + en.z + 6 } })()
   provision.setBuildZone(avoid) // shelters must dig OUTSIDE this while the build is active (cleared by the callers' settle handlers)
+  if (!jobList) checklistBegin(JOB_STEPS) // resume pre-begins (its 'travel to site' step is already done)
+  checklistStep('survey the site')
   // DIFF the BOM against what already STANDS at the site: a resume/re-run of a partial
   // build must only provision the MISSING blocks (the raw BOM sent the bot back into the
   // caves for 44 stone when 5 were missing - ten times the death exposure for nothing).
@@ -2198,6 +2217,7 @@ async function autoBuild (bot, schem, at, opts = {}) {
   const inv0 = provision.inventoryCounts(bot)
   if (!Object.entries(bom).some(([n, c]) => (inv0[n] || 0) < c)) {
     say('i have all the materials - building')
+    checklistStep('build')
     return await schematic.buildSurvival(bot, schem, at, { say, isStopped, restoreMovements: restore, clear: opts.clear })
   }
   say('gonna gather everything myself first...')
@@ -2208,6 +2228,7 @@ async function autoBuild (bot, schem, at, opts = {}) {
   // gearless bot reaches a stone material with no pickaxe and just spins (mining stone
   // bare-handed drops nothing). The per-material planner also pulls in tools, but doing
   // it up front makes a from-NOTHING (or lost-everything) run reliable.
+  checklistStep('basic tools')
   const hasKind = k => (bot.inventory ? bot.inventory.items() : []).some(i => i.name.endsWith('_' + k))
   const bomNeedsMining = Object.keys(bom).some(n => provision.GATHER_TOOL[n] || provision.SMELT_MAP[n])
   if (!isStopped() && bomNeedsMining && (!hasKind('pickaxe') || !hasKind('axe') || !hasKind('sword'))) {
@@ -2228,6 +2249,7 @@ async function autoBuild (bot, schem, at, opts = {}) {
   // STONE-PICK UPGRADE: with a wooden pick + a big cobble mine ahead, a stone pickaxe (3
   // cobble + 2 sticks) mines 2x faster and lasts 131 vs 59 blocks - fewer mid-run breaks
   // (each break forces a whole re-plan round). Big net win over a from-nothing stone build.
+  checklistStep('stone pickaxe')
   const hasStonePick = () => (bot.inventory ? bot.inventory.items() : []).some(i => /^(stone|iron|diamond|netherite)_pickaxe$/.test(i.name))
   if (!isStopped() && process.env.STONE_PICK !== '0' && bomNeedsMining && hasKind('pickaxe') && !hasStonePick()) {
     say('quick stone pickaxe first - it mines way faster')
@@ -2247,6 +2269,7 @@ async function autoBuild (bot, schem, at, opts = {}) {
   // tight local pass (fenced to 48b, ~1 explore, 60s), and craft whatever partial armor the
   // leather affords. This stops the bot roaming 150 blocks for a full leather set (the #1
   // reason a from-nothing build never converged).
+  checklistStep('armor up')
   const anyBare = () => Object.values(wornArmor(bot)).some(v => !v)
   const cowsNear = () => Object.values(bot.entities || {}).some(e => e && e.position && /^(cow|mooshroom)$/.test((e.name || '').toLowerCase()) && Math.hypot(e.position.x - at.x, e.position.z - at.z) <= 48)
   if (!isStopped() && process.env.ARMOR_BOOTSTRAP !== '0' && anyBare() && cowsNear()) {
@@ -2305,6 +2328,7 @@ async function autoBuild (bot, schem, at, opts = {}) {
   if (!isStopped() && totalBom >= 500 && process.env.SITE_CAMP !== '0') {
     say('big build - setting up camp first (chest, furnace, bed)')
     dbg('camp: BOM total ' + totalBom + ' >= 500 - establishing site camp')
+    checklistStep('camp: chest/furnace/bed')
     try {
       // a chest needs 8 planks - craft them from carried logs first (live: camp skipped
       // the chest with "need 8 planks" while holding 22 raw logs)
@@ -2346,6 +2370,7 @@ async function autoBuild (bot, schem, at, opts = {}) {
     // SAFEHOUSE HUT (operator order): 500+ builds get a real building - a 5x4x5 plank
     // shell (71 planks, ONE gather trip, zero smelting; operator: "simple so it can
     // build it fast") next to the bed, so the bed/chest/furnace stop living in the open.
+    checklistStep('camp: safehouse hut')
     try {
       const hutKnown = (provision.listInfra ? provision.listInfra('hut') : []).find(e => Math.hypot(e.x - at.x, e.z - at.z) <= 150)
       if (!hutKnown && process.env.SITE_HUT !== '0') {
@@ -2372,6 +2397,7 @@ async function autoBuild (bot, schem, at, opts = {}) {
     } catch (e) { dbg('camp: hut failed (' + e.message + ') - continuing') }
     // WHEAT FARM (operator order): renewable food at the camp - the region can run dry
     // of animals and the bot starved to death working. Water-edge plot, best-effort.
+    checklistStep('camp: wheat farm')
     try { const ok = await provision.ensureWheatFarm(bot, { x: at.x, z: at.z }, { isStopped, say, avoid }); dbg('camp: wheat farm -> ' + ok) } catch (e) { dbg('camp: wheat farm failed (' + e.message + ')') }
     // REMEMBER the camp as a PLACE (operator rule): a named waypoint in persistent memory
     // - the brain sees it in /state waypoints and can `goto camp`; it survives restarts.
@@ -2406,6 +2432,7 @@ async function autoBuild (bot, schem, at, opts = {}) {
   // 1) provision each material, batch by batch; stash to the chest when the pack fills.
   // `skip` collects materials we can't fully get (unobtainable / no-progress / stuck) so the
   // BUILD phase drops those placements instead of hanging forever begging for them.
+  checklistStep('gather materials')
   const skip = new Set()
   const BATCH = 96
   const home = { x: Math.round(at.x), y: Math.floor(at.y), z: Math.round(at.z) } // roam-fence anchor
@@ -2490,6 +2517,7 @@ async function autoBuild (bot, schem, at, opts = {}) {
 
   // 2) build. If we used a chest, stash the rest and pull from it on demand (topping
   // up scaffold dirt first); otherwise everything's in inventory - just build.
+  checklistStep('build')
   buildProgress = { phase: 'placing blocks', material: null, have: 0, need: 0 }
   if (chest) {
     await stash()
@@ -2570,6 +2598,8 @@ async function resumeBuild (bot) {
   buildInterrupted = false // consumed: we ARE the resume now
   building = true; buildAbort = false // safe: the old loop is provably gone
   beginActivity('autobuild', `resume @ ${job.at.x},${job.at.y},${job.at.z}`)
+  checklistBegin(JOB_STEPS)
+  checklistStep('travel to site') // covers rest-first + grave detour + the trek itself
   let result = null
   try {
     // Only claim a death when one actually happened - this same flow also runs after a
