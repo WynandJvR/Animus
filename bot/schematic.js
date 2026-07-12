@@ -361,6 +361,19 @@ async function waitForMaterial (bot, name, { say, isStopped, fetch, deadlineMs =
 // pathfinder.goto with a hard deadline. Verified live: an unresolvable
 // GoalPlaceBlock can hang goto FOREVER (froze a 432-block build at 50 for 10+
 // minutes) - so we race it against a timer and cancel the goal on timeout.
+// Walk over nearby dropped items to pick them up (mineflayer auto-collects on contact).
+// Used after clearing our own furniture so the builder can re-place the recovered items.
+async function collectNearbyItems (bot, radius = 24, max = 60) {
+  const isItem = e => e && e.position && (e.name === 'item' || e.displayName === 'Item' || e.objectType === 'Item' || e.entityType === 54)
+  for (let i = 0; i < max; i++) {
+    const items = Object.values(bot.entities).filter(e => isItem(e) && e.position.distanceTo(bot.entity.position) <= radius)
+    if (!items.length) break
+    items.sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))
+    const it = items[0]
+    try { await gotoWithTimeout(bot, new goals.GoalNear(it.position.x, it.position.y, it.position.z, 0), 8000) } catch { break }
+    await new Promise(r => setTimeout(r, 150))
+  }
+}
 function gotoWithTimeout (bot, goal, ms) {
   return new Promise((resolve, reject) => {
     let settled = false
@@ -541,6 +554,9 @@ async function buildSurvival (bot, schem, at, opts = {}) {
     if (opts.clear) {
       try { clearedSolids = await clearVolume(bot, schem, at, { isStopped, say: opts.say, clearFurniture: opts.clearFurniture }) } catch {}
       if (clearedSolids) say(`cleared ${clearedSolids} block(s) to flatten the site`)
+      // when we cleared our OWN furniture (hut rebuild), collect the dropped items so the
+      // placement loop can re-place the bed/chest/furnace/table (a bed can't be recrafted)
+      if (opts.clearFurniture) { try { await collectNearbyItems(bot, 24, 60) } catch {} }
       bot.pathfinder.setMovements(moves) // clearVolume reset movements; restore build profile
     }
     beforeSet = snapshotRegion(bot, schem, at)

@@ -2441,7 +2441,17 @@ async function autoBuild (bot, schem, at, opts = {}) {
           const hutBom = schematic.billOfMaterials(hutSchem).counts
           if (hutBom.oak_door) hutBom.oak_door = 1
           if (hutBom.white_bed) hutBom.white_bed = 1
-          const hplan = provision.planProvision(mcData, hutBom, provision.inventoryCounts(bot), { primaryWood })
+          // CREDIT the furniture the bot already has placed in the old hut - it RECOVERS
+          // and reuses those (a bed can't be recrafted without wool/string, which made the
+          // whole plan "unobtainable"). Count old-hut furniture blocks as items in hand.
+          const invForPlan = provision.inventoryCounts(bot)
+          for (let y = st.y; y <= en.y; y++) for (let z = st.z; z <= en.z; z++) for (let x = st.x; x <= en.x; x++) {
+            const g = bot.blockAt(new Vec3(hutAt.x + x, hutAt.y + y, hutAt.z + z))
+            if (g && /^(chest|furnace|smoker|crafting_table|white_bed|oak_door)$/.test(g.name)) invForPlan[g.name] = (invForPlan[g.name] || 0) + 1
+          }
+          if (invForPlan.white_bed) invForPlan.white_bed = Math.ceil(invForPlan.white_bed / 2) // 2 blocks = 1 item
+          if (invForPlan.oak_door) invForPlan.oak_door = Math.ceil(invForPlan.oak_door / 2)
+          const hplan = provision.planProvision(mcData, hutBom, invForPlan, { primaryWood })
           if (Object.keys(hplan.unobtainable || {}).length) { dbg('camp: hut BOM unobtainable ' + JSON.stringify(hplan.unobtainable)) }
           else {
             if (hplan.tasks.length) await provision.runPlan(bot, hplan, { say, isStopped, restoreMovements: restore, homeY: hutAt.y, home: { x: hutAt.x, y: hutAt.y, z: hutAt.z }, avoid })
