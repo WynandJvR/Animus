@@ -3301,7 +3301,12 @@ async function furnishHut (bot, hut, { isStopped = () => false, say = () => {} }
         let foot = null; let head = null
         for (const c of cells.slice(attempt)) { const n = cells.find(o => o.y === c.y && Math.abs(o.x - c.x) + Math.abs(o.z - c.z) === 1); if (n) { foot = c; head = n; break } }
         if (!foot) { dbg('  furnish: no 2-cell space for the bed'); break }
-        if (bot.entity.position.distanceTo(foot) > 3) { try { await gotoWithTimeout(bot, new goals.GoalNear(foot.x, foot.y, foot.z, 2), 15000) } catch {} }
+        // STAND OFF the bed's two cells before placing - the server rejects a bed placed
+        // into the space the placer occupies (every attempt blockUpdate-timed-out, live)
+        const stand = cells.find(c => !(c.x === foot.x && c.z === foot.z) && !(c.x === head.x && c.z === head.z) && Math.abs(c.x - foot.x) + Math.abs(c.z - foot.z) <= 3)
+        if (stand) { try { await gotoWithTimeout(bot, new goals.GoalBlock(stand.x, stand.y, stand.z), 12000) } catch {} }
+        else if (bot.entity.position.distanceTo(foot) > 3) { try { await gotoWithTimeout(bot, new goals.GoalNear(foot.x, foot.y, foot.z, 2), 15000) } catch {} }
+        if (Math.floor(bot.entity.position.x) === foot.x && Math.floor(bot.entity.position.z) === foot.z) { dbg('  furnish: still standing on the bed cell - skipping this spot'); continue }
         const below = bot.blockAt(foot.offset(0, -1, 0))
         await bot.equip(bedItem, 'hand')
         try { await bot.lookAt(head.offset(0.5, 0.5, 0.5), true) } catch {}
