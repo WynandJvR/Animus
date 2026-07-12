@@ -1074,7 +1074,7 @@ function needsFood (bot) { return bot.food != null && bot.food <= 6 && !hasFood(
 async function huntForFood (bot, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   if (!bot.entity) return false
-  let tgt = null; let best = 24
+  let tgt = null; let best = opts.range || 24
   for (const e of Object.values(bot.entities || {})) {
     if (!e || !e.position || (e.type !== 'mob' && e.type !== 'animal')) continue
     if (!FOOD_ANIMALS.test((e.name || '').toLowerCase())) continue
@@ -1907,16 +1907,29 @@ async function ensureFishingRod (bot, { isStopped = () => false, home } = {}) {
   return !!has()
 }
 
-async function fishForFood (bot, { isStopped = () => false, say = () => {}, target = 6, home } = {}) {
+async function fishForFood (bot, { isStopped = () => false, say = () => {}, target = 6, home, scout = false } = {}) {
   if (hasSolidCeiling(bot, 12)) { dbg('  fishing: underground - not here'); return false }
   const mcData = require('minecraft-data')(bot.version)
   const edible = () => (bot.inventory ? bot.inventory.items() : []).filter(i => mcData.foodsByName && mcData.foodsByName[i.name] && !/rotten|spider_eye|poisonous/.test(i.name)).reduce((s, i) => s + i.count, 0)
   if (!await ensureFishingRod(bot, { isStopped, home })) return false
   const waterId = mcData.blocksByName.water.id
-  const waters = (bot.findBlocks({ matching: waterId, maxDistance: 48, count: 64 }) || []) // sample WIDE: the nearest N blocks of a lake are all submerged and fail the air-above filter
+  const findWaters = () => (bot.findBlocks({ matching: waterId, maxDistance: 48, count: 64 }) || []) // sample WIDE: the nearest N blocks of a lake are all submerged and fail the air-above filter
     .filter(p => { const a = bot.blockAt(p.offset(0, 1, 0)); return a && AIRISH(a.name) })
-  if (!waters.length) { dbg('  fishing: no surface water within 48'); return false }
+  let waters = findWaters()
+  if (!waters.length) {
+    // no water in sight - a REMEMBERED pond first (shared with the wheat farm), then, in a
+    // real famine (opts.scout), a bounded scout for one. Water is the guaranteed food path.
+    const known = recallInfra('water', bot.entity.position, 160)
+    if (known && !isStopped()) {
+      dbg('  fishing: walking to remembered water at ' + known.x + ',' + known.z)
+      try { await walkStaged(bot, known.x, known.z, { isStopped, range: 6, timeoutMs: 120000 }) } catch {}
+      waters = findWaters()
+    }
+    if (!waters.length && scout && !isStopped()) waters = await scoutForWater(bot, { isStopped })
+  }
+  if (!waters.length) { dbg('  fishing: no surface water within 48' + (scout ? ' (scout came up dry too)' : '')); return false }
   const w = waters[0]
+  rememberInfra('water', { x: w.x, y: w.y, z: w.z }) // the farm + future famines trek straight back
   try { await gotoWithTimeout(bot, new goals.GoalNear(w.x, w.y + 1, w.z, 3), 45000) } catch {}
   if (isStopped()) return false
   say('nothing to hunt around here - fishing for dinner instead')
@@ -1942,6 +1955,181 @@ async function fishForFood (bot, { isStopped = () => false, say = () => {}, targ
   dbg('  fishing done: ' + catches + ' catches, edible=' + edible())
   if (catches > 0) say(`caught ${catches} fish - that'll do`)
   return edible() > 0
+}
+
+// ---- SECURE FOOD: the ONE "get me fed" routine -------------------------------------
+// Every starving flow funnels here (gather loop, travel legs, smelt rotations, material
+// rounds, and the body's food-crisis reflex). A player's order of ops: eat what you
+// carry -> raid the pantry (bank) -> cook -> hunt what's visible -> harvest the farm ->
+// fish -> go LOOKING for animals -> and if the land is truly barren, hole up at home
+// instead of working on at 1hp. Starvation itself stops at half a heart - every actual
+// starve-death was chip damage taken while it kept working (verified live, repeatedly).
+const RISKY_EAT = /^(rotten_flesh|chicken|spider_eye|poisonous_potato|pufferfish)$/
+// One EATING policy (commands.eatFood delegates here): most filling SAFE food first;
+// risky food only when starving (<=6) or critically hurt with hunger already low.
+async function eatBestFood (bot) {
+  if (bot.food != null && bot.food >= 20) return 'not hungry'
+  const mcData = require('minecraft-data')(bot.version)
+  const foods = (mcData && mcData.foodsByName) || {}
+  const items = bot.inventory ? bot.inventory.items() : []
+  const edible = items.filter(i => foods[i.name]).sort((a, b) => {
+    const risk = (RISKY_EAT.test(a.name) ? 1 : 0) - (RISKY_EAT.test(b.name) ? 1 : 0)
+    if (risk) return risk
+    return (foods[b.name].foodPoints || 0) - (foods[a.name].foodPoints || 0)
+  })
+  if (!edible.length) return 'no food in inventory'
+  const food = edible[0]
+  if (RISKY_EAT.test(food.name) && bot.food > 6 && !((bot.health ?? 20) <= 8 && bot.food < 18)) return 'only risky food left - holding out'
+  await bot.equip(food, 'hand')
+  await bot.consume()
+  return `ate ${food.name} (food ${bot.food})`
+}
+
+// Eat down the pack until reasonably full or out of (safe) food - one bite of the chain's
+// hard-won meat doesn't stop the next starve 10 minutes later.
+async function eatUp (bot) {
+  for (let i = 0; i < 6; i++) {
+    if (bot.food == null || bot.food >= 18) return
+    const r = await eatBestFood(bot).catch(() => 'err')
+    if (!/^ate /.test(r)) return
+  }
+}
+
+let _securingFood = false
+function isSecuringFood () { return _securingFood }
+async function secureFood (bot, opts = {}) {
+  if (_securingFood) return false
+  _securingFood = true
+  try { return await secureFoodInner(bot, opts) } finally { _securingFood = false }
+}
+async function secureFoodInner (bot, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const say = opts.say || (() => {})
+  const home = opts.home || null
+  const cookIfRaw = async () => { try { if (Object.keys(RAW_COOKABLE).some(n => countItem(bot, n) > 0)) await cookRawMeat(bot, { isStopped }) } catch {} }
+  const fedEnough = () => (bot.food != null && bot.food > (opts.threshold != null ? opts.threshold : 12)) || foodCount(bot) >= 3
+  if (fedEnough()) return true
+  dbg('secureFood: food=' + bot.food + ' packFood=' + foodCount(bot))
+  // 0) eat what we carry
+  await eatUp(bot)
+  if (fedEnough()) return true
+  // 1) the pantry: withdraw banked food (lazy require - resources requires provision at load)
+  try {
+    const got = await require('./resources.js').ensureFood(bot, { near: home, threshold: 20, minPack: 1, maxDist: 64 })
+    if (got) { dbg('secureFood: withdrew ' + got + ' food from the bank'); await eatUp(bot) }
+  } catch (e) { dbg('secureFood: bank check failed (' + e.message + ')') }
+  if (fedEnough()) return true
+  // 2) raw meat in the pack + a furnace in reach -> cook (3x the food value of raw)
+  await cookIfRaw(); await eatUp(bot)
+  if (fedEnough()) return true
+  // 3) hunt what's visible (batch - one kill barely dents the deficit)
+  try { for (let k = 0; k < 4 && foodCount(bot) < 5 && !isStopped(); k++) { if (!await huntForFood(bot, { isStopped, range: 32 })) break } } catch {}
+  await cookIfRaw(); await eatUp(bot)
+  if (fedEnough() || isStopped()) return fedEnough()
+  // 4) the farm (harvest what's ripe / plant one by remembered water)
+  try {
+    if (!await tendWheatFarm(bot, { isStopped, say })) {
+      if (home) await ensureWheatFarm(bot, home, { isStopped, say, avoid: opts.avoid })
+    }
+  } catch (e) { dbg('secureFood: farm fallback failed (' + e.message + ')') }
+  await eatUp(bot)
+  if (fedEnough()) return true
+  // 5) fish - works anywhere with surface water (scouts for a pond in a real crisis)
+  try { await fishForFood(bot, { isStopped, say, home, scout: bot.food <= 4 }) } catch (e) { dbg('secureFood: fishing failed (' + e.message + ')') }
+  await eatUp(bot)
+  if (fedEnough()) return true
+  // 6) crisis: go LOOKING for animals - the ground right here is eaten bare
+  if (bot.food <= 4 && !isStopped() && opts.scoutHunt !== false && !isNight(bot)) {
+    try { await scoutHunt(bot, { isStopped, say, maxMs: opts.scoutMs || 180000 }) } catch (e) { dbg('secureFood: scout-hunt failed (' + e.message + ')') }
+    await cookIfRaw(); await eatUp(bot)
+    if (fedEnough()) return true
+  }
+  // 7) famine hold: NOTHING panned out - get home/indoors and sit it out (bounded; the
+  // caller or the crisis reflex re-runs the whole chain later).
+  if (opts.canHold && (bot.food ?? 20) <= 1 && !isStopped()) { try { await famineHold(bot, { isStopped, say }) } catch {} }
+  return foodCount(bot) > 0
+}
+
+// Walk expanding legs looking for food animals. Remembers where it finds them
+// ('pasture' infra) so the next famine treks straight back instead of re-searching.
+async function scoutHunt (bot, { isStopped = () => false, say = () => {}, maxMs = 180000 } = {}) {
+  const start = bot.entity.position.clone()
+  const deadline = Date.now() + maxMs
+  const seesFood = () => Object.values(bot.entities || {}).some(e => e && e.position && FOOD_ANIMALS.test((e.name || '').toLowerCase()))
+  const legs = []
+  const known = recallInfra('pasture', start, 200)
+  if (known) legs.push({ x: known.x, z: known.z })
+  for (const r of [40, 80, 120]) for (const [dx, dz] of [[1, 0], [0, 1], [-1, 0], [0, -1]]) legs.push({ x: start.x + dx * r, z: start.z + dz * r })
+  say('nothing to eat around here - going to find animals')
+  dbg('scoutHunt: searching from ' + Math.round(start.x) + ',' + Math.round(start.z) + (known ? ' (remembered pasture first)' : ''))
+  for (const leg of legs) {
+    if (isStopped() || Date.now() > deadline) break
+    if (isNight(bot)) { dbg('scoutHunt: night fell - not roaming the dark for dinner'); break }
+    try { await walkStaged(bot, leg.x, leg.z, { isStopped, range: 8, timeoutMs: 60000 }) } catch {}
+    if (seesFood()) {
+      rememberInfra('pasture', bot.entity.position)
+      dbg('scoutHunt: animals near ' + Math.round(bot.entity.position.x) + ',' + Math.round(bot.entity.position.z) + ' - remembered as pasture')
+      let kills = 0
+      try { for (let k = 0; k < 4 && !isStopped(); k++) { if (!await huntForFood(bot, { isStopped, range: 32 })) break; kills++ } } catch {}
+      if (kills > 0) return true
+    }
+  }
+  dbg('scoutHunt: no animals found (searched ~120 blocks out)')
+  return false
+}
+
+// Nothing edible anywhere: retreat home and WAIT instead of dying to chip damage at 1hp.
+// Inside the own hut = mob-safe indefinitely. Bounded so the food chain gets retried.
+async function famineHold (bot, { isStopped = () => false, say = () => {} } = {}) {
+  const hut = listInfra('hut')[0] || null
+  const bed = knownBed()
+  const target = hut ? { x: hut.x + 2, y: hut.y + 1, z: hut.z + 2 } : bed
+  if (target && bot.entity) {
+    const d = Math.hypot(target.x - bot.entity.position.x, target.z - bot.entity.position.z)
+    if (d > 4 && d < 250) {
+      say("i'm starving and the land is bare - heading home to hole up")
+      try { await walkStaged(bot, target.x, target.z, { isStopped, range: 6, timeoutMs: 180000 }) } catch {}
+    }
+    if (hut && !insideOwnStructure(bot) && Math.hypot(target.x - bot.entity.position.x, target.z - bot.entity.position.z) <= 12) {
+      try {
+        const nav = require('./navigate.js')
+        await nav.navigateTo(bot, new goals.GoalNear(target.x, target.y, target.z, 1), { timeoutMs: 20000, deadlineMs: 45000, isStopped, climb: false, budgets: { door: 2, pit: 1, water: 1, nudge: 1 }, label: 'famine-home' })
+      } catch (e) { dbg('famineHold: could not get indoors (' + e.message + ')') }
+    }
+  }
+  const indoors = !!insideOwnStructure(bot)
+  dbg('famineHold: holding ' + (indoors ? 'inside my hut' : 'where i am') + ' (food=' + bot.food + ')')
+  say('waiting it out at home - too weak to work safely')
+  const dl = Date.now() + (indoors ? 480000 : 180000)
+  while (Date.now() < dl && !isStopped()) {
+    if (foodCount(bot) > 0 || (bot.food ?? 0) > 4) break
+    // an animal wandered into range -> release the hold, the chain re-runs
+    if (Object.values(bot.entities || {}).some(e => e && e.position && FOOD_ANIMALS.test((e.name || '').toLowerCase()) && e.position.distanceTo(bot.entity.position) <= 24)) break
+    if (isNight(bot) && bed && Math.hypot(bed.x - bot.entity.position.x, bed.z - bot.entity.position.z) <= 8) { try { await sleepInBedHere(bot, { say, isStopped }) } catch {} }
+    await new Promise(r => setTimeout(r, 5000))
+  }
+  return foodCount(bot) > 0
+}
+
+// Bounded water scout: 4 cardinal legs x expanding radius, scanning for surface water at
+// each stop. Feeds BOTH fishing and the wheat farm (found ponds land in 'water' memory).
+async function scoutForWater (bot, { isStopped = () => false, maxMs = 150000 } = {}) {
+  const mcData = require('minecraft-data')(bot.version)
+  const waterId = mcData.blocksByName.water.id
+  const start = bot.entity.position.clone()
+  const deadline = Date.now() + maxMs
+  const surface = () => (bot.findBlocks({ matching: waterId, maxDistance: 48, count: 32 }) || [])
+    .filter(p => { const a = bot.blockAt(p.offset(0, 1, 0)); return a && AIRISH(a.name) })
+  for (const r of [48, 96]) {
+    for (const [dx, dz] of [[1, 0], [0, 1], [-1, 0], [0, -1]]) {
+      if (isStopped() || Date.now() > deadline) return []
+      try { await walkStaged(bot, start.x + dx * r, start.z + dz * r, { isStopped, range: 10, timeoutMs: 45000 }) } catch {}
+      const w = surface()
+      if (w.length) { rememberInfra('water', { x: w[0].x, y: w[0].y, z: w[0].z }); dbg('  water scout: surface water at ' + w[0].x + ',' + w[0].z); return w }
+    }
+  }
+  dbg('  water scout: no surface water within ~96 blocks')
+  return []
 }
 
 // ---- SCAFFOLD TEARDOWN: the pathfinder pillars up to tall canopies and abandons the
@@ -2403,31 +2591,12 @@ async function gatherLoop (bot, item, count, opts = {}) {
     // a night hunt doesn't). The night-rest check below runs first via this guard.
     if (needsFood(bot) && !nightRestWanted(bot) && Date.now() - lastFoodHunt > 20000) {
       lastFoodHunt = Date.now()
-      if (opts.say) opts.say('starving - hunting something to eat first')
-      dbg('  gather food-hunt (food=' + bot.food + ')')
-      // STOCK UP like a player: one kill (~3 raw hunger points) barely dents the deficit
-      // and it's starving again minutes later (verified live: "starving - hunting" on
-      // repeat). Keep hunting (bounded) until a few meals are in the pack - the cook
-      // reflex turns the surplus into proper food at the next furnace.
-      try { for (let k = 0; k < 4 && foodCount(bot) < 5 && !isStopped(); k++) { if (!await huntForFood(bot, { isStopped })) break } } catch { /* keep gathering regardless */ }
-      dbg('  gather food-hunt done (foodItems=' + foodCount(bot) + ')')
-      // COOK the pack whenever we're hungry and a furnace is in reach (incl. the hut's,
-      // remembered) - eating raw wastes 2/3 of every catch (operator complaint).
-      try { if (Object.keys(RAW_COOKABLE).some(n => countItem(bot, n) > 0)) await cookRawMeat(bot, { isStopped }) } catch {}
-      // NO ANIMALS ANYWHERE (Sonnet shepherd finding: it worked at 1hp until death with
-      // no fallback): the wheat farm is the answer - harvest it, or plant it now.
-      if (foodCount(bot) === 0 && !isStopped()) {
-        try {
-          if (!await tendWheatFarm(bot, { isStopped, say: opts.say })) {
-            await ensureWheatFarm(bot, home, { isStopped, say: opts.say, avoid: opts.avoid })
-          }
-        } catch (e) { dbg('  wheat fallback failed (' + e.message + ')') }
-        // FISHING: the last-resort food that works anywhere with water (guardian escort:
-        // this region has no animals, and it starved to death through every fallback)
-        if (foodCount(bot) === 0 && !isStopped()) {
-          try { await fishForFood(bot, { isStopped, say: opts.say, home }) } catch (e) { dbg('  fishing fallback failed (' + e.message + ')') }
-        }
-      }
+      if (opts.say) opts.say('starving - sorting out food before i keep working')
+      dbg('  gather food (food=' + bot.food + ') -> secureFood')
+      // The ONE food chain: eat -> bank -> cook -> hunt -> farm -> fish -> scout -> hold.
+      // (This replaces the old inline hunt/farm/fish copy - one policy, one owner.)
+      try { await secureFood(bot, { isStopped, say: opts.say || (() => {}), home, avoid: opts.avoid, canHold: true }) } catch (e) { dbg('  secureFood failed (' + e.message + ')') }
+      dbg('  gather food done (foodItems=' + foodCount(bot) + ', food=' + bot.food + ')')
     }
     // OPPORTUNISTIC: a food animal is RIGHT THERE and the pack is light - take the free
     // meal before hunger ever forces a detour (operator ask). Close range only (<=12), so
@@ -2976,6 +3145,23 @@ async function runSmeltSingle (bot, output, input, count, opts = {}) {
       // DIED at the furnace (verified live, 26/44). Close the window, dig in, reopen.
       // Output keeps cooking while sheltered and is collected on reopen. (Shelter digging
       // can only yield terrain blocks / smelt INPUT, never the OUTPUT, so `made` is safe.)
+      // STARVING at the furnace: the smelt loop is minutes of AFK - it stood here at 0
+      // food / 1hp for 20 minutes (live). Close the window, run the food chain, reopen
+      // (same shape as the night-shelter below; cooking continues while we're away).
+      if (needsFood(bot) && !isSecuringFood() && Date.now() - lastShelter > 30000) {
+        lastShelter = Date.now()
+        dbg('  smelt food break at', made + '/' + count, '(food=' + bot.food + ')')
+        try { furnace.close() } catch {}
+        try { await secureFood(bot, { isStopped, say, canHold: false, scoutHunt: false }) } catch {}
+        if (isStopped()) break
+        if (bot.entity.position.distanceTo(furnaceBlock.position) > 3) {
+          await gotoWithTimeout(bot, new goals.GoalNear(furnaceBlock.position.x, furnaceBlock.position.y, furnaceBlock.position.z, 2), 20000).catch(() => {})
+        }
+        furnace = await bot.openFurnace(furnaceBlock)
+        before = outSum() - made
+        stall = 0
+        continue
+      }
       if (nightRestWanted(bot) && Date.now() - lastShelter > 15000) {
         lastShelter = Date.now()
         say('night time - closing the furnace till it\'s safe')
@@ -3103,6 +3289,12 @@ async function runSmeltMulti (bot, output, input, count, positions, opts = {}) {
       dbg('  multi: night-rest at', made + '/' + count)
       try { await nightRest(bot, { isStopped, say }) } catch {}
       lastProgressAt = Date.now() // shelter time is not a stall
+    }
+    // STARVING between rotations: same deal as the single-furnace loop - feed first.
+    if (needsFood(bot) && !isSecuringFood()) {
+      dbg('  multi: food break at', made + '/' + count, '(food=' + bot.food + ')')
+      try { await secureFood(bot, { isStopped, say, canHold: false, scoutHunt: false }) } catch {}
+      lastProgressAt = Date.now()
     }
     await new Promise(r => setTimeout(r, 10000)) // ~1 item cooks per 10s; faster rotation is wasted walking
     for (let i = 0; i < F.length; i++) { if (isStopped()) break; if (F[i].dead < 3) await service(F[i], i) }
@@ -3687,4 +3879,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, furnishHut, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, gatherLeather, huntForFood, hasFood, needsFood, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, ensureWheatFarm, tendWheatFarm, fishForFood, ensureHutApron, ensureHutBed, setBuildZone, setDebugSink }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, furnishHut, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, gatherLeather, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, ensureWheatFarm, tendWheatFarm, fishForFood, ensureHutApron, ensureHutBed, setBuildZone, setDebugSink }

@@ -587,16 +587,44 @@ if (process.env.SURVIVAL_HUNT !== '0') {
   setInterval(async () => {
     if (survivalHunting || !bot.entity) return
     if (commands.isBusy && commands.isBusy()) return // the gather loop covers the build case
+    if (provision.isResting && provision.isResting()) return
+    if (provision.isSecuringFood && provision.isSecuringFood()) return
     if (!provision.needsFood(bot)) return
     survivalHunting = true
     try {
-      // FOOD IS A RESOURCE: before hunting, check the bank - the bot starved to death
-      // at 1hp with cooked food sitting in its own chest (live). Withdraw beats hunt.
-      const fed = await resources.ensureFood(bot, {})
-      if (fed > 0) note(`(survival) withdrew ${fed} food from the chest - was starving`)
-      else if (await provision.huntForFood(bot, {})) note('(survival) hunted an animal - starving with no food')
+      // ONE food policy: eat -> bank -> cook -> hunt -> farm -> fish -> scout -> hold
+      // (provision.secureFood; it starved at 1hp with cooked food in its own chest, and
+      // later starved through hunt-only fallbacks in an animal-free region - both live).
+      const home = (provision.knownBed && provision.knownBed()) || undefined
+      if (await provision.secureFood(bot, { home, canHold: true, say: m => bot.chat(String(m).slice(0, 200)) })) note('(survival) food secured - was starving with an empty pack')
     } catch (e) { /* transient - retry next tick */ } finally { survivalHunting = false }
   }, 6000).unref?.()
+}
+
+// FOOD CRISIS (survival tier, fires EVEN WHILE BUSY): every work loop carries its own
+// hunger checks, but a wedged loop can starve the bot at 1hp for 20 minutes (live:
+// 0 food / 0.9hp mid-"gathering" at the hut). At food <= 2 with an empty pack, being
+// fed outranks the job - survival is the one legal interrupt (operator rule). The
+// running loop sees 'goal was changed' and recovers, same as any reflex interruption.
+// Disable with FOOD_CRISIS=0.
+let foodCrisis = false
+if (process.env.FOOD_CRISIS !== '0') {
+  setInterval(async () => {
+    if (foodCrisis || !bot.entity || bot.food == null || bot.food > 2) return
+    if (provision.hasFood(bot)) return // auto-eat has it covered
+    if (provision.isResting && provision.isResting()) return
+    if (provision.isSecuringFood && provision.isSecuringFood()) return
+    if (commands.isEscaping && commands.isEscaping()) return
+    if (navigate.isRecovering()) return
+    foodCrisis = true
+    try {
+      note(`(food-crisis) food=${bot.food} hp=${(bot.health || 0).toFixed(1)} with an empty pack - dropping everything to feed`)
+      try { bot.pathfinder.setGoal(null) } catch {}
+      const home = (provision.knownBed && provision.knownBed()) || undefined
+      const ok = await provision.secureFood(bot, { home, canHold: true, threshold: 10, say: m => bot.chat(String(m).slice(0, 200)) })
+      note(`(food-crisis) ${ok ? 'fed (or safely holding)' : 'still starving - will retry'}`)
+    } catch (e) { note(`(food-crisis) failed: ${e.message}`) } finally { foodCrisis = false }
+  }, 15000).unref?.()
 }
 
 // Night-shelter: a NAKED bot at night with a hostile closing digs into a sealed pit and waits
@@ -608,6 +636,7 @@ if (process.env.NIGHT_SHELTER !== '0') {
   setInterval(async () => {
     if (sheltering || !bot.entity) return
     if (commands.isBusy && commands.isBusy()) return // the gather loop covers the build case
+    if (provision.isSecuringFood && provision.isSecuringFood()) return // feeding run owns the body
     // Two triggers: VULNERABLE at night (naked - always rest, the death carousels were all
     // naked), or simply IDLE at night with a bed on the map - a player with nothing to do
     // goes to bed even in full iron (operator asked for exactly this). Armored + mid-task
@@ -1047,9 +1076,9 @@ const server = http.createServer((req, res) => {
         note(`(cmd) ${line}${rz} -> held (a saved build job exists - the brain may not cancel it)`)
         return send(res, 200, "held: there's a build to finish - i shouldn't stop it")
       }
-      const bodyBusy = (commands.isBusy && commands.isBusy()) || (provision.isResting && provision.isResting())
+      const bodyBusy = (commands.isBusy && commands.isBusy()) || (provision.isResting && provision.isResting()) || (provision.isSecuringFood && provision.isSecuringFood())
       if (bodyBusy && !/^(state|scan|find|block|entities|inventory|look|say)\b/i.test(String(line).trim())) {
-        note(`(cmd) ${line}${rz} -> held (${commands.isBusy && commands.isBusy() ? 'busy building' : 'night-resting'}) - brain command suppressed`)
+        note(`(cmd) ${line}${rz} -> held (${commands.isBusy && commands.isBusy() ? 'busy building' : (provision.isSecuringFood && provision.isSecuringFood() ? 'securing food' : 'night-resting')}) - brain command suppressed`)
         // If a PLAYER just asked for this (the held command is the brain answering them),
         // don't leave them on read - the BODY replies once with what it's doing. Verified
         // live: "digital go sleep" -> six silent holds and the player heard nothing.

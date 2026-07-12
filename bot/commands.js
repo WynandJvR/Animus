@@ -358,7 +358,7 @@ async function travelFar (bot, dest, opts = {}) {
       if (Date.now() - lastSurvival > 12000 && (provision.needsFood(bot) || provision.nightRestWanted(bot))) {
         lastSurvival = Date.now(); const sv0 = Date.now()
         try {
-          if (provision.needsFood(bot)) { say('starving - grabbing something to eat before i push on'); await provision.huntForFood(bot, { isStopped }) }
+          if (provision.needsFood(bot)) { say('starving - sorting out food before i push on'); await provision.secureFood(bot, { isStopped, say, scoutHunt: false, canHold: false }) } // mid-trek: eat/bank/hunt/fish nearby; no cross-country scouting or holing up - the trek itself may be the way home
           else { escaping = true; try { if (provision.underArmored(bot)) await provision.restUntilSafe(bot, { isStopped, say }); else await provision.nightRest(bot, { isStopped, say }) } finally { escaping = false } }
         } catch { /* keep travelling regardless */ }
         climbTimeMs += Date.now() - sv0
@@ -557,31 +557,9 @@ function buildHouse (bot, material, w, l, h, a) {
 
 // Eat the best food in inventory so the bot doesn't starve. Returns a status
 // string. Safe to call often - no-ops if already full or no food on hand.
-// Foods with a status-effect downside (Hunger/poison). A real player only eats these
-// as a LAST RESORT - rotten flesh sorts above raw chicken by food points, so a pure
-// points sort had the bot giving itself the Hunger effect while carrying beef.
-const RISKY_FOOD = /^(rotten_flesh|chicken|spider_eye|poisonous_potato|pufferfish)$/
-async function eatFood (bot) {
-  if (bot.food != null && bot.food >= 20) return 'not hungry'
-  const mcData = require('minecraft-data')(bot.version)
-  const foods = (mcData && mcData.foodsByName) || {}
-  const items = bot.inventory ? bot.inventory.items() : []
-  // prefer the most filling SAFE food; risky food only when there's nothing else
-  const edible = items.filter(i => foods[i.name]).sort((a, b) => {
-    const risk = (RISKY_FOOD.test(a.name) ? 1 : 0) - (RISKY_FOOD.test(b.name) ? 1 : 0)
-    if (risk !== 0) return risk
-    return (foods[b.name].foodPoints || 0) - (foods[a.name].foodPoints || 0)
-  })
-  if (!edible.length) return 'no food in inventory'
-  const food = edible[0]
-  // Risky food unlocks when STARVING - or when critically HURT with hunger below the
-  // regen threshold (18): it stood at 3hp refusing raw chicken, which costs hunger,
-  // never health. At death's door, food poisoning is a bargain (live incident).
-  if (RISKY_FOOD.test(food.name) && bot.food > 6 && !((bot.health ?? 20) <= 8 && bot.food < 18)) return 'only risky food left - holding out'
-  await bot.equip(food, 'hand')
-  await bot.consume()
-  return `ate ${food.name} (food ${bot.food})`
-}
+// ONE eating policy: the ranking (filling-safe first, risky food only when starving or
+// critically hurt) lives in provision.eatBestFood, shared with the secureFood chain.
+async function eatFood (bot) { return provision.eatBestFood(bot) }
 
 // Natural ground a torch may be auto-placed on. Anchored/explicit so crafted or
 // build blocks (planks, bricks, wool, glass, concrete...) never qualify - the
@@ -2501,6 +2479,9 @@ async function autoBuild (bot, schem, at, opts = {}) {
       // 36/36 deadlock (a full pack can't even craft - no output slot). ensurePackRoom
       // dumps junk first, then banks materials, so it replaces the plain dumpJunk.
       try { const fed = await resources.ensureFood(bot, { near: home, threshold: 16 }); if (fed) say('grabbed food from my chest') } catch {} // 16 ~ auto-eat's 17: restock before it grumbles
+      // Bank empty AND starving? Run the whole food chain (hunt/farm/fish/scout/hold)
+      // BEFORE the round - a round is minutes of work and the site can be eaten bare.
+      if (provision.needsFood(bot)) { try { await provision.secureFood(bot, { isStopped, say, home, canHold: true }) } catch (e) { dbg('material food chain failed (' + e.message + ')') } }
       try { await resources.ensurePackRoom(bot, 6, { near: home, keepDirt: KEEP_DIRT, isStopped }) } catch {}
       // START EACH ROUND FROM THE SITE, ON THE SURFACE. A failed gather can leave the bot
       // stranded deep in a cave 40+ blocks off (verified live: cobble round ended at y=61,
