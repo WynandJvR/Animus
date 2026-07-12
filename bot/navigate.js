@@ -308,20 +308,28 @@ async function openNearbyDoor (bot, opts = {}) {
         }
         const posSide = base.offset(dx * 2, 0, dz * 2); const negSide = base.offset(-dx * 2, 0, -dz * 2)
         let sign = 0; let how = ''
-        if (opts.towards && typeof opts.towards.x === 'number') {
-          // GOAL-AWARE crossing: exit toward the side that gets closer to where we're
-          // actually going (entering a hut crosses INWARD; open sky would always pick
-          // outside). Only when the goal clearly favors a side - a goal right at the
-          // doorway says nothing about direction.
+        // Is the GOAL itself inside a structure of ours (e.g. the hut chest), or out in
+        // the world? This, not raw goal-distance, decides which way to cross a doorway.
+        let goalInside = false
+        try { goalInside = !!(opts.towards && typeof opts.towards.x === 'number' && prov().ownHutAt && prov().ownHutAt(new Vec3(opts.towards.x, opts.towards.y != null ? opts.towards.y : base.y, opts.towards.z))) } catch {}
+        const posCovered = skyless(posSide); const negCovered = skyless(negSide)
+        if (posCovered !== negCovered) {
+          // One doorway side is ROOFED (inside a room), the other OPEN (outside). Cross to
+          // the side that MATCHES WHERE THE GOAL IS: an outside goal => exit to open sky;
+          // an inside goal => step into the covered room. This DOMINATES goal-distance,
+          // which wrongly picks "inward" when an outside goal sits beyond the hut's far
+          // wall (live: orchard goal is SOUTH, the only door is NORTH -> raw distance
+          // walked the bot deeper INTO the hut toward the chest instead of out the door).
+          const openSign = posCovered ? -1 : 1 // sign that points at the OPEN (outdoor) side
+          sign = goalInside ? -openSign : openSign
+          how = goalInside ? ' (toward inside goal)' : ' (open sky)'
+        } else if (opts.towards && typeof opts.towards.x === 'number') {
+          // Both sides equally open/covered (a freestanding gate): fall back to goal-distance.
           const dPos = Math.hypot(posSide.x + 0.5 - opts.towards.x, posSide.z + 0.5 - opts.towards.z)
           const dNeg = Math.hypot(negSide.x + 0.5 - opts.towards.x, negSide.z + 0.5 - opts.towards.z)
           if (Math.abs(dPos - dNeg) > 0.75) { sign = dPos < dNeg ? 1 : -1; how = ' (toward goal)' }
         }
-        if (!sign) {
-          const posCovered = skyless(posSide); const negCovered = skyless(negSide)
-          if (posCovered !== negCovered) { sign = posCovered ? -1 : 1; how = ' (open sky)' } // walk to the uncovered (outdoor) side
-          else { sign = Math.sign((base.x + 0.5 - before.x) * dx + (base.z + 0.5 - before.z) * dz) || 1; how = ' (fallback)' }
-        }
+        if (!sign) { sign = Math.sign((base.x + 0.5 - before.x) * dx + (base.z + 0.5 - before.z) * dz) || 1; how = ' (fallback)' }
         // GROUNDED sanity: never force-walk at a WALL. Flip only when the chosen far
         // side is wall-like (no walk gap at any tolerated step height) and the other
         // side has one. A FLOORLESS far side is NOT wall-like: a blast crater beyond
