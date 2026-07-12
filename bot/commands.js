@@ -2441,16 +2441,17 @@ async function autoBuild (bot, schem, at, opts = {}) {
           const hutBom = schematic.billOfMaterials(hutSchem).counts
           if (hutBom.oak_door) hutBom.oak_door = 1
           if (hutBom.white_bed) hutBom.white_bed = 1
-          // CREDIT the furniture the bot already has placed in the old hut - it RECOVERS
-          // and reuses those (a bed can't be recrafted without wool/string, which made the
-          // whole plan "unobtainable"). Count old-hut furniture blocks as items in hand.
+          // Only the BED can't be crafted (needs wool/string) - so the chest/furnace/table/
+          // door get PROVISIONED FRESH (cheap: planks/cobble), which is reliable, and only
+          // the bed is credited to the one we already have + recover (relying on recovery
+          // for the chests made the build skip them when the collect missed - live).
           const invForPlan = provision.inventoryCounts(bot)
+          let hasBedPlaced = false
           for (let y = st.y; y <= en.y; y++) for (let z = st.z; z <= en.z; z++) for (let x = st.x; x <= en.x; x++) {
             const g = bot.blockAt(new Vec3(hutAt.x + x, hutAt.y + y, hutAt.z + z))
-            if (g && /^(chest|furnace|smoker|crafting_table|white_bed|oak_door)$/.test(g.name)) invForPlan[g.name] = (invForPlan[g.name] || 0) + 1
+            if (g && /_bed$/.test(g.name)) hasBedPlaced = true
           }
-          if (invForPlan.white_bed) invForPlan.white_bed = Math.ceil(invForPlan.white_bed / 2) // 2 blocks = 1 item
-          if (invForPlan.oak_door) invForPlan.oak_door = Math.ceil(invForPlan.oak_door / 2)
+          if (hasBedPlaced) invForPlan.white_bed = (invForPlan.white_bed || 0) + 1 // reuse the bed we'll recover
           const hplan = provision.planProvision(mcData, hutBom, invForPlan, { primaryWood })
           if (Object.keys(hplan.unobtainable || {}).length) { dbg('camp: hut BOM unobtainable ' + JSON.stringify(hplan.unobtainable)) }
           else {
