@@ -3171,7 +3171,19 @@ async function furnishHut (bot, hut, { isStopped = () => false, say = () => {} }
     if (kb && !insideHutBox(kb, hut) && Math.hypot(kb.x - hut.x, kb.z - hut.z) <= 150 && (bot.health || 20) >= 12 && !isNight(bot)) {
       await walkStaged(bot, kb.x, kb.z, { isStopped, range: 4, timeoutMs: 120000 })
       const bblk = bot.findBlock({ matching: b => /_bed$/.test(b.name), maxDistance: 6 })
-      if (bblk) { try { await bot.dig(bblk); await collectDrops(bot, 4); forgetBed() } catch (e) { dbg('  furnish: bed dig failed (' + e.message + ')') } }
+      if (bblk) {
+        try {
+          await bot.dig(bblk)
+          // VERIFY the bed ITEM is in the pack before moving on - a restart cut the
+          // pickup off once and the bed despawned on the ground (spawn point lost, live).
+          for (let tries = 0; tries < 4 && !(bot.inventory ? bot.inventory.items() : []).some(i => /_bed$/.test(i.name)); tries++) {
+            await collectDrops(bot, 6)
+            await new Promise(r => setTimeout(r, 500))
+          }
+          if ((bot.inventory ? bot.inventory.items() : []).some(i => /_bed$/.test(i.name))) forgetBed()
+          else { say('i broke my bed and LOST it - i need a new one'); dbg('  furnish: bed item never landed in the pack') }
+        } catch (e) { dbg('  furnish: bed dig failed (' + e.message + ')') }
+      }
     }
     const bedItem = (bot.inventory ? bot.inventory.items() : []).find(i => /_bed$/.test(i.name))
     if (bedItem) {
