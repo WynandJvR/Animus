@@ -1256,7 +1256,8 @@ async function handle (bot, line) {
     case 'travel': {
       // explicit long-distance walk (staged). Handy on its own and used before a
       // far-away build. Same staged logic goto uses for distant targets.
-      const [x, y, z] = a.slice(0, 3).map(Number)
+      // The brain writes "travel 244,64,169" (commas) - accept both separators.
+      const [x, y, z] = a.join(' ').split(/[\s,]+/).filter(Boolean).slice(0, 3).map(Number)
       if ([x, y, z].some(Number.isNaN)) return 'usage: travel <x> <y> <z>'
       buildAbort = false
       beginActivity('travel', `${x},${y},${z}`)
