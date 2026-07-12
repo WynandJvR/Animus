@@ -549,6 +549,43 @@ function onHutApron (bot, pos) {
   return null
 }
 
+// After the hut builds, GUARANTEE a flush doorstep. The ground right in front of the door is
+// often 1-2 blocks below the hut floor (median-surface snap + natural slope + gather shafts),
+// so the bot steps straight out the door into a pit and then struggles to get back into its own
+// safehouse ("hole at the front door", seen live repeatedly). onHutApron only STOPS new digging;
+// this positively FILLS the exit lane up to floor level. Best-effort + idempotent: runs each camp
+// pass and re-heals any hole a gather cycle re-opens. `at` = hut anchor; the schematic door sits
+// at rel (2,*,0) on the z=0 wall, so it opens toward -z (outside = at.z - 1).
+async function ensureHutApron (bot, at, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const say = opts.say || (() => {})
+  const doorX = at.x + 2; const floorY = at.y; const outZ = at.z - 1
+  // only bother if the door is actually there (its lower half sits at floorY+1)
+  const dl = bot.blockAt(new Vec3(doorX, floorY + 1, at.z))
+  if (!dl || !/_door$/.test(dl.name)) return 0
+  // get within reach of the threshold
+  try { await gotoWithTimeout(bot, new goals.GoalNearXZ(doorX, at.z, 2), 20000) } catch {}
+  const DIRTLIKE = /^(dirt|coarse_dirt|cobblestone|cobbled_deepslate|stone|granite|diorite|andesite|tuff|gravel|netherrack)$/
+  const ANYFILL = /(_planks|dirt|cobblestone|cobbled_deepslate|stone)$/
+  const fillCell = async (wx, wy, wz) => {
+    const b = bot.blockAt(new Vec3(wx, wy, wz))
+    if (b && b.boundingBox === 'block' && !AIRISH(b.name)) return false // already solid
+    let ok = await placeAt(bot, new Vec3(wx, wy, wz), DIRTLIKE) // cheap filler first (save planks)
+    if (!ok) ok = await placeAt(bot, new Vec3(wx, wy, wz), ANYFILL)
+    return ok
+  }
+  let filled = 0
+  // door width +-1, the immediate step-out row. Fill support (floorY-1) THEN walk-surface (floorY),
+  // bottom-up so each layer has a solid face beneath/beside to place against. A block at floorY tops
+  // out flush with the inside floor -> a level walk through the door instead of a fall.
+  for (let dx = -1; dx <= 1 && !isStopped(); dx++) {
+    if (await fillCell(doorX + dx, floorY - 1, outZ)) filled++
+    if (await fillCell(doorX + dx, floorY, outZ)) filled++
+  }
+  if (filled) { say(`sealed the doorstep - filled ${filled} apron cell(s) so the exit stays walkable`); dbg('  apron: filled ' + filled + ' doorstep cell(s) at ' + doorX + ',' + floorY + ',' + outZ) }
+  return filled
+}
+
 async function digShaftDown (bot, maxDepth, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const DANGER = /lava|water/
@@ -3486,4 +3523,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, migrateChestInto, furnishHut, hasSolidCeiling, gatherLeather, huntForFood, hasFood, needsFood, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, ensureWheatFarm, tendWheatFarm, fishForFood, setBuildZone, setDebugSink }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, migrateChestInto, furnishHut, hasSolidCeiling, gatherLeather, huntForFood, hasFood, needsFood, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, ensureWheatFarm, tendWheatFarm, fishForFood, ensureHutApron, setBuildZone, setDebugSink }

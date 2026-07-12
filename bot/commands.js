@@ -2239,26 +2239,45 @@ async function autoBuild (bot, schem, at, opts = {}) {
     } catch (e) { dbg('camp: chest skipped (' + e.message + ')') }
     try { await provision.ensureFurnace(bot, { isStopped, home: { x: at.x, y: at.y, z: at.z } }) } catch (e) { dbg('camp: furnace skipped (' + e.message + ')') }
     try {
+      // BED (resource-aware): PLACE a bed the bot already carries before anything else. The old
+      // step gated placement behind "no known bed nearby" AND a wool check, so a recovered bed
+      // rode around unplaced - it logged "no bed and no wool" while holding a white_bed (that's
+      // how we kept losing the spawn). Order now: if a real bed already stands nearby, done; else
+      // if we're holding one, place it; else craft from wool and place that.
+      let bedItem = (bot.inventory ? bot.inventory.items() : []).find(i => /_bed$/.test(i.name))
       const kb = provision.knownBed && provision.knownBed()
-      const bedNear = kb && Math.hypot(kb.x - at.x, kb.z - at.z) <= 120
-      if (!bedNear) {
-        // craft a bed if the pack affords it (3 wool + 3 planks); wool hunting is v2
+      // Trust remembered-bed ONLY if a bed block is ACTUALLY there - memory goes stale the moment
+      // a rebuild/flatten breaks it, which is exactly what stranded this one.
+      let bedNear = false
+      if (kb && Math.hypot(kb.x - at.x, kb.z - at.z) <= 120) {
+        const bb = bot.blockAt(new Vec3(kb.x, kb.y, kb.z))
+        bedNear = !!(bb && /_bed$/.test(bb.name))
+      }
+      if (!bedNear && !bedItem) {
+        // nothing placed and nothing carried - craft one if the pack affords it (3 wool + 3 planks)
         const inv = provision.inventoryCounts(bot)
         const woolName = Object.keys(inv).find(n => /_wool$/.test(n) && inv[n] >= 3)
         if (woolName && (inv.oak_planks || 0) + (inv.birch_planks || 0) + (inv.spruce_planks || 0) >= 3) {
           const r = await handle(bot, 'craft white_bed 1').catch(() => null)
           dbg('camp: bed craft -> ' + r)
+          bedItem = (bot.inventory ? bot.inventory.items() : []).find(i => /_bed$/.test(i.name))
         }
-        const bedItem = (bot.inventory ? bot.inventory.items() : []).find(i => /_bed$/.test(i.name))
-        if (bedItem) {
-          try {
-            await provision.dumpJunk(bot).catch(() => {})
-            await bot.equip(bedItem, 'hand')
-            const spot = bot.blockAt(bot.entity.position.floored().offset(2, -1, 0))
-            if (spot && spot.boundingBox === 'block') { await bot.placeBlock(spot, new (require('vec3').Vec3)(0, 1, 0)); await handle(bot, 'sleep').catch(() => {}) }
-          } catch (e) { dbg('camp: bed place failed (' + e.message + ')') }
-        } else dbg('camp: no bed and no wool for one - sleeping arrangements deferred (bed hunt is v2)')
-      } else dbg('camp: bed already in range at ' + kb.x + ',' + kb.z)
+      }
+      if (bedNear) {
+        dbg('camp: bed already in range at ' + kb.x + ',' + kb.z)
+      } else if (bedItem) {
+        try {
+          await provision.dumpJunk(bot).catch(() => {})
+          await bot.equip(bedItem, 'hand')
+          const spot = bot.blockAt(bot.entity.position.floored().offset(2, -1, 0))
+          if (spot && spot.boundingBox === 'block') {
+            await bot.placeBlock(spot, new Vec3(0, 1, 0))
+            const placed = bot.blockAt(spot.position.offset(0, 1, 0))
+            if (placed && /_bed$/.test(placed.name) && provision.rememberBed) { try { provision.rememberBed(placed.position) } catch {} }
+            await handle(bot, 'sleep').catch(() => {}) // sets spawn at the bed (works at day on this server)
+          } else dbg('camp: bed - no solid spot right here to set it on')
+        } catch (e) { dbg('camp: bed place failed (' + e.message + ')') }
+      } else dbg('camp: no bed and no wool for one - sleeping arrangements deferred (bed hunt is v2)')
     } catch (e) { dbg('camp: bed step failed (' + e.message + ')') }
     try {
       const torch = (bot.inventory ? bot.inventory.items() : []).find(i => i.name === 'torch')
@@ -2349,6 +2368,9 @@ async function autoBuild (bot, schem, at, opts = {}) {
             const hr = await schematic.buildSurvival(bot, hutSchem, hutAt, { say, isStopped, restoreMovements: restore, clear: true, clearFurniture: true, fetch: hutFetch })
             dbg('camp: hut rebuilt -> ' + (hr && hr.placed) + '/' + (hr && hr.total) + ' at ' + hutAt.x + ',' + hutAt.y + ',' + hutAt.z)
             provision.rememberInfra && provision.rememberInfra('hut', hutAt)
+            // fill the doorstep so the exit is flush ground, not a fall into the natural drop-off
+            // in front (the recurring "hole at the front door"); idempotent, self-heals each pass
+            try { await provision.ensureHutApron(bot, hutAt, { isStopped, say }) } catch (e) { dbg('camp: apron fill failed (' + e.message + ')') }
             try { await handle(bot, 'collect') } catch {} // grab any bank items that dropped when the old chest was cleared
             // 4) refill the bank into the schematic's chest cell; count to prove nothing lost
             const chestCell = findCell(/chest/)
