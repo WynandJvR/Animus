@@ -1860,7 +1860,9 @@ async function levelPlotCell (bot, cx, baseY, cz, { isStopped = () => false } = 
 // ground, trees planted evenly so it's easy to navigate and use". Returns count planted.
 async function plantGrove (bot, home, logItem, { isStopped = () => false, say = () => {}, avoid = null, max = 8 } = {}) {
   if (saplingCount(bot, logItem) < 1) return 0
-  const gx = Math.floor(avoid ? avoid.x2 + 8 : home.x + 18); const gz = Math.floor(home.z)
+  // anchor shifted +24 south of the original (pre-leveling) plot: the operator ordered
+  // the messy first orchard torn down and future ones built on cleanly prepared ground
+  const gx = Math.floor(avoid ? avoid.x2 + 8 : home.x + 18); const gz = Math.floor(home.z) + 24
   await walkStaged(bot, gx, gz, { isStopped, range: 6, timeoutMs: 90000 })
   if (isStopped()) return 0
   const baseY = Math.floor(bot.entity.position.y) - 1 // plot level = the ground we stand on
