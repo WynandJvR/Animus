@@ -652,11 +652,11 @@ async function digStaircaseUp (bot, targetY, opts = {}) {
     await digIf(feet.offset(0, 2, 0))             // our own head-clearance to move up
     const fb = bot.blockAt(sFloor)
     if (!fb || AIRISH(fb.name)) { // no floor for the step -> place one
-      const filler = (bot.inventory ? bot.inventory.items() : []).find(i => FILLER_RE.test(i.name))
+      const filler = scaffold.pickFiller(bot) // dirt-first, one policy for every scaffold placer
       if (filler) {
         await bot.equip(filler, 'hand').catch(() => {})
         const under = bot.blockAt(sFloor.offset(0, -1, 0))
-        try { if (under && !AIRISH(under.name)) await bot.placeBlock(under, new Vec3(0, 1, 0)) } catch {}
+        try { if (under && !AIRISH(under.name)) { await bot.placeBlock(under, new Vec3(0, 1, 0)); scaffold.add(sFloor, 'staircase') } } catch {}
       }
     }
     if (!(await digIf(sFeet)) || !(await digIf(sHead))) { stuck++; continue }
@@ -784,8 +784,7 @@ async function pillarUpTo (bot, targetY, opts = {}) {
     }
     // dirt FIRST: cobble towers in the orchard read as stone litter (operator), and the
     // leveler has to shave them - dirt pockets back into scaffold supply instead.
-    const items = (bot.inventory ? bot.inventory.items() : [])
-    const filler = items.find(i => /^(dirt|coarse_dirt)$/.test(i.name)) || items.find(i => FILLER_RE.test(i.name))
+    const filler = scaffold.pickFiller(bot)
     if (!filler) { bot.clearControlStates(); return } // nothing to pillar with
     if (equippedFiller !== filler.name) { await bot.equip(filler, 'hand').catch(() => {}); equippedFiller = filler.name }
     const ref = bot.blockAt(feet.offset(0, -1, 0)) // the block we're standing on
@@ -1067,12 +1066,16 @@ function underArmored (bot) {
   try { for (const s of ['head', 'torso', 'legs', 'feet']) { if (!(bot.inventory && bot.inventory.slots[bot.getEquipmentDestSlot(s)])) return true } return false } catch { return true }
 }
 function isNight (bot) { return !!(bot.time && bot.time.timeOfDay >= 13000 && bot.time.timeOfDay < 23500) }
-// Fire night-rest whenever it's night and we're under-armored. This USED to also wait for a
-// hostile within 12 blocks - which meant the bot wandered exposed all night and only started
+// Fire night-rest whenever we're under-armored and DUSK is falling. This USED to also wait for
+// a hostile within 12 blocks - which meant the bot wandered exposed all night and only started
 // digging once a skeleton was already shooting it (verified live: 7 night deaths in one
-// evening, several while "sheltering"). A naked player doesn't wait to be chased: at dusk
-// they go to bed or hole up BEFORE the mobs arrive.
-function shelterNeeded (bot) { return isNight(bot) && underArmored(bot) }
+// evening, several while "sheltering"). A naked player doesn't wait to be chased: at dusk they
+// go to bed or hole up BEFORE the mobs arrive. Trigger at DUSK (12200), NOT mob-spawn (13000):
+// a fresh pit takes ~15-20s to dig + seal, so starting after dark means a zombie walks straight
+// into the open hole mid-dig (verified live: began the pit at timeOfDay 13618, a zombie walked
+// in during the dig, died). The ~800-tick (~40s) head start lets the pit be sealed before any
+// mob spawns. isNight (13000) stays the trigger for the ARMORED "wanted" cases below.
+function shelterNeeded (bot) { return !!(bot.time && bot.time.timeOfDay >= 12200 && bot.time.timeOfDay < 23500) && underArmored(bot) }
 // Rest is WANTED (not just needed) when night catches us with the bed close by - even in
 // full armor a player sleeps if home is right there (operator rule: safer overall). Far
 // from the bed and armored, keep working the night; the commute would cost more than the
@@ -3576,4 +3579,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, migrateChestInto, furnishHut, hasSolidCeiling, gatherLeather, huntForFood, hasFood, needsFood, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, ensureWheatFarm, tendWheatFarm, fishForFood, ensureHutApron, setBuildZone, setDebugSink }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, furnishHut, hasSolidCeiling, gatherLeather, huntForFood, hasFood, needsFood, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, ensureWheatFarm, tendWheatFarm, fishForFood, ensureHutApron, setBuildZone, setDebugSink }
