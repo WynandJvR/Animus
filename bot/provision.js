@@ -1519,9 +1519,19 @@ async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () =
   if (hasSolidCeiling(bot, 12) || nearHostile(bot, 16) || isNight(bot)) { dbg('  wheat farm: bad moment (cave/hostiles/night) - deferred'); return false }
   // 1) surface water within reach of home - farmland must sit beside it
   const waterId = mcData.blocksByName.water.id
+  // SURFACE water only: cave/ravine pools pass the air-above test but have stone banks
+  // and no light for crops - "0 bank cells" at two remembered underground pools, live.
+  const seesSky = p => {
+    for (let dy = 1; dy <= 40; dy++) {
+      const b = bot.blockAt(p.offset(0, dy, 0))
+      if (b && b.boundingBox === 'block' && !/_leaves$/.test(b.name)) return false
+    }
+    return true
+  }
   const findWaters = () => (bot.findBlocks({ matching: waterId, maxDistance: 48, count: 64 }) || [])
     .filter(p => { const a = bot.blockAt(p.offset(0, 1, 0)); return a && AIRISH(a.name) })
     .filter(p => !inAvoidBox(avoid, p.x, p.z))
+    .filter(seesSky)
   let waters = findWaters()
   if (!waters.length) {
     // No pond in sight - but maybe we REMEMBER one. The camp runs this from the site,
