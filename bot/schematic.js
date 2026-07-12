@@ -454,7 +454,7 @@ async function clearVolume (bot, schem, at, opts = {}) {
             // NEVER clear utility/container blocks: camp infra (bank chest, furnace, bed,
             // torches) legitimately lives inside footprints and reads as a "mismatch" -
             // clearing would dump the treasury on the floor.
-            if (/chest$|barrel$|furnace$|smoker$|_bed$|^torch$|_torch$|crafting_table$/.test(b.name)) continue
+            if (/chest$|barrel$|furnace$|smoker$|_bed$|^torch$|_torch$|crafting_table$|_door$/.test(b.name)) continue
             // Don't destroy a cell that ALREADY matches the schematic - it's part of
             // the finished build (the Build planner skips such cells, so clearing them
             // just punches permanent holes; seen live: stone box on stone terrain).

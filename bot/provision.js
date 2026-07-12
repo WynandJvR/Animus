@@ -3204,6 +3204,48 @@ async function furnishHut (bot, hut, { isStopped = () => false, say = () => {} }
       }
     }
   } catch (e) { dbg('  furnish: bed move failed (' + e.message + ')') }
+  // DOOR the doorway (operator: "no door on its hut so mobs and creepers can still
+  // enter"): the shell schematic leaves a 2-high hole but owns no door block.
+  try {
+    let hasDoor = false
+    for (let dx = 0; dx <= 4 && !hasDoor; dx++) {
+      for (let dz = 0; dz <= 4 && !hasDoor; dz++) {
+        for (let dy = 1; dy <= 2 && !hasDoor; dy++) {
+          const b = bot.blockAt(new Vec3(hut.x + dx, hut.y + dy, hut.z + dz))
+          if (b && /_door$/.test(b.name)) hasDoor = true
+        }
+      }
+    }
+    if (!hasDoor) {
+      let doorway = null
+      for (let dx = 0; dx <= 4 && !doorway; dx++) {
+        for (let dz = 0; dz <= 4 && !doorway; dz++) {
+          const onRim = dx === 0 || dx === 4 || dz === 0 || dz === 4
+          const corner = (dx === 0 || dx === 4) && (dz === 0 || dz === 4)
+          if (!onRim || corner) continue
+          const lo = bot.blockAt(new Vec3(hut.x + dx, hut.y + 1, hut.z + dz))
+          const hi = bot.blockAt(new Vec3(hut.x + dx, hut.y + 2, hut.z + dz))
+          const floor = bot.blockAt(new Vec3(hut.x + dx, hut.y, hut.z + dz))
+          if (lo && AIRISH(lo.name) && hi && AIRISH(hi.name) && floor && floor.boundingBox === 'block') doorway = new Vec3(hut.x + dx, hut.y + 1, hut.z + dz)
+        }
+      }
+      if (doorway) {
+        let door = (bot.inventory ? bot.inventory.items() : []).find(i => /_door$/.test(i.name))
+        if (!door) { try { await runCraft(bot, 'oak_door', 1, true, { isStopped, home: { x: hut.x, y: hut.y, z: hut.z } }) } catch (e) { dbg('  furnish: cannot craft a door (' + e.message + ')') } }
+        door = (bot.inventory ? bot.inventory.items() : []).find(i => /_door$/.test(i.name))
+        if (door) {
+          // stand OUTSIDE the gap facing the hut centre so the door hangs the right way
+          const ox = doorway.x === hut.x ? -1 : doorway.x === hut.x + 4 ? 1 : 0
+          const oz = doorway.z === hut.z ? -1 : doorway.z === hut.z + 4 ? 1 : 0
+          try { await gotoWithTimeout(bot, new goals.GoalBlock(doorway.x + ox, doorway.y, doorway.z + oz), 15000) } catch {}
+          try { await bot.lookAt(new Vec3(hut.x + 2.5, hut.y + 1.5, hut.z + 2.5), true) } catch {}
+          const floor = bot.blockAt(doorway.offset(0, -1, 0))
+          await bot.equip(door, 'hand')
+          try { await bot.placeBlock(floor, new Vec3(0, 1, 0)); moved.push('door') } catch (e) { dbg('  furnish: door place failed (' + e.message + ')') }
+        }
+      } else dbg('  furnish: no doorway hole found to hang a door in')
+    }
+  } catch (e) { dbg('  furnish: door failed (' + e.message + ')') }
   if (moved.length) say('hut furnished - ' + moved.join(' + ') + ' moved indoors')
   return moved.length
 }
