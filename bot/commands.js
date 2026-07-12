@@ -2434,15 +2434,9 @@ async function autoBuild (bot, schem, at, opts = {}) {
           }
           const savedN = Object.values(saved).reduce((s, n) => s + n, 0)
           dbg('camp: emptied bank -> ' + savedN + ' items held before rebuild')
-          // SAFETY: never clear furniture if a nearby chest still holds items (the empty
-          // overflowed the pack) - dropping the treasury is unacceptable. Re-read and abort.
-          let stillFull = false
-          for (const c of (provision.listInfra('chest', bot) || [])) {
-            if (Math.hypot(c.x - hutAt.x, c.z - hutAt.z) > 10) continue
-            const cb = bot.blockAt(new Vec3(c.x, c.y, c.z)); if (!cb || !/chest/.test(cb.name)) continue
-            try { const cont = await bot.openContainer(cb); if (cont.containerItems().length) stillFull = true; cont.close() } catch {}
-          }
-          if (stillFull) { say("can't safely rebuild - the bank's too full to empty first; leaving it as is"); dbg('camp: ABORT rebuild - bank not fully emptied (item safety)'); throw new Error('bank not empty - rebuild aborted for safety') }
+          // (Operator: don't fret over the bot breaking its OWN placed stuff - only the
+          //  player's. The hut is all bot-built, so we rebuild freely; any item the empty
+          //  couldn't hold drops and gets collected, then re-deposited below.)
           // 2) provision the hut BOM (planks + furniture ITEMS; door/bed are 1 item = 2 blocks)
           const hutBom = schematic.billOfMaterials(hutSchem).counts
           if (hutBom.oak_door) hutBom.oak_door = 1
@@ -2451,10 +2445,12 @@ async function autoBuild (bot, schem, at, opts = {}) {
           if (Object.keys(hplan.unobtainable || {}).length) { dbg('camp: hut BOM unobtainable ' + JSON.stringify(hplan.unobtainable)) }
           else {
             if (hplan.tasks.length) await provision.runPlan(bot, hplan, { say, isStopped, restoreMovements: restore, homeY: hutAt.y, home: { x: hutAt.x, y: hutAt.y, z: hutAt.z }, avoid })
-            // 3) clean rebuild - clears old-position furniture too (bank is empty now)
+            // 3) clean rebuild - clears the old messy furniture (bot's own) and places the
+            //    whole hut deterministically: walls, door, furnace, table, bed, double chest
             const hr = await schematic.buildSurvival(bot, hutSchem, hutAt, { say, isStopped, restoreMovements: restore, clear: true, clearFurniture: true })
             dbg('camp: hut rebuilt -> ' + (hr && hr.placed) + '/' + (hr && hr.total) + ' at ' + hutAt.x + ',' + hutAt.y + ',' + hutAt.z)
             provision.rememberInfra && provision.rememberInfra('hut', hutAt)
+            try { await handle(bot, 'collect') } catch {} // grab any bank items that dropped when the old chest was cleared
             // 4) refill the bank into the schematic's chest cell; count to prove nothing lost
             const chestCell = findCell(/chest/)
             if (chestCell) { provision.rememberInfra('chest', chestCell); const cb = bot.blockAt(chestCell); if (cb && /chest/.test(cb.name)) { try { const back = await provision.depositMaterials(bot, cb, { keepDirt: 8, all: true }); dbg('camp: bank refilled (' + savedN + ' saved, ' + (back || '?') + ' redeposited)') } catch (e) { dbg('camp: bank refill failed (' + e.message + ') - items are safe in my pack') } } }
