@@ -196,6 +196,13 @@ function cliffAhead (bot, tx, tz) {
 // the exit side is picked by open sky ("outside") - which can only ever LEAVE a building;
 // a goto INTO the hut needs to cross the other way (navigateTo passes the goal through).
 const OPENABLE_RE = /(_door|_fence_gate)$/
+function doorNearby (bot) { // cheap existence probe - gates the ladder rung
+  try {
+    const md = require('minecraft-data')(bot.version)
+    const ids = Object.values(md.blocksByName).filter(b => OPENABLE_RE.test(b.name) && b.name !== 'iron_door').map(b => b.id)
+    return (bot.findBlocks({ matching: ids, maxDistance: 16, count: 1 }) || []).length > 0
+  } catch { return false }
+}
 async function openNearbyDoor (bot, opts = {}) {
   try {
     const md = require('minecraft-data')(bot.version)
@@ -388,9 +395,13 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
       }
     },
     { // walled into a room with a door (or out of one): open it and walk through like a
-      // person, crossing toward the goal side.
+      // person, crossing toward the goal side. GATED on a door actually existing nearby:
+      // "no door within 16" is NOT APPLICABLE, not a failed attempt - running it in open
+      // country burned the whole door budget mid-trek, and by the time the bot reached
+      // its hut wall the rung was spent (live: re-entry died at (420,66,85), 3 blocks
+      // from its own door, with 'door x3' all wasted 60+ blocks away).
       kind: 'door',
-      when: () => true, // openNearbyDoor itself scans (16 blocks) and returns false fast when there's none
+      when: () => doorNearby(bot),
       run: async () => openNearbyDoor(bot, { towards: xz })
     },
     { // buried underground (real ceiling, not a canopy): staircase/pillar up to daylight.
