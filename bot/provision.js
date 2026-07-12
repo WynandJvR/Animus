@@ -861,10 +861,34 @@ async function mineTunnel (bot, itemName, maxLen, dirIdx, opts = {}) {
       try { await bot.dig(b); dugAny = true } catch { return countItem(bot, itemName) - before }
     }
     await collectDrops(bot, 3)
+    // COAL BYCATCH (operator: "while mining iron it might as well get coal if close"):
+    // the furnace runs on coal, so grab any coal ore this tunnel exposes - cheap, bounded.
+    try { await grabNearbyOre(bot, /coal_ore$/, 3, 2, { isStopped }) } catch {}
     try { await gotoWithTimeout(bot, new goals.GoalBlock(ahead.x, ahead.y, ahead.z), 5000) } catch { break }
     if (!dugAny) break
   }
   return countItem(bot, itemName) - before
+}
+
+// Mine up to `max` blocks matching `oreRe` within `r` of the bot - opportunistic bycatch
+// while tunnelling (coal for the furnace, etc.). Only natural blocks; best-effort.
+async function grabNearbyOre (bot, oreRe, r, max, { isStopped = () => false } = {}) {
+  let got = 0
+  const found = bot.findBlocks({ matching: b => b && oreRe.test(b.name), maxDistance: r, count: max }) || []
+  for (const p of found) {
+    if (isStopped() || got >= max) break
+    const b = bot.blockAt(p)
+    if (!b || !canBreakNaturally(b)) continue
+    try {
+      if (bot.entity.position.distanceTo(b.position) > 4) await gotoWithTimeout(bot, new goals.GoalNear(p.x, p.y, p.z, 2), 6000)
+      const tool = toolForBlock(bot, b.name)
+      if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
+      if (bot.canDigBlock && !bot.canDigBlock(b)) continue
+      await bot.dig(b); await collectDrops(bot, 2); got++
+    } catch { /* skip this one */ }
+  }
+  if (got) dbg('  bycatch: grabbed ' + got + ' ' + oreRe.source)
+  return got
 }
 
 async function runGather (bot, item, count, opts = {}) {
@@ -3126,28 +3150,41 @@ async function withdrawItem (bot, chestBlock, itemName, count) {
 // INSIDE. Item-safe order: the new chest exists and is verified before anything leaves
 // the old one; the old chest is only dug up once it reads EMPTY.
 async function migrateChestInto (bot, oldPos, hut, { isStopped = () => false, say = () => {} } = {}) {
-  // interior target: an air cell with a solid floor inside the 5x5 shell (1..3 = interior)
-  let target = null
-  for (const [dx, dz] of [[2, 2], [1, 2], [3, 2], [2, 1], [2, 3], [1, 1], [3, 1], [1, 3], [3, 3]]) {
-    for (let dy = 0; dy <= 3 && !target; dy++) { // origin y vs floor layer varies with the snap - scan the whole interior column
+  // WALL-HUGGING interior cells (operator: "why did it place its chest in the middle") -
+  // the centre [2,2] stays walkable; corners/edges first. Collect free cells, then find
+  // an adjacent PAIR for a DOUBLE chest (operator: "make it a double chest for more space").
+  const interior = []
+  const order = [[1, 1], [1, 3], [3, 1], [3, 3], [1, 2], [2, 1], [2, 3], [3, 2]] // corners then edges, NEVER [2,2]
+  for (const [dx, dz] of order) {
+    for (let dy = 0; dy <= 3; dy++) {
       const p = new Vec3(hut.x + dx, hut.y + dy, hut.z + dz)
       const b = bot.blockAt(p); const below = bot.blockAt(p.offset(0, -1, 0)); const above = bot.blockAt(p.offset(0, 1, 0))
-      if (b && AIRISH(b.name) && below && below.boundingBox === 'block' && above && AIRISH(above.name)) target = p
+      if (b && AIRISH(b.name) && below && below.boundingBox === 'block' && above && AIRISH(above.name)) { interior.push(p); break }
     }
-    if (target) break
   }
-  if (!target) { dbg('  chest migration: no free interior cell in the hut'); return false }
+  if (!interior.length) { dbg('  chest migration: no free interior cell in the hut'); return false }
+  let target = interior[0]; let target2 = null
+  for (const a of interior) { // a same-y neighbour makes the two chests merge into a double
+    const n = interior.find(o => o.y === a.y && Math.abs(o.x - a.x) + Math.abs(o.z - a.z) === 1)
+    if (n) { target = a; target2 = n; break }
+  }
   let chestItem = (bot.inventory ? bot.inventory.items() : []).find(i => i.name === 'chest')
-  if (!chestItem) {
-    try { await runCraft(bot, 'chest', 1, true, { isStopped, home: { x: hut.x, y: hut.y, z: hut.z } }) } catch (e) { dbg('  chest migration: cannot craft a chest (' + e.message + ')'); return false }
+  const chestCount = () => countItem(bot, 'chest')
+  if (chestCount() < 2) { // want TWO for the double chest
+    try { await runCraft(bot, 'chest', 2 - chestCount(), true, { isStopped, home: { x: hut.x, y: hut.y, z: hut.z } }) } catch (e) { dbg('  chest migration: cannot craft chests (' + e.message + ')') }
     chestItem = (bot.inventory ? bot.inventory.items() : []).find(i => i.name === 'chest')
-    if (!chestItem) return false
   }
+  if (!chestItem) { dbg('  chest migration: no chest to place'); return false }
   if (bot.entity.position.distanceTo(target) > 3) { try { await gotoWithTimeout(bot, new goals.GoalNear(target.x, target.y, target.z, 2), 20000) } catch {} }
   if (!await placeAt(bot, target, /^chest$/)) { dbg('  chest migration: could not place inside - ' + (placeAt.lastFail || '?')); return false }
   const newBlk = bot.blockAt(target)
   if (!newBlk || !/chest/.test(newBlk.name)) return false
   rememberInfra('chest', target)
+  // second half of the double chest, if we have a pair-cell and a spare chest
+  if (target2 && chestCount() >= 1) {
+    if (bot.entity.position.distanceTo(target2) > 3) { try { await gotoWithTimeout(bot, new goals.GoalNear(target2.x, target2.y, target2.z, 2), 15000) } catch {} }
+    if (await placeAt(bot, target2, /^chest$/)) { const b2 = bot.blockAt(target2); if (b2 && /chest/.test(b2.name)) { rememberInfra('chest', target2); dbg('  chest migration: double chest placed') } }
+  }
   say('moving the bank into the hut where creepers cannot audit it')
   let trips = 0
   while (!isStopped() && trips++ < 6) {
@@ -3378,6 +3415,39 @@ async function furnishHut (bot, hut, { isStopped = () => false, say = () => {} }
       } else dbg('  furnish: no doorway hole found to hang a door in')
     }
   } catch (e) { dbg('  furnish: door failed (' + e.message + ')') }
+  // THRESHOLD APRON (operator: "hole in front of its door, it struggles entering"): the
+  // 2 cells just outside the doorway get levelled to the door's floor so the bot walks
+  // in and out flat. Runs every furnish, so a pit dug there later self-heals.
+  try {
+    const dwF = findHutDoorway(bot, hut)
+    if (dwF) {
+      const ox = dwF.x === hut.x ? -1 : dwF.x === hut.x + 4 ? 1 : 0
+      const oz = dwF.z === hut.z ? -1 : dwF.z === hut.z + 4 ? 1 : 0
+      const floorY = dwF.y - 1 // solid surface the door sits on
+      for (let step = 1; step <= 2 && !isStopped(); step++) {
+        const ax = dwF.x + ox * step; const az = dwF.z + oz * step
+        // clear anything blocking the 2-high walkway at floor level and above
+        for (const dy of [0, 1]) {
+          const b = bot.blockAt(new Vec3(ax, dwF.y + dy, az))
+          if (b && !AIRISH(b.name) && canBreakNaturally(b)) {
+            try {
+              if (bot.entity.position.distanceTo(b.position) > 4) await gotoWithTimeout(bot, new goals.GoalNear(ax, dwF.y + dy, az, 2), 8000)
+              const t = toolForBlock(bot, b.name); if (t) await bot.equip(t, 'hand').catch(() => {})
+              await bot.dig(b); await collectDrops(bot, 2)
+            } catch {}
+          }
+        }
+        // fill the ground up to floor level with dirt (stack from the first solid below)
+        let guard = 5
+        let g = bot.blockAt(new Vec3(ax, floorY, az))
+        while ((!g || AIRISH(g.name) || /water/.test(g.name)) && guard-- > 0 && !isStopped()) {
+          if (!await placeAt(bot, new Vec3(ax, floorY, az), /^(dirt|coarse_dirt|cobblestone)$/)) break
+          g = bot.blockAt(new Vec3(ax, floorY, az))
+        }
+      }
+      dbg('  furnish: threshold apron levelled in front of the door')
+    }
+  } catch (e) { dbg('  furnish: threshold apron failed (' + e.message + ')') }
   if (moved.length) say('hut furnished - ' + moved.join(' + ') + ' moved indoors')
   return moved.length
 }

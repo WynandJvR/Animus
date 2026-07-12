@@ -353,7 +353,7 @@ bot.on('chat', (username, message) => {
     // instead of stopping. Pull a recognized imperative out of the addressed message and
     // run it straight through the body, bypassing the brain entirely. `stop` above all -
     // it's the safety override the operator relies on.
-    const direct = directCommand(message)
+    const direct = directCommand(message, username)
     if (direct && access.isOperator(username, cfg)) {
       note(`(direct-cmd) ${username}: "${message}" -> ${direct}`)
       commands.handle(bot, direct)
@@ -371,10 +371,17 @@ bot.on('chat', (username, message) => {
 // orders the brain must never second-guess. Returns a command string for commands.handle
 // or null. Deliberately conservative - only unambiguous imperatives, and never on a
 // negation ("don't stop", "keep going").
-function directCommand (message) {
+function directCommand (message, username) {
   const m = String(message).toLowerCase()
   if (/\bdon'?t\s+stop\b|\bdo\s*n[o']?t\s+stop\b|\bkeep\s+going\b|\bnever\s+stop\b/.test(m)) return null
-  if (/\b(stop|halt|freeze|abort|cancel|hold on|hold up|cut it out|knock it off|quit it|stand down|stop it|stop moving|stop building)\b/.test(m)) return 'stop'
+  if (/\b(stop|halt|freeze|abort|cancel|hold on|hold up|cut it out|knock it off|quit it|stand down|stop it|stop moving|stop building|wait|stay|stay there|stay put|hold position)\b/.test(m)) return 'stop'
+  // A recognized OPERATOR ordering the bot around must be obeyed deterministically, not
+  // argued with by the brain (operator: "IM TELLING IT SHIT WHY IS IT NOT LISTENING").
+  if (username) {
+    if (/\b(follow me|follow us|come with me|stick with me|stay with me)\b/.test(m)) return `follow ${username}`
+    if (/\b(come here|come to me|get over here|over here|come to my|to me|get here|come)\b/.test(m)) return `goto ${username}`
+    if (/\b(go home|head home|return home|back to base|go to base)\b/.test(m)) return 'goto home'
+  }
   return null
 }
 

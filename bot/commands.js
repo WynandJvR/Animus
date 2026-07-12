@@ -2424,9 +2424,12 @@ async function autoBuild (bot, schem, at, opts = {}) {
     try {
       const hutE = (provision.listInfra ? provision.listInfra('hut') : []).find(e => Math.hypot(e.x - at.x, e.z - at.z) <= 150)
       if (hutE) {
-        const exposed = (provision.listInfra('chest') || []).find(c =>
-          Math.hypot(c.x - at.x, c.z - at.z) <= 60 &&
-          !(c.x >= hutE.x && c.x <= hutE.x + 4 && c.z >= hutE.z && c.z <= hutE.z + 4))
+        const chests = provision.listInfra('chest') || []
+        const insideHut = c => c.x >= hutE.x && c.x <= hutE.x + 4 && c.z >= hutE.z && c.z <= hutE.z + 4
+        // the interior CENTRE cell (operator: "why did it place its chest in the middle") -
+        // relocate a centered chest to a wall double just like an exposed outdoor one.
+        const centered = chests.find(c => insideHut(c) && c.x === hutE.x + 2 && c.z === hutE.z + 2)
+        const exposed = chests.find(c => Math.hypot(c.x - at.x, c.z - at.z) <= 60 && !insideHut(c)) || centered
         if (exposed) {
           const oldBlk = bot.blockAt(new Vec3(exposed.x, exposed.y, exposed.z))
           if (oldBlk && /chest/.test(oldBlk.name)) {
