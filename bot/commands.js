@@ -2403,16 +2403,20 @@ async function autoBuild (bot, schem, at, opts = {}) {
         const hz = kb ? kb.z - 2 : Math.round(at.z)
         const hy = kb ? kb.y - 1 : Math.floor(at.y)
         const hutSchem = await schematic.loadFile('hut.schem', bot.version)
+        // SNAP the hut to the actual ground at ITS spot: at.y is the CASTLE's surface, 16
+        // blocks away - un-snapped the shell floats/embeds and getAvailableActions() is
+        // empty on pass one, so it "built 0/71" in 20ms (live, twice).
+        const hutAt = snapToGround(bot, hutSchem, new Vec3(hx, hy, hz))
         const hutBom = schematic.billOfMaterials(hutSchem).counts
         const hplan = provision.planProvision(mcData, hutBom, provision.inventoryCounts(bot), { primaryWood })
         if (Object.keys(hplan.unobtainable || {}).length) dbg('camp: hut unobtainable ' + JSON.stringify(hplan.unobtainable))
         else {
           say('putting up my safehouse hut by the bed')
-          if (hplan.tasks.length) await provision.runPlan(bot, hplan, { say, isStopped, restoreMovements: restore, homeY: hy, home: { x: hx, y: hy, z: hz }, avoid })
-          const hr = await schematic.buildSurvival(bot, hutSchem, new Vec3(hx, hy, hz), { say, isStopped, restoreMovements: restore })
-          dbg('camp: hut built ' + (hr && hr.placed) + '/' + (hr && hr.total))
+          if (hplan.tasks.length) await provision.runPlan(bot, hplan, { say, isStopped, restoreMovements: restore, homeY: hutAt.y, home: { x: hutAt.x, y: hutAt.y, z: hutAt.z }, avoid })
+          const hr = await schematic.buildSurvival(bot, hutSchem, hutAt, { say, isStopped, restoreMovements: restore })
+          dbg('camp: hut built ' + (hr && hr.placed) + '/' + (hr && hr.total) + ' at ' + hutAt.x + ',' + hutAt.y + ',' + hutAt.z)
           if (hr && hr.placed >= 50) {
-            provision.rememberInfra && provision.rememberInfra('hut', new Vec3(hx, hy, hz))
+            provision.rememberInfra && provision.rememberInfra('hut', hutAt)
             try { await handle(bot, 'remember hut') } catch {}
             say('safehouse standing - bed, chest and furnace get walls now')
           }
