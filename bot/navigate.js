@@ -163,6 +163,7 @@ function detectPit (bot) {
     }
   }
   if (pitWalls < 3) return null
+  if (prov().insideOwnStructure && prov().insideOwnStructure(bot)) return null // my own hut is not a pit - don't pillar dirt in the living room
   if (prov().hasSolidCeiling(bot, 20, { ignoreLeaves: true })) return null // roofed = not a pit
   return { rimY }
 }

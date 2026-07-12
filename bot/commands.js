@@ -2390,6 +2390,24 @@ async function autoBuild (bot, schem, at, opts = {}) {
         // decoupled from the rebuild. Idempotent: a filled apron / placed bed is a fast no-op.
         try { await provision.ensureHutApron(bot, hutAt, { isStopped, say }) } catch (e) { dbg('camp: apron fill failed (' + e.message + ')') }
         try { const bs = await provision.ensureHutBed(bot, hutAt, { isStopped, say }); dbg('camp: hut bed -> ' + bs) } catch (e) { dbg('camp: hut bed failed (' + e.message + ')') }
+        // INTERIOR SWEEP (liveability, every pass): utility blocks that wandered onto the
+        // hut floor get dug and pocketed - ensureFurnaces once parked 2 spare furnaces
+        // beside the bed ("nowhere to place - stopping at 3"). Bot-built hut = its own
+        // clutter is fair game; the schematic's OWN furniture cells are never touched.
+        try {
+          const CLUTTER = /^(furnace|blast_furnace|smoker|crafting_table|lit_furnace)$/
+          let swept = 0
+          for (let y = st.y; y <= en.y && !isStopped(); y++) for (let z = st.z; z <= en.z; z++) for (let x = st.x; x <= en.x; x++) {
+            const wp = new Vec3(hutAt.x + x, hutAt.y + y, hutAt.z + z)
+            const g = bot.blockAt(wp)
+            if (!g || !CLUTTER.test(g.name)) continue
+            const w = hutSchem.getBlock(new Vec3(x, y, z))
+            if (w && w.name === g.name) continue // that's where it belongs
+            if (bot.entity.position.distanceTo(wp) > 4) { try { await gotoTimedDA(bot, new goals.GoalNear(wp.x, wp.y, wp.z, 2), 20000) } catch { continue } }
+            try { await bot.dig(bot.blockAt(wp)); swept++ } catch (e) { dbg('camp: interior sweep dig failed at ' + wp + ' (' + e.message + ')') }
+          }
+          if (swept) { try { await handle(bot, 'collect') } catch {}; dbg('camp: interior sweep pocketed ' + swept + ' stray block(s)'); say(`tidied the hut - pocketed ${swept} stray block(s)`) }
+        } catch (e) { dbg('camp: interior sweep failed (' + e.message + ')') }
       }
     } catch (e) { dbg('camp: hut failed (' + e.message + ') - continuing') }
     // (The old reach-based bank-migration + furnish + threshold-apron are RETIRED: the

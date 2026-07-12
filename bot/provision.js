@@ -550,6 +550,26 @@ function onHutApron (bot, pos) {
   return null
 }
 
+// ---- OWN-STRUCTURE AWARENESS ---------------------------------------------------
+// The hut is 6x5x6 (hut.schem: anchor + 0..5 in x/z, + 0..4 in y). Being INSIDE it is
+// not "underground": before this predicate the roofed interior tripped hasSolidCeiling,
+// so climb-out dug through the bot's own roof, pit-escape pillared dirt onto the floor,
+// and fishing/farming refused to run "in a cave" while the bot stood in its living room.
+function ownHutAt (pos) {
+  if (!pos) return null
+  const x = Math.floor(pos.x); const y = Math.floor(pos.y); const z = Math.floor(pos.z)
+  for (const h of listInfra('hut')) {
+    if (x >= h.x && x <= h.x + 5 && z >= h.z && z <= h.z + 5 && y >= h.y && y <= h.y + 4) return h
+  }
+  return null
+}
+// Feet (or `pos`) inside one of the bot's own roofed structures. Returns the hut anchor
+// entry or null - truthiness is the common use.
+function insideOwnStructure (bot, pos) {
+  const p = pos || (bot && bot.entity && bot.entity.position)
+  return p ? ownHutAt(p) : null
+}
+
 // After the hut builds, GUARANTEE a flush doorstep. The ground right in front of the door is
 // often 1-2 blocks below the hut floor (median-surface snap + natural slope + gather shafts),
 // so the bot steps straight out the door into a pit and then struggles to get back into its own
@@ -680,6 +700,7 @@ async function digShaftDown (bot, maxDepth, opts = {}) {
 // feet+head cells there and our own head clearance, then walk onto it. Stops at targetY.
 async function digStaircaseUp (bot, targetY, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
+  if (insideOwnStructure(bot)) { dbg('  staircase: inside my own hut - not cutting up through it'); return }
   const DIRS = [new Vec3(1, 0, 0), new Vec3(0, 0, 1), new Vec3(-1, 0, 0), new Vec3(0, 0, -1)]
   const digIf = async (p) => {
     const b = bot.blockAt(p)
@@ -751,6 +772,10 @@ function climbMovements (bot) {
 // (fine - don't pointlessly pillar up in the open).
 function hasSolidCeiling (bot, upTo = 45, opts = {}) {
   if (!bot.entity) return false
+  // Inside the bot's own hut: roofed, yes - underground, no. Without this the interior
+  // read as a cave and every "buried" consumer (climb-out, travel surfacing, the fishing/
+  // farming gates, /state hazards) misfired while the bot idled at home.
+  if (insideOwnStructure(bot)) return false
   const base = bot.entity.position.floored()
   for (let dy = 2; dy <= upTo; dy++) {
     const b = bot.blockAt(base.offset(0, dy, 0))
@@ -803,6 +828,7 @@ async function climbToSurface (bot, targetY, opts = {}) {
 // back down into the pit. Stops on lava/water above, out of filler, or protected blocks.
 async function pillarUpTo (bot, targetY, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
+  if (insideOwnStructure(bot)) { dbg('  pillar: inside my own hut - not pillaring through the roof'); return }
   const startY = Math.floor(bot.entity.position.y)
   let stuck = 0
   let equippedFiller = null
@@ -1214,6 +1240,41 @@ async function digInForNight (bot, opts = {}) {
       ].sort((a, b) => Math.hypot(a.x - p0.x, a.z - p0.z) - Math.hypot(b.x - p0.x, b.z - p0.z))
       dbg('shelter: inside the build footprint - stepping out to ' + Math.round(exits[0].x) + ',' + Math.round(exits[0].z) + ' before digging')
       try { await gotoWithTimeout(bot, new goals.GoalNearXZ(exits[0].x, exits[0].z, 2), 20000) } catch (e) { dbg('shelter: footprint exit walk failed (' + e.message + ') - digging where i stand') }
+    }
+    // MY HUT IS THE SHELTER: at the doorstep of the bot's own hut, step INSIDE (door-
+    // assist) instead of digging a pit beside the walls; already inside, just wait the
+    // night out - walls and roof beat any hole in the ground, and pitting here is how
+    // the interior kept getting defaced (dirt piles, floor holes - live, repeatedly).
+    if (!insideOwnStructure(bot)) {
+      const hutNear = onHutApron(bot)
+      if (hutNear) {
+        try {
+          const nav = require('./navigate.js') // lazy - navigate requires provision the same way
+          await nav.navigateTo(bot, new goals.GoalNear(hutNear.x + 2, hutNear.y + 1, hutNear.z + 2, 1), { timeoutMs: 20000, deadlineMs: 45000, isStopped, climb: false, budgets: { door: 2, pit: 0, water: 1, nudge: 1 }, label: 'shelter-home' })
+        } catch (e) { dbg('shelter: could not get inside my hut (' + e.message + ')') }
+      }
+    }
+    if (insideOwnStructure(bot)) {
+      dbg('shelter: inside my own hut - waiting out the night, no digging')
+      say('holed up at home for the night')
+      const dl = Date.now() + 600000
+      const hpIn = bot.health || 20
+      let hurtInside = false
+      while (Date.now() < dl && !isStopped()) {
+        if (!isNight(bot) && !nearHostile(bot, 10)) break
+        if ((bot.health || 20) < hpIn - 3) { dbg('shelter: taking damage INSIDE the hut - falling back to a pit'); hurtInside = true; break }
+        if (inWaterNow(bot)) { dbg('shelter: hut interior flooding - bailing'); hurtInside = true; break }
+        await new Promise(r => setTimeout(r, 3000))
+      }
+      if (!hurtInside) return true
+    }
+    // Near (but not in) the hut with no way inside: dig AWAY from the walls/apron, never
+    // against them - same rule as the build footprint below.
+    if (onHutApron(bot)) {
+      const h = onHutApron(bot)
+      const away = { x: h.x + 12, z: h.z + 12 }
+      dbg('shelter: on my hut apron - stepping clear to ' + away.x + ',' + away.z + ' before digging')
+      try { await gotoWithTimeout(bot, new goals.GoalNearXZ(away.x, away.z, 2), 15000) } catch {}
     }
     // REUSE MY BUNKER: four nights of fresh digs at one spot, each side-sealing against
     // the previous night's holes, ENTOMBED the bot in a hillside (live - needed a rescue
@@ -2735,6 +2796,7 @@ async function placeFromInventory (bot, itemName) {
       for (let dz = -r; dz <= r && !ref; dz++) {
         if (dx === 0 && dz === 0) continue
         for (const dy of [0, -1, 1]) { // slope-tolerant (same rationale as ensureTable's findSpot)
+          if (ownHutAt({ x: b.x + dx, y: b.y + dy, z: b.z + dz })) continue // never clutter the hut interior (3 furnaces on the bedroom floor, live)
           const ground = bot.blockAt(new Vec3(b.x + dx, b.y - 1 + dy, b.z + dz))
           const above = bot.blockAt(new Vec3(b.x + dx, b.y + dy, b.z + dz))
           if (ground && ground.boundingBox === 'block' && above && REPLACEABLE.test(above.name)) { ref = ground; break }
@@ -2808,6 +2870,17 @@ async function ensureFurnaces (bot, n, opts = {}) {
     if (!seen.has(k) && found.length < n) { seen.add(k); found.push(p.clone ? p.clone() : new Vec3(p.x, p.y, p.z)) }
   }
   dbg('  ensureFurnaces want=' + n + ' found=' + found.length + ' furnaceItems=' + countItem(bot, 'furnace'))
+  // SMELT BANK PLACEMENT: extra furnaces are utility clutter - never in the hut. If we're
+  // standing in/at the hut, work from a spot clear of the walls first (live: 3 furnaces
+  // crammed onto the hut floor next to the bed, "nowhere to place - stopping").
+  if (found.length < n && (insideOwnStructure(bot) || onHutApron(bot))) {
+    const h = insideOwnStructure(bot) || onHutApron(bot)
+    dbg('  ensureFurnaces: at my hut - stepping to the utility spot before placing')
+    try {
+      const nav = require('./navigate.js') // door-assist: a plain goto can't route out through the hut door
+      await nav.navigateTo(bot, new goals.GoalNearXZ(h.x + 9, h.z + 9, 2), { timeoutMs: 20000, deadlineMs: 40000, isStopped, climb: false, budgets: { door: 2, pit: 0, water: 1, nudge: 1 }, label: 'utility-spot' })
+    } catch (e) { dbg('  ensureFurnaces: utility-spot walk failed (' + e.message + ') - placing where i can') }
+  }
   let attempts = 0
   while (found.length < n && attempts++ < n * 2 + 2 && !isStopped()) {
     // 1) a furnace ITEM in the pack, crafting one if needed (8 cobble at a table)
@@ -3614,4 +3687,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, furnishHut, hasSolidCeiling, gatherLeather, huntForFood, hasFood, needsFood, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, ensureWheatFarm, tendWheatFarm, fishForFood, ensureHutApron, ensureHutBed, setBuildZone, setDebugSink }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, furnishHut, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, gatherLeather, huntForFood, hasFood, needsFood, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, ensureWheatFarm, tendWheatFarm, fishForFood, ensureHutApron, ensureHutBed, setBuildZone, setDebugSink }
