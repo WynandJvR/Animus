@@ -254,6 +254,24 @@ function gotoTimed (bot, goal, ms = 20000) {
   })
 }
 
+// goto WITH door-assist (operator: "if it placed the door it knows where it is, why can't
+// it use its memory?"): the pathfinder plans a closed door as a solid WALL, so it reports
+// "no path" from inside its own hut. On a failed goto we bridge the two systems - walk to
+// the nearest known door, OPEN it, then retry the plan (now the gap is passable). A module
+// flag stops openNearbyDoor's own gotos from recursing back in here.
+let _inDoorAssist = false
+async function gotoTimedDA (bot, goal, ms = 20000) {
+  try { return await gotoTimed(bot, goal, ms) } catch (e) {
+    if (_inDoorAssist) throw e
+    _inDoorAssist = true
+    let opened = false
+    try { opened = await openNearbyDoor(bot) } catch {} finally { _inDoorAssist = false }
+    if (!opened) throw e
+    dbg('goto: retrying after opening a door')
+    return await gotoTimed(bot, goal, ms)
+  }
+}
+
 // Robust "walk to a player". A single GoalNear gives up the instant no exact path
 // exists (walled off, across water, too far to path in one shot), which reads as the
 // bot "running into a wall and freezing". Instead: try to arrive exactly, but on
@@ -1270,7 +1288,7 @@ async function handle (bot, line) {
           }
           return `no waypoint "${a[0]}" (known: ${memory.waypointNames().join(', ') || 'none'})`
         }
-        try { await gotoTimed(bot, new goals.GoalNear(wp.x, wp.y, wp.z, 1), 20000) } catch (e) { return `couldn't reach ${a[0]}: ${e.message}` }
+        try { await gotoTimedDA(bot, new goals.GoalNear(wp.x, wp.y, wp.z, 1), 20000) } catch (e) { return `couldn't reach ${a[0]}: ${e.message}` }
         // gotoTimed can resolve without actually arriving (pathfinder settles at the
         // closest reachable node) - verify the real distance so we never claim a lie.
         { const dp = bot.entity.position; const dd = Math.hypot(dp.x - wp.x, dp.z - wp.z); if (dd > 3) return `couldn't reach ${a[0]} - blocked ~${Math.round(dd)} blocks short` }
@@ -1286,7 +1304,7 @@ async function handle (bot, line) {
         const r = await travelFar(bot, { x, y, z }, { isStopped: () => buildAbort, say: m => bot.chat(String(m).slice(0, 256)) })
         if (!r.ok) return `couldn't get to ${x},${y},${z}: ${r.reason} (~${Math.round(r.dist)} blocks away)`
       }
-      try { await gotoTimed(bot, new goals.GoalNear(x, y, z, 1), 20000) } catch (e) { return `got near ${x},${y},${z} but couldn't settle: ${e.message}` }
+      try { await gotoTimedDA(bot, new goals.GoalNear(x, y, z, 1), 20000) } catch (e) { return `got near ${x},${y},${z} but couldn't settle: ${e.message}` }
       // Verify we ACTUALLY arrived - gotoTimed can resolve at the closest reachable node
       // (walled off / no path) without reaching the goal; claiming "arrived" then would
       // feed the brain a false success.
