@@ -3124,15 +3124,36 @@ async function migrateChestInto (bot, oldPos, hut, { isStopped = () => false, sa
 // camp's loose infra moves indoors with the bank. Furnace and table get dug up and
 // re-placed inside; the remembered bed is relocated and re-activated (spawn re-set).
 const insideHutBox = (p, hut) => p.x >= hut.x && p.x <= hut.x + 4 && p.z >= hut.z && p.z <= hut.z + 4
+// The doorway = the non-corner rim column whose two wall cells are NOT solid wall
+// (air, or a bed/door mistakenly shoved into it - detection must survive clutter).
+function findHutDoorway (bot, hut) {
+  for (let dx = 0; dx <= 4; dx++) {
+    for (let dz = 0; dz <= 4; dz++) {
+      const onRim = dx === 0 || dx === 4 || dz === 0 || dz === 4
+      const corner = (dx === 0 || dx === 4) && (dz === 0 || dz === 4)
+      if (!onRim || corner) continue
+      const lo = bot.blockAt(new Vec3(hut.x + dx, hut.y + 1, hut.z + dz))
+      const hi = bot.blockAt(new Vec3(hut.x + dx, hut.y + 2, hut.z + dz))
+      if (lo && hi && !/_planks$/.test(lo.name) && !/_planks$/.test(hi.name)) return new Vec3(hut.x + dx, hut.y + 1, hut.z + dz)
+    }
+  }
+  return null
+}
 function hutFreeCells (bot, hut) {
+  const doorway = findHutDoorway(bot, hut)
+  // the interior cell in FRONT of the doorway stays clear - the bed got placed in the
+  // entrance (operator: "it placed its bed inside the door frame")
+  const threshold = doorway ? new Vec3(doorway.x + (doorway.x === hut.x ? 1 : doorway.x === hut.x + 4 ? -1 : 0), doorway.y, doorway.z + (doorway.z === hut.z ? 1 : doorway.z === hut.z + 4 ? -1 : 0)) : null
   const out = []
   for (const [dx, dz] of [[1, 1], [2, 1], [3, 1], [1, 2], [2, 2], [3, 2], [1, 3], [2, 3], [3, 3]]) {
     for (let dy = 0; dy <= 3; dy++) {
       const p = new Vec3(hut.x + dx, hut.y + dy, hut.z + dz)
+      if (threshold && p.x === threshold.x && p.z === threshold.z) break // keep the entrance walkable
       const b = bot.blockAt(p); const below = bot.blockAt(p.offset(0, -1, 0)); const above = bot.blockAt(p.offset(0, 1, 0))
       if (b && AIRISH(b.name) && below && below.boundingBox === 'block' && above && AIRISH(above.name)) { out.push(p); break }
     }
   }
+  if (doorway) out.sort((a, b) => b.distanceTo(doorway) - a.distanceTo(doorway)) // furthest from the entrance first
   return out
 }
 async function furnishHut (bot, hut, { isStopped = () => false, say = () => {} } = {}) {
@@ -3167,6 +3188,25 @@ async function furnishHut (bot, hut, { isStopped = () => false, say = () => {} }
   // BED last and only when it's SAFE: digging the bed clears the spawn point until it's
   // re-placed and used - dying in that window means a world-spawn respawn far away.
   try {
+    // A bed shoved into the doorway/threshold gets RELOCATED (operator: "it placed its
+    // bed inside the door frame") - dig with pickup-verify; the placement below re-sites
+    // it on the doorway-aware cells.
+    const dw = findHutDoorway(bot, hut)
+    if (dw) {
+      const thr = new Vec3(dw.x + (dw.x === hut.x ? 1 : dw.x === hut.x + 4 ? -1 : 0), dw.y, dw.z + (dw.z === hut.z ? 1 : dw.z === hut.z + 4 ? -1 : 0))
+      for (const p of [dw, thr]) {
+        const b = bot.blockAt(p)
+        if (b && /_bed$/.test(b.name)) {
+          dbg('  furnish: bed is blocking the doorway - relocating it')
+          if (bot.entity.position.distanceTo(p) > 4) { try { await gotoWithTimeout(bot, new goals.GoalNear(p.x, p.y, p.z, 2), 20000) } catch {} }
+          try {
+            await bot.dig(b)
+            for (let tries = 0; tries < 4 && !(bot.inventory ? bot.inventory.items() : []).some(i => /_bed$/.test(i.name)); tries++) { await collectDrops(bot, 6); await new Promise(r => setTimeout(r, 500)) }
+          } catch (e) { dbg('  furnish: doorway-bed dig failed (' + e.message + ')') }
+          break
+        }
+      }
+    }
     const kb = knownBed()
     if (kb && !insideHutBox(kb, hut) && Math.hypot(kb.x - hut.x, kb.z - hut.z) <= 150 && (bot.health || 20) >= 12 && !isNight(bot)) {
       await walkStaged(bot, kb.x, kb.z, { isStopped, range: 4, timeoutMs: 120000 })
@@ -3217,18 +3257,12 @@ async function furnishHut (bot, hut, { isStopped = () => false, say = () => {} }
       }
     }
     if (!hasDoor) {
-      let doorway = null
-      for (let dx = 0; dx <= 4 && !doorway; dx++) {
-        for (let dz = 0; dz <= 4 && !doorway; dz++) {
-          const onRim = dx === 0 || dx === 4 || dz === 0 || dz === 4
-          const corner = (dx === 0 || dx === 4) && (dz === 0 || dz === 4)
-          if (!onRim || corner) continue
-          const lo = bot.blockAt(new Vec3(hut.x + dx, hut.y + 1, hut.z + dz))
-          const hi = bot.blockAt(new Vec3(hut.x + dx, hut.y + 2, hut.z + dz))
-          const floor = bot.blockAt(new Vec3(hut.x + dx, hut.y, hut.z + dz))
-          if (lo && AIRISH(lo.name) && hi && AIRISH(hi.name) && floor && floor.boundingBox === 'block') doorway = new Vec3(hut.x + dx, hut.y + 1, hut.z + dz)
-        }
-      }
+      const doorway = (() => {
+        const d = findHutDoorway(bot, hut)
+        if (!d) return null
+        const lo = bot.blockAt(d); const hi = bot.blockAt(d.offset(0, 1, 0)); const floor = bot.blockAt(d.offset(0, -1, 0))
+        return (lo && AIRISH(lo.name) && hi && AIRISH(hi.name) && floor && floor.boundingBox === 'block') ? d : null
+      })()
       if (doorway) {
         let door = (bot.inventory ? bot.inventory.items() : []).find(i => /_door$/.test(i.name))
         if (!door) { try { await runCraft(bot, 'oak_door', 1, true, { isStopped, home: { x: hut.x, y: hut.y, z: hut.z } }) } catch (e) { dbg('  furnish: cannot craft a door (' + e.message + ')') } }
