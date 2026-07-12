@@ -771,6 +771,13 @@ async function pillarUpTo (bot, targetY, opts = {}) {
         equippedFiller = null // we swapped to a tool
       }
     }
+    // The FEET cell must be empty to receive the placed block: a sapling/bush standing in
+    // it silently blocks EVERY placement - the bot jump-placed on its own orchard sapling
+    // forever (operator watched it live). Soft vegetation only; anything solid we ride.
+    const inFeet = bot.blockAt(feet)
+    if (inFeet && !AIRISH(inFeet.name) && /sapling|_propagule$|grass|fern|flower|dead_bush|snow|vine/.test(inFeet.name)) {
+      try { await bot.dig(inFeet); await new Promise(r => setTimeout(r, 150)) } catch {}
+    }
     const filler = (bot.inventory ? bot.inventory.items() : []).find(i => FILLER_RE.test(i.name))
     if (!filler) { bot.clearControlStates(); return } // nothing to pillar with
     if (equippedFiller !== filler.name) { await bot.equip(filler, 'hand').catch(() => {}); equippedFiller = filler.name }
