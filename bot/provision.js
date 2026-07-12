@@ -121,13 +121,27 @@ async function walkStaged (bot, tx, tz, opts = {}) {
           // SURFACE wedge (open sky): climbToSurface no-ops here - the pathfinder just
           // can't solve a step it should walk (pinned at its own orchard cell, live).
           // Take the controls: face the leg target, jump+sprint straight at it.
-          dbg('walkStaged: stalled on the SURFACE at ' + Math.round(np.x) + ',' + Math.round(np.z) + ' - manual nudge toward ' + Math.round(lx) + ',' + Math.round(lz))
-          try {
-            bot.pathfinder.setGoal(null)
-            await bot.lookAt(new Vec3(lx, bot.entity.position.y + 1, lz), true)
-            bot.setControlState('jump', true); bot.setControlState('forward', true); bot.setControlState('sprint', true)
-            await new Promise(r => setTimeout(r, 2000))
-          } catch {} finally { bot.clearControlStates() }
+          // FLOOR CHECK before leaping: a blind sprint-jump launched the bot off an edge
+          // into a shaft to bedrock (died at y=1, live). Probe 2-4 blocks ahead along the
+          // nudge line - if there's a 4+ deep drop, don't jump that way this cycle.
+          const fdx = (lx - np.x); const fdz = (lz - np.z); const fn = Math.hypot(fdx, fdz) || 1
+          let cliff = false
+          for (const dist of [2, 3, 4]) {
+            const cx = Math.floor(np.x + (fdx / fn) * dist); const cz = Math.floor(np.z + (fdz / fn) * dist)
+            let solid = false
+            for (let dy = -1; dy >= -4; dy--) { const b = bot.blockAt(new Vec3(cx, Math.floor(np.y) + dy, cz)); if (b && b.boundingBox === 'block') { solid = true; break } }
+            if (!solid) { cliff = true; break }
+          }
+          if (cliff) { dbg('walkStaged: nudge line has a DROP ahead - not jumping blind'); stalls = Math.max(stalls, 4) /* skip to give-up sooner */ }
+          else {
+            dbg('walkStaged: stalled on the SURFACE at ' + Math.round(np.x) + ',' + Math.round(np.z) + ' - manual nudge toward ' + Math.round(lx) + ',' + Math.round(lz))
+            try {
+              bot.pathfinder.setGoal(null)
+              await bot.lookAt(new Vec3(lx, bot.entity.position.y + 1, lz), true)
+              bot.setControlState('jump', true); bot.setControlState('forward', true); bot.setControlState('sprint', true)
+              await new Promise(r => setTimeout(r, 2000))
+            } catch {} finally { bot.clearControlStates() }
+          }
         }
         const now2 = bot.entity.position
         if (Math.floor(now2.y) > Math.floor(np.y) || Math.hypot(now2.x - np.x, now2.z - np.z) >= 2) { stalls = 0; continue } // freed - retry the legs
