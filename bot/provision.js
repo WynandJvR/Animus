@@ -1628,9 +1628,63 @@ function clearSearched (item, pos) {
 // dusk 150 blocks out it "had no bed" and dug a pit instead (7 night deaths in one
 // evening, live). Remember the bed like a player does: saved on every successful
 // sleep/spawn-set, consulted first every night.
-function rememberBed (pos) { const m = loadWorldMem(); m.bed = { x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z), at: Date.now() }; saveWorldMem() }
+// Every rememberBed call site follows an actual spawn-setting action (a sleep or a
+// day bed-use), so it doubles as the "spawn last asserted" timestamp ensureSpawnBed
+// keys off.
+function rememberBed (pos) { const m = loadWorldMem(); m.bed = { x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z), at: Date.now() }; m.bedAssertAt = Date.now(); saveWorldMem() }
 function knownBed () { return loadWorldMem().bed || null }
 function forgetBed () { const m = loadWorldMem(); delete m.bed; saveWorldMem() }
+
+// SPAWN GUARANTEE: make sure the respawn anchor really is the (hut) bed. USE the bed -
+// sets the spawn even at day - whenever we're near it and haven't asserted it recently
+// (opts.force skips the freshness check; a respawn far from the remembered bed means the
+// server spawn is WRONG - bed broken/obstructed/moved - and every death becomes a world-
+// spawn carousel until this runs). If the remembered bed is gone, scan close (rebuilds
+// shift it a cell), else lay a fresh one in the hut. Bounded, honest return.
+async function ensureSpawnBed (bot, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  if (!bot.entity) return false
+  const m = loadWorldMem()
+  const bed = knownBed()
+  if (!bed) {
+    // no bed memory at all - the hut path is the only play
+    const hut = listInfra('hut')[0]
+    if (!hut) return false
+    const r = await ensureHutBed(bot, new Vec3(hut.x, hut.y, hut.z), opts).catch(() => 'fail')
+    return r === 'present' || r === 'placed'
+  }
+  if (!opts.force && m.bedAssertAt && Date.now() - m.bedAssertAt < 3600 * 1000) return true // asserted within the hour
+  const d = Math.hypot(bed.x - bot.entity.position.x, bed.z - bot.entity.position.z)
+  if (d > (opts.maxTrek != null ? opts.maxTrek : 120)) { dbg('spawn: bed too far to assert from here (' + Math.round(d) + 'b)'); return false }
+  if (d > 6) { try { await walkStaged(bot, bed.x, bed.z, { isStopped, range: 4, timeoutMs: 120000 }) } catch {} }
+  let bb = bot.blockAt(new Vec3(bed.x, bed.y, bed.z))
+  if (!bb || !/_bed$/.test(bb.name)) {
+    const md = require('minecraft-data')(bot.version)
+    const ids = Object.values(md.blocksByName).filter(b => /_bed$/.test(b.name)).map(b => b.id)
+    const near = bot.findBlock({ matching: ids, maxDistance: 12 })
+    if (near) { bb = near; dbg('spawn: remembered bed shifted - found one at ' + near.position.toString()) }
+    else {
+      dbg('spawn: remembered bed is GONE - laying a new one')
+      forgetBed()
+      const hut = listInfra('hut')[0]
+      if (hut) { const r = await ensureHutBed(bot, new Vec3(hut.x, hut.y, hut.z), opts).catch(() => 'fail'); return r === 'present' || r === 'placed' }
+      return false
+    }
+  }
+  if (bot.entity.position.distanceTo(bb.position) > 2.5) {
+    try {
+      const nav = require('./navigate.js') // door-assist: the bed lives indoors
+      await nav.navigateTo(bot, new goals.GoalNear(bb.position.x, bb.position.y, bb.position.z, 2), { timeoutMs: 20000, deadlineMs: 45000, isStopped, climb: false, budgets: { door: 2, pit: 1, water: 1, nudge: 1 }, label: 'spawn-bed' })
+    } catch (e) { dbg('spawn: cannot reach the bed (' + e.message + ')'); return false }
+  }
+  try {
+    if (isNight(bot)) { if (await sleepInBedHere(bot, opts)) return true } // a real sleep sets it
+    await bot.activateBlock(bb) // day: right-clicking the bed sets the respawn point
+    rememberBed(bb.position)
+    dbg('spawn: asserted at the bed ' + bb.position.toString())
+    return true
+  } catch (e) { dbg('spawn: bed use failed (' + e.message + ')'); return false }
+}
 
 // Sleep in the remembered bed if we're standing near it. Returns true only if we actually
 // slept through to daylight (or the night got skipped) - anything else falls back to the pit.
@@ -3879,4 +3933,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, furnishHut, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, gatherLeather, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, ensureWheatFarm, tendWheatFarm, fishForFood, ensureHutApron, ensureHutBed, setBuildZone, setDebugSink }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, furnishHut, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, gatherLeather, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, ensureSpawnBed, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, ensureWheatFarm, tendWheatFarm, fishForFood, ensureHutApron, ensureHutBed, setBuildZone, setDebugSink }

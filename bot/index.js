@@ -530,6 +530,18 @@ bot.on('spawn', () => {
       provision.rememberBed(here)
       note(`(respawn) bed memory was empty - re-learned my bed at ${Math.round(here.x)},${Math.round(here.y)},${Math.round(here.z)}`)
     }
+    // SPAWN-WRONGNESS DETECTOR: respawning far from the remembered bed means the server-
+    // side anchor is LOST (bed broken/obstructed/moved without a re-assert) - the world-
+    // spawn death-carousel failure (live crisis, ~11:30Z). Flag it; the resume flow
+    // force-re-asserts the hut bed the moment the bot is back home.
+    const kb = provision.knownBed && provision.knownBed()
+    if (kb && here) {
+      const d = Math.hypot(here.x - kb.x, here.z - kb.z)
+      if (d > 24) {
+        note(`(respawn) landed ${Math.round(d)}b from my bed at ${kb.x},${kb.z} - spawn anchor is WRONG, re-asserting when home`)
+        commands.flagSpawnSuspect && commands.flagSpawnSuspect()
+      }
+    }
   } catch {}
   setTimeout(async () => { // let the world/chunks settle first
     try {

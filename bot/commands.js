@@ -115,6 +115,8 @@ function unretrievedGraves () { return deathLedger.filter(d => !d.retrieved && !
 let resumeJob = null       // { schem, at }
 let buildInterrupted = false
 let resumeDeaths = 0 // consecutive deaths since the resume job was set / bot last reached the site
+let spawnSuspect = false // a respawn landed far from the remembered bed - the server spawn anchor is WRONG
+function flagSpawnSuspect () { spawnSuspect = true }
 let buildProgress = null // REAL build progress for /state - the brain must answer from this, not vibes
 const RESUME_MAX_DEATHS = parseInt(process.env.RESUME_MAX_DEATHS || '4', 10)
 
@@ -2368,6 +2370,9 @@ async function autoBuild (bot, schem, at, opts = {}) {
         // decoupled from the rebuild. Idempotent: a filled apron / placed bed is a fast no-op.
         try { await provision.ensureHutApron(bot, hutAt, { isStopped, say }) } catch (e) { dbg('camp: apron fill failed (' + e.message + ')') }
         try { const bs = await provision.ensureHutBed(bot, hutAt, { isStopped, say }); dbg('camp: hut bed -> ' + bs) } catch (e) { dbg('camp: hut bed failed (' + e.message + ')') }
+        // SPAWN re-assert (hourly no-op): a bed standing in the hut is worthless if the
+        // server anchor drifted - use it again so every death keeps coming home.
+        try { await provision.ensureSpawnBed(bot, { isStopped, say }) } catch (e) { dbg('camp: spawn assert failed (' + e.message + ')') }
         // INTERIOR SWEEP (liveability, every pass): utility blocks that wandered onto the
         // hut floor get dug and pocketed - ensureFurnaces once parked 2 spare furnaces
         // beside the bed ("nowhere to place - stopping at 3"). Bot-built hut = its own
@@ -2689,6 +2694,15 @@ async function resumeBuild (bot) {
       return (result = { stopped: true, placed: 0, total: 0 })
     }
     resumeDeaths = 0; dbg('resume: back at the site - death counter reset')
+    // SPAWN GUARANTEE: while we're home, make sure the respawn anchor really is the hut
+    // bed. Forced when the last respawn landed far from it (server anchor lost - bed
+    // broken/obstructed/moved) - the fix for the world-spawn death carousel: without
+    // this every future death respawns at 0,0 naked and the job never converges.
+    try {
+      const ok = await provision.ensureSpawnBed(bot, { isStopped: () => buildAbort, say, force: spawnSuspect })
+      if (ok) spawnSuspect = false
+      dbg('resume: spawn bed ' + (ok ? 'asserted' : 'NOT asserted (no bed reachable)'))
+    } catch (e) { dbg('resume: spawn assert failed (' + e.message + ')') }
     result = await autoBuild(bot, job.schem, job.at, {
       // FLATTEN THE FOOTPRINT (operator: "if there's a mountain in the way, build inside
       // it? flatten and make even terrain with dirt first"): empty the build box of any
@@ -2711,4 +2725,4 @@ async function resumeBuild (bot) {
   }
 }
 
-module.exports = { handle, state, setupMovements, eatFood, placeTorchNearby, isBusy, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume, setDebugSink }
+module.exports = { handle, state, setupMovements, eatFood, placeTorchNearby, isBusy, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume, flagSpawnSuspect, setDebugSink }
