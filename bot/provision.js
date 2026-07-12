@@ -3241,6 +3241,7 @@ async function furnishHut (bot, hut, { isStopped = () => false, say = () => {} }
           try {
             await bot.dig(b)
             for (let tries = 0; tries < 4 && !(bot.inventory ? bot.inventory.items() : []).some(i => /_bed$/.test(i.name)); tries++) { await collectDrops(bot, 6); await new Promise(r => setTimeout(r, 500)) }
+            if ((bot.inventory ? bot.inventory.items() : []).some(i => /_bed$/.test(i.name))) forgetBed() // memory points at the dug spot
           } catch (e) { dbg('  furnish: doorway-bed dig failed (' + e.message + ')') }
           break
         }
@@ -3267,19 +3268,25 @@ async function furnishHut (bot, hut, { isStopped = () => false, say = () => {} }
     const bedItem = (bot.inventory ? bot.inventory.items() : []).find(i => /_bed$/.test(i.name))
     if (bedItem) {
       await walkStaged(bot, hut.x + 2, hut.z + 2, { isStopped, range: 4, timeoutMs: 120000 })
+      // try up to 3 candidate pairs, VERIFYING the bed actually stands each time - a
+      // phantom-swallowed placeBlock left the bed silently in the pack (live, no log line)
       const cells = hutFreeCells(bot, hut)
-      let foot = null; let head = null
-      for (const c of cells) { const n = cells.find(o => o.y === c.y && Math.abs(o.x - c.x) + Math.abs(o.z - c.z) === 1); if (n) { foot = c; head = n; break } }
-      if (!foot) { dbg('  furnish: no 2-cell space for the bed') } else {
+      let placedBed = false
+      for (let attempt = 0; attempt < 3 && !placedBed && !isStopped(); attempt++) {
+        let foot = null; let head = null
+        for (const c of cells.slice(attempt)) { const n = cells.find(o => o.y === c.y && Math.abs(o.x - c.x) + Math.abs(o.z - c.z) === 1); if (n) { foot = c; head = n; break } }
+        if (!foot) { dbg('  furnish: no 2-cell space for the bed'); break }
+        if (bot.entity.position.distanceTo(foot) > 3) { try { await gotoWithTimeout(bot, new goals.GoalNear(foot.x, foot.y, foot.z, 2), 15000) } catch {} }
         const below = bot.blockAt(foot.offset(0, -1, 0))
         await bot.equip(bedItem, 'hand')
         try { await bot.lookAt(head.offset(0.5, 0.5, 0.5), true) } catch {}
         try { await bot.placeBlock(below, new Vec3(0, 1, 0)) } catch (e) { dbg('  furnish: bed place failed (' + e.message + ')') }
+        await new Promise(r => setTimeout(r, 400))
         const nb = bot.blockAt(foot)
         if (nb && /_bed$/.test(nb.name)) {
           try { await bot.activateBlock(nb) } catch {} // day = sets spawn; night = sleeps
-          rememberBed(foot); moved.push('bed')
-        }
+          rememberBed(foot); moved.push('bed'); placedBed = true
+        } else dbg('  furnish: bed did not land at ' + foot.toString() + ' - trying another spot')
       }
     }
   } catch (e) { dbg('  furnish: bed move failed (' + e.message + ')') }
