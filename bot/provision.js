@@ -1654,6 +1654,8 @@ async function cleanupScaffold (bot, around, { isStopped = () => false } = {}) {
     if (bot.entity.position.distanceTo(b.position) > 4.5) {
       try { await gotoWithTimeout(bot, new goals.GoalNear(p.x, p.y, p.z, 3), 8000) } catch { continue }
     }
+    const tool = toolForBlock(bot, b.name) // cobble dug bare/wrong-tool drops NOTHING (live: hoe-dug scaffold vanished)
+    if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
     try { await bot.dig(b); removed++; await new Promise(r => setTimeout(r, 150)) } catch {}
   }
   if (removed) { await collectDrops(bot, 6); dbg('  tore down ' + removed + ' scaffold blocks (dirt pocketed)') }
@@ -1804,6 +1806,8 @@ async function prepOrchardCell (bot, cx, baseY, cz, { isStopped = () => false } 
   let guard = 3
   while (ground.position.y > baseY && guard-- > 0 && !isStopped()) {
     if (!canBreakNaturally(ground) || (bot.canDigBlock && !bot.canDigBlock(ground))) break
+    const tool = toolForBlock(bot, ground.name) // stone shaved wrong-tool drops nothing
+    if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
     try { await bot.dig(ground); await collectDrops(bot, 3) } catch { break }
     const nb = bot.blockAt(new Vec3(cx, ground.position.y - 1, cz))
     if (!nb || nb.boundingBox !== 'block') break
@@ -1844,6 +1848,8 @@ async function levelPlotCell (bot, cx, baseY, cz, { isStopped = () => false } = 
   let guard = 2
   while (ground.position.y > baseY && guard-- > 0 && !isStopped()) { // shave bump
     if (!canBreakNaturally(ground) || (bot.canDigBlock && !bot.canDigBlock(ground))) break
+    const tool = toolForBlock(bot, ground.name) // stone shaved wrong-tool drops nothing
+    if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
     try { await bot.dig(ground); await collectDrops(bot, 3) } catch { break }
     const nb = bot.blockAt(new Vec3(cx, ground.position.y - 1, cz))
     if (!nb || nb.boundingBox !== 'block') break
