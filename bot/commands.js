@@ -2342,6 +2342,33 @@ async function autoBuild (bot, schem, at, opts = {}) {
       const torch = (bot.inventory ? bot.inventory.items() : []).find(i => i.name === 'torch')
       if (torch && placeTorchNearby) { await placeTorchNearby(bot).catch(() => {}) }
     } catch {}
+    // SAFEHOUSE HUT (operator order): 500+ builds get a real building - a 5x4x5 plank
+    // shell (71 planks, ONE gather trip, zero smelting; operator: "simple so it can
+    // build it fast") next to the bed, so the bed/chest/furnace stop living in the open.
+    try {
+      const hutKnown = (provision.listInfra ? provision.listInfra('hut') : []).find(e => Math.hypot(e.x - at.x, e.z - at.z) <= 150)
+      if (!hutKnown && process.env.SITE_HUT !== '0') {
+        const kb = provision.knownBed && provision.knownBed()
+        const hx = kb ? kb.x + 3 : Math.round(at.x) - 16
+        const hz = kb ? kb.z - 2 : Math.round(at.z)
+        const hy = kb ? kb.y - 1 : Math.floor(at.y)
+        const hutSchem = await schematic.loadFile('hut.schem', bot.version)
+        const hutBom = schematic.billOfMaterials(hutSchem).counts
+        const hplan = provision.planProvision(mcData, hutBom, provision.inventoryCounts(bot), { primaryWood })
+        if (Object.keys(hplan.unobtainable || {}).length) dbg('camp: hut unobtainable ' + JSON.stringify(hplan.unobtainable))
+        else {
+          say('putting up my safehouse hut by the bed')
+          if (hplan.tasks.length) await provision.runPlan(bot, hplan, { say, isStopped, restoreMovements: restore, homeY: hy, home: { x: hx, y: hy, z: hz }, avoid })
+          const hr = await schematic.buildSurvival(bot, hutSchem, new Vec3(hx, hy, hz), { say, isStopped, restoreMovements: restore })
+          dbg('camp: hut built ' + (hr && hr.placed) + '/' + (hr && hr.total))
+          if (hr && hr.placed >= 50) {
+            provision.rememberInfra && provision.rememberInfra('hut', new Vec3(hx, hy, hz))
+            try { await handle(bot, 'remember hut') } catch {}
+            say('safehouse standing - bed, chest and furnace get walls now')
+          }
+        }
+      }
+    } catch (e) { dbg('camp: hut failed (' + e.message + ') - continuing') }
     // WHEAT FARM (operator order): renewable food at the camp - the region can run dry
     // of animals and the bot starved to death working. Water-edge plot, best-effort.
     try { const ok = await provision.ensureWheatFarm(bot, { x: at.x, z: at.z }, { isStopped, say, avoid }); dbg('camp: wheat farm -> ' + ok) } catch (e) { dbg('camp: wheat farm failed (' + e.message + ')') }
