@@ -1566,15 +1566,28 @@ async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () =
       if (ringSeen.has(k) || inAvoidBox(avoid, gp.x, gp.z)) continue
       ringSeen.add(k)
       const g = bot.blockAt(gp); const above = bot.blockAt(gp.offset(0, 1, 0))
-      if (g && /^(grass_block|dirt)$/.test(g.name) && above && REPLACEABLE.test(above.name)) ring.push(g)
+      // sand banks welcome too - most ponds here have them, and requiring grass/dirt made
+      // the ring EMPTY and the farm fail in 1ms every camp pass (live, all morning). Sand
+      // can't be tilled, so those cells get swapped for a carried dirt block below.
+      if (g && /^(grass_block|dirt|sand|red_sand)$/.test(g.name) && above && REPLACEABLE.test(above.name)) ring.push(g)
     }
   }
-  for (const cell of ring.slice(0, 12)) {
+  dbg('  wheat farm: ' + ring.length + ' bank cell(s) by the water at ' + w.x + ',' + w.z)
+  for (let cell of ring.slice(0, 12)) {
     if (isStopped() || seedCount() < 1) break
     try {
       if (bot.entity.position.distanceTo(cell.position) > 4) await gotoWithTimeout(bot, new goals.GoalNear(cell.position.x, cell.position.y, cell.position.z, 2), 12000)
       const veg = bot.blockAt(cell.position.offset(0, 1, 0))
       if (veg && !AIRISH(veg.name)) { try { await bot.dig(veg) } catch {} }
+      if (/sand/.test(cell.name)) { // SAND-BANK SWAP: dig the sand, lay owned dirt, till that
+        const dirtItem = (bot.inventory ? bot.inventory.items() : []).find(i => /^dirt$/.test(i.name))
+        if (!dirtItem) continue
+        try { await bot.dig(cell) } catch { continue }
+        if (!await placeAt(bot, cell.position, /^dirt$/)) { dbg('  wheat farm: dirt swap failed at ' + cell.position.toString()); continue }
+        const swapped = bot.blockAt(cell.position)
+        if (!swapped || !/^(dirt|grass_block)$/.test(swapped.name)) continue
+        cell = swapped
+      }
       await bot.equip((bot.inventory ? bot.inventory.items() : []).find(i => /_hoe$/.test(i.name)), 'hand')
       await bot.activateBlock(cell) // till to farmland
       await new Promise(r => setTimeout(r, 150))
