@@ -2446,7 +2446,7 @@ async function autoBuild (bot, schem, at, opts = {}) {
           const b = bot.blockAt(new Vec3(hutE.x + dx, hutE.y + dy, hutE.z + dz)); if (b && /chest$/.test(b.name)) insideChests++
         }
         const insideHut = c => c.x >= hutE.x && c.x <= hutE.x + 4 && c.z >= hutE.z && c.z <= hutE.z + 4
-        const exposed = insideChests < 2 ? (provision.listInfra('chest') || []).find(c => Math.hypot(c.x - at.x, c.z - at.z) <= 60 && !insideHut(c)) : null
+        const exposed = insideChests < 2 ? (provision.listInfra('chest', bot) || []).find(c => Math.hypot(c.x - at.x, c.z - at.z) <= 60 && !insideHut(c)) : null
         if (exposed) {
           const oldBlk = bot.blockAt(new Vec3(exposed.x, exposed.y, exposed.z))
           if (oldBlk && /chest/.test(oldBlk.name)) {
@@ -2516,7 +2516,7 @@ async function autoBuild (bot, schem, at, opts = {}) {
     // materials landed in chest B while the loop counted only (empty) chest C, and 80
     // banked oak read as 0/346 (live). Dedupes, verifies each block, walks to open.
     let c = provision.inventoryCounts(bot)[name] || 0
-    const spots = (provision.listInfra ? provision.listInfra('chest') : []).filter(e => Math.hypot(e.x - home.x, e.z - home.z) <= 32)
+    const spots = (provision.listInfra ? provision.listInfra('chest', bot) : []).filter(e => Math.hypot(e.x - home.x, e.z - home.z) <= 32)
     if (chest && chestBlk()) spots.push({ x: chest.position.x, y: chest.position.y, z: chest.position.z })
     const seen = new Set()
     for (const e of spots) {

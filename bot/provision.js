@@ -1412,7 +1412,33 @@ function forgetInfra (kind, entry) {
   const list = (loadWorldMem().infra || {})[kind] || []
   const i = list.indexOf(entry); if (i >= 0) { list.splice(i, 1); saveWorldMem() }
 }
-function listInfra (kind) { return (((loadWorldMem().infra || {})[kind]) || []).slice() }
+// What block each infra kind IS in the world - lets memory be VERIFIED against reality
+// (operator: "fix the memory completely so it applies to everything it needs memory for").
+// Remembering a coordinate is worthless if the bot never checks the block is still there.
+const INFRA_BLOCK = { table: /crafting_table$/, furnace: /furnace$/, chest: /chest$/, bed: /_bed$/ }
+// List remembered infra of a kind. Pass `bot` to VERIFY against the world: any entry whose
+// chunk is loaded but no longer holds the expected block is pruned (dead placement, someone
+// broke it, a bad memory). Unloaded chunks (blockAt null) are kept - we can't disprove them.
+function listInfra (kind, bot) {
+  const list = (((loadWorldMem().infra || {})[kind]) || []).slice()
+  const re = INFRA_BLOCK[kind]
+  if (!bot || !re) return list
+  const survivors = []; let changed = false
+  for (const e of list) {
+    const b = bot.blockAt(new Vec3(e.x, e.y, e.z))
+    if (b == null) { survivors.push(e); continue } // chunk not loaded - can't verify, keep
+    if (re.test(b.name)) survivors.push(e); else changed = true // gone/wrong -> prune
+  }
+  if (changed) { const m = loadWorldMem(); if (m.infra) { m.infra[kind] = survivors; saveWorldMem() } }
+  return survivors
+}
+// Recall the nearest remembered infra of a kind, VERIFIED against the world when `bot` given.
+function recallInfraVerified (bot, kind, pos, maxDist) {
+  const list = listInfra(kind, bot)
+  let best = null; let bd = Infinity
+  for (const e of list) { const d = Math.hypot(e.x - pos.x, e.z - pos.z); if (d <= maxDist && d < bd) { bd = d; best = e } }
+  return best
+}
 // Walk to REMEMBERED ones (up to 3 nearest) and verify each still stands; forget the dead.
 // Trying only the single nearest made one stale entry cause a brand-new placement while a
 // perfectly good chest stood 9 blocks further (live: three chests at one site).
@@ -2969,7 +2995,7 @@ async function cookRawMeat (bot, opts = {}) {
   if (!blk) {
     // the camp furnace lives in the hut now - worth a short walk (operator: "now that
     // it has a furnace why is it eating raw food?"); cooked feeds ~3x raw.
-    const known = recallInfra('furnace', bot.entity.position, 32)
+    const known = recallInfraVerified(bot, 'furnace', bot.entity.position, 32)
     if (known) {
       try { await gotoWithTimeout(bot, new goals.GoalNear(known.x, known.y, known.z, 2), 30000) } catch {}
       blk = bot.findBlock({ matching: furnaceId, maxDistance: 6 })
@@ -3323,7 +3349,7 @@ async function furnishHut (bot, hut, { isStopped = () => false, say = () => {} }
   } catch (e) { dbg('  furnish: dedupe pass failed (' + e.message + ')') }
   const grab = async (kind, nameRe) => { // dig a remembered outdoor one and pocket it
     if (furnitureInHut(bot, hut, nameRe)) return false // already have one inside - don't fetch another
-    const e = listInfra(kind).find(x => Math.hypot(x.x - hut.x, x.z - hut.z) <= 60 && !insideHutBox(x, hut))
+    const e = listInfra(kind, bot).find(x => Math.hypot(x.x - hut.x, x.z - hut.z) <= 60 && !insideHutBox(x, hut))
     if (!e) return false
     const blk = bot.blockAt(new Vec3(e.x, e.y, e.z))
     if (!blk || !nameRe.test(blk.name)) { forgetInfra(kind, listInfra(kind).find(x => x.x === e.x && x.y === e.y && x.z === e.z)); return false }
