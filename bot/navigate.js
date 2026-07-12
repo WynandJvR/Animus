@@ -326,6 +326,20 @@ async function openNearbyDoor (bot, opts = {}) {
         // standable column but the opposite one is, the side pick was wrong - flip it.
         if (!walkable(base.offset(dx * sign * 2, 0, dz * sign * 2)) && walkable(base.offset(-dx * sign * 2, 0, -dz * sign * 2))) { sign = -sign; how += ' FLIPPED (chosen side blocked)' }
         dbg('door-assist: exit side ' + (dx ? (sign > 0 ? 'east' : 'west') : (sign > 0 ? 'south' : 'north')) + how)
+        // CRATERED DOORSTEP: if a threshold cell of MY OWN hut door is unwalkable (a
+        // creeper blast ate the apron, live: every crossing dropped into a 2-deep pit
+        // at (416,64,84) and wedged under the sill), heal it with carried filler FIRST -
+        // the same dirt-first idempotent sealer the camp pass runs (ensureHutApron).
+        // Own hut only (ownHutAt gates it): never place a block on someone else's build.
+        try {
+          if (!walkable(base.offset(dx * sign, 0, dz * sign)) || !walkable(base.offset(-dx * sign, 0, -dz * sign))) {
+            const anchor = prov().ownHutAt && prov().ownHutAt(base)
+            if (anchor && prov().ensureHutApron) {
+              const n = await prov().ensureHutApron(bot, anchor, { isStopped: opts.isStopped })
+              dbg('door-assist: doorstep unwalkable - apron heal filled ' + (n || 0) + ' cell(s)')
+            }
+          }
+        } catch (e3) { dbg('door-assist: apron heal failed (' + e3.message + ')') }
         // Align on the inside cell in front of the door (pathfinder CAN reach that).
         try { await gotoOnce(bot, new goals.GoalBlock(base.x - dx * sign, base.y, base.z - dz * sign), 8000) } catch (e2) { dbg('door-assist: could not align (' + e2.message + ')') }
         // FORCE-WALK through on manual controls. Thread the doorway CENTER-TO-CENTER -
