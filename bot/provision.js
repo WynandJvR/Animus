@@ -321,6 +321,12 @@ function recipeNeedsTable (recipe) {
 // finals. Returns { tasks, gathers, crafts, smelts, strips, tools, unobtainable, needsTable }.
 function planProvision (mcData, bom, inventory = {}, opts = {}) {
   const avail = { ...inventory }
+  // Track the portion of consumption satisfied by the CALLER'S inventory (vs craft
+  // surplus credited back to avail mid-plan). When the inventory passed in is total
+  // holdings (pack + chests), `used` is exactly what must be in the PACK before the
+  // plan runs - i.e. what the resource model has to withdraw from the bank first.
+  const stockLeft = { ...inventory }
+  const used = {}
   const gathers = {}            // item -> count
   const craftReq = {}           // item -> {crafts, perCraft, needsTable}
   const craftOrder = []         // craft item names, dependency order (leaf-first)
@@ -344,9 +350,11 @@ function planProvision (mcData, bom, inventory = {}, opts = {}) {
 
   function take (name, count) {
     const have = avail[name] || 0
-    const used = Math.min(have, count)
-    avail[name] = have - used
-    return count - used
+    const taken = Math.min(have, count)
+    avail[name] = have - taken
+    const fromStock = Math.min(taken, stockLeft[name] || 0)
+    if (fromStock > 0) { stockLeft[name] = stockLeft[name] - fromStock; used[name] = (used[name] || 0) + fromStock }
+    return count - taken
   }
   function addGather (name, count) { gathers[name] = (gathers[name] || 0) + count }
   function ensureTool (tool, stack) {
@@ -457,6 +465,7 @@ function planProvision (mcData, bom, inventory = {}, opts = {}) {
       // UNWORN ones the caller vouches for (opts.freshPickaxes), else every re-plan round
       // crafts 2 more picks and the pack fills with them (verified live: 11 picks).
       avail.wooden_pickaxe = opts.freshPickaxes || 0
+      stockLeft.wooden_pickaxe = Math.min(stockLeft.wooden_pickaxe || 0, opts.freshPickaxes || 0)
       const planned = craftReq.wooden_pickaxe ? craftReq.wooden_pickaxe.crafts : 0
       if (want > planned) need('wooden_pickaxe', want - planned, [])
     }
@@ -487,7 +496,7 @@ function planProvision (mcData, bom, inventory = {}, opts = {}) {
     ...strips.map(s => ({ type: 'strip', ...s })),
     ...finals.map(C)
   ]
-  return { tasks, gathers, crafts: craftReq, smelts, strips, tools: [...toolsNeeded], unobtainable, needsTable }
+  return { tasks, gathers, crafts: craftReq, smelts, strips, tools: [...toolsNeeded], unobtainable, needsTable, used }
 }
 
 // Current inventory as {itemName: count}.

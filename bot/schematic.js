@@ -338,7 +338,7 @@ async function waitForMaterial (bot, name, { say, isStopped, fetch, deadlineMs =
   if (haveItem(bot, name)) return true
   // Try our own stash (chest) first, so a self-provisioned build never begs.
   if (fetch) {
-    try { await fetch(name) } catch { /* chest gone / empty - fall through to asking */ }
+    try { await fetch(name, needed) } catch { /* chest gone / empty - fall through to asking */ }
     if (haveItem(bot, name)) return true
   }
   const start = Date.now()
@@ -347,7 +347,7 @@ async function waitForMaterial (bot, name, { say, isStopped, fetch, deadlineMs =
     if (isStopped && isStopped()) return false
     if (haveItem(bot, name)) return true
     // retry the stash occasionally too (more may have been produced/stored)
-    if (fetch) { try { await fetch(name) } catch {} ; if (haveItem(bot, name)) return true }
+    if (fetch) { try { await fetch(name, needed) } catch {} ; if (haveItem(bot, name)) return true }
     if (Date.now() - start > deadlineMs) return null // gave up - skip this material and move on
     const now = Date.now()
     if (say && now - last > 15000) {

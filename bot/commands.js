@@ -12,6 +12,7 @@ const { Vec3 } = require('vec3')
 const memory = require('./memory.js') // persistent named waypoints
 const schematic = require('./schematic.js') // download/parse + survival physical building
 const provision = require('./provision.js') // BOM -> gather/craft plan + execution
+const resources = require('./resources.js') // unified resource model: pack + verified chests, withdraw>craft>gather
 let dbgSink = null // injected by index.js: debug lines persist to logs/bot-events.log
 function setDebugSink (fn) { dbgSink = fn }
 const dbg = (...a) => {
@@ -2257,6 +2258,10 @@ async function autoBuild (bot, schem, at, opts = {}) {
     for (const k of Object.keys(bom)) if (bom[k] <= 0) delete bom[k]
     if (standing > 0) dbg('bom diffed vs world:', standing, 'blocks already standing ->', JSON.stringify(bom))
   } catch { /* schematic read hiccup - provision the full BOM */ }
+  // ITEMS vs CELLS: a door/bed occupies TWO schematic cells but is ONE inventory item -
+  // the raw cell count sent the loop hunting a second bed that can't exist as an item
+  // (the camp/hut path already normalized this; the generic path never did).
+  for (const k of Object.keys(bom)) if (/_door$|_bed$/.test(k)) bom[k] = Math.ceil(bom[k] / 2)
   // SCAFFOLD DIRT must be PROVISIONED, not just reserved - a from-nothing bot arrives with 0
   // dirt, so without adding it to the BOM the builder either can't reach upper layers (build
   // finishes short + clears the resume) or cannibalises the BOM's own cobble as scaffold ->
@@ -2296,8 +2301,10 @@ async function autoBuild (bot, schem, at, opts = {}) {
     if (!hasKind('sword')) want.wooden_sword = 1
     say(`no tools on me - setting up a ${Object.keys(want).map(t => t.replace('wooden_', '')).join(' + ')} first`)
     try {
-      const tplan = provision.planProvision(mcData, want, provision.inventoryCounts(bot), { primaryWood })
-      if (tplan.tasks.length) await provision.runPlan(bot, tplan, { say, isStopped, restoreMovements: restore, homeY: Math.floor(at.y), avoid })
+      // reconcile: tool wood comes out of the BANK when it's there (it chopped fresh
+      // birch for a pickaxe while a hundred oak logs sat in its chest, live test)
+      const trec = await resources.reconcile(bot, want, { near: at, planOpts: { primaryWood } })
+      if (trec.withdraws.length || trec.plan.tasks.length) await resources.runReconciled(bot, trec, { say, isStopped, restoreMovements: restore, homeY: Math.floor(at.y), avoid })
     } catch (e) { say(`(couldn't make tools yet: ${e.message})`) }
     if (!hasKind('pickaxe')) say("still couldn't get a pickaxe - is there any wood around here?")
   }
@@ -2309,8 +2316,8 @@ async function autoBuild (bot, schem, at, opts = {}) {
   if (!isStopped() && process.env.STONE_PICK !== '0' && bomNeedsMining && hasKind('pickaxe') && !hasStonePick()) {
     say('quick stone pickaxe first - it mines way faster')
     try {
-      const sp = provision.planProvision(mcData, { stone_pickaxe: 1 }, provision.inventoryCounts(bot), { primaryWood })
-      if (sp.tasks.length) await provision.runPlan(bot, sp, { say, isStopped, restoreMovements: restore, homeY: Math.floor(at.y), home: { x: Math.round(at.x), y: Math.floor(at.y), z: Math.round(at.z) }, avoid })
+      const sprec = await resources.reconcile(bot, { stone_pickaxe: 1 }, { near: at, planOpts: { primaryWood } })
+      if (sprec.withdraws.length || sprec.plan.tasks.length) await resources.runReconciled(bot, sprec, { say, isStopped, restoreMovements: restore, homeY: Math.floor(at.y), home: { x: Math.round(at.x), y: Math.floor(at.y), z: Math.round(at.z) }, avoid })
     } catch (e) { say(`(stone pick skipped: ${e.message})`) }
   }
 
@@ -2328,11 +2335,10 @@ async function autoBuild (bot, schem, at, opts = {}) {
   // (crafting one needs planks the from-nothing bot doesn't have up front) and only
   // when the pack is filling up. Small builds that fit in 36 slots never make one.
   let chest = null
-  const chestBlk = () => (chest ? bot.blockAt(chest.position) : null)
   async function stash () {
     try {
       if (!chest) chest = await provision.ensureChest(bot, { isStopped })
-      await provision.depositMaterials(bot, chestBlk(), { keepDirt: KEEP_DIRT })
+      await resources.autoBank(bot, { near: home, keepDirt: KEEP_DIRT, isStopped })
     } catch (e) { say(`(couldn't stash yet: ${e.message})`) }
   }
 
@@ -2445,20 +2451,28 @@ async function autoBuild (bot, schem, at, opts = {}) {
           // door get PROVISIONED FRESH (cheap: planks/cobble), which is reliable, and only
           // the bed is credited to the one we already have + recover (relying on recovery
           // for the chests made the build skip them when the collect missed - live).
-          const invForPlan = provision.inventoryCounts(bot)
           let hasBedPlaced = false
           for (let y = st.y; y <= en.y; y++) for (let z = st.z; z <= en.z; z++) for (let x = st.x; x <= en.x; x++) {
             const g = bot.blockAt(new Vec3(hutAt.x + x, hutAt.y + y, hutAt.z + z))
             if (g && /_bed$/.test(g.name)) hasBedPlaced = true
           }
-          if (hasBedPlaced) invForPlan.white_bed = (invForPlan.white_bed || 0) + 1 // reuse the bed we'll recover
-          const hplan = provision.planProvision(mcData, hutBom, invForPlan, { primaryWood })
-          if (Object.keys(hplan.unobtainable || {}).length) { dbg('camp: hut BOM unobtainable ' + JSON.stringify(hplan.unobtainable)) }
+          // RECONCILE against TOTAL holdings (pack + verified bank), withdraw -> craft ->
+          // gather - the old pack-only plan sent the bot to chop trees while its own bank
+          // held a hundred logs.
+          const hrec = await resources.reconcile(bot, hutBom, {
+            near: hutAt,
+            planOpts: { primaryWood },
+            credit: hasBedPlaced ? { white_bed: 1 } : {} // reuse the bed we'll recover
+          })
+          if (Object.keys(hrec.plan.unobtainable || {}).length) { dbg('camp: hut BOM unobtainable ' + JSON.stringify(hrec.plan.unobtainable)) }
           else {
-            if (hplan.tasks.length) await provision.runPlan(bot, hplan, { say, isStopped, restoreMovements: restore, homeY: hutAt.y, home: { x: hutAt.x, y: hutAt.y, z: hutAt.z }, avoid })
+            if (hrec.withdraws.length || hrec.plan.tasks.length) await resources.runReconciled(bot, hrec, { say, isStopped, restoreMovements: restore, homeY: hutAt.y, home: { x: hutAt.x, y: hutAt.y, z: hutAt.z }, avoid })
             // 3) clean rebuild - clears the old messy furniture (bot's own) and places the
-            //    whole hut deterministically: walls, door, furnace, table, bed, double chest
-            const hr = await schematic.buildSurvival(bot, hutSchem, hutAt, { say, isStopped, restoreMovements: restore, clear: true, clearFurniture: true })
+            //    whole hut deterministically: walls, door, furnace, table, bed, double chest.
+            //    fetch = the resource model: a missing piece gets WITHDRAWN or CRAFTED on the
+            //    spot (it once begged players for a door while holding 109 planks + a table).
+            const hutFetch = async (n, cnt) => { await resources.acquire(bot, n, cnt || 1, { near: hutAt, isStopped, say, batch: 32, planOpts: { primaryWood } }) }
+            const hr = await schematic.buildSurvival(bot, hutSchem, hutAt, { say, isStopped, restoreMovements: restore, clear: true, clearFurniture: true, fetch: hutFetch })
             dbg('camp: hut rebuilt -> ' + (hr && hr.placed) + '/' + (hr && hr.total) + ' at ' + hutAt.x + ',' + hutAt.y + ',' + hutAt.z)
             provision.rememberInfra && provision.rememberInfra('hut', hutAt)
             try { await handle(bot, 'collect') } catch {} // grab any bank items that dropped when the old chest was cleared
@@ -2513,44 +2527,27 @@ async function autoBuild (bot, schem, at, opts = {}) {
       // stage 1: a stone pick FIRST (the planner orders it after the iron gather that
       // needs it - offline-verified); stage 2 then plans cleanly around the owned pick
       if (!(bot.inventory ? bot.inventory.items() : []).some(i => /(stone|iron|diamond)_pickaxe/.test(i.name))) {
-        const pp = provision.planProvision(mcData, { stone_pickaxe: 1 }, provision.inventoryCounts(bot), { primaryWood })
-        if (pp.tasks.length) await provision.runPlan(bot, pp, { say, isStopped, restoreMovements: restore, homeY: Math.floor(at.y), home: { x: Math.round(at.x), y: Math.floor(at.y), z: Math.round(at.z) }, avoid })
+        const pprec = await resources.reconcile(bot, { stone_pickaxe: 1 }, { near: at, planOpts: { primaryWood } })
+        if (pprec.withdraws.length || pprec.plan.tasks.length) await resources.runReconciled(bot, pprec, { say, isStopped, restoreMovements: restore, homeY: Math.floor(at.y), home: { x: Math.round(at.x), y: Math.floor(at.y), z: Math.round(at.z) }, avoid })
       }
-      const ip = provision.planProvision(mcData, want, provision.inventoryCounts(bot), { primaryWood, furnacesNearby: provision.countFurnacesNear(bot) })
+      // reconcile: banked iron/ingots/armor pieces count before any mining happens
+      const irec = await resources.reconcile(bot, want, { near: at, planOpts: { primaryWood, furnacesNearby: provision.countFurnacesNear(bot) } })
+      const ip = irec.plan
       if (Object.keys(ip.unobtainable || {}).length) { dbg('iron bootstrap: unobtainable ' + JSON.stringify(ip.unobtainable)) }
-      else if (ip.tasks.length) {
+      else if (ip.tasks.length || irec.withdraws.length) {
         say('no cows around - mining iron for real armor before this patrol kills me again')
         dbg('iron bootstrap plan: ' + ip.tasks.map(t => `${t.type}:${t.item || t.output}x${t.count || t.crafts || ''}`).join(' > '))
-        await provision.runPlan(bot, ip, { say, isStopped, restoreMovements: restore, homeY: Math.floor(at.y), home: { x: Math.round(at.x), y: Math.floor(at.y), z: Math.round(at.z) }, avoid })
+        await resources.runReconciled(bot, irec, { say, isStopped, restoreMovements: restore, homeY: Math.floor(at.y), home: { x: Math.round(at.x), y: Math.floor(at.y), z: Math.round(at.z) }, avoid })
         const r = await handle(bot, 'wear')
         say('armor status: ' + r)
       }
     } catch (e) { dbg('iron bootstrap failed (' + e.message + ') - continuing bare') }
   }
   const slotsUsed = () => (bot.inventory ? bot.inventory.items().length : 0)
-  const totalHave = async (name) => {
-    // Count EVERY remembered site chest, not just the one this run touched - banked
-    // materials landed in chest B while the loop counted only (empty) chest C, and 80
-    // banked oak read as 0/346 (live). Dedupes, verifies each block, walks to open.
-    let c = provision.inventoryCounts(bot)[name] || 0
-    const spots = (provision.listInfra ? provision.listInfra('chest', bot) : []).filter(e => Math.hypot(e.x - home.x, e.z - home.z) <= 32)
-    if (chest && chestBlk()) spots.push({ x: chest.position.x, y: chest.position.y, z: chest.position.z })
-    const seen = new Set()
-    for (const e of spots) {
-      const k = `${e.x},${e.y},${e.z}`
-      if (seen.has(k)) continue
-      seen.add(k)
-      const blk = bot.blockAt(new Vec3(e.x, e.y, e.z))
-      if (blk && /chest/.test(blk.name)) {
-        // cache each chest's last good read - one failed open (mob, reach, night) made
-        // 80 banked oak read as 0 and sent the bot out to re-gather wood it owns (live)
-        try { const counts = await provision.chestCounts(bot, blk); chestCache[k] = counts; c += counts[name] || 0 }
-        catch { if (chestCache[k]) c += chestCache[k][name] || 0 }
-      }
-    }
-    return c
-  }
-  const chestCache = {} // pos -> last successful contents read
+  // Total holdings via the RESOURCE MODEL: pack + every world-verified site chest,
+  // cached+persisted reads (a failed open or a restart no longer zeroes the bank tally
+  // and sends the bot out to re-gather wood it owns - the oak sawtooth, live).
+  const totalHave = async (name) => resources.totalHave(bot, name, { near: home, maxDist: 32 })
 
   // 1) provision each material, batch by batch; stash to the chest when the pack fills.
   // `skip` collects materials we can't fully get (unobtainable / no-progress / stuck) so the
@@ -2577,7 +2574,12 @@ async function autoBuild (bot, schem, at, opts = {}) {
       // quit a slow 44-stone smelt at ~11 and then "built" with too little.
       if (have <= lastHave) { if (++noProgress >= 4) { say(`giving up on ${name} at ${have}/${need}`); if (have < need) skip.add(name); break } } else noProgress = 0
       lastHave = have
-      try { await provision.dumpJunk(bot) } catch {} // free the slots the materials need (keeps bones/famine reserve)
+      // Round-start upkeep via the resource model: eat from the BANK before starving
+      // (it died at 1hp with cooked food in its chest), and free pack slots BEFORE the
+      // 36/36 deadlock (a full pack can't even craft - no output slot). ensurePackRoom
+      // dumps junk first, then banks materials, so it replaces the plain dumpJunk.
+      try { const fed = await resources.ensureFood(bot, { near: home, threshold: 16 }); if (fed) say('grabbed food from my chest') } catch {} // 16 ~ auto-eat's 17: restock before it grumbles
+      try { await resources.ensurePackRoom(bot, 6, { near: home, keepDirt: KEEP_DIRT, isStopped }) } catch {}
       // START EACH ROUND FROM THE SITE, ON THE SURFACE. A failed gather can leave the bot
       // stranded deep in a cave 40+ blocks off (verified live: cobble round ended at y=61,
       // climb-out only reached y=62, and the NEXT round's log gather then started underground
@@ -2602,22 +2604,22 @@ async function autoBuild (bot, schem, at, opts = {}) {
       const batch = Math.min(BATCH, need - have)
       buildProgress = { phase: 'gathering materials', material: name, have, need, materialsDone: Object.keys(bom).indexOf(name), materialsTotal: Object.keys(bom).length }
       say(`need ${name}: ${have}/${need} - gathering ${batch}`)
-      // `batch` is already the TRUE shortfall (need minus pack+chest) - hide the target item
-      // from the planner's inventory or it nets the pack count out AGAIN and emits an empty
-      // plan (verified: dirt 8/14 -> batch 6 -> planner saw 8 dirt -> planned nothing -> loop
-      // broke and the build ran short). Dependencies still see the full inventory.
-      const planInv = provision.inventoryCounts(bot)
-      delete planInv[name]
+      // RECONCILE the batch against TOTAL holdings (pack + bank): banked ingredients get
+      // WITHDRAWN, craftables CRAFTED, and only the true remainder gathered - the old
+      // pack-only plan re-gathered logs for sticks while the bank held a hundred. The
+      // target item itself is HIDDEN: `batch` is already the shortfall net of everything
+      // owned, so crediting it again emits an empty plan (verified: dirt 8/14 stuck).
       const freshPicks = (bot.inventory ? bot.inventory.items() : []).filter(i => i.name === 'wooden_pickaxe' && !(i.durabilityUsed > 0)).length
-      const plan = provision.planProvision(mcData, { [name]: batch }, planInv, { primaryWood, freshPickaxes: freshPicks, furnacesNearby: provision.countFurnacesNear(bot) })
-      dbg('material', name, have + '/' + need, '-> plan:', plan.tasks.map(t => `${t.type}:${t.item || t.output}`).join(',') || '(empty)', '| unobtainable:', Object.keys(plan.unobtainable || {}).join(',') || 'none')
+      const rec = await resources.reconcile(bot, { [name]: batch }, { near: home, hide: [name], planOpts: { primaryWood, freshPickaxes: freshPicks, furnacesNearby: provision.countFurnacesNear(bot) } })
+      const plan = rec.plan
+      dbg('material', name, have + '/' + need, '-> withdraw:', rec.withdraws.map(w => `${w.count} ${w.item}`).join(',') || 'none', '| plan:', plan.tasks.map(t => `${t.type}:${t.item || t.output}`).join(',') || '(empty)', '| unobtainable:', Object.keys(plan.unobtainable || {}).join(',') || 'none')
       if (Object.keys(plan.unobtainable || {}).length) { say(`can't obtain ${name} - skipping`); skip.add(name); break }
-      if (!plan.tasks.length) { dbg('material', name, 'EMPTY PLAN but have', have, '< need', need, '- breaking'); break }
+      if (!plan.tasks.length && !rec.withdraws.length) { dbg('material', name, 'EMPTY PLAN but have', have, '< need', need, '- breaking'); break }
       const before = await totalHave(name)
       // homeY = the build-site SURFACE (the ground-snapped origin), a persistent anchor
       // so strip-mining measures depth from the real surface and can't ratchet the bot
       // down toward lava across batches.
-      const results = await provision.runPlan(bot, plan, { say, isStopped, restoreMovements: restore, homeY: Math.floor(at.y), home, avoid })
+      const results = await resources.runReconciled(bot, rec, { say, isStopped, restoreMovements: restore, homeY: Math.floor(at.y), home, avoid })
       const STASH_AT = parseInt(process.env.AUTOBUILD_STASH_SLOTS || '28', 10) // slots-used before offloading (tunable)
       // BANK BY VALUE, not just slots: 103 oak logs fit in TWO slots, so the slot
       // threshold never fired all evening - the bot carried its whole fortune into a
@@ -2638,20 +2640,19 @@ async function autoBuild (bot, schem, at, opts = {}) {
     if (isStopped()) return { stopped: true, phase: 'provision', placed: 0, total: 0 }
   }
 
-  // 2) build. If we used a chest, stash the rest and pull from it on demand (topping
-  // up scaffold dirt first); otherwise everything's in inventory - just build.
+  // 2) build. Every build gets the resource-model fetch: a missing material is
+  // WITHDRAWN from the bank or CRAFTED from holdings on the spot - waitForMaterial
+  // only ever begs a player for things the bot truly cannot obtain itself.
   checklistStep('build')
   buildProgress = { phase: 'placing blocks', material: null, have: 0, need: 0 }
-  if (chest) {
+  const fetch = async (n, cnt) => { await resources.acquire(bot, n, cnt || 1, { near: home, isStopped, say, batch: 128, planOpts: { primaryWood } }) }
+  if (chest || resources.verifiedChests(bot, home, 32).length) {
     await stash()
     const invDirt = provision.inventoryCounts(bot).dirt || 0
-    if (invDirt < KEEP_DIRT) await provision.withdrawItem(bot, chestBlk(), 'dirt', KEEP_DIRT - invDirt).catch(() => {})
+    if (invDirt < KEEP_DIRT) await resources.withdrawItems(bot, 'dirt', KEEP_DIRT - invDirt, { near: home }).catch(() => {})
     say('materials stashed - building now')
-    const fetch = async (n) => { await provision.withdrawItem(bot, chestBlk(), n, 128) }
-    try { return await schematic.buildSurvival(bot, schem, at, { say, isStopped, restoreMovements: restore, fetch, clear: opts.clear, skip }) } finally { buildProgress = null }
-  }
-  say('got the materials - building now')
-  try { return await schematic.buildSurvival(bot, schem, at, { say, isStopped, restoreMovements: restore, clear: opts.clear, skip }) } finally { buildProgress = null }
+  } else say('got the materials - building now')
+  try { return await schematic.buildSurvival(bot, schem, at, { say, isStopped, restoreMovements: restore, fetch, clear: opts.clear, skip }) } finally { buildProgress = null }
 }
 
 // Called by the body when the bot DIES mid-build: just stop the running loop. resumeJob

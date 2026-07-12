@@ -22,6 +22,7 @@ try { require('fs').accessSync(require('path').join(__dirname, 'config.json')) }
 const cfg = require('./config.json')
 const commands = require('./commands.js')
 const provision = require('./provision.js') // for the body-side survival-hunt reflex
+const resources = require('./resources.js') // unified pack+chest resource model (food withdraw)
 const access = require('./access.js')
 const schematic = require('./schematic.js')
 
@@ -208,6 +209,7 @@ commands.setLogger(note) // build/provision progress lands in /log (GUI live pan
 function noteDebug (msg) { fileLog(`[${new Date().toISOString()}] ${msg}`) }
 commands.setDebugSink(noteDebug)
 provision.setDebugSink(noteDebug)
+resources.setDebugSink(noteDebug)
 // A build job saved to disk survived a process restart - let the operator know it's resumable.
 try {
   const rj = commands.persistedResume && commands.persistedResume()
@@ -583,8 +585,13 @@ if (process.env.SURVIVAL_HUNT !== '0') {
     if (commands.isBusy && commands.isBusy()) return // the gather loop covers the build case
     if (!provision.needsFood(bot)) return
     survivalHunting = true
-    try { if (await provision.huntForFood(bot, {})) note('(survival) hunted an animal - starving with no food') }
-    catch (e) { /* transient - retry next tick */ } finally { survivalHunting = false }
+    try {
+      // FOOD IS A RESOURCE: before hunting, check the bank - the bot starved to death
+      // at 1hp with cooked food sitting in its own chest (live). Withdraw beats hunt.
+      const fed = await resources.ensureFood(bot, {})
+      if (fed > 0) note(`(survival) withdrew ${fed} food from the chest - was starving`)
+      else if (await provision.huntForFood(bot, {})) note('(survival) hunted an animal - starving with no food')
+    } catch (e) { /* transient - retry next tick */ } finally { survivalHunting = false }
   }, 6000).unref?.()
 }
 

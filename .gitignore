@@ -54,3 +54,4 @@ bot/last-death.json
 bot/config.json
 bot/world-memory.json
 bot/body-episodes.jsonl
+bot/chest-cache.json
