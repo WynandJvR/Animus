@@ -3297,8 +3297,9 @@ async function furnishHut (bot, hut, { isStopped = () => false, say = () => {} }
     }
   } catch (e) { dbg('  furnish: floor pass failed (' + e.message + ')') }
   // DEDUPE furniture (operator: two tables; a table ON the chest blocked it from opening):
-  // keep one table + one furnace, dig any extra, and dig ANY furniture stacked on top of
-  // other furniture (a chest/furnace needs air above to open/use). Items pocketed.
+  // keep one table + one furnace, dig any extra, and dig anything stacked on a CHEST -
+  // only a chest needs clear air above to open. A table on a FURNACE is fine (operator:
+  // "valid") - furnaces open by right-click regardless, and it's a tidy space-saver.
   try {
     const seen = {}
     for (let dx = 1; dx <= 3; dx++) for (let dz = 1; dz <= 3; dz++) for (let dy = 3; dy >= 0; dy--) { // top-down
@@ -3306,16 +3307,16 @@ async function furnishHut (bot, hut, { isStopped = () => false, say = () => {} }
       const b = bot.blockAt(p)
       if (!b || !/crafting_table$|furnace$/.test(b.name)) continue
       const below = bot.blockAt(p.offset(0, -1, 0))
-      const onFurniture = below && HUT_FURNITURE.test(below.name)
+      const onChest = below && /chest$/.test(below.name) // blocks the chest lid; furnace-below is fine
       const dupe = seen[b.name.replace(/^.*_/, '')]
-      if (onFurniture || dupe) {
+      if (onChest || dupe) {
         try {
           if (bot.entity.position.distanceTo(p) > 4) await gotoWithTimeout(bot, new goals.GoalNear(p.x, p.y, p.z, 2), 10000)
           const t = toolForBlock(bot, b.name); if (t) await bot.equip(t, 'hand').catch(() => {})
           await bot.dig(b); await collectDrops(bot, 2)
           const entry = listInfra(/table/.test(b.name) ? 'table' : 'furnace').find(x => x.x === p.x && x.y === p.y && x.z === p.z)
           if (entry) forgetInfra(/table/.test(b.name) ? 'table' : 'furnace', entry)
-          dbg('  furnish: removed a stray ' + b.name + (onFurniture ? ' (was on furniture)' : ' (duplicate)'))
+          dbg('  furnish: removed a stray ' + b.name + (onChest ? ' (was blocking the chest)' : ' (duplicate)'))
         } catch {}
       } else seen[b.name.replace(/^.*_/, '')] = true
     }
