@@ -629,31 +629,48 @@ async function healHomeCrater (bot, at, opts = {}) {
   const ANYFILL = /(_planks|dirt|cobblestone|cobbled_deepslate|stone)$/
   const X0 = doorX - 2; const X1 = doorX + 5    // 414..421 - FULL crater width incl. the east pit
   const Z1 = at.z - 1; const Z0 = at.z - 4      // 84..81 - out to the crater's north edge
-  const Y0 = floorY - 3; const Y1 = floorY      // 62..65 - down to the deepest air pocket
-  let filled = 0; let holes = 0; let moves = 0; const MAXMOVES = 12; let unreached = 0
-  // bottom-up so each layer sits on solid support (and repositioning onto a filled lower
-  // layer extends reach into the pit).
-  for (let wy = Y0; wy <= Y1 && !isStopped(); wy++) {
-    for (let wz = Z1; wz >= Z0 && !isStopped(); wz--) {
-      for (let wx = X0; wx <= X1 && !isStopped(); wx++) {
-        const pos = new Vec3(wx, wy, wz)
-        if (wz >= at.z || ownHutAt(pos)) continue                           // NEVER inside the hut footprint (belt + braces: no filler on interior cells)
-        const b = bot.blockAt(pos)
-        if (b && b.boundingBox === 'block' && !AIRISH(b.name)) continue     // already solid - skip
-        holes++
-        if (bot.entity.position.distanceTo(pos.offset(0.5, 0.5, 0.5)) > 4.3 && reposition && moves < MAXMOVES) {
-          moves++
-          try { await gotoWithTimeout(bot, new goals.GoalNearXZ(wx, wz, 2), 5000) } catch {}
+  const solidAt = (x, y, z) => { const b = bot.blockAt(new Vec3(x, y, z)); return !!(b && b.boundingBox === 'block' && !AIRISH(b.name)) }
+  const inFootprint = (x, z) => (z >= at.z) || !!ownHutAt(new Vec3(x, floorY, z)) // NEVER inside the hut
+  // Restore the WALK SURFACE (y=floorY) across the crater by BRIDGING outward from solid
+  // ground - not a bottom-up depth fill, which can't be reached: from the doorstep the
+  // pathfinder can't route ACROSS the open pit to the far (east) cells (live: 'none
+  // placeable'). Instead place the nearest surface hole that has a solid face, STEP ONTO
+  // it, and reach the next - exactly how a player bridges a gap. A 1-thick dirt surface is
+  // stable (only sand/gravel fall) and stops the fall-in death; the air below is harmless.
+  const N4 = [[1, 0], [-1, 0], [0, 1], [0, -1]]
+  const targets = []
+  for (let wz = Z1; wz >= Z0; wz--) for (let wx = X0; wx <= X1; wx++) {
+    if (inFootprint(wx, wz)) continue
+    if (!solidAt(wx, floorY, wz)) targets.push({ x: wx, z: wz })
+  }
+  const holes = targets.length
+  if (!holes) return 0
+  let filled = 0; let progress = true; let guard = 0
+  while (targets.length && progress && guard++ < 80 && !isStopped()) {
+    progress = false
+    targets.sort((a, b) => bot.entity.position.distanceTo(new Vec3(a.x, floorY, a.z)) - bot.entity.position.distanceTo(new Vec3(b.x, floorY, b.z)))
+    for (let i = 0; i < targets.length && !isStopped(); i++) {
+      const t = targets[i]
+      const sideN = N4.map(([dx, dz]) => ({ x: t.x + dx, z: t.z + dz })).filter(n => !inFootprint(n.x, n.z) && solidAt(n.x, floorY, n.z))
+      const belowSolid = solidAt(t.x, floorY - 1, t.z)
+      if (!sideN.length && !belowSolid) continue // no face to place against yet - a nearer cell bridges here first
+      const tv = new Vec3(t.x, floorY, t.z)
+      if (bot.entity.position.distanceTo(tv.offset(0.5, 0.5, 0.5)) > 4.3) {
+        if (!reposition) continue // doorway quick-pass: only what's reachable without walking
+        let ok = false
+        for (const n of sideN) { // stand ON a solid neighbour (its top) to get in reach
+          try { await gotoWithTimeout(bot, new goals.GoalBlock(n.x, floorY + 1, n.z), 6000) } catch {}
+          if (bot.entity.position.distanceTo(tv.offset(0.5, 0.5, 0.5)) <= 4.6) { ok = true; break }
         }
-        if (bot.entity.position.distanceTo(pos.offset(0.5, 0.5, 0.5)) > 4.6) { unreached++; continue } // still out of reach - leave for a later pass
-        let ok = await placeAt(bot, pos, DIRTLIKE)                          // cheap filler first (save planks)
-        if (!ok) ok = await placeAt(bot, pos, ANYFILL)
-        if (ok) filled++
+        if (!ok && bot.entity.position.distanceTo(tv.offset(0.5, 0.5, 0.5)) > 4.6) continue
       }
+      let ok = await placeAt(bot, tv, DIRTLIKE) // cheap filler first (save planks)
+      if (!ok) ok = await placeAt(bot, tv, ANYFILL)
+      if (ok) { filled++; targets.splice(i, 1); i--; progress = true }
     }
   }
-  if (filled) { say(`patched the creeper crater at my door - dropped ${filled} block(s) so it's walkable`); dbg('  crater heal: placed ' + filled + ' of ' + holes + ' hole cell(s), x' + X0 + '-' + X1 + ' z' + Z0 + '-' + Z1 + (unreached ? ' (' + unreached + ' out of reach this pass)' : '')) }
-  else if (holes) dbg('  crater heal: ' + holes + ' hole(s), none placeable from here' + (reposition ? '' : ' (no-reposition pass)'))
+  if (filled) { say(`patched the creeper crater at my door - bridged ${filled} block(s) so it's walkable`); dbg('  crater heal: bridged ' + filled + '/' + holes + ' surface hole(s), x' + X0 + '-' + X1 + ' z' + Z0 + '-' + Z1 + (targets.length ? ' (' + targets.length + ' left for a later pass)' : '')) }
+  else dbg('  crater heal: ' + holes + ' surface hole(s), none bridgeable from here' + (reposition ? '' : ' (no-reposition pass)'))
   return filled
 }
 
