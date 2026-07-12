@@ -164,7 +164,7 @@ function recordOutcome (action, ok, detail) { lastOutcome = { action, ok: !!ok, 
 // activity ends; each step's own code still decides whether it applies (no-op = quick).
 let jobList = null // { steps: [names], current, startedAt }
 const JOB_STEPS = ['travel to site', 'survey the site', 'basic tools', 'stone pickaxe', 'armor up',
-  'camp: chest/furnace/bed', 'camp: safehouse hut', 'camp: wheat farm', 'gather materials', 'build']
+  'camp: chest/furnace/bed', 'camp: safehouse hut', 'camp: bank into hut', 'camp: wheat farm', 'gather materials', 'build']
 function checklistBegin (steps) { jobList = { steps: steps.slice(), current: null, startedAt: Date.now() } }
 function checklistStep (name) {
   if (!jobList) return
@@ -2455,6 +2455,25 @@ async function autoBuild (bot, schem, at, opts = {}) {
         }
       }
     } catch (e) { dbg('camp: hut failed (' + e.message + ') - continuing') }
+    // BANK INTO HUT (operator promise): once the safehouse stands, any banking chest
+    // still out in the open moves inside - a creeper by the treasury loses the economy.
+    checklistStep('camp: bank into hut')
+    try {
+      const hutE = (provision.listInfra ? provision.listInfra('hut') : []).find(e => Math.hypot(e.x - at.x, e.z - at.z) <= 150)
+      if (hutE) {
+        const exposed = (provision.listInfra('chest') || []).find(c =>
+          Math.hypot(c.x - at.x, c.z - at.z) <= 60 &&
+          !(c.x >= hutE.x && c.x <= hutE.x + 4 && c.z >= hutE.z && c.z <= hutE.z + 4))
+        if (exposed) {
+          const oldBlk = bot.blockAt(new Vec3(exposed.x, exposed.y, exposed.z))
+          if (oldBlk && /chest/.test(oldBlk.name)) {
+            const ok = await provision.migrateChestInto(bot, exposed, hutE, { isStopped, say })
+            dbg('camp: bank-into-hut -> ' + ok)
+            if (ok) chest = null // re-resolve: the banking chest may have moved
+          }
+        }
+      }
+    } catch (e) { dbg('camp: bank-into-hut failed (' + e.message + ') - continuing') }
     // WHEAT FARM (operator order): renewable food at the camp - the region can run dry
     // of animals and the bot starved to death working. Water-edge plot, best-effort.
     checklistStep('camp: wheat farm')

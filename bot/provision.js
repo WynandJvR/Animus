@@ -3032,6 +3032,64 @@ async function withdrawItem (bot, chestBlock, itemName, count) {
   return got
 }
 
+// ---- CHEST MIGRATION (operator promise): the banking chest lived in the open - one
+// creeper by the treasury loses the economy. Once the safehouse stands, the bank moves
+// INSIDE. Item-safe order: the new chest exists and is verified before anything leaves
+// the old one; the old chest is only dug up once it reads EMPTY.
+async function migrateChestInto (bot, oldPos, hut, { isStopped = () => false, say = () => {} } = {}) {
+  // interior target: an air cell with a solid floor inside the 5x5 shell (1..3 = interior)
+  let target = null
+  for (const [dx, dz] of [[2, 2], [1, 2], [3, 2], [2, 1], [2, 3], [1, 1], [3, 1], [1, 3], [3, 3]]) {
+    for (let dy = 1; dy <= 2 && !target; dy++) {
+      const p = new Vec3(hut.x + dx, hut.y + dy, hut.z + dz)
+      const b = bot.blockAt(p); const below = bot.blockAt(p.offset(0, -1, 0)); const above = bot.blockAt(p.offset(0, 1, 0))
+      if (b && AIRISH(b.name) && below && below.boundingBox === 'block' && above && AIRISH(above.name)) target = p
+    }
+    if (target) break
+  }
+  if (!target) { dbg('  chest migration: no free interior cell in the hut'); return false }
+  let chestItem = (bot.inventory ? bot.inventory.items() : []).find(i => i.name === 'chest')
+  if (!chestItem) {
+    try { await runCraft(bot, 'chest', 1, true, { isStopped, home: { x: hut.x, y: hut.y, z: hut.z } }) } catch (e) { dbg('  chest migration: cannot craft a chest (' + e.message + ')'); return false }
+    chestItem = (bot.inventory ? bot.inventory.items() : []).find(i => i.name === 'chest')
+    if (!chestItem) return false
+  }
+  if (bot.entity.position.distanceTo(target) > 3) { try { await gotoWithTimeout(bot, new goals.GoalNear(target.x, target.y, target.z, 2), 20000) } catch {} }
+  if (!await placeAt(bot, target, /^chest$/)) { dbg('  chest migration: could not place inside - ' + (placeAt.lastFail || '?')); return false }
+  const newBlk = bot.blockAt(target)
+  if (!newBlk || !/chest/.test(newBlk.name)) return false
+  rememberInfra('chest', target)
+  say('moving the bank into the hut where creepers cannot audit it')
+  let trips = 0
+  while (!isStopped() && trips++ < 6) {
+    const oldBlk = bot.blockAt(new Vec3(oldPos.x, oldPos.y, oldPos.z))
+    if (!oldBlk || !/chest/.test(oldBlk.name)) break
+    let counts
+    try { counts = await chestCounts(bot, oldBlk) } catch (e) { dbg('  chest migration: old chest read failed (' + e.message + ')'); break }
+    const names = Object.keys(counts)
+    if (!names.length) break
+    for (const n of names) {
+      if ((bot.inventory ? bot.inventory.emptySlotCount() : 36) < 2) break
+      try { await withdrawItem(bot, oldBlk, n, counts[n]) } catch {}
+    }
+    try { await depositMaterials(bot, bot.blockAt(target), { keepDirt: 8 }) } catch (e) { dbg('  chest migration: deposit failed (' + e.message + ')') }
+  }
+  const oldBlk2 = bot.blockAt(new Vec3(oldPos.x, oldPos.y, oldPos.z))
+  let left = {}
+  if (oldBlk2 && /chest/.test(oldBlk2.name)) { try { left = await chestCounts(bot, oldBlk2) } catch { left = { unknown: 1 } } }
+  if (oldBlk2 && /chest/.test(oldBlk2.name) && !Object.keys(left).length) {
+    try {
+      const tool = toolForBlock(bot, 'oak_planks')
+      if (tool) await bot.equip(tool, 'hand').catch(() => {})
+      await bot.dig(oldBlk2); await collectDrops(bot, 4)
+      const entry = listInfra('chest').find(e => e.x === Math.floor(oldPos.x) && e.y === Math.floor(oldPos.y) && e.z === Math.floor(oldPos.z))
+      if (entry) forgetInfra('chest', entry)
+      say('bank moved - old chest packed up')
+    } catch (e) { dbg('  chest migration: old chest pickup failed (' + e.message + ')') }
+  } else if (Object.keys(left).length) dbg('  chest migration: old chest NOT empty after trips - leaving it standing')
+  return true
+}
+
 // Read chest contents as { name: count } (build materials the chest is holding).
 async function chestCounts (bot, chestBlock) {
   await gotoChest(bot, chestBlock)
@@ -3041,4 +3099,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, hasSolidCeiling, gatherLeather, huntForFood, hasFood, needsFood, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, ensureWheatFarm, tendWheatFarm, fishForFood, setBuildZone, setDebugSink }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, migrateChestInto, hasSolidCeiling, gatherLeather, huntForFood, hasFood, needsFood, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, ensureWheatFarm, tendWheatFarm, fishForFood, setBuildZone, setDebugSink }
