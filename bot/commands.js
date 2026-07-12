@@ -2421,7 +2421,17 @@ async function autoBuild (bot, schem, at, opts = {}) {
   // with a stone pick available, mine/smelt/craft the iron set - the planner handles the
   // whole chain now (raw_iron gather -> iron_ingot smelt -> armor crafts). Bounded by the
   // plan's own budgets; the build continues with whatever it achieved.
-  if (!isStopped() && process.env.IRON_BOOTSTRAP !== '0' && anyBare()) {
+  // CONVERGENCE BACK-OFF (persisted): repeated fruitless attempts (patrol-interdicted
+  // site, no exposed iron) must not re-run the same death-march on every resume pass -
+  // that churn starved out the camp/farm/build steps for hours (live). Any real progress
+  // (a new piece worn, net iron gained) resets the window.
+  const gearBackoff = provision.gearupState && provision.gearupState()
+  if (!isStopped() && process.env.IRON_BOOTSTRAP !== '0' && anyBare() && gearBackoff && gearBackoff.until > Date.now()) {
+    dbg('iron bootstrap: backing off ' + Math.round((gearBackoff.until - Date.now()) / 60000) + ' more min (' + gearBackoff.fails + ' fruitless attempts) - working the job instead')
+  } else if (!isStopped() && process.env.IRON_BOOTSTRAP !== '0' && anyBare()) {
+    const bareCount = () => Object.values(wornArmor(bot)).filter(v => !v).length
+    const ironScore = () => { const inv = provision.inventoryCounts(bot); return (inv.raw_iron || 0) + (inv.iron_ingot || 0) * 2 }
+    const bareBefore = bareCount(); const ironBefore = ironScore()
     try {
       const want = {}
       const worn = wornArmor(bot)
@@ -2447,6 +2457,13 @@ async function autoBuild (bot, schem, at, opts = {}) {
         say('armor status: ' + r)
       }
     } catch (e) { dbg('iron bootstrap failed (' + e.message + ') - continuing bare') }
+    // score the attempt: worn a new piece or netted iron = progress (reset back-off);
+    // else widen the back-off so the next passes work the job instead of re-flailing
+    try { provision.gearupResult && provision.gearupResult(bareCount() < bareBefore || ironScore() > ironBefore) } catch {}
+    // BANK the gear-up progress: loose iron in the pack dies with the bot (the ~12
+    // ingots' worth mined "across attempts" all evaporated in graves, live). Worn
+    // armor is in equipment slots - depositing touches only the loose surplus.
+    try { if ((provision.inventoryCounts(bot).raw_iron || 0) + (provision.inventoryCounts(bot).iron_ingot || 0) > 0) await resources.autoBank(bot, { near: { x: Math.round(at.x), y: Math.floor(at.y), z: Math.round(at.z) }, keepDirt: KEEP_DIRT, isStopped }) } catch {}
   }
   const slotsUsed = () => (bot.inventory ? bot.inventory.items().length : 0)
   // Total holdings via the RESOURCE MODEL: pack + every world-verified site chest,

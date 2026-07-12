@@ -1618,6 +1618,19 @@ function isSearchedDry (item, x, z) {
   const t = l[searchCellKey(x, z)]
   return !!t && Date.now() - t < 2 * 3600 * 1000
 }
+// GEAR-UP CONVERGENCE (persisted): the iron/armor bootstrap must converge, not flail.
+// Every fruitless attempt (no new piece worn, no net iron gained) widens a back-off
+// window so the same death-march doesn't re-run on every resume pass; any real progress
+// resets it. Survives restarts - the flailing was worst right after respawns.
+function gearupState () { return loadWorldMem().gearup || { fails: 0, until: 0 } }
+function gearupResult (progressed) {
+  const m = loadWorldMem()
+  const g = m.gearup = m.gearup || { fails: 0, until: 0 }
+  if (progressed) { g.fails = 0; g.until = 0 } else { g.fails++; g.until = Date.now() + Math.min(45, g.fails * 10) * 60000 }
+  saveWorldMem()
+  if (!progressed) dbg('gearup: fruitless attempt #' + g.fails + ' - backing off ' + Math.min(45, g.fails * 10) + ' min')
+}
+
 function clearSearched (item, pos) {
   const l = (loadWorldMem().searched || {})[item]
   if (l && l[searchCellKey(pos.x, pos.z)]) { delete l[searchCellKey(pos.x, pos.z)]; saveWorldMem() }
@@ -3933,4 +3946,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, furnishHut, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, gatherLeather, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, ensureSpawnBed, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, ensureWheatFarm, tendWheatFarm, fishForFood, ensureHutApron, ensureHutBed, setBuildZone, setDebugSink }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, furnishHut, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, gatherLeather, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, ensureSpawnBed, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, ensureWheatFarm, tendWheatFarm, fishForFood, ensureHutApron, ensureHutBed, setBuildZone, setDebugSink }
