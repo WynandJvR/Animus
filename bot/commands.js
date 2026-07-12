@@ -837,7 +837,12 @@ async function handle (bot, line) {
       const [x, y, z] = a.map(Number)
       if ([x, y, z].some(Number.isNaN)) return 'usage: block <x> <y> <z>'
       const b = bot.blockAt(new Vec3(x, y, z))
-      return b ? b.name : 'unknown (chunk not loaded)'
+      if (!b) return 'unknown (chunk not loaded)'
+      // blockstate properties too (facing/open/hinge...) - a bare name can't ground-truth
+      // orientation bugs (the sideways-hung hut door hid behind 'oak_door' for hours)
+      let props = ''
+      try { const pr = b.getProperties(); if (pr && Object.keys(pr).length) props = ' ' + JSON.stringify(pr) } catch {}
+      return b.name + props
     }
 
     case 'scan': {

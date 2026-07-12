@@ -226,10 +226,33 @@ async function openNearbyDoor (bot, opts = {}) {
         // along the door's facing axis (height-tolerant: outside ground is often ±1).
         const base = p.y > Math.floor(bot.entity.position.y) ? p.offset(0, -1, 0) : p // upper half -> foot cell
         const before = bot.entity.position.clone()
+        // CROSSING AXIS from WALL GEOMETRY, not the door's facing blockstate. facing
+        // encodes the PLACER'S YAW at hang time, not which way the wall runs - the bot
+        // hung its own hut door sideways during the safehouse build (facing east in a
+        // north wall) and door-assist then force-walked ALONG the inside of the wall
+        // into the chest corner instead of out the doorway (trapped in its own hut,
+        // live 19:16-19:27). The wall is ground truth: the passage axis is the one
+        // whose neighbor columns are walkable; the wall axis is solid. facing is only
+        // a tiebreak (freestanding door), the old approach-line heuristic dead last.
+        const clearCell = (b) => b && (b.boundingBox !== 'block' || OPENABLE_RE.test(b.name))
+        const walkable = (cell) => { // can the bot stand there? (±1: outside ground is often a step up/down)
+          for (const dy of [0, 1, -1]) {
+            const feet = bot.blockAt(cell.offset(0, dy, 0)); const head = bot.blockAt(cell.offset(0, dy + 1, 0)); const floor = bot.blockAt(cell.offset(0, dy - 1, 0))
+            if (clearCell(feet) && clearCell(head) && floor && floor.boundingBox === 'block') return true
+          }
+          return false
+        }
         let facing = null
         try { facing = (bot.blockAt(base) && bot.blockAt(base).getProperties().facing) || null } catch {}
-        const axis = (facing === 'east' || facing === 'west') ? [1, 0] : (facing === 'north' || facing === 'south') ? [0, 1] : [Math.abs(base.x + 0.5 - before.x) >= Math.abs(base.z + 0.5 - before.z) ? 1 : 0, 0]
+        const xOpen = (walkable(base.offset(1, 0, 0)) ? 1 : 0) + (walkable(base.offset(-1, 0, 0)) ? 1 : 0)
+        const zOpen = (walkable(base.offset(0, 0, 1)) ? 1 : 0) + (walkable(base.offset(0, 0, -1)) ? 1 : 0)
+        let axis
+        if (xOpen !== zOpen) axis = xOpen > zOpen ? [1, 0] : [0, 1]
+        else if (facing === 'east' || facing === 'west') axis = [1, 0]
+        else if (facing === 'north' || facing === 'south') axis = [0, 1]
+        else axis = [Math.abs(base.x + 0.5 - before.x) >= Math.abs(base.z + 0.5 - before.z) ? 1 : 0, 0]
         const dx = axis[0]; const dz = axis[0] === 1 ? 0 : 1
+        dbg('door-assist: crossing axis ' + (dx ? 'x (east-west)' : 'z (north-south)') + ' - open sides x=' + xOpen + ' z=' + zOpen + ', facing=' + facing)
         // Exit toward OPEN SKY: "outside" is the side of the doorway with no ceiling.
         // (Away-from-where-I-stand flips when the bot is mid-doorway - verified: it
         // walked back INTO the hut. Ceiling check is position-independent.)
@@ -253,6 +276,9 @@ async function openNearbyDoor (bot, opts = {}) {
           if (posCovered !== negCovered) { sign = posCovered ? -1 : 1; how = ' (open sky)' } // walk to the uncovered (outdoor) side
           else { sign = Math.sign((base.x + 0.5 - before.x) * dx + (base.z + 0.5 - before.z) * dz) || 1; how = ' (fallback)' }
         }
+        // GROUNDED sanity: never force-walk at a wall. If the chosen far side isn't a
+        // standable column but the opposite one is, the side pick was wrong - flip it.
+        if (!walkable(base.offset(dx * sign * 2, 0, dz * sign * 2)) && walkable(base.offset(-dx * sign * 2, 0, -dz * sign * 2))) { sign = -sign; how += ' FLIPPED (chosen side blocked)' }
         dbg('door-assist: exit side ' + (dx ? (sign > 0 ? 'east' : 'west') : (sign > 0 ? 'south' : 'north')) + how)
         // Align on the inside cell in front of the door (pathfinder CAN reach that).
         try { await gotoOnce(bot, new goals.GoalBlock(base.x - dx * sign, base.y, base.z - dz * sign), 8000) } catch (e2) { dbg('door-assist: could not align (' + e2.message + ')') }
