@@ -229,7 +229,8 @@ try {
 // RE-ARM: the boot auto-resume is one-shot, and a resume whose travel retries all fail
 // ends SILENTLY with the job still on disk - the bot then idles forever while the brain
 // gets bored (verified live: 3 blocked travels at 19:09-19:14, then nothing for good).
-// Every 5 minutes: saved job + idle bot + not resting = try the resume again.
+// Every 2 minutes: saved job + idle bot + not resting = try the resume again. (Was 5 -
+// with brain side-trips held while a job waits, a long idle gap has no upside.)
 if (process.env.AUTO_RESUME !== '0') {
   setInterval(async () => {
     try {
@@ -240,7 +241,7 @@ if (process.env.AUTO_RESUME !== '0') {
       const r = await commands.handle(bot, 'resumebuild')
       note(`(resume) re-arm: ${String(r).split(String.fromCharCode(10))[0]}`)
     } catch (e) { note(`(resume) re-arm failed: ${e.message}`) }
-  }, 300000).unref?.()
+  }, 120000).unref?.()
 }
 
 // Env overrides (so the same body can target the lab or a live server without
@@ -972,6 +973,15 @@ const server = http.createServer((req, res) => {
           clearPendingChat() // that IS the answer - stop the brain re-trying the same order
         }
         return send(res, 200, "busy building right now - I'll hold until it's done")
+      }
+      // ONE JOB AT A TIME (operator order): while a saved build job exists, the brain may
+      // not wander the body off on side-trips in the idle gap before the resume re-arms -
+      // it walked 240 blocks from the site that way (live). Survival (eat/fish/farm/sleep/
+      // flee/recover), perception, and chat stay allowed; everything that MOVES is held.
+      if (!bodyBusy && commands.persistedResume && commands.persistedResume() &&
+          /^(goto|travel|explore|collect|gather|mine|chop|dig|follow|come|build)\b/i.test(String(line).trim())) {
+        note(`(cmd) ${line}${rz} -> held (a build job is waiting - one job at a time)`)
+        return send(res, 200, "held: i have a build to get back to - no side trips")
       }
       const drop = gateSay(line, true) || gateImpactful(line) // brain: gated chat + repeat-guard
       if (drop) { note(`(cmd) ${line}${rz} -> skipped (${drop})`); return send(res, 200, `skipped: ${drop}`) }
