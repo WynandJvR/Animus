@@ -1948,8 +1948,27 @@ async function levelPlotCell (bot, cx, baseY, cz, { isStopped = () => false } = 
     if (!nb || nb.boundingBox !== 'block') break
     ground = nb
   }
-  if (ground.position.y < baseY) { // fill dip (one layer per pass)
-    await placeAt(bot, ground.position.offset(0, 1, 0), /^(dirt|grass_block|cobblestone)$/)
+  if (ground.position.y < baseY) { // fill the dip ALL the way up with dirt (operator: "flat ground floor with dirt")
+    let fills = 4
+    while (ground.position.y < baseY && fills-- > 0 && !isStopped()) {
+      if (!await placeAt(bot, ground.position.offset(0, 1, 0), /^(dirt|coarse_dirt|grass_block)$/)) break
+      const nb = bot.blockAt(ground.position.offset(0, 1, 0))
+      if (!nb || nb.boundingBox !== 'block') break
+      ground = nb
+    }
+  }
+  // uniform DIRT surface: a stone/gravel/cobble top reads as mess even when level -
+  // swap it for dirt (operator order: the plot is a flat DIRT floor, not mixed rubble)
+  if (ground.position.y === baseY && !/^(grass_block|dirt|coarse_dirt|podzol|mycelium|farmland)$/.test(ground.name)) {
+    const swappable = canBreakNaturally(ground) || /^(cobblestone|cobbled_deepslate)$/.test(ground.name)
+    if (swappable && (bot.inventory ? bot.inventory.items() : []).some(i => /^(dirt|coarse_dirt)$/.test(i.name))) {
+      const tool = toolForBlock(bot, ground.name)
+      if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
+      try {
+        await bot.dig(ground); await collectDrops(bot, 2)
+        await placeAt(bot, ground.position, /^(dirt|coarse_dirt)$/)
+      } catch {}
+    }
   }
   return true
 }
@@ -1972,6 +1991,12 @@ async function plantGrove (bot, home, logItem, { isStopped = () => false, say = 
   {
     const w = cols * 5; const h = 4 * 5
     let ops = 0
+    // STOCK DIRT first (operator order: flat DIRT floor): hole-fills and rubble-top
+    // swaps both eat dirt, and running dry mid-plot left holes. Dirt digs fast anywhere.
+    if (countItem(bot, 'dirt') < 48 && !isStopped()) {
+      dbg('  orchard: stocking dirt for the leveling (' + countItem(bot, 'dirt') + ' on hand)')
+      try { await runGather(bot, 'dirt', 64, { isStopped, restoreMovements: () => {}, home: { x: gx, z: gz }, avoid }) } catch (e) { dbg('  orchard: dirt stock-up failed (' + e.message + ') - leveling with what we have') }
+    }
     say('leveling the orchard plot first')
     // MULTI-PASS until actually flat (operator review: one 60-cell pass left "holes and
     // a little bit of hill"). Each pass shaves deeper and fills another layer, so bumps
