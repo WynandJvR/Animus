@@ -1519,11 +1519,26 @@ async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () =
   if (hasSolidCeiling(bot, 12) || nearHostile(bot, 16) || isNight(bot)) { dbg('  wheat farm: bad moment (cave/hostiles/night) - deferred'); return false }
   // 1) surface water within reach of home - farmland must sit beside it
   const waterId = mcData.blocksByName.water.id
-  const waters = (bot.findBlocks({ matching: waterId, maxDistance: 48, count: 64 }) || [])
+  const findWaters = () => (bot.findBlocks({ matching: waterId, maxDistance: 48, count: 64 }) || [])
     .filter(p => { const a = bot.blockAt(p.offset(0, 1, 0)); return a && AIRISH(a.name) })
     .filter(p => !inAvoidBox(avoid, p.x, p.z))
+  let waters = findWaters()
+  if (!waters.length) {
+    // No pond in sight - but maybe we REMEMBER one. The camp runs this from the site,
+    // where the nearest pond sits beyond 48 blocks: every camp farm attempt deferred
+    // forever while the bot starved (live, all morning). Ponds seen during any earlier
+    // attempt are in the infra registry - trek back to one.
+    const known = recallInfra('water', bot.entity.position, 120)
+    if (known && !isStopped()) {
+      dbg('  wheat farm: no water in sight - walking to remembered pond at ' + known.x + ',' + known.z)
+      try { await walkStaged(bot, known.x, known.z, { isStopped, range: 6, timeoutMs: 90000 }) } catch {}
+      waters = findWaters()
+      if (!waters.length) forgetInfra('water', listInfra('water').find(e => e.x === known.x && e.z === known.z))
+    }
+  }
   if (!waters.length) { dbg('  wheat farm: no surface water within 48 - deferred'); return false }
   const w = waters[0]
+  rememberInfra('water', { x: w.x, y: w.y, z: w.z }) // future camp passes trek straight back
   // 2) a hoe (wooden: 2 planks + 2 sticks)
   let hoe = (bot.inventory ? bot.inventory.items() : []).find(i => /_hoe$/.test(i.name))
   if (!hoe) {
