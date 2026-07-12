@@ -322,9 +322,19 @@ async function openNearbyDoor (bot, opts = {}) {
           if (posCovered !== negCovered) { sign = posCovered ? -1 : 1; how = ' (open sky)' } // walk to the uncovered (outdoor) side
           else { sign = Math.sign((base.x + 0.5 - before.x) * dx + (base.z + 0.5 - before.z) * dz) || 1; how = ' (fallback)' }
         }
-        // GROUNDED sanity: never force-walk at a wall. If the chosen far side isn't a
-        // standable column but the opposite one is, the side pick was wrong - flip it.
-        if (!walkable(base.offset(dx * sign * 2, 0, dz * sign * 2)) && walkable(base.offset(-dx * sign * 2, 0, -dz * sign * 2))) { sign = -sign; how += ' FLIPPED (chosen side blocked)' }
+        // GROUNDED sanity: never force-walk at a WALL. Flip only when the chosen far
+        // side is wall-like (no walk gap at any tolerated step height) and the other
+        // side has one. A FLOORLESS far side is NOT wall-like: a blast crater beyond
+        // the doorstep is still crossable (step out and drop, recoveries handle the
+        // climb) - flipping on it walked the bot right back inside its hut (live).
+        const blockedSolid = (cell) => {
+          for (const dy of [0, 1, -1]) {
+            const feet = bot.blockAt(cell.offset(0, dy, 0)); const head = bot.blockAt(cell.offset(0, dy + 1, 0))
+            if (clearCell(feet) && clearCell(head)) return false
+          }
+          return true
+        }
+        if (blockedSolid(base.offset(dx * sign * 2, 0, dz * sign * 2)) && !blockedSolid(base.offset(-dx * sign * 2, 0, -dz * sign * 2))) { sign = -sign; how += ' FLIPPED (chosen side blocked)' }
         dbg('door-assist: exit side ' + (dx ? (sign > 0 ? 'east' : 'west') : (sign > 0 ? 'south' : 'north')) + how)
         // CRATERED DOORSTEP: if a threshold cell of MY OWN hut door is unwalkable (a
         // creeper blast ate the apron, live: every crossing dropped into a 2-deep pit
