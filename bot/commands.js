@@ -409,6 +409,7 @@ async function travelFar (bot, dest, opts = {}) {
   let gathers = 0
   let doorAssists = 0
   let climbs = 0
+  let pitEscapes = 0
   let lastSurvival = 0  // throttle the per-leg survival check
   let climbTimeMs = 0   // time spent digging out of caves / sheltering - doesn't count against the travel clock
   // Are we buried in a cave WELL below the (surface) target? We only ever climb for this -
@@ -506,6 +507,29 @@ async function travelFar (bot, dest, opts = {}) {
         }
         // Stalled AND buried -> dig out (the per-leg buried() check usually gets this first).
         if (stalls >= 2 && buried()) { await surfaceOut("stuck underground - digging up toward the surface..."); stalls = 0; lastD = Infinity; continue }
+        // PIT ESCAPE: an open-sky hole (solid walls on 3+ sides at feet level) makes the
+        // no-dig travel profile no-path INSTANTLY - legs cycle in milliseconds and every
+        // rescue above is skipped (no door, blocks in pack, no ceiling). This was the
+        // "stalls on open ground" mystery: the bot idled 70s in its own orchard-leveling
+        // hole, live. Pillar out with carried blocks to the rim, then re-plan.
+        if (stalls >= 2 && pitEscapes < 3) {
+          const f0 = bot.entity.position.floored()
+          let pitWalls = 0; let rimY = f0.y
+          for (const [wdx, wdz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            const w = bot.blockAt(f0.offset(wdx, 0, wdz))
+            if (w && w.boundingBox === 'block') pitWalls++
+            for (let dy = 2; dy >= 0; dy--) {
+              const t = bot.blockAt(f0.offset(wdx, dy, wdz))
+              if (t && t.boundingBox === 'block') { rimY = Math.max(rimY, f0.y + dy + 1); break }
+            }
+          }
+          if (pitWalls >= 3) {
+            dbg('travel: wedged in a PIT at ' + f0.x + ',' + f0.z + ' - pillaring out to y=' + rimY)
+            try { await provision.pillarUpTo(bot, rimY, { isStopped }) } catch (e) { dbg('travel: pillar-out failed (' + e.message + ')') }
+            bot.pathfinder.setMovements(travelMovements(bot))
+            if (Math.floor(bot.entity.position.y) > f0.y) { pitEscapes++; stalls = 0; lastD = Infinity; continue }
+          }
+        }
         if (stalls >= 4) return { ok: false, reason: 'blocked', dist: nd }
       } else stalls = 0
       lastD = nd
