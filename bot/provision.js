@@ -593,9 +593,31 @@ const FILLER_RE = /^(cobblestone|dirt|coarse_dirt|stone|gravel|andesite|diorite|
 // vertical shaft: only break the block underfoot when the block TWO below is solid and
 // non-dangerous, so we never drop into lava/water/a cave. One at a time, falling in,
 // with the right tool. Returns how deep it dug. Climb back out via pillarUpTo.
+// Is the bot standing on/next to a remembered HUT (footprint + a 2-block apron, so the
+// doorway stays walkable)? Strip-mining must NOT open a shaft here - it dug a pit right
+// in front of the door and the bot then struggled to get into its own safehouse (live).
+function onHutApron (bot, pos) {
+  const p = pos || bot.entity.position.floored()
+  for (const h of listInfra('hut')) {
+    if (p.x >= h.x - 2 && p.x <= h.x + 6 && p.z >= h.z - 2 && p.z <= h.z + 6) return h
+  }
+  return null
+}
+
 async function digShaftDown (bot, maxDepth, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const DANGER = /lava|water/
+  // Never sink a shaft on the hut's doorstep. Step clear of the apron first (toward the
+  // build site if we know it, else just off the apron) so the entrance stays intact.
+  if (onHutApron(bot)) {
+    const h = onHutApron(bot)
+    const away = opts.home && (Math.abs(opts.home.x - h.x) > 8 || Math.abs(opts.home.z - h.z) > 8)
+      ? new Vec3(opts.home.x, bot.entity.position.y, opts.home.z)
+      : new Vec3(h.x + 12, bot.entity.position.y, h.z + 12)
+    dbg('  shaft: on the hut apron - stepping clear to ' + Math.round(away.x) + ',' + Math.round(away.z) + ' before digging')
+    try { await gotoWithTimeout(bot, new goals.GoalNearXZ(away.x, away.z, 3), 20000) } catch {}
+    if (onHutApron(bot)) { dbg('  shaft: still on apron - refusing to dig here'); return 0 }
+  }
   let dug = 0
   while (dug < maxDepth && !isStopped()) {
     const feet = bot.entity.position.floored()
@@ -2310,7 +2332,7 @@ async function gatherLoop (bot, item, count, opts = {}) {
       if (canStrip && stripDug < MAX_STRIP && stripBudget() > 0) {
         if (opts.say && stripDug === 0) opts.say(`no ${sources[0]} up here - digging down to reach it`)
         dbg('  gather strip-shaft #' + stripDug + ' budget=' + stripBudget() + ' at y=' + Math.floor(bot.entity.position.y))
-        const dug = await digShaftDown(bot, stripBudget(), { isStopped })
+        const dug = await digShaftDown(bot, stripBudget(), { isStopped, home })
         dbg('  gather strip-shaft dug=' + dug)
         if (dug > 0) { const got = await mineTunnel(bot, item, 16, stripDug, { isStopped }); dbg('  gather tunnel got=' + got); stripDug++; dryExplores = 0; continue } // count only SUCCESSFUL shafts
         // Couldn't dig down here (water/void/lava underfoot - e.g. a riverbed at the fence
@@ -2411,7 +2433,7 @@ async function gatherLoop (bot, item, count, opts = {}) {
       if (canStrip && reachFails >= 3 && stripDug < MAX_STRIP && stripBudget() > 0) {
         if (opts.say && stripDug === 0) opts.say(`the ${sources[0]} is all buried - digging down to it`)
         dbg('  gather buried-strip #' + stripDug + ' budget=' + stripBudget() + ' at y=' + Math.floor(bot.entity.position.y))
-        const dug = await digShaftDown(bot, stripBudget(), { isStopped })
+        const dug = await digShaftDown(bot, stripBudget(), { isStopped, home })
         if (dug > 0) { const got = await mineTunnel(bot, item, 16, stripDug, { isStopped }); dbg('  gather buried-strip dug=' + dug + ' tunnel got=' + got) } else dbg('  gather buried-strip dug=0')
         stripDug++; reachFails = 0
       }
