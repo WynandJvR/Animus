@@ -37,12 +37,21 @@ function isRecovering () { return recoveringDepth > 0 }
 // Active navigations (for observability + later flow arbitration).
 let navDepth = 0
 function isNavigating () { return navDepth > 0 }
+// A watchdog force-escape is driving on manual controls - other gotos must stand down.
+let forceUnsticking = false
+function isForceUnsticking () { return forceUnsticking }
 
 // ---- the ONE deadline-goto ----------------------------------------------------------
 // pathfinder.goto with a hard deadline. An unreachable target can hang goto FOREVER
 // (verified live: froze a 432-block build for 10+ minutes; froze the whole brain loop).
 // This used to exist as three identical copies (commands/provision/schematic).
-function gotoOnce (bot, goal, ms = 20000) {
+async function gotoOnce (bot, goal, ms = 20000) {
+  // Yield to a watchdog FORCE-ESCAPE: its manual maneuvers must not fight a concurrent
+  // goto's physics ticks (both write control states - the escape loses). Bounded wait.
+  if (forceUnsticking) {
+    const t0 = Date.now()
+    while (forceUnsticking && Date.now() - t0 < 45000) await new Promise(r => setTimeout(r, 250))
+  }
   // SCAFFOLD SESSION: any block the pathfinder places while EXECUTING a goto (bridge,
   // 1x1 tower) is by definition movement scaffold, never build fabric - build blocks
   // are placed after the goto completes. The bracket lets the scaffold manager tag and
@@ -428,7 +437,7 @@ async function openNearbyDoor (bot, opts = {}) {
 // help right now; run() maneuvers. A recovery "worked" if the bot demonstrably MOVED
 // (>=2 blocks horizontally or rose >=1) or the entry vouches for itself (door-assist
 // returns whether it crossed) - re-read the world, never trust intent.
-function defaultBudgets () { return { water: 2, door: 3, pit: 2, climb: 2, nudge: 2 } }
+function defaultBudgets () { return { water: 2, door: 3, pit: 2, climb: 2, nudge: 2, stepout: 2 } }
 
 async function recoverOnce (bot, goal, counts, budgets, opts) {
   const isStopped = opts.isStopped || (() => false)
@@ -501,6 +510,59 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
         } catch {} finally { bot.clearControlStates() }
         return movedEnough()
       }
+    },
+    { // SOFT WEDGE, last rung: the planner refuses to move but the immediate cells are
+      // walkable (live: 12-min freeze at 512,68,147 with air/grass on every side - the
+      // whole ladder above whiffed and walkStaged looped "giving up wedged"). Do the
+      // dumbest human thing: hop in place (clears a block-clip desync), then STEP OUT one
+      // or two cells on manual controls - goal-ward first - and verify we actually moved.
+      // Unlike the nudge this needs no goal, tolerates a step down, and probes each of 8
+      // directions instead of blindly charging one.
+      kind: 'stepout',
+      when: () => bot.entity.onGround || feetInWater(bot),
+      run: async () => {
+        try { bot.pathfinder.setGoal(null) } catch {}
+        bot.clearControlStates()
+        try { bot.setControlState('jump', true); await new Promise(r => setTimeout(r, 260)) } catch {} finally { bot.setControlState('jump', false) }
+        await new Promise(r => setTimeout(r, 300)) // land
+        const feet = bot.entity.position.floored()
+        const clear = b => !b || b.boundingBox !== 'block'
+        const walkable = (cell) => { // can the bot stand there? (±1: steps up/down are fine)
+          for (const dy of [0, -1, 1]) {
+            const f = bot.blockAt(cell.offset(0, dy, 0)); const h = bot.blockAt(cell.offset(0, dy + 1, 0)); const g = bot.blockAt(cell.offset(0, dy - 1, 0))
+            if (clear(f) && clear(h) && g && g.boundingBox === 'block' && !/lava|magma/.test(g.name)) return true
+          }
+          return false
+        }
+        const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]
+        if (xz) { // try the goal-ward directions first
+          const gx = xz.x - (feet.x + 0.5); const gz = xz.z - (feet.z + 0.5)
+          dirs.sort((a, b) => (b[0] * gx + b[1] * gz) / Math.hypot(b[0], b[1]) - (a[0] * gx + a[1] * gz) / Math.hypot(a[0], a[1]))
+        }
+        for (const [dx, dz] of dirs) {
+          const c1 = feet.offset(dx, 0, dz)
+          if (!walkable(c1)) continue
+          const c2 = feet.offset(dx * 2, 0, dz * 2)
+          const steps = walkable(c2) ? 2 : 1 // 2 cells out when the lane continues
+          const tx = feet.x + 0.5 + dx * steps; const tz = feet.z + 0.5 + dz * steps
+          dbg('recovery: step-out ' + steps + ' cell(s) toward ' + Math.floor(tx) + ',' + Math.floor(tz))
+          try {
+            await bot.lookAt(new Vec3(tx, bot.entity.position.y + 1.2, tz), true)
+            bot.setControlState('forward', true)
+            const t0 = Date.now()
+            while (Date.now() - t0 < 1800) {
+              await new Promise(r => setTimeout(r, 100))
+              if (Math.hypot(bot.entity.position.x - tx, bot.entity.position.z - tz) < 0.4) break
+              if (Date.now() - t0 > 600 && bot.entity.position.distanceTo(p0) < 0.3) { // bumped - hop once
+                bot.setControlState('jump', true); await new Promise(r => setTimeout(r, 150)); bot.setControlState('jump', false)
+              }
+            }
+          } catch {} finally { bot.clearControlStates() }
+          const p1 = bot.entity.position
+          if (Math.hypot(p1.x - p0.x, p1.z - p0.z) >= 1.0) return true // we broke the freeze - that's the job
+        }
+        return false
+      }
     }
   ]
   for (const step of ladder) {
@@ -544,6 +606,12 @@ async function navigateTo (bot, goal, opts = {}) {
   let interrupts = 0
   let recoveries = 0
   let recoveryMs = 0
+  // Time spent parked while a REFLEX held the pathfinder must not consume the deadline:
+  // in a reflex storm (creeper standoff re-fleeing every second, live 2h+) every nav
+  // burned its whole budget waiting and DIED at the deadline check before the recovery
+  // ladder ever ran once. Credit the wait back (bounded) so recovery always gets a shot.
+  let reflexWaitMs = 0
+  const dl = () => deadline + Math.min(reflexWaitMs, 90000)
   navDepth++
   try {
     for (;;) {
@@ -551,7 +619,7 @@ async function navigateTo (bot, goal, opts = {}) {
       if (opts.movements) { try { bot.pathfinder.setMovements(opts.movements()) } catch {} }
       let lastErr
       try {
-        await gotoOnce(bot, goal, Math.min(timeoutMs, Math.max(2000, deadline - Date.now())))
+        await gotoOnce(bot, goal, Math.min(timeoutMs, Math.max(2000, dl() - Date.now())))
         // GROUNDED, not optimistic: goto "succeeds" WITHOUT ARRIVING when the planner
         // returns an empty path (wedged in a pit = zero legal moves, verified live) or
         // settles at the closest reachable node. Only the goal's own isEnd on our real
@@ -570,9 +638,10 @@ async function navigateTo (bot, goal, opts = {}) {
         const t0 = Date.now()
         while (bot.pathfinder.goal && Date.now() - t0 < 15000 && !isStopped()) await new Promise(r => setTimeout(r, 250))
         await new Promise(r => setTimeout(r, 300)) // let the reflex's controls settle
+        reflexWaitMs += Date.now() - t0
         continue
       }
-      if (Date.now() >= deadline || isStopped()) throw honestFail(lastErr, counts, label, recoveryMs)
+      if (Date.now() >= dl() || isStopped()) throw honestFail(lastErr, counts, label, recoveryMs)
       const r0 = Date.now()
       const rescued = await recoverOnce(bot, goal, counts, budgets, opts)
       recoveryMs += Date.now() - r0
@@ -583,6 +652,37 @@ async function navigateTo (bot, goal, opts = {}) {
   } finally { navDepth-- }
 }
 
+// ---- watchdog FORCE-ESCAPE ---------------------------------------------------------
+// Called by index.js's freeze watchdog when the position has been FROZEN for minutes
+// while something was trying to move (live: 2h creeper standoff in a cave pocket; the
+// 12-min surface wedge). Runs the recovery ladder directly - no goal needed - with the
+// door rung OFF (door-assist calls gotoOnce, which yields to us: deadlock). Sets
+// forceUnsticking so concurrent gotos stand down instead of fighting the manual
+// controls, and recoveringDepth so the flee/defend reflexes hold off.
+async function forceUnstick (bot, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const p0 = bot.entity.position.clone()
+  forceUnsticking = true
+  recoveringDepth++
+  try {
+    try { bot.pathfinder.setGoal(null) } catch {}
+    bot.clearControlStates()
+    const counts = {}
+    const budgets = { water: 1, pit: 2, door: 0, climb: 2, nudge: 0, stepout: 2 }
+    for (let i = 0; i < 4 && !isStopped(); i++) {
+      const rescued = await recoverOnce(bot, null, counts, budgets, { isStopped })
+      if (!rescued) break
+      dbg('forceUnstick: ' + rescued + ' moved us to ' + bot.entity.position.floored())
+      // keep going only while still boxed in (buried or pitted) - once in the open the
+      // normal flows take back over
+      const buried = prov().hasSolidCeiling(bot, 12, { ignoreLeaves: true })
+      if (!buried && !detectPit(bot)) break
+    }
+  } finally { recoveringDepth--; forceUnsticking = false; bot.clearControlStates() }
+  const p1 = bot.entity.position
+  return Math.hypot(p1.x - p0.x, p1.z - p0.z) >= 1.5 || Math.abs(p1.y - p0.y) >= 1
+}
+
 function honestFail (lastErr, counts, label, recoveryMs) {
   const tried = Object.entries(counts).filter(([, n]) => n > 0).map(([k, n]) => k + ' x' + n).join(', ')
   const e = new Error(((lastErr && lastErr.message) || 'no path') + (tried ? ' (tried: ' + tried + ')' : ''))
@@ -590,4 +690,4 @@ function honestFail (lastErr, counts, label, recoveryMs) {
   return e
 }
 
-module.exports = { navigateTo, gotoOnce, openNearbyDoor, swimToShore, isNavigating, isRecovering, setDebugSink, detectPit, goalWasChanged }
+module.exports = { navigateTo, gotoOnce, openNearbyDoor, swimToShore, isNavigating, isRecovering, isForceUnsticking, forceUnstick, setDebugSink, detectPit, goalWasChanged }

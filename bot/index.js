@@ -692,6 +692,14 @@ let lastDefendTarget = null
 let lastFleeAt = 0
 let dfLastHp = 20
 let dfHurtAt = 0 // when health last DROPPED - "someone is shooting me" detector
+// FLEE STANDOFF detector: fleeing the same threat for 12s+ without moving AND without
+// taking a hit means we CAN'T move (wedged) and it CAN'T reach us. Re-setting the flee
+// goal every second just steals the pathfinder from the nav/recovery that could free us
+// (live: a 2h+ creeper standoff in a cave pocket - every chest read / night-rest trek
+// died "goal taken by a reflex" while the creeper sat 8m away unable to close). Stand
+// down per-threat for 90s; a real hit re-arms flee instantly.
+let fleeEp = null // { id, start, pos } - the current flee episode
+const fleeFutileUntil = new Map() // entity id -> epoch ms until which flee is suppressed
 let lastChargeNoteAt = 0
 const RANGED_RE = /skeleton|stray|bogged|pillager/i
 if (process.env.AUTO_DEFEND !== '0') {
@@ -741,6 +749,21 @@ if (process.env.AUTO_DEFEND !== '0') {
       }
       if (flee) {
         const now = Date.now()
+        // standoff suppression (see fleeFutileUntil above) - a hit always re-arms
+        if (!beingHit && (fleeFutileUntil.get(flee.id) || 0) > now) return
+        if (!fleeEp || fleeEp.id !== flee.id) fleeEp = { id: flee.id, start: now, pos: me.clone() }
+        // rolling window: any real movement re-bases the episode, so only a sustained
+        // freeze (not a flee that ran 20 blocks then paused) reads as a standoff
+        if (Math.hypot(me.x - fleeEp.pos.x, me.z - fleeEp.pos.z) >= 2.5) { fleeEp.start = now; fleeEp.pos = me.clone() }
+        else if (!beingHit && now - fleeEp.start > 12000) {
+          fleeFutileUntil.set(flee.id, now + 90000)
+          for (const [id, t] of fleeFutileUntil) { if (t <= now) fleeFutileUntil.delete(id) } // prune
+          fleeEp = null
+          try { bot.pathfinder.setGoal(null) } catch {} // release the pathfinder we've been hogging
+          bot.setControlState('sprint', false)
+          note(`(flee) STANDOFF with ${flee.name || why} ${fbest.toFixed(1)}m - can't move and it can't reach me; standing down 90s so nav/recovery can work`)
+          return
+        }
         if (flee !== lastDefendTarget || now - lastFleeAt > 1000) {
           const away = me.minus(flee.position)
           const dest = me.plus(away.scaled(16 / (away.norm() || 1))) // back off ~16 blocks (past creeper aggro range)
@@ -799,6 +822,44 @@ if (process.env.AUTO_DEFEND !== '0') {
       if (target !== lastDefendTarget) { note(`(auto-defend) ${target.name}`); lastDefendTarget = target } // log on change only
     } catch { /* not ready */ }
   }, 700)
+}
+
+// HARD-WEDGE WATCHDOG: the last line of defense against multi-minute position freezes.
+// If the body has been TRYING to move (pathfinder goal set / a navigation active) but
+// the position hasn't budged for 2.5 minutes, force an escape through the recovery
+// ladder directly (navigate.forceUnstick: hop, step-out, pillar/climb - all manual
+// controls + natural-terrain digs only). Catches the cases the per-nav ladder can't:
+// reflex storms that eat every nav's deadline, and isBusy() builds where the normal
+// stuck detector is deliberately blind (live: a 2h creeper-standoff freeze in a cave
+// pocket showed stuck:null the whole time). Disable with WEDGE_WATCHDOG=0.
+if (process.env.WEDGE_WATCHDOG !== '0') {
+  let wdHist = [] // ring of {x,y,z,t}
+  let wdBusy = false
+  let wdLastFire = 0
+  setInterval(async () => {
+    if (wdBusy || !bot.entity || bot.health <= 0) return
+    const now = Date.now()
+    const p = bot.entity.position
+    wdHist.push({ x: p.x, y: p.y, z: p.z, t: now })
+    while (wdHist.length && now - wdHist[0].t > 200000) wdHist.shift()
+    // "trying to move" = someone is steering; a bot smelting/sleeping/digging in place is fine
+    const trying = !!(bot.pathfinder && bot.pathfinder.goal) || navigate.isNavigating()
+    if (!trying || bot.isSleeping || bot.targetDigBlock) return
+    if (navigate.isRecovering() || navigate.isForceUnsticking() || (commands.isEscaping && commands.isEscaping())) return
+    const old = wdHist.find(h => now - h.t >= 150000)
+    if (!old) return // not enough history yet
+    const moved = Math.hypot(p.x - old.x, p.y - old.y, p.z - old.z)
+    if (moved >= 1.5) return
+    if (now - wdLastFire < 240000) return // one forced escape per 4 min - never a tight loop
+    wdLastFire = now
+    wdBusy = true
+    try {
+      note(`(watchdog) position FROZEN ~${Math.round((now - old.t) / 1000)}s at ${p.floored()} while trying to move - forcing an escape`)
+      const ok = await navigate.forceUnstick(bot)
+      note(`(watchdog) force-escape ${ok ? 'MOVED me to ' + bot.entity.position.floored() : 'could not move me - will retry in 4 min'}`)
+      if (ok) wdHist = []
+    } catch (e) { note(`(watchdog) force-escape failed: ${e.message}`) } finally { wdBusy = false }
+  }, 5000).unref?.()
 }
 
 // Auto-collect: when idle (no active pathfinder goal) and a dropped item is close
