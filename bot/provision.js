@@ -2830,6 +2830,55 @@ async function boneMealBlock (bot, pos, times) {
   }
 }
 
+// Till a bank block (dirt/grass) to farmland, VERIFIED by a world re-read. Returns:
+//   'farmland' - the cell is farmland now (already was, or the hoe took)
+//   'flooded'  - the crop cell above holds water that won't clear (unfarmable here)
+//   'unfarmable' | 'nohoe' | false - couldn't till (bad base / no hoe / hoe was a no-op)
+// ROOT CAUSE of the live "till did not take (got dirt)": MC only converts dirt->farmland
+// when the block DIRECTLY ABOVE is air (HoeItem checks pos.above().isAir()). If water has
+// flowed into the crop cell (a bank at the waterline, or flow opened by digging the veg),
+// the hoe is a SILENT no-op and the block stays dirt - reproduced live + on the test server.
+// Equip/reach/look are all fine (a clean dry cell tills first try); the ONLY blocker is a
+// non-air crop cell. So: guarantee the crop cell is air (clear veg/water, let flow settle,
+// re-read) BEFORE firing the hoe - then the till takes. A cell that keeps re-flooding is
+// genuinely unfarmable (water would wash the seed out too) and is honestly reported 'flooded'.
+async function tillCell (bot, cell) {
+  const cropPos = cell.position.offset(0, 1, 0)
+  let base = bot.blockAt(cell.position)
+  if (base && farm.farmlandReady(base.name)) return 'farmland'
+  if (!base || !farm.tillableBank(base.name)) return 'unfarmable'
+  // Ensure the crop cell above is air, or the hoe silently no-ops.
+  let above = bot.blockAt(cropPos)
+  if (above && !AIRISH(above.name)) {
+    if (/water|bubble_column|kelp|seagrass/.test(above.name)) {
+      // Displace the water: drop a carried block into the cell, then break it. A lone source
+      // is consumed (cell -> air); water still fed by a neighbour source reflows and we skip.
+      const filler = (bot.inventory ? bot.inventory.items() : []).find(i => /^(dirt|coarse_dirt|cobblestone|cobbled_deepslate|stone|granite|diorite|andesite|netherrack|gravel)$/.test(i.name))
+      if (filler) {
+        try {
+          if (await placeAt(bot, cropPos, new RegExp('^' + filler.name + '$'))) {
+            const plug = bot.blockAt(cropPos)
+            if (plug && plug.boundingBox === 'block') await bot.dig(plug)
+          }
+        } catch {}
+      }
+    } else if (REPLACEABLE.test(above.name)) {
+      try { await bot.dig(above) } catch {}
+    }
+    await new Promise(r => setTimeout(r, 350)) // let any flow settle before re-reading
+    above = bot.blockAt(cropPos)
+    if (above && !AIRISH(above.name)) { dbg('  till: crop cell above ' + cropPos.toString() + " won't clear (" + above.name + ') - skipping (flood-prone)'); return 'flooded' }
+  }
+  const hoe = (bot.inventory ? bot.inventory.items() : []).find(i => /_hoe$/.test(i.name))
+  if (!hoe) return 'nohoe'
+  await bot.equip(hoe, 'hand')
+  base = bot.blockAt(cell.position) // re-read (position stable; name may have swapped)
+  try { await bot.activateBlock(base) } catch (e) { dbg('  till: activateBlock threw (' + e.message + ')') }
+  await new Promise(r => setTimeout(r, 200))
+  const tilled = bot.blockAt(cell.position)
+  return (tilled && farm.farmlandReady(tilled.name)) ? 'farmland' : false
+}
+
 async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () => {}, avoid = null } = {}) {
   const mcData = require('minecraft-data')(bot.version)
   const m = loadWorldMem()
@@ -2961,12 +3010,11 @@ async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () =
         if (!swapped || !/^(dirt|grass_block)$/.test(swapped.name)) continue
         cell = swapped
       }
-      await bot.equip((bot.inventory ? bot.inventory.items() : []).find(i => /_hoe$/.test(i.name)), 'hand')
-      await bot.activateBlock(cell) // till to farmland
-      await new Promise(r => setTimeout(r, 150))
-      // BLOCK-READ the till: only proceed if the cell is REALLY farmland now (no faith).
+      // TILL to farmland - tillCell guarantees the crop cell above is air first (a watered
+      // crop cell makes the hoe a silent no-op: the live "till did not take (got dirt)" bug).
+      const tr = await tillCell(bot, cell)
+      if (tr !== 'farmland') { dbg('  wheat farm: till did not take at ' + cell.position.toString() + ' (' + tr + ', got ' + ((bot.blockAt(cell.position) || {}).name || '?') + ')'); continue }
       const tilled = bot.blockAt(cell.position)
-      if (!tilled || !farm.farmlandReady(tilled.name)) { dbg('  wheat farm: till did not take at ' + cell.position.toString() + ' (got ' + ((tilled && tilled.name) || '?') + ')'); continue }
       const seeds = (bot.inventory ? bot.inventory.items() : []).find(i => i.name === 'wheat_seeds')
       if (!seeds) break
       await bot.equip(seeds, 'hand')
@@ -3012,9 +3060,10 @@ async function replantCropCell (bot, cropPos, { isStopped = () => false } = {}) 
   if (occ && !AIRISH(occ.name) && REPLACEABLE.test(occ.name)) { try { await bot.dig(occ) } catch {} }
   if (!farm.farmlandReady(base.name)) {
     if (!farm.tillableBank(base.name)) { dbg('  wheat replant: base at ' + basePos.toString() + ' is ' + base.name + ' - cannot till here'); return false }
-    const hoe = (bot.inventory ? bot.inventory.items() : []).find(i => /_hoe$/.test(i.name))
-    if (!hoe) { dbg('  wheat replant: cell needs tilling but no hoe on hand'); return false }
-    try { await bot.equip(hoe, 'hand'); await bot.activateBlock(base); await new Promise(r => setTimeout(r, 150)) } catch { return false }
+    if (!(bot.inventory ? bot.inventory.items() : []).find(i => /_hoe$/.test(i.name))) { dbg('  wheat replant: cell needs tilling but no hoe on hand'); return false }
+    // tillCell clears any water in the crop cell first (the silent-no-op till bug), then fires.
+    const tr = await tillCell(bot, { position: basePos, name: base.name })
+    if (tr !== 'farmland') { dbg('  wheat replant: till did not take at ' + basePos.toString() + ' (' + tr + ')'); return false }
     base = bot.blockAt(basePos)
     if (!base || !farm.farmlandReady(base.name)) return false
   }
