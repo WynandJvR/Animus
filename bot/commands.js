@@ -768,10 +768,18 @@ async function ironArmorBootstrap (bot, opts = {}) {
   const runOpts = { say, isStopped, restoreMovements: restore, homeY: Math.floor(at.y), home: homeXYZ, avoid }
   const bareList = () => IRON_PIECES.filter(p => !wornArmor(bot)[p.slot])
   try {
-    // stage 1: a stone pick FIRST (the planner orders it after the iron gather that
-    // needs it - offline-verified); stage 2 then plans cleanly around the owned pick
-    if (!(bot.inventory ? bot.inventory.items() : []).some(i => /(stone|iron|diamond)_pickaxe/.test(i.name))) {
-      const pprec = await resources.reconcile(bot, { stone_pickaxe: 1 }, { near: at, planOpts: { primaryWood } })
+    // stage 1: a stone pick to mine with AND a sword to defend - the deep iron grind is a
+    // naked cave dive where zombie+skeleton ambushes kept killing the bot (it had no weapon
+    // at all - gearup only made a pickaxe). A cheap wooden sword gives the auto-defend reflex
+    // something better than fists when a mob corners it mid-retreat.
+    const items0 = () => (bot.inventory ? bot.inventory.items() : [])
+    const needPick = !items0().some(i => /(stone|iron|diamond)_pickaxe/.test(i.name))
+    const needSword = !items0().some(i => /_sword$/.test(i.name))
+    if (needPick || needSword) {
+      const want = {}
+      if (needPick) want.stone_pickaxe = 1
+      if (needSword) want.wooden_sword = 1
+      const pprec = await resources.reconcile(bot, want, { near: at, planOpts: { primaryWood } })
       if (pprec.withdraws.length || pprec.plan.tasks.length) await resources.runReconciled(bot, pprec, runOpts)
     }
     // stage 2: ONE batch gather for all the iron the bare slots need (banked iron counts

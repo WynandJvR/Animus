@@ -758,6 +758,7 @@ async function digShaftDown (bot, maxDepth, opts = {}) {
   }
   let dug = 0
   while (dug < maxDepth && !isStopped()) {
+    if (mineDanger(bot)) { dbg('  shaft: hostile close / hp low - bailing the descent to react'); break } // hand control back to the gather's survival reflex
     const feet = bot.entity.position.floored()
     const below = bot.blockAt(feet.offset(0, -1, 0))
     const below2 = bot.blockAt(feet.offset(0, -2, 0))
@@ -983,6 +984,7 @@ async function mineTunnel (bot, itemName, maxLen, dirIdx, opts = {}) {
   const dir = DIRS[((dirIdx % 4) + 4) % 4]
   const before = countItem(bot, itemName)
   for (let i = 0; i < maxLen && !isStopped(); i++) {
+    if (mineDanger(bot)) break // hostile close / hp low -> return control to the gather's survival reflex (don't stay locked in dig-awaits taking hits)
     const feet = bot.entity.position.floored()
     const ahead = feet.plus(dir)
     const aheadUp = ahead.offset(0, 1, 0)
@@ -990,6 +992,12 @@ async function mineTunnel (bot, itemName, maxLen, dirIdx, opts = {}) {
     const fB = bot.blockAt(floor)
     if ([ahead, aheadUp, floor].some(p => { const b = bot.blockAt(p); return b && DANGER.test(b.name) })) break
     if (!fB || AIRISH(fB.name)) break // drop/cave ahead -> stop (don't walk into a hole)
+    // DON'T OPEN A CAVERN naked: if the cells one step BEYOND the face are already open
+    // air, breaking in exposes us to whatever's in the dark cave (the zombie+skeleton
+    // ambush that killed the gearup bot came from tunnelling into an open cave at y39).
+    const beyond = ahead.plus(dir)
+    const bBeyond = bot.blockAt(beyond); const bBeyondUp = bot.blockAt(beyond.offset(0, 1, 0))
+    if ((bBeyond && AIRISH(bBeyond.name)) && (bBeyondUp && AIRISH(bBeyondUp.name))) break
     let dugAny = false
     for (const p of [aheadUp, ahead]) {
       const b = bot.blockAt(p)
@@ -1227,6 +1235,12 @@ function nearHostile (bot, r) {
   }
   return false
 }
+// DANGER WHILE MINING: a cave hostile has closed to melee/bow range, or hp is crashing.
+// The idle flee/defend reflexes can't help mid-dig (the bot is committed inside bot.dig()
+// awaits, not the pathfinder), so the tight dig loops + the gather loop poll THIS and bail
+// to a survival reaction. Naked deep gearup mining died at ~1hp three times (verified live:
+// y39-40, zombie in melee + skeleton firing, flee:false) - this is the missing reflex.
+function mineDanger (bot) { return nearHostile(bot, 6) || (bot.health ?? 20) < 12 }
 function underArmored (bot) {
   try { for (const s of ['head', 'torso', 'legs', 'feet']) { if (!(bot.inventory && bot.inventory.slots[bot.getEquipmentDestSlot(s)])) return true } return false } catch { return true }
 }
@@ -2818,8 +2832,44 @@ async function gatherLoop (bot, item, count, opts = {}) {
     mined++
   }
 
+  // MID-MINE COMBAT SURVIVAL: the ONE reaction to a hostile that closes (or hp crashing)
+  // while mining. The dig loops bail to here; the gather loop polls it first each pass. Deep
+  // underground -> RETREAT UP to the surface (climbToSurface: bounded, walls a staircase as
+  // it goes, the only mob-safe escape from a shaft). Already at/near the surface, or hp
+  // critical -> BAIL the whole gather so isBusy clears and the full flee/defend/shelter
+  // reflexes (which are useless mid-dig) take over. Returns 'bail' | 'up' | false.
+  let threatReacts = 0
+  async function surviveMiningThreat () {
+    if (!mineDanger(bot)) return false
+    threatReacts++
+    const hp = bot.health ?? 20
+    const feetY = Math.floor(bot.entity.position.y)
+    const deep = feetY < Math.floor(surfaceY) - 3 && hasSolidCeiling(bot, 12, { ignoreLeaves: true })
+    dbg('  gather THREAT while mining #' + threatReacts + ' (hp=' + hp.toFixed(1) + ', hostile<=6=' + nearHostile(bot, 6) + ', deep=' + deep + ') - reacting')
+    if (opts.say && threatReacts <= 2) opts.say('mob on me down here - breaking off to get clear')
+    try { bot.pathfinder && bot.pathfinder.setGoal(null) } catch {}
+    // DEEP: retreat UP (the staircase walls behind us as we climb, shedding the chasers) -
+    // this is the mob-safe escape and the ONLY thing that reliably gets us out of a shaft.
+    // Each climb is awaited (no busy-spin). After a few scares this run the spot is a
+    // deathtrap - stop climbing and bail. SHALLOW (near/at surface): bail straight away so
+    // the un-gated flee/defend/shelter reflexes (useless mid-dig) finally take over.
+    if (deep && threatReacts <= 4) {
+      try { await climbToSurface(bot, Math.floor(surfaceY), { isStopped }) } catch (e) { dbg('  gather threat: climb-out failed (' + e.message + ')') }
+      return 'up'
+    }
+    return 'bail'
+  }
+
   let lastBeat = 0 // throttled trace heartbeat - the LAST line before a hang names the branch
   while (countItem(bot, item) - start < count) {
+    // SURVIVAL FIRST: a cave mob closing (or hp crashing) mid-mine gets reacted to BEFORE
+    // any more digging - the death-carousel was naked gearup mining standing in a shaft at
+    // 1hp because it never broke off. Deep -> climb out; surface/critical -> yield the gather.
+    {
+      const react = await surviveMiningThreat()
+      if (react === 'bail') return { gathered: countItem(bot, item) - start, reason: 'broke off mining to survive a mob / low hp - getting to safety' }
+      if (react) continue
+    }
     if (Date.now() - lastBeat > 5000) {
       lastBeat = Date.now()
       const p = bot.entity.position.floored()
@@ -3080,7 +3130,7 @@ async function gatherLoop (bot, item, count, opts = {}) {
     if (cur && belowCap(cur.position.y)) cur = null // don't descend via the cluster either
     let n = 0
     while (cur && n < 8 && countItem(bot, item) - start < count && haveReqTool()) {
-      if (isStopped()) break
+      if (isStopped() || mineDanger(bot)) break // a mob closed mid-cluster -> back to the survival check at the loop top
       try { await breakBlock(cur) } catch { failed.set(pkey(cur.position), (failed.get(pkey(cur.position)) || 0) + 1); break }
       n++
       cur = bot.findBlock({ matching: ids, maxDistance: 4 })
