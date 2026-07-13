@@ -3742,6 +3742,26 @@ async function healBankDouble (bot, hut, opts = {}) {
     const b = list.find(o => o !== a && o.y === a.y && Math.abs(o.x - a.x) + Math.abs(o.z - a.z) === 1)
     if (b) { pair = [a, b]; break }
   }
+  if (!pair) {
+    // The other half STANDS in the world but fell out of infra memory (the schematic
+    // rebuild registers only ONE chest cell; an aborted heal forgets the half it dug,
+    // live: 418,66,87 west stood unregistered while the model saw a lone single). An
+    // adjacent standing chest inside the bot's own hut IS the bank's other half - adopt
+    // it back into the registry.
+    for (const a of list) {
+      for (const [dx, dz] of [[0, 1], [0, -1], [1, 0], [-1, 0]]) {
+        const cell = { x: a.x + dx, y: a.y, z: a.z + dz }
+        if (!insideHutBox(cell, hut)) continue
+        const cb = bot.blockAt(new Vec3(cell.x, cell.y, cell.z))
+        if (cb && /chest$/.test(cb.name)) {
+          rememberInfra('chest', new Vec3(cell.x, cell.y, cell.z))
+          dbg('bank heal: adopted the unregistered half at ' + cell.x + ',' + cell.y + ',' + cell.z + ' back into the registry')
+          pair = [a, cell]; break
+        }
+      }
+      if (pair) break
+    }
+  }
   if (!pair && list.length === 1 && (bot.inventory ? bot.inventory.items() : []).some(i => i.name === 'chest')) {
     // HALF THE BANK IS IN THE PACK (an aborted heal dug it and could not re-place, live
     // 05:44): adopt the free adjacent interior cell as the missing half - the loop below
@@ -3781,7 +3801,26 @@ async function healBankDouble (bot, hut, opts = {}) {
     if (!missing && !/chest$/.test(b.name)) return false
     if (!missing && prop(b, 'facing') === want) continue // this half is already right
     if (!missing) {
-      // 1) empty it into the pack (verified) - never dig a chest with anything inside
+      // 1a) SHUTTLE the bulk into the OTHER half first - the pack alone can't hold a
+      //     full bank (live: 871 items in one half), and the treasury must never sit
+      //     in a dropped pile. withdraw -> deposit trips, bounded.
+      const other = pair.find(o => o !== e)
+      const otherBlk = () => { const ob = other && blkOf(other); return ob && /chest$/.test(ob.name) ? ob : null }
+      if (otherBlk()) {
+        for (let trip = 0; trip < 8; trip++) {
+          let counts = {}
+          try { counts = await chestCounts(bot, blkOf(e)) } catch { break }
+          const names = Object.keys(counts)
+          if (!names.length) break
+          for (const n of names) {
+            if ((bot.inventory ? bot.inventory.emptySlotCount() : 0) < 3) break
+            try { await withdrawItem(bot, blkOf(e), n, counts[n]) } catch {}
+          }
+          if (!otherBlk()) break
+          try { await depositMaterials(bot, otherBlk(), { all: true, keepDirt: 0 }) } catch (err) { dbg('bank heal: shuttle deposit failed (' + err.message + ')'); break }
+        }
+      }
+      // 1b) empty the remainder into the pack (verified) - never dig a chest with anything inside
       try {
         const counts = await chestCounts(bot, b)
         for (const n of Object.keys(counts)) { await withdrawItem(bot, blkOf(e), n, counts[n]) }
