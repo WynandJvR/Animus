@@ -24,6 +24,7 @@ const commands = require('./commands.js')
 const provision = require('./provision.js') // for the body-side survival-hunt reflex
 const resources = require('./resources.js') // unified pack+chest resource model (food withdraw)
 const navigate = require('./navigate.js') // unified navigation (isRecovering gates the reflexes)
+const arbiter = require('./arbiter.js') // priority body-ownership: reflexes defer to a running navigation maneuver
 const access = require('./access.js')
 const schematic = require('./schematic.js')
 
@@ -215,6 +216,7 @@ navigate.setDebugSink(noteDebug)
 require('./pathfix.js').setDebugSink(noteDebug) // [verify] place/dig world-recheck traces
 require('./scaffold.js').setDebugSink(noteDebug) // [scaffold] registry/teardown traces
 require('./planner.js').setDebugSink(noteDebug) // [plan] re-planning goal-driver traces (rounds/strikes/relocates)
+arbiter.setDebugSink(noteDebug) // [arb] maneuver begin/end/expire + reflex deferrals
 // A build job saved to disk survived a process restart - let the operator know it's resumable.
 try {
   const rj = commands.persistedResume && commands.persistedResume()
@@ -604,6 +606,7 @@ let cookingMeat = false
 if (process.env.AUTO_COOK !== '0') {
   setInterval(async () => {
     if (cookingMeat || !bot.entity || commands.isBusy() || (commands.isEscaping && commands.isEscaping())) return
+    if (arbiter.maneuverActive()) return // a navigation owns the body - don't detour to a furnace mid-approach
     cookingMeat = true
     try {
       const n = await provision.cookRawMeat(bot, {})
@@ -625,6 +628,7 @@ if (process.env.SURVIVAL_HUNT !== '0') {
     if (commands.isBusy && commands.isBusy()) return // the gather loop covers the build case
     if (provision.isResting && provision.isResting()) return
     if (provision.isSecuringFood && provision.isSecuringFood()) return
+    if (arbiter.maneuverActive()) return // don't chase an animal while a navigation drives the body
     if (!provision.needsFood(bot)) return
     survivalHunting = true
     try {
@@ -699,6 +703,7 @@ if (process.env.GEAR_REFLEX !== '0') {
   setInterval(async () => {
     if (gearing || !bot.entity) return
     if (commands.isBusy && commands.isBusy()) return // a job owns the body (its camp flow gears)
+    if (arbiter.maneuverActive()) return // a navigation is driving - don't start the iron grind mid-walk
     if (provision.isResting && provision.isResting()) return
     if (provision.isSecuringFood && provision.isSecuringFood()) return
     if (commands.isEscaping && commands.isEscaping()) return
@@ -809,6 +814,14 @@ if (process.env.AUTO_DEFEND !== '0') {
       }
       if (flee) {
         const now = Date.now()
+        // ARBITER: a deliberate navigation is driving the body (walking into the hut, coming
+        // to a player). Unless this is a TRUE emergency - actively being hit, or a creeper
+        // close enough to detonate (<=6m) - DEFER and let the maneuver finish instead of
+        // stealing its goal. A preventive flee at 6-12m that thrashes the approach is the
+        // exact door-loop the operator saw (four "goal taken by a reflex" in a row). Survival
+        // is NOT regressed: a hit or a point-blank creeper still preempts here.
+        const fleeEmergency = beingHit || (why === 'creeper' && fbest <= 6)
+        if (!fleeEmergency && arbiter.maneuverActive(arbiter.PRIORITY.PROGRESS)) return
         // INSIDE OWN WALLS and untouched: the creeper can't reach - fleeing would walk us
         // back OUT the door into its blast radius. Hold position; a real hit re-arms.
         if (why === 'creeper' && !beingHit) {
@@ -826,7 +839,7 @@ if (process.env.AUTO_DEFEND !== '0') {
               ;(async () => {
                 try {
                   await navigate.navigateToPreempt(bot, new goals.GoalNear(hut.x + 2, hut.y + 1, hut.z + 2, 1),
-                    { timeoutMs: 15000, deadlineMs: 40000, climb: false, budgets: { door: 3, pit: 0, water: 0, nudge: 1, stepout: 1 }, label: 'hut-retreat' })
+                    { timeoutMs: 15000, deadlineMs: 40000, climb: false, priority: arbiter.PRIORITY.SURVIVE, budgets: { door: 3, pit: 0, water: 0, nudge: 1, stepout: 1 }, label: 'hut-retreat' })
                   note('(flee) inside the hut - door-assist sealed the door behind me')
                 } catch (e) { note(`(flee) hut retreat failed (${e.message}) - back to open-field flee`) } finally {
                   setTimeout(() => { hutRetreat = false }, 5000)
@@ -992,6 +1005,7 @@ if (process.env.AUTO_COLLECT !== '0') {
     // never wander off mid-provision/build - those flows manage their own
     // movement and pickups, and surprise walks force inventory desyncs
     if (commands.isBusy && commands.isBusy()) return
+    if (arbiter.maneuverActive()) return // a navigation owns the body (e.g. entering the hut) - don't grab drops mid-approach
     try {
       const me = bot.entity.position
       let best = null; let bestD = 8

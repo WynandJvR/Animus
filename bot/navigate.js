@@ -17,6 +17,7 @@
 
 const { goals } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
+const arbiter = require('./arbiter.js') // priority body-ownership: reflexes defer to a running maneuver
 
 let dbgSink = null // injected by index.js: debug lines persist to logs/bot-events.log
 function setDebugSink (fn) { dbgSink = fn }
@@ -636,8 +637,16 @@ async function navigateToInner (bot, goal, opts = {}) {
   let reflexWaitMs = 0
   const dl = () => deadline + Math.min(reflexWaitMs, 90000)
   navDepth++
+  // Claim the body for this maneuver's whole duration so idle/opportunistic reflexes
+  // (collect/torch/gaze/follow-resume) and NON-EMERGENCY flee don't steal the goal
+  // mid-approach - the door-loop fix. Priority is the caller's tier (a flee hut-retreat
+  // via navigateToPreempt passes SURVIVE; ordinary navigation is PROGRESS). The TTL is a
+  // leak-safety cap (refreshed each loop); the finally end() is the real release.
+  const manTtl = () => Math.min(60000, timeoutMs + 8000)
+  const manTok = arbiter.beginManeuver(opts.label || 'nav', opts.priority != null ? opts.priority : arbiter.PRIORITY.PROGRESS, manTtl())
   try {
     for (;;) {
+      arbiter.refreshManeuver(manTok, manTtl())
       if (isStopped()) throw new Error('stopped')
       if (opts.movements) { try { bot.pathfinder.setMovements(opts.movements()) } catch {} }
       let lastErr
@@ -672,7 +681,7 @@ async function navigateToInner (bot, goal, opts = {}) {
       recoveries++
       dbg(label + 'recovered via ' + rescued + ' - retrying the path')
     }
-  } finally { navDepth-- }
+  } finally { navDepth--; arbiter.endManeuver(manTok) }
 }
 
 // ---- watchdog FORCE-ESCAPE ---------------------------------------------------------

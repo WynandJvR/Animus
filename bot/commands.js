@@ -15,6 +15,7 @@ const provision = require('./provision.js') // BOM -> gather/craft plan + execut
 const resources = require('./resources.js') // unified resource model: pack + verified chests, withdraw>craft>gather
 const navigate = require('./navigate.js') // unified navigation: ONE goto + the full stuck-recovery ladder
 const planner = require('./planner.js') // re-planning goal driver (slice 1: gear-up behind the planarmor/PLANNER_GEARUP seam)
+const arbiter = require('./arbiter.js') // priority body-ownership (sticky-follow defers to a running maneuver)
 let dbgSink = null // injected by index.js: debug lines persist to logs/bot-events.log
 function setDebugSink (fn) { dbgSink = fn }
 const dbg = (...a) => {
@@ -2097,6 +2098,8 @@ function state (bot) {
     moving,                       // is the body currently pathing somewhere?
     goal,                         // current pathfinder goal type (GoalFollow/GoalNear/...) or null
     busy: isBusy(),               // an operator build/provision is driving the body - the brain should hold
+    maneuver: (() => { try { const m = arbiter.topManeuver(); return m ? { label: m.label, tier: arbiter.priName(m.pri) } : null } catch { return null } })(), // the priority-arbiter's current body owner (a navigation in progress), so goal-thrash is visible in /state
+
     // OBSERVABILITY so the brain can spot + break out of stuck/failed/hazardous states:
     activity: activity ? { name: activity.name, detail: activity.detail, forSec: Math.round((Date.now() - activity.startedAt) / 1000) } : null, // a long op still running from a past turn
     buildProgress, // REAL numbers (material have/need) - the brain answers progress questions from THIS
@@ -2202,6 +2205,7 @@ function maybeResumeFollow (bot) {
   if (!followTarget || isBusy()) return null
   if (!bot || !bot.entity || !bot.pathfinder) return null
   if (bot.pathfinder.goal) return null // already pathing (following or busy) - leave it be
+  if (arbiter.maneuverActive(arbiter.PRIORITY.PROGRESS)) return null // a navigation maneuver owns the body - don't reclaim it mid-goto (the door-loop class)
   const t = findPlayer(bot, followTarget)
   if (!t) return null // can't see them right now - try again next tick
   bot.pathfinder.setGoal(new goals.GoalFollow(t, FOLLOW_RANGE), true)
