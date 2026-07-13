@@ -116,7 +116,11 @@ let resumeJob = null       // { schem, at }
 let buildInterrupted = false
 let resumeDeaths = 0 // consecutive deaths since the resume job was set / bot last reached the site
 let spawnSuspect = false // a respawn landed far from the remembered bed - the server spawn anchor is WRONG
-function flagSpawnSuspect () { spawnSuspect = true }
+// PERSISTED via provision (world-memory): the RAM flag died with every restart/deploy
+// mid-crisis, so the carousel kept spinning across reconnects. Cleared by any real
+// spawn-setting action (provision.rememberBed).
+function flagSpawnSuspect () { spawnSuspect = true; try { provision.setSpawnSuspect(true) } catch {} }
+function spawnIsSuspect () { return spawnSuspect || !!(provision.isSpawnSuspect && provision.isSpawnSuspect()) }
 let buildProgress = null // REAL build progress for /state - the brain must answer from this, not vibes
 const RESUME_MAX_DEATHS = parseInt(process.env.RESUME_MAX_DEATHS || '4', 10)
 
@@ -2672,6 +2676,23 @@ async function resumeBuild (bot) {
       try { await provision.restUntilSafe(bot, { isStopped: () => buildAbort, say }) } catch {}
     }
     if (buildAbort) return (result = { stopped: true, placed: 0, total: 0 })
+    // SPAWN FIRST when the anchor is known WRONG (survival tier - the world-spawn
+    // carousel root): BEFORE any grave detour or site trek, get home and re-anchor the
+    // bed. A deep corpse-run on a broken anchor is how one death became an all-night
+    // spiral (die -> respawn 430b out -> die trekking -> repeat); AxGraves drops don't
+    // despawn, so the grave can wait. Food/sword near the respawn first (bounded), then
+    // the trek home; failure is retried on the next respawn (the flag is persisted).
+    if (spawnIsSuspect()) {
+      dbg('resume: spawn anchor is SUSPECT - going home to re-anchor before anything else')
+      try { await survivalPrep(bot, { say, isStopped: () => buildAbort }) } catch (e) { dbg('resume: prep before spawn-recovery failed (' + e.message + ')') }
+      if (buildAbort) return (result = { stopped: true, placed: 0, total: 0 })
+      try {
+        const ok = await provision.recoverSpawnAnchor(bot, { isStopped: () => buildAbort, say })
+        if (ok) spawnSuspect = false
+        dbg('resume: spawn-recovery ' + (ok ? 'RESTORED the anchor' : 'did not restore the anchor - continuing, will retry next respawn'))
+      } catch (e) { dbg('resume: spawn-recovery failed (' + e.message + ')') }
+      if (buildAbort) return (result = { stopped: true, placed: 0, total: 0 })
+    }
     // GET THE STUFF BACK first when it's safe: on servers with a graves plugin (the
     // live one runs AxGraves) drops don't despawn, so a recovery detour beats
     // re-gathering the whole kit. Skipped for lava/void deaths and best-effort -
@@ -2724,7 +2745,7 @@ async function resumeBuild (bot) {
     // broken/obstructed/moved) - the fix for the world-spawn death carousel: without
     // this every future death respawns at 0,0 naked and the job never converges.
     try {
-      const ok = await provision.ensureSpawnBed(bot, { isStopped: () => buildAbort, say, force: spawnSuspect })
+      const ok = await provision.ensureSpawnBed(bot, { isStopped: () => buildAbort, say, force: spawnIsSuspect() })
       if (ok) spawnSuspect = false
       dbg('resume: spawn bed ' + (ok ? 'asserted' : 'NOT asserted (no bed reachable)'))
     } catch (e) { dbg('resume: spawn assert failed (' + e.message + ')') }

@@ -527,8 +527,21 @@ bot.on('spawn', () => {
     const here = bot.entity && bot.entity.position
     if (here && ws && Math.hypot(here.x - ws.x, here.z - ws.z) > 12 &&
         !(provision.knownBed && provision.knownBed())) {
-      provision.rememberBed(here)
-      note(`(respawn) bed memory was empty - re-learned my bed at ${Math.round(here.x)},${Math.round(here.y)},${Math.round(here.z)}`)
+      // Only trust a bed that actually STANDS here: blind re-learning adopted a stale
+      // far-from-home bed during the overnight carousel, and every later "assert" then
+      // targeted the WRONG bed. No bed block within 6 = no re-learn.
+      let bedBlk = null
+      try {
+        const md = require('minecraft-data')(bot.version)
+        const ids = Object.values(md.blocksByName).filter(b => /_bed$/.test(b.name)).map(b => b.id)
+        bedBlk = bot.findBlock({ matching: ids, maxDistance: 6 })
+      } catch {}
+      if (bedBlk) {
+        provision.rememberBed(bedBlk.position)
+        note(`(respawn) bed memory was empty - re-learned my bed at ${bedBlk.position.x},${bedBlk.position.y},${bedBlk.position.z} (bed verified standing)`)
+      } else {
+        note('(respawn) landed away from world spawn with NO bed standing here - not re-learning a phantom bed')
+      }
     }
     // SPAWN-WRONGNESS DETECTOR: respawning far from the remembered bed means the server-
     // side anchor is LOST (bed broken/obstructed/moved without a re-assert) - the world-
@@ -550,6 +563,16 @@ bot.on('spawn', () => {
         if (r && r.deferred) { note('(resume) old build still unwinding - retrying in 30s'); await new Promise(res => setTimeout(res, 30000)); continue }
         if (r) note(`(resume) build ${r.stopped ? 'STOPPED' : 'finished'} after respawn: ${r.placed}/${r.total} placed`)
         else note('(resume) nothing to resume')
+        // NO BUILD but the spawn anchor is WRONG: fixing the anchor must not depend on a
+        // resume job existing - it's a survival goal of its own (the overnight carousel
+        // had windows with no job where the flag just sat unconsumed).
+        if (!r && provision.isSpawnSuspect && provision.isSpawnSuspect()) {
+          note('(respawn) spawn anchor is WRONG and no build to resume - going home to fix the anchor')
+          try {
+            const ok = await provision.recoverSpawnAnchor(bot, {})
+            note(`(respawn) spawn recovery ${ok ? 'RESTORED the anchor at the bed' : 'fell short - will retry on the next respawn'}`)
+          } catch (e) { note(`(respawn) spawn recovery failed: ${e.message}`) }
+        }
         return
       }
       note('(resume) gave up waiting for the old build loop - will try on the next respawn')
@@ -822,6 +845,34 @@ if (process.env.AUTO_DEFEND !== '0') {
       if (target !== lastDefendTarget) { note(`(auto-defend) ${target.name}`); lastDefendTarget = target } // log on change only
     } catch { /* not ready */ }
   }, 700)
+}
+
+// PROACTIVE SPAWN KEEPALIVE: re-assert the bed spawn whenever we're NEAR the bed and the
+// assert is stale (or the anchor is flagged suspect) - not only during resume passes.
+// Overnight the anchor silently reverted to world spawn and the bot only discovered it by
+// DYING 430 blocks out. Near-bed + idle = a 2-second bed activation; suspect overrides
+// the idle gate (survival tier beats the build). Disable with SPAWN_KEEPALIVE=0.
+if (process.env.SPAWN_KEEPALIVE !== '0') {
+  let spawnKeep = false
+  setInterval(async () => {
+    if (spawnKeep || !bot.entity || bot.health <= 0) return
+    try {
+      const suspect = !!(provision.isSpawnSuspect && provision.isSpawnSuspect())
+      const kb = provision.knownBed && provision.knownBed()
+      if (!kb) return
+      const d = Math.hypot(kb.x - bot.entity.position.x, kb.z - bot.entity.position.z)
+      if (d > 24) return // keepalive is a NEAR-bed reflex; far-anchor repair is recoverSpawnAnchor's job
+      if (bot.isSleeping || navigate.isRecovering() || navigate.isForceUnsticking() || (commands.isEscaping && commands.isEscaping())) return
+      if (!suspect) {
+        if (bot.pathfinder && bot.pathfinder.goal) return // someone is driving - don't hijack
+        if (navigate.isNavigating()) return
+        if (commands.isBusy && commands.isBusy()) return  // builds re-assert on their own passes
+      }
+      spawnKeep = true
+      const ok = await provision.ensureSpawnBed(bot, { force: suspect, maxTrek: 40 })
+      if (suspect && ok) note('(spawn) suspect anchor re-asserted at the bed - back to normal')
+    } catch { /* transient */ } finally { spawnKeep = false }
+  }, 45000).unref?.()
 }
 
 // HARD-WEDGE WATCHDOG: the last line of defense against multi-minute position freezes.

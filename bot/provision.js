@@ -689,7 +689,9 @@ async function ensureHutBed (bot, at, opts = {}) {
     const b = bot.blockAt(new Vec3(at.x + dx, at.y + dy, at.z + dz))
     if (b && /_bed$/.test(b.name)) {
       const kb = knownBed()
-      if (kb && kb.x === b.position.x && kb.y === b.position.y && kb.z === b.position.z) return 'present' // spawn already set here - don't re-trek every pass
+      // opts.force = the server anchor is KNOWN wrong (spawn-suspect) - a matching memory
+      // proves nothing then; walk over and genuinely re-activate the bed.
+      if (!opts.force && kb && kb.x === b.position.x && kb.y === b.position.y && kb.z === b.position.z) return 'present' // spawn already set here - don't re-trek every pass
       try { await gotoWithTimeout(bot, new goals.GoalNear(b.position.x, b.position.y, b.position.z, 2), 15000) } catch {}
       try { await bot.activateBlock(b); rememberBed(b.position) } catch {}
       return 'present'
@@ -1721,9 +1723,17 @@ function clearSearched (item, pos) {
 // Every rememberBed call site follows an actual spawn-setting action (a sleep or a
 // day bed-use), so it doubles as the "spawn last asserted" timestamp ensureSpawnBed
 // keys off.
-function rememberBed (pos) { const m = loadWorldMem(); m.bed = { x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z), at: Date.now() }; m.bedAssertAt = Date.now(); saveWorldMem() }
+function rememberBed (pos) { const m = loadWorldMem(); m.bed = { x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z), at: Date.now() }; m.bedAssertAt = Date.now(); delete m.spawnSuspect; saveWorldMem() }
 function knownBed () { return loadWorldMem().bed || null }
 function forgetBed () { const m = loadWorldMem(); delete m.bed; saveWorldMem() }
+
+// SPAWN-SUSPECT flag, PERSISTED: a respawn landed far from the remembered bed, so the
+// server-side anchor is wrong (bed broken/obstructed) - every death is a world-spawn
+// carousel until a bed is re-asserted. The old flag lived in commands.js RAM and died
+// with every restart/deploy mid-crisis (the overnight spiral straddled several). Cleared
+// by rememberBed (every real spawn-setting action goes through it).
+function setSpawnSuspect (v) { const m = loadWorldMem(); if (v) m.spawnSuspect = Date.now(); else delete m.spawnSuspect; saveWorldMem() }
+function isSpawnSuspect () { return !!loadWorldMem().spawnSuspect }
 
 // SPAWN GUARANTEE: make sure the respawn anchor really is the (hut) bed. USE the bed -
 // sets the spawn even at day - whenever we're near it and haven't asserted it recently
@@ -1736,14 +1746,24 @@ async function ensureSpawnBed (bot, opts = {}) {
   if (!bot.entity) return false
   const m = loadWorldMem()
   const bed = knownBed()
+  const hut0 = listInfra('hut')[0]
   if (!bed) {
     // no bed memory at all - the hut path is the only play
-    const hut = listInfra('hut')[0]
-    if (!hut) return false
-    const r = await ensureHutBed(bot, new Vec3(hut.x, hut.y, hut.z), opts).catch(() => 'fail')
+    if (!hut0) return false
+    const r = await ensureHutBed(bot, new Vec3(hut0.x, hut0.y, hut0.z), opts).catch(() => 'fail')
     return r === 'present' || r === 'placed'
   }
   if (!opts.force && m.bedAssertAt && Date.now() - m.bedAssertAt < 3600 * 1000) return true // asserted within the hour
+  // PREFER THE HUT BED: a remembered bed far from the hut is a stale anchor (the overnight
+  // carousel re-learned a bed at world spawn and kept "asserting" THERE) - never keep it
+  // silently while a home hut exists. Re-anchor at the hut; the far bed is only an honest
+  // fallback when the hut can't take a bed right now (no bed item - wool is operator-supplied).
+  if (hut0 && Math.hypot(bed.x - (hut0.x + 2), bed.z - (hut0.z + 2)) > 24) {
+    dbg('spawn: remembered bed ' + bed.x + ',' + bed.z + ' is far from my hut at ' + hut0.x + ',' + hut0.z + ' - re-anchoring at the hut instead')
+    const r = await ensureHutBed(bot, new Vec3(hut0.x, hut0.y, hut0.z), opts).catch(() => 'fail')
+    if (r === 'present' || r === 'placed') return true
+    dbg('spawn: hut bed unavailable (' + r + ') - falling back to the FAR bed at ' + bed.x + ',' + bed.z + ' (better than world spawn)')
+  }
   const d = Math.hypot(bed.x - bot.entity.position.x, bed.z - bot.entity.position.z)
   if (d > (opts.maxTrek != null ? opts.maxTrek : 120)) { dbg('spawn: bed too far to assert from here (' + Math.round(d) + 'b)'); return false }
   if (d > 6) { try { await walkStaged(bot, bed.x, bed.z, { isStopped, range: 4, timeoutMs: 120000 }) } catch {} }
@@ -1774,6 +1794,36 @@ async function ensureSpawnBed (bot, opts = {}) {
     dbg('spawn: asserted at the bed ' + bb.position.toString())
     return true
   } catch (e) { dbg('spawn: bed use failed (' + e.message + ')'); return false }
+}
+
+// WRONG-ANCHOR RECOVERY, survival tier: the server respawn anchor is lost or far (the
+// world-spawn carousel - every death dropped the bot ~430 blocks from home, and it could
+// never re-assert because the re-assert only ran "when home"). Getting home and re-
+// asserting the hut bed IS the goal here, above build/gather/gear: long-legged trek
+// straight to the remembered bed (or the hut), then a FORCED ensureSpawnBed. No 120-block
+// maxTrek cop-out - this is exactly the "too far" case. Honest return; the caller retries
+// on the next respawn (the persisted spawn-suspect flag survives deaths and restarts).
+async function recoverSpawnAnchor (bot, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const say = opts.say || (() => {})
+  const bed = knownBed()
+  const hut = listInfra('hut')[0]
+  // aim at the hut when it exists (the bed we want to anchor); a lone far bed otherwise
+  const tx = hut ? hut.x + 2 : (bed ? bed.x : null)
+  const tz = hut ? hut.z + 2 : (bed ? bed.z : null)
+  if (tx == null) { dbg('spawn-recovery: no hut or bed remembered - nowhere to anchor'); return false }
+  const dist = () => Math.hypot(tx - bot.entity.position.x, tz - bot.entity.position.z)
+  if (dist() > 6) {
+    say(`my spawn point is wrong - heading home (${Math.round(dist())}b) to fix it before anything else`)
+    dbg('spawn-recovery: trekking home ' + Math.round(dist()) + 'b to re-anchor the spawn')
+    for (let leg = 0; leg < 3 && dist() > 6 && !isStopped(); leg++) {
+      try { await walkStaged(bot, tx, tz, { isStopped, range: 5, timeoutMs: 300000 }) } catch (e) { dbg('spawn-recovery: trek leg failed (' + e.message + ')') }
+    }
+  }
+  if (dist() > 12) { dbg('spawn-recovery: could not get home (still ' + Math.round(dist()) + 'b out) - will retry next respawn'); return false }
+  const ok = await ensureSpawnBed(bot, { ...opts, force: true, maxTrek: 1e9 })
+  dbg('spawn-recovery: ' + (ok ? 'anchor RESTORED at the bed' : 'home but could NOT re-anchor (no usable bed)'))
+  return ok
 }
 
 // Sleep in the remembered bed if we're standing near it. Returns true only if we actually
@@ -4118,4 +4168,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, consolidateBank, furnishHut, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, ensureSpawnBed, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, fishForFood, ensureHutApron, ensureHutBed, setBuildZone, setDebugSink }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, consolidateBank, furnishHut, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, setSpawnSuspect, isSpawnSuspect, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, fishForFood, ensureHutApron, ensureHutBed, setBuildZone, setDebugSink }
