@@ -228,6 +228,35 @@ function installPathfinderTuning (bot) {
             d = distTo()
             if (d != null && d > 5) throw new Error(fname + ': cannot reach the container (' + d.toFixed(1) + 'b away after approach) - unreachable, not a window failure')
           }
+          // NO-REACH-THROUGH-WALLS (item 4): within reach can still be THROUGH A WALL (a chest
+          // inside, bot outside, 3 blocks away). A real player walks to a face they can SEE.
+          // If the straight line from the eye to the block is blocked by a solid non-target
+          // cell, walk to an adjacent, LOS-clear face cell before interacting. Bounded; if none
+          // is reachable, fall through and try anyway (better than hanging).
+          if (process.env.STATION_LOS !== '0' && tpos && attempt === 0) {
+            try {
+              const los = require('./los.js')
+              const tgt = { x: Math.floor(tpos.x), y: Math.floor(tpos.y), z: Math.floor(tpos.z) }
+              const isSolid = (x, y, z) => { if (x === tgt.x && y === tgt.y && z === tgt.z) return false; const b = bot.blockAt(new (require('vec3').Vec3)(x, y, z)); return !!(b && b.boundingBox === 'block' && !AIR_RE.test(b.name)) }
+              const eye = bot.entity.position.offset(0, bot.entity.height || 1.62, 0)
+              if (los.lineBlocked(eye, { x: tgt.x + 0.5, y: tgt.y + 0.5, z: tgt.z + 0.5 }, isSolid)) {
+                dbg(fname + ': a wall is between me and ' + tgt.x + ',' + tgt.y + ',' + tgt.z + ' - walking to a clear face (not reaching through)')
+                const { goals } = require('mineflayer-pathfinder')
+                const Vec3 = require('vec3').Vec3
+                // pick the nearest face cell that is standable (air feet+head, solid floor) AND LOS-clear
+                const cells = los.faceApproachCells(tgt).map(c => ({ ...c, d: bot.entity.position.distanceTo(new Vec3(c.x, c.y, c.z)) })).sort((a, b) => a.d - b.d)
+                for (const c of cells) {
+                  const feet = bot.blockAt(new Vec3(c.x, c.y, c.z)); const head = bot.blockAt(new Vec3(c.x, c.y + 1, c.z)); const floor = bot.blockAt(new Vec3(c.x, c.y - 1, c.z))
+                  const standable = feet && AIR_RE.test(feet.name) && head && AIR_RE.test(head.name) && floor && floor.boundingBox === 'block'
+                  if (!standable) continue
+                  const eyeC = { x: c.x + 0.5, y: c.y + 1.62, z: c.z + 0.5 }
+                  if (los.lineBlocked(eyeC, { x: tgt.x + 0.5, y: tgt.y + 0.5, z: tgt.z + 0.5 }, isSolid)) continue
+                  try { await require('./navigate.js').gotoOnce(bot, new goals.GoalNear(c.x, c.y, c.z, 0), 12000) } catch {}
+                  break
+                }
+              }
+            } catch (e) { dbg(fname + ': LOS check skipped (' + e.message + ')') }
+          }
           try { if (tpos) await bot.lookAt(tpos.clone ? tpos.clone().offset(0.5, 0.5, 0.5) : tpos, true) } catch {}
           const w = await Promise.race([
             orig(target, ...rest).catch(e => ({ __err: e || new Error('open failed') })),

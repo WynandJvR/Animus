@@ -111,6 +111,10 @@ function bestGrave () {
   return c[0] || null
 }
 function unretrievedGraves () { return deathLedger.filter(d => !d.retrieved && !d.dangerous && graveWorthIt(d)).length } // only graves actually worth a trip
+// Is there a WORTHWHILE, reachable death-drop to go recover right now? The respawn handler
+// fires recovery on this BEFORE re-mining from scratch (gear-up-critical: it kept dropping
+// iron/tools then re-mining instead of walking back for them). Returns {x,y,z,items} or null.
+function worthwhileGrave () { const g = bestGrave(); return g ? { x: g.x, y: g.y, z: g.z, items: (g.items && g.items.notable) || [], value: graveValue(g) } : null }
 // auto-resume: the build to pick back up after a death interrupts it. autoBuild
 // re-provisions whatever we lost and Build diffs world-vs-schematic, so resuming just
 // finishes the missing blocks. Kept across a death; cleared on finish or `stop`.
@@ -2979,4 +2983,4 @@ async function resumeBuild (bot) {
   }
 }
 
-module.exports = { handle, state, setupMovements, eatFood, placeTorchNearby, isBusy, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume, flagSpawnSuspect, setDebugSink }
+module.exports = { handle, state, setupMovements, eatFood, placeTorchNearby, isBusy, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume, flagSpawnSuspect, worthwhileGrave, setDebugSink }

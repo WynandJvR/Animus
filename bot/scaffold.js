@@ -139,4 +139,29 @@ async function teardown (bot, around, opts = {}) {
   return removed
 }
 
-module.exports = { beginSession, endSession, inSession, add, onPlaced, forget, isScaffold, near, count, pickFiller, teardown, setDebugSink, FILLER_RE }
+// VERIFIED teardown: run teardown, then RE-READ the registry-tracked cells and re-run until
+// none still show a filler block in the world (the huttidy "until clean" postcondition) or a
+// pass makes no progress. Returns { ok, passes, removed, remaining }.
+async function teardownVerified (bot, around, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const radius = opts.radius || 12
+  const maxPasses = opts.maxPasses || 4
+  const { Vec3 } = require('vec3')
+  const stillFiller = () => near(around, radius).filter(p => {
+    if (opts.exclude && opts.exclude(p)) return false
+    const b = bot.blockAt(new Vec3(p.x, p.y, p.z))
+    return b && FILLER_RE.test(b.name)
+  })
+  let removed = 0; let pass = 0
+  for (pass = 1; pass <= maxPasses && !isStopped(); pass++) {
+    if (!stillFiller().length) break
+    const r = await teardown(bot, around, opts)
+    removed += r
+    if (r === 0) break // no progress - the rest is unreachable/protected
+  }
+  const remaining = stillFiller().length
+  dbg('teardownVerified: removed ' + removed + ' in ' + pass + ' pass(es), ' + remaining + ' left (postcondition ' + (remaining === 0 ? 'CLEAN' : 'not met') + ')')
+  return { ok: remaining === 0, passes: pass, removed, remaining }
+}
+
+module.exports = { beginSession, endSession, inSession, add, onPlaced, forget, isScaffold, near, count, pickFiller, teardown, teardownVerified, setDebugSink, FILLER_RE }

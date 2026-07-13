@@ -33,5 +33,15 @@ t('needsFoodSupply: NOT while unsafe, NOT during a hunger crisis', () => {
   assert.strictEqual(F.needsFoodSupply(7, false, 0, 0, true), true, 'just above crisis + safe + no supply -> build it')
 })
 
+t('shouldSweepForFood: sweep ONLY when no farm, no NEAR animal, no known water', () => {
+  assert.strictEqual(F.shouldSweepForFood(false, false, false), true, 'nothing known -> sweep to discover (the whole point)')
+  assert.strictEqual(F.shouldSweepForFood(true, false, false), false, 'a standing farm -> no need to sweep')
+  assert.strictEqual(F.shouldSweepForFood(false, true, false), false, 'a NEAR animal -> hunt it, do not sweep')
+  assert.strictEqual(F.shouldSweepForFood(false, false, true), false, 'a reachable remembered pond -> farm there, do not sweep')
+  // the LIVE BUG: a far cow made seesAnimal (unbounded) true -> passing hasNearAnimal=false
+  // (distance-bounded) now lets the sweep run
+  assert.strictEqual(F.shouldSweepForFood(false, false, false), true)
+})
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall food-security tests passed')
 process.exit(failures ? 1 : 0)

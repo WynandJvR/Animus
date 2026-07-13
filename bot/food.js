@@ -40,4 +40,15 @@ function needsFoodSupply (food, hasRenewable, packFood, bankedFood, safe, opts =
   return !hasFoodSupply(hasRenewable, packFood, bankedFood, opts) // supplied? then nothing to do
 }
 
-module.exports = { DEFAULT_BUFFER, hasFoodSupply, needsFoodSupply }
+// Should ensureFoodSupply run the OUTWARD SWEEP (scoutForFood) to DISCOVER a food source? Yes
+// when there is NO known food source at all - no standing farm, no animal within a REAL range
+// (a distance-bounded check, not "any entity loaded server-wide"), and no reachable remembered
+// pond. This is the fix for "the sweep never ran": a cow loaded 200 blocks away (seesAnimal
+// unbounded) or a stale remembered pond used to skip the sweep straight to the narrow
+// wheat-farm-or-defer. PURE (three booleans in). The driver hunts/farms what's already known
+// instead of sweeping.
+function shouldSweepForFood (hasFarm, hasNearAnimal, hasKnownWater) {
+  return !hasFarm && !hasNearAnimal && !hasKnownWater
+}
+
+module.exports = { DEFAULT_BUFFER, hasFoodSupply, needsFoodSupply, shouldSweepForFood }

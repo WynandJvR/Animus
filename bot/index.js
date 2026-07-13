@@ -530,6 +530,7 @@ bot.on('death', () => {
 // everything: resumeBuild re-provisions from scratch (or the build's chest) and only
 // places the still-missing blocks. 'spawn' also fires on first join, so gate on a death.
 let deathPending = false
+let autoRecoverTries = 0 // consecutive auto death-drop recovery attempts (capped so recovery can't death-loop)
 bot.on('spawn', () => {
   if (!deathPending) return // initial join is handled by the once('spawn') above
   deathPending = false
@@ -574,6 +575,27 @@ bot.on('spawn', () => {
   } catch {}
   setTimeout(async () => { // let the world/chunks settle first
     try {
+      // DEATH-DROP RECOVERY (gear-up-critical): if we dropped WORTHWHILE gear (iron/tools/
+      // armor - graveWorthIt), go get it PROMPTLY before re-mining from scratch or re-firing
+      // gearup. AxGraves despawn in minutes, so speed matters. bestGrave already excludes
+      // lava/void graves; the recover command has its own bounded give-up. Cap consecutive
+      // auto-recover attempts so we never die-loop TO the recovery. RECOVER_ON_RESPAWN=0 off.
+      if (process.env.RECOVER_ON_RESPAWN !== '0' && commands.worthwhileGrave) {
+        const g = commands.worthwhileGrave()
+        if (g && autoRecoverTries < 3) {
+          autoRecoverTries++
+          note(`(respawn) dropped gear worth recovering at ${g.x},${g.y},${g.z} (${g.items.slice(0, 4).join(', ') || 'value ' + g.value}) - going to get it BEFORE re-mining (try ${autoRecoverTries}/3)`)
+          try {
+            const r = await commands.handle(bot, 'recover')
+            note(`(respawn) recover -> ${r}`)
+            if (!commands.worthwhileGrave()) autoRecoverTries = 0 // got it (or it's gone) - reset
+          } catch (e) { note(`(respawn) recover failed: ${e.message}`) }
+        } else if (g) {
+          note(`(respawn) worthwhile grave at ${g.x},${g.y},${g.z} but already tried ${autoRecoverTries}x - writing it off to avoid a death-loop`)
+        } else {
+          autoRecoverTries = 0 // nothing worthwhile pending - reset the cap
+        }
+      }
       for (let attempt = 0; attempt < 3; attempt++) { // deferred = old build loop still unwinding
         const r = commands.resumeBuild && await commands.resumeBuild(bot)
         if (r && r.deferred) { note('(resume) old build still unwinding - retrying in 30s'); await new Promise(res => setTimeout(res, 30000)); continue }
@@ -748,7 +770,7 @@ if (process.env.GEAR_REFLEX !== '0') {
     if (!provision.underArmored(bot)) return
     const tod = bot.time ? bot.time.timeOfDay : 0
     if (tod >= 11000) return // dusk/night belong to the shelter reflex; mornings to the grind
-    if ((bot.food ?? 20) < 8 || (bot.health ?? 20) < 10) return // feed/heal reflexes first
+    if ((bot.food ?? 20) < 14 || (bot.health ?? 20) < 10) return // food is a mining prerequisite - be fed BEFORE the iron grind (it went deep hungry and died); feed/heal reflexes run first
     const backoff = provision.gearupState && provision.gearupState()
     if (backoff && backoff.until > Date.now()) return // recent fruitless grind - let it cool
     gearing = true

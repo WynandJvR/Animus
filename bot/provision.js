@@ -1182,8 +1182,9 @@ async function digStaircaseDown (bot, targetY, opts = {}) {
     await collectDrops(bot, 2)
     try { await gotoWithTimeout(bot, new goals.GoalBlock(step.x, step.y, step.z), 6000) } catch { return { reached: false, reason: 'could not step down', blocked: null } }
     steps++
-    // opportunistic: light the descent every few steps
-    if (steps % 4 === 0) await placeTorch(bot).catch(() => {})
+    // opportunistic: light the descent every few steps + grab coal exposed in the staircase
+    // walls (cheap, bounded - coal is fuel + torches; don't sidetrack far mid-descent)
+    if (steps % 4 === 0) { await placeTorch(bot).catch(() => {}); try { await grabNearbyOre(bot, /coal_ore$/, 3, 2, { isStopped }) } catch {} }
   }
   return { reached: Math.floor(bot.entity.position.y) <= targetY + 1, reason: 'at level', blocked: null }
 }
@@ -1276,6 +1277,18 @@ async function branchMine (bot, item, count, opts = {}) {
   const goodEnough = () => mining.worthMiningHere(bot.entity.position.y, { minIronY })
   const pickLow = parseInt(process.env.MINE_PICK_LOW || '20', 10)
   dbg('  branchMine: item=' + item + ' need=' + count + ' surfaceY=' + surfaceY + ' targetY=' + targetY + ' minIronY=' + minIronY)
+
+  // FOOD IS A SURVIVAL PREREQUISITE (survive > progress, like the arbiter): NEVER go 40 blocks
+  // underground hungry - it chip-dies down there (live: descended to y40 at food=10, died
+  // repeatedly). Secure food to comfortable FIRST; if it's still low, don't descend this
+  // excursion - eat up top and come back fed. Env: MINE_MIN_FOOD (default 14).
+  const MINE_MIN_FOOD = parseInt(process.env.MINE_MIN_FOOD || '14', 10)
+  if ((bot.food ?? 20) < MINE_MIN_FOOD && !isStopped()) {
+    dbg('  branchMine: food ' + bot.food + ' < ' + MINE_MIN_FOOD + ' - securing food BEFORE descending (not mining deep hungry)')
+    if (opts.say) say('too hungry to mine deep - eating first')
+    try { await secureFood(bot, { home: opts.home, isStopped, say: opts.say, threshold: MINE_MIN_FOOD }) } catch (e) { dbg('  branchMine: pre-mine secureFood failed (' + e.message + ')') }
+    if ((bot.food ?? 20) < MINE_MIN_FOOD) return { gathered: got(), reason: 'too hungry to mine deep (food ' + bot.food + ') - fed up top, will descend next pass' }
+  }
 
   // SELF-SUFFICIENT TOOLING: keep a working pickaxe at depth. Re-tool BEFORE the held pick
   // breaks (while it can still mine the cobble a new pick needs) and only when no spare
@@ -1385,6 +1398,14 @@ async function branchMine (bot, item, count, opts = {}) {
       try { await climbToSurface(bot, Math.floor(surfaceY), { isStopped }) } catch {}
       return { gathered: got(), reason: 'broke off to survive a mob / low hp underground' }
     }
+    // FOOD BAIL: if hunger crashes mid-mine, climb out and go eat - don't chip-die deep at low
+    // food (starvation stops at 0.5 heart but the mobs down here finish a starving bot).
+    if ((bot.food ?? 20) <= 6) {
+      dbg('  branchMine: food ' + bot.food + ' critical mid-mine - climbing out to eat')
+      if (opts.say) say('starving down here - heading up to eat')
+      try { await climbToSurface(bot, Math.floor(surfaceY), { isStopped }) } catch {}
+      return { gathered: got(), reason: 'broke off to eat (food ' + bot.food + ') - too hungry to mine deep' }
+    }
     // KEEP A WORKING PICK: re-tool at depth before the pick breaks. If it's gone AND we can't
     // make one down here (no cobble/sticks/planks/table), climb out CLEANLY and bail honestly -
     // never wedge deep with a dead pick waiting on a surface craft-regroup (the stranding bug).
@@ -1404,6 +1425,10 @@ async function branchMine (bot, item, count, opts = {}) {
     await mineTunnel(bot, item, L.branchLen, L.rightIdx, { isStopped })
     try { await gotoWithTimeout(bot, new goals.GoalBlock(junc.x, junc.y, junc.z), 15000) } catch {}
     try { await grabNearbyOre(bot, oreRe, 4, 6, { isStopped }) } catch {} // ore exposed in the junction walls
+    // COAL BYCATCH (regression fix): while branch-mining for iron, also grab any coal_ore in
+    // the junction walls - coal = torches (the mine wants light) + smelting fuel, so it's
+    // high-value and free. Bounded radius/cap so it never sidetracks far from the branch.
+    try { await grabNearbyOre(bot, /coal_ore$/, 4, 3, { isStopped }) } catch {}
     branches++
     // BANK PROGRESS: record the branch count + corridor tip so the next excursion resumes at
     // the fresh face, not the staircase bottom (which would re-walk the open corridor).
@@ -2790,6 +2815,22 @@ function hasStandingFarm () { return !!(loadWorldMem().wheatFarm) }
 // the remembered water (sand banks swapped for carried dirt) -> wheat -> bread. Secondary: an
 // OPPORTUNISTIC hunt only if an animal is actually visible (never depended on - ~none here).
 // Best-effort + bounded; returns { ok, reason }.
+// Nearest food animal within `maxDist` blocks (DISTANCE-BOUNDED, actually reachable), or null.
+// The old unbounded seesAnimal() scanned every loaded entity server-wide - a cow loaded 200
+// blocks away made the bot think it "had animals" and SKIP the exploration sweep (the live bug
+// - it never swept SW toward the actual food). Returns { name, dist } | null.
+function nearestFoodAnimal (bot, maxDist = 40) {
+  const me = bot.entity && bot.entity.position
+  if (!me) return null
+  let best = null; let bd = maxDist
+  for (const e of Object.values(bot.entities || {})) {
+    if (!e || !e.position || (e.type !== 'mob' && e.type !== 'animal')) continue
+    if (!FOOD_ANIMALS.test((e.name || '').toLowerCase())) continue
+    const d = e.position.distanceTo(me); if (d < bd) { bd = d; best = { name: e.name, dist: d } }
+  }
+  return best
+}
+
 async function ensureFoodSupply (bot, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const say = opts.say || (() => {})
@@ -2799,25 +2840,37 @@ async function ensureFoodSupply (bot, opts = {}) {
     try { await tendWheatFarm(bot, { isStopped, say }) } catch (e) { dbg('  foodSupply: tend failed (' + e.message + ')') }
     return { ok: true, reason: 'wheat farm stands - tended it' }
   }
-  // DISCOVER first: if there's no remembered pond within reach AND no animal in sight, SWEEP
-  // unexplored ground to find water/animals (a real player scouts a new area, doesn't wait to
-  // be told or to starve). scoutForFood hunts animals it finds and remembers water for the farm.
-  const knownWater = recallInfra('water', bot.entity.position, 200)
-  const seesAnimal = () => Object.values(bot.entities || {}).some(e => e && e.position && FOOD_ANIMALS.test((e.name || '').toLowerCase()))
-  if (!knownWater && !seesAnimal() && !isStopped()) {
+  // GATE INPUTS (instrumented so a live watch can see WHY it does/doesn't sweep): a reachable
+  // remembered pond, and a food animal within a REAL range (distance-bounded, not server-wide).
+  const knownWater = recallInfra('water', bot.entity.position, 128)
+  const nearAnimal = nearestFoodAnimal(bot, parseInt(process.env.FOOD_ANIMAL_RANGE || '40', 10))
+  dbg('  ensureFoodSupply gate: knownWater=' + (knownWater ? knownWater.x + ',' + knownWater.z : 'none') +
+      ' nearAnimal=' + (nearAnimal ? nearAnimal.name + '@' + Math.round(nearAnimal.dist) + 'b' : 'none') +
+      ' hasFarm=' + hasStandingFarm() + ' stopped=' + isStopped())
+  // DISCOVER FIRST (the headline fix): no farm + no NEAR animal + no reachable known pond ->
+  // SWEEP unexplored ground (explore.js octant×ring) to FIND water/animals. A real player
+  // scouts a new area outward - it doesn't wait to be told or to starve. Must EXECUTE the walk.
+  if (foodSec.shouldSweepForFood(hasStandingFarm(), !!nearAnimal, !!knownWater) && !isStopped()) {
+    dbg('  ensureFoodSupply: NO known food source - running the outward sweep to discover one')
     try {
       const r = await scoutForFood(bot, anchor, { isStopped, say, maxMs: opts.scoutMs || 240000 })
       if (r && r.found === 'animals' && r.kills > 0) return { ok: true, reason: 'scouted out animals and hunted ' + r.kills }
+      // the sweep may have remembered water -> fall through to farm at it
     } catch (e) { dbg('  foodSupply: scout failed (' + e.message + ')') }
+  } else if (nearAnimal && !isStopped()) {
+    // a real, close animal -> hunt it now (don't sweep past food that's right here)
+    dbg('  ensureFoodSupply: ' + nearAnimal.name + ' ' + Math.round(nearAnimal.dist) + 'b away - hunting it')
+    try { await huntForFood(bot, { isStopped, range: parseInt(process.env.FOOD_ANIMAL_RANGE || '40', 10) }) } catch {}
+    if (foodCount(bot) > 0) return { ok: true, reason: 'hunted a nearby animal' }
   }
   // Establish the wheat farm at the remembered/discovered pond (ensureWheatFarm treks to it).
   let planted = false
   try { planted = await ensureWheatFarm(bot, anchor, { isStopped, say, avoid: opts.avoid }) } catch (e) { dbg('  foodSupply: wheat farm setup failed (' + e.message + ')') }
   // SECONDARY, opportunistic: if a food animal is ACTUALLY nearby now, grab it.
-  if (!planted && seesAnimal() && !isStopped()) {
+  if (!planted && nearestFoodAnimal(bot, 24) && !isStopped()) {
     try { await huntForFood(bot, { isStopped, range: 24 }) } catch {}
   }
-  return { ok: hasStandingFarm() || foodCount(bot) > 0, reason: hasStandingFarm() ? 'wheat farm planted' : 'could not establish a farm yet (no reachable open-sky pond / no seeds)' }
+  return { ok: hasStandingFarm() || foodCount(bot) > 0, reason: hasStandingFarm() ? 'wheat farm planted' : 'could not establish a farm yet (no reachable open-sky pond / no seeds - swept for one)' }
 }
 
 // Cheap check (NO bank walk): should a fed, idle, safe bot proactively establish its food
@@ -2929,7 +2982,12 @@ async function secureFoodInner (bot, opts = {}) {
   const say = opts.say || (() => {})
   const home = opts.home || null
   const cookIfRaw = async () => { try { if (Object.keys(RAW_COOKABLE).some(n => countItem(bot, n) > 0)) await cookRawMeat(bot, { isStopped }) } catch {} }
-  const fedEnough = () => (bot.food != null && bot.food > (opts.threshold != null ? opts.threshold : 12)) || foodCount(bot) >= 3
+  // EAT TO COMFORTABLE, not just "stopped starving" (live: it cooked beef then wandered off to
+  // mine at food=10 and died). "Fed" = the food bar is COMFORTABLE (>=18) - the surplus food
+  // left in the pack after eating up to 18 IS the carried buffer. The old release at food>12
+  // OR "3 food items" is exactly what let it leave hungry with cooked meat in the pack.
+  const comfortable = opts.comfortable != null ? opts.comfortable : 18
+  const fedEnough = () => bot.food != null && bot.food >= comfortable
   if (fedEnough()) return true
   // EATING MUST WIN over a stalled brain goal: the bot idled at food=0 stuck in a stalled
   // item-recovery `travel` while food sat in its chest (live). Drop any lingering goal so the
@@ -2953,6 +3011,12 @@ async function secureFoodInner (bot, opts = {}) {
   // 2) raw meat in the pack + a furnace in reach -> cook (3x the food value of raw)
   await cookIfRaw(); await eatUp(bot)
   if (fedEnough()) return true
+  // CHEAP food (pack/bank/cook) is drained. Only GENUINE hunger (<= the acquire trigger)
+  // justifies the EXPENSIVE discovery below (hunt/farm/fish/scout) - a moderately-fed bot
+  // (e.g. food 15) must not go farming every planner round for the last few points. It eats
+  // to comfortable from ready food when it can, and only truly hungry does it go get more.
+  const acquireTrigger = opts.threshold != null ? opts.threshold : 12
+  if ((bot.food ?? 20) > acquireTrigger) { dbg('secureFood: food=' + bot.food + ' > acquire-trigger ' + acquireTrigger + ' and ready food drained - not hunting/farming for the last points'); return true }
   // 3) hunt what's visible (batch - one kill barely dents the deficit)
   try { for (let k = 0; k < 4 && foodCount(bot) < 5 && !isStopped(); k++) { if (!await huntForFood(bot, { isStopped, range: 32 })) break } } catch {}
   await cookIfRaw(); await eatUp(bot)
@@ -3018,7 +3082,8 @@ async function scoutForFood (bot, home, opts = {}) {
     if (isNight(bot)) { dbg('  scoutForFood: night - not roaming the dark'); break }
     const wp = explore.firstUnswept(waypoints, searched)
     if (!wp) { dbg('  scoutForFood: every sector swept recently - nothing new to check'); break }
-    dbg('  scoutForFood: -> sector ' + wp.key + ' (' + wp.name + '-' + wp.ring + ') at ' + wp.x + ',' + wp.z)
+    dbg('  scoutForFood: sweeping octant ' + wp.name + ' ring ' + wp.ring + ' -> walking to ' + wp.x + ',' + wp.z + ' (leg ' + (visited + 1) + '/' + (opts.maxLegs || 8) + ')')
+    if (say && visited === 0) say('scouting ' + wp.name + ' for food')
     try { await walkStaged(bot, wp.x, wp.z, { isStopped, range: 8, timeoutMs: 100000 }) } catch {}
     // credit the sector we ACTUALLY reached (a trek that fell short shouldn't mark the far one)
     const hereKey = explore.sectorKeyAt(bot.entity.position.x, bot.entity.position.z, anchor, { rings })
@@ -3954,6 +4019,10 @@ async function ensureTable (bot, opts = {}) {
     if (!recipe) throw new Error('cannot craft a crafting table (need 4 planks)')
     await bot.craft(recipe, 1, null)
   }
+  // BELIEVABILITY: at the hut, put the SINGLE working table on a valid interior floor cell
+  // (reachable through the door), like the chest/furnace. Falls back to the local spot search.
+  const insideTable = await placeStationInInterior(bot, 'table', 'crafting_table', { hut: opts.home, isStopped: opts.isStopped })
+  if (insideTable) return insideTable
   // place it on solid ground next to us
   const findSpot = () => {
     const b = bot.entity.position.floored()
@@ -4096,6 +4165,12 @@ async function ensureFurnace (bot, opts = {}) {
     await bot.craft(recipe, 1, table)
     await new Promise(r => setTimeout(r, 250))
   }
+  // BELIEVABILITY: the SINGLE working furnace goes INSIDE the hut on a valid interior floor
+  // cell (reachable through the door), like the chest/table - never through a wall. Bulk
+  // parallel-smelt furnaces (ensureFurnaces) stay on the outdoor utility pad. Falls back to
+  // local placement when not at the hut.
+  const inside = await placeStationInInterior(bot, 'furnace', 'furnace', { hut: opts.home, isStopped: opts.isStopped })
+  if (inside) return inside
   await placeFromInventory(bot, 'furnace')
   furnace = bot.findBlock({ matching: furnaceId, maxDistance: 8 })
   if (!furnace) throw new Error('placed a furnace but cannot find it')

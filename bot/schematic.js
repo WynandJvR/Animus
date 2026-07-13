@@ -28,6 +28,7 @@ const { goals, Movements } = require('mineflayer-pathfinder')
 const Build = require('mineflayer-builder/lib/Build')
 const interactable = require('mineflayer-builder/lib/interactable.json')
 const provision = require('./provision.js') // night-shelter during builds (shelterNeeded/digInForNight)
+const buildorder = require('./buildorder.js') // pure placement order: bottom-up then nearest + self-cell trap guard
 const navigate = require('./navigate.js') // the ONE deadline-goto implementation
 
 // DURABLE crash guard (re-applied here so a future `npm install` can't lose it, like
@@ -283,27 +284,52 @@ async function prepSite (bot, schem, at, opts = {}) {
 // Remove scaffold blocks the bot placed to gain height. We can't see what the
 // pathfinder placed, so we diff: any block now present in the footprint (+margin)
 // that WASN'T there before, isn't a schematic cell, and is a scaffold material.
+// Remove the scaffold blocks WE added to reach height, with a VERIFIED POSTCONDITION (item
+// 5b, reuse the huttidy "re-read the world until clean" pattern): after each top-down sweep,
+// re-scan the footprint+margin for remaining scaffold blocks (excluding the build's own solids
+// and pre-existing terrain) and RE-RUN until zero stray scaffold is left - not a single
+// best-effort pass that abandoned towers that only became reachable after others came down.
+// Stops early only when a pass makes NO progress (the rest is genuinely unreachable/protected).
 async function cleanupScaffold (bot, schem, at, beforeSet, solidSet, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
-  const md = require('minecraft-data')(bot.version)
   const scaffoldNames = new Set(SCAFFOLD_BLOCKS)
   const st = schem.start(); const en = schem.end()
   const M = 2 // horizontal margin (bridging can step just outside)
-  let removed = 0
-  for (let y = at.y + en.y; y >= at.y + st.y && !isStopped(); y--) { // top-down so towers unstack safely
-    for (let z = at.z + st.z - M; z <= at.z + en.z + M; z++) {
-      for (let x = at.x + st.x - M; x <= at.x + en.x + M; x++) {
-        const key = `${x},${y},${z}`
-        if (solidSet.has(key) || beforeSet.has(key)) continue // part of the build, or pre-existing
-        const b = bot.blockAt(new Vec3(x, y, z))
-        if (!b || AIR.test(b.name) || !scaffoldNames.has(b.name)) continue
-        try {
-          if (bot.entity.position.distanceTo(b.position) > 4) await gotoWithTimeout(bot, new goals.GoalNear(x, y, z, 3), 12000)
-          if (bot.canDigBlock && bot.canDigBlock(b)) { await equipToolFor(bot, b.name); await bot.dig(b); removed++ }
-        } catch {}
+  const maxPasses = opts.maxPasses || 3
+  const strayScaffold = () => {
+    const rem = []
+    for (let y = at.y + en.y; y >= at.y + st.y; y--) {
+      for (let z = at.z + st.z - M; z <= at.z + en.z + M; z++) {
+        for (let x = at.x + st.x - M; x <= at.x + en.x + M; x++) {
+          const key = `${x},${y},${z}`
+          if (solidSet.has(key) || beforeSet.has(key)) continue // part of the build, or pre-existing
+          const b = bot.blockAt(new Vec3(x, y, z))
+          if (b && !AIR.test(b.name) && scaffoldNames.has(b.name)) rem.push({ x, y, z })
+        }
       }
     }
+    return rem
   }
+  let removed = 0
+  let pass = 0
+  for (pass = 1; pass <= maxPasses && !isStopped(); pass++) {
+    const rem = strayScaffold()
+    if (!rem.length) break
+    rem.sort((a, b) => b.y - a.y) // top-down so towers unstack safely (dig under our feet -> ride down)
+    let progressed = 0
+    for (const p of rem) {
+      if (isStopped()) break
+      const b = bot.blockAt(new Vec3(p.x, p.y, p.z))
+      if (!b || AIR.test(b.name) || !scaffoldNames.has(b.name)) continue
+      try {
+        if (bot.entity.position.distanceTo(b.position) > 4) await gotoWithTimeout(bot, new goals.GoalNear(p.x, p.y, p.z, 3), 12000)
+        if (bot.canDigBlock && bot.canDigBlock(b)) { await equipToolFor(bot, b.name); await bot.dig(b); removed++; progressed++ }
+      } catch {}
+    }
+    if (progressed === 0) { dbg('cleanupScaffold: ' + rem.length + ' scaffold left but none reachable this pass - stopping'); break }
+  }
+  const left = strayScaffold().length
+  dbg('cleanupScaffold: removed ' + removed + ' in ' + pass + ' pass(es), ' + left + ' stray scaffold left (postcondition ' + (left === 0 ? 'CLEAN' : 'not met') + ')')
   return removed
 }
 
@@ -415,12 +441,14 @@ async function tryPlace (bot, build, action, item) {
   const goal = new goals.GoalPlaceBlock(action.pos, bot.world, { faces, facing, facing3D: is3D, half })
 
   if (!goal.isEnd(bot.entity.position.floored())) {
-    try { await gotoWithTimeout(bot, goal, 20000) } catch (e) { return false } // can't reach yet
+    try { await gotoWithTimeout(bot, goal, 20000) } catch (e) { return await placeUnderOverhang(bot, action, item, half) } // can't reach the normal way -> try the overhang fallback
   }
-  await bot.equip(haveItem(bot, item.name), 'hand').catch(() => {})
+  // THROUGHPUT (item 5d): only (re-)equip when not already holding the material - a wall
+  // places dozens of the same block, and a redundant equip per place is a server round-trip.
+  if (!bot.heldItem || bot.heldItem.name !== item.name) await bot.equip(haveItem(bot, item.name), 'hand').catch(() => {})
 
   const faceAndRef = goal.getFaceAndRef(bot.entity.position.floored().offset(0.5, 1.6, 0.5))
-  if (!faceAndRef) return false
+  if (!faceAndRef) return await placeUnderOverhang(bot, action, item, half)
   await bot.lookAt(faceAndRef.to, true).catch(() => {})
   const refBlock = bot.blockAt(faceAndRef.ref)
   const sneak = refBlock && interactable.indexOf(refBlock.name) > 0 // sneak so we don't OPEN a chest/door instead of placing on it
@@ -431,10 +459,42 @@ async function tryPlace (bot, build, action, item) {
     await new Promise(r => setTimeout(r, 120)) // let the block-update settle (Paper) + natural pacing
     return true
   } catch (e) {
-    return false
+    return await placeUnderOverhang(bot, action, item, half)
   } finally {
     if (sneak) bot.setControlState('sneak', false)
   }
+}
+
+// OVERHANG FALLBACK (item 5c): a bottom-layer cell UNDER an overhanging ring has no reachable
+// side/bottom face, so the normal GoalPlaceBlock can't place it (the ~3 unplaceable cells that
+// left the castle at 41/44). A real player stands BESIDE the column and sneak-places against
+// the BOTTOM FACE of the block already ABOVE the target - the block attaches to that underside
+// and fills the cell. Best-effort; verified by a world re-read (pathfix's verifiedPlace covers
+// _placeBlockWithOptions, but we double-check here so a miss returns false, not a phantom pass).
+async function placeUnderOverhang (bot, action, item, half) {
+  try {
+    const above = bot.blockAt(action.pos.offset(0, 1, 0))
+    if (!above || above.boundingBox !== 'block') return false // no overhang to place against
+    // stand at a horizontal neighbour of the target (never in it) with the target reachable
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const stand = action.pos.offset(dx, 0, dz)
+      const feet = bot.blockAt(stand); const head = bot.blockAt(stand.offset(0, 1, 0)); const floor = bot.blockAt(stand.offset(0, -1, 0))
+      if (!(feet && AIR.test(feet.name) && head && AIR.test(head.name) && floor && floor.boundingBox === 'block')) continue
+      try { await gotoWithTimeout(bot, new goals.GoalNear(stand.x, stand.y, stand.z, 0), 12000) } catch { continue }
+      if (bot.entity.position.distanceTo(action.pos) > 4) continue
+      if (!bot.heldItem || bot.heldItem.name !== item.name) await bot.equip(haveItem(bot, item.name), 'hand').catch(() => {})
+      await bot.lookAt(action.pos.offset(0.5, 0.5, 0.5), true).catch(() => {})
+      bot.setControlState('sneak', true)
+      try {
+        // place onto the BOTTOM face of the block above -> the new block lands at action.pos
+        await bot._placeBlockWithOptions(above, new Vec3(0, -1, 0), { half })
+        await new Promise(r => setTimeout(r, 150))
+        const there = bot.blockAt(action.pos)
+        if (there && !AIR.test(there.name)) { dbg('placed under-overhang cell at ' + action.pos.x + ',' + action.pos.y + ',' + action.pos.z + ' against the block above'); return true }
+      } catch { /* try the next stand cell */ } finally { bot.setControlState('sneak', false) }
+    }
+  } catch (e) { dbg('overhang place failed (' + e.message + ')') }
+  return false
 }
 
 // Equip the best available tool for a block KIND (pickaxe/shovel/axe) so clearing
@@ -588,18 +648,25 @@ async function buildSurvival (bot, schem, at, opts = {}) {
       // Re-compute placeable actions EVERY iteration (adaptive: a block becomes
       // placeable once its neighbours exist), excluding ones already deferred
       // this round. We never dig, so only 'place' actions.
-      const avail = build.getAvailableActions()
+      const feet = bot.entity.position.floored()
+      let avail = build.getAvailableActions()
         .filter(a => a.type === 'place' && !deferred.has(key(a.pos)))
+      // DON'T WALL/SUFFOCATE YOURSELF (item 5a): never place into the bot's own feet/head
+      // cell - defer it until it has stepped off that column (else it traps itself or the
+      // place fails because it's standing there). It's re-tried after other progress moves us.
+      for (const a of avail) if (buildorder.isSelfCell(a.pos, feet)) deferred.add(key(a.pos))
+      avail = avail.filter(a => !deferred.has(key(a.pos)))
       if (avail.length === 0) {
         // Drained what's reachable right now. If we placed something since the last
         // drain, the deferred blocks may be reachable now - clear and retry them.
         if (deferred.size && placedSinceDrain > 0) { deferred.clear(); placedSinceDrain = 0; passes++; continue }
         break // nothing reachable and no progress -> the rest is genuinely blocked
       }
-      // Nearest to the bot's CURRENT position (adaptive ordering as it moves).
-      avail.sort((a, b) =>
-        a.pos.offset(0.5, 0.5, 0.5).distanceSquared(bot.entity.position) -
-        b.pos.offset(0.5, 0.5, 0.5).distanceSquared(bot.entity.position))
+      // BOTTOM-UP then NEAREST (item 5a): build a stable base layer-by-layer - never place a
+      // high block before its support, and don't reach up into empty air. Within a layer,
+      // nearest-to-bot keeps walking minimal. Replaces the old nearest-only sort that could
+      // race ahead to upper cells and strand lower ones.
+      avail = buildorder.orderPlacements(avail, bot.entity.position)
       const action = avail[0]
 
       const item = build.getItemForState(action.state)
