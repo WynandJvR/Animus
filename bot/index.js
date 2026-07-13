@@ -792,7 +792,7 @@ if (process.env.AUTO_DEFEND !== '0') {
               note(`(flee) creeper ${fbest.toFixed(1)}m near home - retreating INTO the hut`)
               ;(async () => {
                 try {
-                  await navigate.navigateTo(bot, new goals.GoalNear(hut.x + 2, hut.y + 1, hut.z + 2, 1),
+                  await navigate.navigateToPreempt(bot, new goals.GoalNear(hut.x + 2, hut.y + 1, hut.z + 2, 1),
                     { timeoutMs: 15000, deadlineMs: 40000, climb: false, budgets: { door: 3, pit: 0, water: 0, nudge: 1, stepout: 1 }, label: 'hut-retreat' })
                   note('(flee) inside the hut - door-assist sealed the door behind me')
                 } catch (e) { note(`(flee) hut retreat failed (${e.message}) - back to open-field flee`) } finally {
