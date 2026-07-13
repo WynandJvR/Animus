@@ -45,12 +45,16 @@ function isForceUnsticking () { return forceUnsticking }
 // pathfinder.goto with a hard deadline. An unreachable target can hang goto FOREVER
 // (verified live: froze a 432-block build for 10+ minutes; froze the whole brain loop).
 // This used to exist as three identical copies (commands/provision/schematic).
-async function gotoOnce (bot, goal, ms = 20000) {
-  // Yield to a watchdog FORCE-ESCAPE: its manual maneuvers must not fight a concurrent
-  // goto's physics ticks (both write control states - the escape loses). Bounded wait.
-  if (forceUnsticking) {
+async function gotoOnce (bot, goal, ms = 20000, gopts = {}) {
+  // Yield to a watchdog FORCE-ESCAPE and to any ACTIVE RECOVERY maneuver: their manual
+  // control-state driving must not fight a concurrent goto's physics ticks (the pathfinder
+  // rewrites the controls every tick, so the manual escape LOSES - live: step-out rungs
+  // reported 'no progress' for 3+ minutes at 433,62,112 while another flow's goto stomped
+  // them). Bounded wait. Door-assist's own gotos pass duringRecovery to skip the gate
+  // (they ARE the recovery).
+  if ((forceUnsticking || recoveringDepth > 0) && !gopts.duringRecovery) {
     const t0 = Date.now()
-    while (forceUnsticking && Date.now() - t0 < 45000) await new Promise(r => setTimeout(r, 250))
+    while ((forceUnsticking || recoveringDepth > 0) && Date.now() - t0 < 45000) await new Promise(r => setTimeout(r, 250))
   }
   // SCAFFOLD SESSION: any block the pathfinder places while EXECUTING a goto (bridge,
   // 1x1 tower) is by definition movement scaffold, never build fabric - build blocks
@@ -242,7 +246,7 @@ async function openNearbyDoor (bot, opts = {}) {
       // the pathfinder cannot ROUTE through door cells at all (it only bumps them open
       // on direct lines), and "open" is normalized to "walk line clear" further down
       // (for a sideways-hung door those are OPPOSITES - see passageClear).
-      try { await gotoOnce(bot, new goals.GoalNear(p.x, p.y, p.z, 2), 15000) } catch (e) { dbg('door-assist: cannot reach door at ' + p + ' (' + e.message + ')'); continue }
+      try { await gotoOnce(bot, new goals.GoalNear(p.x, p.y, p.z, 2), 15000, { duringRecovery: true }) } catch (e) { dbg('door-assist: cannot reach door at ' + p + ' (' + e.message + ')'); continue }
       if (bot.entity.position.distanceTo(p) > 4) continue
       try {
         // WALK THROUGH the doorway before re-planning: the pathfinder won't ROUTE
@@ -354,7 +358,7 @@ async function openNearbyDoor (bot, opts = {}) {
         if (blockedSolid(base.offset(dx * sign * 2, 0, dz * sign * 2)) && !blockedSolid(base.offset(-dx * sign * 2, 0, -dz * sign * 2))) { sign = -sign; how += ' FLIPPED (chosen side blocked)' }
         dbg('door-assist: exit side ' + (dx ? (sign > 0 ? 'east' : 'west') : (sign > 0 ? 'south' : 'north')) + how)
         // Align on the inside cell in front of the door (pathfinder CAN reach that).
-        try { await gotoOnce(bot, new goals.GoalBlock(base.x - dx * sign, base.y, base.z - dz * sign), 8000) } catch (e2) { dbg('door-assist: could not align (' + e2.message + ')') }
+        try { await gotoOnce(bot, new goals.GoalBlock(base.x - dx * sign, base.y, base.z - dz * sign), 8000, { duringRecovery: true }) } catch (e2) { dbg('door-assist: could not align (' + e2.message + ')') }
         // FORCE-WALK through on manual controls. Thread the doorway CENTER-TO-CENTER -
         // one long diagonal walk clipped the open door panel and slid the bot off
         // sideways into the wall corner.
@@ -596,7 +600,21 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
 //         profiles) | budgets: per-rung recovery caps (see defaultBudgets) | climb:false
 //         to disable the climb rung (trek loops that manage their own surfacing)
 //       | label (debug tag)
-async function navigateTo (bot, goal, opts = {}) {
+// ONE BODY, ONE ROUTE: concurrent navigateTo calls fight over the single pathfinder and
+// the control states - live at 433,62,112 a bank-withdraw nav and the build travel each
+// ran their own recovery ladder, interleaved every ~2s, and every manual step-out was
+// stomped by the other flow's goto physics: position frozen for many minutes while both
+// "recovered". Serialize behind a mutex: the body can only walk one route at a time; a
+// queued flow just experiences a slower nav (honest) instead of a phantom wedge.
+let navChain = Promise.resolve()
+function navigateTo (bot, goal, opts = {}) {
+  const run = () => navigateToInner(bot, goal, opts)
+  const p = navChain.then(run, run)
+  navChain = p.then(() => {}, () => {}) // failures release the mutex like successes
+  return p
+}
+
+async function navigateToInner (bot, goal, opts = {}) {
   const timeoutMs = opts.timeoutMs || 20000
   const deadline = Date.now() + (opts.deadlineMs || Math.max(90000, timeoutMs * 4))
   const isStopped = opts.isStopped || (() => false)

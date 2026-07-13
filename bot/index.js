@@ -896,7 +896,11 @@ if (process.env.WEDGE_WATCHDOG !== '0') {
     // "trying to move" = someone is steering; a bot smelting/sleeping/digging in place is fine
     const trying = !!(bot.pathfinder && bot.pathfinder.goal) || navigate.isNavigating()
     if (!trying || bot.isSleeping || bot.targetDigBlock) return
-    if (navigate.isRecovering() || navigate.isForceUnsticking() || (commands.isEscaping && commands.isEscaping())) return
+    // Only stand down for our OWN force-escape. A regular recovery/escape that has the
+    // position FROZEN for 2.5 minutes is by definition failing (live: the ladder looped
+    // door/nudge/stepout "no progress" for 4+ minutes at 433,62,112 and the old
+    // isRecovering() gate kept this watchdog silent the whole time).
+    if (navigate.isForceUnsticking()) return
     const old = wdHist.find(h => now - h.t >= 150000)
     if (!old) return // not enough history yet
     const moved = Math.hypot(p.x - old.x, p.y - old.y, p.z - old.z)

@@ -53,9 +53,18 @@ const cellKey = e => `${e.x},${e.y},${e.z}`
 // COUNTS survive the cooldown (the stock is presumably still in there - only the WALK is
 // suppressed), so the bank tally doesn't sawtooth. Any successful open clears the record.
 const REACH_FAIL_RE = /goto timed out|window did not open|openBlock|no path|took too long|path ended short/i
-function chestFailed (e, err) {
+function chestFailed (bot, e, err) {
   const msg = (err && err.message) || ''
   if (!REACH_FAIL_RE.test(msg)) return // a reflex stealing the goal is not the chest's fault
+  // BLAME SCOPE: only count a failure the bot suffered NEAR the chest. A bot wedged in a
+  // hole 30 blocks out fails to reach EVERYTHING - that poisoned the perfectly good hut
+  // chest's record and deregistered it (live, 05:27). Far failure = the BOT's nav problem.
+  try {
+    if (bot && bot.entity && Math.hypot(e.x - bot.entity.position.x, e.y - bot.entity.position.y, e.z - bot.entity.position.z) > 12) {
+      dbg('chest at ' + cellKey(e) + ' unreached from afar (' + msg + ') - not the chest\'s fault, no strike')
+      return
+    }
+  } catch {}
   const c = loadCache()
   const k = cellKey(e)
   const ent = c[k] = c[k] || { counts: {}, at: 0 }
@@ -124,7 +133,7 @@ async function readChest (bot, e) {
     return counts
   } catch (err) {
     dbg('chest read failed at ' + cellKey(e) + ' (' + err.message + ') - using cached counts')
-    chestFailed(e, err)
+    chestFailed(bot, e, err)
     return (loadCache()[cellKey(e)] || {}).counts || {}
   }
 }
@@ -172,7 +181,7 @@ async function withdrawItems (bot, name, count, opts = {}) {
       await readChest(bot, e) // we're standing here - refresh the cache with a real read
     } catch (err) {
       dbg('withdraw ' + name + ' failed at ' + cellKey(e) + ' (' + err.message + ')')
-      chestFailed(e, err)
+      chestFailed(bot, e, err)
     }
   }
   if (got > 0) dbg('withdrew ' + got + '/' + count + ' ' + name + ' from the bank')
