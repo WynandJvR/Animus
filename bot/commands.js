@@ -2399,6 +2399,10 @@ async function autoBuild (bot, schem, at, opts = {}) {
         // decoupled from the rebuild. Idempotent: a filled apron / placed bed is a fast no-op.
         try { await provision.ensureHutApron(bot, hutAt, { isStopped, say }) } catch (e) { dbg('camp: apron fill failed (' + e.message + ')') }
         try { const bs = await provision.ensureHutBed(bot, hutAt, { isStopped, say }); dbg('camp: hut bed -> ' + bs) } catch (e) { dbg('camp: hut bed failed (' + e.message + ')') }
+        // BANK DOUBLE-CHEST HEAL (liveability, every pass): a rebuild that left the bank
+        // as two mismatched single chests (live: 418,66,86 east + 418,66,87 north) gets
+        // re-faced into one connected double. Idempotent: a merged pair is a fast no-op.
+        try { if (await provision.healBankDouble(bot, { x: hutAt.x, y: hutAt.y, z: hutAt.z }, { isStopped, say })) say('fixed the bank - one proper double chest again') } catch (e) { dbg('camp: bank double-heal failed (' + e.message + ')') }
         // SPAWN re-assert (hourly no-op): a bed standing in the hut is worthless if the
         // server anchor drifted - use it again so every death keeps coming home.
         try { await provision.ensureSpawnBed(bot, { isStopped, say }) } catch (e) { dbg('camp: spawn assert failed (' + e.message + ')') }

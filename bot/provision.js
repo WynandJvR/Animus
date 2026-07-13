@@ -3679,6 +3679,118 @@ async function ensureChest (bot, opts = {}) {
   return chest
 }
 
+// ---- ORIENTED chest placement + double-chest heal -----------------------------------
+// The hut bank must be ONE connected double chest. After the creeper rebuild the camp
+// placed two mismatched singles (418,66,86 facing east + 418,66,87 facing north, live) -
+// they never merge, the bank reads as two small chests. Two mechanics matter: a chest's
+// facing follows the PLACER (it faces whoever placed it - yaw at placement), and sneak-
+// placing (which the schematic builder does whenever the reference block is a chest, to
+// avoid opening it) SUPPRESSES merging. So chests are placed deliberately: stand on the
+// wanted-facing side, click the TOP of the FLOOR block (never the partner chest), no
+// sneak, verify the facing landed - with one side-flip retry in case the convention is
+// inverted. A wrong-facing chest is dug back up (fresh + empty + our own block).
+const FACING_OFF = { north: [0, -1], south: [0, 1], west: [-1, 0], east: [1, 0] }
+async function placeChestOriented (bot, target, want, opts = {}) {
+  const off = FACING_OFF[want]
+  const item = () => (bot.inventory ? bot.inventory.items() : []).find(i => i.name === 'chest')
+  if (!off || !item()) return false
+  const floor = bot.blockAt(target.offset(0, -1, 0))
+  if (!floor || floor.boundingBox !== 'block' || /chest/.test(floor.name)) return false
+  for (const sign of [1, -1]) { // stand on the facing side; one flip retry
+    if (!item()) return false
+    const stand = target.offset(off[0] * sign, 0, off[1] * sign)
+    const clear = b => b && b.boundingBox !== 'block'
+    const f = bot.blockAt(stand); const h = bot.blockAt(stand.offset(0, 1, 0)); const g = bot.blockAt(stand.offset(0, -1, 0))
+    if (!(clear(f) && clear(h) && g && g.boundingBox === 'block')) continue
+    try { await gotoWithTimeout(bot, new goals.GoalBlock(stand.x, stand.y, stand.z), 15000) } catch { continue }
+    const cur = bot.blockAt(target)
+    if (cur && /chest/.test(cur.name)) return false // filled meanwhile
+    try {
+      await bot.equip(item(), 'hand')
+      await bot.lookAt(target.offset(0.5, -0.4, 0.5), true) // down through the target cell at the floor
+      await bot.placeBlock(floor, new Vec3(0, 1, 0))
+    } catch (e) { dbg('  orientedChest: place failed (' + e.message + ')'); return false }
+    await new Promise(r => setTimeout(r, 350))
+    const b = bot.blockAt(target)
+    if (!b || !/chest/.test(b.name)) return false
+    let got = null; try { got = (b.getProperties() || {}).facing } catch {}
+    if (got === want) return true
+    dbg('  orientedChest: landed facing ' + got + ' (wanted ' + want + ') - taking it back, flipping sides')
+    try { await bot.dig(b); await collectDrops(bot, 3) } catch { return false }
+    await new Promise(r => setTimeout(r, 250))
+  }
+  return false
+}
+
+// Detect two ADJACENT own single chests in the hut and re-place them with ONE shared
+// perpendicular facing so they merge into a double. Contents move one chest at a time
+// (the pack never holds the whole treasury); a chest is only dug once it READS empty.
+// Returns true when the pair reads as a connected double afterwards.
+async function healBankDouble (bot, hut, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const list = listInfra('chest', bot).filter(e => insideHutBox(e, hut))
+  if (list.length < 2) return false
+  let pair = null
+  for (const a of list) {
+    const b = list.find(o => o !== a && o.y === a.y && Math.abs(o.x - a.x) + Math.abs(o.z - a.z) === 1)
+    if (b) { pair = [a, b]; break }
+  }
+  if (!pair) return false
+  const blkOf = e => bot.blockAt(new Vec3(e.x, e.y, e.z))
+  const prop = (b, k) => { try { return (b.getProperties() || {})[k] } catch { return null } }
+  const [A, B] = pair.map(blkOf)
+  if (!A || !B || !/chest$/.test(A.name) || !/chest$/.test(B.name)) return false
+  if (prop(A, 'type') !== 'single' || prop(B, 'type') !== 'single') return false // already merged
+  // shared facing PERPENDICULAR to the pair axis, on a side with interior standing room
+  const axisZ = pair[0].x === pair[1].x
+  let want = null
+  for (const w of (axisZ ? ['west', 'east'] : ['north', 'south'])) {
+    const off = FACING_OFF[w]
+    const ok = pair.every(e => {
+      const s = new Vec3(e.x + off[0], e.y, e.z + off[1])
+      const f = bot.blockAt(s); const g = bot.blockAt(s.offset(0, -1, 0))
+      return f && f.boundingBox !== 'block' && g && g.boundingBox === 'block'
+    })
+    if (ok) { want = w; break }
+  }
+  if (!want) { dbg('bank heal: no standable shared facing side - leaving the pair as-is'); return false }
+  dbg('bank heal: two SINGLE chests at ' + pair.map(e => e.x + ',' + e.y + ',' + e.z).join(' + ') + ' - re-facing both ' + want + ' to merge them')
+  for (const e of pair) {
+    if (isStopped()) return false
+    let b = blkOf(e)
+    if (!b || !/chest$/.test(b.name)) return false
+    if (prop(b, 'facing') === want) continue // this half is already right
+    // 1) empty it into the pack (verified) - never dig a chest with anything inside
+    try {
+      const counts = await chestCounts(bot, b)
+      for (const n of Object.keys(counts)) { await withdrawItem(bot, blkOf(e), n, counts[n]) }
+    } catch (err) { dbg('bank heal: empty failed (' + err.message + ') - aborting'); return false }
+    let left = {}
+    try { left = await chestCounts(bot, blkOf(e)) } catch { left = { unknown: 1 } }
+    if (Object.keys(left).length) {
+      dbg('bank heal: chest still holds ' + Object.keys(left).join(',') + ' (pack full?) - aborting, nothing lost')
+      return false
+    }
+    // 2) dig + re-place oriented + re-register
+    forgetInfra('chest', listInfra('chest').find(x => x.x === e.x && x.y === e.y && x.z === e.z))
+    try { await bot.dig(blkOf(e)); await collectDrops(bot, 3) } catch (err) { dbg('bank heal: dig failed (' + err.message + ')'); return false }
+    if (!await placeChestOriented(bot, new Vec3(e.x, e.y, e.z), want, opts)) {
+      dbg('bank heal: oriented re-place failed - putting a chest back plainly so the bank cell is not lost')
+      try { await placeAt(bot, new Vec3(e.x, e.y, e.z), /^chest$/) } catch {}
+    }
+    const nb = blkOf(e)
+    if (!nb || !/chest$/.test(nb.name)) { dbg('bank heal: chest did not go back at ' + e.x + ',' + e.y + ',' + e.z + ' - it is in my pack, next camp pass retries'); return false }
+    rememberInfra('chest', new Vec3(e.x, e.y, e.z))
+    // 3) put the goods back (working set stays on the bot as usual)
+    try { await depositMaterials(bot, nb, { keepDirt: 8 }) } catch (err) { dbg('bank heal: redeposit failed (' + err.message + ') - items safe in my pack') }
+  }
+  const [A2, B2] = pair.map(blkOf)
+  const merged = A2 && B2 && /chest$/.test(A2.name) && /chest$/.test(B2.name) &&
+    prop(A2, 'type') !== 'single' && prop(B2, 'type') !== 'single'
+  dbg('bank heal: pair now reads ' + (merged ? 'CONNECTED DOUBLE (' + prop(A2, 'type') + '/' + prop(B2, 'type') + ')' : 'still not merged'))
+  return !!merged
+}
+
 async function gotoChest (bot, chestBlock) {
   // BANKING REACH: a single 15s goto times out on a far bank ("chest read failed (goto
   // timed out)", live at 80b out) and the treasury reads as unreachable. Staged legs
@@ -4183,4 +4295,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, consolidateBank, furnishHut, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, setSpawnSuspect, isSpawnSuspect, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, fishForFood, ensureHutApron, ensureHutBed, setBuildZone, setDebugSink }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, setSpawnSuspect, isSpawnSuspect, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, fishForFood, ensureHutApron, ensureHutBed, setBuildZone, setDebugSink }

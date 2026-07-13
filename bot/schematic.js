@@ -396,6 +396,22 @@ async function tryPlace (bot, build, action, item) {
   // placement - the block still goes down, at worst mis-rotated - never crash the build.
   let facing, is3D
   try { ({ facing, is3D } = build.getFacing(action.state, properties.facing)) } catch { facing = undefined; is3D = false }
+
+  // CHESTS place DELIBERATELY (facing + merging are load-bearing): the generic path
+  // gave the hut bank two mismatched singles (418,66,86 east + 418,66,87 north, live) -
+  // a chest faces its placer, and the sneak used when the reference block is a chest
+  // (to avoid opening it) also SUPPRESSES merging. provision.placeChestOriented stands
+  // on the schematic-facing side, clicks the floor (never the partner chest), no sneak,
+  // and world-verifies the facing - so two adjacent schematic chests merge into the
+  // double. Falls through to the generic path when the oriented one can't even try
+  // (no floor yet / stand cell blocked); a later pass retries.
+  if (/(^|_)chest$/.test(item.name) && properties.facing) {
+    try {
+      if (await provision.placeChestOriented(bot, action.pos, properties.facing)) return true
+    } catch (e) { /* fall through to the generic path */ }
+    const there = bot.blockAt(action.pos)
+    if (there && /chest$/.test(there.name)) return true // landed (maybe imperfect facing) - don't double-place
+  }
   const goal = new goals.GoalPlaceBlock(action.pos, bot.world, { faces, facing, facing3D: is3D, half })
 
   if (!goal.isEnd(bot.entity.position.floored())) {
