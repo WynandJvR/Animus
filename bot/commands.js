@@ -1080,16 +1080,36 @@ async function handle (bot, line) {
       //    entity), NOT blocks - the old activateBlock at the death coords never opened one
       //    (verified live: an uncollected grave with tools stood for hours). Right-click
       //    every display-ish entity near the death point; if a grave GUI opens, empty it.
-      const cands = Object.values(bot.entities || {}).filter(e => e && e.position &&
+      //
+      //    HARDENED (live: "my grave is right here but it won't open" + "0 grave-candidate
+      //    entities" at real graves): (a) entities STREAM IN after chunk load - re-scan for
+      //    up to 5s instead of trusting the first instant's empty list; (b) AxGraves
+      //    listens for PlayerInteractAtEntity - a plain 'interact' packet can be ignored,
+      //    so try interact_at (position-qualified) first, then plain interact, then a
+      //    PUNCH (AxGraves' instant-pickup path) - it's the bot's own grave. Each attempt
+      //    is verified by a window opening or items landing; stop at the first that works.
+      const graveScan = () => Object.values(bot.entities || {}).filter(e => e && e.position &&
         Math.abs(e.position.y - d.y) <= 3 && Math.hypot(e.position.x - d.x, e.position.z - d.z) <= 4 &&
         /armor_stand|item_display|block_display|text_display|interaction|item_frame|glow_item_frame/.test(e.name || ''))
+      let cands = graveScan()
+      for (let w = 0; w < 10 && !cands.length; w++) { await new Promise(r => setTimeout(r, 500)); cands = graveScan() }
       dbg('recover: ' + cands.length + ' grave-candidate entities near ' + d.x + ',' + d.y + ',' + d.z + (cands.length ? ' (' + cands.map(e => e.name).join(',') + ')' : ''))
       for (const g of cands) {
         // no early-exit on item gain: a coincidental pickup (the operator dropped food
         // mid-recovery, live) aborted the loop before the grave was ever CLICKED
         try { await gotoTimed(bot, new goals.GoalNear(g.position.x, g.position.y, g.position.z, 2), 10000) } catch {}
-        try { await bot.activateEntity(g) } catch (e) { dbg('recover: activateEntity ' + g.name + ' failed (' + e.message + ')') }
-        await new Promise(r => setTimeout(r, 700))
+        const invBefore = invTotal()
+        const openedOrLooted = () => !!bot.currentWindow || invTotal() > invBefore
+        for (const how of ['interact_at', 'interact', 'attack']) {
+          try { await bot.lookAt(g.position.offset ? g.position.offset(0, 0.4, 0) : g.position, true) } catch {}
+          try {
+            if (how === 'interact_at' && typeof bot.activateEntityAt === 'function') await bot.activateEntityAt(g, g.position)
+            else if (how === 'interact') await bot.activateEntity(g)
+            else if (how === 'attack') await bot.attack(g)
+          } catch (e) { dbg('recover: ' + how + ' on ' + g.name + ' failed (' + e.message + ')') }
+          await new Promise(r => setTimeout(r, 700))
+          if (openedOrLooted()) { dbg('recover: grave responded to ' + how + (bot.currentWindow ? ' (GUI open)' : ' (items popped)')); break }
+        }
         // grave GUI variant: shift-click every filled container slot into the pack
         const w = bot.currentWindow
         if (w) {

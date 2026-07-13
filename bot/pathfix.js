@@ -189,17 +189,40 @@ function installPathfinderTuning (bot) {
     // FOREVER. Every chest count / withdraw / deposit / furnace open / grave GUI
     // funnels through these two. Deadline + one clean retry + an honest error replace
     // the scattered per-caller timeout hacks (openFurnace retry, grave "won't open").
+    //
+    // REACH DISAMBIGUATION (live overnight: half the "window did not open" failures were
+    // gotos that never arrived - the interact was sent from 8+ blocks out and the server
+    // rightly ignored it): out of reach is a NAV problem, not a container problem. Close
+    // the gap first; if we still can't get within reach, throw an error that SAYS
+    // "cannot reach" so callers (dead-chest tracking, grave recovery) can act on the
+    // difference. A true from-in-reach window failure gets a look-at + a longer second
+    // deadline (lag), then an honest window error.
     for (const fname of ['openBlock', 'openEntity']) {
       const orig = bot[fname].bind(bot)
       bot[fname] = async function (target, ...rest) {
+        const tpos = target && target.position
+        const distTo = () => {
+          try { return tpos ? bot.entity.position.distanceTo(tpos.clone ? tpos.clone().offset(0.5, 0.5, 0.5) : tpos) : null } catch { return null }
+        }
         for (let attempt = 0; ; attempt++) {
+          let d = distTo()
+          if (d != null && d > 4.5) {
+            // too far for the server to accept the interact - close the gap first
+            try {
+              const { goals } = require('mineflayer-pathfinder')
+              await require('./navigate.js').gotoOnce(bot, new goals.GoalNear(Math.floor(tpos.x), Math.floor(tpos.y), Math.floor(tpos.z), 2), 12000)
+            } catch {}
+            d = distTo()
+            if (d != null && d > 5) throw new Error(fname + ': cannot reach the container (' + d.toFixed(1) + 'b away after approach) - unreachable, not a window failure')
+          }
+          try { if (tpos) await bot.lookAt(tpos.clone ? tpos.clone().offset(0.5, 0.5, 0.5) : tpos, true) } catch {}
           const w = await Promise.race([
             orig(target, ...rest).catch(e => ({ __err: e || new Error('open failed') })),
-            new Promise(resolve => setTimeout(() => resolve(null), 5000))
+            new Promise(resolve => setTimeout(() => resolve(null), attempt === 0 ? 5000 : 8000))
           ])
           if (w && !w.__err) return w
-          const why = w && w.__err ? (w.__err.message || 'open failed') : 'window did not open within 5s'
-          if (attempt >= 1) throw new Error(fname + ': ' + why + ' (2 attempts, world-verified)')
+          const why = w && w.__err ? (w.__err.message || 'open failed') : 'window did not open within ' + (attempt === 0 ? 5 : 8) + 's'
+          if (attempt >= 1) throw new Error(fname + ': ' + why + ' (2 attempts, in reach ' + (distTo() != null ? distTo().toFixed(1) + 'b' : '?') + ' - genuine window failure)')
           dbg(fname + ' attempt 1 failed (' + why + ') - closing any half-open window and retrying')
           try { if (bot.currentWindow) bot.closeWindow(bot.currentWindow) } catch {}
           await new Promise(r => setTimeout(r, 500))
