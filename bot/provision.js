@@ -3701,8 +3701,13 @@ async function placeChestOriented (bot, target, want, opts = {}) {
     const stand = target.offset(off[0] * sign, 0, off[1] * sign)
     const clear = b => b && b.boundingBox !== 'block'
     const f = bot.blockAt(stand); const h = bot.blockAt(stand.offset(0, 1, 0)); const g = bot.blockAt(stand.offset(0, -1, 0))
-    if (!(clear(f) && clear(h) && g && g.boundingBox === 'block')) continue
-    try { await gotoWithTimeout(bot, new goals.GoalBlock(stand.x, stand.y, stand.z), 15000) } catch { continue }
+    if (!(clear(f) && clear(h) && g && g.boundingBox === 'block')) { dbg('  orientedChest: no standing room ' + want + (sign < 0 ? '-flipped' : '') + ' of ' + target); continue }
+    try {
+      // door-assist approach: the stand cell is INSIDE the hut and a raw goto can't plan
+      // through the closed door (live: the heal's re-place silently failed from outside)
+      const nav = require('./navigate.js')
+      await nav.navigateTo(bot, new goals.GoalBlock(stand.x, stand.y, stand.z), { timeoutMs: 15000, deadlineMs: 35000, climb: false, budgets: { door: 2, pit: 0, water: 0, nudge: 1, stepout: 1 }, label: 'chest-stand' })
+    } catch (e) { dbg('  orientedChest: cannot reach the stand cell ' + stand + ' (' + e.message + ')'); continue }
     const cur = bot.blockAt(target)
     if (cur && /chest/.test(cur.name)) return false // filled meanwhile
     try {
@@ -3729,18 +3734,32 @@ async function placeChestOriented (bot, target, want, opts = {}) {
 async function healBankDouble (bot, hut, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const list = listInfra('chest', bot).filter(e => insideHutBox(e, hut))
-  if (list.length < 2) return false
+  if (!list.length) return false
+  const blkOf = e => bot.blockAt(new Vec3(e.x, e.y, e.z))
+  const prop = (b, k) => { try { return (b.getProperties() || {})[k] } catch { return null } }
   let pair = null
   for (const a of list) {
     const b = list.find(o => o !== a && o.y === a.y && Math.abs(o.x - a.x) + Math.abs(o.z - a.z) === 1)
     if (b) { pair = [a, b]; break }
   }
+  if (!pair && list.length === 1 && (bot.inventory ? bot.inventory.items() : []).some(i => i.name === 'chest')) {
+    // HALF THE BANK IS IN THE PACK (an aborted heal dug it and could not re-place, live
+    // 05:44): adopt the free adjacent interior cell as the missing half - the loop below
+    // places it oriented and re-registers it.
+    const a = list[0]
+    for (const [dx, dz] of [[0, 1], [0, -1], [1, 0], [-1, 0]]) {
+      const cell = { x: a.x + dx, y: a.y, z: a.z + dz }
+      if (!insideHutBox(cell, hut)) continue
+      const cb = bot.blockAt(new Vec3(cell.x, cell.y, cell.z)); const fl = bot.blockAt(new Vec3(cell.x, cell.y - 1, cell.z))
+      if (cb && AIRISH(cb.name) && fl && fl.boundingBox === 'block') { pair = [a, cell]; dbg('bank heal: missing half is in my pack - restoring it at ' + cell.x + ',' + cell.y + ',' + cell.z); break }
+    }
+  }
   if (!pair) return false
-  const blkOf = e => bot.blockAt(new Vec3(e.x, e.y, e.z))
-  const prop = (b, k) => { try { return (b.getProperties() || {})[k] } catch { return null } }
   const [A, B] = pair.map(blkOf)
-  if (!A || !B || !/chest$/.test(A.name) || !/chest$/.test(B.name)) return false
-  if (prop(A, 'type') !== 'single' || prop(B, 'type') !== 'single') return false // already merged
+  const chestish = b => b && /chest$/.test(b.name)
+  const airish = b => !b || AIRISH(b.name)
+  if (!(chestish(A) || airish(A)) || !(chestish(B) || airish(B))) return false
+  if (chestish(A) && chestish(B) && (prop(A, 'type') !== 'single' || prop(B, 'type') !== 'single')) return false // already merged
   // shared facing PERPENDICULAR to the pair axis, on a side with interior standing room
   const axisZ = pair[0].x === pair[1].x
   let want = null
@@ -3758,22 +3777,25 @@ async function healBankDouble (bot, hut, opts = {}) {
   for (const e of pair) {
     if (isStopped()) return false
     let b = blkOf(e)
-    if (!b || !/chest$/.test(b.name)) return false
-    if (prop(b, 'facing') === want) continue // this half is already right
-    // 1) empty it into the pack (verified) - never dig a chest with anything inside
-    try {
-      const counts = await chestCounts(bot, b)
-      for (const n of Object.keys(counts)) { await withdrawItem(bot, blkOf(e), n, counts[n]) }
-    } catch (err) { dbg('bank heal: empty failed (' + err.message + ') - aborting'); return false }
-    let left = {}
-    try { left = await chestCounts(bot, blkOf(e)) } catch { left = { unknown: 1 } }
-    if (Object.keys(left).length) {
-      dbg('bank heal: chest still holds ' + Object.keys(left).join(',') + ' (pack full?) - aborting, nothing lost')
-      return false
+    const missing = airish(b) // this half is in the pack (aborted earlier heal) - just place it
+    if (!missing && !/chest$/.test(b.name)) return false
+    if (!missing && prop(b, 'facing') === want) continue // this half is already right
+    if (!missing) {
+      // 1) empty it into the pack (verified) - never dig a chest with anything inside
+      try {
+        const counts = await chestCounts(bot, b)
+        for (const n of Object.keys(counts)) { await withdrawItem(bot, blkOf(e), n, counts[n]) }
+      } catch (err) { dbg('bank heal: empty failed (' + err.message + ') - aborting'); return false }
+      let left = {}
+      try { left = await chestCounts(bot, blkOf(e)) } catch { left = { unknown: 1 } }
+      if (Object.keys(left).length) {
+        dbg('bank heal: chest still holds ' + Object.keys(left).join(',') + ' (pack full?) - aborting, nothing lost')
+        return false
+      }
+      // 2) dig + re-place oriented + re-register
+      forgetInfra('chest', listInfra('chest').find(x => x.x === e.x && x.y === e.y && x.z === e.z))
+      try { await bot.dig(blkOf(e)); await collectDrops(bot, 3) } catch (err) { dbg('bank heal: dig failed (' + err.message + ')'); return false }
     }
-    // 2) dig + re-place oriented + re-register
-    forgetInfra('chest', listInfra('chest').find(x => x.x === e.x && x.y === e.y && x.z === e.z))
-    try { await bot.dig(blkOf(e)); await collectDrops(bot, 3) } catch (err) { dbg('bank heal: dig failed (' + err.message + ')'); return false }
     if (!await placeChestOriented(bot, new Vec3(e.x, e.y, e.z), want, opts)) {
       dbg('bank heal: oriented re-place failed - putting a chest back plainly so the bank cell is not lost')
       try { await placeAt(bot, new Vec3(e.x, e.y, e.z), /^chest$/) } catch {}
