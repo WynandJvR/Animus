@@ -214,6 +214,7 @@ resources.setDebugSink(noteDebug)
 navigate.setDebugSink(noteDebug)
 require('./pathfix.js').setDebugSink(noteDebug) // [verify] place/dig world-recheck traces
 require('./scaffold.js').setDebugSink(noteDebug) // [scaffold] registry/teardown traces
+require('./planner.js').setDebugSink(noteDebug) // [plan] re-planning goal-driver traces (rounds/strikes/relocates)
 // A build job saved to disk survived a process restart - let the operator know it's resumable.
 try {
   const rj = commands.persistedResume && commands.persistedResume()

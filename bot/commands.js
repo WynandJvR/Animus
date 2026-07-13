@@ -14,6 +14,7 @@ const schematic = require('./schematic.js') // download/parse + survival physica
 const provision = require('./provision.js') // BOM -> gather/craft plan + execution
 const resources = require('./resources.js') // unified resource model: pack + verified chests, withdraw>craft>gather
 const navigate = require('./navigate.js') // unified navigation: ONE goto + the full stuck-recovery ladder
+const planner = require('./planner.js') // re-planning goal driver (slice 1: gear-up behind the planarmor/PLANNER_GEARUP seam)
 let dbgSink = null // injected by index.js: debug lines persist to logs/bot-events.log
 function setDebugSink (fn) { dbgSink = fn }
 const dbg = (...a) => {
@@ -938,6 +939,7 @@ async function handle (bot, line) {
         '  eat | drop <item> [n] | equip <item>',
         '  wear [armor]              put on armor you have (grabs dropped armor nearby first)',
         '  armorup                   get armor from nothing (hunt cows -> craft leather set)',
+        '  planarmor                 armorup via the re-planning goal driver (A/B seam)',
         ' building (op):',
         '  setblock <x> <y> <z> <block>',
         '  fill <x1 y1 z1 x2 y2 z2> <block>',
@@ -1125,6 +1127,7 @@ async function handle (bot, line) {
       await bot.equip(item, dest)
       return slot ? `put on ${item.name}` : `equipped ${item.name}`
     }
+    case 'planarmor': // force the PLANNER gear-up path (A/B seam - same job, re-planning driver)
     case 'armorup':
     case 'gearup': {
       // Actively GET armored from nothing: wear what we have; leather only if cows are
@@ -1142,8 +1145,20 @@ async function handle (bot, line) {
         // far afield, anchor where we stand and let the resource model do its thing
         const kb = provision.knownBed && provision.knownBed()
         const at = (kb && bot.entity && Math.hypot(kb.x - bot.entity.position.x, kb.z - bot.entity.position.z) <= 64) ? kb : undefined
-        const r = await provisionArmor(bot, { say: m => bot.chat(String(m).slice(0, 256)), isStopped: () => buildAbort, at })
-        endActivity(!/still no armor|no progress/.test(r), r)
+        // SEAM: the RE-PLANNING goal driver (bot/planner.js) OWNS gear-up now - it
+        // re-routes around blocked steps (hut apron, unreachable iron), regroups to open
+        // ground to craft, and gears up cheapest-piece-first (boots ASAP) instead of the
+        // fixed bootstrap script that declared failure and backed off 20 minutes. Verified
+        // end-to-end naked->armor on the test server (slices 1/1.1/1.2). It is the DEFAULT
+        // for armorup/gearup (and therefore the idle gear reflex); `planarmor` also forces
+        // it. The old ironArmorBootstrap/provisionArmor path stays reachable for rollback
+        // via PLANNER_GEARUP=0.
+        const usePlanner = cmd === 'planarmor' || process.env.PLANNER_GEARUP !== '0'
+        const sayFn = m => bot.chat(String(m).slice(0, 256))
+        const r = usePlanner
+          ? (await planner.gearUp(bot, { say: sayFn, isStopped: () => buildAbort, at, restoreMovements: () => setupMovements(bot) })).msg
+          : await provisionArmor(bot, { say: sayFn, isStopped: () => buildAbort, at })
+        endActivity(!/still no armor|no progress|cooling off/.test(r), r)
         return r
       } catch (e) { endActivity(false, e.message); throw e } finally { provisioning = false }
     }
