@@ -1827,6 +1827,42 @@ async function cleanupHutInterior (bot, hut, opts = {}) {
   return { ok: false, passes: pass, remaining: ['stopped'], dug, removedDupes }
 }
 
+// A station of `kind` physically standing in the hut interior (world scan, not the lying
+// registry), or null. The authoritative "do I already have one inside" check.
+function stationInHut (bot, kind, hut) {
+  hut = hut || hutAnchor()
+  if (!hut) return null
+  const cells = hutModel.stationCells(hut, hutReader(bot))[kind] || []
+  return cells.length ? new Vec3(cells[0].x, cells[0].y, cells[0].z) : null
+}
+
+// Where to place a NEW station of `kind` inside the hut - a free interior FLOOR cell (Vec3),
+// or null when `desired` of that kind already stand (never duplicate) or the interior is
+// full. The placement guard the ensure*/furnish flows consult so they stop re-duplicating.
+function stationSlot (bot, kind, desired = 1, hut) {
+  hut = hut || hutAnchor()
+  if (!hut) return null
+  const c = hutModel.stationSlot(hut, hutReader(bot), kind, desired)
+  return c ? new Vec3(c.x, c.y, c.z) : null
+}
+
+// SELF-HEALING hut maintenance for the camp pass: reconcile the registry against the world,
+// then tidy the interior IFF a cheap model scan says it's dirty (stray filler / duplicate
+// station / floor hole) - an early no-op when the hut is already clean, so it's safe to run
+// every pass. Returns { clean } or the cleanup result. Gated by the caller's isStopped.
+async function maintainHut (bot, hut, opts = {}) {
+  hut = hut || hutAnchor()
+  if (!hut) return { skipped: 'no hut' }
+  try { reconcileInfra(bot) } catch (e) { dbg('maintainHut: reconcile failed (' + e.message + ')') }
+  const read = hutReader(bot)
+  let strays, st, holes
+  try { strays = hutModel.strayCells(hut, read); st = hutModel.stationCells(hut, read); holes = hutModel.floorHoles(hut, read) } catch (e) { dbg('maintainHut: scan failed (' + e.message + ')'); return { skipped: e.message } }
+  const dirty = strays.length || (st.table.length > 1) || (st.furnace.length > 1) || holes.length
+  if (!dirty) { dbg('maintainHut: interior already clean - no-op'); return { clean: true } }
+  dbg('maintainHut: interior dirty (stray=' + strays.length + ' tables=' + st.table.length + ' furnaces=' + st.furnace.length + ' holes=' + holes.length + ') - tidying')
+  return await cleanupHutInterior(bot, hut, opts)
+}
+
 // Walk to REMEMBERED ones (up to 3 nearest) and verify each still stands; forget the dead.
 // Trying only the single nearest made one stale entry cause a brand-new placement while a
 // perfectly good chest stood 9 blocks further (live: three chests at one site).
@@ -4290,125 +4326,41 @@ async function consolidateBank (bot, hut, { isStopped = () => false, say = () =>
 // ---- FURNISH THE HUT (operator: "wheres the bed crafting table and furnace?"): the
 // camp's loose infra moves indoors with the bank. Furnace and table get dug up and
 // re-placed inside; the remembered bed is relocated and re-activated (spawn re-set).
-const insideHutBox = (p, hut) => p.x >= hut.x && p.x <= hut.x + 4 && p.z >= hut.z && p.z <= hut.z + 4
-// The doorway = the non-corner rim column whose two wall cells are NOT solid wall
-// (air, or a bed/door mistakenly shoved into it - detection must survive clutter).
+// 6-wide footprint (via the model), not the old +4 (5-wide) box that misclassified the
+// far wall row - used to tell an IN-hut station/chest from a field one.
+const insideHutBox = (p, hut) => hutModel.inBox(hut, p.x, p.z)
+// The doorway rim column, as a Vec3 at floor level (or null) - now derived from the
+// self-structure model (schema-correct 6-wide rim, not the old 5-wide dx/dz 0..4 scan).
 function findHutDoorway (bot, hut) {
-  // hut.schem has NO floor layer: walls start AT origin.y, so the door hole is at
-  // dy 0..1 (scanning 1..2 found "no doorway" while the gap sat one block lower, live)
-  for (let dx = 0; dx <= 4; dx++) {
-    for (let dz = 0; dz <= 4; dz++) {
-      const onRim = dx === 0 || dx === 4 || dz === 0 || dz === 4
-      const corner = (dx === 0 || dx === 4) && (dz === 0 || dz === 4)
-      if (!onRim || corner) continue
-      const lo = bot.blockAt(new Vec3(hut.x + dx, hut.y, hut.z + dz))
-      const hi = bot.blockAt(new Vec3(hut.x + dx, hut.y + 1, hut.z + dz))
-      if (lo && hi && !/_planks$/.test(lo.name) && !/_planks$/.test(hi.name)) return new Vec3(hut.x + dx, hut.y, hut.z + dz)
-    }
-  }
-  return null
+  const d = hutModel.doorwayColumn(hut, hutReader(bot))
+  return d ? new Vec3(d.x, hut.y, d.z) : null
 }
+// Standable FREE interior cells (Vec3s), from the model: the CORRECT 4x4 interior (dx/dz
+// 1..4), floor-level only, threshold excluded, sorted furthest-from-door. The old scan was
+// a 3x3 (dx/dz 1..3) that missed the very cells the bot wedged in, and could return a cell
+// perched on a furniture/dirt pile.
 function hutFreeCells (bot, hut) {
-  const doorway = findHutDoorway(bot, hut)
-  // the interior cell in FRONT of the doorway stays clear - the bed got placed in the
-  // entrance (operator: "it placed its bed inside the door frame")
-  const threshold = doorway ? new Vec3(doorway.x + (doorway.x === hut.x ? 1 : doorway.x === hut.x + 4 ? -1 : 0), doorway.y, doorway.z + (doorway.z === hut.z ? 1 : doorway.z === hut.z + 4 ? -1 : 0)) : null
-  const out = []
-  for (const [dx, dz] of [[1, 1], [2, 1], [3, 1], [1, 2], [2, 2], [3, 2], [1, 3], [2, 3], [3, 3]]) {
-    for (let dy = 0; dy <= 3; dy++) {
-      const p = new Vec3(hut.x + dx, hut.y + dy, hut.z + dz)
-      if (threshold && p.x === threshold.x && p.z === threshold.z) break // keep the entrance walkable
-      const b = bot.blockAt(p); const below = bot.blockAt(p.offset(0, -1, 0)); const above = bot.blockAt(p.offset(0, 1, 0))
-      // the floor below must be a real BLOCK, not other furniture - a chest counts as
-      // "solid" so a table landed ON TOP of the chest (operator caught it live)
-      const belowIsFloor = below && below.boundingBox === 'block' && !HUT_FURNITURE.test(below.name)
-      if (b && AIRISH(b.name) && belowIsFloor && above && AIRISH(above.name)) { out.push(p); break }
-    }
-  }
-  if (doorway) out.sort((a, b) => b.distanceTo(doorway) - a.distanceTo(doorway)) // furthest from the entrance first
-  return out
+  return hutModel.freeStandCells(hut, hutReader(bot)).map(c => new Vec3(c.x, c.y, c.z))
 }
 const HUT_FURNITURE = /chest$|barrel$|furnace$|smoker$|crafting_table$|_bed$|_door$/
-// Is a block of kind `itemRe` already standing inside the hut interior?
+// Is a block of kind `itemRe` already standing inside the hut interior? Scans the correct
+// 4x4x(5) interior via the model, so a duplicate at dx/dz 4 (missed by the old 3x3) is seen.
 function furnitureInHut (bot, hut, itemRe) {
-  for (let dx = 1; dx <= 3; dx++) for (let dz = 1; dz <= 3; dz++) for (let dy = 0; dy <= 3; dy++) {
-    const b = bot.blockAt(new Vec3(hut.x + dx, hut.y + dy, hut.z + dz))
-    if (b && itemRe.test(b.name)) return new Vec3(hut.x + dx, hut.y + dy, hut.z + dz)
+  const read = hutReader(bot)
+  for (const [x, z] of hutModel.interiorColumns(hut)) for (let dy = 0; dy < hutModel.DIMS.h; dy++) {
+    const b = read(x, hut.y + dy, z)
+    if (b && itemRe.test(b.name)) return new Vec3(x, hut.y + dy, z)
   }
   return null
 }
 async function furnishHut (bot, hut, { isStopped = () => false, say = () => {} } = {}) {
   const moved = []
-  // EVEN FLOOR first (operator: "half of the hut is in a hole so the floor isnt even"):
-  // the schematic has no floor layer, so the interior is raw terrain. Level each of the
-  // 9 interior columns to hut.y-1: shave natural bumps, fill holes with carried dirt.
-  // Columns carrying furniture are left alone.
-  const INFRA_RE = /chest$|barrel$|furnace$|smoker$|_bed$|^torch$|_torch$|crafting_table$|_door$/
-  try {
-    for (const [dx, dz] of [[1, 1], [2, 1], [3, 1], [1, 2], [2, 2], [3, 2], [1, 3], [2, 3], [3, 3]]) {
-      if (isStopped()) break
-      const colBusy = [0, 1].some(dy => { const b = bot.blockAt(new Vec3(hut.x + dx, hut.y + dy, hut.z + dz)); return b && INFRA_RE.test(b.name) })
-      if (colBusy) continue
-      for (const dy of [1, 0]) { // shave terrain poking above floor level (top-down)
-        const b = bot.blockAt(new Vec3(hut.x + dx, hut.y + dy, hut.z + dz))
-        if (b && !AIRISH(b.name) && canBreakNaturally(b)) {
-          if (bot.entity.position.distanceTo(b.position) > 4) { try { await gotoWithTimeout(bot, new goals.GoalNear(b.position.x, b.position.y, b.position.z, 2), 12000) } catch { break } }
-          const tool = toolForBlock(bot, b.name)
-          if (tool) await bot.equip(tool, 'hand').catch(() => {})
-          try { await bot.dig(b); await collectDrops(bot, 3) } catch {}
-        }
-      }
-      const fl = bot.blockAt(new Vec3(hut.x + dx, hut.y - 1, hut.z + dz))
-      if (fl && (AIRISH(fl.name) || /water/.test(fl.name))) { // fill a floor hole
-        if (await placeAt(bot, fl.position, /^(dirt|coarse_dirt|cobblestone)$/)) moved.includes('floor') || moved.push('floor')
-      }
-    }
-  } catch (e) { dbg('  furnish: floor pass failed (' + e.message + ')') }
-  // DEDUPE furniture (operator: two tables; a table ON the chest blocked it from opening):
-  // keep one table + one furnace, dig any extra, and dig anything stacked on a CHEST -
-  // only a chest needs clear air above to open. A table on a FURNACE is fine (operator:
-  // "valid") - furnaces open by right-click regardless, and it's a tidy space-saver.
-  try {
-    const seen = {}
-    for (let dx = 1; dx <= 3; dx++) for (let dz = 1; dz <= 3; dz++) for (let dy = 3; dy >= 0; dy--) { // top-down
-      const p = new Vec3(hut.x + dx, hut.y + dy, hut.z + dz)
-      const b = bot.blockAt(p)
-      if (!b || !/crafting_table$|furnace$/.test(b.name)) continue
-      const below = bot.blockAt(p.offset(0, -1, 0))
-      const onChest = below && /chest$/.test(below.name) // blocks the chest lid; furnace-below is fine
-      const dupe = seen[b.name.replace(/^.*_/, '')]
-      if (onChest || dupe) {
-        try {
-          if (bot.entity.position.distanceTo(p) > 4) await gotoWithTimeout(bot, new goals.GoalNear(p.x, p.y, p.z, 2), 10000)
-          const t = toolForBlock(bot, b.name); if (t) await bot.equip(t, 'hand').catch(() => {})
-          await bot.dig(b); await collectDrops(bot, 2)
-          const entry = listInfra(/table/.test(b.name) ? 'table' : 'furnace').find(x => x.x === p.x && x.y === p.y && x.z === p.z)
-          if (entry) forgetInfra(/table/.test(b.name) ? 'table' : 'furnace', entry)
-          dbg('  furnish: removed a stray ' + b.name + (onChest ? ' (was blocking the chest)' : ' (duplicate)'))
-        } catch {}
-      } else seen[b.name.replace(/^.*_/, '')] = true
-    }
-  } catch (e) { dbg('  furnish: dedupe pass failed (' + e.message + ')') }
-  // POCKET STRAY FILLER on the interior floor. The floor pass above only levels the 3x3
-  // INNER columns and only shaves NATURAL terrain, so a self-placed dirt/cobble dropped by
-  // nav flailing (a nudge/pillar/heal) on the CHEST column or any interior cell slips
-  // through and sits there (operator: stray dirt at 418,66,88 by the double chest). Sweep
-  // the FULL interior box (x+1..x+4, z+1..z+4) at standing height and dig+pocket any loose
-  // filler that isn't furniture - it's the bot's own placed block on its own floor, so
-  // anti-grief safe (natural intrusion via canBreakNaturally, or self-placed via pathfix).
-  try {
-    const pf = (() => { try { return require('./pathfix.js') } catch { return null } })()
-    const STRAY_FILLER = /^(dirt|coarse_dirt|cobblestone|cobbled_deepslate|stone|granite|diorite|andesite|tuff|gravel|sand|netherrack|clay|mud)$/
-    for (let dx = 1; dx <= 4 && !isStopped(); dx++) for (let dz = 1; dz <= 4; dz++) for (const dy of [0, 1]) {
-      const p = new Vec3(hut.x + dx, hut.y + dy, hut.z + dz)
-      const b = bot.blockAt(p)
-      if (!b || AIRISH(b.name) || INFRA_RE.test(b.name) || !STRAY_FILLER.test(b.name)) continue // only loose filler, never furniture
-      if (!(canBreakNaturally(b) || (pf && pf.isSelfPlaced && pf.isSelfPlaced(p)))) continue     // own placed / natural only
-      if (bot.entity.position.distanceTo(p) > 4) { try { await gotoWithTimeout(bot, new goals.GoalNear(p.x, p.y, p.z, 2), 10000) } catch { continue } }
-      const tool = toolForBlock(bot, b.name); if (tool) await bot.equip(tool, 'hand').catch(() => {})
-      try { await bot.dig(b); await collectDrops(bot, 2); moved.includes('declutter') || moved.push('declutter'); dbg('  furnish: pocketed stray ' + b.name + ' on the interior floor at ' + p.toString()) } catch {}
-    }
-  } catch (e) { dbg('  furnish: declutter pass failed (' + e.message + ')') }
+  // MAINTENANCE, MODEL-DRIVEN: level the floor (fill real holes ONLY, never dump filler
+  // into interior air), dig stray dirt/cobble (incl. head-height pillar remnants), remove
+  // DUPLICATE stations, and reconcile the registry - all via the schema-correct 4x4 model
+  // with a verified postcondition. This replaces the old hand-rolled floor/dedupe/declutter
+  // passes that scanned a 3x3 (missing dx/dz 4) and could place filler at interior air.
+  try { const r = await cleanupHutInterior(bot, hut, { isStopped, say }); if (r && (r.dug || r.removedDupes)) moved.push('tidy'); dbg('  furnish: interior maintained (' + JSON.stringify({ dug: r && r.dug, dupes: r && r.removedDupes, ok: r && r.ok }) + ')') } catch (e) { dbg('  furnish: interior maintenance failed (' + e.message + ')') }
   const grab = async (kind, nameRe) => { // dig a remembered outdoor one and pocket it
     if (furnitureInHut(bot, hut, nameRe)) return false // already have one inside - don't fetch another
     const e = listInfra(kind, bot).find(x => Math.hypot(x.x - hut.x, x.z - hut.z) <= 60 && !insideHutBox(x, hut))
@@ -4603,4 +4555,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, setSpawnSuspect, isSpawnSuspect, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, fishForFood, ensureHutApron, ensureHutBed, setBuildZone, setDebugSink }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, setSpawnSuspect, isSpawnSuspect, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, fishForFood, ensureHutApron, ensureHutBed, setBuildZone, setDebugSink }

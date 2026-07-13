@@ -99,6 +99,21 @@ t('floorHoles: none here (solid floor); punch one and it is found', () => {
   set(3, 64, 3, 'dirt') // restore
 })
 
+t('stationSlot: SKIP when the kind already stands (no duplicate), PLACE into a free cell', () => {
+  // table already stands twice -> never place another (desired 1)
+  assert.strictEqual(H.stationSlot(A, read, 'table', 1), null, 'a table exists -> skip (no duplicate)')
+  // furnace stands once, desired 1 -> skip
+  assert.strictEqual(H.stationSlot(A, read, 'furnace', 1), null, 'a furnace exists -> skip')
+  // no chest anywhere -> place into a free floor cell (never wall/door/threshold/occupied)
+  const slot = H.stationSlot(A, read, 'chest', 1)
+  assert(slot, 'no chest -> a free cell is offered')
+  assert.strictEqual(H.isInterior(A, slot.x, slot.z), true, 'the slot is an interior cell')
+  assert.strictEqual(slot.y, A.y, 'the slot is floor-level (feet at anchor.y), never head height')
+  assert(read(slot.x, slot.y, slot.z) == null, 'the slot is empty (not onto furniture)')
+  const d = H.doorwayColumn(A, read); const thr = H.thresholdCell(A, d)
+  assert(!(slot.x === thr.x && slot.z === thr.z), 'the slot is never the doorway threshold')
+})
+
 t('reconcileCells: dedupe exact + drop verified-gone, keep present + unknown', () => {
   // mirrors the live corruption: many entries, most gone, some duplicated, some unloaded
   const list = [

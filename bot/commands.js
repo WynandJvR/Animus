@@ -2593,24 +2593,13 @@ async function autoBuild (bot, schem, at, opts = {}) {
         // SPAWN re-assert (hourly no-op): a bed standing in the hut is worthless if the
         // server anchor drifted - use it again so every death keeps coming home.
         try { await provision.ensureSpawnBed(bot, { isStopped, say }) } catch (e) { dbg('camp: spawn assert failed (' + e.message + ')') }
-        // INTERIOR SWEEP (liveability, every pass): utility blocks that wandered onto the
-        // hut floor get dug and pocketed - ensureFurnaces once parked 2 spare furnaces
-        // beside the bed ("nowhere to place - stopping at 3"). Bot-built hut = its own
-        // clutter is fair game; the schematic's OWN furniture cells are never touched.
-        try {
-          const CLUTTER = /^(furnace|blast_furnace|smoker|crafting_table|lit_furnace)$/
-          let swept = 0
-          for (let y = st.y; y <= en.y && !isStopped(); y++) for (let z = st.z; z <= en.z; z++) for (let x = st.x; x <= en.x; x++) {
-            const wp = new Vec3(hutAt.x + x, hutAt.y + y, hutAt.z + z)
-            const g = bot.blockAt(wp)
-            if (!g || !CLUTTER.test(g.name)) continue
-            const w = hutSchem.getBlock(new Vec3(x, y, z))
-            if (w && w.name === g.name) continue // that's where it belongs
-            if (bot.entity.position.distanceTo(wp) > 4) { try { await gotoTimedDA(bot, new goals.GoalNear(wp.x, wp.y, wp.z, 2), 20000) } catch { continue } }
-            try { await bot.dig(bot.blockAt(wp)); swept++ } catch (e) { dbg('camp: interior sweep dig failed at ' + wp + ' (' + e.message + ')') }
-          }
-          if (swept) { try { await handle(bot, 'collect') } catch {}; dbg('camp: interior sweep pocketed ' + swept + ' stray block(s)'); say(`tidied the hut - pocketed ${swept} stray block(s)`) }
-        } catch (e) { dbg('camp: interior sweep failed (' + e.message + ')') }
+        // SELF-HEALING interior (liveability, every pass): reconcile the infra registry
+        // against the world and tidy the interior via the self-structure model - dig stray
+        // dirt (incl. head-height pillar remnants), remove DUPLICATE stations, fill real
+        // floor holes only, with a verified postcondition. Early no-op when already clean,
+        // so it can't re-duplicate. Replaces the old 5x5 ad-hoc CLUTTER sweep (it missed
+        // dx/dz 4, ignored stray dirt + floor holes, and trusted the corrupted registry).
+        try { const mr = await provision.maintainHut(bot, hutAt, { isStopped, say }); if (mr && !mr.clean && !mr.skipped) dbg('camp: hut self-heal -> ' + JSON.stringify({ ok: mr.ok, dug: mr.dug, dupes: mr.removedDupes, passes: mr.passes })) } catch (e) { dbg('camp: hut self-heal failed (' + e.message + ')') }
         // HOME BANK (operator promise): the hut chest is the ONE treasury - ferry every
         // loose field chest within 64 into it and pack the empties up. Idempotent.
         try { const nc = await provision.consolidateBank(bot, hutAt, { isStopped, say }); if (nc) dbg('camp: consolidated ' + nc + ' field chest(s) into the bank') } catch (e) { dbg('camp: bank consolidation failed (' + e.message + ')') }

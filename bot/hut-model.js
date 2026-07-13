@@ -146,6 +146,18 @@ function stationCells (a, read) {
   return out
 }
 
+// PLACEMENT DECISION (pure - the deliverable-2/3 logic): where (if anywhere) to place a
+// NEW station of `kind`. Returns null when `desired` of that kind already physically stand
+// inside the hut (NEVER duplicate - trust the world scan, not the lying registry), else the
+// deepest free interior FLOOR cell to place into (never a wall/door/threshold/occupied cell).
+// null also when the interior is full. This is what stops the duplicate-table recurrence.
+function stationSlot (a, read, kind, desired = 1) {
+  const have = (stationCells(a, read)[kind] || []).length
+  if (have >= desired) return null // already have enough - do not place another
+  const free = freeStandCells(a, read)
+  return free.length ? free[0] : null
+}
+
 // A floor cell that is a HOLE (air/liquid where a solid floor should be). Returns [{x,y,z}].
 function floorHoles (a, read) {
   const out = []
@@ -194,6 +206,7 @@ module.exports = {
   freeStandCells,
   strayCells,
   stationCells,
+  stationSlot,
   floorHoles,
   reconcileCells
 }
