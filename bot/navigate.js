@@ -613,6 +613,11 @@ function navigateTo (bot, goal, opts = {}) {
   navChain = p.then(() => {}, () => {}) // failures release the mutex like successes
   return p
 }
+// PREEMPTING variant for time-critical reflexes (hut-retreat from a creeper): skips the
+// queue and takes the pathfinder NOW, like the flee reflex does - the preempted nav sees
+// 'goal was changed', waits for the pathfinder to free up, and resumes (that machinery
+// predates this). Never use for routine navigation - the mutex exists for a reason.
+function navigateToPreempt (bot, goal, opts = {}) { return navigateToInner(bot, goal, opts) }
 
 async function navigateToInner (bot, goal, opts = {}) {
   const timeoutMs = opts.timeoutMs || 20000
@@ -708,4 +713,4 @@ function honestFail (lastErr, counts, label, recoveryMs) {
   return e
 }
 
-module.exports = { navigateTo, gotoOnce, openNearbyDoor, swimToShore, isNavigating, isRecovering, isForceUnsticking, forceUnstick, setDebugSink, detectPit, goalWasChanged }
+module.exports = { navigateTo, navigateToPreempt, gotoOnce, openNearbyDoor, swimToShore, isNavigating, isRecovering, isForceUnsticking, forceUnstick, setDebugSink, detectPit, goalWasChanged }
