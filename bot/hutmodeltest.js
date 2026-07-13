@@ -48,6 +48,8 @@ t('doorway detected at the open rim column', () => {
   assert.deepStrictEqual({ x: d.x, z: d.z }, { x: 2, z: 0 })
   const thr = H.thresholdCell(A, d)
   assert.deepStrictEqual({ x: thr.x, z: thr.z }, { x: 2, z: 1 }) // interior cell in front of the door
+  const out = H.outsideCell(A, d)
+  assert.deepStrictEqual({ x: out.x, z: out.z }, { x: 2, z: -1 }) // stand-off cell OUTSIDE the door (opposite the threshold)
 })
 
 t('classify: wall / door / floor / furniture / stray / interior', () => {

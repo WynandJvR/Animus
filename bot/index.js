@@ -391,6 +391,19 @@ function directCommand (message, username) {
     if (/\b(come here|come to me|get over here|over here|come to my|to me|get here|come)\b/.test(m)) return `goto ${username}`
     if (/\b(go home|head home|return home|back to base|go to base)\b/.test(m)) return 'goto home'
   }
+  // OPERATOR POINTS IT AT A RESOURCE (fastest path to food when the operator can see it):
+  // "there are animals at 335 63 47" / "hunt at 335 63 47" / "there's water at <x y z>" ->
+  // trek there and hunt / record the water. Coords parsed like the travel command (space or
+  // comma separated). Checked BEFORE the generic "get food" so a coord order wins.
+  const coord = m.match(/(-?\d+)[ ,]+(-?\d+)[ ,]+(-?\d+)/)
+  if (coord && !/\bdon'?t\b/.test(m)) {
+    if (/\b(animals?|sheep|pigs?|cows?|chickens?|hunt|meat|food)\b/.test(m) && /\b(at|near|by|around)\b|@/.test(m)) return `huntat ${coord[1]} ${coord[2]} ${coord[3]}`
+    if (/\b(water|river|pond|lake|farm)\b/.test(m) && /\b(at|near|by|around)\b|@/.test(m)) return `waterat ${coord[1]} ${coord[2]} ${coord[3]}`
+  }
+  // FOOD/CHEST instruction (the LLM understood "there's food in your chest" but had no lever
+  // to pull - chest access was an autonomous reflex, not in the brain's vocabulary). Map it to
+  // a deterministic bank-check-and-eat that FRESH-opens the bank, withdraws, cooks raw, eats.
+  if (!/\bdon'?t\b/.test(m) && (/\b(go eat|eat something|eat now|get food|grab food|feed yourself|food in (your|the) chest|get food from (your|the) chest|check (your|the) chest|open (your|the) chest|you (have|got) food|there'?s food)\b/.test(m) || /^\s*eat\s*!*\s*$/.test(m))) return 'getfood'
   return null
 }
 
@@ -665,6 +678,31 @@ if (process.env.FOOD_CRISIS !== '0') {
       note(`(food-crisis) ${ok ? 'fed (or safely holding)' : 'still starving - will retry'}`)
     } catch (e) { note(`(food-crisis) failed: ${e.message}`) } finally { foodCrisis = false }
   }, 15000).unref?.()
+}
+
+// PROACTIVE FOOD SUPPLY (base-setup goal, like the hut): a FED, SAFE, IDLE bot that lacks a
+// standing renewable food source ESTABLISHES one BEFORE the next hunger crisis - on a
+// no-animal, water-rich site that's a WHEAT FARM at the remembered pond. secureFood only
+// fired reactively at food<=12 and by food=1 it was too late to set up a multi-step source,
+// so it starved (live). This builds the farm while there's still time. Set FOOD_SUPPLY=0 off.
+let buildingFoodSupply = false
+if (process.env.FOOD_SUPPLY !== '0') {
+  setInterval(async () => {
+    if (buildingFoodSupply || !bot.entity) return
+    if (commands.isBusy && commands.isBusy()) return // a job owns the body
+    if (provision.isResting && provision.isResting()) return
+    if (provision.isSecuringFood && provision.isSecuringFood()) return
+    if (arbiter.maneuverActive()) return
+    if (bot.pathfinder && bot.pathfinder.goal) return // idle only - don't yank an active goal
+    if (!provision.needFoodSupply || !provision.needFoodSupply(bot)) return // fed + safe + no standing farm
+    buildingFoodSupply = true
+    try {
+      note('(food-supply) fed + idle but no standing food source - setting up the wheat farm at the remembered pond')
+      const home = (provision.knownBed && provision.knownBed()) || undefined
+      const r = await provision.ensureFoodSupply(bot, { home, say: m => bot.chat(String(m).slice(0, 200)) })
+      note('(food-supply) ' + (r && r.ok ? (r.reason || 'food supply set up') : 'deferred: ' + ((r && r.reason) || 'unknown')))
+    } catch (e) { note('(food-supply) failed: ' + e.message) } finally { buildingFoodSupply = false }
+  }, 45000).unref?.()
 }
 
 // Night-shelter: a NAKED bot at night with a hostile closing digs into a sealed pit and waits

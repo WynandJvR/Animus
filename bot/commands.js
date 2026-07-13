@@ -1063,6 +1063,52 @@ async function handle (bot, line) {
     }
 
     case 'eat': return await eatFood(bot)
+    case 'huntat': {
+      // Operator points it at animals: "there are animals at 335 63 47" -> trek there and
+      // hunt (the site DOES have sheep/pigs, just outside perception range). Remembers the
+      // spot as a pasture so future famines return. Coords like travel.
+      const x = Number(a[0]); const y = Number(a[1]); const z = Number(a[2])
+      if ([x, y, z].some(n => Number.isNaN(n))) return 'huntat needs x y z'
+      buildAbort = false; beginActivity('huntat', `${x},${y},${z}`)
+      try {
+        const say = m => bot.chat(String(m).slice(0, 200))
+        say(`heading to ${x},${y},${z} to hunt`)
+        try { await travelFar(bot, { x, y, z }, { isStopped: () => buildAbort, say }) } catch (e) { dbg('huntat travel: ' + e.message) }
+        let kills = 0
+        for (let k = 0; k < 6 && !buildAbort; k++) { if (!await provision.huntForFood(bot, { isStopped: () => buildAbort, range: 40 })) break; kills++ }
+        if (kills > 0) { try { provision.rememberInfra('pasture', bot.entity.position) } catch {} }
+        endActivity(kills > 0, `hunted ${kills} at ${x},${z}`)
+        return kills > 0 ? `hunted ${kills} animal(s) at ${x},${y},${z} - remembered the pasture` : `got to ${x},${y},${z} but found no animals in range`
+      } catch (e) { endActivity(false, e.message); return `couldn't get to ${x},${y},${z}: ${e.message}` }
+    }
+    case 'waterat': {
+      // Operator points it at water: trek there + record it as 'water' infra so the wheat
+      // farm / fishing use it. Coords like travel.
+      const x = Number(a[0]); const y = Number(a[1]); const z = Number(a[2])
+      if ([x, y, z].some(n => Number.isNaN(n))) return 'waterat needs x y z'
+      buildAbort = false
+      try {
+        const say = m => bot.chat(String(m).slice(0, 200))
+        say(`noting water at ${x},${y},${z}`)
+        try { await travelFar(bot, { x, y, z }, { isStopped: () => buildAbort, say }) } catch (e) { dbg('waterat travel: ' + e.message) }
+        try { provision.rememberInfra('water', { x, y, z }) } catch {}
+        return `remembered water at ${x},${y},${z} - i'll farm/fish there when i need to`
+      } catch (e) { return `couldn't get to ${x},${y},${z}: ${e.message}` }
+    }
+    case 'getfood':
+    case 'securefood':
+    case 'feed': {
+      // Operator "there's food in your chest" / "go eat": deterministic bank-check-and-eat -
+      // walk to the bank, FRESH-open it (never trust a stale empty), withdraw food, cook raw
+      // at the furnace, eat. The autonomous secureFood chain, triggered on command; bypasses
+      // the confined brain. Runs even while a secureFood lock is active only via this operator
+      // path (the lock's guard returns fast if one's already running - honest, not silent).
+      const before = bot.food
+      const home = (provision.knownBed && provision.knownBed()) || undefined
+      try { await provision.secureFood(bot, { home, threshold: 18, canHold: false, say: m => bot.chat(String(m).slice(0, 200)) }) } catch (e) { return `tried to get food but hit an error: ${e.message}` }
+      const now = bot.food
+      return now > before ? `got food and ate (food ${before} -> ${now})` : (provision.hasFood(bot) ? 'got food from the chest' : `checked the bank/food sources - nothing available right now (food ${now})`)
+    }
 
     case 'drop':
     case 'toss': {

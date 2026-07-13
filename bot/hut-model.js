@@ -70,6 +70,16 @@ function thresholdCell (a, door) {
   return { x: door.x + dx, z: door.z + dz }
 }
 
+// The cell just OUTSIDE the doorway (opposite the interior threshold) - the plannable
+// stand-off a bot paths to BEFORE crossing in (you can't goto a cell inside a closed box).
+// Returns {x,z}|null.
+function outsideCell (a, door) {
+  if (!door) return null
+  const dx = door.x === a.x ? -1 : door.x === a.x + DIMS.w - 1 ? 1 : 0
+  const dz = door.z === a.z ? -1 : door.z === a.z + DIMS.l - 1 ? 1 : 0
+  return { x: door.x + dx, z: door.z + dz }
+}
+
 // Classify one cell: 'outside' | 'wall' | 'door' | 'floor' | 'interior' | 'furniture' |
 // 'stray'. `door` may be passed (else detected). Furniture/stray need a world read.
 function classifyCell (a, read, x, y, z, door) {
@@ -201,6 +211,7 @@ module.exports = {
   interiorColumns,
   doorwayColumn,
   thresholdCell,
+  outsideCell,
   classifyCell,
   furnitureKind,
   freeStandCells,

@@ -714,6 +714,76 @@ async function navigateToInner (bot, goal, opts = {}) {
   } finally { navDepth--; arbiter.endManeuver(manTok) }
 }
 
+// ---- ENTER / EXIT my own structure (nav slice B) -----------------------------------
+// A first-class, ATOMIC, reflex-protected door maneuver - the fix for "can't reliably enter
+// its own hut" (the pathfinder cannot PLAN through a closed door, so a plain goto to a cell
+// INSIDE the box times out even on clear ground, and the door-assist force-walk got its goal
+// stolen mid-crossing by reflexes - four "goal taken by a reflex" in a row, live). This:
+//   1. paths to a PLANNABLE stand-off cell just OUTSIDE the door (never a cell inside the box),
+//   2. runs ONE open-align-step-through toward the interior INSIDE a protected maneuver span
+//      (arbiter + recoveringDepth hold flee/defend off, so nothing interrupts between
+//      door-open and threshold-cross), reusing the proven openNearbyDoor crossing logic,
+//   3. verifies insideOwnStructure (grounded arrival); retries once; honest give-up.
+// `hut` = the infra hut anchor (defaults to the bot's own). Returns whether it's inside.
+async function enterStructure (bot, hut, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const prov = prov_ => require('./provision.js')
+  const P = require('./provision.js')
+  hut = hut || (P.listInfra && P.listInfra('hut')[0])
+  if (!hut) { dbg('enterStructure: no hut known'); return false }
+  if (P.insideOwnStructure && P.insideOwnStructure(bot)) return true
+  const H = require('./hut-model.js')
+  const read = (x, y, z) => bot.blockAt(new Vec3(x, y, z))
+  const door = H.doorwayColumn(hut, read)
+  if (!door) { dbg('enterStructure: no doorway found in the hut'); return false }
+  const out = H.outsideCell(hut, door)
+  const inside = H.thresholdCell(hut, door)
+  // 1) path to the stand-off cell JUST OUTSIDE the door (a plannable goal on open ground)
+  if (out) {
+    try { await navigateTo(bot, new goals.GoalNear(out.x, hut.y, out.z, 1), { timeoutMs: 20000, deadlineMs: 45000, isStopped, climb: false, priority: arbiter.PRIORITY.PRESERVE, label: 'enter-standoff' }) } catch (e) { dbg('enterStructure: could not reach the door stand-off (' + e.message + ')') }
+  }
+  if (isStopped()) return false
+  // 2) ONE atomic, reflex-protected open-align-step-through toward the interior
+  const tok = arbiter.beginManeuver('enter-structure', opts.priority != null ? opts.priority : arbiter.PRIORITY.PRESERVE, 25000)
+  recoveringDepth++
+  try {
+    for (let tries = 0; tries < 2 && !(P.insideOwnStructure && P.insideOwnStructure(bot)) && !isStopped(); tries++) {
+      arbiter.refreshManeuver(tok, 25000)
+      await openNearbyDoor(bot, { towards: inside ? { x: inside.x, y: hut.y, z: inside.z } : null })
+    }
+  } catch (e) { dbg('enterStructure: crossing failed (' + e.message + ')') } finally { recoveringDepth--; arbiter.endManeuver(tok) }
+  const ok = !!(P.insideOwnStructure && P.insideOwnStructure(bot))
+  dbg('enterStructure: ' + (ok ? 'INSIDE the hut' : 'still outside') + ' (door ' + door.x + ',' + door.z + ')')
+  return ok
+}
+
+// EXIT my own structure: the symmetric maneuver - cross the doorway toward the OUTSIDE
+// stand-off cell. For the shelter/gather flows that struggle to leave. Returns whether it
+// got outside (no longer insideOwnStructure).
+async function exitStructure (bot, hut, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const P = require('./provision.js')
+  hut = hut || (P.listInfra && P.listInfra('hut')[0])
+  if (!hut) return false
+  if (!(P.insideOwnStructure && P.insideOwnStructure(bot))) return true // already out
+  const H = require('./hut-model.js')
+  const read = (x, y, z) => bot.blockAt(new Vec3(x, y, z))
+  const door = H.doorwayColumn(hut, read)
+  if (!door) return false
+  const out = H.outsideCell(hut, door)
+  const tok = arbiter.beginManeuver('exit-structure', opts.priority != null ? opts.priority : arbiter.PRIORITY.PRESERVE, 25000)
+  recoveringDepth++
+  try {
+    for (let tries = 0; tries < 2 && (P.insideOwnStructure && P.insideOwnStructure(bot)) && !isStopped(); tries++) {
+      arbiter.refreshManeuver(tok, 25000)
+      await openNearbyDoor(bot, { towards: out ? { x: out.x, y: hut.y, z: out.z } : null })
+    }
+  } catch (e) { dbg('exitStructure: crossing failed (' + e.message + ')') } finally { recoveringDepth--; arbiter.endManeuver(tok) }
+  const ok = !(P.insideOwnStructure && P.insideOwnStructure(bot))
+  dbg('exitStructure: ' + (ok ? 'OUTSIDE' : 'still inside'))
+  return ok
+}
+
 // ---- watchdog FORCE-ESCAPE ---------------------------------------------------------
 // Called by index.js's freeze watchdog when the position has been FROZEN for minutes
 // while something was trying to move (live: 2h creeper standoff in a cave pocket; the
@@ -756,4 +826,4 @@ function honestFail (lastErr, counts, label, recoveryMs) {
   return e
 }
 
-module.exports = { navigateTo, navigateToPreempt, gotoOnce, openNearbyDoor, swimToShore, isNavigating, isRecovering, isForceUnsticking, forceUnstick, setDebugSink, detectPit, goalWasChanged }
+module.exports = { navigateTo, navigateToPreempt, gotoOnce, openNearbyDoor, enterStructure, exitStructure, swimToShore, isNavigating, isRecovering, isForceUnsticking, forceUnstick, setDebugSink, detectPit, goalWasChanged }

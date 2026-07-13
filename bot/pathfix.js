@@ -155,6 +155,19 @@ function installPathfinderTuning (bot) {
     bot._placeBlockWithOptions = verifiedPlace
     bot.placeBlock = (referenceBlock, faceVector) => verifiedPlace(referenceBlock, faceVector, { swingArm: 'right' })
 
+    // SETTLE ON ARRIVAL (nav slice C - flat-ground overshoot/bunny-hop): the pathfinder
+    // leaves control states (forward/sprint/jump) SET when a goal resolves, so on latency the
+    // bot slides PAST the target and re-paths, or keeps hopping a beat after arriving (the
+    // flat-ground bunny-hop the operator watched). Clearing controls the moment a goal is
+    // reached (or a path ends with no path / timeout) damps the slide - it stops ON the
+    // target instead of overshooting. Cheap, and it only fires at path boundaries. PATHFIX_SETTLE=0 off.
+    if (process.env.PATHFIX_SETTLE !== '0' && !bot.__pathfixSettle) {
+      bot.__pathfixSettle = true
+      const settle = (why) => { try { bot.clearControlStates() } catch {} ; dbg('settle: cleared control states on ' + why) }
+      bot.on('goal_reached', () => settle('goal_reached'))
+      bot.on('path_update', (r) => { if (r && (r.status === 'noPath' || r.status === 'timeout')) settle('path ' + r.status) })
+    }
+
     // DIG VERIFICATION, same philosophy, different physics: mineflayer zeroes the cell
     // locally when the dig timer elapses, so (a) a dig ERROR with the block actually
     // gone is a phantom - swallow it; (b) a synchronous confirm would read our own

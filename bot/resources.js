@@ -188,24 +188,50 @@ async function withdrawItems (bot, name, count, opts = {}) {
   return got
 }
 
-// Deposit build materials (everything not KEEP_ON_BOT) into the nearest verified
-// chest; with opts.mayCreate it crafts/places one when none is remembered nearby
-// (provision.ensureChest registers it in infra memory). Returns items deposited.
+// How many build-material items the pack still holds (KEEP_ON_BOT excluded) - drives the
+// multi-chest spill: if materials remain after filling a chest, we need another.
+function packMaterialCount (bot) {
+  return (bot.inventory ? bot.inventory.items() : []).filter(i => !provision.KEEP_ON_BOT.test(i.name)).reduce((s, i) => s + i.count, 0)
+}
+
+// Deposit build materials (everything not KEEP_ON_BOT) into verified chests; with
+// opts.mayCreate it crafts/places one when none is remembered nearby. MULTI-CHEST (item 5,
+// castle scale ~2350 blocks): one chest holds ~1728 items, so when a chest FILLS and the pack
+// still has materials, spill into the NEXT verified chest, and place a FRESH one when they're
+// all full - a 2350-block BOM overflows a single bank. Bounded (maxChests per call). Returns
+// total items deposited.
 async function autoBank (bot, opts = {}) {
-  let chests = verifiedChests(bot, opts.near, opts.maxDist)
-  let blk = null
-  for (const e of chests) { if (chestCoolingOff(e)) continue; const b = bot.blockAt(new Vec3(e.x, e.y, e.z)); if (b && /chest/.test(b.name)) { blk = b; break } }
-  if (!blk && opts.mayCreate) {
-    try { blk = await provision.ensureChest(bot, { isStopped: opts.isStopped, home: opts.near }) } catch (e) { dbg('autoBank: no chest and cannot make one (' + e.message + ')'); return 0 }
+  const maxChests = opts.maxChests != null ? opts.maxChests : 6
+  let total = 0
+  const tried = new Set()
+  for (let round = 0; round < maxChests; round++) {
+    if (opts.isStopped && opts.isStopped()) break
+    if (packMaterialCount(bot) <= (opts.keepDirt || 0)) break // nothing left to bank
+    // pick the nearest verified chest we haven't already filled this call
+    let blk = null; let cell = null
+    for (const e of verifiedChests(bot, opts.near, opts.maxDist)) {
+      const k = cellKey(e); if (tried.has(k) || chestCoolingOff(e)) continue
+      const b = bot.blockAt(new Vec3(e.x, e.y, e.z))
+      if (b && /chest/.test(b.name)) { blk = b; cell = e; break }
+    }
+    if (!blk && opts.mayCreate) {
+      try { blk = await provision.ensureChest(bot, { isStopped: opts.isStopped, home: opts.near }) } catch (e) { dbg('autoBank: no chest and cannot make one (' + e.message + ')'); break }
+      cell = blk && { x: blk.position.x, y: blk.position.y, z: blk.position.z }
+    }
+    if (!blk) break // no more chests and can't/won't make one
+    tried.add(cellKey(cell))
+    const before = packMaterialCount(bot)
+    try {
+      const n = await provision.depositMaterials(bot, blk, { keepDirt: opts.keepDirt || 0 })
+      total += n || 0
+      await readChest(bot, cell)
+    } catch (e) { dbg('autoBank: deposit failed (' + e.message + ')') }
+    // if the deposit moved NOTHING, this chest is full (or nothing fit) - try the next one /
+    // make a new one. If it moved something and the pack is now clear, we're done (loop breaks).
+    if (packMaterialCount(bot) >= before) { dbg('autoBank: chest at ' + cellKey(cell) + ' full - spilling to the next'); continue }
   }
-  if (!blk) return 0
-  let n = 0
-  try {
-    n = await provision.depositMaterials(bot, blk, { keepDirt: opts.keepDirt || 0 })
-    await readChest(bot, { x: blk.position.x, y: blk.position.y, z: blk.position.z })
-  } catch (e) { dbg('autoBank: deposit failed (' + e.message + ')') }
-  if (n > 0) dbg('banked ' + n + ' items')
-  return n
+  if (total > 0) dbg('banked ' + total + ' items' + (tried.size > 1 ? ' across ' + tried.size + ' chests' : ''))
+  return total
 }
 
 // Make sure the pack has at least `minFree` empty slots BEFORE it deadlocks (a
@@ -318,11 +344,20 @@ async function ensureFood (bot, opts = {}) {
   // two passes: working chests first; a cooling-off (repeatedly dead) chest is only ever
   // a LAST resort when it's the sole cached food source - never while a good chest holds
   // food (the bot starved beside the stocked hut chest hammering a dead one, live).
+  // STALE-CACHE STARVATION FIX (live: cache was 11h old showing empty; the operator added
+  // food and the bot never re-read, starving AT its own bank). When HUNGRY, a stale cache
+  // (older than freshMs, default 60s) or opts.forceFresh forces a REAL open of a reachable
+  // chest before concluding it's empty - never starve on a stale "empty".
+  const freshMs = opts.freshMs != null ? opts.freshMs : 60000
   for (const allowCooling of [false, true]) {
     for (const e of chests) {
       if (chestCoolingOff(e) !== allowCooling) continue
       const c = cachedChest(e)
-      const counts = (c && c.counts) ? c.counts : (chestCoolingOff(e) ? {} : await readChest(bot, e)) // unknown chest: one real read, then it's cached
+      const fresh = c && c.counts && (Date.now() - (c.at || 0) < freshMs)
+      let counts
+      if (chestCoolingOff(e)) counts = (c && c.counts) || {}                 // dead chest: don't walk, use whatever we cached
+      else if (opts.forceFresh || !fresh) counts = await readChest(bot, e)   // hungry + stale/forced -> real open (the fix)
+      else counts = c.counts
       const names = Object.keys(counts).filter(n => foods[n] && counts[n] > 0)
         .sort((a, b) => (RISKY_FOOD.test(a) ? 1 : 0) - (RISKY_FOOD.test(b) ? 1 : 0) || (foods[b].foodPoints || 0) - (foods[a].foodPoints || 0))
       if (names.length) { target = e; bestFood = names[0]; break }
