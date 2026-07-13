@@ -723,6 +723,10 @@ let dfHurtAt = 0 // when health last DROPPED - "someone is shooting me" detector
 // down per-threat for 90s; a real hit re-arms flee instantly.
 let fleeEp = null // { id, start, pos } - the current flee episode
 const fleeFutileUntil = new Map() // entity id -> epoch ms until which flee is suppressed
+// HUT RETREAT: near home, running INTO the sealed hut beats kiting a creeper around the
+// yard (live: the crippled bot could only 'flee creeper' in circles until one detonated
+// on the hut - a closed wooden door stops a creeper cold). One retreat at a time.
+let hutRetreat = false
 let lastChargeNoteAt = 0
 const RANGED_RE = /skeleton|stray|bogged|pillager/i
 if (process.env.AUTO_DEFEND !== '0') {
@@ -772,6 +776,33 @@ if (process.env.AUTO_DEFEND !== '0') {
       }
       if (flee) {
         const now = Date.now()
+        // INSIDE OWN WALLS and untouched: the creeper can't reach - fleeing would walk us
+        // back OUT the door into its blast radius. Hold position; a real hit re-arms.
+        if (why === 'creeper' && !beingHit) {
+          try { if (provision.insideOwnStructure && provision.insideOwnStructure(bot)) return } catch {}
+        }
+        // NEAR HOME: retreat INTO the sealed hut instead of open-field kiting. Async
+        // (door-assist takes seconds); radial flee stands down while it drives.
+        if (hutRetreat) return
+        if (why === 'creeper' && fbest > 5) { // >5m: there's time to make the door; point-blank still radial-flees
+          try {
+            const hut = (provision.listInfra ? provision.listInfra('hut') : [])[0]
+            if (hut && Math.hypot(hut.x + 2 - me.x, hut.z + 2 - me.z) <= 24) {
+              hutRetreat = true
+              note(`(flee) creeper ${fbest.toFixed(1)}m near home - retreating INTO the hut`)
+              ;(async () => {
+                try {
+                  await navigate.navigateTo(bot, new goals.GoalNear(hut.x + 2, hut.y + 1, hut.z + 2, 1),
+                    { timeoutMs: 15000, deadlineMs: 40000, climb: false, budgets: { door: 3, pit: 0, water: 0, nudge: 1, stepout: 1 }, label: 'hut-retreat' })
+                  note('(flee) inside the hut - door-assist sealed the door behind me')
+                } catch (e) { note(`(flee) hut retreat failed (${e.message}) - back to open-field flee`) } finally {
+                  setTimeout(() => { hutRetreat = false }, 5000)
+                }
+              })()
+              return
+            }
+          } catch {}
+        }
         // standoff suppression (see fleeFutileUntil above) - a hit always re-arms
         if (!beingHit && (fleeFutileUntil.get(flee.id) || 0) > now) return
         if (!fleeEp || fleeEp.id !== flee.id) fleeEp = { id: flee.id, start: now, pos: me.clone() }
