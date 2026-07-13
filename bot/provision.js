@@ -699,7 +699,22 @@ async function ensureHutBed (bot, at, opts = {}) {
   }
   // 2) carrying a bed? lay it on an interior floor cell. foot (2,1,2) + head (2,1,3): both must
   //    be air over a solid floor. (chest 4,1,1/2, furnace 4,1,4, table 1,1,4 are all clear of this.)
-  const bedItem = (bot.inventory ? bot.inventory.items() : []).find(i => /_bed$/.test(i.name))
+  let bedItem = (bot.inventory ? bot.inventory.items() : []).find(i => /_bed$/.test(i.name))
+  if (!bedItem) {
+    // No bed in the pack: wool is operator-supplied here (no sheep), so a spare bed
+    // BANKED in the hut chest is the only other source - withdraw > craft > gather.
+    try {
+      const res = require('./resources.js') // lazy - resources requires provision at load
+      const near = { x: at.x + 2, y: at.y + 1, z: at.z + 2 }
+      const totals = await res.totalCounts(bot, { near, maxDist: 24 })
+      const banked = Object.keys(totals).find(n => /_bed$/.test(n) && totals[n] > 0)
+      if (banked) {
+        dbg('  ensureHutBed: no bed in the pack but a ' + banked + ' is banked - withdrawing it')
+        await res.withdrawItems(bot, banked, 1, { near })
+        bedItem = (bot.inventory ? bot.inventory.items() : []).find(i => /_bed$/.test(i.name))
+      }
+    } catch (e) { dbg('  ensureHutBed: bank bed check failed (' + e.message + ')') }
+  }
   if (!bedItem) return 'none'
   const foot = new Vec3(at.x + 2, at.y + 1, at.z + 2)
   const head = new Vec3(at.x + 2, at.y + 1, at.z + 3)
