@@ -650,18 +650,21 @@ const LEATHER_PIECES = [
   { item: 'leather_boots', slot: 'feet', leather: 4 }
 ]
 
-// Get the bot ARMORED from nothing: wear any armor it already has, then craft
-// leather armor (hunting cows for leather as needed) for the still-bare slots and
-// put it on. Only fills EMPTY slots - never downgrades iron->leather. BOUNDED: if
-// cows/leather run short it makes what it can and returns. This is the survival
-// answer to "respawned naked, night mobs incoming" and mirrors autoBuild's tool
-// bootstrap. Returns a short status string. Never throws fatally.
+// Get the bot ARMORED from nothing, using what THIS biome actually offers: wear any
+// armor already in the pack, then (a) craft leather ONLY if cows are actually around,
+// else (b) bootstrap IRON (mine -> smelt -> craft -> wear) via the resource model -
+// the reliable path in a no-animal biome. The old leather-only version dead-ended
+// ("no cows/leather around here") and left the bot naked for hours while iron sat
+// mineable under its feet (live, 07-13). Only fills EMPTY slots - never downgrades
+// iron->leather. BOUNDED: every branch makes what it can and returns. Returns a
+// short HONEST status string. Never throws fatally.
 async function provisionArmor (bot, opts = {}) {
   const say = opts.say || (() => {})
   const isStopped = opts.isStopped || (() => false)
   const restore = opts.restoreMovements || (() => setupMovements(bot))
   const mcData = require('minecraft-data')(bot.version)
   const inv = () => (bot.inventory ? bot.inventory.items() : [])
+  const bareSlots = () => Object.entries(wornArmor(bot)).filter(([, v]) => !v).map(([k]) => k)
   const wore = []
   // 1) Wear anything already in the pack for a bare slot (best material first).
   for (const slot of ['head', 'torso', 'legs', 'feet']) {
@@ -669,41 +672,126 @@ async function provisionArmor (bot, opts = {}) {
     const pick = bestArmor(inv().filter(i => armorSlot(i.name) === slot))
     if (pick) { try { await bot.equip(pick, slot); wore.push(pick.name) } catch { /* transient */ } }
   }
-  let stillMissing = LEATHER_PIECES.filter(p => !wornArmor(bot)[p.slot])
-  if (!stillMissing.length) return wore.length ? `armored up: ${wore.join(', ')}` : 'already wearing armor in every slot'
+  if (!bareSlots().length) return wore.length ? `armored up: ${wore.join(', ')}` : 'already wearing armor in every slot'
 
-  // 2) Need to CRAFT leather pieces. Gather leather if short.
-  const have = () => provision.inventoryCounts(bot).leather || 0
-  const needLeather = stillMissing.reduce((s, p) => s + p.leather, 0)
-  if (have() < needLeather && !isStopped()) {
-    say(`no armor on me - hunting cows for leather (${have()}/${needLeather})`)
-    try { await provision.gatherLeather(bot, needLeather - have(), { say, isStopped, restoreMovements: restore, home: opts.home, maxRoam: opts.maxRoam, maxExplores: opts.maxExplores, timeMs: opts.timeMs }) }
-    catch (e) { say(`(leather hunt cut short: ${e.message})`) }
-  }
-  // 3) Ensure a crafting table exists (leather armor needs only leather + a table).
-  //    ensureTable throws with no planks/table - chop a little wood for one first.
-  if (!isStopped() && have() >= LEATHER_PIECES[LEATHER_PIECES.length - 1].leather) {
-    try { await provision.ensureTable(bot, { say, isStopped }) }
-    catch {
+  // 2) LEATHER only when cows are VERIFIABLY here (entity check, not hope) - never
+  //    roam-hunt a biome with no animals; that roam was the old dead end.
+  const cowsAround = !!bot.entity && Object.values(bot.entities || {}).some(e => e && e.position && /^(cow|mooshroom)$/.test((e.name || '').toLowerCase()) && e.position.distanceTo(bot.entity.position) <= 48)
+  if (cowsAround && !isStopped()) {
+    const stillMissing = LEATHER_PIECES.filter(p => !wornArmor(bot)[p.slot])
+    const have = () => provision.inventoryCounts(bot).leather || 0
+    const needLeather = stillMissing.reduce((s, p) => s + p.leather, 0)
+    if (have() < needLeather) {
+      say(`no armor on me - hunting cows for leather (${have()}/${needLeather})`)
+      try { await provision.gatherLeather(bot, needLeather - have(), { say, isStopped, restoreMovements: restore, home: opts.home, maxRoam: opts.maxRoam, maxExplores: opts.maxExplores, timeMs: opts.timeMs }) }
+      catch (e) { say(`(leather hunt cut short: ${e.message})`) }
+    }
+    // Ensure a crafting table exists (leather armor needs only leather + a table).
+    if (!isStopped() && have() >= LEATHER_PIECES[LEATHER_PIECES.length - 1].leather) {
+      try { await provision.ensureTable(bot, { say, isStopped }) }
+      catch {
+        try {
+          const wood = provision.detectWood(bot) || 'oak'
+          const plan = provision.planProvision(mcData, { crafting_table: 1 }, provision.inventoryCounts(bot), { primaryWood: wood })
+          if (plan.tasks.length) await provision.runPlan(bot, plan, { say, isStopped, restoreMovements: restore })
+        } catch (e) { say(`(no table and couldn't make one: ${e.message})`) }
+      }
+    }
+    // Craft + wear whatever the leather affords, best slots first.
+    for (const p of stillMissing) {
+      if (isStopped() || wornArmor(bot)[p.slot] || have() < p.leather) continue
       try {
-        const wood = provision.detectWood(bot) || 'oak'
-        const plan = provision.planProvision(mcData, { crafting_table: 1 }, provision.inventoryCounts(bot), { primaryWood: wood })
-        if (plan.tasks.length) await provision.runPlan(bot, plan, { say, isStopped, restoreMovements: restore })
-      } catch (e) { say(`(no table and couldn't make one: ${e.message})`) }
+        await provision.runCraft(bot, p.item, 1, true, { say, isStopped, restoreMovements: restore })
+        const made = inv().find(i => i.name === p.item)
+        if (made) { await bot.equip(made, p.slot); wore.push(p.item) }
+      } catch (e) { say(`(couldn't make ${p.item}: ${e.message})`) }
     }
   }
-  // 4) Craft + wear whatever the leather affords, best slots first.
-  for (const p of stillMissing) {
-    if (isStopped() || have() < p.leather) continue
-    try {
-      await provision.runCraft(bot, p.item, 1, true, { say, isStopped, restoreMovements: restore })
-      const made = inv().find(i => i.name === p.item)
-      if (made) { await bot.equip(made, p.slot); wore.push(p.item) }
-    } catch (e) { say(`(couldn't make ${p.item}: ${e.message})`) }
+
+  // 3) IRON fallback: slots still bare and leather wasn't on offer (or fell short) ->
+  //    mine/smelt/craft/wear the iron set. The ONE viable armor path where cows don't
+  //    exist. opts.ironFallback === false opts out (autoBuild's camp flow runs its own
+  //    pass with build-tuned budgets; survivalPrep must not front-load an iron grind
+  //    onto every trek).
+  let ironNote = ''
+  if (bareSlots().length && !isStopped() && opts.ironFallback !== false) {
+    const r = await ironArmorBootstrap(bot, { say, isStopped, restoreMovements: restore, at: opts.at, avoid: opts.avoid, keepDirt: opts.keepDirt, force: opts.forceIron })
+    if (r.msg) ironNote = ` (iron path: ${r.msg})`
   }
   restore()
-  if (wore.length) return `armored up: ${wore.join(', ')}`
-  return "couldn't scrape together any armor - no cows/leather around here"
+  const bare = bareSlots()
+  const wornNow = Object.values(wornArmor(bot)).filter(Boolean)
+  if (!bare.length) return `armored up - full set on (${wornNow.join(', ')})`
+  if (wornNow.length) return `partly armored (${wornNow.join(', ')}) - still bare: ${bare.join(', ')}${ironNote}`
+  return `still no armor - no cows here for leather${ironNote || ' and the iron path was skipped'}`
+}
+
+// IRON ARMOR BOOTSTRAP: mine -> smelt -> craft -> wear the iron pieces for every bare
+// slot, via the resource model (banked iron/ingots/pieces count BEFORE any mining).
+// Extracted from autoBuild's camp flow so `armorup` (and the idle gear-up reflex) can
+// reach iron too - the leather-only dead end trapped a naked bot for hours (live).
+// Keeps the persisted CONVERGENCE BACK-OFF: repeated fruitless attempts (patrol-
+// interdicted site, no exposed iron) must not re-run the same death-march every call;
+// any real progress (new piece worn, net iron gained) resets the window. Returns
+// { progressed, msg } - msg is an honest, human-readable outcome.
+async function ironArmorBootstrap (bot, opts = {}) {
+  const say = opts.say || (() => {})
+  const isStopped = opts.isStopped || (() => false)
+  const restore = opts.restoreMovements || (() => setupMovements(bot))
+  const at = opts.at || (bot.entity && bot.entity.position)
+  if (!at) return { progressed: false, msg: 'not spawned yet' }
+  const avoid = opts.avoid || null
+  const primaryWood = provision.detectWood(bot) || 'oak'
+  const bareCount = () => Object.values(wornArmor(bot)).filter(v => !v).length
+  if (!bareCount()) return { progressed: false, msg: 'already armored in every slot' }
+  const gb = provision.gearupState && provision.gearupState()
+  if (!opts.force && gb && gb.until > Date.now()) {
+    const min = Math.max(1, Math.round((gb.until - Date.now()) / 60000))
+    return { progressed: false, msg: `iron grind cooling off after ${gb.fails} fruitless tries - retrying in ~${min} min` }
+  }
+  const ironScore = () => { const c = provision.inventoryCounts(bot); return (c.raw_iron || 0) + (c.iron_ingot || 0) * 2 }
+  const bareBefore = bareCount(); const ironBefore = ironScore()
+  let failReason = null
+  try {
+    const want = {}
+    const worn = wornArmor(bot)
+    if (!worn.head) want.iron_helmet = 1
+    if (!worn.torso) want.iron_chestplate = 1
+    if (!worn.legs) want.iron_leggings = 1
+    if (!worn.feet) want.iron_boots = 1
+    // stage 1: a stone pick FIRST (the planner orders it after the iron gather that
+    // needs it - offline-verified); stage 2 then plans cleanly around the owned pick
+    if (!(bot.inventory ? bot.inventory.items() : []).some(i => /(stone|iron|diamond)_pickaxe/.test(i.name))) {
+      const pprec = await resources.reconcile(bot, { stone_pickaxe: 1 }, { near: at, planOpts: { primaryWood } })
+      if (pprec.withdraws.length || pprec.plan.tasks.length) await resources.runReconciled(bot, pprec, { say, isStopped, restoreMovements: restore, homeY: Math.floor(at.y), home: { x: Math.round(at.x), y: Math.floor(at.y), z: Math.round(at.z) }, avoid })
+    }
+    // reconcile: banked iron/ingots/armor pieces count before any mining happens
+    const irec = await resources.reconcile(bot, want, { near: at, planOpts: { primaryWood, furnacesNearby: provision.countFurnacesNear(bot) } })
+    const ip = irec.plan
+    if (Object.keys(ip.unobtainable || {}).length) { failReason = 'unobtainable: ' + Object.keys(ip.unobtainable).join(', '); dbg('iron bootstrap: unobtainable ' + JSON.stringify(ip.unobtainable)) }
+    else if (ip.tasks.length || irec.withdraws.length) {
+      say('no cows around for leather - mining iron for real armor')
+      dbg('iron bootstrap plan: ' + ip.tasks.map(t => `${t.type}:${t.item || t.output}x${t.count || t.crafts || ''}`).join(' > '))
+      await resources.runReconciled(bot, irec, { say, isStopped, restoreMovements: restore, homeY: Math.floor(at.y), home: { x: Math.round(at.x), y: Math.floor(at.y), z: Math.round(at.z) }, avoid })
+    }
+    // wear whatever the run produced (also mops up pieces that were banked all along)
+    const r = await handle(bot, 'wear')
+    dbg('iron bootstrap: wear -> ' + r)
+  } catch (e) { failReason = e.message; dbg('iron bootstrap failed (' + e.message + ') - continuing bare') }
+  // score the attempt: worn a new piece or netted iron = progress (reset back-off);
+  // else widen the back-off so the next passes work the job instead of re-flailing
+  const progressed = bareCount() < bareBefore || ironScore() > ironBefore
+  try { provision.gearupResult && provision.gearupResult(progressed) } catch {}
+  // BANK the gear-up progress: loose iron in the pack dies with the bot (the ~12
+  // ingots' worth mined "across attempts" all evaporated in graves, live). Worn
+  // armor is in equipment slots - depositing touches only the loose surplus.
+  try { const c = provision.inventoryCounts(bot); if ((c.raw_iron || 0) + (c.iron_ingot || 0) > 0) await resources.autoBank(bot, { near: { x: Math.round(at.x), y: Math.floor(at.y), z: Math.round(at.z) }, keepDirt: opts.keepDirt || 16, isStopped }) } catch {}
+  restore()
+  const bareNow = bareCount()
+  const msg = !bareNow ? 'full set on'
+    : progressed ? `progress (${4 - bareNow}/4 slots covered, iron banked) - ${bareNow} slot(s) still bare`
+      : `no progress${failReason ? ': ' + failReason : ' - no reachable iron this attempt'}`
+  return { progressed, msg }
 }
 
 // SURVIVAL PREP before a long trek to a far build site. The bot spawns with NOTHING and the
@@ -740,9 +828,11 @@ async function survivalPrep (bot, opts = {}) {
     try { for (let i = 0; i < 3 && !provision.hasFood(bot) && !isStopped(); i++) { if (!await provision.huntForFood(bot, { isStopped })) break } } catch { /* no animals - travel-phase hunt covers it */ }
   }
   // 3) leather armor if cows/leather are around (bounded; proceeds naked if not - the shelter
-  //    reflex covers a still-naked bot at night).
+  //    reflex covers a still-naked bot at night). NO iron fallback here: the iron grind is a
+  //    long cave dive and the camp flow runs it AFTER the hut/bank/farm (operator order) -
+  //    front-loading it onto every trek would starve the camp steps out again.
   if (!isStopped() && Object.values(wornArmor(bot)).some(v => !v)) {
-    try { const r = await provisionArmor(bot, { say, isStopped, restoreMovements: restore }); if (r) say(r) } catch (e) { say(`(armor prep: ${e.message})`) }
+    try { const r = await provisionArmor(bot, { say, isStopped, restoreMovements: restore, ironFallback: false }); if (r) say(r) } catch (e) { say(`(armor prep: ${e.message})`) }
   }
   restore()
   return { armed: hasKind('sword'), fed: provision.hasFood(bot), armored: !Object.values(wornArmor(bot)).some(v => !v) }
@@ -998,11 +1088,25 @@ async function handle (bot, line) {
     }
     case 'armorup':
     case 'gearup': {
-      // Actively GET armored from nothing: wear what we have, else hunt cows for
-      // leather -> craft leather armor -> put it on. Unlike `wear` (which only equips
-      // armor already in the pack), this ACQUIRES it. For "i'm naked and it's night".
+      // Actively GET armored from nothing: wear what we have; leather only if cows are
+      // actually around, else the IRON bootstrap (mine -> smelt -> craft -> wear).
+      // Unlike `wear` (which only equips armor already in the pack), this ACQUIRES it.
+      // Marks the body BUSY for the duration: the iron grind is a real job and the
+      // brain's side-trips (goto trader, wander) must not yank the pathfinder mid-mine
+      // - that tug-of-war is exactly the old naked-at-the-hut carousel.
+      if (isBusy()) return 'busy with a job - armor has to wait its turn'
       buildAbort = false // a previous stop must not abort this fresh request
-      return await provisionArmor(bot, { say: m => bot.chat(String(m).slice(0, 256)), isStopped: () => buildAbort })
+      provisioning = true
+      beginActivity('gearup', 'armor')
+      try {
+        // anchor the grind at HOME when home is nearby (bank + furnace live there);
+        // far afield, anchor where we stand and let the resource model do its thing
+        const kb = provision.knownBed && provision.knownBed()
+        const at = (kb && bot.entity && Math.hypot(kb.x - bot.entity.position.x, kb.z - bot.entity.position.z) <= 64) ? kb : undefined
+        const r = await provisionArmor(bot, { say: m => bot.chat(String(m).slice(0, 256)), isStopped: () => buildAbort, at })
+        endActivity(!/still no armor|no progress/.test(r), r)
+        return r
+      } catch (e) { endActivity(false, e.message); throw e } finally { provisioning = false }
     }
 
     case 'come': {
@@ -2449,57 +2553,19 @@ async function autoBuild (bot, schem, at, opts = {}) {
   const anyBare = () => Object.values(wornArmor(bot)).some(v => !v)
   const cowsNear = () => Object.values(bot.entities || {}).some(e => e && e.position && /^(cow|mooshroom)$/.test((e.name || '').toLowerCase()) && Math.hypot(e.position.x - at.x, e.position.z - at.z) <= 48)
   if (!isStopped() && process.env.ARMOR_BOOTSTRAP !== '0' && anyBare() && cowsNear()) {
-    try { const r = await provisionArmor(bot, { say, isStopped, restoreMovements: restore, home: { x: at.x, z: at.z }, maxRoam: 48, maxExplores: 1, timeMs: 60000 }); if (r) say(r) }
+    // leather pass only (cows verified nearby); iron runs as its own tuned pass below
+    try { const r = await provisionArmor(bot, { say, isStopped, restoreMovements: restore, home: { x: at.x, z: at.z }, maxRoam: 48, maxExplores: 1, timeMs: 60000, ironFallback: false }); if (r) say(r) }
     catch (e) { say(`(armor bootstrap skipped: ${e.message})`) }
   }
   // IRON BOOTSTRAP (the root fix for the naked death-churn: a pillager patrol interdicted
-  // the site for hours and leather needs cows that don't exist here). When still bare
-  // with a stone pick available, mine/smelt/craft the iron set - the planner handles the
-  // whole chain now (raw_iron gather -> iron_ingot smelt -> armor crafts). Bounded by the
-  // plan's own budgets; the build continues with whatever it achieved.
-  // CONVERGENCE BACK-OFF (persisted): repeated fruitless attempts (patrol-interdicted
-  // site, no exposed iron) must not re-run the same death-march on every resume pass -
-  // that churn starved out the camp/farm/build steps for hours (live). Any real progress
-  // (a new piece worn, net iron gained) resets the window.
-  const gearBackoff = provision.gearupState && provision.gearupState()
-  if (!isStopped() && process.env.IRON_BOOTSTRAP !== '0' && anyBare() && gearBackoff && gearBackoff.until > Date.now()) {
-    dbg('iron bootstrap: backing off ' + Math.round((gearBackoff.until - Date.now()) / 60000) + ' more min (' + gearBackoff.fails + ' fruitless attempts) - working the job instead')
-  } else if (!isStopped() && process.env.IRON_BOOTSTRAP !== '0' && anyBare()) {
-    const bareCount = () => Object.values(wornArmor(bot)).filter(v => !v).length
-    const ironScore = () => { const inv = provision.inventoryCounts(bot); return (inv.raw_iron || 0) + (inv.iron_ingot || 0) * 2 }
-    const bareBefore = bareCount(); const ironBefore = ironScore()
-    try {
-      const want = {}
-      const worn = wornArmor(bot)
-      if (!worn.head) want.iron_helmet = 1
-      if (!worn.torso) want.iron_chestplate = 1
-      if (!worn.legs) want.iron_leggings = 1
-      if (!worn.feet) want.iron_boots = 1
-      // stage 1: a stone pick FIRST (the planner orders it after the iron gather that
-      // needs it - offline-verified); stage 2 then plans cleanly around the owned pick
-      if (!(bot.inventory ? bot.inventory.items() : []).some(i => /(stone|iron|diamond)_pickaxe/.test(i.name))) {
-        const pprec = await resources.reconcile(bot, { stone_pickaxe: 1 }, { near: at, planOpts: { primaryWood } })
-        if (pprec.withdraws.length || pprec.plan.tasks.length) await resources.runReconciled(bot, pprec, { say, isStopped, restoreMovements: restore, homeY: Math.floor(at.y), home: { x: Math.round(at.x), y: Math.floor(at.y), z: Math.round(at.z) }, avoid })
-      }
-      // reconcile: banked iron/ingots/armor pieces count before any mining happens
-      const irec = await resources.reconcile(bot, want, { near: at, planOpts: { primaryWood, furnacesNearby: provision.countFurnacesNear(bot) } })
-      const ip = irec.plan
-      if (Object.keys(ip.unobtainable || {}).length) { dbg('iron bootstrap: unobtainable ' + JSON.stringify(ip.unobtainable)) }
-      else if (ip.tasks.length || irec.withdraws.length) {
-        say('no cows around - mining iron for real armor before this patrol kills me again')
-        dbg('iron bootstrap plan: ' + ip.tasks.map(t => `${t.type}:${t.item || t.output}x${t.count || t.crafts || ''}`).join(' > '))
-        await resources.runReconciled(bot, irec, { say, isStopped, restoreMovements: restore, homeY: Math.floor(at.y), home: { x: Math.round(at.x), y: Math.floor(at.y), z: Math.round(at.z) }, avoid })
-        const r = await handle(bot, 'wear')
-        say('armor status: ' + r)
-      }
-    } catch (e) { dbg('iron bootstrap failed (' + e.message + ') - continuing bare') }
-    // score the attempt: worn a new piece or netted iron = progress (reset back-off);
-    // else widen the back-off so the next passes work the job instead of re-flailing
-    try { provision.gearupResult && provision.gearupResult(bareCount() < bareBefore || ironScore() > ironBefore) } catch {}
-    // BANK the gear-up progress: loose iron in the pack dies with the bot (the ~12
-    // ingots' worth mined "across attempts" all evaporated in graves, live). Worn
-    // armor is in equipment slots - depositing touches only the loose surplus.
-    try { if ((provision.inventoryCounts(bot).raw_iron || 0) + (provision.inventoryCounts(bot).iron_ingot || 0) > 0) await resources.autoBank(bot, { near: { x: Math.round(at.x), y: Math.floor(at.y), z: Math.round(at.z) }, keepDirt: KEEP_DIRT, isStopped }) } catch {}
+  // the site for hours and leather needs cows that don't exist here). Mine/smelt/craft
+  // the iron set - the planner handles the whole chain (raw_iron gather -> iron_ingot
+  // smelt -> armor crafts), bounded by the plan's own budgets + the persisted
+  // convergence back-off inside ironArmorBootstrap. The build continues regardless.
+  if (!isStopped() && process.env.IRON_BOOTSTRAP !== '0' && anyBare()) {
+    const r = await ironArmorBootstrap(bot, { say, isStopped, restoreMovements: restore, at, avoid, keepDirt: KEEP_DIRT })
+    dbg('iron bootstrap: ' + r.msg)
+    if (r.progressed) say('armor status: ' + r.msg)
   }
   const slotsUsed = () => (bot.inventory ? bot.inventory.items().length : 0)
   // Total holdings via the RESOURCE MODEL: pack + every world-verified site chest,

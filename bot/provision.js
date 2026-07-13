@@ -1345,7 +1345,10 @@ async function digInForNight (bot, opts = {}) {
       const hpIn = bot.health || 20
       let hurtInside = false
       while (Date.now() < dl && !isStopped()) {
-        if (!isNight(bot) && !nearHostile(bot, 10)) break
+        // hold through the DUSK HEAD-START too (shelterNeeded fires at 12200, isNight at
+        // 13000): breaking on "!isNight" alone made this return success instantly at dusk,
+        // so the 5s reflex re-entered forever - the "waiting out the night" log spam (live)
+        if (!shelterNeeded(bot) && !isNight(bot) && !nearHostile(bot, 10)) break
         if ((bot.health || 20) < hpIn - 3) { dbg('shelter: taking damage INSIDE the hut - releasing shelter to FIGHT'); hurtInside = true; break }
         if (inWaterNow(bot)) { dbg('shelter: hut interior flooding - bailing'); hurtInside = true; break }
         await new Promise(r => setTimeout(r, 3000))
@@ -1857,6 +1860,26 @@ async function sleepInBedHere (bot, { say = () => {}, isStopped = () => false } 
     if (there) { dbg('nightRest: bed is GONE from ' + kb.x + ',' + kb.y + ',' + kb.z + ' - forgetting it'); forgetBed() }
     else dbg('nightRest: fell short of the bed - keeping the memory, pitting tonight')
     return false
+  }
+  // SLEEP-VIABILITY GATE (the "sleep failed (it's not night and it's not a thunderstorm)"
+  // spam, live 07-13): bot.sleep only works from timeOfDay ~12542 (or in a thunderstorm),
+  // but the shelter reflex fires at the 12200 dusk head-start - so every attempt in that
+  // window failed LOUDLY on the reflex's 5s cadence, night after night. Wait QUIETLY at
+  // the bed for the sleepable window instead of hammering the server; and plain daytime
+  // rain (no thunder) can never become sleepable soon - bail once, silently.
+  const canSleepNow = () => ((bot.thunderState || 0) > 0) || (bot.time && bot.time.timeOfDay >= 12542 && bot.time.timeOfDay <= 23458)
+  if (!canSleepNow()) {
+    const tod = bot.time ? bot.time.timeOfDay : -1
+    if (tod >= 11800 && tod < 12542) {
+      dbg('nightRest: at the bed ahead of sleep-time (timeOfDay ' + tod + ') - waiting quietly for nightfall')
+      if (bot.entity.position.distanceTo(bed.position) > 2.5) { try { await gotoWithTimeout(bot, new goals.GoalNear(bed.position.x, bed.position.y, bed.position.z, 2), 20000) } catch {} }
+      const dl = Date.now() + 90000
+      while (!canSleepNow() && Date.now() < dl && !isStopped()) {
+        if (nearHostile(bot, 10) && underArmored(bot)) { dbg('nightRest: hostiles closing during the dusk wait - pitting instead'); return false }
+        await new Promise(r => setTimeout(r, 2000))
+      }
+    }
+    if (!canSleepNow()) { dbg('nightRest: bed here but sleep is impossible right now (timeOfDay ' + (bot.time ? bot.time.timeOfDay : '?') + ', no thunder) - not hammering it'); return false }
   }
   for (let tries = 0; tries < 3 && !isStopped(); tries++) {
     try {
@@ -2377,7 +2400,7 @@ async function dumpJunk (bot) {
 async function restUntilSafe (bot, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   let waited = false
-  while (isNight(bot) && underArmored(bot) && !isStopped() && bot.entity) {
+  while ((isNight(bot) || shelterNeeded(bot)) && underArmored(bot) && !isStopped() && bot.entity) {
     // HOLDING must never mean holding UNDERWATER - the 4s waits between failed rest
     // attempts are exactly where the bot drowned (test server, in its flooded basin)
     if (inWaterNow(bot)) { try { await ensureAshore(bot, isStopped) } catch {} }

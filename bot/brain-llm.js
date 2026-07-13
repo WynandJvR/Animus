@@ -171,7 +171,7 @@ Do NOT prefix it with a category word like "perceive", "move", "build", or "chat
   sleep | wake   (sleep in a nearby bed at night / wake up)
   equip <item>   (hold an item; armor pieces are WORN automatically, shields go off-hand)
   wear           (put on armor you ALREADY have - picks up armor dropped nearby and wears every piece. To armor up, emit exactly {"command":"wear"} - do NOT invent an item like "iron_armor")
-  armorup        (GET armor from nothing: hunt cows for leather -> craft leather armor -> wear it. Use when "wearing" slots are empty and you have NO armor to wear. Bounded; makes what it can)
+  armorup        (GET armor from nothing: wears what you have, hunts cows for leather ONLY if cows are actually nearby, else it MINES IRON and smelts+crafts an iron set itself. Use when "wearing" slots are empty and you have NO armor to wear. Bounded; makes what it can. Wandering traders are NOT a leather source - never chase them for armor)
   drop <item> [count]   (toss real items from your inventory to give to a player)
   eat            (eat food when hungry - also happens automatically)
   say <message>
@@ -238,9 +238,12 @@ the goal. Never use your own name as a follow/come/look target.
 THREAT: if "threat" is set, a hostile mob is near. If threat.flee is true (a creeper) back away,
 never melee it. Otherwise stay calm if it's far; only attack/defend when it's close and safe.
 ARMOR / SURVIVAL: if every "wearing" slot is null you have NO armor. If it's also night, or a
-threat is near, or you're heading out on a long job, emit "armorup" to make yourself a leather set
-(it hunts cows + crafts). If you DO have armor pieces in inventory but aren't wearing them, use
-"wear" instead. Don't armorup when you're already wearing gear.
+threat is near, or you're heading out on a long job, emit "armorup" to get yourself a set - it
+handles the whole chain itself (leather if cows are around, otherwise it mines+smelts IRON).
+One armorup is a long job: let it run; don't re-issue it or wander off to "find leather" - and
+wandering traders/llamas are NOT an armor source, ignore them. If you DO have armor pieces in
+inventory but aren't wearing them, use "wear" instead. Don't armorup when you're already wearing
+gear.
 STUCK / FAILURES / HAZARDS - read these state fields and the "BODY REPORT" line if present:
 - "stuck" set means the body has been TRYING to move for that many seconds with no progress. Do
   NOT re-issue the same command - it will wedge the same way. First "stop", then pick a DIFFERENT

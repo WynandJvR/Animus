@@ -667,6 +667,7 @@ if (process.env.FOOD_CRISIS !== '0') {
 // when IDLE: during a build the gather loop does this itself (a reflex must not fight its
 // pathfinder). Body-side because the brain is HELD during builds. Set NIGHT_SHELTER=0 to off.
 let sheltering = false
+let lastRestNote = 0
 if (process.env.NIGHT_SHELTER !== '0') {
   setInterval(async () => {
     if (sheltering || !bot.entity) return
@@ -679,9 +680,40 @@ if (process.env.NIGHT_SHELTER !== '0') {
     const idleNight = provision.isNight(bot) && !bot.pathfinder.goal && provision.knownBed && provision.knownBed()
     if (!provision.shelterNeeded(bot) && !idleNight) return
     sheltering = true
-    try { if (await provision.nightRest(bot, { say: m => bot.chat(String(m).slice(0, 200)) })) note('(shelter) rested for the night' + (provision.underArmored(bot) ? ' (bed or pit) - no armor, mobs about' : ' - nothing better to do than sleep')) }
+    // note at most once per 2 min: a rest that resolves instantly (dusk head-start, can't
+    // sleep yet) used to print "rested for the night" every 5s - the log spam (live 07-13)
+    try { if (await provision.nightRest(bot, { say: m => bot.chat(String(m).slice(0, 200)) }) && Date.now() - lastRestNote > 120000) { lastRestNote = Date.now(); note('(shelter) rested for the night' + (provision.underArmored(bot) ? ' (bed or pit) - no armor, mobs about' : ' - nothing better to do than sleep')) } }
     catch (e) { /* transient */ } finally { sheltering = false }
   }, 5000).unref?.()
+}
+
+// GEAR-UP: a naked IDLE bot re-arms itself - body-side and brain-independent (the brain's
+// "leather from the wandering trader" fixation left it naked at the hut for hours while
+// iron sat mineable nearby - live 07-13). Morning + idle + fed + safe -> `armorup`, which
+// wears what it has, hunts cows only if cows actually exist, and otherwise runs the IRON
+// bootstrap (mine -> smelt -> craft -> wear). The persisted gearup back-off inside the
+// bootstrap keeps this from churning on a fruitless site. Set GEAR_REFLEX=0 to off.
+let gearing = false
+if (process.env.GEAR_REFLEX !== '0') {
+  setInterval(async () => {
+    if (gearing || !bot.entity) return
+    if (commands.isBusy && commands.isBusy()) return // a job owns the body (its camp flow gears)
+    if (provision.isResting && provision.isResting()) return
+    if (provision.isSecuringFood && provision.isSecuringFood()) return
+    if (commands.isEscaping && commands.isEscaping()) return
+    if (!provision.underArmored(bot)) return
+    const tod = bot.time ? bot.time.timeOfDay : 0
+    if (tod >= 11000) return // dusk/night belong to the shelter reflex; mornings to the grind
+    if ((bot.food ?? 20) < 8 || (bot.health ?? 20) < 10) return // feed/heal reflexes first
+    const backoff = provision.gearupState && provision.gearupState()
+    if (backoff && backoff.until > Date.now()) return // recent fruitless grind - let it cool
+    gearing = true
+    try {
+      note('(gearup) under-armored and idle - going to get armor (iron if there are no cows)')
+      const r = await commands.handle(bot, 'armorup')
+      note('(gearup) ' + r)
+    } catch (e) { note('(gearup) failed: ' + e.message) } finally { gearing = false }
+  }, 60000).unref?.()
 }
 
 // Anti-AFK: keep the connection alive during genuine idle gaps (e.g. between brain
