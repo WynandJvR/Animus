@@ -1098,11 +1098,13 @@ async function craftOneFromInv (bot, itemName, tableBlock = null) {
 async function craftStonePickHere (bot, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const mcData = require('minecraft-data')(bot.version)
-  // 1) cobble: 3 per pick. Mine surrounding natural stone with the (still-working) pick.
+  // 1) cobble: 3 per pick. Mine surrounding natural stone with the (still-working) pick -
+  //    wider search than the tight bycatch radius so it can grab the last block or two at the
+  //    surface too (the up-front kit reported "have 2" and provisioned nothing, live).
   if (countItem(bot, 'cobblestone') < 3 && workingMiningPick(bot)) {
-    try { await grabNearbyOre(bot, /^(stone|cobblestone|deepslate|cobbled_deepslate|granite|diorite|andesite|tuff)$/, 4, 4, { isStopped }) } catch {}
+    try { await grabNearbyOre(bot, /^(stone|cobblestone|deepslate|cobbled_deepslate|granite|diorite|andesite|tuff)$/, parseInt(process.env.MINE_COBBLE_RADIUS || '8', 10), 4, { isStopped }) } catch {}
   }
-  if (countItem(bot, 'cobblestone') < 3) { dbg('  reTool: not enough cobble to craft a pick (have ' + countItem(bot, 'cobblestone') + ')'); return false }
+  if (countItem(bot, 'cobblestone') < 3) { dbg('  reTool: not enough cobble to craft a pick (have ' + countItem(bot, 'cobblestone') + ') - skipping, will re-tool at depth where stone is everywhere'); return false }
   // 2) sticks: 2 per pick. Cannot be mined - make from carried planks, else fail honestly.
   if (countItem(bot, 'stick') < 2) { await craftOneFromInv(bot, 'stick'); if (countItem(bot, 'stick') < 2) { dbg('  reTool: no sticks and no planks to make them - cannot re-tool here'); return false } }
   // 3) a table WITHIN REACH: reuse one placed nearby, else place a carried one, else craft
@@ -1185,11 +1187,74 @@ async function digStaircaseDown (bot, targetY, opts = {}) {
   return { reached: Math.floor(bot.entity.position.y) <= targetY + 1, reason: 'at level', blocked: null }
 }
 
+// ---- PERSISTENT MINE (world-memory 'mines'): remember a dug mine so the next excursion
+// RE-ENTERS it instead of re-digging the descent (on cave terrain the descent ate the whole
+// excursion, gathered:0 "out of time" - live). A mine record: entrance {x,z}+top (surface),
+// level (mining Y), lx/lz (staircase bottom), dirIdx (corridor dir), tip {x,y,z} (corridor
+// end - where to resume), branches (count done), at.
+function loadMines () { const m = loadWorldMem(); return (m.mines = m.mines || []) }
+function rememberMine (entry) {
+  const mines = loadMines()
+  const i = mines.findIndex(e => Math.hypot(e.x - entry.x, e.z - entry.z) <= 3)
+  const rec = { ...(i >= 0 ? mines[i] : {}), ...entry, at: Date.now() }
+  if (i >= 0) mines[i] = rec; else mines.push(rec)
+  if (mines.length > 8) { mines.sort((a, b) => b.at - a.at); mines.length = 8 }
+  saveWorldMem()
+  return rec
+}
+function recallMine (bot, near, maxDist) {
+  const now = Date.now()
+  let best = null; let bd = Infinity
+  for (const e of loadMines()) {
+    if (!mining.mineReusable(e, near, { maxDist, now })) continue
+    const d = Math.hypot(e.x - near.x, e.z - near.z); if (d < bd) { bd = d; best = e }
+  }
+  return best
+}
+function forgetMine (entry) {
+  const m = loadWorldMem(); if (!m.mines) return
+  m.mines = m.mines.filter(e => !(Math.abs(e.x - entry.x) <= 3 && Math.abs(e.z - entry.z) <= 3))
+  saveWorldMem()
+}
+function updateMineProgress (entry, branches, tip) {
+  const mines = loadMines()
+  const i = mines.findIndex(e => Math.abs(e.x - entry.x) <= 3 && Math.abs(e.z - entry.z) <= 3)
+  if (i >= 0) { mines[i].branches = branches; if (tip) mines[i].tip = { x: tip.x, y: tip.y, z: tip.z }; mines[i].at = Date.now(); saveWorldMem() }
+}
+
+// Walk to a remembered mine's entrance and descend the EXISTING staircase to the mining
+// level, then to the corridor tip - NO re-digging (the whole point). VERIFIES on arrival
+// (world-read: reached the level and it isn't flooded); returns false if the staircase is
+// gone/blocked/flooded so branchMine digs fresh + re-persists.
+async function enterExistingMine (bot, mine, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const here = bot.entity.position
+  // 1) to the entrance XZ at the surface (staged trek for a far mine)
+  if (Math.hypot(here.x - mine.x, here.z - mine.z) > 4) {
+    try { await walkStaged(bot, mine.x, mine.z, { isStopped, range: 3, timeoutMs: 60000 }) } catch {}
+    try { await gotoWithTimeout(bot, new goals.GoalNearXZ(mine.x, mine.z, 2), 20000) } catch {}
+  }
+  if (isStopped()) return false
+  // 2) walk DOWN the open staircase to the mining level (no dig - it's already cut)
+  const lx = mine.lx != null ? mine.lx : mine.x; const lz = mine.lz != null ? mine.lz : mine.z
+  try { await gotoWithTimeout(bot, new goals.GoalNear(lx, mine.level, lz, 2), 40000) } catch {}
+  if (Math.abs(Math.floor(bot.entity.position.y) - mine.level) > 3) {
+    dbg('  reEnter: could not reach the mine level (y' + Math.floor(bot.entity.position.y) + ' vs ' + mine.level + ') - staircase gone/blocked, digging fresh')
+    return false
+  }
+  if (inWaterNow(bot)) { dbg('  reEnter: mine is flooded - abandoning it'); return false }
+  // 3) to the corridor tip so we mine FRESH stone, not re-walk the open corridor
+  if (mine.tip) { try { await gotoWithTimeout(bot, new goals.GoalNear(mine.tip.x, mine.tip.y, mine.tip.z, 2), 30000) } catch {} }
+  dbg('  reEnter: back in my mine at y' + Math.floor(bot.entity.position.y) + ' (level ' + mine.level + ', ' + (mine.branches || 0) + ' branches done) - MINING, not re-digging')
+  return true
+}
+
 // ONE organized branch mine for a DEEP ore (iron/gold/copper/...). Descends a single
 // staircase to the iron band (~y16, mining.targetMineY) - relocating the entrance on
 // water/lava/void instead of stalling - then drives a central corridor with perpendicular
 // branches (classic 2-3-spaced branch mine: far more ore per hole than the old scattered
-// shafts), torch-lit, with ore-in-the-walls bycatch. Danger (mob closes / hp crashes) ->
+// shafts), torch-lit, with ore-in-the-walls bycatch. RE-ENTERS a persisted mine when one
+// exists (spend the budget mining, not re-descending). Danger (mob closes / hp crashes) ->
 // climb out and bail to the deployed survival reflexes. Bounded by count + a wall-clock
 // deadline + a branch cap. Returns { gathered, reason }.
 async function branchMine (bot, item, count, opts = {}) {
@@ -1226,10 +1291,27 @@ async function branchMine (bot, item, count, opts = {}) {
     return workingMiningPick(bot)
   }
 
-  // 1) DESCEND ONCE, sited off the hut apron so the camp doesn't get riddled with holes.
-  if (Math.floor(bot.entity.position.y) > targetY + 1) {
-    // provision picks + a table + sticks up front so a break at depth is fixed in place
-    try { await ensureMiningKit(bot, Math.max(0, Math.floor(surfaceY) - targetY), { isStopped }) } catch (e) { dbg('  ensureMiningKit failed (' + e.message + ') - relying on depth re-tool') }
+  const persist = process.env.MINE_PERSIST !== '0'
+  let corridorDir = opts.dirIdx || 0
+  let mineRec = null
+  let startBranches = 0
+
+  // 0) RE-ENTER a remembered mine instead of re-digging the descent - the whole point on
+  // cave terrain (a fresh descent ate the entire excursion, gathered:0). If a reachable mine
+  // exists, walk in and pick up mining where we left off; only dig fresh if it's gone/flooded.
+  if (persist && Math.floor(bot.entity.position.y) > targetY + 1 && !isStopped()) {
+    const remembered = recallMine(bot, bot.entity.position, parseInt(process.env.MINE_REUSE_DIST || '80', 10))
+    if (remembered) {
+      if (opts.say) say('heading back to my mine to keep digging')
+      if (await enterExistingMine(bot, remembered, { isStopped })) {
+        mineRec = remembered; corridorDir = remembered.dirIdx || 0; startBranches = remembered.branches || 0
+      } else { forgetMine(remembered) }
+    }
+  }
+
+  // 1) DESCEND ONCE (only if we didn't re-enter), sited off the hut apron so the camp doesn't
+  // get riddled with holes.
+  if (!mineRec && Math.floor(bot.entity.position.y) > targetY + 1) {
     if (onHutApron(bot)) {
       const h = onHutApron(bot)
       const away = new Vec3(h.x + 12, bot.entity.position.y, h.z + 12)
@@ -1238,6 +1320,8 @@ async function branchMine (bot, item, count, opts = {}) {
       if (onHutApron(bot)) { dbg('  branchMine: still on apron - not mining the doorstep'); return { gathered: 0, reason: 'too close to home to dig here' } }
     }
     if (opts.say) say('digging down to the iron level (~y' + targetY + ')')
+    // the entrance = the surface top of this staircase (persisted so we re-enter here)
+    const entrance = { x: Math.round(bot.entity.position.x), z: Math.round(bot.entity.position.z), top: Math.floor(bot.entity.position.y) }
     let reached = false
     for (let reloc = 0; reloc < 4 && !reached && !isStopped() && Date.now() < deadline; reloc++) {
       const r = await digStaircaseDown(bot, targetY, { isStopped, dirIdx: reloc })
@@ -1269,16 +1353,30 @@ async function branchMine (bot, item, count, opts = {}) {
       dbg('  branchMine: blocked short of y' + targetY + ' but at y' + Math.floor(bot.entity.position.y) + ' (descended ' + (Math.floor(surfaceY) - Math.floor(bot.entity.position.y)) + ') - iron-viable, MINING HERE not returning empty')
       if (opts.say) say('couldn\'t get all the way down, but there\'s iron at this depth - mining here')
     }
+    // PERSIST the fresh mine so the NEXT excursion re-enters here (AMORTIZE the descent): even
+    // if THIS excursion runs out of time right after descending, the staircase is banked and
+    // the next one picks up mining immediately - never re-descend to 0 excursion after excursion.
+    if (persist && Math.floor(bot.entity.position.y) < surfaceY - 6) {
+      mineRec = rememberMine({ x: entrance.x, z: entrance.z, top: entrance.top, level: Math.floor(bot.entity.position.y), lx: Math.round(bot.entity.position.x), lz: Math.round(bot.entity.position.z), dirIdx: corridorDir, branches: 0, tip: bot.entity.position.floored() })
+      dbg('  branchMine: persisted mine entrance ' + entrance.x + ',' + entrance.z + ' level y' + mineRec.level + ' - next excursion re-enters, no re-dig')
+    }
   }
 
   // 2) BRANCH MINE at level: corridor + perpendicular branches, torch-lit.
+  // Provision the tool kit HERE (at depth, both fresh-descent and re-entry paths): stone is
+  // everywhere down here, so it can actually gather the cobble for spare picks + a table +
+  // sticks - fixing the up-front "provisioned 0 spares" (surface had no stone). Mid-descent
+  // breaks were already covered by keepPickReady (the staircase dig yields cobble).
+  if (Math.floor(bot.entity.position.y) < surfaceY - 4) {
+    try { await ensureMiningKit(bot, Math.max(0, Math.floor(surfaceY) - Math.floor(bot.entity.position.y)), { isStopped }) } catch (e) { dbg('  ensureMiningKit failed (' + e.message + ') - relying on depth re-tool') }
+  }
   await ensureTorches(bot, 12)
-  const L = mining.branchLayout(opts.dirIdx || 0, {
+  const L = mining.branchLayout(corridorDir, {
     branchLen: parseInt(process.env.MINE_BRANCH_LEN || '12', 10),
     spacing: parseInt(process.env.MINE_SPACING || '3', 10)
   })
-  let branches = 0
-  const maxBranches = opts.maxBranches || 30
+  let branches = startBranches
+  const maxBranches = startBranches + (opts.maxBranches || 30)
   while (got() < count && Date.now() < deadline && !isStopped() && branches < maxBranches) {
     if (mineDanger(bot)) {
       dbg('  branchMine: threat/hp down here - climbing out and handing off to the survival reflex')
@@ -1306,6 +1404,9 @@ async function branchMine (bot, item, count, opts = {}) {
     try { await gotoWithTimeout(bot, new goals.GoalBlock(junc.x, junc.y, junc.z), 15000) } catch {}
     try { await grabNearbyOre(bot, oreRe, 4, 6, { isStopped }) } catch {} // ore exposed in the junction walls
     branches++
+    // BANK PROGRESS: record the branch count + corridor tip so the next excursion resumes at
+    // the fresh face, not the staircase bottom (which would re-walk the open corridor).
+    if (persist && mineRec) { try { updateMineProgress(mineRec, branches, junc) } catch {} }
     dbg('  branchMine: junction ' + branches + '/' + maxBranches + ' got=' + got() + '/' + count + ' y=' + Math.floor(bot.entity.position.y))
   }
   return { gathered: got(), reason: got() >= count ? 'done' : (Date.now() >= deadline ? 'out of time' : 'worked the branches') }

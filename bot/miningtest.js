@@ -96,6 +96,19 @@ t('estExcursionBlocks + picksToCraft: provision enough picks up front', () => {
   assert.strictEqual(M.picksToCraft(0, 50), 2, 'need the excursion pick + a spare even for a tiny dig')
 })
 
+t('mineReusable: re-enter a close, fresh, real mine; dig fresh otherwise', () => {
+  const now = 1000000
+  const mine = { x: 100, z: 200, level: 39, at: now - 60000 } // 1 min old, has a level
+  assert.strictEqual(M.mineReusable(mine, { x: 110, z: 205 }, { now }), true, 'close + fresh -> re-enter')
+  assert.strictEqual(M.mineReusable(mine, { x: 300, z: 200 }, { now }), false, 'too far -> dig fresh')
+  assert.strictEqual(M.mineReusable(mine, { x: 100, z: 200 }, { now, maxDist: 5 }), true, 'right on top of it')
+  // stale
+  assert.strictEqual(M.mineReusable({ ...mine, at: now - 7 * 3600 * 1000 }, { x: 100, z: 200 }, { now }), false, 'too old -> dig fresh')
+  // incomplete record (never reached a level) is not reusable
+  assert.strictEqual(M.mineReusable({ x: 100, z: 200 }, { x: 100, z: 200 }, { now }), false, 'no level -> not a real mine')
+  assert.strictEqual(M.mineReusable(null, { x: 0, z: 0 }, { now }), false)
+})
+
 t('needReTool: re-tool BEFORE the pick breaks, and only with no spare', () => {
   assert.strictEqual(M.needReTool(10, 0), true, 'low + no spare -> re-tool now (while it can still mine cobble)')
   assert.strictEqual(M.needReTool(10, 1), false, 'a spare pick is available -> no need')

@@ -105,6 +105,21 @@ function mineableWhenBlocked (currentY, surfaceY, opts = {}) {
   return descended >= minDescent || Math.floor(currentY) <= ironCeiling
 }
 
+// ---- persistent, re-enterable mine -----------------------------------------------------
+// A fresh descent through cave/aquifer terrain can eat a WHOLE excursion (live: ~95s
+// re-descending 3 caves, 0s left to mine, gathered:0 "out of time"). So a mine is PERSISTED
+// after a successful descent and RE-ENTERED next time - spend the budget MINING, not
+// re-digging. This decides whether a remembered mine is worth re-entering: it exists, is a
+// real dig (has a level), is close enough to walk to, and isn't stale. PURE (the driver does
+// the world-read verification - staircase still open / not flooded - on arrival).
+function mineReusable (mine, fromXZ, opts = {}) {
+  if (!mine || mine.x == null || mine.z == null || mine.level == null) return false
+  const maxDist = opts.maxDist != null ? opts.maxDist : 80
+  const maxAgeMs = opts.maxAgeMs != null ? opts.maxAgeMs : 6 * 3600 * 1000
+  if (opts.now != null && mine.at != null && (opts.now - mine.at) > maxAgeMs) return false
+  return Math.hypot(mine.x - fromXZ.x, mine.z - fromXZ.z) <= maxDist
+}
+
 // Classify whether it is SAFE to descend one step onto the cell whose floor blocks are
 // `below` (the block that becomes our feet-floor) and `below2` (one further down). Given
 // block NAME strings (or null = unloaded/air). Returns:
@@ -145,4 +160,4 @@ function branchLayout (corridorIdx, opts = {}) {
   }
 }
 
-module.exports = { LAVA_RE, WATER_RE, AIRISH, DIRS, PICK_USES, perpendicular, targetMineY, worthMiningHere, mineableWhenBlocked, pickMaxUses, pickUsesLeft, estExcursionBlocks, picksToCraft, needReTool, descentSafety, faceHazard, branchLayout }
+module.exports = { LAVA_RE, WATER_RE, AIRISH, DIRS, PICK_USES, perpendicular, targetMineY, worthMiningHere, mineableWhenBlocked, mineReusable, pickMaxUses, pickUsesLeft, estExcursionBlocks, picksToCraft, needReTool, descentSafety, faceHazard, branchLayout }
