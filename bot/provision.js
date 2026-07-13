@@ -18,6 +18,7 @@ const hutModel = require('./hut-model.js') // self-structure model: schema-corre
 const mining = require('./mining.js') // pure mining strategy: depth model, descent-safety, branch-mine geometry
 const shelterSite = require('./shelter.js') // pure shelter-siting: "can a safe pit be dug here" + nearest diggable dry cell
 const foodSec = require('./food.js') // pure food-security decisions: when to proactively build a fishing supply
+const farm = require('./farm.js') // pure wheat-farm geometry (flood-safe bank pick) + crop-state (VERIFIED wheat, never faith)
 const arbiter = require('./arbiter.js') // JOB-LEVEL arbitration: survive > progress authority (jobSurvivalNeed/jobMayProgress)
 // Visible, UNTHROTTLED build tracing to stdout (the say() progress goes through a 40s
 // throttle that hides failures). Enable with BUILD_DEBUG=1 to see every plan/task/smelt step.
@@ -2331,21 +2332,147 @@ function stationSlot (bot, kind, desired = 1, hut) {
   return c ? new Vec3(c.x, c.y, c.z) : null
 }
 
+// STRUCTURAL REPAIR (creeper damage): compare the hut SCHEMATIC to the world and rebuild any
+// missing shell block (wall/floor/roof plank + door) and any missing furniture (chest/furnace/
+// table), placing each at its EXACT schematic cell. This is the targeted, idempotent cousin of
+// the camp's all-or-nothing `bad>3` full rebuild (which empties+rebuilds the whole hut and so
+// never fires for a small blast, leaving a blown door or a lost bank chest un-repaired). A
+// creeper that ate a wall + the bank chest gets patched cell-by-cell, no bank teardown. Missing
+// items are acquired via the resource model (withdraw>craft>gather). The BED is NOT in the
+// schematic - ensureHutBed owns it. Grounds every decision in a live block-read, never faith.
+// Best-effort + bounded; returns { planks, doors, furniture, missing } (or {skipped}).
+// `hut` = the hut anchor (min corner = schematic origin; floor at anchor.y, walls anchor.y+1..).
+let _hutSchemCache = null
+async function loadHutSchem (version) {
+  if (_hutSchemCache && _hutSchemCache.version === version) return _hutSchemCache.schem
+  try {
+    const schematic = require('./schematic.js') // lazy - schematic requires provision back
+    const schem = await schematic.loadFile('hut.schem', version)
+    _hutSchemCache = { version, schem }
+    return schem
+  } catch (e) { dbg('repairHut: schematic load failed (' + e.message + ')'); return null }
+}
+async function repairHutStructure (bot, hut, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const say = opts.say || (() => {})
+  hut = hut || hutAnchor()
+  if (!hut) return { skipped: 'no hut' }
+  if (process.env.HUT_REPAIR === '0') return { skipped: 'disabled' }
+  // repairing under attack means standing still placing blocks while a mob hits us - defer.
+  if (nearHostile(bot, 10) && underArmored(bot)) return { skipped: 'hostiles near' }
+  const schem = await loadHutSchem(bot.version)
+  if (!schem) return { skipped: 'no schematic' }
+  const st = schem.start(); const en = schem.end()
+  const AIRRE = /^(air|cave_air|void_air)$/
+  const missPlank = []                 // world coords wanting a plank the world lacks
+  let doorLower = null                  // world coord of the door's LOWER cell (place the item once)
+  let doorPresent = false
+  const missFurn = []                   // { pos, kind, item, re }
+  const FURN = {
+    chest: { item: 'chest', re: /chest$/ },
+    furnace: { item: 'furnace', re: /^furnace$/ },
+    crafting_table: { item: 'crafting_table', re: /^crafting_table$/ }
+  }
+  // 1) scan the schematic, block-read each cell, classify what's MISSING.
+  for (let y = st.y; y <= en.y; y++) for (let z = st.z; z <= en.z; z++) for (let x = st.x; x <= en.x; x++) {
+    const w = schem.getBlock(new Vec3(x, y, z))
+    if (!w || !w.name || AIRRE.test(w.name)) continue // schema wants air/interior - never fill
+    const wp = new Vec3(hut.x + (x - st.x), hut.y + (y - st.y), hut.z + (z - st.z))
+    const g = bot.blockAt(wp)
+    if (!g) continue // unloaded chunk - skip this pass
+    if (/_planks$/.test(w.name)) { if (!/_planks$/.test(g.name)) missPlank.push(wp) }
+    else if (/_door$/.test(w.name)) {
+      if (/_door$/.test(g.name)) { doorPresent = true } else if (!doorLower || wp.y < doorLower.y) doorLower = wp // lowest door cell = where the item goes
+    } else if (/crafting_table$/.test(w.name)) { if (!FURN.crafting_table.re.test(g.name)) missFurn.push({ pos: wp, kind: 'table', item: 'crafting_table', re: FURN.crafting_table.re }) } else if (/^furnace$|furnace$/.test(w.name)) { if (!FURN.furnace.re.test(g.name)) missFurn.push({ pos: wp, kind: 'furnace', item: 'furnace', re: FURN.furnace.re }) } else if (/chest$/.test(w.name)) { if (!FURN.chest.re.test(g.name)) missFurn.push({ pos: wp, kind: 'chest', item: 'chest', re: FURN.chest.re }) }
+  }
+  const wantDoor = !!doorLower && !doorPresent
+  const missing = missPlank.length + (wantDoor ? 1 : 0) + missFurn.length
+  if (!missing) { dbg('repairHut: intact - no-op'); return { planks: 0, doors: 0, furniture: 0, missing: 0 } }
+  dbg('repairHut: ' + missing + ' cell(s) off (planks ' + missPlank.length + ', door ' + (wantDoor ? 1 : 0) + ', furniture ' + missFurn.length + ') - patching')
+  say('creeper damage on my hut - patching ' + missing + ' block(s)')
+  const res = require('./resources.js')
+  const near = { x: hut.x + 2, y: hut.y + 1, z: hut.z + 2 }
+  // helper: dig a natural intruder occupying a cell we need (dirt washed in / grass), never a build block
+  const clearCell = async (wp, keepRe) => {
+    const b = bot.blockAt(wp)
+    if (b && !AIRRE.test(b.name) && !keepRe.test(b.name) && canBreakNaturally(b)) {
+      try { if (bot.entity.position.distanceTo(wp) > 4) await navigate.gotoOnce(bot, new goals.GoalNear(wp.x, wp.y, wp.z, 2), 8000); const t = toolForBlock(bot, b.name); if (t) await bot.equip(t, 'hand').catch(() => {}); await bot.dig(b) } catch {}
+    }
+  }
+  // 2) SHELL PLANKS - acquire in one batch, place BOTTOM-UP (each course/roof cell then has a
+  //    solid neighbour below/beside to place against). oak to match the schematic (any plank
+  //    still works structurally, but matching keeps the camp's mismatch count quiet).
+  let plankDone = 0
+  if (missPlank.length) {
+    try { await res.acquire(bot, 'oak_planks', Math.min(missPlank.length, 128), { near, batch: 64, isStopped, say, planOpts: { primaryWood: 'oak' } }) } catch (e) { dbg('repairHut: plank acquire failed (' + e.message + ')') }
+    for (const wp of missPlank.sort((a, b) => a.y - b.y)) {
+      if (isStopped()) break
+      const g = bot.blockAt(wp); if (g && /_planks$/.test(g.name)) { plankDone++; continue }
+      if (!(bot.inventory ? bot.inventory.items() : []).some(i => /_planks$/.test(i.name))) { dbg('repairHut: out of planks - ' + (missPlank.length - plankDone) + ' wall cell(s) left'); break }
+      await clearCell(wp, /_planks$/)
+      if (bot.entity.position.distanceTo(wp) > 4) { try { await navigate.gotoOnce(bot, new goals.GoalNear(wp.x, wp.y, wp.z, 2), 12000) } catch {} }
+      if (await placeAt(bot, wp, /_planks$/)) plankDone++
+      else dbg('repairHut: could not place plank at ' + wp.toString() + ' (' + placeAt.lastFail + ')')
+    }
+  }
+  // 3) DOOR - one item hangs the whole 2-tall door. Stand OUTSIDE facing the hut centre so it
+  //    opens the right way (schematic door on the z0 wall opens toward -z).
+  let doorDone = 0
+  if (wantDoor) {
+    let door = (bot.inventory ? bot.inventory.items() : []).find(i => /_door$/.test(i.name))
+    if (!door) { try { await res.acquire(bot, 'oak_door', 1, { near, isStopped, say, planOpts: { primaryWood: 'oak' } }) } catch (e) { dbg('repairHut: door acquire failed (' + e.message + ')') } ; door = (bot.inventory ? bot.inventory.items() : []).find(i => /_door$/.test(i.name)) }
+    const floor = bot.blockAt(doorLower.offset(0, -1, 0))
+    if (door && floor && floor.boundingBox === 'block') {
+      const ox = doorLower.x === hut.x ? -1 : doorLower.x === hut.x + hutModel.DIMS.w - 1 ? 1 : 0
+      const oz = doorLower.z === hut.z ? -1 : doorLower.z === hut.z + hutModel.DIMS.l - 1 ? 1 : 0
+      try { await navigate.gotoOnce(bot, new goals.GoalBlock(doorLower.x + ox, doorLower.y, doorLower.z + oz), 12000) } catch {}
+      try { await bot.lookAt(new Vec3(hut.x + 2.5, hut.y + 1.5, hut.z + 2.5), true) } catch {}
+      try { await bot.equip(door, 'hand'); await bot.placeBlock(floor, new Vec3(0, 1, 0)); doorDone++ } catch (e) { dbg('repairHut: door place failed (' + e.message + ')') }
+    } else if (!door) dbg('repairHut: no door and could not craft one')
+  }
+  // 4) FURNITURE - place each missing chest/furnace/table at its exact cell (the schematic's
+  //    two adjacent chests auto-merge into the double bank). Re-register so the infra registry
+  //    knows the rebuilt station.
+  let furnDone = 0
+  for (const f of missFurn) {
+    if (isStopped()) break
+    const g = bot.blockAt(f.pos); if (g && f.re.test(g.name)) { furnDone++; continue }
+    if (!(bot.inventory ? bot.inventory.items() : []).some(i => i.name === f.item)) {
+      try { await res.acquire(bot, f.item, 1, { near, batch: 1, isStopped, say, planOpts: { primaryWood: 'oak' } }) } catch (e) { dbg('repairHut: ' + f.item + ' acquire failed (' + e.message + ')') }
+    }
+    if (!(bot.inventory ? bot.inventory.items() : []).some(i => i.name === f.item)) { dbg('repairHut: no ' + f.item + ' to place (kept a wall/door open? gather short)'); continue }
+    await clearCell(f.pos, f.re)
+    if (bot.entity.position.distanceTo(f.pos) > 3) { try { await navigate.gotoOnce(bot, new goals.GoalNear(f.pos.x, f.pos.y, f.pos.z, 2), 12000) } catch {} }
+    if (await placeAt(bot, f.pos, f.re)) { furnDone++; rememberInfra(f.kind === 'table' ? 'table' : f.kind, f.pos); dbg('repairHut: re-placed ' + f.kind + ' at ' + f.pos.toString()) } else dbg('repairHut: could not place ' + f.kind + ' at ' + f.pos.toString() + ' (' + placeAt.lastFail + ')')
+  }
+  try { reconcileInfra(bot) } catch {}
+  const done = plankDone + doorDone + furnDone
+  if (done) say('hut repaired - ' + [plankDone && plankDone + ' wall', doorDone && 'door', furnDone && furnDone + ' station'].filter(Boolean).join(' + ') + ' back')
+  dbg('repairHut: patched planks ' + plankDone + '/' + missPlank.length + ', door ' + doorDone + '/' + (wantDoor ? 1 : 0) + ', furniture ' + furnDone + '/' + missFurn.length)
+  return { planks: plankDone, doors: doorDone, furniture: furnDone, missing }
+}
+
 // SELF-HEALING hut maintenance for the camp pass: reconcile the registry against the world,
-// then tidy the interior IFF a cheap model scan says it's dirty (stray filler / duplicate
-// station / floor hole) - an early no-op when the hut is already clean, so it's safe to run
-// every pass. Returns { clean } or the cleanup result. Gated by the caller's isStopped.
+// REPAIR structural creeper damage (missing wall/door/floor/roof + chest/furnace/table), then
+// tidy the interior IFF a cheap model scan says it's dirty (stray filler / duplicate station /
+// floor hole) - an early no-op when the hut is already clean+intact, so it's safe to run every
+// pass. Returns { clean/cleanup..., repair }. Gated by the caller's isStopped.
 async function maintainHut (bot, hut, opts = {}) {
   hut = hut || hutAnchor()
   if (!hut) return { skipped: 'no hut' }
   try { reconcileInfra(bot) } catch (e) { dbg('maintainHut: reconcile failed (' + e.message + ')') }
+  // STRUCTURAL REPAIR first: a hole in the shell lets mobs in and the bank chest may be gone
+  // (live: a creeper flattened the door, west wall, bank chest, furnace + bed). Idempotent.
+  let repair = null
+  try { repair = await repairHutStructure(bot, hut, opts) } catch (e) { dbg('maintainHut: structural repair failed (' + e.message + ')') }
   const read = hutReader(bot)
   let strays, st, holes
-  try { strays = hutModel.strayCells(hut, read); st = hutModel.stationCells(hut, read); holes = hutModel.floorHoles(hut, read) } catch (e) { dbg('maintainHut: scan failed (' + e.message + ')'); return { skipped: e.message } }
+  try { strays = hutModel.strayCells(hut, read); st = hutModel.stationCells(hut, read); holes = hutModel.floorHoles(hut, read) } catch (e) { dbg('maintainHut: scan failed (' + e.message + ')'); return { skipped: e.message, repair } }
   const dirty = strays.length || (st.table.length > 1) || (st.furnace.length > 1) || holes.length
-  if (!dirty) { dbg('maintainHut: interior already clean - no-op'); return { clean: true } }
+  if (!dirty) { dbg('maintainHut: interior already clean - no-op'); return { clean: !repair || !repair.missing, repair } }
   dbg('maintainHut: interior dirty (stray=' + strays.length + ' tables=' + st.table.length + ' furnaces=' + st.furnace.length + ' holes=' + holes.length + ') - tidying')
-  return await cleanupHutInterior(bot, hut, opts)
+  const r = await cleanupHutInterior(bot, hut, opts)
+  return { ...r, repair }
 }
 
 // Walk to REMEMBERED ones (up to 3 nearest) and verify each still stands; forget the dead.
@@ -2738,10 +2865,11 @@ async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () =
       const k = (wp.x + dx) + ',' + (wp.z + dz)
       if (ringSeen.has(k) || inAvoidBox(avoid, wp.x + dx, wp.z + dz)) continue
       ringSeen.add(k)
-      // sand/gravel/clay banks welcome (untillable ones get swapped for carried dirt), and
-      // the bank may sit level with, one below, or a step above the waterline - same-y
-      // grass/dirt-only made the ring EMPTY at every pond here (live: "0 bank cells").
-      for (const dy of [0, -1, 1]) {
+      // sand/gravel/clay banks welcome (untillable ones get swapped for carried dirt).
+      // FLOOD FIX (live: the farm produced nothing for 2.5h): only banks AT or ABOVE the
+      // waterline (farm.BANK_DYS = [0, +1]) - a bank BELOW the water (the old dy -1) puts the
+      // crop cell at water level and the source washes the seed out. dy 0 is hydrated + safe.
+      for (const dy of farm.BANK_DYS) {
         const gp = wp.offset(dx, dy, dz)
         const g = bot.blockAt(gp); const above = bot.blockAt(gp.offset(0, 1, 0))
         if (g && /^(grass_block|dirt|sand|red_sand|gravel|clay)$/.test(g.name) && above && REPLACEABLE.test(above.name)) { ring.push(g); break }
@@ -2749,6 +2877,7 @@ async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () =
     }
   }
   dbg('  wheat farm: ' + ring.length + ' bank cell(s) by the water at ' + w.x + ',' + w.z)
+  const plantedCells = [] // EXACT crop-cell coords, persisted so tend reads the real cells
   for (let cell of ring.slice(0, 12)) {
     if (isStopped() || seedCount() < 1) break
     try {
@@ -2767,57 +2896,115 @@ async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () =
       await bot.equip((bot.inventory ? bot.inventory.items() : []).find(i => /_hoe$/.test(i.name)), 'hand')
       await bot.activateBlock(cell) // till to farmland
       await new Promise(r => setTimeout(r, 150))
+      // BLOCK-READ the till: only proceed if the cell is REALLY farmland now (no faith).
       const tilled = bot.blockAt(cell.position)
-      if (!tilled || tilled.name !== 'farmland') continue
+      if (!tilled || !farm.farmlandReady(tilled.name)) { dbg('  wheat farm: till did not take at ' + cell.position.toString() + ' (got ' + ((tilled && tilled.name) || '?') + ')'); continue }
       const seeds = (bot.inventory ? bot.inventory.items() : []).find(i => i.name === 'wheat_seeds')
       if (!seeds) break
       await bot.equip(seeds, 'hand')
-      await bot.placeBlock(tilled, new Vec3(0, 1, 0)) // plant
-      planted++
-      await boneMealBlock(bot, cell.position.offset(0, 1, 0), 2)
+      const cropPos = cell.position.offset(0, 1, 0)
+      try { await bot.placeBlock(tilled, new Vec3(0, 1, 0)) } catch (e) { dbg('  wheat farm: seed place threw (' + e.message + ')') }
+      await new Promise(r => setTimeout(r, 200))
+      // BLOCK-READ the plant: the OLD bug counted placeBlock() calls, so a silently-failed or
+      // instantly-flooded seed still logged "PLANTED" and persisted a phantom farm with 0 wheat
+      // (live: 2.5h of `harvested 0`). Only a VERIFIED `wheat` block counts + gets persisted.
+      const crop = bot.blockAt(cropPos)
+      if (crop && crop.name === 'wheat') {
+        planted++
+        plantedCells.push({ x: cropPos.x, y: cropPos.y, z: cropPos.z })
+        await boneMealBlock(bot, cropPos, 2)
+      } else dbg('  wheat farm: seed did NOT take at ' + cropPos.x + ',' + cropPos.y + ',' + cropPos.z + ' (got ' + ((crop && crop.name) || '?') + ') - not counting it')
     } catch (e) { dbg('  wheat farm: cell failed (' + e.message + ')') }
   }
   if (planted) {
-    m.wheatFarm = { x: w.x, y: w.y, z: w.z, at: Date.now() }
+    // Persist the EXACT crop cells (block-verified above) alongside the water anchor, so
+    // tendWheatFarm reads THESE cells (harvest/replant) instead of blind-scanning for wheat.
+    m.wheatFarm = { x: w.x, y: w.y, z: w.z, cells: plantedCells, at: Date.now() }
     saveWorldMem()
-    dbg('  wheat farm: ' + planted + ' cells planted at the water near ' + w.x + ',' + w.z)
+    dbg('  wheat farm: ' + planted + ' cell(s) VERIFIED planted (wheat present) at the water near ' + w.x + ',' + w.z)
     say(`wheat farm planted (${planted} cells) - bread incoming`)
-  } else dbg('  wheat farm: could not plant any cell')
+  } else dbg('  wheat farm: could not plant any cell (none verified as wheat)')
   return planted > 0
 }
 
-// Visit the farm: harvest ripe wheat (age 7), replant, bone-meal what's still growing,
-// and craft bread (3 wheat each) when the harvest allows. Called when hungry + huntless.
+// (Re)establish ONE crop cell: till the farmland if needed, then plant a seed - VERIFIED by
+// a world re-read (returns true only if a `wheat` block actually stands after). This is the
+// self-heal primitive tend uses to re-plant cells a creeper/trample/failed-plant emptied.
+// `cropPos` = the crop cell (one above the farmland). Needs a seed; tills only if a hoe is on
+// hand and the base is real dirt/grass (never water/air/stone).
+async function replantCropCell (bot, cropPos, { isStopped = () => false } = {}) {
+  const seeds = (bot.inventory ? bot.inventory.items() : []).find(i => i.name === 'wheat_seeds')
+  if (!seeds) return false
+  const basePos = cropPos.offset(0, -1, 0)
+  let base = bot.blockAt(basePos)
+  if (!base) return false
+  if (bot.entity.position.distanceTo(cropPos) > 4) { try { await gotoWithTimeout(bot, new goals.GoalNear(cropPos.x, cropPos.y, cropPos.z, 2), 10000) } catch {} }
+  // clear anything sitting IN the crop cell (loose veg) so the seed has room
+  const occ = bot.blockAt(cropPos)
+  if (occ && !AIRISH(occ.name) && REPLACEABLE.test(occ.name)) { try { await bot.dig(occ) } catch {} }
+  if (!farm.farmlandReady(base.name)) {
+    if (!farm.tillableBank(base.name)) { dbg('  wheat replant: base at ' + basePos.toString() + ' is ' + base.name + ' - cannot till here'); return false }
+    const hoe = (bot.inventory ? bot.inventory.items() : []).find(i => /_hoe$/.test(i.name))
+    if (!hoe) { dbg('  wheat replant: cell needs tilling but no hoe on hand'); return false }
+    try { await bot.equip(hoe, 'hand'); await bot.activateBlock(base); await new Promise(r => setTimeout(r, 150)) } catch { return false }
+    base = bot.blockAt(basePos)
+    if (!base || !farm.farmlandReady(base.name)) return false
+  }
+  try { await bot.equip(seeds, 'hand'); await bot.placeBlock(base, new Vec3(0, 1, 0)) } catch (e) { dbg('  wheat replant: seed place failed (' + e.message + ')') }
+  await new Promise(r => setTimeout(r, 150))
+  const crop = bot.blockAt(cropPos)
+  return !!(crop && crop.name === 'wheat')
+}
+
+// Visit the farm: harvest ripe wheat (age 7), replant harvested cells, RE-PLANT any cell the
+// world says is empty/destroyed (creeper/trample/failed plant), bone-meal what's still growing,
+// and craft bread (3 wheat each). Called when hungry + huntless AND proactively by the food
+// supply pass. GROUNDED: reads the EXACT persisted crop cells and block-reads each - the old
+// blind `findBlocks(wheat)` scan returned nothing when planting had faith-failed, so tend
+// logged `harvested 0` forever. Robust to partial destruction: re-plants missing cells.
 async function tendWheatFarm (bot, { isStopped = () => false, say = () => {} } = {}) {
   const m = loadWorldMem()
   if (!m.wheatFarm) return false
   const mcData = require('minecraft-data')(bot.version)
   const wheatId = mcData.blocksByName.wheat.id
   await walkStaged(bot, m.wheatFarm.x, m.wheatFarm.z, { isStopped, range: 6, timeoutMs: 120000 })
-  const crops = (bot.findBlocks({ matching: wheatId, maxDistance: 16, count: 24 }) || [])
-  let harvested = 0
-  for (const p of crops) {
+  // AUTHORITATIVE cell list: the exact crop cells persisted at plant time (block-verified).
+  // Fall back to a live scan only for a legacy farm saved before cells were persisted, and
+  // ALWAYS also fold in any wheat visible nearby (a growing cell not in the list).
+  let cells = (m.wheatFarm.cells || []).map(c => new Vec3(c.x, c.y, c.z))
+  const seen = new Set(cells.map(c => c.x + ',' + c.y + ',' + c.z))
+  for (const p of (bot.findBlocks({ matching: wheatId, maxDistance: 16, count: 24 }) || [])) {
+    const k = p.x + ',' + p.y + ',' + p.z
+    if (!seen.has(k)) { seen.add(k); cells.push(new Vec3(p.x, p.y, p.z)) }
+  }
+  let harvested = 0; let replanted = 0
+  for (const p of cells) {
     if (isStopped()) break
     const b = bot.blockAt(p)
-    if (!b) continue
-    const age = b.getProperties ? b.getProperties().age : null
-    if (age >= 7) {
-      try {
-        if (bot.entity.position.distanceTo(p) > 4) await gotoWithTimeout(bot, new goals.GoalNear(p.x, p.y, p.z, 2), 10000)
-        await bot.dig(b); harvested++
-        await collectDrops(bot, 4)
-        const farmland = bot.blockAt(p.offset(0, -1, 0))
-        const seeds = (bot.inventory ? bot.inventory.items() : []).find(i => i.name === 'wheat_seeds')
-        if (farmland && farmland.name === 'farmland' && seeds) { await bot.equip(seeds, 'hand'); await bot.placeBlock(farmland, new Vec3(0, 1, 0)).catch(() => {}) }
-      } catch (e) { dbg('  wheat harvest failed (' + e.message + ')') }
-    } else if (age != null) {
-      await boneMealBlock(bot, p, 2)
-    }
+    const state = farm.cropCellState(b && b.name)
+    if (state === 'wheat') {
+      const age = b.getProperties ? b.getProperties().age : null
+      if (farm.matureForHarvest(age)) {
+        try {
+          if (bot.entity.position.distanceTo(p) > 4) await gotoWithTimeout(bot, new goals.GoalNear(p.x, p.y, p.z, 2), 10000)
+          await bot.dig(b); harvested++
+          await collectDrops(bot, 4)
+          if (await replantCropCell(bot, p, { isStopped })) replanted++ // reseed the cell we just cleared
+        } catch (e) { dbg('  wheat harvest failed (' + e.message + ')') }
+      } else if (age != null) {
+        await boneMealBlock(bot, p, 2) // still growing - speed it up if bones allow
+      }
+    } else if (state === 'gone') {
+      // SELF-HEAL: creeper/trample/failed plant left this cell empty - re-establish it so the
+      // farm converges back to full instead of decaying to zero (ensureWheatFarm won't re-run
+      // once a farm is registered, so tend is the ONLY repair path).
+      if (await replantCropCell(bot, p, { isStopped })) replanted++
+    } // 'flooded'/'blocked': leave it - not fixable from here
   }
   const wheatN = countItem(bot, 'wheat')
   if (wheatN >= 3) { try { const made = await runCraft(bot, 'bread', Math.floor(wheatN / 3), true, { isStopped }); say('baked ' + made + ' bread - crisis over'); dbg('  baked ' + made + ' bread') } catch (e) { dbg('  bread craft failed (' + e.message + ')') } }
-  dbg('  wheat farm tended: harvested ' + harvested + ', wheat=' + countItem(bot, 'wheat') + ', bread=' + countItem(bot, 'bread'))
-  return harvested > 0 || countItem(bot, 'bread') > 0
+  dbg('  wheat farm tended: harvested ' + harvested + ', replanted ' + replanted + ', wheat=' + countItem(bot, 'wheat') + ', bread=' + countItem(bot, 'bread'))
+  return harvested > 0 || replanted > 0 || countItem(bot, 'bread') > 0
 }
 
 // ---- FISHING: the food of last resort that works ANYWHERE with water (the guardian
@@ -5361,4 +5548,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, setSpawnSuspect, isSpawnSuspect, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, setBuildZone, setDebugSink }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, setSpawnSuspect, isSpawnSuspect, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, setBuildZone, setDebugSink }
