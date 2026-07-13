@@ -15,6 +15,8 @@ const { Vec3 } = require('vec3')
 const navigate = require('./navigate.js') // unified navigation (it lazy-requires us back for climb/pillar/water-hop)
 const scaffold = require('./scaffold.js') // scaffold manager: temp-block registry, filler policy, teardown
 const hutModel = require('./hut-model.js') // self-structure model: schema-correct wall/door/floor/interior/furniture classification
+const mining = require('./mining.js') // pure mining strategy: depth model, descent-safety, branch-mine geometry
+const shelterSite = require('./shelter.js') // pure shelter-siting: "can a safe pit be dug here" + nearest diggable dry cell
 // Visible, UNTHROTTLED build tracing to stdout (the say() progress goes through a 40s
 // throttle that hides failures). Enable with BUILD_DEBUG=1 to see every plan/task/smelt step.
 let dbgSink = null // injected by index.js: debug lines persist to logs/bot-events.log
@@ -1025,6 +1027,281 @@ async function mineTunnel (bot, itemName, maxLen, dirIdx, opts = {}) {
   return countItem(bot, itemName) - before
 }
 
+// ---- ORGANIZED BRANCH MINE (mining-strategy-design.md) ---------------------------------
+// Place a torch on the floor beneath us if we carry one - lights the mine so mobs don't
+// spawn in the fresh tunnels (a lightly-armored bot dies to a dark-cave ambush). Best-effort.
+async function placeTorch (bot) {
+  const torch = (bot.inventory ? bot.inventory.items() : []).find(i => i.name === 'torch')
+  if (!torch) return false
+  const feet = bot.entity.position.floored()
+  // place on the floor of an ADJACENT open cell (not under our own feet - we occupy that):
+  // stand-in-tunnel, torch on the ground beside us. Best-effort across the 4 neighbours.
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    const side = feet.offset(dx, 0, dz)
+    const cell = bot.blockAt(side); const floor = bot.blockAt(side.offset(0, -1, 0))
+    if (cell && AIRISH(cell.name) && floor && floor.boundingBox === 'block' && !/lava|water/.test(floor.name)) {
+      try { await bot.equip(torch, 'hand'); await bot.placeBlock(floor, new Vec3(0, 1, 0)); return true } catch { /* try next side */ }
+    }
+  }
+  return false
+}
+
+// Make a few torches so the mine can be lit: coal/charcoal (1) + stick (1) -> 4 torches, no
+// table needed. Best-effort - the bot picks up coal as bycatch while tunnelling, and carries
+// sticks from tool-crafting; if it has neither it just mines darker (the efba7bd reflex is
+// the backstop). Never throws.
+async function ensureTorches (bot, want = 8) {
+  try {
+    if (countItem(bot, 'torch') >= want) return
+    const mcData = require('minecraft-data')(bot.version)
+    const torch = mcData.itemsByName.torch
+    if (!torch) return
+    for (let i = 0; i < 4 && countItem(bot, 'torch') < want; i++) {
+      const recipe = (bot.recipesFor(torch.id, null, 1, null) || [])[0] // inventory 2x2 crafting - no table
+      if (!recipe) break
+      try { await bot.craft(recipe, 1, null); await new Promise(r => setTimeout(r, 150)) } catch { break }
+    }
+    if (countItem(bot, 'torch') > 0) dbg('  mine: have ' + countItem(bot, 'torch') + ' torches to light the tunnels')
+  } catch { /* best-effort */ }
+}
+
+// ---- SELF-SUFFICIENT tooling at depth -------------------------------------------------
+// Pickaxes in the pack (stone-or-better - the tier that actually drops iron/stone), with
+// their remaining uses. A deep mine wears these out; if none has uses left the bot can't
+// mine and (before this) got dragged to a surface table -> stranded on cave terrain (live).
+function miningPicks (bot) {
+  return (bot.inventory ? bot.inventory.items() : [])
+    .filter(i => /(stone|iron|diamond|netherite)_pickaxe$/.test(i.name))
+    .map(i => ({ item: i, usesLeft: mining.pickUsesLeft(i.name, i.durabilityUsed || 0) }))
+}
+function bestPick (bot) { let b = null; for (const p of miningPicks(bot)) if (p.usesLeft > 0 && (!b || p.usesLeft > b.usesLeft)) b = p; return b }
+function workingPickCount (bot) { return miningPicks(bot).filter(p => p.usesLeft > 0).length }
+function workingMiningPick (bot) { return !!bestPick(bot) }
+function carriedPickUsesLeft (bot) { return miningPicks(bot).reduce((s, p) => s + p.usesLeft, 0) }
+
+// Craft ONE of `itemName` from carried ingredients at `tableBlock` (or the 2x2 grid when
+// null). Best-effort, never throws. Returns whether one was made.
+async function craftOneFromInv (bot, itemName, tableBlock = null) {
+  const mcData = require('minecraft-data')(bot.version)
+  const it = mcData.itemsByName[itemName]; if (!it) return false
+  const rec = (bot.recipesFor(it.id, null, 1, tableBlock) || [])[0]
+  if (!rec) return false
+  const before = countItem(bot, itemName)
+  try { await bot.craft(rec, 1, tableBlock || undefined); await new Promise(r => setTimeout(r, 150)) } catch { return false }
+  return countItem(bot, itemName) > before
+}
+
+// Craft a stone pickaxe RIGHT HERE (surface OR depth) - LOCAL only, never walking to a
+// remembered surface table (that walk is the stranding). Mines a little cobble with the
+// still-working pick if short (why we re-tool BEFORE the pick breaks), tops up sticks from
+// carried planks, places a carried/crafted table beside us, and crafts. Returns success.
+async function craftStonePickHere (bot, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const mcData = require('minecraft-data')(bot.version)
+  // 1) cobble: 3 per pick. Mine surrounding natural stone with the (still-working) pick.
+  if (countItem(bot, 'cobblestone') < 3 && workingMiningPick(bot)) {
+    try { await grabNearbyOre(bot, /^(stone|cobblestone|deepslate|cobbled_deepslate|granite|diorite|andesite|tuff)$/, 4, 4, { isStopped }) } catch {}
+  }
+  if (countItem(bot, 'cobblestone') < 3) { dbg('  reTool: not enough cobble to craft a pick (have ' + countItem(bot, 'cobblestone') + ')'); return false }
+  // 2) sticks: 2 per pick. Cannot be mined - make from carried planks, else fail honestly.
+  if (countItem(bot, 'stick') < 2) { await craftOneFromInv(bot, 'stick'); if (countItem(bot, 'stick') < 2) { dbg('  reTool: no sticks and no planks to make them - cannot re-tool here'); return false } }
+  // 3) a table WITHIN REACH: reuse one placed nearby, else place a carried one, else craft
+  //    one from carried planks. NEVER goto a far/remembered table (the stranding walk).
+  let tb = bot.findBlock({ matching: mcData.blocksByName.crafting_table.id, maxDistance: 4 })
+  if (!tb) {
+    if (countItem(bot, 'crafting_table') < 1) { if (!await craftOneFromInv(bot, 'crafting_table')) { dbg('  reTool: no crafting table and no planks to make one'); return false } }
+    let pos = null
+    try { pos = await placeFromInventory(bot, 'crafting_table') } catch {}
+    tb = pos ? bot.blockAt(pos) : bot.findBlock({ matching: mcData.blocksByName.crafting_table.id, maxDistance: 4 })
+  }
+  if (!tb) { dbg('  reTool: could not place a table at depth'); return false }
+  // 4) craft the pick at the local table
+  const ok = await craftOneFromInv(bot, 'stone_pickaxe', tb)
+  if (ok) dbg('  reTool: crafted a fresh stone pickaxe at depth (y=' + Math.floor(bot.entity.position.y) + ')')
+  return ok && workingMiningPick(bot)
+}
+
+// UP-FRONT mining kit (surface, before the descent): carry enough pick durability for the
+// excursion + a table + sticks so a break at depth is re-tooled IN PLACE, never a surface
+// round-trip. Best-effort with carried materials (the bot already made its first stone pick,
+// so it has cobble/planks/sticks around); depth re-tool + honest bail cover any shortfall.
+async function ensureMiningKit (bot, depth, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  // a table to carry for depth re-tool
+  if (countItem(bot, 'crafting_table') < 1) await craftOneFromInv(bot, 'crafting_table')
+  // sticks buffer (can't be mined at depth): craft a handful from carried planks
+  const wantSticks = parseInt(process.env.MINE_KIT_STICKS || '8', 10)
+  for (let i = 0; i < 4 && countItem(bot, 'stick') < wantSticks && !isStopped(); i++) { if (!await craftOneFromInv(bot, 'stick')) break }
+  // spare stone picks sized to the expected dig (bounded so we don't over-grind cobble)
+  const estBlocks = mining.estExcursionBlocks(depth, { branches: parseInt(process.env.MINE_KIT_BRANCHES || '6', 10), branchLen: parseInt(process.env.MINE_BRANCH_LEN || '12', 10), spacing: parseInt(process.env.MINE_SPACING || '3', 10) })
+  const maxPicks = parseInt(process.env.MINE_MAX_PICKS || '4', 10)
+  const toCraft = Math.min(maxPicks, mining.picksToCraft(carriedPickUsesLeft(bot), estBlocks))
+  for (let i = 0; i < toCraft && !isStopped(); i++) { if (!await craftStonePickHere(bot, { isStopped })) break }
+  dbg('  ensureMiningKit: stone_picks=' + countItem(bot, 'stone_pickaxe') + ' pickUsesLeft=' + carriedPickUsesLeft(bot) + ' table=' + countItem(bot, 'crafting_table') + ' sticks=' + countItem(bot, 'stick') + ' (est ' + estBlocks + ' blocks, wanted ' + toCraft + ' spares)')
+}
+
+// Dig a single WALKABLE staircase DOWN to targetY (one entrance, back-out-able - the fix
+// for N scattered vertical shafts). Each step clears the forward feet+head cells and the
+// forward-down tread, then walks onto it. SAFETY: never step onto lava/water/void - probe
+// the landing's floor first (mining.descentSafety). Returns { reached, reason, blocked }
+// where `blocked` (lava/water/void) tells branchMine to relocate the entrance.
+async function digStaircaseDown (bot, targetY, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const dirIdx = ((opts.dirIdx || 0) % 4 + 4) % 4
+  const [ddx, ddz] = mining.DIRS[dirIdx]
+  const dir = new Vec3(ddx, 0, ddz)
+  let steps = 0
+  while (Math.floor(bot.entity.position.y) > targetY && !isStopped() && steps < 96) {
+    if (mineDanger(bot)) return { reached: false, reason: 'hostile/hp during descent', blocked: null }
+    const feet = bot.entity.position.floored()
+    const ahead = feet.plus(dir)            // forward at feet level
+    const aheadUp = ahead.offset(0, 1, 0)   // forward head clearance
+    const step = ahead.offset(0, -1, 0)     // the tread we descend onto
+    const stepFloor = step.offset(0, -1, 0) // what our feet will stand on after stepping
+    const stepFloor2 = step.offset(0, -2, 0)
+    const fb = bot.blockAt(stepFloor); const fb2 = bot.blockAt(stepFloor2)
+    const safety = mining.descentSafety(fb && fb.name, fb2 && fb2.name)
+    if (safety !== 'ok') { dbg('  staircase: ' + safety + ' under the next tread at ' + step.toString() + ' - stopping this shaft'); return { reached: false, reason: safety + ' below', blocked: safety } }
+    // don't break INTO an open cavern (dark mob ambush) - if the tread cell and its head are
+    // already open air with more air beyond, hand back to relocate rather than crack it open.
+    const dig = async (p) => {
+      const b = bot.blockAt(p)
+      if (!b || AIRISH(b.name)) return true
+      if (/lava|water/.test(b.name)) return false
+      if (!canBreakNaturally(b)) return false
+      const tool = toolForBlock(bot, b.name)
+      if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
+      if (bot.canDigBlock && !bot.canDigBlock(b)) return false
+      try { await bot.dig(b) } catch { return false }
+      return true
+    }
+    if (!(await dig(aheadUp)) || !(await dig(ahead)) || !(await dig(step))) { return { reached: false, reason: 'blocked face', blocked: 'void' } }
+    await collectDrops(bot, 2)
+    try { await gotoWithTimeout(bot, new goals.GoalBlock(step.x, step.y, step.z), 6000) } catch { return { reached: false, reason: 'could not step down', blocked: null } }
+    steps++
+    // opportunistic: light the descent every few steps
+    if (steps % 4 === 0) await placeTorch(bot).catch(() => {})
+  }
+  return { reached: Math.floor(bot.entity.position.y) <= targetY + 1, reason: 'at level', blocked: null }
+}
+
+// ONE organized branch mine for a DEEP ore (iron/gold/copper/...). Descends a single
+// staircase to the iron band (~y16, mining.targetMineY) - relocating the entrance on
+// water/lava/void instead of stalling - then drives a central corridor with perpendicular
+// branches (classic 2-3-spaced branch mine: far more ore per hole than the old scattered
+// shafts), torch-lit, with ore-in-the-walls bycatch. Danger (mob closes / hp crashes) ->
+// climb out and bail to the deployed survival reflexes. Bounded by count + a wall-clock
+// deadline + a branch cap. Returns { gathered, reason }.
+async function branchMine (bot, item, count, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const say = opts.say || (() => {})
+  const start = countItem(bot, item)
+  const got = () => countItem(bot, item) - start
+  const surfaceY = opts.surfaceY != null ? opts.surfaceY : Math.floor(bot.entity.position.y)
+  const targetY = mining.targetMineY(surfaceY, {
+    targetY: parseInt(process.env.IRON_TARGET_Y || '16', 10),
+    hardFloor: parseInt(process.env.MINE_HARD_FLOOR || '5', 10)
+  })
+  const deadline = Date.now() + (opts.deadlineMs || 300000)
+  const oreRe = new RegExp(String(item).replace(/^raw_/, '') + '_ore$')
+  // Any depth at/below this is a WORTHWHILE iron level - branch-mine there rather than
+  // burning relocations chasing the ideal targetY through cave-riddled terrain (env-tunable).
+  const minIronY = parseInt(process.env.MIN_IRON_Y || '40', 10)
+  const goodEnough = () => mining.worthMiningHere(bot.entity.position.y, { minIronY })
+  const pickLow = parseInt(process.env.MINE_PICK_LOW || '20', 10)
+  dbg('  branchMine: item=' + item + ' need=' + count + ' surfaceY=' + surfaceY + ' targetY=' + targetY + ' minIronY=' + minIronY)
+
+  // SELF-SUFFICIENT TOOLING: keep a working pickaxe at depth. Re-tool BEFORE the held pick
+  // breaks (while it can still mine the cobble a new pick needs) and only when no spare
+  // exists. Returns whether we still have a working pick after the attempt. Never walks to a
+  // surface table (that round-trip is the stranding bug). Called each junction + after descent.
+  const keepPickReady = async () => {
+    const bp = bestPick(bot)
+    const spares = workingPickCount(bot) - (bp ? 1 : 0)
+    if (mining.needReTool(bp ? bp.usesLeft : 0, spares, { low: pickLow })) {
+      dbg('  branchMine: pick low (' + (bp ? bp.usesLeft : 0) + ' uses, ' + spares + ' spare) - re-tooling AT DEPTH, not climbing out')
+      if (opts.say && !bp) say('pick\'s worn out - making a fresh one down here')
+      await craftStonePickHere(bot, { isStopped })
+    }
+    return workingMiningPick(bot)
+  }
+
+  // 1) DESCEND ONCE, sited off the hut apron so the camp doesn't get riddled with holes.
+  if (Math.floor(bot.entity.position.y) > targetY + 1) {
+    // provision picks + a table + sticks up front so a break at depth is fixed in place
+    try { await ensureMiningKit(bot, Math.max(0, Math.floor(surfaceY) - targetY), { isStopped }) } catch (e) { dbg('  ensureMiningKit failed (' + e.message + ') - relying on depth re-tool') }
+    if (onHutApron(bot)) {
+      const h = onHutApron(bot)
+      const away = new Vec3(h.x + 12, bot.entity.position.y, h.z + 12)
+      dbg('  branchMine: stepping off the hut apron before sinking the entrance')
+      try { await gotoWithTimeout(bot, new goals.GoalNearXZ(away.x, away.z, 3), 20000) } catch {}
+      if (onHutApron(bot)) { dbg('  branchMine: still on apron - not mining the doorstep'); return { gathered: 0, reason: 'too close to home to dig here' } }
+    }
+    if (opts.say) say('digging down to the iron level (~y' + targetY + ')')
+    let reached = false
+    for (let reloc = 0; reloc < 4 && !reached && !isStopped() && Date.now() < deadline; reloc++) {
+      const r = await digStaircaseDown(bot, targetY, { isStopped, dirIdx: reloc })
+      if (r.reached) { reached = true; break }
+      if (mineDanger(bot)) break
+      // pick wore out on the way down -> re-tool HERE and keep descending (don't relocate/bail)
+      if (!workingMiningPick(bot)) { if (await keepPickReady()) { reloc--; continue } else { dbg('  branchMine: pick broke mid-descent and cannot re-tool - stopping the descent'); break } }
+      // GOOD-ENOUGH DEPTH (the live gap): a cave/void/water blocked the last stretch, but we're
+      // already at a worthwhile iron depth (e.g. y28) - STOP relocating and MINE HERE instead
+      // of chasing y16 through cave-riddled ground and returning empty. The hit cave is an
+      // opportunity: it exposes ore and the branch loop's wall-bycatch works it.
+      if (goodEnough()) { dbg('  branchMine: descent stopped at y=' + Math.floor(bot.entity.position.y) + ' (' + r.reason + ') - a workable iron depth, mining HERE not chasing y' + targetY); break }
+      // still too shallow: relocate the entrance (sidestep) and retry a fresh staircase.
+      dbg('  branchMine: descent blocked (' + r.reason + ') and still shallow (y=' + Math.floor(bot.entity.position.y) + ') - relocating the entrance')
+      const p = bot.entity.position; const [sx, sz] = mining.DIRS[(reloc + 1) % 4]
+      try { await gotoWithTimeout(bot, new goals.GoalNearXZ(Math.round(p.x + sx * 4), Math.round(p.z + sz * 4), 2), 12000) } catch {}
+    }
+    // Only bail if we NEVER got to a workable depth (still up near the surface); otherwise
+    // fall through and branch-mine at whatever good-enough depth we reached.
+    if (!reached && !goodEnough()) {
+      return { gathered: got(), reason: 'could not get to a workable iron depth (water/lava/blocked descent, stuck at y' + Math.floor(bot.entity.position.y) + ')' }
+    }
+  }
+
+  // 2) BRANCH MINE at level: corridor + perpendicular branches, torch-lit.
+  await ensureTorches(bot, 12)
+  const L = mining.branchLayout(opts.dirIdx || 0, {
+    branchLen: parseInt(process.env.MINE_BRANCH_LEN || '12', 10),
+    spacing: parseInt(process.env.MINE_SPACING || '3', 10)
+  })
+  let branches = 0
+  const maxBranches = opts.maxBranches || 30
+  while (got() < count && Date.now() < deadline && !isStopped() && branches < maxBranches) {
+    if (mineDanger(bot)) {
+      dbg('  branchMine: threat/hp down here - climbing out and handing off to the survival reflex')
+      if (opts.say && branches < 2) say('mob down here - breaking off the mine to get clear')
+      try { await climbToSurface(bot, Math.floor(surfaceY), { isStopped }) } catch {}
+      return { gathered: got(), reason: 'broke off to survive a mob / low hp underground' }
+    }
+    // KEEP A WORKING PICK: re-tool at depth before the pick breaks. If it's gone AND we can't
+    // make one down here (no cobble/sticks/planks/table), climb out CLEANLY and bail honestly -
+    // never wedge deep with a dead pick waiting on a surface craft-regroup (the stranding bug).
+    if (!await keepPickReady()) {
+      dbg('  branchMine: no working pickaxe and cannot re-tool at depth - climbing out cleanly (not stranded)')
+      if (opts.say) say('out of picks down here and can\'t make one - heading back up')
+      try { await climbToSurface(bot, Math.floor(surfaceY), { isStopped }) } catch {}
+      return { gathered: got(), reason: 'pickaxe gone and could not re-tool at depth - climbed out' }
+    }
+    // advance the main corridor `spacing`, then a junction: torch + left branch + right branch
+    await mineTunnel(bot, item, L.spacing, L.corridorIdx, { isStopped })
+    const junc = bot.entity.position.floored()
+    if (branches % L.torchEvery === 0) await placeTorch(bot).catch(() => {})
+    await mineTunnel(bot, item, L.branchLen, L.leftIdx, { isStopped })
+    try { await gotoWithTimeout(bot, new goals.GoalBlock(junc.x, junc.y, junc.z), 15000) } catch {}
+    if (got() >= count || isStopped()) break
+    await mineTunnel(bot, item, L.branchLen, L.rightIdx, { isStopped })
+    try { await gotoWithTimeout(bot, new goals.GoalBlock(junc.x, junc.y, junc.z), 15000) } catch {}
+    try { await grabNearbyOre(bot, oreRe, 4, 6, { isStopped }) } catch {} // ore exposed in the junction walls
+    branches++
+    dbg('  branchMine: junction ' + branches + '/' + maxBranches + ' got=' + got() + '/' + count + ' y=' + Math.floor(bot.entity.position.y))
+  }
+  return { gathered: got(), reason: got() >= count ? 'done' : (Date.now() >= deadline ? 'out of time' : 'worked the branches') }
+}
+
 // Mine up to `max` blocks matching `oreRe` within `r` of the bot - opportunistic bycatch
 // while tunnelling (coal for the furnace, etc.). Only natural blocks; best-effort.
 async function grabNearbyOre (bot, oreRe, r, max, { isStopped = () => false } = {}) {
@@ -1219,6 +1496,39 @@ async function ensureAshore (bot, isStopped = () => false) {
   try { if (await navigate.swimToShore(bot, isStopped)) return true } catch {}
   try { await manualHopFromWater(bot) } catch {}
   return !inWaterNow(bot)
+}
+
+// Find the nearest DIGGABLE DRY cell to shelter at - a standable surface cell whose column a
+// safe night-pit can actually be dug into (solid ground, no lava/water below OR beside the
+// shaft, and dry to stand on). ensureAshore gets us out of the water but often leaves us
+// water-adjacent on every side, so every in-place pit hits the flooding guard and the shelter
+// loops forever (live). This gives the flow somewhere to RELOCATE to. Returns a feet-cell
+// Vec3 to walk to, or null when there's no diggable dry ground within `radius`.
+async function findDiggableDryCell (bot, opts = {}) {
+  const radius = opts.radius || 24
+  if (!bot.entity) return null
+  const mcData = require('minecraft-data')(bot.version)
+  const GROUND_RE = /^(grass_block|dirt|coarse_dirt|rooted_dirt|podzol|mud|sand|red_sand|gravel|stone|deepslate|granite|diorite|andesite|tuff|clay|terracotta|netherrack|moss_block|snow_block|calcite)$/
+  const ids = Object.values(mcData.blocksByName).filter(b => GROUND_RE.test(b.name)).map(b => b.id)
+  const found = bot.findBlocks({ matching: ids, maxDistance: radius, count: 96 }) || []
+  const nameAt = p => { const b = bot.blockAt(p); return b ? b.name : null }
+  const SIDES = [[1, 0], [-1, 0], [0, 1], [0, -1]]
+  const cand = []
+  for (const gp of found) {
+    const feet = gp.offset(0, 1, 0); const head = gp.offset(0, 2, 0)
+    // standable + dry to STAND on (no water in the feet/head cell or its horizontal neighbours)
+    if (!shelterSite.feetCellDry(nameAt(feet), nameAt(head), SIDES.map(([dx, dz]) => nameAt(feet.offset(dx, 0, dz))))) continue
+    // a safe pit can be dug straight down from here (solid, no fluid below/beside the shaft)
+    const below = nameAt(gp); const below2 = nameAt(gp.offset(0, -1, 0))
+    if (!shelterSite.shelterDiggable(below, below2, SIDES.map(([dx, dz]) => nameAt(gp.offset(dx, 0, dz))))) continue
+    // must be real natural ground the anti-grief dig will actually break (not a player block)
+    const gb = bot.blockAt(gp); if (gb && !canBreakNaturally(gb)) continue
+    // never relocate the pit onto our own hut apron (defaces the doorstep)
+    if (onHutApron(bot, feet)) continue
+    cand.push({ x: feet.x, y: feet.y, z: feet.z })
+  }
+  const ranked = shelterSite.rankByDistance(cand, bot.entity.position)
+  return ranked.length ? new Vec3(ranked[0].x, ranked[0].y, ranked[0].z) : null
 }
 // Where a shelter pit last FLOODED - do not dig another hole next to the same aquifer
 // for a while (the re-dig loop beside water is the entombment/drowning mechanism).
@@ -1456,40 +1766,64 @@ async function digInForNight (bot, opts = {}) {
     // the bot opens a perfect pit and stands beside it all night with the "cap" aimed at
     // thin air (root cause of every 'ducked into a hole' night death; reproduced on the
     // test server at x=-330.5: "cap failed - no solid neighbour to place against").
-    try { const f0 = bot.entity.position.floored(); await gotoWithTimeout(bot, new goals.GoalBlock(f0.x, f0.y, f0.z), 4000) } catch {}
-    const surfaceY = Math.floor(bot.entity.position.y)
-    const shaft = bot.entity.position.floored() // the column we dig - we must END UP inside it
-    // 1) dig straight down 2, keeping the blocks (need one to cap with). NEVER dig into a
-    //    void/lava/water below, and ONLY natural terrain (never a player build block) - so
-    //    sheltering can't punch through someone's floor.
+    // Dig the pit HERE; if the flooding/obstruction guard blocks it, RELOCATE to the nearest
+    // diggable DRY cell and retry (bounded). ensureAshore only gets us OUT of the water - on a
+    // river bank the bot can be ashore yet water-adjacent on every side, so an in-place-only
+    // pit hits the side-liquid guard forever ("water beside the next cell" -> "NO-OP" every
+    // ~4s, bricked the bot, live). Relocating to genuinely diggable dry ground is the fix.
     let dug = 0
-    for (let i = 0; i < 2 && !isStopped(); i++) {
-      const feet = bot.entity.position.floored()
-      const below = bot.blockAt(feet.offset(0, -1, 0))
-      const below2 = bot.blockAt(feet.offset(0, -2, 0))
-      if (!below || AIRISH(below.name) || /lava|water/.test(below.name) || !canBreakNaturally(below)) { dbg('shelter: dig blocked at ' + i + ' (' + (below ? below.name : 'unloaded') + ')'); break }
-      if (below2 && /lava|water/.test(below2.name)) { dbg('shelter: liquid 2 below - not digging'); break }
-      // NEVER open a cell whose SIDE touches liquid - an aquifer beside the shaft floods
-      // the pit the instant the wall drops (drowned at 4hp in its own sealed pit, live).
-      let sideLiquid = null
-      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-        const s = bot.blockAt(below.position.offset(dx, 0, dz))
-        if (s && /lava|water/.test(s.name)) { sideLiquid = s.name; break }
+    let surfaceY = Math.floor(bot.entity.position.y)
+    let shaft = bot.entity.position.floored()
+    const RELOCATE_TRIES = 3
+    for (let attempt = 0; attempt <= RELOCATE_TRIES && dug < 1 && !isStopped(); attempt++) {
+      // CENTER on the feet cell. Digging from a cell edge (x.5/z.5) digs the column under
+      // floored(feet) while the body stays supported by the NEIGHBOUR block - the bot opens a
+      // perfect pit and stands beside it with the "cap" aimed at thin air (every 'ducked into
+      // a hole' night death; reproduced at x=-330.5: "no solid neighbour to place against").
+      try { const f0 = bot.entity.position.floored(); await gotoWithTimeout(bot, new goals.GoalBlock(f0.x, f0.y, f0.z), 4000) } catch {}
+      surfaceY = Math.floor(bot.entity.position.y)
+      shaft = bot.entity.position.floored() // the column we dig - we must END UP inside it
+      // 1) dig straight down 2, keeping the blocks (need one to cap with). NEVER dig into a
+      //    void/lava/water below, and ONLY natural terrain (never a player build block).
+      for (let i = 0; i < 2 && !isStopped(); i++) {
+        const feet = bot.entity.position.floored()
+        const below = bot.blockAt(feet.offset(0, -1, 0))
+        const below2 = bot.blockAt(feet.offset(0, -2, 0))
+        if (!below || AIRISH(below.name) || /lava|water/.test(below.name) || !canBreakNaturally(below)) { dbg('shelter: dig blocked at ' + i + ' (' + (below ? below.name : 'unloaded') + ')'); break }
+        if (below2 && /lava|water/.test(below2.name)) { dbg('shelter: liquid 2 below - not digging'); break }
+        // NEVER open a cell whose SIDE touches liquid - an aquifer beside the shaft floods
+        // the pit the instant the wall drops (drowned at 4hp in its own sealed pit, live).
+        let sideLiquid = null
+        for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const s = bot.blockAt(below.position.offset(dx, 0, dz))
+          if (s && /lava|water/.test(s.name)) { sideLiquid = s.name; break }
+        }
+        if (sideLiquid) { dbg('shelter: ' + sideLiquid + ' beside the next cell - not digging deeper'); break }
+        const tool = toolForBlock(bot, below.name)
+        if (tool) await bot.equip(tool, 'hand').catch(() => {})
+        if (bot.canDigBlock && !bot.canDigBlock(below)) { dbg('shelter: canDigBlock=false for ' + below.name); break }
+        try { await bot.dig(below) } catch (e) { dbg('shelter: dig failed (' + e.message + ')'); break }
+        await new Promise(r => setTimeout(r, 250)) // fall into the hole
+        // VERIFY we dropped in - a straddling bot digs without falling. Steer into the shaft.
+        if (Math.floor(bot.entity.position.y) > feet.y - 1) {
+          try { await gotoWithTimeout(bot, new goals.GoalBlock(shaft.x, feet.y - 1, shaft.z), 3000) } catch {}
+          await new Promise(r => setTimeout(r, 200))
+        }
+        dug++
       }
-      if (sideLiquid) { dbg('shelter: ' + sideLiquid + ' beside the next cell - not digging deeper'); break }
-      const tool = toolForBlock(bot, below.name)
-      if (tool) await bot.equip(tool, 'hand').catch(() => {})
-      if (bot.canDigBlock && !bot.canDigBlock(below)) { dbg('shelter: canDigBlock=false for ' + below.name); break }
-      try { await bot.dig(below) } catch (e) { dbg('shelter: dig failed (' + e.message + ')'); break }
-      await new Promise(r => setTimeout(r, 250)) // fall into the hole
-      // VERIFY we dropped in - a straddling bot digs without falling. Steer into the shaft.
-      if (Math.floor(bot.entity.position.y) > feet.y - 1) {
-        try { await gotoWithTimeout(bot, new goals.GoalBlock(shaft.x, feet.y - 1, shaft.z), 3000) } catch {}
-        await new Promise(r => setTimeout(r, 200))
+      if (dug >= 1) break
+      // Blocked in place (water-adjacent / obstruction). Walk to the nearest diggable dry cell
+      // and try again - PROGRESS instead of the 4s NO-OP spin. Widen the search each retry.
+      if (attempt < RELOCATE_TRIES) {
+        const dry = await findDiggableDryCell(bot, { radius: 20 + attempt * 12 })
+        if (!dry) { dbg('shelter: no diggable dry ground within reach - cannot pit'); break }
+        dbg('shelter: cannot dig here (water/obstruction) - relocating to diggable dry ground at ' + dry.toString() + ' (try ' + (attempt + 1) + '/' + RELOCATE_TRIES + ')')
+        if (opts.say && attempt === 0) opts.say('ground here is too wet to dig into - moving to dry ground to shelter')
+        try { await gotoWithTimeout(bot, new goals.GoalBlock(dry.x, dry.y, dry.z), 20000) } catch (e) { dbg('shelter: relocate walk failed (' + e.message + ')') }
+        if (inWaterNow(bot)) { try { await ensureAshore(bot, isStopped) } catch {} }
       }
-      dug++
     }
-    if (dug < 1) { dbg('shelter: NO-OP (dug 0) - caller must do something else'); return false } // couldn't dig in (bedrock/protected/edge)
+    if (dug < 1) { dbg('shelter: NO-OP (dug 0 after ' + RELOCATE_TRIES + ' relocation tries) - caller must do something else'); return false } // genuinely nowhere diggable+dry nearby
     if (Math.floor(bot.entity.position.y) >= surfaceY) { dbg('shelter: dug ' + dug + ' but NEVER FELL IN (still at surface) - aborting, not pretending'); return false }
     await collectDrops(bot, 3)
     // 2) cap the opening above the head with any spare block
@@ -2584,12 +2918,22 @@ async function dumpJunk (bot) {
 // whenever nothing else is resting.
 async function restUntilSafe (bot, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
-  let waited = false
+  const maxFails = opts.maxShelterFails || 4
+  let waited = false; let fails = 0
   while ((isNight(bot) || shelterNeeded(bot)) && underArmored(bot) && !isStopped() && bot.entity) {
     // HOLDING must never mean holding UNDERWATER - the 4s waits between failed rest
     // attempts are exactly where the bot drowned (test server, in its flooded basin)
     if (inWaterNow(bot)) { try { await ensureAshore(bot, isStopped) } catch {} }
-    if (!isResting()) { try { if (await nightRest(bot, opts)) { waited = true; continue } } catch {} }
+    if (!isResting()) {
+      let ok = false
+      try { ok = await nightRest(bot, opts) } catch {}
+      if (ok) { waited = true; fails = 0; continue }
+      // nightRest FAILED to shelter (couldn't dig even after relocating, and no reachable
+      // bed). Do NOT spin in place forever (the live 4s NO-OP loop): after maxFails, hand
+      // back HONESTLY so the CALLER relocates the whole job somewhere it CAN shelter, rather
+      // than re-digging the same wet spot. Bounded progress beats an unbounded hold.
+      if (++fails >= maxFails) { dbg('restUntilSafe: could not shelter after ' + fails + ' tries (no diggable dry ground / no bed reachable) - handing back so the caller can relocate'); return false }
+    }
     if (!waited) { waited = true; dbg('restUntilSafe: HOLDING for the night (another rest active or rest failed - not working in the dark)') }
     await new Promise(r => setTimeout(r, 4000))
   }
@@ -3157,12 +3501,25 @@ async function gatherLoop (bot, item, count, opts = {}) {
       // STRIP-MINE: for stone/ore, there may be none EXPOSED (plains) - dig our own
       // shaft down to the stone layer instead of wandering, then re-scan (the shaft
       // walls are now reachable stone). Bounded, and only while safely above bedrock.
-      if (canStrip && stripDug < MAX_STRIP && stripBudget() > 0) {
-        if (opts.say && stripDug === 0) opts.say(`no ${sources[0]} up here - digging down to reach it`)
-        dbg('  gather strip-shaft #' + stripDug + ' budget=' + stripBudget() + ' at y=' + Math.floor(bot.entity.position.y))
-        const dug = await digShaftDown(bot, stripBudget(), { isStopped, home })
-        dbg('  gather strip-shaft dug=' + dug)
-        if (dug > 0) { const got = await mineTunnel(bot, item, deepOre ? 24 : 16, stripDug, { isStopped }); dbg('  gather tunnel got=' + got); stripDug++; dryExplores = 0; continue } // count only SUCCESSFUL shafts
+      const useBranch = deepOre && process.env.BRANCH_MINE !== '0'
+      if (canStrip && stripDug < MAX_STRIP && (stripBudget() > 0 || useBranch)) {
+        if (useBranch) {
+          // ORGANIZED BRANCH MINE for deep ore: ONE descent to the iron band (~y16) + a
+          // torch-lit corridor with perpendicular branches - far more ore per hole than the
+          // old scattered N-shaft "mole" strip, and back-out-able. Owns its own descent/depth
+          // (not gated by stripBudget/belowCap). Falls through to relocate/wander if it can't
+          // even sink an entrance (apron/water/lava). BRANCH_MINE=0 restores the old strip.
+          const need = count - (countItem(bot, item) - start)
+          const r = await branchMine(bot, item, need, { isStopped, home, surfaceY, say: opts.say, avoid: opts.avoid, dirIdx: stripDug, deadlineMs: Math.max(20000, deadline - Date.now()) })
+          dbg('  gather branchMine -> ' + JSON.stringify(r)); stripDug++
+          if (r.gathered > 0) { dryExplores = 0; noYield = 0; continue }
+        } else {
+          if (opts.say && stripDug === 0) opts.say(`no ${sources[0]} up here - digging down to reach it`)
+          dbg('  gather strip-shaft #' + stripDug + ' budget=' + stripBudget() + ' at y=' + Math.floor(bot.entity.position.y))
+          const dug = await digShaftDown(bot, stripBudget(), { isStopped, home })
+          dbg('  gather strip-shaft dug=' + dug)
+          if (dug > 0) { const got = await mineTunnel(bot, item, deepOre ? 24 : 16, stripDug, { isStopped }); dbg('  gather tunnel got=' + got); stripDug++; dryExplores = 0; continue } // count only SUCCESSFUL shafts
+        }
         // Couldn't dig down here (water/void/lava underfoot - e.g. a riverbed at the fence
         // edge). Normally head back to the build SITE (dry ground the operator chose) and
         // strip-mine THERE. BUT if the anchor is our own hut (un-diggable), trekking back
@@ -3276,6 +3633,14 @@ async function gatherLoop (bot, item, count, opts = {}) {
           const off = { x: bot.entity.position.x + (bot.entity.position.x >= home.x ? 10 : -10), z: bot.entity.position.z + (bot.entity.position.z >= home.z ? 10 : -10) }
           dbg('  gather buried-strip on my hut apron - sidestepping to ' + Math.round(off.x) + ',' + Math.round(off.z) + ' (not burning shaft budget)')
           try { await gotoWithTimeout(bot, new goals.GoalNearXZ(off.x, off.z, 2), 12000) } catch {}
+          reachFails = 0; continue
+        }
+        // Deep ore: run the ORGANIZED BRANCH MINE (one descent + branches) here too, so a
+        // buried-ore trigger doesn't fall back to the scattered-shaft mole pattern either.
+        if (deepOre && process.env.BRANCH_MINE !== '0') {
+          const need = count - (countItem(bot, item) - start)
+          const r = await branchMine(bot, item, need, { isStopped, home, surfaceY, say: opts.say, avoid: opts.avoid, dirIdx: stripDug, deadlineMs: Math.max(20000, deadline - Date.now()) })
+          dbg('  gather buried branchMine -> ' + JSON.stringify(r)); stripDug++
           reachFails = 0; continue
         }
         const dug = await digShaftDown(bot, stripBudget(), { isStopped, home })
@@ -4555,4 +4920,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, setSpawnSuspect, isSpawnSuspect, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, fishForFood, ensureHutApron, ensureHutBed, setBuildZone, setDebugSink }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, setSpawnSuspect, isSpawnSuspect, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, fishForFood, ensureHutApron, ensureHutBed, setBuildZone, setDebugSink }
