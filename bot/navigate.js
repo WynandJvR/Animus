@@ -442,7 +442,7 @@ async function openNearbyDoor (bot, opts = {}) {
 // help right now; run() maneuvers. A recovery "worked" if the bot demonstrably MOVED
 // (>=2 blocks horizontally or rose >=1) or the entry vouches for itself (door-assist
 // returns whether it crossed) - re-read the world, never trust intent.
-function defaultBudgets () { return { water: 2, door: 3, pit: 2, climb: 2, nudge: 2, stepout: 2 } }
+function defaultBudgets () { return { indoor: 3, water: 2, door: 3, pit: 2, climb: 2, nudge: 2, stepout: 2 } }
 
 async function recoverOnce (bot, goal, counts, budgets, opts) {
   const isStopped = opts.isStopped || (() => false)
@@ -454,6 +454,36 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
   const xz = goalXZ(goal)
   const twd = xz ? { x: xz.x, z: xz.z, y: goalY(goal) } : null // door scans also look near the GOAL
   const ladder = [
+    { // HARD INVARIANT - wedged INSIDE the bot's own structure: step to a schema-correct
+      // FREE interior cell, and NEVER pillar/dig/dirt-fill in the living room. Live, the
+      // emergency escape pillared out with DIRT (head-height dirt piled on the furniture)
+      // and the bot froze 150s boxed in by bed+dirt+table. This rung runs FIRST indoors
+      // and uses only the no-dig pathfinder to reach a real floor-standing cell from the
+      // self-structure model - no block placement, so the roof/furniture stay clean.
+      kind: 'indoor',
+      when: () => { try { return !!(prov().insideOwnStructure && prov().insideOwnStructure(bot)) } catch { return false } },
+      run: async () => {
+        const cell = prov().freeInteriorCell ? prov().freeInteriorCell(bot) : null
+        if (!cell) { dbg('recovery: inside own structure but no free interior cell - holding (never pillaring indoors)'); return false }
+        dbg('recovery: wedged INSIDE own structure at ' + p0.floored() + ' - stepping to free interior cell ' + cell + ' (no pillaring indoors)')
+        try { await gotoOnce(bot, new goals.GoalNear(cell.x, cell.y, cell.z, 0), 8000) } catch {}
+        if (movedEnough()) return true
+        // the no-dig planner couldn't thread the cramped interior - manual step toward the
+        // free cell (still no placement): face it, walk, hop once if we bump.
+        try {
+          bot.pathfinder.setGoal(null); bot.clearControlStates()
+          await bot.lookAt(new Vec3(cell.x + 0.5, bot.entity.position.y + 1.2, cell.z + 0.5), true)
+          bot.setControlState('forward', true)
+          const t0 = Date.now()
+          while (Date.now() - t0 < 1800 && !isStopped()) {
+            await new Promise(r => setTimeout(r, 120))
+            if (Math.hypot(bot.entity.position.x - (cell.x + 0.5), bot.entity.position.z - (cell.z + 0.5)) < 0.5) break
+            if (Date.now() - t0 > 500 && bot.entity.position.distanceTo(p0) < 0.3) { bot.setControlState('jump', true); await new Promise(r => setTimeout(r, 150)); bot.setControlState('jump', false) }
+          }
+        } catch {} finally { bot.clearControlStates() }
+        return movedEnough()
+      }
+    },
     { // in water the pathfinder never registers "on ground", so its planned jumps never
       // fire - it stands in a puddle forever (watched live, 8 min). Shallow trench: hop
       // straight onto the adjacent bank. Deep water (mid-river, no adjacent bank): swim
@@ -700,13 +730,17 @@ async function forceUnstick (bot, opts = {}) {
     try { bot.pathfinder.setGoal(null) } catch {}
     bot.clearControlStates()
     const counts = {}
-    const budgets = { water: 1, pit: 2, door: 0, climb: 2, nudge: 0, stepout: 2 }
+    // indoor FIRST + generous: a wedge inside the hut must be freed by stepping to a free
+    // interior cell, never by the dirt-pillaring the pit/climb rungs would otherwise try.
+    const budgets = { indoor: 3, water: 1, pit: 2, door: 0, climb: 2, nudge: 0, stepout: 2 }
     for (let i = 0; i < 4 && !isStopped(); i++) {
       const rescued = await recoverOnce(bot, null, counts, budgets, { isStopped })
       if (!rescued) break
       dbg('forceUnstick: ' + rescued + ' moved us to ' + bot.entity.position.floored())
       // keep going only while still boxed in (buried or pitted) - once in the open the
-      // normal flows take back over
+      // normal flows take back over. Inside our own hut a "free interior cell" IS the
+      // destination - not buried, not a pit - so stop once the indoor rung has moved us.
+      try { if (prov().insideOwnStructure && prov().insideOwnStructure(bot) && rescued === 'indoor') break } catch {}
       const buried = prov().hasSolidCeiling(bot, 12, { ignoreLeaves: true })
       if (!buried && !detectPit(bot)) break
     }

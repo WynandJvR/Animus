@@ -941,6 +941,7 @@ async function handle (bot, line) {
         '  wear [armor]              put on armor you have (grabs dropped armor nearby first)',
         '  armorup                   get armor from nothing (hunt cows -> craft leather set)',
         '  planarmor                 armorup via the re-planning goal driver (A/B seam)',
+        '  huttidy                   clean the hut interior (dig stray dirt, remove duplicate stations, reconcile registry)',
         ' building (op):',
         '  setblock <x> <y> <z> <block>',
         '  fill <x1 y1 z1 x2 y2 z2> <block>',
@@ -1161,6 +1162,30 @@ async function handle (bot, line) {
           : await provisionArmor(bot, { say: sayFn, isStopped: () => buildAbort, at })
         endActivity(!/still no armor|no progress|cooling off/.test(r), r)
         return r
+      } catch (e) { endActivity(false, e.message); throw e } finally { provisioning = false }
+    }
+
+    case 'huttidy':
+    case 'tidyhut':
+    case 'cleanhut': {
+      // INTERIOR CLEANUP with a verified postcondition: dig every stray dirt/filler in the
+      // hut interior (floor piles + head-height pillar remnants), remove duplicate in-hut
+      // stations (one table + one furnace), fill floor holes, RE-RUN until a fresh world
+      // read confirms it's clean, then reconcile the (corrupted) infra registry against the
+      // world. Operator-triggerable to fix a dirty live hut. Marks the body busy so no
+      // reflex re-clutters mid-sweep (the arbiter maneuver + isBusy both hold).
+      if (isBusy()) return 'busy with a job - hut cleanup has to wait its turn'
+      buildAbort = false
+      provisioning = true
+      beginActivity('huttidy', 'hut interior')
+      try {
+        const say = m => bot.chat(String(m).slice(0, 256))
+        const r = await provision.cleanupHutInterior(bot, null, { say, isStopped: () => buildAbort })
+        const msg = r.ok
+          ? `hut is tidy - dug ${r.dug} stray block(s), removed ${r.removedDupes} duplicate station(s) in ${r.passes} pass(es); registry reconciled`
+          : `hut cleanup incomplete after ${r.passes} pass(es) - still: ${r.remaining.join(', ')} (dug ${r.dug}, removed ${r.removedDupes})`
+        endActivity(r.ok, msg)
+        return msg
       } catch (e) { endActivity(false, e.message); throw e } finally { provisioning = false }
     }
 

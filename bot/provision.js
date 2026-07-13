@@ -14,6 +14,7 @@ const { goals, Movements } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
 const navigate = require('./navigate.js') // unified navigation (it lazy-requires us back for climb/pillar/water-hop)
 const scaffold = require('./scaffold.js') // scaffold manager: temp-block registry, filler policy, teardown
+const hutModel = require('./hut-model.js') // self-structure model: schema-correct wall/door/floor/interior/furniture classification
 // Visible, UNTHROTTLED build tracing to stdout (the say() progress goes through a 40s
 // throttle that hides failures). Enable with BUILD_DEBUG=1 to see every plan/task/smelt step.
 let dbgSink = null // injected by index.js: debug lines persist to logs/bot-events.log
@@ -1698,6 +1699,134 @@ function recallInfraVerified (bot, kind, pos, maxDist) {
   for (const e of list) { const d = Math.hypot(e.x - pos.x, e.z - pos.z); if (d <= maxDist && d < bd) { bd = d; best = e } }
   return best
 }
+// ---- SELF-STRUCTURE integrity + declutter (self-structure-model-design.md) ----------
+// The hut anchor entry (infra.hut[0]), or null. The model keys off this min corner.
+function hutAnchor () { return (listInfra('hut')[0]) || null }
+// A world-read closure for the hut-model's pure functions.
+function hutReader (bot) { return (x, y, z) => bot.blockAt(new Vec3(x, y, z)) }
+
+// A standable FREE interior cell (floor-level, schema-correct 4x4, threshold excluded),
+// nearest to `near` (default: the bot). This is the ONLY sanctioned way to unstick INSIDE
+// the hut - step here, NEVER pillar dirt through the roof. Returns a Vec3 or null.
+function freeInteriorCell (bot, hut, near) {
+  hut = hut || hutAnchor()
+  if (!hut) return null
+  const cells = hutModel.freeStandCells(hut, hutReader(bot))
+  if (!cells.length) return null
+  const p = near || bot.entity.position
+  cells.sort((a, b) => Math.hypot(a.x - p.x, a.z - p.z) - Math.hypot(b.x - p.x, b.z - p.z))
+  const c = cells[0]
+  return new Vec3(c.x, c.y, c.z)
+}
+
+// REGISTRY INTEGRITY: reconcile the infra registry against the WORLD so the bot's model of
+// its own home matches reality. The live registry was garbage (12 crafting_table entries,
+// 7 furnaces, 0 beds for a bed that exists) because nothing pruned dead/duplicate cells.
+// For every kind: dedupe exact cells and DROP entries whose loaded cell no longer holds
+// the block (unloaded/unknown kept). Then re-seed from what physically stands INSIDE the
+// hut (the authoritative count) so the true stations are always registered - including the
+// bed (also mirrored into m.bed / knownBed, the spawn anchor). Returns a summary.
+function reconcileInfra (bot) {
+  const m = loadWorldMem()
+  const infra = m.infra = m.infra || {}
+  const summary = {}
+  const hut = hutAnchor()
+  const inHut = e => hut && hutModel.isInterior(hut, e.x, e.z) && e.y >= hut.y && e.y <= hut.y + hutModel.DIMS.h - 1
+  for (const kind of ['table', 'furnace', 'chest', 'bed']) {
+    const re = INFRA_BLOCK[kind]
+    const list = (infra[kind] || []).slice()
+    const verify = e => { const b = bot.blockAt(new Vec3(e.x, e.y, e.z)); if (b == null) return null; return re.test(b.name) }
+    let { keep } = hutModel.reconcileCells(list, verify)
+    summary[kind] = { was: list.length }
+    // Re-seed the true in-hut stations (world scan) so real furniture is never lost from
+    // memory, and phantom in-hut entries (cell now empty) are already gone from `keep`.
+    if (hut) {
+      const stations = hutModel.stationCells(hut, hutReader(bot))[kind] || []
+      for (const s of stations) if (!keep.some(e => e.x === s.x && e.y === s.y && e.z === s.z)) keep.push({ x: s.x, y: s.y, z: s.z, at: Date.now() })
+      // any KEEP entry that is inside the hut box but no longer a real station was already
+      // dropped by verify; nothing more to do.
+    }
+    infra[kind] = keep
+    summary[kind].now = keep.length
+  }
+  saveWorldMem()
+  // Bed doubles as the spawn anchor - if one stands in the hut and m.bed is empty/stale,
+  // point knownBed at it so ensureSpawnBed stops hunting a phantom.
+  try {
+    if (hut) {
+      const beds = hutModel.stationCells(hut, hutReader(bot)).bed
+      if (beds.length && (!m.bed || !bot.blockAt(new Vec3(m.bed.x, m.bed.y, m.bed.z)) || !/_bed$/.test((bot.blockAt(new Vec3(m.bed.x, m.bed.y, m.bed.z)) || {}).name || ''))) {
+        rememberBed(new Vec3(beds[0].x, beds[0].y, beds[0].z))
+        summary.bed.seededSpawn = true
+      }
+    }
+  } catch (e) { dbg('reconcileInfra: bed/spawn reseed failed (' + e.message + ')') }
+  dbg('reconcileInfra: ' + Object.entries(summary).map(([k, v]) => `${k} ${v.was}->${v.now}`).join(', '))
+  return summary
+}
+
+// INTERIOR CLEANUP with a VERIFIED postcondition: dig every stray filler block in the
+// interior (floor piles + head-height pillar remnants), remove DUPLICATE in-hut stations
+// (keep one per kind), fill floor holes, and RE-RUN until a fresh world read confirms the
+// interior is clean - not best-effort. Uses the self-structure model to know stray vs
+// legit. Operator-triggerable (the `huttidy` command) to fix the current dirty hut.
+// Returns { ok, passes, remaining, dug, removedDupes }.
+async function cleanupHutInterior (bot, hut, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const say = opts.say || (() => {})
+  hut = hut || hutAnchor()
+  if (!hut) return { ok: false, passes: 0, remaining: ['no hut registered'], dug: 0, removedDupes: 0 }
+  const read = hutReader(bot)
+  const maxPasses = opts.maxPasses || 4
+  let dug = 0; let removedDupes = 0; let pass = 0
+  const digAt = async (c) => {
+    const p = new Vec3(c.x, c.y, c.z)
+    const b = bot.blockAt(p)
+    if (!b || AIRISH(b.name)) return false
+    try {
+      if (bot.entity.position.distanceTo(p) > 4) await navigate.gotoOnce(bot, new goals.GoalNear(p.x, p.y, p.z, 2), 12000)
+    } catch { /* dig test below still gates reach */ }
+    const tool = toolForBlock(bot, b.name); if (tool) await bot.equip(tool, 'hand').catch(() => {})
+    if (bot.canDigBlock && !bot.canDigBlock(b)) { dbg('  huttidy: cannot reach ' + b.name + ' at ' + p.toString() + ' this pass'); return false }
+    try { await bot.dig(b); await collectDrops(bot, 3); return true } catch (e) { dbg('  huttidy: dig failed at ' + p.toString() + ' (' + e.message + ')'); return false }
+  }
+  for (pass = 1; pass <= maxPasses; pass++) {
+    if (isStopped()) break
+    // 1) stray filler (dig top-down so a pile clears cleanly)
+    const strays = hutModel.strayCells(hut, read).sort((a, b) => b.y - a.y)
+    for (const s of strays) { if (isStopped()) break; if (await digAt(s)) dug++ }
+    // 2) duplicate stations: keep the FIRST of each kind, dig the rest (a second table
+    //    boxes the bot in; only one is needed). Chests are exempt (a double chest is two
+    //    legit adjacent cells) and so are beds (one bed, never dig the spawn anchor here).
+    for (const kind of ['table', 'furnace']) {
+      const cells = hutModel.stationCells(hut, read)[kind] || []
+      for (let i = 1; i < cells.length; i++) {
+        if (isStopped()) break
+        if (await digAt(cells[i])) { removedDupes++; dbg('  huttidy: removed duplicate ' + kind + ' at ' + cells[i].x + ',' + cells[i].y + ',' + cells[i].z) }
+      }
+    }
+    // 3) floor holes -> fill with carried filler (a hole wedges/traps; NOT a pillar - this
+    //    is the floor level, anchor.y-1, the one place filling is legitimate indoors)
+    for (const h of hutModel.floorHoles(hut, read)) {
+      if (isStopped()) break
+      try { await placeAt(bot, new Vec3(h.x, h.y, h.z), /^(dirt|coarse_dirt|cobblestone)$/) } catch {}
+    }
+    // VERIFY (fresh reads): clean iff no stray, <=1 table, <=1 furnace, no floor hole
+    const strayLeft = hutModel.strayCells(hut, read)
+    const st = hutModel.stationCells(hut, read)
+    const holesLeft = hutModel.floorHoles(hut, read)
+    const remaining = []
+    if (strayLeft.length) remaining.push(strayLeft.length + ' stray')
+    if (st.table.length > 1) remaining.push(st.table.length + ' tables')
+    if (st.furnace.length > 1) remaining.push(st.furnace.length + ' furnaces')
+    if (holesLeft.length) remaining.push(holesLeft.length + ' floor holes')
+    dbg('  huttidy pass ' + pass + ': dug=' + dug + ' dupes=' + removedDupes + ' remaining=[' + remaining.join(', ') + ']')
+    if (!remaining.length) { try { reconcileInfra(bot) } catch (e) { dbg('  huttidy: reconcile failed (' + e.message + ')') }; return { ok: true, passes: pass, remaining: [], dug, removedDupes } }
+    if (pass === maxPasses) { try { reconcileInfra(bot) } catch {}; return { ok: false, passes: pass, remaining, dug, removedDupes } }
+  }
+  return { ok: false, passes: pass, remaining: ['stopped'], dug, removedDupes }
+}
+
 // Walk to REMEMBERED ones (up to 3 nearest) and verify each still stands; forget the dead.
 // Trying only the single nearest made one stale entry cause a brand-new placement while a
 // perfectly good chest stood 9 blocks further (live: three chests at one site).
@@ -4474,4 +4603,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, setSpawnSuspect, isSpawnSuspect, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, fishForFood, ensureHutApron, ensureHutBed, setBuildZone, setDebugSink }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, setSpawnSuspect, isSpawnSuspect, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, fishForFood, ensureHutApron, ensureHutBed, setBuildZone, setDebugSink }
