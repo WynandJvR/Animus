@@ -1004,6 +1004,12 @@ async function mineTunnel (bot, itemName, maxLen, dirIdx, opts = {}) {
     // COAL BYCATCH (operator: "while mining iron it might as well get coal if close"):
     // the furnace runs on coal, so grab any coal ore this tunnel exposes - cheap, bounded.
     try { await grabNearbyOre(bot, /coal_ore$/, 3, 2, { isStopped }) } catch {}
+    // TARGET-ORE BYCATCH: a straight tunnel only mines what's dead-ahead, so iron veins
+    // exposed in the WALLS slid past un-mined - the reason deep tunnels still returned
+    // got=0 (verified live). Actively grab the ore that yields what we came for (raw_iron
+    // -> iron_ore, raw_copper -> copper_ore, ...) from the tunnel walls. Bounded per step.
+    const oreWord = String(itemName).replace(/^raw_/, '')
+    if (oreWord && oreWord !== itemName) { try { await grabNearbyOre(bot, new RegExp(oreWord + '_ore$'), 3, 5, { isStopped }) } catch {} }
     try { await gotoWithTimeout(bot, new goals.GoalBlock(ahead.x, ahead.y, ahead.z), 5000) } catch { break }
     if (!dugAny) break
   }
@@ -2729,13 +2735,28 @@ async function gatherLoop (bot, item, count, opts = {}) {
     dbg('  gather fence widened to', maxRoam, '(' + why + ')')
   }
   const distHome = () => Math.hypot(bot.entity.position.x - home.x, bot.entity.position.z - home.z)
+  // Is the roam anchor sitting ON the bot's own hut? Then it's UN-diggable (the apron/
+  // structure no-dig guard refuses every shaft there). A strip gather anchored at the hut
+  // used to bounce forever: strip out 28b -> shaft fails -> "return home to strip" -> hut
+  // apron refuses -> wander out -> repeat, minutes of walking, mined=0 (verified live).
+  // Knowing the anchor is un-diggable up front, we NEVER trek back to it to strip - we work
+  // the ore field where we are instead.
+  const homeUndiggable = listInfra('hut').some(h => Math.hypot(h.x - home.x, h.z - home.z) <= 6)
+  if (homeUndiggable) dbg('  gather: anchor is on my hut (no-dig) - will strip the ore field, not trek back home')
   // Wall-clock deadline: even a legit strip-mine run must end (bounded so the BUILD phase runs).
   const deadline = Date.now() + (opts.deadlineMs || Math.min(480000, 120000 + count * 4000))
   const timedOut = () => Date.now() > deadline
   // Whether this resource can be reached by digging DOWN (stone/ore under the surface).
   // Plains/grassland have none exposed, so instead of wandering forever we mine a shaft.
   const canStrip = sources.some(s => /stone|deepslate|cobble|granite|diorite|andesite|tuff|_ore$|ancient_debris/.test(s))
-  const MAX_STRIP = 5 // shafts per gather before giving up
+  // ORE gather (iron/gold/copper/redstone/...): the target ore is DEEP, not at the
+  // stone-just-under-grass layer. Iron in 1.18+ follows a triangular distribution that's
+  // sparse above ~y48 and common toward y30; a 16-block depth cap floored strips at y50
+  // where 16-block tunnels struck ZERO iron (verified live: 3 gearups, mined=0 across
+  // y54-60). Ore gathers therefore dig DEEPER (down to the STRIP_FLOOR, still the hard
+  // safety floor), run more shafts, and cut longer tunnels so a vein is actually hit.
+  const deepOre = sources.some(s => /_ore$/.test(s)) || /^raw_(iron|gold|copper)$|^(redstone|lapis_lazuli|diamond|emerald)$/.test(item)
+  const MAX_STRIP = deepOre ? 10 : 5 // shafts per gather before giving up (ore needs several to reach + work the deep levels)
   const NO_YIELD_LIMIT = 10 // mine-with-no-pickup before relocating to better ground
   const cap = count * 4 + 80 // ultimate backstop against grinding forever
   // Depth cap for MINING (tool-required) gathers: chasing exposed stone down into a
@@ -2750,10 +2771,14 @@ async function gatherLoop (bot, item, count, opts = {}) {
   let surfaceY = opts.surfaceY != null ? opts.surfaceY : bot.entity.position.y
   // Generous enough to reach hillside/plateau-edge stone, tight enough to refuse the
   // 30+ block dive into a cave/ravine that stranded the bot.
-  const MAX_MINE_DEPTH = parseInt(process.env.GATHER_MAX_DEPTH || '16', 10)
   // ABSOLUTE floor: never mine/dig below this Y, so a runaway descent can't reach the
-  // deep lava layer no matter what. Well above 1.21 lava pockets.
+  // deep lava layer no matter what. Well above 1.21 lava pockets. (Defined before the
+  // depth cap so ore gathers can key their reach off it.)
   const STRIP_FLOOR = parseInt(process.env.STRIP_FLOOR_Y || '30', 10)
+  // Ore digs to the STRIP_FLOOR (iron territory); everything else stays near the surface.
+  const MAX_MINE_DEPTH = deepOre
+    ? Math.max(16, Math.floor(surfaceY) - STRIP_FLOOR)
+    : parseInt(process.env.GATHER_MAX_DEPTH || '16', 10)
   const belowCap = y => (reqTool && y < surfaceY - MAX_MINE_DEPTH) || y <= STRIP_FLOOR
   // How far we may still safely dig DOWN from here before hitting the depth cap or the
   // absolute floor. <=0 means "already deep enough - do NOT dig, climb out instead".
@@ -2922,10 +2947,17 @@ async function gatherLoop (bot, item, count, opts = {}) {
         dbg('  gather strip-shaft #' + stripDug + ' budget=' + stripBudget() + ' at y=' + Math.floor(bot.entity.position.y))
         const dug = await digShaftDown(bot, stripBudget(), { isStopped, home })
         dbg('  gather strip-shaft dug=' + dug)
-        if (dug > 0) { const got = await mineTunnel(bot, item, 16, stripDug, { isStopped }); dbg('  gather tunnel got=' + got); stripDug++; dryExplores = 0; continue } // count only SUCCESSFUL shafts
+        if (dug > 0) { const got = await mineTunnel(bot, item, deepOre ? 24 : 16, stripDug, { isStopped }); dbg('  gather tunnel got=' + got); stripDug++; dryExplores = 0; continue } // count only SUCCESSFUL shafts
         // Couldn't dig down here (water/void/lava underfoot - e.g. a riverbed at the fence
-        // edge). Head back to the build SITE (dry ground the operator chose) and strip-mine
-        // THERE, instead of wandering to more possibly-wet spots and never getting stone.
+        // edge). Normally head back to the build SITE (dry ground the operator chose) and
+        // strip-mine THERE. BUT if the anchor is our own hut (un-diggable), trekking back
+        // just bounces off the apron guard - sidestep to fresh ground and strip here instead.
+        if (homeUndiggable && distHome() > 6) {
+          const off = { x: bot.entity.position.x + (bot.entity.position.x >= home.x ? 6 : -6), z: bot.entity.position.z + (bot.entity.position.z >= home.z ? 6 : -6) }
+          dbg('  gather shaft-failed off-home (hut anchor no-dig) - sidestepping to ' + Math.round(off.x) + ',' + Math.round(off.z) + ' to strip here, not trekking back')
+          try { await gotoWithTimeout(bot, new goals.GoalNearXZ(off.x, off.z, 2), 12000) } catch {}
+          continue
+        }
         if (distHome() > 6) { dbg('  gather shaft-failed: returning home to strip there (distHome=' + Math.round(distHome()) + ')'); try { await gotoWithTimeout(bot, new goals.GoalNearXZ(home.x, home.z, 4), 30000) } catch {}; continue }
         dbg('  gather shaft-failed AT home - falling through to wander')
         widenFence('cannot shaft down at home') // water/void right under the site - hunt further out
@@ -3022,7 +3054,7 @@ async function gatherLoop (bot, item, count, opts = {}) {
         if (opts.say && stripDug === 0) opts.say(`the ${sources[0]} is all buried - digging down to it`)
         dbg('  gather buried-strip #' + stripDug + ' budget=' + stripBudget() + ' at y=' + Math.floor(bot.entity.position.y))
         const dug = await digShaftDown(bot, stripBudget(), { isStopped, home })
-        if (dug > 0) { const got = await mineTunnel(bot, item, 16, stripDug, { isStopped }); dbg('  gather buried-strip dug=' + dug + ' tunnel got=' + got) } else dbg('  gather buried-strip dug=0')
+        if (dug > 0) { const got = await mineTunnel(bot, item, deepOre ? 24 : 16, stripDug, { isStopped }); dbg('  gather buried-strip dug=' + dug + ' tunnel got=' + got) } else dbg('  gather buried-strip dug=0')
         stripDug++; reachFails = 0
       }
       continue
