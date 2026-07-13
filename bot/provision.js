@@ -2882,7 +2882,10 @@ async function tillCell (bot, cell) {
 async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () => {}, avoid = null } = {}) {
   const mcData = require('minecraft-data')(bot.version)
   const m = loadWorldMem()
-  if (m.wheatFarm && Math.hypot(m.wheatFarm.x - home.x, m.wheatFarm.z - home.z) <= 80) return true // one farm per site
+  // one farm per site - but only if it's a REAL plot (>=1 persisted cell). A stale/pre-schema
+  // record with 0 cells (live: a farm record at 382,38 with cells:[]) used to block re-planting
+  // forever while tend had nothing to tend - a dead-farm deadlock. 0 live cells = no farm, rebuild.
+  if (m.wheatFarm && (m.wheatFarm.cells && m.wheatFarm.cells.length > 0) && Math.hypot(m.wheatFarm.x - home.x, m.wheatFarm.z - home.z) <= 80) return true
   // BAD MOMENT guard: the last attempt ran while being chased INTO A CAVE - it searched
   // for grass from underground and found none. Farming is a peacetime surface job.
   if (hasSolidCeiling(bot, 12) || nearHostile(bot, 16) || isNight(bot)) { dbg('  wheat farm: bad moment (cave/hostiles/night) - deferred'); return false }
@@ -3138,7 +3141,7 @@ async function ensureFishingRod (bot, { isStopped = () => false, home } = {}) {
 }
 
 // A standing wheat farm (planted + remembered) = the renewable food source.
-function hasStandingFarm () { return !!(loadWorldMem().wheatFarm) }
+function hasStandingFarm () { const wf = loadWorldMem().wheatFarm; return !!(wf && wf.cells && wf.cells.length > 0) } // a 0-cell (stale/failed) record is NOT a standing farm - else the food system thinks farming is handled when there's no plot
 
 // PROACTIVE FOOD SUPPLY (base-setup goal, like the hut): while FED + SAFE, ESTABLISH the wheat
 // farm at the REMEMBERED open-sky pond so the next hunger crisis never happens - the farm is
