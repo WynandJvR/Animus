@@ -531,6 +531,7 @@ bot.on('death', () => {
 // places the still-missing blocks. 'spawn' also fires on first join, so gate on a death.
 let deathPending = false
 let autoRecoverTries = 0 // consecutive auto death-drop recovery attempts (capped so recovery can't death-loop)
+let recoveringHome = false // trekking home after a far respawn - holds the idle gear-up reflex off (go home > re-arm in the wild)
 bot.on('spawn', () => {
   if (!deathPending) return // initial join is handled by the once('spawn') above
   deathPending = false
@@ -595,6 +596,23 @@ bot.on('spawn', () => {
         } else {
           autoRecoverTries = 0 // nothing worthwhile pending - reset the cap
         }
+      }
+      // GO HOME FIRST if we respawned FAR from base. The hut BED got creeper-destroyed, so
+      // the server fell back to WORLD SPAWN (~570b from the hut) - and live the bot then just
+      // GEARED UP out in the wilderness, drifting around and abandoning its hut/farm/chest to
+      // re-do everything from scratch far away. Getting home OUTRANKS gear-up + local gathering
+      // (a bot 500 blocks from home should walk home, not rebuild its life in the wild). Bounded
+      // + honest (can't wedge); survival still applies en route. Home anchor = hut > remembered
+      // bed > persisted build site. recoveringHome holds the idle gear-up reflex off meanwhile.
+      // RECOVER_HOME=0 disables. This runs BEFORE the resume loop so the bed/spawn are fixed even
+      // when the build site is near home; after grave-recovery so a fresh grave isn't lost.
+      if (process.env.RECOVER_HOME !== '0') {
+        const pr = commands.persistedResume && commands.persistedResume()
+        recoveringHome = true
+        try {
+          const rh = await provision.recoverHome(bot, { say: (m) => note('(respawn) ' + m), resumeAt: pr && pr.at })
+          if (rh.far) note(`(respawn) ${rh.arrived ? 'arrived home - bed ' + (rh.bedOk ? 'rebuilt + spawn re-asserted (future deaths return here)' : 'could NOT be re-asserted, will retry next respawn') : 'could not reach home this time (' + Math.round(rh.dist) + 'b) - will retry next respawn'}`)
+        } catch (e) { note(`(respawn) recover-home failed: ${e.message}`) } finally { recoveringHome = false }
       }
       for (let attempt = 0; attempt < 3; attempt++) { // deferred = old build loop still unwinding
         const r = commands.resumeBuild && await commands.resumeBuild(bot)
@@ -786,6 +804,7 @@ let gearing = false
 if (process.env.GEAR_REFLEX !== '0') {
   setInterval(async () => {
     if (gearing || !bot.entity) return
+    if (recoveringHome) return // respawned far from base - GO HOME outranks re-arming in the wild
     if (commands.isBusy && commands.isBusy()) return // a job owns the body (its camp flow gears)
     if (arbiter.maneuverActive()) return // a navigation is driving - don't start the iron grind mid-walk
     if (provision.isResting && provision.isResting()) return

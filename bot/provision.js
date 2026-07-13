@@ -2641,6 +2641,74 @@ async function recoverSpawnAnchor (bot, opts = {}) {
   return ok
 }
 
+// GO-HOME-FIRST decision (PURE, offline-testable): the bot's hut BED got creeper-destroyed,
+// so the server respawn fell back to WORLD SPAWN ~570 blocks from base - and live it then
+// just GEARED UP out in the wilderness, abandoning its hut/farm/chest and re-doing everything
+// from scratch far away. A bot 500 blocks from home should WALK HOME, not re-build its life in
+// the wild. This picks the home anchor (hut > remembered bed > persisted build site) and
+// decides whether we landed far enough to trek home BEFORE any gear-up/local gathering. XZ
+// distance only - respawn Y varies, and "far" is a horizontal concept. No bot handle, just
+// data, so the "am I far from home -> go home" logic is unit-tested without a world.
+function homeRecoveryDecision ({ hut, bed, resumeAt, pos, dist } = {}) {
+  const D = dist != null ? dist : Number(process.env.RECOVER_HOME_DIST || 64)
+  // Anchor priority: the HUT is true home (its bed is the spawn we want back). A lone
+  // remembered bed is next. The persisted build site is a last resort - still far better
+  // than stranding at world spawn. Stand-point is +2,+2 into the hut footprint so the trek
+  // ends INSIDE (where ensureHutBed lays the bed), not against an outer wall.
+  let anchor = null; let source = null
+  if (hut) { anchor = { x: hut.x + 2, y: hut.y, z: hut.z + 2 }; source = 'hut' }
+  else if (bed) { anchor = { x: bed.x, y: bed.y, z: bed.z }; source = 'bed' }
+  else if (resumeAt) { anchor = { x: resumeAt.x, y: resumeAt.y, z: resumeAt.z }; source = 'resume' }
+  if (!anchor || !pos) return { anchor, source, dist: null, far: false }
+  const d = Math.hypot(anchor.x - pos.x, anchor.z - pos.z)
+  return { anchor, source, dist: d, far: d > D }
+}
+
+// GO-HOME-FIRST recovery, survival tier (outranks gear-up/gather): if we respawned FAR from
+// home, trek back BEFORE resuming any local work, then rebuild the bed + re-assert the spawn
+// so future deaths return HOME instead of world spawn - closing the "abandon base at world
+// spawn" loop. Bounded (maxLegs) + honest: an unreachable home fails loudly and the caller
+// retries on the next respawn rather than wedging forever. Food/threat survival still applies
+// en route (auto-eat + nav's water/pit/climb recovery run through walkStaged). Distinct from
+// recoverSpawnAnchor (which is gated on the spawn-suspect flag AND no build to resume): this
+// fires purely on DISTANCE, considers the build site as a fallback anchor, and explicitly
+// rebuilds the bed. RECOVER_HOME=0 disables it at the caller.
+async function recoverHome (bot, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const say = opts.say || (() => {})
+  if (!bot.entity) return { far: false }
+  const decision = homeRecoveryDecision({
+    hut: hutAnchor(), bed: knownBed(), resumeAt: opts.resumeAt,
+    pos: bot.entity.position, dist: opts.dist
+  })
+  if (!decision.far) { dbg('recoverHome: ' + (decision.anchor ? 'within ' + Math.round(decision.dist) + 'b of the ' + decision.source + ' - already home, nothing to do' : 'no home anchor remembered - nothing to trek to')); return { ...decision, arrived: false } }
+  const { anchor } = decision
+  // The exact line a live watcher greps for.
+  say(`landed ${Math.round(decision.dist)} blocks from home - trekking back before anything else`)
+  dbg('recoverHome: ' + Math.round(decision.dist) + 'b from the ' + decision.source + ' at ' + anchor.x + ',' + anchor.z + ' - going home before gear-up/gather')
+  const distNow = () => Math.hypot(anchor.x - bot.entity.position.x, anchor.z - bot.entity.position.z)
+  const arrive = opts.arrive != null ? opts.arrive : 8
+  const maxLegs = opts.maxLegs != null ? opts.maxLegs : 12 // bounded so an unreachable home can't wedge us here forever
+  for (let leg = 0; leg < maxLegs && distNow() > arrive && !isStopped(); leg++) {
+    const before = distNow()
+    try { await walkStaged(bot, anchor.x, anchor.z, { isStopped, range: arrive, timeoutMs: 300000 }) } catch (e) { dbg('recoverHome: trek leg ' + leg + ' failed (' + e.message + ')') }
+    if (before - distNow() < 4 && distNow() > arrive) dbg('recoverHome: leg ' + leg + ' made no headway (still ' + Math.round(distNow()) + 'b out)')
+  }
+  const arrived = distNow() <= Math.max(arrive, 16)
+  if (!arrived) { dbg('recoverHome: still ' + Math.round(distNow()) + 'b out after ' + maxLegs + ' legs - giving up honestly, will retry on the next respawn'); return { ...decision, arrived: false } }
+  // Home: rebuild the bed if a creeper took it, then FORCE-re-assert the spawn so the NEXT
+  // death lands here, not at world spawn. ensureSpawnBed also rebuilds via ensureHutBed, but
+  // call ensureHutBed first so the bed physically exists before we try to sleep-anchor on it.
+  let bedOk = false
+  try {
+    const hut = hutAnchor()
+    if (hut) await ensureHutBed(bot, new Vec3(hut.x, hut.y, hut.z), { isStopped, say }).catch(() => 'fail')
+    bedOk = await ensureSpawnBed(bot, { isStopped, say, force: true, maxTrek: 1e9 }).catch(() => false)
+  } catch (e) { dbg('recoverHome: bed re-assert failed (' + e.message + ')') }
+  dbg('recoverHome: home - spawn ' + (bedOk ? 're-asserted at the bed (future deaths return here)' : 'could NOT be re-asserted (no usable bed - will retry next respawn)'))
+  return { ...decision, arrived: true, bedOk }
+}
+
 // Sleep in the remembered bed if we're standing near it. Returns true only if we actually
 // slept through to daylight (or the night got skipped) - anything else falls back to the pit.
 async function sleepInBedHere (bot, { say = () => {}, isStopped = () => false } = {}) {
@@ -5548,4 +5616,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, setSpawnSuspect, isSpawnSuspect, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, setBuildZone, setDebugSink }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, setBuildZone, setDebugSink }
