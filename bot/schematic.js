@@ -29,6 +29,7 @@ const Build = require('mineflayer-builder/lib/Build')
 const interactable = require('mineflayer-builder/lib/interactable.json')
 const provision = require('./provision.js') // night-shelter during builds (shelterNeeded/digInForNight)
 const buildorder = require('./buildorder.js') // pure placement order: bottom-up then nearest + self-cell trap guard
+const orient = require('./orient.js') // pure orientation fallback when the builder lib's facingData lacks a block
 const navigate = require('./navigate.js') // the ONE deadline-goto implementation
 
 // DURABLE crash guard (re-applied here so a future `npm install` can't lose it, like
@@ -418,10 +419,18 @@ async function tryPlace (bot, build, action, item) {
   if (!faces.length) return false
   // getFacing throws on any facing-bearing block missing from mineflayer-builder's stale
   // facingData.json (newer 1.21 stairs/doors: cherry/bamboo/copper/pale_oak...). Unguarded
-  // that crash aborts the ENTIRE build (and clears the resume). Fall back to an unoriented
-  // placement - the block still goes down, at worst mis-rotated - never crash the build.
+  // that crash aborts the ENTIRE build (and clears the resume). ITEM 5(2): instead of an
+  // UNORIENTED fallback (mis-rotated stairs/doors), derive the orientation straight from the
+  // blockstate's own `facing`/`axis` properties (orient.resolveOrientation - independent of
+  // the lib's stale table) so the block still goes down FACING THE RIGHT WAY.
   let facing, is3D
-  try { ({ facing, is3D } = build.getFacing(action.state, properties.facing)) } catch { facing = undefined; is3D = false }
+  try {
+    ({ facing, is3D } = build.getFacing(action.state, properties.facing))
+  } catch {
+    const o = orient.resolveOrientation(properties)
+    if (o && o.facing && o.kind === 'facing') { facing = new Vec3(o.facing[0], o.facing[1], o.facing[2]); is3D = o.is3D; dbg('orient: builder lib lacks ' + item.name + ' - placing facing ' + properties.facing + ' from the blockstate') }
+    else { facing = undefined; is3D = false }
+  }
 
   // CHESTS place DELIBERATELY (facing + merging are load-bearing): the generic path
   // gave the hut bank two mismatched singles (418,66,86 east + 418,66,87 north, live) -

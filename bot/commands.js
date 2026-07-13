@@ -2794,7 +2794,18 @@ async function autoBuild (bot, schem, at, opts = {}) {
   // only ever begs a player for things the bot truly cannot obtain itself.
   checklistStep('build')
   buildProgress = { phase: 'placing blocks', material: null, have: 0, need: 0 }
-  const fetch = async (n, cnt) => { await resources.acquire(bot, n, cnt || 1, { near: home, isStopped, say, batch: 128, planOpts: { primaryWood } }) }
+  let lastRestock = 0
+  const fetch = async (n, cnt) => {
+    await resources.acquire(bot, n, cnt || 1, { near: home, isStopped, say, batch: 128, planOpts: { primaryWood } })
+    // MULTI-MATERIAL BATCHING (throughput): we walked to the bank for `n` - while we're here,
+    // top up the OTHER low, banked, still-needed BOM materials in the SAME visit, so a castle
+    // phase doesn't trek back to the bank every time the placement order switches block type.
+    // Throttled (a bank trip is expensive; not every fetch) and withdraw-only (never gathers).
+    if (Date.now() - lastRestock > 30000) {
+      lastRestock = Date.now()
+      try { const extra = await resources.restockFromBank(bot, bom, { near: home, isStopped }); if (extra) dbg('build: batched restock of +' + extra + ' items in one bank visit') } catch (e) { dbg('build: batched restock failed (' + e.message + ')') }
+    }
+  }
   if (chest || resources.verifiedChests(bot, home, 32).length) {
     await stash()
     const invDirt = provision.inventoryCounts(bot).dirt || 0

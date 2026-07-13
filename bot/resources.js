@@ -21,6 +21,7 @@ const fs = require('fs')
 const path = require('path')
 const { Vec3 } = require('vec3')
 const provision = require('./provision')
+const restock = require('./restock') // pure multi-material batching decision
 
 let dbgSink = null
 function setDebugSink (fn) { dbgSink = fn }
@@ -326,6 +327,36 @@ async function acquire (bot, name, count = 1, opts = {}) {
   return packHas() >= count || packHas() > before
 }
 
+// MULTI-MATERIAL RESTOCK (throughput): while at the bank fetching one material for a big
+// build, top up the OTHER low, banked, still-needed materials in the SAME visit - a castle
+// BOM has many block types and fetching one-at-a-time means a bank trip every time the
+// placement order switches material. `remainingBom` = {item: count still to place}. Only
+// withdraws (never gathers/crafts here - that's acquire's job); the pure `restock.restockPlan`
+// picks what/how much (most-needed first, capped). Returns total items withdrawn.
+async function restockFromBank (bot, remainingBom, opts = {}) {
+  if (!remainingBom || !Object.keys(remainingBom).length) return 0
+  const pack = provision.inventoryCounts(bot)
+  // cheap bank tally: cached counts across verified chests near `near` (no forced re-reads)
+  const bank = {}
+  for (const e of verifiedChests(bot, opts.near, opts.maxDist)) {
+    const c = cachedChest(e)
+    for (const [n, k] of Object.entries((c && c.counts) || {})) bank[n] = (bank[n] || 0) + k
+  }
+  const plan = restock.restockPlan(remainingBom, pack, bank, {
+    perItem: opts.perItem != null ? opts.perItem : 64,
+    lowAt: opts.lowAt != null ? opts.lowAt : 16,
+    maxItems: opts.maxItems != null ? opts.maxItems : 8
+  })
+  if (!plan.length) return 0
+  dbg('restock: one bank visit tops up [' + plan.map(p => p.count + ' ' + p.item).join(', ') + ']')
+  let total = 0
+  for (const p of plan) {
+    if (opts.isStopped && opts.isStopped()) break
+    try { total += await withdrawItems(bot, p.item, p.count, { near: opts.near }) } catch (e) { dbg('restock ' + p.item + ': ' + e.message) }
+  }
+  return total
+}
+
 // ---- food is a resource too --------------------------------------------------------
 
 const RISKY_FOOD = /rotten_flesh|spider_eye|poisonous_potato|pufferfish|^chicken$|^porkchop$|^beef$|^mutton$|^rabbit$|^cod$|^salmon$/
@@ -381,6 +412,7 @@ module.exports = {
   reconcile,
   runReconciled,
   acquire,
+  restockFromBank,
   ensureFood,
   setDebugSink
 }
