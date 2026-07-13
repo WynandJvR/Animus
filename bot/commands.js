@@ -752,31 +752,62 @@ async function ironArmorBootstrap (bot, opts = {}) {
   const ironScore = () => { const c = provision.inventoryCounts(bot); return (c.raw_iron || 0) + (c.iron_ingot || 0) * 2 }
   const bareBefore = bareCount(); const ironBefore = ironScore()
   let failReason = null
+  // INCREMENTAL, CHEAPEST-FIRST (operator: graceful degradation). Gathering all 24 iron
+  // before crafting anything meant ZERO armor worn until the whole set landed - an all-or-
+  // nothing cliff that could take an hour+. Instead craft+WEAR one piece at a time, cheapest
+  // first (boots 4 -> helmet 5 -> leggings 7 -> chestplate 8), so partial protection goes
+  // on ASAP and an interrupt (night/death/stop) still leaves the finished pieces WORN.
+  const IRON_PIECES = [
+    { item: 'iron_boots', slot: 'feet' },
+    { item: 'iron_helmet', slot: 'head' },
+    { item: 'iron_leggings', slot: 'legs' },
+    { item: 'iron_chestplate', slot: 'torso' }
+  ]
+  const NEED = { feet: 4, head: 5, legs: 7, torso: 8 } // ingots per iron piece
+  const homeXYZ = { x: Math.round(at.x), y: Math.floor(at.y), z: Math.round(at.z) }
+  const runOpts = { say, isStopped, restoreMovements: restore, homeY: Math.floor(at.y), home: homeXYZ, avoid }
+  const bareList = () => IRON_PIECES.filter(p => !wornArmor(bot)[p.slot])
   try {
-    const want = {}
-    const worn = wornArmor(bot)
-    if (!worn.head) want.iron_helmet = 1
-    if (!worn.torso) want.iron_chestplate = 1
-    if (!worn.legs) want.iron_leggings = 1
-    if (!worn.feet) want.iron_boots = 1
     // stage 1: a stone pick FIRST (the planner orders it after the iron gather that
     // needs it - offline-verified); stage 2 then plans cleanly around the owned pick
     if (!(bot.inventory ? bot.inventory.items() : []).some(i => /(stone|iron|diamond)_pickaxe/.test(i.name))) {
       const pprec = await resources.reconcile(bot, { stone_pickaxe: 1 }, { near: at, planOpts: { primaryWood } })
-      if (pprec.withdraws.length || pprec.plan.tasks.length) await resources.runReconciled(bot, pprec, { say, isStopped, restoreMovements: restore, homeY: Math.floor(at.y), home: { x: Math.round(at.x), y: Math.floor(at.y), z: Math.round(at.z) }, avoid })
+      if (pprec.withdraws.length || pprec.plan.tasks.length) await resources.runReconciled(bot, pprec, runOpts)
     }
-    // reconcile: banked iron/ingots/armor pieces count before any mining happens
-    const irec = await resources.reconcile(bot, want, { near: at, planOpts: { primaryWood, furnacesNearby: provision.countFurnacesNear(bot) } })
-    const ip = irec.plan
-    if (Object.keys(ip.unobtainable || {}).length) { failReason = 'unobtainable: ' + Object.keys(ip.unobtainable).join(', '); dbg('iron bootstrap: unobtainable ' + JSON.stringify(ip.unobtainable)) }
-    else if (ip.tasks.length || irec.withdraws.length) {
-      say('no cows around for leather - mining iron for real armor')
-      dbg('iron bootstrap plan: ' + ip.tasks.map(t => `${t.type}:${t.item || t.output}x${t.count || t.crafts || ''}`).join(' > '))
-      await resources.runReconciled(bot, irec, { say, isStopped, restoreMovements: restore, homeY: Math.floor(at.y), home: { x: Math.round(at.x), y: Math.floor(at.y), z: Math.round(at.z) }, avoid })
+    // stage 2: ONE batch gather for all the iron the bare slots need (banked iron counts
+    // first). A single excursion amortizes the walk-out/descend overhead and earns a real
+    // wall-clock budget (deadline scales with count) - per-piece 4-iron gathers each got a
+    // ~2min budget mostly eaten by travel and never finished a piece.
+    if (!isStopped()) {
+      const totalIron = bareList().reduce((s, p) => s + NEED[p.slot], 0)
+      const rawRec = await resources.reconcile(bot, { raw_iron: totalIron }, { near: at, planOpts: { primaryWood, furnacesNearby: provision.countFurnacesNear(bot) } })
+      if (Object.keys(rawRec.plan.unobtainable || {}).length) { failReason = 'unobtainable: ' + Object.keys(rawRec.plan.unobtainable).join(', '); dbg('iron bootstrap: raw_iron unobtainable ' + JSON.stringify(rawRec.plan.unobtainable)) }
+      else if (rawRec.plan.tasks.length || rawRec.withdraws.length) {
+        say('no cows around for leather - mining iron for real armor')
+        dbg('iron bootstrap gather: ' + rawRec.plan.tasks.map(t => `${t.type}:${t.item || t.output}x${t.count || t.crafts || ''}`).join(' > '))
+        await resources.runReconciled(bot, rawRec, runOpts)
+      }
     }
-    // wear whatever the run produced (also mops up pieces that were banked all along)
-    const r = await handle(bot, 'wear')
-    dbg('iron bootstrap: wear -> ' + r)
+    // stage 3: smelt+craft+WEAR cheapest-first from whatever the excursion produced. A
+    // partial haul still armors the cheap slots NOW (operator: graceful degradation) -
+    // boots(4) -> helmet(5) -> leggings(7) -> chestplate(8). Stop at the first piece we
+    // can't yet afford (its reconcile would want to GATHER more) and let a later pass
+    // finish it; the iron already mined is banked and counts next time.
+    for (const p of IRON_PIECES) {
+      if (isStopped()) break
+      if (wornArmor(bot)[p.slot]) continue
+      const rec = await resources.reconcile(bot, { [p.item]: 1 }, { near: at, planOpts: { primaryWood, furnacesNearby: provision.countFurnacesNear(bot) } })
+      // needs a fresh GATHER -> we're short on iron for this piece; don't start another
+      // mining excursion this pass (that's the next pass's job) - stop here.
+      if ((rec.plan.tasks || []).some(t => t.type === 'gather')) { dbg('iron bootstrap: short of iron for ' + p.item + ' - stopping, will finish next pass'); if (!failReason) failReason = 'short of iron for ' + p.item; break }
+      if (rec.plan.tasks.length || rec.withdraws.length) {
+        dbg('iron bootstrap ' + p.item + ' craft: ' + rec.plan.tasks.map(t => `${t.type}:${t.item || t.output}x${t.count || t.crafts || ''}`).join(' > '))
+        await resources.runReconciled(bot, rec, runOpts)
+      }
+      const r = await handle(bot, 'wear')
+      dbg('iron bootstrap: after ' + p.item + ' -> ' + r + ' | worn: [' + Object.values(wornArmor(bot)).filter(Boolean).join(', ') + ']')
+      if (!wornArmor(bot)[p.slot]) { dbg('iron bootstrap: ' + p.item + ' craft did not land - stopping this pass'); break }
+    }
   } catch (e) { failReason = e.message; dbg('iron bootstrap failed (' + e.message + ') - continuing bare') }
   // score the attempt: worn a new piece or netted iron = progress (reset back-off);
   // else widen the back-off so the next passes work the job instead of re-flailing

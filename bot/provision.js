@@ -3053,9 +3053,22 @@ async function gatherLoop (bot, item, count, opts = {}) {
       if (canStrip && reachFails >= 3 && stripDug < MAX_STRIP && stripBudget() > 0) {
         if (opts.say && stripDug === 0) opts.say(`the ${sources[0]} is all buried - digging down to it`)
         dbg('  gather buried-strip #' + stripDug + ' budget=' + stripBudget() + ' at y=' + Math.floor(bot.entity.position.y))
+        // APRON GUARD: on our own hut apron digShaftDown always returns 0. The old code
+        // then did stripDug++ ANYWAY, so buried ore near the hut burned the whole shaft
+        // budget in seconds (verified live: stripDug 0->10 in 6s, all dug=0, then stranded
+        // deep with a spent budget). Step to diggable ground first, and DON'T charge it.
+        if (onHutApron(bot) || insideOwnStructure(bot)) {
+          const off = { x: bot.entity.position.x + (bot.entity.position.x >= home.x ? 10 : -10), z: bot.entity.position.z + (bot.entity.position.z >= home.z ? 10 : -10) }
+          dbg('  gather buried-strip on my hut apron - sidestepping to ' + Math.round(off.x) + ',' + Math.round(off.z) + ' (not burning shaft budget)')
+          try { await gotoWithTimeout(bot, new goals.GoalNearXZ(off.x, off.z, 2), 12000) } catch {}
+          reachFails = 0; continue
+        }
         const dug = await digShaftDown(bot, stripBudget(), { isStopped, home })
-        if (dug > 0) { const got = await mineTunnel(bot, item, deepOre ? 24 : 16, stripDug, { isStopped }); dbg('  gather buried-strip dug=' + dug + ' tunnel got=' + got) } else dbg('  gather buried-strip dug=0')
-        stripDug++; reachFails = 0
+        // COUNT ONLY SUCCESSFUL SHAFTS (mirrors the strip-shaft path): a dug=0 shaft made
+        // no descent, so charging it against MAX_STRIP just exhausts the budget uselessly.
+        if (dug > 0) { const got = await mineTunnel(bot, item, deepOre ? 24 : 16, stripDug, { isStopped }); dbg('  gather buried-strip dug=' + dug + ' tunnel got=' + got); stripDug++ }
+        else { dbg('  gather buried-strip dug=0 - fresh ground'); const off = { x: bot.entity.position.x + 6, z: bot.entity.position.z + 6 }; try { await gotoWithTimeout(bot, new goals.GoalNearXZ(off.x, off.z, 2), 10000) } catch {} }
+        reachFails = 0
       }
       continue
     }
