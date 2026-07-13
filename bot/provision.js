@@ -18,6 +18,7 @@ const hutModel = require('./hut-model.js') // self-structure model: schema-corre
 const mining = require('./mining.js') // pure mining strategy: depth model, descent-safety, branch-mine geometry
 const shelterSite = require('./shelter.js') // pure shelter-siting: "can a safe pit be dug here" + nearest diggable dry cell
 const foodSec = require('./food.js') // pure food-security decisions: when to proactively build a fishing supply
+const arbiter = require('./arbiter.js') // JOB-LEVEL arbitration: survive > progress authority (jobSurvivalNeed/jobMayProgress)
 // Visible, UNTHROTTLED build tracing to stdout (the say() progress goes through a 40s
 // throttle that hides failures). Enable with BUILD_DEBUG=1 to see every plan/task/smelt step.
 let dbgSink = null // injected by index.js: debug lines persist to logs/bot-events.log
@@ -1278,16 +1279,21 @@ async function branchMine (bot, item, count, opts = {}) {
   const pickLow = parseInt(process.env.MINE_PICK_LOW || '20', 10)
   dbg('  branchMine: item=' + item + ' need=' + count + ' surfaceY=' + surfaceY + ' targetY=' + targetY + ' minIronY=' + minIronY)
 
-  // FOOD IS A SURVIVAL PREREQUISITE (survive > progress, like the arbiter): NEVER go 40 blocks
-  // underground hungry - it chip-dies down there (live: descended to y40 at food=10, died
-  // repeatedly). Secure food to comfortable FIRST; if it's still low, don't descend this
-  // excursion - eat up top and come back fed. Env: MINE_MIN_FOOD (default 14).
-  const MINE_MIN_FOOD = parseInt(process.env.MINE_MIN_FOOD || '14', 10)
-  if ((bot.food ?? 20) < MINE_MIN_FOOD && !isStopped()) {
-    dbg('  branchMine: food ' + bot.food + ' < ' + MINE_MIN_FOOD + ' - securing food BEFORE descending (not mining deep hungry)')
-    if (opts.say) say('too hungry to mine deep - eating first')
-    try { await secureFood(bot, { home: opts.home, isStopped, say: opts.say, threshold: MINE_MIN_FOOD }) } catch (e) { dbg('  branchMine: pre-mine secureFood failed (' + e.message + ')') }
-    if ((bot.food ?? 20) < MINE_MIN_FOOD) return { gathered: got(), reason: 'too hungry to mine deep (food ' + bot.food + ') - fed up top, will descend next pass' }
+  // JOB ARBITER (survive > progress): a progress job (deep mining) may not START while an
+  // unmet SURVIVE need exists - the ONE authority replaces the old scattered food<14 check.
+  // If the need is food, resolve it (secureFood) and re-check; any other need (threat/hp/lava/
+  // shelter) -> yield the excursion so the survival reflexes handle it, resume next pass.
+  {
+    let need = survivalNeed(bot) // start-gate: foodThreshold 14
+    if (need && !isStopped()) {
+      dbg('  branchMine: SURVIVE need before descending: ' + need.need + ' (' + need.reason + ') - resolving before progress')
+      if (need.need === 'food') {
+        if (opts.say) say('too hungry to mine deep - eating first')
+        try { await secureFood(bot, { home: opts.home, isStopped, say: opts.say, threshold: 14 }) } catch (e) { dbg('  branchMine: pre-mine secureFood failed (' + e.message + ')') }
+        need = survivalNeed(bot)
+      }
+      if (need) return { gathered: got(), reason: 'yielding to survival need (' + need.need + ') before descending - resume when met' }
+    }
   }
 
   // SELF-SUFFICIENT TOOLING: keep a working pickaxe at depth. Re-tool BEFORE the held pick
@@ -1398,13 +1404,17 @@ async function branchMine (bot, item, count, opts = {}) {
       try { await climbToSurface(bot, Math.floor(surfaceY), { isStopped }) } catch {}
       return { gathered: got(), reason: 'broke off to survive a mob / low hp underground' }
     }
-    // FOOD BAIL: if hunger crashes mid-mine, climb out and go eat - don't chip-die deep at low
-    // food (starvation stops at 0.5 heart but the mobs down here finish a starving bot).
-    if ((bot.food ?? 20) <= 6) {
-      dbg('  branchMine: food ' + bot.food + ' critical mid-mine - climbing out to eat')
-      if (opts.say) say('starving down here - heading up to eat')
-      try { await climbToSurface(bot, Math.floor(surfaceY), { isStopped }) } catch {}
-      return { gathered: got(), reason: 'broke off to eat (food ' + bot.food + ') - too hungry to mine deep' }
+    // JOB ARBITER mid-activity (CONTINUE gate, critical thresholds): a normal food dip after
+    // descending fed is fine, but a genuine crash (food <=6) or a new danger the mineDanger
+    // check above missed -> climb out and yield. One authority, critical foodThreshold=6.
+    {
+      const need = survivalNeed(bot, { foodThreshold: 6 })
+      if (need && need.need === 'food') {
+        dbg('  branchMine: food ' + bot.food + ' critical mid-mine (arbiter) - climbing out to eat')
+        if (opts.say) say('starving down here - heading up to eat')
+        try { await climbToSurface(bot, Math.floor(surfaceY), { isStopped }) } catch {}
+        return { gathered: got(), reason: 'broke off to eat (food ' + bot.food + ') - too hungry to mine deep' }
+      }
     }
     // KEEP A WORKING PICK: re-tool at depth before the pick breaks. If it's gone AND we can't
     // make one down here (no cobble/sticks/planks/table), climb out CLEANLY and bail honestly -
@@ -2653,10 +2663,10 @@ async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () =
     // where the nearest pond sits beyond 48 blocks: every camp farm attempt deferred
     // forever while the bot starved (live, all morning). Ponds seen during any earlier
     // attempt are in the infra registry - trek back to one.
-    const known = recallInfra('water', bot.entity.position, 120)
+    const known = recallInfra('water', bot.entity.position, 250) // the discovered pond can be >120 out (sweep ring 96/144)
     if (known && !isStopped()) {
       dbg('  wheat farm: no water in sight - walking to remembered pond at ' + known.x + ',' + known.z)
-      try { await walkStaged(bot, known.x, known.z, { isStopped, range: 6, timeoutMs: 90000 }) } catch {}
+      try { await walkStaged(bot, known.x, known.z, { isStopped, range: 6, timeoutMs: 150000 }) } catch {}
       waters = findWaters()
       // ONLY forget the remembered pond if we actually ARRIVED near it and it's genuinely
       // gone - a trek that fell short (blocked path) must NOT erase a good remembered pond
@@ -2670,35 +2680,53 @@ async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () =
   if (!waters.length) { dbg('  wheat farm: no surface water within 48 - deferred'); return false }
   const w = waters[0]
   rememberInfra('water', { x: w.x, y: w.y, z: w.z }) // future camp passes trek straight back
-  // 2) a hoe (wooden: 2 planks + 2 sticks)
+  // 2) a hoe (wooden: 2 planks + 2 sticks). ACQUIRE IT VIA THE RESOURCE MODEL, never a bare
+  // runCraft: runCraft crafts only from what's ON HAND and THROWS "cannot craft" when
+  // planks/sticks aren't already held - the exact live blocker ("no hoe and cannot craft one")
+  // even though the bot had logs. reconcile withdraws banked planks/sticks/hoe if any, else
+  // plans wooden_hoe <- (planks + sticks) <- planks <- logs and GATHERS wood if short; a bot
+  // that can reach one log can make a hoe. runReconciled executes withdraw+gather+craft.
   let hoe = (bot.inventory ? bot.inventory.items() : []).find(i => /_hoe$/.test(i.name))
   if (!hoe) {
-    try { await runCraft(bot, 'wooden_hoe', 1, true, { isStopped, home }) } catch (e) { dbg('  wheat farm: no hoe and cannot craft one (' + e.message + ') - deferred'); return false }
+    try {
+      const res = require('./resources.js') // lazy (resources requires provision at load)
+      const rec = await res.reconcile(bot, { wooden_hoe: 1 }, { near: home, planOpts: { primaryWood: detectWood(bot) || 'oak' } })
+      dbg('  wheat farm: acquiring a wooden hoe (' + (rec.plan.tasks.map(t => `${t.type}:${t.item || t.output}`).join(' > ') || (rec.withdraws.length ? 'from bank' : 'from hand')) + ')')
+      if (rec.withdraws.length || rec.plan.tasks.length) await res.runReconciled(bot, rec, { isStopped, say, home })
+    } catch (e) { dbg('  wheat farm: hoe acquisition failed (' + e.message + ')') }
     hoe = (bot.inventory ? bot.inventory.items() : []).find(i => /_hoe$/.test(i.name))
-    if (!hoe) return false
+    if (!hoe) { dbg('  wheat farm: still no hoe (no reachable wood/planks/sticks or no table) - deferred'); return false }
+    dbg('  wheat farm: got a ' + hoe.name)
   }
-  // 3) seeds - break grass near the water until we hold a handful
+  // 3) seeds - break tall grass/ferns to get wheat_seeds. ACQUIRE them (search WIDE + roam a
+  // few compass legs if the pond bank is barren) rather than deferring - grass grows patchily
+  // and the pond edge often has none, but a meadow is usually within a short walk.
   const seedCount = () => countItem(bot, 'wheat_seeds')
-  if (seedCount() < 6) {
-    const grassIds = ['short_grass', 'tall_grass', 'grass'].map(n => mcData.blocksByName[n] && mcData.blocksByName[n].id).filter(x => x != null)
+  if (seedCount() < 3) {
+    const grassIds = ['short_grass', 'tall_grass', 'grass', 'fern', 'large_fern'].map(n => mcData.blocksByName[n] && mcData.blocksByName[n].id).filter(x => x != null)
     try { await gotoWithTimeout(bot, new goals.GoalNear(w.x, w.y, w.z, 4), 60000) } catch {}
-    let broken = 0
-    while (seedCount() < 6 && broken < 40 && !isStopped()) {
-      let g = bot.findBlock({ matching: grassIds, maxDistance: 32 }) // 16 found nothing at the pond edge (live) - grass grows patchily
-      if (!g) { // barren bank - one hop toward home usually lands in the meadow
-        try { await gotoWithTimeout(bot, new goals.GoalNearXZ(home.x, home.z, 8), 30000) } catch {}
-        g = bot.findBlock({ matching: grassIds, maxDistance: 32 })
+    let broken = 0; let legs = 0
+    const searchGrass = () => bot.findBlock({ matching: grassIds, maxDistance: 48 })
+    while (seedCount() < 3 && broken < 60 && !isStopped()) {
+      let g = searchGrass()
+      if (!g && legs < 4) { // barren here - roam a compass leg toward likely meadow, then re-search
+        legs++
+        const dir = [[1, 0], [-1, 0], [0, 1], [0, -1]][legs % 4]
+        const tx = Math.round(bot.entity.position.x + dir[0] * 32); const tz = Math.round(bot.entity.position.z + dir[1] * 32)
+        dbg('  wheat farm: no grass in 48 - roaming a leg to ' + tx + ',' + tz + ' to find grass for seeds')
+        try { await walkStaged(bot, tx, tz, { isStopped, range: 6, timeoutMs: 40000 }) } catch {}
+        g = searchGrass()
       }
       if (!g) break
       try {
         if (bot.entity.position.distanceTo(g.position) > 4) await gotoWithTimeout(bot, new goals.GoalNear(g.position.x, g.position.y, g.position.z, 2), 10000)
         await bot.dig(g); broken++
       } catch { break }
-      if (broken % 8 === 0) await collectDrops(bot, 6)
+      if (broken % 6 === 0) await collectDrops(bot, 6)
     }
     await collectDrops(bot, 8)
     dbg('  wheat farm: broke ' + broken + ' grass -> ' + seedCount() + ' seeds')
-    if (seedCount() < 1) { dbg('  wheat farm: no seeds to be had here - deferred'); return false }
+    if (seedCount() < 1) { dbg('  wheat farm: no grass anywhere within reach after ' + legs + ' legs - genuinely no seeds here, deferred'); return false }
   }
   // 4) till + plant the water's bank: same-y neighbours of the waterline
   say('setting up a wheat farm by the water - no more starving')
@@ -2831,46 +2859,76 @@ function nearestFoodAnimal (bot, maxDist = 40) {
   return best
 }
 
+// Eat what's in the pack up to comfortable - cook raw meat FIRST (raw is poor food), then eat.
+// Fixes "idled at food=13 holding beef" - never sit hungry with food in hand.
+async function eatFromPackToComfortable (bot, isStopped = () => false) {
+  try { if (bot.food != null && bot.food < 18 && Object.keys(RAW_COOKABLE).some(n => countItem(bot, n) > 0)) await cookRawMeat(bot, { isStopped }) } catch {}
+  try { await eatUp(bot) } catch {}
+}
+
 async function ensureFoodSupply (bot, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const say = opts.say || (() => {})
   const anchor = opts.home || { x: Math.round(bot.entity.position.x), z: Math.round(bot.entity.position.z) }
-  // Already have a farm? Tend it (harvest ripe -> replant -> bread) - cheap when nothing's ripe.
-  if (hasStandingFarm()) {
-    try { await tendWheatFarm(bot, { isStopped, say }) } catch (e) { dbg('  foodSupply: tend failed (' + e.message + ')') }
-    return { ok: true, reason: 'wheat farm stands - tended it' }
+  const animalRange = parseInt(process.env.FOOD_ANIMAL_RANGE || '40', 10)
+  // 0) EAT what we carry first (cook raw -> eat to comfortable) - never idle hungry with food.
+  await eatFromPackToComfortable(bot, isStopped)
+  // DECISION LOOP (foodSupplyAction): tend / buildFarm-at-known-water / huntNear / sweep. The
+  // KEY fix - after a sweep discovers + remembers water, the NEXT iteration sees knownWater and
+  // BUILDS THE FARM there instead of idling at the hut ("found it, did nothing"). Bounded.
+  let sweeps = 0
+  for (let step = 0; step < 4 && !isStopped(); step++) {
+    if (hasStandingFarm()) {
+      try { await tendWheatFarm(bot, { isStopped, say }) } catch (e) { dbg('  foodSupply: tend failed (' + e.message + ')') }
+      return { ok: true, reason: 'wheat farm stands - tended it' }
+    }
+    const knownWater = recallInfra('water', bot.entity.position, 300)
+    const nearAnimal = nearestFoodAnimal(bot, animalRange)
+    const action = foodSec.foodSupplyAction(false, !!knownWater, !!nearAnimal)
+    dbg('  ensureFoodSupply[step ' + step + ']: action=' + action +
+        ' knownWater=' + (knownWater ? knownWater.x + ',' + knownWater.z : 'none') +
+        ' nearAnimal=' + (nearAnimal ? nearAnimal.name + '@' + Math.round(nearAnimal.dist) + 'b' : 'none'))
+    if (action === 'buildFarm') {
+      // THE MISSING HANDOFF: WALK to the found/remembered pond first (ensureWheatFarm only
+      // searches ~48 locally), VERIFY it's an open-sky pond ON ARRIVAL, then build there.
+      say('found water at ' + knownWater.x + ',' + knownWater.z + ' - going there to build a wheat farm')
+      dbg('  ensureFoodSupply: trekking to the pond at ' + knownWater.x + ',' + knownWater.z + ' to farm it')
+      try { await walkStaged(bot, knownWater.x, knownWater.z, { isStopped, range: 6, timeoutMs: 150000 }) } catch {}
+      // on arrival: is there OPEN-SKY water within reach? A remembered pond can be cave/covered
+      // (older pre-seesSky memory) - drop it and try the NEXT remembered pond, don't loop on it.
+      const md = require('minecraft-data')(bot.version)
+      const seesSky = p => { for (let dy = 1; dy <= 40; dy++) { const b = bot.blockAt(p.offset(0, dy, 0)); if (b && b.boundingBox === 'block' && !/_leaves$/.test(b.name)) return false } return true }
+      const arrived = Math.hypot(bot.entity.position.x - knownWater.x, bot.entity.position.z - knownWater.z) <= 10
+      const openWater = arrived && (bot.findBlocks({ matching: md.blocksByName.water.id, maxDistance: 24, count: 32 }) || []).some(p => { const a = bot.blockAt(p.offset(0, 1, 0)); return a && AIRISH(a.name) && seesSky(p) })
+      if (arrived && !openWater) {
+        dbg('  ensureFoodSupply: remembered pond ' + knownWater.x + ',' + knownWater.z + ' is cave/covered on arrival - forgetting it, trying the next')
+        try { forgetInfra('water', listInfra('water').find(e => e.x === knownWater.x && e.z === knownWater.z)) } catch {}
+        continue // loop: next remembered pond, or sweep farther
+      }
+      if (!arrived) { dbg('  ensureFoodSupply: could not reach the pond (trek fell short) - keeping it, will retry'); return { ok: false, reason: 'could not reach the discovered pond - retry next pass' } }
+      // we're AT an open-sky pond -> build the farm here (ensureWheatFarm finds water locally now)
+      try { await ensureWheatFarm(bot, { x: Math.round(bot.entity.position.x), z: Math.round(bot.entity.position.z) }, { isStopped, say, avoid: opts.avoid }) } catch (e) { dbg('  foodSupply: wheat farm setup error (' + e.message + ')') }
+      if (hasStandingFarm()) { await eatFromPackToComfortable(bot, isStopped); return { ok: true, reason: 'wheat farm PLANTED at the discovered pond ' + knownWater.x + ',' + knownWater.z } }
+      // at a good pond but the farm still deferred (hoe/seeds) - the pond is FINE, don't forget
+      // it; the wheat-farm log names the reason (now the hoe is resource-model-crafted). Retry.
+      dbg('  ensureFoodSupply: at the open-sky pond but farm setup deferred (hoe/seeds - see wheat-farm log)')
+      return { ok: false, reason: 'at the pond but farm setup deferred (hoe/seeds) - retry next pass' }
+    } else if (action === 'huntNear') {
+      dbg('  ensureFoodSupply: ' + nearAnimal.name + ' ' + Math.round(nearAnimal.dist) + 'b away - hunting it')
+      try { await huntForFood(bot, { isStopped, range: animalRange }) } catch {}
+      if (foodCount(bot) > 0) { await eatFromPackToComfortable(bot, isStopped); return { ok: true, reason: 'hunted a nearby animal' } }
+    } else { // 'sweep' - discover water/animals; widen the rings on later sweeps
+      const rings = sweeps === 0 ? [48, 96] : [96, 144, 192]
+      sweeps++
+      dbg('  ensureFoodSupply: no known food source - SWEEPING (rings ' + rings.join('/') + ') to discover one')
+      try {
+        const r = await scoutForFood(bot, anchor, { isStopped, say, rings, maxMs: opts.scoutMs || 240000 })
+        if (r && r.found === 'animals' && r.kills > 0) { await eatFromPackToComfortable(bot, isStopped); return { ok: true, reason: 'scouted out animals and hunted ' + r.kills } }
+        // the sweep remembered water -> the NEXT loop iteration will pick 'buildFarm'
+      } catch (e) { dbg('  foodSupply: scout failed (' + e.message + ')') }
+    }
   }
-  // GATE INPUTS (instrumented so a live watch can see WHY it does/doesn't sweep): a reachable
-  // remembered pond, and a food animal within a REAL range (distance-bounded, not server-wide).
-  const knownWater = recallInfra('water', bot.entity.position, 128)
-  const nearAnimal = nearestFoodAnimal(bot, parseInt(process.env.FOOD_ANIMAL_RANGE || '40', 10))
-  dbg('  ensureFoodSupply gate: knownWater=' + (knownWater ? knownWater.x + ',' + knownWater.z : 'none') +
-      ' nearAnimal=' + (nearAnimal ? nearAnimal.name + '@' + Math.round(nearAnimal.dist) + 'b' : 'none') +
-      ' hasFarm=' + hasStandingFarm() + ' stopped=' + isStopped())
-  // DISCOVER FIRST (the headline fix): no farm + no NEAR animal + no reachable known pond ->
-  // SWEEP unexplored ground (explore.js octant×ring) to FIND water/animals. A real player
-  // scouts a new area outward - it doesn't wait to be told or to starve. Must EXECUTE the walk.
-  if (foodSec.shouldSweepForFood(hasStandingFarm(), !!nearAnimal, !!knownWater) && !isStopped()) {
-    dbg('  ensureFoodSupply: NO known food source - running the outward sweep to discover one')
-    try {
-      const r = await scoutForFood(bot, anchor, { isStopped, say, maxMs: opts.scoutMs || 240000 })
-      if (r && r.found === 'animals' && r.kills > 0) return { ok: true, reason: 'scouted out animals and hunted ' + r.kills }
-      // the sweep may have remembered water -> fall through to farm at it
-    } catch (e) { dbg('  foodSupply: scout failed (' + e.message + ')') }
-  } else if (nearAnimal && !isStopped()) {
-    // a real, close animal -> hunt it now (don't sweep past food that's right here)
-    dbg('  ensureFoodSupply: ' + nearAnimal.name + ' ' + Math.round(nearAnimal.dist) + 'b away - hunting it')
-    try { await huntForFood(bot, { isStopped, range: parseInt(process.env.FOOD_ANIMAL_RANGE || '40', 10) }) } catch {}
-    if (foodCount(bot) > 0) return { ok: true, reason: 'hunted a nearby animal' }
-  }
-  // Establish the wheat farm at the remembered/discovered pond (ensureWheatFarm treks to it).
-  let planted = false
-  try { planted = await ensureWheatFarm(bot, anchor, { isStopped, say, avoid: opts.avoid }) } catch (e) { dbg('  foodSupply: wheat farm setup failed (' + e.message + ')') }
-  // SECONDARY, opportunistic: if a food animal is ACTUALLY nearby now, grab it.
-  if (!planted && nearestFoodAnimal(bot, 24) && !isStopped()) {
-    try { await huntForFood(bot, { isStopped, range: 24 }) } catch {}
-  }
-  return { ok: hasStandingFarm() || foodCount(bot) > 0, reason: hasStandingFarm() ? 'wheat farm planted' : 'could not establish a farm yet (no reachable open-sky pond / no seeds - swept for one)' }
+  return { ok: hasStandingFarm() || foodCount(bot) > 0, reason: hasStandingFarm() ? 'wheat farm planted' : 'still looking for a farmable open-sky pond (swept, none tillable yet - will retry)' }
 }
 
 // Cheap check (NO bank walk): should a fed, idle, safe bot proactively establish its food
@@ -2881,6 +2939,43 @@ function needFoodSupply (bot) {
   const safe = !nearHostile(bot, 12) && (bot.health ?? 20) >= 12 && !isNight(bot) && !hasSolidCeiling(bot, 12)
   return foodSec.needsFoodSupply(bot.food, hasStandingFarm(), foodCount(bot), 0, safe)
 }
+
+// ---- JOB-LEVEL ARBITER: the bot->state snapshot the pure authority (arbiter.jobSurvivalNeed)
+// reads. This is the ONE place the scattered survival predicates are gathered; every progress
+// job consults survivalNeed(bot)/mayDoProgress(bot) instead of its own food/hp/threat checks.
+function survivalState (bot) {
+  const me = bot.entity && bot.entity.position
+  let threatDist = null
+  if (me) {
+    for (const e of Object.values(bot.entities || {})) {
+      if (!e || !e.position || (e.type !== 'mob' && e.type !== 'hostile')) continue
+      if (!SHELTER_HOSTILE.test((e.name || '').toLowerCase())) continue
+      const d = e.position.distanceTo(me); if (threatDist == null || d < threatDist) threatDist = d
+    }
+  }
+  let drowning = false
+  try { const h = me && bot.blockAt(me.floored().offset(0, 1, 0)); drowning = !!(h && /water|seagrass|kelp|bubble_column/.test(h.name)) } catch {}
+  return {
+    food: bot.food,
+    hp: bot.health,
+    threatDist,
+    drowning,
+    inLava: !!(bot.entity && bot.entity.isInLava),
+    onFire: false, // the auto-defend/hazard reflexes own fire; not a progress-gate need here
+    isNight: isNight(bot),
+    underArmored: underArmored(bot)
+  }
+}
+// The highest UNMET survival need blocking progress, or null. opts.foodThreshold: 14 to START a
+// progress job (default), 6 for a mid-activity CRITICAL bail. THE single authority.
+function survivalNeed (bot, opts = {}) {
+  if (!bot.entity) return null
+  const foodThreshold = opts.foodThreshold != null ? opts.foodThreshold : parseInt(process.env.PROGRESS_FOOD_MIN || '14', 10)
+  return arbiter.jobSurvivalNeed(survivalState(bot), { ...opts, foodThreshold })
+}
+// May a progress job (gearup/build/mine/gather) run RIGHT NOW? False when a SURVIVE need is
+// unmet. Callers yield to the need (secure food / flee / shelter) and resume once it's met.
+function mayDoProgress (bot, opts = {}) { return survivalNeed(bot, opts) == null }
 
 async function fishForFood (bot, { isStopped = () => false, say = () => {}, target = 6, home, scout = false } = {}) {
   if (hasSolidCeiling(bot, 12)) { dbg('  fishing: underground - not here'); return false }
@@ -3068,10 +3163,15 @@ async function scoutForFood (bot, home, opts = {}) {
   const waypoints = explore.octantSweep(anchor, { rings })
   const deadline = now + (opts.maxMs || 240000)
   const seesFood = () => Object.values(bot.entities || {}).some(e => e && e.position && FOOD_ANIMALS.test((e.name || '').toLowerCase()))
+  // Remember only OPEN-SKY water the wheat farm can actually use (the DISCOVERY<->ACTION
+  // mismatch fix): the sweep used to remember ANY air-topped water incl. cave/ravine pools that
+  // ensureWheatFarm then REJECTS (seesSky), so "found water" led to a farm that never built.
+  const seesSky = p => { for (let dy = 1; dy <= 40; dy++) { const b = bot.blockAt(p.offset(0, dy, 0)); if (b && b.boundingBox === 'block' && !/_leaves$/.test(b.name)) return false } return true }
   const rememberWaterNear = () => {
     try {
-      const w = (bot.findBlocks({ matching: mcData.blocksByName.water.id, maxDistance: 32, count: 16 }) || []).find(p => { const a = bot.blockAt(p.offset(0, 1, 0)); return a && AIRISH(a.name) })
-      if (w) { rememberInfra('water', { x: w.x, y: w.y, z: w.z }); dbg('  scoutForFood: remembered water at ' + w.x + ',' + w.z); return true }
+      const w = (bot.findBlocks({ matching: mcData.blocksByName.water.id, maxDistance: 32, count: 32 }) || [])
+        .find(p => { const a = bot.blockAt(p.offset(0, 1, 0)); return a && AIRISH(a.name) && seesSky(p) })
+      if (w) { rememberInfra('water', { x: w.x, y: w.y, z: w.z }); dbg('  scoutForFood: remembered OPEN-SKY water at ' + w.x + ',' + w.z + ' (farmable)'); return true }
     } catch {}
     return false
   }
@@ -5261,4 +5361,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, setSpawnSuspect, isSpawnSuspect, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, setBuildZone, setDebugSink }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, setSpawnSuspect, isSpawnSuspect, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, setBuildZone, setDebugSink }

@@ -51,4 +51,18 @@ function shouldSweepForFood (hasFarm, hasNearAnimal, hasKnownWater) {
   return !hasFarm && !hasNearAnimal && !hasKnownWater
 }
 
-module.exports = { DEFAULT_BUFFER, hasFoodSupply, needsFoodSupply, shouldSweepForFood }
+// The NEXT ACTION for the proactive food-supply flow, given what's known. This is the
+// discovery->action handoff that was BROKEN (live: the sweep FOUND + remembered water, then
+// the flow idled at the hut instead of building the farm there). The rule: a standing farm ->
+// tend it; KNOWN WATER (found by the sweep, or remembered) -> BUILD THE FARM at it (do NOT
+// keep sweeping for animals - water at ring 48 is plenty); a near animal but no water -> hunt
+// it; nothing known -> SWEEP outward to discover water/animals. Never "found it, did nothing".
+// PURE (three booleans in, an action string out). Offline-tested.
+function foodSupplyAction (hasFarm, hasKnownWater, hasNearAnimal) {
+  if (hasFarm) return 'tend'
+  if (hasKnownWater) return 'buildFarm' // the missing handoff: found water -> farm THERE
+  if (hasNearAnimal) return 'huntNear'
+  return 'sweep'
+}
+
+module.exports = { DEFAULT_BUFFER, hasFoodSupply, needsFoodSupply, shouldSweepForFood, foodSupplyAction }

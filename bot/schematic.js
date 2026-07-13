@@ -634,8 +634,23 @@ async function buildSurvival (bot, schem, at, opts = {}) {
     if (opts.prep !== false) { try { cleared = await prepSite(bot, schem, at, { isStopped }) } catch {} }
     if (cleared) say(`cleared ${cleared} bit(s) of vegetation`)
     let lastShelter = 0
+    let lastSurvive = 0
     for (;;) {
       if (isStopped()) { stopped = true; break }
+      // JOB ARBITER (survive > progress): building is a PROGRESS job - before placing the next
+      // block, yield to any unmet SURVIVE need (food/hp/threat), the ONE authority instead of
+      // the ad-hoc food/night checks below. Food need -> secure it and resume placing; a live
+      // threat -> let the reflexes handle it (short pause). Night-shelter keeps its own branch.
+      if (Date.now() - lastSurvive > 5000) {
+        lastSurvive = Date.now()
+        const need = provision.survivalNeed(bot)
+        if (need && need.need === 'food') {
+          dbg('build: SURVIVE need (food) mid-build - securing food before the next block')
+          try { await provision.secureFood(bot, { isStopped, say, threshold: 14 }) } catch {}
+          bot.pathfinder.setMovements(moves)
+          continue
+        }
+      }
       // NIGHT SHELTER (same as gatherLoop/runSmelt): a naked bot placing blocks at night is
       // a stationary target - it died at 29/44 to night mobs (verified live). Dig in, wait
       // it out, then carry on building.

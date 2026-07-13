@@ -96,9 +96,46 @@ function maneuverActive (minPri = PRIORITY.PROGRESS) {
 // tier is maneuvering). The inverse of maneuverActive - named for the call site.
 function mayInterrupt (reflexPri) { return !maneuverActive(reflexPri) }
 
+// ---- JOB-LEVEL ARBITRATION (survive > preserve > progress > idle at the GOAL level) -------
+// The maneuver ledger above governs NAVIGATION body-ownership. This governs which JOB the bot
+// may pursue: the big subsystems (secureFood, gearup, build, branchMine, recovery, shelter)
+// used to fire on their own triggers with scattered ad-hoc gates and FOUGHT (gearup started
+// before secureFood finished -> mined starving -> died). ONE authority, evaluated from a
+// survival-state snapshot: the highest UNMET need blocking progress. A PROGRESS job consults
+// jobMayProgress() before starting AND while continuing, and YIELDS to the need. PURE (a state
+// object in, a decision out - no bot) so it is offline-testable (bot/arbitertest.js) and has
+// no module cycle; the bot->state snapshot lives in provision.survivalState.
+//
+// state fields (all optional; absent = not blocking): food (0..20), hp (0..20),
+// threatDist (blocks to nearest hostile | null), drowning, onFire, inLava (bools),
+// isNight, underArmored (bools).
+// opts: foodThreshold (default 14 - the START gate; pass 6 for a mid-activity critical bail),
+//       hpCritical (6), threatRange (6).
+function jobSurvivalNeed (state, opts = {}) {
+  const s = state || {}
+  const hpCritical = opts.hpCritical != null ? opts.hpCritical : 6
+  const threatRange = opts.threatRange != null ? opts.threatRange : 6
+  const foodThreshold = opts.foodThreshold != null ? opts.foodThreshold : 14
+  // IMMEDIATE DANGER first (SURVIVE, non-negotiable)
+  if (s.inLava) return { tier: PRIORITY.SURVIVE, need: 'lava', reason: 'in lava' }
+  if (s.onFire) return { tier: PRIORITY.SURVIVE, need: 'fire', reason: 'on fire' }
+  if (s.drowning) return { tier: PRIORITY.SURVIVE, need: 'drowning', reason: 'head underwater' }
+  if (s.hp != null && s.hp <= hpCritical) return { tier: PRIORITY.SURVIVE, need: 'heal', reason: 'hp ' + s.hp + ' <= ' + hpCritical }
+  if (s.threatDist != null && s.threatDist <= threatRange) return { tier: PRIORITY.SURVIVE, need: 'threat', reason: 'hostile ' + (typeof s.threatDist === 'number' ? s.threatDist.toFixed(1) : s.threatDist) + 'b' }
+  // HUNGER (SURVIVE): a progress job must not run while genuinely hungry (it mined starving)
+  if (s.food != null && s.food < foodThreshold) return { tier: PRIORITY.SURVIVE, need: 'food', reason: 'food ' + s.food + ' < ' + foodThreshold }
+  // NIGHT SHELTER for a naked bot (SURVIVE)
+  if (s.isNight && s.underArmored) return { tier: PRIORITY.SURVIVE, need: 'shelter', reason: 'night + under-armored' }
+  return null
+}
+// May a PROGRESS job run right now? True iff no SURVIVE need is unmet.
+function jobMayProgress (state, opts = {}) { return jobSurvivalNeed(state, opts) == null }
+
 module.exports = {
   PRIORITY,
   priName,
+  jobSurvivalNeed,
+  jobMayProgress,
   beginManeuver,
   refreshManeuver,
   endManeuver,

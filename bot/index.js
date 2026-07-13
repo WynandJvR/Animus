@@ -676,6 +676,30 @@ if (process.env.SURVIVAL_HUNT !== '0') {
   }, 6000).unref?.()
 }
 
+// PROACTIVE TOP-UP: idle food decayed 20 -> 1 with NO refill until near-starvation (live) -
+// auto-eat only eats the PACK, and nothing WITHDREW from the bank until the food=2 crisis. When
+// IDLE and food dips below 14, top up to comfortable from the pack AND the bank (secureFood
+// eats pack -> withdraws banked food -> cooks -> eats), so it never coasts down to 1. (This
+// still spends finite bank food - which is exactly why the renewable wheat farm matters.)
+// Set FOOD_TOPUP=0 to disable.
+let toppingUpFood = false
+if (process.env.FOOD_TOPUP !== '0') {
+  setInterval(async () => {
+    if (toppingUpFood || !bot.entity || bot.food == null || bot.food >= 14) return
+    if (commands.isBusy && commands.isBusy()) return // busy jobs run their own secureFood
+    if (provision.isResting && provision.isResting()) return
+    if (provision.isSecuringFood && provision.isSecuringFood()) return
+    if (arbiter.maneuverActive && arbiter.maneuverActive()) return
+    toppingUpFood = true
+    try {
+      const home = (provision.knownBed && provision.knownBed()) || undefined
+      const before = bot.food
+      await provision.secureFood(bot, { home, threshold: 14, say: m => bot.chat(String(m).slice(0, 200)) })
+      if ((bot.food ?? 0) > before) note(`(food-topup) topped up ${before} -> ${bot.food} (bank/pack) - not waiting for starvation`)
+    } catch (e) { /* transient - retry next tick */ } finally { toppingUpFood = false }
+  }, 20000).unref?.()
+}
+
 // FOOD CRISIS (survival tier, fires EVEN WHILE BUSY): every work loop carries its own
 // hunger checks, but a wedged loop can starve the bot at 1hp for 20 minutes (live:
 // 0 food / 0.9hp mid-"gathering" at the hut). At food <= 2 with an empty pack, being
@@ -770,7 +794,10 @@ if (process.env.GEAR_REFLEX !== '0') {
     if (!provision.underArmored(bot)) return
     const tod = bot.time ? bot.time.timeOfDay : 0
     if (tod >= 11000) return // dusk/night belong to the shelter reflex; mornings to the grind
-    if ((bot.food ?? 20) < 14 || (bot.health ?? 20) < 10) return // food is a mining prerequisite - be fed BEFORE the iron grind (it went deep hungry and died); feed/heal reflexes run first
+    // JOB ARBITER: gear-up is a PROGRESS job - don't start it while a SURVIVE need is unmet
+    // (food/hp/threat/shelter). The ONE authority replaces the old scattered food<X/hp<Y checks;
+    // the survive reflexes (feed/heal/shelter) resolve the need first, then gearup runs.
+    if (!provision.mayDoProgress(bot)) { const n = provision.survivalNeed(bot); if (n) note(`(gearup) holding - survival need first: ${n.need} (${n.reason})`); return }
     const backoff = provision.gearupState && provision.gearupState()
     if (backoff && backoff.until > Date.now()) return // recent fruitless grind - let it cool
     gearing = true

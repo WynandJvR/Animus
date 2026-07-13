@@ -82,5 +82,50 @@ t('ending a stale/unknown token is a harmless no-op', () => {
   assert.strictEqual(arb.maneuverActive(P.IDLE), false)
 })
 
+// ---- JOB-LEVEL ARBITRATION (survive > progress) --------------------------------------
+t('jobMayProgress: fed + safe -> progress allowed', () => {
+  const s = { food: 18, hp: 20, threatDist: null, isNight: false, underArmored: true }
+  assert.strictEqual(arb.jobSurvivalNeed(s), null, 'no unmet survive need')
+  assert.strictEqual(arb.jobMayProgress(s), true)
+})
+
+t('jobMayProgress: food < 14 -> BLOCK progress (secure food first) - the core rule', () => {
+  const s = { food: 13, hp: 20, threatDist: null }
+  const need = arb.jobSurvivalNeed(s)
+  assert(need && need.need === 'food', 'food need surfaced')
+  assert.strictEqual(need.tier, P.SURVIVE)
+  assert.strictEqual(arb.jobMayProgress(s), false, 'a progress job may NOT run while hungry')
+})
+
+t('jobMayProgress: threat live -> BLOCK progress', () => {
+  const s = { food: 18, hp: 20, threatDist: 4 }
+  const need = arb.jobSurvivalNeed(s)
+  assert(need && need.need === 'threat')
+  assert.strictEqual(arb.jobMayProgress(s), false)
+  // a far threat does NOT block
+  assert.strictEqual(arb.jobMayProgress({ food: 18, hp: 20, threatDist: 12 }), true, 'a hostile 12b away is not an emergency')
+})
+
+t('jobSurvivalNeed: PRECEDENCE - immediate danger outranks hunger', () => {
+  const s = { food: 2, hp: 3, threatDist: 2, drowning: true }
+  const need = arb.jobSurvivalNeed(s)
+  assert.strictEqual(need.need, 'drowning', 'drowning (danger) is surfaced before food, even at food=2')
+})
+
+t('jobSurvivalNeed: hp critical, lava, night-shelter', () => {
+  assert.strictEqual(arb.jobSurvivalNeed({ hp: 6 }).need, 'heal', 'hp<=6 -> heal')
+  assert.strictEqual(arb.jobSurvivalNeed({ hp: 20, inLava: true }).need, 'lava')
+  assert.strictEqual(arb.jobSurvivalNeed({ food: 18, hp: 20, isNight: true, underArmored: true }).need, 'shelter')
+  assert.strictEqual(arb.jobSurvivalNeed({ food: 18, hp: 20, isNight: true, underArmored: false }), null, 'armored at night is fine')
+})
+
+t('jobSurvivalNeed: threshold is context-tunable (start=14 vs mid-activity critical=6)', () => {
+  // starting a deep dive: 13 is too hungry
+  assert.strictEqual(arb.jobMayProgress({ food: 13, hp: 20 }, { foodThreshold: 14 }), false)
+  // CONTINUING an activity (mid-mine): only a CRITICAL crash (<=6) bails, not a normal 13
+  assert.strictEqual(arb.jobMayProgress({ food: 13, hp: 20 }, { foodThreshold: 6 }), true, 'food 13 mid-mine is fine (>critical 6)')
+  assert.strictEqual(arb.jobMayProgress({ food: 5, hp: 20 }, { foodThreshold: 6 }), false, 'food 5 mid-mine -> bail')
+})
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall arbiter tests passed')
 process.exit(failures ? 1 : 0)

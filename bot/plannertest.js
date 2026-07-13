@@ -162,5 +162,21 @@ t('single-piece boots goal gathers 4 iron, full-set goal gathers 24 (why sub-goa
   assert.strictEqual(dAll.task.count, 24, 'the whole-set goal gathers 24 up front - the naked window sub-goals fix; got ' + dAll.task.count)
 })
 
+// WHEAT FARM HOE CHAIN (food follow-through): a wooden_hoe from nothing must chain
+// gather-log -> planks -> sticks -> hoe (NOT be "unobtainable"). This is what makes the farm
+// build reliably instead of "no hoe and cannot craft one" - reconcile runs this plan.
+t('wooden_hoe from nothing chains log->planks->sticks->hoe (never unobtainable)', () => {
+  const provision = require('./provision.js')
+  const fromNothing = provision.planProvision(mcData, { wooden_hoe: 1 }, {}, { primaryWood: 'oak' })
+  assert.strictEqual(Object.keys(fromNothing.unobtainable || {}).length, 0, 'a hoe is always obtainable where wood is reachable')
+  const keys = fromNothing.tasks.map(t => t.type + ':' + (t.item || t.output))
+  assert(keys.some(k => /^gather:\w+_log$/.test(k)), 'gathers a log: ' + keys.join(' > '))
+  assert(keys.includes('craft:stick'), 'crafts sticks')
+  assert(keys.includes('craft:wooden_hoe'), 'crafts the hoe')
+  // with logs already in hand -> no gather, just the craft chain
+  const withLogs = provision.planProvision(mcData, { wooden_hoe: 1 }, { oak_log: 4 }, { primaryWood: 'oak' })
+  assert(!withLogs.tasks.some(t => t.type === 'gather'), 'has logs -> no gather, just craft: ' + withLogs.tasks.map(t => t.type + ':' + (t.item || t.output)).join(' > '))
+})
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall planner decision tests passed')
 process.exit(failures ? 1 : 0)
