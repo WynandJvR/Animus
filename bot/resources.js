@@ -44,6 +44,42 @@ function saveCache () {
 }
 const cellKey = e => `${e.x},${e.y},${e.z}`
 
+// ---- dead-chest tracking --------------------------------------------------------
+// A chest that repeatedly fails to REACH or OPEN must stop being selected: overnight the
+// bot hammered a broken underground chest (433,52,113) every ~12s for hours - reporting
+// packFood=0 and starving - while the operator's food sat in the reachable hut chest.
+// Consecutive reach/open failures earn a growing cooldown (2,4,8,...60 min, persisted
+// with the cache); 5 in a row deregisters the chest from infra memory entirely. Cached
+// COUNTS survive the cooldown (the stock is presumably still in there - only the WALK is
+// suppressed), so the bank tally doesn't sawtooth. Any successful open clears the record.
+const REACH_FAIL_RE = /goto timed out|window did not open|openBlock|no path|took too long|path ended short/i
+function chestFailed (e, err) {
+  const msg = (err && err.message) || ''
+  if (!REACH_FAIL_RE.test(msg)) return // a reflex stealing the goal is not the chest's fault
+  const c = loadCache()
+  const k = cellKey(e)
+  const ent = c[k] = c[k] || { counts: {}, at: 0 }
+  ent.fails = (ent.fails || 0) + 1
+  const mins = Math.min(60, 2 * Math.pow(2, ent.fails - 1)) // 2, 4, 8, 16, 32, 60
+  ent.failUntil = Date.now() + mins * 60000
+  saveCache()
+  dbg('chest at ' + k + ' unreachable/unopenable ' + ent.fails + 'x (' + msg + ') - cooling it off ' + mins + ' min')
+  if (ent.fails >= 5) {
+    try {
+      provision.forgetInfra('chest', e)
+      dbg('chest at ' + k + ' DEREGISTERED after ' + ent.fails + ' straight failures - a dead chest must not block the bank')
+    } catch (e2) { dbg('chest dereg failed: ' + e2.message) }
+  }
+}
+function chestWorked (e) {
+  const ent = loadCache()[cellKey(e)]
+  if (ent && (ent.fails || ent.failUntil)) { delete ent.fails; delete ent.failUntil; saveCache() }
+}
+function chestCoolingOff (e) {
+  const ent = loadCache()[cellKey(e)]
+  return !!(ent && ent.failUntil && ent.failUntil > Date.now())
+}
+
 // ---- which chests exist (world-verified) ---------------------------------------
 
 // The bot's own chests near `near` (default: where it stands), nearest first.
@@ -78,13 +114,17 @@ function verifiedChests (bot, near, maxDist = 32) {
 async function readChest (bot, e) {
   const blk = bot.blockAt(new Vec3(e.x, e.y, e.z))
   if (!blk || !/chest/.test(blk.name)) return (loadCache()[cellKey(e)] || {}).counts || {}
+  if (chestCoolingOff(e)) return (loadCache()[cellKey(e)] || {}).counts || {} // dead chest - don't walk, use the cache
   try {
     const counts = await provision.chestCounts(bot, blk)
-    loadCache()[cellKey(e)] = { counts, at: Date.now() }
+    const ent = loadCache()[cellKey(e)] = loadCache()[cellKey(e)] || {}
+    ent.counts = counts; ent.at = Date.now()
     saveCache()
+    chestWorked(e)
     return counts
   } catch (err) {
     dbg('chest read failed at ' + cellKey(e) + ' (' + err.message + ') - using cached counts')
+    chestFailed(e, err)
     return (loadCache()[cellKey(e)] || {}).counts || {}
   }
 }
@@ -102,10 +142,10 @@ async function totalCounts (bot, opts = {}) {
   for (const e of verifiedChests(bot, opts.near, opts.maxDist)) {
     const c = cachedChest(e)
     let counts
-    if (c && (Date.now() - c.at < maxAge)) counts = c.counts
-    else if (opts.cachedOnly) counts = c ? c.counts : {}
+    if (c && c.counts && (Date.now() - c.at < maxAge)) counts = c.counts
+    else if (opts.cachedOnly) counts = (c && c.counts) || {}
     else counts = await readChest(bot, e)
-    for (const [n, k] of Object.entries(counts)) out[n] = (out[n] || 0) + k
+    for (const [n, k] of Object.entries(counts || {})) out[n] = (out[n] || 0) + k
   }
   return out
 }
@@ -120,15 +160,20 @@ async function withdrawItems (bot, name, count, opts = {}) {
   let got = 0
   for (const e of verifiedChests(bot, opts.near, opts.maxDist)) {
     if (got >= count) break
+    if (chestCoolingOff(e) && !opts.includeCooling) continue // repeatedly unreachable - a working chest must get the walk instead
     const c = cachedChest(e)
-    if (c && !(c.counts[name] > 0) && Date.now() - c.at < 60000) continue // fresh read says empty - skip the walk
+    if (c && c.counts && !(c.counts[name] > 0) && Date.now() - c.at < 60000) continue // fresh read says empty - skip the walk
     const blk = bot.blockAt(new Vec3(e.x, e.y, e.z))
     if (!blk || !/chest/.test(blk.name)) continue
     try {
       const n = await provision.withdrawItem(bot, blk, name, count - got)
       got += n
+      chestWorked(e)
       await readChest(bot, e) // we're standing here - refresh the cache with a real read
-    } catch (err) { dbg('withdraw ' + name + ' failed at ' + cellKey(e) + ' (' + err.message + ')') }
+    } catch (err) {
+      dbg('withdraw ' + name + ' failed at ' + cellKey(e) + ' (' + err.message + ')')
+      chestFailed(e, err)
+    }
   }
   if (got > 0) dbg('withdrew ' + got + '/' + count + ' ' + name + ' from the bank')
   return got
@@ -140,7 +185,7 @@ async function withdrawItems (bot, name, count, opts = {}) {
 async function autoBank (bot, opts = {}) {
   let chests = verifiedChests(bot, opts.near, opts.maxDist)
   let blk = null
-  for (const e of chests) { const b = bot.blockAt(new Vec3(e.x, e.y, e.z)); if (b && /chest/.test(b.name)) { blk = b; break } }
+  for (const e of chests) { if (chestCoolingOff(e)) continue; const b = bot.blockAt(new Vec3(e.x, e.y, e.z)); if (b && /chest/.test(b.name)) { blk = b; break } }
   if (!blk && opts.mayCreate) {
     try { blk = await provision.ensureChest(bot, { isStopped: opts.isStopped, home: opts.near }) } catch (e) { dbg('autoBank: no chest and cannot make one (' + e.message + ')'); return 0 }
   }
@@ -183,8 +228,8 @@ async function reconcile (bot, bom, opts = {}) {
   const chestTotals = {}
   for (const e of verifiedChests(bot, opts.near, opts.maxDist)) {
     const c = cachedChest(e)
-    const counts = (c && (Date.now() - c.at < (opts.maxAgeMs != null ? opts.maxAgeMs : 180000))) ? c.counts : await readChest(bot, e)
-    for (const [n, k] of Object.entries(counts)) chestTotals[n] = (chestTotals[n] || 0) + k
+    const counts = (c && c.counts && (Date.now() - c.at < (opts.maxAgeMs != null ? opts.maxAgeMs : 180000))) ? c.counts : await readChest(bot, e)
+    for (const [n, k] of Object.entries(counts || {})) chestTotals[n] = (chestTotals[n] || 0) + k
   }
   const holdings = { ...pack }
   for (const [n, k] of Object.entries(chestTotals)) holdings[n] = (holdings[n] || 0) + k
@@ -261,16 +306,23 @@ async function ensureFood (bot, opts = {}) {
   if (packFood >= (opts.minPack != null ? opts.minPack : 1)) return 0
   const chests = verifiedChests(bot, opts.near, opts.maxDist != null ? opts.maxDist : 48)
   let target = null; let bestFood = null
-  for (const e of chests) {
-    const c = cachedChest(e)
-    const counts = c ? c.counts : await readChest(bot, e) // unknown chest: one real read, then it's cached
-    const names = Object.keys(counts).filter(n => foods[n] && counts[n] > 0)
-      .sort((a, b) => (RISKY_FOOD.test(a) ? 1 : 0) - (RISKY_FOOD.test(b) ? 1 : 0) || (foods[b].foodPoints || 0) - (foods[a].foodPoints || 0))
-    if (names.length) { target = e; bestFood = names[0]; break }
+  // two passes: working chests first; a cooling-off (repeatedly dead) chest is only ever
+  // a LAST resort when it's the sole cached food source - never while a good chest holds
+  // food (the bot starved beside the stocked hut chest hammering a dead one, live).
+  for (const allowCooling of [false, true]) {
+    for (const e of chests) {
+      if (chestCoolingOff(e) !== allowCooling) continue
+      const c = cachedChest(e)
+      const counts = (c && c.counts) ? c.counts : (chestCoolingOff(e) ? {} : await readChest(bot, e)) // unknown chest: one real read, then it's cached
+      const names = Object.keys(counts).filter(n => foods[n] && counts[n] > 0)
+        .sort((a, b) => (RISKY_FOOD.test(a) ? 1 : 0) - (RISKY_FOOD.test(b) ? 1 : 0) || (foods[b].foodPoints || 0) - (foods[a].foodPoints || 0))
+      if (names.length) { target = e; bestFood = names[0]; break }
+    }
+    if (target) break
   }
   if (!target) return 0
-  dbg('hungry (' + bot.food + ') with no pack food - withdrawing ' + bestFood + ' from the bank at ' + cellKey(target))
-  const got = await withdrawItems(bot, bestFood, opts.wantCount != null ? opts.wantCount : 8, { near: opts.near })
+  dbg('hungry (' + bot.food + ') with no pack food - withdrawing ' + bestFood + ' from the bank at ' + cellKey(target) + (chestCoolingOff(target) ? ' (dead-chest LAST RESORT)' : ''))
+  const got = await withdrawItems(bot, bestFood, opts.wantCount != null ? opts.wantCount : 8, { near: opts.near, includeCooling: chestCoolingOff(target) })
   return got
 }
 
