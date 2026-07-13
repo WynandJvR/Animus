@@ -92,6 +92,19 @@ function worthMiningHere (currentY, opts = {}) {
   return Math.floor(currentY) <= minIronY
 }
 
+// When the descent is BLOCKED (can't get deeper after relocations), should we mine at the
+// depth we reached, or bail? The HARD FLOOR: iron spawns from ~y72 down, and cave/aquifer
+// terrain is everywhere, so ANY reasonably-below-surface depth is iron-viable and must NOT
+// return empty. More permissive than worthMiningHere (which is the "great depth, stop
+// chasing" early-break): mine here if we descended a meaningful distance OR are below the
+// iron ceiling. Only "barely scratched the surface" bails. PURE.
+function mineableWhenBlocked (currentY, surfaceY, opts = {}) {
+  const minDescent = opts.minDescent != null ? opts.minDescent : 12  // blocks below surface = a real dig
+  const ironCeiling = opts.ironCeiling != null ? opts.ironCeiling : 52 // at/below this Y iron is plentiful regardless
+  const descended = Math.floor(surfaceY) - Math.floor(currentY)
+  return descended >= minDescent || Math.floor(currentY) <= ironCeiling
+}
+
 // Classify whether it is SAFE to descend one step onto the cell whose floor blocks are
 // `below` (the block that becomes our feet-floor) and `below2` (one further down). Given
 // block NAME strings (or null = unloaded/air). Returns:
@@ -132,4 +145,4 @@ function branchLayout (corridorIdx, opts = {}) {
   }
 }
 
-module.exports = { LAVA_RE, WATER_RE, AIRISH, DIRS, PICK_USES, perpendicular, targetMineY, worthMiningHere, pickMaxUses, pickUsesLeft, estExcursionBlocks, picksToCraft, needReTool, descentSafety, faceHazard, branchLayout }
+module.exports = { LAVA_RE, WATER_RE, AIRISH, DIRS, PICK_USES, perpendicular, targetMineY, worthMiningHere, mineableWhenBlocked, pickMaxUses, pickUsesLeft, estExcursionBlocks, picksToCraft, needReTool, descentSafety, faceHazard, branchLayout }

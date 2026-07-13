@@ -104,5 +104,13 @@ t('needReTool: re-tool BEFORE the pick breaks, and only with no spare', () => {
   assert.strictEqual(M.needReTool(25, 0, { low: 30 }), true, 'threshold is tunable')
 })
 
+t('mineableWhenBlocked: mine at an iron-viable reached depth, only bail if barely below surface', () => {
+  assert.strictEqual(M.mineableWhenBlocked(46, 66), true, 'live gap: descended 20 to y46 -> iron-viable, mine here not bail')
+  assert.strictEqual(M.mineableWhenBlocked(50, 66), true, 'y50 is <= iron ceiling (52) -> mine regardless of descent')
+  assert.strictEqual(M.mineableWhenBlocked(61, 66), false, 'only descended 5 and above the ceiling -> too shallow, bail')
+  assert.strictEqual(M.mineableWhenBlocked(64, 66), false, 'barely scratched the surface -> bail')
+  assert.strictEqual(M.mineableWhenBlocked(30, 66), true, 'at least as deep as the old y30 strip floor -> mine')
+})
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall mining-strategy tests passed')
 process.exit(failures ? 1 : 0)

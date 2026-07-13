@@ -1255,10 +1255,19 @@ async function branchMine (bot, item, count, opts = {}) {
       const p = bot.entity.position; const [sx, sz] = mining.DIRS[(reloc + 1) % 4]
       try { await gotoWithTimeout(bot, new goals.GoalNearXZ(Math.round(p.x + sx * 4), Math.round(p.z + sz * 4), 2), 12000) } catch {}
     }
-    // Only bail if we NEVER got to a workable depth (still up near the surface); otherwise
-    // fall through and branch-mine at whatever good-enough depth we reached.
+    // Only bail if we NEVER got meaningfully below the surface; otherwise fall through and
+    // branch-mine at whatever depth we reached. THE LIVE GAP (16:45, live base): it bailed at
+    // y46 - an iron-viable depth, and SHALLOWER than the old y30 strip - because y46 > minIronY
+    // (40) so goodEnough() was false. Iron spawns from ~y72 down, so any real descent is worth
+    // mining. mineableWhenBlocked is the permissive floor for the blocked case: mine here if we
+    // descended a real distance (>=12) or are below the iron ceiling (y52), never return empty.
+    const mineableNow = () => mining.mineableWhenBlocked(bot.entity.position.y, surfaceY)
+    if (!reached && !goodEnough() && !mineableNow()) {
+      return { gathered: got(), reason: 'could not get below the surface to any iron level (water/lava/blocked descent, stuck at y' + Math.floor(bot.entity.position.y) + ')' }
+    }
     if (!reached && !goodEnough()) {
-      return { gathered: got(), reason: 'could not get to a workable iron depth (water/lava/blocked descent, stuck at y' + Math.floor(bot.entity.position.y) + ')' }
+      dbg('  branchMine: blocked short of y' + targetY + ' but at y' + Math.floor(bot.entity.position.y) + ' (descended ' + (Math.floor(surfaceY) - Math.floor(bot.entity.position.y)) + ') - iron-viable, MINING HERE not returning empty')
+      if (opts.say) say('couldn\'t get all the way down, but there\'s iron at this depth - mining here')
     }
   }
 
