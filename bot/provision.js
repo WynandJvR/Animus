@@ -4077,7 +4077,11 @@ async function gatherLoop (bot, item, count, opts = {}) {
   const homeUndiggable = listInfra('hut').some(h => Math.hypot(h.x - home.x, h.z - home.z) <= 6)
   if (homeUndiggable) dbg('  gather: anchor is on my hut (no-dig) - will strip the ore field, not trek back home')
   // Wall-clock deadline: even a legit strip-mine run must end (bounded so the BUILD phase runs).
-  const deadline = Date.now() + (opts.deadlineMs || Math.min(480000, 120000 + count * 4000))
+  // Logs (the tool-chain ROOT) get extra travel headroom: a treeless base's nearest woods can
+  // sit ~150 blocks off in ONE direction (the live pond->spawn blocker), and the directed
+  // outward sweep below needs time to walk out there and chop before returning. Other gathers
+  // keep the tighter budget so a build isn't stalled waiting on abundant/strip-mined material.
+  const deadline = Date.now() + (opts.deadlineMs || Math.min(480000, (isLogGather ? 300000 : 120000) + count * 4000))
   const timedOut = () => Date.now() > deadline
   // Whether this resource can be reached by digging DOWN (stone/ore under the surface).
   // Plains/grassland have none exposed, so instead of wandering forever we mine a shaft.
@@ -4119,6 +4123,49 @@ async function gatherLoop (bot, item, count, opts = {}) {
   const stripBudget = () => {
     const y = Math.floor(bot.entity.position.y)
     return Math.min(6, y - (surfaceY - MAX_MINE_DEPTH), y - STRIP_FLOOR)
+  }
+
+  // DIRECTED OUTWARD SWEEP for surface resources that must be TRAVELLED to (logs above all;
+  // also any non-tool, non-strippable gather). GROUNDED LIVE: the roomba `explore` fans 48-block
+  // hops out from the CURRENT spot with rotating bearings, so within the time budget it only
+  // reaches ~110-120 blocks from home before the give-up/deadline bites - LESS than the log fence
+  // (160) and short of the exact live blocker (a treeless base whose nearest woods are ~150 blocks
+  // off toward spawn). The wood never got found and the whole tool chain (hoe/table/bed) stalled.
+  // This sweep instead COMMITS to compass bearings and walks an expanding octagon spiral anchored
+  // at HOME: the bearing rotates 45 deg each leg and the radius grows every full lap, so every
+  // direction is pushed to the fence edge in re-scanned legs and timber anywhere inside the fence
+  // is actually walked to. Mining/ore is unaffected (it strip-mines DOWN, canStrip below).
+  const wantsTravel = isLogGather || (!reqTool && !canStrip)
+  // 8 bearings walked as an ADJACENT octagon ring (E,SE,S,SW,W,NW,N,NE): consecutive legs are
+  // only 45 deg apart so each is a short ~0.75x-reach hop around the ring - the most travel-
+  // efficient way to visit every direction (a max-spread order like E-then-W turns each leg
+  // into a full-diameter crossing and is far slower). 8 (not 4) dirs so adjacent rays overlap
+  // the 64-block re-scan even at the fence edge.
+  const SWEEP_DIRS = [[1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, -1]]
+  let sweepLeg = 0
+  async function sweepTowardTimber () {
+    const lap = Math.floor(sweepLeg / 8)
+    // Sample the OUTER band FIRST, not a slow crawl out from the middle: timber that forces a
+    // travel-gather sits near the fence edge (that's WHY we're roaming), and with the 64-block
+    // re-scan a ring at ~0.6x the fence covers the whole fence in ONE 8-bearing lap. GROUNDED:
+    // a first ring at reach 64 only detected timber within ~128 of home and burned the budget
+    // before a second lap could reach ~150-block woods (live 0/2). Grows as widenFence pushes
+    // the fence out on dry looks; stays just inside it so the loop-top fence-return can't fight it.
+    const reach = Math.min(maxRoam - 8, 96 + lap * 44)
+    const [dx, dz] = SWEEP_DIRS[sweepLeg % 8]
+    const n = Math.hypot(dx, dz) || 1
+    const tx = Math.round(home.x + (dx / n) * reach)
+    const tz = Math.round(home.z + (dz / n) * reach)
+    const from = bot.entity.position.clone()
+    dbg('  gather timber-sweep leg=' + sweepLeg + ' bearing=' + (sweepLeg % 8) + ' reach=' + reach + ' -> ' + tx + ',' + tz)
+    // walkStaged LOOPS 48-block sub-legs toward the target, retrying past a nudge/pit recovery
+    // so it actually TRAVELS (a single navigateTo returns the instant it "recovers via nudge"
+    // and never leaves home on pit-prone sand - grounded live, moved=false every leg). Bounded
+    // per leg so a wedged direction can't hang the sweep; the re-scan happens at the gather loop
+    // top after the leg. On a genuinely stuck leg walkStaged bails via its own stall detector.
+    await walkStaged(bot, tx, tz, { isStopped, range: 6, timeoutMs: 45000 })
+    sweepLeg++
+    return bot.entity.position.distanceTo(from) > 8
   }
 
   // Surface to breathe when air runs low - mining near/into water otherwise drowns
@@ -4415,9 +4462,19 @@ async function gatherLoop (bot, item, count, opts = {}) {
       // ROOMBA: this cell was searched and found empty - remember that, and steer the
       // next leg toward ground we HAVEN'T swept (negative memory, cleared by replanting).
       markSearched(item, bot.entity.position)
-      dbg('  gather explore #' + dryExplores)
-      const moved = await explore(bot, exploreIdx++, home, maxRoam, (x, z) => isSearchedDry(item, x, z))
-      dbg('  gather explore moved=' + moved)
+      // Surface resources (logs first) do the DIRECTED outward sweep - commit to a bearing and
+      // push to the fence edge, re-scanning each leg - so timber ~150 blocks off in one direction
+      // is actually reached. Everything else keeps the roomba explore (stone falls here only after
+      // a failed strip and is best served by the negative-memory roomba near the site).
+      let moved
+      if (wantsTravel) {
+        moved = await sweepTowardTimber()
+        dbg('  gather timber-sweep moved=' + moved)
+      } else {
+        dbg('  gather explore #' + dryExplores)
+        moved = await explore(bot, exploreIdx++, home, maxRoam, (x, z) => isSearchedDry(item, x, z))
+        dbg('  gather explore moved=' + moved)
+      }
       dryExplores++
       continue
     }
