@@ -765,6 +765,37 @@ if (process.env.FOOD_CRISIS !== '0') {
   }, 15000).unref?.()
 }
 
+// HP CRISIS (survival tier, fires EVEN WHILE BUSY): a hurt bot that is still endangered (dark
+// night or a mob in range) keeps grinding its job and whittles to death - live: an armored
+// far-gather went hp 18.7->11.7->0.77->DEAD, then lost its armor to a naked death-spiral. No
+// consumer acted on the arbiter's 'heal' need (build/gather bailed only on creeper/threat; the
+// one hp<=8 rest branch sat behind a "bail to safety" that fired first). This is that missing
+// consumer: when survivalNeed surfaces 'heal', STOP the job and shelter-and-heal. Firing while
+// busy IS the override (no isBusy gate on purpose). A live creeper/threat makes the need
+// 'creeper'/'threat' (not 'heal') so this waits for the flee to back off, THEN shelters. Disable
+// with HP_CRISIS=0.
+let hpCrisis = false
+let hpCrisisCooldownUntil = 0
+if (process.env.HP_CRISIS !== '0') {
+  setInterval(async () => {
+    if (hpCrisis || !bot.entity || bot.health == null) return
+    if (Date.now() < hpCrisisCooldownUntil) return
+    const n = provision.survivalNeed(bot)
+    if (!n || n.need !== 'heal') return
+    if (commands.isEscaping && commands.isEscaping()) return
+    if (navigate.isRecovering() || navigate.isForceUnsticking()) return
+    if (provision.isResting()) return
+    if (provision.isSecuringFood && provision.isSecuringFood()) return
+    if (bot.isSleeping) return
+    hpCrisis = true
+    try {
+      note(`(hp-crisis) ${n.reason} - stopping the job to shelter and heal`)
+      const ok = await provision.recoverHp(bot, { say: m => bot.chat(String(m).slice(0, 200)) })
+      note(`(hp-crisis) ${ok ? 'recovered - the job can resume' : 'not fully recovered - resuming carefully'}`)
+    } catch (e) { note(`(hp-crisis) failed: ${e.message}`) } finally { hpCrisis = false; hpCrisisCooldownUntil = Date.now() + 60000 }
+  }, 8000).unref?.()
+}
+
 // PROACTIVE FOOD SUPPLY (base-setup goal, like the hut): a FED, SAFE, IDLE bot that lacks a
 // standing renewable food source ESTABLISHES one BEFORE the next hunger crisis - on a
 // no-animal, water-rich site that's a WHEAT FARM at the remembered pond. secureFood only

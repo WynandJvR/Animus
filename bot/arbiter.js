@@ -131,6 +131,15 @@ function jobSurvivalNeed (state, opts = {}) {
   // CREEPER (SURVIVE): distinct from a melee mob - it explodes, so a progress job must abort
   // at a longer range (12m) to leave room to back off before it detonates point-blank.
   if (s.creeperDist != null && s.creeperDist <= creeperRange) return { tier: PRIORITY.SURVIVE, need: 'creeper', reason: 'creeper ' + (typeof s.creeperDist === 'number' ? s.creeperDist.toFixed(1) : s.creeperDist) + 'b' }
+  // LOW-HP SHELTER-AND-HOLD (SURVIVE): a HURT bot that is also ENDANGERED must stop grinding and
+  // heal or it whittles to death (live: an armored far-gather at night went 18.7->11.7->0.77->dead).
+  // BELOW threat/creeper on purpose - an active flee/back-off outranks, since resolving the mob is
+  // what stops the whittling; this fires once no acute flee is owed but the bot is still exposed
+  // (dark night or a hostile/creeper in the 16b danger band). The unconditional hp<=hpCritical(6)
+  // floor above is the daylight-safe catch that trips even with nothing else nearby.
+  const hpLow = opts.hpLow != null ? opts.hpLow : 10
+  const endangered = (s.isNight && !s.nightStuck) || (s.threatDist != null && s.threatDist <= 16) || (s.creeperDist != null && s.creeperDist <= 16)
+  if (s.hp != null && s.hp <= hpLow && endangered) return { tier: PRIORITY.SURVIVE, need: 'heal', reason: 'hp ' + s.hp + ' <= ' + hpLow + ' while ' + (s.isNight ? 'night' : 'threatened') }
   // HUNGER (SURVIVE): a progress job must not run while genuinely hungry (it mined starving)
   if (s.food != null && s.food < foodThreshold) return { tier: PRIORITY.SURVIVE, need: 'food', reason: 'food ' + s.food + ' < ' + foodThreshold }
   // NIGHT SHELTER for a naked bot (SURVIVE) - but NOT on a frozen/eternal night. When dawn

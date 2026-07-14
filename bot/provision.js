@@ -3832,6 +3832,43 @@ async function restUntilSafe (bot, opts = {}) {
   return true
 }
 
+// LOW-HP SHELTER-AND-HOLD: a hurt bot that is still exposed (dark night or a mob in range) is
+// grinding to death (live: armored far-gather 18.7->11.7->0.77->dead). Latched like secureFood/
+// nightRest so the reflex and the inline job-loop entry are mutually exclusive (no double-shelter).
+// Reuses ONLY existing primitives: eat from the pack to restore regen fuel, dig-in/sleep via
+// nightRest when it's night or a hostile is close, then hold-and-watch until hp recovers. Bounded
+// (3 min), and BAILS honestly when it can't recover here (frozen night, out of food, still taking
+// damage) so the food chain / flee / defend that DO own those cases take over.
+let _recoveringHp = false
+function isRecoveringHp () { return _recoveringHp }
+async function recoverHp (bot, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const say = opts.say || (() => {})
+  const resumeHp = opts.resumeHp != null ? opts.resumeHp : 16
+  if (_recoveringHp) return false
+  _recoveringHp = true
+  try {
+    try { bot.pathfinder.setGoal(null) } catch {}
+    // regen needs food>=18 - eat FIRST so the hold below actually heals.
+    await eatFromPackToComfortable(bot, isStopped)
+    // Get behind cover if it's dark or a mob is near. bedRange 32: sleep in a nearby bed if home
+    // is right there, but don't trek 200b through the dark - pit where we stand past that.
+    if (isNight(bot) || nearHostile(bot, 16)) { try { await nightRest(bot, { isStopped, say, bedRange: 32 }) } catch {} }
+    await eatFromPackToComfortable(bot, isStopped)
+    const dl = Date.now() + 180000
+    const hp0 = bot.health ?? 20
+    while (!isStopped() && Date.now() < dl) {
+      const hp = bot.health ?? 20
+      if (hp >= resumeHp) return true
+      if (nightStuck(bot)) return false                              // frozen night: hand back, act (re-arm, don't hide)
+      if ((bot.food ?? 20) < 18 && !hasFood(bot)) return false       // can't regen with no food - the food chain owns acquisition
+      if (hp < hp0 - 2) return false                                 // still taking damage while 'recovering' - release to flee/defend
+      await new Promise(r => setTimeout(r, 2000))
+    }
+    return (bot.health ?? 20) >= resumeHp
+  } finally { _recoveringHp = false }
+}
+
 // ---- TREE FARMING (user-approved): the castle region is chopped bare, so the bot keeps
 // its own wood supply alive like a player would - replant after every chop, fish saplings
 // out of the leaves when it has none, and when the land is truly dry, plant a grove near
@@ -4326,10 +4363,10 @@ async function gatherLoop (bot, item, count, opts = {}) {
     // here (the secureFood branch below owns hunger). Mirrors branchMine's start-gate/mineDanger.
     if (!hasSolidCeiling(bot, 12, { ignoreLeaves: true })) {
       const need = survivalNeed(bot, { foodThreshold: 6 })
-      if (need && (need.need === 'creeper' || need.need === 'threat')) {
-        dbg('  gather: SURVIVE need (' + need.need + ' - ' + need.reason + ') in the open - breaking off so the flee reflex can react')
-        if (opts.say) opts.say('creeper closing - breaking off to get clear')
-        return { gathered: countItem(bot, item) - start, reason: 'broke off gathering to avoid a ' + need.need + ' - getting clear' }
+      if (need && (need.need === 'creeper' || need.need === 'threat' || need.need === 'heal')) {
+        dbg('  gather: SURVIVE need (' + need.need + ' - ' + need.reason + ') in the open - breaking off so the flee/heal reflex can react')
+        if (opts.say) opts.say(need.need === 'heal' ? 'too hurt to keep gathering - breaking off to shelter and heal' : 'creeper closing - breaking off to get clear')
+        return { gathered: countItem(bot, item) - start, reason: 'broke off gathering to ' + (need.need === 'heal' ? 'shelter and heal' : 'avoid a ' + need.need) + ' - getting clear' }
       }
     }
     if (Date.now() - lastBeat > 5000) {
@@ -5924,4 +5961,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, setBuildZone, setDebugSink }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, setBuildZone, setDebugSink }

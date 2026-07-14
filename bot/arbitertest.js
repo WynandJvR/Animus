@@ -123,6 +123,31 @@ t('jobSurvivalNeed: hp critical, lava, night-shelter', () => {
   assert.strictEqual(arb.jobSurvivalNeed({ food: 18, hp: 20, isNight: true, underArmored: true, nightStuck: true, threatDist: 3 }).need, 'threat', 'a live threat still blocks even on a stuck night')
 })
 
+t('jobSurvivalNeed: LOW-HP SHELTER-AND-HOLD - hurt+endangered -> heal, hurt+safe-day -> allowed', () => {
+  // hp10 at night (not frozen) -> heal
+  assert.strictEqual(arb.jobSurvivalNeed({ food: 18, hp: 10, isNight: true }).need, 'heal', 'hp10 at night -> heal')
+  // hp10 in daylight with NO threat -> NOT a heal need (keep working; only the <=6 floor trips in the clear)
+  assert.strictEqual(arb.jobSurvivalNeed({ food: 18, hp: 10, isNight: false }), null, 'hp10 day + no threat -> keep working')
+  assert.strictEqual(arb.jobMayProgress({ food: 18, hp: 10, isNight: false }), true)
+  // hp10 with a hostile 14b out (past melee range, inside the 16b danger band) -> heal
+  assert.strictEqual(arb.jobSurvivalNeed({ food: 18, hp: 10, isNight: false, threatDist: 14 }).need, 'heal', 'hp10 + threat 14b -> heal')
+  // a creeper 15b out (inside the 16b danger band, past the 12b creeper-abort) also endangers
+  assert.strictEqual(arb.jobSurvivalNeed({ food: 18, hp: 10, isNight: false, creeperDist: 15 }).need, 'heal', 'hp10 + creeper 15b -> heal')
+  // hp11 is above the 10 threshold -> no heal (hysteresis headroom below the 16 resume target)
+  assert.strictEqual(arb.jobSurvivalNeed({ food: 18, hp: 11, isNight: true }), null, 'hp11 at night is above the low-hp trip')
+  // the unconditional hp<=6 FLOOR still trips in broad daylight with nothing around
+  assert.strictEqual(arb.jobSurvivalNeed({ food: 18, hp: 5, isNight: false }).need, 'heal', 'hp5 day -> heal (the <=6 floor)')
+  // FROZEN night does not count as endangered for the low-hp trip (re-arm, don't hide)
+  assert.strictEqual(arb.jobSurvivalNeed({ food: 18, hp: 10, isNight: true, nightStuck: true }), null, 'hp10 on a frozen night -> no heal block')
+})
+
+t('jobSurvivalNeed: PRECEDENCE - creeper/threat outrank the low-hp heal', () => {
+  // a creeper at 8b + hp10 -> creeper (flee first; heal is below it)
+  assert.strictEqual(arb.jobSurvivalNeed({ food: 18, hp: 10, creeperDist: 8, isNight: true }).need, 'creeper', 'creeper outranks low-hp heal')
+  // a melee mob at 4b + hp10 -> threat (flee first)
+  assert.strictEqual(arb.jobSurvivalNeed({ food: 18, hp: 10, threatDist: 4, isNight: true }).need, 'threat', 'threat outranks low-hp heal')
+})
+
 t('jobSurvivalNeed: threshold is context-tunable (start=14 vs mid-activity critical=6)', () => {
   // starting a deep dive: 13 is too hungry
   assert.strictEqual(arb.jobMayProgress({ food: 13, hp: 20 }, { foodThreshold: 14 }), false)

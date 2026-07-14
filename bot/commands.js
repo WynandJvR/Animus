@@ -2768,6 +2768,11 @@ async function autoBuild (bot, schem, at, opts = {}) {
       // Bank empty AND starving? Run the whole food chain (hunt/farm/fish/scout/hold)
       // BEFORE the round - a round is minutes of work and the site can be eaten bare.
       if (provision.needsFood(bot)) { try { await provision.secureFood(bot, { isStopped, say, home, canHold: true }) } catch (e) { dbg('material food chain failed (' + e.message + ')') } }
+      // HURT + ENDANGERED at round start? Shelter-and-heal BEFORE marching back into the mob
+      // field (the hp12->0.77 treadmill: the loop only checked food and re-entered the dark
+      // hurt). The latch makes this inline entry and the index.js hp-crisis reflex mutually
+      // exclusive, so they never double-shelter.
+      { const sn = provision.survivalNeed(bot); if (sn && sn.need === 'heal') { try { await provision.recoverHp(bot, { isStopped, say }) } catch (e) { dbg('material hp recover failed (' + e.message + ')') } } }
       try { await resources.ensurePackRoom(bot, 6, { near: home, keepDirt: KEEP_DIRT, isStopped }) } catch {}
       // START EACH ROUND FROM THE SITE, ON THE SURFACE. A failed gather can leave the bot
       // stranded deep in a cave 40+ blocks off (verified live: cobble round ended at y=61,
