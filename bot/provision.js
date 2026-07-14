@@ -1372,8 +1372,16 @@ async function branchMine (bot, item, count, opts = {}) {
   const start = countItem(bot, item)
   const got = () => countItem(bot, item) - start
   const surfaceY = opts.surfaceY != null ? opts.surfaceY : Math.floor(bot.entity.position.y)
+  // ARMOR-MODULATED DEPTH: a naked bot digs shallower/shorter with fewer torches so it doesn't
+  // die on the same deep excursion an armored bot survives (naked-deep deaths, live). NEVER
+  // blocks - iron armor needs iron, so it only TUNES the plan (food is still owned by the
+  // start-gate below). Env IRON_TARGET_Y (armored) / MINE_NAKED_Y (naked) override the target.
+  const plan = mining.deepMinePlan(armorPieceCount(bot), {
+    targetY: process.env.IRON_TARGET_Y != null ? parseInt(process.env.IRON_TARGET_Y, 10) : undefined,
+    nakedY: process.env.MINE_NAKED_Y != null ? parseInt(process.env.MINE_NAKED_Y, 10) : undefined
+  })
   const targetY = mining.targetMineY(surfaceY, {
-    targetY: parseInt(process.env.IRON_TARGET_Y || '16', 10),
+    targetY: plan.targetY,
     hardFloor: parseInt(process.env.MINE_HARD_FLOOR || '5', 10)
   })
   const deadline = Date.now() + (opts.deadlineMs || 300000)
@@ -1496,13 +1504,13 @@ async function branchMine (bot, item, count, opts = {}) {
   if (Math.floor(bot.entity.position.y) < surfaceY - 4) {
     try { await ensureMiningKit(bot, Math.max(0, Math.floor(surfaceY) - Math.floor(bot.entity.position.y)), { isStopped }) } catch (e) { dbg('  ensureMiningKit failed (' + e.message + ') - relying on depth re-tool') }
   }
-  await ensureTorches(bot, 12)
+  await ensureTorches(bot, plan.wantTorches)
   const L = mining.branchLayout(corridorDir, {
     branchLen: parseInt(process.env.MINE_BRANCH_LEN || '12', 10),
     spacing: parseInt(process.env.MINE_SPACING || '3', 10)
   })
   let branches = startBranches
-  const maxBranches = startBranches + (opts.maxBranches || 30)
+  const maxBranches = startBranches + (opts.maxBranches || plan.maxBranches)
   while (got() < count && Date.now() < deadline && !isStopped() && branches < maxBranches) {
     if (mineDanger(bot)) {
       dbg('  branchMine: threat/hp down here - climbing out and handing off to the survival reflex')
@@ -1821,6 +1829,14 @@ function nearHostile (bot, r) {
 function mineDanger (bot) { return nearHostile(bot, 6) || (bot.health ?? 20) < 12 }
 function underArmored (bot) {
   try { for (const s of ['head', 'torso', 'legs', 'feet']) { if (!(bot.inventory && bot.inventory.slots[bot.getEquipmentDestSlot(s)])) return true } return false } catch { return true }
+}
+// How many armor slots are actually worn (0-4). Modulates the deep-mine plan (deepMinePlan):
+// a naked bot digs shallower/shorter so it doesn't die on the same deep excursion an armored
+// bot survives (naked-deep deaths, live). Complements underArmored (which is a boolean gate).
+function armorPieceCount (bot) {
+  let n = 0
+  try { for (const s of ['head', 'torso', 'legs', 'feet']) { if (bot.inventory && bot.inventory.slots[bot.getEquipmentDestSlot(s)]) n++ } } catch { return 0 }
+  return n
 }
 function isNight (bot) { return !!(bot.time && bot.time.timeOfDay >= 13000 && bot.time.timeOfDay < 23500) }
 // Fire night-rest whenever we're under-armored and DUSK is falling. This USED to also wait for
@@ -4409,23 +4425,30 @@ async function gatherLoop (bot, item, count, opts = {}) {
   // the ore field where we are instead.
   const homeUndiggable = listInfra('hut').some(h => Math.hypot(h.x - home.x, h.z - home.z) <= 6)
   if (homeUndiggable) dbg('  gather: anchor is on my hut (no-dig) - will strip the ore field, not trek back home')
-  // Wall-clock deadline: even a legit strip-mine run must end (bounded so the BUILD phase runs).
-  // Logs (the tool-chain ROOT) get extra travel headroom: a treeless base's nearest woods can
-  // sit ~150 blocks off in ONE direction (the live pond->spawn blocker), and the directed
-  // outward sweep below needs time to walk out there and chop before returning. Other gathers
-  // keep the tighter budget so a build isn't stalled waiting on abundant/strip-mined material.
-  const deadline = Date.now() + (opts.deadlineMs || Math.min(480000, (isLogGather ? 300000 : 120000) + count * 4000))
-  const timedOut = () => Date.now() > deadline
-  // Whether this resource can be reached by digging DOWN (stone/ore under the surface).
-  // Plains/grassland have none exposed, so instead of wandering forever we mine a shaft.
-  const canStrip = sources.some(s => /stone|deepslate|cobble|granite|diorite|andesite|tuff|_ore$|ancient_debris/.test(s))
   // ORE gather (iron/gold/copper/redstone/...): the target ore is DEEP, not at the
   // stone-just-under-grass layer. Iron in 1.18+ follows a triangular distribution that's
   // sparse above ~y48 and common toward y30; a 16-block depth cap floored strips at y50
   // where 16-block tunnels struck ZERO iron (verified live: 3 gearups, mined=0 across
   // y54-60). Ore gathers therefore dig DEEPER (down to the STRIP_FLOOR, still the hard
   // safety floor), run more shafts, and cut longer tunnels so a vein is actually hit.
+  // (Hoisted above the deadline: a deep ore run needs the travel-class budget too.)
   const deepOre = sources.some(s => /_ore$/.test(s)) || /^raw_(iron|gold|copper)$|^(redstone|lapis_lazuli|diamond|emerald)$/.test(item)
+  // Wall-clock deadline: even a legit strip-mine run must end (bounded so the BUILD phase runs).
+  // Logs (the tool-chain ROOT) AND deep ore get extra travel headroom: a treeless base's nearest
+  // woods (or a treeless base with only sparse-tail surface iron) can sit far off in ONE direction,
+  // and the descent/directed sweep below needs time to walk out there and work before returning.
+  // Other gathers keep the tighter budget so a build isn't stalled waiting on abundant material.
+  const deadline = Date.now() + (opts.deadlineMs || Math.min(480000, (isLogGather || deepOre ? 300000 : 120000) + count * 4000))
+  const timedOut = () => Date.now() > deadline
+  // Whether this resource can be reached by digging DOWN (stone/ore under the surface).
+  // Plains/grassland have none exposed, so instead of wandering forever we mine a shaft.
+  const canStrip = sources.some(s => /stone|deepslate|cobble|granite|diorite|andesite|tuff|_ore$|ancient_debris/.test(s))
+  // DEEP-FIRST ROUTING: for iron near the surface with only sparse-tail ore visible, route
+  // straight to the organized branch mine instead of scratching unreachable surface candidates
+  // (the ~1 iron/7min + hut-wedge live bug). branchTries caps the attempts so a site that can't
+  // be descended (apron/water/lava) falls back to today's scratch/wander path (no wedge).
+  const useBranch = deepOre && process.env.BRANCH_MINE !== '0'
+  let branchTries = 0
   const MAX_STRIP = deepOre ? 10 : 5 // shafts per gather before giving up (ore needs several to reach + work the deep levels)
   const NO_YIELD_LIMIT = 10 // mine-with-no-pickup before relocating to better ground
   const cap = count * 4 + 80 // ultimate backstop against grinding forever
@@ -4735,6 +4758,18 @@ async function gatherLoop (bot, item, count, opts = {}) {
       const level = candidates.filter(p => p.y >= feetY && p.y <= feetY + 2)
       if (level.length) candidates = level
     }
+    // DEEP-FIRST: at/near the surface with only sparse-tail iron visible (or none), don't
+    // scratch the unreachable surface candidate - go STRAIGHT to the organized branch mine.
+    // Capped at 2 tries: if we can't sink/enter a mine here (apron/water/lava), the guard
+    // stops firing and the surface scratch/wander path below takes over (no wedge).
+    if (useBranch && branchTries < 2 && mining.preferBranchMine(item, feetY, surfaceY, candidates.map(p => p.y))) {
+      const need = count - (countItem(bot, item) - start)
+      const r = await branchMine(bot, item, need, { isStopped, home, surfaceY, say: opts.say, avoid: opts.avoid, dirIdx: stripDug, deadlineMs: Math.max(20000, deadline - Date.now()) })
+      dbg('  gather deep-first branchMine -> ' + JSON.stringify(r)); stripDug++
+      if (r.gathered > 0) { dryExplores = 0; noYield = 0; continue }
+      branchTries++
+      continue
+    }
     const target = candidates[0] && bot.blockAt(candidates[0])
     if (!target) {
       // Nothing reachable here - grab any nearby drops first.
@@ -4742,7 +4777,6 @@ async function gatherLoop (bot, item, count, opts = {}) {
       // STRIP-MINE: for stone/ore, there may be none EXPOSED (plains) - dig our own
       // shaft down to the stone layer instead of wandering, then re-scan (the shaft
       // walls are now reachable stone). Bounded, and only while safely above bedrock.
-      const useBranch = deepOre && process.env.BRANCH_MINE !== '0'
       if (canStrip && stripDug < MAX_STRIP && (stripBudget() > 0 || useBranch)) {
         if (useBranch) {
           // ORGANIZED BRANCH MINE for deep ore: ONE descent to the iron band (~y16) + a

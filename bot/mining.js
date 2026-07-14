@@ -158,6 +158,30 @@ function digExposureHazard (neighborNames) {
   return 'ok'
 }
 
+// Should a deep-ore gather go STRAIGHT to the branch mine instead of scratching exposed
+// candidates? YES when at/near surface and all visible ore is in the sparse tail (above
+// ironCeiling ~y52). Already deep (down a mine) or a rich-depth candidate exists -> mine
+// what's exposed. PURE.
+function preferBranchMine (item, feetY, surfaceY, candidateYs, opts = {}) {
+  if (!/^raw_iron$/.test(item)) return false            // iron only (copper is a SURFACE ore)
+  const ironCeiling = opts.ironCeiling != null ? opts.ironCeiling : 52
+  const deepBelow = opts.deepBelow != null ? opts.deepBelow : 8
+  if (Math.floor(feetY) <= Math.floor(surfaceY) - deepBelow) return false  // already down a mine
+  const ys = candidateYs || []
+  if (!ys.length) return true                            // nothing exposed -> descend
+  return ys.every(y => y > ironCeiling)                  // only sparse-tail visible -> descend
+}
+
+// Depth/effort profile for a deep branch mine, MODULATED by how much armor we're wearing.
+// A NAKED bot (0 pieces) commits to the SAME deep excursion as an armored one today and dies
+// down there (naked-deep deaths, live) - so an unarmored dig stays shallower, shorter, and
+// carries fewer torches. NEVER blocks (iron armor needs iron): it only tunes the plan.
+// targetY still passes through targetMineY clamping in the driver. PURE.
+function deepMinePlan (armorPieces, opts = {}) {
+  if ((armorPieces || 0) <= 0) return { targetY: opts.nakedY != null ? opts.nakedY : 28, maxBranches: 8, wantTorches: 8, naked: true }
+  return { targetY: opts.targetY != null ? opts.targetY : 16, maxBranches: 30, wantTorches: 12, naked: false }
+}
+
 // Branch-mine geometry constants for the driver. corridorIdx picks the main-corridor
 // direction; left/right branches go off it perpendicular, `spacing` apart. Pure - just
 // resolves the direction indices + returns the tunables so the driver stays declarative.
@@ -173,4 +197,4 @@ function branchLayout (corridorIdx, opts = {}) {
   }
 }
 
-module.exports = { LAVA_RE, WATER_RE, AIRISH, DIRS, PICK_USES, perpendicular, targetMineY, worthMiningHere, mineableWhenBlocked, mineReusable, pickMaxUses, pickUsesLeft, estExcursionBlocks, picksToCraft, needReTool, descentSafety, faceHazard, digExposureHazard, branchLayout }
+module.exports = { LAVA_RE, WATER_RE, AIRISH, DIRS, PICK_USES, perpendicular, targetMineY, worthMiningHere, mineableWhenBlocked, mineReusable, pickMaxUses, pickUsesLeft, estExcursionBlocks, picksToCraft, needReTool, descentSafety, faceHazard, digExposureHazard, branchLayout, preferBranchMine, deepMinePlan }

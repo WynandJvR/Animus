@@ -135,5 +135,40 @@ t('mineableWhenBlocked: mine at an iron-viable reached depth, only bail if barel
   assert.strictEqual(M.mineableWhenBlocked(30, 66), true, 'at least as deep as the old y30 strip floor -> mine')
 })
 
+t('preferBranchMine: at-surface iron with only sparse-tail exposure descends; rich/deep exposure scratches', () => {
+  // near surface, ore visible but all in the sparse tail (>y52) -> go straight to the branch mine
+  assert.strictEqual(M.preferBranchMine('raw_iron', 63, 64, [62, 60, 58]), true, 'only sparse-tail ore visible -> descend')
+  // a rich-depth candidate (<=52) is exposed here -> mine what's exposed, don't descend
+  assert.strictEqual(M.preferBranchMine('raw_iron', 63, 64, [45, 60]), false, 'a y45 candidate is worth mining -> scratch it')
+  // already down a mine (>=8 below surface) -> keep mining the exposed walls
+  assert.strictEqual(M.preferBranchMine('raw_iron', 16, 64, [15, 14]), false, 'already deep -> mine what is exposed')
+  // nothing exposed at all -> descend
+  assert.strictEqual(M.preferBranchMine('raw_iron', 63, 64, []), true, 'no exposed ore -> descend')
+  // copper is a SURFACE ore and everything else stays surface too
+  assert.strictEqual(M.preferBranchMine('raw_copper', 63, 64, [62]), false, 'copper is surface ore -> never branch-mine')
+  assert.strictEqual(M.preferBranchMine('cobblestone', 63, 64, [62]), false, 'cobblestone never reaches the branch mine')
+  // tunables
+  assert.strictEqual(M.preferBranchMine('raw_iron', 63, 64, [50], { ironCeiling: 40 }), true, 'ironCeiling is tunable (lowered to 40, y50 now sparse-tail -> descend)')
+  assert.strictEqual(M.preferBranchMine('raw_iron', 60, 64, [62], { deepBelow: 3 }), false, 'deepBelow is tunable (y60 now counts as deep)')
+})
+
+t('deepMinePlan: naked digs shallower/shorter with fewer torches; armored gets the full plan', () => {
+  const naked = M.deepMinePlan(0)
+  assert.strictEqual(naked.targetY, 28, 'naked stays shallower (~y28)')
+  assert.strictEqual(naked.maxBranches, 8, 'naked runs a short mine')
+  assert.strictEqual(naked.wantTorches, 8)
+  assert.strictEqual(naked.naked, true)
+  const armored = M.deepMinePlan(4)
+  assert.strictEqual(armored.targetY, 16, 'armored reaches the iron band')
+  assert.strictEqual(armored.maxBranches, 30)
+  assert.strictEqual(armored.wantTorches, 12)
+  assert.strictEqual(armored.naked, false)
+  // a single piece already counts as armored (modulates, never blocks)
+  assert.strictEqual(M.deepMinePlan(1).naked, false, 'one piece -> armored plan')
+  // env-style overrides
+  assert.strictEqual(M.deepMinePlan(0, { nakedY: 40 }).targetY, 40, 'MINE_NAKED_Y-style override')
+  assert.strictEqual(M.deepMinePlan(4, { targetY: 8 }).targetY, 8, 'IRON_TARGET_Y-style override')
+})
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall mining-strategy tests passed')
 process.exit(failures ? 1 : 0)
