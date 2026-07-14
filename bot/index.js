@@ -942,10 +942,15 @@ let dfHurtAt = 0 // when health last DROPPED - "someone is shooting me" detector
 // down per-threat for 90s; a real hit re-arms flee instantly.
 let fleeEp = null // { id, start, pos } - the current flee episode
 const fleeFutileUntil = new Map() // entity id -> epoch ms until which flee is suppressed
-// HUT RETREAT: near home, running INTO the sealed hut beats kiting a creeper around the
-// yard (live: the crippled bot could only 'flee creeper' in circles until one detonated
-// on the hut - a closed wooden door stops a creeper cold). One retreat at a time.
-let hutRetreat = false
+// CREEPER AVOID: a creeper is a walking bomb, so it gets a COMMITTED one-shot latched
+// maneuver (near home: run INTO the sealed hut - a closed wooden door stops a creeper cold,
+// live: the crippled bot kited in circles until one detonated on the hut; away from home:
+// back off 20b past the creeper's 16m follow range so it deaggros). One maneuver at a time
+// (the latch), so the reflex can't re-issue a fresh goal every tick and thrash the approach
+// (the door-loop). avoidHist is the ping-pong breaker: two failed back-offs in 60s -> a
+// can't-shake standoff -> stop churning and mark the creeper futile.
+let creeperAvoidLatch = false
+const avoidHist = new Map() // creeper entity id -> [timestamps] of recent avoid attempts
 let lastChargeNoteAt = 0
 const RANGED_RE = /skeleton|stray|bogged|pillager/i
 if (process.env.AUTO_DEFEND !== '0') {
@@ -995,41 +1000,72 @@ if (process.env.AUTO_DEFEND !== '0') {
       }
       if (flee) {
         const now = Date.now()
-        // ARBITER: a deliberate navigation is driving the body (walking into the hut, coming
-        // to a player). Unless this is a TRUE emergency - actively being hit, or a creeper
-        // close enough to detonate (<=6m) - DEFER and let the maneuver finish instead of
-        // stealing its goal. A preventive flee at 6-12m that thrashes the approach is the
-        // exact door-loop the operator saw (four "goal taken by a reflex" in a row). Survival
-        // is NOT regressed: a hit or a point-blank creeper still preempts here.
-        const fleeEmergency = beingHit || (why === 'creeper' && fbest <= 6)
-        if (!fleeEmergency && arbiter.maneuverActive(arbiter.PRIORITY.PROGRESS)) return
-        // INSIDE OWN WALLS and untouched: the creeper can't reach - fleeing would walk us
-        // back OUT the door into its blast radius. Hold position; a real hit re-arms.
-        if (why === 'creeper' && !beingHit) {
+        const isCreeper = why === 'creeper'
+        // A TRUE emergency - actively being hit, or a creeper close enough to detonate (<=6m).
+        // Only an emergency preempts a live PROGRESS maneuver's raw radial flee (below).
+        const fleeEmergency = beingHit || (isCreeper && fbest <= 6)
+        // 1) INSIDE OWN WALLS and untouched: checked FIRST (above the PROGRESS deferral AND the
+        // avoid maneuver) so a bot safe inside its hut never walks back OUT the door into a
+        // creeper's blast radius. The creeper can't reach; hold position. A real hit re-arms.
+        if (isCreeper && !beingHit) {
           try { if (provision.insideOwnStructure && provision.insideOwnStructure(bot)) return } catch {}
         }
-        // NEAR HOME: retreat INTO the sealed hut instead of open-field kiting. Async
-        // (door-assist takes seconds); radial flee stands down while it drives.
-        if (hutRetreat) return
-        if (why === 'creeper' && fbest > 5) { // >5m: there's time to make the door; point-blank still radial-flees
-          try {
-            const hut = (provision.listInfra ? provision.listInfra('hut') : [])[0]
-            if (hut && Math.hypot(hut.x + 2 - me.x, hut.z + 2 - me.z) <= 24) {
-              hutRetreat = true
-              note(`(flee) creeper ${fbest.toFixed(1)}m near home - retreating INTO the hut`)
-              ;(async () => {
-                try {
-                  await navigate.navigateToPreempt(bot, new goals.GoalNear(hut.x + 2, hut.y + 1, hut.z + 2, 1),
-                    { timeoutMs: 15000, deadlineMs: 40000, climb: false, priority: arbiter.PRIORITY.SURVIVE, budgets: { door: 3, pit: 0, water: 0, nudge: 1, stepout: 1 }, label: 'hut-retreat' })
-                  note('(flee) inside the hut - door-assist sealed the door behind me')
-                } catch (e) { note(`(flee) hut retreat failed (${e.message}) - back to open-field flee`) } finally {
-                  setTimeout(() => { hutRetreat = false }, 5000)
-                }
-              })()
-              return
+        // 2) COMMITTED CREEPER AVOID - runs BEFORE the PROGRESS deferral, so a creeper at 6-12m
+        // is backed off from even mid-build/mid-mine (the incompleteness that got the bot blown
+        // up: a preventive creeper reaction used to defer to any progress maneuver). ONE latched
+        // maneuver at a time (no per-tick goal re-issue -> no door-loop goal-thrash); near home
+        // it retreats into the sealed hut, else it backs off 20b past the 16m follow range so the
+        // creeper deaggros. A can't-shake creeper is capped by the ping-pong breaker + futility.
+        if (isCreeper && !fleeEmergency) {
+          if (creeperAvoidLatch) return // a retreat/back-off is already driving - don't stack
+          if ((fleeFutileUntil.get(flee.id) || 0) > now) return // standoff-suppressed this creeper
+          // PING-PONG BREAKER: two back-offs against this creeper in the last 60s and it's still
+          // on us -> a can't-shake standoff (fenced/faster terrain). Stop churning; mark futile 90s.
+          const hist = (avoidHist.get(flee.id) || []).filter(t => now - t < 60000)
+          if (hist.length >= 2) {
+            fleeFutileUntil.set(flee.id, now + 90000); avoidHist.delete(flee.id)
+            for (const [id, t] of fleeFutileUntil) { if (t <= now) fleeFutileUntil.delete(id) } // prune
+            note(`(flee) can't shake creeper ${fbest.toFixed(1)}m after 2 back-offs - standing down 90s`)
+            return
+          }
+          hist.push(now); avoidHist.set(flee.id, hist)
+          creeperAvoidLatch = true
+          const startPos = me.clone()
+          const hut = (() => { try { return (provision.listInfra ? provision.listInfra('hut') : [])[0] } catch { return null } })()
+          const nearHut = hut && Math.hypot(hut.x + 2 - me.x, hut.z + 2 - me.z) <= 24
+          ;(async () => {
+            let ok = false
+            try {
+              if (nearHut) {
+                note(`(flee) creeper ${fbest.toFixed(1)}m near home - retreating INTO the hut`)
+                await navigate.navigateToPreempt(bot, new goals.GoalNear(hut.x + 2, hut.y + 1, hut.z + 2, 1),
+                  { timeoutMs: 15000, deadlineMs: 40000, climb: false, priority: arbiter.PRIORITY.SURVIVE, budgets: { door: 3, pit: 0, water: 0, nudge: 1, stepout: 1 }, label: 'hut-retreat' })
+                note('(flee) inside the hut - door-assist sealed the door behind me')
+              } else {
+                const away = me.minus(flee.position)
+                const dest = me.plus(away.scaled(20 / (away.norm() || 1))) // 20b -> past the creeper's 16m follow range -> deaggro (no boundary jitter)
+                note(`(flee) creeper ${fbest.toFixed(1)}m - backing off 20b to deaggro`)
+                await navigate.navigateToPreempt(bot, new goals.GoalNear(Math.floor(dest.x), Math.floor(me.y), Math.floor(dest.z), 2),
+                  { timeoutMs: 15000, deadlineMs: 40000, priority: arbiter.PRIORITY.SURVIVE, label: 'creeper-backoff' })
+              }
+              ok = true
+            } catch (e) { note(`(flee) creeper avoid failed (${e.message})`) }
+            // FUTILITY: the maneuver failed OR we barely moved (fenced/wedged) -> can't reach
+            // safety; suppress re-fleeing THIS creeper for 90s so job/reflex don't ping-pong and
+            // a can't-reach creeper doesn't freeze the body forever (the wedge watchdog case).
+            let netMove = 0; try { netMove = Math.hypot(bot.entity.position.x - startPos.x, bot.entity.position.z - startPos.z) } catch {}
+            if (!ok || netMove < 2.5) {
+              fleeFutileUntil.set(flee.id, Date.now() + 90000)
+              note(`(flee) creeper avoid netted only ${netMove.toFixed(1)}b - standing down 90s`)
             }
-          } catch {}
+            setTimeout(() => { creeperAvoidLatch = false }, 5000) // release the latch after it settles
+          })()
+          return
         }
+        // 3) The PROGRESS deferral now guards ONLY the raw radial flee below (emergencies /
+        // low-hp melee flee). A non-emergency at 6-12m already committed above; this keeps a
+        // preventive melee flee from thrashing a deliberate navigation's approach (door-loop).
+        if (!fleeEmergency && arbiter.maneuverActive(arbiter.PRIORITY.PROGRESS)) return
         // standoff suppression (see fleeFutileUntil above) - a hit always re-arms
         if (!beingHit && (fleeFutileUntil.get(flee.id) || 0) > now) return
         if (!fleeEp || fleeEp.id !== flee.id) fleeEp = { id: flee.id, start: now, pos: me.clone() }

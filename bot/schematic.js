@@ -644,20 +644,52 @@ async function buildSurvival (bot, schem, at, opts = {}) {
     if (cleared) say(`cleared ${cleared} bit(s) of vegetation`)
     let lastShelter = 0
     let lastSurvive = 0
+    let survivePauseSuppressUntil = 0 // episode cap: after a 90s can't-reach standoff, don't re-pause for 120s
     for (;;) {
       if (isStopped()) { stopped = true; break }
       // JOB ARBITER (survive > progress): building is a PROGRESS job - before placing the next
-      // block, yield to any unmet SURVIVE need (food/hp/threat), the ONE authority instead of
-      // the ad-hoc food/night checks below. Food need -> secure it and resume placing; a live
-      // threat -> let the reflexes handle it (short pause). Night-shelter keeps its own branch.
-      if (Date.now() - lastSurvive > 5000) {
-        lastSurvive = Date.now()
+      // block, consult the ONE authority (provision.survivalNeed) EVERY iteration. A live
+      // THREAT/CREEPER need -> PAUSE: issue no nav/place and hand the body to the 700ms flee
+      // reflex (this pause was MISSING - the loop used to act only on a food need and keep
+      // placing/nav-ing through a creeper, FIGHTING the reflex until it got blown up). A FOOD
+      // need -> secure it (throttled - a bank walk is expensive). Night-shelter keeps its branch.
+      {
         const need = provision.survivalNeed(bot)
-        if (need && need.need === 'food') {
-          dbg('build: SURVIVE need (food) mid-build - securing food before the next block')
-          try { await provision.secureFood(bot, { isStopped, say, threshold: 14 }) } catch {}
-          bot.pathfinder.setMovements(moves)
+        if (need && (need.need === 'creeper' || need.need === 'threat') && Date.now() >= survivePauseSuppressUntil) {
+          dbg('build: SURVIVE need (' + need.need + ' - ' + need.reason + ') mid-build - PAUSING; the flee reflex owns the body')
+          try { bot.pathfinder.setGoal(null) } catch {} // let the reflex drive; don't fight it with a build goal
+          const pauseStart = Date.now()
+          let capped = false
+          while (!isStopped()) {
+            await new Promise(r => setTimeout(r, 1200)) // 1-2s slices; the reflex moves the body
+            const n2 = provision.survivalNeed(bot)
+            if (!n2 || (n2.need !== 'creeper' && n2.need !== 'threat')) break // threat cleared
+            // EPISODE CAP: a can't-reach creeper (fenced, flee marked futile) keeps survivalNeed
+            // returning 'creeper' forever - which would recreate the multi-minute freeze the wedge
+            // watchdog exists for. After 90s, resume building and suppress re-pausing for 120s -
+            // UNLESS the creeper is genuinely point-blank (<=8b), where resuming risks the blast.
+            const st = provision.survivalState ? provision.survivalState(bot) : null
+            const cd = st ? st.creeperDist : null
+            if (Date.now() - pauseStart >= 90000 && !(cd != null && cd <= 8)) {
+              survivePauseSuppressUntil = Date.now() + 120000
+              capped = true
+              dbg('build: threat pause hit the 90s cap (can\'t-reach standoff, creeperDist=' + (cd == null ? 'n/a' : cd.toFixed(1)) + ') - resuming, re-pause suppressed 120s')
+              break
+            }
+          }
+          bot.pathfinder.setMovements(moves) // the reflex may have reset movements - restore the build profile
+          if (isStopped()) { stopped = true; break }
+          if (!capped) dbg('build: threat cleared - resuming the build')
           continue
+        }
+        if (Date.now() - lastSurvive > 5000) {
+          lastSurvive = Date.now()
+          if (need && need.need === 'food') {
+            dbg('build: SURVIVE need (food) mid-build - securing food before the next block')
+            try { await provision.secureFood(bot, { isStopped, say, threshold: 14 }) } catch {}
+            bot.pathfinder.setMovements(moves)
+            continue
+          }
         }
       }
       // NIGHT SHELTER (same as gatherLoop/runSmelt): a naked bot placing blocks at night is

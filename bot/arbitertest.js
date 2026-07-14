@@ -131,5 +131,37 @@ t('jobSurvivalNeed: threshold is context-tunable (start=14 vs mid-activity criti
   assert.strictEqual(arb.jobMayProgress({ food: 5, hp: 20 }, { foodThreshold: 6 }), false, 'food 5 mid-mine -> bail')
 })
 
+t('jobSurvivalNeed: CREEPER at 10b -> BLOCK progress (need:creeper), at 14b -> allowed', () => {
+  const near = arb.jobSurvivalNeed({ food: 18, hp: 20, creeperDist: 10 })
+  assert(near && near.need === 'creeper', 'a creeper 10b away surfaces need:creeper')
+  assert.strictEqual(near.tier, P.SURVIVE)
+  assert.strictEqual(arb.jobMayProgress({ food: 18, hp: 20, creeperDist: 10 }), false, 'progress blocked with a creeper at 10b')
+  // beyond the 12m creeper range -> allowed
+  assert.strictEqual(arb.jobSurvivalNeed({ food: 18, hp: 20, creeperDist: 14 }), null, 'a creeper 14b away does not block')
+  assert.strictEqual(arb.jobMayProgress({ food: 18, hp: 20, creeperDist: 14 }), true)
+  // right at the boundary
+  assert(arb.jobSurvivalNeed({ food: 18, hp: 20, creeperDist: 12 }), 'a creeper at exactly 12b blocks')
+  assert.strictEqual(arb.jobSurvivalNeed({ food: 18, hp: 20, creeperDist: 12.1 }), null, '12.1b is past the creeper range')
+})
+
+t('jobSurvivalNeed: MELEE range unchanged - a far skeleton (threatDist 14, no creeper) does NOT block a build', () => {
+  assert.strictEqual(arb.jobSurvivalNeed({ food: 18, hp: 20, threatDist: 14, creeperDist: null }), null, 'a skeleton 14b away must NOT abort a build (melee keeps range 6)')
+  assert.strictEqual(arb.jobMayProgress({ food: 18, hp: 20, threatDist: 14 }), true)
+  // a melee mob at 5b still blocks (threatRange 6 intact)
+  assert.strictEqual(arb.jobSurvivalNeed({ food: 18, hp: 20, threatDist: 5 }).need, 'threat')
+})
+
+t('jobSurvivalNeed: PRECEDENCE - hp<=6 outranks a creeper', () => {
+  const need = arb.jobSurvivalNeed({ food: 18, hp: 6, creeperDist: 8 })
+  assert.strictEqual(need.need, 'heal', 'hp<=6 (heal) is surfaced before the creeper')
+  // and a melee threat<=6 is surfaced before the creeper too (checked earlier in the ladder)
+  assert.strictEqual(arb.jobSurvivalNeed({ food: 18, hp: 20, threatDist: 4, creeperDist: 8 }).need, 'threat')
+})
+
+t('jobSurvivalNeed: creeperRange is opt-tunable', () => {
+  assert.strictEqual(arb.jobSurvivalNeed({ food: 18, hp: 20, creeperDist: 10 }, { creeperRange: 8 }), null, 'a tighter creeperRange 8 lets a 10b creeper pass')
+  assert(arb.jobSurvivalNeed({ food: 18, hp: 20, creeperDist: 15 }, { creeperRange: 16 }), 'a wider creeperRange 16 blocks a 15b creeper')
+})
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall arbiter tests passed')
 process.exit(failures ? 1 : 0)

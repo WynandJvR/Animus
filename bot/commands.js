@@ -704,6 +704,34 @@ async function provisionArmor (bot, opts = {}) {
   }
   if (!bareSlots().length) return wore.length ? `armored up: ${wore.join(', ')}` : 'already wearing armor in every slot'
 
+  // 1.5) RAID THE BANK before hunting/mining for NEW armor. Live: the bot ran the full iron
+  //     grind (mine -> smelt -> craft) while a finished set sat in its own chest. Withdraw the
+  //     best banked piece for each still-bare slot and WEAR it - covers every material
+  //     (leather/iron/diamond/...), so the expensive leather-hunt/iron-bootstrap below only
+  //     runs for slots the bank genuinely can't cover. Best-effort: a chest hiccup just skips it.
+  if (bareSlots().length && !isStopped()) {
+    try {
+      const chests = (provision.listInfra ? provision.listInfra('chest', bot) : []) || []
+      for (const e of chests) {
+        if (!bareSlots().length || isStopped()) break
+        let blk = null; try { blk = bot.blockAt(new Vec3(e.x, e.y, e.z)) } catch {}
+        if (!blk || !/chest/.test(blk.name || '')) continue
+        let counts = {}
+        try { counts = await provision.chestCounts(bot, blk) } catch { continue }
+        for (const slot of bareSlots()) {
+          const cand = Object.keys(counts).filter(n => counts[n] > 0 && armorSlot(n) === slot).map(n => ({ name: n }))
+          const pick = bestArmor(cand)
+          if (!pick) continue
+          try {
+            const got = await provision.withdrawItem(bot, blk, pick.name, 1)
+            if (got > 0) { const it = inv().find(i => i.name === pick.name); if (it) { await bot.equip(it, slot); wore.push(pick.name + ' (from bank)') } }
+          } catch { /* transient - leave the slot for the leather/iron path */ }
+        }
+      }
+    } catch (e) { say(`(bank-armor check skipped: ${e.message})`) }
+    if (!bareSlots().length) return `armored up from the bank: ${wore.join(', ')}`
+  }
+
   // 2) LEATHER only when cows are VERIFIABLY here (entity check, not hope) - never
   //    roam-hunt a biome with no animals; that roam was the old dead end.
   const cowsAround = !!bot.entity && Object.values(bot.entities || {}).some(e => e && e.position && /^(cow|mooshroom)$/.test((e.name || '').toLowerCase()) && e.position.distanceTo(bot.entity.position) <= 48)

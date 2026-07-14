@@ -3420,11 +3420,15 @@ function needFoodSupply (bot) {
 function survivalState (bot) {
   const me = bot.entity && bot.entity.position
   let threatDist = null
+  let creeperDist = null // tracked SEPARATELY: a creeper triggers avoidance at a longer range
   if (me) {
     for (const e of Object.values(bot.entities || {})) {
       if (!e || !e.position || (e.type !== 'mob' && e.type !== 'hostile')) continue
-      if (!SHELTER_HOSTILE.test((e.name || '').toLowerCase())) continue
-      const d = e.position.distanceTo(me); if (threatDist == null || d < threatDist) threatDist = d
+      const name = (e.name || '').toLowerCase()
+      const d = e.position.distanceTo(me)
+      if (/creeper/.test(name) && (creeperDist == null || d < creeperDist)) creeperDist = d
+      if (!SHELTER_HOSTILE.test(name)) continue
+      if (threatDist == null || d < threatDist) threatDist = d
     }
   }
   let drowning = false
@@ -3433,6 +3437,7 @@ function survivalState (bot) {
     food: bot.food,
     hp: bot.health,
     threatDist,
+    creeperDist,
     drowning,
     inLava: !!(bot.entity && bot.entity.isInLava),
     onFire: false, // the auto-defend/hazard reflexes own fire; not a progress-gate need here
@@ -4311,6 +4316,20 @@ async function gatherLoop (bot, item, count, opts = {}) {
       const react = await surviveMiningThreat()
       if (react === 'bail') return { gathered: countItem(bot, item) - start, reason: 'broke off mining to survive a mob / low hp - getting to safety' }
       if (react) continue
+    }
+    // CREEPER/THREAT beyond mineDanger's 6m reach: surviveMiningThreat (nearHostile 6 / hp<12)
+    // never feels a creeper closing at 6-12m until it's point-blank. Consult the ONE authority
+    // each iteration and, on a creeper/threat SURVIVE need out in the OPEN (not deep - deep keeps
+    // its climb-out via surviveMiningThreat), BAIL the gather so isBusy clears and the body-side
+    // flee/back-off reflex (useless mid-dig) takes over. foodThreshold 6 so a food dip doesn't bail
+    // here (the secureFood branch below owns hunger). Mirrors branchMine's start-gate/mineDanger.
+    if (!hasSolidCeiling(bot, 12, { ignoreLeaves: true })) {
+      const need = survivalNeed(bot, { foodThreshold: 6 })
+      if (need && (need.need === 'creeper' || need.need === 'threat')) {
+        dbg('  gather: SURVIVE need (' + need.need + ' - ' + need.reason + ') in the open - breaking off so the flee reflex can react')
+        if (opts.say) opts.say('creeper closing - breaking off to get clear')
+        return { gathered: countItem(bot, item) - start, reason: 'broke off gathering to avoid a ' + need.need + ' - getting clear' }
+      }
     }
     if (Date.now() - lastBeat > 5000) {
       lastBeat = Date.now()

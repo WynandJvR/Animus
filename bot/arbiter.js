@@ -107,15 +107,20 @@ function mayInterrupt (reflexPri) { return !maneuverActive(reflexPri) }
 // no module cycle; the bot->state snapshot lives in provision.survivalState.
 //
 // state fields (all optional; absent = not blocking): food (0..20), hp (0..20),
-// threatDist (blocks to nearest hostile | null), drowning, onFire, inLava (bools),
-// isNight, underArmored (bools), nightStuck (bool - the night has stopped ending, so the
-// night+underArmored shelter need is NOT surfaced; the resolution is to re-arm, not hide).
+// threatDist (blocks to nearest MELEE hostile | null), creeperDist (blocks to nearest
+// creeper | null - kept SEPARATE from threatDist so it can trigger at a longer range),
+// drowning, onFire, inLava (bools), isNight, underArmored (bools), nightStuck (bool - the
+// night has stopped ending, so the night+underArmored shelter need is NOT surfaced; the
+// resolution is to re-arm, not hide).
 // opts: foodThreshold (default 14 - the START gate; pass 6 for a mid-activity critical bail),
-//       hpCritical (6), threatRange (6).
+//       hpCritical (6), threatRange (6 - melee mobs), creeperRange (12 - a creeper is a walking
+//       bomb; a build/mine must abort well before it closes to detonation range, unlike a
+//       skeleton at 14m which must NOT abort a build).
 function jobSurvivalNeed (state, opts = {}) {
   const s = state || {}
   const hpCritical = opts.hpCritical != null ? opts.hpCritical : 6
   const threatRange = opts.threatRange != null ? opts.threatRange : 6
+  const creeperRange = opts.creeperRange != null ? opts.creeperRange : 12
   const foodThreshold = opts.foodThreshold != null ? opts.foodThreshold : 14
   // IMMEDIATE DANGER first (SURVIVE, non-negotiable)
   if (s.inLava) return { tier: PRIORITY.SURVIVE, need: 'lava', reason: 'in lava' }
@@ -123,6 +128,9 @@ function jobSurvivalNeed (state, opts = {}) {
   if (s.drowning) return { tier: PRIORITY.SURVIVE, need: 'drowning', reason: 'head underwater' }
   if (s.hp != null && s.hp <= hpCritical) return { tier: PRIORITY.SURVIVE, need: 'heal', reason: 'hp ' + s.hp + ' <= ' + hpCritical }
   if (s.threatDist != null && s.threatDist <= threatRange) return { tier: PRIORITY.SURVIVE, need: 'threat', reason: 'hostile ' + (typeof s.threatDist === 'number' ? s.threatDist.toFixed(1) : s.threatDist) + 'b' }
+  // CREEPER (SURVIVE): distinct from a melee mob - it explodes, so a progress job must abort
+  // at a longer range (12m) to leave room to back off before it detonates point-blank.
+  if (s.creeperDist != null && s.creeperDist <= creeperRange) return { tier: PRIORITY.SURVIVE, need: 'creeper', reason: 'creeper ' + (typeof s.creeperDist === 'number' ? s.creeperDist.toFixed(1) : s.creeperDist) + 'b' }
   // HUNGER (SURVIVE): a progress job must not run while genuinely hungry (it mined starving)
   if (s.food != null && s.food < foodThreshold) return { tier: PRIORITY.SURVIVE, need: 'food', reason: 'food ' + s.food + ' < ' + foodThreshold }
   // NIGHT SHELTER for a naked bot (SURVIVE) - but NOT on a frozen/eternal night. When dawn
