@@ -2189,33 +2189,60 @@ function saveWorldMem () {
   worldMemTimer = setTimeout(() => { try { fs.writeFileSync(WORLD_MEM_FILE, JSON.stringify(worldMem, null, 1)) } catch {} }, 2000)
   if (worldMemTimer.unref) worldMemTimer.unref()
 }
-function rememberSpot (item, pos) {
+function rememberSpot (item, pos, tag) {
   const m = loadWorldMem()
   const list = m[item] = m[item] || []
   for (const sp of list) {
-    if (Math.hypot(sp.x - pos.x, sp.z - pos.z) < 24) { sp.hits = (sp.hits || 1) + 1; sp.at = Date.now(); saveWorldMem(); return }
+    if (Math.hypot(sp.x - pos.x, sp.z - pos.z) < 24) {
+      sp.hits = (sp.hits || 1) + 1; sp.at = Date.now()
+      if (sp.dryAt) delete sp.dryAt // a fresh success here clears the dry-on-arrival cooldown
+      if (tag) Object.assign(sp, tag)  // e.g. { orchard:true } so this entry is never hard-deleted
+      saveWorldMem(); return
+    }
   }
-  list.push({ x: Math.round(pos.x), z: Math.round(pos.z), at: Date.now(), hits: 1 })
+  const e = { x: Math.round(pos.x), z: Math.round(pos.z), at: Date.now(), hits: 1 }
+  if (tag) Object.assign(e, tag)
+  list.push(e)
   if (list.length > 20) { list.sort((a, b) => (b.hits - a.hits) || (b.at - a.at)); list.length = 20 }
   saveWorldMem()
 }
 function forgetSpot (item, spot, hard) {
   const list = loadWorldMem()[item] || []
-  // hard: the spot was BONE-DRY on arrival after a deliberate trek - it's dead, remove it
-  // now. Decrement-decay made a stale 4-hit spot cost four wasted 200-block round trips.
-  spot.hits = hard ? 0 : (spot.hits || 1) - 1
-  if (spot.hits <= 0) { const i = list.indexOf(spot); if (i >= 0) list.splice(i, 1) }
+  if (!hard) {
+    // soft forget (decrement-decay): the spot lost a little confidence, delete at zero.
+    spot.hits = (spot.hits || 1) - 1
+    if (spot.hits <= 0) { const i = list.indexOf(spot); if (i >= 0) list.splice(i, 1) }
+    saveWorldMem(); return
+  }
+  // HARD: the spot was BONE-DRY on arrival after a deliberate trek. An ORCHARD entry regrows -
+  // NEVER hard-delete it, just rest-cool it so recall skips it while the trees come back. A wild
+  // spot: MARK it (dryAt suppresses recall for a cooldown, hits demoted) and give regrowth ONE
+  // chance; twice-dead (tries>=2) = gone. Marking-not-deleting stops a hits:5 chopped-out spot
+  // from staying a top recall candidate while still remembering the forest may regrow.
+  if (spot.orchard) { spot.rest = Date.now() + 8 * 60000; spot.hits = 0; saveWorldMem(); return }
+  spot.tries = (spot.tries || 0) + 1
+  spot.dryAt = Date.now()
+  spot.hits = 0
+  if (spot.tries >= 2) { const i = list.indexOf(spot); if (i >= 0) list.splice(i, 1) }
   saveWorldMem()
 }
 function recallSpot (item, pos, visited) {
   const list = loadWorldMem()[item] || []
-  let best = null; let bd = Infinity
+  // SCORED pick (not just nearest-unvisited): skip exhausted/cooling spots, and prefer a spot
+  // that is NEAR and RECENTLY-PRODUCTIVE over a far/stale one. The old nearest-first pick treks
+  // 320b to a stale hits:5 spot, finds it dry, drops it, recalls the next far spot - burning the
+  // deadline before the near ring is ever swept.
+  const now = Date.now(); const DRY_COOLDOWN = 20 * 60000; const STALE = 45 * 60000
+  let best = null; let bs = Infinity
   for (const sp of list) {
     if (visited.has(sp.x + ',' + sp.z)) continue
-    if (sp.rest && sp.rest > Date.now()) continue // growing grove on cooldown - let the trees grow
+    if (sp.rest && sp.rest > now) continue // growing grove on cooldown - let the trees grow
+    if (sp.dryAt && now - sp.dryAt < DRY_COOLDOWN) continue // just came up dry - don't re-trek it yet
     const d = Math.hypot(sp.x - pos.x, sp.z - pos.z)
     if (d > 400 || d < 16) continue // too far to trek / already here
-    if (d < bd) { bd = d; best = sp }
+    const stalePenalty = (now - (sp.at || 0) > STALE) ? 200 : 0
+    const score = d + stalePenalty - Math.min(48, (sp.hits || 1) * 8) // near + recently-productive wins
+    if (score < bs) { bs = score; best = sp }
   }
   return best
 }
@@ -3082,7 +3109,10 @@ async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () =
   if (!hoe) {
     try {
       const res = require('./resources.js') // lazy (resources requires provision at load)
-      const rec = await res.reconcile(bot, { wooden_hoe: 1 }, { near: home, planOpts: { primaryWood: detectWood(bot) || 'oak' } })
+      // maxAgeMs:0 forces a REAL chest open before concluding wood must be gathered: operator-
+      // added / freshly-banked wood inside the 180s cache window otherwise reads stale-empty and
+      // the bot treks for wood it already owns (withdraw > gather). Mirrors ensureFood's forceFresh.
+      const rec = await res.reconcile(bot, { wooden_hoe: 1 }, { near: home, maxAgeMs: 0, planOpts: { primaryWood: detectWood(bot) || 'oak' } })
       dbg('  wheat farm: acquiring a wooden hoe (' + (rec.plan.tasks.map(t => `${t.type}:${t.item || t.output}`).join(' > ') || (rec.withdraws.length ? 'from bank' : 'from hand')) + ')')
       if (rec.withdraws.length || rec.plan.tasks.length) await res.runReconciled(bot, rec, { isStopped, say, home })
     } catch (e) { dbg('  wheat farm: hoe acquisition failed (' + e.message + ')') }
@@ -4141,8 +4171,11 @@ async function plantGrove (bot, home, logItem, { isStopped = () => false, say = 
     }
   }
   if (planted) {
-    const m = loadWorldMem(); m.orchard = { x: gx, z: gz, at: Date.now() }; saveWorldMem() // dedup: one orchard per site per growth cycle
-    rememberSpot(logItem, new Vec3(gx + 5, baseY, gz + 5)) // the plot is a wood source now
+    // dedup: one orchard per site per growth cycle. Growth fields (planted/harvestReadyAt) let
+    // the gather loop treat the grove as a RENEWABLE first-stop once it has had time to mature.
+    const GROW_MS = parseInt(process.env.ORCHARD_GROW_MS || String(10 * 60000), 10)
+    const m = loadWorldMem(); m.orchard = { x: gx, z: gz, at: Date.now(), planted, harvestReadyAt: Date.now() + GROW_MS }; saveWorldMem()
+    rememberSpot(logItem, new Vec3(gx + 5, baseY, gz + 5), { orchard: true }) // the plot is a renewable wood source now (never hard-deleted)
     // a torch in the plot: saplings keep growing through the night and mobs stay out
     try { await placeAt(bot, new Vec3(gx + 2, baseY + 1, gz + 2), /^torch$/) } catch {}
     say(`planted a ${planted}-tree orchard by the site - rows are straight, come have a look`)
@@ -4197,6 +4230,7 @@ async function gatherLoop (bot, item, count, opts = {}) {
   let waterAborts = 0
   let firstLoop = true // first iteration extends the fence over a far continuation start
   let orchardPlanted = false // orchard mode fires at most once per gather run
+  let orchardHarvested = false // orchard-first harvest fires at most once per gather run
   const widenFence = why => {
     if (maxRoam >= MAX_ROAM + 128) return
     maxRoam = Math.min(MAX_ROAM + 128, maxRoam + 32) // dry looks can ultimately reach ~288 blocks out
@@ -4593,9 +4627,51 @@ async function gatherLoop (bot, item, count, opts = {}) {
         }
         return { gathered: countItem(bot, item) - start, reason: `searched far and wide, no reachable ${sources.join('/')}` }
       }
+      // ORCHARD FIRST (renewable supply): before trekking to wild timber, if we planted a grove
+      // and it has had time to grow (or we carry bone_meal to force it), walk to it and harvest
+      // our OWN trees. The plot is ours but isWildTreeLog still passes (planted trees have canopy,
+      // no structure) so the anti-grief filter is unchanged. Fires once per gather; on grown logs
+      // we `continue` and the loop-top scan finds + chops them (existing replant keeps it stocked).
+      if (isLogGather && !orchardHarvested) {
+        const orch = loadWorldMem().orchard
+        const GROW_MS = parseInt(process.env.ORCHARD_GROW_MS || String(10 * 60000), 10)
+        const mature = orch && (Date.now() - (orch.at || 0) > GROW_MS || countItem(bot, 'bone_meal') > 0)
+        if (orch && mature && Math.hypot(orch.x - home.x, orch.z - home.z) <= maxRoam + 40) {
+          orchardHarvested = true
+          dbg('  gather ORCHARD-first: grove at ' + orch.x + ',' + orch.z + ' mature (' + Math.round((Date.now() - (orch.at || 0)) / 60000) + ' min) - harvesting my own trees before the wild')
+          if (opts.say) opts.say('my orchard should be grown - harvesting my own trees first')
+          try { await walkStaged(bot, orch.x + 5, orch.z + 5, { isStopped, range: 8, timeoutMs: 90000 }) } catch {}
+          // bone-meal any still-short saplings so the walk isn't wasted (forces an instant harvest)
+          if (countItem(bot, 'bone_meal') > 0) {
+            const sapId = (mcData.blocksByName[saplingFor(item)] || {}).id
+            const saps = sapId != null ? (bot.findBlocks({ matching: sapId, maxDistance: 24, count: 8 }) || []) : []
+            for (const sp of saps.slice(0, 6)) { if (isStopped()) break; try { await boneMealSapling(bot, sp) } catch {} }
+          }
+          const grown = (bot.findBlocks({ matching: ids, maxDistance: 24, count: 8 }) || []).some(p => isWildTreeLog(bot, p))
+          if (grown) {
+            const mm = loadWorldMem(); if (mm.orchard) { mm.orchard.at = Date.now(); mm.orchard.harvestReadyAt = Date.now() + GROW_MS; saveWorldMem() } // renewed: let it regrow before the next visit
+            dbg('  gather ORCHARD-first: grown logs present - rescanning to chop them')
+            continue
+          }
+          dbg('  gather ORCHARD-first: not grown yet on arrival - falling through to the wild')
+        }
+      }
       // WORLD MEMORY first: walk to a remembered source before wandering blind. Memory
       // deliberately overrides the roam fence - a known resource IS the reason to leave.
       const memSpot = recallSpot(item, bot.entity.position, visitedMem)
+      // NEAR RING BEFORE A FAR MEMORY TREK: a naked bot at a treeless-nearby base has only FAR
+      // (~320b) exhausted memories; the loop-top findBlocks(64) can't see fresh timber ~100b out.
+      // Sweeping one octagon lap FIRST finds the near timber (rememberSpot records a NEAR spot that
+      // out-scores the far ones forever); if the near ring is genuinely dry it falls straight
+      // through to the far trek exactly as before. Bounded to one lap (sweepLeg<8); orchards and
+      // near memories (<=NEAR from home) are trekked, not deferred.
+      const NEAR = parseInt(process.env.WOOD_NEAR || '140', 10)
+      if (isLogGather && memSpot && !memSpot.orchard && Math.hypot(memSpot.x - home.x, memSpot.z - home.z) > NEAR && sweepLeg < 8) {
+        dbg('  gather NEAR-first: memory spot ' + memSpot.x + ',' + memSpot.z + ' is ' + Math.round(Math.hypot(memSpot.x - home.x, memSpot.z - home.z)) + 'b out (>' + NEAR + ') - sweeping the near ring first (leg ' + sweepLeg + ')')
+        await sweepTowardTimber()
+        dryExplores++
+        continue
+      }
       if (memSpot) {
         visitedMem.add(memSpot.x + ',' + memSpot.z)
         if (opts.say && dryExplores === 0) opts.say(`i remember ${sources[0]} over by ${memSpot.x},${memSpot.z} - heading there`)
