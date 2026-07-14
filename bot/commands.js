@@ -2658,25 +2658,12 @@ async function autoBuild (bot, schem, at, opts = {}) {
         // path in, so it fell back to an open-field chest and never entered) and a recovered bed
         // rode around unplaced (no spawn -> night-death carousel). Both self-heal here now,
         // decoupled from the rebuild. Idempotent: a filled apron / placed bed is a fast no-op.
-        try { await provision.ensureHutApron(bot, hutAt, { isStopped, say }) } catch (e) { dbg('camp: apron fill failed (' + e.message + ')') }
-        try { const bs = await provision.ensureHutBed(bot, hutAt, { isStopped, say }); dbg('camp: hut bed -> ' + bs) } catch (e) { dbg('camp: hut bed failed (' + e.message + ')') }
-        // BANK DOUBLE-CHEST HEAL (liveability, every pass): a rebuild that left the bank
-        // as two mismatched single chests (live: 418,66,86 east + 418,66,87 north) gets
-        // re-faced into one connected double. Idempotent: a merged pair is a fast no-op.
-        try { if (await provision.healBankDouble(bot, { x: hutAt.x, y: hutAt.y, z: hutAt.z }, { isStopped, say })) say('fixed the bank - one proper double chest again') } catch (e) { dbg('camp: bank double-heal failed (' + e.message + ')') }
-        // SPAWN re-assert (hourly no-op): a bed standing in the hut is worthless if the
-        // server anchor drifted - use it again so every death keeps coming home.
-        try { await provision.ensureSpawnBed(bot, { isStopped, say }) } catch (e) { dbg('camp: spawn assert failed (' + e.message + ')') }
-        // SELF-HEALING interior (liveability, every pass): reconcile the infra registry
-        // against the world and tidy the interior via the self-structure model - dig stray
-        // dirt (incl. head-height pillar remnants), remove DUPLICATE stations, fill real
-        // floor holes only, with a verified postcondition. Early no-op when already clean,
-        // so it can't re-duplicate. Replaces the old 5x5 ad-hoc CLUTTER sweep (it missed
-        // dx/dz 4, ignored stray dirt + floor holes, and trusted the corrupted registry).
-        try { const mr = await provision.maintainHut(bot, hutAt, { isStopped, say }); if (mr && !mr.clean && !mr.skipped) dbg('camp: hut self-heal -> ' + JSON.stringify({ ok: mr.ok, dug: mr.dug, dupes: mr.removedDupes, passes: mr.passes })) } catch (e) { dbg('camp: hut self-heal failed (' + e.message + ')') }
-        // HOME BANK (operator promise): the hut chest is the ONE treasury - ferry every
-        // loose field chest within 64 into it and pack the empties up. Idempotent.
-        try { const nc = await provision.consolidateBank(bot, hutAt, { isStopped, say }); if (nc) dbg('camp: consolidated ' + nc + ' field chest(s) into the bank') } catch (e) { dbg('camp: bank consolidation failed (' + e.message + ')') }
+        // ONE code path shared with the survival HOME-REPAIR reflex (index.js): apron -> bed
+        // -> bank double-heal -> spawn re-assert -> structural repair + interior tidy ->
+        // consolidate field chests. Extracted to provision.maintainHome so a creeper-damaged
+        // base self-heals during ordinary idle survival too, not only on a full camp BOM.
+        // Each step still no-ops fast when its piece is intact - behaviour identical here.
+        try { await provision.maintainHome(bot, hutAt, { isStopped, say }) } catch (e) { dbg('camp: home maintenance failed (' + e.message + ')') }
       }
     } catch (e) { dbg('camp: hut failed (' + e.message + ') - continuing') }
     // (The old reach-based bank-migration + furnish + threshold-apron are RETIRED: the

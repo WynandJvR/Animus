@@ -864,6 +864,45 @@ if (process.env.GEAR_REFLEX !== '0') {
   }, 60000).unref?.()
 }
 
+// HOME REPAIR: an idle bot standing AT a creeper-damaged base self-heals it as a SURVIVAL
+// reflex - not only inside the camp job. Home upkeep used to run ONLY in autoBuild's camp pass,
+// gated on a huge total BOM (~>=500), so ordinary creeper damage silently rotted the base for
+// hours. This shares the camp pass's exact chain via provision.maintainHome (apron -> bed ->
+// bank double-heal -> spawn re-assert -> structural repair + tidy -> consolidate). Fires only
+// when idle, already home (<=24b), and survival needs are met - repair is a PROGRESS job, so
+// food/hp/threat/shelter come first (won't stand still patching walls under attack). It does
+// NOT trek: crossing the world back to a far base is recover-home's job. Cooled down 5 min
+// after a pass so it can't churn. Set HOME_REPAIR=0 to disable.
+let repairingHome = false
+let lastHomeRepair = 0
+if (process.env.HOME_REPAIR !== '0') {
+  setInterval(async () => {
+    if (repairingHome || !bot.entity) return
+    if (recoveringHome) return // respawned far from base - GO HOME outranks patching the base
+    if (commands.isBusy && commands.isBusy()) return // a job owns the body (its camp pass repairs)
+    if (arbiter.maneuverActive()) return // a navigation is driving - don't start a repair mid-walk
+    if (provision.isResting && provision.isResting()) return
+    if (provision.isSecuringFood && provision.isSecuringFood()) return
+    if (commands.isEscaping && commands.isEscaping()) return
+    if (navigate.isForceUnsticking() || navigate.isRecovering()) return
+    // JOB ARBITER: home repair is a PROGRESS job - never run it while a SURVIVE need is unmet
+    // (food/hp/threat/shelter). This is how the base won't get patched while under attack.
+    if (!provision.mayDoProgress(bot)) return
+    if (Date.now() - lastHomeRepair < 300000) return // 5-min cooldown after a pass - don't churn
+    const hut = provision.hutAnchor(); if (!hut) return
+    // AT-HOME gate: only repair when actually near home. This reflex must NOT trek across the
+    // world - that's recover-home's job; repair only when already standing at the base.
+    if (bot.entity.position.distanceTo(hut) > 24) return
+    repairingHome = true
+    try {
+      const r = await provision.maintainHome(bot, hut, { isStopped: () => false, say: m => bot.chat(String(m).slice(0, 200)) })
+      lastHomeRepair = Date.now()
+      if (r && r.damaged) note('(home-repair) patched the base - ' + JSON.stringify({ bed: r.bed, chest: r.chestFixed, repair: r.repair && r.repair.missing, consolidated: r.consolidated }))
+      else note('(home-repair) base intact - nothing to fix')
+    } catch (e) { note('(home-repair) failed: ' + e.message) } finally { repairingHome = false }
+  }, 60000).unref?.()
+}
+
 // Anti-AFK: keep the connection alive during genuine idle gaps (e.g. between brain
 // restarts) so the server doesn't kick the bot. ONLY when truly idle - if it's
 // pathing/gathering/building it's already active, and a hop mid-task just reads as

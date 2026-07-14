@@ -2510,6 +2510,42 @@ async function maintainHut (bot, hut, opts = {}) {
   return { ...r, repair }
 }
 
+// SURVIVAL-REFLEX home upkeep, shared with the camp pass (commands.js) so there is ONE code
+// path. Runs the SAME liveability chain the camp pass always ran - apron -> bed -> bank
+// double-heal -> spawn re-assert -> structural repair + interior tidy -> consolidate field
+// chests - each step in its own try/catch with the SAME 'camp:' dbg lines. Extracted so a
+// creeper-damaged base self-heals during ordinary idle survival too, not only inside a full
+// camp job (which gates on a ~>=500-block BOM). Each underlying step already no-ops fast when
+// its piece is intact, so this is cheap to run when nothing is broken - no forced rebuilds.
+// Returns { bed, chestFixed, repair, consolidated, damaged }; `damaged` is true when any step
+// actually did work, so the reflex can log/back off meaningfully when the home was intact.
+async function maintainHome (bot, hutAt, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const say = opts.say || (() => {})
+  hutAt = hutAt || hutAnchor()
+  const out = { bed: null, chestFixed: false, repair: null, consolidated: 0, damaged: false }
+  if (!hutAt) return out
+  try { await ensureHutApron(bot, hutAt, { isStopped, say }) } catch (e) { dbg('camp: apron fill failed (' + e.message + ')') }
+  // rebuild/verify the bed. Anything but 'present' means a bed was missing/placed/unplaceable
+  // = the home needed work.
+  try { const bs = await ensureHutBed(bot, hutAt, { isStopped, say }); out.bed = bs; dbg('camp: hut bed -> ' + bs); if (bs !== 'present') out.damaged = true } catch (e) { dbg('camp: hut bed failed (' + e.message + ')') }
+  // BANK DOUBLE-CHEST HEAL (liveability, every pass): a rebuild that left the bank as two
+  // mismatched single chests gets re-faced into one connected double. Idempotent: a merged
+  // pair is a fast no-op (returns false).
+  try { if (await healBankDouble(bot, { x: hutAt.x, y: hutAt.y, z: hutAt.z }, { isStopped, say })) { out.chestFixed = true; out.damaged = true; say('fixed the bank - one proper double chest again') } } catch (e) { dbg('camp: bank double-heal failed (' + e.message + ')') }
+  // SPAWN re-assert (hourly no-op): a bed standing in the hut is worthless if the server
+  // anchor drifted - use it again so every death keeps coming home.
+  try { await ensureSpawnBed(bot, { isStopped, say }) } catch (e) { dbg('camp: spawn assert failed (' + e.message + ')') }
+  // SELF-HEALING structure + interior (liveability, every pass): reconcile the registry, REPAIR
+  // creeper damage (missing wall/door/furniture cells), then tidy the interior. Early no-op when
+  // already clean+intact. repair.missing (0 = intact) is the cheap structural-damage signal.
+  try { const mr = await maintainHut(bot, hutAt, { isStopped, say }); if (mr) { out.repair = mr.repair || null; if (mr.repair && mr.repair.missing) out.damaged = true; if (!mr.clean && !mr.skipped) { out.damaged = true; dbg('camp: hut self-heal -> ' + JSON.stringify({ ok: mr.ok, dug: mr.dug, dupes: mr.removedDupes, passes: mr.passes })) } } } catch (e) { dbg('camp: hut self-heal failed (' + e.message + ')') }
+  // HOME BANK (operator promise): the hut chest is the ONE treasury - ferry every loose field
+  // chest within 64 into it and pack the empties up. Idempotent.
+  try { const nc = await consolidateBank(bot, hutAt, { isStopped, say }); if (nc) { out.consolidated = nc; out.damaged = true; dbg('camp: consolidated ' + nc + ' field chest(s) into the bank') } } catch (e) { dbg('camp: bank consolidation failed (' + e.message + ')') }
+  return out
+}
+
 // Walk to REMEMBERED ones (up to 3 nearest) and verify each still stands; forget the dead.
 // Trying only the single nearest made one stale entry cause a brand-new placement while a
 // perfectly good chest stood 9 blocks further (live: three chests at one site).
@@ -5827,4 +5863,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, setBuildZone, setDebugSink }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, setBuildZone, setDebugSink }
