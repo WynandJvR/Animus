@@ -99,28 +99,68 @@ async function manualHopFromWater (bot) {
 async function walkStaged (bot, tx, tz, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const deadline = Date.now() + (opts.timeoutMs || 180000)
+  // A mid-trek wedge used to make this loop RE-AIM at the same bearing and re-hammer the
+  // identical failing leg up to 3x at ~75s each (~195-225s frozen -> death at night). Now:
+  // on a MEASURED <3b stall we (a) rotate the next leg off the blocked bearing to DETOUR
+  // around the obstacle, and (b) after the first retry still wedged, escalate ONCE to the
+  // aggressive manual escape (navigate.forceUnstick - the same ladder the 150s watchdog
+  // uses) so the freeze breaks in tens of seconds, not minutes. The escape logic lives in
+  // navigate.js; this loop only picks waypoints and asks for the escape.
   let stalls = 0
+  let unstuck = false
   while (!isStopped() && Date.now() < deadline) {
     const p = bot.entity.position
     const d = Math.hypot(tx - p.x, tz - p.z)
     if (d <= (opts.range || 8)) return true
-    const step = Math.min(48, d)
-    const lx = p.x + ((tx - p.x) / d) * step
-    const lz = p.z + ((tz - p.z) / d) * step
-    const from = { x: p.x, z: p.z }
+    // DIRECT toward the goal while progressing; after a stall, rotate the bearing to
+    // route AROUND the wedge (alternating sides, widening) with a shorter leg.
+    const ux = (tx - p.x) / d
+    const uz = (tz - p.z) / d
+    let lx, lz
+    if (stalls === 0) {
+      const step = Math.min(48, d)
+      lx = p.x + ux * step; lz = p.z + uz * step
+    } else {
+      const degs = [60, -60, 120, -120]
+      const th = (degs[stalls - 1] || 0) * Math.PI / 180
+      const rx = ux * Math.cos(th) - uz * Math.sin(th) // rotate the bearing in the XZ plane
+      const rz = ux * Math.sin(th) + uz * Math.cos(th)
+      const step = Math.min(24, d)
+      lx = p.x + rx * step; lz = p.z + rz * step
+    }
+    const legDeadline = stalls === 0 ? 75000 : 30000
+    const legTimeout = stalls === 0 ? 30000 : 12000
+    const legStart = { x: p.x, z: p.z }
     // Each leg runs through the UNIFIED navigator (navigate.js): the water-hop, pit
-    // pillar-out, cave climb-out and cliff-checked surface nudge that used to be an
-    // inline ladder here now fire consistently for every caller.
+    // pillar-out, cave climb-out and cliff-checked surface nudge fire consistently.
+    let navRes, navErr
     try {
-      await navigate.navigateTo(bot, new goals.GoalNearXZ(lx, lz, 4), {
-        timeoutMs: 30000, deadlineMs: 75000, isStopped, label: 'walkStaged',
+      navRes = await navigate.navigateTo(bot, new goals.GoalNearXZ(lx, lz, 4), {
+        timeoutMs: legTimeout, deadlineMs: legDeadline, isStopped, label: 'walkStaged',
         budgets: { water: 1, pit: 1, door: 1, climb: 1, nudge: 1 } // one rescue of each kind per leg - this loop retries legs
       })
-    } catch {}
+    } catch (e) { navErr = e }
     const np = bot.entity.position
-    if (Math.hypot(np.x - from.x, np.z - from.z) < 3) {
+    const moved = Math.hypot(np.x - legStart.x, np.z - legStart.z)
+    // A leg that spent most of its clock PARKED for a survival reflex (creeper standoff,
+    // flee-yield) is NOT a wedge - reflexWaitMs (from the nav's success return or its
+    // honest error) tells us the body was held, not blocked. Never count that as a stall
+    // and never force-unstick it (the #1 regression guard: don't fight the survival hold).
+    const reflexWaitMs = (navRes && navRes.reflexWaitMs) || (navErr && navErr.nav && navErr.nav.reflexWaitMs) || 0
+    const reflexDominated = reflexWaitMs > legDeadline / 2
+    if (moved < 3 && !reflexDominated) {
       stalls++
-      if (stalls >= 3) { dbg('walkStaged: giving up wedged at ' + Math.round(np.x) + ',' + Math.round(np.z)); return false }
+      // After ONE failed retry still wedged, break the freeze with the aggressive manual
+      // escape - at most once per walkStaged call. Gated like the watchdog (never while
+      // asleep or mid-dig). A truly immovable bot then degrades to an honest give-up +
+      // the 150s watchdog backstop, never a manual-controls loop.
+      if (stalls === 2 && !unstuck && !bot.isSleeping && !bot.targetDigBlock) {
+        unstuck = true
+        dbg('walkStaged: wedged after retry at ' + Math.round(np.x) + ',' + Math.round(np.z) + ' - forceUnstick')
+        try { await navigate.forceUnstick(bot, { isStopped }) } catch {}
+        continue
+      }
+      if (stalls >= 4) { dbg('walkStaged: giving up wedged at ' + Math.round(np.x) + ',' + Math.round(np.z)); return false }
     } else stalls = 0
   }
   return false

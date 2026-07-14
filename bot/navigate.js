@@ -688,7 +688,7 @@ async function navigateToInner (bot, goal, opts = {}) {
         // position counts as arrival - anything else feeds the recovery ladder.
         let arrived = true
         try { arrived = goal.isEnd(bot.entity.position.floored()) } catch {}
-        if (arrived) return { recoveries, recoveryMs }
+        if (arrived) return { recoveries, recoveryMs, reflexWaitMs }
         lastErr = new Error('path ended short of the goal')
       } catch (e) { lastErr = e }
       // Reflex handoff: someone SET a new goal mid-goto (flee/defend/charge). The
@@ -703,11 +703,11 @@ async function navigateToInner (bot, goal, opts = {}) {
         reflexWaitMs += Date.now() - t0
         continue
       }
-      if (Date.now() >= dl() || isStopped()) throw honestFail(lastErr, counts, label, recoveryMs)
+      if (Date.now() >= dl() || isStopped()) throw honestFail(lastErr, counts, label, recoveryMs, reflexWaitMs)
       const r0 = Date.now()
       const rescued = await recoverOnce(bot, goal, counts, budgets, opts)
       recoveryMs += Date.now() - r0
-      if (!rescued) throw honestFail(lastErr, counts, label, recoveryMs)
+      if (!rescued) throw honestFail(lastErr, counts, label, recoveryMs, reflexWaitMs)
       recoveries++
       dbg(label + 'recovered via ' + rescued + ' - retrying the path')
     }
@@ -819,10 +819,10 @@ async function forceUnstick (bot, opts = {}) {
   return Math.hypot(p1.x - p0.x, p1.z - p0.z) >= 1.5 || Math.abs(p1.y - p0.y) >= 1
 }
 
-function honestFail (lastErr, counts, label, recoveryMs) {
+function honestFail (lastErr, counts, label, recoveryMs, reflexWaitMs) {
   const tried = Object.entries(counts).filter(([, n]) => n > 0).map(([k, n]) => k + ' x' + n).join(', ')
   const e = new Error(((lastErr && lastErr.message) || 'no path') + (tried ? ' (tried: ' + tried + ')' : ''))
-  e.nav = { counts, recoveryMs: recoveryMs || 0 }
+  e.nav = { counts, recoveryMs: recoveryMs || 0, reflexWaitMs: reflexWaitMs || 0 }
   return e
 }
 
