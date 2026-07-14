@@ -2724,7 +2724,18 @@ async function recoverHome (bot, opts = {}) {
   const distNow = () => Math.hypot(anchor.x - bot.entity.position.x, anchor.z - bot.entity.position.z)
   const arrive = opts.arrive != null ? opts.arrive : 8
   const maxLegs = opts.maxLegs != null ? opts.maxLegs : 12 // bounded so an unreachable home can't wedge us here forever
+  // FOOD SURVIVAL EN ROUTE: on a far respawn the pack is EMPTY - respawn only refills the food
+  // BAR to 20, which then drains over a long trek (this is exactly what starved the bot to death
+  // mid-carousel). Before each leg, if we're getting hungry with nothing to eat, HOLD the trek
+  // and secure food (hunt a nearby animal - raw is fine, auto-eat then eats it) rather than push
+  // blindly to food 0. Bounded (one animal, ~12s); if the field is empty we press on but at least
+  // tried. FOOD_HOLD is generous (<=10) because the remaining trek only burns more.
+  const foodHold = Number(process.env.RECOVER_HOME_FOOD_HOLD || 10)
   for (let leg = 0; leg < maxLegs && distNow() > arrive && !isStopped(); leg++) {
+    if (bot.food != null && bot.food <= foodHold && !hasFood(bot)) {
+      dbg('recoverHome: hungry en route (food ' + bot.food + ', empty pack) - securing food before pushing on')
+      try { const got = await huntForFood(bot, { isStopped }); if (got) { await eatUp(bot).catch(() => {}) ; dbg('recoverHome: hunted + ate en route (food now ' + bot.food + ')') } else dbg('recoverHome: no food animal near the route - pressing on carefully') } catch (e) { dbg('recoverHome: en-route food secure failed (' + e.message + ')') }
+    }
     const before = distNow()
     try { await walkStaged(bot, anchor.x, anchor.z, { isStopped, range: arrive, timeoutMs: 300000 }) } catch (e) { dbg('recoverHome: trek leg ' + leg + ' failed (' + e.message + ')') }
     if (before - distNow() < 4 && distNow() > arrive) dbg('recoverHome: leg ' + leg + ' made no headway (still ' + Math.round(distNow()) + 'b out)')

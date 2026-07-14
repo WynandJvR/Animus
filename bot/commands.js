@@ -115,6 +115,30 @@ function unretrievedGraves () { return deathLedger.filter(d => !d.retrieved && !
 // fires recovery on this BEFORE re-mining from scratch (gear-up-critical: it kept dropping
 // iron/tools then re-mining instead of walking back for them). Returns {x,y,z,items} or null.
 function worthwhileGrave () { const g = bestGrave(); return g ? { x: g.x, y: g.y, z: g.z, items: (g.items && g.items.notable) || [], value: graveValue(g) } : null }
+// SURVIVAL GATE for the respawn grave chase (PURE, offline-testable). The live death spiral:
+// on a far respawn (bed creeper-destroyed -> WORLD SPAWN ~380b from home) the handler sent a
+// NAKED, empty-pack bot on a long trek to chase dropped gear - it STARVED (food 20->0) and got
+// beaten to death en route, then respawned and repeated, bleeding gear every loop. A grave is
+// only worth chasing when the bot is SAFE + FED and the grave is reasonably reachable. No bot
+// handle - just data - so the "is it safe to go?" decision is unit-tested without a world.
+// Returns { chase, reason }. Distances are XZ ("far" is horizontal; respawn Y varies).
+function shouldChaseGrave ({ grave, pos, food, threat, escaping, home, maxDist } = {}) {
+  if (!grave || !pos) return { chase: false, reason: 'no grave or position' }
+  const FOOD_MIN = Number(process.env.GRAVE_MIN_FOOD || 12)
+  // A starving bot must NOT trek - the trek is what drains 20->0 and kills it. Defer, eat/gear
+  // up near home, retry when fed. food==null (not spawned yet) is treated as unknown -> defer.
+  if (food == null || food < FOOD_MIN) return { chase: false, reason: `too hungry to trek (food ${food == null ? '?' : food} < ${FOOD_MIN}) - defer grave until fed` }
+  if (escaping) return { chase: false, reason: 'fleeing a hazard - defer grave' }
+  if (threat) return { chase: false, reason: `hostile ${threat.type || 'mob'} ${threat.dist != null ? threat.dist + 'b' : 'near'} - defer grave until safe` }
+  const MAXD = Number(maxDist != null ? maxDist : (process.env.GRAVE_MAX_DIST || 96))
+  const dBot = Math.hypot(grave.x - pos.x, grave.z - pos.z)
+  // Reachable if the grave is within MAXD of where we ARE, or of HOME (a grave near base is
+  // fine to fetch even mid-trek; a grave far across hostile ground from both is written off).
+  const dHome = home ? Math.hypot(grave.x - home.x, grave.z - home.z) : Infinity
+  const near = Math.min(dBot, dHome)
+  if (near > MAXD) return { chase: false, reason: `grave ${Math.round(near)}b away (> ${MAXD}) across open ground - defer/write off, not worth starving for` }
+  return { chase: true, reason: `safe + fed (food ${food}), grave ${Math.round(near)}b within reach` }
+}
 // auto-resume: the build to pick back up after a death interrupts it. autoBuild
 // re-provisions whatever we lost and Build diffs world-vs-schematic, so resuming just
 // finishes the missing blocks. Kept across a death; cleared on finish or `stop`.
@@ -2994,4 +3018,4 @@ async function resumeBuild (bot) {
   }
 }
 
-module.exports = { handle, state, setupMovements, eatFood, placeTorchNearby, isBusy, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume, flagSpawnSuspect, worthwhileGrave, setDebugSink }
+module.exports = { handle, state, setupMovements, eatFood, placeTorchNearby, isBusy, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume, flagSpawnSuspect, worthwhileGrave, shouldChaseGrave, setDebugSink }

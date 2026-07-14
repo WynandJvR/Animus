@@ -576,59 +576,80 @@ bot.on('spawn', () => {
   } catch {}
   setTimeout(async () => { // let the world/chunks settle first
     try {
-      // DEATH-DROP RECOVERY (gear-up-critical): if we dropped WORTHWHILE gear (iron/tools/
-      // armor - graveWorthIt), go get it PROMPTLY before re-mining from scratch or re-firing
-      // gearup. AxGraves despawn in minutes, so speed matters. bestGrave already excludes
-      // lava/void graves; the recover command has its own bounded give-up. Cap consecutive
-      // auto-recover attempts so we never die-loop TO the recovery. RECOVER_ON_RESPAWN=0 off.
-      if (process.env.RECOVER_ON_RESPAWN !== '0' && commands.worthwhileGrave) {
-        const g = commands.worthwhileGrave()
-        if (g && autoRecoverTries < 3) {
-          autoRecoverTries++
-          note(`(respawn) dropped gear worth recovering at ${g.x},${g.y},${g.z} (${g.items.slice(0, 4).join(', ') || 'value ' + g.value}) - going to get it BEFORE re-mining (try ${autoRecoverTries}/3)`)
-          try {
-            const r = await commands.handle(bot, 'recover')
-            note(`(respawn) recover -> ${r}`)
-            if (!commands.worthwhileGrave()) autoRecoverTries = 0 // got it (or it's gone) - reset
-          } catch (e) { note(`(respawn) recover failed: ${e.message}`) }
-        } else if (g) {
-          note(`(respawn) worthwhile grave at ${g.x},${g.y},${g.z} but already tried ${autoRecoverTries}x - writing it off to avoid a death-loop`)
-        } else {
-          autoRecoverTries = 0 // nothing worthwhile pending - reset the cap
-        }
-      }
-      // GO HOME FIRST if we respawned FAR from base. The hut BED got creeper-destroyed, so
-      // the server fell back to WORLD SPAWN (~570b from the hut) - and live the bot then just
-      // GEARED UP out in the wilderness, drifting around and abandoning its hut/farm/chest to
-      // re-do everything from scratch far away. Getting home OUTRANKS gear-up + local gathering
-      // (a bot 500 blocks from home should walk home, not rebuild its life in the wild). Bounded
-      // + honest (can't wedge); survival still applies en route. Home anchor = hut > remembered
-      // bed > persisted build site. recoveringHome holds the idle gear-up reflex off meanwhile.
-      // RECOVER_HOME=0 disables. This runs BEFORE the resume loop so the bed/spawn are fixed even
-      // when the build site is near home; after grave-recovery so a fresh grave isn't lost.
+      // SURVIVAL-FIRST respawn order (fixes the overnight DEATH SPIRAL): on a far respawn the
+      // bed got creeper-destroyed, so the server dumped the bot at WORLD SPAWN ~380b from home,
+      // NAKED with an empty pack. The old order chased the dropped-gear grave FIRST and ungated
+      // - it sent that starving bot on a long trek, it hit food 0 + got beaten to death, then
+      // respawned and did it again, bleeding gear each loop. RECOVER-HOME NOW RUNS FIRST (getting
+      // home + rebuilding the bed + re-asserting spawn is what STOPS the world-spawn carousel:
+      // future deaths then return HOME, safe), and the grave chase is survival-gated behind it.
+
+      // 1) GO HOME FIRST. Getting home OUTRANKS both gear-up and the grave chase. Bounded +
+      // honest (can't wedge); auto-eat + nav recovery keep survival applied en route. Home
+      // anchor = hut > remembered bed > persisted build site. recoveringHome holds the idle
+      // gear-up reflex off meanwhile. RECOVER_HOME=0 disables. On arrival the bed is rebuilt +
+      // the spawn re-asserted, so the NEXT death lands HOME instead of world spawn.
+      let homeAnchor = null
       if (process.env.RECOVER_HOME !== '0') {
         const pr = commands.persistedResume && commands.persistedResume()
         recoveringHome = true
         try {
           const rh = await provision.recoverHome(bot, { say: (m) => note('(respawn) ' + m), resumeAt: pr && pr.at })
+          homeAnchor = rh && rh.anchor
           if (rh.far) note(`(respawn) ${rh.arrived ? 'arrived home - bed ' + (rh.bedOk ? 'rebuilt + spawn re-asserted (future deaths return here)' : 'could NOT be re-asserted, will retry next respawn') : 'could not reach home this time (' + Math.round(rh.dist) + 'b) - will retry next respawn'}`)
         } catch (e) { note(`(respawn) recover-home failed: ${e.message}`) } finally { recoveringHome = false }
+      }
+      // 2) ESTABLISH THE SPAWN BED as its own survival priority whenever the anchor is still
+      // suspect after the go-home step (creeper-broken bed near home, or recoverHome fell short
+      // of re-asserting). This is what actually ENDS the carousel, so it must NOT wait for a
+      // rare idle camp pass or a build to resume. If recoverHome already re-anchored, rememberBed
+      // cleared the suspect flag and this no-ops (no double trek).
+      if (provision.isSpawnSuspect && provision.isSpawnSuspect()) {
+        note('(respawn) spawn anchor still WRONG after go-home - fixing the bed/spawn as a survival priority')
+        try {
+          const ok = await provision.recoverSpawnAnchor(bot, { say: (m) => note('(respawn) ' + m) })
+          note(`(respawn) spawn anchor ${ok ? 'RESTORED at the bed (future deaths return here)' : 'not fixed this time - will retry on the next respawn'}`)
+        } catch (e) { note(`(respawn) spawn recovery failed: ${e.message}`) }
+      }
+      // 3) DEATH-DROP GRAVE RECOVERY, now SURVIVAL-GATED. Only chase the grave when the bot is
+      // SAFE + FED and the grave is reasonably reachable (shouldChaseGrave). A naked/starving
+      // bot, or a grave far across hostile ground, DEFERS - never trek to it while it would
+      // starve/die. Still capped (autoRecoverTries) so recovery itself can't death-loop.
+      // RECOVER_ON_RESPAWN=0 disables. AxGraves persist on the live server, so a deferred grave
+      // is still there to fetch once the bot is safe + geared.
+      if (process.env.RECOVER_ON_RESPAWN !== '0' && commands.worthwhileGrave) {
+        const g = commands.worthwhileGrave()
+        if (g) {
+          const st = commands.state(bot)
+          const gate = commands.shouldChaseGrave({
+            grave: g, pos: st.pos, food: st.food, threat: st.threat,
+            escaping: (commands.isEscaping && commands.isEscaping()) || false,
+            home: homeAnchor
+          })
+          if (!gate.chase) {
+            note(`(respawn) grave at ${g.x},${g.y},${g.z} DEFERRED - ${gate.reason}`)
+          } else if (autoRecoverTries < 3) {
+            autoRecoverTries++
+            note(`(respawn) safe to recover: grave at ${g.x},${g.y},${g.z} (${g.items.slice(0, 4).join(', ') || 'value ' + g.value}) - ${gate.reason} (try ${autoRecoverTries}/3)`)
+            try {
+              const r = await commands.handle(bot, 'recover')
+              note(`(respawn) recover -> ${r}`)
+              if (!commands.worthwhileGrave()) autoRecoverTries = 0 // got it (or it's gone) - reset
+            } catch (e) { note(`(respawn) recover failed: ${e.message}`) }
+          } else {
+            note(`(respawn) worthwhile grave at ${g.x},${g.y},${g.z} but already tried ${autoRecoverTries}x - writing it off to avoid a death-loop`)
+          }
+        } else {
+          autoRecoverTries = 0 // nothing worthwhile pending - reset the cap
+        }
       }
       for (let attempt = 0; attempt < 3; attempt++) { // deferred = old build loop still unwinding
         const r = commands.resumeBuild && await commands.resumeBuild(bot)
         if (r && r.deferred) { note('(resume) old build still unwinding - retrying in 30s'); await new Promise(res => setTimeout(res, 30000)); continue }
         if (r) note(`(resume) build ${r.stopped ? 'STOPPED' : 'finished'} after respawn: ${r.placed}/${r.total} placed`)
         else note('(resume) nothing to resume')
-        // NO BUILD but the spawn anchor is WRONG: fixing the anchor must not depend on a
-        // resume job existing - it's a survival goal of its own (the overnight carousel
-        // had windows with no job where the flag just sat unconsumed).
-        if (!r && provision.isSpawnSuspect && provision.isSpawnSuspect()) {
-          note('(respawn) spawn anchor is WRONG and no build to resume - going home to fix the anchor')
-          try {
-            const ok = await provision.recoverSpawnAnchor(bot, {})
-            note(`(respawn) spawn recovery ${ok ? 'RESTORED the anchor at the bed' : 'fell short - will retry on the next respawn'}`)
-          } catch (e) { note(`(respawn) spawn recovery failed: ${e.message}`) }
-        }
+        // (spawn-anchor repair is handled ABOVE as an unconditional survival priority - step 2
+        // of the respawn order - so it no longer waits for "no build to resume".)
         return
       }
       note('(resume) gave up waiting for the old build loop - will try on the next respawn')
