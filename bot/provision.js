@@ -696,10 +696,15 @@ async function healHomeCrater (bot, at, opts = {}) {
   // it, and reach the next - exactly how a player bridges a gap. A 1-thick dirt surface is
   // stable (only sand/gravel fall) and stops the fall-in death; the air below is harmless.
   const N4 = [[1, 0], [-1, 0], [0, 1], [0, -1]]
+  // A cell is a real crater ONLY if it's not already walkable at natural grade: intact
+  // ground sits one block LOW (grade top at floorY-1, feet at floorY), so a cell that is
+  // solid at floorY-1 is fine even though floorY itself is air - filling it would build a
+  // waist-high dirt shelf across intact apron (live bug). Only air at BOTH floorY and
+  // floorY-1 is an actual pit to bridge.
   const targets = []
   for (let wz = Z1; wz >= Z0; wz--) for (let wx = X0; wx <= X1; wx++) {
     if (inFootprint(wx, wz)) continue
-    if (!solidAt(wx, floorY, wz)) targets.push({ x: wx, z: wz })
+    if (!solidAt(wx, floorY, wz) && !solidAt(wx, floorY - 1, wz)) targets.push({ x: wx, z: wz })
   }
   const holes = targets.length
   if (!holes) return 0
@@ -709,7 +714,7 @@ async function healHomeCrater (bot, at, opts = {}) {
     targets.sort((a, b) => bot.entity.position.distanceTo(new Vec3(a.x, floorY, a.z)) - bot.entity.position.distanceTo(new Vec3(b.x, floorY, b.z)))
     for (let i = 0; i < targets.length && !isStopped(); i++) {
       const t = targets[i]
-      const sideN = N4.map(([dx, dz]) => ({ x: t.x + dx, z: t.z + dz })).filter(n => !inFootprint(n.x, n.z) && solidAt(n.x, floorY, n.z))
+      const sideN = N4.map(([dx, dz]) => ({ x: t.x + dx, z: t.z + dz })).filter(n => !inFootprint(n.x, n.z) && (solidAt(n.x, floorY, n.z) || solidAt(n.x, floorY - 1, n.z)))
       const belowSolid = solidAt(t.x, floorY - 1, t.z)
       if (!sideN.length && !belowSolid) continue // no face to place against yet - a nearer cell bridges here first
       const tv = new Vec3(t.x, floorY, t.z)
@@ -5864,11 +5869,13 @@ async function consolidateBank (bot, hut, { isStopped = () => false, say = () =>
 // 6-wide footprint (via the model), not the old +4 (5-wide) box that misclassified the
 // far wall row - used to tell an IN-hut station/chest from a field one.
 const insideHutBox = (p, hut) => hutModel.inBox(hut, p.x, p.z)
-// The doorway rim column, as a Vec3 at floor level (or null) - now derived from the
-// self-structure model (schema-correct 6-wide rim, not the old 5-wide dx/dz 0..4 scan).
+// The doorway rim column, as a Vec3 at the door-lower / feet cell (anchor.y+1, the cell a
+// bot actually stands in to cross the threshold), or null - derived from the self-structure
+// model (schema-correct 6-wide rim, not the old 5-wide dx/dz 0..4 scan). anchor.y is the
+// floor plank slab, so the walkable door cell is hut.y+1.
 function findHutDoorway (bot, hut) {
   const d = hutModel.doorwayColumn(hut, hutReader(bot))
-  return d ? new Vec3(d.x, hut.y, d.z) : null
+  return d ? new Vec3(d.x, hut.y + 1, d.z) : null
 }
 // Standable FREE interior cells (Vec3s), from the model: the CORRECT 4x4 interior (dx/dz
 // 1..4), floor-level only, threshold excluded, sorted furthest-from-door. The old scan was

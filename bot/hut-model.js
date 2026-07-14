@@ -17,9 +17,14 @@
 // or null. No bot, no I/O, no Vec3 - so it is offline-testable (bot/hutmodeltest.js) and
 // provision.js can wrap it with real world reads. Coordinates returned are plain {x,y,z}.
 
-// hut.schem geometry (verified from the file: Width 6, Height 5, Length 6). The schematic
-// has NO floor layer - walls start AT anchor.y - so the interior floor is the terrain at
-// anchor.y-1 and a standing bot's feet sit at anchor.y (dy 0). Walls are 5 tall (dy 0..4).
+// hut.schem geometry (verified from the file: Width 6, Height 5, Length 6). CANONICAL
+// CONVENTION: anchor.y is the FLOOR PLANK SLAB the bot stands ON (dy0 in the schematic is
+// a full 6x6 plank floor). So: floor slab = anchor.y; the bot's FEET / door-lower /
+// furniture sit at anchor.y+1 (dy1); door-upper / head at anchor.y+2 (dy2); interior air
+// spans dy1..3; the roof plank slab is anchor.y+4 (dy4 = anchor.y+DIMS.h-1). Natural grade
+// outside the hut is ~anchor.y-1. (The OLD model wrongly assumed a floorless schematic with
+// feet at anchor.y - an off-by-one that made doorwayColumn/freeStandCells read the solid
+// floor and return nothing.)
 const DIMS = { w: 6, h: 5, l: 6 }
 const WALL_RE = /_planks$/                                   // the hut shell is all planks
 const DOOR_RE = /_door$/
@@ -32,7 +37,7 @@ const STRAY_FILLER_RE = /^(dirt|coarse_dirt|rooted_dirt|cobblestone|cobbled_deep
 const AIRISH = n => n === 'air' || n === 'cave_air' || n === 'void_air' || n == null
 
 function box (a) {
-  return { x0: a.x, y0: a.y, z0: a.z, x1: a.x + DIMS.w - 1, y1: a.y + DIMS.h - 1, z1: a.z + DIMS.l - 1, floorY: a.y - 1 }
+  return { x0: a.x, y0: a.y, z0: a.z, x1: a.x + DIMS.w - 1, y1: a.y + DIMS.h - 1, z1: a.z + DIMS.l - 1, floorY: a.y }
 }
 const inBox = (a, x, z) => x >= a.x && x <= a.x + DIMS.w - 1 && z >= a.z && z <= a.z + DIMS.l - 1
 const isRim = (a, x, z) => inBox(a, x, z) && (x === a.x || x === a.x + DIMS.w - 1 || z === a.z || z === a.z + DIMS.l - 1)
@@ -46,14 +51,15 @@ function interiorColumns (a) {
   return out
 }
 
-// The doorway rim column: a non-corner rim column whose lower two cells (dy 0..1) are NOT
-// the plank shell (they're air, or a door/bed clutter shoved in). Detected from the world
-// so it survives a door that's been dug or a bed jammed in the frame. Returns {x,z}|null.
+// The doorway rim column: a non-corner rim column whose door-height cells (anchor.y+1 and
+// anchor.y+2 - the feet + head courses, dy1..2) are NOT the plank shell (they're air, or a
+// door/bed clutter shoved in). Detected from the world so it survives a door that's been dug
+// or a bed jammed in the frame. Returns {x,z}|null.
 function doorwayColumn (a, read) {
   for (let x = a.x; x <= a.x + DIMS.w - 1; x++) {
     for (let z = a.z; z <= a.z + DIMS.l - 1; z++) {
       if (!isRim(a, x, z) || isCorner(a, x, z)) continue
-      const lo = read(x, a.y, z); const hi = read(x, a.y + 1, z)
+      const lo = read(x, a.y + 1, z); const hi = read(x, a.y + 2, z)
       const loWall = lo && WALL_RE.test(lo.name); const hiWall = hi && WALL_RE.test(hi.name)
       if (!loWall && !hiWall) return { x, z }
     }
@@ -83,14 +89,15 @@ function outsideCell (a, door) {
 // Classify one cell: 'outside' | 'wall' | 'door' | 'floor' | 'interior' | 'furniture' |
 // 'stray'. `door` may be passed (else detected). Furniture/stray need a world read.
 function classifyCell (a, read, x, y, z, door) {
-  if (!inBox(a, x, z) || y < a.y - 1 || y > a.y + DIMS.h - 1) return { cls: 'outside' }
+  if (!inBox(a, x, z) || y < a.y || y > a.y + DIMS.h - 1) return { cls: 'outside' }
   door = door === undefined ? doorwayColumn(a, read) : door
-  if (y === a.y - 1) return isInterior(a, x, z) ? { cls: 'floor' } : { cls: 'outside' } // floor only under the interior
+  if (y === a.y) return isRim(a, x, z) ? { cls: 'wall' } : { cls: 'floor' } // the floor plank slab (interior) / its rim
+  if (y === a.y + DIMS.h - 1) return { cls: 'wall' }                        // the roof plank slab (rim + interior are plank)
   if (isRim(a, x, z)) {
-    if (door && x === door.x && z === door.z && (y === a.y || y === a.y + 1)) return { cls: 'door' }
+    if (door && x === door.x && z === door.z && (y === a.y + 1 || y === a.y + 2)) return { cls: 'door' }
     return { cls: 'wall' }
   }
-  // interior column, dy 0..4
+  // interior air column, dy 1..3
   const b = read(x, y, z)
   if (!b || AIRISH(b.name)) return { cls: 'interior' }
   if (FURNITURE_RE.test(b.name)) return { cls: 'furniture', kind: furnitureKind(b.name) }
@@ -107,17 +114,17 @@ function furnitureKind (name) {
   return 'other'
 }
 
-// STANDABLE free interior cells (feet position). A real player stands on the FLOOR, so
-// this is strictly the floor-level cell (feet at anchor.y): feet + head air, a solid
-// non-furniture floor directly below, and not the doorway threshold. Deliberately does
-// NOT accept a cell perched on top of a furniture/dirt pile (that's where the bad
-// pillar-out put the bot). Sorted FURTHEST from the door first (an unstick/place picks the
-// deepest free corner, not the entrance). Returns [{x,y,z}].
+// STANDABLE free interior cells (feet position). A real player stands ON the floor plank
+// slab, so the feet cell is anchor.y+1: feet + head air, the solid non-furniture plank floor
+// directly below (anchor.y), and not the doorway threshold. Deliberately does NOT accept a
+// cell perched on top of a furniture/dirt pile (that's where the bad pillar-out put the bot).
+// Sorted FURTHEST from the door first (an unstick/place picks the deepest free corner, not
+// the entrance). Returns [{x,y,z}] with y = anchor.y+1.
 function freeStandCells (a, read) {
   const door = doorwayColumn(a, read)
   const thr = thresholdCell(a, door)
   const out = []
-  const y = a.y
+  const y = a.y + 1
   for (const [x, z] of interiorColumns(a)) {
     if (thr && x === thr.x && z === thr.z) continue
     const feet = read(x, y, z); const head = read(x, y + 1, z); const below = read(x, y - 1, z)
@@ -128,12 +135,13 @@ function freeStandCells (a, read) {
   return out
 }
 
-// STRAY filler blocks sitting in interior cells (dy 0..h-1) - loose dirt/cobble on the
-// floor or piled on furniture. These are what cleanup digs. Returns [{x,y,z,name}].
+// STRAY filler blocks sitting in interior AIR cells (dy 1..h-2) - loose dirt/cobble on the
+// floor slab or piled on furniture. Skips the floor slab (dy0) and roof (dy h-1) planks.
+// These are what cleanup digs. Returns [{x,y,z,name}].
 function strayCells (a, read) {
   const out = []
   for (const [x, z] of interiorColumns(a)) {
-    for (let dy = 0; dy <= DIMS.h - 1; dy++) {
+    for (let dy = 1; dy <= DIMS.h - 2; dy++) {
       const y = a.y + dy
       const b = read(x, y, z)
       if (b && !AIRISH(b.name) && STRAY_FILLER_RE.test(b.name)) out.push({ x, y, z, name: b.name })
@@ -147,7 +155,7 @@ function strayCells (a, read) {
 function stationCells (a, read) {
   const out = { table: [], furnace: [], chest: [], bed: [], torch: [], other: [] }
   for (const [x, z] of interiorColumns(a)) {
-    for (let dy = 0; dy <= DIMS.h - 1; dy++) {
+    for (let dy = 1; dy <= DIMS.h - 2; dy++) {
       const y = a.y + dy
       const b = read(x, y, z)
       if (b && !AIRISH(b.name) && FURNITURE_RE.test(b.name)) out[furnitureKind(b.name)].push({ x, y, z, name: b.name })
@@ -168,11 +176,12 @@ function stationSlot (a, read, kind, desired = 1) {
   return free.length ? free[0] : null
 }
 
-// A floor cell that is a HOLE (air/liquid where a solid floor should be). Returns [{x,y,z}].
+// A floor cell that is a HOLE (air/liquid where a solid floor PLANK should be). The floor is
+// the plank slab at anchor.y (not the dirt under it). Returns [{x,y,z}].
 function floorHoles (a, read) {
   const out = []
   for (const [x, z] of interiorColumns(a)) {
-    const y = a.y - 1
+    const y = a.y
     const b = read(x, y, z)
     if (!b || AIRISH(b.name) || /water|lava/.test(b.name)) out.push({ x, y, z })
   }
