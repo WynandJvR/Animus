@@ -3451,7 +3451,14 @@ async function secureFoodInner (bot, opts = {}) {
   // 4) the farm (harvest what's ripe / plant one by remembered water)
   try {
     if (!await tendWheatFarm(bot, { isStopped, say })) {
-      if (home) await ensureWheatFarm(bot, home, { isStopped, say, avoid: opts.avoid })
+      // REBUILD the farm even when the BED is gone: a creeper-destroyed bed makes knownBed()->
+      // home null, and the old `if (home)` guard then SILENTLY skipped the rebuild - so a bot with
+      // no bed + a dead 0-cell farm looped at food 10 forever, never re-planting (live 00:3x, food
+      // 10 < 14 gearup-hold, `wheat farm tended: harvested 0` every 20s, ensureWheatFarm never
+      // called). Anchor on the hut, else where we STAND (we reach here standing at the pond), so
+      // the till-fixed builder actually re-establishes the plot.
+      const farmHome = home || (bot.entity && bot.entity.position) || hutAnchor()
+      if (farmHome) await ensureWheatFarm(bot, farmHome, { isStopped, say, avoid: opts.avoid })
     }
   } catch (e) { dbg('secureFood: farm fallback failed (' + e.message + ')') }
   await eatUp(bot)
