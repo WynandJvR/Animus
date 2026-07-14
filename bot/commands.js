@@ -16,6 +16,7 @@ const resources = require('./resources.js') // unified resource model: pack + ve
 const navigate = require('./navigate.js') // unified navigation: ONE goto + the full stuck-recovery ladder
 const planner = require('./planner.js') // re-planning goal driver (slice 1: gear-up behind the planarmor/PLANNER_GEARUP seam)
 const arbiter = require('./arbiter.js') // priority body-ownership (sticky-follow defers to a running maneuver)
+const routeMem = require('./route-mem.js') // PURE route/wedge geometry: replay proven treks + soft-steer around learned wedges (semantic-world-map slice 1)
 let dbgSink = null // injected by index.js: debug lines persist to logs/bot-events.log
 function setDebugSink (fn) { dbgSink = fn }
 const dbg = (...a) => {
@@ -351,6 +352,22 @@ async function travelFar (bot, dest, opts = {}) {
   let lastD = Infinity
   let stalls = 0
   let gathers = 0
+  // ROUTE-REUSE + WEDGE-MEMORY (semantic-world-map slice 1): replay a proven trek + learn
+  // this one. Waypoint choice ONLY - the recovery ladder / reflexes / survival branch below
+  // are untouched. Crumb collection PAUSES during survival/surfaceOut (a >40b gap discards
+  // the recording) so a shelter/food detour never gets baked into the reusable line.
+  const startPos = (bot.entity && bot.entity.position) ? { x: bot.entity.position.x, z: bot.entity.position.z } : { x: dest.x, z: dest.z }
+  const crumbs = [{ x: startPos.x, z: startPos.z }]
+  let lastCrumb = crumbs[0]
+  let recording = true
+  const pushCrumb = q => {
+    if (!recording) return
+    const gap = Math.hypot(q.x - lastCrumb.x, q.z - lastCrumb.z)
+    if (gap > 40) { recording = false; return } // a >40b jump = a survival/climb detour - don't bake it into the line
+    if (gap >= 8) { lastCrumb = { x: q.x, z: q.z }; crumbs.push(lastCrumb) }
+  }
+  let replay = provision.recallRoute(startPos, { x: dest.x, z: dest.z })
+  if (replay) dbg('travel: replaying a proven ' + replay.pts.length + '-pt route to ' + Math.round(dest.x) + ',' + Math.round(dest.z))
   let climbs = 0
   let lastSurvival = 0  // throttle the per-leg survival check
   let climbTimeMs = 0   // time spent digging out of caves / sheltering - doesn't count against the travel clock
@@ -412,16 +429,43 @@ async function travelFar (bot, dest, opts = {}) {
       // Arrive only when close horizontally AND not still stuck deep underground: arriving
       // at bedrock under a surface target and handing off a precise goal is what walked us
       // into the lava. If we're close but buried, the loop above climbs us out first.
-      if (d <= arrive && !buried()) return { ok: true, reason: 'arrived', dist: d }
+      if (d <= arrive && !buried()) {
+        // Record this trek as a reusable route (long trips only; a survival detour already
+        // stopped the recording via the >40b gap guard). Merges into any existing route.
+        if (recording && d0 >= routeMem.ROUTE_MIN_LEN) { pushCrumb({ x: me.x, z: me.z }); provision.rememberRoute(startPos, { x: dest.x, z: dest.z }, crumbs) }
+        return { ok: true, reason: 'arrived', dist: d }
+      }
+      // Self-abandon a stale replay once >60% of the (survival-credited) deadline has burned.
+      if (replay && Date.now() - start - climbTimeMs > 0.6 * deadlineMs) { dbg('travel: abandoning route replay - >60% of the deadline burned'); replay = null }
+      // Leg target: replay point > blind bearing (wedge soft-steered). Proven routes are NOT
+      // wedge-checked; the soft-steer only nudges a fresh straight bearing off a learned wedge.
       const step = Math.min(hop, d)
-      const wx = me.x + (dx / d) * step
-      const wz = me.z + (dz / d) * step
+      let wx = me.x + (dx / d) * step
+      let wz = me.z + (dz / d) * step
+      let replayLeg = false
+      if (replay) {
+        const cur = routeMem.routeCursor(replay.pts, me)
+        const pt = replay.pts[cur]
+        wx = pt.x; wz = pt.z; replayLeg = true
+      } else {
+        const wedges = provision.listWedges()
+        if (wedges.length && routeMem.wedgeOnSegment(wedges, me, { x: wx, z: wz })) {
+          const ux = dx / d; const uz = dz / d; const sstep = Math.min(hop, d)
+          for (const deg of [60, -60, 120, -120]) {
+            const th = deg * Math.PI / 180
+            const cx = me.x + (ux * Math.cos(th) - uz * Math.sin(th)) * sstep
+            const cz = me.z + (ux * Math.sin(th) + uz * Math.cos(th)) * sstep
+            if (!routeMem.wedgeOnSegment(wedges, me, { x: cx, z: cz })) { wx = cx; wz = cz; dbg('travel: soft-steering ' + deg + 'deg around a learned wedge'); break }
+          }
+        }
+      }
       // Each leg goes through the UNIFIED navigator: door-assist, pit-escape, water-hop
       // and the surface nudge all fire consistently mid-leg now (they used to be inline
       // copies here, wired into this loop only). Rescue time is credited against the
       // travel clock; the climb rung is off because this loop does its own proactive
       // surfacing (surfaceOut) with dest-aware depth checks.
       let legErr = null
+      let reflexWaitMs = 0
       const legT0 = Date.now()
       try {
         const nav = await navigate.navigateTo(bot, new goals.GoalNearXZ(wx, wz, 4), {
@@ -431,11 +475,14 @@ async function travelFar (bot, dest, opts = {}) {
           movements: () => travelMovements(bot)
         })
         climbTimeMs += nav.recoveryMs
+        reflexWaitMs = nav.reflexWaitMs || 0
       } catch (e) {
         legErr = e.message /* leg blocked/timed out - re-aim from wherever we ended up */
-        if (e.nav) climbTimeMs += e.nav.recoveryMs || 0
+        if (e.nav) { climbTimeMs += e.nav.recoveryMs || 0; reflexWaitMs = e.nav.reflexWaitMs || 0 }
       }
+      const reflexDominated = reflexWaitMs > 37500 // > legDeadline(75s)/2: body held by a survival reflex, not blocked
       const nd = Math.hypot(dest.x - bot.entity.position.x, dest.z - bot.entity.position.z)
+      pushCrumb({ x: bot.entity.position.x, z: bot.entity.position.z }) // record the trek shape for the reusable route
       // leg telemetry: the Sonnet shepherd watched "moving:true" while stationary for 90s
       // on OPEN ground - these lines make the next such stall's anatomy readable
       dbg('travel leg -> ' + Math.round(nd) + 'b left (was ' + (lastD === Infinity ? 'inf' : Math.round(lastD)) + ', stalls ' + stalls + (legErr ? ', err: ' + legErr : '') + ')')
@@ -444,6 +491,10 @@ async function travelFar (bot, dest, opts = {}) {
       // stalls burn in ~2 seconds and the trek reports "blocked" before the world (a
       // drifting boat gap, a mob shoving us ashore) gets any chance to change.
       if (nd >= lastD - 3) {
+        // MEASURED stall mid-replay (non-reflex) -> the proven route is stale here. Dement it
+        // and abandon the cursor; the next leg falls through to today's blind bearing/stall
+        // handling from the current position, UNCHANGED.
+        if (replayLeg && !reflexDominated) { provision.dementRoute(replay.route); replay = null; dbg('travel: route replay stalled - demented, falling back to blind bearing'); lastD = Infinity; continue }
         stalls++
         if (Date.now() - legT0 < 3000) await new Promise(r => setTimeout(r, 1500))
         // Stalled AND out of blocks to bridge with? Dig some dirt on our own (like the

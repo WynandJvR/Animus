@@ -917,6 +917,11 @@ function exitStructure (bot, hut, opts = {}) {
 async function forceUnstick (bot, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const p0 = bot.entity.position.clone()
+  // WEDGE-MEMORY (semantic-world-map slice 1): this single choke point covers all three
+  // forceUnstick escalators (walkStaged, the nav ladder, the watchdog). recordWedge no-ops
+  // under 12b own-infra suppression (the #1 rule); the reflex-dominated exclusion is
+  // INHERITED (the escalators already refuse forceUnstick while a survival reflex holds).
+  try { prov().recordWedge(p0) } catch {}
   forceUnsticking = true
   recoveringDepth++
   try {

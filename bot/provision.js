@@ -20,6 +20,7 @@ const shelterSite = require('./shelter.js') // pure shelter-siting: "can a safe 
 const foodSec = require('./food.js') // pure food-security decisions: when to proactively build a fishing supply
 const farm = require('./farm.js') // pure wheat-farm geometry (flood-safe bank pick) + crop-state (VERIFIED wheat, never faith)
 const arbiter = require('./arbiter.js') // JOB-LEVEL arbitration: survive > progress authority (jobSurvivalNeed/jobMayProgress)
+const routeMem = require('./route-mem.js') // PURE route/wedge geometry: replay proven treks + soft-steer around learned wedges (semantic-world-map slice 1)
 // Visible, UNTHROTTLED build tracing to stdout (the say() progress goes through a 40s
 // throttle that hides failures). Enable with BUILD_DEBUG=1 to see every plan/task/smelt step.
 let dbgSink = null // injected by index.js: debug lines persist to logs/bot-events.log
@@ -98,7 +99,9 @@ async function manualHopFromWater (bot) {
 // memory/bed/grove treks that can't import it without a require cycle.)
 async function walkStaged (bot, tx, tz, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
-  const deadline = Date.now() + (opts.timeoutMs || 180000)
+  const budgetMs = opts.timeoutMs || 180000
+  const startTime = Date.now()
+  const deadline = startTime + budgetMs
   // A mid-trek wedge used to make this loop RE-AIM at the same bearing and re-hammer the
   // identical failing leg up to 3x at ~75s each (~195-225s frozen -> death at night). Now:
   // on a MEASURED <3b stall we (a) rotate the next leg off the blocked bearing to DETOUR
@@ -108,18 +111,58 @@ async function walkStaged (bot, tx, tz, opts = {}) {
   // navigate.js; this loop only picks waypoints and asks for the escape.
   let stalls = 0
   let unstuck = false
+  // ROUTE-REUSE + WEDGE-MEMORY (semantic-world-map slice 1): learn/replay treks so the Nth
+  // home->timber run doesn't blind-plan into the 1st run's wedge. Waypoint choice ONLY - the
+  // recovery ladder / forceUnstick / reflexes below are untouched.
+  const startPos = { x: bot.entity.position.x, z: bot.entity.position.z }
+  const d0 = Math.hypot(tx - startPos.x, tz - startPos.z) // straight-line trek length (for the >=64b record gate)
+  const crumbs = [{ x: startPos.x, z: startPos.z }]
+  let lastCrumb = crumbs[0]
+  const pushCrumb = q => { if (Math.hypot(q.x - lastCrumb.x, q.z - lastCrumb.z) >= 8) { lastCrumb = { x: q.x, z: q.z }; crumbs.push(lastCrumb) } }
+  // REPLAY a proven route (if one exists between here and the goal): walk its thinned points
+  // as the leg targets instead of a blind bearing. A measured stall mid-replay dements the
+  // route and FALLS THROUGH to today's bearing/rotate/forceUnstick from the current position.
+  let replay = recallRoute(startPos, { x: tx, z: tz })
+  if (replay) dbg('walkStaged: replaying a proven ' + replay.pts.length + '-pt route to ' + Math.round(tx) + ',' + Math.round(tz))
   while (!isStopped() && Date.now() < deadline) {
     const p = bot.entity.position
     const d = Math.hypot(tx - p.x, tz - p.z)
-    if (d <= (opts.range || 8)) return true
-    // DIRECT toward the goal while progressing; after a stall, rotate the bearing to
-    // route AROUND the wedge (alternating sides, widening) with a shorter leg.
+    if (d <= (opts.range || 8)) {
+      // Arrived: record this trek as a reusable route (long trips only; short hops aren't
+      // worth replaying). rememberRoute merges into any existing route (ok++, fresh crumbs).
+      if (d0 >= routeMem.ROUTE_MIN_LEN) { pushCrumb({ x: p.x, z: p.z }); rememberRoute(startPos, { x: tx, z: tz }, crumbs) }
+      return true
+    }
+    // Self-abandon a stale replay that has burned >60% of the trek deadline (worst case =
+    // today's blind trek + a short failed replay prefix).
+    if (replay && Date.now() - startTime > 0.6 * budgetMs) { dbg('walkStaged: abandoning route replay - >60% of the deadline burned'); replay = null }
+    // Leg target: replay point > blind bearing (stalls 0, wedge soft-steered) > rotate detour.
     const ux = (tx - p.x) / d
     const uz = (tz - p.z) / d
     let lx, lz
-    if (stalls === 0) {
+    let replayLeg = false
+    if (replay) {
+      const cur = routeMem.routeCursor(replay.pts, p)
+      const pt = replay.pts[cur]
+      lx = pt.x; lz = pt.z; replayLeg = true
+    } else if (stalls === 0) {
       const step = Math.min(48, d)
       lx = p.x + ux * step; lz = p.z + uz * step
+      // WEDGE SOFT-STEER (bearing mode only; proven routes are NOT wedge-checked): if the
+      // straight leg clips a learned, still-active, non-suppressed wedge, try the same
+      // rotation angles at a shorter leg and take the first clear one. If none clear, take
+      // the DIRECT bearing anyway - SOFT, never a wall (the blind planner still owns it).
+      const wedges = listWedges()
+      if (wedges.length && routeMem.wedgeOnSegment(wedges, p, { x: lx, z: lz })) {
+        const sstep = Math.min(24, d)
+        for (const deg of [60, -60, 120, -120]) {
+          const th = deg * Math.PI / 180
+          const rx = ux * Math.cos(th) - uz * Math.sin(th)
+          const rz = ux * Math.sin(th) + uz * Math.cos(th)
+          const cx = p.x + rx * sstep; const cz = p.z + rz * sstep
+          if (!routeMem.wedgeOnSegment(wedges, p, { x: cx, z: cz })) { lx = cx; lz = cz; dbg('walkStaged: soft-steering ' + deg + 'deg around a learned wedge'); break }
+        }
+      }
     } else {
       const degs = [60, -60, 120, -120]
       const th = (degs[stalls - 1] || 0) * Math.PI / 180
@@ -149,7 +192,12 @@ async function walkStaged (bot, tx, tz, opts = {}) {
     // and never force-unstick it (the #1 regression guard: don't fight the survival hold).
     const reflexWaitMs = (navRes && navRes.reflexWaitMs) || (navErr && navErr.nav && navErr.nav.reflexWaitMs) || 0
     const reflexDominated = reflexWaitMs > legDeadline / 2
+    pushCrumb({ x: np.x, z: np.z }) // record the trek shape for the reusable route
     if (moved < 3 && !reflexDominated) {
+      // MEASURED stall mid-replay -> the proven route is stale here. Dement it (fail++, 2
+      // consecutive fails evict) and abandon the cursor; the next leg falls through to
+      // today's blind bearing/rotate/forceUnstick from the current position, UNCHANGED.
+      if (replayLeg) { dementRoute(replay.route); replay = null; dbg('walkStaged: route replay stalled - demented, falling back to blind bearing'); continue }
       stalls++
       // After ONE failed retry still wedged, break the freeze with the aggressive manual
       // escape - at most once per walkStaged call. Gated like the watchdog (never while
@@ -2193,6 +2241,93 @@ function saveWorldMem () {
   clearTimeout(worldMemTimer)
   worldMemTimer = setTimeout(() => { try { fs.writeFileSync(WORLD_MEM_FILE, JSON.stringify(worldMem, null, 1)) } catch {} }, 2000)
   if (worldMemTimer.unref) worldMemTimer.unref()
+}
+// ---- SEMANTIC WORLD-MAP slice 1: ROUTE-REUSE + WEDGE-MEMORY -------------------------
+// Persistent routes + wedges live in the SAME world-memory.json under the SAME debounced
+// saveWorldMem writer (no second writer). Pure geometry is in route-mem.js; these thin
+// accessors are the ONLY bot-side wiring. HONEST: this reduces getting-stuck, it does not
+// cure it - the blind static straight-line planner is still the root cause (see route-mem.js).
+//
+// Own-infra anchors (XZ) for the #1 rule: the bot must NEVER route AROUND its own
+// hut/build/bank, even if it died or wedged there. Used to SUPPRESS wedges on BOTH the
+// record and the recall side (12b). Routes need no suppression (a home<->X route ends AT
+// home by construction - a feature).
+function ownInfraAnchors () {
+  const m = loadWorldMem()
+  const out = []
+  const push = e => { if (e && typeof e.x === 'number' && typeof e.z === 'number') out.push({ x: e.x, z: e.z }) }
+  const infra = m.infra || {}
+  for (const kind of ['hut', 'bed', 'chest', 'table', 'furnace', 'shelter', 'water']) for (const e of (infra[kind] || [])) push(e)
+  if (m.bed) push(m.bed)                       // the spawn bed (mirrored outside infra too)
+  if (m.wheatFarm) push(m.wheatFarm)           // our farm plot anchor
+  if (buildZone) push({ x: (buildZone.x1 + buildZone.x2) / 2, z: (buildZone.z1 + buildZone.z2) / 2 }) // active build job
+  return out
+}
+// Record a proven trek as a reusable route (from -> to, thinned crumbs). Rejects trips too
+// short to be worth reusing and any polyline that wandered too far off the straight line
+// (a survival/shelter detour must never get baked into the line). Merges with an existing
+// route on the same endpoints (ok++, fresh crumbs).
+function rememberRoute (from, to, crumbs) {
+  try {
+    if (!from || !to || !Array.isArray(crumbs) || crumbs.length < 2) return
+    const straight = Math.hypot(to.x - from.x, to.z - from.z)
+    if (straight < routeMem.ROUTE_MIN_LEN) return
+    const pts = routeMem.thinPolyline(crumbs)
+    if (pts.length < 2) return
+    const len = routeMem.polylineLength(pts)
+    if (len > routeMem.ROUTE_LEN_SANITY * straight) { dbg('route: not recording - polyline ' + Math.round(len) + 'b is >1.6x the ' + Math.round(straight) + 'b straight-line (detour)'); return }
+    const m = loadWorldMem()
+    const routes = m.routes = m.routes || []
+    routeMem.mergeRoute(routes, { a: { x: Math.round(from.x), z: Math.round(from.z) }, b: { x: Math.round(to.x), z: Math.round(to.z) }, pts, len, at: Date.now() })
+    saveWorldMem()
+    dbg('route: recorded ' + Math.round(straight) + 'b trek (' + pts.length + ' pts) ' + Math.round(from.x) + ',' + Math.round(from.z) + ' -> ' + Math.round(to.x) + ',' + Math.round(to.z))
+  } catch (e) { dbg('route: remember failed - ' + e.message) }
+}
+// Look up a usable route between two points (endpoints +-24b, net-successes, length sane).
+// Returns { route, reversed, pts } (pts already oriented in the travel direction) or null.
+function recallRoute (from, to) {
+  try {
+    const routes = (loadWorldMem().routes) || []
+    const m = routeMem.matchRoute(routes, from, to)
+    if (!m || !routeMem.routeUsable(m.route)) return null
+    const pts = m.reversed ? m.route.pts.slice().reverse() : m.route.pts.slice()
+    if (pts.length < 2) return null
+    return { route: m.route, reversed: m.reversed, pts }
+  } catch { return null }
+}
+// A replay stalled (measured, non-reflex) - the route is stale. fail++; 2 consecutive fails
+// evict it. Caller then falls back to today's blind bearing UNCHANGED.
+function dementRoute (route) {
+  try {
+    if (!route) return
+    route.fail = (route.fail || 0) + 1
+    if (routeMem.routeShouldEvict(route)) {
+      const routes = (loadWorldMem().routes) || []
+      const i = routes.indexOf(route)
+      if (i >= 0) routes.splice(i, 1)
+      dbg('route: evicted after 2 consecutive fails')
+    } else dbg('route: demoted (fail ' + route.fail + ')')
+    saveWorldMem()
+  } catch (e) { dbg('route: dement failed - ' + e.message) }
+}
+// Record a physical stuck-spot (forceUnstick fired here). NO-OP under 12b own-infra
+// suppression (record side of the #1 rule) - a wedge at/near home must never be learned.
+function recordWedge (pos) {
+  try {
+    if (!pos || typeof pos.x !== 'number') return
+    if (routeMem.suppressedNearAnchors(ownInfraAnchors(), pos)) { dbg('wedge: not recording - within 12b of own infra (' + Math.round(pos.x) + ',' + Math.round(pos.z) + ')'); return }
+    const m = loadWorldMem()
+    const wedges = m.wedges = m.wedges || []
+    routeMem.mergeWedge(wedges, pos)
+    saveWorldMem()
+    dbg('wedge: recorded stuck-spot ' + Math.round(pos.x) + ',' + Math.round(pos.z))
+  } catch (e) { dbg('wedge: record failed - ' + e.message) }
+}
+// The steer-eligible wedge list: alive (age-weighted) AND re-checked NOW against the
+// current infra list (recall side of the #1 rule) - a hut built after a wedge, or a stale
+// entry near home, is filtered out before it can ever steer routing.
+function listWedges () {
+  try { return routeMem.activeWedges((loadWorldMem().wedges) || [], ownInfraAnchors()) } catch { return [] }
 }
 function rememberSpot (item, pos, tag) {
   const m = loadWorldMem()
@@ -6121,4 +6256,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, setBuildZone, setDebugSink }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, setBuildZone, setDebugSink, rememberRoute, recallRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors }
