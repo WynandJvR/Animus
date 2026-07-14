@@ -15,6 +15,17 @@
 // A comfortable pack/bank food buffer to "coast" on until the farm is set up / harvested.
 const DEFAULT_BUFFER = 8
 
+// FOOD CLASSIFIERS (pure, offline-testable) - the fix for "starved at food 8 with 10 raw
+// mutton banked". BAD_FOOD is hold-out-only garbage (poisons the bot / net-negative unless
+// truly desperate); RAW_COOKABLE_FOOD is REAL food that just needs a furnace first (raw is
+// ~1/3 the food value of cooked). Anchored regexes keep cooked_* / bread / etc. at tier 0.
+//   tier 0 = ready-to-eat (cooked meat, bread, baked_potato, golden_carrot, apple, ...)
+//   tier 1 = raw cookable (beef/porkchop/chicken/mutton/rabbit/cod/salmon) - cook, then eat
+//   tier 2 = bad (rotten_flesh/spider_eye/poisonous_potato/pufferfish) - hold out, last resort
+const BAD_FOOD = /^(rotten_flesh|spider_eye|poisonous_potato|pufferfish)$/
+const RAW_COOKABLE_FOOD = /^(beef|porkchop|chicken|mutton|rabbit|cod|salmon)$/
+function foodTier (name) { return BAD_FOOD.test(name) ? 2 : RAW_COOKABLE_FOOD.test(name) ? 1 : 0 }
+
 // Is the bot ALREADY supplied? Either it has a STANDING renewable source (a planted wheat
 // farm - it will keep producing), OR it's carrying enough of a food buffer to coast for now.
 // A standing farm counts as supplied even before it's ripe: the point of establishing it
@@ -65,4 +76,4 @@ function foodSupplyAction (hasFarm, hasKnownWater, hasNearAnimal) {
   return 'sweep'
 }
 
-module.exports = { DEFAULT_BUFFER, hasFoodSupply, needsFoodSupply, shouldSweepForFood, foodSupplyAction }
+module.exports = { DEFAULT_BUFFER, BAD_FOOD, RAW_COOKABLE_FOOD, foodTier, hasFoodSupply, needsFoodSupply, shouldSweepForFood, foodSupplyAction }

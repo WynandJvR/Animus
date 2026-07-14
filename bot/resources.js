@@ -359,7 +359,7 @@ async function restockFromBank (bot, remainingBom, opts = {}) {
 
 // ---- food is a resource too --------------------------------------------------------
 
-const RISKY_FOOD = /rotten_flesh|spider_eye|poisonous_potato|pufferfish|^chicken$|^porkchop$|^beef$|^mutton$|^rabbit$|^cod$|^salmon$/
+const { foodTier } = require('./food.js') // pure tier classifier: 0 ready-to-eat, 1 raw cookable, 2 bad
 // Hungry with an empty pantry but food IN THE BANK? Withdraw a meal instead of
 // starving next to it (the bot died at 1hp with cooked chicken in its chest, live).
 // Cheap by design: cached chest counts only decide whether a walk happens at all.
@@ -368,10 +368,14 @@ async function ensureFood (bot, opts = {}) {
   if (!bot.entity || bot.food == null || bot.food > threshold) return 0
   const md = require('minecraft-data')(bot.version)
   const foods = (md && md.foodsByName) || {}
-  const packFood = (bot.inventory ? bot.inventory.items() : []).filter(i => foods[i.name]).reduce((s, i) => s + i.count, 0)
+  // COUNT ONLY REAL FOOD toward the "pack already stocked" lockout: bad food (rotten flesh)
+  // no longer satisfies minPack, so one held rotten_flesh can't hide 10 banked mutton (live
+  // starvation bug). Below the crisis line (food<=6) desperation counts even bad food.
+  const packBad = bot.food != null && bot.food <= 6
+  const packFood = (bot.inventory ? bot.inventory.items() : []).filter(i => foods[i.name] && (packBad || foodTier(i.name) < 2)).reduce((s, i) => s + i.count, 0)
   if (packFood >= (opts.minPack != null ? opts.minPack : 1)) return 0
   const chests = verifiedChests(bot, opts.near, opts.maxDist != null ? opts.maxDist : 48)
-  let target = null; let bestFood = null
+  let target = null; let bestFood = null; let targetCounts = {}
   // two passes: working chests first; a cooling-off (repeatedly dead) chest is only ever
   // a LAST resort when it's the sole cached food source - never while a good chest holds
   // food (the bot starved beside the stocked hut chest hammering a dead one, live).
@@ -389,15 +393,36 @@ async function ensureFood (bot, opts = {}) {
       if (chestCoolingOff(e)) counts = (c && c.counts) || {}                 // dead chest: don't walk, use whatever we cached
       else if (opts.forceFresh || !fresh) counts = await readChest(bot, e)   // hungry + stale/forced -> real open (the fix)
       else counts = c.counts
-      const names = Object.keys(counts).filter(n => foods[n] && counts[n] > 0)
-        .sort((a, b) => (RISKY_FOOD.test(a) ? 1 : 0) - (RISKY_FOOD.test(b) ? 1 : 0) || (foods[b].foodPoints || 0) - (foods[a].foodPoints || 0))
-      if (names.length) { target = e; bestFood = names[0]; break }
+      // EXCLUDE bad food (tier 2) from withdrawal UNLESS truly desperate (food<=6): no sense
+      // hauling rotten flesh it won't eat. Sort ready-to-eat (0) first, raw cookable (1) next,
+      // bad (2) last-resort - then most filling within a tier. Makes bestFood=mutton (tier 1)
+      // beat rotten_flesh (tier 2) in the live scenario, instead of losing to its foodPoints.
+      const wantBad = bot.food != null && bot.food <= 6
+      const names = Object.keys(counts).filter(n => foods[n] && counts[n] > 0 && (wantBad || foodTier(n) < 2))
+        .sort((a, b) => (foodTier(a) - foodTier(b)) || (foods[b].foodPoints || 0) - (foods[a].foodPoints || 0))
+      if (names.length) { target = e; bestFood = names[0]; targetCounts = counts; break }
     }
     if (target) break
   }
   if (!target) return 0
   dbg('hungry (' + bot.food + ') with no pack food - withdrawing ' + bestFood + ' from the bank at ' + cellKey(target) + (chestCoolingOff(target) ? ' (dead-chest LAST RESORT)' : ''))
   const got = await withdrawItems(bot, bestFood, opts.wantCount != null ? opts.wantCount : 8, { near: opts.near, includeCooling: chestCoolingOff(target) })
+  // FUEL COMPANION-WITHDRAW: if we pulled RAW meat (tier 1) but the pack carries no furnace
+  // fuel, the downstream cook step (cookRawMeat needs coal|charcoal|coal_block|*_planks) does
+  // nothing and the fix dead-ends - the bot eats raw or holds. So while we're at THIS chest,
+  // grab a little fuel from the same chest's counts so cooking can actually happen. Best-effort.
+  if (got > 0 && foodTier(bestFood) === 1) {
+    try {
+      const isFuel = n => n === 'coal' || n === 'charcoal' || n === 'coal_block' || /_planks$/.test(n)
+      const havePackFuel = (bot.inventory ? bot.inventory.items() : []).some(i => isFuel(i.name))
+      if (!havePackFuel) {
+        const fuel = ['coal', 'charcoal', 'coal_block'].find(n => (targetCounts[n] || 0) > 0)
+        const plankFuel = Object.keys(targetCounts).find(n => /_planks$/.test(n) && targetCounts[n] > 0)
+        if (fuel) await withdrawItems(bot, fuel, 8, { near: opts.near, includeCooling: chestCoolingOff(target) })
+        else if (plankFuel) await withdrawItems(bot, plankFuel, 12, { near: opts.near, includeCooling: chestCoolingOff(target) })
+      }
+    } catch (e) { dbg('ensureFood: fuel companion-withdraw failed (' + e.message + ')') }
+  }
   return got
 }
 

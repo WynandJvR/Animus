@@ -3049,7 +3049,7 @@ async function tillCell (bot, cell) {
   return (tilled && farm.farmlandReady(tilled.name)) ? 'farmland' : false
 }
 
-const WHEAT_FARM_TARGET = 6 // >=6 crop cells -> a harvest yields >=3 wheat -> at least one bread
+const WHEAT_FARM_TARGET = 12 // >=12 crop cells -> a fuller harvest -> several bread per cycle (was 6)
 
 async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () => {}, avoid = null } = {}) {
   const mcData = require('minecraft-data')(bot.version)
@@ -3404,7 +3404,15 @@ async function ensureFoodSupply (bot, opts = {}) {
   let sweeps = 0
   for (let step = 0; step < 4 && !isStopped(); step++) {
     if (hasStandingFarm()) {
-      try { await tendWheatFarm(bot, { isStopped, say }) } catch (e) { dbg('  foodSupply: tend failed (' + e.message + ')') }
+      let tended = false
+      try { tended = await tendWheatFarm(bot, { isStopped, say }) } catch (e) { dbg('  foodSupply: tend failed (' + e.message + ')') }
+      // GROW a standing-but-undersized farm on the fed-idle pass too (same guard as secureFood):
+      // tend returning true no longer blocks expansion - re-admit an under-target, un-maxed farm.
+      const wf = loadWorldMem().wheatFarm
+      const under = wf && (wf.cells || []).length > 0 && (wf.cells || []).length < WHEAT_FARM_TARGET && !wf.maxed
+      if (!tended || under) {
+        try { await ensureWheatFarm(bot, anchor, { isStopped, say }) } catch (e) { dbg('  foodSupply: expand failed (' + e.message + ')') }
+      }
       return { ok: true, reason: 'wheat farm stands - tended it' }
     }
     const knownWater = recallInfra('water', bot.entity.position, 300)
@@ -3620,7 +3628,17 @@ async function secureFoodInner (bot, opts = {}) {
   // eat -> withdraw -> cook steps below own the body and can walk to the bank/furnace.
   try { if (bot.pathfinder && bot.pathfinder.goal) bot.pathfinder.setGoal(null) } catch {}
   dbg('secureFood: food=' + bot.food + ' packFood=' + foodCount(bot))
-  // 0) eat what we carry
+  // 0) eat what we carry. COOK-BEFORE-EAT: if the pack's only non-bad food is RAW meat (tier 1
+  // and NO ready-to-eat tier-0 food), cook it first (mirror eatFromPackToComfortable) so it
+  // doesn't scarf raw mutton at 1/3 value next to a furnace. GUARDED to "no tier-0 in pack" so
+  // a genuine crisis holding bread doesn't detour to a furnace before eating it.
+  try {
+    const md0 = require('minecraft-data')(bot.version); const f0 = (md0 && md0.foodsByName) || {}
+    const packFoods = (bot.inventory ? bot.inventory.items() : []).filter(i => f0[i.name])
+    const hasReady = packFoods.some(i => foodSec.foodTier(i.name) === 0)
+    const hasRaw = packFoods.some(i => foodSec.foodTier(i.name) === 1)
+    if (!hasReady && hasRaw) await cookIfRaw()
+  } catch {}
   await eatUp(bot)
   if (fedEnough()) return true
   // 1) the pantry: withdraw banked food. FORCE A FRESH chest read (opts.forceFresh) - a stale
@@ -3649,7 +3667,13 @@ async function secureFoodInner (bot, opts = {}) {
   if (fedEnough() || isStopped()) return fedEnough()
   // 4) the farm (harvest what's ripe / plant one by remembered water)
   try {
-    if (!await tendWheatFarm(bot, { isStopped, say })) {
+    // EXPAND, don't just tend: a standing-but-undersized farm (tend returns true after
+    // harvesting) never used to grow because ensureWheatFarm only ran when tend returned FALSE.
+    // Re-admit an under-target, un-maxed farm so it keeps expanding toward WHEAT_FARM_TARGET.
+    const tended = await tendWheatFarm(bot, { isStopped, say })
+    const wf = loadWorldMem().wheatFarm
+    const under = wf && (wf.cells || []).length > 0 && (wf.cells || []).length < WHEAT_FARM_TARGET && !wf.maxed
+    if (!tended || under) {
       // REBUILD the farm even when the BED is gone: a creeper-destroyed bed makes knownBed()->
       // home null, and the old `if (home)` guard then SILENTLY skipped the rebuild - so a bot with
       // no bed + a dead 0-cell farm looped at food 10 forever, never re-planting (live 00:3x, food
@@ -6097,4 +6121,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, setBuildZone, setDebugSink }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, setBuildZone, setDebugSink }

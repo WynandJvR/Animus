@@ -43,6 +43,21 @@ t('shouldSweepForFood: sweep ONLY when no farm, no NEAR animal, no known water',
   assert.strictEqual(F.shouldSweepForFood(false, false, false), true)
 })
 
+t('foodTier: bad->2, raw meat->1, ready-to-eat (cooked/bread/veg)->0', () => {
+  for (const bad of ['rotten_flesh', 'spider_eye', 'poisonous_potato', 'pufferfish']) assert.strictEqual(F.foodTier(bad), 2, bad + ' is bad (hold-out only)')
+  for (const raw of ['beef', 'porkchop', 'chicken', 'mutton', 'rabbit', 'cod', 'salmon']) assert.strictEqual(F.foodTier(raw), 1, raw + ' is raw cookable')
+  for (const ready of ['cooked_beef', 'cooked_cod', 'cooked_mutton', 'bread', 'baked_potato', 'golden_carrot', 'apple']) assert.strictEqual(F.foodTier(ready), 0, ready + ' is ready-to-eat')
+  // anchored regexes: cooked_* must NOT be caught by the raw-meat pattern
+  assert.strictEqual(F.RAW_COOKABLE_FOOD.test('cooked_beef'), false, 'cooked_beef is not raw')
+  assert.strictEqual(F.BAD_FOOD.test('cooked_chicken'), false, 'cooked_chicken is not bad')
+})
+
+t('RAW_COOKABLE_FOOD matches provision.RAW_COOKABLE keys (single source of truth)', () => {
+  let RAW_COOKABLE
+  try { RAW_COOKABLE = require('./provision.js').RAW_COOKABLE } catch (e) { console.log('      (skip: provision.js not loadable offline: ' + e.message + ')'); return }
+  for (const name of Object.keys(RAW_COOKABLE)) assert.strictEqual(F.RAW_COOKABLE_FOOD.test(name), true, name + ' (a provision raw-cookable) must be tier 1')
+})
+
 t('foodSupplyAction: the discovery->action handoff (the live idle bug)', () => {
   assert.strictEqual(F.foodSupplyAction(true, true, true), 'tend', 'a standing farm -> tend')
   assert.strictEqual(F.foodSupplyAction(false, true, false), 'buildFarm', 'FOUND WATER -> build the farm THERE (was idling)')
