@@ -53,6 +53,16 @@ t('faceHazard: fluids ahead stop a tunnel; a floor gap is a void', () => {
   assert.strictEqual(M.faceHazard('deepslate', 'deepslate', 'deepslate'), 'ok')
 })
 
+t('digExposureHazard: a fluid in ANY of the 6 neighbours (incl. below) blocks a shallow dig', () => {
+  assert.strictEqual(M.digExposureHazard(['stone', 'stone', 'stone', 'stone', 'stone', 'stone']), 'ok', 'dry rock all around -> safe')
+  assert.strictEqual(M.digExposureHazard(['stone', 'water', 'stone', 'stone', 'stone', 'stone']), 'water', 'water beside/behind -> opening it floods the hole')
+  assert.strictEqual(M.digExposureHazard(['stone', 'stone', 'stone', 'stone', 'stone', 'water']), 'water', 'water BELOW floods the hole too')
+  assert.strictEqual(M.digExposureHazard(['stone', 'water', 'lava', 'stone', 'stone', 'stone']), 'lava', 'lava outranks water (never open lava)')
+  assert.strictEqual(M.digExposureHazard(['stone', 'seagrass', 'stone', 'stone', 'stone', 'stone']), 'water', 'aquifer plants count as water')
+  assert.strictEqual(M.digExposureHazard(['air', 'cave_air', 'stone', null, 'stone', 'stone']), 'ok', 'air/cave/unloaded neighbours are not fluids')
+  assert.strictEqual(M.digExposureHazard([]), 'ok', 'no data -> not a hazard')
+})
+
 t('perpendicular: branches are 90 degrees off the corridor', () => {
   assert.deepStrictEqual(M.perpendicular(0), [1, 3], 'E corridor -> S,N branches')
   assert.deepStrictEqual(M.perpendicular(1), [2, 0], 'S corridor -> W,E branches')

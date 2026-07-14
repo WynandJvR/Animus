@@ -159,6 +159,64 @@ async function swimToShore (bot, isStopped = () => false) {
   return false
 }
 
+// HEAD underwater? The SAME predicate survivalState uses to emit the 'drowning' need
+// (head block water/seagrass/kelp/bubble_column) - shared here so the escape's while-loop
+// tests exactly the condition that fired it (never "near water", only actually submerged).
+function headInWater (bot) {
+  try { const h = bot.entity && bot.blockAt(bot.entity.position.floored().offset(0, 1, 0)); return !!(h && /water|seagrass|kelp|bubble_column/.test(h.name)) } catch { return false }
+}
+
+// ROOFED-FLOOD rung: no shore to swim to and no adjacent bank to hop - so rise straight UP
+// the water column toward an air pocket (face up, hold jump = swim up in water). Bounded.
+// Deliberately NOT climbToSurface (its digs REFUSE water, provision.js:2137 - it would
+// no-op in a flooded shaft); this just floats the head up to whatever air the column has.
+async function jumpForAir (bot, ms = 6000, isStopped = () => false) {
+  const t0 = Date.now()
+  try {
+    try { bot.pathfinder.setGoal(null) } catch {}
+    bot.setControlState('jump', true)
+    bot.setControlState('forward', true) // nudge along the column - a 1-wide flooded shaft often has air just off-axis
+    while (Date.now() - t0 < ms && !isStopped()) {
+      try { await bot.look(bot.entity.yaw, -Math.PI / 2, true) } catch {} // look up so the swim-stroke rises
+      await new Promise(r => setTimeout(r, 120))
+      if (!headInWater(bot)) { dbg('air: head cleared the water rising the column'); return true }
+    }
+  } finally { bot.clearControlStates() }
+  return !headInWater(bot)
+}
+
+// DROWN-ESCAPE: the bounded, re-entrant, arbiter-coordinated water escape. The acute fix for
+// "drowned gear-mining into a pond aquifer" - AUTO_SURFACE's swimToShore alone LOST because a
+// still-running job loop kept re-setting a pathfinder goal and the pathfinder rewrote the
+// controls every tick (navigate.js:50-55). The job loops now stopDigging + setGoal(null) and
+// AWAIT this; the index.js drown-crisis reflex fires it as a backstop/override. Opens a SURVIVE
+// maneuver span so lower reflexes defer. Every rung is bounded (swim 15s + hop 2.5s/dir + air 6s,
+// whole call capped at deadlineMs) and it returns an HONEST bool (still wet? false) - never wedges.
+let escapingWater = false
+async function escapeWater (bot, { isStopped = () => false, deadlineMs = 35000 } = {}) {
+  if (escapingWater) return false // re-entrant guard: one escape at a time (reflex + job loop can both call)
+  escapingWater = true
+  const tok = arbiter.beginManeuver('drown-escape', arbiter.PRIORITY.SURVIVE, deadlineMs + 5000)
+  try {
+    const dl = Date.now() + deadlineMs
+    const wet = () => headInWater(bot)
+    if (!wet()) return true
+    try { bot.stopDigging() } catch {} // a mid-dig await would otherwise hold the body underwater
+    try { bot.pathfinder.setGoal(null) } catch {}
+    while (wet() && Date.now() < dl && !isStopped()) {
+      arbiter.refreshManeuver(tok, deadlineMs + 5000)
+      if (await swimToShore(bot, isStopped)) break            // rung 1: float up + swim to the nearest bank
+      if (!wet()) break
+      try { if (await prov().manualHopFromWater(bot)) break } catch {} // rung 2: hop straight onto an adjacent bank
+      if (!wet()) break
+      await jumpForAir(bot, 6000, isStopped)                  // rung 3: roofed flood - rise the column for air
+    }
+    const out = !wet()
+    dbg('drown-escape: ' + (out ? 'out of the water at ' + bot.entity.position.floored() : 'STILL WET after the ladder'))
+    return out
+  } finally { arbiter.endManeuver(tok); escapingWater = false }
+}
+
 // Standing in a HOLE: solid walls on 3+ sides at feet level. An open-sky pit makes the
 // no-dig profiles no-path INSTANTLY (this was the "stalls on open ground" mystery - the
 // bot idled 70s in its own orchard-leveling hole, live). Returns the rim height to
@@ -891,4 +949,4 @@ function honestFail (lastErr, counts, label, recoveryMs, reflexWaitMs) {
   return e
 }
 
-module.exports = { navigateTo, navigateToPreempt, gotoOnce, openNearbyDoor, crossOwnDoor, enterStructure, exitStructure, swimToShore, isNavigating, isRecovering, isForceUnsticking, forceUnstick, setDebugSink, detectPit, goalWasChanged }
+module.exports = { navigateTo, navigateToPreempt, gotoOnce, openNearbyDoor, crossOwnDoor, enterStructure, exitStructure, swimToShore, escapeWater, headInWater, isNavigating, isRecovering, isForceUnsticking, forceUnstick, setDebugSink, detectPit, goalWasChanged }

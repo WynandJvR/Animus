@@ -1316,29 +1316,44 @@ if (process.env.AUTO_SCAFFOLD_SWEEP !== '0') {
   }, 45000)
 }
 
-// SURFACE REFLEX (survival tier, like auto-defend): head underwater for 8+ seconds
-// means whatever flow is running is failing to keep the bot breathing - take the
-// controls and swim ashore. The rest/shelter flows carry their own ashore guards, and
-// navigation recoveries may be mid-maneuver, so those get right of way; everything
-// else (a build placing river-bank cells, a stray goto, an idle bob) gets rescued.
-// Disable with AUTO_SURFACE=0.
+// DROWN CRISIS (survival tier, fires EVEN WHILE BUSY): the arbiter emits a 'drowning' need
+// (head underwater) but NOTHING consumed it - the bot drowned gear-mining into a pond aquifer.
+// This is that missing consumer, replacing the old parallel AUTO_SURFACE (which lost because a
+// still-running job's goto kept stomping swimToShore's manual controls). It triggers off the ONE
+// authority (survivalNeed==='drowning'; lava/fire outrank it, and it shadows 'heal' so an hp
+// crisis waits until the bot can breathe), takes the controls via navigate.escapeWater (a SURVIVE
+// maneuver span the lower reflexes defer to), and NEVER gates on isBusy - firing while busy IS
+// the override, exactly like the hp-crisis reflex above. Disable with AUTO_SURFACE=0.
 if (process.env.AUTO_SURFACE !== '0') {
-  let wetTicks = 0
-  let surfacing = false
+  let wetHist = 0        // decaying persistence: +1 wet / -1 dry, clamped 0..4 (bobbing between digs still accumulates - NOT a hard reset on one dry poll)
+  let drownStart = 0     // when this drowning episode began (for the gate-starvation override)
+  let drownCooldownUntil = 0
+  let drowning = false
   setInterval(async () => {
-    if (surfacing || !bot.entity) return
-    let headWet = false
-    try { const h = bot.blockAt(bot.entity.position.floored().offset(0, 1, 0)); headWet = !!(h && /water/.test(h.name)) } catch {}
-    if (!headWet) { wetTicks = 0; return }
-    wetTicks++
-    if (wetTicks < 4) return // 4 ticks x 2s = 8s submerged before intervening
-    if ((commands.isEscaping && commands.isEscaping()) || navigate.isRecovering() || (provision.isResting && provision.isResting())) return
-    surfacing = true
+    if (drowning || !bot.entity) return
+    if (Date.now() < drownCooldownUntil) return
+    const n = provision.survivalNeed(bot)
+    const isDrown = !!(n && n.need === 'drowning')
+    if (isDrown) { wetHist = Math.min(4, wetHist + 1); if (!drownStart) drownStart = Date.now() }
+    else { wetHist = Math.max(0, wetHist - 1); if (wetHist === 0) drownStart = 0; return }
+    if (wetHist < 3) return // ~3 of the last 4 polls wet (2s cadence ~= 6s submerged) before intervening
+    const persistedMs = drownStart ? Date.now() - drownStart : 0
+    // Defer to an escape/recovery/rest already in progress - UNLESS drowning has persisted
+    // >=16s: a recovery not producing air in 16s is failing and drowning kills in ~25s, so
+    // fire ANYWAY (closes gate-starvation). bot.isSleeping is always respected.
+    if (persistedMs < 16000) {
+      if (commands.isEscaping && commands.isEscaping()) return
+      if (navigate.isRecovering() || navigate.isForceUnsticking()) return
+      if (provision.isResting && provision.isResting()) return
+    }
+    if (bot.isSleeping) return
+    drowning = true
     try {
-      note('(surface) head underwater 8s+ - taking the controls and swimming ashore')
-      try { bot.pathfinder.setGoal(null) } catch {}
-      await navigate.swimToShore(bot, () => false)
-    } catch {} finally { surfacing = false; wetTicks = 0 }
+      note('(drown-crisis) head underwater - taking the controls to get out of the water')
+      const ok = await navigate.escapeWater(bot, { isStopped: () => false })
+      note(`(drown-crisis) ${ok ? 'out of the water' : 'still wet - will retry after a cooldown'}`)
+      if (!ok) drownCooldownUntil = Date.now() + 10000
+    } catch (e) { note(`(drown-crisis) failed: ${e.message}`); drownCooldownUntil = Date.now() + 10000 } finally { drowning = false; wetHist = 0; drownStart = 0 }
   }, 2000)
 }
 

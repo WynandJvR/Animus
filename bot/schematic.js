@@ -655,7 +655,7 @@ async function buildSurvival (bot, schem, at, opts = {}) {
       // need -> secure it (throttled - a bank walk is expensive). Night-shelter keeps its branch.
       {
         const need = provision.survivalNeed(bot)
-        if (need && (need.need === 'creeper' || need.need === 'threat' || need.need === 'heal') && Date.now() >= survivePauseSuppressUntil) {
+        if (need && (need.need === 'creeper' || need.need === 'threat' || need.need === 'heal' || need.need === 'drowning') && Date.now() >= survivePauseSuppressUntil) {
           dbg('build: SURVIVE need (' + need.need + ' - ' + need.reason + ') mid-build - PAUSING; the flee reflex owns the body')
           try { bot.pathfinder.setGoal(null) } catch {} // let the reflex drive; don't fight it with a build goal
           const pauseStart = Date.now()
@@ -663,7 +663,7 @@ async function buildSurvival (bot, schem, at, opts = {}) {
           while (!isStopped()) {
             await new Promise(r => setTimeout(r, 1200)) // 1-2s slices; the reflex moves the body
             const n2 = provision.survivalNeed(bot)
-            if (!n2 || (n2.need !== 'creeper' && n2.need !== 'threat' && n2.need !== 'heal')) break // threat cleared / healed
+            if (!n2 || (n2.need !== 'creeper' && n2.need !== 'threat' && n2.need !== 'heal' && n2.need !== 'drowning')) break // threat cleared / healed / surfaced
             // EPISODE CAP: a can't-reach creeper (fenced, flee marked futile) keeps survivalNeed
             // returning 'creeper' forever - which would recreate the multi-minute freeze the wedge
             // watchdog exists for. After 90s, resume building and suppress re-pausing for 120s -

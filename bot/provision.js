@@ -1457,6 +1457,21 @@ async function branchMine (bot, item, count, opts = {}) {
       try { await climbToSurface(bot, Math.floor(surfaceY), { isStopped }) } catch {}
       return { gathered: got(), reason: 'broke off to survive a mob / low hp underground' }
     }
+    // DROWNING mid-mine (a branch broke into an aquifer): get the head out of the water FIRST
+    // (bounded escapeWater - drops the goal + stops the dig so the manual escape isn't stomped),
+    // THEN climb out and bail honestly. Same shape as the food branch. escapeWater before
+    // climbToSurface: climbToSurface's digs refuse water, so it must run only once we're clear.
+    {
+      const need = survivalNeed(bot, { foodThreshold: 6 })
+      if (need && need.need === 'drowning') {
+        dbg('  branchMine: DROWNING mid-mine (' + need.reason + ') - escaping the water then climbing out')
+        if (opts.say) say('the mine flooded - getting out before i drown')
+        try { bot.stopDigging() } catch {}
+        try { await navigate.escapeWater(bot, { isStopped }) } catch {}
+        try { await climbToSurface(bot, Math.floor(surfaceY), { isStopped }) } catch {}
+        return { gathered: got(), reason: 'broke off - the mine flooded' }
+      }
+    }
     // JOB ARBITER mid-activity (CONTINUE gate, critical thresholds): a normal food dip after
     // descending fed is fine, but a genuine crash (food <=6) or a new danger the mineDanger
     // check above missed -> climb out and yield. One authority, critical foodThreshold=6.
@@ -4165,6 +4180,7 @@ async function gatherLoop (bot, item, count, opts = {}) {
   let noYield = 0     // blocks mined lately with NO item gain (drops lost to gaps)
   let stripDug = 0    // times we've strip-mined DOWN this gather (bounded)
   let reachFails = 0  // consecutive "found stone but couldn't reach it" (buried -> strip-mine)
+  let drownEscapes = 0 // consecutive water-escapes at this spot (abandon after a couple)
   let lastFoodHunt = 0 // throttle the survival-hunt so it doesn't chase every loop
   let lastShelter = 0  // throttle the night-shelter check
   const isLogGather = /_log$/.test(item) // logs get the natural-tree-only anti-grief filter
@@ -4312,6 +4328,16 @@ async function gatherLoop (bot, item, count, opts = {}) {
     const tool = toolForBlock(bot, blk.name)
     if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
     if (bot.canDigBlock && !bot.canDigBlock(blk)) throw new Error('cannot dig from here')
+    // FLUID-FACE re-probe right before the dig (water flows between the candidate scan and now):
+    // if breaking this block would open a fluid onto us, ABORT rather than crack the aquifer.
+    // Scoped to the stone/ore path (logs are above-ground - a shore trunk isn't a flood risk).
+    if (!isLogGather) {
+      const nb = [blk.position.offset(1, 0, 0), blk.position.offset(-1, 0, 0), blk.position.offset(0, 0, 1), blk.position.offset(0, 0, -1), blk.position.offset(0, 1, 0), blk.position.offset(0, -1, 0)]
+        .map(q => { const b = bot.blockAt(q); return b ? b.name : null })
+      const hz = mining.digExposureHazard(nb)
+      if (hz === 'water') throw new Error('water face - not opening the aquifer')
+      if (hz === 'lava') throw new Error('lava face - not opening the lava')
+    }
     bot.pathfinder.setGoal(null) // a lingering goal lets the pathfinder steer mid-dig and ABORT it (dig-restart loops, operator report)
     await bot.dig(blk)
     mined++
@@ -4354,6 +4380,24 @@ async function gatherLoop (bot, item, count, opts = {}) {
       const react = await surviveMiningThreat()
       if (react === 'bail') return { gathered: countItem(bot, item) - start, reason: 'broke off mining to survive a mob / low hp - getting to safety' }
       if (react) continue
+    }
+    // DROWNING FIRST (before/outside the !hasSolidCeiling gate below - a flooded tunnel HAS a
+    // ceiling, exactly when the open-air gate skips): head underwater means the last dig opened
+    // an aquifer under us. STOP the dig, drop the pathfinder goal (so it can't re-stomp the
+    // manual escape) and hand the body to the bounded escapeWater. On success keep gathering;
+    // if we keep ending up wet HERE, the spot is a pond edge - abandon it, not drown for it.
+    {
+      const dn = survivalNeed(bot, { foodThreshold: 6 })
+      if (dn && dn.need === 'drowning') {
+        dbg('  gather: DROWNING (' + dn.reason + ') - stopping the dig and escaping the water')
+        if (opts.say && drownEscapes === 0) opts.say('dug into water - getting out before i drown')
+        try { bot.stopDigging() } catch {}
+        try { bot.pathfinder.setGoal(null) } catch {}
+        const out = await navigate.escapeWater(bot, { isStopped })
+        if (out) { drownEscapes = 0; continue }
+        if (++drownEscapes >= 2) return { gathered: countItem(bot, item) - start, reason: 'kept ending up underwater here - abandoning this spot' }
+        continue
+      }
     }
     // CREEPER/THREAT beyond mineDanger's 6m reach: surviveMiningThreat (nearHostile 6 / hp<12)
     // never feels a creeper closing at 6-12m until it's point-blank. Consult the ONE authority
@@ -4446,8 +4490,17 @@ async function gatherLoop (bot, item, count, opts = {}) {
     const feetY = Math.floor(bot.entity.position.y)
     let candidates = bot.findBlocks({ matching: ids, maxDistance: 64, count: 32 })
       .filter(p => (failed.get(pkey(p)) || 0) < 2)
-      // Skip SUBMERGED targets (water on top): mining into water is how we drowned.
-      .filter(p => { const a = bot.blockAt(p.offset(0, 1, 0)); return !(a && /water/i.test(a.name)) })
+      // Never target a dig that would OPEN A FLUID onto us. Logs (above-ground, shore trees are
+      // fine) keep the cheap water-ABOVE check; every other gather - the stone/ore SHALLOW path
+      // where the pond-aquifer drowning happened - probes all 6 neighbours (incl. below), so
+      // wet-adjacent ore is skipped and falls through to branchMine's organized y16 descent
+      // (which has its own descentSafety/faceHazard). Dry ground: every neighbour is 'ok' - no-op.
+      .filter(p => {
+        if (isLogGather) { const a = bot.blockAt(p.offset(0, 1, 0)); return !(a && /water/i.test(a.name)) }
+        const nb = [p.offset(1, 0, 0), p.offset(-1, 0, 0), p.offset(0, 0, 1), p.offset(0, 0, -1), p.offset(0, 1, 0), p.offset(0, -1, 0)]
+          .map(q => { const b = bot.blockAt(q); return b ? b.name : null })
+        return mining.digExposureHazard(nb) === 'ok'
+      })
       // Don't chase stone/ore deep below the surface (cave-descent stranding).
       .filter(p => !belowCap(p.y))
       // ANTI-GRIEF: logs must be NATURAL trees (never a village house / log build); every
@@ -4618,7 +4671,7 @@ async function gatherLoop (bot, item, count, opts = {}) {
       failed.set(pkey(target.position), (failed.get(pkey(target.position)) || 0) + 1)
       reachFails++
       if (reachFails <= 3 || reachFails % 5 === 0) dbg('  gather breakBlock fail #' + reachFails + ' at ' + target.position.toString() + ': ' + e.message)
-      if (/underwater/.test(e.message) && ++waterAborts >= 3) { widenFence('approaches flooded'); waterAborts = 0 }
+      if (/underwater|water face/.test(e.message) && ++waterAborts >= 3) { widenFence('approaches flooded'); waterAborts = 0 }
       // Stone is FOUND but we keep failing to reach it -> it's buried (plains): the
       // path can't dig dirt to get there. Strip-mine straight down to it instead of
       // grinding through dozens of doomed gotos, then re-scan from inside the stone.

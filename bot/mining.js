@@ -145,6 +145,19 @@ function faceHazard (aheadName, aheadUpName, floorName) {
   return 'ok'
 }
 
+// SHALLOW-DIG fluid probe (drowning prevention): given the NAME strings of a target block's
+// 6 face-neighbours (E/W/N/S/up/DOWN - order irrelevant; the one BELOW matters too, it floods
+// a hole just the same), is breaking it safe? A fluid in ANY neighbour drains into the space we
+// open - which is exactly how the bot drowned mining ore beside a pond aquifer (the old gather
+// filter only checked water ABOVE the target). Returns 'lava'|'water'|'ok'. PURE - reuses the
+// same LAVA_RE/WATER_RE as descentSafety/faceHazard, so all three agree on "what is a fluid".
+function digExposureHazard (neighborNames) {
+  const ns = Array.isArray(neighborNames) ? neighborNames : []
+  if (ns.some(n => LAVA_RE.test(n || ''))) return 'lava'
+  if (ns.some(n => WATER_RE.test(n || ''))) return 'water'
+  return 'ok'
+}
+
 // Branch-mine geometry constants for the driver. corridorIdx picks the main-corridor
 // direction; left/right branches go off it perpendicular, `spacing` apart. Pure - just
 // resolves the direction indices + returns the tunables so the driver stays declarative.
@@ -160,4 +173,4 @@ function branchLayout (corridorIdx, opts = {}) {
   }
 }
 
-module.exports = { LAVA_RE, WATER_RE, AIRISH, DIRS, PICK_USES, perpendicular, targetMineY, worthMiningHere, mineableWhenBlocked, mineReusable, pickMaxUses, pickUsesLeft, estExcursionBlocks, picksToCraft, needReTool, descentSafety, faceHazard, branchLayout }
+module.exports = { LAVA_RE, WATER_RE, AIRISH, DIRS, PICK_USES, perpendicular, targetMineY, worthMiningHere, mineableWhenBlocked, mineReusable, pickMaxUses, pickUsesLeft, estExcursionBlocks, picksToCraft, needReTool, descentSafety, faceHazard, digExposureHazard, branchLayout }
