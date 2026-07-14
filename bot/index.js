@@ -779,6 +779,10 @@ if (process.env.NIGHT_SHELTER !== '0') {
   setInterval(async () => {
     if (sheltering || !bot.entity) return
     if (commands.isBusy && commands.isBusy()) return // the gather loop covers the build case
+    // A wedge-escape / nav recovery owns the body: re-entering the bunker now would stomp its
+    // manual step-out (ONE BODY, ONE ROUTE) - the live "step-out no progress" at the shallow
+    // bunker was the shelter reflex re-sealing the pit under the escape. Let the escape finish.
+    if (navigate.isForceUnsticking() || navigate.isRecovering()) return
     if (provision.isSecuringFood && provision.isSecuringFood()) return // feeding run owns the body
     // Two triggers: VULNERABLE at night (naked - always rest, the death carousels were all
     // naked), or simply IDLE at night with a bed on the map - a player with nothing to do
@@ -786,6 +790,12 @@ if (process.env.NIGHT_SHELTER !== '0') {
     // keeps working the night; armored + idle sleeps.
     const idleNight = provision.isNight(bot) && !bot.pathfinder.goal && provision.knownBed && provision.knownBed()
     if (!provision.shelterNeeded(bot) && !idleNight) return
+    // ETERNAL/FROZEN NIGHT: after the brief initial shelter, STOP re-bunkering (and stop
+    // idle-sleeping toward a dawn that won't come) - stand down so gearup/progress can run.
+    // Re-arming near the bunker is the real fix for "no armor, mobs about", not hiding forever
+    // (live 379,62,40, pinned 25+ min). flee/defend still guard acute threats; a normal night
+    // never trips nightStuck, so this is a no-op there.
+    if (provision.nightStuck && provision.nightStuck(bot)) return
     sheltering = true
     // note at most once per 2 min: a rest that resolves instantly (dusk head-start, can't
     // sleep yet) used to print "rested for the night" every 5s - the log spam (live 07-13)
@@ -812,7 +822,12 @@ if (process.env.GEAR_REFLEX !== '0') {
     if (commands.isEscaping && commands.isEscaping()) return
     if (!provision.underArmored(bot)) return
     const tod = bot.time ? bot.time.timeOfDay : 0
-    if (tod >= 11000) return // dusk/night belong to the shelter reflex; mornings to the grind
+    // dusk/night belong to the shelter reflex; mornings to the grind - UNLESS the night is
+    // frozen/eternal (dawn never comes, live). Then re-arming near the bunker is the ONLY way
+    // out of "no armor, mobs about", so gear up at night too. mayDoProgress (below) still holds
+    // for a live threat / hunger, keeping it careful; and the shelter reflex stands down for
+    // nightStuck so it won't fight this. Normal nights: tod<23500 so this still defers to shelter.
+    if (tod >= 11000 && !(provision.nightStuck && provision.nightStuck(bot))) return
     // JOB ARBITER: gear-up is a PROGRESS job - don't start it while a SURVIVE need is unmet
     // (food/hp/threat/shelter). The ONE authority replaces the old scattered food<X/hp<Y checks;
     // the survive reflexes (feed/heal/shelter) resolve the need first, then gearup runs.
@@ -1078,7 +1093,13 @@ if (process.env.WEDGE_WATCHDOG !== '0') {
     while (wdHist.length && now - wdHist[0].t > 200000) wdHist.shift()
     // "trying to move" = someone is steering; a bot smelting/sleeping/digging in place is fine
     const trying = !!(bot.pathfinder && bot.pathfinder.goal) || navigate.isNavigating()
-    if (!trying || bot.isSleeping || bot.targetDigBlock) return
+    if (!trying) return
+    // Deliberate stillness is NOT a wedge. While SHELTERING/RESTING (bunker night-wait, bed
+    // sleep) - or asleep / mid-dig - the bot is MEANT to sit still: firing the force-escape
+    // here just fought the night-shelter reflex, pit-escaping the very bunker the shelter
+    // re-sealed 5s later (live 379,62,40: 20+ min of watchdog-vs-shelter, farm cells never
+    // advanced). Reset the freeze clock so a fresh 2.5-min window starts once we truly leave.
+    if (bot.isSleeping || bot.targetDigBlock || (provision.isResting && provision.isResting())) { wdHist = []; return }
     // Only stand down for our OWN force-escape. A regular recovery/escape that has the
     // position FROZEN for 2.5 minutes is by definition failing (live: the ladder looped
     // door/nudge/stepout "no progress" for 4+ minutes at 433,62,112 and the old

@@ -1713,6 +1713,26 @@ function isNight (bot) { return !!(bot.time && bot.time.timeOfDay >= 13000 && bo
 // in during the dig, died). The ~800-tick (~40s) head start lets the pit be sealed before any
 // mob spawns. isNight (13000) stays the trigger for the ARMORED "wanted" cases below.
 function shelterNeeded (bot) { return !!(bot.time && bot.time.timeOfDay >= 12200 && bot.time.timeOfDay < 23500) && underArmored(bot) }
+// FROZEN / ETERNAL NIGHT: on the live server doDaylightCycle is off - timeOfDay is pinned in the
+// night band and DAWN NEVER COMES (grounded live: tod stuck ~15438, delta 0 over 45s). Left to
+// the normal rhythm the bot shelters forever: underArmored -> shelterNeeded -> it re-seals its
+// bunker every cycle, and gearup is night-gated so it never re-arms - the exact "no armor, mobs
+// about" hole it never climbed out of (live 379,62,40, pinned 25+ min). Detect a night that will
+// not end so the reflexes can shelter BRIEFLY, then resume careful progress (gear up first). On a
+// NORMAL server timeOfDay always advances, so this never trips and nights end at dawn as before.
+const NIGHT_FROZEN_MS = parseInt(process.env.NIGHT_STUCK_MS || '90000', 10) // tod pinned this long at night = dawn isn't coming
+const NIGHT_OVERLONG_MS = 900000 // ...or one continuous night runs 15 min (a normal night's dark is ~8-9 min; backstop for a non-frozen but stuck/very-laggy night)
+let _todSeen = { tod: null, at: 0 } // last time timeOfDay changed meaningfully
+let _nightStart = 0 // start of the current unbroken night
+function nightStuck (bot) {
+  if (!bot || !bot.time) return false
+  const now = Date.now()
+  const tod = bot.time.timeOfDay
+  if (_todSeen.tod == null || Math.abs(tod - _todSeen.tod) > 30) _todSeen = { tod, at: now } // ~1.5s of ticks; frozen tod never refreshes this
+  if (!isNight(bot)) { _nightStart = 0; return false }
+  if (!_nightStart) _nightStart = now
+  return (now - _todSeen.at) > NIGHT_FROZEN_MS || (now - _nightStart) > NIGHT_OVERLONG_MS
+}
 // Rest is WANTED (not just needed) when night catches us with the bed close by - even in
 // full armor a player sleeps if home is right there (operator rule: safer overall). Far
 // from the bed and armored, keep working the night; the commute would cost more than the
@@ -1773,6 +1793,10 @@ async function digInForNight (bot, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const say = opts.say || (() => {})
   if (!bot.entity || _sheltering) return false
+  // ETERNAL/FROZEN NIGHT: don't start a fresh dig-in that would just break out on the next poll -
+  // dawn isn't coming, so resume careful progress (gear up) instead of re-bunkering every cycle.
+  // The brief initial shelter already ran while the night still looked normal (see nightStuck).
+  if (nightStuck(bot)) { dbg('shelter: night is stuck/eternal - not digging in; time to re-arm and work carefully'); return false }
   // ANTI-GRIEF is handled PER-DIG below (canBreakNaturally): the shelter can only cut natural
   // ground, never a placed block - so it can't punch through a base's floor, yet it CAN still
   // dig a bunker in natural dirt right next to a build (incl. the bot's OWN castle at the build
@@ -1831,7 +1855,7 @@ async function digInForNight (bot, opts = {}) {
         // hold through the DUSK HEAD-START too (shelterNeeded fires at 12200, isNight at
         // 13000): breaking on "!isNight" alone made this return success instantly at dusk,
         // so the 5s reflex re-entered forever - the "waiting out the night" log spam (live)
-        if (!shelterNeeded(bot) && !isNight(bot) && !nearHostile(bot, 10)) break
+        if ((!shelterNeeded(bot) && !isNight(bot) && !nearHostile(bot, 10)) || nightStuck(bot)) break // stuck night: stop waiting for a dawn that won't come
         if ((bot.health || 20) < hpIn - 3) { dbg('shelter: taking damage INSIDE the hut - releasing shelter to FIGHT'); hurtInside = true; break }
         if (inWaterNow(bot)) { dbg('shelter: hut interior flooding - bailing'); hurtInside = true; break }
         await new Promise(r => setTimeout(r, 3000))
@@ -1871,7 +1895,7 @@ async function digInForNight (bot, opts = {}) {
         const dl = Date.now() + (recapped ? 600000 : 120000)
         const hpX = bot.health || 20
         while (Date.now() < dl && !isStopped()) {
-          if (!isNight(bot) && !nearHostile(bot, 10)) break
+          if ((!isNight(bot) && !nearHostile(bot, 10)) || nightStuck(bot)) break // stuck night: don't squat till a dawn that won't come
           if (!recapped && (bot.health || 20) < hpX - 3) { dbg('shelter: hit in the open bunker - bailing'); break }
           // same flooding bail as the fresh-pit wait: a reused bunker beside an aquifer
           // can flood too, and this loop had no way out (drowned sealed, test server)
@@ -2036,7 +2060,7 @@ async function digInForNight (bot, opts = {}) {
     const deadline = Date.now() + (fullySealed ? 600000 : 120000)
     const hp0 = bot.health || 20
     while (Date.now() < deadline && !isStopped()) {
-      if (!isNight(bot) && !nearHostile(bot, 10)) break
+      if ((!isNight(bot) && !nearHostile(bot, 10)) || nightStuck(bot)) break // stuck night: climb out and re-arm rather than wait forever
       if (!fullySealed && (bot.health || 20) < hp0 - 3) { dbg('shelter: taking damage in a LEAKY pit - bailing out to fight/flee'); break }
       // DROWNING BAIL: water reaching the body cells means the pit is flooding - get out
       // NOW, sealed or not (a "sealed" pit beside an aquifer drowned the bot at 4hp, live)
@@ -3270,7 +3294,8 @@ function survivalState (bot) {
     inLava: !!(bot.entity && bot.entity.isInLava),
     onFire: false, // the auto-defend/hazard reflexes own fire; not a progress-gate need here
     isNight: isNight(bot),
-    underArmored: underArmored(bot)
+    underArmored: underArmored(bot),
+    nightStuck: nightStuck(bot) // frozen/eternal night -> don't surface the "shelter" progress-block
   }
 }
 // The highest UNMET survival need blocking progress, or null. opts.foodThreshold: 14 to START a
@@ -3628,7 +3653,10 @@ async function restUntilSafe (bot, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const maxFails = opts.maxShelterFails || 4
   let waited = false; let fails = 0
-  while ((isNight(bot) || shelterNeeded(bot)) && underArmored(bot) && !isStopped() && bot.entity) {
+  while ((isNight(bot) || shelterNeeded(bot)) && underArmored(bot) && !nightStuck(bot) && !isStopped() && bot.entity) {
+    // FROZEN/ETERNAL NIGHT: stop HOLDING for a dawn that won't come - hand back so the job
+    // resumes careful night work (it re-arms first via gearup). Otherwise this loop pinned
+    // any job that hit night on a doDaylightCycle-off server for the whole session (live).
     // HOLDING must never mean holding UNDERWATER - the 4s waits between failed rest
     // attempts are exactly where the bot drowned (test server, in its flooded basin)
     if (inWaterNow(bot)) { try { await ensureAshore(bot, isStopped) } catch {} }
@@ -5668,4 +5696,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, setBuildZone, setDebugSink }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, setBuildZone, setDebugSink }

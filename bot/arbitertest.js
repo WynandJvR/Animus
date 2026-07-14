@@ -117,6 +117,10 @@ t('jobSurvivalNeed: hp critical, lava, night-shelter', () => {
   assert.strictEqual(arb.jobSurvivalNeed({ hp: 20, inLava: true }).need, 'lava')
   assert.strictEqual(arb.jobSurvivalNeed({ food: 18, hp: 20, isNight: true, underArmored: true }).need, 'shelter')
   assert.strictEqual(arb.jobSurvivalNeed({ food: 18, hp: 20, isNight: true, underArmored: false }), null, 'armored at night is fine')
+  // FROZEN/ETERNAL NIGHT: dawn never comes - hiding can't resolve, so re-arm; shelter must NOT
+  // block progress (gearup) then. But a REAL survive danger still outranks the stuck night.
+  assert.strictEqual(arb.jobSurvivalNeed({ food: 18, hp: 20, isNight: true, underArmored: true, nightStuck: true }), null, 'stuck night + naked -> no shelter block (gear up instead of hiding forever)')
+  assert.strictEqual(arb.jobSurvivalNeed({ food: 18, hp: 20, isNight: true, underArmored: true, nightStuck: true, threatDist: 3 }).need, 'threat', 'a live threat still blocks even on a stuck night')
 })
 
 t('jobSurvivalNeed: threshold is context-tunable (start=14 vs mid-activity critical=6)', () => {

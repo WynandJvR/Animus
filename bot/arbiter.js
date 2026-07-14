@@ -108,7 +108,8 @@ function mayInterrupt (reflexPri) { return !maneuverActive(reflexPri) }
 //
 // state fields (all optional; absent = not blocking): food (0..20), hp (0..20),
 // threatDist (blocks to nearest hostile | null), drowning, onFire, inLava (bools),
-// isNight, underArmored (bools).
+// isNight, underArmored (bools), nightStuck (bool - the night has stopped ending, so the
+// night+underArmored shelter need is NOT surfaced; the resolution is to re-arm, not hide).
 // opts: foodThreshold (default 14 - the START gate; pass 6 for a mid-activity critical bail),
 //       hpCritical (6), threatRange (6).
 function jobSurvivalNeed (state, opts = {}) {
@@ -124,8 +125,11 @@ function jobSurvivalNeed (state, opts = {}) {
   if (s.threatDist != null && s.threatDist <= threatRange) return { tier: PRIORITY.SURVIVE, need: 'threat', reason: 'hostile ' + (typeof s.threatDist === 'number' ? s.threatDist.toFixed(1) : s.threatDist) + 'b' }
   // HUNGER (SURVIVE): a progress job must not run while genuinely hungry (it mined starving)
   if (s.food != null && s.food < foodThreshold) return { tier: PRIORITY.SURVIVE, need: 'food', reason: 'food ' + s.food + ' < ' + foodThreshold }
-  // NIGHT SHELTER for a naked bot (SURVIVE)
-  if (s.isNight && s.underArmored) return { tier: PRIORITY.SURVIVE, need: 'shelter', reason: 'night + under-armored' }
+  // NIGHT SHELTER for a naked bot (SURVIVE) - but NOT on a frozen/eternal night. When dawn
+  // never comes (live: doDaylightCycle off, timeOfDay pinned) hiding is not a survivable
+  // resolution - the bot must re-arm to get safe - so don't let "shelter" block progress
+  // (gearup) forever. nightStuck is set once the night has demonstrably stopped ending.
+  if (s.isNight && s.underArmored && !s.nightStuck) return { tier: PRIORITY.SURVIVE, need: 'shelter', reason: 'night + under-armored' }
   return null
 }
 // May a PROGRESS job run right now? True iff no SURVIVE need is unmet.
