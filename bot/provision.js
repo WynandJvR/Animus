@@ -473,16 +473,27 @@ function gotoWithTimeout (bot, goal, ms) {
 // Walk onto nearby dropped items so they're picked up. Waits for drops to settle,
 // then sweeps the nearest item repeatedly (walk ONTO it - range 0). More persistent
 // than before because scattered drops on jagged terrain were being left behind.
-async function collectDrops (bot, radius = 10) {
+async function collectDrops (bot, radius = 10, { patience = 1 } = {}) {
   await new Promise(r => setTimeout(r, 250)) // let freshly-broken drops settle/land
-  for (let n = 0; n < 14; n++) {
+  let empties = 0
+  for (let n = 0; n < 20; n++) {
     let target = null; let best = radius
     for (const e of Object.values(bot.entities || {})) {
       if (!e || !e.position || e.name !== 'item') continue
       const d = e.position.distanceTo(bot.entity.position)
       if (d < best) { best = d; target = e }
     }
-    if (!target) return
+    if (!target) {
+      // DON'T bail on the first empty scan. A just-broken drop can take a beat to spawn/sync,
+      // or land a hair outside `radius` (a wheat drop from a cell against a pond bounces toward
+      // the water edge). The old early-return abandoned those drops the instant nothing was in
+      // range after 250ms - the "harvested N -> wheat=0" loss. Wait + re-look `patience` times
+      // before concluding there's genuinely nothing here.
+      if (empties++ >= patience) return
+      await new Promise(r => setTimeout(r, 300))
+      continue
+    }
+    empties = 0
     try { await gotoWithTimeout(bot, new goals.GoalNear(target.position.x, target.position.y, target.position.z, 0), 10000) } catch { return }
     await new Promise(r => setTimeout(r, 250))
   }
@@ -2903,13 +2914,20 @@ async function tillCell (bot, cell) {
   return (tilled && farm.farmlandReady(tilled.name)) ? 'farmland' : false
 }
 
+const WHEAT_FARM_TARGET = 6 // >=6 crop cells -> a harvest yields >=3 wheat -> at least one bread
+
 async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () => {}, avoid = null } = {}) {
   const mcData = require('minecraft-data')(bot.version)
   const m = loadWorldMem()
-  // one farm per site - but only if it's a REAL plot (>=1 persisted cell). A stale/pre-schema
-  // record with 0 cells (live: a farm record at 382,38 with cells:[]) used to block re-planting
-  // forever while tend had nothing to tend - a dead-farm deadlock. 0 live cells = no farm, rebuild.
-  if (m.wheatFarm && (m.wheatFarm.cells && m.wheatFarm.cells.length > 0) && Math.hypot(m.wheatFarm.x - home.x, m.wheatFarm.z - home.z) <= 80) return true
+  // one farm per site - but only once it's BIG ENOUGH. A stale/pre-schema record with 0 cells
+  // (live: a farm record at 382,38 with cells:[]) used to block re-planting forever while tend
+  // had nothing to tend - a dead-farm deadlock. 0 live cells = no farm, rebuild. AND a 1-cell
+  // farm (live: a pond that offered only 1 bank cell) yields 1 wheat/cycle - never the 3 needed
+  // for bread. So DON'T early-return at 1 cell: keep coming back to EXPAND until we hit the
+  // target (>=6 cells -> >=3 wheat -> bread), or until the site can't grow any further (`maxed`).
+  const existingLen = (m.wheatFarm && m.wheatFarm.cells && m.wheatFarm.cells.length) || 0
+  const nearExisting = m.wheatFarm && Math.hypot(m.wheatFarm.x - home.x, m.wheatFarm.z - home.z) <= 80
+  if (nearExisting && (existingLen >= WHEAT_FARM_TARGET || (existingLen > 0 && m.wheatFarm.maxed))) return true
   // BAD MOMENT guard: the last attempt ran while being chased INTO A CAVE - it searched
   // for grass from underground and found none. Farming is a peacetime surface job.
   if (hasSolidCeiling(bot, 12) || nearHostile(bot, 16) || isNight(bot)) { dbg('  wheat farm: bad moment (cave/hostiles/night) - deferred'); return false }
@@ -3004,19 +3022,28 @@ async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () =
   let planted = 0
   const ring = []
   const ringSeen = new Set()
-  for (const wp of waters.slice(0, 8)) {
-    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1]]) {
-      const k = (wp.x + dx) + ',' + (wp.z + dz)
-      if (ringSeen.has(k) || inAvoidBox(avoid, wp.x + dx, wp.z + dz)) continue
-      ringSeen.add(k)
-      // sand/gravel/clay banks welcome (untillable ones get swapped for carried dirt).
-      // FLOOD FIX (live: the farm produced nothing for 2.5h): only banks AT or ABOVE the
-      // waterline (farm.BANK_DYS = [0, +1]) - a bank BELOW the water (the old dy -1) puts the
-      // crop cell at water level and the source washes the seed out. dy 0 is hydrated + safe.
-      for (const dy of farm.BANK_DYS) {
-        const gp = wp.offset(dx, dy, dz)
-        const g = bot.blockAt(gp); const above = bot.blockAt(gp.offset(0, 1, 0))
-        if (g && /^(grass_block|dirt|sand|red_sand|gravel|clay)$/.test(g.name) && above && REPLACEABLE.test(above.name)) { ring.push(g); break }
+  // BANK BAND: the immediate neighbours of the waterline (Chebyshev 1), then a SECOND band
+  // (Chebyshev 2) - farmland is hydrated by water up to 4 blocks away, so a 2-block band is
+  // still watered + fast-growing. The old 1-ring-only search found "1 bank cell" at a tight
+  // pond and could never reach the 6 cells a bread harvest needs; the 2nd band gives a small
+  // pond enough land. Inner band FIRST (closest/most-hydrated cells plant first).
+  for (const r of [1, 2]) {
+    const offs = []
+    for (let dx = -r; dx <= r; dx++) for (let dz = -r; dz <= r; dz++) { if (Math.max(Math.abs(dx), Math.abs(dz)) === r) offs.push([dx, dz]) }
+    for (const wp of waters.slice(0, 8)) {
+      for (const [dx, dz] of offs) {
+        const k = (wp.x + dx) + ',' + (wp.z + dz)
+        if (ringSeen.has(k) || inAvoidBox(avoid, wp.x + dx, wp.z + dz)) continue
+        ringSeen.add(k)
+        // sand/gravel/clay banks welcome (untillable ones get swapped for carried dirt).
+        // FLOOD FIX (live: the farm produced nothing for 2.5h): only banks AT or ABOVE the
+        // waterline (farm.BANK_DYS = [0, +1]) - a bank BELOW the water (the old dy -1) puts the
+        // crop cell at water level and the source washes the seed out. dy 0 is hydrated + safe.
+        for (const dy of farm.BANK_DYS) {
+          const gp = wp.offset(dx, dy, dz)
+          const g = bot.blockAt(gp); const above = bot.blockAt(gp.offset(0, 1, 0))
+          if (g && /^(grass_block|dirt|sand|red_sand|gravel|clay)$/.test(g.name) && above && REPLACEABLE.test(above.name)) { ring.push(g); break }
+        }
       }
     }
   }
@@ -3059,15 +3086,26 @@ async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () =
       } else dbg('  wheat farm: seed did NOT take at ' + cropPos.x + ',' + cropPos.y + ',' + cropPos.z + ' (got ' + ((crop && crop.name) || '?') + ') - not counting it')
     } catch (e) { dbg('  wheat farm: cell failed (' + e.message + ')') }
   }
-  if (planted) {
+  // MERGE with any cells already registered at THIS pond (expansion pass) so we grow the plot
+  // instead of clobbering it. Keep prior cells within 32 of the chosen water anchor (same site);
+  // union with the newly-verified cells, de-duped by coord.
+  const priorSame = ((m.wheatFarm && m.wheatFarm.cells) || []).filter(c => Math.hypot(c.x - w.x, c.z - w.z) <= 32)
+  const byKey = new Map()
+  for (const c of priorSame) byKey.set(c.x + ',' + c.y + ',' + c.z, { x: c.x, y: c.y, z: c.z })
+  for (const c of plantedCells) byKey.set(c.x + ',' + c.y + ',' + c.z, c)
+  const merged = [...byKey.values()]
+  if (merged.length) {
     // Persist the EXACT crop cells (block-verified above) alongside the water anchor, so
     // tendWheatFarm reads THESE cells (harvest/replant) instead of blind-scanning for wheat.
-    m.wheatFarm = { x: w.x, y: w.y, z: w.z, cells: plantedCells, at: Date.now() }
+    // `maxed` = this pass added nothing new AND we're still under target: the site is tapped out,
+    // so stop re-running the whole build flow every proactive pass (accept the smaller farm).
+    const maxed = planted === 0 && merged.length < WHEAT_FARM_TARGET
+    m.wheatFarm = { x: w.x, y: w.y, z: w.z, cells: merged, at: Date.now(), maxed }
     saveWorldMem()
-    dbg('  wheat farm: ' + planted + ' cell(s) VERIFIED planted (wheat present) at the water near ' + w.x + ',' + w.z)
-    say(`wheat farm planted (${planted} cells) - bread incoming`)
+    dbg('  wheat farm: ' + planted + ' new cell(s) planted, ' + merged.length + ' total VERIFIED cell(s) at the water near ' + w.x + ',' + w.z + (maxed ? ' (site maxed - under target)' : ''))
+    if (planted) say(`wheat farm ${priorSame.length ? 'expanded' : 'planted'} (${merged.length} cells) - bread incoming`)
   } else dbg('  wheat farm: could not plant any cell (none verified as wheat)')
-  return planted > 0
+  return merged.length > 0
 }
 
 // (Re)establish ONE crop cell: till the farmland if needed, then plant a seed - VERIFIED by
@@ -3117,9 +3155,20 @@ async function tendWheatFarm (bot, { isStopped = () => false, say = () => {} } =
   // ALWAYS also fold in any wheat visible nearby (a growing cell not in the list).
   let cells = (m.wheatFarm.cells || []).map(c => new Vec3(c.x, c.y, c.z))
   const seen = new Set(cells.map(c => c.x + ',' + c.y + ',' + c.z))
+  // Fold in wheat visible nearby (a growing cell not in the list) - but ONLY wheat that belongs
+  // to OUR plot. The bot spawns next to a village wheat field within 16 blocks; the old blanket
+  // findBlocks(16) pulled that foreign field in, so tend wandered off-plot to harvest someone
+  // else's wheat (drops landing in the village pond, out of reach -> `harvested N, wheat=0`).
+  // Own = within 2 blocks (x/z) of a persisted cell, or within 6 of the farm's water anchor.
+  const ownCells = (m.wheatFarm.cells || [])
+  const anchor = m.wheatFarm
+  const isOurs = q => ownCells.some(c => Math.abs(c.x - q.x) <= 2 && Math.abs(c.z - q.z) <= 2) ||
+                      Math.hypot(q.x - anchor.x, q.z - anchor.z) <= 6
   for (const p of (bot.findBlocks({ matching: wheatId, maxDistance: 16, count: 24 }) || [])) {
     const k = p.x + ',' + p.y + ',' + p.z
-    if (!seen.has(k)) { seen.add(k); cells.push(new Vec3(p.x, p.y, p.z)) }
+    if (seen.has(k)) continue
+    if (ownCells.length && !isOurs(p)) continue // don't wander into a foreign/village field
+    seen.add(k); cells.push(new Vec3(p.x, p.y, p.z))
   }
   let harvested = 0; let replanted = 0
   for (const p of cells) {
@@ -3132,7 +3181,13 @@ async function tendWheatFarm (bot, { isStopped = () => false, say = () => {} } =
         try {
           if (bot.entity.position.distanceTo(p) > 4) await gotoWithTimeout(bot, new goals.GoalNear(p.x, p.y, p.z, 2), 10000)
           await bot.dig(b); harvested++
-          await collectDrops(bot, 4)
+          // STAND ON THE DROP, then collect wider + patiently. A wheat drop from a cell against
+          // the pond bounces toward the water edge and takes a beat to settle; walking onto the
+          // crop cell (where the wheat stood, on top of the farmland) puts the pickup box over
+          // it, and the wider/patient collect grabs one that drifted a block onto land/water.
+          // This is the core "harvested N -> wheat=0" fix.
+          try { await gotoWithTimeout(bot, new goals.GoalNear(p.x, p.y, p.z, 0), 6000) } catch {}
+          await collectDrops(bot, 6, { patience: 5 })
           if (await replantCropCell(bot, p, { isStopped })) replanted++ // reseed the cell we just cleared
         } catch (e) { dbg('  wheat harvest failed (' + e.message + ')') }
       } else if (age != null) {
@@ -3145,6 +3200,7 @@ async function tendWheatFarm (bot, { isStopped = () => false, say = () => {} } =
       if (await replantCropCell(bot, p, { isStopped })) replanted++
     } // 'flooded'/'blocked': leave it - not fixable from here
   }
+  if (harvested) await collectDrops(bot, 6, { patience: 3 }) // final sweep: grab any drop that drifted onto the plot edge before we craft (tight radius - don't wander off-plot after distant drops)
   const wheatN = countItem(bot, 'wheat')
   if (wheatN >= 3) { try { const made = await runCraft(bot, 'bread', Math.floor(wheatN / 3), true, { isStopped }); say('baked ' + made + ' bread - crisis over'); dbg('  baked ' + made + ' bread') } catch (e) { dbg('  bread craft failed (' + e.message + ')') } }
   dbg('  wheat farm tended: harvested ' + harvested + ', replanted ' + replanted + ', wheat=' + countItem(bot, 'wheat') + ', bread=' + countItem(bot, 'bread'))
