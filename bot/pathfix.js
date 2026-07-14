@@ -218,6 +218,17 @@ function installPathfinderTuning (bot) {
           try { return tpos ? bot.entity.position.distanceTo(tpos.clone ? tpos.clone().offset(0.5, 0.5, 0.5) : tpos) : null } catch { return null }
         }
         for (let attempt = 0; ; attempt++) {
+          // OWN-HUT DOOR: an interior container (bank/furnace) is UNPLANNABLE through a closed
+          // door, so both the reach-close goto below and the LOS face-walk time out at the wall.
+          // If the target sits in our own hut and we're outside, cross the doorway first with the
+          // mutex-free crossing core - then both approaches become plannable. Best-effort.
+          if (attempt === 0 && tpos) {
+            try {
+              const prov = require('./provision.js'); const nav = require('./navigate.js')
+              const hut = prov.ownHutAt && prov.ownHutAt(tpos)
+              if (hut && !(prov.insideOwnStructure && prov.insideOwnStructure(bot)) && nav.crossOwnDoor) await nav.crossOwnDoor(bot, hut, 'in', {})
+            } catch (e) { dbg(fname + ': own-hut door pre-flight skipped (' + e.message + ')') }
+          }
           let d = distTo()
           if (d != null && d > 4.5) {
             // too far for the server to accept the interact - close the gap first

@@ -466,7 +466,10 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
         const cell = prov().freeInteriorCell ? prov().freeInteriorCell(bot) : null
         if (!cell) { dbg('recovery: inside own structure but no free interior cell - holding (never pillaring indoors)'); return false }
         dbg('recovery: wedged INSIDE own structure at ' + p0.floored() + ' - stepping to free interior cell ' + cell + ' (no pillaring indoors)')
-        try { await gotoOnce(bot, new goals.GoalNear(cell.x, cell.y, cell.z, 0), 8000) } catch {}
+        // duringRecovery: this rung runs INSIDE recoverOnce's recoveringDepth++ span, so
+        // without the flag gotoOnce's yield gate would make this OWN goto wait up to 45s
+        // before it even starts whenever a free interior cell exists (latent 45s dead wait).
+        try { await gotoOnce(bot, new goals.GoalNear(cell.x, cell.y, cell.z, 0), 8000, { duringRecovery: true }) } catch {}
         if (movedEnough()) return true
         // the no-dig planner couldn't thread the cramped interior - manual step toward the
         // free cell (still no placement): face it, walk, hop once if we bump.
@@ -638,11 +641,16 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
 // "recovered". Serialize behind a mutex: the body can only walk one route at a time; a
 // queued flow just experiences a slower nav (honest) instead of a phantom wedge.
 let navChain = Promise.resolve()
-function navigateTo (bot, goal, opts = {}) {
-  const run = () => navigateToInner(bot, goal, opts)
-  const p = navChain.then(run, run)
+// Serialize a body onto the single-pathfinder mutex (see the note above). Any async fn
+// that drives the pathfinder/controls end-to-end - a full navigateTo, or an atomic
+// enter/exit-door shell - queues here so two flows never fight over the controls.
+function runOnNavChain (fn) {
+  const p = navChain.then(fn, fn)
   navChain = p.then(() => {}, () => {}) // failures release the mutex like successes
   return p
+}
+function navigateTo (bot, goal, opts = {}) {
+  return runOnNavChain(() => navigateToInner(bot, goal, opts))
 }
 // PREEMPTING variant for time-critical reflexes (hut-retreat from a creeper): skips the
 // queue and takes the pathfinder NOW, like the flee reflex does - the preempted nav sees
@@ -660,6 +668,9 @@ async function navigateToInner (bot, goal, opts = {}) {
   let interrupts = 0
   let recoveries = 0
   let recoveryMs = 0
+  let crossings = 0 // atomic doorway pre-flight crossings this nav (capped so a threshold flicker can't ping-pong)
+  let stalls = 0    // consecutive goto+recovery cycles that netted < 2.5b of real travel
+  let unstuck = false // forceUnstick fired once already this nav
   // Time spent parked while a REFLEX held the pathfinder must not consume the deadline:
   // in a reflex storm (creeper standoff re-fleeing every second, live 2h+) every nav
   // burned its whole budget waiting and DIED at the deadline check before the recovery
@@ -679,9 +690,31 @@ async function navigateToInner (bot, goal, opts = {}) {
       arbiter.refreshManeuver(manTok, manTtl())
       if (isStopped()) throw new Error('stopped')
       if (opts.movements) { try { bot.pathfinder.setMovements(opts.movements()) } catch {} }
+      // INTERIOR DOOR PRE-FLIGHT: the pathfinder cannot PLAN through a closed door, so a
+      // plain goto to a cell INSIDE our hut (or from inside OUT to a world goal) burns its
+      // whole timeout unplannably. Cross the doorway FIRST with the atomic, mutex-FREE
+      // crossOwnDoor (gotoOnce-based - NEVER navigateTo, which would re-take this mutex and
+      // deadlock), then fall through to the normal goto. Capped at 2 crossings/nav so a
+      // threshold flicker can't ping-pong; arrival stays proven by goal.isEnd below.
+      if (opts.doorPreflight !== false && crossings < 2 && !isStopped()) {
+        try {
+          const P = prov()
+          const xz = goalXZ(goal); const gy = goalY(goal)
+          const goalHut = xz && P.ownHutAt ? P.ownHutAt(new Vec3(xz.x, gy != null ? gy : bot.entity.position.y, xz.z)) : null
+          const botHut = P.insideOwnStructure ? P.insideOwnStructure(bot) : null
+          let atGoal = false
+          try { atGoal = goal.isEnd(bot.entity.position.floored()) } catch {}
+          if (goalHut && !botHut) { crossings++; dbg(label + 'door pre-flight: crossing IN to reach an interior goal'); await crossOwnDoor(bot, goalHut, 'in', { isStopped, priority: opts.priority }) }
+          else if (botHut && !goalHut && !atGoal) { crossings++; dbg(label + 'door pre-flight: crossing OUT to reach an exterior goal'); await crossOwnDoor(bot, botHut, 'out', { isStopped, priority: opts.priority }) }
+        } catch (e) { dbg(label + 'door pre-flight skipped (' + e.message + ')') }
+      }
+      const cyclePos = bot.entity.position.clone() // net-travel measurement for stall escalation
+      const cycleT0 = Date.now()
+      const cycleReflex0 = reflexWaitMs
       let lastErr
       try {
-        await gotoOnce(bot, goal, Math.min(timeoutMs, Math.max(2000, dl() - Date.now())))
+        const attemptMs = stalls >= 1 ? Math.min(timeoutMs, 10000) : timeoutMs // shrink after the first stall
+        await gotoOnce(bot, goal, Math.min(attemptMs, Math.max(2000, dl() - Date.now())))
         // GROUNDED, not optimistic: goto "succeeds" WITHOUT ARRIVING when the planner
         // returns an empty path (wedged in a pit = zero legal moves, verified live) or
         // settles at the closest reachable node. Only the goal's own isEnd on our real
@@ -707,7 +740,39 @@ async function navigateToInner (bot, goal, opts = {}) {
       const r0 = Date.now()
       const rescued = await recoverOnce(bot, goal, counts, budgets, opts)
       recoveryMs += Date.now() - r0
-      if (!rescued) throw honestFail(lastErr, counts, label, recoveryMs, reflexWaitMs)
+      // MEASURED-STALL ESCALATION (mirrors walkStaged): a whole goto+recovery cycle that
+      // netted < 2.5b of real travel - and wasn't dominated by a survival-reflex HOLD
+      // (reflexWaitMs, the same exclusion walkStaged uses, so we never fight a flee/shelter
+      // hold) - is a wedge. Two in a row and we break it with the aggressive manual escape
+      // (forceUnstick), ONCE per nav, gated like the watchdog (never asleep/mid-dig, and not
+      // while a force-escape already drives). escalate:false (walkStaged/travelFar legs)
+      // keeps sole ownership of THEIR own escalation - no double-unstick.
+      let stalled = false
+      if (opts.escalate !== false) {
+        const moved = Math.hypot(bot.entity.position.x - cyclePos.x, bot.entity.position.z - cyclePos.z)
+        const cycleElapsed = Math.max(1, Date.now() - cycleT0)
+        const reflexDominated = (reflexWaitMs - cycleReflex0) > cycleElapsed / 2
+        stalled = moved < 2.5 && !reflexDominated
+        stalls = stalled ? stalls + 1 : 0
+        if (stalls >= 2 && !unstuck && !bot.isSleeping && !bot.targetDigBlock && !isForceUnsticking()) {
+          unstuck = true
+          dbg(label + 'measured wedge ~' + moved.toFixed(1) + 'b/' + Math.round(cycleElapsed / 1000) + 's x' + stalls + ' - forceUnstick')
+          try { await forceUnstick(bot, { isStopped }) } catch {}
+          if (rescued) recoveries++
+          continue
+        }
+      }
+      if (!rescued) {
+        // No rung helped this pass. If we're measurably wedged and still hold the escape +
+        // deadline budget, keep going so the stall counter can reach the escalation instead
+        // of bailing to the caller/watchdog on the first failed recovery. Otherwise give up
+        // honestly (unreachable goal, or the escape is already spent).
+        if (stalled && opts.escalate !== false && !unstuck && !isForceUnsticking() && !bot.isSleeping && !bot.targetDigBlock && Date.now() < dl()) {
+          dbg(label + 'no recovery rung applied but wedged (stall ' + stalls + ') - retrying toward escalation')
+          continue
+        }
+        throw honestFail(lastErr, counts, label, recoveryMs, reflexWaitMs)
+      }
       recoveries++
       dbg(label + 'recovered via ' + rescued + ' - retrying the path')
     }
@@ -718,70 +783,70 @@ async function navigateToInner (bot, goal, opts = {}) {
 // A first-class, ATOMIC, reflex-protected door maneuver - the fix for "can't reliably enter
 // its own hut" (the pathfinder cannot PLAN through a closed door, so a plain goto to a cell
 // INSIDE the box times out even on clear ground, and the door-assist force-walk got its goal
-// stolen mid-crossing by reflexes - four "goal taken by a reflex" in a row, live). This:
-//   1. paths to a PLANNABLE stand-off cell just OUTSIDE the door (never a cell inside the box),
-//   2. runs ONE open-align-step-through toward the interior INSIDE a protected maneuver span
+// stolen mid-crossing by reflexes - four "goal taken by a reflex" in a row, live).
+//
+// crossOwnDoor is the MUTEX-FREE crossing CORE (so navigateToInner's door pre-flight can call
+// it while already holding the nav mutex - a navigateTo here would DEADLOCK). It:
+//   1. (ENTRY only) paths to a PLANNABLE stand-off cell just OUTSIDE the door via
+//      gotoOnce({duringRecovery}) - never navigateTo - so it never re-takes the mutex,
+//   2. runs ONE open-align-step-through toward the target side INSIDE a protected maneuver span
 //      (arbiter + recoveringDepth hold flee/defend off, so nothing interrupts between
 //      door-open and threshold-cross), reusing the proven openNearbyDoor crossing logic,
 //   3. verifies insideOwnStructure (grounded arrival); retries once; honest give-up.
-// `hut` = the infra hut anchor (defaults to the bot's own). Returns whether it's inside.
-async function enterStructure (bot, hut, opts = {}) {
+// `hut` = the infra hut anchor; `dir` = 'in' | 'out'. Returns whether it ended on the target side.
+async function crossOwnDoor (bot, hut, dir, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
-  const prov = prov_ => require('./provision.js')
   const P = require('./provision.js')
-  hut = hut || (P.listInfra && P.listInfra('hut')[0])
-  if (!hut) { dbg('enterStructure: no hut known'); return false }
-  if (P.insideOwnStructure && P.insideOwnStructure(bot)) return true
+  if (!hut) return false
   const H = require('./hut-model.js')
   const read = (x, y, z) => bot.blockAt(new Vec3(x, y, z))
   const door = H.doorwayColumn(hut, read)
-  if (!door) { dbg('enterStructure: no doorway found in the hut'); return false }
-  const out = H.outsideCell(hut, door)
+  if (!door) { dbg('crossOwnDoor: no doorway found in the hut'); return false }
   const inside = H.thresholdCell(hut, door)
-  // 1) path to the stand-off cell JUST OUTSIDE the door (a plannable goal on open ground)
-  if (out) {
-    try { await navigateTo(bot, new goals.GoalNear(out.x, hut.y, out.z, 1), { timeoutMs: 20000, deadlineMs: 45000, isStopped, climb: false, priority: arbiter.PRIORITY.PRESERVE, label: 'enter-standoff' }) } catch (e) { dbg('enterStructure: could not reach the door stand-off (' + e.message + ')') }
-  }
-  if (isStopped()) return false
-  // 2) ONE atomic, reflex-protected open-align-step-through toward the interior
-  const tok = arbiter.beginManeuver('enter-structure', opts.priority != null ? opts.priority : arbiter.PRIORITY.PRESERVE, 25000)
+  const out = H.outsideCell(hut, door)
+  const towards = dir === 'in'
+    ? (inside ? { x: inside.x, y: hut.y, z: inside.z } : null)
+    : (out ? { x: out.x, y: hut.y, z: out.z } : null)
+  const done = () => dir === 'in'
+    ? !!(P.insideOwnStructure && P.insideOwnStructure(bot))
+    : !(P.insideOwnStructure && P.insideOwnStructure(bot))
+  const tok = arbiter.beginManeuver('cross-door', opts.priority != null ? opts.priority : arbiter.PRIORITY.PRESERVE, 25000)
   recoveringDepth++
   try {
-    for (let tries = 0; tries < 2 && !(P.insideOwnStructure && P.insideOwnStructure(bot)) && !isStopped(); tries++) {
-      arbiter.refreshManeuver(tok, 25000)
-      await openNearbyDoor(bot, { towards: inside ? { x: inside.x, y: hut.y, z: inside.z } : null })
+    // ENTRY: path to the stand-off cell JUST OUTSIDE the door first (a plannable goal on open
+    // ground - you cannot goto a cell inside a closed box). gotoOnce+duringRecovery, NOT
+    // navigateTo: this may run inside navigateToInner's pre-flight, which holds the nav mutex.
+    if (dir === 'in' && out && !done() && !isStopped()) {
+      try { await gotoOnce(bot, new goals.GoalNear(out.x, hut.y, out.z, 1), 15000, { duringRecovery: true }) } catch (e) { dbg('crossOwnDoor: could not reach the door stand-off (' + e.message + ')') }
     }
-  } catch (e) { dbg('enterStructure: crossing failed (' + e.message + ')') } finally { recoveringDepth--; arbiter.endManeuver(tok) }
-  const ok = !!(P.insideOwnStructure && P.insideOwnStructure(bot))
-  dbg('enterStructure: ' + (ok ? 'INSIDE the hut' : 'still outside') + ' (door ' + door.x + ',' + door.z + ')')
+    for (let tries = 0; tries < 2 && !done() && !isStopped(); tries++) {
+      arbiter.refreshManeuver(tok, 25000)
+      await openNearbyDoor(bot, { towards, isStopped })
+    }
+  } catch (e) { dbg('crossOwnDoor: crossing failed (' + e.message + ')') } finally { recoveringDepth--; arbiter.endManeuver(tok) }
+  const ok = done()
+  dbg('crossOwnDoor(' + dir + '): ' + (ok ? 'on the intended side' : 'still on the wrong side') + ' (door ' + door.x + ',' + door.z + ')')
   return ok
 }
 
-// EXIT my own structure: the symmetric maneuver - cross the doorway toward the OUTSIDE
-// stand-off cell. For the shelter/gather flows that struggle to leave. Returns whether it
-// got outside (no longer insideOwnStructure).
-async function exitStructure (bot, hut, opts = {}) {
-  const isStopped = opts.isStopped || (() => false)
+// Public ENTER: a thin MUTEX-WRAPPED shell over crossOwnDoor (existing callers serialize on
+// the nav mutex exactly as before, when enterStructure's stand-off leg took it). `hut`
+// defaults to the bot's own. Returns whether it's inside.
+function enterStructure (bot, hut, opts = {}) {
   const P = require('./provision.js')
   hut = hut || (P.listInfra && P.listInfra('hut')[0])
-  if (!hut) return false
-  if (!(P.insideOwnStructure && P.insideOwnStructure(bot))) return true // already out
-  const H = require('./hut-model.js')
-  const read = (x, y, z) => bot.blockAt(new Vec3(x, y, z))
-  const door = H.doorwayColumn(hut, read)
-  if (!door) return false
-  const out = H.outsideCell(hut, door)
-  const tok = arbiter.beginManeuver('exit-structure', opts.priority != null ? opts.priority : arbiter.PRIORITY.PRESERVE, 25000)
-  recoveringDepth++
-  try {
-    for (let tries = 0; tries < 2 && (P.insideOwnStructure && P.insideOwnStructure(bot)) && !isStopped(); tries++) {
-      arbiter.refreshManeuver(tok, 25000)
-      await openNearbyDoor(bot, { towards: out ? { x: out.x, y: hut.y, z: out.z } : null })
-    }
-  } catch (e) { dbg('exitStructure: crossing failed (' + e.message + ')') } finally { recoveringDepth--; arbiter.endManeuver(tok) }
-  const ok = !(P.insideOwnStructure && P.insideOwnStructure(bot))
-  dbg('exitStructure: ' + (ok ? 'OUTSIDE' : 'still inside'))
-  return ok
+  if (!hut) { dbg('enterStructure: no hut known'); return Promise.resolve(false) }
+  if (P.insideOwnStructure && P.insideOwnStructure(bot)) return Promise.resolve(true)
+  return runOnNavChain(() => crossOwnDoor(bot, hut, 'in', opts))
+}
+
+// Public EXIT: the symmetric mutex-wrapped shell. Returns whether it got outside.
+function exitStructure (bot, hut, opts = {}) {
+  const P = require('./provision.js')
+  hut = hut || (P.listInfra && P.listInfra('hut')[0])
+  if (!hut) return Promise.resolve(false)
+  if (!(P.insideOwnStructure && P.insideOwnStructure(bot))) return Promise.resolve(true) // already out
+  return runOnNavChain(() => crossOwnDoor(bot, hut, 'out', opts))
 }
 
 // ---- watchdog FORCE-ESCAPE ---------------------------------------------------------
@@ -826,4 +891,4 @@ function honestFail (lastErr, counts, label, recoveryMs, reflexWaitMs) {
   return e
 }
 
-module.exports = { navigateTo, navigateToPreempt, gotoOnce, openNearbyDoor, enterStructure, exitStructure, swimToShore, isNavigating, isRecovering, isForceUnsticking, forceUnstick, setDebugSink, detectPit, goalWasChanged }
+module.exports = { navigateTo, navigateToPreempt, gotoOnce, openNearbyDoor, crossOwnDoor, enterStructure, exitStructure, swimToShore, isNavigating, isRecovering, isForceUnsticking, forceUnstick, setDebugSink, detectPit, goalWasChanged }

@@ -427,6 +427,7 @@ async function travelFar (bot, dest, opts = {}) {
         const nav = await navigate.navigateTo(bot, new goals.GoalNearXZ(wx, wz, 4), {
           timeoutMs: 30000, deadlineMs: 75000, isStopped, climb: false, label: 'travel',
           budgets: { water: 1, pit: 1, door: 1, nudge: 1 }, // one rescue of each kind per leg - the trip loop retries legs
+          escalate: false, doorPreflight: false, // this trek loop owns its own stall handling; a near-home leg must not spuriously cross a door
           movements: () => travelMovements(bot)
         })
         climbTimeMs += nav.recoveryMs

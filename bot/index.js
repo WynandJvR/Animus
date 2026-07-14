@@ -1037,10 +1037,21 @@ if (process.env.AUTO_DEFEND !== '0') {
             let ok = false
             try {
               if (nearHut) {
-                note(`(flee) creeper ${fbest.toFixed(1)}m near home - retreating INTO the hut`)
-                await navigate.navigateToPreempt(bot, new goals.GoalNear(hut.x + 2, hut.y + 1, hut.z + 2, 1),
-                  { timeoutMs: 15000, deadlineMs: 40000, climb: false, priority: arbiter.PRIORITY.SURVIVE, budgets: { door: 3, pit: 0, water: 0, nudge: 1, stepout: 1 }, label: 'hut-retreat' })
-                note('(flee) inside the hut - door-assist sealed the door behind me')
+                // Already inside our own walls? The creeper can't reach - just hold/re-seal,
+                // never re-navigate to a fixed interior cell (that furniture-blind goto was
+                // unsatisfiable when a table/bed sat on hut+2,+2 -> looped to the 40s deadline).
+                if (provision.insideOwnStructure && provision.insideOwnStructure(bot)) {
+                  note('(flee) creeper near home but already inside the hut - holding, door stays sealed')
+                } else {
+                  note(`(flee) creeper ${fbest.toFixed(1)}m near home - retreating INTO the hut`)
+                  // Target a FREE interior floor cell (furniture-aware), not the fixed hut+2,+2;
+                  // the nav's door pre-flight crosses the doorway to reach it. Fallback to center.
+                  const cell = (() => { try { return provision.freeInteriorCell ? provision.freeInteriorCell(bot, hut) : null } catch { return null } })()
+                  const gx = cell ? cell.x : hut.x + 2; const gy = cell ? cell.y : hut.y + 1; const gz = cell ? cell.z : hut.z + 2
+                  await navigate.navigateToPreempt(bot, new goals.GoalNear(gx, gy, gz, 1),
+                    { timeoutMs: 15000, deadlineMs: 40000, climb: false, priority: arbiter.PRIORITY.SURVIVE, budgets: { door: 3, pit: 0, water: 0, nudge: 1, stepout: 1 }, label: 'hut-retreat' })
+                  note('(flee) inside the hut - door-assist sealed the door behind me')
+                }
               } else {
                 const away = me.minus(flee.position)
                 const dest = me.plus(away.scaled(20 / (away.norm() || 1))) // 20b -> past the creeper's 16m follow range -> deaggro (no boundary jitter)

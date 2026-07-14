@@ -137,7 +137,8 @@ async function walkStaged (bot, tx, tz, opts = {}) {
     try {
       navRes = await navigate.navigateTo(bot, new goals.GoalNearXZ(lx, lz, 4), {
         timeoutMs: legTimeout, deadlineMs: legDeadline, isStopped, label: 'walkStaged',
-        budgets: { water: 1, pit: 1, door: 1, climb: 1, nudge: 1 } // one rescue of each kind per leg - this loop retries legs
+        budgets: { water: 1, pit: 1, door: 1, climb: 1, nudge: 1 }, // one rescue of each kind per leg - this loop retries legs
+        escalate: false, doorPreflight: false // THIS loop owns the measured-stall forceUnstick; a near-home leg must not spuriously cross a door
       })
     } catch (e) { navErr = e }
     const np = bot.entity.position
@@ -4661,7 +4662,9 @@ async function ensureTable (bot, opts = {}) {
   const tableId = mcData.blocksByName.crafting_table.id
   const reach = async (t) => {
     if (bot.entity.position.distanceTo(t.position) <= 3) return true
-    try { await gotoWithTimeout(bot, new goals.GoalNear(t.position.x, t.position.y, t.position.z, 2), 30000); return true } catch (e) { dbg('  ensureTable: cannot reach table at', t.position.toString(), '-', e.message); return false }
+    // Through the UNIFIED navigator (not a raw goto): a table INSIDE our hut is unplannable
+    // through a closed door, so the nav's door pre-flight crosses first. Tight at-base budgets.
+    try { await navigate.navigateTo(bot, new goals.GoalNear(t.position.x, t.position.y, t.position.z, 2), { timeoutMs: 15000, deadlineMs: 35000, climb: false, budgets: { door: 2, pit: 0, nudge: 1, stepout: 1 }, label: 'table-reach' }); return true } catch (e) { dbg('  ensureTable: cannot reach table at', t.position.toString(), '-', e.message); return false }
   }
   let table = bot.findBlock({ matching: tableId, maxDistance: 16 }) // `let`: the place path below reassigns it
   if (table && await reach(table)) { rememberInfra('table', table.position); return table }
@@ -5312,7 +5315,8 @@ async function ensureChest (bot, opts = {}) {
   if (knownC) { rememberInfra('chest', knownC.position); return knownC }
   if (countItem(bot, 'chest') === 0) {
     const table = await ensureTable(bot, opts)
-    if (bot.entity.position.distanceTo(table.position) > 3) await gotoWithTimeout(bot, new goals.GoalNear(table.position.x, table.position.y, table.position.z, 2), 20000)
+    // Unified navigator (door pre-flight crosses into the hut if the table's inside); tight at-base budgets.
+    if (bot.entity.position.distanceTo(table.position) > 3) { try { await navigate.navigateTo(bot, new goals.GoalNear(table.position.x, table.position.y, table.position.z, 2), { timeoutMs: 15000, deadlineMs: 35000, climb: false, budgets: { door: 2, pit: 0, nudge: 1, stepout: 1 }, label: 'chest-table-reach' }) } catch {} }
     const recipe = bot.recipesFor(mcData.itemsByName.chest.id, null, 1, table)[0]
     if (!recipe) throw new Error('cannot craft a chest (need 8 planks)')
     await bot.craft(recipe, 1, table)
@@ -5509,13 +5513,11 @@ async function gotoChest (bot, chestBlock) {
   const d = bot.entity.position.distanceTo(chestBlock.position)
   if (d > 40) { try { await walkStaged(bot, chestBlock.position.x, chestBlock.position.z, { range: 8, timeoutMs: 120000 }) } catch {} }
   if (bot.entity.position.distanceTo(chestBlock.position) > 3) {
+    // The bank lives INSIDE the hut - a plain goto can't plan through the door, so go straight
+    // through the UNIFIED navigator (its door pre-flight crosses in). Tight at-base budgets.
     try {
-      await gotoWithTimeout(bot, new goals.GoalNear(chestBlock.position.x, chestBlock.position.y, chestBlock.position.z, 2), 15000)
-    } catch (e) {
-      // the bank lives INSIDE the hut now - a plain goto can't plan through the door
-      const nav = require('./navigate.js')
-      await nav.navigateTo(bot, new goals.GoalNear(chestBlock.position.x, chestBlock.position.y, chestBlock.position.z, 2), { timeoutMs: 15000, deadlineMs: 35000, climb: false, budgets: { door: 2, pit: 1, water: 1, nudge: 1 }, label: 'bank' })
-    }
+      await navigate.navigateTo(bot, new goals.GoalNear(chestBlock.position.x, chestBlock.position.y, chestBlock.position.z, 2), { timeoutMs: 15000, deadlineMs: 35000, climb: false, budgets: { door: 2, pit: 0, nudge: 1, stepout: 1 }, label: 'bank' })
+    } catch {}
   }
 }
 
