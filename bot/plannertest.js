@@ -178,5 +178,40 @@ t('wooden_hoe from nothing chains log->planks->sticks->hoe (never unobtainable)'
   assert(!withLogs.tasks.some(t => t.type === 'gather'), 'has logs -> no gather, just craft: ' + withLogs.tasks.map(t => t.type + ':' + (t.item || t.output)).join(' > '))
 })
 
+// GEAR-UP CONVERGENCE (#19): a pass that MINED iron but wore no piece must count as
+// PROGRESS (banked iron survives death and counts next pass), so it must NOT feed the
+// fruitless back-off. The old score read the PACK, which the end-of-run autoBank empties,
+// so a productive mining pass read as zero progress and cooled itself off for ~28 min.
+t('gearupProgressed: mined+banked iron (no piece worn) counts as PROGRESS', () => {
+  const { gearupProgressed } = require('./planner.js')
+  // 4 bare slots throughout (wore nothing), total iron 0 -> 4 (mined+banked): PROGRESS
+  assert.strictEqual(gearupProgressed(4, 4, 0, 4), true, 'mining+banking iron must be progress')
+  // wore a piece (bare 4 -> 3) even with no net iron gain (spent it on the piece): PROGRESS
+  assert.strictEqual(gearupProgressed(4, 3, 0, 0), true, 'wearing a piece must be progress')
+  // GENUINELY fruitless: no piece worn AND no iron netted anywhere -> back-off may fire
+  assert.strictEqual(gearupProgressed(4, 4, 0, 0), false, 'no piece + no iron is fruitless')
+  // withdraw/deposit shuffling nets to zero on a TOTAL measure -> not spurious progress
+  assert.strictEqual(gearupProgressed(4, 4, 7, 7), false, 'flat total iron, no piece: not progress')
+})
+
+// BANKED IRON -> WITHDRAW+CRAFT, never re-gather (#19 short-circuit + Bug-3 verification).
+// Given a boots goal and enough banked iron, planProvision must CONSUME the banked ingots
+// (plan.used) and plan NO raw_iron gather and NO smelt - the reconcile path then withdraws
+// them. This is what makes "4 ingots in the chest -> free boots" work instead of mining anew.
+t('banked iron_ingot drives craft:iron_boots via plan.used (no re-gather, no smelt)', () => {
+  const provision = require('./provision.js')
+  const plan = provision.planProvision(mcData, { iron_boots: 1 }, { iron_ingot: 4 }, {})
+  assert.strictEqual(plan.used.iron_ingot, 4, 'must consume the 4 banked ingots, got ' + JSON.stringify(plan.used))
+  assert(!(plan.gathers && plan.gathers.raw_iron), 'must NOT re-gather raw iron: ' + JSON.stringify(plan.gathers))
+  assert.strictEqual((plan.smelts || []).length, 0, 'must NOT smelt when ingots are already banked')
+  const keys = plan.tasks.map(x => x.type + ':' + (x.item || x.output))
+  assert(keys.includes('craft:iron_boots'), 'must craft the boots: ' + keys.join(' > '))
+  // mixed banked stock (2 ingots + 2 raw) still credits BOTH toward the 4 needed (no over-mining)
+  const mixed = provision.planProvision(mcData, { iron_boots: 1 }, { iron_ingot: 2, raw_iron: 2 }, {})
+  assert.strictEqual(mixed.used.iron_ingot, 2, 'credits the 2 banked ingots')
+  assert.strictEqual(mixed.used.raw_iron, 2, 'credits the 2 banked raw iron (smelts them, not mines more)')
+  assert(!(mixed.gathers && mixed.gathers.raw_iron), 'no raw-iron gather when the 4 are already banked: ' + JSON.stringify(mixed.gathers))
+})
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall planner decision tests passed')
 process.exit(failures ? 1 : 0)

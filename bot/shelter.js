@@ -24,13 +24,29 @@ const UNDIGGABLE_RE = /^(bedrock|obsidian|crying_obsidian|barrier|reinforced_dee
 //   below2 - one deeper (becomes the pit floor). A fluid here floods the pit.
 //   sides  - the 4 blocks BESIDE `below` (same Y). A fluid touching the shaft wall floods
 //            the pit the instant the wall drops (the exact live drowning/entombment cause).
-// Returns true only when the column is diggable AND dry on all those faces.
-function shelterDiggable (below, below2, sides = []) {
+//   below3 - two deeper. AIR at BOTH below2 and below3 means the pit floor is a thin shelf
+//            over a CAVE - digging drops the bot >=2 blocks into the open cavern (the exposed
+//            dark-cave "shelter" this whole fix targets). below2-air over a SOLID below3 is the
+//            existing legit 3-deep geometry, so it stays allowed.
+// Returns true only when the column is diggable AND dry AND not a lid over a void.
+function shelterDiggable (below, below2, sides = [], below3 = null) {
   if (AIRISH(below)) return false            // nothing to dig into / already open
   if (FLUID_RE.test(below)) return false      // digging into lava/water
   if (UNDIGGABLE_RE.test(below)) return false // bedrock/obsidian/etc.
   if (below2 != null && FLUID_RE.test(below2)) return false // fluid one deeper -> floods
+  if (AIRISH(below2) && AIRISH(below3)) return false // thin shelf over a cave -> we'd fall in
   for (const s of sides) if (s != null && FLUID_RE.test(s)) return false // aquifer beside the shaft
+  return true
+}
+
+// Is a candidate torch-alcove pocket a COMPLETE seal? Inputs are the block NAMES of the pocket's
+// enclosing faces (floor, far wall, both side walls, ceiling). Every face must be a solid,
+// non-liquid, non-leaf, non-void block so that widening one cell for the torch does NOT open a
+// new hole in the sealed shelter. Pure so it's offline table-testable.
+const SOLID_FACE = n => n != null && !AIRISH(n) && !FLUID_RE.test(n) && !/_leaves$/.test(n)
+function alcoveSafe (faceNames = []) {
+  if (!faceNames.length) return false
+  for (const n of faceNames) if (!SOLID_FACE(n)) return false
   return true
 }
 
@@ -50,4 +66,4 @@ function rankByDistance (cells, from) {
   return cells.slice().sort((a, b) => Math.hypot(a.x - from.x, a.z - from.z) - Math.hypot(b.x - from.x, b.z - from.z))
 }
 
-module.exports = { AIRISH, FLUID_RE, UNDIGGABLE_RE, shelterDiggable, feetCellDry, rankByDistance }
+module.exports = { AIRISH, FLUID_RE, UNDIGGABLE_RE, shelterDiggable, feetCellDry, rankByDistance, alcoveSafe }

@@ -413,13 +413,25 @@ async function wearFromPack (bot) {
 // same order the old bootstrap converged on): boots(4) -> helmet(5) -> leggings(7) ->
 // chestplate(8) ingots.
 const IRON_PIECES = [
-  { item: 'iron_boots', slot: 'feet' },
-  { item: 'iron_helmet', slot: 'head' },
-  { item: 'iron_leggings', slot: 'legs' },
-  { item: 'iron_chestplate', slot: 'torso' }
+  { item: 'iron_boots', slot: 'feet', iron: 4 },
+  { item: 'iron_helmet', slot: 'head', iron: 5 },
+  { item: 'iron_leggings', slot: 'legs', iron: 7 },
+  { item: 'iron_chestplate', slot: 'torso', iron: 8 }
 ]
 
 const hasSword = bot => (bot.inventory ? bot.inventory.items() : []).some(i => /_sword$/.test(i.name))
+
+// PURE (offline-testable): did a gear-up pass make progress? YES if it wore a new piece
+// (bareAfter < bareBefore) OR netted iron ANYWHERE (pack+bank, in ingot-equivalents).
+// Iron is measured on TOTAL holdings so a productive MINING pass that BANKS its iron
+// still counts as progress - the old score read the PACK, which the end-of-run autoBank
+// empties, so a pass that mined iron read as zero progress and wrongly fed the back-off.
+// withdraw/deposit shuffling nets to zero on a total measure; wearing (which spends iron)
+// is already caught by the bare() term. Only a genuinely fruitless pass (no piece, no new
+// iron) returns false - which is exactly when the convergence back-off should fire.
+function gearupProgressed (bareBefore, bareAfter, ironBefore, ironAfter) {
+  return bareAfter < bareBefore || ironAfter > ironBefore
+}
 
 // GEAR UP, the planner way: a full iron set from ANY start (naked+toolless included),
 // but INCREMENTAL - cheapest piece first, each as its OWN sub-goal, so the bot gets
@@ -447,16 +459,29 @@ async function gearUp (bot, opts = {}) {
   await wearFromPack(bot) // free protection first - never mine for what the pack holds
   const bare = () => IRON_PIECES.filter(p => !wornBySlot(bot)[p.slot])
   if (!bare().length) return { progressed: false, msg: 'already armored in every slot' }
+  // TOTAL (pack+bank) iron in ingot-equivalents (raw smelts 1:1). ONE honest measure used
+  // for both the banked-iron short-circuit (below) and the progress score (at the end) -
+  // reads pack + verified chests near the anchor.
+  const ironUnits = async () => {
+    try { const t = await resources.totalCounts(bot, { near: at }); return (t.iron_ingot || 0) + (t.raw_iron || 0) } catch { return 0 }
+  }
+  const ironBefore = await ironUnits()
+  // SHORT-CIRCUIT the back-off when iron is ALREADY BANKED. The convergence back-off exists
+  // for iron-POOR sites (repeated no-iron grinds); it must NOT strand iron that is already
+  // in the bank/pack. If we hold enough iron for the cheapest bare piece, BYPASS the
+  // cooldown and run the normal reconcile path (withdraw banked iron -> smelt raw if needed
+  // -> craft -> wear) so free armor gets worn instead of sitting for ~28 min.
+  const cheapestBare = bare()[0] // IRON_PIECES is cheapest-first, so bare()[0] is the cheapest
+  const bankedEnough = !!cheapestBare && ironBefore >= cheapestBare.iron
   // Cross-run back-off parity with the old path: a genuinely fruitless RUN still cools
   // off (the planner's in-run strikes are minutes and re-route; this guards run-level churn).
   const gb = provision.gearupState && provision.gearupState()
-  if (!opts.force && gb && gb.until > Date.now()) {
+  if (!opts.force && !bankedEnough && gb && gb.until > Date.now()) {
     const min = Math.max(1, Math.round((gb.until - Date.now()) / 60000))
     return { progressed: false, msg: `iron grind cooling off after ${gb.fails} fruitless tries - retrying in ~${min} min` }
   }
-  const ironScore = () => { const c = provision.inventoryCounts(bot); return (c.raw_iron || 0) + (c.iron_ingot || 0) * 2 }
+  if (bankedEnough && gb && gb.until > Date.now()) dbg(`gearUp: ${ironBefore} iron already banked - bypassing back-off to make ${cheapestBare.item}`)
   const bareBefore = bare().length
-  const ironBefore = ironScore()
   // ONE overall deadline shared across all sub-goals, so 4 pieces can't each burn a full
   // 15 min - total naked-exposure stays bounded like the single-goal version was.
   const overallDeadline = Date.now() + (opts.deadlineMs || 15 * 60000)
@@ -511,7 +536,12 @@ async function gearUp (bot, opts = {}) {
     if ((c.raw_iron || 0) + (c.iron_ingot || 0) > 0) await resources.autoBank(bot, { near: at, keepDirt: opts.keepDirt || 16, isStopped })
   } catch {}
   if (opts.restoreMovements) { try { opts.restoreMovements() } catch {} }
-  const progressed = bare().length < bareBefore || ironScore() > ironBefore
+  // PROGRESS on TOTAL holdings, measured AFTER banking: a pass that mined iron and banked
+  // it (line above) still gained iron in the bank, so it counts as progress and does NOT
+  // feed the fruitless back-off. Only a pass that wore nothing AND netted no iron anywhere
+  // is fruitless. (Old bug: pack-only score read 0 right after autoBank -> false back-off.)
+  const ironAfter = await ironUnits()
+  const progressed = gearupProgressed(bareBefore, bare().length, ironBefore, ironAfter)
   try { provision.gearupResult && provision.gearupResult(progressed) } catch {}
   const bareNow = bare().length
   const msg = !bareNow ? 'full set on'
@@ -521,4 +551,4 @@ async function gearUp (bot, opts = {}) {
   return { progressed, msg }
 }
 
-module.exports = { decide, runGoal, gearUp, relocate, regroupForCraft, shouldRegroupForCraft, packHasToolFor, taskKey, setDebugSink }
+module.exports = { decide, runGoal, gearUp, gearupProgressed, relocate, regroupForCraft, shouldRegroupForCraft, packHasToolFor, taskKey, setDebugSink }

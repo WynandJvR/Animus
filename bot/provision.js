@@ -1311,11 +1311,11 @@ function rememberMine (entry) {
   saveWorldMem()
   return rec
 }
-function recallMine (bot, near, maxDist) {
+function recallMine (bot, near, maxDist, opts = {}) {
   const now = Date.now()
   let best = null; let bd = Infinity
   for (const e of loadMines()) {
-    if (!mining.mineReusable(e, near, { maxDist, now })) continue
+    if (!mining.mineReusable(e, near, { maxDist, now, ...opts })) continue
     const d = Math.hypot(e.x - near.x, e.z - near.z); if (d < bd) { bd = d; best = e }
   }
   return best
@@ -1434,7 +1434,10 @@ async function branchMine (bot, item, count, opts = {}) {
   // cave terrain (a fresh descent ate the entire excursion, gathered:0). If a reachable mine
   // exists, walk in and pick up mining where we left off; only dig fresh if it's gone/flooded.
   if (persist && Math.floor(bot.entity.position.y) > targetY + 1 && !isStopped()) {
-    const remembered = recallMine(bot, bot.entity.position, parseInt(process.env.MINE_REUSE_DIST || '80', 10))
+    const depthGate = process.env.MINE_REUSE_DEPTH_GATE !== '0'
+    const remembered = recallMine(bot, bot.entity.position,
+      parseInt(process.env.MINE_REUSE_DIST || '80', 10),
+      depthGate ? { maxLevelY: minIronY } : {})
     if (remembered) {
       if (opts.say) say('heading back to my mine to keep digging')
       if (await enterExistingMine(bot, remembered, { isStopped })) {
@@ -1586,6 +1589,14 @@ async function grabNearbyOre (bot, oreRe, r, max, { isStopped = () => false } = 
     if (isStopped() || got >= max) break
     const b = bot.blockAt(p)
     if (!b || !canBreakNaturally(b)) continue
+    // The 6 face-neighbour names, read ONCE for the exposure skip + the fluid safety probe.
+    const nb = [p.offset(1, 0, 0), p.offset(-1, 0, 0), p.offset(0, 0, 1), p.offset(0, 0, -1), p.offset(0, 1, 0), p.offset(0, -1, 0)]
+      .map(q => { const bb = bot.blockAt(q); return bb ? bb.name : null })
+    // EXPOSURE: skip ore embedded in solid rock rather than goto'ing at it (the ~7-9 noPath
+    // bursts). An open face means it's actually reachable by the mining profile.
+    if (!mining.faceExposed(nb)) continue
+    // SAFETY (grabNearbyOre lacked it): don't crack an aquifer/lava face onto ourselves.
+    if (mining.digExposureHazard(nb) !== 'ok') continue
     try {
       if (bot.entity.position.distanceTo(b.position) > 4) await gotoWithTimeout(bot, new goals.GoalNear(p.x, p.y, p.z, 2), 6000)
       const tool = toolForBlock(bot, b.name)
@@ -1793,9 +1804,10 @@ async function findDiggableDryCell (bot, opts = {}) {
     const feet = gp.offset(0, 1, 0); const head = gp.offset(0, 2, 0)
     // standable + dry to STAND on (no water in the feet/head cell or its horizontal neighbours)
     if (!shelterSite.feetCellDry(nameAt(feet), nameAt(head), SIDES.map(([dx, dz]) => nameAt(feet.offset(dx, 0, dz))))) continue
-    // a safe pit can be dug straight down from here (solid, no fluid below/beside the shaft)
-    const below = nameAt(gp); const below2 = nameAt(gp.offset(0, -1, 0))
-    if (!shelterSite.shelterDiggable(below, below2, SIDES.map(([dx, dz]) => nameAt(gp.offset(dx, 0, dz))))) continue
+    // a safe pit can be dug straight down from here (solid, no fluid below/beside the shaft,
+    // and not a thin shelf over a cave - below3 lets shelterDiggable reject a void two deep)
+    const below = nameAt(gp); const below2 = nameAt(gp.offset(0, -1, 0)); const below3 = nameAt(gp.offset(0, -2, 0))
+    if (!shelterSite.shelterDiggable(below, below2, SIDES.map(([dx, dz]) => nameAt(gp.offset(dx, 0, dz))), below3)) continue
     // must be real natural ground the anti-grief dig will actually break (not a player block)
     const gb = bot.blockAt(gp); if (gb && !canBreakNaturally(gb)) continue
     // never relocate the pit onto our own hut apron (defaces the doorstep)
@@ -1925,6 +1937,96 @@ function inBuildZone (x, z) { return !!buildZone && x >= buildZone.x1 && x <= bu
 // sealed pit survives a creeper - it can't reach you underground - where fleeing didn't.
 // Deterministic + body-side (the brain is HELD during builds). Sets isSheltering() so the
 // flee/defend reflexes stand down instead of dragging us off. Returns true if it sheltered.
+// Seal a dug night-pit into a mob-TIGHT box. WALLS FIRST, then the cap - the order is the
+// whole fix: in open-cave geometry the cap cell is mid-air (all neighbours air) so a cap-first
+// placeAt fails "no solid neighbour" and the bot squats in an OPEN hole. Building the head ring
+// FIRST gives the cap solid faces to place against. Used by BOTH the fresh-dig and bunker-reuse
+// paths so a reused pit is RE-WALLED, not merely re-lidded. `interior` = { feet, head,
+// alcoveCell } - cells to KEEP OPEN (never wall them, or the torch alcove gets bricked back in).
+// Returns { capped, sideHoles, capPos } (capPos = the cell we actually capped, for breakout).
+async function sealShaft (bot, interior = {}) {
+  const CAP_RE = /terracotta|dirt|cobble|stone|gravel|sand|netherrack|deepslate|tuff|granite|diorite|andesite|clay|mud|_planks$|_log$|_concrete/
+  const SIDES = [[1, 0], [-1, 0], [0, 1], [0, -1]]
+  const feet = interior.feet || bot.entity.position.floored()
+  const keep = [interior.feet, interior.head, interior.alcoveCell].filter(Boolean)
+  const isInterior = c => keep.some(m => m.x === c.x && m.y === c.y && m.z === c.z)
+  // 1) WALLS FIRST: dy=0 ring (each cell places against the solid floor under it) THEN dy=1
+  //    ring (each places against the dy=0 block just laid) - this ordering is what makes cave
+  //    geometry sealable. Liquid counts as a hole (AIRISH misses water). Skip interior cells
+  //    (the alcove) so we never wall the torch back in.
+  let sideHoles = 0
+  for (const dy of [0, 1]) {
+    for (const [dx, dz] of SIDES) {
+      const cell = feet.offset(dx, dy, dz)
+      if (isInterior(cell)) continue
+      const b = bot.blockAt(cell)
+      if (b && (AIRISH(b.name) || /lava|water/.test(b.name))) {
+        if (await placeAt(bot, cell, CAP_RE)) dbg('shelter: walled a side hole at ' + cell.toString())
+        else { sideHoles++; dbg('shelter: side hole at ' + cell.toString() + ' UNSEALED (' + b.name + ') - ' + (placeAt.lastFail || '?')) }
+      }
+    }
+  }
+  // 2) CAP SECOND - the head ring now gives the cap cell solid neighbours so placeAt succeeds.
+  let capPos = bot.entity.position.floored().offset(0, 2, 0)
+  let capped = await placeAt(bot, capPos, CAP_RE)
+  if (!capped) dbg('shelter: cap attempt 1 failed - ' + (placeAt.lastFail || '?'))
+  // VERIFY the cap landed (placement can miss from inside a 1x1 pit) and retry once - an
+  // uncapped pit is a mob funnel (they fall in ON TOP of the bot, seen live).
+  if (!capped || AIRISH((bot.blockAt(capPos) || {}).name || 'air')) {
+    await new Promise(r => setTimeout(r, 300))
+    capped = await placeAt(bot, capPos, CAP_RE)
+    if (!capped) dbg('shelter: cap attempt 2 failed - ' + (placeAt.lastFail || '?'))
+  }
+  // Last resort: dig one deeper and cap one lower - a 3-deep shaft with a lid at -2 still seals
+  // (head keeps a 1-block air gap under the cap), and the deeper shaft gives a wall ring to place
+  // against that some placements need.
+  if (!capped || AIRISH((bot.blockAt(capPos) || {}).name || 'air')) {
+    const f = bot.entity.position.floored()
+    const below = bot.blockAt(f.offset(0, -1, 0))
+    const below2 = bot.blockAt(f.offset(0, -2, 0))
+    if (below && !AIRISH(below.name) && !/lava|water/.test(below.name) && canBreakNaturally(below) &&
+        !(below2 && /lava|water/.test(below2.name))) {
+      try {
+        await bot.dig(below); await new Promise(r => setTimeout(r, 300)); await collectDrops(bot, 3)
+        capPos = bot.entity.position.floored().offset(0, 2, 0)
+        capped = await placeAt(bot, capPos, CAP_RE)
+        if (!capped) dbg('shelter: deep-cap attempt failed - ' + (placeAt.lastFail || '?'))
+      } catch (e) { dbg('shelter: deeper dig failed (' + e.message + ')') }
+    }
+  }
+  return { capped, sideHoles, capPos }
+}
+
+// Widen ONE floor-level neighbour of `feet` into a torch alcove so a sealed pit can be LIT.
+// PROBE everything first (world re-reads): the candidate must be natural + breakable, and its
+// floor, far wall, both side faces AND ceiling must all be solid non-liquid (alcoveSafe) with no
+// liquid on any of its 6 faces - so cutting the one cell keeps the box a complete seal. ONE
+// attempt, first candidate that passes; returns the dug cell Vec3 or null. The ONLY new dig in
+// the shelter flow, gated by canBreakNaturally (anti-grief) + the liquid probes.
+async function digTorchAlcove (bot, feet) {
+  const SIDES = [[1, 0], [-1, 0], [0, 1], [0, -1]]
+  const N6 = [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0], [0, -1, 0]]
+  for (const [dx, dz] of SIDES) {
+    const cell = feet.offset(dx, 0, dz)
+    const cb = bot.blockAt(cell)
+    if (!cb || AIRISH(cb.name) || /lava|water/.test(cb.name)) continue // must be a block we open INTO
+    if (!canBreakNaturally(cb)) continue // anti-grief: never cut a player block
+    if (bot.canDigBlock && !bot.canDigBlock(cb)) continue
+    const floor = bot.blockAt(cell.offset(0, -1, 0))
+    const farWall = bot.blockAt(cell.offset(dx, 0, dz))
+    const perp = dx !== 0 ? [[0, 0, 1], [0, 0, -1]] : [[1, 0, 0], [-1, 0, 0]]
+    const side1 = bot.blockAt(cell.offset(perp[0][0], perp[0][1], perp[0][2]))
+    const side2 = bot.blockAt(cell.offset(perp[1][0], perp[1][1], perp[1][2]))
+    const ceil = bot.blockAt(cell.offset(0, 1, 0))
+    if (!shelterSite.alcoveSafe([floor, farWall, side1, side2, ceil].map(b => (b ? b.name : null)))) continue
+    if (N6.some(([ox, oy, oz]) => { const b = bot.blockAt(cell.offset(ox, oy, oz)); return b && /lava|water/.test(b.name) })) continue // no liquid touching the pocket
+    const tool = toolForBlock(bot, cb.name)
+    if (tool) await bot.equip(tool, 'hand').catch(() => {})
+    try { await bot.dig(cb); await collectDrops(bot, 3); dbg('shelter: opened a torch alcove at ' + cell.toString()); return cell } catch (e) { dbg('shelter: alcove dig failed (' + e.message + ')'); return null }
+  }
+  return null
+}
+
 async function digInForNight (bot, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const say = opts.say || (() => {})
@@ -1941,6 +2043,10 @@ async function digInForNight (bot, opts = {}) {
   _sheltering = true
   try {
     bot.pathfinder && bot.pathfinder.setGoal(null)
+    // LIGHT THE SHELTER: try to have a couple of torches ready (free from coal/charcoal mine
+    // bycatch + carried sticks; silent no-op if we have neither). A lit sealed alcove stops
+    // mob spawns through a long night - the missing half of "an actual safe space, not a hole".
+    try { await ensureTorches(bot, 2) } catch {}
     // IN WATER? Get ashore FIRST - digging attempts from a water column all fail while
     // the bot drowns through the retry carousel (watched it die that way on the test
     // server). If we can't reach land, say so honestly instead of pretending to shelter.
@@ -2014,19 +2120,25 @@ async function digInForNight (bot, opts = {}) {
     }
     // REUSE MY BUNKER: four nights of fresh digs at one spot, each side-sealing against
     // the previous night's holes, ENTOMBED the bot in a hillside (live - needed a rescue
-    // agent). If a registered shelter is within 12, go sit in it and re-cap instead.
-    const oldPit = recallInfra('shelter', bot.entity.position, 12)
+    // agent). If a registered shelter is within 24, go sit in it and re-SEAL instead (24 not
+    // 12: a branch-mine head drifts, and a bounded goto to a known bunker beats a fresh dig).
+    const oldPit = recallInfra('shelter', bot.entity.position, 24)
     if (oldPit) {
       dbg('shelter: reusing my bunker at ' + oldPit.x + ',' + oldPit.y + ',' + oldPit.z)
       try { await gotoWithTimeout(bot, new goals.GoalBlock(oldPit.x, oldPit.y, oldPit.z), 15000) } catch {}
       const here = bot.entity.position.floored()
       if (Math.abs(here.x - oldPit.x) <= 1 && Math.abs(here.z - oldPit.z) <= 1 && here.y <= oldPit.y + 1) {
-        // we're in the old hole - just seal the lid and wait like a normal night
-        const capPos0 = bot.entity.position.floored().offset(0, 2, 0)
-        const CAP0 = /terracotta|dirt|cobble|stone|gravel|sand|netherrack|deepslate|tuff|granite|diorite|andesite|clay|mud|_planks$|_log$|_concrete/
-        let recapped = await placeAt(bot, capPos0, CAP0)
-        if (!recapped) { await new Promise(r => setTimeout(r, 300)); recapped = await placeAt(bot, capPos0, CAP0) }
-        dbg('shelter: bunker re-entered, lid ' + (recapped ? 'SEALED' : 'OPEN'))
+        // we're in the old hole - RE-SEAL it (walls too, not just the lid: a reused pit can have
+        // caved-in / re-opened sides), light a torch alcove if we carry one, then wait the night.
+        const feet0 = bot.entity.position.floored()
+        const head0 = feet0.offset(0, 1, 0)
+        let alcove0 = null
+        if (countItem(bot, 'torch') > 0) { try { alcove0 = await digTorchAlcove(bot, feet0) } catch {} }
+        const seal0 = await sealShaft(bot, { feet: feet0, head: head0, alcoveCell: alcove0 })
+        if (alcove0) { try { await placeTorch(bot) } catch {} }
+        const capPos0 = seal0.capPos
+        const recapped = seal0.capped && !seal0.sideHoles
+        dbg('shelter: bunker re-entered, ' + (recapped ? 'RE-SEALED' : 'OPEN (leaky)') + (seal0.sideHoles ? ' ' + seal0.sideHoles + ' side(s)' : ''))
         say(recapped ? 'back in my bunker for the night' : 'in my bunker (lid open)')
         const dl = Date.now() + (recapped ? 600000 : 120000)
         const hpX = bot.health || 20
@@ -2103,6 +2215,13 @@ async function digInForNight (bot, opts = {}) {
         const below2 = bot.blockAt(feet.offset(0, -2, 0))
         if (!below || AIRISH(below.name) || /lava|water/.test(below.name) || !canBreakNaturally(below)) { dbg('shelter: dig blocked at ' + i + ' (' + (below ? below.name : 'unloaded') + ')'); break }
         if (below2 && /lava|water/.test(below2.name)) { dbg('shelter: liquid 2 below - not digging'); break }
+        // VOID BELOW: if BOTH below2 AND below3 are airish we're on a thin shelf over a CAVE -
+        // digging `below` drops us >=2 blocks into the open cavern (the exposed dark-cave death
+        // this fix targets). below2-air over SOLID below3 is legit 3-deep geometry -> allowed.
+        // Break into the relocate machinery to find real ground instead of falling in.
+        const below3 = bot.blockAt(feet.offset(0, -3, 0))
+        const airish = b => !b || AIRISH(b.name)
+        if (airish(below2) && airish(below3)) { dbg('shelter: void 2+ below (thin shelf over a cave) - not digging, relocating'); break }
         // NEVER open a cell whose SIDE touches liquid - an aquifer beside the shaft floods
         // the pit the instant the wall drops (drowned at 4hp in its own sealed pit, live).
         let sideLiquid = null
@@ -2138,55 +2257,20 @@ async function digInForNight (bot, opts = {}) {
     if (dug < 1) { dbg('shelter: NO-OP (dug 0 after ' + RELOCATE_TRIES + ' relocation tries) - caller must do something else'); return false } // genuinely nowhere diggable+dry nearby
     if (Math.floor(bot.entity.position.y) >= surfaceY) { dbg('shelter: dug ' + dug + ' but NEVER FELL IN (still at surface) - aborting, not pretending'); return false }
     await collectDrops(bot, 3)
-    // 2) cap the opening above the head with any spare block
-    const capPos = bot.entity.position.floored().offset(0, 2, 0)
-    // cap with ANY common terrain/building block we're holding (whatever the biome gave us
-    // when we dug in - terracotta, deepslate, tuff, etc. all count, not just dirt/cobble).
-    const CAP_RE = /terracotta|dirt|cobble|stone|gravel|sand|netherrack|deepslate|tuff|granite|diorite|andesite|clay|mud|_planks$|_log$|_concrete/
-    let capped = await placeAt(bot, capPos, CAP_RE)
-    if (!capped) dbg('shelter: cap attempt 1 failed - ' + (placeAt.lastFail || '?'))
-    // VERIFY the cap landed (placement can miss from inside a 1x1 pit) and retry once -
-    // an uncapped pit is a mob funnel: they fall in ON TOP of the bot (seen live).
-    if (!capped || AIRISH((bot.blockAt(capPos) || {}).name || 'air')) {
-      await new Promise(r => setTimeout(r, 300))
-      capped = await placeAt(bot, capPos, CAP_RE)
-      if (!capped) dbg('shelter: cap attempt 2 failed - ' + (placeAt.lastFail || '?'))
-    }
-    // Last resort: dig one deeper and try the cap one lower - a 3-deep shaft with a lid at
-    // -2 still seals (head has a 1-block air gap under the cap). Geometry matters: from the
-    // bottom of a 2-deep shaft the cap cell's solid neighbours sit at surface level, which
-    // some placements reject; one deeper gives a wall ring at head+1 to place against.
-    if (!capped || AIRISH((bot.blockAt(capPos) || {}).name || 'air')) {
-      const feet = bot.entity.position.floored()
-      const below = bot.blockAt(feet.offset(0, -1, 0))
-      const below2 = bot.blockAt(feet.offset(0, -2, 0))
-      if (below && !AIRISH(below.name) && !/lava|water/.test(below.name) && canBreakNaturally(below) &&
-          !(below2 && /lava|water/.test(below2.name))) {
-        try {
-          await bot.dig(below); await new Promise(r => setTimeout(r, 300)); await collectDrops(bot, 3)
-          const capPos2 = bot.entity.position.floored().offset(0, 2, 0)
-          capped = await placeAt(bot, capPos2, CAP_RE)
-          if (!capped) dbg('shelter: deep-cap attempt failed - ' + (placeAt.lastFail || '?'))
-        } catch (e) { dbg('shelter: deeper dig failed (' + e.message + ')') }
-      }
-    }
-    // SEAL THE SIDES TOO: digging beside a cave leaves a pit wall OPEN into it - a lid
-    // over a doorway (operator caught it live: "open on one side, dug into a cave").
-    // Wall off every airish horizontal neighbour of both body cells with spare blocks.
-    let sideHoles = 0
-    for (const dy of [0, 1]) {
-      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-        const cell = bot.entity.position.floored().offset(dx, dy, dz)
-        const b = bot.blockAt(cell)
-        // liquid counts as a hole: AIRISH misses water, so an aquifer wall was silently
-        // skipped and flooded the sealed pit (drowning death, live)
-        if (b && (AIRISH(b.name) || /lava|water/.test(b.name))) {
-          if (await placeAt(bot, cell, CAP_RE)) dbg('shelter: walled a side hole at ' + cell.toString())
-          else { sideHoles++; dbg('shelter: side hole at ' + cell.toString() + ' UNSEALED (' + b.name + ') - ' + (placeAt.lastFail || '?')) }
-        }
-      }
-    }
-    dbg('shelter: pit ' + (capped ? 'SEALED' : 'OPEN (cap failed - mob funnel risk)') + (sideHoles ? ' with ' + sideHoles + ' open side(s)' : ''))
+    // LIT ALCOVE: BEFORE sealing, if we carry a torch, widen ONE floor-level neighbour into a
+    // torch alcove (probed for solidity + dryness) so the sealed box is LIT - no mob spawns
+    // through a long night. Skipped on any probe fail / no torch (a sealed 1x1 needs no light).
+    const feet = bot.entity.position.floored()
+    const head = feet.offset(0, 1, 0)
+    let alcoveCell = null
+    if (countItem(bot, 'torch') > 0) { try { alcoveCell = await digTorchAlcove(bot, feet) } catch {} }
+    // WALLS FIRST, THEN CAP (sealShaft) - the head ring gives the cap solid faces so it seals in
+    // open-cave geometry, and the alcove cell is kept OPEN (not walled) for the torch.
+    const { capped, sideHoles, capPos } = await sealShaft(bot, { feet, head, alcoveCell })
+    // Light it: after sealing, the alcove is the sole open floor-level neighbour, so placeTorch
+    // lands the torch there (not against some other still-open side).
+    if (alcoveCell) { try { await placeTorch(bot) } catch {} }
+    dbg('shelter: pit ' + (capped ? 'SEALED' : 'OPEN (cap failed - mob funnel risk)') + (sideHoles ? ' with ' + sideHoles + ' open side(s)' : '') + (alcoveCell ? ' (lit alcove)' : ''))
     say(capped ? 'holed up till it\'s safe' : 'ducked into a hole till it\'s safe')
     // 3) wait until DAY and no hostile near, or a hard timeout (~one full night). An OPEN
     // pit is NOT a shelter - don't squat in a mob funnel for 10 minutes: short deadline,
@@ -3632,10 +3716,32 @@ function survivalState (bot) {
   let threatDist = null
   let creeperDist = null // tracked SEPARATELY: a creeper triggers avoidance at a longer range
   if (me) {
+    // LOS/reachability gate: a hostile walled off behind solid rock (deep in a cave, on the
+    // far side of a shaft wall) is NOT a live progress-block - discount it so a fully-enclosed
+    // mob doesn't freeze mining/build forever. Close floor (<=5b) ALWAYS counts (may be right
+    // above/below or breaking through); the raycast only runs in the 5..16.5b band so far-mob
+    // values stay bit-identical to before. THREAT_LOS=0 disables (blocked stays false).
+    const losOn = process.env.THREAT_LOS !== '0'
+    const losFloor = parseInt(process.env.THREAT_LOS_FLOOR || '5', 10)
+    let los = null
+    const eye = me.offset(0, (bot.entity && bot.entity.height) || 1.62, 0)
+    const isSolid = (x, y, z) => { const b = bot.blockAt(new Vec3(x, y, z)); return !!(b && b.boundingBox === 'block' && !AIRISH(b.name)) }
     for (const e of Object.values(bot.entities || {})) {
       if (!e || !e.position || (e.type !== 'mob' && e.type !== 'hostile')) continue
       const name = (e.name || '').toLowerCase()
       const d = e.position.distanceTo(me)
+      // occlusion: BOTH feet-center and head rays must be blocked to discount (conservative
+      // vs 1-block gaps). FAIL-OPEN: any error leaves blocked=false so the mob counts.
+      let blocked = false
+      if (losOn && d > losFloor && d <= 16.5) {
+        try {
+          if (!los) los = require('./los.js')
+          const feet = los.lineBlocked(eye, e.position.offset(0, 0.5, 0), isSolid)
+          const head = feet ? los.lineBlocked(eye, e.position.offset(0, (e.height || 1.6) - 0.1, 0), isSolid) : false
+          blocked = feet && head
+        } catch { blocked = false }
+      }
+      if (!arbiter.hostileThreatens(d, blocked, { floor: losFloor })) continue
       if (/creeper/.test(name) && (creeperDist == null || d < creeperDist)) creeperDist = d
       if (!SHELTER_HOSTILE.test(name)) continue
       if (threatDist == null || d < threatDist) threatDist = d
@@ -3965,11 +4071,28 @@ async function famineHold (bot, { isStopped = () => false, say = () => {} } = {}
   const indoors = !!insideOwnStructure(bot)
   dbg('famineHold: holding ' + (indoors ? 'inside my hut' : 'where i am') + ' (food=' + bot.food + ')')
   say('waiting it out at home - too weak to work safely')
-  const dl = Date.now() + (indoors ? 480000 : 180000)
+  // S1 HOTFIX (REDESIGN §1.1 F2 / §5 R5 precursor): the old 480s indoor sit was a sanctioned
+  // 8-minute NO-OP - it never re-read the bank and waited on food spontaneously materializing.
+  // BOUND the hold hard (90s), RE-OPEN THE PANTRY on every re-eval (a stale cache reported the
+  // chest empty for 11h while the bot starved AT it - live), and prefer BED-SLEEP toward dawn as
+  // a wake that provably occurs. On expiry the caller / crisis reflex re-runs the whole secureFood
+  // chain (which now re-checks graves, bank, hunt...). FAMINE_HOLD_MS overrides; S1_HOTFIX=0 rolls
+  // back to the old 480s/180s no-op.
+  const s1 = process.env.S1_HOTFIX !== '0'
+  const dl = Date.now() + (s1 ? Number(process.env.FAMINE_HOLD_MS || 90000) : (indoors ? 480000 : 180000))
+  const near = (bot.entity && bot.entity.position) || target || bed
   while (Date.now() < dl && !isStopped()) {
     if (foodCount(bot) > 0 || (bot.food ?? 0) > 4) break
+    // RE-CHECK THE BANK each pass (FORCE a fresh chest read): banked food a stale cache hid - or
+    // food an operator/courier just restocked - is the fastest exit from the hold. Then eat it.
+    if (s1) {
+      try { const got = await require('./resources.js').ensureFood(bot, { near, threshold: 20, minPack: 1, maxDist: 64, forceFresh: true }); if (got) await eatUp(bot) } catch (e) { dbg('famineHold: bank re-check failed (' + e.message + ')') }
+      if (foodCount(bot) > 0 || (bot.food ?? 0) > 4) break
+    }
     // an animal wandered into range -> release the hold, the chain re-runs
     if (Object.values(bot.entities || {}).some(e => e && e.position && FOOD_ANIMALS.test((e.name || '').toLowerCase()) && e.position.distanceTo(bot.entity.position) <= 24)) break
+    // NIGHT -> sleep to dawn: a NAMED wake that provably occurs, and it skips the dangerous dark
+    // (starvation stops at half a heart indoors, provision.js: a slept night at low food survives).
     if (isNight(bot) && bed && Math.hypot(bed.x - bot.entity.position.x, bed.z - bot.entity.position.z) <= 8) { try { await sleepInBedHere(bot, { say, isStopped }) } catch {} }
     await new Promise(r => setTimeout(r, 5000))
   }
@@ -4543,7 +4666,17 @@ async function gatherLoop (bot, item, count, opts = {}) {
     await breathe()
     if ((bot.oxygenLevel ?? 20) < 4) throw new Error('too deep underwater - surfacing') // never drown for a block
     if (bot.entity.position.distanceTo(blk.position) > 4.2) {
-      await gotoWithTimeout(bot, new goals.GoalNear(blk.position.x, blk.position.y, blk.position.z, 2), 15000)
+      // Budget 15000->8000: a reachable ore is walked to in well under 8s; the extra 7s was
+      // pure standing-still on an UNPATHABLE spot (exposure-filtered now, but a face can seal
+      // between scan and dig). On a timeout/no-path failure BLACKLIST the spot immediately
+      // (failed=2) - the 2-try allowance is for transient dig failures, not "no route exists",
+      // and retrying a doomed goto is exactly the ~50s/block churn we're killing.
+      try {
+        await gotoWithTimeout(bot, new goals.GoalNear(blk.position.x, blk.position.y, blk.position.z, 2), 8000)
+      } catch (e) {
+        if (/timed out|no ?path/i.test(e && e.message)) failed.set(pkey(blk.position), 2)
+        throw e
+      }
     }
     if (bot.entity.position.distanceTo(blk.position) > 5.5) throw new Error('out of reach')
     const tool = toolForBlock(bot, blk.name)
@@ -4720,10 +4853,18 @@ async function gatherLoop (bot, item, count, opts = {}) {
         if (isLogGather) { const a = bot.blockAt(p.offset(0, 1, 0)); return !(a && /water/i.test(a.name)) }
         const nb = [p.offset(1, 0, 0), p.offset(-1, 0, 0), p.offset(0, 0, 1), p.offset(0, 0, -1), p.offset(0, 1, 0), p.offset(0, -1, 0)]
           .map(q => { const b = bot.blockAt(q); return b ? b.name : null })
-        return mining.digExposureHazard(nb) === 'ok'
+        if (mining.digExposureHazard(nb) !== 'ok') return false
+        // EXPOSURE (the mining-throughput root fix): only target ore with an open face. Ore
+        // EMBEDDED in solid rock is unreachable by the anti-grief mining profile, so goto'ing
+        // at it stands still until a silent timeout (~1 block/50s churn). Embedded ore is
+        // skipped here and falls through to branchMine's organized descent. Reuses the 6
+        // neighbour names already read for the fluid probe above - no extra world reads.
+        return mining.faceExposed(nb)
       })
-      // Don't chase stone/ore deep below the surface (cave-descent stranding).
-      .filter(p => !belowCap(p.y))
+      // Don't chase stone/ore deep below the surface (cave-descent stranding). AT DEPTH, allow
+      // same-level tunnel-wall ore (>= feetY-1) so a deep branch-mine can still work the walls
+      // it exposes; STRIP_FLOOR still governs digging DOWN, and candidates never sit above feet.
+      .filter(p => !belowCap(p.y) || (deepOre && p.y >= feetY - 1))
       // ANTI-GRIEF: logs must be NATURAL trees (never a village house / log build); every
       // OTHER gather (stone/dirt/sand/...) must not be right next to a player structure, so a
       // cobble/dirt run near a base can't dismantle a wall or crater a yard.
@@ -4757,6 +4898,15 @@ async function gatherLoop (bot, item, count, opts = {}) {
     if (feetY < surfaceY - 1) {
       const level = candidates.filter(p => p.y >= feetY && p.y <= feetY + 2)
       if (level.length) candidates = level
+    }
+    // AT DEPTH, don't burn the budget scratch-pathing far cave-wall ore. When we're already
+    // down a mine and every exposed candidate is >~16b away, drop them so the no-target route
+    // below RE-ENTERS branchMine (which skips the descent when already at level and continues
+    // its persisted corridor from the tip). branchTries/MAX_STRIP/deadline bound the re-entries.
+    if (deepOre && candidates.length &&
+        !mining.scratchWorthy(feetY, surfaceY, candidates.map(p => Math.hypot(p.x - bot.entity.position.x, p.z - bot.entity.position.z)))) {
+      dbg('  gather at-depth: nearest exposed ore >16b - back to branchMine instead of scratch-pathing')
+      candidates = []
     }
     // DEEP-FIRST: at/near the surface with only sparse-tail iron visible (or none), don't
     // scratch the unreachable surface candidate - go STRAIGHT to the organized branch mine.

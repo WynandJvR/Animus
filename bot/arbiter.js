@@ -152,11 +152,22 @@ function jobSurvivalNeed (state, opts = {}) {
 // May a PROGRESS job run right now? True iff no SURVIVE need is unmet.
 function jobMayProgress (state, opts = {}) { return jobSurvivalNeed(state, opts) == null }
 
+// PURE: does a hostile at `dist` blocks count as a live threat, given whether the straight
+// eye-line to it is blocked by solid rock? Close floor ALWAYS counts (may be right above/below
+// or about to break through); beyond it, a fully walled-off mob is discounted.
+function hostileThreatens (dist, blocked, opts = {}) {
+  const floor = opts.floor != null ? opts.floor : 5
+  if (dist == null) return false
+  if (dist <= floor) return true
+  return !blocked
+}
+
 module.exports = {
   PRIORITY,
   priName,
   jobSurvivalNeed,
   jobMayProgress,
+  hostileThreatens,
   beginManeuver,
   refreshManeuver,
   endManeuver,

@@ -117,6 +117,7 @@ function mineReusable (mine, fromXZ, opts = {}) {
   const maxDist = opts.maxDist != null ? opts.maxDist : 80
   const maxAgeMs = opts.maxAgeMs != null ? opts.maxAgeMs : 6 * 3600 * 1000
   if (opts.now != null && mine.at != null && (opts.now - mine.at) > maxAgeMs) return false
+  if (opts.maxLevelY != null && mine.level > opts.maxLevelY) return false // too shallow for this ore band
   return Math.hypot(mine.x - fromXZ.x, mine.z - fromXZ.z) <= maxDist
 }
 
@@ -158,6 +159,35 @@ function digExposureHazard (neighborNames) {
   return 'ok'
 }
 
+// EXPOSURE probe (THE mining-throughput root fix): given a target block's 6 face-neighbour
+// NAME strings, is at least ONE face open to air? Ore EMBEDDED in solid rock (all 6 neighbours
+// solid) is NOT reachable by the anti-grief mining movement profile (canDig, but every
+// non-leaf block is blocksCantBreak), so goto'ing at it stands still until a silent timeout -
+// the ~1-block-per-50s churn. Requiring an exposed face means only ore we can actually walk up
+// to and mine becomes a breakBlock target; embedded ore falls through to the branch mine.
+// Only true air counts (unloaded/null is NOT treated as exposed, so embedded ore stays
+// filtered at a chunk edge). PURE - same AIRISH vocabulary as descentSafety/faceHazard.
+function faceExposed (neighborNames) {
+  const ns = Array.isArray(neighborNames) ? neighborNames : []
+  return ns.some(n => n === 'air' || n === 'cave_air' || n === 'void_air')
+}
+
+// At depth, is it worth SCRATCH-PATHING to an exposed candidate, or should we go back to the
+// organized branch mine? When we're already down a mine (feetY <= surfaceY - deepBelow) and
+// EVERY exposed candidate is farther than maxScratch (~16b), the pathfinder burns the budget
+// crawling cave walls it mostly can't reach - re-entering branchMine (which continues its
+// persisted corridor) yields far more ore. Near the surface (not at depth) scratching is always
+// fine. Nothing exposed at depth -> also back to the mine. PURE.
+function scratchWorthy (feetY, surfaceY, candidateDists, opts = {}) {
+  const deepBelow = opts.deepBelow != null ? opts.deepBelow : 8
+  const maxScratch = opts.maxScratch != null ? opts.maxScratch : 16
+  const atDepth = Math.floor(feetY) <= Math.floor(surfaceY) - deepBelow
+  if (!atDepth) return true                      // near surface -> scratch exposed ore as usual
+  const ds = Array.isArray(candidateDists) ? candidateDists : []
+  if (!ds.length) return false                   // nothing exposed at depth -> back to branchMine
+  return ds.some(d => d <= maxScratch)           // a near candidate exists -> worth the scratch
+}
+
 // Should a deep-ore gather go STRAIGHT to the branch mine instead of scratching exposed
 // candidates? YES when at/near surface and all visible ore is in the sparse tail (above
 // ironCeiling ~y52). Already deep (down a mine) or a rich-depth candidate exists -> mine
@@ -197,4 +227,4 @@ function branchLayout (corridorIdx, opts = {}) {
   }
 }
 
-module.exports = { LAVA_RE, WATER_RE, AIRISH, DIRS, PICK_USES, perpendicular, targetMineY, worthMiningHere, mineableWhenBlocked, mineReusable, pickMaxUses, pickUsesLeft, estExcursionBlocks, picksToCraft, needReTool, descentSafety, faceHazard, digExposureHazard, branchLayout, preferBranchMine, deepMinePlan }
+module.exports = { LAVA_RE, WATER_RE, AIRISH, DIRS, PICK_USES, perpendicular, targetMineY, worthMiningHere, mineableWhenBlocked, mineReusable, pickMaxUses, pickUsesLeft, estExcursionBlocks, picksToCraft, needReTool, descentSafety, faceHazard, digExposureHazard, faceExposed, scratchWorthy, branchLayout, preferBranchMine, deepMinePlan }

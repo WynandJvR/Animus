@@ -32,6 +32,33 @@ t('shelterDiggable: nothing to dig / undiggable -> no', () => {
   assert.strictEqual(S.shelterDiggable('obsidian', 'stone', []), false)
 })
 
+t('shelterDiggable: void guard - thin shelf over a cave -> no (would fall in)', () => {
+  // BOTH below2 and below3 airish = digging drops the bot >=2 blocks into an open cavern
+  assert.strictEqual(S.shelterDiggable('dirt', 'air', ['dirt', 'dirt', 'dirt', 'dirt'], 'air'), false, 'air below2 + air below3 = cave under the shelf')
+  assert.strictEqual(S.shelterDiggable('dirt', 'cave_air', [], 'cave_air'), false, 'cave_air counts as void')
+  assert.strictEqual(S.shelterDiggable('dirt', 'air', [], null), false, 'air below2 + unloaded below3 = treat as void (conservative)')
+})
+
+t('shelterDiggable: air below2 over SOLID below3 stays allowed (legit 3-deep geometry)', () => {
+  assert.strictEqual(S.shelterDiggable('dirt', 'air', ['dirt', 'dirt', 'dirt', 'dirt'], 'stone'), true, 'a 1-block air gap with solid floor beneath is fine')
+  assert.strictEqual(S.shelterDiggable('grass_block', 'cave_air', [], 'deepslate'), true)
+})
+
+t('shelterDiggable: solid below2 - below3 irrelevant, still yes (non-regression)', () => {
+  assert.strictEqual(S.shelterDiggable('dirt', 'stone', ['dirt', 'dirt', 'dirt', 'dirt'], 'air'), true, 'solid below2 supports the floor no matter what below3 is')
+  assert.strictEqual(S.shelterDiggable('dirt', 'stone', ['dirt', 'dirt', 'dirt', 'dirt']), true, 'below3 defaulting undefined does not break the common case')
+})
+
+t('alcoveSafe: all faces solid -> yes; liquid/leaf/void face -> no', () => {
+  assert.strictEqual(S.alcoveSafe(['stone', 'stone', 'dirt', 'stone', 'deepslate']), true, 'fully enclosed solid pocket')
+  assert.strictEqual(S.alcoveSafe(['stone', 'water', 'dirt', 'stone', 'stone']), false, 'liquid face would flood the pocket')
+  assert.strictEqual(S.alcoveSafe(['stone', 'lava', 'dirt', 'stone', 'stone']), false, 'lava face')
+  assert.strictEqual(S.alcoveSafe(['stone', 'oak_leaves', 'dirt', 'stone', 'stone']), false, 'a leaf wall is not a real seal')
+  assert.strictEqual(S.alcoveSafe(['stone', 'air', 'dirt', 'stone', 'stone']), false, 'air face = open hole')
+  assert.strictEqual(S.alcoveSafe(['stone', null, 'dirt', 'stone', 'stone']), false, 'null/unloaded face -> not proven solid')
+  assert.strictEqual(S.alcoveSafe([]), false, 'no faces = not safe')
+})
+
 t('feetCellDry: standable + dry vs water-adjacent', () => {
   assert.strictEqual(S.feetCellDry('air', 'air', ['dirt', 'dirt', 'dirt', 'dirt']), true)
   assert.strictEqual(S.feetCellDry('air', 'air', ['water', 'dirt', 'dirt', 'dirt']), false, 'water beside the standing cell -> not dry')

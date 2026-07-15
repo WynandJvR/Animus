@@ -63,6 +63,28 @@ t('digExposureHazard: a fluid in ANY of the 6 neighbours (incl. below) blocks a 
   assert.strictEqual(M.digExposureHazard([]), 'ok', 'no data -> not a hazard')
 })
 
+t('faceExposed: embedded ore (all solid) is unreachable; any open face makes it minable', () => {
+  assert.strictEqual(M.faceExposed(['stone', 'stone', 'stone', 'stone', 'stone', 'stone']), false, 'boxed in solid rock -> not reachable, DO NOT target')
+  assert.strictEqual(M.faceExposed(['stone', 'air', 'stone', 'stone', 'stone', 'stone']), true, 'an air face -> reachable')
+  assert.strictEqual(M.faceExposed(['stone', 'stone', 'stone', 'stone', 'cave_air', 'stone']), true, 'a cave_air face -> reachable')
+  assert.strictEqual(M.faceExposed(['void_air', 'stone', 'stone', 'stone', 'stone', 'stone']), true, 'void_air counts as exposed')
+  assert.strictEqual(M.faceExposed(['stone', null, 'stone', 'stone', 'stone', 'stone']), false, 'an UNLOADED (null) neighbour is NOT treated as exposed (embedded ore stays filtered at a chunk edge)')
+  assert.strictEqual(M.faceExposed([]), false, 'no data -> not exposed')
+})
+
+t('scratchWorthy: at depth, only scratch a NEAR exposed candidate; far/none -> back to branchMine', () => {
+  // near surface: scratching is always fine
+  assert.strictEqual(M.scratchWorthy(63, 64, [40]), true, 'not at depth -> scratch as usual')
+  assert.strictEqual(M.scratchWorthy(63, 64, []), true, 'not at depth, nothing exposed -> still fine (surface path handles it)')
+  // at depth (>=8 below surface)
+  assert.strictEqual(M.scratchWorthy(16, 64, [8, 30]), true, 'a candidate within ~16b -> worth the scratch')
+  assert.strictEqual(M.scratchWorthy(16, 64, [20, 45, 60]), false, 'every candidate farther than 16b -> back to branchMine')
+  assert.strictEqual(M.scratchWorthy(16, 64, []), false, 'nothing exposed at depth -> back to branchMine')
+  // tunables
+  assert.strictEqual(M.scratchWorthy(16, 64, [24], { maxScratch: 30 }), true, 'maxScratch is tunable')
+  assert.strictEqual(M.scratchWorthy(60, 64, [40], { deepBelow: 3 }), false, 'deepBelow tunable (y60 now counts as depth, y40 candidate is far)')
+})
+
 t('perpendicular: branches are 90 degrees off the corridor', () => {
   assert.deepStrictEqual(M.perpendicular(0), [1, 3], 'E corridor -> S,N branches')
   assert.deepStrictEqual(M.perpendicular(1), [2, 0], 'S corridor -> W,E branches')
@@ -117,6 +139,15 @@ t('mineReusable: re-enter a close, fresh, real mine; dig fresh otherwise', () =>
   // incomplete record (never reached a level) is not reusable
   assert.strictEqual(M.mineReusable({ x: 100, z: 200 }, { x: 100, z: 200 }, { now }), false, 'no level -> not a real mine')
   assert.strictEqual(M.mineReusable(null, { x: 0, z: 0 }, { now }), false)
+})
+
+t('mineReusable: maxLevelY depth gate rejects a too-shallow mine (the live 0-iron bug)', () => {
+  const at = { x: 0, z: 0 } // right on top -> distance never the reason
+  assert.strictEqual(M.mineReusable({ x: 0, z: 0, level: 45 }, at, { maxLevelY: 40 }), false, 'level 45 > iron band 40 -> too shallow, dig deeper')
+  assert.strictEqual(M.mineReusable({ x: 0, z: 0, level: 16 }, at, { maxLevelY: 40 }), true, 'a deep mine (y16) is reusable')
+  assert.strictEqual(M.mineReusable({ x: 0, z: 0, level: 40 }, at, { maxLevelY: 40 }), true, 'exactly at the band (40) passes (boundary)')
+  assert.strictEqual(M.mineReusable({ x: 0, z: 0, level: 45 }, at, {}), true, 'no maxLevelY -> backward compatible (shallow mine still reusable)')
+  assert.strictEqual(M.mineReusable({ x: 0, z: 0, level: 35 }, at, { maxLevelY: 40 }), true, 'level 35 < 40 -> deep enough')
 })
 
 t('needReTool: re-tool BEFORE the pick breaks, and only with no spare', () => {

@@ -1512,6 +1512,24 @@ function send (res, code, body) {
   res.end(payload)
 }
 
+// S1 HOTFIX (REDESIGN §3.3 I1 / §3.4): is an incoming SURVIVAL command admissible RIGHT NOW,
+// i.e. may it preempt a body hold instead of being muzzled by it? True when arbiter (the survival
+// authority) reports a real unmet need, OR a worthwhile non-dangerous grave is within GRAVE_NEAR
+// - at 3 blocks the grave IS the survival move (free armor + often food, zero trek risk). Pure
+// read; no side effects. Pre-scheduler this stands in for scheduler.admissible('survival', s).
+function survivalAdmissible (bot) {
+  try { const need = provision.survivalNeed && provision.survivalNeed(bot); if (need) return { allow: true, reason: need.reason || need.need || 'survival need' } } catch {}
+  try {
+    const g = commands.worthwhileGrave && commands.worthwhileGrave() // already non-dangerous + worth it
+    const st = commands.state(bot)
+    if (g && st && st.pos && !st.threat) {
+      const GRAVE_NEAR = Number(process.env.GRAVE_NEAR || 16)
+      const d = Math.hypot(g.x - st.pos.x, g.z - st.pos.z)
+      if (d <= GRAVE_NEAR) return { allow: true, reason: `grave ${Math.round(d)}b away - free gear` }
+    }
+  } catch {}
+  return { allow: false, reason: 'no survival need and no grave in reach' }
+}
 const server = http.createServer((req, res) => {
   if (req.method === 'GET' && req.url === '/health') return send(res, 200, { ok: true, spawned: !!bot.entity })
   if (req.method === 'GET' && (req.url === '/state' || req.url.startsWith('/state?'))) {
@@ -1570,19 +1588,38 @@ const server = http.createServer((req, res) => {
         return send(res, 200, "held: there's a build to finish - i shouldn't stop it")
       }
       const bodyBusy = (commands.isBusy && commands.isBusy()) || (provision.isResting && provision.isResting()) || (provision.isSecuringFood && provision.isSecuringFood())
-      if (bodyBusy && !/^(state|scan|find|block|entities|inventory|look|say)\b/i.test(String(line).trim())) {
-        note(`(cmd) ${line}${rz} -> held (${commands.isBusy && commands.isBusy() ? 'busy building' : (provision.isSecuringFood && provision.isSecuringFood() ? 'securing food' : 'night-resting')}) - brain command suppressed`)
-        // If a PLAYER just asked for this (the held command is the brain answering them),
-        // don't leave them on read - the BODY replies once with what it's doing. Verified
-        // live: "digital go sleep" -> six silent holds and the player heard nothing.
-        if (Date.now() - lastAddressedAt < 20000 && Date.now() - lastBusyReplyAt > 30000) {
-          lastBusyReplyAt = Date.now()
-          let doing = 'working'
-          try { const a = commands.state(bot).activity; if (a && a.name) doing = a.name + (a.detail ? ' (' + a.detail + ')' : '') } catch {}
-          bot.chat(`can't right now - busy with ${doing}. say "stop" first if you need me to drop it`.slice(0, 200))
-          clearPendingChat() // that IS the answer - stop the brain re-trying the same order
+      const trimmedLine = String(line).trim()
+      const readOnly = /^(state|scan|find|block|entities|inventory|look|say)\b/i.test(trimmedLine)
+      if (bodyBusy && !readOnly) {
+        // S1 HOTFIX (REDESIGN §3.4): survival-class commands are no longer muzzled by the body's
+        // own hold - they PREEMPT it. The live freeze: `recover`/`eat`/`wear` suppressed for 8+
+        // minutes at 1hp/food 0 while famineHold sat inside `_securingFood` with iron in a grave
+        // 3b away. When a real survival need exists (or a grave is at arm's reach) the command
+        // sets the stop latch (the failing hold unwinds; any build resumes via persistedResume)
+        // and falls through to run. Progress-class commands keep exactly today's suppression.
+        // S1_HOTFIX=0 restores the old blanket hold. `stop`-suppression + the persisted-build
+        // hold above are UNTOUCHED (they guard operator intent, orthogonal to survival).
+        const survivalCmd = process.env.S1_HOTFIX !== '0' && /^(recover|getstuff|eat|wear|armorup|sleep)\b/i.test(trimmedLine)
+        const adm = survivalCmd ? survivalAdmissible(bot) : null
+        if (survivalCmd && adm.allow) {
+          note(`(cmd) ${line}${rz} -> PREEMPT (${adm.reason}) - survival outranks the current hold`)
+          if (commands.preemptForSurvival) commands.preemptForSurvival() // set the stop latch; a build resumes via persistedResume
+          // fall through: the survival command runs and owns the body
+        } else {
+          const label = commands.isBusy && commands.isBusy() ? 'busy building' : (provision.isSecuringFood && provision.isSecuringFood() ? 'securing food' : 'night-resting')
+          note(`(cmd) ${line}${rz} -> held (${survivalCmd ? 'no survival need: ' + adm.reason : label}) - brain command suppressed`)
+          // If a PLAYER just asked for this (the held command is the brain answering them),
+          // don't leave them on read - the BODY replies once with what it's doing. Verified
+          // live: "digital go sleep" -> six silent holds and the player heard nothing.
+          if (Date.now() - lastAddressedAt < 20000 && Date.now() - lastBusyReplyAt > 30000) {
+            lastBusyReplyAt = Date.now()
+            let doing = 'working'
+            try { const a = commands.state(bot).activity; if (a && a.name) doing = a.name + (a.detail ? ' (' + a.detail + ')' : '') } catch {}
+            bot.chat(`can't right now - busy with ${doing}. say "stop" first if you need me to drop it`.slice(0, 200))
+            clearPendingChat() // that IS the answer - stop the brain re-trying the same order
+          }
+          return send(res, 200, "busy building right now - I'll hold until it's done")
         }
-        return send(res, 200, "busy building right now - I'll hold until it's done")
       }
       // ONE JOB AT A TIME (operator order): while a saved build job exists, the brain may
       // not wander the body off on side-trips in the idle gap before the resume re-arms -

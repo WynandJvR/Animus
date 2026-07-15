@@ -188,5 +188,25 @@ t('jobSurvivalNeed: creeperRange is opt-tunable', () => {
   assert(arb.jobSurvivalNeed({ food: 18, hp: 20, creeperDist: 15 }, { creeperRange: 16 }), 'a wider creeperRange 16 blocks a 15b creeper')
 })
 
+// ---- LOS/reachability threat gate (hostileThreatens) ---------------------------------
+t('hostileThreatens: close floor always counts; beyond it a walled-off mob is discounted', () => {
+  assert.strictEqual(arb.hostileThreatens(3, true), true, 'point-blank counts even if the eye-line is "blocked"')
+  assert.strictEqual(arb.hostileThreatens(4.9, true), true, 'inside the floor (5) always counts')
+  assert.strictEqual(arb.hostileThreatens(5.1, true), false, 'just past the floor + walled off -> discounted')
+  assert.strictEqual(arb.hostileThreatens(12, true), false, 'far + walled off -> discounted')
+  assert.strictEqual(arb.hostileThreatens(8, false), true, 'a clear eye-line counts (reachable)')
+  assert.strictEqual(arb.hostileThreatens(16, false), true, 'far but visible still counts')
+  assert.strictEqual(arb.hostileThreatens(null, true), false, 'no distance -> not a threat')
+  assert.strictEqual(arb.hostileThreatens(null, false), false)
+  assert.strictEqual(arb.hostileThreatens(7, true, { floor: 8 }), true, 'a wider floor keeps a 7b walled mob counting')
+})
+
+t('jobSurvivalNeed: a walled-off creeper (discounted -> creeperDist null) + fed + healthy -> progress allowed', () => {
+  // survivalState would set creeperDist=null once hostileThreatens discounts the enclosed mob
+  const s = { food: 18, hp: 20, threatDist: null, creeperDist: null, isNight: false, underArmored: false }
+  assert.strictEqual(arb.jobSurvivalNeed(s), null, 'no unmet need once the creeper is walled off')
+  assert.strictEqual(arb.jobMayProgress(s), true)
+})
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall arbiter tests passed')
 process.exit(failures ? 1 : 0)

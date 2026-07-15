@@ -37,6 +37,13 @@ let lastBrokeAt = null
 let loadedSchem = null
 let building = false
 let buildAbort = false // set by `stop`; watched by schematic builds AND provision runs
+// S1 HOTFIX (REDESIGN §3.4 / invariant I1): let an admissible SURVIVAL command PREEMPT a body
+// hold without cancelling operator intent. Unlike the `stop` command it sets ONLY the abort
+// latch - the current famineHold/secureFood/gather unwinds, but resumeJob/persistedResume are
+// left intact so an interrupted build resumes via its normal resume path. `recover` ignores
+// buildAbort entirely (its travels use isStopped:()=>false), so this cleanly frees the body for
+// the survival move without breaking the recover it is preempting for.
+function preemptForSurvival () { buildAbort = true }
 let recovering = false // recover mutex - concurrent recovers raced inventory diffs (live)
 let provisioning = false
 let escaping = false   // true while digging UP out of a cave - the flee reflex must not
@@ -123,20 +130,32 @@ function worthwhileGrave () { const g = bestGrave(); return g ? { x: g.x, y: g.y
 // only worth chasing when the bot is SAFE + FED and the grave is reasonably reachable. No bot
 // handle - just data - so the "is it safe to go?" decision is unit-tested without a world.
 // Returns { chase, reason }. Distances are XZ ("far" is horizontal; respawn Y varies).
-function shouldChaseGrave ({ grave, pos, food, threat, escaping, home, maxDist } = {}) {
+function shouldChaseGrave ({ grave, pos, food, threat, escaping, home, maxDist, dangerous } = {}) {
   if (!grave || !pos) return { chase: false, reason: 'no grave or position' }
-  const FOOD_MIN = Number(process.env.GRAVE_MIN_FOOD || 12)
-  // A starving bot must NOT trek - the trek is what drains 20->0 and kills it. Defer, eat/gear
-  // up near home, retry when fed. food==null (not spawned yet) is treated as unknown -> defer.
-  if (food == null || food < FOOD_MIN) return { chase: false, reason: `too hungry to trek (food ${food == null ? '?' : food} < ${FOOD_MIN}) - defer grave until fed` }
+  const dngr = dangerous != null ? dangerous : !!(grave && grave.dangerous)
+  // ACTIVE-HAZARD defers ALWAYS, at any distance: a hostile on the bot, an in-progress flee, or
+  // a grave sitting in/over lava/void is never worth walking into for a few items.
   if (escaping) return { chase: false, reason: 'fleeing a hazard - defer grave' }
   if (threat) return { chase: false, reason: `hostile ${threat.type || 'mob'} ${threat.dist != null ? threat.dist + 'b' : 'near'} - defer grave until safe` }
-  const MAXD = Number(maxDist != null ? maxDist : (process.env.GRAVE_MAX_DIST || 96))
+  if (dngr) return { chase: false, reason: 'grave is in/over a hazard (lava/void) - defer, not worth dying for' }
   const dBot = Math.hypot(grave.x - pos.x, grave.z - pos.z)
   // Reachable if the grave is within MAXD of where we ARE, or of HOME (a grave near base is
   // fine to fetch even mid-trek; a grave far across hostile ground from both is written off).
   const dHome = home ? Math.hypot(grave.x - home.x, grave.z - home.z) : Infinity
   const near = Math.min(dBot, dHome)
+  // NEAR-GRAVE OVERRIDE (S1 hotfix, REDESIGN §1.1 / §7-S1 / invariant I3): a non-dangerous,
+  // no-threat grave within GRAVE_NEAR IS the survival move itself - free armor + often food at
+  // arm's reach, ~zero trek risk - so it is chased REGARDLESS of food/hp. Distance is classified
+  // FIRST; the food gate below only guards a genuine FAR trek. The old order ran the food gate
+  // BEFORE distance, so a 3b grave was deferred *because* the corpse-run had made the bot hungry
+  // - and each death ratcheted the bot into a strictly weaker respawn. S1_HOTFIX=0 rolls back.
+  const GRAVE_NEAR = Number(process.env.GRAVE_NEAR || 16)
+  if (process.env.S1_HOTFIX !== '0' && near <= GRAVE_NEAR) return { chase: true, reason: `grave ${Math.round(near)}b away (<= ${GRAVE_NEAR}) - free gear at arm's reach, chasing regardless of food/hp` }
+  // FAR grave: a starving bot must NOT trek - the trek is what drains 20->0 and kills it. Defer,
+  // eat/gear up near home, retry when fed. food==null (not spawned yet) is treated as -> defer.
+  const FOOD_MIN = Number(process.env.GRAVE_MIN_FOOD || 12)
+  if (food == null || food < FOOD_MIN) return { chase: false, reason: `too hungry to trek (food ${food == null ? '?' : food} < ${FOOD_MIN}) - defer grave until fed` }
+  const MAXD = Number(maxDist != null ? maxDist : (process.env.GRAVE_MAX_DIST || 96))
   if (near > MAXD) return { chase: false, reason: `grave ${Math.round(near)}b away (> ${MAXD}) across open ground - defer/write off, not worth starving for` }
   return { chase: true, reason: `safe + fed (food ${food}), grave ${Math.round(near)}b within reach` }
 }
@@ -3090,4 +3109,4 @@ async function resumeBuild (bot) {
   }
 }
 
-module.exports = { handle, state, setupMovements, eatFood, placeTorchNearby, isBusy, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume, flagSpawnSuspect, worthwhileGrave, shouldChaseGrave, setDebugSink }
+module.exports = { handle, state, setupMovements, eatFood, placeTorchNearby, isBusy, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume, flagSpawnSuspect, worthwhileGrave, shouldChaseGrave, preemptForSurvival, setDebugSink }
