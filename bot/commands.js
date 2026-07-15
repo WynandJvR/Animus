@@ -173,6 +173,12 @@ function flagSpawnSuspect () { spawnSuspect = true; try { provision.setSpawnSusp
 function spawnIsSuspect () { return spawnSuspect || !!(provision.isSpawnSuspect && provision.isSpawnSuspect()) }
 let buildProgress = null // REAL build progress for /state - the brain must answer from this, not vibes
 const RESUME_MAX_DEATHS = parseInt(process.env.RESUME_MAX_DEATHS || '4', 10)
+// BUILD PERSISTENCE (DESIGN-build-persistence.md): stop = PAUSE not destroy; only an
+// operator cancelbuild (or a REAL finish) deletes a saved build. STOP_KEEPS_BUILD=0
+// restores today's destructive behavior at every touched site (BRANCH_MINE=0 convention).
+const STOP_KEEPS_BUILD = process.env.STOP_KEEPS_BUILD !== '0'
+const RESUME_HOLD_MS = parseInt(process.env.RESUME_HOLD_MS || '900000', 10) // pause hold before autonomy resumes (15min)
+let cancelArmedAt = 0 // two-step cancelbuild confirm window (ms epoch of the arm)
 
 // ---- observability: what the body is DOING, how the last long op ENDED, and whether
 // it's WEDGED. The brain reads /state to make high-level calls; without these a stuck
@@ -1030,7 +1036,7 @@ async function collectNearbyDrops (bot, { radius = 8, max = 6, deadlineMs = 1200
 
 // ---- command dispatch ------------------------------------------------------
 
-async function handle (bot, line) {
+async function handle (bot, line, opts = {}) {
   const parts = String(line).trim().split(/\s+/)
   const cmd = (parts[0] || '').toLowerCase()
   const a = parts.slice(1)
@@ -1593,11 +1599,21 @@ async function handle (bot, line) {
       bot.pathfinder.setGoal(new goals.GoalFollow(t, FOLLOW_RANGE), true)
       return `following ${a[0] || 'nearest player'}`
     }
-    case 'stop':
+    case 'stop': {
       followTarget = null // end persistent follow - "stop" means stop
       buildAbort = true // also halts an in-progress schematic build
-      resumeJob = null; buildInterrupted = false; resumeDeaths = 0; clearPersistedResume() // an explicit stop cancels auto-resume too
-      bot.pathfinder.setGoal(null); return 'stopped'
+      resumeJob = null; buildInterrupted = false; resumeDeaths = 0 // drop the in-memory job; halt NOW
+      bot.pathfinder.setGoal(null)
+      if (!STOP_KEEPS_BUILD) { clearPersistedResume(); return 'stopped' } // rollback: today's destructive stop
+      // stop = PAUSE, not destroy: keep the saved build (operator intent) and stamp a hold, so
+      // a confused brain (instructed to emit `stop` when wedged) can never erase the castle -
+      // autonomy resumes it after RESUME_HOLD_MS; only cancelbuild throws it away.
+      const savedStop = persistedResume()
+      if (!savedStop) return 'stopped'
+      markResumePaused('operator stop')
+      const holdMin = Math.round(RESUME_HOLD_MS / 60000)
+      return `stopped ("${savedStop.name}" stays saved - resuming in ~${holdMin}min; "resumebuild" to continue now, "cancelbuild" to drop it)`
+    }
 
     case 'attack':
     case 'defend': {
@@ -2104,7 +2120,10 @@ async function handle (bot, line) {
           endActivity(false, 'interrupted by death - resuming after respawn', { detached: true })
           return
         }
-        resumeJob = null; if (!r.stopped) clearPersistedResume() // done for real - nothing to resume
+        resumeJob = null
+        const disp = STOP_KEEPS_BUILD ? finishDisposition(r) : (!r.stopped ? 'clear' : 'keep')
+        if (disp === 'clear') clearPersistedResume() // done for real - nothing to resume
+        else if (disp === 'pause') { markResumePaused(`shortfall: ${r.placed}/${r.total} placed, ${r.skipped} skipped`); bot.chat(`build ended short (${r.placed}/${r.total}, ${r.skipped} skipped) - keeping it saved; "cancelbuild" drops it`.slice(0, 256)) } // "0/2350 all-skipped" pauses, never clears
         endActivity(!r.stopped, `${r.placed}/${r.total} placed${r.stopped ? ' (stopped)' : ''}`, { detached: true })
         bot.chat(`autobuild ${r.stopped ? 'stopped' : 'done'}: ${r.placed}/${r.total} placed${r.skipped ? `, ${r.skipped} skipped` : ''}`.slice(0, 256))
       }).catch(e => {
@@ -2122,6 +2141,7 @@ async function handle (bot, line) {
       // resume flow (gear up, travel back with retries, re-provision, finish).
       const saved = persistedResume()
       if (!saved) return 'no saved build to resume'
+      if (saved.pausedAt) persistResume(saved.name, saved.at) // explicit resume clears the pause hold
       try { loadedSchem = { schem: await schematic.loadFile(saved.name, bot.version), name: saved.name } } catch (e) { return `couldn't reload schematic "${saved.name}": ${e.message}` }
       resumeJob = { schem: loadedSchem.schem, at: new Vec3(saved.at.x, saved.at.y, saved.at.z) }
       resumeDeaths = 0; buildAbort = false; buildInterrupted = false
@@ -2129,6 +2149,27 @@ async function handle (bot, line) {
         if (r && !r.stopped) bot.chat(`resumed build done: ${r.placed}/${r.total} placed`.slice(0, 200))
       }).catch(e => bot.chat(`resume failed: ${e.message}`.slice(0, 200)))
       return `resuming "${saved.name}" at ${saved.at.x},${saved.at.y},${saved.at.z} - heading back to finish it`
+    }
+
+    case 'cancelbuild':
+    case 'abandonbuild': {
+      // The ONLY intended delete of a saved build. Operator-authenticated (opts.source) AND
+      // blocked from the brain's /cmd path by CHEAT_CMDS - two independent gates, either
+      // suffices. Undefined source FAILS CLOSED. Two-step 60s confirm; ARCHIVE (rename) rather
+      // than unlink, so a fat-fingered confirm is recoverable (rename back + resumebuild).
+      if (opts.source !== 'operator') return 'cancelbuild is operator-only'
+      const saved = persistedResume()
+      if (!saved) { cancelArmedAt = 0; return 'no saved build to cancel' }
+      const confirmed = /^confirm$/i.test(a[0] || '') && (Date.now() - cancelArmedAt) <= 60000
+      if (!confirmed) {
+        cancelArmedAt = Date.now() // (re-)arm; a bare "confirm" with no fresh arm lands here too
+        return `this deletes the saved build "${saved.name}" at ${saved.at.x},${saved.at.y},${saved.at.z} for good - say "cancelbuild confirm" within 60s`
+      }
+      cancelArmedAt = 0
+      buildAbort = true; resumeJob = null; buildInterrupted = false; resumeDeaths = 0 // halt any running build
+      bot.pathfinder.setGoal(null)
+      try { try { fs.unlinkSync(RESUME_FILE + '.cancelled') } catch {} ; fs.renameSync(RESUME_FILE, RESUME_FILE + '.cancelled') } catch (e) { dbg('cancelbuild archive failed: ' + e.message) }
+      return `cancelled "${saved.name}" - the save is archived, not resumable`
     }
 
     case 'stash': {
@@ -2955,11 +2996,37 @@ function setResumeJob (pt) { if (loadedSchem && pt) { resumeJob = { schem: loade
 // fresh process can pick the build back up via the `resumebuild` command.
 const RESUME_FILE = process.env.RESUME_FILE || path.join(__dirname, 'resume-job.json') // env-overridable (test isolation)
 function persistResume (name, at) {
-  try { fs.writeFileSync(RESUME_FILE, JSON.stringify({ name, at: { x: at.x, y: at.y, z: at.z }, savedAt: new Date().toISOString() })) } catch {}
+  try { fs.writeFileSync(RESUME_FILE, JSON.stringify({ name, at: { x: at.x, y: at.y, z: at.z }, savedAt: new Date().toISOString() })) } catch (e) { dbg('persistResume FAILED: ' + e.message) }
 }
 function clearPersistedResume () { try { fs.unlinkSync(RESUME_FILE) } catch {} }
 function persistedResume () {
   try { return JSON.parse(fs.readFileSync(RESUME_FILE, 'utf8')) } catch { return null }
+}
+// PAUSE the saved job in place (operator stop / shortfall finish / death give-up): stamp
+// pausedAt so the resume machinery holds off for RESUME_HOLD_MS, then autonomy picks it back
+// up. NOT a delete - operator intent survives; only cancelbuild or a real finish removes it.
+function markResumePaused (why) {
+  try {
+    const saved = JSON.parse(fs.readFileSync(RESUME_FILE, 'utf8'))
+    saved.pausedAt = Date.now(); saved.pausedWhy = String(why || '')
+    fs.writeFileSync(RESUME_FILE, JSON.stringify(saved))
+  } catch (e) { dbg('markResumePaused failed: ' + e.message) }
+}
+// PURE: ms left on a pause hold (0 = resume now). No file / no pausedAt / malformed pausedAt
+// all -> 0 (fail OPEN to resume, the safe direction - a saved build must not stall forever).
+function resumeHoldRemaining (saved, now) {
+  const paused = saved && Number(saved.pausedAt)
+  if (!paused || Number.isNaN(paused)) return 0
+  return Math.max(0, paused + RESUME_HOLD_MS - now)
+}
+// PURE: what to do with the saved build when a build loop settles (DESIGN §5). Clear ONLY a
+// genuine finish; shortfall/all-skipped -> pause (keep the job); errored/deferred/aborted -> keep.
+function finishDisposition (r) {
+  if (!r) return 'keep'                    // errored/undefined - never delete on a throw
+  if (r.deferred) return 'keep'            // resume deferred (old loop still unwinding)
+  if (r.stopped) return 'keep'             // aborted, not finished
+  if ((r.skipped || 0) > 0) return 'pause' // "done" but blocks/materials are still owed - shortfall
+  return 'clear'                           // placed everything it set out to place
 }
 
 // Resume an interrupted build after respawn. Travels back to the site (we respawn far
@@ -2979,7 +3046,9 @@ async function resumeBuild (bot) {
     // Stop RETRYING but keep the job ON DISK: giving up used to clearPersistedResume(),
     // which erased the castle from existence and left "resumebuild" with nothing to load
     // (had to hand-recreate the file, live). The auto-retry loop ends here; a human (or a
-    // calmer future respawn) can still say "resumebuild".
+    // calmer future respawn) can still say "resumebuild". Stamp the pause so the re-arm loop
+    // honors a real hold instead of the old ~2-min breather (resumebuild resets resumeDeaths).
+    if (STOP_KEEPS_BUILD) markResumePaused('gave up after ' + resumeDeaths + ' deaths')
     resumeJob = null; buildInterrupted = false; resumeDeaths = 0
     return null
   }
@@ -3103,10 +3172,12 @@ async function resumeBuild (bot) {
       endActivity(false, why, { detached: true })
     } else {
       resumeJob = null
-      if (result && !result.stopped) clearPersistedResume() // resumed to a real finish
+      const disp = STOP_KEEPS_BUILD ? finishDisposition(result) : (result && !result.stopped ? 'clear' : 'keep')
+      if (disp === 'clear') clearPersistedResume() // resumed to a real finish
+      else if (disp === 'pause') { markResumePaused(`shortfall: ${result.placed}/${result.total} placed, ${result.skipped} skipped`); try { bot.chat(`build ended short (${result.placed}/${result.total}, ${result.skipped} skipped) - keeping it saved; "cancelbuild" drops it`.slice(0, 256)) } catch {} }
       endActivity(!!result && !result.stopped, result ? `${result.placed}/${result.total} placed${result.stopped ? ' (stopped)' : ''}` : 'no result', { detached: true })
     }
   }
 }
 
-module.exports = { handle, state, setupMovements, eatFood, placeTorchNearby, isBusy, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume, flagSpawnSuspect, worthwhileGrave, shouldChaseGrave, preemptForSurvival, setDebugSink }
+module.exports = { handle, state, setupMovements, eatFood, placeTorchNearby, isBusy, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume, flagSpawnSuspect, worthwhileGrave, shouldChaseGrave, preemptForSurvival, setDebugSink, finishDisposition, resumeHoldRemaining, markResumePaused }

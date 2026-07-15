@@ -126,6 +126,6 @@ function parseBuildRequest (message, botName, cfg = {}) {
 // the HTTP /cmd path (it can only move, perceive, equip, eat, chat) - so it can't
 // grief or dupe. Operators keep full access via in-game !commands. Lift with
 // BRAIN_ALLOW_CHEATS=1. Shared by BOTH bodies so the two lists can't drift apart.
-const CHEAT_CMDS = /^(give|fill|setblock|clear|clearinv|wall|tower|house|schem|schematic|provision|autobuild|stash|unstash|gamemode|tp)\b/i
+const CHEAT_CMDS = /^(give|fill|setblock|clear|clearinv|wall|tower|house|schem|schematic|provision|autobuild|cancelbuild|abandonbuild|stash|unstash|gamemode|tp)\b/i
 
 module.exports = { operatorSet, isOperator, isAddressed, parseBuildRequest, CHEAT_CMDS }

@@ -248,6 +248,8 @@ try {
       setTimeout(async () => {
         try {
           if (commands.isBusy && commands.isBusy()) return // something else already driving
+          const hold = commands.resumeHoldRemaining ? commands.resumeHoldRemaining(commands.persistedResume(), Date.now()) : 0
+          if (hold > 0) { note(`(resume) held (paused, ${Math.round(hold / 1000)}s left - "resumebuild" overrides)`); return }
           const r = await commands.handle(bot, 'resumebuild')
           note(`(resume) auto: ${String(r).split(String.fromCharCode(10))[0]}`)
         } catch (e) { note(`(resume) auto failed: ${e.message}`) }
@@ -261,12 +263,20 @@ try {
 // Every 2 minutes: saved job + idle bot + not resting = try the resume again. (Was 5 -
 // with brain side-trips held while a job waits, a long idle gap has no upside.)
 if (process.env.AUTO_RESUME !== '0') {
+  let resumeHeldLogged = false // log the pause-hold once per state change, not every tick
   setInterval(async () => {
     try {
       if (!bot.entity) return
-      if (!(commands.persistedResume && commands.persistedResume())) return
+      const saved = commands.persistedResume && commands.persistedResume()
+      if (!saved) return
       if (commands.isBusy && commands.isBusy()) return
       if (provision.isResting && provision.isResting()) return
+      const hold = commands.resumeHoldRemaining ? commands.resumeHoldRemaining(saved, Date.now()) : 0
+      if (hold > 0) {
+        if (!resumeHeldLogged) { note(`(resume) held (paused, ${Math.round(hold / 1000)}s left - "resumebuild" overrides)`); resumeHeldLogged = true }
+        return
+      }
+      resumeHeldLogged = false
       const r = await commands.handle(bot, 'resumebuild')
       note(`(resume) re-arm: ${String(r).split(String.fromCharCode(10))[0]}`)
     } catch (e) { note(`(resume) re-arm failed: ${e.message}`) }
@@ -356,7 +366,7 @@ bot.on('chat', (username, message) => {
     const drop = gateSay(line, false) // operators speak freely
     if (drop) { note(`(chat-cmd) ${line} -> skipped (${drop})`); return }
     noteManualLook(line)
-    commands.handle(bot, line)
+    commands.handle(bot, line, { source: 'operator' })
       .then(r => note(`(chat-cmd) ${r}`))
       .catch(e => note(`(chat-cmd error) ${e.message}`))
     return
@@ -385,7 +395,7 @@ bot.on('chat', (username, message) => {
     const direct = directCommand(message, username)
     if (direct && access.isOperator(username, cfg)) {
       note(`(direct-cmd) ${username}: "${message}" -> ${direct}`)
-      commands.handle(bot, direct)
+      commands.handle(bot, direct, { source: 'operator' })
         .then(r => note(`(direct-cmd) ${r}`))
         .catch(e => note(`(direct-cmd error) ${e.message}`))
       recordChat(username, message) // still let the brain see it (so it can ack in chat)
@@ -471,7 +481,7 @@ async function startNaturalBuild (username, req) {
   // still works (it goes through the directCommand path, which bypasses the brain gate).
   commands.setBuildReqActive(true)
   try {
-    const loadRes = await commands.handle(bot, `schematic load ${file}`)
+    const loadRes = await commands.handle(bot, `schematic load ${file}`, { source: 'operator' })
     bot.chat(String(loadRes).slice(0, 256))
     // Set the resume job NOW (approximate origin = the requested point) so a death during the
     // trek to the site resumes the build instead of being forgotten. autoBuild refines `at`.
@@ -488,14 +498,14 @@ async function startNaturalBuild (username, req) {
         try { const prep = await commands.survivalPrep(bot, { say: m => bot.chat(String(m).slice(0, 200)) }); note(`(build-req) prep -> armed=${prep.armed} fed=${prep.fed} armored=${prep.armored}`) }
         catch (e) { note(`(build-req) prep skipped: ${e.message}`) }
         bot.chat(`that's a fair way off - heading to ${where} first...`)
-        const tr = await commands.handle(bot, `travel ${point.x} ${point.y} ${point.z}`)
+        const tr = await commands.handle(bot, `travel ${point.x} ${point.y} ${point.z}`, { source: 'operator' })
         note(`(build-req) travel -> ${tr}`)
         if (/^couldn't get to/.test(tr)) { bot.chat(tr.slice(0, 256)); return } // never reached - don't churn
       }
     }
     // autobuild = build from inventory if we have the materials, else gather/craft
     // the whole bill of materials (stashing in a chest) first, then build.
-    const buildRes = await commands.handle(bot, `autobuild center ${where}${req.clear ? ' clear' : ''}`)
+    const buildRes = await commands.handle(bot, `autobuild center ${where}${req.clear ? ' clear' : ''}`, { source: 'operator' })
     bot.chat(String(buildRes).slice(0, 256))
   } catch (e) {
     note(`(build-req error) ${e.message}`)
@@ -1654,7 +1664,7 @@ const server = http.createServer((req, res) => {
       if (drop) { note(`(cmd) ${line}${rz} -> skipped (${drop})`); return send(res, 200, `skipped: ${drop}`) }
       noteManualLook(line)
       try {
-        const result = await commands.handle(bot, line)
+        const result = await commands.handle(bot, line, { source: 'brain' })
         // A non-perception command is the brain's response to any waiting player,
         // so consider the request answered (perception commands keep it pending).
         if (!PREP_CMDS.test(String(line).trim())) clearPendingChat()
@@ -1746,7 +1756,7 @@ const server = http.createServer((req, res) => {
       try { const j = JSON.parse(data); if (j && typeof j.command === 'string') line = j.command } catch {}
       noteManualLook(line)
       try {
-        const result = await commands.handle(bot, line)
+        const result = await commands.handle(bot, line, { source: 'operator' })
         clearPendingChat()
         note(`(ui-cmd) ${line} -> ${result.split('\n')[0]}`)
         // TRAINING DATA (human demonstrations): operator commands are gold-standard
