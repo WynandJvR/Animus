@@ -283,6 +283,16 @@ verified routine, each individually skippable:
 2. **Tend/harvest the farm on ripeness cadence** — `tendWheatFarm`
    (provision.js:3520) + `ensureWheatFarm` expansion, no longer only inside
    `secureFood`/`ensureFoodSupply`. At most once per ~20 min (wheat is slow).
+   NOTE (deferred — see §11): the farm self-degrades two ways that this pass must
+   also address. (a) **Trampling** — the bot walking/jumping over its own tilled
+   cells reverts them to dirt; tend then logs "cell needs tilling" and the plot
+   shrinks. Add a "don't path over own crops" rule (route around the farm cells;
+   approach from an adjacent walkway). (b) **Hoe-before-tend** — a tool-less bot
+   (hoe lost to a grave) harvests but cannot re-till/replant, so it strips the farm
+   to bare dirt even while carrying seeds. Gate tending on a hoe being on hand
+   (reconcile via resources.acquire — withdraw > craft > gather — before tending),
+   and never harvest a cell it cannot then replant. Observed live 2026-07-15
+   (inventory: seeds present, no hoe; 8-10 cells "needs tilling" per cycle).
 3. **Cook + bake at home** — `cookRawMeat`, bread from wheat via
    `resources.reconcile` (never raw inventory math).
 4. **Courier: stock the HOME cache.** New: after harvest/cook, deposit food surplus
@@ -430,6 +440,15 @@ closes. Each is a testable statement:
   `gearUp` already banks loose iron at run end (planner.js:534); maintenancePass
   extends the principle to food (courier, §4.2). Worn armor and banked goods
   survive a death; only pack contents go to the grave — and S1 gets those back.
+  GAP (deferred — see §11): banking today is reactive-only (`autoBank` fires after
+  a mining run / when the pack fills / at gear-up end) and `KEEP_ON_BOT`
+  (provision.js:5792) deliberately keeps ALL tools/armor/food/coal/planks on the
+  bot — so a death still drops the whole working kit into the grave (this is how the
+  live bot lost its hoe + iron). There is no proactive **safekeeping**: stash
+  surplus/valuables and spare tools in the hut bank when home, and carry only a
+  minimal working loadout before a risky excursion or overnight, so a death costs a
+  bounded, cheap kit — not everything. This tightens S3's bound from "the pack" to
+  "a minimal loadout".
 - **S4 — All recovery-relevant state survives a process restart.** Already true:
   death ledger (`persistDeath`), world-memory (bed/hut/farm/graves' coordinates via
   ledger), chest-cache, persistedResume build, spawn-suspect flag
@@ -645,6 +664,24 @@ by the layered bounded-failure model, §2).
   holdings (the resource model makes them idempotent). Verify explicitly in S4.
 - *Snapshot cost* — `schedulerState` on a 15s tick must use `cachedOnly` chest
   counts (resources.totalCounts opts) — never walk the bot from a tick.
+
+**Deferred (noted, not this pass — for a later slice, most likely S6):**
+- *Farm self-degradation* (observed live 2026-07-15). Two independent causes to fix
+  together in the maintenance pass (§4.2 step 2): (a) the bot **tramples its own
+  tilled cells** by pathing over them → they revert to dirt → tend logs "needs
+  tilling" and the plot shrinks; needs a "route around own crops" rule. (b) A bot
+  that **lost its hoe to a grave** harvests-without-replanting, stripping the plot
+  to bare dirt even while carrying seeds; tending must be gated on a hoe on hand
+  (acquire one first via the resource model) and must never harvest a cell it can't
+  replant. S1's grave recovery fixes the upstream hoe loss but not these two
+  directly.
+- *Proactive safekeeping / minimal-loadout banking* (tied to §7 S3). Banking today
+  is reactive-only and `KEEP_ON_BOT` keeps the entire working kit (tools/armor/food)
+  on the bot, so a death drops all of it. Add a home behavior that stashes surplus
+  and valuables (and spare tools) in the hut bank and carries only a minimal working
+  loadout — especially before risky excursions or overnight — so a death costs a
+  bounded cheap kit, not everything. Tension to resolve: never bank the last working
+  tool of a kind (can't work without a pickaxe); safekeep the *spares/surplus* only.
 
 **Open questions (decide during implementation; none block S1-S3):**
 - Exact buffer numbers (§4.1) — tune from live observation in S6.

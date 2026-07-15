@@ -3861,6 +3861,29 @@ async function eatUp (bot) {
   }
 }
 
+// BAKE BREAD from banked wheat (the live rescue): the bot's bank wheat is RAW/inedible, so a
+// starving bot standing at home with 5 wheat + a farm still can't eat without baking. Top up
+// the pack from the bank (runCraft only crafts from ON-HAND) then craft bread at the home
+// table via runCraft - the SAME primitive tendWheatFarm/fishing-rod use (ensureTable finds/
+// places the table; bot.recipesFor/bot.craft; verified through the pathfix path). Skips
+// GRACEFULLY (returns 0, never throws) if no table is reachable or the wheat can't be found.
+async function bakeBreadFromWheat (bot, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const home = opts.home || null
+  try {
+    let wheatN = countItem(bot, 'wheat')
+    if (wheatN < 3) {
+      try { await require('./resources.js').withdrawItems(bot, 'wheat', 3 - wheatN, { near: home, maxDist: 64 }) } catch (e) { dbg('  bakeBread: wheat withdraw failed (' + e.message + ')') }
+      wheatN = countItem(bot, 'wheat')
+    }
+    const loaves = foodSec.breadFromWheat(wheatN)
+    if (loaves < 1) { dbg('  bakeBread: only ' + wheatN + ' wheat on hand - need 3 for a loaf'); return 0 }
+    const made = await runCraft(bot, 'bread', loaves, true, { isStopped, home })
+    dbg('  bakeBread: baked ' + made + ' bread from ' + wheatN + ' wheat')
+    return made
+  } catch (e) { dbg('  bakeBread: skipped (' + e.message + ')'); return 0 }
+}
+
 let _securingFood = false
 function isSecuringFood () { return _securingFood }
 async function secureFood (bot, opts = {}) {
@@ -3879,6 +3902,7 @@ async function secureFoodInner (bot, opts = {}) {
   // OR "3 food items" is exactly what let it leave hungry with cooked meat in the pack.
   const comfortable = opts.comfortable != null ? opts.comfortable : 18
   const fedEnough = () => bot.food != null && bot.food >= comfortable
+  let triedHomeFood = false // HOME FOOD FIRST: at most ONE home trek per call (loop-safe)
   if (fedEnough()) return true
   // EATING MUST WIN over a stalled brain goal: the bot idled at food=0 stuck in a stalled
   // item-recovery `travel` while food sat in its chest (live). Drop any lingering goal so the
@@ -3918,6 +3942,51 @@ async function secureFoodInner (bot, opts = {}) {
   // to comfortable from ready food when it can, and only truly hungry does it go get more.
   const acquireTrigger = opts.threshold != null ? opts.threshold : 12
   if ((bot.food ?? 20) > acquireTrigger) { dbg('secureFood: food=' + bot.food + ' > acquire-trigger ' + acquireTrigger + ' and ready food drained - not hunting/farming for the last points'); return true }
+  // 2.5) HOME FOOD FIRST (HOME_FOOD_FIRST=0 restores today's behavior). Step 1's bank withdraw
+  // is RANGE-BOUNDED (maxDist 64): once the bot has drifted beyond it, that read silently
+  // no-ops and the chain below marches OUTWARD (scout) hunting NEW food while the bot's own
+  // bank + farm sit at home (live: starved 110b out with 5 wheat + a farm at the hut). Before
+  // any outward discovery, if we're beyond withdraw range of home AND home holds USABLE food
+  // (real banked food, or >=3 bakeable wheat, or a standing farm), trek BACK and use what we
+  // own: re-run the in-range pantry, BAKE the raw banked wheat (the actual live rescue), then
+  // tend/harvest the farm. ONCE per call + fully guarded: a failed trek or a dry home falls
+  // straight through to today's exact chain (hunt/fish/scout) with nothing lost.
+  if (process.env.HOME_FOOD_FIRST !== '0' && !triedHomeFood) {
+    triedHomeFood = true
+    const anchor = home || hutAnchor() || knownBed()
+    if (anchor && bot.entity && bot.entity.position) {
+      const range = Number(process.env.HOME_FOOD_RANGE || 48)
+      const pos = bot.entity.position
+      const distHome = Math.hypot(pos.x - anchor.x, pos.z - anchor.z)
+      let totals = {}
+      try { totals = await require('./resources.js').totalCounts(bot, { cachedOnly: true, near: anchor, maxDist: 64 }) } catch {}
+      const mdH = require('minecraft-data')(bot.version); const foodsH = (mdH && mdH.foodsByName) || {}
+      let bankFoodPts = 0
+      for (const [n, c] of Object.entries(totals)) if (foodsH[n]) bankFoodPts += (foodsH[n].foodPoints || 0) * c
+      const wheatCount = totals.wheat || 0
+      const snap = { distHome, bankFoodPts, wheatCount, hasFarm: hasStandingFarm() }
+      if (foodSec.shouldTrekHomeForFood(snap, { range })) {
+        say('starving out here - heading home to eat from my own stores')
+        dbg('secureFood: HOME FOOD FIRST - ' + Math.round(distHome) + 'b out (range ' + range + '), bankFoodPts=' + bankFoodPts + ' wheat=' + wheatCount + ' farm=' + snap.hasFarm + ' -> trekking home')
+        try { await walkStaged(bot, anchor.x, anchor.z, { isStopped, range: 6, timeoutMs: 180000 }) } catch (e) { dbg('  home-food: trek home failed (' + e.message + ')') }
+        // re-run the in-range pantry now that we should be home (fresh chest read)
+        try {
+          const got = await require('./resources.js').ensureFood(bot, { near: anchor, threshold: 20, minPack: 1, maxDist: 64, forceFresh: true })
+          if (got) { dbg('  home-food: withdrew ' + got + ' food from the bank'); await cookIfRaw(); await eatUp(bot) }
+        } catch (e) { dbg('  home-food: pantry failed (' + e.message + ')') }
+        if (fedEnough()) return true
+        // still hungry: BAKE the banked wheat (it's raw/inedible - the live rescue)
+        if (snap.wheatCount >= 3 || countItem(bot, 'wheat') >= 3) {
+          try { await bakeBreadFromWheat(bot, { isStopped, home: anchor }); await eatUp(bot) } catch (e) { dbg('  home-food: bake failed (' + e.message + ')') }
+          if (fedEnough()) return true
+        }
+        // last home resort: tend/harvest the farm, then eat what came off it
+        try { await tendWheatFarm(bot, { isStopped, say }); await eatUp(bot) } catch (e) { dbg('  home-food: farm tend failed (' + e.message + ')') }
+        if (fedEnough()) return true
+        // home came up dry - fall through to today's exact chain below (nothing lost)
+      }
+    }
+  }
   // 3) hunt what's visible (batch - one kill barely dents the deficit)
   try { for (let k = 0; k < 4 && foodCount(bot) < 5 && !isStopped(); k++) { if (!await huntForFood(bot, { isStopped, range: 32 })) break } } catch {}
   await cookIfRaw(); await eatUp(bot)

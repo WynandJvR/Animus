@@ -39,6 +39,9 @@ testserver/.console_history
 
 # misc
 logs/
+# compact rolling state time-series + supervisor heartbeat (runtime telemetry - live coords)
+logs/state-history.jsonl*
+bot/heartbeat.json
 *.pid
 
 # generated brain decision log (run data - player names/chat/coords)

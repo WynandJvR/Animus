@@ -27,6 +27,7 @@ const navigate = require('./navigate.js') // unified navigation (isRecovering ga
 const arbiter = require('./arbiter.js') // priority body-ownership: reflexes defer to a running navigation maneuver
 const access = require('./access.js')
 const schematic = require('./schematic.js')
+const loghistory = require('./loghistory.js') // compact rolling state time-series + heartbeat (observability)
 
 // Live brain settings the dashboard can change on the fly; brain-llm.js polls
 // GET /brain each tick and switches model / goal / on-off without a restart.
@@ -192,17 +193,36 @@ const log = []
 // build progress, deaths - the first place to look when asking "what happened?".
 const EVENTS_LOG = process.env.EVENTS_LOG || path.join(__dirname, '..', 'logs', 'bot-events.log') // env-overridable so a test instance doesn't interleave into the live flight recorder
 try { fs.mkdirSync(path.dirname(EVENTS_LOG), { recursive: true }) } catch {}
+let _logDrops = 0 // consecutive event-log writes lost (transient Windows file lock / EMFILE / ENOSPC / vanished dir)
 function fileLog (line) {
-  try {
+  const write = () => {
     try { if (fs.statSync(EVENTS_LOG).size > 5 * 1024 * 1024) fs.renameSync(EVENTS_LOG, EVENTS_LOG + '.old') } catch {}
     fs.appendFileSync(EVENTS_LOG, line + String.fromCharCode(10))
-  } catch {}
+  }
+  try { write() } catch {
+    // The sink threw - almost always a transient Windows lock (an editor/tail/AV
+    // holding the file with no share-write), EMFILE, or the logs/ dir was removed.
+    // ROOT of the old "went stale for hours" bug: the previous empty `catch {}`
+    // swallowed this and every subsequent line silently. Recreate the dir + retry
+    // ONCE; if it still fails, count the drop rather than crash the caller.
+    try { fs.mkdirSync(path.dirname(EVENTS_LOG), { recursive: true }); write() } catch { _logDrops++; return }
+  }
+  // Recovered after a stall: surface the gap IN the log so a post-mortem sees the
+  // hole instead of a silent multi-hour jump.
+  if (_logDrops > 0) {
+    const n = _logDrops; _logDrops = 0
+    try { fs.appendFileSync(EVENTS_LOG, `[${new Date().toISOString()}] (logsink) recovered after ${n} dropped line(s)` + String.fromCharCode(10)) } catch {}
+  }
 }
 function note (msg) {
   const line = `[${new Date().toISOString()}] ${msg}`
   log.push(line)
   if (log.length > 200) log.shift()
-  console.log(line)
+  // Isolate console.log: a broken supervisor stdout pipe (EPIPE, e.g. its window
+  // closed) throwing here must NOT abort note() before fileLog runs - that would
+  // stall the FILE while the in-memory /log ring stays current (the exact split
+  // symptom seen live). The file sink is the flight recorder; protect it.
+  try { console.log(line) } catch {}
   fileLog(line)
 }
 commands.setLogger(note) // build/provision progress lands in /log (GUI live panel), not chat
@@ -1753,3 +1773,32 @@ const controlHost = process.env.CONTROL_HOST || cfg.controlHost
 server.listen(controlPort, controlHost, () => {
   note(`control API on http://${controlHost}:${controlPort}`)
 })
+
+// ---------------------------------------------------------------------------
+// STATE-HISTORY recorder + supervisor heartbeat (observability; REDESIGN §8.1).
+// One compact flat JSON line every ~5s to logs/state-history.jsonl (size-rotated
+// at ~5 MB, one .old generation) - the consolidated, queryable time-series that
+// brain-decisions.jsonl (a 29 MB firehose) never gave us. Pure telemetry: it
+// reuses the same in-process snapshot the /state handler builds (commands.state),
+// never self-calls HTTP, never touches decision/survival logic, and any error is
+// swallowed so it can't harm the bot. STATE_HISTORY=0 disables (BRANCH_MINE-style).
+const HEARTBEAT_FILE = process.env.HEARTBEAT_FILE || path.join(__dirname, 'heartbeat.json')
+if (process.env.STATE_HISTORY !== '0') {
+  let hbLastPos = null
+  let hbLastProgressAt = Date.now()
+  const historyTick = () => {
+    try {
+      const sample = loghistory.compactSample(commands.state(bot), Date.now())
+      loghistory.appendSample(sample)
+      // lastProgressAt: advance when the body materially moved (>=1 block, 3-D) - a
+      // supervisor watching heartbeat.json can spot a wedged/frozen bot (pos static
+      // while connected) without parsing the whole history.
+      const p = sample.pos
+      if (p && hbLastPos && (Math.abs(p.x - hbLastPos.x) + Math.abs(p.y - hbLastPos.y) + Math.abs(p.z - hbLastPos.z)) >= 1) hbLastProgressAt = sample.t
+      if (p) hbLastPos = p
+      try { fs.writeFileSync(HEARTBEAT_FILE, JSON.stringify(Object.assign({}, sample, { connected: !!bot.entity, lastProgressAt: hbLastProgressAt }))) } catch {}
+    } catch { /* telemetry must never kill the bot */ }
+  }
+  const historyTimer = setInterval(historyTick, 5000)
+  if (historyTimer.unref) historyTimer.unref() // never hold the process open on this timer alone
+}

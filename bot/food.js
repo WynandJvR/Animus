@@ -76,4 +76,30 @@ function foodSupplyAction (hasFarm, hasKnownWater, hasNearAnimal) {
   return 'sweep'
 }
 
-module.exports = { DEFAULT_BUFFER, BAD_FOOD, RAW_COOKABLE_FOOD, foodTier, hasFoodSupply, needsFoodSupply, shouldSweepForFood, foodSupplyAction }
+// HOME FOOD FIRST (the "walk BACK home before wandering outward" decision). Live bug: a
+// starving bot 110b from its hut kept sweeping OUTWARD (scoutForFood) for new food while its
+// own bank (wheat + seeds) and farm sat at home - because the in-range bank withdraw silently
+// no-ops beyond ~64b and the chain then escalated hunt/farm/fish/scout, marching it further
+// away. This says: if we've drifted beyond withdraw range of home AND home holds USABLE food,
+// trek back and use what we own before any outward discovery. PURE (a snapshot in, go/no-go
+// out) so the ordering/thresholds are covered offline.
+//   distHome    blocks from the home anchor (hut / bed / opts.home)
+//   bankFoodPts cached edible-food points reachable at home (pack+bank; a cheap cached read)
+//   wheatCount  bank+pack wheat (>=3 wheat -> 1 bread, so raw-but-bakeable counts as usable)
+//   hasFarm     a standing/tendable wheat farm exists at home
+//   opts.range  withdraw range - beyond this the in-range bank read no-ops (default 48b)
+//   opts.foodFloor  a small edible-points floor so a token crumb doesn't trigger a long trek
+function shouldTrekHomeForFood ({ distHome, bankFoodPts, wheatCount, hasFarm } = {}, opts = {}) {
+  const range = opts.range != null ? opts.range : 48
+  const foodFloor = opts.foodFloor != null ? opts.foodFloor : 2
+  if (!(distHome != null && distHome > range)) return false        // already in withdraw range - the in-range steps handle it
+  const usable = (bankFoodPts || 0) > foodFloor ||                  // (a) real edible food banked
+                 (wheatCount || 0) >= 3 ||                          // (b) bakeable wheat: 3 wheat -> 1 bread
+                 !!hasFarm                                          // (c) a standing farm to tend/harvest
+  return usable                                                     // far + home has something worth the trek
+}
+
+// How many bread can we bake from N wheat (3 wheat -> 1 bread). PURE arithmetic, offline-tested.
+function breadFromWheat (wheatCount) { return Math.max(0, Math.floor((wheatCount || 0) / 3)) }
+
+module.exports = { DEFAULT_BUFFER, BAD_FOOD, RAW_COOKABLE_FOOD, foodTier, hasFoodSupply, needsFoodSupply, shouldSweepForFood, foodSupplyAction, shouldTrekHomeForFood, breadFromWheat }

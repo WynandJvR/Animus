@@ -66,5 +66,38 @@ t('foodSupplyAction: the discovery->action handoff (the live idle bug)', () => {
   assert.strictEqual(F.foodSupplyAction(false, false, false), 'sweep', 'nothing known -> sweep to discover')
 })
 
+t('shouldTrekHomeForFood: FAR + home has food => go; NEAR => no-go; FAR + dry => no-go', () => {
+  // FAR (beyond withdraw range) + real banked food => trek home
+  assert.strictEqual(F.shouldTrekHomeForFood({ distHome: 110, bankFoodPts: 12, wheatCount: 0, hasFarm: false }), true, 'far + banked food -> go home')
+  // NEAR (in withdraw range) => never trek, the in-range steps handle it
+  assert.strictEqual(F.shouldTrekHomeForFood({ distHome: 30, bankFoodPts: 20, wheatCount: 9, hasFarm: true }), false, 'in range -> no trek (the live no-op was BEYOND range)')
+  assert.strictEqual(F.shouldTrekHomeForFood({ distHome: 48, bankFoodPts: 20, wheatCount: 9, hasFarm: true }), false, 'exactly at range -> still in range, no trek')
+  // FAR + home truly dry => no-go (don't bounce home to nothing)
+  assert.strictEqual(F.shouldTrekHomeForFood({ distHome: 110, bankFoodPts: 0, wheatCount: 0, hasFarm: false }), false, 'far + dry home -> fall through to today\'s chain')
+  assert.strictEqual(F.shouldTrekHomeForFood({ distHome: 110, bankFoodPts: 2, wheatCount: 2, hasFarm: false }), false, 'a crumb (<=floor) + 2 wheat (<3) + no farm -> not worth the trek')
+})
+
+t('shouldTrekHomeForFood: >=3 wheat counts as food; a standing farm counts as food', () => {
+  // the ACTUAL live rescue: bank wheat is raw/inedible (bankFoodPts=0) but 3 wheat -> 1 bread
+  assert.strictEqual(F.shouldTrekHomeForFood({ distHome: 110, bankFoodPts: 0, wheatCount: 3, hasFarm: false }), true, '3 bakeable wheat -> usable, go home to bake')
+  assert.strictEqual(F.shouldTrekHomeForFood({ distHome: 110, bankFoodPts: 0, wheatCount: 5, hasFarm: false }), true, '5 wheat -> usable')
+  // a standing farm alone justifies the trek (harvest/tend it)
+  assert.strictEqual(F.shouldTrekHomeForFood({ distHome: 110, bankFoodPts: 0, wheatCount: 0, hasFarm: true }), true, 'a standing farm -> go home to harvest')
+  // tunable range: HOME_FOOD_RANGE via opts.range
+  assert.strictEqual(F.shouldTrekHomeForFood({ distHome: 40, bankFoodPts: 20, wheatCount: 0, hasFarm: false }, { range: 24 }), true, 'range is tunable (env HOME_FOOD_RANGE)')
+  // missing distHome => never trek (defensive)
+  assert.strictEqual(F.shouldTrekHomeForFood({ bankFoodPts: 20, wheatCount: 9, hasFarm: true }), false, 'no distHome known -> do not trek')
+})
+
+t('breadFromWheat: 3 wheat -> 1 bread (floor), sub-3 -> 0, negative/garbage -> 0', () => {
+  assert.strictEqual(F.breadFromWheat(0), 0, '0 wheat -> 0 bread')
+  assert.strictEqual(F.breadFromWheat(2), 0, '2 wheat -> 0 bread (need 3)')
+  assert.strictEqual(F.breadFromWheat(3), 1, '3 wheat -> 1 bread')
+  assert.strictEqual(F.breadFromWheat(5), 1, '5 wheat -> 1 bread (floor)')
+  assert.strictEqual(F.breadFromWheat(9), 3, '9 wheat -> 3 bread')
+  assert.strictEqual(F.breadFromWheat(-4), 0, 'garbage/negative -> 0 (never negative)')
+  assert.strictEqual(F.breadFromWheat(undefined), 0, 'undefined -> 0')
+})
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall food-security tests passed')
 process.exit(failures ? 1 : 0)
