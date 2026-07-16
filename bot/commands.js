@@ -166,6 +166,45 @@ function shouldChaseGrave ({ grave, pos, food, threat, escaping, home, maxDist, 
   if (near > MAXD) return { chase: false, reason: `grave ${Math.round(near)}b away (> ${MAXD}) across open ground - defer/write off, not worth starving for` }
   return { chase: true, reason: `safe + fed (food ${food}), grave ${Math.round(near)}b within reach` }
 }
+// PURE grave-loot verdict (fix #12, DESIGN-fix12-grave-stragglers.md §4.1; offline-testable, no
+// bot handle, no clock). Given the plain-data outcome of a grave-loot attempt, decide whether the
+// grave is genuinely emptied (mark retrieved) or an honest partial (leave it - the scheduler's
+// 300s cooldown re-dispatches and finishes it). The single unverified GUI sweep it replaces once
+// looted 212 items, left 2 stragglers, and marked the grave done forever.
+//   in : { sawWindow, emptied, remaining:[{name,count}], exhausted, freeSlots,
+//          gained, recorded, gotNotable, gravePresent, looseNearby }
+//   out: { mark, kind:'full'|'partial'|'capacity'|'writeoff-junk'|'loose-only'|'gone'|'unopened' }
+function graveLootVerdict ({ sawWindow, emptied, remaining, exhausted, freeSlots, gained, recorded, gotNotable, gravePresent, looseNearby } = {}) {
+  const rem = Array.isArray(remaining) ? remaining : []
+  // notableTier = the verbatim recordDeath notable regex (gear/ingots/gems are NEVER written off).
+  const notableTier = n => /_(pickaxe|axe|sword|shovel|hoe|helmet|chestplate|leggings|boots)$|_ingot$|^diamond|^emerald/.test(n || '')
+  // rung 1: no recorded notable back in the pack -> never mark from here; the case site keeps
+  // today's :1570/:1575 tails (and its own gone-mark) for the no-notable / gained-0 path.
+  if (!gotNotable) return { mark: false, kind: 'partial' }
+  if (sawWindow) {
+    // rung 2: window emptied + a FRESH scan says the grave is gone -> genuinely full.
+    if (gained > 0 && emptied && !gravePresent) return { mark: true, kind: 'full' }
+    if (!emptied) {
+      // rung 3: pack is full -> honest capacity stop (never a write-off), come back after off-loading.
+      if (freeSlots <= 0) return { mark: false, kind: 'capacity' }
+      // rung 4: reachable gear/ingots/gems left behind -> NEVER done, whatever the gained ratio.
+      if (rem.some(r => notableTier(r.name))) return { mark: false, kind: 'partial' }
+      const remCount = rem.reduce((s, r) => s + (r.count || 0), 0)
+      // rung 5: retries exhausted, pack has room, only a handful of junk-tier slots the server
+      // refuses -> bounded honest write-off (the <10 bulk line mirrors graveWorthIt).
+      if (exhausted && freeSlots > 0 && remCount < 10) return { mark: true, kind: 'writeoff-junk' }
+      // rung 6: still-loaded window, not a bounded junk write-off -> honest partial.
+      return { mark: false, kind: 'partial' }
+    }
+    // emptied window but the grave is still present (AxGraves race) or nothing gained -> conservative partial.
+    return { mark: false, kind: 'partial' }
+  }
+  // rung 7: no GUI (attack-path grave) - presence re-verified by the fresh scan, no ratio heuristic.
+  if (gained > 0 && !gravePresent && !looseNearby) return { mark: true, kind: 'full' }
+  if (gained > 0 && gravePresent) return { mark: false, kind: 'loose-only' }
+  if (gained === 0 && !gravePresent && !looseNearby) return { mark: true, kind: 'gone' }
+  return { mark: false, kind: 'unopened' }
+}
 // GRAVES SNAPSHOT (S4, DESIGN §5): export the death ledger in the plain-data shape the pure
 // scheduler consumes (scheduler.pickJob / admissible read snap.graves[]). Walks the ledger with
 // the SAME worth+age filter as bestGrave - but INCLUDING dangerous graves (the shape carries the
@@ -1518,6 +1557,20 @@ async function handle (bot, line, opts = {}) {
       let cands = graveScan()
       for (let w = 0; w < 10 && !cands.length; w++) { await new Promise(r => setTimeout(r, 500)); cands = graveScan() }
       dbg('recover: ' + cands.length + ' grave-candidate entities near ' + d.x + ',' + d.y + ',' + d.z + (cands.length ? ' (' + cands.map(e => e.name).join(',') + ')' : ''))
+      // fix #12 (GRAVE_LOOT_VERIFY, default on): a single unverified GUI sweep silently abandoned
+      // raced shift-clicks (212 looted, 2 stragglers left, grave marked done forever). Sweep each
+      // grave window up to GRAVE_LOOT_PASSES times, re-reading filled slots between passes, and
+      // mark retrieved only when the window empties + a FRESH entity re-scan confirms it's gone
+      // (or a bounded junk-only remainder no retry could move). GRAVE_LOOT_VERIFY=0 rolls back to
+      // HEAD's single sweep + recorded*0.5 heuristic byte-equivalently. DESIGN-fix12-grave-stragglers.md.
+      const GRAVE_LOOT_VERIFY_ON = process.env.GRAVE_LOOT_VERIFY !== '0'
+      const GRAVE_LOOT_PASSES = Number(process.env.GRAVE_LOOT_PASSES || 4)
+      const GRAVE_LOOT_MS = Number(process.env.GRAVE_LOOT_MS || 25000)
+      let sawWindow = false      // any cand opened a GUI
+      let allEmptied = true      // every opened window ended empty (AND across cands)
+      const remaining = []       // {name,count} left in windows at close (concat across cands)
+      let lootExhausted = false  // a pass loop burned its retry budget with slots still filled
+      let lootPasses = 0         // total sweep passes (dbg suffix)
       for (const g of cands) {
         // no early-exit on item gain: a coincidental pickup (the operator dropped food
         // mid-recovery, live) aborted the loop before the grave was ever CLICKED
@@ -1537,10 +1590,55 @@ async function handle (bot, line, opts = {}) {
         // grave GUI variant: shift-click every filled container slot into the pack
         const w = bot.currentWindow
         if (w) {
-          try {
-            const end = w.inventoryStart != null ? w.inventoryStart : w.slots.length - 36
-            for (let s = 0; s < end; s++) { if (w.slots[s]) { try { await bot.clickWindow(s, 0, 1) } catch {} ; await new Promise(r => setTimeout(r, 120)) } }
-          } finally { try { bot.closeWindow(w) } catch {} }
+          const end = w.inventoryStart != null ? w.inventoryStart : w.slots.length - 36
+          const filled = () => { const out = []; for (let s = 0; s < end; s++) if (w.slots[s]) out.push(s); return out }
+          if (!GRAVE_LOOT_VERIFY_ON) {
+            // ROLLBACK (GRAVE_LOOT_VERIFY=0): today's single unverified sweep, byte-equivalent to HEAD.
+            try {
+              for (let s = 0; s < end; s++) { if (w.slots[s]) { try { await bot.clickWindow(s, 0, 1) } catch {} ; await new Promise(r => setTimeout(r, 120)) } }
+            } finally { try { bot.closeWindow(w) } catch {} }
+          } else {
+            // BOUNDED retry loop: same shift-click + close, re-reading filled slots between passes so
+            // a raced/refused click is retried. Triple-bounded (pass count, wall clock, two
+            // zero-progress passes) - can never spin on a stuck grave.
+            sawWindow = true
+            const loopStart = Date.now()
+            let zeroProgress = 0
+            let prevRemain = filled().length
+            let emptiedHere = false
+            try {
+              while (true) {
+                if (bot.currentWindow !== w) break // AxGraves auto-closes the GUI when it empties/despawns
+                const cur = filled()
+                if (cur.length === 0) { emptiedHere = true; break }
+                let free = 36; try { free = bot.inventory.emptySlotCount() } catch {}
+                if (free <= 0) break // capacity stop - the verdict handles it
+                if (lootPasses >= GRAVE_LOOT_PASSES) break
+                if ((Date.now() - loopStart) > GRAVE_LOOT_MS) break
+                if (zeroProgress >= 2) break // server is refusing these exact slots - a 5th pass is churn
+                for (const s of cur) { if (w.slots[s]) { try { await bot.clickWindow(s, 0, 1) } catch {} ; await new Promise(r => setTimeout(r, 120)) } }
+                lootPasses++
+                await new Promise(r => setTimeout(r, 300)) // let server slot re-syncs land before re-reading
+                const after = (bot.currentWindow === w) ? filled().length : 0
+                let freeNow = 36; try { freeNow = bot.inventory.emptySlotCount() } catch {}
+                dbg('recover: loot pass ' + lootPasses + ': ' + cur.length + ' -> ' + after + ' slots remain (free ' + freeNow + ')')
+                if (after >= prevRemain) zeroProgress++; else zeroProgress = 0
+                prevRemain = after
+              }
+              // record plain data for the verdict (READ before closing the window)
+              if (bot.currentWindow === w) {
+                const rem = filled()
+                if (rem.length === 0) { emptiedHere = true } else {
+                  for (const s of rem) { const it = w.slots[s]; if (it) remaining.push({ name: it.name, count: it.count }) }
+                }
+                if (rem.length > 0 && (lootPasses >= GRAVE_LOOT_PASSES || (Date.now() - loopStart) > GRAVE_LOOT_MS || zeroProgress >= 2)) lootExhausted = true
+              } else if (prevRemain > 0) {
+                // window vanished mid-pass with slots unread: emptied only if the last read was 0
+                emptiedHere = false
+              } else { emptiedHere = true }
+              if (!emptiedHere) allEmptied = false
+            } finally { try { bot.closeWindow(w) } catch {} }
+          }
         }
         await collectNearbyDrops(bot, { radius: 12, max: 40, deadlineMs: 30000 })
       }
@@ -1548,25 +1646,60 @@ async function handle (bot, line, opts = {}) {
       const graveBlk = bot.blockAt(new Vec3(d.x, d.y, d.z)) || bot.blockAt(new Vec3(d.x, d.y + 1, d.z))
       if (invTotal() === before && graveBlk && graveBlk.name !== 'air') { try { await bot.activateBlock(graveBlk) } catch {} ; await collectNearbyDrops(bot, { radius: 12, max: 40, deadlineMs: 30000 }) }
       const gained = invTotal() - before
-      const stillSomething = cands.length > 0 || Object.values(bot.entities || {}).some(e => e && e.name === 'item' && e.position && e.position.distanceTo(bot.entity.position) < 8)
+      const looseNearby = Object.values(bot.entities || {}).some(e => e && e.name === 'item' && e.position && e.position.distanceTo(bot.entity.position) < 8)
       // Success means getting the GEAR back, not just any items: the operator dropping
       // food mid-recovery produced "+20 items" while the armor stayed in the grave, and
       // the grave got marked retrieved (live). Require at least one recorded notable.
       const wantNotable = d.items && d.items.notable && d.items.notable.length
       const gotNotable = !wantNotable || (bot.inventory ? bot.inventory.items() : []).some(i => d.items.notable.includes(i.name))
-      dbg('recover: gained ' + gained + ' items, notable recovered: ' + gotNotable + ' (grave still present: ' + stillSomething + ')')
-      if (gained > 0 && gotNotable) {
-        // PARTIAL recovery with the grave still standing: tools back but a fraction of
-        // the recorded count while the grave holds the rest = NOT done (live: tools came
-        // back, ledger marked done, 50 oak despawned in the still-standing grave).
-        const recorded = (d.items && d.items.count) || 0
-        if (stillSomething && recorded > 0 && gained < recorded * 0.5) {
-          return `got some of my stuff at ${d.x},${d.y},${d.z} (+${gained} of ~${recorded}) - the grave still has the rest, going back for it` // NOT retrieved
+      const recorded = (d.items && d.items.count) || 0
+      if (!GRAVE_LOOT_VERIFY_ON) {
+        // ROLLBACK (GRAVE_LOOT_VERIFY=0): today's stale-cands presence + the recorded*0.5
+        // heuristic, byte-equivalent to HEAD ba413bb.
+        const stillSomething = cands.length > 0 || looseNearby
+        dbg('recover: gained ' + gained + ' items, notable recovered: ' + gotNotable + ' (grave still present: ' + stillSomething + ')')
+        if (gained > 0 && gotNotable) {
+          if (stillSomething && recorded > 0 && gained < recorded * 0.5) {
+            return `got some of my stuff at ${d.x},${d.y},${d.z} (+${gained} of ~${recorded}) - the grave still has the rest, going back for it` // NOT retrieved
+          }
+          d.retrieved = true; persistDeath()
+          const left = unretrievedGraves()
+          return `got my stuff back at ${d.x},${d.y},${d.z} (+${gained} items)${left ? ` - ${left} more grave${left > 1 ? 's' : ''} to visit` : ''}`
         }
-        d.retrieved = true; persistDeath()
-        const left = unretrievedGraves()
-        return `got my stuff back at ${d.x},${d.y},${d.z} (+${gained} items)${left ? ` - ${left} more grave${left > 1 ? 's' : ''} to visit` : ''}`
+        if (gained > 0 && stillSomething) return `picked up ${gained} loose items at ${d.x},${d.y},${d.z} but my gear is still in the grave - it won't open` // NOT retrieved
+        if (!stillSomething) {
+          d.retrieved = true; persistDeath()
+          return `nothing left where i died at ${d.x},${d.y},${d.z} - it's gone`
+        }
+        return `my grave at ${d.x},${d.y},${d.z} is right here but it won't open - my stuff's stuck in it` // NOT marked retrieved - worth another try
       }
+      // GRAVE_LOOT_VERIFY on: verify emptiness by a FRESH entity re-scan (give AxGraves a tick to
+      // despawn an emptied grave's display entities), then let the pure verdict decide marking.
+      await new Promise(r => setTimeout(r, 1000))
+      const graveAfter = graveScan()
+      const stillSomething = graveAfter.length > 0 || looseNearby
+      let freeSlots = 36; try { freeSlots = bot.inventory.emptySlotCount() } catch {}
+      const remainingCount = remaining.reduce((s, r) => s + (r.count || 0), 0)
+      dbg('recover: gained ' + gained + ' items, notable recovered: ' + gotNotable + ' (grave still present: ' + stillSomething + ') (window emptied: ' + allEmptied + ', remaining: ' + remainingCount + ', passes: ' + lootPasses + ')')
+      const verdict = graveLootVerdict({ sawWindow, emptied: allEmptied, remaining, exhausted: lootExhausted, freeSlots, gained, recorded, gotNotable, gravePresent: graveAfter.length > 0, looseNearby })
+      if (gained > 0 && gotNotable) {
+        if (verdict.kind === 'capacity') return `got some of my stuff at ${d.x},${d.y},${d.z} (+${gained}) - pack's full, the grave still has the rest, going back for it` // NOT retrieved - come back after off-loading
+        if (verdict.kind === 'writeoff-junk') {
+          d.retrieved = true; persistDeath()
+          const left = unretrievedGraves()
+          return `got my stuff back at ${d.x},${d.y},${d.z} (+${gained} items) - left ${remainingCount} junk bits i couldn't pull${left ? ` - ${left} more grave${left > 1 ? 's' : ''} to visit` : ''}`
+        }
+        if (verdict.kind === 'loose-only') return `picked up ${gained} loose items at ${d.x},${d.y},${d.z} but my gear is still in the grave - it won't open` // NOT retrieved
+        if (verdict.mark) {
+          d.retrieved = true; persistDeath()
+          const left = unretrievedGraves()
+          return `got my stuff back at ${d.x},${d.y},${d.z} (+${gained} items)${left ? ` - ${left} more grave${left > 1 ? 's' : ''} to visit` : ''}`
+        }
+        // honest partial (gear/bulk left, window not emptied): NOT retrieved - the scheduler's 300s
+        // cooldown re-dispatches and finishes it, exactly as today's <50% path.
+        return `got some of my stuff at ${d.x},${d.y},${d.z} (+${gained} of ~${recorded}) - the grave still has the rest, going back for it`
+      }
+      // no recorded-notable back / gained 0: today's honest tails (:1570/:1571/:1575), fresh presence.
       if (gained > 0 && stillSomething) return `picked up ${gained} loose items at ${d.x},${d.y},${d.z} but my gear is still in the grave - it won't open` // NOT retrieved
       if (!stillSomething) {
         d.retrieved = true; persistDeath()
@@ -3272,4 +3405,4 @@ async function resumeBuild (bot) {
   }
 }
 
-module.exports = { handle, state, setupMovements, eatFood, placeTorchNearby, isBusy, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume, flagSpawnSuspect, worthwhileGrave, shouldChaseGrave, gravesSnapshot, activityInfo, preemptForSurvival, setDebugSink, finishDisposition, resumeHoldRemaining, markResumePaused, touchProgress, progressInfo, markStalled, _resetProgress }
+module.exports = { handle, state, setupMovements, eatFood, placeTorchNearby, isBusy, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume, flagSpawnSuspect, worthwhileGrave, shouldChaseGrave, graveLootVerdict, gravesSnapshot, activityInfo, preemptForSurvival, setDebugSink, finishDisposition, resumeHoldRemaining, markResumePaused, touchProgress, progressInfo, markStalled, _resetProgress }

@@ -201,5 +201,123 @@ const near = (a, b, tol) => Math.abs(a - b) <= (tol == null ? 0.5 : tol)
   eq(Sched.admissible('survival', snap).allow, true, 'a recover command is admitted for the livelock snapshot (the muzzle is gone)')
 }
 
+// ============================================================================================
+// fix #12: commands.graveLootVerdict() - the PURE emptiness-verified grave-loot verdict that
+// replaced the recorded*0.5 heuristic (212 looted, 2 stragglers left, grave marked done forever).
+// DESIGN-fix12-grave-stragglers.md §4.1 decision table. Plain data in, {mark,kind} out.
+// ============================================================================================
+const V = C.graveLootVerdict
+// (a) window emptied + notable back + FRESH scan empty -> full, MARK (the genuinely-clean case)
+{
+  const r = V({ sawWindow: true, emptied: true, remaining: [], exhausted: false, freeSlots: 19, gained: 214, recorded: 214, gotNotable: true, gravePresent: false, looseNearby: false })
+  eq(r.kind, 'full', 'emptied + notable + fresh-scan-empty -> full')
+  eq(r.mark, true, 'full -> MARK')
+}
+// (b) THE LIVE INCIDENT: 2 planks left, pack room, loop NOT exhausted -> partial, NO mark
+{
+  const r = V({ sawWindow: true, emptied: false, remaining: [{ name: 'oak_planks', count: 2 }], exhausted: false, freeSlots: 19, gained: 212, recorded: 214, gotNotable: true, gravePresent: true, looseNearby: false })
+  eq(r.kind, 'partial', '2 planks remain, freeSlots 19, not exhausted -> partial (the live incident)')
+  eq(r.mark, false, 'partial -> NO mark (grave stays for the 300s re-dispatch)')
+}
+// (c) same 2 planks but retries EXHAUSTED, pack room -> writeoff-junk, MARK (bounded write-off)
+{
+  const r = V({ sawWindow: true, emptied: false, remaining: [{ name: 'oak_planks', count: 2 }], exhausted: true, freeSlots: 19, gained: 212, recorded: 214, gotNotable: true, gravePresent: true, looseNearby: false })
+  eq(r.kind, 'writeoff-junk', '2 junk planks the server refuses after every retry -> writeoff-junk')
+  eq(r.mark, true, 'writeoff-junk -> MARK (not a cooldown-cycle forever)')
+}
+// (d) remaining contains iron_ingot, EXHAUSTED -> partial, NO mark (gear is NEVER written off)
+{
+  const r = V({ sawWindow: true, emptied: false, remaining: [{ name: 'iron_ingot', count: 3 }], exhausted: true, freeSlots: 19, gained: 100, recorded: 120, gotNotable: true, gravePresent: true, looseNearby: false })
+  eq(r.kind, 'partial', 'iron_ingot left behind, even exhausted -> partial (gear never written off)')
+  eq(r.mark, false, 'gear remainder -> NO mark')
+}
+// (d2) remaining contains a tool (diamond_pickaxe), exhausted -> partial, NO mark
+{
+  const r = V({ sawWindow: true, emptied: false, remaining: [{ name: 'diamond_pickaxe', count: 1 }], exhausted: true, freeSlots: 19, gained: 50, recorded: 60, gotNotable: true, gravePresent: true, looseNearby: false })
+  eq(r.kind, 'partial', 'diamond_pickaxe left behind, exhausted -> partial (tool never written off)')
+  eq(r.mark, false, 'tool remainder -> NO mark')
+}
+// (e) freeSlots 0 with anything remaining -> capacity, NO mark (honest "pack's full")
+{
+  const r = V({ sawWindow: true, emptied: false, remaining: [{ name: 'cobblestone', count: 40 }], exhausted: false, freeSlots: 0, gained: 100, recorded: 200, gotNotable: true, gravePresent: true, looseNearby: false })
+  eq(r.kind, 'capacity', 'freeSlots 0 + items remain -> capacity')
+  eq(r.mark, false, 'capacity -> NO mark (come back after off-loading)')
+}
+// (e2) capacity beats the junk-writeoff: a full pack is never a write-off even if the remainder is junk+small
+{
+  const r = V({ sawWindow: true, emptied: false, remaining: [{ name: 'dirt', count: 2 }], exhausted: true, freeSlots: 0, gained: 100, recorded: 110, gotNotable: true, gravePresent: true, looseNearby: false })
+  eq(r.kind, 'capacity', 'freeSlots 0 outranks the junk write-off -> capacity, NO mark')
+  eq(r.mark, false, 'capacity (pack full) -> NO mark')
+}
+// (f) !gotNotable -> never mark from here (case site keeps its own tails)
+{
+  const r = V({ sawWindow: true, emptied: true, remaining: [], exhausted: false, freeSlots: 19, gained: 5, recorded: 100, gotNotable: false, gravePresent: false, looseNearby: false })
+  eq(r.mark, false, '!gotNotable -> NEVER mark from the verdict (operator-dropped-food fix intact)')
+}
+// (g) no-window + gained>0 + grave still present -> loose-only, NO mark
+{
+  const r = V({ sawWindow: false, emptied: false, remaining: [], exhausted: false, freeSlots: 19, gained: 8, recorded: 30, gotNotable: true, gravePresent: true, looseNearby: false })
+  eq(r.kind, 'loose-only', 'no GUI + gained loose items + grave present -> loose-only')
+  eq(r.mark, false, 'loose-only -> NO mark')
+}
+// (h) no-window + nothing present + gained 0 -> gone, MARK
+{
+  const r = V({ sawWindow: false, emptied: false, remaining: [], exhausted: false, freeSlots: 19, gained: 0, recorded: 30, gotNotable: true, gravePresent: false, looseNearby: false })
+  eq(r.kind, 'gone', 'no GUI + gained 0 + nothing present -> gone')
+  eq(r.mark, true, 'gone -> MARK (do not chase an empty grave forever)')
+}
+// (h2) no-window + nothing present + gained>0 -> full, MARK
+{
+  const r = V({ sawWindow: false, emptied: false, remaining: [], exhausted: false, freeSlots: 19, gained: 12, recorded: 12, gotNotable: true, gravePresent: false, looseNearby: false })
+  eq(r.kind, 'full', 'no GUI + gained>0 + nothing present (attack-path pickup) -> full')
+  eq(r.mark, true, 'full (no window) -> MARK')
+}
+// (h3) no-window + gained 0 + grave present -> unopened, NO mark (worth another try)
+{
+  const r = V({ sawWindow: false, emptied: false, remaining: [], exhausted: false, freeSlots: 19, gained: 0, recorded: 30, gotNotable: true, gravePresent: true, looseNearby: false })
+  eq(r.kind, 'unopened', "no GUI + gained 0 + grave present -> unopened (won't open, retry)")
+  eq(r.mark, false, 'unopened -> NO mark')
+}
+// (i) BULK junk (count >= 10) exhausted -> partial, NO mark (a real pile is worth another trip)
+{
+  const r = V({ sawWindow: true, emptied: false, remaining: [{ name: 'cobblestone', count: 32 }], exhausted: true, freeSlots: 19, gained: 100, recorded: 200, gotNotable: true, gravePresent: true, looseNearby: false })
+  eq(r.kind, 'partial', 'bulk junk (>=10) even exhausted -> partial (a real pile is worth a trip)')
+  eq(r.mark, false, 'bulk remainder -> NO mark')
+}
+// (i2) writeoff-junk needs BOTH exhausted AND <10: a small junk remainder NOT exhausted -> partial
+{
+  const r = V({ sawWindow: true, emptied: false, remaining: [{ name: 'oak_planks', count: 2 }], exhausted: false, freeSlots: 19, gained: 200, recorded: 202, gotNotable: true, gravePresent: true, looseNearby: false })
+  eq(r.kind, 'partial', 'small junk remainder but NOT exhausted -> partial (retry, do not write off yet)')
+}
+// (j) emptied window but the fresh scan STILL sees the grave (AxGraves race) -> partial, NO mark
+{
+  const r = V({ sawWindow: true, emptied: true, remaining: [], exhausted: false, freeSlots: 19, gained: 214, recorded: 214, gotNotable: true, gravePresent: true, looseNearby: false })
+  eq(r.kind, 'partial', 'window emptied but fresh scan still sees the grave (race) -> partial, NO mark')
+  eq(r.mark, false, 'ambiguous standing grave -> NO mark (conservative)')
+}
+
+// ---- R1 STRING CONTRACT: index.js:~1173 reads /got my stuff back|nothing left where i died/i to
+// decide recover success. Every MARKING verdict's case-site string must match it; every NON-marking
+// (partial) string must NOT (so the grave stays unretrieved for the 300s cooldown re-dispatch).
+{
+  const R1 = /got my stuff back|nothing left where i died/i
+  const x = 1, y = 2, z = 3, gained = 5, recorded = 10, remainingCount = 2, left = 0
+  // exact strings the recover case returns per verdict kind:
+  const strFull = `got my stuff back at ${x},${y},${z} (+${gained} items)${left ? ` - ${left} more grave to visit` : ''}`
+  const strWriteoff = `got my stuff back at ${x},${y},${z} (+${gained} items) - left ${remainingCount} junk bits i couldn't pull`
+  const strGone = `nothing left where i died at ${x},${y},${z} - it's gone`
+  const strCapacity = `got some of my stuff at ${x},${y},${z} (+${gained}) - pack's full, the grave still has the rest, going back for it`
+  const strPartial = `got some of my stuff at ${x},${y},${z} (+${gained} of ~${recorded}) - the grave still has the rest, going back for it`
+  const strLoose = `picked up ${gained} loose items at ${x},${y},${z} but my gear is still in the grave - it won't open`
+  const strUnopened = `my grave at ${x},${y},${z} is right here but it won't open - my stuff's stuck in it`
+  eq(R1.test(strFull), true, 'R1: full string matches success regex (ledger + regex agree)')
+  eq(R1.test(strWriteoff), true, 'R1: writeoff-junk string matches (prefix "got my stuff back" - no pointless cooldown)')
+  eq(R1.test(strGone), true, 'R1: gone string matches success regex')
+  eq(R1.test(strCapacity), false, 'R1: capacity string does NOT match (grave re-dispatched after cooldown)')
+  eq(R1.test(strPartial), false, 'R1: partial string does NOT match (grave stays unretrieved)')
+  eq(R1.test(strLoose), false, 'R1: loose-only string does NOT match')
+  eq(R1.test(strUnopened), false, 'R1: unopened string does NOT match')
+}
+
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)
