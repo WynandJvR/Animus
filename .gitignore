@@ -61,3 +61,6 @@ bot/chest-cache.json
 bot/.*-tmp.js
 bot/scaffold-trail.json
 bot/scaffold-registry.json
+
+# design/planning docs - kept locally, not in git
+/design-docs/
