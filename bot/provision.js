@@ -3936,6 +3936,8 @@ async function schedulerState (bot) {
     const a = commands.activityInfo && commands.activityInfo()
     if (a && a.name) {
       s.activeJob = { name: a.name, cls: scheduler.commandClass(a.name), startedAt: a.startedAt, lastProgressAt: null, blockedOn: null }
+    } else if (isRecoveringDegraded()) {
+      s.activeJob = { name: 'recoveryLadder', cls: 'survival', startedAt: null, lastProgressAt: null, blockedOn: null }
     } else if (isSecuringFood()) {
       s.activeJob = { name: 'secureFood', cls: 'survival', startedAt: null, lastProgressAt: null, blockedOn: null }
     } else if (isRecoveringHp()) {
@@ -4069,7 +4071,7 @@ async function bakeBreadFromWheat (bot, opts = {}) {
 let _securingFood = false
 function isSecuringFood () { return _securingFood }
 async function secureFood (bot, opts = {}) {
-  if (_securingFood) return false
+  if (_securingFood) return { fed: false, blockedOn: 'busy' }
   _securingFood = true
   try { return await secureFoodInner(bot, opts) } finally { _securingFood = false }
 }
@@ -4085,7 +4087,7 @@ async function secureFoodInner (bot, opts = {}) {
   const comfortable = opts.comfortable != null ? opts.comfortable : 18
   const fedEnough = () => bot.food != null && bot.food >= comfortable
   let triedHomeFood = false // HOME FOOD FIRST: at most ONE home trek per call (loop-safe)
-  if (fedEnough()) return true
+  if (fedEnough()) return { fed: true, blockedOn: null }
   // EATING MUST WIN over a stalled brain goal: the bot idled at food=0 stuck in a stalled
   // item-recovery `travel` while food sat in its chest (live). Drop any lingering goal so the
   // eat -> withdraw -> cook steps below own the body and can walk to the bank/furnace.
@@ -4103,7 +4105,7 @@ async function secureFoodInner (bot, opts = {}) {
     if (!hasReady && hasRaw) await cookIfRaw()
   } catch {}
   await eatUp(bot)
-  if (fedEnough()) return true
+  if (fedEnough()) return { fed: true, blockedOn: null }
   // 1) the pantry: withdraw banked food. FORCE A FRESH chest read (opts.forceFresh) - a stale
   // cache reported the bank empty for 11h and the bot starved AT its own chest without ever
   // re-opening it (live). A hungry bot near its bank must really open it before giving up.
@@ -4114,16 +4116,16 @@ async function secureFoodInner (bot, opts = {}) {
     // last-resort starving fallback (eatBestFood already gates raw meat to food<=6).
     if (got) { dbg('secureFood: withdrew ' + got + ' food from the bank'); await cookIfRaw(); await eatUp(bot) }
   } catch (e) { dbg('secureFood: bank check failed (' + e.message + ')') }
-  if (fedEnough()) return true
+  if (fedEnough()) return { fed: true, blockedOn: null }
   // 2) raw meat in the pack + a furnace in reach -> cook (3x the food value of raw)
   await cookIfRaw(); await eatUp(bot)
-  if (fedEnough()) return true
+  if (fedEnough()) return { fed: true, blockedOn: null }
   // CHEAP food (pack/bank/cook) is drained. Only GENUINE hunger (<= the acquire trigger)
   // justifies the EXPENSIVE discovery below (hunt/farm/fish/scout) - a moderately-fed bot
   // (e.g. food 15) must not go farming every planner round for the last few points. It eats
   // to comfortable from ready food when it can, and only truly hungry does it go get more.
   const acquireTrigger = opts.threshold != null ? opts.threshold : 12
-  if ((bot.food ?? 20) > acquireTrigger) { dbg('secureFood: food=' + bot.food + ' > acquire-trigger ' + acquireTrigger + ' and ready food drained - not hunting/farming for the last points'); return true }
+  if ((bot.food ?? 20) > acquireTrigger) { dbg('secureFood: food=' + bot.food + ' > acquire-trigger ' + acquireTrigger + ' and ready food drained - not hunting/farming for the last points'); return { fed: true, blockedOn: null } }
   // 2.5) HOME FOOD FIRST (HOME_FOOD_FIRST=0 restores today's behavior). Step 1's bank withdraw
   // is RANGE-BOUNDED (maxDist 64): once the bot has drifted beyond it, that read silently
   // no-ops and the chain below marches OUTWARD (scout) hunting NEW food while the bot's own
@@ -4156,15 +4158,15 @@ async function secureFoodInner (bot, opts = {}) {
           const got = await require('./resources.js').ensureFood(bot, { near: anchor, threshold: 20, minPack: 1, maxDist: 64, forceFresh: true })
           if (got) { dbg('  home-food: withdrew ' + got + ' food from the bank'); await cookIfRaw(); await eatUp(bot) }
         } catch (e) { dbg('  home-food: pantry failed (' + e.message + ')') }
-        if (fedEnough()) return true
+        if (fedEnough()) return { fed: true, blockedOn: null }
         // still hungry: BAKE the banked wheat (it's raw/inedible - the live rescue)
         if (snap.wheatCount >= 3 || countItem(bot, 'wheat') >= 3) {
           try { await bakeBreadFromWheat(bot, { isStopped, home: anchor }); await eatUp(bot) } catch (e) { dbg('  home-food: bake failed (' + e.message + ')') }
-          if (fedEnough()) return true
+          if (fedEnough()) return { fed: true, blockedOn: null }
         }
         // last home resort: tend/harvest the farm, then eat what came off it
         try { await tendWheatFarm(bot, { isStopped, say }); await eatUp(bot) } catch (e) { dbg('  home-food: farm tend failed (' + e.message + ')') }
-        if (fedEnough()) return true
+        if (fedEnough()) return { fed: true, blockedOn: null }
         // home came up dry - fall through to today's exact chain below (nothing lost)
       }
     }
@@ -4172,7 +4174,7 @@ async function secureFoodInner (bot, opts = {}) {
   // 3) hunt what's visible (batch - one kill barely dents the deficit)
   try { for (let k = 0; k < 4 && foodCount(bot) < 5 && !isStopped(); k++) { if (!await huntForFood(bot, { isStopped, range: 32 })) break } } catch {}
   await cookIfRaw(); await eatUp(bot)
-  if (fedEnough() || isStopped()) return fedEnough()
+  if (fedEnough() || isStopped()) return { fed: fedEnough(), blockedOn: fedEnough() ? null : (isStopped() ? 'stopped' : 'food') }
   // 4) the farm (harvest what's ripe / plant one by remembered water)
   try {
     // EXPAND, don't just tend: a standing-but-undersized farm (tend returns true after
@@ -4193,22 +4195,23 @@ async function secureFoodInner (bot, opts = {}) {
     }
   } catch (e) { dbg('secureFood: farm fallback failed (' + e.message + ')') }
   await eatUp(bot)
-  if (fedEnough()) return true
+  if (fedEnough()) return { fed: true, blockedOn: null }
   // 5) fish - works anywhere with surface water (scouts for a pond in a real crisis)
   try { await fishForFood(bot, { isStopped, say, home, scout: bot.food <= 4 }) } catch (e) { dbg('secureFood: fishing failed (' + e.message + ')') }
   await eatUp(bot)
-  if (fedEnough()) return true
+  if (fedEnough()) return { fed: true, blockedOn: null }
   // 6) crisis: SYSTEMATICALLY sweep unexplored ground for animals + water (not the old
   // re-tread-stale-pastures scoutHunt) - the SW/NW food the bot never found was here.
   if (bot.food <= 4 && !isStopped() && opts.scoutHunt !== false && !isNight(bot)) {
     try { await scoutForFood(bot, home || undefined, { isStopped, say, maxMs: opts.scoutMs || 180000 }) } catch (e) { dbg('secureFood: scout failed (' + e.message + ')') }
     await cookIfRaw(); await eatUp(bot)
-    if (fedEnough()) return true
+    if (fedEnough()) return { fed: true, blockedOn: null }
   }
   // 7) famine hold: NOTHING panned out - get home/indoors and sit it out (bounded; the
   // caller or the crisis reflex re-runs the whole chain later).
-  if (opts.canHold && (bot.food ?? 20) <= 1 && !isStopped()) { try { await famineHold(bot, { isStopped, say }) } catch {} }
-  return foodCount(bot) > 0
+  if (opts.canHold && (bot.food ?? 20) <= 1 && !isStopped()) { try { await boundedHold(bot, { isStopped, say }) } catch {} }
+  const fed = foodCount(bot) > 0
+  return { fed, blockedOn: fed ? null : (isStopped() ? 'stopped' : (isNight(bot) ? 'night' : 'food')) }
 }
 
 // PROACTIVE, SYSTEMATIC food scouting (the core exploration fix): sweep UNSEARCHED ground
@@ -4300,9 +4303,16 @@ async function scoutHunt (bot, { isStopped = () => false, say = () => {}, maxMs 
   return false
 }
 
-// Nothing edible anywhere: retreat home and WAIT instead of dying to chip damage at 1hp.
-// Inside the own hut = mob-safe indefinitely. Bounded so the food chain gets retried.
-async function famineHold (bot, { isStopped = () => false, say = () => {} } = {}) {
+// BOUNDED HOLD (S5, replaces the old famine-hold - the I5 migration): nothing edible anywhere -> retreat
+// home/indoors and WAIT in the ONE bounded way whose wake provably occurs, instead of dying to
+// chip damage at 1hp. Built FROM the old famine-hold's proven body (same get-home preamble + 90s re-eval
+// loop with the FORCED-FRESH bank re-check - the 11h-stale-cache starvation fix, DO NOT LOSE IT),
+// PLUS a grave-appeared wake (a fresh grave IS a recovery input - the ladder's next pass runs R1)
+// and a sealed-pit branch (existing digInForNight) for night-exposed-no-bed. Refuses to hold on
+// nightStuck (eternal night has no dawn wake - the caller acts by night instead). The hard deadline
+// is unconditional (BOUNDED_HOLD_MS, default 90s). Returns { held, wake }.
+async function boundedHold (bot, { isStopped = () => false, say = () => {}, deadlineMs = Number(process.env.BOUNDED_HOLD_MS || 90000) } = {}) {
+  if (nightStuck(bot)) return { held: false, wake: 'nightStuck' } // eternal night: act, don't wait for a dawn that won't come
   const hut = listInfra('hut')[0] || null
   const bed = knownBed()
   const target = hut ? { x: hut.x + 2, y: hut.y + 1, z: hut.z + 2 } : bed
@@ -4316,38 +4326,35 @@ async function famineHold (bot, { isStopped = () => false, say = () => {} } = {}
       try {
         const nav = require('./navigate.js')
         await nav.navigateTo(bot, new goals.GoalNear(target.x, target.y, target.z, 1), { timeoutMs: 20000, deadlineMs: 45000, isStopped, climb: false, budgets: { door: 2, pit: 1, water: 1, nudge: 1 }, label: 'famine-home' })
-      } catch (e) { dbg('famineHold: could not get indoors (' + e.message + ')') }
+      } catch (e) { dbg('boundedHold: could not get indoors (' + e.message + ')') }
     }
   }
   const indoors = !!insideOwnStructure(bot)
-  dbg('famineHold: holding ' + (indoors ? 'inside my hut' : 'where i am') + ' (food=' + bot.food + ')')
+  dbg('boundedHold: holding ' + (indoors ? 'inside my hut' : 'where i am') + ' (food=' + bot.food + ')')
   say('waiting it out at home - too weak to work safely')
-  // S1 HOTFIX (REDESIGN §1.1 F2 / §5 R5 precursor): the old 480s indoor sit was a sanctioned
-  // 8-minute NO-OP - it never re-read the bank and waited on food spontaneously materializing.
-  // BOUND the hold hard (90s), RE-OPEN THE PANTRY on every re-eval (a stale cache reported the
-  // chest empty for 11h while the bot starved AT it - live), and prefer BED-SLEEP toward dawn as
-  // a wake that provably occurs. On expiry the caller / crisis reflex re-runs the whole secureFood
-  // chain (which now re-checks graves, bank, hunt...). FAMINE_HOLD_MS overrides; S1_HOTFIX=0 rolls
-  // back to the old 480s/180s no-op.
-  const s1 = process.env.S1_HOTFIX !== '0'
-  const dl = Date.now() + (s1 ? Number(process.env.FAMINE_HOLD_MS || 90000) : (indoors ? 480000 : 180000))
+  const dl = Date.now() + deadlineMs
   const near = (bot.entity && bot.entity.position) || target || bed
+  let sealedPit = false
   while (Date.now() < dl && !isStopped()) {
-    if (foodCount(bot) > 0 || (bot.food ?? 0) > 4) break
+    if (foodCount(bot) > 0 || (bot.food ?? 0) > 4) return { held: true, wake: 'foodInPack' }
     // RE-CHECK THE BANK each pass (FORCE a fresh chest read): banked food a stale cache hid - or
     // food an operator/courier just restocked - is the fastest exit from the hold. Then eat it.
-    if (s1) {
-      try { const got = await require('./resources.js').ensureFood(bot, { near, threshold: 20, minPack: 1, maxDist: 64, forceFresh: true }); if (got) await eatUp(bot) } catch (e) { dbg('famineHold: bank re-check failed (' + e.message + ')') }
-      if (foodCount(bot) > 0 || (bot.food ?? 0) > 4) break
-    }
+    try { const got = await require('./resources.js').ensureFood(bot, { near, threshold: 20, minPack: 1, maxDist: 64, forceFresh: true }); if (got) await eatUp(bot) } catch (e) { dbg('boundedHold: bank re-check failed (' + e.message + ')') }
+    if (foodCount(bot) > 0 || (bot.food ?? 0) > 4) return { held: true, wake: 'foodInPack' }
+    // a fresh grave appeared -> release; the ladder's next pass runs R1 (free gear at arm's reach)
+    try { const commands = require('./commands.js'); if (commands.worthwhileGrave && commands.worthwhileGrave()) return { held: true, wake: 'grave' } } catch {}
     // an animal wandered into range -> release the hold, the chain re-runs
-    if (Object.values(bot.entities || {}).some(e => e && e.position && FOOD_ANIMALS.test((e.name || '').toLowerCase()) && e.position.distanceTo(bot.entity.position) <= 24)) break
-    // NIGHT -> sleep to dawn: a NAMED wake that provably occurs, and it skips the dangerous dark
-    // (starvation stops at half a heart indoors, provision.js: a slept night at low food survives).
+    if (Object.values(bot.entities || {}).some(e => e && e.position && FOOD_ANIMALS.test((e.name || '').toLowerCase()) && e.position.distanceTo(bot.entity.position) <= 24)) return { held: true, wake: 'animal<=24' }
+    // NIGHT -> sleep to dawn (a NAMED wake that provably occurs; starvation stops at half a heart
+    // indoors so a slept night at low food survives). Bed within 8b -> sleep it. Otherwise, if
+    // EXPOSED (not inside own structure), seal a pit ONCE (digInForNight carries its own dawn wake
+    // + hazard bails; the 90s deadline governs only the un-sheltered portions - the I5 intent).
     if (isNight(bot) && bed && Math.hypot(bed.x - bot.entity.position.x, bed.z - bot.entity.position.z) <= 8) { try { await sleepInBedHere(bot, { say, isStopped }) } catch {} }
+    else if (isNight(bot) && !insideOwnStructure(bot) && !sealedPit) { sealedPit = true; try { await digInForNight(bot, { isStopped, say }) } catch (e) { dbg('boundedHold: seal-pit failed (' + e.message + ')') } }
     await new Promise(r => setTimeout(r, 5000))
   }
-  return foodCount(bot) > 0
+  const fed = foodCount(bot) > 0
+  return { held: fed, wake: fed ? 'foodInPack' : 'deadline' }
 }
 
 // Bounded water scout: 4 cardinal legs x expanding radius, scanning for surface water at
@@ -4466,6 +4473,82 @@ async function recoverHp (bot, opts = {}) {
     }
     return (bot.health ?? 20) >= resumeHp
   } finally { _recoveringHp = false }
+}
+
+// RECOVERY LADDER (S5): the rung->executor map. Every action string that recoveryPlan emits maps
+// to an EXISTING, bounded, live-verified executor (no new dig/place/nav paths). `commands` is a
+// LAZY require (cycle-safe). `o` = { isStopped, say, home, dbg }. Actions with no executor
+// (trekOrchard - a WOOD grove, not a food producer) are simply absent -> the ladder skips them.
+const RUNG_EXECUTORS = {
+  // R0: eat what we carry, then wear every carried piece (bare `wear` = wantAll; never downgrades)
+  'eatPack+wearFromPack': async (bot, o) => { await eatUp(bot); try { await require('./commands.js').handle(bot, 'wear') } catch (e) { o.dbg('(ladder) wear failed: ' + e.message) } },
+  // R1: fetch the nearest worthwhile grave (recover has its OWN night-shelter-first gate)
+  'recoverGrave': async (bot, o) => { await require('./commands.js').handle(bot, 'recover') },
+  // R2: get home, eat the cache (forceFresh - the stale-cache fix), cook, eat, bake surplus wheat
+  'gotoHome+ensureFood(forceFresh)+cook+eat': async (bot, o) => {
+    const home = o.home
+    if (home && bot.entity) { try { await walkStaged(bot, home.x, home.z, { isStopped: o.isStopped, range: 6, timeoutMs: 180000 }) } catch (e) { o.dbg('(ladder) R2 home trek failed: ' + e.message) } }
+    try { await require('./resources.js').ensureFood(bot, { near: home, threshold: 20, minPack: 1, maxDist: 64, forceFresh: true }) } catch (e) { o.dbg('(ladder) R2 ensureFood failed: ' + e.message) }
+    try { if (Object.keys(RAW_COOKABLE).some(n => countItem(bot, n) > 0)) await cookRawMeat(bot, { isStopped: o.isStopped }) } catch {}
+    await eatUp(bot)
+    if (countItem(bot, 'wheat') >= 3) { try { await bakeBreadFromWheat(bot, { isStopped: o.isStopped, home }); await eatUp(bot) } catch (e) { o.dbg('(ladder) R2 bake failed: ' + e.message) } }
+  },
+  // R2 night: sleep to dawn (self-releases at morning) / dig a sealed pit to dawn
+  'sleepInBed': async (bot, o) => { await nightRest(bot, { isStopped: o.isStopped, say: o.say }) },
+  'digInForNight': async (bot, o) => { await digInForNight(bot, { isStopped: o.isStopped, say: o.say }) },
+  // R3: tend/harvest the owned farm (hoe-aware), eat what came off it. courierHome = S6, logged-skip.
+  'trekFarm+tend+harvest+courierHome': async (bot, o) => { await tendWheatFarm(bot, { isStopped: o.isStopped, say: o.say }); await eatUp(bot); o.dbg('(ladder) courier deferred to S6') },
+  // R4: acquire NEW supply (hunt->fish->scout). canHold:false - the ladder owns holding (R5).
+  'secureFood(hunt->fish->scout)': async (bot, o) => { await secureFood(bot, { home: o.home, canHold: false, isStopped: o.isStopped, say: o.say }) },
+  // R5: the one bounded hold (bed-sleep -> hut -> pit; its own preference order covers both variants)
+  'boundedHold:sleep': async (bot, o) => { await boundedHold(bot, { isStopped: o.isStopped, say: o.say }) },
+  'boundedHold:sealPit': async (bot, o) => { await boundedHold(bot, { isStopped: o.isStopped, say: o.say }) },
+  // R5 eternal night: no hold - the no-op just re-loops so R3/R4 run by night (rungFeasible lifts
+  // the night gates under nightStuck; the executors carry their own shelter discipline).
+  'rerunLadderByNight': async (bot, o) => { o.dbg('(ladder) rerun by night - re-planning') }
+}
+
+let _recoveringDegraded = false
+function isRecoveringDegraded () { return _recoveringDegraded }
+// RECOVER FROM DEGRADED (S5): the survival-class orchestrator that EXECUTES scheduler.recoveryPlan.
+// Loops { s = schedulerState; exit on ladderDone/isStopped/deadline; plan = recoveryPlan(s); take
+// the FIRST rung that is rungFeasible + has an executor + this run hasn't tried; run it; mark tried
+// on BOTH success and failure (once per action per run => <=8 executions => termination); re-loop -
+// each rung changes the world, so we re-snapshot + re-plan }. Bounded by RECOVERY_MAX_MS (default
+// 15 min), the once-per-action rule, and isStopped. No distance gates (recoveryPlan owns
+// sequencing), no new dig/place, no buildAbort/resumeJob touching. Returns { done, rungs, reason }.
+async function recoverFromDegraded (bot, { isStopped = () => false, say = () => {}, maxMs = Number(process.env.RECOVERY_MAX_MS || 900000), reason } = {}) {
+  if (_recoveringDegraded) return { done: false, rungs: [], reason: 'busy' }
+  _recoveringDegraded = true
+  const rungs = []
+  const tried = new Set()
+  const deadline = Date.now() + maxMs
+  const home = (() => { try { return hutAnchor() || knownBed() || null } catch { return null } })()
+  try {
+    while (true) {
+      const s = await schedulerState(bot)
+      if (scheduler.ladderDone(s)) return { done: true, rungs, reason: reason || 'recovered' }
+      if (isStopped()) return { done: false, rungs, reason: 'stopped' }
+      if (Date.now() > deadline) return { done: false, rungs, reason: 'deadline' }
+      const plan = scheduler.recoveryPlan(s)
+      let chosen = null
+      for (const r of plan) {
+        if (!scheduler.rungFeasible(r, s)) continue
+        if (tried.has(r.action)) continue
+        if (!RUNG_EXECUTORS[r.action]) continue // no executor (e.g. trekOrchard) - skip, never binds
+        chosen = r; break
+      }
+      // recoveryPlan is TOTAL (>=1 rung, R5 always appended); if every feasible rung is tried,
+      // hand back honestly - the tick re-dispatches after its 60s cooldown (the outer retry).
+      if (!chosen) return { done: false, rungs, reason: 'all rungs tried' }
+      tried.add(chosen.action)
+      const label = chosen.rung + ':' + chosen.action
+      dbg('(ladder) ' + label + ' -> executing')
+      try { await RUNG_EXECUTORS[chosen.action](bot, { isStopped, say, home, dbg }) }
+      catch (e) { dbg('(ladder) ' + label + ' failed: ' + e.message) }
+      rungs.push(label)
+    }
+  } finally { _recoveringDegraded = false }
 }
 
 // ---- TREE FARMING (user-approved): the castle region is chopped bare, so the bot keeps
@@ -4982,7 +5065,7 @@ async function gatherLoop (bot, item, count, opts = {}) {
       // 1) eat what we carry (cook raw first) - food 14 -> >=18 starts natural regen. Fixes the live case.
       try { await eatFromPackToComfortable(bot, isStopped) } catch (e) { dbg('  gather recover: eat failed (' + e.message + ')') }
       // 2) only if still low AND the pack is bare, run the ONE food chain (canHold:false - a mid-gather
-      //    pause is not the food<=1 famineHold mechanism; the starving branch below keeps its canHold).
+      //    pause is not the food<=1 boundedHold mechanism; the starving branch below keeps its canHold).
       if ((bot.food ?? 20) < 18 && !hasFood(bot)) {
         try { await secureFood(bot, { isStopped, say: opts.say || (() => {}), home, avoid: opts.avoid, canHold: false }) } catch (e) { dbg('  gather recover: secureFood failed (' + e.message + ')') }
       }
@@ -6740,4 +6823,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, boundedHold, recoverFromDegraded, isRecoveringDegraded, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors }

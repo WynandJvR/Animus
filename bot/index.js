@@ -30,6 +30,7 @@ const schematic = require('./schematic.js')
 const loghistory = require('./loghistory.js') // compact rolling state time-series + heartbeat (observability)
 const scheduler = require('./scheduler.js') // S4: pure survival-tier decision core (commandClass/admissible/pickJob) - wires the busy-gate + the tick
 const SCHED_ON = process.env.SCHEDULER !== '0' // master flag: SCHEDULER=0 restores the S1-hotfix wiring byte-for-byte (gate takes the survivalAdmissible path, the tick never registers, the 3 reflexes run as today)
+const LADDER_ON = SCHED_ON && process.env.RECOVERY_LADDER !== '0' // S5: RECOVERY_LADDER=0 restores S4's recoveryLadder DOWNGRADE + the one-shot respawn grave gating byte-for-byte
 
 // Live brain settings the dashboard can change on the fly; brain-llm.js polls
 // GET /brain each tick and switches model / goal / on-off without a restart.
@@ -654,7 +655,28 @@ bot.on('spawn', () => {
       // starve/die. Still capped (autoRecoverTries) so recovery itself can't death-loop.
       // RECOVER_ON_RESPAWN=0 disables. AxGraves persist on the live server, so a deferred grave
       // is still there to fetch once the bot is safe + geared.
-      if (process.env.RECOVER_ON_RESPAWN !== '0' && commands.worthwhileGrave) {
+      if (LADDER_ON) {
+        // S5: route the grave/degraded step through the recovery ladder, so a deferral is
+        // re-evaluated by the ~15s tick (pickJob graveSweep/recoveryLadder) instead of only on the
+        // NEXT death. The home -> spawn-anchor order above and the autoRecoverTries cap are unchanged.
+        if (process.env.RECOVER_ON_RESPAWN !== '0') {
+          const g = commands.worthwhileGrave && commands.worthwhileGrave()
+          let degraded = false
+          try { degraded = scheduler.isDegraded(await provision.schedulerState(bot)) } catch {}
+          if ((g || degraded) && autoRecoverTries < 3) {
+            autoRecoverTries++
+            note(`(respawn) degraded/grave after death - running the recovery ladder (try ${autoRecoverTries}/3)`)
+            try {
+              const r = await provision.recoverFromDegraded(bot, { say: m => note('(respawn) ' + m), reason: 'respawn' })
+              note(`(respawn) ladder -> ${r.done ? 'recovered' : 'not fully recovered'} via ${r.rungs.join(' > ') || '(no rung ran)'}`)
+              if (r.done || !(commands.worthwhileGrave && commands.worthwhileGrave())) autoRecoverTries = 0
+            } catch (e) { note(`(respawn) ladder failed: ${e.message}`) }
+          } else if (!g) autoRecoverTries = 0
+          // NO one-shot deferral note: whatever this pass could not finish, the ~15s tick's pickJob
+          // sees (graveSweep <=16b / recoveryLadder on the degraded signature) and re-dispatches -
+          // deferral is re-evaluated every tick, not once per death (REDESIGN §5 end, §7 S1).
+        }
+      } else if (process.env.RECOVER_ON_RESPAWN !== '0' && commands.worthwhileGrave) {
         const g = commands.worthwhileGrave()
         if (g) {
           const st = commands.state(bot)
@@ -748,7 +770,7 @@ if (process.env.SURVIVAL_HUNT !== '0') {
       // (provision.secureFood; it starved at 1hp with cooked food in its own chest, and
       // later starved through hunt-only fallbacks in an animal-free region - both live).
       const home = (provision.knownBed && provision.knownBed()) || undefined
-      if (await provision.secureFood(bot, { home, canHold: true, say: m => bot.chat(String(m).slice(0, 200)) })) note('(survival) food secured - was starving with an empty pack')
+      if ((await provision.secureFood(bot, { home, canHold: true, say: m => bot.chat(String(m).slice(0, 200)) })).fed) note('(survival) food secured - was starving with an empty pack')
     } catch (e) { /* transient - retry next tick */ } finally { survivalHunting = false }
   }, 6000).unref?.()
 }
@@ -766,6 +788,7 @@ if (process.env.FOOD_TOPUP !== '0') {
     if (commands.isBusy && commands.isBusy()) return // busy jobs run their own secureFood
     if (provision.isResting && provision.isResting()) return
     if (provision.isSecuringFood && provision.isSecuringFood()) return
+    if (provision.isRecoveringDegraded && provision.isRecoveringDegraded()) return // S5: the ladder owns the body between rungs
     if (arbiter.maneuverActive && arbiter.maneuverActive()) return
     toppingUpFood = true
     try {
@@ -799,7 +822,7 @@ if (process.env.FOOD_CRISIS !== '0') {
       try { bot.pathfinder.setGoal(null) } catch {}
       const home = (provision.knownBed && provision.knownBed()) || undefined
       const ok = await provision.secureFood(bot, { home, canHold: true, threshold: 10, say: m => bot.chat(String(m).slice(0, 200)) })
-      note(`(food-crisis) ${ok ? 'fed (or safely holding)' : 'still starving - will retry'}`)
+      note(`(food-crisis) ${ok.fed ? 'fed (or safely holding)' : 'still starving - will retry'}`)
     } catch (e) { note(`(food-crisis) failed: ${e.message}`) } finally { foodCrisis = false }
   }, 15000).unref?.()
 }
@@ -848,6 +871,7 @@ if (process.env.FOOD_SUPPLY !== '0') {
     if (commands.isBusy && commands.isBusy()) return // a job owns the body
     if (provision.isResting && provision.isResting()) return
     if (provision.isSecuringFood && provision.isSecuringFood()) return
+    if (provision.isRecoveringDegraded && provision.isRecoveringDegraded()) return // S5: the ladder owns the body between rungs
     if (arbiter.maneuverActive()) return
     if (bot.pathfinder && bot.pathfinder.goal) return // idle only - don't yank an active goal
     if (!provision.needFoodSupply || !provision.needFoodSupply(bot)) return // fed + safe + no standing farm
@@ -876,6 +900,7 @@ if (process.env.NIGHT_SHELTER !== '0') {
     // bunker was the shelter reflex re-sealing the pit under the escape. Let the escape finish.
     if (navigate.isForceUnsticking() || navigate.isRecovering()) return
     if (provision.isSecuringFood && provision.isSecuringFood()) return // feeding run owns the body
+    if (provision.isRecoveringDegraded && provision.isRecoveringDegraded()) return // S5: the ladder owns the body between rungs
     // Two triggers: VULNERABLE at night (naked - always rest, the death carousels were all
     // naked), or simply IDLE at night with a bed on the map - a player with nothing to do
     // goes to bed even in full iron (operator asked for exactly this). Armored + mid-task
@@ -911,6 +936,7 @@ if (process.env.GEAR_REFLEX !== '0') {
     if (arbiter.maneuverActive()) return // a navigation is driving - don't start the iron grind mid-walk
     if (provision.isResting && provision.isResting()) return
     if (provision.isSecuringFood && provision.isSecuringFood()) return
+    if (provision.isRecoveringDegraded && provision.isRecoveringDegraded()) return // S5: the ladder owns the body between rungs
     if (commands.isEscaping && commands.isEscaping()) return
     if (!provision.underArmored(bot)) return
     const tod = bot.time ? bot.time.timeOfDay : 0
@@ -954,6 +980,7 @@ if (process.env.HOME_REPAIR !== '0') {
     if (arbiter.maneuverActive()) return // a navigation is driving - don't start a repair mid-walk
     if (provision.isResting && provision.isResting()) return
     if (provision.isSecuringFood && provision.isSecuringFood()) return
+    if (provision.isRecoveringDegraded && provision.isRecoveringDegraded()) return // S5: the ladder owns the body between rungs
     if (commands.isEscaping && commands.isEscaping()) return
     if (navigate.isForceUnsticking() || navigate.isRecovering()) return
     // JOB ARBITER: home repair is a PROGRESS job - never run it while a SURVIVE need is unmet
@@ -983,6 +1010,7 @@ let schedJob = null             // the single job-latch (I4): one scheduler disp
 let schedLastLog = ''           // decision-change log throttle
 let schedHeldLog = ''           // busy-held note throttle (separate so it never clobbers the decision key)
 let schedGraveCooldownUntil = 0 // failed grave recovery -> don't hammer an unreachable grave
+let schedLadderCooldownUntil = 0 // S5: honest ladder non-completion -> don't re-run every 15s
 let schedHpCooldownUntil = 0    // mirror of hpCrisisCooldownUntil (index.js hp-crisis)
 let schedDeferNoted = ''        // one note per deferred job kind (nightShelter/maintain/degraded/ladder-reflex)
 if (SCHED_ON) {
@@ -1022,7 +1050,7 @@ if (SCHED_ON) {
       const knownBed = (provision.knownBed && provision.knownBed()) || undefined
       let name = null
       let executor = null
-      const wantSecureFood = () => { name = 'secureFood'; executor = () => provision.secureFood(bot, { home: knownBed, canHold: true, say: schedSay }) }
+      const wantSecureFood = () => { name = 'secureFood'; executor = async () => { const r = await provision.secureFood(bot, { home: knownBed, canHold: true, say: schedSay }); return r.fed ? `fed (food ${bot.food})` : `not fed - blocked on ${r.blockedOn}` } }
       const wantRecoverHp = () => { name = 'recoverHp'; executor = () => provision.recoverHp(bot, { say: schedSay }) }
       const wantRecover = () => { name = 'recover' } // recover has its own runner (cooldown needs the result); executor stays null
       if (pick.job === 'graveSweep') wantRecover()
@@ -1030,18 +1058,31 @@ if (SCHED_ON) {
       else if (pick.job === 'recoverHp') wantRecoverHp()
       else if (pick.job === 'nightShelter') { if (schedDeferNoted !== 'nightShelter') { schedDeferNoted = 'nightShelter'; note('(sched) nightShelter - reflex-owned in S4, holding') } return }
       else if (pick.job === 'recoveryLadder') {
-        // DOWNGRADE (do NOT build the ladder - that's S5): re-read the single need and route to its
-        // producer; shelter/flee stay reflex-owned; a degraded-only state with a near grave = recover.
-        let need = null
-        try { need = provision.survivalNeed(bot) } catch {}
-        if (need) {
-          const prod = scheduler.needProducer(need.need)
-          if (prod === 'secureFood') wantSecureFood()
-          else if (prod === 'recoverHp') wantRecoverHp()
-          else { if (schedDeferNoted !== 'ladder-reflex') { schedDeferNoted = 'ladder-reflex'; note('(sched) ladder need ' + need.need + ' is reflex-owned (' + (prod || 'flee') + ') - holding') } return }
-        } else if (nearest && nearest.dist <= GRAVE_NEAR_LADDER) {
-          wantRecover()
-        } else { if (schedDeferNoted !== 'degraded') { schedDeferNoted = 'degraded'; note('(sched) degraded but no executor until S5 - holding') } return }
+        if (LADDER_ON) {
+          // S5: EXECUTE the ladder (provision.recoverFromDegraded runs recoveryPlan first-feasible).
+          if (Date.now() < schedLadderCooldownUntil) return
+          name = 'recoverFromDegraded'
+          executor = async () => {
+            const r = await provision.recoverFromDegraded(bot, { say: schedSay })
+            if (!r.done) schedLadderCooldownUntil = Date.now() + 60000 // honest fail -> don't re-run every 15s
+            return (r.done ? 'recovered' : 'NOT recovered (' + (r.reason || 'rungs exhausted') + ')') +
+                   (r.rungs.length ? ' via ' + r.rungs.join(' > ') : '')
+          }
+        } else {
+          // S4 DOWNGRADE (RECOVERY_LADDER=0 - do NOT build the ladder): re-read the single need and
+          // route to its producer; shelter/flee stay reflex-owned; a degraded-only state with a near
+          // grave = recover.
+          let need = null
+          try { need = provision.survivalNeed(bot) } catch {}
+          if (need) {
+            const prod = scheduler.needProducer(need.need)
+            if (prod === 'secureFood') wantSecureFood()
+            else if (prod === 'recoverHp') wantRecoverHp()
+            else { if (schedDeferNoted !== 'ladder-reflex') { schedDeferNoted = 'ladder-reflex'; note('(sched) ladder need ' + need.need + ' is reflex-owned (' + (prod || 'flee') + ') - holding') } return }
+          } else if (nearest && nearest.dist <= GRAVE_NEAR_LADDER) {
+            wantRecover()
+          } else { if (schedDeferNoted !== 'degraded') { schedDeferNoted = 'degraded'; note('(sched) degraded but no executor until S5 - holding') } return }
+        }
       } else return // unknown survival job name - do nothing
       if (name !== 'recover' && !executor) return
       // NIGHT-FORAGE GUARD (#11 - live death: creeper at the hut doorstep, foraging at night un-armored):
@@ -1062,7 +1103,7 @@ if (SCHED_ON) {
       if (bodyBusy) {
         // busy -> dispatch ONLY when crisis-grade: a near grave IS the survival move (recover), OR a
         // crisis-grade vitals need (food<=SCHED_CRISIS_FOOD, or hp/threat/etc via survivalNeed).
-        let crisis = name === 'recover'
+        let crisis = name === 'recover' || (name === 'recoverFromDegraded' && (s.deathsRecent || 0) >= 2) // a death-spiral signature (>=2 recent deaths) may preempt the build (REDESIGN §5 entry)
         if (!crisis) { try { crisis = !!provision.survivalNeed(bot, { foodThreshold: Number(process.env.SCHED_CRISIS_FOOD || 6) }) } catch { crisis = false } }
         if (!crisis) { if (schedHeldLog !== name) { schedHeldLog = name; note('(sched) ' + name + ' held - body busy, not crisis-grade (single-goal)') } return }
         schedHeldLog = ''
@@ -1071,6 +1112,7 @@ if (SCHED_ON) {
       } else schedHeldLog = ''
       // 7. LATCH CHECKS + COOLDOWNS (never double-drive) + 8. the single job-latch runner.
       if (name === 'secureFood') { if (provision.isSecuringFood && provision.isSecuringFood()) return; await runJob(name, executor) }
+      else if (name === 'recoverFromDegraded') { if (provision.isRecoveringDegraded && provision.isRecoveringDegraded()) return; await runJob(name, executor) }
       else if (name === 'recoverHp') {
         if ((provision.isRecoveringHp && provision.isRecoveringHp()) || Date.now() < schedHpCooldownUntil) return
         await runJob(name, executor)
@@ -1776,7 +1818,7 @@ const server = http.createServer((req, res) => {
         note(`(cmd) ${line}${rz} -> held (a saved build job exists - the brain may not cancel it)`)
         return send(res, 200, "held: there's a build to finish - i shouldn't stop it")
       }
-      const bodyBusy = (commands.isBusy && commands.isBusy()) || (provision.isResting && provision.isResting()) || (provision.isSecuringFood && provision.isSecuringFood())
+      const bodyBusy = (commands.isBusy && commands.isBusy()) || (provision.isResting && provision.isResting()) || (provision.isSecuringFood && provision.isSecuringFood()) || (provision.isRecoveringDegraded && provision.isRecoveringDegraded())
       const trimmedLine = String(line).trim()
       // S4 (REDESIGN §3.4): classify read-only via scheduler.commandClass when SCHEDULER is on.
       // Deliberate, documented widening: commandClass's perception set adds turn|lookbehind|
@@ -1788,7 +1830,7 @@ const server = http.createServer((req, res) => {
       if (bodyBusy && !readOnly && !fromSupervisor) {
         // S1 HOTFIX (REDESIGN §3.4): survival-class commands are no longer muzzled by the body's
         // own hold - they PREEMPT it. The live freeze: `recover`/`eat`/`wear` suppressed for 8+
-        // minutes at 1hp/food 0 while famineHold sat inside `_securingFood` with iron in a grave
+        // minutes at 1hp/food 0 while the famine-hold sat inside `_securingFood` with iron in a grave
         // 3b away. When a real survival need exists (or a grave is at arm's reach) the command
         // sets the stop latch (the failing hold unwinds; any build resumes via persistedResume)
         // and falls through to run. Progress-class commands keep exactly today's suppression.

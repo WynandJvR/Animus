@@ -39,7 +39,7 @@ let building = false
 let buildAbort = false // set by `stop`; watched by schematic builds AND provision runs
 // S1 HOTFIX (REDESIGN §3.4 / invariant I1): let an admissible SURVIVAL command PREEMPT a body
 // hold without cancelling operator intent. Unlike the `stop` command it sets ONLY the abort
-// latch - the current famineHold/secureFood/gather unwinds, but resumeJob/persistedResume are
+// latch - the current boundedHold/secureFood/gather unwinds, but resumeJob/persistedResume are
 // left intact so an interrupted build resumes via its normal resume path. `recover` ignores
 // buildAbort entirely (its travels use isStopped:()=>false), so this cleanly frees the body for
 // the survival move without breaking the recover it is preempting for.

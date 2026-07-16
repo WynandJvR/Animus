@@ -243,5 +243,86 @@ t('pickJob: null when idle (fed, armed, no job, no buffers)', () => {
   assert.strictEqual(S.pickJob(snap({})), null)
 })
 
+// ---- (S5) rungFeasible: the night/day gates ---------------------------------------------
+const OUTBOUND = [
+  { rung: 'R3', action: 'trekFarm+tend+harvest+courierHome' },
+  { rung: 'R3', action: 'trekOrchard+harvest+courierHome' },
+  { rung: 'R4', action: 'secureFood(hunt->fish->scout)' }
+]
+const NON_OUTBOUND = [
+  { rung: 'R0', action: 'eatPack+wearFromPack' },
+  { rung: 'R1', action: 'recoverGrave' },
+  { rung: 'R2', action: 'gotoHome+ensureFood(forceFresh)+cook+eat' },
+  { rung: 'R2', action: 'sleepInBed', wake: 'dawn' },
+  { rung: 'R2', action: 'digInForNight', wake: 'dawn' },
+  { rung: 'R5', action: 'boundedHold:sleep', wake: 'dawn' },
+  { rung: 'R5', action: 'rerunLadderByNight' }
+]
+
+t('(S5) rungFeasible: night + underArmored blocks the OUTBOUND rungs, admits R0/R1/R2/R5', () => {
+  const s = snap({ isNight: true, underArmored: true, armorPieces: 0, nightStuck: false })
+  for (const r of OUTBOUND) assert.strictEqual(S.rungFeasible(r, s), false, r.action + ' must be blocked at night un-armored')
+  for (const r of NON_OUTBOUND) assert.strictEqual(S.rungFeasible(r, s), true, r.action + ' must stay feasible at night')
+})
+
+t('(S5) rungFeasible: nightStuck LIFTS both gates -> everything feasible', () => {
+  const s = snap({ isNight: true, underArmored: true, armorPieces: 0, nightStuck: true })
+  for (const r of OUTBOUND) assert.strictEqual(S.rungFeasible(r, s), true, r.action + ' lifts on nightStuck')
+  for (const r of NON_OUTBOUND) assert.strictEqual(S.rungFeasible(r, s), true)
+  // a dayGated rung also lifts on eternal night
+  assert.strictEqual(S.rungFeasible({ rung: 'R3', action: 'trekFarm+tend+harvest+courierHome', dayGated: true }, s), true)
+})
+
+t('(S5) rungFeasible: day + naked -> all feasible (armor is only a NIGHT gate)', () => {
+  const s = snap({ isNight: false, underArmored: true, armorPieces: 0 })
+  for (const r of OUTBOUND.concat(NON_OUTBOUND)) assert.strictEqual(S.rungFeasible(r, s), true, r.action + ' feasible by day')
+})
+
+t('(S5) rungFeasible: armored night -> R4 (secureFood/hunt) still feasible (today\'s behavior)', () => {
+  const s = snap({ isNight: true, underArmored: false, armorPieces: 4 })
+  assert.strictEqual(S.rungFeasible({ rung: 'R4', action: 'secureFood(hunt->fish->scout)' }, s), true)
+  assert.strictEqual(S.rungFeasible({ rung: 'R3', action: 'trekFarm+tend+harvest+courierHome' }, s), true)
+})
+
+t('(S5) rungFeasible: dayGated rung false at night (non-stuck), true by day', () => {
+  const g = { rung: 'R3', action: 'trekFarm+tend+harvest+courierHome', dayGated: true }
+  assert.strictEqual(S.rungFeasible(g, snap({ isNight: true, nightStuck: false, armorPieces: 4, underArmored: false })), false, 'dayGated blocked at night')
+  assert.strictEqual(S.rungFeasible(g, snap({ isNight: false, armorPieces: 4, underArmored: false })), true, 'dayGated allowed by day')
+})
+
+// ---- (S5) ladderDone: the exit predicate (the live-death grid) ---------------------------
+t('(S5) ladderDone: the live-death grid', () => {
+  assert.strictEqual(S.ladderDone(snap({ hp: 1, food: 0, armorPieces: 0, graves: [grave(3)] })), false, 'rock-bottom -> not done')
+  assert.strictEqual(S.ladderDone(snap({ hp: 20, food: 18, armorPieces: 0, graves: [grave(3)] })), false, 'naked with a standing grave -> not done')
+  assert.strictEqual(S.ladderDone(snap({ hp: 20, food: 18, armorPieces: 0, graves: [] })), true, 'fed + healthy, no grave -> done even naked')
+  assert.strictEqual(S.ladderDone(snap({ hp: 20, food: 13, armorPieces: 4, graves: [] })), false, 'food 13 -> not done (14 is the bar)')
+  assert.strictEqual(S.ladderDone(snap({ hp: 20, food: 14, armorPieces: 4, graves: [] })), true, 'food 14 -> done')
+  // deathsRecent must NOT pin termination (it biases sequencing only)
+  assert.strictEqual(S.ladderDone(snap({ hp: 20, food: 18, armorPieces: 4, graves: [], deathsRecent: 5 })), true, 'restored vitals+gear -> done regardless of deathsRecent')
+  // null vitals (partial snapshot) don't block termination
+  assert.strictEqual(S.ladderDone(snap({ hp: null, food: null, armorPieces: 4, graves: [] })), true, 'null hp/food -> not blocking')
+})
+
+// ---- (S5) composition: the ladder ALWAYS has a move --------------------------------------
+t('(S5) composition: every totality-sweep snapshot has >=1 feasible rung (or rerunLadderByNight)', () => {
+  const hps = [1, 6, 12, 20]
+  const foods = [0, 6, 12, 20]
+  const armors = [0, 4]
+  const graveDists = ['none', 3, 32, 200]
+  const homeDists = [5, 48, 200]
+  const nights = [false, true]
+  const stucks = [false, true]
+  const deaths = [0, 3]
+  for (const hp of hps) for (const food of foods) for (const armor of armors)
+    for (const gd of graveDists) for (const hd of homeDists) for (const night of nights)
+      for (const ns of stucks) for (const dr of deaths) {
+        const graves = gd === 'none' ? [] : [grave(gd, { value: 20 })]
+        const s = snap({ hp, food, armorPieces: armor, underArmored: armor === 0, graves, homeDist: hd, isNight: night, nightStuck: ns, deathsRecent: dr, farm: { exists: true, dist: 200 } })
+        const plan = S.recoveryPlan(s)
+        assert(plan.some(r => S.rungFeasible(r, s) || r.action === 'rerunLadderByNight'),
+          'no feasible move for ' + JSON.stringify({ hp, food, armor, gd, hd, night, ns, dr }) + ' plan=' + JSON.stringify(plan.map(r => r.action)))
+      }
+})
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall scheduler tests passed')
 process.exit(failures ? 1 : 0)

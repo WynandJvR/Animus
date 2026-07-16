@@ -1,6 +1,6 @@
 'use strict'
 // PROACTIVE-SURVIVAL SCHEDULER (slice S3): the PURE decision core that replaces the broken
-// busy-gate + the deleted famineHold. Two questions the old code could not answer cleanly:
+// busy-gate + the deleted famine-hold. Two questions the old code could not answer cleanly:
 //   (1) which ONE job may own the body right now, and
 //   (2) is an incoming command allowed to preempt it.
 // This module answers both from a plain-data SNAPSHOT (no bot, no pathfinder, no fs) so it is
@@ -274,6 +274,40 @@ function recoveryPlan (snapshot) {
   return plan
 }
 
+// ---- rungFeasible (S5) ------------------------------------------------------------------
+// PURE right-now admission for ONE recoveryPlan rung (the plan is ORDERED; the ladder takes the
+// first feasible rung that has an executor and hasn't been tried). Two gates, §7 layers 1-2:
+//  - a dayGated rung (deathsRecent>=2) is inadmissible at night, UNLESS nightStuck (eternal night
+//    can't wait for a day that won't come);
+//  - the OUTBOUND rungs (trekFarm / trekOrchard / secureFood) are inadmissible while
+//    isNight && underArmored && !nightStuck - the headline "never forage/trek OUT un-armored at
+//    night" gate (mirrors shelterNeeded / arbiter shelter need). An ARMORED bot may still work the
+//    night (today's behavior). nightStuck lifts BOTH gates (arbiter.js:145-149; R5 rerunLadderByNight).
+// Everything else runs by night by design: R0 eat, R1 grave (its own night gate), R2 shelter, R5 hold.
+const OUTBOUND_RE = /^(trekFarm|trekOrchard|secureFood)/
+function rungFeasible (rung, snapshot) {
+  const r = rung || {}
+  const s = snapshot || {}
+  const night = !!s.isNight
+  const stuck = !!s.nightStuck
+  if (r.dayGated && night && !stuck) return false
+  if (OUTBOUND_RE.test(r.action || '') && night && !!s.underArmored && !stuck) return false
+  return true
+}
+
+// ---- ladderDone (S5) --------------------------------------------------------------------
+// PURE exit predicate for recoverFromDegraded: vitals + gear restored. Uses the START food bar
+// (14 = arbiter default / PROGRESS_FOOD_MIN) so the ladder hands back a bot that mayDoProgress
+// actually clears. DELIBERATELY excludes deathsRecent (it biases *sequencing* via dayGated, never
+// termination - a fully-recovered bot must not re-run the ladder for 20 min after its 2nd death).
+function ladderDone (snapshot) {
+  const s = snapshot || {}
+  const graves = gravesOf(s)
+  return (s.hp == null || s.hp > 6) &&
+         (s.food == null || s.food >= 14) &&
+         !(s.armorPieces === 0 && graves.length > 0)
+}
+
 // ---- watchdog ---------------------------------------------------------------------------
 // PURE danger-scaled forward-progress verdict (§6). Windows are additive thresholds on the SAME
 // idleMs (nudge at [nudgeMs, failMs), fail at >= failMs); failMs = 2*nudgeMs gives the
@@ -299,6 +333,9 @@ function watchdog (activeJob, vitals, now) {
 module.exports = {
   pickJob,
   recoveryPlan,
+  rungFeasible,
+  ladderDone,
+  isDegraded,
   commandClass,
   admissible,
   needProducer,
