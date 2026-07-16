@@ -65,8 +65,158 @@ function needs (snapshot) {
   return out
 }
 
+// ---- S6 PURE HELPERS (courier / safekeep / cadence) ------------------------------------
+// All three are require-only, no bot/fs/clock (an injected `now` where cadence is involved).
+
+// courierPlan(packItems, bankFoodPts, opts) -> [{ name, count }] to DEPOSIT into the bank.
+//   packItems = [{ name, count, foodPoints, tier }] (caller pre-computes points/tier).
+// Rules (§4.1): keep >= MAINT_PACKFOOD_TARGET (24) pts in the pack, preferring tier-0
+//   (ready-to-eat) then highest points-per-item to STAY; ship the surplus until the bank
+//   would reach MAINT_BANKFOOD_TARGET (40) or the surplus is exhausted; tier>=2 (rotten/
+//   poison) is never a pack-keep and never ships; empty pack / full bank -> [].
+function courierPlan (packItems, bankFoodPts, opts) {
+  opts = opts || {}
+  const packTarget = opts.packTarget != null ? opts.packTarget : Number(process.env.MAINT_PACKFOOD_TARGET || 24)
+  const bankTarget = opts.bankTarget != null ? opts.bankTarget : Number(process.env.MAINT_BANKFOOD_TARGET || 40)
+  let bankPts = Number(bankFoodPts) || 0
+  if (bankPts >= bankTarget) return [] // pantry already stocked
+  // shippable = real food, tier<2. Everything else (rotten/poison/non-food) is ignored:
+  // never counted toward the pack keep, never deposited.
+  const shippable = (packItems || [])
+    .filter(i => i && i.count > 0 && (i.foodPoints || 0) > 0 && (i.tier != null ? i.tier : 0) < 2)
+    .map(i => ({ name: i.name, count: i.count, foodPoints: i.foodPoints, tier: i.tier != null ? i.tier : 0 }))
+  if (!shippable.length) return []
+  // KEEP the best food on the bot first: tier asc (ready-to-eat first), then points-per-item
+  // desc, then name (determinism). Walk this order accumulating pts until the pack keep is met;
+  // whatever is not needed to reach the keep is surplus.
+  const keepOrder = shippable.slice().sort((a, b) => a.tier - b.tier || b.foodPoints - a.foodPoints || (a.name < b.name ? -1 : 1))
+  let keptPts = 0
+  const surplus = []
+  for (const it of keepOrder) {
+    let keepCount = 0
+    if (keptPts < packTarget) {
+      const stillNeed = packTarget - keptPts
+      keepCount = Math.min(it.count, Math.ceil(stillNeed / it.foodPoints))
+      keptPts += keepCount * it.foodPoints
+    }
+    const surplusCount = it.count - keepCount
+    if (surplusCount > 0) surplus.push({ name: it.name, count: surplusCount, foodPoints: it.foodPoints, tier: it.tier })
+  }
+  // Deposit surplus WORST-first (keep the best food on the bot): tier desc, points-per-item asc.
+  surplus.sort((a, b) => b.tier - a.tier || a.foodPoints - b.foodPoints || (a.name < b.name ? -1 : 1))
+  const deposits = []
+  for (const it of surplus) {
+    if (bankPts >= bankTarget) break
+    let n = 0
+    while (n < it.count && bankPts < bankTarget) { bankPts += it.foodPoints; n++ }
+    if (n > 0) deposits.push({ name: it.name, count: n })
+  }
+  return deposits
+}
+
+// safekeepPlan(packItems, opts) -> [{ name, count }] to DEPOSIT. ALLOW-LIST by design: only
+//   ships items it explicitly recognises as surplus (spare tools + build-material above an
+//   allowance); everything else (food, armor, seeds, iron, unknowns) is kept. This is what
+//   guarantees the working loadout is never stripped.
+//   packItems = [{ name, count, usesLeft? }]  (usesLeft only meaningful for picks).
+function safekeepPlan (packItems, opts) {
+  opts = opts || {}
+  const items = (packItems || []).filter(i => i && i.count > 0)
+  const deposits = []
+  const add = (name, count) => { if (count > 0) deposits.push({ name, count }) }
+
+  // ---- TOOLS: never the last working one of a kind -------------------------------------
+  // pickaxes: keep the best working + 1 spare working (2 working picks); axe/sword/shovel/hoe/
+  // shears: keep the best 1. Surplus tools ship.
+  const TIER = { wooden: 1, golden: 2, stone: 3, iron: 4, diamond: 5, netherite: 6 }
+  const toolTier = name => { const m = /^(wooden|golden|stone|iron|diamond|netherite)_/.exec(name); return m ? (TIER[m[1]] || 0) : 0 }
+  const KIND = [
+    { re: /_pickaxe$/, keep: 2, uses: true },
+    { re: /_axe$/, keep: 1 },
+    { re: /_sword$/, keep: 1 },
+    { re: /_shovel$/, keep: 1 },
+    { re: /_hoe$/, keep: 1 },
+    { re: /^shears$/, keep: 1 }
+  ]
+  for (const k of KIND) {
+    // expand to individual tool units (count is ~always 1 for tools, but be safe)
+    const units = []
+    for (const it of items) {
+      if (!k.re.test(it.name)) continue
+      for (let c = 0; c < it.count; c++) units.push({ name: it.name, usesLeft: it.usesLeft })
+    }
+    if (units.length <= k.keep) continue
+    // rank best-first: for picks prefer WORKING (usesLeft>0, undefined=assume working) then more
+    // uses; for all, higher material tier is better.
+    const working = u => (u.usesLeft == null ? 1 : (u.usesLeft > 0 ? 1 : 0))
+    units.sort((a, b) => working(b) - working(a) || ((b.usesLeft || 0) - (a.usesLeft || 0)) || (toolTier(b.name) - toolTier(a.name)))
+    const surplusUnits = units.slice(k.keep)
+    const byName = {}
+    for (const u of surplusUnits) byName[u.name] = (byName[u.name] || 0) + 1
+    for (const [name, cnt] of Object.entries(byName)) add(name, cnt)
+  }
+
+  // ---- BUILD-MATERIAL ALLOWANCES (the excursion loadout) -------------------------------
+  const envKeep = (item, def) => { const v = process.env['MAINT_KEEP_' + item.toUpperCase()]; return v != null ? Number(v) : def }
+  const count = name => items.filter(i => i.name === name).reduce((n, i) => n + i.count, 0)
+  const shipNamedExcess = (name, allow) => { const c = count(name); if (c > allow) add(name, c - allow) }
+  shipNamedExcess('dirt', envKeep('dirt', 16))
+  shipNamedExcess('cobblestone', envKeep('cobblestone', 16))
+  shipNamedExcess('stick', envKeep('stick', 8))
+  shipNamedExcess('torch', envKeep('torch', Number(process.env.MAINT_TORCH_TARGET || 8)))
+  // planks / logs: per material name, allowance each.
+  const plankAllow = envKeep('planks', 16); const logAllow = envKeep('logs', 8)
+  const perNameGroups = {}
+  for (const it of items) {
+    if (/_planks$/.test(it.name)) perNameGroups[it.name] = { allow: plankAllow }
+    else if (/_log$/.test(it.name)) perNameGroups[it.name] = { allow: logAllow }
+  }
+  for (const [name, g] of Object.entries(perNameGroups)) shipNamedExcess(name, g.allow)
+  // coal + charcoal: a COMBINED fuel/torch buffer of 8; ship the excess, charcoal first.
+  const fuelAllow = envKeep('coal', 8)
+  const coal = count('coal'); const charcoal = count('charcoal')
+  let fuelExcess = Math.max(0, (coal + charcoal) - fuelAllow)
+  if (fuelExcess > 0) {
+    const shipChar = Math.min(charcoal, fuelExcess); add('charcoal', shipChar); fuelExcess -= shipChar
+    if (fuelExcess > 0) add('coal', Math.min(coal, fuelExcess))
+  }
+  // singleton utilities: keep 1 each, ship the rest.
+  for (const name of ['crafting_table', 'furnace', 'chest', 'flint_and_steel', 'fishing_rod']) shipNamedExcess(name, 1)
+  for (const it of items) { if (/_bucket$/.test(it.name) || it.name === 'bucket') { if (it.count > 1) add(it.name, it.count - 1) } }
+
+  // merge duplicate deposit lines
+  const merged = new Map()
+  for (const d of deposits) merged.set(d.name, (merged.get(d.name) || 0) + d.count)
+  return [...merged.entries()].map(([name, count]) => ({ name, count }))
+}
+
+// stepDue(state, key, intervalMs, now, jitterFrac=0.3) -> { due, nextAt }. Deterministic given
+//   `now` + a seeded PRNG stored on `state` (so the chores read as chores, not a metronome).
+//   When due, ARMS the next window at intervalMs*(1 +- jitterFrac); no re-fire inside it.
+function _mulberry32 (state) {
+  let a = (state.__rng == null ? (state.__rng = 0x9e3779b9 >>> 0) : state.__rng)
+  a = (a + 0x6D2B79F5) >>> 0
+  state.__rng = a
+  let t = a
+  t = Math.imul(t ^ (t >>> 15), t | 1)
+  t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+}
+function stepDue (state, key, intervalMs, now, jitterFrac = 0.3) {
+  state = state || {}
+  const slot = state[key]
+  if (slot && now < slot.nextAt) return { due: false, nextAt: slot.nextAt }
+  const jitter = (_mulberry32(state) * 2 - 1) * jitterFrac // -jf..+jf
+  const nextAt = now + Math.round(intervalMs * (1 + jitter))
+  state[key] = { nextAt, jitter }
+  return { due: true, nextAt }
+}
+
 module.exports = {
   needs,
   BUFFERS,
+  courierPlan,
+  safekeepPlan,
+  stepDue,
   _reset: () => {} // no state; present for test-harness parity
 }

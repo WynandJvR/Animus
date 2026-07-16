@@ -59,7 +59,31 @@ function gatherMovements (bot) {
   m.blocksCantBreak = new Set(
     Object.values(md.blocksByName).filter(b => !/_leaves$/.test(b.name)).map(b => b.id)
   )
+  try { const ex = cropExclusionStep(bot); if (ex && Array.isArray(m.exclusionAreasStep)) m.exclusionAreasStep.push(ex) } catch {} // FARM_NO_TRAMPLE: route AROUND our crop cells (cost-only)
   return m
+}
+
+// ANTI-TRAMPLING (FARM_NO_TRAMPLE, §5.5): a SOFT additive per-block cost on our OWN persisted
+// wheat cells (+ the farmland under them + the hop-over cell) so travel/gather/climb routes bend
+// AROUND the plot instead of jumping across it (a jump-landing is what reverts farmland). It is
+// COST ONLY - never a wall, never a dig; position-keyed to our exact cells so reverted (dirt)
+// cells stay protected and FOREIGN village farmland is never avoided. Returns fn(block)->0|COST,
+// or null (flag off / no farm). Built ONCE per movements construction (A*-hot path).
+function cropExclusionStep (bot) {
+  if (process.env.FARM_NO_TRAMPLE === '0') return null
+  let cells = null
+  try { const wf = loadWorldMem().wheatFarm; cells = (wf && wf.cells) || null } catch { return null }
+  if (!cells || !cells.length) return null
+  const cols = new Set()
+  let cy = null
+  for (const c of cells) { cols.add(c.x + ',' + c.z); if (cy == null) cy = c.y }
+  const COST = Number(process.env.MAINT_CROP_STEP_COST || 50)
+  return (block) => {
+    const p = block && block.position
+    if (!p) return 0
+    if (cy != null && Math.abs(p.y - cy) > 1) return 0
+    return cols.has(p.x + ',' + p.z) ? COST : 0
+  }
 }
 
 // MANUAL water escape: face the nearest bank cell (solid ground with headroom, up to +1
@@ -1029,6 +1053,7 @@ function climbMovements (bot) {
       for (const b of Object.values(md.blocksByName || {})) { if (STRUCTURE_RE.test(b.name)) m.blocksCantBreak.add(b.id) }
     }
   } catch { /* mcData not ready */ }
+  try { const ex = cropExclusionStep(bot); if (ex && Array.isArray(m.exclusionAreasStep)) m.exclusionAreasStep.push(ex) } catch {} // FARM_NO_TRAMPLE: climb-out routes around our plot too
   return m
 }
 
@@ -3364,6 +3389,39 @@ async function tillCell (bot, cell) {
 
 const WHEAT_FARM_TARGET = Number(process.env.WHEAT_FARM_TARGET || 20) // >=20 crop cells: 12 barely covered 0->full (10 wheat ~3 bread ~15 hunger); 20 -> ~6 bread -> 0->full + surplus/buffer (was 12/6)
 
+// SEED GATHERING (extracted from ensureWheatFarm step 3, §5.4): break tall grass/ferns for
+// wheat_seeds up to `want`, roaming a few compass legs if the immediate area is barren. Same
+// grassIds / roam legs / budgets as before (behavior identical when want=3). Now also reusable
+// by the tend path so a seed-starved plot self-fills. Returns the seed count on hand.
+async function gatherSeedsNear (bot, want, { isStopped = () => false } = {}) {
+  const mcData = require('minecraft-data')(bot.version)
+  const seedCount = () => countItem(bot, 'wheat_seeds')
+  if (seedCount() >= want) return seedCount()
+  const grassIds = ['short_grass', 'tall_grass', 'grass', 'fern', 'large_fern'].map(n => mcData.blocksByName[n] && mcData.blocksByName[n].id).filter(x => x != null)
+  let broken = 0; let legs = 0
+  const searchGrass = () => bot.findBlock({ matching: grassIds, maxDistance: 48 })
+  while (seedCount() < want && broken < 60 && !isStopped()) {
+    let g = searchGrass()
+    if (!g && legs < 4) { // barren here - roam a compass leg toward likely meadow, then re-search
+      legs++
+      const dir = [[1, 0], [-1, 0], [0, 1], [0, -1]][legs % 4]
+      const tx = Math.round(bot.entity.position.x + dir[0] * 32); const tz = Math.round(bot.entity.position.z + dir[1] * 32)
+      dbg('  seeds: no grass in 48 - roaming a leg to ' + tx + ',' + tz + ' to find grass for seeds')
+      try { await walkStaged(bot, tx, tz, { isStopped, range: 6, timeoutMs: 40000 }) } catch {}
+      g = searchGrass()
+    }
+    if (!g) break
+    try {
+      if (bot.entity.position.distanceTo(g.position) > 4) await gotoWithTimeout(bot, new goals.GoalNear(g.position.x, g.position.y, g.position.z, 2), 10000)
+      await bot.dig(g); broken++
+    } catch { break }
+    if (broken % 6 === 0) await collectDrops(bot, 6)
+  }
+  await collectDrops(bot, 8)
+  dbg('  seeds: broke ' + broken + ' grass -> ' + seedCount() + ' seeds')
+  return seedCount()
+}
+
 async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () => {}, avoid = null } = {}) {
   const mcData = require('minecraft-data')(bot.version)
   const m = loadWorldMem()
@@ -3442,31 +3500,14 @@ async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () =
   // few compass legs if the pond bank is barren) rather than deferring - grass grows patchily
   // and the pond edge often has none, but a meadow is usually within a short walk.
   const seedCount = () => countItem(bot, 'wheat_seeds')
-  if (seedCount() < 3) {
-    const grassIds = ['short_grass', 'tall_grass', 'grass', 'fern', 'large_fern'].map(n => mcData.blocksByName[n] && mcData.blocksByName[n].id).filter(x => x != null)
+  // FARM_SEED_TOPUP: gather enough seeds for what THIS expansion pass can plant (up to the
+  // 12-cell per-pass cap), so a 20-cell target actually accumulates seeds instead of planting 3
+  // and deferring. FARM_SEED_TOPUP=0 restores the hardcoded-3 goal byte-for-byte.
+  const seedWant = process.env.FARM_SEED_TOPUP === '0' ? 3 : Math.max(3, Math.min(12, WHEAT_FARM_TARGET - existingLen))
+  if (seedCount() < seedWant) {
     try { await gotoWithTimeout(bot, new goals.GoalNear(w.x, w.y, w.z, 4), 60000) } catch {}
-    let broken = 0; let legs = 0
-    const searchGrass = () => bot.findBlock({ matching: grassIds, maxDistance: 48 })
-    while (seedCount() < 3 && broken < 60 && !isStopped()) {
-      let g = searchGrass()
-      if (!g && legs < 4) { // barren here - roam a compass leg toward likely meadow, then re-search
-        legs++
-        const dir = [[1, 0], [-1, 0], [0, 1], [0, -1]][legs % 4]
-        const tx = Math.round(bot.entity.position.x + dir[0] * 32); const tz = Math.round(bot.entity.position.z + dir[1] * 32)
-        dbg('  wheat farm: no grass in 48 - roaming a leg to ' + tx + ',' + tz + ' to find grass for seeds')
-        try { await walkStaged(bot, tx, tz, { isStopped, range: 6, timeoutMs: 40000 }) } catch {}
-        g = searchGrass()
-      }
-      if (!g) break
-      try {
-        if (bot.entity.position.distanceTo(g.position) > 4) await gotoWithTimeout(bot, new goals.GoalNear(g.position.x, g.position.y, g.position.z, 2), 10000)
-        await bot.dig(g); broken++
-      } catch { break }
-      if (broken % 6 === 0) await collectDrops(bot, 6)
-    }
-    await collectDrops(bot, 8)
-    dbg('  wheat farm: broke ' + broken + ' grass -> ' + seedCount() + ' seeds')
-    if (seedCount() < 1) { dbg('  wheat farm: no grass anywhere within reach after ' + legs + ' legs - genuinely no seeds here, deferred'); return false }
+    await gatherSeedsNear(bot, seedWant, { isStopped })
+    if (seedCount() < 1) { dbg('  wheat farm: no grass anywhere within reach - genuinely no seeds here, deferred'); return false }
   }
   // 4) till + plant the water's bank: same-y neighbours of the waterline
   say('setting up a wheat farm by the water - no more starving')
@@ -3619,6 +3660,23 @@ async function tendWheatFarm (bot, { isStopped = () => false, say = () => {} } =
   const mcData = require('minecraft-data')(bot.version)
   const wheatId = mcData.blocksByName.wheat.id
   await walkStaged(bot, m.wheatFarm.x, m.wheatFarm.z, { isStopped, range: 6, timeoutMs: 120000 })
+  // TEND-SIDE SEED TOP-UP (FARM_SEED_TOPUP, §5.4): replantCropCell bails seedless, so a seed-
+  // starved plot decays. Count the cells that need (re)seeding - 'gone' cells + the under-target
+  // shortfall - and if the pack is short, gather from the grass beside the plot BEFORE the
+  // harvest/replant loop. A producing farm is seed-self-sufficient; this matters for the
+  // seed-starved bootstrap. FARM_SEED_TOPUP=0 skips it (no tend-side gathering, as before).
+  if (process.env.FARM_SEED_TOPUP !== '0') {
+    try {
+      const cellsArr = (m.wheatFarm.cells || [])
+      let gone = 0
+      for (const c of cellsArr) { const b = bot.blockAt(new Vec3(c.x, c.y, c.z)); if (farm.cropCellState(b && b.name) === 'gone') gone++ }
+      const missing = gone + Math.max(0, WHEAT_FARM_TARGET - cellsArr.length)
+      if (missing > 0 && countItem(bot, 'wheat_seeds') < missing) {
+        dbg('  wheat tend: seed-starved (' + countItem(bot, 'wheat_seeds') + ' seeds, ' + missing + ' cells need seeding) - gathering from the grass')
+        await gatherSeedsNear(bot, Math.min(missing, 12), { isStopped })
+      }
+    } catch (e) { dbg('  wheat tend: seed top-up failed (' + e.message + ')') }
+  }
   // AUTHORITATIVE cell list: the exact crop cells persisted at plant time (block-verified).
   // Fall back to a live scan only for a legacy farm saved before cells were persisted, and
   // ALWAYS also fold in any wheat visible nearby (a growing cell not in the list).
@@ -3944,12 +4002,22 @@ async function schedulerState (bot) {
       s.activeJob = { name: 'recoverHp', cls: 'survival', startedAt: null, lastProgressAt: null, blockedOn: null }
     } else if (isResting()) {
       s.activeJob = { name: 'nightShelter', cls: 'survival', startedAt: null, lastProgressAt: null, blockedOn: null }
+    } else if (isMaintaining()) {
+      // S6: surface the running chore as a rank-1 job so pickJob preempts it by rank (survival 3 >
+      // 1; a progress pick 2 > 1) without maintain ever holding a progress command.
+      s.activeJob = { name: 'maintenancePass', cls: 'maintain', startedAt: null, lastProgressAt: null, blockedOn: null }
     } else s.activeJob = null
   } catch { s.activeJob = null }
   try { const commands = require('./commands.js'); s.persistedBuild = !!(commands.persistedResume && commands.persistedResume()) } catch { s.persistedBuild = false }
-  // maintain.needs inputs. tools OMITTED in S4 (absent => "not measured", maintain.js) - the tool
-  // booleans arrive in S6.
+  // maintain.needs inputs.
   try { s.torches = countItem(bot, 'torch') } catch { s.torches = 0 }
+  // tools booleans (S6): pick/sparePick via workingPickCount (>=1/>=2 usable picks); axe/sword
+  // via an inventory name scan (/_axe$/ does NOT match /_pickaxe$/). Feeds maintain.needs' tools.
+  try {
+    const pc = workingPickCount(bot)
+    const inv = (bot.inventory ? bot.inventory.items() : [])
+    s.tools = { pick: pc >= 1, sparePick: pc >= 2, axe: inv.some(i => /_axe$/.test(i.name)), sword: inv.some(i => /_sword$/.test(i.name)) }
+  } catch { s.tools = { pick: false, sparePick: false, axe: false, sword: false } }
   s.homeReachable = s.homeDist != null && s.homeDist <= 48
   // maintainNeeded computed LAST on the fully-assembled base snapshot (pure, no cycle). S4 never
   // dispatches maintain; the field exists so pickJob is exercised with real data (S6 = one-line enable).
@@ -4497,7 +4565,13 @@ const RUNG_EXECUTORS = {
   'sleepInBed': async (bot, o) => { await nightRest(bot, { isStopped: o.isStopped, say: o.say }) },
   'digInForNight': async (bot, o) => { await digInForNight(bot, { isStopped: o.isStopped, say: o.say }) },
   // R3: tend/harvest the owned farm (hoe-aware), eat what came off it. courierHome = S6, logged-skip.
-  'trekFarm+tend+harvest+courierHome': async (bot, o) => { await tendWheatFarm(bot, { isStopped: o.isStopped, say: o.say }); await eatUp(bot); o.dbg('(ladder) courier deferred to S6') },
+  'trekFarm+tend+harvest+courierHome': async (bot, o) => {
+    await tendWheatFarm(bot, { isStopped: o.isStopped, say: o.say }); await eatUp(bot)
+    // S6: courier the food surplus home so a famine recovery restocks the pantry on its way out
+    // (the §4.2-step-4 promise). Behind MAINTAIN; MAINTAIN=0 keeps the old logged-skip.
+    if (process.env.MAINTAIN !== '0') { try { await courierFoodToBank(bot, { isStopped: o.isStopped, say: o.say }) } catch (e) { o.dbg('(ladder) courier failed: ' + e.message) } }
+    else o.dbg('(ladder) courier deferred (MAINTAIN=0)')
+  },
   // R4: acquire NEW supply (hunt->fish->scout). canHold:false - the ladder owns holding (R5).
   'secureFood(hunt->fish->scout)': async (bot, o) => { await secureFood(bot, { home: o.home, canHold: false, isStopped: o.isStopped, say: o.say }) },
   // R5: the one bounded hold (bed-sleep -> hut -> pit; its own preference order covers both variants)
@@ -4549,6 +4623,234 @@ async function recoverFromDegraded (bot, { isStopped = () => false, say = () => 
       rungs.push(label)
     }
   } finally { _recoveringDegraded = false }
+}
+
+// ==== S6: PROACTIVE MAINTENANCE PASS (§4.2/§5) ===========================================
+// The single maintain-class job. A thin, bounded composition of EXISTING routines keyed off
+// maintain.needs(snapshot): harvest orchard, tend/expand the farm, cook+bake, COURIER the food
+// surplus into the bank, SAFEKEEP spare kit, then top up gear/tools/torches + repair home. It
+// NEVER preempts progress/build (rank 1, tick admission, command-path stopMaintenance) and bails
+// on any survival need. MAINTAIN=0 -> the tick never dispatches this (defer-note restored).
+let _maintaining = false
+let _maintStop = false
+function isMaintaining () { return _maintaining }
+function stopMaintenance () { _maintStop = true } // the running pass unwinds at its next isStopped poll
+function _setMaintaining (v) { _maintaining = !!v } // test-only seam (schedstatetest activeJob synthesis)
+const _maintState = {} // module-local per-step cadence (stepDue); NOT persisted - a restart re-allows all steps (every step is a no-op when its buffer is fine)
+
+// Resolve the hut bank chest exactly as consolidateBank does: the bed-adjacent chest inside the
+// hut, else the nearest verified chest <=16b of the hut anchor. null (log+skip) if no bank -
+// making one is maintainHome's job (step 9). Returns the chest cell {x,y,z} or null.
+function resolveBankCell (bot) {
+  try {
+    const bank = listInfra('chest', bot).find(e => ownHutAt({ x: e.x, y: e.y, z: e.z }))
+    if (bank) return { x: bank.x, y: bank.y, z: bank.z }
+    const hut = hutAnchor()
+    if (hut) { const v = require('./resources.js').verifiedChests(bot, hut, 16)[0]; if (v) return { x: v.x, y: v.y, z: v.z } }
+  } catch {}
+  return null
+}
+
+// THE COURIER (§5.2): deposit the pack's food surplus into the hut bank so R2's raid-the-cache
+// always works. Reuses depositMaterials' open/deposit/close body via the explicit-list mode; the
+// pure maintain.courierPlan decides what moves. Refreshes the chest cache so bankFoodPts updates
+// next tick. Returns how many food items were banked.
+async function courierFoodToBank (bot, { isStopped = () => false, say = () => {} } = {}) {
+  const res = require('./resources.js')
+  const maintain = require('./maintain.js')
+  const cell = resolveBankCell(bot)
+  if (!cell) { dbg('  courier: no hut bank chest - skipping (home-repair owns making one)'); return 0 }
+  const hut = hutAnchor()
+  const anchor = hut || cell
+  if (bot.entity && bot.entity.position.distanceTo(new Vec3(anchor.x, anchor.y, anchor.z)) > 6) {
+    try { await walkStaged(bot, anchor.x, anchor.z, { isStopped, range: 4, timeoutMs: 120000 }) } catch {}
+  }
+  if (isStopped()) return 0
+  const md = require('minecraft-data')(bot.version); const foods = (md && md.foodsByName) || {}
+  const packItems = []
+  for (const i of (bot.inventory ? bot.inventory.items() : [])) {
+    if (foods[i.name]) packItems.push({ name: i.name, count: i.count, foodPoints: foods[i.name].foodPoints || 0, tier: foodSec.foodTier(i.name) })
+  }
+  // BANK-only food points (a real read - we're standing at the chest): totalCounts would fold in
+  // the pack surplus we're about to deposit and wrongly read the pantry as full.
+  let bankFoodPts = 0
+  try { const counts = await res.readChest(bot, cell); for (const [n, c] of Object.entries(counts || {})) if (foods[n]) bankFoodPts += (foods[n].foodPoints || 0) * c } catch {}
+  const plan = maintain.courierPlan(packItems, bankFoodPts, {})
+  if (!plan.length) { dbg('  courier: pack keep met / pantry stocked (' + bankFoodPts + ' pts) - nothing to deposit'); return 0 }
+  const blk = bot.blockAt(new Vec3(cell.x, cell.y, cell.z))
+  if (!blk || !/chest/.test(blk.name)) { dbg('  courier: bank cell no longer a chest'); return 0 }
+  let n = 0
+  try { n = await depositMaterials(bot, blk, { deposits: plan }) } catch (e) { dbg('  courier: deposit failed (' + e.message + ')') }
+  try { await res.readChest(bot, cell) } catch {} // refresh cache so bankFoodPts/maintainNeeded update next tick
+  if (n) { dbg('  courier: banked ' + n + ' food item(s) into the pantry'); say('stocking the pantry - ' + n + ' food in the chest') }
+  return n
+}
+
+// SAFEKEEPING (§5.3, FIRM): stash spare tools + build-material surplus into the bank so a death
+// mid-excursion costs only the bounded loadout. Same bank + deposit mode as the courier; the pure
+// maintain.safekeepPlan (never the last working tool of a kind) decides. REFUSES during build
+// placement (belt-and-suspenders; trigger 3 lives in planner). Returns how many items were stashed.
+async function safekeepSweep (bot, { isStopped = () => false, say = () => {} } = {}) {
+  if (process.env.MAINT_SAFEKEEP === '0') return 0
+  try {
+    const commands = require('./commands.js')
+    if (commands.persistedResume && commands.persistedResume()) { dbg('  safekeep: a saved build exists - not sweeping'); return 0 }
+    const a = commands.activityInfo && commands.activityInfo()
+    if (a && a.name && /build|schem|wall|tower|house|castle/i.test(a.name)) { dbg('  safekeep: build placement running - not sweeping'); return 0 }
+  } catch {}
+  const res = require('./resources.js')
+  const maintain = require('./maintain.js')
+  const cell = resolveBankCell(bot)
+  if (!cell) { dbg('  safekeep: no hut bank chest - skipping'); return 0 }
+  const hut = hutAnchor()
+  const anchor = hut || cell
+  if (bot.entity && bot.entity.position.distanceTo(new Vec3(anchor.x, anchor.y, anchor.z)) > 6) {
+    try { await walkStaged(bot, anchor.x, anchor.z, { isStopped, range: 4, timeoutMs: 120000 }) } catch {}
+  }
+  if (isStopped()) return 0
+  // usesLeft for picks (via miningPicks - same item object refs as inventory.items()).
+  const usesByItem = new Map()
+  for (const p of miningPicks(bot)) usesByItem.set(p.item, p.usesLeft)
+  const packItems = (bot.inventory ? bot.inventory.items() : []).map(i => ({ name: i.name, count: i.count, usesLeft: usesByItem.has(i) ? usesByItem.get(i) : undefined }))
+  const plan = maintain.safekeepPlan(packItems, {})
+  if (!plan.length) { dbg('  safekeep: nothing surplus to stash'); return 0 }
+  const blk = bot.blockAt(new Vec3(cell.x, cell.y, cell.z))
+  if (!blk || !/chest/.test(blk.name)) { dbg('  safekeep: bank cell no longer a chest'); return 0 }
+  let n = 0
+  try { n = await depositMaterials(bot, blk, { deposits: plan }) } catch (e) { dbg('  safekeep: deposit failed (' + e.message + ')') }
+  try { await res.readChest(bot, cell) } catch {}
+  if (n) { dbg('  safekeep: stashed ' + n + ' surplus item(s) - departing light'); say('stashing spare kit in the bank before i head out') }
+  return n
+}
+
+// maintenancePass(bot, opts) - the orchestrator. opts: { say, nightIndoorOnly, isStopped }.
+// Returns { ok, steps: [label...], reason } for the tick's one-line note.
+async function maintenancePass (bot, opts = {}) {
+  if (_maintaining) return { ok: false, steps: [], reason: 'busy' }
+  _maintaining = true; _maintStop = false
+  const say = opts.say || (() => {})
+  const nightIndoorOnly = !!opts.nightIndoorOnly
+  const steps = []
+  const deadline = Date.now() + Number(process.env.MAINT_PASS_MAX_MS || 600000)
+  const crisisFood = Number(process.env.SCHED_CRISIS_FOOD || 6)
+  // isStopped: crisis-grade survival probe (unwinds within one executor poll) + the deadline.
+  const isStopped = () => {
+    if (_maintStop || (opts.isStopped && opts.isStopped()) || Date.now() > deadline) return true
+    try { return survivalNeed(bot, { foodThreshold: crisisFood }) != null } catch { return false }
+  }
+  // between steps: the fuller survivalNeed (default threshold 14) - bail honestly to the tick.
+  const between = () => { if (isStopped()) return true; try { return survivalNeed(bot) != null } catch { return false } }
+  const maintain = require('./maintain.js')
+  const home = (() => { try { return hutAnchor() || knownBed() || null } catch { return null } })()
+  const atHome = () => { try { return !!(home && bot.entity && Math.hypot(bot.entity.position.x - home.x, bot.entity.position.z - home.z) <= 24) } catch { return false } }
+  const day = () => !isNight(bot)
+  const due = (key, ms) => maintain.stepDue(_maintState, key, ms, Date.now()).due
+  try {
+    let snap = {}
+    try { snap = await schedulerState(bot) } catch {}
+    // the needs list, once (cheap, pure), so each step gate reads the same authority as the tick.
+    let needList = []
+    try { needList = maintain.needs(snap) } catch {}
+    const has = k => needList.some(x => x.key === k)
+    const farmUnderTarget = () => { try { const wf = loadWorldMem().wheatFarm; return !!(wf && (wf.cells || []).length > 0 && (wf.cells || []).length < WHEAT_FARM_TARGET && !wf.maxed) } catch { return false } }
+    const orchardReady = () => { try { const o = loadWorldMem().orchard; return !!(o && o.harvestReadyAt != null && Date.now() >= o.harvestReadyAt) } catch { return false } }
+    const woodLow = async () => { try { const t = await require('./resources.js').totalCounts(bot, { cachedOnly: true, near: home, maxDist: 64 }); let n = 0; for (const [k, v] of Object.entries(t)) if (/_planks$|_log$/.test(k)) n += v; return n < 32 } catch { return false } }
+    const packTarget = Number(process.env.MAINT_PACKFOOD_TARGET || 24)
+
+    // STEP 0: safekeep-out - stash spare kit BEFORE any outbound trek leaves the hut.
+    if (process.env.MAINT_SAFEKEEP !== '0' && !nightIndoorOnly && atHome()) {
+      const outboundDue = (process.env.FOOD_SUPPLY !== '0' && (has('bankFood') || has('packFood') || farmUnderTarget())) ||
+                          orchardReady() ||
+                          (process.env.GEAR_REFLEX !== '0' && has('armor'))
+      if (outboundDue && due('safekeep', 600000)) {
+        try { const n = await safekeepSweep(bot, { isStopped, say }); if (n) steps.push('safekeep-out(' + n + ')') } catch (e) { dbg('  maint: safekeep-out failed (' + e.message + ')') }
+      }
+    }
+    if (between()) return { ok: true, steps, reason: 'bail:survival' }
+
+    // STEP 1: packFood - top the carried buffer up (R2 pattern) + cook/bake + eat.
+    if (process.env.FOOD_TOPUP !== '0' && has('packFood') && due('packFood', 600000)) {
+      try {
+        await require('./resources.js').ensureFood(bot, { near: home, threshold: 20, minPack: 1, maxDist: 64 })
+        if (Object.keys(RAW_COOKABLE).some(n => countItem(bot, n) > 0)) await cookRawMeat(bot, { isStopped })
+        await bakeBreadFromWheat(bot, { isStopped, home })
+        await eatUp(bot)
+        steps.push('packFood')
+      } catch (e) { dbg('  maint: packFood failed (' + e.message + ')') }
+    }
+    if (between()) return { ok: true, steps, reason: 'bail:survival' }
+
+    // STEP 2: farm - tend + under-target expansion (with the seed top-up). Daylight only.
+    if (process.env.FOOD_SUPPLY !== '0' && !nightIndoorOnly && day() && (has('bankFood') || has('packFood') || farmUnderTarget()) && due('farm', 1200000)) {
+      try { await ensureFoodSupply(bot, { home, say, isStopped }); steps.push('farm') } catch (e) { dbg('  maint: farm failed (' + e.message + ')') }
+    }
+    if (between()) return { ok: true, steps, reason: 'bail:survival' }
+
+    // STEP 3: orchard - harvest our OWN grove when ripe AND wood is low. Daylight only.
+    if (!nightIndoorOnly && day() && orchardReady() && await woodLow() && due('orchard', 900000)) {
+      try { await runGather(bot, (detectWood(bot) || 'oak') + '_log', 16, { home, isStopped, say }); steps.push('orchard') } catch (e) { dbg('  maint: orchard failed (' + e.message + ')') }
+    }
+    if (between()) return { ok: true, steps, reason: 'bail:survival' }
+
+    // STEP 4: cook + bake at the (reused hut) furnace.
+    if ((Object.keys(RAW_COOKABLE).some(n => countItem(bot, n) > 0) || countItem(bot, 'wheat') >= 3) && due('cook', 600000)) {
+      try { await cookRawMeat(bot, { isStopped }); await bakeBreadFromWheat(bot, { isStopped, home }); steps.push('cook') } catch (e) { dbg('  maint: cook failed (' + e.message + ')') }
+    }
+    if (between()) return { ok: true, steps, reason: 'bail:survival' }
+
+    // STEP 5: THE COURIER - deposit the food surplus into the bed-adjacent bank.
+    if ((has('bankFood') || (snap.packFoodPts || 0) > packTarget) && snap.homeReachable && due('courier', 600000)) {
+      try { const n = await courierFoodToBank(bot, { isStopped, say }); if (n) steps.push('courier(' + n + ')') } catch (e) { dbg('  maint: courier failed (' + e.message + ')') }
+    }
+    if (between()) return { ok: true, steps, reason: 'bail:survival' }
+
+    // STEP 5b: safekeep-home - same bank visit as the courier (shares the 'safekeep' window).
+    if (process.env.MAINT_SAFEKEEP !== '0' && atHome() && due('safekeep', 600000)) {
+      try { const n = await safekeepSweep(bot, { isStopped, say }); if (n) steps.push('safekeep(' + n + ')') } catch (e) { dbg('  maint: safekeep failed (' + e.message + ')') }
+    }
+    if (between()) return { ok: true, steps, reason: 'bail:survival' }
+
+    // STEP 6: armor - the GEAR_REFLEX executor, same back-off + nightStuck exception. Outbound.
+    if (process.env.GEAR_REFLEX !== '0' && !nightIndoorOnly && has('armor') && (day() || nightStuck(bot)) && due('armor', 900000)) {
+      const gb = gearupState()
+      if (!(gb && gb.until > Date.now())) {
+        try { const r = await require('./commands.js').handle(bot, 'armorup'); steps.push('armor'); dbg('  maint armor -> ' + String(r || '').split('\n')[0]) } catch (e) { dbg('  maint: armor failed (' + e.message + ')') }
+      }
+    }
+    if (between()) return { ok: true, steps, reason: 'bail:survival' }
+
+    // STEP 7: tools - ONE missing tool per pass via the resource model (withdraw > craft > gather).
+    if (has('tools') && !nightIndoorOnly && due('tools', 900000)) {
+      const t = snap.tools || {}
+      try {
+        const res = require('./resources.js')
+        if (!t.pick || !t.sparePick) await res.acquire(bot, 'stone_pickaxe', 1, { near: home, isStopped, say })
+        else if (!t.axe) await res.acquire(bot, 'stone_axe', 1, { near: home, isStopped, say })
+        else if (!t.sword) await res.acquire(bot, 'wooden_sword', 1, { near: home, isStopped, say })
+        steps.push('tools')
+      } catch (e) { dbg('  maint: tools failed (' + e.message + ')') }
+    }
+    if (between()) return { ok: true, steps, reason: 'bail:survival' }
+
+    // STEP 8: torches - withdraw coal+sticks if short, then craft from carried coal+stick.
+    if (has('torches') && !nightIndoorOnly && due('torches', 900000)) {
+      try {
+        const torchTarget = Number(process.env.MAINT_TORCH_TARGET || 8)
+        const res = require('./resources.js')
+        if (countItem(bot, 'coal') + countItem(bot, 'charcoal') < 1) { try { await res.withdrawItems(bot, 'coal', 8, { near: home, maxDist: 64 }) } catch {} }
+        if (countItem(bot, 'stick') < 1) { try { await res.withdrawItems(bot, 'stick', 4, { near: home, maxDist: 64 }) } catch {} }
+        await ensureTorches(bot, torchTarget)
+        steps.push('torches')
+      } catch (e) { dbg('  maint: torches failed (' + e.message + ')') }
+    }
+    if (between()) return { ok: true, steps, reason: 'bail:survival' }
+
+    // STEP 9: homeRepair - the HOME_REPAIR chain when already home (5-min floor via stepDue).
+    if (process.env.HOME_REPAIR !== '0' && atHome() && due('homeRepair', 300000)) {
+      try { const r = await maintainHome(bot, hutAnchor(), { isStopped, say }); if (r && r.damaged) steps.push('homeRepair') } catch (e) { dbg('  maint: homeRepair failed (' + e.message + ')') }
+    }
+    return { ok: true, steps, reason: steps.length ? steps.join('+') : 'nothing due' }
+  } finally { _maintaining = false }
 }
 
 // ---- TREE FARMING (user-approved): the castle region is chopped bare, so the bot keeps
@@ -6062,7 +6364,7 @@ async function cookRawMeat (bot, opts = {}) {
   if (!blk) {
     // the camp furnace lives in the hut now - worth a short walk (operator: "now that
     // it has a furnace why is it eating raw food?"); cooked feeds ~3x raw.
-    const known = recallInfraVerified(bot, 'furnace', bot.entity.position, 32)
+    const known = recallInfraVerified(bot, 'furnace', bot.entity.position, hutAnchor() ? 48 : 32) // §8: the farm sits ~76b out; 48 walks a far cook pass home to the hut furnace (which also sets up the courier bank visit)
     if (known) {
       try { await gotoWithTimeout(bot, new goals.GoalNear(known.x, known.y, known.z, 2), 30000) } catch {}
       blk = bot.findBlock({ matching: furnaceId, maxDistance: 6 })
@@ -6433,12 +6735,30 @@ async function depositMaterials (bot, chestBlock, opts = {}) {
   const chest = await bot.openContainer(chestBlock)
   let n = 0
   try {
-    for (const it of bot.inventory.items()) {
-      if (keepRe.test(it.name)) continue
-      let count = it.count
-      if (it.name === 'dirt' && keepDirt) count = Math.max(0, it.count - keepDirt)
-      if (count <= 0) continue
-      try { await chest.deposit(it.type, null, count); n += count } catch { /* chest full / slot race */ }
+    if (opts.deposits) {
+      // EXPLICIT-LIST mode (S6 courier/safekeep): deposit EXACTLY the named counts and IGNORE
+      // the keep regexes - KEEP_ON_BOT/KEEP_WHEN_ALL would otherwise pin food/planks on the bot
+      // forever (the pure courierPlan/safekeepPlan already decided what is safe to move). The
+      // regex modes below stay byte-identical for every existing caller (opts.deposits absent).
+      const want = new Map()
+      for (const d of opts.deposits) { if (d && d.name && d.count > 0) want.set(d.name, (want.get(d.name) || 0) + d.count) }
+      for (const [name, cnt] of want) {
+        let remaining = cnt
+        for (const it of bot.inventory.items()) {
+          if (remaining <= 0) break
+          if (it.name !== name) continue
+          const take = Math.min(remaining, it.count)
+          try { await chest.deposit(it.type, null, take); n += take; remaining -= take } catch { /* chest full / slot race */ }
+        }
+      }
+    } else {
+      for (const it of bot.inventory.items()) {
+        if (keepRe.test(it.name)) continue
+        let count = it.count
+        if (it.name === 'dirt' && keepDirt) count = Math.max(0, it.count - keepDirt)
+        if (count <= 0) continue
+        try { await chest.deposit(it.type, null, count); n += count } catch { /* chest full / slot race */ }
+      }
     }
   } finally { chest.close() }
   return n
@@ -6823,4 +7143,5 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, boundedHold, recoverFromDegraded, isRecoveringDegraded, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, boundedHold, recoverFromDegraded, isRecoveringDegraded, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
+  maintenancePass, isMaintaining, stopMaintenance, _setMaintaining, courierFoodToBank, safekeepSweep, cropExclusionStep, gatherSeedsNear }

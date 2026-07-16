@@ -111,6 +111,30 @@ t('(g) a barely-populated stub resolves without throwing (partial snapshot)', as
   assert.strictEqual(typeof s.packFoodPts, 'number', 'packFoodPts defaulted to a number even with no inventory')
 })
 
+// (h) S6: the tools booleans are present + correctly shaped (pick/sparePick/axe/sword)
+t('(h) s.tools booleans present + shaped; axe/sword name-scan excludes pickaxe', async () => {
+  // a working stone pick + a stone axe, no sword, no spare pick.
+  const s = await provision.schedulerState(stubBot({ items: [{ name: 'stone_pickaxe', count: 1 }, { name: 'stone_axe', count: 1 }] }))
+  assert.ok(s.tools && typeof s.tools === 'object', 's.tools object present')
+  for (const k of ['pick', 'sparePick', 'axe', 'sword']) assert.strictEqual(typeof s.tools[k], 'boolean', k + ' is boolean')
+  assert.strictEqual(s.tools.pick, true, 'one working pick -> pick true')
+  assert.strictEqual(s.tools.sparePick, false, 'only one pick -> no spare')
+  assert.strictEqual(s.tools.axe, true, 'stone_axe -> axe true')
+  assert.strictEqual(s.tools.sword, false, 'no sword (and pickaxe must NOT read as an axe)')
+})
+
+// (i) S6: activeJob synthesizes maintenancePass/maintain when the latch is set
+t('(i) activeJob = maintenancePass/maintain when the maintain latch is set', async () => {
+  try {
+    provision._setMaintaining(true)
+    const s = await provision.schedulerState(stubBot({}))
+    assert.ok(s.activeJob && s.activeJob.name === 'maintenancePass', 'activeJob is the maintenance pass')
+    assert.strictEqual(s.activeJob.cls, 'maintain', 'classified rank-1 maintain')
+  } finally { provision._setMaintaining(false) }
+  const s2 = await provision.schedulerState(stubBot({}))
+  assert.ok(!s2.activeJob || s2.activeJob.name !== 'maintenancePass', 'latch cleared -> no synthetic maintain job')
+})
+
 ;(async () => {
   let failures = 0
   for (const [name, fn] of tests) {

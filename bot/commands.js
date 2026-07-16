@@ -601,6 +601,7 @@ function travelMovements (bot) {
     const ids = bridge.map(n => md.itemsByName[n] && md.itemsByName[n].id).filter(x => x != null)
     if ('scafoldingBlocks' in m) m.scafoldingBlocks = ids
   } catch { /* mcData not ready - fall back to no bridging (routes around) */ }
+  try { const ex = provision.cropExclusionStep && provision.cropExclusionStep(bot); if (ex && Array.isArray(m.exclusionAreasStep)) m.exclusionAreasStep.push(ex) } catch {} // FARM_NO_TRAMPLE: treks bend around our crop cells (cost-only, never a wall/dig)
   return m
 }
 

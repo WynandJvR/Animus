@@ -31,6 +31,7 @@ const loghistory = require('./loghistory.js') // compact rolling state time-seri
 const scheduler = require('./scheduler.js') // S4: pure survival-tier decision core (commandClass/admissible/pickJob) - wires the busy-gate + the tick
 const SCHED_ON = process.env.SCHEDULER !== '0' // master flag: SCHEDULER=0 restores the S1-hotfix wiring byte-for-byte (gate takes the survivalAdmissible path, the tick never registers, the 3 reflexes run as today)
 const LADDER_ON = SCHED_ON && process.env.RECOVERY_LADDER !== '0' // S5: RECOVERY_LADDER=0 restores S4's recoveryLadder DOWNGRADE + the one-shot respawn grave gating byte-for-byte
+const MAINTAIN_ON = SCHED_ON && process.env.MAINTAIN !== '0' // S6: MAINTAIN=0 restores the defer-note + the four proactive reflexes on their old timers byte-for-byte
 
 // Live brain settings the dashboard can change on the fly; brain-llm.js polls
 // GET /brain each tick and switches model / goal / on-off without a restart.
@@ -402,6 +403,8 @@ bot.on('chat', (username, message) => {
     // it's the safety override the operator relies on.
     const direct = directCommand(message, username)
     if (direct && access.isOperator(username, cfg)) {
+      // S6: an operator's deterministic order STOPS a running maintenance pass so the body is free.
+      if (provision.isMaintaining && provision.isMaintaining()) { try { const dcls = scheduler.commandClass(direct); if (dcls !== 'perception' && dcls !== 'chat') provision.stopMaintenance() } catch {} }
       note(`(direct-cmd) ${username}: "${message}" -> ${direct}`)
       commands.handle(bot, direct, { source: 'operator' })
         .then(r => note(`(direct-cmd) ${r}`))
@@ -784,6 +787,7 @@ if (process.env.SURVIVAL_HUNT !== '0') {
 let toppingUpFood = false
 if (process.env.FOOD_TOPUP !== '0') {
   setInterval(async () => {
+    if (MAINTAIN_ON) return // S6: food<14 is a survival need (secureFood dispatch owns it); the pack-points buffer is maintain step 1. FOOD_TOPUP=0 still disables step 1.
     if (toppingUpFood || !bot.entity || bot.food == null || bot.food >= 14) return
     if (commands.isBusy && commands.isBusy()) return // busy jobs run their own secureFood
     if (provision.isResting && provision.isResting()) return
@@ -867,6 +871,7 @@ if (process.env.HP_CRISIS !== '0') {
 let buildingFoodSupply = false
 if (process.env.FOOD_SUPPLY !== '0') {
   setInterval(async () => {
+    if (MAINTAIN_ON) return // S6: farm tend/expand is maintain step 2. FOOD_SUPPLY=0 still disables step 2.
     if (buildingFoodSupply || !bot.entity) return
     if (commands.isBusy && commands.isBusy()) return // a job owns the body
     if (provision.isResting && provision.isResting()) return
@@ -907,6 +912,9 @@ if (process.env.NIGHT_SHELTER !== '0') {
     // keeps working the night; armored + idle sleeps.
     const idleNight = provision.isNight(bot) && !bot.pathfinder.goal && provision.knownBed && provision.knownBed()
     if (!provision.shelterNeeded(bot) && !idleNight) return
+    // S6: don't yank a night indoor cook/courier into bed mid-deposit. shelterNeeded (a naked bot
+    // at dusk) still WINS - this only holds the idle-sleep while a maintain pass is running safe.
+    if (provision.isMaintaining && provision.isMaintaining() && !provision.shelterNeeded(bot)) return
     // ETERNAL/FROZEN NIGHT: after the brief initial shelter, STOP re-bunkering (and stop
     // idle-sleeping toward a dawn that won't come) - stand down so gearup/progress can run.
     // Re-arming near the bunker is the real fix for "no armor, mobs about", not hiding forever
@@ -930,6 +938,7 @@ if (process.env.NIGHT_SHELTER !== '0') {
 let gearing = false
 if (process.env.GEAR_REFLEX !== '0') {
   setInterval(async () => {
+    if (MAINTAIN_ON) return // S6: gear-up is maintain step 6 (same executor, back-off, nightStuck exception). GEAR_REFLEX=0 still disables step 6.
     if (gearing || !bot.entity) return
     if (recoveringHome) return // respawned far from base - GO HOME outranks re-arming in the wild
     if (commands.isBusy && commands.isBusy()) return // a job owns the body (its camp flow gears)
@@ -974,6 +983,7 @@ let repairingHome = false
 let lastHomeRepair = 0
 if (process.env.HOME_REPAIR !== '0') {
   setInterval(async () => {
+    if (MAINTAIN_ON) return // S6: home repair is maintain step 9 (same gates). HOME_REPAIR=0 still disables step 9.
     if (repairingHome || !bot.entity) return
     if (recoveringHome) return // respawned far from base - GO HOME outranks patching the base
     if (commands.isBusy && commands.isBusy()) return // a job owns the body (its camp pass repairs)
@@ -1012,6 +1022,7 @@ let schedHeldLog = ''           // busy-held note throttle (separate so it never
 let schedGraveCooldownUntil = 0 // failed grave recovery -> don't hammer an unreachable grave
 let schedLadderCooldownUntil = 0 // S5: honest ladder non-completion -> don't re-run every 15s
 let schedHpCooldownUntil = 0    // mirror of hpCrisisCooldownUntil (index.js hp-crisis)
+let schedMaintainCooldownUntil = 0 // S6: 10 min after a completed pass, 5 min after a no-op/bail (mirrors schedLadderCooldownUntil)
 let schedDeferNoted = ''        // one note per deferred job kind (nightShelter/maintain/degraded/ladder-reflex)
 if (SCHED_ON) {
   const GRAVE_NEAR_LADDER = Number(process.env.GRAVE_NEAR_LADDER || 32)
@@ -1043,7 +1054,31 @@ if (SCHED_ON) {
       // 4. Non-survival results are IGNORED (progress = body/resume already owns the goal; maintain
       //    dispatch is S6).
       if (!pick || pick.cls !== 'survival') {
-        if (pick && pick.job === 'maintenancePass' && schedDeferNoted !== 'maintain') { schedDeferNoted = 'maintain'; note('(sched) maintain needed - deferred to S6') }
+        if (pick && pick.job === 'maintenancePass') {
+          if (!MAINTAIN_ON) {
+            if (schedDeferNoted !== 'maintain') { schedDeferNoted = 'maintain'; note('(sched) maintain needed - deferred to S6') }
+            return
+          }
+          // S6 DISPATCH: admission gates (cheap, mirror the reflexes it replaces) - idle body +
+          // idle pathfinder + fed + cooldown clear; at night restrict to indoor sub-steps AND
+          // only when already near home. runJob's single schedJob latch keeps one dispatch at a time.
+          if (schedJob || Date.now() < schedMaintainCooldownUntil) return
+          const busy = (commands.isBusy && commands.isBusy()) || (provision.isResting && provision.isResting()) || (provision.isSecuringFood && provision.isSecuringFood()) || (provision.isRecoveringDegraded && provision.isRecoveringDegraded())
+          if (busy) return
+          if (bot.pathfinder && bot.pathfinder.goal) return
+          if (!provision.mayDoProgress(bot)) return
+          const night = !!(provision.isNight && provision.isNight(bot))
+          if (night && (s.homeDist == null || s.homeDist > 48)) return // night: indoor-only, and only if already <=48b of home
+          if (provision.isMaintaining && provision.isMaintaining()) return
+          schedDeferNoted = ''
+          await runJob('maintenancePass', async () => {
+            const r = await provision.maintenancePass(bot, { say: schedSay, nightIndoorOnly: night })
+            const worked = !!(r && r.steps && r.steps.length && !/^bail/.test(r.reason || ''))
+            schedMaintainCooldownUntil = Date.now() + (worked ? 600000 : 300000) // 10 min after a real pass, 5 min after a no-op/bail
+            return r && r.steps && r.steps.length ? r.steps.join('+') : (r && r.reason) || 'nothing due'
+          })
+          return
+        }
         return
       }
       // 5. RESOLVE the executor (the dispatch map). `name` = the executor kind actually dispatched.
@@ -1876,6 +1911,9 @@ const server = http.createServer((req, res) => {
       const drop = gateSay(line, true) || gateImpactful(line) // brain: gated chat + repeat-guard
       if (drop) { note(`(cmd) ${line}${rz} -> skipped (${drop})`); return send(res, 200, `skipped: ${drop}`) }
       noteManualLook(line)
+      // S6: an incoming progress/survival command STOPS a running maintenance pass (the pass
+      // unwinds at its next poll; the incoming job takes the body). perception/chat never do.
+      if (provision.isMaintaining && provision.isMaintaining() && cls !== 'perception' && cls !== 'chat') provision.stopMaintenance()
       try {
         const result = await commands.handle(bot, line, { source: fromSupervisor ? 'supervisor' : 'brain' })
         // A non-perception command is the brain's response to any waiting player,

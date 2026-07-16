@@ -457,6 +457,20 @@ async function gearUp (bot, opts = {}) {
   if (!p0) return { progressed: false, msg: 'not spawned yet' }
   const at = { x: Math.round(p0.x), y: Math.floor(p0.y), z: Math.round(p0.z) }
   await wearFromPack(bot) // free protection first - never mine for what the pack holds
+  // S6 SAFEKEEP (trigger 3): the iron grind is the classic depart-with-a-full-pack excursion
+  // (how it lost the hoe + iron on 07-15). If we're AT the hut and NOT mid-build, stash spare
+  // tools + material surplus into the bank FIRST so a death on the grind costs only the loadout.
+  // Behind MAINTAIN (+ MAINT_SAFEKEEP / build-placement refusal inside safekeepSweep).
+  try {
+    if (process.env.SCHEDULER !== '0' && process.env.MAINTAIN !== '0') {
+      const hut = provision.hutAnchor && provision.hutAnchor()
+      let building = false
+      try { const c = require('./commands.js'); building = !!(c.persistedResume && c.persistedResume()) } catch {}
+      if (hut && bot.entity && bot.entity.position.distanceTo(hut) <= 24 && !building && provision.safekeepSweep) {
+        await provision.safekeepSweep(bot, { isStopped, say })
+      }
+    }
+  } catch (e) { dbg('gearUp: pre-excursion safekeep skipped (' + e.message + ')') }
   const bare = () => IRON_PIECES.filter(p => !wornBySlot(bot)[p.slot])
   if (!bare().length) return { progressed: false, msg: 'already armored in every slot' }
   // TOTAL (pack+bank) iron in ingot-equivalents (raw smelts 1:1). ONE honest measure used
