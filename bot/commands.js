@@ -210,6 +210,7 @@ const RESUME_MAX_DEATHS = parseInt(process.env.RESUME_MAX_DEATHS || '4', 10)
 // restores today's destructive behavior at every touched site (BRANCH_MINE=0 convention).
 const STOP_KEEPS_BUILD = process.env.STOP_KEEPS_BUILD !== '0'
 const RESUME_HOLD_MS = parseInt(process.env.RESUME_HOLD_MS || '900000', 10) // pause hold before autonomy resumes (15min)
+const SUPERVISOR_RESUME_HOLD_MS = parseInt(process.env.SUPERVISOR_RESUME_HOLD_MS || '60000', 10) // a supervisor UNSTICK (frozen-vitals nudge: stop->recover) pauses only briefly, not the full operator 15min
 let cancelArmedAt = 0 // two-step cancelbuild confirm window (ms epoch of the arm)
 
 // ---- observability: what the body is DOING, how the last long op ENDED, and whether
@@ -1642,8 +1643,14 @@ async function handle (bot, line, opts = {}) {
       // autonomy resumes it after RESUME_HOLD_MS; only cancelbuild throws it away.
       const savedStop = persistedResume()
       if (!savedStop) return 'stopped'
-      markResumePaused('operator stop')
-      const holdMin = Math.round(RESUME_HOLD_MS / 60000)
+      // A supervisor UNSTICK (frozen-vitals nudge: stop->recover) must NOT pause the build for the
+      // full operator 15min - it only clears the wedged body so `recover` can run, then autonomy
+      // resumes promptly. Label it distinctly (so it never reads as an operator stop) and use the
+      // short hold. A real operator stop is unchanged (15min, "operator stop").
+      const bySupervisor = opts.source === 'supervisor'
+      const holdMs = bySupervisor ? SUPERVISOR_RESUME_HOLD_MS : RESUME_HOLD_MS
+      markResumePaused(bySupervisor ? 'supervisor unstick' : 'operator stop', bySupervisor ? holdMs : null)
+      const holdMin = Math.round(holdMs / 60000)
       return `stopped ("${savedStop.name}" stays saved - resuming in ~${holdMin}min; "resumebuild" to continue now, "cancelbuild" to drop it)`
     }
 
@@ -3054,10 +3061,12 @@ function persistedResume () {
 // PAUSE the saved job in place (operator stop / shortfall finish / death give-up): stamp
 // pausedAt so the resume machinery holds off for RESUME_HOLD_MS, then autonomy picks it back
 // up. NOT a delete - operator intent survives; only cancelbuild or a real finish removes it.
-function markResumePaused (why) {
+function markResumePaused (why, holdMs) {
   try {
     const saved = JSON.parse(fs.readFileSync(RESUME_FILE, 'utf8'))
     saved.pausedAt = Date.now(); saved.pausedWhy = String(why || '')
+    // optional per-pause hold (supervisor unstick = short); absent -> resumeHoldRemaining uses RESUME_HOLD_MS
+    if (holdMs != null && Number(holdMs) > 0) saved.pauseHoldMs = Number(holdMs); else delete saved.pauseHoldMs
     fs.writeFileSync(RESUME_FILE, JSON.stringify(saved))
   } catch (e) { dbg('markResumePaused failed: ' + e.message) }
 }
@@ -3066,7 +3075,8 @@ function markResumePaused (why) {
 function resumeHoldRemaining (saved, now) {
   const paused = saved && Number(saved.pausedAt)
   if (!paused || Number.isNaN(paused)) return 0
-  return Math.max(0, paused + RESUME_HOLD_MS - now)
+  const hold = (saved && Number(saved.pauseHoldMs) > 0) ? Number(saved.pauseHoldMs) : RESUME_HOLD_MS
+  return Math.max(0, paused + hold - now)
 }
 // PURE: what to do with the saved build when a build loop settles (DESIGN §5). Clear ONLY a
 // genuine finish; shortfall/all-skipped -> pause (keep the job); errored/deferred/aborted -> keep.

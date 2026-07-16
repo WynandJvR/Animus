@@ -61,6 +61,10 @@ async function main () {
     assert.ok(commands.resumeHoldRemaining({ pausedAt: now }, now) > 0, 'fresh pause -> held')
     assert.strictEqual(commands.resumeHoldRemaining({ pausedAt: now - 2_000_000 }, now), 0, '> hold elapsed -> resume')
     assert.strictEqual(commands.resumeHoldRemaining({ pausedAt: 'garbage' }, now), 0, 'malformed pausedAt -> fail open to resume')
+    // per-pause hold (supervisor unstick): a short pauseHoldMs overrides the 15min default
+    assert.strictEqual(commands.resumeHoldRemaining({ pausedAt: now - 120_000, pauseHoldMs: 60_000 }, now), 0, 'short supervisor hold elapsed -> resume (not held for 15min)')
+    assert.ok(commands.resumeHoldRemaining({ pausedAt: now - 120_000 }, now) > 0, 'same age with the DEFAULT 15min hold -> still held (proves pauseHoldMs shortened it)')
+    assert.ok(commands.resumeHoldRemaining({ pausedAt: now, pauseHoldMs: 60_000 }, now) > 0, 'fresh short-hold pause -> still held briefly')
   })
 
   // ---- stop = pause (flag ON) ---------------------------------------------
