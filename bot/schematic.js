@@ -355,34 +355,41 @@ function haveItem (bot, name) {
   return (bot.inventory ? bot.inventory.items() : []).find(i => i.name === name) || null
 }
 
-// Get a material we've run out of. FIRST try opts.fetch (e.g. withdraw a batch
-// from the build's chest); only if that can't supply it do we fall back to asking
-// the player and polling. Returns true once we have it, false if stopped/aborted.
-// Returns: true = have it now; false = operator stopped; null = gave up after the deadline
-// (caller should SKIP this material, not hang). The deadline is what stops an unattended
-// from-nothing run from begging chat FOREVER for a material it can never obtain (iron_bars,
-// wool, ...) - the old unbounded loop = a permanent stall / death-loop.
-async function waitForMaterial (bot, name, { say, isStopped, fetch, deadlineMs = 240000 }, needed) {
+// Get a material we've run out of. FIRST try opts.fetch (withdraw/craft a batch at the build's
+// chest); if that can't supply it, try opts.gather (a bounded reconcile round through the SAME
+// withdraw>craft>GATHER chain phase 1 uses) BEFORE giving up. The bot NEVER begs a player for
+// materials (operator hard rule) - it goes and gets them, or skips the block.
+// Returns: true = have it now; false = operator stopped; null = gave up after the deadline OR
+// the material is genuinely unobtainable (caller SKIPs it, not hang). The deadline is what stops
+// an unattended from-nothing run from hanging FOREVER on a material it can never obtain
+// (iron_bars, wool, ...) - the old unbounded loop = a permanent stall / death-loop.
+async function waitForMaterial (bot, name, { say, isStopped, fetch, gather, deadlineMs = 240000 }, needed) {
   if (haveItem(bot, name)) return true
-  // Try our own stash (chest) first, so a self-provisioned build never begs.
+  // Try our own stash (chest) first, so a self-provisioned build never even gathers if the bank has it.
   if (fetch) {
-    try { await fetch(name, needed) } catch { /* chest gone / empty - fall through to asking */ }
+    try { await fetch(name, needed) } catch { /* chest gone / empty - fall through to gathering */ }
     if (haveItem(bot, name)) return true
   }
   const start = Date.now()
-  let last = 0
+  let attempts = 0 // bounded self-gather rounds (never one-shot-and-skip, never infinite)
   for (;;) {
     if (isStopped && isStopped()) return false
     if (haveItem(bot, name)) return true
-    // retry the stash occasionally too (more may have been produced/stored)
+    // retry the stash each pass (a trailing smelt/craft may have delivered since)
     if (fetch) { try { await fetch(name, needed) } catch {} ; if (haveItem(bot, name)) return true }
-    if (Date.now() - start > deadlineMs) return null // gave up - skip this material and move on
-    const now = Date.now()
-    if (say && now - last > 15000) {
-      say(`I need ${needed ? needed + ' ' : 'more '}${name} to keep building - drop some by me? (skipping it soon if not)`)
-      last = now
+    // SELF-GATHER before any skip: a bounded reconcile round (withdraw>craft>gather). The build
+    // keep-out box + home fence are threaded in by the caller's closure. No chat, ever.
+    if (gather && attempts < 2) {
+      attempts++
+      let r
+      try { r = await gather(name, needed) } catch { r = 'none' }
+      if (r === 'unobtainable') return null // iron_bars/wool: skip NOW, no 240s dead wait
+      if (fetch) { try { await fetch(name, needed) } catch {} } // crafted parents may need assembling
+      if (haveItem(bot, name)) return true
+      if (r === 'none' && attempts >= 2) return null // gathered nothing twice - genuinely stuck, skip
     }
-    await new Promise(r => setTimeout(r, 2000))
+    if (Date.now() - start > deadlineMs) return null // gave up - skip this material and move on
+    await new Promise(r => setTimeout(r, 2000)) // no gather rung / gather exhausted: wait for a trailing smelt, silently
   }
 }
 
@@ -728,12 +735,13 @@ async function buildSurvival (bot, schem, at, opts = {}) {
       const item = build.getItemForState(action.state)
       if (!item) { build.removeAction(action); continue } // truly unplaceable (tech block)
       // Ensure we hold the material - pull from our chest (opts.fetch) if we have one, else
-      // pause and ask the player. Materials the provisioner already flagged UNOBTAINABLE (or
-      // gave up on) are in opts.skip: don't even wait - drop those placements so the build
-      // finishes with what it CAN make instead of hanging forever on the first iron_bar.
+      // GATHER it (opts.gather - the bot never begs). Materials the provisioner already flagged
+      // UNOBTAINABLE (or gave up on) are in opts.skip: don't even wait - drop those placements so
+      // the build finishes with what it CAN make instead of hanging forever on the first iron_bar.
       if (!haveItem(bot, item.name)) {
         if (opts.skip && opts.skip.has(item.name)) { build.removeAction(action); matSkipped++; continue }
-        const got = await waitForMaterial(bot, item.name, { say, isStopped, fetch: opts.fetch, deadlineMs: opts.materialDeadlineMs }, action.count)
+        const got = await waitForMaterial(bot, item.name, { say, isStopped, fetch: opts.fetch, gather: opts.gather, deadlineMs: opts.materialDeadlineMs }, action.count)
+        bot.pathfinder.setMovements(moves) // a fetch/gather may have swapped in gatherMovements - restore the build profile
         if (got === false) { stopped = true; break }        // operator stopped
         if (got === null) { // gave up after the deadline - skip this material everywhere
           if (opts.skip) opts.skip.add(item.name)

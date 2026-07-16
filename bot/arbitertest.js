@@ -208,5 +208,38 @@ t('jobSurvivalNeed: a walled-off creeper (discounted -> creeperDist null) + fed 
   assert.strictEqual(arb.jobMayProgress(s), true)
 })
 
+// ---- mineThreatDecision: split the mid-mine break-out into bail/up/recover/false ----
+
+t('mineThreatDecision: (1) hurt on the surface, nothing attacking -> recover', () => {
+  assert.strictEqual(arb.mineThreatDecision({ hp: 7.5, hostileNear: false, deep: false }), 'recover', 'the livelock case heals in place')
+})
+
+t('mineThreatDecision: (2) recovery exhausted -> honest bail', () => {
+  assert.strictEqual(arb.mineThreatDecision({ hp: 7.5, hostileNear: false, deep: false, recoverTries: 2 }), 'bail', 'after maxRecover it gives up')
+})
+
+t('mineThreatDecision: (3) hurt + deep, no hostile -> climb out first, then bail', () => {
+  assert.strictEqual(arb.mineThreatDecision({ hp: 7.5, hostileNear: false, deep: true, threatReacts: 4 }), 'up', 'never eat-and-hold in a shaft (<=4 climbs)')
+  assert.strictEqual(arb.mineThreatDecision({ hp: 7.5, hostileNear: false, deep: true, threatReacts: 5 }), 'bail', 'climb budget exhausted -> bail')
+})
+
+t('mineThreatDecision: (4) hp critical on the surface -> bail (reflex owns it)', () => {
+  assert.strictEqual(arb.mineThreatDecision({ hp: 5, hostileNear: false, deep: false }), 'bail', 'hp<=6 yields to the hp-crisis reflex, never recovers mid-gather')
+})
+
+t('mineThreatDecision: (5) a hostile within 6 -> today verbatim (surface bail, deep climb)', () => {
+  assert.strictEqual(arb.mineThreatDecision({ hp: 15, hostileNear: true, deep: false }), 'bail', 'hostile at the surface -> bail (flee/defend reflex)')
+  assert.strictEqual(arb.mineThreatDecision({ hp: 15, hostileNear: true, deep: true, threatReacts: 1 }), 'up', 'hostile deep -> climb out')
+})
+
+t('mineThreatDecision: (6) no hostile and hp at/over the low arm -> false (mineDanger quiet)', () => {
+  assert.strictEqual(arb.mineThreatDecision({ hp: 15, hostileNear: false, deep: false }), false, 'no danger')
+  assert.strictEqual(arb.mineThreatDecision({ hp: 12, hostileNear: false, deep: true }), false, 'exactly at the low arm, no hostile -> not dangerous')
+})
+
+t('mineThreatDecision: (7) hostile deep with the climb budget spent -> bail', () => {
+  assert.strictEqual(arb.mineThreatDecision({ hp: 11.9, hostileNear: true, deep: true, threatReacts: 5 }), 'bail', 'budget exhausted even with a hostile on us')
+})
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall arbiter tests passed')
 process.exit(failures ? 1 : 0)

@@ -21,6 +21,7 @@ const foodSec = require('./food.js') // pure food-security decisions: when to pr
 const farm = require('./farm.js') // pure wheat-farm geometry (flood-safe bank pick) + crop-state (VERIFIED wheat, never faith)
 const arbiter = require('./arbiter.js') // JOB-LEVEL arbitration: survive > progress authority (jobSurvivalNeed/jobMayProgress)
 const routeMem = require('./route-mem.js') // PURE route/wedge geometry: replay proven treks + soft-steer around learned wedges (semantic-world-map slice 1)
+const pocketEscape = require('./pocket-escape.js') // PURE pocket-breach geometry: plan a bounded dig out of a flooded, roofed pocket (water-wedge escape)
 // Visible, UNTHROTTLED build tracing to stdout (the say() progress goes through a 40s
 // throttle that hides failures). Enable with BUILD_DEBUG=1 to see every plan/task/smelt step.
 let dbgSink = null // injected by index.js: debug lines persist to logs/bot-events.log
@@ -89,6 +90,74 @@ async function manualHopFromWater (bot) {
   }
   dbg('  manual water hop found no bank - still wet')
   return false
+}
+
+// BREACH a flooded pocket (water-wedge escape): boxed in a 1-block water pocket under a
+// solid ceiling (a waterlogged tree), the swim/hop rungs have already failed and there is
+// no "dig sideways one block and walk out" rung. Plan a BOUNDED dig to the nearest air/bank
+// (horizontal-first, vertical overhead fallback - geometry from the pure pocket-escape
+// module) and execute it dig-only. Sibling of manualHopFromWater; driven by navigate's
+// `wetbreach` recovery rung. ANTI-GRIEF is the SAME test the wood gather uses: natural
+// terrain/ore (canBreakNaturally) OR natural leaves OR wild-tree logs away from own infra,
+// honouring canDigBlock per block and RE-READING every cell at dig time. Never places a
+// block (no scaffold litter in the water); never re-opens water (fluid/unknown cells reject
+// the plan). Returns an honest moved/dry bool.
+async function breachWaterPocket (bot, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const wide = !!opts.wide
+  const navigate = require('./navigate.js')
+  // GUARDS (order matters): never dig indoors; must actually be in water; hand a drowning
+  // bot back to escapeWater / the drown reflex instead of digging while it suffocates.
+  if (insideOwnStructure(bot)) { dbg('  breach: inside my own structure - not digging'); return false }
+  const feet = bot.entity.position.floored()
+  const feetBlock = bot.blockAt(feet)
+  if (!feetBlock || !/water/.test(feetBlock.name)) { dbg('  breach: not standing in water - skipping'); return false }
+  if ((bot.oxygenLevel ?? 20) < 6) { dbg('  breach: low oxygen - handing back to the drown reflex'); return false }
+  // THE anti-grief whitelist, passed to the pure planner. Extends dig permission to natural
+  // tree blocks FOR THIS RUNG ONLY - the exact permission the wood gather already exercises.
+  const anchors = ownInfraAnchors()
+  const diggable = (name, dx, dy, dz) => {
+    const pos = feet.offset(dx, dy, dz)
+    const block = bot.blockAt(pos)
+    if (!block || block.name !== name) return false
+    let ok = canBreakNaturally(block) || /_leaves$/.test(name)
+    if (!ok && /_log$/.test(name)) {
+      ok = isWildTreeLog(bot, pos) && !routeMem.suppressedNearAnchors(anchors, pos)
+    }
+    if (!ok) return false
+    if (bot.canDigBlock && !bot.canDigBlock(block)) return false
+    return true
+  }
+  const read = (dx, dy, dz) => { const b = bot.blockAt(feet.offset(dx, dy, dz)); return b ? b.name : null }
+  const plan = pocketEscape.planPocketBreach(read, diggable, wide ? { march: 4, maxDigs: 8 } : { march: 3, maxDigs: 6 })
+  if (!plan) { dbg('  breach: no bounded escape plan from ' + feet + (wide ? ' (wide)' : '') + ' - honestly stuck'); return false }
+  dbg('  breach: ' + plan.kind + ' plan, ' + plan.digs.length + ' dig(s) toward ' + plan.exit.dx + ',' + plan.exit.dy + ',' + plan.exit.dz)
+  if (opts.say) opts.say('boxed in a flooded hole - digging myself out')
+  // EXECUTE - dig-only, bounded ~25s, RE-READ every block (world may have changed since
+  // planning; a cell that turned to fluid or no longer passes the whitelist aborts the whole
+  // attempt), oxygen re-checked between digs.
+  const t0 = Date.now()
+  for (const d of plan.digs) {
+    if (isStopped()) { dbg('  breach: stopped mid-dig'); return false }
+    if (Date.now() - t0 > 25000) { dbg('  breach: 25s cap reached'); break }
+    if ((bot.oxygenLevel ?? 20) < 6) { dbg('  breach: oxygen dropped mid-dig - aborting to the drown reflex'); return false }
+    const pos = feet.offset(d.dx, d.dy, d.dz)
+    const block = bot.blockAt(pos)
+    if (!block || AIRISH(block.name)) continue // already open (drop-through / stale plan cell)
+    if (/water|lava/.test(block.name)) { dbg('  breach: a dig cell turned to fluid - aborting (never re-open water)'); return false }
+    if (!diggable(block.name, d.dx, d.dy, d.dz)) { dbg('  breach: a dig cell no longer passes the whitelist - aborting'); return false }
+    const tool = toolForBlock(bot, block.name)
+    if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
+    try { await bot.dig(block) } catch (e) { dbg('  breach: dig failed (' + e.message + ') - aborting'); return false }
+  }
+  // WALK OUT: a vertical breach opened the column overhead - rise it; then hop onto the now-
+  // adjacent bank (horizontal) or float to shore (still wet).
+  const stillWet = () => { const b = bot.blockAt(bot.entity.position.floored()); return !!b && /water/.test(b.name) }
+  if (plan.kind === 'vertical') { try { await navigate.jumpForAir(bot, 6000, isStopped) } catch {} }
+  let out = false
+  try { out = await manualHopFromWater(bot) } catch {}
+  if (!out && stillWet()) { try { out = await navigate.swimToShore(bot, isStopped) } catch {} }
+  return out || !stillWet()
 }
 
 // Long treks in ~48-block legs. A single 200-block GoalNearXZ makes the pathfinder chew
@@ -1839,6 +1908,14 @@ function nearHostile (bot, r) {
 // to a survival reaction. Naked deep gearup mining died at ~1hp three times (verified live:
 // y39-40, zombie in melee + skeleton firing, flee:false) - this is the missing reflex.
 function mineDanger (bot) { return nearHostile(bot, 6) || (bot.health ?? 20) < 12 }
+// LOW-HP-BUT-CALM: hurt below the mine-danger arm with NOTHING attacking - the livelock state
+// (hp<12, no hostile) that the arbiter heal/food needs both miss (heal fires at hp<=6 or hp<=10
+// only while endangered; food at food<14). The material-round heal entry widens on THIS so the
+// bank-side recover gets a second chance. Flag-gated with the gather recover path (GATHER_HP_RECOVER).
+function lowHpCalm (bot) {
+  if (process.env.GATHER_HP_RECOVER === '0') return false
+  return (bot.health ?? 20) < 12 && !nearHostile(bot, 6)
+}
 function underArmored (bot) {
   try { for (const s of ['head', 'torso', 'legs', 'feet']) { if (!(bot.inventory && bot.inventory.slots[bot.getEquipmentDestSlot(s)])) return true } return false } catch { return true }
 }
@@ -4773,24 +4850,59 @@ async function gatherLoop (bot, item, count, opts = {}) {
   // critical -> BAIL the whole gather so isBusy clears and the full flee/defend/shelter
   // reflexes (which are useless mid-dig) take over. Returns 'bail' | 'up' | false.
   let threatReacts = 0
+  let recoverTries = 0            // hp-recover attempts this run (separate budget from threatReacts)
+  let recoverSaid = false         // the status say fires at most once per runGather
+  const RECOVER_ON = process.env.GATHER_HP_RECOVER !== '0' // flag off -> today's bail-on-low-hp verbatim
   async function surviveMiningThreat () {
     if (!mineDanger(bot)) return false
-    threatReacts++
+    threatReacts++                // count EVERY break-out exactly as today (climb budget byte-for-byte)
     const hp = bot.health ?? 20
     const feetY = Math.floor(bot.entity.position.y)
     const deep = feetY < Math.floor(surfaceY) - 3 && hasSolidCeiling(bot, 12, { ignoreLeaves: true })
-    dbg('  gather THREAT while mining #' + threatReacts + ' (hp=' + hp.toFixed(1) + ', hostile<=6=' + nearHostile(bot, 6) + ', deep=' + deep + ') - reacting')
-    if (opts.say && threatReacts <= 2) opts.say('mob on me down here - breaking off to get clear')
+    const hostileNear = nearHostile(bot, 6)
+    // ONE authority classifies the break-out. mineDanger stays as sensitive as ever; this only
+    // decides the RESPONSE. Every hostile/deep/critical case is today's 'up'/'bail'; the sole new
+    // case (hurt, no hostile, on the surface) is 'recover' - eat + heal here, then keep gathering.
+    let decision = arbiter.mineThreatDecision({ hp, hostileNear, deep, threatReacts, recoverTries }, {})
+    if (decision === 'recover' && !RECOVER_ON) decision = 'bail' // flag off -> today's response
+    // NEW: RECOVER-AND-RESUME. No threat, hp in (6,12), on the surface: the livelock. Instead of
+    // bailing into a loop that can never end (hp<12 forever, food<18 -> never regens), eat to
+    // comfortable, run the food chain only if the pack is bare, then hold for regen - then the
+    // caller's `if (react) continue` re-polls and gathering resumes once hp is back up. Bounded.
+    if (decision === 'recover') {
+      recoverTries++
+      dbg('  gather RECOVER #' + recoverTries + ' (hp=' + hp.toFixed(1) + ', food=' + (bot.food ?? 20) + ') - no threat, eating and healing before resuming')
+      if (opts.say && !recoverSaid) { recoverSaid = true; opts.say('banged up - taking a breather to heal before i keep gathering') }
+      try { bot.pathfinder && bot.pathfinder.setGoal(null) } catch {}
+      // 1) eat what we carry (cook raw first) - food 14 -> >=18 starts natural regen. Fixes the live case.
+      try { await eatFromPackToComfortable(bot, isStopped) } catch (e) { dbg('  gather recover: eat failed (' + e.message + ')') }
+      // 2) only if still low AND the pack is bare, run the ONE food chain (canHold:false - a mid-gather
+      //    pause is not the food<=1 famineHold mechanism; the starving branch below keeps its canHold).
+      if ((bot.food ?? 20) < 18 && !hasFood(bot)) {
+        try { await secureFood(bot, { isStopped, say: opts.say || (() => {}), home, avoid: opts.avoid, canHold: false }) } catch (e) { dbg('  gather recover: secureFood failed (' + e.message + ')') }
+      }
+      // 3) hold-and-heal (eats again, night-rests behind cover if dark/mob<=16, <=3min, honest false).
+      //    Its _recoveringHp latch makes this mutually exclusive with the index.js hp-crisis reflex.
+      try { await recoverHp(bot, { isStopped, say: opts.say }) } catch (e) { dbg('  gather recover: recoverHp failed (' + e.message + ')') }
+      return 'recovered'
+    }
+    dbg('  gather THREAT while mining #' + threatReacts + ' (hp=' + hp.toFixed(1) + ', hostile<=6=' + hostileNear + ', deep=' + deep + ') - reacting')
+    // HONESTY: only claim "mob on me" when there actually IS a mob within 6 - an hp-only bail on
+    // the surface says nothing (the loop already reports its bail reason).
+    if (opts.say && hostileNear && threatReacts <= 2) opts.say('mob on me down here - breaking off to get clear')
     try { bot.pathfinder && bot.pathfinder.setGoal(null) } catch {}
     // DEEP: retreat UP (the staircase walls behind us as we climb, shedding the chasers) -
     // this is the mob-safe escape and the ONLY thing that reliably gets us out of a shaft.
     // Each climb is awaited (no busy-spin). After a few scares this run the spot is a
     // deathtrap - stop climbing and bail. SHALLOW (near/at surface): bail straight away so
     // the un-gated flee/defend/shelter reflexes (useless mid-dig) finally take over.
-    if (deep && threatReacts <= 4) {
+    if (decision === 'up') {
       try { await climbToSurface(bot, Math.floor(surfaceY), { isStopped }) } catch (e) { dbg('  gather threat: climb-out failed (' + e.message + ')') }
       return 'up'
     }
+    // Distinguish the exhausted-recovery bail (hurt, no hostile, surface, recovery used up) from
+    // the mob/critical bail so the reason line is honest and greppable. Only when the flag is on.
+    if (RECOVER_ON && !hostileNear && !deep && hp > 6) return 'bail-hurt'
     return 'bail'
   }
 
@@ -4802,6 +4914,7 @@ async function gatherLoop (bot, item, count, opts = {}) {
     {
       const react = await surviveMiningThreat()
       if (react === 'bail') return { gathered: countItem(bot, item) - start, reason: 'broke off mining to survive a mob / low hp - getting to safety' }
+      if (react === 'bail-hurt') return { gathered: countItem(bot, item) - start, reason: 'too hurt to keep gathering and could not recover here - backing off' }
       if (react) continue
     }
     // DROWNING FIRST (before/outside the !hasSolidCeiling gate below - a flooded tunnel HAS a
@@ -4911,6 +5024,10 @@ async function gatherLoop (bot, item, count, opts = {}) {
 
     surfaceY = Math.max(surfaceY, bot.entity.position.y) // highest ground we've stood on
     const feetY = Math.floor(bot.entity.position.y)
+    // WEDGE TARGET FILTER (water-wedge escape, Change C): stop re-picking a site that just
+    // wedged us. listWedges is already own-infra-suppressed on both record and recall, so a
+    // wedge near home can never poison our own resources; the decay ages a spot back in.
+    const wedges = process.env.WEDGE_TARGET_FILTER !== '0' ? listWedges() : []
     let candidates = bot.findBlocks({ matching: ids, maxDistance: 64, count: 32 })
       .filter(p => (failed.get(pkey(p)) || 0) < 2)
       // Never target a dig that would OPEN A FLUID onto us. Logs (above-ground, shore trees are
@@ -4941,6 +5058,9 @@ async function gatherLoop (bot, item, count, opts = {}) {
       // ROAM FENCE: ignore targets outside the fence so a distant block can't lure the bot
       // out (findBlocks reaches ~64 past the bot). Strip-mining supplies stone inside the fence.
       .filter(p => Math.hypot(p.x - home.x, p.z - home.z) <= maxRoam + 8)
+      // Skip any candidate within 8b of a live wedge (the waterlogged tree that froze us):
+      // the scan falls through to the next tree / timber-sweep exactly like "no candidates".
+      .filter(p => !routeMem.wedgeNearXZ(wedges, p, 8))
     // ORCHARD MODE (operator rule): grinding one tree per chunk wastes the day. Sparse
     // area (about one tree visible) + a real sapling stock + a big remaining need ->
     // plant a 16-tree orchard near the site RIGHT NOW (don't wait for total dryness) and
@@ -5090,6 +5210,12 @@ async function gatherLoop (bot, item, count, opts = {}) {
         continue
       }
       if (memSpot) {
+        // Don't let a remembered spot lure us back onto a live wedge either: rest-cool it
+        // (recallSpot honors spot.rest, provision.js) and re-plan, same as the growing-grove case.
+        if (routeMem.wedgeNearXZ(wedges, memSpot, 8)) {
+          dbg('  gather: remembered spot ' + memSpot.x + ',' + memSpot.z + ' is on a live wedge - resting it 30 min and re-planning')
+          memSpot.rest = Date.now() + 30 * 60000; saveWorldMem(); continue
+        }
         visitedMem.add(memSpot.x + ',' + memSpot.z)
         if (opts.say && dryExplores === 0) opts.say(`i remember ${sources[0]} over by ${memSpot.x},${memSpot.z} - heading there`)
         dbg('  gather heading to remembered spot ' + memSpot.x + ',' + memSpot.z + ' (hits ' + (memSpot.hits || 1) + ')')
@@ -6509,4 +6635,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, setBuildZone, setDebugSink, rememberRoute, recallRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors }

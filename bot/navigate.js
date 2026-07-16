@@ -500,7 +500,7 @@ async function openNearbyDoor (bot, opts = {}) {
 // help right now; run() maneuvers. A recovery "worked" if the bot demonstrably MOVED
 // (>=2 blocks horizontally or rose >=1) or the entry vouches for itself (door-assist
 // returns whether it crossed) - re-read the world, never trust intent.
-function defaultBudgets () { return { indoor: 3, water: 2, door: 3, pit: 2, climb: 2, nudge: 2, stepout: 2 } }
+function defaultBudgets () { return { indoor: 3, water: 2, wetbreach: 1, door: 3, pit: 2, climb: 2, nudge: 2, stepout: 2 } }
 
 async function recoverOnce (bot, goal, counts, budgets, opts) {
   const isStopped = opts.isStopped || (() => false)
@@ -555,6 +555,26 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
         await prov().manualHopFromWater(bot)
         if (movedEnough() && !feetInWater(bot)) return true
         return swimToShore(bot, isStopped)
+      }
+    },
+    { // WATER-WEDGE ESCAPE: boxed in a 1-block water pocket under a solid ceiling (a
+      // waterlogged tree the gather walked into) - swim + hop just failed (this rung only
+      // ever runs after the water rung above), and no other rung fits: detectPit refuses a
+      // roofed cell, pillar/climb refuse water overhead, stepout finds no walkable neighbour.
+      // Dig a BOUNDED path to the nearest air/bank (horizontal-first, vertical fallback)
+      // through the SAME anti-grief whitelist the wood gather uses, never re-opening water.
+      // Gated so a pure leaf canopy over open water does NOT trigger it (ignoreLeaves) - the
+      // swim rungs own that; logs/terrain overhead do. WATER_WEDGE_ESCAPE=0 -> byte-for-byte
+      // today's ladder (this rung never applies).
+      kind: 'wetbreach',
+      when: () => process.env.WATER_WEDGE_ESCAPE !== '0' &&
+        feetInWater(bot) &&
+        prov().hasSolidCeiling(bot, 8, { ignoreLeaves: true }) &&
+        !(prov().insideOwnStructure && prov().insideOwnStructure(bot)),
+      run: async () => {
+        dbg('recovery: WATER POCKET at ' + p0.floored() + ' - breaching toward the nearest bank')
+        try { await prov().breachWaterPocket(bot, { isStopped, wide: !!opts.desperate }) } catch (e) { dbg('recovery: wetbreach failed (' + e.message + ')') }
+        return movedEnough()
       }
     },
     { // open-sky hole: pillar out to the rim with carried filler. Checked BEFORE the
@@ -930,9 +950,9 @@ async function forceUnstick (bot, opts = {}) {
     const counts = {}
     // indoor FIRST + generous: a wedge inside the hut must be freed by stepping to a free
     // interior cell, never by the dirt-pillaring the pit/climb rungs would otherwise try.
-    const budgets = { indoor: 3, water: 1, pit: 2, door: 0, climb: 2, nudge: 0, stepout: 2 }
+    const budgets = { indoor: 3, water: 1, wetbreach: 1, pit: 2, door: 0, climb: 2, nudge: 0, stepout: 2 }
     for (let i = 0; i < 4 && !isStopped(); i++) {
-      const rescued = await recoverOnce(bot, null, counts, budgets, { isStopped })
+      const rescued = await recoverOnce(bot, null, counts, budgets, { isStopped, desperate: !!opts.desperate })
       if (!rescued) break
       dbg('forceUnstick: ' + rescued + ' moved us to ' + bot.entity.position.floored())
       // keep going only while still boxed in (buried or pitted) - once in the open the
@@ -954,4 +974,4 @@ function honestFail (lastErr, counts, label, recoveryMs, reflexWaitMs) {
   return e
 }
 
-module.exports = { navigateTo, navigateToPreempt, gotoOnce, openNearbyDoor, crossOwnDoor, enterStructure, exitStructure, swimToShore, escapeWater, headInWater, isNavigating, isRecovering, isForceUnsticking, forceUnstick, setDebugSink, detectPit, goalWasChanged }
+module.exports = { navigateTo, navigateToPreempt, gotoOnce, openNearbyDoor, crossOwnDoor, enterStructure, exitStructure, swimToShore, escapeWater, headInWater, jumpForAir, isNavigating, isRecovering, isForceUnsticking, forceUnstick, setDebugSink, detectPit, goalWasChanged }

@@ -221,6 +221,19 @@ function suppressedNearAnchors (anchors, pos, r = INFRA_SUPPRESS_R) {
   return false
 }
 
+// Is any ACTIVE wedge within `r` (XZ) of point p? Used by gather target-selection to skip a
+// site that just wedged us. Reuses wedgeWeight's age-decay - a wedge past its window weighs 0
+// and no longer counts, so a re-grown/re-passable spot ages back in automatically (no
+// permanent bans). Caller passes an already own-infra-suppressed list (listWedges).
+function wedgeNearXZ (wedges, p, r = 8, now = Date.now()) {
+  if (!Array.isArray(wedges) || !p) return false
+  for (const w of wedges) {
+    if (wedgeWeight(w, now) <= 0) continue
+    if (Math.hypot(w.x - p.x, w.z - p.z) <= r) return true
+  }
+  return false
+}
+
 // The steer-eligible wedge list: alive (weight>0) AND not currently suppressed by infra.
 function activeWedges (wedges, anchors, now = Date.now(), r = INFRA_SUPPRESS_R) {
   if (!Array.isArray(wedges)) return []
@@ -233,6 +246,6 @@ module.exports = {
   dist, pointToSegDist, turnAngle, polylineLength,
   thinPolyline, canonEndpoints, matchRoute, routeCursor,
   routeLenOk, routeUsable, routeShouldEvict, mergeRoute,
-  wedgeWeight, mergeWedge, wedgeOnSegment,
+  wedgeWeight, mergeWedge, wedgeOnSegment, wedgeNearXZ,
   suppressedNearAnchors, activeWedges
 }

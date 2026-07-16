@@ -152,6 +152,40 @@ function jobSurvivalNeed (state, opts = {}) {
 // May a PROGRESS job run right now? True iff no SURVIVE need is unmet.
 function jobMayProgress (state, opts = {}) { return jobSurvivalNeed(state, opts) == null }
 
+// PURE: split the mid-mine break-out into a RESPONSE. `mineDanger` (provision.js) stays as
+// sensitive as ever - it breaks the bot OUT of a committed dig at hp<12 OR a hostile<=6, the
+// death-carousel guard. This classifies WHAT TO DO once broken out, so a hurt-but-safe bot on
+// the surface stops bailing into an unbreakable loop (hp<12 forever, food<18 -> never regens).
+// state fields: hp (0..20), hostileNear (bool - a melee/bow mob within 6), deep (bool - below
+// the surface under a solid ceiling), threatReacts (climb-out count this run), recoverTries
+// (recover attempts this run). Returns:
+//   false     -> no danger (mirror mineDanger going quiet: no hostile AND hp back at/over low)
+//   'up'      -> deep + a live reason: climb out of the shaft first (re-evaluated up top)
+//   'bail'    -> yield the whole gather so isBusy clears and the flee/heal reflex stack owns it
+//   'recover' -> the NEW case: hurt (crit<hp<low), no hostile, on the surface -> eat + heal here
+//                then RESUME the same gather. Bounded to maxRecover attempts, then an honest bail.
+// Every hostile/deep/critical branch maps to today's 'up'/'bail' verbatim; 'recover' is the only
+// new outcome and is reachable ONLY on the surface with nothing attacking and hp above critical.
+function mineThreatDecision (state, opts = {}) {
+  const s = state || {}
+  const hp = s.hp != null ? s.hp : 20
+  const hostileNear = !!s.hostileNear
+  const deep = !!s.deep
+  const threatReacts = s.threatReacts || 0
+  const recoverTries = s.recoverTries || 0
+  const hpCritical = opts.hpCritical != null ? opts.hpCritical : 6   // matches jobSurvivalNeed's floor (arbiter.js:121)
+  const hpLowMine = opts.hpLowMine != null ? opts.hpLowMine : 12     // matches mineDanger's arm (provision.js:1910)
+  const maxClimbs = opts.maxClimbs != null ? opts.maxClimbs : 4      // today's threatReacts <= 4 (provision.js:4859)
+  const maxRecover = opts.maxRecover != null ? opts.maxRecover : 2
+  if (!hostileNear && hp >= hpLowMine) return false                            // no danger (mirror mineDanger)
+  if (hostileNear) return (deep && threatReacts <= maxClimbs) ? 'up' : 'bail'  // today, verbatim
+  // hp-only from here (hp < hpLowMine, nothing within 6)
+  if (hp <= hpCritical) return 'bail'                                          // truly critical: the hp-crisis reflex owns it
+  if (deep) return (threatReacts <= maxClimbs) ? 'up' : 'bail'                 // NEVER eat-and-hold in a shaft: surface first
+  if (recoverTries < maxRecover) return 'recover'                             // THE new case
+  return 'bail'                                                               // recovery exhausted: honest bail
+}
+
 // PURE: does a hostile at `dist` blocks count as a live threat, given whether the straight
 // eye-line to it is blocked by solid rock? Close floor ALWAYS counts (may be right above/below
 // or about to break through); beyond it, a fully walled-off mob is discounted.
@@ -167,6 +201,7 @@ module.exports = {
   priName,
   jobSurvivalNeed,
   jobMayProgress,
+  mineThreatDecision,
   hostileThreatens,
   beginManeuver,
   refreshManeuver,

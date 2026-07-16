@@ -193,5 +193,20 @@ t('routeShouldEvict: 2 consecutive fails evict', () => {
   assert.strictEqual(rm.routeShouldEvict(r), true, 'two consecutive fails -> evict')
 })
 
+// ---- wedgeNearXZ: gather target-selection guard ------------------------------------
+t('wedgeNearXZ: a fresh wedge within 8b hits, a far one misses', () => {
+  const now = 1000000000000
+  const wedges = [{ x: 100, z: 200, at: now, n: 1 }]
+  assert.strictEqual(rm.wedgeNearXZ(wedges, { x: 104, z: 203 }, 8, now), true, '~5b away -> on the wedge')
+  assert.strictEqual(rm.wedgeNearXZ(wedges, { x: 130, z: 200 }, 8, now), false, '30b away -> clear')
+})
+
+t('wedgeNearXZ: a wedge aged past its decay window (weight 0) misses', () => {
+  const now = 1000000000000
+  const old = now - 8 * 24 * 3600 * 1000 // >7d -> wedgeWeight 0, ages back into eligibility
+  const wedges = [{ x: 100, z: 200, at: old, n: 1 }]
+  assert.strictEqual(rm.wedgeNearXZ(wedges, { x: 100, z: 200 }, 8, now), false, 'decayed wedge no longer blocks')
+})
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall route-mem tests passed')
 process.exit(failures ? 1 : 0)

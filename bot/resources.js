@@ -304,9 +304,11 @@ async function runReconciled (bot, rec, opts = {}) {
 // The builder ran out of `name` mid-placement. Withdraw it from the bank; if the
 // bank hasn't got it but the holdings can CRAFT it (a door from carried planks -
 // the bot once begged players for a door while holding 109 planks and a table),
-// craft/smelt it now. Never wanders off to gather mid-build - that is the material
-// loop's job; we only do work that stays at/near the site. Returns true when the
-// pack now holds at least `count` (or gained any, for count>1 partials).
+// craft/smelt it now. This helper itself stays at/near the site (withdraw + craft only);
+// the mid-build GATHER of a genuine shortfall is a separate bounded rung (waitForMaterial's
+// opts.gather -> commands.gatherShort), so a build no longer begs OR mass-skips - it goes
+// and gets the material. Returns true when the pack now holds at least `count` (or gained
+// any, for count>1 partials).
 async function acquire (bot, name, count = 1, opts = {}) {
   const packHas = () => provision.inventoryCounts(bot)[name] || 0
   const before = packHas()

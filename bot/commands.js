@@ -1296,7 +1296,7 @@ async function handle (bot, line, opts = {}) {
           try { await bot.equip(pick, slot); worn.push(pick.name) } catch { /* slot busy / transient */ }
         }
         if (worn.length) return `put on ${worn.join(', ')}`
-        return hadCandidate ? 'already wearing my best armor' : 'no armor to put on (drop some by me first)'
+        return hadCandidate ? 'already wearing my best armor' : "no armor to put on - i don't have any"
       }
       const name = a[0]
       if (!name) return 'usage: equip <item>  (or "wear armor" to put on all your armor)'
@@ -2883,7 +2883,10 @@ async function autoBuild (bot, schem, at, opts = {}) {
       // field (the hp12->0.77 treadmill: the loop only checked food and re-entered the dark
       // hurt). The latch makes this inline entry and the index.js hp-crisis reflex mutually
       // exclusive, so they never double-shelter.
-      { const sn = provision.survivalNeed(bot); if (sn && sn.need === 'heal') { try { await provision.recoverHp(bot, { isStopped, say }) } catch (e) { dbg('material hp recover failed (' + e.message + ')') } } }
+      // Also covers the LIVELOCK state the arbiter heal need misses (hp<12, no hostile, day - not
+      // "critical" and not "endangered"): lowHpCalm catches it so the bank-side recover (pack just
+      // topped up by ensureFood above) gets a shot before the round marches back out hurt.
+      { const sn = provision.survivalNeed(bot); if ((sn && sn.need === 'heal') || provision.lowHpCalm(bot)) { try { await provision.recoverHp(bot, { isStopped, say }) } catch (e) { dbg('material hp recover failed (' + e.message + ')') } } }
       try { await resources.ensurePackRoom(bot, 6, { near: home, keepDirt: KEEP_DIRT, isStopped }) } catch {}
       // START EACH ROUND FROM THE SITE, ON THE SURFACE. A failed gather can leave the bot
       // stranded deep in a cave 40+ blocks off (verified live: cobble round ended at y=61,
@@ -2962,13 +2965,27 @@ async function autoBuild (bot, schem, at, opts = {}) {
       try { const extra = await resources.restockFromBank(bot, bom, { near: home, isStopped }); if (extra) dbg('build: batched restock of +' + extra + ' items in one bank visit') } catch (e) { dbg('build: batched restock failed (' + e.message + ')') }
     }
   }
+  // SELF-GATHER a mid-build shortfall (the bot NEVER begs). Same reconcile chain + params as the
+  // phase-1 material loop: hide the target (batch is the true shortfall), fence to home, carry the
+  // build keep-out box (avoid) so it never digs/chops inside the footprint - no new dig paths. A
+  // BOUNDED batch (16..64), gated on BUILD_SELF_GATHER. Returns 'unobtainable' | 'gained' | 'none'.
+  const gatherShort = async (name, cnt) => {
+    const batch = Math.min(64, Math.max(cnt || 1, 16)) // never one-block-at-a-time
+    const freshPicks = (bot.inventory ? bot.inventory.items() : []).filter(i => i.name === 'wooden_pickaxe' && !(i.durabilityUsed > 0)).length
+    const rec = await resources.reconcile(bot, { [name]: batch }, { near: home, hide: [name], planOpts: { primaryWood, freshPickaxes: freshPicks, furnacesNearby: provision.countFurnacesNear(bot) } })
+    if (Object.keys(rec.plan.unobtainable || {}).length) return 'unobtainable'
+    const before = provision.inventoryCounts(bot)[name] || 0
+    try { await resources.runReconciled(bot, rec, { say, isStopped, restoreMovements: restore, homeY: Math.floor(at.y), home, avoid }) } catch (e) { dbg('build gatherShort ' + name + ' failed (' + e.message + ')') }
+    return (provision.inventoryCounts(bot)[name] || 0) > before ? 'gained' : 'none'
+  }
   if (chest || resources.verifiedChests(bot, home, 32).length) {
     await stash()
     const invDirt = provision.inventoryCounts(bot).dirt || 0
     if (invDirt < KEEP_DIRT) await resources.withdrawItems(bot, 'dirt', KEEP_DIRT - invDirt, { near: home }).catch(() => {})
     say('materials stashed - building now')
   } else say('got the materials - building now')
-  try { return await schematic.buildSurvival(bot, schem, at, { say, isStopped, restoreMovements: restore, fetch, clear: opts.clear, skip }) } finally { buildProgress = null }
+  const gather = process.env.BUILD_SELF_GATHER !== '0' ? gatherShort : undefined // flag off -> silent wait + skip, still never begs
+  try { return await schematic.buildSurvival(bot, schem, at, { say, isStopped, restoreMovements: restore, fetch, gather, clear: opts.clear, skip }) } finally { buildProgress = null }
 }
 
 // Called by the body when the bot DIES mid-build: just stop the running loop. resumeJob

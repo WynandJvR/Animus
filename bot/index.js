@@ -1253,6 +1253,8 @@ if (process.env.WEDGE_WATCHDOG !== '0') {
   let wdHist = [] // ring of {x,y,z,t}
   let wdBusy = false
   let wdLastFire = 0
+  let wdFailPos = null // where the last force-escape failed (for the same-cell streak)
+  let wdFailStreak = 0 // consecutive same-cell force-escape failures
   setInterval(async () => {
     if (wdBusy || !bot.entity || bot.health <= 0) return
     const now = Date.now()
@@ -1283,8 +1285,29 @@ if (process.env.WEDGE_WATCHDOG !== '0') {
     try {
       note(`(watchdog) position FROZEN ~${Math.round((now - old.t) / 1000)}s at ${p.floored()} while trying to move - forcing an escape`)
       const ok = await navigate.forceUnstick(bot)
-      note(`(watchdog) force-escape ${ok ? 'MOVED me to ' + bot.entity.position.floored() : 'could not move me - will retry in 4 min'}`)
-      if (ok) wdHist = []
+      if (ok) {
+        note(`(watchdog) force-escape MOVED me to ${bot.entity.position.floored()}`)
+        wdHist = []; wdFailStreak = 0; wdFailPos = null
+      } else {
+        // ESCALATION (water-wedge escape, Change B): track consecutive same-cell failures.
+        // The 4-min retry cadence (wdLastFire) is deliberately unchanged; nothing here aborts
+        // or cancels a job (stop semantics are protected and an abort can't move the body).
+        const cur = bot.entity.position
+        if (wdFailPos && Math.hypot(cur.x - wdFailPos.x, cur.y - wdFailPos.y, cur.z - wdFailPos.z) <= 4) wdFailStreak++
+        else wdFailStreak = 1
+        wdFailPos = { x: cur.x, y: cur.y, z: cur.z }
+        note('(watchdog) force-escape could not move me - will retry in 4 min')
+        if (wdFailStreak === 2) {
+          // ~8 min frozen on the same cell: ONE immediate retry with the wider breach budget.
+          note('(watchdog) 2nd failed escape at the same cell - one DESPERATE retry (wider breach)')
+          let ok2 = false
+          try { ok2 = await navigate.forceUnstick(bot, { desperate: true }) } catch (e) { note(`(watchdog) desperate retry failed: ${e.message}`) }
+          if (ok2) { note(`(watchdog) DESPERATE escape MOVED me to ${bot.entity.position.floored()}`); wdHist = []; wdFailStreak = 0; wdFailPos = null }
+        } else if (wdFailStreak >= 3) {
+          const mins = Math.round((now - old.t) / 60000)
+          note(`(watchdog) HARD-WEDGED at ${cur.floored()}: ${wdFailStreak} consecutive failed escapes over ~${mins} min - out of tools, will keep retrying`)
+        }
+      }
     } catch (e) { note(`(watchdog) force-escape failed: ${e.message}`) } finally { wdBusy = false }
   }, 5000).unref?.()
 }
