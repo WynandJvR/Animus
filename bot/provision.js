@@ -33,6 +33,15 @@ const dbg = (...a) => {
   if (dbgSink) dbgSink(line)
 }
 
+// S7 (DESIGN-S7-watchdog): the verified-progress heartbeat hook + the survival-job fail-job latch.
+// touchP is the cycle-safe lazy hook (commands requires provision, so a top-level require would
+// cycle - the established pattern). _survStop mirrors _maintStop/stopMaintenance: the watchdog's
+// fail-job lever for the latch jobs (secureFood/recoverHp/recoverFromDegraded), set by
+// stopSurvivalJob, cleared at each survival-job entry, folded into their isStopped chains.
+const touchP = tag => { try { require('./commands.js').touchProgress(tag) } catch {} }
+let _survStop = false
+function stopSurvivalJob () { _survStop = true } // the running survival job unwinds at its next isStopped poll
+
 // Movement profile for GATHERING: like a real player it may punch through
 // LEAVES to reach a trunk - and nothing else. The pathfinder only has a global
 // canDig + a denylist, so we enable digging and deny every non-leaf block.
@@ -3969,6 +3978,34 @@ function mayDoProgress (bot, opts = {}) { return survivalNeed(bot, opts) == null
 // snapshot (an absent field = "not blocking" per the scheduler contract), never a throw. The bank
 // read is cachedOnly (MANDATORY, REDESIGN §11: never walk the bot from a tick). SCHEDULER=0 never
 // calls this.
+// ACTIVE-JOB SYNTHESIS (S7 §3.3), factored out of schedulerState so BOTH the snapshot AND the 5s
+// watchdog interval read ONE definition. SYNC + cheap (no bank reads, no awaits): commands' running
+// activity first (classified), else the five survival latches - exactly as before. Two fields are
+// now REAL: lastProgressAt = max(the verified-progress clock, this job's own startedAt) so a job
+// entered by a path that forgot to touch at t0 still starts its clock at startedAt rather than
+// inheriting a stale global clock (the pure watchdog prefers lastProgressAt when non-null, so a
+// too-old value would insta-fail a fresh job); blockedOn = the §6 nudge marker, cleared by any touch.
+// Never throws.
+function activeJobInfo () {
+  const commands = require('./commands.js')
+  const prog = (() => { try { return commands.progressInfo() } catch { return { at: 0, stalled: false } } })()
+  const mk = (name, cls, startedAt) => ({
+    name,
+    cls,
+    startedAt: startedAt != null ? startedAt : null,
+    lastProgressAt: Math.max(prog.at || 0, startedAt || 0),
+    blockedOn: prog.stalled ? 'stalled' : null
+  })
+  const a = commands.activityInfo && commands.activityInfo()
+  if (a && a.name) return mk(a.name, scheduler.commandClass(a.name), a.startedAt)
+  if (isRecoveringDegraded()) return mk('recoveryLadder', 'survival', null)
+  if (isSecuringFood()) return mk('secureFood', 'survival', null)
+  if (isRecoveringHp()) return mk('recoverHp', 'survival', null)
+  if (isResting()) return mk('nightShelter', 'survival', null)
+  if (isMaintaining()) return mk('maintenancePass', 'maintain', null)
+  return null
+}
+
 async function schedulerState (bot) {
   const s = {}
   try { Object.assign(s, survivalState(bot)) } catch {} // spread the base survival threat/vitals scan ONCE
@@ -4022,27 +4059,9 @@ async function schedulerState (bot) {
     s.orchard = o ? { dist: me ? Math.hypot(me.x - o.x, me.z - o.z) : null, readyAt: o.harvestReadyAt != null ? o.harvestReadyAt : null } : {}
   } catch { s.orchard = {} }
   try { s.gearupBackoffUntil = (gearupState() || {}).until || 0 } catch { s.gearupBackoffUntil = 0 }
-  // activeJob: commands' running activity first (classified via commandClass), else synthesize from
-  // the provision survival latches. lastProgressAt/blockedOn stay null until S7 adds touchProgress.
-  try {
-    const commands = require('./commands.js')
-    const a = commands.activityInfo && commands.activityInfo()
-    if (a && a.name) {
-      s.activeJob = { name: a.name, cls: scheduler.commandClass(a.name), startedAt: a.startedAt, lastProgressAt: null, blockedOn: null }
-    } else if (isRecoveringDegraded()) {
-      s.activeJob = { name: 'recoveryLadder', cls: 'survival', startedAt: null, lastProgressAt: null, blockedOn: null }
-    } else if (isSecuringFood()) {
-      s.activeJob = { name: 'secureFood', cls: 'survival', startedAt: null, lastProgressAt: null, blockedOn: null }
-    } else if (isRecoveringHp()) {
-      s.activeJob = { name: 'recoverHp', cls: 'survival', startedAt: null, lastProgressAt: null, blockedOn: null }
-    } else if (isResting()) {
-      s.activeJob = { name: 'nightShelter', cls: 'survival', startedAt: null, lastProgressAt: null, blockedOn: null }
-    } else if (isMaintaining()) {
-      // S6: surface the running chore as a rank-1 job so pickJob preempts it by rank (survival 3 >
-      // 1; a progress pick 2 > 1) without maintain ever holding a progress command.
-      s.activeJob = { name: 'maintenancePass', cls: 'maintain', startedAt: null, lastProgressAt: null, blockedOn: null }
-    } else s.activeJob = null
-  } catch { s.activeJob = null }
+  // activeJob: the running activity/survival-latch synthesis (S7: factored into activeJobInfo so the
+  // snapshot and the 5s watchdog share ONE definition; lastProgressAt/blockedOn are now REAL data).
+  try { s.activeJob = activeJobInfo() } catch { s.activeJob = null }
   try { const commands = require('./commands.js'); s.persistedBuild = !!(commands.persistedResume && commands.persistedResume()) } catch { s.persistedBuild = false }
   // maintain.needs inputs.
   try { s.torches = countItem(bot, 'torch') } catch { s.torches = 0 }
@@ -4176,10 +4195,11 @@ function isSecuringFood () { return _securingFood }
 async function secureFood (bot, opts = {}) {
   if (_securingFood) return { fed: false, blockedOn: 'busy' }
   _securingFood = true
+  _survStop = false; touchP('secureFood') // S7 H5c: per-dispatch latch clear + zero-idle at t0
   try { return await secureFoodInner(bot, opts) } finally { _securingFood = false }
 }
 async function secureFoodInner (bot, opts = {}) {
-  const isStopped = opts.isStopped || (() => false)
+  const isStopped = () => _survStop || (opts.isStopped ? opts.isStopped() : false) // S7: fold the watchdog latch into the existing abort poll
   const say = opts.say || (() => {})
   const home = opts.home || null
   const cookIfRaw = async () => { try { if (Object.keys(RAW_COOKABLE).some(n => countItem(bot, n) > 0)) await cookRawMeat(bot, { isStopped }) } catch {} }
@@ -4439,6 +4459,7 @@ async function boundedHold (bot, { isStopped = () => false, say = () => {}, dead
   const near = (bot.entity && bot.entity.position) || target || bed
   let sealedPit = false
   while (Date.now() < dl && !isStopped()) {
+    touchP('boundedHold') // S7 H7: a DECLARED hold with named wakes + a 90s deadline - the loop body IS the validity check
     if (foodCount(bot) > 0 || (bot.food ?? 0) > 4) return { held: true, wake: 'foodInPack' }
     // RE-CHECK THE BANK each pass (FORCE a fresh chest read): banked food a stale cache hid - or
     // food an operator/courier just restocked - is the fastest exit from the hold. Then eat it.
@@ -4551,11 +4572,12 @@ async function restUntilSafe (bot, opts = {}) {
 let _recoveringHp = false
 function isRecoveringHp () { return _recoveringHp }
 async function recoverHp (bot, opts = {}) {
-  const isStopped = opts.isStopped || (() => false)
+  const isStopped = () => _survStop || (opts.isStopped ? opts.isStopped() : false) // S7: fold the watchdog latch into the abort poll
   const say = opts.say || (() => {})
   const resumeHp = opts.resumeHp != null ? opts.resumeHp : 16
   if (_recoveringHp) return false
   _recoveringHp = true
+  _survStop = false; touchP('recoverHp') // S7 H5c: per-dispatch latch clear + zero-idle at t0
   try {
     try { bot.pathfinder.setGoal(null) } catch {}
     // regen needs food>=18 - eat FIRST so the hold below actually heals.
@@ -4566,8 +4588,11 @@ async function recoverHp (bot, opts = {}) {
     await eatFromPackToComfortable(bot, isStopped)
     const dl = Date.now() + 180000
     const hp0 = bot.health ?? 20
+    let hpPrev = bot.health ?? 20 // S7 H6: a rising hp between 2s passes is the world verifiably healing the bot
     while (!isStopped() && Date.now() < dl) {
       const hp = bot.health ?? 20
+      if (hp > hpPrev) touchP('regen') // without this, a legit heal-hold at hp<=6 would trip the 20s/40s crisis window
+      hpPrev = hp
       if (hp >= resumeHp) return true
       if (nightStuck(bot)) return false                              // frozen night: hand back, act (re-arm, don't hide)
       if ((bot.food ?? 20) < 18 && !hasFood(bot)) return false       // can't regen with no food - the food chain owns acquisition
@@ -4629,6 +4654,7 @@ function isRecoveringDegraded () { return _recoveringDegraded }
 async function recoverFromDegraded (bot, { isStopped = () => false, say = () => {}, maxMs = Number(process.env.RECOVERY_MAX_MS || 900000), reason } = {}) {
   if (_recoveringDegraded) return { done: false, rungs: [], reason: 'busy' }
   _recoveringDegraded = true
+  _survStop = false; touchP('recoverFromDegraded') // S7 H5c: per-dispatch latch clear + zero-idle at t0
   const rungs = []
   const tried = new Set()
   const deadline = Date.now() + maxMs
@@ -4637,7 +4663,7 @@ async function recoverFromDegraded (bot, { isStopped = () => false, say = () => 
     while (true) {
       const s = await schedulerState(bot)
       if (scheduler.ladderDone(s)) return { done: true, rungs, reason: reason || 'recovered' }
-      if (isStopped()) return { done: false, rungs, reason: 'stopped' }
+      if (isStopped() || _survStop) return { done: false, rungs, reason: 'stopped' } // S7: watchdog fail-job lever folded in
       if (Date.now() > deadline) return { done: false, rungs, reason: 'deadline' }
       const plan = scheduler.recoveryPlan(s)
       let chosen = null
@@ -4656,6 +4682,7 @@ async function recoverFromDegraded (bot, { isStopped = () => false, say = () => 
       try { await RUNG_EXECUTORS[chosen.action](bot, { isStopped, say, home, dbg }) }
       catch (e) { dbg('(ladder) ' + label + ' failed: ' + e.message) }
       rungs.push(label)
+      touchP('ladderRung') // S7 H5a: a bounded, live-verified rung completed
     }
   } finally { _recoveringDegraded = false }
 }
@@ -4763,9 +4790,11 @@ async function safekeepSweep (bot, { isStopped = () => false, say = () => {} } =
 async function maintenancePass (bot, opts = {}) {
   if (_maintaining) return { ok: false, steps: [], reason: 'busy' }
   _maintaining = true; _maintStop = false
+  touchP('maintenancePass') // S7 H5c: zero-idle at t0
   const say = opts.say || (() => {})
   const nightIndoorOnly = !!opts.nightIndoorOnly
   const steps = []
+  const stepDone = (label) => { steps[steps.length] = label; touchP('maintStep') } // S7 H5b: each completed chore sub-step is verified progress (steps[...]= avoids a literal .push so the sweep below leaves this line alone)
   const deadline = Date.now() + Number(process.env.MAINT_PASS_MAX_MS || 600000)
   const crisisFood = Number(process.env.SCHED_CRISIS_FOOD || 6)
   // isStopped: crisis-grade survival probe (unwinds within one executor poll) + the deadline.
@@ -4798,7 +4827,7 @@ async function maintenancePass (bot, opts = {}) {
                           orchardReady() ||
                           (process.env.GEAR_REFLEX !== '0' && has('armor'))
       if (outboundDue && due('safekeep', 600000)) {
-        try { const n = await safekeepSweep(bot, { isStopped, say }); if (n) steps.push('safekeep-out(' + n + ')') } catch (e) { dbg('  maint: safekeep-out failed (' + e.message + ')') }
+        try { const n = await safekeepSweep(bot, { isStopped, say }); if (n) stepDone('safekeep-out(' + n + ')') } catch (e) { dbg('  maint: safekeep-out failed (' + e.message + ')') }
       }
     }
     if (between()) return { ok: true, steps, reason: 'bail:survival' }
@@ -4810,38 +4839,38 @@ async function maintenancePass (bot, opts = {}) {
         if (Object.keys(RAW_COOKABLE).some(n => countItem(bot, n) > 0)) await cookRawMeat(bot, { isStopped })
         await bakeBreadFromWheat(bot, { isStopped, home })
         await eatUp(bot)
-        steps.push('packFood')
+        stepDone('packFood')
       } catch (e) { dbg('  maint: packFood failed (' + e.message + ')') }
     }
     if (between()) return { ok: true, steps, reason: 'bail:survival' }
 
     // STEP 2: farm - tend + under-target expansion (with the seed top-up). Daylight only.
     if (process.env.FOOD_SUPPLY !== '0' && !nightIndoorOnly && day() && (has('bankFood') || has('packFood') || farmUnderTarget()) && due('farm', 1200000)) {
-      try { await ensureFoodSupply(bot, { home, say, isStopped }); steps.push('farm') } catch (e) { dbg('  maint: farm failed (' + e.message + ')') }
+      try { await ensureFoodSupply(bot, { home, say, isStopped }); stepDone('farm') } catch (e) { dbg('  maint: farm failed (' + e.message + ')') }
     }
     if (between()) return { ok: true, steps, reason: 'bail:survival' }
 
     // STEP 3: orchard - harvest our OWN grove when ripe AND wood is low. Daylight only.
     if (!nightIndoorOnly && day() && orchardReady() && await woodLow() && due('orchard', 900000)) {
-      try { await runGather(bot, (detectWood(bot) || 'oak') + '_log', 16, { home, isStopped, say }); steps.push('orchard') } catch (e) { dbg('  maint: orchard failed (' + e.message + ')') }
+      try { await runGather(bot, (detectWood(bot) || 'oak') + '_log', 16, { home, isStopped, say }); stepDone('orchard') } catch (e) { dbg('  maint: orchard failed (' + e.message + ')') }
     }
     if (between()) return { ok: true, steps, reason: 'bail:survival' }
 
     // STEP 4: cook + bake at the (reused hut) furnace.
     if ((Object.keys(RAW_COOKABLE).some(n => countItem(bot, n) > 0) || countItem(bot, 'wheat') >= 3) && due('cook', 600000)) {
-      try { await cookRawMeat(bot, { isStopped }); await bakeBreadFromWheat(bot, { isStopped, home }); steps.push('cook') } catch (e) { dbg('  maint: cook failed (' + e.message + ')') }
+      try { await cookRawMeat(bot, { isStopped }); await bakeBreadFromWheat(bot, { isStopped, home }); stepDone('cook') } catch (e) { dbg('  maint: cook failed (' + e.message + ')') }
     }
     if (between()) return { ok: true, steps, reason: 'bail:survival' }
 
     // STEP 5: THE COURIER - deposit the food surplus into the bed-adjacent bank.
     if ((has('bankFood') || (snap.packFoodPts || 0) > packTarget) && snap.homeReachable && due('courier', 600000)) {
-      try { const n = await courierFoodToBank(bot, { isStopped, say }); if (n) steps.push('courier(' + n + ')') } catch (e) { dbg('  maint: courier failed (' + e.message + ')') }
+      try { const n = await courierFoodToBank(bot, { isStopped, say }); if (n) stepDone('courier(' + n + ')') } catch (e) { dbg('  maint: courier failed (' + e.message + ')') }
     }
     if (between()) return { ok: true, steps, reason: 'bail:survival' }
 
     // STEP 5b: safekeep-home - same bank visit as the courier (shares the 'safekeep' window).
     if (process.env.MAINT_SAFEKEEP !== '0' && atHome() && due('safekeep', 600000)) {
-      try { const n = await safekeepSweep(bot, { isStopped, say }); if (n) steps.push('safekeep(' + n + ')') } catch (e) { dbg('  maint: safekeep failed (' + e.message + ')') }
+      try { const n = await safekeepSweep(bot, { isStopped, say }); if (n) stepDone('safekeep(' + n + ')') } catch (e) { dbg('  maint: safekeep failed (' + e.message + ')') }
     }
     if (between()) return { ok: true, steps, reason: 'bail:survival' }
 
@@ -4849,7 +4878,7 @@ async function maintenancePass (bot, opts = {}) {
     if (process.env.GEAR_REFLEX !== '0' && !nightIndoorOnly && has('armor') && (day() || nightStuck(bot)) && due('armor', 900000)) {
       const gb = gearupState()
       if (!(gb && gb.until > Date.now())) {
-        try { const r = await require('./commands.js').handle(bot, 'armorup'); steps.push('armor'); dbg('  maint armor -> ' + String(r || '').split('\n')[0]) } catch (e) { dbg('  maint: armor failed (' + e.message + ')') }
+        try { const r = await require('./commands.js').handle(bot, 'armorup'); stepDone('armor'); dbg('  maint armor -> ' + String(r || '').split('\n')[0]) } catch (e) { dbg('  maint: armor failed (' + e.message + ')') }
       }
     }
     if (between()) return { ok: true, steps, reason: 'bail:survival' }
@@ -4862,7 +4891,7 @@ async function maintenancePass (bot, opts = {}) {
         if (!t.pick || !t.sparePick) await res.acquire(bot, 'stone_pickaxe', 1, { near: home, isStopped, say })
         else if (!t.axe) await res.acquire(bot, 'stone_axe', 1, { near: home, isStopped, say })
         else if (!t.sword) await res.acquire(bot, 'wooden_sword', 1, { near: home, isStopped, say })
-        steps.push('tools')
+        stepDone('tools')
       } catch (e) { dbg('  maint: tools failed (' + e.message + ')') }
     }
     if (between()) return { ok: true, steps, reason: 'bail:survival' }
@@ -4875,14 +4904,14 @@ async function maintenancePass (bot, opts = {}) {
         if (countItem(bot, 'coal') + countItem(bot, 'charcoal') < 1) { try { await res.withdrawItems(bot, 'coal', 8, { near: home, maxDist: 64 }) } catch {} }
         if (countItem(bot, 'stick') < 1) { try { await res.withdrawItems(bot, 'stick', 4, { near: home, maxDist: 64 }) } catch {} }
         await ensureTorches(bot, torchTarget)
-        steps.push('torches')
+        stepDone('torches')
       } catch (e) { dbg('  maint: torches failed (' + e.message + ')') }
     }
     if (between()) return { ok: true, steps, reason: 'bail:survival' }
 
     // STEP 9: homeRepair - the HOME_REPAIR chain when already home (5-min floor via stepDue).
     if (process.env.HOME_REPAIR !== '0' && atHome() && due('homeRepair', 300000)) {
-      try { const r = await maintainHome(bot, hutAnchor(), { isStopped, say }); if (r && r.damaged) steps.push('homeRepair') } catch (e) { dbg('  maint: homeRepair failed (' + e.message + ')') }
+      try { const r = await maintainHome(bot, hutAnchor(), { isStopped, say }); if (r && r.damaged) stepDone('homeRepair') } catch (e) { dbg('  maint: homeRepair failed (' + e.message + ')') }
     }
     return { ok: true, steps, reason: steps.length ? steps.join('+') : 'nothing due' }
   } finally { _maintaining = false }
@@ -6259,7 +6288,7 @@ async function runSmeltSingle (bot, output, input, count, opts = {}) {
           try { await furnace.putFuel(fid, null, Math.min(inInv(fuelName), want)) } catch {}
         }
       }
-      if (made > lastMade) { lastMade = made; stall = 0; dbg('  smelt progress', made + '/' + count) } else stall++
+      if (made > lastMade) { lastMade = made; stall = 0; touchP('smelt'); dbg('  smelt progress', made + '/' + count) } else stall++ // S7 H4a: output collected from the OPEN furnace window
       const noFuel = !furnace.fuelItem() && !(furnace.slots || []).slice(3).some(s => s && isFuel(s))
       const noInput = !furnace.inputItem() && inInv(input) === 0
       if ((noFuel || noInput) && !furnace.outputItem() && cooking === 0) { dbg('  smelt BREAK: noFuel=' + noFuel + ' noInput=' + noInput + ' (made ' + made + '/' + count + ', fuelItem=' + !!furnace.fuelItem() + ' inputItem=' + !!furnace.inputItem() + ' invInput=' + inInv(input) + ' invCoal=' + inInv('coal') + ')'); break }
@@ -6317,7 +6346,7 @@ async function runSmeltMulti (bot, output, input, count, positions, opts = {}) {
       if (invOut0 === null) invOut0 = inInv(output) // baseline BEFORE any drain
       for (let k = 0; k < 4; k++) { try { await w.takeOutput() } catch {} await new Promise(r => setTimeout(r, 200)) }
       made = inInv(output) - invOut0 // exact: only window ops change inventory output
-      if (made > lastMade) { lastMade = made; lastProgressAt = Date.now(); dbg('  multi: collect furnace', i, '->', made + '/' + count) }
+      if (made > lastMade) { lastMade = made; lastProgressAt = Date.now(); touchP('smelt'); dbg('  multi: collect furnace', i, '->', made + '/' + count) } // S7 H4b: output collected from the OPEN furnace window
       // top up input toward this furnace's share of what's still unloaded
       const curIn = w.inputItem() ? w.inputItem().count : 0
       const share = Math.ceil(Math.max(0, count - totalLoaded()) / Math.max(1, alive().length))
@@ -7179,4 +7208,5 @@ async function chestCounts (bot, chestBlock) {
 }
 
 module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, boundedHold, recoverFromDegraded, isRecoveringDegraded, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, markBedUnusable, bedHeld, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
-  maintenancePass, isMaintaining, stopMaintenance, _setMaintaining, courierFoodToBank, safekeepSweep, cropExclusionStep, gatherSeedsNear }
+  maintenancePass, isMaintaining, stopMaintenance, _setMaintaining, courierFoodToBank, safekeepSweep, cropExclusionStep, gatherSeedsNear,
+  activeJobInfo, stopSurvivalJob }

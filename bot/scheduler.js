@@ -330,6 +330,37 @@ function watchdog (activeJob, vitals, now) {
   return 'ok'
 }
 
+// ---- wdPhase (S7 §3.4b) -----------------------------------------------------------------
+// PURE escalation reducer over the `watchdog` verdict STREAM for the CURRENT job. Latches a phase
+// so each escalation fires exactly ONCE, and returns the ACT the index applies (it holds no clock,
+// no bot - all side effects live in index.js). Phases: ok -> nudged -> failed -> gaveup.
+//   act 'none'   - do nothing
+//   act 'nudge'  - loud log + markStalled (the FIRST nudge while phase ok; the job's own recovery
+//                  and the other watchdogs get first crack - a log line + a flag fight nothing)
+//   act 'fail'   - set the job's EXISTING stop latch + recordOutcome (the FIRST fail-job)
+//   act 'giveup' - log once + stand down for this jobKey (a fail-job STILL arriving AFTER the fail
+//                  was applied => the stop latch provably didn't bite: a hung promise, layer d's class)
+// A jobKey change resets to `ok` (a fresh job's clock starts clean); an `ok` verdict resets. The
+// giveup lands on the next fail-job observation after the fail (>=5s / one watchdog pass later - the
+// bounded reading of "still failing after the fail was applied"; the exact failMs delay is not
+// safety-critical, this branch only hands a latch-immune hang to the supervisor).
+function wdPhase (prev, verdict, jobKey) {
+  const p = prev || {}
+  if (jobKey == null) return { phase: 'ok', jobKey: null, act: 'none' }
+  const phase = (p.jobKey === jobKey) ? (p.phase || 'ok') : 'ok' // a new job resets the ladder
+  if (verdict === 'ok') return { phase: 'ok', jobKey, act: 'none' }
+  if (verdict === 'nudge') {
+    if (phase === 'ok') return { phase: 'nudged', jobKey, act: 'nudge' }
+    return { phase, jobKey, act: 'none' } // already escalated further - a nudge never de-escalates
+  }
+  if (verdict === 'fail-job') {
+    if (phase === 'ok' || phase === 'nudged') return { phase: 'failed', jobKey, act: 'fail' }
+    if (phase === 'failed') return { phase: 'gaveup', jobKey, act: 'giveup' } // latch didn't bite
+    return { phase: 'gaveup', jobKey, act: 'none' } // already gave up - silence for this jobKey
+  }
+  return { phase, jobKey, act: 'none' }
+}
+
 module.exports = {
   pickJob,
   recoveryPlan,
@@ -340,6 +371,7 @@ module.exports = {
   admissible,
   needProducer,
   watchdog,
+  wdPhase,
   JOB_CLASSES,
   WAKE_SET,
   _setNow,

@@ -173,6 +173,31 @@ t('(e) watchdog: patient (else) windows 120000/240000; idle 0 -> ok; null job ->
   assert.strictEqual(S.watchdog(null, v, 999999), 'ok')
 })
 
+// ---- (e) wdPhase: the escalation reducer (S7) --------------------------------------------
+t('(e) wdPhase: ok->nudge->fail->giveup sequencing, latch-once, verdict-ok + jobKey resets', () => {
+  const K = 'travel@1000'
+  let st = { phase: 'ok', jobKey: null }
+  const step = (verdict, jobKey) => { st = S.wdPhase(st, verdict, jobKey); return st.act }
+  assert.strictEqual(step('ok', K), 'none', 'ok -> none')
+  assert.strictEqual(step('nudge', K), 'nudge', 'first nudge fires')
+  assert.strictEqual(step('nudge', K), 'none', 'nudge latches - only the first fires')
+  assert.strictEqual(step('fail-job', K), 'fail', 'first fail-job fires the fail')
+  assert.strictEqual(step('fail-job', K), 'giveup', 'still failing AFTER the fail -> giveup (latch did not bite)')
+  assert.strictEqual(step('fail-job', K), 'none', 'giveup is once, then silence for this jobKey')
+  // an ok verdict resets the ladder
+  assert.strictEqual(step('ok', K), 'none')
+  assert.strictEqual(step('nudge', K), 'nudge', 'after an ok reset, nudge fires again')
+  // a jobKey change resets to ok regardless of prior phase
+  st = { phase: 'failed', jobKey: K }
+  assert.strictEqual(S.wdPhase(st, 'nudge', 'gather@2000').act, 'nudge', 'new jobKey resets -> nudge fires')
+  // a straight-to-fail (tick interval > nudge window) still fails once from phase ok
+  assert.strictEqual(S.wdPhase({ phase: 'ok', jobKey: 'x' }, 'fail-job', 'x').act, 'fail')
+  // null jobKey (no active job) -> never acts, resets phase
+  const r = S.wdPhase({ phase: 'failed', jobKey: 'x' }, 'fail-job', null)
+  assert.strictEqual(r.act, 'none')
+  assert.strictEqual(r.phase, 'ok')
+})
+
 // ---- (f) every hold carries a valid wake (focused restatement of (d)) --------------------
 t('(f) hold-forcing snapshots all carry valid wakes', () => {
   const cases = [

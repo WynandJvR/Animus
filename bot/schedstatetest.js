@@ -135,6 +135,37 @@ t('(i) activeJob = maintenancePass/maintain when the maintain latch is set', asy
   assert.ok(!s2.activeJob || s2.activeJob.name !== 'maintenancePass', 'latch cleared -> no synthetic maintain job')
 })
 
+// (j) S7: activeJob.lastProgressAt/blockedOn are now REAL (no more "null until S7") - the synthesis
+// carries the verified-progress clock; markStalled surfaces blockedOn:'stalled'; a touch clears it.
+t('(j) S7: activeJob carries the progress clock; markStalled -> blockedOn:stalled; touch clears', async () => {
+  const commands = require('./commands.js')
+  try {
+    provision._setMaintaining(true)
+    // a seeded touch is the job's progress clock -> lastProgressAt reflects it (not null)
+    commands.touchProgress('seed')
+    const at0 = commands.progressInfo().at
+    let s = await provision.schedulerState(stubBot({}))
+    assert.strictEqual(typeof s.activeJob.lastProgressAt, 'number', 'lastProgressAt is a real number (not null)')
+    assert.ok(s.activeJob.lastProgressAt >= at0, 'lastProgressAt >= the seeded touch time')
+    assert.strictEqual(s.activeJob.blockedOn, null, 'no stall -> blockedOn null')
+    // markStalled surfaces the nudge marker
+    commands.markStalled()
+    s = await provision.schedulerState(stubBot({}))
+    assert.strictEqual(s.activeJob.blockedOn, 'stalled', 'markStalled -> blockedOn:stalled')
+    // any touch clears it
+    commands.touchProgress('clear')
+    s = await provision.schedulerState(stubBot({}))
+    assert.strictEqual(s.activeJob.blockedOn, null, 'a touch clears the stalled marker')
+  } finally { provision._setMaintaining(false); commands._resetProgress() }
+})
+
+// (k) S7: activeJobInfo is exported, sync, and returns null when no job/latch is active
+t('(k) S7: activeJobInfo() sync + null when idle', () => {
+  assert.strictEqual(typeof provision.activeJobInfo, 'function', 'activeJobInfo exported')
+  assert.strictEqual(typeof provision.stopSurvivalJob, 'function', 'stopSurvivalJob exported')
+  assert.strictEqual(provision.activeJobInfo(), null, 'no activity + no latch -> null (sync)')
+})
+
 ;(async () => {
   let failures = 0
   for (const [name, fn] of tests) {

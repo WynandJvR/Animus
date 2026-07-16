@@ -32,6 +32,7 @@ const scheduler = require('./scheduler.js') // S4: pure survival-tier decision c
 const SCHED_ON = process.env.SCHEDULER !== '0' // master flag: SCHEDULER=0 restores the S1-hotfix wiring byte-for-byte (gate takes the survivalAdmissible path, the tick never registers, the 3 reflexes run as today)
 const LADDER_ON = SCHED_ON && process.env.RECOVERY_LADDER !== '0' // S5: RECOVERY_LADDER=0 restores S4's recoveryLadder DOWNGRADE + the one-shot respawn grave gating byte-for-byte
 const MAINTAIN_ON = SCHED_ON && process.env.MAINTAIN !== '0' // S6: MAINTAIN=0 restores the defer-note + the four proactive reflexes on their old timers byte-for-byte
+const WATCHDOG_ON = SCHED_ON && process.env.WATCHDOG !== '0' // S7: the in-process forward-progress watchdog. WATCHDOG=0 -> no interval, no heartbeat merge, no wdPhase call; the touchProgress hooks remain as inert timestamps nobody reads (behaviorally byte-identical)
 
 // Live brain settings the dashboard can change on the fly; brain-llm.js polls
 // GET /brain each tick and switches model / goal / on-off without a restart.
@@ -238,6 +239,7 @@ provision.setDebugSink(noteDebug)
 resources.setDebugSink(noteDebug)
 navigate.setDebugSink(noteDebug)
 require('./pathfix.js').setDebugSink(noteDebug) // [verify] place/dig world-recheck traces
+require('./pathfix.js').setProgressSink(commands.touchProgress) // [S7] a pathfix-VERIFIED place/break -> the forward-progress heartbeat
 require('./scaffold.js').setDebugSink(noteDebug) // [scaffold] registry/teardown traces
 require('./planner.js').setDebugSink(noteDebug) // [plan] re-planning goal-driver traces (rounds/strikes/relocates)
 arbiter.setDebugSink(noteDebug) // [arb] maneuver begin/end/expire + reflex deferrals
@@ -1024,16 +1026,23 @@ let schedLadderCooldownUntil = 0 // S5: honest ladder non-completion -> don't re
 let schedHpCooldownUntil = 0    // mirror of hpCrisisCooldownUntil (index.js hp-crisis)
 let schedMaintainCooldownUntil = 0 // S6: 10 min after a completed pass, 5 min after a no-op/bail (mirrors schedLadderCooldownUntil)
 let schedDeferNoted = ''        // one note per deferred job kind (nightShelter/maintain/degraded/ladder-reflex)
+let schedLastPick = null        // S7 idle-with-work: the tick's last pickJob decision
+let schedLastPickAt = 0
+let schedLastTickAt = 0          // S7 tick-liveness: last time the tick body entered (the watchdog re-arms if this goes >90s stale)
+let tickGen = 0                 // S7 generation guard: a resurrected tick chain can never coexist with the live one
 if (SCHED_ON) {
   const GRAVE_NEAR_LADDER = Number(process.env.GRAVE_NEAR_LADDER || 32)
   const schedSay = m => bot.chat(String(m).slice(0, 200))
   const runJob = async (name, executor) => {
     schedJob = { name, startedAt: Date.now() }
+    commands.touchProgress('dispatch:' + name) // S7 (d): a just-dispatched job is at zero idle (same t0 rule as beginActivity/H5c)
     try { const r = await executor(); note('(sched) ' + name + ' -> ' + (r === false ? 'no-op/deferred' : (typeof r === 'string' ? r.split('\n')[0] : 'done'))) }
     catch (e) { note('(sched) ' + name + ' failed: ' + e.message) }
     finally { schedJob = null }
   }
   const tick = async () => {
+    const myGen = tickGen // S7 tick-liveness: capture this chain's generation; the finally only reschedules if still current
+    schedLastTickAt = Date.now() // S7: liveness stamp - the watchdog re-arms the chain if this goes >90s stale
     try {
       // 1. GUARDS (cheap; mirror the crisis reflexes). NOT gated on arbiter.maneuverActive() - a
       //    survival preempt must be able to interrupt a nav leg (same as FOOD_CRISIS today).
@@ -1051,6 +1060,7 @@ if (SCHED_ON) {
         schedLastLog = key
         note(`(sched) pick=${pick ? pick.job : 'idle'}${pick && pick.preempt ? ' PREEMPT' : ''} reason="${pick ? pick.reason : 'idle'}" | hp=${s.hp} food=${s.food} packPts=${s.packFoodPts} armor=${s.armorPieces} graves=${(s.graves || []).length}${nearest ? '(near ' + Math.round(nearest.dist) + 'b)' : ''} home=${s.homeDist == null ? '?' : Math.round(s.homeDist) + 'b'}`)
       }
+      schedLastPick = pick; schedLastPickAt = Date.now() // S7: expose the last decision to the idle-with-work watchdog
       // 4. Non-survival results are IGNORED (progress = body/resume already owns the goal; maintain
       //    dispatch is S6).
       if (!pick || pick.cls !== 'survival') {
@@ -1155,6 +1165,7 @@ if (SCHED_ON) {
       } else if (name === 'recover') {
         if (Date.now() < schedGraveCooldownUntil) return
         schedJob = { name, startedAt: Date.now() }
+        commands.touchProgress('dispatch:recover') // S7 (d): zero-idle at t0
         try {
           const r = await commands.handle(bot, 'recover', { source: 'scheduler' })
           // success marks the grave retrieved (it then leaves the snapshot naturally); anything else
@@ -1166,9 +1177,89 @@ if (SCHED_ON) {
         finally { schedJob = null }
       }
     } catch (e) { try { note('(sched) tick error: ' + e.message) } catch {} }
-    finally { setTimeout(tick, 15000 + (Math.random() * 6000 - 3000)) } // self-rescheduling => built-in jitter, one dispatch at a time
+    finally { if (myGen === tickGen) setTimeout(tick, 15000 + (Math.random() * 6000 - 3000)) } // self-rescheduling => built-in jitter, one dispatch at a time; S7: a re-armed chain (tickGen++) orphans this stale one so two chains never coexist
   }
   setTimeout(tick, 15000)
+
+  // S7 (§3.4c): the in-process FORWARD-PROGRESS watchdog. Every 5s it reads the SAME activeJob the
+  // snapshot builds, runs the PURE danger-scaled scheduler.watchdog, and applies the §6 ladder via the
+  // PURE scheduler.wdPhase reducer: NUDGE (loud log + markStalled, NO body action - the inner layers
+  // get first crack) -> FAIL-JOB (set the job's EXISTING stop latch + recordOutcome; the executor
+  // unwinds its honest-failure path and the next 15s tick's pickJob re-plans) -> GIVEUP (log once; a
+  // latch-immune hung promise is layer d's class). Plus idle-with-work (crisis-cooldown clear + kick)
+  // and a generation-guarded tick-liveness re-arm. WATCHDOG=0 -> this whole block never runs.
+  if (WATCHDOG_ON) {
+    let wdState = { phase: 'ok', jobKey: null }
+    let idleWorkSince = 0
+    let lastKickAt = 0
+    let lastLivenessRearm = 0
+    const wdTimer = setInterval(() => {
+      try {
+        // 1. GUARDS. Dead/absent body: nothing to watch. A DECLARED hold (bed-sleep, night-rest) is a
+        //    dawn-waking hold (I5) whose own inner watchdog stays the authority - heartbeat + return
+        //    (same reasoning WEDGE_WATCHDOG uses, expressed as a heartbeat instead of a clock reset).
+        if (!bot.entity || bot.health <= 0) return
+        if (bot.isSleeping || (provision.isResting && provision.isResting())) { commands.touchProgress('declaredHold'); return }
+        // 2. the active job (sync, cheap - no snapshot build on the 5s path).
+        const job = provision.activeJobInfo()
+        const now = Date.now()
+        // 3. pure verdict + escalation phase.
+        const verdict = scheduler.watchdog(job, { hp: bot.health, food: bot.food }, now)
+        const jobKey = job ? (job.name + '@' + (job.startedAt || '')) : null
+        wdState = scheduler.wdPhase(wdState, verdict, jobKey)
+        if (job && wdState.act !== 'none') {
+          const base = job.lastProgressAt != null ? job.lastProgressAt : (job.startedAt != null ? job.startedAt : now)
+          const idle = Math.round((now - base) / 1000)
+          if (wdState.act === 'nudge') {
+            note('(wd) NUDGE ' + job.name + ' - no verified progress for ' + idle + 's (hp ' + bot.health + ' food ' + bot.food + ') - marking stalled, letting its own recovery act')
+            commands.markStalled() // NOTHING else: no forceUnstick, no stop, no goal poke - the nudge is loud + a flag only
+          } else if (wdState.act === 'fail') {
+            note('(wd) FAIL-JOB ' + job.name + ' - no verified progress for ' + idle + 's - setting its stop latch')
+            try { commands.recordOutcome('watchdog:' + job.name, false, 'no verified progress for ' + idle + 's - stop latch set') } catch {}
+            // the LEVER MAP - every lever is an EXISTING, already-polled abort latch (no new dig/build/nav):
+            if (/^(autobuild|gather|provision|travel|come|huntat|fish|huttidy|gearup)$/.test(job.name)) {
+              try { commands.preemptForSurvival() } catch {} // sets ONLY buildAbort; persistedResume stays intact -> a failed build PAUSES, never cancels
+            } else if (job.name === 'maintenancePass') {
+              try { provision.stopMaintenance() } catch {}
+            } else if (job.name === 'secureFood' || job.name === 'recoverHp' || job.name === 'recoverFromDegraded' || job.name === 'recoveryLadder') {
+              try { provision.stopSurvivalJob() } catch {}
+            }
+            // recover/graveSweep: NO latch bites by design (recover ignores buildAbort) - log + recordOutcome
+            // only; its own travel deadlines unwind it and the tick applies schedGraveCooldownUntil. A
+            // promise-hung recover is caught by GIVEUP next window (layer d's class).
+          } else if (wdState.act === 'giveup') {
+            note('(wd) stop latch ineffective on ' + job.name + ' - a hung promise; standing down, layer d (supervisor frozen-vitals/kill) owns this')
+          }
+        }
+        // 7. IDLE-WITH-WORK (§6 item 3): a survival pick sits undispatched while the body is truly idle
+        //    (no busy activity, no pathfinder goal, no schedJob) and no latch job is running. Continuous
+        //    >30s -> kick; at CRISIS vitals also clear the stale scheduler cooldowns so the next tick
+        //    dispatches (the surgical fix for "sat frozen while graves gleamed 3b away"). Rate-limited 60s.
+        const idleBody = !(commands.isBusy && commands.isBusy()) && !(bot.pathfinder && bot.pathfinder.goal) && !schedJob
+        if (schedLastPick && schedLastPick.cls === 'survival' && job == null && idleBody) {
+          if (!idleWorkSince) idleWorkSince = now
+          if (now - idleWorkSince > 30000 && now - lastKickAt > 60000) {
+            lastKickAt = now
+            note('(wd) IDLE WITH WORK 30s+: pick=' + (schedLastPick && schedLastPick.job) + ' undispatched - kicking')
+            if (bot.health <= 6 || bot.food <= 2) {
+              schedGraveCooldownUntil = schedLadderCooldownUntil = schedHpCooldownUntil = 0
+              note('(wd) crisis vitals - cleared stale grave/ladder/hp cooldowns so the next tick can dispatch')
+            }
+          }
+        } else idleWorkSince = 0
+        // 8. TICK-LIVENESS: the self-rescheduling chain itself died (a hung await -> its finally never
+        //    ran). Re-arm with the generation guard (tickGen++ orphans any later-resolving stale chain;
+        //    schedJob still guarantees one dispatch). Rate-limited to once per 5 min.
+        if (schedLastTickAt && now - schedLastTickAt > 90000 && now - lastLivenessRearm > 300000) {
+          lastLivenessRearm = now
+          note('(wd) scheduler tick chain stalled >90s - re-arming (generation guard prevents a double chain)')
+          tickGen++
+          setTimeout(tick, 0)
+        }
+      } catch (e) { try { note('(wd) watchdog error: ' + e.message) } catch {} }
+    }, 5000)
+    if (wdTimer.unref) wdTimer.unref() // never hold the process open on this timer alone
+  }
 }
 
 // Anti-AFK: keep the connection alive during genuine idle gaps (e.g. between brain
@@ -2079,6 +2170,9 @@ if (process.env.STATE_HISTORY !== '0') {
       // while connected) without parsing the whole history.
       const p = sample.pos
       if (p && hbLastPos && (Math.abs(p.x - hbLastPos.x) + Math.abs(p.y - hbLastPos.y) + Math.abs(p.z - hbLastPos.z)) >= 1) hbLastProgressAt = sample.t
+      // S7 (§3.4e): merge the VERIFIED-progress clock so layer d (supervise.js frozen-vitals, 5 min)
+      // stops false-flagging a bot standing still at a furnace for 10 min of real smelting.
+      if (WATCHDOG_ON) { try { hbLastProgressAt = Math.max(hbLastProgressAt, commands.progressInfo().at) } catch {} }
       if (p) hbLastPos = p
       try { fs.writeFileSync(HEARTBEAT_FILE, JSON.stringify(Object.assign({}, sample, { connected: !!bot.entity, lastProgressAt: hbLastProgressAt }))) } catch {}
     } catch { /* telemetry must never kill the bot */ }

@@ -36,6 +36,8 @@ function key (p) { return `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.
 
 let dbgSink = null // injected by index.js: debug lines persist to logs/bot-events.log
 function setDebugSink (fn) { dbgSink = fn }
+let progressSink = null // S7 H3: injected by index.js (commands.touchProgress) - fired ONLY on a VERIFIED place/break transition
+function setProgressSink (fn) { progressSink = fn }
 const dbg = (...a) => {
   const line = '[verify] ' + a.map(x => String(x)).join(' ')
   if (process.env.BUILD_DEBUG) console.log(line)
@@ -60,7 +62,12 @@ async function placedOK (bot, pos, opts = {}) {
   for (;;) {
     try {
       const b = bot.blockAt(pos)
-      if (b && !AIR_RE.test(b.name) && (opts.before == null || b.stateId !== opts.before)) return true
+      if (b && !AIR_RE.test(b.name) && (opts.before == null || b.stateId !== opts.before)) {
+        // S7 H3: fire ONLY when a stateId CHANGE was proven (opts.before given). A bare non-air read
+        // without the before-snapshot could be a pre-existing block - never a verified placement.
+        if (progressSink && opts.before != null) progressSink('placed')
+        return true
+      }
     } catch {}
     if (Date.now() >= deadline) return false
     await new Promise(r => setTimeout(r, 120))
@@ -72,10 +79,17 @@ async function placedOK (bot, pos, opts = {}) {
 // optimistic write - pass a timeoutMs of ~700+ and call it later when it matters.
 async function brokeOK (bot, pos, opts = {}) {
   const deadline = Date.now() + (opts.timeoutMs != null ? opts.timeoutMs : 900)
+  let sawSolid = false // S7 H3: did we ever observe a non-air block here? only a non-air->air TRANSITION is progress
   for (;;) {
     try {
       const b = bot.blockAt(pos)
-      if (!b || AIR_RE.test(b.name)) return true
+      if (b && !AIR_RE.test(b.name)) sawSolid = true
+      if (!b || AIR_RE.test(b.name)) {
+        // fire ONLY on an observed transition inside this call. An already-air cell (a re-verify, a
+        // spinning dig loop polling the same hole) proves nothing and must NOT touch.
+        if (progressSink && sawSolid) progressSink('broke')
+        return true
+      }
     } catch {}
     if (Date.now() >= deadline) return false
     await new Promise(r => setTimeout(r, 120))
@@ -309,4 +323,4 @@ function installPathfinderTuning (bot) {
   } catch {}
 }
 
-module.exports = { installPathfinderTuning, selfPlacedNear, isSelfPlaced, placedOK, brokeOK, setDebugSink }
+module.exports = { installPathfinderTuning, selfPlacedNear, isSelfPlaced, placedOK, brokeOK, setDebugSink, setProgressSink }
