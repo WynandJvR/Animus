@@ -23,6 +23,7 @@ const arbiter = require('./arbiter.js') // JOB-LEVEL arbitration: survive > prog
 const scheduler = require('./scheduler.js') // PURE survival-tier decision core; top-level-safe (scheduler requires only arbiter - no cycle back to provision). Used by schedulerState to classify the active job.
 const routeMem = require('./route-mem.js') // PURE route/wedge geometry: replay proven treks + soft-steer around learned wedges (semantic-world-map slice 1)
 const pocketEscape = require('./pocket-escape.js') // PURE pocket-breach geometry: plan a bounded dig out of a flooded, roofed pocket (water-wedge escape)
+const navProfile = require('./nav-profile.js') // PURE nav-terrain policy: wild-profile type whitelist, scope gate, per-position break exclusion (NAV Phase 1)
 // Visible, UNTHROTTLED build tracing to stdout (the say() progress goes through a 40s
 // throttle that hides failures). Enable with BUILD_DEBUG=1 to see every plan/task/smelt step.
 let dbgSink = null // injected by index.js: debug lines persist to logs/bot-events.log
@@ -95,6 +96,74 @@ function cropExclusionStep (bot) {
   }
 }
 
+// WILD-TERRAIN travel profile (NAV Phase 1, DESIGN-navP1-terrain-profile §4.2b). Like a
+// survival player, this profile may DIG through wild terrain (and its OWN registry-proven
+// scaffold cobble) to route past a sealed dip / pocket / pit-rim - but NEVER a player build
+// or its own permanent fabric. Six independent anti-grief layers hold (§6):
+//  1. TYPE whitelist = canBreakNaturally's exact compound (DIGGABLE_NATURAL && !STRUCTURE_RE)
+//     + _leaves$ + cobble/cobbled_deepslate; everything else sits in blocksCantBreak.
+//  2. POSITIONAL gate (exclusionAreasBreak): forbid (100) ANY break - dirt included - within
+//     16b XZ of own infra or the active buildZone+16 (enforced INSIDE the library safeToBreak).
+//  4. COST gate: digCost 20 - A* digs only when the walk-around is massively worse.
+//  5. cobble is breakable ONLY on an exact scaffold.isScaffold(pos) registry hit.
+// Layer 3 (scope) lives in trekMovements; layer 6 (execution) is pathfix + canDigBlock, pre-
+// existing. Built in gatherMovements' style; reuses S6 cropExclusionStep + NAV-P0 liquidCost.
+function wildTerrainMovements (bot) {
+  const m = new Movements(bot)
+  const md = require('minecraft-data')(bot.version)
+  m.canDig = true
+  m.digCost = navProfile.WILD_DIG_COST // 20: dig only when the walk-around is massively worse
+  m.liquidCost = navProfile.WILD_LIQUID_COST // 4: route AROUND water, don't swim (NAV-P0 parity)
+  m.allow1by1towers = true
+  m.canOpenDoors = true
+  m.allowParkour = true
+  m.maxDropDown = 4 // don't plunge into caves/ravines chasing the target's XZ (travelMovements parity)
+  if ('infiniteLiquidDropdownDistance' in m) m.infiniteLiquidDropdownDistance = false
+  if ('allowSprinting' in m) m.allowSprinting = true
+  // Bridge gaps/ravines with cheap carried blocks (travelMovements' bridge families).
+  try {
+    const bridge = ['dirt', 'cobblestone', 'cobbled_deepslate', 'netherrack', 'stone', 'gravel', 'dirt_path', 'andesite', 'granite', 'diorite']
+    const ids = bridge.map(n => md.itemsByName[n] && md.itemsByName[n].id).filter(x => x != null)
+    if ('scafoldingBlocks' in m) m.scafoldingBlocks = ids
+  } catch { /* mcData not ready */ }
+  // LAYER 1: the type whitelist inverted into the library's denylist (built exactly like
+  // gatherMovements at provision.js:68-70). Any block whose NAME fails canWildBreakType is
+  // un-breakable regardless of position - planks/logs/torches/chests/beds/glass/bricks/... .
+  m.blocksCantBreak = new Set(
+    Object.values(md.blocksByName)
+      .filter(b => !navProfile.canWildBreakType(b.name, DIGGABLE_NATURAL, STRUCTURE_RE))
+      .map(b => b.id)
+  )
+  // LAYER 2 + 5: the positional break exclusion. PUSH (never assign - the array is
+  // library-initialized, movements.js:104). Anchors snapshotted once at construction (the
+  // selector rebuilds the profile per goto attempt, so staleness is bounded to one attempt).
+  const anchors = ownInfraAnchors()
+  const zone = buildZone
+  m.exclusionAreasBreak.push(block => {
+    try { return navProfile.breakExclusion(anchors, zone, block && block.name, block && block.position, p => scaffold.isScaffold(p)) } catch { return 100 }
+  })
+  // S6 FARM_NO_TRAMPLE parity (provision.js:71 pattern) - route AROUND our crop cells (cost-only).
+  try { const ex = cropExclusionStep(bot); if (ex && Array.isArray(m.exclusionAreasStep)) m.exclusionAreasStep.push(ex) } catch {}
+  return m
+}
+
+// The SELECTOR (DESIGN §4.2c): returns the wild dig-capable profile ONLY when the flag is on
+// AND the bot stands outside the 32b home/build scope (layer 3); otherwise TODAY's no-dig
+// profile via safeThunk(). DEFAULT OFF: with NAV_TERRAIN_PROFILE unset/!=='1' this ALWAYS
+// returns safeThunk() and the wild profile/exclusion/registry hooks never construct. Whole
+// body try/catch -> safeThunk (a policy error degrades to today's no-dig, never a throw
+// mid-leg). navigateToInner re-runs this thunk before EVERY attempt (navigate.js:770), so the
+// profile demotes to safe automatically as a leg carries the bot inside the 32b home radius.
+function trekMovements (bot, safeThunk) {
+  try {
+    if (process.env.NAV_TERRAIN_PROFILE !== '1') return safeThunk()
+    const pos = bot.entity && bot.entity.position
+    if (!pos) return safeThunk()
+    if (!navProfile.wildAllowedAt(ownInfraAnchors(), buildZone, pos)) return safeThunk()
+    return wildTerrainMovements(bot)
+  } catch { return safeThunk() }
+}
+
 // MANUAL water escape: face the nearest bank cell (solid ground with headroom, up to +1
 // higher) and hold jump+sprint+forward until we're standing on it. Bypasses the
 // pathfinder entirely - in water it never registers "on ground", so its planned jumps
@@ -154,7 +223,7 @@ async function breachWaterPocket (bot, opts = {}) {
     const pos = feet.offset(dx, dy, dz)
     const block = bot.blockAt(pos)
     if (!block || block.name !== name) return false
-    let ok = canBreakNaturally(block) || /_leaves$/.test(name)
+    let ok = canBreakNaturally(block) || /_leaves$/.test(name) || scaffoldDigOK(block)
     if (!ok && /_log$/.test(name)) {
       ok = isWildTreeLog(bot, pos) && !routeMem.suppressedNearAnchors(anchors, pos)
     }
@@ -284,7 +353,13 @@ async function walkStaged (bot, tx, tz, opts = {}) {
       navRes = await navigate.navigateTo(bot, new goals.GoalNearXZ(lx, lz, 4), {
         timeoutMs: legTimeout, deadlineMs: legDeadline, isStopped, label: 'walkStaged',
         budgets: { water: 1, pit: 1, door: 1, climb: 1, nudge: 1 }, // one rescue of each kind per leg - this loop retries legs
-        escalate: false, doorPreflight: false // THIS loop owns the measured-stall forceUnstick; a near-home leg must not spuriously cross a door
+        escalate: false, doorPreflight: false, // THIS loop owns the measured-stall forceUnstick; a near-home leg must not spuriously cross a door
+        // Pin the leg profile (NAV-P0 remainder + NAV Phase 1). Flag OFF => trekMovements returns
+        // travelMovements(bot) - the no-dig profile walkStaged was always meant to trek under
+        // (its legs otherwise inherit whatever ambient profile is set, often the wedge-prone
+        // setupMovements). Flag ON + >32b from home => the wild dig-capable profile. Lazy require
+        // (cycle-safe, the touchP pattern); navigateToInner re-runs this thunk per attempt.
+        movements: () => trekMovements(bot, () => require('./commands.js').travelMovements(bot))
       })
     } catch (e) { navErr = e }
     const np = bot.entity.position
@@ -330,6 +405,13 @@ const STRUCTURE_RE = /planks$|stairs$|_slab$|fence|_door$|trapdoor$|_wall$|glass
 // block) - the strip-mine digs `stone` and gets cobble as the drop.
 const DIGGABLE_NATURAL = /^(dirt|coarse_dirt|rooted_dirt|grass_block|podzol|mycelium|moss_block|stone|deepslate|granite|diorite|andesite|tuff|calcite|dripstone_block|pointed_dripstone|sand|red_sand|gravel|clay|mud|sandstone|red_sandstone|snow_block|snow|powder_snow|ice|packed_ice|blue_ice|frosted_ice|netherrack|soul_sand|soul_soil|magma_block|blackstone|basalt|end_stone)$|terracotta$|_ore$/
 function canBreakNaturally (block) { return !!block && DIGGABLE_NATURAL.test(block.name) && !STRUCTURE_RE.test(block.name) }
+// NAV Phase 1 (DESIGN §4.3e): a PRECISE, expiring positive permission for the bot's OWN
+// registry-proven scaffold (cobble pillar/staircase/fill it placed itself). Flag-gated
+// (DEFAULT OFF - unset/!=='1' => always false, byte-identical to today). Never a regex
+// loosening: an exact scaffold.isScaffold(pos) hit only. Widens the three dig-capable RESCUE
+// predicates (breachWaterPocket/digStaircaseUp/pillarUpTo) so a bot boxed by its own tower
+// can dig out - the mining/shelter dig primitives are deliberately NOT widened.
+const scaffoldDigOK = (block) => process.env.NAV_TERRAIN_PROFILE === '1' && !!block && scaffold.isScaffold(block.position)
 // Is a player-built structure within `r` of pos? Reused by the shelter + gather filters so
 // the bot never digs in / mines right next to someone's base.
 function structureNearby (bot, pos, r) {
@@ -1005,7 +1087,7 @@ async function digStaircaseUp (bot, targetY, opts = {}) {
     const b = bot.blockAt(p)
     if (!b || AIRISH(b.name)) return true
     if (/lava|water/.test(b.name)) return false
-    if (!canBreakNaturally(b)) return false // anti-grief: don't cut through a player build
+    if (!canBreakNaturally(b) && !scaffoldDigOK(b)) return false // anti-grief: don't cut through a player build (own registry-proven scaffold allowed under NAV_TERRAIN_PROFILE)
     const tool = toolForBlock(bot, b.name)
     if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
     if (bot.canDigBlock && !bot.canDigBlock(b)) return false
@@ -1145,7 +1227,7 @@ async function pillarUpTo (bot, targetY, opts = {}) {
       const above = bot.blockAt(feet.offset(0, up, 0))
       if (above && !AIRISH(above.name)) {
         if (/lava|water/.test(above.name)) { bot.clearControlStates(); return }
-        if (!canBreakNaturally(above)) { bot.clearControlStates(); return } // anti-grief: don't pillar up through a build
+        if (!canBreakNaturally(above) && !scaffoldDigOK(above)) { bot.clearControlStates(); return } // anti-grief: don't pillar up through a build (own registry-proven scaffold allowed under NAV_TERRAIN_PROFILE)
         if (bot.canDigBlock && !bot.canDigBlock(above)) { bot.clearControlStates(); return }
         const tool = toolForBlock(bot, above.name)
         if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
@@ -7209,4 +7291,5 @@ async function chestCounts (bot, chestBlock) {
 
 module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, boundedHold, recoverFromDegraded, isRecoveringDegraded, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, markBedUnusable, bedHeld, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
   maintenancePass, isMaintaining, stopMaintenance, _setMaintaining, courierFoodToBank, safekeepSweep, cropExclusionStep, gatherSeedsNear,
-  activeJobInfo, stopSurvivalJob }
+  activeJobInfo, stopSurvivalJob,
+  wildTerrainMovements, trekMovements, DIGGABLE_NATURAL, STRUCTURE_RE, canBreakNaturally }

@@ -595,7 +595,9 @@ async function travelFar (bot, dest, opts = {}) {
           timeoutMs: 30000, deadlineMs: 75000, isStopped, climb: false, label: 'travel',
           budgets: { water: 1, pit: 1, door: 1, nudge: 1 }, // one rescue of each kind per leg - the trip loop retries legs
           escalate: false, doorPreflight: false, // this trek loop owns its own stall handling; a near-home leg must not spuriously cross a door
-          movements: () => travelMovements(bot)
+          // NAV Phase 1 selector: flag OFF (default) => travelMovements(bot), byte-identical
+          // no-dig behavior; flag ON + >32b from home => the wild dig-capable profile.
+          movements: () => provision.trekMovements(bot, () => travelMovements(bot))
         })
         climbTimeMs += nav.recoveryMs
         reflexWaitMs = nav.reflexWaitMs || 0
@@ -3405,4 +3407,4 @@ async function resumeBuild (bot) {
   }
 }
 
-module.exports = { handle, state, setupMovements, eatFood, placeTorchNearby, isBusy, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume, flagSpawnSuspect, worthwhileGrave, shouldChaseGrave, graveLootVerdict, gravesSnapshot, activityInfo, preemptForSurvival, setDebugSink, finishDisposition, resumeHoldRemaining, markResumePaused, touchProgress, progressInfo, markStalled, _resetProgress }
+module.exports = { handle, state, setupMovements, travelMovements, eatFood, placeTorchNearby, isBusy, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume, flagSpawnSuspect, worthwhileGrave, shouldChaseGrave, graveLootVerdict, gravesSnapshot, activityInfo, preemptForSurvival, setDebugSink, finishDisposition, resumeHoldRemaining, markResumePaused, touchProgress, progressInfo, markStalled, _resetProgress }
