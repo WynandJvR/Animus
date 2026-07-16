@@ -1293,6 +1293,14 @@ const RETREAT_HP = parseInt(process.env.RETREAT_HP || '8', 10)
 // expressions below to their old forms byte-equivalently.
 const SHELTER_BED_FALLBACK = process.env.SHELTER_BED_FALLBACK
 const CRIT_HP = parseInt(process.env.SHELTER_CRIT_HP || '6', 10)
+// fix #10 (flag CREEPER_BACKOFF, default ON): a creeper never emits a pre-blast hit, so #14's
+// beingHit re-arm can't open the three whole-tick gates for a silent walking bomb, and the
+// full recovery ladder + 40s deadline are the wrong tool against a 1.5s-fuse threat. Read once
+// at module load like the other reflex flags; =0 makes creeperClose constant-false (all three
+// gates byte-revert), keeps today's avoid-nav budgets, and never fires the sprint burst.
+const CREEPER_BACKOFF_ON = process.env.CREEPER_BACKOFF !== '0'
+const CREEPER_REARM_DIST = parseInt(process.env.CREEPER_REARM_DIST || '8', 10)
+const CREEPER_BURST_MS = parseInt(process.env.CREEPER_BURST_MS || '2500', 10)
 let defendEquipped = false
 let lastDefendTarget = null
 let lastFleeAt = 0
@@ -1317,6 +1325,36 @@ let creeperAvoidLatch = false
 const avoidHist = new Map() // creeper entity id -> [timestamps] of recent avoid attempts
 let lastChargeNoteAt = 0
 const RANGED_RE = /skeleton|stray|bogged|pillager/i
+// fix #10 F3: the primitive sprint-away burst - a REFLEX move-away that uses ONLY primitives
+// the reflex already uses (setGoal(null), bot.lookAt, setControlState). NO pathfinder goal (so
+// no brain-vs-body carousel), NO dig/place. Rate-limited to one burst per CREEPER_BURST_MS+1s.
+// Clearing the goal is an honest cancel of any in-flight avoid nav (navigate.js:806-808), which
+// then unwinds through its own catch while this drives the body. Blind sprint-jump is the same
+// pre-existing recovery idiom as the nudge rung (navigate.js:243). finally-clears the control
+// states so an exception can't leave them latched.
+let lastBurstAt = 0
+async function burstAwayFrom (threatPos) {
+  const now = Date.now()
+  if (now - lastBurstAt < CREEPER_BURST_MS + 1000) return // rate-limit
+  lastBurstAt = now
+  try {
+    try { bot.pathfinder.setGoal(null) } catch {} // cancel any in-flight avoid nav
+    try {
+      const me = bot.entity.position
+      const away = me.minus(threatPos)
+      const dest = me.plus(away.scaled(8 / (away.norm() || 1))) // same away-vector the flee/back-off compute
+      await bot.lookAt(dest, true)
+    } catch {}
+    bot.setControlState('forward', true)
+    bot.setControlState('sprint', true)
+    bot.setControlState('jump', true)
+    await new Promise(r => setTimeout(r, CREEPER_BURST_MS)) // ~12-14b at sprint
+  } finally {
+    try { bot.setControlState('forward', false) } catch {}
+    try { bot.setControlState('sprint', false) } catch {}
+    try { bot.setControlState('jump', false) } catch {}
+  }
+}
 if (process.env.AUTO_DEFEND !== '0') {
   setInterval(() => {
     if (!bot.entity) return
@@ -1326,21 +1364,37 @@ if (process.env.AUTO_DEFEND !== '0') {
     if (hpNow < dfLastHp - 0.5) dfHurtAt = Date.now()
     dfLastHp = hpNow
     const beingHit = Date.now() - dfHurtAt < 8000
+    // fix #10 F1: a creeper never emits a pre-blast hit, so #14's beingHit re-arm can't open the
+    // three whole-tick gates below for a silent walking bomb. A cheap proximity check (same
+    // filter shape as the :1353 scan; one entity iteration the ungated scan already does) re-arms
+    // the reflex when a creeper is within CREEPER_REARM_DIST (8b, >= blast 3 + fuse-close + a tick
+    // + goto spin-up) so a resting/recovering/sheltering bot isn't reflex-blind till point-blank.
+    let creeperClose = false
+    if (CREEPER_BACKOFF_ON) {
+      try {
+        const mp = bot.entity.position
+        for (const e of Object.values(bot.entities || {})) {
+          if (!e || !e.position || (e.type !== 'mob' && e.type !== 'hostile')) continue
+          if (!/creeper/.test(e.name || '')) continue
+          if (e.position.distanceTo(mp) <= CREEPER_REARM_DIST) { creeperClose = true; break }
+        }
+      } catch {}
+    }
     // While digging UP out of a cave, don't let the flee reflex hijack the pathfinder
     // sideways - rising out of the hole IS the escape (fleeing horizontally just keeps us
     // in the mob-filled cave and pins us at depth). fix #14: only ACTUALLY-being-hit at
     // <=CRIT_HP re-arms it - absorbing hits there is strictly fatal (travelFar's blocking
     // rest raises isEscaping precisely so flee doesn't fight the shelter dig).
-    if (commands.isEscaping && commands.isEscaping() && !(SHELTER_BED_FALLBACK !== '0' && beingHit && hpNow <= CRIT_HP)) return
+    if (commands.isEscaping && commands.isEscaping() && !(SHELTER_BED_FALLBACK !== '0' && beingHit && hpNow <= CRIT_HP) && !creeperClose) return
     // Same rule while a navigation RECOVERY is maneuvering (pillaring out of a pit,
     // threading a doorway, hopping from water) - the recovery IS the escape.
-    if (navigate.isRecovering()) return
+    if (navigate.isRecovering() && !creeperClose) return
     // While sheltering (sealed bunker / hut night-wait) stand down - UNLESS something is
     // actually HITTING us. A sealed pit takes no hits (the mob can't reach), so this still
     // yields there; but an enderman teleported into the hut, or a leaky pit, must be FOUGHT
     // - we're armored and win - not passively absorbed to death (live: 'attack enderman
     // suppressed' then died). The moment we take damage, defense/flee re-engages.
-    if (provision.isSheltering && provision.isSheltering() && !beingHit) return
+    if (provision.isSheltering && provision.isSheltering() && !beingHit && !creeperClose) return
     try {
       const me = bot.entity.position
       const hp = hpNow
@@ -1415,7 +1469,7 @@ if (process.env.AUTO_DEFEND !== '0') {
                   const cell = (() => { try { return provision.freeInteriorCell ? provision.freeInteriorCell(bot, hut) : null } catch { return null } })()
                   const gx = cell ? cell.x : hut.x + 2; const gy = cell ? cell.y : hut.y + 1; const gz = cell ? cell.z : hut.z + 2
                   await navigate.navigateToPreempt(bot, new goals.GoalNear(gx, gy, gz, 1),
-                    { timeoutMs: 15000, deadlineMs: 40000, climb: false, priority: arbiter.PRIORITY.SURVIVE, budgets: { door: 3, pit: 0, water: 0, nudge: 1, stepout: 1 }, label: 'hut-retreat' })
+                    { timeoutMs: 15000, deadlineMs: CREEPER_BACKOFF_ON ? 20000 : 40000, climb: false, priority: arbiter.PRIORITY.SURVIVE, budgets: { door: 3, pit: 0, water: 0, nudge: 1, stepout: 1 }, label: 'hut-retreat' })
                   note('(flee) inside the hut - door-assist sealed the door behind me')
                 }
               } else {
@@ -1423,7 +1477,9 @@ if (process.env.AUTO_DEFEND !== '0') {
                 const dest = me.plus(away.scaled(20 / (away.norm() || 1))) // 20b -> past the creeper's 16m follow range -> deaggro (no boundary jitter)
                 note(`(flee) creeper ${fbest.toFixed(1)}m - backing off 20b to deaggro`)
                 await navigate.navigateToPreempt(bot, new goals.GoalNear(Math.floor(dest.x), Math.floor(me.y), Math.floor(dest.z), 2),
-                  { timeoutMs: 15000, deadlineMs: 40000, priority: arbiter.PRIORITY.SURVIVE, label: 'creeper-backoff' })
+                  CREEPER_BACKOFF_ON
+                    ? { timeoutMs: 6000, deadlineMs: 12000, priority: arbiter.PRIORITY.SURVIVE, label: 'creeper-backoff', budgets: { nudge: 1, stepout: 1, climb: 0, pit: 0, door: 0, indoor: 0, water: 1, wetbreach: 0 } } // fix #10 F2: 1.5s-fuse threat - ladder-light, the burst is the fallback not the ladder
+                    : { timeoutMs: 15000, deadlineMs: 40000, priority: arbiter.PRIORITY.SURVIVE, label: 'creeper-backoff' })
               }
               ok = true
             } catch (e) { note(`(flee) creeper avoid failed (${e.message})`) }
@@ -1431,6 +1487,19 @@ if (process.env.AUTO_DEFEND !== '0') {
             // safety; suppress re-fleeing THIS creeper for 90s so job/reflex don't ping-pong and
             // a can't-reach creeper doesn't freeze the body forever (the wedge watchdog case).
             let netMove = 0; try { netMove = Math.hypot(bot.entity.position.x - startPos.x, bot.entity.position.z - startPos.z) } catch {}
+            if (!ok || netMove < 2.5) {
+              // fix #10 F4a: the ladder wedged, but the body can still move. Before conceding a
+              // 90s futility stand-down, if the creeper is still within 12b fire the raw sprint
+              // burst (setControlState only) and re-measure; only mark futile if the burst ALSO
+              // netted < 2.5b. Burst (2.5s) completes within the 5s settle - latch timing unchanged.
+              let stillClose = false
+              try { stillClose = !!(flee && flee.position && bot.entity && flee.position.distanceTo(bot.entity.position) <= 12) } catch {}
+              if (CREEPER_BACKOFF_ON && stillClose) {
+                note('(flee) creeper backoff wedged - raw sprint burst')
+                await burstAwayFrom(flee.position)
+                try { netMove = Math.hypot(bot.entity.position.x - startPos.x, bot.entity.position.z - startPos.z) } catch {}
+              }
+            }
             if (!ok || netMove < 2.5) {
               fleeFutileUntil.set(flee.id, Date.now() + 90000)
               note(`(flee) creeper avoid netted only ${netMove.toFixed(1)}b - standing down 90s`)
@@ -1449,6 +1518,14 @@ if (process.env.AUTO_DEFEND !== '0') {
         // (bot.attack + lookAt, NO pathfinder goal) instead of returning. Only return when the
         // threat is out of melee reach. Flag-gated; =0 keeps the old bare returns.
         const suppressed = !beingHit && (fleeFutileUntil.get(flee.id) || 0) > now
+        // fix #10 F4b: #14's meleeFall is a no-op for creepers (NO_AUTO_MELEE forbids punching
+        // them, :1522), so a futility-suppressed creeper inside blast range currently gets NO
+        // response. Fire the (rate-limited) raw sprint burst instead of freezing, then return.
+        // The melee fall-through (meleeFall/defendInstead) stays byte-identical for non-creepers.
+        if (suppressed && isCreeper && fbest <= 6 && CREEPER_BACKOFF_ON) {
+          burstAwayFrom(flee.position).catch(() => {})
+          return
+        }
         const meleeFall = SHELTER_BED_FALLBACK !== '0' && fbest <= 4
         let defendInstead = false
         if (suppressed) {
@@ -1475,7 +1552,14 @@ if (process.env.AUTO_DEFEND !== '0') {
           if (flee !== lastDefendTarget || now - lastFleeAt > 1000) {
             const away = me.minus(flee.position)
             const dest = me.plus(away.scaled(16 / (away.norm() || 1))) // back off ~16 blocks (past creeper aggro range)
-            bot.pathfinder.setGoal(new goals.GoalNear(Math.floor(dest.x), Math.floor(me.y), Math.floor(dest.z), 1))
+            // fix #10 F4c: point-blank creeper first sighting (the death case) - control-states
+            // move the body in ms; a pathfinder goal needs path-compute the ~1.5s fuse doesn't
+            // grant. Fire the burst INSTEAD of setGoal at <=4b; >4b (and non-creepers) keep it.
+            if (isCreeper && fbest <= 4 && CREEPER_BACKOFF_ON) {
+              burstAwayFrom(flee.position).catch(() => {})
+            } else {
+              bot.pathfinder.setGoal(new goals.GoalNear(Math.floor(dest.x), Math.floor(me.y), Math.floor(dest.z), 1))
+            }
             bot.setControlState('sprint', true) // RUN - creepers sprint the last stretch; a walking flee lost twice tonight
             lastFleeAt = now
             if (flee !== lastDefendTarget) note(`(flee) ${why} ${fbest.toFixed(1)}m`)
