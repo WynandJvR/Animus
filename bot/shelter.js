@@ -66,4 +66,36 @@ function rankByDistance (cells, from) {
   return cells.slice().sort((a, b) => Math.hypot(a.x - from.x, a.z - from.z) - Math.hypot(b.x - from.x, b.z - from.z))
 }
 
-module.exports = { AIRISH, FLUID_RE, UNDIGGABLE_RE, shelterDiggable, feetCellDry, rankByDistance, alcoveSafe }
+// ---- SLEEP-FAILURE CLASSIFIER + BED-HOLD POLICY (fix #14) --------------------------------
+// bot.sleep (mineflayer bed.js) throws a spread of messages; classify them so provision.js
+// can decide whether to hold OFF a bed that just proved unusable, and for how long. Pure
+// (string in, tag/number out) so sheltertest.js table-tests it. The live loop: at hp1 with a
+// zombie at the bed, mineflayer threw 'cant click the bed' (canDigBlock reach) forever - a
+// position-deterministic failure that the stateless catch re-tried every cycle.
+//   transient - not a real bed problem (wrong time / already sleeping/awake); NEVER hold (the
+//               dusk-wait already owns the not-night case quietly).
+//   monsters  - vanilla's 'there are monsters nearby'; hold briefly (they wander off / burn).
+//   unusable  - the bed can't be clicked/reached/used right now (cant click, too far, occupied,
+//               only half bed, wrong block, waitUntilSleep's 'bot is not sleeping' timeout);
+//               hold ~a night. UNKNOWN messages default here: an unrecognised error that repeats
+//               is a loop, and the hold is short + self-expiring so mis-classing is cheap.
+const BED_HOLD_MS = parseInt(process.env.BED_HOLD_MS || '480000', 10)                 // unusable ~ rest of the dark span
+const BED_HOLD_MONSTER_MS = parseInt(process.env.BED_HOLD_MONSTER_MS || '90000', 10)  // a mob wanders off / burns
+const BED_HOLD_FELLSHORT_MS = parseInt(process.env.BED_HOLD_FELLSHORT_MS || '120000', 10) // wedge fails identically ~soon
+function sleepFailKind (msg) {
+  const m = String(msg == null ? '' : msg)
+  if (/not night and it's not a thunderstorm|already sleeping|already awake/i.test(m)) return 'transient'
+  if (/monster/i.test(m)) return 'monsters'
+  if (/cant click|too far|only half bed|wrong block|occupied|not sleeping/i.test(m)) return 'unusable'
+  return 'unusable' // any unrecognised repeating error is a loop; a short self-expiring hold is cheap
+}
+function bedHoldMs (kind) {
+  if (kind === 'transient') return 0
+  if (kind === 'monsters') return BED_HOLD_MONSTER_MS
+  return BED_HOLD_MS // unusable (and any unknown kind)
+}
+
+module.exports = {
+  AIRISH, FLUID_RE, UNDIGGABLE_RE, shelterDiggable, feetCellDry, rankByDistance, alcoveSafe,
+  sleepFailKind, bedHoldMs, BED_HOLD_MS, BED_HOLD_MONSTER_MS, BED_HOLD_FELLSHORT_MS
+}

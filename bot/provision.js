@@ -3035,9 +3035,26 @@ function clearSearched (item, pos) {
 // Every rememberBed call site follows an actual spawn-setting action (a sleep or a
 // day bed-use), so it doubles as the "spawn last asserted" timestamp ensureSpawnBed
 // keys off.
-function rememberBed (pos) { const m = loadWorldMem(); m.bed = { x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z), at: Date.now() }; m.bedAssertAt = Date.now(); delete m.spawnSuspect; saveWorldMem() }
+function rememberBed (pos) { const m = loadWorldMem(); m.bed = { x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z), at: Date.now() }; m.bedAssertAt = Date.now(); delete m.spawnSuspect; saveWorldMem(); _bedHold = { until: 0, key: '' } }
 function knownBed () { return loadWorldMem().bed || null }
-function forgetBed () { const m = loadWorldMem(); delete m.bed; saveWorldMem() }
+function forgetBed () { const m = loadWorldMem(); delete m.bed; saveWorldMem(); _bedHold = { until: 0, key: '' } }
+
+// UNUSABLE-BED HOLD (fix #14, flag SHELTER_BED_FALLBACK): sleepInBedHere's non-/monster/
+// failure is stateless, so nightRestInner re-committed every caller to a bed mineflayer had
+// just proven unusable (cant-click reach is position-deterministic) - paying a ~40s doomed
+// bed prefix each cycle and starving flee/defend. Remember, per-bed and time-bounded, that
+// THIS remembered bed just failed so nightRest pits straight away within the window. The bed
+// itself is NEVER forgotten (hold != forget - the fell-short regression guard stays); the hold
+// is cleared by expiry, a real sleep (rememberBed), or forgetBed, and never persisted (a
+// restart forgets it => one extra bed attempt, which is safe). now-injectable for the test.
+let _bedHold = { until: 0, key: '' }
+function bedKey (pos) { return Math.round(pos.x) + '|' + Math.round(pos.y) + '|' + Math.round(pos.z) }
+function markBedUnusable (pos, ms, why, now = Date.now()) {
+  if (process.env.SHELTER_BED_FALLBACK === '0' || !pos || !(ms > 0)) return
+  _bedHold = { until: now + ms, key: bedKey(pos) }
+  dbg('nightRest: bed at ' + bedKey(pos).replace(/\|/g, ',') + ' unusable (' + why + ') - holding off it for ' + Math.round(ms / 1000) + 's')
+}
+function bedHeld (pos, now = Date.now()) { return !!pos && _bedHold.key === bedKey(pos) && now < _bedHold.until }
 
 // SPAWN-SUSPECT flag, PERSISTED: a respawn landed far from the remembered bed, so the
 // server-side anchor is wrong (bed broken/obstructed) - every death is a world-spawn
@@ -3231,7 +3248,7 @@ async function sleepInBedHere (bot, { say = () => {}, isStopped = () => false } 
     const kb = knownBed()
     const there = kb && Math.hypot(kb.x - bot.entity.position.x, kb.z - bot.entity.position.z) <= 4
     if (there) { dbg('nightRest: bed is GONE from ' + kb.x + ',' + kb.y + ',' + kb.z + ' - forgetting it'); forgetBed() }
-    else dbg('nightRest: fell short of the bed - keeping the memory, pitting tonight')
+    else { dbg('nightRest: fell short of the bed - keeping the memory, pitting tonight'); if (kb) markBedUnusable(kb, shelterSite.BED_HOLD_FELLSHORT_MS, 'fell short of the bed') }
     return false
   }
   // SLEEP-VIABILITY GATE (the "sleep failed (it's not night and it's not a thunderstorm)"
@@ -3254,6 +3271,15 @@ async function sleepInBedHere (bot, { say = () => {}, isStopped = () => false } 
     }
     if (!canSleepNow()) { dbg('nightRest: bed here but sleep is impossible right now (timeOfDay ' + (bot.time ? bot.time.timeOfDay : '?') + ', no thunder) - not hammering it'); return false }
   }
+  // MOB-BLOCKS-SLEEP PRE-GATE (fix #14): vanilla's monster box is +-8 around the bed head
+  // (bed.js) and would refuse anyway - but today a wedge's 'cant click the bed' fires FIRST
+  // and masks the monster error entirely, so the /monster/ retry never runs and we loop. A
+  // naked bot with a hostile in the wake-radius can't sleep here: hold the bed briefly and pit.
+  if (nearHostile(bot, 8) && underArmored(bot)) {
+    dbg('nightRest: hostile in the bed wake-radius while under-armored - pitting instead of clicking the bed')
+    markBedUnusable(bed.position, shelterSite.BED_HOLD_MONSTER_MS, 'hostile in the wake-radius')
+    return false
+  }
   for (let tries = 0; tries < 3 && !isStopped(); tries++) {
     try {
       if (bot.entity.position.distanceTo(bed.position) > 2.5) { try { await gotoWithTimeout(bot, new goals.GoalNear(bed.position.x, bed.position.y, bed.position.z, 2), 20000) } catch {} }
@@ -3267,14 +3293,16 @@ async function sleepInBedHere (bot, { say = () => {}, isStopped = () => false } 
       return false // kicked out of bed (attacked / player woke us)
     } catch (e) {
       dbg('nightRest: sleep failed (' + e.message + ')')
-      if (/monster/i.test(e.message)) {
+      const kind = shelterSite.sleepFailKind(e.message) // fix #14: classify so an unusable bed is held, not re-tried forever
+      if (kind === 'monsters') {
         // hostiles CLOSE while we're under-armored: don't stand at the bed taking hits
         // for 3 retries (verified on test server: hp 20 -> 17 doing exactly that) - seal
         // a pit right here and let the day burn them off.
-        if (nearHostile(bot, 10) && underArmored(bot)) { dbg('nightRest: hostiles at the bed - pitting NOW instead of waiting'); return false }
+        if (nearHostile(bot, 10) && underArmored(bot)) { dbg('nightRest: hostiles at the bed - pitting NOW instead of waiting'); markBedUnusable(bed.position, shelterSite.BED_HOLD_MONSTER_MS, e.message); return false }
         await new Promise(r => setTimeout(r, 6000)); continue // borderline-range mobs may wander off
       }
-      return false
+      if (kind === 'unusable') markBedUnusable(bed.position, shelterSite.BED_HOLD_MS, e.message)
+      return false // 'transient' keeps today's bare bail (no mark)
     }
   }
   return false
@@ -3299,7 +3327,12 @@ async function nightRestInner (bot, opts = {}) {
   // deciding bed-vs-pit, or the pit path dig-fails in a loop while it drowns
   await ensureAshore(bot, isStopped)
   const bed = knownBed()
-  if (bed && bot.entity && !_sheltering) {
+  // THE CHOKE POINT (fix #14): a bed on an unusable-hold falls straight to the pit with ZERO
+  // bed prefix (no ~40s doomed 2x20s goto) - de-looping EVERY nightRest caller without touching
+  // a signature. Within the hold window the bed attempt provably can't succeed (position-
+  // deterministic reach), so skipping it loses nothing; the bed is never forgotten (retried on
+  // hold expiry / next night).
+  if (bed && bot.entity && !_sheltering && !bedHeld(bed)) {
     const d = Math.hypot(bed.x - bot.entity.position.x, bed.z - bot.entity.position.z)
     if (d <= (opts.bedRange || 200)) {
       dbg('nightRest: bed remembered at ' + bed.x + ',' + bed.y + ',' + bed.z + ' (' + Math.round(d) + ' blocks) - heading there')
@@ -3311,8 +3344,10 @@ async function nightRestInner (bot, opts = {}) {
       if (isStopped()) return false
       if (Math.hypot(bed.x - bot.entity.position.x, bed.z - bot.entity.position.z) <= 8) {
         if (await sleepInBedHere(bot, { say, isStopped })) return true
-      } else dbg('nightRest: never reached the bed - pitting where i stand')
+      } else { dbg('nightRest: never reached the bed - pitting where i stand'); markBedUnusable(bed, shelterSite.BED_HOLD_FELLSHORT_MS, 'never reached the bed') }
     } else dbg('nightRest: bed too far (' + Math.round(d) + ' > ' + (opts.bedRange || 200) + ') - pitting here')
+  } else if (bed && bedHeld(bed)) {
+    dbg('nightRest: bed at ' + bed.x + ',' + bed.y + ',' + bed.z + ' is on an unusable-hold (' + Math.max(0, Math.round((_bedHold.until - Date.now()) / 1000)) + 's left) - pitting instead')
   }
   return digInForNight(bot, opts)
 }
@@ -7143,5 +7178,5 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, boundedHold, recoverFromDegraded, isRecoveringDegraded, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, boundedHold, recoverFromDegraded, isRecoveringDegraded, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, markBedUnusable, bedHeld, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
   maintenancePass, isMaintaining, stopMaintenance, _setMaintaining, courierFoodToBank, safekeepSweep, cropExclusionStep, gatherSeedsNear }

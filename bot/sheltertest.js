@@ -75,5 +75,94 @@ t('rankByDistance: nearest safe cell first (shortest relocate)', () => {
   assert.strictEqual(cells[0].x, 10)
 })
 
+// ---- fix #14: sleep-failure classifier + bed-hold policy (pure, shelter.js) ---------------
+t('sleepFailKind: exact mineflayer bed.js strings map correctly', () => {
+  // unusable - the bed can't be clicked/reached/used right now (bed.js:82,86,93,109,115,131 + waitUntilSleep:159)
+  assert.strictEqual(S.sleepFailKind('cant click the bed'), 'unusable')
+  assert.strictEqual(S.sleepFailKind('the bed is too far'), 'unusable')
+  assert.strictEqual(S.sleepFailKind('the bed is occupied'), 'unusable')
+  assert.strictEqual(S.sleepFailKind("there's only half bed"), 'unusable')
+  assert.strictEqual(S.sleepFailKind('wrong block : not a bed block'), 'unusable')
+  assert.strictEqual(S.sleepFailKind('bot is not sleeping'), 'unusable', 'waitUntilSleep 3s timeout')
+  // monsters - vanilla's monster-box refusal (bed.js:143)
+  assert.strictEqual(S.sleepFailKind('there are monsters nearby'), 'monsters')
+  // transient - not a real bed problem; never hold (bed.js:69,82,84)
+  assert.strictEqual(S.sleepFailKind("it's not night and it's not a thunderstorm"), 'transient')
+  assert.strictEqual(S.sleepFailKind('already sleeping'), 'transient')
+  assert.strictEqual(S.sleepFailKind('already awake'), 'transient')
+})
+
+t('sleepFailKind: unknown / empty defaults to unusable (a repeating unknown error is a loop)', () => {
+  assert.strictEqual(S.sleepFailKind('some brand new mineflayer error'), 'unusable')
+  assert.strictEqual(S.sleepFailKind(''), 'unusable')
+  assert.strictEqual(S.sleepFailKind(null), 'unusable')
+  assert.strictEqual(S.sleepFailKind(undefined), 'unusable')
+})
+
+t('bedHoldMs: policy table (transient=0, monsters=short, unusable=night)', () => {
+  assert.strictEqual(S.bedHoldMs('transient'), 0, 'never hold a transient failure')
+  assert.strictEqual(S.bedHoldMs('monsters'), S.BED_HOLD_MONSTER_MS)
+  assert.strictEqual(S.bedHoldMs('unusable'), S.BED_HOLD_MS)
+  assert.strictEqual(S.bedHoldMs('anything-else'), S.BED_HOLD_MS, 'unknown kind holds as unusable')
+  assert.ok(S.BED_HOLD_MONSTER_MS < S.BED_HOLD_MS, 'monsters hold is shorter than unusable')
+  assert.ok(S.BED_HOLD_MS > 0 && S.BED_HOLD_MONSTER_MS > 0 && S.BED_HOLD_FELLSHORT_MS > 0)
+})
+
+// ---- fix #14: the now-injectable bed-hold state helpers (provision.js) --------------------
+// markBedUnusable/bedHeld are pure w.r.t. their `now` arg (no world I/O), so table-test them
+// here. WORLD_MEM_FILE is redirected to scratch so requiring provision.js never touches live
+// world memory (rememberBed's clear path does a debounced, unref'd write).
+process.env.WORLD_MEM_FILE = require('path').join(require('os').tmpdir(), 'sheltertest-worldmem.json')
+process.env.SHELTER_BED_FALLBACK = '' // ensure the fix is ARMED for these cases (default-on)
+const P = require('./provision.js')
+
+t('bedHeld: mark then held within the window, expires after it', () => {
+  const bed = { x: 417, y: 66, z: 89 }
+  const t0 = 1000000
+  P.markBedUnusable(bed, 480000, 'cant click the bed', t0)
+  assert.strictEqual(P.bedHeld(bed, t0 + 1000), true, 'held right after the mark')
+  assert.strictEqual(P.bedHeld(bed, t0 + 479000), true, 'still held just inside the window')
+  assert.strictEqual(P.bedHeld(bed, t0 + 480001), false, 'released once the window elapses')
+})
+
+t('bedHeld: a DIFFERENT bed position is never held by this bed hold', () => {
+  const bed = { x: 417, y: 66, z: 89 }
+  const t0 = 2000000
+  P.markBedUnusable(bed, 480000, 'cant click the bed', t0)
+  assert.strictEqual(P.bedHeld({ x: 10, y: 66, z: 20 }, t0 + 1000), false, 'other bed not held')
+  assert.strictEqual(P.bedHeld({ x: 418, y: 66, z: 89 }, t0 + 1000), false, 'even one block off is a different key')
+  assert.strictEqual(P.bedHeld(bed, t0 + 1000), true, 'the marked bed is still held')
+})
+
+t('markBedUnusable: rounds the key and ms<=0 / no pos is a no-op', () => {
+  const t0 = 3000000
+  P.markBedUnusable({ x: 417.4, y: 65.6, z: 88.7 }, 90000, 'hostile in the wake-radius', t0)
+  assert.strictEqual(P.bedHeld({ x: 417, y: 66, z: 89 }, t0 + 1000), true, 'position rounded to key')
+  // ms<=0 does not overwrite/clear an existing hold, and null pos is a no-op
+  P.markBedUnusable({ x: 417, y: 66, z: 89 }, 0, 'zero', t0 + 2000)
+  assert.strictEqual(P.bedHeld({ x: 417, y: 66, z: 89 }, t0 + 3000), true, 'ms<=0 was a no-op, prior hold survives')
+  P.markBedUnusable(null, 90000, 'nopos', t0 + 4000)
+  assert.strictEqual(P.bedHeld({ x: 417, y: 66, z: 89 }, t0 + 5000), true, 'null pos was a no-op')
+})
+
+t('bedHeld: a REAL sleep (rememberBed) clears the hold', () => {
+  const bed = { x: 417, y: 66, z: 89 }
+  const t0 = 4000000
+  P.markBedUnusable(bed, 480000, 'cant click the bed', t0)
+  assert.strictEqual(P.bedHeld(bed, t0 + 1000), true)
+  P.rememberBed(bed) // actually sleeping re-arms the spawn AND clears the unusable-hold
+  assert.strictEqual(P.bedHeld(bed, t0 + 1000), false, 'sleeping clears the hold so the bed is usable again')
+})
+
+t('markBedUnusable: SHELTER_BED_FALLBACK=0 is a no-op (rollback = never holds)', () => {
+  const bed = { x: 500, y: 70, z: 500 }
+  const t0 = 5000000
+  const prev = process.env.SHELTER_BED_FALLBACK
+  process.env.SHELTER_BED_FALLBACK = '0'
+  P.markBedUnusable(bed, 480000, 'cant click the bed', t0)
+  assert.strictEqual(P.bedHeld(bed, t0 + 1000), false, 'no hold is ever set when the flag is off')
+  process.env.SHELTER_BED_FALLBACK = prev
+})
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall shelter-siting tests passed')
 process.exit(failures ? 1 : 0)

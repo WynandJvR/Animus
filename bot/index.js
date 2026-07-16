@@ -1197,6 +1197,11 @@ const NO_AUTO_MELEE = /creeper|ghast|warden|wither_boss|^wither$/i
 // below this health, DISENGAGE from any hostile (retreat) instead of trading hits -
 // how it survived to death overnight was by fighting a skeleton while low. Tunable.
 const RETREAT_HP = parseInt(process.env.RETREAT_HP || '8', 10)
+// fix #14 (flag SHELTER_BED_FALLBACK, default ON): free the built-in flee/defend at CRITICAL
+// hp. Read once at module load like the other reflex flags; =0 reverts both guarded
+// expressions below to their old forms byte-equivalently.
+const SHELTER_BED_FALLBACK = process.env.SHELTER_BED_FALLBACK
+const CRIT_HP = parseInt(process.env.SHELTER_CRIT_HP || '6', 10)
 let defendEquipped = false
 let lastDefendTarget = null
 let lastFleeAt = 0
@@ -1232,8 +1237,10 @@ if (process.env.AUTO_DEFEND !== '0') {
     const beingHit = Date.now() - dfHurtAt < 8000
     // While digging UP out of a cave, don't let the flee reflex hijack the pathfinder
     // sideways - rising out of the hole IS the escape (fleeing horizontally just keeps us
-    // in the mob-filled cave and pins us at depth).
-    if (commands.isEscaping && commands.isEscaping()) return
+    // in the mob-filled cave and pins us at depth). fix #14: only ACTUALLY-being-hit at
+    // <=CRIT_HP re-arms it - absorbing hits there is strictly fatal (travelFar's blocking
+    // rest raises isEscaping precisely so flee doesn't fight the shelter dig).
+    if (commands.isEscaping && commands.isEscaping() && !(SHELTER_BED_FALLBACK !== '0' && beingHit && hpNow <= CRIT_HP)) return
     // Same rule while a navigation RECOVERY is maneuvering (pillaring out of a pit,
     // threading a doorway, hopping from water) - the recovery IS the escape.
     if (navigate.isRecovering()) return
@@ -1345,31 +1352,47 @@ if (process.env.AUTO_DEFEND !== '0') {
         // low-hp melee flee). A non-emergency at 6-12m already committed above; this keeps a
         // preventive melee flee from thrashing a deliberate navigation's approach (door-loop).
         if (!fleeEmergency && arbiter.maneuverActive(arbiter.PRIORITY.PROGRESS)) return
-        // standoff suppression (see fleeFutileUntil above) - a hit always re-arms
-        if (!beingHit && (fleeFutileUntil.get(flee.id) || 0) > now) return
-        if (!fleeEp || fleeEp.id !== flee.id) fleeEp = { id: flee.id, start: now, pos: me.clone() }
-        // rolling window: any real movement re-bases the episode, so only a sustained
-        // freeze (not a flee that ran 20 blocks then paused) reads as a standoff
-        if (Math.hypot(me.x - fleeEp.pos.x, me.z - fleeEp.pos.z) >= 2.5) { fleeEp.start = now; fleeEp.pos = me.clone() }
-        else if (!beingHit && now - fleeEp.start > 12000) {
-          fleeFutileUntil.set(flee.id, now + 90000)
-          for (const [id, t] of fleeFutileUntil) { if (t <= now) fleeFutileUntil.delete(id) } // prune
-          fleeEp = null
-          try { bot.pathfinder.setGoal(null) } catch {} // release the pathfinder we've been hogging
-          bot.setControlState('sprint', false)
-          note(`(flee) STANDOFF with ${flee.name || why} ${fbest.toFixed(1)}m - can't move and it can't reach me; standing down 90s so nav/recovery can work`)
+        // standoff suppression (see fleeFutileUntil above) - a hit always re-arms.
+        // fix #14 CAN'T-RUN-SO-FIGHT: when flee is standoff-suppressed AND the threat is in
+        // melee reach (<=4b), don't freeze - fall through to the auto-defend section below
+        // (bot.attack + lookAt, NO pathfinder goal) instead of returning. Only return when the
+        // threat is out of melee reach. Flag-gated; =0 keeps the old bare returns.
+        const suppressed = !beingHit && (fleeFutileUntil.get(flee.id) || 0) > now
+        const meleeFall = SHELTER_BED_FALLBACK !== '0' && fbest <= 4
+        let defendInstead = false
+        if (suppressed) {
+          if (!meleeFall) return
+          defendInstead = true // in melee reach + can't run -> fight (fall through)
+        }
+        if (!defendInstead) {
+          if (!fleeEp || fleeEp.id !== flee.id) fleeEp = { id: flee.id, start: now, pos: me.clone() }
+          // rolling window: any real movement re-bases the episode, so only a sustained
+          // freeze (not a flee that ran 20 blocks then paused) reads as a standoff
+          if (Math.hypot(me.x - fleeEp.pos.x, me.z - fleeEp.pos.z) >= 2.5) { fleeEp.start = now; fleeEp.pos = me.clone() }
+          else if (!beingHit && now - fleeEp.start > 12000) {
+            fleeFutileUntil.set(flee.id, now + 90000)
+            for (const [id, t] of fleeFutileUntil) { if (t <= now) fleeFutileUntil.delete(id) } // prune
+            fleeEp = null
+            try { bot.pathfinder.setGoal(null) } catch {} // release the pathfinder we've been hogging
+            bot.setControlState('sprint', false)
+            note(`(flee) STANDOFF with ${flee.name || why} ${fbest.toFixed(1)}m - can't move and it can't reach me; standing down 90s so nav/recovery can work`)
+            if (!meleeFall) return
+            defendInstead = true // just marked futile AND in melee reach -> fight this tick
+          }
+        }
+        if (!defendInstead) {
+          if (flee !== lastDefendTarget || now - lastFleeAt > 1000) {
+            const away = me.minus(flee.position)
+            const dest = me.plus(away.scaled(16 / (away.norm() || 1))) // back off ~16 blocks (past creeper aggro range)
+            bot.pathfinder.setGoal(new goals.GoalNear(Math.floor(dest.x), Math.floor(me.y), Math.floor(dest.z), 1))
+            bot.setControlState('sprint', true) // RUN - creepers sprint the last stretch; a walking flee lost twice tonight
+            lastFleeAt = now
+            if (flee !== lastDefendTarget) note(`(flee) ${why} ${fbest.toFixed(1)}m`)
+            lastDefendTarget = flee
+          }
           return
         }
-        if (flee !== lastDefendTarget || now - lastFleeAt > 1000) {
-          const away = me.minus(flee.position)
-          const dest = me.plus(away.scaled(16 / (away.norm() || 1))) // back off ~16 blocks (past creeper aggro range)
-          bot.pathfinder.setGoal(new goals.GoalNear(Math.floor(dest.x), Math.floor(me.y), Math.floor(dest.z), 1))
-          bot.setControlState('sprint', true) // RUN - creepers sprint the last stretch; a walking flee lost twice tonight
-          lastFleeAt = now
-          if (flee !== lastDefendTarget) note(`(flee) ${why} ${fbest.toFixed(1)}m`)
-          lastDefendTarget = flee
-        }
-        return
+        // fix #14: standoff-suppressed melee threat -> fall through to the defend section below
       }
       // Mid-DIG with healthy hp AND nobody actually hitting us: don't break off a
       // 7-second dig to punch a zombie the armor can tank. Being SHOT overrides this.
