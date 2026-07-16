@@ -3598,6 +3598,24 @@ async function replantCropCell (bot, cropPos, { isStopped = () => false } = {}) 
 async function tendWheatFarm (bot, { isStopped = () => false, say = () => {} } = {}) {
   const m = loadWorldMem()
   if (!m.wheatFarm) return false
+  // FARM-DEGRADATION FIX (REDESIGN §4.2/§11): a hoe-less bot can re-till nothing, so trampled/
+  // reverted cells stay bare dirt and the plot shrinks ("needs tilling but no hoe on hand" -
+  // observed live at food 0 with 53 planks in hand). Ensure a hoe BEFORE tending, reconciled
+  // exactly as ensureWheatFarm does (withdraw banked > craft wooden_hoe from planks+sticks >
+  // gather wood). Best-effort: if none can be made, tend still harvests ripe wheat + replants
+  // intact farmland (no hoe needed there) - only re-tilling a reverted cell defers, as today.
+  // FARM_TEND_HOE=0 rolls back to the old bail-on-no-hoe behavior.
+  if (process.env.FARM_TEND_HOE !== '0' && !(bot.inventory ? bot.inventory.items() : []).find(i => /_hoe$/.test(i.name))) {
+    try {
+      const res = require('./resources.js') // lazy (resources requires provision at load)
+      const near = hutAnchor() || { x: m.wheatFarm.x, y: Math.floor(bot.entity.position.y), z: m.wheatFarm.z }
+      const rec = await res.reconcile(bot, { wooden_hoe: 1 }, { near, maxAgeMs: 0, planOpts: { primaryWood: detectWood(bot) || 'oak' } })
+      if (rec.withdraws.length || rec.plan.tasks.length) {
+        dbg('  wheat tend: acquiring a hoe to re-till (' + (rec.plan.tasks.map(t => `${t.type}:${t.item || t.output}`).join(' > ') || 'from bank') + ')')
+        await res.runReconciled(bot, rec, { isStopped, say, home: near })
+      }
+    } catch (e) { dbg('  wheat tend: hoe acquisition failed (' + e.message + ') - tending without re-till') }
+  }
   const mcData = require('minecraft-data')(bot.version)
   const wheatId = mcData.blocksByName.wheat.id
   await walkStaged(bot, m.wheatFarm.x, m.wheatFarm.z, { isStopped, range: 6, timeoutMs: 120000 })
