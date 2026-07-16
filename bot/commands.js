@@ -195,6 +195,7 @@ function activityInfo () { return activity ? { name: activity.name, detail: acti
 // re-provisions whatever we lost and Build diffs world-vs-schematic, so resuming just
 // finishes the missing blocks. Kept across a death; cleared on finish or `stop`.
 let resumeJob = null       // { schem, at }
+let resumeAnnounced = false // "back online - picking up my build" is said ONCE per process (a genuine reconnect), NOT on every 2-min re-arm retry (which spammed it while survival kept preempting the build)
 let buildInterrupted = false
 let resumeDeaths = 0 // consecutive deaths since the resume job was set / bot last reached the site
 let spawnSuspect = false // a respawn landed far from the remembered bed - the server spawn anchor is WRONG
@@ -3133,7 +3134,10 @@ async function resumeBuild (bot) {
     // Only claim a death when one actually happened - this same flow also runs after a
     // plain process restart, and "i died" with no death confused the operator (live).
     const justDied = lastDeath && Date.now() - (lastDeath.at || 0) < 120000
-    say(justDied ? `i died - heading back to finish the build at ${job.at.x},${job.at.y},${job.at.z}` : `back online - picking up my build at ${job.at.x},${job.at.y},${job.at.z}`)
+    // "back online" only on a GENUINE reconnect (first resume this process); a re-arm retry on an
+    // already-online bot stays quiet so it doesn't spam the line every 2 min. A death always announces.
+    if (justDied) say(`i died - heading back to finish the build at ${job.at.x},${job.at.y},${job.at.z}`)
+    else if (!resumeAnnounced) { say(`back online - picking up my build at ${job.at.x},${job.at.y},${job.at.z}`); resumeAnnounced = true }
     // NIGHT-FIRST: a fresh respawn is naked; prepping/trekking at night IS the death loop
     // (verified live: 3 deaths in 90s at spawn). We respawn AT the bed - sleep in it (or
     // pit as fallback) until morning, THEN gear up and go.

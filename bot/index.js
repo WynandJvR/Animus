@@ -273,6 +273,11 @@ if (process.env.AUTO_RESUME !== '0') {
       if (!saved) return
       if (commands.isBusy && commands.isBusy()) return
       if (provision.isResting && provision.isResting()) return
+      // Don't fight the scheduler: while a survival need is active IT owns the body (actively
+      // preempting the build for recovery), so re-issuing `resumebuild` every 2min just churns -
+      // the body gets yanked toward the site, then bumped straight back to survival, spamming
+      // "back online". Hold until progress is admissible again (mayDoProgress == no survival need).
+      if (provision.mayDoProgress && !provision.mayDoProgress(bot)) { if (!resumeHeldLogged) { note('(resume) held (survival need active - the scheduler owns the body)'); resumeHeldLogged = true }; return }
       const hold = commands.resumeHoldRemaining ? commands.resumeHoldRemaining(saved, Date.now()) : 0
       if (hold > 0) {
         if (!resumeHeldLogged) { note(`(resume) held (paused, ${Math.round(hold / 1000)}s left - "resumebuild" overrides)`); resumeHeldLogged = true }
