@@ -3362,7 +3362,7 @@ async function tillCell (bot, cell) {
   return (tilled && farm.farmlandReady(tilled.name)) ? 'farmland' : false
 }
 
-const WHEAT_FARM_TARGET = 12 // >=12 crop cells -> a fuller harvest -> several bread per cycle (was 6)
+const WHEAT_FARM_TARGET = Number(process.env.WHEAT_FARM_TARGET || 20) // >=20 crop cells: 12 barely covered 0->full (10 wheat ~3 bread ~15 hunger); 20 -> ~6 bread -> 0->full + surplus/buffer (was 12/6)
 
 async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () => {}, avoid = null } = {}) {
   const mcData = require('minecraft-data')(bot.version)
