@@ -20,6 +20,7 @@ const shelterSite = require('./shelter.js') // pure shelter-siting: "can a safe 
 const foodSec = require('./food.js') // pure food-security decisions: when to proactively build a fishing supply
 const farm = require('./farm.js') // pure wheat-farm geometry (flood-safe bank pick) + crop-state (VERIFIED wheat, never faith)
 const arbiter = require('./arbiter.js') // JOB-LEVEL arbitration: survive > progress authority (jobSurvivalNeed/jobMayProgress)
+const scheduler = require('./scheduler.js') // PURE survival-tier decision core; top-level-safe (scheduler requires only arbiter - no cycle back to provision). Used by schedulerState to classify the active job.
 const routeMem = require('./route-mem.js') // PURE route/wedge geometry: replay proven treks + soft-steer around learned wedges (semantic-world-map slice 1)
 const pocketEscape = require('./pocket-escape.js') // PURE pocket-breach geometry: plan a bounded dig out of a flooded, roofed pocket (water-wedge escape)
 // Visible, UNTHROTTLED build tracing to stdout (the say() progress goes through a 40s
@@ -3850,6 +3851,92 @@ function survivalNeed (bot, opts = {}) {
 // unmet. Callers yield to the need (secure food / flee / shelter) and resume once it's met.
 function mayDoProgress (bot, opts = {}) { return survivalNeed(bot, opts) == null }
 
+// SCHEDULER SNAPSHOT (S4, DESIGN §4): assemble the full plain-data snapshot the pure scheduler
+// (scheduler.js) consumes - a SUPERSET of survivalState(bot). Async because the bank read
+// (resources.totalCounts) is async; both call sites (the /cmd busy-gate and the ~15s tick) are
+// async. Every sub-read is individually try/catch-wrapped so a half-broken world yields a PARTIAL
+// snapshot (an absent field = "not blocking" per the scheduler contract), never a throw. The bank
+// read is cachedOnly (MANDATORY, REDESIGN §11: never walk the bot from a tick). SCHEDULER=0 never
+// calls this.
+async function schedulerState (bot) {
+  const s = {}
+  try { Object.assign(s, survivalState(bot)) } catch {} // spread the base survival threat/vitals scan ONCE
+  const me = (bot && bot.entity && bot.entity.position) || null
+  const home = (() => { try { return hutAnchor() || knownBed() || null } catch { return null } })()
+  // packFoodPts: the exact bank foodPoints sum (below), applied to the pack; foodTier<2 gates out
+  // rotten/poisonous (BAD_FOOD = tier 2).
+  try {
+    const md = require('minecraft-data')(bot.version); const foods = (md && md.foodsByName) || {}
+    let pts = 0
+    for (const i of (bot.inventory ? bot.inventory.items() : [])) {
+      if (foods[i.name] && foodSec.foodTier(i.name) < 2) pts += (foods[i.name].foodPoints || 0) * i.count
+    }
+    s.packFoodPts = pts
+  } catch { s.packFoodPts = 0 }
+  try { s.armorPieces = armorPieceCount(bot) } catch {}
+  // packArmorPieces: unworn armor carried in the pack (recoveryPlan R0 wears it). Same armor-name
+  // regex the grave notables use (commands.js).
+  try {
+    s.packArmorPieces = (bot.inventory ? bot.inventory.items() : [])
+      .filter(i => /_(helmet|chestplate|leggings|boots)$/.test(i.name))
+      .reduce((n, i) => n + i.count, 0)
+  } catch { s.packArmorPieces = 0 }
+  // graves + deathsRecent from the death ledger. LAZY require: commands already requires provision,
+  // so a top-level require would be a cycle (established pattern - cf. the inline resources require).
+  try {
+    const commands = require('./commands.js')
+    const g = commands.gravesSnapshot({ pos: me, home })
+    s.graves = g.graves; s.deathsRecent = g.deathsRecent
+  } catch { s.graves = []; s.deathsRecent = 0 }
+  // homeDist: XZ to the hut anchor else the bed; null if neither.
+  try { s.homeDist = (me && home) ? Math.hypot(me.x - home.x, me.z - home.z) : null } catch { s.homeDist = null }
+  // bankFoodPts: cachedOnly chest counts near home -> foodPoints sum (the live HOME-FOOD-FIRST
+  // pattern). cachedOnly is MANDATORY so the tick never walks the bot to open a chest.
+  try {
+    let totals = {}
+    if (home) totals = await require('./resources.js').totalCounts(bot, { cachedOnly: true, near: home, maxDist: 64 })
+    const md = require('minecraft-data')(bot.version); const foods = (md && md.foodsByName) || {}
+    let pts = 0
+    for (const [n, c] of Object.entries(totals)) if (foods[n]) pts += (foods[n].foodPoints || 0) * c
+    s.bankFoodPts = pts
+  } catch { s.bankFoodPts = 0 }
+  // farm: standing wheat farm + XZ distance to its water anchor.
+  try {
+    const wf = loadWorldMem().wheatFarm
+    s.farm = { exists: hasStandingFarm(), dist: (wf && me) ? Math.hypot(me.x - wf.x, me.z - wf.z) : null }
+  } catch { s.farm = { exists: false, dist: null } }
+  // orchard: XZ distance + when the grove is next harvestable.
+  try {
+    const o = loadWorldMem().orchard
+    s.orchard = o ? { dist: me ? Math.hypot(me.x - o.x, me.z - o.z) : null, readyAt: o.harvestReadyAt != null ? o.harvestReadyAt : null } : {}
+  } catch { s.orchard = {} }
+  try { s.gearupBackoffUntil = (gearupState() || {}).until || 0 } catch { s.gearupBackoffUntil = 0 }
+  // activeJob: commands' running activity first (classified via commandClass), else synthesize from
+  // the provision survival latches. lastProgressAt/blockedOn stay null until S7 adds touchProgress.
+  try {
+    const commands = require('./commands.js')
+    const a = commands.activityInfo && commands.activityInfo()
+    if (a && a.name) {
+      s.activeJob = { name: a.name, cls: scheduler.commandClass(a.name), startedAt: a.startedAt, lastProgressAt: null, blockedOn: null }
+    } else if (isSecuringFood()) {
+      s.activeJob = { name: 'secureFood', cls: 'survival', startedAt: null, lastProgressAt: null, blockedOn: null }
+    } else if (isRecoveringHp()) {
+      s.activeJob = { name: 'recoverHp', cls: 'survival', startedAt: null, lastProgressAt: null, blockedOn: null }
+    } else if (isResting()) {
+      s.activeJob = { name: 'nightShelter', cls: 'survival', startedAt: null, lastProgressAt: null, blockedOn: null }
+    } else s.activeJob = null
+  } catch { s.activeJob = null }
+  try { const commands = require('./commands.js'); s.persistedBuild = !!(commands.persistedResume && commands.persistedResume()) } catch { s.persistedBuild = false }
+  // maintain.needs inputs. tools OMITTED in S4 (absent => "not measured", maintain.js) - the tool
+  // booleans arrive in S6.
+  try { s.torches = countItem(bot, 'torch') } catch { s.torches = 0 }
+  s.homeReachable = s.homeDist != null && s.homeDist <= 48
+  // maintainNeeded computed LAST on the fully-assembled base snapshot (pure, no cycle). S4 never
+  // dispatches maintain; the field exists so pickJob is exercised with real data (S6 = one-line enable).
+  try { const maintain = require('./maintain.js'); s.maintainNeeded = maintain.needs(s).length > 0 } catch { s.maintainNeeded = false }
+  return s
+}
+
 async function fishForFood (bot, { isStopped = () => false, say = () => {}, target = 6, home, scout = false } = {}) {
   if (hasSolidCeiling(bot, 12)) { dbg('  fishing: underground - not here'); return false }
   const mcData = require('minecraft-data')(bot.version)
@@ -6635,4 +6722,4 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors }
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors }

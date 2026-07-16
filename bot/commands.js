@@ -159,6 +159,38 @@ function shouldChaseGrave ({ grave, pos, food, threat, escaping, home, maxDist, 
   if (near > MAXD) return { chase: false, reason: `grave ${Math.round(near)}b away (> ${MAXD}) across open ground - defer/write off, not worth starving for` }
   return { chase: true, reason: `safe + fed (food ${food}), grave ${Math.round(near)}b within reach` }
 }
+// GRAVES SNAPSHOT (S4, DESIGN §5): export the death ledger in the plain-data shape the pure
+// scheduler consumes (scheduler.pickJob / admissible read snap.graves[]). Walks the ledger with
+// the SAME worth+age filter as bestGrave - but INCLUDING dangerous graves (the shape carries the
+// flag; the scheduler filters on it) - and the exact min(botDist, homeDist) XZ math of
+// shouldChaseGrave. `ledger` defaults to the module deathLedger; the parameter is the OFFLINE-TEST
+// seam (inject a fixture array, no fs / recordDeath ceremony). `now` defaults to Date.now().
+// Never throws - a malformed entry is skipped defensively by the field reads.
+function gravesSnapshot ({ pos, home, now, ledger } = {}) {
+  const led = Array.isArray(ledger) ? ledger : deathLedger
+  const t = now != null ? now : Date.now()
+  const graves = []
+  for (const d of led) {
+    if (!d || d.retrieved || !graveWorthIt(d) || t - (d.at || 0) >= 24 * 3600 * 1000) continue
+    const dBot = pos ? Math.hypot(d.x - pos.x, d.z - pos.z) : Infinity
+    const dHome = home ? Math.hypot(d.x - home.x, d.z - home.z) : Infinity
+    const near = Math.min(dBot, dHome) // exact min(bot, home) of shouldChaseGrave; scheduler skips a null-dist grave
+    const notable = (d.items && d.items.notable) || []
+    const hasGear = notable.some(n => /^(iron|diamond|netherite|golden)_|_(helmet|chestplate|leggings|boots)$/.test(n)) // verbatim realGear regex from graveWorthIt
+    graves.push({ x: d.x, y: d.y, z: d.z, at: d.at || 0, dist: isFinite(near) ? near : null, value: graveValue(d), dangerous: !!d.dangerous, hasGear })
+  }
+  // deathsRecent: deaths in the last 20 min, REGARDLESS of retrieved (a reclaimed grave was still a
+  // death - the ratchet signal). CAVEAT: the process-restart load above drops retrieved entries, so
+  // this UNDER-counts across restarts; acceptable (it only biases the degraded signature toward LESS
+  // aggressive, and S5's ladder re-derives).
+  const deathsRecent = led.filter(d => d && t - (d.at || 0) < 20 * 60000).length
+  return { graves, deathsRecent }
+}
+// activityInfo (S4, DESIGN §5): a one-liner over the module `activity` record (set by beginActivity)
+// so schedulerState can read the active op's name/detail/startedAt WITHOUT building the heavyweight
+// state(bot) snapshot (blockAtCursor/entity summaries) on every tick. null when nothing is running.
+function activityInfo () { return activity ? { name: activity.name, detail: activity.detail, startedAt: activity.startedAt } : null }
+
 // auto-resume: the build to pick back up after a death interrupts it. autoBuild
 // re-provisions whatever we lost and Build diffs world-vs-schematic, so resuming just
 // finishes the missing blocks. Kept across a death; cleared on finish or `stop`.
@@ -3197,4 +3229,4 @@ async function resumeBuild (bot) {
   }
 }
 
-module.exports = { handle, state, setupMovements, eatFood, placeTorchNearby, isBusy, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume, flagSpawnSuspect, worthwhileGrave, shouldChaseGrave, preemptForSurvival, setDebugSink, finishDisposition, resumeHoldRemaining, markResumePaused }
+module.exports = { handle, state, setupMovements, eatFood, placeTorchNearby, isBusy, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume, flagSpawnSuspect, worthwhileGrave, shouldChaseGrave, gravesSnapshot, activityInfo, preemptForSurvival, setDebugSink, finishDisposition, resumeHoldRemaining, markResumePaused }

@@ -16,6 +16,12 @@ const HISTORY_CAP = 5 * 1024 * 1024 // ~5 MB, then rotate to one .old generation
 
 function num (v) { return (typeof v === 'number' && isFinite(v)) ? v : null }
 
+// APPROXIMATE ready-to-eat pack count (S4): points need minecraft-data, which this PURE module
+// must not require - so match names against the staples instead. Keeps raw meats and rotten/
+// poisonous/spider_eye OUT (guarded below) so the count means "ready to eat" (mirrors foodTier<1
+// in spirit). Approximate by design - the operator reads it as a trend, not an exact point total.
+const EDIBLE_RE = /bread|cooked_|apple|carrot|baked_potato|melon_slice|cookie|pumpkin_pie|_stew|beetroot|cod|salmon|tropical_fish|dried_kelp|honey_bottle|glow_berries|sweet_berries|chorus_fruit/
+
 // PURE: map a commands.state(bot) snapshot -> the compact flat time-series line.
 // Every field is best-effort; a missing/oddly-shaped snapshot yields nulls, never throws.
 function compactSample (snap, now) {
@@ -36,7 +42,21 @@ function compactSample (snap, now) {
     moving: !!snap.moving,
     graves: (snap.died && typeof snap.died.graves === 'number') ? snap.died.graves : 0,
     biome: (snap.biome != null ? snap.biome : null),
-    isDay: (snap.isDay != null ? snap.isDay : null)
+    isDay: (snap.isDay != null ? snap.isDay : null),
+    // S4 survival-signature fields, mapped from data commands.state(bot) already carries (no new
+    // plumbing): worn-armor count, approx ready-to-eat pack count, oxygen, and water/underground
+    // hazard flags - so the naked-drowning / naked-starving signatures are readable after the fact.
+    armor: snap.wearing ? ['head', 'torso', 'legs', 'feet'].filter(k => snap.wearing[k]).length : null,
+    packFood: Array.isArray(snap.inventory)
+      ? snap.inventory.reduce((sum, e) => {
+          const str = String(e); const name = str.split(' ')[0]
+          if (!EDIBLE_RE.test(name) || /rotten|spider_eye|poisonous/.test(name)) return sum
+          const m = / x(\d+)/.exec(str); return sum + (m ? parseInt(m[1], 10) : 1)
+        }, 0)
+      : null,
+    oxy: num(snap.oxygen), // memory: oxygenLevel is unreliable on live 1.21 (reads ~4 on dry land) - recorded raw anyway, nulls included
+    inWater: snap.hazards ? !!snap.hazards.inWater : null,
+    underground: snap.hazards ? !!snap.hazards.underground : null
   }
 }
 

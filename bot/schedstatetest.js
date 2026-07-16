@@ -1,0 +1,122 @@
+'use strict'
+// OFFLINE unit test for provision.schedulerState (S4, DESIGN §4) - the async snapshot builder that
+// assembles the plain-data superset of survivalState(bot) the pure scheduler consumes. No live bot,
+// no server: a MINIMAL stub bot + WORLD_MEM_FILE / DEATH_FILE / RESUME_FILE env isolation set BEFORE
+// the requires (so provision/commands read the fixtures, never live memory). Run: cd bot && node schedstatetest.js
+
+const assert = require('assert')
+const fs = require('fs')
+const os = require('os')
+const path = require('path')
+const { Vec3 } = require('vec3')
+
+// ---- ENV ISOLATION (set BEFORE requiring provision/commands - they read these at load time) ----
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'schedstate-'))
+process.env.WORLD_MEM_FILE = path.join(tmp, 'world-memory.json')
+process.env.DEATH_FILE = path.join(tmp, 'last-death.json')
+process.env.RESUME_FILE = path.join(tmp, 'resume-job.json')
+process.env.EPISODE_LOG = path.join(tmp, 'body-episodes.jsonl')
+process.env.STATE_HISTORY_FILE = path.join(tmp, 'state-history.jsonl')
+
+// a FRESH, unretrieved iron grave in the death ledger (loaded at commands require time). Placed so
+// home (the bed at 110,100) is nearer than the bot (100,100) -> dist must resolve to min(bot,home).
+const NOW = Date.now()
+const GRAVE = { x: 112, y: 65, z: 100, at: NOW, dangerous: false, items: { notable: ['iron_pickaxe', 'iron_helmet'], count: 2 } }
+fs.writeFileSync(process.env.DEATH_FILE, JSON.stringify({ deaths: [GRAVE] }))
+
+const provision = require('./provision.js')
+require('./commands.js') // required for its side-effect: loads the death-ledger fixture that schedulerState reads via gravesSnapshot
+
+// ---- harness (async: schedulerState is async) ----
+const tests = []
+function t (name, fn) { tests.push([name, fn]) }
+
+const VERSION = '1.21.11'
+function stubBot ({ health = 20, food = 20, items = [], worn = {}, pos = new Vec3(100, 65, 100), timeOfDay = 6000 } = {}) {
+  const slotIndex = { head: 5, torso: 6, legs: 7, feet: 8 }
+  const slots = []
+  for (const k of Object.keys(slotIndex)) if (worn[k]) slots[slotIndex[k]] = { name: worn[k] }
+  return {
+    version: VERSION,
+    health, food,
+    entity: { position: pos, height: 1.62, isInLava: false },
+    entities: {},
+    time: { timeOfDay },
+    isSleeping: false,
+    blockAt: () => null,
+    getEquipmentDestSlot: (name) => slotIndex[name],
+    inventory: { items: () => items.slice(), slots }
+  }
+}
+
+// (a) survivalState fields are present (spread once, never re-scanned)
+t('(a) survivalState fields present + hp/food passthrough', async () => {
+  const s = await provision.schedulerState(stubBot({ health: 17, food: 13 }))
+  for (const k of ['hp', 'food', 'threatDist', 'creeperDist', 'drowning', 'inLava', 'onFire', 'isNight', 'underArmored', 'nightStuck']) {
+    assert.ok(k in s, 'field ' + k + ' present')
+  }
+  assert.strictEqual(s.hp, 17)
+  assert.strictEqual(s.food, 13)
+})
+
+// (b) packFoodPts sums the tier<2 pack food only (tier gate excludes rotten_flesh)
+t('(b) packFoodPts: bread x2 -> 10 pts; rotten_flesh (tier 2) excluded', async () => {
+  const s = await provision.schedulerState(stubBot({ items: [{ name: 'bread', count: 2 }, { name: 'rotten_flesh', count: 5 }] }))
+  assert.strictEqual(s.packFoodPts, 10, 'bread=5pts x2 = 10; rotten_flesh gated out, got ' + s.packFoodPts)
+})
+
+// (c) packArmorPieces counts an UNWORN iron_helmet; armorPieces counts worn (0 here)
+t('(c) packArmorPieces counts an unworn iron_helmet; armorPieces 0', async () => {
+  const s = await provision.schedulerState(stubBot({ items: [{ name: 'iron_helmet', count: 1 }, { name: 'cobblestone', count: 32 }] }))
+  assert.strictEqual(s.packArmorPieces, 1, 'unworn iron_helmet counted, got ' + s.packArmorPieces)
+  assert.strictEqual(s.armorPieces, 0, 'nothing worn')
+})
+
+// (d) homeDist: null on empty world-mem, numeric once a bed exists
+t('(d) homeDist null with no home, ~10 with a bed 10b away', async () => {
+  // the temp world-mem starts empty (no bed persisted yet) - so homeDist is null before rememberBed
+  let s = await provision.schedulerState(stubBot({}))
+  assert.strictEqual(s.homeDist, null, 'no hut + no bed -> homeDist null')
+  provision.rememberBed({ x: 110, y: 65, z: 100 }) // 10b east of the bot at 100,100
+  s = await provision.schedulerState(stubBot({}))
+  assert.ok(typeof s.homeDist === 'number' && Math.abs(s.homeDist - 10) < 0.5, 'bed 10b away -> homeDist ~10, got ' + s.homeDist)
+  assert.strictEqual(s.homeReachable, true, 'homeDist 10 <= 48 -> homeReachable')
+})
+
+// (e) graves passthrough via the ledger, dist = min(bot, home)
+t('(e) graves from the ledger; dist = min(bot 12b, home 2b) = ~2', async () => {
+  provision.rememberBed({ x: 110, y: 65, z: 100 }) // ensure home is the bed at 110,100
+  const s = await provision.schedulerState(stubBot({}))
+  assert.ok(Array.isArray(s.graves) && s.graves.length >= 1, 'the fixture grave is surfaced')
+  const g = s.graves[0]
+  assert.ok(Math.abs(g.dist - 2) < 0.5, 'dist = min(bot 12b, home 2b) = ~2, got ' + g.dist)
+  assert.strictEqual(g.hasGear, true, 'iron notables -> hasGear:true')
+  assert.ok(g.value > 0, 'grave has value')
+  assert.ok(s.deathsRecent >= 1, 'a fresh death is counted in deathsRecent')
+})
+
+// (f) persistedBuild + maintainNeeded are booleans (real data, so pickJob is exercisable)
+t('(f) persistedBuild + maintainNeeded are booleans', async () => {
+  const s = await provision.schedulerState(stubBot({}))
+  assert.strictEqual(typeof s.persistedBuild, 'boolean')
+  assert.strictEqual(typeof s.maintainNeeded, 'boolean')
+  assert.strictEqual(s.persistedBuild, false, 'no resume-job fixture -> no persisted build')
+})
+
+// (g) the partial-snapshot guarantee: a barely-populated stub still RESOLVES (no throw)
+t('(g) a barely-populated stub resolves without throwing (partial snapshot)', async () => {
+  const bare = { version: VERSION, entity: { position: new Vec3(0, 64, 0) }, blockAt: () => null }
+  const s = await provision.schedulerState(bare)
+  assert.ok(s && typeof s === 'object', 'a partial snapshot object is returned')
+  assert.strictEqual(typeof s.packFoodPts, 'number', 'packFoodPts defaulted to a number even with no inventory')
+})
+
+;(async () => {
+  let failures = 0
+  for (const [name, fn] of tests) {
+    try { await fn(); console.log('PASS  ' + name) } catch (e) { failures++; console.log('FAIL  ' + name + '\n      ' + (e && e.stack || e)) }
+  }
+  try { fs.rmSync(tmp, { recursive: true, force: true }) } catch {}
+  console.log(failures ? ('\n' + failures + ' FAILED') : '\nALL PASS')
+  process.exit(failures ? 1 : 0)
+})()

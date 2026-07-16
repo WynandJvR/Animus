@@ -28,6 +28,8 @@ const arbiter = require('./arbiter.js') // priority body-ownership: reflexes def
 const access = require('./access.js')
 const schematic = require('./schematic.js')
 const loghistory = require('./loghistory.js') // compact rolling state time-series + heartbeat (observability)
+const scheduler = require('./scheduler.js') // S4: pure survival-tier decision core (commandClass/admissible/pickJob) - wires the busy-gate + the tick
+const SCHED_ON = process.env.SCHEDULER !== '0' // master flag: SCHEDULER=0 restores the S1-hotfix wiring byte-for-byte (gate takes the survivalAdmissible path, the tick never registers, the 3 reflexes run as today)
 
 // Live brain settings the dashboard can change on the fly; brain-llm.js polls
 // GET /brain each tick and switches model / goal / on-off without a restart.
@@ -728,6 +730,7 @@ if (process.env.AUTO_COOK !== '0') {
 let survivalHunting = false
 if (process.env.SURVIVAL_HUNT !== '0') {
   setInterval(async () => {
+    if (SCHED_ON) return // S4: the scheduler tick owns survival dispatch
     if (survivalHunting || !bot.entity) return
     if (commands.isBusy && commands.isBusy()) return // the gather loop covers the build case
     if (provision.isResting && provision.isResting()) return
@@ -778,6 +781,7 @@ if (process.env.FOOD_TOPUP !== '0') {
 let foodCrisis = false
 if (process.env.FOOD_CRISIS !== '0') {
   setInterval(async () => {
+    if (SCHED_ON) return // S4: the scheduler tick owns survival dispatch
     if (foodCrisis || !bot.entity || bot.food == null || bot.food > 2) return
     if (provision.hasFood(bot)) return // auto-eat has it covered
     if (provision.isResting && provision.isResting()) return
@@ -808,6 +812,7 @@ let hpCrisis = false
 let hpCrisisCooldownUntil = 0
 if (process.env.HP_CRISIS !== '0') {
   setInterval(async () => {
+    if (SCHED_ON) return // S4: the scheduler tick owns survival dispatch
     if (hpCrisis || !bot.entity || bot.health == null) return
     if (Date.now() < hpCrisisCooldownUntil) return
     const n = provision.survivalNeed(bot)
@@ -962,6 +967,113 @@ if (process.env.HOME_REPAIR !== '0') {
       else note('(home-repair) base intact - nothing to fix')
     } catch (e) { note('(home-repair) failed: ' + e.message) } finally { repairingHome = false }
   }, 60000).unref?.()
+}
+
+// SCHEDULER TICK (S4, REDESIGN §3.2/§10): ONE dispatcher for the survival tier. Replaces the three
+// ad-hoc crisis timers above (SURVIVAL_HUNT/FOOD_CRISIS/HP_CRISIS early-return while SCHEDULER is
+// on). Builds a snapshot, asks the pure pickJob which ONE job should own the body, and dispatches
+// ONLY survival-class jobs to the existing executors (graveSweep->recover, secureFood, recoverHp),
+// preempting a busy body only on a crisis-grade need or a near grave. SCHEDULER=0 removes it entirely.
+let schedJob = null             // the single job-latch (I4): one scheduler dispatch at a time
+let schedLastLog = ''           // decision-change log throttle
+let schedHeldLog = ''           // busy-held note throttle (separate so it never clobbers the decision key)
+let schedGraveCooldownUntil = 0 // failed grave recovery -> don't hammer an unreachable grave
+let schedHpCooldownUntil = 0    // mirror of hpCrisisCooldownUntil (index.js hp-crisis)
+let schedDeferNoted = ''        // one note per deferred job kind (nightShelter/maintain/degraded/ladder-reflex)
+if (SCHED_ON) {
+  const GRAVE_NEAR_LADDER = Number(process.env.GRAVE_NEAR_LADDER || 32)
+  const schedSay = m => bot.chat(String(m).slice(0, 200))
+  const runJob = async (name, executor) => {
+    schedJob = { name, startedAt: Date.now() }
+    try { const r = await executor(); note('(sched) ' + name + ' -> ' + (r === false ? 'no-op/deferred' : (typeof r === 'string' ? r.split('\n')[0] : 'done'))) }
+    catch (e) { note('(sched) ' + name + ' failed: ' + e.message) }
+    finally { schedJob = null }
+  }
+  const tick = async () => {
+    try {
+      // 1. GUARDS (cheap; mirror the crisis reflexes). NOT gated on arbiter.maneuverActive() - a
+      //    survival preempt must be able to interrupt a nav leg (same as FOOD_CRISIS today).
+      if (!bot.entity || schedJob) return
+      if (commands.isEscaping && commands.isEscaping()) return
+      if (navigate.isRecovering() || navigate.isForceUnsticking()) return
+      if (bot.isSleeping) return
+      // 2. SNAPSHOT + decision.
+      const s = await provision.schedulerState(bot)
+      const pick = scheduler.pickJob(s)
+      // 3. OBSERVABILITY: log on CHANGE (not every tick). Dispatches/outcomes always log (rare).
+      const nearest = (s.graves || []).filter(g => g && !g.dangerous && g.value > 0 && g.dist != null).sort((a, b) => a.dist - b.dist)[0]
+      const key = pick ? (pick.job + '|' + pick.preempt) : 'idle'
+      if (key !== schedLastLog) {
+        schedLastLog = key
+        note(`(sched) pick=${pick ? pick.job : 'idle'}${pick && pick.preempt ? ' PREEMPT' : ''} reason="${pick ? pick.reason : 'idle'}" | hp=${s.hp} food=${s.food} packPts=${s.packFoodPts} armor=${s.armorPieces} graves=${(s.graves || []).length}${nearest ? '(near ' + Math.round(nearest.dist) + 'b)' : ''} home=${s.homeDist == null ? '?' : Math.round(s.homeDist) + 'b'}`)
+      }
+      // 4. Non-survival results are IGNORED (progress = body/resume already owns the goal; maintain
+      //    dispatch is S6).
+      if (!pick || pick.cls !== 'survival') {
+        if (pick && pick.job === 'maintenancePass' && schedDeferNoted !== 'maintain') { schedDeferNoted = 'maintain'; note('(sched) maintain needed - deferred to S6') }
+        return
+      }
+      // 5. RESOLVE the executor (the dispatch map). `name` = the executor kind actually dispatched.
+      const knownBed = (provision.knownBed && provision.knownBed()) || undefined
+      let name = null
+      let executor = null
+      const wantSecureFood = () => { name = 'secureFood'; executor = () => provision.secureFood(bot, { home: knownBed, canHold: true, say: schedSay }) }
+      const wantRecoverHp = () => { name = 'recoverHp'; executor = () => provision.recoverHp(bot, { say: schedSay }) }
+      const wantRecover = () => { name = 'recover' } // recover has its own runner (cooldown needs the result); executor stays null
+      if (pick.job === 'graveSweep') wantRecover()
+      else if (pick.job === 'secureFood') wantSecureFood()
+      else if (pick.job === 'recoverHp') wantRecoverHp()
+      else if (pick.job === 'nightShelter') { if (schedDeferNoted !== 'nightShelter') { schedDeferNoted = 'nightShelter'; note('(sched) nightShelter - reflex-owned in S4, holding') } return }
+      else if (pick.job === 'recoveryLadder') {
+        // DOWNGRADE (do NOT build the ladder - that's S5): re-read the single need and route to its
+        // producer; shelter/flee stay reflex-owned; a degraded-only state with a near grave = recover.
+        let need = null
+        try { need = provision.survivalNeed(bot) } catch {}
+        if (need) {
+          const prod = scheduler.needProducer(need.need)
+          if (prod === 'secureFood') wantSecureFood()
+          else if (prod === 'recoverHp') wantRecoverHp()
+          else { if (schedDeferNoted !== 'ladder-reflex') { schedDeferNoted = 'ladder-reflex'; note('(sched) ladder need ' + need.need + ' is reflex-owned (' + (prod || 'flee') + ') - holding') } return }
+        } else if (nearest && nearest.dist <= GRAVE_NEAR_LADDER) {
+          wantRecover()
+        } else { if (schedDeferNoted !== 'degraded') { schedDeferNoted = 'degraded'; note('(sched) degraded but no executor until S5 - holding') } return }
+      } else return // unknown survival job name - do nothing
+      if (name !== 'recover' && !executor) return
+      // 6. BUSY vs IDLE dispatch policy (single-goal discipline).
+      const bodyBusy = (commands.isBusy && commands.isBusy()) || (provision.isResting && provision.isResting()) || (provision.isSecuringFood && provision.isSecuringFood())
+      if (bodyBusy) {
+        // busy -> dispatch ONLY when crisis-grade: a near grave IS the survival move (recover), OR a
+        // crisis-grade vitals need (food<=SCHED_CRISIS_FOOD, or hp/threat/etc via survivalNeed).
+        let crisis = name === 'recover'
+        if (!crisis) { try { crisis = !!provision.survivalNeed(bot, { foodThreshold: Number(process.env.SCHED_CRISIS_FOOD || 6) }) } catch { crisis = false } }
+        if (!crisis) { if (schedHeldLog !== name) { schedHeldLog = name; note('(sched) ' + name + ' held - body busy, not crisis-grade (single-goal)') } return }
+        schedHeldLog = ''
+        if (commands.preemptForSurvival) commands.preemptForSurvival() // sets ONLY buildAbort; the build resumes via persistedResume
+        note('(sched) PREEMPT ' + name + ' (' + pick.reason + ') - crisis-grade survival outranks the busy job')
+      } else schedHeldLog = ''
+      // 7. LATCH CHECKS + COOLDOWNS (never double-drive) + 8. the single job-latch runner.
+      if (name === 'secureFood') { if (provision.isSecuringFood && provision.isSecuringFood()) return; await runJob(name, executor) }
+      else if (name === 'recoverHp') {
+        if ((provision.isRecoveringHp && provision.isRecoveringHp()) || Date.now() < schedHpCooldownUntil) return
+        await runJob(name, executor)
+        schedHpCooldownUntil = Date.now() + 60000 // mirror hp-crisis: cool 60s after the attempt
+      } else if (name === 'recover') {
+        if (Date.now() < schedGraveCooldownUntil) return
+        schedJob = { name, startedAt: Date.now() }
+        try {
+          const r = await commands.handle(bot, 'recover', { source: 'scheduler' })
+          // success marks the grave retrieved (it then leaves the snapshot naturally); anything else
+          // keeps the grave, so back off for SCHED_GRAVE_COOLDOWN_MS to avoid hammering it.
+          const retrieved = /got my stuff back|nothing left where i died/i.test(String(r || ''))
+          if (!retrieved) schedGraveCooldownUntil = Date.now() + Number(process.env.SCHED_GRAVE_COOLDOWN_MS || 300000)
+          note('(sched) recover -> ' + String(r || '').split('\n')[0])
+        } catch (e) { schedGraveCooldownUntil = Date.now() + Number(process.env.SCHED_GRAVE_COOLDOWN_MS || 300000); note('(sched) recover failed: ' + e.message) }
+        finally { schedJob = null }
+      }
+    } catch (e) { try { note('(sched) tick error: ' + e.message) } catch {} }
+    finally { setTimeout(tick, 15000 + (Math.random() * 6000 - 3000)) } // self-rescheduling => built-in jitter, one dispatch at a time
+  }
+  setTimeout(tick, 15000)
 }
 
 // Anti-AFK: keep the connection alive during genuine idle gaps (e.g. between brain
@@ -1648,7 +1760,13 @@ const server = http.createServer((req, res) => {
       }
       const bodyBusy = (commands.isBusy && commands.isBusy()) || (provision.isResting && provision.isResting()) || (provision.isSecuringFood && provision.isSecuringFood())
       const trimmedLine = String(line).trim()
-      const readOnly = /^(state|scan|find|block|entities|inventory|look|say)\b/i.test(trimmedLine)
+      // S4 (REDESIGN §3.4): classify read-only via scheduler.commandClass when SCHEDULER is on.
+      // Deliberate, documented widening: commandClass's perception set adds turn|lookbehind|
+      // waypoints|places|help to the old whitelist - all read-only/head-only ("perception/chat ->
+      // allow as today"). SCHEDULER=0 keeps the old regex byte-for-byte.
+      const cls = SCHED_ON ? scheduler.commandClass(trimmedLine) : null
+      const readOnly = SCHED_ON ? (cls === 'perception' || cls === 'chat')
+        : /^(state|scan|find|block|entities|inventory|look|say)\b/i.test(trimmedLine)
       if (bodyBusy && !readOnly && !fromSupervisor) {
         // S1 HOTFIX (REDESIGN §3.4): survival-class commands are no longer muzzled by the body's
         // own hold - they PREEMPT it. The live freeze: `recover`/`eat`/`wear` suppressed for 8+
@@ -1658,8 +1776,14 @@ const server = http.createServer((req, res) => {
         // and falls through to run. Progress-class commands keep exactly today's suppression.
         // S1_HOTFIX=0 restores the old blanket hold. `stop`-suppression + the persisted-build
         // hold above are UNTOUCHED (they guard operator intent, orthogonal to survival).
-        const survivalCmd = process.env.S1_HOTFIX !== '0' && /^(recover|getstuff|eat|wear|armorup|sleep)\b/i.test(trimmedLine)
-        const adm = survivalCmd ? survivalAdmissible(bot) : null
+        // S4: survival-class via commandClass + decide via the pure admissible(schedulerState).
+        // commandClass's survival vocabulary is wider than S1's regex (equip/gearup/hunt/...), but
+        // admissible still requires a REAL need or a near grave, so a whimsical gearup at full health
+        // while a build runs is still HELD (now with the scheduler's greppable reason). SCHEDULER=0
+        // restores S1_HOTFIX + survivalAdmissible byte-for-byte.
+        const survivalCmd = SCHED_ON ? (cls === 'survival')
+          : (process.env.S1_HOTFIX !== '0' && /^(recover|getstuff|eat|wear|armorup|sleep)\b/i.test(trimmedLine))
+        const adm = survivalCmd ? (SCHED_ON ? scheduler.admissible('survival', await provision.schedulerState(bot)) : survivalAdmissible(bot)) : null
         if (survivalCmd && adm.allow) {
           note(`(cmd) ${line}${rz} -> PREEMPT (${adm.reason}) - survival outranks the current hold`)
           if (commands.preemptForSurvival) commands.preemptForSurvival() // set the stop latch; a build resumes via persistedResume

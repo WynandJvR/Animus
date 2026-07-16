@@ -26,7 +26,12 @@ t('compactSample maps a full snapshot to the flat line', () => {
     threat: { type: 'zombie', dist: 4.2, flee: false },
     moving: true, biome: 'plains', isDay: false,
     died: { x: 1, y: 2, z: 3, graves: 2 },
-    lastResult: { action: 'gather', ok: true }
+    lastResult: { action: 'gather', ok: true },
+    // S4 survival-signature inputs (mapped from commands.state fields)
+    wearing: { head: 'iron_helmet', torso: 'iron_chestplate', legs: null, feet: 'iron_boots' },
+    inventory: ['bread x5', 'cobblestone x32', 'cooked_beef x2', 'rotten_flesh x9'],
+    oxygen: 12,
+    hazards: { inWater: true, underground: false }
   }
   const o = lh.compactSample(snap, 1000)
   assert.strictEqual(o.t, 1000)
@@ -41,6 +46,18 @@ t('compactSample maps a full snapshot to the flat line', () => {
   assert.strictEqual(o.graves, 2)
   assert.strictEqual(o.biome, 'plains')
   assert.strictEqual(o.isDay, false)
+  // S4 new fields
+  assert.strictEqual(o.armor, 3, '3 of 4 armor slots worn (legs null)')
+  assert.strictEqual(o.packFood, 7, 'bread x5 + cooked_beef x2 = 7; cobblestone not food, rotten_flesh excluded')
+  assert.strictEqual(o.oxy, 12)
+  assert.strictEqual(o.inWater, true)
+  assert.strictEqual(o.underground, false)
+  // backward-compat: every PRE-EXISTING field is byte-identical (the S4 diff is additions only)
+  assert.deepStrictEqual(
+    { t: o.t, hp: o.hp, food: o.food, pos: o.pos, activity: o.activity, job: o.job, blockedOn: o.blockedOn, threat: o.threat, moving: o.moving, graves: o.graves, biome: o.biome, isDay: o.isDay },
+    { t: 1000, hp: 18, food: 7, pos: { x: 477.4, y: 67, z: 116.2 }, activity: 'gather', job: 'craft wooden_hoe', blockedOn: 'stuck 12s', threat: 'zombie', moving: true, graves: 2, biome: 'plains', isDay: false },
+    'pre-existing fields unchanged'
+  )
 })
 
 t('compactSample: blockedOn falls back to a failed lastResult when not stuck', () => {
@@ -62,6 +79,12 @@ t('compactSample: null/empty snapshot yields nulls, never throws', () => {
   assert.strictEqual(o.graves, 0)   // no grave info -> 0, not null
   assert.strictEqual(o.biome, null)
   assert.strictEqual(o.isDay, null)
+  // S4 new fields: all null on an empty snapshot
+  assert.strictEqual(o.armor, null)
+  assert.strictEqual(o.packFood, null)
+  assert.strictEqual(o.oxy, null)
+  assert.strictEqual(o.inWater, null)
+  assert.strictEqual(o.underground, null)
 })
 
 t('compactSample: NaN/undefined numerics coerce to null (json-safe)', () => {

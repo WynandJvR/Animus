@@ -104,5 +104,102 @@ eq(C.shouldChaseGrave({ grave: adjGrave, pos: null, food: 20, home }).chase, fal
   delete process.env.S1_HOTFIX
 }
 
+// ============================================================================================
+// S4: commands.gravesSnapshot() - the plain-data graves exporter the scheduler consumes.
+// Uses the `ledger` seam (inject a fixture array; no fs / recordDeath ceremony). DESIGN §5.
+// ============================================================================================
+const Sched = require('./scheduler.js')
+const NOW = 1_000_000_000_000
+const near = (a, b, tol) => Math.abs(a - b) <= (tol == null ? 0.5 : tol)
+
+// (1) near iron grave (~3b from home) -> listed, hasGear, value>0, dist ~= min(bot,home)
+{
+  const ironGrave = { x: 418, y: 65, z: 88, at: NOW, dangerous: false, items: { notable: ['iron_pickaxe', 'iron_helmet'], count: 2 } }
+  const r = C.gravesSnapshot({ pos: home, home, now: NOW, ledger: [ironGrave] })
+  eq(r.graves.length, 1, 'near iron grave -> LISTED')
+  eq(r.graves[0].hasGear, true, 'iron gear -> hasGear:true')
+  eq(r.graves[0].value > 0, true, 'iron grave has value>0')
+  eq(near(r.graves[0].dist, Math.hypot(418 - 416, 88 - 87)), true, 'dist ~= min(bot,home) XZ')
+  eq(r.graves[0].dangerous, false, 'not dangerous')
+}
+
+// (2) far grave 200b from BOTH -> still LISTED (distance never filters, only sequences)
+{
+  const farGrave = { x: 616, y: 65, z: 87, at: NOW, items: { notable: ['iron_sword'], count: 1 } } // 200b east of home
+  const r = C.gravesSnapshot({ pos: home, home, now: NOW, ledger: [farGrave] })
+  eq(r.graves.length, 1, 'far grave still LISTED (distance is not a filter)')
+  eq(near(r.graves[0].dist, 200, 1), true, 'far grave dist ~200')
+}
+
+// (3) dangerous grave -> LISTED with the flag (the scheduler filters on dangerous, not the exporter)
+{
+  const dngr = { x: 418, y: 65, z: 88, at: NOW, dangerous: true, items: { notable: ['diamond_chestplate'], count: 1 } }
+  const r = C.gravesSnapshot({ pos: home, home, now: NOW, ledger: [dngr] })
+  eq(r.graves.length, 1, 'dangerous grave still LISTED')
+  eq(r.graves[0].dangerous, true, 'dangerous flag carried through')
+  eq(r.graves[0].hasGear, true, 'diamond gear -> hasGear:true')
+}
+
+// (4) worthless grave (1 dirt, graveWorthIt false) -> NOT listed
+{
+  const junk = { x: 418, y: 65, z: 88, at: NOW, items: { notable: [], count: 1 } }
+  const r = C.gravesSnapshot({ pos: home, home, now: NOW, ledger: [junk] })
+  eq(r.graves.length, 0, 'worthless grave (1 dirt) NOT listed')
+}
+
+// (5) retrieved:true -> not in graves, but counted in deathsRecent when fresh (< 20min)
+{
+  const reclaimed = { x: 418, y: 65, z: 88, at: NOW - 60000, retrieved: true, items: { notable: ['iron_pickaxe'], count: 1 } }
+  const r = C.gravesSnapshot({ pos: home, home, now: NOW, ledger: [reclaimed] })
+  eq(r.graves.length, 0, 'retrieved grave excluded from graves[]')
+  eq(r.deathsRecent, 1, 'a reclaimed grave 1min ago still counts as a recent death (ratchet signal)')
+}
+
+// (5b) an OLD retrieved death (> 20min) is not counted in deathsRecent
+{
+  const oldReclaimed = { x: 418, y: 65, z: 88, at: NOW - 30 * 60000, retrieved: true, items: { notable: ['iron_pickaxe'], count: 1 } }
+  const r = C.gravesSnapshot({ pos: home, home, now: NOW, ledger: [oldReclaimed] })
+  eq(r.deathsRecent, 0, 'a 30-min-old death is not "recent"')
+}
+
+// (6) empty ledger -> {graves:[], deathsRecent:0}
+{
+  const r = C.gravesSnapshot({ pos: home, home, now: NOW, ledger: [] })
+  eq(r.graves.length, 0, 'empty ledger -> no graves')
+  eq(r.deathsRecent, 0, 'empty ledger -> deathsRecent 0')
+}
+
+// (7) pos FAR, home NEAR -> dist uses home (the min)
+{
+  const g = { x: 418, y: 65, z: 88, at: NOW, items: { notable: ['iron_helmet'], count: 1 } }
+  const r = C.gravesSnapshot({ pos: { x: 900, y: 65, z: 900 }, home, now: NOW, ledger: [g] })
+  eq(near(r.graves[0].dist, Math.hypot(418 - 416, 88 - 87)), true, 'dist uses the nearer of bot/home (home)')
+}
+
+// (7b) neither pos nor home -> dist null (the scheduler skips null-dist graves)
+{
+  const g = { x: 418, y: 65, z: 88, at: NOW, items: { notable: ['iron_helmet'], count: 1 } }
+  const r = C.gravesSnapshot({ now: NOW, ledger: [g] })
+  eq(r.graves[0].dist, null, 'no pos AND no home -> dist null')
+}
+
+// ---- COMPOSITION: the REAL exporter shape feeds the pure scheduler (proves gravesSnapshot ->
+// pickJob matches what schedulertest built by hand for the headline livelock, §5 case 7+).
+{
+  const grave3b = { x: 418, y: 65, z: 88, at: NOW, items: { notable: ['iron_pickaxe', 'iron_helmet'], count: 2 } }
+  const gs = C.gravesSnapshot({ pos: home, home, now: NOW, ledger: [grave3b] })
+  const snap = {
+    hp: 1, food: 0, packFoodPts: 0, armorPieces: 0,
+    threatDist: null, creeperDist: null, isNight: false, nightStuck: false,
+    drowning: false, onFire: false, inLava: false,
+    graves: gs.graves, deathsRecent: gs.deathsRecent,
+    homeDist: 3, bankFoodPts: 0, farm: { exists: false }, orchard: {},
+    activeJob: { name: 'secureFood', cls: 'survival' }, persistedBuild: false, maintainNeeded: false
+  }
+  const pj = Sched.pickJob(snap)
+  eq(!!pj && pj.cls === 'survival', true, 'livelock fixture (hp1/food0/naked/grave3b) via the REAL exporter -> survival job')
+  eq(Sched.admissible('survival', snap).allow, true, 'a recover command is admitted for the livelock snapshot (the muzzle is gone)')
+}
+
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)
