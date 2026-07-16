@@ -590,6 +590,7 @@ function travelMovements (bot) {
   m.canOpenDoors = true
   m.allowParkour = true
   m.maxDropDown = 4           // don't plunge into caves/ravines chasing the target's XZ
+  m.liquidCost = 4            // NAV P0: route AROUND water - library default is 1 (priced like land) so A* happily swam lakes; mirrors gatherMovements (provision.js). Treks are how the bot reaches water-pocket geometry.
   if ('infiniteLiquidDropdownDistance' in m) m.infiniteLiquidDropdownDistance = false
   if ('allowSprinting' in m) m.allowSprinting = true
   // Bridge gaps/ravines with cheap blocks the bot is carrying (dirt/cobble/gravel...).
@@ -2436,7 +2437,8 @@ function hazards (bot) {
     onFire,
     inLava: !!(ent && ent.isInLava),
     inWater: !!(ent && ent.isInWater),
-    drowning: headWater
+    drowning: headWater,
+    onGround: !!(ent && ent.onGround) // NAV P0 observability: the water-pocket wedge signature is inWater+underground+!onGround
   }
 }
 

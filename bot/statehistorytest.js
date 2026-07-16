@@ -31,7 +31,8 @@ t('compactSample maps a full snapshot to the flat line', () => {
     wearing: { head: 'iron_helmet', torso: 'iron_chestplate', legs: null, feet: 'iron_boots' },
     inventory: ['bread x5', 'cobblestone x32', 'cooked_beef x2', 'rotten_flesh x9'],
     oxygen: 12,
-    hazards: { inWater: true, underground: false }
+    hazards: { inWater: true, underground: false, onGround: false, inLava: false, onFire: true, drowning: true },
+    goal: 'GoalNearXZ'
   }
   const o = lh.compactSample(snap, 1000)
   assert.strictEqual(o.t, 1000)
@@ -52,6 +53,12 @@ t('compactSample maps a full snapshot to the flat line', () => {
   assert.strictEqual(o.oxy, 12)
   assert.strictEqual(o.inWater, true)
   assert.strictEqual(o.underground, false)
+  // NAV P0 fields
+  assert.strictEqual(o.onGround, false)
+  assert.strictEqual(o.inLava, false)
+  assert.strictEqual(o.onFire, true)
+  assert.strictEqual(o.drowning, true)
+  assert.strictEqual(o.goal, 'GoalNearXZ')
   // backward-compat: every PRE-EXISTING field is byte-identical (the S4 diff is additions only)
   assert.deepStrictEqual(
     { t: o.t, hp: o.hp, food: o.food, pos: o.pos, activity: o.activity, job: o.job, blockedOn: o.blockedOn, threat: o.threat, moving: o.moving, graves: o.graves, biome: o.biome, isDay: o.isDay },

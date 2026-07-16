@@ -56,7 +56,15 @@ function compactSample (snap, now) {
       : null,
     oxy: num(snap.oxygen), // memory: oxygenLevel is unreliable on live 1.21 (reads ~4 on dry land) - recorded raw anyway, nulls included
     inWater: snap.hazards ? !!snap.hazards.inWater : null,
-    underground: snap.hazards ? !!snap.hazards.underground : null
+    underground: snap.hazards ? !!snap.hazards.underground : null,
+    // NAV P0 (operator-requested): the remaining hazard flags + the pathfinder goal. The water-pocket
+    // wedge signature is inWater+underground+!onGround; nav-wedge INTENT (what it was pathing toward)
+    // was otherwise only in bot-events.log, not the time-series. All from data commands.state carries.
+    onGround: snap.hazards && snap.hazards.onGround != null ? !!snap.hazards.onGround : null,
+    inLava: snap.hazards ? !!snap.hazards.inLava : null,
+    onFire: snap.hazards ? !!snap.hazards.onFire : null,
+    drowning: snap.hazards ? !!snap.hazards.drowning : null,
+    goal: (snap.goal != null ? snap.goal : null)
   }
 }
 
