@@ -1614,6 +1614,12 @@ const server = http.createServer((req, res) => {
       let why = '' // the brain's stated motive for this command, if it sent one
       try { const j = JSON.parse(data); if (j && typeof j.command === 'string') line = j.command; if (j && typeof j.reason === 'string') why = j.reason } catch {}
       const rz = why ? ` «${String(why).slice(0, 80)}»` : '' // shown in /log so "why did it do X" is answerable
+      // The external liveness supervisor (run.js) is allowed past the BRAIN-suppression gates
+      // (which guard against the BRAIN, not ops) - but ONLY for the two recovery verbs and ONLY
+      // with the X-Supervisor header. Verb-allowlisted at the parse site so a forged/compromised
+      // local process gains nothing the loopback bind (controlHost 127.0.0.1) didn't already give.
+      // It stays inside the CHEAT confinement below (defense in depth) and can never run any other verb.
+      const fromSupervisor = req.headers['x-supervisor'] === '1' && /^(stop|recover)\s*$/i.test(String(line).trim())
       // BRAIN CONFINEMENT: block world-editing/admin commands on the API path so
       // the autonomous brain can't grief or dupe. Operators use in-game !commands.
       if (process.env.BRAIN_ALLOW_CHEATS !== '1' && CHEAT_CMDS.test(String(line).trim())) {
@@ -1636,14 +1642,14 @@ const server = http.createServer((req, res) => {
       // brain's `stop` slipped through and CLEARED the persisted castle job ("can't
       // recover, stuck in maze" -> stopped, live). While a saved build job exists on
       // disk, the brain's stop is always suppressed - that file is operator intent.
-      if (/^stop\b/i.test(String(line).trim()) && commands.persistedResume && commands.persistedResume()) {
+      if (!fromSupervisor && /^stop\b/i.test(String(line).trim()) && commands.persistedResume && commands.persistedResume()) {
         note(`(cmd) ${line}${rz} -> held (a saved build job exists - the brain may not cancel it)`)
         return send(res, 200, "held: there's a build to finish - i shouldn't stop it")
       }
       const bodyBusy = (commands.isBusy && commands.isBusy()) || (provision.isResting && provision.isResting()) || (provision.isSecuringFood && provision.isSecuringFood())
       const trimmedLine = String(line).trim()
       const readOnly = /^(state|scan|find|block|entities|inventory|look|say)\b/i.test(trimmedLine)
-      if (bodyBusy && !readOnly) {
+      if (bodyBusy && !readOnly && !fromSupervisor) {
         // S1 HOTFIX (REDESIGN §3.4): survival-class commands are no longer muzzled by the body's
         // own hold - they PREEMPT it. The live freeze: `recover`/`eat`/`wear` suppressed for 8+
         // minutes at 1hp/food 0 while famineHold sat inside `_securingFood` with iron in a grave
@@ -1687,11 +1693,11 @@ const server = http.createServer((req, res) => {
       if (drop) { note(`(cmd) ${line}${rz} -> skipped (${drop})`); return send(res, 200, `skipped: ${drop}`) }
       noteManualLook(line)
       try {
-        const result = await commands.handle(bot, line, { source: 'brain' })
+        const result = await commands.handle(bot, line, { source: fromSupervisor ? 'supervisor' : 'brain' })
         // A non-perception command is the brain's response to any waiting player,
         // so consider the request answered (perception commands keep it pending).
         if (!PREP_CMDS.test(String(line).trim())) clearPendingChat()
-        note(`(cmd) ${line}${rz} -> ${result.split('\n')[0]}`)
+        note(`(cmd)${fromSupervisor ? ' [supervisor]' : ''} ${line}${rz} -> ${result.split('\n')[0]}`)
         send(res, 200, result)
       } catch (e) {
         note(`(cmd error) ${line} -> ${e.message}`)
