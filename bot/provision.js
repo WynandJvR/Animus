@@ -2684,15 +2684,22 @@ function recallSpot (item, pos, visited) {
 // INFRASTRUCTURE MEMORY (operator-requested): remember our OWN tables/furnaces/chests and
 // walk back to them instead of littering the landscape with a fresh crafting table every
 // time the last one fell out of the loaded chunks or behind torn-up terrain.
-function rememberInfra (kind, pos) {
+function rememberInfra (kind, pos, meta) {
+  // PROVENANCE (fix #13): genuine PLACEMENT sites tag { own: true } so furnace consolidation
+  // can tell a furnace the bot provably placed from a merely-adopted (possibly player) one.
+  // Adoption sites pass no meta => no `own` field (byte-equivalent to fd90c9f when unset).
+  const own = !!(meta && meta.own)
   const m = loadWorldMem()
   const s = m.infra = m.infra || {}
   const list = s[kind] = s[kind] || []
   // EXACT-cell dedup: the old radius-2 merge collapsed adjacent blocks into ONE entry, so
   // a double chest (two adjacent) or a chest+table read as a single remembered thing and
   // the bot lost track of what it had placed (operator: duplicate table, table on chest).
-  for (const e of list) { if (e.x === Math.floor(pos.x) && e.y === Math.floor(pos.y) && e.z === Math.floor(pos.z)) { e.at = Date.now(); saveWorldMem(); return } }
-  list.push({ x: Math.floor(pos.x), y: Math.floor(pos.y), z: Math.floor(pos.z), at: Date.now() })
+  // On a dedup hit, PRESERVE an existing own flag and only ever SET it (never clear it).
+  for (const e of list) { if (e.x === Math.floor(pos.x) && e.y === Math.floor(pos.y) && e.z === Math.floor(pos.z)) { e.at = Date.now(); if (own) e.own = true; saveWorldMem(); return } }
+  const entry = { x: Math.floor(pos.x), y: Math.floor(pos.y), z: Math.floor(pos.z), at: Date.now() }
+  if (own) entry.own = true
+  list.push(entry)
   if (list.length > 12) { list.sort((a, b) => b.at - a.at); list.length = 12 }
   saveWorldMem()
 }
@@ -4995,8 +5002,146 @@ async function maintenancePass (bot, opts = {}) {
     if (process.env.HOME_REPAIR !== '0' && atHome() && due('homeRepair', 300000)) {
       try { const r = await maintainHome(bot, hutAnchor(), { isStopped, say }); if (r && r.damaged) stepDone('homeRepair') } catch (e) { dbg('  maint: homeRepair failed (' + e.message + ')') }
     }
+    if (between()) return { ok: true, steps, reason: 'bail:survival' }
+
+    // STEP 10: furnace consolidation (fix #13 Part A) - reclaim scattered field furnaces
+    // (>32 and <=96 from the hut, <=2/pass) via the proven grab() primitive: re-verify the
+    // block IS a furnace at dig time + own-tagged/lonely, else skip+forget (NEVER dig a
+    // non-furnace or a furnace near anything player-built). Hourly, daytime, at-hut.
+    if (process.env.INFRA_CONSOLIDATE !== '0' && !nightIndoorOnly && day() && hutAnchor() && due('furnaceConsol', 3600000)) {
+      try { const n = await consolidateFurnaces(bot, { isStopped, say }); if (n) stepDone('furnaceConsol(' + n + ')') } catch (e) { dbg('  maint: furnaceConsol failed (' + e.message + ')') }
+    }
+    if (between()) return { ok: true, steps, reason: 'bail:survival' }
+
+    // STEP 11: scaffold litter patrol (fix #13 Part B) - walk to ONE far registered scaffold
+    // cluster within 64 of home and teardownVerified it (registry-only, FILLER_RE re-read,
+    // hut box excluded). Every dig is a cell the bot registered itself. Half-hourly, daytime.
+    if (process.env.INFRA_CONSOLIDATE !== '0' && !nightIndoorOnly && day() && home && due('litterPatrol', 1800000)) {
+      try { const n = await litterPatrol(bot, home, { isStopped, say }); if (n) stepDone('litter(' + n + ')') } catch (e) { dbg('  maint: litterPatrol failed (' + e.message + ')') }
+    }
     return { ok: true, steps, reason: steps.length ? steps.join('+') : 'nothing due' }
   } finally { _maintaining = false }
+}
+
+// ---- INFRA CONSOLIDATION (fix #13) --------------------------------------------------------
+// Every "x,y,z" cell the bot has in its OWN infra memory, any kind. Used by lonelyFurnace to
+// exempt the bot's own table/chest/torch next to a camp furnace from the structure scan.
+function ownInfraCells () {
+  const infra = (loadWorldMem().infra || {})
+  const set = new Set()
+  for (const kind of Object.keys(infra)) {
+    for (const e of (infra[kind] || [])) {
+      if (e && Number.isFinite(e.x) && Number.isFinite(e.y) && Number.isFinite(e.z)) set.add(Math.floor(e.x) + ',' + Math.floor(e.y) + ',' + Math.floor(e.z))
+    }
+  }
+  return set
+}
+
+// PURE: is the furnace at `cell` "in the middle of nowhere" - i.e. nothing PLAYER-built within
+// radius 5? readBlock(x,y,z) -> block|null. ownCells: Set/array of "x,y,z" the bot placed. A
+// STRUCTURE_RE hit disqualifies UNLESS it's (a) the furnace cell itself, (b) an own-remembered
+// cell (bot's own camp table/chest), or (c) a torch (the bot lights its own smelt camps). Any
+// other structure block (planks, door, wall, chest, another furnace...) => false, never touched.
+// Offline-unit-testable with a fake reader (exported).
+function lonelyFurnace (readBlock, cell, ownCells) {
+  const own = ownCells instanceof Set ? ownCells : new Set(ownCells || [])
+  const cx = Math.floor(cell.x); const cy = Math.floor(cell.y); const cz = Math.floor(cell.z)
+  const R = 5
+  for (let dx = -R; dx <= R; dx++) {
+    for (let dy = -R; dy <= R; dy++) {
+      for (let dz = -R; dz <= R; dz++) {
+        if (dx * dx + dy * dy + dz * dz > R * R) continue
+        const x = cx + dx; const y = cy + dy; const z = cz + dz
+        if (x === cx && y === cy && z === cz) continue // (a) the furnace cell itself
+        const b = readBlock(x, y, z)
+        if (!b || !b.name) continue // air / unloaded / natural - fine
+        if (!STRUCTURE_RE.test(b.name)) continue // natural terrain - fine
+        if (/torch/.test(b.name)) continue // (c) own smelt-camp lighting - a torch alone isn't a base
+        if (own.has(x + ',' + y + ',' + z)) continue // (b) own remembered infra next to the camp furnace
+        return false // player-built structure block adjacent - never reclaim this furnace
+      }
+    }
+  }
+  return true
+}
+
+// STEP 10 body: reclaim up to 2 scattered field furnaces per pass (>KEEP_R and <=MAX_R from the
+// hut). A bounded generalization of furnishHut's grab() - SAME primitives, NO new dig path:
+// re-read blockAt at the cell, require name==='furnace' EXACTLY (a player blast_furnace never
+// qualifies), toolForBlock('stone'), dig, collectDrops, forgetInfra. Eligibility is evaluated
+// AFTER walking to the furnace (so the lonely-furnace structure scan reads LOADED blocks - a
+// far furnace's chunk is unloaded and would scan blind; this is strictly safer than a pre-walk
+// scan). Returns the count reclaimed.
+async function consolidateFurnaces (bot, { isStopped = () => false, say = () => {} } = {}) {
+  const home = hutAnchor()
+  if (!home) return 0
+  const KEEP_R = Number(process.env.FURNACE_KEEP_R || 32) // keep the in-hut + utility-pad (hut+9,+9) furnaces
+  const MAX_R = Number(process.env.FURNACE_MAX_R || 96) // travel bound
+  const cands = listInfra('furnace', bot)
+    .map(e => ({ e, d: Math.hypot(e.x - home.x, e.z - home.z) }))
+    .filter(o => o.d > KEEP_R && o.d <= MAX_R)
+    .sort((a, b) => a.d - b.d)
+    .slice(0, 2)
+  if (!cands.length) return 0
+  const own = ownInfraCells()
+  let reclaimed = 0
+  for (const { e } of cands) {
+    if (isStopped()) break
+    // Walk there first so the chunk loads (recallAndReach pattern, provision.js:3074).
+    try { await walkStaged(bot, e.x, e.z, { range: 10, timeoutMs: 60000, isStopped }) } catch { continue } // unreachable - keep the entry, retry a later pass
+    if (isStopped()) break
+    // RE-VERIFY at dig time: the block IS a furnace (exact - stricter than INFRA_BLOCK's
+    // /furnace$/, so a player's blast_furnace never qualifies). Not a furnace => forget, NEVER dig.
+    const b = bot.blockAt(new Vec3(e.x, e.y, e.z))
+    if (!(b && b.name === 'furnace')) { forgetInfra('furnace', e); continue }
+    // ELIGIBILITY (now that the chunk is loaded): own-tagged (bot provably placed it) OR the
+    // lonely-furnace structure scan passes (nothing player-built within 5). Else skip forever.
+    const eligible = e.own === true || lonelyFurnace((x, y, z) => bot.blockAt(new Vec3(x, y, z)), e, own)
+    if (!eligible) { dbg('  consolidateFurnaces: furnace at ' + e.x + ',' + e.z + ' is near a build - leaving it'); continue }
+    if (bot.entity.position.distanceTo(b.position) > 4) { try { await gotoWithTimeout(bot, new goals.GoalNear(e.x, e.y, e.z, 2), 20000) } catch { continue } }
+    const tool = toolForBlock(bot, 'stone') // wrong-tool digs drop NOTHING
+    if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
+    if (bot.canDigBlock && !bot.canDigBlock(b)) continue
+    try {
+      await bot.dig(b)
+      await collectDrops(bot, 4) // breaking a furnace also drops its contents
+      forgetInfra('furnace', e)
+      reclaimed++
+      dbg('  consolidateFurnaces: reclaimed a field furnace at ' + e.x + ',' + e.y + ',' + e.z + ' (' + Math.round(Math.hypot(e.x - home.x, e.z - home.z)) + 'b out)')
+    } catch (err) { dbg('  consolidateFurnaces: dig failed at ' + e.x + ',' + e.z + ' (' + err.message + ')') }
+  }
+  return reclaimed
+}
+
+// STEP 11 body: walk to ONE far registered scaffold cluster within LITTER_PATROL_R of home and
+// teardownVerified it. Registry-only + hut box excluded (alsoTrail OFF - the pathfix trail
+// remembers build fabric near home). Reuses scaffold.teardownVerified UNMODIFIED (its own
+// FILLER_RE re-read + canDigBlock + exclude gates). Returns blocks removed.
+async function litterPatrol (bot, home, { isStopped = () => false, say = () => {} } = {}) {
+  const R = Number(process.env.LITTER_PATROL_R || 64)
+  const now = Date.now()
+  const hb = hutAnchor()
+  // Hut box + 2-margin: the apron's self-placed dirt must never be shaved.
+  const inHutApron = p => {
+    if (ownHutAt(p)) return true
+    if (!hb) return false
+    const m = 2
+    return p.x >= hb.x - m && p.x <= hb.x + 5 + m && p.z >= hb.z - m && p.z <= hb.z + 5 + m
+  }
+  const spots = scaffold.near(home, R).filter(s => (now - s.t > 600000) && !inHutApron(s)) // older than 10 min, not the hut apron
+  if (!spots.length) return 0
+  // Pick the densest cluster (most registry neighbors within 8; ties: oldest).
+  const neighbors = s => spots.reduce((n, o) => n + (Math.hypot(o.x - s.x, o.z - s.z) <= 8 ? 1 : 0), 0)
+  spots.sort((a, b) => (neighbors(b) - neighbors(a)) || (a.t - b.t))
+  const spot = spots[0]
+  try { await gotoWithTimeout(bot, new goals.GoalNear(spot.x, spot.y, spot.z, 3), 45000) } catch {}
+  let removed = 0
+  try {
+    const r = await scaffold.teardownVerified(bot, spot, { radius: 16, max: 48, maxPasses: 3, isStopped, exclude: p => !!ownHutAt(p) })
+    removed = (r && r.removed) || 0
+  } catch (e) { dbg('  litterPatrol: teardown failed (' + e.message + ')') }
+  try { await collectDrops(bot, 8) } catch {}
+  return removed
 }
 
 // ---- TREE FARMING (user-approved): the castle region is chopped bare, so the bot keeps
@@ -6163,8 +6308,11 @@ async function ensureFurnace (bot, opts = {}) {
   }
   let furnace = bot.findBlock({ matching: furnaceId, maxDistance: 12 })
   if (furnace && await reach(furnace)) { rememberInfra('furnace', furnace.position); return furnace }
-  // Reuse a furnace we REMEMBER before smelting 8 more cobble into a new one.
-  const knownF = await recallAndReach(bot, 'furnace', furnaceId, 64, reach)
+  // Reuse a furnace we REMEMBER before smelting 8 more cobble into a new one. fix #13: widen
+  // the recall envelope 64->96 (env FURNACE_RECALL_R) when consolidating so a smelt within
+  // ~96 of any remembered furnace walks to it instead of littering a fresh one; flag off => 64.
+  const recallR = process.env.INFRA_CONSOLIDATE !== '0' ? Number(process.env.FURNACE_RECALL_R || 96) : 64
+  const knownF = await recallAndReach(bot, 'furnace', furnaceId, recallR, reach)
   if (knownF) { rememberInfra('furnace', knownF.position); return knownF }
   if (countItem(bot, 'furnace') === 0) {
     const table = await ensureTable(bot, opts)
@@ -6183,7 +6331,7 @@ async function ensureFurnace (bot, opts = {}) {
   await placeFromInventory(bot, 'furnace')
   furnace = bot.findBlock({ matching: furnaceId, maxDistance: 8 })
   if (!furnace) throw new Error('placed a furnace but cannot find it')
-  rememberInfra('furnace', furnace.position)
+  rememberInfra('furnace', furnace.position, { own: true }) // fix #13: genuine placement => own-tagged
   return furnace
 }
 
@@ -6259,7 +6407,7 @@ async function ensureFurnaces (bot, n, opts = {}) {
       const b = bot.blockAt(pos)
       if (b && b.name === 'furnace') ok = true
     }
-    if (ok) { found.push(pos); dbg('  ensureFurnaces: placed #' + found.length + ' at ' + pos.toString()) } else dbg('  ensureFurnaces: placed but never saw a furnace block at ' + pos.toString())
+    if (ok) { found.push(pos); rememberInfra('furnace', pos, { own: true }); dbg('  ensureFurnaces: placed #' + found.length + ' at ' + pos.toString()) } else dbg('  ensureFurnaces: placed but never saw a furnace block at ' + pos.toString()) // fix #13: bulk field furnaces are now VISIBLE to reconcile/consolidation (own-tagged), not invisible litter
   }
   if (!found.length) found.push((await ensureFurnace(bot, opts)).position) // proven fallback; may throw -> task fails loudly
   return found
@@ -6644,7 +6792,7 @@ async function placeStationInInterior (bot, kind, itemName, opts = {}) {
     if (!await placeAt(bot, cell, new RegExp('^' + itemName + '$'))) { dbg('  interior place: ' + itemName + ' did not land at ' + cell.toString()); return null }
     const md = require('minecraft-data')(bot.version)
     const blk = bot.blockAt(cell)
-    if (blk && blk.name === itemName) { rememberInfra(kind, cell); dbg('  placed ' + kind + ' inside the hut at ' + cell.toString() + ' (reachable through the door, not across a wall)'); return blk }
+    if (blk && blk.name === itemName) { rememberInfra(kind, cell, { own: true }); dbg('  placed ' + kind + ' inside the hut at ' + cell.toString() + ' (reachable through the door, not across a wall)'); return blk }
     void md
   } catch (e) { dbg('  interior place failed (' + e.message + ')') }
   return null
@@ -7289,7 +7437,7 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, boundedHold, recoverFromDegraded, isRecoveringDegraded, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, markBedUnusable, bedHeld, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, boundedHold, recoverFromDegraded, isRecoveringDegraded, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, markBedUnusable, bedHeld, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, lonelyFurnace, consolidateFurnaces, litterPatrol, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
   maintenancePass, isMaintaining, stopMaintenance, _setMaintaining, courierFoodToBank, safekeepSweep, cropExclusionStep, gatherSeedsNear,
   activeJobInfo, stopSurvivalJob,
   wildTerrainMovements, trekMovements, DIGGABLE_NATURAL, STRUCTURE_RE, canBreakNaturally }

@@ -25,7 +25,14 @@ const dbg = (...a) => {
   if (dbgSink) dbgSink(line)
 }
 
-const MAX_AGE_MS = 6 * 3600 * 1000 // registry entries older than this are landscape now
+// Retention: with INFRA_CONSOLIDATE on, own-scaffold memory survives 72h (env-tunable) so the
+// far-pillar litter patrol can still claim towers that outlive a 6h window; flag off => 6h
+// exactly (byte-equivalent to fd90c9f). Longer retention is a POSITIVE own-block permission
+// (isScaffold/teardown only ever act on cells WE registered), so widening it never risks a
+// player block - the only cost is registry size, bounded by the sweep() cap guard below.
+const MAX_AGE_MS = process.env.INFRA_CONSOLIDATE !== '0'
+  ? Number(process.env.SCAFFOLD_MAX_AGE_MS || 72 * 3600 * 1000)
+  : 6 * 3600 * 1000 // registry entries older than this are landscape now
 const FILE = process.env.SCAFFOLD_FILE || path.join(__dirname, 'scaffold-registry.json')
 const reg = new Map() // "x,y,z" -> { t, purpose }
 try {
@@ -45,6 +52,13 @@ function key (p) { return `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.
 function sweep () {
   const cut = Date.now() - MAX_AGE_MS
   for (const [k, v] of reg) { if (v.t < cut) reg.delete(k) }
+  // CAP GUARD (flag-on only): a 72h retention window can outgrow the registry if the age cut
+  // frees nothing. Evict OLDEST-first down to 512 so memory stays bounded. Flag off => this is
+  // skipped and sweep() age-culls exactly as fd90c9f did (byte-equivalent).
+  if (process.env.INFRA_CONSOLIDATE !== '0' && reg.size > 512) {
+    const byAge = [...reg.entries()].sort((a, b) => a[1].t - b[1].t)
+    for (let i = 0; i < byAge.length && reg.size > 512; i++) reg.delete(byAge[i][0])
+  }
   save()
 }
 
