@@ -1044,6 +1044,19 @@ if (SCHED_ON) {
         } else { if (schedDeferNoted !== 'degraded') { schedDeferNoted = 'degraded'; note('(sched) degraded but no executor until S5 - holding') } return }
       } else return // unknown survival job name - do nothing
       if (name !== 'recover' && !executor) return
+      // NIGHT-FORAGE GUARD (#11 - live death: creeper at the hut doorstep, foraging at night un-armored):
+      // pickJob picks secureFood off the food<14 need, but at moderate hunger the crisis-grade need
+      // (threshold 6) is actually 'shelter' (night + under-armored, arbiter.js:149). Foraging OUT into
+      // the dark naked is the death - so HOLD secureFood and let the NIGHT_SHELTER reflex sleep it
+      // through; it forages at dawn. A real food<=6 / hp<=6 crisis has need food/heal (not shelter) and
+      // still dispatches below. (NIGHT_FORAGE_GUARD=0 rolls back.)
+      if (name === 'secureFood' && process.env.NIGHT_FORAGE_GUARD !== '0') {
+        let sn = null; try { sn = provision.survivalNeed(bot, { foodThreshold: Number(process.env.SCHED_CRISIS_FOOD || 6) }) } catch {}
+        if (sn && sn.need === 'shelter') {
+          if (schedDeferNoted !== 'night-forage') { schedDeferNoted = 'night-forage'; note('(sched) secureFood held - night + under-armored: sheltering, not foraging out into the dark (forage at dawn)') }
+          return
+        } else if (schedDeferNoted === 'night-forage') schedDeferNoted = ''
+      }
       // 6. BUSY vs IDLE dispatch policy (single-goal discipline).
       const bodyBusy = (commands.isBusy && commands.isBusy()) || (provision.isResting && provision.isResting()) || (provision.isSecuringFood && provision.isSecuringFood())
       if (bodyBusy) {
