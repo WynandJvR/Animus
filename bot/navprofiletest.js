@@ -198,5 +198,45 @@ t('hazardExclusion: null pos / non-fn sampler tolerated => 0; HAZARD_STEP_COST i
   assert(nav.HAZARD_STEP_COST > 0 && nav.HAZARD_STEP_COST < 100, 'cost routes around but never forbids the sole path')
 })
 
+// ---- WATER_SAFE (task #45): deepWaterHazard (DEEP vs SHALLOW step cost) ----------------------
+// A block-name sampler over an explicit water-cell set; everything else is the given floor name.
+const waterAt = (floorName, ...cells) => {
+  const set = new Set(cells.map(c => c.x + ',' + c.y + ',' + c.z))
+  return (x, y, z) => set.has(x + ',' + y + ',' + z) ? 'water' : floorName
+}
+const FEET = { x: 5, y: 40, z: 5 }
+t('deepWaterHazard: feet water + HEAD water (2-deep, submerged) => WATER_STEP_COST', () => {
+  const s = waterAt('stone', { x: 5, y: 40, z: 5 }, { x: 5, y: 41, z: 5 })
+  assert.strictEqual(nav.deepWaterHazard(FEET, s), nav.WATER_STEP_COST)
+})
+t('deepWaterHazard: feet water + water BELOW (no floor, over-the-head) => WATER_STEP_COST', () => {
+  const s = waterAt('air', { x: 5, y: 40, z: 5 }, { x: 5, y: 39, z: 5 }) // head air, but nothing to stand on
+  assert.strictEqual(nav.deepWaterHazard(FEET, s), nav.WATER_STEP_COST)
+})
+t('deepWaterHazard: 1-deep SHALLOW (feet water, head AIR, solid floor below) => 0 (farm/fishing crossing stays free)', () => {
+  const s = waterAt('stone', { x: 5, y: 40, z: 5 }) // only the feet cell is water; head=stone-name->but head is air here
+  // make head explicitly air and floor solid:
+  const s2 = (x, y, z) => (x === 5 && y === 40 && z === 5) ? 'water' : (y === 39 ? 'stone' : 'air')
+  assert.strictEqual(nav.deepWaterHazard(FEET, s2), 0)
+  assert.strictEqual(nav.deepWaterHazard(FEET, s), 0) // stone head/floor also -> not submerged, walkable
+})
+t('deepWaterHazard: DRY cell (feet not water) => 0, even beside deep water (bank/fishing spot stays free)', () => {
+  // deep water one block over (x=6), but we stand on the dry bank at x=5 -> NOT surcharged
+  const s = (x, y, z) => (x === 6) ? 'water' : (y <= 39 ? 'stone' : 'air')
+  assert.strictEqual(nav.deepWaterHazard(FEET, s), 0)
+})
+t('deepWaterHazard: flowing_water / bubble_column count as submerging liquids', () => {
+  const flow = (x, y, z) => (x === 5 && z === 5 && (y === 40 || y === 41)) ? 'flowing_water' : 'stone'
+  assert.strictEqual(nav.deepWaterHazard(FEET, flow), nav.WATER_STEP_COST)
+  const bub = (x, y, z) => (x === 5 && z === 5 && (y === 40 || y === 41)) ? 'bubble_column' : 'stone'
+  assert.strictEqual(nav.deepWaterHazard(FEET, bub), nav.WATER_STEP_COST)
+})
+t('deepWaterHazard: null pos / non-fn sampler tolerated => 0; WATER_STEP_COST is sub-forbid (<100) and > liquidCost', () => {
+  assert.strictEqual(nav.deepWaterHazard(null, () => 'water'), 0)
+  assert.strictEqual(nav.deepWaterHazard(FEET, null), 0)
+  assert(nav.WATER_STEP_COST > nav.WILD_LIQUID_COST, 'deep water costs more than a shallow crossing')
+  assert(nav.WATER_STEP_COST > 0 && nav.WATER_STEP_COST < 100, 'routes around deep water but never noPath (can still reach the river-farm)')
+})
+
 console.log(failures ? ('\n' + failures + ' FAILURE(S)') : '\nALL PASS')
 process.exit(failures ? 1 : 0)

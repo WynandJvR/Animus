@@ -22,6 +22,7 @@ const hutModel = require('./hut-model.js') // PURE self-structure model + #37 re
 const navLeg = require('./nav-leg.js') // PURE leg-planning core (NAV Phase B): Y-banded surface-trek leg goal so travelFar legs can't ride a cave 45b down to lava
 const GoalNearXZBanded = navLeg.makeGoalNearXZBanded(goals.Goal) // Y-aware drop-in for goals.GoalNearXZ (NAV_HAZARD_LEGS)
 const NAV_HAZARD_LEGS = process.env.NAV_HAZARD_LEGS !== '0' // NAV Phase B (default ON): Y-band the trek leg goal + price lava in travelMovements; =0 => today's Y-blind GoalNearXZ + no lava cost, byte-for-byte
+const WATER_SAFE = process.env.WATER_SAFE !== '0' // task #45 (default ON): price OVER-THE-HEAD water in travelMovements so legs route around a pond aquifer (shallow water stays free -> farm/fishing reachable); =0 => no water cost, byte-for-byte
 // ---- NAV Phase C flags (DESIGN-nav-overhaul.md §3 Phase C = DESIGN-navigation-redesign §5 P2-4) ----
 const NAV_LEG_PROBE = process.env.NAV_LEG_PROBE !== '0' // Phase C / §5-P2 (default ON): pre-flight getPathTo probe of a bearing leg; noPath => rotate ±60/±120 and take the first reachable (SOFT). =0 => today byte-for-byte
 const NAV_WAYPOINT_GRAPH = process.env.NAV_WAYPOINT_GRAPH !== '0' // Phase C / §5-P3 (default ON): compose proven route segments over a waypoint graph before whole-route replay / bearing. =0 => graph unused, today byte-for-byte
@@ -799,6 +800,9 @@ function travelMovements (bot) {
   // NAV Phase B: price lava (+lava-adjacent pool edges) so surface-trek legs route AROUND it at
   // plan time (cost-only, never a forbid). Flag-gated so NAV_HAZARD_LEGS=0 is byte-for-byte today.
   try { if (NAV_HAZARD_LEGS && provision.hazardStepExclusion && Array.isArray(m.exclusionAreasStep)) m.exclusionAreasStep.push(provision.hazardStepExclusion(bot)) } catch {}
+  // WATER_SAFE (task #45): price DEEP (over-the-head) water so a trek routes AROUND a pond aquifer;
+  // shallow water stays free (liquidCost) so the river-farm/fishing spots stay reachable. Cost-only.
+  try { if (WATER_SAFE && provision.waterStepExclusion && Array.isArray(m.exclusionAreasStep)) m.exclusionAreasStep.push(provision.waterStepExclusion(bot)) } catch {}
   return m
 }
 

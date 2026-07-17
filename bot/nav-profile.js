@@ -41,6 +41,18 @@ const HAZARD_OFFSETS = [
   [1, -1, 0], [-1, -1, 0], [0, -1, 1], [0, -1, -1]
 ]
 
+// WATER_SAFE (task #45): the DEEP-water STEP predicate. liquidCost (=WILD_LIQUID_COST 4) already
+// prices a water CROSSING cheaply - that keeps SHALLOW (1-deep, walkable) water free so the bot
+// can still reach its river-farm / cast a fishing line (#24). What was unpriced is OVER-THE-HEAD
+// water: a surface trek could route a leg straight into a pond aquifer and the bot drowned
+// (live 2026-07-17 x2). WATER_STEP_COST is a soft, sub-100 surcharge (< lava's 60, > liquidCost 4):
+// A* routes AROUND deep water when a dry alternative exists but degrades to the longer path
+// (never noPath, movements.js cost>100 drop threshold) when deep water is unavoidable - so farm/
+// fishing access is preserved. WATER_RE = the liquids that submerge (seagrass/kelp are decorations
+// INSIDE water and don't change depth, so they're excluded here - only the water column matters).
+const WATER_RE = /^(water|flowing_water|bubble_column)$/
+const WATER_STEP_COST = 50
+
 // Movements-level TYPE whitelist for the wild profile. The first clause is byte-identical to
 // canBreakNaturally's compound (provision.js:332) - cobble is admitted at the TYPE level ONLY
 // via SCAFFOLD_BREAK_RE, and its per-position registry gate then lives in breakExclusion (c).
@@ -100,11 +112,33 @@ function hazardExclusion (pos, sampleName) {
   return 0
 }
 
+// WATER_SAFE (task #45): the PURE deep-water STEP predicate. Returns WATER_STEP_COST iff STANDING
+// at `pos` would put the head underwater or leave no floor to stand on (over-the-head DEEP water),
+// else 0. Column-only (feet / head / below) - deliberately NOT neighbour-sampled like the lava
+// HAZARD_OFFSETS: standing on the BANK BESIDE deep water is safe (and is exactly where the bot
+// fishes / tends the river-farm), so an adjacent deep cell must never surcharge the dry bank cell.
+// Lava surcharges neighbours because it flows/burns from adjacency; deep water only drowns you
+// when you STAND in it. `sampleName(x,y,z) -> blockName|null` is the caller's live-world lookup.
+//   feet not water          -> 0 (dry ground and bank cells stay free)
+//   feet water + head water  -> DEEP (2+ deep, head submerged)
+//   feet water + water below -> DEEP (no floor within stand reach - float/sink)
+//   feet water + head air + solid floor below -> 0 (1-deep SHALLOW: walkable, stays cheap via liquidCost)
+function deepWaterHazard (pos, sampleName) {
+  if (!pos || typeof sampleName !== 'function') return 0
+  if (!WATER_RE.test(sampleName(pos.x, pos.y, pos.z) || '')) return 0
+  if (WATER_RE.test(sampleName(pos.x, pos.y + 1, pos.z) || '')) return WATER_STEP_COST
+  if (WATER_RE.test(sampleName(pos.x, pos.y - 1, pos.z) || '')) return WATER_STEP_COST
+  return 0
+}
+
 module.exports = {
   WILD_DIG_COST,
   HAZARD_RE,
   HAZARD_STEP_COST,
   hazardExclusion,
+  WATER_RE,
+  WATER_STEP_COST,
+  deepWaterHazard,
   WILD_LIQUID_COST,
   INFRA_BREAK_RADIUS,
   WILD_SCOPE_RADIUS,

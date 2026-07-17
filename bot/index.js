@@ -1419,6 +1419,10 @@ const DEFEND_WHEN_HIT_ON = process.env.DEFEND_WHEN_HIT !== '0'
 // gates byte-revert), keeps today's avoid-nav budgets, and never fires the sprint burst.
 const CREEPER_BACKOFF_ON = process.env.CREEPER_BACKOFF !== '0'
 const CREEPER_REARM_DIST = parseInt(process.env.CREEPER_REARM_DIST || '8', 10)
+// task #45 (flag WATER_SAFE, default ON): while the head is UNDERWATER the fight/flee reflex stands
+// down (RETREAT-TO-LAND, not fight) and the drown-escape fires EARLIER (block-based, not at low
+// oxygen). The bot drowned TWICE fighting a Drowned while submerged. =0 reverts both to today.
+const WATER_SAFE = process.env.WATER_SAFE !== '0'
 const CREEPER_BURST_MS = parseInt(process.env.CREEPER_BURST_MS || '2500', 10)
 // PHASE A: route the time-critical flee reflexes (burst, creeper back-off, hut-retreat approach)
 // through navigate.reactiveMove - a bounded control-driven short move - instead of a timeout-prone
@@ -1534,6 +1538,12 @@ if (process.env.AUTO_DEFEND !== '0') {
     // - we're armored and win - not passively absorbed to death (live: 'attack enderman
     // suppressed' then died). The moment we take damage, defense/flee re-engages.
     if (provision.isSheltering && provision.isSheltering() && !beingHit && !creeperClose) return
+    // task #45: HEAD UNDERWATER -> stand down. The bot drowned twice trading blows with a Drowned
+    // while submerged (`(flee) PINNED ... can't flee, fighting`). While the head is underwater the
+    // SURVIVE-tier drown-escape (AUTO_SURFACE) owns the body and swims to the nearest bank (also
+    // away from the water mob); fighting resumes the instant the head clears (on land/shallow),
+    // where the melee/flee ladder below is unchanged. WATER_SAFE=0 keeps today's fight-while-wet.
+    if (scheduler.fightSuppressedWhenSubmerged({ flagOn: WATER_SAFE, submerged: navigate.headInWater(bot) })) return
     try {
       const me = bot.entity.position
       const hp = hpNow
@@ -1966,7 +1976,13 @@ if (process.env.AUTO_SURFACE !== '0') {
     const isDrown = !!(n && n.need === 'drowning')
     if (isDrown) { wetHist = Math.min(4, wetHist + 1); if (!drownStart) drownStart = Date.now() }
     else { wetHist = Math.max(0, wetHist - 1); if (wetHist === 0) drownStart = 0; return }
-    if (wetHist < 3) return // ~3 of the last 4 polls wet (2s cadence ~= 6s submerged) before intervening
+    // task #45: in OVER-THE-HEAD (deep) water, intervene on the FIRST confirmed submerged poll
+    // instead of waiting ~6s (wetHist>=3 ~= the `low oxygen` point that lost the race). Block-based
+    // `deep` flag (bot.oxygenLevel is unreliable on live). WATER_SAFE=0 -> today's flat wetHist>=3.
+    if (WATER_SAFE) {
+      const deep = provision.deepWaterUnderfoot(bot)
+      if (!scheduler.submergedEscapeDue({ flagOn: true, submerged: true, deep, wetHist, oxygenReliable: false })) return
+    } else if (wetHist < 3) return // ~3 of the last 4 polls wet (2s cadence ~= 6s submerged) before intervening
     const persistedMs = drownStart ? Date.now() - drownStart : 0
     // Defer to an escape/recovery/rest already in progress - UNLESS drowning has persisted
     // >=16s: a recovery not producing air in 16s is failing and drowning kills in ~25s, so

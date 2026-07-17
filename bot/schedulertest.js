@@ -519,5 +519,28 @@ t('(#18) graveCooldownMs: travel failure/throw scaled by the despawn budget (min
 })
 if (_savedGU18 != null) process.env.GRAVE_URGENT = _savedGU18; else delete process.env.GRAVE_URGENT // restore ambient flag
 
+// ---- WATER_SAFE (task #45): fightSuppressedWhenSubmerged + submergedEscapeDue ----------------
+t('(#45) fightSuppressedWhenSubmerged: submerged + flag on -> suppress the fight; on land -> fight', () => {
+  assert.strictEqual(S.fightSuppressedWhenSubmerged({ flagOn: true, submerged: true }), true, 'head underwater -> stand down (drown-escape owns the body)')
+  assert.strictEqual(S.fightSuppressedWhenSubmerged({ flagOn: true, submerged: false }), false, 'on land/shallow -> the melee/flee ladder runs unchanged')
+  assert.strictEqual(S.fightSuppressedWhenSubmerged({ flagOn: false, submerged: true }), false, 'WATER_SAFE=0 -> today: fight even while submerged')
+})
+t('(#45) submergedEscapeDue: DEEP water fires on the FIRST confirmed poll (no ~6s wait)', () => {
+  assert.strictEqual(S.submergedEscapeDue({ flagOn: true, submerged: true, deep: true, wetHist: 1 }), true, 'over-the-head -> escape at wetHist 1')
+  assert.strictEqual(S.submergedEscapeDue({ flagOn: true, submerged: true, deep: true, wetHist: 0 }), false, 'needs one confirmed submerged poll first')
+})
+t('(#45) submergedEscapeDue: SHALLOW head-dip keeps today\'s ~6s (wetHist>=3) persistence', () => {
+  assert.strictEqual(S.submergedEscapeDue({ flagOn: true, submerged: true, deep: false, wetHist: 2 }), false, 'shallow + 2 polls -> wait')
+  assert.strictEqual(S.submergedEscapeDue({ flagOn: true, submerged: true, deep: false, wetHist: 3 }), true, 'shallow + 3 polls -> today\'s threshold')
+})
+t('(#45) submergedEscapeDue: oxygen only trusted when oxygenReliable (unreliable on live)', () => {
+  assert.strictEqual(S.submergedEscapeDue({ flagOn: true, submerged: true, deep: false, wetHist: 1, oxygen: 5, oxygenReliable: false }), false, 'unreliable oxygen ignored -> block-based only')
+  assert.strictEqual(S.submergedEscapeDue({ flagOn: true, submerged: true, deep: false, wetHist: 1, oxygen: 5, oxygenReliable: true }), true, 'reliable + draining -> escape at wetHist 1')
+})
+t('(#45) submergedEscapeDue: not submerged or flag off -> never due (WATER_SAFE=0 uses caller\'s wetHist>=3)', () => {
+  assert.strictEqual(S.submergedEscapeDue({ flagOn: true, submerged: false, deep: true, wetHist: 4 }), false, 'on land -> not due')
+  assert.strictEqual(S.submergedEscapeDue({ flagOn: false, submerged: true, deep: true, wetHist: 4 }), false, 'flag off -> caller falls back to its own gate')
+})
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall scheduler tests passed')
 process.exit(failures ? 1 : 0)

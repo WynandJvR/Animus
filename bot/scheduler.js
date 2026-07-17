@@ -179,6 +179,28 @@ function fightNotFlee ({ flagOn, beingHit, pinnedMs, threatDist, isCreeper }) {
   return pinnedMs >= 4000 && threatDist <= 4
 }
 
+// ---- WATER_SAFE (task #45) fight/escape arbitration ------------------------------------------
+// PURE. While the head is UNDERWATER the threat response must be RETREAT-TO-LAND, not fight: the
+// bot drowned TWICE trading blows with a Drowned in place (`(flee) PINNED ... can't flee, fighting`
+// while submerged). This suppresses the auto-defend/flee reflex so the SURVIVE-tier drown-escape
+// owns the body and swims to the nearest bank (also away from the water mob). Fighting resumes the
+// instant the head clears (on land / shallow) - the on-land ladder is unchanged. flagOn=false
+// (WATER_SAFE=0) reverts to today (always false -> the bot fights while submerged).
+function fightSuppressedWhenSubmerged ({ flagOn, submerged }) { return !!(flagOn && submerged) }
+
+// PURE. WHEN is the drown-escape due? The old AUTO_SURFACE reflex waited for ~6s of submersion
+// (wetHist>=3 ~= the `low oxygen` point) before acting and lost the race to the Drowned fight.
+// In OVER-THE-HEAD (deep) water, escape on the FIRST confirmed submerged poll - don't bank air
+// debt. oxygen is trusted ONLY when oxygenReliable (bot.oxygenLevel is unreliable on live, so the
+// block-based `deep` flag is the primary trigger). Shallow head-dip / unreliable oxygen keeps
+// today's ~6s persistence. flagOn=false (WATER_SAFE=0) -> always false (caller uses its wetHist>=3).
+function submergedEscapeDue ({ flagOn, submerged, deep, wetHist, oxygen, oxygenReliable }) {
+  if (!flagOn || !submerged) return false
+  if (deep) return (wetHist || 0) >= 1
+  if (oxygenReliable && oxygen != null && oxygen <= 12) return (wetHist || 0) >= 1
+  return (wetHist || 0) >= 3
+}
+
 // ---- pickJob ----------------------------------------------------------------------------
 // The single owning-job selector (I3, §3.2, §5 entry). null => idle. `preempt` is true only
 // when there IS an active victim whose class rank the returned job exceeds (the S4 dispatcher
@@ -446,6 +468,8 @@ module.exports = {
   commandClass,
   admissible,
   fightNotFlee,
+  fightSuppressedWhenSubmerged,
+  submergedEscapeDue,
   needProducer,
   watchdog,
   wdPhase,
