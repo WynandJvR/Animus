@@ -88,15 +88,85 @@ t('bankFood needs home reachable: unreachable bank -> deficit NOT emitted', () =
   assert.deepStrictEqual(keys(M.needs(snap({ bankFoodPts: 0, homeReachable: true }))), ['bankFood'], 'reachable bank low -> need')
 })
 
+// ==== BREAD_ENGINE: engine-aware bank floor/target =======================================
+// helper: run fn with a temporary env, always restored.
+function withEnv (overrides, fn) {
+  const saved = {}
+  for (const k of Object.keys(overrides)) saved[k] = process.env[k]
+  try {
+    for (const [k, v] of Object.entries(overrides)) { if (v == null) delete process.env[k]; else process.env[k] = v }
+    fn()
+  } finally {
+    for (const k of Object.keys(overrides)) { if (saved[k] != null) process.env[k] = saved[k]; else delete process.env[k] }
+  }
+}
+
+t('needs(): BREAD_ENGINE ON (default) -> bank floor 40 / target 80', () => {
+  withEnv({ BREAD_ENGINE: null, MAINT_BANKFOOD_FLOOR: null, MAINT_BANKFOOD_TARGET: null, BREAD_BANK_TARGET: null }, () => {
+    assert.deepStrictEqual(keys(M.needs(snap({ bankFoodPts: 39 }))), ['bankFood'], '39 < 40 floor -> need')
+    assert.deepStrictEqual(keys(M.needs(snap({ bankFoodPts: 40 }))), [], 'at 40 floor -> satisfied')
+    const n = M.needs(snap({ bankFoodPts: 0 }))[0]
+    assert.strictEqual(n.target, 80, 'engine target is 80')
+    assert.strictEqual(n.deficit, 80, 'deficit tops up to 80')
+  })
+})
+
+t('needs(): BREAD_ENGINE=0 -> legacy bank floor 16 / target 40', () => {
+  withEnv({ BREAD_ENGINE: '0', MAINT_BANKFOOD_FLOOR: null, MAINT_BANKFOOD_TARGET: null, BREAD_BANK_TARGET: null }, () => {
+    assert.deepStrictEqual(keys(M.needs(snap({ bankFoodPts: 15 }))), ['bankFood'], '15 < 16 floor -> need')
+    assert.deepStrictEqual(keys(M.needs(snap({ bankFoodPts: 16 }))), [], 'at 16 floor -> satisfied')
+    const n = M.needs(snap({ bankFoodPts: 0 }))[0]
+    assert.strictEqual(n.target, 40, 'legacy target 40')
+  })
+})
+
+t('needs(): explicit MAINT_BANKFOOD_* env overrides the engine defaults', () => {
+  withEnv({ BREAD_ENGINE: null, MAINT_BANKFOOD_FLOOR: '50', MAINT_BANKFOOD_TARGET: '60' }, () => {
+    assert.deepStrictEqual(keys(M.needs(snap({ bankFoodPts: 45 }))), ['bankFood'], '45 < explicit floor 50 -> need')
+    const n = M.needs(snap({ bankFoodPts: 0 }))[0]
+    assert.strictEqual(n.target, 60, 'explicit target wins over engine 80')
+  })
+  // BREAD_BANK_TARGET tunes the engine target when MAINT_BANKFOOD_TARGET is unset
+  withEnv({ BREAD_ENGINE: null, MAINT_BANKFOOD_TARGET: null, BREAD_BANK_TARGET: '100' }, () => {
+    assert.strictEqual(M.needs(snap({ bankFoodPts: 0 }))[0].target, 100, 'BREAD_BANK_TARGET sets engine target')
+  })
+})
+
 // ==== S6: courierPlan =====================================================================
 const names = arr => arr.map(x => x.name)
 const byName = arr => { const o = {}; for (const d of arr) o[d.name] = (o[d.name] || 0) + d.count; return o }
 
+t('courierPlan(): BREAD_ENGINE ON (default) fills the bank to 80', () => {
+  withEnv({ BREAD_ENGINE: null, MAINT_BANKFOOD_TARGET: null, BREAD_BANK_TARGET: null }, () => {
+    // cooked_beef 8 pts x10 = 80. Keep 3 (24 pts); surplus 7; bank 0->80 wants 10 -> ships all 7.
+    const plan = M.courierPlan([{ name: 'cooked_beef', count: 10, foodPoints: 8, tier: 0 }], 0, {})
+    assert.deepStrictEqual(byName(plan), { cooked_beef: 7 }, 'engine target 80 -> ships all 7 surplus')
+    // bank already at 40 is now UNDER the 80 target -> still ships toward 80.
+    const plan2 = M.courierPlan([{ name: 'bread', count: 10, foodPoints: 5, tier: 0 }], 40, {})
+    assert.deepStrictEqual(byName(plan2), { bread: 5 }, 'bank 40 < 80 target -> ships surplus 5')
+  })
+})
+
+t('courierPlan(): explicit target env / opts win over the engine default', () => {
+  withEnv({ BREAD_ENGINE: null, MAINT_BANKFOOD_TARGET: '40' }, () => {
+    const plan = M.courierPlan([{ name: 'cooked_beef', count: 10, foodPoints: 8, tier: 0 }], 0, {})
+    assert.deepStrictEqual(byName(plan), { cooked_beef: 5 }, 'explicit MAINT_BANKFOOD_TARGET=40 wins')
+  })
+  withEnv({ BREAD_ENGINE: null, MAINT_BANKFOOD_TARGET: null }, () => {
+    const plan = M.courierPlan([{ name: 'cooked_beef', count: 10, foodPoints: 8, tier: 0 }], 0, { bankTarget: 40 })
+    assert.deepStrictEqual(byName(plan), { cooked_beef: 5 }, 'opts.bankTarget wins over engine default')
+  })
+})
+
 t('courierPlan: keeps ~24 pts on the bot, ships surplus, stops filling the bank at 40', () => {
-  // cooked_beef = 8 pts (tier 0), x10 = 80 pts. bank empty. Keep ceil(24/8)=3 (24 pts);
-  // deposit until bank hits 40 -> 5 beef (40 pts). Pack retains 5.
-  const plan = M.courierPlan([{ name: 'cooked_beef', count: 10, foodPoints: 8, tier: 0 }], 0, {})
-  assert.deepStrictEqual(byName(plan), { cooked_beef: 5 }, 'ship 5 beef (bank 0->40); keep 5 (>=24 pts)')
+  // LEGACY (BREAD_ENGINE=0) target 40. cooked_beef = 8 pts (tier 0), x10 = 80 pts. bank empty.
+  // Keep ceil(24/8)=3 (24 pts); deposit until bank hits 40 -> 5 beef (40 pts). Pack retains 5.
+  const saved = process.env.BREAD_ENGINE
+  try {
+    process.env.BREAD_ENGINE = '0'
+    const plan = M.courierPlan([{ name: 'cooked_beef', count: 10, foodPoints: 8, tier: 0 }], 0, {})
+    assert.deepStrictEqual(byName(plan), { cooked_beef: 5 }, 'ship 5 beef (bank 0->40); keep 5 (>=24 pts)')
+  } finally { if (saved != null) process.env.BREAD_ENGINE = saved; else delete process.env.BREAD_ENGINE }
 })
 
 t('courierPlan: rotten_flesh (tier 2) never ships and never counts as pack keep', () => {
@@ -110,8 +180,13 @@ t('courierPlan: rotten_flesh (tier 2) never ships and never counts as pack keep'
 })
 
 t('courierPlan: bank already at/over target -> [] (nothing to do)', () => {
-  assert.deepStrictEqual(M.courierPlan([{ name: 'bread', count: 10, foodPoints: 5, tier: 0 }], 40, {}), [])
-  assert.deepStrictEqual(M.courierPlan([{ name: 'bread', count: 10, foodPoints: 5, tier: 0 }], 45, {}), [])
+  // LEGACY (BREAD_ENGINE=0) target 40.
+  const saved = process.env.BREAD_ENGINE
+  try {
+    process.env.BREAD_ENGINE = '0'
+    assert.deepStrictEqual(M.courierPlan([{ name: 'bread', count: 10, foodPoints: 5, tier: 0 }], 40, {}), [])
+    assert.deepStrictEqual(M.courierPlan([{ name: 'bread', count: 10, foodPoints: 5, tier: 0 }], 45, {}), [])
+  } finally { if (saved != null) process.env.BREAD_ENGINE = saved; else delete process.env.BREAD_ENGINE }
 })
 
 t('courierPlan: empty pack -> []; and never deposits below the pack keep', () => {

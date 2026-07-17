@@ -13,6 +13,7 @@ const memory = require('./memory.js') // persistent named waypoints
 const schematic = require('./schematic.js') // download/parse + survival physical building
 const provision = require('./provision.js') // BOM -> gather/craft plan + execution
 const resources = require('./resources.js') // unified resource model: pack + verified chests, withdraw>craft>gather
+const mining = require('./mining.js') // pure tool-durability model (toolUsesLeft) for the freshPickaxes computation
 const navigate = require('./navigate.js') // unified navigation: ONE goto + the full stuck-recovery ladder
 const planner = require('./planner.js') // re-planning goal driver (slice 1: gear-up behind the planarmor/PLANNER_GEARUP seam)
 const arbiter = require('./arbiter.js') // priority body-ownership (sticky-follow defers to a running maneuver)
@@ -89,14 +90,18 @@ function snapInventory (bot) {
     if (!items.length && !worn.length) return
     const notable = items.filter(i => /_(pickaxe|axe|sword|shovel|hoe|helmet|chestplate|leggings|boots)$|_ingot$|^diamond|^emerald/.test(i.name)).map(i => i.name)
     const count = items.reduce((s, i) => s + i.count, 0) + worn.length
-    invSnap = { count, notable: notable.concat(worn), at: Date.now() }
+    // FIX #16: bulk BUILD materials (logs/planks/wood/cobble/stone) tallied so grave-worth can
+    // credit a grave full of wood, not just "notable" gear - a meaningful stash below the generic
+    // count>=10 bulk bar was abandoned. This tally is build-only, so junk (dirt/seeds) never trips it.
+    const build = items.filter(i => /_log$|_planks$|_wood$|^cobblestone$|^stone$|^cobbled_deepslate$|^deepslate$/.test(i.name)).reduce((s, i) => s + i.count, 0)
+    invSnap = { count, notable: notable.concat(worn), build, at: Date.now() }
     // H2: any total-count change (craft/withdraw/deposit/pickup/eat/toss) is verified progress.
     if (lastItemCount !== -1 && count !== lastItemCount) touchProgress('itemDelta')
     lastItemCount = count
   } catch {}
 }
 function recordDeath (info) {
-  info.items = (Date.now() - invSnap.at < 90000) ? { count: invSnap.count, notable: invSnap.notable.slice(0, 12) } : { count: 0, notable: [] }
+  info.items = (Date.now() - invSnap.at < 90000) ? { count: invSnap.count, notable: invSnap.notable.slice(0, 12), build: invSnap.build || 0 } : { count: 0, notable: [], build: 0 }
   invSnap = { count: 0, notable: [], at: 0 } // consumed - the NEXT death starts naked until a new snap
   progAnchor = null // S7 H1: the respawn teleport must re-anchor cleanly (a huge displacement is not progress)
   deathLedger.push(info)
@@ -117,7 +122,12 @@ function graveWorthIt (d) {
   // Wooden/stone tools cost less to recraft than the trek into whatever killed you -
   // only REAL gear (iron+, any armor) or genuine bulk justifies a corpse run.
   const realGear = (it.notable || []).some(n => /^(iron|diamond|netherite|golden)_|_(helmet|chestplate|leggings|boots)$/.test(n))
-  return realGear || (it.count || 0) >= 10
+  // FIX #16 (GRAVE_BUILD_WORTH, default on): a meaningful stash of BUILD materials (logs, planks,
+  // cobble, stone) is worth a corpse run even below the generic count>=10 bulk bar - the bot used
+  // to abandon a grave holding a big stack of wood. GRAVE_BUILD_MIN (default 6, below the count bar
+  // so it genuinely widens) keeps trivial single items out. GRAVE_BUILD_WORTH=0 -> gear+count only.
+  const buildWorth = process.env.GRAVE_BUILD_WORTH !== '0' && (it.build || 0) >= Number(process.env.GRAVE_BUILD_MIN || 6)
+  return realGear || (it.count || 0) >= 10 || buildWorth
 }
 // The grave worth going back for: unretrieved, reachable (not lava), richest first.
 function bestGrave () {
@@ -668,6 +678,7 @@ function travelMovements (bot) {
     if ('scafoldingBlocks' in m) m.scafoldingBlocks = ids
   } catch { /* mcData not ready - fall back to no bridging (routes around) */ }
   try { const ex = provision.cropExclusionStep && provision.cropExclusionStep(bot); if (ex && Array.isArray(m.exclusionAreasStep)) m.exclusionAreasStep.push(ex) } catch {} // FARM_NO_TRAMPLE: treks bend around our crop cells (cost-only, never a wall/dig)
+  try { const px = provision.cropPlaceExclusion && provision.cropPlaceExclusion(bot); if (px && Array.isArray(m.exclusionAreasPlace)) m.exclusionAreasPlace.push(px) } catch {} // NO_PLACE_ON_FARM (fix #17): never bridge/place on our own farmland
   return m
 }
 
@@ -845,6 +856,33 @@ function bestArmor (pieces) {
   const order = ['netherite', 'diamond', 'iron', 'chainmail', 'golden', 'leather', 'turtle']
   for (const m of order) { const p = pieces.find(i => i.name.startsWith(m)); if (p) return p }
   return pieces[0] || null
+}
+// Material rank for a standard armor piece (same preference order as bestArmor); an empty slot or a
+// non-standard piece (elytra/carved_pumpkin) ranks 0 so it's never a downgrade target.
+const ARMOR_MAT = /^(netherite|diamond|iron|chainmail|golden|leather|turtle)_/
+const ARMOR_RANK = { turtle: 1, leather: 2, golden: 3, chainmail: 4, iron: 5, diamond: 6, netherite: 7 }
+function armorRank (name) { const m = ARMOR_MAT.exec(name || ''); return m ? (ARMOR_RANK[m[1]] || 0) : 0 }
+// FIX #19 (EQUIP_CARRIED_ARMOR): wear STRICTLY-BETTER armor already in the pack, per slot. This is
+// CARRIED-ONLY - it never treks/gathers/crafts (that's provisionArmor/armorup). Equipping is an
+// instant inventory op (no move/dig/nav, zero grief risk), so the index.js reflex runs it even
+// while the body is BUSY - the reason a respawned/graved bot built naked with iron in the pack.
+// Only fills an empty slot or up-tiers a lower-material piece; never touches a special piece
+// (elytra/carved_pumpkin) worn in a slot. Returns the newly-worn piece names.
+async function equipCarriedArmor (bot) {
+  if (!bot || !bot.entity || !bot.inventory) return []
+  if (bot.currentWindow) return [] // a chest/crafting GUI is mid-transaction - don't clobber slots
+  const inv = bot.inventory.items ? bot.inventory.items() : []
+  const worn = wornArmor(bot)
+  const wore = []
+  for (const slot of ['head', 'torso', 'legs', 'feet']) {
+    const cur = worn[slot]
+    if (cur && !ARMOR_MAT.test(cur)) continue // a special piece (elytra/pumpkin) - leave it
+    const curRank = armorRank(cur)
+    const cand = bestArmor(inv.filter(i => armorSlot(i.name) === slot && ARMOR_MAT.test(i.name)))
+    if (!cand || armorRank(cand.name) <= curRank) continue // nothing strictly better carried
+    try { await bot.equip(cand, slot); wore.push(cand.name) } catch { /* transient - retry next tick */ }
+  }
+  return wore
 }
 
 // Leather-armor pieces in PROTECTION-PER-LEATHER order, so a partial haul still
@@ -2993,7 +3031,23 @@ async function autoBuild (bot, schem, at, opts = {}) {
             const bedCell = findCell(/_bed$/)
             if (bedCell) { const bb = bot.blockAt(bedCell); if (bb && /_bed$/.test(bb.name)) { try { await bot.activateBlock(bb); provision.rememberBed(bedCell) } catch {} } }
             try { await handle(bot, 'remember hut') } catch {}
-            say('safehouse built clean - walls, door, bed, furnace, bank all in place')
+            // VERIFY_SUCCESS_MSG (fix #36): don't CLAIM "built clean" unless the world actually
+            // matches the schematic now. Re-run the SAME grounded mismatch scan (furniture cells
+            // included) AFTER the full rebuild+bed+bank; only bad2===0 earns the success line, else
+            // say the honest count and leave the repair unsatisfied so the next camp pass retries
+            // (bad is recomputed fresh each pass, so nothing else needs resetting).
+            let bad2 = 0
+            if (process.env.VERIFY_SUCCESS_MSG !== '0') {
+              for (let y = st.y; y <= en.y; y++) for (let z = st.z; z <= en.z; z++) for (let x = st.x; x <= en.x; x++) {
+                const w = hutSchem.getBlock(new Vec3(x, y, z)); const g = bot.blockAt(new Vec3(hutAt.x + x, hutAt.y + y, hutAt.z + z))
+                if (!g) continue
+                const wantAir = !w || !w.name || AIRRE.test(w.name)
+                if (wantAir ? !AIRRE.test(g.name) : g.name !== w.name) bad2++
+              }
+            }
+            const builtClean = process.env.VERIFY_SUCCESS_MSG === '0' || (bad2 === 0 && hr && hr.total && hr.placed >= hr.total)
+            if (builtClean) say('safehouse built clean - walls, door, bed, furnace, bank all in place')
+            else { dbg('camp: rebuild NOT clean - ' + bad2 + ' cell(s) still off, placed ' + (hr && hr.placed) + '/' + (hr && hr.total)); say('patched the safehouse but ' + bad2 + ' cell(s) still off - will retry') }
           }
         }
         // LIVEABILITY - runs EVERY camp pass, even when no rebuild is due (bad <= 3). The
@@ -3121,7 +3175,10 @@ async function autoBuild (bot, schem, at, opts = {}) {
       // pack-only plan re-gathered logs for sticks while the bank held a hundred. The
       // target item itself is HIDDEN: `batch` is already the shortfall net of everything
       // owned, so crediting it again emits an empty plan (verified: dirt 8/14 stuck).
-      const freshPicks = (bot.inventory ? bot.inventory.items() : []).filter(i => i.name === 'wooden_pickaxe' && !(i.durabilityUsed > 0)).length
+      // INV_TOOLBANK: a pick that dug ONE block is no longer "fresh" today -> planner sees 0 picks
+      // and crafts more. Count picks with real durability left instead (threshold = needReTool's low).
+      // Flag off => the old strictly-unworn count (byte-for-byte).
+      const freshPicks = (bot.inventory ? bot.inventory.items() : []).filter(i => i.name === 'wooden_pickaxe' && ((process.env.INV_DISCIPLINE !== '0' && process.env.INV_TOOLBANK !== '0') ? mining.toolUsesLeft('wooden_pickaxe', i.durabilityUsed || 0) >= Number(process.env.INV_PICK_MIN_USES || 20) : !(i.durabilityUsed > 0))).length
       const rec = await resources.reconcile(bot, { [name]: batch }, { near: home, hide: [name], planOpts: { primaryWood, freshPickaxes: freshPicks, furnacesNearby: provision.countFurnacesNear(bot) } })
       const plan = rec.plan
       dbg('material', name, have + '/' + need, '-> withdraw:', rec.withdraws.map(w => `${w.count} ${w.item}`).join(',') || 'none', '| plan:', plan.tasks.map(t => `${t.type}:${t.item || t.output}`).join(',') || '(empty)', '| unobtainable:', Object.keys(plan.unobtainable || {}).join(',') || 'none')
@@ -3175,7 +3232,8 @@ async function autoBuild (bot, schem, at, opts = {}) {
   // BOUNDED batch (16..64), gated on BUILD_SELF_GATHER. Returns 'unobtainable' | 'gained' | 'none'.
   const gatherShort = async (name, cnt) => {
     const batch = Math.min(64, Math.max(cnt || 1, 16)) // never one-block-at-a-time
-    const freshPicks = (bot.inventory ? bot.inventory.items() : []).filter(i => i.name === 'wooden_pickaxe' && !(i.durabilityUsed > 0)).length
+    // INV_TOOLBANK: durability-aware fresh-pick count (see the material loop). Flag off => old count.
+    const freshPicks = (bot.inventory ? bot.inventory.items() : []).filter(i => i.name === 'wooden_pickaxe' && ((process.env.INV_DISCIPLINE !== '0' && process.env.INV_TOOLBANK !== '0') ? mining.toolUsesLeft('wooden_pickaxe', i.durabilityUsed || 0) >= Number(process.env.INV_PICK_MIN_USES || 20) : !(i.durabilityUsed > 0))).length
     const rec = await resources.reconcile(bot, { [name]: batch }, { near: home, hide: [name], planOpts: { primaryWood, freshPickaxes: freshPicks, furnacesNearby: provision.countFurnacesNear(bot) } })
     if (Object.keys(rec.plan.unobtainable || {}).length) return 'unobtainable'
     const before = provision.inventoryCounts(bot)[name] || 0
@@ -3407,4 +3465,4 @@ async function resumeBuild (bot) {
   }
 }
 
-module.exports = { handle, state, setupMovements, travelMovements, eatFood, placeTorchNearby, isBusy, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume, flagSpawnSuspect, worthwhileGrave, shouldChaseGrave, graveLootVerdict, gravesSnapshot, activityInfo, preemptForSurvival, setDebugSink, finishDisposition, resumeHoldRemaining, markResumePaused, touchProgress, progressInfo, markStalled, _resetProgress }
+module.exports = { handle, state, setupMovements, travelMovements, eatFood, placeTorchNearby, isBusy, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume, flagSpawnSuspect, worthwhileGrave, shouldChaseGrave, graveLootVerdict, gravesSnapshot, equipCarriedArmor, activityInfo, preemptForSurvival, setDebugSink, finishDisposition, resumeHoldRemaining, markResumePaused, touchProgress, progressInfo, markStalled, _resetProgress }

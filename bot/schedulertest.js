@@ -349,5 +349,107 @@ t('(S5) composition: every totality-sweep snapshot has >=1 feasible rung (or rer
       }
 })
 
+// ---- (opp) oppMaintain: the opportunistic at-hut maintenance window predicate ------------
+// PURE. Position-gated + survival-yielding + build-era-only; preempt true only when a build
+// is actively running (idle+saved resumes without a preempt). checkupDue relaxes the buffer gate.
+t('(opp) at hut + active autobuild + maintainNeeded -> ok, preempt (chores while the build passes home)', () => {
+  const s = snap({ homeDist: 10, activeJob: { name: 'autobuild', cls: 'progress' }, maintainNeeded: true })
+  const r = S.oppMaintain(s, { checkupDue: false })
+  assert.strictEqual(r.ok, true, 'window opens: ' + r.reason)
+  assert.strictEqual(r.preempt, true, 'a running build must be preempt-paused')
+})
+
+t('(opp) homeDist 30 (>24 default) -> not at the hut; with OPP_MAINTAIN_DIST=40 it opens', () => {
+  const s = snap({ homeDist: 30, activeJob: { name: 'autobuild', cls: 'progress' }, maintainNeeded: true })
+  assert.strictEqual(S.oppMaintain(s, { checkupDue: false }).ok, false, '30b is outside the 24b default radius')
+  process.env.OPP_MAINTAIN_DIST = '40'
+  try {
+    const r = S.oppMaintain(s, { checkupDue: false })
+    assert.strictEqual(r.ok, true, '30b <= 40b radius -> opens')
+    assert.strictEqual(r.preempt, true)
+  } finally { delete process.env.OPP_MAINTAIN_DIST }
+})
+
+t('(opp) homeDist null (no home / off-map) -> never opens', () => {
+  const s = snap({ homeDist: null, activeJob: { name: 'autobuild', cls: 'progress' }, maintainNeeded: true })
+  assert.strictEqual(S.oppMaintain(s, { checkupDue: true }).ok, false)
+})
+
+t('(opp) survival need present (food 4) -> survival wins, no window', () => {
+  const s = snap({ homeDist: 10, food: 4, activeJob: { name: 'autobuild', cls: 'progress' }, maintainNeeded: true })
+  const r = S.oppMaintain(s, { checkupDue: true })
+  assert.strictEqual(r.ok, false)
+  assert(/survival/i.test(r.reason), 'reason is survival: ' + r.reason)
+})
+
+t('(opp) degraded (deathsRecent 2) / flee (creeper 8b) -> not chore time', () => {
+  // deathsRecent>=2 is degraded but raises no direct survival need (vitals fine) -> exercises the degraded branch
+  const degraded = snap({ homeDist: 10, deathsRecent: 2, activeJob: { name: 'autobuild', cls: 'progress' }, maintainNeeded: true })
+  assert.strictEqual(S.oppMaintain(degraded, { checkupDue: true }).ok, false, 'degraded -> no window')
+  const flee = snap({ homeDist: 10, creeperDist: 8, activeJob: { name: 'autobuild', cls: 'progress' }, maintainNeeded: true })
+  assert.strictEqual(S.oppMaintain(flee, { checkupDue: true }).ok, false, 'creeper in blast band -> no window')
+})
+
+t('(opp) active gather (progress, not autobuild) -> no window (never abort a non-resumable job)', () => {
+  const s = snap({ homeDist: 10, activeJob: { name: 'gather', cls: 'progress' }, maintainNeeded: true })
+  const r = S.oppMaintain(s, { checkupDue: true })
+  assert.strictEqual(r.ok, false)
+  assert(/build era/i.test(r.reason), 'reason: no build era, got: ' + r.reason)
+})
+
+t('(opp) idle + persistedBuild + maintainNeeded -> ok, NO preempt (resume-gap window)', () => {
+  const s = snap({ homeDist: 10, activeJob: null, persistedBuild: true, maintainNeeded: true })
+  const r = S.oppMaintain(s, { checkupDue: false })
+  assert.strictEqual(r.ok, true, 'window opens in the resume gap: ' + r.reason)
+  assert.strictEqual(r.preempt, false, 'nothing to pause when idle')
+})
+
+t('(opp) idle + no saved build -> no build era, no window', () => {
+  const s = snap({ homeDist: 10, activeJob: null, persistedBuild: false, maintainNeeded: true })
+  assert.strictEqual(S.oppMaintain(s, { checkupDue: true }).ok, false)
+})
+
+t('(opp) maintainNeeded false: checkupDue toggles the window', () => {
+  const s = snap({ homeDist: 10, activeJob: null, persistedBuild: true, maintainNeeded: false })
+  assert.strictEqual(S.oppMaintain(s, { checkupDue: false }).ok, false, 'buffers fine + checkup not due -> closed')
+  const r = S.oppMaintain(s, { checkupDue: true })
+  assert.strictEqual(r.ok, true, 'checkup due lets homeRepair/safekeep run even with buffers fine')
+  assert.strictEqual(r.preempt, false)
+})
+
+t('(opp) non-regression: oppMaintain is a separate authority - pickJob still continues the build', () => {
+  const s = snap({ homeDist: 10, activeJob: { name: 'autobuild', cls: 'progress' }, maintainNeeded: true })
+  const pj = S.pickJob(s)
+  assert.strictEqual(pj.job, 'autobuild', 'pickJob unchanged: active progress continues')
+  assert.strictEqual(pj.cls, 'progress')
+  assert.notStrictEqual(pj.cls, 'maintain', 'pickJob never surfaces maintain over the build (oppMaintain is the only path)')
+})
+
+// ---- (#15) fightNotFlee: melee beats an unsatisfiable flee when pinned + hit --------------
+// PURE predicate (§7.1). hp is NOT an input by design. flagOn=false reverts to today (false).
+t('(#15) fightNotFlee: flag off -> always false', () => {
+  assert.strictEqual(S.fightNotFlee({ flagOn: false, beingHit: true, pinnedMs: 9000, threatDist: 2, isCreeper: false }), false, 'DEFEND_WHEN_HIT=0 -> never converts')
+})
+t('(#15) fightNotFlee: not being hit -> false', () => {
+  assert.strictEqual(S.fightNotFlee({ flagOn: true, beingHit: false, pinnedMs: 9000, threatDist: 2, isCreeper: false }), false, 'no hits -> normal flee')
+})
+t('(#15) fightNotFlee: hit + pinned >=4s + dist <=4 + non-creeper -> true', () => {
+  assert.strictEqual(S.fightNotFlee({ flagOn: true, beingHit: true, pinnedMs: 4000, threatDist: 4, isCreeper: false }), true, 'wedged + in reach -> fight')
+  assert.strictEqual(S.fightNotFlee({ flagOn: true, beingHit: true, pinnedMs: 8000, threatDist: 1, isCreeper: false }), true)
+})
+t('(#15) fightNotFlee: creeper -> false (burst away, never melee)', () => {
+  assert.strictEqual(S.fightNotFlee({ flagOn: true, beingHit: true, pinnedMs: 9000, threatDist: 2, isCreeper: true }), false, 'NO_AUTO_MELEE: never punch a creeper')
+})
+t('(#15) fightNotFlee: dist 5 (out of melee reach) -> false', () => {
+  assert.strictEqual(S.fightNotFlee({ flagOn: true, beingHit: true, pinnedMs: 9000, threatDist: 5, isCreeper: false }), false, 'out of reach -> keep fleeing')
+})
+t('(#15) fightNotFlee: pinned 3.9s (< 4s) -> false', () => {
+  assert.strictEqual(S.fightNotFlee({ flagOn: true, beingHit: true, pinnedMs: 3900, threatDist: 2, isCreeper: false }), false, 'not pinned long enough')
+})
+t('(#15) fightNotFlee: hp is irrelevant (not an input)', () => {
+  // same inputs, no hp field -> still true; the predicate must not read hp
+  assert.strictEqual(S.fightNotFlee({ flagOn: true, beingHit: true, pinnedMs: 5000, threatDist: 3, isCreeper: false }), true)
+})
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall scheduler tests passed')
 process.exit(failures ? 1 : 0)

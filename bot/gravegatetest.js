@@ -183,6 +183,28 @@ const near = (a, b, tol) => Math.abs(a - b) <= (tol == null ? 0.5 : tol)
   eq(r.graves[0].dist, null, 'no pos AND no home -> dist null')
 }
 
+// ---- FIX #16: build materials count toward grave-worth (a grave full of wood is no longer abandoned)
+// (16a) 8 build-material items (below the count>=10 bulk bar) -> LISTED (worth the corpse run)
+{
+  const woodGrave = { x: 418, y: 65, z: 88, at: NOW, items: { notable: [], count: 8, build: 8 } }
+  const r = C.gravesSnapshot({ pos: home, home, now: NOW, ledger: [woodGrave] })
+  eq(r.graves.length, 1, 'FIX #16: grave with 8 build-material items (below count>=10) -> LISTED')
+}
+// (16b) trivial NON-build junk under the bulk bar is still written off (no chasing single items)
+{
+  const junkSmall = { x: 418, y: 65, z: 88, at: NOW, items: { notable: [], count: 3, build: 0 } }
+  const r = C.gravesSnapshot({ pos: home, home, now: NOW, ledger: [junkSmall] })
+  eq(r.graves.length, 0, 'FIX #16: 3 non-build junk items -> NOT listed (no trivial chasing)')
+}
+// (16c) rollback: GRAVE_BUILD_WORTH=0 restores gear+count only (build-material grave abandoned)
+{
+  process.env.GRAVE_BUILD_WORTH = '0'
+  const woodGrave = { x: 418, y: 65, z: 88, at: NOW, items: { notable: [], count: 8, build: 8 } }
+  const r = C.gravesSnapshot({ pos: home, home, now: NOW, ledger: [woodGrave] })
+  eq(r.graves.length, 0, 'FIX #16 rollback: GRAVE_BUILD_WORTH=0 -> build-material grave NOT listed')
+  delete process.env.GRAVE_BUILD_WORTH
+}
+
 // ---- COMPOSITION: the REAL exporter shape feeds the pure scheduler (proves gravesSnapshot ->
 // pickJob matches what schedulertest built by hand for the headline livelock, §5 case 7+).
 {

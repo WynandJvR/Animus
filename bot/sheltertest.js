@@ -108,6 +108,26 @@ t('bedHoldMs: policy table (transient=0, monsters=short, unusable=night)', () =>
   assert.ok(S.BED_HOLD_MS > 0 && S.BED_HOLD_MONSTER_MS > 0 && S.BED_HOLD_FELLSHORT_MS > 0)
 })
 
+// ---- fix #30: SHELTER_AVOID_FARM - never bunker into our own wheat farm --------------------
+t('farmConflict: within r of the anchor -> true, clear of it -> false', () => {
+  const anchor = { x: 100, y: 64, z: 200 }
+  assert.strictEqual(S.farmConflict(anchor, [], { x: 103, z: 200 }, 7), true, '3b from the anchor is inside the buffer')
+  assert.strictEqual(S.farmConflict(anchor, [], { x: 120, z: 200 }, 7), false, '20b away is clear')
+})
+
+t('farmConflict: near a far-flung CELL even when the anchor is distant -> true', () => {
+  const anchor = { x: 100, y: 64, z: 200 }
+  const cells = [{ x: 140, y: 64, z: 240 }] // a strip cell well away from the anchor
+  assert.strictEqual(S.farmConflict(anchor, cells, { x: 142, z: 241 }, 7), true, 'a pit beside a farm CELL floods it too')
+  assert.strictEqual(S.farmConflict(anchor, cells, { x: 160, z: 260 }, 7), false, 'clear of both anchor and cells')
+})
+
+t('farmConflict: guards - no pos, r<=0, no farm -> false (never blocks)', () => {
+  assert.strictEqual(S.farmConflict({ x: 0, z: 0 }, [], null, 7), false, 'no position')
+  assert.strictEqual(S.farmConflict({ x: 0, z: 0 }, [], { x: 0, z: 0 }, 0), false, 'r<=0 never conflicts')
+  assert.strictEqual(S.farmConflict(null, [], { x: 0, z: 0 }, 7), false, 'no farm -> no conflict')
+})
+
 // ---- fix #14: the now-injectable bed-hold state helpers (provision.js) --------------------
 // markBedUnusable/bedHeld are pure w.r.t. their `now` arg (no world I/O), so table-test them
 // here. WORLD_MEM_FILE is redirected to scratch so requiring provision.js never touches live

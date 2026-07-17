@@ -155,6 +155,17 @@ function admissible (cmdClass, snapshot) {
   return { allow: true, reason: "progress admissibility is the busy-gate's job, not survival" }
 }
 
+// ---- fightNotFlee -----------------------------------------------------------------------
+// PURE predicate (#15 Piece B). While actively being hit AND pinned (no net movement) with the
+// threat in melee reach, an unsatisfiable flee goal just shoves the wall forever - melee it
+// instead. Never melees a creeper (NO_AUTO_MELEE - the caller bursts away instead). hp is NOT an
+// input by design. flagOn=false (DEFEND_WHEN_HIT=0) reverts to today (always false).
+function fightNotFlee ({ flagOn, beingHit, pinnedMs, threatDist, isCreeper }) {
+  if (!flagOn || !beingHit) return false
+  if (isCreeper) return false            // never melee a creeper (burst instead)
+  return pinnedMs >= 4000 && threatDist <= 4
+}
+
 // ---- pickJob ----------------------------------------------------------------------------
 // The single owning-job selector (I3, §3.2, §5 entry). null => idle. `preempt` is true only
 // when there IS an active victim whose class rank the returned job exceeds (the S4 dispatcher
@@ -202,6 +213,28 @@ function pickJob (snapshot) {
 
   // 6. idle
   return null
+}
+
+// ---- oppMaintain (OPPORTUNISTIC MAINTENANCE) ---------------------------------------------
+// PURE. May a bounded maintenance window open RIGHT NOW, given that the build era normally
+// starves maintain (pickJob:194-201)? Flag-gated at the CALL SITE (index OPP_ON); this
+// predicate is total and side-effect-free so it unit-tests offline.
+// opts.checkupDue: caller-computed "no window for OPP_CHECKUP_MS" bit - lets homeRepair/
+// safekeep run even when maintain.needs() is empty (hut damage + pack surplus are not
+// snapshot buffers). Returns { ok, preempt, reason }.
+function oppMaintain (snapshot, opts) {
+  const s = snapshot || {}
+  const o = opts || {}
+  const dist = Number(process.env.OPP_MAINTAIN_DIST || 24)
+  if (!(s.homeDist != null && s.homeDist <= dist)) return { ok: false, reason: 'not at the hut (' + (s.homeDist == null ? '?' : Math.round(s.homeDist)) + 'b)' }
+  if (arbiter.jobSurvivalNeed(s)) return { ok: false, reason: 'survival need first' }
+  if (fleeActive(s) || isDegraded(s)) return { ok: false, reason: 'danger/degraded - not chore time' }
+  const aj = s.activeJob
+  const buildRunning = !!(aj && aj.cls === 'progress' && aj.name === 'autobuild')
+  const idleWithSaved = !aj && !!s.persistedBuild
+  if (!buildRunning && !idleWithSaved) return { ok: false, reason: 'no build era to be opportunistic inside' }
+  if (!(s.maintainNeeded || o.checkupDue)) return { ok: false, reason: 'buffers fine + checkup not due' }
+  return { ok: true, preempt: buildRunning, reason: buildRunning ? 'at the hut mid-build - chores while i\'m here' : 'at the hut in a resume gap - chores while i\'m here' }
 }
 
 // ---- recoveryPlan -----------------------------------------------------------------------
@@ -363,12 +396,14 @@ function wdPhase (prev, verdict, jobKey) {
 
 module.exports = {
   pickJob,
+  oppMaintain,
   recoveryPlan,
   rungFeasible,
   ladderDone,
   isDegraded,
   commandClass,
   admissible,
+  fightNotFlee,
   needProducer,
   watchdog,
   wdPhase,

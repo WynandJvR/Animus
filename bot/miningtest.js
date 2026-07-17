@@ -201,5 +201,18 @@ t('deepMinePlan: naked digs shallower/shorter with fewer torches; armored gets t
   assert.strictEqual(M.deepMinePlan(4, { targetY: 8 }).targetY, 8, 'IRON_TARGET_Y-style override')
 })
 
+t('sweepDue: batched-harvest cadence fires on every Nth step (mine-one-pause-one fix)', () => {
+  // every=4: a sweep is due at step COUNT 4,8,12 -> 0-based indices 3,7,11; never at 0,1,2
+  assert.strictEqual(M.sweepDue(0, 4), false, 'step 0 -> no sweep')
+  assert.strictEqual(M.sweepDue(1, 4), false, 'step 1 -> no sweep')
+  assert.strictEqual(M.sweepDue(2, 4), false, 'step 2 -> no sweep')
+  assert.strictEqual(M.sweepDue(3, 4), true, 'step 3 (4th step) -> sweep')
+  assert.strictEqual(M.sweepDue(7, 4), true, 'step 7 (8th step) -> sweep')
+  assert.strictEqual(M.sweepDue(11, 4), true, 'step 11 (12th step) -> sweep')
+  assert.strictEqual(M.sweepDue(4, 4), false, 'step 4 -> not yet (next is 7)')
+  // every=1 -> every step (the MINE_FLUID=0 legacy shape)
+  for (let i = 0; i < 6; i++) assert.strictEqual(M.sweepDue(i, 1), true, 'every=1 sweeps every step (legacy cadence)')
+})
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall mining-strategy tests passed')
 process.exit(failures ? 1 : 0)

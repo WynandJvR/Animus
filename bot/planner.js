@@ -26,6 +26,7 @@ const { goals } = require('mineflayer-pathfinder')
 const provision = require('./provision.js')
 const resources = require('./resources.js')
 const navigate = require('./navigate.js')
+const mining = require('./mining.js') // pure tool-durability model (toolUsesLeft) for the freshPickaxes computation
 
 let dbgSink = null
 function setDebugSink (fn) { dbgSink = fn }
@@ -261,7 +262,9 @@ async function runGoal (bot, goal, opts = {}) {
     // vouch for UNWORN picks or the durability rule re-plans a fresh one EVERY round
     // (planProvision zeroes possibly-worn picks; per-round re-planning turns that into
     // an infinite pick-crafting loop - caught by the offline walk test)
-    freshPickaxes: (bot.inventory ? bot.inventory.items() : []).filter(i => i.name === 'wooden_pickaxe' && !(i.durabilityUsed > 0)).length
+    // INV_TOOLBANK: count picks with real durability left (a 1-block pick is still fine), not just
+    // strictly-unworn ones. Flag off => the old strictly-unworn count (byte-for-byte).
+    freshPickaxes: (bot.inventory ? bot.inventory.items() : []).filter(i => i.name === 'wooden_pickaxe' && ((process.env.INV_DISCIPLINE !== '0' && process.env.INV_TOOLBANK !== '0') ? mining.toolUsesLeft('wooden_pickaxe', i.durabilityUsed || 0) >= Number(process.env.INV_PICK_MIN_USES || 20) : !(i.durabilityUsed > 0))).length
   })
   // in-run strike ledger: key -> {fails, until}. Short + escalating - a strike means
   // "try something ELSE for a bit", never "park the whole job".

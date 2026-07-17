@@ -102,4 +102,15 @@ function shouldTrekHomeForFood ({ distHome, bankFoodPts, wheatCount, hasFarm } =
 // How many bread can we bake from N wheat (3 wheat -> 1 bread). PURE arithmetic, offline-tested.
 function breadFromWheat (wheatCount) { return Math.max(0, Math.floor((wheatCount || 0) / 3)) }
 
-module.exports = { DEFAULT_BUFFER, BAD_FOOD, RAW_COOKABLE_FOOD, foodTier, hasFoodSupply, needsFoodSupply, shouldSweepForFood, foodSupplyAction, shouldTrekHomeForFood, breadFromWheat }
+// How much banked wheat to withdraw so a bake can top the banked reserve up to target.
+// 3 wheat -> 1 bread -> 5 pts. Bounded by capWheat (default 33 = 11 loaves/pass).
+function wheatWithdrawForBake ({ packWheat, bankWheat, bankFoodPts, bankTargetPts } = {}, opts = {}) {
+  const cap = opts.capWheat != null ? opts.capWheat : 33
+  const deficitPts = Math.max(0, (bankTargetPts || 0) - (bankFoodPts || 0))
+  if (deficitPts <= 0) return 0
+  const loaves = Math.ceil(deficitPts / 5)
+  const need = Math.max(0, loaves * 3 - (packWheat || 0))
+  return Math.max(0, Math.min(bankWheat || 0, need, cap))
+}
+
+module.exports = { DEFAULT_BUFFER, BAD_FOOD, RAW_COOKABLE_FOOD, foodTier, hasFoodSupply, needsFoodSupply, shouldSweepForFood, foodSupplyAction, shouldTrekHomeForFood, breadFromWheat, wheatWithdrawForBake }

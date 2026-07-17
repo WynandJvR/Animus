@@ -33,6 +33,7 @@ const SCHED_ON = process.env.SCHEDULER !== '0' // master flag: SCHEDULER=0 resto
 const LADDER_ON = SCHED_ON && process.env.RECOVERY_LADDER !== '0' // S5: RECOVERY_LADDER=0 restores S4's recoveryLadder DOWNGRADE + the one-shot respawn grave gating byte-for-byte
 const MAINTAIN_ON = SCHED_ON && process.env.MAINTAIN !== '0' // S6: MAINTAIN=0 restores the defer-note + the four proactive reflexes on their old timers byte-for-byte
 const WATCHDOG_ON = SCHED_ON && process.env.WATCHDOG !== '0' // S7: the in-process forward-progress watchdog. WATCHDOG=0 -> no interval, no heartbeat merge, no wdPhase call; the touchProgress hooks remain as inert timestamps nobody reads (behaviorally byte-identical)
+const OPP_ON = MAINTAIN_ON && process.env.OPPORTUNISTIC_MAINTAIN !== '0' // opportunistic at-hut maintenance during the build era; OPPORTUNISTIC_MAINTAIN=0 restores S6 byte-for-byte
 
 // Live brain settings the dashboard can change on the fly; brain-llm.js polls
 // GET /brain each tick and switches model / goal / on-off without a restart.
@@ -277,6 +278,7 @@ if (process.env.AUTO_RESUME !== '0') {
       if (!saved) return
       if (commands.isBusy && commands.isBusy()) return
       if (provision.isResting && provision.isResting()) return
+      if (provision.isMaintaining && provision.isMaintaining()) return // an opp/idle maintenance pass owns the body - resume right after it
       // Don't fight the scheduler: while a survival need is active IT owns the body (actively
       // preempting the build for recovery), so re-issuing `resumebuild` every 2min just churns -
       // the body gets yanked toward the site, then bumped straight back to survival, spamming
@@ -736,6 +738,23 @@ if (process.env.AUTO_EAT !== '0') {
   }, 4000)
 }
 
+// FIX #19: wear better armor already in the pack even while BUSY. After a respawn or grave-loot the
+// bot can carry armor it isn't wearing because equipping only happened in the busy-gated gearup path
+// - so it built naked with iron in the pack. Equipping is an instant inventory op (no move/dig/nav/
+// grief), so this reflex is DELIBERATELY NOT muzzled by isBusy (mirroring auto-eat). Carried-only:
+// commands.equipCarriedArmor never treks/gathers/crafts (that's armorup). Set EQUIP_CARRIED_ARMOR=0.
+let equippingArmor = false
+if (process.env.EQUIP_CARRIED_ARMOR !== '0') {
+  setInterval(async () => {
+    if (equippingArmor || !bot.entity || bot.health <= 0) return
+    equippingArmor = true
+    try {
+      const wore = await commands.equipCarriedArmor(bot)
+      if (wore && wore.length) note(`(auto-equip) put on carried armor: ${wore.join(', ')}`)
+    } catch { /* transient - retry next tick */ } finally { equippingArmor = false }
+  }, 5000).unref?.()
+}
+
 // Cook reflex: idle near a furnace with raw meat in the pack -> cook it, like a player
 // tidying up after a hunt. Opportunistic (existing furnace + pack fuel only; provision
 // runs also cook right after each smelt while the furnace is hot). Only when IDLE so it
@@ -873,6 +892,7 @@ if (process.env.HP_CRISIS !== '0') {
 let buildingFoodSupply = false
 if (process.env.FOOD_SUPPLY !== '0') {
   setInterval(async () => {
+    try { provision.noteWaterCrossing(bot) } catch {} // FARM_EXPAND passive river-crossing note (self-throttled <=1/60s, O(1), never navigates) - runs before the MAINTAIN gate so it ticks in every era
     if (MAINTAIN_ON) return // S6: farm tend/expand is maintain step 2. FOOD_SUPPLY=0 still disables step 2.
     if (buildingFoodSupply || !bot.entity) return
     if (commands.isBusy && commands.isBusy()) return // a job owns the body
@@ -1025,6 +1045,7 @@ let schedGraveCooldownUntil = 0 // failed grave recovery -> don't hammer an unre
 let schedLadderCooldownUntil = 0 // S5: honest ladder non-completion -> don't re-run every 15s
 let schedHpCooldownUntil = 0    // mirror of hpCrisisCooldownUntil (index.js hp-crisis)
 let schedMaintainCooldownUntil = 0 // S6: 10 min after a completed pass, 5 min after a no-op/bail (mirrors schedLadderCooldownUntil)
+let schedOppLastWindowAt = 0 // last opportunistic window CLOSE (drives the checkupDue bit)
 let schedDeferNoted = ''        // one note per deferred job kind (nightShelter/maintain/degraded/ladder-reflex)
 let schedLastPick = null        // S7 idle-with-work: the tick's last pickJob decision
 let schedLastPickAt = 0
@@ -1089,6 +1110,49 @@ if (SCHED_ON) {
           })
           return
         }
+        // OPPORTUNISTIC MAINTENANCE (design-docs/DESIGN-opportunistic-maintenance.md):
+        // during the build era pickJob can never pick maintenancePass (persistedBuild
+        // shadows it, scheduler.js:196) - so when the build's own life has the bot ALREADY
+        // at the hut, open a brief bounded chore window: pause (never cancel) the build,
+        // run the home-only maintenancePass, cool down, and let the 2-min re-arm resume it.
+        if (!OPP_ON) return
+        if (schedJob || Date.now() < schedMaintainCooldownUntil) return
+        const checkupDue = Date.now() - schedOppLastWindowAt >= Number(process.env.OPP_CHECKUP_MS || 1800000)
+        const elig = scheduler.oppMaintain(s, { checkupDue })
+        if (!elig.ok) return
+        // live re-checks the snapshot can't carry (mirror the S6 dispatch gates 1076-1082,
+        // minus the busy gate - busy is the POINT when preempting):
+        if (!provision.mayDoProgress(bot)) return
+        if ((provision.isMaintaining && provision.isMaintaining()) || (provision.isResting && provision.isResting()) ||
+            (provision.isSecuringFood && provision.isSecuringFood()) || (provision.isRecoveringDegraded && provision.isRecoveringDegraded())) return
+        const wasBusy = commands.isBusy && commands.isBusy()
+        if (elig.preempt && !wasBusy) return // activity says autobuild but the latch dropped - next tick re-reads
+        if (!elig.preempt && (wasBusy || (bot.pathfinder && bot.pathfinder.goal))) return // idle path must be TRULY idle
+        note('(sched) OPPORTUNISTIC MAINTAIN - ' + elig.reason + (elig.preempt ? ' (pausing the build; it resumes via re-arm)' : ''))
+        await runJob('maintenancePass', async () => {
+          if (elig.preempt) {
+            commands.preemptForSurvival() // sets ONLY buildAbort; persistedResume intact (I-3)
+            // bounded unwind wait: the aborted build settles at its next isStopped poll
+            // (a mid-smelt unwind took ~33s live - commands.js:3281); bail on crisis.
+            const unwindBy = Date.now() + Number(process.env.OPP_UNWIND_MS || 90000)
+            while ((commands.isBusy && commands.isBusy()) && Date.now() < unwindBy) {
+              let crisis = null; try { crisis = provision.survivalNeed(bot, { foodThreshold: Number(process.env.SCHED_CRISIS_FOOD || 6) }) } catch {}
+              if (crisis) { schedMaintainCooldownUntil = Date.now() + 300000; return 'window abandoned - crisis (' + crisis.need + ') during unwind' }
+              await new Promise(r => setTimeout(r, 500))
+            }
+            if (commands.isBusy && commands.isBusy()) { schedMaintainCooldownUntil = Date.now() + 300000; return 'window abandoned - build did not unwind in time' }
+          }
+          const windowEnd = Date.now() + Number(process.env.OPP_WINDOW_MS || 300000)
+          const night = !!(provision.isNight && provision.isNight(bot))
+          const r = await provision.maintenancePass(bot, {
+            say: schedSay, nightIndoorOnly: night, opportunistic: true,
+            isStopped: () => Date.now() > windowEnd
+          })
+          const worked = !!(r && r.steps && r.steps.length && !/^bail/.test(r.reason || ''))
+          schedMaintainCooldownUntil = Date.now() + (worked ? 600000 : Number(process.env.OPP_NOOP_COOLDOWN_MS || 1800000))
+          schedOppLastWindowAt = Date.now()
+          return 'opp window: ' + (r && r.steps && r.steps.length ? r.steps.join('+') : (r && r.reason) || 'nothing due')
+        })
         return
       }
       // 5. RESOLVE the executor (the dispatch map). `name` = the executor kind actually dispatched.
@@ -1293,6 +1357,11 @@ const RETREAT_HP = parseInt(process.env.RETREAT_HP || '8', 10)
 // expressions below to their old forms byte-equivalently.
 const SHELTER_BED_FALLBACK = process.env.SHELTER_BED_FALLBACK
 const CRIT_HP = parseInt(process.env.SHELTER_CRIT_HP || '6', 10)
+// fix #15 (flag DEFEND_WHEN_HIT, default ON): a hostile actively HITTING the bot must be fought
+// or fled - never absorbed - even mid-build / night-resting / nav-recovery. Read once at module
+// load like the other reflex flags; =0 reverts every guarded expression (Pieces A/B/C/D) to its
+// old form byte-equivalently. provision.js reads the same env once at module load for Piece C.
+const DEFEND_WHEN_HIT_ON = process.env.DEFEND_WHEN_HIT !== '0'
 // fix #10 (flag CREEPER_BACKOFF, default ON): a creeper never emits a pre-blast hit, so #14's
 // beingHit re-arm can't open the three whole-tick gates for a silent walking bomb, and the
 // full recovery ladder + 40s deadline are the wrong tool against a 1.5s-fuse threat. Read once
@@ -1304,8 +1373,11 @@ const CREEPER_BURST_MS = parseInt(process.env.CREEPER_BURST_MS || '2500', 10)
 let defendEquipped = false
 let lastDefendTarget = null
 let lastFleeAt = 0
-let dfLastHp = 20
-let dfHurtAt = 0 // when health last DROPPED - "someone is shooting me" detector
+// fix #15 Piece D: the "someone is hitting me" detector is hoisted to module scope (below, a
+// bot.on('health') handler + beingHitNow()) so the busy/rest COMMAND gate can see hits even when
+// AUTO_DEFEND=0. The AUTO_DEFEND tick delegates to beingHitNow() instead of tracking hp itself.
+let lastDamagedAt = 0 // epoch ms of the last >=0.5 hp DROP (module-scope hit tracker)
+let hitTrackLastHp = 20
 // FLEE STANDOFF detector: fleeing the same threat for 12s+ without moving AND without
 // taking a hit means we CAN'T move (wedged) and it CAN'T reach us. Re-setting the flee
 // goal every second just steals the pathfinder from the nav/recovery that could free us
@@ -1355,15 +1427,22 @@ async function burstAwayFrom (threatPos) {
     try { bot.setControlState('jump', false) } catch {}
   }
 }
+// fix #15 Piece D: shared "under attack" tracker at module scope (NOT inside the AUTO_DEFEND
+// guard) so the busy/rest command gate defends even with AUTO_DEFEND=0. Same >=0.5-drop threshold
+// and 8s window the AUTO_DEFEND tick used; both the tick and the gate now read beingHitNow().
+bot.on('health', () => {
+  const hp = bot.health == null ? 20 : bot.health
+  if (hp < hitTrackLastHp - 0.5) lastDamagedAt = Date.now()
+  hitTrackLastHp = hp
+})
+function beingHitNow () { return Date.now() - lastDamagedAt < 8000 }
 if (process.env.AUTO_DEFEND !== '0') {
   setInterval(() => {
     if (!bot.entity) return
     // Track being-HIT first, so the shelter gate below can tell "safely holed up" from
     // "under attack" (health dropped in the last 8s).
     const hpNow = bot.health == null ? 20 : bot.health
-    if (hpNow < dfLastHp - 0.5) dfHurtAt = Date.now()
-    dfLastHp = hpNow
-    const beingHit = Date.now() - dfHurtAt < 8000
+    const beingHit = beingHitNow() // delegated to the module-scope hit tracker (Piece D)
     // fix #10 F1: a creeper never emits a pre-blast hit, so #14's beingHit re-arm can't open the
     // three whole-tick gates below for a silent walking bomb. A cheap proximity check (same
     // filter shape as the :1353 scan; one entity iteration the ungated scan already does) re-arms
@@ -1385,10 +1464,12 @@ if (process.env.AUTO_DEFEND !== '0') {
     // in the mob-filled cave and pins us at depth). fix #14: only ACTUALLY-being-hit at
     // <=CRIT_HP re-arms it - absorbing hits there is strictly fatal (travelFar's blocking
     // rest raises isEscaping precisely so flee doesn't fight the shelter dig).
-    if (commands.isEscaping && commands.isEscaping() && !(SHELTER_BED_FALLBACK !== '0' && beingHit && hpNow <= CRIT_HP) && !creeperClose) return
+    if (commands.isEscaping && commands.isEscaping() && !(SHELTER_BED_FALLBACK !== '0' && beingHit && (hpNow <= CRIT_HP || DEFEND_WHEN_HIT_ON)) && !creeperClose) return
     // Same rule while a navigation RECOVERY is maneuvering (pillaring out of a pit,
-    // threading a doorway, hopping from water) - the recovery IS the escape.
-    if (navigate.isRecovering() && !creeperClose) return
+    // threading a doorway, hopping from water) - the recovery IS the escape. fix #15 Piece A:
+    // a recovery maneuver defers to defense the moment hits actually land (the 18:27 blind spot -
+    // a wedged bot runs recovery rungs almost continuously, so defense was blind while being hit).
+    if (navigate.isRecovering() && !creeperClose && !(DEFEND_WHEN_HIT_ON && beingHit)) return
     // While sheltering (sealed bunker / hut night-wait) stand down - UNLESS something is
     // actually HITTING us. A sealed pit takes no hits (the mob can't reach), so this still
     // yields there; but an enderman teleported into the hut, or a leaky pit, must be FOUGHT
@@ -1547,6 +1628,23 @@ if (process.env.AUTO_DEFEND !== '0') {
             if (!meleeFall) return
             defendInstead = true // just marked futile AND in melee reach -> fight this tick
           }
+          // fix #15 Piece B: BEING-HIT-PINNED. The fleeEp window already re-bases on >=2.5b of
+          // real movement, so `now - fleeEp.start > 4000` while beingHit = 4s of hits with no net
+          // movement = wedged/cornered and flee is impossible. Do NOT set fleeFutileUntil - the
+          // moment we net movement the episode re-bases and normal flee resumes.
+          else if (DEFEND_WHEN_HIT_ON && beingHit && isCreeper && now - fleeEp.start > 4000 && CREEPER_BACKOFF_ON) {
+            // pinned creeper: NO_AUTO_MELEE forbids punching it - fire the raw sprint burst
+            // instead (mirror of :1605-1607) and return.
+            note(`(flee) PINNED + hit, creeper ${fbest.toFixed(1)}m - can't flee, sprint burst`)
+            burstAwayFrom(flee.position).catch(() => {})
+            return
+          } else if (scheduler.fightNotFlee({ flagOn: DEFEND_WHEN_HIT_ON, beingHit, pinnedMs: now - fleeEp.start, threatDist: fbest, isCreeper })) {
+            // pinned non-creeper in melee reach: stop shoving the wall, drop the stale flee goal,
+            // and FIGHT (falls through to the melee section below - bot.attack + lookAt, no goal).
+            try { bot.pathfinder.setGoal(null) } catch {}
+            note(`(flee) PINNED + hit by ${flee.name || why} ${fbest.toFixed(1)}m for 4s - can't flee, fighting`)
+            defendInstead = true
+          }
         }
         if (!defendInstead) {
           if (flee !== lastDefendTarget || now - lastFleeAt > 1000) {
@@ -1660,6 +1758,7 @@ if (process.env.WEDGE_WATCHDOG !== '0') {
   let wdLastFire = 0
   let wdFailPos = null // where the last force-escape failed (for the same-cell streak)
   let wdFailStreak = 0 // consecutive same-cell force-escape failures
+  const DIGOUT_ON = process.env.DIGOUT_ESCAPE !== '0' // hard-wedge dig-out escape (default ON; =0 restores today)
   setInterval(async () => {
     if (wdBusy || !bot.entity || bot.health <= 0) return
     const now = Date.now()
@@ -1689,7 +1788,7 @@ if (process.env.WEDGE_WATCHDOG !== '0') {
     wdBusy = true
     try {
       note(`(watchdog) position FROZEN ~${Math.round((now - old.t) / 1000)}s at ${p.floored()} while trying to move - forcing an escape`)
-      const ok = await navigate.forceUnstick(bot)
+      const ok = await navigate.forceUnstick(bot, { digOut: DIGOUT_ON && wdFailStreak >= 1 })
       if (ok) {
         note(`(watchdog) force-escape MOVED me to ${bot.entity.position.floored()}`)
         wdHist = []; wdFailStreak = 0; wdFailPos = null
@@ -1706,11 +1805,11 @@ if (process.env.WEDGE_WATCHDOG !== '0') {
           // ~8 min frozen on the same cell: ONE immediate retry with the wider breach budget.
           note('(watchdog) 2nd failed escape at the same cell - one DESPERATE retry (wider breach)')
           let ok2 = false
-          try { ok2 = await navigate.forceUnstick(bot, { desperate: true }) } catch (e) { note(`(watchdog) desperate retry failed: ${e.message}`) }
+          try { ok2 = await navigate.forceUnstick(bot, { desperate: true, digOut: DIGOUT_ON }) } catch (e) { note(`(watchdog) desperate retry failed: ${e.message}`) }
           if (ok2) { note(`(watchdog) DESPERATE escape MOVED me to ${bot.entity.position.floored()}`); wdHist = []; wdFailStreak = 0; wdFailPos = null }
         } else if (wdFailStreak >= 3) {
           const mins = Math.round((now - old.t) / 60000)
-          note(`(watchdog) HARD-WEDGED at ${cur.floored()}: ${wdFailStreak} consecutive failed escapes over ~${mins} min - out of tools, will keep retrying`)
+          note(`(watchdog) HARD-WEDGED at ${cur.floored()}: ${wdFailStreak} consecutive failed escapes over ~${mins} min - out of tools, will keep retrying${DIGOUT_ON ? ' (dig-out tried)' : ''}`)
         }
       }
     } catch (e) { note(`(watchdog) force-escape failed: ${e.message}`) } finally { wdBusy = false }
@@ -2074,10 +2173,23 @@ const server = http.createServer((req, res) => {
         // admissible still requires a REAL need or a near grave, so a whimsical gearup at full health
         // while a build runs is still HELD (now with the scheduler's greppable reason). SCHEDULER=0
         // restores S1_HOTFIX + survivalAdmissible byte-for-byte.
+        // fix #15 Piece D: being actively DAMAGED is a survival situation - a brain attack/defend
+        // must not be muzzled by the build/rest hold while a mob is hitting us (the 18:27 death:
+        // every attack/defend logged `held (night-resting)` while a zombie beat the bot). Checked
+        // BEFORE the survival-class check; mirrors the S1/S4 survival PREEMPT (pause, not cancel,
+        // any build via preemptForSurvival -> resumes through persistedResume). The 8s beingHitNow()
+        // window bounds it. attack/defend stay 'progress' class in scheduler.js - no reclassify.
+        const defenseCmd = /^(attack|defend)\b/i.test(trimmedLine)
+        const defendPreempt = DEFEND_WHEN_HIT_ON && defenseCmd && beingHitNow()
         const survivalCmd = SCHED_ON ? (cls === 'survival')
           : (process.env.S1_HOTFIX !== '0' && /^(recover|getstuff|eat|wear|armorup|sleep)\b/i.test(trimmedLine))
         const adm = survivalCmd ? (SCHED_ON ? scheduler.admissible('survival', await provision.schedulerState(bot)) : survivalAdmissible(bot)) : null
-        if (survivalCmd && adm.allow) {
+        if (defendPreempt) {
+          const label = commands.isBusy && commands.isBusy() ? 'busy building' : (provision.isSecuringFood && provision.isSecuringFood() ? 'securing food' : 'night-resting')
+          note(`(cmd) ${line}${rz} -> PREEMPT (under attack) - defense outranks the ${label} hold`)
+          if (commands.preemptForSurvival) commands.preemptForSurvival() // stop latch; a build resumes via persistedResume
+          // fall through: the command runs and owns the body
+        } else if (survivalCmd && adm.allow) {
           note(`(cmd) ${line}${rz} -> PREEMPT (${adm.reason}) - survival outranks the current hold`)
           if (commands.preemptForSurvival) commands.preemptForSurvival() // set the stop latch; a build resumes via persistedResume
           // fall through: the survival command runs and owns the body

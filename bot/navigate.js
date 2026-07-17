@@ -679,6 +679,22 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
         }
         return false
       }
+    },
+    { // LAST RESORT - proven hard-wedge (watchdog digOut only): dig the natural blocks boxing
+      // us in. The live death-spiral (§1) was a DRY surface wedge where every geometry-narrow
+      // rung's when() was false and nothing ran at all (1ms "escape") - so this rung has NO
+      // onGround/ceiling/wall-count gate; the watchdog's measured hard-wedge (opts.digOut) IS
+      // the gate. Bounded (<=8/12 digs, 25s), nearHostile-aborting, SAME anti-grief whitelist
+      // as wetbreach (escapeDiggable). DIGOUT_ESCAPE=0 -> when() is false -> today byte-for-byte.
+      kind: 'drybreach',
+      when: () => process.env.DIGOUT_ESCAPE !== '0' && !!opts.digOut &&
+        !feetInWater(bot) &&
+        !(prov().insideOwnStructure && prov().insideOwnStructure(bot)),
+      run: async () => {
+        dbg('recovery: HARD-WEDGED dry at ' + p0.floored() + ' - digging out (bounded)')
+        try { await prov().breachDryPocket(bot, { isStopped, wide: !!opts.desperate }) } catch (e) { dbg('recovery: drybreach failed (' + e.message + ')') }
+        return movedEnough()
+      }
     }
   ]
   for (const step of ladder) {
@@ -950,9 +966,9 @@ async function forceUnstick (bot, opts = {}) {
     const counts = {}
     // indoor FIRST + generous: a wedge inside the hut must be freed by stepping to a free
     // interior cell, never by the dirt-pillaring the pit/climb rungs would otherwise try.
-    const budgets = { indoor: 3, water: 1, wetbreach: 1, pit: 2, door: 0, climb: 2, nudge: 0, stepout: 2 }
+    const budgets = { indoor: 3, water: 1, wetbreach: 1, pit: 2, door: 0, climb: 2, nudge: 0, stepout: 2, drybreach: 1 }
     for (let i = 0; i < 4 && !isStopped(); i++) {
-      const rescued = await recoverOnce(bot, null, counts, budgets, { isStopped, desperate: !!opts.desperate })
+      const rescued = await recoverOnce(bot, null, counts, budgets, { isStopped, desperate: !!opts.desperate, digOut: !!opts.digOut })
       if (!rescued) break
       dbg('forceUnstick: ' + rescued + ' moved us to ' + bot.entity.position.floored())
       // keep going only while still boxed in (buried or pitted) - once in the open the

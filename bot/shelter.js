@@ -66,6 +66,17 @@ function rankByDistance (cells, from) {
   return cells.slice().sort((a, b) => Math.hypot(a.x - from.x, a.z - from.z) - Math.hypot(b.x - from.x, b.z - from.z))
 }
 
+// SHELTER_AVOID_FARM (fix #30): is `pos` within r blocks (XZ) of our own wheat farm - its
+// anchor OR any of its cells? A night-bunker dug at the farm waterline floods and wrecks the
+// crop (the #28 physical cause), so the driver steps clear of a conflict before digging and
+// never relocates a pit into one. Pure (coords in, bool out) so sheltertest.js table-tests it.
+function farmConflict (anchor, cells, pos, r) {
+  if (!pos || !(r > 0)) return false
+  if (anchor && Math.hypot(anchor.x - pos.x, anchor.z - pos.z) <= r) return true
+  for (const c of (cells || [])) { if (Math.hypot(c.x - pos.x, c.z - pos.z) <= r) return true }
+  return false
+}
+
 // ---- SLEEP-FAILURE CLASSIFIER + BED-HOLD POLICY (fix #14) --------------------------------
 // bot.sleep (mineflayer bed.js) throws a spread of messages; classify them so provision.js
 // can decide whether to hold OFF a bed that just proved unusable, and for how long. Pure
@@ -96,6 +107,6 @@ function bedHoldMs (kind) {
 }
 
 module.exports = {
-  AIRISH, FLUID_RE, UNDIGGABLE_RE, shelterDiggable, feetCellDry, rankByDistance, alcoveSafe,
+  AIRISH, FLUID_RE, UNDIGGABLE_RE, shelterDiggable, feetCellDry, rankByDistance, alcoveSafe, farmConflict,
   sleepFailKind, bedHoldMs, BED_HOLD_MS, BED_HOLD_MONSTER_MS, BED_HOLD_FELLSHORT_MS
 }

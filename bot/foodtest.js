@@ -99,5 +99,38 @@ t('breadFromWheat: 3 wheat -> 1 bread (floor), sub-3 -> 0, negative/garbage -> 0
   assert.strictEqual(F.breadFromWheat(undefined), 0, 'undefined -> 0')
 })
 
+t('wheatWithdrawForBake: reserve at/over target -> withdraw 0 (quiescence)', () => {
+  assert.strictEqual(F.wheatWithdrawForBake({ packWheat: 0, bankWheat: 30, bankFoodPts: 80, bankTargetPts: 80 }), 0, 'deficit 0 -> 0')
+  assert.strictEqual(F.wheatWithdrawForBake({ packWheat: 0, bankWheat: 30, bankFoodPts: 90, bankTargetPts: 80 }), 0, 'over target -> 0')
+})
+
+t('wheatWithdrawForBake: withdraws banked wheat to cover the pts deficit (3 wheat -> 5 pts)', () => {
+  // 80 pts deficit -> ceil(80/5)=16 loaves -> 48 wheat, but cap 33 binds -> 33.
+  assert.strictEqual(F.wheatWithdrawForBake({ packWheat: 0, bankWheat: 100, bankFoodPts: 0, bankTargetPts: 80 }), 33, 'cap 33 binds on a large deficit')
+  // 15 pts deficit -> ceil(15/5)=3 loaves -> 9 wheat; plenty banked, no pack wheat.
+  assert.strictEqual(F.wheatWithdrawForBake({ packWheat: 0, bankWheat: 100, bankFoodPts: 65, bankTargetPts: 80 }), 9, '15-pt deficit -> 9 wheat')
+})
+
+t('wheatWithdrawForBake: pack wheat offsets the need', () => {
+  // 15 pts deficit -> 9 wheat needed; 4 already in the pack -> withdraw only 5.
+  assert.strictEqual(F.wheatWithdrawForBake({ packWheat: 4, bankWheat: 100, bankFoodPts: 65, bankTargetPts: 80 }), 5, '9 needed - 4 pack = 5')
+  // pack already covers the loaves -> withdraw 0.
+  assert.strictEqual(F.wheatWithdrawForBake({ packWheat: 9, bankWheat: 100, bankFoodPts: 65, bankTargetPts: 80 }), 0, 'pack covers it -> 0')
+})
+
+t('wheatWithdrawForBake: bankWheat binds when the bank is short', () => {
+  // 15-pt deficit wants 9 wheat but only 4 banked -> withdraw 4.
+  assert.strictEqual(F.wheatWithdrawForBake({ packWheat: 0, bankWheat: 4, bankFoodPts: 65, bankTargetPts: 80 }), 4, 'bankWheat 4 binds')
+  assert.strictEqual(F.wheatWithdrawForBake({ packWheat: 0, bankWheat: 0, bankFoodPts: 0, bankTargetPts: 80 }), 0, 'no banked wheat -> 0')
+})
+
+t('wheatWithdrawForBake: null/absent fields -> 0 (defensive)', () => {
+  assert.strictEqual(F.wheatWithdrawForBake(), 0, 'no args -> 0')
+  assert.strictEqual(F.wheatWithdrawForBake({}), 0, 'empty snapshot -> 0 (no target)')
+  assert.strictEqual(F.wheatWithdrawForBake({ bankWheat: 30, bankTargetPts: 80 }), 30, 'null packWheat/bankFoodPts treated as 0 (full 80-pt deficit -> 48 wheat wanted; bankWheat 30 binds)')
+  // opts.capWheat is tunable
+  assert.strictEqual(F.wheatWithdrawForBake({ packWheat: 0, bankWheat: 100, bankFoodPts: 0, bankTargetPts: 80 }, { capWheat: 12 }), 12, 'cap is tunable')
+})
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall food-security tests passed')
 process.exit(failures ? 1 : 0)

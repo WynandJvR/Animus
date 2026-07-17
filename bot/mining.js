@@ -50,8 +50,14 @@ function targetMineY (surfaceY, opts = {}) {
 // sufficiency at depth: provision enough picks up front + re-tool AT DEPTH when one runs low.
 const PICK_USES = { wooden: 59, golden: 32, stone: 131, iron: 250, diamond: 1561, netherite: 2031 }
 function pickMaxUses (name) { const m = String(name || '').match(/^(wooden|golden|stone|iron|diamond|netherite)_pickaxe$/); return m ? PICK_USES[m[1]] : 0 }
-// Uses remaining on a pickaxe given its durabilityUsed (undefined/absent = brand new).
-function pickUsesLeft (name, durabilityUsed) { const max = pickMaxUses(name); return max ? Math.max(0, max - (durabilityUsed || 0)) : 0 }
+// Uses remaining on ANY tool given its durabilityUsed - vanilla tool durability is per MATERIAL
+// (wood 59, gold 32, stone 131, iron 250, diamond 1561, netherite 2031), the SAME table as
+// pickaxes, so PICK_USES covers pickaxe/axe/sword/shovel/hoe alike. PURE; undefined/absent = new.
+function toolMaxUses (name) { const m = String(name || '').match(/^(wooden|golden|stone|iron|diamond|netherite)_(pickaxe|axe|sword|shovel|hoe)$/); return m ? PICK_USES[m[1]] : 0 }
+function toolUsesLeft (name, durabilityUsed) { const max = toolMaxUses(name); return max ? Math.max(0, max - (durabilityUsed || 0)) : 0 }
+// Uses remaining on a pickaxe given its durabilityUsed (undefined/absent = brand new). Delegates
+// to toolUsesLeft but stays pickaxe-only (returns 0 for any non-pickaxe) - unchanged behavior.
+function pickUsesLeft (name, durabilityUsed) { return pickMaxUses(name) ? toolUsesLeft(name, durabilityUsed) : 0 }
 
 // Rough block-count estimate for an excursion: the staircase down (≈3 blocks dug per step of
 // depth) + `branches` junctions, each ≈ the corridor advance + two branches, 2 blocks
@@ -212,6 +218,12 @@ function deepMinePlan (armorPieces, opts = {}) {
   return { targetY: opts.targetY != null ? opts.targetY : 16, maxBranches: 30, wantTorches: 12, naked: false }
 }
 
+// Batched-harvest cadence for the mining loops (the mine-one-pause-one fix): sweep drops on
+// every Nth step instead of every step. stepIdx is 0-based; a sweep is due when the step
+// COUNT (stepIdx+1) is a multiple of `every`. every=1 -> every step (the MINE_FLUID=0 legacy
+// cadence). Trivial by design - it exists so the cadence is unit-testable and shared. PURE.
+function sweepDue (stepIdx, every) { return (stepIdx + 1) % every === 0 }
+
 // Branch-mine geometry constants for the driver. corridorIdx picks the main-corridor
 // direction; left/right branches go off it perpendicular, `spacing` apart. Pure - just
 // resolves the direction indices + returns the tunables so the driver stays declarative.
@@ -227,4 +239,4 @@ function branchLayout (corridorIdx, opts = {}) {
   }
 }
 
-module.exports = { LAVA_RE, WATER_RE, AIRISH, DIRS, PICK_USES, perpendicular, targetMineY, worthMiningHere, mineableWhenBlocked, mineReusable, pickMaxUses, pickUsesLeft, estExcursionBlocks, picksToCraft, needReTool, descentSafety, faceHazard, digExposureHazard, faceExposed, scratchWorthy, branchLayout, preferBranchMine, deepMinePlan }
+module.exports = { LAVA_RE, WATER_RE, AIRISH, DIRS, PICK_USES, perpendicular, targetMineY, worthMiningHere, mineableWhenBlocked, mineReusable, pickMaxUses, pickUsesLeft, toolMaxUses, toolUsesLeft, estExcursionBlocks, picksToCraft, needReTool, descentSafety, faceHazard, digExposureHazard, faceExposed, scratchWorthy, branchLayout, preferBranchMine, deepMinePlan, sweepDue }

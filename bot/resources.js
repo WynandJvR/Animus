@@ -242,6 +242,27 @@ async function ensurePackRoom (bot, minFree = 4, opts = {}) {
   if (free() >= minFree) return free()
   try { await provision.dumpJunk(bot) } catch {}
   if (free() < minFree) await autoBank(bot, opts)
+  // INV_SHED: if still tight, autoBank couldn't move the clutter (KEEP_ON_BOT pins planks/furnaces/
+  // tables/picks/coal/sticks to the bot in regex mode). SHED the safekeepPlan allow-list surplus
+  // (spare tools + build-material over its allowance) into the nearest verified chest via the
+  // explicit-deposit mode. One pass, NO recursion (must not call ensurePackRoom). Shedding to the
+  // bank is not loss - fetch/acquire withdraw on demand.
+  if (free() < minFree && process.env.INV_DISCIPLINE !== '0' && process.env.INV_SHED !== '0') {
+    try {
+      const mining = require('./mining.js')
+      const maintain = require('./maintain.js')
+      const items = (bot.inventory ? bot.inventory.items() : []).map(i => ({ name: i.name, count: i.count, usesLeft: mining.toolUsesLeft(i.name, i.durabilityUsed || 0) }))
+      const plan = maintain.safekeepPlan(items, {})
+      if (plan.length) {
+        const e = verifiedChests(bot, opts.near)[0]
+        const blk = e && bot.blockAt(new Vec3(e.x, e.y, e.z))
+        if (blk && /chest/.test(blk.name)) {
+          const n = await provision.depositMaterials(bot, blk, { deposits: plan })
+          if (n) { dbg('ensurePackRoom: shed ' + n + ' surplus item(s) to the bank (' + free() + ' slots free)'); try { await readChest(bot, e) } catch {} }
+        }
+      }
+    } catch (err) { dbg('ensurePackRoom shed failed: ' + err.message) }
+  }
   if (free() < minFree) dbg('pack still tight after junk+bank: ' + free() + ' slots free')
   return free()
 }
@@ -271,7 +292,15 @@ async function reconcile (bot, bom, opts = {}) {
   for (const [n, k] of Object.entries(chestTotals)) holdings[n] = (holdings[n] || 0) + k
   for (const [n, k] of Object.entries(opts.credit || {})) holdings[n] = (holdings[n] || 0) + k
   for (const h of (opts.hide || [])) delete holdings[h]
-  const plan = provision.planProvision(mcData, bom, holdings, opts.planOpts || {})
+  // INV_TOOLBANK: vouch for BANKED wooden picks so planProvision withdraws one before crafting a
+  // new one (withdraw>craft restored for picks). Flag off / caller-set => untouched (bankPickaxes
+  // stays 0/absent => planProvision degenerates to today's fresh-only behavior). ONLY affects the
+  // wooden_pickaxe block; every other item's holdings/withdraw arithmetic is byte-identical (I6).
+  const planOpts = { ...(opts.planOpts || {}) }
+  if (process.env.INV_DISCIPLINE !== '0' && process.env.INV_TOOLBANK !== '0' && planOpts.bankPickaxes == null) {
+    planOpts.bankPickaxes = chestTotals.wooden_pickaxe || 0
+  }
+  const plan = provision.planProvision(mcData, bom, holdings, planOpts)
   const withdraws = []
   for (const [name, cnt] of Object.entries(plan.used || {})) {
     if (opts.hide && opts.hide.includes(name)) continue
@@ -289,7 +318,10 @@ async function reconcile (bot, bom, opts = {}) {
 // (gather/craft/smelt). Same return shape as runPlan, with withdraw steps prepended.
 async function runReconciled (bot, rec, opts = {}) {
   const results = []
-  if (rec.withdraws.length) await ensurePackRoom(bot, Math.min(8, rec.withdraws.length + 2), { near: opts.near || opts.home, isStopped: opts.isStopped })
+  // INV_CRAFTROOM: make room before a CRAFT-ONLY plan too (today only withdrawals triggered it,
+  // so a 147-plank craft got no make-room step). Flag off => today's withdraws-only gate.
+  const invCraftRoom = process.env.INV_DISCIPLINE !== '0' && process.env.INV_CRAFTROOM !== '0'
+  if (rec.withdraws.length || (invCraftRoom && rec.plan.tasks.length)) await ensurePackRoom(bot, Math.min(8, rec.withdraws.length + 2), { near: opts.near || opts.home, isStopped: opts.isStopped })
   for (const w of rec.withdraws) {
     if (opts.isStopped && opts.isStopped()) break
     const got = await withdrawItems(bot, w.item, w.count, { near: opts.near || opts.home })

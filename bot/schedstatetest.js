@@ -123,6 +123,37 @@ t('(h) s.tools booleans present + shaped; axe/sword name-scan excludes pickaxe',
   assert.strictEqual(s.tools.sword, false, 'no sword (and pickaxe must NOT read as an axe)')
 })
 
+// (h2) FIX #20: wooden sword/axe + a working pick -> read as a NEED (up-tier to stone once cobble is mineable)
+t('(h2) FIX #20: wooden axe/sword + a pick -> axe/sword NEED (tier upgrade)', async () => {
+  const s = await provision.schedulerState(stubBot({ items: [{ name: 'stone_pickaxe', count: 1 }, { name: 'wooden_axe', count: 1 }, { name: 'wooden_sword', count: 1 }] }))
+  assert.strictEqual(s.tools.axe, false, 'wooden axe + a pick to mine cobble -> axe NEED (upgrade to stone)')
+  assert.strictEqual(s.tools.sword, false, 'wooden sword + a pick -> sword NEED (upgrade to stone)')
+})
+
+// (h3) FIX #20: stone sword/axe are adequate (no spurious upgrade need)
+t('(h3) FIX #20: stone axe/sword are adequate', async () => {
+  const s = await provision.schedulerState(stubBot({ items: [{ name: 'stone_pickaxe', count: 1 }, { name: 'stone_axe', count: 1 }, { name: 'stone_sword', count: 1 }] }))
+  assert.strictEqual(s.tools.axe, true, 'stone axe adequate -> no need')
+  assert.strictEqual(s.tools.sword, true, 'stone sword adequate -> no need')
+})
+
+// (h4) FIX #20: no working pick -> wooden stays adequate (never demand an upgrade it can't afford)
+t('(h4) FIX #20: no pick -> wooden tools stay adequate (unaffordable upgrade not demanded)', async () => {
+  const s = await provision.schedulerState(stubBot({ items: [{ name: 'wooden_axe', count: 1 }, { name: 'wooden_sword', count: 1 }] }))
+  assert.strictEqual(s.tools.axe, true, 'no pick -> cannot mine cobble -> wooden axe stays adequate')
+  assert.strictEqual(s.tools.sword, true, 'no pick -> wooden sword stays adequate')
+})
+
+// (h5) FIX #20 rollback: TOOL_TIER_UPGRADE=0 restores existence-only (any axe/sword satisfies)
+t('(h5) FIX #20 rollback: TOOL_TIER_UPGRADE=0 -> existence-only', async () => {
+  process.env.TOOL_TIER_UPGRADE = '0'
+  try {
+    const s = await provision.schedulerState(stubBot({ items: [{ name: 'stone_pickaxe', count: 1 }, { name: 'wooden_axe', count: 1 }, { name: 'wooden_sword', count: 1 }] }))
+    assert.strictEqual(s.tools.axe, true, 'rollback: any axe satisfies')
+    assert.strictEqual(s.tools.sword, true, 'rollback: any sword satisfies')
+  } finally { delete process.env.TOOL_TIER_UPGRADE }
+})
+
 // (i) S6: activeJob synthesizes maintenancePass/maintain when the latch is set
 t('(i) activeJob = maintenancePass/maintain when the maintain latch is set', async () => {
   try {

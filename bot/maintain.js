@@ -18,7 +18,7 @@
 // so overrides apply per call; these defaults mirror what the env resolves to at load.
 const BUFFERS = {
   packFood: { target: Number(process.env.MAINT_PACKFOOD_TARGET || 24), floor: Number(process.env.MAINT_PACKFOOD_FLOOR || 12) }, // pts
-  bankFood: { target: Number(process.env.MAINT_BANKFOOD_TARGET || 40), floor: Number(process.env.MAINT_BANKFOOD_FLOOR || 16) }, // pts
+  bankFood: { target: Number(process.env.MAINT_BANKFOOD_TARGET || (process.env.BREAD_ENGINE !== '0' ? Number(process.env.BREAD_BANK_TARGET || 80) : 40)), floor: Number(process.env.MAINT_BANKFOOD_FLOOR || (process.env.BREAD_ENGINE !== '0' ? 40 : 16)) }, // pts (BREAD_ENGINE reserve 40/80)
   armor: { target: 4, floor: 4 }, // any missing (armorPieces < 4) is under floor
   tools: { members: ['pick', 'axe', 'sword', 'sparePick'] }, // any missing -> need
   torches: { target: Number(process.env.MAINT_TORCH_TARGET || 8), floor: Number(process.env.MAINT_TORCH_FLOOR || 4) }
@@ -33,8 +33,12 @@ function needs (snapshot) {
   // read floors/targets LIVE so env overrides apply without a restart (mirrors gravegate).
   const packFloor = Number(process.env.MAINT_PACKFOOD_FLOOR || 12)
   const packTarget = Number(process.env.MAINT_PACKFOOD_TARGET || 24)
-  const bankFloor = Number(process.env.MAINT_BANKFOOD_FLOOR || 16)
-  const bankTarget = Number(process.env.MAINT_BANKFOOD_TARGET || 40)
+  // BREAD_ENGINE (default on): raise the banked-food band to a real reserve (floor 40 / target
+  // 80 = 8/16 loaves) so the courier/R2 have a post-death meal to withdraw; BREAD_ENGINE=0
+  // restores the legacy 16/40. Explicit MAINT_BANKFOOD_FLOOR/TARGET always win.
+  const engine = process.env.BREAD_ENGINE !== '0'
+  const bankFloor = Number(process.env.MAINT_BANKFOOD_FLOOR || (engine ? 40 : 16))
+  const bankTarget = Number(process.env.MAINT_BANKFOOD_TARGET || (engine ? Number(process.env.BREAD_BANK_TARGET || 80) : 40))
   const torchFloor = Number(process.env.MAINT_TORCH_FLOOR || 4)
   const torchTarget = Number(process.env.MAINT_TORCH_TARGET || 8)
 
@@ -77,7 +81,7 @@ function needs (snapshot) {
 function courierPlan (packItems, bankFoodPts, opts) {
   opts = opts || {}
   const packTarget = opts.packTarget != null ? opts.packTarget : Number(process.env.MAINT_PACKFOOD_TARGET || 24)
-  const bankTarget = opts.bankTarget != null ? opts.bankTarget : Number(process.env.MAINT_BANKFOOD_TARGET || 40)
+  const bankTarget = opts.bankTarget != null ? opts.bankTarget : Number(process.env.MAINT_BANKFOOD_TARGET || (process.env.BREAD_ENGINE !== '0' ? Number(process.env.BREAD_BANK_TARGET || 80) : 40))
   let bankPts = Number(bankFoodPts) || 0
   if (bankPts >= bankTarget) return [] // pantry already stocked
   // shippable = real food, tier<2. Everything else (rotten/poison/non-food) is ignored:
@@ -114,6 +118,36 @@ function courierPlan (packItems, bankFoodPts, opts) {
   return deposits
 }
 
+// ---- tool tiers (shared by safekeepPlan + toolIsJunk) --------------------------------
+const TIER = { wooden: 1, golden: 2, stone: 3, iron: 4, diamond: 5, netherite: 6 }
+const toolTier = name => { const m = /^(wooden|golden|stone|iron|diamond|netherite)_/.exec(name); return m ? (TIER[m[1]] || 0) : 0 }
+
+// toolIsJunk(unit, ctx) -> bool. PURE. Classifies ONE tool unit as junk-to-toss.
+//   unit = { name, usesLeft }              (usesLeft from mining.toolUsesLeft; undefined = assume working)
+//   ctx  = { workingSameKind,              // count of OTHER working units of this kind in the pack
+//            bestSameKindTier,             // best material tier of a WORKING same-kind tool in the pack
+//            junkMinUses }                 // default 10; "working" = usesLeft >= junkMinUses
+// JUNK iff:
+//   worn:     usesLeft < junkMinUses AND workingSameKind >= 1   (never the last working one)
+//   obsolete: tier(name) === wooden  AND bestSameKindTier >= stone (a better tool is held & working)
+function toolIsJunk (unit, ctx) {
+  unit = unit || {}; ctx = ctx || {}
+  const junkMinUses = ctx.junkMinUses != null ? ctx.junkMinUses : 10
+  const uses = unit.usesLeft == null ? Infinity : unit.usesLeft
+  const workingSameKind = ctx.workingSameKind || 0
+  if (uses < junkMinUses && workingSameKind >= 1) return true
+  if (toolTier(unit.name) === TIER.wooden && (ctx.bestSameKindTier || 0) >= TIER.stone) return true
+  return false
+}
+
+// craftBudgetForSpace(needed, freeSlots, stackSize, reserve=1) -> count to craft NOW so the
+// output fits (conservative: ignores slots freed by consumed ingredients / partial stacks - it
+// under-crafts at worst and the caller's re-plan round tops up). PURE, never negative.
+function craftBudgetForSpace (needed, freeSlots, stackSize, reserve = 1) {
+  const usable = Math.max(0, (freeSlots || 0) - reserve)
+  return Math.max(0, Math.min(needed || 0, usable * (stackSize || 1)))
+}
+
 // safekeepPlan(packItems, opts) -> [{ name, count }] to DEPOSIT. ALLOW-LIST by design: only
 //   ships items it explicitly recognises as surplus (spare tools + build-material above an
 //   allowance); everything else (food, armor, seeds, iron, unknowns) is kept. This is what
@@ -127,9 +161,7 @@ function safekeepPlan (packItems, opts) {
 
   // ---- TOOLS: never the last working one of a kind -------------------------------------
   // pickaxes: keep the best working + 1 spare working (2 working picks); axe/sword/shovel/hoe/
-  // shears: keep the best 1. Surplus tools ship.
-  const TIER = { wooden: 1, golden: 2, stone: 3, iron: 4, diamond: 5, netherite: 6 }
-  const toolTier = name => { const m = /^(wooden|golden|stone|iron|diamond|netherite)_/.exec(name); return m ? (TIER[m[1]] || 0) : 0 }
+  // shears: keep the best 1. Surplus tools ship. (TIER/toolTier lifted to module scope.)
   const KIND = [
     { re: /_pickaxe$/, keep: 2, uses: true },
     { re: /_axe$/, keep: 1 },
@@ -218,5 +250,9 @@ module.exports = {
   courierPlan,
   safekeepPlan,
   stepDue,
+  TIER,
+  toolTier,
+  toolIsJunk,
+  craftBudgetForSpace,
   _reset: () => {} // no state; present for test-harness parity
 }
