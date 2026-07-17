@@ -19,6 +19,9 @@ const planner = require('./planner.js') // re-planning goal driver (slice 1: gea
 const arbiter = require('./arbiter.js') // priority body-ownership (sticky-follow defers to a running maneuver)
 const routeMem = require('./route-mem.js') // PURE route/wedge geometry: replay proven treks + soft-steer around learned wedges (semantic-world-map slice 1)
 const hutModel = require('./hut-model.js') // PURE self-structure model + #37 repair decision (decideHutRepair) / tolerant classifier (cellMismatch)
+const navLeg = require('./nav-leg.js') // PURE leg-planning core (NAV Phase B): Y-banded surface-trek leg goal so travelFar legs can't ride a cave 45b down to lava
+const GoalNearXZBanded = navLeg.makeGoalNearXZBanded(goals.Goal) // Y-aware drop-in for goals.GoalNearXZ (NAV_HAZARD_LEGS)
+const NAV_HAZARD_LEGS = process.env.NAV_HAZARD_LEGS !== '0' // NAV Phase B (default ON): Y-band the trek leg goal + price lava in travelMovements; =0 => today's Y-blind GoalNearXZ + no lava cost, byte-for-byte
 let dbgSink = null // injected by index.js: debug lines persist to logs/bot-events.log
 function setDebugSink (fn) { dbgSink = fn }
 const dbg = (...a) => {
@@ -672,8 +675,16 @@ async function travelFar (bot, dest, opts = {}) {
       let legErr = null
       let reflexWaitMs = 0
       const legT0 = Date.now()
+      // NAV Phase B leg goal: Y-BANDED to the (surface) destination Y so A* can't satisfy this
+      // leg deep down a cave at the target's XZ (#41). travelFar already surfaces reactively
+      // (buried()/surfaceOut, dest.y-keyed) - this is the plan-time complement, and both keep
+      // final arrival on the independent XZ+!buried() check below. NAV_HAZARD_LEGS=0 => today's
+      // Y-blind GoalNearXZ, byte-for-byte.
+      const legGoal = NAV_HAZARD_LEGS
+        ? new GoalNearXZBanded(wx, wz, 4, dest.y)
+        : new goals.GoalNearXZ(wx, wz, 4)
       try {
-        const nav = await navigate.navigateTo(bot, new goals.GoalNearXZ(wx, wz, 4), {
+        const nav = await navigate.navigateTo(bot, legGoal, {
           timeoutMs: 30000, deadlineMs: 75000, isStopped, climb: false, label: 'travel',
           budgets: { water: 1, pit: 1, door: 1, nudge: 1 }, // one rescue of each kind per leg - the trip loop retries legs
           escalate: false, doorPreflight: false, // this trek loop owns its own stall handling; a near-home leg must not spuriously cross a door
@@ -751,6 +762,9 @@ function travelMovements (bot) {
   } catch { /* mcData not ready - fall back to no bridging (routes around) */ }
   try { const ex = provision.cropExclusionStep && provision.cropExclusionStep(bot); if (ex && Array.isArray(m.exclusionAreasStep)) m.exclusionAreasStep.push(ex) } catch {} // FARM_NO_TRAMPLE: treks bend around our crop cells (cost-only, never a wall/dig)
   try { const px = provision.cropPlaceExclusion && provision.cropPlaceExclusion(bot); if (px && Array.isArray(m.exclusionAreasPlace)) m.exclusionAreasPlace.push(px) } catch {} // NO_PLACE_ON_FARM (fix #17): never bridge/place on our own farmland
+  // NAV Phase B: price lava (+lava-adjacent pool edges) so surface-trek legs route AROUND it at
+  // plan time (cost-only, never a forbid). Flag-gated so NAV_HAZARD_LEGS=0 is byte-for-byte today.
+  try { if (NAV_HAZARD_LEGS && provision.hazardStepExclusion && Array.isArray(m.exclusionAreasStep)) m.exclusionAreasStep.push(provision.hazardStepExclusion(bot)) } catch {}
   return m
 }
 

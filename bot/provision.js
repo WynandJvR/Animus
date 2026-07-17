@@ -24,6 +24,9 @@ const scheduler = require('./scheduler.js') // PURE survival-tier decision core;
 const routeMem = require('./route-mem.js') // PURE route/wedge geometry: replay proven treks + soft-steer around learned wedges (semantic-world-map slice 1)
 const pocketEscape = require('./pocket-escape.js') // PURE pocket-breach geometry: plan a bounded dig out of a flooded, roofed pocket (water-wedge escape)
 const navProfile = require('./nav-profile.js') // PURE nav-terrain policy: wild-profile type whitelist, scope gate, per-position break exclusion (NAV Phase 1)
+const navLeg = require('./nav-leg.js') // PURE leg-planning core (NAV Phase B): Y-banded surface-trek leg goal (isEnd/heuristic) so A* can't ride a leg 45b down a cave to lava
+const GoalNearXZBanded = navLeg.makeGoalNearXZBanded(goals.Goal) // Y-aware drop-in for goals.GoalNearXZ (NAV_HAZARD_LEGS)
+const NAV_HAZARD_LEGS = process.env.NAV_HAZARD_LEGS !== '0' // NAV Phase B (default ON): Y-band the trek leg goal + price lava in the trek Movements profile; =0 => today's Y-blind GoalNearXZ + no lava cost, byte-for-byte
 // Visible, UNTHROTTLED build tracing to stdout (the say() progress goes through a 40s
 // throttle that hides failures). Enable with BUILD_DEBUG=1 to see every plan/task/smelt step.
 let dbgSink = null // injected by index.js: debug lines persist to logs/bot-events.log
@@ -102,6 +105,16 @@ function cropExclusionStep (bot) {
   }
 }
 
+// NAV Phase B (NAV_HAZARD_LEGS): the lava-hazard STEP exclusion closure for a trek Movements
+// profile. Wraps the PURE navProfile.hazardExclusion with a live-world block-name sampler so A*
+// pays HAZARD_STEP_COST to step onto a lava / lava-adjacent (pool-edge) cell and routes around
+// it. Shared by wildTerrainMovements (here) and commands.travelMovements (exported). Cost-only,
+// never a forbid; bounded to a handful of blockAt reads per candidate cell.
+function hazardStepExclusion (bot) {
+  const sample = (x, y, z) => { try { const b = bot.blockAt(new Vec3(x, y, z)); return b && b.name } catch { return null } }
+  return (block) => { const p = block && block.position; return p ? navProfile.hazardExclusion(p, sample) : 0 }
+}
+
 // NO_PLACE_ON_FARM (fix #17): a per-block PLACEMENT exclusion (fed to Movements.exclusionAreasPlace)
 // that FORBIDS the pathfinder from bridging/scaffolding a block onto our OWN farmland or the crop
 // cell just above it - placing cobble there destroys the farmland/crop and floods it (#28/#31).
@@ -174,6 +187,9 @@ function wildTerrainMovements (bot) {
   })
   // S6 FARM_NO_TRAMPLE parity (provision.js:71 pattern) - route AROUND our crop cells (cost-only).
   try { const ex = cropExclusionStep(bot); if (ex && Array.isArray(m.exclusionAreasStep)) m.exclusionAreasStep.push(ex) } catch {}
+  // NAV Phase B: price lava (+lava-adjacent pool edges) so A* routes AROUND it (cost-only, never
+  // a forbid). Additive to exclusionAreasStep; flag-gated so =0 is byte-for-byte today.
+  try { if (NAV_HAZARD_LEGS && Array.isArray(m.exclusionAreasStep)) m.exclusionAreasStep.push(hazardStepExclusion(bot)) } catch {}
   try { const px = cropPlaceExclusion(bot); if (px && Array.isArray(m.exclusionAreasPlace)) m.exclusionAreasPlace.push(px) } catch {} // NO_PLACE_ON_FARM (fix #17): never bridge/place on our own farmland
   return m
 }
@@ -473,8 +489,17 @@ async function walkStaged (bot, tx, tz, opts = {}) {
     // Each leg runs through the UNIFIED navigator (navigate.js): the water-hop, pit
     // pillar-out, cave climb-out and cliff-checked surface nudge fire consistently.
     let navRes, navErr
+    // NAV Phase B leg goal: Y-BANDED to surfaceRef so A* can't satisfy this leg 45b DOWN a cave
+    // at the target's XZ (#41). Folds the intent of the reactive #41 depth-guard (below) into the
+    // GOAL at plan time; the guard stays as a cheap post-leg backstop. NAV_HAZARD_LEGS=0 =>
+    // today's Y-blind GoalNearXZ, byte-for-byte. Final trek arrival is the independent XZ check
+    // at the loop top, so the band never blocks completion, and mining descents (branchMine) run
+    // their own deep logic - not through this surface-trek leg - so they are untouched.
+    const legGoal = NAV_HAZARD_LEGS
+      ? new GoalNearXZBanded(lx, lz, 4, surfaceRef)
+      : new goals.GoalNearXZ(lx, lz, 4)
     try {
-      navRes = await navigate.navigateTo(bot, new goals.GoalNearXZ(lx, lz, 4), {
+      navRes = await navigate.navigateTo(bot, legGoal, {
         timeoutMs: legTimeout, deadlineMs: legDeadline, isStopped, label: 'walkStaged',
         budgets: { water: 1, pit: 1, door: 1, climb: 1, nudge: 1 }, // one rescue of each kind per leg - this loop retries legs
         escalate: false, doorPreflight: false, // THIS loop owns the measured-stall forceUnstick; a near-home leg must not spuriously cross a door
@@ -8215,6 +8240,6 @@ async function chestCounts (bot, chestBlock) {
 }
 
 module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, smeltFuelPlan, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, breachDryPocket, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, boundedHold, recoverFromDegraded, isRecoveringDegraded, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, markBedUnusable, bedHeld, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, noteWaterCrossing, lonelyFurnace, consolidateFurnaces, litterPatrol, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
-  maintenancePass, isMaintaining, stopMaintenance, _setMaintaining, courierFoodToBank, safekeepSweep, cropExclusionStep, cropPlaceExclusion, gatherSeedsNear,
+  maintenancePass, isMaintaining, stopMaintenance, _setMaintaining, courierFoodToBank, safekeepSweep, cropExclusionStep, cropPlaceExclusion, hazardStepExclusion, gatherSeedsNear,
   activeJobInfo, stopSurvivalJob,
   wildTerrainMovements, trekMovements, DIGGABLE_NATURAL, STRUCTURE_RE, canBreakNaturally }

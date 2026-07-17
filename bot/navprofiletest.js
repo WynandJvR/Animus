@@ -158,5 +158,45 @@ t('constants: digCost>=20, radii 16/32, liquidCost 4', () => {
   assert.strictEqual(nav.WILD_LIQUID_COST, 4)
 })
 
+// ---- NAV Phase B: hazardExclusion (lava / lava-adjacent step cost) ---------------------------
+// A block-name sampler over an explicit lava-cell set: sampleName(x,y,z) -> name|null.
+const lavaAt = (...cells) => {
+  const set = new Set(cells.map(c => c.x + ',' + c.y + ',' + c.z))
+  return (x, y, z) => set.has(x + ',' + y + ',' + z) ? 'lava' : 'stone'
+}
+t('hazardExclusion: standing IN lava => HAZARD_STEP_COST', () => {
+  const s = lavaAt({ x: 5, y: 40, z: 5 })
+  assert.strictEqual(nav.hazardExclusion({ x: 5, y: 40, z: 5 }, s), nav.HAZARD_STEP_COST)
+})
+t('hazardExclusion: lava one block BELOW the standing cell (support) => cost', () => {
+  const s = lavaAt({ x: 5, y: 39, z: 5 })
+  assert.strictEqual(nav.hazardExclusion({ x: 5, y: 40, z: 5 }, s), nav.HAZARD_STEP_COST)
+})
+t('hazardExclusion: lava in a horizontal neighbour (pool edge) => cost', () => {
+  const s = lavaAt({ x: 6, y: 40, z: 5 })
+  assert.strictEqual(nav.hazardExclusion({ x: 5, y: 40, z: 5 }, s), nav.HAZARD_STEP_COST)
+})
+t('hazardExclusion: lava diagonally-below a horizontal neighbour (pool edge you stand beside) => cost', () => {
+  const s = lavaAt({ x: 4, y: 39, z: 5 })
+  assert.strictEqual(nav.hazardExclusion({ x: 5, y: 40, z: 5 }, s), nav.HAZARD_STEP_COST)
+})
+t('hazardExclusion: flowing_lava is a hazard name', () => {
+  const s = (x, y, z) => (x === 5 && y === 40 && z === 5) ? 'flowing_lava' : 'air'
+  assert.strictEqual(nav.hazardExclusion({ x: 5, y: 40, z: 5 }, s), nav.HAZARD_STEP_COST)
+})
+t('hazardExclusion: no lava anywhere near => 0; water is NOT a lava hazard (priced by liquidCost)', () => {
+  assert.strictEqual(nav.hazardExclusion({ x: 5, y: 40, z: 5 }, () => 'stone'), 0)
+  assert.strictEqual(nav.hazardExclusion({ x: 5, y: 40, z: 5 }, () => 'water'), 0)
+})
+t('hazardExclusion: lava 2b away (outside the sampled neighbourhood) => 0 (cost-local, not a map)', () => {
+  const s = lavaAt({ x: 7, y: 40, z: 5 }, { x: 5, y: 42, z: 5 })
+  assert.strictEqual(nav.hazardExclusion({ x: 5, y: 40, z: 5 }, s), 0)
+})
+t('hazardExclusion: null pos / non-fn sampler tolerated => 0; HAZARD_STEP_COST is high but sub-forbid (<100)', () => {
+  assert.strictEqual(nav.hazardExclusion(null, () => 'lava'), 0)
+  assert.strictEqual(nav.hazardExclusion({ x: 0, y: 0, z: 0 }, null), 0)
+  assert(nav.HAZARD_STEP_COST > 0 && nav.HAZARD_STEP_COST < 100, 'cost routes around but never forbids the sole path')
+})
+
 console.log(failures ? ('\n' + failures + ' FAILURE(S)') : '\nALL PASS')
 process.exit(failures ? 1 : 0)

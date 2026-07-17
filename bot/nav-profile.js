@@ -24,6 +24,23 @@ const WILD_SCOPE_RADIUS = 32
 // whitelisted as such and breakable anywhere the positional gate permits.
 const SCAFFOLD_BREAK_RE = /^(cobblestone|cobbled_deepslate)$/
 
+// NAV Phase B (NAV_HAZARD_LEGS): the lava-hazard STEP predicate. travelMovements/wildTerrain
+// never priced lava at all (no liquidCost for it, and A* prices a lava-pool-edge cell like open
+// ground) - so a surface trek could route a leg right to a pool edge. HAZARD_RE matches the two
+// lava block names; HAZARD_STEP_COST is a HIGH but sub-forbid step surcharge: high enough that
+// A* routes AROUND lava when any alternative exists, but < the library's cost>100 drop threshold
+// (movements.js:388) so it degrades to a longer path rather than noPath when lava is unavoidable
+// (worst case = today's route, never worse). HAZARD_OFFSETS are the cells sampled around a
+// step-destination whose lava presence makes the destination a "pool edge": the standing/feet
+// cell, the support block below, and the 4 horizontal neighbours at feet and support level.
+const HAZARD_RE = /^(lava|flowing_lava)$/
+const HAZARD_STEP_COST = 60
+const HAZARD_OFFSETS = [
+  [0, 0, 0], [0, -1, 0],
+  [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1],
+  [1, -1, 0], [-1, -1, 0], [0, -1, 1], [0, -1, -1]
+]
+
 // Movements-level TYPE whitelist for the wild profile. The first clause is byte-identical to
 // canBreakNaturally's compound (provision.js:332) - cobble is admitted at the TYPE level ONLY
 // via SCAFFOLD_BREAK_RE, and its per-position registry gate then lives in breakExclusion (c).
@@ -69,8 +86,25 @@ function breakExclusion (anchorsXZ, buildZone, name, pos, isScaffold) {
   return 0
 }
 
+// The per-position STEP hazard exclusion (fed to Movements.exclusionAreasStep, style of
+// cropExclusionStep). Returns HAZARD_STEP_COST if the step-destination `pos` is lava OR
+// lava-adjacent (any HAZARD_OFFSETS neighbour is lava), else 0. PURE: the caller supplies
+// `sampleName(x,y,z) -> blockName|null` (a live-world lookup at plan time); this module never
+// touches the world. Bounded to HAZARD_OFFSETS.length reads per candidate cell.
+function hazardExclusion (pos, sampleName) {
+  if (!pos || typeof sampleName !== 'function') return 0
+  for (const [dx, dy, dz] of HAZARD_OFFSETS) {
+    const n = sampleName(pos.x + dx, pos.y + dy, pos.z + dz)
+    if (n && HAZARD_RE.test(n)) return HAZARD_STEP_COST
+  }
+  return 0
+}
+
 module.exports = {
   WILD_DIG_COST,
+  HAZARD_RE,
+  HAZARD_STEP_COST,
+  hazardExclusion,
   WILD_LIQUID_COST,
   INFRA_BREAK_RADIUS,
   WILD_SCOPE_RADIUS,
