@@ -409,6 +409,8 @@ async function walkStaged (bot, tx, tz, opts = {}) {
   // home->timber run doesn't blind-plan into the 1st run's wedge. Waypoint choice ONLY - the
   // recovery ladder / forceUnstick / reflexes below are untouched.
   const startPos = { x: bot.entity.position.x, z: bot.entity.position.z }
+  const LAVA_SAFE = process.env.LAVA_SAFE !== '0' // #41 §2a: a surface trek's XZ-blind GoalNearXZ can thread a cave mouth 45b DOWN to lava - climb out before it parks on a pool edge
+  const surfaceRef = opts.surfaceY != null ? opts.surfaceY : Math.floor(bot.entity.position.y) // trek's reference surface (gather plumbs surfaceY; else where we set off from)
   const d0 = Math.hypot(tx - startPos.x, tz - startPos.z) // straight-line trek length (for the >=64b record gate)
   const crumbs = [{ x: startPos.x, z: startPos.z }]
   let lastCrumb = crumbs[0]
@@ -493,6 +495,15 @@ async function walkStaged (bot, tx, tz, opts = {}) {
     const reflexWaitMs = (navRes && navRes.reflexWaitMs) || (navErr && navErr.nav && navErr.nav.reflexWaitMs) || 0
     const reflexDominated = reflexWaitMs > legDeadline / 2
     pushCrumb({ x: np.x, z: np.z }) // record the trek shape for the reusable route
+    // #41 §2a DEPTH GUARD: a surface trek that has sunk >18b below its reference surface UNDER A
+    // ROOF is threading a cave downward toward the lava band. Climb out proactively (now via the
+    // lava-safe climbToSurface) BEFORE the pathfinder walks it to y20 and parks it on a pool edge.
+    // Bounded: climbToSurface raises y, so the guard self-clears; worst case bounded by the deadline.
+    if (LAVA_SAFE && hasSolidCeiling(bot, 12, { ignoreLeaves: true }) && Math.floor(np.y) < surfaceRef - 18) {
+      dbg('walkStaged: surface trek sank ' + (surfaceRef - Math.floor(np.y)) + 'b under a roof at ' + np.floored().toString() + ' - climbing out before lava depth')
+      try { await climbToSurface(bot, Math.min(surfaceRef, Math.floor(np.y) + 20), { isStopped }) } catch {}
+      continue
+    }
     if (moved < 3 && !reflexDominated) {
       // MEASURED stall mid-replay -> the proven route is stale here. Dement it (fail++, 2
       // consecutive fails evict) and abandon the cursor; the next leg falls through to
@@ -1219,6 +1230,7 @@ async function ensureHutBed (bot, at, opts = {}) {
 async function digShaftDown (bot, maxDepth, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const FLUID = process.env.MINE_FLUID !== '0'
+  const LAVA_SAFE = process.env.LAVA_SAFE !== '0' // #41 §2c: a pool at shaft-bottom level flows in SIDEWAYS (below/below2 only look straight down)
   const DANGER = /lava|water/
   // Never sink a shaft on the hut's doorstep. Step clear of the apron first (toward the
   // build site if we know it, else just off the apron) so the entrance stays intact.
@@ -1239,6 +1251,11 @@ async function digShaftDown (bot, maxDepth, opts = {}) {
     const below2 = bot.blockAt(feet.offset(0, -2, 0))
     if (!below || AIRISH(below.name) || DANGER.test(below.name)) break
     if (!below2 || AIRISH(below2.name) || DANGER.test(below2.name)) break // drop/lava/cave beneath -> STOP
+    if (LAVA_SAFE) { // #41: fluid in a SIDE neighbour of our feet cell or of the cell we'll drop into -> it floods in horizontally; stop the shaft
+      const sides = []
+      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const a = bot.blockAt(feet.offset(dx, 0, dz)); const b = bot.blockAt(feet.offset(dx, -1, dz)); sides.push(a && a.name, b && b.name) }
+      if (mining.digExposureHazard(sides) !== 'ok') break
+    }
     if (!canBreakNaturally(below)) break // anti-grief: never dig a player-placed block
     const tool = toolForBlock(bot, below.name)
     if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
@@ -1273,6 +1290,9 @@ async function digStaircaseUp (bot, targetY, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   if (insideOwnStructure(bot)) { dbg('  staircase: inside my own hut - not cutting up through it'); return }
   const FLUID = process.env.MINE_FLUID !== '0'
+  const LAVA_SAFE = process.env.LAVA_SAFE !== '0' // #41: refuse a lava-adjacent/lava-floored step; =0 -> byte-for-byte today
+  const FACE6 = [new Vec3(1, 0, 0), new Vec3(-1, 0, 0), new Vec3(0, 1, 0), new Vec3(0, -1, 0), new Vec3(0, 0, 1), new Vec3(0, 0, -1)]
+  const nameAt = (v) => { const b = bot.blockAt(v); return b ? b.name : null }
   const DIRS = [new Vec3(1, 0, 0), new Vec3(0, 0, 1), new Vec3(-1, 0, 0), new Vec3(0, 0, -1)]
   const digIf = async (p) => {
     const b = bot.blockAt(p)
@@ -1287,14 +1307,37 @@ async function digStaircaseUp (bot, targetY, opts = {}) {
   const startY = Math.floor(bot.entity.position.y)
   let di = 0; let stuck = 0
   while (Math.floor(bot.entity.position.y) < targetY && !isStopped() && stuck < 8) {
+    if (LAVA_SAFE && mineDanger(bot)) break // #41: in-lava/on-fire/hostile/low-hp -> stop digging & hand control back (the 3 sibling primitives already bail; this one didn't - death 1 climbed ~9s while burning)
     if (Math.floor(bot.entity.position.y) > startY && !hasSolidCeiling(bot, 20, { ignoreLeaves: true })) break // broke into open sky - done
     const y0 = Math.floor(bot.entity.position.y)
     const feet = bot.entity.position.floored()
-    const dir = DIRS[di % 4]; di++
-    const sFloor = feet.plus(dir)                 // block we'll stand on (same Y as feet)
-    const sFeet = feet.plus(dir).offset(0, 1, 0)  // new feet cell
-    const sHead = feet.plus(dir).offset(0, 2, 0)  // new head cell
     await digIf(feet.offset(0, 2, 0))             // our own head-clearance to move up
+    let dir, sFloor, sFeet, sHead
+    if (LAVA_SAFE) {
+      // #41 gap #1/#2: pick the first of the 4 quarter-turn directions whose step is lava-safe.
+      // For each candidate probe climbStepSafety over the tread's support (descentSafety) + every
+      // cell the step opens/enters and its face-neighbours (a lava tread, or a pocket beside a
+      // cell we crack open). All 4 hazardous -> abandon the staircase (return); climbToSurface
+      // then falls through to its column-safe pillarUpTo fallback. No new escalation machinery.
+      let chosen = null; let lastHz = 'ok'
+      for (let k = 0; k < 4; k++) {
+        const cand = DIRS[(di + k) % 4]
+        const cFloor = feet.plus(cand); const cFeet = cFloor.offset(0, 1, 0); const cHead = cFloor.offset(0, 2, 0)
+        const under = cFloor.offset(0, -1, 0)
+        const probe = []
+        for (const c of [feet.offset(0, 2, 0), cFeet, cHead, cFloor]) { probe.push(nameAt(c)); for (const n of FACE6) probe.push(nameAt(c.plus(n))) }
+        const hz = mining.climbStepSafety(nameAt(under), nameAt(under.offset(0, -1, 0)), probe)
+        if (hz === 'ok') { chosen = { dir: cand, off: k }; break }
+        lastHz = hz
+      }
+      if (!chosen) { dbg('  staircase: all 4 directions hazardous (' + lastHz + ') at ' + feet.toString() + ' - handing to pillar fallback'); return }
+      dir = chosen.dir; di += chosen.off + 1
+    } else {
+      dir = DIRS[di % 4]; di++
+    }
+    sFloor = feet.plus(dir)                        // block we'll stand on (same Y as feet)
+    sFeet = feet.plus(dir).offset(0, 1, 0)         // new feet cell
+    sHead = feet.plus(dir).offset(0, 2, 0)         // new head cell
     const fb = bot.blockAt(sFloor)
     if (!fb || AIRISH(fb.name)) { // no floor for the step -> place one
       const filler = scaffold.pickFiller(bot) // dirt-first, one policy for every scaffold placer
@@ -1474,6 +1517,10 @@ async function pillarUpTo (bot, targetY, opts = {}) {
 // in `finally` so a survival flee/defend reflex firing after the loop breaks gets clean
 // controls (same discipline as pillarUpTo). Returns whether we arrived. Never digs or places.
 async function stepInto (bot, cell, { jump = false, ms = 1200, isStopped = () => false } = {}) {
+  if (process.env.LAVA_SAFE !== '0') { // #41 belt-and-braces for EVERY caller: never walk into a lava cell or onto a lava floor (death 2 walked sideways into lava). Returning false falls through to the caller's pathfinder goto, which refuses lava cells natively.
+    const dst = bot.blockAt(cell); const dstFloor = bot.blockAt(cell.offset(0, -1, 0))
+    if ((dst && mining.LAVA_RE.test(dst.name)) || (dstFloor && mining.LAVA_RE.test(dstFloor.name))) { dbg('  stepInto: lava at/under ' + cell.toString() + ' - refusing to step in'); return false }
+  }
   let arrived = false
   try {
     try { await bot.lookAt(cell.offset(0.5, 1.5, 0.5), true) } catch {} // aim at ~eye height of the target cell
@@ -1504,6 +1551,7 @@ async function mineTunnel (bot, itemName, maxLen, dirIdx, opts = {}) {
   const dir = DIRS[((dirIdx % 4) + 4) % 4]
   const before = countItem(bot, itemName)
   const FLUID = process.env.MINE_FLUID !== '0'
+  const LAVA_SAFE = process.env.LAVA_SAFE !== '0' // #41: close residual holes (ceiling pocket above the new head; FLUID - not just open air - beyond the face)
   const SWEEP_EVERY = parseInt(process.env.MINE_SWEEP_EVERY || '4', 10)
   const oreWord = String(itemName).replace(/^raw_/, '')
   for (let i = 0; i < maxLen && !isStopped(); i++) {
@@ -1521,6 +1569,10 @@ async function mineTunnel (bot, itemName, maxLen, dirIdx, opts = {}) {
     const beyond = ahead.plus(dir)
     const bBeyond = bot.blockAt(beyond); const bBeyondUp = bot.blockAt(beyond.offset(0, 1, 0))
     if ((bBeyond && AIRISH(bBeyond.name)) && (bBeyondUp && AIRISH(bBeyondUp.name))) break
+    if (LAVA_SAFE) { // #41 §2c: a ceiling lava pocket ABOVE the new head cell, or FLUID (not just air) one step beyond the face
+      const bAbove = bot.blockAt(aheadUp.offset(0, 1, 0)) // = ahead.offset(0,2,0), above the new head cell
+      if (mining.digExposureHazard([bAbove && bAbove.name, bBeyond && bBeyond.name, bBeyondUp && bBeyondUp.name]) !== 'ok') break
+    }
     let dugAny = false
     for (const p of [aheadUp, ahead]) {
       const b = bot.blockAt(p)
@@ -1690,6 +1742,7 @@ async function digStaircaseDown (bot, targetY, opts = {}) {
   const [ddx, ddz] = mining.DIRS[dirIdx]
   const dir = new Vec3(ddx, 0, ddz)
   const FLUID = process.env.MINE_FLUID !== '0'
+  const LAVA_SAFE = process.env.LAVA_SAFE !== '0' // #41 §2c: descentSafety only probes UNDER the tread; a pool beside/above the dug cells still pours in
   let steps = 0
   while (Math.floor(bot.entity.position.y) > targetY && !isStopped() && steps < 96) {
     if (mineDanger(bot)) return { reached: false, reason: 'hostile/hp during descent', blocked: null }
@@ -1702,6 +1755,12 @@ async function digStaircaseDown (bot, targetY, opts = {}) {
     const fb = bot.blockAt(stepFloor); const fb2 = bot.blockAt(stepFloor2)
     const safety = mining.descentSafety(fb && fb.name, fb2 && fb2.name)
     if (safety !== 'ok') { dbg('  staircase: ' + safety + ' under the next tread at ' + step.toString() + ' - stopping this shaft'); return { reached: false, reason: safety + ' below', blocked: safety } }
+    if (LAVA_SAFE) { // #41: fluid in a SIDE/ABOVE neighbour of the cells we're about to open -> relocate the entrance (branchMine already knows how)
+      const nb = []
+      for (const cell of [aheadUp, ahead, step]) { for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]]) { const b = bot.blockAt(cell.offset(dx, dy, dz)); nb.push(b && b.name) } }
+      const hz = mining.digExposureHazard(nb)
+      if (hz !== 'ok') { dbg('  staircase-down: ' + hz + ' beside the face at ' + step.toString() + ' - relocating entrance'); return { reached: false, reason: hz + ' beside face', blocked: hz } }
+    }
     // don't break INTO an open cavern (dark mob ambush) - if the tread cell and its head are
     // already open air with more air beyond, hand back to relocate rather than crack it open.
     const dig = async (p) => {
@@ -2306,7 +2365,7 @@ function nearHostile (bot, r) {
 // awaits, not the pathfinder), so the tight dig loops + the gather loop poll THIS and bail
 // to a survival reaction. Naked deep gearup mining died at ~1hp three times (verified live:
 // y39-40, zombie in melee + skeleton firing, flee:false) - this is the missing reflex.
-function mineDanger (bot) { return nearHostile(bot, 6) || (bot.health ?? 20) < 12 }
+function mineDanger (bot) { return nearHostile(bot, 6) || (bot.health ?? 20) < 12 || (process.env.LAVA_SAFE !== '0' && !!(bot.entity && (bot.entity.isInLava || bot.entity.onFire))) } // #41: in-lava/on-fire is a dig-abort for every mining primitive (isInLava/onFire are reliable entity flags; oxygenLevel is not)
 // LOW-HP-BUT-CALM: hurt below the mine-danger arm with NOTHING attacking - the livelock state
 // (hp<12, no hostile) that the arbiter heal/food needs both miss (heal fires at hp<=6 or hp<=10
 // only while endangered; food at food<14). The material-round heal entry widens on THIS so the

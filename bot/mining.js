@@ -165,6 +165,29 @@ function digExposureHazard (neighborNames) {
   return 'ok'
 }
 
+// CLIMB-STEP safety (the digStaircaseUp lava-death fix, #41): compose the two existing probes
+// so a single call decides whether the NEXT up-staircase step is safe. Given the two blocks
+// UNDER the tread (floorName/floor2Name - where the filler will rest / what we stand on) and
+// the NAME strings of every cell the step OPENS or ENTERS **plus their face-neighbours**
+// (`openCellNeighborNames` - own head-clearance, the new feet/head cells, the tread cell,
+// deduped ~12-16 reads), returns 'lava'|'water'|'void'|'ok':
+//   - descentSafety(floorName, floor2Name): lava/water UNDER the tread, or void (no support to
+//     place a tread on -> try another direction). 'void' is a real "can't build here" signal,
+//     not a fluid, but the caller rotates off it exactly like the other hazards.
+//   - else digExposureHazard(openCellNeighborNames): lava/water AT or beside any opened cell
+//     (a lava tread walked onto, or a pocket one block past the cell we crack open).
+// Widened beyond fluids to the fire/magma death-danger class (index.js grave classifier) via a
+// local regex only - LAVA_RE/WATER_RE are UNTOUCHED so descentSafety/faceHazard/digExposureHazard
+// keep their exact meaning for every other caller. PURE (names + numbers in, decision out).
+const CLIMB_HAZARD_RE = /magma_block|fire/
+function climbStepSafety (floorName, floor2Name, openCellNeighborNames) {
+  const d = descentSafety(floorName, floor2Name)
+  if (d !== 'ok') return d
+  const ns = Array.isArray(openCellNeighborNames) ? openCellNeighborNames : []
+  if ([floorName, floor2Name].concat(ns).some(n => CLIMB_HAZARD_RE.test(n || ''))) return 'lava'
+  return digExposureHazard(ns)
+}
+
 // EXPOSURE probe (THE mining-throughput root fix): given a target block's 6 face-neighbour
 // NAME strings, is at least ONE face open to air? Ore EMBEDDED in solid rock (all 6 neighbours
 // solid) is NOT reachable by the anti-grief mining movement profile (canDig, but every
@@ -239,4 +262,4 @@ function branchLayout (corridorIdx, opts = {}) {
   }
 }
 
-module.exports = { LAVA_RE, WATER_RE, AIRISH, DIRS, PICK_USES, perpendicular, targetMineY, worthMiningHere, mineableWhenBlocked, mineReusable, pickMaxUses, pickUsesLeft, toolMaxUses, toolUsesLeft, estExcursionBlocks, picksToCraft, needReTool, descentSafety, faceHazard, digExposureHazard, faceExposed, scratchWorthy, branchLayout, preferBranchMine, deepMinePlan, sweepDue }
+module.exports = { LAVA_RE, WATER_RE, AIRISH, DIRS, PICK_USES, perpendicular, targetMineY, worthMiningHere, mineableWhenBlocked, mineReusable, pickMaxUses, pickUsesLeft, toolMaxUses, toolUsesLeft, estExcursionBlocks, picksToCraft, needReTool, descentSafety, faceHazard, digExposureHazard, climbStepSafety, faceExposed, scratchWorthy, branchLayout, preferBranchMine, deepMinePlan, sweepDue }

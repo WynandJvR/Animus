@@ -63,6 +63,31 @@ t('digExposureHazard: a fluid in ANY of the 6 neighbours (incl. below) blocks a 
   assert.strictEqual(M.digExposureHazard([]), 'ok', 'no data -> not a hazard')
 })
 
+t('climbStepSafety (#41 up-staircase lava gate): compose descentSafety + digExposureHazard over an opened step', () => {
+  const dry6 = ['stone', 'stone', 'stone', 'stone', 'stone', 'stone']
+  // all-solid, dry rock under the tread AND around the opened cells -> safe to step up
+  assert.strictEqual(M.climbStepSafety('stone', 'stone', dry6), 'ok', 'solid non-lava all around -> ok')
+  // lava as the tread's floor (below the cell we step onto) -> descentSafety catches it
+  assert.strictEqual(M.climbStepSafety('lava', 'stone', dry6), 'lava', 'lava floor under the tread -> lava (descentSafety)')
+  assert.strictEqual(M.climbStepSafety('stone', 'lava', dry6), 'lava', 'lava two below the tread -> lava')
+  // lava as a NEIGHBOUR of an opened/entered cell (the tread itself, or a pocket one block over)
+  assert.strictEqual(M.climbStepSafety('stone', 'stone', ['stone', 'lava', 'stone', 'stone', 'stone', 'stone']), 'lava', 'lava beside an opened cell -> lava (digExposureHazard)')
+  // no floor to place a tread on -> void (caller rotates off it, exactly like a fluid)
+  assert.strictEqual(M.climbStepSafety('air', 'stone', dry6), 'void', 'no support under the tread -> void')
+  assert.strictEqual(M.climbStepSafety(null, 'stone', dry6), 'void', 'unloaded/absent support -> void')
+  // water variants
+  assert.strictEqual(M.climbStepSafety('water', 'stone', dry6), 'water', 'water under the tread -> water')
+  assert.strictEqual(M.climbStepSafety('stone', 'stone', ['stone', 'water', 'stone', 'stone', 'stone', 'stone']), 'water', 'water beside an opened cell -> water')
+  // widened death-danger class (fire/magma) matched WITHOUT touching LAVA_RE
+  assert.strictEqual(M.climbStepSafety('stone', 'stone', ['stone', 'magma_block', 'stone', 'stone', 'stone', 'stone']), 'lava', 'a magma block neighbour is the same death-danger class -> lava')
+  assert.strictEqual(M.climbStepSafety('stone', 'stone', ['stone', 'fire', 'stone', 'stone', 'stone', 'stone']), 'lava', 'fire neighbour -> lava-class refusal')
+  assert.strictEqual(M.climbStepSafety('magma_block', 'stone', dry6), 'lava', 'a magma block AS the tread floor -> lava-class refusal')
+  // lava outranks water in the neighbour set
+  assert.strictEqual(M.climbStepSafety('stone', 'stone', ['water', 'lava', 'stone', 'stone', 'stone', 'stone']), 'lava', 'lava outranks water')
+  // no data at all -> ok (descentSafety null/null is void though - guard the intended shape)
+  assert.strictEqual(M.climbStepSafety('stone', 'stone', []), 'ok', 'solid support, no neighbour data -> ok')
+})
+
 t('faceExposed: embedded ore (all solid) is unreachable; any open face makes it minable', () => {
   assert.strictEqual(M.faceExposed(['stone', 'stone', 'stone', 'stone', 'stone', 'stone']), false, 'boxed in solid rock -> not reachable, DO NOT target')
   assert.strictEqual(M.faceExposed(['stone', 'air', 'stone', 'stone', 'stone', 'stone']), true, 'an air face -> reachable')
