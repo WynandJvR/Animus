@@ -3871,7 +3871,22 @@ async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () =
   if (nearExisting && (existingLen >= WHEAT_FARM_TARGET || (existingLen > 0 && m.wheatFarm.maxed)) && !resiteEligible) return true
   // BAD MOMENT guard: the last attempt ran while being chased INTO A CAVE - it searched
   // for grass from underground and found none. Farming is a peacetime surface job.
-  if (hasSolidCeiling(bot, 12) || nearHostile(bot, 16) || isNight(bot)) { dbg('  wheat farm: bad moment (cave/hostiles/night) - deferred'); return false }
+  // FIX #39: farming is a peacetime SURFACE job - defer if we're truly caved-in, hunted, or it's
+  // night. Fix A (FARM_CAVE_STRICT): a LEAF CANOPY is not a cave roof. hasSolidCeiling counts any
+  // 'block'-bounding-box block above, so tree leaves / an overhang within 12b read as a ceiling and
+  // farming was skipped in broad daylight (verified: isDay + no threat still deferred). ignoreLeaves
+  // makes the ceiling check require a real opaque (non-leaf) block. FARM_CAVE_STRICT=0 = legacy.
+  // Fix B: split the lumped message so the log names WHICH condition fired (this vagueness
+  // misdiagnosed the defer twice) - pure observability, always on.
+  const ceilStrict = process.env.FARM_CAVE_STRICT !== '0'
+  const ceiling = hasSolidCeiling(bot, 12, { ignoreLeaves: ceilStrict })
+  const hostile = nearHostile(bot, 16)
+  const night = isNight(bot)
+  if (ceiling || hostile || night) {
+    const why = ceiling ? 'solid ceiling <=12b (real cave roof)' : hostile ? 'hostile within 16b' : 'night'
+    dbg('  wheat farm: bad moment - ' + why + ' - deferred')
+    return false
+  }
   // 1) surface water within reach of home - farmland must sit beside it
   const waterId = mcData.blocksByName.water.id
   // SURFACE water only: cave/ravine pools pass the air-above test but have stone banks
@@ -4310,7 +4325,22 @@ async function tendWheatFarm (bot, { isStopped = () => false, say = () => {} } =
       try { await ensureWheatFarm(bot, { x: m.wheatFarm.x, z: m.wheatFarm.z }, { isStopped, say }) } catch (e) { dbg('  farm reseed: inline ensure failed (' + e.message + ')') }
     }
   }
-  if (harvested) await collectDrops(bot, 6, { patience: 3 }) // final sweep: grab any drop that drifted onto the plot edge before we craft (tight radius - don't wander off-plot after distant drops)
+  // FIX #38: WHOLE-PLOT collect sweep. A big plot (live: 22 cells at 446,31) spans past radius 6,
+  // so the old fixed-6 sweep left drops at far cells on the ground ("harvested 8 -> wheat=1"). Center
+  // on the plot (the water anchor) and collect out to a radius that covers its bounding box, so every
+  // cell's drop is in range. Bounded: one sweep, radius capped (farm.plotCollectRadius). Off-plot
+  // drops stay out via the cap. FARM_COLLECT_PLOT=0 restores today's radius-6 sweep.
+  if (harvested) {
+    if (process.env.FARM_COLLECT_PLOT !== '0') {
+      const pcells = m.wheatFarm.cells || []
+      const rad = farm.plotCollectRadius(pcells, { x: m.wheatFarm.x, z: m.wheatFarm.z })
+      const cy = (pcells[0] && pcells[0].y) || Math.floor(bot.entity.position.y)
+      try { await gotoWithTimeout(bot, new goals.GoalNear(m.wheatFarm.x, cy, m.wheatFarm.z, 2), 12000) } catch {}
+      await collectDrops(bot, rad, { patience: 3 })
+    } else {
+      await collectDrops(bot, 6, { patience: 3 }) // legacy: tight radius sweep at the current spot
+    }
+  }
   const wheatN = countItem(bot, 'wheat')
   if (wheatN >= 3) { try { const made = await runCraft(bot, 'bread', Math.floor(wheatN / 3), true, { isStopped }); say('baked ' + made + ' bread - crisis over'); dbg('  baked ' + made + ' bread') } catch (e) { dbg('  bread craft failed (' + e.message + ')') } }
   dbg('  wheat farm tended: harvested ' + harvested + ', replanted ' + replanted + ', wheat=' + countItem(bot, 'wheat') + ', bread=' + countItem(bot, 'bread'))

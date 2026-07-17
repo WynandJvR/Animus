@@ -207,7 +207,62 @@ function reconcileCells (list, verify) {
   return { keep, pruned }
 }
 
+// ---- #37 non-destructive hut repair: decision predicate + tolerant classifier --------
+// A creeper hole is NOT a reason to empty the bank + clearFurniture-teardown the hut. These
+// two PURE functions let the camp pass route ordinary damage into the existing cell-by-cell
+// patcher (repairHutStructure) and reserve the catastrophic rebuild for a genuinely
+// flattened hut - and never fire the destructive path twice without measured improvement.
+
+// Absolute floor for the rebuild threshold, so a tiny schematic can't trip the 50% rule on
+// a handful of cells (135-cell hut.schem -> rebuild only at bad >= 68).
+const REBUILD_MIN = 24
+
+// The tolerant CLASS a block name belongs to for hut-repair mismatch purposes. Mirrors
+// repairHutStructure's deliberately tolerant matching (any *_planks satisfies a plank cell,
+// any *chest a chest cell, furnace/smoker a furnace cell, any *crafting_table a table, any
+// *_door a door; air/cave_air/void_air collapse to 'air'). Anything else -> its exact name.
+function cellClass (name) {
+  if (AIRISH(name)) return 'air'
+  if (/_planks$/.test(name)) return 'plank'
+  if (/_door$/.test(name)) return 'door'
+  if (/chest$/.test(name)) return 'chest'
+  if (/furnace$|smoker$/.test(name)) return 'furnace'
+  if (/crafting_table$/.test(name)) return 'table'
+  return name
+}
+
+// TRUE when the world block `gotName` does NOT satisfy the schematic's `wantName` for a hut
+// cell. Tolerant by class - a birch-plank patch satisfies an oak-plank cell, a trapped_chest
+// a chest cell - so a legitimate repairHutStructure patch doesn't read as permanent damage
+// (the divergence that would otherwise pin 'patch' forever, §4.2).
+function cellMismatch (wantName, gotName) {
+  return cellClass(wantName) !== cellClass(gotName)
+}
+
+// PURE repair decision. `bad` = grounded mismatch count; `solidTotal` = count of non-air
+// schematic cells; `lastBad`/`lastAction` = the previous pass's in-memory progress latch.
+//   bad <= 3     -> 'none'    (liveability chain still runs every pass, unchanged threshold)
+//   bad > 3      -> 'patch'   (the DEFAULT - non-destructive repairHutStructure, bank sealed)
+//   catastrophic -> 'rebuild' ONLY when bad >= max(REBUILD_MIN, ceil(0.5*solidTotal)) AND the
+//                   latch permits: never 'rebuild' twice without `bad` decreasing (kills the
+//                   re-empty-every-pass loop by construction). A prior action that didn't
+//                   improve `bad` locks the destructive path down to 'patch'.
+function decideHutRepair ({ bad, solidTotal, lastBad, lastAction } = {}) {
+  if (!(bad > 3)) return 'none'
+  const threshold = Math.max(REBUILD_MIN, Math.ceil(0.5 * (solidTotal || 0)))
+  if (bad >= threshold) {
+    const improved = typeof lastBad === 'number' && bad < lastBad
+    const stalled = lastAction != null && !improved
+    if (!stalled) return 'rebuild'
+  }
+  return 'patch'
+}
+
 module.exports = {
+  REBUILD_MIN,
+  cellClass,
+  cellMismatch,
+  decideHutRepair,
   DIMS,
   WALL_RE,
   DOOR_RE,

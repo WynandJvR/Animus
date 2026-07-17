@@ -148,4 +148,16 @@ function shouldResite ({ curCells, curMaxed, curScore, curDist, bestScore, bestD
   return bestScore >= curScore + margin
 }
 
-module.exports = { bankUsable, BANK_DYS, cropCellState, cellHealthStep, plotShouldUnlatch, matureForHarvest, farmlandReady, tillableBank, expansionMaxed, barrenStep, orderBankCandidates, scoreFarmSite, shouldResite }
+// FIX #38: collect-radius that covers the WHOLE plot. A big plot (live: 22 cells at 446,31)
+// spans well past the fixed radius-6 final sweep, so drops at far cells were left on the ground
+// ("harvested 8 -> wheat=1"). From the plot center (the water anchor) the farthest cell is `maxD`
+// away; collect out to that plus a small margin so every cell's drop is in range. Bounded: never
+// below `base` (today's radius), never above `cap` (don't wander off-plot after foreign drops).
+function plotCollectRadius (cells, anchor, { base = 6, margin = 4, cap = 24 } = {}) {
+  if (!cells || !cells.length || !anchor) return base
+  let maxD = 0
+  for (const c of cells) { const d = Math.hypot(c.x - anchor.x, c.z - anchor.z); if (d > maxD) maxD = d }
+  return Math.max(base, Math.min(cap, Math.ceil(maxD) + margin))
+}
+
+module.exports = { bankUsable, BANK_DYS, cropCellState, cellHealthStep, plotShouldUnlatch, matureForHarvest, farmlandReady, tillableBank, expansionMaxed, barrenStep, orderBankCandidates, scoreFarmSite, shouldResite, plotCollectRadius }

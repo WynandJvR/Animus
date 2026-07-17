@@ -18,6 +18,7 @@ const navigate = require('./navigate.js') // unified navigation: ONE goto + the 
 const planner = require('./planner.js') // re-planning goal driver (slice 1: gear-up behind the planarmor/PLANNER_GEARUP seam)
 const arbiter = require('./arbiter.js') // priority body-ownership (sticky-follow defers to a running maneuver)
 const routeMem = require('./route-mem.js') // PURE route/wedge geometry: replay proven treks + soft-steer around learned wedges (semantic-world-map slice 1)
+const hutModel = require('./hut-model.js') // PURE self-structure model + #37 repair decision (decideHutRepair) / tolerant classifier (cellMismatch)
 let dbgSink = null // injected by index.js: debug lines persist to logs/bot-events.log
 function setDebugSink (fn) { dbgSink = fn }
 const dbg = (...a) => {
@@ -37,6 +38,12 @@ let lastBrokeAt = null
 // buildAbort: set by `stop` to halt an in-progress build cleanly.
 let loadedSchem = null
 let building = false
+// #37 non-destructive hut repair: in-memory progress latch so the destructive rebuild path
+// can never fire twice without `bad` decreasing (decideHutRepair reads lastBad/lastAction).
+// hutPendingRestore is set only when a rebuild couldn't re-deposit the treasury into a chest -
+// the next camp pass runs restoreBank() FIRST, before any repair logic.
+let hutRepairLatch = { lastBad: null, lastAction: null, ts: 0 }
+let hutPendingRestore = null
 let buildAbort = false // set by `stop`; watched by schematic builds AND provision runs
 // S1 HOTFIX (REDESIGN §3.4 / invariant I1): let an admissible SURVIVAL command PREEMPT a body
 // hold without cancelling operator intent. Unlike the `stop` command it sets ONLY the abort
@@ -2958,17 +2965,27 @@ async function autoBuild (bot, schem, at, opts = {}) {
           const kb = provision.knownBed && provision.knownBed()
           hutAt = snapToGround(bot, hutSchem, new Vec3(kb ? kb.x + 3 : Math.round(at.x) - 16, kb ? kb.y - 1 : Math.floor(at.y), kb ? kb.z - 2 : Math.round(at.z)))
         }
-        // GROUNDED mismatch count - furniture cells INCLUDED this time (real block reads)
+        // GROUNDED mismatch count - furniture cells INCLUDED (real block reads). #37: also tally
+        // solidTotal (non-air schematic cells) in the SAME loop (one extra counter, no new pass),
+        // and choose the classifier by flag - tolerant cellMismatch under the flag so a birch-plank
+        // patch on an oak cell isn't counted as permanent damage; the exact match is kept under =0.
+        const ndRepair = process.env.NONDESTRUCTIVE_REPAIR !== '0' // default ON; =0 = today byte-for-byte
         let bad = 0
+        let solidTotal = 0
         for (let y = st.y; y <= en.y; y++) for (let z = st.z; z <= en.z; z++) for (let x = st.x; x <= en.x; x++) {
           const w = hutSchem.getBlock(new Vec3(x, y, z)); const g = bot.blockAt(new Vec3(hutAt.x + x, hutAt.y + y, hutAt.z + z))
+          const wantName = (w && w.name) || 'air'
+          if (!AIRRE.test(wantName)) solidTotal++
           if (!g) continue
-          const wantAir = !w || !w.name || AIRRE.test(w.name)
-          if (wantAir ? !AIRRE.test(g.name) : g.name !== w.name) bad++
+          if (ndRepair) { if (hutModel.cellMismatch(wantName, g.name)) bad++ }
+          else { const wantAir = !w || !w.name || AIRRE.test(w.name); if (wantAir ? !AIRRE.test(g.name) : g.name !== w.name) bad++ }
         }
         // schematic furniture cells (world coords) - found by scanning the schematic
         const findCell = re => { for (let y = st.y; y <= en.y; y++) for (let z = st.z; z <= en.z; z++) for (let x = st.x; x <= en.x; x++) { const w = hutSchem.getBlock(new Vec3(x, y, z)); if (w && re.test(w.name)) return new Vec3(hutAt.x + x, hutAt.y + y, hutAt.z + z) } return null }
-        if (bad > 3) {
+        if (!ndRepair && bad > 3) {
+          // NONDESTRUCTIVE_REPAIR=0 -> TODAY'S EXACT PATH: empty the bank + clearFurniture
+          // teardown + rebuild on ANY bad>3. Kept intact byte-for-byte for rollback; the whole
+          // block below is unchanged from the pre-#37 code.
           say(`building my safehouse properly (${bad} cells off) - one clean pass`)
           // 1) EMPTY the bank into the pack (verified reads) so the rebuild can clear old
           //    furniture without dropping the treasury. Count what we pulled.
@@ -3049,6 +3066,125 @@ async function autoBuild (bot, schem, at, opts = {}) {
             if (builtClean) say('safehouse built clean - walls, door, bed, furnace, bank all in place')
             else { dbg('camp: rebuild NOT clean - ' + bad2 + ' cell(s) still off, placed ' + (hr && hr.placed) + '/' + (hr && hr.total)); say('patched the safehouse but ' + bad2 + ' cell(s) still off - will retry') }
           }
+        } else if (ndRepair) {
+          // ---- #37 NON-DESTRUCTIVE HUT REPAIR (default ON) --------------------------------
+          // restoreBank(): the treasury guard - escalating targets, NEVER throws (all I/O is
+          // guarded). (a) schematic chest cell standing -> deposit; (b/c) else ensureChest (places
+          // a chest at the interior cell or recalls a remembered chest) -> deposit; (d) else keep
+          // it in the pack, say LOUDLY, and latch a pending restore so the NEXT pass re-deposits
+          // FIRST. This is what makes "never strand the bank" hold on every exit path (invariant 1).
+          const restoreBank = async () => {
+            let target = null
+            const cc = findCell(/chest/)
+            if (cc) { const cb = bot.blockAt(cc); if (cb && /chest/.test(cb.name)) target = cb }
+            if (!target) { try { target = await provision.ensureChest(bot, { home: hutAt, isStopped }) } catch (e) { dbg('camp: restore ensureChest failed (' + e.message + ')') } }
+            if (target && target.position) {
+              try {
+                const back = await provision.depositMaterials(bot, target, { keepDirt: 8, all: true })
+                provision.rememberInfra('chest', target.position)
+                dbg('camp: bank restored (' + (back != null ? back : '?') + ' redeposited)')
+                hutPendingRestore = null
+                return true
+              } catch (e) { dbg('camp: bank restore deposit failed (' + e.message + ') - items safe in my pack') }
+            }
+            say('WARNING: could not re-deposit the treasury into a chest - it is safe in my pack, I will restore it first next pass')
+            hutPendingRestore = { ts: Date.now() }
+            return false
+          }
+          // Treasury LEFT in the pack from a prior failed pass is re-deposited BEFORE any repair
+          // logic (invariant 1: never begin a pass on a pack-only bank).
+          if (hutPendingRestore) { dbg('camp: pending bank restore from a prior pass - restoring the treasury first'); try { await restoreBank() } catch (e) { dbg('camp: pending restore failed (' + e.message + ')') } }
+          const decision = hutModel.decideHutRepair({ bad, solidTotal, lastBad: hutRepairLatch.lastBad, lastAction: hutRepairLatch.lastAction })
+          dbg('camp: hut repair decision=' + decision + ' (bad=' + bad + '/' + solidTotal + ' solid, lastBad=' + hutRepairLatch.lastBad + ' lastAction=' + hutRepairLatch.lastAction + ')')
+          if (decision === 'patch') {
+            // COMMON CASE: SKIP the destructive teardown entirely. provision.maintainHome (below)
+            // runs repairHutStructure - re-places missing planks bottom-up, the door from OUTSIDE,
+            // and missing furniture at their exact cells (materials via the resource model), and
+            // NEVER opens/empties/digs the bank. Latch the pre-repair count so a pass that improves
+            // nothing can never escalate to the destructive rebuild.
+            say('damage on my safehouse (' + bad + ' cells off) - patching in place, bank untouched')
+            hutRepairLatch = { lastBad: bad, lastAction: 'patch', ts: Date.now() }
+          } else if (decision === 'rebuild') {
+            // CATASTROPHIC only (hut genuinely unrecognizable). Reordered so nothing irreversible
+            // happens before it's funded, and the treasury is protected by construction.
+            say('safehouse critically damaged (' + bad + ' of ' + solidTotal + ' cells off) - one hardened rebuild')
+            // 1) PROVISION FIRST, bank untouched: reconcile the BOM + unobtainable check BEFORE
+            //    opening any chest. Unobtainable -> abort with the bank never opened (kills the
+            //    "empty, then find out you can't build" stranding path), fall back to patch.
+            const hutBom = schematic.billOfMaterials(hutSchem).counts
+            if (hutBom.oak_door) hutBom.oak_door = 1
+            if (hutBom.white_bed) hutBom.white_bed = 1
+            let hasBedPlaced = false
+            for (let y = st.y; y <= en.y; y++) for (let z = st.z; z <= en.z; z++) for (let x = st.x; x <= en.x; x++) {
+              const g = bot.blockAt(new Vec3(hutAt.x + x, hutAt.y + y, hutAt.z + z))
+              if (g && /_bed$/.test(g.name)) hasBedPlaced = true
+            }
+            const hrec = await resources.reconcile(bot, hutBom, { near: hutAt, planOpts: { primaryWood }, credit: hasBedPlaced ? { white_bed: 1 } : {} })
+            if (Object.keys(hrec.plan.unobtainable || {}).length) {
+              dbg('camp: hut BOM unobtainable ' + JSON.stringify(hrec.plan.unobtainable) + ' - aborting rebuild (bank untouched), patching instead')
+              say('can\'t source the full rebuild - leaving the bank sealed and patching what I can')
+              hutRepairLatch = { lastBad: bad, lastAction: 'patch', ts: Date.now() }
+            } else {
+              if (hrec.withdraws.length || hrec.plan.tasks.length) await resources.runReconciled(bot, hrec, { say, isStopped, restoreMovements: restore, homeY: hutAt.y, home: { x: hutAt.x, y: hutAt.y, z: hutAt.z }, avoid })
+              // 2) VERIFIED EMPTY, or DON'T tear down (healBankDouble pattern, provision.js:7554-
+              //    7563): withdraw per-name via withdrawItem, RE-READ chestCounts, and if any chest
+              //    still holds items (pack full) ABORT the rebuild -> restore + fall back to patch,
+              //    exactly like bank heal's "chest still holds ... aborting, nothing lost". This
+              //    kills the clearFurniture spill: we never dig a chest with anything inside.
+              const bankChests = (provision.listInfra('chest', bot) || []).filter(c => Math.hypot(c.x - hutAt.x, c.z - hutAt.z) <= 10)
+              let emptied = true
+              const saved = {}
+              for (const c of bankChests) {
+                const cb = bot.blockAt(new Vec3(c.x, c.y, c.z)); if (!cb || !/chest/.test(cb.name)) continue
+                let counts = {}
+                try { counts = await provision.chestCounts(bot, cb) } catch (e) { dbg('camp: bank read failed (' + e.message + ')'); continue }
+                for (const n of Object.keys(counts)) { saved[n] = (saved[n] || 0) + counts[n]; try { await provision.withdrawItem(bot, cb, n, counts[n]) } catch {} }
+                let left = {}
+                try { left = await provision.chestCounts(bot, cb) } catch { left = { unknown: 1 } }
+                if (Object.keys(left).length) { emptied = false; dbg('camp: bank chest at ' + c.x + ',' + c.y + ',' + c.z + ' still holds ' + Object.keys(left).join(',') + ' (pack full?)'); break }
+              }
+              const savedN = Object.values(saved).reduce((s, n) => s + n, 0)
+              if (!emptied) {
+                dbg('camp: bank NOT fully emptied - aborting rebuild, nothing lost, patching instead')
+                say('pack too full to safely clear the bank - not tearing the hut down; restoring + patching')
+                await restoreBank()
+                hutRepairLatch = { lastBad: bad, lastAction: 'patch', ts: Date.now() }
+              } else {
+                dbg('camp: bank verified empty -> ' + savedN + ' items held in pack for the rebuild')
+                // 3) try/finally TREASURY GUARD: a throw anywhere in build/refill still runs
+                //    restoreBank() (kills the "throw -> outer catch -> refill skipped" path).
+                let hr = null
+                try {
+                  const hutFetch = async (n, cnt) => { await resources.acquire(bot, n, cnt || 1, { near: hutAt, isStopped, say, batch: 32, planOpts: { primaryWood } }) }
+                  hr = await schematic.buildSurvival(bot, hutSchem, hutAt, { say, isStopped, restoreMovements: restore, clear: true, clearFurniture: true, fetch: hutFetch })
+                  dbg('camp: hut rebuilt -> ' + (hr && hr.placed) + '/' + (hr && hr.total) + ' at ' + hutAt.x + ',' + hutAt.y + ',' + hutAt.z)
+                  provision.rememberInfra && provision.rememberInfra('hut', hutAt)
+                  try { await provision.ensureHutApron(bot, hutAt, { isStopped, say }) } catch (e) { dbg('camp: apron fill failed (' + e.message + ')') }
+                  try { await handle(bot, 'collect') } catch {}
+                  const bedCell = findCell(/_bed$/)
+                  if (bedCell) { const bb = bot.blockAt(bedCell); if (bb && /_bed$/.test(bb.name)) { try { await bot.activateBlock(bb); provision.rememberBed(bedCell) } catch {} } }
+                  try { await handle(bot, 'remember hut') } catch {}
+                } finally {
+                  await restoreBank() // ALWAYS re-deposit the treasury (never strand the bank)
+                }
+                // 4) VERIFY with the SHARED tolerant classifier (composes with #36). Success only
+                //    when placed>=total && bad2===0; on partial, latch bad2 so a pass that improved
+                //    nothing cannot re-enter 'rebuild'.
+                let bad2 = 0
+                if (process.env.VERIFY_SUCCESS_MSG !== '0') {
+                  for (let y = st.y; y <= en.y; y++) for (let z = st.z; z <= en.z; z++) for (let x = st.x; x <= en.x; x++) {
+                    const w = hutSchem.getBlock(new Vec3(x, y, z)); const g = bot.blockAt(new Vec3(hutAt.x + x, hutAt.y + y, hutAt.z + z))
+                    if (!g) continue
+                    if (hutModel.cellMismatch((w && w.name) || 'air', g.name)) bad2++
+                  }
+                }
+                const builtClean = process.env.VERIFY_SUCCESS_MSG === '0' || (bad2 === 0 && hr && hr.total && hr.placed >= hr.total)
+                if (builtClean) { say('safehouse rebuilt clean - walls, door, bed, furnace, bank all in place'); hutRepairLatch = { lastBad: 0, lastAction: 'rebuild', ts: Date.now() } }
+                else { dbg('camp: rebuild NOT clean - ' + bad2 + ' cell(s) still off, placed ' + (hr && hr.placed) + '/' + (hr && hr.total)); say('rebuilt the safehouse but ' + bad2 + ' cell(s) still off - no destructive retry until it improves'); hutRepairLatch = { lastBad: bad2, lastAction: 'rebuild', ts: Date.now() } }
+              }
+            }
+          }
+          // decision === 'none' -> nothing here; the liveability chain (maintainHome) still runs.
         }
         // LIVEABILITY - runs EVERY camp pass, even when no rebuild is due (bad <= 3). The
         // doorstep-fill and bed placement used to live INSIDE the bad>3 rebuild, so once the

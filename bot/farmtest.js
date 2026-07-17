@@ -152,5 +152,22 @@ eq(F.barrenStep(undefined, 'other'), { strikes: 1, skip: false }, 'undefined pri
   eq(F.shouldResite({ curCells: 10, curMaxed: true, curScore: -46.55, curDist: 77, bestScore: 7, bestDist: 40, target: 33 }), true, 'shouldResite: default opts match the live-calibrated gates')
 }
 
+// ---- plotCollectRadius: FIX #38 whole-plot collect sweep --------------------------
+{
+  const anchor = { x: 446, z: 31 }
+  // No cells / no anchor -> today's radius (base 6).
+  eq(F.plotCollectRadius([], anchor), 6, 'plotCollectRadius: empty plot -> base radius 6')
+  eq(F.plotCollectRadius(null, anchor), 6, 'plotCollectRadius: null cells -> base 6')
+  eq(F.plotCollectRadius([{ x: 446, z: 31 }], null), 6, 'plotCollectRadius: no anchor -> base 6')
+  // A tight plot within radius 6 stays at the base (never shrinks below today's sweep).
+  eq(F.plotCollectRadius([{ x: 447, z: 32 }, { x: 445, z: 30 }], anchor), 6, 'plotCollectRadius: tight plot -> stays at base 6')
+  // A wide plot: farthest cell ~7.07b from anchor -> ceil(7.07)+4 = 12.
+  eq(F.plotCollectRadius([{ x: 451, z: 36 }, { x: 441, z: 26 }], anchor), 12, 'plotCollectRadius: 5x5-corner plot -> maxD(~7)+margin = 12')
+  // Cap: a runaway/foreign-cell distance is clamped so the sweep never wanders off-plot.
+  eq(F.plotCollectRadius([{ x: 446 + 100, z: 31 }], anchor), 24, 'plotCollectRadius: far outlier clamped to cap 24')
+  // margin/cap/base overridable.
+  eq(F.plotCollectRadius([{ x: 456, z: 31 }], anchor, { margin: 2, cap: 50 }), 12, 'plotCollectRadius: custom margin (10+2)')
+}
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall farm tests passed')
 process.exit(failures ? 1 : 0)

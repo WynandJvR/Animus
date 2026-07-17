@@ -162,6 +162,47 @@ t('reconcileCells: dedupe exact + drop verified-gone, keep present + unknown', (
   assert.strictEqual(pruned.length, 3)
 })
 
+// ---- #37 non-destructive hut repair: decision predicate + tolerant classifier ----------
+t('decideHutRepair: bad<=3 -> none (liveability chain still runs every pass)', () => {
+  assert.strictEqual(H.decideHutRepair({ bad: 0, solidTotal: 135 }), 'none')
+  assert.strictEqual(H.decideHutRepair({ bad: 3, solidTotal: 135 }), 'none')
+})
+t('decideHutRepair: 4..threshold-1 -> patch (the default, non-destructive)', () => {
+  assert.strictEqual(H.decideHutRepair({ bad: 4, solidTotal: 135 }), 'patch')
+  // threshold = max(REBUILD_MIN=24, ceil(0.5*135)=68) = 68 -> 67 still patches
+  assert.strictEqual(H.decideHutRepair({ bad: 67, solidTotal: 135 }), 'patch')
+  // small schematic: the REBUILD_MIN=24 floor beats ceil(0.5*30)=15, so 20 still patches
+  assert.strictEqual(H.decideHutRepair({ bad: 20, solidTotal: 30 }), 'patch')
+})
+t('decideHutRepair: >=threshold -> rebuild (fresh episode, no latch)', () => {
+  assert.strictEqual(H.decideHutRepair({ bad: 68, solidTotal: 135 }), 'rebuild')
+  assert.strictEqual(H.decideHutRepair({ bad: 100, solidTotal: 135 }), 'rebuild')
+  // the REBUILD_MIN=24 floor is the threshold when 50% is smaller
+  assert.strictEqual(H.decideHutRepair({ bad: 24, solidTotal: 30 }), 'rebuild')
+})
+t('decideHutRepair: rebuild LOCKED OUT when lastBad did not improve (kills the re-empty loop)', () => {
+  // catastrophic, but the previous pass already acted and bad did NOT decrease -> patch
+  assert.strictEqual(H.decideHutRepair({ bad: 70, solidTotal: 135, lastBad: 70, lastAction: 'rebuild' }), 'patch')
+  // got strictly worse -> still locked (never destroy again without measured progress)
+  assert.strictEqual(H.decideHutRepair({ bad: 72, solidTotal: 135, lastBad: 70, lastAction: 'rebuild' }), 'patch')
+  // measured improvement re-permits the escalation
+  assert.strictEqual(H.decideHutRepair({ bad: 70, solidTotal: 135, lastBad: 80, lastAction: 'rebuild' }), 'rebuild')
+  // a prior PATCH that didn't help also locks the destructive path down to patch
+  assert.strictEqual(H.decideHutRepair({ bad: 70, solidTotal: 135, lastBad: 70, lastAction: 'patch' }), 'patch')
+})
+t('cellMismatch: tolerant by class (planks / chest / furnace / table / door / air)', () => {
+  assert.strictEqual(H.cellMismatch('oak_planks', 'birch_planks'), false, 'any plank satisfies a plank cell')
+  assert.strictEqual(H.cellMismatch('chest', 'trapped_chest'), false, 'a trapped_chest satisfies a chest cell')
+  assert.strictEqual(H.cellMismatch('furnace', 'smoker'), false, 'a smoker satisfies a furnace cell')
+  assert.strictEqual(H.cellMismatch('oak_door', 'spruce_door'), false, 'any door satisfies a door cell')
+  assert.strictEqual(H.cellMismatch('crafting_table', 'crafting_table'), false, 'exact table matches')
+  assert.strictEqual(H.cellMismatch('air', 'cave_air'), false, 'air variants all read as air')
+  assert.strictEqual(H.cellMismatch('air', 'dirt'), true, 'dirt where air is wanted is a mismatch')
+  assert.strictEqual(H.cellMismatch('oak_planks', 'air'), true, 'air where a plank is wanted is a mismatch')
+  assert.strictEqual(H.cellMismatch(undefined, 'oak_planks'), true, 'undefined want = air; a plank is a mismatch')
+  assert.strictEqual(H.cellMismatch('white_bed', 'crafting_table'), true, 'unrelated blocks mismatch')
+})
+
 // ---- ANTI-DIVERGENCE: stamp the REAL hut.schem and assert the model reads it -----------
 // This is the gate that stops hut-model silently drifting from the schematic's anchor
 // convention. Loads bot/schematics/hut.schem OFFLINE (no bot), stamps every non-air block
