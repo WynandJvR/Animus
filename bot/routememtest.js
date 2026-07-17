@@ -208,5 +208,77 @@ t('wedgeNearXZ: a wedge aged past its decay window (weight 0) misses', () => {
   assert.strictEqual(rm.wedgeNearXZ(wedges, { x: 100, z: 200 }, 8, now), false, 'decayed wedge no longer blocks')
 })
 
+// ---- WAYPOINT GRAPH (NAV_WAYPOINT_GRAPH, Phase C / §5-P3) ----------------------------
+// A "usable" route needs net successes + a length-sane polyline. Helper to mint one.
+function route (pts, ok = 2, fail = 0) {
+  const a = pts[0]; const b = pts[pts.length - 1]
+  const len = rm.polylineLength(pts)
+  return { a: { x: a.x, z: a.z }, b: { x: b.x, z: b.z }, pts, ok, fail, len, at: Date.now() }
+}
+
+t('buildGraph: a single route becomes a node chain with consecutive edges', () => {
+  const r = route([{ x: 0, z: 0 }, { x: 20, z: 0 }, { x: 40, z: 0 }])
+  const g = rm.buildGraph([r], [])
+  assert.strictEqual(g.nodes.length, 3, '3 thinned points -> 3 nodes')
+  assert(g.adj[0].has(1) && g.adj[1].has(2), 'consecutive edges present')
+  assert(g.adj[1].has(0) && g.adj[2].has(1), 'edges undirected (stored both ways)')
+})
+
+t('buildGraph: two routes passing within 12b SHARE a junction node (merge)', () => {
+  const r1 = route([{ x: 0, z: 0 }, { x: 50, z: 0 }, { x: 100, z: 0 }])
+  const r2 = route([{ x: 50, z: 3 }, { x: 50, z: 60 }]) // 50,3 is within 12b of r1's 50,0 node
+  const g = rm.buildGraph([r1, r2], [])
+  // r2's start must reuse r1's middle node rather than adding a 4th coincident node
+  assert.strictEqual(g.nodes.length, 4, '3 + (merged start) + 1 = 4 nodes, not 5')
+  const mid = g.nodes.findIndex(n => Math.abs(n.x - 50) < 12 && Math.abs(n.z) < 12)
+  assert(g.adj[mid].size >= 3, 'the shared junction connects >=3 ways (both routes)')
+})
+
+t('planOverGraph: composes a path across TWO routes sharing a corridor', () => {
+  // Route A: home(0,0) -> junction(50,0); Route B: junction(50,0) -> lake(50,80).
+  // Neither route alone covers home->lake, but the graph stitches them.
+  const rA = route([{ x: 0, z: 0 }, { x: 25, z: 0 }, { x: 50, z: 0 }])
+  const rB = route([{ x: 50, z: 0 }, { x: 50, z: 40 }, { x: 50, z: 80 }])
+  const g = rm.buildGraph([rA, rB], [])
+  const path = rm.planOverGraph(g, { x: 0, z: 0 }, { x: 50, z: 80 })
+  assert(path && path.length >= 3, 'a composed path exists')
+  assert.strictEqual(path[0].x, 0, 'starts at home')
+  assert.strictEqual(path[path.length - 1].z, 80, 'ends at the lake')
+})
+
+t('planOverGraph: null when the goal has no node within tolerance (no coverage)', () => {
+  const rA = route([{ x: 0, z: 0 }, { x: 50, z: 0 }])
+  const g = rm.buildGraph([rA], [])
+  assert.strictEqual(rm.planOverGraph(g, { x: 0, z: 0 }, { x: 500, z: 500 }), null, 'far goal -> no plan')
+})
+
+t('planOverGraph: a demented (fail>0) edge is avoided when a cleaner detour exists', () => {
+  // Direct edge A->C (fail=3, len 100) vs the two-hop A->B->C (clean, len ~101). The fail
+  // inflation should make Dijkstra prefer the slightly-longer clean corridor.
+  const direct = route([{ x: 0, z: 0 }, { x: 100, z: 0 }], 2, 3)      // A -> C, demented
+  const legAB = route([{ x: 0, z: 0 }, { x: 50, z: 50 }])             // A -> B (clean)
+  const legBC = route([{ x: 50, z: 50 }, { x: 100, z: 0 }])           // B -> C (clean)
+  const g = rm.buildGraph([direct, legAB, legBC], [])
+  const path = rm.planOverGraph(g, { x: 0, z: 0 }, { x: 100, z: 0 })
+  assert(path, 'a path exists')
+  const viaB = path.some(pt => Math.abs(pt.x - 50) < 12 && Math.abs(pt.z - 50) < 12)
+  assert(viaB, 'routes via the clean B corridor, not the demented direct edge')
+})
+
+t('planOverGraph: null for an empty/degenerate graph; buildGraph drops unusable routes', () => {
+  assert.strictEqual(rm.planOverGraph(rm.buildGraph([], []), { x: 0, z: 0 }, { x: 1, z: 1 }), null)
+  const unusable = route([{ x: 0, z: 0 }, { x: 50, z: 0 }], 1, 2) // fail>=ok net -> not routeUsable
+  const g = rm.buildGraph([unusable], [])
+  assert.strictEqual(g.nodes.length, 0, 'an unusable route contributes no nodes')
+})
+
+t('buildGraph: bounded by GRAPH_MAX_NODES (over-cap points dropped, never grows unbounded)', () => {
+  const pts = []
+  for (let i = 0; i < 400; i++) pts.push({ x: i * 20, z: 0 }) // 400 well-spaced points
+  const g = rm.buildGraph([route(pts, 5, 0)], [], { junctionR: 1 })
+  assert(g.nodes.length <= rm.GRAPH_MAX_NODES, 'node count capped at GRAPH_MAX_NODES')
+  assert.strictEqual(g.nodes.length, g.adj.length, 'adjacency parallels nodes')
+})
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall route-mem tests passed')
 process.exit(failures ? 1 : 0)

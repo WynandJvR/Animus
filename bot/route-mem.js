@@ -240,12 +240,110 @@ function activeWedges (wedges, anchors, now = Date.now(), r = INFRA_SUPPRESS_R) 
   return wedges.filter(w => wedgeWeight(w, now) > 0 && !suppressedNearAnchors(anchors, w, r))
 }
 
+// ---- WAYPOINT GRAPH (NAV_WAYPOINT_GRAPH, DESIGN-navigation-redesign §5 Phase 3) ----
+// Promote the stored polylines (which matchRoute/routeCursor already replay whole) into a
+// GRAPH so the Nth trek can COMPOSE proven segments from DIFFERENT routes instead of
+// blind-planning: "these two half-routes share a river crossing". Nodes = thinned polyline
+// points (+ infra anchors), junction-MERGED within GRAPH_JUNCTION_R (routes that pass close
+// become one node -> a real junction); edges = consecutive polyline segments, each carrying
+// its source route's ok/fail so a demented route makes its edges costlier; planOverGraph =
+// Dijkstra from nearest-node(start) to nearest-node(goal). PURE math (no bot, no world, no fs)
+// - offline-testable exactly like matchRoute/thinPolyline. The graph is READ-ONLY over route
+// memory: it never mutates routes; dement/evict stays in the route records via their own replay
+// (a composed edge whose route goes bad drops out of the graph automatically once routeUsable
+// turns false). The FLAG is the CALLER's concern - it decides whether to build/consult a graph.
+const GRAPH_JUNCTION_R = 12   // two waypoints within 12b are the SAME node (a shared corridor) - mirrors the 12b junction radius in the design
+const GRAPH_MAX_NODES = 256   // HARD cap on graph size (bounded growth): routes are capped at 16, thinned <=24 pts each; extra points past the cap are dropped
+const GRAPH_ENDPOINT_TOL = 24 // start/goal must snap to a graph node within 24b to plan over it (mirrors ROUTE_MATCH_TOL)
+
+// Build the waypoint graph from usable route polylines + infra anchors. Returns { nodes, adj }
+// where nodes[i] = {x,z} and adj[i] = Map(j -> { w, ok, fail }) (undirected, stored both ways).
+// Junction-merge: a point within `junctionR` of an existing node REUSES that node (so two routes
+// crossing near each other share the crossing node). Bounded to `maxNodes` (over-cap points are
+// dropped, their edges skipped). Only routeUsable routes contribute (net successes, length-sane).
+function buildGraph (routes, anchors, opts = {}) {
+  const jr = opts.junctionR != null ? opts.junctionR : GRAPH_JUNCTION_R
+  const cap = opts.maxNodes != null ? opts.maxNodes : GRAPH_MAX_NODES
+  const nodes = []
+  const adj = []
+  const nodeIdAt = (p) => {
+    for (let i = 0; i < nodes.length; i++) if (Math.hypot(nodes[i].x - p.x, nodes[i].z - p.z) <= jr) return i
+    if (nodes.length >= cap) return -1
+    nodes.push({ x: p.x, z: p.z }); adj.push(new Map())
+    return nodes.length - 1
+  }
+  const addEdge = (i, j, route) => {
+    if (i < 0 || j < 0 || i === j) return
+    const w = dist(nodes[i], nodes[j])
+    const ok = (route && route.ok) || 1
+    const fail = (route && route.fail) || 0
+    const cur = adj[i].get(j)
+    if (!cur || w < cur.w) { const stat = { w, ok, fail }; adj[i].set(j, stat); adj[j].set(i, stat) }
+  }
+  for (const r of (routes || [])) {
+    if (!routeUsable(r) || !Array.isArray(r.pts) || r.pts.length < 2) continue
+    let prev = nodeIdAt(r.pts[0])
+    for (let k = 1; k < r.pts.length; k++) {
+      const cur = nodeIdAt(r.pts[k])
+      addEdge(prev, cur, r)
+      prev = cur
+    }
+  }
+  for (const a of (anchors || [])) { if (a && typeof a.x === 'number' && typeof a.z === 'number') nodeIdAt(a) }
+  return { nodes, adj }
+}
+
+// Index of the graph node nearest to p within `tol`, else -1.
+function nearestNode (graph, p, tol = GRAPH_ENDPOINT_TOL) {
+  if (!graph || !Array.isArray(graph.nodes) || !p) return -1
+  let best = -1; let bestD = Infinity
+  for (let i = 0; i < graph.nodes.length; i++) {
+    const d = dist(graph.nodes[i], p)
+    if (d < bestD) { bestD = d; best = i }
+  }
+  return (best >= 0 && bestD <= tol) ? best : -1
+}
+
+// Dijkstra over the graph from nearest-node(from) to nearest-node(goal). Edge cost = geometric
+// length inflated by the edge's fail count (a demented segment is avoided when an alternative
+// exists), so the plan prefers proven corridors. Returns the ordered {x,z} node list [start..goal]
+// (length >= 2), or null if either endpoint has no node within `tol` or the two are disconnected.
+function planOverGraph (graph, from, to, opts = {}) {
+  if (!graph || !Array.isArray(graph.nodes) || graph.nodes.length < 2) return null
+  const tol = opts.endpointTol != null ? opts.endpointTol : GRAPH_ENDPOINT_TOL
+  const s = nearestNode(graph, from, tol)
+  const g = nearestNode(graph, to, tol)
+  if (s < 0 || g < 0 || s === g) return null
+  const n = graph.nodes.length
+  const distTo = new Array(n).fill(Infinity)
+  const prev = new Array(n).fill(-1)
+  const done = new Array(n).fill(false)
+  distTo[s] = 0
+  for (;;) {
+    let u = -1; let ud = Infinity
+    for (let i = 0; i < n; i++) if (!done[i] && distTo[i] < ud) { ud = distTo[i]; u = i }
+    if (u < 0 || u === g) break
+    done[u] = true
+    for (const [v, e] of graph.adj[u]) {
+      const w = e.w * (1 + 2 * (e.fail || 0)) // a demented (fail>0) edge is inflated so A* routes around it
+      if (distTo[u] + w < distTo[v]) { distTo[v] = distTo[u] + w; prev[v] = u }
+    }
+  }
+  if (distTo[g] === Infinity) return null
+  const path = []
+  for (let u = g; u >= 0; u = prev[u]) path.push({ x: graph.nodes[u].x, z: graph.nodes[u].z })
+  path.reverse()
+  return path.length >= 2 ? path : null
+}
+
 module.exports = {
   ROUTE_CAP, WEDGE_CAP, WEDGE_MERGE_R, ROUTE_MIN_LEN, ROUTE_LEN_SANITY, ROUTE_MATCH_TOL,
   WEDGE_STEER_CORRIDOR, INFRA_SUPPRESS_R,
+  GRAPH_JUNCTION_R, GRAPH_MAX_NODES, GRAPH_ENDPOINT_TOL,
   dist, pointToSegDist, turnAngle, polylineLength,
   thinPolyline, canonEndpoints, matchRoute, routeCursor,
   routeLenOk, routeUsable, routeShouldEvict, mergeRoute,
   wedgeWeight, mergeWedge, wedgeOnSegment, wedgeNearXZ,
-  suppressedNearAnchors, activeWedges
+  suppressedNearAnchors, activeWedges,
+  buildGraph, nearestNode, planOverGraph
 }

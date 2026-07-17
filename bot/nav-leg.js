@@ -69,6 +69,54 @@ function makeGoalNearXZBanded (GoalBase) {
   }
 }
 
+// ---- LEG-PROBE candidate policy (NAV_LEG_PROBE, DESIGN-navigation-redesign §5 Phase 2 / D) ----
+// A bearing-projected leg is aimed at a compass point NOTHING checked is reachable - it may sit
+// mid-lake, inside a hill, atop last week's wedge. The probe runs the SAME A* the goto would run
+// (bot.pathfinder.getPathTo, WITHOUT moving) against each candidate and vetoes only a `noPath`
+// verdict; `success`/`partial`/`timeout` are green (a far target legitimately times out - §4-D).
+// This PURE core owns the candidate GEOMETRY + the selection over injected verdicts (the getPathTo
+// I/O stays in the trek loops); offline-tested with stubbed verdicts. The rotation angles are the
+// SAME ±60/±120 the reactive rotate-detour uses - the probe just tries them at SELECTION time
+// instead of after a 30-75s failed leg. All SOFT: if every candidate probes noPath it falls back
+// to the direct bearing (index 0) - never a wall (the blind planner still owns it).
+const PROBE_ROTATIONS = [60, -60, 120, -120]
+
+// Rotate a unit bearing (ux,uz) by `deg` in the XZ plane.
+function rotateBearing (ux, uz, deg) {
+  const th = deg * Math.PI / 180
+  return { ux: ux * Math.cos(th) - uz * Math.sin(th), uz: ux * Math.sin(th) + uz * Math.cos(th) }
+}
+
+// Ordered leg candidates to probe from `origin` {x,z} along the unit bearing (ux,uz): the DIRECT
+// bearing FIRST (deg 0, full `step` capped at the remaining distance), then the ±60/±120 rotations
+// at a shorter `rotStep`. Each candidate = { x, z, deg, step }. The caller probes them IN ORDER and
+// keeps the first non-noPath (so a reachable direct bearing costs exactly one probe).
+function legCandidates (origin, ux, uz, d, step, rotStep) {
+  const full = Math.min(step, d)
+  const sstep = Math.min(rotStep, d)
+  const out = [{ x: origin.x + ux * full, z: origin.z + uz * full, deg: 0, step: full }]
+  for (const deg of PROBE_ROTATIONS) {
+    const r = rotateBearing(ux, uz, deg)
+    out.push({ x: origin.x + r.ux * sstep, z: origin.z + r.uz * sstep, deg, step: sstep })
+  }
+  return out
+}
+
+// Choose a leg from probe verdicts. `verdict(cand) -> 'noPath' | anything-else`. Rule: return the
+// FIRST candidate whose verdict is NOT 'noPath' (direct bearing wins whenever it is reachable);
+// only if EVERY candidate probes 'noPath' fall back to the direct bearing (index 0) - SOFT. Returns
+// { cand, verdict, rotated, index }. verdict lookups are lazy + short-circuit, so the rotations are
+// only probed when the direct bearing was vetoed.
+function chooseProbedLeg (candidates, verdict) {
+  if (!Array.isArray(candidates) || candidates.length === 0) return null
+  for (let i = 0; i < candidates.length; i++) {
+    let v = 'unknown'
+    try { v = verdict(candidates[i]) } catch { v = 'unknown' }
+    if (v !== 'noPath') return { cand: candidates[i], verdict: v, rotated: i > 0, index: i }
+  }
+  return { cand: candidates[0], verdict: 'noPath', rotated: false, index: 0 }
+}
+
 module.exports = {
   DEFAULT_MAX_DROP,
   DEPTH_PENALTY,
@@ -76,5 +124,9 @@ module.exports = {
   depthBelowBand,
   bandedIsEnd,
   bandedHeuristic,
-  makeGoalNearXZBanded
+  makeGoalNearXZBanded,
+  PROBE_ROTATIONS,
+  rotateBearing,
+  legCandidates,
+  chooseProbedLeg
 }

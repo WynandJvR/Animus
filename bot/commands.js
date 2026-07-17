@@ -22,6 +22,11 @@ const hutModel = require('./hut-model.js') // PURE self-structure model + #37 re
 const navLeg = require('./nav-leg.js') // PURE leg-planning core (NAV Phase B): Y-banded surface-trek leg goal so travelFar legs can't ride a cave 45b down to lava
 const GoalNearXZBanded = navLeg.makeGoalNearXZBanded(goals.Goal) // Y-aware drop-in for goals.GoalNearXZ (NAV_HAZARD_LEGS)
 const NAV_HAZARD_LEGS = process.env.NAV_HAZARD_LEGS !== '0' // NAV Phase B (default ON): Y-band the trek leg goal + price lava in travelMovements; =0 => today's Y-blind GoalNearXZ + no lava cost, byte-for-byte
+// ---- NAV Phase C flags (DESIGN-nav-overhaul.md §3 Phase C = DESIGN-navigation-redesign §5 P2-4) ----
+const NAV_LEG_PROBE = process.env.NAV_LEG_PROBE !== '0' // Phase C / §5-P2 (default ON): pre-flight getPathTo probe of a bearing leg; noPath => rotate ±60/±120 and take the first reachable (SOFT). =0 => today byte-for-byte
+const NAV_WAYPOINT_GRAPH = process.env.NAV_WAYPOINT_GRAPH !== '0' // Phase C / §5-P3 (default ON): compose proven route segments over a waypoint graph before whole-route replay / bearing. =0 => graph unused, today byte-for-byte
+const NAV_LADDER_DIET = process.env.NAV_LADDER_DIET === '1' // Phase C / §5-P4 DEFAULT OFF: retire the superseded wedge soft-steer only after the design's >=1wk soak; unset => today byte-for-byte
+const PROBE_MS = Math.max(200, parseInt(process.env.NAV_PROBE_MS || '1000', 10)) // bounded getPathTo budget per candidate (success/noPath resolve fast; only a far `timeout` costs the full budget)
 let dbgSink = null // injected by index.js: debug lines persist to logs/bot-events.log
 function setDebugSink (fn) { dbgSink = fn }
 const dbg = (...a) => {
@@ -574,7 +579,10 @@ async function travelFar (bot, dest, opts = {}) {
     if (gap > 40) { recording = false; return } // a >40b jump = a survival/climb detour - don't bake it into the line
     if (gap >= 8) { lastCrumb = { x: q.x, z: q.z }; crumbs.push(lastCrumb) }
   }
-  let replay = provision.recallRoute(startPos, { x: dest.x, z: dest.z })
+  // NAV Phase C leg-target source (priority: graph plan > whole-route replay > bearing+probe).
+  let graphPlan = NAV_WAYPOINT_GRAPH ? provision.planTrekRoute(startPos, { x: dest.x, z: dest.z }) : null
+  if (graphPlan) dbg('travel: composed a ' + graphPlan.pts.length + '-node graph route to ' + Math.round(dest.x) + ',' + Math.round(dest.z))
+  let replay = graphPlan ? null : provision.recallRoute(startPos, { x: dest.x, z: dest.z })
   if (replay) dbg('travel: replaying a proven ' + replay.pts.length + '-pt route to ' + Math.round(dest.x) + ',' + Math.round(dest.z))
   let climbs = 0
   let lastSurvival = 0  // throttle the per-leg survival check
@@ -643,28 +651,50 @@ async function travelFar (bot, dest, opts = {}) {
         if (recording && d0 >= routeMem.ROUTE_MIN_LEN) { pushCrumb({ x: me.x, z: me.z }); provision.rememberRoute(startPos, { x: dest.x, z: dest.z }, crumbs) }
         return { ok: true, reason: 'arrived', dist: d }
       }
-      // Self-abandon a stale replay once >60% of the (survival-credited) deadline has burned.
+      // Self-abandon a stale replay/graph plan once >60% of the (survival-credited) deadline has burned.
+      if (graphPlan && Date.now() - start - climbTimeMs > 0.6 * deadlineMs) { dbg('travel: abandoning graph route - >60% of the deadline burned'); graphPlan = null }
       if (replay && Date.now() - start - climbTimeMs > 0.6 * deadlineMs) { dbg('travel: abandoning route replay - >60% of the deadline burned'); replay = null }
-      // Leg target: replay point > blind bearing (wedge soft-steered). Proven routes are NOT
-      // wedge-checked; the soft-steer only nudges a fresh straight bearing off a learned wedge.
+      // Leg target: graph node > replay point > blind bearing (wedge soft-steered + probed). Proven
+      // routes/graph edges are NOT wedge-checked/probed; the soft-steer + probe only touch a fresh bearing.
       const step = Math.min(hop, d)
       let wx = me.x + (dx / d) * step
       let wz = me.z + (dz / d) * step
       let replayLeg = false
-      if (replay) {
+      let graphLeg = false
+      if (graphPlan) {
+        const cur = routeMem.routeCursor(graphPlan.pts, me)
+        const pt = graphPlan.pts[cur]
+        wx = pt.x; wz = pt.z; graphLeg = true
+      } else if (replay) {
         const cur = routeMem.routeCursor(replay.pts, me)
         const pt = replay.pts[cur]
         wx = pt.x; wz = pt.z; replayLeg = true
       } else {
-        const wedges = provision.listWedges()
-        if (wedges.length && routeMem.wedgeOnSegment(wedges, me, { x: wx, z: wz })) {
-          const ux = dx / d; const uz = dz / d; const sstep = Math.min(hop, d)
-          for (const deg of [60, -60, 120, -120]) {
-            const th = deg * Math.PI / 180
-            const cx = me.x + (ux * Math.cos(th) - uz * Math.sin(th)) * sstep
-            const cz = me.z + (ux * Math.sin(th) + uz * Math.cos(th)) * sstep
-            if (!routeMem.wedgeOnSegment(wedges, me, { x: cx, z: cz })) { wx = cx; wz = cz; dbg('travel: soft-steering ' + deg + 'deg around a learned wedge'); break }
+        // NAV_LADDER_DIET (Phase C / §5-P4, default OFF): the probe+graph supersede this soft-steer.
+        if (!NAV_LADDER_DIET) {
+          const wedges = provision.listWedges()
+          if (wedges.length && routeMem.wedgeOnSegment(wedges, me, { x: wx, z: wz })) {
+            const ux = dx / d; const uz = dz / d; const sstep = Math.min(hop, d)
+            for (const deg of [60, -60, 120, -120]) {
+              const th = deg * Math.PI / 180
+              const cx = me.x + (ux * Math.cos(th) - uz * Math.sin(th)) * sstep
+              const cz = me.z + (ux * Math.sin(th) + uz * Math.cos(th)) * sstep
+              if (!routeMem.wedgeOnSegment(wedges, me, { x: cx, z: cz })) { wx = cx; wz = cz; dbg('travel: soft-steering ' + deg + 'deg around a learned wedge'); break }
+            }
           }
+        }
+        // NAV_LEG_PROBE (Phase C / §5-P2): pre-flight the bearing leg; noPath => rotate ±60/±120,
+        // take the first reachable, else keep the direct bearing (SOFT). Bearing legs ONLY.
+        if (NAV_LEG_PROBE) {
+          try {
+            const dirx = wx - me.x; const dirz = wz - me.z; const dn = Math.hypot(dirx, dirz) || 1
+            const pm = provision.trekMovements(bot, () => travelMovements(bot))
+            try { bot.pathfinder.setMovements(pm) } catch {}
+            const cands = navLeg.legCandidates({ x: me.x, z: me.z }, dirx / dn, dirz / dn, dn, dn, Math.min(hop, d))
+            const verdict = (c) => { try { const r = bot.pathfinder.getPathTo(pm, new goals.GoalNearXZ(Math.floor(c.x), Math.floor(c.z), 4), PROBE_MS); return (r && r.status === 'noPath') ? 'noPath' : ((r && r.status) || 'unknown') } catch { return 'unknown' } }
+            const pick = navLeg.chooseProbedLeg(cands, verdict)
+            if (pick) { wx = pick.cand.x; wz = pick.cand.z; if (pick.rotated) dbg('travel: probe noPath at bearing - took ' + pick.cand.deg + 'deg (' + pick.verdict + ')') }
+          } catch (e) { dbg('travel: leg probe skipped - ' + e.message) }
         }
       }
       // Each leg goes through the UNIFIED navigator: door-assist, pit-escape, water-hop
@@ -709,6 +739,10 @@ async function travelFar (bot, dest, opts = {}) {
       // stalls burn in ~2 seconds and the trek reports "blocked" before the world (a
       // drifting boat gap, a mob shoving us ashore) gets any chance to change.
       if (nd >= lastD - 3) {
+        // MEASURED stall on a composed GRAPH leg (non-reflex) -> abandon the graph plan for THIS
+        // trek and fall back to whole-route replay / bearing (the graph is read-only over route
+        // memory; the underlying routes still dement through their own replay).
+        if (graphLeg && !reflexDominated) { graphPlan = null; replay = provision.recallRoute({ x: bot.entity.position.x, z: bot.entity.position.z }, { x: dest.x, z: dest.z }); dbg('travel: graph route stalled - abandoning, falling back to replay/bearing'); lastD = Infinity; continue }
         // MEASURED stall mid-replay (non-reflex) -> the proven route is stale here. Dement it
         // and abandon the cursor; the next leg falls through to today's blind bearing/stall
         // handling from the current position, UNCHANGED.

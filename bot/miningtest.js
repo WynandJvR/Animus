@@ -208,6 +208,29 @@ t('preferBranchMine: at-surface iron with only sparse-tail exposure descends; ri
   assert.strictEqual(M.preferBranchMine('raw_iron', 60, 64, [62], { deepBelow: 3 }), false, 'deepBelow is tunable (y60 now counts as deep)')
 })
 
+t('preferStoneDescend: at-surface stone with nothing exposed descends; at depth or with candidates it does not; iron is not stone', () => {
+  // stone/cobble family, near surface, NOTHING exposed -> descend to the stone layer (the #22 fix)
+  assert.strictEqual(M.preferStoneDescend('cobblestone', 63, 64, []), true, 'cobble gather, surface, no exposed stone -> descend')
+  assert.strictEqual(M.preferStoneDescend('stone', 70, 70, []), true, 'stone item counts as stone-family')
+  // something IS exposed here -> mine it, don't descend
+  assert.strictEqual(M.preferStoneDescend('cobblestone', 63, 64, [62, 61]), false, 'exposed stone present -> mine it, no descent')
+  // already down a dig (>=8 below surface) -> the loop-top level-preference mines the walls
+  assert.strictEqual(M.preferStoneDescend('cobblestone', 50, 64, []), false, 'already deep -> mine the staircase walls, do not re-descend')
+  // iron / non-stone items never take the stone descent (they go to preferBranchMine)
+  assert.strictEqual(M.preferStoneDescend('raw_iron', 63, 64, []), false, 'iron is not the stone family')
+  assert.strictEqual(M.preferStoneDescend('oak_log', 63, 64, []), false, 'logs are not the stone family')
+  // deepBelow is tunable
+  assert.strictEqual(M.preferStoneDescend('cobblestone', 60, 64, [], { deepBelow: 3 }), false, 'deepBelow tunable (y60 now counts as deep)')
+})
+
+t('stoneDescendTargetY: a shallow ~12-below scrape, clamped to the strip floor and never above surface-3', () => {
+  assert.strictEqual(M.stoneDescendTargetY(64), 52, 'normal surface -> 12 below (y52), well above the iron/lava depths')
+  assert.strictEqual(M.stoneDescendTargetY(70, { hardFloor: 30 }), 58, 'y70 surface -> y58')
+  assert.strictEqual(M.stoneDescendTargetY(38, { hardFloor: 30 }), 30, 'low surface clamps to the hard floor (STRIP_FLOOR)')
+  assert.ok(M.stoneDescendTargetY(64) <= 64 - 3, 'never sits above surface-3 (always a real descent) via targetMineY')
+  assert.strictEqual(M.stoneDescendTargetY(64, { depth: 6 }), 58, 'depth is tunable')
+})
+
 t('deepMinePlan: naked digs shallower/shorter with fewer torches; armored gets the full plan', () => {
   const naked = M.deepMinePlan(0)
   assert.strictEqual(naked.targetY, 28, 'naked stays shallower (~y28)')

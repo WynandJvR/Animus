@@ -231,6 +231,33 @@ function preferBranchMine (item, feetY, surfaceY, candidateYs, opts = {}) {
   return ys.every(y => y > ironCeiling)                  // only sparse-tail visible -> descend
 }
 
+// Should a STONE (cobble-family) gather DESCEND to the stone layer instead of scratching the
+// surface / standing still? Mirrors preferBranchMine's shape but for the stone family (no ore
+// band): YES when the gather is for stone/cobble, the bot is at/near the surface, and NOTHING is
+// exposed to mine. Already down a dig (>=deepBelow below surface) -> false: the loop-top
+// level-preference mines the exposed staircase walls there, we don't re-descend. This is what
+// routes a cobble gather to digStaircaseDown instead of the blind wander when the surface around
+// the hut is dirt/grass. `item` is the gather item (cobblestone, not 'stone'). PURE.
+const STONE_ITEM_RE = /^(cobblestone|cobbled_deepslate|stone|granite|diorite|andesite|tuff)$/
+function preferStoneDescend (item, feetY, surfaceY, candidateYs, opts = {}) {
+  if (!STONE_ITEM_RE.test(String(item || ''))) return false // stone/cobble family only (iron etc. -> preferBranchMine)
+  const deepBelow = opts.deepBelow != null ? opts.deepBelow : 8
+  if (Math.floor(feetY) <= Math.floor(surfaceY) - deepBelow) return false // already down a dig -> mine the walls
+  const ys = candidateYs || []
+  return !ys.length                                       // only descend when nothing is exposed here
+}
+
+// The SHALLOW descent target for a stone scrape: `depth` (default 12) below the surface -
+// comfortably through any normal soil blanket (fixes the 6-block strip that bottomed out in
+// dirt) while never approaching the iron/lava excursion depths. Reuses targetMineY's clamps so
+// it never sinks below the strip hard-floor and never sits so high it isn't a descent
+// (<= surfaceY-3). This is a scrape for 3 cobble, not a mine. PURE (delegates to targetMineY).
+function stoneDescendTargetY (surfaceY, opts = {}) {
+  const depth = opts.depth != null ? opts.depth : 12
+  const hardFloor = opts.hardFloor != null ? opts.hardFloor : 30
+  return targetMineY(surfaceY, { targetY: Math.floor(surfaceY) - depth, hardFloor })
+}
+
 // Depth/effort profile for a deep branch mine, MODULATED by how much armor we're wearing.
 // A NAKED bot (0 pieces) commits to the SAME deep excursion as an armored one today and dies
 // down there (naked-deep deaths, live) - so an unarmored dig stays shallower, shorter, and
@@ -262,4 +289,4 @@ function branchLayout (corridorIdx, opts = {}) {
   }
 }
 
-module.exports = { LAVA_RE, WATER_RE, AIRISH, DIRS, PICK_USES, perpendicular, targetMineY, worthMiningHere, mineableWhenBlocked, mineReusable, pickMaxUses, pickUsesLeft, toolMaxUses, toolUsesLeft, estExcursionBlocks, picksToCraft, needReTool, descentSafety, faceHazard, digExposureHazard, climbStepSafety, faceExposed, scratchWorthy, branchLayout, preferBranchMine, deepMinePlan, sweepDue }
+module.exports = { LAVA_RE, WATER_RE, AIRISH, DIRS, PICK_USES, perpendicular, targetMineY, worthMiningHere, mineableWhenBlocked, mineReusable, pickMaxUses, pickUsesLeft, toolMaxUses, toolUsesLeft, estExcursionBlocks, picksToCraft, needReTool, descentSafety, faceHazard, digExposureHazard, climbStepSafety, faceExposed, scratchWorthy, branchLayout, preferBranchMine, preferStoneDescend, stoneDescendTargetY, deepMinePlan, sweepDue }

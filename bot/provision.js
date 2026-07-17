@@ -27,6 +27,16 @@ const navProfile = require('./nav-profile.js') // PURE nav-terrain policy: wild-
 const navLeg = require('./nav-leg.js') // PURE leg-planning core (NAV Phase B): Y-banded surface-trek leg goal (isEnd/heuristic) so A* can't ride a leg 45b down a cave to lava
 const GoalNearXZBanded = navLeg.makeGoalNearXZBanded(goals.Goal) // Y-aware drop-in for goals.GoalNearXZ (NAV_HAZARD_LEGS)
 const NAV_HAZARD_LEGS = process.env.NAV_HAZARD_LEGS !== '0' // NAV Phase B (default ON): Y-band the trek leg goal + price lava in the trek Movements profile; =0 => today's Y-blind GoalNearXZ + no lava cost, byte-for-byte
+// ---- NAV Phase C flags (DESIGN-nav-overhaul.md §3 Phase C = DESIGN-navigation-redesign §5 P2-4) ----
+const NAV_LEG_PROBE = process.env.NAV_LEG_PROBE !== '0' // Phase C / §5-P2 (default ON): pre-flight getPathTo probe of a bearing leg; noPath => rotate through ±60/±120 and take the first reachable (SOFT). =0 => no probe, today byte-for-byte
+const NAV_WAYPOINT_GRAPH = process.env.NAV_WAYPOINT_GRAPH !== '0' // Phase C / §5-P3 (default ON): compose proven route segments over a waypoint graph before falling back to whole-route replay / bearing. =0 => graph unused, today byte-for-byte
+// Phase C / §5-P4 NAV_LADDER_DIET: DEFAULT OFF (unset/!=='1'). The design gates the measured
+// retirement of the now-superseded rotate-detour + wedge soft-steer on a >=1 WEEK live soak +
+// log fire-rate analysis (§5 Phase 4) - so this ships as a reversible gate the operator flips ON
+// only after that soak; unset => today byte-for-byte (both paths run, harmlessly, alongside the
+// probe/graph that supersede them). NEVER zeroes a survival recovery-rung budget.
+const NAV_LADDER_DIET = process.env.NAV_LADDER_DIET === '1'
+const PROBE_MS = Math.max(200, parseInt(process.env.NAV_PROBE_MS || '1000', 10)) // bounded getPathTo budget per candidate (success/noPath resolve fast; only a far `timeout` costs the full budget)
 // Visible, UNTHROTTLED build tracing to stdout (the say() progress goes through a 40s
 // throttle that hides failures). Enable with BUILD_DEBUG=1 to see every plan/task/smelt step.
 let dbgSink = null // injected by index.js: debug lines persist to logs/bot-events.log
@@ -434,7 +444,12 @@ async function walkStaged (bot, tx, tz, opts = {}) {
   // REPLAY a proven route (if one exists between here and the goal): walk its thinned points
   // as the leg targets instead of a blind bearing. A measured stall mid-replay dements the
   // route and FALLS THROUGH to today's bearing/rotate/forceUnstick from the current position.
-  let replay = recallRoute(startPos, { x: tx, z: tz })
+  // NAV Phase C leg-target source (priority: graph plan > whole-route replay > bearing+probe).
+  // The GRAPH composes segments from >=2 proven routes (a shared corridor recallRoute can't
+  // stitch); a single matching route still goes through recallRoute below.
+  let graphPlan = planTrekRoute(startPos, { x: tx, z: tz })
+  if (graphPlan) dbg('walkStaged: composed a ' + graphPlan.pts.length + '-node graph route to ' + Math.round(tx) + ',' + Math.round(tz))
+  let replay = graphPlan ? null : recallRoute(startPos, { x: tx, z: tz })
   if (replay) dbg('walkStaged: replaying a proven ' + replay.pts.length + '-pt route to ' + Math.round(tx) + ',' + Math.round(tz))
   while (!isStopped() && Date.now() < deadline) {
     const p = bot.entity.position
@@ -445,15 +460,21 @@ async function walkStaged (bot, tx, tz, opts = {}) {
       if (d0 >= routeMem.ROUTE_MIN_LEN) { pushCrumb({ x: p.x, z: p.z }); rememberRoute(startPos, { x: tx, z: tz }, crumbs) }
       return true
     }
-    // Self-abandon a stale replay that has burned >60% of the trek deadline (worst case =
-    // today's blind trek + a short failed replay prefix).
+    // Self-abandon a stale replay/graph plan that has burned >60% of the trek deadline (worst
+    // case = today's blind trek + a short failed prefix).
+    if (graphPlan && Date.now() - startTime > 0.6 * budgetMs) { dbg('walkStaged: abandoning graph route - >60% of the deadline burned'); graphPlan = null }
     if (replay && Date.now() - startTime > 0.6 * budgetMs) { dbg('walkStaged: abandoning route replay - >60% of the deadline burned'); replay = null }
-    // Leg target: replay point > blind bearing (stalls 0, wedge soft-steered) > rotate detour.
+    // Leg target: graph node > replay point > blind bearing (stalls 0, wedge soft-steered + probed) > rotate detour.
     const ux = (tx - p.x) / d
     const uz = (tz - p.z) / d
     let lx, lz
     let replayLeg = false
-    if (replay) {
+    let graphLeg = false
+    if (graphPlan) {
+      const cur = routeMem.routeCursor(graphPlan.pts, p)
+      const pt = graphPlan.pts[cur]
+      lx = pt.x; lz = pt.z; graphLeg = true
+    } else if (replay) {
       const cur = routeMem.routeCursor(replay.pts, p)
       const pt = replay.pts[cur]
       lx = pt.x; lz = pt.z; replayLeg = true
@@ -464,17 +485,42 @@ async function walkStaged (bot, tx, tz, opts = {}) {
       // straight leg clips a learned, still-active, non-suppressed wedge, try the same
       // rotation angles at a shorter leg and take the first clear one. If none clear, take
       // the DIRECT bearing anyway - SOFT, never a wall (the blind planner still owns it).
-      const wedges = listWedges()
-      if (wedges.length && routeMem.wedgeOnSegment(wedges, p, { x: lx, z: lz })) {
-        const sstep = Math.min(24, d)
-        for (const deg of [60, -60, 120, -120]) {
-          const th = deg * Math.PI / 180
-          const rx = ux * Math.cos(th) - uz * Math.sin(th)
-          const rz = ux * Math.sin(th) + uz * Math.cos(th)
-          const cx = p.x + rx * sstep; const cz = p.z + rz * sstep
-          if (!routeMem.wedgeOnSegment(wedges, p, { x: cx, z: cz })) { lx = cx; lz = cz; dbg('walkStaged: soft-steering ' + deg + 'deg around a learned wedge'); break }
+      // NAV_LADDER_DIET (Phase C / §5-P4, default OFF): the probe+graph supersede this soft-steer;
+      // with the diet enabled it's skipped (retired). Default keeps it (byte-for-byte) pending soak.
+      if (!NAV_LADDER_DIET) {
+        const wedges = listWedges()
+        if (wedges.length && routeMem.wedgeOnSegment(wedges, p, { x: lx, z: lz })) {
+          const sstep = Math.min(24, d)
+          for (const deg of [60, -60, 120, -120]) {
+            const th = deg * Math.PI / 180
+            const rx = ux * Math.cos(th) - uz * Math.sin(th)
+            const rz = ux * Math.sin(th) + uz * Math.cos(th)
+            const cx = p.x + rx * sstep; const cz = p.z + rz * sstep
+            if (!routeMem.wedgeOnSegment(wedges, p, { x: cx, z: cz })) { lx = cx; lz = cz; dbg('walkStaged: soft-steering ' + deg + 'deg around a learned wedge'); break }
+          }
         }
       }
+      // NAV_LEG_PROBE (Phase C / §5-P2): pre-flight the bearing leg with a bounded getPathTo; a
+      // `noPath` verdict rotates through ±60/±120 (probing each) and takes the first reachable, else
+      // keeps the direct bearing (SOFT). success/partial/timeout => walk it. Bearing legs ONLY
+      // (graph/replay are proven). Cheap: a reachable direct bearing costs one fast probe.
+      if (NAV_LEG_PROBE) {
+        try {
+          const dirx = lx - p.x; const dirz = lz - p.z; const dn = Math.hypot(dirx, dirz) || 1
+          const pm = trekMovements(bot, () => require('./commands.js').travelMovements(bot))
+          try { bot.pathfinder.setMovements(pm) } catch {}
+          const cands = navLeg.legCandidates({ x: p.x, z: p.z }, dirx / dn, dirz / dn, dn, dn, Math.min(24, d))
+          const verdict = (c) => { try { const r = bot.pathfinder.getPathTo(pm, new goals.GoalNearXZ(Math.floor(c.x), Math.floor(c.z), 4), PROBE_MS); return (r && r.status === 'noPath') ? 'noPath' : ((r && r.status) || 'unknown') } catch { return 'unknown' } }
+          const pick = navLeg.chooseProbedLeg(cands, verdict)
+          if (pick) { lx = pick.cand.x; lz = pick.cand.z; if (pick.rotated) dbg('walkStaged: probe noPath at bearing - took ' + pick.cand.deg + 'deg (' + pick.verdict + ')') }
+        } catch (e) { dbg('walkStaged: leg probe skipped - ' + e.message) }
+      }
+    } else if (NAV_LADDER_DIET) {
+      // NAV_LADDER_DIET (Phase C / §5-P4): the reactive rotate-detour retires (the leg probe now
+      // rotates PREEMPTIVELY at selection time, before a leg is committed). On a stall just re-aim
+      // the direct bearing; repeated failure degrades to forceUnstick/watchdog as before.
+      const step = Math.min(24, d)
+      lx = p.x + ux * step; lz = p.z + uz * step
     } else {
       const degs = [60, -60, 120, -120]
       const th = (degs[stalls - 1] || 0) * Math.PI / 180
@@ -530,6 +576,11 @@ async function walkStaged (bot, tx, tz, opts = {}) {
       continue
     }
     if (moved < 3 && !reflexDominated) {
+      // MEASURED stall on a composed GRAPH leg -> this stitched corridor doesn't hold here.
+      // Abandon the graph plan for THIS trek and fall through to whole-route replay / bearing from
+      // the current position (the underlying routes still dement through their own replay - the
+      // graph is read-only over route memory, so nothing is corrupted).
+      if (graphLeg) { graphPlan = null; dbg('walkStaged: graph route stalled - abandoning, falling back to replay/bearing'); replay = recallRoute({ x: np.x, z: np.z }, { x: tx, z: tz }); continue }
       // MEASURED stall mid-replay -> the proven route is stale here. Dement it (fail++, 2
       // consecutive fails evict) and abandon the cursor; the next leg falls through to
       // today's blind bearing/rotate/forceUnstick from the current position, UNCHANGED.
@@ -1075,6 +1126,41 @@ function insideOwnStructure (bot, pos) {
   return p ? ownHutAt(p) : null
 }
 
+// STEP OFF THE HUT APRON before sinking a shaft/staircase, so the doorstep itself is never dug
+// (the onHutApron refusal is KEPT) but "just off the apron" is actually reachable. The old
+// step-off tried ONE fixed target (home if far, else the +12,+12 diagonal) with one goto - if
+// that single direction was wedged/cratered/watered it returned 0 forever, so a stone gather at
+// a dirt-surface hut never got underground (task #22, R2). With STONE_RELOCATE on we rotate the 4
+// mining.DIRS at `radius` blocks (exactly branchMine's entrance-relocation pattern) and stop at
+// the first cell clear of the apron AND the hut interior. STONE_RELOCATE=0 restores today's
+// one-shot target (byte-for-byte movement). NEVER digs. Returns true if we ended clear of the
+// apron; the caller keeps its own refuse-and-return on false.
+async function stepOffApron (bot, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const h = onHutApron(bot)
+  if (!h) return true // not on the apron - nothing to step off
+  const tag = opts.tag || 'shaft'
+  if (process.env.STONE_RELOCATE === '0') { // legacy one-shot: today's exact behavior
+    const away = opts.home && (Math.abs(opts.home.x - h.x) > 8 || Math.abs(opts.home.z - h.z) > 8)
+      ? new Vec3(opts.home.x, bot.entity.position.y, opts.home.z)
+      : new Vec3(h.x + 12, bot.entity.position.y, h.z + 12)
+    dbg('  ' + tag + ': on the hut apron - stepping clear to ' + Math.round(away.x) + ',' + Math.round(away.z) + ' before digging')
+    try { await gotoWithTimeout(bot, new goals.GoalNearXZ(away.x, away.z, 3), 20000) } catch {}
+    return !onHutApron(bot)
+  }
+  // STONE_RELOCATE on: rotate the compass so a single wedged direction no longer sticks.
+  const radius = opts.radius != null ? opts.radius : 12
+  const tries = opts.tries != null ? opts.tries : 4
+  for (let i = 0; i < tries && !isStopped(); i++) {
+    const [dx, dz] = mining.DIRS[i % 4]
+    const away = new Vec3(h.x + dx * radius, bot.entity.position.y, h.z + dz * radius)
+    dbg('  ' + tag + ': on the hut apron - stepping clear (dir ' + i + ') to ' + Math.round(away.x) + ',' + Math.round(away.z))
+    try { await gotoWithTimeout(bot, new goals.GoalNearXZ(away.x, away.z, 3), 12000) } catch {}
+    if (!onHutApron(bot) && !insideOwnStructure(bot)) return true
+  }
+  return !onHutApron(bot) && !insideOwnStructure(bot)
+}
+
 // After the hut builds, GUARANTEE a flush doorstep. The ground right in front of the door is
 // often 1-2 blocks below the hut floor (median-surface snap + natural slope + gather shafts),
 // so the bot steps straight out the door into a pit and then struggles to get back into its own
@@ -1260,13 +1346,9 @@ async function digShaftDown (bot, maxDepth, opts = {}) {
   // Never sink a shaft on the hut's doorstep. Step clear of the apron first (toward the
   // build site if we know it, else just off the apron) so the entrance stays intact.
   if (onHutApron(bot)) {
-    const h = onHutApron(bot)
-    const away = opts.home && (Math.abs(opts.home.x - h.x) > 8 || Math.abs(opts.home.z - h.z) > 8)
-      ? new Vec3(opts.home.x, bot.entity.position.y, opts.home.z)
-      : new Vec3(h.x + 12, bot.entity.position.y, h.z + 12)
-    dbg('  shaft: on the hut apron - stepping clear to ' + Math.round(away.x) + ',' + Math.round(away.z) + ' before digging')
-    try { await gotoWithTimeout(bot, new goals.GoalNearXZ(away.x, away.z, 3), 20000) } catch {}
-    if (onHutApron(bot)) { dbg('  shaft: still on apron - refusing to dig here'); return 0 }
+    // Step clear of the doorstep via the shared 4-direction helper (STONE_RELOCATE=0 -> today's
+    // single home/diagonal one-shot). The refusal to dig the apron itself is KEPT.
+    if (!(await stepOffApron(bot, { isStopped, home: opts.home, tag: 'shaft' }))) { dbg('  shaft: still on apron - refusing to dig here'); return 0 }
   }
   let dug = 0
   while (dug < maxDepth && !isStopped()) {
@@ -1768,8 +1850,9 @@ async function digStaircaseDown (bot, targetY, opts = {}) {
   const dir = new Vec3(ddx, 0, ddz)
   const FLUID = process.env.MINE_FLUID !== '0'
   const LAVA_SAFE = process.env.LAVA_SAFE !== '0' // #41 §2c: descentSafety only probes UNDER the tread; a pool beside/above the dug cells still pours in
+  const stopWhen = opts.stopWhen || null // optional early-stop (stone-relocate: stop once enough cobble is in hand). Absent -> today byte-for-byte.
   let steps = 0
-  while (Math.floor(bot.entity.position.y) > targetY && !isStopped() && steps < 96) {
+  while (Math.floor(bot.entity.position.y) > targetY && !isStopped() && steps < 96 && !(stopWhen && stopWhen())) {
     if (mineDanger(bot)) return { reached: false, reason: 'hostile/hp during descent', blocked: null }
     const feet = bot.entity.position.floored()
     const ahead = feet.plus(dir)            // forward at feet level
@@ -1975,11 +2058,8 @@ async function branchMine (bot, item, count, opts = {}) {
   // get riddled with holes.
   if (!mineRec && Math.floor(bot.entity.position.y) > targetY + 1) {
     if (onHutApron(bot)) {
-      const h = onHutApron(bot)
-      const away = new Vec3(h.x + 12, bot.entity.position.y, h.z + 12)
-      dbg('  branchMine: stepping off the hut apron before sinking the entrance')
-      try { await gotoWithTimeout(bot, new goals.GoalNearXZ(away.x, away.z, 3), 20000) } catch {}
-      if (onHutApron(bot)) { dbg('  branchMine: still on apron - not mining the doorstep'); return { gathered: 0, reason: 'too close to home to dig here' } }
+      // Shared 4-direction step-off (STONE_RELOCATE=0 -> today's single +12,+12 one-shot).
+      if (!(await stepOffApron(bot, { isStopped, tag: 'branchMine' }))) { dbg('  branchMine: still on apron - not mining the doorstep'); return { gathered: 0, reason: 'too close to home to dig here' } }
     }
     if (opts.say) say('digging down to the iron level (~y' + targetY + ')')
     // the entrance = the surface top of this staircase (persisted so we re-enter here)
@@ -2968,6 +3048,26 @@ function recallRoute (from, to) {
     if (pts.length < 2) return null
     return { route: m.route, reversed: m.reversed, pts }
   } catch { return null }
+}
+// NAV Phase C (NAV_WAYPOINT_GRAPH): compose a route over the WAYPOINT GRAPH built from ALL usable
+// routes + own-infra anchors - so a trek between two proven areas can stitch segments from
+// DIFFERENT routes (a shared corridor) that no single recallRoute covers. Returns { pts } (an
+// ordered {x,z} polyline to walk like a replay) or null (=> caller falls back to recallRoute, then
+// bearing). Length-sane guard: a composed detour >1.6x the straight line is rejected (never bake a
+// wander into the line). Reuses the same worldMem.routes / ownInfraAnchors - no new store/writer.
+function planTrekRoute (from, to) {
+  if (!NAV_WAYPOINT_GRAPH) return null
+  try {
+    const routes = (loadWorldMem().routes) || []
+    if (routes.length < 2) return null // one route is already served by recallRoute's whole-route replay - the graph earns its keep only by COMPOSING >=2
+    const graph = routeMem.buildGraph(routes, ownInfraAnchors())
+    const nodes = routeMem.planOverGraph(graph, from, to)
+    if (!nodes || nodes.length < 2) return null
+    const straight = Math.hypot(to.x - from.x, to.z - from.z)
+    const plen = routeMem.polylineLength(nodes)
+    if (straight > 0 && plen > routeMem.ROUTE_LEN_SANITY * straight) { dbg('graph: composed plan ' + Math.round(plen) + 'b >1.6x the ' + Math.round(straight) + 'b straight-line - falling back'); return null }
+    return { pts: nodes }
+  } catch (e) { dbg('graph: plan failed - ' + e.message); return null }
 }
 // A replay stalled (measured, non-reflex) - the route is stale. fail++; 2 consecutive fails
 // evict it. Caller then falls back to today's blind bearing UNCHANGED.
@@ -6165,6 +6265,8 @@ async function gatherLoop (bot, item, count, opts = {}) {
   let noYield = 0     // blocks mined lately with NO item gain (drops lost to gaps)
   let stripDug = 0    // times we've strip-mined DOWN this gather (bounded)
   let reachFails = 0  // consecutive "found stone but couldn't reach it" (buried -> strip-mine)
+  let mineReentryTried = false // stone-relocate (#22): re-enter a known mine at most once per gather
+  let saidNoStone = false      // stone-relocate: fire the "no stone up here" say at most once per gather
   let drownEscapes = 0 // consecutive water-escapes at this spot (abandon after a couple)
   let lastFoodHunt = 0 // throttle the survival-hunt so it doesn't chase every loop
   let lastShelter = 0  // throttle the night-shelter check
@@ -6220,6 +6322,10 @@ async function gatherLoop (bot, item, count, opts = {}) {
   // (the ~1 iron/7min + hut-wedge live bug). branchTries caps the attempts so a site that can't
   // be descended (apron/water/lava) falls back to today's scratch/wander path (no wedge).
   const useBranch = deepOre && process.env.BRANCH_MINE !== '0'
+  // STONE RELOCATE (#22): when a stone/cobble gather finds nothing exposed at the surface,
+  // DESCEND to the stone layer (staircase / known-mine re-entry) instead of the blind wander.
+  // Default ON; STONE_RELOCATE=0 restores today's digShaftDown-strip-then-wander path exactly.
+  const STONE_RELOCATE = process.env.STONE_RELOCATE !== '0'
   let branchTries = 0
   const MAX_STRIP = deepOre ? 10 : 5 // shafts per gather before giving up (ore needs several to reach + work the deep levels)
   const NO_YIELD_LIMIT = 10 // mine-with-no-pickup before relocating to better ground
@@ -6636,7 +6742,39 @@ async function gatherLoop (bot, item, count, opts = {}) {
           dbg('  gather branchMine -> ' + JSON.stringify(r)); stripDug++
           if (r.gathered > 0) { dryExplores = 0; noYield = 0; continue }
         } else {
-          if (opts.say && stripDug === 0) opts.say(`no ${sources[0]} up here - digging down to reach it`)
+          // STONE RELOCATE (task #22): the surface here has no exposed stone, and a 6-block strip
+          // can bottom out still in dirt (deep-soil terrain) -> DESCEND to the stone layer (or
+          // re-enter a known mine) instead of scratching / standing still and then wandering.
+          // Reuses the descent primitives, bounded shallow (<=12 treads); runGather's finally
+          // climbs us back out. STONE_RELOCATE=0 -> only the legacy strip below runs (byte-for-byte).
+          if (STONE_RELOCATE && !deepOre && mining.preferStoneDescend(item, feetY, surfaceY, candidates.map(p => p.y))) {
+            // 1) FREE STONE: re-enter a remembered mine's exposed walls (at most once per gather).
+            if (!mineReentryTried) {
+              mineReentryTried = true
+              const known = recallMine(bot, bot.entity.position, 48)
+              if (known && !isStopped()) {
+                dbg('  gather stone-relocate: re-entering a known mine at ' + known.x + ',' + known.z + ' for exposed stone')
+                if (await enterExistingMine(bot, known, { isStopped })) { dryExplores = 0; continue }
+                dbg('  gather stone-relocate: mine re-entry failed - descending a fresh staircase')
+              }
+            }
+            // 2) DESCEND a walkable staircase to the stone layer (step off the apron first).
+            if (opts.say && !saidNoStone) { saidNoStone = true; opts.say(`no ${sources[0]} up here - digging down to reach it`) }
+            if (await stepOffApron(bot, { isStopped, home, tag: 'stone-descend' })) {
+              const tY = mining.stoneDescendTargetY(surfaceY, { hardFloor: STRIP_FLOOR })
+              const y0 = Math.floor(bot.entity.position.y)
+              dbg('  gather stone-relocate: staircase to y' + tY + ' (from y' + y0 + ') for cobble')
+              // digStaircaseDown probes each tread (descentSafety/#41 lava-safe), refuses player
+              // blocks, bails on mineDanger, and collects its own drops - the treads yield the cobble.
+              const r = await digStaircaseDown(bot, tY, { isStopped, dirIdx: stripDug, stopWhen: () => (countItem(bot, item) - start) >= count })
+              dbg('  gather stone-relocate: staircase -> ' + JSON.stringify(r))
+              if (Math.floor(bot.entity.position.y) < y0) { stripDug++; dryExplores = 0; continue } // descended -> loop-top rescan sees the stone walls; while-cond exits when count is met
+              dbg('  gather stone-relocate: no descent (entrance blocked) - falling through to the legacy strip')
+            } else {
+              dbg('  gather stone-relocate: could not step off the apron - falling through to the legacy strip/wander')
+            }
+          }
+          if (opts.say && stripDug === 0 && !saidNoStone) opts.say(`no ${sources[0]} up here - digging down to reach it`)
           dbg('  gather strip-shaft #' + stripDug + ' budget=' + stripBudget() + ' at y=' + Math.floor(bot.entity.position.y))
           const dug = await digShaftDown(bot, stripBudget(), { isStopped, home })
           dbg('  gather strip-shaft dug=' + dug)
@@ -8239,7 +8377,7 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, smeltFuelPlan, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, breachDryPocket, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, boundedHold, recoverFromDegraded, isRecoveringDegraded, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, markBedUnusable, bedHeld, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, noteWaterCrossing, lonelyFurnace, consolidateFurnaces, litterPatrol, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, smeltFuelPlan, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, breachDryPocket, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, boundedHold, recoverFromDegraded, isRecoveringDegraded, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, markBedUnusable, bedHeld, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, noteWaterCrossing, lonelyFurnace, consolidateFurnaces, litterPatrol, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, planTrekRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
   maintenancePass, isMaintaining, stopMaintenance, _setMaintaining, courierFoodToBank, safekeepSweep, cropExclusionStep, cropPlaceExclusion, hazardStepExclusion, gatherSeedsNear,
   activeJobInfo, stopSurvivalJob,
   wildTerrainMovements, trekMovements, DIGGABLE_NATURAL, STRUCTURE_RE, canBreakNaturally }
