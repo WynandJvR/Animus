@@ -1420,6 +1420,10 @@ const DEFEND_WHEN_HIT_ON = process.env.DEFEND_WHEN_HIT !== '0'
 const CREEPER_BACKOFF_ON = process.env.CREEPER_BACKOFF !== '0'
 const CREEPER_REARM_DIST = parseInt(process.env.CREEPER_REARM_DIST || '8', 10)
 const CREEPER_BURST_MS = parseInt(process.env.CREEPER_BURST_MS || '2500', 10)
+// PHASE A: route the time-critical flee reflexes (burst, creeper back-off, hut-retreat approach)
+// through navigate.reactiveMove - a bounded control-driven short move - instead of a timeout-prone
+// goto. =0 => each reflex falls back to its exact current call (today byte-for-byte).
+const REACTIVE_MOVE_ON = process.env.NAV_REACTIVE_MOVE !== '0'
 let defendEquipped = false
 let lastDefendTarget = null
 let lastFleeAt = 0
@@ -1459,6 +1463,10 @@ async function burstAwayFrom (threatPos) {
   const now = Date.now()
   if (now - lastBurstAt < CREEPER_BURST_MS + 1000) return // rate-limit
   lastBurstAt = now
+  if (REACTIVE_MOVE_ON) { // Phase A: the sprint-jump burst IS the reactiveMove primitive - same away-vector, sustained + measured, arbiter/recoveringDepth-coordinated
+    try { await navigate.reactiveMove(bot, { awayFrom: threatPos, minClearB: 8, budgetMs: CREEPER_BURST_MS, priority: arbiter.PRIORITY.SURVIVE }) } catch {}
+    return
+  }
   try {
     try { bot.pathfinder.setGoal(null) } catch {} // cancel any in-flight avoid nav
     try {
@@ -1599,18 +1607,33 @@ if (process.env.AUTO_DEFEND !== '0') {
                   // the nav's door pre-flight crosses the doorway to reach it. Fallback to center.
                   const cell = (() => { try { return provision.freeInteriorCell ? provision.freeInteriorCell(bot, hut) : null } catch { return null } })()
                   const gx = cell ? cell.x : hut.x + 2; const gy = cell ? cell.y : hut.y + 1; const gz = cell ? cell.z : hut.z + 2
-                  await navigate.navigateToPreempt(bot, new goals.GoalNear(gx, gy, gz, 1),
-                    { timeoutMs: 15000, deadlineMs: CREEPER_BACKOFF_ON ? 20000 : 40000, climb: false, priority: arbiter.PRIORITY.SURVIVE, budgets: { door: 3, pit: 0, water: 0, nudge: 1, stepout: 1 }, label: 'hut-retreat' })
+                  if (REACTIVE_MOVE_ON) { // Phase A: reactive control-driven approach toward home (no 20s goto), then the EXISTING atomic door crossing (crossOwnDoor/#33 kept exactly as-is)
+                    try { await navigate.reactiveMove(bot, { toward: { x: gx, y: gy, z: gz }, reach: 16, arriveB: 2, budgetMs: 2500, priority: arbiter.PRIORITY.SURVIVE }) } catch {}
+                    try { await navigate.enterStructure(bot, hut, { isStopped: () => false, priority: arbiter.PRIORITY.SURVIVE }) } catch {}
+                  } else {
+                    await navigate.navigateToPreempt(bot, new goals.GoalNear(gx, gy, gz, 1),
+                      { timeoutMs: 15000, deadlineMs: CREEPER_BACKOFF_ON ? 20000 : 40000, climb: false, priority: arbiter.PRIORITY.SURVIVE, budgets: { door: 3, pit: 0, water: 0, nudge: 1, stepout: 1 }, label: 'hut-retreat' })
+                  }
                   note('(flee) inside the hut - door-assist sealed the door behind me')
                 }
               } else {
-                const away = me.minus(flee.position)
-                const dest = me.plus(away.scaled(20 / (away.norm() || 1))) // 20b -> past the creeper's 16m follow range -> deaggro (no boundary jitter)
                 note(`(flee) creeper ${fbest.toFixed(1)}m - backing off 20b to deaggro`)
-                await navigate.navigateToPreempt(bot, new goals.GoalNear(Math.floor(dest.x), Math.floor(me.y), Math.floor(dest.z), 2),
-                  CREEPER_BACKOFF_ON
-                    ? { timeoutMs: 6000, deadlineMs: 12000, priority: arbiter.PRIORITY.SURVIVE, label: 'creeper-backoff', budgets: { nudge: 1, stepout: 1, climb: 0, pit: 0, door: 0, indoor: 0, water: 1, wetbreach: 0 } } // fix #10 F2: 1.5s-fuse threat - ladder-light, the burst is the fallback not the ladder
-                    : { timeoutMs: 15000, deadlineMs: 40000, priority: arbiter.PRIORITY.SURVIVE, label: 'creeper-backoff' })
+                if (REACTIVE_MOVE_ON) { // Phase A: bounded control-driven back-off - the burst is now the PRIMARY tool, not a post-goto fallback. Up to 3 sustained bursts (each <=2.5s) until 20b netted; the futility bookkeeping below reads the measured net move from the body position exactly as before
+                  let net = 0
+                  for (let b = 0; b < 3 && net < 20; b++) {
+                    let R = null
+                    try { R = await navigate.reactiveMove(bot, { awayFrom: flee.position, minClearB: 20, budgetMs: 2500, priority: arbiter.PRIORITY.SURVIVE }) } catch {}
+                    try { net = Math.hypot(bot.entity.position.x - startPos.x, bot.entity.position.z - startPos.z) } catch {}
+                    if (!R || R.moved < 1) break // wedged - stop bursting, let the futility path below take over
+                  }
+                } else {
+                  const away = me.minus(flee.position)
+                  const dest = me.plus(away.scaled(20 / (away.norm() || 1))) // 20b -> past the creeper's 16m follow range -> deaggro (no boundary jitter)
+                  await navigate.navigateToPreempt(bot, new goals.GoalNear(Math.floor(dest.x), Math.floor(me.y), Math.floor(dest.z), 2),
+                    CREEPER_BACKOFF_ON
+                      ? { timeoutMs: 6000, deadlineMs: 12000, priority: arbiter.PRIORITY.SURVIVE, label: 'creeper-backoff', budgets: { nudge: 1, stepout: 1, climb: 0, pit: 0, door: 0, indoor: 0, water: 1, wetbreach: 0 } } // fix #10 F2: 1.5s-fuse threat - ladder-light, the burst is the fallback not the ladder
+                      : { timeoutMs: 15000, deadlineMs: 40000, priority: arbiter.PRIORITY.SURVIVE, label: 'creeper-backoff' })
+                }
               }
               ok = true
             } catch (e) { note(`(flee) creeper avoid failed (${e.message})`) }

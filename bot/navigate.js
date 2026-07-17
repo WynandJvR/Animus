@@ -42,6 +42,13 @@ function isNavigating () { return navDepth > 0 }
 let forceUnsticking = false
 function isForceUnsticking () { return forceUnsticking }
 
+// PHASE A flag: the bounded reactive-move primitive (reactiveMove, below) is the PRIMARY tool
+// for time-critical short moves (creeper flee, low-hp radial retreat, hut-retreat approach,
+// recovery nudge/stepout) instead of a long, timeout-prone goto. =0 => every adopter falls
+// back to its exact current call and the primitive is defined but unreferenced (today
+// byte-for-byte). Default ON.
+const REACTIVE_MOVE_ON = process.env.NAV_REACTIVE_MOVE !== '0'
+
 // ---- the ONE deadline-goto ----------------------------------------------------------
 // pathfinder.goto with a hard deadline. An unreachable target can hang goto FOREVER
 // (verified live: froze a 432-block build for 10+ minutes; froze the whole brain loop).
@@ -647,6 +654,10 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
       when: () => !!xz && bot.entity.onGround && !cliffAhead(bot, xz.x, xz.z),
       run: async () => {
         dbg('recovery: surface nudge at ' + p0.floored() + ' toward ' + Math.round(xz.x) + ',' + Math.round(xz.z))
+        if (REACTIVE_MOVE_ON) { // Phase A: the 2s sprint-jump-toward-the-goal IS reactiveMove(toward) - one bounded code path
+          try { await reactiveMove(bot, { toward: { x: xz.x, y: bot.entity.position.y, z: xz.z }, budgetMs: 2000, arriveB: 1.0, isStopped, priority: arbiter.PRIORITY.SURVIVE }) } catch {}
+          return movedEnough()
+        }
         try {
           try { bot.pathfinder.setGoal(null) } catch {}
           await bot.lookAt(new Vec3(xz.x, bot.entity.position.y + 1, xz.z), true)
@@ -691,18 +702,22 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
           const steps = walkable(c2) ? 2 : 1 // 2 cells out when the lane continues
           const tx = feet.x + 0.5 + dx * steps; const tz = feet.z + 0.5 + dz * steps
           dbg('recovery: step-out ' + steps + ' cell(s) toward ' + Math.floor(tx) + ',' + Math.floor(tz))
-          try {
-            await bot.lookAt(new Vec3(tx, bot.entity.position.y + 1.2, tz), true)
-            bot.setControlState('forward', true)
-            const t0 = Date.now()
-            while (Date.now() - t0 < 1800) {
-              await new Promise(r => setTimeout(r, 100))
-              if (Math.hypot(bot.entity.position.x - tx, bot.entity.position.z - tz) < 0.4) break
-              if (Date.now() - t0 > 600 && bot.entity.position.distanceTo(p0) < 0.3) { // bumped - hop once
-                bot.setControlState('jump', true); await new Promise(r => setTimeout(r, 150)); bot.setControlState('jump', false)
+          if (REACTIVE_MOVE_ON) { // Phase A: the per-direction step-out drive IS reactiveMove(toward) - walk (no sprint), hop only when stalled
+            try { await reactiveMove(bot, { toward: { x: tx, y: bot.entity.position.y, z: tz }, budgetMs: 1800, arriveB: 0.4, sprint: false, jump: false, isStopped, priority: arbiter.PRIORITY.SURVIVE }) } catch {}
+          } else {
+            try {
+              await bot.lookAt(new Vec3(tx, bot.entity.position.y + 1.2, tz), true)
+              bot.setControlState('forward', true)
+              const t0 = Date.now()
+              while (Date.now() - t0 < 1800) {
+                await new Promise(r => setTimeout(r, 100))
+                if (Math.hypot(bot.entity.position.x - tx, bot.entity.position.z - tz) < 0.4) break
+                if (Date.now() - t0 > 600 && bot.entity.position.distanceTo(p0) < 0.3) { // bumped - hop once
+                  bot.setControlState('jump', true); await new Promise(r => setTimeout(r, 150)); bot.setControlState('jump', false)
+                }
               }
-            }
-          } catch {} finally { bot.clearControlStates() }
+            } catch {} finally { bot.clearControlStates() }
+          }
           const p1 = bot.entity.position
           if (Math.hypot(p1.x - p0.x, p1.z - p0.z) >= 1.0) return true // we broke the freeze - that's the job
         }
@@ -1053,6 +1068,104 @@ async function forceUnstick (bot, opts = {}) {
   return Math.hypot(p1.x - p0.x, p1.z - p0.z) >= 1.5 || Math.abs(p1.y - p0.y) >= 1
 }
 
+// ---- reactiveMove: the bounded reactive-move primitive (NAV_REACTIVE_MOVE, Phase A) -------
+// The reliable short move a survival REFLEX can DEPEND on. A creeper flee, a low-hp radial
+// retreat, a hut-retreat approach, a recovery nudge/stepout each need to move the body a few
+// blocks AWAY from a bomb or TOWARD safety in <2s. A goto is the WRONG instrument: under a live
+// threat it can spend a 12s deadline planning-and-yielding and never move the body (the
+// ~30x/day 'goto timed out' -> detonation death, DESIGN §1.1). This drives the body DIRECTLY on
+// control-states - the proven burstAwayFrom / nudge / swimToShore idiom - HARD-capped at
+// budgetMs, and returns a MEASURED net move, never an optimistic bool. Opens a SURVIVE arbiter
+// span + recoveringDepth++ exactly like escapeWater, so lower reflexes/gotos hold off (unchanged
+// coordination). It NEVER issues a goto or a long deadline. The optional short-A* refine
+// (DESIGN §3 Phase A step 4) is INERT until Phase B/C ship a hazard predicate - until then this
+// is pure control-driving. NAV_REACTIVE_MOVE=0 => defined but no adopter references it.
+
+// PURE: the short target CELL to steer at, from the bot's current position. `awayFrom` -> a
+// point `reach` blocks along the HORIZONTAL away-vector (me - threat) - the same radial
+// burstAwayFrom and the flee code use (index.js). `toward` -> the goal itself when within
+// `reach`, else a `reach`-capped step toward it. Y is held at pos.y (a flee/approach is a ground
+// move; the caller re-lookAt's every tick). No bot, no world reads - offline-testable.
+function reactiveTarget (pos, opts = {}) {
+  const reach = opts.reach != null ? opts.reach : 8
+  if (opts.awayFrom) {
+    const ax = pos.x - opts.awayFrom.x; const az = pos.z - opts.awayFrom.z
+    const n = Math.hypot(ax, az) || 1
+    return { x: pos.x + (ax / n) * reach, y: pos.y, z: pos.z + (az / n) * reach }
+  }
+  const t = opts.toward || { x: pos.x, y: pos.y, z: pos.z }
+  const tx = t.x - pos.x; const tz = t.z - pos.z
+  const d = Math.hypot(tx, tz)
+  const ty = t.y != null ? t.y : pos.y
+  if (d <= reach || d === 0) return { x: t.x, y: ty, z: t.z }
+  return { x: pos.x + (tx / d) * reach, y: ty, z: pos.z + (tz / d) * reach }
+}
+
+// PURE: is the reactive move DONE this tick? Retreat (`awayFrom`) completes once it has netted
+// `minClearB` from the start; approach (`toward`) once within `arriveB` of the goal. null =>
+// keep driving (the caller also stops at budget end - the fast, honest give-up). Offline-testable.
+function reactiveDone (netMoved, distToGoal, opts = {}) {
+  if (opts.awayFrom) return netMoved >= (opts.minClearB != null ? opts.minClearB : 8) ? 'cleared' : null
+  return distToGoal <= (opts.arriveB != null ? opts.arriveB : 1.5) ? 'arrived' : null
+}
+
+let reactiveMoving = false // re-entrant guard: one reactive drive at a time (a reflex + a rung can both call)
+async function reactiveMove (bot, opts = {}) {
+  const awayFrom = opts.awayFrom || null
+  const toward = opts.toward || null
+  if ((!awayFrom && !toward) || (awayFrom && toward)) return { moved: 0, ok: false } // exactly one of toward/awayFrom
+  if (reactiveMoving) return { moved: 0, ok: false }
+  const budgetMs = Math.max(200, Math.min(opts.budgetMs != null ? opts.budgetMs : 2000, 3000)) // HARD cap - never a goto-length wait
+  const minClearB = opts.minClearB != null ? opts.minClearB : 8
+  const arriveB = opts.arriveB != null ? opts.arriveB : 1.5
+  const reach = awayFrom ? minClearB : (opts.reach != null ? opts.reach : Math.max(minClearB, 8))
+  const sprint = opts.sprint !== false
+  const holdJump = opts.jump !== false // continuous bunny-hop (burst/nudge idiom); false => hop only on a measured stall (stepout idiom)
+  const isStopped = opts.isStopped || (() => false)
+  const priority = opts.priority != null ? opts.priority : arbiter.PRIORITY.SURVIVE
+  reactiveMoving = true
+  const tok = arbiter.beginManeuver('reactive-move', priority, budgetMs + 1000)
+  recoveringDepth++
+  const start = bot.entity.position.clone()
+  let result = null
+  try {
+    try { bot.pathfinder.setGoal(null) } catch {} // honest cancel of any in-flight nav (it unwinds through its own catch while we drive)
+    bot.setControlState('forward', true)
+    if (sprint) bot.setControlState('sprint', true)
+    if (holdJump) bot.setControlState('jump', true)
+    const t0 = Date.now()
+    let lastPos = start.clone(); let lastMove = Date.now()
+    while (Date.now() - t0 < budgetMs && !isStopped()) {
+      const pos = bot.entity.position
+      const target = reactiveTarget(pos, { awayFrom, toward, reach })
+      try { await bot.lookAt(new Vec3(target.x, pos.y + 1, target.z), true) } catch {} // re-aim each tick to hold the line
+      await new Promise(r => setTimeout(r, 100))
+      const now = bot.entity.position
+      const netMoved = Math.hypot(now.x - start.x, now.z - start.z)
+      const distToGoal = toward ? Math.hypot(now.x - toward.x, now.z - toward.z) : 0
+      result = reactiveDone(netMoved, distToGoal, { awayFrom, minClearB, arriveB })
+      if (result) break
+      if (!holdJump) { // measured micro-stall hop (walkTo/stepout idiom) when not already hopping continuously
+        const moved = now.distanceTo(lastPos)
+        if (moved > 0.15) { lastPos = now.clone(); lastMove = Date.now() }
+        else if (Date.now() - lastMove > 350) {
+          bot.setControlState('jump', true); await new Promise(r => setTimeout(r, 120)); bot.setControlState('jump', false)
+          lastMove = Date.now()
+        }
+      }
+    }
+  } finally {
+    bot.clearControlStates()
+    recoveringDepth--
+    arbiter.endManeuver(tok)
+    reactiveMoving = false
+  }
+  const net = Math.hypot(bot.entity.position.x - start.x, bot.entity.position.z - start.z)
+  const ok = awayFrom ? net >= minClearB : (result === 'arrived')
+  dbg('reactive-move: ' + (awayFrom ? 'away' : 'toward') + ' netted ' + net.toFixed(1) + 'b in <=' + budgetMs + 'ms -> ' + (ok ? 'ok' : 'short'))
+  return { moved: net, ok }
+}
+
 function honestFail (lastErr, counts, label, recoveryMs, reflexWaitMs) {
   const tried = Object.entries(counts).filter(([, n]) => n > 0).map(([k, n]) => k + ' x' + n).join(', ')
   const e = new Error(((lastErr && lastErr.message) || 'no path') + (tried ? ' (tried: ' + tried + ')' : ''))
@@ -1060,4 +1173,4 @@ function honestFail (lastErr, counts, label, recoveryMs, reflexWaitMs) {
   return e
 }
 
-module.exports = { navigateTo, navigateToPreempt, gotoOnce, openNearbyDoor, crossOwnDoor, crossVerdict, enterStructure, exitStructure, swimToShore, escapeWater, headInWater, jumpForAir, isNavigating, isRecovering, isForceUnsticking, forceUnstick, setDebugSink, detectPit, goalWasChanged }
+module.exports = { navigateTo, navigateToPreempt, gotoOnce, openNearbyDoor, crossOwnDoor, crossVerdict, enterStructure, exitStructure, swimToShore, escapeWater, headInWater, jumpForAir, isNavigating, isRecovering, isForceUnsticking, forceUnstick, setDebugSink, detectPit, goalWasChanged, reactiveMove, reactiveTarget, reactiveDone }
