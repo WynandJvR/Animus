@@ -4860,6 +4860,8 @@ async function schedulerState (bot) {
       .filter(i => /_(helmet|chestplate|leggings|boots)$/.test(i.name))
       .reduce((n, i) => n + i.count, 0)
   } catch { s.packArmorPieces = 0 }
+  // #41: a spare (2nd+) sword carried in the pack is a donatable dupe for the banked spare-kit need.
+  try { s.spareSwordInPack = (bot.inventory ? bot.inventory.items() : []).filter(i => /_sword$/.test(i.name)).reduce((n, i) => n + i.count, 0) >= 2 } catch { s.spareSwordInPack = false }
   // graves + deathsRecent from the death ledger. LAZY require: commands already requires provision,
   // so a top-level require would be a cycle (established pattern - cf. the inline resources require).
   try {
@@ -4878,7 +4880,13 @@ async function schedulerState (bot) {
     let pts = 0
     for (const [n, c] of Object.entries(totals)) if (foods[n]) pts += (foods[n].foodPoints || 0) * c
     s.bankFoodPts = pts
-  } catch { s.bankFoodPts = 0 }
+    // #41 RESILIENT_RECOVERY: what the bank holds toward ONE spare set (same cachedOnly read as
+    // bankFoodPts - never walks). Feeds maintain.needs(spareKit), scheduler.recoveryReady, and the
+    // rearmFromBank rung gate. Absent -> maintain treats spareKit as "not measured" (no spurious need).
+    s.bankArmorPieces = Object.entries(totals).filter(([n]) => /_(helmet|chestplate|leggings|boots)$/.test(n)).reduce((a, [, c]) => a + c, 0)
+    s.bankHasPick = Object.keys(totals).some(n => /_pickaxe$/.test(n))
+    s.bankHasSword = Object.keys(totals).some(n => /_sword$/.test(n))
+  } catch { s.bankFoodPts = 0; s.bankArmorPieces = 0; s.bankHasPick = false; s.bankHasSword = false }
   // farm: standing wheat farm + XZ distance to its water anchor.
   try {
     const wf = loadWorldMem().wheatFarm
@@ -5514,6 +5522,33 @@ const RUNG_EXECUTORS = {
     await eatUp(bot)
     if (countItem(bot, 'wheat') >= 3) { try { await bakeBreadFromWheat(bot, { isStopped: o.isStopped, home }); await eatUp(bot) } catch (e) { o.dbg('(ladder) R2 bake failed: ' + e.message) } }
   },
+  // R1.5 (#41 RESILIENT_RECOVERY): re-arm from the banked spare set. Walk HOME, withdraw a spare set
+  // (fill each bare armor slot + a pick + a sword, best material available), equip the armor (#19).
+  // WALK + chest-window + equip ONLY - no dig/place path (anti-grief untouched). Decouples re-arm
+  // from a lost/lethal grave (RC-C).
+  'rearmFromBank': async (bot, o) => {
+    const home = o.home
+    const res = require('./resources.js')
+    if (home && bot.entity) { try { await walkStaged(bot, home.x, home.z, { isStopped: o.isStopped, range: 6, timeoutMs: 180000 }) } catch (e) { o.dbg('(ladder) R1.5 home trek failed: ' + e.message) } }
+    if (o.isStopped()) return
+    let totals = {}
+    try { totals = await res.totalCounts(bot, { near: home, maxDist: 64 }) } catch {}
+    const MAT = ['netherite', 'diamond', 'iron', 'chainmail', 'golden', 'leather']
+    const bestArmorName = (slotRe) => { for (const m of MAT) { const nm = Object.keys(totals).find(n => n.startsWith(m + '_') && slotRe.test(n) && totals[n] > 0); if (nm) return nm } return null }
+    for (const re of [/helmet$/, /chestplate$/, /leggings$/, /boots$/]) {
+      if (o.isStopped()) break
+      const nm = bestArmorName(re)
+      if (nm) { try { await res.withdrawItems(bot, nm, 1, { near: home, maxDist: 64 }) } catch (e) { o.dbg('(ladder) rearm withdraw ' + nm + ' failed: ' + e.message) } }
+    }
+    const TOOLMAT = ['netherite', 'diamond', 'iron', 'stone', 'golden', 'wooden']
+    const bestTool = (suffix) => { for (const m of TOOLMAT) { const nm = m + '_' + suffix; if (totals[nm] > 0) return nm } return null }
+    for (const suffix of ['pickaxe', 'sword']) {
+      if (o.isStopped()) break
+      const nm = bestTool(suffix)
+      if (nm) { try { await res.withdrawItems(bot, nm, 1, { near: home, maxDist: 64 }) } catch (e) { o.dbg('(ladder) rearm withdraw ' + nm + ' failed: ' + e.message) } }
+    }
+    try { const wore = await require('./commands.js').equipCarriedArmor(bot); if (wore && wore.length) o.dbg('(ladder) rearm equipped ' + wore.join(',')) } catch (e) { o.dbg('(ladder) rearm equip failed: ' + e.message) }
+  },
   // R2 night: sleep to dawn (self-releases at morning) / dig a sealed pit to dawn
   'sleepInBed': async (bot, o) => { await nightRest(bot, { isStopped: o.isStopped, say: o.say }) },
   'digInForNight': async (bot, o) => { await digInForNight(bot, { isStopped: o.isStopped, say: o.say }) },
@@ -5537,6 +5572,23 @@ const RUNG_EXECUTORS = {
 
 let _recoveringDegraded = false
 function isRecoveringDegraded () { return _recoveringDegraded }
+// #41 P4: is post-death recovery complete enough to let the build drive again? Builds the snapshot
+// and asks scheduler.recoveryReady; CLEARS the P0 latch when ready (so resumeBuild proceeds). A hard
+// RECOVERY_MAX_MS ceiling on how long the latch has been held guarantees the build is never trapped
+// forever (P4 "never hides forever"), and any error fails OPEN (ready) - a snapshot glitch must not
+// stall a saved build. RESILIENT_RECOVERY=0 -> always ready (the latch is inert).
+async function recoveryReadyNow (bot) {
+  if (process.env.RESILIENT_RECOVERY === '0') return true
+  const commands = require('./commands.js')
+  try {
+    const heldMs = commands.postDeathRecoveryHeldMs ? commands.postDeathRecoveryHeldMs() : 0
+    if (heldMs > Number(process.env.RECOVERY_MAX_MS || 900000)) { try { commands.clearPostDeathRecovery() } catch {} return true }
+  } catch {}
+  let ready = true
+  try { ready = scheduler.recoveryReady(await schedulerState(bot)).ready } catch { ready = true }
+  if (ready) { try { commands.clearPostDeathRecovery() } catch {} }
+  return ready
+}
 // RECOVER FROM DEGRADED (S5): the survival-class orchestrator that EXECUTES scheduler.recoveryPlan.
 // Loops { s = schedulerState; exit on ladderDone/isStopped/deadline; plan = recoveryPlan(s); take
 // the FIRST rung that is rungFeasible + has an executor + this run hasn't tried; run it; mark tried
@@ -5555,7 +5607,13 @@ async function recoverFromDegraded (bot, { isStopped = () => false, say = () => 
   try {
     while (true) {
       const s = await schedulerState(bot)
-      if (scheduler.ladderDone(s)) return { done: true, rungs, reason: reason || 'recovered' }
+      // P4: exit on recoveryReady (hp>=18, food>=14, 4 armor, pick&&sword; best-affordable escape) -
+      // NOT the naked-tolerant ladderDone (RC-D). Clearing the exit clears the P0 latch so the build
+      // may resume. RESILIENT_RECOVERY=0 restores ladderDone byte-for-byte.
+      if (process.env.RESILIENT_RECOVERY !== '0') {
+        const rr = scheduler.recoveryReady(s)
+        if (rr.ready) { try { require('./commands.js').clearPostDeathRecovery() } catch {} return { done: true, rungs, reason: reason || (rr.maxCaution ? 'recovered (best-affordable)' : 'recovered'), maxCaution: rr.maxCaution } }
+      } else if (scheduler.ladderDone(s)) return { done: true, rungs, reason: reason || 'recovered' }
       if (isStopped() || _survStop) return { done: false, rungs, reason: 'stopped' } // S7: watchdog fail-job lever folded in
       if (Date.now() > deadline) return { done: false, rungs, reason: 'deadline' }
       const plan = scheduler.recoveryPlan(s)
@@ -5700,6 +5758,46 @@ async function safekeepSweep (bot, { isStopped = () => false, say = () => {}, du
   return n
 }
 
+// SPARE-KIT COURIER (#41 RESILIENT_RECOVERY, §P2): deposit a SURPLUS/dupe spare set (4 armor + pick
+// + sword) into the hut bank so a post-death respawn can withdraw + re-arm (rearmFromBank) WITHOUT
+// depending on a lost/lethal grave. Same bank + deposit machinery as the food courier; the pure
+// maintain.spareKitCourierPlan (never strips the bot's only kit) decides what moves. Returns how
+// many spare items were banked. SPAREKIT=0 / RESILIENT_RECOVERY=0 -> no-op.
+async function spareKitToBank (bot, { isStopped = () => false, say = () => {} } = {}) {
+  if (process.env.RESILIENT_RECOVERY === '0' || process.env.SPAREKIT === '0') return 0
+  const res = require('./resources.js')
+  const maintain = require('./maintain.js')
+  const cell = resolveBankCell(bot)
+  if (!cell) { dbg('  spareKit: no hut bank chest - skipping'); return 0 }
+  const hut = hutAnchor()
+  const anchor = hut || cell
+  if (bot.entity && bot.entity.position.distanceTo(new Vec3(anchor.x, anchor.y, anchor.z)) > 6) {
+    try { await walkStaged(bot, anchor.x, anchor.z, { isStopped, range: 4, timeoutMs: 120000 }) } catch {}
+  }
+  if (isStopped()) return 0
+  // what the bank already holds toward the spare (a REAL read - we're standing at the chest).
+  const bankKit = { armorPieces: 0, hasPick: false, hasSword: false }
+  try {
+    const counts = await res.readChest(bot, cell)
+    bankKit.armorPieces = Object.entries(counts || {}).filter(([n]) => /_(helmet|chestplate|leggings|boots)$/.test(n)).reduce((a, [, c]) => a + c, 0)
+    bankKit.hasPick = Object.keys(counts || {}).some(n => /_pickaxe$/.test(n))
+    bankKit.hasSword = Object.keys(counts || {}).some(n => /_sword$/.test(n))
+  } catch {}
+  // pack items with usesLeft for tools so the plan keeps the best WORKING pick/sword on the bot.
+  const usesByItem = new Map()
+  for (const it of (bot.inventory ? bot.inventory.items() : [])) { if (/_(pickaxe|sword)$/.test(it.name)) usesByItem.set(it, mining.toolUsesLeft(it.name, it.durabilityUsed || 0)) }
+  const packItems = (bot.inventory ? bot.inventory.items() : []).map(i => ({ name: i.name, count: i.count, usesLeft: usesByItem.has(i) ? usesByItem.get(i) : undefined }))
+  const plan = maintain.spareKitCourierPlan(packItems, bankKit, {})
+  if (!plan.length) { dbg('  spareKit: bank spare complete / no dupe to donate'); return 0 }
+  const blk = bot.blockAt(new Vec3(cell.x, cell.y, cell.z))
+  if (!blk || !/chest/.test(blk.name)) { dbg('  spareKit: bank cell no longer a chest'); return 0 }
+  let n = 0
+  try { n = await depositMaterials(bot, blk, { deposits: plan }) } catch (e) { dbg('  spareKit: deposit failed (' + e.message + ')') }
+  try { await res.readChest(bot, cell) } catch {}
+  if (n) { dbg('  spareKit: banked ' + n + ' spare-kit item(s) - a re-arm floor for the next death'); say('stashing a spare kit in the bank - re-arm insurance') }
+  return n
+}
+
 // maintenancePass(bot, opts) - the orchestrator. opts: { say, nightIndoorOnly, isStopped }.
 // Returns { ok, steps: [label...], reason } for the tick's one-line note.
 async function maintenancePass (bot, opts = {}) {
@@ -5801,6 +5899,13 @@ async function maintenancePass (bot, opts = {}) {
     // STEP 5b: safekeep-home - same bank visit as the courier (shares the 'safekeep' window).
     if (process.env.MAINT_SAFEKEEP !== '0' && atHome() && due('safekeep', 600000)) {
       try { const n = await safekeepSweep(bot, { isStopped, say, duringBuildOk: opportunistic }); if (n) stepDone('safekeep(' + n + ')') } catch (e) { dbg('  maint: safekeep failed (' + e.message + ')') }
+    }
+    if (between()) return { ok: true, steps, reason: 'bail:survival' }
+
+    // STEP 5c: spare-kit courier (#41) - bank a SURPLUS spare set (post-death re-arm floor), same
+    // bank visit. Deposits only dupes (never the bot's only kit); no-op unless flagged + a surplus.
+    if (process.env.RESILIENT_RECOVERY !== '0' && process.env.SPAREKIT !== '0' && has('spareKit') && atHome() && due('spareKit', 600000)) {
+      try { const n = await spareKitToBank(bot, { isStopped, say }); if (n) stepDone('spareKit(' + n + ')') } catch (e) { dbg('  maint: spareKit failed (' + e.message + ')') }
     }
     if (between()) return { ok: true, steps, reason: 'bail:survival' }
 
@@ -8405,6 +8510,6 @@ async function chestCounts (bot, chestBlock) {
 }
 
 module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, smeltFuelPlan, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, breachDryPocket, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, boundedHold, recoverFromDegraded, isRecoveringDegraded, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, markBedUnusable, bedHeld, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, noteWaterCrossing, lonelyFurnace, consolidateFurnaces, litterPatrol, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, planTrekRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
-  maintenancePass, isMaintaining, stopMaintenance, _setMaintaining, courierFoodToBank, safekeepSweep, cropExclusionStep, cropPlaceExclusion, hazardStepExclusion, waterStepExclusion, deepWaterUnderfoot, gatherSeedsNear,
+  maintenancePass, isMaintaining, stopMaintenance, _setMaintaining, courierFoodToBank, safekeepSweep, spareKitToBank, recoveryReadyNow, cropExclusionStep, cropPlaceExclusion, hazardStepExclusion, waterStepExclusion, deepWaterUnderfoot, gatherSeedsNear,
   activeJobInfo, stopSurvivalJob,
   wildTerrainMovements, trekMovements, DIGGABLE_NATURAL, STRUCTURE_RE, canBreakNaturally }

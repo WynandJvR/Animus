@@ -306,6 +306,18 @@ function recoveryPlan (snapshot) {
   const g = nearestReachGrave(s, GRAVE_NEAR_LADDER, Number(process.env.GRAVE_URGENT_DIST || 96))
   if (g) plan.push({ rung: 'R1', action: 'recoverGrave', graveDist: g.dist })
 
+  // R1.5 rearmFromBank (#41 RESILIENT_RECOVERY): re-arm from a banked spare set - decouples re-arm
+  // from a lost/lethal grave (RC-C). AFTER R0/R1, BEFORE any outbound R3/R4. Needs home reachable +
+  // a bank that can fill the deficit + a naked/toolless bot. NOT an OUTBOUND rung (walks HOME), so
+  // rungFeasible never day/night/spiral-gates it. RESILIENT_RECOVERY=0 -> the rung is never planned.
+  if (process.env.RESILIENT_RECOVERY !== '0') {
+    const underArmored = armorPieces < 4
+    const toolless = !(s.tools && s.tools.pick && s.tools.sword)
+    const bankHelpsArmor = underArmored && (s.bankArmorPieces || 0) >= 1
+    const bankHelpsTools = toolless && (!!s.bankHasPick || !!s.bankHasSword)
+    if (homeReachable && (bankHelpsArmor || bankHelpsTools)) plan.push({ rung: 'R1.5', action: 'rearmFromBank' })
+  }
+
   // R2 shelter + home food cache.
   if (homeReachable) {
     plan.push({ rung: 'R2', action: 'gotoHome+ensureFood(forceFresh)+cook+eat' })
@@ -363,7 +375,18 @@ function rungFeasible (rung, snapshot) {
   const night = !!s.isNight
   const stuck = !!s.nightStuck
   if (r.dayGated && night && !stuck) return false
-  if (OUTBOUND_RE.test(r.action || '') && night && !!s.underArmored && !stuck) return false
+  // P5 anti-spiral: during a death spiral, seal near the hut - no grave chase (R1), no outbound trek
+  // (R3/R4). rearmFromBank (walks HOME) + R0/R2/R5 stay admissible so the bot re-arms + holds, not
+  // marches back into the death cluster. RESILIENT_RECOVERY=0 -> spiralActive() is always false.
+  if (spiralActive(s) && !stuck && (r.rung === 'R1' || OUTBOUND_RE.test(r.action || ''))) return false
+  if (OUTBOUND_RE.test(r.action || '')) {
+    if (process.env.RESILIENT_RECOVERY !== '0') {
+      // P3: an outbound rung is inadmissible while under-armored BY DAY TOO (not only at night) -
+      // re-arm (rearmFromBank / grave) before any farm/orchard/forage trek. UNLESS nightStuck (can't
+      // wait for a day that won't come) OR the world has no re-arm source (P4 escape - don't trap it).
+      if (!!s.underArmored && !stuck && reArmSourceAvailable(s)) return false
+    } else if (night && !!s.underArmored && !stuck) return false // today: night-only
+  }
   return true
 }
 
@@ -378,6 +401,103 @@ function ladderDone (snapshot) {
   return (s.hp == null || s.hp > 6) &&
          (s.food == null || s.food >= 14) &&
          !(s.armorPieces === 0 && graves.length > 0)
+}
+
+// ==== RESILIENT RECOVERY (#41) - PURE predicates ==========================================
+// Flag RESILIENT_RECOVERY (default on; =0 restores today). These are all side-effect-free and
+// read the flag/knobs LIVE (per call) so they unit-test in both regimes and honor operator
+// overrides without a restart. The impure wiring (latch state, snapshot build, the ladder loop)
+// lives in index.js / provision.js / commands.js and consults these.
+
+// bankHasSpareKit(s) -> is a full spare set banked? (4 armor + a pick + a sword.) Reads the
+// cachedOnly snapshot fields set by schedulerState (bankArmorPieces/bankHasPick/bankHasSword).
+function bankHasSpareKit (s) {
+  return (s.bankArmorPieces || 0) >= 4 && !!s.bankHasPick && !!s.bankHasSword
+}
+// A SAFE, reachable grave that actually holds gear (a re-arm source competing with the bank).
+function hasSafeGraveWithGear (s) {
+  const band = Number(process.env.GRAVE_NEAR_LADDER || 32)
+  return gravesOf(s).some(g => g && !g.dangerous && g.hasGear && g.dist != null && g.dist <= band)
+}
+// Is there ANY way to re-arm right now? bank spare, a safe grave with gear, or gearup off back-off.
+function reArmSourceAvailable (s) {
+  return bankHasSpareKit(s) || hasSafeGraveWithGear(s) || (s.gearupBackoffUntil || 0) <= nowFn()
+}
+
+// recoveryReady(snapshot) -> { ready, maxCaution, reason }. Replaces ladderDone's naked-tolerant
+// exit (RC-D): a bot is "recovered" only at hp>=HP_OK(18) AND food>=14 AND 4 armor AND pick&&sword.
+// Deadlock escape (P4, honest boundedness): if armor is short but the WORLD affords no re-arm
+// (no bank spare AND no safe grave AND gearup on back-off), accept "best-affordable" -> ready WITH
+// maxCaution raised (P5). Vitals + core tools are ALWAYS required (a toolless bot is never ready;
+// the RECOVERY_MAX_MS ceiling in the impure wrapper is the ultimate never-hides-forever backstop).
+function recoveryReady (snapshot) {
+  const s = snapshot || {}
+  const HP_OK = Number(process.env.HP_OK || 18)
+  const hp = s.hp != null ? s.hp : 20
+  const food = s.food != null ? s.food : 20
+  const armorPieces = s.armorPieces != null ? s.armorPieces : 0
+  const tools = s.tools || {}
+  const coreTools = !!tools.pick && !!tools.sword
+  const vitalsOk = hp >= HP_OK && food >= 14
+  if (!coreTools) return { ready: false, maxCaution: false, reason: 'missing core tools (pick/sword)' }
+  if (!vitalsOk) return { ready: false, maxCaution: false, reason: 'vitals not restored (hp>=' + HP_OK + ' food>=14)' }
+  if (armorPieces >= 4) return { ready: true, maxCaution: false, reason: 'fully recovered' }
+  // armor short: ready ONLY if there is no re-arm source left (else keep recovering -> re-arm first).
+  if (!reArmSourceAvailable(s)) return { ready: true, maxCaution: true, reason: 'best-affordable (no armor source; gearup on back-off) - resuming with max caution' }
+  return { ready: false, maxCaution: false, reason: 'under-armored with a re-arm source available' }
+}
+
+// resumeGate({ postDeathRecovery, ready }) -> 'wait' | 'proceed'. The P0 latch gate the build-
+// resume consults: while the post-death latch is set and recovery is not yet ready, the build WAITS
+// (kept on disk, does not drive the bot). Pure so the center-of-the-design invariant is offline-tested.
+function resumeGate ({ postDeathRecovery, ready } = {}) {
+  return (postDeathRecovery && !ready) ? 'wait' : 'proceed'
+}
+
+// preemptCrisisGrade({ name, deathsRecent, postDeathRecovery }) -> bool. The busy-gate preempt
+// verdict for a survival job over a busy build. `recover` is always crisis-grade. recoverFromDegraded
+// is crisis-grade at deathsRecent>=2 (today) OR, under the P0 latch, UNCONDITIONALLY (so recovery
+// preempts on the FIRST death, not the third). RESILIENT_RECOVERY=0 -> the >=2 gate byte-for-byte.
+function preemptCrisisGrade ({ name, deathsRecent, postDeathRecovery } = {}) {
+  if (name === 'recover') return true
+  if (name === 'recoverFromDegraded') {
+    if (process.env.RESILIENT_RECOVERY !== '0' && postDeathRecovery) return true
+    return (deathsRecent || 0) >= 2
+  }
+  return false
+}
+
+// admissibleUnderLatch(cmdClass, line, snapshot, postDeathRecovery) -> { allow, reason }. P0.4:
+// while the post-death recovery latch is set, recovery-class commands are NOT muzzled by the busy-
+// gate - survival commands and explicit recovery moves (recover/getstuff/retreat/goto-home) pass so
+// the bot can retreat + re-arm. Otherwise defers to admissible() (today's verdict). Pure.
+function isRecoveryMove (line) {
+  const l = String(line == null ? '' : line).trim()
+  return /^[!/]*(recover|getstuff|retreat)\b/i.test(l) || /^[!/]*(goto|travel|come)\s+home\b/i.test(l)
+}
+function admissibleUnderLatch (cmdClass, line, snapshot, postDeathRecovery) {
+  if (postDeathRecovery && process.env.RESILIENT_RECOVERY !== '0') {
+    if (cmdClass === 'survival') return { allow: true, reason: 'post-death recovery - survival command owns the body' }
+    if (isRecoveryMove(line)) return { allow: true, reason: 'post-death recovery - recovery move allowed' }
+  }
+  return admissible(cmdClass, snapshot)
+}
+
+// spiralActive(snapshot) -> bool. P5 anti-spiral: deathsRecent >= SPIRAL_N(3) within the 20-min
+// window = MAX-CAUTION (no grave chase, no outbound trek; stay sealed near the hut until recovered).
+// RESILIENT_RECOVERY=0 -> always false (today).
+function spiralActive (s) {
+  if (process.env.RESILIENT_RECOVERY === '0') return false
+  return ((s && s.deathsRecent) || 0) >= Number(process.env.SPIRAL_N || 3)
+}
+
+// withinDeathZone(target, deathCells, r) -> bool. P5c: is a leg's target within DEATH_ZONE_R(24) of
+// any recent death cell? Used to DEFER marching back into a death cluster during a spiral. XZ only
+// (respawn Y varies). Pure.
+function withinDeathZone (target, deathCells, r) {
+  if (!target || !Array.isArray(deathCells)) return false
+  const R = r != null ? r : Number(process.env.DEATH_ZONE_R || 24)
+  return deathCells.some(c => c && Math.hypot(c.x - target.x, c.z - target.z) <= R)
 }
 
 // ---- watchdog ---------------------------------------------------------------------------
@@ -464,6 +584,15 @@ module.exports = {
   rungFeasible,
   OUTBOUND_RE,
   ladderDone,
+  recoveryReady,
+  resumeGate,
+  preemptCrisisGrade,
+  admissibleUnderLatch,
+  isRecoveryMove,
+  spiralActive,
+  withinDeathZone,
+  bankHasSpareKit,
+  reArmSourceAvailable,
   isDegraded,
   commandClass,
   admissible,

@@ -15,6 +15,12 @@ function t (name, fn) {
   S._reset(); S._setNow(() => Date.now()) // isolation between cases
   try { fn(); console.log('PASS  ' + name) } catch (e) { failures++; console.log('FAIL  ' + name + '\n      ' + e.message) }
 }
+// force RESILIENT_RECOVERY ON for a test body regardless of the ambient regime (so the whole suite
+// can be run with RESILIENT_RECOVERY=0 to prove =0 rollback, while flag-ON behavior still gets tested).
+function withResilient (fn) {
+  const old = process.env.RESILIENT_RECOVERY; process.env.RESILIENT_RECOVERY = '1'
+  try { return fn() } finally { if (old == null) delete process.env.RESILIENT_RECOVERY; else process.env.RESILIENT_RECOVERY = old }
+}
 
 // ---- fixture factories ------------------------------------------------------------------
 function snap (over) {
@@ -298,9 +304,25 @@ t('(S5) rungFeasible: nightStuck LIFTS both gates -> everything feasible', () =>
   assert.strictEqual(S.rungFeasible({ rung: 'R3', action: 'trekFarm+tend+harvest+courierHome', dayGated: true }, s), true)
 })
 
-t('(S5) rungFeasible: day + naked -> all feasible (armor is only a NIGHT gate)', () => {
-  const s = snap({ isNight: false, underArmored: true, armorPieces: 0 })
-  for (const r of OUTBOUND.concat(NON_OUTBOUND)) assert.strictEqual(S.rungFeasible(r, s), true, r.action + ' feasible by day')
+t('(#41 P3) rungFeasible: day + naked + a re-arm source -> OUTBOUND inadmissible (re-arm first)', () => withResilient(() => {
+  // gearupBackoffUntil 0 => gearup available => a re-arm source exists => block outbound by DAY too.
+  const s = snap({ isNight: false, underArmored: true, armorPieces: 0, gearupBackoffUntil: 0 })
+  for (const r of OUTBOUND) assert.strictEqual(S.rungFeasible(r, s), false, r.action + ' blocked by day when under-armored + re-armable (P3)')
+  for (const r of NON_OUTBOUND) assert.strictEqual(S.rungFeasible(r, s), true, r.action + ' still feasible')
+}))
+
+t('(#41 P4) rungFeasible: day + naked + NO re-arm source -> OUTBOUND admissible (escape, no trap)', () => {
+  // no bank spare, no grave, gearup on back-off => nothing to re-arm from => forage to survive.
+  const s = snap({ isNight: false, underArmored: true, armorPieces: 0, graves: [], bankArmorPieces: 0, bankHasPick: false, bankHasSword: false, gearupBackoffUntil: Date.now() + 100000 })
+  for (const r of OUTBOUND) assert.strictEqual(S.rungFeasible(r, s), true, r.action + ' allowed when the world affords no re-arm (P4 escape)')
+})
+
+t('(#41 P3) rungFeasible: RESILIENT_RECOVERY=0 -> day + naked all feasible (today byte-for-byte)', () => {
+  const old = process.env.RESILIENT_RECOVERY; process.env.RESILIENT_RECOVERY = '0'
+  try {
+    const s = snap({ isNight: false, underArmored: true, armorPieces: 0, gearupBackoffUntil: 0 })
+    for (const r of OUTBOUND.concat(NON_OUTBOUND)) assert.strictEqual(S.rungFeasible(r, s), true, r.action + ' feasible by day (flag off = night-only gate)')
+  } finally { if (old == null) delete process.env.RESILIENT_RECOVERY; else process.env.RESILIENT_RECOVERY = old }
 })
 
 t('(S5) rungFeasible: armored night -> R4 (secureFood/hunt) still feasible (today\'s behavior)', () => {
@@ -541,6 +563,115 @@ t('(#45) submergedEscapeDue: not submerged or flag off -> never due (WATER_SAFE=
   assert.strictEqual(S.submergedEscapeDue({ flagOn: true, submerged: false, deep: true, wetHist: 4 }), false, 'on land -> not due')
   assert.strictEqual(S.submergedEscapeDue({ flagOn: false, submerged: true, deep: true, wetHist: 4 }), false, 'flag off -> caller falls back to its own gate')
 })
+
+// ==== #41 RESILIENT RECOVERY - PURE predicates ============================================
+const kit = { pick: true, sword: true }
+
+t('(#41 P4) recoveryReady: naked + fed -> NOT ready (armor + re-arm source available)', () => {
+  const rr = S.recoveryReady(snap({ hp: 20, food: 20, armorPieces: 0, tools: kit, gearupBackoffUntil: 0 }))
+  assert.strictEqual(rr.ready, false, 'naked with a re-arm source is not recovered')
+})
+
+t('(#41 P4) recoveryReady: full armor + tools + hp18 + food14 -> ready', () => {
+  const rr = S.recoveryReady(snap({ hp: 18, food: 14, armorPieces: 4, tools: kit }))
+  assert.strictEqual(rr.ready, true)
+  assert.strictEqual(rr.maxCaution, false)
+})
+
+t('(#41 P4) recoveryReady: hp/food below the bar -> NOT ready', () => {
+  assert.strictEqual(S.recoveryReady(snap({ hp: 17, food: 14, armorPieces: 4, tools: kit })).ready, false, 'hp 17 < HP_OK 18')
+  assert.strictEqual(S.recoveryReady(snap({ hp: 18, food: 13, armorPieces: 4, tools: kit })).ready, false, 'food 13 < 14')
+})
+
+t('(#41 P4) recoveryReady: naked + NO bank kit + no safe grave + gearup back-off -> ready-with-maxCaution', () => {
+  const rr = S.recoveryReady(snap({ hp: 18, food: 14, armorPieces: 0, tools: kit, graves: [], bankArmorPieces: 0, bankHasPick: false, bankHasSword: false, gearupBackoffUntil: Date.now() + 100000 }))
+  assert.strictEqual(rr.ready, true, 'best-affordable escape -> ready')
+  assert.strictEqual(rr.maxCaution, true, 'raised max caution')
+})
+
+t('(#41 P4) recoveryReady: toolless -> NOT ready even under the escape', () => {
+  const rr = S.recoveryReady(snap({ hp: 18, food: 14, armorPieces: 4, tools: { pick: false, sword: true }, graves: [], bankArmorPieces: 0, bankHasPick: false, bankHasSword: false, gearupBackoffUntil: Date.now() + 100000 }))
+  assert.strictEqual(rr.ready, false, 'no pick -> never ready')
+})
+
+t('(#41 P4) recoveryReady: under-armored but a BANK spare exists -> NOT ready (re-arm first)', () => {
+  const rr = S.recoveryReady(snap({ hp: 18, food: 14, armorPieces: 0, tools: kit, bankArmorPieces: 4, bankHasPick: true, bankHasSword: true, gearupBackoffUntil: Date.now() + 100000 }))
+  assert.strictEqual(rr.ready, false, 'bank can re-arm -> keep recovering, not escape')
+})
+
+t('(#41 P2) recoveryPlan: rearmFromBank present after R0, before outbound, when underArmored+home+bankKit', () => withResilient(() => {
+  const s = snap({ armorPieces: 0, tools: kit, homeDist: 10, bankArmorPieces: 4, bankHasPick: true, bankHasSword: true, farm: { exists: true }, orchard: { dist: 50 } })
+  const plan = S.recoveryPlan(s)
+  const iRearm = plan.findIndex(r => r.action === 'rearmFromBank')
+  assert(iRearm !== -1, 'rearmFromBank is planned')
+  const iOutbound = plan.findIndex(r => S.OUTBOUND_RE.test(r.action || ''))
+  assert(iOutbound === -1 || iRearm < iOutbound, 'rearmFromBank comes before any outbound rung')
+}))
+
+t('(#41 P2) recoveryPlan: rearmFromBank ABSENT when bank empty or flag off', () => {
+  const empty = snap({ armorPieces: 0, tools: kit, homeDist: 10, bankArmorPieces: 0, bankHasPick: false, bankHasSword: false })
+  assert(!S.recoveryPlan(empty).some(r => r.action === 'rearmFromBank'), 'no bank kit -> no rung')
+  const old = process.env.RESILIENT_RECOVERY; process.env.RESILIENT_RECOVERY = '0'
+  try {
+    const s = snap({ armorPieces: 0, tools: kit, homeDist: 10, bankArmorPieces: 4, bankHasPick: true, bankHasSword: true })
+    assert(!S.recoveryPlan(s).some(r => r.action === 'rearmFromBank'), 'flag off -> no rung')
+  } finally { if (old == null) delete process.env.RESILIENT_RECOVERY; else process.env.RESILIENT_RECOVERY = old }
+})
+
+t('(#41 P5) spiralActive: deathsRecent >= SPIRAL_N(3) -> true; <3 -> false; flag off -> false', () => withResilient(() => {
+  assert.strictEqual(S.spiralActive(snap({ deathsRecent: 3 })), true)
+  assert.strictEqual(S.spiralActive(snap({ deathsRecent: 2 })), false)
+  const old = process.env.RESILIENT_RECOVERY; process.env.RESILIENT_RECOVERY = '0'
+  try { assert.strictEqual(S.spiralActive(snap({ deathsRecent: 5 })), false, 'flag off -> never active') }
+  finally { if (old == null) delete process.env.RESILIENT_RECOVERY; else process.env.RESILIENT_RECOVERY = old }
+}))
+
+t('(#41 P5) rungFeasible: spiral -> grave (R1) + outbound suppressed, home rungs stay', () => withResilient(() => {
+  const s = snap({ deathsRecent: 3, isNight: false, underArmored: false, armorPieces: 4 })
+  assert.strictEqual(S.rungFeasible({ rung: 'R1', action: 'recoverGrave' }, s), false, 'no grave chase in a spiral')
+  assert.strictEqual(S.rungFeasible({ rung: 'R4', action: 'secureFood(hunt->fish->scout)' }, s), false, 'no outbound trek in a spiral')
+  assert.strictEqual(S.rungFeasible({ rung: 'R1.5', action: 'rearmFromBank' }, s), true, 're-arm at home stays feasible')
+  assert.strictEqual(S.rungFeasible({ rung: 'R2', action: 'gotoHome+ensureFood(forceFresh)+cook+eat' }, s), true, 'home rungs stay feasible')
+}))
+
+t('(#41 P5c) withinDeathZone: target within DEATH_ZONE_R(24) of a death cell -> true', () => {
+  const cells = [{ x: 100, z: 100 }, { x: 400, z: 22 }]
+  assert.strictEqual(S.withinDeathZone({ x: 410, z: 25 }, cells), true, '~10b from a death cell')
+  assert.strictEqual(S.withinDeathZone({ x: 200, z: 200 }, cells), false, 'far from every death cell')
+  assert.strictEqual(S.withinDeathZone({ x: 0, z: 0 }, null), false, 'no cells -> false')
+})
+
+t('(#41 P0) resumeGate: latch set + not ready -> wait; ready -> proceed; no latch -> proceed', () => {
+  assert.strictEqual(S.resumeGate({ postDeathRecovery: true, ready: false }), 'wait')
+  assert.strictEqual(S.resumeGate({ postDeathRecovery: true, ready: true }), 'proceed')
+  assert.strictEqual(S.resumeGate({ postDeathRecovery: false, ready: false }), 'proceed')
+})
+
+t('(#41 P0.2) preemptCrisisGrade: recoverFromDegraded is crisis-grade at deathsRecent==1 UNDER the latch', () => withResilient(() => {
+  assert.strictEqual(S.preemptCrisisGrade({ name: 'recover', deathsRecent: 0, postDeathRecovery: false }), true, 'recover always crisis')
+  assert.strictEqual(S.preemptCrisisGrade({ name: 'recoverFromDegraded', deathsRecent: 1, postDeathRecovery: true }), true, 'latch -> crisis at 1')
+  assert.strictEqual(S.preemptCrisisGrade({ name: 'recoverFromDegraded', deathsRecent: 1, postDeathRecovery: false }), false, 'no latch, 1 death -> not crisis (today)')
+  assert.strictEqual(S.preemptCrisisGrade({ name: 'recoverFromDegraded', deathsRecent: 2, postDeathRecovery: false }), true, 'no latch, 2 deaths -> crisis (today)')
+  const old = process.env.RESILIENT_RECOVERY; process.env.RESILIENT_RECOVERY = '0'
+  try { assert.strictEqual(S.preemptCrisisGrade({ name: 'recoverFromDegraded', deathsRecent: 1, postDeathRecovery: true }), false, 'flag off -> latch ignored, >=2 gate restored') }
+  finally { if (old == null) delete process.env.RESILIENT_RECOVERY; else process.env.RESILIENT_RECOVERY = old }
+}))
+
+t('(#41 P0.4) admissibleUnderLatch: recovery-class cmds pass under the latch, else defer to admissible', () => withResilient(() => {
+  // a survival cmd with NO vitals need + NO grave: HELD today, ALLOWED under the latch.
+  const noNeed = snap({ hp: 20, food: 20, armorPieces: 4, graves: [] })
+  assert.strictEqual(S.admissible('survival', noNeed).allow, false, 'today: no need -> held')
+  assert.strictEqual(S.admissibleUnderLatch('survival', 'eat', noNeed, true).allow, true, 'latch: survival cmd owns the body')
+  // a progress-class recovery MOVE (goto home) passes under the latch.
+  assert.strictEqual(S.admissibleUnderLatch('progress', 'goto home', noNeed, true).allow, true, 'latch: goto home is a recovery move')
+  assert.strictEqual(S.isRecoveryMove('recover'), true)
+  assert.strictEqual(S.isRecoveryMove('travel home'), true)
+  assert.strictEqual(S.isRecoveryMove('mine iron'), false)
+  // flag off -> no special latch handling (defers to admissible: survival with no need -> held)
+  const old = process.env.RESILIENT_RECOVERY; process.env.RESILIENT_RECOVERY = '0'
+  try { assert.strictEqual(S.admissibleUnderLatch('survival', 'eat', noNeed, true).allow, false, 'flag off -> today') }
+  finally { if (old == null) delete process.env.RESILIENT_RECOVERY; else process.env.RESILIENT_RECOVERY = old }
+}))
 
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall scheduler tests passed')
 process.exit(failures ? 1 : 0)

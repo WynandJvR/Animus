@@ -38,6 +38,7 @@ const MAINTAIN_ON = SCHED_ON && process.env.MAINTAIN !== '0' // S6: MAINTAIN=0 r
 const WATCHDOG_ON = SCHED_ON && process.env.WATCHDOG !== '0' // S7: the in-process forward-progress watchdog. WATCHDOG=0 -> no interval, no heartbeat merge, no wdPhase call; the touchProgress hooks remain as inert timestamps nobody reads (behaviorally byte-identical)
 const CYCLE_DETECT_ON = WATCHDOG_ON && process.env.CYCLE_DETECT !== '0' // task #34: the behavioral cycle detector. An S7 ORGAN (not a peer) - lives inside the wdTimer, so WATCHDOG=0 kills it too. CYCLE_DETECT=0 -> no sampling, no verdict override, no ring read: byte-identical to today.
 const OPP_ON = MAINTAIN_ON && process.env.OPPORTUNISTIC_MAINTAIN !== '0' // opportunistic at-hut maintenance during the build era; OPPORTUNISTIC_MAINTAIN=0 restores S6 byte-for-byte
+const RESILIENT_ON = SCHED_ON && process.env.RESILIENT_RECOVERY !== '0' // #41: invert build-vs-recovery priority after a death (postDeathRecovery latch + bank re-arm). RESILIENT_RECOVERY=0 restores today byte-for-byte (deathsRecent>=2 preempt gate, un-suppressed respawn ladder, no latch)
 
 // Live brain settings the dashboard can change on the fly; brain-llm.js polls
 // GET /brain each tick and switches model / goal / on-off without a restart.
@@ -571,6 +572,10 @@ bot.on('death', () => {
   const info = { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z), dangerous, at: Date.now(), retrieved: false }
   commands.recordDeath(info)
   commands.markBuildInterrupted && commands.markBuildInterrupted() // keep the build to resume
+  // #41 P0: set the post-death recovery LATCH - recovery now OWNS the bot and OUTRANKS build-resume
+  // until recoveryReady (P4). Cleared by provision.recoveryReadyNow / the scheduler tick. Reads are
+  // flag-gated (isPostDeathRecovery), so RESILIENT_RECOVERY=0 leaves this inert = today byte-for-byte.
+  commands.setPostDeathRecovery && commands.setPostDeathRecovery(true)
   deathPending = true
   note(`(death) at ${info.x},${info.y},${info.z}${dangerous ? ' - LAVA/FIRE/VOID, risky to return' : ' - can go recover'}`)
 })
@@ -675,7 +680,15 @@ bot.on('spawn', () => {
           const g = commands.worthwhileGrave && commands.worthwhileGrave()
           let degraded = false
           try { degraded = scheduler.isDegraded(await provision.schedulerState(bot)) } catch {}
-          if ((g || degraded) && autoRecoverTries < 3) {
+          if (RESILIENT_ON && (g || degraded)) {
+            // #41 P1: SINGLE LADDER DRIVER. Don't fire the respawn handler's own recoverFromDegraded -
+            // it raced the ~15s tick ladder on the mutex and logged the misleading "(no rung ran)"
+            // NO-OP (RC-B). Instead SET the latch (already set by the death handler) and let the tick
+            // own the ladder, kept alive until recoveryReady. The tick's pickJob sees degraded/grave.
+            commands.setPostDeathRecovery && commands.setPostDeathRecovery(true)
+            note('(respawn) degraded/grave after death - recovery latch set; the scheduler ladder owns recovery until fully re-armed (single driver)')
+            autoRecoverTries = 0
+          } else if ((g || degraded) && autoRecoverTries < 3) {
             autoRecoverTries++
             note(`(respawn) degraded/grave after death - running the recovery ladder (try ${autoRecoverTries}/3)`)
             try {
@@ -1078,6 +1091,12 @@ if (SCHED_ON) {
       if (bot.isSleeping) return
       // 2. SNAPSHOT + decision.
       const s = await provision.schedulerState(bot)
+      // #41 P4: the SINGLE place the post-death latch clears on a regular cadence - the moment the
+      // world reports recoveryReady (hp/food/armor/tools restored, or the best-affordable escape),
+      // release the build. Runs even when there's no build to resume, so the latch never sticks.
+      if (RESILIENT_ON && commands.isPostDeathRecovery && commands.isPostDeathRecovery()) {
+        try { if (scheduler.recoveryReady(s).ready) { commands.clearPostDeathRecovery(); note('(sched) recovery complete - post-death latch cleared, the build may resume') } } catch {}
+      }
       const pick = scheduler.pickJob(s)
       // 3. OBSERVABILITY: log on CHANGE (not every tick). Dispatches/outcomes always log (rare).
       const nearest = (s.graves || []).filter(g => g && !g.dangerous && g.value > 0 && g.dist != null).sort((a, b) => a.dist - b.dist)[0]
@@ -1224,7 +1243,11 @@ if (SCHED_ON) {
       if (bodyBusy) {
         // busy -> dispatch ONLY when crisis-grade: a near grave IS the survival move (recover), OR a
         // crisis-grade vitals need (food<=SCHED_CRISIS_FOOD, or hp/threat/etc via survivalNeed).
-        let crisis = name === 'recover' || (name === 'recoverFromDegraded' && (s.deathsRecent || 0) >= 2) // a death-spiral signature (>=2 recent deaths) may preempt the build (REDESIGN §5 entry)
+        // #41 P0.2: under the post-death latch, recoverFromDegraded is crisis-grade UNCONDITIONALLY
+        // (preempts on the FIRST death, not the third) - the deathsRecent>=2 gate no longer holds the
+        // naked bot's recovery behind the build. RESILIENT_RECOVERY=0 -> the >=2 gate byte-for-byte.
+        const latch = RESILIENT_ON && commands.isPostDeathRecovery && commands.isPostDeathRecovery()
+        let crisis = scheduler.preemptCrisisGrade({ name, deathsRecent: s.deathsRecent || 0, postDeathRecovery: latch }) // a death-spiral signature (>=2 recent deaths, or the post-death latch) may preempt the build
         if (!crisis) { try { crisis = !!provision.survivalNeed(bot, { foodThreshold: foodSec.busyPreemptFood() }) } catch { crisis = false } } // #40 F3.2: busy job preempted for secureFood at food<=10 (FOOD_SURVIVAL), not <=6
         if (!crisis) { if (schedHeldLog !== name) { schedHeldLog = name; note('(sched) ' + name + ' held - body busy, not crisis-grade (single-goal)') } return }
         schedHeldLog = ''
@@ -2270,14 +2293,26 @@ const server = http.createServer((req, res) => {
         // window bounds it. attack/defend stay 'progress' class in scheduler.js - no reclassify.
         const defenseCmd = /^(attack|defend)\b/i.test(trimmedLine)
         const defendPreempt = DEFEND_WHEN_HIT_ON && defenseCmd && beingHitNow()
+        // #41 P0.4: while the post-death recovery latch is set, recovery-class commands are NOT muzzled
+        // by the busy-gate (RC-A: goto home / recover / retreat were all held "busy building" while the
+        // build dragged the naked bot back). A recovery MOVE (recover/getstuff/retreat/goto-home) passes
+        // even though `goto`/`travel` are progress-class; survival commands use admissibleUnderLatch so
+        // a bare `recover` at deathsRecent==1 passes in the post-death window. RESILIENT off -> unchanged.
+        const latchOn = RESILIENT_ON && commands.isPostDeathRecovery && commands.isPostDeathRecovery()
+        const recoveryMove = latchOn && SCHED_ON && scheduler.isRecoveryMove(trimmedLine)
         const survivalCmd = SCHED_ON ? (cls === 'survival')
           : (process.env.S1_HOTFIX !== '0' && /^(recover|getstuff|eat|wear|armorup|sleep)\b/i.test(trimmedLine))
-        const adm = survivalCmd ? (SCHED_ON ? scheduler.admissible('survival', await provision.schedulerState(bot)) : survivalAdmissible(bot)) : null
+        const adm = survivalCmd ? (SCHED_ON ? scheduler.admissibleUnderLatch('survival', trimmedLine, await provision.schedulerState(bot), latchOn) : survivalAdmissible(bot)) : null
         if (defendPreempt) {
           const label = commands.isBusy && commands.isBusy() ? 'busy building' : (provision.isSecuringFood && provision.isSecuringFood() ? 'securing food' : 'night-resting')
           note(`(cmd) ${line}${rz} -> PREEMPT (under attack) - defense outranks the ${label} hold`)
           if (commands.preemptForSurvival) commands.preemptForSurvival() // stop latch; a build resumes via persistedResume
           // fall through: the command runs and owns the body
+        } else if (recoveryMove) {
+          const label = commands.isBusy && commands.isBusy() ? 'busy building' : (provision.isSecuringFood && provision.isSecuringFood() ? 'securing food' : 'night-resting')
+          note(`(cmd) ${line}${rz} -> PREEMPT (post-death recovery) - recovery outranks the ${label} hold`)
+          if (commands.preemptForSurvival) commands.preemptForSurvival() // stop latch; a build resumes via persistedResume
+          // fall through: the recovery command runs and owns the body
         } else if (survivalCmd && adm.allow) {
           note(`(cmd) ${line}${rz} -> PREEMPT (${adm.reason}) - survival outranks the current hold`)
           if (commands.preemptForSurvival) commands.preemptForSurvival() // set the stop latch; a build resumes via persistedResume

@@ -14,6 +14,11 @@ function t (name, fn) {
   M._reset()
   try { fn(); console.log('PASS  ' + name) } catch (e) { failures++; console.log('FAIL  ' + name + '\n      ' + e.message) }
 }
+// force RESILIENT_RECOVERY ON for a test body regardless of the ambient regime.
+function withResilient (fn) {
+  const old = process.env.RESILIENT_RECOVERY; process.env.RESILIENT_RECOVERY = '1'
+  try { return fn() } finally { if (old == null) delete process.env.RESILIENT_RECOVERY; else process.env.RESILIENT_RECOVERY = old }
+}
 
 // a fully-satisfied snapshot; override to force individual deficits.
 function snap (over) {
@@ -330,6 +335,76 @@ t('stepDue: independent keys arm independently', () => {
   assert.strictEqual(M.stepDue(st, 'a', 1000, 0).due, true)
   assert.strictEqual(M.stepDue(st, 'b', 1000, 0).due, true, 'a different key is due even though a just armed')
   assert.strictEqual(M.stepDue(st, 'a', 1000, 10).due, false, 'a stays armed')
+})
+
+// ==== #41 RESILIENT RECOVERY - spareKit buffer + courier ==================================
+
+t('(#41) needs: spareKit deficit when bank lacks the spare AND the pack has a dupe', () => withResilient(() => {
+  // fully-satisfied food/armor/tools/torches; add a bank-spare shortfall + an unworn pack dupe.
+  const s = snap({ bankArmorPieces: 0, bankHasPick: false, bankHasSword: false, packArmorPieces: 1 })
+  assert.deepStrictEqual(keys(M.needs(s)), ['spareKit'], 'a banked-spare deficit with a donatable dupe')
+}))
+
+t('(#41) needs: NO spareKit deficit when the bank spare is already complete', () => withResilient(() => {
+  const s = snap({ bankArmorPieces: 4, bankHasPick: true, bankHasSword: true, packArmorPieces: 1 })
+  assert.deepStrictEqual(keys(M.needs(s)), [], 'bank spare complete -> nothing to do')
+}))
+
+t('(#41) needs: NO spareKit deficit when there is no dupe to donate', () => {
+  // fully-tooled bot (sparePick true keeps the tools buffer satisfied); no unworn armor, no 2nd sword.
+  const s = snap({ bankArmorPieces: 0, bankHasPick: false, bankHasSword: false, packArmorPieces: 0, spareSwordInPack: false })
+  assert.deepStrictEqual(keys(M.needs(s)), [], 'a 2nd pick is the keep-2 loadout, not surplus -> no demand to craft a spare')
+})
+
+t('(#41) needs: bank fields ABSENT -> spareKit not measured (protects today\'s snapshots)', () => {
+  const s = snap({ packArmorPieces: 1 }) // no bankArmorPieces field
+  assert.deepStrictEqual(keys(M.needs(s)), [], 'unmeasured bank -> no spurious need')
+})
+
+t('(#41) needs: RESILIENT_RECOVERY=0 / SPAREKIT=0 -> no spareKit deficit ever', () => {
+  const s = snap({ bankArmorPieces: 0, bankHasPick: false, bankHasSword: false, packArmorPieces: 2 })
+  for (const flag of ['RESILIENT_RECOVERY', 'SPAREKIT']) {
+    const old = process.env[flag]; process.env[flag] = '0'
+    try { assert.deepStrictEqual(keys(M.needs(s)), [], flag + '=0 -> off') }
+    finally { if (old == null) delete process.env[flag]; else process.env[flag] = old }
+  }
+})
+
+t('(#41) spareKitCourierPlan: deposits an unworn armor dupe + a spare tool; keeps the working kit', () => {
+  const pack = [
+    { name: 'iron_chestplate', count: 1 },               // unworn spare armor
+    { name: 'iron_pickaxe', count: 1, usesLeft: 200 },   // keep (best of 3)
+    { name: 'stone_pickaxe', count: 1, usesLeft: 120 },  // keep (2nd of 3)
+    { name: 'wooden_pickaxe', count: 1, usesLeft: 30 },  // the 3rd pick -> donate
+    { name: 'iron_sword', count: 1, usesLeft: 150 },     // keep (best of 2)
+    { name: 'stone_sword', count: 1, usesLeft: 60 }      // the 2nd sword -> donate
+  ]
+  const plan = M.spareKitCourierPlan(pack, { armorPieces: 0, hasPick: false, hasSword: false })
+  const byName = Object.fromEntries(plan.map(d => [d.name, d.count]))
+  assert.strictEqual(byName.iron_chestplate, 1, 'ships the unworn spare chestplate')
+  assert.strictEqual(byName.wooden_pickaxe, 1, 'donates the 3rd (worst) pick, keeps the working 2')
+  assert(!byName.iron_pickaxe && !byName.stone_pickaxe, 'keeps the best two working picks')
+  assert.strictEqual(byName.stone_sword, 1, 'donates the 2nd sword, keeps the best')
+  assert(!byName.iron_sword, 'keeps the working sword')
+})
+
+t('(#41) spareKitCourierPlan: never strips the bot\'s only kit; empty when nothing surplus', () => {
+  const pack = [
+    { name: 'iron_pickaxe', count: 1, usesLeft: 200 },
+    { name: 'iron_sword', count: 1, usesLeft: 150 }
+  ]
+  assert.deepStrictEqual(M.spareKitCourierPlan(pack, { armorPieces: 0, hasPick: false, hasSword: false }), [], 'a single working tool of each kind ships nothing')
+})
+
+t('(#41) spareKitCourierPlan: armor deposits target exactly ONE set (capped by the bank shortfall)', () => {
+  const pack = [
+    { name: 'iron_helmet', count: 1 }, { name: 'iron_chestplate', count: 1 },
+    { name: 'iron_leggings', count: 1 }, { name: 'iron_boots', count: 1 }, { name: 'leather_helmet', count: 1 }
+  ]
+  // bank already holds 2 armor pieces -> only 2 more needed even though the pack has 5 spares.
+  const plan = M.spareKitCourierPlan(pack, { armorPieces: 2, hasPick: true, hasSword: true })
+  const shipped = plan.reduce((n, d) => n + d.count, 0)
+  assert.strictEqual(shipped, 2, 'ships exactly the 2 pieces the bank still needs, no more')
 })
 
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall maintain tests passed')

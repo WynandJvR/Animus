@@ -21,7 +21,8 @@ const BUFFERS = {
   bankFood: { target: Number(process.env.MAINT_BANKFOOD_TARGET || (process.env.BREAD_ENGINE !== '0' ? Number(process.env.BREAD_BANK_TARGET || 80) : 40)), floor: Number(process.env.MAINT_BANKFOOD_FLOOR || (process.env.BREAD_ENGINE !== '0' ? 40 : 16)) }, // pts (BREAD_ENGINE reserve 40/80)
   armor: { target: 4, floor: 4 }, // any missing (armorPieces < 4) is under floor
   tools: { members: ['pick', 'axe', 'sword', 'sparePick'] }, // any missing -> need
-  torches: { target: Number(process.env.MAINT_TORCH_TARGET || 8), floor: Number(process.env.MAINT_TORCH_FLOOR || 4) }
+  torches: { target: Number(process.env.MAINT_TORCH_TARGET || 8), floor: Number(process.env.MAINT_TORCH_FLOOR || 4) },
+  spareKit: { armor: 4, pick: 1, sword: 1 } // #41 RESILIENT_RECOVERY: ONE banked spare set (a post-death re-arm floor; mirrors bankFood)
 }
 
 // needs(snapshot) -> ordered array of { key, deficit, target }. Emit in the FIXED order food ->
@@ -68,6 +69,22 @@ function needs (snapshot) {
   // 5. torches.
   const torches = s.torches != null ? s.torches : 0
   if (torches < torchFloor) out.push({ key: 'torches', deficit: torchTarget - torches, target: torchTarget })
+
+  // 6. spareKit (#41 RESILIENT_RECOVERY): a banked spare set is the post-death re-arm floor. Emit a
+  //    deficit ONLY when the bank LACKS the full spare (measured via the new bankArmorPieces/
+  //    bankHasPick/bankHasSword snapshot fields) AND the bot has a surplus/dupe to donate (unworn
+  //    armor in the pack, or a spare pick/sword) - never a demand to CRAFT a spare, only to bank one
+  //    it already has. Gated on the bank fields being MEASURED (absent -> not measured -> no need),
+  //    so today's snapshots (no bank-spare fields) never trigger it. SPAREKIT=0 / flag off -> off.
+  const spareKitOn = process.env.RESILIENT_RECOVERY !== '0' && process.env.SPAREKIT !== '0'
+  if (spareKitOn && s.bankArmorPieces != null) {
+    // a DONATABLE dupe = UNWORN pack armor (worn armor is kept), or a SECOND sword (the bot keeps 1).
+    // Deliberately NOT tools.sparePick: a 2nd pick is the bot's intended keep-2 loadout (safekeepPlan),
+    // not surplus - only a 3rd+ pick is, which the courier plan banks opportunistically once triggered.
+    const bankSpareComplete = (s.bankArmorPieces || 0) >= 4 && !!s.bankHasPick && !!s.bankHasSword
+    const packSurplus = (s.packArmorPieces || 0) > 0 || !!s.spareSwordInPack
+    if (!bankSpareComplete && packSurplus) out.push({ key: 'spareKit', deficit: 1, target: 1 })
+  }
 
   return out
 }
@@ -141,6 +158,56 @@ function toolIsJunk (unit, ctx) {
   if (uses < junkMinUses && workingSameKind >= 1) return true
   if (toolTier(unit.name) === TIER.wooden && (ctx.bestSameKindTier || 0) >= TIER.stone) return true
   return false
+}
+
+// spareKitCourierPlan(packItems, bankKit, opts) -> [{ name, count }] to DEPOSIT into the bank so a
+// post-death respawn can withdraw + re-arm a SPARE set (rearmFromBank rung). Mirror of courierPlan /
+// safekeepPlan: deposits ONLY surplus/dupe gear and NEVER the bot's only working kit. PURE.
+//   packItems = [{ name, count, usesLeft? }]  - inventory.items() (worn armor is NOT here, so any
+//               armor piece present is already a spare/dupe; usesLeft only meaningful for tools).
+//   bankKit   = { armorPieces, hasPick, hasSword }  - what the bank already holds toward the spare.
+// Rules: ship UNWORN armor to fill the bank's armor deficit (up to 4); donate exactly ONE spare
+//   pick/sword only when the bank lacks it AND the pack holds >=2 of that kind (keep the best working
+//   one on the bot). Target = ONE set (bounded); already-complete bank / no dupe -> [].
+function spareKitCourierPlan (packItems, bankKit, opts) {
+  opts = opts || {}
+  const bank = bankKit || {}
+  const items = (packItems || []).filter(i => i && i.count > 0)
+  const deposits = []
+  const add = (name, count) => { if (count > 0) deposits.push({ name, count }) }
+
+  // ARMOR: fill the bank's shortfall toward 4 with UNWORN pack armor (all spares). Worst material
+  // first so the best stays available to WEAR; capped at the deficit (never over-banks).
+  const armorNeed = Math.max(0, 4 - (bank.armorPieces || 0))
+  if (armorNeed > 0) {
+    const armorUnits = []
+    for (const it of items) { if (/_(helmet|chestplate|leggings|boots)$/.test(it.name)) for (let c = 0; c < it.count; c++) armorUnits.push(it.name) }
+    armorUnits.sort((a, b) => toolTier(a) - toolTier(b) || (a < b ? -1 : 1)) // worst-first (toolTier maps the material prefix; 0 for leather/none)
+    const byName = {}
+    for (const nm of armorUnits.slice(0, armorNeed)) byName[nm] = (byName[nm] || 0) + 1
+    for (const [nm, c] of Object.entries(byName)) add(nm, c)
+  }
+
+  // TOOLS: donate ONE spare pick / sword only if the bank lacks it and the pack holds MORE than the
+  // bot's intended keep count (picks keep 2 - safekeepPlan's loadout; sword keeps 1). Donate the
+  // best of the surplus so the banked spare is itself usable; the kept units are the best. This never
+  // strips the working loadout (a keep-2/keep-1 bot ships nothing).
+  const donateTool = (re, keep, bankHas) => {
+    if (bankHas) return
+    const units = []
+    for (const it of items) { if (re.test(it.name)) for (let c = 0; c < it.count; c++) units.push({ name: it.name, usesLeft: it.usesLeft }) }
+    if (units.length <= keep) return // only the intended loadout - never strip the kit
+    const working = u => (u.usesLeft == null ? 1 : (u.usesLeft > 0 ? 1 : 0))
+    units.sort((a, b) => working(b) - working(a) || ((b.usesLeft || 0) - (a.usesLeft || 0)) || (toolTier(b.name) - toolTier(a.name)))
+    add(units[keep].name, 1) // keep units[0..keep-1] (best); bank units[keep] (best of the surplus)
+  }
+  donateTool(/_pickaxe$/, 2, !!bank.hasPick)
+  donateTool(/_sword$/, 1, !!bank.hasSword)
+
+  // merge duplicate deposit lines
+  const merged = new Map()
+  for (const d of deposits) merged.set(d.name, (merged.get(d.name) || 0) + d.count)
+  return [...merged.entries()].map(([name, count]) => ({ name, count }))
 }
 
 // craftBudgetForSpace(needed, freeSlots, stackSize, reserve=1) -> count to craft NOW so the
@@ -252,6 +319,7 @@ module.exports = {
   BUFFERS,
   courierPlan,
   safekeepPlan,
+  spareKitCourierPlan,
   stepDue,
   TIER,
   toolTier,

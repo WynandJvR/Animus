@@ -61,6 +61,17 @@ let buildAbort = false // set by `stop`; watched by schematic builds AND provisi
 // buildAbort entirely (its travels use isStopped:()=>false), so this cleanly frees the body for
 // the survival move without breaking the recover it is preempting for.
 function preemptForSurvival () { buildAbort = true }
+// #41 RESILIENT_RECOVERY (P0): the post-death recovery LATCH. Set on bot.on('death'); while set,
+// recovery OWNS the bot and OUTRANKS build-resume (resumeBuild waits, kept on disk), recovery is
+// crisis-grade unconditionally, and recovery-class commands are not muzzled by the busy-gate. Cleared
+// ONLY when recoveryReady (P4, via provision.recoveryReadyNow / the scheduler tick). RESILIENT_
+// RECOVERY=0 -> reads return false (inert) = today byte-for-byte. Stamps set-time for the P4 ceiling.
+let postDeathRecovery = false
+let postDeathRecoveryAt = 0
+function setPostDeathRecovery (v) { if (v) { if (!postDeathRecovery) postDeathRecoveryAt = Date.now() } else postDeathRecoveryAt = 0; postDeathRecovery = !!v }
+function isPostDeathRecovery () { return process.env.RESILIENT_RECOVERY !== '0' && postDeathRecovery }
+function clearPostDeathRecovery () { postDeathRecovery = false; postDeathRecoveryAt = 0 }
+function postDeathRecoveryHeldMs () { return postDeathRecovery ? Date.now() - postDeathRecoveryAt : 0 }
 let recovering = false // recover mutex - concurrent recovers raced inventory diffs (live)
 let provisioning = false
 let escaping = false   // true while digging UP out of a cave - the flee reflex must not
@@ -2546,7 +2557,7 @@ async function handle (bot, line, opts = {}) {
       resumeJob = { schem: loadedSchem.schem, at: new Vec3(saved.at.x, saved.at.y, saved.at.z) }
       resumeDeaths = 0; buildAbort = false; buildInterrupted = false
       resumeBuild(bot).then(r => {
-        if (r && !r.stopped) bot.chat(`resumed build done: ${r.placed}/${r.total} placed`.slice(0, 200))
+        if (r && !r.stopped && !r.deferred) bot.chat(`resumed build done: ${r.placed}/${r.total} placed`.slice(0, 200))
       }).catch(e => bot.chat(`resume failed: ${e.message}`.slice(0, 200)))
       return `resuming "${saved.name}" at ${saved.at.x},${saved.at.y},${saved.at.z} - heading back to finish it`
     }
@@ -3624,6 +3635,31 @@ async function resumeBuild (bot) {
     resumeJob = null; buildInterrupted = false; resumeDeaths = 0
     return null
   }
+  // #41 P0.1 (THE core inversion): after a death, RECOVERY owns the bot and OUTRANKS build-resume.
+  // While the post-death latch is set and recovery is not yet complete (recoveryReady, P4), the build
+  // WAITS - kept on disk, NEVER driving the naked bot back into the death cell (fixes RC-A). No
+  // building=true, no trek. recoveryReadyNow re-checks vitals/gear + clears the latch when ready.
+  if (isPostDeathRecovery()) {
+    let ready = true
+    try { ready = await provision.recoveryReadyNow(bot) } catch { ready = true }
+    let gate = 'proceed'
+    try { gate = require('./scheduler.js').resumeGate({ postDeathRecovery: isPostDeathRecovery(), ready }) } catch {}
+    if (gate === 'wait') { dbg('resume: post-death recovery in progress - holding the build (kept on disk)'); return { deferred: true, recovering: true } }
+  }
+  // #41 P5c anti-spiral: during a death SPIRAL, don't march the build back into a recent death
+  // cluster (defer that leg; the build stays saved). Only fires under a real spiral (>=SPIRAL_N
+  // deaths in 20 min) AND when the site itself sits inside the cluster. RESILIENT_RECOVERY=0 -> off.
+  if (process.env.RESILIENT_RECOVERY !== '0' && resumeJob) {
+    try {
+      const S = require('./scheduler.js')
+      const now = Date.now()
+      const recent = deathLedger.filter(d => d && now - (d.at || 0) < 20 * 60000)
+      if (recent.length >= Number(process.env.SPIRAL_N || 3) && S.withinDeathZone(resumeJob.at, recent.map(d => ({ x: d.x, z: d.z })))) {
+        dbg('resume: death spiral + build site in a recent death cluster - holding the build (kept on disk)')
+        return { deferred: true, recovering: true }
+      }
+    } catch {}
+  }
   // Wait until the OLD loop is FULLY out: its settle-handler sets building=false and
   // consumes buildInterrupted in one synchronous block, so building===false proves the
   // handler already ran (resumeJob preserved, activity ended). Bounded 90s (a mid-smelt
@@ -3756,4 +3792,4 @@ async function resumeBuild (bot) {
   }
 }
 
-module.exports = { handle, state, setupMovements, travelMovements, eatFood, placeTorchNearby, isBusy, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume, flagSpawnSuspect, worthwhileGrave, shouldChaseGrave, graveLootVerdict, gravesSnapshot, graveUrgency, graveCompare, equipCarriedArmor, activityInfo, preemptForSurvival, setDebugSink, finishDisposition, resumeHoldRemaining, markResumePaused, touchProgress, progressInfo, markStalled, _resetProgress, recentOutcomes }
+module.exports = { handle, state, setupMovements, travelMovements, eatFood, placeTorchNearby, isBusy, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume, flagSpawnSuspect, worthwhileGrave, shouldChaseGrave, graveLootVerdict, gravesSnapshot, graveUrgency, graveCompare, equipCarriedArmor, activityInfo, preemptForSurvival, setDebugSink, finishDisposition, resumeHoldRemaining, markResumePaused, touchProgress, progressInfo, markStalled, _resetProgress, recentOutcomes, setPostDeathRecovery, isPostDeathRecovery, clearPostDeathRecovery, postDeathRecoveryHeldMs }
