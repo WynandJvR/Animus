@@ -132,5 +132,59 @@ t('wheatWithdrawForBake: null/absent fields -> 0 (defensive)', () => {
   assert.strictEqual(F.wheatWithdrawForBake({ packWheat: 0, bankWheat: 100, bankFoodPts: 0, bankTargetPts: 80 }, { capWheat: 12 }), 12, 'cap is tunable')
 })
 
+// ==== #40 (starve-despite-food) trigger predicates ========================================
+// Each is FOOD_SURVIVAL-gated; opts.foodSurvival pins the regime so BOTH `node foodtest.js` and
+// `FOOD_SURVIVAL=0 node foodtest.js` prove the on- AND off-regime numbers independent of ambient.
+const ON = { foodSurvival: true }
+const OFF = { foodSurvival: false }
+
+t('#40 F3.1: inLoopFoodTrigger - busy packless bot breaks off at food<=12 (on) / <=6 (legacy)', () => {
+  // the "in-loop secureFood" column of the trigger table, across food in {20,17,12,10,6,2}.
+  // ON (FOOD_SURVIVAL): fires at food<=12 when the pack carries NO food.
+  assert.strictEqual(F.inLoopFoodTrigger(20, false, ON), false, 'food 20 packless -> fed, no secure')
+  assert.strictEqual(F.inLoopFoodTrigger(17, false, ON), false, 'food 17 packless -> auto-eat territory, not yet secure')
+  assert.strictEqual(F.inLoopFoodTrigger(12, false, ON), true, 'food 12 packless -> in-loop secureFood (the earlier trigger)')
+  assert.strictEqual(F.inLoopFoodTrigger(10, false, ON), true, 'food 10 packless -> secure')
+  assert.strictEqual(F.inLoopFoodTrigger(6, false, ON), true, 'food 6 packless -> secure')
+  assert.strictEqual(F.inLoopFoodTrigger(2, false, ON), true, 'food 2 packless -> secure')
+  // carrying food -> auto-eat/pack cover it; the in-loop hunt does NOT fire (any food level)
+  assert.strictEqual(F.inLoopFoodTrigger(6, true, ON), false, 'food 6 WITH pack food -> auto-eat has it, no secure')
+  assert.strictEqual(F.inLoopFoodTrigger(12, true, ON), false, 'food 12 WITH pack food -> no secure')
+  // OFF (FOOD_SURVIVAL=0): legacy needsFood threshold 6 exactly
+  assert.strictEqual(F.inLoopFoodTrigger(12, false, OFF), false, 'legacy: food 12 packless -> NOT yet (threshold 6)')
+  assert.strictEqual(F.inLoopFoodTrigger(6, false, OFF), true, 'legacy: food 6 packless -> secure')
+  assert.strictEqual(F.inLoopFoodTrigger(7, false, OFF), false, 'legacy: food 7 packless -> not yet')
+  // explicit trigger / env override wins
+  assert.strictEqual(F.inLoopFoodTrigger(9, false, { trigger: 9 }), true, 'explicit trigger 9 -> fires at 9')
+})
+
+t('#40 F3.2: busyPreemptFood - busy job preempted for secureFood at food<=10 (on) / <=6 (legacy)', () => {
+  assert.strictEqual(F.busyPreemptFood(ON), 10, 'FOOD_SURVIVAL -> busy-preempt at food<=10 (~2 min margin)')
+  assert.strictEqual(F.busyPreemptFood(OFF), 6, 'FOOD_SURVIVAL=0 -> legacy food<=6 (byte-for-byte)')
+})
+
+t('#40 F4.1: outboundRungAdmissible - an outbound rung aborts at hp<=6 (on); never aborts (legacy)', () => {
+  // admissibility at hp in {20,7,6,1}: keeps running above the abort line, bails at/below it.
+  assert.strictEqual(F.outboundRungAdmissible(20, ON), true, 'hp 20 -> rung runs')
+  assert.strictEqual(F.outboundRungAdmissible(7, ON), true, 'hp 7 -> still above abort, runs')
+  assert.strictEqual(F.outboundRungAdmissible(6, ON), false, 'hp 6 -> abort (bail to the next rung)')
+  assert.strictEqual(F.outboundRungAdmissible(1, ON), false, 'hp 1 -> abort (no death-march farming)')
+  // FOOD_SURVIVAL=0: always admissible (today - only isStopped stops a rung)
+  assert.strictEqual(F.outboundRungAdmissible(1, OFF), true, 'legacy: hp 1 rung is admissible (no hp-abort)')
+  assert.strictEqual(F.outboundRungAdmissible(null, ON), true, 'unknown hp -> admissible (defensive)')
+})
+
+t('#40 F4.2: famineHoldFood - a starving bot (food<=4) holds instead of an outward excursion', () => {
+  assert.strictEqual(F.famineHoldFood(4, ON), true, 'food 4 -> hold, do not trek out to fish/scout')
+  assert.strictEqual(F.famineHoldFood(2, ON), true, 'food 2 -> hold')
+  assert.strictEqual(F.famineHoldFood(5, ON), false, 'food 5 -> still allowed to try the outward chain')
+  assert.strictEqual(F.famineHoldFood(4, OFF), false, 'FOOD_SURVIVAL=0 -> never skips the outward chain (byte-for-byte)')
+})
+
+t('#40 F5: auto-eat threshold locked at 17 + cooked_beef is tier-0 (verified, no behavior change)', () => {
+  assert.strictEqual(F.AUTO_EAT_AT, 17, 'auto-eat (index.js) eats carried food at food<=17')
+  assert.strictEqual(F.foodTier('cooked_beef'), 0, 'cooked_beef is tier-0 ready-to-eat - never held out by the tier gate')
+})
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall food-security tests passed')
 process.exit(failures ? 1 : 0)

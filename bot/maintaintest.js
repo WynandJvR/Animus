@@ -36,8 +36,10 @@ t('full ordering across all five buffers', () => {
 })
 
 t('each floor triggers at floor-1, NOT at target', () => {
-  assert.deepStrictEqual(keys(M.needs(snap({ packFoodPts: 11 }))), ['packFood'], 'packFood at 11 (<12)')
-  assert.deepStrictEqual(keys(M.needs(snap({ packFoodPts: 24 }))), [], 'packFood at target 24 -> none')
+  // 11 is below BOTH packFood floors (24 default / 12 legacy) and 24 is at/above BOTH -> these two
+  // hold in either FOOD_SURVIVAL regime; the exact 24/40 vs 12/24 band is proven in the #40 F1 tests.
+  assert.deepStrictEqual(keys(M.needs(snap({ packFoodPts: 11 }))), ['packFood'], 'packFood at 11 (< floor: 24 default / 12 legacy)')
+  assert.deepStrictEqual(keys(M.needs(snap({ packFoodPts: 24 }))), [], 'packFood at 24 (>= default floor 24) -> none')
   assert.deepStrictEqual(keys(M.needs(snap({ bankFoodPts: 15 }))), ['bankFood'], 'bankFood at 15 (<16)')
   assert.deepStrictEqual(keys(M.needs(snap({ bankFoodPts: 40 }))), [], 'bankFood at target 40 -> none')
   assert.deepStrictEqual(keys(M.needs(snap({ torches: 3 }))), ['torches'], 'torches at 3 (<4)')
@@ -46,17 +48,31 @@ t('each floor triggers at floor-1, NOT at target', () => {
   assert.deepStrictEqual(keys(M.needs(snap({ armorPieces: 4 }))), [], 'armor 4 -> none')
 })
 
-t('hysteresis band: packFood between floor(12) and target(24) is NOT a need', () => {
-  assert.deepStrictEqual(keys(M.needs(snap({ packFoodPts: 18 }))), [], 'in the band (18) -> satisfied, anti-churn')
-  assert.deepStrictEqual(keys(M.needs(snap({ packFoodPts: 11 }))), ['packFood'], 'below floor (11) -> need')
-  assert.deepStrictEqual(keys(M.needs(snap({ packFoodPts: 24 }))), [], 'at target (24) -> satisfied')
+// #40 F1: the excursion reserve. FOOD_SURVIVAL (default on) raises the pack-food band 12/24 ->
+// 24/40; FOOD_SURVIVAL=0 restores the legacy 12/24 byte-for-byte. Both regimes proven here (each
+// pins its own FOOD_SURVIVAL via withEnv so `node maintaintest.js` AND `FOOD_SURVIVAL=0 node
+// maintaintest.js` both pass identically). withEnv is defined just below - hoisted function decl.
+t('#40 F1: FOOD_SURVIVAL default -> packFood band floor 24 / target 40 (excursion reserve)', () => {
+  withEnv({ FOOD_SURVIVAL: null, MAINT_PACKFOOD_FLOOR: null, MAINT_PACKFOOD_TARGET: null }, () => {
+    assert.deepStrictEqual(keys(M.needs(snap({ packFoodPts: 23 }))), ['packFood'], 'below floor 24 -> need')
+    assert.deepStrictEqual(keys(M.needs(snap({ packFoodPts: 30 }))), [], 'in the band (24..40) -> satisfied, anti-churn')
+    assert.deepStrictEqual(keys(M.needs(snap({ packFoodPts: 40 }))), [], 'at target 40 -> satisfied')
+    const n = M.needs(snap({ packFoodPts: 4 }))[0]
+    assert.strictEqual(n.key, 'packFood')
+    assert.strictEqual(n.target, 40, 'target 40')
+    assert.strictEqual(n.deficit, 36, 'deficit tops up to 40')
+  })
 })
 
-t('deficit + target reported', () => {
-  const n = M.needs(snap({ packFoodPts: 4 }))[0]
-  assert.strictEqual(n.key, 'packFood')
-  assert.strictEqual(n.target, 24)
-  assert.strictEqual(n.deficit, 20)
+t('#40 F1: FOOD_SURVIVAL=0 -> legacy packFood band floor 12 / target 24 (byte-for-byte)', () => {
+  withEnv({ FOOD_SURVIVAL: '0', MAINT_PACKFOOD_FLOOR: null, MAINT_PACKFOOD_TARGET: null }, () => {
+    assert.deepStrictEqual(keys(M.needs(snap({ packFoodPts: 11 }))), ['packFood'], 'below legacy floor 12 -> need')
+    assert.deepStrictEqual(keys(M.needs(snap({ packFoodPts: 18 }))), [], 'in the legacy band (12..24) -> satisfied')
+    assert.deepStrictEqual(keys(M.needs(snap({ packFoodPts: 24 }))), [], 'at legacy target 24 -> satisfied')
+    const n = M.needs(snap({ packFoodPts: 4 }))[0]
+    assert.strictEqual(n.target, 24, 'legacy target 24')
+    assert.strictEqual(n.deficit, 20, 'legacy deficit 20')
+  })
 })
 
 t('all-satisfied -> []', () => {
@@ -79,8 +95,9 @@ t('env override: MAINT_PACKFOOD_FLOOR=20 makes packFoodPts 18 a need (restored i
     if (saved != null) process.env.MAINT_PACKFOOD_FLOOR = saved
     else delete process.env.MAINT_PACKFOOD_FLOOR
   }
-  // restored: 18 is back in the band and no longer a need
-  assert.deepStrictEqual(keys(M.needs(snap({ packFoodPts: 18 }))), [], 'env restored -> 18 satisfied again')
+  // restored: the explicit floor override is gone; 30 sits in/above the default band (24..40 with
+  // FOOD_SURVIVAL, >=24 legacy) so it is satisfied in EITHER regime -> no need.
+  assert.deepStrictEqual(keys(M.needs(snap({ packFoodPts: 30 }))), [], 'env restored -> 30 satisfied again')
 })
 
 t('bankFood needs home reachable: unreachable bank -> deficit NOT emitted', () => {
@@ -136,14 +153,22 @@ t('needs(): explicit MAINT_BANKFOOD_* env overrides the engine defaults', () => 
 const names = arr => arr.map(x => x.name)
 const byName = arr => { const o = {}; for (const d of arr) o[d.name] = (o[d.name] || 0) + d.count; return o }
 
-t('courierPlan(): BREAD_ENGINE ON (default) fills the bank to 80', () => {
-  withEnv({ BREAD_ENGINE: null, MAINT_BANKFOOD_TARGET: null, BREAD_BANK_TARGET: null }, () => {
-    // cooked_beef 8 pts x10 = 80. Keep 3 (24 pts); surplus 7; bank 0->80 wants 10 -> ships all 7.
+t('courierPlan(): BREAD_ENGINE ON + FOOD_SURVIVAL default -> keep 40 pts, fill bank to 80', () => {
+  withEnv({ FOOD_SURVIVAL: null, MAINT_PACKFOOD_TARGET: null, BREAD_ENGINE: null, MAINT_BANKFOOD_TARGET: null, BREAD_BANK_TARGET: null }, () => {
+    // #40 F1: keep ceil(40/8)=5 (40 pts); surplus 5; bank 0->80 wants 10 -> ships all 5 (pack keeps 5).
     const plan = M.courierPlan([{ name: 'cooked_beef', count: 10, foodPoints: 8, tier: 0 }], 0, {})
-    assert.deepStrictEqual(byName(plan), { cooked_beef: 7 }, 'engine target 80 -> ships all 7 surplus')
-    // bank already at 40 is now UNDER the 80 target -> still ships toward 80.
+    assert.deepStrictEqual(byName(plan), { cooked_beef: 5 }, 'keep 40 pts (5 beef) -> ships 5 surplus toward 80')
+    // bank already at 40 is UNDER the 80 target -> ships toward 80; keep ceil(40/5)=8 (40 pts), surplus 2.
     const plan2 = M.courierPlan([{ name: 'bread', count: 10, foodPoints: 5, tier: 0 }], 40, {})
-    assert.deepStrictEqual(byName(plan2), { bread: 5 }, 'bank 40 < 80 target -> ships surplus 5')
+    assert.deepStrictEqual(byName(plan2), { bread: 2 }, 'keep 40 pts (8 bread) -> bank 40<80 ships surplus 2')
+  })
+})
+
+t('#40 F1: courierPlan FOOD_SURVIVAL=0 -> legacy keep 24 pts (byte-for-byte)', () => {
+  withEnv({ FOOD_SURVIVAL: '0', MAINT_PACKFOOD_TARGET: null, BREAD_ENGINE: null, MAINT_BANKFOOD_TARGET: null, BREAD_BANK_TARGET: null }, () => {
+    // legacy keep ceil(24/8)=3 (24 pts); surplus 7; bank 0->80 wants 10 -> ships all 7 (pack keeps 3).
+    const plan = M.courierPlan([{ name: 'cooked_beef', count: 10, foodPoints: 8, tier: 0 }], 0, {})
+    assert.deepStrictEqual(byName(plan), { cooked_beef: 7 }, 'legacy keep 24 pts (3 beef) -> ships 7 surplus')
   })
 })
 
@@ -158,25 +183,25 @@ t('courierPlan(): explicit target env / opts win over the engine default', () =>
   })
 })
 
-t('courierPlan: keeps ~24 pts on the bot, ships surplus, stops filling the bank at 40', () => {
-  // LEGACY (BREAD_ENGINE=0) target 40. cooked_beef = 8 pts (tier 0), x10 = 80 pts. bank empty.
-  // Keep ceil(24/8)=3 (24 pts); deposit until bank hits 40 -> 5 beef (40 pts). Pack retains 5.
-  const saved = process.env.BREAD_ENGINE
-  try {
-    process.env.BREAD_ENGINE = '0'
+t('courierPlan: keeps the pack reserve on the bot, ships surplus, stops filling the bank at 40', () => {
+  // LEGACY regime (FOOD_SURVIVAL=0 keep 24, BREAD_ENGINE=0 target 40). cooked_beef = 8 pts x10 = 80.
+  // Keep ceil(24/8)=3 (24 pts); deposit until bank hits 40 -> 5 beef (40 pts); pack retains 5.
+  withEnv({ FOOD_SURVIVAL: '0', BREAD_ENGINE: '0', MAINT_PACKFOOD_TARGET: null }, () => {
     const plan = M.courierPlan([{ name: 'cooked_beef', count: 10, foodPoints: 8, tier: 0 }], 0, {})
     assert.deepStrictEqual(byName(plan), { cooked_beef: 5 }, 'ship 5 beef (bank 0->40); keep 5 (>=24 pts)')
-  } finally { if (saved != null) process.env.BREAD_ENGINE = saved; else delete process.env.BREAD_ENGINE }
+  })
 })
 
 t('courierPlan: rotten_flesh (tier 2) never ships and never counts as pack keep', () => {
-  const plan = M.courierPlan([
-    { name: 'rotten_flesh', count: 20, foodPoints: 4, tier: 2 },
-    { name: 'bread', count: 10, foodPoints: 5, tier: 0 }
-  ], 0, {})
-  assert.ok(!names(plan).includes('rotten_flesh'), 'rotten never in the deposit list')
-  // bread keep = ceil(24/5)=5 (25 pts); surplus 5; bank 0->40 wants 8 -> ships all 5.
-  assert.deepStrictEqual(byName(plan), { bread: 5 }, 'only bread ships')
+  withEnv({ FOOD_SURVIVAL: null, MAINT_PACKFOOD_TARGET: null, BREAD_ENGINE: null, MAINT_BANKFOOD_TARGET: null, BREAD_BANK_TARGET: null }, () => {
+    const plan = M.courierPlan([
+      { name: 'rotten_flesh', count: 20, foodPoints: 4, tier: 2 },
+      { name: 'bread', count: 10, foodPoints: 5, tier: 0 }
+    ], 0, {})
+    assert.ok(!names(plan).includes('rotten_flesh'), 'rotten never in the deposit list')
+    // #40 F1 keep = ceil(40/5)=8 (40 pts); surplus 2; bank 0->80 wants 16 -> ships all 2.
+    assert.deepStrictEqual(byName(plan), { bread: 2 }, 'only bread ships (the surplus above the 40-pt keep)')
+  })
 })
 
 t('courierPlan: bank already at/over target -> [] (nothing to do)', () => {
@@ -191,9 +216,9 @@ t('courierPlan: bank already at/over target -> [] (nothing to do)', () => {
 
 t('courierPlan: empty pack -> []; and never deposits below the pack keep', () => {
   assert.deepStrictEqual(M.courierPlan([], 0, {}), [])
-  // exactly the keep on hand (24 pts of bread = 5 loaves rounds to keep all) -> nothing surplus
+  // 5 bread = 25 pts <= the pack keep in EITHER regime (40 default / 24 legacy) -> all kept, nothing ships
   const plan = M.courierPlan([{ name: 'bread', count: 5, foodPoints: 5, tier: 0 }], 0, {})
-  assert.deepStrictEqual(plan, [], '5 bread = 25 pts, all needed for the 24 keep -> ship nothing')
+  assert.deepStrictEqual(plan, [], '5 bread = 25 pts, all needed for the pack keep -> ship nothing')
 })
 
 t('courierPlan: keeps the BEST tier on the bot, ships the lesser food to the bank', () => {

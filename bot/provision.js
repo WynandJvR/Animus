@@ -4945,6 +4945,18 @@ async function secureFoodInner (bot, opts = {}) {
   try { for (let k = 0; k < 4 && foodCount(bot) < 5 && !isStopped(); k++) { if (!await huntForFood(bot, { isStopped, range: 32 })) break } } catch {}
   await cookIfRaw(); await eatUp(bot)
   if (fedEnough() || isStopped()) return { fed: fedEnough(), blockedOn: fedEnough() ? null : (isStopped() ? 'stopped' : 'food') }
+  // #40 F4.2: a STARVING bot (food<=4) that just trekked home and found the pantry dry must NOT
+  // then march OUT to farm/fish/scout - those excursions are what get a 1-hp bot killed. Skip the
+  // outward legs and hold indoors (bounded); the caller / crisis reflex re-runs the whole chain
+  // later. Only when it can hold and only after HOME-FOOD-FIRST was tried; food>4 (or no-hold
+  // callers like the mid-trek chain) keep today's exact hunt/farm/fish/scout ordering.
+  if (opts.canHold && triedHomeFood && foodSec.famineHoldFood(bot.food) && !isStopped()) {
+    dbg('secureFood: famine-hold - food=' + bot.food + ' and home stores dry - holding indoors, not trekking out to fish/scout')
+    say('nothing to eat out here and home is dry - holing up rather than starving on a fishing trip')
+    try { await boundedHold(bot, { isStopped, say }) } catch {}
+    const fedH = foodCount(bot) > 0
+    return { fed: fedH, blockedOn: fedH ? null : (isStopped() ? 'stopped' : (isNight(bot) ? 'night' : 'food')) }
+  }
   // 4) the farm (harvest what's ripe / plant one by remembered water)
   try {
     // EXPAND, don't just tend: a standing-but-undersized farm (tend returns true after
@@ -5349,7 +5361,15 @@ async function recoverFromDegraded (bot, { isStopped = () => false, say = () => 
       tried.add(chosen.action)
       const label = chosen.rung + ':' + chosen.action
       dbg('(ladder) ' + label + ' -> executing')
-      try { await RUNG_EXECUTORS[chosen.action](bot, { isStopped, say, home, dbg }) }
+      // #40 F4.1: on an OUTBOUND rung (trek/tend/secureFood) compose isStopped with an hp-abort so
+      // a bot burned to <=6 hp mid-trek/tend/seed-gather BAILS to the next rung (-> R5 bounded hold)
+      // instead of farming grass at 1 hp for minutes. Non-outbound rungs (eat/grave/shelter/hold)
+      // keep plain isStopped. FOOD_SURVIVAL=0 -> outboundRungAdmissible is always true (today).
+      const outbound = process.env.FOOD_SURVIVAL !== '0' && scheduler.OUTBOUND_RE.test(chosen.action || '')
+      const rungStopped = outbound
+        ? () => isStopped() || !foodSec.outboundRungAdmissible(bot.health)
+        : isStopped
+      try { await RUNG_EXECUTORS[chosen.action](bot, { isStopped: rungStopped, say, home, dbg }) }
       catch (e) { dbg('(ladder) ' + label + ' failed: ' + e.message) }
       rungs.push(label)
       touchP('ladderRung') // S7 H5a: a bounded, live-verified rung completed
@@ -6374,7 +6394,12 @@ async function gatherLoop (bot, item, count, opts = {}) {
     // NEVER hunt when rest is due: roaming for animals in the dark at 1hp is how it died
     // at 479,67,85 (a sealed pit is safe at ANY hunger - starvation stops at half hearts;
     // a night hunt doesn't). The night-rest check below runs first via this guard.
-    if (needsFood(bot) && !nightRestWanted(bot) && Date.now() - lastFoodHunt > 20000) {
+    // #40 F3.1: trigger the in-loop secureFood EARLIER (FOOD_SURVIVAL: food<=12 with an empty
+    // pack, vs the legacy <=6) so a busy, packless bot breaks off ~2 min from zero instead of
+    // ~90s - and it fires even when the scheduler tick chain is stalled (this hook lives inside
+    // the gather loop). Same 20s throttle + _securingFood latch keep it bounded. FOOD_SURVIVAL=0
+    // -> foodSec.inLoopFoodTrigger resolves to 6, i.e. today's needsFood(bot) exactly.
+    if (foodSec.inLoopFoodTrigger(bot.food, hasFood(bot)) && !nightRestWanted(bot) && Date.now() - lastFoodHunt > 20000) {
       lastFoodHunt = Date.now()
       if (opts.say) opts.say('starving - sorting out food before i keep working')
       dbg('  gather food (food=' + bot.food + ') -> secureFood')

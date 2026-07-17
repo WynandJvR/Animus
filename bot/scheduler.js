@@ -440,6 +440,7 @@ module.exports = {
   graveCooldownMs,
   recoveryPlan,
   rungFeasible,
+  OUTBOUND_RE,
   ladderDone,
   isDegraded,
   commandClass,

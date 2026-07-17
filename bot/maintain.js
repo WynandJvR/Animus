@@ -17,7 +17,7 @@
 // Default buffer bands (documentation / introspection). `needs` reads the same env keys LIVE
 // so overrides apply per call; these defaults mirror what the env resolves to at load.
 const BUFFERS = {
-  packFood: { target: Number(process.env.MAINT_PACKFOOD_TARGET || 24), floor: Number(process.env.MAINT_PACKFOOD_FLOOR || 12) }, // pts
+  packFood: { target: Number(process.env.MAINT_PACKFOOD_TARGET || (process.env.FOOD_SURVIVAL !== '0' ? 40 : 24)), floor: Number(process.env.MAINT_PACKFOOD_FLOOR || (process.env.FOOD_SURVIVAL !== '0' ? 24 : 12)) }, // pts (#40 F1: FOOD_SURVIVAL raises the excursion reserve 24/12 -> 40/24)
   bankFood: { target: Number(process.env.MAINT_BANKFOOD_TARGET || (process.env.BREAD_ENGINE !== '0' ? Number(process.env.BREAD_BANK_TARGET || 80) : 40)), floor: Number(process.env.MAINT_BANKFOOD_FLOOR || (process.env.BREAD_ENGINE !== '0' ? 40 : 16)) }, // pts (BREAD_ENGINE reserve 40/80)
   armor: { target: 4, floor: 4 }, // any missing (armorPieces < 4) is under floor
   tools: { members: ['pick', 'axe', 'sword', 'sparePick'] }, // any missing -> need
@@ -31,8 +31,11 @@ function needs (snapshot) {
   const out = []
 
   // read floors/targets LIVE so env overrides apply without a restart (mirrors gravegate).
-  const packFloor = Number(process.env.MAINT_PACKFOOD_FLOOR || 12)
-  const packTarget = Number(process.env.MAINT_PACKFOOD_TARGET || 24)
+  // #40 F1: FOOD_SURVIVAL (default on) raises the pack-food band to a real excursion reserve
+  // (floor 24 / target 40 = 3..5 meals) so the maintain need fires while the bot still holds
+  // several meals; FOOD_SURVIVAL=0 restores the legacy 12/24. Explicit env always wins.
+  const packFloor = Number(process.env.MAINT_PACKFOOD_FLOOR || (process.env.FOOD_SURVIVAL !== '0' ? 24 : 12))
+  const packTarget = Number(process.env.MAINT_PACKFOOD_TARGET || (process.env.FOOD_SURVIVAL !== '0' ? 40 : 24))
   // BREAD_ENGINE (default on): raise the banked-food band to a real reserve (floor 40 / target
   // 80 = 8/16 loaves) so the courier/R2 have a post-death meal to withdraw; BREAD_ENGINE=0
   // restores the legacy 16/40. Explicit MAINT_BANKFOOD_FLOOR/TARGET always win.
@@ -74,13 +77,13 @@ function needs (snapshot) {
 
 // courierPlan(packItems, bankFoodPts, opts) -> [{ name, count }] to DEPOSIT into the bank.
 //   packItems = [{ name, count, foodPoints, tier }] (caller pre-computes points/tier).
-// Rules (§4.1): keep >= MAINT_PACKFOOD_TARGET (24) pts in the pack, preferring tier-0
+// Rules (§4.1): keep >= MAINT_PACKFOOD_TARGET (40 under FOOD_SURVIVAL, else 24) pts in the pack, preferring tier-0
 //   (ready-to-eat) then highest points-per-item to STAY; ship the surplus until the bank
 //   would reach MAINT_BANKFOOD_TARGET (40) or the surplus is exhausted; tier>=2 (rotten/
 //   poison) is never a pack-keep and never ships; empty pack / full bank -> [].
 function courierPlan (packItems, bankFoodPts, opts) {
   opts = opts || {}
-  const packTarget = opts.packTarget != null ? opts.packTarget : Number(process.env.MAINT_PACKFOOD_TARGET || 24)
+  const packTarget = opts.packTarget != null ? opts.packTarget : Number(process.env.MAINT_PACKFOOD_TARGET || (process.env.FOOD_SURVIVAL !== '0' ? 40 : 24)) // #40 F1: keep >=40 pts on the bot (FOOD_SURVIVAL); FOOD_SURVIVAL=0 -> legacy 24
   const bankTarget = opts.bankTarget != null ? opts.bankTarget : Number(process.env.MAINT_BANKFOOD_TARGET || (process.env.BREAD_ENGINE !== '0' ? Number(process.env.BREAD_BANK_TARGET || 80) : 40))
   let bankPts = Number(bankFoodPts) || 0
   if (bankPts >= bankTarget) return [] // pantry already stocked

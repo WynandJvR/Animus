@@ -29,6 +29,8 @@ const access = require('./access.js')
 const schematic = require('./schematic.js')
 const loghistory = require('./loghistory.js') // compact rolling state time-series + heartbeat (observability)
 const scheduler = require('./scheduler.js') // S4: pure survival-tier decision core (commandClass/admissible/pickJob) - wires the busy-gate + the tick
+const maintain = require('./maintain.js') // #40 F2: pure buffer needs() - to detect a pending food (pack/bank) need when an opp window is abandoned
+const foodSec = require('./food.js') // #40 F3.2: pure busy-preempt food threshold (FOOD_SURVIVAL raises it 6 -> 10)
 const cycleDetect = require('./cycle-detect.js') // task #34: pure behavioral cycle/oscillation detector - fed into the S7 watchdog's existing ladder (no new subsystem)
 const SCHED_ON = process.env.SCHEDULER !== '0' // master flag: SCHEDULER=0 restores the S1-hotfix wiring byte-for-byte (gate takes the survivalAdmissible path, the tick never registers, the 3 reflexes run as today)
 const LADDER_ON = SCHED_ON && process.env.RECOVERY_LADDER !== '0' // S5: RECOVERY_LADDER=0 restores S4's recoveryLadder DOWNGRADE + the one-shot respawn grave gating byte-for-byte
@@ -1135,15 +1137,22 @@ if (SCHED_ON) {
         await runJob('maintenancePass', async () => {
           if (elig.preempt) {
             commands.preemptForSurvival() // sets ONLY buildAbort; persistedResume intact (I-3)
+            // #40 F2: if this windfall-deposit window is abandoned WHILE a pack/bank food need is
+            // pending, retry in OPP_CRISIS_RETRY_MS (60s) instead of 300s - the only banking window
+            // in the incident died to a 1s threat abort + a 300s cooldown, so the larder was never
+            // stocked and R2 had nothing to withdraw. FOOD_SURVIVAL=0 -> foodNeedPending is false
+            // -> the 300s cooldown byte-for-byte.
+            const foodNeedPending = process.env.FOOD_SURVIVAL !== '0' && (() => { try { return maintain.needs(s).some(n => n.key === 'packFood' || n.key === 'bankFood') } catch { return false } })()
+            const abandonCd = foodNeedPending ? Number(process.env.OPP_CRISIS_RETRY_MS || 60000) : 300000
             // bounded unwind wait: the aborted build settles at its next isStopped poll
             // (a mid-smelt unwind took ~33s live - commands.js:3281); bail on crisis.
             const unwindBy = Date.now() + Number(process.env.OPP_UNWIND_MS || 90000)
             while ((commands.isBusy && commands.isBusy()) && Date.now() < unwindBy) {
-              let crisis = null; try { crisis = provision.survivalNeed(bot, { foodThreshold: Number(process.env.SCHED_CRISIS_FOOD || 6) }) } catch {}
-              if (crisis) { schedMaintainCooldownUntil = Date.now() + 300000; return 'window abandoned - crisis (' + crisis.need + ') during unwind' }
+              let crisis = null; try { crisis = provision.survivalNeed(bot, { foodThreshold: foodSec.busyPreemptFood() }) } catch {}
+              if (crisis) { schedMaintainCooldownUntil = Date.now() + abandonCd; return 'window abandoned - crisis (' + crisis.need + ') during unwind' + (foodNeedPending ? ' (food need pending - 60s retry)' : '') }
               await new Promise(r => setTimeout(r, 500))
             }
-            if (commands.isBusy && commands.isBusy()) { schedMaintainCooldownUntil = Date.now() + 300000; return 'window abandoned - build did not unwind in time' }
+            if (commands.isBusy && commands.isBusy()) { schedMaintainCooldownUntil = Date.now() + abandonCd; return 'window abandoned - build did not unwind in time' + (foodNeedPending ? ' (food need pending - 60s retry)' : '') }
           }
           const windowEnd = Date.now() + Number(process.env.OPP_WINDOW_MS || 300000)
           const night = !!(provision.isNight && provision.isNight(bot))
@@ -1204,7 +1213,7 @@ if (SCHED_ON) {
       // through; it forages at dawn. A real food<=6 / hp<=6 crisis has need food/heal (not shelter) and
       // still dispatches below. (NIGHT_FORAGE_GUARD=0 rolls back.)
       if (name === 'secureFood' && process.env.NIGHT_FORAGE_GUARD !== '0') {
-        let sn = null; try { sn = provision.survivalNeed(bot, { foodThreshold: Number(process.env.SCHED_CRISIS_FOOD || 6) }) } catch {}
+        let sn = null; try { sn = provision.survivalNeed(bot, { foodThreshold: foodSec.busyPreemptFood() }) } catch {} // #40 F3.2: FOOD_SURVIVAL raises the food preempt 6 -> 10
         if (sn && sn.need === 'shelter') {
           if (schedDeferNoted !== 'night-forage') { schedDeferNoted = 'night-forage'; note('(sched) secureFood held - night + under-armored: sheltering, not foraging out into the dark (forage at dawn)') }
           return
@@ -1216,7 +1225,7 @@ if (SCHED_ON) {
         // busy -> dispatch ONLY when crisis-grade: a near grave IS the survival move (recover), OR a
         // crisis-grade vitals need (food<=SCHED_CRISIS_FOOD, or hp/threat/etc via survivalNeed).
         let crisis = name === 'recover' || (name === 'recoverFromDegraded' && (s.deathsRecent || 0) >= 2) // a death-spiral signature (>=2 recent deaths) may preempt the build (REDESIGN §5 entry)
-        if (!crisis) { try { crisis = !!provision.survivalNeed(bot, { foodThreshold: Number(process.env.SCHED_CRISIS_FOOD || 6) }) } catch { crisis = false } }
+        if (!crisis) { try { crisis = !!provision.survivalNeed(bot, { foodThreshold: foodSec.busyPreemptFood() }) } catch { crisis = false } } // #40 F3.2: busy job preempted for secureFood at food<=10 (FOOD_SURVIVAL), not <=6
         if (!crisis) { if (schedHeldLog !== name) { schedHeldLog = name; note('(sched) ' + name + ' held - body busy, not crisis-grade (single-goal)') } return }
         schedHeldLog = ''
         if (commands.preemptForSurvival) commands.preemptForSurvival() // sets ONLY buildAbort; the build resumes via persistedResume

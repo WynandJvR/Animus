@@ -99,6 +99,56 @@ function shouldTrekHomeForFood ({ distHome, bankFoodPts, wheatCount, hasFarm } =
   return usable                                                     // far + home has something worth the trek
 }
 
+// ==== #40 (starve-despite-food) PURE TRIGGER PREDICATES ==================================
+// All FOOD_SURVIVAL-gated (default ON); FOOD_SURVIVAL=0 restores the legacy numbers byte-for-
+// byte. Each also honours its own env override. Kept here (pure, offline-tested) so the
+// survival thresholds are locked against silent regression; the live wiring lives in
+// provision.js (in-loop secureFood + ladder hp-abort) and index.js (busy-preempt).
+
+// F3.1 - the in-loop secureFood trigger for a BUSY, packless bot. A gather loop must break off
+// to secure food at this bar - FOOD_SURVIVAL raises it from the legacy crisis line (6) to 12
+// (~2 min of margin at travel burn) so a stalled scheduler tick can't starve it. `hasCarriedFood`
+// = the pack still holds edible food (auto-eat covers that case). PURE; env FOOD_SF_TRIGGER wins.
+function inLoopFoodTrigger (food, hasCarriedFood, opts = {}) {
+  const on = opts.foodSurvival != null ? opts.foodSurvival : (process.env.FOOD_SURVIVAL !== '0')
+  const trig = opts.trigger != null ? opts.trigger : Number(process.env.FOOD_SF_TRIGGER || (on ? 12 : 6))
+  return food != null && food <= trig && !hasCarriedFood
+}
+
+// F3.2 - the busy-job food-preempt bar (index.js SCHED_CRISIS_FOOD). A busy job is preempted for
+// secureFood at food<=this: FOOD_SURVIVAL raises it 6 -> 10 (~2 min vs ~90s of margin). The
+// LADDER entry (scheduler.isDegraded) stays at 6 - only the plain secureFood preempt moves early.
+function busyPreemptFood (opts = {}) {
+  const on = opts.foodSurvival != null ? opts.foodSurvival : (process.env.FOOD_SURVIVAL !== '0')
+  return Number(process.env.SCHED_CRISIS_FOOD || (on ? 10 : 6))
+}
+
+// F4.1 - an OUTBOUND recovery rung (trek/tend/secureFood) may KEEP RUNNING only while hp is above
+// the abort line; a bot burned to 1 hp mid-trek/tend/seed-gather bails to the next rung (-> the
+// bounded hold) instead of farming grass at 1 hp for minutes. Default abort hp 6 = isDegraded's
+// hp gate. FOOD_SURVIVAL=0 -> always admissible (today's behavior: only isStopped stops a rung).
+function outboundRungAdmissible (hp, opts = {}) {
+  const on = opts.foodSurvival != null ? opts.foodSurvival : (process.env.FOOD_SURVIVAL !== '0')
+  if (!on) return true
+  const abortHp = opts.abortHp != null ? opts.abortHp : Number(process.env.LADDER_HP_ABORT || 6)
+  return !(hp != null && hp <= abortHp)
+}
+
+// F4.2 - a starving bot (food<=this) whose home stores came up dry must NOT begin a fresh OUTWARD
+// farm/fish/scout excursion - it holds indoors (starvation stops at half-hearts; the excursion is
+// what gets it killed). Default 4. FOOD_SURVIVAL=0 -> never skips (today's full outward chain).
+function famineHoldFood (food, opts = {}) {
+  const on = opts.foodSurvival != null ? opts.foodSurvival : (process.env.FOOD_SURVIVAL !== '0')
+  if (!on) return false
+  const floor = opts.floor != null ? opts.floor : Number(process.env.FOOD_FAMINE_HOLD || 4)
+  return food != null && food <= floor
+}
+
+// F5 - the auto-eat reflex (index.js) eats carried, non-risky food whenever the food bar is
+// at/below this. Exported to LOCK the number offline (F5 is verified/no-change - the reflex keeps
+// its own inline `bot.food > 17` guard; this is a regression sentinel, not new wiring).
+const AUTO_EAT_AT = 17
+
 // How many bread can we bake from N wheat (3 wheat -> 1 bread). PURE arithmetic, offline-tested.
 function breadFromWheat (wheatCount) { return Math.max(0, Math.floor((wheatCount || 0) / 3)) }
 
@@ -113,4 +163,4 @@ function wheatWithdrawForBake ({ packWheat, bankWheat, bankFoodPts, bankTargetPt
   return Math.max(0, Math.min(bankWheat || 0, need, cap))
 }
 
-module.exports = { DEFAULT_BUFFER, BAD_FOOD, RAW_COOKABLE_FOOD, foodTier, hasFoodSupply, needsFoodSupply, shouldSweepForFood, foodSupplyAction, shouldTrekHomeForFood, breadFromWheat, wheatWithdrawForBake }
+module.exports = { DEFAULT_BUFFER, BAD_FOOD, RAW_COOKABLE_FOOD, foodTier, hasFoodSupply, needsFoodSupply, shouldSweepForFood, foodSupplyAction, shouldTrekHomeForFood, breadFromWheat, wheatWithdrawForBake, inLoopFoodTrigger, busyPreemptFood, outboundRungAdmissible, famineHoldFood, AUTO_EAT_AT }
