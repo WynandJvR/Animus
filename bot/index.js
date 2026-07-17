@@ -662,8 +662,9 @@ bot.on('spawn', () => {
       // SAFE + FED and the grave is reasonably reachable (shouldChaseGrave). A naked/starving
       // bot, or a grave far across hostile ground, DEFERS - never trek to it while it would
       // starve/die. Still capped (autoRecoverTries) so recovery itself can't death-loop.
-      // RECOVER_ON_RESPAWN=0 disables. AxGraves persist on the live server, so a deferred grave
-      // is still there to fetch once the bot is safe + geared.
+      // RECOVER_ON_RESPAWN=0 disables. NOTE (task #18): AxGraves graves DESPAWN on the server's
+      // timer - a deferred grave is NOT guaranteed to keep; the ~15s tick re-evaluates every pass and
+      // recover now prioritizes urgent graves + shortens the post-partial cooldown to race the timer.
       if (LADDER_ON) {
         // S5: route the grave/degraded step through the recovery ladder, so a deferral is
         // re-evaluated by the ~15s tick (pickJob graveSweep/recoveryLadder) instead of only on the
@@ -1232,14 +1233,24 @@ if (SCHED_ON) {
         if (Date.now() < schedGraveCooldownUntil) return
         schedJob = { name, startedAt: Date.now() }
         commands.touchProgress('dispatch:recover') // S7 (d): zero-idle at t0
+        // task #18 M4: verdict-classed back-off (scheduler.graveCooldownMs) instead of a blanket 300s -
+        // a stalled PARTIAL comes straight back inside the despawn window. GRAVE_URGENT=0 -> the single
+        // 300s branch, byte-equivalent. remainMs is the nearest grave's despawn budget (from the snap).
+        const graveUrgentOn = process.env.GRAVE_URGENT !== '0'
+        const graveRemainMs = graveUrgentOn && nearest ? nearest.remainMs : undefined
         try {
           const r = await commands.handle(bot, 'recover', { source: 'scheduler' })
-          // success marks the grave retrieved (it then leaves the snapshot naturally); anything else
-          // keeps the grave, so back off for SCHED_GRAVE_COOLDOWN_MS to avoid hammering it.
-          const retrieved = /got my stuff back|nothing left where i died/i.test(String(r || ''))
-          if (!retrieved) schedGraveCooldownUntil = Date.now() + Number(process.env.SCHED_GRAVE_COOLDOWN_MS || 300000)
-          note('(sched) recover -> ' + String(r || '').split('\n')[0])
-        } catch (e) { schedGraveCooldownUntil = Date.now() + Number(process.env.SCHED_GRAVE_COOLDOWN_MS || 300000); note('(sched) recover failed: ' + e.message) }
+          // success (retrieved/gone) marks the grave, it then leaves the snapshot; anything else keeps
+          // the grave with a result-classed cooldown (partial/capacity 30s, won't-open 120s, travel/
+          // throw scaled by the despawn budget) so we neither hammer it nor lose the despawn race.
+          const cd = scheduler.graveCooldownMs(r, { remainMs: graveRemainMs, flagOn: graveUrgentOn })
+          if (cd > 0) schedGraveCooldownUntil = Date.now() + cd
+          note('(sched) recover -> ' + String(r || '').split('\n')[0] + (graveUrgentOn && cd > 0 ? ' (cooldown ' + Math.round(cd / 1000) + 's)' : ''))
+        } catch (e) {
+          const cd = scheduler.graveCooldownMs('', { remainMs: graveRemainMs, flagOn: graveUrgentOn })
+          if (cd > 0) schedGraveCooldownUntil = Date.now() + cd
+          note('(sched) recover failed: ' + e.message)
+        }
         finally { schedJob = null }
       }
     } catch (e) { try { note('(sched) tick error: ' + e.message) } catch {} }

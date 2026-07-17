@@ -341,5 +341,80 @@ const V = C.graveLootVerdict
   eq(R1.test(strUnopened), false, 'R1: unopened string does NOT match')
 }
 
+// ============================================================================================
+// TASK #18: commands.graveUrgency() - the PURE despawn-budget clock, and commands.graveCompare()
+// - the urgency-then-value ordering. GRAVE_DESPAWN_S is the operator-set AxGraves despawn window
+// (seconds); the ledger `at` is death time = the timer's t0. GRAVE_URGENT=0 or the window unset ->
+// every grave reports 'safe' and nothing downstream changes (fail-safe).
+// ============================================================================================
+const U = C.graveUrgency
+{
+  const savedU = process.env.GRAVE_URGENT
+  const savedD = process.env.GRAVE_DESPAWN_S
+
+  // ---- no clock known -> everything 'safe' (default: GRAVE_DESPAWN_S unset) ----------------
+  delete process.env.GRAVE_URGENT
+  delete process.env.GRAVE_DESPAWN_S
+  eq(U({ at: NOW - 999999999 }, NOW).tier, 'safe', 'GRAVE_DESPAWN_S unset -> even an ancient grave is safe (no clock)')
+  eq(U({ at: NOW }, NOW).remainMs, Infinity, 'no clock -> remainMs Infinity')
+  eq(U({ at: 0 }, NOW).tier, 'safe', 'no death time (at 0) -> safe')
+
+  // ---- window 1000s: tier boundaries by remaining % ---------------------------------------
+  process.env.GRAVE_DESPAWN_S = '1000' // 1,000,000 ms window; 60% remain @ age 400s, 25% @ age 750s
+  eq(U({ at: NOW - 300 * 1000 }, NOW).tier, 'safe', 'age 300s of 1000s (remain 70%) -> safe')
+  eq(U({ at: NOW - 500 * 1000 }, NOW).tier, 'urgent', 'age 500s (remain 50%, >120s) -> urgent')
+  eq(U({ at: NOW - 800 * 1000 }, NOW).tier, 'critical', 'age 800s (remain 20% <= 25%) -> critical')
+  eq(U({ at: NOW - 1600 * 1000 }, NOW).tier, 'expired', 'age 1600s (>= 1.5x window 1500s) -> expired')
+  eq(Math.round(U({ at: NOW - 500 * 1000 }, NOW).remainMs), 500000, 'age 500s -> remainMs 500000')
+
+  // ---- the < 120s critical floor (window 300s: 25% = 75s, so a 100s remainder is NOT <=25% but IS <120s)
+  process.env.GRAVE_DESPAWN_S = '300'
+  eq(U({ at: NOW - 200 * 1000 }, NOW).tier, 'critical', 'window 300s, age 200s (remain 100s: >25% but <120s) -> critical (the <120s floor)')
+  eq(U({ at: NOW - 130 * 1000 }, NOW).tier, 'urgent', 'window 300s, age 130s (remain 170s, 56%<=60%, >120s) -> urgent')
+
+  // ---- GRAVE_URGENT=0 -> always safe even with a window set (rollback) ---------------------
+  process.env.GRAVE_URGENT = '0'
+  eq(U({ at: NOW - 800 * 1000 }, NOW).tier, 'safe', 'GRAVE_URGENT=0 -> tier safe even at age 800s (rollback)')
+  eq(U({ at: NOW - 1600 * 1000 }, NOW).tier, 'safe', 'GRAVE_URGENT=0 -> never expired (rollback)')
+  delete process.env.GRAVE_URGENT
+
+  // ---- graveCompare: an urgent poorer grave beats a safe RICHER one (only when GRAVE_URGENT on)
+  process.env.GRAVE_DESPAWN_S = '1000'
+  const safeRich = { at: NOW, items: { notable: ['iron_pickaxe', 'iron_helmet', 'iron_sword'], count: 5 } } // value 35, safe (age 0)
+  const urgentPoor = { at: NOW - 500 * 1000, items: { notable: ['iron_helmet'], count: 1 } }               // value 11, urgent (age 500s)
+  eq(C.graveCompare(urgentPoor, safeRich, NOW) < 0, true, 'GRAVE_URGENT on: urgent poorer grave sorts BEFORE the safe richer one')
+  eq(C.graveCompare(safeRich, urgentPoor, NOW) > 0, true, 'GRAVE_URGENT on: safe richer grave sorts AFTER the urgent one (symmetric)')
+  process.env.GRAVE_URGENT = '0'
+  eq(C.graveCompare(urgentPoor, safeRich, NOW) > 0, true, 'GRAVE_URGENT=0: falls back to value-first (richer safe grave wins)')
+  delete process.env.GRAVE_URGENT
+
+  // ---- gravesSnapshot: expired excluded, remainMs+tier carried; unset window -> all safe ----
+  process.env.GRAVE_DESPAWN_S = '1000'
+  {
+    const urgentG = { x: 418, y: 65, z: 88, at: NOW - 500 * 1000, items: { notable: ['iron_helmet'], count: 1 } }
+    const r = C.gravesSnapshot({ pos: home, home, now: NOW, ledger: [urgentG] })
+    eq(r.graves.length, 1, 'urgent grave LISTED with the clock on')
+    eq(r.graves[0].tier, 'urgent', 'snapshot carries tier=urgent')
+    eq(Math.round(r.graves[0].remainMs), 500000, 'snapshot carries remainMs')
+  }
+  {
+    const expiredG = { x: 418, y: 65, z: 88, at: NOW - 1600 * 1000, items: { notable: ['iron_helmet'], count: 1 } }
+    const r = C.gravesSnapshot({ pos: home, home, now: NOW, ledger: [expiredG] })
+    eq(r.graves.length, 0, 'EXPIRED grave excluded from gravesSnapshot (stop chasing a ghost)')
+  }
+  delete process.env.GRAVE_DESPAWN_S
+  {
+    // clock unset -> the SAME old grave is safe and still listed (fail-safe: never silently dropped)
+    const oldG = { x: 418, y: 65, z: 88, at: NOW - 1600 * 1000, items: { notable: ['iron_helmet'], count: 1 } }
+    const r = C.gravesSnapshot({ pos: home, home, now: NOW, ledger: [oldG] })
+    eq(r.graves.length, 1, 'clock unset -> an old grave is still LISTED (safe tier, no expiry)')
+    eq(r.graves[0].tier, 'safe', 'clock unset -> tier safe')
+    eq(r.graves[0].remainMs, Infinity, 'clock unset -> remainMs Infinity')
+  }
+
+  if (savedU != null) process.env.GRAVE_URGENT = savedU; else delete process.env.GRAVE_URGENT
+  if (savedD != null) process.env.GRAVE_DESPAWN_S = savedD; else delete process.env.GRAVE_DESPAWN_S
+}
+
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

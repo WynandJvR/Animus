@@ -107,12 +107,25 @@ function fleeActive (s) {
          !!s.inLava || !!s.onFire || !!s.drowning ||
          (s.creeperDist != null && s.creeperDist <= 12)
 }
-// Is a worthwhile, non-dangerous grave within `band` blocks? (dist is already min(bot,home).)
-function nearestReachGrave (s, band) {
+// task #18: an about-to-despawn grave (tier from commands.graveUrgency, carried on the snapshot) is
+// urgency-graded. Reflects a widened reach band for urgent/critical graves.
+function graveUrgent (g) { return !!g && (g.tier === 'urgent' || g.tier === 'critical') }
+// PURE effective reach band for a grave (M2, task #18): safe graves keep `band`; urgent/critical
+// graves widen to max(band, urgentBand). GRAVE_URGENT=0, no urgentBand, or a safe/untagged grave
+// -> `band` unchanged (byte-equivalent to today). Callers that must NOT widen (admissible's near
+// override) simply omit urgentBand.
+function graveReachBand (g, band, urgentBand) {
+  if (process.env.GRAVE_URGENT === '0' || urgentBand == null || !graveUrgent(g)) return band
+  return Math.max(band, urgentBand)
+}
+// Is a worthwhile, non-dangerous grave within reach? (dist is already min(bot,home).) `band` is the
+// SAFE-tier band; pass `urgentBand` to let urgent/critical graves reach further (M2). Omit it to
+// keep every grave on `band` (admissibility != dispatch priority).
+function nearestReachGrave (s, band, urgentBand) {
   let best = null
   for (const g of gravesOf(s)) {
     if (!g || g.dangerous || !(g.value > 0)) continue
-    if (g.dist == null || g.dist > band) continue
+    if (g.dist == null || g.dist > graveReachBand(g, band, urgentBand)) continue
     if (!best || g.dist < best.dist) best = g
   }
   return best
@@ -191,11 +204,14 @@ function pickJob (snapshot) {
   }
 
   // 2. NEARBY GRAVE as first-class survival (I3) - even at food0/hp1 (the fed-but-naked case
-  //    where step 1's need was null). Below immediate-danger, above everything else.
+  //    where step 1's need was null). Below immediate-danger, above everything else. task #18: an
+  //    URGENT/critical (about-to-despawn) grave widens the band to GRAVE_URGENT_DIST (closing the
+  //    old 33-96b dead zone exactly when the despawn timer matters); a safe grave keeps GRAVE_NEAR.
   const GRAVE_NEAR = Number(process.env.GRAVE_NEAR || 16)
+  const GRAVE_URGENT_DIST = Number(process.env.GRAVE_URGENT_DIST || 96)
   if (!fleeActive(s)) {
-    const g = nearestReachGrave(s, GRAVE_NEAR)
-    if (g) return { job: 'graveSweep', cls: 'survival', reason: `grave ${Math.round(g.dist)}b - free gear, zero trek`, preempt: preemptFor('survival') }
+    const g = nearestReachGrave(s, GRAVE_NEAR, GRAVE_URGENT_DIST)
+    if (g) return { job: 'graveSweep', cls: 'survival', reason: `grave ${Math.round(g.dist)}b${graveUrgent(g) ? ' (' + g.tier + ' - despawning)' : ''} - free gear`, preempt: preemptFor('survival') }
   }
 
   // 3. DEGRADED SIGNATURE -> recovery ladder (need was null-but-degraded, e.g. naked with a
@@ -263,8 +279,9 @@ function recoveryPlan (snapshot) {
     plan.push({ rung: 'R0', action: 'eatPack+wearFromPack' })
   }
 
-  // R1 nearest non-dangerous worthwhile grave within the ladder's wider band (32).
-  const g = nearestReachGrave(s, GRAVE_NEAR_LADDER)
+  // R1 nearest non-dangerous worthwhile grave within the ladder's wider band (32), widened again to
+  // GRAVE_URGENT_DIST for an about-to-despawn grave (task #18 M2 - same as pickJob step 2).
+  const g = nearestReachGrave(s, GRAVE_NEAR_LADDER, Number(process.env.GRAVE_URGENT_DIST || 96))
   if (g) plan.push({ rung: 'R1', action: 'recoverGrave', graveDist: g.dist })
 
   // R2 shelter + home food cache.
@@ -394,9 +411,33 @@ function wdPhase (prev, verdict, jobKey) {
   return { phase, jobKey, act: 'none' }
 }
 
+// ---- graveCooldownMs (task #18 M4) ------------------------------------------------------
+// PURE verdict-classed re-dispatch back-off, derived from doRecover's RESULT STRING (the same
+// string-match contract the index recover dispatch uses for `retrieved`). Replaces the blanket
+// 300s-on-any-non-retrieval so a stalled PARTIAL comes straight back inside the despawn window
+// instead of losing the remaining items. flagOn=false (GRAVE_URGENT=0) -> today's single 300s
+// branch, byte-equivalent. remainMs = the grave's despawn budget (Infinity/unset -> the 300s
+// ceiling). Returns milliseconds; 0 = no cooldown (retrieved/gone - the grave leaves the snapshot).
+//   retrieved / gone                                  -> 0
+//   partial ("still has the rest") / capacity ("full")-> GRAVE_COOLDOWN_HOT_MS (floor 15s)
+//   won't open (unopened / loose-only)                -> 120s
+//   travel failure ("couldn't get back") / throw ('') -> min(300s, max(60s, remainMs/2))
+function graveCooldownMs (result, { remainMs, flagOn, hotMs, blanketMs } = {}) {
+  const r = String(result || '')
+  const blanket = blanketMs != null ? blanketMs : Number(process.env.SCHED_GRAVE_COOLDOWN_MS || 300000)
+  if (/got my stuff back|nothing left where i died/i.test(r)) return 0
+  if (!flagOn) return blanket // GRAVE_URGENT=0: today's single 300s branch on any non-retrieval
+  const HOT = Math.max(15000, hotMs != null ? hotMs : Number(process.env.GRAVE_COOLDOWN_HOT_MS || 30000))
+  if (/the grave still has the rest|pack's full/i.test(r)) return HOT
+  if (/won't open/i.test(r)) return 120000
+  const rem = (remainMs != null && isFinite(remainMs)) ? remainMs : Infinity
+  return Math.min(blanket, Math.max(60000, isFinite(rem) ? rem / 2 : blanket))
+}
+
 module.exports = {
   pickJob,
   oppMaintain,
+  graveCooldownMs,
   recoveryPlan,
   rungFeasible,
   ladderDone,

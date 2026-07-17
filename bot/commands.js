@@ -136,10 +136,49 @@ function graveWorthIt (d) {
   const buildWorth = process.env.GRAVE_BUILD_WORTH !== '0' && (it.build || 0) >= Number(process.env.GRAVE_BUILD_MIN || 6)
   return realGear || (it.count || 0) >= 10 || buildWorth
 }
-// The grave worth going back for: unretrieved, reachable (not lava), richest first.
+// GRAVE DESPAWN CLOCK (task #18, PURE, offline-testable). AxGraves graves on the live server sit on
+// a plugin despawn timer; GRAVE_DESPAWN_S is the operator-set despawn-time (seconds) and the ledger
+// `at` is the death time = that timer's t0. Classify how much budget is left so at-risk graves are
+// prioritized before they're lost. GRAVE_URGENT=0, or GRAVE_DESPAWN_S unset/0 -> no clock known ->
+// everything reports 'safe' and NOTHING downstream changes (fail-safe: a mis-set clock only ever
+// costs one walk to an already-empty site, never a silent write-off).
+//   -> { ageMs, remainMs, tier: 'safe' | 'urgent' | 'critical' | 'expired' }
+//      urgent: remain <= 60% window   critical: remain <= 25% window OR < 120s   expired: age >= 1.5x window
+function graveUrgency (d, now) {
+  const at = (d && d.at) || 0
+  const t = now != null ? now : Date.now()
+  const windowS = Number(process.env.GRAVE_DESPAWN_S || 0)
+  const ageMs = at ? Math.max(0, t - at) : 0
+  if (process.env.GRAVE_URGENT === '0' || !(windowS > 0) || !at) return { ageMs, remainMs: Infinity, tier: 'safe' }
+  const windowMs = windowS * 1000
+  const remainMs = windowMs - ageMs
+  let tier
+  if (ageMs >= windowMs * 1.5) tier = 'expired'
+  else if (remainMs <= windowMs * 0.25 || remainMs < 120000) tier = 'critical'
+  else if (remainMs <= windowMs * 0.6) tier = 'urgent'
+  else tier = 'safe'
+  return { ageMs, remainMs, tier }
+}
+function graveUrgencyRank (tier) { return tier === 'critical' ? 2 : (tier === 'urgent' ? 1 : 0) }
+// PURE ordering for bestGrave (M1 urgency priority): among worthwhile graves an urgent/critical one
+// outranks a richer SAFE one ONLY when GRAVE_URGENT is on (a rich safe grave can wait; a poor dying
+// one can't). Falls back to today's value-first, then newest. <0 => a sorts first. GRAVE_URGENT=0
+// (or no despawn clock) -> byte-equivalent to today's sort.
+function graveCompare (a, b, now) {
+  if (process.env.GRAVE_URGENT !== '0') {
+    const ru = graveUrgencyRank(graveUrgency(b, now).tier) - graveUrgencyRank(graveUrgency(a, now).tier)
+    if (ru) return ru
+  }
+  return (graveValue(b) - graveValue(a)) || ((b.at || 0) - (a.at || 0))
+}
+// The grave worth going back for: unretrieved, reachable (not lava), urgency-then-richest first.
+// (task #18: an about-to-despawn grave outranks a richer one that can still wait; expired graves -
+// past 1.5x the despawn window - drop off the candidate list, but are NEVER auto-marked retrieved:
+// only a physical visit that confirms absence marks 'gone', or the 24h ledger expiry reaps them.)
 function bestGrave () {
-  const c = deathLedger.filter(d => !d.retrieved && !d.dangerous && graveWorthIt(d) && Date.now() - (d.at || 0) < 24 * 3600 * 1000)
-  c.sort((a, b) => (graveValue(b) - graveValue(a)) || (b.at - a.at))
+  const now = Date.now()
+  const c = deathLedger.filter(d => !d.retrieved && !d.dangerous && graveWorthIt(d) && now - (d.at || 0) < 24 * 3600 * 1000 && graveUrgency(d, now).tier !== 'expired')
+  c.sort((a, b) => graveCompare(a, b, now))
   return c[0] || null
 }
 function unretrievedGraves () { return deathLedger.filter(d => !d.retrieved && !d.dangerous && graveWorthIt(d)).length } // only graves actually worth a trip
@@ -235,12 +274,14 @@ function gravesSnapshot ({ pos, home, now, ledger } = {}) {
   const graves = []
   for (const d of led) {
     if (!d || d.retrieved || !graveWorthIt(d) || t - (d.at || 0) >= 24 * 3600 * 1000) continue
+    const u = graveUrgency(d, t) // task #18 despawn budget (safe when GRAVE_URGENT off / clock unset)
+    if (u.tier === 'expired') continue // past 1.5x the despawn window - stop chasing a ghost (never auto-marked retrieved)
     const dBot = pos ? Math.hypot(d.x - pos.x, d.z - pos.z) : Infinity
     const dHome = home ? Math.hypot(d.x - home.x, d.z - home.z) : Infinity
     const near = Math.min(dBot, dHome) // exact min(bot, home) of shouldChaseGrave; scheduler skips a null-dist grave
     const notable = (d.items && d.items.notable) || []
     const hasGear = notable.some(n => /^(iron|diamond|netherite|golden)_|_(helmet|chestplate|leggings|boots)$/.test(n)) // verbatim realGear regex from graveWorthIt
-    graves.push({ x: d.x, y: d.y, z: d.z, at: d.at || 0, dist: isFinite(near) ? near : null, value: graveValue(d), dangerous: !!d.dangerous, hasGear })
+    graves.push({ x: d.x, y: d.y, z: d.z, at: d.at || 0, dist: isFinite(near) ? near : null, value: graveValue(d), dangerous: !!d.dangerous, hasGear, remainMs: u.remainMs, tier: u.tier })
   }
   // deathsRecent: deaths in the last 20 min, REGARDLESS of retrieved (a reclaimed grave was still a
   // death - the ratchet signal). CAVEAT: the process-restart load above drops retrieved entries, so
@@ -1584,11 +1625,18 @@ async function handle (bot, line, opts = {}) {
       // Recovery's own travels ignore stop; it's short and the operator can wait it out.
       // NIGHT GATE: a naked corpse-run in the dark is how death carousels start (the brain
       // fires `recover` the moment it sees the grave, respawn is at night, armor is IN the
-      // grave). Sleep/shelter first - the grave keeps (AxGraves persists; vanilla despawn
-      // already lost by the time a night passes anyway).
-      if (provision.isNight(bot) && provision.underArmored(bot)) {
+      // grave). Sleep/shelter first - BUT (task #18) AxGraves graves despawn on a timer, they do
+      // NOT keep: a near, about-to-despawn grave (urgent/critical tier within GRAVE_NEAR_LADDER)
+      // is grabbed FIRST - arm's reach IS the survival move (same S1 near-override argument) - and
+      // the rest happens after. Far + night + under-armored still rests (the night trek IS the loop).
+      const meNight = bot.entity && bot.entity.position
+      const graveDistNight = meNight ? Math.hypot(d.x - meNight.x, d.z - meNight.z) : Infinity
+      const urgentNear = process.env.GRAVE_URGENT !== '0' && graveUrgency(d).tier !== 'safe' && graveDistNight <= Number(process.env.GRAVE_NEAR_LADDER || 32)
+      if (provision.isNight(bot) && provision.underArmored(bot) && !urgentNear) {
         try { bot.chat('night and no gear - resting before i go get my stuff') } catch {}
         try { await provision.restUntilSafe(bot, { isStopped: () => false }) } catch {}
+      } else if (urgentNear && provision.isNight(bot) && provision.underArmored(bot)) {
+        try { bot.chat("grave's about to despawn and it's right here - grabbing it before it's gone, then i'll rest") } catch {}
       }
       const me = bot.entity.position
       if (Math.hypot(d.x - me.x, d.z - me.z) > 80) {
@@ -1610,6 +1658,19 @@ async function handle (bot, line, opts = {}) {
       //    A full-inventory death scatters 30+ stacks down slopes/water - sweep wide and
       //    keep sweeping until the area is clean, not the old 6-stacks-and-quit.
       await collectNearbyDrops(bot, { radius: 12, max: 40, deadlineMs: 45000 })
+      // TASK #18 REVISIT LOOP (GRAVE_URGENT, default on): the #1 live partial cause is the AxGraves
+      // GUI auto-close race / zero-progress break ending a visit at 2 of ~140 items while the grave is
+      // STILL PRESENT under the bot's feet - the old "going back for it" then delegated to a cooldown
+      // that lost the despawn race. Wrap the scan->interact->loot->verdict block below in a bounded
+      // in-place revisit: on an honest partial with the grave still present and pack room, re-open it
+      // NOW. Triple-bounded: <= GRAVE_REVISIT_TRIES re-opens, a GRAVE_RECOVER_MS whole-visit wall
+      // clock, PLUS the inner fix-#12 pass/time/zero-progress bounds. GRAVE_URGENT=0 -> 0 revisits =
+      // ONE pass = byte-equivalent to today (the loop runs exactly once and returns as before).
+      const GRAVE_URGENT_ON = process.env.GRAVE_URGENT !== '0'
+      const GRAVE_REVISIT_TRIES = GRAVE_URGENT_ON ? Number(process.env.GRAVE_REVISIT_TRIES || 2) : 0
+      const GRAVE_RECOVER_MS = Number(process.env.GRAVE_RECOVER_MS || 90000)
+      const recoverStart = Date.now()
+      for (let visit = 0; visit <= GRAVE_REVISIT_TRIES; visit++) { // body below is one visit; `before` (cumulative gain) stays captured above
       // 2) the GRAVE: AxGraves graves are ENTITIES (item/text displays + an interaction
       //    entity), NOT blocks - the old activateBlock at the death coords never opened one
       //    (verified live: an uncollected grave with tools stood for hours). Right-click
@@ -1626,7 +1687,8 @@ async function handle (bot, line, opts = {}) {
         Math.abs(e.position.y - d.y) <= 3 && Math.hypot(e.position.x - d.x, e.position.z - d.z) <= 4 &&
         /armor_stand|item_display|block_display|text_display|interaction|item_frame|glow_item_frame/.test(e.name || ''))
       let cands = graveScan()
-      for (let w = 0; w < 10 && !cands.length; w++) { await new Promise(r => setTimeout(r, 500)); cands = graveScan() }
+      if (visit === 0) { for (let w = 0; w < 10 && !cands.length; w++) { await new Promise(r => setTimeout(r, 500)); cands = graveScan() } }
+      else { await new Promise(r => setTimeout(r, 500)); cands = graveScan() } // revisit: brief settle + single rescan (already standing at the grave)
       dbg('recover: ' + cands.length + ' grave-candidate entities near ' + d.x + ',' + d.y + ',' + d.z + (cands.length ? ' (' + cands.map(e => e.name).join(',') + ')' : ''))
       // fix #12 (GRAVE_LOOT_VERIFY, default on): a single unverified GUI sweep silently abandoned
       // raced shift-clicks (212 looted, 2 stragglers left, grave marked done forever). Sweep each
@@ -1753,6 +1815,19 @@ async function handle (bot, line, opts = {}) {
       const remainingCount = remaining.reduce((s, r) => s + (r.count || 0), 0)
       dbg('recover: gained ' + gained + ' items, notable recovered: ' + gotNotable + ' (grave still present: ' + stillSomething + ') (window emptied: ' + allEmptied + ', remaining: ' + remainingCount + ', passes: ' + lootPasses + ')')
       const verdict = graveLootVerdict({ sawWindow, emptied: allEmptied, remaining, exhausted: lootExhausted, freeSlots, gained, recorded, gotNotable, gravePresent: graveAfter.length > 0, looseNearby })
+      // TASK #18: an honest PARTIAL with the grave STILL PRESENT and pack room -> re-open it IN PLACE
+      // right now (bounded), instead of walking away and racing the despawn timer via a cooldown.
+      // loose-only/unopened get ONE re-try (an entity that ignored 3 interact modes twice won't open
+      // on the 4th); capacity is excluded by freeSlots>0; full/writeoff/gone are excluded by mark.
+      if (GRAVE_URGENT_ON && visit < GRAVE_REVISIT_TRIES && graveAfter.length > 0 && freeSlots > 0 && !verdict.mark &&
+          (Date.now() - recoverStart) < GRAVE_RECOVER_MS) {
+        const revisitable = verdict.kind === 'partial' || ((verdict.kind === 'loose-only' || verdict.kind === 'unopened') && visit === 0)
+        if (revisitable) {
+          dbg('recover: ' + verdict.kind + ' + grave still present (' + graveAfter.length + ' ent) - re-opening in place (revisit ' + (visit + 1) + '/' + GRAVE_REVISIT_TRIES + ')')
+          await new Promise(r => setTimeout(r, 2000)) // settle before the re-interact
+          continue
+        }
+      }
       if (gained > 0 && gotNotable) {
         if (verdict.kind === 'capacity') return `got some of my stuff at ${d.x},${d.y},${d.z} (+${gained}) - pack's full, the grave still has the rest, going back for it` // NOT retrieved - come back after off-loading
         if (verdict.kind === 'writeoff-junk') {
@@ -1777,6 +1852,8 @@ async function handle (bot, line, opts = {}) {
         return `nothing left where i died at ${d.x},${d.y},${d.z} - it's gone`
       }
       return `my grave at ${d.x},${d.y},${d.z} is right here but it won't open - my stuff's stuck in it` // NOT marked retrieved - worth another try
+      } // end revisit loop (every path above returns or `continue`s; the last allowed visit always returns)
+      return `my grave at ${d.x},${d.y},${d.z} - couldn't fully clear it, i'll try again` // defensive: unreachable while GRAVE_REVISIT_TRIES >= 0 (NOT marked retrieved)
       } // end doRecover
     }
     case 'goto': {
@@ -2594,8 +2671,9 @@ function state (bot) {
     heldItem: bot.heldItem ? bot.heldItem.name : null,
     wearing: wornArmor(bot),      // armor actually equipped {head,torso,legs,feet}, so the brain never claims armor it isn't wearing
     // the best grave to go back for + how many stand unretrieved (so the brain can choose
-    // to `recover`). Graves persist on the live server (AxGraves), so a VALUABLE grave is
-    // surfaced for 6h; a worthless naked-death one only 15 min.
+    // to `recover`). NOTE (task #18): AxGraves graves DESPAWN on the server's timer - they do NOT
+    // keep; urgency (bestGrave/graveUrgency) prioritizes at-risk ones. A VALUABLE grave is surfaced
+    // for up to 6h here; a worthless naked-death one only 15 min (surfacing != the despawn budget).
     died: (() => {
       const g = bestGrave()
       if (!g || Date.now() - g.at > (graveValue(g) > 0 ? 6 * 3600000 : 900000)) return null
@@ -3531,8 +3609,9 @@ async function resumeBuild (bot) {
     // SPAWN FIRST when the anchor is known WRONG (survival tier - the world-spawn
     // carousel root): BEFORE any grave detour or site trek, get home and re-anchor the
     // bed. A deep corpse-run on a broken anchor is how one death became an all-night
-    // spiral (die -> respawn 430b out -> die trekking -> repeat); AxGraves drops don't
-    // despawn, so the grave can wait. Food/sword near the respawn first (bounded), then
+    // spiral (die -> respawn 430b out -> die trekking -> repeat). The grave is fetched AFTER the
+    // anchor (task #18: AxGraves DOES despawn on a timer, so recover's own urgency/cooldowns race
+    // it - but a broken anchor is the bigger loss). Food/sword near the respawn first (bounded), then
     // the trek home; failure is retried on the next respawn (the flag is persisted).
     if (spawnIsSuspect()) {
       dbg('resume: spawn anchor is SUSPECT - going home to re-anchor before anything else')
@@ -3545,10 +3624,10 @@ async function resumeBuild (bot) {
       } catch (e) { dbg('resume: spawn-recovery failed (' + e.message + ')') }
       if (buildAbort) return (result = { stopped: true, placed: 0, total: 0 })
     }
-    // GET THE STUFF BACK first when it's safe: on servers with a graves plugin (the
-    // live one runs AxGraves) drops don't despawn, so a recovery detour beats
-    // re-gathering the whole kit. Skipped for lava/void deaths and best-effort -
-    // a failed recovery must never block the resume itself.
+    // GET THE STUFF BACK first when it's safe: a recovery detour beats re-gathering the whole kit.
+    // NOTE (task #18): the live AxGraves plugin DESPAWNS graves on a timer - recover itself now
+    // prioritizes urgent graves and back-off is verdict-classed, so the sooner this fires the better.
+    // Skipped for lava/void deaths and best-effort - a failed recovery must never block the resume.
     const grave = bestGrave()
     if (grave) {
       // WRITE OFF worthless or suicidal graves instead of trekking: a naked-death grave
@@ -3625,4 +3704,4 @@ async function resumeBuild (bot) {
   }
 }
 
-module.exports = { handle, state, setupMovements, travelMovements, eatFood, placeTorchNearby, isBusy, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume, flagSpawnSuspect, worthwhileGrave, shouldChaseGrave, graveLootVerdict, gravesSnapshot, equipCarriedArmor, activityInfo, preemptForSurvival, setDebugSink, finishDisposition, resumeHoldRemaining, markResumePaused, touchProgress, progressInfo, markStalled, _resetProgress, recentOutcomes }
+module.exports = { handle, state, setupMovements, travelMovements, eatFood, placeTorchNearby, isBusy, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume, flagSpawnSuspect, worthwhileGrave, shouldChaseGrave, graveLootVerdict, gravesSnapshot, graveUrgency, graveCompare, equipCarriedArmor, activityInfo, preemptForSurvival, setDebugSink, finishDisposition, resumeHoldRemaining, markResumePaused, touchProgress, progressInfo, markStalled, _resetProgress, recentOutcomes }

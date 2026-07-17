@@ -451,5 +451,73 @@ t('(#15) fightNotFlee: hp is irrelevant (not an input)', () => {
   assert.strictEqual(S.fightNotFlee({ flagOn: true, beingHit: true, pinnedMs: 5000, threatDist: 3, isCreeper: false }), true)
 })
 
+// ---- (#18) urgency-widened grave band: pickJob + recoveryPlan --------------------------------
+// A safe grave keeps GRAVE_NEAR (16, pickJob) / GRAVE_NEAR_LADDER (32, R1); an urgent/critical
+// (about-to-despawn, tier carried on the snapshot) grave widens to GRAVE_URGENT_DIST (96), closing
+// the 33-96b dead zone exactly when the despawn timer matters. Step 1 (need) still outranks; a flee
+// still blocks; GRAVE_URGENT=0 rolls the band back.
+// These band tests assume the flag ON regardless of how the process was invoked (the OFF path has
+// its own explicit rollback case below), so force it on here and restore at the end of the block.
+const _savedGU18 = process.env.GRAVE_URGENT; delete process.env.GRAVE_URGENT
+t('(#18) pickJob: a 60b URGENT grave -> graveSweep (band widens to GRAVE_URGENT_DIST)', () => {
+  const s = snap({ graves: [grave(60, { value: 20, tier: 'urgent' })] })
+  const pj = S.pickJob(s)
+  assert.strictEqual(pj.job, 'graveSweep', 'urgent 60b grave is picked (dead zone closed)')
+  assert.strictEqual(pj.cls, 'survival')
+  assert(/despawning/.test(pj.reason), 'reason flags the despawn urgency: ' + pj.reason)
+})
+t('(#18) pickJob: a 60b SAFE grave is NOT picked (safe keeps GRAVE_NEAR 16)', () => {
+  const s = snap({ graves: [grave(60, { value: 20, tier: 'safe' })] })
+  assert.strictEqual(S.pickJob(s), null, 'a safe 60b grave stays in the dead zone (unchanged today)')
+})
+t('(#18) pickJob: a 3b safe grave is still picked (near band unchanged)', () => {
+  const s = snap({ graves: [grave(3, { value: 20, tier: 'safe' })] })
+  assert.strictEqual(S.pickJob(s).job, 'graveSweep', 'a near safe grave is unchanged')
+})
+t('(#18) pickJob: step-1 vitals need OUTRANKS an urgent grave (I1)', () => {
+  const s = snap({ food: 5, graves: [grave(60, { value: 20, tier: 'urgent' })] }) // food<=6 -> need + degraded
+  const pj = S.pickJob(s)
+  assert.strictEqual(pj.cls, 'survival')
+  assert.notStrictEqual(pj.job, 'graveSweep', 'a real food need is served before the grave (step 1 > step 2)')
+})
+t('(#18) pickJob: a flee/danger still blocks the urgent grave (fleeActive gate intact)', () => {
+  const s = snap({ inLava: true, graves: [grave(60, { value: 20, tier: 'critical' })] })
+  const pj = S.pickJob(s)
+  assert(pj == null || pj.job !== 'graveSweep', 'an active hazard is never traded for a grave, urgent or not')
+})
+t('(#18) pickJob: GRAVE_URGENT=0 -> the 60b urgent grave is NOT picked (rollback)', () => {
+  process.env.GRAVE_URGENT = '0'
+  try { assert.strictEqual(S.pickJob(snap({ graves: [grave(60, { value: 20, tier: 'urgent' })] })), null, 'flag off -> band is 16 again') }
+  finally { delete process.env.GRAVE_URGENT } // back to ON for the remaining band tests
+})
+t('(#18) recoveryPlan R1: an urgent 60b grave gets an R1 rung; a safe 60b grave does not', () => {
+  const urgent = S.recoveryPlan(snap({ hp: 5, food: 4, graves: [grave(60, { value: 20, tier: 'urgent' })], homeDist: 200 }))
+  assert(urgent.some(r => r.rung === 'R1' && r.action === 'recoverGrave'), 'urgent 60b grave -> R1 present (band widened past 32)')
+  const safe = S.recoveryPlan(snap({ hp: 5, food: 4, graves: [grave(60, { value: 20, tier: 'safe' })], homeDist: 200 }))
+  assert(!safe.some(r => r.rung === 'R1'), 'safe 60b grave -> no R1 (ladder band stays 32)')
+})
+
+// ---- (#18) graveCooldownMs: verdict-classed re-dispatch back-off ------------------------------
+t('(#18) graveCooldownMs: retrieved/gone -> 0; flag off -> blanket 300s on any non-retrieval', () => {
+  assert.strictEqual(S.graveCooldownMs('got my stuff back at 1,2,3 (+40 items)', { flagOn: true }), 0, 'retrieved -> 0')
+  assert.strictEqual(S.graveCooldownMs("nothing left where i died at 1,2,3 - it's gone", { flagOn: true }), 0, 'gone -> 0')
+  assert.strictEqual(S.graveCooldownMs('got some of my stuff (+2 of ~140) - the grave still has the rest', { flagOn: false }), 300000, 'flag off partial -> 300s blanket')
+  assert.strictEqual(S.graveCooldownMs('got my stuff back (+40 items)', { flagOn: false }), 0, 'flag off retrieved -> still 0')
+})
+t('(#18) graveCooldownMs: partial/capacity -> hot 30s (floor 15s); won\'t open -> 120s', () => {
+  assert.strictEqual(S.graveCooldownMs('got some of my stuff (+2 of ~140) - the grave still has the rest, going back for it', { flagOn: true }), 30000, 'partial -> 30s hot')
+  assert.strictEqual(S.graveCooldownMs("got some of my stuff (+5) - pack's full, the grave still has the rest", { flagOn: true }), 30000, 'capacity -> 30s hot')
+  assert.strictEqual(S.graveCooldownMs('got some of my stuff - the grave still has the rest', { flagOn: true, hotMs: 5000 }), 15000, 'hot floor is 15s (a tiny hotMs is clamped)')
+  assert.strictEqual(S.graveCooldownMs("picked up 5 loose items but my gear is still in the grave - it won't open", { flagOn: true }), 120000, "won't open -> 120s")
+})
+t('(#18) graveCooldownMs: travel failure/throw scaled by the despawn budget (min 300s, max(60s, remain/2))', () => {
+  assert.strictEqual(S.graveCooldownMs("couldn't get back to where i died", { flagOn: true, remainMs: Infinity }), 300000, 'unreachable SAFE (remain inf) -> today\'s 300s')
+  assert.strictEqual(S.graveCooldownMs("couldn't get back", { flagOn: true, remainMs: 400000 }), 200000, 'remain 400s -> remain/2 = 200s')
+  assert.strictEqual(S.graveCooldownMs("couldn't get back", { flagOn: true, remainMs: 100000 }), 60000, 'remain 100s -> clamped up to the 60s floor')
+  assert.strictEqual(S.graveCooldownMs('', { flagOn: true, remainMs: Infinity }), 300000, 'a THROW (empty result) -> 300s ceiling with no budget')
+  assert.strictEqual(S.graveCooldownMs('', { flagOn: true, remainMs: 90000 }), 60000, 'throw + urgent budget -> 60s floor (retries sooner)')
+})
+if (_savedGU18 != null) process.env.GRAVE_URGENT = _savedGU18; else delete process.env.GRAVE_URGENT // restore ambient flag
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall scheduler tests passed')
 process.exit(failures ? 1 : 0)
