@@ -55,13 +55,38 @@ function interiorColumns (a) {
 // anchor.y+2 - the feet + head courses, dy1..2) are NOT the plank shell (they're air, or a
 // door/bed clutter shoved in). Detected from the world so it survives a door that's been dug
 // or a bed jammed in the frame. Returns {x,z}|null.
-function doorwayColumn (a, read) {
+//
+// `opts.preferDoorBlock` (default false = today's byte-for-byte scan; the door-crossing
+// caller passes it under DOOR_CROSS_GEOMETRIC): with a wall HOLE the plain gap-scan finds
+// >=2 qualifying columns and picks whichever sorts first (hole or door), and a `null`
+// (unloaded/edge-of-range) read makes ANY rim column look like a gap - so the chosen "door"
+// flapped between the real door and the hole across calls. With preferDoorBlock:
+//   1. FIRST return the column that actually holds a hung `_door` block (invariant to holes),
+//   2. else fall back to the gap rule, but a `null` read is UNKNOWN - it never qualifies a
+//      column as the doorway (kills the unloaded-chunk flap). Still pure/offline-testable.
+function doorwayColumn (a, read, opts = {}) {
+  if (opts.preferDoorBlock) {
+    // Pass 1: the ACTUAL hung door (its lower half sits at anchor.y+1). Stable across holes.
+    for (let x = a.x; x <= a.x + DIMS.w - 1; x++) {
+      for (let z = a.z; z <= a.z + DIMS.l - 1; z++) {
+        if (!isRim(a, x, z) || isCorner(a, x, z)) continue
+        const lo = read(x, a.y + 1, z)
+        if (lo && DOOR_RE.test(lo.name)) return { x, z }
+      }
+    }
+  }
   for (let x = a.x; x <= a.x + DIMS.w - 1; x++) {
     for (let z = a.z; z <= a.z + DIMS.l - 1; z++) {
       if (!isRim(a, x, z) || isCorner(a, x, z)) continue
       const lo = read(x, a.y + 1, z); const hi = read(x, a.y + 2, z)
-      const loWall = lo && WALL_RE.test(lo.name); const hiWall = hi && WALL_RE.test(hi.name)
-      if (!loWall && !hiWall) return { x, z }
+      if (opts.preferDoorBlock) {
+        // Pass 2 (no door block anywhere): a KNOWN non-wall gap in BOTH courses. A null read
+        // is unknown, not "open" - so it can never claim the doorway.
+        if (lo != null && hi != null && !WALL_RE.test(lo.name) && !WALL_RE.test(hi.name)) return { x, z }
+      } else {
+        const loWall = lo && WALL_RE.test(lo.name); const hiWall = hi && WALL_RE.test(hi.name)
+        if (!loWall && !hiWall) return { x, z }
+      }
     }
   }
   return null

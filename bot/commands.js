@@ -299,6 +299,7 @@ function endActivity (ok, detail, opts = {}) {
   // recoveries, travels, builds - with real outcomes and durations. The brain dataset
   // only captures brain choices; this captures what the BODY can do (the richer skill).
   if (a) {
+    try { pushOutcomeRing(a.name + (a.detail ? ' ' + a.detail : ''), ok, detail) } catch {} // task #34: feed the outcome ring (successes too - they reset a repeat-fail streak)
     try {
       const b = globalBot
       fs.appendFile(EPISODE_LOG, JSON.stringify({
@@ -316,7 +317,7 @@ function endActivity (ok, detail, opts = {}) {
 const EPISODE_LOG = process.env.EPISODE_LOG || path.join(__dirname, 'body-episodes.jsonl')
 let globalBot = null // set once by trackTick; lets endActivity snapshot vitals without threading bot everywhere
 // Let non-command code (reflexes) record an outcome directly (e.g. a wedged follow).
-function recordOutcome (action, ok, detail) { lastOutcome = { action, ok: !!ok, detail: String(detail || '').slice(0, 100), at: Date.now() } }
+function recordOutcome (action, ok, detail) { lastOutcome = { action, ok: !!ok, detail: String(detail || '').slice(0, 100), at: Date.now() }; try { pushOutcomeRing(action, ok, detail) } catch {} } // task #34: also feed the bounded outcome ring
 
 // ---- S7 FORWARD-PROGRESS LATCH (DESIGN-S7-watchdog) --------------------------------------
 // A module-level heartbeat advanced ONLY by VERIFIED progress via touchProgress (an anchored 8b
@@ -324,11 +325,34 @@ function recordOutcome (action, ok, detail) { lastOutcome = { action, ok: !!ok, 
 // completed rung/step, a regen tick, a valid pass of a DECLARED hold). Read by
 // provision.activeJobInfo -> the 5s watchdog. One object write per touch; a job spinning/hung in
 // place touches NOTHING - that is the whole point. WATCHDOG=0 leaves these as inert timestamps.
-let bodyProgress = { at: Date.now(), by: 'boot', stalled: false }
-function touchProgress (tag) { bodyProgress = { at: Date.now(), by: tag || '', stalled: false } } // any touch clears stalled
+// task #34 (cycle detector): a MONOTONIC workCount, advanced ONLY by a WORK tag (item/block/smelt/
+// heal/rung/chore progress - never by movement or a fresh dispatch). It is the chest<->build shuttle
+// guard: the oscillation predicate requires ZERO work touches across its whole window, so real
+// back-and-forth work (which always moves an item or a block) can never be flagged. Inert unless the
+// watchdog's cycle detector reads it (like S7's touchProgress: cheap + unread == byte-identical).
+const CYCLE_WORK_TAGS = new Set(['itemDelta', 'placed', 'broke', 'smelt', 'regen', 'ladderRung', 'maintStep'])
+let bodyProgress = { at: Date.now(), by: 'boot', stalled: false, workCount: 0 }
+function touchProgress (tag) { const w = bodyProgress.workCount || 0; bodyProgress = { at: Date.now(), by: tag || '', stalled: false, workCount: CYCLE_WORK_TAGS.has(tag) ? w + 1 : w } } // any touch clears stalled; WORK tags also bump workCount
 function progressInfo () { return bodyProgress }
 function markStalled () { bodyProgress.stalled = true } // the nudge's blockedOn='stalled' marker; cleared by the next touch
-function _resetProgress () { bodyProgress = { at: Date.now(), by: 'reset', stalled: false } } // test seam (house pattern: _setNow/_setMaintaining)
+function _resetProgress () { bodyProgress = { at: Date.now(), by: 'reset', stalled: false, workCount: 0 } } // test seam (house pattern: _setNow/_setMaintaining)
+
+// ---- OUTCOME RING (task #34): a bounded 16-entry history of how recent long ops ENDED, so the
+// repeat-fail predicate can SEE the same failure recur. The architecture records each failure into
+// the single-record `lastOutcome` and immediately forgets it (that is the "why is this even possible"
+// gap); this ring is the memory. Pushed from the two EXISTING recording paths (endActivity /
+// recordOutcome) + the scheduler's runJob catch. Each record: { t, action, ok, failClass, cell } where
+// failClass = detail lowercased with digits/coords stripped (so "door at 433,62,112" repeats match)
+// and cell = position floored to 4b. lastOutcome / the brain's lastResult are UNCHANGED (additive).
+const CYCLE_OUTCOME_MAX = 16
+let recentOutcomesRing = []
+function cycleFailClass (detail) { return String(detail || '').toLowerCase().replace(/-?\d+(?:\.\d+)?/g, '#').replace(/\s+/g, ' ').trim() }
+function cycleCellOf () { const b = globalBot; const p = b && b.entity && b.entity.position; if (!p) return null; return { x: Math.floor(p.x / 4) * 4, y: Math.floor(p.y / 4) * 4, z: Math.floor(p.z / 4) * 4 } }
+function pushOutcomeRing (action, ok, detail) {
+  recentOutcomesRing.push({ t: Date.now(), action: String(action || ''), ok: !!ok, failClass: ok ? '' : cycleFailClass(detail), cell: cycleCellOf() })
+  if (recentOutcomesRing.length > CYCLE_OUTCOME_MAX) recentOutcomesRing.shift()
+}
+function recentOutcomes () { return recentOutcomesRing }
 
 // ---- JOB CHECKLIST (operator order: a goal gets a CHECKLIST and is worked step by
 // step - only survival may interrupt). Observational, not a scheduler: each phase of a
@@ -3601,4 +3625,4 @@ async function resumeBuild (bot) {
   }
 }
 
-module.exports = { handle, state, setupMovements, travelMovements, eatFood, placeTorchNearby, isBusy, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume, flagSpawnSuspect, worthwhileGrave, shouldChaseGrave, graveLootVerdict, gravesSnapshot, equipCarriedArmor, activityInfo, preemptForSurvival, setDebugSink, finishDisposition, resumeHoldRemaining, markResumePaused, touchProgress, progressInfo, markStalled, _resetProgress }
+module.exports = { handle, state, setupMovements, travelMovements, eatFood, placeTorchNearby, isBusy, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume, flagSpawnSuspect, worthwhileGrave, shouldChaseGrave, graveLootVerdict, gravesSnapshot, equipCarriedArmor, activityInfo, preemptForSurvival, setDebugSink, finishDisposition, resumeHoldRemaining, markResumePaused, touchProgress, progressInfo, markStalled, _resetProgress, recentOutcomes }

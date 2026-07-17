@@ -638,6 +638,41 @@ const ITEMS_PER_PLANK = 1.5
 // furnaces the planner never budgeted 8 cobble each for.
 function furnaceCountFor (count) { return Math.max(1, Math.min(4, Math.ceil(count / 16))) }
 
+// SMART SMELT FUEL (task #26). Default ON (same pattern as BRANCH_MINE/MINE_FLUID). Flag off
+// => today's plank-fuel planning + permissive runtime picker + no smelt preflight, byte-for-byte.
+const SMELT_FUEL_SMART = process.env.SMELT_FUEL_SMART !== '0'
+// Items one unit of a fuel smelts (vanilla 1.21 burn values). ONE copy shared by both smelt
+// loops and the smelt preflight (previously duplicated inside runSmeltMulti). Non-fuel/unknown
+// names fall through to a plank's value, matching the old runSmeltMulti local exactly.
+const unitsOf = n => (n === 'coal' || n === 'charcoal') ? 8 : n === 'coal_block' ? 80 : /_log$/.test(n) ? 1.5 : ITEMS_PER_PLANK
+
+// PURE fuel-strategy decision for a smelt of `count` items given coal-family holdings.
+// coal/charcoal smelt 8 items each, coal_block 80. When SMART and the uncovered remainder is
+// worth a two-stage smelt (> charcoalMin), MAKE charcoal (log->charcoal, ~8 items/piece) for it
+// and size a small plank bootstrap for the charcoal smelt itself; below that floor, or with
+// SMART off, cover the whole remainder with planks exactly as today. Offline-testable.
+//   count      : total items to smelt (smeltTotal)
+//   holdings   : { coal, charcoal, coal_block } already aboard (planner's netted `avail`)
+//   opts       : { smart, nWant, itemsPerPlank, charcoalMin }
+// returns { useCoal, makeCharcoal, charcoalPlanks, needPlanks }
+function smeltFuelPlan (count, holdings = {}, opts = {}) {
+  const smart = opts.smart !== false
+  const perPlank = opts.itemsPerPlank || ITEMS_PER_PLANK
+  const nWant = opts.nWant || 1
+  const charcoalMin = opts.charcoalMin != null ? opts.charcoalMin : 12
+  const coalUnits = ((holdings.coal || 0) + (holdings.charcoal || 0)) * 8 + (holdings.coal_block || 0) * 80
+  const uncovered = count - coalUnits
+  if (uncovered <= 0) return { useCoal: coalUnits > 0, makeCharcoal: 0, charcoalPlanks: 0, needPlanks: 0 }
+  if (smart && uncovered > charcoalMin) {
+    const makeCharcoal = Math.min(64, Math.ceil(uncovered / 8) + 1)          // one stack cap bounds the wood cost
+    const charcoalPlanks = Math.ceil(makeCharcoal / perPlank) + 2            // bootstrap fuel for the charcoal smelt only
+    return { useCoal: coalUnits > 0, makeCharcoal, charcoalPlanks, needPlanks: 0 }
+  }
+  // legacy / small-smelt: cover the whole remainder with planks (byte-for-byte with today)
+  const needPlanks = Math.ceil(uncovered / perPlank) + 2 + 2 * nWant
+  return { useCoal: coalUnits > 0, makeCharcoal: 0, charcoalPlanks: 0, needPlanks }
+}
+
 function isPlank (name) { return /_planks$/.test(name) }
 function isTool (name) { return /_(pickaxe|axe|shovel|sword|hoe)$/.test(name) }
 const WOODS = ['oak', 'spruce', 'birch', 'jungle', 'acacia', 'dark_oak', 'cherry', 'mangrove', 'pale_oak']
@@ -801,7 +836,17 @@ function planProvision (mcData, bom, inventory = {}, opts = {}) {
       const plankCounts = {}
       for (const n of craftOrder) if (isPlank(n)) plankCounts[n] = craftReq[n].crafts * craftReq[n].perCraft
       const fuelPlank = Object.entries(plankCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || `${opts.primaryWood || 'oak'}_planks`
-      need(fuelPlank, Math.ceil(uncovered / ITEMS_PER_PLANK) + 2 + 2 * nWant, [])
+      // #26: CHARCOAL-FIRST fuel. smeltFuelPlan decides charcoal-vs-planks; `need('charcoal', n)`
+      // rides the existing SMELT_MAP recursion (-> gather:<primaryWood>_log + smelt:charcoal),
+      // with a small plank bootstrap for the charcoal smelt. SMART off => the else-branch is the
+      // old `need(fuelPlank, ceil(uncovered/1.5)+2+2*nWant)` byte-for-byte.
+      const fp = smeltFuelPlan(smeltTotal, avail, { smart: SMELT_FUEL_SMART, nWant })
+      if (fp.makeCharcoal > 0) {
+        need('charcoal', fp.makeCharcoal, [])
+        need(fuelPlank, fp.charcoalPlanks, [])
+      } else {
+        need(fuelPlank, fp.needPlanks, [])
+      }
     }
   }
   // Pickaxes for the cobble mine. A wooden pick survives ~59 blocks (breaks mid-run ->
@@ -841,13 +886,19 @@ function planProvision (mcData, bom, inventory = {}, opts = {}) {
   const finals = craftOrder.filter(n => !isBasic(n) && n !== 'furnace')
   const G = (n, c) => ({ type: 'gather', item: n, count: c, blocks: GATHER_SOURCES[n], tool: GATHER_TOOL[n] || null })
   const C = n => ({ type: 'craft', item: n, crafts: craftReq[n].crafts, perCraft: craftReq[n].perCraft, needsTable: craftReq[n].needsTable })
+  // #26: charcoal is produced by its OWN smelt task and BURNED by the main smelt, so it must
+  // run first. Recursion pushes it last -> stable-sort charcoal smelts to the front (SMART only;
+  // off => same array reference, byte-for-byte task order).
+  const smeltsOrdered = SMELT_FUEL_SMART
+    ? [...smelts].sort((a, b) => (a.output === 'charcoal' ? 0 : 1) - (b.output === 'charcoal' ? 0 : 1))
+    : smelts
 
   const tasks = [
     ...logGathers.map(([n, c]) => G(n, c)),
     ...basics.map(C),
     ...otherGathers.map(([n, c]) => G(n, c)),
     ...(craftReq.furnace ? [C('furnace')] : []),
-    ...smelts.map(s => ({ type: 'smelt', ...s })),
+    ...smeltsOrdered.map(s => ({ type: 'smelt', ...s })),
     ...strips.map(s => ({ type: 'strip', ...s })),
     ...finals.map(C)
   ]
@@ -6996,10 +7047,66 @@ async function ensureFurnaces (bot, n, opts = {}) {
   return found
 }
 
+// #26: loadable fuel units aboard, matching the runtime picker's set (SMART excludes raw
+// logs/sticks). Shared by the smelt preflight below. Uses the module `unitsOf`.
+function packFuelUnits (bot, smart = SMELT_FUEL_SMART) {
+  let u = 0
+  for (const [name, c] of Object.entries(inventoryCounts(bot))) {
+    if (name === 'coal' || name === 'charcoal' || name === 'coal_block' || /_planks$/.test(name)) u += c * unitsOf(name)
+    else if (!smart && (/_log$/.test(name) || name === 'stick')) u += c * unitsOf(name)
+  }
+  return u
+}
+
+// #26: craft planks from logs to cover a fuel shortfall (units). Craft-only, best-effort, never
+// throws, bounded to <=16 crafts (~16 logs). Each log -> 4 planks = 6 items of fuel. Same 2x2
+// no-table shape as ensureTorches. NEVER gathers wood (the planner/charcoal task sized that).
+async function preflightFuelCraft (bot, shortfallUnits) {
+  try {
+    const mcData = require('minecraft-data')(bot.version)
+    const logsToUse = Math.min(16, Math.max(0, Math.ceil(shortfallUnits / 6)))
+    for (let i = 0; i < logsToUse; i++) {
+      const logItem = (bot.inventory ? bot.inventory.items() : []).find(it => /_log$/.test(it.name))
+      if (!logItem) break
+      const plank = mcData.itemsByName[logItem.name.replace(/_log$/, '_planks')]
+      if (!plank) break
+      const recipe = (bot.recipesFor(plank.id, null, 1, null) || [])[0] // inventory 2x2 - no table
+      if (!recipe) break
+      try { await bot.craft(recipe, 1, null); await new Promise(r => setTimeout(r, 150)) } catch { break }
+    }
+  } catch { /* best-effort */ }
+}
+
+// #26: verify input + fuel are aboard BEFORE opening a furnace (and before ensureFurnaces eats
+// the input cobble). ONE bounded input gather (120s, gatherable inputs only) + a plank-from-logs
+// fuel craft, then SHRINK the smelt to what's coverable instead of opening a furnace that stalls
+// 90s and throws. Returns the effective count (<= count); throws fast only when NOTHING is
+// coverable. Reuses runGather + bot.recipesFor - no new subsystem.
+async function smeltPreflight (bot, output, input, count, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  let haveIn = countItem(bot, input)
+  if (haveIn < count && GATHER_SOURCES[input] && !isStopped()) {
+    dbg('  smelt preflight: input short ' + haveIn + '/' + count + ' ' + input + ' - one bounded gather (120s)')
+    try { await runGather(bot, input, count - haveIn, { ...opts, deadlineMs: 120000 }) } catch (e) { dbg('  smelt preflight: input gather failed (' + e.message + ')') }
+    haveIn = countItem(bot, input)
+  }
+  let fuelUnits = packFuelUnits(bot)
+  if (fuelUnits < count && !isStopped()) {
+    await preflightFuelCraft(bot, count - fuelUnits)
+    fuelUnits = packFuelUnits(bot)
+  }
+  const effective = Math.min(count, haveIn, Math.floor(fuelUnits))
+  if (effective <= 0) throw new Error(`smelt preflight: no ${input}/fuel aboard for ${output} (input ${haveIn}, fuelUnits ${fuelUnits.toFixed(1)})`)
+  if (effective < count) dbg('  smelt preflight: shrinking ' + count + '->' + effective + ' ' + output + ' (input ' + haveIn + ', fuelUnits ' + fuelUnits.toFixed(1) + ')')
+  return effective
+}
+
 // Smelt `count` of `input` into `output`. Dispatcher: big smelts (per furnaceCountFor)
 // run across N furnaces in parallel when >=2 furnaces actually materialize; everything
 // else takes the PROVEN single-furnace path. Returns number produced. opts: {say,isStopped}.
 async function runSmelt (bot, output, input, count, opts = {}) {
+  // #26: preflight (input + fuel aboard, or shrink) BEFORE ensureFurnaces eats the input cobble.
+  if (SMELT_FUEL_SMART) count = await smeltPreflight(bot, output, input, count, opts)
   const N = furnaceCountFor(count)
   if (N < 2) return runSmeltSingle(bot, output, input, count, opts)
   let positions = null
@@ -7023,7 +7130,10 @@ async function runSmeltSingle (bot, output, input, count, opts = {}) {
   if (bot.entity.position.distanceTo(furnaceBlock.position) > 3) {
     await gotoWithTimeout(bot, new goals.GoalNear(furnaceBlock.position.x, furnaceBlock.position.y, furnaceBlock.position.z, 2), 20000)
   }
-  const isFuel = i => /_planks$/.test(i.name) || i.name === 'coal' || i.name === 'charcoal' || i.name === 'coal_block' || /_log$/.test(i.name) || i.name === 'stick'
+  // #26: SMART never LOADS raw logs/sticks (they burn 1.5/0.5 items each and are build wood).
+  // Flag off => today's permissive set. A log already in the furnace's fuel slot is still read
+  // via furnace.fuelItem(), unaffected by this loadable-set narrowing.
+  const isFuel = i => /_planks$/.test(i.name) || i.name === 'coal' || i.name === 'charcoal' || i.name === 'coal_block' || (!SMELT_FUEL_SMART && (/_log$/.test(i.name) || i.name === 'stick'))
   // openFurnace can time out when a mob is whacking the bot mid-open (verified live at
   // hp 2) - re-approach and retry once before giving the task up to the re-plan loop.
   let furnace
@@ -7094,7 +7204,7 @@ async function runSmeltSingle (bot, output, input, count, opts = {}) {
         try { await furnace.putInput(inItem.id, null, Math.min(stillNeed, inInv(input), 64)) } catch {}
       }
       if (!furnace.fuelItem() && stillNeed > 0 && (cooking > 0 || inInv(input) > 0)) {
-        const fuelName = ['coal', 'charcoal'].find(n => inInv(n) > 0) || (furnace.slots || []).slice(3).find(s => s && isFuel(s))?.name
+        const fuelName = (SMELT_FUEL_SMART ? ['coal', 'charcoal', 'coal_block'] : ['coal', 'charcoal']).find(n => inInv(n) > 0) || (furnace.slots || []).slice(3).find(s => s && isFuel(s))?.name
         if (fuelName) {
           const fid = mcData.itemsByName[fuelName].id
           const want = /_planks$/.test(fuelName) ? Math.max(2, Math.ceil(stillNeed / ITEMS_PER_PLANK) + 1) : 8
@@ -7127,8 +7237,8 @@ async function runSmeltMulti (bot, output, input, count, positions, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const mcData = require('minecraft-data')(bot.version)
   const inItem = mcData.itemsByName[input]
-  const isFuel = i => /_planks$/.test(i.name) || i.name === 'coal' || i.name === 'charcoal' || i.name === 'coal_block' || /_log$/.test(i.name) || i.name === 'stick'
-  const unitsOf = n => (n === 'coal' || n === 'charcoal') ? 8 : n === 'coal_block' ? 80 : /_log$/.test(n) ? 1.5 : ITEMS_PER_PLANK
+  // #26: same loadable-set narrowing as the single loop (unitsOf is now the shared module copy).
+  const isFuel = i => /_planks$/.test(i.name) || i.name === 'coal' || i.name === 'charcoal' || i.name === 'coal_block' || (!SMELT_FUEL_SMART && (/_log$/.test(i.name) || i.name === 'stick'))
   const F = positions.map(pos => ({ pos, loaded: 0, dead: 0, inputEmpty: false, outputResidue: false }))
   const alive = () => F.filter(f => f.dead < 3)
   let made = 0
@@ -7172,7 +7282,7 @@ async function runSmeltMulti (bot, output, input, count, positions, opts = {}) {
       const fuelItem = w.fuelItem()
       const fuelUnits = fuelItem ? fuelItem.count * unitsOf(fuelItem.name) : 0
       if (pending > 0 && fuelUnits < pending) {
-        const fuelName = ['coal', 'charcoal'].find(n => inInv(n) > 0) || (w.slots || []).slice(3).find(s => s && isFuel(s))?.name
+        const fuelName = (SMELT_FUEL_SMART ? ['coal', 'charcoal', 'coal_block'] : ['coal', 'charcoal']).find(n => inInv(n) > 0) || (w.slots || []).slice(3).find(s => s && isFuel(s))?.name
         if (fuelName) {
           const needUnits = pending - fuelUnits
           const n = Math.min(inInv(fuelName), Math.max(1, Math.ceil(needUnits / unitsOf(fuelName))))
@@ -7797,7 +7907,7 @@ const insideHutBox = (p, hut) => hutModel.inBox(hut, p.x, p.z)
 // model (schema-correct 6-wide rim, not the old 5-wide dx/dz 0..4 scan). anchor.y is the
 // floor plank slab, so the walkable door cell is hut.y+1.
 function findHutDoorway (bot, hut) {
-  const d = hutModel.doorwayColumn(hut, hutReader(bot))
+  const d = hutModel.doorwayColumn(hut, hutReader(bot), { preferDoorBlock: process.env.DOOR_CROSS_GEOMETRIC !== '0' })
   return d ? new Vec3(d.x, hut.y + 1, d.z) : null
 }
 // Standable FREE interior cells (Vec3s), from the model: the CORRECT 4x4 interior (dx/dz
@@ -8020,7 +8130,7 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, breachDryPocket, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, boundedHold, recoverFromDegraded, isRecoveringDegraded, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, markBedUnusable, bedHeld, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, noteWaterCrossing, lonelyFurnace, consolidateFurnaces, litterPatrol, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, smeltFuelPlan, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, breachDryPocket, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, boundedHold, recoverFromDegraded, isRecoveringDegraded, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, markBedUnusable, bedHeld, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, noteWaterCrossing, lonelyFurnace, consolidateFurnaces, litterPatrol, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
   maintenancePass, isMaintaining, stopMaintenance, _setMaintaining, courierFoodToBank, safekeepSweep, cropExclusionStep, cropPlaceExclusion, gatherSeedsNear,
   activeJobInfo, stopSurvivalJob,
   wildTerrainMovements, trekMovements, DIGGABLE_NATURAL, STRUCTURE_RE, canBreakNaturally }

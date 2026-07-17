@@ -70,6 +70,22 @@ t('doorway detected at the open rim column', () => {
   assert.deepStrictEqual({ x: out.x, z: out.z }, { x: 2, z: -1 }) // stand-off cell OUTSIDE the door (opposite the threshold)
 })
 
+t('doorwayColumn: preferDoorBlock returns the REAL door even when a wall hole sorts first', () => {
+  // punch a 2-high wall HOLE at rim column (1,0) - lower x than the door (2,0), so it sorts first
+  world.delete(key(1, 66, 0)); world.delete(key(1, 67, 0))
+  const dflt = H.doorwayColumn(A, read)
+  assert.deepStrictEqual({ x: dflt.x, z: dflt.z }, { x: 1, z: 0 }, 'default (today) scan returns the first gap = the HOLE')
+  const pref = H.doorwayColumn(A, read, { preferDoorBlock: true })
+  assert.deepStrictEqual({ x: pref.x, z: pref.z }, { x: 2, z: 0 }, 'preferDoorBlock returns the actual hung door column (invariant to the hole)')
+  set(1, 66, 0, 'oak_planks'); set(1, 67, 0, 'oak_planks') // restore the wall
+})
+
+t('doorwayColumn: preferDoorBlock treats null (unloaded) reads as UNKNOWN, never the doorway', () => {
+  const nullRead = () => null // an unloaded chunk: every read is null
+  assert(H.doorwayColumn(A, nullRead), 'default scan wrongly claims a doorway from null reads (the documented flap)')
+  assert.strictEqual(H.doorwayColumn(A, nullRead, { preferDoorBlock: true }), null, 'preferDoorBlock: null reads never claim the doorway')
+})
+
 t('classify: wall / door / floor / furniture / stray / interior (schematic-true y)', () => {
   assert.strictEqual(H.classifyCell(A, read, 0, 66, 3).cls, 'wall')   // rim wall at feet level (anchor.y+1)
   assert.strictEqual(H.classifyCell(A, read, 3, 69, 3).cls, 'wall')   // roof plank slab (anchor.y+4)
@@ -201,6 +217,35 @@ t('cellMismatch: tolerant by class (planks / chest / furnace / table / door / ai
   assert.strictEqual(H.cellMismatch('oak_planks', 'air'), true, 'air where a plank is wanted is a mismatch')
   assert.strictEqual(H.cellMismatch(undefined, 'oak_planks'), true, 'undefined want = air; a plank is a mismatch')
   assert.strictEqual(H.cellMismatch('white_bed', 'crafting_table'), true, 'unrelated blocks mismatch')
+})
+
+// ---- F3 door-cross ledger core (pure crossVerdict, from navigate.js) -------------------
+// The cross-nav loop-breaker: 3 failed crossings of a (hut,dir) in a 90s window -> a 120s
+// cooldown; a success clears the entry. navigate.js keeps only the Map + the clock; the
+// transition is this pure function.
+const nav = require('./navigate.js')
+t('crossVerdict: success returns a null entry (a working door never cools down)', () => {
+  const r = nav.crossVerdict({ fails: 2, firstAt: 1000, coolUntil: 0 }, 5000, true)
+  assert.strictEqual(r.entry, null)
+  assert.strictEqual(r.cooled, false)
+})
+t('crossVerdict: 3 fails inside the 90s window trip a 120s cooldown', () => {
+  let r = nav.crossVerdict(null, 1000, false)
+  assert.strictEqual(r.entry.fails, 1); assert.strictEqual(r.cooled, false); assert.strictEqual(r.entry.coolUntil, 0)
+  r = nav.crossVerdict(r.entry, 2000, false)
+  assert.strictEqual(r.entry.fails, 2); assert.strictEqual(r.cooled, false); assert.strictEqual(r.entry.coolUntil, 0)
+  r = nav.crossVerdict(r.entry, 3000, false)
+  assert.strictEqual(r.entry.fails, 3); assert.strictEqual(r.cooled, true); assert.strictEqual(r.entry.coolUntil, 3000 + 120000)
+})
+t('crossVerdict: a fail past the 90s window resets the count to 1', () => {
+  const r = nav.crossVerdict({ fails: 2, firstAt: 1000, coolUntil: 0 }, 1000 + 90001, false)
+  assert.strictEqual(r.entry.fails, 1, 'window elapsed -> fresh count')
+  assert.strictEqual(r.entry.firstAt, 1000 + 90001)
+  assert.strictEqual(r.cooled, false)
+})
+t('crossVerdict: a success after failures clears the entry (restores normal door behavior)', () => {
+  const r = nav.crossVerdict({ fails: 3, firstAt: 1000, coolUntil: 200000 }, 5000, true)
+  assert.strictEqual(r.entry, null)
 })
 
 // ---- ANTI-DIVERGENCE: stamp the REAL hut.schem and assert the model reads it -----------

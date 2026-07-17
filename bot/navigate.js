@@ -287,6 +287,12 @@ function doorNearby (bot, towards) { // cheap existence probe - gates the ladder
   } catch { return false }
 }
 async function openNearbyDoor (bot, opts = {}) {
+  // GEOMETRIC ARRIVAL (DOOR_CROSS_GEOMETRIC): crossOwnDoor threads its inside-ness predicate
+  // in as opts.done - once the bot is on the target side (through ANY opening: the door OR a
+  // wall hole), the crossing is COMPLETE and we return immediately, instead of walking the
+  // bot back out to satisfy one specific door. opts.done is undefined for every other caller
+  // (recovery-ladder rung, pathfix pre-flight) => no behavior change for them.
+  const isDone = () => { try { return opts.done ? !!opts.done() : false } catch { return false } }
   try {
     const ids = openableIds(bot)
     const seen = new Set(); const cands = []
@@ -296,9 +302,22 @@ async function openNearbyDoor (bot, opts = {}) {
         if (!seen.has(k)) { seen.add(k); cands.push(c) }
       }
     }
-    cands.sort((a, b) => a.distanceTo(bot.entity.position) - b.distanceTo(bot.entity.position))
+    if (opts.doorAt) {
+      // PINNED CHOICE (DOOR_CROSS_GEOMETRIC): crossOwnDoor chose ONE doorway column - cross
+      // THAT one first, then rank any remainder by distance to the GOAL side (opts.towards)
+      // with a stable (x,z) tiebreak. The old distance-to-BOT sort flip-flopped between the
+      // door and a wall hole as the bot moved (live: the anchored door coordinate kept
+      // changing 430,86 / 414,87 / 416,85). Applies only to this pinned call.
+      const gx = (opts.towards && typeof opts.towards.x === 'number') ? opts.towards.x : bot.entity.position.x
+      const gz = (opts.towards && typeof opts.towards.z === 'number') ? opts.towards.z : bot.entity.position.z
+      const atDoor = c => (c.x === opts.doorAt.x && c.z === opts.doorAt.z) ? 0 : 1
+      cands.sort((a, b) => (atDoor(a) - atDoor(b)) || (Math.hypot(a.x - gx, a.z - gz) - Math.hypot(b.x - gx, b.z - gz)) || (a.x - b.x) || (a.z - b.z))
+    } else {
+      cands.sort((a, b) => a.distanceTo(bot.entity.position) - b.distanceTo(bot.entity.position))
+    }
     dbg('door-assist: ' + cands.length + ' door/gate candidates near me/goal')
     for (const p of cands) {
+      if (isDone()) return true // already on the target side (e.g. entered through the hole) - stop
       const blk = bot.blockAt(p)
       if (!blk) continue
       // NOTE: the walk-through below runs regardless of the door's open/closed STATE -
@@ -371,6 +390,16 @@ async function openNearbyDoor (bot, opts = {}) {
             dbg('door-assist: toggled ' + blk.name + ' (' + when + ') - walk line ' + (passageClear() ? 'CLEAR' : 'still blocked'))
           }
         }
+        // Seal the door behind us (close it if we toggled it open) - "sealed" = the collision
+        // shape SPANS the doorway (passageClear false), the inverse of ensurePassage. Reused by
+        // the post-crossing close below AND by the geometric short-circuit returns (F1): a done()
+        // early-out still leaves the hut sealed to mobs.
+        const sealBehind = async () => {
+          try {
+            for (let i = 0; i < 2 && passageClear(); i++) { await bot.activateBlock(bot.blockAt(base)); await new Promise(r => setTimeout(r, 300)) }
+            dbg('door-assist: door behind me ' + (passageClear() ? 'still open' : 'closed'))
+          } catch {}
+        }
         // Exit toward OPEN SKY: "outside" is the side of the doorway with no ceiling.
         // (Away-from-where-I-stand flips when the bot is mid-doorway - verified: it
         // walked back INTO the hut. Ceiling check is position-independent.)
@@ -418,6 +447,7 @@ async function openNearbyDoor (bot, opts = {}) {
         dbg('door-assist: exit side ' + (dx ? (sign > 0 ? 'east' : 'west') : (sign > 0 ? 'south' : 'north')) + how)
         // Align on the inside cell in front of the door (pathfinder CAN reach that).
         try { await gotoOnce(bot, new goals.GoalBlock(base.x - dx * sign, base.y, base.z - dz * sign), 8000, { duringRecovery: true }) } catch (e2) { dbg('door-assist: could not align (' + e2.message + ')') }
+        if (isDone()) { await sealBehind(); return true } // arrival (any opening) during align - stop, don't force-walk out
         // FORCE-WALK through on manual controls. Thread the doorway CENTER-TO-CENTER -
         // one long diagonal walk clipped the open door panel and slid the bot off
         // sideways into the wall corner.
@@ -448,6 +478,7 @@ async function openNearbyDoor (bot, opts = {}) {
         // line (the old force-open here re-blocked the doorway every pass, live).
         try { await ensurePassage('before crossing') } catch {}
         await walkTo(base.x + 0.5, base.z + 0.5, 0.45, 2500)                                    // into the doorway
+        if (isDone()) { await sealBehind(); return true } // stepping into the doorway already put us on the target side (entered via the hole)
         // OWN-HUT crater heal, from THE DOORWAY: standing on the solid door floor the bot
         // reaches the whole exit lane, so fill any creeper crater HERE - before the second
         // step walks it off the doorstep edge into the pit. A blast turned the exit lane
@@ -466,6 +497,7 @@ async function openNearbyDoor (bot, opts = {}) {
           }
         } catch (e3) { dbg('door-assist: crater heal skipped (' + e3.message + ')') }
         await walkTo(base.x + dx * sign * 2 + 0.5, base.z + dz * sign * 2 + 0.5, 0.6, 2500)     // out the far side
+        if (isDone()) { await sealBehind(); return true } // reached the target side - crossing complete
         const prog = (bot.entity.position.x - (base.x + 0.5)) * dx * sign + (bot.entity.position.z - (base.z + 0.5)) * dz * sign
         dbg('door-assist: force-walk ' + (prog > 1.2 ? 'THROUGH to ' : 'did not clear, at ') + bot.entity.position.floored())
         // CLOSE THE DOOR BEHIND US so the hut stays sealed to mobs (it was opened/toggled
@@ -473,10 +505,7 @@ async function openNearbyDoor (bot, opts = {}) {
         // false) - the inverse of ensurePassage, same shape ground-truth. Do this BEFORE
         // the full crater heal (which walks the rim away from the door), while we're still
         // in reach; we're past the door now, so closing it can't lock us out.
-        try {
-          for (let i = 0; i < 2 && passageClear(); i++) { await bot.activateBlock(bot.blockAt(base)); await new Promise(r => setTimeout(r, 300)) }
-          dbg('door-assist: door behind me ' + (passageClear() ? 'still open' : 'closed'))
-        } catch {}
+        await sealBehind()
         // FULL crater heal whenever we're actually OUTSIDE the hut now (not just prog>1.2 -
         // a "did not clear" exit still lands the bot outside and can reach the crater): walk
         // the rim and bridge the whole footprint incl. the far EAST pit the doorway can't
@@ -735,6 +764,30 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
 // "recovered". Serialize behind a mutex: the body can only walk one route at a time; a
 // queued flow just experiences a slower nav (honest) instead of a phantom wedge.
 let navChain = Promise.resolve()
+// DOOR-CROSS LEDGER (F3, DOOR_CROSS_GEOMETRIC): the per-nav caps (crossings<2, tries<2,
+// door budget 3) are each individually bounded, but every CALLER retry (pathfix attempt
+// loop, comeToPlayer re-issue, planner/supervisor) builds a FRESH nav with fresh caps, so
+// the in/out oscillation is unbounded ACROSS navs. This module-level ledger counts failed
+// crossings keyed by (hut,dir): 3 fails in a 90s window -> a 120s cooldown during which
+// crossOwnDoor no-ops (returns done()) and the plain goto takes over (it reaches interior
+// goals via the same hole the loop kept using); a success deletes the entry. Consulted only
+// under the flag; DOOR_CROSS_GEOMETRIC=0 never touches it.
+const doorCrossLedger = new Map() // `${hut.x},${hut.y},${hut.z}:${dir}` -> { fails, firstAt, coolUntil }
+// PURE ledger transition (unit-tested offline; navigate.js keeps only the Map + the clock).
+// `e` = prior entry (or null); `now` = ms; `ok` = did the crossing succeed. Returns the NEXT
+// entry (null => delete it) and whether a cooldown was FRESHLY triggered (for the one log line).
+function crossVerdict (e, now, ok) {
+  if (ok) return { entry: null, cooled: false } // a working door never cools down
+  const WINDOW_MS = 90000; const COOL_MS = 120000
+  let fails = (e && typeof e.fails === 'number') ? e.fails : 0
+  let firstAt = (e && typeof e.firstAt === 'number') ? e.firstAt : now
+  if (now - firstAt > WINDOW_MS) { fails = 0; firstAt = now } // window elapsed -> fresh count
+  fails++
+  let coolUntil = (e && typeof e.coolUntil === 'number') ? e.coolUntil : 0
+  let cooled = false
+  if (fails >= 3) { coolUntil = now + COOL_MS; cooled = true }
+  return { entry: { fails, firstAt, coolUntil }, cooled }
+}
 // Serialize a body onto the single-pathfinder mutex (see the note above). Any async fn
 // that drives the pathfinder/controls end-to-end - a full navigateTo, or an atomic
 // enter/exit-door shell - queues here so two flows never fight over the controls.
@@ -893,8 +946,9 @@ async function crossOwnDoor (bot, hut, dir, opts = {}) {
   const P = require('./provision.js')
   if (!hut) return false
   const H = require('./hut-model.js')
+  const GEO = process.env.DOOR_CROSS_GEOMETRIC !== '0' // default ON; =0 => today byte-for-byte
   const read = (x, y, z) => bot.blockAt(new Vec3(x, y, z))
-  const door = H.doorwayColumn(hut, read)
+  const door = H.doorwayColumn(hut, read, { preferDoorBlock: GEO }) // F2: pin to the real door, ignore hole/unknown flap
   if (!door) { dbg('crossOwnDoor: no doorway found in the hut'); return false }
   const inside = H.thresholdCell(hut, door)
   const out = H.outsideCell(hut, door)
@@ -904,6 +958,15 @@ async function crossOwnDoor (bot, hut, dir, opts = {}) {
   const done = () => dir === 'in'
     ? !!(P.insideOwnStructure && P.insideOwnStructure(bot))
     : !(P.insideOwnStructure && P.insideOwnStructure(bot))
+  // F3: during a cooldown (3 failed crossings of this hut/dir in 90s) do NO maneuver at all -
+  // return the geometric done() so the caller's plain goto takes over (it reaches interior
+  // goals via the hole, which is the route the pathfinder kept proving works). No walking, no
+  // fail counting while cooled; the entry clears on cooldown expiry / next success.
+  const ledgerKey = hut.x + ',' + hut.y + ',' + hut.z + ':' + dir
+  if (GEO) {
+    const e = doorCrossLedger.get(ledgerKey)
+    if (e && e.coolUntil > Date.now()) { dbg('crossOwnDoor(' + dir + '): cooling down - plain goto takes over (door ' + door.x + ',' + door.z + ')'); return done() }
+  }
   const tok = arbiter.beginManeuver('cross-door', opts.priority != null ? opts.priority : arbiter.PRIORITY.PRESERVE, 25000)
   recoveringDepth++
   try {
@@ -915,11 +978,18 @@ async function crossOwnDoor (bot, hut, dir, opts = {}) {
     }
     for (let tries = 0; tries < 2 && !done() && !isStopped(); tries++) {
       arbiter.refreshManeuver(tok, 25000)
-      await openNearbyDoor(bot, { towards, isStopped })
+      // F1 threads done() into the crossing (arrival via ANY opening ends it early); F2 pins
+      // the candidate sort to the chosen door column. Old opts when the flag is off.
+      await openNearbyDoor(bot, GEO ? { towards, isStopped, done, doorAt: door } : { towards, isStopped })
     }
   } catch (e) { dbg('crossOwnDoor: crossing failed (' + e.message + ')') } finally { recoveringDepth--; arbiter.endManeuver(tok) }
   const ok = done()
   dbg('crossOwnDoor(' + dir + '): ' + (ok ? 'on the intended side' : 'still on the wrong side') + ' (door ' + door.x + ',' + door.z + ')')
+  if (GEO) { // F3: record the outcome; a run of failures trips the cross-nav cooldown
+    const { entry, cooled } = crossVerdict(doorCrossLedger.get(ledgerKey), Date.now(), ok)
+    if (entry) doorCrossLedger.set(ledgerKey, entry); else doorCrossLedger.delete(ledgerKey)
+    if (cooled) dbg('crossOwnDoor: 3 failed crossings of hut ' + hut.x + ',' + hut.y + ',' + hut.z + ' - cooling down 120s, plain goto takes over')
+  }
   return ok
 }
 
@@ -990,4 +1060,4 @@ function honestFail (lastErr, counts, label, recoveryMs, reflexWaitMs) {
   return e
 }
 
-module.exports = { navigateTo, navigateToPreempt, gotoOnce, openNearbyDoor, crossOwnDoor, enterStructure, exitStructure, swimToShore, escapeWater, headInWater, jumpForAir, isNavigating, isRecovering, isForceUnsticking, forceUnstick, setDebugSink, detectPit, goalWasChanged }
+module.exports = { navigateTo, navigateToPreempt, gotoOnce, openNearbyDoor, crossOwnDoor, crossVerdict, enterStructure, exitStructure, swimToShore, escapeWater, headInWater, jumpForAir, isNavigating, isRecovering, isForceUnsticking, forceUnstick, setDebugSink, detectPit, goalWasChanged }

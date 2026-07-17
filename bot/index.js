@@ -29,10 +29,12 @@ const access = require('./access.js')
 const schematic = require('./schematic.js')
 const loghistory = require('./loghistory.js') // compact rolling state time-series + heartbeat (observability)
 const scheduler = require('./scheduler.js') // S4: pure survival-tier decision core (commandClass/admissible/pickJob) - wires the busy-gate + the tick
+const cycleDetect = require('./cycle-detect.js') // task #34: pure behavioral cycle/oscillation detector - fed into the S7 watchdog's existing ladder (no new subsystem)
 const SCHED_ON = process.env.SCHEDULER !== '0' // master flag: SCHEDULER=0 restores the S1-hotfix wiring byte-for-byte (gate takes the survivalAdmissible path, the tick never registers, the 3 reflexes run as today)
 const LADDER_ON = SCHED_ON && process.env.RECOVERY_LADDER !== '0' // S5: RECOVERY_LADDER=0 restores S4's recoveryLadder DOWNGRADE + the one-shot respawn grave gating byte-for-byte
 const MAINTAIN_ON = SCHED_ON && process.env.MAINTAIN !== '0' // S6: MAINTAIN=0 restores the defer-note + the four proactive reflexes on their old timers byte-for-byte
 const WATCHDOG_ON = SCHED_ON && process.env.WATCHDOG !== '0' // S7: the in-process forward-progress watchdog. WATCHDOG=0 -> no interval, no heartbeat merge, no wdPhase call; the touchProgress hooks remain as inert timestamps nobody reads (behaviorally byte-identical)
+const CYCLE_DETECT_ON = WATCHDOG_ON && process.env.CYCLE_DETECT !== '0' // task #34: the behavioral cycle detector. An S7 ORGAN (not a peer) - lives inside the wdTimer, so WATCHDOG=0 kills it too. CYCLE_DETECT=0 -> no sampling, no verdict override, no ring read: byte-identical to today.
 const OPP_ON = MAINTAIN_ON && process.env.OPPORTUNISTIC_MAINTAIN !== '0' // opportunistic at-hut maintenance during the build era; OPPORTUNISTIC_MAINTAIN=0 restores S6 byte-for-byte
 
 // Live brain settings the dashboard can change on the fly; brain-llm.js polls
@@ -1058,7 +1060,7 @@ if (SCHED_ON) {
     schedJob = { name, startedAt: Date.now() }
     commands.touchProgress('dispatch:' + name) // S7 (d): a just-dispatched job is at zero idle (same t0 rule as beginActivity/H5c)
     try { const r = await executor(); note('(sched) ' + name + ' -> ' + (r === false ? 'no-op/deferred' : (typeof r === 'string' ? r.split('\n')[0] : 'done'))) }
-    catch (e) { note('(sched) ' + name + ' failed: ' + e.message) }
+    catch (e) { note('(sched) ' + name + ' failed: ' + e.message); if (CYCLE_DETECT_ON) { try { commands.recordOutcome('sched:' + name, false, e.message) } catch {} } } // task #34: today this only note()s+forgets; feed the outcome ring so a re-dispatch loop (gather held x8) is SEEN. Flag-gated so CYCLE_DETECT=0 leaves lastOutcome byte-identical.
     finally { schedJob = null }
   }
   const tick = async () => {
@@ -1257,6 +1259,8 @@ if (SCHED_ON) {
     let idleWorkSince = 0
     let lastKickAt = 0
     let lastLivenessRearm = 0
+    const cycRing = []            // task #34: bounded 48-sample position ring (~4min @ 5s)
+    let cycState = { phase: 'idle', firedAt: -Infinity, cycleKey: null, workCount: 0 } // cycle-detect latch (mirrors wdState)
     const wdTimer = setInterval(() => {
       try {
         // 1. GUARDS. Dead/absent body: nothing to watch. A DECLARED hold (bed-sleep, night-rest) is a
@@ -1268,8 +1272,34 @@ if (SCHED_ON) {
         const job = provision.activeJobInfo()
         const now = Date.now()
         // 3. pure verdict + escalation phase.
-        const verdict = scheduler.watchdog(job, { hp: bot.health, food: bot.food }, now)
+        let verdict = scheduler.watchdog(job, { hp: bot.health, food: bot.food }, now)
         const jobKey = job ? (job.name + '@' + (job.startedAt || '')) : null
+        // 3b. task #34 BEHAVIORAL CYCLE DETECTION (an S7 organ): sample position into a bounded ring
+        //     and, when the pure detector flags an oscillation / repeat-fail, synthesize a fail-job
+        //     verdict into the UNMODIFIED wdPhase + lever map (max-severity merge - a real fail-job is
+        //     never downgraded). SURVIVE-tier maneuvers + escaping suppress it (invariant 6); the
+        //     sleep/rest declared-hold early-returns above already exclude declared holds.
+        if (CYCLE_DETECT_ON && !(commands.isEscaping && commands.isEscaping()) && !arbiter.maneuverActive(arbiter.PRIORITY.SURVIVE)) {
+          const pp = bot.entity && bot.entity.position
+          if (pp) {
+            let wc = 0; try { wc = commands.progressInfo().workCount || 0 } catch {}
+            cycRing.push({ t: now, x: pp.x, y: pp.y, z: pp.z, cycleKey: job ? job.name : null, workCount: wc }) // job NAME, not per-dispatch jobKey (root cause 2b)
+            if (cycRing.length > 48) cycRing.shift()
+          }
+          let outRing = []; try { outRing = commands.recentOutcomes() } catch {}
+          const det = cycleDetect.detect(cycRing, outRing, now)
+          cycState = cycleDetect.step(cycState, det, now)
+          if (cycState.act === 'break') {
+            if (job) {
+              note('(wd) CYCLE ' + det.kind + ' on ' + job.name + ' - forcing fail-job (behavioral loop, not a freeze)')
+              verdict = 'fail-job' // synthetic - flows through the UNMODIFIED wdPhase/lever map below
+            } else {
+              note('(wd) CYCLE ' + det.kind + ' with no active job - clearing the goal so the brain sees the loop')
+              try { commands.recordOutcome('cycle:' + det.kind, false, 'A<->B loop broken (no job to fail)') } catch {}
+              try { if (bot.pathfinder) bot.pathfinder.setGoal(null) } catch {} // honest cancel the nav stack understands; NO forceUnstick (the body can move - the decision is stuck)
+            }
+          }
+        }
         wdState = scheduler.wdPhase(wdState, verdict, jobKey)
         if (job && wdState.act !== 'none') {
           const base = job.lastProgressAt != null ? job.lastProgressAt : (job.startedAt != null ? job.startedAt : now)

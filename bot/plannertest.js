@@ -213,5 +213,72 @@ t('banked iron_ingot drives craft:iron_boots via plan.used (no re-gather, no sme
   assert(!(mixed.gathers && mixed.gathers.raw_iron), 'no raw-iron gather when the 4 are already banked: ' + JSON.stringify(mixed.gathers))
 })
 
+// SMART SMELT FUEL (#26): the PURE smeltFuelPlan predicate. coal/charcoal=8 items each,
+// coal_block=80; the uncovered remainder is MADE into charcoal (log->charcoal) above a floor,
+// else covered with planks. Flag off reproduces today's plank numbers byte-for-byte.
+t('smeltFuelPlan: coal covers all -> no charcoal, no planks', () => {
+  const { smeltFuelPlan } = require('./provision.js')
+  const fp = smeltFuelPlan(96, { coal: 12 }, { smart: true })          // 12*8 = 96 units
+  assert.strictEqual(fp.makeCharcoal, 0, 'coal covers it -> make no charcoal')
+  assert.strictEqual(fp.needPlanks, 0, 'coal covers it -> plan no planks')
+  assert.strictEqual(fp.useCoal, true, 'nets the coal')
+})
+
+t('smeltFuelPlan: partial coal -> charcoal only for the remainder', () => {
+  const { smeltFuelPlan } = require('./provision.js')
+  const fp = smeltFuelPlan(96, { coal: 4 }, { smart: true })           // 32 covered, 64 uncovered
+  assert.strictEqual(fp.makeCharcoal, Math.min(64, Math.ceil(64 / 8) + 1), 'charcoal sized to the uncovered 64 (=9)')
+  assert.strictEqual(fp.makeCharcoal, 9)
+  assert.strictEqual(fp.needPlanks, 0, 'no plank remainder when charcoal covers it')
+})
+
+t('smeltFuelPlan: small smelt (uncovered <= 12) -> planks only, no charcoal', () => {
+  const { smeltFuelPlan } = require('./provision.js')
+  const fp = smeltFuelPlan(10, {}, { smart: true, nWant: 1 })
+  assert.strictEqual(fp.makeCharcoal, 0, 'below the floor -> no two-stage charcoal smelt')
+  assert.strictEqual(fp.needPlanks, Math.ceil(10 / 1.5) + 2 + 2, 'plank branch covers the snack smelt')
+  // boundary: 12 is NOT worth charcoal, 13 IS
+  assert.strictEqual(smeltFuelPlan(12, {}, { smart: true }).makeCharcoal, 0, '12 -> planks')
+  assert(smeltFuelPlan(13, {}, { smart: true }).makeCharcoal > 0, '13 -> charcoal')
+})
+
+t('smeltFuelPlan: charcoal capped at one stack (64) for monster smelts', () => {
+  const { smeltFuelPlan } = require('./provision.js')
+  const fp = smeltFuelPlan(600, {}, { smart: true })                   // ceil(600/8)+1 = 76 -> capped
+  assert.strictEqual(fp.makeCharcoal, 64, 'nChar cap = 64')
+  assert.strictEqual(fp.charcoalPlanks, Math.ceil(64 / 1.5) + 2, 'bootstrap planks sized to nChar only')
+})
+
+t('smeltFuelPlan: SMART off -> today plank numbers byte-for-byte (no charcoal ever)', () => {
+  const { smeltFuelPlan } = require('./provision.js')
+  for (const [count, nWant] of [[96, 1], [96, 4], [32, 1], [8, 2]]) {
+    const fp = smeltFuelPlan(count, {}, { smart: false, nWant })
+    assert.strictEqual(fp.makeCharcoal, 0, 'flag off never makes charcoal')
+    assert.strictEqual(fp.needPlanks, Math.ceil(count / 1.5) + 2 + 2 * nWant, `legacy plank count for ${count}/${nWant}`)
+  }
+  // partial coal, flag off: nets coal, covers the rest with planks (old branch)
+  const fp = smeltFuelPlan(96, { coal: 4 }, { smart: false, nWant: 1 })
+  assert.strictEqual(fp.needPlanks, Math.ceil(64 / 1.5) + 2 + 2, 'flag off nets coal then planks the remainder')
+})
+
+// INTEGRATION: a stone smelt with no coal. SMART on (default) plans a charcoal smelt ORDERED
+// BEFORE the stone smelt (charcoal is burned by it); SMART off plans no charcoal (legacy planks).
+// Branches on the env flag so this passes under both settings (proves the byte-for-byte rollback).
+t('planProvision: SMART orders charcoal smelt before the main smelt (off => legacy, no charcoal)', () => {
+  const provision = require('./provision.js')
+  const smart = process.env.SMELT_FUEL_SMART !== '0'
+  const plan = provision.planProvision(mcData, { stone: 96 }, {}, { primaryWood: 'oak' })
+  const smeltKeys = plan.tasks.filter(x => x.type === 'smelt').map(x => x.output)
+  assert(smeltKeys.includes('stone'), 'always plans the stone smelt')
+  assert(!plan.tasks.some(x => x.type === 'smelt' && x.input === 'stick'), 'never a stick-fuelled smelt')
+  if (smart) {
+    assert(smeltKeys.includes('charcoal'), 'SMART plans a charcoal fuel smelt: ' + smeltKeys.join(','))
+    assert(smeltKeys.indexOf('charcoal') < smeltKeys.indexOf('stone'), 'charcoal must run before stone: ' + smeltKeys.join(','))
+  } else {
+    assert(!smeltKeys.includes('charcoal'), 'SMART off makes no charcoal: ' + smeltKeys.join(','))
+    assert(plan.tasks.some(x => x.type === 'craft' && /_planks$/.test(x.item)), 'SMART off plans plank fuel')
+  }
+})
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall planner decision tests passed')
 process.exit(failures ? 1 : 0)
