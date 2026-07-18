@@ -29,6 +29,7 @@ const { blockPos, anchorInFront, fill, setblock, normName, findPlayer, buildWall
 const gear = require('./gear.js') // PURE gear picks (which tool for a block, which slot/material of armor); the acting code stays here
 const { bestTool, armorSlot, bestArmor, armorRank, ARMOR_MAT, ARMOR_RANK, LEATHER_PIECES } = gear
 const telemetry = require('./telemetry.js') // activity/outcome/progress/checklist/stuck records; trackTick below still orchestrates it with the death snapshot
+const grave = require('./grave.js') // the death LEDGER + carried-items snapshot (grave-policy.js holds the pure decisions)
 const { activityInfo, beginActivity, endActivity, recordOutcome, touchProgress, progressInfo, markStalled, _resetProgress, pushOutcomeRing, recentOutcomes, checklistBegin, checklistStep, JOB_STEPS } = telemetry
 const GoalNearXZBanded = navLeg.makeGoalNearXZBanded(goals.Goal) // Y-aware drop-in for goals.GoalNearXZ (NAV_HAZARD_LEGS)
 const NAV_HAZARD_LEGS = process.env.NAV_HAZARD_LEGS !== '0' // NAV Phase B (default ON): Y-band the trek leg goal + price lava in travelMovements; =0 => today's Y-blind GoalNearXZ + no lava cost, byte-for-byte
@@ -90,116 +91,15 @@ let escaping = false   // true while digging UP out of a cave - the flee reflex 
 // switching tasks (attack/goto/scan replace the follow goal), so a body-side reflex
 // can resume trailing them once idle. Cleared by `stop` (or a new follow retargets).
 let followTarget = null
-// death recovery: where we last died + whether it's dangerous to return to (lava/fire/
-// void). Set by the body's death handler; surfaced in /state so the BRAIN can decide
-// whether to `recover`. Cleared/marked once retrieved. Expires so it's not stale forever.
-let lastDeath = null // NEWEST death (kept for quick checks); the LEDGER below is the real record
-// Death LEDGER, persisted to disk. It used to be a single slot - so dying on the way to a
-// recovery OVERWROTE the grave that mattered (verified live: died with full iron at 553,62,50,
-// died again trekking back, and the iron grave was forgotten forever while the bot faithfully
-// visited every worthless naked-death grave after it). Keep every unretrieved death, with a
-// snapshot of what was carried, and recover the most VALUABLE one first.
-const DEATH_FILE = process.env.DEATH_FILE || path.join(__dirname, 'last-death.json') // env-overridable (test isolation)
-let deathLedger = []
-function persistDeath () {
-  try {
-    const keep = deathLedger.filter(d => !d.retrieved).slice(-8)
-    if (keep.length) fs.writeFileSync(DEATH_FILE, JSON.stringify({ deaths: keep }))
-    else fs.unlinkSync(DEATH_FILE)
-  } catch {}
-}
-try {
-  const j = JSON.parse(fs.readFileSync(DEATH_FILE, 'utf8'))
-  const arr = Array.isArray(j.deaths) ? j.deaths : (j && j.x != null ? [j] : []) // old single-death shape migrates
-  deathLedger = arr.filter(d => d && !d.retrieved && Date.now() - (d.at || 0) < 24 * 3600 * 1000)
-  lastDeath = deathLedger[deathLedger.length - 1] || null
-} catch {}
-// Rolling snapshot of what the bot carries (armor slots included - items() skips them), so a
-// death can record what went into the grave. Read at death time it's already unreliable.
-let invSnap = { count: 0, notable: [], at: 0 }
-let lastItemCount = -1 // S7 H2: total carried-item count from the previous snap (a delta = a VERIFIED inventory change). Separate from invSnap.count (consumed by the death recorder).
-// (progAnchor - the S7 H1 anti-spin anchor - moved to telemetry.js with the rest of the
-// progress latch; recordDeath resets it through telemetry.resetProgressAnchor().)
-function snapInventory (bot) {
-  try {
-    const items = bot.inventory ? bot.inventory.items() : []
-    const worn = []
-    for (const s of ['head', 'torso', 'legs', 'feet']) { const it = bot.inventory && bot.inventory.slots[bot.getEquipmentDestSlot(s)]; if (it) worn.push(it.name) }
-    if (!items.length && !worn.length) return
-    const notable = items.filter(i => /_(pickaxe|axe|sword|shovel|hoe|helmet|chestplate|leggings|boots)$|_ingot$|^diamond|^emerald/.test(i.name)).map(i => i.name)
-    const count = items.reduce((s, i) => s + i.count, 0) + worn.length
-    // FIX #16: bulk BUILD materials (logs/planks/wood/cobble/stone) tallied so grave-worth can
-    // credit a grave full of wood, not just "notable" gear - a meaningful stash below the generic
-    // count>=10 bulk bar was abandoned. This tally is build-only, so junk (dirt/seeds) never trips it.
-    const build = items.filter(i => /_log$|_planks$|_wood$|^cobblestone$|^stone$|^cobbled_deepslate$|^deepslate$/.test(i.name)).reduce((s, i) => s + i.count, 0)
-    invSnap = { count, notable: notable.concat(worn), build, at: Date.now() }
-    // H2: any total-count change (craft/withdraw/deposit/pickup/eat/toss) is verified progress.
-    if (lastItemCount !== -1 && count !== lastItemCount) touchProgress('itemDelta')
-    lastItemCount = count
-  } catch {}
-}
+// ---- death ledger lives in grave.js -------------------------------------------------
+// The ledger, the carried-items snapshot and the grave selectors moved there; the pure
+// decisions live in grave-policy.js. Two thin wrappers stay here because they touch THIS
+// file's state: recordDeath (grave.js returns { abortLongOp }, we own buildAbort) and
+// trackTick further down (it orchestrates the death snapshot with telemetry).
+const { persistDeath, snapInventory, bestGrave, unretrievedGraves, worthwhileGrave, gravesSnapshot } = grave
 function recordDeath (info) {
-  info.items = (Date.now() - invSnap.at < 90000) ? { count: invSnap.count, notable: invSnap.notable.slice(0, 12), build: invSnap.build || 0 } : { count: 0, notable: [], build: 0 }
-  invSnap = { count: 0, notable: [], at: 0 } // consumed - the NEXT death starts naked until a new snap
-  telemetry.resetProgressAnchor() // S7 H1: the respawn teleport must re-anchor cleanly (a huge displacement is not progress)
-  deathLedger.push(info)
-  if (deathLedger.length > 16) deathLedger.shift()
-  lastDeath = info
-  persistDeath()
-  // A death ABORTS a standalone gather/provision: the loop has no death handling of its
-  // own and kept "gathering" from the respawn point through the night (verified on test
-  // server: count went NEGATIVE, then a 14-death carousel). Builds handle death via
-  // markBuildInterrupted/resume; this covers the op/brain-issued long ops.
-  const act = telemetry.activityInfo()
-  if (act && /^(gather|provision)$/.test(act.name)) { buildAbort = true }
-}
-// graveValue / graveWorthIt / graveUrgency / graveUrgencyRank / graveCompare now live in
-// grave-policy.js (pure, destructured at the top of this file). The LEDGER stays here.
-// The grave worth going back for: unretrieved, reachable (not lava), urgency-then-richest first.
-// (task #18: an about-to-despawn grave outranks a richer one that can still wait; expired graves -
-// past 1.5x the despawn window - drop off the candidate list, but are NEVER auto-marked retrieved:
-// only a physical visit that confirms absence marks 'gone', or the 24h ledger expiry reaps them.)
-function bestGrave () {
-  const now = Date.now()
-  const c = deathLedger.filter(d => !d.retrieved && !d.dangerous && graveWorthIt(d) && now - (d.at || 0) < 24 * 3600 * 1000 && graveUrgency(d, now).tier !== 'expired')
-  c.sort((a, b) => graveCompare(a, b, now))
-  return c[0] || null
-}
-function unretrievedGraves () { return deathLedger.filter(d => !d.retrieved && !d.dangerous && graveWorthIt(d)).length } // only graves actually worth a trip
-// Is there a WORTHWHILE, reachable death-drop to go recover right now? The respawn handler
-// fires recovery on this BEFORE re-mining from scratch (gear-up-critical: it kept dropping
-// iron/tools then re-mining instead of walking back for them). Returns {x,y,z,items} or null.
-function worthwhileGrave () { const g = bestGrave(); return g ? { x: g.x, y: g.y, z: g.z, items: (g.items && g.items.notable) || [], value: graveValue(g) } : null }
-// shouldChaseGrave (the SAFE+FED survival gate for a corpse run) now lives in grave-policy.js.
-// graveLootVerdict (did the loot attempt genuinely empty the grave) now lives in grave-policy.js.
-// GRAVES SNAPSHOT (S4, DESIGN §5): export the death ledger in the plain-data shape the pure
-// scheduler consumes (scheduler.pickJob / admissible read snap.graves[]). Walks the ledger with
-// the SAME worth+age filter as bestGrave - but INCLUDING dangerous graves (the shape carries the
-// flag; the scheduler filters on it) - and the exact min(botDist, homeDist) XZ math of
-// shouldChaseGrave. `ledger` defaults to the module deathLedger; the parameter is the OFFLINE-TEST
-// seam (inject a fixture array, no fs / recordDeath ceremony). `now` defaults to Date.now().
-// Never throws - a malformed entry is skipped defensively by the field reads.
-function gravesSnapshot ({ pos, home, now, ledger } = {}) {
-  const led = Array.isArray(ledger) ? ledger : deathLedger
-  const t = now != null ? now : Date.now()
-  const graves = []
-  for (const d of led) {
-    if (!d || d.retrieved || !graveWorthIt(d) || t - (d.at || 0) >= 24 * 3600 * 1000) continue
-    const u = graveUrgency(d, t) // task #18 despawn budget (safe when GRAVE_URGENT off / clock unset)
-    if (u.tier === 'expired') continue // past 1.5x the despawn window - stop chasing a ghost (never auto-marked retrieved)
-    const dBot = pos ? Math.hypot(d.x - pos.x, d.z - pos.z) : Infinity
-    const dHome = home ? Math.hypot(d.x - home.x, d.z - home.z) : Infinity
-    const near = Math.min(dBot, dHome) // exact min(bot, home) of shouldChaseGrave; scheduler skips a null-dist grave
-    const notable = (d.items && d.items.notable) || []
-    const hasGear = notable.some(n => /^(iron|diamond|netherite|golden)_|_(helmet|chestplate|leggings|boots)$/.test(n)) // verbatim realGear regex from graveWorthIt
-    graves.push({ x: d.x, y: d.y, z: d.z, at: d.at || 0, dist: isFinite(near) ? near : null, value: graveValue(d), dangerous: !!d.dangerous, hasGear, remainMs: u.remainMs, tier: u.tier })
-  }
-  // deathsRecent: deaths in the last 20 min, REGARDLESS of retrieved (a reclaimed grave was still a
-  // death - the ratchet signal). CAVEAT: the process-restart load above drops retrieved entries, so
-  // this UNDER-counts across restarts; acceptable (it only biases the degraded signature toward LESS
-  // aggressive, and S5's ladder re-derives).
-  const deathsRecent = led.filter(d => d && t - (d.at || 0) < 20 * 60000).length
-  return { graves, deathsRecent }
+  const { abortLongOp } = grave.recordDeath(info)
+  if (abortLongOp) buildAbort = true // a death aborts a standalone gather/provision (it has no death handling of its own)
 }
 // activityInfo now lives in telemetry.js (destructured at the top of this file).
 
@@ -1314,9 +1214,9 @@ async function handle (bot, line, opts = {}) {
       // done (it used to say "grabbed what i could" after picking up nothing, forever).
       const d = bestGrave()
       if (!d) {
-        const burned = deathLedger.find(x => !x.retrieved && x.dangerous)
+        const burned = grave.ledger().find(x => !x.retrieved && x.dangerous)
         if (burned) { burned.retrieved = true; persistDeath(); return `i died in lava/fire at ${burned.x},${burned.y},${burned.z} - my stuff burned up, not walking back into that` }
-        const junk = deathLedger.find(x => !x.retrieved && !x.dangerous)
+        const junk = grave.ledger().find(x => !x.retrieved && !x.dangerous)
         if (junk) { junk.retrieved = true; persistDeath(); return `i died with nothing worth going back for - letting it go` }
         return "i haven't died recently - nothing to go get"
       }
@@ -3170,7 +3070,7 @@ async function resumeBuild (bot) {
     try {
       const S = require('./scheduler.js')
       const now = Date.now()
-      const recent = deathLedger.filter(d => d && now - (d.at || 0) < 20 * 60000)
+      const recent = grave.ledger().filter(d => d && now - (d.at || 0) < 20 * 60000)
       if (recent.length >= Number(process.env.SPIRAL_N || 3) && S.withinDeathZone(resumeJob.at, recent.map(d => ({ x: d.x, z: d.z })))) {
         dbg('resume: death spiral + build site in a recent death cluster - holding the build (kept on disk)')
         return { deferred: true, recovering: true }
@@ -3198,7 +3098,7 @@ async function resumeBuild (bot) {
   try {
     // Only claim a death when one actually happened - this same flow also runs after a
     // plain process restart, and "i died" with no death confused the operator (live).
-    const justDied = lastDeath && Date.now() - (lastDeath.at || 0) < 120000
+    const ld = grave.lastDeathInfo(); const justDied = ld && Date.now() - (ld.at || 0) < 120000
     // "back online" only on a GENUINE reconnect (first resume this process); a re-arm retry on an
     // already-online bot stays quiet so it doesn't spam the line every 2 min. A death always announces.
     if (justDied) say(`i died - heading back to finish the build at ${job.at.x},${job.at.y},${job.at.z}`)
