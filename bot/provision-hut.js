@@ -31,6 +31,7 @@ const { loadWorldMem, saveWorldMem, listInfra, rememberInfra, forgetInfra, recal
 
 // The provisioning layer, resolved at CALL time (see the late-binding note above).
 const P = () => require('./provision.js')
+const S = () => require('./provision.js').__siblings // refactor fix: reach the __siblings-bridge walkStaged
 
 let dbgSink = null // forwarded from provision.js's setDebugSink
 function setDebugSink (fn) { dbgSink = fn }
@@ -356,7 +357,7 @@ async function furnishHut (bot, hut, { isStopped = () => false, say = () => {} }
     }
     const kb = knownBed()
     if (kb && !insideHutBox(kb, hut) && Math.hypot(kb.x - hut.x, kb.z - hut.z) <= 150 && (bot.health || 20) >= 12 && !isNight(bot)) {
-      await P().walkStaged(bot, kb.x, kb.z, { isStopped, range: 4, timeoutMs: 120000 })
+      await S().walkStaged(bot, kb.x, kb.z, { isStopped, range: 4, timeoutMs: 120000 })
       const bblk = bot.findBlock({ matching: b => /_bed$/.test(b.name), maxDistance: 6 })
       if (bblk) {
         try {
@@ -374,7 +375,7 @@ async function furnishHut (bot, hut, { isStopped = () => false, say = () => {} }
     }
     const bedItem = (bot.inventory ? bot.inventory.items() : []).find(i => /_bed$/.test(i.name))
     if (bedItem) {
-      await P().walkStaged(bot, hut.x + 2, hut.z + 2, { isStopped, range: 4, timeoutMs: 120000 })
+      await S().walkStaged(bot, hut.x + 2, hut.z + 2, { isStopped, range: 4, timeoutMs: 120000 })
       // try up to 3 candidate pairs, VERIFYING the bed actually stands each time - a
       // phantom-swallowed placeBlock left the bed silently in the pack (live, no log line)
       const cells = hutFreeCells(bot, hut)
@@ -711,7 +712,7 @@ async function recallAndReach (bot, kind, blockId, maxDist, reach) {
     const known = recallInfra(kind, bot.entity.position, maxDist)
     if (!known) return null
     dbg('  remembered ' + kind + ' at ' + known.x + ',' + known.y + ',' + known.z + ' - reusing it instead of placing a new one')
-    await P().walkStaged(bot, known.x, known.z, { range: 10, timeoutMs: 60000 })
+    await S().walkStaged(bot, known.x, known.z, { range: 10, timeoutMs: 60000 })
     const blk = bot.blockAt(new Vec3(known.x, known.y, known.z))
     if (!blk || blk.type !== blockId) { dbg('  remembered ' + kind + ' is gone - forgetting it'); forgetInfra(kind, known); continue }
     if (await reach(blk)) return blk

@@ -33,6 +33,7 @@ const { hutAnchor, insideOwnStructure, hasSolidCeiling } = provHut
 
 // The provisioning layer, resolved at CALL time (see the note above).
 const P = () => require('./provision.js')
+const S = () => require('./provision.js').__siblings // refactor fix: reach __siblings-bridge fns (walkStaged, resolveBankCell, ensureTorches)
 
 let dbgSink = null // forwarded from provision.js's setDebugSink
 function setDebugSink (fn) { dbgSink = fn }
@@ -170,7 +171,7 @@ async function withdrawSeedsFromBank (bot, want, { near = null, isStopped = () =
   const have = countItem(bot, 'wheat_seeds')
   if (farm.seedBankWithdrawAmount(Infinity, have, want) <= 0) return have // pack already has `want`
   try {
-    const anchor = near || P().resolveBankCell(bot) || hutAnchor() ||
+    const anchor = near || S().resolveBankCell(bot) || hutAnchor() ||
       (bot.entity && bot.entity.position ? { x: Math.round(bot.entity.position.x), z: Math.round(bot.entity.position.z) } : null)
     // craft:false -> pure bank WITHDRAW only (wheat_seeds is not craftable; acquire would refuse to
     // gather anyway, but craft:false skips the reconcile/chest-read churn and can't throw outward).
@@ -196,7 +197,7 @@ async function gatherSeedsNear (bot, want, { isStopped = () => false, near = nul
       const dir = [[1, 0], [-1, 0], [0, 1], [0, -1]][legs % 4]
       const tx = Math.round(bot.entity.position.x + dir[0] * 32); const tz = Math.round(bot.entity.position.z + dir[1] * 32)
       dbg('  seeds: no grass in 48 - roaming a leg to ' + tx + ',' + tz + ' to find grass for seeds')
-      try { await P().walkStaged(bot, tx, tz, { isStopped, range: 6, timeoutMs: 40000 }) } catch {}
+      try { await S().walkStaged(bot, tx, tz, { isStopped, range: 6, timeoutMs: 40000 }) } catch {}
       g = searchGrass()
     }
     if (!g) break
@@ -213,7 +214,7 @@ async function gatherSeedsNear (bot, want, { isStopped = () => false, near = nul
 
 async function placeFarmTorches (bot, cells, { isStopped = () => false } = {}) {
   if (!cells || !cells.length) return 0
-  if (countItem(bot, 'torch') < 1) { try { await P().ensureTorches(bot, 4) } catch {} } // craft a few if coal+stick on hand; best-effort
+  if (countItem(bot, 'torch') < 1) { try { await S().ensureTorches(bot, 4) } catch {} } // craft a few if coal+stick on hand; best-effort
   if (countItem(bot, 'torch') < 1) { dbg('  wheat farm: no torches on hand (skipping lighting - establishment not blocked)'); return 0 }
   const cropCols = new Set(cells.map(c => c.x + ',' + c.z))
   // spaced anchors (~6b apart) so torches cover perimeter + interior without clustering.
@@ -373,7 +374,7 @@ async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () =
     const known = recallInfra('water', bot.entity.position, 250) // the discovered pond can be >120 out (sweep ring 96/144)
     if (known && !isStopped()) {
       dbg('  wheat farm: no water in sight - walking to remembered pond at ' + known.x + ',' + known.z)
-      try { await P().walkStaged(bot, known.x, known.z, { isStopped, range: 6, timeoutMs: 150000 }) } catch {}
+      try { await S().walkStaged(bot, known.x, known.z, { isStopped, range: 6, timeoutMs: 150000 }) } catch {}
       waters = findWaters()
       // ONLY forget the remembered pond if we actually ARRIVED near it and it's genuinely
       // gone - a trek that fell short (blocked path) must NOT erase a good remembered pond
@@ -724,7 +725,7 @@ async function tendWheatFarm (bot, { isStopped = () => false, say = () => {} } =
   }
   const mcData = require('minecraft-data')(bot.version)
   const wheatId = mcData.blocksByName.wheat.id
-  await P().walkStaged(bot, m.wheatFarm.x, m.wheatFarm.z, { isStopped, range: 6, timeoutMs: 120000 })
+  await S().walkStaged(bot, m.wheatFarm.x, m.wheatFarm.z, { isStopped, range: 6, timeoutMs: 120000 })
   // TEND-SIDE SEED TOP-UP (FARM_SEED_TOPUP, §5.4): replantCropCell bails seedless, so a seed-
   // starved plot decays. Count the cells that need (re)seeding - 'gone' cells + the under-target
   // shortfall - and if the pack is short, gather from the grass beside the plot BEFORE the
@@ -995,7 +996,7 @@ async function plantGrove (bot, home, logItem, { isStopped = () => false, say = 
   // anchor shifted +24 south of the original (pre-leveling) plot: the operator ordered
   // the messy first orchard torn down and future ones built on cleanly prepared ground
   const gx = Math.floor(avoid ? avoid.x2 + 8 : home.x + 18); const gz = Math.floor(home.z) + 24
-  await P().walkStaged(bot, gx, gz, { isStopped, range: 6, timeoutMs: 90000 })
+  await S().walkStaged(bot, gx, gz, { isStopped, range: 6, timeoutMs: 90000 })
   if (isStopped()) return 0
   const baseY = Math.floor(bot.entity.position.y) - 1 // plot level = the ground we stand on
   const cols = Math.min(4, Math.max(2, Math.ceil(Math.sqrt(max))))
