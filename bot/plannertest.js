@@ -261,6 +261,27 @@ t('smeltFuelPlan: SMART off -> today plank numbers byte-for-byte (no charcoal ev
   assert.strictEqual(fp.needPlanks, Math.ceil(64 / 1.5) + 2 + 2, 'flag off nets coal then planks the remainder')
 })
 
+// #66 FUEL_PROVISION (PURE): how many coal-family pieces to withdraw from the bank before a smelt,
+// bank-first, given {smeltCount, packFuelUnits, bankCoal}. Flag-independent (the gate lives in
+// provisionSmeltFuel), so this passes under both FUEL_PROVISION regimes.
+t('fuelBankWithdrawAmount: sizes the bank coal withdraw from the smelt shortfall (bank-first)', () => {
+  const { fuelBankWithdrawAmount } = require('./provision.js')
+  // empty pack, need 32 items smelted: 32/8 = 4 coal, full bank covers it
+  assert.strictEqual(fuelBankWithdrawAmount(32, 0, 64, 8), 4, 'empty pack, 32 items -> withdraw 4 coal')
+  // pack already carries 16 units of fuel: only the 16-unit shortfall (ceil(16/8)=2) is drawn
+  assert.strictEqual(fuelBankWithdrawAmount(32, 16, 64, 8), 2, 'pack has 16 units -> only 2 coal for the remainder')
+  // non-multiple shortfall rounds UP (never leave 1 item uncovered)
+  assert.strictEqual(fuelBankWithdrawAmount(4, 0, 64, 8), 1, '4 items -> 1 coal (round up)')
+  // bank short: capped at what the bank holds, wood fallback covers the rest
+  assert.strictEqual(fuelBankWithdrawAmount(80, 0, 3, 8), 3, 'bank has 3 -> withdraw all 3, wood covers the rest')
+  // pack already covered -> 0 (no bank trip), never negative
+  assert.strictEqual(fuelBankWithdrawAmount(8, 16, 64, 8), 0, 'pack over-covered -> 0, never negative')
+  // unknown bank stock (null) -> request the full shortfall
+  assert.strictEqual(fuelBankWithdrawAmount(64, 0, null, 8), 8, 'unknown bank -> full 8-coal shortfall')
+  // coal_block smelts 80 items each -> one block covers a 64-item smelt
+  assert.strictEqual(fuelBankWithdrawAmount(64, 0, 64, 80), 1, 'coal_block (80/pc) -> 1 block for 64 items')
+})
+
 // INTEGRATION: a stone smelt with no coal. SMART on (default) plans a charcoal smelt ORDERED
 // BEFORE the stone smelt (charcoal is burned by it); SMART off plans no charcoal (legacy planks).
 // Branches on the env flag so this passes under both settings (proves the byte-for-byte rollback).

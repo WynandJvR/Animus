@@ -89,7 +89,7 @@ function ok (cond, label) { eq(!!cond, true, label) }
 // The split is only safe while that surface is unchanged AND not a stale copy.
 {
   const pub = Object.keys(provision).filter(k => k !== '__siblings')
-  eq(pub.length, 153, 'facade: provision.js still exports exactly 153 public names')
+  eq(pub.length, 154, 'facade: provision.js still exports exactly 154 public names')
 
   const moved = [
     [worldMemory, ['listInfra', 'rememberInfra', 'forgetInfra', 'recordWedge', 'listWedges', 'ownInfraAnchors',

@@ -37,7 +37,7 @@ const { survivalState, survivalNeed, mayDoProgress, activeJobInfo, schedulerStat
 const { JUNK_RE, _maintaining, _maintStop, _maintState, isMaintaining, stopMaintenance, _setMaintaining, cleanupScaffold, dumpJunk, safekeepSweep, spareKitToBank, maintenancePass } = provMaintain
 const { DEADLOCK_HP, DEADLOCK_MAX_NOFOOD, DEADLOCK_FAILS, DEADLOCK_RESET_COOLDOWN_MS, DEADLOCK_FALL_H, SUICIDE_EXIT_OPEN_SKY, SUICIDE_FALLBACK_DEATH, SUICIDE_DROWN, _deadlockFails, _deadlockResetting, _noteDeadlockProgress, noteDeadlockReset, deadlockResetDue, deadlockResetState, sampleColumnForSky, reachOpenSky, deadlockDieByFall, suicideByDrown, suicideByPitDrop, deadlockFallbackDeath, deadlockSuicideReset, _recoveringHp, recoverHp, isRecoveringHp, _resting, restUntilSafe, isResting, sleepInBedHere, nightRest, nightRestInner, boundedHold, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, RUNG_EXECUTORS, recoveryReadyNow, _recoveringDegraded, recoverFromDegraded, isRecoveringDegraded } = provRecovery
 const { DEFEND_WHEN_HIT_ON, NIGHT_FROZEN_MS, NIGHT_OVERLONG_MS, _nightStart, _todSeen, lastFlood, _sheltering, isSheltering, shelterSite, SHELTER_FARM_R, shelterFarmConflict, inWaterNow, ensureAshore, nearRecentFlood, findDiggableDryCell, scoutForWater, armorPieceCount, underArmored, lowHpCalm, shelterNeeded, nightStuck, nightRestWanted, sealShaft, digTorchAlcove, digInForNight, pickOpenSkyCell } = provShelter
-const { _foodFloorState, RAW_COOKABLE, FOOD_ANIMALS, LEATHER_ANIMALS, RISKY_EAT, ROD_SPIDERS, DFOOD_DEEP, DFOOD_FAR, hasFood, foodCount, needsFood, nearestFoodAnimal, eatFromPackToComfortable, eatBestFood, eatUp, bakeBreadFromWheat, cookRawMeat, fishingEnabled, ensureFishingRod, fishForFood, huntForFood, huntSpiderForString, gatherLeather, ensureFoodSupply, needFoodSupply, bankFoodFirst, courierFoodToBank, foodPlanNow, topUpFoodForPlan, isSecuringFood, escalateFoodFloor, secureFood, secureFoodInner, scoutForFood, scoutHunt } = provFood
+const { _foodFloorState, _setFoodPlanHint, RAW_COOKABLE, FOOD_ANIMALS, LEATHER_ANIMALS, RISKY_EAT, ROD_SPIDERS, DFOOD_DEEP, DFOOD_FAR, hasFood, foodCount, needsFood, nearestFoodAnimal, eatFromPackToComfortable, eatBestFood, eatUp, bakeBreadFromWheat, cookRawMeat, fishingEnabled, ensureFishingRod, fishForFood, huntForFood, huntSpiderForString, gatherLeather, ensureFoodSupply, needFoodSupply, bankFoodFirst, courierFoodToBank, foodPlanNow, topUpFoodForPlan, isSecuringFood, escalateFoodFloor, secureFood, secureFoodInner, scoutForFood, scoutHunt } = provFood
 const { FACING_OFF, resolveBankCell, isBankStand, bankStandFor, gotoChest, placeStationInInterior, ensureChest, placeChestOriented, healBankDouble, chestCounts, depositMaterials, withdrawItem, migrateChestInto, consolidateBank, ownInfraCells, lonelyFurnace, consolidateFurnaces, litterPatrol } = provBank
 const { digShaftDown, digStaircaseUp, climbMovements, climbToSurface, pillarUpTo, mineTunnel, placeTorch, ensureTorches, miningPicks, bestPick, workingPickCount, workingMiningPick, carriedPickUsesLeft, craftOneFromInv, craftStonePickHere, ensureMiningKit, digStaircaseDown, enterExistingMine, branchMine, grabNearbyOre, mineDanger } = provMining
 const { PLANTABLE_GROUND, WHEAT_FARM_TARGET, farmFootprintHas, cropExclusionStep, cropPlaceExclusion, inAvoidBox, boneMealBlock, tillCell, withdrawSeedsFromBank, gatherSeedsNear, placeFarmTorches, levelPlotCell, ensureWheatFarm, replantCropCell, tendWheatFarm, hasStandingFarm, saplingFor, saplingCount, plantSaplingNear, boneMealSapling, fishSaplings, prepOrchardCell, plantGrove } = provFarm
@@ -805,6 +805,23 @@ function smeltFuelPlan (count, holdings = {}, opts = {}) {
   // legacy / small-smelt: cover the whole remainder with planks (byte-for-byte with today)
   const needPlanks = Math.ceil(uncovered / perPlank) + 2 + 2 * nWant
   return { useCoal: coalUnits > 0, makeCharcoal: 0, charcoalPlanks: 0, needPlanks }
+}
+
+// #66 FUEL_PROVISION (default ON, =0 byte-for-byte). Before a smelt fails its fuel preflight, the
+// bot must PROVISION fuel through the resource model (bank-first), the same withdraw-first gap the
+// seed fix (#59) closed for wheat_seeds: coal sat in the bank while the smelt threw "0 fuel aboard".
+const FUEL_PROVISION = process.env.FUEL_PROVISION !== '0'
+
+// PURE decision: how many coal-family pieces to WITHDRAW from the bank before a smelt of `smeltCount`
+// items, given the fuel UNITS already aboard the pack and the banked coal count. Each piece smelts
+// `unitsPerPiece` items (coal/charcoal 8, coal_block 80). Bank-first, bounded, never negative; a null
+// bankCoal means "unknown stock - request the full shortfall" (acquire/withdrawItems only pull what's
+// really there). Mirrors farm.seedBankWithdrawAmount. Offline-testable, no bot / no I/O.
+function fuelBankWithdrawAmount (smeltCount, packFuelUnits, bankCoal, unitsPerPiece = 8) {
+  const shortfallUnits = Math.max(0, (smeltCount || 0) - (packFuelUnits || 0))
+  if (shortfallUnits <= 0) return 0
+  const needPieces = Math.ceil(shortfallUnits / (unitsPerPiece || 8))
+  return Math.max(0, Math.min(bankCoal == null ? needPieces : bankCoal, needPieces))
 }
 
 function isPlank (name) { return /_planks$/.test(name) }
@@ -3357,6 +3374,53 @@ async function preflightFuelCraft (bot, shortfallUnits) {
   } catch { /* best-effort */ }
 }
 
+// #66 FUEL_PROVISION: withdraw-first fuel sourcing before a smelt. The pack has ZERO fuel but the
+// hut bank holds coal (and/or planks/logs) - so PROVISION it through the resource model, bank-first,
+// in order: (1) banked coal/charcoal/coal_block, sized from the smelt shortfall via the shared
+// unitsOf/fuelBankWithdrawAmount math; (2) if still short, banked WOOD (planks are direct fuel,
+// packFuelUnits counts them; withdrawn logs are turned into planks by preflightFuelCraft right after
+// this returns). Reuses resources.acquire(craft:false) = pure bank WITHDRAW (never gathers/crafts
+// here). Bounded + fail-safe: an unreachable/empty bank just leaves the pack as-is and the preflight
+// shrinks/fails honestly as before. FUEL_PROVISION=0 -> caller skips this entirely (byte-for-byte).
+async function provisionSmeltFuel (bot, count, opts = {}) {
+  if (!FUEL_PROVISION) return
+  const isStopped = opts.isStopped || (() => false)
+  const say = opts.say || (() => {})
+  const res = require('./resources.js')
+  const near = opts.near || opts.home || resolveBankCell(bot) || hutAnchor() ||
+    (bot.entity && bot.entity.position ? { x: Math.round(bot.entity.position.x), z: Math.round(bot.entity.position.z) } : null)
+
+  // 1) banked coal-family first. withdrawItems skips the walk for a fresh-empty chest, so trying all
+  // three is bounded: after the first read refreshes the cache, absent fuels cost no extra walk.
+  for (const fuel of ['coal', 'charcoal', 'coal_block']) {
+    if (isStopped() || count - packFuelUnits(bot) <= 0) return
+    const add = fuelBankWithdrawAmount(count, packFuelUnits(bot), null, unitsOf(fuel))
+    if (add <= 0) continue
+    const have = countItem(bot, fuel)
+    try { await res.acquire(bot, fuel, have + add, { near, craft: false, isStopped, say }) } catch (e) { dbg('  smelt fuel: bank withdraw ' + fuel + ' failed (' + e.message + ')') }
+    const got = countItem(bot, fuel) - have
+    if (got > 0) dbg('  smelt fuel: withdrew ' + got + ' ' + fuel + ' from the bank (bank-first)')
+  }
+  if (isStopped() || count - packFuelUnits(bot) <= 0) return
+
+  // 2) still short -> WOOD is valid fuel. Discover the plank/log NAMES the bank holds from cheap
+  // cached totals (no forced chest walks), then withdraw planks first (direct fuel), logs next.
+  let totals = {}
+  try { totals = await res.totalCounts(bot, { near, cachedOnly: true }) } catch {}
+  const pack = inventoryCounts(bot)
+  const banked = n => Math.max(0, (totals[n] || 0) - (pack[n] || 0))
+  const woodNames = Object.keys(totals).filter(n => /_planks$/.test(n) && banked(n) > 0)
+    .concat(Object.keys(totals).filter(n => /_log$/.test(n) && banked(n) > 0))
+  for (const wood of woodNames) {
+    if (isStopped() || count - packFuelUnits(bot) <= 0) break
+    const add = Math.max(1, Math.ceil((count - packFuelUnits(bot)) / unitsOf(wood)))
+    const have = countItem(bot, wood)
+    try { await res.acquire(bot, wood, have + add, { near, craft: false, isStopped, say }) } catch (e) { dbg('  smelt fuel: bank withdraw ' + wood + ' failed (' + e.message + ')') }
+    const got = countItem(bot, wood) - have
+    if (got > 0) dbg('  smelt fuel: using ' + wood + ' as fuel - withdrew ' + got + ' from the bank')
+  }
+}
+
 // #26: verify input + fuel are aboard BEFORE opening a furnace (and before ensureFurnaces eats
 // the input cobble). ONE bounded input gather (120s, gatherable inputs only) + a plank-from-logs
 // fuel craft, then SHRINK the smelt to what's coverable instead of opening a furnace that stalls
@@ -3371,6 +3435,12 @@ async function smeltPreflight (bot, output, input, count, opts = {}) {
     haveIn = countItem(bot, input)
   }
   let fuelUnits = packFuelUnits(bot)
+  // #66: WITHDRAW-FIRST fuel. Bring banked coal/wood aboard before the plank-from-logs craft (which
+  // only converts logs already carried) and before failing the preflight. No-op when FUEL_PROVISION=0.
+  if (fuelUnits < count && !isStopped()) {
+    await provisionSmeltFuel(bot, count, opts)
+    fuelUnits = packFuelUnits(bot)
+  }
   if (fuelUnits < count && !isStopped()) {
     await preflightFuelCraft(bot, count - fuelUnits)
     fuelUnits = packFuelUnits(bot)
@@ -3791,7 +3861,7 @@ const HUT_FURNITURE = /chest$|barrel$|furnace$|smoker$|crafting_table$|_bed$|_do
 // Read chest contents as { name: count } (build materials the chest is holding).
 // (chestCounts moved to provision-bank.js)
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, smeltFuelPlan, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, breachDryPocket, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, boundedHold, recoverFromDegraded, isRecoveringDegraded, deadlockResetDue, deadlockResetState, pickOpenSkyCell, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, markBedUnusable, bedHeld, gearupState, gearupResult, gearupShouldArmBackoff, proactiveGearupGate, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, noteWaterCrossing, lonelyFurnace, consolidateFurnaces, litterPatrol, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, planTrekRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, smeltFuelPlan, fuelBankWithdrawAmount, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, breachDryPocket, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, boundedHold, recoverFromDegraded, isRecoveringDegraded, deadlockResetDue, deadlockResetState, pickOpenSkyCell, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, markBedUnusable, bedHeld, gearupState, gearupResult, gearupShouldArmBackoff, proactiveGearupGate, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, noteWaterCrossing, lonelyFurnace, consolidateFurnaces, litterPatrol, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, planTrekRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
   maintenancePass, isMaintaining, stopMaintenance, _setMaintaining, courierFoodToBank, safekeepSweep, spareKitToBank, recoveryReadyNow, cropExclusionStep, cropPlaceExclusion, farmFootprintHas, hazardStepExclusion, waterStepExclusion, deepWaterUnderfoot, gatherSeedsNear,
   activeJobInfo, stopSurvivalJob, escalateFoodFloor, _foodFloorState,
   wildTerrainMovements, trekMovements, DIGGABLE_NATURAL, STRUCTURE_RE, canBreakNaturally,
