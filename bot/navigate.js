@@ -58,6 +58,20 @@ const REACTIVE_MOVE_ON = process.env.NAV_REACTIVE_MOVE !== '0'
 // back into the pond while an escape owns the body.
 const WATER_ESCAPE = process.env.WATER_ESCAPE === '1'
 
+// #63 SUICIDE_DIES §B.1: the DELIBERATE-DROWN latch. During the last-resort suicide-reset
+// (provision.deadlockDieByFall's drown fallback) the bot walks into deep water ON PURPOSE and must
+// let its oxygen deplete to death - so while this latch is set the drown-escape reflexes
+// (escapeWater / escapeToDryLand) MUST NOT swim it out. The latch is OFF by default and only ever
+// true inside that bounded drown attempt (set there, cleared in a finally), so a NORMAL accidental
+// water entry ALWAYS still escapes byte-for-byte. provision.js toggles it via setDeliberateDrown().
+let deliberateDrown = false
+function setDeliberateDrown (v) { deliberateDrown = !!v }
+function isDeliberateDrown () { return deliberateDrown }
+// PURE guard predicate (unit-tested): should the drown-escape reflex SKIP escaping (i.e. leave the
+// bot submerged)? ONLY when a deliberate drown is in progress. deliberate=false => never skips, so
+// the reflex escapes exactly as today (byte-for-byte when no suicide-drown is active).
+function drownReflexSkips (deliberate) { return !!deliberate }
+
 // ---- the ONE deadline-goto ----------------------------------------------------------
 // pathfinder.goto with a hard deadline. An unreachable target can hang goto FOREVER
 // (verified live: froze a 432-block build for 10+ minutes; froze the whole brain loop).
@@ -210,6 +224,7 @@ async function jumpForAir (bot, ms = 6000, isStopped = () => false) {
 // whole call capped at deadlineMs) and it returns an HONEST bool (still wet? false) - never wedges.
 let escapingWater = false
 async function escapeWater (bot, { isStopped = () => false, deadlineMs = 35000 } = {}) {
+  if (drownReflexSkips(deliberateDrown)) { dbg('drown-escape: deliberate-drown latch set (suicide-reset) - NOT escaping, letting it drown'); return false } // #63 §B.1
   if (escapingWater) return false // re-entrant guard: one escape at a time (reflex + job loop can both call)
   escapingWater = true
   const tok = arbiter.beginManeuver('drown-escape', arbiter.PRIORITY.SURVIVE, deadlineMs + 5000)
@@ -243,6 +258,7 @@ function isEscapingWater () { return escapingWater }
 // onGround/dry-feet success test treading water can never satisfy (design §2a/§2b). Bounded ladder,
 // whole call <=deadlineMs (default 25s); returns an HONEST !feetInWater bool - never wedges.
 async function escapeToDryLand (bot, { goalDir = null, isStopped = () => false, deadlineMs = 25000 } = {}) {
+  if (drownReflexSkips(deliberateDrown)) { dbg('escapeToDryLand: deliberate-drown latch set (suicide-reset) - NOT escaping, letting it drown'); return false } // #63 §B.1
   const dl = Date.now() + deadlineMs
   const sample = (x, y, z) => { try { const b = bot.blockAt(new Vec3(x, y, z)); return b && b.name } catch { return null } }
   const solidAt = (x, y, z) => { try { const b = bot.blockAt(new Vec3(x, y, z)); return !!b && b.boundingBox === 'block' && !/water|lava/.test(b.name) } catch { return false } }
@@ -1292,4 +1308,4 @@ function honestFail (lastErr, counts, label, recoveryMs, reflexWaitMs) {
   return e
 }
 
-module.exports = { navigateTo, navigateToPreempt, gotoOnce, openNearbyDoor, crossOwnDoor, crossVerdict, enterStructure, exitStructure, swimToShore, escapeWater, escapeToDryLand, isEscapingWater, headInWater, feetInWater, jumpForAir, isNavigating, isRecovering, isForceUnsticking, forceUnstick, setDebugSink, detectPit, goalWasChanged, reactiveMove, reactiveTarget, reactiveDone }
+module.exports = { navigateTo, navigateToPreempt, gotoOnce, openNearbyDoor, crossOwnDoor, crossVerdict, enterStructure, exitStructure, swimToShore, escapeWater, escapeToDryLand, isEscapingWater, headInWater, feetInWater, jumpForAir, isNavigating, isRecovering, isForceUnsticking, forceUnstick, setDebugSink, detectPit, goalWasChanged, reactiveMove, reactiveTarget, reactiveDone, setDeliberateDrown, isDeliberateDrown, drownReflexSkips }

@@ -6141,6 +6141,12 @@ const DEADLOCK_FAILS = Number(process.env.DEADLOCK_FAILS || 4)    // K consecuti
 const DEADLOCK_FALL_H = Number(process.env.DEADLOCK_FALL_H || 6)  // pillar height for the lethal fall
 const DEADLOCK_RESET_COOLDOWN_MS = Number(process.env.DEADLOCK_RESET_COOLDOWN_MS || 600000) // hard anti-loop gap
 const DEADLOCK_MAX_NOFOOD = Number(process.env.DEADLOCK_MAX_NOFOOD || 5) // back off after N resets that gained no food
+// #63 SUICIDE_DIES (default on): make the suicide-reset actually DIE when it can't pillar-to-fall
+// under its own roof. §A robustly reaches OPEN SKY before pillaring; §B falls back to DROWN then
+// PIT-DROP when open sky is unreachable. Each `=0` -> today's fall-only-then-abort byte-for-byte.
+const SUICIDE_EXIT_OPEN_SKY = process.env.SUICIDE_EXIT_OPEN_SKY !== '0' // §A: reach open sky (ring at r8-12), not just a single 6-block step
+const SUICIDE_FALLBACK_DEATH = process.env.SUICIDE_FALLBACK_DEATH !== '0' // §B: drown / pit-drop when pillar+fall can't be set up
+const SUICIDE_DROWN = process.env.SUICIDE_DROWN !== '0' // §B.1 sub-guard: the deliberate-drown fallback (arms the navigate reflex latch)
 let _deadlockFails = 0          // consecutive "all rungs tried" cycles observed AT the deadlock state
 let _deadlockResetting = false  // re-entrancy guard while the stash+die runs
 
@@ -6329,15 +6335,219 @@ async function deadlockSuicideReset (bot, { isStopped = () => false, say = () =>
   } finally { _deadlockResetting = false }
 }
 
+// #63 SUICIDE_DIES §A (PURE, unit-tested): given a list of candidate cells each already world-
+// sampled + tagged { solidCeiling, standable }, return the FIRST that is genuine OPEN SKY and
+// stand-able (!solidCeiling && standable), else null. The suicide-reset uses this to choose where
+// to walk before pillaring for the lethal fall. Pure -> testable without a live bot.
+function pickOpenSkyCell (cells) {
+  if (!Array.isArray(cells)) return null
+  for (const c of cells) { if (c && !c.solidCeiling && c.standable) return c }
+  return null
+}
+
+// #63 §A: world-sample the column at (x,z) near surfaceY. Find the top stand-able cell (solid non-
+// fluid floor with 2 air above) within a small vertical window, and whether that cell is inside our
+// own hut or has a SOLID ceiling within `ceil` blocks (leaves ignored - a canopy isn't a roof).
+// Returns { x, y, z, standable, solidCeiling }; a not-standable column reports standable:false.
+function sampleColumnForSky (bot, x, z, surfaceY, ceil) {
+  const nameAt = (ax, ay, az) => { try { const b = bot.blockAt(new Vec3(ax, ay, az)); return b && b.name } catch { return null } }
+  let foundY = null
+  for (let dy = 3; dy >= -4; dy--) {
+    const fy = surfaceY + dy
+    const floor = nameAt(x, fy - 1, z); const feet = nameAt(x, fy, z); const head = nameAt(x, fy + 1, z)
+    if (floor && !AIRISH(floor) && !/water|lava/.test(floor) && AIRISH(feet) && AIRISH(head)) { foundY = fy; break }
+  }
+  if (foundY == null) return { x, y: surfaceY, z, standable: false, solidCeiling: true }
+  let solidCeiling = !!insideOwnStructure(bot, new Vec3(x, foundY, z))
+  if (!solidCeiling) {
+    for (let dy = 2; dy <= ceil; dy++) { const n = nameAt(x, foundY + dy, z); if (n && !AIRISH(n) && !/_leaves$/.test(n)) { solidCeiling = true; break } }
+  }
+  return { x, y: foundY, z, standable: true, solidCeiling }
+}
+
+// #63 SUICIDE_DIES §A: robustly get the bot to an OPEN-SKY, stand-able cell before pillaring for the
+// lethal fall (pillarUpTo refuses under our own roof). The live bug: a single 6-block step-out
+// failed to clear a big hut. Instead we sample a RING of candidate columns at radius 8-12 around the
+// hut anchor (8 compass bearings), rank them with pickOpenSkyCell, walk to the first genuinely open-
+// sky one, and RE-VERIFY open sky on arrival with the bot-position predicate (the authority) before
+// returning. Bounded (~deadlineMs, default 60s). Returns whether the bot ends genuinely under open
+// sky; the caller falls through to §B when it can't. SUICIDE_EXIT_OPEN_SKY=0 -> not called.
+async function reachOpenSky (bot, { isStopped = () => false, home = null, deadlineMs = 60000 } = {}) {
+  const deadline = Date.now() + deadlineMs
+  const CEIL = DEADLOCK_FALL_H + 2
+  const openHere = () => !insideOwnStructure(bot) && !hasSolidCeiling(bot, CEIL, { ignoreLeaves: true })
+  if (openHere()) return true
+  const anchor = home || hutAnchor() || knownBed()
+  if (!anchor) return openHere()
+  const bearings = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]
+  for (let r = 8; r <= 12 && Date.now() < deadline && !isStopped(); r += 2) {
+    const surfaceY = Math.floor(bot.entity.position.y)
+    const cands = []
+    for (const [bx, bz] of bearings) {
+      const len = Math.hypot(bx, bz) || 1
+      const cx = Math.round(anchor.x + (bx / len) * r); const cz = Math.round(anchor.z + (bz / len) * r)
+      cands.push(sampleColumnForSky(bot, cx, cz, surfaceY, CEIL))
+    }
+    const pick = pickOpenSkyCell(cands)
+    if (!pick) continue
+    dbg('deadlock-reset: walking out to open-sky cell ' + pick.x + ',' + pick.y + ',' + pick.z + ' (r=' + r + ')')
+    try { await walkStaged(bot, pick.x, pick.z, { isStopped: () => isStopped() || Date.now() > deadline, range: 2, timeoutMs: Math.max(8000, Math.min(30000, deadline - Date.now())) }) } catch {}
+    if (openHere()) return true
+  }
+  return openHere()
+}
+
+// #63 SUICIDE_DIES §B: FALLBACK deaths when pillar+fall can't be set up (still under our own roof).
+// Tries, in order, each independently bounded and abort-to-hold on failure: (1) DROWN in remembered
+// deep water, (2) PIT-DROP into a dug shaft beside the hut. Returns true only if the bot actually
+// died. SUICIDE_FALLBACK_DEATH=0 -> not called (caller aborts as today). Never wedges.
+async function deadlockFallbackDeath (bot, { isStopped = () => false, home = null, say = () => {} } = {}) {
+  if (SUICIDE_DROWN) {
+    try { if (await suicideByDrown(bot, { isStopped, home, say })) return true } catch (e) { dbg('deadlock-reset: drown fallback threw (' + e.message + ')') }
+  }
+  try { if (await suicideByPitDrop(bot, { isStopped, home, say })) return true } catch (e) { dbg('deadlock-reset: pit-drop fallback threw (' + e.message + ')') }
+  return false
+}
+
+// #63 §B.1: DROWN on purpose. Walk to the nearest remembered DEEP (>=2) water, drive into it, then
+// clear all controls (crucially NOT jump) so the bot SINKS and its head stays submerged - the
+// navigate deliberate-drown latch stops the drown-escape reflex from swimming it out - and wait for
+// oxygen to deplete to death. Bounded (~90s total). The latch is set in the try and cleared in the
+// finally, so a normal accidental water entry ALWAYS still escapes. Returns true only if it died.
+async function suicideByDrown (bot, { isStopped = () => false, home = null, say = () => {} } = {}) {
+  if (!bot.entity) return false
+  const here = bot.entity.position.floored()
+  const w = recallInfra('water', here, 300)
+  if (!w) { dbg('deadlock-reset: no remembered water for the drown fallback'); return false }
+  // Verify it is genuinely DEEP (>=2 water blocks stacked at/under the remembered surface cell).
+  let depth = 0
+  for (let dy = 0; dy < 6; dy++) { const b = bot.blockAt(new Vec3(w.x, w.y - dy, w.z)); if (b && b.name === 'water') depth++; else break }
+  if (depth < 2) { dbg('deadlock-reset: remembered water at ' + w.x + ',' + w.z + ' is only ' + depth + ' deep - not drownable'); return false }
+  const deadline = Date.now() + 90000
+  say('resetting - no open sky to fall; drowning in the pond to reset')
+  try { await walkStaged(bot, w.x, w.z, { isStopped: () => isStopped() || Date.now() > deadline, range: 2, timeoutMs: 45000 }) } catch {}
+  if (isStopped()) return false
+  let died = false
+  const onDeath = () => { died = true }
+  bot.once('death', onDeath)
+  try {
+    navigate.setDeliberateDrown(true) // arm the reflex latch: escapeWater/escapeToDryLand now no-op
+    try { bot.pathfinder.setGoal(null) } catch {}
+    // Drive toward the water centre until the head is submerged (jump OFF so buoyancy can't lift us),
+    // then release and let the sink hold us under. Re-nudge if we drift out of the water.
+    const centre = new Vec3(w.x + 0.5, w.y, w.z + 0.5)
+    const submergeDl = Math.min(deadline, Date.now() + 25000)
+    while (!died && Date.now() < submergeDl && !isStopped() && !navigate.headInWater(bot)) {
+      try { await bot.lookAt(centre, true) } catch {}
+      bot.setControlState('forward', true)
+      bot.setControlState('jump', false)
+      bot.setControlState('sneak', true) // hold position low; never swim up
+      await new Promise(r => setTimeout(r, 150))
+    }
+    bot.clearControlStates()
+    // Wait out the drowning (oxygen ~ a few seconds, then ~2 hp/s; lethal fast at the hp<=2 trigger).
+    while (!died && Date.now() < deadline && !isStopped()) {
+      if (!navigate.headInWater(bot) && !navigate.feetInWater(bot)) { dbg('deadlock-reset: drifted out of the water before drowning - drown fallback failed'); break }
+      await new Promise(r => setTimeout(r, 250))
+    }
+    if (died) { dbg('deadlock-reset: drowned on purpose - respawn resets to full at the bed'); return true }
+    dbg('deadlock-reset: drown did not kill within bound - ABORTING this fallback'); return false
+  } finally { navigate.setDeliberateDrown(false); try { bot.removeListener('death', onDeath) } catch {}; try { bot.clearControlStates() } catch {} }
+}
+
+// #63 §B.2: PIT-DROP. Dig a ~6-deep OPEN shaft in the column one step FORWARD (never on the build
+// footprint / farm), then step into it so the >=5b fall kills at hp<=2. Because reach caps a single-
+// position dig at ~3-4 blocks, we deepen in two stages: dig the front column from the surface, drop
+// ONE into our own cell to regain reach, dig the front column deeper, then pillar the ONE block back
+// up so we stand at the shaft rim and step off. Bounded; refuses build/farm/protected blocks and
+// aborts to hold on any snag. Returns true only if the bot actually died.
+async function suicideByPitDrop (bot, { isStopped = () => false, home = null, say = () => {} } = {}) {
+  if (!bot.entity) return false
+  const deadline = Date.now() + 60000
+  // Get clear of the hut apron + interior so we never dig the doorstep/footprint.
+  try { await stepOffApron(bot, { isStopped, home, tag: 'suicide-pit' }) } catch {}
+  if (insideOwnStructure(bot) || onHutApron(bot)) { dbg('deadlock-reset: could not step clear of the hut for a pit - ABORTING this fallback'); return false }
+  const feet = bot.entity.position.floored()
+  // Pick the first of the 4 compass directions whose forward column is diggable natural terrain and
+  // NOT on the wheat-farm footprint, from feet level down 6.
+  const DEPTH = Math.max(6, DEADLOCK_FALL_H)
+  let dir = null
+  for (const [dx, dz] of mining.DIRS) {
+    const fx = feet.x + dx; const fz = feet.z + dz
+    let ok = true
+    for (let dy = -1; dy >= -DEPTH; dy--) {
+      const cell = new Vec3(fx, feet.y + dy, fz)
+      if (scaffold.onFarmFootprint(cell) || farmFootprintHas(cell) || insideOwnStructure(bot, cell)) { ok = false; break }
+      const b = bot.blockAt(cell)
+      if (b && /water|lava/.test(b.name)) { ok = false; break }
+      if (b && !AIRISH(b.name) && !canBreakNaturally(b)) { ok = false; break } // protected/build block in the shaft
+    }
+    if (ok) { dir = { dx, dz, fx, fz }; break }
+  }
+  if (!dir) { dbg('deadlock-reset: no diggable pit column beside the hut - ABORTING this fallback'); return false }
+  const digAt = async (v) => {
+    const b = bot.blockAt(v)
+    if (!b || AIRISH(b.name)) return true
+    if (/water|lava/.test(b.name) || !canBreakNaturally(b)) return false
+    if (bot.canDigBlock && !bot.canDigBlock(b)) return false
+    const tool = toolForBlock(bot, b.name)
+    if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
+    try { await bot.dig(b) } catch { return false }
+    return true
+  }
+  say('resetting - digging a pit to drop into')
+  // Stage A: dig the reachable top of the front shaft (feet-1 .. feet-3).
+  for (let dy = -1; dy >= -3 && Date.now() < deadline; dy--) { if (!(await digAt(new Vec3(dir.fx, feet.y + dy, dir.fz)))) { dbg('deadlock-reset: pit stage A blocked - ABORTING this fallback'); return false } }
+  // Descend ONE into our own cell to regain reach for the lower shaft.
+  const under = new Vec3(feet.x, feet.y - 1, feet.z)
+  if (!(scaffold.onFarmFootprint(under) || farmFootprintHas(under) || insideOwnStructure(bot, under))) { await digAt(under) }
+  try { await stepInto(bot, under, { isStopped }) } catch {}
+  const lowY = Math.floor(bot.entity.position.y)
+  // Stage B: from the lower stance, dig the front shaft deeper (down to feet.y-DEPTH).
+  for (let y = lowY - 1; y >= feet.y - DEPTH && Date.now() < deadline; y--) { if (!(await digAt(new Vec3(dir.fx, y, dir.fz)))) break }
+  // Climb the ONE block back to rim level so the step-off falls the full shaft depth.
+  if (Math.floor(bot.entity.position.y) < feet.y) { try { await pillarUpTo(bot, feet.y, { isStopped: () => isStopped() || Date.now() > deadline }) } catch {} }
+  // Measure the achieved open drop in the front column from the rim.
+  let drop = 0
+  for (let dy = -1; dy >= -(DEPTH + 1); dy--) { const b = bot.blockAt(new Vec3(dir.fx, feet.y + dy, dir.fz)); if (!b || AIRISH(b.name)) drop++; else break }
+  const lethalMin = (bot.health != null ? bot.health : DEADLOCK_HP) + 3
+  if (drop < lethalMin || Math.floor(bot.entity.position.y) < feet.y) { dbg('deadlock-reset: pit only ' + drop + 'b deep (need ' + lethalMin + ') or not at rim - ABORTING this fallback'); return false }
+  // Step off the rim into the shaft and fall.
+  let died = false
+  const onDeath = () => { died = true }
+  bot.once('death', onDeath)
+  try {
+    dbg('deadlock-reset: pit ' + drop + 'b deep at ' + dir.fx + ',' + dir.fz + ' - stepping in to fall')
+    try { bot.pathfinder.setGoal(null) } catch {}
+    bot.clearControlStates()
+    try { await bot.lookAt(new Vec3(dir.fx + 0.5, feet.y - 1, dir.fz + 0.5), true) } catch {}
+    bot.setControlState('forward', true)
+    const t0 = Date.now()
+    while (!died && Date.now() < deadline && Date.now() - t0 < 12000) {
+      await new Promise(r => setTimeout(r, 100))
+      if (Math.floor(bot.entity.position.y) < feet.y) bot.setControlState('forward', false) // dropped - just fall
+    }
+    if (died) { dbg('deadlock-reset: pit-dropped on purpose - respawn resets to full at the bed'); return true }
+    dbg('deadlock-reset: pit fall did not kill within bound - ABORTING this fallback'); return false
+  } finally { try { bot.removeListener('death', onDeath) } catch {}; try { bot.clearControlStates() } catch {} }
+}
+
 // Deliberate, bounded death by FALL (the most controllable method - no reflex fights it, unlike
 // drowning which WATER_ESCAPE would resist). Get to open sky near home (pillarUpTo refuses under
 // our own roof), pillar ~DEADLOCK_FALL_H, then step off the edge -> a >=3b fall is lethal at hp<=2.
 // Bounded 30s; returns true only if the bot actually died, else aborts to holding (never wedges).
+// #63 SUICIDE_DIES: §A robustly reaches open sky first (reachOpenSky); if still roofed, §B falls
+// back to drown/pit-drop before the honest abort. Both flags =0 -> today's fall-only-then-abort.
 async function deadlockDieByFall (bot, { isStopped = () => false, home = null, say = () => {} } = {}) {
   if (!bot.entity) return false
   const deadline = Date.now() + 30000
-  // Clear our own roof/overhang: pillarUpTo no-ops inside our structure, so step a few blocks out.
-  if (insideOwnStructure(bot) || hasSolidCeiling(bot, 6, { ignoreLeaves: true })) {
+  // Clear our own roof/overhang: pillarUpTo no-ops inside our structure, so reach open sky first.
+  if (SUICIDE_EXIT_OPEN_SKY) {
+    if (insideOwnStructure(bot) || hasSolidCeiling(bot, DEADLOCK_FALL_H + 2, { ignoreLeaves: true })) {
+      try { await reachOpenSky(bot, { isStopped, home, deadlineMs: 60000 }) } catch (e) { dbg('deadlock-reset: reachOpenSky threw (' + e.message + ')') }
+    }
+  } else if (insideOwnStructure(bot) || hasSolidCeiling(bot, 6, { ignoreLeaves: true })) {
+    // legacy single 6-block step-out (byte-for-byte when SUICIDE_EXIT_OPEN_SKY=0)
     const h = home || hutAnchor() || knownBed()
     if (h && bot.entity) {
       const dx = bot.entity.position.x - h.x; const dz = bot.entity.position.z - h.z
@@ -6346,7 +6556,17 @@ async function deadlockDieByFall (bot, { isStopped = () => false, home = null, s
       try { await walkStaged(bot, ox, oz, { isStopped: () => isStopped() || Date.now() > deadline, range: 2, timeoutMs: 60000 }) } catch {}
     }
   }
-  if (insideOwnStructure(bot)) { dbg('deadlock-reset: still under my own roof - can\'t pillar to fall, ABORTING to hold'); return false }
+  if (insideOwnStructure(bot)) {
+    // Can't pillar-to-fall under our own roof. §B: try the fallback deaths before the honest abort.
+    if (SUICIDE_FALLBACK_DEATH) {
+      dbg('deadlock-reset: still under my own roof - trying fallback deaths (drown / pit-drop)')
+      let fdied = false
+      try { fdied = await deadlockFallbackDeath(bot, { isStopped, home, say }) } catch (e) { dbg('deadlock-reset: fallback death threw (' + e.message + ')') }
+      if (fdied) { dbg('deadlock-reset: died on purpose (fallback) - respawn resets to full at the bed'); return true }
+      dbg('deadlock-reset: fallback deaths could not kill - ABORTING to hold'); return false
+    }
+    dbg('deadlock-reset: still under my own roof - can\'t pillar to fall, ABORTING to hold'); return false
+  }
   const startY = Math.floor(bot.entity.position.y)
   const targetY = startY + Math.max(4, DEADLOCK_FALL_H)
   let died = false
@@ -9402,7 +9622,7 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, smeltFuelPlan, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, breachDryPocket, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, boundedHold, recoverFromDegraded, isRecoveringDegraded, deadlockResetDue, deadlockResetState, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, markBedUnusable, bedHeld, gearupState, gearupResult, gearupShouldArmBackoff, proactiveGearupGate, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, noteWaterCrossing, lonelyFurnace, consolidateFurnaces, litterPatrol, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, planTrekRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, smeltFuelPlan, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, breachDryPocket, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, boundedHold, recoverFromDegraded, isRecoveringDegraded, deadlockResetDue, deadlockResetState, pickOpenSkyCell, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, markBedUnusable, bedHeld, gearupState, gearupResult, gearupShouldArmBackoff, proactiveGearupGate, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, noteWaterCrossing, lonelyFurnace, consolidateFurnaces, litterPatrol, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, planTrekRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
   maintenancePass, isMaintaining, stopMaintenance, _setMaintaining, courierFoodToBank, safekeepSweep, spareKitToBank, recoveryReadyNow, cropExclusionStep, cropPlaceExclusion, farmFootprintHas, hazardStepExclusion, waterStepExclusion, deepWaterUnderfoot, gatherSeedsNear,
   activeJobInfo, stopSurvivalJob, escalateFoodFloor, _foodFloorState,
   wildTerrainMovements, trekMovements, DIGGABLE_NATURAL, STRUCTURE_RE, canBreakNaturally,
