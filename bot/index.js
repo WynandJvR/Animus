@@ -61,143 +61,18 @@ refreshOllamaModels(); setInterval(refreshOllamaModels, 30000).unref?.()
 // (The old browser dashboard is gone - the Animus GUI is the control surface now.
 // It uses the same local API: /state, /log, /brain, /config, /op/cmd.)
 
-// short-term memory of chat addressed to the bot, surfaced in /state. Each
-// message is offered for up to MAX_DELIVERIES ticks so the brain reliably gets a
-// chance to respond (not dropped after one poll), yet bounded so it can't loop
-// forever. A reply (say) clears all pending immediately.
-const recentChat = []
-// separate, noise-free record of ALL player chat (so it isn't flooded out of
-// the main event log by the bot's own follow/scan commands). Seen via /chat.
-const chatLog = []
-function recordChatLog (line) { chatLog.push(line); if (chatLog.length > 40) chatLog.shift() }
-const MAX_DELIVERIES = parseInt(process.env.CHAT_MAX_DELIVERIES || '6', 10)
-let lastAddressedAt = 0 // when a player last addressed the bot (gates brain chatter)
-let lastReplyAt = 0     // when the bot last spoke a reply
-// gaze/attention state (see the gaze reflex below): who last spoke to us (eye
-// contact while replying), and a window where a manual look/turn owns the head.
-let gazeFocusPlayer = null
-let gazeFocusAt = 0
-let gazeSuppressUntil = 0
-function noteManualLook (line) { // a deliberate look/turn should not be overridden by gaze
-  if (/^(look|turn|lookbehind)\b/i.test(String(line).trim())) gazeSuppressUntil = Date.now() + 6000
-}
-function recordChat (from, text) {
-  recentChat.push({ from, text, ts: Date.now(), deliveries: 0 })
-  if (recentChat.length > 6) recentChat.shift()
-  lastAddressedAt = Date.now()
-  gazeFocusPlayer = from; gazeFocusAt = Date.now() // look at whoever just addressed us
-}
-// Resolve the OLDEST still-pending message - one fulfilling action answers one
-// request. Clearing ALL of them dropped a second player's message unanswered when
-// two people spoke in the same window; now each message gets its own turn.
-function clearPendingChat () {
-  const pending = recentChat.filter(c => c.deliveries < MAX_DELIVERIES)
-  if (pending.length) pending[0].deliveries = MAX_DELIVERIES
-}
-// Outgoing-chat gate: a "say" is only actually sent if it isn't a duplicate and
-// the cooldown elapsed - kills repeated/again-spam chat and server anti-spam
-// kicks. Returns null to send, or a reason string to suppress.
-// Brain chat comes in two kinds: a REPLY (a player addressed it since it last
-// spoke) is always allowed; an UNPROMPTED quip ("vibe") is allowed at most once
-// per VIBE_CHAT_MS so the bot feels alive without ever spamming itself into a
-// kick. Set VIBE_CHAT_MS huge to restore the old hard-block on unprompted chat.
-const CHAT_COOLDOWN_MS = parseInt(process.env.CHAT_COOLDOWN_MS || '2500', 10)
-// Budget for UNPROMPTED quips (a direct reply is never throttled). 90s felt spammy,
-// 150s STILL felt spammy on the live server ("i see a bunch of wolves..." every couple
-// of minutes) - a real player idles quietly. One ambient line per ~10 min feels alive.
-const VIBE_CHAT_MS = parseInt(process.env.VIBE_CHAT_MS || '600000', 10)
-// The spam is characteristically NARRATION - announcing what it sees or that it's
-// waiting. Those lines carry zero information for players; block the genre outright
-// for unprompted chat (replies are never filtered - if you ASK what it sees, it answers).
-const NARRATION_RE = /^(i (see|spot|notice|hear|found) |i'?m (still here|just|waiting|around|chilling)|just (waiting|hanging|chilling)|let me know if|anyone (need|want)|nothing (going on|happening)|all quiet)/i
-let lastSayAt = 0
-let lastVibeAt = 0
-let lastBusyReplyAt = 0 // rate-limits the body's own "can't right now - busy" replies
-// Content de-dupe. A fixated model re-emits near-identical lines ("why are there so
-// many wolves here") every tick; the timing gates alone let one identical copy through
-// each window, so players see the same message on repeat. Track the last few sent
-// lines and suppress near-duplicates of UNPROMPTED chatter (a direct reply is never
-// blocked, but is recorded so the next quip can't just echo it).
-const RECENT_SAY_MAX = 10
-const SAY_DUP_WINDOW_MS = parseInt(process.env.SAY_DUP_WINDOW_MS || '360000', 10)
-const recentSaid = [] // { norm, at }
-function normSay (line) {
-  return String(line).replace(/^\s*say\b/i, '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim()
-}
-function tooSimilar (a, b) {
-  if (!a || !b) return false
-  if (a === b) return true
-  if (a.length > 6 && (a.includes(b) || b.includes(a))) return true // one contains the other
-  const A = new Set(a.split(' ')), B = new Set(b.split(' '))
-  let inter = 0
-  for (const t of A) if (B.has(t)) inter++
-  const uni = new Set([...A, ...B]).size
-  return uni > 0 && inter / uni >= 0.5 // Jaccard: mostly the same words (0.5 catches more rephrasings)
-}
-function isDupSay (norm) {
-  const now = Date.now()
-  for (const s of recentSaid) if (now - s.at < SAY_DUP_WINDOW_MS && tooSimilar(norm, s.norm)) return true
-  return false
-}
-function recordSaid (norm) {
-  if (!norm) return
-  recentSaid.push({ norm, at: Date.now() })
-  while (recentSaid.length > RECENT_SAY_MAX) recentSaid.shift()
-}
-function gateSay (line, fromBrain) {
-  if (!/^say\b/i.test(String(line).trim())) return null // not a chat line - allow
-  const now = Date.now()
-  if (now - lastSayAt < CHAT_COOLDOWN_MS) return `cooldown ${CHAT_COOLDOWN_MS}ms`
-  const norm = normSay(line)
-  // Block near-duplicates of anything said recently - covers BOTH unprompted quips and
-  // replies (the model kept answering different messages with the same sentence). Short
-  // reactions ("lol", "ok bro") are exempt so natural interjections can still repeat.
-  // A blocked reply does NOT clear the pending request, so the brain must answer again
-  // with something new instead of parroting.
-  const substantial = norm.split(' ').filter(Boolean).length >= 3
-  if (substantial && isDupSay(norm)) return 'duplicate (already said that - say something new)'
-  if (fromBrain && lastAddressedAt <= lastReplyAt) {
-    // UNPROMPTED quip (nobody addressed it). This is the ONLY chatter we throttle -
-    // replies below are always free so conversation feels natural. Stay SILENT while
-    // busy working (building/gathering - it should focus, not narrate), and otherwise
-    // only an occasional line per VIBE_CHAT_MS.
-    if (commands.isBusy && commands.isBusy()) return 'busy - no idle chatter'
-    if (NARRATION_RE.test(norm)) return 'narration - players can see the world themselves, say something worth saying or nothing'
-    if (now - lastVibeAt < VIBE_CHAT_MS) return `vibe budget ${Math.ceil((VIBE_CHAT_MS - (now - lastVibeAt)) / 1000)}s`
-    lastVibeAt = now; lastSayAt = now
-    recordSaid(norm)
-    return null
-  }
-  // a REPLY (someone addressed it) - always allowed, natural conversation
-  lastSayAt = now; lastReplyAt = now
-  clearPendingChat() // a reply resolves the pending request(s)
-  recordSaid(norm)
-  return null
-}
-
-// Block spamming the same world-changing command - caps any single impactful
-// command (give/build) to once per IMPACT_COOLDOWN_MS, so a fixated model can't
-// dupe items or re-build the same thing on a loop. Returns a reason or null.
-// World-edit/admin block list is shared from access.js so both bodies stay in sync.
+// Chat, the outgoing say-gate and gaze/attention state live in chat-gate.js. The event
+// handlers and the gaze reflex below consume it; gateSay takes commands.isBusy injected.
+const chatGate = require('./chat-gate.js')
+const { recordChatLog, recordChat, clearPendingChat, noteManualLook, gateImpactful, MAX_DELIVERIES } = chatGate
+const gateSay = (line, fromBrain) => chatGate.gateSay(line, fromBrain, { isBusy: commands.isBusy })
+// Command-gate vocabularies stay here (they are about COMMANDS, not chat). The world-edit/
+// admin block list is shared from access.js so both bodies stay in sync.
 const CHEAT_CMDS = access.CHEAT_CMDS
-// Perception commands are PREPARATORY ("look first, then answer"): they don't
-// resolve a player's request, so a pending message stays offered until the brain
-// actually answers. Any OTHER command (follow/come/equip/say/...) IS the response,
-// so it clears the pending request - stops one "follow me" from re-firing for
-// every redelivery tick while still letting scan->say sequences complete.
-const PREP_CMDS = /^(scan|find|entities|block|look|state|inventory)\b/i
-const IMPACTFUL = /^(give|fill|setblock|clear|wall|tower|house|drop|toss)\b/i
-const IMPACT_COOLDOWN_MS = parseInt(process.env.IMPACT_COOLDOWN_MS || '8000', 10)
-let lastImpact = ''
-let lastImpactAt = 0
-function gateImpactful (line) {
-  const l = String(line).trim()
-  if (!IMPACTFUL.test(l)) return null
-  const now = Date.now()
-  if (l === lastImpact && now - lastImpactAt < IMPACT_COOLDOWN_MS) return `repeat blocked ${IMPACT_COOLDOWN_MS}ms`
-  lastImpact = l; lastImpactAt = now
-  return null
-}
+// Perception commands are PREPARATORY ("look first, then answer"): they don't resolve a
+// player's request, so a pending message stays offered until the brain actually answers. Any
+// OTHER command (follow/come/equip/say/...) IS the response, so it clears the pending request.
+const PREP_CMDS = /^(scan|find|entities|block|look|state|inventory)/i
 
 const log = []
 // Persistent event log: the in-memory buffer dies on restart and the console dies
@@ -2126,7 +2001,7 @@ if (process.env.GAZE !== '0') {
   setInterval(() => {
     if (!bot.entity) return
     try {
-      if (Date.now() < gazeSuppressUntil) return            // a manual look/turn owns the head
+      if (Date.now() < chatGate.gazeState().suppressUntil) return            // a manual look/turn owns the head
       if (bot.pathfinder && bot.pathfinder.isMoving()) return // pathfinder aims toward travel
       const now = Date.now()
       // 1) just hurt -> face the attacker (a hostile at any range, or a close player)
@@ -2137,8 +2012,9 @@ if (process.env.GAZE !== '0') {
       // 2) hostile in melee range -> auto-defend owns the head, don't fight it
       if (gazeNearest(gazeIsHostile, 4.5)) return
       // 3) someone just spoke to us -> eye contact while it's fresh
-      if (gazeFocusPlayer && now - gazeFocusAt < 5000) {
-        const p = bot.players[gazeFocusPlayer] && bot.players[gazeFocusPlayer].entity
+      const gz = chatGate.gazeState()
+      if (gz.player && now - gz.at < 5000) {
+        const p = bot.players[gz.player] && bot.players[gz.player].entity
         if (p) { gazeLookAt(p); return }
       }
       // 4) otherwise attend to the nearest player, or glance at nearby motion
@@ -2250,7 +2126,7 @@ const server = http.createServer((req, res) => {
       // Any fulfilling response clears it early (a say, or any non-PREP_CMDS command
       // via /cmd -> clearPendingChat); a PREPARATORY perception command keeps it
       // offered so a "look first, then answer" sequence can still complete.
-      const pending = recentChat.filter(c => c.deliveries < MAX_DELIVERIES)
+      const pending = chatGate.pendingChat()
       s.unanswered = pending.map(c => ({ from: c.from, text: c.text }))
       // Only the BRAIN's poll (?brain=1) spends the delivery budget. A generic
       // /state read (the dashboard polls every ~1s) must NOT drain it, or a
@@ -2260,7 +2136,7 @@ const server = http.createServer((req, res) => {
     } catch (e) { return send(res, 500, `error: ${e.message}`) }
   }
   if (req.method === 'GET' && req.url === '/log') return send(res, 200, log.slice(-40).join('\n'))
-  if (req.method === 'GET' && req.url === '/chat') return send(res, 200, chatLog.slice(-40).join('\n'))
+  if (req.method === 'GET' && req.url === '/chat') return send(res, 200, chatGate.chatLogTail(40).join('\n'))
   if (req.method === 'POST' && req.url === '/cmd') {
     let data = ''
     req.on('data', c => { data += c })
@@ -2362,8 +2238,8 @@ const server = http.createServer((req, res) => {
           // If a PLAYER just asked for this (the held command is the brain answering them),
           // don't leave them on read - the BODY replies once with what it's doing. Verified
           // live: "digital go sleep" -> six silent holds and the player heard nothing.
-          if (Date.now() - lastAddressedAt < 20000 && Date.now() - lastBusyReplyAt > 30000) {
-            lastBusyReplyAt = Date.now()
+          if (chatGate.busyReplyDue(20000, 30000)) {
+            chatGate.markBusyReply()
             let doing = 'working'
             try { const a = commands.state(bot).activity; if (a && a.name) doing = a.name + (a.detail ? ' (' + a.detail + ')' : '') } catch {}
             bot.chat(`can't right now - busy with ${doing}. say "stop" first if you need me to drop it`.slice(0, 200))
