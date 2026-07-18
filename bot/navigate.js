@@ -1190,6 +1190,27 @@ function reactiveTarget (pos, opts = {}) {
   return { x: pos.x + (tx / d) * reach, y: ty, z: pos.z + (tz / d) * reach }
 }
 
+// #NN FLEE-STEER: when a retreat (awayFrom) is driving STRAIGHT into terrain (a wall/hill/water
+// directly opposite the threat) it nets ~0 and the creeper catches it (live: 'creeper avoid netted
+// only 0.0b' -> death). Pick the nearest WALKABLE direction that still increases distance from the
+// threat - slide along the wall instead of into it. Rotates the away-vector outward (0, +/-40, +/-80,
+// +/-120 deg) and returns the first cell ~2b ahead that is stand-in-able (solid floor, air at feet+
+// head). Returns null only when fully boxed in (then the caller keeps the straight-away + hop). Impure
+// (samples blocks) so it lives here, not in the pure reactiveTarget. REACTIVE_FLEE_STEER=0 -> unused.
+function fleeSteerTarget (bot, pos, awayFrom, reach) {
+  const Vec = Vec3
+  const solidAt = (x, y, z) => { try { const b = bot.blockAt(new Vec(Math.floor(x), Math.floor(y), Math.floor(z))); return !!b && b.boundingBox === 'block' && !/water|lava/.test(b.name) } catch { return false } }
+  const walkable = (x, z) => { const fy = Math.floor(pos.y); return solidAt(x, fy - 1, z) && !solidAt(x, fy, z) && !solidAt(x, fy + 1, z) } // ground + air for feet+head
+  const baseAng = Math.atan2(pos.z - awayFrom.z, pos.x - awayFrom.x) // straight away from the threat
+  for (const off of [0, 0.7, -0.7, 1.4, -1.4, 2.1, -2.1]) { // ~40deg steps outward; prefers straight-away, then sideways
+    const a = baseAng + off
+    if (walkable(pos.x + Math.cos(a) * 2, pos.z + Math.sin(a) * 2)) { // a clear cell ~2b ahead in this direction
+      return { x: pos.x + Math.cos(a) * reach, y: pos.y, z: pos.z + Math.sin(a) * reach }
+    }
+  }
+  return null // fully boxed in
+}
+
 // PURE: is the reactive move DONE this tick? Retreat (`awayFrom`) completes once it has netted
 // `minClearB` from the start; approach (`toward`) once within `arriveB` of the goal. null =>
 // keep driving (the caller also stops at budget end - the fast, honest give-up). Offline-testable.
@@ -1224,9 +1245,18 @@ async function reactiveMove (bot, opts = {}) {
     if (holdJump) bot.setControlState('jump', true)
     const t0 = Date.now()
     let lastPos = start.clone(); let lastMove = Date.now()
+    const FLEE_STEER_ON = process.env.REACTIVE_FLEE_STEER !== '0' // steer a stalled retreat around terrain
+    let steerNet = 0; let steerSince = Date.now()
     while (Date.now() - t0 < budgetMs && !isStopped()) {
       const pos = bot.entity.position
-      const target = reactiveTarget(pos, { awayFrom, toward, reach })
+      let target = reactiveTarget(pos, { awayFrom, toward, reach })
+      // FLEE-STEER: a retreat wedged against a wall (net barely growing) -> aim at a clear walkable
+      // direction that still moves away, instead of grinding straight into the terrain (the flee-wedge death).
+      if (awayFrom && FLEE_STEER_ON) {
+        const netNow = Math.hypot(pos.x - start.x, pos.z - start.z)
+        if (netNow - steerNet >= 0.2) { steerNet = netNow; steerSince = Date.now() } // real progress -> keep straight away
+        else if (Date.now() - steerSince > 450) { const s = fleeSteerTarget(bot, pos, awayFrom, reach); if (s) target = s; steerSince = Date.now() } // stalled -> steer clear
+      }
       try { await bot.lookAt(new Vec3(target.x, pos.y + 1, target.z), true) } catch {} // re-aim each tick to hold the line
       await new Promise(r => setTimeout(r, 100))
       const now = bot.entity.position
