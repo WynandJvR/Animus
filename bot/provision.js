@@ -5513,6 +5513,27 @@ async function secureFoodInner (bot, opts = {}) {
   // outward legs and hold indoors (bounded); the caller / crisis reflex re-runs the whole chain
   // later. Only when it can hold and only after HOME-FOOD-FIRST was tried; food>4 (or no-hold
   // callers like the mid-trek chain) keep today's exact hunt/farm/fish/scout ordering.
+  // #57 FARM FLOOR (FARM_FLOOR, default on): fishing is dead/unreliable here, so the FARM is the
+  // ONLY renewable food - but ensureWheatFarm (establish + LEVEL the plot, #56) sits AFTER the
+  // famine-hold below, so a starving bot at low hp holds indoors and NEVER establishes it (the live
+  // hp1/food0 deadlock: unarmored -> degraded -> recovery owns the body -> never builds -> the farm
+  // never gets leveled -> can't ever eat). When the pack is dry and a farm site is NEAR home (not a
+  // far/deadly trek), ESTABLISH + LEVEL + plant the farm NOW - it IS the food source, exactly like
+  // the fishing floor above, and it's reachable at low hp because it's next to home. Then tend +
+  // eat in case a cell is already ripe. Bounded by ensureWheatFarm's own cell/time budget + isStopped
+  // (survival preempts). It won't feed INSTANTLY (wheat must grow) but it PLANTS the source that the
+  // next crisis harvests - breaking the deadlock. FARM_FLOOR=0 -> skip (today's hold-and-starve).
+  if (process.env.FARM_FLOOR !== '0' && !fedEnough() && foodCount(bot) < 1 && !isStopped()) {
+    const fh = home || hutAnchor() || knownBed()
+    const nearHome = !!(fh && bot.entity && Math.hypot(bot.entity.position.x - fh.x, bot.entity.position.z - fh.z) <= Number(process.env.FARM_FLOOR_RANGE || 80))
+    if (nearHome) {
+      dbg('secureFood: FARM FLOOR - food=' + bot.food + ' hp=' + (bot.health ?? 20) + ' fishing dry -> establishing/leveling the farm (the real food source)')
+      say('fishing does nothing here - building the farm so i can actually eat')
+      try { await ensureWheatFarm(bot, fh, { isStopped, say, avoid: opts.avoid }) } catch (e) { dbg('  FARM FLOOR: ensureWheatFarm failed (' + e.message + ')') }
+      try { await tendWheatFarm(bot, { isStopped, say }); await cookIfRaw(); await eatUp(bot) } catch (e) { dbg('  FARM FLOOR: tend/eat failed (' + e.message + ')') }
+      if (fedEnough()) return { fed: true, blockedOn: null }
+    }
+  }
   // #54 FAMINE_FORAGE_SAFE (default on): the famine-hold (food<=4) is meant to stop a bot from
   // marching out to DIE on a fishing trip - but at hp OK + DAY + no mob near, foraging is SAFE, and
   // holding indoors here just FREEZES the bot forever (food pinned at 4 while perfectly still ->
