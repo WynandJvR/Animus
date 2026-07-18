@@ -31,6 +31,8 @@ const provHut = require('./provision-hut.js')
 const { hutAnchor, insideOwnStructure, hasSolidCeiling } = provHut
 const provFarm = require('./provision-farm.js')
 const { hasStandingFarm, tendWheatFarm, ensureWheatFarm, WHEAT_FARM_TARGET } = provFarm
+const provShelter = require('./provision-shelter.js') // inWaterNow: don't fish from inside the pond
+const { inWaterNow } = provShelter
 const provBank = require('./provision-bank.js')
 const { resolveBankCell, isBankStand, bankStandFor, chestCounts, withdrawItem, depositMaterials } = provBank
 
@@ -280,7 +282,7 @@ async function fishForFood (bot, { isStopped = () => false, say = () => {}, targ
       if (!stand) continue
       try { await nav.navigateTo(bot, new goals.GoalBlock(stand.x, stand.y, stand.z), { timeoutMs: 20000, deadlineMs: 40000, budgets: { water: 0, pit: 0, door: 1, nudge: 1, stepout: 1 }, label: 'fish-stand' }) } catch {}
       if (isStopped()) return false
-      if (S().inWaterNow(bot)) { dbg('  fishing: arrived wet at the ' + cw.x + ',' + cw.z + ' bank - trying the next water'); continue }
+      if (inWaterNow(bot)) { dbg('  fishing: arrived wet at the ' + cw.x + ',' + cw.z + ' bank - trying the next water'); continue }
       w = cw; stood = true; break // standing DRY on the bank - cast at this water
     }
     if (!stood) { dbg('  fishing: no dry bank at any nearby water - skipping (won\'t fish from in the water)'); return false }

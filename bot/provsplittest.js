@@ -122,11 +122,18 @@ function ok (cond, label) { eq(!!cond, true, label) }
 {
   const s = provision.__siblings
   ok(s && typeof s === 'object', 'bridge: __siblings exists')
+  // shelterSite left the bridge when provision-shelter was extracted: bank and food now
+  // import it directly (no cycle in that direction). inWaterNow STAYS because provision-mining
+  // cannot import provision-shelter - shelter already requires mining, so it would be a real
+  // cycle. That asymmetry is the point: the bridge should hold only what genuinely cannot be
+  // a direct import.
   const expected = ['foodPlanNow', 'topUpFoodForPlan', '_setFoodPlanHint', 'armorPieceCount',
     'inWaterNow', 'placeFromInventory', 'scaffoldDigOK', 'walkStaged', 'KEEP_WHEN_ALL',
-    'shelterSite', 'explore', 'isSurvStopped']
+    'explore', 'isSurvStopped']
   for (const n of expected) ok(s[n] !== undefined, 'bridge: __siblings.' + n + ' resolves (not undefined)')
   ok(!Object.keys(provision).includes('walkStaged'), 'bridge: internals stay OFF the public surface')
+  ok(provision.__siblings.shelterSite === undefined, 'bridge: shelterSite LEFT the bridge (bank/food import it directly)')
+  ok(require('./provision-shelter.js').shelterSite !== undefined, 'shelter: owns shelterSite now')
 }
 
 // ---- 4. DEBUG SINK FORWARDING --------------------------------------------------------------

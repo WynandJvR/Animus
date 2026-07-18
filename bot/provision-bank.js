@@ -11,9 +11,10 @@
 // materials into gather/craft/smelt work IS provision's stated charter - banking is the
 // adjacent concern that grew inside it, not the core.
 //
-// Upward calls (ensureTable, runCraft, placeFromInventory, walkStaged, shelterSite,
-// KEEP_WHEN_ALL) resolve at CALL time: public ones through P(), internals through the
-// __siblings bridge.
+// Upward calls (ensureTable, runCraft, placeFromInventory, walkStaged, KEEP_WHEN_ALL)
+// resolve at CALL time: public ones through P(), internals through the __siblings bridge.
+// shelterSite is imported directly - provision-shelter does not require this module, so
+// there is no cycle and no reason to route it through the bridge.
 
 const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
@@ -25,6 +26,8 @@ const { AIRISH, REPLACEABLE, canBreakNaturally, countItem, inventoryCounts, tool
 const worldMemory = require('./world-memory.js')
 const { loadWorldMem, saveWorldMem, listInfra, rememberInfra, forgetInfra, recallInfra,
   recallInfraVerified, ownInfraAnchors } = worldMemory
+const provShelter = require('./provision-shelter.js') // shelterSite: a bank stand must not sit in a shelter pit
+const { shelterSite } = provShelter
 const provHut = require('./provision-hut.js')
 const { hutAnchor, insideOwnStructure, hasSolidCeiling, freeInteriorCell, stationSlot,
   onHutApron, ownHutAt, recallAndReach, insideHutBox } = provHut
@@ -54,7 +57,7 @@ function resolveBankCell (bot) {
 
 function isBankStand (feetName, headName, sideNames, hasAdjacentWater) {
   if (!hasAdjacentWater) return false // dry but landlocked - a cast can't reach water
-  return S().shelterSite.feetCellDry(feetName, headName, sideNames || [])
+  return shelterSite.feetCellDry(feetName, headName, sideNames || [])
 }
 
 function bankStandFor (bot, w) {
@@ -83,7 +86,7 @@ function bankStandFor (bot, w) {
       }
     }
   }
-  const ranked = S().shelterSite.rankByDistance(cand, bot.entity.position)
+  const ranked = shelterSite.rankByDistance(cand, bot.entity.position)
   return ranked.length ? new Vec3(ranked[0].x, ranked[0].y, ranked[0].z) : null
 }
 
