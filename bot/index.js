@@ -139,6 +139,15 @@ try {
     if (process.env.AUTO_RESUME !== '0') {
       setTimeout(async () => {
         try {
+          // NOT SPAWNED YET: the 25s below assumes a cached-token login, which is fast. A
+          // FIRST/expired-token login is a device-code flow that waits on a human, so this
+          // timer can fire while bot.entity is still undefined - and resumebuild's chat
+          // announce then throws `bot._client.chat is not a function`, which is UNCAUGHT and
+          // kills the process. run.js restarts it, prints a NEW device code, and invalidates
+          // the one being typed - an unwinnable login loop (hit live 2026-07-18).
+          // Skipping is safe: the 2-minute re-arm below already guards on bot.entity and
+          // will pick the job up as soon as we are actually in the world.
+          if (!bot.entity) { note('(resume) boot auto-resume skipped - not spawned yet (login still in progress); the re-arm will retry'); return }
           if (commands.isBusy && commands.isBusy()) return // something else already driving
           const hold = commands.resumeHoldRemaining ? commands.resumeHoldRemaining(commands.persistedResume(), Date.now()) : 0
           if (hold > 0) { note(`(resume) held (paused, ${Math.round(hold / 1000)}s left - "resumebuild" overrides)`); return }

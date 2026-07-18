@@ -2096,9 +2096,14 @@ async function handle (bot, line, opts = {}) {
       try { loadedSchem = { schem: await schematic.loadFile(saved.name, bot.version), name: saved.name } } catch (e) { return `couldn't reload schematic "${saved.name}": ${e.message}` }
       resumeJob = { schem: loadedSchem.schem, at: new Vec3(saved.at.x, saved.at.y, saved.at.z) }
       resumeDeaths = 0; buildAbort = false; buildInterrupted = false
+      // Chat defensively: this runs DETACHED (after the command already returned), so an
+      // unspawned/disconnected bot makes bot.chat throw `bot._client.chat is not a function`
+      // with nobody to catch it - which killed the process mid-login (live 2026-07-18). A
+      // failed announce must never take the bot down; the result is already in the log.
+      const sayIfUp = m => { try { if (bot.entity && bot._client) bot.chat(String(m).slice(0, 200)) } catch {} }
       resumeBuild(bot).then(r => {
-        if (r && !r.stopped && !r.deferred) bot.chat(`resumed build done: ${r.placed}/${r.total} placed`.slice(0, 200))
-      }).catch(e => bot.chat(`resume failed: ${e.message}`.slice(0, 200)))
+        if (r && !r.stopped && !r.deferred) sayIfUp(`resumed build done: ${r.placed}/${r.total} placed`)
+      }).catch(e => { dbg('resume failed: ' + e.message); sayIfUp(`resume failed: ${e.message}`) })
       return `resuming "${saved.name}" at ${saved.at.x},${saved.at.y},${saved.at.z} - heading back to finish it`
     }
 
