@@ -133,6 +133,53 @@ eq(F.barrenStep(undefined, 'other'), { strikes: 1, skip: false }, 'undefined pri
   eq(Math.round(F.scoreFarmSite({ tillable: 33, flatFrac: 1.0, distHome: 40, target: 33 }).score * 100) / 100, 7, 'scoreFarmSite: default opts match distWeight 0.75')
 }
 
+// ---- #56 FARM_FLAT_SITE: flatFrac floor on `acceptable` (reject rough/wet pond edges) ----
+{
+  // minFlatFrac opt injects the floor (testable/gated): a tillable-but-ROUGH site is NOT acceptable.
+  const rough = F.scoreFarmSite({ tillable: 33, flatFrac: 0.3, distHome: 40, target: 33 }, { minFlatFrac: 0.6 })
+  eq(rough.acceptable, false, 'FARM_FLAT_SITE: flatFrac 0.3 < floor 0.6 -> NOT acceptable (even with 33 tillable)')
+  // exactly at the floor -> acceptable.
+  eq(F.scoreFarmSite({ tillable: 33, flatFrac: 0.6, distHome: 40, target: 33 }, { minFlatFrac: 0.6 }).acceptable, true, 'FARM_FLAT_SITE: flatFrac 0.6 == floor -> acceptable')
+  eq(F.scoreFarmSite({ tillable: 33, flatFrac: 1.0, distHome: 40, target: 33 }, { minFlatFrac: 0.6 }).acceptable, true, 'FARM_FLAT_SITE: a flat site (1.0) -> acceptable')
+  // the floor still needs the tillable floor too (both must pass).
+  eq(F.scoreFarmSite({ tillable: 5, flatFrac: 1.0, distHome: 40, target: 33 }, { minFlatFrac: 0.6 }).acceptable, false, 'FARM_FLAT_SITE: flat but tillable 5 < 6 -> still NOT acceptable')
+  // FLAG/OPT OFF (minFlatFrac 0) matches today: tillable-only gate, rough sites accepted.
+  eq(F.scoreFarmSite({ tillable: 33, flatFrac: 0.3, distHome: 40, target: 33 }, { minFlatFrac: 0 }).acceptable, true, 'FARM_FLAT_SITE=0 (minFlatFrac 0): rough site accepted (today)')
+  eq(F.scoreFarmSite({ tillable: 6, flatFrac: 0, distHome: 10, target: 33 }, { minFlatFrac: 0 }).acceptable, true, 'FARM_FLAT_SITE=0: tillable 6, flat 0 -> acceptable (today)')
+  // the score term is UNCHANGED by the gate (still quality - distWeight*dist, quality += 4*flat).
+  eq(F.scoreFarmSite({ tillable: 33, flatFrac: 0.3, distHome: 40, target: 33 }, { minFlatFrac: 0.6 }).score,
+     F.scoreFarmSite({ tillable: 33, flatFrac: 0.3, distHome: 40, target: 33 }, { minFlatFrac: 0 }).score, 'FARM_FLAT_SITE: gate never changes the score, only acceptable')
+  // env fallback (no opt): FARM_FLAT_SITE=0 disables the floor; default floor 0.6 otherwise.
+  const savedSite = process.env.FARM_FLAT_SITE; const savedMin = process.env.FARM_FLAT_MIN
+  delete process.env.FARM_FLAT_SITE; delete process.env.FARM_FLAT_MIN
+  eq(F.scoreFarmSite({ tillable: 33, flatFrac: 0.3, distHome: 40, target: 33 }).acceptable, false, 'FARM_FLAT_SITE env default: floor 0.6 -> rough site NOT acceptable')
+  eq(F.scoreFarmSite({ tillable: 33, flatFrac: 0.7, distHome: 40, target: 33 }).acceptable, true, 'FARM_FLAT_SITE env default: flat 0.7 -> acceptable')
+  process.env.FARM_FLAT_SITE = '0'
+  eq(F.scoreFarmSite({ tillable: 33, flatFrac: 0.3, distHome: 40, target: 33 }).acceptable, true, 'FARM_FLAT_SITE=0 env: floor disabled -> rough site accepted (today)')
+  if (savedSite === undefined) delete process.env.FARM_FLAT_SITE; else process.env.FARM_FLAT_SITE = savedSite
+  if (savedMin === undefined) delete process.env.FARM_FLAT_MIN; else process.env.FARM_FLAT_MIN = savedMin
+}
+
+// ---- #56 FARM_EXCLUDE_YFIX: per-cell crop-footprint membership (offline predicate) --------
+{
+  // A multi-LEVEL plot (the exact bug: cells at different Y) - every cell must be protected at its
+  // OWN level, plus the farmland below (y-1) and the block above (y+1).
+  const cells = [{ x: 10, y: 64, z: 20 }, { x: 11, y: 66, z: 20 }] // two crop cells, 2 Y apart
+  eq(F.footprintHasCell(cells, 10, 64, 20), true, 'YFIX: crop cell itself excluded')
+  eq(F.footprintHasCell(cells, 10, 63, 20), true, 'YFIX: farmland under the crop (y-1) excluded')
+  eq(F.footprintHasCell(cells, 10, 65, 20), true, 'YFIX: block above the crop (y+1) excluded')
+  eq(F.footprintHasCell(cells, 11, 66, 20), true, 'YFIX: the SECOND cell at a DIFFERENT Y is excluded at its own level (the multi-level fix)')
+  eq(F.footprintHasCell(cells, 11, 65, 20), true, 'YFIX: farmland under the second cell excluded')
+  // Outside the footprint: a different column, or too far in Y, is NOT excluded.
+  eq(F.footprintHasCell(cells, 12, 64, 20), false, 'YFIX: neighbouring column (not a cell) not excluded')
+  eq(F.footprintHasCell(cells, 10, 62, 20), false, 'YFIX: y-2 below a crop cell not excluded (outside +-1)')
+  eq(F.footprintHasCell(cells, 10, 66, 20), false, 'YFIX: y+2 above a crop cell not excluded')
+  eq(F.footprintHasCell(cells, 10, 64, 21), false, 'YFIX: same x/y, different z not excluded')
+  // Empty / null footprint is never excluded.
+  eq(F.footprintHasCell([], 10, 64, 20), false, 'YFIX: empty plot -> nothing excluded')
+  eq(F.footprintHasCell(null, 10, 64, 20), false, 'YFIX: null cells -> nothing excluded')
+}
+
 // shouldResite: the full live case true + every false gate.
 {
   const opt = { margin: 8, nearHome: 112, slack: 16, minCellsFrac: 0.5 }

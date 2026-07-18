@@ -132,9 +132,15 @@ function orderBankCandidates (cands, anchor) {
 // subtracted INSIDE the score so it dominates small quality differences: at distWeight 0.75, a
 // site 20b farther needs +15 more reachable cells to win. acceptable = the site can at least feed
 // a bread cycle (tillable >= minTillable).
-function scoreFarmSite ({ tillable, flatFrac, distHome, target }, { distWeight = 0.75, minTillable = 6 } = {}) {
+function scoreFarmSite ({ tillable, flatFrac, distHome, target }, { distWeight = 0.75, minTillable = 6, minFlatFrac } = {}) {
   const quality = Math.min(tillable, target) + 4 * (flatFrac || 0)
-  return { score: quality - distWeight * distHome, acceptable: tillable >= minTillable }
+  // #56 FARM_FLAT_SITE: a site must ALSO be flat enough to level + till cheaply (rough/wet pond
+  // edges land crop cells at 2-3 Y-levels -> tills fail -> nothing grows). `minFlatFrac` opt wins
+  // (testable); else env (FARM_FLAT_SITE=0 -> no floor = today's tillable-only gate; FARM_FLAT_MIN
+  // sets the floor, default 0.6). The +4*flatFrac score term is unchanged.
+  const gate = minFlatFrac != null ? minFlatFrac
+    : (process.env.FARM_FLAT_SITE === '0' ? 0 : Number(process.env.FARM_FLAT_MIN || 0.6))
+  return { score: quality - distWeight * distHome, acceptable: tillable >= minTillable && (flatFrac || 0) >= gate }
 }
 
 // §4.6 should the farm relocate off its current site? Clearly better AND near home AND NEVER
@@ -160,4 +166,15 @@ function plotCollectRadius (cells, anchor, { base = 6, margin = 4, cap = 24 } = 
   return Math.max(base, Math.min(cap, Math.ceil(maxD) + margin))
 }
 
-module.exports = { bankUsable, BANK_DYS, cropCellState, cellHealthStep, plotShouldUnlatch, matureForHarvest, farmlandReady, tillableBank, expansionMaxed, barrenStep, orderBankCandidates, scoreFarmSite, shouldResite, plotCollectRadius }
+// §D FARM_EXCLUDE_YFIX: is (x,y,z) inside the persisted crop-cell footprint - i.e. does ANY cell
+// share the (x,z) column and sit within 1 Y of it (its farmland y-1, the crop y, or the block above
+// y+1)? PURE, per-cell (each cell protected at its OWN level, never one global cy), offline-testable.
+// The movement exclusions (cropExclusionStep/cropPlaceExclusion) build the same predicate inline as
+// a per-(x,z)->y-set map (A*-hot path); provision.farmFootprintHas (the manual-placer guard) uses THIS.
+function footprintHasCell (cells, x, y, z) {
+  if (!cells || !cells.length) return false
+  for (const c of cells) { if (c.x === x && c.z === z && Math.abs(y - c.y) <= 1) return true }
+  return false
+}
+
+module.exports = { bankUsable, BANK_DYS, cropCellState, cellHealthStep, plotShouldUnlatch, matureForHarvest, farmlandReady, tillableBank, expansionMaxed, barrenStep, orderBankCandidates, scoreFarmSite, shouldResite, plotCollectRadius, footprintHasCell }

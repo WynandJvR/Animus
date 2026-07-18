@@ -101,6 +101,14 @@ function near (pos, r, maxAgeMs) {
 }
 function count () { return reg.size }
 
+// #56 FARM_EXCLUDE_YFIX: is `pos` inside our own wheat-farm footprint (a crop cell / its farmland /
+// the block just above one)? scaffold.js had NO farm awareness (design §D), so a manual scaffold/
+// pillar placer could brick over the crops the pathfinder's cropPlaceExclusion already avoids.
+// Lazy-consults provision's wheatFarm memory; false on any error / flag off. Callers gate placement.
+function onFarmFootprint (pos) {
+  try { return require('./provision.js').farmFootprintHas(pos) } catch { return false }
+}
+
 // ---- filler policy -----------------------------------------------------------------
 // Dirt FIRST: cobble towers read as stone litter and the leveler has to shave them;
 // dirt pockets back into scaffold supply. One policy for every scaffold placer.
@@ -178,4 +186,4 @@ async function teardownVerified (bot, around, opts = {}) {
   return { ok: remaining === 0, passes: pass, removed, remaining }
 }
 
-module.exports = { beginSession, endSession, inSession, add, onPlaced, forget, isScaffold, near, count, pickFiller, teardown, teardownVerified, setDebugSink, FILLER_RE }
+module.exports = { beginSession, endSession, inSession, add, onPlaced, forget, isScaffold, near, count, onFarmFootprint, pickFiller, teardown, teardownVerified, setDebugSink, FILLER_RE }
