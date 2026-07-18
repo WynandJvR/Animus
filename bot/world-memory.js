@@ -20,6 +20,8 @@ const fs = require('fs')
 const path = require('path')
 const { Vec3 } = require('vec3')
 const routeMem = require('./route-mem.js') // PURE route/wedge geometry: replay proven treks + soft-steer around learned wedges
+const mining = require('./mining.js') // PURE depth model + branch geometry (the mine registry stores its plans)
+const arbiter = require('./arbiter.js') // PURE survival authority (the gear-up back-off consults it)
 
 // The ACTIVE BUILD ZONE, mirrored from provision.js via setBuildZone. ownInfraAnchors
 // treats the zone centre as an anchor, so wedges inside a live build site are suppressed.
@@ -301,6 +303,177 @@ function recallInfraVerified (bot, kind, pos, maxDist) {
   for (const e of list) { const d = Math.hypot(e.x - pos.x, e.z - pos.z); if (d <= maxDist && d < bd) { bd = d; best = e } }
   return best
 }
+
+// ---- REGISTRIES ALSO BACKED BY world-memory.json ------------------------------------
+// Mines, searched-cell negatives, the gear-up back-off latch and the bed/spawn record all
+// persist through loadWorldMem()/saveWorldMem() above. They lived in provision.js purely
+// because that is where everything lived; they are storage, not provisioning.
+
+// ---- mine registry ----
+// end - where to resume), branches (count done), at.
+function loadMines () { const m = loadWorldMem(); return (m.mines = m.mines || []) }
+function rememberMine (entry) {
+  const mines = loadMines()
+  const i = mines.findIndex(e => Math.hypot(e.x - entry.x, e.z - entry.z) <= 3)
+  const rec = { ...(i >= 0 ? mines[i] : {}), ...entry, at: Date.now() }
+  if (i >= 0) mines[i] = rec; else mines.push(rec)
+  if (mines.length > 8) { mines.sort((a, b) => b.at - a.at); mines.length = 8 }
+  saveWorldMem()
+  return rec
+}
+function recallMine (bot, near, maxDist, opts = {}) {
+  const now = Date.now()
+  let best = null; let bd = Infinity
+  for (const e of loadMines()) {
+    if (!mining.mineReusable(e, near, { maxDist, now, ...opts })) continue
+    const d = Math.hypot(e.x - near.x, e.z - near.z); if (d < bd) { bd = d; best = e }
+  }
+  return best
+}
+function forgetMine (entry) {
+  const m = loadWorldMem(); if (!m.mines) return
+  m.mines = m.mines.filter(e => !(Math.abs(e.x - entry.x) <= 3 && Math.abs(e.z - entry.z) <= 3))
+  saveWorldMem()
+}
+function updateMineProgress (entry, branches, tip) {
+  const mines = loadMines()
+  const i = mines.findIndex(e => Math.abs(e.x - entry.x) <= 3 && Math.abs(e.z - entry.z) <= 3)
+  if (i >= 0) { mines[i].branches = branches; if (tip) mines[i].tip = { x: tip.x, y: tip.y, z: tip.z }; mines[i].at = Date.now(); saveWorldMem() }
+}
+
+// Walk to a remembered mine's entrance and descend the EXISTING staircase to the mining
+
+// ---- searched-cell + gearup memory ----
+// NEGATIVE MEMORY (roomba rule, operator-requested): remember 32-block cells that were
+// SEARCHED AND EMPTY, and stop re-sweeping them - the blind compass kept walking the same
+// barren ground round after round. A cell un-marks when we PLANT saplings there (that's a
+// reason to come back) or after 2h (world changes - players build, trees grow).
+const SEARCH_CELL = 32
+function searchCellKey (x, z) { return Math.floor(x / SEARCH_CELL) + ',' + Math.floor(z / SEARCH_CELL) }
+function markSearched (item, pos) {
+  const m = loadWorldMem()
+  const s = m.searched = m.searched || {}
+  const l = s[item] = s[item] || {}
+  l[searchCellKey(pos.x, pos.z)] = Date.now()
+  const keys = Object.keys(l)
+  if (keys.length > 300) { keys.sort((a, b) => l[a] - l[b]); for (const k of keys.slice(0, keys.length - 300)) delete l[k] }
+  saveWorldMem()
+}
+function isSearchedDry (item, x, z) {
+  const l = (loadWorldMem().searched || {})[item] || {}
+  const t = l[searchCellKey(x, z)]
+  return !!t && Date.now() - t < 2 * 3600 * 1000
+}
+// GEAR-UP CONVERGENCE (persisted): the iron/armor bootstrap must converge, not flail.
+// Every fruitless attempt (no new piece worn, no net iron gained) widens a back-off
+// window so the same death-march doesn't re-run on every resume pass; any real progress
+// resets it. Survives restarts - the flailing was worst right after respawns.
+function gearupState () { return loadWorldMem().gearup || { fails: 0, until: 0 } }
+// PURE (#60 GEARUP_PREEMPT_EXEMPT, offline-testable): should a FINISHED gear-up attempt ARM the
+// naked back-off? A pass that made progress never arms (the caller's `progressed` branch resets it
+// instead). A no-progress pass arms UNLESS it was interrupted by a survival preempt / stop (the body
+// was taken mid-smelt) - that is not a genuine material failure (no iron obtainable, no fuel
+// sourceable, furnace unreachable, or completed-but-0-slots), and penalizing it is exactly the bug
+// that turned every crisis-timed smelt into a 12-min back-off and a permanent-naked loop. `hadMaterial`
+// is informational (both a with-material and a no-material genuine failure arm) - only progressed and
+// interrupted flip the outcome.
+function gearupShouldArmBackoff (r) {
+  const s = r || {}
+  if (s.progressed) return false
+  if (s.interrupted) return false
+  return true
+}
+// PURE (#60 GEARUP_PROACTIVE, offline-testable): may the bot proactively gear up RIGHT NOW, in a
+// SAFE window, instead of only reactively in a crisis? Fires ONLY when EVERY guard holds:
+//   !armored       - still under-armored (something to make)
+//   hasIron        - iron on hand (raw_iron/iron_ingot) or cheaply obtainable, so smelt->craft->equip
+//                    finishes without a naked mining excursion
+//   hp >= safeHp   - a real health buffer (14) so a ~40s furnace stand is not preempted 5s in
+//   fed            - not in a food crisis (the smelt loop is minutes of AFK)
+//   day            - daylight (mobs asleep) so standing at the furnace is safe
+//   atHome         - at/near the hut (furnace + bank reachable)
+//   !backoffActive - the naked back-off is not cooling us off
+// Any guard failing => don't fire (a later safe window / the crisis path handles it). This is the
+// calm-window trigger the permanent-naked bot never had: it only ever tried while already dying.
+function proactiveGearupGate (state, opts = {}) {
+  const s = state || {}
+  const safeHp = opts.safeHp != null ? opts.safeHp : 14
+  if (s.armored) return false
+  if (!s.hasIron) return false
+  if (s.hp == null || s.hp < safeHp) return false
+  if (!s.fed) return false
+  if (!s.day) return false
+  if (!s.atHome) return false
+  if (s.backoffActive) return false
+  return true
+}
+// opts.naked (bool): the attempt ended fully naked (0 pieces worn). #53 NAKED_IRON_GRACE caps a
+// naked bot's fruitless cooldown at 12 min (not 45) so it keeps trying to bootstrap armor instead
+// of sitting locked out while it dies naked. Armored/partial + flag off -> today's min(45, fails*10).
+// opts.interrupted (bool, #60 GEARUP_PREEMPT_EXEMPT): the attempt was cut short by a survival preempt
+// / stop - not a genuine failure, so skip the back-off entirely (flag off -> ignored, byte-for-byte).
+function gearupResult (progressed, opts = {}) {
+  const m = loadWorldMem()
+  const g = m.gearup = m.gearup || { fails: 0, until: 0 }
+  if (progressed) { g.fails = 0; g.until = 0 } else if (process.env.GEARUP_PREEMPT_EXEMPT !== '0' && !gearupShouldArmBackoff({ progressed, interrupted: opts.interrupted })) {
+    // #60: survival/stop took the body mid-attempt - not a genuine material failure; leave the back-off as-is.
+    dbg('gearup: attempt interrupted by survival/stop - not counting it fruitless (#60 GEARUP_PREEMPT_EXEMPT)')
+  } else {
+    g.fails++
+    const base = Math.min(45, g.fails * 10)
+    const mins = arbiter.gearupCooldownMin(g.fails, !!opts.naked, { enabled: process.env.NAKED_IRON_GRACE !== '0' })
+    g.until = Date.now() + mins * 60000
+    dbg('gearup: fruitless attempt #' + g.fails + ' - backing off ' + mins + ' min' + (mins < base ? ' (naked cap)' : ''))
+  }
+  saveWorldMem()
+}
+
+function clearSearched (item, pos) {
+  const l = (loadWorldMem().searched || {})[item]
+  if (l && l[searchCellKey(pos.x, pos.z)]) { delete l[searchCellKey(pos.x, pos.z)]; saveWorldMem() }
+}
+
+// BED MEMORY: the server knows the bot's spawn bed but never tells the client, and the
+// sleep command only scans 48 blocks around wherever the bot happens to stand - so at
+// dusk 150 blocks out it "had no bed" and dug a pit instead (7 night deaths in one
+// evening, live). Remember the bed like a player does: saved on every successful
+// sleep/spawn-set, consulted first every night.
+// Every rememberBed call site follows an actual spawn-setting action (a sleep or a
+// day bed-use), so it doubles as the "spawn last asserted" timestamp ensureSpawnBed
+
+// ---- bed + spawn-suspect memory ----
+// keys off.
+function rememberBed (pos) { const m = loadWorldMem(); m.bed = { x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z), at: Date.now() }; m.bedAssertAt = Date.now(); delete m.spawnSuspect; saveWorldMem(); _bedHold = { until: 0, key: '' } }
+function knownBed () { return loadWorldMem().bed || null }
+function forgetBed () { const m = loadWorldMem(); delete m.bed; saveWorldMem(); _bedHold = { until: 0, key: '' } }
+
+// UNUSABLE-BED HOLD (fix #14, flag SHELTER_BED_FALLBACK): sleepInBedHere's non-/monster/
+// failure is stateless, so nightRestInner re-committed every caller to a bed mineflayer had
+// just proven unusable (cant-click reach is position-deterministic) - paying a ~40s doomed
+// bed prefix each cycle and starving flee/defend. Remember, per-bed and time-bounded, that
+// THIS remembered bed just failed so nightRest pits straight away within the window. The bed
+// itself is NEVER forgotten (hold != forget - the fell-short regression guard stays); the hold
+// is cleared by expiry, a real sleep (rememberBed), or forgetBed, and never persisted (a
+// restart forgets it => one extra bed attempt, which is safe). now-injectable for the test.
+let _bedHold = { until: 0, key: '' }
+function bedHoldUntil () { return _bedHold.until } // read-only: provision logs the remaining hold
+function bedKey (pos) { return Math.round(pos.x) + '|' + Math.round(pos.y) + '|' + Math.round(pos.z) }
+function markBedUnusable (pos, ms, why, now = Date.now()) {
+  if (process.env.SHELTER_BED_FALLBACK === '0' || !pos || !(ms > 0)) return
+  _bedHold = { until: now + ms, key: bedKey(pos) }
+  dbg('nightRest: bed at ' + bedKey(pos).replace(/\|/g, ',') + ' unusable (' + why + ') - holding off it for ' + Math.round(ms / 1000) + 's')
+}
+function bedHeld (pos, now = Date.now()) { return !!pos && _bedHold.key === bedKey(pos) && now < _bedHold.until }
+
+// SPAWN-SUSPECT flag, PERSISTED: a respawn landed far from the remembered bed, so the
+// server-side anchor is wrong (bed broken/obstructed) - every death is a world-spawn
+// carousel until a bed is re-asserted. The old flag lived in commands.js RAM and died
+// with every restart/deploy mid-crisis (the overnight spiral straddled several). Cleared
+// by rememberBed (every real spawn-setting action goes through it).
+function setSpawnSuspect (v) { const m = loadWorldMem(); if (v) m.spawnSuspect = Date.now(); else delete m.spawnSuspect; saveWorldMem() }
+function isSpawnSuspect () { return !!loadWorldMem().spawnSuspect }
+
+
 module.exports = {
   setDebugSink, setBuildZone,
   loadWorldMem, saveWorldMem, ownInfraAnchors,
@@ -308,5 +481,10 @@ module.exports = {
   recordWedge, listWedges,
   rememberSpot, forgetSpot, recallSpot,
   rememberInfra, recallInfra, forgetInfra, listInfra, recallInfraVerified,
+  loadMines, rememberMine, recallMine, forgetMine, updateMineProgress,
+  searchCellKey, markSearched, isSearchedDry, clearSearched,
+  gearupState, gearupResult, gearupShouldArmBackoff, proactiveGearupGate,
+  rememberBed, knownBed, forgetBed, markBedUnusable, bedHeld, bedHoldUntil,
+  setSpawnSuspect, isSpawnSuspect,
   WORLD_MEM_FILE
 }
