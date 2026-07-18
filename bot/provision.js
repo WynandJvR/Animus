@@ -4996,6 +4996,50 @@ async function schedulerState (bot) {
   return s
 }
 
+// #52 FISH_FROM_BANK — PURE bank-stand predicate. A cell is a safe fishing STAND iff its feet/head
+// are a genuinely-dry standable pocket (shelterSite.feetCellDry: 2 air, no water in feet/head or the
+// 4 feet-level neighbours - never a puddle edge that floods) AND some water is horizontally adjacent
+// so a cast actually reaches the pond. hasAdjacentWater is computed at the GROUND level by the caller
+// (feet-level water is excluded by feetCellDry). Extracted for unit testing.
+function isBankStand (feetName, headName, sideNames, hasAdjacentWater) {
+  if (!hasAdjacentWater) return false // dry but landlocked - a cast can't reach water
+  return shelterSite.feetCellDry(feetName, headName, sideNames || [])
+}
+
+// #52 FISH_FROM_BANK — the nearest DRY, castable bank stand cell adjacent to water `w`, or null.
+// Scans solid ground blocks within ~3b horizontally of w (a small y-window covers a flush shore or a
+// one-block lip), tests each with isBankStand, and returns the feet Vec3 nearest the bot. Never picks
+// a cell in/under water - the whole point is to fish standing dry, casting INTO the pond.
+function bankStandFor (bot, w) {
+  if (!bot.entity || !w) return null
+  const nameAt = p => { const b = bot.blockAt(p); return b ? b.name : null }
+  const isSolid = p => { const b = bot.blockAt(p); return !!(b && b.boundingBox === 'block' && !/water|lava/.test(b.name)) }
+  const isWater = n => n != null && /water/.test(n)
+  const SIDES = [[1, 0], [-1, 0], [0, 1], [0, -1]]
+  const R = 3
+  const cand = []
+  for (let dx = -R; dx <= R; dx++) {
+    for (let dz = -R; dz <= R; dz++) {
+      if (dx === 0 && dz === 0) continue
+      if (Math.hypot(dx, dz) > R + 0.001) continue // within ~3b horizontally of the water (cast range)
+      for (let dy = -2; dy <= 2; dy++) {
+        const g = new Vec3(w.x + dx, w.y + dy, w.z + dz)
+        if (!isSolid(g)) continue // must be a solid block to stand ON
+        const feet = g.offset(0, 1, 0); const head = g.offset(0, 2, 0)
+        const feetName = nameAt(feet); const headName = nameAt(head)
+        const feetSides = SIDES.map(([sx, sz]) => nameAt(feet.offset(sx, 0, sz)))
+        // castable: water horizontally adjacent to the GROUND block (at g's level or one below - a
+        // flush shore or the foot of a low lip); feet-level neighbours stay dry per feetCellDry.
+        const hasAdjacentWater = SIDES.some(([sx, sz]) => isWater(nameAt(g.offset(sx, 0, sz))) || isWater(nameAt(g.offset(sx, -1, sz))))
+        if (!isBankStand(feetName, headName, feetSides, hasAdjacentWater)) continue
+        cand.push({ x: feet.x, y: feet.y, z: feet.z })
+      }
+    }
+  }
+  const ranked = shelterSite.rankByDistance(cand, bot.entity.position)
+  return ranked.length ? new Vec3(ranked[0].x, ranked[0].y, ranked[0].z) : null
+}
+
 async function fishForFood (bot, { isStopped = () => false, say = () => {}, target = 6, home, scout = false, scoutRings } = {}) {
   if (hasSolidCeiling(bot, 12)) { dbg('  fishing: underground - not here'); return false }
   const mcData = require('minecraft-data')(bot.version)
@@ -5017,9 +5061,30 @@ async function fishForFood (bot, { isStopped = () => false, say = () => {}, targ
     if (!waters.length && scout && !isStopped()) waters = await scoutForWater(bot, { isStopped, rings: scoutRings })
   }
   if (!waters.length) { dbg('  fishing: no surface water within 48' + (scout ? ' (scout came up dry too)' : '')); return false }
-  const w = waters[0]
-  rememberInfra('water', { x: w.x, y: w.y, z: w.z }) // the farm + future famines trek straight back
-  try { await gotoWithTimeout(bot, new goals.GoalNear(w.x, w.y + 1, w.z, 3), 45000) } catch {}
+  // #52 FISH_FROM_BANK (default on): fish standing on a DRY SOLID BANK at the water's edge - never IN
+  // the deep water (the pond drownings: GoalNear(water,3) is satisfied standing submerged). Iterate
+  // candidate waters nearest-first; for each, walk to a verified-dry adjacent bank stand and cast from
+  // there. FISH_FROM_BANK=0 -> the original waters[0] + GoalNear(water,3) path, byte-for-byte.
+  let w
+  if (process.env.FISH_FROM_BANK !== '0') {
+    const nav = require('./navigate.js')
+    let stood = false
+    for (const cw of waters.slice(0, 8)) {
+      if (isStopped()) return false
+      const stand = bankStandFor(bot, cw)
+      if (!stand) continue
+      try { await nav.navigateTo(bot, new goals.GoalBlock(stand.x, stand.y, stand.z), { timeoutMs: 20000, deadlineMs: 40000, budgets: { water: 0, pit: 0, door: 1, nudge: 1, stepout: 1 }, label: 'fish-stand' }) } catch {}
+      if (isStopped()) return false
+      if (inWaterNow(bot)) { dbg('  fishing: arrived wet at the ' + cw.x + ',' + cw.z + ' bank - trying the next water'); continue }
+      w = cw; stood = true; break // standing DRY on the bank - cast at this water
+    }
+    if (!stood) { dbg('  fishing: no dry bank at any nearby water - skipping (won\'t fish from in the water)'); return false }
+    rememberInfra('water', { x: w.x, y: w.y, z: w.z }) // the farm + future famines trek straight back
+  } else {
+    w = waters[0]
+    rememberInfra('water', { x: w.x, y: w.y, z: w.z }) // the farm + future famines trek straight back
+    try { await gotoWithTimeout(bot, new goals.GoalNear(w.x, w.y + 1, w.z, 3), 45000) } catch {}
+  }
   if (isStopped()) return false
   say('nothing to hunt around here - fishing for dinner instead')
   dbg('  fishing at the water near ' + w.x + ',' + w.z + ' (edible now: ' + edible() + ', target ' + target + ')')
@@ -8704,4 +8769,4 @@ module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvis
   maintenancePass, isMaintaining, stopMaintenance, _setMaintaining, courierFoodToBank, safekeepSweep, spareKitToBank, recoveryReadyNow, cropExclusionStep, cropPlaceExclusion, hazardStepExclusion, waterStepExclusion, deepWaterUnderfoot, gatherSeedsNear,
   activeJobInfo, stopSurvivalJob, escalateFoodFloor, _foodFloorState,
   wildTerrainMovements, trekMovements, DIGGABLE_NATURAL, STRUCTURE_RE, canBreakNaturally,
-  collectDrops, huntSpiderForString, ensureFishingRod }
+  collectDrops, huntSpiderForString, ensureFishingRod, isBankStand }

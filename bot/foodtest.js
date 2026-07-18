@@ -282,5 +282,22 @@ t('#51: famineHoldFood releases the indoor hold ONLY in the food 3-6 hp-crisis, 
   assert.strictEqual(F.famineHoldFood(6, { hp: 4, ...on }), false, 'food>4 -> not a famine hold')
 })
 
+t('#52 FISH_FROM_BANK: isBankStand - dry standable cell WITH adjacent water is a bank; flooded/landlocked is not', () => {
+  let P
+  try { P = require('./provision.js') } catch (e) { console.log('      (skip: provision.js not loadable offline: ' + e.message + ')'); return }
+  if (typeof P.isBankStand !== 'function') { console.log('      (skip: isBankStand not exported)'); return }
+  const drySides = ['air', 'air', 'grass_block', 'dirt'] // dry feet-level neighbours (solid land + air, no fluid)
+  // a genuinely dry standable pocket next to open water -> castable bank
+  assert.strictEqual(P.isBankStand('air', 'air', drySides, true), true, 'dry 2-air pocket + adjacent water -> bank stand')
+  // no water in reach -> cannot cast -> not a fishing bank (even if perfectly dry)
+  assert.strictEqual(P.isBankStand('air', 'air', drySides, false), false, 'dry but landlocked -> not a fishing bank')
+  // feet submerged -> feetCellDry false -> never a stand (the drowning cell we must avoid)
+  assert.strictEqual(P.isBankStand('water', 'air', drySides, true), false, 'submerged feet -> not a stand')
+  // a puddle laps at a feet-level side -> feetCellDry false -> reject (would flood the stand)
+  assert.strictEqual(P.isBankStand('air', 'air', ['water', 'air', 'air', 'air'], true), false, 'water at a feet-level side -> not a stand')
+  // head blocked (not 2 air) -> not standable
+  assert.strictEqual(P.isBankStand('air', 'stone', drySides, true), false, 'head not air -> not standable')
+})
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall food-security tests passed')
 process.exit(failures ? 1 : 0)
