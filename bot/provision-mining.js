@@ -227,7 +227,9 @@ async function pillarUpTo (bot, targetY, opts = {}) {
     // Stop the MOMENT we break into open sky (no ceiling) - keeping on to targetY builds a
     // useless 1x1 tower into the air and strands the bot on top (targetY is a rough surface
     // guess and overshoots in valleys). Once above where we started with clear sky, we're out.
-    if (Math.floor(bot.entity.position.y) > startY && !hasSolidCeiling(bot, 20, { ignoreLeaves: true })) break
+    // (#76: the suicide-fall path pillars AT an open-sky cell and NEEDS the full targetY height for a
+    // lethal fall, so it passes ignoreOpenSkyBreak to skip this early-out; every other caller unchanged.)
+    if (!opts.ignoreOpenSkyBreak && Math.floor(bot.entity.position.y) > startY && !hasSolidCeiling(bot, 20, { ignoreLeaves: true })) break
     const y0 = Math.floor(bot.entity.position.y)
     const feet = bot.entity.position.floored()
     // Clear TWO blocks above our head (y+2 and y+3): a full jump-up needs the head to pass

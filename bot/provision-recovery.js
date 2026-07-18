@@ -94,6 +94,8 @@ const SUICIDE_FALLBACK_DEATH = process.env.SUICIDE_FALLBACK_DEATH !== '0' // §B
 
 const SUICIDE_DROWN = process.env.SUICIDE_DROWN !== '0' // §B.1 sub-guard: the deliberate-drown fallback (arms the navigate reflex latch)
 
+const SUICIDE_PILLAR_WORKS = process.env.SUICIDE_PILLAR_WORKS !== '0' // #76: acquire filler after stash-all + climb past the open-sky break so the lethal pillar can actually be built AT open sky
+
 let _deadlockFails = 0          // consecutive "all rungs tried" cycles observed AT the deadlock state
 
 let _deadlockResetting = false  // re-entrancy guard while the stash+die runs
@@ -192,6 +194,50 @@ async function reachOpenSky (bot, { isStopped = () => false, home = null, deadli
   return openHere()
 }
 
+// §A #76: pillarUpTo needs a filler item in the pack, but deadlockSuicideReset stashes the ENTIRE
+// pack into the bank first (the hard "die with an empty pack" safety), so the lethal pillar has
+// nothing to place and rises 0 blocks - the fall-suicide is 0-for-4 live. Acquire up to `need` free
+// dirt-class blocks AT the suicide cell so the pillar can actually go up. This DELIBERATELY relaxes
+// the empty-pack invariant by <=need dirt: that invariant protects GEAR (the :401 leftover-check ran
+// BEFORE this and still guards gear), and a few dirt blocks in the grave are free. Bounded by
+// deadlineMs + isStopped; guards mirror pillarUpTo/pit-drop (never dig our own support column, the
+// wheat-farm footprint, a registered build block, or a cell with water/lava directly above).
+async function ensurePillarFiller (bot, { isStopped = () => false, need = DEADLOCK_FALL_H + 2, deadlineMs = 45000 } = {}) {
+  if (scaffold.pickFiller(bot)) return true // already have filler - nothing to do
+  if (!bot.entity) return false
+  const deadline = Date.now() + deadlineMs
+  const mcData = require('minecraft-data')(bot.version)
+  const DIRT_RE = /^(grass_block|dirt|coarse_dirt|rooted_dirt)$/ // NO sand/gravel - they fall and would bury us
+  const ids = ['grass_block', 'dirt', 'coarse_dirt', 'rooted_dirt'].map(n => mcData.blocksByName[n] && mcData.blocksByName[n].id).filter(x => x != null)
+  const feet = bot.entity.position.floored()
+  const cands = (bot.findBlocks({ point: bot.entity.position, matching: ids, maxDistance: 6, count: 64 }) || [])
+    .filter(p => Math.abs(p.y - feet.y) <= 3) // surface blocks within +-3y of the feet
+    .sort((a, b) => bot.entity.position.distanceTo(a) - bot.entity.position.distanceTo(b))
+  let dug = 0
+  for (const p of cands) {
+    if (dug >= need || isStopped() || Date.now() > deadline) break
+    if (p.x === feet.x && p.z === feet.z) continue // never dig our own support column
+    const b = bot.blockAt(p)
+    if (!b || !DIRT_RE.test(b.name)) continue
+    if (scaffold.onFarmFootprint(p) || farmFootprintHas(p)) continue // never dig the wheat-farm footprint
+    if (!canBreakNaturally(b)) continue // registered build / protected block
+    if (bot.canDigBlock && !bot.canDigBlock(b)) continue
+    const above = bot.blockAt(p.offset(0, 1, 0))
+    if (above && /water|lava/.test(above.name)) continue // don't open a liquid flow onto ourselves
+    const tool = toolForBlock(bot, b.name)
+    if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
+    try { await bot.dig(b) } catch { continue }
+    dug++
+    try { await stepInto(bot, p, { isStopped }) } catch {} // step onto the dug cell so the dirt drop is picked up
+    // pickFiller is truthy after ONE collected dirt, but the lethal pillar needs `need` placements -
+    // only stop early once the pack holds enough filler for the whole tower.
+    const fillerCount = (bot.inventory ? bot.inventory.items() : []).filter(i => scaffold.FILLER_RE.test(i.name)).reduce((a, i) => a + i.count, 0)
+    if (fillerCount >= need) break // enough for the full lethal pillar - stop, don't strip more
+  }
+  try { await collectDrops(bot, 4) } catch {} // final sweep for any drop we walked past
+  return !!scaffold.pickFiller(bot)
+}
+
 async function deadlockDieByFall (bot, { isStopped = () => false, home = null, say = () => {} } = {}) {
   if (!bot.entity) return false
   const deadline = Date.now() + 30000
@@ -221,6 +267,22 @@ async function deadlockDieByFall (bot, { isStopped = () => false, home = null, s
     }
     dbg('deadlock-reset: still under my own roof - can\'t pillar to fall, ABORTING to hold'); return false
   }
+  // §A #76: the stash-all emptied the pack, so pillarUpTo has no filler to place (rises 0b - 0-for-4
+  // live). Under the flag, dig a few free dirt blocks HERE so the lethal pillar can be built. If none
+  // can be dug here (all farm/build/liquid), skip the pillar entirely and chain into the fallbacks.
+  if (SUICIDE_PILLAR_WORKS && !scaffold.pickFiller(bot)) {
+    let gotFiller = false
+    try { gotFiller = await ensurePillarFiller(bot, { isStopped: () => isStopped() || Date.now() > deadline, need: DEADLOCK_FALL_H + 2 }) } catch (e) { dbg('deadlock-reset: ensurePillarFiller threw (' + e.message + ')') }
+    if (!gotFiller) {
+      dbg('deadlock-reset: no filler for the lethal pillar (pack emptied, none diggable here) - trying fallback deaths')
+      if (SUICIDE_FALLBACK_DEATH) {
+        let fdied = false
+        try { fdied = await deadlockFallbackDeath(bot, { isStopped, home, say }) } catch (e) { dbg('deadlock-reset: fallback death threw (' + e.message + ')') }
+        if (fdied) { dbg('deadlock-reset: died on purpose (fallback) - respawn resets to full at the bed'); return true }
+      }
+      dbg('deadlock-reset: no filler and fallback deaths could not kill - ABORTING to hold'); return false
+    }
+  }
   const startY = Math.floor(bot.entity.position.y)
   const targetY = startY + Math.max(4, DEADLOCK_FALL_H)
   let died = false
@@ -228,7 +290,12 @@ async function deadlockDieByFall (bot, { isStopped = () => false, home = null, s
   bot.once('death', onDeath)
   try {
     say('resetting - climbing up to take a lethal fall')
-    try { await pillarUpTo(bot, targetY, { isStopped: () => isStopped() || died || Date.now() > deadline }) } catch (e) { dbg('deadlock-reset: pillar failed (' + e.message + ')') }
+    // §B #76: the suicide path pillars AT an open-sky cell, so pillarUpTo's open-sky early-break
+    // would cap the tower at +1b (below the lethal minimum). Under the flag pass ignoreOpenSkyBreak
+    // so it climbs to targetY. Flag off -> the opts object is byte-for-byte today's { isStopped }.
+    const pillarOpts = { isStopped: () => isStopped() || died || Date.now() > deadline }
+    if (SUICIDE_PILLAR_WORKS) pillarOpts.ignoreOpenSkyBreak = true
+    try { await pillarUpTo(bot, targetY, pillarOpts) } catch (e) { dbg('deadlock-reset: pillar failed (' + e.message + ')') }
     if (died) { dbg('deadlock-reset: died on purpose - respawn resets to full at the bed'); return true }
     const gained = Math.floor(bot.entity.position.y) - startY
     // Fall damage (points) = fallBlocks - 3; hp is in points (20=full). To guarantee lethality we
@@ -236,7 +303,19 @@ async function deadlockDieByFall (bot, { isStopped = () => false, home = null, s
     // too short to kill - a survived fall would just waste the attempt (gear is already safe in the
     // bank). DEADLOCK_FALL_H (default 6) gives margin at the hp<=2 trigger.
     const lethalMin = (bot.health != null ? bot.health : DEADLOCK_HP) + 3
-    if (gained < lethalMin) { dbg('deadlock-reset: pillar too short for a lethal fall (rose ' + gained + 'b, need ' + lethalMin + 'b at hp ' + (bot.health ?? '?') + ') - ABORTING to hold'); return false }
+    if (gained < lethalMin) {
+      // §C #76: a short pillar at open sky used to abort directly - the drown/pit fallbacks were only
+      // ever tried from the under-own-roof branch. Under the flag, chain into them before the honest
+      // abort. Flag off (or no fallback) -> the exact original single-line abort, byte-for-byte.
+      if (SUICIDE_PILLAR_WORKS && SUICIDE_FALLBACK_DEATH) {
+        dbg('deadlock-reset: pillar too short for a lethal fall (rose ' + gained + 'b, need ' + lethalMin + 'b at hp ' + (bot.health ?? '?') + ') - trying fallback deaths')
+        let fdied = false
+        try { fdied = await deadlockFallbackDeath(bot, { isStopped, home, say }) } catch (e) { dbg('deadlock-reset: fallback death threw (' + e.message + ')') }
+        if (fdied) { dbg('deadlock-reset: died on purpose (fallback) - respawn resets to full at the bed'); return true }
+        dbg('deadlock-reset: pillar too short and fallback deaths could not kill - ABORTING to hold'); return false
+      }
+      dbg('deadlock-reset: pillar too short for a lethal fall (rose ' + gained + 'b, need ' + lethalMin + 'b at hp ' + (bot.health ?? '?') + ') - ABORTING to hold'); return false
+    }
     dbg('deadlock-reset: pillared +' + gained + 'b - stepping off the edge to fall')
     bot.clearControlStates()
     bot.setControlState('forward', true)
@@ -967,5 +1046,5 @@ function isRecoveringDegraded () { return _recoveringDegraded }
 
 module.exports = {
   setDebugSink,
-  DEADLOCK_HP, DEADLOCK_MAX_NOFOOD, DEADLOCK_FAILS, DEADLOCK_RESET_SOFT, DEADLOCK_SOFT_HP, DEADLOCK_SOFT_FOOD, DEADLOCK_SOFT_FAILS, DEADLOCK_RESET_COOLDOWN_MS, DEADLOCK_FALL_H, SUICIDE_EXIT_OPEN_SKY, SUICIDE_FALLBACK_DEATH, SUICIDE_DROWN, _deadlockFails, _deadlockResetting, _noteDeadlockProgress, noteDeadlockReset, deadlockResetDue, deadlockResetState, sampleColumnForSky, reachOpenSky, deadlockDieByFall, suicideByDrown, suicideByPitDrop, deadlockFallbackDeath, deadlockSuicideReset, _recoveringHp, recoverHp, isRecoveringHp, _resting, restUntilSafe, isResting, sleepInBedHere, nightRest, nightRestInner, boundedHold, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, RUNG_EXECUTORS, recoveryReadyNow, _recoveringDegraded, recoverFromDegraded, isRecoveringDegraded
+  DEADLOCK_HP, DEADLOCK_MAX_NOFOOD, DEADLOCK_FAILS, DEADLOCK_RESET_SOFT, DEADLOCK_SOFT_HP, DEADLOCK_SOFT_FOOD, DEADLOCK_SOFT_FAILS, DEADLOCK_RESET_COOLDOWN_MS, DEADLOCK_FALL_H, SUICIDE_EXIT_OPEN_SKY, SUICIDE_FALLBACK_DEATH, SUICIDE_DROWN, SUICIDE_PILLAR_WORKS, _deadlockFails, _deadlockResetting, _noteDeadlockProgress, noteDeadlockReset, deadlockResetDue, deadlockResetState, sampleColumnForSky, reachOpenSky, ensurePillarFiller, deadlockDieByFall, suicideByDrown, suicideByPitDrop, deadlockFallbackDeath, deadlockSuicideReset, _recoveringHp, recoverHp, isRecoveringHp, _resting, restUntilSafe, isResting, sleepInBedHere, nightRest, nightRestInner, boundedHold, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, RUNG_EXECUTORS, recoveryReadyNow, _recoveringDegraded, recoverFromDegraded, isRecoveringDegraded
 }

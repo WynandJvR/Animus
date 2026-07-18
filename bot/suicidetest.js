@@ -13,9 +13,12 @@ const assert = require('assert')
 let failures = 0
 function t (name, fn) { try { fn(); console.log('PASS  ' + name) } catch (e) { failures++; console.log('FAIL  ' + name + '\n      ' + e.message) } }
 
-let P, N
+async function ta (name, fn) { try { await fn(); console.log('PASS  ' + name) } catch (e) { failures++; console.log('FAIL  ' + name + '\n      ' + e.message) } }
+
+let P, N, R
 try { P = require('./provision.js') } catch (e) { console.log('FAIL  provision.js not loadable offline: ' + e.message); process.exit(1) }
 try { N = require('./navigate.js') } catch (e) { console.log('FAIL  navigate.js not loadable offline: ' + e.message); process.exit(1) }
+try { R = require('./provision-recovery.js') } catch (e) { console.log('FAIL  provision-recovery.js not loadable offline: ' + e.message); process.exit(1) }
 
 // ---- §A: pickOpenSkyCell ---------------------------------------------------------------
 const pick = P.pickOpenSkyCell
@@ -83,5 +86,31 @@ t('setDeliberateDrown coerces to a real boolean (no truthy leak)', () => {
   assert.strictEqual(N.isDeliberateDrown(), false, 'falsy -> false')
 })
 
-if (failures) { console.log('\n' + failures + ' FAILED'); process.exit(1) }
-console.log('\nALL PASS')
+// ---- #76 SUICIDE_PILLAR_WORKS -----------------------------------------------------------
+t('SUICIDE_PILLAR_WORKS flag const tracks process.env (default ON, =0 -> off)', () => {
+  const expected = process.env.SUICIDE_PILLAR_WORKS !== '0'
+  assert.strictEqual(R.SUICIDE_PILLAR_WORKS, expected, 'const captured from env at require time')
+})
+
+t('#76 §B: pillarUpTo\'s open-sky break is guarded by opts.ignoreOpenSkyBreak (default unset -> unchanged)', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, 'provision-mining.js'), 'utf8')
+  // the break line must be gated on !opts.ignoreOpenSkyBreak so the default (all existing callers,
+  // opt unset) still breaks at open sky exactly as before, and ONLY the flagged suicide caller skips it.
+  assert.ok(/if\s*\(\s*!opts\.ignoreOpenSkyBreak\s*&&\s*Math\.floor\(bot\.entity\.position\.y\)\s*>\s*startY\s*&&\s*!hasSolidCeiling/.test(src),
+    ':230 open-sky break is additively guarded by !opts.ignoreOpenSkyBreak')
+})
+
+async function main () {
+  // (a) ensurePillarFiller returns true IMMEDIATELY when the pack already has filler (stub bot).
+  //     The stub has NO entity: if the early pickFiller short-circuit failed, the `!bot.entity`
+  //     guard would return false and this test would catch it.
+  await ta('#76 §A: ensurePillarFiller returns true immediately when pickFiller already finds filler', async () => {
+    const botWithFiller = { inventory: { items: () => [{ name: 'dirt', count: 5 }] } }
+    const got = await R.ensurePillarFiller(botWithFiller, { isStopped: () => false })
+    assert.strictEqual(got, true, 'filler already present -> true without touching the world')
+  })
+
+  if (failures) { console.log('\n' + failures + ' FAILED'); process.exit(1) }
+  console.log('\nALL PASS')
+}
+main()
