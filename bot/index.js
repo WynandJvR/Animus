@@ -1427,7 +1427,7 @@ if (process.env.ANTI_AFK !== '0') {
 
 // Self-defense: swing at any hostile mob that gets close, independent of the
 // brain - so the bot fights back when attacked. Disable with AUTO_DEFEND=0.
-const HOSTILE_RE = /zombie|skeleton|spider|creeper|enderman|witch|husk|drowned|pillager|vindicator|ravager|slime|magma_cube|blaze|piglin|hoglin|phantom|zoglin|stray|silverfish|guardian|vex|wither|warden|ghast|shulker|illusioner|evoker|breeze|bogged/i
+const HOSTILE_RE = require('./perception.js').HOSTILE // ONE canonical hostile list (was a byte-identical copy of commands.js's)
 // never AUTO-melee these: creepers explode point-blank, ghast/warden/wither are ranged/deadly
 const NO_AUTO_MELEE = /creeper|ghast|warden|wither_boss|^wither$/i
 // below this health, DISENGAGE from any hostile (retreat) instead of trading hits -
