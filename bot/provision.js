@@ -2089,6 +2089,18 @@ function noteWaterCrossing (bot) {
 // (_foodPlanHint moved to provision-food.js)
 // (_setFoodPlanHint moved to provision-food.js)
 
+// IRON_KEYSTONE: minedReal signal for the fruitless-count fix. Set true by gatherLoop the moment a
+// keystone-active iron grind GENUINELY descends into the shallow band and mines it (so a grind that
+// found no iron there counts as an honest fruitless try), left false when the grind was reclaimed by
+// the build / preempted before it ever reached the band (so it is NOT mislabeled a material failure
+// and cannot arm the ~42-min lockout - the #60 class). Reset at each iron runGather; read by the
+// armorup/gearup fruitless accounting (planner.gearUp). Inert unless IRON_KEYSTONE is on.
+let _ironGrindMinedReal = false
+function resetIronGrindMined () { _ironGrindMinedReal = false }
+function _markIronGrindMined () { _ironGrindMinedReal = true }
+function ironGrindMinedReal () { return _ironGrindMinedReal }
+const IRON_KEYSTONE_ON = () => process.env.IRON_KEYSTONE !== '0'
+
 // §C - BOUNDED, FAIL-SAFE pre-trip food top-up. Before a deep-mine / far excursion, if the pack food
 // (points) is below what the plan needs, WITHDRAW the shortfall as bread from the bank (reuse
 // resources.acquire, bank-first: craft:false so it never kicks off a gather right before the trip).
@@ -2299,6 +2311,20 @@ async function gatherLoop (bot, item, count, opts = {}) {
   // DESCEND to the stone layer (staircase / known-mine re-entry) instead of the blind wander.
   // Default ON; STONE_RELOCATE=0 restores today's digShaftDown-strip-then-wander path exactly.
   const STONE_RELOCATE = process.env.STONE_RELOCATE !== '0'
+  // IRON_KEYSTONE (default ON): while fully naked and short of a boots' worth of raw iron, the iron
+  // gather is COMMITTED to the organized shallow branch mine - it must DESCEND (never fall back to the
+  // surface scratch/wander that left it at y66, mined=0) until it banks the iron or genuinely can't.
+  // Recomputed each loop (armor/iron change). Reuses #71's shallow band inside branchMine. Only the
+  // iron ore (NAKED_ORE_RE, checked below). Flag off -> keystone.descend false => branchTries caps at
+  // 2 and the scratch/wander path runs exactly as today (byte-for-byte).
+  const keystoneNow = () => (deepOre && /^raw_iron$/.test(item))
+    ? mining.ironKeystone({ armorPieces: armorPieceCount(bot), rawIron: countItem(bot, 'raw_iron') },
+      { enabled: IRON_KEYSTONE_ON(), bootsIron: parseInt(process.env.ARMOR_BOOTSTRAP_IRON || '4', 10) })
+    : { active: false, descend: false, commit: false }
+  // While the keystone commits us to the branch mine, keep re-trying branchMine (which steps off the
+  // apron + descends/re-enters the persisted shaft each time) instead of capping at 2 and falling to
+  // the surface scratch. MAX_STRIP still bounds it, and branchMine's own budgets/threat-bail hold.
+  const branchTriesCap = () => keystoneNow().descend ? MAX_STRIP : 2
   let branchTries = 0
   const MAX_STRIP = deepOre ? 10 : 5 // shafts per gather before giving up (ore needs several to reach + work the deep levels)
   const NO_YIELD_LIMIT = 10 // mine-with-no-pickup before relocating to better ground
@@ -2871,10 +2897,13 @@ async function gatherLoop (bot, item, count, opts = {}) {
     // scratch the unreachable surface candidate - go STRAIGHT to the organized branch mine.
     // Capped at 2 tries: if we can't sink/enter a mine here (apron/water/lava), the guard
     // stops firing and the surface scratch/wander path below takes over (no wedge).
-    if (useBranch && branchTries < 2 && mining.preferBranchMine(item, feetY, surfaceY, candidates.map(p => p.y))) {
+    if (useBranch && branchTries < branchTriesCap() && mining.preferBranchMine(item, feetY, surfaceY, candidates.map(p => p.y))) {
       const need = count - (countItem(bot, item) - start)
       const r = await branchMine(bot, item, need, { isStopped, home, surfaceY, say: opts.say, avoid: opts.avoid, dirIdx: stripDug, deadlineMs: Math.max(20000, deadline - Date.now()) })
       dbg('  gather deep-first branchMine -> ' + JSON.stringify(r)); stripDug++
+      // IRON_KEYSTONE: record that a keystone grind genuinely reached + mined the shallow band, so a
+      // no-iron outcome counts as an honest fruitless try (vs a build-reclaim that never got down).
+      if (keystoneNow().descend && (r.gathered > 0 || r.descended)) _markIronGrindMined()
       if (r.gathered > 0) { dryExplores = 0; noYield = 0; continue }
       branchTries++
       continue
@@ -2896,6 +2925,7 @@ async function gatherLoop (bot, item, count, opts = {}) {
           const need = count - (countItem(bot, item) - start)
           const r = await branchMine(bot, item, need, { isStopped, home, surfaceY, say: opts.say, avoid: opts.avoid, dirIdx: stripDug, deadlineMs: Math.max(20000, deadline - Date.now()) })
           dbg('  gather branchMine -> ' + JSON.stringify(r)); stripDug++
+          if (keystoneNow().descend && (r.gathered > 0 || r.descended)) _markIronGrindMined() // IRON_KEYSTONE: honest fruitless signal
           if (r.gathered > 0) { dryExplores = 0; noYield = 0; continue }
         } else {
           // STONE RELOCATE (task #22): the surface here has no exposed stone, and a 6-block strip
@@ -4010,7 +4040,7 @@ const HUT_FURNITURE = /chest$|barrel$|furnace$|smoker$|crafting_table$|_bed$|_do
 // Read chest contents as { name: count } (build materials the chest is holding).
 // (chestCounts moved to provision-bank.js)
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, smeltFuelPlan, fuelBankWithdrawAmount, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, breachDryPocket, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, secureBase, secureBaseGate, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, boundedHold, recoverFromDegraded, isRecoveringDegraded, deadlockResetDue, deadlockResetState, pickOpenSkyCell, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, markBedUnusable, bedHeld, gearupState, gearupResult, gearupShouldArmBackoff, proactiveGearupGate, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, noteWaterCrossing, lonelyFurnace, consolidateFurnaces, litterPatrol, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, planTrekRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, smeltFuelPlan, fuelBankWithdrawAmount, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, breachDryPocket, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, secureBase, secureBaseGate, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, boundedHold, recoverFromDegraded, isRecoveringDegraded, deadlockResetDue, deadlockResetState, pickOpenSkyCell, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, markBedUnusable, bedHeld, gearupState, gearupResult, gearupShouldArmBackoff, proactiveGearupGate, ironGrindMinedReal, resetIronGrindMined, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, noteWaterCrossing, lonelyFurnace, consolidateFurnaces, litterPatrol, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, planTrekRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
   maintenancePass, isMaintaining, stopMaintenance, _setMaintaining, courierFoodToBank, safekeepSweep, spareKitToBank, recoveryReadyNow, cropExclusionStep, cropPlaceExclusion, farmFootprintHas, hazardStepExclusion, waterStepExclusion, deepWaterUnderfoot, gatherSeedsNear,
   activeJobInfo, stopSurvivalJob, escalateFoodFloor, _foodFloorState,
   wildTerrainMovements, trekMovements, DIGGABLE_NATURAL, STRUCTURE_RE, canBreakNaturally,

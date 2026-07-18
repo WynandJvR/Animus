@@ -300,6 +300,43 @@ function armorBootstrapMining (armorPieces, rawIronHave, opts = {}) {
   return { active, targetY: ymin, ymin, ymax, retreatDist, bootsIron }
 }
 
+// PURE (IRON_KEYSTONE): the keystone-blocker COMMITMENT decision, layered on top of #71's shallow
+// band. A fully-naked bot must bank its FIRST boots' worth of raw iron before ANY armor can exist
+// (the chicken-and-egg: needs armor to mine iron safely, needs iron to make armor). While naked AND
+// still short of `bootsIron` raw iron, the iron gather MUST:
+//   descend - route STRAIGHT to the organized shallow branch mine (#71's y45-58 band), never scan
+//             the surface and quit (the live "stays at y66, mines 0" bug); and
+//   commit  - HOLD that grind against the build / oak-gather / any non-crisis, yielding ONLY to a
+//             real survival crisis (the existing reflexes) - the single-goal discipline it violates
+//             by thrashing iron<->oak every ~19s and never finishing the descent.
+// Once a piece is worn OR bootsIron raw iron is banked, active=false and normal routing/preemption
+// resume. enabled:false (IRON_KEYSTONE=0) -> always inactive => today byte-for-byte. PURE.
+function ironKeystone (state, opts = {}) {
+  const s = state || {}
+  const enabled = opts.enabled !== false
+  const bootsIron = opts.bootsIron != null ? opts.bootsIron : 4
+  const active = enabled && (s.armorPieces || 0) <= 0 && (s.rawIron || 0) < bootsIron
+  return { active, descend: active, commit: active, bootsIron }
+}
+
+// PURE (IRON_KEYSTONE): should a FINISHED keystone iron grind that netted no iron ARM the naked
+// gear-up back-off? Only a grind that GENUINELY descended and mined the band and STILL found no iron
+// is a material failure (fruitless). A grind cut short before a real mining attempt - preempted by a
+// survival crisis / stop (isStopped), or reclaimed by the build before it ever reached the band
+// (minedReal=false) - is NOT fruitless: arming it is exactly the #60-class bug that locks the bot out
+// of its ONLY armor source for ~42 min while it stays permanently naked. Not keystone-active ->
+// 'defer' so the caller keeps today's gearupShouldArmBackoff verdict byte-for-byte. PURE.
+//   state: active (keystone on this run), progressed (wore a piece / netted iron), interrupted
+//          (survival/stop preempt, #60), minedReal (actually descended + mined the band this run)
+function ironKeystoneFruitless (state) {
+  const s = state || {}
+  if (!s.active) return 'defer'      // flag off / armored / has boots' iron -> today's accounting
+  if (s.progressed) return false     // progress never arms (caller resets instead)
+  if (s.interrupted) return false    // #60: survival/stop took the body - not a material failure
+  if (!s.minedReal) return false     // never reached the band (build reclaim) - not a failure either
+  return true                        // descended, mined the band, found no iron -> honest fruitless
+}
+
 // PURE (#71): the retreat-when-unarmored decision, split out so both mine loops share ONE test-
 // able predicate. A bootstrapping (naked, first-iron) bot yields the moment a hostile is within
 // retreatDist - EARLIER/WIDER than mineDanger's 6b - so a skeleton can't whittle it down before
@@ -331,4 +368,4 @@ function branchLayout (corridorIdx, opts = {}) {
   }
 }
 
-module.exports = { LAVA_RE, WATER_RE, AIRISH, DIRS, PICK_USES, perpendicular, targetMineY, worthMiningHere, mineableWhenBlocked, mineReusable, pickMaxUses, pickUsesLeft, toolMaxUses, toolUsesLeft, estExcursionBlocks, picksToCraft, needReTool, descentSafety, faceHazard, digExposureHazard, climbStepSafety, faceExposed, digToOreInReach, scratchWorthy, branchLayout, preferBranchMine, preferStoneDescend, stoneDescendTargetY, deepMinePlan, armorBootstrapMining, armorBootstrapRetreat, sweepDue }
+module.exports = { LAVA_RE, WATER_RE, AIRISH, DIRS, PICK_USES, perpendicular, targetMineY, worthMiningHere, mineableWhenBlocked, mineReusable, pickMaxUses, pickUsesLeft, toolMaxUses, toolUsesLeft, estExcursionBlocks, picksToCraft, needReTool, descentSafety, faceHazard, digExposureHazard, climbStepSafety, faceExposed, digToOreInReach, scratchWorthy, branchLayout, preferBranchMine, preferStoneDescend, stoneDescendTargetY, deepMinePlan, armorBootstrapMining, armorBootstrapRetreat, ironKeystone, ironKeystoneFruitless, sweepDue }

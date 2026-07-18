@@ -311,5 +311,39 @@ t('armorBootstrapRetreat (#71): a bootstrapping bot retreats from ANY hostile wi
   assert.strictEqual(M.armorBootstrapRetreat(false, 3, 10), false, 'inactive -> today\'s reflex owns it (no early retreat)')
 })
 
+t('ironKeystone (IRON_KEYSTONE): naked + short of a boots\' worth of iron -> descend+commit; else inactive', () => {
+  // fully naked (0 armor) + 0 iron -> ACTIVE: descend straight to the branch mine AND commit (hold the
+  // build / non-crisis)
+  const a = M.ironKeystone({ armorPieces: 0, rawIron: 0 })
+  assert.strictEqual(a.active, true, 'naked + no iron -> keystone active')
+  assert.strictEqual(a.descend, true, 'active -> must descend to the shallow band, never surface-scratch')
+  assert.strictEqual(a.commit, true, 'active -> hold the grind vs the build / a non-crisis')
+  assert.strictEqual(a.bootsIron, 4, 'default boots threshold')
+  // still short of 4 iron -> still active (accumulating the first boots)
+  assert.strictEqual(M.ironKeystone({ armorPieces: 0, rawIron: 3 }).active, true, '3 iron (<4) -> still on the keystone')
+  // reached a boots' worth OR wearing any piece -> inactive (the ring can unlock; normal routing resumes)
+  assert.strictEqual(M.ironKeystone({ armorPieces: 0, rawIron: 4 }).active, false, '4 iron -> boots affordable, keystone done')
+  assert.strictEqual(M.ironKeystone({ armorPieces: 1, rawIron: 0 }).active, false, 'one armor piece -> not naked -> inactive')
+  // flag off (IRON_KEYSTONE=0) -> ALWAYS inactive => today byte-for-byte
+  assert.strictEqual(M.ironKeystone({ armorPieces: 0, rawIron: 0 }, { enabled: false }).active, false, 'flag off -> inactive')
+  assert.strictEqual(M.ironKeystone({ armorPieces: 0, rawIron: 0 }, { enabled: false }).descend, false, 'flag off -> no forced descend')
+  assert.strictEqual(M.ironKeystone({ armorPieces: 0, rawIron: 0 }, { enabled: false }).commit, false, 'flag off -> no commit')
+  // env-tunable threshold
+  assert.strictEqual(M.ironKeystone({ armorPieces: 0, rawIron: 6 }, { bootsIron: 8 }).active, true, '6 iron with bootsIron 8 -> still short')
+})
+
+t('ironKeystoneFruitless (IRON_KEYSTONE): only a genuine no-iron-after-mining pass arms the lockout', () => {
+  // NOT keystone-active -> defer to today's gearupShouldArmBackoff (caller keeps its verdict)
+  assert.strictEqual(M.ironKeystoneFruitless({ active: false, progressed: false, interrupted: false, minedReal: true }), 'defer', 'inactive -> defer to today')
+  // progressed -> never arms
+  assert.strictEqual(M.ironKeystoneFruitless({ active: true, progressed: true, interrupted: false, minedReal: true }), false, 'progress never arms')
+  // interrupted (survival/stop preempt, #60) -> not a material failure
+  assert.strictEqual(M.ironKeystoneFruitless({ active: true, progressed: false, interrupted: true, minedReal: true }), false, 'interrupted -> not fruitless (#60)')
+  // reclaimed by the build before it ever mined the band (minedReal false) -> NOT fruitless (the bug)
+  assert.strictEqual(M.ironKeystoneFruitless({ active: true, progressed: false, interrupted: false, minedReal: false }), false, 'never reached the band -> not fruitless (build reclaim)')
+  // GENUINE: descended, mined the shallow band, still found no iron -> honest fruitless (arms)
+  assert.strictEqual(M.ironKeystoneFruitless({ active: true, progressed: false, interrupted: false, minedReal: true }), true, 'mined the band + no iron -> honest fruitless')
+})
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall mining-strategy tests passed')
 process.exit(failures ? 1 : 0)

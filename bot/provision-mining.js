@@ -546,6 +546,11 @@ async function branchMine (bot, item, count, opts = {}) {
   const start = countItem(bot, item)
   const got = () => countItem(bot, item) - start
   const surfaceY = opts.surfaceY != null ? opts.surfaceY : Math.floor(bot.entity.position.y)
+  // IRON_KEYSTONE: did this call GENUINELY get down to a mining depth (into the shallow band, not still
+  // stuck on the apron / blocked short of any iron level)? gatherLoop reads it so a keystone grind that
+  // reached the band but found no iron counts as an honest fruitless try, while an apron/blocked bail
+  // (never descended) does not. Purely informational - existing callers read only r.gathered.
+  const descended = () => Math.floor(bot.entity.position.y) <= Math.floor(surfaceY) - 6
   // ARMOR-MODULATED DEPTH: a naked bot digs shallower/shorter with fewer torches so it doesn't
   // die on the same deep excursion an armored bot survives (naked-deep deaths, live). NEVER
   // blocks - iron armor needs iron, so it only TUNES the plan (food is still owned by the
@@ -608,7 +613,7 @@ async function branchMine (bot, item, count, opts = {}) {
         try { await P().secureFood(bot, { home: opts.home, isStopped, say: opts.say, threshold: 14 }) } catch (e) { dbg('  branchMine: pre-mine secureFood failed (' + e.message + ')') }
         need = P().survivalNeed(bot)
       }
-      if (need) { if (_dynFood) S()._setFoodPlanHint(_minePlanHintPrev); return { gathered: got(), reason: 'yielding to survival need (' + need.need + ') before descending - resume when met' } }
+      if (need) { if (_dynFood) S()._setFoodPlanHint(_minePlanHintPrev); return { gathered: got(), reason: 'yielding to survival need (' + need.need + ') before descending - resume when met', descended: descended() } }
     }
   }
   // Past the pre-descent guard window: from here the descent puts the bot underground, where the
@@ -657,7 +662,7 @@ async function branchMine (bot, item, count, opts = {}) {
   if (!mineRec && Math.floor(bot.entity.position.y) > targetY + 1) {
     if (onHutApron(bot)) {
       // Shared 4-direction step-off (STONE_RELOCATE=0 -> today's single +12,+12 one-shot).
-      if (!(await stepOffApron(bot, { isStopped, tag: 'branchMine' }))) { dbg('  branchMine: still on apron - not mining the doorstep'); return { gathered: 0, reason: 'too close to home to dig here' } }
+      if (!(await stepOffApron(bot, { isStopped, tag: 'branchMine' }))) { dbg('  branchMine: still on apron - not mining the doorstep'); return { gathered: 0, reason: 'too close to home to dig here', descended: descended() } }
     }
     if (opts.say) say('digging down to the iron level (~y' + targetY + ')')
     // the entrance = the surface top of this staircase (persisted so we re-enter here)
@@ -687,7 +692,7 @@ async function branchMine (bot, item, count, opts = {}) {
     // descended a real distance (>=12) or are below the iron ceiling (y52), never return empty.
     const mineableNow = () => mining.mineableWhenBlocked(bot.entity.position.y, surfaceY)
     if (!reached && !goodEnough() && !mineableNow()) {
-      return { gathered: got(), reason: 'could not get below the surface to any iron level (water/lava/blocked descent, stuck at y' + Math.floor(bot.entity.position.y) + ')' }
+      return { gathered: got(), reason: 'could not get below the surface to any iron level (water/lava/blocked descent, stuck at y' + Math.floor(bot.entity.position.y) + ')', descended: descended() }
     }
     if (!reached && !goodEnough()) {
       dbg('  branchMine: blocked short of y' + targetY + ' but at y' + Math.floor(bot.entity.position.y) + ' (descended ' + (Math.floor(surfaceY) - Math.floor(bot.entity.position.y)) + ') - iron-viable, MINING HERE not returning empty')
@@ -729,7 +734,7 @@ async function branchMine (bot, item, count, opts = {}) {
       dbg('  branchMine: threat/hp down here' + (bootRetreat && !mineDanger(bot) ? ' (naked - retreating from a hostile in the wider ' + bootCfg.retreatDist + 'b band)' : '') + ' - climbing out and handing off to the survival reflex')
       if (opts.say && branches < 2) say(bootRetreat && !mineDanger(bot) ? 'mob near and i\'ve got no armor - pulling out before it shoots me up' : 'mob down here - breaking off the mine to get clear')
       try { await climbToSurface(bot, Math.floor(surfaceY), { isStopped }) } catch {}
-      return { gathered: got(), reason: 'broke off to survive a mob / low hp underground' }
+      return { gathered: got(), reason: 'broke off to survive a mob / low hp underground', descended: descended() }
     }
     // DROWNING mid-mine (a branch broke into an aquifer): get the head out of the water FIRST
     // (bounded escapeWater - drops the goal + stops the dig so the manual escape isn't stomped),
@@ -743,7 +748,7 @@ async function branchMine (bot, item, count, opts = {}) {
         try { bot.stopDigging() } catch {}
         try { await navigate.escapeWater(bot, { isStopped }) } catch {}
         try { await climbToSurface(bot, Math.floor(surfaceY), { isStopped }) } catch {}
-        return { gathered: got(), reason: 'broke off - the mine flooded' }
+        return { gathered: got(), reason: 'broke off - the mine flooded', descended: descended() }
       }
     }
     // JOB ARBITER mid-activity (CONTINUE gate, critical thresholds): a normal food dip after
@@ -755,7 +760,7 @@ async function branchMine (bot, item, count, opts = {}) {
         dbg('  branchMine: food ' + bot.food + ' critical mid-mine (arbiter) - climbing out to eat')
         if (opts.say) say('starving down here - heading up to eat')
         try { await climbToSurface(bot, Math.floor(surfaceY), { isStopped }) } catch {}
-        return { gathered: got(), reason: 'broke off to eat (food ' + bot.food + ') - too hungry to mine deep' }
+        return { gathered: got(), reason: 'broke off to eat (food ' + bot.food + ') - too hungry to mine deep', descended: descended() }
       }
     }
     // KEEP A WORKING PICK: re-tool at depth before the pick breaks. If it's gone AND we can't
@@ -765,7 +770,7 @@ async function branchMine (bot, item, count, opts = {}) {
       dbg('  branchMine: no working pickaxe and cannot re-tool at depth - climbing out cleanly (not stranded)')
       if (opts.say) say('out of picks down here and can\'t make one - heading back up')
       try { await climbToSurface(bot, Math.floor(surfaceY), { isStopped }) } catch {}
-      return { gathered: got(), reason: 'pickaxe gone and could not re-tool at depth - climbed out' }
+      return { gathered: got(), reason: 'pickaxe gone and could not re-tool at depth - climbed out', descended: descended() }
     }
     // advance the main corridor `spacing`, then a junction: torch + left branch + right branch.
     // #71: bootTorchEvery (>0 only while bootstrapping) also lights INSIDE each tunnel every few
@@ -789,7 +794,7 @@ async function branchMine (bot, item, count, opts = {}) {
     if (persist && mineRec) { try { updateMineProgress(mineRec, branches, junc) } catch {} }
     dbg('  branchMine: junction ' + branches + '/' + maxBranches + ' got=' + got() + '/' + count + ' y=' + Math.floor(bot.entity.position.y))
   }
-  return { gathered: got(), reason: got() >= count ? 'done' : (Date.now() >= deadline ? 'out of time' : 'worked the branches') }
+  return { gathered: got(), reason: got() >= count ? 'done' : (Date.now() >= deadline ? 'out of time' : 'worked the branches'), descended: descended() }
 }
 
 async function grabNearbyOre (bot, oreRe, r, max, { isStopped = () => false } = {}) {

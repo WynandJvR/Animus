@@ -460,6 +460,7 @@ async function gearUp (bot, opts = {}) {
   if (!p0) return { progressed: false, msg: 'not spawned yet' }
   const at = { x: Math.round(p0.x), y: Math.floor(p0.y), z: Math.round(p0.z) }
   await wearFromPack(bot) // free protection first - never mine for what the pack holds
+  try { provision.resetIronGrindMined && provision.resetIronGrindMined() } catch {} // IRON_KEYSTONE: fresh minedReal window for this run's fruitless accounting
   // S6 SAFEKEEP (trigger 3): the iron grind is the classic depart-with-a-full-pack excursion
   // (how it lost the hoe + iron on 07-15). If we're AT the hut and NOT mid-build, stash spare
   // tools + material surplus into the bank FIRST so a death on the grind costs only the loadout.
@@ -566,7 +567,19 @@ async function gearUp (bot, opts = {}) {
   // interrupted so gearupResult leaves the back-off untouched; a real failure (no iron/fuel, furnace
   // unreachable, completed-but-0-slots) still isStopped()==false -> arms normally. Flag off ->
   // interrupted stays false -> today's accounting byte-for-byte.
-  const interrupted = process.env.GEARUP_PREEMPT_EXEMPT !== '0' && isStopped()
+  let interrupted = process.env.GEARUP_PREEMPT_EXEMPT !== '0' && isStopped()
+  // IRON_KEYSTONE: a naked keystone grind that netted no iron must NOT arm the ~42-min lockout unless
+  // it GENUINELY descended and mined the shallow band and found none - a grind reclaimed by the build
+  // before it ever reached the band (minedReal=false) is interrupted-class, not a material failure
+  // (the same #60 reasoning). Only broadens `interrupted` for the fully-naked no-progress case; a real
+  // no-iron-after-mining pass (minedReal=true) still arms. Flag off / armored / progressed -> unchanged.
+  if (process.env.IRON_KEYSTONE !== '0' && !progressed) {
+    const keystone = mining.ironKeystone({ armorPieces: 4 - bareBefore, rawIron: ironBefore }, { enabled: true })
+    let minedReal = true
+    try { minedReal = !!(provision.ironGrindMinedReal && provision.ironGrindMinedReal()) } catch {}
+    const verdict = mining.ironKeystoneFruitless({ active: keystone.active, progressed, interrupted, minedReal })
+    if (verdict === false) interrupted = true // never-really-mined keystone grind -> don't count fruitless
+  }
   try { provision.gearupResult && provision.gearupResult(progressed, { naked: bareBefore === 4, interrupted }) } catch {}
   const bareNow = bare().length
   const msg = !bareNow ? 'full set on'

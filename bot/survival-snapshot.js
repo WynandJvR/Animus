@@ -140,6 +140,10 @@ async function schedulerState (bot) {
     s.packFoodPts = pts
   } catch { s.packFoodPts = 0 }
   try { s.armorPieces = armorPieceCount(bot) } catch {}
+  // rawIron (IRON_KEYSTONE): pack iron in ingot-equivalents (raw smelts 1:1). The bank share is added
+  // below from the same cachedOnly totals read. scheduler.ironKeystoneActive reads it to hold the build
+  // while a fully-naked bot banks its first boots' worth of iron. Pack-only here; bank folded in later.
+  try { s.rawIron = countItem(bot, 'raw_iron') + countItem(bot, 'iron_ingot') } catch { s.rawIron = 0 }
   // packArmorPieces: unworn armor carried in the pack (recoveryPlan R0 wears it). Same armor-name
   // regex the grave notables use (commands.js).
   try {
@@ -171,6 +175,9 @@ async function schedulerState (bot) {
     // bankFoodPts - never walks). Feeds maintain.needs(spareKit), scheduler.recoveryReady, and the
     // rearmFromBank rung gate. Absent -> maintain treats spareKit as "not measured" (no spurious need).
     s.bankArmorPieces = Object.entries(totals).filter(([n]) => /_(helmet|chestplate|leggings|boots)$/.test(n)).reduce((a, [, c]) => a + c, 0)
+    // IRON_KEYSTONE: fold the banked iron (raw + ingots, 1:1) into rawIron so the keystone reads TOTAL
+    // holdings - a bot with 4 iron already banked is NOT on the keystone grind (it can smelt boots now).
+    s.rawIron = (s.rawIron || 0) + (totals.raw_iron || 0) + (totals.iron_ingot || 0)
     s.bankHasPick = Object.keys(totals).some(n => /_pickaxe$/.test(n))
     s.bankHasSword = Object.keys(totals).some(n => /_sword$/.test(n))
   } catch { s.bankFoodPts = 0; s.bankArmorPieces = 0; s.bankHasPick = false; s.bankHasSword = false }

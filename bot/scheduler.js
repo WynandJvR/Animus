@@ -21,6 +21,20 @@
 // Reason/dbg strings are kept human + greppable - they surface in /log as PREEMPT/held reasons.
 
 const arbiter = require('./arbiter.js') // one-way: for jobSurvivalNeed (the single need authority)
+const mining = require('./mining.js')   // one-way: PURE ironKeystone decision (mining requires nothing)
+
+// IRON_KEYSTONE: is this bot on the keystone-blocker grind - fully naked (0 armor) and short of a
+// boots' worth of raw iron - so it MUST bank that first iron before ANY other progress? Reuses the
+// PURE mining.ironKeystone. s.rawIron is pack+bank iron in ingot-equivalents (raw smelts 1:1); absent
+// -> 0 (a snapshot that never measured it reads as "no iron", the conservative keystone-active side,
+// but the guard also demands armorPieces===0 so an armored bot is never affected). Flag off -> false.
+function ironKeystoneActive (s) {
+  if (process.env.IRON_KEYSTONE === '0') return false
+  return mining.ironKeystone(
+    { armorPieces: (s && s.armorPieces) || 0, rawIron: (s && s.rawIron) || 0 },
+    { enabled: true, bootsIron: Number(process.env.ARMOR_BOOTSTRAP_IRON || 4) }
+  ).active
+}
 
 let dbgSink = null
 function setDebugSink (fn) { dbgSink = fn }
@@ -318,6 +332,16 @@ function pickJob (snapshot) {
   const bn = bootstrapNeed(s)
   if (bn) return { job: 'maintenancePass', cls: 'maintain', reason: 'bootstrap: ' + bn + ' before resuming the build', preempt: false, bootstrap: bn }
 
+  // IRON_KEYSTONE COMMIT (anti-thrash): a fully-naked bot short of its first boots' worth of iron must
+  // NOT resume the build and range for wood - that thrash (iron at the bed <-> oak at the far site every
+  // ~19s) is why it never finishes the descent. Hold the build and keep it on the armor bootstrap until
+  // it banks the iron (or a real crisis takes over - pickJob steps 1-3 already ran, so a genuine survival
+  // need still outranks this). Fires only when we'd otherwise resume the build (bn was null): bootstrap's
+  // #65/#74 ordering above is untouched. Flag off -> ironKeystoneActive false -> the build resumes as
+  // today, byte-for-byte.
+  if (s.persistedBuild && ironKeystoneActive(s)) {
+    return { job: 'maintenancePass', cls: 'maintain', reason: 'iron keystone: banking first armor iron before resuming the build (no naked thrash)', preempt: false, bootstrap: 'armor' }
+  }
   if (s.persistedBuild) return { job: 'build', cls: 'progress', reason: 'resuming a saved operator build', preempt: false }
   if (s.brainJobPending) return { job: 'brainJob', cls: 'progress', reason: 'brain job queued', preempt: false }
 
@@ -712,6 +736,7 @@ function graveCooldownMs (result, { remainMs, flagOn, hotMs, blanketMs } = {}) {
 module.exports = {
   pickJob,
   bootstrapNeed,
+  ironKeystoneActive,
   oppMaintain,
   graveCooldownMs,
   recoveryPlan,

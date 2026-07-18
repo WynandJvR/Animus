@@ -168,13 +168,53 @@ t('(#65) pickJob: a real survival need OUTRANKS bootstrap (crisis-survival stays
   const pj = S.pickJob(s)
   assert.strictEqual(pj.cls, 'survival', 'a degraded bot recovers, it does not bootstrap')
 }))
-t('(#65) pickJob: BOOTSTRAP_PRIORITY=0 -> the build resumes exactly as today', () => {
-  withEnv('BOOTSTRAP_PRIORITY', '0', () => {
-    const s = snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: true, activeJob: null, persistedBuild: true })
+t('(#65) pickJob: BOOTSTRAP_PRIORITY=0 + IRON_KEYSTONE=0 -> the build resumes exactly as today', () => {
+  withEnv('BOOTSTRAP_PRIORITY', '0', () => withEnv('IRON_KEYSTONE', '0', () => {
+    const s = snap({ hp: 20, food: 20, armorPieces: 0, rawIron: 0, homeReachable: true, activeJob: null, persistedBuild: true })
     const pj = S.pickJob(s)
-    assert.strictEqual(pj.job, 'build', 'flag off -> persistedBuild resumes')
+    assert.strictEqual(pj.job, 'build', 'both flags off -> persistedBuild resumes')
     assert.strictEqual(pj.cls, 'progress')
-  })
+  }))
+})
+
+// ---- IRON_KEYSTONE COMMIT: a fully-naked bot short of its first boots' iron holds the build ----
+// The keystone blocker: the bot thrashed iron(bed)<->oak(far site) every ~19s and never finished the
+// descent. The commit HOLDS the build (returns the armor bootstrap) until the first boots' worth of iron
+// is banked, so the descent + smelt can complete. Below crisis-survival (pickJob steps 1-3 run first).
+t('(IRON_KEYSTONE) ironKeystoneActive: naked + <4 iron -> true; armored / iron-stocked / flag off -> false', () => withEnv('IRON_KEYSTONE', '1', () => {
+  assert.strictEqual(S.ironKeystoneActive({ armorPieces: 0, rawIron: 0 }), true, 'naked + no iron -> active')
+  assert.strictEqual(S.ironKeystoneActive({ armorPieces: 0, rawIron: 3 }), true, '3 iron (<4) -> still active')
+  assert.strictEqual(S.ironKeystoneActive({ armorPieces: 0, rawIron: 4 }), false, '4 iron banked -> boots affordable -> inactive')
+  assert.strictEqual(S.ironKeystoneActive({ armorPieces: 1, rawIron: 0 }), false, 'a piece worn -> not naked -> inactive')
+  withEnv('IRON_KEYSTONE', '0', () => assert.strictEqual(S.ironKeystoneActive({ armorPieces: 0, rawIron: 0 }), false, 'flag off -> inactive'))
+}))
+t('(IRON_KEYSTONE) pickJob: naked keystone bot with a saved build -> holds the build for the armor grind', () => {
+  // BOOTSTRAP_PRIORITY off so bn is null and we'd otherwise resume the build - the keystone still holds it.
+  withEnv('IRON_KEYSTONE', '1', () => withEnv('BOOTSTRAP_PRIORITY', '0', () => {
+    const s = snap({ hp: 20, food: 20, armorPieces: 0, rawIron: 0, homeReachable: true, activeJob: null, persistedBuild: true })
+    const pj = S.pickJob(s)
+    assert.strictEqual(pj.job, 'maintenancePass', 'keystone holds the build')
+    assert.strictEqual(pj.bootstrap, 'armor', 'on the armor grind')
+    assert.strictEqual(pj.preempt, false, 'never preempts (build held, not cancelled)')
+  }))
+})
+t('(IRON_KEYSTONE) pickJob: iron-stocked bot resumes the build (keystone inactive)', () => {
+  withEnv('IRON_KEYSTONE', '1', () => withEnv('BOOTSTRAP_PRIORITY', '0', () => {
+    const s = snap({ hp: 20, food: 20, armorPieces: 0, rawIron: 4, homeReachable: true, activeJob: null, persistedBuild: true })
+    assert.strictEqual(S.pickJob(s).job, 'build', '4 iron banked -> keystone done -> build resumes')
+  }))
+})
+t('(IRON_KEYSTONE) pickJob: IRON_KEYSTONE=0 -> naked bot resumes the build (byte-for-byte)', () => {
+  withEnv('BOOTSTRAP_PRIORITY', '0', () => withEnv('IRON_KEYSTONE', '0', () => {
+    const s = snap({ hp: 20, food: 20, armorPieces: 0, rawIron: 0, homeReachable: true, activeJob: null, persistedBuild: true })
+    assert.strictEqual(S.pickJob(s).job, 'build', 'flag off -> build resumes as today')
+  }))
+})
+t('(IRON_KEYSTONE) pickJob: a real survival crisis still OUTRANKS the keystone commit', () => {
+  withEnv('IRON_KEYSTONE', '1', () => withEnv('BOOTSTRAP_PRIORITY', '0', () => {
+    const s = snap({ hp: 4, food: 4, armorPieces: 0, rawIron: 0, homeReachable: true, persistedBuild: true })
+    assert.strictEqual(S.pickJob(s).cls, 'survival', 'crisis-survival stays on top - the commit never masks it')
+  }))
 })
 
 // ---- (#74) FOOD_RESERVE_FIRST: the DURABLE bank bread reserve is the TOP bootstrap priority ----
