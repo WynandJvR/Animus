@@ -66,6 +66,24 @@ const DEADLOCK_MAX_NOFOOD = Number(process.env.DEADLOCK_MAX_NOFOOD || 5) // back
 
 const DEADLOCK_FAILS = Number(process.env.DEADLOCK_FAILS || 4)    // K consecutive all-rungs-tried deadlock cycles
 
+// #72 DEADLOCK_RESET_SOFT (default on): broaden the trigger to a persistently-degraded-and-not-
+// recovering equilibrium (hp<=SOFT_HP AND food<=SOFT_FOOD AND no pack food AND K'>=SOFT_FAILS
+// consecutive all-rungs-tried cycles), not just the exact hp<=2/food0 floor. The bot can sit at
+// hp~4.8/food~7 - functionally deadlocked (can't reach food to climb to hp>=14, so #69/#71 never
+// fire) but never at the hard floor because food drains too slowly while holding. The soft path
+// requires MORE consecutive fails (6 vs 4) so a transient dip never resets; !hasPackFood + the
+// higher fail bar keep a healthy/recovering bot (food climbing >SOFT_FOOD, hp climbing >SOFT_HP,
+// or any pack food) from ever tripping it. DEADLOCK_RESET_SOFT=0 -> only the original hp<=2/food0
+// trigger, byte-for-byte. It REUSES the same stash->die action, 10-min cooldown, noteDeadlockReset,
+// and DEADLOCK_MAX_NOFOOD backoff - a broadened trigger must NOT cause a suicide-loop.
+const DEADLOCK_RESET_SOFT = process.env.DEADLOCK_RESET_SOFT !== '0' // default on
+
+const DEADLOCK_SOFT_HP = Number(process.env.DEADLOCK_SOFT_HP || 6)     // soft trigger: hp<=this
+
+const DEADLOCK_SOFT_FOOD = Number(process.env.DEADLOCK_SOFT_FOOD || 8) // soft trigger: food<=this
+
+const DEADLOCK_SOFT_FAILS = Number(process.env.DEADLOCK_SOFT_FAILS || 6) // soft trigger: K' consecutive fails (> hard's 4)
+
 const DEADLOCK_RESET_COOLDOWN_MS = Number(process.env.DEADLOCK_RESET_COOLDOWN_MS || 600000) // hard anti-loop gap
 
 const DEADLOCK_FALL_H = Number(process.env.DEADLOCK_FALL_H || 6)  // pillar height for the lethal fall
@@ -83,7 +101,15 @@ let _deadlockResetting = false  // re-entrancy guard while the stash+die runs
 function _noteDeadlockProgress (bot) {
   const hp = bot.health != null ? bot.health : 20
   const food = bot.food != null ? bot.food : 20
-  if (hp > DEADLOCK_HP || food > 0 || foodCount(bot) >= 1) {
+  // Any genuine escape from the deadlock state clears the fail counter + the no-food streak. When
+  // the soft trigger is on the escape bar rises to the SOFT thresholds (hp>SOFT_HP OR food>SOFT_FOOD
+  // OR any pack food) - otherwise food>0 at the hp~4.8/food~7 equilibrium would reset the counter
+  // every cycle and the soft failCount could never accumulate. DEADLOCK_RESET_SOFT=0 -> the original
+  // hp>2 || food>0 || packfood escape bar, byte-for-byte.
+  const escaped = DEADLOCK_RESET_SOFT
+    ? (hp > DEADLOCK_SOFT_HP || food > DEADLOCK_SOFT_FOOD || foodCount(bot) >= 1)
+    : (hp > DEADLOCK_HP || food > 0 || foodCount(bot) >= 1)
+  if (escaped) {
     _deadlockFails = 0
     const m = loadWorldMem()
     if (m.deadlockReset && m.deadlockReset.count) { m.deadlockReset.count = 0; saveWorldMem() }
@@ -103,7 +129,24 @@ function deadlockResetDue ({ hp, food, hasPackFood, failCount, sinceLastResetMs 
   const HP = opts.hp != null ? opts.hp : DEADLOCK_HP
   const FAILS = opts.fails != null ? opts.fails : DEADLOCK_FAILS
   const COOLDOWN = opts.cooldownMs != null ? opts.cooldownMs : DEADLOCK_RESET_COOLDOWN_MS
-  return hp <= HP && food === 0 && !hasPackFood && failCount >= FAILS && sinceLastResetMs >= COOLDOWN
+  // Anti-loop + no-auto-eat guards are shared by BOTH triggers (commuting the AND leaves the hard
+  // path byte-for-byte): edible pack food -> never suicide; the 10-min cooldown must have elapsed.
+  if (hasPackFood) return false
+  if (sinceLastResetMs < COOLDOWN) return false
+  // HARD trigger (original #58): the exact hp<=2/food0 floor at the lower fail bar (K=4).
+  if (hp <= HP && food === 0 && failCount >= FAILS) return true
+  // SOFT trigger (#72, DEADLOCK_RESET_SOFT default on): a persistently-degraded-and-not-recovering
+  // equilibrium - low hp AND low food AND no pack food AND MORE consecutive all-rungs-tried cycles
+  // (K'=6 > 4) so a transient dip never resets. opts.soft===false (the DEADLOCK_RESET_SOFT=0 flag)
+  // hard-disables it, leaving ONLY the hard path -> byte-for-byte.
+  const softOn = opts.soft != null ? opts.soft : DEADLOCK_RESET_SOFT
+  if (softOn) {
+    const SHP = opts.softHp != null ? opts.softHp : DEADLOCK_SOFT_HP
+    const SFOOD = opts.softFood != null ? opts.softFood : DEADLOCK_SOFT_FOOD
+    const SFAILS = opts.softFails != null ? opts.softFails : DEADLOCK_SOFT_FAILS
+    if (hp <= SHP && food <= SFOOD && failCount >= SFAILS) return true
+  }
+  return false
 }
 
 function deadlockResetState () { return loadWorldMem().deadlockReset || { at: 0, count: 0 } }
@@ -872,7 +915,14 @@ async function recoverFromDegraded (bot, { isStopped = () => false, say = () => 
         // suicide-reset (stash all -> die -> respawn full). Runs LAST, after every ladder rung failed.
         const hp = bot.health != null ? bot.health : 20
         const food = bot.food != null ? bot.food : 20
-        const inDeadlock = hp <= DEADLOCK_HP && food === 0 && foodCount(bot) < 1
+        // Accumulate the fail counter while genuinely stuck: the HARD floor (hp<=2/food0/no-pack) or,
+        // when the soft trigger is on, the broader SOFT equilibrium (hp<=SOFT_HP/food<=SOFT_FOOD/
+        // no-pack). Any other state resets it (a normal recoverable crisis must never accumulate).
+        // DEADLOCK_RESET_SOFT=0 -> only the hard gate, byte-for-byte.
+        const hasPack = foodCount(bot) >= 1
+        const inHardDeadlock = hp <= DEADLOCK_HP && food === 0 && !hasPack
+        const inSoftDeadlock = DEADLOCK_RESET_SOFT && hp <= DEADLOCK_SOFT_HP && food <= DEADLOCK_SOFT_FOOD && !hasPack
+        const inDeadlock = inHardDeadlock || inSoftDeadlock
         if (inDeadlock) _deadlockFails++; else _deadlockFails = 0
         const dstate = deadlockResetState()
         const due = deadlockResetDue(
@@ -917,5 +967,5 @@ function isRecoveringDegraded () { return _recoveringDegraded }
 
 module.exports = {
   setDebugSink,
-  DEADLOCK_HP, DEADLOCK_MAX_NOFOOD, DEADLOCK_FAILS, DEADLOCK_RESET_COOLDOWN_MS, DEADLOCK_FALL_H, SUICIDE_EXIT_OPEN_SKY, SUICIDE_FALLBACK_DEATH, SUICIDE_DROWN, _deadlockFails, _deadlockResetting, _noteDeadlockProgress, noteDeadlockReset, deadlockResetDue, deadlockResetState, sampleColumnForSky, reachOpenSky, deadlockDieByFall, suicideByDrown, suicideByPitDrop, deadlockFallbackDeath, deadlockSuicideReset, _recoveringHp, recoverHp, isRecoveringHp, _resting, restUntilSafe, isResting, sleepInBedHere, nightRest, nightRestInner, boundedHold, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, RUNG_EXECUTORS, recoveryReadyNow, _recoveringDegraded, recoverFromDegraded, isRecoveringDegraded
+  DEADLOCK_HP, DEADLOCK_MAX_NOFOOD, DEADLOCK_FAILS, DEADLOCK_RESET_SOFT, DEADLOCK_SOFT_HP, DEADLOCK_SOFT_FOOD, DEADLOCK_SOFT_FAILS, DEADLOCK_RESET_COOLDOWN_MS, DEADLOCK_FALL_H, SUICIDE_EXIT_OPEN_SKY, SUICIDE_FALLBACK_DEATH, SUICIDE_DROWN, _deadlockFails, _deadlockResetting, _noteDeadlockProgress, noteDeadlockReset, deadlockResetDue, deadlockResetState, sampleColumnForSky, reachOpenSky, deadlockDieByFall, suicideByDrown, suicideByPitDrop, deadlockFallbackDeath, deadlockSuicideReset, _recoveringHp, recoverHp, isRecoveringHp, _resting, restUntilSafe, isResting, sleepInBedHere, nightRest, nightRestInner, boundedHold, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, RUNG_EXECUTORS, recoveryReadyNow, _recoveringDegraded, recoverFromDegraded, isRecoveringDegraded
 }

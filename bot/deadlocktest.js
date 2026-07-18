@@ -75,6 +75,85 @@ t('ALL guards together: a normal recoverable crisis never trips it', () => {
   assert.strictEqual(due({ hp: 2, food: 0, hasPackFood: true, failCount: 20, sinceLastResetMs: 9e9 }), false)
 })
 
+// ============================================================================================
+// #72 DEADLOCK_RESET_SOFT (default on): a broadened trigger for the persistently-degraded-and-not-
+// recovering equilibrium (the bot sits at hp~4.8/food~7, functionally deadlocked but never at the
+// exact hp<=2/food0 floor). The soft path needs low hp AND low food AND no pack food AND MORE
+// consecutive all-rungs-tried cycles (K'=6 > the hard 4). All tests pass soft:true explicitly so
+// they are independent of the DEADLOCK_RESET_SOFT env default, plus one env-default check.
+
+// The canonical GENUINE soft deadlock: low-hp/low-food equilibrium, nothing edible, K'>=6 cycles,
+// past the cooldown. NOT at the hard hp<=2/food0 floor.
+const SOFT = { hp: 5, food: 7, hasPackFood: false, failCount: 6, sinceLastResetMs: 600000 }
+
+t('SOFT: fires on a persistent low-hp/low-food stuck equilibrium (hp5/food7/failCount6/no-pack)', () => {
+  assert.strictEqual(due({ ...SOFT }, { soft: true }), true, 'the bootstrap-breaker - a real soft deadlock resets')
+  assert.strictEqual(due({ ...SOFT, hp: 6, food: 8 }, { soft: true }), true, 'exactly at the soft thresholds -> fires (boundary)')
+  assert.strictEqual(due({ ...SOFT, failCount: 6 }, { soft: true }), true, 'exactly K\'=6 -> fires (boundary)')
+})
+
+t('SOFT: does NOT fire with edible pack food (recovering, auto-eat handles it)', () => {
+  assert.strictEqual(due({ ...SOFT, hasPackFood: true }, { soft: true }), false, 'pack food -> never suicide')
+})
+
+t('SOFT: does NOT fire with hp above the soft floor (hp climbing = recovering)', () => {
+  assert.strictEqual(due({ ...SOFT, hp: 7 }, { soft: true }), false, 'hp>6 -> not the soft deadlock')
+  assert.strictEqual(due({ ...SOFT, hp: 14 }, { soft: true }), false, 'hp14 (secure-base gate) -> obviously not')
+})
+
+t('SOFT: does NOT fire with food above the soft floor (food climbing = recovering)', () => {
+  assert.strictEqual(due({ ...SOFT, food: 9 }, { soft: true }), false, 'food>8 -> recovering, not stuck')
+  assert.strictEqual(due({ ...SOFT, food: 20 }, { soft: true }), false, 'full food -> obviously not')
+})
+
+t('SOFT: needs MORE consecutive fails than the hard trigger (transient dip never resets)', () => {
+  assert.strictEqual(due({ ...SOFT, failCount: 5 }, { soft: true }), false, 'K\'-1=5 cycles -> hold, do not reset')
+  assert.strictEqual(due({ ...SOFT, failCount: 4 }, { soft: true }), false, 'the hard bar (4) is NOT enough for the soft trigger')
+  assert.strictEqual(due({ ...SOFT, failCount: 0 }, { soft: true }), false, 'first cycle -> never')
+})
+
+t('SOFT: does NOT fire within the anti-loop cooldown (shared 10-min gap, no suicide loop)', () => {
+  assert.strictEqual(due({ ...SOFT, sinceLastResetMs: 0 }, { soft: true }), false, 'just reset -> hard cooldown blocks')
+  assert.strictEqual(due({ ...SOFT, sinceLastResetMs: 599999 }, { soft: true }), false, 'one ms short -> still blocked')
+})
+
+t('SOFT: flag OFF (DEADLOCK_RESET_SOFT=0) -> only the hard trigger, byte-for-byte', () => {
+  assert.strictEqual(due({ ...SOFT }, { soft: false }), false, 'soft off -> the soft equilibrium does NOT reset')
+  assert.strictEqual(due({ ...SOFT }, { soft: true }), true, 'soft on -> fires')
+  // hard trigger is unaffected by the soft flag either way
+  assert.strictEqual(due({ ...DEADLOCK }, { soft: false }), true, 'hard trigger fires with soft off')
+  assert.strictEqual(due({ ...DEADLOCK }, { soft: true }), true, 'hard trigger fires with soft on')
+})
+
+t('SOFT: DEADLOCK_RESET=0 (whole feature off) hard-disables both triggers', () => {
+  assert.strictEqual(due({ ...SOFT }, { soft: true, enabled: false }), false, 'enabled:false wins over the soft path')
+})
+
+t('SOFT: opts override the soft thresholds (tunable, env-independent)', () => {
+  assert.strictEqual(due({ ...SOFT, hp: 5 }, { soft: true, softHp: 4 }), false, 'softHp=4 -> hp5 no longer qualifies')
+  assert.strictEqual(due({ ...SOFT, food: 7 }, { soft: true, softFood: 6 }), false, 'softFood=6 -> food7 no longer qualifies')
+  assert.strictEqual(due({ ...SOFT, failCount: 6 }, { soft: true, softFails: 9 }), false, 'softFails=9 -> 6 cycles not enough')
+  assert.strictEqual(due({ ...SOFT, failCount: 9 }, { soft: true, softFails: 9 }), true, 'softFails=9 -> 9 cycles fires')
+})
+
+t('SOFT: env default is ON (DEADLOCK_RESET_SOFT unset -> the soft trigger is live)', () => {
+  // no soft opt -> falls through to the DEADLOCK_RESET_SOFT env default (on unless ==="0")
+  const expect = process.env.DEADLOCK_RESET_SOFT !== '0'
+  assert.strictEqual(due({ ...SOFT }), expect, 'default-on soft trigger fires with no opt override')
+})
+
+t('SOFT: the anti-loop MAX_NOFOOD backoff still bounds it (caller composition)', () => {
+  // The caller fires only when `due && resetCount < DEADLOCK_MAX_NOFOOD`; at/after the backoff it
+  // LOGS a warning and holds instead of spinning suicides. Same safety as the hard trigger.
+  const MAX_NOFOOD = 5
+  const soft = due({ ...SOFT }, { soft: true })
+  const fire = (resetCount) => soft && resetCount < MAX_NOFOOD
+  assert.strictEqual(fire(0), true, 'first reset -> fires')
+  assert.strictEqual(fire(4), true, 'still under the backoff -> fires')
+  assert.strictEqual(fire(5), false, 'at MAX_NOFOOD resets with no food gained -> back off (hold, no suicide-loop)')
+  assert.strictEqual(fire(9), false, 'well past the backoff -> stays held')
+})
+
 t('deadlockResetState exports the persisted { at, count } shape', () => {
   const s = P.deadlockResetState()
   assert.ok(s && typeof s === 'object', 'returns an object')
