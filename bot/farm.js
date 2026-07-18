@@ -177,4 +177,23 @@ function footprintHasCell (cells, x, y, z) {
   return false
 }
 
-module.exports = { bankUsable, BANK_DYS, cropCellState, cellHealthStep, plotShouldUnlatch, matureForHarvest, farmlandReady, tillableBank, expansionMaxed, barrenStep, orderBankCandidates, scoreFarmSite, shouldResite, plotCollectRadius, footprintHasCell }
+// #59 §A FARM_SEED_BANK (PURE): how many wheat_seeds to withdraw from the bank, BANK-FIRST, before
+// any grass-breaking. The shortfall `want - packSeeds` (floored at 0), capped by what the bank holds
+// (`bankSeeds`; pass Infinity when the bank stock is unknown and the caller lets the withdraw itself
+// cap). >0 means "raid the bank before touching grass"; 0 means the pack already has enough (or the
+// bank is empty -> fall through to the grass fallback). Offline-testable, no bot / no I/O.
+function seedBankWithdrawAmount (bankSeeds, packSeeds, want) {
+  const need = Math.max(0, (want || 0) - (packSeeds || 0))
+  return Math.max(0, Math.min(bankSeeds == null ? need : bankSeeds, need))
+}
+
+// #59 §B FARM_HARVEST_FIRST (PURE): on a food crisis, harvest the STANDING farm before establishing a
+// new plot at the nearest (often stale) water. Returns 'harvest-standing' when a farm already stands
+// AND food is below the crisis threshold AND the flag is on; else 'establish' (today's behavior /
+// no farm). Offline-testable, no bot / no I/O.
+function foodCrisisFarmAction ({ hasStandingFarm = false, food = 20, harvestFirst = true, foodThreshold = 14 } = {}) {
+  if (harvestFirst && hasStandingFarm && food < foodThreshold) return 'harvest-standing'
+  return 'establish'
+}
+
+module.exports = { bankUsable, BANK_DYS, cropCellState, cellHealthStep, plotShouldUnlatch, matureForHarvest, farmlandReady, tillableBank, expansionMaxed, barrenStep, orderBankCandidates, scoreFarmSite, shouldResite, plotCollectRadius, footprintHasCell, seedBankWithdrawAmount, foodCrisisFarmAction }

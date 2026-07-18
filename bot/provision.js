@@ -4170,14 +4170,39 @@ async function tillCell (bot, cell) {
 
 const WHEAT_FARM_TARGET = Number(process.env.WHEAT_FARM_TARGET || (process.env.FARM_EXPAND !== '0' ? 33 : 20)) // §4.8: 33 (~11 bread/cycle, breaks the food death-spiral) when FARM_EXPAND on; 20 off. >=20 crop cells: 12 barely covered 0->full (10 wheat ~3 bread ~15 hunger); 20 -> ~6 bread -> 0->full + surplus/buffer (was 12/6)
 
+// #59 §A FARM_SEED_BANK (default on): WITHDRAW wheat_seeds from the hut bank BEFORE breaking any
+// grass - a chest full of seeds was invisible to the farm (the loop-open bug: "seed-starved ...
+// deferred" while 1.5 stacks sat banked). Resource-model correct (withdraw > gather). Bounded +
+// NEVER throws the food path (bank unreachable / no chest -> quietly returns, caller falls through
+// to the grass fallback). FARM_SEED_BANK=0 -> no-op (grass-only, byte-for-byte). Returns the seed
+// count on hand after the attempt.
+async function withdrawSeedsFromBank (bot, want, { near = null, isStopped = () => false, say = () => {} } = {}) {
+  if (process.env.FARM_SEED_BANK === '0') return countItem(bot, 'wheat_seeds')
+  const have = countItem(bot, 'wheat_seeds')
+  if (farm.seedBankWithdrawAmount(Infinity, have, want) <= 0) return have // pack already has `want`
+  try {
+    const anchor = near || resolveBankCell(bot) || hutAnchor() ||
+      (bot.entity && bot.entity.position ? { x: Math.round(bot.entity.position.x), z: Math.round(bot.entity.position.z) } : null)
+    // craft:false -> pure bank WITHDRAW only (wheat_seeds is not craftable; acquire would refuse to
+    // gather anyway, but craft:false skips the reconcile/chest-read churn and can't throw outward).
+    await require('./resources.js').acquire(bot, 'wheat_seeds', want, { near: anchor, craft: false, isStopped, say })
+  } catch (e) { dbg('  seeds: bank withdraw failed (' + e.message + ') - falling back to grass') }
+  const now = countItem(bot, 'wheat_seeds')
+  if (now > have) dbg('  seeds: withdrew ' + (now - have) + ' wheat_seeds from the bank (bank-first, before grass)')
+  return now
+}
+
 // SEED GATHERING (extracted from ensureWheatFarm step 3, §5.4): break tall grass/ferns for
 // wheat_seeds up to `want`, roaming a few compass legs if the immediate area is barren. Same
 // grassIds / roam legs / budgets as before (behavior identical when want=3). Now also reusable
 // by the tend path so a seed-starved plot self-fills. Returns the seed count on hand.
-async function gatherSeedsNear (bot, want, { isStopped = () => false } = {}) {
+// #59 §A FARM_SEED_BANK: raid the bank FIRST (all three seed sites route through here), then this
+// grass loop is the FALLBACK for whatever the bank couldn't supply. =0 -> straight to grass.
+async function gatherSeedsNear (bot, want, { isStopped = () => false, near = null, say = () => {} } = {}) {
   const mcData = require('minecraft-data')(bot.version)
   const seedCount = () => countItem(bot, 'wheat_seeds')
   if (seedCount() >= want) return seedCount()
+  if (process.env.FARM_SEED_BANK !== '0') { await withdrawSeedsFromBank(bot, want, { near, isStopped, say }); if (seedCount() >= want) return seedCount() }
   const grassIds = ['short_grass', 'tall_grass', 'grass', 'fern', 'large_fern'].map(n => mcData.blocksByName[n] && mcData.blocksByName[n].id).filter(x => x != null)
   let broken = 0; let legs = 0
   const searchGrass = () => bot.findBlock({ matching: grassIds, maxDistance: 48 })
@@ -4327,7 +4352,13 @@ async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () =
       // ONLY forget the remembered pond if we actually ARRIVED near it and it's genuinely
       // gone - a trek that fell short (blocked path) must NOT erase a good remembered pond
       // (that's how the bot lost its one water and could never farm again).
-      if (!waters.length && Math.hypot(bot.entity.position.x - known.x, bot.entity.position.z - known.z) <= 8) {
+      // #59 §C FARM_FORGET_DRY_WATER (default on): walkStaged stops within nav RANGE (6), so the
+      // exact-coord hypot lands ~6-9b out and the old strict <=8 gate FREQUENTLY failed to forget a
+      // genuinely-dry phantom (the 444,35 pond re-picked every crisis). Widen the "arrived" radius so
+      // a reached-but-dry water is forgotten; still guarded by !waters.length (nothing farmable in 48b).
+      // =0 -> the strict <=8 (byte-for-byte).
+      const arriveR = process.env.FARM_FORGET_DRY_WATER === '0' ? 8 : Number(process.env.FARM_FORGET_ARRIVE || 12)
+      if (!waters.length && Math.hypot(bot.entity.position.x - known.x, bot.entity.position.z - known.z) <= arriveR) {
         dbg('  wheat farm: arrived at remembered pond ' + known.x + ',' + known.z + ' but no open-sky water there anymore - forgetting it')
         forgetInfra('water', listInfra('water').find(e => e.x === known.x && e.z === known.z))
       } else if (!waters.length) dbg('  wheat farm: could not reach remembered pond ' + known.x + ',' + known.z + ' (trek fell short) - keeping it for next time')
@@ -4473,8 +4504,11 @@ async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () =
   const seedWant = process.env.FARM_SEED_TOPUP === '0' ? 3 : Math.max(3, Math.min(12, WHEAT_FARM_TARGET - existingLen))
   if (seedCount() < seedWant) {
     try { await gotoWithTimeout(bot, new goals.GoalNear(w.x, w.y, w.z, 4), 60000) } catch {}
-    await gatherSeedsNear(bot, seedWant, { isStopped })
-    if (seedCount() < 1) { dbg('  wheat farm: no grass anywhere within reach - genuinely no seeds here, deferred'); return false }
+    await gatherSeedsNear(bot, seedWant, { isStopped, near: home, say })
+    // #59 §A: gatherSeedsNear now raids the bank BEFORE grass, so a <1 result means BOTH the bank
+    // AND the grass came up empty - only THEN is it "genuinely no seeds". FARM_SEED_BANK=0 keeps the
+    // original grass-only wording byte-for-byte.
+    if (seedCount() < 1) { dbg('  wheat farm: ' + (process.env.FARM_SEED_BANK !== '0' ? 'bank empty of seeds AND no grass anywhere within reach' : 'no grass anywhere within reach') + ' - genuinely no seeds here, deferred'); return false }
   }
   // 4) till + plant the water's bank: same-y neighbours of the waterline
   say('setting up a wheat farm by the water - no more starving')
@@ -4688,8 +4722,8 @@ async function tendWheatFarm (bot, { isStopped = () => false, say = () => {} } =
       for (const c of cellsArr) { const b = bot.blockAt(new Vec3(c.x, c.y, c.z)); if (farm.cropCellState(b && b.name) === 'gone') gone++ }
       const missing = gone + Math.max(0, WHEAT_FARM_TARGET - cellsArr.length)
       if (missing > 0 && countItem(bot, 'wheat_seeds') < missing) {
-        dbg('  wheat tend: seed-starved (' + countItem(bot, 'wheat_seeds') + ' seeds, ' + missing + ' cells need seeding) - gathering from the grass')
-        await gatherSeedsNear(bot, Math.min(missing, 12), { isStopped })
+        dbg('  wheat tend: seed-starved (' + countItem(bot, 'wheat_seeds') + ' seeds, ' + missing + ' cells need seeding) - ' + (process.env.FARM_SEED_BANK !== '0' ? 'raiding the bank then the grass' : 'gathering from the grass'))
+        await gatherSeedsNear(bot, Math.min(missing, 12), { isStopped, near: hutAnchor() || { x: m.wheatFarm.x, z: m.wheatFarm.z }, say })
       }
     } catch (e) { dbg('  wheat tend: seed top-up failed (' + e.message + ')') }
   }
@@ -5508,6 +5542,27 @@ async function secureFoodInner (bot, opts = {}) {
     }
   }
   if (fedEnough() || isStopped()) return { fed: fedEnough(), blockedOn: fedEnough() ? null : (isStopped() ? 'stopped' : 'food') }
+  // #59 §B FARM_HARVEST_FIRST (default on): the farm GROWS but the bot never EATS from it - the crisis
+  // path establishes a NEW plot at the nearest (often STALE) water instead of routing to the STANDING
+  // farm. When a farm already stands in world-mem and we're in a real food crisis, TREK TO IT and
+  // tend/harvest (mature wheat -> bake bread -> eat) BEFORE any establish. The standing farm can be
+  // ~100b out (beyond FARM FLOOR's nearHome gate), so this treks farther - but ONLY when it's safe
+  // (day, no hostile within 12, hp above the floor), exactly the surrounding safety discipline. A
+  // single harvest yields BOTH bread (food) and seeds (replant) -> self-sustaining. Bounded by
+  // walkStaged/tendWheatFarm + isStopped. FARM_HARVEST_FIRST=0 -> skip (today's establish-first).
+  if (farm.foodCrisisFarmAction({ hasStandingFarm: hasStandingFarm(), food: bot.food ?? 20, harvestFirst: process.env.FARM_HARVEST_FIRST !== '0' }) === 'harvest-standing' &&
+      !fedEnough() && foodCount(bot) < 1 && !isStopped()) {
+    const wf = loadWorldMem().wheatFarm
+    const hp = bot.health ?? 20
+    const safe = hp > Number(process.env.FARM_HARVEST_HP || 10) && !isNight(bot) && !nearHostile(bot, 12)
+    if (wf && safe) {
+      dbg('secureFood: HARVEST-FIRST - standing farm at ' + wf.x + ',' + wf.z + ' (food=' + bot.food + ' hp=' + hp + ') -> trekking to harvest it before establishing anew')
+      say('i have a farm - harvesting it instead of starving next to it')
+      try { await walkStaged(bot, wf.x, wf.z, { isStopped, range: 6, timeoutMs: 180000 }) } catch (e) { dbg('  harvest-first: trek to farm failed (' + e.message + ')') }
+      try { await tendWheatFarm(bot, { isStopped, say }); await bakeBreadFromWheat(bot, { isStopped, home: wf }); await cookIfRaw(); await eatUp(bot) } catch (e) { dbg('  harvest-first: tend/bake/eat failed (' + e.message + ')') }
+      if (fedEnough()) return { fed: true, blockedOn: null }
+    } else if (wf) dbg('secureFood: HARVEST-FIRST - standing farm at ' + wf.x + ',' + wf.z + ' but unsafe to trek (hp=' + hp + ' night=' + isNight(bot) + ' hostile=' + nearHostile(bot, 12) + ') - deferring to the local floor')
+  }
   // #40 F4.2: a STARVING bot (food<=4) that just trekked home and found the pantry dry must NOT
   // then march OUT to farm/fish/scout - those excursions are what get a 1-hp bot killed. Skip the
   // outward legs and hold indoors (bounded); the caller / crisis reflex re-runs the whole chain

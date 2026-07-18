@@ -216,5 +216,41 @@ eq(F.barrenStep(undefined, 'other'), { strikes: 1, skip: false }, 'undefined pri
   eq(F.plotCollectRadius([{ x: 456, z: 31 }], anchor, { margin: 2, cap: 50 }), 12, 'plotCollectRadius: custom margin (10+2)')
 }
 
+// ---- #59 §A FARM_SEED_BANK: bank-first seed withdraw amount ------------------------
+{
+  // The decision the real path embodies: withdraw the shortfall (want - packSeeds), floored at 0,
+  // capped by what the bank actually holds. >0 means "raid the bank BEFORE any grass".
+  eq(F.seedBankWithdrawAmount(64, 0, 12), 12, 'seedBank: full bank, empty pack -> withdraw the full want (bank-first, before gather)')
+  eq(F.seedBankWithdrawAmount(64, 5, 12), 7, 'seedBank: pack has 5, want 12 -> withdraw only the 7 shortfall')
+  eq(F.seedBankWithdrawAmount(3, 0, 12), 3, 'seedBank: bank short (3) -> withdraw all 3, THEN grass covers the rest')
+  eq(F.seedBankWithdrawAmount(0, 0, 12), 0, 'seedBank: empty bank -> 0 (fall through to the grass fallback)')
+  eq(F.seedBankWithdrawAmount(64, 12, 12), 0, 'seedBank: pack already has want -> 0 (no bank trip)')
+  eq(F.seedBankWithdrawAmount(64, 20, 12), 0, 'seedBank: pack over want -> 0, never negative')
+  // Bank stock unknown at call time (provision passes Infinity; the withdraw itself caps to reality).
+  eq(F.seedBankWithdrawAmount(Infinity, 5, 12), 7, 'seedBank: unknown bank stock -> request the full shortfall (7)')
+  eq(F.seedBankWithdrawAmount(Infinity, 12, 12), 0, 'seedBank: unknown bank + pack full -> 0')
+  // FLAG REGIME: FARM_SEED_BANK=0 is enforced at the call site (provision.withdrawSeedsFromBank
+  // early-returns), never in this PURE amount fn. The amount math is identical both regimes; only
+  // whether provision CALLS it differs - asserted here for completeness.
+  eq(F.seedBankWithdrawAmount(64, 0, 12), 12, 'seedBank: pure amount is flag-independent (gate lives in provision)')
+}
+
+// ---- #59 §B FARM_HARVEST_FIRST: harvest-standing vs establish decision -------------
+{
+  // Flag ON (default): a standing farm + food below the crisis threshold -> harvest the STANDING
+  // farm before establishing a redundant new plot at stale water.
+  eq(F.foodCrisisFarmAction({ hasStandingFarm: true, food: 8, harvestFirst: true }), 'harvest-standing', 'harvestFirst ON: standing farm + food<14 -> harvest-standing')
+  eq(F.foodCrisisFarmAction({ hasStandingFarm: true, food: 13, harvestFirst: true }), 'harvest-standing', 'harvestFirst ON: standing farm + food 13 (<14) -> harvest-standing')
+  eq(F.foodCrisisFarmAction({ hasStandingFarm: true, food: 14, harvestFirst: true }), 'establish', 'harvestFirst ON: food 14 (not <14) -> not a crisis, establish path')
+  eq(F.foodCrisisFarmAction({ hasStandingFarm: false, food: 8, harvestFirst: true }), 'establish', 'harvestFirst ON: NO standing farm -> establish (nothing to harvest)')
+  // Flag OFF (FARM_HARVEST_FIRST=0): ALWAYS establish (today's establish-first behavior), even with
+  // a standing farm at food 8 - byte-for-byte the pre-#59 decision.
+  eq(F.foodCrisisFarmAction({ hasStandingFarm: true, food: 8, harvestFirst: false }), 'establish', 'harvestFirst OFF: standing farm + food<14 STILL establishes (today byte-for-byte)')
+  eq(F.foodCrisisFarmAction({ hasStandingFarm: false, food: 8, harvestFirst: false }), 'establish', 'harvestFirst OFF: no farm -> establish')
+  // Threshold + defaults.
+  eq(F.foodCrisisFarmAction({ hasStandingFarm: true, food: 8 }), 'harvest-standing', 'default harvestFirst=true -> harvest-standing')
+  eq(F.foodCrisisFarmAction({ hasStandingFarm: true, food: 8, harvestFirst: true, foodThreshold: 6 }), 'establish', 'threshold tunable: food 8 not < 6 -> establish')
+}
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall farm tests passed')
 process.exit(failures ? 1 : 0)
