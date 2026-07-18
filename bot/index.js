@@ -1320,6 +1320,33 @@ const NO_AUTO_MELEE = /creeper|ghast|warden|wither_boss|^wither$/i
 // below this health, DISENGAGE from any hostile (retreat) instead of trading hits -
 // how it survived to death overnight was by fighting a skeleton while low. Tunable.
 const RETREAT_HP = parseInt(process.env.RETREAT_HP || '8', 10)
+// #78 (flag FLEE_LOS, default ON): don't flee a hostile that is fully walled off - a creeper
+// sealed in a cave 13b below the hut can't reach the bot, yet the straight-line flee scans
+// phantom-retreat off every harvest walk. Mirror the survival-snapshot occlusion gate (the same
+// THREAT_LOS test that already discounts walled mobs for mining) at the two flee candidate
+// filters: <=floor ALWAYS counts (thin wall / right above-below / breaking through), the raycast
+// runs only in the (floor, cap] band, both feet+head rays must be blocked to discount, FAIL-OPEN
+// on any error (blocked=false -> the mob still counts). FLEE_LOS=0 -> blocked stays false ->
+// hostileThreatens is true for every candidate past the floor -> both scans byte-for-byte today.
+// Floor from THREAT_LOS_FLOOR (shared with survival-snapshot); NOT coupled to THREAT_LOS itself.
+const FLEE_LOS_ON = process.env.FLEE_LOS !== '0'
+const FLEE_LOS_FLOOR = parseInt(process.env.THREAT_LOS_FLOOR || '5', 10)
+function fleeThreatens (bot, me, e, d, cap) {
+  let blocked = false
+  if (FLEE_LOS_ON && d > FLEE_LOS_FLOOR && d <= cap) {
+    try {
+      const { Vec3 } = require('vec3')
+      const { AIRISH } = require('./provision-core.js')
+      const los = require('./los.js')
+      const eye = me.offset(0, (bot.entity && bot.entity.height) || 1.62, 0)
+      const isSolid = (x, y, z) => { const b = bot.blockAt(new Vec3(x, y, z)); return !!(b && b.boundingBox === 'block' && !AIRISH(b.name)) }
+      const feet = los.lineBlocked(eye, e.position.offset(0, 0.5, 0), isSolid)
+      const head = feet ? los.lineBlocked(eye, e.position.offset(0, (e.height || 1.6) - 0.1, 0), isSolid) : false
+      blocked = feet && head
+    } catch { blocked = false }
+  }
+  return arbiter.hostileThreatens(d, blocked, { floor: FLEE_LOS_FLOOR })
+}
 // fix #14 (flag SHELTER_BED_FALLBACK, default ON): free the built-in flee/defend at CRITICAL
 // hp. Read once at module load like the other reflex flags; =0 reverts both guarded
 // expressions below to their old forms byte-equivalently.
@@ -1480,14 +1507,18 @@ if (process.env.AUTO_DEFEND !== '0') {
       for (const e of Object.values(bot.entities || {})) {
         if (!e || !e.position || (e.type !== 'mob' && e.type !== 'hostile')) continue
         if (!/creeper/.test(e.name || '')) continue
-        const d = e.position.distanceTo(me); if (d < fbest) { fbest = d; flee = e }
+        const d = e.position.distanceTo(me)
+        if (!fleeThreatens(bot, me, e, d, 12)) continue // #78: skip a fully walled-off creeper (fail-open; <=floor always counts)
+        if (d < fbest) { fbest = d; flee = e }
       }
       if (!flee && hp <= RETREAT_HP) { // low health -> disengage from whatever's hunting us
         let best = 13
         for (const e of Object.values(bot.entities || {})) {
           if (!e || !e.position || (e.type !== 'mob' && e.type !== 'hostile')) continue
           if (!HOSTILE_RE.test(e.name || '')) continue
-          const d = e.position.distanceTo(me); if (d < best) { best = d; flee = e; why = `low hp (${Math.round(hp)})` }
+          const d = e.position.distanceTo(me)
+          if (!fleeThreatens(bot, me, e, d, 13)) continue // #78: skip a fully walled-off hostile (fail-open; <=floor always counts)
+          if (d < best) { best = d; flee = e; why = `low hp (${Math.round(hp)})` }
         }
         if (flee) fbest = flee.position.distanceTo(me)
       }
