@@ -151,9 +151,17 @@ async function placeAt (bot, target, match) {
   return false
 }
 
+// Natural-terrain break test: diggable terrain that is NOT part of a built structure.
+// Shared - nav-profile.js reasons about the same distinction.
+const STRUCTURE_RE = /planks$|stairs$|_slab$|fence|_door$|trapdoor$|_wall$|glass|_bed$|torch|lantern|crafting_table|^furnace$|chest|barrel|bookshelf|ladder|_sign$|_carpet$|wool$|brick|cobblestone|_wood$|smooth_|polished_|composter|loom|^bell$|dirt_path|farmland|hay_block|stripped_/
+
+const DIGGABLE_NATURAL = /^(dirt|coarse_dirt|rooted_dirt|grass_block|podzol|mycelium|moss_block|stone|deepslate|granite|diorite|andesite|tuff|calcite|dripstone_block|pointed_dripstone|sand|red_sand|gravel|clay|mud|sandstone|red_sandstone|snow_block|snow|powder_snow|ice|packed_ice|blue_ice|frosted_ice|netherrack|soul_sand|soul_soil|magma_block|blackstone|basalt|end_stone)$|terracotta$|_ore$/
+
+function canBreakNaturally (block) { return !!block && DIGGABLE_NATURAL.test(block.name) && !STRUCTURE_RE.test(block.name) }
+
 module.exports = {
   setDebugSink,
-  AIRISH, REPLACEABLE, SHELTER_HOSTILE,
+  AIRISH, REPLACEABLE, SHELTER_HOSTILE, STRUCTURE_RE, DIGGABLE_NATURAL, canBreakNaturally,
   inventoryCounts, countItem, isNight, nearHostile, toolForBlock,
   gotoWithTimeout, collectDrops, stepInto, placeAt
 }
