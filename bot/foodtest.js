@@ -183,7 +183,11 @@ t('FOOD_FLOOR F1: outboundRungAdmissible - a STARVING bot (food<=floorFood) may 
   // NARROW: a merely-scratched, not-starving bot still aborts outbound at hp<=6 (the §5 invariant).
   assert.strictEqual(F.outboundRungAdmissible(1, { food: 12, ...FF }), false, 'hp1 food12 (>floorFood) -> still aborts (no death-march)')
   assert.strictEqual(F.outboundRungAdmissible(5, { food: 12, ...FF }), false, 'hp5 food12 -> still aborts as today')
-  assert.strictEqual(F.outboundRungAdmissible(3, { food: 3, ...FF }), false, 'hp3 food3 (>floorFood 2) -> aborts')
+  // #51 FOOD_FLOOR_HP: hp3/food3 is the dead-zone livelock - with the hp-crisis clause ON the fishing
+  // rung is now ADMITTED (was: aborts). With FOOD_FLOOR_HP=0 it aborts exactly as before (byte-for-byte).
+  assert.strictEqual(F.outboundRungAdmissible(3, { food: 3, ...FF, foodFloorHp: true }), true, '#51: hp3 food3 (hp-crisis, no food) -> admit the fishing rung')
+  assert.strictEqual(F.outboundRungAdmissible(3, { food: 3, ...FF, foodFloorHp: false }), false, 'FOOD_FLOOR_HP=0 -> hp3 food3 aborts as today (byte-for-byte)')
+  assert.strictEqual(F.outboundRungAdmissible(3, { food: 8, ...FF, foodFloorHp: true }), false, 'hp3 food8 (>dead-zone) -> still aborts (not a food-crisis)')
   // GUARDRAIL: no food passed (trekFarm rung) -> today's pure hp-abort, carve-out inert.
   assert.strictEqual(F.outboundRungAdmissible(1, FF), false, 'no food passed (trekFarm) -> hp1 aborts as today')
   assert.strictEqual(F.outboundRungAdmissible(7, { food: 0, ...FF }), true, 'hp7 -> admissible anyway (above the abort line)')
@@ -233,6 +237,49 @@ t('ROD_SUPPLY: needStringForRod - seek string ONLY when rod-less, reserve-dry, a
   assert.strictEqual(F.needStringForRod({ hasRod: false, packString: 1, bankRods: 0, target: 1 }), false, 'target override respected')
   // defensive: missing counts default to 0 (rod-less, dry, 0 string) -> true
   assert.strictEqual(F.needStringForRod({ hasRod: false }), true, 'undefined counts default to 0 -> cold-start true')
+})
+
+t('#51 FOOD_FLOOR_HP: foodFloorTriggered - fish at food<=2 OR (hp<=6 & food<=6 & no pack food)', () => {
+  const on = { foodFloor: true, foodFloorHp: true } // pin flags for determinism (avoid env)
+  // existing starvation floor (food<=2, dry pack)
+  assert.strictEqual(F.foodFloorTriggered({ food: 2, hasPackFood: false, ...on }), true, 'food<=2 dry -> fish (existing floor)')
+  assert.strictEqual(F.foodFloorTriggered({ food: 2, hasPackFood: true, ...on }), false, 'food<=2 but carrying food -> eat, do not fish')
+  // THE LIVELOCK CASE: hp4/food4, no pack food -> must fish (the new hp-crisis clause)
+  assert.strictEqual(F.foodFloorTriggered({ food: 4, hp: 4, hasPackFood: false, ...on }), true, 'hp4/food4 dry -> fish (dead-zone livelock closed)')
+  assert.strictEqual(F.foodFloorTriggered({ food: 6, hp: 6, hasPackFood: false, ...on }), true, 'hp6/food6 edge -> fish')
+  // a healthy bot must NOT over-fish in the food 3-6 zone
+  assert.strictEqual(F.foodFloorTriggered({ food: 4, hp: 20, hasPackFood: false, ...on }), false, 'hp20/food4 -> not an hp-crisis, no fish')
+  // food above the dead-zone even at low hp -> no fish (regen zone / eat path)
+  assert.strictEqual(F.foodFloorTriggered({ food: 8, hp: 4, hasPackFood: false, ...on }), false, 'food8 -> above the dead-zone, no fish')
+  // carrying food -> eat, never fish
+  assert.strictEqual(F.foodFloorTriggered({ food: 4, hp: 4, hasPackFood: true, ...on }), false, 'hp-crisis but carrying food -> eat')
+  // FOOD_FLOOR_HP=0 -> only the food<=2 case (byte-for-byte today)
+  assert.strictEqual(F.foodFloorTriggered({ food: 4, hp: 4, hasPackFood: false, foodFloor: true, foodFloorHp: false }), false, 'FOOD_FLOOR_HP=0 -> hp-clause off, food4 no fish')
+  assert.strictEqual(F.foodFloorTriggered({ food: 2, hasPackFood: false, foodFloor: true, foodFloorHp: false }), true, 'FOOD_FLOOR_HP=0 still fires the food<=2 floor')
+  // FOOD_FLOOR=0 -> whole feature off
+  assert.strictEqual(F.foodFloorTriggered({ food: 1, hp: 1, hasPackFood: false, foodFloor: false }), false, 'FOOD_FLOOR=0 -> never triggers')
+})
+
+t('#51: outboundRungAdmissible admits the fishing rung during the hp-crisis (hp passed)', () => {
+  const base = { foodSurvival: true, foodFloor: true }
+  // hp4/food4: with the hp-crisis clause on, the secureFood/fishing outbound rung is admitted
+  assert.strictEqual(F.outboundRungAdmissible(4, { food: 4, ...base, foodFloorHp: true }), true, 'hp4/food4 -> admit the fishing rung (dead-zone)')
+  // FOOD_FLOOR_HP=0: hp4/food4 (food>2) is barred as today (hp<=abortHp)
+  assert.strictEqual(F.outboundRungAdmissible(4, { food: 4, ...base, foodFloorHp: false }), false, 'FOOD_FLOOR_HP=0 -> hp4/food4 barred (byte-for-byte)')
+  // food<=2 still admitted (existing carve-out), flag on or off
+  assert.strictEqual(F.outboundRungAdmissible(1, { food: 2, ...base, foodFloorHp: false }), true, 'food<=2 -> admitted as today')
+})
+
+t('#51: famineHoldFood releases the indoor hold ONLY in the food 3-6 hp-crisis, not at food<=2', () => {
+  const on = { foodFloor: true, foodFloorHp: true, foodSurvival: true }
+  // hp4/food4 dead-zone -> release the hold so the bot can go fish
+  assert.strictEqual(F.famineHoldFood(4, { hp: 4, hasPackFood: false, ...on }), false, 'hp4/food4 -> do NOT famine-hold (fish instead)')
+  // food<=2 -> KEEP holding (the starvation floor + #40 own it; releasing re-opens the death-march)
+  assert.strictEqual(F.famineHoldFood(2, { hp: 2, hasPackFood: false, ...on }), true, 'food<=2 -> still holds (byte-for-byte, #40 preserved)')
+  // no hp passed (today's live caller) -> unchanged hold at food<=4
+  assert.strictEqual(F.famineHoldFood(4, { foodSurvival: true }), true, 'no hp opt -> holds at food<=4 as today')
+  // food>4 -> never a famine hold regardless
+  assert.strictEqual(F.famineHoldFood(6, { hp: 4, ...on }), false, 'food>4 -> not a famine hold')
 })
 
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall food-security tests passed')

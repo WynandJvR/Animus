@@ -5248,10 +5248,10 @@ async function secureFoodInner (bot, opts = {}) {
   // reel-out. The floor only fires at food<=floorFood, which IS the §4 spiral exception, so it is
   // never spiral-suppressed. FOOD_FLOOR=0 -> the whole branch is skipped (byte-for-byte).
   let floorFished = false
-  if (process.env.FOOD_FLOOR !== '0' && (bot.food ?? 20) <= Number(process.env.FOOD_FLOOR_FOOD || 2) && foodCount(bot) < 1 && !fedEnough()) {
+  if (process.env.FOOD_FLOOR !== '0' && !fedEnough() && foodSec.foodFloorTriggered({ hp: bot.health, food: bot.food, hasPackFood: foodCount(bot) >= 1 })) {
     const escalate = foodSec.foodFloorEscalated(_foodFloorNoProgress)
     const foodBefore = bot.food ?? 0
-    dbg('secureFood: FOOD FLOOR - food=' + bot.food + ' pack dry -> fishing floor' + (escalate ? ' (ESCALATED - widening the water scout)' : ''))
+    dbg('secureFood: FOOD FLOOR - food=' + bot.food + ' hp=' + bot.health + ' pack dry -> fishing floor' + (escalate ? ' (ESCALATED - widening the water scout)' : ''))
     say('starving - going fishing, it\'s the one food source that always works')
     try {
       if (await ensureFishingRod(bot, { isStopped, home })) {

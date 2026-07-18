@@ -123,6 +123,26 @@ function busyPreemptFood (opts = {}) {
   return Number(process.env.SCHED_CRISIS_FOOD || (on ? 10 : 6))
 }
 
+// #51 FOOD_FLOOR_HP - the ONE shared "must actively FISH NOW" predicate (PURE). Fires at genuine
+// starvation (food<=floorFood, the existing floor) OR during an hp-crisis that can't self-heal with
+// NO food on hand (the food 3-6 dead-zone livelock: hp4/food4 in the hut, barren farm + dry bank,
+// held indoors forever). Master-gated by FOOD_FLOOR; the hp-crisis clause is separately gated by
+// FOOD_FLOOR_HP (default ON). FOOD_FLOOR_HP=0 -> reduces to the food<=floorFood case (byte-for-byte
+// today). FOOD_FLOOR=0 -> false everywhere (whole feature off). `hasPackFood` = the bot carries
+// edible food (it would just eat - no need to fish). Offline-tested.
+function foodFloorTriggered (opts = {}) {
+  const floorOn = opts.foodFloor != null ? opts.foodFloor : (process.env.FOOD_FLOOR !== '0')
+  if (!floorOn) return false
+  const floorFood = opts.floorFood != null ? opts.floorFood : Number(process.env.FOOD_FLOOR_FOOD || 2)
+  const food = opts.food, hp = opts.hp, hasPackFood = !!opts.hasPackFood
+  const hpCrisisOn = opts.foodFloorHp != null ? opts.foodFloorHp : (process.env.FOOD_FLOOR_HP !== '0')
+  const hpTrig = Number(process.env.FOOD_FLOOR_HP_HP || 6)     // hp at/below this = crisis needing food to heal
+  const foodTrig = Number(process.env.FOOD_FLOOR_HP_FOOD || 6) // food at/below this + hp-crisis + no food -> fish
+  const starve = food != null && food <= floorFood && !hasPackFood                                  // existing starvation floor
+  const hpCrisis = hpCrisisOn && hp != null && hp <= hpTrig && food != null && food <= foodTrig && !hasPackFood // #51 dead-zone
+  return starve || hpCrisis
+}
+
 // F4.1 - an OUTBOUND recovery rung (trek/tend/secureFood) may KEEP RUNNING only while hp is above
 // the abort line; a bot burned to 1 hp mid-trek/tend/seed-gather bails to the next rung (-> the
 // bounded hold) instead of farming grass at 1 hp for minutes. Default abort hp 6 = isDegraded's
@@ -130,17 +150,15 @@ function busyPreemptFood (opts = {}) {
 function outboundRungAdmissible (hp, opts = {}) {
   const on = opts.foodSurvival != null ? opts.foodSurvival : (process.env.FOOD_SURVIVAL !== '0')
   if (!on) return true
-  // FOOD_FLOOR (default on) carve-out: a genuinely-STARVING bot (food<=floorFood) MUST be allowed
-  // to run the ONE bounded food-ACQUISITION rung (secureFood->fishing) even at 1 hp - sitting at
-  // hp1/food0 forever (the 3.5h livelock) is strictly worse than one bounded fishing session
-  // (240s cap + hostile reel-out). NARROW: fires ONLY when the caller passes the current food AND
-  // it is <= floorFood. The ladder passes food ONLY for the secureFood rung, so the 70b trekFarm
-  // trek still aborts at hp<=6 (the §5 invariant). FOOD_FLOOR=0 (or no food passed) -> today.
+  // FOOD_FLOOR (default on) carve-out: admit the ONE bounded food-ACQUISITION rung (secureFood->
+  // fishing) whenever the shared food-floor trigger fires - genuine starvation (food<=floorFood) OR
+  // an hp-crisis with no food on hand (#51, the food 3-6 dead-zone). Sitting at hp<=6/food<=6 forever
+  // is strictly worse than one bounded fishing session (240s cap + hostile reel-out). NARROW: the
+  // trigger needs the current food, and the ladder passes food ONLY for the secureFood rung, so the
+  // 70b trekFarm trek still aborts at hp<=6 (the §5 invariant). FOOD_FLOOR=0 (or no food) -> today.
   const floorOn = opts.foodFloor != null ? opts.foodFloor : (process.env.FOOD_FLOOR !== '0')
-  if (floorOn && opts.food != null) {
-    const floorFood = opts.floorFood != null ? opts.floorFood : Number(process.env.FOOD_FLOOR_FOOD || 2)
-    if (opts.food <= floorFood) return true
-  }
+  const floorFood = opts.floorFood != null ? opts.floorFood : Number(process.env.FOOD_FLOOR_FOOD || 2)
+  if (foodFloorTriggered({ hp, food: opts.food, hasPackFood: opts.hasPackFood, foodFloor: floorOn, floorFood, foodFloorHp: opts.foodFloorHp })) return true
   const abortHp = opts.abortHp != null ? opts.abortHp : Number(process.env.LADDER_HP_ABORT || 6)
   return !(hp != null && hp <= abortHp)
 }
@@ -152,7 +170,16 @@ function famineHoldFood (food, opts = {}) {
   const on = opts.foodSurvival != null ? opts.foodSurvival : (process.env.FOOD_SURVIVAL !== '0')
   if (!on) return false
   const floor = opts.floor != null ? opts.floor : Number(process.env.FOOD_FAMINE_HOLD || 4)
-  return food != null && food <= floor
+  if (!(food != null && food <= floor)) return false
+  // #51: don't famine-hold when the shared food-floor trigger says we must actively FISH (the food
+  // 3-6 / hp-crisis dead-zone livelock). Scoped to the dead-zone ABOVE the starvation floor: pure
+  // starvation (food<=floorFood) keeps holding - #40 + the fishing floor own it, and releasing it
+  // here would re-open the death-march #40 fixed. The hp-clause is inert when the caller passes no
+  // hp (the live secureFood caller passes food only) -> byte-for-byte hold. FOOD_FLOOR/FOOD_FLOOR_HP
+  // =0 -> trigger off -> today's hold.
+  const floorFood = opts.floorFood != null ? opts.floorFood : Number(process.env.FOOD_FLOOR_FOOD || 2)
+  if (food > floorFood && foodFloorTriggered({ hp: opts.hp, food, hasPackFood: opts.hasPackFood, foodFloorHp: opts.foodFloorHp })) return false
+  return true
 }
 
 // F5 - the auto-eat reflex (index.js) eats carried, non-risky food whenever the food bar is
@@ -203,4 +230,4 @@ function wheatWithdrawForBake ({ packWheat, bankWheat, bankFoodPts, bankTargetPt
   return Math.max(0, Math.min(bankWheat || 0, need, cap))
 }
 
-module.exports = { DEFAULT_BUFFER, BAD_FOOD, RAW_COOKABLE_FOOD, foodTier, hasFoodSupply, needsFoodSupply, shouldSweepForFood, foodSupplyAction, shouldTrekHomeForFood, breadFromWheat, wheatWithdrawForBake, inLoopFoodTrigger, busyPreemptFood, outboundRungAdmissible, famineHoldFood, foodFloorEscalation, foodFloorEscalated, AUTO_EAT_AT, needStringForRod }
+module.exports = { DEFAULT_BUFFER, BAD_FOOD, RAW_COOKABLE_FOOD, foodTier, hasFoodSupply, needsFoodSupply, shouldSweepForFood, foodSupplyAction, shouldTrekHomeForFood, breadFromWheat, wheatWithdrawForBake, inLoopFoodTrigger, busyPreemptFood, foodFloorTriggered, outboundRungAdmissible, famineHoldFood, foodFloorEscalation, foodFloorEscalated, AUTO_EAT_AT, needStringForRod }
