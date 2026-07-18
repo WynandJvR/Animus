@@ -6,7 +6,8 @@
 //
 // PURE: require-only, no bot, no fs, no clock. It consumes PRE-SUMMED food points
 // (snapshot.packFoodPts / snapshot.bankFoodPts, computed by the S4 snapshot builder via
-// food.foodTier) - it does NOT walk inventory. Dormant until S4 calls it.
+// food.foodTier) - it does NOT walk inventory. S4 is LIVE: provision.js calls needs() from the
+// survival snapshot and the maintenance pass, and resources.js consults it for buffer sizing.
 //
 // HYSTERESIS without state (§3.3): a buffer is "needed" only below its FLOOR, and the S4 pass
 // tops it up to its (higher) TARGET, so the next tick sees it satisfied. The floor/target gap

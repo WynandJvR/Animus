@@ -4,8 +4,9 @@
 //   (1) which ONE job may own the body right now, and
 //   (2) is an incoming command allowed to preempt it.
 // This module answers both from a plain-data SNAPSHOT (no bot, no pathfinder, no fs) so it is
-// offline-testable exactly like arbiter.js. It is DORMANT until S4 wires it into index.js /
-// provision.js - nothing requires it yet, so the live bot is byte-identical to today.
+// offline-testable exactly like arbiter.js. S4 is LIVE: index.js owns the scheduler tick + the
+// busy-gate, provision.js classifies the active job through it, and commands.js gates
+// build-resume on it. Editing this file changes live behaviour - it is not dormant.
 //
 // It reuses the ONE survival authority (arbiter.jobSurvivalNeed) rather than re-deriving need
 // precedence (one-way require: arbiter must never require scheduler - no cycle).
