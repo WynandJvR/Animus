@@ -4033,7 +4033,14 @@ async function nightRestInner (bot, opts = {}) {
   // a signature. Within the hold window the bed attempt provably can't succeed (position-
   // deterministic reach), so skipping it loses nothing; the bed is never forgotten (retried on
   // hold expiry / next night).
-  if (bed && bot.entity && !_sheltering && !bedHeld(bed)) {
+  // BED_HELD_OVERRIDE (default on): the unusable-hold is a reach-failure guard measured from a
+  // FARTHER position. If the bot is now RIGHT NEXT to the bed (<=4b, clickable), that stale hold no
+  // longer applies - use the bed instead of digging a hole beside it (the live "bed 3 blocks away,
+  // on a 2s hold -> pitting instead" dumbness). sleepInBedHere still bails/pits on a real monster or
+  // sleep-timing block, so this only recovers the reachable-bed case. =0 -> today's byte-for-byte.
+  const bedClickable = bed && bot.entity && Math.hypot(bed.x - bot.entity.position.x, bed.z - bot.entity.position.z) <= 4
+  const bedOk = bed && bot.entity && !_sheltering && (!bedHeld(bed) || (process.env.BED_HELD_OVERRIDE !== '0' && bedClickable))
+  if (bedOk) {
     const d = Math.hypot(bed.x - bot.entity.position.x, bed.z - bot.entity.position.z)
     if (d <= (opts.bedRange || 200)) {
       dbg('nightRest: bed remembered at ' + bed.x + ',' + bed.y + ',' + bed.z + ' (' + Math.round(d) + ' blocks) - heading there')
