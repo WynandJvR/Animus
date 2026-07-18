@@ -23,6 +23,9 @@ const arbiter = require('./arbiter.js') // JOB-LEVEL arbitration: survive > prog
 const scheduler = require('./scheduler.js') // PURE survival-tier decision core; top-level-safe (scheduler requires only arbiter - no cycle back to provision). Used by schedulerState to classify the active job.
 const routeMem = require('./route-mem.js') // PURE route/wedge geometry: replay proven treks + soft-steer around learned wedges (semantic-world-map slice 1)
 const worldMemory = require('./world-memory.js') // the semantic map + world-memory.json persistence (split out of this file)
+const provCore = require('./provision-core.js') // shared low-level primitives (inventory, tool pick, goto-with-deadline, collect, place)
+const { AIRISH, REPLACEABLE, SHELTER_HOSTILE, inventoryCounts, countItem, isNight, nearHostile,
+  toolForBlock, gotoWithTimeout, collectDrops, stepInto, placeAt } = provCore
 const { loadWorldMem, saveWorldMem, ownInfraAnchors, rememberRoute, recallRoute, planTrekRoute, dementRoute,
   recordWedge, listWedges, rememberSpot, forgetSpot, recallSpot,
   rememberInfra, recallInfra, forgetInfra, listInfra, recallInfraVerified, WORLD_MEM_FILE,
@@ -50,7 +53,7 @@ const PROBE_MS = Math.max(200, parseInt(process.env.NAV_PROBE_MS || '1000', 10))
 // Visible, UNTHROTTLED build tracing to stdout (the say() progress goes through a 40s
 // throttle that hides failures). Enable with BUILD_DEBUG=1 to see every plan/task/smelt step.
 let dbgSink = null // injected by index.js: debug lines persist to logs/bot-events.log
-function setDebugSink (fn) { dbgSink = fn; worldMemory.setDebugSink(fn) } // forward: world-memory logs through the same sink
+function setDebugSink (fn) { dbgSink = fn; worldMemory.setDebugSink(fn); provCore.setDebugSink(fn) } // forward: world-memory + core log through the same sink
 // fix #15 Piece C (flag DEFEND_WHEN_HIT, default ON, read once at module load - mirrors index.js):
 // a sealed shelter that is nonetheless TAKING DAMAGE (breached/leaky seal, mob fell in before the
 // cap) must bail out to fight/flee instead of holding _sheltering for up to 600s while hits land.
@@ -1076,50 +1079,20 @@ function planProvision (mcData, bom, inventory = {}, opts = {}) {
 }
 
 // Current inventory as {itemName: count}.
-function inventoryCounts (bot) {
-  const out = {}
-  for (const i of (bot.inventory ? bot.inventory.items() : [])) out[i.name] = (out[i.name] || 0) + i.count
-  return out
-}
+// (inventoryCounts moved to provision-core.js)
 
 // ---- executors (live bot) ----------------------------------------------------
 
-function countItem (bot, name) { return inventoryCounts(bot)[name] || 0 }
+// (countItem moved to provision-core.js)
 
 // pathfinder.goto with a deadline (goto can hang forever on an unreachable target).
 // One shared implementation now - navigate.js.
-function gotoWithTimeout (bot, goal, ms) {
-  return navigate.gotoOnce(bot, goal, ms)
-}
+// (gotoWithTimeout moved to provision-core.js)
 
 // Walk onto nearby dropped items so they're picked up. Waits for drops to settle,
 // then sweeps the nearest item repeatedly (walk ONTO it - range 0). More persistent
 // than before because scattered drops on jagged terrain were being left behind.
-async function collectDrops (bot, radius = 10, { patience = 1 } = {}) {
-  await new Promise(r => setTimeout(r, 250)) // let freshly-broken drops settle/land
-  let empties = 0
-  for (let n = 0; n < 20; n++) {
-    let target = null; let best = radius
-    for (const e of Object.values(bot.entities || {})) {
-      if (!e || !e.position || e.name !== 'item') continue
-      const d = e.position.distanceTo(bot.entity.position)
-      if (d < best) { best = d; target = e }
-    }
-    if (!target) {
-      // DON'T bail on the first empty scan. A just-broken drop can take a beat to spawn/sync,
-      // or land a hair outside `radius` (a wheat drop from a cell against a pond bounces toward
-      // the water edge). The old early-return abandoned those drops the instant nothing was in
-      // range after 250ms - the "harvested N -> wheat=0" loss. Wait + re-look `patience` times
-      // before concluding there's genuinely nothing here.
-      if (empties++ >= patience) return
-      await new Promise(r => setTimeout(r, 300))
-      continue
-    }
-    empties = 0
-    try { await gotoWithTimeout(bot, new goals.GoalNear(target.position.x, target.position.y, target.position.z, 0), 10000) } catch { return }
-    await new Promise(r => setTimeout(r, 250))
-  }
-}
+// (collectDrops moved to provision-core.js)
 
 // Walk ~48 blocks in a rotating compass direction to reach fresh, unexplored
 // terrain (loads new chunks) when the current area is tapped out. Returns whether
@@ -1170,7 +1143,7 @@ async function explore (bot, idx, home, maxRoam, isBad) {
 
 // Gather `count` of `item` by mining its source blocks (chops whole trees for
 // logs). opts: { say, isStopped, restoreMovements }. Returns {gathered, reason}.
-const AIRISH = n => n === 'air' || n === 'cave_air' || n === 'void_air'
+// (AIRISH moved to provision-core.js)
 
 const FILLER_RE = scaffold.FILLER_RE // ONE filler list - scaffold.js owns it (this was a byte-identical redeclaration)
 
@@ -1709,29 +1682,7 @@ async function pillarUpTo (bot, targetY, opts = {}) {
 // we're within 0.35b of its centre horizontally), hard-capped by `ms`. ALWAYS clears controls
 // in `finally` so a survival flee/defend reflex firing after the loop breaks gets clean
 // controls (same discipline as pillarUpTo). Returns whether we arrived. Never digs or places.
-async function stepInto (bot, cell, { jump = false, ms = 1200, isStopped = () => false } = {}) {
-  if (process.env.LAVA_SAFE !== '0') { // #41 belt-and-braces for EVERY caller: never walk into a lava cell or onto a lava floor (death 2 walked sideways into lava). Returning false falls through to the caller's pathfinder goto, which refuses lava cells natively.
-    const dst = bot.blockAt(cell); const dstFloor = bot.blockAt(cell.offset(0, -1, 0))
-    if ((dst && mining.LAVA_RE.test(dst.name)) || (dstFloor && mining.LAVA_RE.test(dstFloor.name))) { dbg('  stepInto: lava at/under ' + cell.toString() + ' - refusing to step in'); return false }
-  }
-  let arrived = false
-  try {
-    try { await bot.lookAt(cell.offset(0.5, 1.5, 0.5), true) } catch {} // aim at ~eye height of the target cell
-    bot.setControlState('forward', true)
-    if (jump) bot.setControlState('jump', true)
-    const t = Date.now()
-    const cx = cell.x + 0.5; const cz = cell.z + 0.5
-    while (Date.now() - t < ms && !isStopped()) {
-      await new Promise(r => setTimeout(r, 20))
-      const p = bot.entity.position.floored()
-      const horiz = Math.hypot(bot.entity.position.x - cx, bot.entity.position.z - cz)
-      if ((p.x === cell.x && p.y === cell.y && p.z === cell.z) || horiz < 0.35) { arrived = true; break }
-    }
-  } finally {
-    bot.clearControlStates()
-  }
-  return arrived
-}
+// (stepInto moved to provision-core.js)
 
 // Mine a straight horizontal 1x2 TUNNEL forward, collecting drops at our feet so cobble
 // isn't lost down a pit (the generic loop mined the floor and dropped it into the hole).
@@ -2494,7 +2445,7 @@ async function huntSpiderForString (bot, opts = {}) {
 }
 
 // ---- night survival: dig-in shelter for a NAKED bot ------------------------------
-const SHELTER_HOSTILE = /zombie|skeleton|spider|creeper|husk|drowned|witch|pillager|vindicator|stray|bogged|phantom|slime|enderman|silverfish|cave_spider|warden/
+// (SHELTER_HOSTILE moved to provision-core.js)
 let _sheltering = false
 function isSheltering () { return _sheltering } // reflexes (flee/defend) yield while true
 
@@ -2579,15 +2530,7 @@ function nearRecentFlood (bot) {
   if (!lastFlood || Date.now() - lastFlood.at > 600000 || !bot.entity) return false
   return Math.hypot(bot.entity.position.x - lastFlood.x, bot.entity.position.z - lastFlood.z) <= 6
 }
-function nearHostile (bot, r) {
-  const me = bot.entity && bot.entity.position; if (!me) return false
-  for (const e of Object.values(bot.entities || {})) {
-    if (!e || !e.position || (e.type !== 'mob' && e.type !== 'hostile')) continue
-    if (!SHELTER_HOSTILE.test((e.name || '').toLowerCase())) continue
-    if (e.position.distanceTo(me) <= r) return true
-  }
-  return false
-}
+// (nearHostile moved to provision-core.js)
 // DANGER WHILE MINING: a cave hostile has closed to melee/bow range, or hp is crashing.
 // The idle flee/defend reflexes can't help mid-dig (the bot is committed inside bot.dig()
 // awaits, not the pathfinder), so the tight dig loops + the gather loop poll THIS and bail
@@ -2613,7 +2556,7 @@ function armorPieceCount (bot) {
   try { for (const s of ['head', 'torso', 'legs', 'feet']) { if (bot.inventory && bot.inventory.slots[bot.getEquipmentDestSlot(s)]) n++ } } catch { return 0 }
   return n
 }
-function isNight (bot) { return !!(bot.time && bot.time.timeOfDay >= 13000 && bot.time.timeOfDay < 23500) }
+// (isNight moved to provision-core.js)
 // Fire night-rest whenever we're under-armored and DUSK is falling. This USED to also wait for
 // a hostile within 12 blocks - which meant the bot wandered exposed all night and only started
 // digging once a skeleton was already shooting it (verified live: 7 night deaths in one
@@ -2660,32 +2603,7 @@ function nightRestWanted (bot) {
 
 // Place a block from inventory (name matching `match`) AT world position `target`, using any
 // solid neighbouring face to place against. Best-effort; returns whether a block landed.
-async function placeAt (bot, target, match) {
-  placeAt.lastFail = null // observability: WHY the last placement failed (cap-fail debugging)
-  const item = (bot.inventory ? bot.inventory.items() : []).find(i => match.test(i.name))
-  if (!item) { placeAt.lastFail = 'no matching item in inventory'; return false }
-  await bot.equip(item, 'hand').catch(() => {})
-  let sawRef = false
-  for (const [dx, dy, dz] of [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]]) {
-    const ref = bot.blockAt(target.offset(dx, dy, dz))
-    if (ref && ref.boundingBox === 'block' && !AIRISH(ref.name)) {
-      sawRef = true
-      try { await bot.lookAt(target.offset(0.5, 0.5, 0.5), true) } catch {}
-      try { await bot.placeBlock(ref, new Vec3(-dx, -dy, -dz)); return true } catch (e) {
-        placeAt.lastFail = `place vs ${ref.name} face ${-dx},${-dy},${-dz}: ${e.message}`
-        // Paper often doesn't echo the blockUpdate even when the block PLACED (same quirk
-        // as the torch reflex, see NOTES.md) - check the world before calling it a miss.
-        if (/blockUpdate/.test(e.message)) {
-          await new Promise(r => setTimeout(r, 400))
-          const b = bot.blockAt(target)
-          if (b && !AIRISH(b.name)) return true
-        }
-      }
-    }
-  }
-  if (!sawRef) placeAt.lastFail = 'no solid neighbour to place against'
-  return false
-}
+// (placeAt moved to provision-core.js)
 
 // ACTIVE BUILD ZONE (set by autoBuild, cleared when it ends): the shelter must never dig
 // its bunker inside the build footprint - a pit under the castle floor is a hole in the
@@ -3088,17 +3006,7 @@ async function digInForNight (bot, opts = {}) {
 
 // Pick the right tool KIND in inventory for a block (pickaxe/axe/shovel), best
 // material first. Returns the item or null (bare hands).
-function toolForBlock (bot, blockName) {
-  let kind = null
-  if (/stone|cobble|ore|deepslate|granite|diorite|andesite|tuff|basalt|blackstone/.test(blockName)) kind = 'pickaxe'
-  else if (/_log$|_wood$|_stem$/.test(blockName)) kind = 'axe'
-  else if (/dirt|grass_block|sand|gravel|clay|mud/.test(blockName)) kind = 'shovel'
-  if (!kind) return null
-  const items = (bot.inventory ? bot.inventory.items() : []).filter(i => i.name.endsWith('_' + kind))
-  const order = ['netherite', 'diamond', 'iron', 'stone', 'golden', 'wooden']
-  for (const m of order) { const t = items.find(i => i.name.startsWith(m)); if (t) return t }
-  return items[0] || null
-}
+// (toolForBlock moved to provision-core.js)
 
 // ---- WORLD MEMORY lives in world-memory.js ------------------------------------------
 // The semantic map (resource spots, own-infra registry, proven routes, learned wedges)
@@ -8103,7 +8011,7 @@ async function runCraft (bot, item, count, needsTable, opts = {}) {
 // A cell counts as OPEN if it's air OR replaceable vegetation (placing into grass
 // replaces it, like a player does) - requiring exactly 'air' made every table/furnace/
 // chest placement fail in grassy savanna ("nowhere to place a crafting table").
-const REPLACEABLE = /^(air|cave_air|void_air|short_grass|grass|tall_grass|fern|large_fern|dead_bush|snow|vine|seagrass)$/
+// (REPLACEABLE moved to provision-core.js)
 async function placeFromInventory (bot, itemName) {
   const item = (bot.inventory ? bot.inventory.items() : []).find(i => i.name === itemName)
   if (!item) throw new Error(`no ${itemName} to place`)
