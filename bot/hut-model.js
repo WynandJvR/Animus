@@ -283,11 +283,64 @@ function decideHutRepair ({ bad, solidTotal, lastBad, lastAction } = {}) {
   return 'patch'
 }
 
+// ---- SECURE_BASE: spawn-proofing geometry (pure) ------------------------------------
+// A dark base breeds mobs: creepers/spiders that survive daylight linger and harass the
+// bot at home. A real player spawn-proofs by lighting the perimeter - torches on a spacing
+// lattice so every ground cell reads light>=8 and denies spawns. These three PURE helpers
+// are that policy; the executor (provision-hut.secureBase) reads the world through them.
+//
+// baseTorchAnchors(): the lattice COLUMNS (x,z) to light - a grid at `spacing`, within
+// `radius` of the hut centre, OUTSIDE the hut footprint (the interior is sealed/roofed, not
+// spawn ground). Anchored on the hut centre so it is DETERMINISTIC every visit, which is
+// what lets the persisted torched-cell list CONVERGE instead of re-placing forever.
+function baseTorchAnchors (anchor, { radius = 18, spacing = 6 } = {}) {
+  if (!anchor) return []
+  const cx = anchor.x + (DIMS.w - 1) / 2
+  const cz = anchor.z + (DIMS.l - 1) / 2
+  const step = Math.max(2, Math.floor(spacing))
+  const r = Math.max(step, Math.floor(radius))
+  const out = []
+  for (let dx = -r; dx <= r; dx += step) for (let dz = -r; dz <= r; dz += step) {
+    if (dx * dx + dz * dz > r * r) continue          // circular spawn radius
+    const x = Math.round(cx + dx); const z = Math.round(cz + dz)
+    if (inBox(anchor, x, z)) continue                // never inside the hut box
+    out.push({ x, z })
+  }
+  return out
+}
+
+// secureBaseRemaining(): the anchors NOT yet covered by a placed torch = the work still
+// owed. A torch covers only its own lattice point (coverRadius < spacing), so EACH anchor
+// needs its own torch and a blown one (dropped from the persisted list on world re-read)
+// re-opens its anchor. Empty result => the ring is complete (converged) => the step no-ops.
+function secureBaseRemaining (anchors, torched, { coverRadius = 3 } = {}) {
+  const cov2 = Math.max(1, coverRadius) * Math.max(1, coverRadius)
+  const pts = torched || []
+  return (anchors || []).filter(a => !pts.some(t => {
+    const dx = t.x - a.x; const dz = t.z - a.z
+    return dx * dx + dz * dz <= cov2
+  }))
+}
+
+// secureBaseGate(): mirror of proactiveGearupGate - light the base only in a genuinely calm
+// window (daylight, at home, healthy, fed, no active survival crisis). Any false => defer,
+// so the bot never stands in the open placing torches during a threat / low-food crisis.
+function secureBaseGate ({ hp, fed, day, atHome, crisisActive } = {}, { safeHp = 14 } = {}) {
+  if (crisisActive) return false
+  if (!day) return false
+  if (!atHome) return false
+  if (!fed) return false
+  return typeof hp === 'number' && hp >= safeHp
+}
+
 module.exports = {
   REBUILD_MIN,
   cellClass,
   cellMismatch,
   decideHutRepair,
+  baseTorchAnchors,
+  secureBaseRemaining,
+  secureBaseGate,
   DIMS,
   WALL_RE,
   DOOR_RE,

@@ -766,7 +766,104 @@ async function maintainHome (bot, hutAt, opts = {}) {
   return out
 }
 
+// SECURE_BASE (#67, default ON): spawn-proof the home. A base with only ~4 tunnel torches
+// stays DARK, so mobs spawn all around every night and daylight-proof creepers/spiders linger
+// to harass the bot AT HOME (nightRest: "no armor, mobs about"). A real player lights the
+// perimeter + seals the shell. secureBase does both, as a bounded CALM-window step:
+//   1) TORCH SUPPLY  - top up torches (ensureTorches; withdraw coal+stick from the bank if short).
+//   2) LIGHT THE RING - place torches on solid ground on a spacing lattice around the hut (pure
+//      baseTorchAnchors), targeting cells not yet lit; PERSIST each placed torch (world-mem
+//      baseLight, keyed to the hut) so it converges across visits and self-heals a blown torch.
+//   3) SEAL THE HUT  - reuse repairHutStructure to close wall/roof/door gaps mobs path through.
+// Bounded (<=maxPlace torches/visit) and YIELDS to survival (isStopped). Never lights the crops
+// (scaffold.onFarmFootprint) or inside the hut box. SECURE_BASE=0 -> the maintenance step never
+// calls this (byte-for-byte); a direct call still early-returns here as a belt-and-braces guard.
+async function secureBase (bot, opts = {}) {
+  if (process.env.SECURE_BASE === '0') return { skipped: 'disabled', placed: 0 }
+  const isStopped = opts.isStopped || (() => false)
+  const say = opts.say || (() => {})
+  const hut = opts.hut || hutAnchor()
+  if (!hut) return { skipped: 'no hut', placed: 0 }
+
+  const radius = Math.max(8, Math.min(32, Number(process.env.SECURE_BASE_RADIUS || 18)))
+  const spacing = Math.max(4, Math.min(7, Number(process.env.SECURE_BASE_SPACING || 6)))
+  const maxPlace = Math.max(1, Number(process.env.SECURE_BASE_MAX || 6))
+  const darkTh = Number(process.env.SECURE_BASE_DARK || 8)
+  const coverRadius = Math.max(2, Math.floor(spacing / 2))
+  const want = Math.max(Number(process.env.SECURE_BASE_TORCHES || 12), maxPlace)
+
+  // Persisted torched cells (world-mem), keyed to THIS hut so a relocated base starts fresh.
+  const mem = loadWorldMem()
+  let bl = mem.baseLight
+  if (!bl || !bl.hut || bl.hut.x !== hut.x || bl.hut.z !== hut.z) { bl = mem.baseLight = { hut: { x: hut.x, z: hut.z }, torched: [] } }
+  bl.torched = bl.torched || []
+  // SELF-HEAL: forget any persisted torch the world no longer shows (a creeper blew it) so its
+  // anchor re-opens and it gets re-lit. Keep entries whose chunk is unloaded (blockAt null).
+  const beforeLen = bl.torched.length
+  bl.torched = bl.torched.filter(t => { const b = bot.blockAt(new Vec3(t.x, t.y, t.z)); return !b || /torch/.test(b.name) })
+  const healed = bl.torched.length !== beforeLen
+
+  const anchors = hutModel.baseTorchAnchors(hut, { radius, spacing })
+  let remaining = hutModel.secureBaseRemaining(anchors, bl.torched, { coverRadius })
+  // Nearest-first: a bounded visit lights the closest dark ground, converging outward.
+  const here = (bot.entity && bot.entity.position) || new Vec3(hut.x + 2, hut.y, hut.z + 2)
+  remaining.sort((a, b) => Math.hypot(a.x - here.x, a.z - here.z) - Math.hypot(b.x - here.x, b.z - here.z))
+
+  // 1) TORCH SUPPLY - top up (never BLOCK on it; place what we have). Coal/stick from the bank
+  //    (the #66 fuel path) then craft via the shared ensureTorches (bridge - mining owns it).
+  if (remaining.length && countItem(bot, 'torch') < Math.min(want, remaining.length)) {
+    try {
+      const res = require('./resources.js')
+      if (countItem(bot, 'coal') + countItem(bot, 'charcoal') < 1) { try { await res.withdrawItems(bot, 'coal', 8, { near: hut, maxDist: 64 }) } catch {} }
+      if (countItem(bot, 'stick') < 1) { try { await res.withdrawItems(bot, 'stick', 4, { near: hut, maxDist: 64 }) } catch {} }
+      await S().ensureTorches(bot, want)
+    } catch (e) { dbg('  secureBase: torch supply failed (' + e.message + ')') }
+  }
+
+  // 2) LIGHT THE PERIMETER - bounded, survival-yielding. Reuse placeAt(/^torch$/) (the same
+  //    primitive placeFarmTorches uses) at a solid, non-crop ground cell at/near each anchor.
+  const scaffoldMod = (() => { try { return require('./scaffold.js') } catch { return null } })()
+  const onFarm = (x, y, z) => { try { return !!(scaffoldMod && scaffoldMod.onFarmFootprint(new Vec3(x, y, z))) } catch { return false } }
+  const NB = [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1]]
+  let placed = 0
+  for (const a of remaining) {
+    if (isStopped() || placed >= maxPlace) break
+    if (countItem(bot, 'torch') < 1) { dbg('  secureBase: out of torches - ' + (remaining.length - placed) + ' ring cell(s) still dark (resume next visit)'); break }
+    let handled = false
+    for (const [dx, dz] of NB) {
+      if (handled) break
+      const gx = a.x + dx; const gz = a.z + dz
+      if (hutModel.inBox(hut, gx, gz)) continue // never inside the hut box
+      for (let gy = hut.y + 3; gy >= hut.y - 3; gy--) { // scan a small Y band for the surface (grade isn't flat)
+        const ground = bot.blockAt(new Vec3(gx, gy, gz))
+        const air = bot.blockAt(new Vec3(gx, gy + 1, gz))
+        if (!ground || ground.boundingBox !== 'block' || AIRISH(ground.name)) continue
+        if (/water|lava|farmland/.test(ground.name)) continue
+        if (!air || !AIRISH(air.name)) continue
+        if (onFarm(gx, gy + 1, gz) || onFarm(gx, gy, gz)) { handled = true; break } // respect crops
+        // LIGHT SKIP (best-effort; block-light is sparse on some servers): already bright enough?
+        // defer without spending a torch. Not persisted, so it's cheaply re-checked next visit.
+        try { const lv = air.light; if (typeof lv === 'number' && lv >= darkTh) { handled = true; break } } catch {}
+        const cell = new Vec3(gx, gy + 1, gz)
+        if (bot.entity && bot.entity.position.distanceTo(cell) > 4) { try { await gotoWithTimeout(bot, new goals.GoalNear(gx, gy + 1, gz, 3), 8000) } catch {} }
+        if (await placeAt(bot, cell, /^torch$/)) { placed++; bl.torched.push({ x: cell.x, y: cell.y, z: cell.z }); handled = true }
+        break // this column's surface handled (placed or not); try the next neighbour column
+      }
+    }
+  }
+  if (placed || healed) { try { saveWorldMem() } catch {} }
+
+  // 3) SEAL THE HUT - reuse the structural sealer (closes missing wall/roof/door cells so mobs
+  //    can't path in). Idempotent no-op when the shell is intact.
+  let sealed = null
+  if (!isStopped()) { try { sealed = await repairHutStructure(bot, hut, { isStopped, say }) } catch (e) { dbg('  secureBase: seal failed (' + e.message + ')') } }
+
+  if (placed) { dbg('  secureBase: lit ' + placed + ' perimeter cell(s) (ring ' + bl.torched.length + '/' + anchors.length + ' anchors)'); say('spawn-proofing home - lit ' + placed + ' dark spot(s) around the base') }
+  return { placed, ringTorches: bl.torched.length, anchors: anchors.length, remaining: Math.max(0, remaining.length - placed), sealed }
+}
+
 module.exports = {
   setDebugSink, insideHutBox,
-  insideHutBox, ownHutAt, onHutApron, insideOwnStructure, hasSolidCeiling, hutAnchor, hutReader, stepOffApron, ensureHutApron, healHomeCrater, ensureHutBed, freeInteriorCell, findHutDoorway, hutFreeCells, furnitureInHut, furnishHut, stationInHut, stationSlot, loadHutSchem, reconcileInfra, cleanupHutInterior, repairHutStructure, recallAndReach, maintainHut, maintainHome
+  insideHutBox, ownHutAt, onHutApron, insideOwnStructure, hasSolidCeiling, hutAnchor, hutReader, stepOffApron, ensureHutApron, healHomeCrater, ensureHutBed, freeInteriorCell, findHutDoorway, hutFreeCells, furnitureInHut, furnishHut, stationInHut, stationSlot, loadHutSchem, reconcileInfra, cleanupHutInterior, repairHutStructure, recallAndReach, maintainHut, maintainHome,
+  secureBase, secureBaseGate: hutModel.secureBaseGate
 }

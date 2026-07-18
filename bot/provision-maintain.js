@@ -23,7 +23,7 @@ const worldMemory = require('./world-memory.js')
 const { loadWorldMem, saveWorldMem, listInfra, rememberInfra, recallInfra, knownBed,
   gearupState, proactiveGearupGate } = worldMemory
 const provHut = require('./provision-hut.js')
-const { hutAnchor, insideOwnStructure, ownHutAt, maintainHome } = provHut
+const { hutAnchor, insideOwnStructure, ownHutAt, maintainHome, secureBase, secureBaseGate } = provHut
 const provBank = require('./provision-bank.js')
 const { resolveBankCell, depositMaterials, withdrawItem, chestCounts, consolidateBank,
   lonelyFurnace, consolidateFurnaces, litterPatrol } = provBank
@@ -386,6 +386,34 @@ async function maintenancePass (bot, opts = {}) {
       try { const r = await maintainHome(bot, hutAnchor(), { isStopped, say }); if (r && r.damaged) stepDone('homeRepair') } catch (e) { dbg('  maint: homeRepair failed (' + e.message + ')') }
     }
     if (between()) return { ok: true, steps, reason: 'bail:survival' }
+
+    // STEP 9b: SECURE_BASE (#67) - spawn-proof the home in a CALM window. The base had no
+    // perimeter light (only mine/farm torches), so it stayed DARK -> mobs spawned all around
+    // every night and daylight-proof creepers/spiders lingered to harass the bot AT HOME. This
+    // step lights a spawn-proof torch ring around the hut (persisted world-mem cells -> converges
+    // across visits, self-heals a blown torch) and re-seals the shell (repairHutStructure). Same
+    // admission shape as #60's proactiveArmor: the PURE secureBaseGate owns the guards (day + at
+    // home + hp>=SAFE_HP + fed + no crisis); secureBase's own maxPlace budget + isStopped/between
+    // keep it BOUNDED and YIELD to survival. Held to the !opportunistic/!nightIndoorOnly envelope
+    // (no mid-build/night work). The whole block (step AND its between-guard) is inside the flag
+    // gate, so SECURE_BASE=0 -> nothing here runs and no _maintState is touched (byte-for-byte).
+    if (process.env.SECURE_BASE !== '0') {
+      const secureBaseDue = !nightIndoorOnly && !opportunistic && (() => {
+        try {
+          return secureBaseGate({
+            hp: bot.health,
+            fed: (bot.food != null ? bot.food : 20) >= Number(process.env.SECURE_BASE_FED_MIN || 14),
+            day: day(),
+            atHome: atHome(),
+            crisisActive: (() => { try { return P().survivalNeed(bot, { foodThreshold: crisisFood }) != null } catch { return false } })()
+          }, { safeHp: Number(process.env.SECURE_BASE_SAFE_HP || 14) })
+        } catch { return false }
+      })()
+      if (secureBaseDue && hutAnchor() && due('secureBase', Number(process.env.SECURE_BASE_EVERY_MS || 1200000))) {
+        try { const r = await secureBase(bot, { hut: hutAnchor(), isStopped, say }); if (r && r.placed) stepDone('secureBase(' + r.placed + ')') } catch (e) { dbg('  maint: secureBase failed (' + e.message + ')') }
+      }
+      if (between()) return { ok: true, steps, reason: 'bail:survival' }
+    }
 
     // STEP 10: furnace consolidation (fix #13 Part A) - reclaim scattered field furnaces
     // (>32 and <=96 from the hut, <=2/pass) via the proven grab() primitive: re-verify the
