@@ -1141,7 +1141,7 @@ if (SCHED_ON) {
         }
         // OPPORTUNISTIC MAINTENANCE (design-docs/DESIGN-opportunistic-maintenance.md):
         // during the build era pickJob can never pick maintenancePass (persistedBuild
-        // shadows it, scheduler.js:196) - so when the build's own life has the bot ALREADY
+        // shadows it, scheduler.js resumeGate) - so when the build's own life has the bot ALREADY
         // at the hut, open a brief bounded chore window: pause (never cancel) the build,
         // run the home-only maintenancePass, cool down, and let the 2-min re-arm resume it.
         if (!OPP_ON) return
@@ -1169,7 +1169,7 @@ if (SCHED_ON) {
             const foodNeedPending = process.env.FOOD_SURVIVAL !== '0' && (() => { try { return maintain.needs(s).some(n => n.key === 'packFood' || n.key === 'bankFood') } catch { return false } })()
             const abandonCd = foodNeedPending ? Number(process.env.OPP_CRISIS_RETRY_MS || 60000) : 300000
             // bounded unwind wait: the aborted build settles at its next isStopped poll
-            // (a mid-smelt unwind took ~33s live - commands.js:3281); bail on crisis.
+            // (a mid-smelt unwind took ~33s live - commands.js resumeBuild); bail on crisis.
             const unwindBy = Date.now() + Number(process.env.OPP_UNWIND_MS || 90000)
             while ((commands.isBusy && commands.isBusy()) && Date.now() < unwindBy) {
               let crisis = null; try { crisis = provision.survivalNeed(bot, { foodThreshold: foodSec.busyPreemptFood() }) } catch {}
@@ -1498,9 +1498,9 @@ const RANGED_RE = /skeleton|stray|bogged|pillager/i
 // fix #10 F3: the primitive sprint-away burst - a REFLEX move-away that uses ONLY primitives
 // the reflex already uses (setGoal(null), bot.lookAt, setControlState). NO pathfinder goal (so
 // no brain-vs-body carousel), NO dig/place. Rate-limited to one burst per CREEPER_BURST_MS+1s.
-// Clearing the goal is an honest cancel of any in-flight avoid nav (navigate.js:806-808), which
+// Clearing the goal is an honest cancel of any in-flight avoid nav (navigate.js escapeToDryLand), which
 // then unwinds through its own catch while this drives the body. Blind sprint-jump is the same
-// pre-existing recovery idiom as the nudge rung (navigate.js:243). finally-clears the control
+// pre-existing recovery idiom as the nudge rung (navigate.js, the 'nudge' recovery rung). finally-clears the control
 // states so an exception can't leave them latched.
 let lastBurstAt = 0
 async function burstAwayFrom (threatPos) {

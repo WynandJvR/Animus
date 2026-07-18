@@ -174,8 +174,8 @@ function mineThreatDecision (state, opts = {}) {
   const threatReacts = s.threatReacts || 0
   const recoverTries = s.recoverTries || 0
   const hpCritical = opts.hpCritical != null ? opts.hpCritical : 6   // matches jobSurvivalNeed's floor (arbiter.js:121)
-  const hpLowMine = opts.hpLowMine != null ? opts.hpLowMine : 12     // matches mineDanger's arm (provision.js:1910)
-  const maxClimbs = opts.maxClimbs != null ? opts.maxClimbs : 4      // today's threatReacts <= 4 (provision.js:4859)
+  const hpLowMine = opts.hpLowMine != null ? opts.hpLowMine : 12     // matches mineDanger's arm (provision.js mineDanger)
+  const maxClimbs = opts.maxClimbs != null ? opts.maxClimbs : 4      // today's threatReacts <= 4 (provision.js gatherLoop)
   const maxRecover = opts.maxRecover != null ? opts.maxRecover : 2
   if (!hostileNear && hp >= hpLowMine) return false                            // no danger (mirror mineDanger)
   if (hostileNear) return (deep && threatReacts <= maxClimbs) ? 'up' : 'bail'  // today, verbatim

@@ -18,7 +18,7 @@ const WILD_DIG_COST = 20
 const WILD_LIQUID_COST = 4
 const INFRA_BREAK_RADIUS = 16
 const WILD_SCOPE_RADIUS = 32
-// The two FILLER_RE members (scaffold.js:93) that are NOT already natural terrain in
+// The two FILLER_RE members (scaffold.js FILLER_RE) that are NOT already natural terrain in
 // DIGGABLE_NATURAL - i.e. the only scaffold materials that need the per-position registry gate.
 // Everything else in FILLER_RE (dirt/stone/gravel/andesite/...) is natural terrain, already
 // whitelisted as such and breakable anywhere the positional gate permits.
@@ -54,7 +54,7 @@ const WATER_RE = /^(water|flowing_water|bubble_column)$/
 const WATER_STEP_COST = 50
 
 // Movements-level TYPE whitelist for the wild profile. The first clause is byte-identical to
-// canBreakNaturally's compound (provision.js:332) - cobble is admitted at the TYPE level ONLY
+// canBreakNaturally's compound (provision.js canBreakNaturally) - cobble is admitted at the TYPE level ONLY
 // via SCAFFOLD_BREAK_RE, and its per-position registry gate then lives in breakExclusion (c).
 // No log permission here (isWildTreeLog is positional/contextual and stays in the per-block
 // gather/wetbreach predicates that re-read every block at dig time).
@@ -141,7 +141,7 @@ function deepWaterHazard (pos, sampleName) {
 //   1. FLOOD-FILL through WATER from the bot's feet cell (6-connected) instead of 8 blind rays: a
 //      solid wall (not water) blocks the fill, so a bank behind terrain is NEVER returned - only a
 //      cell with a real swim corridor is (design §2a-1 / test b).
-//   2. a GENUINELY-DRY, CLIMBABLE test (mirrors swimToShore's bank test navigate.js:134-139, but
+//   2. a GENUINELY-DRY, CLIMBABLE test (mirrors swimToShore's bank test in navigate.js swimToShore, but
 //      DRY not merely "not water"):
 //        - floor (ny-1) is a full solid block, not water/lava   [opts.solidAt if given, else a
 //          name heuristic so the fn stays pure/unit-testable like deepWaterHazard];

@@ -2927,7 +2927,7 @@ async function autoBuild (bot, schem, at, opts = {}) {
               hutRepairLatch = { lastBad: bad, lastAction: 'patch', ts: Date.now() }
             } else {
               if (hrec.withdraws.length || hrec.plan.tasks.length) await resources.runReconciled(bot, hrec, { say, isStopped, restoreMovements: restore, homeY: hutAt.y, home: { x: hutAt.x, y: hutAt.y, z: hutAt.z }, avoid })
-              // 2) VERIFIED EMPTY, or DON'T tear down (healBankDouble pattern, provision.js:7554-
+              // 2) VERIFIED EMPTY, or DON'T tear down (healBankDouble pattern, provision.js healBankDouble)
               //    7563): withdraw per-name via withdrawItem, RE-READ chestCounts, and if any chest
               //    still holds items (pack full) ABORT the rebuild -> restore + fall back to patch,
               //    exactly like bank heal's "chest still holds ... aborting, nothing lost". This

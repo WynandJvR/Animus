@@ -198,7 +198,7 @@ function headInWater (bot) {
 
 // ROOFED-FLOOD rung: no shore to swim to and no adjacent bank to hop - so rise straight UP
 // the water column toward an air pocket (face up, hold jump = swim up in water). Bounded.
-// Deliberately NOT climbToSurface (its digs REFUSE water, provision.js:2137 - it would
+// Deliberately NOT climbToSurface (its digs REFUSE water, provision.js climbToSurface - it would
 // no-op in a flooded shaft); this just floats the head up to whatever air the column has.
 async function jumpForAir (bot, ms = 6000, isStopped = () => false) {
   const t0 = Date.now()
@@ -218,7 +218,7 @@ async function jumpForAir (bot, ms = 6000, isStopped = () => false) {
 // DROWN-ESCAPE: the bounded, re-entrant, arbiter-coordinated water escape. The acute fix for
 // "drowned gear-mining into a pond aquifer" - AUTO_SURFACE's swimToShore alone LOST because a
 // still-running job loop kept re-setting a pathfinder goal and the pathfinder rewrote the
-// controls every tick (navigate.js:50-55). The job loops now stopDigging + setGoal(null) and
+// controls every tick (see the REACTIVE_MOVE flag block above). The job loops now stopDigging + setGoal(null) and
 // AWAIT this; the index.js drown-crisis reflex fires it as a backstop/override. Opens a SURVIVE
 // maneuver span so lower reflexes defer. Every rung is bounded (swim 15s + hop 2.5s/dir + air 6s,
 // whole call capped at deadlineMs) and it returns an HONEST bool (still wet? false) - never wedges.

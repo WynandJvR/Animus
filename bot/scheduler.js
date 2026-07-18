@@ -142,7 +142,7 @@ function isDegraded (s) {
 }
 
 // ---- admissible -------------------------------------------------------------------------
-// Replaces the busy-gate regex + survivalAdmissible(bot) (index.js:1573). PURE. It ONLY
+// Replaces the busy-gate regex + survivalAdmissible(bot) (index.js survivalAdmissible). PURE. It ONLY
 // adjudicates survival preemption - it does NOT re-implement the "progress held while busy"
 // hold (that stays at the S4 call site). perception/chat are always allowed; progress always
 // returns allow:true here ("no survival objection", busy-gate still applies); survival is

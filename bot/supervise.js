@@ -53,7 +53,7 @@ function freshState (now) {
   }
 }
 
-// same-pos rule = the heartbeat writer's OWN progress rule (index.js:1830): a move counts
+// same-pos rule = the heartbeat writer's OWN progress rule (index.js, the heartbeat tick): a move counts
 // when |dx|+|dy|+|dz| >= 1, so "same pos" is a manhattan delta strictly < 1.
 function samePos (a, b) {
   if (!a || !b) return false
@@ -152,7 +152,7 @@ function probeHealth (host, port, timeoutMs) {
   })
 }
 
-// POST /cmd with the X-Supervisor header (matches the parser at index.js:1615 + §6 predicate).
+// POST /cmd with the X-Supervisor header (matches the x-supervisor parser in index.js POST /cmd + §6 predicate).
 // A timeout AFTER connect is success-in-progress: recover awaits commands.handle (a grave trek
 // can take minutes) - the server keeps executing after the client disconnects, so destroy the
 // request and treat it as sent. Never rejects.

@@ -31,7 +31,7 @@ let cfg = {}
 try { cfg = require('./config.json') } catch { cfg = {} }
 const host = process.env.CONTROL_HOST || cfg.controlHost || '127.0.0.1'
 const port = parseInt(process.env.CONTROL_PORT || cfg.controlPort || 3001, 10)
-const HB_FILE = process.env.HEARTBEAT_FILE || path.join(__dirname, 'heartbeat.json') // IDENTICAL to index.js:1818
+const HB_FILE = process.env.HEARTBEAT_FILE || path.join(__dirname, 'heartbeat.json') // IDENTICAL to index.js HEARTBEAT_FILE
 
 function start () {
   lastStart = Date.now()

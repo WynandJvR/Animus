@@ -272,7 +272,7 @@ function wildTerrainMovements (bot) {
 // profile via safeThunk(). DEFAULT OFF: with NAV_TERRAIN_PROFILE unset/!=='1' this ALWAYS
 // returns safeThunk() and the wild profile/exclusion/registry hooks never construct. Whole
 // body try/catch -> safeThunk (a policy error degrades to today's no-dig, never a throw
-// mid-leg). navigateToInner re-runs this thunk before EVERY attempt (navigate.js:770), so the
+// mid-leg). navigateToInner re-runs this thunk before EVERY attempt (navigate.js navigateToInner), so the
 // profile demotes to safe automatically as a leg carries the bot inside the 32b home radius.
 function trekMovements (bot, safeThunk) {
   try {
@@ -7161,7 +7161,7 @@ async function consolidateFurnaces (bot, { isStopped = () => false, say = () => 
   let reclaimed = 0
   for (const { e } of cands) {
     if (isStopped()) break
-    // Walk there first so the chunk loads (recallAndReach pattern, provision.js:3074).
+    // Walk there first so the chunk loads (recallAndReach pattern, provision.js recallAndReach).
     try { await walkStaged(bot, e.x, e.z, { range: 10, timeoutMs: 60000, isStopped }) } catch { continue } // unreachable - keep the entry, retry a later pass
     if (isStopped()) break
     // RE-VERIFY at dig time: the block IS a furnace (exact - stricter than INFRA_BLOCK's
