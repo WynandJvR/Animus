@@ -1336,6 +1336,11 @@ if (SCHED_ON) {
             if (job) {
               note('(wd) CYCLE ' + det.kind + ' on ' + job.name + ' - forcing fail-job (behavioral loop, not a freeze)')
               verdict = 'fail-job' // synthetic - flows through the UNMODIFIED wdPhase/lever map below
+              // FOOD_FLOOR F4: a repeatFail cycle on the survival ladder / secureFood is the eternal
+              // food re-loop - BUMP the floor's no-progress counter so its next dispatch ESCALATES
+              // (widen the water scout, active fishing over a passive hold) instead of re-running the
+              // identical failing sequence. FOOD_FLOOR=0 -> escalateFoodFloor is a no-op.
+              if (process.env.FOOD_FLOOR !== '0' && /recoverFromDegraded|recoveryLadder|secureFood/.test(job.name || '')) { try { provision.escalateFoodFloor() } catch {} }
             } else {
               note('(wd) CYCLE ' + det.kind + ' with no active job - clearing the goal so the brain sees the loop')
               try { commands.recordOutcome('cycle:' + det.kind, false, 'A<->B loop broken (no job to fail)') } catch {}

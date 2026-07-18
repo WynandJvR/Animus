@@ -130,6 +130,17 @@ function busyPreemptFood (opts = {}) {
 function outboundRungAdmissible (hp, opts = {}) {
   const on = opts.foodSurvival != null ? opts.foodSurvival : (process.env.FOOD_SURVIVAL !== '0')
   if (!on) return true
+  // FOOD_FLOOR (default on) carve-out: a genuinely-STARVING bot (food<=floorFood) MUST be allowed
+  // to run the ONE bounded food-ACQUISITION rung (secureFood->fishing) even at 1 hp - sitting at
+  // hp1/food0 forever (the 3.5h livelock) is strictly worse than one bounded fishing session
+  // (240s cap + hostile reel-out). NARROW: fires ONLY when the caller passes the current food AND
+  // it is <= floorFood. The ladder passes food ONLY for the secureFood rung, so the 70b trekFarm
+  // trek still aborts at hp<=6 (the §5 invariant). FOOD_FLOOR=0 (or no food passed) -> today.
+  const floorOn = opts.foodFloor != null ? opts.foodFloor : (process.env.FOOD_FLOOR !== '0')
+  if (floorOn && opts.food != null) {
+    const floorFood = opts.floorFood != null ? opts.floorFood : Number(process.env.FOOD_FLOOR_FOOD || 2)
+    if (opts.food <= floorFood) return true
+  }
   const abortHp = opts.abortHp != null ? opts.abortHp : Number(process.env.LADDER_HP_ABORT || 6)
   return !(hp != null && hp <= abortHp)
 }
@@ -149,6 +160,23 @@ function famineHoldFood (food, opts = {}) {
 // its own inline `bot.food > 17` guard; this is a regression sentinel, not new wiring).
 const AUTO_EAT_AT = 17
 
+// FOOD_FLOOR F4 - the no-progress ESCALATION counter (PURE). The food floor re-running the
+// identical failing sequence forever (§2.4) is the eternal loop; this advances a bounded counter
+// every floor dispatch that gained NO food and RESETS it on any food gain. The FOOD_FLOOR gate +
+// the food-gain measurement live at the call site (provision.js floor branch + the watchdog
+// repeatFail hook); this is the pure, locked arithmetic. Capped so it never runs away.
+function foodFloorEscalation (counter, gainedFood, opts = {}) {
+  const cap = opts.cap != null ? opts.cap : Number(process.env.FOOD_FLOOR_ESC_CAP || 4)
+  if (gainedFood) return 0
+  return Math.min((counter || 0) + 1, cap)
+}
+// Has the floor stalled enough (>= N consecutive zero-food dispatches) to ESCALATE - widen the
+// water scout one ring + let the floor's ACTIVE fishing outrank a passive outdoor hold? PURE.
+function foodFloorEscalated (counter, opts = {}) {
+  const n = opts.n != null ? opts.n : Number(process.env.FOOD_FLOOR_ESC_N || 2)
+  return (counter || 0) >= n
+}
+
 // How many bread can we bake from N wheat (3 wheat -> 1 bread). PURE arithmetic, offline-tested.
 function breadFromWheat (wheatCount) { return Math.max(0, Math.floor((wheatCount || 0) / 3)) }
 
@@ -163,4 +191,4 @@ function wheatWithdrawForBake ({ packWheat, bankWheat, bankFoodPts, bankTargetPt
   return Math.max(0, Math.min(bankWheat || 0, need, cap))
 }
 
-module.exports = { DEFAULT_BUFFER, BAD_FOOD, RAW_COOKABLE_FOOD, foodTier, hasFoodSupply, needsFoodSupply, shouldSweepForFood, foodSupplyAction, shouldTrekHomeForFood, breadFromWheat, wheatWithdrawForBake, inLoopFoodTrigger, busyPreemptFood, outboundRungAdmissible, famineHoldFood, AUTO_EAT_AT }
+module.exports = { DEFAULT_BUFFER, BAD_FOOD, RAW_COOKABLE_FOOD, foodTier, hasFoodSupply, needsFoodSupply, shouldSweepForFood, foodSupplyAction, shouldTrekHomeForFood, breadFromWheat, wheatWithdrawForBake, inLoopFoodTrigger, busyPreemptFood, outboundRungAdmissible, famineHoldFood, foodFloorEscalation, foodFloorEscalated, AUTO_EAT_AT }

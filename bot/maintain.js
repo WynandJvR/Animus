@@ -210,6 +210,18 @@ function spareKitCourierPlan (packItems, bankKit, opts) {
   return [...merged.entries()].map(([name, count]) => ({ name, count }))
 }
 
+// FOOD_FLOOR F2/F3: how many spare fishing_rod to ship to the bank so it holds the emergency
+// reserve (default 1) that the food floor withdraws post-death, WITHOUT stripping the bot's own
+// working rod (keep 1 on hand). PURE arithmetic (mirrors the courier/spareKit reserve model);
+// the FOOD_FLOOR gate + the actual deposit live at the call site (courierFoodToBank).
+function rodReserveTopUp (bankRods, packRods, opts = {}) {
+  const target = opts.target != null ? opts.target : Number(process.env.MAINT_BANKROD_TARGET || 1)
+  const keep = opts.keep != null ? opts.keep : 1
+  const need = Math.max(0, target - (bankRods || 0))
+  const shippable = Math.max(0, (packRods || 0) - keep)
+  return Math.min(need, shippable)
+}
+
 // craftBudgetForSpace(needed, freeSlots, stackSize, reserve=1) -> count to craft NOW so the
 // output fits (conservative: ignores slots freed by consumed ingredients / partial stacks - it
 // under-crafts at worst and the caller's re-plan round tops up). PURE, never negative.
@@ -325,5 +337,6 @@ module.exports = {
   toolTier,
   toolIsJunk,
   craftBudgetForSpace,
+  rodReserveTopUp,
   _reset: () => {} // no state; present for test-harness parity
 }

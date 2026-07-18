@@ -407,5 +407,13 @@ t('(#41) spareKitCourierPlan: armor deposits target exactly ONE set (capped by t
   assert.strictEqual(shipped, 2, 'ships exactly the 2 pieces the bank still needs, no more')
 })
 
+t('(FOOD_FLOOR F3) rodReserveTopUp: ship exactly ONE spare rod to a dry reserve, never the bot\'s last rod', () => {
+  assert.strictEqual(M.rodReserveTopUp(0, 2), 1, 'bank dry + pack holds 2 rods -> ship 1 (keep 1 to fish now)')
+  assert.strictEqual(M.rodReserveTopUp(0, 1), 0, 'bank dry + pack holds only 1 -> keep it, ship nothing (never strip the working rod)')
+  assert.strictEqual(M.rodReserveTopUp(1, 2), 0, 'reserve already stocked (1) -> ship nothing (hysteresis)')
+  assert.strictEqual(M.rodReserveTopUp(0, 0), 0, 'no rod anywhere -> nothing to ship (honest)')
+  assert.strictEqual(M.rodReserveTopUp(0, 5, { target: 2 }), 2, 'target override respected, bounded by need')
+})
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall maintain tests passed')
 process.exit(failures ? 1 : 0)

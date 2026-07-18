@@ -4616,6 +4616,14 @@ async function tendWheatFarm (bot, { isStopped = () => false, say = () => {} } =
 async function ensureFishingRod (bot, { isStopped = () => false, home } = {}) {
   const has = () => (bot.inventory ? bot.inventory.items() : []).find(i => i.name === 'fishing_rod')
   if (has()) return true
+  // FOOD_FLOOR F2: guarantee the rod. A naked post-death bot has 0 string (can't craft), so the
+  // #40-maintained bank reserve (F3 tops it up) is the reliable source - WITHDRAW the reserved rod
+  // before falling back to a craft. Bounded chest read (<=64b); a dry bank falls through to craft.
+  // FOOD_FLOOR=0 -> skip straight to today's string/craft path (byte-for-byte).
+  if (process.env.FOOD_FLOOR !== '0') {
+    try { await require('./resources.js').withdrawItems(bot, 'fishing_rod', 1, { near: home, maxDist: 64 }) } catch (e) { dbg('  fishing: rod bank-withdraw failed (' + e.message + ')') }
+    if (has()) { dbg('  fishing: withdrew a fishing_rod from the bank reserve'); return true }
+  }
   const inv = inventoryCounts(bot)
   if ((inv.string || 0) < 2) { dbg('  fishing: no rod and only ' + (inv.string || 0) + ' string - deferred'); return false }
   try { await runCraft(bot, 'fishing_rod', 1, true, { isStopped, home }) } catch (e) { dbg('  fishing: rod craft failed (' + e.message + ')'); return false }
@@ -4928,7 +4936,7 @@ async function schedulerState (bot) {
   return s
 }
 
-async function fishForFood (bot, { isStopped = () => false, say = () => {}, target = 6, home, scout = false } = {}) {
+async function fishForFood (bot, { isStopped = () => false, say = () => {}, target = 6, home, scout = false, scoutRings } = {}) {
   if (hasSolidCeiling(bot, 12)) { dbg('  fishing: underground - not here'); return false }
   const mcData = require('minecraft-data')(bot.version)
   const edible = () => (bot.inventory ? bot.inventory.items() : []).filter(i => mcData.foodsByName && mcData.foodsByName[i.name] && !/rotten|spider_eye|poisonous/.test(i.name)).reduce((s, i) => s + i.count, 0)
@@ -4946,7 +4954,7 @@ async function fishForFood (bot, { isStopped = () => false, say = () => {}, targ
       try { await walkStaged(bot, known.x, known.z, { isStopped, range: 6, timeoutMs: 120000 }) } catch {}
       waters = findWaters()
     }
-    if (!waters.length && scout && !isStopped()) waters = await scoutForWater(bot, { isStopped })
+    if (!waters.length && scout && !isStopped()) waters = await scoutForWater(bot, { isStopped, rings: scoutRings })
   }
   if (!waters.length) { dbg('  fishing: no surface water within 48' + (scout ? ' (scout came up dry too)' : '')); return false }
   const w = waters[0]
@@ -5058,6 +5066,14 @@ async function bakeBreadFromWheat (bot, opts = {}) {
 
 let _securingFood = false
 function isSecuringFood () { return _securingFood }
+// FOOD_FLOOR F4: the no-progress escalation counter (module-local; a restart re-allows a fresh
+// attempt). Advanced by the floor branch on a zero-food dispatch, reset on food gain, and BUMPED
+// by the watchdog's `(wd) CYCLE repeatFail` on the recovery ladder (index.js) - so the eternal
+// re-loop escalates (widen the water scout one ring + active fishing over a passive outdoor hold)
+// instead of re-running the identical failing sequence. Capped (foodFloorEscalation).
+let _foodFloorNoProgress = 0
+function escalateFoodFloor () { if (process.env.FOOD_FLOOR !== '0') _foodFloorNoProgress = foodSec.foodFloorEscalation(_foodFloorNoProgress, false) }
+function _foodFloorState () { return _foodFloorNoProgress } // test/introspection seam
 async function secureFood (bot, opts = {}) {
   if (_securingFood) return { fed: false, blockedOn: 'busy' }
   _securingFood = true
@@ -5163,6 +5179,36 @@ async function secureFoodInner (bot, opts = {}) {
   // 3) hunt what's visible (batch - one kill barely dents the deficit)
   try { for (let k = 0; k < 4 && foodCount(bot) < 5 && !isStopped(); k++) { if (!await huntForFood(bot, { isStopped, range: 32 })) break } } catch {}
   await cookIfRaw(); await eatUp(bot)
+  // F1' FOOD FLOOR (FOOD_FLOOR, default on): the DEDICATED starvation floor - runs BEFORE the
+  // isStopped short-circuit below so the ONE reliable acquisition (fishing at remembered / farm-
+  // pond / scouted open-sky water) FIRES even when an hp-abort or a stopped latch would otherwise
+  // return here with ZERO food (the 3.5h hp1/food0 livelock, §2.2/§2.0). Only at genuine starvation
+  // (food<=floorFood) with a dry pack (the bank was already tried at step 1). Rod is guaranteed by
+  // ensureFishingRod (bank-withdraw then craft, F2); bounded by fishForFood's 240s cap + hostile
+  // reel-out. The floor only fires at food<=floorFood, which IS the §4 spiral exception, so it is
+  // never spiral-suppressed. FOOD_FLOOR=0 -> the whole branch is skipped (byte-for-byte).
+  let floorFished = false
+  if (process.env.FOOD_FLOOR !== '0' && (bot.food ?? 20) <= Number(process.env.FOOD_FLOOR_FOOD || 2) && foodCount(bot) < 1 && !fedEnough()) {
+    const escalate = foodSec.foodFloorEscalated(_foodFloorNoProgress)
+    const foodBefore = bot.food ?? 0
+    dbg('secureFood: FOOD FLOOR - food=' + bot.food + ' pack dry -> fishing floor' + (escalate ? ' (ESCALATED - widening the water scout)' : ''))
+    say('starving - going fishing, it\'s the one food source that always works')
+    try {
+      if (await ensureFishingRod(bot, { isStopped, home })) {
+        await fishForFood(bot, { isStopped, say, home, scout: true, scoutRings: escalate ? [48, 96, 144] : undefined })
+      } else dbg('  FOOD FLOOR: no rod obtainable (bank reserve dry + can\'t craft) - cannot fish (honest fallback: hold)')
+    } catch (e) { dbg('  FOOD FLOOR: fishing floor failed (' + e.message + ')') }
+    await cookIfRaw(); await eatUp(bot)
+    floorFished = true
+    const gained = (bot.food ?? 0) > foodBefore || foodCount(bot) > 0
+    _foodFloorNoProgress = foodSec.foodFloorEscalation(_foodFloorNoProgress, gained)
+    if (fedEnough()) {
+      // F3: a SUCCESSFUL floor session restocks the bank reserve (surplus fish + a spare rod) so R2
+      // gotoHome+ensureFood pays out instantly next crisis. Reuses the #40 courier (bounded).
+      if (process.env.MAINTAIN !== '0') { try { await courierFoodToBank(bot, { isStopped, say }) } catch {} }
+      return { fed: true, blockedOn: null }
+    }
+  }
   if (fedEnough() || isStopped()) return { fed: fedEnough(), blockedOn: fedEnough() ? null : (isStopped() ? 'stopped' : 'food') }
   // #40 F4.2: a STARVING bot (food<=4) that just trekked home and found the pantry dry must NOT
   // then march OUT to farm/fish/scout - those excursions are what get a 1-hp bot killed. Skip the
@@ -5197,8 +5243,10 @@ async function secureFoodInner (bot, opts = {}) {
   } catch (e) { dbg('secureFood: farm fallback failed (' + e.message + ')') }
   await eatUp(bot)
   if (fedEnough()) return { fed: true, blockedOn: null }
-  // 5) fish - works anywhere with surface water (scouts for a pond in a real crisis)
-  try { await fishForFood(bot, { isStopped, say, home, scout: bot.food <= 4 }) } catch (e) { dbg('secureFood: fishing failed (' + e.message + ')') }
+  // 5) fish - works anywhere with surface water (scouts for a pond in a real crisis). Skip when the
+  // F1' floor already ran the fishing leg this call (no double 240s session); FOOD_FLOOR=0 ->
+  // floorFished is always false -> today's unconditional fishing (byte-for-byte).
+  try { if (!floorFished) await fishForFood(bot, { isStopped, say, home, scout: bot.food <= 4 }) } catch (e) { dbg('secureFood: fishing failed (' + e.message + ')') }
   await eatUp(bot)
   if (fedEnough()) return { fed: true, blockedOn: null }
   // 6) crisis: SYSTEMATICALLY sweep unexplored ground for animals + water (not the old
@@ -5361,14 +5409,16 @@ async function boundedHold (bot, { isStopped = () => false, say = () => {}, dead
 
 // Bounded water scout: 4 cardinal legs x expanding radius, scanning for surface water at
 // each stop. Feeds BOTH fishing and the wheat farm (found ponds land in 'water' memory).
-async function scoutForWater (bot, { isStopped = () => false, maxMs = 150000 } = {}) {
+async function scoutForWater (bot, { isStopped = () => false, maxMs = 150000, rings } = {}) {
   const mcData = require('minecraft-data')(bot.version)
   const waterId = mcData.blocksByName.water.id
   const start = bot.entity.position.clone()
   const deadline = Date.now() + maxMs
   const surface = () => (bot.findBlocks({ matching: waterId, maxDistance: 48, count: 32 }) || [])
     .filter(p => { const a = bot.blockAt(p.offset(0, 1, 0)); return a && AIRISH(a.name) })
-  for (const r of [48, 96]) {
+  // FOOD_FLOOR F4: the escalated floor widens the rings by one (a caller passes [48,96,144]);
+  // default is today's [48,96] byte-for-byte.
+  for (const r of (rings && rings.length ? rings : [48, 96])) {
     for (const [dx, dz] of [[1, 0], [0, 1], [-1, 0], [0, -1]]) {
       if (isStopped() || Date.now() > deadline) return []
       try { await walkStaged(bot, start.x + dx * r, start.z + dz * r, { isStopped, range: 10, timeoutMs: 45000 }) } catch {}
@@ -5635,8 +5685,14 @@ async function recoverFromDegraded (bot, { isStopped = () => false, say = () => 
       // instead of farming grass at 1 hp for minutes. Non-outbound rungs (eat/grave/shelter/hold)
       // keep plain isStopped. FOOD_SURVIVAL=0 -> outboundRungAdmissible is always true (today).
       const outbound = process.env.FOOD_SURVIVAL !== '0' && scheduler.OUTBOUND_RE.test(chosen.action || '')
+      // FOOD_FLOOR (default on): the hp-abort must NOT forbid the ONE bounded acquisition that ends
+      // the starvation (secureFood->fishing) - so at food<=floorFood admit the SECUREFOOD rung
+      // regardless of hp. RUNG-AWARE guardrail: pass bot.food ONLY for the secureFood rung; the
+      // long trekFarm/trekOrchard trek gets {} -> today's pure hp<=6 abort (the §5 invariant: the
+      // farm trek still aborts, only the fishing leg is admitted). FOOD_FLOOR=0 -> {} for all.
+      const foodAcqRung = process.env.FOOD_FLOOR !== '0' && /^secureFood/.test(chosen.action || '')
       const rungStopped = outbound
-        ? () => isStopped() || !foodSec.outboundRungAdmissible(bot.health)
+        ? () => isStopped() || !foodSec.outboundRungAdmissible(bot.health, foodAcqRung ? { food: bot.food } : {})
         : isStopped
       try { await RUNG_EXECUTORS[chosen.action](bot, { isStopped: rungStopped, say, home, dbg }) }
       catch (e) { dbg('(ladder) ' + label + ' failed: ' + e.message) }
@@ -5694,9 +5750,17 @@ async function courierFoodToBank (bot, { isStopped = () => false, say = () => {}
   }
   // BANK-only food points (a real read - we're standing at the chest): totalCounts would fold in
   // the pack surplus we're about to deposit and wrongly read the pantry as full.
-  let bankFoodPts = 0
-  try { const counts = await res.readChest(bot, cell); for (const [n, c] of Object.entries(counts || {})) if (foods[n]) bankFoodPts += (foods[n].foodPoints || 0) * c } catch {}
+  let bankFoodPts = 0; let bankRods = 0
+  try { const counts = await res.readChest(bot, cell); for (const [n, c] of Object.entries(counts || {})) { if (foods[n]) bankFoodPts += (foods[n].foodPoints || 0) * c; if (n === 'fishing_rod') bankRods += c } } catch {}
   const plan = maintain.courierPlan(packItems, bankFoodPts, {})
+  // FOOD_FLOOR F3: leave a spare fishing_rod in the reserve alongside the food, so the post-death
+  // naked bot's floor can WITHDRAW a rod (F2) instead of scrambling for 0 string. Ships only a
+  // TRUE dupe (keeps 1 rod on the bot); rodReserveTopUp bounds it. FOOD_FLOOR=0 -> no rod line.
+  if (process.env.FOOD_FLOOR !== '0') {
+    const packRods = countItem(bot, 'fishing_rod')
+    const shipRods = maintain.rodReserveTopUp(bankRods, packRods)
+    if (shipRods > 0) plan.push({ name: 'fishing_rod', count: shipRods })
+  }
   if (!plan.length) { dbg('  courier: pack keep met / pantry stocked (' + bankFoodPts + ' pts) - nothing to deposit'); return 0 }
   const blk = bot.blockAt(new Vec3(cell.x, cell.y, cell.z))
   if (!blk || !/chest/.test(blk.name)) { dbg('  courier: bank cell no longer a chest'); return 0 }
@@ -8511,5 +8575,5 @@ async function chestCounts (bot, chestBlock) {
 
 module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, smeltFuelPlan, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, breachDryPocket, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, boundedHold, recoverFromDegraded, isRecoveringDegraded, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, markBedUnusable, bedHeld, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, noteWaterCrossing, lonelyFurnace, consolidateFurnaces, litterPatrol, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, planTrekRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
   maintenancePass, isMaintaining, stopMaintenance, _setMaintaining, courierFoodToBank, safekeepSweep, spareKitToBank, recoveryReadyNow, cropExclusionStep, cropPlaceExclusion, hazardStepExclusion, waterStepExclusion, deepWaterUnderfoot, gatherSeedsNear,
-  activeJobInfo, stopSurvivalJob,
+  activeJobInfo, stopSurvivalJob, escalateFoodFloor, _foodFloorState,
   wildTerrainMovements, trekMovements, DIGGABLE_NATURAL, STRUCTURE_RE, canBreakNaturally }

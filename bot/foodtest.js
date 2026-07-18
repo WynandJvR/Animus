@@ -174,6 +174,38 @@ t('#40 F4.1: outboundRungAdmissible - an outbound rung aborts at hp<=6 (on); nev
   assert.strictEqual(F.outboundRungAdmissible(null, ON), true, 'unknown hp -> admissible (defensive)')
 })
 
+t('FOOD_FLOOR F1: outboundRungAdmissible - a STARVING bot (food<=floorFood) may run the fishing rung at 1 hp; a merely-scratched bot still aborts', () => {
+  // THE livelock break: hp1/food0 must be ADMISSIBLE for the food-acquisition rung (carve-out).
+  // foodSurvival/foodFloor:true pin both flags ON so the mechanism is asserted regardless of regime.
+  const FF = { foodSurvival: true, foodFloor: true }
+  assert.strictEqual(F.outboundRungAdmissible(1, { food: 0, floorFood: 2, ...FF }), true, 'hp1 food0 (<=floorFood) -> admit the fishing floor')
+  assert.strictEqual(F.outboundRungAdmissible(1, { food: 2, floorFood: 2, ...FF }), true, 'hp1 food2 (==floorFood) -> admit')
+  // NARROW: a merely-scratched, not-starving bot still aborts outbound at hp<=6 (the §5 invariant).
+  assert.strictEqual(F.outboundRungAdmissible(1, { food: 12, ...FF }), false, 'hp1 food12 (>floorFood) -> still aborts (no death-march)')
+  assert.strictEqual(F.outboundRungAdmissible(5, { food: 12, ...FF }), false, 'hp5 food12 -> still aborts as today')
+  assert.strictEqual(F.outboundRungAdmissible(3, { food: 3, ...FF }), false, 'hp3 food3 (>floorFood 2) -> aborts')
+  // GUARDRAIL: no food passed (trekFarm rung) -> today's pure hp-abort, carve-out inert.
+  assert.strictEqual(F.outboundRungAdmissible(1, FF), false, 'no food passed (trekFarm) -> hp1 aborts as today')
+  assert.strictEqual(F.outboundRungAdmissible(7, { food: 0, ...FF }), true, 'hp7 -> admissible anyway (above the abort line)')
+  // flag-off unchanged: FOOD_SURVIVAL off -> always admissible (today, only isStopped stops a rung).
+  assert.strictEqual(F.outboundRungAdmissible(5, { food: 0, foodSurvival: false }), true, 'FOOD_SURVIVAL=0 -> admissible regardless (byte-for-byte)')
+  assert.strictEqual(F.outboundRungAdmissible(1, { food: 0, foodSurvival: false }), true, 'FOOD_SURVIVAL=0 -> hp1 admissible')
+  // FOOD_FLOOR=0: carve-out inert -> hp1 food0 aborts exactly like #40 today (FOOD_SURVIVAL still on).
+  assert.strictEqual(F.outboundRungAdmissible(1, { food: 0, foodFloor: false, foodSurvival: true }), false, 'FOOD_FLOOR=0 -> hp1 food0 aborts (byte-for-byte #40)')
+})
+
+t('FOOD_FLOOR F4: foodFloorEscalation counter increments on no-progress, RESETS on food gain, and is capped', () => {
+  assert.strictEqual(F.foodFloorEscalation(0, false), 1, 'no food gained -> +1')
+  assert.strictEqual(F.foodFloorEscalation(1, false), 2, 'still no food -> +1')
+  assert.strictEqual(F.foodFloorEscalation(3, true), 0, 'food GAINED -> reset to 0')
+  assert.strictEqual(F.foodFloorEscalation(99, false, { cap: 4 }), 4, 'capped so it never runs away')
+  // the escalate predicate flips at N consecutive zero-food dispatches (default 2).
+  assert.strictEqual(F.foodFloorEscalated(0), false, '0 -> not yet escalated')
+  assert.strictEqual(F.foodFloorEscalated(1), false, '1 -> not yet (default N=2)')
+  assert.strictEqual(F.foodFloorEscalated(2), true, '2 -> ESCALATE (widen scout + active fishing)')
+  assert.strictEqual(F.foodFloorEscalated(1, { n: 1 }), true, 'N override respected')
+})
+
 t('#40 F4.2: famineHoldFood - a starving bot (food<=4) holds instead of an outward excursion', () => {
   assert.strictEqual(F.famineHoldFood(4, ON), true, 'food 4 -> hold, do not trek out to fish/scout')
   assert.strictEqual(F.famineHoldFood(2, ON), true, 'food 2 -> hold')
