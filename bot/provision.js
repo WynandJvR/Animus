@@ -2280,6 +2280,12 @@ async function gatherLoop (bot, item, count, opts = {}) {
   // (the ~1 iron/7min + hut-wedge live bug). branchTries caps the attempts so a site that can't
   // be descended (apron/water/lava) falls back to today's scratch/wander path (no wedge).
   const useBranch = deepOre && process.env.BRANCH_MINE !== '0'
+  // IRON_GATHER_FIX (default ON): when a DETECTED ore passes the faceExposed scan but the
+  // pathfinder can't route a standing cell to it (breakBlock's goto times out -> reachFails
+  // climbs 9,10,11, mined=0 - the permanent-naked live bug), tunnel STRAIGHT to it one block
+  // at a time instead of blacklisting and looping. IRON_GATHER_FIX=0 -> the whole arm is
+  // skipped and reachFails behaves byte-for-byte as today.
+  const IRON_GATHER_FIX = process.env.IRON_GATHER_FIX !== '0'
   // STONE RELOCATE (#22): when a stone/cobble gather finds nothing exposed at the surface,
   // DESCEND to the stone layer (staircase / known-mine re-entry) instead of the blind wander.
   // Default ON; STONE_RELOCATE=0 restores today's digShaftDown-strip-then-wander path exactly.
@@ -2408,6 +2414,75 @@ async function gatherLoop (bot, item, count, opts = {}) {
     bot.pathfinder.setGoal(null) // a lingering goal lets the pathfinder steer mid-dig and ABORT it (dig-restart loops, operator report)
     await bot.dig(blk)
     mined++
+  }
+
+  // IRON_GATHER_FIX: DIG STRAIGHT TO an ore we can SEE but can't PATH to. faceExposed() passes
+  // for ore with a single air face, but that face is often a pocket/gap the anti-grief mining
+  // profile can't put a standing cell into, so breakBlock's goto times out and reachFails climbs
+  // with mined=0 (live: strip=10 exhausted, ~0 iron/session -> permanent naked -> far-death loop).
+  // Rather than blacklist + loop, tunnel the NATURAL blocks between us and the ore one cell at a
+  // time until it's in reach + line-of-sight, then the caller's breakBlock mines it. BOUNDED (short
+  // horizontal reach, small vertical band, step cap), anti-grief (canBreakNaturally ONLY), fluid-safe
+  // (digExposureHazard), never below STRIP_FLOOR, danger-gated, and it NEVER digs the ore itself.
+  const IRON_DIG_TO_ORE_MAX = parseInt(process.env.IRON_DIG_TO_ORE_MAX || '8', 10)     // max horizontal blocks to tunnel
+  const IRON_DIG_TO_ORE_VBAND = parseInt(process.env.IRON_DIG_TO_ORE_VBAND || '4', 10) // don't chase ore far above/below
+  async function digToOre (target) {
+    if (!target) return false
+    const tp = target.position
+    const REACH = 4.0 // safely inside breakBlock's 4.2 no-goto threshold, so it digs the ore directly
+    const reachable = () => bot.entity.position.distanceTo(tp) <= REACH && (!bot.canDigBlock || bot.canDigBlock(target))
+    const feet0 = bot.entity.position.floored()
+    if (!mining.digToOreInReach(Math.abs(tp.y - feet0.y), Math.hypot(tp.x - feet0.x, tp.z - feet0.z),
+      { vband: IRON_DIG_TO_ORE_VBAND, maxHoriz: IRON_DIG_TO_ORE_MAX })) return false          // out of the bounded tunnel range
+    // Clear ONE natural cell toward the ore. Returns 'air'|'dug' (progress ok) or a stop reason.
+    const clearCell = async (c) => {
+      if (c.x === tp.x && c.y === tp.y && c.z === tp.z) return 'air'          // NEVER dig the ore itself - the caller does
+      const b = bot.blockAt(c)
+      if (!b || AIRISH(b.name)) return 'air'
+      if (/lava|water/.test(b.name)) return 'stop'                            // never open a fluid onto us
+      if (!canBreakNaturally(b)) return 'stop'                               // anti-grief: never cut a player build
+      const nb = [c.offset(1, 0, 0), c.offset(-1, 0, 0), c.offset(0, 0, 1), c.offset(0, 0, -1), c.offset(0, 1, 0), c.offset(0, -1, 0)]
+        .map(q => { const bb = bot.blockAt(q); return bb ? bb.name : null })
+      if (mining.digExposureHazard(nb) !== 'ok') return 'stop'               // fluid in a neighbour of the cell we'd open
+      const tool = toolForBlock(bot, b.name)
+      if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
+      if (bot.canDigBlock && !bot.canDigBlock(b)) return 'stop'
+      try { await bot.dig(b) } catch { return 'stop' }
+      return 'dug'
+    }
+    for (let s = 0; s < IRON_DIG_TO_ORE_MAX + IRON_DIG_TO_ORE_VBAND && !isStopped(); s++) {
+      if (mineDanger(bot)) return false                                       // danger-gated: never tunnel while threatened
+      if (reachable()) return true
+      const feet = bot.entity.position.floored()
+      const dx = tp.x - feet.x; const dy = tp.y - feet.y; const dz = tp.z - feet.z
+      let dir = null
+      if (Math.abs(dx) >= Math.abs(dz) && Math.abs(dx) >= 1) dir = new Vec3(Math.sign(dx), 0, 0)
+      else if (Math.abs(dz) >= 1) dir = new Vec3(0, 0, Math.sign(dz))
+      let stepTo = null
+      if (dir) {
+        // Horizontal advance, dropping the tread by at most one per step to track a lower ore.
+        const aheadFeet = feet.plus(dir).offset(0, dy < 0 ? -1 : 0, 0)
+        if (aheadFeet.y <= STRIP_FLOOR) return false                          // never tunnel below the hard floor
+        for (const c of [aheadFeet.offset(0, 1, 0), aheadFeet]) { if ((await clearCell(c)) === 'stop') return false } // head + feet clearance
+        stepTo = aheadFeet
+      } else if (dy < 0) {
+        // XZ-aligned, ore still below: step one straight down toward it (a lower tread).
+        const down = feet.offset(0, -1, 0)
+        if (down.y <= STRIP_FLOOR) return false
+        if ((await clearCell(down)) === 'stop') return false
+        stepTo = down
+      } else if (dy > 0) {
+        // XZ-aligned, ore above and within band: clear our head-clearance and let breakBlock reach up.
+        await clearCell(feet.offset(0, 2, 0)); break
+      } else break
+      if (stepTo) {
+        let arrived = false
+        try { arrived = await stepInto(bot, stepTo, { jump: false, isStopped }) } catch {}
+        if (!arrived) { try { await gotoWithTimeout(bot, new goals.GoalBlock(stepTo.x, stepTo.y, stepTo.z), 4000) } catch {} }
+      }
+      try { await collectDrops(bot, 3) } catch {}
+    }
+    return reachable()
   }
 
   // MID-MINE COMBAT SURVIVAL: the ONE reaction to a hostile that closes (or hp crashing)
@@ -2969,6 +3044,24 @@ async function gatherLoop (bot, item, count, opts = {}) {
       failed.set(pkey(target.position), (failed.get(pkey(target.position)) || 0) + 1)
       reachFails++
       if (reachFails <= 3 || reachFails % 5 === 0) dbg('  gather breakBlock fail #' + reachFails + ' at ' + target.position.toString() + ': ' + e.message)
+      // IRON_GATHER_FIX: a DETECTED ore the pathfinder couldn't reach (embedded / air-pocket
+      // face) -> tunnel straight to it and mine it, instead of leaving it for the exhausted
+      // strip budget (strip=10) and looping reachFails. Deep ore only, danger-gated, only for a
+      // genuine reach/path failure (not a fluid-face or underwater abort, which have their own
+      // handling below). Success resets reachFails + un-blacklists the spot; failure/throw falls
+      // straight through to today's strip/relocate path.
+      if (IRON_GATHER_FIX && deepOre && !isLogGather && !mineDanger(bot) &&
+          /timed out|no ?path|out of reach|cannot dig/i.test((e && e.message) || '')) {
+        try {
+          if (await digToOre(target)) {
+            await breakBlock(target)
+            failed.delete(pkey(target.position))
+            reachFails = 0
+            dbg('  gather IRON_GATHER_FIX: tunneled to buried ore and mined it at ' + target.position.toString())
+            continue
+          }
+        } catch (e2) { dbg('  gather dig-to-ore could not land it (' + ((e2 && e2.message) || 'no route') + ') - falling through') }
+      }
       if (/underwater|water face/.test(e.message) && ++waterAborts >= 3) { widenFence('approaches flooded'); waterAborts = 0 }
       // LOG REACHFAIL CAP (#50, LOG_REACHFAIL_CAP): a far wild grove we can SEE but the pathfinder
       // can't reach (across water / under canopy) used to be ground one doomed 8s goto at a time

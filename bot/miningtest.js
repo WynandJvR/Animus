@@ -97,6 +97,22 @@ t('faceExposed: embedded ore (all solid) is unreachable; any open face makes it 
   assert.strictEqual(M.faceExposed([]), false, 'no data -> not exposed')
 })
 
+t('digToOreInReach (IRON_GATHER_FIX): only tunnel to a detected ore that is close + roughly level', () => {
+  // in-bounds: level ore a few blocks away -> tunnel to it (the reachFails=9,10,11 mined=0 case)
+  assert.strictEqual(M.digToOreInReach(0, 3), true, 'same level, 3b away -> tunnel')
+  assert.strictEqual(M.digToOreInReach(4, 8), true, 'at the vertical band + horizontal limits -> still in range')
+  assert.strictEqual(M.digToOreInReach(2, 9), true, 'horizDist may reach maxHoriz+1 (findBlock 64 slop)')
+  // out of bounds: too far vertically (would strand the bot) or across a wide gap
+  assert.strictEqual(M.digToOreInReach(5, 3), false, 'ore 5 below/above the band -> do NOT chase it down')
+  assert.strictEqual(M.digToOreInReach(1, 12), false, 'ore too far horizontally -> not a bounded tunnel')
+  // env-tunable bounds
+  assert.strictEqual(M.digToOreInReach(6, 3, { vband: 8 }), true, 'a wider vertical band is honored')
+  assert.strictEqual(M.digToOreInReach(2, 5, { maxHoriz: 3 }), false, 'a tighter horizontal cap is honored (5 > 3+1)')
+  // defensive: negative/garbage inputs never green-light a tunnel
+  assert.strictEqual(M.digToOreInReach(-1, 3), false, 'negative dy -> no')
+  assert.strictEqual(M.digToOreInReach(2, -1), false, 'negative dist -> no')
+})
+
 t('scratchWorthy: at depth, only scratch a NEAR exposed candidate; far/none -> back to branchMine', () => {
   // near surface: scratching is always fine
   assert.strictEqual(M.scratchWorthy(63, 64, [40]), true, 'not at depth -> scratch as usual')

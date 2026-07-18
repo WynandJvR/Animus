@@ -201,6 +201,18 @@ function faceExposed (neighborNames) {
   return ns.some(n => n === 'air' || n === 'cave_air' || n === 'void_air')
 }
 
+// PURE (IRON_GATHER_FIX): is a DETECTED-but-unreachable ore close enough to justify tunnelling a
+// direct path to it? The dig-to-ore step (provision.js) only fires within a bounded vertical band
+// and horizontal reach - chasing ore far above/below, or across a wide gap, risks digging the bot
+// off into terrain it can't get back from. Given |dy| to the ore and its horizontal distance,
+// returns whether a bounded direct tunnel is in-range. PURE (numbers in, bool out).
+function digToOreInReach (dyAbs, horizDist, opts = {}) {
+  const vband = opts.vband != null ? opts.vband : 4
+  const maxHoriz = opts.maxHoriz != null ? opts.maxHoriz : 8
+  if (!(dyAbs >= 0) || !(horizDist >= 0)) return false
+  return dyAbs <= vband && horizDist <= maxHoriz + 1
+}
+
 // At depth, is it worth SCRATCH-PATHING to an exposed candidate, or should we go back to the
 // organized branch mine? When we're already down a mine (feetY <= surfaceY - deepBelow) and
 // EVERY exposed candidate is farther than maxScratch (~16b), the pathfinder burns the budget
@@ -289,4 +301,4 @@ function branchLayout (corridorIdx, opts = {}) {
   }
 }
 
-module.exports = { LAVA_RE, WATER_RE, AIRISH, DIRS, PICK_USES, perpendicular, targetMineY, worthMiningHere, mineableWhenBlocked, mineReusable, pickMaxUses, pickUsesLeft, toolMaxUses, toolUsesLeft, estExcursionBlocks, picksToCraft, needReTool, descentSafety, faceHazard, digExposureHazard, climbStepSafety, faceExposed, scratchWorthy, branchLayout, preferBranchMine, preferStoneDescend, stoneDescendTargetY, deepMinePlan, sweepDue }
+module.exports = { LAVA_RE, WATER_RE, AIRISH, DIRS, PICK_USES, perpendicular, targetMineY, worthMiningHere, mineableWhenBlocked, mineReusable, pickMaxUses, pickUsesLeft, toolMaxUses, toolUsesLeft, estExcursionBlocks, picksToCraft, needReTool, descentSafety, faceHazard, digExposureHazard, climbStepSafety, faceExposed, digToOreInReach, scratchWorthy, branchLayout, preferBranchMine, preferStoneDescend, stoneDescendTargetY, deepMinePlan, sweepDue }
