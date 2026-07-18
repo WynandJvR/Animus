@@ -3884,5 +3884,6 @@ module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvis
     get walkStaged () { return walkStaged },
     get KEEP_WHEN_ALL () { return KEEP_WHEN_ALL },
     get explore () { return explore },
-    get isSurvStopped () { return () => _survStop }
+    get isSurvStopped () { return () => _survStop },
+    clearSurvStop () { _survStop = false } // refactor fix: sibling modules clear the per-dispatch latch through this setter (was a broken write to the getter)
   } }

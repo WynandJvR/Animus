@@ -655,7 +655,7 @@ function escalateFoodFloor () { if (process.env.FOOD_FLOOR !== '0') _foodFloorNo
 async function secureFood (bot, opts = {}) {
   if (_securingFood) return { fed: false, blockedOn: 'busy' }
   _securingFood = true
-  S().isSurvStopped() = false; touchP('secureFood') // S7 H5c: per-dispatch latch clear + zero-idle at t0
+  S().clearSurvStop(); touchP('secureFood') // S7 H5c: per-dispatch latch clear + zero-idle at t0
   try { return await secureFoodInner(bot, opts) } finally { _securingFood = false }
 }
 

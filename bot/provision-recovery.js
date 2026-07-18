@@ -371,7 +371,7 @@ async function recoverHp (bot, opts = {}) {
   const resumeHp = opts.resumeHp != null ? opts.resumeHp : 16
   if (_recoveringHp) return false
   _recoveringHp = true
-  S().isSurvStopped() = false; touchP('recoverHp') // S7 H5c: per-dispatch latch clear + zero-idle at t0
+  S().clearSurvStop(); touchP('recoverHp') // S7 H5c: per-dispatch latch clear + zero-idle at t0
   try {
     try { bot.pathfinder.setGoal(null) } catch {}
     // regen needs food>=18 - eat FIRST so the hold below actually heals.
@@ -836,7 +836,7 @@ let _recoveringDegraded = false
 async function recoverFromDegraded (bot, { isStopped = () => false, say = () => {}, maxMs = Number(process.env.RECOVERY_MAX_MS || 900000), reason } = {}) {
   if (_recoveringDegraded) return { done: false, rungs: [], reason: 'busy' }
   _recoveringDegraded = true
-  S().isSurvStopped() = false; touchP('recoverFromDegraded') // S7 H5c: per-dispatch latch clear + zero-idle at t0
+  S().clearSurvStop(); touchP('recoverFromDegraded') // S7 H5c: per-dispatch latch clear + zero-idle at t0
   const rungs = []
   const tried = new Set()
   const deadline = Date.now() + maxMs
