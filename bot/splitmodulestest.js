@@ -12,6 +12,8 @@
 //   (1) commands.js re-exports every moved name (so no call site had to change), and
 //   (2) the re-export is the SAME function object, not a copy that could drift.
 
+const fs = require('fs')
+const path = require('path')
 const gravePolicy = require('./grave-policy.js')
 const gear = require('./gear.js')
 const opBuild = require('./op-build.js')
@@ -108,6 +110,103 @@ function eq (got, want, label) {
   eq(t && t.type, 'zombie', 'nearestThreat: picks the hostile, not the closer cow')
   eq(t && t.flee, false, 'nearestThreat: a zombie is not a flee-on-sight target')
   eq(perception.nearestThreat({ entity: { position: { x: 0, y: 64, z: 0 } }, entities: { 1: at(3, 0, 'cow') } }, 16), null, 'nearestThreat: passive-only -> null')
+}
+
+// ---- telemetry: the progress latch, outcome ring and stuck detector ------------------------
+{
+  const telemetry = require('./telemetry.js')
+  telemetry._resetProgress()
+  eq(telemetry.progressInfo().by, 'reset', 'telemetry: _resetProgress stamps the reason')
+  eq(telemetry.progressInfo().workCount, 0, 'telemetry: reset zeroes workCount')
+
+  // only WORK tags bump workCount - movement and dispatch must not
+  telemetry.touchProgress('moved8b')
+  eq(telemetry.progressInfo().workCount, 0, 'telemetry: movement is progress but NOT work')
+  telemetry.touchProgress('placed')
+  eq(telemetry.progressInfo().workCount, 1, 'telemetry: a placed block IS work')
+  telemetry.touchProgress('begin:gather')
+  eq(telemetry.progressInfo().workCount, 1, 'telemetry: a fresh dispatch is not work')
+
+  // stalled is set by the nudge and cleared by ANY touch
+  telemetry.markStalled()
+  eq(telemetry.progressInfo().stalled, true, 'telemetry: markStalled latches')
+  telemetry.touchProgress('regen')
+  eq(telemetry.progressInfo().stalled, false, 'telemetry: any touch clears stalled')
+
+  // failClass strips coords so repeats of the same failure match
+  eq(telemetry.cycleFailClass('door at 433,62,112'), 'door at #,#,#', 'telemetry: failClass strips coordinates')
+  eq(telemetry.cycleFailClass('Door  At  433'), 'door at #', 'telemetry: failClass lowercases + collapses whitespace')
+
+  // activity lifecycle
+  telemetry.beginActivity('gather', 'oak_log')
+  const a = telemetry.activityInfo()
+  eq(a && a.name, 'gather', 'telemetry: activityInfo reports the running op')
+  eq(a && a.detail, 'oak_log', 'telemetry: activityInfo carries the detail')
+  telemetry.endActivity(true, 'done')
+  eq(telemetry.activityInfo(), null, 'telemetry: endActivity clears the activity')
+
+  // the outcome ring is bounded
+  for (let i = 0; i < 25; i++) telemetry.recordOutcome('op' + i, false, 'failed at ' + i)
+  eq(telemetry.recentOutcomes().length, 16, 'telemetry: outcome ring is capped at 16')
+}
+
+// ---- grave: the abortLongOp contract the split introduced ----------------------------------
+{
+  // Isolate the ledger file - this test must never touch the live last-death.json.
+  const os = require('os')
+  const isolated = path.join(os.tmpdir(), 'splitmodules-death-' + process.pid + '.json')
+  const savedEnv = process.env.DEATH_FILE
+  process.env.DEATH_FILE = isolated
+  delete require.cache[require.resolve('./grave.js')]
+  const grave = require('./grave.js')
+  const telemetry = require('./telemetry.js')
+
+  telemetry.endActivity(true, 'clear') // ensure no activity is running
+  eq(grave.recordDeath({ x: 1, y: 64, z: 1, at: Date.now() }).abortLongOp, false,
+    'grave: no activity running -> nothing to abort')
+
+  telemetry.beginActivity('gather', 'iron_ore')
+  eq(grave.recordDeath({ x: 2, y: 64, z: 2, at: Date.now() }).abortLongOp, true,
+    'grave: a death during gather aborts the long op')
+
+  telemetry.endActivity(true, 'done')
+  telemetry.beginActivity('build', 'hut')
+  eq(grave.recordDeath({ x: 3, y: 64, z: 3, at: Date.now() }).abortLongOp, false,
+    'grave: a death during BUILD does not abort (resume handles it)')
+  telemetry.endActivity(true, 'done')
+
+  // gravesSnapshot over an injected fixture (the offline seam)
+  const now = Date.now()
+  const snap = grave.gravesSnapshot({
+    pos: { x: 0, y: 64, z: 0 },
+    home: null,
+    now,
+    ledger: [{ x: 30, y: 64, z: 40, at: now - 1000, items: { count: 2, notable: ['iron_pickaxe'] } }]
+  })
+  eq(snap.graves.length, 1, 'grave: snapshot includes a worthwhile grave')
+  eq(snap.graves[0].hasGear, true, 'grave: snapshot flags real gear')
+  eq(Math.round(snap.graves[0].dist), 50, 'grave: snapshot dist is XZ hypot (30,40 -> 50)')
+  eq(snap.deathsRecent, 1, 'grave: deathsRecent counts recent deaths')
+
+  try { fs.unlinkSync(isolated) } catch {}
+  if (savedEnv != null) process.env.DEATH_FILE = savedEnv; else delete process.env.DEATH_FILE
+}
+
+// ---- resume-store: the pure timing + disposition rules -------------------------------------
+{
+  const rs = require('./resume-store.js')
+  eq(rs.finishDisposition(undefined), 'keep', 'resume: a throw never deletes the saved job')
+  eq(rs.finishDisposition({ deferred: true }), 'keep', 'resume: deferred keeps the job')
+  eq(rs.finishDisposition({ stopped: true }), 'keep', 'resume: aborted is not finished')
+  eq(rs.finishDisposition({ skipped: 3 }), 'pause', 'resume: shortfall pauses rather than clears')
+  eq(rs.finishDisposition({ skipped: 0 }), 'clear', 'resume: a genuine finish clears')
+
+  const now = Date.now()
+  eq(rs.resumeHoldRemaining(null, now), 0, 'resume: no saved file -> fail OPEN (resume now)')
+  eq(rs.resumeHoldRemaining({}, now), 0, 'resume: no pausedAt -> fail OPEN')
+  eq(rs.resumeHoldRemaining({ pausedAt: 'nonsense' }, now), 0, 'resume: malformed pausedAt -> fail OPEN')
+  eq(rs.resumeHoldRemaining({ pausedAt: now - 1000, pauseHoldMs: 60000 }, now), 59000, 'resume: per-pause hold honoured')
+  eq(rs.resumeHoldRemaining({ pausedAt: now - 99999999, pauseHoldMs: 1000 }, now), 0, 'resume: an expired hold is over')
 }
 
 // ---- the split's own contract: commands.js still re-exports, and by IDENTITY ---------------
