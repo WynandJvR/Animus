@@ -79,7 +79,18 @@ t('rankByDistance: nearest safe cell first (shortest relocate)', () => {
 t('sleepFailKind: exact mineflayer bed.js strings map correctly', () => {
   // unusable - the bed can't be clicked/reached/used right now (bed.js:82,86,93,109,115,131 + waitUntilSleep:159)
   assert.strictEqual(S.sleepFailKind('cant click the bed'), 'unusable')
-  assert.strictEqual(S.sleepFailKind('the bed is too far'), 'unusable')
+  // #77: 'too far' is a POSITION failure (retryable) - default flag ON classes it 'toofar';
+  // with SLEEP_RETRY_TOOFAR=0 it falls back to 'unusable' exactly as before. Drive BOTH env
+  // regimes explicitly here (not via ambient) so this passes whichever way the suite is run,
+  // and restore the ambient value after.
+  {
+    const prev = process.env.SLEEP_RETRY_TOOFAR
+    delete process.env.SLEEP_RETRY_TOOFAR // default (flag ON)
+    assert.strictEqual(S.sleepFailKind('the bed is too far'), 'toofar')
+    process.env.SLEEP_RETRY_TOOFAR = '0'  // flag OFF -> byte-for-byte today's mapping
+    assert.strictEqual(S.sleepFailKind('the bed is too far'), 'unusable')
+    if (prev === undefined) delete process.env.SLEEP_RETRY_TOOFAR; else process.env.SLEEP_RETRY_TOOFAR = prev
+  }
   assert.strictEqual(S.sleepFailKind('the bed is occupied'), 'unusable')
   assert.strictEqual(S.sleepFailKind("there's only half bed"), 'unusable')
   assert.strictEqual(S.sleepFailKind('wrong block : not a bed block'), 'unusable')

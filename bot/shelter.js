@@ -97,6 +97,11 @@ function sleepFailKind (msg) {
   const m = String(msg == null ? '' : msg)
   if (/not night and it's not a thunderstorm|already sleeping|already awake/i.test(m)) return 'transient'
   if (/monster/i.test(m)) return 'monsters'
+  // #77: 'too far' is a POSITION failure (a competing goal dragged us off mid-approach), not a
+  // property of the bed - split it out (flag default-ON) so sleepInBedHere re-approaches and
+  // retries instead of holding a good bed off all night. Flag off -> classed 'unusable' as
+  // before (the /too far/ below still catches it), so behavior is byte-for-byte today's.
+  if (process.env.SLEEP_RETRY_TOOFAR !== '0' && /too far/i.test(m)) return 'toofar'
   if (/cant click|too far|only half bed|wrong block|occupied|not sleeping/i.test(m)) return 'unusable'
   return 'unusable' // any unrecognised repeating error is a loop; a short self-expiring hold is cheap
 }

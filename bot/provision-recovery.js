@@ -596,6 +596,7 @@ async function sleepInBedHere (bot, { say = () => {}, isStopped = () => false } 
     markBedUnusable(bed.position, shelterSite.BED_HOLD_MONSTER_MS, 'hostile in the wake-radius')
     return false
   }
+  let tooFarFails = 0 // #77: only the exhausted case (3 genuine too-far failures) marks the bed
   for (let tries = 0; tries < 3 && !isStopped(); tries++) {
     try {
       if (bot.entity.position.distanceTo(bed.position) > 2.5) { try { await gotoWithTimeout(bot, new goals.GoalNear(bed.position.x, bed.position.y, bed.position.z, 2), 20000) } catch {} }
@@ -617,10 +618,26 @@ async function sleepInBedHere (bot, { say = () => {}, isStopped = () => false } 
         if (nearHostile(bot, 10) && underArmored(bot)) { dbg('nightRest: hostiles at the bed - pitting NOW instead of waiting'); markBedUnusable(bed.position, shelterSite.BED_HOLD_MONSTER_MS, e.message); return false }
         await new Promise(r => setTimeout(r, 6000)); continue // borderline-range mobs may wander off
       }
+      if (kind === 'toofar') {
+        // #77: 'too far' is a POSITION failure - a competing goal (the concurrent farm goto)
+        // dragged us off mid-approach. Kill that goal, re-approach TIGHTER (range 1, not 2 -
+        // mineflayer's click limit is ~3b so range 2 can settle at ~2.9b and lose the race),
+        // then retry via the loop rather than holding this good bed off for the whole night.
+        tooFarFails++
+        try { bot.pathfinder.setGoal(null) } catch {} // drop the competing goal that dragged us off
+        dbg('nightRest: too far from the bed (attempt ' + tooFarFails + '/3) - re-approaching tighter and retrying')
+        try { await gotoWithTimeout(bot, new goals.GoalNear(bed.position.x, bed.position.y, bed.position.z, 1), 15000) } catch {}
+        await new Promise(r => setTimeout(r, 300)) // settle before the re-click
+        continue
+      }
       if (kind === 'unusable') markBedUnusable(bed.position, shelterSite.BED_HOLD_MS, e.message)
       return false // 'transient' keeps today's bare bail (no mark)
     }
   }
+  // #77: exhausted all 3 too-far retries - the competing goal kept winning the race. Hold the
+  // bed off for the SHORT fell-short span (120s), NOT the 480s night-long unusable hold, and pit
+  // tonight. Guarded by flag-on + counter===3 so the flag-off path never marks here (byte-for-byte).
+  if (process.env.SLEEP_RETRY_TOOFAR !== '0' && tooFarFails === 3) markBedUnusable(bed.position, shelterSite.BED_HOLD_FELLSHORT_MS, 'too far x3')
   return false
 }
 
