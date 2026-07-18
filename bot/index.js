@@ -205,6 +205,9 @@ const log = []
 // (rotated at ~5 MB so it can run for weeks). One file for body events, commands,
 // build progress, deaths - the first place to look when asking "what happened?".
 const EVENTS_LOG = process.env.EVENTS_LOG || path.join(__dirname, '..', 'logs', 'bot-events.log') // env-overridable so a test instance doesn't interleave into the live flight recorder
+// Cap for brain-decisions.jsonl (operator + brain decision firehose). It had NO cap at all
+// and reached 39.7 MB live while the state-history next to it rotated dutifully at 5 MB.
+const DECISION_LOG_CAP = parseInt(process.env.DECISION_LOG_CAP || String(16 * 1024 * 1024), 10)
 try { fs.mkdirSync(path.dirname(EVENTS_LOG), { recursive: true }) } catch {}
 let _logDrops = 0 // consecutive event-log writes lost (transient Windows file lock / EMFILE / ENOSPC / vanished dir)
 function fileLog (line) {
@@ -2484,10 +2487,10 @@ const server = http.createServer((req, res) => {
         // corrections - "in this exact state, the human chose THIS". Logged alongside
         // the brain's decisions with source stamped for curation.
         try {
-          fs.appendFile(path.join(__dirname, 'brain-decisions.jsonl'), JSON.stringify({
+          loghistory.appendLineRotating(path.join(__dirname, 'brain-decisions.jsonl'), {
             t: Date.now(), source: 'operator', command: String(line).slice(0, 120),
             result: String(result).slice(0, 160), state: commands.state(bot)
-          }) + '\n', () => {})
+          }, DECISION_LOG_CAP)
         } catch {}
         send(res, 200, result)
       } catch (e) { note(`(ui-cmd error) ${line} -> ${e.message}`); send(res, 500, `error: ${e.message}`) }

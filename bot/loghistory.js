@@ -90,6 +90,33 @@ function appendSample (sample, opts) {
   }
 }
 
+// ASYNC rotating append, for the hot paths that must not touch the event loop.
+// appendSample above is appendFileSync - correct for the 5s telemetry tick, wrong for
+// the HTTP handler and the brain's decision path, which write per request/decision.
+// (BODY FIRST: observability never buys itself event-loop budget.)
+//
+// This is what brain-decisions.jsonl was missing. Both writers used a bare
+// fs.appendFile with no size check, so the file grew unbounded - it reached 39.7 MB
+// live, while the state-history beside it was faithfully rotating at 5 MB.
+//
+// The size check is THROTTLED (one stat per file per ROTATE_CHECK_MS) rather than run
+// per line: a stat on every decision would be the same mistake in a smaller costume.
+// Overshoot between checks is bounded by how fast a line-per-decision log can grow.
+const ROTATE_CHECK_MS = 60000
+const lastRotateCheck = new Map() // file -> ts of the last stat
+function appendLineRotating (file, obj, cap) {
+  if (!file) return
+  const now = Date.now()
+  const due = (lastRotateCheck.get(file) || 0) + ROTATE_CHECK_MS <= now
+  if (due) {
+    lastRotateCheck.set(file, now)
+    fs.stat(file, (err, st) => {
+      if (!err && st && shouldRotate(st.size, cap || HISTORY_CAP)) fs.rename(file, file + '.old', () => {})
+    })
+  }
+  try { fs.appendFile(file, JSON.stringify(obj) + NL, () => {}) } catch { /* telemetry must never kill the bot */ }
+}
+
 // Read compact samples with t >= sinceMs, spanning the rotated .old then the live
 // file (chronological). Best-effort: a missing file or a torn line is skipped.
 function readSince (sinceMs, opts) {
@@ -108,7 +135,7 @@ function readSince (sinceMs, opts) {
   return out
 }
 
-module.exports = { compactSample, shouldRotate, appendSample, readSince, num, HISTORY_FILE, HISTORY_CAP }
+module.exports = { compactSample, shouldRotate, appendSample, appendLineRotating, readSince, num, HISTORY_FILE, HISTORY_CAP }
 
 // CLI entry: `node loghistory.js [sinceMs]` - defaults to the last hour.
 if (require.main === module) {
