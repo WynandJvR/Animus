@@ -6530,6 +6530,13 @@ async function gatherLoop (bot, item, count, opts = {}) {
   let lastFoodHunt = 0 // throttle the survival-hunt so it doesn't chase every loop
   let lastShelter = 0  // throttle the night-shelter check
   const isLogGather = /_log$/.test(item) // logs get the natural-tree-only anti-grief filter
+  // ORCHARD-FIRST (#50): before committing to far wild timber the pathfinder can't reach
+  // (~264b treks, 33 reachFails - live), check our OWN renewable orchard ONCE per run.
+  // ORCHARD_FIRST=0 restores today's behavior (no hoisted check, no re-arm, old latch).
+  const ORCHARD_FIRST = process.env.ORCHARD_FIRST !== '0'
+  // LOG reachfail cap (#50): abandon a doomed far grove after this many consecutive reach
+  // failures instead of grinding it one 8s goto at a time. A large value -> today's behavior.
+  const LOG_REACHFAIL_CAP = parseInt(process.env.LOG_REACHFAIL_CAP || '6', 10)
   const MAX_EXPLORE = 20 // wander this many times before truly giving up (48-block hops; 20 spans a real trek to the next biome)
   // ROAM FENCE: stay within maxRoam (XZ) of the build anchor so gathering CONVERGES back to
   // the site instead of drifting 150 blocks off chasing one more tree/cow. Stone is under
@@ -6544,6 +6551,7 @@ async function gatherLoop (bot, item, count, opts = {}) {
   let firstLoop = true // first iteration extends the fence over a far continuation start
   let orchardPlanted = false // orchard mode fires at most once per gather run
   let orchardHarvested = false // orchard-first harvest fires at most once per gather run
+  let orchardTried = false // ORCHARD_FIRST (#50): the orchard is VISITED at most once per run (grown or not) - no ping-pong
   const widenFence = why => {
     if (maxRoam >= MAX_ROAM + 128) return
     maxRoam = Math.min(MAX_ROAM + 128, maxRoam + 32) // dry looks can ultimately reach ~288 blocks out
@@ -6897,6 +6905,41 @@ async function gatherLoop (bot, item, count, opts = {}) {
 
     surfaceY = Math.max(surfaceY, bot.entity.position.y) // highest ground we've stood on
     const feetY = Math.floor(bot.entity.position.y)
+    // ORCHARD-FIRST (#50, ORCHARD_FIRST): before the candidate scan can lock onto far wild
+    // timber the pathfinder can't reach, check our OWN renewable orchard ONCE per run. If
+    // world-mem has a READY (harvestReadyAt reached) + NEAR orchard, walk there and harvest our
+    // trees first. Visited <=1/run via orchardTried (no ping-pong). Grown -> harvest + renew;
+    // not grown -> re-arm the grow timer (never stranded ripe) and fall through to the wild scan.
+    // ORCHARD_FIRST=0 -> this whole arm is skipped (byte-for-byte today).
+    if (ORCHARD_FIRST && isLogGather && !orchardTried) {
+      const orch = loadWorldMem().orchard
+      const GROW_MS = parseInt(process.env.ORCHARD_GROW_MS || String(10 * 60000), 10)
+      const now = Date.now()
+      const ready = orch && orch.harvestReadyAt != null && now >= orch.harvestReadyAt
+      if (orch && ready && Math.hypot(orch.x - home.x, orch.z - home.z) <= maxRoam + 40) {
+        orchardTried = true // attempted the walk - don't return to the orchard again this run
+        dbg('  gather ORCHARD-first (hoisted): grove at ' + orch.x + ',' + orch.z + ' ready - harvesting my own trees before the wild')
+        if (opts.say) opts.say('my orchard should be grown - harvesting my own trees first')
+        try { await walkStaged(bot, orch.x + 5, orch.z + 5, { isStopped, range: 8, timeoutMs: 90000 }) } catch {}
+        // bone-meal any still-short saplings so the walk isn't wasted (forces an instant harvest)
+        if (countItem(bot, 'bone_meal') > 0) {
+          const sapId = (mcData.blocksByName[saplingFor(item)] || {}).id
+          const saps = sapId != null ? (bot.findBlocks({ matching: sapId, maxDistance: 24, count: 8 }) || []) : []
+          for (const sp of saps.slice(0, 6)) { if (isStopped()) break; try { await boneMealSapling(bot, sp) } catch {} }
+        }
+        const grown = (bot.findBlocks({ matching: ids, maxDistance: 24, count: 8 }) || []).some(p => isWildTreeLog(bot, p))
+        if (grown) {
+          orchardHarvested = true
+          const mm = loadWorldMem(); if (mm.orchard) { mm.orchard.at = now; mm.orchard.harvestReadyAt = now + GROW_MS; saveWorldMem() } // renewed: regrow before the next visit
+          dbg('  gather ORCHARD-first (hoisted): grown logs present - rescanning to chop them')
+          continue
+        }
+        // Not grown on arrival: DON'T permanently disable - push the grow timer forward so it is
+        // never stranded ripe forever, then fall through to the normal wild scan.
+        const mm = loadWorldMem(); if (mm.orchard) { mm.orchard.harvestReadyAt = now + GROW_MS; saveWorldMem() }
+        dbg('  gather ORCHARD-first (hoisted): not grown yet on arrival - re-armed grow timer, falling through to the wild')
+      }
+    }
     // WEDGE TARGET FILTER (water-wedge escape, Change C): stop re-picking a site that just
     // wedged us. listWedges is already own-infra-suppressed on both record and recall, so a
     // wedge near home can never poison our own resources; the decay ages a spot back in.
@@ -7074,12 +7117,13 @@ async function gatherLoop (bot, item, count, opts = {}) {
       // our OWN trees. The plot is ours but isWildTreeLog still passes (planted trees have canopy,
       // no structure) so the anti-grief filter is unchanged. Fires once per gather; on grown logs
       // we `continue` and the loop-top scan finds + chops them (existing replant keeps it stocked).
-      if (isLogGather && !orchardHarvested) {
+      if (isLogGather && !orchardHarvested && !(ORCHARD_FIRST && orchardTried)) {
         const orch = loadWorldMem().orchard
         const GROW_MS = parseInt(process.env.ORCHARD_GROW_MS || String(10 * 60000), 10)
         const mature = orch && (Date.now() - (orch.at || 0) > GROW_MS || countItem(bot, 'bone_meal') > 0)
         if (orch && mature && Math.hypot(orch.x - home.x, orch.z - home.z) <= maxRoam + 40) {
-          orchardHarvested = true
+          if (ORCHARD_FIRST) orchardTried = true // count this as the <=1 orchard visit/run (shared with the hoisted arm)
+          else orchardHarvested = true // flag off: today's latch (set BEFORE the grown check) - byte-for-byte
           dbg('  gather ORCHARD-first: grove at ' + orch.x + ',' + orch.z + ' mature (' + Math.round((Date.now() - (orch.at || 0)) / 60000) + ' min) - harvesting my own trees before the wild')
           if (opts.say) opts.say('my orchard should be grown - harvesting my own trees first')
           try { await walkStaged(bot, orch.x + 5, orch.z + 5, { isStopped, range: 8, timeoutMs: 90000 }) } catch {}
@@ -7091,10 +7135,13 @@ async function gatherLoop (bot, item, count, opts = {}) {
           }
           const grown = (bot.findBlocks({ matching: ids, maxDistance: 24, count: 8 }) || []).some(p => isWildTreeLog(bot, p))
           if (grown) {
+            if (ORCHARD_FIRST) orchardHarvested = true // LATCH-BUG FIX: disable the orchard for the run only AFTER a confirmed harvest
             const mm = loadWorldMem(); if (mm.orchard) { mm.orchard.at = Date.now(); mm.orchard.harvestReadyAt = Date.now() + GROW_MS; saveWorldMem() } // renewed: let it regrow before the next visit
             dbg('  gather ORCHARD-first: grown logs present - rescanning to chop them')
             continue
           }
+          // Not grown: flag on -> re-arm the grow timer so a missed/early arrival never strands it ripe forever.
+          if (ORCHARD_FIRST) { const mm = loadWorldMem(); if (mm.orchard) { mm.orchard.harvestReadyAt = Date.now() + GROW_MS; saveWorldMem() } }
           dbg('  gather ORCHARD-first: not grown yet on arrival - falling through to the wild')
         }
       }
@@ -7196,6 +7243,23 @@ async function gatherLoop (bot, item, count, opts = {}) {
       reachFails++
       if (reachFails <= 3 || reachFails % 5 === 0) dbg('  gather breakBlock fail #' + reachFails + ' at ' + target.position.toString() + ': ' + e.message)
       if (/underwater|water face/.test(e.message) && ++waterAborts >= 3) { widenFence('approaches flooded'); waterAborts = 0 }
+      // LOG REACHFAIL CAP (#50, LOG_REACHFAIL_CAP): a far wild grove we can SEE but the pathfinder
+      // can't reach (across water / under canopy) used to be ground one doomed 8s goto at a time
+      // with NO abandon (live: reachFails=33, distHome=264, ~4 min burned). Once the cap trips,
+      // abandon it: demote the far wood-memory spot so it stops re-anchoring the scan (root #2),
+      // drop the fence back to base, and give the local orchard one more shot (orchardTried=false)
+      // before falling back near. Logs only; a large cap -> never trips -> today's behavior.
+      if (isLogGather && reachFails >= LOG_REACHFAIL_CAP) {
+        const d = Math.round(distHome())
+        const spots = loadWorldMem()[item] || []
+        const farSpot = spots.find(sp => Math.hypot(sp.x - bot.entity.position.x, sp.z - bot.entity.position.z) < 24 && Math.hypot(sp.x - home.x, sp.z - home.z) > MAX_ROAM)
+        if (farSpot) forgetSpot(item, farSpot, true) // demote/migrate so recall skips this doomed far grove
+        maxRoam = MAX_ROAM // undo any widen a stale far spot pulled the fence out to
+        orchardTried = false // re-check the local orchard next iteration (it may have grown)
+        reachFails = 0
+        dbg('  gather ' + item + ': reachfail-cap ' + LOG_REACHFAIL_CAP + ' hit at distHome=' + d + ' - abandoning far grove, falling back to orchard/near')
+        continue
+      }
       // Stone is FOUND but we keep failing to reach it -> it's buried (plains): the
       // path can't dig dirt to get there. Strip-mine straight down to it instead of
       // grinding through dozens of doomed gotos, then re-scan from inside the stone.
