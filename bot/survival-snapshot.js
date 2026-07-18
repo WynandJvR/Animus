@@ -209,6 +209,19 @@ async function schedulerState (bot) {
     s.tools = { pick: pc >= 1, sparePick: pc >= 2, axe: adequate(/_axe$/), sword: adequate(/_sword$/) }
   } catch { s.tools = { pick: false, sparePick: false, axe: false, sword: false } }
   s.homeReachable = s.homeDist != null && s.homeDist <= 48
+  // baseLit (#65 BOOTSTRAP_PRIORITY / #69 secureBase): has the home been spawn-proofed yet? A cheap
+  // world-mem read (no block scan): true once secureBase has placed its perimeter ring for THIS hut
+  // (baseLight.torched), false when a hut exists but the ring is empty, null when there's no hut to
+  // secure (not measurable). Only bootstrapNeed reads it, and only when BOOTSTRAP_PRIORITY is on -
+  // an extra data field nothing branches on otherwise, so the snapshot stays behaviorally identical.
+  try {
+    const hut = hutAnchor()
+    if (!hut) s.baseLit = null
+    else {
+      const bl = loadWorldMem().baseLight
+      s.baseLit = !!(bl && bl.hut && bl.hut.x === hut.x && bl.hut.z === hut.z && (bl.torched || []).length > 0)
+    }
+  } catch { s.baseLit = null }
   // maintainNeeded computed LAST on the fully-assembled base snapshot (pure, no cycle). S4 never
   // dispatches maintain; the field exists so pickJob is exercised with real data (S6 = one-line enable).
   try { const maintain = require('./maintain.js'); s.maintainNeeded = maintain.needs(s).length > 0 } catch { s.maintainNeeded = false }

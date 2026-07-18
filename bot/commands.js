@@ -3036,6 +3036,19 @@ async function resumeBuild (bot) {
     try { gate = require('./scheduler.js').resumeGate({ postDeathRecovery: isPostDeathRecovery(), ready }) } catch {}
     if (gate === 'wait') { dbg('resume: post-death recovery in progress - holding the build (kept on disk)'); return { deferred: true, recovering: true } }
   }
+  // #65 BOOTSTRAP_PRIORITY (Phase 1 DYNAMIC_CORE): before resuming the build, establish the MISSING
+  // survival infrastructure (armor / food reserve / lit base) in a healthy window. While bootstrapNeed
+  // is non-null the build WAITS - kept on disk, never driving the naked bot back to the site - and the
+  // scheduler tick's bootstrap-tier maintenancePass does the establishing (mines iron for armor, banks a
+  // bread reserve, lights the base). Below crisis-survival (bootstrapNeed only fires hp>=14 & fed, and
+  // the post-death gate above already owns any post-death recovery), so it can't mask a crisis. Once the
+  // infra exists bootstrapNeed goes null and the build resumes exactly as today. BOOTSTRAP_PRIORITY=0 ->
+  // bootstrapNeed is always null -> byte-for-byte.
+  if (process.env.BOOTSTRAP_PRIORITY !== '0') {
+    let bn = null
+    try { bn = require('./scheduler.js').bootstrapNeed(await provision.schedulerState(bot)) } catch {}
+    if (bn) { dbg('resume: bootstrap needed (' + bn + ') - holding the build until survival infra exists (kept on disk)'); return { deferred: true, bootstrap: bn } }
+  }
   // #41 P5c anti-spiral: during a death SPIRAL, don't march the build back into a recent death
   // cluster (defer that leg; the build stays saved). Only fires under a real spiral (>=SPIRAL_N
   // deaths in 20 min) AND when the site itself sits inside the cluster. RESILIENT_RECOVERY=0 -> off.

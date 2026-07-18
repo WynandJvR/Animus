@@ -202,6 +202,48 @@ function submergedEscapeDue ({ flagOn, submerged, deep, wetHist, oxygen, oxygenR
   return (wetHist || 0) >= 3
 }
 
+// ==== #65 BOOTSTRAP_PRIORITY (Phase 1 of DYNAMIC_CORE) - PURE decision ====================
+// Flag BOOTSTRAP_PRIORITY (default on; =0 -> ALWAYS null = today byte-for-byte). THE frontier
+// blocker: the bot survives everything but never THRIVES - it wastes its healthy windows (hp20/
+// food20 after a reset) charging the castle build (ranging 76-88b for wood) instead of establishing
+// the survival INFRASTRUCTURE it lacks, so it stays UNARMORED / foodless / in a dark base -> degrades
+// back to hp1/food0 -> repeats. This returns the single highest-priority MISSING survival-infra need
+// when the bot is in a HEALTHY window (hp>=BOOTSTRAP_HP & fed), so pickJob/resumeBuild can establish
+// it BEFORE resuming the build. Order: ARMOR > FOOD RESERVE > BASE LIT. It is PRIORITY, not new
+// mechanics: the picked maintenancePass runs the EXISTING #60 proactiveArmor / #62 courier-bake /
+// #69 secureBase steps (which today only fire opportunistically, so they rarely run).
+//
+// Conservative by construction:
+//  - only in a HEALTHY window (hp>=14 & fed) - a degraded/hungry bot is the SURVIVAL tier's job, never
+//    bootstrap's, so it can NEVER mask a real crisis (pickJob steps 1-3 also run strictly before it);
+//  - ARMOR needs no home (armorup mines its own iron via #71 + smelts boots via #60); FOOD RESERVE and
+//    BASE LIT live at the home bank/hut, so they only count when home is REACHABLE (else the go-home/
+//    recovery flow owns the bot, and blocking the build on an unreachable bank would livelock);
+//  - BASE LIT only when measurable (s.baseLit === false: a hut exists but secureBase hasn't lit its
+//    ring yet). Unknown (no hut / no read) never invents a need. secureBase persists its ring, so ONE
+//    torch placement flips baseLit true and hands the build back (no dark-base livelock).
+function bootstrapNeed (snapshot) {
+  if (process.env.BOOTSTRAP_PRIORITY === '0') return null
+  const s = snapshot || {}
+  const hp = s.hp != null ? s.hp : 20
+  const food = s.food != null ? s.food : 20
+  if (hp < Number(process.env.BOOTSTRAP_HP || 14)) return null
+  if (food < Number(process.env.BOOTSTRAP_FED || 14)) return null
+  // (1) ARMOR - the biggest survivability multiplier; fires whenever fully naked (no home required).
+  const armorPieces = s.armorPieces != null ? s.armorPieces : 0
+  if (armorPieces === 0) return 'armor'
+  // The rest is home-bank/hut infra - only a bootstrap need when home is reachable enough for the
+  // maintenancePass to actually establish it.
+  if (s.homeReachable) {
+    // (2) FOOD RESERVE - a small banked bread buffer so the next hungry window has something to draw.
+    const reserve = s.bankFoodPts != null ? s.bankFoodPts : 0
+    if (reserve < Number(process.env.BOOTSTRAP_FOOD_RESERVE || 15)) return 'food'
+    // (3) BASE LIT - spawn-proof the home (#69 secureBase). Only when provably not yet lit.
+    if (s.baseLit === false) return 'base'
+  }
+  return null
+}
+
 // ---- pickJob ----------------------------------------------------------------------------
 // The single owning-job selector (I3, §3.2, §5 entry). null => idle. `preempt` is true only
 // when there IS an active victim whose class rank the returned job exceeds (the S4 dispatcher
@@ -241,8 +283,19 @@ function pickJob (snapshot) {
   //    far grave and food 12).
   if (degraded) return { job: 'recoveryLadder', cls: 'survival', reason: 'degraded - running the ladder', preempt: preemptFor('survival') }
 
-  // 4. ACTIVE PROGRESS job continues (single-goal discipline).
+  // 4. ACTIVE PROGRESS job continues (single-goal discipline). An ALREADY-running progress job is
+  //    never preempted here (bootstrap is below crisis-survival but above only the build-RESUME tier).
   if (s.activeJob && s.activeJob.cls === 'progress') return { job: s.activeJob.name, cls: 'progress', reason: 'continuing the active job (single-goal)', preempt: false }
+
+  // 4b. BOOTSTRAP tier (#65): before RESUMING a saved build, establish the MISSING survival infra in a
+  //     healthy window (armor -> food reserve -> lit base). Below crisis-survival (steps 1-3 already
+  //     returned) and above the build-resume tier: a healthy naked bot mines iron for armor instead of
+  //     ranging for build-wood. Reuses maintenancePass (its #60/#62/#69 steps do the work; maintain
+  //     rank 1 can't preempt a busy build - the build is held at resumeBuild's bootstrap gate meanwhile).
+  //     BOOTSTRAP_PRIORITY=0 -> bootstrapNeed is always null -> the build resumes exactly as today.
+  const bn = bootstrapNeed(s)
+  if (bn) return { job: 'maintenancePass', cls: 'maintain', reason: 'bootstrap: ' + bn + ' before resuming the build', preempt: false, bootstrap: bn }
+
   if (s.persistedBuild) return { job: 'build', cls: 'progress', reason: 'resuming a saved operator build', preempt: false }
   if (s.brainJobPending) return { job: 'brainJob', cls: 'progress', reason: 'brain job queued', preempt: false }
 
@@ -636,6 +689,7 @@ function graveCooldownMs (result, { remainMs, flagOn, hotMs, blanketMs } = {}) {
 
 module.exports = {
   pickJob,
+  bootstrapNeed,
   oppMaintain,
   graveCooldownMs,
   recoveryPlan,

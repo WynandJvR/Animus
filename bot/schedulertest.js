@@ -109,6 +109,72 @@ t('(c) maintain surfaces only with no progress job + no survival need, and never
   assert.strictEqual(pj.preempt, false, 'maintain (rank 1) can never preempt progress (rank 2)')
 })
 
+// ---- (#65) BOOTSTRAP_PRIORITY: pure bootstrapNeed decision + pickJob tier -----------------
+// bootstrapNeed returns the highest-priority MISSING survival-infra need in a healthy window
+// (hp>=14 & fed), order armor > food > base; null when all met, degraded, or flag-off.
+function withBootstrap (fn) { return withEnv('BOOTSTRAP_PRIORITY', '1', fn) }
+t('(#65) bootstrapNeed: healthy + naked -> "armor" (no home required)', () => withBootstrap(() => {
+  assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: false })), 'armor')
+}))
+t('(#65) bootstrapNeed: armored + healthy + home + empty bank food -> "food"', () => withBootstrap(() => {
+  assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 4, homeReachable: true, bankFoodPts: 0 })), 'food')
+}))
+t('(#65) bootstrapNeed: armored + food reserve stocked + home + base unlit -> "base"', () => withBootstrap(() => {
+  assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 4, homeReachable: true, bankFoodPts: 40, baseLit: false })), 'base')
+}))
+t('(#65) bootstrapNeed: all infra present -> null (build resumes)', () => withBootstrap(() => {
+  assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 4, homeReachable: true, bankFoodPts: 40, baseLit: true })), null)
+}))
+t('(#65) bootstrapNeed: ARMOR outranks FOOD (naked + empty bank -> armor first)', () => withBootstrap(() => {
+  assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: true, bankFoodPts: 0, baseLit: false })), 'armor')
+}))
+t('(#65) bootstrapNeed: FOOD outranks BASE (armored, empty bank, base unlit -> food first)', () => withBootstrap(() => {
+  assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 4, homeReachable: true, bankFoodPts: 0, baseLit: false })), 'food')
+}))
+t('(#65) bootstrapNeed: degraded/hungry never bootstraps (survival tier owns it)', () => withBootstrap(() => {
+  assert.strictEqual(S.bootstrapNeed(snap({ hp: 8, food: 20, armorPieces: 0, homeReachable: true })), null, 'hp<14 -> null (not bootstrap\'s job)')
+  assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 10, armorPieces: 0, homeReachable: true })), null, 'food<14 -> null')
+}))
+t('(#65) bootstrapNeed: food/base need home reachable (no livelock on an unreachable bank)', () => withBootstrap(() => {
+  assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 4, homeReachable: false, bankFoodPts: 0, baseLit: false })), null, 'no reachable home -> no food/base bootstrap')
+}))
+t('(#65) bootstrapNeed: unmeasured base (baseLit null/undefined) never invents a need', () => withBootstrap(() => {
+  assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 4, homeReachable: true, bankFoodPts: 40, baseLit: null })), null, 'no hut to secure -> null')
+  assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 4, homeReachable: true, bankFoodPts: 40 })), null, 'baseLit absent -> null')
+}))
+t('(#65) bootstrapNeed: BOOTSTRAP_PRIORITY=0 -> always null (byte-for-byte)', () => {
+  withEnv('BOOTSTRAP_PRIORITY', '0', () => {
+    assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: true, bankFoodPts: 0, baseLit: false })), null, 'flag off -> no bootstrap need at all')
+  })
+})
+t('(#65) pickJob: healthy naked bot with a saved build -> maintenancePass (bootstrap) OVER the build', () => withBootstrap(() => {
+  const s = snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: true, activeJob: null, persistedBuild: true })
+  const pj = S.pickJob(s)
+  assert.strictEqual(pj.job, 'maintenancePass', 'bootstrap beats build-resume')
+  assert.strictEqual(pj.cls, 'maintain')
+  assert.strictEqual(pj.bootstrap, 'armor', 'carries the bootstrap need')
+  assert.strictEqual(pj.preempt, false, 'never preempts (build is held at resumeBuild instead)')
+}))
+t('(#65) pickJob: an ALREADY-active progress job is NOT preempted by bootstrap (conservative)', () => withBootstrap(() => {
+  const s = snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: true, activeJob: { name: 'autobuild', cls: 'progress' }, persistedBuild: true })
+  const pj = S.pickJob(s)
+  assert.strictEqual(pj.job, 'autobuild', 'active progress continues (single-goal)')
+  assert.strictEqual(pj.cls, 'progress')
+}))
+t('(#65) pickJob: a real survival need OUTRANKS bootstrap (crisis-survival stays on top)', () => withBootstrap(() => {
+  const s = snap({ hp: 4, food: 4, armorPieces: 0, homeReachable: true, persistedBuild: true })
+  const pj = S.pickJob(s)
+  assert.strictEqual(pj.cls, 'survival', 'a degraded bot recovers, it does not bootstrap')
+}))
+t('(#65) pickJob: BOOTSTRAP_PRIORITY=0 -> the build resumes exactly as today', () => {
+  withEnv('BOOTSTRAP_PRIORITY', '0', () => {
+    const s = snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: true, activeJob: null, persistedBuild: true })
+    const pj = S.pickJob(s)
+    assert.strictEqual(pj.job, 'build', 'flag off -> persistedBuild resumes')
+    assert.strictEqual(pj.cls, 'progress')
+  })
+})
+
 // ---- (d) recoveryPlan totality sweep (S6) - the core safety test -------------------------
 t('(d) totality sweep: every snapshot -> non-empty plan, valid wakes, far supply kept, nightStuck no dawn-hold, death-ratchet ordering', () => {
   const hps = [1, 6, 12, 20]
