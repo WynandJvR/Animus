@@ -1035,6 +1035,8 @@ async function plantGrove (bot, home, logItem, { isStopped = () => false, say = 
     dbg('  orchard: plot leveled (' + ops + ' cells corrected)')
   }
   const sap = () => (bot.inventory ? bot.inventory.items() : []).find(i => i.name === saplingFor(logItem))
+  const LW = process.env.LOCAL_WOOD !== '0'
+  const cells = [] // LOCAL_WOOD: per-tree state - only cells where a sapling was VERIFIED placed
   let planted = 0
   for (let r = 0; r < 4 && planted < max && !isStopped(); r++) {
     for (let c = 0; c < cols && planted < max && !isStopped(); c++) {
@@ -1048,8 +1050,14 @@ async function plantGrove (bot, home, logItem, { isStopped = () => false, say = 
         await bot.placeBlock(ground, new Vec3(0, 1, 0))
         planted++
         clearSearched(logItem, ground.position)
+        // VERIFY a sapling actually sits there before we mark this tree planted (the #50
+        // latch-bug pattern: never record state on faith). This runs BEFORE bone-mealing,
+        // so the block is still a sapling when we check it.
+        const sapPos = ground.position.offset(0, 1, 0)
+        const pb = bot.blockAt(sapPos)
+        if (pb && /_sapling$/.test(pb.name)) cells.push({ x: cx, y: sapPos.y, z: cz })
         dbg('  orchard: planted ' + saplingFor(logItem) + ' at ' + cx + ',' + (ground.position.y + 1) + ',' + cz + ' (' + planted + '/' + max + ')')
-        await boneMealSapling(bot, ground.position.offset(0, 1, 0))
+        await boneMealSapling(bot, sapPos)
       } catch (e) { dbg('  orchard: plant failed at ' + cx + ',' + cz + ' (' + e.message + ')') }
     }
   }
@@ -1057,7 +1065,13 @@ async function plantGrove (bot, home, logItem, { isStopped = () => false, say = 
     // dedup: one orchard per site per growth cycle. Growth fields (planted/harvestReadyAt) let
     // the gather loop treat the grove as a RENEWABLE first-stop once it has had time to mature.
     const GROW_MS = parseInt(process.env.ORCHARD_GROW_MS || String(10 * 60000), 10)
-    const m = loadWorldMem(); m.orchard = { x: gx, z: gz, at: Date.now(), planted, harvestReadyAt: Date.now() + GROW_MS }; saveWorldMem()
+    // LOCAL_WOOD: record `planted` as the VERIFIED sapling count and persist per-tree cells
+    // so revisits CONVERGE (harvest/top-up the real trees, don't re-derive the plot blindly).
+    // LW off -> the object shape is byte-for-byte today's { x, z, at, planted, harvestReadyAt }.
+    const m = loadWorldMem()
+    m.orchard = { x: gx, z: gz, at: Date.now(), planted: LW ? cells.length : planted, harvestReadyAt: Date.now() + GROW_MS }
+    if (LW) m.orchard.cells = cells
+    saveWorldMem()
     rememberSpot(logItem, new Vec3(gx + 5, baseY, gz + 5), { orchard: true }) // the plot is a renewable wood source now (never hard-deleted)
     // a torch in the plot: saplings keep growing through the night and mobs stay out
     try { await placeAt(bot, new Vec3(gx + 2, baseY + 1, gz + 2), /^torch$/) } catch {}

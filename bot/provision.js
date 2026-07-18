@@ -22,6 +22,7 @@ const farm = require('./farm.js') // pure wheat-farm geometry (flood-safe bank p
 const arbiter = require('./arbiter.js') // JOB-LEVEL arbitration: survive > progress authority (jobSurvivalNeed/jobMayProgress)
 const scheduler = require('./scheduler.js') // PURE survival-tier decision core; top-level-safe (scheduler requires only arbiter - no cycle back to provision). Used by schedulerState to classify the active job.
 const routeMem = require('./route-mem.js') // PURE route/wedge geometry: replay proven treks + soft-steer around learned wedges (semantic-world-map slice 1)
+const woodPolicy = require('./wood-policy.js') // PURE LOCAL_WOOD decisions: renewable local orchard vs far wild-oak treks (roam cap, orchard-divert, replant-home)
 const worldMemory = require('./world-memory.js') // the semantic map + world-memory.json persistence (split out of this file)
 const provCore = require('./provision-core.js') // shared low-level primitives (inventory, tool pick, goto-with-deadline, collect, place)
 const provHut = require('./provision-hut.js') // the bot's own hut: ownership tests, repair, furnish, the maintainHome chain
@@ -2225,6 +2226,10 @@ async function gatherLoop (bot, item, count, opts = {}) {
   // (~264b treks, 33 reachFails - live), check our OWN renewable orchard ONCE per run.
   // ORCHARD_FIRST=0 restores today's behavior (no hoisted check, no re-arm, old latch).
   const ORCHARD_FIRST = process.env.ORCHARD_FIRST !== '0'
+  // LOCAL_WOOD (default ON): oak is a RENEWABLE LOCAL supply - prefer the home orchard,
+  // fence the wild search, and carry saplings home instead of scattering them at far
+  // groves. LOCAL_WOOD=0 -> every wired site below is byte-for-byte today's behavior.
+  const LW = woodPolicy.localWoodOn()
   // LOG reachfail cap (#50): abandon a doomed far grove after this many consecutive reach
   // failures instead of grinding it one 8s goto at a time. A large value -> today's behavior.
   const LOG_REACHFAIL_CAP = parseInt(process.env.LOG_REACHFAIL_CAP || '6', 10)
@@ -2233,7 +2238,11 @@ async function gatherLoop (bot, item, count, opts = {}) {
   // the site instead of drifting 150 blocks off chasing one more tree/cow. Stone is under
   // every point (strip-mine), so it gets a tight fence; logs a looser one. Env-overridable.
   const home = opts.home || { x: Math.round(bot.entity.position.x), z: Math.round(bot.entity.position.z) }
-  const MAX_ROAM = parseInt(process.env.GATHER_MAX_ROAM || (reqTool ? '64' : (isLogGather ? '160' : '96')), 10) // logs 96->160: the castle site sits in a treeless pocket wider than the old leash
+  // logs 96->160: the castle site sits in a treeless pocket wider than the old leash.
+  // LOCAL_WOOD then fences the WILD base roam back to a bounded radius (default 96) so the
+  // bot prefers the local orchard over 94-130b treks; widenFence still stretches it when
+  // wood is GENUINELY inaccessible. LW off -> woodRoamCap is a no-op (byte-for-byte).
+  const MAX_ROAM = woodPolicy.woodRoamCap(parseInt(process.env.GATHER_MAX_ROAM || (reqTool ? '64' : (isLogGather ? '160' : '96')), 10), isLogGather, LW)
   // The fence is ADAPTIVE: when this site's resource is genuinely inaccessible inside it
   // (verified live: stone under the site was a flooded aquifer - every shaft/dive aborted
   // on water), a player walks FURTHER. waterAborts/failed shafts widen it in +32 steps.
@@ -2718,7 +2727,11 @@ async function gatherLoop (bot, item, count, opts = {}) {
       const GROW_MS = parseInt(process.env.ORCHARD_GROW_MS || String(10 * 60000), 10)
       const now = Date.now()
       const ready = orch && orch.harvestReadyAt != null && now >= orch.harvestReadyAt
-      if (orch && ready && Math.hypot(orch.x - home.x, orch.z - home.z) <= maxRoam + 40) {
+      // LOCAL_WOOD: also divert when we carry bone_meal and the plot has real (verified)
+      // saplings - we can force-grow it NOW instead of waiting on the wall-clock timer, so
+      // a not-yet-ripe home orchard still beats a wild trek. LW off -> `ready` only (today).
+      const worth = woodPolicy.orchardWorthVisiting({ orch, timerReady: ready, hasBoneMeal: countItem(bot, 'bone_meal') > 0, saplingsPlanted: orch && orch.planted, on: LW })
+      if (orch && worth && Math.hypot(orch.x - home.x, orch.z - home.z) <= maxRoam + 40) {
         orchardTried = true // attempted the walk - don't return to the orchard again this run
         dbg('  gather ORCHARD-first (hoisted): grove at ' + orch.x + ',' + orch.z + ' ready - harvesting my own trees before the wild')
         if (opts.say) opts.say('my orchard should be grown - harvesting my own trees first')
@@ -2783,8 +2796,17 @@ async function gatherLoop (bot, item, count, opts = {}) {
     // area (about one tree visible) + a real sapling stock + a big remaining need ->
     // plant a 16-tree orchard near the site RIGHT NOW (don't wait for total dryness) and
     // keep hunting while it grows; revisits bone-meal it into a mass harvest.
-    if (isLogGather && !orchardPlanted && candidates.length > 0 && candidates.length < 8 &&
-        (count - (countItem(bot, item) - start)) >= 24 && saplingCount(bot, item) >= 6 && !isStopped()) {
+    // LOCAL_WOOD relaxes this to also fire when near-home oak is DEPLETED (0-7 wild logs in
+    // the fenced scan) and we hold >=4 saplings with no live home orchard yet - so the
+    // renewable plot gets ESTABLISHED early instead of only on total dryness. The `haveLive`
+    // guard below still blocks a blind re-plant. LW off -> only the today gate fires.
+    const _need = count - (countItem(bot, item) - start)
+    const _saps = saplingCount(bot, item)
+    const _orchNow = loadWorldMem().orchard
+    const _haveLive = !!(_orchNow && Math.hypot(_orchNow.x - home.x, _orchNow.z - home.z) <= 60 && Date.now() - _orchNow.at < 40 * 60000)
+    const _todayGate = candidates.length > 0 && candidates.length < 8 && _need >= 24 && _saps >= 6
+    const _lwGate = candidates.length < 8 && woodPolicy.shouldEstablishOrchard({ need: _need, saplings: _saps, haveLiveOrchard: _haveLive, on: LW })
+    if (isLogGather && !orchardPlanted && !isStopped() && (_todayGate || _lwGate)) {
       orchardPlanted = true
       // ONE orchard per site per growth cycle: the flag resets each round, and every
       // round was re-walking the grid to plant into already-occupied cells (live, 3x).
@@ -3133,7 +3155,11 @@ async function gatherLoop (bot, item, count, opts = {}) {
     if (isLogGather && n > 0 && !isStopped()) {
       try {
         if (saplingCount(bot, item) < 1) await fishSaplings(bot, target.position, item, { isStopped })
-        await plantSaplingNear(bot, target.position, item, { avoid: opts.avoid })
+        // LOCAL_WOOD: when we're chopping FAR from home, DON'T scatter the sapling at the
+        // wild grove (94b out - a supply we never reach); keep it to seed/top-up the home
+        // orchard instead. Near home (or LW off) -> replant on the spot exactly as today.
+        if (!woodPolicy.replantHome(distHome(), LW)) await plantSaplingNear(bot, target.position, item, { avoid: opts.avoid })
+        else dbg('  LOCAL_WOOD: ' + Math.round(distHome()) + 'b from home - keeping the sapling for the home orchard, not replanting the wild grove')
         await cleanupScaffold(bot, target.position, { isStopped }) // no abandoned dirt towers (operator rule)
       } catch (e) { dbg('  replant skipped (' + e.message + ')') }
     }
