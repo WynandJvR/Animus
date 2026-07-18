@@ -766,6 +766,6 @@ async function maintainHome (bot, hutAt, opts = {}) {
 }
 
 module.exports = {
-  setDebugSink,
+  setDebugSink, insideHutBox,
   insideHutBox, ownHutAt, onHutApron, insideOwnStructure, hasSolidCeiling, hutAnchor, hutReader, stepOffApron, ensureHutApron, healHomeCrater, ensureHutBed, freeInteriorCell, findHutDoorway, hutFreeCells, furnitureInHut, furnishHut, stationInHut, stationSlot, loadHutSchem, reconcileInfra, cleanupHutInterior, repairHutStructure, recallAndReach, maintainHut, maintainHome
 }
