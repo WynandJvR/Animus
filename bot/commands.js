@@ -24,6 +24,8 @@ const gravePolicy = require('./grave-policy.js') // PURE grave decisions (worth/
 const { graveValue, graveWorthIt, graveUrgency, graveUrgencyRank, graveCompare, shouldChaseGrave, graveLootVerdict } = gravePolicy
 const perception = require('./perception.js') // read-only world/self observation; state() below stitches these with the records THIS file owns
 const { HOSTILE, facing, summariseEntities, biomeName, nearestThreat, nearbyPlayers, wornArmor, isWaterlogged, hazards } = perception
+const opBuild = require('./op-build.js') // LEGACY operator /fill+/setblock builders + position/player helpers (NOT the survival build path)
+const { blockPos, anchorInFront, fill, setblock, normName, findPlayer, buildWall, buildTower, buildHouse } = opBuild
 const GoalNearXZBanded = navLeg.makeGoalNearXZBanded(goals.Goal) // Y-aware drop-in for goals.GoalNearXZ (NAV_HAZARD_LEGS)
 const NAV_HAZARD_LEGS = process.env.NAV_HAZARD_LEGS !== '0' // NAV Phase B (default ON): Y-band the trek leg goal + price lava in travelMovements; =0 => today's Y-blind GoalNearXZ + no lava cost, byte-for-byte
 const WATER_SAFE = process.env.WATER_SAFE !== '0' // task #45 (default ON): price OVER-THE-HEAD water in travelMovements so legs route around a pond aquifer (shallow water stays free -> farm/fishing reachable); =0 => no water cost, byte-for-byte
@@ -706,98 +708,10 @@ const FOLLOW_RANGE = Math.max(1, parseInt(process.env.FOLLOW_RANGE || '3', 10))
 
 // ---- helpers ---------------------------------------------------------------
 
-function blockPos (bot) {
-  const p = bot.entity.position
-  return { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) }
-}
-
-// An anchor a few blocks in front of the bot's facing, so it never builds on
-// top of itself. Yaw 0 = south(+z); we snap to the nearest cardinal.
-function anchorInFront (bot, dist = 3) {
-  const b = blockPos(bot)
-  const yaw = bot.entity.yaw
-  const dirs = [
-    { x: 0, z: 1 }, { x: -1, z: 0 }, { x: 0, z: -1 }, { x: 1, z: 0 }
-  ]
-  const idx = (Math.round(yaw / (Math.PI / 2)) % 4 + 4) % 4
-  const d = dirs[idx]
-  return { x: b.x + d.x * dist, y: b.y, z: b.z + d.z * dist }
-}
-
-function fill (bot, x1, y1, z1, x2, y2, z2, block) {
-  bot.chat(`/fill ${x1} ${y1} ${z1} ${x2} ${y2} ${z2} ${block}`)
-}
-function setblock (bot, x, y, z, block) {
-  bot.chat(`/setblock ${x} ${y} ${z} ${block}`)
-}
-
-// normalize a username for fuzzy matching: lowercase + drop a leading
-// non-alphanumeric prefix (e.g. Bedrock/Floodgate names like ".PlayerName")
-function normName (n) { return String(n || '').toLowerCase().replace(/^[^a-z0-9_]+/i, '') }
-
-function findPlayer (bot, name) {
-  if (name) {
-    // never target yourself: the bot appears in bot.players under its own name, and
-    // an alone brain otherwise latches onto its own name ("follow Claudebot" -> self)
-    const want = normName(name)
-    if (name === bot.username || want === normName(bot.username)) return null
-    // exact first, then case-/prefix-insensitive (so "PlayerName" finds ".PlayerName")
-    if (bot.players[name] && bot.players[name].entity) return bot.players[name].entity
-    for (const p of Object.values(bot.players)) {
-      if (!p.entity || p.username === bot.username) continue
-      if (normName(p.username) === want) return p.entity
-    }
-    return null
-  }
-  // nearest other player
-  let best = null
-  let bestD = Infinity
-  for (const p of Object.values(bot.players)) {
-    if (!p.entity || p.username === bot.username) continue
-    const d = p.entity.position.distanceTo(bot.entity.position)
-    if (d < bestD) { bestD = d; best = p.entity }
-  }
-  return best
-}
-
-// ---- building primitives ---------------------------------------------------
-
-function buildWall (bot, material, length, height, a) {
-  fill(bot, a.x, a.y, a.z, a.x + length - 1, a.y + height - 1, a.z, material)
-  return `wall: ${material} ${length}x${height} at ${a.x},${a.y},${a.z}`
-}
-
-function buildTower (bot, material, height, size, a) {
-  const x2 = a.x + size - 1
-  const z2 = a.z + size - 1
-  // solid then hollow to leave a climbable shaft
-  fill(bot, a.x, a.y, a.z, x2, a.y + height - 1, z2, material)
-  if (size > 2) {
-    fill(bot, a.x + 1, a.y, a.z + 1, x2 - 1, a.y + height - 1, z2 - 1, 'air')
-  }
-  return `tower: ${material} ${size}x${size} h${height} at ${a.x},${a.y},${a.z}`
-}
-
-function buildHouse (bot, material, w, l, h, a) {
-  const x1 = a.x; const y1 = a.y; const z1 = a.z
-  const x2 = a.x + w - 1; const y2 = a.y + h - 1; const z2 = a.z + l - 1
-  // floor
-  fill(bot, x1, y1, z1, x2, y1, z2, material)
-  // solid shell up to roof
-  fill(bot, x1, y1, z1, x2, y2, z2, material)
-  // hollow interior
-  fill(bot, x1 + 1, y1 + 1, z1 + 1, x2 - 1, y2 - 1, z2 - 1, 'air')
-  // flat roof
-  fill(bot, x1, y2, z1, x2, y2, z2, material)
-  // doorway (2 high) centred on the -z wall
-  const dx = Math.floor((x1 + x2) / 2)
-  setblock(bot, dx, y1 + 1, z1, 'air')
-  setblock(bot, dx, y1 + 2, z1, 'air')
-  // a couple of window holes on the +x / -x walls
-  setblock(bot, x1, y1 + 2, Math.floor((z1 + z2) / 2), 'glass')
-  setblock(bot, x2, y1 + 2, Math.floor((z1 + z2) / 2), 'glass')
-  return `house: ${material} ${w}x${l}x${h} at ${x1},${y1},${z1} (door on -z side)`
-}
+// blockPos / anchorInFront / fill / setblock / normName / findPlayer and the legacy
+// wall/tower/house builders now live in op-build.js (destructured at the top of this
+// file). They are OPERATOR conveniences over /fill+/setblock - NOT the survival build
+// path, which is schematic.buildSurvival placing real blocks from inventory.
 
 // Eat the best food in inventory so the bot doesn't starve. Returns a status
 // string. Safe to call often - no-ops if already full or no food on hand.
