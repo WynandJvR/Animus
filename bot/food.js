@@ -228,6 +228,52 @@ function needStringForRod ({ hasRod, packString, bankRods, target } = {}) {
 // turns it straight back on. PURE (env in, go/no-go out) so the gate itself is offline-tested.
 function shouldFish (env = process.env) { return (env || {}).FISHING_ENABLED === '1' }
 
+// ==== #62 FOOD_BUFFER PURE HELPERS (the keystone for STEADY food) ==========================
+// §A FOOD_BANK_FIRST decision: how many food POINTS to withdraw from the bank to lift the food
+// bar to a SAFE level, capped by what the bank actually holds. >0 => the bank holds edible food
+// worth pulling (the crisis withdraws+eats it, reachable even at hp1 - no far-farm trek); 0 =>
+// nothing to pull, fall through to the farm/hold path. PURE (three numbers in, points out).
+//   bankFoodPts  edible (tier<2) food points reachable in the hut bank (a cheap cached read)
+//   curFood      the current hunger bar (0..20)
+//   safeFood     the food level the withdraw aims to reach (default 14)
+function bankFoodWithdrawPts (bankFoodPts, curFood, safeFood) {
+  const safe = safeFood != null ? safeFood : 14
+  const shortfall = Math.max(0, safe - (curFood != null ? curFood : 20))
+  return Math.max(0, Math.min(shortfall, bankFoodPts || 0))
+}
+
+// §B FOOD_BUFFER_STOCK decision: the pack food SURPLUS (points) beyond a small carried reserve -
+// what the courier should ship to the bank so a durable reserve ACCUMULATES over cycles. With §A
+// providing a reachable bank fallback the bot no longer needs to hoard on-pack, so the reserve is
+// small (~8 pts / 2-3 loaves) and the rest flows to the bank. PURE (two numbers in, surplus out).
+function foodSurplusToBank (packFoodPts, packReserve) {
+  const reserve = packReserve != null ? packReserve : 8
+  return Math.max(0, (packFoodPts || 0) - reserve)
+}
+
+// §C FARM_EXPAND_PROACTIVE gate: may the bot PROACTIVELY expand its wheat farm toward target RIGHT
+// NOW, in a SAFE window, instead of only crisis-tending it (why it's stuck at 7 cells)? Mirrors
+// proactiveGearupGate: fires ONLY when EVERY guard holds -
+//   underTarget  the farm is below WHEAT_FARM_TARGET (something to grow)
+//   !crisisActive no survival need is active (yields to survival - the HARD constraint)
+//   hp >= safeHp  a real health buffer (14) so the leveling/tilling isn't preempted 5s in
+//   fed          not in a food crisis (expansion is minutes of tilling)
+//   day          daylight (mobs asleep) so working the plot is safe
+//   nearFarm     at/near the farm (no long trek to expand)
+// Any guard failing => don't expand (crisis-tending / a later safe window handles it). PURE
+// (a snapshot in, go/no-go out). Offline-tested.
+function farmExpandGate (state, opts = {}) {
+  const s = state || {}
+  const safeHp = opts.safeHp != null ? opts.safeHp : 14
+  if (!s.underTarget) return false      // farm already at target -> nothing to expand
+  if (s.crisisActive) return false      // a real survival need is active -> yield to survival
+  if (s.hp == null || s.hp < safeHp) return false
+  if (!s.fed) return false
+  if (!s.day) return false
+  if (!s.nearFarm) return false
+  return true
+}
+
 // How many bread can we bake from N wheat (3 wheat -> 1 bread). PURE arithmetic, offline-tested.
 function breadFromWheat (wheatCount) { return Math.max(0, Math.floor((wheatCount || 0) / 3)) }
 
@@ -242,4 +288,4 @@ function wheatWithdrawForBake ({ packWheat, bankWheat, bankFoodPts, bankTargetPt
   return Math.max(0, Math.min(bankWheat || 0, need, cap))
 }
 
-module.exports = { DEFAULT_BUFFER, BAD_FOOD, RAW_COOKABLE_FOOD, foodTier, hasFoodSupply, needsFoodSupply, shouldSweepForFood, foodSupplyAction, shouldTrekHomeForFood, breadFromWheat, wheatWithdrawForBake, inLoopFoodTrigger, busyPreemptFood, foodFloorTriggered, outboundRungAdmissible, famineHoldFood, foodFloorEscalation, foodFloorEscalated, AUTO_EAT_AT, needStringForRod, shouldFish }
+module.exports = { DEFAULT_BUFFER, BAD_FOOD, RAW_COOKABLE_FOOD, foodTier, hasFoodSupply, needsFoodSupply, shouldSweepForFood, foodSupplyAction, shouldTrekHomeForFood, breadFromWheat, wheatWithdrawForBake, bankFoodWithdrawPts, foodSurplusToBank, farmExpandGate, inLoopFoodTrigger, busyPreemptFood, foodFloorTriggered, outboundRungAdmissible, famineHoldFood, foodFloorEscalation, foodFloorEscalated, AUTO_EAT_AT, needStringForRod, shouldFish }

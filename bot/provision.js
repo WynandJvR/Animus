@@ -5450,6 +5450,44 @@ async function bakeBreadFromWheat (bot, opts = {}) {
   } catch (e) { dbg('  bakeBread: skipped (' + e.message + ')'); return 0 }
 }
 
+// #62 §A FOOD_BANK_FIRST (default on): the crisis deadlock-breaker. At hp1/food0 the far farm is
+// UNREACHABLE, but the hut BANK is not - if it holds edible food, WITHDRAW enough to reach a safe
+// food level and EAT it BEFORE any farm trek / fishing / hold. Reuses resources.ensureFood (the
+// same hut-anchored, range-bounded withdraw step 1 uses) gated by the pure bankFoodWithdrawPts
+// decision (only bothers when the bank actually holds food worth pulling). BOUNDED (maxDist 64 -
+// never a far trek) and fully guarded: a dry/unreachable bank falls straight through with nothing
+// lost. Anchors on hutAnchor()/knownBed() (works even when opts.home is null, the ladder/crisis
+// dispatch). Returns { fed }. FOOD_BANK_FIRST=0 -> immediate no-op (byte-for-byte).
+async function bankFoodFirst (bot, { home = null, isStopped = () => false, say = () => {} } = {}) {
+  if (process.env.FOOD_BANK_FIRST === '0') return { fed: false }
+  const comfortable = 18
+  if (bot.food != null && bot.food >= comfortable) return { fed: true }
+  if (isStopped()) return { fed: false }
+  const anchor = home || hutAnchor() || knownBed()
+  if (!anchor) return { fed: false }
+  const res = require('./resources.js')
+  let bankFoodPts = 0
+  try {
+    const t = await res.totalCounts(bot, { cachedOnly: true, near: anchor, maxDist: 64 })
+    const md = require('minecraft-data')(bot.version); const foods = (md && md.foodsByName) || {}
+    for (const [n, c] of Object.entries(t)) if (foods[n] && foodSec.foodTier(n) < 2) bankFoodPts += (foods[n].foodPoints || 0) * c
+  } catch (e) { dbg('  bank-first: bank read failed (' + e.message + ')') }
+  const safeFood = Number(process.env.FOOD_BANK_SAFE || 14)
+  const want = foodSec.bankFoodWithdrawPts(bankFoodPts, bot.food, safeFood)
+  if (want <= 0) return { fed: false } // bank holds no edible food worth pulling -> fall through to farm/hold
+  dbg('secureFood: BANK FIRST - bank holds ~' + bankFoodPts + ' edible pts; withdrawing to reach food ' + safeFood + ' (reachable even at low hp, no far-farm trek)')
+  say('grabbing food from my bank instead of trekking to the far farm')
+  try {
+    const got = await res.ensureFood(bot, { near: anchor, threshold: 20, minPack: 1, maxDist: 64, forceFresh: true })
+    if (got) {
+      dbg('  bank-first: withdrew ' + got + ' food from the bank')
+      try { if (Object.keys(RAW_COOKABLE).some(n => countItem(bot, n) > 0)) await cookRawMeat(bot, { isStopped }) } catch {}
+      await eatUp(bot)
+    }
+  } catch (e) { dbg('  bank-first: withdraw failed (' + e.message + ')') }
+  return { fed: bot.food != null && bot.food >= comfortable }
+}
+
 let _securingFood = false
 function isSecuringFood () { return _securingFood }
 // FOOD_FLOOR F4: the no-progress escalation counter (module-local; a restart re-allows a fresh
@@ -5517,6 +5555,15 @@ async function secureFoodInner (bot, opts = {}) {
   // to comfortable from ready food when it can, and only truly hungry does it go get more.
   const acquireTrigger = opts.threshold != null ? opts.threshold : 12
   if ((bot.food ?? 20) > acquireTrigger) { dbg('secureFood: food=' + bot.food + ' > acquire-trigger ' + acquireTrigger + ' and ready food drained - not hunting/farming for the last points'); return { fed: true, blockedOn: null } }
+  // #62 §A FOOD_BANK_FIRST (default on): BEFORE any farm trek / fishing / hold, if the hut BANK
+  // holds edible food, withdraw enough to reach a safe food level and eat it - reachable even at
+  // hp1 (the bank is at the hut), so it breaks the "far farm unreachable when weak" deadlock without
+  // a 100b trek. Bounded (maxDist 64, never forces a far trek) + guarded (a dry/unreachable bank
+  // falls through with nothing lost). FOOD_BANK_FIRST=0 -> the whole branch is skipped (byte-for-byte).
+  if (process.env.FOOD_BANK_FIRST !== '0') {
+    try { await bankFoodFirst(bot, { home, isStopped, say }) } catch (e) { dbg('secureFood: bank-first failed (' + e.message + ')') }
+    if (fedEnough()) return { fed: true, blockedOn: null }
+  }
   // 2.5) HOME FOOD FIRST (HOME_FOOD_FIRST=0 restores today's behavior). Step 1's bank withdraw
   // is RANGE-BOUNDED (maxDist 64): once the bot has drifted beyond it, that read silently
   // no-ops and the chain below marches OUTWARD (scout) hunting NEW food while the bot's own
@@ -5619,7 +5666,13 @@ async function secureFoodInner (bot, opts = {}) {
       say('i have a farm - harvesting it instead of starving next to it')
       try { await walkStaged(bot, wf.x, wf.z, { isStopped, range: 6, timeoutMs: 180000 }) } catch (e) { dbg('  harvest-first: trek to farm failed (' + e.message + ')') }
       try { await tendWheatFarm(bot, { isStopped, say }); await bakeBreadFromWheat(bot, { isStopped, home: wf }); await cookIfRaw(); await eatUp(bot) } catch (e) { dbg('  harvest-first: tend/bake/eat failed (' + e.message + ')') }
-      if (fedEnough()) return { fed: true, blockedOn: null }
+      if (fedEnough()) {
+        // #62 §B FOOD_BUFFER_STOCK: now that the crisis is over (fed), bank the harvest SURPLUS so a
+        // durable reserve accumulates for the next crisis (§A withdraws it). Bounded + isStopped-aware
+        // inside courierFoodToBank; only after we're safely fed. =0 -> just return (byte-for-byte).
+        if (process.env.FOOD_BUFFER_STOCK !== '0') { try { await courierFoodToBank(bot, { isStopped, say }) } catch (e) { dbg('  harvest-first: courier surplus failed (' + e.message + ')') } }
+        return { fed: true, blockedOn: null }
+      }
     } else if (wf) dbg('secureFood: HARVEST-FIRST - standing farm at ' + wf.x + ',' + wf.z + ' but unsafe to trek (hp=' + hp + ' night=' + isNight(bot) + ' hostile=' + nearHostile(bot, 12) + ') - deferring to the local floor')
   }
   // #40 F4.2: a STARVING bot (food<=4) that just trekked home and found the pantry dry must NOT
@@ -6012,6 +6065,9 @@ const RUNG_EXECUTORS = {
   'gotoHome+ensureFood(forceFresh)+cook+eat': async (bot, o) => {
     const home = o.home
     if (home && bot.entity) { try { await walkStaged(bot, home.x, home.z, { isStopped: o.isStopped, range: 6, timeoutMs: 180000 }) } catch (e) { o.dbg('(ladder) R2 home trek failed: ' + e.message) } }
+    // #62 §A FOOD_BANK_FIRST: hut-anchored bank-cooked-food-first withdraw+eat (the pure-gated
+    // deadlock-breaker) BEFORE the generic ensureFood/cook/eat below. FOOD_BANK_FIRST=0 -> skipped.
+    if (process.env.FOOD_BANK_FIRST !== '0') { try { await bankFoodFirst(bot, { home, isStopped: o.isStopped, say: o.say }) } catch (e) { o.dbg('(ladder) R2 bank-first failed: ' + e.message) } }
     try { await require('./resources.js').ensureFood(bot, { near: home, threshold: 20, minPack: 1, maxDist: 64, forceFresh: true }) } catch (e) { o.dbg('(ladder) R2 ensureFood failed: ' + e.message) }
     try { if (Object.keys(RAW_COOKABLE).some(n => countItem(bot, n) > 0)) await cookRawMeat(bot, { isStopped: o.isStopped }) } catch {}
     await eatUp(bot)
@@ -6049,7 +6105,11 @@ const RUNG_EXECUTORS = {
   'digInForNight': async (bot, o) => { await digInForNight(bot, { isStopped: o.isStopped, say: o.say }) },
   // R3: tend/harvest the owned farm (hoe-aware), eat what came off it. courierHome = S6, logged-skip.
   'trekFarm+tend+harvest+courierHome': async (bot, o) => {
-    await tendWheatFarm(bot, { isStopped: o.isStopped, say: o.say }); await eatUp(bot)
+    await tendWheatFarm(bot, { isStopped: o.isStopped, say: o.say })
+    // #62 §B FOOD_BUFFER_STOCK: BAKE all harvested wheat into bread before eating/couriering, so the
+    // harvest actually becomes bankable food (tend alone leaves wheat raw+unshippable). =0 -> skipped.
+    if (process.env.FOOD_BUFFER_STOCK !== '0') { try { await bakeBreadFromWheat(bot, { isStopped: o.isStopped, home: o.home }) } catch (e) { o.dbg('(ladder) R3 bake failed: ' + e.message) } }
+    await eatUp(bot)
     // S6: courier the food surplus home so a famine recovery restocks the pantry on its way out
     // (the §4.2-step-4 promise). Behind MAINTAIN; MAINTAIN=0 keeps the old logged-skip.
     if (process.env.MAINTAIN !== '0') { try { await courierFoodToBank(bot, { isStopped: o.isStopped, say: o.say }) } catch (e) { o.dbg('(ladder) courier failed: ' + e.message) } }
@@ -6366,7 +6426,18 @@ async function courierFoodToBank (bot, { isStopped = () => false, say = () => {}
   // the pack surplus we're about to deposit and wrongly read the pantry as full.
   let bankFoodPts = 0; let bankRods = 0
   try { const counts = await res.readChest(bot, cell); for (const [n, c] of Object.entries(counts || {})) { if (foods[n]) bankFoodPts += (foods[n].foodPoints || 0) * c; if (n === 'fishing_rod') bankRods += c } } catch {}
-  const plan = maintain.courierPlan(packItems, bankFoodPts, {})
+  // #62 §B FOOD_BUFFER_STOCK (default on): with §A providing a reachable bank fallback, the bot no
+  // longer needs to HOARD food on-pack - LOWER the courier's pack keep to a small reserve
+  // (FOOD_PACK_RESERVE pts) so the harvest SURPLUS flows to the bank and a durable reserve
+  // accumulates toward FOOD_BANK_TARGET loaves (which the next crisis withdraws via §A). Same
+  // pure courierPlan machinery - just a lower keep + explicit bank target. FOOD_BUFFER_STOCK=0 ->
+  // courierPlan's default keep/target (byte-for-byte).
+  const courierOpts = {}
+  if (process.env.FOOD_BUFFER_STOCK !== '0') {
+    courierOpts.packTarget = Number(process.env.FOOD_PACK_RESERVE || 8)
+    courierOpts.bankTarget = Number(process.env.FOOD_BANK_TARGET || 10) * 5 // FOOD_BANK_TARGET is in loaves; bread = 5 food pts
+  }
+  const plan = maintain.courierPlan(packItems, bankFoodPts, courierOpts)
   // FOOD_FLOOR F3: leave a spare fishing_rod in the reserve alongside the food, so the post-death
   // naked bot's floor can WITHDRAW a rod (F2) instead of scrambling for 0 string. Ships only a
   // TRUE dupe (keeps 1 rod on the bot); rodReserveTopUp bounds it. FOOD_FLOOR=0 -> no rod line.
@@ -6553,7 +6624,26 @@ async function maintenancePass (bot, opts = {}) {
     if (between()) return { ok: true, steps, reason: 'bail:survival' }
 
     // STEP 2: farm - tend + under-target expansion (with the seed top-up). Daylight only.
-    if (process.env.FOOD_SUPPLY !== '0' && !nightIndoorOnly && day() && (has('bankFood') || has('packFood') || farmUnderTarget()) && (!opportunistic || (snap.farm && snap.farm.exists && snap.farm.dist != null && snap.farm.dist <= Number(process.env.BREAD_FARM_DIST || (process.env.BREAD_ENGINE !== '0' ? 48 : 32)))) && due('farm', 1200000)) {
+    // #62 §C FARM_EXPAND_PROACTIVE: ALSO admit the farm step in a SAFE window (under target + hp>=SAFE_HP
+    // + fed + day + at/near the farm + no survival crisis), off the 20-min throttle and independent of
+    // the maintain need-list, so a CALM bot grows the plot toward WHEAT_FARM_TARGET (33) - it's stuck at
+    // ~7 cells because it's only ever crisis-tended. Mirrors #60's proactiveArmor: the pure farmExpandGate
+    // owns the guards; ensureFoodSupply's own cell/time budget + isStopped/between bail keep it bounded and
+    // YIELD to survival. Held to the same !opportunistic/!nightIndoorOnly envelope (no mid-build/night
+    // treks). FARM_EXPAND_PROACTIVE=0 -> proactiveExpand is false (short-circuit) -> byte-for-byte.
+    const proactiveExpand = process.env.FARM_EXPAND_PROACTIVE !== '0' && !nightIndoorOnly && !opportunistic && day() && (() => {
+      try {
+        return foodSec.farmExpandGate({
+          underTarget: farmUnderTarget(),
+          crisisActive: (() => { try { return survivalNeed(bot, { foodThreshold: crisisFood }) != null } catch { return false } })(),
+          hp: bot.health,
+          fed: (bot.food != null ? bot.food : 20) >= Number(process.env.FARM_EXPAND_FED_MIN || 14),
+          day: day(),
+          nearFarm: !!(snap.farm && snap.farm.exists && snap.farm.dist != null && snap.farm.dist <= Number(process.env.FARM_EXPAND_NEAR || 48))
+        }, { safeHp: Number(process.env.FARM_EXPAND_SAFE_HP || 14) })
+      } catch { return false }
+    })()
+    if ((process.env.FOOD_SUPPLY !== '0' && !nightIndoorOnly && day() && (has('bankFood') || has('packFood') || farmUnderTarget()) && (!opportunistic || (snap.farm && snap.farm.exists && snap.farm.dist != null && snap.farm.dist <= Number(process.env.BREAD_FARM_DIST || (process.env.BREAD_ENGINE !== '0' ? 48 : 32)))) && due('farm', 1200000)) || proactiveExpand) {
       try { await ensureFoodSupply(bot, { home, say, isStopped }); stepDone('farm') } catch (e) { dbg('  maint: farm failed (' + e.message + ')') }
     }
     if (between()) return { ok: true, steps, reason: 'bail:survival' }

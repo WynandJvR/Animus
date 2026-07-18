@@ -318,5 +318,56 @@ t('#61 SKIP_DEAD_FISHING: shouldFish - the fishing gate is DEFAULT OFF, true ONL
   } finally { if (saved === undefined) delete process.env.FISHING_ENABLED; else process.env.FISHING_ENABLED = saved }
 })
 
+// ==== #62 FOOD_BUFFER pure helpers ==========================================================
+t('#62 §A bankFoodWithdrawPts: shortfall to safeFood, capped by what the bank holds', () => {
+  // bank rich, deep crisis -> withdraw the full shortfall (safe 14 - food 0 = 14)
+  assert.strictEqual(F.bankFoodWithdrawPts(50, 0, 14), 14, 'rich bank, food0 -> pull the full 14-pt shortfall')
+  // bank poor -> capped by the bank (only 5 pts banked, still helps partially)
+  assert.strictEqual(F.bankFoodWithdrawPts(5, 0, 14), 5, 'poor bank -> capped by bank holdings (partial help)')
+  // bank EMPTY -> 0 -> fall through to the farm/hold path
+  assert.strictEqual(F.bankFoodWithdrawPts(0, 0, 14), 0, 'empty bank -> 0 -> fall through to farm/hold')
+  // already at/above the safe level -> 0 (no needless withdraw, e.g. food 15 >= 14)
+  assert.strictEqual(F.bankFoodWithdrawPts(50, 15, 14), 0, 'already fed past safe -> 0')
+  assert.strictEqual(F.bankFoodWithdrawPts(50, 14, 14), 0, 'exactly at safe -> 0')
+  // partial shortfall -> exact points, bank-capped
+  assert.strictEqual(F.bankFoodWithdrawPts(50, 10, 14), 4, 'food10 -> 4-pt shortfall to safe 14')
+  assert.strictEqual(F.bankFoodWithdrawPts(3, 10, 14), 3, 'food10, shortfall 4 but bank only 3 -> 3')
+  // safeFood defaults to 14 when omitted; guards on null/undefined inputs
+  assert.strictEqual(F.bankFoodWithdrawPts(50, 0), 14, 'safeFood default 14')
+  assert.strictEqual(F.bankFoodWithdrawPts(undefined, undefined, 14), 0, 'null bank + null food -> 0 (no throw)')
+})
+
+t('#62 §B foodSurplusToBank: surplus beyond the small pack reserve is what ships to the bank', () => {
+  // plenty on pack -> ship everything beyond the reserve (40 - 8 = 32)
+  assert.strictEqual(F.foodSurplusToBank(40, 8), 32, 'pack 40, reserve 8 -> 32 surplus to the bank')
+  // exactly the reserve -> nothing to ship
+  assert.strictEqual(F.foodSurplusToBank(8, 8), 0, 'pack == reserve -> 0 surplus (keep it)')
+  // below the reserve -> nothing to ship (hoard the last few for the excursion)
+  assert.strictEqual(F.foodSurplusToBank(5, 8), 0, 'pack < reserve -> 0 surplus')
+  // reserve defaults to 8 when omitted
+  assert.strictEqual(F.foodSurplusToBank(20), 12, 'reserve default 8 -> 12 surplus')
+  // guards
+  assert.strictEqual(F.foodSurplusToBank(0, 8), 0, 'empty pack -> 0')
+  assert.strictEqual(F.foodSurplusToBank(undefined, undefined), 0, 'null pack + default reserve -> 0 (no throw)')
+})
+
+t('#62 §C farmExpandGate: expands ONLY in a safe window; yields to survival + all guards', () => {
+  const safe = { underTarget: true, crisisActive: false, hp: 20, fed: true, day: true, nearFarm: true }
+  assert.strictEqual(F.farmExpandGate(safe), true, 'every guard holds -> proactively expand')
+  // yields to survival (the HARD constraint)
+  assert.strictEqual(F.farmExpandGate({ ...safe, crisisActive: true }), false, 'a survival crisis active -> yield, no expand')
+  // each individual guard blocks
+  assert.strictEqual(F.farmExpandGate({ ...safe, underTarget: false }), false, 'farm already at target -> nothing to expand')
+  assert.strictEqual(F.farmExpandGate({ ...safe, hp: 13 }), false, 'hp below safeHp 14 -> no expand')
+  assert.strictEqual(F.farmExpandGate({ ...safe, hp: null }), false, 'unknown hp -> no expand')
+  assert.strictEqual(F.farmExpandGate({ ...safe, fed: false }), false, 'not fed (food crisis) -> no expand')
+  assert.strictEqual(F.farmExpandGate({ ...safe, day: false }), false, 'night -> no expand')
+  assert.strictEqual(F.farmExpandGate({ ...safe, nearFarm: false }), false, 'not near the farm -> no expand (no long trek)')
+  // hp exactly at the safe line passes; safeHp is tunable via opts
+  assert.strictEqual(F.farmExpandGate({ ...safe, hp: 14 }), true, 'hp exactly 14 -> passes the >=safeHp gate')
+  assert.strictEqual(F.farmExpandGate({ ...safe, hp: 16 }, { safeHp: 18 }), false, 'safeHp opt raises the bar')
+  assert.strictEqual(F.farmExpandGate(), false, 'no state -> false (no throw)')
+})
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall food-security tests passed')
 process.exit(failures ? 1 : 0)
