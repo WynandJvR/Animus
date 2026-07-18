@@ -4682,6 +4682,21 @@ async function ensureFishingRod (bot, { isStopped = () => false, home } = {}) {
     try { await require('./resources.js').withdrawItems(bot, 'fishing_rod', 1, { near: home, maxDist: 64 }) } catch (e) { dbg('  fishing: rod bank-withdraw failed (' + e.message + ')') }
     if (has()) { dbg('  fishing: withdrew a fishing_rod from the bank reserve'); return true }
   }
+  // B-slice-1 (PLANNER_FOOD, default on): route the rod through the reconcile PLANNER (resources.acquire)
+  // so it WITHDRAWS the string + sticks sitting in the BANK and crafts a rod. The hand path below only
+  // ever read PACK string, so the bot starved with 3 string in its own chest. acquire recurses the
+  // recipe (rod->string+sticks) against pack+bank holdings and crafts, and REFUSES to wander off and
+  // gather (safe to run at a food crisis). reconcile structurally can't obtain string from the WORLD
+  // (not gatherable), so a truly dry bank falls through to the spider hunt below. PLANNER_FOOD=0 ->
+  // skip this block (today's hand string-check path, byte-for-byte).
+  if (process.env.PLANNER_FOOD !== '0') {
+    try {
+      const res = require('./resources.js')
+      if (await res.acquire(bot, 'fishing_rod', 1, { near: home, isStopped, say: m => dbg('  ' + m) }) && has()) {
+        dbg('  fishing: got a rod via the planner (bank string -> craft)'); return true
+      }
+    } catch (e) { dbg('  fishing: planner rod acquire failed (' + e.message + ')') }
+  }
   const inv = inventoryCounts(bot)
   let stringN = inv.string || 0
   // ROD_SUPPLY (M2): before deferring on <2 string, make the craft REACHABLE - a rod-less,
