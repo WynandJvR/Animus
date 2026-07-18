@@ -31,6 +31,7 @@ const loghistory = require('./loghistory.js') // compact rolling state time-seri
 const scheduler = require('./scheduler.js') // S4: pure survival-tier decision core (commandClass/admissible/pickJob) - wires the busy-gate + the tick
 const maintain = require('./maintain.js') // #40 F2: pure buffer needs() - to detect a pending food (pack/bank) need when an opp window is abandoned
 const foodSec = require('./food.js') // #40 F3.2: pure busy-preempt food threshold (FOOD_SURVIVAL raises it 6 -> 10)
+const pov = require('./pov.js') // GUI-OVERHAUL §2: sliced DDA raycaster behind GET /pov (all logic lives in pov.js)
 const cycleDetect = require('./cycle-detect.js') // task #34: pure behavioral cycle/oscillation detector - fed into the S7 watchdog's existing ladder (no new subsystem)
 const SCHED_ON = process.env.SCHEDULER !== '0' // master flag: SCHEDULER=0 restores the S1-hotfix wiring byte-for-byte (gate takes the survivalAdmissible path, the tick never registers, the 3 reflexes run as today)
 const LADDER_ON = SCHED_ON && process.env.RECOVERY_LADDER !== '0' // S5: RECOVERY_LADDER=0 restores S4's recoveryLadder DOWNGRADE + the one-shot respawn grave gating byte-for-byte
@@ -2212,7 +2213,7 @@ if (process.env.STICKY_FOLLOW !== '0') {
 
 function send (res, code, body) {
   const payload = typeof body === 'string' ? body : JSON.stringify(body)
-  res.writeHead(code, { 'Content-Type': typeof body === 'string' ? 'text/plain' : 'application/json' })
+  res.writeHead(code, { 'Content-Type': (typeof body === 'string' ? 'text/plain' : 'application/json') + '; charset=utf-8' })
   res.end(payload)
 }
 
@@ -2492,6 +2493,12 @@ const server = http.createServer((req, res) => {
       } catch (e) { note(`(ui-cmd error) ${line} -> ${e.message}`); send(res, 500, `error: ${e.message}`) }
     })
     return
+  }
+  // GUI-OVERHAUL §2.5 / POV-V2: the bot's point of view as a 128x72 frame for the Animus POV panel.
+  // Computed only on request, sliced across event-loop turns and cached 250 ms (see pov.js).
+  if (req.method === 'GET' && req.url === '/pov') {
+    if (!bot.entity) return send(res, 503, { ok: false, reason: 'not spawned' })
+    return pov.requestFrame(bot, frame => send(res, 200, frame))
   }
   send(res, 404, 'not found')
 })
