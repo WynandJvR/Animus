@@ -291,6 +291,7 @@ async function mineTunnel (bot, itemName, maxLen, dirIdx, opts = {}) {
   const FLUID = process.env.MINE_FLUID !== '0'
   const LAVA_SAFE = process.env.LAVA_SAFE !== '0' // #41: close residual holes (ceiling pocket above the new head; FLUID - not just open air - beyond the face)
   const SWEEP_EVERY = parseInt(process.env.MINE_SWEEP_EVERY || '4', 10)
+  const TORCH_EVERY = parseInt(opts.torchEvery || 0, 10) // #71: >0 -> light INSIDE the tunnel every Nth block (naked bootstrap only); 0 -> today's no-in-tunnel-torching
   const oreWord = String(itemName).replace(/^raw_/, '')
   for (let i = 0; i < maxLen && !isStopped(); i++) {
     if (mineDanger(bot)) break // hostile close / hp low -> return control to the gather's survival reflex (don't stay locked in dig-awaits taking hits)
@@ -340,6 +341,9 @@ async function mineTunnel (bot, itemName, maxLen, dirIdx, opts = {}) {
     let arrived = false
     if (FLUID) { arrived = await stepInto(bot, ahead, { isStopped }) }
     if (!arrived) { try { await gotoWithTimeout(bot, new goals.GoalBlock(ahead.x, ahead.y, ahead.z), 5000) } catch { break } }
+    // #71 ARMOR_BOOTSTRAP: light the freshly-dug naked tunnel every Nth block so mobs can't spawn on
+    // it. Best-effort (placeTorch no-ops when out of torches - never blocks the dig). Off by default.
+    if (TORCH_EVERY > 0 && mining.sweepDue(i, TORCH_EVERY)) { try { await placeTorch(bot) } catch {} }
     if (!dugAny) break
   }
   // FINAL SWEEP: bank everything left on the floor so the return count + branchMine's got()
@@ -546,9 +550,23 @@ async function branchMine (bot, item, count, opts = {}) {
   // die on the same deep excursion an armored bot survives (naked-deep deaths, live). NEVER
   // blocks - iron armor needs iron, so it only TUNES the plan (food is still owned by the
   // start-gate below). Env IRON_TARGET_Y (armored) / MINE_NAKED_Y (naked) override the target.
+  // #71 ARMOR_BOOTSTRAP: while fully naked and short of a boots' worth of raw iron, mine a SHALLOW
+  // safe band (far fewer skeletons/creepers than y<40) and retreat from ANY hostile within the wider
+  // retreat band. Recomputed via bootNow() through the loop (armor/iron change). Flag off / armored /
+  // has-boots'-iron -> inactive => the descent target + retreat gate are today's, byte-for-byte.
+  const bootCfg = {
+    enabled: process.env.ARMOR_BOOTSTRAP !== '0',
+    bootsIron: parseInt(process.env.ARMOR_BOOTSTRAP_IRON || '4', 10),
+    ymin: parseInt(process.env.ARMOR_BOOTSTRAP_YMIN || '45', 10),
+    ymax: parseInt(process.env.ARMOR_BOOTSTRAP_YMAX || '58', 10),
+    retreatDist: parseInt(process.env.ARMOR_BOOTSTRAP_RETREAT_DIST || '10', 10)
+  }
+  const bootNow = () => mining.armorBootstrapMining(S().armorPieceCount(bot), countItem(bot, 'raw_iron'), bootCfg)
+  const boot0 = bootNow()
   const plan = mining.deepMinePlan(S().armorPieceCount(bot), {
     targetY: process.env.IRON_TARGET_Y != null ? parseInt(process.env.IRON_TARGET_Y, 10) : undefined,
-    nakedY: process.env.MINE_NAKED_Y != null ? parseInt(process.env.MINE_NAKED_Y, 10) : undefined
+    // bootstrapping -> the shallow-band floor overrides the naked target (y28); else today's exactly.
+    nakedY: boot0.active ? boot0.targetY : (process.env.MINE_NAKED_Y != null ? parseInt(process.env.MINE_NAKED_Y, 10) : undefined)
   })
   const targetY = mining.targetMineY(surfaceY, {
     targetY: plan.targetY,
@@ -561,7 +579,7 @@ async function branchMine (bot, item, count, opts = {}) {
   const minIronY = parseInt(process.env.MIN_IRON_Y || '40', 10)
   const goodEnough = () => mining.worthMiningHere(bot.entity.position.y, { minIronY })
   const pickLow = parseInt(process.env.MINE_PICK_LOW || '20', 10)
-  dbg('  branchMine: item=' + item + ' need=' + count + ' surfaceY=' + surfaceY + ' targetY=' + targetY + ' minIronY=' + minIronY)
+  dbg('  branchMine: item=' + item + ' need=' + count + ' surfaceY=' + surfaceY + ' targetY=' + targetY + ' minIronY=' + minIronY + (boot0.active ? ' [ARMOR_BOOTSTRAP: shallow band y' + boot0.ymin + '-' + boot0.ymax + ', retreat<=' + boot0.retreatDist + 'b]' : ''))
 
   // #64 §C DYNAMIC_FOOD: leave home STOCKED for the descent. Size the ration to the KNOWN descent
   // target (depth = surfaceY - targetY - you can't nip home from y16 to eat) and top up the shortfall
@@ -692,7 +710,10 @@ async function branchMine (bot, item, count, opts = {}) {
   if (Math.floor(bot.entity.position.y) < surfaceY - 4) {
     try { await ensureMiningKit(bot, Math.max(0, Math.floor(surfaceY) - Math.floor(bot.entity.position.y)), { isStopped }) } catch (e) { dbg('  ensureMiningKit failed (' + e.message + ') - relying on depth re-tool') }
   }
-  await ensureTorches(bot, plan.wantTorches)
+  // #71: bootstrapping -> carry MORE torches and light the branches every few blocks (not just at
+  // junctions) so nothing spawns on the freshly-dug naked tunnel. torchEvery=0 => today's cadence.
+  const bootTorchEvery = boot0.active ? parseInt(process.env.ARMOR_BOOTSTRAP_TORCH_EVERY || '3', 10) : 0
+  await ensureTorches(bot, boot0.active ? Math.max(plan.wantTorches, parseInt(process.env.ARMOR_BOOTSTRAP_TORCHES || '16', 10)) : plan.wantTorches)
   const L = mining.branchLayout(corridorDir, {
     branchLen: parseInt(process.env.MINE_BRANCH_LEN || '12', 10),
     spacing: parseInt(process.env.MINE_SPACING || '3', 10)
@@ -700,9 +721,13 @@ async function branchMine (bot, item, count, opts = {}) {
   let branches = startBranches
   const maxBranches = startBranches + (opts.maxBranches || plan.maxBranches)
   while (got() < count && Date.now() < deadline && !isStopped() && branches < maxBranches) {
-    if (mineDanger(bot)) {
-      dbg('  branchMine: threat/hp down here - climbing out and handing off to the survival reflex')
-      if (opts.say && branches < 2) say('mob down here - breaking off the mine to get clear')
+    // #71 ARMOR_BOOTSTRAP widens the retreat: a naked first-iron bot yields the moment a hostile is
+    // within the retreat band (10b) - EARLIER than mineDanger's 6b - so a skeleton can't shoot it up
+    // before it climbs out. Same climb-out + honest bail as the mineDanger path (flag off -> identical).
+    const bootRetreat = mining.armorBootstrapRetreat(bootNow().active, nearHostile(bot, bootCfg.retreatDist) ? bootCfg.retreatDist : null, bootCfg.retreatDist)
+    if (mineDanger(bot) || bootRetreat) {
+      dbg('  branchMine: threat/hp down here' + (bootRetreat && !mineDanger(bot) ? ' (naked - retreating from a hostile in the wider ' + bootCfg.retreatDist + 'b band)' : '') + ' - climbing out and handing off to the survival reflex')
+      if (opts.say && branches < 2) say(bootRetreat && !mineDanger(bot) ? 'mob near and i\'ve got no armor - pulling out before it shoots me up' : 'mob down here - breaking off the mine to get clear')
       try { await climbToSurface(bot, Math.floor(surfaceY), { isStopped }) } catch {}
       return { gathered: got(), reason: 'broke off to survive a mob / low hp underground' }
     }
@@ -742,14 +767,16 @@ async function branchMine (bot, item, count, opts = {}) {
       try { await climbToSurface(bot, Math.floor(surfaceY), { isStopped }) } catch {}
       return { gathered: got(), reason: 'pickaxe gone and could not re-tool at depth - climbed out' }
     }
-    // advance the main corridor `spacing`, then a junction: torch + left branch + right branch
-    await mineTunnel(bot, item, L.spacing, L.corridorIdx, { isStopped })
+    // advance the main corridor `spacing`, then a junction: torch + left branch + right branch.
+    // #71: bootTorchEvery (>0 only while bootstrapping) also lights INSIDE each tunnel every few
+    // blocks so the long naked branches aren't dark spawn-corridors. 0 -> today's junction-only light.
+    await mineTunnel(bot, item, L.spacing, L.corridorIdx, { isStopped, torchEvery: bootTorchEvery })
     const junc = bot.entity.position.floored()
     if (branches % L.torchEvery === 0) await placeTorch(bot).catch(() => {})
-    await mineTunnel(bot, item, L.branchLen, L.leftIdx, { isStopped })
+    await mineTunnel(bot, item, L.branchLen, L.leftIdx, { isStopped, torchEvery: bootTorchEvery })
     try { await gotoWithTimeout(bot, new goals.GoalBlock(junc.x, junc.y, junc.z), 15000) } catch {}
     if (got() >= count || isStopped()) break
-    await mineTunnel(bot, item, L.branchLen, L.rightIdx, { isStopped })
+    await mineTunnel(bot, item, L.branchLen, L.rightIdx, { isStopped, torchEvery: bootTorchEvery })
     try { await gotoWithTimeout(bot, new goals.GoalBlock(junc.x, junc.y, junc.z), 15000) } catch {}
     try { await grabNearbyOre(bot, oreRe, 4, 6, { isStopped }) } catch {} // ore exposed in the junction walls
     // COAL BYCATCH (regression fix): while branch-mining for iron, also grab any coal_ore in

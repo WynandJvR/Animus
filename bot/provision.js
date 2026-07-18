@@ -2514,8 +2514,29 @@ async function gatherLoop (bot, item, count, opts = {}) {
   const GRACE_REACH = 4     // only ore ALREADY within ~4b (never a new/deeper search)
   const NAKED_ORE_RE = /^(raw_iron|iron_ore|deepslate_iron_ore)$/ // the iron-bootstrap ore only
   let graceSaid = false     // the naked-grace status say fires at most once per runGather
+  // #71 ARMOR_BOOTSTRAP: while gathering iron FULLY NAKED and short of a boots' worth of raw iron,
+  // retreat from ANY hostile in the WIDER retreat band (10b, vs mineDanger's 6b) - a skeleton kills
+  // the unarmored miner before it accumulates the ~4 iron for boots (the keystone blocker). This
+  // COMPLEMENTS the existing threat reflex: it makes surviveMiningThreat fire (and force a climb/
+  // bail) EARLIER when naked, it does NOT duplicate/override the mineDanger path. Recomputed each
+  // call (armor/iron change). Flag off / armored / has-boots'-iron / not-iron -> inactive => the
+  // gate + decision are today's byte-for-byte. Only for the iron gather (NAKED_ORE_RE).
+  const ARMOR_BOOT_CFG = {
+    enabled: process.env.ARMOR_BOOTSTRAP !== '0',
+    bootsIron: parseInt(process.env.ARMOR_BOOTSTRAP_IRON || '4', 10),
+    ymin: parseInt(process.env.ARMOR_BOOTSTRAP_YMIN || '45', 10),
+    ymax: parseInt(process.env.ARMOR_BOOTSTRAP_YMAX || '58', 10),
+    retreatDist: parseInt(process.env.ARMOR_BOOTSTRAP_RETREAT_DIST || '10', 10)
+  }
+  const ARMOR_BOOT_TORCH_EVERY = parseInt(process.env.ARMOR_BOOTSTRAP_TORCH_EVERY || '3', 10) // #71: light naked strip/branch tunnels every Nth block
+  const armorBootNow = () => NAKED_ORE_RE.test(item)
+    ? mining.armorBootstrapMining(armorPieceCount(bot), countItem(bot, 'raw_iron'), ARMOR_BOOT_CFG)
+    : { active: false, retreatDist: ARMOR_BOOT_CFG.retreatDist }
+  let bootRetreatSaid = false
   async function surviveMiningThreat () {
-    if (!mineDanger(bot)) return false
+    const boot = armorBootNow()
+    const bootRetreat = mining.armorBootstrapRetreat(boot.active, nearHostile(bot, boot.retreatDist) ? boot.retreatDist : null, boot.retreatDist)
+    if (!mineDanger(bot) && !bootRetreat) return false // #71: also enter for the naked wider-band retreat
     threatReacts++                // count EVERY break-out exactly as today (climb budget byte-for-byte)
     const hp = bot.health ?? 20
     const feetY = Math.floor(bot.entity.position.y)
@@ -2526,6 +2547,15 @@ async function gatherLoop (bot, item, count, opts = {}) {
     // case (hurt, no hostile, on the surface) is 'recover' - eat + heal here, then keep gathering.
     let decision = arbiter.mineThreatDecision({ hp, hostileNear, deep, threatReacts, recoverTries }, {})
     if (decision === 'recover' && !RECOVER_ON) decision = 'bail' // flag off -> today's response
+    // #71 ARMOR_BOOTSTRAP: naked + a hostile in the wider retreat band (often 6-10b, past the 6b
+    // hostileNear window that made mineThreatDecision return false/recover) -> HARD retreat now, never
+    // naked-mine or sit recovering through it. Deep climbs out (walls the staircase behind us);
+    // surface bails so the flee/shelter reflex owns it. The NAKED_GRACE grab below still nets the ore
+    // already in FRONT first (bounded, only when no mob is in melee). Flag off -> bootRetreat false.
+    if (bootRetreat) {
+      decision = deep ? 'up' : 'bail'
+      if (opts.say && !bootRetreatSaid && !hostileNear) { bootRetreatSaid = true; opts.say('mob closing and i\'ve got no armor - pulling back before it shoots me up') }
+    }
     // NEW: RECOVER-AND-RESUME. No threat, hp in (6,12), on the surface: the livelock. Instead of
     // bailing into a loop that can never end (hp<12 forever, food<18 -> never regens), eat to
     // comfortable, run the food chain only if the pack is bare, then hold for regen - then the
@@ -2589,8 +2619,8 @@ async function gatherLoop (bot, item, count, opts = {}) {
     }
     // Distinguish the exhausted-recovery bail (hurt, no hostile, surface, recovery used up) from
     // the mob/critical bail so the reason line is honest and greppable. Only when the flag is on.
-    if (RECOVER_ON && !hostileNear && !deep && hp > 6) return 'bail-hurt'
-    return 'bail'
+    if (RECOVER_ON && !hostileNear && !deep && hp > 6 && !bootRetreat) return 'bail-hurt'
+    return 'bail' // #71: a bootRetreat surface case falls here -> honest "survive a mob" bail, not "too hurt"
   }
 
   let lastBeat = 0 // throttled trace heartbeat - the LAST line before a hang names the branch
@@ -2904,7 +2934,7 @@ async function gatherLoop (bot, item, count, opts = {}) {
           dbg('  gather strip-shaft #' + stripDug + ' budget=' + stripBudget() + ' at y=' + Math.floor(bot.entity.position.y))
           const dug = await digShaftDown(bot, stripBudget(), { isStopped, home })
           dbg('  gather strip-shaft dug=' + dug)
-          if (dug > 0) { const got = await mineTunnel(bot, item, deepOre ? 24 : 16, stripDug, { isStopped }); dbg('  gather tunnel got=' + got); stripDug++; dryExplores = 0; continue } // count only SUCCESSFUL shafts
+          if (dug > 0) { const got = await mineTunnel(bot, item, deepOre ? 24 : 16, stripDug, { isStopped, torchEvery: armorBootNow().active ? ARMOR_BOOT_TORCH_EVERY : 0 }); dbg('  gather tunnel got=' + got); stripDug++; dryExplores = 0; continue } // count only SUCCESSFUL shafts (#71: light the naked strip tunnel too)
         }
         // Couldn't dig down here (water/void/lava underfoot - e.g. a riverbed at the fence
         // edge). Normally head back to the build SITE (dry ground the operator chose) and
@@ -3129,7 +3159,7 @@ async function gatherLoop (bot, item, count, opts = {}) {
         const dug = await digShaftDown(bot, stripBudget(), { isStopped, home })
         // COUNT ONLY SUCCESSFUL SHAFTS (mirrors the strip-shaft path): a dug=0 shaft made
         // no descent, so charging it against MAX_STRIP just exhausts the budget uselessly.
-        if (dug > 0) { const got = await mineTunnel(bot, item, deepOre ? 24 : 16, stripDug, { isStopped }); dbg('  gather buried-strip dug=' + dug + ' tunnel got=' + got); stripDug++ }
+        if (dug > 0) { const got = await mineTunnel(bot, item, deepOre ? 24 : 16, stripDug, { isStopped, torchEvery: armorBootNow().active ? ARMOR_BOOT_TORCH_EVERY : 0 }); dbg('  gather buried-strip dug=' + dug + ' tunnel got=' + got); stripDug++ }
         else { dbg('  gather buried-strip dug=0 - fresh ground'); const off = { x: bot.entity.position.x + 6, z: bot.entity.position.z + 6 }; try { await gotoWithTimeout(bot, new goals.GoalNearXZ(off.x, off.z, 2), 10000) } catch {} }
         reachFails = 0
       }

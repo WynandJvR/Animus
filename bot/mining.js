@@ -280,6 +280,36 @@ function deepMinePlan (armorPieces, opts = {}) {
   return { targetY: opts.targetY != null ? opts.targetY : 16, maxBranches: 30, wantTorches: 12, naked: false }
 }
 
+// PURE (#71 ARMOR_BOOTSTRAP): the keystone-blocker fix. A FULLY-NAKED bot (0 armor) must
+// accumulate its FIRST boots' worth of raw iron SAFELY before it can smelt any armor (the
+// chicken-and-egg: needs armor to mine iron, needs iron to make armor). While naked AND still
+// short of `bootsIron`, the miner (a) targets a SHALLOW band [ymin..ymax] - near-surface iron,
+// far fewer skeletons/creepers than the y<40 deep zone that keeps killing it - and (b) retreats
+// from ANY hostile within `retreatDist` (wider than the 6b mineDanger gate). Once it wears a
+// piece OR banks bootsIron raw iron, `active` goes false and the normal deep plan resumes.
+// enabled:false (ARMOR_BOOTSTRAP=0) -> always inactive => today's mining, byte-for-byte. PURE.
+function armorBootstrapMining (armorPieces, rawIronHave, opts = {}) {
+  const enabled = opts.enabled !== false
+  const bootsIron = opts.bootsIron != null ? opts.bootsIron : 4
+  const ymin = opts.ymin != null ? opts.ymin : 45
+  const ymax = opts.ymax != null ? opts.ymax : 58
+  const retreatDist = opts.retreatDist != null ? opts.retreatDist : 10
+  const active = enabled && (armorPieces || 0) <= 0 && (rawIronHave || 0) < bootsIron
+  // targetY = the DEEPEST end of the safe band: the descent stops at ymin, so the branch mine
+  // works the whole [ymin..ymax] near-surface iron band (the staircase passes through ymax->ymin).
+  return { active, targetY: ymin, ymin, ymax, retreatDist, bootsIron }
+}
+
+// PURE (#71): the retreat-when-unarmored decision, split out so both mine loops share ONE test-
+// able predicate. A bootstrapping (naked, first-iron) bot yields the moment a hostile is within
+// retreatDist - EARLIER/WIDER than mineDanger's 6b - so a skeleton can't whittle it down before
+// it climbs out. inactive (armored / flag off / has boots' iron) -> false => unchanged. PURE.
+function armorBootstrapRetreat (active, hostileDist, retreatDist) {
+  if (!active) return false
+  if (hostileDist == null) return false
+  return hostileDist <= (retreatDist != null ? retreatDist : 10)
+}
+
 // Batched-harvest cadence for the mining loops (the mine-one-pause-one fix): sweep drops on
 // every Nth step instead of every step. stepIdx is 0-based; a sweep is due when the step
 // COUNT (stepIdx+1) is a multiple of `every`. every=1 -> every step (the MINE_FLUID=0 legacy
@@ -301,4 +331,4 @@ function branchLayout (corridorIdx, opts = {}) {
   }
 }
 
-module.exports = { LAVA_RE, WATER_RE, AIRISH, DIRS, PICK_USES, perpendicular, targetMineY, worthMiningHere, mineableWhenBlocked, mineReusable, pickMaxUses, pickUsesLeft, toolMaxUses, toolUsesLeft, estExcursionBlocks, picksToCraft, needReTool, descentSafety, faceHazard, digExposureHazard, climbStepSafety, faceExposed, digToOreInReach, scratchWorthy, branchLayout, preferBranchMine, preferStoneDescend, stoneDescendTargetY, deepMinePlan, sweepDue }
+module.exports = { LAVA_RE, WATER_RE, AIRISH, DIRS, PICK_USES, perpendicular, targetMineY, worthMiningHere, mineableWhenBlocked, mineReusable, pickMaxUses, pickUsesLeft, toolMaxUses, toolUsesLeft, estExcursionBlocks, picksToCraft, needReTool, descentSafety, faceHazard, digExposureHazard, climbStepSafety, faceExposed, digToOreInReach, scratchWorthy, branchLayout, preferBranchMine, preferStoneDescend, stoneDescendTargetY, deepMinePlan, armorBootstrapMining, armorBootstrapRetreat, sweepDue }

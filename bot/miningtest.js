@@ -278,5 +278,38 @@ t('sweepDue: batched-harvest cadence fires on every Nth step (mine-one-pause-one
   for (let i = 0; i < 6; i++) assert.strictEqual(M.sweepDue(i, 1), true, 'every=1 sweeps every step (legacy cadence)')
 })
 
+t('armorBootstrapMining (#71): naked + short of a boots\' worth of iron -> shallow safe band; else inactive', () => {
+  // fully naked (0 armor) and 0 raw iron -> ACTIVE, shallow band, descent stops at ymin
+  const a = M.armorBootstrapMining(0, 0)
+  assert.strictEqual(a.active, true, 'naked + no iron -> bootstrap active')
+  assert.strictEqual(a.targetY, 45, 'descent floor = ymin (the deepest of the SAFE band, not the deep y28)')
+  assert.strictEqual(a.ymin, 45); assert.strictEqual(a.ymax, 58)
+  assert.strictEqual(a.retreatDist, 10, 'default wider retreat band')
+  // still short of the 4-iron boots threshold -> still active (accumulating)
+  assert.strictEqual(M.armorBootstrapMining(0, 3).active, true, '3 iron (< 4) -> still bootstrapping')
+  // reached a boots' worth -> DONE, deep mining may resume
+  assert.strictEqual(M.armorBootstrapMining(0, 4).active, false, '4 iron -> boots covered, resume normal depth')
+  // ANY armor piece worn -> not naked -> inactive (armored mining is unchanged)
+  assert.strictEqual(M.armorBootstrapMining(1, 0).active, false, 'one armor piece -> inactive')
+  // flag off (ARMOR_BOOTSTRAP=0) -> ALWAYS inactive, byte-for-byte
+  assert.strictEqual(M.armorBootstrapMining(0, 0, { enabled: false }).active, false, 'flag off -> inactive even when all else says go')
+  // env-tunable band + threshold
+  const b = M.armorBootstrapMining(0, 5, { ymin: 40, ymax: 55, bootsIron: 8, retreatDist: 12 })
+  assert.strictEqual(b.active, true, '5 iron with bootsIron 8 -> still short')
+  assert.strictEqual(b.targetY, 40); assert.strictEqual(b.retreatDist, 12)
+})
+
+t('armorBootstrapRetreat (#71): a bootstrapping bot retreats from ANY hostile within the wider band', () => {
+  // active + hostile inside the band -> retreat
+  assert.strictEqual(M.armorBootstrapRetreat(true, 8, 10), true, 'hostile 8b <= 10b band + active -> retreat')
+  assert.strictEqual(M.armorBootstrapRetreat(true, 10, 10), true, 'exactly at the band edge -> retreat')
+  // active but the hostile is beyond the band -> keep mining (the shallow band has few of them)
+  assert.strictEqual(M.armorBootstrapRetreat(true, 11, 10), false, 'hostile past the band -> no early retreat')
+  // no hostile -> never retreat
+  assert.strictEqual(M.armorBootstrapRetreat(true, null, 10), false, 'no hostile -> keep mining')
+  // NOT bootstrapping (armored / has iron / flag off) -> the wider retreat is off entirely
+  assert.strictEqual(M.armorBootstrapRetreat(false, 3, 10), false, 'inactive -> today\'s reflex owns it (no early retreat)')
+})
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall mining-strategy tests passed')
 process.exit(failures ? 1 : 0)
