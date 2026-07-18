@@ -299,5 +299,24 @@ t('#52 FISH_FROM_BANK: isBankStand - dry standable cell WITH adjacent water is a
   assert.strictEqual(P.isBankStand('air', 'stone', drySides, true), false, 'head not air -> not standable')
 })
 
+t('#61 SKIP_DEAD_FISHING: shouldFish - the fishing gate is DEFAULT OFF, true ONLY at FISHING_ENABLED=1', () => {
+  // DEFAULT OFF (the deliberate exception to the usual default-ON convention - fishing is dead).
+  assert.strictEqual(F.shouldFish({}), false, 'unset FISHING_ENABLED -> fishing OFF (default)')
+  assert.strictEqual(F.shouldFish({ FISHING_ENABLED: undefined }), false, 'undefined -> OFF')
+  assert.strictEqual(F.shouldFish({ FISHING_ENABLED: '0' }), false, '=0 -> OFF')
+  assert.strictEqual(F.shouldFish({ FISHING_ENABLED: 'true' }), false, 'only the exact string "1" enables it -> "true" is OFF')
+  assert.strictEqual(F.shouldFish({ FISHING_ENABLED: 1 }), false, 'numeric 1 (not the string "1") -> OFF')
+  // ON only at the exact string '1' -> restores today's fishing behavior byte-for-byte.
+  assert.strictEqual(F.shouldFish({ FISHING_ENABLED: '1' }), true, '=1 -> fishing ON (today\'s behavior)')
+  // no-arg defaults to process.env (the runtime path fishingEnabled() uses).
+  const saved = process.env.FISHING_ENABLED
+  try {
+    delete process.env.FISHING_ENABLED
+    assert.strictEqual(F.shouldFish(), false, 'no arg + env unset -> OFF (runtime default)')
+    process.env.FISHING_ENABLED = '1'
+    assert.strictEqual(F.shouldFish(), true, 'no arg + env=1 -> ON (runtime enable)')
+  } finally { if (saved === undefined) delete process.env.FISHING_ENABLED; else process.env.FISHING_ENABLED = saved }
+})
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall food-security tests passed')
 process.exit(failures ? 1 : 0)

@@ -5290,7 +5290,18 @@ function bankStandFor (bot, w) {
   return ranked.length ? new Vec3(ranked[0].x, ranked[0].y, ranked[0].z) : null
 }
 
+// #61 SKIP_DEAD_FISHING - the runtime fishing gate. Fishing is confirmed DEAD on this stack (0
+// catches all session); every fishing entry point consults THIS, so a single flag governs them
+// all. DEFAULT OFF (the deliberate exception to the usual default-ON convention - see food.shouldFish).
+// FISHING_ENABLED=1 restores today's fishing behavior byte-for-byte. GATE only: all rod/string/#52
+// machinery is kept intact so re-enabling is a one-flag flip if fishing is ever fixed upstream.
+function fishingEnabled () { return foodSec.shouldFish(process.env) }
+
 async function fishForFood (bot, { isStopped = () => false, say = () => {}, target = 6, home, scout = false, scoutRings } = {}) {
+  // #61: the belt-and-suspenders gate at the machinery ENTRY - covers EVERY caller (incl. the manual
+  // `!fish` command in commands.js) without touching them. Skip cleanly (return false, like "no
+  // water") so callers fall through to their next food option. FISHING_ENABLED=1 -> pass through.
+  if (!fishingEnabled()) { dbg('  fishing: disabled (0 catches on this version) - skipping (set FISHING_ENABLED=1 to re-enable)'); return false }
   if (hasSolidCeiling(bot, 12)) { dbg('  fishing: underground - not here'); return false }
   const mcData = require('minecraft-data')(bot.version)
   const edible = () => (bot.inventory ? bot.inventory.items() : []).filter(i => mcData.foodsByName && mcData.foodsByName[i.name] && !/rotten|spider_eye|poisonous/.test(i.name)).reduce((s, i) => s + i.count, 0)
@@ -5562,8 +5573,13 @@ async function secureFoodInner (bot, opts = {}) {
   // ensureFishingRod (bank-withdraw then craft, F2); bounded by fishForFood's 240s cap + hostile
   // reel-out. The floor only fires at food<=floorFood, which IS the §4 spiral exception, so it is
   // never spiral-suppressed. FOOD_FLOOR=0 -> the whole branch is skipped (byte-for-byte).
+  // #61 SKIP_DEAD_FISHING: compute the floor trigger ONCE; the fishing floor only ENTERS when fishing
+  // is enabled. Disabled (default) -> log a clean skip and fall straight through to the #59 harvest-
+  // first / FARM FLOOR / famine-hold path below (NO ensureFishingRod trek, NO walk-to-water, NO cast).
+  const floorTriggered = process.env.FOOD_FLOOR !== '0' && !fedEnough() && foodSec.foodFloorTriggered({ hp: bot.health, food: bot.food, hasPackFood: foodCount(bot) >= 1 })
+  if (floorTriggered && !fishingEnabled()) dbg('secureFood: FOOD FLOOR - fishing: disabled (0 catches on this version) - skipping the fishing floor -> farm-harvest/farm-floor/hold')
   let floorFished = false
-  if (process.env.FOOD_FLOOR !== '0' && !fedEnough() && foodSec.foodFloorTriggered({ hp: bot.health, food: bot.food, hasPackFood: foodCount(bot) >= 1 })) {
+  if (floorTriggered && fishingEnabled()) {
     const escalate = foodSec.foodFloorEscalated(_foodFloorNoProgress)
     const foodBefore = bot.food ?? 0
     dbg('secureFood: FOOD FLOOR - food=' + bot.food + ' hp=' + bot.health + ' pack dry -> fishing floor' + (escalate ? ' (ESCALATED - widening the water scout)' : ''))
@@ -5672,7 +5688,10 @@ async function secureFoodInner (bot, opts = {}) {
   // 5) fish - works anywhere with surface water (scouts for a pond in a real crisis). Skip when the
   // F1' floor already ran the fishing leg this call (no double 240s session); FOOD_FLOOR=0 ->
   // floorFished is always false -> today's unconditional fishing (byte-for-byte).
-  try { if (!floorFished) await fishForFood(bot, { isStopped, say, home, scout: bot.food <= 4 }) } catch (e) { dbg('secureFood: fishing failed (' + e.message + ')') }
+  // #61 SKIP_DEAD_FISHING: gate the unconditional fishing leg. Disabled (default) -> skip cleanly to
+  // the scout (6) / famine-hold (7) below; NO walk-to-water, NO cast. =1 -> today's leg byte-for-byte.
+  if (!fishingEnabled()) dbg('secureFood: fishing: disabled (0 catches on this version) - skipping the unconditional fishing leg -> scout/hold')
+  try { if (!floorFished && fishingEnabled()) await fishForFood(bot, { isStopped, say, home, scout: bot.food <= 4 }) } catch (e) { dbg('secureFood: fishing failed (' + e.message + ')') }
   await eatUp(bot)
   if (fedEnough()) return { fed: true, blockedOn: null }
   // 6) crisis: SYSTEMATICALLY sweep unexplored ground for animals + water (not the old

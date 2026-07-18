@@ -216,6 +216,18 @@ function needStringForRod ({ hasRod, packString, bankRods, target } = {}) {
   return !hasRod && (bankRods || 0) < 1 && (packString || 0) < tgt
 }
 
+// #61 SKIP_DEAD_FISHING - the ONE fishing-enabled gate (PURE, env-driven). Fishing is confirmed
+// DEAD on this mineflayer/1.21 stack (0 catches all session, every cast logs "Fishing cancelled"/
+// "cast timeout"), yet the crisis food path still routed to it FIRST - wasting scarce crisis time
+// AND walking the bot into deep water at night at low hp (the recurring drown + night-mob death).
+// This gate is the DELIBERATE EXCEPTION to the usual default-ON flag convention: fishing is OFF
+// unless FISHING_ENABLED === '1', BECAUSE it is dead weight. Every fishing entry point in
+// provision.js consults this (via fishingEnabled()). FISHING_ENABLED=1 restores today's fishing
+// behavior byte-for-byte - all the rod/string/#52 fish-from-bank machinery is kept intact; this is
+// a runtime GATE only, so if a future MC/mineflayer update fixes fishing, `setx FISHING_ENABLED 1`
+// turns it straight back on. PURE (env in, go/no-go out) so the gate itself is offline-tested.
+function shouldFish (env = process.env) { return (env || {}).FISHING_ENABLED === '1' }
+
 // How many bread can we bake from N wheat (3 wheat -> 1 bread). PURE arithmetic, offline-tested.
 function breadFromWheat (wheatCount) { return Math.max(0, Math.floor((wheatCount || 0) / 3)) }
 
@@ -230,4 +242,4 @@ function wheatWithdrawForBake ({ packWheat, bankWheat, bankFoodPts, bankTargetPt
   return Math.max(0, Math.min(bankWheat || 0, need, cap))
 }
 
-module.exports = { DEFAULT_BUFFER, BAD_FOOD, RAW_COOKABLE_FOOD, foodTier, hasFoodSupply, needsFoodSupply, shouldSweepForFood, foodSupplyAction, shouldTrekHomeForFood, breadFromWheat, wheatWithdrawForBake, inLoopFoodTrigger, busyPreemptFood, foodFloorTriggered, outboundRungAdmissible, famineHoldFood, foodFloorEscalation, foodFloorEscalated, AUTO_EAT_AT, needStringForRod }
+module.exports = { DEFAULT_BUFFER, BAD_FOOD, RAW_COOKABLE_FOOD, foodTier, hasFoodSupply, needsFoodSupply, shouldSweepForFood, foodSupplyAction, shouldTrekHomeForFood, breadFromWheat, wheatWithdrawForBake, inLoopFoodTrigger, busyPreemptFood, foodFloorTriggered, outboundRungAdmissible, famineHoldFood, foodFloorEscalation, foodFloorEscalated, AUTO_EAT_AT, needStringForRod, shouldFish }
