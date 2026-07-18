@@ -26,6 +26,7 @@ const provCore = require('./provision-core.js')
 const { AIRISH, REPLACEABLE, canBreakNaturally, countItem, inventoryCounts, toolForBlock,
   gotoWithTimeout, collectDrops, stepInto, placeAt, nearHostile, isNight } = provCore
 const worldMemory = require('./world-memory.js')
+const INFRA_BLOCK = { table: /crafting_table$/, furnace: /furnace$/, chest: /chest$/, bed: /_bed$/ } // refactor fix: the reconcileInfra consumer moved here but this const stayed (unexported) in world-memory.js -> ReferenceError
 const { loadWorldMem, saveWorldMem, listInfra, rememberInfra, forgetInfra, recallInfra,
   recallInfraVerified, knownBed, rememberBed, forgetBed } = worldMemory
 
