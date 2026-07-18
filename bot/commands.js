@@ -28,6 +28,8 @@ const opBuild = require('./op-build.js') // LEGACY operator /fill+/setblock buil
 const { blockPos, anchorInFront, fill, setblock, normName, findPlayer, buildWall, buildTower, buildHouse } = opBuild
 const gear = require('./gear.js') // PURE gear picks (which tool for a block, which slot/material of armor); the acting code stays here
 const { bestTool, armorSlot, bestArmor, armorRank, ARMOR_MAT, ARMOR_RANK, LEATHER_PIECES } = gear
+const telemetry = require('./telemetry.js') // activity/outcome/progress/checklist/stuck records; trackTick below still orchestrates it with the death snapshot
+const { activityInfo, beginActivity, endActivity, recordOutcome, touchProgress, progressInfo, markStalled, _resetProgress, pushOutcomeRing, recentOutcomes, checklistBegin, checklistStep, JOB_STEPS } = telemetry
 const GoalNearXZBanded = navLeg.makeGoalNearXZBanded(goals.Goal) // Y-aware drop-in for goals.GoalNearXZ (NAV_HAZARD_LEGS)
 const NAV_HAZARD_LEGS = process.env.NAV_HAZARD_LEGS !== '0' // NAV Phase B (default ON): Y-band the trek leg goal + price lava in travelMovements; =0 => today's Y-blind GoalNearXZ + no lava cost, byte-for-byte
 const WATER_SAFE = process.env.WATER_SAFE !== '0' // task #45 (default ON): price OVER-THE-HEAD water in travelMovements so legs route around a pond aquifer (shallow water stays free -> farm/fishing reachable); =0 => no water cost, byte-for-byte
@@ -37,7 +39,7 @@ const NAV_WAYPOINT_GRAPH = process.env.NAV_WAYPOINT_GRAPH !== '0' // Phase C / �
 const NAV_LADDER_DIET = process.env.NAV_LADDER_DIET === '1' // Phase C / §5-P4 DEFAULT OFF: retire the superseded wedge soft-steer only after the design's >=1wk soak; unset => today byte-for-byte
 const PROBE_MS = Math.max(200, parseInt(process.env.NAV_PROBE_MS || '1000', 10)) // bounded getPathTo budget per candidate (success/noPath resolve fast; only a far `timeout` costs the full budget)
 let dbgSink = null // injected by index.js: debug lines persist to logs/bot-events.log
-function setDebugSink (fn) { dbgSink = fn }
+function setDebugSink (fn) { dbgSink = fn; telemetry.setDebugSink(fn) } // forward: telemetry's checklistStep emits [job] step lines through the same sink
 const dbg = (...a) => {
   const line = '[build] ' + a.map(x => String(x)).join(' ')
   if (process.env.BUILD_DEBUG) console.log(line)
@@ -116,7 +118,8 @@ try {
 // death can record what went into the grave. Read at death time it's already unreliable.
 let invSnap = { count: 0, notable: [], at: 0 }
 let lastItemCount = -1 // S7 H2: total carried-item count from the previous snap (a delta = a VERIFIED inventory change). Separate from invSnap.count (consumed by the death recorder).
-let progAnchor = null  // S7 H1: the position the bot last made 8b of real progress from (anti-spin anchor; reset on respawn)
+// (progAnchor - the S7 H1 anti-spin anchor - moved to telemetry.js with the rest of the
+// progress latch; recordDeath resets it through telemetry.resetProgressAnchor().)
 function snapInventory (bot) {
   try {
     const items = bot.inventory ? bot.inventory.items() : []
@@ -138,7 +141,7 @@ function snapInventory (bot) {
 function recordDeath (info) {
   info.items = (Date.now() - invSnap.at < 90000) ? { count: invSnap.count, notable: invSnap.notable.slice(0, 12), build: invSnap.build || 0 } : { count: 0, notable: [], build: 0 }
   invSnap = { count: 0, notable: [], at: 0 } // consumed - the NEXT death starts naked until a new snap
-  progAnchor = null // S7 H1: the respawn teleport must re-anchor cleanly (a huge displacement is not progress)
+  telemetry.resetProgressAnchor() // S7 H1: the respawn teleport must re-anchor cleanly (a huge displacement is not progress)
   deathLedger.push(info)
   if (deathLedger.length > 16) deathLedger.shift()
   lastDeath = info
@@ -147,7 +150,8 @@ function recordDeath (info) {
   // own and kept "gathering" from the respawn point through the night (verified on test
   // server: count went NEGATIVE, then a 14-death carousel). Builds handle death via
   // markBuildInterrupted/resume; this covers the op/brain-issued long ops.
-  if (activity && /^(gather|provision)$/.test(activity.name)) { buildAbort = true }
+  const act = telemetry.activityInfo()
+  if (act && /^(gather|provision)$/.test(act.name)) { buildAbort = true }
 }
 // graveValue / graveWorthIt / graveUrgency / graveUrgencyRank / graveCompare now live in
 // grave-policy.js (pure, destructured at the top of this file). The LEDGER stays here.
@@ -197,10 +201,7 @@ function gravesSnapshot ({ pos, home, now, ledger } = {}) {
   const deathsRecent = led.filter(d => d && t - (d.at || 0) < 20 * 60000).length
   return { graves, deathsRecent }
 }
-// activityInfo (S4, DESIGN §5): a one-liner over the module `activity` record (set by beginActivity)
-// so schedulerState can read the active op's name/detail/startedAt WITHOUT building the heavyweight
-// state(bot) snapshot (blockAtCursor/entity summaries) on every tick. null when nothing is running.
-function activityInfo () { return activity ? { name: activity.name, detail: activity.detail, startedAt: activity.startedAt } : null }
+// activityInfo now lives in telemetry.js (destructured at the top of this file).
 
 // auto-resume: the build to pick back up after a death interrupts it. autoBuild
 // re-provisions whatever we lost and Build diffs world-vs-schematic, so resuming just
@@ -225,138 +226,18 @@ const RESUME_HOLD_MS = parseInt(process.env.RESUME_HOLD_MS || '900000', 10) // p
 const SUPERVISOR_RESUME_HOLD_MS = parseInt(process.env.SUPERVISOR_RESUME_HOLD_MS || '60000', 10) // a supervisor UNSTICK (frozen-vitals nudge: stop->recover) pauses only briefly, not the full operator 15min
 let cancelArmedAt = 0 // two-step cancelbuild confirm window (ms epoch of the arm)
 
-// ---- observability: what the body is DOING, how the last long op ENDED, and whether
-// it's WEDGED. The brain reads /state to make high-level calls; without these a stuck
-// or failed body looks identical to a working one, so the brain re-issues the same
-// doomed command and idles up to a heartbeat before noticing. These surface enough for
-// the brain to change approach - the low-level recovery stays body-side.
-let activity = null    // { name, detail, startedAt } - a long op running RIGHT NOW
-let lastOutcome = null // { action, ok, detail, at } - how the last long op ended
-function beginActivity (name, detail) { activity = { name, detail: detail || '', startedAt: Date.now() }; touchProgress('begin:' + name) } // S7: a just-started job is at zero idle - a stale clock must never insta-fail it
-// Record an outcome the brain should NOTICE: any FAILURE, a DETACHED flow (build/
-// provision/autobuild resolve after /cmd already returned, so their result never
-// reaches the brain otherwise), or anything that ran > 45s (likely outlived the brain's
-// 60s /cmd fetch). Short successful awaited commands already reach the brain via the
-// /cmd reply + history, so we skip those to avoid redundant wakes.
-function endActivity (ok, detail, opts = {}) {
-  const a = activity
-  if (a && (!ok || opts.detached || Date.now() - a.startedAt > 45000)) {
-    lastOutcome = { action: a.name + (a.detail ? ' ' + a.detail : ''), ok: !!ok, detail: String(detail || '').slice(0, 100), at: Date.now() }
-  }
-  // TRAINING DATA (episodes): the body's autonomous task-level competence - gathers,
-  // recoveries, travels, builds - with real outcomes and durations. The brain dataset
-  // only captures brain choices; this captures what the BODY can do (the richer skill).
-  if (a) {
-    try { pushOutcomeRing(a.name + (a.detail ? ' ' + a.detail : ''), ok, detail, (!ok && /\(stopped\)/.test(String(detail || '')))) } catch {} // task #34: feed the outcome ring (successes too - they reset a repeat-fail streak); #49: a "(stopped)" fail is a watchdog/preempt-induced PAUSE, not a behavioral failure -> tag selfAbort
-    try {
-      const b = globalBot
-      fs.appendFile(EPISODE_LOG, JSON.stringify({
-        t: Date.now(), episode: a.name, detail: String(a.detail || '').slice(0, 60), ok: !!ok,
-        note: String(detail || '').slice(0, 100), ms: Date.now() - a.startedAt,
-        hp: b && b.health != null ? Math.round(b.health * 10) / 10 : null,
-        food: b && b.food != null ? b.food : null,
-        pos: b && b.entity ? { x: Math.floor(b.entity.position.x), y: Math.floor(b.entity.position.y), z: Math.floor(b.entity.position.z) } : null
-      }) + '\n', () => {})
-    } catch {}
-  }
-  if (a && a.name === 'autobuild') jobList = null // the job's checklist dies with the job
-  activity = null
-}
-const EPISODE_LOG = process.env.EPISODE_LOG || path.join(__dirname, 'body-episodes.jsonl')
-let globalBot = null // set once by trackTick; lets endActivity snapshot vitals without threading bot everywhere
-// Let non-command code (reflexes) record an outcome directly (e.g. a wedged follow).
-function recordOutcome (action, ok, detail) { lastOutcome = { action, ok: !!ok, detail: String(detail || '').slice(0, 100), at: Date.now() }; try { pushOutcomeRing(action, ok, detail, /^watchdog:/.test(String(action || ''))) } catch {} } // task #34: also feed the bounded outcome ring; #49: watchdog:* records are the watchdog's own verdict -> tag selfAbort
-
-// ---- S7 FORWARD-PROGRESS LATCH (DESIGN-S7-watchdog) --------------------------------------
-// A module-level heartbeat advanced ONLY by VERIFIED progress via touchProgress (an anchored 8b
-// displacement, an item-count delta, a pathfix-verified place/break, a collected smelt output, a
-// completed rung/step, a regen tick, a valid pass of a DECLARED hold). Read by
-// provision.activeJobInfo -> the 5s watchdog. One object write per touch; a job spinning/hung in
-// place touches NOTHING - that is the whole point. WATCHDOG=0 leaves these as inert timestamps.
-// task #34 (cycle detector): a MONOTONIC workCount, advanced ONLY by a WORK tag (item/block/smelt/
-// heal/rung/chore progress - never by movement or a fresh dispatch). It is the chest<->build shuttle
-// guard: the oscillation predicate requires ZERO work touches across its whole window, so real
-// back-and-forth work (which always moves an item or a block) can never be flagged. Inert unless the
-// watchdog's cycle detector reads it (like S7's touchProgress: cheap + unread == byte-identical).
-const CYCLE_WORK_TAGS = new Set(['itemDelta', 'placed', 'broke', 'smelt', 'regen', 'ladderRung', 'maintStep'])
-let bodyProgress = { at: Date.now(), by: 'boot', stalled: false, workCount: 0 }
-function touchProgress (tag) { const w = bodyProgress.workCount || 0; bodyProgress = { at: Date.now(), by: tag || '', stalled: false, workCount: CYCLE_WORK_TAGS.has(tag) ? w + 1 : w } } // any touch clears stalled; WORK tags also bump workCount
-function progressInfo () { return bodyProgress }
-function markStalled () { bodyProgress.stalled = true } // the nudge's blockedOn='stalled' marker; cleared by the next touch
-function _resetProgress () { bodyProgress = { at: Date.now(), by: 'reset', stalled: false, workCount: 0 } } // test seam (house pattern: _setNow/_setMaintaining)
-
-// ---- OUTCOME RING (task #34): a bounded 16-entry history of how recent long ops ENDED, so the
-// repeat-fail predicate can SEE the same failure recur. The architecture records each failure into
-// the single-record `lastOutcome` and immediately forgets it (that is the "why is this even possible"
-// gap); this ring is the memory. Pushed from the two EXISTING recording paths (endActivity /
-// recordOutcome) + the scheduler's runJob catch. Each record: { t, action, ok, failClass, cell } where
-// failClass = detail lowercased with digits/coords stripped (so "door at 433,62,112" repeats match)
-// and cell = position floored to 4b. lastOutcome / the brain's lastResult are UNCHANGED (additive).
-const CYCLE_OUTCOME_MAX = 16
-let recentOutcomesRing = []
-function cycleFailClass (detail) { return String(detail || '').toLowerCase().replace(/-?\d+(?:\.\d+)?/g, '#').replace(/\s+/g, ' ').trim() }
-function cycleCellOf () { const b = globalBot; const p = b && b.entity && b.entity.position; if (!p) return null; return { x: Math.floor(p.x / 4) * 4, y: Math.floor(p.y / 4) * 4, z: Math.floor(p.z / 4) * 4 } }
-function pushOutcomeRing (action, ok, detail, selfAbort) {
-  recentOutcomesRing.push({ t: Date.now(), action: String(action || ''), ok: !!ok, failClass: ok ? '' : cycleFailClass(detail), cell: cycleCellOf(), selfAbort: !!selfAbort }) // #49: selfAbort tags watchdog/preempt-induced "(stopped)" pauses; additive + inert unless index.js filters on it
-  if (recentOutcomesRing.length > CYCLE_OUTCOME_MAX) recentOutcomesRing.shift()
-}
-function recentOutcomes () { return recentOutcomesRing }
-
-// ---- JOB CHECKLIST (operator order: a goal gets a CHECKLIST and is worked step by
-// step - only survival may interrupt). Observational, not a scheduler: each phase of a
-// job announces itself, so the flight recorder and /state always show exactly which
-// step the job is on ("what is it doing" is never a guess). Cleared when the autobuild
-// activity ends; each step's own code still decides whether it applies (no-op = quick).
-let jobList = null // { steps: [names], current, startedAt }
-const JOB_STEPS = ['travel to site', 'survey the site', 'basic tools', 'stone pickaxe',
-  'camp: chest/furnace/bed', 'camp: safehouse hut', 'camp: bank into hut', 'camp: wheat farm', 'armor up', 'gather materials', 'build']
-function checklistBegin (steps) { jobList = { steps: steps.slice(), current: null, startedAt: Date.now() } }
-function checklistStep (name) {
-  if (!jobList) return
-  jobList.current = name
-  dbg(`[job] step ${jobList.steps.indexOf(name) + 1}/${jobList.steps.length}: ${name}`)
-}
-
-// Stuck detection: the body is TRYING to get somewhere but making no progress. Driven
-// by index.js on a 1s tick. "Trying" = a non-follow pathfinder goal is set, OR a travel/
-// gather/come/recover activity is running. "No progress" = moved < 1.5 blocks (3-D, so a
-// climb-out counts as progress) over the trailing ~12s. Excluded so we don't cry wolf:
-// operator builds (isBusy - they legitimately stand still and self-recover), cave-escape
-// climbs (escaping), active digs (targetDigBlock IS progress), and follow (a stationary
-// player is not "stuck" - the leash reflex owns that). Surfaced in /state.stuck.
-let posHist = []       // ring of { x, y, z, t }
-let stuckSince = 0
-let tryingSince = 0    // when the CURRENT move attempt began (goal/activity became active)
-const STUCK_WINDOW_MS = 12000
-const STUCK_DIST = 1.5
+// ---- observability lives in telemetry.js -------------------------------------------
+// activity/outcome records, the S7 forward-progress latch, the outcome ring, the job
+// checklist and stuck detection all moved there (destructured at the top of this file).
+// trackTick STAYS here because it orchestrates two owners: the death-ledger inventory
+// snapshot below and telemetry's position tracking. Splitting the tick - rather than
+// trying to split the modules - is what broke the grave<->telemetry cycle (trackTick
+// called snapInventory, snapInventory called touchProgress). isBusy/escaping are passed
+// in because they are THIS file's build latches.
 function trackTick (bot) {
-  globalBot = bot // vitals reference for the episode logger
+  telemetry.setBot(bot) // vitals reference for the episode logger
   snapInventory(bot) // rolling carried-items snapshot - stamps death records (grave value)
-  const ent = bot.entity
-  if (!ent || !ent.position) { stuckSince = 0; tryingSince = 0; posHist = []; return }
-  const now = Date.now()
-  const p = ent.position
-  posHist.push({ x: p.x, y: p.y, z: p.z, t: now })
-  while (posHist.length && now - posHist[0].t > STUCK_WINDOW_MS + 2000) posHist.shift()
-  // S7 H1 (before the isBusy early-return below - busy bodies are exactly who we watch): anchored
-  // 8b-displacement heartbeat. The anchor advances ONLY when the bot gets 8 blocks from where it
-  // last made progress, so a bot spinning/bobbing/pacing inside an 8b pocket NEVER touches
-  // (displacement-from-anchor, not path length) - the anti-spin is by construction. Cost: one hypot/s.
-  if (!progAnchor) progAnchor = { x: p.x, y: p.y, z: p.z }
-  else if (Math.hypot(p.x - progAnchor.x, p.y - progAnchor.y, p.z - progAnchor.z) >= 8) { touchProgress('moved8b'); progAnchor = { x: p.x, y: p.y, z: p.z } }
-  const goal = bot.pathfinder && bot.pathfinder.goal
-  const following = goal && goal.constructor && goal.constructor.name === 'GoalFollow'
-  const trying = (goal && !following) || (activity && /^(travel|gather|come|recover)$/.test(activity.name))
-  if (!trying || bot.targetDigBlock || isBusy() || escaping) { stuckSince = 0; tryingSince = 0; return }
-  if (!tryingSince) tryingSince = now // just started this attempt - clock starts NOW, so idle time
-  // before the move began (pathfinding takes a second or two) never counts as "stuck".
-  if (now - tryingSince < STUCK_WINDOW_MS) return // give the attempt a full window to show progress
-  const cutoff = Math.max(now - STUCK_WINDOW_MS, tryingSince)
-  const old = posHist.find(h => h.t >= cutoff)
-  if (!old) return
-  const moved = Math.hypot(p.x - old.x, p.y - old.y, p.z - old.z)
-  if (moved < STUCK_DIST) { if (!stuckSince) stuckSince = now }
-  else stuckSince = 0
+  telemetry.trackPosition(bot, { isBusy, escaping })
 }
 
 // Progress chatter from a long build/provision run calls bot.chat DIRECTLY (bypassing
@@ -2434,14 +2315,14 @@ function state (bot) {
     maneuver: (() => { try { const m = arbiter.topManeuver(); return m ? { label: m.label, tier: arbiter.priName(m.pri) } : null } catch { return null } })(), // the priority-arbiter's current body owner (a navigation in progress), so goal-thrash is visible in /state
 
     // OBSERVABILITY so the brain can spot + break out of stuck/failed/hazardous states:
-    activity: activity ? { name: activity.name, detail: activity.detail, forSec: Math.round((Date.now() - activity.startedAt) / 1000) } : null, // a long op still running from a past turn
-    progress: { agoSec: Math.round((Date.now() - bodyProgress.at) / 1000), by: bodyProgress.by, stalled: bodyProgress.stalled }, // S7 verified-progress clock (last verified touch + the nudge's stalled flag)
+    activity: (() => { const a = activityInfo(); return a ? { name: a.name, detail: a.detail, forSec: Math.round((Date.now() - a.startedAt) / 1000) } : null })(), // a long op still running from a past turn
+    progress: (() => { const bp = progressInfo(); return { agoSec: Math.round((Date.now() - bp.at) / 1000), by: bp.by, stalled: bp.stalled } })(), // S7 verified-progress clock (last verified touch + the nudge's stalled flag)
     buildProgress, // REAL numbers (material have/need) - the brain answers progress questions from THIS
-    checklist: jobList ? { step: jobList.current, n: jobList.steps.indexOf(jobList.current) + 1, of: jobList.steps.length, steps: jobList.steps } : null, // the job's step-by-step plan + where it is (operator order: goals get checklists)
-    lastResult: (lastOutcome && Date.now() - lastOutcome.at < 180000) // how the last long/detached/failed op ended (results that don't come back via /cmd)
-      ? { action: lastOutcome.action, ok: lastOutcome.ok, detail: lastOutcome.detail, ageSec: Math.round((Date.now() - lastOutcome.at) / 1000) }
-      : null,
-    stuck: stuckSince ? { forSec: Math.round((Date.now() - stuckSince) / 1000) } : null, // body trying to move but not progressing
+    checklist: (() => { const jl = telemetry.checklistInfo(); return jl ? { step: jl.current, n: jl.steps.indexOf(jl.current) + 1, of: jl.steps.length, steps: jl.steps } : null })(), // the job's step-by-step plan + where it is (operator order: goals get checklists)
+    lastResult: (() => { const lo = telemetry.lastOutcomeInfo(); return (lo && Date.now() - lo.at < 180000) // how the last long/detached/failed op ended (results that don't come back via /cmd)
+      ? { action: lo.action, ok: lo.ok, detail: lo.detail, ageSec: Math.round((Date.now() - lo.at) / 1000) }
+      : null })(),
+    stuck: (() => { const ss = telemetry.stuckInfo(); return ss ? { forSec: Math.round((Date.now() - ss) / 1000) } : null })(), // body trying to move but not progressing
     hazards: hazards(bot),        // { underground, onFire, inLava, inWater, drowning } - immediate dangers
     waypoints: memory.waypointNames(), // named places you can "goto <name>"
     entities: summariseEntities(bot)
@@ -2570,7 +2451,7 @@ async function autoBuild (bot, schem, at, opts = {}) {
   // gather so replants/groves never put a future tree inside (or leaning over) the build.
   const avoid = (() => { const st = schem.start(); const en = schem.end(); return { x1: at.x + st.x - 6, z1: at.z + st.z - 6, x2: at.x + en.x + 6, z2: at.z + en.z + 6 } })()
   provision.setBuildZone(avoid) // shelters must dig OUTSIDE this while the build is active (cleared by the callers' settle handlers)
-  if (!jobList) checklistBegin(JOB_STEPS) // resume pre-begins (its 'travel to site' step is already done)
+  if (!telemetry.checklistInfo()) checklistBegin(JOB_STEPS) // resume pre-begins (its 'travel to site' step is already done)
   checklistStep('survey the site')
   // DIFF the BOM against what already STANDS at the site: a resume/re-run of a partial
   // build must only provision the MISSING blocks (the raw BOM sent the bot back into the
