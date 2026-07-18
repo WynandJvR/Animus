@@ -14,9 +14,11 @@
 // and face/orientation math. Its own build loop is creative-only (spawns items
 // via bot.creative), so the placement loop below is our own, survival version.
 //
-// STATUS: download + parse + bill-of-materials are VERIFIED offline against real
-// files. The buildSurvival() executor is written but UNTESTED - it needs live
-// tuning on the server (reach, timing, pillar-up, scaffold cleanup).
+// STATUS: download + parse + bill-of-materials are VERIFIED offline against real files.
+// buildSurvival() is VERIFIED LIVE - a full hut built by hand in survival on the test
+// server, and re-run since. It has been through several rounds of live tuning (reach,
+// timing, pillar-up, scaffold cleanup), which is where the episode caps and standoff
+// timers further down came from - they are live-derived, not guesses.
 
 const fs = require('fs')
 const path = require('path')
