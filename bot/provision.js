@@ -5348,7 +5348,16 @@ async function secureFoodInner (bot, opts = {}) {
   // outward legs and hold indoors (bounded); the caller / crisis reflex re-runs the whole chain
   // later. Only when it can hold and only after HOME-FOOD-FIRST was tried; food>4 (or no-hold
   // callers like the mid-trek chain) keep today's exact hunt/farm/fish/scout ordering.
-  if (opts.canHold && triedHomeFood && foodSec.famineHoldFood(bot.food) && !isStopped()) {
+  // #54 FAMINE_FORAGE_SAFE (default on): the famine-hold (food<=4) is meant to stop a bot from
+  // marching out to DIE on a fishing trip - but at hp OK + DAY + no mob near, foraging is SAFE, and
+  // holding indoors here just FREEZES the bot forever (food pinned at 4 while perfectly still ->
+  // never drains to the food<=2 crisis floor -> never fishes -> zero progress, the live 06:1x stuck).
+  // When it's genuinely safe, SKIP the hold so execution reaches the farm-rebuild (5358) + the
+  // unconditional fishing leg (5382, fish-from-bank #52) + the scout (5387) and the bot FEEDS itself.
+  // Night / mob-near / hp<=floor still holds (the #40 death-march stays fixed). =0 -> today byte-for-byte.
+  const safeToForage = process.env.FAMINE_FORAGE_SAFE !== '0' &&
+    (bot.health ?? 20) > Number(process.env.FAMINE_FORAGE_HP || 10) && !isNight(bot) && !nearHostile(bot, 12)
+  if (opts.canHold && triedHomeFood && foodSec.famineHoldFood(bot.food) && !safeToForage && !isStopped()) {
     dbg('secureFood: famine-hold - food=' + bot.food + ' and home stores dry - holding indoors, not trekking out to fish/scout')
     say('nothing to eat out here and home is dry - holing up rather than starving on a fishing trip')
     try { await boundedHold(bot, { isStopped, say }) } catch {}
