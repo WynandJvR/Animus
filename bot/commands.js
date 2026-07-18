@@ -26,6 +26,8 @@ const perception = require('./perception.js') // read-only world/self observatio
 const { HOSTILE, facing, summariseEntities, biomeName, nearestThreat, nearbyPlayers, wornArmor, isWaterlogged, hazards } = perception
 const opBuild = require('./op-build.js') // LEGACY operator /fill+/setblock builders + position/player helpers (NOT the survival build path)
 const { blockPos, anchorInFront, fill, setblock, normName, findPlayer, buildWall, buildTower, buildHouse } = opBuild
+const gear = require('./gear.js') // PURE gear picks (which tool for a block, which slot/material of armor); the acting code stays here
+const { bestTool, armorSlot, bestArmor, armorRank, ARMOR_MAT, ARMOR_RANK, LEATHER_PIECES } = gear
 const GoalNearXZBanded = navLeg.makeGoalNearXZBanded(goals.Goal) // Y-aware drop-in for goals.GoalNearXZ (NAV_HAZARD_LEGS)
 const NAV_HAZARD_LEGS = process.env.NAV_HAZARD_LEGS !== '0' // NAV Phase B (default ON): Y-band the trek leg goal + price lava in travelMovements; =0 => today's Y-blind GoalNearXZ + no lava cost, byte-for-byte
 const WATER_SAFE = process.env.WATER_SAFE !== '0' // task #45 (default ON): price OVER-THE-HEAD water in travelMovements so legs route around a pond aquifer (shallow water stays free -> farm/fishing reachable); =0 => no water cost, byte-for-byte
@@ -758,42 +760,9 @@ async function placeTorchNearby (bot) {
   return `placed torch at ${ref.position.x},${ref.position.y + 1},${ref.position.z}`
 }
 
-// Pick the best tool in inventory for a block (axe/pickaxe/shovel, best material).
-function bestTool (bot, blockName) {
-  const items = bot.inventory ? bot.inventory.items() : []
-  let kind = null
-  if (/_log$|_wood$|plank|_stem$|fence|door|chest|crafting|bookshelf|barrel|sign|ladder|wooden/.test(blockName)) kind = 'axe'
-  else if (/stone|ore|cobble|deepslate|granite|diorite|andesite|obsidian|brick|furnace|anvil|concrete|terracotta|netherrack|basalt|blackstone|amethyst|raw_|rail|iron_block|gold_block/.test(blockName)) kind = 'pickaxe'
-  else if (/dirt|grass_block|sand|gravel|clay|soul_|mud|path|farmland|snow|podzol|mycelium/.test(blockName)) kind = 'shovel'
-  if (!kind) return null
-  const tools = items.filter(i => i.name.endsWith('_' + kind))
-  const order = ['netherite', 'diamond', 'iron', 'stone', 'golden', 'wooden']
-  for (const m of order) { const t = tools.find(i => i.name.startsWith(m)); if (t) return t }
-  return tools[0] || null
-}
-
-// Which body slot an item is WORN in (so armor is put on, not just held). Returns
-// 'head'|'torso'|'legs'|'feet' for armor, else null. mineflayer's bot.equip needs
-// this destination - equipping armor to 'hand' only holds it (the "put it on did
-// nothing" bug). Covers every armor material + turtle helmet, elytra, pumpkin hat.
-function armorSlot (name) {
-  if (/_helmet$|^turtle_helmet$|^carved_pumpkin$/.test(name)) return 'head'
-  if (/_chestplate$|^elytra$/.test(name)) return 'torso'
-  if (/_leggings$/.test(name)) return 'legs'
-  if (/_boots$/.test(name)) return 'feet'
-  return null
-}
-// Best armor piece among candidates for one slot (strongest material wins).
-function bestArmor (pieces) {
-  const order = ['netherite', 'diamond', 'iron', 'chainmail', 'golden', 'leather', 'turtle']
-  for (const m of order) { const p = pieces.find(i => i.name.startsWith(m)); if (p) return p }
-  return pieces[0] || null
-}
-// Material rank for a standard armor piece (same preference order as bestArmor); an empty slot or a
-// non-standard piece (elytra/carved_pumpkin) ranks 0 so it's never a downgrade target.
-const ARMOR_MAT = /^(netherite|diamond|iron|chainmail|golden|leather|turtle)_/
-const ARMOR_RANK = { turtle: 1, leather: 2, golden: 3, chainmail: 4, iron: 5, diamond: 6, netherite: 7 }
-function armorRank (name) { const m = ARMOR_MAT.exec(name || ''); return m ? (ARMOR_RANK[m[1]] || 0) : 0 }
+// bestTool / armorSlot / bestArmor / armorRank / ARMOR_MAT / ARMOR_RANK now live in
+// gear.js (destructured at the top of this file). The ACTING code - equipCarriedArmor,
+// provisionArmor, survivalPrep - stays here; gear.js holds only the "which one" picks.
 // FIX #19 (EQUIP_CARRIED_ARMOR): wear STRICTLY-BETTER armor already in the pack, per slot. This is
 // CARRIED-ONLY - it never treks/gathers/crafts (that's provisionArmor/armorup). Equipping is an
 // instant inventory op (no move/dig/nav, zero grief risk), so the index.js reflex runs it even
@@ -817,17 +786,8 @@ async function equipCarriedArmor (bot) {
   return wore
 }
 
-// Leather-armor pieces in PROTECTION-PER-LEATHER order, so a partial haul still
-// guards the most valuable slots first: chestplate (3 armor / 8 leather) beats
-// leggings (2/7) beats helmet (1/5) beats boots (1/4). Leather armor is the
-// from-NOTHING tier - the recipes are pure leather (no sticks/planks), so the only
-// crafting prerequisite is a table.
-const LEATHER_PIECES = [
-  { item: 'leather_chestplate', slot: 'torso', leather: 8 },
-  { item: 'leather_leggings', slot: 'legs', leather: 7 },
-  { item: 'leather_helmet', slot: 'head', leather: 5 },
-  { item: 'leather_boots', slot: 'feet', leather: 4 }
-]
+// LEATHER_PIECES (the protection-per-leather order for a from-nothing armor haul) now
+// lives in gear.js.
 
 // Get the bot ARMORED from nothing, using what THIS biome actually offers: wear any
 // armor already in the pack, then (a) craft leather ONLY if cows are actually around,
