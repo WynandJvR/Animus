@@ -3106,18 +3106,18 @@ async function resumeBuild (bot) {
     // NOTE (task #18): the live AxGraves plugin DESPAWNS graves on a timer - recover itself now
     // prioritizes urgent graves and back-off is verdict-classed, so the sooner this fires the better.
     // Skipped for lava/void deaths and best-effort - a failed recovery must never block the resume.
-    const grave = bestGrave()
-    if (grave) {
+    const graveSpot = bestGrave() // refactor fix: was 'const grave' - shadowed the module-level grave (grave.js) and TDZ-threw the grave.ledger()/lastDeathInfo() calls earlier in resumeBuild
+    if (graveSpot) {
       // WRITE OFF worthless or suicidal graves instead of trekking: a naked-death grave
       // holds nothing (tonight's carousel made 5 pointless recovery treks), and a naked
       // corpse-run to a deep cave through the mobs that just killed you is how death
       // carousels happen (verified live: died at y=4, then died AGAIN going back).
       // (bestGrave already filters out worthless deaths - dying with 1 dirt never
       // triggers a corpse run at all; only gear/real loot is worth the trek.)
-      const deep = grave.y < job.at.y - 15
+      const deep = graveSpot.y < job.at.y - 15
       const naked = !(bot.inventory ? bot.inventory.items() : []).some(i => /_(pickaxe|axe|sword)$|_chestplate$/.test(i.name))
       if (deep && naked) {
-        grave.retrieved = true; persistDeath()
+        graveSpot.retrieved = true; persistDeath()
         say("my stuff's too deep in that cave - not worth dying for, moving on")
       } else {
         try { const r = await handle(bot, 'recover'); dbg('resume: recover -> ' + String(r).split(String.fromCharCode(10))[0]) } catch (e) { dbg('resume: recover failed (' + e.message + ')') }
