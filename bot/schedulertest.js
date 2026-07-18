@@ -21,6 +21,13 @@ function withResilient (fn) {
   const old = process.env.RESILIENT_RECOVERY; process.env.RESILIENT_RECOVERY = '1'
   try { return fn() } finally { if (old == null) delete process.env.RESILIENT_RECOVERY; else process.env.RESILIENT_RECOVERY = old }
 }
+// force one env flag to a value for a test body, restoring it after (used to prove both regimes of a
+// flag-gated predicate from a single suite run).
+function withEnv (name, val, fn) {
+  const old = process.env[name]
+  if (val == null) delete process.env[name]; else process.env[name] = val
+  try { return fn() } finally { if (old == null) delete process.env[name]; else process.env[name] = old }
+}
 
 // ---- fixture factories ------------------------------------------------------------------
 function snap (over) {
@@ -589,9 +596,58 @@ t('(#41 P4) recoveryReady: naked + NO bank kit + no safe grave + gearup back-off
   assert.strictEqual(rr.maxCaution, true, 'raised max caution')
 })
 
-t('(#41 P4) recoveryReady: toolless -> NOT ready even under the escape', () => {
-  const rr = S.recoveryReady(snap({ hp: 18, food: 14, armorPieces: 4, tools: { pick: false, sword: true }, graves: [], bankArmorPieces: 0, bankHasPick: false, bankHasSword: false, gearupBackoffUntil: Date.now() + 100000 }))
-  assert.strictEqual(rr.ready, false, 'no pick -> never ready')
+t('(#64 RECOVERY_UNBLOCK) recoveryReady: toolless + no re-arm source -> regime-dependent', () => {
+  // toolless (no pick), survivable, and NO re-arm source at all (empty bank, no grave, gearup on
+  // back-off). The pre-#64 rule held such a bot forever ("no pick -> never ready") - the live stall.
+  const fx = { hp: 18, food: 14, armorPieces: 4, tools: { pick: false, sword: true }, graves: [], bankArmorPieces: 0, bankHasPick: false, bankHasSword: false, gearupBackoffUntil: Date.now() + 100000 }
+  withEnv('RECOVERY_UNBLOCK', '0', () => {
+    assert.strictEqual(S.recoveryReady(snap(fx)).ready, false, 'flag off -> no pick -> never ready (byte-for-byte)')
+  })
+  withEnv('RECOVERY_UNBLOCK', '1', () => {
+    const rr = S.recoveryReady(snap(fx))
+    assert.strictEqual(rr.ready, true, 'flag on -> gear-up unachievable -> release the build')
+    assert.strictEqual(rr.maxCaution, true, 'released with max caution')
+  })
+})
+
+t('(#64) recoveryReady: toolless but a re-arm SOURCE exists -> still NOT ready (gear up first)', () => withEnv('RECOVERY_UNBLOCK', '1', () => {
+  // gearup off back-off (could still gear up) -> reArmSourceAvailable true -> do NOT short-circuit.
+  const rr = S.recoveryReady(snap({ hp: 18, food: 14, armorPieces: 0, tools: { pick: false, sword: false }, graves: [], bankArmorPieces: 0, bankHasPick: false, bankHasSword: false, gearupBackoffUntil: 0 }))
+  assert.strictEqual(rr.ready, false, 'gear obtainable -> keep recovering, never release toolless')
+}))
+
+t('(#64) recoveryReady: unsurvivable (low hp) + no source -> NOT released (survival owns the body)', () => withEnv('RECOVERY_UNBLOCK', '1', () => {
+  const rr = S.recoveryReady(snap({ hp: 8, food: 14, armorPieces: 0, tools: { pick: false, sword: false }, graves: [], bankArmorPieces: 0, bankHasPick: false, bankHasSword: false, gearupBackoffUntil: Date.now() + 100000 }))
+  assert.strictEqual(rr.ready, false, 'hp 8 < survivable floor -> hold, do not resume the build')
+}))
+
+t('(#64) gearUpUnachievable: survivable + no source -> true; flag off -> false', () => {
+  const naked = snap({ hp: 16, food: 14, armorPieces: 0, tools: { pick: false, sword: false }, graves: [], bankArmorPieces: 0, bankHasPick: false, bankHasSword: false, gearupBackoffUntil: Date.now() + 100000 })
+  withEnv('RECOVERY_UNBLOCK', '1', () => assert.strictEqual(S.gearUpUnachievable(naked), true, 'survivable + no re-arm source'))
+  withEnv('RECOVERY_UNBLOCK', '0', () => assert.strictEqual(S.gearUpUnachievable(naked), false, 'flag off -> always false'))
+  withEnv('RECOVERY_UNBLOCK', '1', () => {
+    assert.strictEqual(S.gearUpUnachievable(snap({ hp: 15, food: 14, gearupBackoffUntil: Date.now() + 100000 })), false, 'hp 15 < floor -> not unachievable-release')
+    assert.strictEqual(S.gearUpUnachievable(snap({ hp: 16, food: 14, bankArmorPieces: 4, bankHasPick: true, bankHasSword: true, gearupBackoffUntil: Date.now() + 100000 })), false, 'bank kit -> a source exists')
+  })
+})
+
+t('(#64) hasLadderReArm: bank kit or safe grave only (gearup excluded)', () => {
+  assert.strictEqual(S.hasLadderReArm(snap({ bankArmorPieces: 4, bankHasPick: true, bankHasSword: true })), true, 'bank spare kit')
+  assert.strictEqual(S.hasLadderReArm(snap({ graves: [grave(10, { hasGear: true })] })), true, 'safe grave with gear')
+  assert.strictEqual(S.hasLadderReArm(snap({ graves: [], bankArmorPieces: 0, bankHasPick: false, bankHasSword: false, gearupBackoffUntil: 0 })), false, 'gearup-off-back-off is NOT a ladder re-arm')
+})
+
+t('(#64) recoveryStuckRelease: survivable + no ladder re-arm + past RECOVERY_STUCK_MS -> release', () => {
+  withEnv('RECOVERY_STUCK_MS', '120000', () => withEnv('RECOVERY_UNBLOCK', '1', () => {
+    const base = { hp: 16, food: 14, ladderReArm: false }
+    assert.strictEqual(S.recoveryStuckRelease({ ...base, sinceDeathMs: 130000 }), true, 'held past the stuck window -> release')
+    assert.strictEqual(S.recoveryStuckRelease({ ...base, sinceDeathMs: 60000 }), false, 'still inside the stuck window -> hold')
+    assert.strictEqual(S.recoveryStuckRelease({ hp: 16, food: 14, ladderReArm: true, sinceDeathMs: 999999 }), false, 'a ladder re-arm exists -> fetch it, do not release')
+    assert.strictEqual(S.recoveryStuckRelease({ hp: 8, food: 14, ladderReArm: false, sinceDeathMs: 999999 }), false, 'unsurvivable -> never release here')
+  }))
+  withEnv('RECOVERY_UNBLOCK', '0', () => {
+    assert.strictEqual(S.recoveryStuckRelease({ hp: 16, food: 14, ladderReArm: false, sinceDeathMs: 999999 }), false, 'flag off -> false (RECOVERY_MAX_MS-only backstop)')
+  })
 })
 
 t('(#41 P4) recoveryReady: under-armored but a BANK spare exists -> NOT ready (re-arm first)', () => {

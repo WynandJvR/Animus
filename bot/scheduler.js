@@ -424,6 +424,57 @@ function hasSafeGraveWithGear (s) {
 function reArmSourceAvailable (s) {
   return bankHasSpareKit(s) || hasSafeGraveWithGear(s) || (s.gearupBackoffUntil || 0) <= nowFn()
 }
+// The re-arm sources the recovery LADDER can actually reach: a banked spare kit (the rearmFromBank
+// rung) or a safe grave with gear (the recoverGrave rung). Gearup is deliberately EXCLUDED - it is
+// not a recovery rung and does not run while the post-death latch owns the body (index GEAR_REFLEX
+// stands down for isRecoveringDegraded), so its back-off never arms during the hold. So a bot with
+// no bank kit and no grave has NOTHING the recovery ladder can gear it up with. (cf.
+// reArmSourceAvailable, which also counts gearup-off-back-off = "gearup could be tried later".)
+function hasLadderReArm (s) {
+  return bankHasSpareKit(s) || hasSafeGraveWithGear(s)
+}
+
+// ==== RECOVERY_UNBLOCK (#64) - release the build when gear-up is genuinely UNACHIEVABLE ====
+// Flag RECOVERY_UNBLOCK (default on; =0 -> these return false = today byte-for-byte). The live
+// stall: after a death the bot respawns naked with an empty pack, no grave, and an empty bank, so
+// recoveryReady can NEVER reach its full-gear exit (no pick/sword, armor fuel-blocked, no bank kit,
+// no obtainable re-arm) - the post-death latch holds the build forever and the bot cycles in place.
+// The operator's rule: "the goal isn't that the bot never dies, it's that it doesn't spiral and not
+// get progress done." So when the bot is SURVIVABLE but cannot make progress toward gear, RELEASE
+// the build (unarmored + resuming beats frozen; resuming also frees GEAR_REFLEX to run the iron
+// grind that the latch was suppressing). A REAL survival need (low hp/food) still holds - the
+// SURVIVABLE floor (RECOVERY_UNBLOCK_HP~16 / RECOVERY_UNBLOCK_FOOD~14) is the anti-spiral guard.
+
+// gearUpUnachievable(s) -> bool. The PROMPT (clockless) release, folded into recoveryReady. Fires
+// when the bot is survivable AND there is NO re-arm source left AT ALL (no bank kit, no safe grave,
+// AND gearup is on back-off) - i.e. gearup has provably been tried and failed. Conservative by
+// design: while gearup is still off back-off it reads as "gear obtainable" and does NOT release, so
+// this never short-circuits a bot that could still gear up. =0 -> false.
+function gearUpUnachievable (s) {
+  if (process.env.RECOVERY_UNBLOCK === '0') return false
+  const ss = s || {}
+  const hp = ss.hp != null ? ss.hp : 20
+  const food = ss.food != null ? ss.food : 20
+  const survivable = hp >= Number(process.env.RECOVERY_UNBLOCK_HP || 16) && food >= Number(process.env.RECOVERY_UNBLOCK_FOOD || 14)
+  return survivable && !reArmSourceAvailable(ss)
+}
+
+// recoveryStuckRelease({ hp, food, ladderReArm, sinceDeathMs }) -> bool. The TIME-BOUNDED release,
+// consulted by the impure recoveryReadyNow (which owns the P0 latch clock). Fires when the bot is
+// survivable, the recovery ladder has NO re-arm it can reach (no bank kit, no safe grave), and the
+// latch has held for >= RECOVERY_STUCK_MS. This is the one that breaks the live stall: gearup never
+// gets a turn under the latch, so its back-off never arms and gearUpUnachievable can't fire - after
+// RECOVERY_STUCK_MS with nothing the ladder can do, holding longer is pure loss. RECOVERY_MAX_MS
+// remains the ultimate ceiling above this (a survivable bot never holds longer than that). =0 ->
+// false (the RECOVERY_MAX_MS-only backstop stands, byte-for-byte).
+function recoveryStuckRelease ({ hp, food, ladderReArm, sinceDeathMs } = {}) {
+  if (process.env.RECOVERY_UNBLOCK === '0') return false
+  const h = hp != null ? hp : 20
+  const f = food != null ? food : 20
+  const survivable = h >= Number(process.env.RECOVERY_UNBLOCK_HP || 16) && f >= Number(process.env.RECOVERY_UNBLOCK_FOOD || 14)
+  if (!survivable || ladderReArm) return false
+  return (sinceDeathMs || 0) >= Number(process.env.RECOVERY_STUCK_MS || 120000)
+}
 
 // recoveryReady(snapshot) -> { ready, maxCaution, reason }. Replaces ladderDone's naked-tolerant
 // exit (RC-D): a bot is "recovered" only at hp>=HP_OK(18) AND food>=14 AND 4 armor AND pick&&sword.
@@ -440,6 +491,12 @@ function recoveryReady (snapshot) {
   const tools = s.tools || {}
   const coreTools = !!tools.pick && !!tools.sword
   const vitalsOk = hp >= HP_OK && food >= 14
+  // RECOVERY_UNBLOCK (#64): a survivable bot with NO re-arm source left (gearup provably exhausted)
+  // releases the build here - even naked/toolless - instead of being trapped by the coreTools/vitals
+  // gates below forever. Reuses the best-affordable path (ready WITH maxCaution). Conservative: only
+  // fires when reArmSourceAvailable is false (gearup on back-off), so a bot that could still gear up
+  // keeps recovering. =0 -> gearUpUnachievable is always false, so the rest is byte-for-byte.
+  if (gearUpUnachievable(s)) return { ready: true, maxCaution: true, reason: 'gear-up unachievable (survivable, no re-arm source) - releasing the build, max caution' }
   if (!coreTools) return { ready: false, maxCaution: false, reason: 'missing core tools (pick/sword)' }
   if (!vitalsOk) return { ready: false, maxCaution: false, reason: 'vitals not restored (hp>=' + HP_OK + ' food>=14)' }
   if (armorPieces >= 4) return { ready: true, maxCaution: false, reason: 'fully recovered' }
@@ -594,6 +651,9 @@ module.exports = {
   withinDeathZone,
   bankHasSpareKit,
   reArmSourceAvailable,
+  hasLadderReArm,
+  gearUpUnachievable,
+  recoveryStuckRelease,
   isDegraded,
   commandClass,
   admissible,

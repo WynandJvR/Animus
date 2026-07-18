@@ -805,12 +805,28 @@ const RUNG_EXECUTORS = {
 async function recoveryReadyNow (bot) {
   if (process.env.RESILIENT_RECOVERY === '0') return true
   const commands = require('./commands.js')
-  try {
-    const heldMs = commands.postDeathRecoveryHeldMs ? commands.postDeathRecoveryHeldMs() : 0
-    if (heldMs > Number(process.env.RECOVERY_MAX_MS || 900000)) { try { commands.clearPostDeathRecovery() } catch {} return true }
-  } catch {}
+  const heldMs = (() => { try { return commands.postDeathRecoveryHeldMs ? commands.postDeathRecoveryHeldMs() : 0 } catch { return 0 } })()
+  // HARD CEILING (never hides forever): a bot held longer than RECOVERY_MAX_MS releases the build
+  // unconditionally. Unchanged - the ultimate backstop above every other release path.
+  if (heldMs > Number(process.env.RECOVERY_MAX_MS || 900000)) { try { commands.clearPostDeathRecovery() } catch {} return true }
+  let s = null
+  try { s = await P().schedulerState(bot) } catch { s = null }
+  // RECOVERY_UNBLOCK (#64): the gear-up-unachievable TIME release. When the bot is SURVIVABLE but the
+  // recovery ladder has NO re-arm it can reach (no bank spare kit, no safe grave) and the latch has
+  // held for RECOVERY_STUCK_MS, release the build well before the full RECOVERY_MAX_MS ceiling - this
+  // is the live post-death stall (naked, empty pack, empty bank, no grave; gearup never gets a turn
+  // under the latch so its back-off never arms). Releasing lets the build resume AND frees GEAR_REFLEX
+  // to run the iron grind. =0 -> recoveryStuckRelease is false, so only the ceiling above applies.
+  if (s) {
+    try {
+      if (scheduler.recoveryStuckRelease({ hp: s.hp, food: s.food, ladderReArm: scheduler.hasLadderReArm(s), sinceDeathMs: heldMs })) {
+        try { commands.clearPostDeathRecovery() } catch {}
+        return true
+      }
+    } catch {}
+  }
   let ready = true
-  try { ready = scheduler.recoveryReady(await P().schedulerState(bot)).ready } catch { ready = true }
+  if (s) { try { ready = scheduler.recoveryReady(s).ready } catch { ready = true } }
   if (ready) { try { commands.clearPostDeathRecovery() } catch {} }
   return ready
 }
