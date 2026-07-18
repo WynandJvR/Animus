@@ -5950,6 +5950,61 @@ const RUNG_EXECUTORS = {
 
 let _recoveringDegraded = false
 function isRecoveringDegraded () { return _recoveringDegraded }
+
+// ==== #58 DEADLOCK_RESET: suicide-reset an unbreakable hp<=2/food0 starvation deadlock =========
+// See DESIGN-deadlock-suicide-reset.md. The bot floors at hp1/food0 FOREVER when no food is
+// reachable (fishing dead, no water for the farm) - starvation never kills on Normal, so the
+// recovery ladder pings the same failing rungs and makes zero progress. A respawn is a CLEAN full
+// reset (hp20/food20 at the bed) that lets it range far enough to actually reach food. So when
+// GENUINELY deadlocked: STASH EVERYTHING at the bank (empty pack -> empty grave -> zero loss),
+// deliberately DIE (fall damage), respawn fresh, recover properly from full. DEADLOCK_RESET=0 ->
+// today's hold-and-starve, byte-for-byte (the detector never fires, no code path changes).
+const DEADLOCK_HP = Number(process.env.DEADLOCK_HP || 2)          // fire only at hp<=this
+const DEADLOCK_FAILS = Number(process.env.DEADLOCK_FAILS || 4)    // K consecutive all-rungs-tried deadlock cycles
+const DEADLOCK_FALL_H = Number(process.env.DEADLOCK_FALL_H || 6)  // pillar height for the lethal fall
+const DEADLOCK_RESET_COOLDOWN_MS = Number(process.env.DEADLOCK_RESET_COOLDOWN_MS || 600000) // hard anti-loop gap
+const DEADLOCK_MAX_NOFOOD = Number(process.env.DEADLOCK_MAX_NOFOOD || 5) // back off after N resets that gained no food
+let _deadlockFails = 0          // consecutive "all rungs tried" cycles observed AT the deadlock state
+let _deadlockResetting = false  // re-entrancy guard while the stash+die runs
+
+// PURE detector (unit-tested): does a GENUINE multi-cycle deadlock warrant a suicide-reset NOW?
+// Fires ONLY at hp<=HP & food===0 & no pack food & failCount>=FAILS & the cooldown has elapsed,
+// with the flag on. Everything is passed in (no bot / no I/O) so the trigger is fully testable.
+// opts.enabled===false (the DEADLOCK_RESET=0 flag) hard-disables it; hp/fails/cooldownMs override
+// the module defaults for the unit tests.
+function deadlockResetDue ({ hp, food, hasPackFood, failCount, sinceLastResetMs }, opts = {}) {
+  if (opts.enabled === false) return false
+  const HP = opts.hp != null ? opts.hp : DEADLOCK_HP
+  const FAILS = opts.fails != null ? opts.fails : DEADLOCK_FAILS
+  const COOLDOWN = opts.cooldownMs != null ? opts.cooldownMs : DEADLOCK_RESET_COOLDOWN_MS
+  return hp <= HP && food === 0 && !hasPackFood && failCount >= FAILS && sinceLastResetMs >= COOLDOWN
+}
+
+// Persisted (world-mem, the gearupState pattern) so a restart can't bypass the cooldown or the
+// no-food back-off. { at: last reset timestamp, count: consecutive resets with no food gained }.
+function deadlockResetState () { return loadWorldMem().deadlockReset || { at: 0, count: 0 } }
+// Record that a reset is FIRING (called once, before the stash+die): stamps the cooldown clock and
+// bumps the no-food streak. Stamping on FIRE (not on success) guarantees the detector can't re-fire
+// for DEADLOCK_RESET_COOLDOWN_MS even if this attempt aborts - so an unreachable bank / un-diable
+// spot can never spin retries. The WARNING surfaces the real root (food source still broken).
+function noteDeadlockReset () {
+  const m = loadWorldMem()
+  const d = m.deadlockReset = m.deadlockReset || { at: 0, count: 0 }
+  d.at = Date.now(); d.count = (d.count || 0) + 1
+  saveWorldMem()
+  if (d.count >= Math.min(3, DEADLOCK_MAX_NOFOOD)) dbg('deadlock-reset: ' + d.count + ' resets with no food gained - the food SOURCE is still broken (no water / farm won\'t establish)')
+}
+// Any REAL food/hp progress clears both the in-run fail counter and the persisted no-food streak
+// (the food source works again). Called each recover cycle + on a successful recovery.
+function _noteDeadlockProgress (bot) {
+  const hp = bot.health != null ? bot.health : 20
+  const food = bot.food != null ? bot.food : 20
+  if (hp > DEADLOCK_HP || food > 0 || foodCount(bot) >= 1) {
+    _deadlockFails = 0
+    const m = loadWorldMem()
+    if (m.deadlockReset && m.deadlockReset.count) { m.deadlockReset.count = 0; saveWorldMem() }
+  }
+}
 // #41 P4: is post-death recovery complete enough to let the build drive again? Builds the snapshot
 // and asks scheduler.recoveryReady; CLEARS the P0 latch when ready (so resumeBuild proceeds). A hard
 // RECOVERY_MAX_MS ceiling on how long the latch has been held guarantees the build is never trapped
@@ -5985,13 +6040,14 @@ async function recoverFromDegraded (bot, { isStopped = () => false, say = () => 
   try {
     while (true) {
       const s = await schedulerState(bot)
+      _noteDeadlockProgress(bot) // #58: any food/hp gain this cycle clears the deadlock fail counter + no-food streak
       // P4: exit on recoveryReady (hp>=18, food>=14, 4 armor, pick&&sword; best-affordable escape) -
       // NOT the naked-tolerant ladderDone (RC-D). Clearing the exit clears the P0 latch so the build
       // may resume. RESILIENT_RECOVERY=0 restores ladderDone byte-for-byte.
       if (process.env.RESILIENT_RECOVERY !== '0') {
         const rr = scheduler.recoveryReady(s)
-        if (rr.ready) { try { require('./commands.js').clearPostDeathRecovery() } catch {} return { done: true, rungs, reason: reason || (rr.maxCaution ? 'recovered (best-affordable)' : 'recovered'), maxCaution: rr.maxCaution } }
-      } else if (scheduler.ladderDone(s)) return { done: true, rungs, reason: reason || 'recovered' }
+        if (rr.ready) { _deadlockFails = 0; try { require('./commands.js').clearPostDeathRecovery() } catch {} return { done: true, rungs, reason: reason || (rr.maxCaution ? 'recovered (best-affordable)' : 'recovered'), maxCaution: rr.maxCaution } }
+      } else if (scheduler.ladderDone(s)) { _deadlockFails = 0; return { done: true, rungs, reason: reason || 'recovered' } }
       if (isStopped() || _survStop) return { done: false, rungs, reason: 'stopped' } // S7: watchdog fail-job lever folded in
       if (Date.now() > deadline) return { done: false, rungs, reason: 'deadline' }
       const plan = scheduler.recoveryPlan(s)
@@ -6004,7 +6060,30 @@ async function recoverFromDegraded (bot, { isStopped = () => false, say = () => 
       }
       // recoveryPlan is TOTAL (>=1 rung, R5 always appended); if every feasible rung is tried,
       // hand back honestly - the tick re-dispatches after its 60s cooldown (the outer retry).
-      if (!chosen) return { done: false, rungs, reason: 'all rungs tried' }
+      if (!chosen) {
+        // #58 DEADLOCK_RESET: this IS the "NOT recovered (all rungs tried)" point. Bump the deadlock
+        // fail counter ONLY when we're genuinely at the deadlock state (hp<=HP & food0 & no pack
+        // food); any other state resets it (a normal recoverable crisis must never accumulate). Then
+        // the PURE detector decides if a genuine multi-cycle deadlock warrants the last-resort
+        // suicide-reset (stash all -> die -> respawn full). Runs LAST, after every ladder rung failed.
+        const hp = bot.health != null ? bot.health : 20
+        const food = bot.food != null ? bot.food : 20
+        const inDeadlock = hp <= DEADLOCK_HP && food === 0 && foodCount(bot) < 1
+        if (inDeadlock) _deadlockFails++; else _deadlockFails = 0
+        const dstate = deadlockResetState()
+        const due = deadlockResetDue(
+          { hp, food, hasPackFood: foodCount(bot) >= 1, failCount: _deadlockFails, sinceLastResetMs: Date.now() - (dstate.at || 0) },
+          { enabled: process.env.DEADLOCK_RESET !== '0' })
+        if (due && (dstate.count || 0) >= DEADLOCK_MAX_NOFOOD) {
+          dbg('deadlock-reset: ' + dstate.count + ' resets with no food gained - the food SOURCE is still broken (no water / farm won\'t establish); holding, not spinning suicides')
+        } else if (due && !isStopped()) {
+          noteDeadlockReset() // stamp the cooldown + no-food streak BEFORE the attempt (an abort still holds off re-firing)
+          let ok = false
+          try { ok = await deadlockSuicideReset(bot, { isStopped, say }) } catch (e) { dbg('deadlock-reset: threw (' + e.message + ')') }
+          return { done: false, rungs, reason: ok ? 'deadlock-reset: died to reset' : 'deadlock-reset aborted (held)' }
+        }
+        return { done: false, rungs, reason: 'all rungs tried' }
+      }
       tried.add(chosen.action)
       const label = chosen.rung + ':' + chosen.action
       dbg('(ladder) ' + label + ' -> executing')
@@ -6028,6 +6107,96 @@ async function recoverFromDegraded (bot, { isStopped = () => false, say = () => 
       touchP('ladderRung') // S7 H5a: a bounded, live-verified rung completed
     }
   } finally { _recoveringDegraded = false }
+}
+
+// #58 DEADLOCK_RESET - the last-resort suicide-reset action (impure). STASH ALL non-essential at
+// the bank (aggressive: raw_iron/tools/materials, leave the pack empty so the grave holds nothing),
+// then DIE via fall damage so the vanilla respawn resets hp20/food20 at the bed with an empty pack
+// and the normal post-death recovery runs from FULL. Bounded; aborts to holding on ANY snag (bank
+// unreachable, chest full, can't pillar, didn't die) - NEVER suicides while still holding gear.
+// Returns true only if the bot actually died. The cooldown timestamp is stamped by the caller
+// (noteDeadlockReset) BEFORE this runs, so an abort still imposes the full anti-loop gap.
+async function deadlockSuicideReset (bot, { isStopped = () => false, say = () => {} } = {}) {
+  if (_deadlockResetting) return false
+  _deadlockResetting = true
+  try {
+    const home = (() => { try { return hutAnchor() || knownBed() || null } catch { return null } })()
+    // 1) STASH ALL. The bank must be reachable - if not, ABORT (holding is strictly safer than
+    //    dying with everything and losing it to a far grave). "Reachable" = resolveBankCell finds
+    //    a chest, we can walk to it, and we end up standing at a real chest block.
+    const cell = resolveBankCell(bot)
+    if (!cell) { dbg('deadlock-reset: no hut bank chest - ABORTING (won\'t suicide holding gear)'); return false }
+    const anchor = hutAnchor() || cell
+    if (bot.entity && bot.entity.position.distanceTo(new Vec3(anchor.x, anchor.y, anchor.z)) > 6) {
+      try { await walkStaged(bot, anchor.x, anchor.z, { isStopped, range: 4, timeoutMs: 180000 }) } catch {}
+    }
+    if (isStopped()) { dbg('deadlock-reset: stopped before stash - aborting'); return false }
+    const blk = bot.blockAt(new Vec3(cell.x, cell.y, cell.z))
+    if (!blk || !/chest/.test(blk.name)) { dbg('deadlock-reset: bank cell is not a chest - ABORTING'); return false }
+    if (bot.entity && bot.entity.position.distanceTo(new Vec3(cell.x, cell.y, cell.z)) > 5) { dbg('deadlock-reset: could not reach the bank chest - ABORTING'); return false }
+    const total = (bot.inventory ? bot.inventory.items() : []).reduce((a, i) => a + i.count, 0)
+    if (total > 0) {
+      const packAll = (bot.inventory ? bot.inventory.items() : []).map(i => ({ name: i.name, count: i.count }))
+      dbg('deadlock-reset: stashing ' + total + ' items then dying to reset')
+      say('genuinely deadlocked with no food - stashing everything in the bank, then resetting by dying')
+      try { await depositMaterials(bot, blk, { deposits: packAll }) } catch (e) { dbg('deadlock-reset: deposit failed (' + e.message + ')') }
+      try { await require('./resources.js').readChest(bot, cell) } catch {}
+    }
+    // HARD SAFETY: the pack MUST be empty before we die. If ANYTHING failed to stash (chest full,
+    // slot race), ABORT - dropping it to a grave is exactly what this whole mechanism avoids.
+    const leftover = (bot.inventory ? bot.inventory.items() : []).reduce((a, i) => a + i.count, 0)
+    if (leftover > 0) { dbg('deadlock-reset: ' + leftover + ' item(s) would NOT stash (chest full?) - ABORTING (won\'t drop gear to a grave)'); return false }
+    dbg('deadlock-reset: pack empty (grave will be empty) - proceeding to die by fall')
+    // 2) DIE by fall damage (bounded ~30s). Never wedge - abort to holding if it can't die.
+    return await deadlockDieByFall(bot, { isStopped, home, say })
+  } finally { _deadlockResetting = false }
+}
+
+// Deliberate, bounded death by FALL (the most controllable method - no reflex fights it, unlike
+// drowning which WATER_ESCAPE would resist). Get to open sky near home (pillarUpTo refuses under
+// our own roof), pillar ~DEADLOCK_FALL_H, then step off the edge -> a >=3b fall is lethal at hp<=2.
+// Bounded 30s; returns true only if the bot actually died, else aborts to holding (never wedges).
+async function deadlockDieByFall (bot, { isStopped = () => false, home = null, say = () => {} } = {}) {
+  if (!bot.entity) return false
+  const deadline = Date.now() + 30000
+  // Clear our own roof/overhang: pillarUpTo no-ops inside our structure, so step a few blocks out.
+  if (insideOwnStructure(bot) || hasSolidCeiling(bot, 6, { ignoreLeaves: true })) {
+    const h = home || hutAnchor() || knownBed()
+    if (h && bot.entity) {
+      const dx = bot.entity.position.x - h.x; const dz = bot.entity.position.z - h.z
+      const len = Math.hypot(dx, dz) || 1
+      const ox = Math.round(h.x + (dx / len) * 6); const oz = Math.round(h.z + (dz / len) * 6)
+      try { await walkStaged(bot, ox, oz, { isStopped: () => isStopped() || Date.now() > deadline, range: 2, timeoutMs: 60000 }) } catch {}
+    }
+  }
+  if (insideOwnStructure(bot)) { dbg('deadlock-reset: still under my own roof - can\'t pillar to fall, ABORTING to hold'); return false }
+  const startY = Math.floor(bot.entity.position.y)
+  const targetY = startY + Math.max(4, DEADLOCK_FALL_H)
+  let died = false
+  const onDeath = () => { died = true }
+  bot.once('death', onDeath)
+  try {
+    say('resetting - climbing up to take a lethal fall')
+    try { await pillarUpTo(bot, targetY, { isStopped: () => isStopped() || died || Date.now() > deadline }) } catch (e) { dbg('deadlock-reset: pillar failed (' + e.message + ')') }
+    if (died) { dbg('deadlock-reset: died on purpose - respawn resets to full at the bed'); return true }
+    const gained = Math.floor(bot.entity.position.y) - startY
+    // Fall damage (points) = fallBlocks - 3; hp is in points (20=full). To guarantee lethality we
+    // need gained >= hp+3 (e.g. hp2 -> a 5-block fall = 2 dmg). Abort rather than step off a ledge
+    // too short to kill - a survived fall would just waste the attempt (gear is already safe in the
+    // bank). DEADLOCK_FALL_H (default 6) gives margin at the hp<=2 trigger.
+    const lethalMin = (bot.health != null ? bot.health : DEADLOCK_HP) + 3
+    if (gained < lethalMin) { dbg('deadlock-reset: pillar too short for a lethal fall (rose ' + gained + 'b, need ' + lethalMin + 'b at hp ' + (bot.health ?? '?') + ') - ABORTING to hold'); return false }
+    dbg('deadlock-reset: pillared +' + gained + 'b - stepping off the edge to fall')
+    bot.clearControlStates()
+    bot.setControlState('forward', true)
+    const t0 = Date.now()
+    while (!died && Date.now() < deadline && Date.now() - t0 < 15000) {
+      await new Promise(r => setTimeout(r, 100))
+      if (Math.floor(bot.entity.position.y) < startY) bot.setControlState('forward', false) // dropped - stop walking, just fall
+    }
+    if (died) { dbg('deadlock-reset: died on purpose - respawn resets to full at the bed'); return true }
+    dbg('deadlock-reset: fall did not kill within bound - ABORTING to hold'); return false
+  } finally { try { bot.removeListener('death', onDeath) } catch {}; bot.clearControlStates() }
 }
 
 // ==== S6: PROACTIVE MAINTENANCE PASS (§4.2/§5) ===========================================
@@ -9004,7 +9173,7 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, smeltFuelPlan, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, breachDryPocket, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, boundedHold, recoverFromDegraded, isRecoveringDegraded, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, markBedUnusable, bedHeld, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, noteWaterCrossing, lonelyFurnace, consolidateFurnaces, litterPatrol, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, planTrekRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, smeltFuelPlan, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, breachDryPocket, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, boundedHold, recoverFromDegraded, isRecoveringDegraded, deadlockResetDue, deadlockResetState, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, markBedUnusable, bedHeld, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, noteWaterCrossing, lonelyFurnace, consolidateFurnaces, litterPatrol, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, planTrekRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
   maintenancePass, isMaintaining, stopMaintenance, _setMaintaining, courierFoodToBank, safekeepSweep, spareKitToBank, recoveryReadyNow, cropExclusionStep, cropPlaceExclusion, farmFootprintHas, hazardStepExclusion, waterStepExclusion, deepWaterUnderfoot, gatherSeedsNear,
   activeJobInfo, stopSurvivalJob, escalateFoodFloor, _foodFloorState,
   wildTerrainMovements, trekMovements, DIGGABLE_NATURAL, STRUCTURE_RE, canBreakNaturally,
