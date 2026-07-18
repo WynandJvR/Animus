@@ -20,6 +20,8 @@ const arbiter = require('./arbiter.js') // priority body-ownership (sticky-follo
 const routeMem = require('./route-mem.js') // PURE route/wedge geometry: replay proven treks + soft-steer around learned wedges (semantic-world-map slice 1)
 const hutModel = require('./hut-model.js') // PURE self-structure model + #37 repair decision (decideHutRepair) / tolerant classifier (cellMismatch)
 const navLeg = require('./nav-leg.js') // PURE leg-planning core (NAV Phase B): Y-banded surface-trek leg goal so travelFar legs can't ride a cave 45b down to lava
+const gravePolicy = require('./grave-policy.js') // PURE grave decisions (worth/urgency/order/chase-gate/loot-verdict); the LEDGER itself stays here
+const { graveValue, graveWorthIt, graveUrgency, graveUrgencyRank, graveCompare, shouldChaseGrave, graveLootVerdict } = gravePolicy
 const GoalNearXZBanded = navLeg.makeGoalNearXZBanded(goals.Goal) // Y-aware drop-in for goals.GoalNearXZ (NAV_HAZARD_LEGS)
 const NAV_HAZARD_LEGS = process.env.NAV_HAZARD_LEGS !== '0' // NAV Phase B (default ON): Y-band the trek leg goal + price lava in travelMovements; =0 => today's Y-blind GoalNearXZ + no lava cost, byte-for-byte
 const WATER_SAFE = process.env.WATER_SAFE !== '0' // task #45 (default ON): price OVER-THE-HEAD water in travelMovements so legs route around a pond aquifer (shallow water stays free -> farm/fishing reachable); =0 => no water cost, byte-for-byte
@@ -141,56 +143,8 @@ function recordDeath (info) {
   // markBuildInterrupted/resume; this covers the op/brain-issued long ops.
   if (activity && /^(gather|provision)$/.test(activity.name)) { buildAbort = true }
 }
-function graveValue (d) { const it = d.items || {}; return (it.notable ? it.notable.length * 10 : 0) + (it.count || 0) }
-// A grave is WORTH a corpse run only if it holds gear (tools/armor/ingots) or a real pile
-// of loot. Dying with 1 dirt = let it go, like a player would - the trek itself is the risk.
-function graveWorthIt (d) {
-  const it = d.items || {}
-  // Wooden/stone tools cost less to recraft than the trek into whatever killed you -
-  // only REAL gear (iron+, any armor) or genuine bulk justifies a corpse run.
-  const realGear = (it.notable || []).some(n => /^(iron|diamond|netherite|golden)_|_(helmet|chestplate|leggings|boots)$/.test(n))
-  // FIX #16 (GRAVE_BUILD_WORTH, default on): a meaningful stash of BUILD materials (logs, planks,
-  // cobble, stone) is worth a corpse run even below the generic count>=10 bulk bar - the bot used
-  // to abandon a grave holding a big stack of wood. GRAVE_BUILD_MIN (default 6, below the count bar
-  // so it genuinely widens) keeps trivial single items out. GRAVE_BUILD_WORTH=0 -> gear+count only.
-  const buildWorth = process.env.GRAVE_BUILD_WORTH !== '0' && (it.build || 0) >= Number(process.env.GRAVE_BUILD_MIN || 6)
-  return realGear || (it.count || 0) >= 10 || buildWorth
-}
-// GRAVE DESPAWN CLOCK (task #18, PURE, offline-testable). AxGraves graves on the live server sit on
-// a plugin despawn timer; GRAVE_DESPAWN_S is the operator-set despawn-time (seconds) and the ledger
-// `at` is the death time = that timer's t0. Classify how much budget is left so at-risk graves are
-// prioritized before they're lost. GRAVE_URGENT=0, or GRAVE_DESPAWN_S unset/0 -> no clock known ->
-// everything reports 'safe' and NOTHING downstream changes (fail-safe: a mis-set clock only ever
-// costs one walk to an already-empty site, never a silent write-off).
-//   -> { ageMs, remainMs, tier: 'safe' | 'urgent' | 'critical' | 'expired' }
-//      urgent: remain <= 60% window   critical: remain <= 25% window OR < 120s   expired: age >= 1.5x window
-function graveUrgency (d, now) {
-  const at = (d && d.at) || 0
-  const t = now != null ? now : Date.now()
-  const windowS = Number(process.env.GRAVE_DESPAWN_S || 0)
-  const ageMs = at ? Math.max(0, t - at) : 0
-  if (process.env.GRAVE_URGENT === '0' || !(windowS > 0) || !at) return { ageMs, remainMs: Infinity, tier: 'safe' }
-  const windowMs = windowS * 1000
-  const remainMs = windowMs - ageMs
-  let tier
-  if (ageMs >= windowMs * 1.5) tier = 'expired'
-  else if (remainMs <= windowMs * 0.25 || remainMs < 120000) tier = 'critical'
-  else if (remainMs <= windowMs * 0.6) tier = 'urgent'
-  else tier = 'safe'
-  return { ageMs, remainMs, tier }
-}
-function graveUrgencyRank (tier) { return tier === 'critical' ? 2 : (tier === 'urgent' ? 1 : 0) }
-// PURE ordering for bestGrave (M1 urgency priority): among worthwhile graves an urgent/critical one
-// outranks a richer SAFE one ONLY when GRAVE_URGENT is on (a rich safe grave can wait; a poor dying
-// one can't). Falls back to today's value-first, then newest. <0 => a sorts first. GRAVE_URGENT=0
-// (or no despawn clock) -> byte-equivalent to today's sort.
-function graveCompare (a, b, now) {
-  if (process.env.GRAVE_URGENT !== '0') {
-    const ru = graveUrgencyRank(graveUrgency(b, now).tier) - graveUrgencyRank(graveUrgency(a, now).tier)
-    if (ru) return ru
-  }
-  return (graveValue(b) - graveValue(a)) || ((b.at || 0) - (a.at || 0))
-}
+// graveValue / graveWorthIt / graveUrgency / graveUrgencyRank / graveCompare now live in
+// grave-policy.js (pure, destructured at the top of this file). The LEDGER stays here.
 // The grave worth going back for: unretrieved, reachable (not lava), urgency-then-richest first.
 // (task #18: an about-to-despawn grave outranks a richer one that can still wait; expired graves -
 // past 1.5x the despawn window - drop off the candidate list, but are NEVER auto-marked retrieved:
@@ -206,81 +160,8 @@ function unretrievedGraves () { return deathLedger.filter(d => !d.retrieved && !
 // fires recovery on this BEFORE re-mining from scratch (gear-up-critical: it kept dropping
 // iron/tools then re-mining instead of walking back for them). Returns {x,y,z,items} or null.
 function worthwhileGrave () { const g = bestGrave(); return g ? { x: g.x, y: g.y, z: g.z, items: (g.items && g.items.notable) || [], value: graveValue(g) } : null }
-// SURVIVAL GATE for the respawn grave chase (PURE, offline-testable). The live death spiral:
-// on a far respawn (bed creeper-destroyed -> WORLD SPAWN ~380b from home) the handler sent a
-// NAKED, empty-pack bot on a long trek to chase dropped gear - it STARVED (food 20->0) and got
-// beaten to death en route, then respawned and repeated, bleeding gear every loop. A grave is
-// only worth chasing when the bot is SAFE + FED and the grave is reasonably reachable. No bot
-// handle - just data - so the "is it safe to go?" decision is unit-tested without a world.
-// Returns { chase, reason }. Distances are XZ ("far" is horizontal; respawn Y varies).
-function shouldChaseGrave ({ grave, pos, food, threat, escaping, home, maxDist, dangerous } = {}) {
-  if (!grave || !pos) return { chase: false, reason: 'no grave or position' }
-  const dngr = dangerous != null ? dangerous : !!(grave && grave.dangerous)
-  // ACTIVE-HAZARD defers ALWAYS, at any distance: a hostile on the bot, an in-progress flee, or
-  // a grave sitting in/over lava/void is never worth walking into for a few items.
-  if (escaping) return { chase: false, reason: 'fleeing a hazard - defer grave' }
-  if (threat) return { chase: false, reason: `hostile ${threat.type || 'mob'} ${threat.dist != null ? threat.dist + 'b' : 'near'} - defer grave until safe` }
-  if (dngr) return { chase: false, reason: 'grave is in/over a hazard (lava/void) - defer, not worth dying for' }
-  const dBot = Math.hypot(grave.x - pos.x, grave.z - pos.z)
-  // Reachable if the grave is within MAXD of where we ARE, or of HOME (a grave near base is
-  // fine to fetch even mid-trek; a grave far across hostile ground from both is written off).
-  const dHome = home ? Math.hypot(grave.x - home.x, grave.z - home.z) : Infinity
-  const near = Math.min(dBot, dHome)
-  // NEAR-GRAVE OVERRIDE (S1 hotfix, REDESIGN §1.1 / §7-S1 / invariant I3): a non-dangerous,
-  // no-threat grave within GRAVE_NEAR IS the survival move itself - free armor + often food at
-  // arm's reach, ~zero trek risk - so it is chased REGARDLESS of food/hp. Distance is classified
-  // FIRST; the food gate below only guards a genuine FAR trek. The old order ran the food gate
-  // BEFORE distance, so a 3b grave was deferred *because* the corpse-run had made the bot hungry
-  // - and each death ratcheted the bot into a strictly weaker respawn. S1_HOTFIX=0 rolls back.
-  const GRAVE_NEAR = Number(process.env.GRAVE_NEAR || 16)
-  if (process.env.S1_HOTFIX !== '0' && near <= GRAVE_NEAR) return { chase: true, reason: `grave ${Math.round(near)}b away (<= ${GRAVE_NEAR}) - free gear at arm's reach, chasing regardless of food/hp` }
-  // FAR grave: a starving bot must NOT trek - the trek is what drains 20->0 and kills it. Defer,
-  // eat/gear up near home, retry when fed. food==null (not spawned yet) is treated as -> defer.
-  const FOOD_MIN = Number(process.env.GRAVE_MIN_FOOD || 12)
-  if (food == null || food < FOOD_MIN) return { chase: false, reason: `too hungry to trek (food ${food == null ? '?' : food} < ${FOOD_MIN}) - defer grave until fed` }
-  const MAXD = Number(maxDist != null ? maxDist : (process.env.GRAVE_MAX_DIST || 96))
-  if (near > MAXD) return { chase: false, reason: `grave ${Math.round(near)}b away (> ${MAXD}) across open ground - defer/write off, not worth starving for` }
-  return { chase: true, reason: `safe + fed (food ${food}), grave ${Math.round(near)}b within reach` }
-}
-// PURE grave-loot verdict (fix #12, DESIGN-fix12-grave-stragglers.md §4.1; offline-testable, no
-// bot handle, no clock). Given the plain-data outcome of a grave-loot attempt, decide whether the
-// grave is genuinely emptied (mark retrieved) or an honest partial (leave it - the scheduler's
-// 300s cooldown re-dispatches and finishes it). The single unverified GUI sweep it replaces once
-// looted 212 items, left 2 stragglers, and marked the grave done forever.
-//   in : { sawWindow, emptied, remaining:[{name,count}], exhausted, freeSlots,
-//          gained, recorded, gotNotable, gravePresent, looseNearby }
-//   out: { mark, kind:'full'|'partial'|'capacity'|'writeoff-junk'|'loose-only'|'gone'|'unopened' }
-function graveLootVerdict ({ sawWindow, emptied, remaining, exhausted, freeSlots, gained, recorded, gotNotable, gravePresent, looseNearby } = {}) {
-  const rem = Array.isArray(remaining) ? remaining : []
-  // notableTier = the verbatim recordDeath notable regex (gear/ingots/gems are NEVER written off).
-  const notableTier = n => /_(pickaxe|axe|sword|shovel|hoe|helmet|chestplate|leggings|boots)$|_ingot$|^diamond|^emerald/.test(n || '')
-  // rung 1: no recorded notable back in the pack -> never mark from here; the case site keeps
-  // today's :1570/:1575 tails (and its own gone-mark) for the no-notable / gained-0 path.
-  if (!gotNotable) return { mark: false, kind: 'partial' }
-  if (sawWindow) {
-    // rung 2: window emptied + a FRESH scan says the grave is gone -> genuinely full.
-    if (gained > 0 && emptied && !gravePresent) return { mark: true, kind: 'full' }
-    if (!emptied) {
-      // rung 3: pack is full -> honest capacity stop (never a write-off), come back after off-loading.
-      if (freeSlots <= 0) return { mark: false, kind: 'capacity' }
-      // rung 4: reachable gear/ingots/gems left behind -> NEVER done, whatever the gained ratio.
-      if (rem.some(r => notableTier(r.name))) return { mark: false, kind: 'partial' }
-      const remCount = rem.reduce((s, r) => s + (r.count || 0), 0)
-      // rung 5: retries exhausted, pack has room, only a handful of junk-tier slots the server
-      // refuses -> bounded honest write-off (the <10 bulk line mirrors graveWorthIt).
-      if (exhausted && freeSlots > 0 && remCount < 10) return { mark: true, kind: 'writeoff-junk' }
-      // rung 6: still-loaded window, not a bounded junk write-off -> honest partial.
-      return { mark: false, kind: 'partial' }
-    }
-    // emptied window but the grave is still present (AxGraves race) or nothing gained -> conservative partial.
-    return { mark: false, kind: 'partial' }
-  }
-  // rung 7: no GUI (attack-path grave) - presence re-verified by the fresh scan, no ratio heuristic.
-  if (gained > 0 && !gravePresent && !looseNearby) return { mark: true, kind: 'full' }
-  if (gained > 0 && gravePresent) return { mark: false, kind: 'loose-only' }
-  if (gained === 0 && !gravePresent && !looseNearby) return { mark: true, kind: 'gone' }
-  return { mark: false, kind: 'unopened' }
-}
+// shouldChaseGrave (the SAFE+FED survival gate for a corpse run) now lives in grave-policy.js.
+// graveLootVerdict (did the loot attempt genuinely empty the grave) now lives in grave-policy.js.
 // GRAVES SNAPSHOT (S4, DESIGN §5): export the death ledger in the plain-data shape the pure
 // scheduler consumes (scheduler.pickJob / admissible read snap.graves[]). Walks the ledger with
 // the SAME worth+age filter as bestGrave - but INCLUDING dangerous graves (the shape carries the
