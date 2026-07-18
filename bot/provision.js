@@ -3707,12 +3707,20 @@ function isSearchedDry (item, x, z) {
 // window so the same death-march doesn't re-run on every resume pass; any real progress
 // resets it. Survives restarts - the flailing was worst right after respawns.
 function gearupState () { return loadWorldMem().gearup || { fails: 0, until: 0 } }
-function gearupResult (progressed) {
+// opts.naked (bool): the attempt ended fully naked (0 pieces worn). #53 NAKED_IRON_GRACE caps a
+// naked bot's fruitless cooldown at 12 min (not 45) so it keeps trying to bootstrap armor instead
+// of sitting locked out while it dies naked. Armored/partial + flag off -> today's min(45, fails*10).
+function gearupResult (progressed, opts = {}) {
   const m = loadWorldMem()
   const g = m.gearup = m.gearup || { fails: 0, until: 0 }
-  if (progressed) { g.fails = 0; g.until = 0 } else { g.fails++; g.until = Date.now() + Math.min(45, g.fails * 10) * 60000 }
+  if (progressed) { g.fails = 0; g.until = 0 } else {
+    g.fails++
+    const base = Math.min(45, g.fails * 10)
+    const mins = arbiter.gearupCooldownMin(g.fails, !!opts.naked, { enabled: process.env.NAKED_IRON_GRACE !== '0' })
+    g.until = Date.now() + mins * 60000
+    dbg('gearup: fruitless attempt #' + g.fails + ' - backing off ' + mins + ' min' + (mins < base ? ' (naked cap)' : ''))
+  }
   saveWorldMem()
-  if (!progressed) dbg('gearup: fruitless attempt #' + g.fails + ' - backing off ' + Math.min(45, g.fails * 10) + ' min')
 }
 
 function clearSearched (item, pos) {
@@ -6794,6 +6802,16 @@ async function gatherLoop (bot, item, count, opts = {}) {
   let recoverTries = 0            // hp-recover attempts this run (separate budget from threatReacts)
   let recoverSaid = false         // the status say fires at most once per runGather
   const RECOVER_ON = process.env.GATHER_HP_RECOVER !== '0' // flag off -> today's bail-on-low-hp verbatim
+  // #53 NAKED_IRON_GRACE: a naked bot may grab a FEW already-found iron ore before it retreats,
+  // so a threatened dive nets a couple iron instead of zero and can bootstrap boots. SAFETY-bounded
+  // by arbiter.nakedGraceAllowed (hp floor, no-melee, <=GRACE_ORE). Flag off -> today's byte-for-byte.
+  const NAKED_GRACE_ON = process.env.NAKED_IRON_GRACE !== '0'
+  const GRACE_HP_FLOOR = parseInt(process.env.NAKED_GRACE_HP_FLOOR || '10', 10) // well above the hp-critical 6
+  const GRACE_ORE = parseInt(process.env.NAKED_GRACE_ORE || '3', 10)            // hard cap on grabs per react
+  const GRACE_MELEE = 2.5   // a mob this close -> react now, no grab (don't tank a hit naked)
+  const GRACE_REACH = 4     // only ore ALREADY within ~4b (never a new/deeper search)
+  const NAKED_ORE_RE = /^(raw_iron|iron_ore|deepslate_iron_ore)$/ // the iron-bootstrap ore only
+  let graceSaid = false     // the naked-grace status say fires at most once per runGather
   async function surviveMiningThreat () {
     if (!mineDanger(bot)) return false
     threatReacts++                // count EVERY break-out exactly as today (climb budget byte-for-byte)
@@ -6826,6 +6844,32 @@ async function gatherLoop (bot, item, count, opts = {}) {
       //    Its _recoveringHp latch makes this mutually exclusive with the index.js hp-crisis reflex.
       try { await recoverHp(bot, { isStopped, say: opts.say }) } catch (e) { dbg('  gather recover: recoverHp failed (' + e.message + ')') }
       return 'recovered'
+    }
+    // NAKED IRON GRACE (#53): a naked bot about to climb/bail on a threat grabs a FEW already-found
+    // iron ore FIRST, so the dive nets a couple iron instead of zero (the keystone that bootstraps
+    // boots). Bounded by arbiter.nakedGraceAllowed: NAKED + iron-ore gather + hp>GRACE_HP_FLOOR(10)
+    // + NO mob in melee(~2.5b) + <GRACE_ORE(3) grabbed. Re-checks hp/melee/isStopped between EACH
+    // break; only breaks ore ALREADY within ~4b (never a new/deeper search). Then falls straight
+    // through to today's exact climb/bail below. Flag off / armored / non-iron -> byte-for-byte.
+    if (NAKED_GRACE_ON) {
+      const naked = armorPieceCount(bot) === 0
+      const isOre = NAKED_ORE_RE.test(item)
+      let grabbed = 0
+      while (arbiter.nakedGraceAllowed(
+        { naked, isOre, hp: bot.health ?? 20, hostileMelee: nearHostile(bot, GRACE_MELEE), oreGrabbed: grabbed },
+        { enabled: true, graceHpFloor: GRACE_HP_FLOOR, graceOre: GRACE_ORE })) {
+        if (isStopped()) break
+        let ore = bot.findBlock({ matching: ids, maxDistance: GRACE_REACH }) // ALREADY next to us
+        if (ore && belowCap(ore.position.y)) ore = null // never chase ore DOWN, only what's at reach
+        if (!ore) break // nothing already in front of us -> fall to today's climb/bail
+        try { await breakBlock(ore) } catch (e) { dbg('  gather naked-grace: grab failed (' + e.message + ')'); break }
+        grabbed++
+      }
+      if (grabbed > 0) {
+        try { await collectDrops(bot, 6) } catch {}
+        dbg('  gather naked-grace grabbed ' + grabbed + ' ore before retreating (hp=' + (bot.health ?? 20).toFixed(1) + ')')
+        if (opts.say && !graceSaid) { graceSaid = true; opts.say('grabbing the iron in front of me before i pull back') }
+      }
     }
     dbg('  gather THREAT while mining #' + threatReacts + ' (hp=' + hp.toFixed(1) + ', hostile<=6=' + hostileNear + ', deep=' + deep + ') - reacting')
     // HONESTY: only claim "mob on me" when there actually IS a mob within 6 - an hp-only bail on

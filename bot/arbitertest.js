@@ -241,5 +241,52 @@ t('mineThreatDecision: (7) hostile deep with the climb budget spent -> bail', ()
   assert.strictEqual(arb.mineThreatDecision({ hp: 11.9, hostileNear: true, deep: true, threatReacts: 5 }), 'bail', 'budget exhausted even with a hostile on us')
 })
 
+// ---- #53 NAKED_IRON_GRACE: nakedGraceAllowed (grab a few adjacent iron before retreating) ----
+
+t('nakedGraceAllowed: naked + iron ore + hp15 + no melee + grabbed 0 -> allow', () => {
+  assert.strictEqual(arb.nakedGraceAllowed({ naked: true, isOre: true, hp: 15, hostileMelee: false, oreGrabbed: 0 }), true)
+})
+
+t('nakedGraceAllowed: hp at the floor (10) -> deny (never mine through low hp)', () => {
+  assert.strictEqual(arb.nakedGraceAllowed({ naked: true, isOre: true, hp: 10, hostileMelee: false, oreGrabbed: 0 }), false)
+})
+
+t('nakedGraceAllowed: a mob within melee -> deny (react now, no grab)', () => {
+  assert.strictEqual(arb.nakedGraceAllowed({ naked: true, isOre: true, hp: 15, hostileMelee: true, oreGrabbed: 0 }), false)
+})
+
+t('nakedGraceAllowed: already grabbed the cap (3) -> deny (bounded)', () => {
+  assert.strictEqual(arb.nakedGraceAllowed({ naked: true, isOre: true, hp: 15, hostileMelee: false, oreGrabbed: 3 }), false)
+})
+
+t('nakedGraceAllowed: NOT naked -> deny (armored mining unchanged)', () => {
+  assert.strictEqual(arb.nakedGraceAllowed({ naked: false, isOre: true, hp: 15, hostileMelee: false, oreGrabbed: 0 }), false)
+})
+
+t('nakedGraceAllowed: not an ore gather -> deny', () => {
+  assert.strictEqual(arb.nakedGraceAllowed({ naked: true, isOre: false, hp: 15, hostileMelee: false, oreGrabbed: 0 }), false)
+})
+
+t('nakedGraceAllowed: flag off (enabled:false) -> deny even when all else allows', () => {
+  assert.strictEqual(arb.nakedGraceAllowed({ naked: true, isOre: true, hp: 15, hostileMelee: false, oreGrabbed: 0 }, { enabled: false }), false)
+})
+
+// ---- #53: gearupCooldownMin (naked bot's fruitless cooldown is capped low) ----
+
+t('gearupCooldownMin: naked caps the cooldown at 12 min (not 45)', () => {
+  assert.strictEqual(arb.gearupCooldownMin(5, true), 12, 'fails*10=50 -> min(45,..)=45 -> naked cap 12')
+  assert.strictEqual(arb.gearupCooldownMin(1, true), 10, 'fails=1 -> 10 (already under the cap)')
+  assert.ok(arb.gearupCooldownMin(99, true) <= 12, 'naked never exceeds 12')
+})
+
+t('gearupCooldownMin: armored/partial keeps today min(45, fails*10)', () => {
+  assert.strictEqual(arb.gearupCooldownMin(5, false), 45, 'armored fails=5 -> 45')
+  assert.strictEqual(arb.gearupCooldownMin(2, false), 20, 'armored fails=2 -> 20')
+})
+
+t('gearupCooldownMin: flag off (enabled:false) -> naked keeps today min(45, fails*10)', () => {
+  assert.strictEqual(arb.gearupCooldownMin(5, true, { enabled: false }), 45, 'flag off -> no naked cap')
+})
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall arbiter tests passed')
 process.exit(failures ? 1 : 0)

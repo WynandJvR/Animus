@@ -186,6 +186,42 @@ function mineThreatDecision (state, opts = {}) {
   return 'bail'                                                               // recovery exhausted: honest bail
 }
 
+// PURE (#53 NAKED_IRON_GRACE): may a NAKED bot grab a FEW already-found adjacent iron ore
+// before it climbs/bails out of a mining threat? The keystone: a naked bot that bails with 0
+// iron on every deep threat can never bootstrap even boots -> permanent nakedness -> death loop.
+// This lets it net the couple iron it's already standing next to, SAFELY - it never overrides
+// the survival bail. Every hard invariant is a deny here; the impure grab-loop just calls this.
+//   state: naked (bool, 0 armor pieces worn), isOre (bool, gathering iron ore), hp (0..20),
+//          hostileMelee (bool, a mob within ~2.5b), oreGrabbed (count grabbed so far this react)
+//   opts:  enabled (NAKED_IRON_GRACE on; false -> today, always deny), graceHpFloor (10 - well
+//          above the hp-critical 6), graceOre (3 - the hard grab cap)
+// hp <= graceHpFloor -> deny (bail); a mob in melee -> deny (react now, don't tank hits naked);
+// grabbed >= graceOre -> deny (bounded); not naked / not ore / flag off -> deny (byte-for-byte).
+function nakedGraceAllowed (state, opts = {}) {
+  const s = state || {}
+  if (opts.enabled === false) return false            // flag off -> today's climb/bail exactly
+  if (!s.naked) return false                          // armored/partial mining is UNCHANGED
+  if (!s.isOre) return false                          // only the iron-ore bootstrap case
+  if (s.hostileMelee) return false                    // a mob within ~2.5b -> react now, no grab
+  const hp = s.hp != null ? s.hp : 20
+  const hpFloor = opts.graceHpFloor != null ? opts.graceHpFloor : 10
+  if (hp <= hpFloor) return false                     // never mine through genuinely-low hp
+  const maxOre = opts.graceOre != null ? opts.graceOre : 3
+  if ((s.oreGrabbed || 0) >= maxOre) return false     // bounded: at most graceOre this react
+  return true
+}
+
+// PURE (#53): minutes to cool off a fruitless gear-up attempt. Armored/partial keeps today's
+// min(45, fails*10). A FULLY NAKED bot (0 pieces) must keep trying - it can't sit locked out 45
+// min while it dies naked - so its cooldown is capped at nakedCap (12). Gated: the naked cap
+// applies only when enabled (NAKED_IRON_GRACE on); flag off -> today's min(45, fails*10) exactly.
+function gearupCooldownMin (fails, naked, opts = {}) {
+  const base = Math.min(45, (fails || 0) * 10)
+  if (opts.enabled === false || !naked) return base
+  const nakedCap = opts.nakedCap != null ? opts.nakedCap : 12
+  return Math.min(base, nakedCap)
+}
+
 // PURE: does a hostile at `dist` blocks count as a live threat, given whether the straight
 // eye-line to it is blocked by solid rock? Close floor ALWAYS counts (may be right above/below
 // or about to break through); beyond it, a fully walled-off mob is discounted.
@@ -202,6 +238,8 @@ module.exports = {
   jobSurvivalNeed,
   jobMayProgress,
   mineThreatDecision,
+  nakedGraceAllowed,
+  gearupCooldownMin,
   hostileThreatens,
   beginManeuver,
   refreshManeuver,
