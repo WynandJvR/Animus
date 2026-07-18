@@ -30,6 +30,8 @@ const gear = require('./gear.js') // PURE gear picks (which tool for a block, wh
 const { bestTool, armorSlot, bestArmor, armorRank, ARMOR_MAT, ARMOR_RANK, LEATHER_PIECES } = gear
 const telemetry = require('./telemetry.js') // activity/outcome/progress/checklist/stuck records; trackTick below still orchestrates it with the death snapshot
 const grave = require('./grave.js') // the death LEDGER + carried-items snapshot (grave-policy.js holds the pure decisions)
+const resumeStore = require('./resume-store.js') // the saved-build FILE + pause timing + finish disposition (the build latches stay here)
+const { persistResume, clearPersistedResume, persistedResume, markResumePaused, resumeHoldRemaining, finishDisposition } = resumeStore
 const { activityInfo, beginActivity, endActivity, recordOutcome, touchProgress, progressInfo, markStalled, _resetProgress, pushOutcomeRing, recentOutcomes, checklistBegin, checklistStep, JOB_STEPS } = telemetry
 const GoalNearXZBanded = navLeg.makeGoalNearXZBanded(goals.Goal) // Y-aware drop-in for goals.GoalNearXZ (NAV_HAZARD_LEGS)
 const NAV_HAZARD_LEGS = process.env.NAV_HAZARD_LEGS !== '0' // NAV Phase B (default ON): Y-band the trek leg goal + price lava in travelMovements; =0 => today's Y-blind GoalNearXZ + no lava cost, byte-for-byte
@@ -40,7 +42,7 @@ const NAV_WAYPOINT_GRAPH = process.env.NAV_WAYPOINT_GRAPH !== '0' // Phase C / �
 const NAV_LADDER_DIET = process.env.NAV_LADDER_DIET === '1' // Phase C / §5-P4 DEFAULT OFF: retire the superseded wedge soft-steer only after the design's >=1wk soak; unset => today byte-for-byte
 const PROBE_MS = Math.max(200, parseInt(process.env.NAV_PROBE_MS || '1000', 10)) // bounded getPathTo budget per candidate (success/noPath resolve fast; only a far `timeout` costs the full budget)
 let dbgSink = null // injected by index.js: debug lines persist to logs/bot-events.log
-function setDebugSink (fn) { dbgSink = fn; telemetry.setDebugSink(fn) } // forward: telemetry's checklistStep emits [job] step lines through the same sink
+function setDebugSink (fn) { dbgSink = fn; telemetry.setDebugSink(fn); resumeStore.setDebugSink(fn) } // forward: telemetry + resume-store emit through the same sink
 const dbg = (...a) => {
   const line = '[build] ' + a.map(x => String(x)).join(' ')
   if (process.env.BUILD_DEBUG) console.log(line)
@@ -122,7 +124,7 @@ const RESUME_MAX_DEATHS = parseInt(process.env.RESUME_MAX_DEATHS || '4', 10)
 // operator cancelbuild (or a REAL finish) deletes a saved build. STOP_KEEPS_BUILD=0
 // restores today's destructive behavior at every touched site (BRANCH_MINE=0 convention).
 const STOP_KEEPS_BUILD = process.env.STOP_KEEPS_BUILD !== '0'
-const RESUME_HOLD_MS = parseInt(process.env.RESUME_HOLD_MS || '900000', 10) // pause hold before autonomy resumes (15min)
+const { RESUME_HOLD_MS } = resumeStore // pause hold before autonomy resumes (15min) - one definition, in resume-store.js
 const SUPERVISOR_RESUME_HOLD_MS = parseInt(process.env.SUPERVISOR_RESUME_HOLD_MS || '60000', 10) // a supervisor UNSTICK (frozen-vitals nudge: stop->recover) pauses only briefly, not the full operator 15min
 let cancelArmedAt = 0 // two-step cancelbuild confirm window (ms epoch of the arm)
 
@@ -2117,7 +2119,7 @@ async function handle (bot, line, opts = {}) {
       cancelArmedAt = 0
       buildAbort = true; resumeJob = null; buildInterrupted = false; resumeDeaths = 0 // halt any running build
       bot.pathfinder.setGoal(null)
-      try { try { fs.unlinkSync(RESUME_FILE + '.cancelled') } catch {} ; fs.renameSync(RESUME_FILE, RESUME_FILE + '.cancelled') } catch (e) { dbg('cancelbuild archive failed: ' + e.message) }
+      try { const RF = resumeStore.RESUME_FILE; try { fs.unlinkSync(RF + '.cancelled') } catch {} ; fs.renameSync(RF, RF + '.cancelled') } catch (e) { dbg('cancelbuild archive failed: ' + e.message) }
       return `cancelled "${saved.name}" - the save is archived, not resumable`
     }
 
@@ -2991,43 +2993,9 @@ function setResumeJob (pt) { if (loadedSchem && pt) { resumeJob = { schem: loade
 // DISK-PERSISTED resume: the in-memory resumeJob dies with the process (restart/crash/
 // reboot), which lost the castle job twice live. Save {schematic name, origin} so a
 // fresh process can pick the build back up via the `resumebuild` command.
-const RESUME_FILE = process.env.RESUME_FILE || path.join(__dirname, 'resume-job.json') // env-overridable (test isolation)
-function persistResume (name, at) {
-  try { fs.writeFileSync(RESUME_FILE, JSON.stringify({ name, at: { x: at.x, y: at.y, z: at.z }, savedAt: new Date().toISOString() })) } catch (e) { dbg('persistResume FAILED: ' + e.message) }
-}
-function clearPersistedResume () { try { fs.unlinkSync(RESUME_FILE) } catch {} }
-function persistedResume () {
-  try { return JSON.parse(fs.readFileSync(RESUME_FILE, 'utf8')) } catch { return null }
-}
-// PAUSE the saved job in place (operator stop / shortfall finish / death give-up): stamp
-// pausedAt so the resume machinery holds off for RESUME_HOLD_MS, then autonomy picks it back
-// up. NOT a delete - operator intent survives; only cancelbuild or a real finish removes it.
-function markResumePaused (why, holdMs) {
-  try {
-    const saved = JSON.parse(fs.readFileSync(RESUME_FILE, 'utf8'))
-    saved.pausedAt = Date.now(); saved.pausedWhy = String(why || '')
-    // optional per-pause hold (supervisor unstick = short); absent -> resumeHoldRemaining uses RESUME_HOLD_MS
-    if (holdMs != null && Number(holdMs) > 0) saved.pauseHoldMs = Number(holdMs); else delete saved.pauseHoldMs
-    fs.writeFileSync(RESUME_FILE, JSON.stringify(saved))
-  } catch (e) { dbg('markResumePaused failed: ' + e.message) }
-}
-// PURE: ms left on a pause hold (0 = resume now). No file / no pausedAt / malformed pausedAt
-// all -> 0 (fail OPEN to resume, the safe direction - a saved build must not stall forever).
-function resumeHoldRemaining (saved, now) {
-  const paused = saved && Number(saved.pausedAt)
-  if (!paused || Number.isNaN(paused)) return 0
-  const hold = (saved && Number(saved.pauseHoldMs) > 0) ? Number(saved.pauseHoldMs) : RESUME_HOLD_MS
-  return Math.max(0, paused + hold - now)
-}
-// PURE: what to do with the saved build when a build loop settles (DESIGN §5). Clear ONLY a
-// genuine finish; shortfall/all-skipped -> pause (keep the job); errored/deferred/aborted -> keep.
-function finishDisposition (r) {
-  if (!r) return 'keep'                    // errored/undefined - never delete on a throw
-  if (r.deferred) return 'keep'            // resume deferred (old loop still unwinding)
-  if (r.stopped) return 'keep'             // aborted, not finished
-  if ((r.skipped || 0) > 0) return 'pause' // "done" but blocks/materials are still owed - shortfall
-  return 'clear'                           // placed everything it set out to place
-}
+// The resume STORE (file + pause timing + finish disposition) lives in resume-store.js,
+// destructured at the top of this file. markBuildInterrupted / setResumeJob / resumeBuild
+// stayed here: they read and write the live build latches and re-enter autoBuild.
 
 // Resume an interrupted build after respawn. Travels back to the site (we respawn far
 // away), then re-runs autoBuild - which RE-PROVISIONS whatever we lost (even if we
