@@ -177,6 +177,18 @@ function foodFloorEscalated (counter, opts = {}) {
   return (counter || 0) >= n
 }
 
+// ROD_SUPPLY - the ONE gate for SEEKING string to craft a FIRST fishing rod (M1 spider-drop
+// retention + M2 bounded spider hunt). The bot only bothers with string when it genuinely cannot
+// otherwise get a rod: no rod in the pack, no rod in the bank reserve to withdraw (F2), AND not
+// enough string on hand to craft one (a rod = 3 sticks + 2 string). A stocked bot never chases
+// spider loot. PURE (a snapshot in, go/no-go out); the ROD_SUPPLY flag gate + the side-effecting
+// hunt/collect live at the call sites (provision.ensureFishingRod / index.js auto-defend). Offline-
+// tested. Default string target 2 (env ROD_STRING_TARGET).
+function needStringForRod ({ hasRod, packString, bankRods, target } = {}) {
+  const tgt = target != null ? target : Number(process.env.ROD_STRING_TARGET || 2)
+  return !hasRod && (bankRods || 0) < 1 && (packString || 0) < tgt
+}
+
 // How many bread can we bake from N wheat (3 wheat -> 1 bread). PURE arithmetic, offline-tested.
 function breadFromWheat (wheatCount) { return Math.max(0, Math.floor((wheatCount || 0) / 3)) }
 
@@ -191,4 +203,4 @@ function wheatWithdrawForBake ({ packWheat, bankWheat, bankFoodPts, bankTargetPt
   return Math.max(0, Math.min(bankWheat || 0, need, cap))
 }
 
-module.exports = { DEFAULT_BUFFER, BAD_FOOD, RAW_COOKABLE_FOOD, foodTier, hasFoodSupply, needsFoodSupply, shouldSweepForFood, foodSupplyAction, shouldTrekHomeForFood, breadFromWheat, wheatWithdrawForBake, inLoopFoodTrigger, busyPreemptFood, outboundRungAdmissible, famineHoldFood, foodFloorEscalation, foodFloorEscalated, AUTO_EAT_AT }
+module.exports = { DEFAULT_BUFFER, BAD_FOOD, RAW_COOKABLE_FOOD, foodTier, hasFoodSupply, needsFoodSupply, shouldSweepForFood, foodSupplyAction, shouldTrekHomeForFood, breadFromWheat, wheatWithdrawForBake, inLoopFoodTrigger, busyPreemptFood, outboundRungAdmissible, famineHoldFood, foodFloorEscalation, foodFloorEscalated, AUTO_EAT_AT, needStringForRod }

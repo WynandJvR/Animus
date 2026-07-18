@@ -1459,6 +1459,12 @@ const REACTIVE_MOVE_ON = process.env.NAV_REACTIVE_MOVE !== '0'
 let defendEquipped = false
 let lastDefendTarget = null
 let lastFleeAt = 0
+// ROD_SUPPLY (M1): the last spider we auto-meleed, so that once it DIES we can walk to its STRING
+// drop and pick it up (string = the one string source on this no-animal site, and the precondition
+// for a first fishing rod). Only tracked/collected under the flag; spiderLootBusy re-entry-guards
+// the async collect so the 700ms reflex never stacks pickups.
+let lastSpiderMelee = null
+let spiderLootBusy = false
 // fix #15 Piece D: the "someone is hitting me" detector is hoisted to module scope (below, a
 // bot.on('health') handler + beingHitNow()) so the busy/rest COMMAND gate can see hits even when
 // AUTO_DEFEND=0. The AUTO_DEFEND tick delegates to beingHitNow() instead of tracking hp itself.
@@ -1815,6 +1821,20 @@ if (process.env.AUTO_DEFEND !== '0') {
         if (!HOSTILE_RE.test(name) || NO_AUTO_MELEE.test(name)) continue
         const d = e.position.distanceTo(me); if (d < best) { best = d; target = e }
       }
+      // ROD_SUPPLY (M1): a spider we just fought in self-defense drops STRING - the one string
+      // source on this no-animal site. When we still NEED string for a first rod, walk to the drop
+      // ONCE and pick it up (string is kept - not in JUNK_RE / safekeep). Bounded, post-death only
+      // (no live-fight distraction), re-entry-guarded; no-op when stocked. Flag off => never fires.
+      if (process.env.ROD_SUPPLY === '1' && lastSpiderMelee && !lastSpiderMelee.isValid && !spiderLootBusy) {
+        const inv = bot.inventory ? bot.inventory.items() : []
+        const need = foodSec.needStringForRod({
+          hasRod: inv.some(i => i.name === 'fishing_rod'),
+          packString: inv.reduce((n, i) => n + (i.name === 'string' ? i.count : 0), 0),
+          bankRods: 0
+        })
+        lastSpiderMelee = null
+        if (need) { spiderLootBusy = true; provision.collectDrops(bot, 6).catch(() => {}).then(() => { spiderLootBusy = false }) }
+      }
       if (!target) { defendEquipped = false; lastDefendTarget = null; return }
       if (!defendEquipped) {
         const w = (bot.inventory ? bot.inventory.items() : []).find(i => i.name.endsWith('_sword'))
@@ -1822,6 +1842,8 @@ if (process.env.AUTO_DEFEND !== '0') {
       }
       bot.lookAt(target.position.offset(0, 1, 0)).catch(() => {})
       bot.attack(target)
+      // ROD_SUPPLY (M1): remember a spider we're meleeing so its string drop is collected on death.
+      if (process.env.ROD_SUPPLY === '1' && /^(spider|cave_spider)$/i.test(target.name || '')) lastSpiderMelee = target
       if (target !== lastDefendTarget) { note(`(auto-defend) ${target.name}`); lastDefendTarget = target } // log on change only
     } catch { /* not ready */ }
   }, 700)
@@ -2025,8 +2047,14 @@ if (process.env.AUTO_SURFACE !== '0') {
     try {
       note('(drown-crisis) head underwater - taking the controls to get out of the water')
       const ok = await navigate.escapeWater(bot, { isStopped: () => false })
-      note(`(drown-crisis) ${ok ? 'out of the water' : 'still wet - will retry after a cooldown'}`)
-      if (!ok) drownCooldownUntil = Date.now() + 10000
+      // WATER_ESCAPE (task #48): escapeWater's success is HEAD-based (!headInWater), so a bobbing bot
+      // whose head clears for a tick declared "out of the water" while its body kept treading the same
+      // pond (the log-50236 false victory, design §2b). Under the flag, judge "out" by the FEET so the
+      // head-based reflex and the feet-based recovery `water` rung agree on "actually out". Purely the
+      // success LABEL + cooldown gate; the escape it ran is unchanged. Flag OFF => today's head-based ok.
+      const out = (process.env.WATER_ESCAPE === '1') ? !navigate.feetInWater(bot) : ok
+      note(`(drown-crisis) ${out ? 'out of the water' : 'still wet - will retry after a cooldown'}`)
+      if (!out) drownCooldownUntil = Date.now() + 10000
     } catch (e) { note(`(drown-crisis) failed: ${e.message}`); drownCooldownUntil = Date.now() + 10000 } finally { drowning = false; wetHist = 0; drownStart = 0 }
   }, 2000)
 }

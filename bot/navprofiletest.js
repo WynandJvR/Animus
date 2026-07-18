@@ -238,5 +238,102 @@ t('deepWaterHazard: null pos / non-fn sampler tolerated => 0; WATER_STEP_COST is
   assert(nav.WATER_STEP_COST > 0 && nav.WATER_STEP_COST < 100, 'routes around deep water but never noPath (can still reach the river-farm)')
 })
 
+// ---- WATER_ESCAPE (task #48): findDryLandExit (nearest REACHABLE-DRY-LAND finder) --------------
+// A block-name sampler over an explicit map: `set` maps "x,y,z" -> name; anything unlisted is air.
+// The bot's feet cell is water (treading). Cells are integer; the fill is 6-connected over WATER.
+const mkSampler = (map) => (x, y, z) => (map[x + ',' + y + ',' + z] || 'air')
+const put = (map, name, ...cells) => { for (const c of cells) map[c[0] + ',' + c[1] + ',' + c[2]] = name }
+// Build a simple straight water channel along +z at y=40 (feet), depth 1 with a solid floor at y=39,
+// air above at y=41. Bot at (0,40,0). Helper adds `len` water cells from z=z0..z0+len-1.
+const channel = (map, x, z0, len, floorName = 'stone') => {
+  for (let i = 0; i < len; i++) { put(map, 'water', [x, 40, z0 + i]); put(map, floorName, [x, 39, z0 + i]) }
+}
+
+t('findDryLandExit: null/!fn tolerated; not-in-water (no water at feet) => null', () => {
+  assert.strictEqual(nav.findDryLandExit(null, () => 'water'), null)
+  assert.strictEqual(nav.findDryLandExit({ x: 0, y: 40, z: 0 }, null), null)
+  // dry cell, no water anywhere -> nothing to escape
+  assert.strictEqual(nav.findDryLandExit({ x: 0, y: 40, z: 0 }, () => 'stone'), null)
+})
+
+t('findDryLandExit: open pond, DRY banks both sides -> goalDir NORTH picks the north cell even though south is nearer (a)', () => {
+  const map = {}
+  // water column at x=0: bot at z=0; a near SOUTH bank 2 cells at z=-1 (dist 1 from a z=0-adjacent water),
+  // and a farther NORTH bank at z=+5. Both are level dry stand cells (floor stone at y=39, air at 40/41).
+  put(map, 'water', [0, 40, 0])            // bot feet cell
+  // south water then a dry bank cell just south (nearer)
+  put(map, 'water', [0, 40, -1]); put(map, 'stone', [0, 39, -1])
+  put(map, 'stone', [0, 39, -2])           // south DRY bank stand cell (0,40,-2): floor stone, feet/head air
+  // north channel then a dry bank cell farther north
+  for (let z = 1; z <= 4; z++) { put(map, 'water', [0, 40, z]); put(map, 'stone', [0, 39, z]) }
+  put(map, 'stone', [0, 39, 5])            // north DRY bank stand cell (0,40,5) - FARTHER
+  const s = mkSampler(map)
+  const north = nav.findDryLandExit({ x: 0, y: 40, z: 0 }, s, { goalDir: { x: 0, z: 1 } })
+  assert(north, 'a reachable dry exit exists')
+  assert.strictEqual(north.z, 5, 'goalDir north => picks the north bank (z=5) despite the nearer south bank at z=-2')
+  // no goalDir => nearest wins (south, z=-2)
+  const nearest = nav.findDryLandExit({ x: 0, y: 40, z: 0 }, s, {})
+  assert.strictEqual(nearest.z, -2, 'no goalDir => the nearer south bank')
+})
+
+t('findDryLandExit: bank WALLED off by terrain between bot and cell => null (flood-fill blocked) (b)', () => {
+  const map = {}
+  put(map, 'water', [0, 40, 0])            // bot feet cell (isolated pocket)
+  put(map, 'stone', [0, 39, 0])
+  // a solid wall at z=1 (both the water level and the floor) seals the pocket
+  put(map, 'stone', [0, 40, 1]); put(map, 'stone', [0, 41, 1]); put(map, 'stone', [0, 39, 1])
+  // a perfectly good DRY bank sits BEYOND the wall at z=2 - unreachable through the solid wall
+  put(map, 'water', [0, 40, 2]); put(map, 'stone', [0, 39, 2]); put(map, 'stone', [0, 39, 3])
+  const s = mkSampler(map)
+  // the only surface water is the bot cell; its z+1 neighbour is stone (wall), not a dry stand cell,
+  // and the fill cannot cross the wall to reach the z=3 bank => null.
+  assert.strictEqual(nav.findDryLandExit({ x: 0, y: 40, z: 0 }, s, { goalDir: { x: 0, z: 1 } }), null)
+})
+
+t('findDryLandExit: 1-deep SHELF (adjacent cell feet=WATER) is NOT a dry exit => null (c)', () => {
+  const map = {}
+  channel(map, 0, 0, 1)                     // bot at (0,40,0), water over stone
+  // neighbour at z=1 is a 1-deep shelf: floor stone at y=39 but the FEET cell (y=40) is WATER, head air
+  put(map, 'water', [0, 40, 1]); put(map, 'stone', [0, 39, 1])
+  // and z=2 is deeper water with a water floor (no dry land anywhere)
+  put(map, 'water', [0, 40, 2]); put(map, 'water', [0, 39, 2])
+  const s = mkSampler(map)
+  assert.strictEqual(nav.findDryLandExit({ x: 0, y: 40, z: 0 }, s, { goalDir: { x: 0, z: 1 } }), null,
+    'a surf shelf (feet still water) must be rejected - no declaring victory in the water')
+})
+
+t('findDryLandExit: unclimbable 2-b lip with no other exit => null (d); a reachable +1 lip => returned (e)', () => {
+  // (d) 2-block lip: the bank floor top is at y=41 (stand cell would be y=42 = surface+2), too high.
+  const d = {}
+  put(d, 'water', [0, 40, 0]); put(d, 'stone', [0, 39, 0]) // bot cell (surface: y=41 is air)
+  // neighbour column z=1: solid up through y=41 (a 2-high wall), so the only stand cell is y=42.
+  put(d, 'stone', [0, 39, 1]); put(d, 'stone', [0, 40, 1]); put(d, 'stone', [0, 41, 1])
+  // (y=42/43 are air) - stand cell (0,42,1) would need Δy=+2 from the surface water at y=40 => skipped
+  const sd = mkSampler(d)
+  assert.strictEqual(nav.findDryLandExit({ x: 0, y: 40, z: 0 }, sd, { goalDir: { x: 0, z: 1 } }), null,
+    'a 2-b lip is unclimbable (Δy>+1) and there is no other exit => null')
+
+  // (e) +1 lip: bank floor top at y=40, stand cell at y=41 (surface+1) - reachable.
+  const e = {}
+  put(e, 'water', [0, 40, 0]); put(e, 'stone', [0, 39, 0]) // bot cell, surface at y=40 (y=41 air)
+  put(e, 'stone', [0, 40, 1])                              // neighbour floor block one UP => stand on top at y=41
+  // (0,41,1) feet air, (0,42,1) head air by default
+  const se = mkSampler(e)
+  const exit = nav.findDryLandExit({ x: 0, y: 40, z: 0 }, se, { goalDir: { x: 0, z: 1 } })
+  assert(exit, 'a +1 lip is climbable and must be returned')
+  assert.deepStrictEqual({ x: exit.x, y: exit.y, z: exit.z }, { x: 0, y: 41, z: 1 }, 'the returned exit is the +1 lip stand cell')
+})
+
+t('findDryLandExit: opts.solidAt (real boundingBox) overrides the name heuristic for the floor test', () => {
+  const map = {}
+  channel(map, 0, 0, 1)                     // bot at (0,40,0)
+  put(map, 'oak_leaves', [0, 39, 1])        // neighbour "floor" is LEAVES (not a full solid block)
+  // by name heuristic leaves are non-solid -> rejected; assert solidAt=false path also rejects it
+  const s = mkSampler(map)
+  const solidFalse = () => false
+  assert.strictEqual(nav.findDryLandExit({ x: 0, y: 40, z: 0 }, s, { solidAt: solidFalse }), null,
+    'solidAt=false => no floor qualifies => null')
+})
+
 console.log(failures ? ('\n' + failures + ' FAILURE(S)') : '\nALL PASS')
 process.exit(failures ? 1 : 0)

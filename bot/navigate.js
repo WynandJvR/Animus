@@ -18,6 +18,7 @@
 const { goals } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
 const arbiter = require('./arbiter.js') // priority body-ownership: reflexes defer to a running maneuver
+const navProfile = require('./nav-profile.js') // PURE terrain policy - findDryLandExit (WATER_ESCAPE); no bot-module cycle
 
 let dbgSink = null // injected by index.js: debug lines persist to logs/bot-events.log
 function setDebugSink (fn) { dbgSink = fn }
@@ -48,6 +49,14 @@ function isForceUnsticking () { return forceUnsticking }
 // back to its exact current call and the primitive is defined but unreferenced (today
 // byte-for-byte). Default ON.
 const REACTIVE_MOVE_ON = process.env.NAV_REACTIVE_MOVE !== '0'
+
+// WATER_ESCAPE (task #48, DEFAULT OFF): the water-stuck livelock fix. OFF (unset / !== '1') =>
+// byte-for-byte today (blind nearest-bank picker + the unsatisfiable onGround/dry-feet success
+// test + no trek anti-fight). ON => the recovery `water` rung relocates to the nearest REACHABLE,
+// DRY, goal-biased land cell (findDryLandExit + escapeToDryLand), the drown reflex's success label
+// becomes FEET-based (stops the head-based false victory), and walkStaged stops re-aiming a leg
+// back into the pond while an escape owns the body.
+const WATER_ESCAPE = process.env.WATER_ESCAPE === '1'
 
 // ---- the ONE deadline-goto ----------------------------------------------------------
 // pathfinder.goto with a hard deadline. An unreachable target can hang goto FOREVER
@@ -222,6 +231,77 @@ async function escapeWater (bot, { isStopped = () => false, deadlineMs = 35000 }
     dbg('drown-escape: ' + (out ? 'out of the water at ' + bot.entity.position.floored() : 'STILL WET after the ladder'))
     return out
   } finally { arbiter.endManeuver(tok); escapingWater = false }
+}
+// Is a water-escape maneuver (escapeWater) actively driving the body right now? walkStaged reads
+// this for the WATER_ESCAPE trek anti-fight - don't compose a leg back into the pond while an
+// escape is swimming the bot OUT. Bounded: escapingWater is cleared in escapeWater's finally.
+function isEscapingWater () { return escapingWater }
+
+// WATER_ESCAPE (task #48): relocate a bot stuck TREADING water to the nearest REACHABLE, DRY,
+// goal-biased land cell - the correct replacement for the blind nearest-bank swim (swimToShore /
+// manualHopFromWater) that ignores the goal, holds controls at a possibly-walled cell, and whose
+// onGround/dry-feet success test treading water can never satisfy (design §2a/§2b). Bounded ladder,
+// whole call <=deadlineMs (default 25s); returns an HONEST !feetInWater bool - never wedges.
+async function escapeToDryLand (bot, { goalDir = null, isStopped = () => false, deadlineMs = 25000 } = {}) {
+  const dl = Date.now() + deadlineMs
+  const sample = (x, y, z) => { try { const b = bot.blockAt(new Vec3(x, y, z)); return b && b.name } catch { return null } }
+  const solidAt = (x, y, z) => { try { const b = bot.blockAt(new Vec3(x, y, z)); return !!b && b.boundingBox === 'block' && !/water|lava/.test(b.name) } catch { return false } }
+  const feet = bot.entity.position.floored()
+  // The finder returns only a cell with a REAL swim corridor (flood-fill, not blind rays) and a
+  // genuinely-dry climbable top, ranked toward the goal. No dry land in range => honest hold (below).
+  const exit = navProfile.findDryLandExit({ x: feet.x, y: feet.y, z: feet.z }, sample, { maxR: 16, goalDir, solidAt })
+  if (!exit) { dbg('escapeToDryLand: no reachable dry land within range - holding (never wedging)'); return false }
+  dbg('escapeToDryLand: relocating to dry cell ' + exit.x + ',' + exit.y + ',' + exit.z + (goalDir ? ' (goal-biased)' : ''))
+  // CORRECTED success test (design §3b): standing on reachable dry land - onGround-and-dry OR within
+  // 0.7b of the exit cell and no longer treading (feet not water). NOT the unsatisfiable
+  // onGround-AND-dry-floor-AND-!feetInWater the swim rungs use (deep water never reports onGround).
+  const reached = () => {
+    if (feetInWater(bot)) return false
+    if (bot.entity.onGround) return true
+    const p = bot.entity.position
+    return Math.hypot(p.x - (exit.x + 0.5), p.z - (exit.z + 0.5)) <= 0.7
+  }
+  // RUNG 1 (<=12s): swim/step straight at the exit on the swimToShore control idiom.
+  try {
+    try { bot.pathfinder.setGoal(null) } catch {}
+    const t0 = Date.now()
+    bot.setControlState('jump', true) // float/climb the water column
+    bot.setControlState('forward', true)
+    bot.setControlState('sprint', true)
+    while (Date.now() - t0 < 12000 && Date.now() < dl && !isStopped()) {
+      try { await bot.lookAt(new Vec3(exit.x + 0.5, bot.entity.position.y + 0.4, exit.z + 0.5), true) } catch {}
+      await new Promise(r => setTimeout(r, 120))
+      if (reached()) { dbg('escapeToDryLand: reached dry land at ' + bot.entity.position.floored()); return true }
+    }
+  } finally { bot.clearControlStates() }
+  if (!feetInWater(bot)) return true // the swim landed us dry (onGround may lag) - done
+  // RUNG 2: an unclimbable lip the swim couldn't make - pillar up under OPEN SKY, then step off.
+  // Reuses the already-anti-grief pillarUpTo (refuses indoors :1586, refuses water-overhead :1602,
+  // natural/own-scaffold filler only :1603, self-terminates on clear sky :1594) - NO new placement.
+  const roofed = () => { try { return !!(prov().hasSolidCeiling && prov().hasSolidCeiling(bot, 8, { ignoreLeaves: true })) } catch { return false } }
+  const indoors = () => { try { return !!(prov().insideOwnStructure && prov().insideOwnStructure(bot)) } catch { return false } }
+  if (Date.now() < dl && !isStopped() && !roofed() && !indoors()) {
+    let ySurf = feet.y
+    for (let dy = 0; dy <= 12; dy++) { const n = sample(feet.x, feet.y + dy, feet.z); if (!n || !/water/.test(n)) { ySurf = feet.y + dy; break } }
+    dbg('escapeToDryLand: unclimbable lip - pillaring to y=' + (ySurf + 1) + ' then stepping off')
+    try { await prov().pillarUpTo(bot, ySurf + 1, { isStopped }) } catch (e) { dbg('escapeToDryLand: pillar failed (' + e.message + ')') }
+    if (!feetInWater(bot) && bot.entity.onGround) { // now on the tower top - step off onto the dry cell
+      try {
+        try { bot.pathfinder.setGoal(null) } catch {}
+        bot.clearControlStates()
+        await bot.lookAt(new Vec3(exit.x + 0.5, bot.entity.position.y, exit.z + 0.5), true)
+        bot.setControlState('forward', true)
+        const t1 = Date.now()
+        while (Date.now() - t1 < 3000 && Date.now() < dl && !isStopped()) {
+          await new Promise(r => setTimeout(r, 120))
+          if (!feetInWater(bot) && bot.entity.onGround && Math.hypot(bot.entity.position.x - (exit.x + 0.5), bot.entity.position.z - (exit.z + 0.5)) < 0.6) break
+        }
+      } catch {} finally { bot.clearControlStates() }
+    }
+  }
+  const out = !feetInWater(bot)
+  dbg('escapeToDryLand: ' + (out ? 'on dry land at ' + bot.entity.position.floored() : 'still wet - honest give-up'))
+  return out
 }
 
 // Standing in a HOLE: solid walls on 3+ sides at feet level. An open-sky pit makes the
@@ -590,7 +670,16 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
       run: async () => {
         await prov().manualHopFromWater(bot)
         if (movedEnough() && !feetInWater(bot)) return true
-        return swimToShore(bot, isStopped)
+        if (await swimToShore(bot, isStopped)) return true
+        // WATER_ESCAPE (task #48): the blind nearest-bank swim just failed - it ignores the goal and
+        // holds controls at a maybe-walled cell (design §2a). Relocate to the nearest REACHABLE, DRY,
+        // GOAL-BIASED land cell instead (flood-fill corridor + corrected success test + pillarUpTo the
+        // lip). Flag OFF => this block never runs; the rung is byte-for-byte swimToShore's result.
+        if (WATER_ESCAPE) {
+          const gd = xz ? { x: xz.x - p0.x, z: xz.z - p0.z } : null
+          if (await escapeToDryLand(bot, { goalDir: gd, isStopped })) return true
+        }
+        return false
       }
     },
     { // WATER-WEDGE ESCAPE: boxed in a 1-block water pocket under a solid ceiling (a
@@ -1173,4 +1262,4 @@ function honestFail (lastErr, counts, label, recoveryMs, reflexWaitMs) {
   return e
 }
 
-module.exports = { navigateTo, navigateToPreempt, gotoOnce, openNearbyDoor, crossOwnDoor, crossVerdict, enterStructure, exitStructure, swimToShore, escapeWater, headInWater, jumpForAir, isNavigating, isRecovering, isForceUnsticking, forceUnstick, setDebugSink, detectPit, goalWasChanged, reactiveMove, reactiveTarget, reactiveDone }
+module.exports = { navigateTo, navigateToPreempt, gotoOnce, openNearbyDoor, crossOwnDoor, crossVerdict, enterStructure, exitStructure, swimToShore, escapeWater, escapeToDryLand, isEscapingWater, headInWater, feetInWater, jumpForAir, isNavigating, isRecovering, isForceUnsticking, forceUnstick, setDebugSink, detectPit, goalWasChanged, reactiveMove, reactiveTarget, reactiveDone }

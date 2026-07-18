@@ -218,5 +218,22 @@ t('#40 F5: auto-eat threshold locked at 17 + cooked_beef is tier-0 (verified, no
   assert.strictEqual(F.foodTier('cooked_beef'), 0, 'cooked_beef is tier-0 ready-to-eat - never held out by the tier gate')
 })
 
+t('ROD_SUPPLY: needStringForRod - seek string ONLY when rod-less, reserve-dry, and string-short', () => {
+  // has a pack rod -> never seek string (the F1 pack-rod path covers it)
+  assert.strictEqual(F.needStringForRod({ hasRod: true, packString: 0, bankRods: 0 }), false, 'a pack rod -> no string need')
+  // a bank reserve rod -> F2 withdraw covers it, no string need
+  assert.strictEqual(F.needStringForRod({ hasRod: false, packString: 0, bankRods: 1 }), false, 'a banked reserve rod -> withdraw it, do not hunt string')
+  // already holds enough craft string
+  assert.strictEqual(F.needStringForRod({ hasRod: false, packString: 2, bankRods: 0 }), false, 'string>=target -> craft is already reachable')
+  // THE COLD-START CASE: no rod anywhere + 0 string -> seek string
+  assert.strictEqual(F.needStringForRod({ hasRod: false, packString: 0, bankRods: 0 }), true, 'cold start: no rod, dry reserve, 0 string -> hunt string')
+  // 1 string is still below the default target of 2
+  assert.strictEqual(F.needStringForRod({ hasRod: false, packString: 1, bankRods: 0 }), true, '1 < 2 -> still short, keep seeking')
+  // target is tunable (ROD_STRING_TARGET); 1 >= target 1 -> satisfied
+  assert.strictEqual(F.needStringForRod({ hasRod: false, packString: 1, bankRods: 0, target: 1 }), false, 'target override respected')
+  // defensive: missing counts default to 0 (rod-less, dry, 0 string) -> true
+  assert.strictEqual(F.needStringForRod({ hasRod: false }), true, 'undefined counts default to 0 -> cold-start true')
+})
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall food-security tests passed')
 process.exit(failures ? 1 : 0)

@@ -28,6 +28,7 @@ const navLeg = require('./nav-leg.js') // PURE leg-planning core (NAV Phase B): 
 const GoalNearXZBanded = navLeg.makeGoalNearXZBanded(goals.Goal) // Y-aware drop-in for goals.GoalNearXZ (NAV_HAZARD_LEGS)
 const NAV_HAZARD_LEGS = process.env.NAV_HAZARD_LEGS !== '0' // NAV Phase B (default ON): Y-band the trek leg goal + price lava in the trek Movements profile; =0 => today's Y-blind GoalNearXZ + no lava cost, byte-for-byte
 const WATER_SAFE = process.env.WATER_SAFE !== '0' // task #45 (default ON): price OVER-THE-HEAD water in the trek Movements profile so legs route around a pond aquifer (shallow water stays free -> farm/fishing reachable); =0 => no water cost, byte-for-byte
+const WATER_ESCAPE = process.env.WATER_ESCAPE === '1' // task #48 (DEFAULT OFF): water-stuck livelock fix. ON => walkStaged stops re-aiming a leg back into the pond while a water-escape maneuver owns the body (the recovery `water` rung / drown reflex is swimming the bot OUT); =1 also arms escapeToDryLand in navigate. =0 => byte-for-byte today.
 // ---- NAV Phase C flags (DESIGN-nav-overhaul.md §3 Phase C = DESIGN-navigation-redesign §5 P2-4) ----
 const NAV_LEG_PROBE = process.env.NAV_LEG_PROBE !== '0' // Phase C / §5-P2 (default ON): pre-flight getPathTo probe of a bearing leg; noPath => rotate through ±60/±120 and take the first reachable (SOFT). =0 => no probe, today byte-for-byte
 const NAV_WAYPOINT_GRAPH = process.env.NAV_WAYPOINT_GRAPH !== '0' // Phase C / §5-P3 (default ON): compose proven route segments over a waypoint graph before falling back to whole-route replay / bearing. =0 => graph unused, today byte-for-byte
@@ -486,6 +487,18 @@ async function walkStaged (bot, tx, tz, opts = {}) {
       // worth replaying). rememberRoute merges into any existing route (ok++, fresh crumbs).
       if (d0 >= routeMem.ROUTE_MIN_LEN) { pushCrumb({ x: p.x, z: p.z }); rememberRoute(startPos, { x: tx, z: tz }, crumbs) }
       return true
+    }
+    // TREK ANTI-FIGHT (WATER_ESCAPE, task #48): don't let this trek compose a leg BACK INTO the pond
+    // while a water-escape maneuver is swimming the bot OUT - nav (out) and trek (in) otherwise cancel
+    // each other every ~15s (design §2c). (a) While an escape actively OWNS the body, yield a beat and
+    // re-read instead of composing a concurrent leg - bounded, escapingWater clears when the escape
+    // resolves and the trek deadline caps the wait. (b) While the bot is itself feetInWater, DROP any
+    // proven graph/replay route for this cycle so it can't re-aim the memorized leg north into the
+    // water; fall through to the bearing+probe leg, whose recovery `water` rung runs the goal-biased
+    // escapeToDryLand and relocates the body first. Flag OFF => neither branch runs (byte-for-byte).
+    if (WATER_ESCAPE) {
+      if (navigate.isEscapingWater()) { await new Promise(r => setTimeout(r, 300)); continue }
+      if ((graphPlan || replay) && navigate.feetInWater(bot)) { graphPlan = null; replay = null; dbg('walkStaged: feet in water - suppressing proven-route replay this cycle (WATER_ESCAPE anti-fight)') }
     }
     // Self-abandon a stale replay/graph plan that has burned >60% of the trek deadline (worst
     // case = today's blind trek + a short failed prefix).
@@ -2376,6 +2389,43 @@ async function huntForFood (bot, opts = {}) {
   for (const e of Object.values(bot.entities || {})) {
     if (!e || !e.position || (e.type !== 'mob' && e.type !== 'animal')) continue
     if (!FOOD_ANIMALS.test((e.name || '').toLowerCase())) continue
+    const d = e.position.distanceTo(bot.entity.position); if (d < best) { best = d; tgt = e }
+  }
+  if (!tgt) return false
+  const items = bot.inventory ? bot.inventory.items() : []
+  const weapon = items.find(i => i.name.endsWith('_sword')) || items.find(i => i.name.endsWith('_axe'))
+  if (weapon) await bot.equip(weapon, 'hand').catch(() => {})
+  const killStart = Date.now()
+  try {
+    bot.pathfinder.setGoal(new goals.GoalFollow(tgt, 2), true)
+    while (tgt.isValid && Date.now() - killStart < 12000 && !isStopped()) {
+      if (bot.entity.position.distanceTo(tgt.position) <= 3.5) {
+        await bot.lookAt(tgt.position.offset(0, (tgt.height || 1) * 0.7, 0)).catch(() => {})
+        bot.attack(tgt)
+        await new Promise(r => setTimeout(r, 600))
+      } else { await new Promise(r => setTimeout(r, 300)) }
+    }
+  } finally { bot.pathfinder.setGoal(null) }
+  await collectDrops(bot, 8)
+  return !tgt.isValid
+}
+
+// ROD_SUPPLY (M2): a bounded near-clone of huntForFood that finishes off a NEARBY spider for its
+// STRING drop (a rod = 3 sticks + 2 string, and on this no-animal site spiders-at-night are the
+// only realistic string source). Same GoalFollow/attack/collect shape + ~12s cap as huntForFood,
+// but targets spider|cave_spider within `range` (default 16b) - NEVER a hunt across the map, never
+// a creeper/skeleton. No-op if no spider is near (honest, like huntForFood on an empty field).
+// BOUNDED: ONE pass, no loop; the string need + flag gate live at the ensureFishingRod call site.
+// Returns true if a spider died. Uses the movement profile already set (chasing needs no digging,
+// so anti-grief holds).
+const ROD_SPIDERS = /^(spider|cave_spider)$/
+async function huntSpiderForString (bot, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  if (!bot.entity) return false
+  let tgt = null; let best = opts.range || Number(process.env.ROD_SPIDER_RANGE || 16)
+  for (const e of Object.values(bot.entities || {})) {
+    if (!e || !e.position || (e.type !== 'mob' && e.type !== 'hostile')) continue
+    if (!ROD_SPIDERS.test((e.name || '').toLowerCase())) continue
     const d = e.position.distanceTo(bot.entity.position); if (d < best) { best = d; tgt = e }
   }
   if (!tgt) return false
@@ -4625,7 +4675,17 @@ async function ensureFishingRod (bot, { isStopped = () => false, home } = {}) {
     if (has()) { dbg('  fishing: withdrew a fishing_rod from the bank reserve'); return true }
   }
   const inv = inventoryCounts(bot)
-  if ((inv.string || 0) < 2) { dbg('  fishing: no rod and only ' + (inv.string || 0) + ' string - deferred'); return false }
+  let stringN = inv.string || 0
+  // ROD_SUPPLY (M2): before deferring on <2 string, make the craft REACHABLE - a rod-less,
+  // string-short bot finishes off a NEARBY spider for its string (bounded ONE pass; no-op if none
+  // near), then re-reads. The F2 bank-withdraw already ran above (dry, or FOOD_FLOOR=0), so
+  // bankRods=0 here. Still short -> today's honest defer. Flag off => byte-for-byte (no hunt/re-read).
+  if (process.env.ROD_SUPPLY === '1' && foodSec.needStringForRod({ hasRod: false, packString: stringN, bankRods: 0 })) {
+    dbg('  fishing: no rod + ' + stringN + ' string - one bounded spider-string hunt')
+    try { await huntSpiderForString(bot, { isStopped }) } catch (e) { dbg('  fishing: spider-string hunt failed (' + e.message + ')') }
+    stringN = inventoryCounts(bot).string || 0
+  }
+  if (stringN < 2) { dbg('  fishing: no rod and only ' + stringN + ' string - deferred'); return false }
   try { await runCraft(bot, 'fishing_rod', 1, true, { isStopped, home }) } catch (e) { dbg('  fishing: rod craft failed (' + e.message + ')'); return false }
   return !!has()
 }
@@ -5756,7 +5816,10 @@ async function courierFoodToBank (bot, { isStopped = () => false, say = () => {}
   // FOOD_FLOOR F3: leave a spare fishing_rod in the reserve alongside the food, so the post-death
   // naked bot's floor can WITHDRAW a rod (F2) instead of scrambling for 0 string. Ships only a
   // TRUE dupe (keeps 1 rod on the bot); rodReserveTopUp bounds it. FOOD_FLOOR=0 -> no rod line.
-  if (process.env.FOOD_FLOOR !== '0') {
+  // ROD_SUPPLY (M4): also seed the reserve on the MAINTENANCE courier pass (this same call) so the
+  // moment the bot EVER holds a spare rod (e.g. a fresh self-craft) it banks it - the reserve then
+  // survives death and F2 pays out on every later crisis, independent of a successful fish trip.
+  if (process.env.FOOD_FLOOR !== '0' || process.env.ROD_SUPPLY === '1') {
     const packRods = countItem(bot, 'fishing_rod')
     const shipRods = maintain.rodReserveTopUp(bankRods, packRods)
     if (shipRods > 0) plan.push({ name: 'fishing_rod', count: shipRods })
@@ -8576,4 +8639,5 @@ async function chestCounts (bot, chestBlock) {
 module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, smeltFuelPlan, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, breachDryPocket, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, boundedHold, recoverFromDegraded, isRecoveringDegraded, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, markBedUnusable, bedHeld, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, noteWaterCrossing, lonelyFurnace, consolidateFurnaces, litterPatrol, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, planTrekRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
   maintenancePass, isMaintaining, stopMaintenance, _setMaintaining, courierFoodToBank, safekeepSweep, spareKitToBank, recoveryReadyNow, cropExclusionStep, cropPlaceExclusion, hazardStepExclusion, waterStepExclusion, deepWaterUnderfoot, gatherSeedsNear,
   activeJobInfo, stopSurvivalJob, escalateFoodFloor, _foodFloorState,
-  wildTerrainMovements, trekMovements, DIGGABLE_NATURAL, STRUCTURE_RE, canBreakNaturally }
+  wildTerrainMovements, trekMovements, DIGGABLE_NATURAL, STRUCTURE_RE, canBreakNaturally,
+  collectDrops, huntSpiderForString, ensureFishingRod }
