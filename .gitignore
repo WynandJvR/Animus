@@ -66,3 +66,4 @@ bot/scaffold-registry.json
 
 # design/planning docs - kept locally, not in git
 /design-docs/
+/docs/

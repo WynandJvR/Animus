@@ -13,6 +13,9 @@ Same body, same command surface, two brains.
 
 ## Architecture
 
+A **brain** decides, a **body** acts. They talk over a local HTTP API, so either
+side can be swapped or driven by hand.
+
 ```
             ┌─────────────┐       HTTP control API        ┌──────────────┐
  brain ───► │  index.js   │ ◄──── POST /cmd, GET /state ──│  Claude (curl)│
@@ -25,6 +28,23 @@ Same body, same command surface, two brains.
             └─────────────┘
 ```
 
+Under the body sit several subsystems that keep the bot alive and productive
+without the brain micromanaging it. Roughly in priority order:
+
+| Subsystem | What it owns |
+|---|---|
+| **Survival scheduler** | Picks the current job (survive ▸ preserve ▸ progress ▸ idle) and decides whether an incoming command may interrupt it. Pure decision core + a tick that dispatches it. |
+| **Reflexes** | Fast, always-on responses the brain never sees: eat, flee/defend, drown escape, night shelter, auto-torch, stuck recovery. |
+| **Navigation** | One entry point for all movement, with a recovery ladder for when pathfinding wedges (nudge, detour, dig-out, waypoint replay). |
+| **Provisioning** | Turns a bill of materials into gather ▸ craft ▸ smelt work and executes it — mining, farming, hunting, fishing, banking. |
+| **Resource model** | Single source of truth for what the bot holds, in pack *and* in its chests. Provisioning asks it before gathering anything. |
+| **World memory** | Persistent map of the bot's own structures, resource sites, routes, and hazards, so it doesn't re-learn the world every session. |
+| **Building** | Places real blocks from inventory, one at a time, like a survival player — including from `.schem` schematics. |
+
+The bot builds **physically in survival**: it acquires its own materials and
+places every block by hand. No `/give`, no creative spawn, no `/fill` for
+structures. That constraint is the point — see [NOTES.md](NOTES.md).
+
 ## Layout
 
 ```
@@ -33,17 +53,37 @@ animus/
 │   ├── start.sh       small heap, no pre-touch - won't disturb a live server
 │   └── server.properties
 ├── bot/
-│   ├── index.js       the body: Mineflayer + HTTP control API (:3001)
-│   ├── index-bedrock.js  alternative body over the Bedrock protocol (Geyser/Floodgate)
-│   ├── commands.js    actions + building primitives (wall/tower/house/fill/...)
-│   ├── brain-llm.js   optional local-model driver (llama.cpp / Ollama)
-│   ├── command.gbnf   llama.cpp grammar - forces valid JSON commands
-│   ├── access.js      operator allowlist + "is this addressed to me?" logic
-│   └── config.json    host/port/username/operators
+│   ├── index.js           the body: Mineflayer, reflexes, scheduler tick, HTTP API (:3001)
+│   ├── index-bedrock.js   alternative body over the Bedrock protocol (Geyser/Floodgate)
+│   ├── commands.js        command dispatch + action layer
+│   ├── brain-llm.js       optional local-model driver (llama.cpp / Ollama)
+│   ├── command.gbnf       llama.cpp grammar - forces valid JSON commands
+│   ├── access.js          operator allowlist + "is this addressed to me?" logic
+│   ├── config.example.json  copy to config.json (gitignored - holds your server address)
+│   │
+│   ├── scheduler.js       which job runs now; may a command interrupt it
+│   ├── arbiter.js         survive-over-progress authority
+│   ├── planner.js         state-driven goal re-planning
+│   ├── supervise.js       watchdog / liveness
+│   │
+│   ├── navigate.js        THE navigation entry point + recovery ladder
+│   ├── nav-leg.js  nav-profile.js  route-mem.js  pocket-escape.js  los.js
+│   │
+│   ├── provision.js       gather/craft/smelt executor (mining, farming, banking)
+│   ├── resources.js       single source of truth for pack + chest holdings
+│   ├── mining.js  farm.js  food.js  shelter.js  maintain.js  restock.js
+│   │
+│   ├── schematic.js       physical survival building from .schem files
+│   ├── scaffold.js  pathfix.js  buildorder.js  hut-model.js
+│   └── memory.js  explore.js  orient.js  pov.js  cycle-detect.js  loghistory.js
 ├── start-lab.sh       bring the whole lab up (test server + bot)
 ├── stop-lab.sh        tear it down and free the RAM
 └── ctl.sh             shell helper to send commands to the bot
 ```
+
+Modules ending in `test.js` are offline unit tests - run any of them with
+`node bot/<name>test.js`. Most pure logic (planning, geometry, decision cores)
+is deliberately split out from the executors so it can be tested without a server.
 
 ## Requirements
 
@@ -215,8 +255,10 @@ autodetect; pin the version if the server disables status pings). See
 
 ## Notes
 
-- Building uses `/fill` and `/setblock` (the bot is op+creative on the lab server)
-  for reliability; physical block-by-block placement is a later option.
+- Building is **physical survival placement**: the bot gathers its own materials and
+  places each block by hand from its inventory. `/fill` and `/setblock` remain only
+  behind the legacy `wall`/`tower`/`house`/`clear` operator commands, not on the
+  build path.
 - [NOTES.md](NOTES.md) has the full capability list, behavior-tuning lessons,
   anti-grief rules, and the hardware/model findings.
 
