@@ -1164,7 +1164,7 @@ async function explore (bot, idx, home, maxRoam, isBad) {
 // logs). opts: { say, isStopped, restoreMovements }. Returns {gathered, reason}.
 const AIRISH = n => n === 'air' || n === 'cave_air' || n === 'void_air'
 
-const FILLER_RE = /^(cobblestone|dirt|coarse_dirt|stone|gravel|andesite|diorite|granite|cobbled_deepslate|netherrack|tuff|deepslate)$/
+const FILLER_RE = scaffold.FILLER_RE // ONE filler list - scaffold.js owns it (this was a byte-identical redeclaration)
 
 // STRIP-MINE downward to reach buried stone (plains - it's all under dirt). Digs a SAFE
 // vertical shaft: only break the block underfoot when the block TWO below is solid and
