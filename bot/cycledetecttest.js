@@ -152,6 +152,64 @@ t('repeatFail: stale fails outside the 600s window are ignored', () => {
   assert.strictEqual(cd.detect([], out, 700001).cycling, false, 'only 1 fail inside 600s of now')
 })
 
+// ---- (b') #49 CYCLE_SELFABORT_EXEMPT: watchdog/preempt self-aborts must NOT latch repeatFail ---
+// The index.js filter (CYCLE_SELFABORT_EXEMPT on) drops self-abort FAILS before detect() reads the
+// ring: outRing.filter(r => !(r.selfAbort && !r.ok)). Mirror that exact filter here at the detect
+// boundary; the fix lives in the wiring, cycle-detect.js stays pure.
+const selfAbortExempt = ring => ring.filter(r => !(r.selfAbort && !r.ok))
+function sfail (t, action, detail, cell, selfAbort) { return { t, action, ok: false, failClass: String(detail).toLowerCase().replace(/-?\d+(?:\.\d+)?/g, '#').replace(/\s+/g, ' ').trim(), cell, selfAbort: !!selfAbort } }
+const SITE = { x: 430, y: 67, z: 85 } // wall quantized 4b in the real ring; use a raw cell here (detect only cell-gates within 8b)
+
+t('#49 self-abort cascade: 4x "(stopped)" self-aborts -> NOT flagged after the exempt filter (bug fixed)', () => {
+  const out = [
+    sfail(0, 'autobuild resume @ 430,67,85', '0/0 placed (stopped)', SITE, true),
+    sfail(150000, 'autobuild resume @ 430,67,85', '0/0 placed (stopped)', SITE, true),
+    sfail(300000, 'autobuild resume @ 430,67,85', '0/0 placed (stopped)', SITE, true),
+    sfail(450000, 'autobuild resume @ 430,67,85', '0/0 placed (stopped)', SITE, true)
+  ]
+  const filtered = selfAbortExempt(out)
+  const d = cd.detect([], filtered, 450000)
+  assert.strictEqual(d.cycling, false, 'self-abort fails are exempt -> no repeatFail cycle')
+})
+
+t('#49 flag OFF reproduces todays bug: the SAME 4x self-abort cascade DOES latch repeatFail without the filter', () => {
+  const out = [
+    sfail(0, 'autobuild resume @ 430,67,85', '0/0 placed (stopped)', SITE, true),
+    sfail(150000, 'autobuild resume @ 430,67,85', '0/0 placed (stopped)', SITE, true),
+    sfail(300000, 'autobuild resume @ 430,67,85', '0/0 placed (stopped)', SITE, true),
+    sfail(450000, 'autobuild resume @ 430,67,85', '0/0 placed (stopped)', SITE, true)
+  ]
+  const d = cd.detect([], out, 450000) // no filter == CYCLE_SELFABORT_EXEMPT=0
+  assert.strictEqual(d.cycling, true, 'unfiltered, the self-abort cascade latches (the false positive)')
+  assert.strictEqual(d.kind, 'repeatFail')
+})
+
+t('#49 genuine repeatFail STILL latches: 3x real place-fail (selfAbort:false) survives the filter', () => {
+  const cell = { x: 1, y: 2, z: 3 }
+  const out = [
+    sfail(0, 'place', 'cannot place at', cell, false),
+    sfail(30000, 'place', 'cannot place at', cell, false),
+    sfail(60000, 'place', 'cannot place at', cell, false)
+  ]
+  const filtered = selfAbortExempt(out)
+  const d = cd.detect([], filtered, 61000)
+  assert.strictEqual(d.cycling, true, 'genuine fails are not exempt -> still a cycle')
+  assert.strictEqual(d.kind, 'repeatFail')
+  assert.strictEqual(d.tuple.count, 3)
+})
+
+t('#49 interleaved success still resets: genuine fails with an ok:true between -> null', () => {
+  const cell = { x: 1, y: 2, z: 3 }
+  const out = [
+    sfail(0, 'place', 'cannot place at', cell, false),
+    sfail(30000, 'place', 'cannot place at', cell, false),
+    ok(40000, 'place'),
+    sfail(60000, 'place', 'cannot place at', cell, false)
+  ]
+  const filtered = selfAbortExempt(out)
+  assert.strictEqual(cd.detect([], filtered, 61000).cycling, false, 'an interleaved success resets the streak')
+})
+
 // ---- step latch reducer ---------------------------------------------------------------------
 t('step: fires break ONCE, then cooldown holds for 240s', () => {
   const det = { cycling: true, kind: 'oscillation', cycleKey: 'gather', workCount: 0 }

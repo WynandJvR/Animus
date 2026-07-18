@@ -360,7 +360,7 @@ function endActivity (ok, detail, opts = {}) {
   // recoveries, travels, builds - with real outcomes and durations. The brain dataset
   // only captures brain choices; this captures what the BODY can do (the richer skill).
   if (a) {
-    try { pushOutcomeRing(a.name + (a.detail ? ' ' + a.detail : ''), ok, detail) } catch {} // task #34: feed the outcome ring (successes too - they reset a repeat-fail streak)
+    try { pushOutcomeRing(a.name + (a.detail ? ' ' + a.detail : ''), ok, detail, (!ok && /\(stopped\)/.test(String(detail || '')))) } catch {} // task #34: feed the outcome ring (successes too - they reset a repeat-fail streak); #49: a "(stopped)" fail is a watchdog/preempt-induced PAUSE, not a behavioral failure -> tag selfAbort
     try {
       const b = globalBot
       fs.appendFile(EPISODE_LOG, JSON.stringify({
@@ -378,7 +378,7 @@ function endActivity (ok, detail, opts = {}) {
 const EPISODE_LOG = process.env.EPISODE_LOG || path.join(__dirname, 'body-episodes.jsonl')
 let globalBot = null // set once by trackTick; lets endActivity snapshot vitals without threading bot everywhere
 // Let non-command code (reflexes) record an outcome directly (e.g. a wedged follow).
-function recordOutcome (action, ok, detail) { lastOutcome = { action, ok: !!ok, detail: String(detail || '').slice(0, 100), at: Date.now() }; try { pushOutcomeRing(action, ok, detail) } catch {} } // task #34: also feed the bounded outcome ring
+function recordOutcome (action, ok, detail) { lastOutcome = { action, ok: !!ok, detail: String(detail || '').slice(0, 100), at: Date.now() }; try { pushOutcomeRing(action, ok, detail, /^watchdog:/.test(String(action || ''))) } catch {} } // task #34: also feed the bounded outcome ring; #49: watchdog:* records are the watchdog's own verdict -> tag selfAbort
 
 // ---- S7 FORWARD-PROGRESS LATCH (DESIGN-S7-watchdog) --------------------------------------
 // A module-level heartbeat advanced ONLY by VERIFIED progress via touchProgress (an anchored 8b
@@ -409,8 +409,8 @@ const CYCLE_OUTCOME_MAX = 16
 let recentOutcomesRing = []
 function cycleFailClass (detail) { return String(detail || '').toLowerCase().replace(/-?\d+(?:\.\d+)?/g, '#').replace(/\s+/g, ' ').trim() }
 function cycleCellOf () { const b = globalBot; const p = b && b.entity && b.entity.position; if (!p) return null; return { x: Math.floor(p.x / 4) * 4, y: Math.floor(p.y / 4) * 4, z: Math.floor(p.z / 4) * 4 } }
-function pushOutcomeRing (action, ok, detail) {
-  recentOutcomesRing.push({ t: Date.now(), action: String(action || ''), ok: !!ok, failClass: ok ? '' : cycleFailClass(detail), cell: cycleCellOf() })
+function pushOutcomeRing (action, ok, detail, selfAbort) {
+  recentOutcomesRing.push({ t: Date.now(), action: String(action || ''), ok: !!ok, failClass: ok ? '' : cycleFailClass(detail), cell: cycleCellOf(), selfAbort: !!selfAbort }) // #49: selfAbort tags watchdog/preempt-induced "(stopped)" pauses; additive + inert unless index.js filters on it
   if (recentOutcomesRing.length > CYCLE_OUTCOME_MAX) recentOutcomesRing.shift()
 }
 function recentOutcomes () { return recentOutcomesRing }

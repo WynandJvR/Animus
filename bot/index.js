@@ -38,6 +38,7 @@ const MAINTAIN_ON = SCHED_ON && process.env.MAINTAIN !== '0' // S6: MAINTAIN=0 r
 const WATCHDOG_ON = SCHED_ON && process.env.WATCHDOG !== '0' // S7: the in-process forward-progress watchdog. WATCHDOG=0 -> no interval, no heartbeat merge, no wdPhase call; the touchProgress hooks remain as inert timestamps nobody reads (behaviorally byte-identical)
 const CYCLE_DETECT_ON = WATCHDOG_ON && process.env.CYCLE_DETECT !== '0' // task #34: the behavioral cycle detector. An S7 ORGAN (not a peer) - lives inside the wdTimer, so WATCHDOG=0 kills it too. CYCLE_DETECT=0 -> no sampling, no verdict override, no ring read: byte-identical to today.
 const OPP_ON = MAINTAIN_ON && process.env.OPPORTUNISTIC_MAINTAIN !== '0' // opportunistic at-hut maintenance during the build era; OPPORTUNISTIC_MAINTAIN=0 restores S6 byte-for-byte
+const CYCLE_SELFABORT_EXEMPT = process.env.CYCLE_SELFABORT_EXEMPT !== '0' // #49: exempt watchdog/preempt-induced "(stopped)" self-aborts from repeatFail eligibility. Default ON; =0 restores today byte-for-byte (the selfAbort ring field goes unread)
 const RESILIENT_ON = SCHED_ON && process.env.RESILIENT_RECOVERY !== '0' // #41: invert build-vs-recovery priority after a death (postDeathRecovery latch + bank re-arm). RESILIENT_RECOVERY=0 restores today byte-for-byte (deathsRecent>=2 preempt gate, un-suppressed respawn ladder, no latch)
 
 // Live brain settings the dashboard can change on the fly; brain-llm.js polls
@@ -1330,6 +1331,7 @@ if (SCHED_ON) {
             if (cycRing.length > 48) cycRing.shift()
           }
           let outRing = []; try { outRing = commands.recentOutcomes() } catch {}
+          if (CYCLE_SELFABORT_EXEMPT) outRing = outRing.filter(r => !(r.selfAbort && !r.ok)) // #49: drop self-abort FAILS (watchdog/preempt "(stopped)" pauses); keep successes + genuine fails so repeatFail still latches on real failures
           const det = cycleDetect.detect(cycRing, outRing, now)
           cycState = cycleDetect.step(cycState, det, now)
           if (cycState.act === 'break') {
