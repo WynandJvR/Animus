@@ -132,6 +132,17 @@ t('wheatWithdrawForBake: null/absent fields -> 0 (defensive)', () => {
   assert.strictEqual(F.wheatWithdrawForBake({ packWheat: 0, bankWheat: 100, bankFoodPts: 0, bankTargetPts: 80 }, { capWheat: 12 }), 12, 'cap is tunable')
 })
 
+// ---- (#74) reserve-stock decision: BAKE BIG toward a durable reserve, not 1-2 loaves -----
+// The #74 FOOD_RESERVE_FIRST bootstrap stocks the bank via the EXISTING bake chain; the pure bake
+// decision (wheatWithdrawForBake) must batch BIG toward the target reserve, never a token loaf.
+t('(#74) reserve-stock: bakes a BIG batch toward the reserve target (not 1-2 loaves)', () => {
+  // empty reserve, ample banked wheat, target 40 pts (~8 loaves): withdraw 8 loaves' worth (24 wheat),
+  // clearly a big batch, not the legacy 3-wheat/1-loaf token bake.
+  assert.strictEqual(F.wheatWithdrawForBake({ packWheat: 0, bankWheat: 100, bankFoodPts: 0, bankTargetPts: 40 }), 24, '40-pt deficit -> 8 loaves -> 24 wheat (big batch)')
+  // once the reserve is stocked to target it goes quiescent (durable, untouched by re-baking).
+  assert.strictEqual(F.wheatWithdrawForBake({ packWheat: 0, bankWheat: 100, bankFoodPts: 40, bankTargetPts: 40 }), 0, 'reserve at target -> 0 (durable, no churn)')
+})
+
 // ==== #40 (starve-despite-food) trigger predicates ========================================
 // Each is FOOD_SURVIVAL-gated; opts.foodSurvival pins the regime so BOTH `node foodtest.js` and
 // `FOOD_SURVIVAL=0 node foodtest.js` prove the on- AND off-regime numbers independent of ambient.

@@ -112,7 +112,9 @@ t('(c) maintain surfaces only with no progress job + no survival need, and never
 // ---- (#65) BOOTSTRAP_PRIORITY: pure bootstrapNeed decision + pickJob tier -----------------
 // bootstrapNeed returns the highest-priority MISSING survival-infra need in a healthy window
 // (hp>=14 & fed), order armor > food > base; null when all met, degraded, or flag-off.
-function withBootstrap (fn) { return withEnv('BOOTSTRAP_PRIORITY', '1', fn) }
+// Pinned to FOOD_RESERVE_FIRST=0 so these assert the #65 (armor-first) order regardless of the
+// ambient default (the #74 block below owns the reserve-first order).
+function withBootstrap (fn) { return withEnv('BOOTSTRAP_PRIORITY', '1', () => withEnv('FOOD_RESERVE_FIRST', '0', fn)) }
 t('(#65) bootstrapNeed: healthy + naked -> "armor" (no home required)', () => withBootstrap(() => {
   assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: false })), 'armor')
 }))
@@ -174,6 +176,48 @@ t('(#65) pickJob: BOOTSTRAP_PRIORITY=0 -> the build resumes exactly as today', (
     assert.strictEqual(pj.cls, 'progress')
   })
 })
+
+// ---- (#74) FOOD_RESERVE_FIRST: the DURABLE bank bread reserve is the TOP bootstrap priority ----
+// Reorders bootstrapNeed to FOOD RESERVE > ARMOR > BASE, fires the food-reserve need at a LOWER hp
+// gate (FOOD_RESERVE_HP, default 8) since stocking wheat->bread at the farm/home is lower-risk than
+// deep iron-mining and it's what lets a degraded window recover to hp14 (#62 §A withdraws it). Stocks
+// toward FOOD_RESERVE_TARGET (~40 pts / 8 loaves). FOOD_RESERVE_FIRST=0 -> the #65 order byte-for-byte.
+function withReserveFirst (fn) { return withEnv('BOOTSTRAP_PRIORITY', '1', () => withEnv('FOOD_RESERVE_FIRST', '1', fn)) }
+t('(#74) bootstrapNeed: FOOD-RESERVE outranks ARMOR (naked + short reserve -> food FIRST)', () => withReserveFirst(() => {
+  assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: true, bankFoodPts: 0 })), 'food', 'reserve is the enabler -> food before armor')
+}))
+t('(#74) bootstrapNeed: food-reserve fires at the LOWER hp gate (hp 8, fed, home) below hp14', () => withReserveFirst(() => {
+  assert.strictEqual(S.bootstrapNeed(snap({ hp: 8, food: 20, armorPieces: 0, homeReachable: true, bankFoodPts: 0 })), 'food', 'stocking food is lower-risk -> fires at hp>=FOOD_RESERVE_HP(8)')
+  assert.strictEqual(S.bootstrapNeed(snap({ hp: 7, food: 20, armorPieces: 0, homeReachable: true, bankFoodPts: 0 })), null, 'below FOOD_RESERVE_HP(8) -> survival tier owns the bot')
+}))
+t('(#74) bootstrapNeed: reserve stocked to FOOD_RESERVE_TARGET -> ARMOR resumes (food no longer short)', () => withReserveFirst(() => {
+  assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: true, bankFoodPts: 40 })), 'armor', 'reserve at ~40 pts -> armor is next')
+}))
+t('(#74) bootstrapNeed: only FOOD-RESERVE is lowered - ARMOR/BASE keep the hp14 gate', () => withReserveFirst(() => {
+  // hp 10: >= FOOD_RESERVE_HP(8) but < BOOTSTRAP_HP(14). Reserve stocked -> not food; armor needs hp14
+  // -> null (never gears the deep iron-mine at hp10).
+  assert.strictEqual(S.bootstrapNeed(snap({ hp: 10, food: 20, armorPieces: 0, homeReachable: true, bankFoodPts: 40 })), null, 'armor still needs hp>=14')
+  assert.strictEqual(S.bootstrapNeed(snap({ hp: 10, food: 20, armorPieces: 4, homeReachable: true, bankFoodPts: 40, baseLit: false })), null, 'base still needs hp>=14')
+}))
+t('(#74) bootstrapNeed: food-reserve still needs FED + REACHABLE home (no starving trek / bank livelock)', () => withReserveFirst(() => {
+  assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 10, armorPieces: 4, homeReachable: true, bankFoodPts: 0 })), null, 'food<14 -> not fed enough for the far-farm trek')
+  // armored (so it can't divert to the no-home armor need) + unreachable home -> no food bootstrap.
+  assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 4, homeReachable: false, bankFoodPts: 0 })), null, 'unreachable home -> no food bootstrap (no livelock)')
+}))
+t('(#74) bootstrapNeed: FOOD_RESERVE_FIRST=0 -> #65 order byte-for-byte (armor before food, no lowered gate)', () => {
+  withEnv('BOOTSTRAP_PRIORITY', '1', () => withEnv('FOOD_RESERVE_FIRST', '0', () => {
+    assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: true, bankFoodPts: 0 })), 'armor', 'flag off -> armor first (#65)')
+    assert.strictEqual(S.bootstrapNeed(snap({ hp: 8, food: 20, armorPieces: 0, homeReachable: true, bankFoodPts: 0 })), null, 'flag off -> no lowered hp gate (hp<14 -> null)')
+    assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 4, homeReachable: true, bankFoodPts: 0, baseLit: false })), 'food', 'flag off -> reserve threshold BOOTSTRAP_FOOD_RESERVE(15)')
+  }))
+})
+t('(#74) pickJob: healthy naked bot with a saved build -> bootstrap FOOD over the build (reserve first)', () => withReserveFirst(() => {
+  const s = snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: true, bankFoodPts: 0, activeJob: null, persistedBuild: true })
+  const pj = S.pickJob(s)
+  assert.strictEqual(pj.job, 'maintenancePass', 'bootstrap beats build-resume')
+  assert.strictEqual(pj.bootstrap, 'food', 'carries the food-reserve bootstrap need (reserve-first)')
+  assert.strictEqual(pj.preempt, false, 'never preempts (build held at resumeBuild)')
+}))
 
 // ---- (d) recoveryPlan totality sweep (S6) - the core safety test -------------------------
 t('(d) totality sweep: every snapshot -> non-empty plan, valid wakes, far supply kept, nightStuck no dawn-hold, death-ratchet ordering', () => {

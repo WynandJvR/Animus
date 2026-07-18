@@ -188,6 +188,18 @@ t('courierPlan(): explicit target env / opts win over the engine default', () =>
   })
 })
 
+t('(#74) reserve-stock: couriers the harvest surplus toward the reserve target (durable, low pack keep)', () => {
+  // The #74 FOOD_RESERVE_FIRST bootstrap stocks the bank via this EXISTING courier: a low pack keep
+  // (opts.packTarget) sends the fresh-baked surplus to the bank, filling toward the reserve target,
+  // then goes quiescent once the reserve is met (untouched by the courier thereafter).
+  const loaves = [{ name: 'bread', count: 12, foodPoints: 5, tier: 0 }] // 12 fresh loaves = 60 pts
+  const plan = M.courierPlan(loaves, 0, { packTarget: 8, bankTarget: 40 }) // keep ~8 pts on pack, stock 40 to bank
+  // keep ceil(8/5)=2 loaves on the bot; bank 0->40 wants 8 loaves -> ships 8 (12-2=10 surplus, capped at 8).
+  assert.deepStrictEqual(byName(plan), { bread: 8 }, 'ships 8 loaves toward the 40-pt reserve (big, durable)')
+  const done = M.courierPlan(loaves, 40, { packTarget: 8, bankTarget: 40 })
+  assert.deepStrictEqual(done, [], 'reserve at target -> nothing shipped (durable, not re-couriered)')
+})
+
 t('courierPlan: keeps the pack reserve on the bot, ships surplus, stops filling the bank at 40', () => {
   // LEGACY regime (FOOD_SURVIVAL=0 keep 24, BREAD_ENGINE=0 target 40). cooked_beef = 8 pts x10 = 80.
   // Keep ceil(24/8)=3 (24 pts); deposit until bank hits 40 -> 5 beef (40 pts); pack retains 5.
