@@ -559,7 +559,15 @@ async function gearUp (bot, opts = {}) {
   // is fruitless. (Old bug: pack-only score read 0 right after autoBank -> false back-off.)
   const ironAfter = await ironUnits()
   const progressed = gearupProgressed(bareBefore, bare().length, ironBefore, ironAfter)
-  try { provision.gearupResult && provision.gearupResult(progressed) } catch {}
+  // #60 GEARUP_PREEMPT_EXEMPT: a run the survival stack cut short (recoverHp/secureFood/watchdog
+  // took the body -> buildAbort -> isStopped) is NOT a genuine material failure - the crisis-timed
+  // ~40s smelt was correctly preempted ~5s in, so counting it FRUITLESS is exactly the bug that
+  // armed the 12-min back-off and stranded the pack iron in a permanent-naked loop. Flag the attempt
+  // interrupted so gearupResult leaves the back-off untouched; a real failure (no iron/fuel, furnace
+  // unreachable, completed-but-0-slots) still isStopped()==false -> arms normally. Flag off ->
+  // interrupted stays false -> today's accounting byte-for-byte.
+  const interrupted = process.env.GEARUP_PREEMPT_EXEMPT !== '0' && isStopped()
+  try { provision.gearupResult && provision.gearupResult(progressed, { naked: bareBefore === 4, interrupted }) } catch {}
   const bareNow = bare().length
   const msg = !bareNow ? 'full set on'
     : progressed ? `progress (${4 - bareNow}/4 slots covered, iron banked) - ${bareNow} slot(s) still bare`

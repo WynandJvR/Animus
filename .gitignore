@@ -56,6 +56,8 @@ bot/last-death.json
 # real connection config (holds the live server address) - copy config.example.json
 bot/config.json
 bot/world-memory.json
+# hand/tool-made snapshots of the above (bak-<label>-<hhmmss>) - same live coords, same exclusion
+bot/*.bak-*
 bot/body-episodes.jsonl
 bot/chest-cache.json
 bot/.*-tmp.js

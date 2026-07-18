@@ -3745,13 +3745,56 @@ function isSearchedDry (item, x, z) {
 // window so the same death-march doesn't re-run on every resume pass; any real progress
 // resets it. Survives restarts - the flailing was worst right after respawns.
 function gearupState () { return loadWorldMem().gearup || { fails: 0, until: 0 } }
+// PURE (#60 GEARUP_PREEMPT_EXEMPT, offline-testable): should a FINISHED gear-up attempt ARM the
+// naked back-off? A pass that made progress never arms (the caller's `progressed` branch resets it
+// instead). A no-progress pass arms UNLESS it was interrupted by a survival preempt / stop (the body
+// was taken mid-smelt) - that is not a genuine material failure (no iron obtainable, no fuel
+// sourceable, furnace unreachable, or completed-but-0-slots), and penalizing it is exactly the bug
+// that turned every crisis-timed smelt into a 12-min back-off and a permanent-naked loop. `hadMaterial`
+// is informational (both a with-material and a no-material genuine failure arm) - only progressed and
+// interrupted flip the outcome.
+function gearupShouldArmBackoff (r) {
+  const s = r || {}
+  if (s.progressed) return false
+  if (s.interrupted) return false
+  return true
+}
+// PURE (#60 GEARUP_PROACTIVE, offline-testable): may the bot proactively gear up RIGHT NOW, in a
+// SAFE window, instead of only reactively in a crisis? Fires ONLY when EVERY guard holds:
+//   !armored       - still under-armored (something to make)
+//   hasIron        - iron on hand (raw_iron/iron_ingot) or cheaply obtainable, so smelt->craft->equip
+//                    finishes without a naked mining excursion
+//   hp >= safeHp   - a real health buffer (14) so a ~40s furnace stand is not preempted 5s in
+//   fed            - not in a food crisis (the smelt loop is minutes of AFK)
+//   day            - daylight (mobs asleep) so standing at the furnace is safe
+//   atHome         - at/near the hut (furnace + bank reachable)
+//   !backoffActive - the naked back-off is not cooling us off
+// Any guard failing => don't fire (a later safe window / the crisis path handles it). This is the
+// calm-window trigger the permanent-naked bot never had: it only ever tried while already dying.
+function proactiveGearupGate (state, opts = {}) {
+  const s = state || {}
+  const safeHp = opts.safeHp != null ? opts.safeHp : 14
+  if (s.armored) return false
+  if (!s.hasIron) return false
+  if (s.hp == null || s.hp < safeHp) return false
+  if (!s.fed) return false
+  if (!s.day) return false
+  if (!s.atHome) return false
+  if (s.backoffActive) return false
+  return true
+}
 // opts.naked (bool): the attempt ended fully naked (0 pieces worn). #53 NAKED_IRON_GRACE caps a
 // naked bot's fruitless cooldown at 12 min (not 45) so it keeps trying to bootstrap armor instead
 // of sitting locked out while it dies naked. Armored/partial + flag off -> today's min(45, fails*10).
+// opts.interrupted (bool, #60 GEARUP_PREEMPT_EXEMPT): the attempt was cut short by a survival preempt
+// / stop - not a genuine failure, so skip the back-off entirely (flag off -> ignored, byte-for-byte).
 function gearupResult (progressed, opts = {}) {
   const m = loadWorldMem()
   const g = m.gearup = m.gearup || { fails: 0, until: 0 }
-  if (progressed) { g.fails = 0; g.until = 0 } else {
+  if (progressed) { g.fails = 0; g.until = 0 } else if (process.env.GEARUP_PREEMPT_EXEMPT !== '0' && !gearupShouldArmBackoff({ progressed, interrupted: opts.interrupted })) {
+    // #60: survival/stop took the body mid-attempt - not a genuine material failure; leave the back-off as-is.
+    dbg('gearup: attempt interrupted by survival/stop - not counting it fruitless (#60 GEARUP_PREEMPT_EXEMPT)')
+  } else {
     g.fails++
     const base = Math.min(45, g.fails * 10)
     const mins = arbiter.gearupCooldownMin(g.fails, !!opts.naked, { enabled: process.env.NAKED_IRON_GRACE !== '0' })
@@ -6537,7 +6580,29 @@ async function maintenancePass (bot, opts = {}) {
     if (between()) return { ok: true, steps, reason: 'bail:survival' }
 
     // STEP 6: armor - the GEAR_REFLEX executor, same back-off + nightStuck exception. Outbound.
-    if (process.env.GEAR_REFLEX !== '0' && !nightIndoorOnly && !opportunistic && has('armor') && (day() || nightStuck(bot)) && due('armor', 900000)) {
+    // #60 GEARUP_PROACTIVE: ALSO admit this step in a SAFE window (iron on hand + hp>=SAFE_HP + fed +
+    // day + at home + no back-off), off the 15-min throttle and independent of the maintain need-list,
+    // so the calm-window smelt->craft->equip turns the dead pack iron into worn armor BEFORE a crisis
+    // forces the preempt-able attempt the bot kept self-penalizing on. The gate demands iron ON HAND
+    // (the fast home smelt, no naked mining excursion) and armorup/gearUp still yield to survival via
+    // buildAbort mid-smelt. Held to the same !opportunistic/!nightIndoorOnly envelope as the reactive
+    // step (no mid-build/night treks). GEARUP_PROACTIVE=0 -> proactiveArmor is false (short-circuit,
+    // the IIFE never runs) -> the admission is byte-for-byte the reactive-only step.
+    const proactiveArmor = process.env.GEARUP_PROACTIVE !== '0' && !nightIndoorOnly && !opportunistic && (() => {
+      try {
+        const gbp = gearupState()
+        return proactiveGearupGate({
+          armored: (snap.armorPieces != null ? snap.armorPieces : 4) >= 4,
+          hasIron: (countItem(bot, 'raw_iron') + countItem(bot, 'iron_ingot')) >= 4,
+          hp: bot.health,
+          fed: (bot.food != null ? bot.food : 20) >= Number(process.env.GEARUP_FED_MIN || 14),
+          day: day(),
+          atHome: atHome(),
+          backoffActive: !!(gbp && gbp.until > Date.now())
+        }, { safeHp: Number(process.env.GEARUP_SAFE_HP || 14) })
+      } catch { return false }
+    })()
+    if ((process.env.GEAR_REFLEX !== '0' && !nightIndoorOnly && !opportunistic && has('armor') && (day() || nightStuck(bot)) && due('armor', 900000)) || proactiveArmor) {
       const gb = gearupState()
       if (!(gb && gb.until > Date.now())) {
         try { const r = await require('./commands.js').handle(bot, 'armorup'); stepDone('armor'); dbg('  maint armor -> ' + String(r || '').split('\n')[0]) } catch (e) { dbg('  maint: armor failed (' + e.message + ')') }
@@ -9228,7 +9293,7 @@ async function chestCounts (bot, chestBlock) {
   return out
 }
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, smeltFuelPlan, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, breachDryPocket, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, boundedHold, recoverFromDegraded, isRecoveringDegraded, deadlockResetDue, deadlockResetState, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, markBedUnusable, bedHeld, gearupState, gearupResult, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, noteWaterCrossing, lonelyFurnace, consolidateFurnaces, litterPatrol, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, planTrekRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, smeltFuelPlan, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, breachDryPocket, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, boundedHold, recoverFromDegraded, isRecoveringDegraded, deadlockResetDue, deadlockResetState, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, markBedUnusable, bedHeld, gearupState, gearupResult, gearupShouldArmBackoff, proactiveGearupGate, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, noteWaterCrossing, lonelyFurnace, consolidateFurnaces, litterPatrol, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, planTrekRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
   maintenancePass, isMaintaining, stopMaintenance, _setMaintaining, courierFoodToBank, safekeepSweep, spareKitToBank, recoveryReadyNow, cropExclusionStep, cropPlaceExclusion, farmFootprintHas, hazardStepExclusion, waterStepExclusion, deepWaterUnderfoot, gatherSeedsNear,
   activeJobInfo, stopSurvivalJob, escalateFoodFloor, _foodFloorState,
   wildTerrainMovements, trekMovements, DIGGABLE_NATURAL, STRUCTURE_RE, canBreakNaturally,
