@@ -2079,6 +2079,20 @@ async function branchMine (bot, item, count, opts = {}) {
   const pickLow = parseInt(process.env.MINE_PICK_LOW || '20', 10)
   dbg('  branchMine: item=' + item + ' need=' + count + ' surfaceY=' + surfaceY + ' targetY=' + targetY + ' minIronY=' + minIronY)
 
+  // #64 §C DYNAMIC_FOOD: leave home STOCKED for the descent. Size the ration to the KNOWN descent
+  // target (depth = surfaceY - targetY - you can't nip home from y16 to eat) and top up the shortfall
+  // from the bank (bounded, bank-first, fail-safe) BEFORE going down. Also mark the imminent deep-mine
+  // (_foodPlanHint) so the pre-mine secureFood's own courier keeps the TRIP ration instead of
+  // stripping food to the home baseline right as we descend (§C's "don't courier food away when an
+  // excursion is imminent" guard). Restored before every path that leaves the arbiter. DYNAMIC_FOOD=0
+  // -> no top-up, hint inert (courier falls back to the fixed FOOD_PACK_RESERVE - byte-for-byte #62).
+  let _minePlanHintPrev = null; const _dynFood = process.env.DYNAMIC_FOOD !== '0'
+  if (_dynFood) {
+    const minePlan = foodPlanNow(bot, null, { activity: 'deep-mine', depth: Math.max(0, Math.floor(surfaceY) - targetY) })
+    _minePlanHintPrev = _setFoodPlanHint(minePlan)
+    if (!isStopped()) { try { await topUpFoodForPlan(bot, minePlan, { home: opts.home, isStopped }) } catch {} }
+  }
+
   // JOB ARBITER (survive > progress): a progress job (deep mining) may not START while an
   // unmet SURVIVE need exists - the ONE authority replaces the old scattered food<14 check.
   // If the need is food, resolve it (secureFood) and re-check; any other need (threat/hp/lava/
@@ -2092,9 +2106,13 @@ async function branchMine (bot, item, count, opts = {}) {
         try { await secureFood(bot, { home: opts.home, isStopped, say: opts.say, threshold: 14 }) } catch (e) { dbg('  branchMine: pre-mine secureFood failed (' + e.message + ')') }
         need = survivalNeed(bot)
       }
-      if (need) return { gathered: got(), reason: 'yielding to survival need (' + need.need + ') before descending - resume when met' }
+      if (need) { if (_dynFood) _setFoodPlanHint(_minePlanHintPrev); return { gathered: got(), reason: 'yielding to survival need (' + need.need + ') before descending - resume when met' } }
     }
   }
+  // Past the pre-descent guard window: from here the descent puts the bot underground, where the
+  // courier's physical-state read (depth>=DFOOD_DEEP) already sizes the deep-mine ration - so the
+  // explicit hint is only needed for the surface pre-descent secureFood above. Restore it now.
+  if (_dynFood) _setFoodPlanHint(_minePlanHintPrev)
 
   // SELF-SUFFICIENT TOOLING: keep a working pickaxe at depth. Re-tool BEFORE the held pick
   // breaks (while it can still mine the cobble a new pick needs) and only when no spare
@@ -2307,9 +2325,22 @@ async function runGather (bot, item, count, opts = {}) {
   const home = opts.home || { x: Math.round(bot.entity.position.x), y: surfaceY, z: Math.round(bot.entity.position.z) }
   bot.pathfinder.setMovements(gatherMovements(bot)) // may punch through leaves + pillar up
   dbg('runGather', item, 'x' + count, 'surfaceY=' + surfaceY, 'home=' + home.x + ',' + home.z, 'at', bot.entity.position.floored().toString())
+  // #64 §C DYNAMIC_FOOD: before a (possibly far) gather excursion, top up food to what the plan needs
+  // (physical-state read: a gather that starts far from the hut sizes up; a near-home gather stays at
+  // the home baseline - a no-op when already stocked). Mark the excursion (_foodPlanHint) so any
+  // secureFood->courier inside the gather loop keeps the trip ration rather than banking it away. Both
+  // bounded + fail-safe; restored in the finally so the hint never leaks. DYNAMIC_FOOD=0 -> inert.
+  const _dynFood = process.env.DYNAMIC_FOOD !== '0'
+  let _gatherHintPrev = null
+  if (_dynFood) {
+    const gatherPlan = foodPlanNow(bot, null)
+    _gatherHintPrev = _setFoodPlanHint(gatherPlan)
+    if (!(opts.isStopped && opts.isStopped())) { try { await topUpFoodForPlan(bot, gatherPlan, { home, isStopped: opts.isStopped }) } catch {} }
+  }
   try {
     return await gatherLoop(bot, item, count, { ...opts, surfaceY, home })
   } finally {
+    if (_dynFood) _setFoodPlanHint(_gatherHintPrev)
     // Back to the surface if we're below it (strip-mined down OR fell into a cave). Try
     // three ways, in order, until we're within a couple blocks of the top: a spiral
     // staircase up, a straight pillar-up, then a pathfinder dig-out. Any one that works
@@ -6622,11 +6653,74 @@ function resolveBankCell (bot) {
   return null
 }
 
+// ==== #64 DYNAMIC_FOOD (§B/§C wiring) =======================================================
+// Read "what is the bot about to do" from bot position + the scheduler snapshot into the PURE
+// foodNeedForPlan's plan shape {activity, distHome, depth, homeReachable}. PHYSICAL-FIRST + robust
+// (the mandate: derive distHome from bot pos vs hutAnchor, depth from surface Y vs bot Y; default to
+// the home baseline when unknown) so a stale/absent job label never mis-sizes the ration. `override`
+// lets a caller that KNOWS its plan (branchMine knows the descent target depth) force the numbers.
+const DFOOD_DEEP = () => Number(process.env.DFOOD_DEEP_DEPTH || 8)   // >= this far below surface = "in a mine"
+const DFOOD_FAR = () => Number(process.env.DFOOD_FAR_DIST || 48)     // > this from home = an excursion buffer
+function foodPlanNow (bot, snap, override) {
+  const s = snap || {}
+  let home = null
+  try { home = hutAnchor() || knownBed() || null } catch {}
+  const pos = (bot && bot.entity && bot.entity.position) || null
+  let distHome = s.homeDist
+  if (distHome == null && pos && home) { try { distHome = Math.hypot(pos.x - home.x, pos.z - home.z) } catch {} }
+  distHome = distHome != null ? distHome : 0
+  const homeReachable = s.homeReachable != null ? s.homeReachable : (distHome <= DFOOD_FAR())
+  const surfaceY = (home && home.y != null) ? home.y : (pos ? pos.y : 64)
+  const depth = pos ? Math.max(0, surfaceY - pos.y) : 0
+  let activity
+  if (depth >= DFOOD_DEEP()) activity = 'deep-mine'          // physically underground = the biggest ration
+  else if (distHome > DFOOD_FAR()) activity = 'far-trek'     // physically far from the bank = distance buffer
+  else activity = 'idle'                                     // at home/surface: the bank is a few steps away
+  const plan = { activity, distHome, depth, homeReachable }
+  return override ? Object.assign(plan, override) : plan     // an explicit caller plan wins (knows its target)
+}
+
+// The imminent-excursion plan hint: set by branchMine/runGather at the pre-trip point so the courier
+// (which can fire from the pre-mine secureFood) keeps the TRIP-sized ration instead of stripping food
+// down to the home baseline just before descending (§C's "do NOT courier food away when an excursion
+// is imminent" guard). Save/restore nests correctly (runGather -> branchMine). Only ever consulted
+// when DYNAMIC_FOOD is on.
+let _foodPlanHint = null
+function _setFoodPlanHint (p) { const prev = _foodPlanHint; _foodPlanHint = p || null; return prev }
+
+// §C - BOUNDED, FAIL-SAFE pre-trip food top-up. Before a deep-mine / far excursion, if the pack food
+// (points) is below what the plan needs, WITHDRAW the shortfall as bread from the bank (reuse
+// resources.acquire, bank-first: craft:false so it never kicks off a gather right before the trip).
+// Bounded (a loaf count), fail-safe (bank unreachable/empty -> withdraw no-ops -> the job proceeds with
+// what's carried; never blocks). DYNAMIC_FOOD=0 -> the caller skips this entirely (no top-up). Returns
+// the loaves withdrawn (0 if already stocked / nothing banked).
+async function topUpFoodForPlan (bot, plan, { home = null, isStopped = () => false } = {}) {
+  try {
+    const needPts = foodSec.foodNeedForPlan(plan)
+    const md = require('minecraft-data')(bot.version); const foods = (md && md.foodsByName) || {}
+    let packPts = 0
+    for (const i of (bot.inventory ? bot.inventory.items() : [])) {
+      if (foods[i.name] && foodSec.foodTier(i.name) < 2) packPts += (foods[i.name].foodPoints || 0) * i.count
+    }
+    if (packPts >= needPts) return 0                        // already carrying the trip ration
+    const loavesToAdd = Math.ceil((needPts - packPts) / 5)  // bread = 5 pts; round up to cover the shortfall
+    if (loavesToAdd <= 0) return 0
+    const haveBread = countItem(bot, 'bread')
+    const before = haveBread
+    // acquire(craft:false) = a BANK-FIRST, withdraw-only top-up to the target bread count. It no-ops
+    // gracefully when the bank has no bread / is out of range (the job then proceeds with what it has).
+    try { await require('./resources.js').acquire(bot, 'bread', haveBread + loavesToAdd, { near: home, craft: false, isStopped }) } catch (e) { dbg('  topUpFood: withdraw failed (' + e.message + ')') }
+    const got = countItem(bot, 'bread') - before
+    if (got > 0) dbg('  DYNAMIC_FOOD: pre-trip top-up +' + got + ' bread (' + plan.activity + ', need ' + needPts + 'pts, had ' + packPts + 'pts)')
+    return Math.max(0, got)
+  } catch (e) { dbg('  topUpFood: ' + e.message); return 0 }
+}
+
 // THE COURIER (§5.2): deposit the pack's food surplus into the hut bank so R2's raid-the-cache
 // always works. Reuses depositMaterials' open/deposit/close body via the explicit-list mode; the
 // pure maintain.courierPlan decides what moves. Refreshes the chest cache so bankFoodPts updates
 // next tick. Returns how many food items were banked.
-async function courierFoodToBank (bot, { isStopped = () => false, say = () => {} } = {}) {
+async function courierFoodToBank (bot, { isStopped = () => false, say = () => {}, snap = null } = {}) {
   const res = require('./resources.js')
   const maintain = require('./maintain.js')
   const cell = resolveBankCell(bot)
@@ -6654,7 +6748,20 @@ async function courierFoodToBank (bot, { isStopped = () => false, say = () => {}
   // courierPlan's default keep/target (byte-for-byte).
   const courierOpts = {}
   if (process.env.FOOD_BUFFER_STOCK !== '0') {
-    courierOpts.packTarget = Number(process.env.FOOD_PACK_RESERVE || 8)
+    // #64 §B DYNAMIC_FOOD (default on): the pack KEEP is no longer a flat FOOD_PACK_RESERVE - it's
+    // foodNeedForPlan(currentPlan), so the courier banks only food genuinely SURPLUS to what the bot
+    // is about to do. At home idle -> ~DFOOD_HOME_PTS(8), banks the rest (today's behavior). Mid-/pre-
+    // excursion (the _foodPlanHint set by branchMine/runGather, else the physical-state snapshot) ->
+    // the trip-sized keep, so it does NOT strip food away before a deep mine (§C guard). DYNAMIC_FOOD=0
+    // -> the flat FOOD_PACK_RESERVE (byte-for-byte #62).
+    if (process.env.DYNAMIC_FOOD !== '0') {
+      let s = snap
+      if (!s) { try { s = await schedulerState(bot) } catch { s = {} } }
+      const plan = _foodPlanHint || foodPlanNow(bot, s)
+      courierOpts.packTarget = foodSec.foodNeedForPlan(plan)
+    } else {
+      courierOpts.packTarget = Number(process.env.FOOD_PACK_RESERVE || 8)
+    }
     courierOpts.bankTarget = Number(process.env.FOOD_BANK_TARGET || 10) * 5 // FOOD_BANK_TARGET is in loaves; bread = 5 food pts
   }
   const plan = maintain.courierPlan(packItems, bankFoodPts, courierOpts)
@@ -6882,7 +6989,7 @@ async function maintenancePass (bot, opts = {}) {
 
     // STEP 5: THE COURIER - deposit the food surplus into the bed-adjacent bank.
     if ((has('bankFood') || (snap.packFoodPts || 0) > packTarget) && snap.homeReachable && due('courier', 600000)) {
-      try { const n = await courierFoodToBank(bot, { isStopped, say }); if (n) stepDone('courier(' + n + ')') } catch (e) { dbg('  maint: courier failed (' + e.message + ')') }
+      try { const n = await courierFoodToBank(bot, { isStopped, say, snap }); if (n) stepDone('courier(' + n + ')') } catch (e) { dbg('  maint: courier failed (' + e.message + ')') }
     }
     if (breadEngine) dbg('  (bread-engine) reserve ' + cachedBankFoodPts + '/' + bankTargetPts + ' pts')
     if (between()) return { ok: true, steps, reason: 'bail:survival' }

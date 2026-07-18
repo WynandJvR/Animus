@@ -369,5 +369,94 @@ t('#62 §C farmExpandGate: expands ONLY in a safe window; yields to survival + a
   assert.strictEqual(F.farmExpandGate(), false, 'no state -> false (no throw)')
 })
 
+// ==== #64 DYNAMIC_FOOD - foodNeedForPlan (pure, intent-aware ration) =========================
+// ON = pin the flag on via opts so the dynamic-MODEL tests are independent of the ambient
+// DYNAMIC_FOOD env (the suite runs in BOTH regimes; the =0 fallback has its own test below).
+const DF_ON = { dynamicFood: true }
+t('#64 foodNeedForPlan: home/near-bank -> the small DFOOD_HOME_PTS baseline', () => {
+  const home = F.foodNeedForPlan({ activity: 'idle', distHome: 0, depth: 0, homeReachable: true }, DF_ON)
+  assert.strictEqual(home, 8, 'idle at the bank -> ~DFOOD_HOME_PTS (8)')
+  assert.strictEqual(F.foodNeedForPlan({ activity: 'idle', distHome: 20, depth: 0, homeReachable: true }, DF_ON), 8, 'near the bank (in range) -> still the home baseline')
+  assert.strictEqual(F.foodNeedForPlan({ activity: 'build-at-home', distHome: 5, homeReachable: true }, DF_ON), 8, 'a build at home can withdraw anytime -> home baseline')
+  assert.strictEqual(F.foodNeedForPlan({}, DF_ON), 8, 'no plan -> the home baseline (safe default), no throw')
+})
+
+t('#64 foodNeedForPlan: far-gather scales with distHome, clamps at DFOOD_MAX', () => {
+  const near = F.foodNeedForPlan({ activity: 'far-gather', distHome: 30, homeReachable: false }, DF_ON)
+  const mid = F.foodNeedForPlan({ activity: 'far-gather', distHome: 120, homeReachable: false }, DF_ON)
+  const far = F.foodNeedForPlan({ activity: 'far-gather', distHome: 400, homeReachable: false }, DF_ON)
+  assert.ok(near < mid, 'more distance -> more food (' + near + ' < ' + mid + ')')
+  assert.strictEqual(far, 40, 'a very far trek clamps at DFOOD_MAX (40), never hoards past it')
+  // monotonic non-decreasing in distHome
+  let prev = -1
+  for (const d of [0, 10, 25, 50, 100, 200, 300, 500]) {
+    const n = F.foodNeedForPlan({ activity: 'far-trek', distHome: d, homeReachable: false }, DF_ON)
+    assert.ok(n >= prev, 'monotonic in distHome (' + d + 'b -> ' + n + ' >= ' + prev + ')')
+    prev = n
+  }
+})
+
+t('#64 foodNeedForPlan: deep-mine is the BIGGEST bucket, monotonic + clamped in depth', () => {
+  const gather = F.foodNeedForPlan({ activity: 'far-gather', distHome: 60, homeReachable: false }, DF_ON)
+  const shallow = F.foodNeedForPlan({ activity: 'deep-mine', depth: 5, homeReachable: false }, DF_ON)
+  const deep = F.foodNeedForPlan({ activity: 'deep-mine', depth: 50, homeReachable: false }, DF_ON)
+  assert.ok(deep > gather, 'deep-mine >> far-gather (' + deep + ' > ' + gather + ') - you cannot pop home from y16')
+  assert.ok(deep >= shallow, 'more depth -> at least as much food (' + deep + ' >= ' + shallow + ')')
+  assert.strictEqual(deep, 40, 'a deep descent (2*depth + session) clamps at DFOOD_MAX (40)')
+  // monotonic non-decreasing in depth
+  let prev = -1
+  for (const d of [0, 3, 8, 12, 20, 40, 60]) {
+    const n = F.foodNeedForPlan({ activity: 'deep-mine', depth: d, homeReachable: false }, DF_ON)
+    assert.ok(n >= prev, 'monotonic in depth (' + d + ' -> ' + n + ' >= ' + prev + ')')
+    prev = n
+  }
+  // deep-mine at a comparable-scale depth beats a comparable-distance gather (biggest bucket)
+  const dm = F.foodNeedForPlan({ activity: 'deep-mine', depth: 10, homeReachable: false }, DF_ON)
+  const fg = F.foodNeedForPlan({ activity: 'far-gather', distHome: 10, homeReachable: false }, DF_ON)
+  assert.ok(dm > fg, 'at the same magnitude deep-mine outweighs far-gather (' + dm + ' > ' + fg + ')')
+})
+
+t('#64 foodNeedForPlan: every excursion result >= home baseline + return margin', () => {
+  const HOME = 8, MARGIN = 4
+  for (const plan of [
+    { activity: 'far-gather', distHome: 1, homeReachable: false },
+    { activity: 'far-trek', distHome: 40, homeReachable: false },
+    { activity: 'deep-mine', depth: 1, homeReachable: false },
+    { activity: 'deep-mine', depth: 30, homeReachable: false }
+  ]) {
+    const n = F.foodNeedForPlan(plan, DF_ON)
+    assert.ok(n >= HOME + MARGIN, plan.activity + ' carries at least home+margin (' + n + ' >= ' + (HOME + MARGIN) + ')')
+  }
+  // always clamped within [HOME, MAX] for arbitrary inputs
+  for (const plan of [
+    { activity: 'idle' }, { activity: 'deep-mine', depth: 9999 }, { activity: 'far-gather', distHome: 9999 },
+    { activity: 'weird', distHome: -5, depth: -3 }
+  ]) {
+    const n = F.foodNeedForPlan(plan, DF_ON)
+    assert.ok(n >= 8 && n <= 40, 'clamped to [8,40] (' + JSON.stringify(plan) + ' -> ' + n + ')')
+  }
+})
+
+t('#64 foodNeedForPlan: !homeReachable never leaves with less than a real buffer', () => {
+  // an "idle"-classified plan but the bank is out of reach -> bumped to at least BASE+margin (16)
+  const stranded = F.foodNeedForPlan({ activity: 'idle', distHome: 10, homeReachable: false }, DF_ON)
+  assert.ok(stranded >= 16, 'stranded from the bank -> a real buffer, not the home 8 (' + stranded + ')')
+  // homeReachable idle stays at the small baseline (the bank is right there)
+  assert.strictEqual(F.foodNeedForPlan({ activity: 'idle', distHome: 10, homeReachable: true }, DF_ON), 8, 'bank reachable -> home baseline')
+})
+
+t('#64 foodNeedForPlan: DYNAMIC_FOOD=0 -> the fixed FOOD_PACK_RESERVE (byte-for-byte #62)', () => {
+  // via opts (offline, no env mutation): the flag off returns the flat reserve regardless of plan
+  for (const plan of [
+    { activity: 'deep-mine', depth: 50 }, { activity: 'far-gather', distHome: 300 }, { activity: 'idle' }
+  ]) {
+    assert.strictEqual(F.foodNeedForPlan(plan, { dynamicFood: false }), 8, 'flag off -> fixed reserve 8 (' + plan.activity + ')')
+    assert.strictEqual(F.foodNeedForPlan(plan, { dynamicFood: false, reserve: 12 }), 12, 'flag off -> the configured FOOD_PACK_RESERVE')
+  }
+  // tunables are honoured when on
+  assert.strictEqual(F.foodNeedForPlan({ activity: 'idle' }, { dynamicFood: true, homePts: 6 }), 6, 'DFOOD_HOME_PTS opt honoured')
+  assert.strictEqual(F.foodNeedForPlan({ activity: 'deep-mine', depth: 100 }, { dynamicFood: true, max: 25 }), 25, 'DFOOD_MAX opt caps the ration')
+})
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall food-security tests passed')
 process.exit(failures ? 1 : 0)

@@ -288,4 +288,57 @@ function wheatWithdrawForBake ({ packWheat, bankWheat, bankFoodPts, bankTargetPt
   return Math.max(0, Math.min(bankWheat || 0, need, cap))
 }
 
-module.exports = { DEFAULT_BUFFER, BAD_FOOD, RAW_COOKABLE_FOOD, foodTier, hasFoodSupply, needsFoodSupply, shouldSweepForFood, foodSupplyAction, shouldTrekHomeForFood, breadFromWheat, wheatWithdrawForBake, bankFoodWithdrawPts, foodSurplusToBank, farmExpandGate, inLoopFoodTrigger, busyPreemptFood, foodFloorTriggered, outboundRungAdmissible, famineHoldFood, foodFloorEscalation, foodFloorEscalated, AUTO_EAT_AT, needStringForRod, shouldFish }
+// ==== #64 DYNAMIC_FOOD (§A) - carry what the PLAN needs, not a fixed reserve ================
+// A PURE food-need estimate keyed off what the bot is ABOUT to do. Fixed reserves are wrong: #62
+// banks food to a flat FOOD_PACK_RESERVE(8) regardless of intent -> too thin for a deep mine / far
+// trek (starve far from BOTH farm and bank), wasteful at home. This maps the current/next plan ->
+// the food POINTS the bot should keep on-pack. PURE: a snapshot of numbers in, a points target out
+// (no bot, no I/O) so it is offline-testable (foodtest.js). The impure "read the plan from the
+// scheduler snapshot / active job" reader lives in provision.js (foodPlanNow).
+//   plan.activity   idle|home | build-at-home | far-gather | far-trek | deep-mine
+//   plan.distHome   blocks to the home/bank anchor (round-trip hunger drain scales with this)
+//   plan.depth      blocks below the surface for a mine (descent+ascent can't pop home to eat)
+//   plan.homeReachable  is the bank within withdraw range (can top up anytime)
+//   plan.expectedDurationTicks  optional job-exposed duration (a small extra ration if present)
+// Model (tunable constants, not magic literals):
+//   idle/home/build-at-home (bank a few steps away) -> DFOOD_HOME_PTS (small, ~8; today's reserve).
+//   far-gather/far-trek     -> DFOOD_BASE + DFOOD_PER_BLOCK*distHome + DFOOD_RETURN_MARGIN (round-trip
+//                              drain by distance), capped so it never hoards past DFOOD_MAX.
+//   deep-mine               -> DFOOD_BASE + 2*depth (descent+ascent) + DFOOD_MINE_SESSION + margin -
+//                              the biggest bucket (you can't nip home from y16). Monotonic in depth.
+//   !homeReachable          -> can't rely on the bank; never carry less than a real buffer (BASE+margin).
+// Clamp to [DFOOD_HOME_PTS, DFOOD_MAX]. DYNAMIC_FOOD=0 -> returns the fixed FOOD_PACK_RESERVE
+// (byte-for-byte #62). Offline-tested.
+function foodNeedForPlan (plan = {}, opts = {}) {
+  const on = opts.dynamicFood != null ? opts.dynamicFood : (process.env.DYNAMIC_FOOD !== '0')
+  const reserve = opts.reserve != null ? opts.reserve : Number(process.env.FOOD_PACK_RESERVE || 8)
+  if (!on) return reserve // DYNAMIC_FOOD=0 -> today's flat FOOD_PACK_RESERVE (byte-for-byte #62)
+  const HOME = opts.homePts != null ? opts.homePts : Number(process.env.DFOOD_HOME_PTS || 8)
+  const BASE = opts.base != null ? opts.base : Number(process.env.DFOOD_BASE || 12)
+  const PER = opts.perBlock != null ? opts.perBlock : Number(process.env.DFOOD_PER_BLOCK || 0.15)
+  const SESSION = opts.mineSession != null ? opts.mineSession : Number(process.env.DFOOD_MINE_SESSION || 16)
+  const MARGIN = opts.returnMargin != null ? opts.returnMargin : Number(process.env.DFOOD_RETURN_MARGIN || 4)
+  const MAX = opts.max != null ? opts.max : Number(process.env.DFOOD_MAX || 40)
+  const perKtick = opts.perKtick != null ? opts.perKtick : Number(process.env.DFOOD_PER_KTICK || 0)
+  const p = plan || {}
+  const activity = p.activity || 'idle'
+  const distHome = Math.max(0, Number(p.distHome) || 0)
+  const depth = Math.max(0, Number(p.depth) || 0)
+  const durTicks = Math.max(0, Number(p.expectedDurationTicks) || 0)
+  let need
+  if (activity === 'deep-mine') {
+    need = BASE + 2 * depth + SESSION + MARGIN            // descent+ascent + a mining-session budget
+  } else if (activity === 'far-gather' || activity === 'far-trek') {
+    need = BASE + PER * distHome + MARGIN                 // round-trip drain scales with distance
+  } else {
+    need = HOME                                           // idle/home/build-at-home: the bank is right here
+  }
+  need += perKtick * (durTicks / 1000)                    // optional job-exposed duration (inert when 0/absent)
+  // Stranded from the bank (can't just withdraw) -> never leave with less than a real buffer.
+  if (p.homeReachable === false && need < BASE + MARGIN) need = BASE + MARGIN
+  if (need < HOME) need = HOME                            // clamp floor: never below the home baseline
+  if (need > MAX) need = MAX                              // clamp cap: don't hoard past a couple of bars
+  return Math.round(need)
+}
+
+module.exports = { DEFAULT_BUFFER, BAD_FOOD, RAW_COOKABLE_FOOD, foodTier, hasFoodSupply, needsFoodSupply, shouldSweepForFood, foodSupplyAction, shouldTrekHomeForFood, breadFromWheat, wheatWithdrawForBake, bankFoodWithdrawPts, foodSurplusToBank, farmExpandGate, foodNeedForPlan, inLoopFoodTrigger, busyPreemptFood, foodFloorTriggered, outboundRungAdmissible, famineHoldFood, foodFloorEscalation, foodFloorEscalated, AUTO_EAT_AT, needStringForRod, shouldFish }
