@@ -2633,12 +2633,18 @@ async function autoBuild (bot, schem, at, opts = {}) {
                   await restoreBank() // ALWAYS re-deposit the treasury (never strand the bank)
                 }
                 if (!hr || hr.refused || !hr.placed) {
-                  // Honest report, no latch: the scheduler re-selects and the next pass retries
-                  // from wherever the body actually is. Leaving the latch alone means a refused
-                  // pass neither blocks nor licenses a future destructive retry - the decision is
-                  // re-derived from a fresh grounded survey next time.
+                  // Honest report: no infra record, no "rebuilt" claim, no success latch. But the
+                  // ANTI-THRASH latch MUST still bite. By this point the bank has been emptied and
+                  // clearVolume has already torn the site down - a refusal here means "we destroyed
+                  // and rebuilt NOTHING". Leaving hutRepairLatch untouched would let decideHutRepair
+                  // return 'rebuild' again next pass (stalled = lastAction != null && !improved), so
+                  // every pass would clear the site afresh. We therefore record the TRUTH - the
+                  // pre-build damage count, unimproved - which is what forces the next pass down to
+                  // the non-destructive 'patch' route. lastBad is `bad`, never 0: this is the
+                  // opposite of a success record.
                   const why = (hr && hr.refused) || 'nothing-placed'
-                  dbg('camp: hut rebuild REFUSED (' + why + ') - no infra written, no claim, no latch')
+                  hutRepairLatch = { lastBad: bad, lastAction: 'rebuild', ts: Date.now() }
+                  dbg('camp: hut rebuild REFUSED (' + why + ') - no infra written, no claim; latched lastBad=' + bad + ' (unimproved) so the next pass patches instead of re-clearing the site')
                   say(why === 'stopped' ? 'i was told to stop before i could work on the safehouse - nothing done' : 'i could not get at the safehouse site to build - nothing done, i will try again')
                 } else {
                   // VERIFY with the SHARED tolerant classifier - MANDATORY (the VERIFY_SUCCESS_MSG=0

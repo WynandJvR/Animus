@@ -126,6 +126,21 @@ t('census: the hut rebuild may not record infra / claim / latch from a REFUSED b
     "rememberInfra('hut') must sit behind a `!hr.refused && hr.placed > 0` guard - a refused pass writes nothing")
 })
 
+t('census/anti-grief: a REFUSED hut rebuild still latches the UNIMPROVED damage count', () => {
+  // By the time a rebuild can refuse, the bank has been emptied and clearVolume has already torn
+  // the site down. decideHutRepair only declines a second destructive pass when the latch says the
+  // last attempt improved nothing (stalled = lastAction != null && !improved). So a refused pass
+  // must record lastBad = the PRE-build `bad` (never 0, never absent) or the bot re-clears the hut
+  // site on every single camp pass forever. Latching the truth is not claiming success.
+  const code = SOURCE_FILES.find(f => f.file === 'commands.js').code
+  const i = code.indexOf('hut rebuild REFUSED')
+  assert(i > 0, 'the refusal branch of the hut rebuild was not found')
+  const window = code.slice(Math.max(0, i - 500), i + 200)
+  assert(/hutRepairLatch\s*=\s*\{\s*lastBad:\s*bad\s*,/.test(window),
+    'a refused rebuild must latch lastBad = bad (the unimproved pre-build count) so the next pass patches')
+  assert(!/hutRepairLatch\s*=\s*\{\s*lastBad:\s*0/.test(window), 'a refused rebuild may never latch lastBad: 0 (that is a success record)')
+})
+
 // =============================================================================================
 // 2. THE REFUSAL CONTRACT
 // =============================================================================================
