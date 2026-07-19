@@ -3,9 +3,14 @@
 // and keeping it liveable. Split out of provision.js unchanged.
 //
 // This is the layer that answers "is this MY structure?" (ownHutAt / insideOwnStructure /
-// onHutApron), the one that repairs and furnishes it (repairHutStructure, furnishHut,
-// cleanupHutInterior, healHomeCrater), and the maintainHome chain the camp pass and the
-// index.js home-repair reflex both drive.
+// onHutApron), the one that repairs it (repairHutStructure, cleanupHutInterior,
+// healHomeCrater), and the maintainHome chain the camp pass and the index.js home-repair
+// reflex both drive. It also owns the SPAWN ANCHOR primitives: bedUsable (is this bed a
+// working anchor?), assertSpawnOn (the one place allowed to claim a spawn), ensureBedSite
+// (find OR MAKE somewhere to lay one) and upgradeBedPlacement (the only legal anchor swap).
+//
+// #110 removed furnishHut entirely: it had zero callers (the camp chain owns bed/station/
+// interior duties) and carried three latent destroy-before-create paths.
 //
 // hut-model.js holds the PURE interior model (classifyCell, decideHutRepair); this file is
 // the executor that reads the world through it and actually places blocks.
@@ -282,66 +287,275 @@ function bedFootprint (bot, pos) {
   return { foot, head: foot.offset(d[0], d[1], d[2]), facing: pr.facing }
 }
 
-// "A solid block below" is not a ground test - the top of a one-wide wall passes it. Require
-// support under BOTH real cells AND that each support sits in ground (>=3 of its 4 horizontal
-// neighbours solid), which rejects wall crests and single pillars. Pure world reads.
-function bedWellPlaced (bot, pos) {
-  const fp = bedFootprint(bot, pos)
-  if (!fp) return { ok: false, why: 'not a bed' }
-  for (const c of [fp.foot, fp.head]) {
-    const here = bot.blockAt(c)
-    if (!here || !/_bed$/.test(here.name)) return { ok: false, why: 'cell ' + c.toString() + ' is not part of the bed' }
-    const sup = bot.blockAt(c.offset(0, -1, 0))
-    if (!sup || sup.boundingBox !== 'block') return { ok: false, why: 'no support under ' + c.toString() }
-    let solid = 0
-    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-      const n = bot.blockAt(c.offset(dx, -1, dz))
-      if (n && n.boundingBox === 'block') solid++
-    }
-    if (solid < 3) return { ok: false, why: 'support under ' + c.toString() + ' is a ledge/wall crest (' + solid + '/4 neighbours solid)' }
-  }
-  return { ok: true, why: 'both cells supported on ground' }
+// #110 THE ANCHOR-REPLACEMENT INVARIANT - the placement predicate re-derived from the actual
+// REQUIREMENT instead of a cosmetic proxy. The old rule ("support under both cells AND >=3 of
+// that support's 4 horizontal neighbours solid") tested whether the ground LOOKS continuous.
+// That is not the requirement, and it cost the bot its home: on the chewed-up terrain the bot
+// itself creates around its hut, legitimate pit-pocked topsoil was rejected everywhere, so a
+// bot holding a bed and planks found "nowhere near home to lay it" (live 2026-07-20 01:17:39)
+// while the crest class it was invented to stop was already stopped by footprint support.
+//
+// The requirement is: THE BED PERSISTS, THE BOT CAN USE IT, AND USING IT IS NOT A HAZARD.
+//   P1 integrity - both REAL cells (facing/part, never an assumed +z) read as the bed.
+//   P2 support   - a solid block directly under BOTH real cells. A woken/respawning body
+//                  standing over air is the live crest failure; this is the clause that kills it.
+//   P3 usability - at least ONE standable cell side-adjacent to the footprint (air, air above,
+//                  solid below), at bed Y or one step down. A one-wide wall crest with BOTH
+//                  cells supported fails HERE - its neighbours are air over air. This is also
+//                  exactly the geometry the sleep/activate approach needs (the #77 click-reach fix).
+//   P4 no lethal - no lava/fire side-adjacent to the footprint or under a standable cell.
+//
+// The >=3/4-neighbour count is DELETED, not tuned: once both cells are supported and a stand
+// exists, the continuity of the ground AROUND the support is irrelevant. Do not bring a
+// neighbour count back (spawnbedtest pins this).
+//
+// UNKNOWN-SAFE: a null read is "cannot judge" - never a silent pass and never a silent fail.
+// Callers get { ok:false, why:'unknown ...' } and must treat it as not-provable, not as bad.
+const LETHAL_RE = /^(lava|flowing_lava|fire|soul_fire|magma_block)$/
+
+// Is `c` a cell a body can stand in? null = unknown (chunk not loaded), never a verdict.
+function standableCell (bot, c) {
+  const feet = bot.blockAt(c); const head = bot.blockAt(c.offset(0, 1, 0)); const floor = bot.blockAt(c.offset(0, -1, 0))
+  if (!feet || !head || !floor) return null
+  return AIRISH(feet.name) && AIRISH(head.name) && floor.boundingBox === 'block'
 }
 
+// P2+P3+P4 over a PAIR of cells. Shared by bedUsable (after P1) and ensureBedSite (before the
+// bed exists) so the site the bot prepares is judged by the same rule that judges the result.
+function bedPairSafe (bot, foot, head) {
+  const cells = [foot, head]
+  const inPair = c => cells.some(p => p.x === c.x && p.y === c.y && p.z === c.z)
+  for (const c of cells) { // P2
+    const sup = bot.blockAt(c.offset(0, -1, 0))
+    if (!sup) return { ok: false, why: 'unknown chunk under ' + c.toString() }
+    if (sup.boundingBox !== 'block') return { ok: false, why: 'no support under ' + c.toString() }
+  }
+  let stand = false; let standUnknown = false
+  for (const c of cells) { // P3 + P4 over the side-adjacent columns
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const side = c.offset(dx, 0, dz)
+      if (inPair(side)) continue
+      const sb = bot.blockAt(side)
+      if (sb && LETHAL_RE.test(sb.name)) return { ok: false, why: sb.name + ' right beside the bed at ' + side.toString() }
+      for (const dy of [0, -1]) { // a bed on a low rise is still clickable from the ground beside it
+        const cand = side.offset(0, dy, 0)
+        const s = standableCell(bot, cand)
+        if (s === null) { standUnknown = true; continue }
+        if (!s) continue
+        const under = bot.blockAt(cand.offset(0, -1, 0))
+        if (under && LETHAL_RE.test(under.name)) return { ok: false, why: 'the only footing beside the bed stands on ' + under.name }
+        stand = true
+      }
+    }
+  }
+  if (!stand) return { ok: false, why: standUnknown ? 'unknown chunk beside the bed - cannot prove a place to stand' : 'nothing standable beside the bed (a ledge/crest the bot cannot reach it from)' }
+  return { ok: true, why: 'both cells supported, standable beside it, nothing lethal adjacent' }
+}
+
+function bedUsable (bot, pos) {
+  const at = pos instanceof Vec3 ? pos : new Vec3(pos.x, pos.y, pos.z)
+  const b0 = bot.blockAt(at)
+  if (!b0) return { ok: false, why: 'unknown chunk at ' + at.toString() }
+  const fp = bedFootprint(bot, at)
+  if (!fp) return { ok: false, why: 'not a bed' }
+  for (const c of [fp.foot, fp.head]) { // P1 conformance
+    const here = bot.blockAt(c)
+    if (!here) return { ok: false, why: 'unknown chunk at ' + c.toString() }
+    if (!/_bed$/.test(here.name)) return { ok: false, why: 'cell ' + c.toString() + ' is not part of the bed' }
+  }
+  return bedPairSafe(bot, fp.foot, fp.head)
+}
+
+// #110 assertSpawnOn - THE ONE spawn-assert primitive, and the only code in this file allowed
+// to claim a spawn. The defect it closes: `await bot.activateBlock(bed); rememberBed(pos)` was
+// the idiom at four call sites, and activateBlock RESOLVING only proves the CLICK happened.
+// At night with a hostile near, the server refuses and sets nothing - yet memory stamped
+// success and cleared the spawn-suspect flag. A claim recorded without server evidence is
+// exactly the failure the grounded-truth work exists to end.
+//
+// Evidence, in strength order:
+//   'slept'       - bot.isSleeping observed true (the server granted the sleep). We never
+//                   INITIATE a sleep here; nightRest's sleepInBedHere owns that policy.
+//   'spawn_set'   - the server's own set-spawn game message arrived.
+//   'unconfirmed' - the click resolved and nothing came back.
+// rememberBed fires on slept/spawn_set always; on unconfirmed only with opts.allowUnconfirmed
+// (recovery paths that have NO anchor at all - an unconfirmed bed beats none), and then the
+// record says confirmed:false rather than lying.
+const SET_SPAWN_RE = /block\.minecraft\.set_spawn|respawn point set/i
+function isSetSpawnMessage (msg) {
+  const seen = []
+  const walk = (m, depth) => {
+    if (m == null || depth > 4) return
+    if (typeof m === 'string') { seen.push(m); return }
+    if (Array.isArray(m)) { for (const x of m) walk(x, depth + 1); return }
+    if (typeof m !== 'object') return
+    if (m.translate) seen.push(String(m.translate))
+    if (m.text) seen.push(String(m.text))
+    walk(m.json, depth + 1); walk(m.extra, depth + 1); walk(m.with, depth + 1)
+  }
+  walk(msg, 0)
+  return seen.some(s => SET_SPAWN_RE.test(s))
+}
+
+// A BOUNDED EVIDENCE-ARRIVAL window, NOT a behaviour cooldown: the condition is "the message
+// arrived"; the 3s only stops an unbounded wait. A bot with no event channel (offline tests)
+// skips the wait entirely rather than burning it for nothing.
+const SPAWN_EVIDENCE_MS = 3000
+async function assertSpawnOn (bot, bedBlock, opts = {}) {
+  if (!bedBlock || !/_bed$/.test(bedBlock.name || '')) return { ok: false, how: 'none', why: 'nothing bed-shaped to assert spawn on' }
+  const pos = bedBlock.position
+  const remember = (confirmed, how, why) => { rememberBed(pos, { confirmed }); dbg('  assertSpawn: [' + how + '] ' + why); return { ok: true, how, why } }
+  if (bot.isSleeping) return remember(true, 'slept', 'already asleep in the bed at ' + pos.toString() + ' - the server granted it')
+  let sawSetSpawn = false
+  const onMsg = m => { try { if (isSetSpawnMessage(m)) sawSetSpawn = true } catch {} }
+  const canListen = typeof bot.on === 'function' && typeof bot.removeListener === 'function'
+  if (canListen) { bot.on('message', onMsg); bot.on('messagestr', onMsg) }
+  try {
+    try { await bot.activateBlock(bedBlock) } catch (e) { return { ok: false, how: 'none', why: 'the bed click failed (' + e.message + ')' } }
+    if (canListen) {
+      const deadline = Date.now() + SPAWN_EVIDENCE_MS
+      while (!sawSetSpawn && !bot.isSleeping && Date.now() < deadline) await new Promise(r => setTimeout(r, 100))
+    }
+    if (bot.isSleeping) return remember(true, 'slept', 'the click put the bot to sleep at ' + pos.toString())
+    if (sawSetSpawn) return remember(true, 'spawn_set', 'the server confirmed the spawn is set at ' + pos.toString())
+    if (opts.allowUnconfirmed) return remember(false, 'unconfirmed', 'the click resolved but the server never said it set the spawn at ' + pos.toString() + ' - recorded UNCONFIRMED (no other anchor)')
+    dbg('  assertSpawn: [unconfirmed] no server evidence for a spawn at ' + pos.toString() + ' - claiming nothing')
+    return { ok: false, how: 'unconfirmed', why: 'the server never confirmed a spawn at ' + pos.toString() }
+  } finally {
+    if (canListen) { try { bot.removeListener('message', onMsg); bot.removeListener('messagestr', onMsg) } catch {} }
+  }
+}
+
+// #110 ensureBedSite - site search AND PREPARATION as a first-class rung. A real player on
+// chewed ground does not hunt for a perfect natural pad: they place two blocks and lay the bed
+// on them. Search-only placement is a terrain lottery, and around its own hut the bot always
+// loses it. Two modes:
+//   plan:true - pure reads + a resource-model count check, NO world writes. Returns the chosen
+//               site and its cost, or null. This doubles as the SWAP'S ACHIEVABILITY GATE.
+//   (default) - executes: places any needed support blocks (verified by a world re-read),
+//               returns { foot, head, need, prepared } ready for the bed.
+//
+// ANTI-GRIEF, all enforced HERE and not at call sites: <=2 pad blocks ever, own materials via
+// the resource model, within 12b (XZ) of `near`, never inside a registered build footprint,
+// UNKNOWN-read columns skipped, and the pad is judged by bedPairSafe AFTER placement so a pad
+// that CREATES a hazard is rolled back. Pad blocks are PERMANENT INFRASTRUCTURE and are
+// deliberately NOT registered with scaffold.js - a registered pad would be torn down by the
+// next teardown pass, dropping the spawn bed's support out from under it.
+const PAD_FILLER = ['cobblestone', 'oak_planks', 'birch_planks', 'spruce_planks', 'dirt']
+const PAD_MAX = 2
+const BED_SITE_MAX_XZ = 12
+async function ensureBedSite (bot, near, opts = {}) {
+  if (!near || !bot.entity) return null
+  const res = require('./resources.js')
+  const isStopped = opts.isStopped || (() => false)
+  const base = new Vec3(Math.round(near.x), Math.floor(near.y), Math.round(near.z))
+  const excluded = (opts.exclude || []).map(c => c.x + '|' + c.y + '|' + c.z)
+  const isExcluded = c => excluded.includes(c.x + '|' + c.y + '|' + c.z)
+  const airish = b => !!b && AIRISH(b.name)
+
+  // GROUND-SEEKING, not a single Y: for each column find the surface inside the band instead
+  // of assuming the site shares near.y. The single-Y assumption is why the old ring generator
+  // found nothing but the wall crest on ground that sits a block or two lower.
+  const surfaceY = (x, z) => {
+    for (let y = base.y + 2; y >= base.y - 4; y--) {
+      const here = bot.blockAt(new Vec3(x, y, z)); const above = bot.blockAt(new Vec3(x, y + 1, z)); const below = bot.blockAt(new Vec3(x, y - 1, z))
+      if (!here || !above || !below) return null // unknown column - never "clear"
+      if (airish(here) && airish(above) && below.boundingBox === 'block') return y
+    }
+    return null
+  }
+
+  const candidates = []
+  for (let r = 1; r <= 8; r++) for (let dx = -r; dx <= r; dx++) for (let dz = -r; dz <= r; dz++) {
+    if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue
+    const x = base.x + dx; const z = base.z + dz
+    if (Math.hypot(x - base.x, z - base.z) > BED_SITE_MAX_XZ) continue
+    const y = surfaceY(x, z)
+    if (y == null) continue
+    // the placement code stands off and faces +z, so the pair it aims for is foot + head@+z.
+    // The post-place CONFORMANCE read still judges whatever the server actually made.
+    const foot = new Vec3(x, y, z); const head = new Vec3(x, y, z + 1)
+    if (isExcluded(foot) || isExcluded(head)) continue
+    const hb = bot.blockAt(head); const hAbove = bot.blockAt(head.offset(0, 1, 0))
+    if (!hb || !hAbove || !airish(hb) || !airish(hAbove)) continue
+    const pad = []
+    for (const c of [foot, head]) {
+      const sup = bot.blockAt(c.offset(0, -1, 0))
+      if (!sup) { pad.push(null); break } // unknown - drop the candidate
+      if (sup.boundingBox === 'block') continue
+      if (!AIRISH(sup.name) && !REPLACEABLE.test(sup.name)) { pad.push(null); break } // liquid/other - not ours to fill
+      const under = bot.blockAt(c.offset(0, -2, 0))
+      if (!under || under.boundingBox !== 'block') { pad.push(null); break } // nothing to place the pad against
+      pad.push(c.offset(0, -1, 0))
+    }
+    if (pad.some(p => p === null)) continue
+    if (pad.length > PAD_MAX) continue
+    // anti-grief: neither the bed nor its pad may land inside a registered build footprint
+    let inZone = false
+    try { inZone = [foot, head, ...pad].some(c => P().inBuildZone(c.x, c.z)) } catch {}
+    if (inZone) continue
+    candidates.push({ foot, head, pad, need: pad.length, dist: Math.hypot(x - base.x, z - base.z) })
+  }
+  // fewest filler blocks first (0 = a natural site), then closest to home
+  candidates.sort((a, b) => (a.need - b.need) || (a.dist - b.dist))
+  if (!candidates.length) { dbg('  ensureBedSite: no bed pair within 8b of ' + base.x + ',' + base.z + ' is preparable for <=' + PAD_MAX + ' blocks'); return null }
+
+  let totals = {}
+  try { totals = await res.totalCounts(bot, { near: base, maxDist: 24 }) } catch (e) { dbg('  ensureBedSite: holdings read failed (' + e.message + ')') }
+  const fillerFor = n => n === 0 ? 'none' : (PAD_FILLER.find(name => (totals[name] || 0) >= n) || null)
+
+  for (const c of candidates) {
+    if (isStopped()) break
+    const filler = fillerFor(c.need)
+    if (!filler) continue // cannot fund this pad from our own holdings
+    if (opts.plan) {
+      dbg('  ensureBedSite: [plan] ' + c.foot.toString() + ' needs ' + c.need + ' pad block(s)' + (c.need ? ' of ' + filler : ''))
+      return { foot: c.foot, head: c.head, need: c.need, filler: c.need ? filler : null, prepared: false }
+    }
+    if (c.need === 0) {
+      const safe = bedPairSafe(bot, c.foot, c.head)
+      if (!safe.ok) { dbg('  ensureBedSite: natural pair at ' + c.foot.toString() + ' rejected (' + safe.why + ')'); continue }
+      dbg('  ensureBedSite: natural site at ' + c.foot.toString() + ' - no preparation needed')
+      return { foot: c.foot, head: c.head, need: 0, filler: null, prepared: true }
+    }
+    // EXECUTE: source the filler through the resource model (never a raw pack count), lay the
+    // pad, and re-read every cell. Anything short rolls the pad back - it is this call's own
+    // uncommitted creation, which is the one dig the invariant always allows.
+    try { await res.acquire(bot, filler, c.need, { near: base, isStopped, say: opts.say }) } catch (e) { dbg('  ensureBedSite: could not acquire ' + filler + ' (' + e.message + ')') }
+    const laid = []
+    let ok = true
+    for (const p of c.pad) {
+      if (bot.entity.position.distanceTo(p) > 3) { try { await gotoWithTimeout(bot, new goals.GoalNear(p.x, p.y + 1, p.z, 2), 15000) } catch {} }
+      const placed = await placeAt(bot, p, new RegExp('^' + filler + '$'))
+      const back = bot.blockAt(p) // the re-read IS the proof (pathfix wraps the place itself)
+      if (!placed || !back || back.boundingBox !== 'block') { dbg('  ensureBedSite: pad block at ' + p.toString() + ' did not land (' + (placeAt.lastFail || '?') + ')'); ok = false; break }
+      laid.push(p)
+    }
+    const safe = ok ? bedPairSafe(bot, c.foot, c.head) : { ok: false, why: 'pad incomplete' }
+    if (ok && safe.ok) { dbg('  ensureBedSite: prepared a ' + laid.length + '-block ' + filler + ' pad at ' + c.foot.toString()); return { foot: c.foot, head: c.head, need: c.need, filler, prepared: true } }
+    dbg('  ensureBedSite: pad at ' + c.foot.toString() + ' rolled back (' + safe.why + ')')
+    for (const p of laid) { try { const b = bot.blockAt(p); if (b && b.boundingBox === 'block') { await bot.dig(b); await collectDrops(bot, 2) } } catch (e) { dbg('  ensureBedSite: pad rollback failed at ' + p.toString() + ' (' + e.message + ')') } }
+  }
+  dbg('  ensureBedSite: ' + candidates.length + ' candidate site(s) near ' + base.x + ',' + base.z + ' but none could be funded or prepared')
+  return null
+}
+
+// Lay a carried bed on OPEN GROUND near `near`. #110: the site now comes from ensureBedSite,
+// which SEARCHES AND PREPARES (the inline r<=4 single-Y ring generator and its cosmetic
+// pre-screen are gone). This function keeps exactly its old duties - place, verify
+// CONFORMANCE, reject-dig a bad one - and the reject-dig stays what it always was: rollback of
+// an uncommitted creation made in this same call, which the anchor invariant always permits.
 async function placeBedNear (bot, near, opts = {}) {
   let bedItem = bedInPack(bot)
   if (!bedItem || !near) return null
   const isStopped = opts.isStopped || (() => false)
-  const base = new Vec3(Math.round(near.x), Math.floor(near.y), Math.round(near.z))
-  const cells = []
-  for (let r = 1; r <= 4; r++) for (let dx = -r; dx <= r; dx++) for (let dz = -r; dz <= r; dz++) {
-    if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue
-    cells.push(new Vec3(base.x + dx, base.y, base.z + dz))
-  }
-  for (const foot of cells) {
-    if (isStopped()) break
-    const head = foot.offset(0, 0, 1) // bed lays toward +z, same as the hut cell
-    // anti-grief: never lay a bed inside an active build footprint
-    let inZone = false
-    try { inZone = [foot, head].some(c => P().inBuildZone(c.x, c.z)) } catch {}
-    if (inZone) continue
-    let good = true
-    // Pre-screen BOTH possible orientations' cells plus the ground quality, so a wall crest
-    // is never even attempted. The post-place check below is what actually decides.
-    for (const c of [foot, head, foot.offset(1, 0, 0), foot.offset(-1, 0, 0)]) {
-      const cb = bot.blockAt(c)
-      if (!cb) { good = false; break } // unknown chunk is NOT "clear"
-    }
-    if (good) {
-      for (const c of [foot, head]) {
-        const cb = bot.blockAt(c); const fl = bot.blockAt(c.offset(0, -1, 0))
-        if (!cb || !AIRISH(cb.name)) { good = false; break }
-        if (!fl || fl.boundingBox !== 'block') { good = false; break }
-        let solid = 0
-        for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-          const n = bot.blockAt(c.offset(dx, -1, dz))
-          if (n && n.boundingBox === 'block') solid++
-        }
-        if (solid < 3) { good = false; break } // ledge / wall crest / pillar top
-      }
-    }
-    if (!good) continue
-    try { await gotoWithTimeout(bot, new goals.GoalNear(foot.x, foot.y, foot.z, 2), 15000) } catch {}
+  const exclude = (opts.exclude || []).slice()
+  for (let attempt = 0; attempt < 3 && !isStopped(); attempt++) {
+    const site = await ensureBedSite(bot, near, { isStopped, say: opts.say, exclude })
+    if (!site) { dbg('  placeBedNear: no site near ' + Math.round(near.x) + ',' + Math.round(near.z) + ' could be found or prepared'); return null }
+    const { foot, head } = site
+    exclude.push(foot, head) // a site that fails is not offered again on the next attempt
+    if (bot.entity.position.distanceTo(foot) > 3) { try { await gotoWithTimeout(bot, new goals.GoalNear(foot.x, foot.y, foot.z, 2), 15000) } catch {} }
     bedItem = bedInPack(bot)
     if (!bedItem) return null
     try {
@@ -355,7 +569,7 @@ async function placeBedNear (bot, near, opts = {}) {
     let landed = null
     for (const c of [foot, head]) { const b = bot.blockAt(c); if (b && /_bed$/.test(b.name)) { landed = b; break } }
     if (!landed) { dbg('  placeBedNear: placement at ' + foot.x + ',' + foot.z + ' did not verify'); continue }
-    const verdict = bedWellPlaced(bot, landed.position)
+    const verdict = bedUsable(bot, landed.position)
     if (verdict.ok) { dbg('  placeBedNear: bed verified at ' + landed.position.toString() + ' (' + verdict.why + ')'); return landed }
     dbg('  placeBedNear: REJECTING bed at ' + landed.position.toString() + ' - ' + verdict.why + ' - breaking it and trying elsewhere')
     try { await bot.dig(landed); await collectDrops(bot, 3) } catch (e) { dbg('  placeBedNear: could not reclaim the bad bed (' + e.message + ')'); return null }
@@ -375,7 +589,9 @@ async function ensureHutBed (bot, at, opts = {}) {
       // proves nothing then; walk over and genuinely re-activate the bed.
       if (!opts.force && kb && kb.x === b.position.x && kb.y === b.position.y && kb.z === b.position.z) return 'present' // spawn already set here - don't re-trek every pass
       try { await gotoWithTimeout(bot, new goals.GoalNear(b.position.x, b.position.y, b.position.z, 2), 15000) } catch {}
-      try { await bot.activateBlock(b); rememberBed(b.position) } catch {}
+      // #110: evidence or no claim. This is a recovery path with no proven anchor, so an
+      // unconfirmed click is still recorded - but recorded HONESTLY (confirmed:false).
+      try { await assertSpawnOn(bot, b, { allowUnconfirmed: true, say: opts.say }) } catch {}
       return 'present'
     }
   }
@@ -402,7 +618,7 @@ async function ensureHutBed (bot, at, opts = {}) {
   for (let dz = 0; dz <= 5; dz++) for (let dx = 0; dx <= 5; dx++) { // verify a bed actually landed, then set spawn
     const b = bot.blockAt(new Vec3(at.x + dx, at.y + 1, at.z + dz))
     if (b && /_bed$/.test(b.name)) {
-      try { await bot.activateBlock(b); rememberBed(b.position) } catch {}
+      try { await assertSpawnOn(bot, b, { allowUnconfirmed: true, say }) } catch {}
       say('set my bed in the hut - spawn point secured')
       return 'placed'
     }
@@ -440,197 +656,92 @@ function furnitureInHut (bot, hut, itemRe) {
   return null
 }
 
-async function furnishHut (bot, hut, { isStopped = () => false, say = () => {} } = {}) {
-  const moved = []
-  // MAINTENANCE, MODEL-DRIVEN: level the floor (fill real holes ONLY, never dump filler
-  // into interior air), dig stray dirt/cobble (incl. head-height pillar remnants), remove
-  // DUPLICATE stations, and reconcile the registry - all via the schema-correct 4x4 model
-  // with a verified postcondition. This replaces the old hand-rolled floor/dedupe/declutter
-  // passes that scanned a 3x3 (missing dx/dz 4) and could place filler at interior air.
-  try { const r = await cleanupHutInterior(bot, hut, { isStopped, say }); if (r && (r.dug || r.removedDupes)) moved.push('tidy'); dbg('  furnish: interior maintained (' + JSON.stringify({ dug: r && r.dug, dupes: r && r.removedDupes, ok: r && r.ok }) + ')') } catch (e) { dbg('  furnish: interior maintenance failed (' + e.message + ')') }
-  const grab = async (kind, nameRe) => { // dig a remembered outdoor one and pocket it
-    if (furnitureInHut(bot, hut, nameRe)) return false // already have one inside - don't fetch another
-    const e = listInfra(kind, bot).find(x => Math.hypot(x.x - hut.x, x.z - hut.z) <= 60 && !insideHutBox(x, hut))
-    if (!e) return false
-    const blk = bot.blockAt(new Vec3(e.x, e.y, e.z))
-    if (!blk || !nameRe.test(blk.name)) { forgetInfra(kind, listInfra(kind).find(x => x.x === e.x && x.y === e.y && x.z === e.z)); return false }
-    if (bot.entity.position.distanceTo(blk.position) > 4) { try { await gotoWithTimeout(bot, new goals.GoalNear(e.x, e.y, e.z, 2), 30000) } catch { return false } }
-    const tool = toolForBlock(bot, /furnace/.test(blk.name) ? 'stone' : 'oak_planks')
-    if (tool) await bot.equip(tool, 'hand').catch(() => {})
-    try { await bot.dig(blk); await collectDrops(bot, 4) } catch (err) { dbg('  furnish: could not dig ' + kind + ' (' + err.message + ')'); return false }
-    forgetInfra(kind, listInfra(kind).find(x => x.x === e.x && x.y === e.y && x.z === e.z))
-    return true
+// #110 upgradeBedPlacement - MAINTENANCE ONLY, and the ONLY code in the tree permitted to dig
+// a bed that memory points at. This is where the quality judgment went after it was taken OUT
+// of the spawn-critical path: ensureSpawnBed's STOOD rung used to consult a quality verdict and,
+// on a bad one, dig the anchor and forget it BEFORE any replacement existed - executed from a
+// 45s background timer that discards failure verdicts. It traded a working anchor for none and
+// the bot died in a respawn carousel all night (live 2026-07-19 21:09).
+//
+// THE ANCHOR-REPLACEMENT INVARIANT, enforced literally here: a swap may not BEGIN until the
+// replacement is proven ACHIEVABLE (site preparable AND materials confirmed), and then runs
+// acquire -> create -> verify -> assert -> DESTROY LAST. At every await point knownBed() names
+// a bed that is PHYSICALLY STANDING. Every failure leaves the old anchor standing and remembered.
+//
+// Gates are condition gates, zero time windows, cheapest first - the primitive is inert (one
+// bedUsable read) whenever the anchor is fine, which is why it needs no flag.
+async function upgradeBedPlacement (bot, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const say = opts.say || (() => {})
+  const res = require('./resources.js')
+  const N = (how, why) => { dbg('bed-upgrade: [' + how + '] ' + why); return { how, why } }
+  if (!bot.entity) return N('noop', 'no body yet')
+  const kb = knownBed()
+  if (!kb) return N('noop', 'no bed remembered - a missing anchor is ensureSpawnBed\'s job, not maintenance\'s')
+  if (Math.hypot(kb.x - bot.entity.position.x, kb.z - bot.entity.position.z) > 8) return N('noop', 'the remembered bed is not in reach from here')
+  const old = bot.blockAt(new Vec3(kb.x, kb.y, kb.z))
+  if (!old || !/_bed$/.test(old.name)) return N('noop', 'nothing reads as a bed at the remembered spot - not a swap, a reconciliation')
+  const v = bedUsable(bot, old.position)
+  if (v.ok) return N('noop', 'the anchor is already usable')
+  // a bot in ANY crisis keeps its ugly bed - a swap is never worth a survival window
+  if (isNight(bot)) return N('kept', 'night - an ugly anchor beats a swap in the dark (' + v.why + ')')
+  let need = null
+  try { need = P().survivalNeed(bot) } catch {}
+  if (need) return N('kept', 'a survival need is active - keeping the ugly anchor (' + v.why + ')')
+
+  // ACHIEVABILITY, before anything in the world is touched. A bed occupying the only viable
+  // cells is by definition not upgradable: that returns 'kept', never a deadlock or a dig.
+  const fp = bedFootprint(bot, old.position)
+  const oldCells = fp ? [fp.foot, fp.head] : [old.position]
+  const near = opts.near || { x: kb.x, y: kb.y, z: kb.z }
+  const plan = await ensureBedSite(bot, near, { plan: true, isStopped, exclude: oldCells, say }).catch(() => null)
+  if (!plan) return N('kept', 'no better site near home is findable or preparable (' + v.why + ')')
+  let totals = {}
+  try { totals = await res.totalCounts(bot, { near, maxDist: 24 }) } catch (e) { dbg('bed-upgrade: holdings read failed (' + e.message + ')') }
+  if (!bedObtainable(bot, totals)) return N('kept', 'a replacement bed is not obtainable from what we hold (' + v.why + ')')
+
+  // 1) ACQUIRE FIRST - withdraw > craft through the resource model. Never by touching the
+  //    standing bed: cannibalising the anchor to replace the anchor is the bug, not the fix.
+  const item = await acquireBed(bot, { near, isStopped, say }).catch(() => null)
+  if (!item) return N('kept', 'could not get a replacement bed - the old one stays')
+  // 2) CREATE - prepare the site and lay the new bed. placeBedNear's conformance check and
+  //    reject-dig are the rollback for an uncommitted creation.
+  const nb = await placeBedNear(bot, near, { isStopped, say, exclude: oldCells }).catch(() => null)
+  if (!nb) return N('kept', 'the replacement bed would not lay anywhere better - the old one stays')
+  // 3) ASSERT - server evidence only. No confirmation means we do NOT move the anchor, so the
+  //    new bed is rolled back and memory still names the old, standing one.
+  const a = await assertSpawnOn(bot, nb, { allowUnconfirmed: false, say }).catch(() => ({ ok: false, why: 'assert threw' }))
+  if (!a.ok) {
+    dbg('bed-upgrade: the new bed at ' + nb.position.toString() + ' set no spawn (' + a.why + ') - rolling it back')
+    try { await bot.dig(bot.blockAt(nb.position) || nb); await collectDrops(bot, 3) } catch (e) { dbg('bed-upgrade: rollback dig failed (' + e.message + ')') }
+    return N('kept', 'spawn-set was not confirmed on the new bed - the old anchor is untouched')
   }
-  const placeInside = async (kind, itemRe) => {
-    if (!(bot.inventory ? bot.inventory.items() : []).some(i => itemRe.test(i.name))) return false
-    if (furnitureInHut(bot, hut, itemRe)) { dbg('  furnish: ' + kind + ' already inside - not duplicating'); return false }
-    const cell = hutFreeCells(bot, hut)[0]
-    if (!cell) { dbg('  furnish: no free cell for the ' + kind); return false }
-    if (bot.entity.position.distanceTo(cell) > 3) { try { await gotoWithTimeout(bot, new goals.GoalNear(cell.x, cell.y, cell.z, 2), 20000) } catch {} }
-    if (!await placeAt(bot, cell, itemRe)) { dbg('  furnish: could not place ' + kind + ' - ' + (placeAt.lastFail || '?')); return false }
-    rememberInfra(kind, cell); moved.push(kind)
-    return true
-  }
-  try { if (await grab('furnace', /furnace/)) await placeInside('furnace', /^furnace$/) } catch (e) { dbg('  furnish: furnace move failed (' + e.message + ')') }
+  // 4) DESTROY LAST - memory already names the NEW, verified, standing anchor. From here a
+  //    failure costs at most one bed ITEM; it can no longer cost the anchor.
+  let husk = ''
   try {
-    let haveTable = (bot.inventory ? bot.inventory.items() : []).some(i => i.name === 'crafting_table')
-    if (!haveTable) haveTable = await grab('table', /crafting_table/)
-    if (haveTable) await placeInside('table', /^crafting_table$/)
-  } catch (e) { dbg('  furnish: table move failed (' + e.message + ')') }
-  // BED last and only when it's SAFE: digging the bed clears the spawn point until it's
-  // re-placed and used - dying in that window means a world-spawn respawn far away.
-  try {
-    // A bed shoved into the doorway/threshold gets RELOCATED (operator: "it placed its
-    // bed inside the door frame") - dig with pickup-verify; the placement below re-sites
-    // it on the doorway-aware cells.
-    const dw = findHutDoorway(bot, hut)
-    if (dw) {
-      const thr = new Vec3(dw.x + (dw.x === hut.x ? 1 : dw.x === hut.x + 4 ? -1 : 0), dw.y, dw.z + (dw.z === hut.z ? 1 : dw.z === hut.z + 4 ? -1 : 0))
-      for (const p of [dw, thr]) {
-        const b = bot.blockAt(p)
-        if (b && /_bed$/.test(b.name)) {
-          dbg('  furnish: bed is blocking the doorway - relocating it')
-          if (bot.entity.position.distanceTo(p) > 4) { try { await gotoWithTimeout(bot, new goals.GoalNear(p.x, p.y, p.z, 2), 20000) } catch {} }
-          try {
-            await bot.dig(b)
-            for (let tries = 0; tries < 4 && !(bot.inventory ? bot.inventory.items() : []).some(i => /_bed$/.test(i.name)); tries++) { await collectDrops(bot, 6); await new Promise(r => setTimeout(r, 500)) }
-            if ((bot.inventory ? bot.inventory.items() : []).some(i => /_bed$/.test(i.name))) forgetBed() // memory points at the dug spot
-          } catch (e) { dbg('  furnish: doorway-bed dig failed (' + e.message + ')') }
-          break
-        }
-      }
+    if (bot.entity.position.distanceTo(new Vec3(kb.x, kb.y, kb.z)) > 4) { try { await gotoWithTimeout(bot, new goals.GoalNear(kb.x, kb.y, kb.z, 2), 20000) } catch {} }
+    const stale = bot.blockAt(new Vec3(kb.x, kb.y, kb.z))
+    if (stale && /_bed$/.test(stale.name)) {
+      await bot.dig(stale)
+      // pickup-verify (the idiom salvaged from the deleted furnishHut): the reclaimed bed is
+      // the spare that funds the NEXT swap, so it is worth four tries to actually pocket it.
+      for (let tries = 0; tries < 4 && !bedInPack(bot); tries++) { await collectDrops(bot, 6); await new Promise(r => setTimeout(r, 500)) }
+      if (!bedInPack(bot)) husk = ' (the old bed dropped but never reached the pack)'
     }
-    const kb = knownBed()
-    if (kb && !insideHutBox(kb, hut) && Math.hypot(kb.x - hut.x, kb.z - hut.z) <= 150 && (bot.health || 20) >= 12 && !isNight(bot)) {
-      await S().walkStaged(bot, kb.x, kb.z, { isStopped, range: 4, timeoutMs: 120000 })
-      const bblk = bot.findBlock({ matching: b => /_bed$/.test(b.name), maxDistance: 6 })
-      if (bblk) {
-        try {
-          await bot.dig(bblk)
-          // VERIFY the bed ITEM is in the pack before moving on - a restart cut the
-          // pickup off once and the bed despawned on the ground (spawn point lost, live).
-          for (let tries = 0; tries < 4 && !(bot.inventory ? bot.inventory.items() : []).some(i => /_bed$/.test(i.name)); tries++) {
-            await collectDrops(bot, 6)
-            await new Promise(r => setTimeout(r, 500))
-          }
-          if ((bot.inventory ? bot.inventory.items() : []).some(i => /_bed$/.test(i.name))) forgetBed()
-          else { say('i broke my bed and LOST it - i need a new one'); dbg('  furnish: bed item never landed in the pack') }
-        } catch (e) { dbg('  furnish: bed dig failed (' + e.message + ')') }
-      }
-    }
-    const bedItem = (bot.inventory ? bot.inventory.items() : []).find(i => /_bed$/.test(i.name))
-    if (bedItem) {
-      await S().walkStaged(bot, hut.x + 2, hut.z + 2, { isStopped, range: 4, timeoutMs: 120000 })
-      // try up to 3 candidate pairs, VERIFYING the bed actually stands each time - a
-      // phantom-swallowed placeBlock left the bed silently in the pack (live, no log line)
-      const cells = hutFreeCells(bot, hut)
-      let placedBed = false
-      for (let attempt = 0; attempt < 3 && !placedBed && !isStopped(); attempt++) {
-        let foot = null; let head = null
-        for (const c of cells.slice(attempt)) { const n = cells.find(o => o.y === c.y && Math.abs(o.x - c.x) + Math.abs(o.z - c.z) === 1); if (n) { foot = c; head = n; break } }
-        if (!foot) { dbg('  furnish: no 2-cell space for the bed'); break }
-        // STAND OFF the bed's two cells before placing - the server rejects a bed placed
-        // into the space the placer occupies (every attempt blockUpdate-timed-out, live)
-        const stand = cells.find(c => !(c.x === foot.x && c.z === foot.z) && !(c.x === head.x && c.z === head.z) && Math.abs(c.x - foot.x) + Math.abs(c.z - foot.z) <= 3)
-        if (stand) { try { await gotoWithTimeout(bot, new goals.GoalBlock(stand.x, stand.y, stand.z), 12000) } catch {} }
-        else if (bot.entity.position.distanceTo(foot) > 3) { try { await gotoWithTimeout(bot, new goals.GoalNear(foot.x, foot.y, foot.z, 2), 15000) } catch {} }
-        if (Math.floor(bot.entity.position.x) === foot.x && Math.floor(bot.entity.position.z) === foot.z) { dbg('  furnish: still standing on the bed cell - skipping this spot'); continue }
-        const below = bot.blockAt(foot.offset(0, -1, 0))
-        await bot.equip(bedItem, 'hand')
-        try { await bot.lookAt(head.offset(0.5, 0.5, 0.5), true) } catch {}
-        try { await bot.placeBlock(below, new Vec3(0, 1, 0)) } catch (e) { dbg('  furnish: bed place failed (' + e.message + ')') }
-        await new Promise(r => setTimeout(r, 400))
-        const nb = bot.blockAt(foot)
-        if (nb && /_bed$/.test(nb.name)) {
-          try { await bot.activateBlock(nb) } catch {} // day = sets spawn; night = sleeps
-          rememberBed(foot); moved.push('bed'); placedBed = true
-        } else dbg('  furnish: bed did not land at ' + foot.toString() + ' - trying another spot')
-      }
-    }
-  } catch (e) { dbg('  furnish: bed move failed (' + e.message + ')') }
-  // DOOR the doorway (operator: "no door on its hut so mobs and creepers can still
-  // enter"): the shell schematic leaves a 2-high hole but owns no door block.
-  try {
-    let hasDoor = false
-    for (let dx = 0; dx <= 4 && !hasDoor; dx++) {
-      for (let dz = 0; dz <= 4 && !hasDoor; dz++) {
-        for (let dy = 1; dy <= 2 && !hasDoor; dy++) {
-          const b = bot.blockAt(new Vec3(hut.x + dx, hut.y + dy, hut.z + dz))
-          if (b && /_door$/.test(b.name)) hasDoor = true
-        }
-      }
-    }
-    if (!hasDoor) {
-      const doorway = (() => {
-        const d = findHutDoorway(bot, hut)
-        if (!d) return null
-        const lo = bot.blockAt(d); const hi = bot.blockAt(d.offset(0, 1, 0)); const floor = bot.blockAt(d.offset(0, -1, 0))
-        return (lo && AIRISH(lo.name) && hi && AIRISH(hi.name) && floor && floor.boundingBox === 'block') ? d : null
-      })()
-      if (doorway) {
-        let door = (bot.inventory ? bot.inventory.items() : []).find(i => /_door$/.test(i.name))
-        if (!door) { try { await P().runCraft(bot, 'oak_door', 1, true, { isStopped, home: { x: hut.x, y: hut.y, z: hut.z } }) } catch (e) { dbg('  furnish: cannot craft a door (' + e.message + ')') } }
-        door = (bot.inventory ? bot.inventory.items() : []).find(i => /_door$/.test(i.name))
-        if (door) {
-          // stand OUTSIDE the gap facing the hut centre so the door hangs the right way
-          const ox = doorway.x === hut.x ? -1 : doorway.x === hut.x + 4 ? 1 : 0
-          const oz = doorway.z === hut.z ? -1 : doorway.z === hut.z + 4 ? 1 : 0
-          try { await gotoWithTimeout(bot, new goals.GoalBlock(doorway.x + ox, doorway.y, doorway.z + oz), 15000) } catch {}
-          try { await bot.lookAt(new Vec3(hut.x + 2.5, hut.y + 1.5, hut.z + 2.5), true) } catch {}
-          const floor = bot.blockAt(doorway.offset(0, -1, 0))
-          await bot.equip(door, 'hand')
-          try { await bot.placeBlock(floor, new Vec3(0, 1, 0)); moved.push('door') } catch (e) { dbg('  furnish: door place failed (' + e.message + ')') }
-        }
-      } else dbg('  furnish: no doorway hole found to hang a door in')
-    }
-  } catch (e) { dbg('  furnish: door failed (' + e.message + ')') }
-  // THRESHOLD APRON (operator: "hole in front of its door, it struggles entering"): the
-  // 2 cells just outside the doorway get levelled to the door's floor so the bot walks
-  // in and out flat. Runs every furnish, so a pit dug there later self-heals.
-  try {
-    const dwF = findHutDoorway(bot, hut)
-    if (dwF) {
-      const ox = dwF.x === hut.x ? -1 : dwF.x === hut.x + 4 ? 1 : 0
-      const oz = dwF.z === hut.z ? -1 : dwF.z === hut.z + 4 ? 1 : 0
-      const floorY = dwF.y - 1 // solid surface the door sits on
-      // stand at the doorway (inside the door cell) so we can reach the apron pit from
-      // above and build it up toward us - the bot can't stand IN the pit to fill it
-      try { await gotoWithTimeout(bot, new goals.GoalBlock(dwF.x, dwF.y, dwF.z), 15000) } catch {}
-      for (let step = 1; step <= 2 && !isStopped(); step++) {
-        const ax = dwF.x + ox * step; const az = dwF.z + oz * step
-        // clear anything blocking the 2-high walkway at floor level and above
-        for (const dy of [0, 1]) {
-          const b = bot.blockAt(new Vec3(ax, dwF.y + dy, az))
-          if (b && !AIRISH(b.name) && canBreakNaturally(b)) {
-            try {
-              if (bot.entity.position.distanceTo(b.position) > 4) await gotoWithTimeout(bot, new goals.GoalNear(ax, dwF.y + dy, az, 2), 8000)
-              const t = toolForBlock(bot, b.name); if (t) await bot.equip(t, 'hand').catch(() => {})
-              await bot.dig(b); await collectDrops(bot, 2)
-            } catch {}
-          }
-        }
-        // fill the pit from the BOTTOM up to floor level (416,63 AND 416,64 were both air -
-        // a single top placement had no support and failed, live). Find the lowest air
-        // cell sitting on something solid and stack dirt upward.
-        let guard = 7
-        while (guard-- > 0 && !isStopped()) {
-          const top = bot.blockAt(new Vec3(ax, floorY, az))
-          if (top && !AIRISH(top.name) && !/water/.test(top.name)) break // walkway complete
-          let py = floorY
-          while (py > floorY - 6) {
-            const here = bot.blockAt(new Vec3(ax, py, az)); const below = bot.blockAt(new Vec3(ax, py - 1, az))
-            if (here && (AIRISH(here.name) || /water/.test(here.name)) && below && below.boundingBox === 'block') break
-            py--
-          }
-          if (py <= floorY - 6) break // no solid base within reach - give up on this cell
-          if (!await placeAt(bot, new Vec3(ax, py, az), /^(dirt|coarse_dirt|cobblestone)$/)) break
-        }
-      }
-      dbg('  furnish: threshold apron levelled in front of the door')
-    }
-  } catch (e) { dbg('  furnish: threshold apron failed (' + e.message + ')') }
-  if (moved.length) say('hut furnished - ' + moved.join(' + ') + ' moved indoors')
-  return moved.length
+  } catch (e) { husk = ' (old bed husk left standing: ' + e.message + ')' }
+  say('moved my bed somewhere i can actually use it')
+  return N('swapped', 'anchor moved to ' + nb.position.toString() + ' - the old bed at ' + kb.x + ',' + kb.z + ' was cleared LAST' + husk)
+}
+
+// Can we get a replacement bed WITHOUT touching the standing one? Holdings-derived, from the
+// resource model's totals - the achievability half of the swap gate.
+function bedObtainable (bot, totals) {
+  if (bedInPack(bot)) return true
+  const t = totals || {}
+  const sum = re => Object.keys(t).filter(n => re.test(n)).reduce((s, n) => s + (t[n] || 0), 0)
+  if (sum(/_bed$/) >= 1) return true
+  return sum(/_wool$/) >= 3 && (sum(/_planks$/) >= 3 || sum(/_log$/) >= 1 || sum(/_wood$/) >= 1)
 }
 
 function stationInHut (bot, kind, hut) {
@@ -687,7 +798,9 @@ function reconcileInfra (bot) {
     if (hut) {
       const beds = hutModel.stationCells(hut, hutReader(bot)).bed
       if (beds.length && (!m.bed || !bot.blockAt(new Vec3(m.bed.x, m.bed.y, m.bed.z)) || !/_bed$/.test((bot.blockAt(new Vec3(m.bed.x, m.bed.y, m.bed.z)) || {}).name || ''))) {
-        rememberBed(new Vec3(beds[0].x, beds[0].y, beds[0].z))
+        // RECONCILIATION, not an assert: this only says "the bed we mean is THAT one". No
+        // server was asked, so it never claims confirmed - assertSpawnOn owns that word.
+        rememberBed(new Vec3(beds[0].x, beds[0].y, beds[0].z), { confirmed: false })
         summary.bed.seededSpawn = true
       }
     }
@@ -888,12 +1001,17 @@ async function maintainHome (bot, hutAt, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const say = opts.say || (() => {})
   hutAt = hutAt || hutAnchor()
-  const out = { bed: null, chestFixed: false, repair: null, consolidated: 0, damaged: false }
+  const out = { bed: null, bedUpgrade: null, chestFixed: false, repair: null, consolidated: 0, damaged: false }
   if (!hutAt) return out
   try { await ensureHutApron(bot, hutAt, { isStopped, say }) } catch (e) { dbg('camp: apron fill failed (' + e.message + ')') }
   // rebuild/verify the bed. Anything but 'present' means a bed was missing/placed/unplaceable
   // = the home needed work.
   try { const bs = await ensureHutBed(bot, hutAt, { isStopped, say }); out.bed = bs; dbg('camp: hut bed -> ' + bs); if (bs !== 'present') out.damaged = true } catch (e) { dbg('camp: hut bed failed (' + e.message + ')') }
+  // #110 ANCHOR QUALITY - maintenance's business, never the spawn-critical path's. This runs
+  // where the bot is AT the hut, in a repair window, with say wired and failure harmless; the
+  // 45s keepalive timer that used to own this judgment was precisely the wrong executor.
+  // Inert (one bedUsable read) when the anchor is fine, and it can only ever SWAP, never strand.
+  try { const up = await upgradeBedPlacement(bot, { isStopped, say }); out.bedUpgrade = up.how; if (up.how === 'swapped') out.damaged = true } catch (e) { dbg('camp: bed upgrade failed (' + e.message + ')') }
   // BANK DOUBLE-CHEST HEAL (liveability, every pass): a rebuild that left the bank as two
   // mismatched single chests gets re-faced into one connected double. Idempotent: a merged
   // pair is a fast no-op (returns false).
@@ -1333,7 +1451,7 @@ async function worldTidy (bot, opts = {}) {
 
 module.exports = {
   setDebugSink, insideHutBox,
-  insideHutBox, ownHutAt, onHutApron, insideOwnStructure, hasSolidCeiling, hutAnchor, hutReader, stepOffApron, ensureHutApron, healHomeCrater, ensureHutBed, bedInPack, bedCandidates, acquireBed, placeBedNear, bedFootprint, bedWellPlaced, freeInteriorCell, findHutDoorway, hutFreeCells, furnitureInHut, furnishHut, stationInHut, stationSlot, loadHutSchem, reconcileInfra, cleanupHutInterior, repairHutStructure, recallAndReach, maintainHut, maintainHome,
+  insideHutBox, ownHutAt, onHutApron, insideOwnStructure, hasSolidCeiling, hutAnchor, hutReader, stepOffApron, ensureHutApron, healHomeCrater, ensureHutBed, bedInPack, bedCandidates, acquireBed, placeBedNear, bedFootprint, bedUsable, assertSpawnOn, ensureBedSite, upgradeBedPlacement, freeInteriorCell, findHutDoorway, hutFreeCells, furnitureInHut, stationInHut, stationSlot, loadHutSchem, reconcileInfra, cleanupHutInterior, repairHutStructure, recallAndReach, maintainHut, maintainHome,
   secureBase, secureBaseGate: hutModel.secureBaseGate,
   sealHomeDescents, sealDescentsGate: hutModel.sealDescentsGate,
   worldTidy, litterSignature: hutModel.litterSignature

@@ -556,8 +556,11 @@ bot.on('spawn', () => {
       // 2) ESTABLISH THE SPAWN BED as its own survival priority whenever the anchor is still
       // suspect after the go-home step (creeper-broken bed near home, or recoverHome fell short
       // of re-asserting). This is what actually ENDS the carousel, so it must NOT wait for a
-      // rare idle camp pass or a build to resume. If recoverHome already re-anchored, rememberBed
-      // cleared the suspect flag and this no-ops (no double trek).
+      // rare idle camp pass or a build to resume. If recoverHome re-anchored WITH SERVER
+      // EVIDENCE (a granted sleep / the set_spawn message) rememberBed cleared the suspect flag
+      // and this no-ops. #110: an UNCONFIRMED day-click no longer clears it - because it never
+      // actually moved the spawn (live: a "restored" anchor still respawned the bot 462b away),
+      // so this rung correctly still runs and the note reports "not fixed this time".
       if (provision.isSpawnSuspect && provision.isSpawnSuspect()) {
         note('(respawn) spawn anchor still WRONG after go-home - fixing the bed/spawn as a survival priority')
         try {

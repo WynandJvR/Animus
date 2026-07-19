@@ -1771,13 +1771,19 @@ async function handle (bot, line, opts = {}) {
       }
       if (bot.entity.position.distanceTo(bed.position) > 3) { try { await gotoTimed(bot, new goals.GoalNear(bed.position.x, bed.position.y, bed.position.z, 2), 30000) } catch {} }
       try { await bot.sleep(bed) } catch (e) {
-        // Can't sleep now (daytime / mobs) - but USING the bed still sets the respawn
-        // point in modern MC, which is usually what the operator wants ("set your spawn
-        // there"). Do that instead of just failing.
-        try { await bot.activateBlock(bed); provision.rememberBed(bed.position); return `can't sleep now (${e.message}) - but i set my spawn at this bed` } catch {}
+        // Can't sleep now (daytime / mobs). The old code clicked the bed anyway and told the
+        // operator "i set my spawn at this bed" - a claim it had no evidence for. PROVEN FALSE
+        // LIVE 2026-07-20: after exactly that line the bot died and respawned 462 blocks away
+        // at world origin. Day-clicking sets NOTHING on this server. Still click (it costs
+        // nothing and the bed is worth remembering), but report what the SERVER confirmed.
+        try {
+          const a = await provision.assertSpawnOn(bot, bed, { allowUnconfirmed: true, say })
+          if (a.ok && a.how !== 'unconfirmed') return `can't sleep now (${e.message}) - but i set my spawn at this bed`
+          if (a.ok) return `can't sleep now (${e.message}) - i clicked the bed and i'll remember it, but the server did NOT move my spawn; i'll set it properly when i sleep here tonight`
+        } catch {}
         return `can't sleep: ${e.message}`
       }
-      provision.rememberBed(bed.position) // bed memory: nights head here first from now on
+      provision.rememberBed(bed.position, { confirmed: true }) // a granted sleep IS the server evidence
       return 'sleeping (spawn set here)'
     }
     case 'fish': {
@@ -2626,7 +2632,10 @@ async function autoBuild (bot, schem, at, opts = {}) {
                     try { await provision.ensureHutApron(bot, hutAt, { isStopped, say }) } catch (e) { dbg('camp: apron fill failed (' + e.message + ')') }
                     try { await handle(bot, 'collect') } catch {}
                     const bedCell = findCell(/_bed$/)
-                    if (bedCell) { const bb = bot.blockAt(bedCell); if (bb && /_bed$/.test(bb.name)) { try { await bot.activateBlock(bb); provision.rememberBed(bedCell) } catch {} } }
+                    // #110: evidence or no claim - assertSpawnOn is the one primitive allowed
+                    // to record a spawn. A post-rebuild bot has no proven anchor, so an
+                    // unconfirmed click is still recorded, but recorded as unconfirmed.
+                    if (bedCell) { const bb = bot.blockAt(bedCell); if (bb && /_bed$/.test(bb.name)) { try { await provision.assertSpawnOn(bot, bb, { allowUnconfirmed: true, say }) } catch {} } }
                     try { await handle(bot, 'remember hut') } catch {}
                   }
                 } finally {

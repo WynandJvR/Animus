@@ -33,7 +33,7 @@ const { loadWorldMem, saveWorldMem, listInfra, rememberInfra, recallInfra, known
   rememberBed, forgetBed, markBedUnusable, bedHeld, setSpawnSuspect, isSpawnSuspect } = worldMemory
 const provHut = require('./provision-hut.js')
 const { hutAnchor, insideOwnStructure, hasSolidCeiling, ownHutAt, onHutApron, maintainHome,
-  ensureHutBed, stepOffApron, bedWellPlaced } = provHut
+  ensureHutBed, stepOffApron, bedUsable, assertSpawnOn } = provHut
 const provShelter = require('./provision-shelter.js')
 const { isSheltering, shelterNeeded, nightStuck, nightRestWanted, digInForNight, underArmored,
   lowHpCalm, inWaterNow, ensureAshore, pickOpenSkyCell, shelterSite, _sheltering } = provShelter
@@ -593,6 +593,12 @@ async function restUntilSafe (bot, opts = {}) {
 
 function isResting () { return _resting || _sheltering }
 
+// Can the server grant a sleep RIGHT NOW? A pure world-condition read (the same window
+// sleepInBedHere enforces) - the condition gate the unconfirmed-spawn re-assert waits on.
+function sleepableNow (bot) {
+  return ((bot.thunderState || 0) > 0) || !!(bot.time && bot.time.timeOfDay >= 12542 && bot.time.timeOfDay <= 23458)
+}
+
 async function sleepInBedHere (bot, { say = () => {}, isStopped = () => false } = {}) {
   const mcData = require('minecraft-data')(bot.version)
   const bedIds = Object.values(mcData.blocksByName).filter(b => /_bed$/.test(b.name)).map(b => b.id)
@@ -642,7 +648,7 @@ async function sleepInBedHere (bot, { say = () => {}, isStopped = () => false } 
     try {
       if (bot.entity.position.distanceTo(bed.position) > 2.5) { try { await gotoWithTimeout(bot, new goals.GoalNear(bed.position.x, bed.position.y, bed.position.z, 2), 20000) } catch {} }
       await bot.sleep(bed)
-      rememberBed(bed.position) // sleeping re-arms the spawn - keep the memory fresh
+      rememberBed(bed.position, { confirmed: true }) // a GRANTED sleep is server evidence: the spawn really moved here
       say('sleeping till morning')
       dbg('nightRest: asleep in bed at ' + bed.position.toString())
       while (bot.isSleeping && isNight(bot) && !isStopped()) { await new Promise(r => setTimeout(r, 2000)) }
@@ -810,18 +816,28 @@ async function ensureSpawnBed (bot, opts = {}) {
     const bb0 = bot.blockAt(new Vec3(bed.x, bed.y, bed.z))
     const d0 = Math.hypot(bed.x - bot.entity.position.x, bed.z - bot.entity.position.z)
     if (bb0 && /_bed$/.test(bb0.name)) {
-      // A bed that STANDS is not automatically a bed we can stand behind. #107b: the first
-      // laid bed landed on the hut wall crest (server chose the orientation; the unvalidated
-      // head cell hung over air). Judge the real footprint; reclaim a bad one when it is in
-      // reach and re-lay it, rather than anchoring spawn to something absurd.
-      const v0 = bedWellPlaced(bot, new Vec3(bed.x, bed.y, bed.z))
-      if (v0.ok) return R(true, 'stood', 'anchor set and the bed still stands at ' + bed.x + ',' + bed.z)
-      if (d0 <= 8) {
-        dbg('spawn: the anchored bed is badly placed (' + v0.why + ') - reclaiming it to re-lay')
-        try { await bot.dig(bb0) } catch (e) { dbg('spawn: could not reclaim the bad bed (' + e.message + ')') }
-        try { await P().collectDrops(bot, 3) } catch (e) { dbg('spawn: collectDrops after reclaim failed (' + e.message + ')') }
-        forgetBed()
-      } else return R(true, 'stood', 'anchor set; the bed at ' + bed.x + ',' + bed.z + ' is badly placed (' + v0.why + ') but ' + Math.round(d0) + 'b off - re-laying when closer')
+      // #110: a standing anchored bed is NEVER touched here - UGLY BEATS ABSENT. This rung
+      // answers a SAFETY question ("do I have a working anchor?"), and the quality judgment
+      // that used to live here turned an aesthetic defect into a survival action: dig ->
+      // forget -> hope to re-lay, executed from a 45s background timer whose caller ignores
+      // failure verdicts. It traded a working anchor for none (live 2026-07-19 21:09) and the
+      // bot spent the night respawning hundreds of blocks away. Quality is maintenance's
+      // business now (provision-hut.upgradeBedPlacement), and only via a COMPLETED swap.
+      const v0 = bedUsable(bot, new Vec3(bed.x, bed.y, bed.z)) // pure reads, log-only
+      if (!v0.ok) dbg('spawn: the anchor at ' + bed.x + ',' + bed.z + ' is ugly (' + v0.why + ') - KEEPING it; maintenance swaps it when a full swap can complete')
+      // A STANDING BED IS NOT A GRANTED SPAWN. Proven live 2026-07-20: a day-clicked bed
+      // reported "i set my spawn at this bed" and the next death respawned the bot 462b away
+      // at world origin - day-clicking sets nothing on this server, only a granted sleep does.
+      // So when the record is unconfirmed we re-assert AT THE NEXT LEGAL OPPORTUNITY. The gate
+      // is the world's own sleepability condition (night or thunder), never a timer: in
+      // daylight there is nothing to retry, so we say so honestly and wait for the condition.
+      if (!bed.confirmed && sleepableNow(bot)) {
+        dbg('spawn: the bed at ' + bed.x + ',' + bed.z + ' stands but the server never confirmed the spawn - it is sleepable NOW, re-asserting')
+      } else {
+        const r0 = R(true, 'stood', 'the bed still stands at ' + bed.x + ',' + bed.z + (bed.confirmed ? ' and the server confirmed the spawn' : ' but the server never confirmed the spawn - re-asserting at nightfall'))
+        r0.confirmed = !!bed.confirmed
+        return r0
+      }
     }
     if (!bb0 && d0 > 48) return R(true, 'stood', 'anchor set; the bed is ' + Math.round(d0) + 'b off, out of read range')
     dbg('spawn: the bed we anchored on no longer reads as a bed - re-anchoring')
@@ -883,7 +899,11 @@ async function ensureSpawnBed (bot, opts = {}) {
   }
   if (!bb) return R(false, 'failed', 'no bed to anchor on and nothing could be acquired')
 
-  // ASSERT: sleeping sets spawn at night; on this server a day-time right-click sets it too.
+  // ASSERT. "On this server a day-time right-click sets it too" was believed for months and is
+  // FALSE - disproven live 2026-07-20 (day-click, "i set my spawn at this bed", then a death
+  // respawning 462b away at world origin). Only a granted SLEEP or the server's own set_spawn
+  // message is evidence, so assertSpawnOn decides, not us. We still click in daylight: it costs
+  // nothing, and the bed is worth recording even when the spawn did not move.
   if (bot.entity.position.distanceTo(bb.position) > 2.5) {
     try {
       const nav = require('./navigate.js') // door-assist: the bed lives indoors
@@ -892,9 +912,18 @@ async function ensureSpawnBed (bot, opts = {}) {
   }
   try {
     if (isNight(bot) && await sleepInBedHere(bot, opts)) return R(true, how || 'stood', 'slept in the bed - spawn set at ' + bb.position.toString())
-    await bot.activateBlock(bb)
-    rememberBed(bb.position)
-    return R(true, how || 'stood', 'spawn asserted at the bed ' + bb.position.toString())
+    // #110: activateBlock RESOLVING proves the click, not that the server set anything.
+    // assertSpawnOn is the one primitive allowed to write the claim, and it writes what it
+    // can prove. allowUnconfirmed here because this rung runs exactly when no working anchor
+    // is proven - an unconfirmed bed beats none, provided memory says so honestly.
+    const a = await assertSpawnOn(bot, bb, { allowUnconfirmed: true, say: opts.say })
+    if (!a.ok) return R(false, 'failed', 'could not set spawn on the bed at ' + bb.position.toString() + ' (' + a.why + ')')
+    const confirmed = a.how !== 'unconfirmed'
+    const r1 = R(true, how || 'stood', confirmed
+      ? 'spawn asserted at the bed ' + bb.position.toString() + ' (' + a.how + ')'
+      : 'the bed at ' + bb.position.toString() + ' is mine and standing, but the server did NOT confirm a spawn (day-clicking sets nothing here) - re-asserting at nightfall')
+    r1.confirmed = confirmed
+    return r1
   } catch (e) { return R(false, 'failed', 'bed use failed (' + e.message + ')') }
 }
 

@@ -443,7 +443,28 @@ function clearSearched (item, pos) {
 
 // ---- bed + spawn-suspect memory ----
 // keys off.
-function rememberBed (pos) { const m = loadWorldMem(); m.bed = { x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z), at: Date.now() }; m.bedAssertAt = Date.now(); delete m.spawnSuspect; saveWorldMem(); _bedHold = { until: 0, key: '' } }
+// #110: the record now carries PROVENANCE. `confirmed` is true only when the SERVER was
+// observed to set the spawn (a granted sleep, or the set_spawn game message) - see
+// provision-hut.assertSpawnOn, the one primitive allowed to claim a spawn. An unconfirmed
+// record is still a record (an unconfirmed anchor beats none) but it never claims proof.
+// PROVEN LIVE 2026-07-20: the bot day-clicked a bed, said "i set my spawn at this bed", and
+// 17 minutes later died and respawned 462 BLOCKS AWAY at world origin. Day-clicking does NOT
+// set spawn on this server; only a granted SLEEP (or the server's own set_spawn message) does.
+// So the two facts this function used to smear together are now kept apart:
+//   m.bed          - WHERE MY BED IS. Always written. Useful even unconfirmed (nights head
+//                    there, the ladder can find it) and it carries its own provenance.
+//   m.spawnSuspect - "a respawn proved the anchor wrong". A click we cannot prove worked
+//                    CANNOT clear that proof; only server evidence can. Clearing it on an
+//                    unconfirmed click is exactly how the bot convinced itself home was solved.
+function rememberBed (pos, meta = {}) {
+  const m = loadWorldMem()
+  const confirmed = meta.confirmed === true
+  m.bed = { x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z), at: Date.now(), confirmed }
+  m.bedAssertAt = Date.now()
+  if (confirmed) delete m.spawnSuspect
+  saveWorldMem()
+  _bedHold = { until: 0, key: '' }
+}
 function knownBed () { return loadWorldMem().bed || null }
 function forgetBed () { const m = loadWorldMem(); delete m.bed; saveWorldMem(); _bedHold = { until: 0, key: '' } }
 

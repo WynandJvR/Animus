@@ -89,7 +89,7 @@ function ok (cond, label) { eq(!!cond, true, label) }
 // The split is only safe while that surface is unchanged AND not a stale copy.
 {
   const pub = Object.keys(provision).filter(k => k !== '__siblings')
-  eq(pub.length, 170, 'facade: provision.js still exports exactly 170 public names') // +6: bedInPack, bedCandidates, acquireBed, placeBedNear, bedFootprint, bedWellPlaced (#107 SPAWN_BED); +2: secureBase, secureBaseGate (#67 SECURE_BASE); +2: ironGrindMinedReal, resetIronGrindMined (IRON_KEYSTONE); +1: deathSpotExclusion (#85 DEATH_SPOT_COST); +3: sealHomeDescents, sealDescentsGate, inBuildZone (#89 SEAL_HOME_DESCENTS); +2: worldTidy, litterSignature (#94 WORLD_TIDY)
+  eq(pub.length, 172, 'facade: provision.js still exports exactly 172 public names') // +6: bedInPack, bedCandidates, acquireBed, placeBedNear, bedFootprint, bedWellPlaced (#107 SPAWN_BED); +2: secureBase, secureBaseGate (#67 SECURE_BASE); +2: ironGrindMinedReal, resetIronGrindMined (IRON_KEYSTONE); +1: deathSpotExclusion (#85 DEATH_SPOT_COST); +3: sealHomeDescents, sealDescentsGate, inBuildZone (#89 SEAL_HOME_DESCENTS); +2: worldTidy, litterSignature (#94 WORLD_TIDY); -2 +4: furnishHut + bedWellPlaced OUT, bedUsable + assertSpawnOn + ensureBedSite + upgradeBedPlacement IN (#110 ANCHOR_INVARIANT)
 
   const moved = [
     [worldMemory, ['listInfra', 'rememberInfra', 'forgetInfra', 'recordWedge', 'listWedges', 'ownInfraAnchors',
@@ -97,7 +97,7 @@ function ok (cond, label) { eq(!!cond, true, label) }
       'markBedUnusable', 'bedHeld', 'setSpawnSuspect', 'isSpawnSuspect', 'gearupState', 'gearupResult']],
     [provCore, ['inventoryCounts', 'toolForBlock', 'collectDrops', 'isNight', 'canBreakNaturally']],
     [provHut, ['hutAnchor', 'ownHutAt', 'onHutApron', 'insideOwnStructure', 'hasSolidCeiling',
-      'maintainHome', 'maintainHut', 'repairHutStructure', 'furnishHut', 'ensureHutApron', 'ensureHutBed',
+      'maintainHome', 'maintainHut', 'repairHutStructure', 'ensureHutApron', 'ensureHutBed',
       'worldTidy', 'litterSignature', 'bedInPack', 'bedCandidates', 'acquireBed', 'placeBedNear']],
     [provFarm, ['ensureWheatFarm', 'tendWheatFarm', 'hasStandingFarm', 'WHEAT_FARM_TARGET']],
     [provMining, ['branchMine', 'digStaircaseDown', 'climbToSurface', 'pillarUpTo']],
