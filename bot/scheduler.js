@@ -147,11 +147,21 @@ function nearestReachGrave (s, band, urgentBand) {
 }
 // The compound-degraded signature (DESIGN §2.4 step 3 / §5 opening): a state bad enough that a
 // single producer won't do - run the ladder, which sequences R0..R5 and re-plans.
+// #79 DEGRADED_GRAVE_REACHABLE (default on): the naked+grave clause counts only a grave the
+// ladder's R1 can actually FETCH (worthwhile, non-dangerous, within the ladder band). The raw
+// graves.length pinned the ladder for 95min live (03:0xZ): a far/despawned-but-unretrieved
+// LEDGER grave kept degraded true at hp20/food20/armor0, the ladder looped R2>R5 hold with no
+// R1 planned (out of band), and every other job (farm/bootstrap/iron) starved. Naked with no
+// reachable grave is bootstrapNeed('armor')'s job, not a compound-degraded state. Flag =0 ->
+// today's raw-count clause byte-for-byte.
 function isDegraded (s) {
   const graves = gravesOf(s)
+  const graveHook = process.env.DEGRADED_GRAVE_REACHABLE !== '0'
+    ? !!nearestReachGrave(s, Number(process.env.GRAVE_NEAR_LADDER || 32), Number(process.env.GRAVE_URGENT_DIST || 96))
+    : graves.length > 0
   return (s.hp != null && s.hp <= 6) ||
          (s.food != null && s.food <= 6) ||
-         (s.armorPieces === 0 && graves.length > 0) ||
+         (s.armorPieces === 0 && graveHook) ||
          ((s.deathsRecent || 0) >= 2)
 }
 

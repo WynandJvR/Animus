@@ -879,5 +879,27 @@ t('(#41 P0.4) admissibleUnderLatch: recovery-class cmds pass under the latch, el
   finally { if (old == null) delete process.env.RESILIENT_RECOVERY; else process.env.RESILIENT_RECOVERY = old }
 }))
 
+t('(#79) isDegraded: a naked bot with only an OUT-OF-BAND grave is NOT compound-degraded (flag on); raw-count under flag=0', () => {
+  const prevFlag = process.env.DEGRADED_GRAVE_REACHABLE
+  const prevBand = process.env.GRAVE_NEAR_LADDER
+  delete process.env.DEGRADED_GRAVE_REACHABLE // default = flag ON
+  delete process.env.GRAVE_NEAR_LADDER        // default band 32
+  try {
+    const farGrave = snap({ armorPieces: 0, graves: [{ dist: 70, value: 5, dangerous: false }] })
+    const nearGrave = snap({ armorPieces: 0, graves: [{ dist: 10, value: 5, dangerous: false }] })
+    assert.strictEqual(S.isDegraded(farGrave), false, 'flag on: far grave does not pin the ladder')
+    assert.strictEqual(S.isDegraded(nearGrave), true, 'flag on: reachable grave still compound-degraded')
+    // vitals clauses unaffected by the flag
+    assert.strictEqual(S.isDegraded(snap({ hp: 5, graves: [] })), true, 'low hp still degraded')
+    assert.strictEqual(S.isDegraded(snap({ food: 5, graves: [] })), true, 'low food still degraded')
+    assert.strictEqual(S.isDegraded(snap({ deathsRecent: 2, graves: [] })), true, 'death ratchet still degraded')
+    process.env.DEGRADED_GRAVE_REACHABLE = '0'
+    assert.strictEqual(S.isDegraded(farGrave), true, 'flag off: raw graves.length pins exactly as today')
+  } finally {
+    if (prevFlag == null) delete process.env.DEGRADED_GRAVE_REACHABLE; else process.env.DEGRADED_GRAVE_REACHABLE = prevFlag
+    if (prevBand == null) delete process.env.GRAVE_NEAR_LADDER; else process.env.GRAVE_NEAR_LADDER = prevBand
+  }
+})
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall scheduler tests passed')
 process.exit(failures ? 1 : 0)
