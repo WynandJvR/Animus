@@ -92,7 +92,19 @@ async function collectDrops (bot, radius = 10, { patience = 1 } = {}) {
       // the water edge). The old early-return abandoned those drops the instant nothing was in
       // range after 250ms - the "harvested N -> wheat=0" loss. Wait + re-look `patience` times
       // before concluding there's genuinely nothing here.
-      if (empties++ >= patience) return
+      if (empties++ >= patience) {
+        // #82c: before concluding, say what we're LEAVING - the harvest keeps losing ~60% of drops
+        // with zero goto failures logged, so either the scan never sees them (out of `radius`) or
+        // they sit somewhere specific (water channel?). This names the cells for the next fix.
+        if (process.env.COLLECT_ROBUST !== '0') {
+          try {
+            const me = bot.entity.position
+            const left = Object.values(bot.entities || {}).filter(e => e && e.position && e.name === 'item' && e.position.distanceTo(me) < radius + 12)
+            if (left.length) dbg('  collect: sweep ended with ' + left.length + ' item(s) still visible: ' + left.slice(0, 5).map(e => Math.round(e.position.x) + ',' + Math.round(e.position.y) + ',' + Math.round(e.position.z) + (unreachable.has(e.id) ? '(unreach)' : '')).join(' '))
+          } catch {}
+        }
+        return
+      }
       await new Promise(r => setTimeout(r, 300))
       continue
     }
