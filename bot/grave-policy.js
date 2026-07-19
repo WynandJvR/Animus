@@ -146,4 +146,22 @@ function graveLootVerdict ({ sawWindow, emptied, remaining, exhausted, freeSlots
   return { mark: false, kind: 'unopened' }
 }
 
-module.exports = { graveValue, graveWorthIt, graveUrgency, graveUrgencyRank, graveCompare, shouldChaseGrave, graveLootVerdict }
+// #85 DEATH_SPOT_COST - PURE: the per-block step cost near recent death spots. The cave openings
+// around the farm (432-442, z21-32, y58-62) killed 5 bots in ~3h (and swallowed the first-ever
+// iron boots): routes must BEND AROUND the columns that keep eating the bot. Cost-only (never a
+// wall) like the crop/water exclusions; the y-window reaches UP past the death cell so the
+// surface cells directly over a cave death (where the bot actually falls in) are priced too.
+function deathSpotCost (p, spots, opts = {}) {
+  if (!p || !spots || !spots.length) return 0
+  const R = opts.radius != null ? opts.radius : 4
+  const UP = opts.up != null ? opts.up : 8
+  const DOWN = opts.down != null ? opts.down : 2
+  const COST = opts.cost != null ? opts.cost : 40
+  for (const s of spots) {
+    if (s && s.x != null && Math.abs(p.x - s.x) <= R && Math.abs(p.z - s.z) <= R &&
+        (p.y - s.y) <= UP && (s.y - p.y) <= DOWN) return COST
+  }
+  return 0
+}
+
+module.exports = { graveValue, graveWorthIt, graveUrgency, graveUrgencyRank, graveCompare, shouldChaseGrave, graveLootVerdict, deathSpotCost }

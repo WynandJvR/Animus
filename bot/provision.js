@@ -122,6 +122,7 @@ function gatherMovements (bot) {
   )
   try { const ex = cropExclusionStep(bot); if (ex && Array.isArray(m.exclusionAreasStep)) m.exclusionAreasStep.push(ex) } catch {} // FARM_NO_TRAMPLE: route AROUND our crop cells (cost-only)
   try { const px = cropPlaceExclusion(bot); if (px && Array.isArray(m.exclusionAreasPlace)) m.exclusionAreasPlace.push(px) } catch {} // NO_PLACE_ON_FARM (fix #17): never bridge/place on our own farmland
+  try { const dx = deathSpotExclusion(bot); if (dx && Array.isArray(m.exclusionAreasStep)) m.exclusionAreasStep.push(dx) } catch {} // #85 DEATH_SPOT_COST: route AROUND the cells that keep killing the bot (cost-only)
   return m
 }
 
@@ -141,6 +142,29 @@ function gatherMovements (bot) {
 function hazardStepExclusion (bot) {
   const sample = (x, y, z) => { try { const b = bot.blockAt(new Vec3(x, y, z)); return b && b.name } catch { return null } }
   return (block) => { const p = block && block.position; return p ? navProfile.hazardExclusion(p, sample) : 0 }
+}
+
+// #85 DEATH_SPOT_COST (default on): recent unretrieved death spots become expensive to WALK NEAR -
+// same cost-only closure pattern as the crop/water exclusions, wrapping the PURE
+// gravePolicy.deathSpotCost over the death ledger's live last-24h entries. The y-window reaches 8
+// UP from the death cell so the surface directly over a cave death (where the bot falls in) is
+// priced too. DEATH_SPOT_COST=0 -> null (no exclusion), byte-for-byte.
+function deathSpotExclusion (bot) {
+  if (process.env.DEATH_SPOT_COST === '0') return null
+  let led = null
+  try { led = require('./grave.js').ledger() } catch { return null }
+  if (!led || !led.length) return null
+  const now = Date.now()
+  const spots = led.filter(d => d && d.x != null && !d.retrieved && now - (d.at || 0) < 24 * 3600 * 1000)
+  if (!spots.length) return null
+  const opts = {
+    radius: Number(process.env.DEATH_SPOT_R || 4),
+    up: Number(process.env.DEATH_SPOT_UP || 8),
+    down: Number(process.env.DEATH_SPOT_DOWN || 2),
+    cost: Number(process.env.DEATH_SPOT_COST_VAL || 40)
+  }
+  const gravePolicy = require('./grave-policy.js')
+  return (block) => { const p = block && block.position; return p ? gravePolicy.deathSpotCost(p, spots, opts) : 0 }
 }
 
 // WATER_SAFE (task #45): the DEEP-water STEP exclusion closure - sibling of hazardStepExclusion,
@@ -230,6 +254,7 @@ function wildTerrainMovements (bot) {
   })
   // S6 FARM_NO_TRAMPLE parity (provision.js:71 pattern) - route AROUND our crop cells (cost-only).
   try { const ex = cropExclusionStep(bot); if (ex && Array.isArray(m.exclusionAreasStep)) m.exclusionAreasStep.push(ex) } catch {}
+  try { const dx = deathSpotExclusion(bot); if (dx && Array.isArray(m.exclusionAreasStep)) m.exclusionAreasStep.push(dx) } catch {} // #85 DEATH_SPOT_COST parity
   // NAV Phase B: price lava (+lava-adjacent pool edges) so A* routes AROUND it (cost-only, never
   // a forbid). Additive to exclusionAreasStep; flag-gated so =0 is byte-for-byte today.
   try { if (NAV_HAZARD_LEGS && Array.isArray(m.exclusionAreasStep)) m.exclusionAreasStep.push(hazardStepExclusion(bot)) } catch {}
@@ -4041,7 +4066,7 @@ const HUT_FURNITURE = /chest$|barrel$|furnace$|smoker$|crafting_table$|_bed$|_do
 // (chestCounts moved to provision-bank.js)
 
 module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, smeltFuelPlan, fuelBankWithdrawAmount, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, breachDryPocket, toolForBlock, migrateChestInto, consolidateBank, furnishHut, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, secureBase, secureBaseGate, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, boundedHold, recoverFromDegraded, isRecoveringDegraded, deadlockResetDue, deadlockResetState, pickOpenSkyCell, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, markBedUnusable, bedHeld, gearupState, gearupResult, gearupShouldArmBackoff, proactiveGearupGate, ironGrindMinedReal, resetIronGrindMined, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, noteWaterCrossing, lonelyFurnace, consolidateFurnaces, litterPatrol, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, planTrekRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
-  maintenancePass, isMaintaining, stopMaintenance, _setMaintaining, courierFoodToBank, safekeepSweep, spareKitToBank, recoveryReadyNow, cropExclusionStep, cropPlaceExclusion, farmFootprintHas, hazardStepExclusion, waterStepExclusion, deepWaterUnderfoot, gatherSeedsNear,
+  maintenancePass, isMaintaining, stopMaintenance, _setMaintaining, courierFoodToBank, safekeepSweep, spareKitToBank, recoveryReadyNow, cropExclusionStep, cropPlaceExclusion, farmFootprintHas, hazardStepExclusion, waterStepExclusion, deathSpotExclusion, deepWaterUnderfoot, gatherSeedsNear,
   activeJobInfo, stopSurvivalJob, escalateFoodFloor, _foodFloorState,
   wildTerrainMovements, trekMovements, DIGGABLE_NATURAL, STRUCTURE_RE, canBreakNaturally,
   collectDrops, huntSpiderForString, ensureFishingRod, isBankStand,

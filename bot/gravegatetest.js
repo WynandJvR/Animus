@@ -416,5 +416,19 @@ const U = C.graveUrgency
   if (savedD != null) process.env.GRAVE_DESPAWN_S = savedD; else delete process.env.GRAVE_DESPAWN_S
 }
 
+// #85 DEATH_SPOT_COST - pure box math: cost near a death spot, up-window covers the surface
+// ABOVE a cave death (where the bot falls in), 0 outside the box.
+{
+  const GP = require('./grave-policy.js')
+  const spots = [{ x: 441, y: 59, z: 32 }]
+  eq(GP.deathSpotCost({ x: 441, y: 59, z: 32 }, spots), 40, '#85: at the death cell -> cost')
+  eq(GP.deathSpotCost({ x: 443, y: 66, z: 30 }, spots), 40, '#85: surface cell over the cave death (y+7, xz within 4) -> cost')
+  eq(GP.deathSpotCost({ x: 441, y: 68, z: 32 }, spots), 0, '#85: above the up-window (y+9) -> 0')
+  eq(GP.deathSpotCost({ x: 441, y: 55, z: 32 }, spots), 0, '#85: below the down-window (y-4) -> 0')
+  eq(GP.deathSpotCost({ x: 447, y: 59, z: 32 }, spots), 0, '#85: outside the xz radius -> 0')
+  eq(GP.deathSpotCost({ x: 441, y: 59, z: 32 }, []), 0, '#85: no spots -> 0')
+  eq(GP.deathSpotCost({ x: 441, y: 59, z: 32 }, spots, { cost: 60 }), 60, '#85: cost override')
+}
+
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

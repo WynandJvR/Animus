@@ -477,6 +477,7 @@ function travelMovements (bot) {
     if ('scafoldingBlocks' in m) m.scafoldingBlocks = ids
   } catch { /* mcData not ready - fall back to no bridging (routes around) */ }
   try { const ex = provision.cropExclusionStep && provision.cropExclusionStep(bot); if (ex && Array.isArray(m.exclusionAreasStep)) m.exclusionAreasStep.push(ex) } catch {} // FARM_NO_TRAMPLE: treks bend around our crop cells (cost-only, never a wall/dig)
+  try { const dx = provision.deathSpotExclusion && provision.deathSpotExclusion(bot); if (dx && Array.isArray(m.exclusionAreasStep)) m.exclusionAreasStep.push(dx) } catch {} // #85 DEATH_SPOT_COST: treks bend around the cells that keep killing the bot (cost-only)
   try { const px = provision.cropPlaceExclusion && provision.cropPlaceExclusion(bot); if (px && Array.isArray(m.exclusionAreasPlace)) m.exclusionAreasPlace.push(px) } catch {} // NO_PLACE_ON_FARM (fix #17): never bridge/place on our own farmland
   // NAV Phase B: price lava (+lava-adjacent pool edges) so surface-trek legs route AROUND it at
   // plan time (cost-only, never a forbid). Flag-gated so NAV_HAZARD_LEGS=0 is byte-for-byte today.
