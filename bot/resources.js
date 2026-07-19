@@ -62,6 +62,25 @@ function chestFailed (bot, e, err) {
   // chest's record and deregistered it (live, 05:27). Far failure = the BOT's nav problem.
   try {
     if (bot && bot.entity && Math.hypot(e.x - bot.entity.position.x, e.y - bot.entity.position.y, e.z - bot.entity.position.z) > 12) {
+      // #104 CHEST_FAR_STRIKE (default on): "far = the bot's fault" was absolute, so a chest
+      // BURIED in an unreachable pocket (self-placed at y53 while dying, live 13:36 local) anchored
+      // the bank and got approach-hammered forever - every failure counted 'from afar' because the
+      // approach can never get close to a buried chest. 6 consecutive far-failures earn the normal
+      // cooldown (never the 5-strike deregistration from afar); any successful open still clears.
+      if (process.env.CHEST_FAR_STRIKE !== '0') {
+        const c2 = loadCache(); const k2 = cellKey(e)
+        const e2 = c2[k2] = c2[k2] || { counts: {}, at: 0 }
+        e2.farFails = (e2.farFails || 0) + 1
+        if (e2.farFails >= 6) {
+          const mins = Math.min(60, 2 * Math.pow(2, (e2.fails || 0)))
+          e2.failUntil = Date.now() + mins * 60000
+          e2.farFails = 0
+          saveCache()
+          dbg('chest at ' + k2 + ' unreachable from afar 6x in a row (buried/blocked?) - cooling it off ' + mins + ' min')
+          return
+        }
+        saveCache()
+      }
       dbg('chest at ' + cellKey(e) + ' unreached from afar (' + msg + ') - not the chest\'s fault, no strike')
       return
     }
@@ -83,7 +102,7 @@ function chestFailed (bot, e, err) {
 }
 function chestWorked (e) {
   const ent = loadCache()[cellKey(e)]
-  if (ent && (ent.fails || ent.failUntil)) { delete ent.fails; delete ent.failUntil; saveCache() }
+  if (ent && (ent.fails || ent.failUntil || ent.farFails)) { delete ent.fails; delete ent.failUntil; delete ent.farFails; saveCache() } // #104: success clears the far-fail streak too
 }
 function chestCoolingOff (e) {
   const ent = loadCache()[cellKey(e)]
