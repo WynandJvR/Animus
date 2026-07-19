@@ -77,10 +77,12 @@ function gotoWithTimeout (bot, goal, ms) {
 async function collectDrops (bot, radius = 10, { patience = 1 } = {}) {
   await new Promise(r => setTimeout(r, 250)) // let freshly-broken drops settle/land
   let empties = 0
+  const unreachable = new Set() // #82: items a goto failed on - skip them, never abort the sweep
   for (let n = 0; n < 20; n++) {
     let target = null; let best = radius
     for (const e of Object.values(bot.entities || {})) {
       if (!e || !e.position || e.name !== 'item') continue
+      if (unreachable.has(e.id)) continue
       const d = e.position.distanceTo(bot.entity.position)
       if (d < best) { best = d; target = e }
     }
@@ -95,7 +97,16 @@ async function collectDrops (bot, radius = 10, { patience = 1 } = {}) {
       continue
     }
     empties = 0
-    try { await gotoWithTimeout(bot, new goals.GoalNear(target.position.x, target.position.y, target.position.z, 0), 10000) } catch { return }
+    if (process.env.COLLECT_ROBUST !== '0') {
+      // #82 COLLECT_ROBUST: (a) range 1, not 0 - farm drops sit ON FARMLAND, which the
+      // anti-trample movement exclusion refuses to path INTO, so every range-0 goto to a farm
+      // drop failed; standing in the ADJACENT cell is inside the pickup magnet and tramples
+      // nothing. (b) a failed goto skips THAT item and keeps sweeping - the old catch{return}
+      // let one unpathable drop abandon the whole field (live: harvested 22 -> wheat 4).
+      try { await gotoWithTimeout(bot, new goals.GoalNear(target.position.x, target.position.y, target.position.z, 1), 10000) } catch { unreachable.add(target.id); continue }
+    } else {
+      try { await gotoWithTimeout(bot, new goals.GoalNear(target.position.x, target.position.y, target.position.z, 0), 10000) } catch { return }
+    }
     await new Promise(r => setTimeout(r, 250))
   }
 }
