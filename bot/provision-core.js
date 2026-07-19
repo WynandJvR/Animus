@@ -103,7 +103,7 @@ async function collectDrops (bot, radius = 10, { patience = 1 } = {}) {
       // drop failed; standing in the ADJACENT cell is inside the pickup magnet and tramples
       // nothing. (b) a failed goto skips THAT item and keeps sweeping - the old catch{return}
       // let one unpathable drop abandon the whole field (live: harvested 22 -> wheat 4).
-      try { await gotoWithTimeout(bot, new goals.GoalNear(target.position.x, target.position.y, target.position.z, 1), 10000) } catch { unreachable.add(target.id); continue }
+      try { await gotoWithTimeout(bot, new goals.GoalNear(target.position.x, target.position.y, target.position.z, 1), 10000) } catch (e) { dbg('  collect: goto drop at ' + Math.round(target.position.x) + ',' + Math.round(target.position.y) + ',' + Math.round(target.position.z) + ' failed (' + e.message + ') - skipping it'); unreachable.add(target.id); continue }
     } else {
       try { await gotoWithTimeout(bot, new goals.GoalNear(target.position.x, target.position.y, target.position.z, 0), 10000) } catch { return }
     }
