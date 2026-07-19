@@ -115,8 +115,18 @@ t('(c) maintain surfaces only with no progress job + no survival need, and never
 // Pinned to FOOD_RESERVE_FIRST=0 so these assert the #65 (armor-first) order regardless of the
 // ambient default (the #74 block below owns the reserve-first order).
 function withBootstrap (fn) { return withEnv('BOOTSTRAP_PRIORITY', '1', () => withEnv('FOOD_RESERVE_FIRST', '0', fn)) }
-t('(#65) bootstrapNeed: healthy + naked -> "armor" (no home required)', () => withBootstrap(() => {
-  assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: false })), 'armor')
+t('(#65) bootstrapNeed: healthy + naked -> "armor" (no home REACHABLE, but a home EXISTS)', () => withBootstrap(() => {
+  // #103: armor still fires when a home exists but is momentarily unreachable (homeDist known)...
+  assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: false, homeDist: 60 })), 'armor')
+  // ...but a truly HOMELESS bot (no hut, no homeDist) bootstraps NOTHING - the build's camp step
+  // owns establishment (#102); the armor grind must not steal the body from it.
+  assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: false, homeDist: null })), null, '#103: homeless -> null')
+  {
+    const prev = process.env.BOOTSTRAP_NEEDS_HOME
+    process.env.BOOTSTRAP_NEEDS_HOME = '0'
+    assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: false, homeDist: null })), 'armor', '#103 flag off: homeless armor as before')
+    if (prev === undefined) delete process.env.BOOTSTRAP_NEEDS_HOME; else process.env.BOOTSTRAP_NEEDS_HOME = prev
+  }
 }))
 t('(#65) bootstrapNeed: armored + healthy + home + empty bank food -> "food"', () => withBootstrap(() => {
   assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 4, homeReachable: true, bankFoodPts: 0 })), 'food')

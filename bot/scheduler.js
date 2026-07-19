@@ -258,6 +258,13 @@ function submergedEscapeDue ({ flagOn, submerged, deep, wetHist, oxygen, oxygenR
 function bootstrapNeed (snapshot) {
   if (process.env.BOOTSTRAP_PRIORITY === '0') return null
   const s = snapshot || {}
+  // #103 BOOTSTRAP_NEEDS_HOME (default on): with NO home at all there is nothing to bootstrap
+  // AROUND - the build's CAMP step owns establishment (#102), and letting the homeless armor
+  // branch fire sent the bot deep-mining while its half-built hut stood unregistered and its
+  // food ran out (live 13:2xZ new land: food 8, zero edibles, y53, hut shell abandoned - the
+  // armor-maintenance job ping-ponged the body against the build's travel step for 1.5h).
+  // homeReachable false + no hut = homeless => null (the build/camp gets the body exclusively).
+  if (process.env.BOOTSTRAP_NEEDS_HOME !== '0' && !s.homeReachable && !(s.hutExists || s.homeDist != null)) return null
   const hp = s.hp != null ? s.hp : 20
   const food = s.food != null ? s.food : 20
   const fed = food >= Number(process.env.BOOTSTRAP_FED || 14)
