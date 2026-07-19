@@ -331,7 +331,10 @@ async function ensureDryHomeFarm (bot, home, hut, { isStopped = () => false, say
       }
       if (!ground || !farm.tillableBank(ground.name)) continue
       if (insideOwnStructure(bot, ground.position)) continue // never the hut structure itself (anti-grief)
-      out.push({ x: gx, z: gz, y: ground.position.y, flat: ground.position.y === floorY, block: ground })
+      // #87c: 'flat' = LEVELABLE (within 1 of the floor) - the leveling pass below flattens +-1 cells,
+      // so demanding y===floorY exactly rejected a perfectly workable gentle slope (live 07:30: 369
+      // tillable, flat 0.22 -> deferred; the hut sits on a mild hill).
+      out.push({ x: gx, z: gz, y: ground.position.y, flat: Math.abs(ground.position.y - floorY) <= 1, block: ground })
     }
     return out
   }
@@ -342,7 +345,10 @@ async function ensureDryHomeFarm (bot, home, hut, { isStopped = () => false, say
   // a rough/obstructed annulus is rejected so the caller can fall back to the legacy path. Expansion
   // skips the gate (the plot already stands) and just adds whatever flat cells remain.
   if (!expand) {
-    const sc = farm.scoreFarmSite({ tillable, flatFrac, distHome: 0, target: WHEAT_FARM_TARGET }, { distWeight: DIST_WEIGHT, minTillable: MIN_TILLABLE, minFlatFrac: FLAT_SITE ? FLAT_MIN : 0 })
+    // #87c: dry mode gets its OWN flat threshold (default 0.35, DRY_FLAT_MIN) - 'flat' already means
+    // levelable (+-1) and the bounded leveling pass handles the rest; the water path's 0.6 stays.
+    const DRY_FLAT_MIN = Number(process.env.DRY_FLAT_MIN || 0.35)
+    const sc = farm.scoreFarmSite({ tillable, flatFrac, distHome: 0, target: WHEAT_FARM_TARGET }, { distWeight: DIST_WEIGHT, minTillable: MIN_TILLABLE, minFlatFrac: FLAT_SITE ? DRY_FLAT_MIN : 0 })
     if (!sc.acceptable) { dbg('  wheat farm [dry]: annulus ' + NEAR_MIN + '-' + NEAR_MAX + 'b off the hut not acceptable (tillable ' + tillable + ', flat ' + flatFrac.toFixed(2) + ') - deferring to fallback'); return false }
   }
   const ownedCols = new Set(((m.wheatFarm && m.wheatFarm.cells) || []).map(c => c.x + ',' + c.z))
