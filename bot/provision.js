@@ -1357,6 +1357,16 @@ async function runGather (bot, item, count, opts = {}) {
   const home = opts.home || { x: Math.round(bot.entity.position.x), y: surfaceY, z: Math.round(bot.entity.position.z) }
   bot.pathfinder.setMovements(gatherMovements(bot)) // may punch through leaves + pillar up
   dbg('runGather', item, 'x' + count, 'surfaceY=' + surfaceY, 'home=' + home.x + ',' + home.z, 'at', bot.entity.position.floored().toString())
+  // #102b GATHER_SWEEP (default on): before LEAVING the roam area, tear down every registered
+  // scaffold this excursion placed - the opportunistic mid-gather sweep only cleans near the
+  // current spot, so climb towers at earlier trees stayed standing (operator: "cobblestone
+  // scaffolding all over"). Registry-driven (only own registered cells), bounded by the registry
+  // size, radius covers the whole roam fence. =0 -> today's leave-it behavior.
+  const sweepAfter = async (r) => {
+    if (process.env.GATHER_SWEEP === '0') return r
+    try { await scaffold.teardown(bot, { x: home.x, y: surfaceY, z: home.z }, { radius: Number(process.env.GATHER_SWEEP_R || 110), isStopped: opts.isStopped }) } catch (e) { dbg('runGather sweep failed (' + e.message + ')') }
+    return r
+  }
   // #64 §C DYNAMIC_FOOD: before a (possibly far) gather excursion, top up food to what the plan needs
   // (physical-state read: a gather that starts far from the hut sizes up; a near-home gather stays at
   // the home baseline - a no-op when already stocked). Mark the excursion (_foodPlanHint) so any
@@ -1370,7 +1380,7 @@ async function runGather (bot, item, count, opts = {}) {
     if (!(opts.isStopped && opts.isStopped())) { try { await topUpFoodForPlan(bot, gatherPlan, { home, isStopped: opts.isStopped }) } catch {} }
   }
   try {
-    return await gatherLoop(bot, item, count, { ...opts, surfaceY, home })
+    return await sweepAfter(await gatherLoop(bot, item, count, { ...opts, surfaceY, home })) // #102b: sweep own scaffold before leaving the roam area
   } finally {
     if (_dynFood) _setFoodPlanHint(_gatherHintPrev)
     // Back to the surface if we're below it (strip-mined down OR fell into a cave). Try

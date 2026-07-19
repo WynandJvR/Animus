@@ -3060,7 +3060,14 @@ async function resumeBuild (bot) {
   if (process.env.BOOTSTRAP_PRIORITY !== '0') {
     let bn = null
     try { bn = require('./scheduler.js').bootstrapNeed(await provision.schedulerState(bot)) } catch {}
-    if (bn) { dbg('resume: bootstrap needed (' + bn + ') - holding the build until survival infra exists (kept on disk)'); return { deferred: true, bootstrap: bn } }
+    // #102 CAMP_FIRST (default on): while NO hut exists, the build's own CAMP steps (hut/bed/bank)
+    // ARE the missing survival infra - holding the build on 'armor' held the SHELTER hostage to the
+    // iron grind (live 12:04Z: fresh land, half-built hut, bootstrap ran off to mine). Let the job
+    // through to run its camp; once the hut anchor registers, this hold re-applies before the
+    // castle placement phase exactly as designed. =0 -> hold on any bootstrap need as before.
+    const noHut = process.env.CAMP_FIRST !== '0' && !(provision.hutAnchor && provision.hutAnchor())
+    if (bn && !noHut) { dbg('resume: bootstrap needed (' + bn + ') - holding the build until survival infra exists (kept on disk)'); return { deferred: true, bootstrap: bn } }
+    if (bn && noHut) dbg('resume: bootstrap ' + bn + ' pending but NO HUT stands - resuming the build so its camp step establishes shelter first (#102)')
   }
   // #41 P5c anti-spiral: during a death SPIRAL, don't march the build back into a recent death
   // cluster (defer that leg; the build stays saved). Only fires under a real spiral (>=SPIRAL_N
