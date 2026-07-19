@@ -2624,7 +2624,19 @@ async function autoBuild (bot, schem, at, opts = {}) {
             //    fetch = the resource model: a missing piece gets WITHDRAWN or CRAFTED on the
             //    spot (it once begged players for a door while holding 109 planks + a table).
             const hutFetch = async (n, cnt) => { await resources.acquire(bot, n, cnt || 1, { near: hutAt, isStopped, say, batch: 32, planOpts: { primaryWood } }) }
-            const hr = await schematic.buildSurvival(bot, hutSchem, hutAt, { say, isStopped, restoreMovements: restore, clear: true, clearFurniture: true, fetch: hutFetch })
+            // #101 CAMP_SELF_GATHER (default on): the camp hut build could FETCH (bank/craft) but not
+            // GATHER, so a missing raw material (the furnace's 8 cobble, live 11:58Z) dead-waited the
+            // full 240s/cell fetch-poll instead of a ~30s dig. Same bounded reconcile chain as the
+            // main build's gatherShort; unobtainable -> skip fast.
+            const hutGather = process.env.CAMP_SELF_GATHER !== '0' ? (async (n, cnt) => {
+              const batch = Math.min(64, Math.max(cnt || 1, 8))
+              const rec = await resources.reconcile(bot, { [n]: batch }, { near: hutAt, hide: [n], planOpts: { primaryWood } })
+              if (Object.keys(rec.plan.unobtainable || {}).length) return 'unobtainable'
+              const before = provision.inventoryCounts(bot)[n] || 0
+              try { await resources.runReconciled(bot, rec, { say, isStopped, restoreMovements: restore, homeY: hutAt.y, home: { x: hutAt.x, y: hutAt.y, z: hutAt.z }, avoid }) } catch (e) { dbg('camp gatherShort ' + n + ' failed (' + e.message + ')') }
+              return (provision.inventoryCounts(bot)[n] || 0) > before ? 'gained' : 'none'
+            }) : undefined
+            const hr = await schematic.buildSurvival(bot, hutSchem, hutAt, { say, isStopped, restoreMovements: restore, clear: true, clearFurniture: true, fetch: hutFetch, gather: hutGather })
             dbg('camp: hut rebuilt -> ' + (hr && hr.placed) + '/' + (hr && hr.total) + ' at ' + hutAt.x + ',' + hutAt.y + ',' + hutAt.z)
             provision.rememberInfra && provision.rememberInfra('hut', hutAt)
             // fill the doorstep so the exit is flush ground, not a fall into the natural drop-off
