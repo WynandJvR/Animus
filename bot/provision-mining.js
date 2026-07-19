@@ -135,6 +135,14 @@ async function digStaircaseUp (bot, targetY, opts = {}) {
       // cell we crack open). All 4 hazardous -> abandon the staircase (return); climbToSurface
       // then falls through to its column-safe pillarUpTo fallback. No new escalation machinery.
       let chosen = null; let lastHz = 'ok'
+      // #99 SOFT_STEP_FIRST (default on): among SAFE directions, prefer the SOFTEST dig - a hand
+      // knows dirt (<1s) from stone (~7s barehand); the first-safe-wins pick chewed cobble with a
+      // dirt wall one turn away (operator watched it live). Cost = worst block of the 2 the step
+      // opens (soft dirt-class 0, other diggable 1); safety stays the hard filter, softness only
+      // breaks ties among 'ok' candidates. =0 -> first-safe-wins exactly as before.
+      const SOFT_FIRST = process.env.SOFT_STEP_FIRST !== '0'
+      const SOFT_RE = /^(grass_block|dirt|coarse_dirt|rooted_dirt|sand|gravel|snow|clay|mud|podzol|mycelium)$/
+      let best = null
       for (let k = 0; k < 4; k++) {
         const cand = DIRS[(di + k) % 4]
         const cFloor = feet.plus(cand); const cFeet = cFloor.offset(0, 1, 0); const cHead = cFloor.offset(0, 2, 0)
@@ -142,9 +150,15 @@ async function digStaircaseUp (bot, targetY, opts = {}) {
         const probe = []
         for (const c of [feet.offset(0, 2, 0), cFeet, cHead, cFloor]) { probe.push(nameAt(c)); for (const n of FACE6) probe.push(nameAt(c.plus(n))) }
         const hz = mining.climbStepSafety(nameAt(under), nameAt(under.offset(0, -1, 0)), probe)
-        if (hz === 'ok') { chosen = { dir: cand, off: k }; break }
+        if (hz === 'ok') {
+          if (!SOFT_FIRST) { chosen = { dir: cand, off: k }; break }
+          const openCost = [cFeet, cHead].reduce((a, c) => { const n = nameAt(c); return a + (n == null || AIRISH(n) ? 0 : (SOFT_RE.test(n) ? 0 : 1)) }, 0)
+          if (!best || openCost < best.cost) best = { dir: cand, off: k, cost: openCost }
+          if (best && best.cost === 0) break // can't beat all-soft/air
+        }
         lastHz = hz
       }
+      if (SOFT_FIRST && best) chosen = best
       if (!chosen) { dbg('  staircase: all 4 directions hazardous (' + lastHz + ') at ' + feet.toString() + ' - handing to pillar fallback'); return }
       dir = chosen.dir; di += chosen.off + 1
     } else {
