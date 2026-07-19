@@ -240,7 +240,11 @@ async function ensurePillarFiller (bot, { isStopped = () => false, need = DEADLO
 
 async function deadlockDieByFall (bot, { isStopped = () => false, home = null, say = () => {} } = {}) {
   if (!bot.entity) return false
-  const deadline = Date.now() + 30000
+  // #76b: the 30s budget predates ensurePillarFiller - walk-out + digging + pillaring consumed all
+  // 30s live (00:39Z: both 'pillared +4b' and 'fall did not kill' logged the SAME millisecond - the
+  // fall-wait loop never ran, the finally cleared controls, the bot never stepped off). Under the
+  // flag give the whole sequence a real budget; flag off -> today's 30s exactly.
+  const deadline = Date.now() + (SUICIDE_PILLAR_WORKS ? 90000 : 30000)
   // Clear our own roof/overhang: pillarUpTo no-ops inside our structure, so reach open sky first.
   if (SUICIDE_EXIT_OPEN_SKY) {
     if (insideOwnStructure(bot) || hasSolidCeiling(bot, DEADLOCK_FALL_H + 2, { ignoreLeaves: true })) {
@@ -325,6 +329,16 @@ async function deadlockDieByFall (bot, { isStopped = () => false, home = null, s
       if (Math.floor(bot.entity.position.y) < startY) bot.setControlState('forward', false) // dropped - stop walking, just fall
     }
     if (died) { dbg('deadlock-reset: died on purpose - respawn resets to full at the bed'); return true }
+    // #76b: a survived/timed-out fall used to abort directly (only the SHORT-pillar path chained
+    // fallbacks). Chain the drown/pit fallbacks here too before the honest abort; flag off -> the
+    // exact original single-line abort.
+    if (SUICIDE_PILLAR_WORKS && SUICIDE_FALLBACK_DEATH) {
+      dbg('deadlock-reset: fall did not kill within bound (hp ' + (bot.health ?? '?') + ' at y' + Math.floor(bot.entity.position.y) + ') - trying fallback deaths')
+      let fdied = false
+      try { fdied = await deadlockFallbackDeath(bot, { isStopped, home, say }) } catch (e) { dbg('deadlock-reset: fallback death threw (' + e.message + ')') }
+      if (fdied) { dbg('deadlock-reset: died on purpose (fallback) - respawn resets to full at the bed'); return true }
+      dbg('deadlock-reset: fall + fallback deaths could not kill - ABORTING to hold'); return false
+    }
     dbg('deadlock-reset: fall did not kill within bound - ABORTING to hold'); return false
   } finally { try { bot.removeListener('death', onDeath) } catch {}; bot.clearControlStates() }
 }
