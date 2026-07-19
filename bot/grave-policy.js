@@ -24,12 +24,18 @@ function graveWorthIt (d) {
   // Wooden/stone tools cost less to recraft than the trek into whatever killed you -
   // only REAL gear (iron+, any armor) or genuine bulk justifies a corpse run.
   const realGear = (it.notable || []).some(n => /^(iron|diamond|netherite|golden)_|_(helmet|chestplate|leggings|boots)$/.test(n))
+  // #98 GRAVE_TOOL_WORTH (default on): ANY tool makes the grave worth a run. "Wooden tools cost
+  // less to recraft than the trek" assumes a world with wood - on this deforested map the bot's
+  // only hoe died 7b from home and the fetch was refused as junk, orphaning the food bootstrap
+  // (live 11:30Z: graves=0 with the hoe grave on the surface next door). Distance/danger stay
+  // gated by the reach bands; worth just says "a tool is never litter".
+  const toolWorth = process.env.GRAVE_TOOL_WORTH !== '0' && (it.notable || []).some(n => /_(hoe|pickaxe|sword|axe|shovel)$/.test(n))
   // FIX #16 (GRAVE_BUILD_WORTH, default on): a meaningful stash of BUILD materials (logs, planks,
   // cobble, stone) is worth a corpse run even below the generic count>=10 bulk bar - the bot used
   // to abandon a grave holding a big stack of wood. GRAVE_BUILD_MIN (default 6, below the count bar
   // so it genuinely widens) keeps trivial single items out. GRAVE_BUILD_WORTH=0 -> gear+count only.
   const buildWorth = process.env.GRAVE_BUILD_WORTH !== '0' && (it.build || 0) >= Number(process.env.GRAVE_BUILD_MIN || 6)
-  return realGear || (it.count || 0) >= 10 || buildWorth
+  return realGear || toolWorth || (it.count || 0) >= 10 || buildWorth
 }
 
 // GRAVE DESPAWN CLOCK (task #18). AxGraves graves on the live server sit on a plugin despawn
