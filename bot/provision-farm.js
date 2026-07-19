@@ -510,7 +510,14 @@ async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () =
   // misdiagnosed the defer twice) - pure observability, always on.
   const ceilStrict = process.env.FARM_CAVE_STRICT !== '0'
   const ceiling = hasSolidCeiling(bot, 12, { ignoreLeaves: ceilStrict })
-  const hostile = nearHostile(bot, 16)
+  // #95 FARM_HOSTILE_LOS (default on): the raw straight-line check counted CAVE mobs sealed under
+  // the ground (the same phantom class #78 fixed for flee) and deferred the dry-farm establish in
+  // broad daylight at hp20 (live 10:10Z: 'hostile within 16b' with every mob at y52-61 walled).
+  // Use the LOS-discounted threat from the survival snapshot: both rays blocked -> not a farming
+  // blocker; <=5b floor always counts; fail-open (snapshot error -> raw check). =0 -> raw check.
+  const hostile = process.env.FARM_HOSTILE_LOS !== '0'
+    ? (() => { try { const t = P().survivalState(bot); return (t.threatDist != null && t.threatDist <= 16) || (t.creeperDist != null && t.creeperDist <= 16) } catch { return nearHostile(bot, 16) } })()
+    : nearHostile(bot, 16)
   const night = isNight(bot)
   if (ceiling || hostile || night) {
     const why = ceiling ? 'solid ceiling <=12b (real cave roof)' : hostile ? 'hostile within 16b' : 'night'
