@@ -289,8 +289,18 @@ t('armorBootstrapMining (#71): naked + short of a boots\' worth of iron -> shall
   assert.strictEqual(M.armorBootstrapMining(0, 3).active, true, '3 iron (< 4) -> still bootstrapping')
   // reached a boots' worth -> DONE, deep mining may resume
   assert.strictEqual(M.armorBootstrapMining(0, 4).active, false, '4 iron -> boots covered, resume normal depth')
-  // ANY armor piece worn -> not naked -> inactive (armored mining is unchanged)
-  assert.strictEqual(M.armorBootstrapMining(1, 0).active, false, 'one armor piece -> inactive')
+  // #84 SHALLOW_UNTIL_ARMORED (default on): 1-3 pieces KEEP the safe band; 4/4 releases it.
+  // Flag =0 -> the original naked-only gate. Drive both env regimes explicitly.
+  {
+    const prev = process.env.SHALLOW_UNTIL_ARMORED
+    delete process.env.SHALLOW_UNTIL_ARMORED // default (flag ON)
+    assert.strictEqual(M.armorBootstrapMining(1, 0).active, true, 'one armor piece, flag on -> band kept until fully armored')
+    assert.strictEqual(M.armorBootstrapMining(3, 0).active, true, 'three pieces, flag on -> band kept')
+    assert.strictEqual(M.armorBootstrapMining(4, 0).active, false, 'fully armored -> inactive')
+    process.env.SHALLOW_UNTIL_ARMORED = '0'
+    assert.strictEqual(M.armorBootstrapMining(1, 0).active, false, 'one armor piece, flag off -> inactive (original naked-only gate)')
+    if (prev === undefined) delete process.env.SHALLOW_UNTIL_ARMORED; else process.env.SHALLOW_UNTIL_ARMORED = prev
+  }
   // flag off (ARMOR_BOOTSTRAP=0) -> ALWAYS inactive, byte-for-byte
   assert.strictEqual(M.armorBootstrapMining(0, 0, { enabled: false }).active, false, 'flag off -> inactive even when all else says go')
   // env-tunable band + threshold

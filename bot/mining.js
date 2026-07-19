@@ -294,7 +294,13 @@ function armorBootstrapMining (armorPieces, rawIronHave, opts = {}) {
   const ymin = opts.ymin != null ? opts.ymin : 45
   const ymax = opts.ymax != null ? opts.ymax : 58
   const retreatDist = opts.retreatDist != null ? opts.retreatDist : 10
-  const active = enabled && (armorPieces || 0) <= 0 && (rawIronHave || 0) < bootsIron
+  // #84 SHALLOW_UNTIL_ARMORED (default on): keep the safe shallow band (and the #83 mine-recall
+  // privileges that key off `active`) until FULLY armored - the moment the first boots went on,
+  // active flipped false and the helmet-phase gather reverted to the deep y16 target + strict
+  // recall gates it cannot execute (live 04:28Z: every descent 'stuck at y6x' again). A 1/4-armored
+  // bot at y16 is barely safer than a naked one; y45-58 has proven iron yield here. =0 -> naked-only.
+  const underCap = process.env.SHALLOW_UNTIL_ARMORED !== '0' ? 4 : 1
+  const active = enabled && (armorPieces || 0) < underCap && (rawIronHave || 0) < bootsIron
   // targetY = the DEEPEST end of the safe band: the descent stops at ymin, so the branch mine
   // works the whole [ymin..ymax] near-surface iron band (the staircase passes through ymax->ymin).
   return { active, targetY: ymin, ymin, ymax, retreatDist, bootsIron }
