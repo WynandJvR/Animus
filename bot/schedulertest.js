@@ -111,22 +111,24 @@ t('(c) maintain surfaces only with no progress job + no survival need, and never
 
 // ---- (#65) BOOTSTRAP_PRIORITY: pure bootstrapNeed decision + pickJob tier -----------------
 // bootstrapNeed returns the highest-priority MISSING survival-infra need in a healthy window
-// (hp>=14 & fed), order armor > food > base; null when all met, degraded, or flag-off.
-// Pinned to FOOD_RESERVE_FIRST=0 so these assert the #65 (armor-first) order regardless of the
-// ambient default (the #74 block below owns the reserve-first order).
-function withBootstrap (fn) { return withEnv('BOOTSTRAP_PRIORITY', '1', () => withEnv('FOOD_RESERVE_FIRST', '0', fn)) }
+// (hp>=14 & fed), order FOOD RESERVE > armor > base (#74); null when all met, degraded, or flag-off.
+// #108: FOOD_RESERVE_FIRST is DELETED - the 'food' verdict used to exist at two positions of this
+// one function, so these tests can no longer pin an alternative order. They now assert the ONE
+// order, stocking the reserve where the case is really about armor/base ranking.
+function withBootstrap (fn) { return withEnv('BOOTSTRAP_PRIORITY', '1', fn) }
+const STOCKED = 40 // bankFoodPts >= FOOD_RESERVE_TARGET -> the food-reserve rung is satisfied
 t('(#65) bootstrapNeed: healthy + naked -> "armor" (no home REACHABLE, but a home EXISTS)', () => withBootstrap(() => {
   // #103: drive BOTH env regimes explicitly (ambient-proof).
   const prev = process.env.BOOTSTRAP_NEEDS_HOME
   try {
     delete process.env.BOOTSTRAP_NEEDS_HOME // default (flag ON)
     // armor still fires when a home exists but is momentarily unreachable (homeDist known)...
-    assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: false, homeDist: 60 })), 'armor')
+    assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: false, homeDist: 60, bankFoodPts: STOCKED })), 'armor')
     // ...but a truly HOMELESS bot (no hut, no homeDist) bootstraps NOTHING - the build's camp step
     // owns establishment (#102); the armor grind must not steal the body from it.
-    assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: false, homeDist: null })), null, '#103: homeless -> null')
+    assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: false, homeDist: null, bankFoodPts: STOCKED })), null, '#103: homeless -> null')
     process.env.BOOTSTRAP_NEEDS_HOME = '0'
-    assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: false, homeDist: null })), 'armor', '#103 flag off: homeless armor as before')
+    assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: false, homeDist: null, bankFoodPts: STOCKED })), 'armor', '#103 flag off: homeless armor as before')
   } finally {
     if (prev === undefined) delete process.env.BOOTSTRAP_NEEDS_HOME; else process.env.BOOTSTRAP_NEEDS_HOME = prev
   }
@@ -140,15 +142,19 @@ t('(#65) bootstrapNeed: armored + food reserve stocked + home + base unlit -> "b
 t('(#65) bootstrapNeed: all infra present -> null (build resumes)', () => withBootstrap(() => {
   assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 4, homeReachable: true, bankFoodPts: 40, baseLit: true })), null)
 }))
-t('(#65) bootstrapNeed: ARMOR outranks FOOD (naked + empty bank -> armor first)', () => withBootstrap(() => {
-  assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: true, bankFoodPts: 0, baseLit: false })), 'armor')
+t('(#65/#74) bootstrapNeed: FOOD RESERVE outranks ARMOR (naked + empty bank -> food first)', () => withBootstrap(() => {
+  // #108: this used to assert the opposite under FOOD_RESERVE_FIRST=0. That second order is deleted;
+  // the reserve is the enabler (a degraded window cannot climb to hp14 for the armor grind without it).
+  assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: true, bankFoodPts: 0, baseLit: false })), 'food')
+  assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: true, bankFoodPts: STOCKED, baseLit: false })), 'armor', 'reserve stocked -> armor is next')
 }))
 t('(#65) bootstrapNeed: FOOD outranks BASE (armored, empty bank, base unlit -> food first)', () => withBootstrap(() => {
   assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 4, homeReachable: true, bankFoodPts: 0, baseLit: false })), 'food')
 }))
 t('(#65) bootstrapNeed: degraded/hungry never bootstraps (survival tier owns it)', () => withBootstrap(() => {
-  assert.strictEqual(S.bootstrapNeed(snap({ hp: 8, food: 20, armorPieces: 0, homeReachable: true })), null, 'hp<14 -> null (not bootstrap\'s job)')
-  assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 10, armorPieces: 0, homeReachable: true })), null, 'food<14 -> null')
+  // reserve stocked so the lower-gated food rung cannot answer - this case is about the hp14/fed gate
+  assert.strictEqual(S.bootstrapNeed(snap({ hp: 8, food: 20, armorPieces: 0, homeReachable: true, bankFoodPts: STOCKED })), null, 'hp<14 -> null (not bootstrap\'s job)')
+  assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 10, armorPieces: 0, homeReachable: true, bankFoodPts: STOCKED })), null, 'food<14 -> null')
 }))
 t('(#65) bootstrapNeed: food/base need home reachable (no livelock on an unreachable bank)', () => withBootstrap(() => {
   assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 4, homeReachable: false, bankFoodPts: 0, baseLit: false })), null, 'no reachable home -> no food/base bootstrap')
@@ -163,7 +169,7 @@ t('(#65) bootstrapNeed: BOOTSTRAP_PRIORITY=0 -> always null (byte-for-byte)', ()
   })
 })
 t('(#65) pickJob: healthy naked bot with a saved build -> maintenancePass (bootstrap) OVER the build', () => withBootstrap(() => {
-  const s = snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: true, activeJob: null, persistedBuild: true })
+  const s = snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: true, bankFoodPts: STOCKED, activeJob: null, persistedBuild: true })
   const pj = S.pickJob(s)
   assert.strictEqual(pj.job, 'maintenancePass', 'bootstrap beats build-resume')
   assert.strictEqual(pj.cls, 'maintain')
@@ -234,8 +240,9 @@ t('(IRON_KEYSTONE) pickJob: a real survival crisis still OUTRANKS the keystone c
 // Reorders bootstrapNeed to FOOD RESERVE > ARMOR > BASE, fires the food-reserve need at a LOWER hp
 // gate (FOOD_RESERVE_HP, default 8) since stocking wheat->bread at the farm/home is lower-risk than
 // deep iron-mining and it's what lets a degraded window recover to hp14 (#62 §A withdraws it). Stocks
-// toward FOOD_RESERVE_TARGET (~40 pts / 8 loaves). FOOD_RESERVE_FIRST=0 -> the #65 order byte-for-byte.
-function withReserveFirst (fn) { return withEnv('BOOTSTRAP_PRIORITY', '1', () => withEnv('FOOD_RESERVE_FIRST', '1', fn)) }
+// toward FOOD_RESERVE_TARGET (~40 pts / 8 loaves). #108: this is the ONLY order now - the
+// FOOD_RESERVE_FIRST=0 duplicate verdict position is deleted.
+function withReserveFirst (fn) { return withEnv('BOOTSTRAP_PRIORITY', '1', fn) }
 t('(#74) bootstrapNeed: FOOD-RESERVE outranks ARMOR (naked + short reserve -> food FIRST)', () => withReserveFirst(() => {
   assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: true, bankFoodPts: 0 })), 'food', 'reserve is the enabler -> food before armor')
 }))
@@ -257,12 +264,16 @@ t('(#74) bootstrapNeed: food-reserve still needs FED + REACHABLE home (no starvi
   // armored (so it can't divert to the no-home armor need) + unreachable home -> no food bootstrap.
   assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 4, homeReachable: false, bankFoodPts: 0 })), null, 'unreachable home -> no food bootstrap (no livelock)')
 }))
-t('(#74) bootstrapNeed: FOOD_RESERVE_FIRST=0 -> #65 order byte-for-byte (armor before food, no lowered gate)', () => {
-  withEnv('BOOTSTRAP_PRIORITY', '1', () => withEnv('FOOD_RESERVE_FIRST', '0', () => {
-    assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: true, bankFoodPts: 0 })), 'armor', 'flag off -> armor first (#65)')
-    assert.strictEqual(S.bootstrapNeed(snap({ hp: 8, food: 20, armorPieces: 0, homeReachable: true, bankFoodPts: 0 })), null, 'flag off -> no lowered hp gate (hp<14 -> null)')
-    assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 4, homeReachable: true, bankFoodPts: 0, baseLit: false })), 'food', 'flag off -> reserve threshold BOOTSTRAP_FOOD_RESERVE(15)')
-  }))
+t('(#108) bootstrapNeed: the FOOD_RESERVE_FIRST=0 duplicate verdict is GONE - the flag has no effect', () => {
+  // ONE implementation, so setting the deleted flag either way must yield the SAME decision. This
+  // is the fork-deletion lock: re-introduce a second 'food' verdict position and these diverge.
+  withEnv('BOOTSTRAP_PRIORITY', '1', () => {
+    const s = snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: true, bankFoodPts: 0 })
+    const a = withEnv('FOOD_RESERVE_FIRST', '0', () => S.bootstrapNeed(s))
+    const b = withEnv('FOOD_RESERVE_FIRST', '1', () => S.bootstrapNeed(s))
+    assert.strictEqual(a, 'food', 'the one order: reserve first')
+    assert.strictEqual(b, a, 'the deleted flag must not change any verdict')
+  })
 })
 t('(#74) pickJob: healthy naked bot with a saved build -> bootstrap FOOD over the build (reserve first)', () => withReserveFirst(() => {
   const s = snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: true, bankFoodPts: 0, activeJob: null, persistedBuild: true })

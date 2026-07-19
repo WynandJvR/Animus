@@ -241,8 +241,7 @@ function submergedEscapeDue ({ flagOn, submerged, deep, wetHist, oxygen, oxygenR
 // the survival INFRASTRUCTURE it lacks, so it stays UNARMORED / foodless / in a dark base -> degrades
 // back to hp1/food0 -> repeats. This returns the single highest-priority MISSING survival-infra need
 // when the bot is in a HEALTHY window (hp>=BOOTSTRAP_HP & fed), so pickJob/resumeBuild can establish
-// it BEFORE resuming the build. Order: FOOD RESERVE > ARMOR > BASE LIT (#74 FOOD_RESERVE_FIRST;
-// =0 -> the #65 ARMOR > FOOD RESERVE > BASE LIT order). It is PRIORITY, not new
+// it BEFORE resuming the build. Order: FOOD RESERVE > ARMOR > BASE LIT (#74). It is PRIORITY, not new
 // mechanics: the picked maintenancePass runs the EXISTING #60 proactiveArmor / #62 courier-bake /
 // #69 secureBase steps (which today only fire opportunistically, so they rarely run).
 //
@@ -269,7 +268,8 @@ function bootstrapNeed (snapshot) {
   const food = s.food != null ? s.food : 20
   const fed = food >= Number(process.env.BOOTSTRAP_FED || 14)
   const reserve = s.bankFoodPts != null ? s.bankFoodPts : 0
-  // ==== #74 FOOD_RESERVE_FIRST (default on; =0 -> #65 order byte-for-byte) ====================
+  // ==== #74 FOOD RESERVE FIRST (#108: the =0 leg is DELETED - the same 'food' verdict lived at
+  // TWO positions of this one function, so the decision had two copies to drift; rollback = git) ==
   // The DURABLE bank bread reserve is the bootstrap ENABLER: with ~8 banked loaves, #62 §A withdraws
   // bread at the hut the moment a low-hp/food crisis hits -> the bot recovers -> sustains a window ->
   // and only THEN can the hp>=14 armor/base bootstraps EXECUTE. Without a reserve no degraded window
@@ -282,11 +282,9 @@ function bootstrapNeed (snapshot) {
   // the bot - never livelock on an unreachable bank). It stocks toward FOOD_RESERVE_TARGET (~40 pts /
   // 8 loaves) via the EXISTING maintenancePass farm->bake->courier chain (#62 courier-bake, bounded &
   // survival-yielding), so a genuinely durable reserve accumulates. Armor/base keep BOOTSTRAP_HP(14).
-  if (process.env.FOOD_RESERVE_FIRST !== '0') {
-    if (s.homeReachable && fed &&
-        hp >= Number(process.env.FOOD_RESERVE_HP || 8) &&
-        reserve < Number(process.env.FOOD_RESERVE_TARGET || 40)) return 'food'
-  }
+  if (s.homeReachable && fed &&
+      hp >= Number(process.env.FOOD_RESERVE_HP || 8) &&
+      reserve < Number(process.env.FOOD_RESERVE_TARGET || 40)) return 'food'
   if (hp < Number(process.env.BOOTSTRAP_HP || 14)) return null
   if (!fed) return null
   // (1) ARMOR - the biggest survivability multiplier; fires whenever fully naked (no home required).
@@ -295,11 +293,7 @@ function bootstrapNeed (snapshot) {
   // The rest is home-bank/hut infra - only a bootstrap need when home is reachable enough for the
   // maintenancePass to actually establish it.
   if (s.homeReachable) {
-    // (2) FOOD RESERVE - a small banked bread buffer so the next hungry window has something to draw.
-    //     #65 legacy position; reached only when FOOD_RESERVE_FIRST=0 (the #74 block above already
-    //     returns 'food' for a short reserve when the flag is on).
-    if (reserve < Number(process.env.BOOTSTRAP_FOOD_RESERVE || 15)) return 'food'
-    // (3) BASE LIT - spawn-proof the home (#69 secureBase). Only when provably not yet lit.
+    // (2) BASE LIT - spawn-proof the home (#69 secureBase). Only when provably not yet lit.
     if (s.baseLit === false) return 'base'
   }
   return null

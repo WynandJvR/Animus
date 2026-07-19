@@ -3288,6 +3288,7 @@ async function gatherLoop (bot, item, count, opts = {}) {
 // routinely ends 20-40 blocks from the plan's own table across torn-up ground the
 // anti-grief profile can't path ("No path to the goal!" killed the furnace craft twice,
 // live) - so reach failures fall through to building a FRESH table where we stand.
+let ensureTableAcquiring = false // see the reentrancy guard inside ensureTable
 async function ensureTable (bot, opts = {}) {
   const mcData = require('minecraft-data')(bot.version)
   const tableId = mcData.blocksByName.crafting_table.id
@@ -3308,6 +3309,17 @@ async function ensureTable (bot, opts = {}) {
   const known = await recallAndReach(bot, 'table', tableId, 64, reach)
   if (known) { rememberInfra('table', known.position); return known }
   // No reachable table -> place/craft a fresh one HERE (pack table, or 4 planks).
+  // ASK THE RESOURCE MODEL FIRST (#108): withdraw > craft over pack AND bank, so a bot holding
+  // logs (or a bank holding planks) never concludes it cannot have a table by counting its pack.
+  // REENTRANCY GUARD: acquire -> runPlan -> runCraft can call back into ensureTable when a task
+  // is marked needsTable. crafting_table is a 2x2 recipe so that does not happen today, but a
+  // recipe/planner change must not be able to turn this into silent infinite recursion.
+  if (countItem(bot, 'crafting_table') === 0 && !ensureTableAcquiring) {
+    ensureTableAcquiring = true
+    try {
+      await require('./resources.js').acquire(bot, 'crafting_table', 1, { near: opts.home, isStopped: opts.isStopped, say: opts.say, planOpts: opts.planOpts })
+    } catch (e) { dbg('  ensureTable: acquire failed (' + e.message + ')') } finally { ensureTableAcquiring = false }
+  }
   if (countItem(bot, 'crafting_table') === 0) {
     const def = mcData.itemsByName.crafting_table
     const recipe = bot.recipesFor(def.id, null, 1, null)[0]
@@ -3471,6 +3483,13 @@ async function ensureFurnace (bot, opts = {}) {
   const recallR = process.env.INFRA_CONSOLIDATE !== '0' ? Number(process.env.FURNACE_RECALL_R || 96) : 64
   const knownF = await recallAndReach(bot, 'furnace', furnaceId, recallR, reach)
   if (knownF) { rememberInfra('furnace', knownF.position); return knownF }
+  // ASK THE RESOURCE MODEL FIRST (#108): withdraw > craft, so a banked furnace or banked
+  // cobble is used before the pack-only recipe check declares "need 8 cobblestone".
+  if (countItem(bot, 'furnace') === 0) {
+    try {
+      await require('./resources.js').acquire(bot, 'furnace', 1, { near: opts.home, isStopped: opts.isStopped, say: opts.say, planOpts: opts.planOpts })
+    } catch (e) { dbg('  ensureFurnace: acquire failed (' + e.message + ')') }
+  }
   if (countItem(bot, 'furnace') === 0) {
     const table = await ensureTable(bot, opts)
     if (bot.entity.position.distanceTo(table.position) > 3) await gotoWithTimeout(bot, new goals.GoalNear(table.position.x, table.position.y, table.position.z, 2), 20000)

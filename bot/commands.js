@@ -1294,13 +1294,13 @@ async function handle (bot, line, opts = {}) {
       if (visit === 0) { for (let w = 0; w < 10 && !cands.length; w++) { await new Promise(r => setTimeout(r, 500)); cands = graveScan() } }
       else { await new Promise(r => setTimeout(r, 500)); cands = graveScan() } // revisit: brief settle + single rescan (already standing at the grave)
       dbg('recover: ' + cands.length + ' grave-candidate entities near ' + d.x + ',' + d.y + ',' + d.z + (cands.length ? ' (' + cands.map(e => e.name).join(',') + ')' : ''))
-      // fix #12 (GRAVE_LOOT_VERIFY, default on): a single unverified GUI sweep silently abandoned
+      // fix #12 (#108: the GRAVE_LOOT_VERIFY=0 rollback copy is DELETED - it was a SECOND live
+      // loot-verdict implementation, so any future loot fix had to be written twice or silently
+      // miss a regime; rollback is `git revert`). A single unverified GUI sweep silently abandoned
       // raced shift-clicks (212 looted, 2 stragglers left, grave marked done forever). Sweep each
       // grave window up to GRAVE_LOOT_PASSES times, re-reading filled slots between passes, and
       // mark retrieved only when the window empties + a FRESH entity re-scan confirms it's gone
-      // (or a bounded junk-only remainder no retry could move). GRAVE_LOOT_VERIFY=0 rolls back to
-      // HEAD's single sweep + recorded*0.5 heuristic byte-equivalently. DESIGN-fix12-grave-stragglers.md.
-      const GRAVE_LOOT_VERIFY_ON = process.env.GRAVE_LOOT_VERIFY !== '0'
+      // (or a bounded junk-only remainder no retry could move). DESIGN-fix12-grave-stragglers.md.
       const GRAVE_LOOT_PASSES = Number(process.env.GRAVE_LOOT_PASSES || 4)
       const GRAVE_LOOT_MS = Number(process.env.GRAVE_LOOT_MS || 25000)
       let sawWindow = false      // any cand opened a GUI
@@ -1329,12 +1329,7 @@ async function handle (bot, line, opts = {}) {
         if (w) {
           const end = w.inventoryStart != null ? w.inventoryStart : w.slots.length - 36
           const filled = () => { const out = []; for (let s = 0; s < end; s++) if (w.slots[s]) out.push(s); return out }
-          if (!GRAVE_LOOT_VERIFY_ON) {
-            // ROLLBACK (GRAVE_LOOT_VERIFY=0): today's single unverified sweep, byte-equivalent to HEAD.
-            try {
-              for (let s = 0; s < end; s++) { if (w.slots[s]) { try { await bot.clickWindow(s, 0, 1) } catch {} ; await new Promise(r => setTimeout(r, 120)) } }
-            } finally { try { bot.closeWindow(w) } catch {} }
-          } else {
+          {
             // BOUNDED retry loop: same shift-click + close, re-reading filled slots between passes so
             // a raced/refused click is retried. Triple-bounded (pass count, wall clock, two
             // zero-progress passes) - can never spin on a stuck grave.
@@ -1390,28 +1385,8 @@ async function handle (bot, line, opts = {}) {
       const wantNotable = d.items && d.items.notable && d.items.notable.length
       const gotNotable = !wantNotable || (bot.inventory ? bot.inventory.items() : []).some(i => d.items.notable.includes(i.name))
       const recorded = (d.items && d.items.count) || 0
-      if (!GRAVE_LOOT_VERIFY_ON) {
-        // ROLLBACK (GRAVE_LOOT_VERIFY=0): today's stale-cands presence + the recorded*0.5
-        // heuristic, byte-equivalent to HEAD ba413bb.
-        const stillSomething = cands.length > 0 || looseNearby
-        dbg('recover: gained ' + gained + ' items, notable recovered: ' + gotNotable + ' (grave still present: ' + stillSomething + ')')
-        if (gained > 0 && gotNotable) {
-          if (stillSomething && recorded > 0 && gained < recorded * 0.5) {
-            return `got some of my stuff at ${d.x},${d.y},${d.z} (+${gained} of ~${recorded}) - the grave still has the rest, going back for it` // NOT retrieved
-          }
-          d.retrieved = true; persistDeath()
-          const left = unretrievedGraves()
-          return `got my stuff back at ${d.x},${d.y},${d.z} (+${gained} items)${left ? ` - ${left} more grave${left > 1 ? 's' : ''} to visit` : ''}`
-        }
-        if (gained > 0 && stillSomething) return `picked up ${gained} loose items at ${d.x},${d.y},${d.z} but my gear is still in the grave - it won't open` // NOT retrieved
-        if (!stillSomething) {
-          d.retrieved = true; persistDeath()
-          return `nothing left where i died at ${d.x},${d.y},${d.z} - it's gone`
-        }
-        return `my grave at ${d.x},${d.y},${d.z} is right here but it won't open - my stuff's stuck in it` // NOT marked retrieved - worth another try
-      }
-      // GRAVE_LOOT_VERIFY on: verify emptiness by a FRESH entity re-scan (give AxGraves a tick to
-      // despawn an emptied grave's display entities), then let the pure verdict decide marking.
+      // Verify emptiness by a FRESH entity re-scan (give AxGraves a tick to despawn an emptied
+      // grave's display entities), then let the pure verdict decide marking.
       await new Promise(r => setTimeout(r, 1000))
       const graveAfter = graveScan()
       const stillSomething = graveAfter.length > 0 || looseNearby
@@ -2401,7 +2376,7 @@ async function autoBuild (bot, schem, at, opts = {}) {
   if (!Object.entries(bom).some(([n, c]) => (inv0[n] || 0) < c)) {
     say('i have all the materials - building')
     checklistStep('build')
-    return await schematic.buildSurvival(bot, schem, at, { say, isStopped, restoreMovements: restore, clear: opts.clear })
+    return await schematic.buildSurvival(bot, schem, at, { say, isStopped, restoreMovements: restore, clear: opts.clear, planOpts: { primaryWood }, home: { x: Math.round(at.x), y: Math.floor(at.y), z: Math.round(at.z) }, avoid })
   }
   say('gonna gather everything myself first...')
 
@@ -2525,10 +2500,12 @@ async function autoBuild (bot, schem, at, opts = {}) {
           hutAt = snapToGround(bot, hutSchem, new Vec3(kb ? kb.x + 3 : Math.round(at.x) - 16, kb ? kb.y - 1 : Math.floor(at.y), kb ? kb.z - 2 : Math.round(at.z)))
         }
         // GROUNDED mismatch count - furniture cells INCLUDED (real block reads). #37: also tally
-        // solidTotal (non-air schematic cells) in the SAME loop (one extra counter, no new pass),
-        // and choose the classifier by flag - tolerant cellMismatch under the flag so a birch-plank
-        // patch on an oak cell isn't counted as permanent damage; the exact match is kept under =0.
-        const ndRepair = process.env.NONDESTRUCTIVE_REPAIR !== '0' // default ON; =0 = today byte-for-byte
+        // solidTotal (non-air schematic cells) in the SAME loop (one extra counter, no new pass).
+        // The tolerant cellMismatch classifier is THE classifier now (#108): a birch-plank patch on
+        // an oak cell is not permanent damage. Note this counts BOTH directions - a cell the
+        // schematic wants EMPTY that holds a stray block (the bot's own cobble litter) is damage
+        // exactly like a missing wall, and only the destructive-rebuild path (clearVolume) can
+        // clear those; the patch path re-places missing blocks only.
         let bad = 0
         let solidTotal = 0
         for (let y = st.y; y <= en.y; y++) for (let z = st.z; z <= en.z; z++) for (let x = st.x; x <= en.x; x++) {
@@ -2536,109 +2513,18 @@ async function autoBuild (bot, schem, at, opts = {}) {
           const wantName = (w && w.name) || 'air'
           if (!AIRRE.test(wantName)) solidTotal++
           if (!g) continue
-          if (ndRepair) { if (hutModel.cellMismatch(wantName, g.name)) bad++ }
-          else { const wantAir = !w || !w.name || AIRRE.test(w.name); if (wantAir ? !AIRRE.test(g.name) : g.name !== w.name) bad++ }
+          if (hutModel.cellMismatch(wantName, g.name)) bad++
         }
         // schematic furniture cells (world coords) - found by scanning the schematic
         const findCell = re => { for (let y = st.y; y <= en.y; y++) for (let z = st.z; z <= en.z; z++) for (let x = st.x; x <= en.x; x++) { const w = hutSchem.getBlock(new Vec3(x, y, z)); if (w && re.test(w.name)) return new Vec3(hutAt.x + x, hutAt.y + y, hutAt.z + z) } return null }
-        if (!ndRepair && bad > 3) {
-          // NONDESTRUCTIVE_REPAIR=0 -> TODAY'S EXACT PATH: empty the bank + clearFurniture
-          // teardown + rebuild on ANY bad>3. Kept intact byte-for-byte for rollback; the whole
-          // block below is unchanged from the pre-#37 code.
-          say(`building my safehouse properly (${bad} cells off) - one clean pass`)
-          // 1) EMPTY the bank into the pack (verified reads) so the rebuild can clear old
-          //    furniture without dropping the treasury. Count what we pulled.
-          const saved = {}
-          for (const c of (provision.listInfra('chest', bot) || [])) {
-            if (Math.hypot(c.x - hutAt.x, c.z - hutAt.z) > 10) continue
-            const cb = bot.blockAt(new Vec3(c.x, c.y, c.z)); if (!cb || !/chest/.test(cb.name)) continue
-            try {
-              const cont = await bot.openContainer(cb)
-              for (const it of cont.containerItems()) saved[it.name] = (saved[it.name] || 0) + it.count
-              for (const it of cont.containerItems().slice()) { try { await cont.withdraw(it.type, it.metadata, it.count) } catch {} }
-              cont.close()
-            } catch (e) { dbg('camp: bank empty failed (' + e.message + ')') }
-          }
-          const savedN = Object.values(saved).reduce((s, n) => s + n, 0)
-          dbg('camp: emptied bank -> ' + savedN + ' items held before rebuild')
-          // (Operator: don't fret over the bot breaking its OWN placed stuff - only the
-          //  player's. The hut is all bot-built, so we rebuild freely; any item the empty
-          //  couldn't hold drops and gets collected, then re-deposited below.)
-          // 2) provision the hut BOM (planks + furniture ITEMS; door/bed are 1 item = 2 blocks)
-          const hutBom = schematic.billOfMaterials(hutSchem).counts
-          if (hutBom.oak_door) hutBom.oak_door = 1
-          if (hutBom.white_bed) hutBom.white_bed = 1
-          // Only the BED can't be crafted (needs wool/string) - so the chest/furnace/table/
-          // door get PROVISIONED FRESH (cheap: planks/cobble), which is reliable, and only
-          // the bed is credited to the one we already have + recover (relying on recovery
-          // for the chests made the build skip them when the collect missed - live).
-          let hasBedPlaced = false
-          for (let y = st.y; y <= en.y; y++) for (let z = st.z; z <= en.z; z++) for (let x = st.x; x <= en.x; x++) {
-            const g = bot.blockAt(new Vec3(hutAt.x + x, hutAt.y + y, hutAt.z + z))
-            if (g && /_bed$/.test(g.name)) hasBedPlaced = true
-          }
-          // RECONCILE against TOTAL holdings (pack + verified bank), withdraw -> craft ->
-          // gather - the old pack-only plan sent the bot to chop trees while its own bank
-          // held a hundred logs.
-          const hrec = await resources.reconcile(bot, hutBom, {
-            near: hutAt,
-            planOpts: { primaryWood },
-            credit: hasBedPlaced ? { white_bed: 1 } : {} // reuse the bed we'll recover
-          })
-          if (Object.keys(hrec.plan.unobtainable || {}).length) { dbg('camp: hut BOM unobtainable ' + JSON.stringify(hrec.plan.unobtainable)) }
-          else {
-            if (hrec.withdraws.length || hrec.plan.tasks.length) await resources.runReconciled(bot, hrec, { say, isStopped, restoreMovements: restore, homeY: hutAt.y, home: { x: hutAt.x, y: hutAt.y, z: hutAt.z }, avoid })
-            // 3) clean rebuild - clears the old messy furniture (bot's own) and places the
-            //    whole hut deterministically: walls, door, furnace, table, bed, double chest.
-            //    fetch = the resource model: a missing piece gets WITHDRAWN or CRAFTED on the
-            //    spot (it once begged players for a door while holding 109 planks + a table).
-            const hutFetch = async (n, cnt) => { await resources.acquire(bot, n, cnt || 1, { near: hutAt, isStopped, say, batch: 32, planOpts: { primaryWood } }) }
-            // #101 CAMP_SELF_GATHER (default on): the camp hut build could FETCH (bank/craft) but not
-            // GATHER, so a missing raw material (the furnace's 8 cobble, live 11:58Z) dead-waited the
-            // full 240s/cell fetch-poll instead of a ~30s dig. Same bounded reconcile chain as the
-            // main build's gatherShort; unobtainable -> skip fast.
-            const hutGather = process.env.CAMP_SELF_GATHER !== '0' ? (async (n, cnt) => {
-              const batch = Math.min(64, Math.max(cnt || 1, 8))
-              const rec = await resources.reconcile(bot, { [n]: batch }, { near: hutAt, hide: [n], planOpts: { primaryWood } })
-              if (Object.keys(rec.plan.unobtainable || {}).length) return 'unobtainable'
-              const before = provision.inventoryCounts(bot)[n] || 0
-              try { await resources.runReconciled(bot, rec, { say, isStopped, restoreMovements: restore, homeY: hutAt.y, home: { x: hutAt.x, y: hutAt.y, z: hutAt.z }, avoid }) } catch (e) { dbg('camp gatherShort ' + n + ' failed (' + e.message + ')') }
-              return (provision.inventoryCounts(bot)[n] || 0) > before ? 'gained' : 'none'
-            }) : undefined
-            const hr = await schematic.buildSurvival(bot, hutSchem, hutAt, { say, isStopped, restoreMovements: restore, clear: true, clearFurniture: true, fetch: hutFetch, gather: hutGather })
-            dbg('camp: hut rebuilt -> ' + (hr && hr.placed) + '/' + (hr && hr.total) + ' at ' + hutAt.x + ',' + hutAt.y + ',' + hutAt.z)
-            provision.rememberInfra && provision.rememberInfra('hut', hutAt)
-            // fill the doorstep so the exit is flush ground, not a fall into the natural drop-off
-            // in front (the recurring "hole at the front door"); idempotent, self-heals each pass
-            try { await provision.ensureHutApron(bot, hutAt, { isStopped, say }) } catch (e) { dbg('camp: apron fill failed (' + e.message + ')') }
-            try { await handle(bot, 'collect') } catch {} // grab any bank items that dropped when the old chest was cleared
-            // 4) refill the bank into the schematic's chest cell; count to prove nothing lost
-            const chestCell = findCell(/chest/)
-            if (chestCell) { provision.rememberInfra('chest', chestCell); const cb = bot.blockAt(chestCell); if (cb && /chest/.test(cb.name)) { try { const back = await provision.depositMaterials(bot, cb, { keepDirt: 8, all: true }); dbg('camp: bank refilled (' + savedN + ' saved, ' + (back || '?') + ' redeposited)') } catch (e) { dbg('camp: bank refill failed (' + e.message + ') - items are safe in my pack') } } }
-            // 5) set spawn on the schematic bed
-            const bedCell = findCell(/_bed$/)
-            if (bedCell) { const bb = bot.blockAt(bedCell); if (bb && /_bed$/.test(bb.name)) { try { await bot.activateBlock(bb); provision.rememberBed(bedCell) } catch {} } }
-            try { await handle(bot, 'remember hut') } catch {}
-            // VERIFY_SUCCESS_MSG (fix #36): don't CLAIM "built clean" unless the world actually
-            // matches the schematic now. Re-run the SAME grounded mismatch scan (furniture cells
-            // included) AFTER the full rebuild+bed+bank; only bad2===0 earns the success line, else
-            // say the honest count and leave the repair unsatisfied so the next camp pass retries
-            // (bad is recomputed fresh each pass, so nothing else needs resetting).
-            let bad2 = 0
-            if (process.env.VERIFY_SUCCESS_MSG !== '0') {
-              for (let y = st.y; y <= en.y; y++) for (let z = st.z; z <= en.z; z++) for (let x = st.x; x <= en.x; x++) {
-                const w = hutSchem.getBlock(new Vec3(x, y, z)); const g = bot.blockAt(new Vec3(hutAt.x + x, hutAt.y + y, hutAt.z + z))
-                if (!g) continue
-                const wantAir = !w || !w.name || AIRRE.test(w.name)
-                if (wantAir ? !AIRRE.test(g.name) : g.name !== w.name) bad2++
-              }
-            }
-            const builtClean = process.env.VERIFY_SUCCESS_MSG === '0' || (bad2 === 0 && hr && hr.total && hr.placed >= hr.total)
-            if (builtClean) say('safehouse built clean - walls, door, bed, furnace, bank all in place')
-            else { dbg('camp: rebuild NOT clean - ' + bad2 + ' cell(s) still off, placed ' + (hr && hr.placed) + '/' + (hr && hr.total)); say('patched the safehouse but ' + bad2 + ' cell(s) still off - will retry') }
-          }
-        } else if (ndRepair) {
-          // ---- #37 NON-DESTRUCTIVE HUT REPAIR (default ON) --------------------------------
+        {
+          // ---- HUT REPAIR - THE ONE PATH (#37 non-destructive + #108 ONE_HUT_PATH) ---------
+          // There used to be a second, complete copy of this whole operation behind
+          // NONDESTRUCTIVE_REPAIR=0 "kept byte-for-byte for rollback". Fixes then landed on ONE
+          // side in BOTH directions: the self-gather fix went into the copy that never ran, while
+          // the treasury guard and the verified-bank-empty abort went into this one - so the
+          // "rollback" had become a treasury-loss path, and a shipped fix sat in dead code for
+          // days. It is DELETED. Rollback is `git revert`, never a second living implementation.
           // restoreBank(): the treasury guard - escalating targets, NEVER throws (all I/O is
           // guarded). (a) schematic chest cell standing -> deposit; (b/c) else ensureChest (places
           // a chest at the interior cell or recalls a remembered chest) -> deposit; (d) else keep
@@ -2726,32 +2612,49 @@ async function autoBuild (bot, schem, at, opts = {}) {
                 //    restoreBank() (kills the "throw -> outer catch -> refill skipped" path).
                 let hr = null
                 try {
-                  const hutFetch = async (n, cnt) => { await resources.acquire(bot, n, cnt || 1, { near: hutAt, isStopped, say, batch: 32, planOpts: { primaryWood } }) }
-                  hr = await schematic.buildSurvival(bot, hutSchem, hutAt, { say, isStopped, restoreMovements: restore, clear: true, clearFurniture: true, fetch: hutFetch })
-                  dbg('camp: hut rebuilt -> ' + (hr && hr.placed) + '/' + (hr && hr.total) + ' at ' + hutAt.x + ',' + hutAt.y + ',' + hutAt.z)
-                  provision.rememberInfra && provision.rememberInfra('hut', hutAt)
-                  try { await provision.ensureHutApron(bot, hutAt, { isStopped, say }) } catch (e) { dbg('camp: apron fill failed (' + e.message + ')') }
-                  try { await handle(bot, 'collect') } catch {}
-                  const bedCell = findCell(/_bed$/)
-                  if (bedCell) { const bb = bot.blockAt(bedCell); if (bb && /_bed$/.test(bb.name)) { try { await bot.activateBlock(bb); provision.rememberBed(bedCell) } catch {} } }
-                  try { await handle(bot, 'remember hut') } catch {}
+                  // Sourcing is OWNED by buildSurvival now (#108): no fetch/gather closures to
+                  // assemble here, so this call site cannot be under-capable. It passes planOpts
+                  // (the wood policy) and the keep-out box, nothing else.
+                  hr = await schematic.buildSurvival(bot, hutSchem, hutAt, { say, isStopped, restoreMovements: restore, clear: true, clearFurniture: true, planOpts: { primaryWood }, home: { x: hutAt.x, y: hutAt.y, z: hutAt.z }, avoid })
+                  dbg('camp: hut build -> placed ' + (hr && hr.placed) + '/' + (hr && hr.total) + (hr && hr.refused ? ' REFUSED(' + hr.refused + ')' : '') + ' at ' + hutAt.x + ',' + hutAt.y + ',' + hutAt.z)
+                  // REFUSAL CONTRACT (#108). A build that refused, or placed nothing, did NOT
+                  // rebuild the hut: it writes no memory, claims nothing, and sets no latch. The
+                  // "hut rebuilt -> 0/94" + rememberInfra('hut') pipeline is what let the bot
+                  // believe home was established and walk away for hours.
+                  if (hr && !hr.refused && hr.placed > 0) {
+                    provision.rememberInfra && provision.rememberInfra('hut', hutAt)
+                    try { await provision.ensureHutApron(bot, hutAt, { isStopped, say }) } catch (e) { dbg('camp: apron fill failed (' + e.message + ')') }
+                    try { await handle(bot, 'collect') } catch {}
+                    const bedCell = findCell(/_bed$/)
+                    if (bedCell) { const bb = bot.blockAt(bedCell); if (bb && /_bed$/.test(bb.name)) { try { await bot.activateBlock(bb); provision.rememberBed(bedCell) } catch {} } }
+                    try { await handle(bot, 'remember hut') } catch {}
+                  }
                 } finally {
                   await restoreBank() // ALWAYS re-deposit the treasury (never strand the bank)
                 }
-                // 4) VERIFY with the SHARED tolerant classifier (composes with #36). Success only
-                //    when placed>=total && bad2===0; on partial, latch bad2 so a pass that improved
-                //    nothing cannot re-enter 'rebuild'.
-                let bad2 = 0
-                if (process.env.VERIFY_SUCCESS_MSG !== '0') {
+                if (!hr || hr.refused || !hr.placed) {
+                  // Honest report, no latch: the scheduler re-selects and the next pass retries
+                  // from wherever the body actually is. Leaving the latch alone means a refused
+                  // pass neither blocks nor licenses a future destructive retry - the decision is
+                  // re-derived from a fresh grounded survey next time.
+                  const why = (hr && hr.refused) || 'nothing-placed'
+                  dbg('camp: hut rebuild REFUSED (' + why + ') - no infra written, no claim, no latch')
+                  say(why === 'stopped' ? 'i was told to stop before i could work on the safehouse - nothing done' : 'i could not get at the safehouse site to build - nothing done, i will try again')
+                } else {
+                  // VERIFY with the SHARED tolerant classifier - MANDATORY (the VERIFY_SUCCESS_MSG=0
+                  // truth-bypass that set builtClean=true unverified is deleted; a claim must be
+                  // earned by a world re-read). Success only when placed>=total && bad2===0; on
+                  // partial, latch bad2 so a pass that improved nothing cannot re-enter 'rebuild'.
+                  let bad2 = 0
                   for (let y = st.y; y <= en.y; y++) for (let z = st.z; z <= en.z; z++) for (let x = st.x; x <= en.x; x++) {
                     const w = hutSchem.getBlock(new Vec3(x, y, z)); const g = bot.blockAt(new Vec3(hutAt.x + x, hutAt.y + y, hutAt.z + z))
                     if (!g) continue
                     if (hutModel.cellMismatch((w && w.name) || 'air', g.name)) bad2++
                   }
+                  const builtClean = bad2 === 0 && hr.total && hr.placed >= hr.total
+                  if (builtClean) { say('safehouse rebuilt clean - walls, door, bed, furnace, bank all in place'); hutRepairLatch = { lastBad: 0, lastAction: 'rebuild', ts: Date.now() } }
+                  else { dbg('camp: rebuild NOT clean - ' + bad2 + ' cell(s) still off, placed ' + hr.placed + '/' + hr.total); say('rebuilt the safehouse but ' + bad2 + ' cell(s) still off - no destructive retry until it improves'); hutRepairLatch = { lastBad: bad2, lastAction: 'rebuild', ts: Date.now() } }
                 }
-                const builtClean = process.env.VERIFY_SUCCESS_MSG === '0' || (bad2 === 0 && hr && hr.total && hr.placed >= hr.total)
-                if (builtClean) { say('safehouse rebuilt clean - walls, door, bed, furnace, bank all in place'); hutRepairLatch = { lastBad: 0, lastAction: 'rebuild', ts: Date.now() } }
-                else { dbg('camp: rebuild NOT clean - ' + bad2 + ' cell(s) still off, placed ' + (hr && hr.placed) + '/' + (hr && hr.total)); say('rebuilt the safehouse but ' + bad2 + ' cell(s) still off - no destructive retry until it improves'); hutRepairLatch = { lastBad: bad2, lastAction: 'rebuild', ts: Date.now() } }
               }
             }
           }
@@ -2916,45 +2819,27 @@ async function autoBuild (bot, schem, at, opts = {}) {
     if (isStopped()) return { stopped: true, phase: 'provision', placed: 0, total: 0 }
   }
 
-  // 2) build. Every build gets the resource-model fetch: a missing material is
-  // WITHDRAWN from the bank or CRAFTED from holdings on the spot - waitForMaterial
-  // only ever begs a player for things the bot truly cannot obtain itself.
+  // 2) build. Sourcing is OWNED by buildSurvival (#108 ONE_HUT_PATH): a missing material is
+  // WITHDRAWN from the bank, CRAFTED from holdings, or GATHERED - one chain, inside the build,
+  // for every call site. This site used to hand-assemble a `fetch` + `gather` pair; two of the
+  // other four sites assembled a weaker pair or none at all, which is exactly how the camp hut
+  // ended up unable to source anything. All it passes now is the wood/tool planning hints.
   checklistStep('build')
   buildProgress = { phase: 'placing blocks', material: null, have: 0, need: 0 }
-  let lastRestock = 0
-  const fetch = async (n, cnt) => {
-    await resources.acquire(bot, n, cnt || 1, { near: home, isStopped, say, batch: 128, planOpts: { primaryWood } })
-    // MULTI-MATERIAL BATCHING (throughput): we walked to the bank for `n` - while we're here,
-    // top up the OTHER low, banked, still-needed BOM materials in the SAME visit, so a castle
-    // phase doesn't trek back to the bank every time the placement order switches block type.
-    // Throttled (a bank trip is expensive; not every fetch) and withdraw-only (never gathers).
-    if (Date.now() - lastRestock > 30000) {
-      lastRestock = Date.now()
-      try { const extra = await resources.restockFromBank(bot, bom, { near: home, isStopped }); if (extra) dbg('build: batched restock of +' + extra + ' items in one bank visit') } catch (e) { dbg('build: batched restock failed (' + e.message + ')') }
-    }
-  }
-  // SELF-GATHER a mid-build shortfall (the bot NEVER begs). Same reconcile chain + params as the
-  // phase-1 material loop: hide the target (batch is the true shortfall), fence to home, carry the
-  // build keep-out box (avoid) so it never digs/chops inside the footprint - no new dig paths. A
-  // BOUNDED batch (16..64), gated on BUILD_SELF_GATHER. Returns 'unobtainable' | 'gained' | 'none'.
-  const gatherShort = async (name, cnt) => {
-    const batch = Math.min(64, Math.max(cnt || 1, 16)) // never one-block-at-a-time
-    // INV_TOOLBANK: durability-aware fresh-pick count (see the material loop). Flag off => old count.
-    const freshPicks = (bot.inventory ? bot.inventory.items() : []).filter(i => i.name === 'wooden_pickaxe' && ((process.env.INV_DISCIPLINE !== '0' && process.env.INV_TOOLBANK !== '0') ? mining.toolUsesLeft('wooden_pickaxe', i.durabilityUsed || 0) >= Number(process.env.INV_PICK_MIN_USES || 20) : !(i.durabilityUsed > 0))).length
-    const rec = await resources.reconcile(bot, { [name]: batch }, { near: home, hide: [name], planOpts: { primaryWood, freshPickaxes: freshPicks, furnacesNearby: provision.countFurnacesNear(bot) } })
-    if (Object.keys(rec.plan.unobtainable || {}).length) return 'unobtainable'
-    const before = provision.inventoryCounts(bot)[name] || 0
-    try { await resources.runReconciled(bot, rec, { say, isStopped, restoreMovements: restore, homeY: Math.floor(at.y), home, avoid }) } catch (e) { dbg('build gatherShort ' + name + ' failed (' + e.message + ')') }
-    return (provision.inventoryCounts(bot)[name] || 0) > before ? 'gained' : 'none'
-  }
+  // Recomputed per sourcing round (durability-aware fresh-pickaxe count + nearby furnaces), so
+  // the planner's cost model stays current across a long build - hence a function, not a value.
+  const buildPlanOpts = () => ({
+    primaryWood,
+    freshPickaxes: (bot.inventory ? bot.inventory.items() : []).filter(i => i.name === 'wooden_pickaxe' && ((process.env.INV_DISCIPLINE !== '0' && process.env.INV_TOOLBANK !== '0') ? mining.toolUsesLeft('wooden_pickaxe', i.durabilityUsed || 0) >= Number(process.env.INV_PICK_MIN_USES || 20) : !(i.durabilityUsed > 0))).length,
+    furnacesNearby: provision.countFurnacesNear(bot)
+  })
   if (chest || resources.verifiedChests(bot, home, 32).length) {
     await stash()
     const invDirt = provision.inventoryCounts(bot).dirt || 0
     if (invDirt < KEEP_DIRT) await resources.withdrawItems(bot, 'dirt', KEEP_DIRT - invDirt, { near: home }).catch(() => {})
     say('materials stashed - building now')
   } else say('got the materials - building now')
-  const gather = process.env.BUILD_SELF_GATHER !== '0' ? gatherShort : undefined // flag off -> silent wait + skip, still never begs
-  try { return await schematic.buildSurvival(bot, schem, at, { say, isStopped, restoreMovements: restore, fetch, gather, clear: opts.clear, skip }) } finally { buildProgress = null }
+  try { return await schematic.buildSurvival(bot, schem, at, { say, isStopped, restoreMovements: restore, clear: opts.clear, skip, planOpts: buildPlanOpts, home, avoid, bom, batch: 128 }) } finally { buildProgress = null }
 }
 
 // Called by the body when the bot DIES mid-build: just stop the running loop. resumeJob

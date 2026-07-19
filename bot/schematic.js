@@ -49,6 +49,18 @@ if (Build.prototype && !Build.prototype._gpdGuarded) {
   Build.prototype._gpdGuarded = true
 }
 
+// DEBUG SINK. `dbg(...)` was referenced 9 times in this file and DEFINED NOWHERE - every one
+// of those lines threw ReferenceError into a swallowing try/catch (the module-map trap), so the
+// build loop has been silently emitting none of its diagnostics. Defined here and wired from
+// index.js like every other module's sink.
+let dbgSink = null
+function setDebugSink (fn) { dbgSink = fn }
+const dbg = (...a) => {
+  const line = '[schem] ' + a.map(x => String(x)).join(' ')
+  if (process.env.BUILD_DEBUG) console.log(line)
+  if (dbgSink) dbgSink(line)
+}
+
 // Where local .schem files live (also the download cache). Gitignored - runtime data.
 const SCHEM_DIR = path.join(__dirname, 'schematics')
 
@@ -357,42 +369,84 @@ function haveItem (bot, name) {
   return (bot.inventory ? bot.inventory.items() : []).find(i => i.name === name) || null
 }
 
-// Get a material we've run out of. FIRST try opts.fetch (withdraw/craft a batch at the build's
-// chest); if that can't supply it, try opts.gather (a bounded reconcile round through the SAME
-// withdraw>craft>GATHER chain phase 1 uses) BEFORE giving up. The bot NEVER begs a player for
-// materials (operator hard rule) - it goes and gets them, or skips the block.
-// Returns: true = have it now; false = operator stopped; null = gave up after the deadline OR
-// the material is genuinely unobtainable (caller SKIPs it, not hang). The deadline is what stops
-// an unattended from-nothing run from hanging FOREVER on a material it can never obtain
-// (iron_bars, wool, ...) - the old unbounded loop = a permanent stall / death-loop.
-async function waitForMaterial (bot, name, { say, isStopped, fetch, gather, deadlineMs = 240000 }, needed) {
-  if (haveItem(bot, name)) return true
-  // Try our own stash (chest) first, so a self-provisioned build never even gathers if the bank has it.
-  if (fetch) {
-    try { await fetch(name, needed) } catch { /* chest gone / empty - fall through to gathering */ }
-    if (haveItem(bot, name)) return true
-  }
-  const start = Date.now()
-  let attempts = 0 // bounded self-gather rounds (never one-shot-and-skip, never infinite)
-  for (;;) {
-    if (isStopped && isStopped()) return false
-    if (haveItem(bot, name)) return true
-    // retry the stash each pass (a trailing smelt/craft may have delivered since)
-    if (fetch) { try { await fetch(name, needed) } catch {} ; if (haveItem(bot, name)) return true }
-    // SELF-GATHER before any skip: a bounded reconcile round (withdraw>craft>gather). The build
-    // keep-out box + home fence are threaded in by the caller's closure. No chat, ever.
-    if (gather && attempts < 2) {
-      attempts++
-      let r
-      try { r = await gather(name, needed) } catch { r = 'none' }
-      if (r === 'unobtainable') return null // iron_bars/wool: skip NOW, no 240s dead wait
-      if (fetch) { try { await fetch(name, needed) } catch {} } // crafted parents may need assembling
-      if (haveItem(bot, name)) return true
-      if (r === 'none' && attempts >= 2) return null // gathered nothing twice - genuinely stuck, skip
+// ---- THE ONE MATERIAL SOURCER (Root I) ---------------------------------------------------
+// Sourcing is owned by the OPERATION, not assembled per call site. Before this, the five
+// buildSurvival call sites passed four different combinations of `fetch`/`gather` closures, so
+// an under-capable build was representable - and in fact shipped: the camp hut build ran with
+// fetch-only while the self-gather fix sat in a branch that never executed. Those options no
+// longer exist. Every survival build gets the SAME chain (resource-model rule):
+//   withdraw > craft   (resources.acquire - at the bank/site, no roaming)
+//   > gather           (a bounded resources.reconcile round - the bot goes and gets it)
+// The bot NEVER begs a player for materials (operator hard rule): it sources, or it skips the
+// block honestly. Returns 'gained' | 'none' | 'unobtainable' | 'stopped'.
+function makeSourcer (bot, at, opts) {
+  const isStopped = opts.isStopped || (() => false)
+  const say = opts.say || (() => {})
+  // planOpts may be a FUNCTION when a hint has to be recomputed per round (the castle build's
+  // durability-aware fresh-pickaxe count / nearby-furnace tally) - resolved at each use, never cached.
+  const planOptsOf = () => (typeof opts.planOpts === 'function' ? (opts.planOpts() || {}) : (opts.planOpts || {}))
+  const home = opts.home || { x: at.x, y: at.y, z: at.z }
+  const resources = require('./resources.js')
+  let lastRestock = 0
+  const have = name => (provision.inventoryCounts(bot)[name] || 0)
+  return async function source (name, needed) {
+    if (isStopped()) return 'stopped'
+    const want = Math.max(1, needed || 1)
+    const before = have(name)
+    // 1) WITHDRAW > CRAFT. acquire pulls a batch from the bank and crafts the shortfall from
+    //    holdings; it deliberately does NOT roam (that is rung 2), so it is cheap to try first.
+    try {
+      await resources.acquire(bot, name, want, { near: at, isStopped, say, batch: opts.batch || 32, planOpts: planOptsOf() })
+    } catch (e) { dbg('source ' + name + ': acquire failed (' + e.message + ')') }
+    if (have(name) > before) {
+      // MULTI-MATERIAL BATCHING (throughput, absorbed from the castle call site): we already
+      // walked to the bank for `name` - top up the other low, banked, still-needed BOM materials
+      // in the SAME visit instead of trekking back per block type. This is a RATE LIMIT on an
+      // expensive trip, not a behaviour hold: nothing is blocked while it is not due.
+      if (opts.bom && Date.now() - lastRestock > 30000) {
+        lastRestock = Date.now()
+        try { const extra = await resources.restockFromBank(bot, opts.bom, { near: home, isStopped }); if (extra) dbg('source: batched restock of +' + extra + ' items in one bank visit') } catch (e) { dbg('source: batched restock failed (' + e.message + ')') }
+      }
+      return 'gained'
     }
-    if (Date.now() - start > deadlineMs) return null // gave up - skip this material and move on
-    await new Promise(r => setTimeout(r, 2000)) // no gather rung / gather exhausted: wait for a trailing smelt, silently
+    if (isStopped()) return 'stopped'
+    // 2) GATHER a genuine shortfall: one bounded reconcile round through the same chain phase 1
+    //    uses. `hide` makes the batch the true shortfall; the build keep-out box (opts.avoid) and
+    //    the home fence keep it from digging/chopping inside its own footprint - no new dig paths.
+    const batch = Math.min(64, Math.max(want, opts.gatherBatch || 16))
+    let rec
+    try { rec = await resources.reconcile(bot, { [name]: batch }, { near: home, hide: [name], planOpts: planOptsOf() }) } catch (e) { dbg('source ' + name + ': reconcile failed (' + e.message + ')'); return 'none' }
+    if (Object.keys(rec.plan.unobtainable || {}).length) return 'unobtainable' // iron_bars/wool: skip NOW
+    const b2 = have(name)
+    try {
+      await resources.runReconciled(bot, rec, { say, isStopped, restoreMovements: opts.restoreMovements, homeY: Math.floor(at.y), home, avoid: opts.avoid })
+    } catch (e) { dbg('source ' + name + ': gather round failed (' + e.message + ')') }
+    if (have(name) > b2) return 'gained'
+    // a gather round may have delivered a PARENT (logs, not planks) - one more craft attempt
+    try { await resources.acquire(bot, name, want, { near: at, isStopped, say, batch: opts.batch || 32, planOpts: planOptsOf() }) } catch {}
+    return have(name) > before ? 'gained' : 'none'
   }
+}
+
+// Get a material we've run out of, through the ONE sourcer above. Bounded by ATTEMPTS, never by
+// a wall clock: the old 240s/material dead-wait existed only because a fetch-only call site had
+// no way to go and get anything, so it re-polled an empty chest for four minutes per cell. With
+// sourcing owned by the build there is nothing to wait FOR - either a round makes progress or the
+// material is skipped and the build finishes with what it can make.
+// Returns: true = have it now; false = operator stopped; null = skip this material.
+async function waitForMaterial (bot, name, { isStopped, source }, needed) {
+  if (haveItem(bot, name)) return true
+  let fruitless = 0
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (isStopped && isStopped()) return false
+    let r
+    try { r = await source(name, needed) } catch { r = 'none' }
+    if (r === 'stopped') return false
+    if (haveItem(bot, name)) return true
+    if (r === 'unobtainable') return null
+    if (r === 'none' && ++fruitless >= 2) return null // two rounds gained nothing - genuinely stuck
+  }
+  return null
 }
 
 // pathfinder.goto with a hard deadline. Verified live: an unresolvable
@@ -616,14 +670,37 @@ async function clearVolume (bot, schem, at, opts = {}) {
 // from inventory in survival, in repeated passes so blocks that only become
 // reachable/placeable after their neighbours exist get retried (a single pass
 // leaves gaps - verified live). opts: { say(msg), isStopped(), restoreMovements(),
-// clear(bool) - flatten the footprint first }.
-// Returns { placed, total, skipped, stopped, passes }.
+// clear(bool) - flatten the footprint first, planOpts/avoid/bom - threaded into the ONE
+// internal material sourcer (there are no fetch/gather options: see makeSourcer) }.
+// Returns { placed, total, skipped, stopped, passes, refused }.
+//
+// REFUSAL CONTRACT (Root I / Root A). `refused` is 'stopped' | 'unreachable' | null. A build
+// that was entered with a stop signal already live, or that could not reach its site at all,
+// did NOT build anything - and the caller MUST NOT record infrastructure, claim "rebuilt", or
+// latch a repair from it. Live evidence: a 109s "rebuild" made zero sourcing calls and zero
+// placement attempts (wedged, stop signal live at entry) and still printed
+// `hut rebuilt -> 0/94`, then wrote the hut into world memory. Fails CLOSED: any build that
+// placed nothing is refused, never silently reported as a success with placed=0.
 async function buildSurvival (bot, schem, at, opts = {}) {
   const say = opts.say || (() => {})
   const isStopped = opts.isStopped || (() => false)
+  // ENTERED STOPPED: do nothing at all - not even the world scan. A build cannot begin in a
+  // state where every action it would take is meaningless.
+  if (isStopped()) {
+    dbg('build: REFUSED at entry - stop signal already live (nothing placed, nothing claimed)')
+    return { placed: 0, total: 0, skipped: 0, stopped: true, passes: 0, cleared: 0, scaffoldRemoved: 0, refused: 'stopped' }
+  }
+  const source = makeSourcer(bot, at, opts) // the ONE sourcing path (withdraw > craft > gather)
   const build = new Build(schem, bot.world, at)
   const total = build.actions.filter(a => a.type === 'place').length
   let placed = 0; let stopped = false; let passes = 0; let matSkipped = 0
+  // UNREACHABLE detection (condition-based, no timers): K consecutive grounded placement
+  // approaches that all failed while NOTHING has been placed yet = the site cannot be worked
+  // from where the body is (the wedged-builder case). K is a count of real attempts, not elapsed
+  // time, so a slow-but-progressing build is never refused.
+  const UNREACHABLE_K = 12
+  let approachFails = 0
+  let unreachable = false
 
   const moves = buildMovements(bot)
   bot.pathfinder.setMovements(moves)
@@ -736,14 +813,14 @@ async function buildSurvival (bot, schem, at, opts = {}) {
 
       const item = build.getItemForState(action.state)
       if (!item) { build.removeAction(action); continue } // truly unplaceable (tech block)
-      // Ensure we hold the material - pull from our chest (opts.fetch) if we have one, else
-      // GATHER it (opts.gather - the bot never begs). Materials the provisioner already flagged
+      // Ensure we hold the material - through the build's OWN sourcer (withdraw > craft >
+      // gather; the bot never begs). Materials the provisioner already flagged
       // UNOBTAINABLE (or gave up on) are in opts.skip: don't even wait - drop those placements so
       // the build finishes with what it CAN make instead of hanging forever on the first iron_bar.
       if (!haveItem(bot, item.name)) {
         if (opts.skip && opts.skip.has(item.name)) { build.removeAction(action); matSkipped++; continue }
-        const got = await waitForMaterial(bot, item.name, { say, isStopped, fetch: opts.fetch, gather: opts.gather, deadlineMs: opts.materialDeadlineMs }, action.count)
-        bot.pathfinder.setMovements(moves) // a fetch/gather may have swapped in gatherMovements - restore the build profile
+        const got = await waitForMaterial(bot, item.name, { isStopped, source }, action.count)
+        bot.pathfinder.setMovements(moves) // sourcing may have swapped in gatherMovements - restore the build profile
         if (got === false) { stopped = true; break }        // operator stopped
         if (got === null) { // gave up after the deadline - skip this material everywhere
           if (opts.skip) opts.skip.add(item.name)
@@ -754,10 +831,15 @@ async function buildSurvival (bot, schem, at, opts = {}) {
       const ok = await tryPlace(bot, build, action, item)
       if (ok) {
         build.removeAction(action); deferred.delete(key(action.pos))
-        placed++; placedSinceDrain++
+        placed++; placedSinceDrain++; approachFails = 0
         if (placed % 25 === 0) say(`…${placed}/${total} blocks placed`)
       } else {
         deferred.add(key(action.pos)) // couldn't reach/place now - retry after progress
+        if (placed === 0 && ++approachFails >= UNREACHABLE_K) {
+          unreachable = true
+          dbg('build: REFUSED - ' + approachFails + ' consecutive placement approaches failed with nothing placed; the site is not workable from here')
+          break
+        }
       }
     }
     // Tidy up: pull down the scaffold blocks we placed to gain height.
@@ -778,7 +860,15 @@ async function buildSurvival (bot, schem, at, opts = {}) {
     if (opts.restoreMovements) opts.restoreMovements() // back to the anti-grief profile
   }
   const skipped = build.actions.filter(a => a.type === 'place').length + matSkipped
-  return { placed, total, skipped, stopped, passes, cleared, scaffoldRemoved }
+  // FAIL CLOSED: a build with work to do that placed NOTHING is refused, never a success with
+  // placed=0. 'stopped' when the operator/scheduler pulled the body; 'unreachable' when the site
+  // could not be worked. (A run that placed nothing purely because every material was skipped as
+  // unobtainable is also refused - the caller must not record a structure it did not build.)
+  let refused = null
+  if (total > 0 && placed === 0) refused = stopped ? 'stopped' : 'unreachable'
+  if (unreachable) refused = 'unreachable'
+  if (refused) dbg('build: refused=' + refused + ' (placed ' + placed + '/' + total + ', skipped ' + skipped + ') - NOTHING may be claimed or remembered from this pass')
+  return { placed, total, skipped, stopped, passes, cleared, scaffoldRemoved, refused }
 }
 
 module.exports = {
@@ -793,5 +883,6 @@ module.exports = {
   billOfMaterials,
   materialsSummary,
   buildSurvival,
-  clearVolume
+  clearVolume,
+  setDebugSink
 }

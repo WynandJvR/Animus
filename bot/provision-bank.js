@@ -135,6 +135,16 @@ async function ensureChest (bot, opts = {}) {
   const knownC = await recallAndReach(bot, 'chest', chestId, 24, async () => true)
   if (knownC) { rememberInfra('chest', knownC.position); return knownC }
   if (countItem(bot, 'chest') === 0) {
+    // ASK THE RESOURCE MODEL FIRST (#108, same rule as the bed in #107). This used to plan
+    // straight from the pack: `recipesFor` sees carried PLANKS only, so a bot holding a stack of
+    // logs - or a bank full of planks - threw "cannot craft a chest (need 8 planks)" and the
+    // treasury restore was deferred (live 16:15:40). acquire is withdraw > craft; it may return
+    // without the item (bank empty, nothing craftable) and the local craft below still runs.
+    try {
+      await require('./resources.js').acquire(bot, 'chest', 1, { near: opts.home, isStopped: opts.isStopped, say: opts.say, planOpts: opts.planOpts })
+    } catch (e) { dbg('  ensureChest: acquire failed (' + e.message + ')') }
+  }
+  if (countItem(bot, 'chest') === 0) {
     const table = await P().ensureTable(bot, opts)
     // Unified navigator (door pre-flight crosses into the hut if the table's inside); tight at-base budgets.
     if (bot.entity.position.distanceTo(table.position) > 3) { try { await navigate.navigateTo(bot, new goals.GoalNear(table.position.x, table.position.y, table.position.z, 2), { timeoutMs: 15000, deadlineMs: 35000, climb: false, budgets: { door: 2, pit: 0, nudge: 1, stepout: 1 }, label: 'chest-table-reach' }) } catch {} }

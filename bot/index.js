@@ -137,6 +137,7 @@ navigate.setDebugSink(noteDebug)
 require('./pathfix.js').setDebugSink(noteDebug) // [verify] place/dig world-recheck traces
 require('./pathfix.js').setProgressSink(commands.touchProgress) // [S7] a pathfix-VERIFIED place/break -> the forward-progress heartbeat
 require('./scaffold.js').setDebugSink(noteDebug) // [scaffold] registry/teardown traces
+require('./schematic.js').setDebugSink(noteDebug) // [schem] build loop + material sourcing traces (dbg() here was undefined until #108)
 require('./planner.js').setDebugSink(noteDebug) // [plan] re-planning goal-driver traces (rounds/strikes/relocates)
 arbiter.setDebugSink(noteDebug) // [arb] maneuver begin/end/expire + reflex deferrals
 // A build job saved to disk survived a process restart - let the operator know it's resumable.
