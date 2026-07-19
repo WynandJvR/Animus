@@ -359,6 +359,11 @@ async function ensureDryHomeFarm (bot, home, hut, { isStopped = () => false, say
   if (!hoe) {
     try {
       const res = require('./resources.js')
+      // #96: the dry establish IS the survival plan - but it is usually dispatched from a ladder
+      // rung whose watchdog stop-latch is still armed, so runPlan's tasks skipped in ~6ms and the
+      // hoe chain NEVER ran (live: every ladder-context attempt, day or night). Clear the stale
+      // latch at this deliberate fresh dispatch; the watchdog re-arms if we genuinely stall.
+      if (process.env.DRY_FARM_CLEARSTOP !== '0') { try { S().clearSurvStop() } catch {} }
       // #88: the chest cache goes stale-blind when the post-stash read fails (standing-on-chest) -
       // a stale-empty cache made reconcile plan a multi-minute wood gather for a hoe/planks the bank
       // held. Force a fresh bank read before planning; best-effort (cache still used if it fails).
