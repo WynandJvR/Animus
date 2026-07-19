@@ -1335,6 +1335,18 @@ const FILLER_RE = scaffold.FILLER_RE // ONE filler list - scaffold.js owns it (t
 // (grabNearbyOre moved to provision-mining.js)
 
 async function runGather (bot, item, count, opts = {}) {
+  // #91 GATHER_NIGHT_GATE (default on): a NAKED bot must not roam the dark for materials - the
+  // headline night rule (ladder treks #41P3, gearup #90) now covers the LAST outbound path: the
+  // hoe's oak gather ranged 40-60b at night and died 3x in 4 minutes (live 09:44-47Z). Armored
+  // bots and eternal-night keep working; the next daylight pass resumes the gather naturally.
+  if (process.env.GATHER_NIGHT_GATE !== '0') {
+    try {
+      if (isNight(bot) && armorPieceCount(bot) < 1 && !nightStuck(bot)) {
+        dbg('runGather ' + item + ': naked at night - deferring the roam to dawn')
+        return 0
+      }
+    } catch {}
+  }
   // Anchor to the PERSISTENT surface (homeY, from the build/provision run) if given, not
   // wherever we happen to be standing now - so a batch that starts underground (previous
   // climb-out fell short, or we fell in a cave) still knows where the real surface is and
