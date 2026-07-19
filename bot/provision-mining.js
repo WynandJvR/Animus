@@ -112,8 +112,17 @@ async function digStaircaseUp (bot, targetY, opts = {}) {
   }
   const startY = Math.floor(bot.entity.position.y)
   let di = 0; let stuck = 0
+  // #97 ESCAPE_DIGS_HURT (default on): when this staircase IS the escape (opts.escape - the
+  // climbToSurface/recovery path), only lava/fire may abort it. mineDanger's low-hp clause exists
+  // for MINING ("don't keep mining hurt") but it VETOED every wedge escape at hp<12 - the hp1 bot
+  // sat toolless in a stone pocket forever because its own safety check forbade digging out
+  // (live 11:24-11:30Z: climb -> no progress on every watchdog cycle). A hurt player digs out.
+  const escapeMode = process.env.ESCAPE_DIGS_HURT !== '0' && !!opts.escape
+  const dangerNow = () => escapeMode
+    ? !!(bot.entity && (bot.entity.isInLava || bot.entity.onFire))
+    : mineDanger(bot)
   while (Math.floor(bot.entity.position.y) < targetY && !isStopped() && stuck < 8) {
-    if (LAVA_SAFE && mineDanger(bot)) break // #41: in-lava/on-fire/hostile/low-hp -> stop digging & hand control back (the 3 sibling primitives already bail; this one didn't - death 1 climbed ~9s while burning)
+    if (LAVA_SAFE && dangerNow()) break // #41: in-lava/on-fire (+hostile/low-hp when NOT escaping) -> stop digging & hand control back
     if (Math.floor(bot.entity.position.y) > startY && !hasSolidCeiling(bot, 20, { ignoreLeaves: true })) break // broke into open sky - done
     const y0 = Math.floor(bot.entity.position.y)
     const feet = bot.entity.position.floored()
@@ -202,7 +211,7 @@ async function climbToSurface (bot, targetY, opts = {}) {
     if (need()) {
       if (bot.pathfinder) bot.pathfinder.setMovements(climbMovements(bot))
       const y0 = bot.entity.position.y
-      try { await digStaircaseUp(bot, targetY, { isStopped }) } catch (e) { if (process.env.CLIMB_DEBUG) console.error('[climb] staircase threw', e.message) }
+      try { await digStaircaseUp(bot, targetY, { isStopped, escape: true }) } catch (e) { if (process.env.CLIMB_DEBUG) console.error('[climb] staircase threw', e.message) } // #97: climbToSurface IS the escape - only lava/fire may abort the dig
       if (process.env.CLIMB_DEBUG) console.error(`[climb] staircase ${y0.toFixed(1)} -> ${bot.entity.position.y.toFixed(1)} (target ${targetY})`)
     }
     // 2) PILLAR STRAIGHT UP as a fallback - if the staircase stalls (awkward/open cavern
