@@ -98,6 +98,32 @@ t('BOTH regimes: flag OFF never admits (byte-for-byte); flag ON admits only in a
   assert.strictEqual(wouldAdmit(true, { ...SAFE, crisisActive: true }, {}), false, 'crisis -> defer even with the flag on')
 })
 
+// ---- (d) #89 sealDescentsGate - same calm-window shape, safeHp defaults to 12 --------
+t('sealDescentsGate: all guards satisfied -> fire; default safeHp is 12 (NOT 14)', () => {
+  assert.strictEqual(H.sealDescentsGate(SAFE, { safeHp: 12 }), true)
+  // the whole point of the lower default: hp 12 fires WITHOUT an explicit opt (secureBase would defer)
+  assert.strictEqual(H.sealDescentsGate({ ...SAFE, hp: 12 }), true, 'hp 12 admits at the 12 default')
+  assert.strictEqual(H.sealDescentsGate({ ...SAFE, hp: 12 }, { safeHp: 14 }), false, 'the 14 override still defers hp 12')
+  assert.strictEqual(H.secureBaseGate({ ...SAFE, hp: 12 }), false, 'secureBase (default 14) would NOT fire at hp 12 - the divergence this step needs')
+})
+
+t('sealDescentsGate: any single guard false -> defer (crisis/night/away/hungry/low-hp)', () => {
+  assert.strictEqual(H.sealDescentsGate({ ...SAFE, day: false }, {}), false, 'night defers')
+  assert.strictEqual(H.sealDescentsGate({ ...SAFE, atHome: false }, {}), false, 'away defers')
+  assert.strictEqual(H.sealDescentsGate({ ...SAFE, fed: false }, {}), false, 'hungry defers')
+  assert.strictEqual(H.sealDescentsGate({ ...SAFE, crisisActive: true }, {}), false, 'active crisis defers (yield to survival)')
+  assert.strictEqual(H.sealDescentsGate({ ...SAFE, hp: 8 }, {}), false, 'hp below the 12 floor defers')
+  assert.strictEqual(H.sealDescentsGate({ ...SAFE, hp: undefined }, {}), false, 'unknown hp defers')
+})
+
+t('BOTH regimes: SEAL_HOME_DESCENTS=0 never admits; ON admits only in a calm window', () => {
+  const wouldSeal = (flagOn, state, opts) => flagOn && H.sealDescentsGate(state, opts)
+  assert.strictEqual(wouldSeal(false, SAFE, { safeHp: 12 }), false, 'SEAL_HOME_DESCENTS=0 -> never admit')
+  assert.strictEqual(wouldSeal(false, { ...SAFE, day: false }, {}), false)
+  assert.strictEqual(wouldSeal(true, SAFE, { safeHp: 12 }), true, 'calm window -> admit')
+  assert.strictEqual(wouldSeal(true, { ...SAFE, crisisActive: true }, {}), false, 'crisis -> defer even with the flag on')
+})
+
 // ---- facade wiring (the split can silently drop a re-export) -------------------------
 t('facade: provision.js re-exports secureBase + secureBaseGate, and the gate IS the model fn', () => {
   assert.strictEqual(typeof p.secureBase, 'function', 'secureBase re-exported')
@@ -105,6 +131,13 @@ t('facade: provision.js re-exports secureBase + secureBaseGate, and the gate IS 
   assert.strictEqual(p.secureBaseGate, H.secureBaseGate, 're-export IS the model fn, not a drifting copy')
   // the pure gate behaves identically through the facade
   assert.strictEqual(p.secureBaseGate(SAFE, { safeHp: 14 }), true)
+})
+
+t('facade: provision.js re-exports sealHomeDescents + sealDescentsGate (#89), gate IS the model fn', () => {
+  assert.strictEqual(typeof p.sealHomeDescents, 'function', 'sealHomeDescents re-exported')
+  assert.strictEqual(typeof p.sealDescentsGate, 'function', 'sealDescentsGate re-exported')
+  assert.strictEqual(p.sealDescentsGate, H.sealDescentsGate, 're-export IS the model fn, not a drifting copy')
+  assert.strictEqual(p.sealDescentsGate(SAFE, { safeHp: 12 }), true)
 })
 
 console.log(failures ? ('\n' + failures + ' FAILED') : '\nALL PASS')

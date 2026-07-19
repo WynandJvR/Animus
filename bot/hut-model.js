@@ -333,6 +333,19 @@ function secureBaseGate ({ hp, fed, day, atHome, crisisActive } = {}, { safeHp =
   return typeof hp === 'number' && hp >= safeHp
 }
 
+// sealDescentsGate() (#89 SEAL_HOME_DESCENTS): same calm-window shape as secureBaseGate - cap the
+// cave/shaft mouths that feed mobs into the hut only in daylight, at home, healthy, fed, no active
+// crisis. The ONE difference is `safeHp` defaults to 12, not 14: sealing the underground ramps is
+// the PREREQUISITE for a night being survivable at all, so it must not wait on a 14 that food
+// scarcity rarely allows - the exact trap that kept secureBase from ever running. Still pure.
+function sealDescentsGate ({ hp, fed, day, atHome, crisisActive } = {}, { safeHp = 12 } = {}) {
+  if (crisisActive) return false
+  if (!day) return false
+  if (!atHome) return false
+  if (!fed) return false
+  return typeof hp === 'number' && hp >= safeHp
+}
+
 module.exports = {
   REBUILD_MIN,
   cellClass,
@@ -341,6 +354,7 @@ module.exports = {
   baseTorchAnchors,
   secureBaseRemaining,
   secureBaseGate,
+  sealDescentsGate,
   DIMS,
   WALL_RE,
   DOOR_RE,

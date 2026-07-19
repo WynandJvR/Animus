@@ -23,7 +23,7 @@ const worldMemory = require('./world-memory.js')
 const { loadWorldMem, saveWorldMem, listInfra, rememberInfra, recallInfra, knownBed,
   gearupState, proactiveGearupGate } = worldMemory
 const provHut = require('./provision-hut.js')
-const { hutAnchor, insideOwnStructure, ownHutAt, maintainHome, secureBase, secureBaseGate } = provHut
+const { hutAnchor, insideOwnStructure, ownHutAt, maintainHome, secureBase, secureBaseGate, sealHomeDescents, sealDescentsGate } = provHut
 const provBank = require('./provision-bank.js')
 const { resolveBankCell, depositMaterials, withdrawItem, chestCounts, consolidateBank,
   lonelyFurnace, consolidateFurnaces, litterPatrol } = provBank
@@ -411,6 +411,35 @@ async function maintenancePass (bot, opts = {}) {
       })()
       if (secureBaseDue && hutAnchor() && due('secureBase', Number(process.env.SECURE_BASE_EVERY_MS || 1200000))) {
         try { const r = await secureBase(bot, { hut: hutAnchor(), isStopped, say }); if (r && r.placed) stepDone('secureBase(' + r.placed + ')') } catch (e) { dbg('  maint: secureBase failed (' + e.message + ')') }
+      }
+      if (between()) return { ok: true, steps, reason: 'bail:survival' }
+    }
+
+    // STEP 9c: SEAL_HOME_DESCENTS (#89) - cap the cave/shaft mouths near home. secureBase (9b) lights
+    // the SURFACE ring but nothing closes the UNDERGROUND routes: the bot's own abandoned mining
+    // descents are open ramps from the mob-filled cave up to the bed (live 08:17-08:20Z: 5 spawn-camp
+    // deaths in 4 min; sleep is impossible when a zombie loiters in the bed's 8x5 box, walls or not).
+    // Same admission shape as 9b's secureBase: the PURE sealDescentsGate owns the guards (day + at
+    // home + hp>=SAFE_HP + fed + no crisis), but with safeHp 12 - sealing the ramps is the PREREQUISITE
+    // for a survivable night, so it must not wait on a 14 that food scarcity rarely allows (the trap
+    // that kept secureBase from ever running). sealHomeDescents' own maxCaps budget + deadline +
+    // isStopped keep it BOUNDED and YIELD to survival. Held to the !opportunistic/!nightIndoorOnly
+    // envelope. The whole block (step AND its between-guard) is inside the flag gate, so
+    // SEAL_HOME_DESCENTS=0 -> nothing here runs and no _maintState is touched (byte-for-byte).
+    if (process.env.SEAL_HOME_DESCENTS !== '0') {
+      const sealDue = !nightIndoorOnly && !opportunistic && (() => {
+        try {
+          return sealDescentsGate({
+            hp: bot.health,
+            fed: (bot.food != null ? bot.food : 20) >= Number(process.env.SEAL_FED_MIN || 14),
+            day: day(),
+            atHome: atHome(),
+            crisisActive: (() => { try { return P().survivalNeed(bot, { foodThreshold: crisisFood }) != null } catch { return false } })()
+          }, { safeHp: Number(process.env.SEAL_SAFE_HP || 12) })
+        } catch { return false }
+      })()
+      if (sealDue && hutAnchor() && due('sealDescents', Number(process.env.SEAL_DESCENTS_EVERY_MS || 1200000))) {
+        try { const r = await sealHomeDescents(bot, { hut: hutAnchor(), isStopped, say }); if (r && r.capped) stepDone('sealDescents(' + r.capped + ')') } catch (e) { dbg('  maint: sealDescents failed (' + e.message + ')') }
       }
       if (between()) return { ok: true, steps, reason: 'bail:survival' }
     }

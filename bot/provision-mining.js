@@ -519,6 +519,12 @@ async function digStaircaseDown (bot, targetY, opts = {}) {
   return { reached: Math.floor(bot.entity.position.y) <= targetY + 1, reason: 'at level', blocked: null }
 }
 
+// #89 SEAL_HOME_DESCENTS interaction: this re-enter runs under the active gather/travel movement
+// profile, whose blocksCantBreak denies every non-leaf block (gatherMovements = leaves only), so the
+// pathfinder can NOT dig through a filler cap placed over the entrance - a capped entrance reads as
+// "staircase gone/blocked" below and the mine gets forgotten + re-dug fresh. sealHomeDescents
+// therefore SKIPS the single most-recent (active) mine and only caps dormant older ones; if that
+// policy ever changes, this descent would need a canDig profile to punch the 1-block cap first.
 async function enterExistingMine (bot, mine, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const here = bot.entity.position

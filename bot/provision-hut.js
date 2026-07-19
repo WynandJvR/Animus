@@ -868,8 +868,126 @@ async function secureBase (bot, opts = {}) {
   return { placed, ringTorches: bl.torched.length, anchors: anchors.length, remaining: Math.max(0, remaining.length - placed), sealed }
 }
 
+// SEAL_HOME_DESCENTS (#89, default ON): CAP the cave/shaft mouths that funnel mobs up into the hut.
+// secureBase (#67) only torches the SURFACE ring - nothing closes the UNDERGROUND routes. The bot's
+// own abandoned mining descents (staircase entrances, failed shaft starts) are open ramps from the
+// mob-filled cave straight up to the bed (live 08:17-08:20Z: 5 spawn-camp deaths in 4 min; and
+// vanilla refuses sleep whenever a monster loiters in the bed's 8x5 box, walls notwithstanding).
+// This bounded CALM-window step caps those openings within SEAL_RADIUS of home:
+//   1) MINE-REGISTRY entrances (world-mem mines {x,z,top}): if the entrance column is an OPEN mouth
+//      (airish cells leading down), place a solid filler cap at the entrance cell (x,top,z). The mine
+//      record is KEPT (a future armored run may deliberately re-open it). The SINGLE most-recent
+//      (active) mine is SKIPPED: enterExistingMine re-enters under gatherMovements, whose
+//      blocksCantBreak denies every non-leaf block, so it can NOT dig through a cap - capping the
+//      active mine would only orphan it (it forgets the record and re-digs elsewhere). Dormant older
+//      mines are safe to seal (a later run re-opens them from scratch anyway).
+//   2) DEATH-CLUSTER columns (grave ledger, last-48h, unretrieved, within SEAL_RADIUS): probe the
+//      surface column above each death spot; an open hole (>=3 consecutive airish cells from the
+//      local surface down) gets capped at its surface cell.
+// Anti-grief (HARD): fills ONLY airish cells; NEVER on/inside the hut or its apron, the wheat-farm
+// footprint, registered scaffold, or the castle build zone; every cap goes through the verified
+// placeAt wrapper (world re-read). Bounded (<=SEAL_MAX_PER_PASS caps, SEAL_DEADLINE_MS deadline) and
+// YIELDS to survival (isStopped re-checked before each cap). Material: FILLER_RE from the pack, else
+// withdraw <=8 cobble from the bank (best-effort), else skip honestly. SEAL_HOME_DESCENTS=0 -> the
+// maintenance step never calls this (byte-for-byte); a direct call still early-returns here.
+async function sealHomeDescents (bot, opts = {}) {
+  if (process.env.SEAL_HOME_DESCENTS === '0') return { skipped: 'disabled', capped: 0 }
+  const isStopped = opts.isStopped || (() => false)
+  const say = opts.say || (() => {})
+  const hut = opts.hut || hutAnchor()
+  if (!hut) return { skipped: 'no hut', capped: 0 }
+
+  const radius = Math.max(8, Math.min(64, Number(process.env.SEAL_RADIUS || 32)))
+  const maxCaps = Math.max(1, Number(process.env.SEAL_MAX_PER_PASS || 4))
+  const deadline = Date.now() + Number(process.env.SEAL_DEADLINE_MS || 90000)
+
+  const scaffoldMod = (() => { try { return require('./scaffold.js') } catch { return null } })()
+  const FILLER_RE = (scaffoldMod && scaffoldMod.FILLER_RE) || /^(cobblestone|dirt|coarse_dirt|stone|gravel|andesite|diorite|granite|cobbled_deepslate|netherrack|tuff|deepslate)$/
+  const haveFiller = () => (bot.inventory ? bot.inventory.items() : []).some(i => FILLER_RE.test(i.name))
+  // MATERIAL: cobble/dirt from the pack; top up from the bank if bare (never BLOCK on it). Honest skip if none.
+  if (!haveFiller()) {
+    try { const res = require('./resources.js'); await res.withdrawItems(bot, 'cobblestone', 8, { near: hut, maxDist: 64 }) } catch {}
+  }
+  if (!haveFiller()) { dbg('  seal: no filler aboard and none banked - skipping this pass'); return { skipped: 'no filler', capped: 0 } }
+
+  // anti-grief: cells we must NEVER cap. onHutApron covers the hut box + a 2-block apron ring (XZ).
+  const onFarm = (x, y, z) => { try { return !!(scaffoldMod && scaffoldMod.onFarmFootprint(new Vec3(x, y, z))) } catch { return false } }
+  const isScaffold = (x, y, z) => { try { return !!(scaffoldMod && scaffoldMod.isScaffold({ x, y, z })) } catch { return false } }
+  const inBuild = (x, z) => { try { return !!P().inBuildZone(x, z) } catch { return false } }
+  const protectedCell = (x, y, z) =>
+    !!onHutApron(bot, new Vec3(x, y, z)) ||
+    onFarm(x, y, z) || onFarm(x, y - 1, z) ||
+    isScaffold(x, y, z) ||
+    inBuild(x, z)
+
+  // an OPEN descent mouth worth capping: the cap cell itself is airish (never replace a solid) AND
+  // the shaft below leads down (>=3 consecutive airish cells from the cap cell going down).
+  const openMouth = (x, capY, z) => {
+    let run = 0
+    for (let dy = 0; dy <= 3; dy++) {
+      const b = bot.blockAt(new Vec3(x, capY - dy, z))
+      if (b && AIRISH(b.name)) run++
+      else break
+    }
+    return run >= 3
+  }
+  // death-hole surface cell: feet-level air over the highest intact NEIGHBOUR ground (matches the
+  // mine 'top' = feet-Y semantics). null when no intact neighbour surface is loaded around it.
+  const deathCapY = (x, z) => {
+    let top = null
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      for (let y = hut.y + 5; y >= hut.y - 8; y--) {
+        const g = bot.blockAt(new Vec3(x + dx, y, z + dz)); const air = bot.blockAt(new Vec3(x + dx, y + 1, z + dz))
+        if (g && g.boundingBox === 'block' && !AIRISH(g.name) && air && AIRISH(air.name)) { if (top == null || y + 1 > top) top = y + 1; break }
+      }
+    }
+    return top
+  }
+
+  // 1) MINE ENTRANCES - skip the single most-recent (active) mine; only dormant older ones.
+  const mines = (() => { try { return worldMemory.loadMines() } catch { return [] } })()
+  const active = mines.length ? mines.reduce((a, b) => ((b.at || 0) > (a.at || 0) ? b : a)) : null
+  const caps = []
+  for (const m of mines) {
+    if (m === active) continue
+    if (m.top == null) continue
+    if (Math.hypot(m.x - hut.x, m.z - hut.z) > radius) continue
+    caps.push({ x: m.x, y: m.top, z: m.z, kind: 'mine-entrance' })
+  }
+  // 2) DEATH-CLUSTER HOLES - last-48h, unretrieved, within radius.
+  const now = Date.now()
+  const ledger = (() => { try { return require('./grave.js').ledger() } catch { return [] } })()
+  for (const d of ledger) {
+    if (!d || d.x == null || d.retrieved) continue
+    if (now - (d.at || 0) >= 48 * 3600 * 1000) continue
+    if (Math.hypot(d.x - hut.x, d.z - hut.z) > radius) continue
+    const cy = deathCapY(Math.floor(d.x), Math.floor(d.z))
+    if (cy != null) caps.push({ x: Math.floor(d.x), y: cy, z: Math.floor(d.z), kind: 'death-hole' })
+  }
+
+  // nearest-first so a bounded visit seals the closest ramps; place the verified caps.
+  const here = (bot.entity && bot.entity.position) || new Vec3(hut.x + 2, hut.y, hut.z + 2)
+  caps.sort((a, b) => Math.hypot(a.x - here.x, a.z - here.z) - Math.hypot(b.x - here.x, b.z - here.z))
+  let capped = 0
+  for (const c of caps) {
+    if (isStopped() || Date.now() > deadline || capped >= maxCaps) break
+    const { x, y, z, kind } = c
+    if (protectedCell(x, y, z)) continue
+    if (!haveFiller()) { dbg('  seal: out of filler - ' + (caps.length - capped) + ' descent(s) still open (resume next visit)'); break }
+    if (!openMouth(x, y, z)) continue
+    const cell = new Vec3(x, y, z)
+    if (bot.entity && bot.entity.position.distanceTo(cell) > 4) { try { await gotoWithTimeout(bot, new goals.GoalNear(x, y, z, 3), 10000) } catch {} }
+    // re-read after the walk (chunk may have (un)loaded / the world moved): re-gate before placing.
+    if (protectedCell(x, y, z) || !openMouth(x, y, z)) continue
+    if (await placeAt(bot, cell, FILLER_RE)) { capped++; dbg('  seal: capped descent at ' + x + ',' + y + ',' + z + ' (' + kind + ')') } else dbg('  seal: could not cap ' + kind + ' at ' + x + ',' + y + ',' + z + ' (' + placeAt.lastFail + ')')
+  }
+  if (capped) say('sealed ' + capped + ' open cave/shaft mouth(s) near home so mobs stop funnelling up to the hut')
+  return { capped, candidates: caps.length }
+}
+
 module.exports = {
   setDebugSink, insideHutBox,
   insideHutBox, ownHutAt, onHutApron, insideOwnStructure, hasSolidCeiling, hutAnchor, hutReader, stepOffApron, ensureHutApron, healHomeCrater, ensureHutBed, freeInteriorCell, findHutDoorway, hutFreeCells, furnitureInHut, furnishHut, stationInHut, stationSlot, loadHutSchem, reconcileInfra, cleanupHutInterior, repairHutStructure, recallAndReach, maintainHut, maintainHome,
-  secureBase, secureBaseGate: hutModel.secureBaseGate
+  secureBase, secureBaseGate: hutModel.secureBaseGate,
+  sealHomeDescents, sealDescentsGate: hutModel.sealDescentsGate
 }
