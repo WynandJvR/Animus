@@ -1170,7 +1170,7 @@ async function worldTidy (bot, opts = {}) {
   // the sealer/scaffold still has filler on hand). Never blocks the pass; any failure is swallowed.
   if (reclaimed) {
     try {
-      const bank = P().resolveBankCell(bot)
+      const bank = S().resolveBankCell(bot) // #94 fix: resolveBankCell lives on the __siblings bridge, not the facade (caught by the core builder's bridge audit)
       if (bank) {
         const keepEach = Math.max(0, Number(process.env.TIDY_KEEP_FILLER || 64))
         const deposits = []

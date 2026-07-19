@@ -29,6 +29,7 @@ const access = require('./access.js')
 const schematic = require('./schematic.js')
 const loghistory = require('./loghistory.js') // compact rolling state time-series + heartbeat (observability)
 const scheduler = require('./scheduler.js') // S4: pure survival-tier decision core (commandClass/admissible/pickJob) - wires the busy-gate + the tick
+const schedulerCore = require('./scheduler-core.js') // #65 DYNAMIC_CORE Phase 1: the PURE utility choosing layer (flag DYNAMIC_CORE, default OFF - soaked offline before the coordinator flips it live)
 const maintain = require('./maintain.js') // #40 F2: pure buffer needs() - to detect a pending food (pack/bank) need when an opp window is abandoned
 const foodSec = require('./food.js') // #40 F3.2: pure busy-preempt food threshold (FOOD_SURVIVAL raises it 6 -> 10)
 const pov = require('./pov.js') // GUI-OVERHAUL §2: sliced DDA raycaster behind GET /pov (all logic lives in pov.js)
@@ -968,6 +969,23 @@ if (SCHED_ON) {
     catch (e) { note('(sched) ' + name + ' failed: ' + e.message); if (CYCLE_DETECT_ON) { try { commands.recordOutcome('sched:' + name, false, e.message) } catch {} } } // task #34: today this only note()s+forgets; feed the outcome ring so a re-dispatch loop (gather held x8) is SEEN. Flag-gated so CYCLE_DETECT=0 leaves lastOutcome byte-identical.
     finally { schedJob = null }
   }
+  // #65 DYNAMIC_CORE Phase 1 adapter: run the PURE schedulerCore.chooseActivity and shape its verdict
+  // into the SAME `pick` object pickJob returns, so the whole dispatch block below is unchanged. The
+  // caller (here) owns the clock - it passes Date.now() in so the pure fn never reads one itself. On a
+  // build/idle verdict (job=null) it delegates to pickJob, whose survival tier the core has already
+  // cleared, so pickJob returns exactly the same build/resume/brain/maintain/idle decision it would.
+  const coreAdapter = (s) => {
+    const aj = s.activeJob || null
+    const c = schedulerCore.chooseActivity(s, {
+      activeJob: aj && aj.name,
+      activeCls: aj && aj.cls,
+      lastProgressAt: aj && aj.lastProgressAt, // verified-progress timestamp (caller-provided; drives the anti-thrash bonus)
+      now: Date.now()                          // caller's clock - the pure core compares timestamps, never reads a clock
+    })
+    note('(core) chose ' + (c.job || 'build/idle') + ': ' + c.reason)
+    if (c.job == null) return scheduler.pickJob(s) // build-may-proceed -> today's non-survival tail (parity: the core already cleared the survival tier)
+    return { job: c.job, cls: c.cls, reason: c.reason, preempt: !!c.preempt, bootstrap: c.bootstrap }
+  }
   const tick = async () => {
     const myGen = tickGen // S7 tick-liveness: capture this chain's generation; the finally only reschedules if still current
     schedLastTickAt = Date.now() // S7: liveness stamp - the watchdog re-arms the chain if this goes >90s stale
@@ -986,7 +1004,14 @@ if (SCHED_ON) {
       if (RESILIENT_ON && commands.isPostDeathRecovery && commands.isPostDeathRecovery()) {
         try { if (scheduler.recoveryReady(s).ready) { commands.clearPostDeathRecovery(); note('(sched) recovery complete - post-death latch cleared, the build may resume') } } catch {}
       }
-      const pick = scheduler.pickJob(s)
+      // #65 DYNAMIC_CORE Phase 1 (the CHOOSING layer): behind DYNAMIC_CORE (default OFF - soaked
+      //   offline; the coordinator flips it after live parity). When ON, the PURE schedulerCore
+      //   chooseActivity replaces pickJob's SELECTION: same snapshot in, the same pick shape out
+      //   (job/cls/reason/preempt/bootstrap), so every downstream dispatch below is untouched. When
+      //   the core returns job=null (build/idle may proceed) it hands off to pickJob's existing
+      //   build/resume/brain/maintain/idle TAIL - the core only owns the survival + bootstrap-vs-build
+      //   choice, not the progress plumbing. DYNAMIC_CORE!=1 -> today's pickJob path, byte-for-byte.
+      const pick = process.env.DYNAMIC_CORE === '1' ? coreAdapter(s) : scheduler.pickJob(s)
       // 3. OBSERVABILITY: log on CHANGE (not every tick). Dispatches/outcomes always log (rare).
       const nearest = (s.graves || []).filter(g => g && !g.dangerous && g.value > 0 && g.dist != null).sort((a, b) => a.dist - b.dist)[0]
       const key = pick ? (pick.job + '|' + pick.preempt) : 'idle'
