@@ -300,6 +300,10 @@ async function levelPlotCell (bot, cx, baseY, cz, { isStopped = () => false } = 
 // false to defer to the caller's fallback.
 async function ensureDryHomeFarm (bot, home, hut, { isStopped = () => false, say = () => {}, avoid = null, expand = false } = {}) {
   if (!hut) return false
+  // #96b: clear the stale watchdog stop-latch for the WHOLE establishment, not just the hoe block -
+  // the seed withdraw/grass-gather step was still being 6ms-killed by a latch armed at dispatch
+  // (live 10:50: hoe crafted, then 'no seeds (bank + grass empty)' with 4 seeds in the bank).
+  if (process.env.DRY_FARM_CLEARSTOP !== '0') { try { S().clearSurvStop() } catch {} }
   const m = loadWorldMem()
   const NEAR_MIN = Number(process.env.DRY_FARM_NEAR_MIN || 6)
   const NEAR_MAX = Number(process.env.DRY_FARM_NEAR_MAX || 14)
