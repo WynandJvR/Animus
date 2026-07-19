@@ -684,7 +684,12 @@ async function branchMine (bot, item, count, opts = {}) {
       // still too shallow: relocate the entrance (sidestep) and retry a fresh staircase.
       dbg('  branchMine: descent blocked (' + r.reason + ') and still shallow (y=' + Math.floor(bot.entity.position.y) + ') - relocating the entrance')
       const p = bot.entity.position; const [sx, sz] = mining.DIRS[(reloc + 1) % 4]
-      try { await gotoWithTimeout(bot, new goals.GoalNearXZ(Math.round(p.x + sx * 4), Math.round(p.z + sz * 4), 2), 12000) } catch {}
+      // #81 VOID_RELOC_WIDE: a 'void below' means a CAVE under this ground - the whole home area
+      // is honeycombed (live 03:33Z: all 4 relocated entrances within ~10b hit void in 1-4 treads,
+      // and the keystone-commit re-ran the same doomed patch). A 4b sidestep lands on the same
+      // cave roof; jump 12b on void so the next entrance clears the cavern footprint. =0 -> 4b.
+      const hop = (process.env.VOID_RELOC_WIDE !== '0' && /void/i.test(r.reason || '')) ? 12 : 4
+      try { await gotoWithTimeout(bot, new goals.GoalNearXZ(Math.round(p.x + sx * hop), Math.round(p.z + sz * hop), 2), 12000) } catch {}
     }
     // Only bail if we NEVER got meaningfully below the surface; otherwise fall through and
     // branch-mine at whatever depth we reached. THE LIVE GAP (16:45, live base): it bailed at
