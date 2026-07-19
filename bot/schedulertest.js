@@ -462,10 +462,18 @@ t('(S5) rungFeasible: nightStuck LIFTS both gates -> everything feasible', () =>
 })
 
 t('(#41 P3) rungFeasible: day + naked + a re-arm source -> OUTBOUND inadmissible (re-arm first)', () => withResilient(() => {
-  // gearupBackoffUntil 0 => gearup available => a re-arm source exists => block outbound by DAY too.
-  const s = snap({ isNight: false, underArmored: true, armorPieces: 0, gearupBackoffUntil: 0 })
-  for (const r of OUTBOUND) assert.strictEqual(S.rungFeasible(r, s), false, r.action + ' blocked by day when under-armored + re-armable (P3)')
-  for (const r of NON_OUTBOUND) assert.strictEqual(S.rungFeasible(r, s), true, r.action + ' still feasible')
+  // #86 LADDER_REARM_REAL (default on): "gearup off back-off" is NOT a real re-arm source any more -
+  // with no bank kit and no grave, the day outbound is ADMISSIBLE (the bot must be able to eat).
+  // A REAL source (bank kit) still blocks. Flag =0 -> the old gearup-counts behavior exactly.
+  const prev86 = process.env.LADDER_REARM_REAL
+  delete process.env.LADDER_REARM_REAL // default (flag ON)
+  try {
+    const s = snap({ isNight: false, underArmored: true, armorPieces: 0, gearupBackoffUntil: 0 })
+    for (const r of OUTBOUND) assert.strictEqual(S.rungFeasible(r, s), true, r.action + ' admissible by day: gearup-off-backoff is not a REAL source (#86)')
+    for (const r of NON_OUTBOUND) assert.strictEqual(S.rungFeasible(r, s), true, r.action + ' still feasible')
+    process.env.LADDER_REARM_REAL = '0'
+    for (const r of OUTBOUND) assert.strictEqual(S.rungFeasible(r, s), false, r.action + ' blocked by day under flag=0 (old P3)')
+  } finally { if (prev86 === undefined) delete process.env.LADDER_REARM_REAL; else process.env.LADDER_REARM_REAL = prev86 }
 }))
 
 t('(#41 P4) rungFeasible: day + naked + NO re-arm source -> OUTBOUND admissible (escape, no trap)', () => {
@@ -898,6 +906,26 @@ t('(#79) isDegraded: a naked bot with only an OUT-OF-BAND grave is NOT compound-
   } finally {
     if (prevFlag == null) delete process.env.DEGRADED_GRAVE_REACHABLE; else process.env.DEGRADED_GRAVE_REACHABLE = prevFlag
     if (prevBand == null) delete process.env.GRAVE_NEAR_LADDER; else process.env.GRAVE_NEAR_LADDER = prevBand
+  }
+})
+
+t('(#86) rungFeasible: under-armored outbound is blocked only by a REAL ladder re-arm (bank kit / safe grave), not by gearup-off-backoff', () => {
+  const prev = process.env.LADDER_REARM_REAL
+  delete process.env.LADDER_REARM_REAL // default (flag ON)
+  try {
+    const rung = { rung: 'R3', action: 'trekFarm+tend+harvest+courierHome' }
+    // naked, no bank kit, no safe grave, gearup NOT on backoff (the live starvation case)
+    const bare = snap({ armorPieces: 0, underArmored: true, graves: [], bankArmorPieces: 0, gearupBackoffUntil: 0 })
+    assert.strictEqual(S.rungFeasible(rung, bare), true, 'flag on: nothing the ladder can re-arm with -> the farm trek is admissible')
+    // a real bank spare kit still blocks the outbound (re-arm first)
+    const kitted = snap({ armorPieces: 0, underArmored: true, graves: [], bankArmorPieces: 4, bankHasPick: true, bankHasSword: true, gearupBackoffUntil: 0 })
+    if (S.bankHasSpareKit && S.bankHasSpareKit(kitted)) {
+      assert.strictEqual(S.rungFeasible(rung, kitted), false, 'flag on: a real bank kit -> re-arm before trekking')
+    }
+    process.env.LADDER_REARM_REAL = '0'
+    assert.strictEqual(S.rungFeasible(rung, bare), false, 'flag off: gearup-off-backoff still counts as a source (today)')
+  } finally {
+    if (prev === undefined) delete process.env.LADDER_REARM_REAL; else process.env.LADDER_REARM_REAL = prev
   }
 })
 

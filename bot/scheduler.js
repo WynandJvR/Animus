@@ -494,7 +494,15 @@ function rungFeasible (rung, snapshot) {
       // P3: an outbound rung is inadmissible while under-armored BY DAY TOO (not only at night) -
       // re-arm (rearmFromBank / grave) before any farm/orchard/forage trek. UNLESS nightStuck (can't
       // wait for a day that won't come) OR the world has no re-arm source (P4 escape - don't trap it).
-      if (!!s.underArmored && !stuck && reArmSourceAvailable(s)) return false
+      // #86 LADDER_REARM_REAL (default on): the source test must be what the LADDER can actually do
+      // (bank kit / safe grave = hasLadderReArm), NOT reArmSourceAvailable - its third clause counts
+      // "gearup not on back-off" as a source, so the moment the gearup cooldown expired the farm/
+      // forage rungs went permanently inadmissible at armor 0 and the bot idled at food 5 with
+      // mature wheat 60b away (live 05:15-05:45Z: every plan R1.5>R2>R5, R3/R4 never planned).
+      // =0 -> reArmSourceAvailable exactly as before.
+      // Night keeps the headline rule unconditionally (never forage out un-armored at night);
+      // by day the block requires the REAL source.
+      if (!!s.underArmored && !stuck && (night || (process.env.LADDER_REARM_REAL !== '0' ? hasLadderReArm(s) : reArmSourceAvailable(s)))) return false
     } else if (night && !!s.underArmored && !stuck) return false // today: night-only
   }
   return true
