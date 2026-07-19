@@ -67,3 +67,7 @@ bot/scaffold-registry.json
 # design/planning docs - kept locally, not in git
 /design-docs/
 /docs/
+
+# session state archives + rotated log artifacts
+state-archive-oldbase/
+*.jsonl.old
