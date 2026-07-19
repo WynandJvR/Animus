@@ -89,7 +89,7 @@ function ok (cond, label) { eq(!!cond, true, label) }
 // The split is only safe while that surface is unchanged AND not a stale copy.
 {
   const pub = Object.keys(provision).filter(k => k !== '__siblings')
-  eq(pub.length, 162, 'facade: provision.js still exports exactly 162 public names') // +2: secureBase, secureBaseGate (#67 SECURE_BASE); +2: ironGrindMinedReal, resetIronGrindMined (IRON_KEYSTONE); +1: deathSpotExclusion (#85 DEATH_SPOT_COST); +3: sealHomeDescents, sealDescentsGate, inBuildZone (#89 SEAL_HOME_DESCENTS)
+  eq(pub.length, 164, 'facade: provision.js still exports exactly 164 public names') // +2: secureBase, secureBaseGate (#67 SECURE_BASE); +2: ironGrindMinedReal, resetIronGrindMined (IRON_KEYSTONE); +1: deathSpotExclusion (#85 DEATH_SPOT_COST); +3: sealHomeDescents, sealDescentsGate, inBuildZone (#89 SEAL_HOME_DESCENTS); +2: worldTidy, litterSignature (#94 WORLD_TIDY)
 
   const moved = [
     [worldMemory, ['listInfra', 'rememberInfra', 'forgetInfra', 'recordWedge', 'listWedges', 'ownInfraAnchors',
@@ -97,7 +97,8 @@ function ok (cond, label) { eq(!!cond, true, label) }
       'markBedUnusable', 'bedHeld', 'setSpawnSuspect', 'isSpawnSuspect', 'gearupState', 'gearupResult']],
     [provCore, ['inventoryCounts', 'toolForBlock', 'collectDrops', 'isNight', 'canBreakNaturally']],
     [provHut, ['hutAnchor', 'ownHutAt', 'onHutApron', 'insideOwnStructure', 'hasSolidCeiling',
-      'maintainHome', 'maintainHut', 'repairHutStructure', 'furnishHut', 'ensureHutApron', 'ensureHutBed']],
+      'maintainHome', 'maintainHut', 'repairHutStructure', 'furnishHut', 'ensureHutApron', 'ensureHutBed',
+      'worldTidy', 'litterSignature']],
     [provFarm, ['ensureWheatFarm', 'tendWheatFarm', 'hasStandingFarm', 'WHEAT_FARM_TARGET']],
     [provMining, ['branchMine', 'digStaircaseDown', 'climbToSurface', 'pillarUpTo']],
     [provBank, ['ensureChest', 'depositMaterials', 'withdrawItem', 'chestCounts', 'consolidateBank',

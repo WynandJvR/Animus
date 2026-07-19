@@ -346,8 +346,92 @@ function sealDescentsGate ({ hp, fed, day, atHome, crisisActive } = {}, { safeHp
   return typeof hp === 'number' && hp >= safeHp
 }
 
+// ---- WORLD_TIDY (#94): pure litter classifier ---------------------------------------
+// Active reclaim of ORPHANED litter near own infra: the scaffold registry is empty
+// (interrupted ops + restarts + unregistered placements) while the world holds ~2 days of
+// leveling/pillar scraps, cobble on the hut, floating dirt in the farm, and duplicate-torch
+// clusters. The executor (provision-hut.worldTidy) reads the world into a per-cell `ctx` and
+// asks this PURE classifier whether the cell is litter to reclaim. Five world-read signatures:
+//   dup-torch  - a torch with another torch within 2 cells (keep exactly ONE per cluster)
+//   floating   - a filler block with >=5 airish faces (a classic leveling/pillar scrap)
+//   tower      - a filler block in a >=3-tall 1x1 column with air on all 4 sides (a pillar)
+//   hut-scrap  - a well-exposed filler block ON the hut faces/roof that is NOT schema fabric
+//   farm-scrap - a filler block inside the farm/orchard plot footprint (at/above the surface)
+// Anti-grief is BUILT IN and comes FIRST: only torch/filler classes are ever 'dig'; hut schema
+// fabric (a plank/door/furniture/floor cell) and crop/farmland/sapling/tree cells are always
+// 'keep' even when a signature flag is set. Returns { decision:'keep'|'dig', sig } - `sig` names
+// the matched signature, used both for the executor's dig debug line and the per-signature unit
+// tests. PURE: `ctx` carries pre-read world facts, so there is no bot / no I/O here.
+//
+// ctx shape (all optional; the executor fills what a cell needs):
+//   name          world block name at the cell
+//   self          {x,y,z} of the cell (for the torch keeper tie-break)
+//   airFaces      count 0..6 of the 6 face-neighbours that are airish
+//   sidesAir      count 0..4 of the 4 horizontal neighbours that are airish
+//   towerRun      length of the consecutive vertical filler run through this cell
+//   torchCluster  [{x,y,z}] of torches (incl. self) within 2 cells (torch cells only)
+//   onHutExterior true when the cell sits on the hut wall-face/roof exterior layer
+//   hutSchemaFabric true when hut-model classifies this cell as fabric (plank/door/furniture/floor)
+//   inFarmPlot    true when the cell is inside a plot bbox at/above the plot surface band
+//   isFarmland/isCrop/isTree  protective flags (never dig these, whatever else is set)
+const TIDY_FILLER_RE = /^(cobblestone|dirt|coarse_dirt|rooted_dirt|stone|granite|diorite|andesite|tuff|gravel|sand|red_sand|cobbled_deepslate|deepslate|netherrack|clay|mud|grass_block|podzol)$/
+const TIDY_TORCH_RE = /^(torch|wall_torch)$/
+const isTidyFiller = name => !!name && TIDY_FILLER_RE.test(name)
+const isTidyTorch = name => !!name && TIDY_TORCH_RE.test(name)
+
+// The canonical torch to KEEP in a cluster: lowest y, then lowest x, then lowest z. Deterministic
+// so every torch in the same cluster agrees on the ONE keeper (exactly one 'keep', the rest 'dig').
+function canonicalLitterTorch (cluster) {
+  let best = null
+  for (const t of (cluster || [])) {
+    if (!best || t.y < best.y || (t.y === best.y && (t.x < best.x || (t.x === best.x && t.z < best.z)))) best = t
+  }
+  return best
+}
+
+function litterSignature (ctx) {
+  const keep = sig => ({ decision: 'keep', sig: sig || 'none' })
+  const dig = sig => ({ decision: 'dig', sig })
+  if (!ctx || !ctx.name) return keep('empty')
+  const torch = isTidyTorch(ctx.name)
+  const filler = isTidyFiller(ctx.name)
+  // HARD anti-grief, evaluated BEFORE any signature: only torch/filler are litter, and hut fabric
+  // + crop/farmland/tree cells are sacrosanct no matter what a signature flag says.
+  if (!torch && !filler) return keep('not-litter')
+  if (ctx.hutSchemaFabric) return keep('hut-fabric')
+  if (ctx.isFarmland || ctx.isCrop || ctx.isTree) return keep('protected')
+
+  // 1) DUPLICATE TORCH - a cluster of >=2 keeps its canonical member; the extras are litter.
+  if (torch) {
+    const cluster = Array.isArray(ctx.torchCluster) ? ctx.torchCluster : []
+    if (cluster.length >= 2 && ctx.self) {
+      const keeper = canonicalLitterTorch(cluster)
+      if (keeper && !(keeper.x === ctx.self.x && keeper.y === ctx.self.y && keeper.z === ctx.self.z)) return dig('dup-torch')
+    }
+    return keep('torch') // a lone torch or the cluster's keeper - leave it lit
+  }
+
+  // filler from here down.
+  // 4) HUT-EXTERIOR SCRAP - a filler block stuck on the hut face/roof. Require >=3 air faces so a
+  //    hillside the hut is dug into (a solid terrain mass against a wall) is never carved.
+  if (ctx.onHutExterior && (ctx.airFaces || 0) >= 3) return dig('hut-scrap')
+  // 5) FARM/ORCHARD FOOTPRINT SCRAP - filler inside the plot bbox, at/above the surface band.
+  if (ctx.inFarmPlot) return dig('farm-scrap')
+  // 2) FLOATING SINGLE BLOCK - a leveling/pillar scrap hanging in the air.
+  if ((ctx.airFaces || 0) >= 5) return dig('floating')
+  // 3) 1x1 TOWER - a pillar leftover: a >=3-tall filler column with air on all 4 sides.
+  if ((ctx.towerRun || 0) >= 3 && (ctx.sidesAir || 0) >= 4) return dig('tower')
+  return keep('none')
+}
+
 module.exports = {
   REBUILD_MIN,
+  TIDY_FILLER_RE,
+  TIDY_TORCH_RE,
+  isTidyFiller,
+  isTidyTorch,
+  canonicalLitterTorch,
+  litterSignature,
   cellClass,
   cellMismatch,
   decideHutRepair,

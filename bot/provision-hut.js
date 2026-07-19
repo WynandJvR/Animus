@@ -985,9 +985,216 @@ async function sealHomeDescents (bot, opts = {}) {
   return { capped, candidates: caps.length }
 }
 
+// WORLD_TIDY (#94, default ON): actively RECLAIM orphaned litter near own infra. The scaffold
+// registry is empty (interrupted ops + restarts + unregistered placements), so scaffold teardown
+// alone cannot help - the world holds ~2 days of leveling/pillar scraps, cobble on the hut,
+// floating dirt in the farm, and duplicate-torch clusters. This bounded CALM-window step SCANS
+// within TIDY_RADIUS of each own infra anchor (hut, wheat-farm, orchard), classifies each
+// filler/torch cell through the PURE hutModel.litterSignature, and digs up to TIDY_MAX verified
+// digs/pass, collecting the drops and depositing the reclaimed filler to the bank (best-effort).
+// Anti-grief (HARD): only filler-class or torch blocks; only within TIDY_RADIUS of OWN infra;
+// NEVER in the castle build zone (P().inBuildZone), on a registered station/chest/bed cell, on
+// schema-matching hut fabric, or on crops/farmland/saplings/trees; every dig RE-READS the world
+// (re-classify + canDigBlock reach) before breaking. Bounded (<=TIDY_MAX digs, a scan cap, and
+// isStopped-yielding). WORLD_TIDY=0 -> the maintenance step never calls this (byte-for-byte); a
+// direct call still early-returns here as a belt-and-braces guard.
+async function worldTidy (bot, opts = {}) {
+  if (process.env.WORLD_TIDY === '0') return { skipped: 'disabled', reclaimed: 0 }
+  const isStopped = opts.isStopped || (() => false)
+  const say = opts.say || (() => {})
+  const R = Math.max(8, Math.min(48, Number(process.env.TIDY_RADIUS || 24)))
+  const MAX = Math.max(1, Number(process.env.TIDY_MAX || 24))
+  const yBand = Math.max(2, Number(process.env.TIDY_Y_BAND || 6))
+  const scanCap = Math.max(1000, Number(process.env.TIDY_SCAN_CAP || 40000)) // safety ceiling; near-first order + periodic yields keep it responsive
+  const farmBand = Math.max(1, Number(process.env.TIDY_FARM_BAND || 3))
+  const CROP_RE = /(wheat|carrots|potatoes|beetroots|_stem|pumpkin|melon|nether_wart|sweet_berry|cocoa)$/
+  const TREE_RE = /(_sapling|_log|_wood|_leaves|mushroom|_stem)$/
+
+  // --- own infra anchors + plot footprints --------------------------------------------
+  const m = loadWorldMem()
+  const anchors = []
+  for (const h of listInfra('hut')) anchors.push({ x: h.x + 2, y: h.y, z: h.z + 2, hut: h })
+  const plots = []
+  const addPlot = (cells) => {
+    if (!cells || !cells.length) return
+    let x0 = Infinity; let x1 = -Infinity; let z0 = Infinity; let z1 = -Infinity; let cy = null
+    for (const c of cells) { x0 = Math.min(x0, c.x); x1 = Math.max(x1, c.x); z0 = Math.min(z0, c.z); z1 = Math.max(z1, c.z); if (c.y != null) cy = cy == null ? c.y : Math.min(cy, c.y) }
+    if (cy == null) return
+    plots.push({ x0, x1, z0, z1, loY: cy, hiY: cy + farmBand - 1 }) // cy = crop/sapling level; the ground below (cy-1) is never in-band
+  }
+  const wf = m.wheatFarm
+  if (wf && wf.cells && wf.cells.length) { anchors.push({ x: wf.x, y: (wf.y != null ? wf.y : wf.cells[0].y), z: wf.z }); addPlot(wf.cells) }
+  const orch = m.orchard
+  if (orch && orch.cells && orch.cells.length) { anchors.push({ x: orch.x, y: orch.cells[0].y - 1, z: orch.z }); addPlot(orch.cells) }
+  else if (orch && orch.x != null && orch.z != null) anchors.push({ x: orch.x, y: (bot.entity ? Math.floor(bot.entity.position.y) : 64), z: orch.z })
+  if (!anchors.length) return { skipped: 'no infra', reclaimed: 0 }
+
+  const huts = listInfra('hut')
+  const DIMS = hutModel.DIMS
+  // A cell on the hut wall-face/roof exterior layer (ABOVE the floor slab, so the doorstep apron
+  // walk-surface at ground level is never touched). Returns the containing hut, else null.
+  const hutExteriorOf = (x, y, z) => {
+    for (const h of huts) {
+      const x0 = h.x; const x1 = h.x + DIMS.w - 1; const z0 = h.z; const z1 = h.z + DIMS.l - 1; const y0 = h.y; const y1 = h.y + DIMS.h - 1
+      if (y === y1 + 1 && x >= x0 && x <= x1 && z >= z0 && z <= z1) return h // resting on the roof
+      if (y >= y0 + 1 && y <= y1) {
+        const withinZ = z >= z0 && z <= z1; const withinX = x >= x0 && x <= x1
+        if ((withinZ && (x === x0 - 1 || x === x1 + 1)) || (withinX && (z === z0 - 1 || z === z1 + 1))) return h // stuck to a wall face
+      }
+    }
+    return null
+  }
+  const hutContaining = (x, z) => huts.find(h => hutModel.inBox(h, x, z)) || null
+  const inFarmPlot = (x, y, z) => plots.some(p => x >= p.x0 && x <= p.x1 && z >= p.z0 && z <= p.z1 && y >= p.loY && y <= p.hiY)
+  const inBuild = (x, z) => { try { return !!P().inBuildZone(x, z) } catch { return false } }
+  const infraCells = []
+  for (const kind of ['table', 'furnace', 'chest', 'bed']) for (const e of listInfra(kind)) infraCells.push(e)
+  const kb = (() => { try { return knownBed() } catch { return null } })()
+  if (kb) infraCells.push(kb)
+  const isRegistered = (x, y, z) => infraCells.some(e => e.x === x && e.y === y && e.z === z)
+
+  const read = (x, y, z) => bot.blockAt(new Vec3(x, y, z))
+  const airish = b => !b || AIRISH(b.name)
+  const airFacesAt = (x, y, z) => {
+    let n = 0
+    for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) if (airish(read(x + dx, y + dy, z + dz))) n++
+    return n
+  }
+  const sidesAirAt = (x, y, z) => {
+    let n = 0
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) if (airish(read(x + dx, y, z + dz))) n++
+    return n
+  }
+  const towerRunAt = (x, y, z) => {
+    let run = 1
+    for (let dy = 1; dy <= 8; dy++) { const b = read(x, y + dy, z); if (b && hutModel.isTidyFiller(b.name)) run++; else break }
+    for (let dy = 1; dy <= 8; dy++) { const b = read(x, y - dy, z); if (b && hutModel.isTidyFiller(b.name)) run++; else break }
+    return run
+  }
+  const torchClusterAt = (x, y, z) => {
+    const out = []
+    for (let dx = -2; dx <= 2; dx++) for (let dy = -2; dy <= 2; dy++) for (let dz = -2; dz <= 2; dz++) {
+      const b = read(x + dx, y + dy, z + dz)
+      if (b && hutModel.isTidyTorch(b.name)) out.push({ x: x + dx, y: y + dy, z: z + dz })
+    }
+    return out
+  }
+  // Build the per-cell ctx and classify. Cheap early-out: non-litter cells never do neighbour reads.
+  const classifyAt = (x, y, z) => {
+    const b = read(x, y, z)
+    if (!b) return null
+    const torch = hutModel.isTidyTorch(b.name)
+    const filler = hutModel.isTidyFiller(b.name)
+    if (!torch && !filler) return null // not a litter class - skip without any neighbour reads
+    const hut = hutContaining(x, z)
+    let hutSchemaFabric = false
+    if (hut && y >= hut.y && y <= hut.y + DIMS.h - 1) { try { const c = hutModel.classifyCell(hut, hutReader(bot), x, y, z); hutSchemaFabric = c && (c.cls === 'wall' || c.cls === 'door' || c.cls === 'floor' || c.cls === 'furniture') } catch {} }
+    const ctx = {
+      name: b.name,
+      self: { x, y, z },
+      hutSchemaFabric,
+      isFarmland: /farmland$/.test(b.name),
+      isCrop: CROP_RE.test(b.name),
+      isTree: TREE_RE.test(b.name),
+      onHutExterior: !!hutExteriorOf(x, y, z),
+      inFarmPlot: inFarmPlot(x, y, z),
+      airFaces: torch ? 0 : airFacesAt(x, y, z),
+      sidesAir: torch ? 0 : sidesAirAt(x, y, z),
+      towerRun: torch ? 0 : towerRunAt(x, y, z),
+      torchCluster: torch ? torchClusterAt(x, y, z) : null
+    }
+    return { b, ctx, res: hutModel.litterSignature(ctx) }
+  }
+
+  // --- SCAN: bounded box per anchor, NEAREST-COLUMN first so the examined budget is always spent
+  // on the cells closest to home (litter clusters at the base) and a clean far world can't crowd
+  // out near litter. Cheap early-out on non-litter cells (no neighbour reads). Yields the event
+  // loop periodically so a large clean-world sweep never hitches the body ([[body-first-priority]]).
+  const columns = []
+  for (let dx = -R; dx <= R; dx++) for (let dz = -R; dz <= R; dz++) { const d = Math.hypot(dx, dz); if (d <= R) columns.push({ dx, dz, d }) }
+  columns.sort((a, b) => a.d - b.d)
+  const seen = new Set()
+  const candidates = []
+  let examined = 0
+  const candCap = MAX * 3
+  scan:
+  for (const a of anchors) {
+    const ay = Math.floor(a.y)
+    const yHi = ay + Math.max(yBand, DIMS.h + 2)
+    for (const col of columns) {
+      if (isStopped()) break scan
+      const x = a.x + col.dx; const z = a.z + col.dz
+      for (let y = ay - yBand; y <= yHi; y++) {
+        const k = x + ',' + y + ',' + z
+        if (seen.has(k)) continue
+        seen.add(k)
+        if (++examined > scanCap) break scan
+        if ((examined & 4095) === 0) { if (isStopped()) break scan; await new Promise(r => setImmediate(r)) } // breathe
+        const c = classifyAt(x, y, z)
+        if (!c || c.res.decision !== 'dig') continue
+        if (inBuild(x, z) || isRegistered(x, y, z)) continue // executor belt-and-braces
+        candidates.push({ x, y, z, sig: c.res.sig, name: c.b.name })
+        if (candidates.length >= candCap) break scan
+      }
+    }
+  }
+  if (!candidates.length) { dbg('  worldTidy: nothing to reclaim (examined ' + examined + ' cell(s) near ' + anchors.length + ' anchor(s))'); return { reclaimed: 0, candidates: 0, examined } }
+
+  // nearest-first so a bounded visit clears the closest mess; verified digs up to MAX.
+  const here = (bot.entity && bot.entity.position) || new Vec3(anchors[0].x, anchors[0].y, anchors[0].z)
+  candidates.sort((p, q) => Math.hypot(p.x - here.x, p.z - here.z) - Math.hypot(q.x - here.x, q.z - here.z))
+  let reclaimed = 0
+  for (const c of candidates) {
+    if (isStopped() || reclaimed >= MAX) break
+    const p = new Vec3(c.x, c.y, c.z)
+    if (bot.entity && bot.entity.position.distanceTo(p) > 4) { try { await navigate.gotoOnce(bot, new goals.GoalNear(c.x, c.y, c.z, 2), 10000) } catch {} }
+    // RE-READ + re-classify after the walk (chunk (un)loaded / world moved / an earlier dig changed
+    // the neighbourhood): re-gate before breaking, exactly the verified-dig contract.
+    const re = classifyAt(c.x, c.y, c.z)
+    if (!re || re.res.decision !== 'dig') continue
+    if (inBuild(c.x, c.z) || isRegistered(c.x, c.y, c.z)) continue
+    const b = re.b
+    const tool = toolForBlock(bot, b.name); if (tool) await bot.equip(tool, 'hand').catch(() => {})
+    if (bot.canDigBlock && !bot.canDigBlock(b)) { dbg('  worldTidy: cannot reach ' + b.name + ' at ' + p.toString() + ' this pass'); continue }
+    try {
+      await bot.dig(b)
+      await collectDrops(bot, 3)
+      const after = bot.blockAt(p)
+      if (after && !AIRISH(after.name) && after.name === b.name) { dbg('  worldTidy: dig did not clear ' + b.name + ' at ' + p.toString()); continue }
+      reclaimed++
+      dbg('  tidy: reclaimed ' + c.name + ' at ' + c.x + ',' + c.y + ',' + c.z + ' (' + c.sig + ')')
+    } catch (e) { dbg('  worldTidy: dig failed at ' + p.toString() + ' (' + e.message + ')') }
+  }
+
+  // BEST-EFFORT: deposit the reclaimed filler surplus to the bank (keep a small working buffer so
+  // the sealer/scaffold still has filler on hand). Never blocks the pass; any failure is swallowed.
+  if (reclaimed) {
+    try {
+      const bank = P().resolveBankCell(bot)
+      if (bank) {
+        const keepEach = Math.max(0, Number(process.env.TIDY_KEEP_FILLER || 64))
+        const deposits = []
+        for (const it of (bot.inventory ? bot.inventory.items() : [])) {
+          if (!hutModel.isTidyFiller(it.name)) continue
+          const drop = it.count - keepEach
+          if (drop > 0) deposits.push({ name: it.name, count: drop })
+        }
+        if (deposits.length) {
+          const chestBlock = bot.blockAt(new Vec3(bank.x, bank.y, bank.z))
+          if (chestBlock && /chest$/.test(chestBlock.name)) await P().depositMaterials(bot, chestBlock, { deposits })
+        }
+      }
+    } catch (e) { dbg('  worldTidy: bank deposit failed (' + e.message + ')') }
+    say('tidied up around home - reclaimed ' + reclaimed + ' bit(s) of litter')
+    dbg('  worldTidy: reclaimed ' + reclaimed + ' litter block(s) of ' + candidates.length + ' candidate(s) (examined ' + examined + ')')
+  }
+  return { reclaimed, candidates: candidates.length, examined }
+}
+
 module.exports = {
   setDebugSink, insideHutBox,
   insideHutBox, ownHutAt, onHutApron, insideOwnStructure, hasSolidCeiling, hutAnchor, hutReader, stepOffApron, ensureHutApron, healHomeCrater, ensureHutBed, freeInteriorCell, findHutDoorway, hutFreeCells, furnitureInHut, furnishHut, stationInHut, stationSlot, loadHutSchem, reconcileInfra, cleanupHutInterior, repairHutStructure, recallAndReach, maintainHut, maintainHome,
   secureBase, secureBaseGate: hutModel.secureBaseGate,
-  sealHomeDescents, sealDescentsGate: hutModel.sealDescentsGate
+  sealHomeDescents, sealDescentsGate: hutModel.sealDescentsGate,
+  worldTidy, litterSignature: hutModel.litterSignature
 }

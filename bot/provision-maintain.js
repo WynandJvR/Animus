@@ -23,7 +23,7 @@ const worldMemory = require('./world-memory.js')
 const { loadWorldMem, saveWorldMem, listInfra, rememberInfra, recallInfra, knownBed,
   gearupState, proactiveGearupGate } = worldMemory
 const provHut = require('./provision-hut.js')
-const { hutAnchor, insideOwnStructure, ownHutAt, maintainHome, secureBase, secureBaseGate, sealHomeDescents, sealDescentsGate } = provHut
+const { hutAnchor, insideOwnStructure, ownHutAt, maintainHome, secureBase, secureBaseGate, sealHomeDescents, sealDescentsGate, worldTidy } = provHut
 const provBank = require('./provision-bank.js')
 const { resolveBankCell, depositMaterials, withdrawItem, chestCounts, consolidateBank,
   lonelyFurnace, consolidateFurnaces, litterPatrol } = provBank
@@ -440,6 +440,36 @@ async function maintenancePass (bot, opts = {}) {
       })()
       if (sealDue && hutAnchor() && due('sealDescents', Number(process.env.SEAL_DESCENTS_EVERY_MS || 1200000))) {
         try { const r = await sealHomeDescents(bot, { hut: hutAnchor(), isStopped, say }); if (r && r.capped) stepDone('sealDescents(' + r.capped + ')') } catch (e) { dbg('  maint: sealDescents failed (' + e.message + ')') }
+      }
+      if (between()) return { ok: true, steps, reason: 'bail:survival' }
+    }
+
+    // STEP 9d: WORLD_TIDY (#94) - actively RECLAIM orphaned litter near own infra. The scaffold
+    // registry is empty (interrupted ops + restarts + unregistered placements), so litterPatrol's
+    // registry-only teardown can't touch the ~2 days of world litter: leveling/pillar scraps, cobble
+    // on the hut, floating dirt in the farm, duplicate-torch clusters (operator: "the orchard is a
+    // mess, scaffolding and random shit all over"; "lumpy farm with floating dirt"; "cobble on/in the
+    // hut"). worldTidy scans within TIDY_RADIUS of each own anchor (hut/farm/orchard), classifies via
+    // the PURE litterSignature, and digs bounded (<=TIDY_MAX) verified reclaims. Same admission shape
+    // as 9c's sealHomeDescents (the PURE sealDescentsGate: day + at home + hp>=12 + fed + no crisis),
+    // and its own scan/dig budget + isStopped/between keep it BOUNDED and YIELD to survival. Held to
+    // the !opportunistic/!nightIndoorOnly envelope. The DUE interval only RATE-LIMITS the scan (never a
+    // behavior hold, per the #94 no-time-hold directive). The whole block (step AND its between-guard)
+    // is inside the flag gate, so WORLD_TIDY=0 -> nothing here runs and no _maintState is touched.
+    if (process.env.WORLD_TIDY !== '0') {
+      const tidyDue = !nightIndoorOnly && !opportunistic && (() => {
+        try {
+          return sealDescentsGate({
+            hp: bot.health,
+            fed: (bot.food != null ? bot.food : 20) >= Number(process.env.TIDY_FED_MIN || 14),
+            day: day(),
+            atHome: atHome(),
+            crisisActive: (() => { try { return P().survivalNeed(bot, { foodThreshold: crisisFood }) != null } catch { return false } })()
+          }, { safeHp: Number(process.env.TIDY_SAFE_HP || 12) })
+        } catch { return false }
+      })()
+      if (tidyDue && (hutAnchor() || home) && due('worldTidy', Number(process.env.WORLD_TIDY_EVERY_MS || 900000))) {
+        try { const r = await worldTidy(bot, { isStopped, say }); if (r && r.reclaimed) stepDone('worldTidy(' + r.reclaimed + ')') } catch (e) { dbg('  maint: worldTidy failed (' + e.message + ')') }
       }
       if (between()) return { ok: true, steps, reason: 'bail:survival' }
     }
