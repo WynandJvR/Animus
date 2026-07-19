@@ -101,7 +101,10 @@ async function stepOffApron (bot, opts = {}) {
       ? new Vec3(opts.home.x, bot.entity.position.y, opts.home.z)
       : new Vec3(h.x + 12, bot.entity.position.y, h.z + 12)
     dbg('  ' + tag + ': on the hut apron - stepping clear to ' + Math.round(away.x) + ',' + Math.round(away.z) + ' before digging')
-    try { await gotoWithTimeout(bot, new goals.GoalNearXZ(away.x, away.z, 3), 20000) } catch {}
+    // #80 APRON_DOOR_WALK: a raw goto has no door-assist, so from INSIDE the sealed hut every
+    // step-off returned noPath instantly (live 03:22Z: all 4 dirs in <300ms, gathers starved).
+    // walkStaged carries the door pre-flight + recovery rungs. =0 -> today's raw goto exactly.
+    if (process.env.APRON_DOOR_WALK !== '0') { try { await S().walkStaged(bot, Math.round(away.x), Math.round(away.z), { isStopped, range: 3, timeoutMs: 20000 }) } catch {} } else { try { await gotoWithTimeout(bot, new goals.GoalNearXZ(away.x, away.z, 3), 20000) } catch {} }
     return !onHutApron(bot)
   }
   // STONE_RELOCATE on: rotate the compass so a single wedged direction no longer sticks.
@@ -111,7 +114,9 @@ async function stepOffApron (bot, opts = {}) {
     const [dx, dz] = mining.DIRS[i % 4]
     const away = new Vec3(h.x + dx * radius, bot.entity.position.y, h.z + dz * radius)
     dbg('  ' + tag + ': on the hut apron - stepping clear (dir ' + i + ') to ' + Math.round(away.x) + ',' + Math.round(away.z))
-    try { await gotoWithTimeout(bot, new goals.GoalNearXZ(away.x, away.z, 3), 12000) } catch {}
+    // #80 APRON_DOOR_WALK: same door-assist swap as the legacy path above (raw goto = instant
+    // noPath from inside the sealed hut; walkStaged crosses the own-door first). =0 -> raw goto.
+    if (process.env.APRON_DOOR_WALK !== '0') { try { await S().walkStaged(bot, Math.round(away.x), Math.round(away.z), { isStopped, range: 3, timeoutMs: 12000 }) } catch {} } else { try { await gotoWithTimeout(bot, new goals.GoalNearXZ(away.x, away.z, 3), 12000) } catch {} }
     if (!onHutApron(bot) && !insideOwnStructure(bot)) return true
   }
   return !onHutApron(bot) && !insideOwnStructure(bot)
