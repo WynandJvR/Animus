@@ -511,6 +511,7 @@ async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () =
   // (dry mode needs no water). On a non-establish miss it falls back to the legacy water path so a
   // farmless bot is never stranded. This whole block is unreachable when DRY_HOME_FARM=0 (dryMode
   // pins to 'off'), so flag off is byte-for-byte today.
+  if (DRY_HOME_FARM && dryMode !== 'off') dbg('  wheat farm: dry-mode=' + dryMode + ' hut=' + (hutA ? hutA.x + ',' + hutA.z : 'none') + ' stopped=' + !!isStopped()) // #87 diag: which term kills the dry block
   if (DRY_HOME_FARM && dryMode !== 'off' && !isStopped()) {
     const established = await ensureDryHomeFarm(bot, home, hutA, { isStopped, say, avoid, expand: dryMode === 'expand' })
     if (established) return true
