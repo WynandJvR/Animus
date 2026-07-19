@@ -648,9 +648,17 @@ async function branchMine (bot, item, count, opts = {}) {
   // exists, walk in and pick up mining where we left off; only dig fresh if it's gone/flooded.
   if (persist && Math.floor(bot.entity.position.y) > targetY + 1 && !isStopped()) {
     const depthGate = process.env.MINE_REUSE_DEPTH_GATE !== '0'
+    // #83 MINE_RECALL_KEYSTONE: the shallow-band bootstrap (y45-58) must accept a mine AT its own
+    // band - the #21 depth gate (maxLevelY 40, built for the deep y16 target) rejected a 124-branch
+    // y45 mine 38b from home; and dug staircases are persistent world infrastructure, so the 6h
+    // default age cap had forgotten every mine (enterExistingMine verifies the shaft and forgets a
+    // dead one anyway - stale records self-heal). Flag =0 -> today's gate exactly.
+    const keystoneRecall = process.env.MINE_RECALL_KEYSTONE !== '0' && boot0.active
+    const recallOpts = keystoneRecall
+      ? { maxLevelY: boot0.ymax, maxAgeMs: 7 * 24 * 3600 * 1000 }
+      : (depthGate ? { maxLevelY: minIronY } : {})
     const remembered = recallMine(bot, bot.entity.position,
-      parseInt(process.env.MINE_REUSE_DIST || '80', 10),
-      depthGate ? { maxLevelY: minIronY } : {})
+      parseInt(process.env.MINE_REUSE_DIST || '80', 10), recallOpts)
     if (remembered) {
       if (opts.say) say('heading back to my mine to keep digging')
       if (await enterExistingMine(bot, remembered, { isStopped })) {
