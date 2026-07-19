@@ -252,5 +252,25 @@ eq(F.barrenStep(undefined, 'other'), { strikes: 1, skip: false }, 'undefined pri
   eq(F.foodCrisisFarmAction({ hasStandingFarm: true, food: 8, harvestFirst: true, foodThreshold: 6 }), 'establish', 'threshold tunable: food 8 not < 6 -> establish')
 }
 
+// ---- #87 DRY_HOME_FARM: hut-adjacent dry-plot gate (dryHomeFarmMode) ----------------
+{
+  // Flag ON, hut exists, NO standing farm near the hut -> establish (the first plot, OR supersede a
+  // far water farm: the "near" test is the caller's, so a 60b farm still reads as none-near).
+  eq(F.dryHomeFarmMode({ flag: true, hutExists: true, standingNearHut: false }), 'establish', 'dry: flag on + hut + no near farm -> establish (dry site accepted; no water needed)')
+  eq(F.dryHomeFarmMode({ flag: true, hutExists: true, standingNearHut: false, farmIsDry: false, cells: 33, target: 33, maxed: true }), 'establish', 'dry: a far maxed WATER farm (not near the hut) is still superseded -> establish')
+  // Flag OFF -> always off (water requirement intact; today byte-for-byte).
+  eq(F.dryHomeFarmMode({ flag: false, hutExists: true, standingNearHut: false }), 'off', 'dry: FLAG OFF -> off (legacy water-anchored path, requirement intact)')
+  // No hut anchor -> off (a dry plot needs a home to sit beside).
+  eq(F.dryHomeFarmMode({ flag: true, hutExists: false, standingNearHut: false }), 'off', 'dry: no hut anchor -> off')
+  // A standing DRY home plot under target and not maxed -> expand.
+  eq(F.dryHomeFarmMode({ flag: true, hutExists: true, standingNearHut: true, farmIsDry: true, cells: 9, target: 33, maxed: false }), 'expand', 'dry: standing dry plot under target, not maxed -> expand')
+  eq(F.dryHomeFarmMode({ flag: true, hutExists: true, standingNearHut: true, farmIsDry: true, cells: 33, target: 33, maxed: false }), 'off', 'dry: dry plot AT target -> off (nothing to add)')
+  eq(F.dryHomeFarmMode({ flag: true, hutExists: true, standingNearHut: true, farmIsDry: true, cells: 12, target: 33, maxed: true }), 'off', 'dry: dry plot maxed (annulus exhausted) -> off (leave it, tend un-latches on retire)')
+  // A GENUINE near-hut WATER farm (not dry) must NOT be disturbed -> off.
+  eq(F.dryHomeFarmMode({ flag: true, hutExists: true, standingNearHut: true, farmIsDry: false, cells: 10, target: 33, maxed: false }), 'off', 'dry: a real near-hut water farm is left alone -> off (never clobbered)')
+  // Defaults: flag defaults on, but no hut -> off.
+  eq(F.dryHomeFarmMode({}), 'off', 'dry: defaults (no hut) -> off')
+}
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall farm tests passed')
 process.exit(failures ? 1 : 0)

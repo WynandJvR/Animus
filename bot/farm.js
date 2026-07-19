@@ -187,6 +187,19 @@ function seedBankWithdrawAmount (bankSeeds, packSeeds, want) {
   return Math.max(0, Math.min(bankSeeds == null ? need : bankSeeds, need))
 }
 
+// #87 DRY_HOME_FARM (PURE): should the hut-adjacent DRY establishment mode run this pass, and in
+// which sub-mode? Fires only under the flag with a hut anchor. 'establish' when NO standing farm sits
+// within DRY_FARM_NEAR of the hut (the first plot, OR superseding a far water farm - the near check is
+// the caller's, so a 60b water farm still reads as "none near"); 'expand' when the standing near-hut
+// farm IS a dry plot still under target and not maxed; 'off' otherwise (incl. flag off -> today
+// byte-for-byte, and a genuine near-hut water farm we must NOT disturb). PURE, no bot / no I/O.
+function dryHomeFarmMode ({ flag = true, hutExists = false, standingNearHut = false, farmIsDry = false, cells = 0, target = 33, maxed = false } = {}) {
+  if (!flag || !hutExists) return 'off'
+  if (!standingNearHut) return 'establish'
+  if (farmIsDry && cells < target && !maxed) return 'expand'
+  return 'off'
+}
+
 // #59 §B FARM_HARVEST_FIRST (PURE): on a food crisis, harvest the STANDING farm before establishing a
 // new plot at the nearest (often stale) water. Returns 'harvest-standing' when a farm already stands
 // AND food is below the crisis threshold AND the flag is on; else 'establish' (today's behavior /
@@ -196,4 +209,4 @@ function foodCrisisFarmAction ({ hasStandingFarm = false, food = 20, harvestFirs
   return 'establish'
 }
 
-module.exports = { bankUsable, BANK_DYS, cropCellState, cellHealthStep, plotShouldUnlatch, matureForHarvest, farmlandReady, tillableBank, expansionMaxed, barrenStep, orderBankCandidates, scoreFarmSite, shouldResite, plotCollectRadius, footprintHasCell, seedBankWithdrawAmount, foodCrisisFarmAction }
+module.exports = { bankUsable, BANK_DYS, cropCellState, cellHealthStep, plotShouldUnlatch, matureForHarvest, farmlandReady, tillableBank, expansionMaxed, barrenStep, orderBankCandidates, scoreFarmSite, shouldResite, plotCollectRadius, footprintHasCell, seedBankWithdrawAmount, foodCrisisFarmAction, dryHomeFarmMode }

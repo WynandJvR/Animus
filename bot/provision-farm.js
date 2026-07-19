@@ -289,6 +289,148 @@ async function levelPlotCell (bot, cx, baseY, cz, { isStopped = () => false } = 
   return true
 }
 
+// #87 DRY_HOME_FARM: establish/expand a hut-adjacent DRY farmland plot (no water, no bucket, no iron -
+// crops grow on dry farmland at ~half speed, and a PLANTED cell never reverts to dirt). Sited 6-14b off
+// the hut anchor, clear of the apron, on NATURAL flat grass/dirt only (anti-grief; tillableBank keeps it
+// to grass/dirt/coarse/rooted so we never dig/place inside the structure). Registered in the SAME
+// wheatFarm schema with `dry:true`, so tendWheatFarm/collect/exclusions all just work on it. Called ONLY
+// from ensureWheatFarm under the flag (flag off -> never invoked -> today byte-for-byte). No hydration/
+// water-within-4 gate exists to skip: the only water requirement is ensureWheatFarm's own `!waters.length`
+// defer, which this path is injected BEFORE. Returns true when the plot stands (established/expanded),
+// false to defer to the caller's fallback.
+async function ensureDryHomeFarm (bot, home, hut, { isStopped = () => false, say = () => {}, avoid = null, expand = false } = {}) {
+  if (!hut) return false
+  const m = loadWorldMem()
+  const NEAR_MIN = Number(process.env.DRY_FARM_NEAR_MIN || 6)
+  const NEAR_MAX = Number(process.env.DRY_FARM_NEAR_MAX || 14)
+  const FLAT_SITE = process.env.FARM_FLAT_SITE !== '0'
+  const FLAT_MIN = Number(process.env.FARM_FLAT_MIN || 0.6)
+  const MIN_TILLABLE = Number(process.env.FARM_MIN_TILLABLE || 6)
+  const DIST_WEIGHT = Number(process.env.FARM_DIST_WEIGHT || 0.75)
+  const LEVEL = process.env.FARM_LEVEL !== '0'
+  const TORCH = process.env.FARM_TORCH !== '0'
+  const floorY = hut.y // the hut infra y is the floor level - crops sit level with the home floor
+  const cx = hut.x + 2; const cz = hut.z + 2 // hut centre (6x6): the plot anchor + tend/collect centre
+  const existingLen = (expand && m.wheatFarm && m.wheatFarm.cells && m.wheatFarm.cells.length) || 0
+  const onApron = (x, z) => x >= hut.x - 2 && x <= hut.x + 6 && z >= hut.z - 2 && z <= hut.z + 6 // == onHutApron box
+  // annulus 6-14b off the hut corner, off the apron, on NATURAL tillable ground (grass/dirt) with a
+  // replaceable/air cell above - NO water-adjacency requirement (dry mode). tillableBank keeps it to
+  // grass/dirt/coarse/rooted so tillCell takes directly (no sand/dirt-swap) and we never touch the hut.
+  const scanDry = () => {
+    const out = []; const seen = new Set()
+    for (let dx = -NEAR_MAX; dx <= NEAR_MAX; dx++) for (let dz = -NEAR_MAX; dz <= NEAR_MAX; dz++) {
+      const dist = Math.hypot(dx, dz)
+      if (dist < NEAR_MIN || dist > NEAR_MAX) continue
+      const gx = hut.x + dx; const gz = hut.z + dz; const k = gx + ',' + gz
+      if (seen.has(k) || onApron(gx, gz) || inAvoidBox(avoid, gx, gz)) continue
+      seen.add(k)
+      let ground = null
+      for (let y = floorY + 3; y >= floorY - 3; y--) {
+        const b = bot.blockAt(new Vec3(gx, y, gz)); const a = bot.blockAt(new Vec3(gx, y + 1, gz))
+        if (b && b.boundingBox === 'block' && a && (AIRISH(a.name) || REPLACEABLE.test(a.name))) { ground = b; break }
+      }
+      if (!ground || !farm.tillableBank(ground.name)) continue
+      if (insideOwnStructure(bot, ground.position)) continue // never the hut structure itself (anti-grief)
+      out.push({ x: gx, z: gz, y: ground.position.y, flat: ground.position.y === floorY, block: ground })
+    }
+    return out
+  }
+  let cands = scanDry()
+  const tillable = cands.length
+  const flatFrac = tillable ? cands.filter(c => c.flat).length / tillable : 0
+  // fresh establish gates on the SAME flat-site scorer as the water path (only water-adjacency dropped):
+  // a rough/obstructed annulus is rejected so the caller can fall back to the legacy path. Expansion
+  // skips the gate (the plot already stands) and just adds whatever flat cells remain.
+  if (!expand) {
+    const sc = farm.scoreFarmSite({ tillable, flatFrac, distHome: 0, target: WHEAT_FARM_TARGET }, { distWeight: DIST_WEIGHT, minTillable: MIN_TILLABLE, minFlatFrac: FLAT_SITE ? FLAT_MIN : 0 })
+    if (!sc.acceptable) { dbg('  wheat farm [dry]: annulus ' + NEAR_MIN + '-' + NEAR_MAX + 'b off the hut not acceptable (tillable ' + tillable + ', flat ' + flatFrac.toFixed(2) + ') - deferring to fallback'); return false }
+  }
+  const ownedCols = new Set(((m.wheatFarm && m.wheatFarm.cells) || []).map(c => c.x + ',' + c.z))
+  cands = farm.orderBankCandidates(cands.filter(c => !ownedCols.has(c.x + ',' + c.z)), { x: cx, z: cz }) // grow contiguously outward from the hut
+  if (!cands.length) { dbg('  wheat farm [dry]: no un-owned flat cells left off the hut'); return existingLen > 0 }
+  // 1) a hoe - acquired via the resource model exactly as the water path (withdraw > craft > gather wood)
+  let hoe = (bot.inventory ? bot.inventory.items() : []).find(i => /_hoe$/.test(i.name))
+  if (!hoe) {
+    try {
+      const res = require('./resources.js')
+      const rec = await res.reconcile(bot, { wooden_hoe: 1 }, { near: hut, maxAgeMs: 0, planOpts: { primaryWood: P().detectWood(bot) || 'oak' } })
+      dbg('  wheat farm [dry]: acquiring a wooden hoe (' + (rec.plan.tasks.map(t => `${t.type}:${t.item || t.output}`).join(' > ') || (rec.withdraws.length ? 'from bank' : 'from hand')) + ')')
+      if (rec.withdraws.length || rec.plan.tasks.length) await res.runReconciled(bot, rec, { isStopped, say, home: hut })
+    } catch (e) { dbg('  wheat farm [dry]: hoe acquisition failed (' + e.message + ')') }
+    hoe = (bot.inventory ? bot.inventory.items() : []).find(i => /_hoe$/.test(i.name))
+    if (!hoe) { dbg('  wheat farm [dry]: still no hoe - deferred'); return existingLen > 0 }
+  }
+  // 2) seeds - bank-first then grass, same as the water path
+  const seedCount = () => countItem(bot, 'wheat_seeds')
+  const seedWant = process.env.FARM_SEED_TOPUP === '0' ? 3 : Math.max(3, Math.min(12, WHEAT_FARM_TARGET - existingLen))
+  if (seedCount() < seedWant) {
+    try { await S().walkStaged(bot, cx, cz, { isStopped, range: 6, timeoutMs: 60000 }) } catch {}
+    await gatherSeedsNear(bot, seedWant, { isStopped, near: hut, say })
+    if (seedCount() < 1) { dbg('  wheat farm [dry]: no seeds (bank + grass empty) - deferred'); return existingLen > 0 }
+  }
+  say(expand ? 'expanding the home wheat plot - dry farmland, no commute' : 'planting a wheat plot right by the hut - dry farmland, no more food runs')
+  // 3) level the target cells to the hut floor Y (one baseY) so tills take + the plot is tidy - the
+  // orchard/water-farm levelPlotCell primitive, bounded. FARM_LEVEL=0 keeps today's no-level behavior.
+  const baseY = floorY
+  if (LEVEL && !isStopped()) {
+    if (countItem(bot, 'dirt') < 12 && !isStopped()) { try { await P().runGather(bot, 'dirt', 24, { isStopped, restoreMovements: () => {}, home: { x: cx, z: cz }, avoid }) } catch (e) { dbg('  wheat farm [dry]: dirt stock-up failed (' + e.message + ')') } }
+    const LB = Number(process.env.FARM_LEVEL_BUDGET || 48); const LM = Number(process.env.FARM_LEVEL_MS || 60000)
+    const t0 = Date.now(); let leveled = 0; let tried = 0
+    for (const c of cands.slice(0, 12)) {
+      if (isStopped() || tried >= LB || Date.now() - t0 > LM) break
+      tried++
+      try { if (await levelPlotCell(bot, c.x, baseY, c.z, { isStopped })) leveled++ } catch {}
+    }
+    dbg('  wheat farm [dry]: leveled ' + leveled + '/' + tried + ' cell(s) to baseY ' + baseY)
+    cands = farm.orderBankCandidates(scanDry().filter(c => !ownedCols.has(c.x + ',' + c.z)), { x: cx, z: cz }) // re-read the now-flat ground
+  }
+  // 4) till + plant (block-verified, exactly like the water path minus the sand/dirt-swap - we
+  // restricted to tillableBank ground). No hydration gate: dry farmland grows crops just fine.
+  let planted = 0; let attempted = 0; const plantedCells = []
+  for (const cell of cands.slice(0, 12).map(c => c.block)) {
+    if (isStopped() || seedCount() < 1) break
+    attempted++
+    try {
+      if (bot.entity.position.distanceTo(cell.position) > 4) await gotoWithTimeout(bot, new goals.GoalNear(cell.position.x, cell.position.y, cell.position.z, 2), 12000)
+      const veg = bot.blockAt(cell.position.offset(0, 1, 0))
+      if (veg && !AIRISH(veg.name)) { try { await bot.dig(veg) } catch {} }
+      const tr = await tillCell(bot, cell)
+      if (tr === 'nohoe') { dbg('  wheat farm [dry]: hoe vanished mid-pass - aborting'); break }
+      if (tr !== 'farmland') { dbg('  wheat farm [dry]: till did not take at ' + cell.position.toString() + ' (' + tr + ', got ' + ((bot.blockAt(cell.position) || {}).name || '?') + ')'); continue }
+      const tilled = bot.blockAt(cell.position)
+      const seeds = (bot.inventory ? bot.inventory.items() : []).find(i => i.name === 'wheat_seeds')
+      if (!seeds) break
+      await bot.equip(seeds, 'hand')
+      const cropPos = cell.position.offset(0, 1, 0)
+      try { await bot.placeBlock(tilled, new Vec3(0, 1, 0)) } catch (e) { dbg('  wheat farm [dry]: seed place threw (' + e.message + ')') }
+      await new Promise(r => setTimeout(r, 200))
+      const crop = bot.blockAt(cropPos)
+      if (crop && crop.name === 'wheat') { planted++; plantedCells.push({ x: cropPos.x, y: cropPos.y, z: cropPos.z }); await boneMealBlock(bot, cropPos, 2) }
+      else dbg('  wheat farm [dry]: seed did NOT take at ' + cropPos.x + ',' + cropPos.y + ',' + cropPos.z + ' (got ' + ((crop && crop.name) || '?') + ')')
+    } catch (e) { dbg('  wheat farm [dry]: cell failed (' + e.message + ')') }
+  }
+  // 5) merge with the standing dry plot (expansion) + persist under the SAME schema + dry:true. On a
+  // fresh establish this SUPERSEDES a far water farm (its record is dropped here; its pond stays in the
+  // infra registry via rememberInfra for a future bucket-hydration upgrade). Only overwrite on success,
+  // so a failed pass never strands the bot farm-less.
+  const prior = expand ? ((m.wheatFarm && m.wheatFarm.cells) || []) : []
+  const byKey = new Map()
+  for (const c of prior) byKey.set(c.x + ',' + c.y + ',' + c.z, { x: c.x, y: c.y, z: c.z })
+  for (const c of plantedCells) byKey.set(c.x + ',' + c.y + ',' + c.z, c)
+  const merged = [...byKey.values()]
+  if (!merged.length) { dbg('  wheat farm [dry]: could not plant any cell (none verified as wheat) - leaving any existing farm intact'); return false }
+  const eligibleRemaining = Math.max(0, cands.length - attempted)
+  const maxed = farm.expansionMaxed({ expand: true, planted, eligibleRemaining, cells: merged.length, target: WHEAT_FARM_TARGET })
+  const prevHealth = expand && m.wheatFarm ? m.wheatFarm.cellHealth : undefined // carry the tend cell-health ledger across an expansion
+  m.wheatFarm = { x: cx, y: baseY, z: cz, cells: merged, at: Date.now(), maxed, dry: true }
+  if (prevHealth) m.wheatFarm.cellHealth = prevHealth
+  saveWorldMem()
+  dbg('  wheat farm [dry]: ' + planted + ' new cell(s), ' + merged.length + ' total at the hut (' + cx + ',' + cz + ')' + (maxed ? ' [site maxed - ' + eligibleRemaining + ' eligible left]' : ''))
+  if (planted) say(`home wheat plot ${expand ? 'expanded' : 'planted'} (${merged.length} cells) by the hut - dry farmland, bread without the commute`)
+  if (TORCH) { try { await placeFarmTorches(bot, merged, { isStopped }) } catch (e) { dbg('  wheat farm [dry]: torch pass failed (' + e.message + ')') } }
+  return true
+}
+
 async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () => {}, avoid = null } = {}) {
   const mcData = require('minecraft-data')(bot.version)
   const m = loadWorldMem()
@@ -331,7 +473,22 @@ async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () =
   // reachable while `maxed` is latched); the actual move still needs shouldResite to pass below.
   const tinyMaxed = !!(m.wheatFarm && m.wheatFarm.maxed && existingLen > 0 && existingLen < Math.ceil(WHEAT_FARM_TARGET / 2))
   const resiteEligible = RESITE && nearExisting && tinyMaxed && (Date.now() - (m.farmResiteAt || 0) > RESITE_COOLDOWN_MS)
-  if (nearExisting && (existingLen >= WHEAT_FARM_TARGET || (existingLen > 0 && m.wheatFarm.maxed)) && !resiteEligible) return true
+  // #87 DRY_HOME_FARM: a hut-adjacent DRY farmland plot kills the food commute (crops grow on dry
+  // farmland at ~half speed; a PLANTED cell never reverts - no water/bucket/iron needed). Fires only
+  // with the flag + a hut anchor + no standing farm within DRY_FARM_NEAR of it (establish/supersede a
+  // far water farm), or to expand a standing dry home plot. dryHomeFarmMode is the PURE gate.
+  // DRY_HOME_FARM=0 -> dryMode always 'off' -> every branch below is skipped (today byte-for-byte).
+  const DRY_HOME_FARM = process.env.DRY_HOME_FARM !== '0'
+  const DRY_FARM_NEAR = Number(process.env.DRY_FARM_NEAR || 24)
+  const hutA = hutAnchor()
+  const standingNearHut = !!(m.wheatFarm && m.wheatFarm.cells && m.wheatFarm.cells.length > 0 && hutA &&
+    Math.hypot(m.wheatFarm.x - hutA.x, m.wheatFarm.z - hutA.z) <= DRY_FARM_NEAR)
+  const dryMode = DRY_HOME_FARM
+    ? farm.dryHomeFarmMode({ flag: true, hutExists: !!hutA, standingNearHut, farmIsDry: !!(m.wheatFarm && m.wheatFarm.dry), cells: existingLen, target: WHEAT_FARM_TARGET, maxed: !!(m.wheatFarm && m.wheatFarm.maxed) })
+    : 'off'
+  // ...but a far, maxed/at-target water farm must NOT early-return when dry mode wants to SUPERSEDE it
+  // (dryMode 'establish' means no standing farm is near the hut, so the far one may be replaced).
+  if (nearExisting && (existingLen >= WHEAT_FARM_TARGET || (existingLen > 0 && m.wheatFarm.maxed)) && !resiteEligible && dryMode !== 'establish') return true
   // BAD MOMENT guard: the last attempt ran while being chased INTO A CAVE - it searched
   // for grass from underground and found none. Farming is a peacetime surface job.
   // FIX #39: farming is a peacetime SURFACE job - defer if we're truly caved-in, hunted, or it's
@@ -349,6 +506,17 @@ async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () =
     const why = ceiling ? 'solid ceiling <=12b (real cave roof)' : hostile ? 'hostile within 16b' : 'night'
     dbg('  wheat farm: bad moment - ' + why + ' - deferred')
     return false
+  }
+  // #87 DRY_HOME_FARM: dry-first. Establish/expand the hut-adjacent dry plot BEFORE the water search
+  // (dry mode needs no water). On a non-establish miss it falls back to the legacy water path so a
+  // farmless bot is never stranded. This whole block is unreachable when DRY_HOME_FARM=0 (dryMode
+  // pins to 'off'), so flag off is byte-for-byte today.
+  if (DRY_HOME_FARM && dryMode !== 'off' && !isStopped()) {
+    const established = await ensureDryHomeFarm(bot, home, hutA, { isStopped, say, avoid, expand: dryMode === 'expand' })
+    if (established) return true
+    if (dryMode === 'expand') return true // the standing dry plot still stands (this pass just deferred adds)
+    if (existingLen > 0) return false // a far farm still stands + is tended; retry dry next pass (don't build a 2nd farm)
+    dbg('  wheat farm: dry-home found no flat home site and no farm yet - falling back to the legacy water path')
   }
   // 1) surface water within reach of home - farmland must sit beside it
   const waterId = mcData.blocksByName.water.id
@@ -806,6 +974,11 @@ async function tendWheatFarm (bot, { isStopped = () => false, say = () => {} } =
       if (replantOk) replanted++
     } // 'flooded'/'blocked': leave it - not fixable from here (retirement below handles a persistent one)
     // FARM_RESEED: tally + age the health of PERSISTED cells only (foldins aren't in the ledger).
+    // #87 DRY_HOME_FARM §B verified: a slow-growing dry cell is a `wheat` block at ANY age (0..7), so
+    // cropCellState -> 'wheat' -> cellHealthStep resets deadRuns and NEVER retires it. Only a truly
+    // empty/washed/blocked cell ('gone'/'flooded'/'blocked') ages toward retirement - unchanged by dry
+    // mode. bankBarren likewise only strikes tilling/planting FAILURES, not a healthy growing crop. No
+    // code change needed for dry patience.
     if (RESEED && persistedKeys.has(p.x + ',' + p.y + ',' + p.z)) {
       const key = p.x + ',' + p.y + ',' + p.z
       if (state === 'wheat') { cWheat++; if (farm.matureForHarvest(b.getProperties ? b.getProperties().age : null)) cMature++ } else if (state === 'gone') cGone++
