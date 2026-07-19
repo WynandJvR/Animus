@@ -85,6 +85,7 @@ async function runQueued () {
 function fakeBot (opts = {}) {
   const overrides = new Map() // "x,y,z" -> block name
   const placed = []
+  const propMap = new Map()
   const bot = {
     version: '1.21.1',
     time: { timeOfDay: opts.timeOfDay != null ? opts.timeOfDay : 1000 }, // day by default
@@ -93,14 +94,15 @@ function fakeBot (opts = {}) {
     entity: { position: new Vec3(opts.x != null ? opts.x : 100.5, 64, opts.z != null ? opts.z : 100.5) },
     inventory: { _items: (opts.items || []).slice(), items () { return this._items } },
     _placed: placed,
-    _override (v, name) { overrides.set(`${v.x},${v.y},${v.z}`, name) },
+    _override (v, name, props) { overrides.set(`${v.x},${v.y},${v.z}`, name); if (props) propMap.set(`${v.x},${v.y},${v.z}`, props) },
     blockAt (v) {
       if (!v) return null
       const key = `${Math.floor(v.x)},${Math.floor(v.y)},${Math.floor(v.z)}`
       const name = overrides.has(key) ? overrides.get(key) : (Math.floor(v.y) <= 63 ? 'grass_block' : 'air')
       if (name === null) return null
       const solid = !/^(air|cave_air|void_air)$/.test(name)
-      return { name, position: new Vec3(Math.floor(v.x), Math.floor(v.y), Math.floor(v.z)), boundingBox: solid ? 'block' : 'empty' }
+      const props = propMap.get(key) || {}
+      return { name, position: new Vec3(Math.floor(v.x), Math.floor(v.y), Math.floor(v.z)), boundingBox: solid ? 'block' : 'empty', getProperties: () => props }
     },
     findBlock () { return null },
     async equip () {},
@@ -111,9 +113,22 @@ function fakeBot (opts = {}) {
       placed.push(at)
       const held = bot.inventory._items.find(i => /_bed$/.test(i.name))
       if (!held) throw new Error('nothing bed-shaped in hand')
-      bot._override(at, held.name)          // foot
-      bot._override(at.offset(0, 0, 1), held.name) // head
+      // The SERVER picks the orientation from the placer's yaw - it is NOT ours to assume.
+      // opts.serverFacing lets a test reproduce the live wall-perch: we validate a +z head
+      // and the server lays the bed east instead.
+      const facing = opts.serverFacing || 'south'
+      const D = { north: [0, 0, -1], south: [0, 0, 1], east: [1, 0, 0], west: [-1, 0, 0] }[facing]
+      bot._override(at, held.name, { part: 'foot', facing })
+      bot._override(at.offset(D[0], D[1], D[2]), held.name, { part: 'head', facing })
       bot.inventory._items = bot.inventory._items.filter(i => i !== held)
+    },
+    async dig (b) {
+      const fp = provHut.bedFootprint(bot, b.position)
+      for (const c of (fp ? [fp.foot, fp.head] : [b.position])) {
+        overrides.set(`${c.x},${c.y},${c.z}`, 'air'); propMap.delete(`${c.x},${c.y},${c.z}`)
+      }
+      if (fp) bot.inventory._items.push({ name: b.name, count: 1 }) // breaking a bed drops it
+      bot._dug = (bot._dug || 0) + 1
     }
   }
   return bot
@@ -234,7 +249,8 @@ ta('ensureSpawnBed: a standing, asserted bed is NOT re-placed (how=stood)', asyn
   fakeRes._asked = []
   fakeRes._grant = 'white_bed'
   const bot = fakeBot({ items: [{ name: 'white_bed', count: 1 }] }) // carrying a spare on purpose
-  bot._override(new Vec3(102, 64, 100), 'white_bed')
+  bot._override(new Vec3(102, 64, 100), 'white_bed', { part: 'foot', facing: 'south' })
+  bot._override(new Vec3(102, 64, 101), 'white_bed', { part: 'head', facing: 'south' })
   worldMemory.rememberBed({ x: 102, y: 64, z: 100 }) // also stamps bedAssertAt
   const r = await provRec.ensureSpawnBed(bot, {})
   assert.strictEqual(r.ok, true, 'why: ' + r.why)
@@ -288,7 +304,8 @@ ta('ensureSpawnBed: truly bedless and broke -> ok:false with an honest why', asy
 ta('ensureSpawnBed: force re-asserts even on a standing, remembered bed', async () => {
   resetWorldMem()
   const bot = fakeBot({ items: [] })
-  bot._override(new Vec3(101, 64, 100), 'white_bed')
+  bot._override(new Vec3(101, 64, 100), 'white_bed', { part: 'foot', facing: 'south' })
+  bot._override(new Vec3(101, 64, 101), 'white_bed', { part: 'head', facing: 'south' })
   worldMemory.rememberBed({ x: 101, y: 64, z: 100 })
   bot._activated = null
   const r = await provRec.ensureSpawnBed(bot, { force: true })
@@ -322,6 +339,69 @@ t('regression: the spawn ladder holds no blanket time window', () => {
   const fn = src.slice(src.indexOf('async function ensureSpawnBed'), src.indexOf('async function recoverSpawnAnchor'))
   assert.ok(!/3600 \* 1000/.test(fn), 'the hourly assert window is back - condition gates only')
   assert.ok(!/Date\.now\(\) - m\.bedAssertAt/.test(fn), 'a time-since-assert comparison is back')
+})
+
+
+// ---- #107b THE WALL-PERCH REGRESSION -------------------------------------------------
+// Live 2026-07-19 16:32: placeBedNear validated foot + head-at-+z, then bot.placeBlock let
+// the SERVER orient the bed EAST. The real head landed one cell east - never validated, and
+// with nothing beneath it. The old post-place check looked for "a bed at either ASSUMED cell",
+// found the foot, and reported success. Result: a bed perched on the hut wall crest with its
+// head over open air. Verify CONFORMANCE (the footprint the world actually produced), never
+// a prediction of it.
+
+t('bedWellPlaced: a bed whose real head hangs over air is REJECTED', () => {
+  const bot = fakeBot({})
+  bot._override(new Vec3(101, 64, 100), 'white_bed', { part: 'foot', facing: 'east' })
+  bot._override(new Vec3(102, 64, 100), 'white_bed', { part: 'head', facing: 'east' })
+  bot._override(new Vec3(102, 63, 100), 'air') // nothing under the head
+  const v = provHut.bedWellPlaced(bot, new Vec3(101, 64, 100))
+  assert.strictEqual(v.ok, false, 'an unsupported head must not pass')
+  assert.ok(/no support/.test(v.why), 'why should name the missing support: ' + v.why)
+})
+
+t('bedWellPlaced: a bed on a one-wide wall crest is REJECTED', () => {
+  const bot = fakeBot({})
+  // a bed sitting on top of a N-S wall: support exists under both cells, but the ground
+  // either side of that support is air - a crest, not ground.
+  bot._override(new Vec3(101, 65, 100), 'white_bed', { part: 'foot', facing: 'south' })
+  bot._override(new Vec3(101, 65, 101), 'white_bed', { part: 'head', facing: 'south' })
+  for (const z of [99, 100, 101, 102]) bot._override(new Vec3(101, 64, z), 'oak_planks')
+  for (const z of [99, 100, 101, 102]) { bot._override(new Vec3(100, 64, z), 'air'); bot._override(new Vec3(102, 64, z), 'air') }
+  const v = provHut.bedWellPlaced(bot, new Vec3(101, 65, 100))
+  assert.strictEqual(v.ok, false, 'a wall crest must not pass as ground')
+  assert.ok(/crest|ledge/.test(v.why), 'why should name the crest: ' + v.why)
+})
+
+t('bedWellPlaced: a bed flat on real ground PASSES', () => {
+  const bot = fakeBot({})
+  bot._override(new Vec3(101, 64, 100), 'white_bed', { part: 'foot', facing: 'south' })
+  bot._override(new Vec3(101, 64, 101), 'white_bed', { part: 'head', facing: 'south' })
+  const v = provHut.bedWellPlaced(bot, new Vec3(101, 64, 100))
+  assert.strictEqual(v.ok, true, 'flat ground must pass: ' + v.why)
+})
+
+t('bedFootprint: reads the REAL two cells from facing/part, not an assumption', () => {
+  const bot = fakeBot({})
+  bot._override(new Vec3(101, 64, 100), 'white_bed', { part: 'foot', facing: 'east' })
+  bot._override(new Vec3(102, 64, 100), 'white_bed', { part: 'head', facing: 'east' })
+  const fpF = provHut.bedFootprint(bot, new Vec3(101, 64, 100))
+  const fpH = provHut.bedFootprint(bot, new Vec3(102, 64, 100)) // from the HEAD too
+  assert.strictEqual(fpF.head.x, 102, 'head must be east of the foot, not +z')
+  assert.strictEqual(fpH.foot.x, 101, 'resolving from the head must find the same foot')
+})
+
+t('placeBedNear: server lays it EAST over a cliff -> bed is broken, then re-laid safely', async () => {
+  const bot = fakeBot({ items: [{ name: 'white_bed', count: 1 }], serverFacing: 'east' })
+  // a clean cliff: solid ground west of x=99, open air from x=99 east. A foot at x=98 looks
+  // perfectly good (3/4 neighbours solid) but an EAST-facing head lands at x=99, over nothing.
+  for (let x = 99; x <= 112; x++) for (let z = 90; z <= 112; z++) bot._override(new Vec3(x, 63, z), 'air')
+  const r = await provHut.placeBedNear(bot, { x: 99, y: 64, z: 100 }, {})
+  assert.ok((bot._dug || 0) > 0, 'it must have reclaimed the badly-oriented bed it laid over the cliff')
+  if (r) {
+    const v = provHut.bedWellPlaced(bot, r.position)
+    assert.strictEqual(v.ok, true, 'any bed it RETURNS must be well placed: ' + v.why)
+  }
 })
 
 runQueued().then(() => {

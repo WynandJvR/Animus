@@ -264,6 +264,45 @@ async function acquireBed (bot, opts = {}) {
 // Rings outward so the bed lands close to home without needing the hut model. Every rung is
 // grounded: cells are read before placing and the placed bed is re-read afterwards (that
 // re-read IS the proof - pathfix already wraps the place itself). Returns the bed block or null.
+// A bed occupies TWO cells and the SERVER decides which two - the orientation follows the
+// placer's yaw, not our intent. The old code ASSUMED head = foot+z, validated those cells,
+// then accepted any bed found at the foot: it verified EXISTENCE, not CONFORMANCE, so a bed
+// that landed facing east (head one cell east, unsupported) passed. Live cost: a bed perched
+// on the hut wall crest with its head over open air. Read the real footprint from the block's
+// own state instead of predicting it.
+const BED_FACE = { north: [0, 0, -1], south: [0, 0, 1], east: [1, 0, 0], west: [-1, 0, 0] }
+function bedFootprint (bot, pos) {
+  const b = bot.blockAt(pos instanceof Vec3 ? pos : new Vec3(pos.x, pos.y, pos.z))
+  if (!b || !/_bed$/.test(b.name)) return null
+  let pr = {}
+  try { pr = b.getProperties() || {} } catch {}
+  const d = BED_FACE[pr.facing]
+  if (!d) return null
+  const foot = pr.part === 'head' ? b.position.offset(-d[0], -d[1], -d[2]) : b.position
+  return { foot, head: foot.offset(d[0], d[1], d[2]), facing: pr.facing }
+}
+
+// "A solid block below" is not a ground test - the top of a one-wide wall passes it. Require
+// support under BOTH real cells AND that each support sits in ground (>=3 of its 4 horizontal
+// neighbours solid), which rejects wall crests and single pillars. Pure world reads.
+function bedWellPlaced (bot, pos) {
+  const fp = bedFootprint(bot, pos)
+  if (!fp) return { ok: false, why: 'not a bed' }
+  for (const c of [fp.foot, fp.head]) {
+    const here = bot.blockAt(c)
+    if (!here || !/_bed$/.test(here.name)) return { ok: false, why: 'cell ' + c.toString() + ' is not part of the bed' }
+    const sup = bot.blockAt(c.offset(0, -1, 0))
+    if (!sup || sup.boundingBox !== 'block') return { ok: false, why: 'no support under ' + c.toString() }
+    let solid = 0
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const n = bot.blockAt(c.offset(dx, -1, dz))
+      if (n && n.boundingBox === 'block') solid++
+    }
+    if (solid < 3) return { ok: false, why: 'support under ' + c.toString() + ' is a ledge/wall crest (' + solid + '/4 neighbours solid)' }
+  }
+  return { ok: true, why: 'both cells supported on ground' }
+}
+
 async function placeBedNear (bot, near, opts = {}) {
   let bedItem = bedInPack(bot)
   if (!bedItem || !near) return null
@@ -282,10 +321,24 @@ async function placeBedNear (bot, near, opts = {}) {
     try { inZone = [foot, head].some(c => P().inBuildZone(c.x, c.z)) } catch {}
     if (inZone) continue
     let good = true
-    for (const c of [foot, head]) {
-      const cb = bot.blockAt(c); const fl = bot.blockAt(c.offset(0, -1, 0))
-      if (!cb || !AIRISH(cb.name)) { good = false; break }
-      if (!fl || fl.boundingBox !== 'block') { good = false; break }
+    // Pre-screen BOTH possible orientations' cells plus the ground quality, so a wall crest
+    // is never even attempted. The post-place check below is what actually decides.
+    for (const c of [foot, head, foot.offset(1, 0, 0), foot.offset(-1, 0, 0)]) {
+      const cb = bot.blockAt(c)
+      if (!cb) { good = false; break } // unknown chunk is NOT "clear"
+    }
+    if (good) {
+      for (const c of [foot, head]) {
+        const cb = bot.blockAt(c); const fl = bot.blockAt(c.offset(0, -1, 0))
+        if (!cb || !AIRISH(cb.name)) { good = false; break }
+        if (!fl || fl.boundingBox !== 'block') { good = false; break }
+        let solid = 0
+        for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const n = bot.blockAt(c.offset(dx, -1, dz))
+          if (n && n.boundingBox === 'block') solid++
+        }
+        if (solid < 3) { good = false; break } // ledge / wall crest / pillar top
+      }
     }
     if (!good) continue
     try { await gotoWithTimeout(bot, new goals.GoalNear(foot.x, foot.y, foot.z, 2), 15000) } catch {}
@@ -297,11 +350,15 @@ async function placeBedNear (bot, near, opts = {}) {
       await bot.placeBlock(bot.blockAt(foot.offset(0, -1, 0)), new Vec3(0, 1, 0))
     } catch (e) { dbg('  placeBedNear: ' + foot.x + ',' + foot.z + ' place failed (' + e.message + ')'); continue }
     await new Promise(r => setTimeout(r, 400))
-    for (const c of [foot, head]) { // re-read: did a bed actually land?
-      const b = bot.blockAt(c)
-      if (b && /_bed$/.test(b.name)) { dbg('  placeBedNear: bed verified at ' + b.position.toString()); return b }
-    }
-    dbg('  placeBedNear: placement at ' + foot.x + ',' + foot.z + ' did not verify')
+    // CONFORMANCE, not existence: read the footprint the server actually produced and judge
+    // THAT. A bed we cannot stand behind gets broken and the item reused on the next candidate.
+    let landed = null
+    for (const c of [foot, head]) { const b = bot.blockAt(c); if (b && /_bed$/.test(b.name)) { landed = b; break } }
+    if (!landed) { dbg('  placeBedNear: placement at ' + foot.x + ',' + foot.z + ' did not verify'); continue }
+    const verdict = bedWellPlaced(bot, landed.position)
+    if (verdict.ok) { dbg('  placeBedNear: bed verified at ' + landed.position.toString() + ' (' + verdict.why + ')'); return landed }
+    dbg('  placeBedNear: REJECTING bed at ' + landed.position.toString() + ' - ' + verdict.why + ' - breaking it and trying elsewhere')
+    try { await bot.dig(landed); await collectDrops(bot, 3) } catch (e) { dbg('  placeBedNear: could not reclaim the bad bed (' + e.message + ')'); return null }
   }
   return null
 }
@@ -1276,7 +1333,7 @@ async function worldTidy (bot, opts = {}) {
 
 module.exports = {
   setDebugSink, insideHutBox,
-  insideHutBox, ownHutAt, onHutApron, insideOwnStructure, hasSolidCeiling, hutAnchor, hutReader, stepOffApron, ensureHutApron, healHomeCrater, ensureHutBed, bedInPack, bedCandidates, acquireBed, placeBedNear, freeInteriorCell, findHutDoorway, hutFreeCells, furnitureInHut, furnishHut, stationInHut, stationSlot, loadHutSchem, reconcileInfra, cleanupHutInterior, repairHutStructure, recallAndReach, maintainHut, maintainHome,
+  insideHutBox, ownHutAt, onHutApron, insideOwnStructure, hasSolidCeiling, hutAnchor, hutReader, stepOffApron, ensureHutApron, healHomeCrater, ensureHutBed, bedInPack, bedCandidates, acquireBed, placeBedNear, bedFootprint, bedWellPlaced, freeInteriorCell, findHutDoorway, hutFreeCells, furnitureInHut, furnishHut, stationInHut, stationSlot, loadHutSchem, reconcileInfra, cleanupHutInterior, repairHutStructure, recallAndReach, maintainHut, maintainHome,
   secureBase, secureBaseGate: hutModel.secureBaseGate,
   sealHomeDescents, sealDescentsGate: hutModel.sealDescentsGate,
   worldTidy, litterSignature: hutModel.litterSignature

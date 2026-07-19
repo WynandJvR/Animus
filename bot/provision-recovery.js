@@ -33,7 +33,7 @@ const { loadWorldMem, saveWorldMem, listInfra, rememberInfra, recallInfra, known
   rememberBed, forgetBed, markBedUnusable, bedHeld, setSpawnSuspect, isSpawnSuspect } = worldMemory
 const provHut = require('./provision-hut.js')
 const { hutAnchor, insideOwnStructure, hasSolidCeiling, ownHutAt, onHutApron, maintainHome,
-  ensureHutBed, stepOffApron } = provHut
+  ensureHutBed, stepOffApron, bedWellPlaced } = provHut
 const provShelter = require('./provision-shelter.js')
 const { isSheltering, shelterNeeded, nightStuck, nightRestWanted, digInForNight, underArmored,
   lowHpCalm, inWaterNow, ensureAshore, pickOpenSkyCell, shelterSite, _sheltering } = provShelter
@@ -809,7 +809,20 @@ async function ensureSpawnBed (bot, opts = {}) {
   if (!opts.force && bed && m.bedAssertAt && !isSpawnSuspect()) {
     const bb0 = bot.blockAt(new Vec3(bed.x, bed.y, bed.z))
     const d0 = Math.hypot(bed.x - bot.entity.position.x, bed.z - bot.entity.position.z)
-    if (bb0 && /_bed$/.test(bb0.name)) return R(true, 'stood', 'anchor set and the bed still stands at ' + bed.x + ',' + bed.z)
+    if (bb0 && /_bed$/.test(bb0.name)) {
+      // A bed that STANDS is not automatically a bed we can stand behind. #107b: the first
+      // laid bed landed on the hut wall crest (server chose the orientation; the unvalidated
+      // head cell hung over air). Judge the real footprint; reclaim a bad one when it is in
+      // reach and re-lay it, rather than anchoring spawn to something absurd.
+      const v0 = bedWellPlaced(bot, new Vec3(bed.x, bed.y, bed.z))
+      if (v0.ok) return R(true, 'stood', 'anchor set and the bed still stands at ' + bed.x + ',' + bed.z)
+      if (d0 <= 8) {
+        dbg('spawn: the anchored bed is badly placed (' + v0.why + ') - reclaiming it to re-lay')
+        try { await bot.dig(bb0) } catch (e) { dbg('spawn: could not reclaim the bad bed (' + e.message + ')') }
+        try { await P().collectDrops(bot, 3) } catch (e) { dbg('spawn: collectDrops after reclaim failed (' + e.message + ')') }
+        forgetBed()
+      } else return R(true, 'stood', 'anchor set; the bed at ' + bed.x + ',' + bed.z + ' is badly placed (' + v0.why + ') but ' + Math.round(d0) + 'b off - re-laying when closer')
+    }
     if (!bb0 && d0 > 48) return R(true, 'stood', 'anchor set; the bed is ' + Math.round(d0) + 'b off, out of read range')
     dbg('spawn: the bed we anchored on no longer reads as a bed - re-anchoring')
   }

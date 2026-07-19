@@ -42,7 +42,7 @@ const { _foodFloorState, _setFoodPlanHint, RAW_COOKABLE, FOOD_ANIMALS, LEATHER_A
 const { FACING_OFF, resolveBankCell, isBankStand, bankStandFor, gotoChest, placeStationInInterior, ensureChest, placeChestOriented, healBankDouble, chestCounts, depositMaterials, withdrawItem, migrateChestInto, consolidateBank, ownInfraCells, lonelyFurnace, consolidateFurnaces, litterPatrol } = provBank
 const { digShaftDown, digStaircaseUp, climbMovements, climbToSurface, pillarUpTo, mineTunnel, placeTorch, ensureTorches, miningPicks, bestPick, workingPickCount, workingMiningPick, carriedPickUsesLeft, craftOneFromInv, craftStonePickHere, ensureMiningKit, digStaircaseDown, enterExistingMine, branchMine, grabNearbyOre, mineDanger } = provMining
 const { PLANTABLE_GROUND, WHEAT_FARM_TARGET, farmFootprintHas, cropExclusionStep, cropPlaceExclusion, inAvoidBox, boneMealBlock, tillCell, withdrawSeedsFromBank, gatherSeedsNear, placeFarmTorches, levelPlotCell, ensureWheatFarm, replantCropCell, tendWheatFarm, hasStandingFarm, saplingFor, saplingCount, plantSaplingNear, boneMealSapling, fishSaplings, prepOrchardCell, plantGrove } = provFarm
-const { ownHutAt, onHutApron, insideOwnStructure, hasSolidCeiling, stepOffApron, ensureHutApron, healHomeCrater, ensureHutBed, bedInPack, bedCandidates, acquireBed, placeBedNear, hutAnchor, hutReader, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, loadHutSchem, repairHutStructure, maintainHut, maintainHome, recallAndReach, findHutDoorway, hutFreeCells, furnitureInHut, furnishHut, insideHutBox, secureBase, secureBaseGate, sealHomeDescents, sealDescentsGate, worldTidy, litterSignature } = provHut
+const { ownHutAt, onHutApron, insideOwnStructure, hasSolidCeiling, stepOffApron, ensureHutApron, healHomeCrater, ensureHutBed, bedInPack, bedCandidates, acquireBed, placeBedNear, bedFootprint, bedWellPlaced, hutAnchor, hutReader, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, loadHutSchem, repairHutStructure, maintainHut, maintainHome, recallAndReach, findHutDoorway, hutFreeCells, furnitureInHut, furnishHut, insideHutBox, secureBase, secureBaseGate, sealHomeDescents, sealDescentsGate, worldTidy, litterSignature } = provHut
 const { AIRISH, REPLACEABLE, SHELTER_HOSTILE, STRUCTURE_RE, DIGGABLE_NATURAL, canBreakNaturally,
   inventoryCounts, countItem, isNight, nearHostile,
   toolForBlock, gotoWithTimeout, collectDrops, stepInto, placeAt } = provCore
@@ -4111,7 +4111,7 @@ module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvis
   activeJobInfo, stopSurvivalJob, escalateFoodFloor, _foodFloorState,
   wildTerrainMovements, trekMovements, DIGGABLE_NATURAL, STRUCTURE_RE, canBreakNaturally,
   collectDrops, huntSpiderForString, ensureFishingRod, isBankStand,
-  bedInPack, bedCandidates, acquireBed, placeBedNear, // #107 SPAWN_BED: the bed acquire/lay primitives ensureSpawnBed stands on
+  bedInPack, bedCandidates, acquireBed, placeBedNear, bedFootprint, bedWellPlaced, // #107 SPAWN_BED: the bed acquire/lay primitives ensureSpawnBed stands on
   // SIBLING BRIDGE: internals the split-out provision-* modules legitimately need at RUNTIME
   // (food planning, scaffold gating, staged walking). Kept off the public surface on purpose -
   // these are not part of the API index.js/commands.js/scheduler.js call, and the double
