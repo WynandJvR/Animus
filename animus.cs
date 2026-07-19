@@ -1824,6 +1824,35 @@ class Animus : Form
         return body != null && status == 200;
     }
 
+    // Free the GPU too. The model lives in OLLAMA's process, not in brain-llm.js, so
+    // killing the brain client leaves the weights parked in VRAM until Ollama's own
+    // keep-alive expires (measured: qwen3:14b held 11.9 GB for another 28 minutes
+    // after a Stop, on a 16 GB card). "Stop" should mean stopped, GPU included.
+    int UnloadOllamaModels()
+    {
+        int freed = 0;
+        try
+        {
+            int status;
+            string ps = WebGet("http://127.0.0.1:11434/api/ps", out status);
+            if (string.IsNullOrEmpty(ps)) return 0;
+            foreach (Match m in Regex.Matches(ps, @"""model""\s*:\s*""([^""]+)"""))
+            {
+                string name = m.Groups[1].Value;
+                try
+                {
+                    WebPost("http://127.0.0.1:11434/api/generate",
+                            "{\"model\":\"" + name + "\",\"keep_alive\":0}");
+                    freed++;
+                    Log("Unloaded " + name + " from VRAM.");
+                }
+                catch (Exception e) { Log("stop: could not unload " + name + " (" + e.Message + ")"); }
+            }
+        }
+        catch (Exception e) { Log("stop: ollama not reachable (" + e.Message + ")"); }
+        return freed;
+    }
+
     void StopAll()
     {
         Log("Stopping bot + brain…");
@@ -1851,6 +1880,9 @@ class Animus : Form
         string[] titles = { "Animus BOT", "Animus BRAIN" };
         foreach (Process p in Process.GetProcesses())
         { try { if (Array.IndexOf(titles, p.MainWindowTitle) >= 0) { p.Kill(); killed++; } } catch { } }
+
+        // Release the GPU as part of stopping, not 28 minutes later.
+        UnloadOllamaModels();
 
         // VERIFY, never assert. The old code set "Stopped" unconditionally - it would
         // log "Nothing was running." and then show Stopped while the bot was online.

@@ -11,6 +11,12 @@ sleep 1
 pkill -f "$LAB/bot/index.js" 2>/dev/null || pkill -f "node index.js" 2>/dev/null || true
 pkill -f "brain-llm.js" 2>/dev/null || true
 sleep 1
+# Free the GPU too: the model lives in OLLAMA's process, not brain-llm.js, so killing
+# the brain client leaves the weights in VRAM until ollama's keep-alive expires.
+for m in $(curl -s --max-time 3 http://127.0.0.1:11434/api/ps 2>/dev/null | grep -oE '"model":"[^"]+"' | cut -d'"' -f4 | sort -u); do
+  curl -s --max-time 5 http://127.0.0.1:11434/api/generate -d "{\"model\":\"$m\",\"keep_alive\":0}" >/dev/null 2>&1     && echo "unloaded $m from VRAM"
+done
+
 # VERIFY rather than assume: the control port is the honest test.
 if curl -s --max-time 3 http://127.0.0.1:3001/health >/dev/null 2>&1; then
   echo "STOP FAILED: :3001 still answers - the bot is still up"
