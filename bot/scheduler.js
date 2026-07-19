@@ -159,10 +159,18 @@ function isDegraded (s) {
   const graveHook = process.env.DEGRADED_GRAVE_REACHABLE !== '0'
     ? !!nearestReachGrave(s, Number(process.env.GRAVE_NEAR_LADDER || 32), Number(process.env.GRAVE_URGENT_DIST || 96))
     : graves.length > 0
+  // #92 DEATH_RATCHET_DAY_RELEASE (default on): the deathsRecent>=2 hold exists to break death
+  // CASCADES (marching back to the death spot at 32 deaths/day). With every outbound path now
+  // night-gated (#41P3/#90/#91) and death spots route-costed (#85), a FULL-VITALS bot in DAYLIGHT
+  // gains nothing from 20 minutes of sitting in the hut (operator: "it just wastes time") - the
+  // ratchet pins only at night or when vitals are actually dented. Flag =0 -> the blanket hold.
+  const ratchet = (s.deathsRecent || 0) >= 2 &&
+    (process.env.DEATH_RATCHET_DAY_RELEASE === '0' ||
+      (!!s.isNight || (s.hp != null && s.hp < 14) || (s.food != null && s.food < 14)))
   return (s.hp != null && s.hp <= 6) ||
          (s.food != null && s.food <= 6) ||
          (s.armorPieces === 0 && graveHook) ||
-         ((s.deathsRecent || 0) >= 2)
+         ratchet
 }
 
 // ---- admissible -------------------------------------------------------------------------

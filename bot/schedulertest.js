@@ -570,9 +570,10 @@ t('(opp) survival need present (food 4) -> survival wins, no window', () => {
 })
 
 t('(opp) degraded (deathsRecent 2) / flee (creeper 8b) -> not chore time', () => {
-  // deathsRecent>=2 is degraded but raises no direct survival need (vitals fine) -> exercises the degraded branch
-  const degraded = snap({ homeDist: 10, deathsRecent: 2, activeJob: { name: 'autobuild', cls: 'progress' }, maintainNeeded: true })
-  assert.strictEqual(S.oppMaintain(degraded, { checkupDue: true }).ok, false, 'degraded -> no window')
+  // deathsRecent>=2 is degraded but raises no direct survival need (vitals fine) -> exercises the
+  // degraded branch. #92: by DAY at full vitals the ratchet releases, so pin the case at NIGHT.
+  const degraded = snap({ homeDist: 10, deathsRecent: 2, isNight: true, activeJob: { name: 'autobuild', cls: 'progress' }, maintainNeeded: true })
+  assert.strictEqual(S.oppMaintain(degraded, { checkupDue: true }).ok, false, 'degraded (night ratchet) -> no window')
   const flee = snap({ homeDist: 10, creeperDist: 8, activeJob: { name: 'autobuild', cls: 'progress' }, maintainNeeded: true })
   assert.strictEqual(S.oppMaintain(flee, { checkupDue: true }).ok, false, 'creeper in blast band -> no window')
 })
@@ -900,7 +901,19 @@ t('(#79) isDegraded: a naked bot with only an OUT-OF-BAND grave is NOT compound-
     // vitals clauses unaffected by the flag
     assert.strictEqual(S.isDegraded(snap({ hp: 5, graves: [] })), true, 'low hp still degraded')
     assert.strictEqual(S.isDegraded(snap({ food: 5, graves: [] })), true, 'low food still degraded')
-    assert.strictEqual(S.isDegraded(snap({ deathsRecent: 2, graves: [] })), true, 'death ratchet still degraded')
+    // #92 DEATH_RATCHET_DAY_RELEASE: full vitals + daylight -> the ratchet releases; night or
+    // dented vitals -> still pinned; flag=0 -> the blanket 20-min hold. Drive BOTH env regimes
+    // explicitly (not ambient) so the suite passes whichever way it is run.
+    {
+      const prev92 = process.env.DEATH_RATCHET_DAY_RELEASE
+      delete process.env.DEATH_RATCHET_DAY_RELEASE // default (flag ON)
+      assert.strictEqual(S.isDegraded(snap({ deathsRecent: 2, graves: [], hp: 20, food: 20, isNight: false })), false, '#92: day + full vitals -> ratchet released')
+      assert.strictEqual(S.isDegraded(snap({ deathsRecent: 2, graves: [], hp: 20, food: 20, isNight: true })), true, '#92: night -> ratchet holds')
+      assert.strictEqual(S.isDegraded(snap({ deathsRecent: 2, graves: [], hp: 10, food: 20, isNight: false })), true, '#92: dented hp -> ratchet holds')
+      process.env.DEATH_RATCHET_DAY_RELEASE = '0'
+      assert.strictEqual(S.isDegraded(snap({ deathsRecent: 2, graves: [], hp: 20, food: 20, isNight: false })), true, '#92 flag off: blanket hold as before')
+      if (prev92 === undefined) delete process.env.DEATH_RATCHET_DAY_RELEASE; else process.env.DEATH_RATCHET_DAY_RELEASE = prev92
+    }
     process.env.DEGRADED_GRAVE_REACHABLE = '0'
     assert.strictEqual(S.isDegraded(farGrave), true, 'flag off: raw graves.length pins exactly as today')
   } finally {
