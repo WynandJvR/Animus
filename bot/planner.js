@@ -460,6 +460,21 @@ async function gearUp (bot, opts = {}) {
   if (!p0) return { progressed: false, msg: 'not spawned yet' }
   const at = { x: Math.round(p0.x), y: Math.floor(p0.y), z: Math.round(p0.z) }
   await wearFromPack(bot) // free protection first - never mine for what the pack holds
+  // #90 GEARUP_NIGHT_GATE (default on): the iron grind is an OUTBOUND excursion, and the headline
+  // rule ("never work outside un-armored at night") already gates every ladder trek - but the
+  // brain's armorup commands are survival-class, PREEMPT the night-shelter hold, and launched
+  // naked mining runs into the dark all night (live 08:5x: hp20 -> hp5 at the hut door, activity
+  // gearup, tod 22279). Defer to dawn without counting it fruitless. nightStuck (eternal night)
+  // lifts the gate exactly like the rung rule; an armored bot may still work the night.
+  if (process.env.GEARUP_NIGHT_GATE !== '0') {
+    try {
+      const night = provision.isNight && provision.isNight(bot)
+      const apc = provision.__siblings && provision.__siblings.armorPieceCount // facade doesn't export it; the bridge does
+      const naked = apc ? apc(bot) < 1 : false // unknown armor -> fail-open (don't gate an armored bot)
+      const stuck = provision.nightStuck && provision.nightStuck(bot)
+      if (night && naked && !stuck) return { progressed: false, msg: 'deferred: naked at night - gearing up at dawn (sheltering now)' }
+    } catch {}
+  }
   try { provision.resetIronGrindMined && provision.resetIronGrindMined() } catch {} // IRON_KEYSTONE: fresh minedReal window for this run's fruitless accounting
   // S6 SAFEKEEP (trigger 3): the iron grind is the classic depart-with-a-full-pack excursion
   // (how it lost the hoe + iron on 07-15). If we're AT the hut and NOT mid-build, stash spare
