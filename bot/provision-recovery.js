@@ -321,6 +321,33 @@ async function deadlockDieByFall (bot, { isStopped = () => false, home = null, s
       dbg('deadlock-reset: pillar too short for a lethal fall (rose ' + gained + 'b, need ' + lethalMin + 'b at hp ' + (bot.health ?? '?') + ') - ABORTING to hold'); return false
     }
     dbg('deadlock-reset: pillared +' + gained + 'b - stepping off the edge to fall')
+    // #76c: FACE the side with the DEEPEST drop before walking off. The r=8 open-sky cell gets
+    // reused across attempts, so a PRIOR attempt's leftover tower can stand adjacent and catch
+    // the fall 2 blocks down (live 04:54: pillared +6, landed y68 on the old tower, hp1 survived).
+    // If NO side offers a lethal drop, don't step at all - go straight to the fallback chain.
+    if (SUICIDE_PILLAR_WORKS) {
+      const feetNow = bot.entity.position.floored()
+      let bestDir = null; let bestDrop = -1
+      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        let drop = 0
+        for (let dy = -1; dy >= -(DEADLOCK_FALL_H + 6); dy--) {
+          const b = bot.blockAt(new Vec3(feetNow.x + dx, feetNow.y + dy, feetNow.z + dz))
+          if (!b || AIRISH(b.name)) drop++
+          else break
+        }
+        if (drop > bestDrop) { bestDrop = drop; bestDir = [dx, dz] }
+      }
+      if (bestDrop >= 0 && bestDrop < lethalMin) {
+        dbg('deadlock-reset: no side of the pillar top drops ' + lethalMin + 'b (best ' + bestDrop + 'b - an old tower/terrain catches the fall) - skipping the step-off')
+        if (SUICIDE_FALLBACK_DEATH) {
+          let fdied = false
+          try { fdied = await deadlockFallbackDeath(bot, { isStopped, home, say }) } catch (e) { dbg('deadlock-reset: fallback death threw (' + e.message + ')') }
+          if (fdied) { dbg('deadlock-reset: died on purpose (fallback) - respawn resets to full at the bed'); return true }
+        }
+        dbg('deadlock-reset: no lethal drop and fallbacks could not kill - ABORTING to hold'); return false
+      }
+      if (bestDir) { try { await bot.lookAt(new Vec3(feetNow.x + bestDir[0] + 0.5, feetNow.y - 1, feetNow.z + bestDir[1] + 0.5), true) } catch {} }
+    }
     bot.clearControlStates()
     bot.setControlState('forward', true)
     const t0 = Date.now()
