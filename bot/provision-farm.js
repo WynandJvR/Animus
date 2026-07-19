@@ -359,6 +359,10 @@ async function ensureDryHomeFarm (bot, home, hut, { isStopped = () => false, say
   if (!hoe) {
     try {
       const res = require('./resources.js')
+      // #88: the chest cache goes stale-blind when the post-stash read fails (standing-on-chest) -
+      // a stale-empty cache made reconcile plan a multi-minute wood gather for a hoe/planks the bank
+      // held. Force a fresh bank read before planning; best-effort (cache still used if it fails).
+      try { const cell = S().resolveBankCell(bot); if (cell) await res.readChest(bot, cell) } catch (e2) { dbg('  wheat farm [dry]: bank re-read failed (' + e2.message + ') - planning from cache') }
       const rec = await res.reconcile(bot, { wooden_hoe: 1 }, { near: hut, maxAgeMs: 0, planOpts: { primaryWood: P().detectWood(bot) || 'oak' } })
       dbg('  wheat farm [dry]: acquiring a wooden hoe (' + (rec.plan.tasks.map(t => `${t.type}:${t.item || t.output}`).join(' > ') || (rec.withdraws.length ? 'from bank' : 'from hand')) + ')')
       if (rec.withdraws.length || rec.plan.tasks.length) await res.runReconciled(bot, rec, { isStopped, say, home: hut })

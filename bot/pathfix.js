@@ -264,8 +264,15 @@ function installPathfinderTuning (bot) {
               const tgt = { x: Math.floor(tpos.x), y: Math.floor(tpos.y), z: Math.floor(tpos.z) }
               const isSolid = (x, y, z) => { if (x === tgt.x && y === tgt.y && z === tgt.z) return false; const b = bot.blockAt(new (require('vec3').Vec3)(x, y, z)); return !!(b && b.boundingBox === 'block' && !AIR_RE.test(b.name)) }
               const eye = bot.entity.position.offset(0, bot.entity.height || 1.62, 0)
-              if (los.lineBlocked(eye, { x: tgt.x + 0.5, y: tgt.y + 0.5, z: tgt.z + 0.5 }, isSolid)) {
-                dbg(fname + ': a wall is between me and ' + tgt.x + ',' + tgt.y + ',' + tgt.z + ' - walking to a clear face (not reaching through)')
+              // #88 CHEST_STEP_OFF (default on): STANDING ON the container defeats the open with
+              // clear LOS (live: 5x 'window did not open, in reach 1.1b' from on top of the bank
+              // double-chest -> the chest got deregistered + the resource model went stale-blind
+              // and planned wood gathers for a hoe the bank held). Same face-walk as the wall case.
+              const standingOn = process.env.CHEST_STEP_OFF !== '0' &&
+                Math.floor(bot.entity.position.x) === tgt.x && Math.floor(bot.entity.position.z) === tgt.z &&
+                bot.entity.position.y > tgt.y
+              if (standingOn || los.lineBlocked(eye, { x: tgt.x + 0.5, y: tgt.y + 0.5, z: tgt.z + 0.5 }, isSolid)) {
+                dbg(fname + ': ' + (standingOn ? 'standing ON ' : 'a wall is between me and ') + tgt.x + ',' + tgt.y + ',' + tgt.z + ' - walking to a clear face (not reaching through)')
                 const { goals } = require('mineflayer-pathfinder')
                 const Vec3 = require('vec3').Vec3
                 // pick the nearest face cell that is standable (air feet+head, solid floor) AND LOS-clear
