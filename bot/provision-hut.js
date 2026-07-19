@@ -211,6 +211,101 @@ async function healHomeCrater (bot, at, opts = {}) {
   return filled
 }
 
+// ---- BEDS: one place that knows how to GET a bed and how to LAY one -------------------------
+// Everything bed-shaped used to be re-derived at each call site, and one of those derivations
+// was wrong in a way that cost 23 deaths in a day: the camp step gated bed-crafting on
+// "3 wool AND >=3 PLANKS in the pack", so a bot carrying 6 wool and a stack of LOGS decided it
+// had no bed and no way to make one - then said so in the log while holding the wool. The fix
+// is not a better inventory count; it is to stop counting inventory here at all and let the
+// resource model (withdraw > craft) answer "can I have a bed?".
+
+function bedInPack (bot) {
+  return (bot.inventory ? bot.inventory.items() : []).find(i => /_bed$/.test(i.name)) || null
+}
+
+// Bed item names worth ASKING the resource model for, best first: a bed already sitting in
+// our own chests (any colour - a withdraw is free), then a bed whose wool we hold enough of,
+// then white_bed as the universal fallback. PURE - unit-testable without a bot or a world.
+function bedCandidates (totals) {
+  const t = totals || {}
+  const banked = Object.keys(t).filter(n => /_bed$/.test(n) && t[n] > 0).sort((a, b) => t[b] - t[a])
+  const fromWool = Object.keys(t).filter(n => /_wool$/.test(n) && t[n] >= 3)
+    .sort((a, b) => t[b] - t[a]).map(n => n.replace(/_wool$/, '_bed'))
+  const out = []
+  for (const n of [...banked, ...fromWool, 'white_bed']) if (!out.includes(n)) out.push(n)
+  return out
+}
+
+// Put a bed in the pack, or honestly fail. resources.acquire is the ONLY sanctioned path:
+// it withdraws from our own verified chests first and crafts from total holdings second, so
+// logs-vs-planks (the live bug) is the planner's problem, not ours. It does not GATHER - if
+// the wool genuinely is not ours yet this returns null and the caller says why.
+async function acquireBed (bot, opts = {}) {
+  const have = bedInPack(bot)
+  if (have) return have
+  const isStopped = opts.isStopped || (() => false)
+  const res = require('./resources.js') // lazy - resources requires provision at load
+  const near = opts.near
+  const planOpts = { primaryWood: (P().detectWood(bot) || 'oak') }
+  let totals = {}
+  try { totals = await res.totalCounts(bot, { near, maxDist: 24 }) } catch (e) { dbg('  acquireBed: holdings read failed (' + e.message + ')') }
+  for (const name of bedCandidates(totals)) {
+    if (isStopped()) break
+    try { await res.acquire(bot, name, 1, { near, isStopped, say: opts.say, planOpts }) }
+    catch (e) { dbg('  acquireBed: ' + name + ' failed (' + e.message + ')') }
+    const got = bedInPack(bot)
+    if (got) { dbg('  acquireBed: now holding a ' + got.name); return got }
+  }
+  dbg('  acquireBed: no bed obtainable from holdings (' + bedCandidates(totals).join(', ') + ')')
+  return null
+}
+
+// Lay a carried bed on OPEN GROUND near `near` - the fallback for a bot that has no hut yet.
+// Rings outward so the bed lands close to home without needing the hut model. Every rung is
+// grounded: cells are read before placing and the placed bed is re-read afterwards (that
+// re-read IS the proof - pathfix already wraps the place itself). Returns the bed block or null.
+async function placeBedNear (bot, near, opts = {}) {
+  let bedItem = bedInPack(bot)
+  if (!bedItem || !near) return null
+  const isStopped = opts.isStopped || (() => false)
+  const base = new Vec3(Math.round(near.x), Math.floor(near.y), Math.round(near.z))
+  const cells = []
+  for (let r = 1; r <= 4; r++) for (let dx = -r; dx <= r; dx++) for (let dz = -r; dz <= r; dz++) {
+    if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue
+    cells.push(new Vec3(base.x + dx, base.y, base.z + dz))
+  }
+  for (const foot of cells) {
+    if (isStopped()) break
+    const head = foot.offset(0, 0, 1) // bed lays toward +z, same as the hut cell
+    // anti-grief: never lay a bed inside an active build footprint
+    let inZone = false
+    try { inZone = [foot, head].some(c => P().inBuildZone(c.x, c.z)) } catch {}
+    if (inZone) continue
+    let good = true
+    for (const c of [foot, head]) {
+      const cb = bot.blockAt(c); const fl = bot.blockAt(c.offset(0, -1, 0))
+      if (!cb || !AIRISH(cb.name)) { good = false; break }
+      if (!fl || fl.boundingBox !== 'block') { good = false; break }
+    }
+    if (!good) continue
+    try { await gotoWithTimeout(bot, new goals.GoalNear(foot.x, foot.y, foot.z, 2), 15000) } catch {}
+    bedItem = bedInPack(bot)
+    if (!bedItem) return null
+    try {
+      await bot.equip(bedItem, 'hand')
+      await bot.lookAt(head.offset(0.5, 0, 0.5), true)
+      await bot.placeBlock(bot.blockAt(foot.offset(0, -1, 0)), new Vec3(0, 1, 0))
+    } catch (e) { dbg('  placeBedNear: ' + foot.x + ',' + foot.z + ' place failed (' + e.message + ')'); continue }
+    await new Promise(r => setTimeout(r, 400))
+    for (const c of [foot, head]) { // re-read: did a bed actually land?
+      const b = bot.blockAt(c)
+      if (b && /_bed$/.test(b.name)) { dbg('  placeBedNear: bed verified at ' + b.position.toString()); return b }
+    }
+    dbg('  placeBedNear: placement at ' + foot.x + ',' + foot.z + ' did not verify')
+  }
+  return null
+}
+
 async function ensureHutBed (bot, at, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const say = opts.say || (() => {})
@@ -229,22 +324,9 @@ async function ensureHutBed (bot, at, opts = {}) {
   }
   // 2) carrying a bed? lay it on an interior floor cell. foot (2,1,2) + head (2,1,3): both must
   //    be air over a solid floor. (chest 4,1,1/2, furnace 4,1,4, table 1,1,4 are all clear of this.)
-  let bedItem = (bot.inventory ? bot.inventory.items() : []).find(i => /_bed$/.test(i.name))
-  if (!bedItem) {
-    // No bed in the pack: wool is operator-supplied here (no sheep), so a spare bed
-    // BANKED in the hut chest is the only other source - withdraw > craft > gather.
-    try {
-      const res = require('./resources.js') // lazy - resources requires provision at load
-      const near = { x: at.x + 2, y: at.y + 1, z: at.z + 2 }
-      const totals = await res.totalCounts(bot, { near, maxDist: 24 })
-      const banked = Object.keys(totals).find(n => /_bed$/.test(n) && totals[n] > 0)
-      if (banked) {
-        dbg('  ensureHutBed: no bed in the pack but a ' + banked + ' is banked - withdrawing it')
-        await res.withdrawItems(bot, banked, 1, { near })
-        bedItem = (bot.inventory ? bot.inventory.items() : []).find(i => /_bed$/.test(i.name))
-      }
-    } catch (e) { dbg('  ensureHutBed: bank bed check failed (' + e.message + ')') }
-  }
+  // No bed in the pack: acquireBed is the one source of truth - withdraw a banked bed,
+  // else craft one from total holdings (this is where the old planks-in-pack gate lived).
+  const bedItem = await acquireBed(bot, { near: { x: at.x + 2, y: at.y + 1, z: at.z + 2 }, isStopped, say: opts.say })
   if (!bedItem) return 'none'
   const foot = new Vec3(at.x + 2, at.y + 1, at.z + 2)
   const head = new Vec3(at.x + 2, at.y + 1, at.z + 3)
@@ -759,9 +841,10 @@ async function maintainHome (bot, hutAt, opts = {}) {
   // mismatched single chests gets re-faced into one connected double. Idempotent: a merged
   // pair is a fast no-op (returns false).
   try { if (await P().healBankDouble(bot, { x: hutAt.x, y: hutAt.y, z: hutAt.z }, { isStopped, say })) { out.chestFixed = true; out.damaged = true; say('fixed the bank - one proper double chest again') } } catch (e) { dbg('camp: bank double-heal failed (' + e.message + ')') }
-  // SPAWN re-assert (hourly no-op): a bed standing in the hut is worthless if the server
-  // anchor drifted - use it again so every death keeps coming home.
-  try { await P().ensureSpawnBed(bot, { isStopped, say }) } catch (e) { dbg('camp: spawn assert failed (' + e.message + ')') }
+  // SPAWN re-assert: a bed standing in the hut is worthless if the server anchor drifted -
+  // use it again so every death keeps coming home. A no-op when the anchored bed still stands
+  // (condition-gated inside ensureSpawnBed, no time window).
+  try { const r = await P().ensureSpawnBed(bot, { isStopped, say }); dbg('camp: spawn -> ' + r.how + (r.why ? ' (' + r.why + ')' : '')) } catch (e) { dbg('camp: spawn assert failed (' + e.message + ')') }
   // SELF-HEALING structure + interior (liveability, every pass): reconcile the registry, REPAIR
   // creeper damage (missing wall/door/furniture cells), then tidy the interior. Early no-op when
   // already clean+intact. repair.missing (0 = intact) is the cheap structural-damage signal.
@@ -1193,7 +1276,7 @@ async function worldTidy (bot, opts = {}) {
 
 module.exports = {
   setDebugSink, insideHutBox,
-  insideHutBox, ownHutAt, onHutApron, insideOwnStructure, hasSolidCeiling, hutAnchor, hutReader, stepOffApron, ensureHutApron, healHomeCrater, ensureHutBed, freeInteriorCell, findHutDoorway, hutFreeCells, furnitureInHut, furnishHut, stationInHut, stationSlot, loadHutSchem, reconcileInfra, cleanupHutInterior, repairHutStructure, recallAndReach, maintainHut, maintainHome,
+  insideHutBox, ownHutAt, onHutApron, insideOwnStructure, hasSolidCeiling, hutAnchor, hutReader, stepOffApron, ensureHutApron, healHomeCrater, ensureHutBed, bedInPack, bedCandidates, acquireBed, placeBedNear, freeInteriorCell, findHutDoorway, hutFreeCells, furnitureInHut, furnishHut, stationInHut, stationSlot, loadHutSchem, reconcileInfra, cleanupHutInterior, repairHutStructure, recallAndReach, maintainHut, maintainHome,
   secureBase, secureBaseGate: hutModel.secureBaseGate,
   sealHomeDescents, sealDescentsGate: hutModel.sealDescentsGate,
   worldTidy, litterSignature: hutModel.litterSignature

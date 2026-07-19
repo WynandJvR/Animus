@@ -1826,7 +1826,7 @@ if (process.env.SPAWN_KEEPALIVE !== '0') {
         if (commands.isBusy && commands.isBusy()) return  // builds re-assert on their own passes
       }
       spawnKeep = true
-      const ok = await provision.ensureSpawnBed(bot, { force: suspect, maxTrek: 40 })
+      const ok = (await provision.ensureSpawnBed(bot, { force: suspect, maxTrek: 40 })).ok
       if (suspect && ok) note('(spawn) suspect anchor re-asserted at the bed - back to normal')
     } catch { /* transient */ } finally { spawnKeep = false }
   }, 45000).unref?.()

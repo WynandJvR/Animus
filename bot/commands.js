@@ -2487,46 +2487,15 @@ async function autoBuild (bot, schem, at, opts = {}) {
       chest = await provision.ensureChest(bot, { isStopped, home: { x: at.x, y: at.y, z: at.z } })
     } catch (e) { dbg('camp: chest skipped (' + e.message + ')') }
     try { await provision.ensureFurnace(bot, { isStopped, home: { x: at.x, y: at.y, z: at.z } }) } catch (e) { dbg('camp: furnace skipped (' + e.message + ')') }
+    // BED / SPAWN ANCHOR (#107 SPAWN_BED): one idempotent call. This step used to own its own
+    // bed logic and got it wrong - it required 3 wool AND 3 PLANKS in the pack before it would
+    // craft, so a bot carrying 6 wool and a stack of logs concluded it could not have a bed and
+    // logged so. ensureSpawnBed asks the resource model instead (withdraw > craft), reuses the
+    // hut bed cell when a hut stands, and falls back to open ground. Camp is no longer the only
+    // site that can produce a bed, and it is no longer allowed to decide we cannot have one.
     try {
-      // BED (resource-aware): PLACE a bed the bot already carries before anything else. The old
-      // step gated placement behind "no known bed nearby" AND a wool check, so a recovered bed
-      // rode around unplaced - it logged "no bed and no wool" while holding a white_bed (that's
-      // how we kept losing the spawn). Order now: if a real bed already stands nearby, done; else
-      // if we're holding one, place it; else craft from wool and place that.
-      let bedItem = (bot.inventory ? bot.inventory.items() : []).find(i => /_bed$/.test(i.name))
-      const kb = provision.knownBed && provision.knownBed()
-      // Trust remembered-bed ONLY if a bed block is ACTUALLY there - memory goes stale the moment
-      // a rebuild/flatten breaks it, which is exactly what stranded this one.
-      let bedNear = false
-      if (kb && Math.hypot(kb.x - at.x, kb.z - at.z) <= 120) {
-        const bb = bot.blockAt(new Vec3(kb.x, kb.y, kb.z))
-        bedNear = !!(bb && /_bed$/.test(bb.name))
-      }
-      if (!bedNear && !bedItem) {
-        // nothing placed and nothing carried - craft one if the pack affords it (3 wool + 3 planks)
-        const inv = provision.inventoryCounts(bot)
-        const woolName = Object.keys(inv).find(n => /_wool$/.test(n) && inv[n] >= 3)
-        if (woolName && (inv.oak_planks || 0) + (inv.birch_planks || 0) + (inv.spruce_planks || 0) >= 3) {
-          const r = await handle(bot, 'craft white_bed 1').catch(() => null)
-          dbg('camp: bed craft -> ' + r)
-          bedItem = (bot.inventory ? bot.inventory.items() : []).find(i => /_bed$/.test(i.name))
-        }
-      }
-      if (bedNear) {
-        dbg('camp: bed already in range at ' + kb.x + ',' + kb.z)
-      } else if (bedItem) {
-        try {
-          await provision.dumpJunk(bot).catch(() => {})
-          await bot.equip(bedItem, 'hand')
-          const spot = bot.blockAt(bot.entity.position.floored().offset(2, -1, 0))
-          if (spot && spot.boundingBox === 'block') {
-            await bot.placeBlock(spot, new Vec3(0, 1, 0))
-            const placed = bot.blockAt(spot.position.offset(0, 1, 0))
-            if (placed && /_bed$/.test(placed.name) && provision.rememberBed) { try { provision.rememberBed(placed.position) } catch {} }
-            await handle(bot, 'sleep').catch(() => {}) // sets spawn at the bed (works at day on this server)
-          } else dbg('camp: bed - no solid spot right here to set it on')
-        } catch (e) { dbg('camp: bed place failed (' + e.message + ')') }
-      } else dbg('camp: no bed and no wool for one - sleeping arrangements deferred (bed hunt is v2)')
+      const r = await provision.ensureSpawnBed(bot, { near: { x: at.x, y: at.y, z: at.z }, isStopped, say })
+      dbg('camp: bed -> ' + r.how + (r.why ? ' (' + r.why + ')' : ''))
     } catch (e) { dbg('camp: bed step failed (' + e.message + ')') }
     try {
       const torch = (bot.inventory ? bot.inventory.items() : []).find(i => i.name === 'torch')
@@ -3187,9 +3156,9 @@ async function resumeBuild (bot) {
     // broken/obstructed/moved) - the fix for the world-spawn death carousel: without
     // this every future death respawns at 0,0 naked and the job never converges.
     try {
-      const ok = await provision.ensureSpawnBed(bot, { isStopped: () => buildAbort, say, force: spawnIsSuspect() })
-      if (ok) spawnSuspect = false
-      dbg('resume: spawn bed ' + (ok ? 'asserted' : 'NOT asserted (no bed reachable)'))
+      const r = await provision.ensureSpawnBed(bot, { isStopped: () => buildAbort, say, force: spawnIsSuspect() })
+      if (r.ok) spawnSuspect = false
+      dbg('resume: spawn bed ' + (r.ok ? 'asserted (' + r.how + ')' : 'NOT asserted - ' + r.why))
     } catch (e) { dbg('resume: spawn assert failed (' + e.message + ')') }
     result = await autoBuild(bot, job.schem, job.at, {
       // FLATTEN THE FOOTPRINT (operator: "if there's a mountain in the way, build inside

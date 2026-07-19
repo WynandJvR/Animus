@@ -776,59 +776,113 @@ async function boundedHold (bot, { isStopped = () => false, say = () => {}, dead
   return { held: fed, wake: fed ? 'foodInPack' : 'deadline' }
 }
 
+// #107 SPAWN_BED. THE single entry point for "the bot has a bed and the server knows it",
+// and the one place allowed to decide it cannot have one. Ladder, each rung grounded in a
+// real block read, no time windows anywhere:
+//
+//   stood    - a bed we already asserted still physically stands: nothing to do
+//   placed   - a bed exists (or we carry/bank one): lay it in the hut bed cell if a hut
+//              stands, else on open ground near home, then activate it to set spawn
+//   acquired - we hold no bed at all but the resource model can make one, so we make one
+//              and lay it (this rung did not exist - it is the whole point of the change)
+//   failed   - honest, and says WHY
+//
+// The rung that was missing cost 23 deaths in one day: with no bed every death respawned the
+// bot 235-350 blocks away and it walked back for ~10 minutes. The old camp step could have
+// made a bed - it was carrying 6 wool and a stack of logs - but it counted PLANKS in the pack,
+// found none, and logged "no bed and no wool for one" while holding the wool. Nothing below
+// counts inventory to make that decision; provision-hut's acquireBed asks the resource model.
 async function ensureSpawnBed (bot, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
-  if (!bot.entity) return false
+  const R = (ok, how, why) => { dbg('spawn: [' + how + '] ' + (why || '')); return { ok, how, why: why || '' } }
+  if (!bot.entity) return R(false, 'failed', 'no body yet')
   const m = loadWorldMem()
   const bed = knownBed()
   const hut0 = listInfra('hut')[0]
-  if (!bed) {
-    // no bed memory at all - the hut path is the only play
-    if (!hut0) return false
-    const r = await ensureHutBed(bot, new Vec3(hut0.x, hut0.y, hut0.z), opts).catch(() => 'fail')
-    return r === 'present' || r === 'placed'
+  const near = opts.near || (hut0 ? { x: hut0.x + 2, y: hut0.y + 1, z: hut0.z + 2 } : bot.entity.position)
+
+  // rung STOOD - CONDITION-gated, never a time window. The old gate was "asserted within the
+  // hour", which both re-trekked a perfectly good anchor after 60 minutes and blindly trusted
+  // a broken one for 59. What actually matters: we asserted, the anchor is not suspect, and
+  // the bed we asserted on still READS as a bed. A null read means the chunk is not loaded -
+  // that disproves nothing, so only a far bed gets the benefit of the doubt.
+  if (!opts.force && bed && m.bedAssertAt && !isSpawnSuspect()) {
+    const bb0 = bot.blockAt(new Vec3(bed.x, bed.y, bed.z))
+    const d0 = Math.hypot(bed.x - bot.entity.position.x, bed.z - bot.entity.position.z)
+    if (bb0 && /_bed$/.test(bb0.name)) return R(true, 'stood', 'anchor set and the bed still stands at ' + bed.x + ',' + bed.z)
+    if (!bb0 && d0 > 48) return R(true, 'stood', 'anchor set; the bed is ' + Math.round(d0) + 'b off, out of read range')
+    dbg('spawn: the bed we anchored on no longer reads as a bed - re-anchoring')
   }
-  if (!opts.force && m.bedAssertAt && Date.now() - m.bedAssertAt < 3600 * 1000) return true // asserted within the hour
-  // PREFER THE HUT BED: a remembered bed far from the hut is a stale anchor (the overnight
-  // carousel re-learned a bed at world spawn and kept "asserting" THERE) - never keep it
-  // silently while a home hut exists. Re-anchor at the hut; the far bed is only an honest
-  // fallback when the hut can't take a bed right now (no bed item - wool is operator-supplied).
-  if (hut0 && Math.hypot(bed.x - (hut0.x + 2), bed.z - (hut0.z + 2)) > 24) {
-    dbg('spawn: remembered bed ' + bed.x + ',' + bed.z + ' is far from my hut at ' + hut0.x + ',' + hut0.z + ' - re-anchoring at the hut instead')
+
+  // rung PLACED (hut) - the hut bed cell is the home anchor we WANT. ensureHutBed now runs
+  // acquireBed itself, so "no bed in the pack" is no longer the end of this rung.
+  const hutRung = async (why) => {
+    dbg('spawn: ' + why)
     const r = await ensureHutBed(bot, new Vec3(hut0.x, hut0.y, hut0.z), opts).catch(() => 'fail')
-    if (r === 'present' || r === 'placed') return true
-    dbg('spawn: hut bed unavailable (' + r + ') - falling back to the FAR bed at ' + bed.x + ',' + bed.z + ' (better than world spawn)')
+    if (r === 'present') return R(true, 'stood', 'the hut bed is standing and asserted')
+    if (r === 'placed') return R(true, 'placed', 'laid the bed in the hut and set spawn on it')
+    return null // 'none' / 'fail' -> fall through to the open-ground + acquire rungs
   }
-  const d = Math.hypot(bed.x - bot.entity.position.x, bed.z - bot.entity.position.z)
-  if (d > (opts.maxTrek != null ? opts.maxTrek : 120)) { dbg('spawn: bed too far to assert from here (' + Math.round(d) + 'b)'); return false }
-  if (d > 6) { try { await S().walkStaged(bot, bed.x, bed.z, { isStopped, range: 4, timeoutMs: 120000 }) } catch {} }
-  let bb = bot.blockAt(new Vec3(bed.x, bed.y, bed.z))
-  if (!bb || !/_bed$/.test(bb.name)) {
-    const md = require('minecraft-data')(bot.version)
-    const ids = Object.values(md.blocksByName).filter(b => /_bed$/.test(b.name)).map(b => b.id)
-    const near = bot.findBlock({ matching: ids, maxDistance: 12 })
-    if (near) { bb = near; dbg('spawn: remembered bed shifted - found one at ' + near.position.toString()) }
-    else {
-      dbg('spawn: remembered bed is GONE - laying a new one')
-      forgetBed()
-      const hut = listInfra('hut')[0]
-      if (hut) { const r = await ensureHutBed(bot, new Vec3(hut.x, hut.y, hut.z), opts).catch(() => 'fail'); return r === 'present' || r === 'placed' }
-      return false
+
+  if (!bed && hut0) {
+    const r = await hutRung('no bed remembered at all - the hut bed cell is the play')
+    if (r) return r
+  } else if (bed && hut0 && Math.hypot(bed.x - (hut0.x + 2), bed.z - (hut0.z + 2)) > 24) {
+    // PREFER THE HUT BED: a remembered bed far from the hut is a stale anchor (the overnight
+    // carousel re-learned a bed at world spawn and kept "asserting" THERE) - never keep it
+    // silently while a home hut exists. The far bed stays an honest fallback below.
+    const r = await hutRung('remembered bed ' + bed.x + ',' + bed.z + ' is far from my hut at ' + hut0.x + ',' + hut0.z + ' - re-anchoring at the hut')
+    if (r) return r
+    dbg('spawn: hut bed unavailable - falling back to the FAR bed at ' + bed.x + ',' + bed.z + ' (better than world spawn)')
+  }
+
+  // rung STOOD/PLACED (remembered bed) - walk to the bed we know about and assert on it.
+  let bb = null
+  if (bed) {
+    const d = Math.hypot(bed.x - bot.entity.position.x, bed.z - bot.entity.position.z)
+    const maxTrek = opts.maxTrek != null ? opts.maxTrek : 120
+    if (d <= maxTrek) {
+      if (d > 6) { try { await S().walkStaged(bot, bed.x, bed.z, { isStopped, range: 4, timeoutMs: 120000 }) } catch {} }
+      bb = bot.blockAt(new Vec3(bed.x, bed.y, bed.z))
+      if (!bb || !/_bed$/.test(bb.name)) {
+        const md = require('minecraft-data')(bot.version)
+        const ids = Object.values(md.blocksByName).filter(b => /_bed$/.test(b.name)).map(b => b.id)
+        const shifted = bot.findBlock({ matching: ids, maxDistance: 12 })
+        if (shifted) { bb = shifted; dbg('spawn: remembered bed shifted - found one at ' + shifted.position.toString()) }
+        else { dbg('spawn: remembered bed is GONE - laying a new one'); forgetBed(); bb = null }
+      }
+    } else dbg('spawn: remembered bed too far to assert from here (' + Math.round(d) + 'b)')
+  }
+
+  // rung ACQUIRED - no bed block anywhere we can reach. Get one (withdraw > craft) and lay it.
+  let how = bb ? 'stood' : null
+  if (!bb && !isStopped()) {
+    const item = await P().acquireBed(bot, { near, isStopped, say: opts.say }).catch(() => null)
+    if (!item) return R(false, 'failed', 'no bed standing, none banked, and none craftable from what we hold')
+    how = 'acquired'
+    if (hut0) {
+      const r = await ensureHutBed(bot, new Vec3(hut0.x, hut0.y, hut0.z), opts).catch(() => 'fail')
+      if (r === 'present' || r === 'placed') return R(true, 'acquired', 'made a ' + item.name + ' and set spawn on it in the hut')
+      dbg('spawn: hut cell would not take the bed (' + r + ') - laying it on open ground instead')
     }
+    bb = await P().placeBedNear(bot, near, { isStopped, say: opts.say }).catch(() => null)
+    if (!bb) return R(false, 'failed', 'holding a ' + item.name + ' but found nowhere near home to lay it')
   }
+  if (!bb) return R(false, 'failed', 'no bed to anchor on and nothing could be acquired')
+
+  // ASSERT: sleeping sets spawn at night; on this server a day-time right-click sets it too.
   if (bot.entity.position.distanceTo(bb.position) > 2.5) {
     try {
       const nav = require('./navigate.js') // door-assist: the bed lives indoors
       await nav.navigateTo(bot, new goals.GoalNear(bb.position.x, bb.position.y, bb.position.z, 2), { timeoutMs: 20000, deadlineMs: 45000, isStopped, climb: false, budgets: { door: 2, pit: 1, water: 1, nudge: 1 }, label: 'spawn-bed' })
-    } catch (e) { dbg('spawn: cannot reach the bed (' + e.message + ')'); return false }
+    } catch (e) { return R(false, 'failed', 'cannot reach the bed (' + e.message + ')') }
   }
   try {
-    if (isNight(bot)) { if (await sleepInBedHere(bot, opts)) return true } // a real sleep sets it
-    await bot.activateBlock(bb) // day: right-clicking the bed sets the respawn point
+    if (isNight(bot) && await sleepInBedHere(bot, opts)) return R(true, how || 'stood', 'slept in the bed - spawn set at ' + bb.position.toString())
+    await bot.activateBlock(bb)
     rememberBed(bb.position)
-    dbg('spawn: asserted at the bed ' + bb.position.toString())
-    return true
-  } catch (e) { dbg('spawn: bed use failed (' + e.message + ')'); return false }
+    return R(true, how || 'stood', 'spawn asserted at the bed ' + bb.position.toString())
+  } catch (e) { return R(false, 'failed', 'bed use failed (' + e.message + ')') }
 }
 
 async function recoverSpawnAnchor (bot, opts = {}) {
@@ -849,7 +903,7 @@ async function recoverSpawnAnchor (bot, opts = {}) {
     }
   }
   if (dist() > 12) { dbg('spawn-recovery: could not get home (still ' + Math.round(dist()) + 'b out) - will retry next respawn'); return false }
-  const ok = await ensureSpawnBed(bot, { ...opts, force: true, maxTrek: 1e9 })
+  const ok = (await ensureSpawnBed(bot, { ...opts, force: true, maxTrek: 1e9 })).ok
   dbg('spawn-recovery: ' + (ok ? 'anchor RESTORED at the bed' : 'home but could NOT re-anchor (no usable bed)'))
   return ok
 }
@@ -910,7 +964,7 @@ async function recoverHome (bot, opts = {}) {
   try {
     const hut = hutAnchor()
     if (hut) await ensureHutBed(bot, new Vec3(hut.x, hut.y, hut.z), { isStopped, say }).catch(() => 'fail')
-    bedOk = await ensureSpawnBed(bot, { isStopped, say, force: true, maxTrek: 1e9 }).catch(() => false)
+    bedOk = await ensureSpawnBed(bot, { isStopped, say, force: true, maxTrek: 1e9 }).then(r => !!(r && r.ok)).catch(() => false)
   } catch (e) { dbg('recoverHome: bed re-assert failed (' + e.message + ')') }
   dbg('recoverHome: home - spawn ' + (bedOk ? 're-asserted at the bed (future deaths return here)' : 'could NOT be re-asserted (no usable bed - will retry next respawn)'))
   return { ...decision, arrived: true, bedOk }
