@@ -620,14 +620,17 @@ async function sleepInBedHere (bot, { say = () => {}, isStopped = () => false } 
       }
       if (kind === 'toofar') {
         // #77: 'too far' is a POSITION failure - a competing goal (the concurrent farm goto)
-        // dragged us off mid-approach. Kill that goal, re-approach TIGHTER (range 1, not 2 -
-        // mineflayer's click limit is ~3b so range 2 can settle at ~2.9b and lose the race),
-        // then retry via the loop rather than holding this good bed off for the whole night.
+        // dragged us off mid-approach. Kill that goal, re-approach ADJACENT (GoalGetToBlock, not a
+        // GoalNear ring - the range-1 ring around a bed block is mostly bed-hitbox/wall cells, so
+        // the ring goto no-oped and all 3 clicks re-fired from the same too-far spot, live 00:00Z;
+        // mineflayer's ~3b click limit is 3D from EYE height, so standing truly beside the bed is
+        // what passes it), then retry via the loop rather than holding this good bed off all night.
         tooFarFails++
         try { bot.pathfinder.setGoal(null) } catch {} // drop the competing goal that dragged us off
-        dbg('nightRest: too far from the bed (attempt ' + tooFarFails + '/3) - re-approaching tighter and retrying')
-        try { await gotoWithTimeout(bot, new goals.GoalNear(bed.position.x, bed.position.y, bed.position.z, 1), 15000) } catch {}
+        dbg('nightRest: too far from the bed (attempt ' + tooFarFails + '/3) - re-approaching adjacent and retrying')
+        try { await gotoWithTimeout(bot, new goals.GoalGetToBlock(bed.position.x, bed.position.y, bed.position.z), 15000) } catch {}
         await new Promise(r => setTimeout(r, 300)) // settle before the re-click
+        dbg('nightRest: re-approach done - ' + (bot.entity ? bot.entity.position.distanceTo(bed.position).toFixed(1) : '?') + 'b from the bed block (eye-3D is what the click checks)')
         continue
       }
       if (kind === 'unusable') markBedUnusable(bed.position, shelterSite.BED_HOLD_MS, e.message)
