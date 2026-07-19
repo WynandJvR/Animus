@@ -11,7 +11,7 @@ Start-Sleep -Milliseconds 300
 
 & $csc.FullName /nologo /target:winexe /platform:anycpu `
   /reference:System.Windows.Forms.dll /reference:System.Drawing.dll `
-  /reference:System.Web.Extensions.dll `
+  /reference:System.Web.Extensions.dll /reference:System.Management.dll `
   /out:"$PSScriptRoot\Animus.exe" "$PSScriptRoot\animus.cs"
 if ($LASTEXITCODE -eq 0) { Write-Host 'Built Animus.exe' -ForegroundColor Green }
 else { Write-Host "Build FAILED (csc exit $LASTEXITCODE)" -ForegroundColor Red; exit 1 }

@@ -22,6 +22,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.IO;
+using System.Management;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
@@ -1790,14 +1791,87 @@ class Animus : Form
         catch (Exception e) { Log("Could not open folder: " + e.Message); }
     }
 
+    // Node processes whose COMMAND LINE contains `needle`. Matching on MainWindowTitle
+    // (what this used to do) can never find the bot: it is launched with
+    // -WindowStyle Hidden, so its MainWindowTitle is "" and no title match exists.
+    List<int> NodePidsMatching(string needle)
+    {
+        List<int> pids = new List<int>();
+        try
+        {
+            using (ManagementObjectSearcher q = new ManagementObjectSearcher(
+                "SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name = 'node.exe'"))
+            {
+                foreach (ManagementObject o in q.Get())
+                {
+                    string cl = null;
+                    try { cl = o["CommandLine"] as string; } catch { }
+                    if (string.IsNullOrEmpty(cl)) continue;
+                    if (cl.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0)
+                    { try { pids.Add(Convert.ToInt32(o["ProcessId"])); } catch { } }
+                }
+            }
+        }
+        catch (Exception e) { Log("stop: could not enumerate processes (" + e.Message + ")"); }
+        return pids;
+    }
+
+    // True while the bot's control API still answers - the only honest test of "is it down".
+    static bool ControlPortAnswers()
+    {
+        int status;
+        string body = WebGet("http://127.0.0.1:3001/health", out status);
+        return body != null && status == 200;
+    }
+
     void StopAll()
     {
         Log("Stopping bot + brain…");
-        string[] titles = { "Animus BOT", "Animus BRAIN" };
+        // ORDER MATTERS: run.js is a SUPERVISOR - it restarts index.js within seconds.
+        // Killing the body first just gets it resurrected, which is why "stop" appeared
+        // to do nothing. Supervisor dies first, then the body, then the brain.
+        string[] order = { "run.js", "index.js", "brain-llm.js" };
         int killed = 0;
+        foreach (string needle in order)
+        {
+            foreach (int pid in NodePidsMatching(needle))
+            {
+                try
+                {
+                    Process p = Process.GetProcessById(pid);
+                    p.Kill();
+                    p.WaitForExit(4000);
+                    killed++;
+                }
+                catch (Exception e) { Log("stop: pid " + pid + " (" + needle + ") - " + e.Message); }
+            }
+            Thread.Sleep(300);
+        }
+        // Legacy: also close any visible Animus BOT/BRAIN console windows.
+        string[] titles = { "Animus BOT", "Animus BRAIN" };
         foreach (Process p in Process.GetProcesses())
         { try { if (Array.IndexOf(titles, p.MainWindowTitle) >= 0) { p.Kill(); killed++; } } catch { } }
-        Log(killed > 0 ? ("Closed " + killed + " window(s).") : "Nothing was running.");
+
+        // VERIFY, never assert. The old code set "Stopped" unconditionally - it would
+        // log "Nothing was running." and then show Stopped while the bot was online.
+        Thread.Sleep(600);
+        bool stillUp = ControlPortAnswers();
+        List<int> survivors = new List<int>();
+        foreach (string needle in order) survivors.AddRange(NodePidsMatching(needle));
+
+        if (stillUp || survivors.Count > 0)
+        {
+            Log("STOP FAILED - killed " + killed + ", but " + survivors.Count +
+                " node process(es) remain" + (stillUp ? " and :3001 still answers" : "") + ".");
+            SetStop("Stop FAILED", Danger);
+            botUp = stillUp;
+            stateFails = stillUp ? 0 : 3;
+            return;
+        }
+
+        Log(killed > 0
+            ? ("Stopped. Killed " + killed + " process(es); :3001 is closed.")
+            : "Nothing was running (:3001 already closed).");
         SetStop("Stopped", Ghost);
         botUp = false;
         stateFails = 3;   // an explicit stop is known-dead: no grace window
