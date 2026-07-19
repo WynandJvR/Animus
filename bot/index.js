@@ -103,11 +103,20 @@ function fileLog (line) {
   // hole instead of a silent multi-hour jump.
   if (_logDrops > 0) {
     const n = _logDrops; _logDrops = 0
-    try { fs.appendFileSync(EVENTS_LOG, `[${new Date().toISOString()}] (logsink) recovered after ${n} dropped line(s)` + String.fromCharCode(10)) } catch {}
+    try { fs.appendFileSync(EVENTS_LOG, `[${ts()}] (logsink) recovered after ${n} dropped line(s)` + String.fromCharCode(10)) } catch {}
   }
 }
+// LOCAL-time log stamps (operator demand: the UTC ISO stamps read "hours wrong" against the
+// wall clock). Same sortable shape, local clock, with the UTC offset suffix so post-mortems
+// stay unambiguous. LOG_UTC=1 restores the old toISOString stamps.
+function ts () {
+  if (process.env.LOG_UTC === '1') return new Date().toISOString()
+  const d = new Date(); const p = (n, w = 2) => String(n).padStart(w, '0')
+  const off = -d.getTimezoneOffset(); const oh = p(Math.floor(Math.abs(off) / 60)); const om = p(Math.abs(off) % 60)
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}${off >= 0 ? '+' : '-'}${oh}:${om}`
+}
 function note (msg) {
-  const line = `[${new Date().toISOString()}] ${msg}`
+  const line = `[${ts()}] ${msg}`
   log.push(line)
   if (log.length > 200) log.shift()
   // Isolate console.log: a broken supervisor stdout pipe (EPIPE, e.g. its window
@@ -120,7 +129,7 @@ function note (msg) {
 commands.setLogger(note) // build/provision progress lands in /log (GUI live panel), not chat
 // Debug traces ([prov]/[build]) always persist to the FILE (not the GUI ring buffer,
 // which they'd flood) - no more relaunching with BUILD_DEBUG=1 to see what happened.
-function noteDebug (msg) { fileLog(`[${new Date().toISOString()}] ${msg}`) }
+function noteDebug (msg) { fileLog(`[${ts()}] ${msg}`) }
 commands.setDebugSink(noteDebug)
 provision.setDebugSink(noteDebug)
 resources.setDebugSink(noteDebug)
