@@ -59,11 +59,13 @@ t('RAW_COOKABLE_FOOD matches provision.RAW_COOKABLE keys (single source of truth
 })
 
 t('foodSupplyAction: the discovery->action handoff (the live idle bug)', () => {
+  // #118: the middle input is now hasChosenSite - the verdict of the home-anchored site
+  // comparison - not "some water is remembered within 300b of my feet". Same action table.
   assert.strictEqual(F.foodSupplyAction(true, true, true), 'tend', 'a standing farm -> tend')
-  assert.strictEqual(F.foodSupplyAction(false, true, false), 'buildFarm', 'FOUND WATER -> build the farm THERE (was idling)')
-  assert.strictEqual(F.foodSupplyAction(false, true, true), 'buildFarm', 'water beats a near animal - farm is renewable')
-  assert.strictEqual(F.foodSupplyAction(false, false, true), 'huntNear', 'no water but an animal here -> hunt it')
-  assert.strictEqual(F.foodSupplyAction(false, false, false), 'sweep', 'nothing known -> sweep to discover')
+  assert.strictEqual(F.foodSupplyAction(false, true, false), 'buildFarm', 'a CHOSEN site -> build the farm THERE (was idling)')
+  assert.strictEqual(F.foodSupplyAction(false, true, true), 'buildFarm', 'a chosen site beats a near animal - a farm is renewable')
+  assert.strictEqual(F.foodSupplyAction(false, false, true), 'huntNear', 'nothing near home qualified but an animal is here -> hunt it')
+  assert.strictEqual(F.foodSupplyAction(false, false, false), 'sweep', 'no qualifying site near home -> sweep to discover')
 })
 
 t('shouldTrekHomeForFood: FAR + home has food => go; NEAR => no-go; FAR + dry => no-go', () => {

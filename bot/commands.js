@@ -1061,7 +1061,10 @@ async function handleInner (bot, line, opts = {}) {
         const say = m => bot.chat(String(m).slice(0, 200))
         say(`noting water at ${x},${y},${z}`)
         try { await travelFar(bot, { x, y, z }, { isStopped: () => buildAbort, say }) } catch (e) { dbg('waterat travel: ' + e.message) }
-        try { provision.rememberInfra('water', { x, y, z }) } catch {}
+        // #118: the operator POINTING at water is a claim, not an observation - we just travelled
+        // there, so survey it and store what we actually saw. An operator-named cave pool is then
+        // an honest disqualified record instead of a 150s trek the siting comparison keeps picking.
+        try { provision.rememberInfra('water', { x, y, z }, provision.surveyWaterSite(bot, { x, y, z })) } catch {}
         return `remembered water at ${x},${y},${z} - i'll farm/fish there when i need to`
       } catch (e) { return `couldn't get to ${x},${y},${z}: ${e.message}` }
     }

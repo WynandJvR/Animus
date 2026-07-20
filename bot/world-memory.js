@@ -283,6 +283,11 @@ function rememberInfra (kind, pos, meta) {
     if (meta.tillable != null) e.tillable = meta.tillable
     if (meta.flat != null) e.flat = meta.flat
     if (meta.surveyedAt != null) e.surveyedAt = meta.surveyedAt
+    // #118 FARM_SITED_FROM_HOME: open-sky is a QUALIFYING property, established at write time
+    // by whoever observed the water (surveyWaterSite), not 150 seconds of walking later on
+    // arrival. `false` writes through (a corrected record must be able to lose); null/undefined
+    // does NOT (an UNKNOWN read proves nothing and must never overwrite a real observation).
+    if (meta.openSky != null) e.openSky = meta.openSky
   }
   // #115: provenance. A claimed-but-failed proof is REJECTED outright (that is the phantom
   // hut); an unclaimed write is stored as an unverified hint.

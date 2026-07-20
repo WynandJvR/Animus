@@ -62,16 +62,24 @@ function shouldSweepForFood (hasFarm, hasNearAnimal, hasKnownWater) {
   return !hasFarm && !hasNearAnimal && !hasKnownWater
 }
 
-// The NEXT ACTION for the proactive food-supply flow, given what's known. This is the
-// discovery->action handoff that was BROKEN (live: the sweep FOUND + remembered water, then
-// the flow idled at the hut instead of building the farm there). The rule: a standing farm ->
-// tend it; KNOWN WATER (found by the sweep, or remembered) -> BUILD THE FARM at it (do NOT
-// keep sweeping for animals - water at ring 48 is plenty); a near animal but no water -> hunt
-// it; nothing known -> SWEEP outward to discover water/animals. Never "found it, did nothing".
+// The NEXT ACTION for the proactive food-supply flow, given what's known. A standing farm ->
+// tend it; a CHOSEN SITE -> build the farm there; a near animal but no site -> hunt it; nothing
+// -> SWEEP outward to discover water/animals. Never "found it, did nothing".
+//
+// #118 FARM_SITED_FROM_HOME (Root F). The middle rung used to read `hasKnownWater` - literally
+// `recallInfra('water', bot.entity.position, 300)` - and its comment celebrated that any such
+// record meant "do NOT keep sweeping". That made this a PRIORITY LADDER over a comparison:
+// one junk record within 300b of wherever the body stood suppressed discovery outright, so a
+// good pond 50b from the hut was never rejected as worse - it was never a candidate at all
+// (live: a 140b trek south to cave water at y48). The input is now `hasChosenSite` - the verdict
+// of provision-farm.chooseFarmSite, a home-anchored utility comparison in which remembered and
+// freshly discovered candidates already competed on equal terms. Memory no longer short-circuits
+// discovery, because discovery is INSIDE the comparison; 'sweep' now means "nothing near home
+// qualified", not "we happen to remember nothing".
 // PURE (three booleans in, an action string out). Offline-tested.
-function foodSupplyAction (hasFarm, hasKnownWater, hasNearAnimal) {
+function foodSupplyAction (hasFarm, hasChosenSite, hasNearAnimal) {
   if (hasFarm) return 'tend'
-  if (hasKnownWater) return 'buildFarm' // the missing handoff: found water -> farm THERE
+  if (hasChosenSite) return 'buildFarm'
   if (hasNearAnimal) return 'huntNear'
   return 'sweep'
 }

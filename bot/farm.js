@@ -143,6 +143,45 @@ function scoreFarmSite ({ tillable, flatFrac, distHome, target }, { distWeight =
   return { score: quality - distWeight * distHome, acceptable: tillable >= minTillable && (flatFrac || 0) >= gate }
 }
 
+// ---- Root F (§3.6): home-anchored site selection BY COMPARISON --------------------------
+// What this DELETES: `if (recallInfra('water', MY FEET, 300)) return 'buildFarm'` - a first-truthy
+// ladder in which any remembered water, however bad, suppressed discovery outright, anchored on
+// wherever the body happened to be standing when the food timer fired. Live cost: a 140-block trek
+// south past a pond 50 blocks from the hut, to cave water at y48 the record itself described.
+// A wheat farm is tended for the rest of the bot's life, so its value is dominated by tend-distance
+// from HOME - which is why a slightly worse pond near home beats a better pond far away, and why
+// remembered and freshly discovered candidates have to sit in ONE array where either can lose.
+//
+// QUALIFICATION (Root A): a candidate whose farmable properties were never established is not a
+// bad candidate, it is an UNVERIFIED one. It cannot win - and, the part the ladder got wrong, it
+// cannot suppress a verified rival either. openSky !== true (cave water, or nobody ever looked)
+// or no tillable count => not a candidate at all.
+// PURE: candidates in, one winner or null out. No bot, no I/O, no clock, no env-dependent anchor.
+function farmSiteQualified (c) {
+  return !!c && c.openSky === true && Number.isFinite(c.tillable)
+}
+// The winner among `cands`, scored on lifetime tend-cost from `home`, or null when nothing
+// qualifies/passes the acceptability floor (the caller's hunt/sweep fallbacks then proceed).
+// NO HOME, NO SITE: permanent infrastructure is sited from home or not at all - siting it from a
+// transient body position is the defect, so a homeless bot gets null here and establishes home
+// first (Root B). Deterministic: the same candidate array yields the same winner no matter where
+// the body stands, because the body is not an input.
+function rankFarmSites (cands, { home, target = 33, distWeight, minTillable, minFlatFrac } = {}) {
+  if (!home || !Number.isFinite(home.x) || !Number.isFinite(home.z)) return null
+  let best = null
+  for (const c of (cands || [])) {
+    if (!farmSiteQualified(c)) continue
+    const distHome = Math.hypot(c.x - home.x, c.z - home.z)
+    const sc = scoreFarmSite({ tillable: c.tillable, flatFrac: c.flat, distHome, target },
+      { distWeight, minTillable, minFlatFrac })
+    if (!sc.acceptable) continue
+    if (!best || sc.score > best.score) {
+      best = { x: c.x, y: c.y, z: c.z, score: sc.score, dist: distHome, source: c.source || 'memory' }
+    }
+  }
+  return best
+}
+
 // §4.6 should the farm relocate off its current site? Clearly better AND near home AND NEVER
 // farther out than the farm already is (+slack). Never abandons a producing/near-target farm
 // (curCells >= target*minCellsFrac), never moves without maxed, never for a small quality gain
@@ -209,4 +248,4 @@ function foodCrisisFarmAction ({ hasStandingFarm = false, food = 20, harvestFirs
   return 'establish'
 }
 
-module.exports = { bankUsable, BANK_DYS, cropCellState, cellHealthStep, plotShouldUnlatch, matureForHarvest, farmlandReady, tillableBank, expansionMaxed, barrenStep, orderBankCandidates, scoreFarmSite, shouldResite, plotCollectRadius, footprintHasCell, seedBankWithdrawAmount, foodCrisisFarmAction, dryHomeFarmMode }
+module.exports = { bankUsable, BANK_DYS, cropCellState, cellHealthStep, plotShouldUnlatch, matureForHarvest, farmlandReady, tillableBank, expansionMaxed, barrenStep, orderBankCandidates, scoreFarmSite, farmSiteQualified, rankFarmSites, shouldResite, plotCollectRadius, footprintHasCell, seedBankWithdrawAmount, foodCrisisFarmAction, dryHomeFarmMode }

@@ -24,9 +24,11 @@ const provCore = require('./provision-core.js')
 const { AIRISH, REPLACEABLE, canBreakNaturally, countItem, inventoryCounts, toolForBlock,
   gotoWithTimeout, collectDrops, stepInto, placeAt, nearHostile, isNight } = provCore
 const worldMemory = require('./world-memory.js')
-const { loadWorldMem, saveWorldMem, listInfra, rememberInfra, recallInfra, rememberSpot,
+// #118: listInfra + forgetInfra dropped - the only consumer was ensureFoodSupply's arrival-time
+// forget-and-continue purge over remembered ponds, which the write-time qualifier replaced.
+const { loadWorldMem, saveWorldMem, rememberInfra, recallInfra, rememberSpot,
   recallSpot, forgetSpot, markSearched, isSearchedDry, clearSearched,
-  forgetInfra, recallInfraVerified, knownBed } = worldMemory
+  recallInfraVerified, knownBed } = worldMemory
 const provHut = require('./provision-hut.js')
 const { hutAnchor, insideOwnStructure, hasSolidCeiling } = provHut
 const provFarm = require('./provision-farm.js')
@@ -448,12 +450,16 @@ async function ensureFoodSupply (bot, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const say = opts.say || (() => {})
   const anchor = opts.home || { x: Math.round(bot.entity.position.x), z: Math.round(bot.entity.position.z) }
+  // #118: the SWEEP anchor above may fall back to the body (a sweep is a one-trip search, so that
+  // is fine). The FARM SITE may not: a wheat farm is tended for the rest of the bot's life, so it
+  // is anchored on real home - hut, then bed - and on nothing at all when neither exists.
+  const homeAnchor = opts.home || hutAnchor() || knownBed() || null
   const animalRange = parseInt(process.env.FOOD_ANIMAL_RANGE || '40', 10)
   // 0) EAT what we carry first (cook raw -> eat to comfortable) - never idle hungry with food.
   await eatFromPackToComfortable(bot, isStopped)
-  // DECISION LOOP (foodSupplyAction): tend / buildFarm-at-known-water / huntNear / sweep. The
-  // KEY fix - after a sweep discovers + remembers water, the NEXT iteration sees knownWater and
-  // BUILDS THE FARM there instead of idling at the hut ("found it, did nothing"). Bounded.
+  // DECISION LOOP (foodSupplyAction): tend / buildFarm-at-the-chosen-site / huntNear / sweep.
+  // A sweep that discovers water writes a QUALIFIED record, so the next iteration's comparison
+  // sees it as a candidate and can build there instead of idling ("found it, did nothing").
   let sweeps = 0
   for (let step = 0; step < 4 && !isStopped(); step++) {
     if (hasStandingFarm()) {
@@ -468,33 +474,33 @@ async function ensureFoodSupply (bot, opts = {}) {
       }
       return { ok: true, reason: 'wheat farm stands - tended it' }
     }
-    const knownWater = recallInfra('water', bot.entity.position, 300)
+    // #118 FARM_SITED_FROM_HOME (Root F): ONE home-anchored comparison over remembered AND
+    // freshly discoverable ponds, in place of `recallInfra('water', bot.entity.position, 300)`
+    // feeding a first-truthy ladder. The 150s trek happens once, to the WINNER.
+    const site = provFarm.chooseFarmSite(bot, { home: homeAnchor, isStopped })
     const nearAnimal = nearestFoodAnimal(bot, animalRange)
-    const action = foodSec.foodSupplyAction(false, !!knownWater, !!nearAnimal)
+    const action = foodSec.foodSupplyAction(false, !!site, !!nearAnimal)
     dbg('  ensureFoodSupply[step ' + step + ']: action=' + action +
-        ' knownWater=' + (knownWater ? knownWater.x + ',' + knownWater.z : 'none') +
+        ' site=' + (site ? site.source + ' ' + site.x + ',' + site.z + ' @' + Math.round(site.dist) + 'b from home' : 'none') +
         ' nearAnimal=' + (nearAnimal ? nearAnimal.name + '@' + Math.round(nearAnimal.dist) + 'b' : 'none'))
     if (action === 'buildFarm') {
-      // THE MISSING HANDOFF: WALK to the found/remembered pond first (ensureWheatFarm only
-      // searches ~48 locally), VERIFY it's an open-sky pond ON ARRIVAL, then build there.
-      say('found water at ' + knownWater.x + ',' + knownWater.z + ' - going there to build a wheat farm')
-      dbg('  ensureFoodSupply: trekking to the pond at ' + knownWater.x + ',' + knownWater.z + ' to farm it')
-      try { await S().walkStaged(bot, knownWater.x, knownWater.z, { isStopped, range: 6, timeoutMs: 150000 }) } catch {}
-      // on arrival: is there OPEN-SKY water within reach? A remembered pond can be cave/covered
-      // (older pre-seesSky memory) - drop it and try the NEXT remembered pond, don't loop on it.
-      const md = require('minecraft-data')(bot.version)
-      const seesSky = p => { for (let dy = 1; dy <= 40; dy++) { const b = bot.blockAt(p.offset(0, dy, 0)); if (b && b.boundingBox === 'block' && !/_leaves$/.test(b.name)) return false } return true }
-      const arrived = Math.hypot(bot.entity.position.x - knownWater.x, bot.entity.position.z - knownWater.z) <= 10
-      const openWater = arrived && (bot.findBlocks({ matching: md.blocksByName.water.id, maxDistance: 24, count: 32 }) || []).some(p => { const a = bot.blockAt(p.offset(0, 1, 0)); return a && AIRISH(a.name) && seesSky(p) })
-      if (arrived && !openWater) {
-        dbg('  ensureFoodSupply: remembered pond ' + knownWater.x + ',' + knownWater.z + ' is cave/covered on arrival - forgetting it, trying the next')
-        try { forgetInfra('water', listInfra('water').find(e => e.x === knownWater.x && e.z === knownWater.z)) } catch {}
-        continue // loop: next remembered pond, or sweep farther
+      say('best wheat-farm site is the water at ' + site.x + ',' + site.z + ' (' + Math.round(site.dist) + 'b from home) - heading there')
+      dbg('  ensureFoodSupply: trekking to the chosen site at ' + site.x + ',' + site.z + ' to farm it')
+      try { await S().walkStaged(bot, site.x, site.z, { isStopped, range: 6, timeoutMs: 150000 }) } catch {}
+      const arrived = Math.hypot(bot.entity.position.x - site.x, bot.entity.position.z - site.z) <= 10
+      if (!arrived) { dbg('  ensureFoodSupply: could not reach the chosen site (trek fell short) - keeping it, will retry'); return { ok: false, reason: 'could not reach the chosen farm site - retry next pass' } }
+      // Arrival is now a cheap ASSERTION over a record qualified at WRITE time, not the primary
+      // filter. If the world disagrees with the record, CORRECT the record (openSky:false makes
+      // it lose every future comparison) rather than erasing it - and re-choose immediately.
+      const seen = provFarm.surveyWaterSite(bot, { x: site.x, y: site.y, z: site.z })
+      if (seen.openSky === false) {
+        dbg('  ensureFoodSupply: chosen site ' + site.x + ',' + site.z + ' reads cave/covered on arrival - correcting the record, re-choosing')
+        try { rememberInfra('water', { x: site.x, y: site.y, z: site.z }, seen) } catch {}
+        continue
       }
-      if (!arrived) { dbg('  ensureFoodSupply: could not reach the pond (trek fell short) - keeping it, will retry'); return { ok: false, reason: 'could not reach the discovered pond - retry next pass' } }
       // we're AT an open-sky pond -> build the farm here (ensureWheatFarm finds water locally now)
       try { await ensureWheatFarm(bot, { x: Math.round(bot.entity.position.x), z: Math.round(bot.entity.position.z) }, { isStopped, say, avoid: opts.avoid }) } catch (e) { dbg('  foodSupply: wheat farm setup error (' + e.message + ')') }
-      if (hasStandingFarm()) { await eatFromPackToComfortable(bot, isStopped); return { ok: true, reason: 'wheat farm PLANTED at the discovered pond ' + knownWater.x + ',' + knownWater.z } }
+      if (hasStandingFarm()) { await eatFromPackToComfortable(bot, isStopped); return { ok: true, reason: 'wheat farm PLANTED at the chosen site ' + site.x + ',' + site.z } }
       // at a good pond but the farm still deferred (hoe/seeds) - the pond is FINE, don't forget
       // it; the wheat-farm log names the reason (now the hoe is resource-model-crafted). Retry.
       dbg('  ensureFoodSupply: at the open-sky pond but farm setup deferred (hoe/seeds - see wheat-farm log)')
@@ -953,7 +959,7 @@ async function scoutForFood (bot, home, opts = {}) {
     try {
       const w = (bot.findBlocks({ matching: mcData.blocksByName.water.id, maxDistance: 32, count: 32 }) || [])
         .find(p => { const a = bot.blockAt(p.offset(0, 1, 0)); return a && AIRISH(a.name) && seesSky(p) })
-      if (w) { rememberInfra('water', { x: w.x, y: w.y, z: w.z }); dbg('  scoutForFood: remembered OPEN-SKY water at ' + w.x + ',' + w.z + ' (farmable)'); return true }
+      if (w) { rememberInfra('water', { x: w.x, y: w.y, z: w.z }, provFarm.surveyWaterSite(bot, w)); dbg('  scoutForFood: remembered OPEN-SKY water at ' + w.x + ',' + w.z + ' (farmable)'); return true }
     } catch {}
     return false
   }

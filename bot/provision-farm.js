@@ -450,6 +450,100 @@ async function ensureDryHomeFarm (bot, home, hut, { isStopped = () => false, say
   return true
 }
 
+// ==== #118 FARM_SITED_FROM_HOME - Root F (§3.6) ==========================================
+// Siting the farm used to be answered by "nearest remembered water to MY FEET, within 300b",
+// fed into a ladder where remembering ANYTHING short-circuited looking. Two functions replace it:
+// surveyWaterSite establishes a water column's farmable properties WHERE THE OBSERVATION IS, and
+// chooseFarmSite compares every option - remembered and freshly discovered - anchored on HOME.
+
+// THE water-record qualifier. Item 10: these properties used to be established 150 seconds of
+// walking LATER, on arrival, by an `if (!openWater) forgetInfra(); continue` purge loop, while
+// the write side stored a bare x/y/z - so the y that would have unmasked cave water at y48 was
+// stored and never consulted. Qualification happens at WRITE time now; the arrival check demotes
+// to a cheap assertion that CORRECTS the record instead of blindly erasing it.
+// Bounded + read-only (one sky column, two rings of bank cells) - a siting-time call, never
+// per-tick (body-first). UNKNOWN is honest per Root A: an unloaded column returns openSky:null,
+// never true, so an unreadable pond is unverified rather than accidentally good.
+function surveyWaterSite (bot, pos) {
+  const readCell = (c) => { try { return require('./pathfix.js').readCell(bot, c) } catch { return { known: false, block: null } } }
+  const X = Math.floor(pos.x); const Y = Math.floor(pos.y); const Z = Math.floor(pos.z)
+  let openSky = true
+  for (let dy = 1; dy <= 40; dy++) {
+    const r = readCell({ x: X, y: Y + dy, z: Z })
+    if (!r.known) return { openSky: null } // never sent that chunk - we did not look, we cannot claim
+    if (r.block && r.block.boundingBox === 'block' && !/_leaves$/.test(r.block.name)) { openSky = false; break }
+  }
+  if (!openSky) return { openSky: false, tillable: 0, flat: 0, surveyedAt: Date.now() }
+  // tillable/flat over the same bank bands the ring build actually plants into (farm.BANK_DYS),
+  // so the count means what the planter will find rather than a separate optimistic model.
+  let tillable = 0; let flatN = 0
+  for (let r = 1; r <= 2; r++) {
+    for (let dx = -r; dx <= r; dx++) {
+      for (let dz = -r; dz <= r; dz++) {
+        if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue
+        for (const dy of farm.BANK_DYS) {
+          const g = readCell({ x: X + dx, y: Y + dy, z: Z + dz })
+          if (!g.known || !g.block) continue
+          const above = readCell({ x: X + dx, y: Y + dy + 1, z: Z + dz })
+          if (!above.known || !above.block) continue
+          if (/^(grass_block|dirt|sand|red_sand|gravel|clay)$/.test(g.block.name) && REPLACEABLE.test(above.block.name)) {
+            tillable++; if (dy === 0) flatN++
+            break
+          }
+        }
+      }
+    }
+  }
+  return { openSky: true, tillable, flat: tillable ? flatN / tillable : 0, surveyedAt: Date.now() }
+}
+
+// THE farm-site chooser. Candidates from memory and candidates from a fresh scan compete in ONE
+// array, scored on tend-distance from HOME - never from bot.entity.position, which is why the
+// same candidate set yields the same site regardless of where the body happens to stand.
+// The discovery half is the hut-relative scan that never existed: one bounded, read-only
+// findBlocks around home (no walking, no digging). It comes up empty when home's chunks are not
+// loaded, which simply leaves memory to compete alone - it never fabricates a candidate.
+// Returns { x, y, z, score, dist, source } or null; null means the caller's sweep/hunt fallbacks
+// proceed, which is exactly the discovery that the old ladder suppressed.
+function chooseFarmSite (bot, opts = {}) {
+  const home = opts.home || hutAnchor() || (worldMemory.knownBed && worldMemory.knownBed()) || null
+  if (!home || !Number.isFinite(home.x) || !Number.isFinite(home.z)) {
+    dbg('  farm site: no home anchor - a farm is sited from home or not at all (home comes first)')
+    return null
+  }
+  const NEAR_HOME = Number(process.env.FARM_NEAR_HOME || 112)
+  const cands = []; const seen = new Set()
+  const push = (c) => { const k = c.x + ',' + c.z; if (!seen.has(k)) { seen.add(k); cands.push(c) } }
+  // (a) DISCOVERY around HOME first, so a fresh survey wins the x,z dedup over a stale record.
+  try {
+    const waterId = require('minecraft-data')(bot.version).blocksByName.water.id
+    const hy = Number.isFinite(home.y) ? home.y : Math.round(bot.entity.position.y)
+    const cols = (bot.findBlocks({ point: new Vec3(home.x, hy, home.z), matching: waterId, maxDistance: 48, count: 64 }) || [])
+      .slice().sort((a, b) => Math.hypot(a.x - home.x, a.z - home.z) - Math.hypot(b.x - home.x, b.z - home.z))
+    const picked = []
+    for (const p of cols) {
+      if (picked.some(q => Math.hypot(q.x - p.x, q.z - p.z) < 16)) continue // one candidate per pond, not per block
+      picked.push(p)
+      if (picked.length >= 4) break // bounded: at most 4 surveys per siting decision
+    }
+    for (const p of picked) {
+      const sv = surveyWaterSite(bot, p)
+      try { rememberInfra('water', { x: p.x, y: p.y, z: p.z }, sv) } catch {} // write-time qualification
+      push({ x: p.x, y: p.y, z: p.z, openSky: sv.openSky, tillable: sv.tillable, flat: sv.flat, source: 'discovered' })
+    }
+  } catch (e) { dbg('  farm site: home scan failed (' + e.message + ') - memory competes alone') }
+  // (b) MEMORY, within tend range of HOME, on exactly the same terms - no priority, no veto.
+  for (const e of (listInfra('water') || [])) {
+    if (Math.hypot(e.x - home.x, e.z - home.z) > NEAR_HOME) continue
+    push({ x: e.x, y: e.y, z: e.z, openSky: e.openSky, tillable: e.tillable, flat: e.flat, source: 'memory' })
+  }
+  const best = farm.rankFarmSites(cands, { home, target: WHEAT_FARM_TARGET })
+  dbg('  farm site: ' + cands.length + ' candidate(s) near home ' + Math.round(home.x) + ',' + Math.round(home.z) +
+      ' (' + cands.filter(c => farm.farmSiteQualified(c)).length + ' qualified) -> ' +
+      (best ? best.source + ' ' + best.x + ',' + best.z + ' score ' + best.score.toFixed(1) + ' @' + best.dist.toFixed(0) + 'b' : 'none acceptable'))
+  return best
+}
+
 async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () => {}, avoid = null } = {}) {
   const mcData = require('minecraft-data')(bot.version)
   const m = loadWorldMem()
@@ -588,7 +682,7 @@ async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () =
   }
   if (!waters.length) { dbg('  wheat farm: no surface water within 48 - deferred'); return false }
   const w = waters[0]
-  rememberInfra('water', { x: w.x, y: w.y, z: w.z }) // future camp passes trek straight back
+  rememberInfra('water', { x: w.x, y: w.y, z: w.z }, surveyWaterSite(bot, w)) // #118: qualified where it was observed
   // ---- FARM_EXPAND site selection + anchor pinning (§4.1/4.2/4.4/4.6) -----------------
   const homeXZ = hutAnchor() || home
   // scanBank(siteVec): the ring build's OWN predicate as a reusable closure - the exact bands,
@@ -654,7 +748,7 @@ async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () =
     for (const c of picks) {
       const sv = surveyAt(c)
       const sc = farm.scoreFarmSite({ tillable: sv.tillable, flatFrac: sv.flatFrac, distHome: sv.distHome, target: WHEAT_FARM_TARGET }, { distWeight: DIST_WEIGHT, minTillable: MIN_TILLABLE, minFlatFrac: FLAT_SITE ? FLAT_MIN : 0 })
-      rememberInfra('water', { x: c.x, y: c.y, z: c.z }, { tillable: sv.tillable, flat: sv.flatFrac, surveyedAt: Date.now() })
+      rememberInfra('water', { x: c.x, y: c.y, z: c.z }, { tillable: sv.tillable, flat: sv.flatFrac, surveyedAt: Date.now(), openSky: true }) // #118: `waters` is seesSky-filtered, so open-sky is OBSERVED here
       if (sc.acceptable && (!best || sc.score > best.score)) best = { col: c, score: sc.score, dist: sv.distHome }
     }
     return best
@@ -1283,5 +1377,6 @@ async function plantGrove (bot, home, logItem, { isStopped = () => false, say = 
 
 module.exports = {
   setDebugSink,
+  surveyWaterSite, chooseFarmSite, // #118 FARM_SITED_FROM_HOME (Root F)
   PLANTABLE_GROUND, WHEAT_FARM_TARGET, farmFootprintHas, cropExclusionStep, cropPlaceExclusion, inAvoidBox, boneMealBlock, tillCell, withdrawSeedsFromBank, gatherSeedsNear, placeFarmTorches, levelPlotCell, ensureWheatFarm, replantCropCell, tendWheatFarm, hasStandingFarm, saplingFor, saplingCount, plantSaplingNear, boneMealSapling, fishSaplings, prepOrchardCell, plantGrove
 }
