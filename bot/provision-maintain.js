@@ -236,6 +236,25 @@ async function maintenancePass (bot, opts = {}) {
       } catch {}
     }
 
+    // ==== STEP H (#117 HOME_IS_A_NEED) - THE HOME PRODUCERS, FIRST AND OUTSIDE THE BUILD ======
+    // Design §3.2 B2. Establishing home used to be reachable by exactly one route: steps 5-6 of
+    // the 11-step castle build job. That job had to be picked AND survive steps 1-5 for the bot to
+    // get a bed, and across 2026-07-19 it never did - 23 deaths, each respawning 380-490 blocks
+    // from home with no anchor to come back to, then a ten-minute walk. Home is a NEED now, so its
+    // producers hang off the need's own verdict and run whether or not a build exists.
+    //
+    // Ordered above every other step on purpose: a maintenance window spent baking bread while the
+    // bot has no spawn anchor is the old failure in miniature. Both producers are idempotent and
+    // condition-gated internally (ensureSpawnBed's STOOD rung, ensureHomeShelter's OK survey), so
+    // a pass dispatched for some other reason costs a couple of in-memory reads here.
+    if (opts.bootstrap === 'spawn') {
+      try { const r = await P().ensureSpawnBed(bot, { isStopped, say }); if (r && r.ok) stepDone('spawn(' + r.how + ')'); else dbg('  maint: spawn anchor not established (' + ((r && r.why) || '?') + ')') } catch (e) { dbg('  maint: spawn anchor failed (' + e.message + ')') }
+      if (between()) return { ok: true, steps, reason: 'bail:survival' }
+    } else if (opts.bootstrap === 'shelter') {
+      try { const r = await P().ensureHomeShelter(bot, { isStopped, say }); if (r && r.ok) stepDone('shelter(' + r.how + ')'); else dbg('  maint: shelter not established (' + ((r && r.why) || '?') + ')') } catch (e) { dbg('  maint: shelter failed (' + e.message + ')') }
+      if (between()) return { ok: true, steps, reason: 'bail:survival' }
+    }
+
     // STEP 0: safekeep-out - stash spare kit BEFORE any outbound trek leaves the hut.
     if (process.env.MAINT_SAFEKEEP !== '0' && !nightIndoorOnly && atHome()) {
       const outboundDue = (process.env.FOOD_SUPPLY !== '0' && (has('bankFood') || has('packFood') || farmUnderTarget())) ||

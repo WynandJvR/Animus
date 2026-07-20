@@ -236,7 +236,11 @@ function chooseActivity (snapshot, opts) {
   if (bn || upkeep) {
     // urgency by kind: armor is the biggest survivability multiplier; food-reserve the enabler; base
     // spawn-proofing next; a plain buffer top-up lowest.
-    const urgency = bn === 'armor' ? 0.9 : bn === 'food' ? 0.7 : bn === 'base' ? 0.5 : 0.4
+    // #117: 'spawn' and 'shelter' rank HERE the way they rank in bootstrapNeed - the two readiness
+    // models must not drift (that is Root G, and this file exists because they did). The anchor is
+    // top: it does not reduce the chance of a death, it reduces the price of every death that still
+    // happens, which on the 23-death tape was a 380-490b naked walk home.
+    const urgency = bn === 'spawn' ? 0.95 : bn === 'armor' ? 0.9 : bn === 'food' ? 0.7 : bn === 'shelter' ? 0.6 : bn === 'base' ? 0.5 : 0.4
     // feasibility: armor needs no home (armorup mines its own iron); the home-infra normally wants a
     // reachable home, because that dock exists for ONE reason - to yield the body to the build rather
     // than livelock on an unreachable bank (see the original comment). #114: it may not yield to a
@@ -244,7 +248,10 @@ function chooseActivity (snapshot, opts) {
     // while the executor vetoed the build on that very food need - a three-way standoff in which each
     // side blocked the other's remedy and the body did nothing for 90s at a stretch. The dock is now
     // CONDITIONED on the build actually being an available alternative: no alternative, no dock.
-    const feas = bn === 'armor' ? 1 : ((s.homeReachable || !br.ok) ? 1 : 0)
+    // #117: 'spawn' joins 'armor' in needing NO home - ensureSpawnBed's whole point is that a
+    // homeless bot can lay an anchor on open ground. Docking it on an unreachable bank would
+    // re-create, for the one need that fixes homelessness, the livelock the dock exists to prevent.
+    const feas = (bn === 'armor' || bn === 'spawn') ? 1 : ((s.homeReachable || !br.ok) ? 1 : 0)
     const yielded = !feas
     let score = W_SECURE * urgency * feas - W_RISK_MAINT * riskLevel(s) - footprintCost('maintenancePass', s)
     // NEED-INHERITANCE (§3.7): when the build is blocked ON THIS WORK, the work inherits the build's

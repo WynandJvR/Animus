@@ -252,9 +252,10 @@ function submergedEscapeDue ({ flagOn, submerged, deep, wetHist, oxygen, oxygenR
 // the survival INFRASTRUCTURE it lacks, so it stays UNARMORED / foodless / in a dark base -> degrades
 // back to hp1/food0 -> repeats. This returns the single highest-priority MISSING survival-infra need
 // when the bot is in a HEALTHY window (hp>=BOOTSTRAP_HP & fed), so pickJob/resumeBuild can establish
-// it BEFORE resuming the build. Order: FOOD RESERVE > ARMOR > BASE LIT (#74). It is PRIORITY, not new
-// mechanics: the picked maintenancePass runs the EXISTING #60 proactiveArmor / #62 courier-bake /
-// #69 secureBase steps (which today only fire opportunistically, so they rarely run).
+// it BEFORE resuming the build. Order: FOOD RESERVE > SPAWN > ARMOR > SHELTER > BASE LIT (#117).
+// It is PRIORITY, not new mechanics: the picked maintenancePass runs the EXISTING #60 proactiveArmor
+// / #62 courier-bake / #69 secureBase steps plus the #117 home producers (ensureSpawnBed /
+// ensureHomeShelter), which today only fire opportunistically, so they rarely run.
 //
 // Conservative by construction:
 //  - only in a HEALTHY window (hp>=14 & fed) - a degraded/hungry bot is the SURVIVAL tier's job, never
@@ -265,16 +266,26 @@ function submergedEscapeDue ({ flagOn, submerged, deep, wetHist, oxygen, oxygenR
 //  - BASE LIT only when measurable (s.baseLit === false: a hut exists but secureBase hasn't lit its
 //    ring yet). Unknown (no hut / no read) never invents a need. secureBase persists its ring, so ONE
 //    torch placement flips baseLit true and hands the build back (no dark-base livelock).
+//
+// #117 HOME_IS_A_NEED (design §3.2 Root B). Two things changed here and one was DELETED.
+// DELETED: #103's `BOOTSTRAP_NEEDS_HOME` inversion - "no home at all => bootstrap NOTHING,
+// the build's camp step owns establishment". It made home the one survival need the scheduler
+// could not want, and the live cost was the whole of 2026-07-19: home was step 6/11 INSIDE the
+// castle build job, so it only progressed if that job ran AND survived steps 1-5, which it
+// never did - 23 deaths, each respawning the bot 380-490 blocks away with no anchor to come
+// back to. The comment's fear (the armor branch stealing the body from establishment while
+// food ran out) was itself a SYMPTOM of home not being a verdict; with 'spawn' outranking
+// 'armor' the armor grind can no longer win that race, so the patch is removed, not layered on.
+// ADDED: 'spawn' (no verified spawn anchor) above 'armor', and 'shelter' (a hut on the books
+// that does not verify) just below it. Both are measured from world-memory v2 `verified` flags
+// by the snapshot - no world reads on this path.
+//
+// UNMEASURED IS NOT UNMET (the Root A rule, applied here): a field that was never measured
+// must never invent a need, so both verdicts fire on an explicit `=== false` exactly like
+// baseLit does. A snapshot that carries neither field behaves precisely as before.
 function bootstrapNeed (snapshot) {
   if (process.env.BOOTSTRAP_PRIORITY === '0') return null
   const s = snapshot || {}
-  // #103 BOOTSTRAP_NEEDS_HOME (default on): with NO home at all there is nothing to bootstrap
-  // AROUND - the build's CAMP step owns establishment (#102), and letting the homeless armor
-  // branch fire sent the bot deep-mining while its half-built hut stood unregistered and its
-  // food ran out (live 13:2xZ new land: food 8, zero edibles, y53, hut shell abandoned - the
-  // armor-maintenance job ping-ponged the body against the build's travel step for 1.5h).
-  // homeReachable false + no hut = homeless => null (the build/camp gets the body exclusively).
-  if (process.env.BOOTSTRAP_NEEDS_HOME !== '0' && !s.homeReachable && !(s.hutExists || s.homeDist != null)) return null
   const hp = s.hp != null ? s.hp : 20
   const food = s.food != null ? s.food : 20
   const fed = food >= Number(process.env.BOOTSTRAP_FED || 14)
@@ -298,16 +309,53 @@ function bootstrapNeed (snapshot) {
       reserve < Number(process.env.FOOD_RESERVE_TARGET || 40)) return 'food'
   if (hp < Number(process.env.BOOTSTRAP_HP || 14)) return null
   if (!fed) return null
-  // (1) ARMOR - the biggest survivability multiplier; fires whenever fully naked (no home required).
+  // (1) SPAWN ANCHOR (#117) - a fed bot beds BEFORE it armors. The bed is the single biggest
+  // death-cost reducer on the 23-death tape: without it every death is a 380-490b walk home
+  // through the terrain that just killed the bot, naked, with the grave timing out behind it.
+  // Armor reduces the CHANCE of a death; the anchor reduces the PRICE of every death that
+  // still happens, and it costs one craft. Needs no home - ensureSpawnBed lays on open ground.
+  if (spawnBootstrapDue(s)) return 'spawn'
+  // (2) ARMOR - the biggest survivability multiplier; fires whenever fully naked (no home required).
   const armorPieces = s.armorPieces != null ? s.armorPieces : 0
   if (armorPieces === 0) return 'armor'
+  // (3) SHELTER (#117) - a hut that is ON THE BOOKS but does not verify this life. That is the
+  // phantom-hut state exactly (registry box, no structure), and its producer is the repair path
+  // (ensureHomeShelter -> maintainHome), which is now runnable OUTSIDE the build job.
+  // Deliberately NOT fired when no hut is registered at all: siting-and-raising a first hut has
+  // exactly one implementation and it lives in the build's camp step, which buildReady's #102
+  // noHut exemption already hands the body to. Claiming a need whose producer does not exist is
+  // how a verdict becomes a livelock, so the homeless case stays with the camp step until that
+  // implementation is extracted - and it is no longer reached by returning null for EVERYTHING.
+  if (s.hutExists && s.hutVerified === false) return 'shelter'
   // The rest is home-bank/hut infra - only a bootstrap need when home is reachable enough for the
   // maintenancePass to actually establish it.
   if (s.homeReachable) {
-    // (2) BASE LIT - spawn-proof the home (#69 secureBase). Only when provably not yet lit.
+    // (4) BASE LIT - spawn-proof the home (#69 secureBase). Only when provably not yet lit.
     if (s.baseLit === false) return 'base'
   }
   return null
+}
+
+// #117 - PURE. Is the 'spawn' verdict due, i.e. is the bot unanchored AND does its producer
+// (provision.ensureSpawnBed) have a rung that can make progress RIGHT NOW? Every clause is a
+// CONDITION on the world or on this life's observations; there is no clock and no cooldown
+// anywhere in it, and there must never be one (memory: no-blanket-time-holds).
+//
+// The anti-loop cases this closes, both named in design §5:
+//  - NO SHEEP / NO WOOL ANYWHERE: acquireBed exhausts its plan and ensureSpawnBed records
+//    `bedUnobtainable` FOR THIS LIFE (epoch-scoped, cleared by a bed arriving or by a death
+//    bumping the epoch). The verdict then steps aside so armor/base/build can proceed, and it
+//    comes back by itself the moment the condition changes - not when a timer says so.
+//  - A STANDING BUT UNCONFIRMED BED: day-clicking sets no spawn on this server (proven live
+//    2026-07-20 - "i set my spawn at this bed", then a respawn 462b away at world origin), so
+//    only a granted SLEEP confirms it. In daylight ensureSpawnBed has nothing to do but say so,
+//    and a verdict that fires anyway would spin maintenancePass every tick and starve armor.
+//    The gate is the world's own sleepability condition, which the snapshot already carries.
+function spawnBootstrapDue (s) {
+  if (!s || s.spawnAnchored !== false) return false // anchored, or never measured -> no invented need
+  if (!s.bedKnown) return s.bedUnobtainable !== true // no bed at all -> acquire one, unless that plan is exhausted
+  if (s.spawnSuspect === true) return true          // a respawn disproved the anchor -> re-anchor
+  return s.sleepableNow === true                    // standing but unconfirmed: only a sleep can fix it
 }
 
 // ==== #114 ONE_READINESS - THE single build-readiness predicate ===========================
@@ -828,6 +876,7 @@ function graveCooldownMs (result, { remainMs, flagOn, hotMs, blanketMs } = {}) {
 module.exports = {
   pickJob,
   bootstrapNeed,
+  spawnBootstrapDue,
   buildReady,
   ironKeystoneActive,
   oppMaintain,

@@ -26,7 +26,8 @@ const maintain = require('./maintain.js')   // PURE buffer floors
 const provCore = require('./provision-core.js')
 const { countItem, inventoryCounts, isNight, nearHostile, AIRISH, SHELTER_HOSTILE } = provCore
 const worldMemory = require('./world-memory.js')
-const { loadWorldMem, listInfra, knownBed, isSpawnSuspect, gearupState } = worldMemory
+const { loadWorldMem, listInfra, knownBed, isSpawnSuspect, gearupState, bedUnobtainable,
+  hutVerifiedNow } = worldMemory
 const provHut = require('./provision-hut.js')
 const { hutAnchor, insideOwnStructure, hasSolidCeiling } = provHut
 const provShelter = require('./provision-shelter.js')
@@ -37,6 +38,9 @@ const { hasFood, foodCount, needsFood, isSecuringFood, needFoodSupply, hasStandi
 const provRecovery = require('./provision-recovery.js')
 const { isRecoveringHp, isRecoveringDegraded, isResting, recoveryReadyNow, deadlockResetDue,
   deadlockResetState } = provRecovery
+// NOTE: sleepableNow is reached via provRecovery.<name> at CALL time, not destructured here -
+// provision-recovery requires this module's siblings, so a name captured at load time can be
+// undefined (module-map's swallowed-ReferenceError trap).
 const provMaintain = require('./provision-maintain.js')
 const { isMaintaining } = provMaintain
 const provMining = require('./provision-mining.js')
@@ -217,6 +221,32 @@ async function schedulerState (bot) {
   // hutExists: does a hut anchor stand in memory? (#102 CAMP_FIRST's noHut exemption reads this;
   // bootstrapNeed's #103 clause already referenced the field but nothing ever set it.)
   try { s.hutExists = !!hutAnchor() } catch { s.hutExists = false }
+  // ==== #117 HOME_IS_A_NEED (design §3.2 B2) - the HOME facts bootstrapNeed reasons over. ======
+  // Every one of these is an in-memory read of a world-memory v2 provenance flag or of bot.time.
+  // NOT ONE of them touches a chunk, and that is a requirement, not an accident: this runs on the
+  // scheduler tick and BODY FIRST forbids buying snapshot detail with event-loop budget.
+  //
+  // spawnAnchored is deliberately strict. A bed STANDING is not a spawn the server GRANTED -
+  // proven live 2026-07-20, when a day-clicked bed reported "i set my spawn at this bed" and the
+  // next death respawned the bot 462 blocks away at world origin. So only a `confirmed` record (a
+  // granted sleep, or the server's own set_spawn message, via assertSpawnOn) counts, and a
+  // spawnSuspect flag - a respawn that PROVED the anchor wrong - overrides it outright.
+  // The remaining fields are what the pure verdict needs to know whether ensureSpawnBed has a rung
+  // that can make progress right now, so 'spawn' can never spin on a producer with nothing to do.
+  try {
+    const kb = knownBed()
+    const suspect = isSpawnSuspect()
+    s.bedKnown = !!kb
+    s.spawnSuspect = !!suspect
+    s.spawnAnchored = !!(kb && kb.confirmed === true && !suspect)
+    s.bedUnobtainable = bedUnobtainable()
+  } catch { s.bedKnown = false; s.spawnSuspect = false; s.spawnAnchored = false; s.bedUnobtainable = false }
+  // sleepableNow: can the server grant a sleep RIGHT NOW (night or thunder)? The condition gate
+  // the unconfirmed-anchor re-assert waits on - ONE definition, provision-recovery's, reused here.
+  try { s.sleepableNow = !!provRecovery.sleepableNow(bot) } catch { s.sleepableNow = false }
+  // hutVerified: is the registry hut a structure the bot has SEEN this life, or just a box of
+  // coordinates? False is the phantom-hut state the 'shelter' verdict exists to resolve.
+  try { s.hutVerified = hutVerifiedNow() } catch { s.hutVerified = false }
   // maintain.needs inputs.
   try { s.torches = countItem(bot, 'torch') } catch { s.torches = 0 }
   // tools booleans (S6): pick/sparePick via workingPickCount (>=1/>=2 usable picks); axe/sword

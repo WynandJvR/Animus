@@ -30,7 +30,8 @@ const { AIRISH, REPLACEABLE, countItem, inventoryCounts, toolForBlock, gotoWithT
   collectDrops, stepInto, placeAt, nearHostile, isNight, canBreakNaturally } = provCore
 const worldMemory = require('./world-memory.js')
 const { loadWorldMem, saveWorldMem, listInfra, rememberInfra, recallInfra, knownBed,
-  rememberBed, forgetBed, markBedUnusable, bedHeld, setSpawnSuspect, isSpawnSuspect } = worldMemory
+  rememberBed, forgetBed, markBedUnusable, bedHeld, setSpawnSuspect, isSpawnSuspect,
+  noteBedUnobtainable, clearBedUnobtainable } = worldMemory
 const provHut = require('./provision-hut.js')
 const { hutAnchor, insideOwnStructure, hasSolidCeiling, ownHutAt, onHutApron, maintainHome,
   ensureHutBed, stepOffApron, bedUsable, assertSpawnOn } = provHut
@@ -887,7 +888,15 @@ async function ensureSpawnBed (bot, opts = {}) {
   let how = bb ? 'stood' : null
   if (!bb && !isStopped()) {
     const item = await P().acquireBed(bot, { near, isStopped, say: opts.say }).catch(() => null)
-    if (!item) return R(false, 'failed', 'no bed standing, none banked, and none craftable from what we hold')
+    if (!item) {
+      // #117: RECORD THE EXHAUSTED PLAN, so the 'spawn' bootstrap verdict can step aside for
+      // armor/base/build instead of re-picking a producer that has nothing left to try. This is
+      // an observation scoped to THIS LIFE (world-memory epoch), never a cooldown - a death, or
+      // a bed arriving by any route, clears it and the want comes straight back.
+      if (!isStopped()) { try { noteBedUnobtainable() } catch {} }
+      return R(false, 'failed', 'no bed standing, none banked, and none craftable from what we hold')
+    }
+    try { clearBedUnobtainable() } catch {}
     how = 'acquired'
     if (hut0) {
       const r = await ensureHutBed(bot, new Vec3(hut0.x, hut0.y, hut0.z), opts).catch(() => 'fail')
@@ -1203,5 +1212,5 @@ function isRecoveringDegraded () { return _recoveringDegraded }
 
 module.exports = {
   setDebugSink,
-  DEADLOCK_HP, DEADLOCK_MAX_NOFOOD, DEADLOCK_FAILS, DEADLOCK_RESET_SOFT, DEADLOCK_SOFT_HP, DEADLOCK_SOFT_FOOD, DEADLOCK_SOFT_FAILS, DEADLOCK_RESET_COOLDOWN_MS, DEADLOCK_FALL_H, SUICIDE_EXIT_OPEN_SKY, SUICIDE_FALLBACK_DEATH, SUICIDE_DROWN, SUICIDE_PILLAR_WORKS, _deadlockFails, _deadlockResetting, _noteDeadlockProgress, noteDeadlockReset, deadlockResetDue, deadlockResetState, sampleColumnForSky, reachOpenSky, ensurePillarFiller, deadlockDieByFall, suicideByDrown, suicideByPitDrop, deadlockFallbackDeath, deadlockSuicideReset, _recoveringHp, recoverHp, isRecoveringHp, _resting, restUntilSafe, isResting, sleepInBedHere, nightRest, nightRestInner, boundedHold, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, RUNG_EXECUTORS, recoveryReadyNow, _recoveringDegraded, recoverFromDegraded, isRecoveringDegraded
+  DEADLOCK_HP, DEADLOCK_MAX_NOFOOD, DEADLOCK_FAILS, DEADLOCK_RESET_SOFT, DEADLOCK_SOFT_HP, DEADLOCK_SOFT_FOOD, DEADLOCK_SOFT_FAILS, DEADLOCK_RESET_COOLDOWN_MS, DEADLOCK_FALL_H, SUICIDE_EXIT_OPEN_SKY, SUICIDE_FALLBACK_DEATH, SUICIDE_DROWN, SUICIDE_PILLAR_WORKS, _deadlockFails, _deadlockResetting, _noteDeadlockProgress, noteDeadlockReset, deadlockResetDue, deadlockResetState, sampleColumnForSky, reachOpenSky, ensurePillarFiller, deadlockDieByFall, suicideByDrown, suicideByPitDrop, deadlockFallbackDeath, deadlockSuicideReset, _recoveringHp, recoverHp, isRecoveringHp, _resting, restUntilSafe, isResting, sleepInBedHere, nightRest, nightRestInner, boundedHold, sleepableNow, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, RUNG_EXECUTORS, recoveryReadyNow, _recoveringDegraded, recoverFromDegraded, isRecoveringDegraded
 }

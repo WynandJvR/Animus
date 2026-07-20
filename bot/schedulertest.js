@@ -117,21 +117,13 @@ t('(c) maintain surfaces only with no progress job + no survival need, and never
 // order, stocking the reserve where the case is really about armor/base ranking.
 function withBootstrap (fn) { return withEnv('BOOTSTRAP_PRIORITY', '1', fn) }
 const STOCKED = 40 // bankFoodPts >= FOOD_RESERVE_TARGET -> the food-reserve rung is satisfied
-t('(#65) bootstrapNeed: healthy + naked -> "armor" (no home REACHABLE, but a home EXISTS)', () => withBootstrap(() => {
-  // #103: drive BOTH env regimes explicitly (ambient-proof).
-  const prev = process.env.BOOTSTRAP_NEEDS_HOME
-  try {
-    delete process.env.BOOTSTRAP_NEEDS_HOME // default (flag ON)
-    // armor still fires when a home exists but is momentarily unreachable (homeDist known)...
-    assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: false, homeDist: 60, bankFoodPts: STOCKED })), 'armor')
-    // ...but a truly HOMELESS bot (no hut, no homeDist) bootstraps NOTHING - the build's camp step
-    // owns establishment (#102); the armor grind must not steal the body from it.
-    assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: false, homeDist: null, bankFoodPts: STOCKED })), null, '#103: homeless -> null')
-    process.env.BOOTSTRAP_NEEDS_HOME = '0'
-    assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: false, homeDist: null, bankFoodPts: STOCKED })), 'armor', '#103 flag off: homeless armor as before')
-  } finally {
-    if (prev === undefined) delete process.env.BOOTSTRAP_NEEDS_HOME; else process.env.BOOTSTRAP_NEEDS_HOME = prev
-  }
+t('(#65/#117) bootstrapNeed: healthy + naked -> "armor", and a HOMELESS bot is no longer muzzled', () => withBootstrap(() => {
+  // armor fires when a home exists but is momentarily unreachable (homeDist known)...
+  assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: false, homeDist: 60, bankFoodPts: STOCKED })), 'armor')
+  // ...and #117 DELETED the #103 inversion, so a truly HOMELESS bot (no hut, no homeDist) no
+  // longer returns null. It bootstraps: armor here, and 'spawn' ahead of it once the snapshot
+  // actually measures the anchor (homefirsttest.js owns that ordering).
+  assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: false, homeDist: null, bankFoodPts: STOCKED })), 'armor', '#117: homeless is not a reason to bootstrap nothing')
 }))
 t('(#65) bootstrapNeed: armored + healthy + home + empty bank food -> "food"', () => withBootstrap(() => {
   assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 4, homeReachable: true, bankFoodPts: 0 })), 'food')

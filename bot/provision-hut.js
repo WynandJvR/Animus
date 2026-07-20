@@ -1030,6 +1030,70 @@ async function maintainHut (bot, hut, opts = {}) {
   return { ...r, repair }
 }
 
+// #117 HOME_IS_A_NEED - THE 'shelter' bootstrap producer, and the first code allowed to put the
+// home back in order with NO BUILD JOB RUNNING. Root B, design §3.2 B2.
+//
+// The defect it closes: repairing/verifying the safehouse was step ~6 of an 11-step castle build,
+// so it only ever progressed if that job ran AND survived steps 1-5. It never did, and the
+// registry kept a hut at 456,68,-142 that had been "rebuilt" by a pass which placed 0/94 blocks -
+// a coordinate box with no structure in it, which insideOwnStructure then answered "yes, I'm home"
+// from, and boundedHold held the bot inside. Home was a chore; now it is a need with a producer.
+//
+// GROUNDED THROUGHOUT (§3.1): the only thing that makes this function claim a verified hut is a
+// surveyCells verdict of OK, read from loaded chunks, in THIS life. UNKNOWN travels to the anchor
+// and looks again; UNKNOWN after that claims NOTHING and says so out loud.
+//
+// NON-DESTRUCTIVE BY CONSTRUCTION (§5 anti-grief): this path can only PLACE missing cells, via
+// maintainHome -> repairHutStructure. It never empties the bank, never calls clearVolume, and
+// never sites or raises a first hut - the destructive rebuild and the initial raising both stay
+// in the build's camp step, which owns the one implementation of each.
+async function ensureHomeShelter (bot, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const say = opts.say || (() => {})
+  const R = (ok, how, why) => { dbg('shelter: [' + how + '] ' + (why || '')); return { ok, how, why: why || '' } }
+  if (!bot || !bot.entity) return R(false, 'failed', 'no body yet')
+  const hut = opts.hut || hutAnchor()
+  // No hut ON THE BOOKS at all: siting and raising the first one has exactly ONE implementation
+  // and it is the build's camp step. Saying so honestly beats copying it (§8.2 - one operation,
+  // one implementation), and bootstrapNeed never routes the homeless case here for that reason.
+  if (!hut) return R(false, 'no-hut', 'no hut is registered - the camp step raises the first one')
+
+  const pathfix = require('./pathfix.js')
+  const schem = await loadHutSchem(bot.version)
+  if (!schem) return R(false, 'failed', 'no hut schematic to check the safehouse against')
+  const st = schem.start(); const en = schem.end()
+  const cells = []
+  for (let y = st.y; y <= en.y; y++) for (let z = st.z; z <= en.z; z++) for (let x = st.x; x <= en.x; x++) {
+    const w = schem.getBlock(new Vec3(x, y, z))
+    cells.push({ pos: new Vec3(hut.x + (x - st.x), hut.y + (y - st.y), hut.z + (z - st.z)), want: (w && w.name) || 'air' })
+  }
+  const survey = () => pathfix.surveyCells(bot, cells, hutModel.cellMismatch)
+  // A record verified by a survey we just took, in this life. rememberInfra REJECTS anything
+  // weaker, which is the whole point - this is the only memory write site in this function.
+  const claim = sv => { try { rememberInfra('hut', { x: hut.x, y: hut.y, z: hut.z }, { proof: { verdict: sv.verdict, epoch: pathfix.epoch() } }) } catch (e) { dbg('shelter: memory write rejected (' + e.message + ')') } }
+
+  let sv = survey()
+  if (sv.verdict === 'UNKNOWN') {
+    // Not a failure - a "go and look". This is the trek that used to be locked inside the build.
+    dbg('shelter: safehouse survey UNKNOWN (' + sv.unknown + '/' + sv.total + ' cells unreadable) - going to look')
+    try { await S().walkStaged(bot, hut.x + 2, hut.z + 2, { isStopped, range: 4, timeoutMs: 300000 }) } catch (e) { dbg('shelter: approach failed (' + e.message + ')') }
+    if (isStopped()) return R(false, 'failed', 'survival took the body before I could reach the safehouse')
+    sv = survey()
+  }
+  if (sv.verdict === 'UNKNOWN') return R(false, 'failed', 'still cannot see the safehouse at ' + hut.x + ',' + hut.y + ',' + hut.z + ' (' + sv.unknown + '/' + sv.total + ' unreadable) - claiming nothing about it')
+  if (sv.verdict === 'OK') { claim(sv); return R(true, 'verified', 'the safehouse at ' + hut.x + ',' + hut.z + ' stands intact - registry record verified') }
+
+  // BAD, and SEEN to be bad. Patch in place; the bank is never opened by this path.
+  say('my safehouse has ' + sv.bad + ' block(s) missing - patching it before anything else')
+  let home = null
+  try { home = await maintainHome(bot, { x: hut.x, y: hut.y, z: hut.z }, { isStopped, say }) } catch (e) { return R(false, 'failed', 'safehouse repair failed (' + e.message + ')') }
+  // RE-READ. The repair's own return value is not evidence that a hut stands (§3.1).
+  const after = survey()
+  if (after.verdict === 'OK') { claim(after); return R(true, 'repaired', 'patched the safehouse at ' + hut.x + ',' + hut.z + ' - ' + sv.bad + ' cell(s) off, now clean') }
+  if (after.verdict === 'UNKNOWN') return R(false, 'failed', 'lost sight of the safehouse mid-repair - claiming nothing')
+  return R(false, 'partial', 'patched what I could at ' + hut.x + ',' + hut.z + ' but ' + after.bad + ' cell(s) are still off' + (home && home.damaged ? '' : ' (nothing was placed - out of materials?)'))
+}
+
 async function maintainHome (bot, hutAt, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const say = opts.say || (() => {})
@@ -1484,7 +1548,7 @@ async function worldTidy (bot, opts = {}) {
 
 module.exports = {
   setDebugSink, insideHutBox,
-  insideHutBox, ownHutAt, onHutApron, insideOwnStructure, hasSolidCeiling, hutAnchor, hutReader, stepOffApron, ensureHutApron, healHomeCrater, ensureHutBed, bedInPack, bedCandidates, acquireBed, placeBedNear, bedFootprint, bedUsable, assertSpawnOn, ensureBedSite, upgradeBedPlacement, freeInteriorCell, findHutDoorway, hutFreeCells, furnitureInHut, stationInHut, stationSlot, loadHutSchem, reconcileInfra, cleanupHutInterior, repairHutStructure, recallAndReach, maintainHut, maintainHome,
+  insideHutBox, ownHutAt, onHutApron, insideOwnStructure, hasSolidCeiling, hutAnchor, hutReader, ensureHomeShelter, stepOffApron, ensureHutApron, healHomeCrater, ensureHutBed, bedInPack, bedCandidates, acquireBed, placeBedNear, bedFootprint, bedUsable, assertSpawnOn, ensureBedSite, upgradeBedPlacement, freeInteriorCell, findHutDoorway, hutFreeCells, furnitureInHut, stationInHut, stationSlot, loadHutSchem, reconcileInfra, cleanupHutInterior, repairHutStructure, recallAndReach, maintainHut, maintainHome,
   secureBase, secureBaseGate: hutModel.secureBaseGate,
   sealHomeDescents, sealDescentsGate: hutModel.sealDescentsGate,
   worldTidy, litterSignature: hutModel.litterSignature

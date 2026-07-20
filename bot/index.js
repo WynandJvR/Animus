@@ -1088,7 +1088,11 @@ if (SCHED_ON) {
           if (provision.isMaintaining && provision.isMaintaining()) return
           schedDeferNoted = ''
           await runJob('maintenancePass', async () => {
-            const r = await provision.maintenancePass(bot, { say: schedSay, nightIndoorOnly: night })
+            // #117 HOME_IS_A_NEED: the chooser's bootstrap verdict is HANDED TO the executor, so
+            // 'spawn'/'shelter' reach their producers (ensureSpawnBed / ensureHomeShelter) instead
+            // of being computed, logged and dropped. Both pickJob and the DYNAMIC_CORE adapter
+            // already carry `bootstrap` on the pick - nothing downstream had ever read it.
+            const r = await provision.maintenancePass(bot, { say: schedSay, nightIndoorOnly: night, bootstrap: pick.bootstrap || null })
             const worked = !!(r && r.steps && r.steps.length && !/^bail/.test(r.reason || ''))
             schedMaintainCooldownUntil = Date.now() + (worked ? 600000 : 300000) // 10 min after a real pass, 5 min after a no-op/bail
             return r && r.steps && r.steps.length ? r.steps.join('+') : (r && r.reason) || 'nothing due'

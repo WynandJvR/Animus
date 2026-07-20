@@ -517,6 +517,7 @@ function rememberBed (pos, meta = {}) {
   m.bed = { x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z), at: Date.now(), confirmed }
   m.bedAssertAt = Date.now()
   if (confirmed) delete m.spawnSuspect
+  delete m.bedUnobtainable // #117: a bed record exists, so "no bed obtainable" is disproven outright
   saveWorldMem()
   _bedHold = { until: 0, key: '' }
 }
@@ -548,6 +549,30 @@ function bedHeld (pos, now = Date.now()) { return !!pos && _bedHold.key === bedK
 // by rememberBed (every real spawn-setting action goes through it).
 function setSpawnSuspect (v) { const m = loadWorldMem(); if (v) m.spawnSuspect = Date.now(); else delete m.spawnSuspect; saveWorldMem() }
 function isSpawnSuspect () { return !!loadWorldMem().spawnSuspect }
+
+// #117 HOME_IS_A_NEED - "acquireBed exhausted its plan, IN THIS LIFE". An OBSERVATION with a
+// scope, not a cooldown: a bot on a wool-less, sheep-less island must be able to stop wanting a
+// bed long enough to armor up and get on with the build, and it must start wanting one again the
+// moment the situation can have changed - never merely because N minutes elapsed. The scope is
+// the pathfix life EPOCH, so the record dies with the bot that made it (a respawn puts the body
+// somewhere else entirely, usually near world spawn, where the holdings question is genuinely
+// open again), and it is cleared outright the instant a bed IS obtained.
+function noteBedUnobtainable () { const m = loadWorldMem(); m.bedUnobtainable = { epoch: _epochNow(), at: Date.now() }; saveWorldMem() }
+function clearBedUnobtainable () { const m = loadWorldMem(); if (m.bedUnobtainable) { delete m.bedUnobtainable; saveWorldMem() } }
+function bedUnobtainable () { const r = loadWorldMem().bedUnobtainable; return !!(r && r.epoch === _epochNow()) }
+
+// #117 - does a hut record stand VERIFIED in this life? Pure in-memory (no world reads, no
+// chunk access): it reads the v2 provenance stamps rememberInfra/insideOwnStructure write.
+// listInfra cannot upgrade a hut on observation the way it does a chest - INFRA_BLOCK has no
+// 'hut' entry because a hut is a 136-cell structure, not one block - so the ONLY writers of a
+// verified hut are the post-build survey (commands.js) and the grounded occupancy spot-check
+// (provision-hut.insideOwnStructure). A registry box nobody has seen this life reads false,
+// which is exactly the phantom-hut condition the 'shelter' verdict exists to clear.
+function hutVerifiedNow () {
+  const list = ((loadWorldMem().infra || {}).hut) || []
+  const now = _epochNow()
+  return list.some(e => e && e.verified === true && e.epoch === now)
+}
 
 // ---- HAZARD MEMORY (#112 HAZARD_NOT_LURE) -------------------------------------------
 // WHAT THE WORLD DOES TO THE BOT, kept apart from WHAT THE BOT WANTS FROM THE WORLD.
@@ -654,6 +679,7 @@ module.exports = {
   gearupState, gearupResult, gearupShouldArmBackoff, proactiveGearupGate,
   rememberBed, knownBed, forgetBed, markBedUnusable, bedHeld, bedHoldUntil,
   setSpawnSuspect, isSpawnSuspect,
+  noteBedUnobtainable, clearBedUnobtainable, bedUnobtainable, hutVerifiedNow, // #117 HOME_IS_A_NEED
   recordHazard, hazardAt, listHazards, markTraversed, hazardsSeeded, markHazardsSeeded, // #112 HAZARD_NOT_LURE
   setOperatorRouting, operatorRouting,
   WORLD_MEM_FILE
