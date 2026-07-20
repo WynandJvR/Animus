@@ -310,6 +310,60 @@ function bootstrapNeed (snapshot) {
   return null
 }
 
+// ==== #114 ONE_READINESS - THE single build-readiness predicate ===========================
+// Root G (design-docs/DESIGN-grounded-truth-and-home-first.md §3.7). "Can the build run?" used to
+// be answered TWICE by two predicates that never met: the chooser's feasibility term
+// (scheduler-core.js, which consulted NO readiness at all and labelled its pick "infra is in
+// order") and the executor's inline gate (commands.js resumeBuild). They drifted the day they were
+// written, and on 2026-07-19 16:02-16:06 the drift stood the bot still: the chooser picked the
+// build six times in 76s ("infra is in order") while the executor refused it every time
+// ("bootstrap needed (food)"), and the refusal - already a structured return value - was dropped.
+// Nothing ran until the 90s watchdog re-armed the tick.
+//
+// This function IS the gate. The executor's inline block is DELETED; the chooser's feasibility
+// term and reason string are DERIVED from here. Same function object for both consumers, so
+// divergence is unrepresentable rather than merely discouraged.
+//
+// PURE: snapshot in, verdict out. No clock, no bot handle, no world read (it runs on the hot
+// scheduler path - [[body-first-priority]]). Everything time-shaped is supplied BY THE CALLER on
+// the snapshot (recentDeathCells is already windowed; recoveryReady may be supplied by the
+// executor, which can afford the impure live re-check the pure term cannot).
+//
+// Snapshot fields consumed: postDeathRecovery, recoveryReady (optional bool override), hutExists,
+// persistedBuild, buildSite, recentDeathCells - plus everything bootstrapNeed reads.
+// Returns { ok, why, need, exempt } where `need` names the WORK that would clear the refusal
+// ('food'|'armor'|'base'|'recovery'|null) - that is what lets the chooser pick the enabling job
+// INSTEAD of idling (need-inheritance, scheduler-core.js).
+function buildReady (snapshot) {
+  const s = snapshot || {}
+  // (1) #41 P0.1 - after a death, RECOVERY owns the bot and OUTRANKS build-resume. The build waits,
+  //     kept on disk, never driving the naked bot back into the death cell.
+  if (s.postDeathRecovery) {
+    const ready = typeof s.recoveryReady === 'boolean' ? s.recoveryReady : recoveryReady(s).ready
+    if (resumeGate({ postDeathRecovery: true, ready }) === 'wait') {
+      return { ok: false, why: 'post-death recovery in progress', need: 'recovery', exempt: false }
+    }
+  }
+  // (2) #65 BOOTSTRAP_PRIORITY - establish the MISSING survival infra (food reserve / armor / lit
+  //     base) before resuming, with #102 CAMP_FIRST's exemption: while NO hut stands, the build's
+  //     own CAMP steps ARE the missing infra, so the job is let through to establish shelter.
+  if (process.env.BOOTSTRAP_PRIORITY !== '0') {
+    const bn = bootstrapNeed(s)
+    const noHut = process.env.CAMP_FIRST !== '0' && !s.hutExists
+    if (bn && !noHut) return { ok: false, why: 'bootstrap needed (' + bn + ')', need: bn, exempt: false }
+    if (bn && noHut) return { ok: true, why: 'bootstrap ' + bn + ' pending but NO HUT stands - the camp step establishes shelter first (#102)', need: null, exempt: true }
+  }
+  // (3) #41 P5c anti-spiral - during a death SPIRAL don't march the build back into a recent death
+  //     cluster. recentDeathCells is the caller's already-windowed list (this fn holds no clock).
+  if (process.env.RESILIENT_RECOVERY !== '0' && s.persistedBuild && s.buildSite) {
+    const cells = Array.isArray(s.recentDeathCells) ? s.recentDeathCells : []
+    if (cells.length >= Number(process.env.SPIRAL_N || 3) && withinDeathZone(s.buildSite, cells)) {
+      return { ok: false, why: 'death spiral + the build site sits in a recent death cluster', need: 'recovery', exempt: false }
+    }
+  }
+  return { ok: true, why: 'survival infra in order', need: null, exempt: false }
+}
+
 // ---- pickJob ----------------------------------------------------------------------------
 // The single owning-job selector (I3, §3.2, §5 entry). null => idle. `preempt` is true only
 // when there IS an active victim whose class rank the returned job exceeds (the S4 dispatcher
@@ -774,6 +828,7 @@ function graveCooldownMs (result, { remainMs, flagOn, hotMs, blanketMs } = {}) {
 module.exports = {
   pickJob,
   bootstrapNeed,
+  buildReady,
   ironKeystoneActive,
   oppMaintain,
   graveCooldownMs,

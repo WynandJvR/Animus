@@ -2935,50 +2935,29 @@ async function resumeBuild (bot) {
     resumeJob = null; buildInterrupted = false; resumeDeaths = 0
     return null
   }
-  // #41 P0.1 (THE core inversion): after a death, RECOVERY owns the bot and OUTRANKS build-resume.
-  // While the post-death latch is set and recovery is not yet complete (recoveryReady, P4), the build
-  // WAITS - kept on disk, NEVER driving the naked bot back into the death cell (fixes RC-A). No
-  // building=true, no trek. recoveryReadyNow re-checks vitals/gear + clears the latch when ready.
-  if (isPostDeathRecovery()) {
-    let ready = true
-    try { ready = await provision.recoveryReadyNow(bot) } catch { ready = true }
-    let gate = 'proceed'
-    try { gate = require('./scheduler.js').resumeGate({ postDeathRecovery: isPostDeathRecovery(), ready }) } catch {}
-    if (gate === 'wait') { dbg('resume: post-death recovery in progress - holding the build (kept on disk)'); return { deferred: true, recovering: true } }
-  }
-  // #65 BOOTSTRAP_PRIORITY (Phase 1 DYNAMIC_CORE): before resuming the build, establish the MISSING
-  // survival infrastructure (armor / food reserve / lit base) in a healthy window. While bootstrapNeed
-  // is non-null the build WAITS - kept on disk, never driving the naked bot back to the site - and the
-  // scheduler tick's bootstrap-tier maintenancePass does the establishing (mines iron for armor, banks a
-  // bread reserve, lights the base). Below crisis-survival (bootstrapNeed only fires hp>=14 & fed, and
-  // the post-death gate above already owns any post-death recovery), so it can't mask a crisis. Once the
-  // infra exists bootstrapNeed goes null and the build resumes exactly as today. BOOTSTRAP_PRIORITY=0 ->
-  // bootstrapNeed is always null -> byte-for-byte.
-  if (process.env.BOOTSTRAP_PRIORITY !== '0') {
-    let bn = null
-    try { bn = require('./scheduler.js').bootstrapNeed(await provision.schedulerState(bot)) } catch {}
-    // #102 CAMP_FIRST (default on): while NO hut exists, the build's own CAMP steps (hut/bed/bank)
-    // ARE the missing survival infra - holding the build on 'armor' held the SHELTER hostage to the
-    // iron grind (live 12:04Z: fresh land, half-built hut, bootstrap ran off to mine). Let the job
-    // through to run its camp; once the hut anchor registers, this hold re-applies before the
-    // castle placement phase exactly as designed. =0 -> hold on any bootstrap need as before.
-    const noHut = process.env.CAMP_FIRST !== '0' && !(provision.hutAnchor && provision.hutAnchor())
-    if (bn && !noHut) { dbg('resume: bootstrap needed (' + bn + ') - holding the build until survival infra exists (kept on disk)'); return { deferred: true, bootstrap: bn } }
-    if (bn && noHut) dbg('resume: bootstrap ' + bn + ' pending but NO HUT stands - resuming the build so its camp step establishes shelter first (#102)')
-  }
-  // #41 P5c anti-spiral: during a death SPIRAL, don't march the build back into a recent death
-  // cluster (defer that leg; the build stays saved). Only fires under a real spiral (>=SPIRAL_N
-  // deaths in 20 min) AND when the site itself sits inside the cluster. RESILIENT_RECOVERY=0 -> off.
-  if (process.env.RESILIENT_RECOVERY !== '0' && resumeJob) {
-    try {
-      const S = require('./scheduler.js')
-      const now = Date.now()
-      const recent = grave.ledger().filter(d => d && now - (d.at || 0) < 20 * 60000)
-      if (recent.length >= Number(process.env.SPIRAL_N || 3) && S.withinDeathZone(resumeJob.at, recent.map(d => ({ x: d.x, z: d.z })))) {
-        dbg('resume: death spiral + build site in a recent death cluster - holding the build (kept on disk)')
-        return { deferred: true, recovering: true }
-      }
-    } catch {}
+  // #114 ONE_READINESS (design §3.7): the build's precondition is ONE predicate - scheduler.buildReady
+  // - consulted by the CHOOSER as its feasibility term and enforced HERE as the gate. The three
+  // inline gates that used to live at this spot (#41 P0.1 post-death wait, #65 BOOTSTRAP_PRIORITY
+  // hold with #102 CAMP_FIRST's noHut exemption, #41 P5c anti-spiral defer) are DELETED - they were a
+  // SECOND readiness model that the chooser knew nothing about, and the disagreement stood the bot
+  // still: 2026-07-19 16:02-16:06, six "(core) chose build/idle: ... infra is in order" picks in 76s
+  // against six "resume: bootstrap needed (food)" refusals, nothing running until the 90s watchdog.
+  // The refusal is returned WITH its reason and need so the tick can re-select on it in the same tick.
+  {
+    let s = null
+    try { s = await provision.schedulerState(bot) } catch {}
+    // ONE extra input the executor can afford and the pure snapshot cannot: the live post-death
+    // re-check (RECOVERY_MAX_MS ceiling, stuck-release, latch clearing). It can only release EARLIER
+    // than the pure recoveryReady term, never later - so the executor is never STRICTER than the
+    // chooser, which is the direction that could reproduce the standoff.
+    if (s && s.postDeathRecovery) { try { s.recoveryReady = await provision.recoveryReadyNow(bot) } catch { s.recoveryReady = true } }
+    let r = null
+    try { r = require('./scheduler.js').buildReady(s) } catch {}
+    if (r && !r.ok) {
+      dbg('resume: ' + r.why + ' - holding the build (kept on disk)')
+      return { deferred: true, why: r.why, need: r.need, bootstrap: r.need === 'recovery' ? undefined : r.need, recovering: r.need === 'recovery' }
+    }
+    if (r && r.exempt) dbg('resume: ' + r.why)
   }
   // Wait until the OLD loop is FULLY out: its settle-handler sets building=false and
   // consumes buildInterrupted in one synchronous block, so building===false proves the

@@ -30,7 +30,9 @@
 // duplicated on purpose so this migration touches scheduler.js not at all, keeping the flag-OFF suite
 // byte-for-byte.
 //
-// chooseActivity(snapshot, opts) -> { job, cls, reason, score, preempt, bootstrap }
+// chooseActivity(snapshot, opts) -> { job, cls, reason, score, preempt, bootstrap[, standoff, refusals] }
+//   opts.refused: (#114) a Map of candidate key -> why, for candidates whose EXECUTOR already declined
+//            THIS tick; they score out and the tick re-selects. All-refused => standoff:true + refusals.
 //   job    : an EXISTING dispatchable job name the S4 tick already knows how to run -
 //            recoveryLadder | graveSweep | secureFood | recoverHp | nightShelter | maintenancePass
 //            | 'flee' (reflex-owned, the tick no-ops it exactly as pickJob does) | null (build/idle
@@ -65,6 +67,12 @@ const W_RISK_MAINT = 0.15
 const PROGRESS_BONUS = 0.15
 const PROGRESS_BONUS_WINDOW_MS = 60000
 const CRISIS_SCORE = 1000 // a survival guard's sentinel score - it hard-dominates every utility candidate
+// #114 ONE_READINESS: the score of a candidate whose precondition says NO (buildReady) or whose
+// executor already declined THIS tick. A sentinel, not a weight: it must sit strictly below every
+// real candidate (which can go mildly negative under a full risk dock) so an infeasible job can
+// never win on arithmetic - but the candidate stays in the list so an all-refused tick still has
+// something honest to settle on and name.
+const REFUSED_SCORE = -1000
 
 // ---- grave / flee helpers (tiny duplicates of scheduler.js internals; see header) --------
 function graveUrgent (g) { return !!g && (g.tier === 'urgent' || g.tier === 'critical') }
@@ -194,6 +202,12 @@ function chooseActivity (snapshot, opts) {
   // pick the max. This is the layer that replaces the fixed FOOD/FARM/bootstrap ORDER with reasoning.
   const cands = []
 
+  // #114 ONE_READINESS: the build's precondition, evaluated ONCE per tick by the SAME function the
+  // executor enforces (scheduler.buildReady). This is the chooser's feasibility term for the build
+  // candidate AND the source of its reason string - the old hardcoded "infra is in order" label was
+  // a claim nothing had checked, and it disagreed with the executor for 90s at a time.
+  const br = scheduler.buildReady(s)
+
   // (B1) NIGHT SHELTER / go-home - EMERGES from dusk-proximity x exposure (never a per-path gate).
   //      Far + naked + dusk => this dominates; home + armored + noon => it never even appears.
   const dusk = duskProximity(s)
@@ -208,6 +222,13 @@ function chooseActivity (snapshot, opts) {
   //      window. REUSES scheduler.bootstrapNeed's verdict (which already encodes the food-reserve >
   //      armor > base priority the operator tuned) + the iron-keystone hold, so the WHAT is unchanged;
   //      the core only changes WHEN (it can now lose to a more urgent shelter, or to an active build).
+  // The build's OWN score (pre-feasibility) is computed first so an infeasible build can hand its
+  // motivation to the work that would make it feasible (need-inheritance, below).
+  const activeProgress = activeCls === 'progress'
+  const base = activeProgress ? W_CONTINUE : ((s.persistedBuild || s.brainJobPending) ? W_RESUME : W_IDLE)
+  const buildCls = (activeProgress || s.persistedBuild || s.brainJobPending) ? 'progress' : 'idle'
+  const buildWant = base - W_RISK_BUILD * riskLevel(s)
+
   let bn = scheduler.bootstrapNeed(s)
   let keystone = false
   if (!bn && s.persistedBuild && scheduler.ironKeystoneActive(s)) { bn = 'armor'; keystone = true }
@@ -216,25 +237,51 @@ function chooseActivity (snapshot, opts) {
     // urgency by kind: armor is the biggest survivability multiplier; food-reserve the enabler; base
     // spawn-proofing next; a plain buffer top-up lowest.
     const urgency = bn === 'armor' ? 0.9 : bn === 'food' ? 0.7 : bn === 'base' ? 0.5 : 0.4
-    // feasibility: armor needs no home (armorup mines its own iron), the home-infra needs a reachable
-    // home (else the go-home/recovery flow owns the bot - never block the build on an unreachable bank).
-    const feas = bn === 'armor' ? 1 : (s.homeReachable ? 1 : 0)
-    const score = W_SECURE * urgency * feas - W_RISK_MAINT * riskLevel(s) - footprintCost('maintenancePass', s)
+    // feasibility: armor needs no home (armorup mines its own iron); the home-infra normally wants a
+    // reachable home, because that dock exists for ONE reason - to yield the body to the build rather
+    // than livelock on an unreachable bank (see the original comment). #114: it may not yield to a
+    // build that is ITSELF refusing. On 2026-07-19 16:04 (home 140b) this filter vetoed the food work
+    // while the executor vetoed the build on that very food need - a three-way standoff in which each
+    // side blocked the other's remedy and the body did nothing for 90s at a stretch. The dock is now
+    // CONDITIONED on the build actually being an available alternative: no alternative, no dock.
+    const feas = bn === 'armor' ? 1 : ((s.homeReachable || !br.ok) ? 1 : 0)
+    const yielded = !feas
+    let score = W_SECURE * urgency * feas - W_RISK_MAINT * riskLevel(s) - footprintCost('maintenancePass', s)
+    // NEED-INHERITANCE (§3.7): when the build is blocked ON THIS WORK, the work inherits the build's
+    // motivation - the tick picks the enabling job INSTEAD of the build, this tick, rather than
+    // selecting a job that will refuse and idling to the watchdog.
+    const inherits = !br.ok && br.need != null && br.need === bn
+    if (inherits && score < buildWant) score = buildWant
     const label = bn ? ('bootstrap ' + bn + (keystone ? ' (iron keystone)' : '')) : 'topping up low buffers'
     cands.push({ job: 'maintenancePass', cls: 'maintain', key: 'maintenancePass', order: 1, score, bootstrap: bn || undefined,
-      reason: label + (feas ? '' : ' [home unreachable - deferring]') + ' - establishing survival infra before the build' })
+      reason: label + (yielded ? ' [home unreachable - deferring]' : '') + (inherits ? ' [the build is waiting on exactly this]' : '') + ' - establishing survival infra before the build' })
   }
 
   // (B3) BUILD / IDLE proceeds (null job). The baseline progress candidate, DOCKED live risk so an
   //      exposed bot never "just keeps building" - that dock is what pulls it home instead. When a
   //      progress job is already running it carries the single-goal-discipline continue weight.
-  const activeProgress = activeCls === 'progress'
-  const base = activeProgress ? W_CONTINUE : ((s.persistedBuild || s.brainJobPending) ? W_RESUME : W_IDLE)
-  const buildCls = (activeProgress || s.persistedBuild || s.brainJobPending) ? 'progress' : 'idle'
-  const buildScore = base - W_RISK_BUILD * riskLevel(s)
-  cands.push({ job: null, cls: buildCls, key: 'build', order: 2, score: buildScore,
-    reason: activeProgress ? 'continuing the active build (single-goal, safe window)'
-      : (s.persistedBuild ? 'resuming the saved build - infra is in order' : (s.brainJobPending ? 'starting the queued brain job' : 'idle - nothing pressing')) })
+  //      #114: gated by buildReady - the SAME predicate the executor enforces. An unready build sinks
+  //      to REFUSED_SCORE so it can never out-score real work, but the candidate STAYS in the list so
+  //      an all-refused tick still settles on an honest, greppable pick instead of spinning.
+  cands.push({ job: null, cls: buildCls, key: 'build', order: 2, score: br.ok ? buildWant : REFUSED_SCORE,
+    reason: !br.ok ? ('build not ready: ' + br.why + (br.need ? ' (needs ' + br.need + ')' : ''))
+      : (activeProgress ? 'continuing the active build (single-goal, safe window)'
+        : (s.persistedBuild ? 'resuming the saved build - ' + br.why : (s.brainJobPending ? 'starting the queued brain job' : 'idle - nothing pressing'))) })
+
+  // REFUSAL FEEDBACK (§3.7): a candidate whose EXECUTOR declined earlier in THIS tick is scored
+  // REFUSED_SCORE with its own stated reason, so the re-selection picks something else immediately
+  // instead of the tick idling to the 90s watchdog. `refused` is caller-owned and MONOTONE within a
+  // tick (a key is added, never removed), which is what bounds the re-selection: at most one pass per
+  // candidate. Condition-scoped, not time-scoped - the map is rebuilt from scratch each tick, so the
+  // moment the refusal's condition stops holding the candidate is live again ([[no-blanket-time-holds]]).
+  const refused = o.refused instanceof Map ? o.refused : null
+  if (refused && refused.size) {
+    for (const c of cands) {
+      if (!refused.has(c.key)) continue
+      c.score = REFUSED_SCORE
+      c.reason = 'refused this tick: ' + refused.get(c.key)
+    }
+  }
 
   // ---- HYSTERESIS: bonus the active job WHILE it is making verified progress (no clock read) -------
   // progressing is a comparison of two CALLER-provided timestamps - the pure fn holds no clock. This
@@ -250,11 +297,49 @@ function chooseActivity (snapshot, opts) {
   cands.sort((a, b) => (b.effective - a.effective) || (classRank(b.cls) - classRank(a.cls)) || (a.order - b.order))
   const best = cands[0]
   const bonused = progressing && best.key === activeKey
-  return mk(best.job, best.cls, best.reason + (bonused ? ' [holding - making progress]' : ''), best.effective, best.bootstrap ? { bootstrap: best.bootstrap } : null)
+  // STANDOFF (§3.7): every live candidate said no. The tick settles on the best-available one
+  // DELIBERATELY and says so - a greppable invariant violation naming both sides, instead of the
+  // silent "chose build/idle" x6 that preceded 90s of standing still. `standoff` is data on the
+  // verdict, so the caller can stop re-selecting on a condition rather than on a timer.
+  const standoff = best.score <= REFUSED_SCORE
+  const extra = Object.assign({}, best.bootstrap ? { bootstrap: best.bootstrap } : null, standoff ? { standoff: true, refusals: cands.filter(c => c.score <= REFUSED_SCORE).map(c => c.key + ': ' + c.reason) } : null)
+  const reason = (standoff ? 'standoff - every candidate refused; settling on ' + (best.job || 'build/idle') + ': ' : '') +
+    best.reason + (bonused ? ' [holding - making progress]' : '')
+  return mk(best.job, best.cls, reason, best.effective, Object.keys(extra).length ? extra : null)
+}
+
+// ---- selectWithRefusals ------------------------------------------------------------------
+// #114 ONE_READINESS - REFUSAL FEEDS BACK IN-TICK (design §3.7). PURE (no clock, no bot, no I/O):
+// the caller supplies `refusalOf(verdict, snapshot) -> { key, why } | null`, a CHEAP precondition
+// probe for the chosen candidate. A refusal re-enters selection IMMEDIATELY with that candidate
+// scored out, so the tick picks the enabling work instead of committing to a job its own executor
+// will decline and then standing still until the 90s watchdog (the 2026-07-19 16:02-16:06 defect).
+//
+// BOUNDED BY CONDITION, NEVER BY A TIMER ([[no-blanket-time-holds]]): `refused` only GROWS, and a
+// key already present is never re-added, so each candidate refuses at most ONCE and the loop runs
+// at most MAX_RESELECT times before settling on the honest best-available pick (which chooseActivity
+// labels `standoff:` and names the refusals of). The map is per-CALL - it is discarded when the tick
+// ends, so nothing is held past the condition that caused it; the next tick starts clean.
+const MAX_RESELECT = 4 // one pass per candidate key: nightShelter | maintenancePass | build (+ slack)
+function selectWithRefusals (snapshot, opts, refusalOf, onRefuse) {
+  const o = opts || {}
+  const refused = new Map()
+  let c = chooseActivity(snapshot, Object.assign({}, o, { refused }))
+  for (let i = 0; i < MAX_RESELECT; i++) {
+    let rf = null
+    try { rf = refusalOf ? refusalOf(c, snapshot) : null } catch { rf = null }
+    if (!rf || !rf.key || refused.has(rf.key)) break // no refusal, or this candidate already had its one turn
+    refused.set(rf.key, rf.why || 'declined')
+    if (onRefuse) { try { onRefuse(c, rf) } catch {} }
+    c = chooseActivity(snapshot, Object.assign({}, o, { refused }))
+  }
+  return c
 }
 
 module.exports = {
   chooseActivity,
+  selectWithRefusals,
+  MAX_RESELECT,
   // exported for offline testing / reuse
   duskProximity,
   shelterExposure,

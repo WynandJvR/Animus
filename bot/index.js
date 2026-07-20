@@ -1008,14 +1008,27 @@ if (SCHED_ON) {
   // caller (here) owns the clock - it passes Date.now() in so the pure fn never reads one itself. On a
   // build/idle verdict (job=null) it delegates to pickJob, whose survival tier the core has already
   // cleared, so pickJob returns exactly the same build/resume/brain/maintain/idle decision it would.
+  // #114 ONE_READINESS (design §3.7): the chooser's verdict, with the executor's refusal FED BACK
+  // IN-TICK. `buildRefusal` is the precondition probe - it asks scheduler.buildReady, the SAME
+  // function the chooser scores the build candidate with and the SAME one commands.js resumeBuild
+  // enforces, so a disagreement between the three is unrepresentable rather than merely unlikely.
+  // (That is why this probe is near-inert in practice; it exists so a FUTURE executor gate cannot
+  // recreate the standoff - the design's cross-check of item 12 against B2.) The bounded, condition-
+  // scoped re-selection loop itself lives in the PURE core (schedulerCore.selectWithRefusals).
+  const buildRefusal = (c, s) => {
+    if (!c || c.job != null) return null // only the build/idle candidate has a snapshot-derivable gate today
+    let r = null
+    try { r = scheduler.buildReady(s) } catch { return null }
+    return (r && !r.ok) ? { key: 'build', why: r.why + (r.need ? ' (needs ' + r.need + ')' : '') } : null
+  }
   const coreAdapter = (s) => {
     const aj = s.activeJob || null
-    const c = schedulerCore.chooseActivity(s, {
+    const c = schedulerCore.selectWithRefusals(s, {
       activeJob: aj && aj.name,
       activeCls: aj && aj.cls,
       lastProgressAt: aj && aj.lastProgressAt, // verified-progress timestamp (caller-provided; drives the anti-thrash bonus)
       now: Date.now()                          // caller's clock - the pure core compares timestamps, never reads a clock
-    })
+    }, buildRefusal, (cand, rf) => note('(core) ' + (cand.job || 'build/idle') + ' REFUSED: ' + rf.why + ' - re-selecting in this tick (no watchdog wait)'))
     note('(core) chose ' + (c.job || 'build/idle') + ': ' + c.reason)
     if (c.job == null) return scheduler.pickJob(s) // build-may-proceed -> today's non-survival tail (parity: the core already cleared the survival tier)
     return { job: c.job, cls: c.cls, reason: c.reason, preempt: !!c.preempt, bootstrap: c.bootstrap }

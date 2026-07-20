@@ -195,7 +195,28 @@ async function schedulerState (bot) {
   // activeJob: the running activity/survival-latch synthesis (S7: factored into activeJobInfo so the
   // snapshot and the 5s watchdog share ONE definition; lastProgressAt/blockedOn are now REAL data).
   try { s.activeJob = activeJobInfo() } catch { s.activeJob = null }
-  try { const commands = require('./commands.js'); s.persistedBuild = !!(commands.persistedResume && commands.persistedResume()) } catch { s.persistedBuild = false }
+  // #114 ONE_READINESS: the inputs scheduler.buildReady needs, so the CHOOSER can evaluate the
+  // build's precondition with the same data the EXECUTOR does (one predicate, one snapshot).
+  // All cheap: two in-memory reads that were already on this path (persistedResume, grave ledger)
+  // plus the hut-anchor read `home` above already performed. No world scan ([[body-first-priority]]).
+  try {
+    const commands = require('./commands.js')
+    const saved = commands.persistedResume && commands.persistedResume()
+    s.persistedBuild = !!saved
+    s.buildSite = (saved && saved.at) ? { x: saved.at.x, y: saved.at.y, z: saved.at.z } : null
+    s.postDeathRecovery = !!(commands.isPostDeathRecovery && commands.isPostDeathRecovery())
+  } catch { s.persistedBuild = false; s.buildSite = null; s.postDeathRecovery = false }
+  // recentDeathCells: the P5c spiral window, computed HERE (the caller owns the clock) so
+  // buildReady stays pure/clockless. Same 20-min window the old inline gate used.
+  try {
+    const now = Date.now()
+    s.recentDeathCells = require('./grave.js').ledger()
+      .filter(d => d && now - (d.at || 0) < 20 * 60000)
+      .map(d => ({ x: d.x, z: d.z }))
+  } catch { s.recentDeathCells = [] }
+  // hutExists: does a hut anchor stand in memory? (#102 CAMP_FIRST's noHut exemption reads this;
+  // bootstrapNeed's #103 clause already referenced the field but nothing ever set it.)
+  try { s.hutExists = !!hutAnchor() } catch { s.hutExists = false }
   // maintain.needs inputs.
   try { s.torches = countItem(bot, 'torch') } catch { s.torches = 0 }
   // tools booleans (S6): pick/sparePick via workingPickCount (>=1/>=2 usable picks); axe/sword
