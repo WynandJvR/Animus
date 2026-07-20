@@ -140,6 +140,9 @@ function trackTick (bot) {
   telemetry.setBot(bot) // vitals reference for the episode logger
   snapInventory(bot) // rolling carried-items snapshot - stamps death records (grave value)
   telemetry.trackPosition(bot, { isBusy, escaping })
+  // #112: the hazard release condition. Standing in a remembered kill-cell, alive and out of the
+  // medium, is the evidence that de-escalates it - the only way out, and never a clock.
+  try { provision.markHazardTraversal(bot) } catch {}
 }
 
 // Progress chatter from a long build/provision run calls bot.chat DIRECTLY (bypassing
@@ -859,7 +862,18 @@ async function collectNearbyDrops (bot, { radius = 8, max = 6, deadlineMs = 1200
 
 // ---- command dispatch ------------------------------------------------------
 
+// #112 HAZARD_NOT_LURE / anti-grief (§5): the HARD hazard exclusion governs AUTONOMOUS route
+// planning only. An operator-issued command must always be able to send the bot anywhere, so the
+// latch is held for the duration of one and the exclusion degrades to the old cost-only rung.
+// Counted, so a nested dispatch (an operator command that internally issues another) unwinds
+// correctly, and released in a `finally` so a thrown command cannot leave it stuck on.
 async function handle (bot, line, opts = {}) {
+  const operator = opts.source === 'operator'
+  if (operator) { try { provision.setOperatorRouting(true) } catch {} }
+  try { return await handleInner(bot, line, opts) } finally { if (operator) { try { provision.setOperatorRouting(false) } catch {} } }
+}
+
+async function handleInner (bot, line, opts = {}) {
   const parts = String(line).trim().split(/\s+/)
   const cmd = (parts[0] || '').toLowerCase()
   const a = parts.slice(1)
@@ -1226,6 +1240,13 @@ async function handle (bot, line, opts = {}) {
       if (!d) {
         const burned = grave.ledger().find(x => !x.retrieved && x.dangerous)
         if (burned) { burned.retrieved = true; persistDeath(); return `i died in lava/fire at ${burned.x},${burned.y},${burned.z} - my stuff burned up, not walking back into that` }
+        // #112: a grave DEFERRED by salvageVerdict is not junk and is not written off - the gear
+        // is still there and still ours, the way in is just lethal right now. Reporting honestly
+        // and leaving the row alone is the whole point: the old code fell straight through to the
+        // "nothing worth going back for" branch below and marked it retrieved, throwing away both
+        // the gear and the only reason the bot would ever come back once the pocket drained.
+        const held = grave.deferredGraves()[0]
+        if (held) { const v = grave.graveSalvage(held); return `my stuff is at ${held.x},${held.y},${held.z} but ${v.why} - leaving it there for now rather than dying for it again` }
         const junk = grave.ledger().find(x => !x.retrieved && !x.dangerous)
         if (junk) { junk.retrieved = true; persistDeath(); return `i died with nothing worth going back for - letting it go` }
         return "i haven't died recently - nothing to go get"

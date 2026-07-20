@@ -42,6 +42,7 @@
 
 const arbiter = require('./arbiter.js')      // one-way: the survival-need authority (no cycle: arbiter requires nobody here)
 const scheduler = require('./scheduler.js')  // one-way, READ-ONLY reuse: isDegraded/bootstrapNeed/ironKeystoneActive/needProducer/JOB_CLASSES
+const gravePolicy = require('./grave-policy.js') // one-way: PURE grave decisions (#112 salvageVerdict / net-of-risk scoring)
 
 // ---- tuning constants (the utility weights) ---------------------------------------------
 // Benefit tiers encode the operator's goal stack: survive > sustain > secure > build. They are
@@ -71,14 +72,21 @@ function graveReachBand (g, band, urgentBand) {
   if (process.env.GRAVE_URGENT === '0' || urgentBand == null || !graveUrgent(g)) return band
   return Math.max(band, urgentBand)
 }
-// The nearest worthwhile, non-dangerous grave within reach (dist is already min(bot,home)). Mirrors
-// scheduler.nearestReachGrave so pickJob and the core agree on "a near grave IS the survival move".
+// The best worthwhile, non-dangerous, SALVAGEABLE grave within reach (dist is already
+// min(bot,home)). Mirrors scheduler.nearestReachGrave so pickJob and the core agree on "a near
+// grave IS the survival move" - INCLUDING #112's two Root-E clauses, which matter more here than
+// anywhere: the line that killed the bot on 2026-07-19 was this function's caller printing
+// "(core) chose graveSweep: near grave 10b - free gear" over a pocket that had drowned it seven
+// minutes earlier. A grave whose salvageVerdict is go:false is not a candidate, and the pick is
+// by desire NET OF RISK rather than raw proximity.
 function nearestReachGrave (s, band, urgentBand) {
-  let best = null
+  let best = null; let bs = -Infinity
   for (const g of (Array.isArray(s.graves) ? s.graves : [])) {
     if (!g || g.dangerous || !(g.value > 0)) continue
+    if (gravePolicy.graveSalvageBlocked(g)) continue
     if (g.dist == null || g.dist > graveReachBand(g, band, urgentBand)) continue
-    if (!best || g.dist < best.dist) best = g
+    const sc = gravePolicy.graveScore(g)
+    if (sc > bs) { bs = sc; best = g }
   }
   return best
 }

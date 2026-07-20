@@ -52,7 +52,8 @@ const { loadWorldMem, saveWorldMem, ownInfraAnchors, rememberRoute, recallRoute,
   loadMines, rememberMine, recallMine, forgetMine, updateMineProgress,
   markSearched, isSearchedDry, clearSearched, gearupState, gearupResult,
   gearupShouldArmBackoff, proactiveGearupGate,
-  rememberBed, knownBed, forgetBed, markBedUnusable, bedHeld, setSpawnSuspect, isSpawnSuspect } = worldMemory
+  rememberBed, knownBed, forgetBed, markBedUnusable, bedHeld, setSpawnSuspect, isSpawnSuspect,
+  setOperatorRouting } = worldMemory // #112: the operator-routing latch is set by commands.handle through this facade
 const pocketEscape = require('./pocket-escape.js') // PURE pocket-breach geometry: plan a bounded dig out of a flooded, roofed pocket (water-wedge escape)
 const navProfile = require('./nav-profile.js') // PURE nav-terrain policy: wild-profile type whitelist, scope gate, per-position break exclusion (NAV Phase 1)
 const navLeg = require('./nav-leg.js') // PURE leg-planning core (NAV Phase B): Y-banded surface-trek leg goal (isEnd/heuristic) so A* can't ride a leg 45b down a cave to lava
@@ -144,27 +145,62 @@ function hazardStepExclusion (bot) {
   return (block) => { const p = block && block.position; return p ? navProfile.hazardExclusion(p, sample) : 0 }
 }
 
-// #85 DEATH_SPOT_COST (default on): recent unretrieved death spots become expensive to WALK NEAR -
-// same cost-only closure pattern as the crop/water exclusions, wrapping the PURE
-// gravePolicy.deathSpotCost over the death ledger's live last-24h entries. The y-window reaches 8
-// UP from the death cell so the surface directly over a cave death (where the bot falls in) is
-// priced too. DEATH_SPOT_COST=0 -> null (no exclusion), byte-for-byte.
+// #85 DEATH_SPOT_COST (default on): cells that keep killing the bot become expensive to WALK NEAR,
+// and - #112 HAZARD_NOT_LURE - the ones that have killed it repeatedly and never been survived
+// since become genuinely unwalkable.
+//
+// The SOURCE changed and that is the whole point: this used to read `grave.js.ledger()`, so the
+// bot's danger memory was a side effect of its loot bookkeeping. Retrieving a grave, a grave
+// despawning, or deleting last-death.json each silently erased it - and an empty ledger returned
+// null, making "no hazards known" and "hazard memory wiped" indistinguishable. It now reads
+// worldMemory hazards, which have their own lifetime and are released only by evidence.
+//
+// TWO RUNGS, both condition-gated:
+//   soft  - unchanged #85: cost 40 across the box (routes bend around).
+//   hard  - deaths >= 2 with no survived traversal since (gravePolicy.hazardHardArmed), AND only
+//           on cells that currently READ as the medium that killed the bot there. A cost of 40
+//           lost to job selection every time and raising the number would lose again; a forbid
+//           does not compete. It is a planner exclusion only: never a dig, never a world write.
+// ANTI-GRIEF (§5): the hard rung is for AUTONOMOUS planning. While an operator command is in
+// flight the closure degrades to cost-only, so an operator can always send the bot anywhere.
+// DEATH_SPOT_COST=0 -> null (no exclusion), byte-for-byte.
 function deathSpotExclusion (bot) {
   if (process.env.DEATH_SPOT_COST === '0') return null
-  let led = null
-  try { led = require('./grave.js').ledger() } catch { return null }
-  if (!led || !led.length) return null
-  const now = Date.now()
-  const spots = led.filter(d => d && d.x != null && !d.retrieved && now - (d.at || 0) < 24 * 3600 * 1000)
-  if (!spots.length) return null
+  const gravePolicy = require('./grave-policy.js')
+  let hz = null
+  try { hz = worldMemory.listHazards() } catch { return null }
+  if (!hz || !hz.length) return null
+  const autonomous = !worldMemory.operatorRouting()
+  const spots = hz.map(h => ({ x: h.x, y: h.y, z: h.z, cause: h.cause, hard: autonomous && gravePolicy.hazardHardArmed(h) }))
   const opts = {
     radius: Number(process.env.DEATH_SPOT_R || 4),
     up: Number(process.env.DEATH_SPOT_UP || 8),
     down: Number(process.env.DEATH_SPOT_DOWN || 2),
     cost: Number(process.env.DEATH_SPOT_COST_VAL || 40)
   }
-  const gravePolicy = require('./grave-policy.js')
-  return (block) => { const p = block && block.position; return p ? gravePolicy.deathSpotCost(p, spots, opts) : 0 }
+  return (block) => { const p = block && block.position; return p ? gravePolicy.hazardStepCost(p, block.name, spots, opts) : 0 }
+}
+
+// #112: the ONE release condition, wired. Called on the body's 1Hz tick (commands.trackTick).
+// A hazard record de-escalates only when the bot is PROVABLY standing in it, alive, and out of
+// the medium that killed it there - for the drowning pocket that means standing there dry, which
+// is the grounded probe that the water is no longer in the way. Cheap: a vitals read plus box
+// arithmetic over a short list, and it exits on the first line when nothing is remembered.
+function markHazardTraversal (bot) {
+  try {
+    if (!bot || !bot.entity || !(bot.health > 0)) return false
+    const hz = worldMemory.listHazards()
+    if (!hz.length) return false
+    const p = bot.entity.position
+    if (!worldMemory.hazardAt(p)) return false
+    // Out of the medium: not swimming/submerged, not in lava, feet on something. A pass-through
+    // WHILE drowning proves nothing (the bot survived the last one by luck and died the next).
+    if (bot.entity.isInWater || bot.entity.isInLava || (bot.oxygenLevel != null && bot.oxygenLevel < 20)) return false
+    const feet = bot.blockAt(p)
+    const head = bot.blockAt(p.offset(0, 1, 0))
+    if ((feet && /water|lava/.test(feet.name)) || (head && /water|lava/.test(head.name))) return false
+    return worldMemory.markTraversed(p)
+  } catch { return false }
 }
 
 // WATER_SAFE (task #45): the DEEP-water STEP exclusion closure - sibling of hazardStepExclusion,
@@ -4107,7 +4143,7 @@ const HUT_FURNITURE = /chest$|barrel$|furnace$|smoker$|crafting_table$|_bed$|_do
 // (chestCounts moved to provision-bank.js)
 
 module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, smeltFuelPlan, fuelBankWithdrawAmount, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, breachDryPocket, toolForBlock, migrateChestInto, consolidateBank, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, secureBase, secureBaseGate, sealHomeDescents, sealDescentsGate, worldTidy, litterSignature, inBuildZone, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, boundedHold, recoverFromDegraded, isRecoveringDegraded, deadlockResetDue, deadlockResetState, pickOpenSkyCell, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, markBedUnusable, bedHeld, gearupState, gearupResult, gearupShouldArmBackoff, proactiveGearupGate, ironGrindMinedReal, resetIronGrindMined, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, noteWaterCrossing, lonelyFurnace, consolidateFurnaces, litterPatrol, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, planTrekRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
-  maintenancePass, isMaintaining, stopMaintenance, _setMaintaining, courierFoodToBank, safekeepSweep, spareKitToBank, recoveryReadyNow, cropExclusionStep, cropPlaceExclusion, farmFootprintHas, hazardStepExclusion, waterStepExclusion, deathSpotExclusion, deepWaterUnderfoot, gatherSeedsNear,
+  maintenancePass, isMaintaining, stopMaintenance, _setMaintaining, courierFoodToBank, safekeepSweep, spareKitToBank, recoveryReadyNow, cropExclusionStep, cropPlaceExclusion, farmFootprintHas, hazardStepExclusion, waterStepExclusion, deathSpotExclusion, markHazardTraversal, setOperatorRouting, deepWaterUnderfoot, gatherSeedsNear,
   activeJobInfo, stopSurvivalJob, escalateFoodFloor, _foodFloorState,
   wildTerrainMovements, trekMovements, DIGGABLE_NATURAL, STRUCTURE_RE, canBreakNaturally,
   collectDrops, huntSpiderForString, ensureFishingRod, isBankStand,

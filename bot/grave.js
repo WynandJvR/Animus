@@ -22,7 +22,11 @@
 const fs = require('fs')
 const path = require('path')
 const telemetry = require('./telemetry.js') // one-way: progress touches + the active-op name
-const { graveValue, graveWorthIt, graveUrgency, graveCompare } = require('./grave-policy.js')
+const { graveValue, graveWorthIt, graveUrgency, graveCompare, salvageVerdict } = require('./grave-policy.js')
+// #112 HAZARD_NOT_LURE: hazard memory lives in world-memory.json, NOT in this file's ledger.
+// This module WRITES a hazard when it records a death and READS one to gate salvage - but it
+// never owns one, so retrieving a grave (or deleting last-death.json) cannot erase danger.
+const worldMemory = require('./world-memory.js')
 
 // death recovery: where we last died + whether it's dangerous to return to (lava/fire/
 // void). Set by the body's death handler; surfaced in /state so the BRAIN can decide
@@ -45,6 +49,28 @@ try {
   deathLedger = arr.filter(d => d && !d.retrieved && Date.now() - (d.at || 0) < 24 * 3600 * 1000)
   lastDeath = deathLedger[deathLedger.length - 1] || null
 } catch {}
+
+// ONE-TIME SEED of hazard memory from whatever ledger exists at first load, so shipping the
+// split does not blank the bot's #85 death-spot routing costs on deploy day. Seeds are marked
+// already-traversed: an old ledger row is evidence that a death happened there, NOT evidence
+// that the bot has since failed to get through, so it prices the box (soft, cost 40) without
+// arming the hard rung or deferring salvage. The first REAL death re-arms it properly.
+try {
+  if (!worldMemory.hazardsSeeded()) {
+    for (const d of deathLedger) {
+      const rec = worldMemory.recordHazard(d, d.cause || (d.dangerous ? 'lava' : 'unknown'))
+      if (rec) rec.traversedSinceDeath = true
+    }
+    worldMemory.markHazardsSeeded()
+  }
+} catch {}
+
+// The hazard verdict for one grave: may the bot survive the medium that killed it here, and
+// what is the loot worth net of that risk? Pure decision (grave-policy) over the hazard record
+// (world-memory) - this file only joins the two.
+function graveSalvage (d, caps) {
+  try { return salvageVerdict(d, worldMemory.hazardAt(d), caps) } catch { return { go: true, why: 'no hazard data', discount: 1 } }
+}
 
 // Live references for the call sites that scan/mark the ledger directly (the `recover`
 // command marks a grave retrieved, the degraded signature counts recent deaths). Returning
@@ -81,7 +107,11 @@ function snapInventory (bot) {
 // 14-death carousel). Builds handle death via markBuildInterrupted/resume; this covers the
 // op/brain-issued long ops.
 function recordDeath (info) {
-  info.items = (Date.now() - invSnap.at < 90000) ? { count: invSnap.count, notable: invSnap.notable.slice(0, 12), build: invSnap.build || 0 } : { count: 0, notable: [], build: 0 }
+  // #112: the hazard write happens FIRST and unconditionally - it is the half of this record
+  // that must outlive the loot. `info.cause` is classified by the death handler from grounded
+  // reads at the death cell (grave-policy.classifyDeathCause).
+  try { worldMemory.recordHazard(info, info.cause) } catch {}
+  info.items =(Date.now() - invSnap.at < 90000) ? { count: invSnap.count, notable: invSnap.notable.slice(0, 12), build: invSnap.build || 0 } : { count: 0, notable: [], build: 0 }
   invSnap = { count: 0, notable: [], at: 0 } // consumed - the NEXT death starts naked until a new snap
   telemetry.resetProgressAnchor() // S7 H1: the respawn teleport must re-anchor cleanly (a huge displacement is not progress)
   deathLedger.push(info)
@@ -98,12 +128,19 @@ function recordDeath (info) {
 // only a physical visit that confirms absence marks 'gone', or the 24h ledger expiry reaps them.)
 function bestGrave () {
   const now = Date.now()
-  const c = deathLedger.filter(d => !d.retrieved && !d.dangerous && graveWorthIt(d) && now - (d.at || 0) < 24 * 3600 * 1000 && graveUrgency(d, now).tier !== 'expired')
+  // #112: `graveSalvage(d).go` is the new clause - a grave in a medium the bot cannot survive is
+  // not a candidate at all. It is DEFERRED, not written off: the ledger keeps the row and the
+  // value, and the verdict flips as soon as the bot proves it can get through there alive.
+  const c = deathLedger.filter(d => !d.retrieved && !d.dangerous && graveWorthIt(d) && now - (d.at || 0) < 24 * 3600 * 1000 && graveUrgency(d, now).tier !== 'expired' && graveSalvage(d).go)
   c.sort((a, b) => graveCompare(a, b, now))
   return c[0] || null
 }
 
-function unretrievedGraves () { return deathLedger.filter(d => !d.retrieved && !d.dangerous && graveWorthIt(d)).length } // only graves actually worth a trip
+function unretrievedGraves () { return deathLedger.filter(d => !d.retrieved && !d.dangerous && graveWorthIt(d) && graveSalvage(d).go).length } // only graves actually worth a trip
+// The worthwhile-but-DEFERRED graves: still owned, still on the books, just behind a condition.
+// The `recover` command needs these so it reports honestly instead of falling through to the
+// "nothing worth going back for" branch and marking the row retrieved (which would throw the gear away).
+function deferredGraves () { return deathLedger.filter(d => !d.retrieved && !d.dangerous && graveWorthIt(d) && !graveSalvage(d).go) }
 
 // Is there a WORTHWHILE, reachable death-drop to go recover right now? The respawn handler
 // fires recovery on this BEFORE re-mining from scratch (gear-up-critical: it kept dropping
@@ -130,7 +167,10 @@ function gravesSnapshot ({ pos, home, now, ledger: injected } = {}) {
     const near = Math.min(dBot, dHome) // exact min(bot, home) of shouldChaseGrave; scheduler skips a null-dist grave
     const notable = (d.items && d.items.notable) || []
     const hasGear = notable.some(n => /^(iron|diamond|netherite|golden)_|_(helmet|chestplate|leggings|boots)$/.test(n)) // verbatim realGear regex from graveWorthIt
-    graves.push({ x: d.x, y: d.y, z: d.z, at: d.at || 0, dist: isFinite(near) ? near : null, value: graveValue(d), dangerous: !!d.dangerous, hasGear, remainMs: u.remainMs, tier: u.tier })
+    // #112: the row carries its SALVAGE VERDICT (go + discount). It is not dropped - the value
+    // stays visible and on the books - but the schedulers filter on `salvage.go` and score the
+    // grave NET of `salvage.discount` instead of pricing it as gross "free gear".
+    graves.push({ x: d.x, y: d.y, z: d.z, at: d.at || 0, dist: isFinite(near) ? near : null, value: graveValue(d), dangerous: !!d.dangerous, hasGear, remainMs: u.remainMs, tier: u.tier, salvage: graveSalvage(d) })
   }
   // deathsRecent: deaths in the last 20 min, REGARDLESS of retrieved (a reclaimed grave was still a
   // death - the ratchet signal). CAVEAT: the process-restart load above drops retrieved entries, so
@@ -140,4 +180,4 @@ function gravesSnapshot ({ pos, home, now, ledger: injected } = {}) {
   return { graves, deathsRecent }
 }
 
-module.exports = { persistDeath, snapInventory, recordDeath, bestGrave, unretrievedGraves, worthwhileGrave, gravesSnapshot, ledger, lastDeathInfo, DEATH_FILE }
+module.exports = { persistDeath, snapInventory, recordDeath, bestGrave, unretrievedGraves, worthwhileGrave, gravesSnapshot, ledger, lastDeathInfo, graveSalvage, deferredGraves, DEATH_FILE }

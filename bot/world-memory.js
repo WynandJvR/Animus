@@ -494,6 +494,98 @@ function bedHeld (pos, now = Date.now()) { return !!pos && _bedHold.key === bedK
 function setSpawnSuspect (v) { const m = loadWorldMem(); if (v) m.spawnSuspect = Date.now(); else delete m.spawnSuspect; saveWorldMem() }
 function isSpawnSuspect () { return !!loadWorldMem().spawnSuspect }
 
+// ---- HAZARD MEMORY (#112 HAZARD_NOT_LURE) -------------------------------------------
+// WHAT THE WORLD DOES TO THE BOT, kept apart from WHAT THE BOT WANTS FROM THE WORLD.
+//
+// The grave ledger (last-death.json) used to be BOTH: it drove `graveSweep` ("free gear")
+// AND it was the only source deathSpotExclusion had for "this cell kills me". Danger memory
+// was therefore created by loot, scoped to loot, retired with loot, and wiped with loot -
+// so the more lethal a place was the more gear it accumulated and the more attractive it
+// became. Live proof (2026-07-19): drowned at 429,52,-49 at 15:51, the scheduler chose
+// graveSweep "near grave 10b - free gear" at 15:58:31 with the death-spot cost ARMED, and
+// the bot drowned again at 427,51,-48 at 15:59:15. A soft routing cost of 40 loses to job
+// selection every time; and clearing last-death.json (twice that day, at the operator's
+// request) silently destroyed the bot's only memory of where it drowns.
+//
+// So hazards live HERE, in world-memory.json, with their own lifetime: retrieving a grave,
+// a grave despawning, or deleting last-death.json cannot touch them. An empty `hazards`
+// now truthfully means "no known hazards".
+//
+// LIFETIME IS CONDITION-GATED, NEVER TIMED. A record is created by a death and de-escalated
+// only by EVIDENCE: the bot standing in the cell, alive, and out of the medium that killed
+// it there (markTraversed). Nothing here expires on a clock. The timestamps in `deaths` are
+// for the operator's eyes and for the storage cap; no decision function reads them.
+const gravePolicy = require('./grave-policy.js') // PURE: the hazard box math + cause taxonomy
+// Deaths this close to an existing record are the SAME hazard (the two drownings above were
+// 2 apart in x, 1 in y, 1 in z - one pocket, one record, two deaths => escalation).
+const HAZARD_MERGE = { radius: 3, up: 3, down: 3 }
+const HAZARD_MAX = 64
+function hazardList () { const m = loadWorldMem(); return (m.hazards = m.hazards || []) }
+// The record whose EXCLUSION box (the deathSpotCost box) contains pos, or null. Point query.
+function hazardAt (pos, opts) {
+  if (!pos) return null
+  for (const h of hazardList()) if (gravePolicy.hazardBoxHas(pos, h, opts)) return h
+  return null
+}
+function listHazards () { return hazardList().slice() }
+// A death happened here. Merges into the nearby record if one exists (deaths++), and RE-ARMS
+// escalation: a fresh death means the last "i walked through it fine" no longer proves anything.
+function recordHazard (pos, cause) {
+  try {
+    if (!pos || pos.x == null) return null
+    const list = hazardList()
+    const c = cause || 'unknown'
+    let rec = null
+    for (const h of list) if (gravePolicy.hazardBoxHas(pos, h, HAZARD_MERGE)) { rec = h; break }
+    if (!rec) { rec = { x: Math.floor(pos.x), y: Math.floor(pos.y), z: Math.floor(pos.z), cause: c, deaths: [] }; list.push(rec) }
+    rec.cause = c // the LATEST cause owns the record: it is what the bot must survive to come back
+    rec.deaths.push(Date.now())
+    if (rec.deaths.length > 12) rec.deaths.splice(0, rec.deaths.length - 12)
+    rec.traversedSinceDeath = false
+    // storage cap only (NOT a decision): keep the records with the most deaths, then the freshest.
+    if (list.length > HAZARD_MAX) {
+      list.sort((a, b) => (b.deaths.length - a.deaths.length) || ((b.deaths[b.deaths.length - 1] || 0) - (a.deaths[a.deaths.length - 1] || 0)))
+      list.length = HAZARD_MAX
+    }
+    saveWorldMem()
+    dbg('hazard: recorded ' + c + ' death at ' + rec.x + ',' + rec.y + ',' + rec.z + ' (' + rec.deaths.length + ' here)')
+    return rec
+  } catch (e) { dbg('hazard: record failed - ' + e.message); return null }
+}
+// THE RELEASE CONDITION (the only one). The bot stood in the cell, alive, and NOT in the
+// medium that killed it - so the medium is survivable/gone right now. This is both design
+// releases at once ("survived traversal" and "cause neutralised"): for a drowning pocket,
+// standing there dry IS the grounded probe that the water is no longer in the way.
+// Callers must only pass a position the bot is genuinely occupying, having verified it is
+// out of the medium (see provision.markHazardTraversal - the one wired caller).
+function markTraversed (pos) {
+  if (!pos) return false
+  let changed = false
+  for (const h of hazardList()) {
+    if (!gravePolicy.hazardBoxHas(pos, h)) continue
+    if (h.traversedSinceDeath) continue
+    h.traversedSinceDeath = true
+    changed = true
+    dbg('hazard: walked through ' + h.x + ',' + h.y + ',' + h.z + ' alive and out of the ' + (h.cause || 'unknown') + ' - escalation released')
+  }
+  if (changed) saveWorldMem()
+  return changed
+}
+// One-time ingestion of the pre-existing grave ledger, so deploying this does not blank the
+// bot's #85 death-spot routing costs. Seeded records carry cause 'unknown' (nothing recorded
+// how those deaths happened), which is soft-cost-only - never a hard exclusion.
+function hazardsSeeded () { return !!loadWorldMem().hazardsSeeded }
+function markHazardsSeeded () { const m = loadWorldMem(); m.hazardsSeeded = true; saveWorldMem() }
+
+// OPERATOR-ROUTING LATCH (anti-grief, §5): the hard hazard exclusion is for AUTONOMOUS route
+// planning only - it must never forbid a route the operator asked for. commands.handle pushes
+// this for the duration of an operator-sourced command (counted, so nesting is safe) and the
+// exclusion closure degrades to cost-only while it is held. It is a CONDITION (an operator
+// command is in flight), not a timer.
+let _operatorRouting = 0
+function setOperatorRouting (on) { if (on) _operatorRouting++; else _operatorRouting = Math.max(0, _operatorRouting - 1) }
+function operatorRouting () { return _operatorRouting > 0 }
+
 
 module.exports = {
   setDebugSink, setBuildZone,
@@ -507,5 +599,7 @@ module.exports = {
   gearupState, gearupResult, gearupShouldArmBackoff, proactiveGearupGate,
   rememberBed, knownBed, forgetBed, markBedUnusable, bedHeld, bedHoldUntil,
   setSpawnSuspect, isSpawnSuspect,
+  recordHazard, hazardAt, listHazards, markTraversed, hazardsSeeded, markHazardsSeeded, // #112 HAZARD_NOT_LURE
+  setOperatorRouting, operatorRouting,
   WORLD_MEM_FILE
 }

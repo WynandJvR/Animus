@@ -22,6 +22,7 @@ try { require('fs').accessSync(require('path').join(__dirname, 'config.json')) }
 const cfg = require('./config.json')
 const commands = require('./commands.js')
 const provision = require('./provision.js') // for the body-side survival-hunt reflex
+const gravePolicy = require('./grave-policy.js') // PURE: the death-cause taxonomy the death handler stamps (#112)
 const resources = require('./resources.js') // unified pack+chest resource model (food withdraw)
 const navigate = require('./navigate.js') // unified navigation (isRecovering gates the reflexes)
 const arbiter = require('./arbiter.js') // priority body-ownership: reflexes defer to a running navigation maneuver
@@ -458,18 +459,33 @@ setInterval(() => { try { commands.trackTick(bot) } catch {} }, 1000).unref?.()
 bot.on('death', () => {
   const p = (bot.entity && bot.entity.position) || lastAlivePos
   if (!p) return
-  let dangerous = p.y < -60 // void / deep
+  // #112 HAZARD_NOT_LURE: name WHAT KILLED THE BOT, not just "is it risky to come back".
+  // The bot could previously represent exactly two ways of dying (lava/fire, via the hand-set
+  // `dangerous` flag); a drowning trap was unrepresentable, which is why the grave lure won over
+  // a pocket that had just drowned it. The cause is classified here - the one place with the
+  // vitals and the blocks at the death cell - and `dangerous` is now DERIVED from it, so there is
+  // one taxonomy instead of a flag plus an unwritable rest.
+  let hazardNear = false
   try {
-    for (let dx = -1; dx <= 1 && !dangerous; dx++) {
-      for (let dy = -1; dy <= 2 && !dangerous; dy++) {
-        for (let dz = -1; dz <= 1 && !dangerous; dz++) {
+    for (let dx = -1; dx <= 1 && !hazardNear; dx++) {
+      for (let dy = -1; dy <= 2 && !hazardNear; dy++) {
+        for (let dz = -1; dz <= 1 && !hazardNear; dz++) {
           const b = bot.blockAt(p.offset(dx, dy, dz))
-          if (b && /lava|fire|magma/.test(b.name)) dangerous = true
+          if (b && /lava|fire|magma/.test(b.name)) hazardNear = true
         }
       }
     }
   } catch {}
-  const info = { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z), dangerous, at: Date.now(), retrieved: false }
+  // Grounded block reads at the head/feet cells. oxygenLevel is only a corroborating signal:
+  // per the project memory it is unreliable on the live server, so it never decides alone.
+  let headWater = false; let feetWater = false
+  try {
+    const hb = bot.blockAt(p.offset(0, 1, 0)); const fb = bot.blockAt(p)
+    headWater = !!(hb && /water/.test(hb.name)); feetWater = !!(fb && /water/.test(fb.name))
+  } catch {}
+  const cause = gravePolicy.classifyDeathCause({ y: p.y, hazardNear, headWater, feetWater, oxygen: bot.oxygenLevel })
+  const dangerous = gravePolicy.causeWritesOff(cause) // lava/fire/void: the stuff is gone (unchanged semantics)
+  const info = { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z), cause, dangerous, at: Date.now(), retrieved: false }
   commands.recordDeath(info)
   commands.markBuildInterrupted && commands.markBuildInterrupted() // keep the build to resume
   // #41 P0: set the post-death recovery LATCH - recovery now OWNS the bot and OUTRANKS build-resume
@@ -477,7 +493,7 @@ bot.on('death', () => {
   // flag-gated (isPostDeathRecovery), so RESILIENT_RECOVERY=0 leaves this inert = today byte-for-byte.
   commands.setPostDeathRecovery && commands.setPostDeathRecovery(true)
   deathPending = true
-  note(`(death) at ${info.x},${info.y},${info.z}${dangerous ? ' - LAVA/FIRE/VOID, risky to return' : ' - can go recover'}`)
+  note(`(death) at ${info.x},${info.y},${info.z} (${cause})${dangerous ? ' - LAVA/FIRE/VOID, risky to return' : ' - can go recover'}`)
 })
 
 // After a DEATH -> RESPAWN, auto-resume any interrupted build. The build survives losing

@@ -22,6 +22,7 @@
 
 const arbiter = require('./arbiter.js') // one-way: for jobSurvivalNeed (the single need authority)
 const mining = require('./mining.js')   // one-way: PURE ironKeystone decision (mining requires nothing)
+const gravePolicy = require('./grave-policy.js') // one-way: PURE grave decisions (#112 salvageVerdict / net-of-risk scoring)
 
 // IRON_KEYSTONE: is this bot on the keystone-blocker grind - fully naked (0 armor) and short of a
 // boots' worth of raw iron - so it MUST bank that first iron before ANY other progress? Reuses the
@@ -136,12 +137,22 @@ function graveReachBand (g, band, urgentBand) {
 // Is a worthwhile, non-dangerous grave within reach? (dist is already min(bot,home).) `band` is the
 // SAFE-tier band; pass `urgentBand` to let urgent/critical graves reach further (M2). Omit it to
 // keep every grave on `band` (admissibility != dispatch priority).
+// #112 HAZARD_NOT_LURE: two changes, both Root E.
+//   (1) a grave whose salvageVerdict says `go:false` is NOT a candidate. It is not "free gear";
+//       it is a liability behind a precondition (the bot cannot yet survive the medium that
+//       killed it there). The row stays on the books - it is filtered here, not forgotten.
+//   (2) the pick is by DESIRE NET OF RISK, not by raw proximity: gravePolicy.graveScore is the
+//       grave's value discounted by the deaths at its cell, over the trek. With equal value and
+//       no hazard this is the old nearest-first pick; with a hazard, a rich grave in a cell that
+//       keeps killing the bot now loses to a modest one in a safe cell.
 function nearestReachGrave (s, band, urgentBand) {
-  let best = null
+  let best = null; let bs = -Infinity
   for (const g of gravesOf(s)) {
     if (!g || g.dangerous || !(g.value > 0)) continue
+    if (gravePolicy.graveSalvageBlocked(g)) continue
     if (g.dist == null || g.dist > graveReachBand(g, band, urgentBand)) continue
-    if (!best || g.dist < best.dist) best = g
+    const sc = gravePolicy.graveScore(g)
+    if (sc > bs) { bs = sc; best = g }
   }
   return best
 }
@@ -544,7 +555,7 @@ function bankHasSpareKit (s) {
 // A SAFE, reachable grave that actually holds gear (a re-arm source competing with the bank).
 function hasSafeGraveWithGear (s) {
   const band = Number(process.env.GRAVE_NEAR_LADDER || 32)
-  return gravesOf(s).some(g => g && !g.dangerous && g.hasGear && g.dist != null && g.dist <= band)
+  return gravesOf(s).some(g => g && !g.dangerous && g.hasGear && g.dist != null && g.dist <= band && !gravePolicy.graveSalvageBlocked(g)) // #112: a grave the bot cannot survive reaching is not a re-arm source
 }
 // Is there ANY way to re-arm right now? bank spare, a safe grave with gear, or gearup off back-off.
 function reArmSourceAvailable (s) {

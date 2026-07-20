@@ -159,15 +159,121 @@ function graveLootVerdict ({ sawWindow, emptied, remaining, exhausted, freeSlots
 // surface cells directly over a cave death (where the bot actually falls in) are priced too.
 function deathSpotCost (p, spots, opts = {}) {
   if (!p || !spots || !spots.length) return 0
-  const R = opts.radius != null ? opts.radius : 4
-  const UP = opts.up != null ? opts.up : 8
-  const DOWN = opts.down != null ? opts.down : 2
   const COST = opts.cost != null ? opts.cost : 40
-  for (const s of spots) {
-    if (s && s.x != null && Math.abs(p.x - s.x) <= R && Math.abs(p.z - s.z) <= R &&
-        (p.y - s.y) <= UP && (s.y - p.y) <= DOWN) return COST
-  }
+  for (const s of spots) if (hazardBoxHas(p, s, opts)) return COST
   return 0
 }
 
-module.exports = { graveValue, graveWorthIt, graveUrgency, graveUrgencyRank, graveCompare, shouldChaseGrave, graveLootVerdict, deathSpotCost }
+// PURE box test, extracted from deathSpotCost so hazard MEMORY (world-memory.js) and hazard
+// ROUTING (deathSpotCost) agree on what "at this hazard" means by construction rather than by
+// two copies of the same arithmetic. The y-window reaches UP past the death cell so the surface
+// directly over a cave death - where the bot actually falls in - is inside the box.
+function hazardBoxHas (p, s, opts = {}) {
+  if (!p || !s || s.x == null) return false
+  const R = opts.radius != null ? opts.radius : 4
+  const UP = opts.up != null ? opts.up : 8
+  const DOWN = opts.down != null ? opts.down : 2
+  return Math.abs(p.x - s.x) <= R && Math.abs(p.z - s.z) <= R && (p.y - s.y) <= UP && (s.y - p.y) <= DOWN
+}
+
+// ---- #112 HAZARD_NOT_LURE: the cause taxonomy + the salvage decision ------------------
+// The bot used to be able to represent exactly TWO ways the world kills it (lava and fire, via
+// the hand-set `dangerous` flag on grave entries). A drowning trap was literally unrepresentable
+// - which is why the "free gear" lure won twice in eight minutes over a pocket that had just
+// drowned the bot. Every cause is nameable here, and `dangerous` is now DERIVED from the cause
+// instead of hand-set in two branches of recoverGrave.
+
+// The causes whose gear is GONE, not merely guarded: walking back buys nothing. These are the
+// causes the old `dangerous` flag stood for, so deriving it from them is byte-equivalent.
+const WRITEOFF_CAUSES = /^(lava|fire|void)$/
+function causeWritesOff (cause) { return WRITEOFF_CAUSES.test(cause || '') }
+// Causes with a MEDIUM the bot can read off a block name. A hard step-exclusion is only ever
+// armed on these, and only on cells currently reading as the medium - so the exclusion RELEASES
+// itself the moment the pocket drains, and can never become an unreleasable wall across terrain.
+const HAZARD_MEDIUM = { drowning: /water$/, lava: /lava$|fire$|magma/, fire: /lava$|fire$|magma/ }
+// N deaths at a cell with no survived traversal since => escalate from cost to forbid. A COUNT,
+// deliberately not a duration: nothing in this file may de-escalate on elapsed time.
+const HAZARD_HARD_DEATHS = 2
+// Pathfinder drops any neighbour whose step cost exceeds 100 (movements.js "cost > 100 return"),
+// so this is a genuine FORBID on the planner - not a big number that job selection can outbid,
+// and not a dig instruction: an excluded cell is one A* will not step into, nothing more.
+const HAZARD_FORBID = 1e6
+
+// PURE: classify what killed the bot, from what the death handler can see at the death cell.
+// Ordered by certainty of the reading. `headWater` is the grounded block read (the memory rule
+// says oxygenLevel is unreliable on the live server, so it is only ever a corroborating signal).
+function classifyDeathCause ({ y, hazardNear, headWater, feetWater, oxygen, fallDistance } = {}) {
+  if (y != null && y < -60) return 'void'
+  if (hazardNear) return 'lava'
+  if (headWater || (feetWater && oxygen != null && oxygen <= 0)) return 'drowning'
+  if (fallDistance != null && fallDistance >= 5) return 'fall'
+  return 'unknown'
+}
+
+// PURE: the per-step verdict for one candidate cell, replacing the cost-only closure. `name` is
+// the candidate block's name (pathfinder hands the block in). `hazards` is plain data:
+// [{ x, y, z, cause, hard }]. Returns 0, the soft cost, or HAZARD_FORBID.
+//   - soft rung (unchanged #85 semantics, cost 40): every armed hazard prices its box.
+//   - hard rung: only where `hard` is set AND the cell reads as the medium that did the killing.
+// A hazard with no readable medium (fall/mob/unknown) never hard-forbids: a wall nothing can
+// walk through is a wall nothing can prove safe again, and §5 forbids walling off terrain.
+function hazardStepCost (p, name, hazards, opts = {}) {
+  if (!p || !hazards || !hazards.length) return 0
+  const COST = opts.cost != null ? opts.cost : 40
+  let out = 0
+  for (const h of hazards) {
+    if (!hazardBoxHas(p, h, opts)) continue
+    const medium = HAZARD_MEDIUM[h.cause]
+    if (h.hard && medium && name && medium.test(name)) return HAZARD_FORBID
+    out = COST
+  }
+  return out
+}
+
+// PURE: is this cell's escalation armed? Condition-gated - N deaths AND no survived traversal
+// since the last of them. `markTraversed` (world-memory) is the only thing that sets the release,
+// and it is set by evidence, never by a clock.
+function hazardHardArmed (h) { return !!h && Array.isArray(h.deaths) && h.deaths.length >= HAZARD_HARD_DEATHS && !h.traversedSinceDeath }
+
+// PURE: MAY the bot go salvage this grave, and what is the loot worth NET OF THE RISK of the
+// place it is lying in? This is the whole point of Root E: `graveSweep` used to price a grave at
+// gross gear value ("free gear") with the only counterweight a soft cost on the ROUTE. A grave
+// is a candidate only if the bot can survive the MEDIUM that killed it there.
+//   grave  - the ledger entry (or snapshot row)
+//   hazard - worldMemory.hazardAt(grave) or null
+//   caps   - what the bot can do about the medium RIGHT NOW. `dryStandpoint` is the seam for a
+//            grounded approach-time probe (a reachable air-adjacent cell within reach of the
+//            grave); until the vertical-water-escape rung exists (capability gap H, a later
+//            slice) nothing sets it, so a drowning pocket stays deferred - and that is correct.
+// go:false does NOT write the grave off - the ledger keeps the record and the value, and the
+// verdict flips the moment the condition does. There is deliberately no "grab it anyway if
+// urgent" bypass: that is the lure, and it is what re-drowned the bot.
+function salvageVerdict (grave, hazard, caps = {}) {
+  const deaths = (hazard && Array.isArray(hazard.deaths)) ? hazard.deaths.length : 0
+  const discount = 1 / (1 + deaths) // value is NETTED, never gross
+  if (!hazard) return { go: true, why: 'no hazard recorded here', discount: 1 }
+  const cause = hazard.cause || 'unknown'
+  // survived: the bot has stood in this cell alive and out of the medium since the last death
+  // here, or the caller established a dry standpoint by a grounded read at approach time.
+  const survived = !!hazard.traversedSinceDeath || caps.dryStandpoint === true
+  if (causeWritesOff(cause)) return { go: false, why: `i died in ${cause} at ${hazard.x},${hazard.y},${hazard.z} - the stuff is gone`, discount }
+  if (hazardHardArmed(hazard) && !survived) return { go: false, why: `${deaths} deaths at ${hazard.x},${hazard.y},${hazard.z} and i have not got through there alive since`, discount }
+  if (HAZARD_MEDIUM[cause] && !survived) return { go: false, why: `${cause} killed me at ${hazard.x},${hazard.y},${hazard.z} and i still cannot get out of that`, discount }
+  return { go: true, why: `${deaths} death(s) here - worth ${Math.round(discount * 100)}% of face value`, discount }
+}
+
+// PURE: a grave's desire score, net of the risk of its location and of the trek. Replaces the
+// pure nearest-first pick in both schedulers, so a rich grave in a cell that keeps killing the
+// bot loses to a modest one in a safe cell instead of always winning on gross gear value.
+function graveNetValue (g) { return (g && g.value > 0 ? g.value : 0) * ((g && g.salvage && g.salvage.discount != null) ? g.salvage.discount : 1) }
+function graveScore (g) { return graveNetValue(g) / (1 + (g && g.dist != null ? g.dist : 0)) }
+// PURE: has this snapshot row been ruled out by salvageVerdict? (Rows written before the gate
+// existed carry no `salvage` and are treated as go - absence of a verdict is not a veto.)
+function graveSalvageBlocked (g) { return !!(g && g.salvage && g.salvage.go === false) }
+
+module.exports = {
+  graveValue, graveWorthIt, graveUrgency, graveUrgencyRank, graveCompare, shouldChaseGrave, graveLootVerdict, deathSpotCost,
+  hazardBoxHas, classifyDeathCause, causeWritesOff, hazardStepCost, hazardHardArmed, salvageVerdict,
+  graveNetValue, graveScore, graveSalvageBlocked,
+  HAZARD_MEDIUM, HAZARD_HARD_DEATHS, HAZARD_FORBID
+}
