@@ -143,6 +143,7 @@ navigate.setDebugSink(noteDebug)
 require('./pathfix.js').setDebugSink(noteDebug) // [verify] place/dig world-recheck traces
 require('./pathfix.js').setProgressSink(commands.touchProgress) // [S7] a pathfix-VERIFIED place/break -> the forward-progress heartbeat
 require('./scaffold.js').setDebugSink(noteDebug) // [scaffold] registry/teardown traces
+require('./reclaim.js').setDebugSink(noteDebug) // [reclaim] #119 commitment-ledger payment traces
 require('./schematic.js').setDebugSink(noteDebug) // [schem] build loop + material sourcing traces (dbg() here was undefined until #108)
 require('./planner.js').setDebugSink(noteDebug) // [plan] re-planning goal-driver traces (rounds/strikes/relocates)
 arbiter.setDebugSink(noteDebug) // [arb] maneuver begin/end/expire + reflex deferrals
@@ -1096,6 +1097,28 @@ if (SCHED_ON) {
             const worked = !!(r && r.steps && r.steps.length && !/^bail/.test(r.reason || ''))
             schedMaintainCooldownUntil = Date.now() + (worked ? 600000 : 300000) // 10 min after a real pass, 5 min after a no-op/bail
             return r && r.steps && r.steps.length ? r.steps.join('+') : (r && r.reason) || 'nothing due'
+          })
+          return
+        }
+        // #119 COMMITMENT_LEDGER (design §3.3): RECLAIM dispatch. Same admission gates as the
+        // maintain pass above - this is background work and it yields to everything real. It
+        // gets its own dispatch rather than riding maintenancePass because it is a different
+        // job with a different precondition: maintenance ESTABLISHES infra the bot needs,
+        // reclaim PAYS FOR what the bot already did to the world. Conflating them is how
+        // reclamation became a side effect of idleness in the first place.
+        if (pick && pick.job === 'reclaim') {
+          if (schedJob) return
+          const busyR = (commands.isBusy && commands.isBusy()) || (provision.isResting && provision.isResting()) || (provision.isSecuringFood && provision.isSecuringFood()) || (provision.isRecoveringDegraded && provision.isRecoveringDegraded())
+          if (busyR) return
+          if (bot.pathfinder && bot.pathfinder.goal) return
+          if (!provision.mayDoProgress(bot)) return
+          if (provision.isMaintaining && provision.isMaintaining()) return
+          // Never at night: reclamation is cosmetic work and the dark is where the deaths are.
+          // A CONDITION, not a cooldown - it clears the moment the sun does.
+          if (provision.isNight && provision.isNight(bot)) return
+          await runJob('reclaim', async () => {
+            const r = await require('./reclaim.js').reclaimPass(bot, { isStopped: () => !!(commands.isEscaping && commands.isEscaping()) })
+            return (r && r.reason) || 'nothing owed'
           })
           return
         }

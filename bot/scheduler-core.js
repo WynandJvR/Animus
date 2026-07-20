@@ -55,6 +55,13 @@ const W_SECURE = 0.6    // maintenancePass: bootstrap missing infra (armor/food-
 const W_CONTINUE = 0.65 // build(null) baseline while a progress job is ALREADY running (single-goal discipline)
 const W_RESUME = 0.2    // build(null) baseline when a saved build is waiting to resume (below any real bootstrap)
 const W_IDLE = 0.1      // build(null) baseline when there is nothing to build (pure idle)
+// #119 COMMITMENT_LEDGER: reclamation's benefit ceiling. Set BELOW W_RESUME (0.2) on purpose -
+// at full saturation and zero distance a reclaim pass scores 0.18, so it beats pure idling
+// (W_IDLE 0.1) and loses to a waiting build, an active build, and every bootstrap need. Root C
+// asks for debt to COMPETE, not to win: a bot dying 23x/day manufactures litter faster than any
+// sweeper cleans it, so prevention outranks the backlog (design §9.4). This is that ranking as
+// one number instead of as a place in a hand-ordered list.
+const W_RECLAIM = 0.18
 // Risk (0..1) is a live-condition COST, per the directive's utility signature. It is docked hard from
 // "keep exposing yourself to make progress" (build) and lightly from at-or-near-home upkeep; it is
 // NOT docked from going home to shelter (that REDUCES risk). This is what makes a naked/exposed bot
@@ -158,6 +165,7 @@ function footprintCost (/* candidate, s */) { return 0 }
 // on the right utility candidate. Progress/idle build names all fold onto the build(null) candidate.
 function bonusKeyFor (activeName) {
   if (activeName === 'maintenancePass') return 'maintenancePass'
+  if (activeName === 'reclaim') return 'reclaim'
   if (activeName === 'nightShelter') return 'nightShelter'
   if (activeName === 'secureFood') return 'secureFood'
   return activeName ? 'build' : null // build/autobuild/gather/travel/mine/brainJob... all continue as "build"
@@ -262,6 +270,35 @@ function chooseActivity (snapshot, opts) {
     const label = bn ? ('bootstrap ' + bn + (keystone ? ' (iron keystone)' : '')) : 'topping up low buffers'
     cands.push({ job: 'maintenancePass', cls: 'maintain', key: 'maintenancePass', order: 1, score, bootstrap: bn || undefined,
       reason: label + (yielded ? ' [home unreachable - deferring]' : '') + (inherits ? ' [the build is waiting on exactly this]' : '') + ' - establishing survival infra before the build' })
+  }
+
+  // (B2b) RECLAIM - pay down what the bot owes the world (#119 COMMITMENT_LEDGER, design §3.3).
+  //      Root C's whole point: reclamation used to be a side effect of IDLENESS, so an always-busy
+  //      bot reclaimed nothing and the registry grew 199 -> 272 in one session while sweeps ran.
+  //      Making it a CANDIDATE is the structural fix - debt now competes for the body on the same
+  //      utility terms as everything else, and therefore gets it exactly when it deserves it.
+  //
+  //      The scoring is deliberately weak, and that is the design, not timidity:
+  //        value      saturates (a 400-block backlog is not 400x more urgent than 4; it is just
+  //                   "a lot", and the difference between them is a day of sweeping either way)
+  //        proximity  is the feasibility term - a debt at arm's reach is nearly free to pay, one
+  //                   200b away costs a trip and had better be worth it
+  //      So: three dirt blocks 200b away never win the body; a 20-beef furnace 40b away can beat
+  //      resuming a build. That is the example §3.3 gives, and it falls out of the arithmetic
+  //      rather than out of a threshold anyone tuned.
+  //
+  //      It sits in the W_SECURE band but at a fraction of a real bootstrap need, so it loses to
+  //      every genuine need and to an actively-progressing build, and beats idling. It is docked
+  //      the same live risk as other maintain work - a naked bot at dusk does not tidy.
+  const debt = s.debt || null
+  if (debt && debt.best && debt.value > 0) {
+    const value = clamp(debt.value / 120, 0, 1)          // saturating: 120 points of debt is "a lot"
+    const d = debt.best.dist != null ? debt.best.dist : 256
+    const proximity = clamp(1 - d / 128, 0, 1)           // feasibility: 0 beyond 128b, 1 underfoot
+    const score = W_RECLAIM * value * proximity - W_RISK_MAINT * riskLevel(s)
+    cands.push({ job: 'reclaim', cls: 'maintain', key: 'reclaim', order: 3, score,
+      reason: 'paying down ' + debt.n + ' outstanding commitment(s) - nearest is ' + debt.best.n + ' ' +
+        debt.best.kind + ' cell(s) ' + Math.round(d) + 'b away' })
   }
 
   // (B3) BUILD / IDLE proceeds (null job). The baseline progress candidate, DOCKED live risk so an

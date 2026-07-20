@@ -59,7 +59,16 @@ function loadWorldMem () {
   try { worldMem = JSON.parse(fs.readFileSync(WORLD_MEM_FILE, 'utf8')) } catch { worldMem = {} }
   return worldMem
 }
-function saveWorldMem () {
+// #119: `now` forces a SYNCHRONOUS write. Everything else here is debounced 2s because it is
+// bookkeeping nobody would miss - but a COMMITMENT LEDGER entry is a write-ahead record whose
+// entire job is to outlive the risky window that follows it. A debt written 2 seconds before a
+// death that never reached the disk is exactly the 20-abandoned-beef case with extra steps.
+function saveWorldMem (opts) {
+  if (opts && opts.now) {
+    clearTimeout(worldMemTimer); worldMemTimer = null
+    try { fs.writeFileSync(WORLD_MEM_FILE, JSON.stringify(worldMem, null, 1)) } catch {}
+    return
+  }
   clearTimeout(worldMemTimer)
   worldMemTimer = setTimeout(() => { try { fs.writeFileSync(WORLD_MEM_FILE, JSON.stringify(worldMem, null, 1)) } catch {} }, 2000)
   if (worldMemTimer.unref) worldMemTimer.unref()
@@ -362,6 +371,81 @@ function recallInfraVerified (bot, kind, pos, maxDist) {
   let best = null; let bd = Infinity
   for (const e of list) { const d = Math.hypot(e.x - pos.x, e.z - pos.z); if (d <= maxDist && d < bd) { bd = d; best = e } }
   return best
+}
+
+// ---- CONTAINER CONTENTS: "I own N items in a container at X" (#119) -------------------
+// The 20 cooked beef abandoned mid-smelt in the remote furnace at 429,70,-119 were lost
+// because items sitting inside a world container existed in NO data structure at all. The
+// schema could not represent the loss, so no mechanism could name it, let alone go get it.
+//
+// This is deliberately NOT a new subsystem. An infra record ALREADY names the container
+// (kind + x,y,z); what it lacked was a `contents` field. So the commitment ledger's
+// container class is one more qualifying fact on the record that already exists - the same
+// consolidation §3.3 proposed and the coordinator asked to take if it held. It holds: one
+// store, one lifetime, and a container the bot forgets takes its debt with it.
+//
+// WRITE-AHEAD is the whole point (§3.3): `noteContainer` is called when the items go IN,
+// while the window is open and the counts are readable - never on the way out, which is the
+// path a death takes away. Hence the synchronous save: the record must already be on disk
+// when the risky window begins.
+const CONTAINER_KINDS = /^(furnace|chest)$/
+
+// Coarse worth of a holding, so a 20-beef debt outranks 3 cobblestone in the reclaim
+// scoring without importing minecraft-data onto a hot path. Deliberately crude: the ledger
+// needs an ORDERING, not an appraisal.
+function itemValue (name, count) {
+  const n = String(name || '')
+  if (/_(helmet|chestplate|leggings|boots)$|_(sword|pickaxe|axe|shovel|hoe)$|^(bow|shield|bucket)$/.test(n)) return 8 * count
+  if (/^(diamond|iron_ingot|gold_ingot|emerald|raw_iron|raw_gold|coal)$/.test(n)) return 3 * count
+  if (/^cooked_|^bread$|^baked_potato$|_stew$/.test(n)) return 2 * count
+  return 1 * count
+}
+function contentsValue (items) {
+  let v = 0
+  for (const [n, c] of Object.entries(items || {})) if (c > 0) v += itemValue(n, c)
+  return v
+}
+
+// Record what the bot is leaving inside a container. `items` is {name:count}; an empty/absent
+// map SETTLES the debt (nothing owed here). Creates the infra record as an unverified HINT if
+// the container is not remembered yet - a debt must be nameable even at a container the bot
+// has not re-observed this life.
+function noteContainer (kind, pos, items) {
+  if (!CONTAINER_KINDS.test(kind)) return
+  const m = loadWorldMem()
+  const s = m.infra = m.infra || {}
+  const list = s[kind] = s[kind] || []
+  const X = Math.floor(pos.x); const Y = Math.floor(pos.y); const Z = Math.floor(pos.z)
+  let e = list.find(o => o.x === X && o.y === Y && o.z === Z)
+  if (!e) { e = { x: X, y: Y, z: Z, at: Date.now(), verified: false, observedAt: Date.now() }; list.push(e) }
+  const held = {}
+  for (const [n, c] of Object.entries(items || {})) if (c > 0) held[n] = c
+  if (!Object.keys(held).length) {
+    if (e.contents) { delete e.contents; delete e.owedAt; saveWorldMem({ now: true }) }
+    return
+  }
+  e.contents = held
+  e.owedAt = Date.now()
+  saveWorldMem({ now: true })
+}
+// Settle: the container was verifiably emptied. Callers must have READ it empty (a grounded
+// window read), never assumed it - the ledger's own no-guessing rule.
+function settleContainer (kind, pos) { noteContainer(kind, pos, null) }
+
+// Outstanding container debt near a point (the reclaim job's read side).
+function containerDebts (pos, maxDist) {
+  const infra = loadWorldMem().infra || {}
+  const out = []
+  for (const kind of Object.keys(infra)) {
+    if (!CONTAINER_KINDS.test(kind)) continue
+    for (const e of (infra[kind] || [])) {
+      if (!e || !e.contents || !Object.keys(e.contents).length) continue
+      const d = pos ? Math.hypot(e.x - pos.x, e.z - pos.z) : 0
+      if (maxDist != null && d > maxDist) continue
+      out.push({ kind, x: e.x, y: e.y, z: e.z, items: e.contents, value: contentsValue(e.contents), at: e.owedAt || e.at, dist: d })
+    }
+  }
+  return out
 }
 
 // ---- REGISTRIES ALSO BACKED BY world-memory.json ------------------------------------
@@ -679,6 +763,7 @@ module.exports = {
   recordWedge, listWedges,
   rememberSpot, forgetSpot, recallSpot,
   rememberInfra, recallInfra, forgetInfra, listInfra, recallInfraVerified, infraVerified, proofHolds,
+  noteContainer, settleContainer, containerDebts, contentsValue, // #119 COMMITMENT_LEDGER (container class)
   loadMines, rememberMine, recallMine, forgetMine, updateMineProgress,
   searchCellKey, markSearched, isSearchedDry, clearSearched,
   gearupState, gearupResult, gearupShouldArmBackoff, proactiveGearupGate,

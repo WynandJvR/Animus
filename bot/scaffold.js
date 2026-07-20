@@ -67,9 +67,45 @@ function sweep () {
 }
 
 // ---- sessions -----------------------------------------------------------------
-const sessions = [] // stack of purpose strings; any open session tags placements
-function beginSession (purpose) { sessions.push(purpose || 'move') }
-function endSession () { sessions.pop() }
+// #119 COMMITMENT_LEDGER: a session frame now REMEMBERS WHAT IT PLACED. It used to be a bare
+// purpose string, so the moment a movement session closed, the blocks it had just put in the
+// world became anonymous members of a 213-entry registry - indistinguishable from litter left
+// three days ago, and reachable only by an idle sweep that a never-idle bot never runs. The
+// registry grew 199 -> 272 in a single session that way: placement was coupled to MOVEMENT,
+// reclamation was coupled to IDLENESS, and the two rates were never going to meet.
+//
+// Closing a session is the event that creates the debt, so it is the event that must own it.
+const sessions = [] // stack of { purpose, cells: [key] }
+function beginSession (purpose) { sessions.push({ purpose: purpose || 'move', cells: [] }) }
+
+// Cells left standing by the most recently closed session(s), oldest first. A single
+// navigateTo runs many gotoOnce legs (one session each), so these ACCUMULATE and are drained
+// once, by closeOut, when the whole navigation is done.
+let pendingCloseOut = []
+
+// endSession(bot?) - `bot` is optional and back-compatible. With it, the cells this session
+// placed are flagged `owed` (a session-close stamp: this is debt that just came due, not aged
+// landscape) and queued for closeOut. WITHOUT digging anything here: this runs inside
+// gotoOnce's synchronous settle callback, and [[body-first-priority]] forbids buying tidiness
+// with the nav hot path. The dig happens in closeOut, at an await point the body owns.
+function endSession (bot) {
+  const f = sessions.pop()
+  if (!f || !bot || !f.cells.length) return 0
+  const now = Date.now()
+  for (const k of f.cells) {
+    const v = reg.get(k)
+    if (!v || isShaft(v)) continue
+    v.owed = true; v.closedAt = now
+    if (!pendingCloseOut.includes(k)) pendingCloseOut.push(k)
+  }
+  // BOUNDED. gotoOnce is also called directly (scaffold.teardown's own approach, door assists),
+  // and those legs close a session without a navigateTo ever draining the queue. Keep the most
+  // RECENT cells - they are the ones the body is still standing next to, and the rest lose
+  // nothing: they stay in the registry as ordinary debt for the reclaim candidate to price.
+  if (pendingCloseOut.length > 64) pendingCloseOut = pendingCloseOut.slice(-64)
+  save()
+  return f.cells.length
+}
 async function inSession (purpose, fn) {
   beginSession(purpose)
   try { return await fn() } finally { endSession() }
@@ -84,7 +120,10 @@ function add (pos, purpose) {
 // called by pathfix.verifiedPlace on EVERY world-verified placement
 function onPlaced (pos) {
   if (!sessions.length) return
-  add(pos, sessions[sessions.length - 1])
+  const f = sessions[sessions.length - 1]
+  add(pos, f.purpose)
+  const k = key(pos)
+  if (!f.cells.includes(k)) f.cells.push(k) // #119: the frame owns what it placed
 }
 function forget (pos) { reg.delete(key(pos)); save() }
 
@@ -133,7 +172,7 @@ function near (pos, r, maxAgeMs, opts = {}) {
     if (v.t < cut) continue
     if (isShaft(v) && !opts.includeShafts) continue // debts are not teardown candidates
     const [x, y, z] = k.split(',').map(Number)
-    if (Math.hypot(x - pos.x, z - pos.z) <= r) out.push({ x, y, z, t: v.t, purpose: v.purpose })
+    if (Math.hypot(x - pos.x, z - pos.z) <= r) out.push({ x, y, z, t: v.t, purpose: v.purpose, owed: !!v.owed, closedAt: v.closedAt })
   }
   return out
 }
@@ -256,4 +295,61 @@ async function teardownVerified (bot, around, opts = {}) {
   return { ok: remaining === 0, passes: pass, removed, remaining }
 }
 
-module.exports = { beginSession, endSession, inSession, add, onPlaced, forget, oweShaft, shaftDebts, settleShaft, isScaffold, near, count, onFarmFootprint, pickFiller, teardown, teardownVerified, setDebugSink, FILLER_RE }
+// ---- SESSION-CLOSE TEARDOWN (#119, design §3.3) --------------------------------------
+// "Reclamation coupled to the EVENT THAT CREATED THE DEBT, not to idleness." The bot walks
+// home past the pillar it built ninety seconds ago; the old code could only get that pillar
+// back via an idle sweep that tore down a handful of cells per pass while movement placed far
+// more. This closes the loop at the source: when a whole navigation finishes, the blocks its
+// legs placed are still WITHIN ARM'S REACH, and paying for them costs one dig each.
+//
+// STRICTLY BOUNDED, because this runs after every navigation:
+//   - ONLY cells queued by endSession() this navigation - never the wider registry, never the
+//     pathfix trail (trail-teardown near builds is FORBIDDEN, [[action-verification]])
+//   - ONLY cells already within reach. It NEVER walks. If the bot has moved on, the cell stays
+//     on the books and the reclaim job can price a trip for it later.
+//   - a hard cell budget, so a long navigation cannot turn into a mining expedition
+//   - the same double gate as teardown(): registry says ours AND the world still shows filler
+//   - the column invariant: a cell is never removed while a registered cell stands above it
+//   - fail CLOSED on an UNKNOWN read (pathfix.readCell) - a null is not "already gone"
+//   - `exclude` (build footprints / hut apron) is honoured exactly as in teardown()
+async function closeOut (bot, opts = {}) {
+  const queued = pendingCloseOut
+  pendingCloseOut = []
+  if (!bot || !bot.entity || !queued.length) return 0
+  if (opts.isStopped && opts.isStopped()) return 0
+  const { Vec3 } = require('vec3')
+  const budget = opts.max || 6
+  const reach = opts.reach || 4.5
+  // Highest first: the column invariant is satisfied for free when we always take the top
+  // cell that is still standing, and a 1x1 tower is dismantled from the top as the bot rides
+  // it down - which is the only order that cannot strand a floater.
+  const cells = queued.map(k => { const [x, y, z] = k.split(',').map(Number); return { x, y, z, k } })
+    .filter(p => reg.has(p.k))
+    .sort((a, b) => b.y - a.y)
+  let removed = 0
+  let provision = null
+  try { provision = require('./provision.js') } catch {}
+  for (const p of cells) {
+    if (removed >= budget) break
+    if (opts.isStopped && opts.isStopped()) break
+    if (opts.exclude && opts.exclude(p)) continue          // a build owns this cell
+    if (onFarmFootprint(p)) continue                        // never shave the crop plot
+    // COLUMN INTEGRITY: something of ours still stands above this cell. Removing it would
+    // strand that - the floating-topsoil failure. Leave the whole thing on the books.
+    if (reg.has(`${p.x},${p.y + 1},${p.z}`)) continue
+    const r = require('./pathfix.js').readCell(bot, p)
+    if (!r.known) continue                                  // UNKNOWN: fail closed, keep the debt
+    if (!FILLER_RE.test(r.block.name)) { forget(p); continue } // repurposed - nothing of ours here
+    if (bot.entity.position.distanceTo(new Vec3(p.x + 0.5, p.y + 0.5, p.z + 0.5)) > reach) continue // out of reach: NEVER walk for it here
+    const tool = provision && provision.toolForBlock ? provision.toolForBlock(bot, r.block.name) : null
+    if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
+    if (bot.canDigBlock && !bot.canDigBlock(r.block)) continue
+    try { await bot.dig(r.block); removed++; forget(p) } catch { /* leave it owed */ }
+  }
+  if (removed) dbg('session close: reclaimed ' + removed + ' block(s) on the way out (' + reg.size + ' registered left)')
+  return removed
+}
+// Test/observability seam: what is queued for the next closeOut.
+function pendingCloseOutCount () { return pendingCloseOut.length }
+
+module.exports = { beginSession, endSession, inSession, add, onPlaced, forget, oweShaft, shaftDebts, settleShaft, isScaffold, near, count, onFarmFootprint, pickFiller, teardown, teardownVerified, closeOut, pendingCloseOutCount, setDebugSink, FILLER_RE }

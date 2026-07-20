@@ -95,7 +95,10 @@ async function gotoOnce (bot, goal, ms = 20000, gopts = {}) {
   scaffold.beginSession('goto')
   return new Promise((resolve, reject) => {
     let settled = false
-    const done = (fn, v) => { if (!settled) { settled = true; scaffold.endSession(); fn(v) } }
+    // #119: hand the bot in so the closing frame can flag what it placed as OWED and queue it
+    // for navigateTo's closeOut. Nothing is dug here - this callback is synchronous and on the
+    // nav hot path ([[body-first-priority]]).
+    const done = (fn, v) => { if (!settled) { settled = true; scaffold.endSession(bot); fn(v) } }
     const timer = setTimeout(() => {
       try { bot.pathfinder.setGoal(null) } catch {}
       done(reject, new Error('goto timed out'))
@@ -1019,7 +1022,33 @@ function runOnNavChain (fn) {
   return p
 }
 function navigateTo (bot, goal, opts = {}) {
-  return runOnNavChain(() => navigateToInner(bot, goal, opts))
+  return runOnNavChain(async () => {
+    try {
+      return await navigateToInner(bot, goal, opts)
+    } finally {
+      // #119 COMMITMENT_LEDGER (design §3.3): the movement session that placed scaffold is
+      // over, and this is the ONE moment the bot is still standing next to what it placed.
+      // Pay for it here - within reach only, hard budget, never a walk - instead of leaving
+      // it to an idle sweep a never-idle bot never reaches. In the `finally` deliberately: a
+      // failed navigation placed blocks too, and those are exactly the ones that used to
+      // become permanent. Its own errors are logged, never propagated - a tidy-up must not
+      // turn a completed navigation into a failed one.
+      try {
+        const scaffold = require('./scaffold.js')
+        await scaffold.closeOut(bot, {
+          isStopped: opts.isStopped,
+          // trail-teardown near builds is FORBIDDEN ([[action-verification]]); the build
+          // zone and the bot's own hut are excluded from the registry pass too.
+          exclude: p => {
+            try {
+              const prov = require('./provision.js')
+              return !!(prov.inBuildZone && prov.inBuildZone(p.x, p.z)) || !!(prov.ownHutAt && prov.ownHutAt(p)) || !!(prov.onHutApron && prov.onHutApron(null, p))
+            } catch { return true } // cannot tell whether a build owns it -> do not touch it
+          }
+        })
+      } catch (e) { dbg('closeOut failed (' + e.message + ') - the cells stay owed') }
+    }
+  })
 }
 // PREEMPTING variant for time-critical reflexes (hut-retreat from a creeper): skips the
 // queue and takes the pathfinder NOW, like the flee reflex does - the preempted nav sees

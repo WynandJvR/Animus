@@ -221,6 +221,15 @@ async function schedulerState (bot) {
   // hutExists: does a hut anchor stand in memory? (#102 CAMP_FIRST's noHut exemption reads this;
   // bootstrapNeed's #103 clause already referenced the field but nothing ever set it.)
   try { s.hutExists = !!hutAnchor() } catch { s.hutExists = false }
+  // #119 COMMITMENT_LEDGER (design §3.3): what the bot owes the world, as a number the chooser
+  // can score. Anchored on the BODY (falling back to home) because the reclaim candidate's
+  // feasibility term IS "how far would I have to walk to pay this".
+  // CHEAP BY CONTRACT ([[body-first-priority]]): ledger.summary reads an in-memory Map (the
+  // scaffold registry), a cached JSON object (world memory) and an in-memory array (graves).
+  // Zero world reads, zero fs, zero awaits - same bar as every other field on this snapshot.
+  try {
+    s.debt = require('./ledger.js').summary({ near: me || home || { x: 0, y: 0, z: 0 }, maxDist: 256 })
+  } catch { s.debt = { value: 0, n: 0, best: null } }
   // ==== #117 HOME_IS_A_NEED (design §3.2 B2) - the HOME facts bootstrapNeed reasons over. ======
   // Every one of these is an in-memory read of a world-memory v2 provenance flag or of bot.time.
   // NOT ONE of them touches a chunk, and that is a requirement, not an accident: this runs on the

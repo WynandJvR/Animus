@@ -3819,6 +3819,27 @@ async function runSmelt (bot, output, input, count, opts = {}) {
 }
 
 // The PROVEN single-furnace smelt loop (night-shelter + slot-6/stale-inventory handling).
+// ---- #119 COMMITMENT_LEDGER: the furnace is a container the bot OWNS THINGS IN ----------
+// 2026-07-19 15:39: `runSmelt cooked_beef x20 from beef` at the remote furnace 429,70,-119;
+// 15:41: `smelt BREAK: stalled 90s at 1/20`. Twenty beef stayed in that furnace and became
+// nobody's - not because the bot forgot, but because "my items are inside a container over
+// there" was UNREPRESENTABLE. Nothing to forget.
+//
+// WRITE-AHEAD: this is called while the window is OPEN and the slots are readable, BEFORE the
+// stall/night/death that takes the bot away - the same discipline as a write-ahead log. The
+// record is synchronously flushed to disk by noteContainer, so it survives the process losing
+// the bot, not just the bot losing the furnace. When the window reads empty the debt SETTLES
+// on that read - a grounded observation of nothing, never an assumption of nothing.
+function noteFurnaceHoldings (bot, pos, furnace) {
+  try {
+    const items = {}
+    for (const it of [furnace.inputItem && furnace.inputItem(), furnace.fuelItem && furnace.fuelItem(), furnace.outputItem && furnace.outputItem()]) {
+      if (it && it.name && it.count > 0) items[it.name] = (items[it.name] || 0) + it.count
+    }
+    require('./world-memory.js').noteContainer('furnace', pos, items)
+  } catch {}
+}
+
 async function runSmeltSingle (bot, output, input, count, opts = {}) {
   const say = opts.say || (() => {})
   const isStopped = opts.isStopped || (() => false)
@@ -3844,6 +3865,7 @@ async function runSmeltSingle (bot, output, input, count, opts = {}) {
     furnace = await bot.openFurnace(furnaceBlock)
   }
   dbg('  furnace window open')
+  noteFurnaceHoldings(bot, furnaceBlock.position, furnace) // #119: whatever is already in there is owed from this instant
   // (closures read the `furnace` BINDING, so they follow the reopen-after-shelter reassignment)
   const slotSum = name => (furnace.slots || []).filter(s => s && s.name === name).reduce((a, s) => a + s.count, 0)
   const outSum = () => slotSum(output)
@@ -3911,6 +3933,7 @@ async function runSmeltSingle (bot, output, input, count, opts = {}) {
           try { await furnace.putFuel(fid, null, Math.min(inInv(fuelName), want)) } catch {}
         }
       }
+      noteFurnaceHoldings(bot, furnaceBlock.position, furnace) // #119: re-book the debt every time the load changes
       if (made > lastMade) { lastMade = made; stall = 0; touchP('smelt'); dbg('  smelt progress', made + '/' + count) } else stall++ // S7 H4a: output collected from the OPEN furnace window
       const noFuel = !furnace.fuelItem() && !(furnace.slots || []).slice(3).some(s => s && isFuel(s))
       const noInput = !furnace.inputItem() && inInv(input) === 0
@@ -3921,7 +3944,14 @@ async function runSmeltSingle (bot, output, input, count, opts = {}) {
     }
     for (let i = 0; i < 4; i++) { try { await furnace.takeOutput() } catch {} await new Promise(r => setTimeout(r, 200)) }
     var madeFinal = outSum() - before
-  } finally { try { furnace.close() } catch {} }
+  } finally {
+    // #119: the LAST thing before walking away is to book what is being left behind. An empty
+    // read settles the debt; anything else keeps it owed and the reclaim job can come back for
+    // it. This is in the `finally` on purpose - the abandonment cases (stall break, night
+    // shelter that never returned, a throw) are the ones that lost the beef.
+    noteFurnaceHoldings(bot, furnaceBlock.position, furnace)
+    try { furnace.close() } catch {}
+  }
   await new Promise(r => setTimeout(r, 300))
   if ((madeFinal || 0) < count) throw new Error(`smelting stalled: ${madeFinal || 0}/${count} ${output} (out of fuel or input?)`)
   return madeFinal
@@ -3993,7 +4023,10 @@ async function runSmeltMulti (bot, output, input, count, positions, opts = {}) {
       f.outputResidue = ((w.slots || []).slice(0, 3).some(s => s && s.name === output))
       f.noFuelLeft = !w.fuelItem() && !(w.slots || []).slice(3).some(s => s && isFuel(s))
       f.noInputLeft = inInv(input) === 0
-    } finally { try { w.close() } catch {} }
+    } finally {
+      noteFurnaceHoldings(bot, f.pos, w) // #119: every visit re-books what this furnace still holds (empty read settles it)
+      try { w.close() } catch {}
+    }
     await new Promise(r => setTimeout(r, 300)) // stale-inventory hygiene after close
   }
 
