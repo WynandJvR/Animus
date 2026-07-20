@@ -46,10 +46,51 @@ const mismatch = (want, got) => want !== got
 // Source pins must read the CODE, not the commentary. This slice's comments quote the exact
 // broken lines they replaced (that is the point - a deleted patch-scar should stay legible),
 // so a naive grep for the old shape would match the tombstone instead of a regression.
+// NOTE the CRLF normalisation, and why it is load-bearing: this repo checks out CRLF, and
+// `.` in a JS regex does not match \r (it is a line terminator), so a per-line
+// `/(^|[^:])\/\/.*$/` silently strips NOTHING on a CRLF file - every pin below then greps the
+// commentary it was meant to look past and reports the fixed defect as still present. That is
+// exactly how five green tests turned red between a local run and a clean checkout. Normalise
+// first, strip block comments, then line comments.
+// The grounded-claim contract's OWN source, delimited by its first and last function rather
+// than by a byte offset. `+200` past bumpEpoch used to spill into isSelfPlaced - pre-existing
+// code that legitimately uses Date.now() - and failed the no-timers pin on someone else's line.
+function contractRegion () {
+  const pf = codeOf('pathfix.js')
+  const start = pf.indexOf('function surveyCells')
+  const last = pf.indexOf('function bumpEpoch')
+  assert.ok(start > 0 && last > start, 'the grounded-claim contract could not be delimited')
+  return pf.slice(start, pf.indexOf('\n', last) + 1)
+}
+
 function codeOf (file) {
-  return fs.readFileSync(path.join(__dirname, file), 'utf8')
+  return fs.readFileSync(path.resolve(__dirname, file), 'utf8')
+    .replace(/\r\n?/g, '\n')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
     .split('\n').map(l => l.replace(/(^|[^:])\/\/.*$/, '$1')).join('\n')
 }
+
+// =====================================================================================
+// 0. THE PINS' OWN PIN. Every source-assertion below is only as honest as codeOf. When it
+// silently stopped stripping (CRLF + `.` not matching \r), five pins greped the tombstone
+// comments instead of the code and reported four fixed defects as still present - a false
+// alarm that costs a deploy. So the helper is tested FIRST and explicitly: if it breaks
+// again it fails HERE, as one legible failure, instead of as a scatter of confusing ones.
+// =====================================================================================
+
+t('codeOf: strips line and block comments, on LF *and* CRLF input', () => {
+  const f = path.join(require('os').tmpdir(), 'gc115-codeof-' + process.pid + '.js')
+  const body = "const a = 1 // if (!g) continue\n/* if (!g) continue */\nconst b = 2\nconst u = 'http://x' // tail\n"
+  for (const [label, text] of [['LF', body], ['CRLF', body.replace(/\n/g, '\r\n')]]) {
+    fs.writeFileSync(f, text)
+    const out = codeOf(f)
+    assert.ok(!/if \(!g\) continue/.test(out), label + ': comments were not stripped - every source pin below is worthless')
+    assert.ok(/const a = 1/.test(out) && /const b = 2/.test(out), label + ': stripping ate real code')
+    assert.ok(/http:\/\/x/.test(out), label + ': a URL inside a string was mangled')
+    assert.ok(!/\r/.test(out), label + ': carriage returns survived normalisation')
+  }
+  try { fs.unlinkSync(f) } catch {}
+})
 
 // =====================================================================================
 // 1. surveyCells - a survey that cannot see its subject REFUSES TO DECIDE
@@ -184,7 +225,10 @@ t('recoverGrave: the approach failure is no longer swallowed, and arrival is re-
   const src = codeOf('commands.js')
   const i = src.indexOf('let approachErr = null')
   assert.ok(i > 0, 'the honest approach block is missing')
-  const block = src.slice(i - 2600, i + 1400)
+  // anchored to real landmarks, never a byte offset: a fixed-size window silently slides off
+  // its subject the moment anyone edits nearby, and then pins pass or fail for no reason.
+  const block = src.slice(src.indexOf('const e0 = pathfix.epoch()'), src.indexOf('const invTotal ='))
+  assert.ok(block.length > 0 && block.length < 4000, 'the recover approach block could not be delimited')
   assert.ok(!/await gotoTimedDA\(bot, new goals\.GoalNear\(d\.x, d\.y, d\.z, 2\), 20000\) \} catch \{\}/.test(src),
     'the bare try{}catch{} around the grave approach is back')
   assert.ok(/catch \(e\) \{ approachErr =/.test(block), 'the approach error must be captured')
@@ -205,7 +249,7 @@ t('recoverGrave: "grave still present: false" cannot be concluded from a scan at
   assert.ok(arrive > 0 && scan > arrive,
     'the entity scan that concludes the grave despawned must sit AFTER the grounded arrival gate')
   // and every early return between them must be a REFUSAL, never a write-off
-  const between = src.slice(arrive - 1800, arrive)
+  const between = src.slice(src.indexOf('let approachErr = null'), arrive)
   assert.ok(/not going to pretend it's gone/.test(between),
     'failing to arrive must return without ever entering the loot/verdict phase')
 })
@@ -225,17 +269,20 @@ t('epoch: increments on death, and sameEpoch invalidates a pre-death observation
 t('epoch: it is wired to the bot death event, not to a timer', () => {
   const src = codeOf('pathfix.js')
   assert.ok(/bot\.on\('death', \(\) => \{ bumpEpoch\(\) \}\)/.test(src), 'the epoch must be bumped by the death event')
-  const i = src.indexOf('let _epoch = 1')
-  const block = src.slice(i - 900, i + 300)
-  assert.ok(!/setTimeout|Date\.now\(\)/.test(block), 'the epoch must carry no time component at all')
+  assert.ok(!/setTimeout|Date\.now\(\)/.test(contractRegion()), 'the epoch must carry no time component at all')
 })
 
 t('epoch: recoverGrave captures its life at entry and refuses to decide across a death', () => {
   const src = codeOf('commands.js')
   const i = src.indexOf('const e0 = pathfix.epoch()')
   assert.ok(i > 0, 'recoverGrave must capture its epoch at entry')
-  const rest = src.slice(i, i + 9000)
-  assert.ok((rest.match(/sameEpoch\(e0\)/g) || []).length >= 2,
+  const verdict = src.indexOf('const stillSomething =')
+  assert.ok(verdict > i, 'the grave verdict must sit after the epoch capture')
+  const rest = src.slice(i, verdict)
+  // BOTH re-checks must fall between capturing the life and deciding the grave's fate:
+  // one after the approach (a death on the way back), one before the verdict (a death
+  // mid-loot, which is what let a scan finished in the afterlife write the grave off).
+  assert.strictEqual((rest.match(/sameEpoch\(e0\)/g) || []).length, 2,
     'the epoch must be re-checked after the approach AND before the grave verdict')
   assert.ok(/i died again while recovering/.test(rest), 'a death mid-recovery must not write the grave off')
 })
@@ -384,9 +431,7 @@ if (!memWorks) {
 // =====================================================================================
 
 t('NO TIME HOLDS: nothing this slice added gates on elapsed time', () => {
-  const pf = codeOf('pathfix.js')
-  const contract = pf.slice(pf.indexOf('function surveyCells'), pf.indexOf('function bumpEpoch') + 200)
-  assert.ok(!/setTimeout|Date\.now|cooldown|Until\b/i.test(contract),
+  assert.ok(!/setTimeout|Date\.now|cooldown|Until\b/i.test(contractRegion()),
     'the grounded-claim contract must be condition-only - no timers, no cooldowns, no holds')
 })
 
