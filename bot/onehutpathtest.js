@@ -114,16 +114,24 @@ t('census: exactly ONE hut rebuild implementation - no second buildSurvival call
   assert.strictEqual(n, 1, 'the hut is built from ' + n + ' places - it must be exactly one')
 })
 
-t('census: the hut rebuild may not record infra / claim / latch from a REFUSED build', () => {
+t('census: the hut rebuild may not record infra / claim / latch from a REFUSED or UNVERIFIED build', () => {
   const code = SOURCE_FILES.find(f => f.file === 'commands.js').code
-  const i = code.indexOf("buildSurvival(bot, hutSchem")
-  assert(i > 0, 'hut build call site not found')
-  const window = code.slice(i, i + 1400)
-  const remember = window.indexOf("rememberInfra('hut'")
-  assert(remember > 0, "rememberInfra('hut') not found near the hut build")
-  const guard = window.slice(0, remember)
-  assert(/!hr\.refused/.test(guard) && /hr\.placed\s*>\s*0/.test(guard),
-    "rememberInfra('hut') must sit behind a `!hr.refused && hr.placed > 0` guard - a refused pass writes nothing")
+  // #115 STRENGTHENED. The old lock demanded rememberInfra('hut') sit behind
+  // `!hr.refused && hr.placed > 0`. That guard was necessary and NOT sufficient: a build that
+  // placed blocks is not evidence that a hut STANDS, and the live tape proved it - the write
+  // fired after a pass that "rebuilt" a hut nobody could see. The write now lives in the
+  // post-verify's builtClean branch and must carry the survey as its proof.
+  const all = (code.match(/rememberInfra\s*\(\s*'hut'/g) || []).length
+  assert.strictEqual(all, 1, "there must be exactly ONE rememberInfra('hut') write site, found " + all)
+  const remember = code.indexOf("rememberInfra('hut'")
+  assert(remember > 0, "rememberInfra('hut') not found")
+  const call = code.slice(remember, remember + 220)
+  assert(/proof\s*:/.test(call), "rememberInfra('hut') must pass a proof - an unproven write is how the phantom hut got in")
+  // and it must be downstream of the verify that earned it
+  const clean = code.indexOf('const builtClean')
+  assert(clean > 0 && clean < remember, "rememberInfra('hut') must sit AFTER the post-build survey, inside its clean branch")
+  const guard = code.slice(clean, remember)
+  assert(/builtClean/.test(guard), "rememberInfra('hut') must be gated on builtClean")
 })
 
 t('census/anti-grief: a REFUSED hut rebuild still latches the UNIMPROVED damage count', () => {

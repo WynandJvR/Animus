@@ -29,7 +29,7 @@ const worldMemory = require('./world-memory.js')
 const { loadWorldMem, saveWorldMem, listInfra, rememberInfra, forgetInfra, recallInfra,
   rememberSpot, clearSearched } = worldMemory
 const provHut = require('./provision-hut.js')
-const { hutAnchor, insideOwnStructure, hasSolidCeiling } = provHut
+const { hutAnchor, insideOwnStructure, ownHutAt, hasSolidCeiling } = provHut
 
 // The provisioning layer, resolved at CALL time (see the note above).
 const P = () => require('./provision.js')
@@ -334,7 +334,7 @@ async function ensureDryHomeFarm (bot, home, hut, { isStopped = () => false, say
         if (b && b.boundingBox === 'block' && a && (AIRISH(a.name) || REPLACEABLE.test(a.name))) { ground = b; break }
       }
       if (!ground || !farm.tillableBank(ground.name)) continue
-      if (insideOwnStructure(bot, ground.position)) continue // never the hut structure itself (anti-grief)
+      if (ownHutAt(ground.position)) continue // never the hut structure itself (anti-grief). #115: ownHutAt (pure geometry over ALL records, verified or not) - an EXCLUSION must fail protective, so an unverified hut row still bans farming through it. insideOwnStructure is the verified CLAIM and fails closed the other way.
       // #87c: 'flat' = LEVELABLE (within 1 of the floor) - the leveling pass below flattens +-1 cells,
       // so demanding y===floorY exactly rejected a perfectly workable gentle slope (live 07:30: 369
       // tillable, flat 0.22 -> deferred; the hut sits on a mild hill).

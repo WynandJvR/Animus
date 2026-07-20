@@ -68,9 +68,42 @@ function onHutApron (bot, pos) {
   return null
 }
 
+// #115 GROUNDED_CLAIMS - VERIFIED OCCUPANCY. This used to be `ownHutAt(p)`: a pure geometry
+// test against the registry box that never read one block of the world. On 2026-07-19 the
+// registry held a hut at 456,68,-142 ingested straight after a rebuild that placed 0/94
+// blocks, so `boundedHold: holding inside my hut` printed one line after `crossOwnDoor(in):
+// still on the wrong side` - the bot was standing in a field, inside the COORDINATES of a
+// hut that had never been verified to exist, and held there.
+//
+// Now: geometry FIRST (cheap, and it short-circuits to null everywhere the bot normally is,
+// so this stays off the hot path), then a grounded spot-check that the structure is really
+// there - four wall corners at anchor y+1 read through pathfix.readCell.
+//   >=3 known solid  -> occupied, and the registry record is UPGRADED to verified (seeing it
+//                       IS the proof - this is how a real hut heals a stale hint).
+//   unloaded probes  -> null. "Can't tell" is not "yes"; every caller already handles null.
+//   known but hollow -> null, and no upgrade. The phantom cannot answer.
+// NOTE ownHutAt stays pure geometry ON PURPOSE: its other consumers are anti-grief
+// exclusions ("never dig/clutter here"), which must fail PROTECTIVE, while this predicate is
+// a claim about the bot's own situation and must fail CLOSED. Opposite directions, so they
+// are deliberately two functions.
 function insideOwnStructure (bot, pos) {
   const p = pos || (bot && bot.entity && bot.entity.position)
-  return p ? ownHutAt(p) : null
+  if (!p) return null
+  const h = ownHutAt(p)
+  if (!h) return null
+  if (process.env.GROUNDED_OBS === '0') return h // temporary rollback seam, deletion scheduled
+  const readCell = require('./pathfix.js').readCell
+  let knownProbes = 0; let solidProbes = 0
+  for (const [dx, dz] of [[0, 0], [5, 0], [0, 5], [5, 5]]) {
+    const r = readCell(bot, { x: h.x + dx, y: h.y + 1, z: h.z + dz })
+    if (!r.known) continue
+    knownProbes++
+    if (!AIRISH(r.block.name)) solidProbes++
+  }
+  if (knownProbes < 3) return null // unloaded / can't see it - refuse to decide
+  if (solidProbes < 3) return null // the box is empty air: this hut does not exist
+  if (!h.verified) { try { worldMemory.rememberInfra('hut', { x: h.x, y: h.y, z: h.z }, { proof: { verdict: 'OK', epoch: require('./pathfix.js').epoch() } }) } catch {} }
+  return h
 }
 
 function hasSolidCeiling (bot, upTo = 45, opts = {}) {

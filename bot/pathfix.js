@@ -165,6 +165,63 @@ function surfaceYAt (bot, x, z, opts = {}) {
   return UNKNOWN // unloaded column, or nothing solid in it at all
 }
 
+// ---- THE GROUNDED CLAIM CONTRACT (#115) ----------------------------------------------
+// pathfix has enforced "the world re-read is the ONLY arbiter" for place/dig/window since
+// 9fdc4ce - but only for those three PRIMITIVES. Arrival, occupancy, survey and recovery
+// were left on the honour system and every one of them lied on the live tape:
+//   - a grave 18 blocks STRAIGHT DOWN read as "7.6 blocks away, I'm here" (XZ-only hypot)
+//   - a hut survey taken 200b away from an unloaded chunk read as PERFECT (`if (!g) continue`)
+//   - "grave still present: false" was concluded from an entity scan taken at the wrong place
+//   - "ashore, out of the water" was logged 1.7s AFTER the death that ended the episode
+// The contract below scopes verification to CLAIMS instead of to primitives. Three parts,
+// one per way the old code lied: a survey that can say UNKNOWN, an arrival that re-reads
+// the body, and an epoch that makes a claim belong to the life it was made in.
+
+// SURVEY WITH A THIRD STATE. `cells` is [{ pos, want }]; classify(want, got) -> true when
+// the cell is WRONG. A survey that cannot see its subject REFUSES TO DECIDE: one unknown
+// cell makes the whole verdict 'UNKNOWN' and the bad/solid counts PARTIAL. Callers must
+// branch on verdict, never on bad===0 (that is precisely the `if (!g) continue` bug: an
+// absent hut counted as zero damage and a hut nobody could see verified as perfect).
+// Cheap by construction: one readCell per cell, no retries, no waiting, no world scan.
+function surveyCells (bot, cells, classify) {
+  let bad = 0; let solid = 0; let unknown = 0
+  const isAir = n => /^(air|cave_air|void_air)$/.test(n)
+  for (const c of (cells || [])) {
+    const want = (c && c.want) || 'air'
+    if (!isAir(want)) solid++
+    const r = readCell(bot, c.pos)
+    if (!r.known) { unknown++; continue }
+    if (classify(want, r.block.name)) bad++
+  }
+  const total = (cells || []).length
+  const verdict = unknown > 0 ? 'UNKNOWN' : (bad > 0 ? 'BAD' : 'OK')
+  return { verdict, bad, solid, unknown, total, partial: unknown > 0 }
+}
+
+// GROUNDED ARRIVAL. "Did I get there" is answered by the goal's own isEnd against a
+// RE-READ of the body's feet - never by a travel helper's return value, never by an XZ
+// hypot that cannot see the 18 blocks of stone between the bot and its grave.
+function arrivedOK (bot, goal) {
+  try {
+    const p = bot && bot.entity && bot.entity.position
+    if (!p) return false
+    if (goal && typeof goal.isEnd === 'function') return !!goal.isEnd(p.floored())
+    // plain {x,y,z[,range]} target: 3D distance, Y INCLUDED (this is the whole point)
+    if (!goal || goal.x == null) return false
+    const r = goal.range != null ? goal.range : 3
+    return Math.sqrt((goal.x - p.x) ** 2 + ((goal.y != null ? goal.y : p.y) - p.y) ** 2 + (goal.z - p.z) ** 2) <= r
+  } catch { return false }
+}
+
+// LIFE EPOCH. Death resets the world's opinion of where the bot is, so every observation
+// taken before it is void. An async flow that spans awaits captures epoch() at entry and
+// treats a change as invalidation - that is the ONLY thing that would have stopped the
+// drown guard logging "ashore" from the respawn point 137 blocks away.
+let _epoch = 1
+function epoch () { return _epoch }
+function sameEpoch (e) { return e === _epoch }
+function bumpEpoch () { _epoch++; return _epoch }
+
 // Point query: was THIS cell self-placed recently? The replant reflex was planting
 // saplings on the bot's own scaffold dirt (operator caught it live) - scaffold is
 // temporary by definition, nothing should treat it as real ground.
@@ -189,6 +246,9 @@ function selfPlacedNear (pos, r, maxAgeMs) {
 function installPathfinderTuning (bot) {
   if (!bot.__pathfixInstalled) {
     bot.__pathfixInstalled = true
+    // #115: the life epoch. Every claim made before this fires belongs to a bot that no
+    // longer exists at that position, holding that inventory, in that chunk.
+    try { bot.on('death', () => { bumpEpoch() }) } catch {}
     // Wrap the ONE placement primitive - bot._placeBlockWithOptions - and rebuild
     // bot.placeBlock on top of it. (placeBlock is a closure over the lib-internal
     // function, so wrapping placeBlock alone missed buildSurvival's tryPlace, which
@@ -393,4 +453,4 @@ function installPathfinderTuning (bot) {
   } catch {}
 }
 
-module.exports = { installPathfinderTuning, selfPlacedNear, isSelfPlaced, placedOK, brokeOK, setDebugSink, setProgressSink, readCell, isGroundBlock, surfaceYAt }
+module.exports = { installPathfinderTuning, selfPlacedNear, isSelfPlaced, placedOK, brokeOK, setDebugSink, setProgressSink, readCell, isGroundBlock, surfaceYAt, surveyCells, arrivedOK, epoch, sameEpoch, bumpEpoch }

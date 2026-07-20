@@ -427,7 +427,7 @@ async function suicideByPitDrop (bot, { isStopped = () => false, home = null, sa
     let ok = true
     for (let dy = -1; dy >= -DEPTH; dy--) {
       const cell = new Vec3(fx, feet.y + dy, fz)
-      if (scaffold.onFarmFootprint(cell) || farmFootprintHas(cell) || insideOwnStructure(bot, cell)) { ok = false; break }
+      if (scaffold.onFarmFootprint(cell) || farmFootprintHas(cell) || ownHutAt(cell)) { ok = false; break } // #115: exclusions use the geometric predicate - they must fail PROTECTIVE
       const b = bot.blockAt(cell)
       if (b && /water|lava/.test(b.name)) { ok = false; break }
       if (b && !AIRISH(b.name) && !canBreakNaturally(b)) { ok = false; break } // protected/build block in the shaft
@@ -450,7 +450,7 @@ async function suicideByPitDrop (bot, { isStopped = () => false, home = null, sa
   for (let dy = -1; dy >= -3 && Date.now() < deadline; dy--) { if (!(await digAt(new Vec3(dir.fx, feet.y + dy, dir.fz)))) { dbg('deadlock-reset: pit stage A blocked - ABORTING this fallback'); return false } }
   // Descend ONE into our own cell to regain reach for the lower shaft.
   const under = new Vec3(feet.x, feet.y - 1, feet.z)
-  if (!(scaffold.onFarmFootprint(under) || farmFootprintHas(under) || insideOwnStructure(bot, under))) { await digAt(under) }
+  if (!(scaffold.onFarmFootprint(under) || farmFootprintHas(under) || ownHutAt(under))) { await digAt(under) } // #115: geometric exclusion (fail protective)
   try { await stepInto(bot, under, { isStopped }) } catch {}
   const lowY = Math.floor(bot.entity.position.y)
   // Stage B: from the lower stance, dig the front shaft deeper (down to feet.y-DEPTH).

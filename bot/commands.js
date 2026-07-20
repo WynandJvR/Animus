@@ -1270,14 +1270,39 @@ async function handleInner (bot, line, opts = {}) {
       } else if (urgentNear && provision.isNight(bot) && provision.underArmored(bot)) {
         try { bot.chat("grave's about to despawn and it's right here - grabbing it before it's gone, then i'll rest") } catch {}
       }
+      // #115 GROUNDED_CLAIMS. Everything below this line used to be asserted, never observed:
+      //   - `Math.hypot(d.x-me.x, d.z-me.z)` is XZ-ONLY, so a grave 18 blocks STRAIGHT DOWN
+      //     measured 7.6 blocks away and the approach was skipped as "already here".
+      //   - `travelFar` failing but landing within 24 XZ blocks still asserted
+      //     endActivity(true, 'reached death site').
+      //   - the real approach sat in a bare `try {} catch {}`, so a failed one was silent and
+      //     the loot phase ran anyway - against a grave the bot had never reached. The entity
+      //     scan then found nothing (correct: wrong place) and concluded `grave still present:
+      //     false` -> marked recovered with 0 items gained -> walked away from a full pack.
+      // Arrival is now a world re-read (pathfix.arrivedOK, Y included) and nothing downstream
+      // runs without it. Absence of evidence at the wrong place is no longer proof of absence.
+      const pathfix = require('./pathfix.js')
+      const e0 = pathfix.epoch() // the life this recovery belongs to
+      const graveGoal = new goals.GoalNear(d.x, d.y, d.z, 3)
       const me = bot.entity.position
-      if (Math.hypot(d.x - me.x, d.z - me.z) > 80) {
+      const travelled = Math.hypot(d.x - me.x, d.z - me.z) > 80
+      if (travelled) {
         beginActivity('recover', `${d.x},${d.y},${d.z}`)
         const r = await travelFar(bot, { x: d.x, y: d.y, z: d.z }, { isStopped: () => false, say: m => bot.chat(String(m).slice(0, 256)) })
-        if (!r.ok && r.dist > 24) { endActivity(false, r.reason); return `couldn't get back to where i died (${d.x},${d.y},${d.z}): ${r.reason}` }
-        endActivity(true, 'reached death site')
+        if (!r.ok && !pathfix.arrivedOK(bot, graveGoal)) { endActivity(false, r.reason); return `couldn't get back to where i died (${d.x},${d.y},${d.z}): ${r.reason}` }
       }
-      try { await gotoTimedDA(bot, new goals.GoalNear(d.x, d.y, d.z, 2), 20000) } catch {} // full ladder - graves end up in pits/caves
+      // The approach, no longer swallowed. graves end up in pits/caves, so the full ladder still
+      // runs - but its failure is now a REPORTED failure, not a silent one.
+      let approachErr = null
+      try { await gotoTimedDA(bot, graveGoal, 20000) } catch (e) { approachErr = e && e.message ? e.message : String(e) }
+      if (!pathfix.sameEpoch(e0)) { if (travelled) endActivity(false, 'died on the way'); return `i died on the way back to my grave at ${d.x},${d.y},${d.z} - starting over` }
+      if (!pathfix.arrivedOK(bot, graveGoal)) {
+        const p = bot.entity.position
+        const gap = Math.round(Math.sqrt((d.x - p.x) ** 2 + (d.y - p.y) ** 2 + (d.z - p.z) ** 2))
+        if (travelled) endActivity(false, 'never reached the death site')
+        return `couldn't reach my grave at ${d.x},${d.y},${d.z} - i'm still ${gap} blocks off${approachErr ? ` (${approachErr})` : ''}, so i'm not going to pretend it's gone`
+      }
+      if (travelled) endActivity(true, 'reached death site') // EARNED: arrivedOK re-read the body
       // Safety re-check: if lava/fire is right here now, don't dive in for a few items.
       const here = bot.entity.position.floored()
       for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
@@ -1417,6 +1442,10 @@ async function handleInner (bot, line, opts = {}) {
       // grave's display entities), then let the pure verdict decide marking.
       await new Promise(r => setTimeout(r, 1000))
       const graveAfter = graveScan()
+      // #115: an observation taken before a death does not survive it. Without this, a scan
+      // that started at the grave and finished after a respawn 137 blocks away reads "nothing
+      // here" and writes the grave off. A dead bot decides nothing about its own grave.
+      if (!pathfix.sameEpoch(e0)) return `i died again while recovering at ${d.x},${d.y},${d.z} - my stuff is still out there, going back for it`
       const stillSomething = graveAfter.length > 0 || looseNearby
       let freeSlots = 36; try { freeSlots = bot.inventory.emptySlotCount() } catch {}
       const remainingCount = remaining.reduce((s, r) => s + (r.count || 0), 0)
@@ -2523,9 +2552,9 @@ async function autoBuild (bot, schem, at, opts = {}) {
     // the schematic -> refill the bank, counting items before/after so nothing is lost.
     try {
       if (process.env.SITE_HUT !== '0') {
+        const pathfixMod = require('./pathfix.js') // #115: the grounded-claim contract
         const hutSchem = await schematic.loadFile('hut.schem', bot.version)
         const st = hutSchem.start(); const en = hutSchem.end()
-        const AIRRE = /^(air|cave_air|void_air)$/
         const known = (provision.listInfra ? provision.listInfra('hut', bot) : []).find(e => Math.hypot(e.x - at.x, e.z - at.z) <= 150)
         let hutAt
         if (known) hutAt = new Vec3(known.x, known.y, known.z)
@@ -2540,14 +2569,32 @@ async function autoBuild (bot, schem, at, opts = {}) {
         // schematic wants EMPTY that holds a stray block (the bot's own cobble litter) is damage
         // exactly like a missing wall, and only the destructive-rebuild path (clearVolume) can
         // clear those; the patch path re-places missing blocks only.
-        let bad = 0
-        let solidTotal = 0
+        // #115 GROUNDED_CLAIMS. This loop used to `if (!g) continue` - and mineflayer returns
+        // null both for "empty" and for "I have never been sent that chunk", so a hut the bot
+        // could not see counted ZERO bad cells and verified as PERFECT. Live 2026-07-19: the
+        // bot decided `rebuild (bad=111/136)` from ~200b away underground, emptied the bank,
+        // cleared the site, died, and four seconds later announced `0 cell(s) still off,
+        // placed 0/94`. A survey that cannot see its subject must REFUSE TO DECIDE.
+        const hutCells = []
         for (let y = st.y; y <= en.y; y++) for (let z = st.z; z <= en.z; z++) for (let x = st.x; x <= en.x; x++) {
-          const w = hutSchem.getBlock(new Vec3(x, y, z)); const g = bot.blockAt(new Vec3(hutAt.x + x, hutAt.y + y, hutAt.z + z))
-          const wantName = (w && w.name) || 'air'
-          if (!AIRRE.test(wantName)) solidTotal++
-          if (!g) continue
-          if (hutModel.cellMismatch(wantName, g.name)) bad++
+          const w = hutSchem.getBlock(new Vec3(x, y, z))
+          hutCells.push({ pos: new Vec3(hutAt.x + x, hutAt.y + y, hutAt.z + z), want: (w && w.name) || 'air' })
+        }
+        const surveyHut = () => pathfixMod.surveyCells(bot, hutCells, hutModel.cellMismatch)
+        let sv = surveyHut()
+        if (sv.verdict === 'UNKNOWN') {
+          // Not a failure - a "go and look". Travel to the anchor and re-read; the counts from
+          // the blind pass are PARTIAL and are never used for anything.
+          dbg('camp: hut survey UNKNOWN (' + sv.unknown + '/' + sv.total + ' cells unreadable) - travelling to the anchor to look before deciding anything')
+          try { await travelFar(bot, { x: hutAt.x, y: hutAt.y, z: hutAt.z }, { isStopped, say }) } catch (e) { dbg('camp: hut approach failed (' + e.message + ')') }
+          sv = surveyHut()
+        }
+        const hutVerdict = sv.verdict
+        const bad = sv.bad
+        const solidTotal = sv.solid
+        if (hutVerdict === 'UNKNOWN') {
+          dbg('camp: hut STILL UNKNOWN after approaching ' + hutAt.x + ',' + hutAt.y + ',' + hutAt.z + ' (' + sv.unknown + '/' + sv.total + ') - refusing to judge the safehouse this pass')
+          say("i can't actually see my safehouse from here, so i'm not going to guess at what's wrong with it")
         }
         // schematic furniture cells (world coords) - found by scanning the schematic
         const findCell = re => { for (let y = st.y; y <= en.y; y++) for (let z = st.z; z <= en.z; z++) for (let x = st.x; x <= en.x; x++) { const w = hutSchem.getBlock(new Vec3(x, y, z)); if (w && re.test(w.name)) return new Vec3(hutAt.x + x, hutAt.y + y, hutAt.z + z) } return null }
@@ -2585,8 +2632,13 @@ async function autoBuild (bot, schem, at, opts = {}) {
           // Treasury LEFT in the pack from a prior failed pass is re-deposited BEFORE any repair
           // logic (invariant 1: never begin a pass on a pack-only bank).
           if (hutPendingRestore) { dbg('camp: pending bank restore from a prior pass - restoring the treasury first'); try { await restoreBank() } catch (e) { dbg('camp: pending restore failed (' + e.message + ')') } }
-          const decision = hutModel.decideHutRepair({ bad, solidTotal, lastBad: hutRepairLatch.lastBad, lastAction: hutRepairLatch.lastAction })
-          dbg('camp: hut repair decision=' + decision + ' (bad=' + bad + '/' + solidTotal + ' solid, lastBad=' + hutRepairLatch.lastBad + ' lastAction=' + hutRepairLatch.lastAction + ')')
+          // #115 THE ANTI-GRIEF GATE. 'rebuild' empties the bank and CLEARS THE SITE. It is now
+          // structurally unreachable from a survey that isn't grounded: an UNKNOWN verdict cannot
+          // produce a decision at all, and no latch is written from one. Fail closed - UNKNOWN
+          // refuses, it never proceeds. (verdict 'OK' means bad===0, which decideHutRepair already
+          // answers 'none' to, so only a genuinely-BAD, genuinely-SEEN hut can be touched.)
+          const decision = hutVerdict === 'UNKNOWN' ? 'none' : hutModel.decideHutRepair({ bad, solidTotal, lastBad: hutRepairLatch.lastBad, lastAction: hutRepairLatch.lastAction })
+          dbg('camp: hut repair decision=' + decision + ' (verdict=' + hutVerdict + ', bad=' + bad + '/' + solidTotal + ' solid' + (sv.unknown ? ', unknown=' + sv.unknown : '') + ', lastBad=' + hutRepairLatch.lastBad + ' lastAction=' + hutRepairLatch.lastAction + ')')
           if (decision === 'patch') {
             // COMMON CASE: SKIP the destructive teardown entirely. provision.maintainHome (below)
             // runs repairHutStructure - re-places missing planks bottom-up, the door from OUTSIDE,
@@ -2626,13 +2678,24 @@ async function autoBuild (bot, schem, at, opts = {}) {
               let emptied = true
               const saved = {}
               for (const c of bankChests) {
-                const cb = bot.blockAt(new Vec3(c.x, c.y, c.z)); if (!cb || !/chest/.test(cb.name)) continue
+                // #115: BOTH skips here used to consume absence-of-observation as
+                // observation-of-absence, and together they printed `camp: bank verified empty
+                // -> 0 items` about chests the bot could not reach. An unloaded cell and a
+                // failed read are UNKNOWN, and an UNKNOWN chest blocks the teardown: we do not
+                // dig a chest whose contents we have not seen.
+                const cr = pathfixMod.readCell(bot, { x: c.x, y: c.y, z: c.z })
+                if (!cr.known) { emptied = false; dbg('camp: bank chest at ' + c.x + ',' + c.y + ',' + c.z + ' is in an unloaded chunk - contents UNKNOWN, not tearing anything down'); break }
+                const cb = cr.block; if (!/chest/.test(cb.name)) continue // seen, and it is not a chest: nothing of ours to empty
                 let counts = {}
-                try { counts = await provision.chestCounts(bot, cb) } catch (e) { dbg('camp: bank read failed (' + e.message + ')'); continue }
+                try { counts = await provision.chestCounts(bot, cb) } catch (e) { emptied = false; dbg('camp: bank read FAILED at ' + c.x + ',' + c.y + ',' + c.z + ' (' + e.message + ') - contents UNKNOWN, aborting the teardown'); break }
                 for (const n of Object.keys(counts)) { saved[n] = (saved[n] || 0) + counts[n]; try { await provision.withdrawItem(bot, cb, n, counts[n]) } catch {} }
-                let left = {}
-                try { left = await provision.chestCounts(bot, cb) } catch { left = { unknown: 1 } }
-                if (Object.keys(left).length) { emptied = false; dbg('camp: bank chest at ' + c.x + ',' + c.y + ',' + c.z + ' still holds ' + Object.keys(left).join(',') + ' (pack full?)'); break }
+                // #115: `catch { left = { unknown: 1 } }` was groping for exactly the third state
+                // this slice adds. A chest read that FAILED tells us nothing about what is inside
+                // it - and "I could not look" must never become "it is not empty enough, but also
+                // the survey said the bank was verified empty". UNKNOWN => not emptied, explicitly.
+                let left = {}; let leftUnknown = false
+                try { left = await provision.chestCounts(bot, cb) } catch (e) { leftUnknown = true; dbg('camp: bank re-read FAILED at ' + c.x + ',' + c.y + ',' + c.z + ' (' + e.message + ') - contents UNKNOWN, treating as not emptied') }
+                if (leftUnknown || Object.keys(left).length) { emptied = false; dbg('camp: bank chest at ' + c.x + ',' + c.y + ',' + c.z + ' still holds ' + (leftUnknown ? 'UNKNOWN contents' : Object.keys(left).join(',') + ' (pack full?)')); break }
               }
               const savedN = Object.values(saved).reduce((s, n) => s + n, 0)
               if (!emptied) {
@@ -2656,7 +2719,10 @@ async function autoBuild (bot, schem, at, opts = {}) {
                   // "hut rebuilt -> 0/94" + rememberInfra('hut') pipeline is what let the bot
                   // believe home was established and walk away for hours.
                   if (hr && !hr.refused && hr.placed > 0) {
-                    provision.rememberInfra && provision.rememberInfra('hut', hutAt)
+                    // #115: rememberInfra('hut', hutAt) USED TO BE HERE, unconditional on any
+                    // non-refused build. It has moved to the post-verify below, where an OK
+                    // survey can be passed as its proof. A build that placed blocks is not
+                    // evidence that a hut stands.
                     try { await provision.ensureHutApron(bot, hutAt, { isStopped, say }) } catch (e) { dbg('camp: apron fill failed (' + e.message + ')') }
                     try { await handle(bot, 'collect') } catch {}
                     const bedCell = findCell(/_bed$/)
@@ -2688,15 +2754,25 @@ async function autoBuild (bot, schem, at, opts = {}) {
                   // truth-bypass that set builtClean=true unverified is deleted; a claim must be
                   // earned by a world re-read). Success only when placed>=total && bad2===0; on
                   // partial, latch bad2 so a pass that improved nothing cannot re-enter 'rebuild'.
-                  let bad2 = 0
-                  for (let y = st.y; y <= en.y; y++) for (let z = st.z; z <= en.z; z++) for (let x = st.x; x <= en.x; x++) {
-                    const w = hutSchem.getBlock(new Vec3(x, y, z)); const g = bot.blockAt(new Vec3(hutAt.x + x, hutAt.y + y, hutAt.z + z))
-                    if (!g) continue
-                    if (hutModel.cellMismatch((w && w.name) || 'air', g.name)) bad2++
-                  }
-                  const builtClean = bad2 === 0 && hr.total && hr.placed >= hr.total
-                  if (builtClean) { say('safehouse rebuilt clean - walls, door, bed, furnace, bank all in place'); hutRepairLatch = { lastBad: 0, lastAction: 'rebuild', ts: Date.now() } }
-                  else { dbg('camp: rebuild NOT clean - ' + bad2 + ' cell(s) still off, placed ' + hr.placed + '/' + hr.total); say('rebuilt the safehouse but ' + bad2 + ' cell(s) still off - no destructive retry until it improves'); hutRepairLatch = { lastBad: bad2, lastAction: 'rebuild', ts: Date.now() } }
+                  // #115: same `if (!g) continue` defect lived here, and it is what printed
+                  // `0 cell(s) still off` four seconds after the bot died, having placed 0/94.
+                  // A verify that cannot see the hut claims NOTHING - and specifically may not
+                  // clear the anti-thrash latch, which is what let the site be re-cleared.
+                  const sv2 = pathfixMod.surveyCells(bot, hutCells, hutModel.cellMismatch)
+                  const bad2 = sv2.bad
+                  const builtClean = sv2.verdict === 'OK' && hr.total && hr.placed >= hr.total
+                  if (builtClean) {
+                    say('safehouse rebuilt clean - walls, door, bed, furnace, bank all in place')
+                    hutRepairLatch = { lastBad: 0, lastAction: 'rebuild', ts: Date.now() }
+                    // PROOF-BACKED INGESTION: the hut record is written HERE, from the verify that
+                    // earned it, and nowhere else. The old unconditional rememberInfra('hut') ran
+                    // after a 0/94 build and gave insideOwnStructure a phantom to hold the bot in.
+                    try { provision.rememberInfra && provision.rememberInfra('hut', hutAt, { proof: { verdict: sv2.verdict, epoch: pathfixMod.epoch() } }) } catch (e) { dbg('camp: hut memory write rejected (' + e.message + ')') }
+                  } else if (sv2.verdict === 'UNKNOWN') {
+                    dbg('camp: rebuild verify UNKNOWN (' + sv2.unknown + '/' + sv2.total + ' unreadable) - claiming nothing, latching the pre-build damage so the next pass patches')
+                    say("i built at the safehouse but i can't see it well enough to say it's done")
+                    hutRepairLatch = { lastBad: bad, lastAction: 'rebuild', ts: Date.now() }
+                  } else { dbg('camp: rebuild NOT clean - ' + bad2 + ' cell(s) still off, placed ' + hr.placed + '/' + hr.total); say('rebuilt the safehouse but ' + bad2 + ' cell(s) still off - no destructive retry until it improves'); hutRepairLatch = { lastBad: bad2, lastAction: 'rebuild', ts: Date.now() } }
                 }
               }
             }

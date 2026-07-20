@@ -232,6 +232,43 @@ function recallSpot (item, pos, visited) {
 // INFRASTRUCTURE MEMORY (operator-requested): remember our OWN tables/furnaces/chests and
 // walk back to them instead of littering the landscape with a fresh crafting table every
 // time the last one fell out of the loaded chunks or behind torn-up terrain.
+// ---- INGESTION GATE (#115 GROUNDED_CLAIMS) -------------------------------------------
+// Memory used to accept ANY write and record no provenance, so a consumer could not tell a
+// record the bot had SEEN from one it had merely ASSERTED. Live cost: `rememberInfra('hut',
+// hutAt)` fired four seconds after a death, immediately after a "rebuild" that placed 0/94
+// blocks - and from then on `insideOwnStructure` answered "yes, I'm home" from inside a
+// phantom box, and `boundedHold` held the bot there.
+//
+// The rule now: a record carries HOW and WHEN it was verified.
+//   verified:true  - a grounded read/survey backed this write, in THIS life (epoch).
+//   verified:false - a hint. Good enough to AIM travel at ("go check the furnace"), never
+//                    good enough to make a life-affecting claim from.
+// A write that CLAIMS proof and whose proof does not hold up (stale epoch, UNKNOWN/BAD
+// survey, wrong block) is the phantom-hut case exactly: it is REJECTED and logged, never
+// downgraded to a hint. A write that claims nothing is stored as a hint. Records are then
+// upgraded IN PLACE by listInfra() the moment the bot can actually see them (below), so
+// this gate needs no changes at 30-odd existing call sites to converge on the truth.
+function _epochNow () { try { return require('./pathfix.js').epoch() } catch { return 0 } }
+// Does `proof` actually ground a write of `kind` at `pos`, in the current life?
+function proofHolds (kind, pos, proof) {
+  if (!proof || typeof proof !== 'object') return false
+  if (proof.epoch != null && proof.epoch !== _epochNow()) return false // observed in a previous life
+  if (proof.verdict != null) return proof.verdict === 'OK' // a surveyCells result
+  if (proof.known === true && proof.block && proof.block.name) { // a readCell result
+    const re = INFRA_BLOCK[kind]
+    if (re && !re.test(proof.block.name)) return false
+    const bp = proof.block.position
+    if (bp && (Math.floor(bp.x) !== Math.floor(pos.x) || Math.floor(bp.y) !== Math.floor(pos.y) || Math.floor(bp.z) !== Math.floor(pos.z))) return false
+    return true
+  }
+  if (proof.known === false) return false // an UNKNOWN read proves nothing
+  return false
+}
+function infraVerified (e) { return !!(e && e.verified) }
+// blockAt returns null for "nothing there" AND for "never sent that chunk"; readCell is the
+// one place allowed to tell them apart, so memory reads the world through it too.
+function readCellOf (bot, e) { try { return require('./pathfix.js').readCell(bot, { x: e.x, y: e.y, z: e.z }) } catch { return { known: false, block: null } } }
+
 function rememberInfra (kind, pos, meta) {
   // PROVENANCE (fix #13): genuine PLACEMENT sites tag { own: true } so furnace consolidation
   // can tell a furnace the bot provably placed from a merely-adopted (possibly player) one.
@@ -247,6 +284,17 @@ function rememberInfra (kind, pos, meta) {
     if (meta.flat != null) e.flat = meta.flat
     if (meta.surveyedAt != null) e.surveyedAt = meta.surveyedAt
   }
+  // #115: provenance. A claimed-but-failed proof is REJECTED outright (that is the phantom
+  // hut); an unclaimed write is stored as an unverified hint.
+  let verified = false
+  if (meta && meta.proof !== undefined) {
+    if (!proofHolds(kind, pos, meta.proof)) {
+      dbg('[mem] REJECTED unverified ' + kind + ' at ' + Math.floor(pos.x) + ',' + Math.floor(pos.y) + ',' + Math.floor(pos.z) + ' - proof did not hold')
+      return
+    }
+    verified = true
+  }
+  const stamp = e => { e.observedAt = Date.now(); if (verified) { e.verified = true; e.epoch = _epochNow() } else if (e.verified === undefined) e.verified = false }
   const m = loadWorldMem()
   const s = m.infra = m.infra || {}
   const list = s[kind] = s[kind] || []
@@ -254,10 +302,11 @@ function rememberInfra (kind, pos, meta) {
   // a double chest (two adjacent) or a chest+table read as a single remembered thing and
   // the bot lost track of what it had placed (operator: duplicate table, table on chest).
   // On a dedup hit, PRESERVE an existing own flag and only ever SET it (never clear it).
-  for (const e of list) { if (e.x === Math.floor(pos.x) && e.y === Math.floor(pos.y) && e.z === Math.floor(pos.z)) { e.at = Date.now(); if (own) e.own = true; applyMeta(e); saveWorldMem(); return } }
+  for (const e of list) { if (e.x === Math.floor(pos.x) && e.y === Math.floor(pos.y) && e.z === Math.floor(pos.z)) { e.at = Date.now(); if (own) e.own = true; applyMeta(e); stamp(e); saveWorldMem(); return } }
   const entry = { x: Math.floor(pos.x), y: Math.floor(pos.y), z: Math.floor(pos.z), at: Date.now() }
   if (own) entry.own = true
   applyMeta(entry)
+  stamp(entry)
   list.push(entry)
   if (list.length > 12) { list.sort((a, b) => b.at - a.at); list.length = 12 }
   saveWorldMem()
@@ -288,10 +337,16 @@ function listInfra (kind, bot) {
   const re = INFRA_BLOCK[kind]
   if (!bot || !re) return list
   const survivors = []; let changed = false
+  const now = _epochNow()
   for (const e of list) {
-    const b = bot.blockAt(new Vec3(e.x, e.y, e.z))
-    if (b == null) { survivors.push(e); continue } // chunk not loaded - can't verify, keep
-    if (re.test(b.name)) survivors.push(e); else changed = true // gone/wrong -> prune
+    const r = readCellOf(bot, e)
+    if (!r.known) { survivors.push(e); continue } // chunk not loaded - UNKNOWN, can't verify, can't disprove
+    if (re.test(r.block.name)) {
+      // #115 UPGRADE-ON-OBSERVATION: the bot is looking straight at it. That IS the proof,
+      // so the hint becomes a verified record here rather than at 30 call sites.
+      if (!e.verified || e.epoch !== now) { e.verified = true; e.epoch = now; e.observedAt = Date.now(); changed = true }
+      survivors.push(e)
+    } else changed = true // gone/wrong -> prune
   }
   if (changed) { const m = loadWorldMem(); if (m.infra) { m.infra[kind] = survivors; saveWorldMem() } }
   return survivors
@@ -593,7 +648,7 @@ module.exports = {
   rememberRoute, recallRoute, planTrekRoute, dementRoute,
   recordWedge, listWedges,
   rememberSpot, forgetSpot, recallSpot,
-  rememberInfra, recallInfra, forgetInfra, listInfra, recallInfraVerified,
+  rememberInfra, recallInfra, forgetInfra, listInfra, recallInfraVerified, infraVerified, proofHolds,
   loadMines, rememberMine, recallMine, forgetMine, updateMineProgress,
   searchCellKey, markSearched, isSearchedDry, clearSearched,
   gearupState, gearupResult, gearupShouldArmBackoff, proactiveGearupGate,
