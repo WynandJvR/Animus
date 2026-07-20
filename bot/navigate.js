@@ -746,10 +746,22 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
       kind: 'climb',
       when: () => opts.climb !== false && prov().hasSolidCeiling(bot, 12, { ignoreLeaves: true }),
       run: async () => {
+        // GROUNDED TARGET (#111). This rung used to hand climbToSurface `feet.y + 10` - a
+        // number, not a place. Every hop left the bot ten blocks up and still under a ceiling,
+        // so the rung re-fired and stepped again (live: y45 -> 55 -> 65 -> 75 over ground that
+        // stands at y70-72), and the last hop pillared several blocks into open sky. The
+        // ladder disappears STRUCTURALLY once the target is the surface the world actually has.
+        const feet = bot.entity.position.floored()
+        const surf = require('./pathfix.js').surfaceYAt(bot, feet.x, feet.z)
+        if (!surf.known) { dbg('recovery: climb REFUSED at ' + p0.floored() + ' - the surface of my own column is UNKNOWN (chunk not loaded) - not guessing a target'); return false }
+        // The goal's own Y is only admissible when the goal is in THIS column: "above the
+        // surface" is a local fact. A remote goal on a hillside says nothing about the ceiling
+        // over MY head, and maxing its Y in here is the same guess wearing a different hat.
         const gy = goalY(goal)
-        const targetY = Math.max(Math.floor(bot.entity.position.y) + 10, gy == null ? -Infinity : Math.floor(gy))
-        dbg('recovery: stuck UNDERGROUND at ' + p0.floored() + ' - climbing toward y=' + targetY)
-        try { await prov().climbToSurface(bot, targetY, { isStopped }) } catch (e) { dbg('recovery: climb-out failed (' + e.message + ')') }
+        const local = !!xz && Math.abs(Math.floor(xz.x) - feet.x) <= 1 && Math.abs(Math.floor(xz.z) - feet.z) <= 1
+        const targetY = (local && gy != null) ? Math.max(surf.y, Math.floor(gy)) : surf.y
+        dbg('recovery: stuck UNDERGROUND at ' + p0.floored() + ' - climbing to the surface y=' + targetY + ' (ground reads y' + surf.groundY + ')')
+        try { await prov().climbToSurface(bot, targetY, { isStopped, surfaceY: surf.y }) } catch (e) { dbg('recovery: climb-out failed (' + e.message + ')') }
         return movedEnough()
       }
     },

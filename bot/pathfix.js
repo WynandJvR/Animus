@@ -102,6 +102,69 @@ function sweep () {
   saveTrail()
 }
 
+// ---- GROUNDED WORLD READS ------------------------------------------------------------
+// THE one honest block read. mineflayer returns null both for "there is nothing there"
+// and for "I have never been sent that chunk" - and the codebase has been reading the
+// second as the first for months. A null is NOT information; it is the absence of it.
+// { known:false } is a THIRD state and callers must refuse to decide on it, never guess.
+function readCell (bot, pos) {
+  let b = null
+  try {
+    const { Vec3 } = require('vec3')
+    b = bot.blockAt(pos && pos.offset ? pos : new Vec3(Math.floor(pos.x), Math.floor(pos.y), Math.floor(pos.z)))
+  } catch { b = null }
+  if (!b || !b.name) return { known: false, block: null }
+  return { known: true, block: b }
+}
+
+// Canopy and clutter are not ground. A leaf block has a 'block' bounding box but standing
+// "on the surface" never means standing in a treetop, and the climb-out must not aim at one.
+const NOT_GROUND_RE = /_leaves$|^(vine|glow_lichen|scaffolding|bamboo|cave_vines|cave_vines_plant|weeping_vines|twisting_vines)/
+
+function isGroundBlock (block) {
+  if (!block || !block.name) return false
+  if (AIR_RE.test(block.name)) return false
+  if (NOT_GROUND_RE.test(block.name)) return false
+  return block.boundingBox === 'block' // plants, water, lava, torches, snow layers: not a floor
+}
+
+// GROUNDED SURFACE LOCATOR (#111). Scans the column (x,z) top-down and returns the cell a
+// player would STAND IN on the surface: `y` = one above the topmost ground block,
+// `groundY` = that block. There is no arithmetic guess anywhere in it - it reads the world.
+//
+// This replaces `bot.entity.position.y + 10`, a number that was named for a surface it never
+// located: it re-fired every time the bot got stuck ten blocks higher, so ONE burial produced
+// a ladder of hops (live 16:44-16:47: y45 -> 55 -> 65 -> 75 over ground standing at y70-72)
+// and left a 1x1 cobble tower several blocks into open sky.
+//
+// UNKNOWN handling (the point of the exercise): unknown cells at the TOP of the scan are
+// tolerated - they only mean the scan started above this world's build height - but once a
+// real cell has been read, any later unknown makes the whole answer UNKNOWN, and a column
+// with NO readable cell at all (an unloaded chunk) is UNKNOWN. Never a guess. Callers refuse.
+function surfaceYAt (bot, x, z, opts = {}) {
+  const X = Math.floor(x); const Z = Math.floor(z)
+  const UNKNOWN = { known: false, y: null, groundY: null }
+  let topY = opts.maxY
+  let botY = opts.minY
+  try {
+    if (topY == null && bot.game && Number.isFinite(bot.game.minY) && Number.isFinite(bot.game.height)) topY = bot.game.minY + bot.game.height - 1
+    if (botY == null && bot.game && Number.isFinite(bot.game.minY)) botY = bot.game.minY
+  } catch {}
+  if (topY == null) topY = 319
+  if (botY == null) botY = -64
+  let sawKnown = false
+  for (let y = topY; y >= botY; y--) {
+    const r = readCell(bot, { x: X, y, z: Z })
+    if (!r.known) {
+      if (sawKnown) return UNKNOWN // a hole in a column we were reading: fail closed
+      continue                      // still above the world's ceiling - not yet data
+    }
+    sawKnown = true
+    if (isGroundBlock(r.block)) return { known: true, y: y + 1, groundY: y }
+  }
+  return UNKNOWN // unloaded column, or nothing solid in it at all
+}
+
 // Point query: was THIS cell self-placed recently? The replant reflex was planting
 // saplings on the bot's own scaffold dirt (operator caught it live) - scaffold is
 // temporary by definition, nothing should treat it as real ground.
@@ -330,4 +393,4 @@ function installPathfinderTuning (bot) {
   } catch {}
 }
 
-module.exports = { installPathfinderTuning, selfPlacedNear, isSelfPlaced, placedOK, brokeOK, setDebugSink, setProgressSink }
+module.exports = { installPathfinderTuning, selfPlacedNear, isSelfPlaced, placedOK, brokeOK, setDebugSink, setProgressSink, readCell, isGroundBlock, surfaceYAt }

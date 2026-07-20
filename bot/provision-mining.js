@@ -108,8 +108,10 @@ async function digStaircaseUp (bot, targetY, opts = {}) {
     const tool = toolForBlock(bot, b.name)
     if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
     if (bot.canDigBlock && !bot.canDigBlock(b)) return false
-    try { await bot.dig(b); return true } catch { return false }
+    // ESCAPE COMMITMENT (#111): every cell the escape opens is a debt we own - see pillarUpTo.
+    try { await bot.dig(b); scaffold.oweShaft(p, b.name); return true } catch { return false }
   }
+  const surfaceY = Number.isFinite(opts.surfaceY) ? opts.surfaceY : null
   const startY = Math.floor(bot.entity.position.y)
   let di = 0; let stuck = 0
   // #97 ESCAPE_DIGS_HURT (default on): when this staircase IS the escape (opts.escape - the
@@ -123,7 +125,13 @@ async function digStaircaseUp (bot, targetY, opts = {}) {
     : mineDanger(bot)
   while (Math.floor(bot.entity.position.y) < targetY && !isStopped() && stuck < 8) {
     if (LAVA_SAFE && dangerNow()) break // #41: in-lava/on-fire (+hostile/low-hp when NOT escaping) -> stop digging & hand control back
-    if (Math.floor(bot.entity.position.y) > startY && !hasSolidCeiling(bot, 20, { ignoreLeaves: true })) break // broke into open sky - done
+    if (surfaceY != null && Math.floor(bot.entity.position.y) >= surfaceY) break // #111 NO OVERSHOOT: the surface is the end of the climb, not a waypoint
+    if (Math.floor(bot.entity.position.y) > startY && !hasSolidCeiling(bot, 20, { ignoreLeaves: true })) { // broke into open sky - done
+      // #111: same demotion as pillarUpTo - with a grounded targetY the loop bound is the stop
+      // condition and open sky BELOW the claimed surface is an ungrounded-target assertion.
+      if (surfaceY != null && Math.floor(bot.entity.position.y) < surfaceY) dbg('  staircase: INVARIANT VIOLATION - open sky at y' + Math.floor(bot.entity.position.y) + ' but the target claims a surface at y' + surfaceY + ' (ungrounded target) - stopping')
+      break
+    }
     const y0 = Math.floor(bot.entity.position.y)
     const feet = bot.entity.position.floored()
     await digIf(feet.offset(0, 2, 0))             // our own head-clearance to move up
@@ -213,10 +221,16 @@ function climbMovements (bot) {
   return m
 }
 
+// CONTRACT (#111): `targetY` is a GROUNDED surface - the standable cell returned by
+// pathfix.surfaceYAt for the bot's OWN column - not an arithmetic guess. This function was
+// named for a surface it never located; now its callers locate one and it climbs to exactly
+// that. opts.surfaceY carries the same number down to the primitives so they can ASSERT it.
+// The stop condition is feet.y >= targetY EXACTLY: no slack, no overshoot into open air.
 async function climbToSurface (bot, targetY, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
+  const surfaceY = Number.isFinite(opts.surfaceY) ? opts.surfaceY : targetY
   const prev = bot.pathfinder && bot.pathfinder.movements
-  const need = () => bot.entity && Math.floor(bot.entity.position.y) < targetY - 1 &&
+  const need = () => bot.entity && Math.floor(bot.entity.position.y) < targetY &&
     hasSolidCeiling(bot) && !isStopped()
   try {
     // 1) SPIRAL STAIRCASE up - cuts a WALKABLE ramp to the surface (fast, and once up we
@@ -225,14 +239,14 @@ async function climbToSurface (bot, targetY, opts = {}) {
     if (need()) {
       if (bot.pathfinder) bot.pathfinder.setMovements(climbMovements(bot))
       const y0 = bot.entity.position.y
-      try { await digStaircaseUp(bot, targetY, { isStopped, escape: true }) } catch (e) { if (process.env.CLIMB_DEBUG) console.error('[climb] staircase threw', e.message) } // #97: climbToSurface IS the escape - only lava/fire may abort the dig
+      try { await digStaircaseUp(bot, targetY, { isStopped, escape: true, surfaceY }) } catch (e) { if (process.env.CLIMB_DEBUG) console.error('[climb] staircase threw', e.message) } // #97: climbToSurface IS the escape - only lava/fire may abort the dig
       if (process.env.CLIMB_DEBUG) console.error(`[climb] staircase ${y0.toFixed(1)} -> ${bot.entity.position.y.toFixed(1)} (target ${targetY})`)
     }
     // 2) PILLAR STRAIGHT UP as a fallback - if the staircase stalls (awkward/open cavern
     //    geometry it can step off of), rise on a 1-wide column that can't be fallen off.
     if (need()) {
       const y0 = bot.entity.position.y
-      try { await pillarUpTo(bot, targetY, { isStopped }) } catch (e) { if (process.env.CLIMB_DEBUG) console.error('[climb] pillar threw', e.message) }
+      try { await pillarUpTo(bot, targetY, { isStopped, surfaceY }) } catch (e) { if (process.env.CLIMB_DEBUG) console.error('[climb] pillar threw', e.message) }
       if (process.env.CLIMB_DEBUG) console.error(`[climb] pillar ${y0.toFixed(1)} -> ${bot.entity.position.y.toFixed(1)}`)
     }
   } finally {
@@ -244,15 +258,34 @@ async function pillarUpTo (bot, targetY, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   if (insideOwnStructure(bot)) { dbg('  pillar: inside my own hut - not pillaring through the roof'); return }
   const startY = Math.floor(bot.entity.position.y)
+  const surfaceY = Number.isFinite(opts.surfaceY) ? opts.surfaceY : null
   let stuck = 0
   let equippedFiller = null
   while (Math.floor(bot.entity.position.y) < targetY && !isStopped() && stuck < 15) {
-    // Stop the MOMENT we break into open sky (no ceiling) - keeping on to targetY builds a
-    // useless 1x1 tower into the air and strands the bot on top (targetY is a rough surface
-    // guess and overshoots in valleys). Once above where we started with clear sky, we're out.
+    // NO OVERSHOOT (#111), the hard stop: feet.y >= surfaceY ends the climb, full stop. A
+    // targetY above the located surface is not a taller climb, it is a 1x1 tower into open
+    // air - the thing the operator watched appear across the map. Say so and stop AT the
+    // ground. (surfaceY is null only for the #76 suicide-fall path, which needs the height.)
+    if (surfaceY != null && Math.floor(bot.entity.position.y) >= surfaceY) {
+      if (Math.floor(bot.entity.position.y) < targetY) dbg('  pillar: INVARIANT VIOLATION - target y' + targetY + ' is ABOVE the grounded surface y' + surfaceY + ' - stopping at the surface, refusing to tower into open air')
+      break
+    }
+    // #111: this open-sky break used to be the LOAD-BEARING overshoot guard, and its own
+    // comment conceded the defect it was guarding ("targetY is a rough surface guess and
+    // overshoots in valleys"). It was then DEFEATED by its own debris: the floating topsoil
+    // plug that an earlier overshoot left above a shaft reads as a solid ceiling to
+    // hasSolidCeiling(20), so the guard went blind exactly where the damage was worst.
+    // targetY is now a grounded surface, so the loop bound above is the real stop condition
+    // and this DEMOTES to an invariant assertion: open sky BELOW the claimed surface means a
+    // caller handed us a guess. Stop, say so, and place nothing above.
     // (#76: the suicide-fall path pillars AT an open-sky cell and NEEDS the full targetY height for a
     // lethal fall, so it passes ignoreOpenSkyBreak to skip this early-out; every other caller unchanged.)
-    if (!opts.ignoreOpenSkyBreak && Math.floor(bot.entity.position.y) > startY && !hasSolidCeiling(bot, 20, { ignoreLeaves: true })) break
+    if (!opts.ignoreOpenSkyBreak && Math.floor(bot.entity.position.y) > startY && !hasSolidCeiling(bot, 20, { ignoreLeaves: true })) {
+      if (surfaceY != null && Math.floor(bot.entity.position.y) < surfaceY) {
+        dbg('  pillar: INVARIANT VIOLATION - open sky at y' + Math.floor(bot.entity.position.y) + ' but the target claims a surface at y' + surfaceY + ' (ungrounded target) - stopping, nothing placed above')
+      }
+      break
+    }
     const y0 = Math.floor(bot.entity.position.y)
     const feet = bot.entity.position.floored()
     // Clear TWO blocks above our head (y+2 and y+3): a full jump-up needs the head to pass
@@ -265,7 +298,12 @@ async function pillarUpTo (bot, targetY, opts = {}) {
         if (bot.canDigBlock && !bot.canDigBlock(above)) { bot.clearControlStates(); return }
         const tool = toolForBlock(bot, above.name)
         if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
-        try { await bot.dig(above) } catch {}
+        // ESCAPE COMMITMENT (#111): the cell we just opened is world state we own. The registry
+        // used to remember only blocks we PLACED, so the void a climb cut through was
+        // unnameable - and what cannot be named cannot be healed (live: the 5-block void at
+        // 459,-91 under its own floating topsoil). Record it as shaft debt with the block that
+        // used to fill it, so the reclaim job can settle it with matching material.
+        try { await bot.dig(above); scaffold.oweShaft(feet.offset(0, up, 0), above.name) } catch {}
         equippedFiller = null // we swapped to a tool
       }
     }

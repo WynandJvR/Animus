@@ -49,14 +49,18 @@ function save () {
   }, 2000)
 }
 function key (p) { return `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}` }
+const AIR_RE = /^(air|cave_air|void_air)$/
+const isShaft = (v) => !!v && v.purpose === 'shaft'
 function sweep () {
   const cut = Date.now() - MAX_AGE_MS
   for (const [k, v] of reg) { if (v.t < cut) reg.delete(k) }
   // CAP GUARD (flag-on only): a 72h retention window can outgrow the registry if the age cut
   // frees nothing. Evict OLDEST-first down to 512 so memory stays bounded. Flag off => this is
   // skipped and sweep() age-culls exactly as fd90c9f did (byte-equivalent).
+  // #111: PLACED blocks are evicted before SHAFT DEBT. Forgetting a block we placed loses a
+  // chore; forgetting a hole we dug loses the only record that the hole is ours to fill.
   if (process.env.INFRA_CONSOLIDATE !== '0' && reg.size > 512) {
-    const byAge = [...reg.entries()].sort((a, b) => a[1].t - b[1].t)
+    const byAge = [...reg.entries()].sort((a, b) => (isShaft(a[1]) - isShaft(b[1])) || (a[1].t - b[1].t))
     for (let i = 0; i < byAge.length && reg.size > 512; i++) reg.delete(byAge[i][0])
   }
   save()
@@ -84,16 +88,50 @@ function onPlaced (pos) {
 }
 function forget (pos) { reg.delete(key(pos)); save() }
 
+// ---- ESCAPE COMMITMENTS: the cells we DUG (#111) --------------------------------------
+// The registry remembered only blocks we PLACED. Cells the bot DIGS to escape are committed
+// world state exactly the same way, and nothing recorded them - so the 5-block void a climb
+// cut at 459,-91, left under its own floating topsoil, was not merely unhealed but
+// UNNAMEABLE. This is the dig side of the same ledger: `was` is the block that used to fill
+// the cell, so a later reclaim pass can settle the debt with coarsely-matching material.
+//
+// A shaft entry is DEBT, not scaffold. It is deliberately invisible to isScaffold() (there is
+// nothing there to grant dig permission over) and to near() (teardown must never see an
+// air cell as a candidate - it would "repurposed, already gone" the debt straight out of the
+// registry). Readers who want debts ask for them by name.
+function oweShaft (pos, wasName) {
+  if (!wasName || AIR_RE.test(String(wasName))) return
+  const k = key(pos)
+  const prev = reg.get(k)
+  if (prev && isShaft(prev)) return // idempotent - keep the ORIGINAL block name, not a re-dig's
+  reg.set(k, { t: Date.now(), purpose: 'shaft', was: String(wasName) })
+  if (reg.size > 512) sweep()
+  save()
+}
+// Outstanding dug-cell debt near a point (the reclaim job's read side).
+function shaftDebts (pos, r, maxAgeMs) {
+  const out = []
+  const cut = Date.now() - (maxAgeMs || MAX_AGE_MS)
+  for (const [k, v] of reg) {
+    if (!isShaft(v) || v.t < cut) continue
+    const [x, y, z] = k.split(',').map(Number)
+    if (r == null || Math.hypot(x - pos.x, z - pos.z) <= r) out.push({ x, y, z, t: v.t, was: v.was })
+  }
+  return out
+}
+function settleShaft (pos) { const v = reg.get(key(pos)); if (isShaft(v)) { reg.delete(key(pos)); save() } }
+
 // ---- reads -----------------------------------------------------------------------
 function isScaffold (pos, maxAgeMs) {
   const e = reg.get(key(pos))
-  return !!e && e.t >= Date.now() - (maxAgeMs || MAX_AGE_MS)
+  return !!e && !isShaft(e) && e.t >= Date.now() - (maxAgeMs || MAX_AGE_MS) // a dug cell is debt, not a block we may break
 }
-function near (pos, r, maxAgeMs) {
+function near (pos, r, maxAgeMs, opts = {}) {
   const out = []
   const cut = Date.now() - (maxAgeMs || MAX_AGE_MS)
   for (const [k, v] of reg) {
     if (v.t < cut) continue
+    if (isShaft(v) && !opts.includeShafts) continue // debts are not teardown candidates
     const [x, y, z] = k.split(',').map(Number)
     if (Math.hypot(x - pos.x, z - pos.z) <= r) out.push({ x, y, z, t: v.t, purpose: v.purpose })
   }
@@ -142,20 +180,52 @@ async function teardown (bot, around, opts = {}) {
     } catch {}
   }
   if (!spots.length) return 0
-  spots.sort((a, b) => b.y - a.y) // top-down: digging under our own feet rides us down
+  // COLUMN INTEGRITY (#111). This loop used to sort top-down and then treat every cell
+  // INDEPENDENTLY: any cell it could not reach was `continue`d while the reachable cells
+  // below it were dug. Applied to a column - which is the shape almost all of this litter
+  // has - that does not "make partial progress", it deterministically AMPUTATES THE BASE and
+  // strands the top where nothing can ever reach it again. The floating dirt plug over a
+  // 5-block void at 459,-91 is the guaranteed end state of cell-independent teardown, not
+  // bad luck. INVARIANT: a cell may not be removed while a registered cell still stands above
+  // it in the same column. A column is dismantled strictly top-down, riding it down; the
+  // moment one of its cells cannot be removed the WHOLE column is abandoned and stays on the
+  // books as debt. Amputating a base to show a number is forbidden - progress that
+  // manufactures an unreachable floater is negative progress.
+  const cols = new Map()
+  for (const p of spots) {
+    const ck = Math.floor(p.x) + ',' + Math.floor(p.z)
+    if (!cols.has(ck)) cols.set(ck, [])
+    cols.get(ck).push(p)
+  }
+  const columns = [...cols.values()]
+  for (const c of columns) c.sort((a, b) => b.y - a.y) // top-down within the column
+  columns.sort((a, b) => b[0].y - a[0].y)              // tallest tops first (the old global order)
+  const budget = opts.max || 32
+  let considered = 0
   let removed = 0
-  for (const p of spots.slice(0, opts.max || 32)) {
-    if (isStopped()) break
-    if (opts.exclude && opts.exclude(p)) continue // e.g. cells the schematic owns
-    const b = bot.blockAt(new Vec3(p.x, p.y, p.z))
-    if (!b || !FILLER_RE.test(b.name)) { forget(p); continue } // repurposed/already gone
-    if (bot.entity.position.distanceTo(b.position) > 4.5) {
-      try { await require('./navigate.js').gotoOnce(bot, new goals.GoalNear(p.x, p.y, p.z, 3), 8000) } catch { continue }
+  const abandon = (col, at, why) => dbg('column ' + Math.floor(col[0].x) + ',' + Math.floor(col[0].z) + ': ' + why + ' at y' + at + ' - leaving the whole column standing (' + col.length + ' cell(s) still owed) rather than stranding what is above it')
+  for (const col of columns) {
+    if (isStopped() || considered >= budget) break
+    for (const p of col) {
+      if (isStopped() || considered >= budget) break
+      considered++
+      if (opts.exclude && opts.exclude(p)) { abandon(col, p.y, 'a cell is excluded (owned by a build)'); break } // e.g. cells the schematic owns
+      const b = bot.blockAt(new Vec3(p.x, p.y, p.z))
+      if (!b) { abandon(col, p.y, 'UNKNOWN cell (chunk not loaded)'); break } // a null is not "already gone" - fail closed, keep the debt
+      if (!FILLER_RE.test(b.name)) { forget(p); continue } // repurposed: nothing of ours here to strand
+      if (bot.entity.position.distanceTo(b.position) > 4.5) {
+        try { await require('./navigate.js').gotoOnce(bot, new goals.GoalNear(p.x, p.y, p.z, 3), 8000) } catch {}
+        // goto reports success on paths it never walked - the arrival claim is the re-read distance
+        if (bot.entity.position.distanceTo(b.position) > 4.5) { abandon(col, p.y, 'cannot reach it'); break }
+      }
+      const tool = provision.toolForBlock ? provision.toolForBlock(bot, b.name) : null // wrong-tool digs drop NOTHING (hoe-dug scaffold vanished, live)
+      if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
+      if (bot.canDigBlock && !bot.canDigBlock(b)) { abandon(col, p.y, 'cannot dig it'); break }
+      let dug = false
+      try { await bot.dig(b); dug = true } catch {}
+      if (!dug) { abandon(col, p.y, 'the dig failed'); break }
+      removed++; forget(p); await new Promise(r => setTimeout(r, 150))
     }
-    const tool = provision.toolForBlock ? provision.toolForBlock(bot, b.name) : null // wrong-tool digs drop NOTHING (hoe-dug scaffold vanished, live)
-    if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
-    if (bot.canDigBlock && !bot.canDigBlock(b)) { continue }
-    try { await bot.dig(b); removed++; forget(p); await new Promise(r => setTimeout(r, 150)) } catch {}
   }
   if (removed) dbg('tore down ' + removed + ' scaffold block(s) near ' + Math.round(around.x) + ',' + Math.round(around.z) + ' (' + reg.size + ' registered left)')
   return removed
@@ -186,4 +256,4 @@ async function teardownVerified (bot, around, opts = {}) {
   return { ok: remaining === 0, passes: pass, removed, remaining }
 }
 
-module.exports = { beginSession, endSession, inSession, add, onPlaced, forget, isScaffold, near, count, onFarmFootprint, pickFiller, teardown, teardownVerified, setDebugSink, FILLER_RE }
+module.exports = { beginSession, endSession, inSession, add, onPlaced, forget, oweShaft, shaftDebts, settleShaft, isScaffold, near, count, onFarmFootprint, pickFiller, teardown, teardownVerified, setDebugSink, FILLER_RE }

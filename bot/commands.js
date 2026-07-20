@@ -277,10 +277,17 @@ async function travelFar (bot, dest, opts = {}) {
   // escape) and doesn't bill the climb against the travel clock. Returns true if we rose.
   const surfaceOut = async (reason) => {
     if (climbs >= 8) return false
+    // GROUNDED TARGET (#111): this used to climb toward `dest.y` - the destination's height,
+    // which says nothing about the ground over the bot's HEAD when the destination is 300
+    // blocks away. Read the surface of the column we are standing in; refuse if it is UNKNOWN
+    // (fail closed - a guess here is what builds towers into the sky).
+    const feet = bot.entity.position.floored()
+    const surf = require('./pathfix.js').surfaceYAt(bot, feet.x, feet.z)
+    if (!surf.known) { climbs = 8; return false }
     say(reason)
     const cs = Date.now(); const yBefore = Math.floor(bot.entity.position.y)
     escaping = true
-    try { await provision.climbToSurface(bot, Math.floor(dest.y), { isStopped }) }
+    try { await provision.climbToSurface(bot, surf.y, { isStopped, surfaceY: surf.y }) }
     catch { /* couldn't cut up from here */ } finally { escaping = false }
     climbTimeMs += Date.now() - cs
     bot.pathfinder.setMovements(travelMovements(bot))
