@@ -2010,11 +2010,15 @@ if (process.env.AUTO_SCAFFOLD_SWEEP !== '0') {
 if (process.env.AUTO_SURFACE !== '0') {
   let wetHist = 0        // decaying persistence: +1 wet / -1 dry, clamped 0..4 (bobbing between digs still accumulates - NOT a hard reset on one dry poll)
   let drownStart = 0     // when this drowning episode began (for the gate-starvation override)
-  let drownCooldownUntil = 0
+  // #116 ESCAPE_ACCOUNTABLE: `drownCooldownUntil` - a 10-SECOND BLANKET TIMER that muted this
+  // reflex entirely after a failed escape - was DELETED here. It was a wall-clock hold on the
+  // one reflex that answers drowning, in violation of the no-blanket-time-holds rule, and it is
+  // NOT replaced by another timer: escapeWater is now re-entrant-guarded and owns the crisis for
+  // exactly as long as the bot is submerged, and accountability for a failing rung is the
+  // arbiter's condition-scoped progress revocation, not a clock.
   let drowning = false
   setInterval(async () => {
     if (drowning || !bot.entity) return
-    if (Date.now() < drownCooldownUntil) return
     const n = provision.survivalNeed(bot)
     const isDrown = !!(n && n.need === 'drowning')
     if (isDrown) { wetHist = Math.min(4, wetHist + 1); if (!drownStart) drownStart = Date.now() }
@@ -2039,16 +2043,22 @@ if (process.env.AUTO_SURFACE !== '0') {
     drowning = true
     try {
       note('(drown-crisis) head underwater - taking the controls to get out of the water')
+      // #116: epoch-scope the whole claim. At 15:51:19 this reflex logged `out of the water`
+      // 1.7s AFTER the bot drowned - the check was honest and described the RESPAWN POINT,
+      // 137 blocks away. A claim that outlives the bot that made it is not a claim.
+      const pathfix = require('./pathfix.js')
+      const e0 = pathfix.epoch()
       const ok = await navigate.escapeWater(bot, { isStopped: () => false })
       // WATER_ESCAPE (task #48): escapeWater's success is HEAD-based (!headInWater), so a bobbing bot
       // whose head clears for a tick declared "out of the water" while its body kept treading the same
       // pond (the log-50236 false victory, design §2b). Under the flag, judge "out" by the FEET so the
       // head-based reflex and the feet-based recovery `water` rung agree on "actually out". Purely the
       // success LABEL + cooldown gate; the escape it ran is unchanged. Flag OFF => today's head-based ok.
-      const out = (process.env.WATER_ESCAPE === '1') ? !navigate.feetInWater(bot) : ok
-      note(`(drown-crisis) ${out ? 'out of the water' : 'still wet - will retry after a cooldown'}`)
-      if (!out) drownCooldownUntil = Date.now() + 10000
-    } catch (e) { note(`(drown-crisis) failed: ${e.message}`); drownCooldownUntil = Date.now() + 10000 } finally { drowning = false; wetHist = 0; drownStart = 0 }
+      if (!pathfix.sameEpoch(e0)) { note('(drown-crisis) I died down there - not claiming an escape I did not make') } else {
+        const out = (process.env.WATER_ESCAPE === '1') ? !navigate.feetInWater(bot) : ok
+        note(`(drown-crisis) ${out ? 'out of the water' : 'still wet - re-evaluating while I am still under'}`)
+      }
+    } catch (e) { note(`(drown-crisis) failed: ${e.message}`) } finally { drowning = false; wetHist = 0; drownStart = 0 }
   }, 2000)
 }
 

@@ -222,30 +222,104 @@ async function jumpForAir (bot, ms = 6000, isStopped = () => false) {
 // AWAIT this; the index.js drown-crisis reflex fires it as a backstop/override. Opens a SURVIVE
 // maneuver span so lower reflexes defer. Every rung is bounded (swim 15s + hop 2.5s/dir + air 6s,
 // whole call capped at deadlineMs) and it returns an HONEST bool (still wet? false) - never wedges.
+// #116 ESCAPE_ACCOUNTABLE (DESIGN §3.4 D1 + capability gap H, Root D)
+//
+// What this used to be: a FIXED ladder - swim, hop, rise - run under one SURVIVE span that
+// nothing audited. On 2026-07-19 it held the body for 24 seconds in a flooded cave pocket where
+// every one of those three rungs was physically impossible, and the span ended 1.7 seconds after
+// the bot died. Three separate guards (this ladder, navigate's water/wetbreach rungs, and the
+// index drown reflex) each believed one of the others owned the problem; the wetbreach rung
+// literally handed control back to the reflex that was already failing.
+//
+// What it is now, and the three things that changed:
+//   1. ONE OWNER. This function is the only water-escape authority. The index reflex is pure
+//      detection and the recovery rungs delegate here, so a handoff loop is unrepresentable.
+//   2. THE LADDER IS ORDERED BY DIAGNOSIS, NOT BY HABIT. classifySubmersion reads the world and
+//      says what kind of trouble this is; 'submerged-enclosed' puts the VERTICAL rung FIRST
+//      (capability gap H), because swimming toward a bank that does not exist is not a strategy.
+//   3. EVERY RUNG MUST PROVE PROGRESS. Each rung runs under its own probed SURVIVE sub-span. The
+//      probe is `floor(y) + 100 if breathing` - rising the column or clearing the head both count,
+//      bobbing does not. A rung whose probe goes flat is REVOKED by the arbiter, aborts its await,
+//      is BURNED for this crisis instance, and the ladder escalates. No rung can hold the body by
+//      assertion again.
+//
+// The burn set is CONDITION-scoped, not time-scoped: it lives exactly as long as this call, and
+// this call lives exactly as long as the bot is submerged. There is no cooldown anywhere in here
+// (the 10s drownCooldownUntil timer this replaces was deleted from index.js).
+//
+// EPOCH: success is claimed only if the bot is alive in the SAME life it started in. The
+// `swim: ashore on oak_planks` / `(drown-crisis) out of the water` pair at 15:51:19 was true and
+// worthless - it described the respawn point, 137 blocks away, reached by dying.
+const ESCAPE_PROBE_MS = 1000
 let escapingWater = false
+function escapeProbe (bot) {
+  try {
+    const y = Math.floor(bot.entity.position.y)
+    return y + (headInWater(bot) ? 0 : 100)
+  } catch { return -Infinity }
+}
 async function escapeWater (bot, { isStopped = () => false, deadlineMs = 35000 } = {}) {
   if (drownReflexSkips(deliberateDrown)) { dbg('drown-escape: deliberate-drown latch set (suicide-reset) - NOT escaping, letting it drown'); return false } // #63 §B.1
   if (escapingWater) return false // re-entrant guard: one escape at a time (reflex + job loop can both call)
   escapingWater = true
+  const pathfix = require('./pathfix.js')
+  const pocketEscape = require('./pocket-escape.js')
+  const e0 = pathfix.epoch()
   const tok = arbiter.beginManeuver('drown-escape', arbiter.PRIORITY.SURVIVE, deadlineMs + 5000)
+  // The sampler IS the accountability. One interval, two block reads per tick, alive only while
+  // the bot is actually drowning (body-first-priority: this must not cost anything in peacetime).
+  const sampler = setInterval(() => { try { arbiter.sampleManeuvers() } catch {} }, ESCAPE_PROBE_MS)
   try {
     const dl = Date.now() + deadlineMs
     const wet = () => headInWater(bot)
     if (!wet()) return true
     try { bot.stopDigging() } catch {} // a mid-dig await would otherwise hold the body underwater
     try { bot.pathfinder.setGoal(null) } catch {}
-    while (wet() && Date.now() < dl && !isStopped()) {
-      arbiter.refreshManeuver(tok, deadlineMs + 5000)
-      if (await swimToShore(bot, isStopped)) break            // rung 1: float up + swim to the nearest bank
-      if (!wet()) break
-      try { if (await prov().manualHopFromWater(bot)) break } catch {} // rung 2: hop straight onto an adjacent bank
-      if (!wet()) break
-      await jumpForAir(bot, 6000, isStopped)                  // rung 3: roofed flood - rise the column for air
+    const burned = new Set() // rungs proven useless for THIS crisis instance
+    // Run one rung under its own probed sub-span. Returns 'out' | 'revoked' | 'failed'.
+    const runRung = async (kind, fn) => {
+      const rtok = arbiter.beginManeuver('escape:' + kind, arbiter.PRIORITY.SURVIVE, deadlineMs + 5000, { probe: () => escapeProbe(bot) })
+      const stop = () => isStopped() || arbiter.maneuverRevoked(rtok)
+      let ok = false
+      try { ok = await fn(stop) } catch (e) { dbg('drown-escape: rung ' + kind + ' failed (' + e.message + ')') }
+      const wasRevoked = arbiter.maneuverRevoked(rtok)
+      arbiter.endManeuver(rtok)
+      if (!wet()) return 'out'
+      if (wasRevoked) { burned.add(kind); dbg('drown-escape: rung ' + kind + ' REVOKED - no progress, escalating'); return 'revoked' }
+      if (!ok) burned.add(kind)
+      return ok ? 'out' : 'failed'
     }
-    const out = !wet()
-    dbg('drown-escape: ' + (out ? 'out of the water at ' + bot.entity.position.floored() : 'STILL WET after the ladder'))
+    const rungs = {
+      swim: (stop) => swimToShore(bot, stop),
+      hop: async () => { try { return await prov().manualHopFromWater(bot) } catch { return false } },
+      breach: async (stop) => { try { return await prov().breachWaterPocket(bot, { isStopped: stop }) } catch { return false } },
+      vertical: async (stop) => { try { return await prov().escapeUpColumn(bot, { isStopped: stop }) } catch { return false } },
+      rise: (stop) => jumpForAir(bot, 6000, stop)
+    }
+    while (wet() && Date.now() < dl && !isStopped()) {
+      if (!pathfix.sameEpoch(e0)) { dbg('drown-escape: died mid-escape - abandoning the attempt, claiming nothing'); return false }
+      arbiter.refreshManeuver(tok, deadlineMs + 5000)
+      // DIAGNOSE, then order the ladder by what is actually wrong. Re-classified every pass, so a
+      // situation that changes under us (a breach opens a bank) re-orders immediately.
+      let situation = 'open-water-with-bank'
+      try {
+        const feet = bot.entity.position.floored()
+        const read = (dx, dy, dz) => { const b = bot.blockAt(feet.offset(dx, dy, dz)); return b ? b.name : null }
+        situation = pocketEscape.classifySubmersion(read, null)
+      } catch {}
+      const order = pocketEscape.escapeRungOrder(situation) // capability gap H: 'submerged-enclosed' puts vertical FIRST
+      const next = order.find(k => !burned.has(k))
+      if (!next) { dbg('drown-escape: every rung burned for this crisis (' + situation + ') - honest give-up'); break }
+      dbg('drown-escape: ' + situation + ' -> rung ' + next)
+      const r = await runRung(next, rungs[next])
+      if (r === 'out') break
+    }
+    // GROUNDED + EPOCH-SCOPED success. Both halves matter: the head must be out of the water NOW,
+    // and it must be the same bot that went in.
+    const out = !wet() && pathfix.sameEpoch(e0)
+    dbg('drown-escape: ' + (out ? 'out of the water at ' + bot.entity.position.floored() : (pathfix.sameEpoch(e0) ? 'STILL WET after the ladder' : 'DIED - the escape outlived the bot, claiming nothing')))
     return out
-  } finally { arbiter.endManeuver(tok); escapingWater = false }
+  } finally { clearInterval(sampler); arbiter.endManeuver(tok); escapingWater = false }
 }
 // Is a water-escape maneuver (escapeWater) actively driving the body right now? walkStaged reads
 // this for the WATER_ESCAPE trek anti-fight - don't compose a leg back into the pond while an
@@ -681,9 +755,19 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
       // fire - it stands in a puddle forever (watched live, 8 min). Shallow trench: hop
       // straight onto the adjacent bank. Deep water (mid-river, no adjacent bank): swim
       // for the nearest shore on manual controls.
+      // #116: a DROWNING bot is not this rung's business. When the head is under, this used to
+      // run its own hop/swim/relocate ladder in parallel with the index drown reflex and the
+      // wetbreach rung - three owners, no accountability. It now DELEGATES to escapeWater, the
+      // single authority (which is re-entrant-guarded, so if the reflex already owns the escape
+      // this returns honestly instead of starting a competing one). Feet-wet-but-breathing - a
+      // shallow trench - is still genuinely this rung's job and is unchanged below.
       kind: 'water',
       when: () => feetInWater(bot),
       run: async () => {
+        if (headInWater(bot)) {
+          const out = await escapeWater(bot, { isStopped })
+          return out || movedEnough()
+        }
         await prov().manualHopFromWater(bot)
         if (movedEnough() && !feetInWater(bot)) return true
         if (await swimToShore(bot, isStopped)) return true
@@ -707,9 +791,15 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
       // Gated so a pure leaf canopy over open water does NOT trigger it (ignoreLeaves) - the
       // swim rungs own that; logs/terrain overhead do. WATER_WEDGE_ESCAPE=0 -> byte-for-byte
       // today's ladder (this rung never applies).
+      // #116: gated on !headInWater. This rung's executor used to bail with `breach: low oxygen -
+      // handing back to the drown reflex` - handing a drowning bot to the reflex that had already
+      // failed it for 15 seconds, which came straight back here. That circular handoff is deleted
+      // at both ends: the bail is gone from breachWaterPocket, and a submerged bot never reaches
+      // this rung at all (the water rung above delegates to escapeWater first, and escapeWater
+      // owns `breach` as one of ITS rungs, under a progress probe).
       kind: 'wetbreach',
       when: () => process.env.WATER_WEDGE_ESCAPE !== '0' &&
-        feetInWater(bot) &&
+        feetInWater(bot) && !headInWater(bot) &&
         prov().hasSolidCeiling(bot, 8, { ignoreLeaves: true }) &&
         !(prov().insideOwnStructure && prov().insideOwnStructure(bot)),
       run: async () => {

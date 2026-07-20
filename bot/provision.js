@@ -392,7 +392,12 @@ async function breachWaterPocket (bot, opts = {}) {
   const feet = bot.entity.position.floored()
   const feetBlock = bot.blockAt(feet)
   if (!feetBlock || !/water/.test(feetBlock.name)) { dbg('  breach: not standing in water - skipping'); return false }
-  if ((bot.oxygenLevel ?? 20) < 6) { dbg('  breach: low oxygen - handing back to the drown reflex'); return false }
+  // #116: the `low oxygen - handing back to the drown reflex` bail was DELETED here. It handed
+  // control to the reflex that had ALREADY been failing for 15 seconds, which handed it back -
+  // a closed loop with no owner, and the bot drowned inside it. Low oxygen is the reason to dig
+  // FASTER, never the reason to hand a drowning bot to a peer that cannot help it either.
+  // escapeWater is now the single owner and this is one of its rungs; accountability for a rung
+  // that is not producing air lives in the arbiter's progress probe, not in a handoff.
   // THE anti-grief whitelist, passed to the pure planner. Extends dig permission to natural
   // tree blocks FOR THIS RUNG ONLY - the exact permission the wood gather already exercises.
   const anchors = ownInfraAnchors()
@@ -409,7 +414,8 @@ async function breachWaterPocket (bot, opts = {}) {
   for (const d of plan.digs) {
     if (isStopped()) { dbg('  breach: stopped mid-dig'); return false }
     if (Date.now() - t0 > 25000) { dbg('  breach: 25s cap reached'); break }
-    if ((bot.oxygenLevel ?? 20) < 6) { dbg('  breach: oxygen dropped mid-dig - aborting to the drown reflex'); return false }
+    // #116: the mid-dig `oxygen dropped - aborting to the drown reflex` bail was DELETED for the
+    // same reason as its sibling above - it aborted the ONE move that could still work.
     const pos = feet.offset(d.dx, d.dy, d.dz)
     const block = bot.blockAt(pos)
     if (!block || AIRISH(block.name)) continue // already open (drop-through / stale plan cell)
@@ -417,7 +423,9 @@ async function breachWaterPocket (bot, opts = {}) {
     if (!diggable(block.name, d.dx, d.dy, d.dz)) { dbg('  breach: a dig cell no longer passes the whitelist - aborting'); return false }
     const tool = toolForBlock(bot, block.name)
     if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
-    try { await bot.dig(block) } catch (e) { dbg('  breach: dig failed (' + e.message + ') - aborting'); return false }
+    // #116: an escape dig is committed world state - book it as shaft debt so the reclaim pass
+    // seals it, instead of leaving another open hole nobody owns (Root C).
+    try { await bot.dig(block); scaffold.oweShaft(pos, block.name) } catch (e) { dbg('  breach: dig failed (' + e.message + ') - aborting'); return false }
   }
   // WALK OUT: a vertical breach opened the column overhead - rise it; then hop onto the now-
   // adjacent bank (horizontal) or float to shore (still wet).
@@ -427,6 +435,64 @@ async function breachWaterPocket (bot, opts = {}) {
   try { out = await manualHopFromWater(bot) } catch {}
   if (!out && stillWet()) { try { out = await navigate.swimToShore(bot, isStopped) } catch {} }
   return out || !stillWet()
+}
+
+// #116 ESCAPE_ACCOUNTABLE (DESIGN capability gap H) - VERTICAL ESCAPE FROM A SUBMERGED ENCLOSURE.
+//
+// breachWaterPocket's vertical fallback only reaches ~2 blocks of ceiling: it needs KNOWN AIR
+// within dy<=7 or it plans nothing. That is fine for a waterlogged tree and useless for the case
+// that actually killed the bot - a flooded cave pocket at y53 under ~10 blocks of solid stone,
+// where every lateral direction was void and the surface was straight up. No rung existed that
+// could climb OUT of that, so the ladder cycled swim/hop/breach until the bot suffocated.
+//
+// This is that rung: dig the cell above the head, rise into it, repeat, until the head is
+// breathing or a bound stops us. It is deliberately the DUMBEST possible move, because in a
+// submerged enclosure it is the only one with a chance.
+//
+// ANTI-GRIEF (every one a hard deny, all fail-closed):
+//   - strictly a 1-BLOCK COLUMN over the bot's own feet - it never widens
+//   - the SAME escapeDiggable whitelist as the wedge rungs: natural terrain/ore, natural leaves,
+//     own registry scaffold, wild logs away from own infra - player builds and own hut/farm/
+//     fence/doors are rejected, and canDigBlock is honoured per block
+//   - never inside the bot's own structure, never inside a registered build zone
+//   - an UNKNOWN (unloaded) cell overhead ABORTS - it never digs blind
+//   - lava overhead ABORTS
+//   - every dug cell is booked as scaffold shaft DEBT (Root C), so the hole is a liability the
+//     reclaim pass seals rather than the 8th open pit nobody owns
+//   - epoch-scoped: if the bot dies mid-climb the call claims NOTHING (the 15:51:19 `ashore ...`
+//     line was logged from the respawn point, 137 blocks away, by a check that outlived the death)
+async function escapeUpColumn (bot, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const maxUp = opts.maxUp || 24
+  const navigate = require('./navigate.js')
+  const pathfix = require('./pathfix.js')
+  if (insideOwnStructure(bot)) { dbg('  climb-out: inside my own structure - not digging through my own roof'); return false }
+  const start = bot.entity.position.floored()
+  if (inBuildZone(start.x, start.z)) { dbg('  climb-out: under a registered build - refusing'); return false }
+  const e0 = pathfix.epoch()
+  const anchors = ownInfraAnchors()
+  let dug = 0
+  for (let i = 0; i < maxUp; i++) {
+    if (isStopped()) { dbg('  climb-out: stopped after ' + dug + ' dig(s)'); return false }
+    if (!pathfix.sameEpoch(e0)) { dbg('  climb-out: died mid-climb - claiming nothing'); return false }
+    if (!navigate.headInWater(bot)) { dbg('  climb-out: head is breathing after ' + dug + ' dig(s)'); return true }
+    const feet = bot.entity.position.floored()
+    const target = feet.offset(0, 2, 0) // the cell directly above the head - the whole column
+    const cell = pathfix.readCell(bot, target)
+    if (!cell.known) { dbg('  climb-out: the cell overhead is UNKNOWN (chunk not loaded) - not digging blind'); return false }
+    const b = cell.block
+    if (/lava/.test(b.name)) { dbg('  climb-out: lava overhead - aborting'); return false }
+    if (AIRISH(b.name) || /water/.test(b.name)) { await navigate.jumpForAir(bot, 1500, isStopped); continue } // already open - rise
+    const diggable = escapeDiggable(bot, feet, anchors)
+    if (!diggable(b.name, 0, 2, 0)) { dbg('  climb-out: ' + b.name + ' overhead is not mine to break - aborting'); return false }
+    const tool = toolForBlock(bot, b.name)
+    if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
+    try { await bot.dig(b); scaffold.oweShaft(target, b.name); dug++ } catch (e) { dbg('  climb-out: dig failed (' + e.message + ') - aborting'); return false }
+    await navigate.jumpForAir(bot, 1500, isStopped)
+  }
+  const out = !navigate.headInWater(bot) && pathfix.sameEpoch(e0)
+  dbg('  climb-out: ' + (out ? 'surfaced' : 'still submerged') + ' after ' + dug + ' dig(s)')
+  return out
 }
 
 // DRY-WEDGE ESCAPE (DIGOUT_ESCAPE): a near-clone of breachWaterPocket for a bot hard-wedged
@@ -4142,7 +4208,7 @@ const HUT_FURNITURE = /chest$|barrel$|furnace$|smoker$|crafting_table$|_bed$|_do
 // Read chest contents as { name: count } (build materials the chest is holding).
 // (chestCounts moved to provision-bank.js)
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, smeltFuelPlan, fuelBankWithdrawAmount, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, breachDryPocket, toolForBlock, migrateChestInto, consolidateBank, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, secureBase, secureBaseGate, sealHomeDescents, sealDescentsGate, worldTidy, litterSignature, inBuildZone, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, boundedHold, recoverFromDegraded, isRecoveringDegraded, deadlockResetDue, deadlockResetState, pickOpenSkyCell, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, markBedUnusable, bedHeld, gearupState, gearupResult, gearupShouldArmBackoff, proactiveGearupGate, ironGrindMinedReal, resetIronGrindMined, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, noteWaterCrossing, lonelyFurnace, consolidateFurnaces, litterPatrol, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, planTrekRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, smeltFuelPlan, fuelBankWithdrawAmount, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, breachDryPocket, escapeUpColumn, toolForBlock, migrateChestInto, consolidateBank, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, secureBase, secureBaseGate, sealHomeDescents, sealDescentsGate, worldTidy, litterSignature, inBuildZone, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, boundedHold, recoverFromDegraded, isRecoveringDegraded, deadlockResetDue, deadlockResetState, pickOpenSkyCell, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, markBedUnusable, bedHeld, gearupState, gearupResult, gearupShouldArmBackoff, proactiveGearupGate, ironGrindMinedReal, resetIronGrindMined, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, noteWaterCrossing, lonelyFurnace, consolidateFurnaces, litterPatrol, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, planTrekRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
   maintenancePass, isMaintaining, stopMaintenance, _setMaintaining, courierFoodToBank, safekeepSweep, spareKitToBank, recoveryReadyNow, cropExclusionStep, cropPlaceExclusion, farmFootprintHas, hazardStepExclusion, waterStepExclusion, deathSpotExclusion, markHazardTraversal, setOperatorRouting, deepWaterUnderfoot, gatherSeedsNear,
   activeJobInfo, stopSurvivalJob, escalateFoodFloor, _foodFloorState,
   wildTerrainMovements, trekMovements, DIGGABLE_NATURAL, STRUCTURE_RE, canBreakNaturally,

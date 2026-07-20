@@ -131,4 +131,114 @@ function planPocketBreach (read, diggable, opts = {}) {
   return planVertical(read, diggable)
 }
 
-module.exports = { planPocketBreach, planHorizontal, planVertical, AIRISH_RE, isFluid, isWater, isSolid, waterSurfaceDy }
+// ---------------------------------------------------------------------------
+// #116 ESCAPE_ACCOUNTABLE (DESIGN capability gap H) - SITUATION CLASSIFICATION
+//
+// Every water-escape strategy the bot had assumed OPEN WATER WITH A BANK. On
+// 2026-07-19 it drowned in an ENCLOSED flooded cave pocket under ~10 blocks of
+// stone: `swim: heading for the bank` fired three times at a y55 target while
+// the bot sat at y53 under rock, `manual water hop found no bank` twice, and the
+// only vertical idea surfaced 1 second AFTER the death. Lateral was genuinely
+// impossible - `staircase: all 4 directions hazardous (void)`.
+//
+// The missing thing was not a strategy, it was a DIAGNOSIS: nothing classified
+// the situation, so the ladder tried its rungs in a fixed order that could never
+// work. This is that diagnosis, PURE (same relative `read(dx,dy,dz)` contract as
+// the planners above), returning the situation the escape ladder orders itself
+// by. Vertical is the ONLY move that works in a submerged enclosure, so
+// 'submerged-enclosed' puts it first instead of last.
+//
+//   'not-submerged'         head is not in water - no crisis here
+//   'open-water-with-bank'  a standable/breathable cell is reachable through
+//                           the water - swim to it
+//   'open-water-no-bank'    no bank in range but no ceiling either - the surface
+//                           is straight up, rise the column
+//   'thin-wall-pocket'      roofed, no bank, but a bounded horizontal breach
+//                           reaches one - dig sideways and walk out
+//   'submerged-enclosed'    roofed, no bank, no lateral breach - VERTICAL ONLY
+//
+// UNKNOWN (null) reads are never counted as a bank and never counted as a
+// ceiling: an unloaded chunk is not evidence of enclosure, and the DIG planners
+// (which do the world mutation) already reject unknowns outright.
+const HEADISH_RE = /water|seagrass|kelp|bubble_column/
+
+// Is the cell at (dx,dy,dz) somewhere the bot could stand and breathe? Air (or
+// the pocket's own air) with a KNOWN solid, non-fluid floor beneath it.
+function isBankCell (read, dx, dy, dz) {
+  const here = read(dx, dy, dz)
+  if (here == null || !AIRISH_RE.test(here)) return false
+  return isSolid(read(dx, dy - 1, dz))
+}
+
+// Flood-fill through swimmable cells (water or air) looking for a bank. Bounded
+// hard on BOTH radius and visited-cell count - this runs on the drowning reflex
+// path, where an expensive survey is itself a way to die (body-first-priority).
+function findBank (read, maxR, maxCells) {
+  const seen = new Set()
+  const q = [[0, 0, 0]]
+  seen.add('0,0,0')
+  let visited = 0
+  while (q.length && visited < maxCells) {
+    const [dx, dy, dz] = q.shift()
+    visited++
+    if (!(dx === 0 && dy === 0 && dz === 0) && isBankCell(read, dx, dy, dz)) return { dx, dy, dz }
+    for (const [ox, oy, oz] of [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0], [0, -1, 0]]) {
+      const nx = dx + ox; const ny = dy + oy; const nz = dz + oz
+      if (Math.abs(nx) > maxR || Math.abs(ny) > maxR || Math.abs(nz) > maxR) continue
+      const k = nx + ',' + ny + ',' + nz
+      if (seen.has(k)) continue
+      seen.add(k)
+      const n = read(nx, ny, nz)
+      if (n == null) continue                        // unknown: not traversable, not evidence
+      if (!isWater(n) && !AIRISH_RE.test(n)) continue // solid/lava: not swimmable
+      q.push([nx, ny, nz])
+    }
+  }
+  return null
+}
+
+// Is there a KNOWN solid ceiling over the feet column? Mirrors provision's
+// hasSolidCeiling but on the pure `read` contract, and skipping the pocket's own
+// water. Unknown overhead => NOT a ceiling (fail open toward "swim", because the
+// dig rung is the one that must fail closed).
+function hasCeiling (read, upTo) {
+  for (let dy = 2; dy <= upTo; dy++) {
+    const n = read(0, dy, 0)
+    if (n == null) return false
+    if (isWater(n) || AIRISH_RE.test(n)) continue
+    if (/_leaves$/.test(n)) continue   // a canopy is not a cave roof (matches hasSolidCeiling's ignoreLeaves)
+    return true
+  }
+  return false
+}
+
+function classifySubmersion (read, diggable, opts = {}) {
+  const maxR = opts.maxR || 5
+  const maxCells = opts.maxCells || 150
+  const ceilScan = opts.ceilScan || 8
+  const head = read(0, 1, 0)
+  if (head == null || !HEADISH_RE.test(head)) return 'not-submerged'
+  if (findBank(read, maxR, maxCells)) return 'open-water-with-bank'
+  if (!hasCeiling(read, ceilScan)) return 'open-water-no-bank'
+  const surfaceDy = waterSurfaceDy(read)
+  const march = opts.march || 3
+  const maxDigs = opts.maxDigs || 6
+  if (typeof diggable === 'function' && planHorizontal(read, diggable, march, maxDigs, surfaceDy)) return 'thin-wall-pocket'
+  return 'submerged-enclosed'
+}
+
+// The escape ladder's ORDER, derived from the diagnosis. PURE and exported so the ordering
+// itself is unit-testable - the whole defect was a ladder whose order was a habit nobody could
+// see or test. The invariant that matters: in a submerged enclosure 'vertical' is FIRST and
+// 'swim' is not, because there is no bank to swim to and trying anyway is how the bot died.
+const ESCAPE_RUNGS = ['swim', 'hop', 'rise', 'breach', 'vertical']
+function escapeRungOrder (situation) {
+  switch (situation) {
+    case 'submerged-enclosed': return ['vertical', 'breach', 'rise', 'swim', 'hop']
+    case 'thin-wall-pocket': return ['breach', 'vertical', 'rise', 'swim', 'hop']
+    case 'open-water-no-bank': return ['rise', 'swim', 'vertical', 'breach', 'hop']
+    default: return ['swim', 'hop', 'rise', 'breach', 'vertical']
+  }
+}
+
+module.exports = { planPocketBreach, planHorizontal, planVertical, classifySubmersion, escapeRungOrder, ESCAPE_RUNGS, findBank, hasCeiling, isBankCell, AIRISH_RE, isFluid, isWater, isSolid, waterSurfaceDy }

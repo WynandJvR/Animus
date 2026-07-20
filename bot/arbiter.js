@@ -48,8 +48,33 @@ function _setNow (fn) { nowFn = fn || (() => Date.now()) }
 // Active maneuver spans, keyed by id. Concurrent spans are legal (navigateToPreempt runs
 // alongside a queued navigateTo; a SURVIVE flee-retreat overlaps a PROGRESS trek), so we
 // keep a set and report the MAX active tier - the body is effectively owned at that tier.
-const spans = new Map() // id -> { label, pri, until }
+const spans = new Map() // id -> { label, pri, until, probe, best, stalls }
 let seq = 0
+
+// ---------------------------------------------------------------------------
+// #116 ESCAPE_ACCOUNTABLE (DESIGN §3.4 D1, Root D)
+//
+// The 15:51:17 drowning: `(drown-crisis) taking the controls to get out of the
+// water` opened a SURVIVE span and held the body for 24 seconds while the bot
+// suffocated. Nothing above it ever asked whether the claim was PRODUCING
+// anything - and precisely BECAUSE a subsystem had declared it was handling
+// this, no other layer escalated. The span ended only because the bot died
+// (`maneuver END drown-escape SURVIVE` logged 1.7s AFTER the death).
+//
+// Ownership at SURVIVE tier is therefore no longer granted on assertion alone.
+// A SURVIVE claimant may declare a `probe` - a cheap world/vitals read where
+// HIGHER IS BETTER - and the ledger samples it. A claimant whose probe fails to
+// beat its own best over PROBE_STALLS consecutive samples is REVOKED: its span
+// is force-ended and `maneuverRevoked(id)` reports true forever after, so the
+// rung it was running aborts and the crisis escalates to the next rung.
+//
+// This is a CONDITION gate, not a timer: nothing here reads a wall clock, and
+// revocation is driven purely by "did the measured situation improve". Spans
+// with no probe, or below SURVIVE, are never revoked - existing callers are
+// byte-for-byte unaffected.
+const PROBE_STALLS = 3
+const PROBE_EPS = 1e-9
+const revoked = new Set()
 
 function prune () {
   const now = nowFn()
@@ -59,12 +84,46 @@ function prune () {
 // Open a maneuver span. Returns a token id (pass it to refresh/end). ttlMs bounds how
 // long the span can survive without a refresh - a safety cap against a leaked span, not
 // the intended lifetime (movers refresh as they work and end() in a finally).
-function beginManeuver (label, pri = PRIORITY.PROGRESS, ttlMs = 25000) {
+// opts.probe: () => number (HIGHER = better). Only honoured at SURVIVE tier - see the
+// #116 block above. opts.stalls overrides PROBE_STALLS for that span.
+function beginManeuver (label, pri = PRIORITY.PROGRESS, ttlMs = 25000, opts = {}) {
   const id = ++seq
-  spans.set(id, { label: label || 'nav', pri, until: nowFn() + Math.max(0, ttlMs) })
-  dbg('maneuver BEGIN', label, priName(pri), 'ttl=' + ttlMs)
+  const span = { label: label || 'nav', pri, until: nowFn() + Math.max(0, ttlMs) }
+  if (typeof opts.probe === 'function' && pri >= PRIORITY.SURVIVE) {
+    span.probe = opts.probe
+    span.best = -Infinity
+    span.stalls = 0
+    span.maxStalls = opts.stalls != null ? opts.stalls : PROBE_STALLS
+  }
+  spans.set(id, span)
+  dbg('maneuver BEGIN', label, priName(pri), 'ttl=' + ttlMs + (span.probe ? ' (probed)' : ''))
   return id
 }
+
+// Sample every probed SURVIVE span once. Returns the spans revoked BY THIS CALL
+// ([{ id, label }]), so the caller can log/escalate. A probe that throws counts as
+// NO progress (fail closed) - an escape whose own progress measure is broken is not
+// an escape that may keep the body.
+function sampleManeuvers () {
+  const out = []
+  for (const [id, s] of spans) {
+    if (!s.probe) continue
+    let v = null
+    try { v = s.probe() } catch { v = null }
+    if (typeof v === 'number' && isFinite(v) && v > s.best + PROBE_EPS) { s.best = v; s.stalls = 0; continue }
+    s.stalls++
+    if (s.stalls < s.maxStalls) continue
+    spans.delete(id)
+    revoked.add(id)
+    dbg('maneuver REVOKED', s.label, priName(s.pri), 'no progress over', s.stalls, 'samples (best=' + s.best + ')')
+    out.push({ id, label: s.label })
+  }
+  return out
+}
+
+// Was this span revoked for lack of progress? Stays true after the span is gone, so a
+// rung that is mid-await can see it and abort.
+function maneuverRevoked (id) { return revoked.has(id) }
 function refreshManeuver (id, ttlMs = 25000) {
   const s = spans.get(id)
   if (s) s.until = nowFn() + Math.max(0, ttlMs)
@@ -72,6 +131,7 @@ function refreshManeuver (id, ttlMs = 25000) {
 function endManeuver (id) {
   const s = spans.get(id)
   if (s) { spans.delete(id); dbg('maneuver END', s.label, priName(s.pri)) }
+  revoked.delete(id) // the id is retired either way - don't leak the revocation set
 }
 
 // The highest-tier active span, or null. Prunes expired spans first.
@@ -297,10 +357,13 @@ module.exports = {
   beginManeuver,
   refreshManeuver,
   endManeuver,
+  sampleManeuvers,
+  maneuverRevoked,
+  PROBE_STALLS,
   topManeuver,
   maneuverActive,
   mayInterrupt,
   setDebugSink,
   _setNow,
-  _reset: () => { spans.clear(); seq = 0 } // test hygiene
+  _reset: () => { spans.clear(); revoked.clear(); seq = 0 } // test hygiene
 }
