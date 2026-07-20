@@ -109,6 +109,13 @@ function recordSaid (norm) {
 // opts.isBusy: injected from index.js (commands.isBusy) - see the header note.
 function gateSay (line, fromBrain, opts = {}) {
   const isBusy = typeof opts.isBusy === 'function' ? opts.isBusy : () => false
+  // #113 CRISIS_OUTRANKS_PEACETIME (DESIGN §3.4 D2): injected like isBusy - true while the arbiter
+  // reports mortal danger. At 15:51:19 the drowning bot's `say i'm stuck in water and can't move -
+  // help me out` came back `skipped (vibe budget 3s)`. A distress call is not a vibe: the two
+  // CHATTER budgets below (busy-silence and the vibe budget) do not apply to it. The duplicate
+  // guard and the hard cooldown still do, so this cannot become a spam channel.
+  // Lazy on purpose: it costs a live vitals scan, and only the unprompted-quip path below asks.
+  const inCrisis = () => { try { return typeof opts.inCrisis === 'function' ? !!opts.inCrisis() : false } catch { return false } }
   if (!/^say\b/i.test(String(line).trim())) return null // not a chat line - allow
   const now = Date.now()
   if (now - lastSayAt < CHAT_COOLDOWN_MS) return `cooldown ${CHAT_COOLDOWN_MS}ms`
@@ -125,9 +132,9 @@ function gateSay (line, fromBrain, opts = {}) {
     // replies below are always free so conversation feels natural. Stay SILENT while
     // busy working (building/gathering - it should focus, not narrate), and otherwise
     // only an occasional line per VIBE_CHAT_MS.
-    if (isBusy()) return 'busy - no idle chatter'
+    if (isBusy() && !inCrisis()) return 'busy - no idle chatter'
     if (NARRATION_RE.test(norm)) return 'narration - players can see the world themselves, say something worth saying or nothing'
-    if (now - lastVibeAt < VIBE_CHAT_MS) return `vibe budget ${Math.ceil((VIBE_CHAT_MS - (now - lastVibeAt)) / 1000)}s`
+    if (now - lastVibeAt < VIBE_CHAT_MS && !inCrisis()) return `vibe budget ${Math.ceil((VIBE_CHAT_MS - (now - lastVibeAt)) / 1000)}s`
     lastVibeAt = now; lastSayAt = now
     recordSaid(norm)
     return null

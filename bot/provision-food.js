@@ -116,7 +116,21 @@ async function eatBestFood (bot) {
   })
   if (!edible.length) return 'no food in inventory'
   const food = edible[0]
-  if (RISKY_EAT.test(food.name) && bot.food > 6 && !((bot.health ?? 20) <= 8 && bot.food < 18)) return 'only risky food left - holding out'
+  // #113 CRISIS_OUTRANKS_PEACETIME (DESIGN §3.4 D2): holding out for better food is a sane
+  // PEACETIME rule that was being applied with no regard for proximity to death - it looped every
+  // 4s at hp1 while the bot starved AND drowned on 2026-07-19. It consults hunger and hp but not
+  // oxygen, lava, fire or any other imminent cause of death, and no threshold tuned here could
+  // ever know about them. So the hold-out is condition-gated on the arbiter's live crisis instead:
+  // in mortal danger, rotten flesh beats dying. Lazy require breaks the module cycle; evaluated
+  // ONLY when we are otherwise about to hold out, so the vitals scan stays off the hot path.
+  if (RISKY_EAT.test(food.name) && bot.food > 6 && !((bot.health ?? 20) <= 8 && bot.food < 18)) {
+    let dying = false
+    try {
+      const arbiter = require('./arbiter.js')
+      dying = arbiter.mortalDanger(require('./survival-snapshot.js').survivalNeed(bot))
+    } catch {}
+    if (!dying) return 'only risky food left - holding out'
+  }
   await bot.equip(food, 'hand')
   await bot.consume()
   return `ate ${food.name} (food ${bot.food})`

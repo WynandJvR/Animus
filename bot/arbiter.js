@@ -152,6 +152,55 @@ function jobSurvivalNeed (state, opts = {}) {
 // May a PROGRESS job run right now? True iff no SURVIVE need is unmet.
 function jobMayProgress (state, opts = {}) { return jobSurvivalNeed(state, opts) == null }
 
+// ---------------------------------------------------------------------------
+// #113 CRISIS_OUTRANKS_PEACETIME (DESIGN §3.4 D2, Root D)
+//
+// The 15:51:17 drowning: the brain diagnosed the emergency and issued `goto hut
+// «get out of water»` four times in 24 seconds. Every one came back
+// `held (securing food) - brain command suppressed`, and the bot died. A
+// food-securing hold outranked active drowning because index.js decided
+// admissibility from the command's VERB and the hold's LABEL - two string
+// vocabularies that know nothing about how close the bot is to dying. One
+// require away, THIS file was already reporting `drowning` at SURVIVE tier.
+//
+// The rule below is the whole fix, and it is deliberately not about water:
+// a hold is admissible only while the need IT SERVES is at least as urgent as
+// the live crisis. Nothing outranks imminent death, so whatever a hold is
+// called is irrelevant - only what it is for. Peacetime work (a build, a
+// gather) serves no survival need and therefore never outranks any crisis.
+//
+// NEED_ORDER is THE ranking, in the same order jobSurvivalNeed tests its
+// branches above ('heal' takes its first, most-urgent occurrence). It is a
+// ranking, not a set of thresholds: there is no tunable constant here.
+const NEED_ORDER = ['lava', 'fire', 'drowning', 'heal', 'threat', 'creeper', 'food', 'shelter']
+function needRank (need) { const i = NEED_ORDER.indexOf(need || ''); return i < 0 ? Infinity : i }
+
+// PURE. `crisis` is a jobSurvivalNeed result (or null); `holdNeed` is the need
+// string the hold exists to serve, or null for peacetime work. Returns
+// { ok, reason } - ok:false means the hold MAY NOT suppress anything.
+function holdAdmissible (crisis, holdNeed) {
+  if (!crisis || crisis.tier < PRIORITY.SURVIVE) return { ok: true, reason: 'no crisis' }
+  const cr = needRank(crisis.need)
+  const hr = needRank(holdNeed)
+  if (cr < hr) return { ok: false, reason: `${crisis.need} (${crisis.reason}) outranks ${holdNeed ? 'the ' + holdNeed + ' hold' : 'peacetime work'}` }
+  return { ok: true, reason: `the hold already serves ${holdNeed} (>= ${crisis.need})` }
+}
+
+// PURE. Is the bot in the class of crisis where death arrives in seconds no
+// matter what it is doing? Rank-derived (>= 'heal' in urgency), so it inherits
+// the ordering above instead of introducing a second vocabulary: lava, fire,
+// drowning, critical hp. A mob at 5b and a half-empty food bar are dangerous
+// but not lethal-this-instant, so peacetime nutrition/chatter policy still
+// applies there - which is why this is narrower than holdAdmissible.
+//
+// Consumers: the risky-food hold-out (rotten flesh beats dying) and the chat
+// vibe budget (a distress call is not a vibe). Both were peacetime rules with
+// no crisis exemption; both were live at 15:51:17 while the bot drowned.
+function mortalDanger (crisis) {
+  if (!crisis || crisis.tier < PRIORITY.SURVIVE) return false
+  return needRank(crisis.need) <= needRank('heal')
+}
+
 // PURE: split the mid-mine break-out into a RESPONSE. `mineDanger` (provision.js) stays as
 // sensitive as ever - it breaks the bot OUT of a committed dig at hp<12 OR a hostile<=6, the
 // death-carousel guard. This classifies WHAT TO DO once broken out, so a hurt-but-safe bot on
@@ -237,6 +286,10 @@ module.exports = {
   priName,
   jobSurvivalNeed,
   jobMayProgress,
+  NEED_ORDER,
+  needRank,
+  holdAdmissible,
+  mortalDanger,
   mineThreatDecision,
   nakedGraceAllowed,
   gearupCooldownMin,

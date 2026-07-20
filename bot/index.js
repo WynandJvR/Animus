@@ -67,7 +67,12 @@ refreshOllamaModels(); setInterval(refreshOllamaModels, 30000).unref?.()
 // handlers and the gaze reflex below consume it; gateSay takes commands.isBusy injected.
 const chatGate = require('./chat-gate.js')
 const { recordChatLog, recordChat, clearPendingChat, noteManualLook, gateImpactful, MAX_DELIVERIES } = chatGate
-const gateSay = (line, fromBrain) => chatGate.gateSay(line, fromBrain, { isBusy: commands.isBusy })
+const gateSay = (line, fromBrain) => chatGate.gateSay(line, fromBrain, {
+  isBusy: commands.isBusy,
+  // #113: the crisis probe the chatter budgets consult. Evaluated ONLY on the unprompted-quip
+  // path inside gateSay, so the vitals scan never runs on ordinary replies (body-first).
+  inCrisis: () => { try { return arbiter.mortalDanger(provision.survivalNeed(bot)) } catch { return false } }
+})
 // Command-gate vocabularies stay here (they are about COMMANDS, not chat). The world-edit/
 // admin block list is shared from access.js so both bodies stay in sync.
 const CHEAT_CMDS = access.CHEAT_CMDS
@@ -2312,6 +2317,17 @@ const server = http.createServer((req, res) => {
         const survivalCmd = SCHED_ON ? (cls === 'survival')
           : (process.env.S1_HOTFIX !== '0' && /^(recover|getstuff|eat|wear|armorup|sleep)\b/i.test(trimmedLine))
         const adm = survivalCmd ? (SCHED_ON ? scheduler.admissibleUnderLatch('survival', trimmedLine, await provision.schedulerState(bot), latchOn) : survivalAdmissible(bot)) : null
+        // #113 CRISIS_OUTRANKS_PEACETIME (DESIGN §3.4 D2): what the hold IS FOR, computed from the
+        // predicates themselves rather than from the display label below - a hold that serves no
+        // survival need (a build/gather: commands.isBusy) is deliberately absent from this list.
+        // Most urgent wins when several are latched at once.
+        const holdNeed = [
+          (provision.isRecoveringDegraded && provision.isRecoveringDegraded()) ? 'heal' : null,
+          (provision.isSecuringFood && provision.isSecuringFood()) ? 'food' : null,
+          (provision.isResting && provision.isResting()) ? 'shelter' : null
+        ].filter(Boolean).sort((a, b) => arbiter.needRank(a) - arbiter.needRank(b))[0] || null
+        const liveCrisis = (() => { try { return provision.survivalNeed(bot) } catch { return null } })()
+        const holdAdm = arbiter.holdAdmissible(liveCrisis, holdNeed)
         if (defendPreempt) {
           const label = commands.isBusy && commands.isBusy() ? 'busy building' : (provision.isSecuringFood && provision.isSecuringFood() ? 'securing food' : 'night-resting')
           note(`(cmd) ${line}${rz} -> PREEMPT (under attack) - defense outranks the ${label} hold`)
@@ -2326,6 +2342,16 @@ const server = http.createServer((req, res) => {
           note(`(cmd) ${line}${rz} -> PREEMPT (${adm.reason}) - survival outranks the current hold`)
           if (commands.preemptForSurvival) commands.preemptForSurvival() // set the stop latch; a build resumes via persistedResume
           // fall through: the survival command runs and owns the body
+        } else if (!holdAdm.ok) {
+          // #113 CRISIS_OUTRANKS_PEACETIME (DESIGN §3.4 D2): the ONLY thing that reaches here is a
+          // command the verb/label machinery above was about to suppress. It may not be suppressed
+          // while a strictly-worse crisis is live - the 15:51 tape is four `goto hut «get out of
+          // water»` answered `held (securing food)` and then a corpse. Admissibility is computed
+          // from the arbiter's live need tier (holdAdm), never from the verb or the label, so this
+          // covers lava/fire/critical-hp/threat identically - there is no water special case.
+          note(`(cmd) ${line}${rz} -> PREEMPT (crisis) - ${holdAdm.reason}`)
+          if (commands.preemptForSurvival) commands.preemptForSurvival() // stop latch; a build resumes via persistedResume
+          // fall through: the command runs
         } else {
           const label = commands.isBusy && commands.isBusy() ? 'busy building' : (provision.isSecuringFood && provision.isSecuringFood() ? 'securing food' : 'night-resting')
           note(`(cmd) ${line}${rz} -> held (${survivalCmd ? 'no survival need: ' + adm.reason : label}) - brain command suppressed`)
