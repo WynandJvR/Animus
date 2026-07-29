@@ -26,7 +26,7 @@ const maintain = require('./maintain.js')   // PURE buffer floors
 const provCore = require('./provision-core.js')
 const { countItem, inventoryCounts, isNight, nearHostile, AIRISH, SHELTER_HOSTILE } = provCore
 const worldMemory = require('./world-memory.js')
-const { loadWorldMem, listInfra, knownBed, isSpawnSuspect, gearupState, bedUnobtainable,
+const { loadWorldMem, listInfra, recallInfra, knownBed, isSpawnSuspect, gearupState, bedUnobtainable,
   hutVerifiedNow } = worldMemory
 const provHut = require('./provision-hut.js')
 const { hutAnchor, insideOwnStructure, hasSolidCeiling } = provHut
@@ -34,7 +34,7 @@ const provShelter = require('./provision-shelter.js')
 const { isSheltering, shelterNeeded, nightStuck, nightRestWanted, underArmored, lowHpCalm,
   armorPieceCount, inWaterNow } = provShelter
 const provFood = require('./provision-food.js')
-const { hasFood, foodCount, needsFood, isSecuringFood, needFoodSupply, hasStandingFarm } = provFood
+const { hasFood, foodCount, needsFood, isSecuringFood, needFoodSupply, hasStandingFarm, RAW_COOKABLE } = provFood
 const provRecovery = require('./provision-recovery.js')
 const { isRecoveringHp, isRecoveringDegraded, isResting, recoveryReadyNow, deadlockResetDue,
   deadlockResetState } = provRecovery
@@ -366,6 +366,45 @@ async function schedulerState (bot) {
       s.baseLit = !!(bl && bl.hut && bl.hut.x === hut.x && bl.hut.z === hut.z && (bl.torched || []).length > 0)
     }
   } catch { s.baseLit = null }
+  // ==== PLAN-one-runner S5: the HOUSEKEEPING facts ==========================================
+  // The four idle-tier proposals (autoCollect / autoCook / scaffoldSweep / autoTorch) were 3s-45s
+  // timers that each scanned for their own trigger and then moved the body if a handful of latches
+  // happened to read false. As proposals their trigger has to be on the snapshot, so the chooser
+  // can weigh them against everything else - which is what makes them unable to interrupt anything.
+  //
+  // CHEAP BY CONTRACT ([[body-first-priority]]): the entity list is already in memory (the threat
+  // scan above walks it), the pack is in memory, and furnaces/scaffold come from the infra registry
+  // and the scaffold ledger - both in-memory. The ONLY world reads are two blockAt lookups per
+  // dropped item, which the 3s auto-collect timer was doing twenty times more often than this.
+  try {
+    let dropDist = null
+    if (me) {
+      for (const e of Object.values(bot.entities || {})) {
+        if (!e || !e.position || e.name !== 'item') continue
+        const d = e.position.distanceTo(me)
+        if (d <= 1.3 || d > 8 || (dropDist != null && d >= dropDist)) continue
+        // NEVER dive for drops: items sunk in water lured the idle bot to the river bottom and it
+        // drowned reclaiming its own death-drops (test server, verified by the server log).
+        const at = bot.blockAt(e.position.floored())
+        const above = bot.blockAt(e.position.floored().offset(0, 1, 0))
+        if ((at && /water/.test(at.name)) || (above && /water/.test(above.name))) continue
+        dropDist = d
+      }
+    }
+    s.dropDist = dropDist
+  } catch { s.dropDist = null }
+  try {
+    s.rawMeat = (bot.inventory ? bot.inventory.items() : []).filter(i => RAW_COOKABLE.test(i.name)).reduce((n, i) => n + i.count, 0)
+  } catch { s.rawMeat = 0 }
+  try {
+    const f = me ? recallInfra('furnace', me, 24) : null
+    s.furnaceDist = (f && me) ? Math.hypot(f.x - me.x, f.z - me.z) : null
+  } catch { s.furnaceDist = null }
+  try {
+    // only registry entries older than 2 min - never yank scaffold a flow just placed
+    const scaffold = require('./scaffold.js')
+    s.scaffoldDebtNear = me ? scaffold.near(me, 20).filter(e => Date.now() - e.t > 120000).length : 0
+  } catch { s.scaffoldDebtNear = 0 }
   // maintainNeeded computed LAST on the fully-assembled base snapshot (pure, no cycle). S4 never
   // dispatches maintain; the field exists so pickJob is exercised with real data (S6 = one-line enable).
   try { const maintain = require('./maintain.js'); s.maintainNeeded = maintain.needs(s).length > 0 } catch { s.maintainNeeded = false }

@@ -85,7 +85,8 @@ const BODY_OWNERS = [
   { key: 'shelter', tier: 'SURVIVE', crisisOnly: true, label: 'the night shelter' },
   { key: 'maintain', tier: 'PROGRESS', label: 'a maintenance pass' },
   { key: 'job', tier: 'PROGRESS', crisisOnly: true, label: 'a job' },
-  { key: 'walk', tier: 'PROGRESS', label: 'a walk already in progress' }
+  { key: 'walk', tier: 'PROGRESS', label: 'a walk already in progress' },
+  { key: 'dig', tier: 'PROGRESS', label: 'a dig in progress' } // aborting a dig resets its break progress - never for housekeeping
 ]
 const ownerByKey = new Map(BODY_OWNERS.map(o => [o.key, o]))
 function ownerInfo (key) { return ownerByKey.get(key) || null }
@@ -310,14 +311,15 @@ def({
   run: async (bot, ctx) => {
     const provision = require('./provision.js')
     const commands = require('./commands.js')
-    ctx.runner.recoveringHome = true
-    try {
-      const pr = commands.persistedResume && commands.persistedResume()
-      const rh = await provision.recoverHome(bot, { say: ctx.say, resumeAt: pr && pr.at })
-      if (rh.arrived) return 'home' + (rh.bedOk ? ' - spawn re-anchored at the bed' : ' - bed could NOT be re-asserted')
-      if (rh.stabilise) return 'stood down mid-crossing (' + (rh.blockedOn || 'blocked') + '): ' + (rh.why || '')
-      return 'did not reach home this pass (' + Math.round(rh.dist || 0) + 'b out) - will pick it up again'
-    } finally { ctx.runner.recoveringHome = false }
+    const pr = commands.persistedResume && commands.persistedResume()
+    // (this used to set a `recoveringHome` flag whose only readers were the gear-up and
+    //  home-repair TIMERS - "go home outranks re-arming in the wild". Both are proposals now,
+    //  and the tier ordering says the same thing without a flag: homecoming is SURVIVE and
+    //  owns the body, so nothing at PROGRESS can start underneath it.)
+    const rh = await provision.recoverHome(bot, { say: ctx.say, resumeAt: pr && pr.at })
+    if (rh.arrived) return 'home' + (rh.bedOk ? ' - spawn re-anchored at the bed' : ' - bed could NOT be re-asserted')
+    if (rh.stabilise) return 'stood down mid-crossing (' + (rh.blockedOn || 'blocked') + '): ' + (rh.why || '')
+    return 'did not reach home this pass (' + Math.round(rh.dist || 0) + 'b out) - will pick it up again'
   }
 })
 
@@ -397,6 +399,118 @@ def({
   why: 'creeper damage to the base is repaired from home, never trekked to (maintain step 9)'
 })
 
+// -- IDLE: housekeeping (PLAN-one-runner S5) -------------------------------------------------
+// These four were 3s/30s/45s timers, each with its own private "am I allowed to move?" stack.
+// They are the clearest case for the registry, because none of them is ever URGENT and all four
+// used to be able to yank the body the instant a latch happened to read false.
+//
+// They are SELF-PROPOSING: unlike the survival jobs (whose candidate the utility core builds from
+// the survival need), the registry is the only place that knows a drop is on the ground or that
+// there is raw meat to cook, so each carries its own `when` and `benefit`. scheduler-core scores
+// them alongside everything else - benefit x urgency - risk - and that is the entire reason they
+// stop being able to interrupt anything: an IDLE-tier proposal loses to every owner, and its
+// score sits below a waiting build (W_RESUME 0.2) and above pure idling (W_IDLE 0.1).
+//
+// `when` is PURE over the snapshot. The facts it reads are the cheap ones survival-snapshot.js
+// already assembles from in-memory state (the entity list, the pack, the infra registry, the
+// scaffold ledger) - no new world scan, because the tick is the body's own event loop
+// ([[body-first-priority]]).
+
+def({
+  name: 'autoCollect',
+  tier: 'IDLE',
+  why: 'walk over a dropped item and pick it up, the way a player tidies up after a chop',
+  when: (s) => s.dropDist != null && s.dropDist <= 8,
+  benefit: 0.16,
+  // a drop underfoot is nearly free; one 8b away is a walk. Never NEVER dive for it: items sunk
+  // in water lured the idle bot to the river bottom and it drowned reclaiming its own death-drops
+  // (the snapshot excludes submerged drops for exactly that reason).
+  urgency: (s) => Math.max(0, 1 - (s.dropDist || 0) / 8),
+  run: async (bot, ctx) => {
+    const { goals } = require('mineflayer-pathfinder')
+    const me = bot.entity && bot.entity.position
+    let best = null; let bestD = 8
+    for (const e of Object.values(bot.entities || {})) {
+      if (!e || !e.position || e.name !== 'item') continue
+      const d = e.position.distanceTo(me)
+      if (d > 1.3 && d < bestD) { bestD = d; best = e }
+    }
+    if (!best) return 'nothing on the ground any more'
+    // range 0: actually walk ONTO the item's block - range 1 can count as "arrived" a block
+    // short, so the bot never touches the drop and never picks it up.
+    await bot.pathfinder.goto(new goals.GoalNear(best.position.x, best.position.y, best.position.z, 0))
+    return 'picked up a drop ' + Math.round(bestD) + 'b away'
+  }
+})
+
+def({
+  name: 'autoCook',
+  tier: 'IDLE',
+  why: 'raw meat in the pack and a furnace on the map: cook it while there is nothing better to do',
+  when: (s) => (s.rawMeat || 0) > 0 && s.furnaceDist != null && s.furnaceDist <= 24,
+  benefit: 0.18,
+  urgency: (s) => Math.min(1, (s.rawMeat || 0) / 8) * Math.max(0.2, 1 - (s.furnaceDist || 0) / 24),
+  run: async (bot, ctx) => {
+    const provision = require('./provision.js')
+    const n = await provision.cookRawMeat(bot, {})
+    return n > 0 ? 'cooked ' + n + ' raw meat at the furnace' : 'nothing cooked'
+  }
+})
+
+def({
+  name: 'scaffoldSweep',
+  tier: 'IDLE',
+  why: 'tear down the orphaned towers a death or a restart left standing in the forest',
+  when: (s) => (s.scaffoldDebtNear || 0) > 0,
+  benefit: 0.12,
+  urgency: (s) => Math.min(1, (s.scaffoldDebtNear || 0) / 12),
+  run: async (bot, ctx) => {
+    const scaffold = require('./scaffold.js')
+    const n = await scaffold.teardown(bot, bot.entity.position, { radius: 20, max: 12 })
+    return n ? 'tore down ' + n + ' orphaned scaffold block(s)' : 'nothing reachable to tear down'
+  }
+})
+
+def({
+  name: 'autoTorch',
+  tier: 'IDLE',
+  why: 'light the way at night like a companion would - opt-in, because it is an autonomous placer',
+  when: (s) => process.env.AUTO_TORCH === '1' && !!s.isNight && (s.torches || 0) > 0,
+  benefit: 0.13,
+  urgency: () => 0.6,
+  run: async (bot, ctx) => {
+    const commands = require('./commands.js')
+    // the "already lit nearby" check stays here: it is a world read, and `when` is pure.
+    try {
+      const md = require('minecraft-data')(bot.version)
+      const ids = Object.values(md.blocksByName).filter(b => /torch|lantern/.test(b.name)).map(b => b.id)
+      if (ids.length && bot.findBlock({ matching: ids, maxDistance: 6 })) return 'nothing to light - there is already a torch here'
+    } catch { /* mcData not ready: fall through, placeTorchNearby is idempotent enough */ }
+    return await commands.placeTorchNearby(bot)
+  }
+})
+
+// ---- self-proposing candidates -------------------------------------------------------------
+// The candidates scheduler-core merges into its own list. Same shape its Phase-B candidates use
+// (job/cls/key/order/score/reason), and the same utility signature: benefit x urgency - risk.
+// The RISK is passed in rather than re-derived, so there is exactly one definition of it.
+function proposalCandidates (s, opts) {
+  const risk = (opts && typeof opts.risk === 'number') ? opts.risk : 0
+  const riskWeight = (opts && typeof opts.riskWeight === 'number') ? opts.riskWeight : 0.15
+  const out = []
+  for (const r of REFLEXES) {
+    if (typeof r.when !== 'function') continue
+    let ok = false
+    try { ok = !!r.when(s) } catch { ok = false }
+    if (!ok) continue
+    let u = 1
+    try { u = typeof r.urgency === 'function' ? r.urgency(s) : 1 } catch { u = 1 }
+    const score = (r.benefit || 0.1) * Math.max(0, Math.min(1, u)) - riskWeight * risk
+    out.push({ job: r.name, cls: classOf(r.tier), key: r.name, order: 4, score, reason: r.why })
+  }
+  return out
+}
+
 // ---- lookups ------------------------------------------------------------------------------
 const byName = new Map(REFLEXES.map(r => [r.name, r]))
 function get (name) { return byName.get(name) || null }
@@ -418,6 +532,7 @@ module.exports = {
   get,
   names,
   dispatchable,
+  proposalCandidates,
   beginHold,
   endHold,
   activeHold,

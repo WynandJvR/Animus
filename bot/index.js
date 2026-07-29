@@ -44,12 +44,6 @@ const WATCHDOG_ON = SCHED_ON && process.env.WATCHDOG !== '0' // S7: the in-proce
 const CYCLE_DETECT_ON = WATCHDOG_ON && process.env.CYCLE_DETECT !== '0' // task #34: the behavioral cycle detector. An S7 ORGAN (not a peer) - lives inside the wdTimer, so WATCHDOG=0 kills it too. CYCLE_DETECT=0 -> no sampling, no verdict override, no ring read: byte-identical to today.
 const OPP_ON = MAINTAIN_ON && process.env.OPPORTUNISTIC_MAINTAIN !== '0' // opportunistic at-hut maintenance during the build era; OPPORTUNISTIC_MAINTAIN=0 restores S6 byte-for-byte
 const CYCLE_SELFABORT_EXEMPT = process.env.CYCLE_SELFABORT_EXEMPT !== '0' // #49: exempt watchdog/preempt-induced "(stopped)" self-aborts from repeatFail eligibility. Default ON; =0 restores today byte-for-byte (the selfAbort ring field goes unread)
-// PLAN-one-runner.md: the scheduler tick is THE runner - the one component that decides who
-// moves the body. ONE_RUNNER=0 hands the body back to the old reflex timers, and it is the ONLY
-// new flag this work is allowed (PLAN §6.3): it must be DELETED once S5 has soaked, not left as
-// permanent debt. Every guard it replaces is a refusal the chooser can see, so a decline is
-// logged with its blocker instead of being a silent `return` (audit D1, the 780 -> 82 gap).
-const RUNNER_ON = SCHED_ON && process.env.ONE_RUNNER !== '0'
 const RESILIENT_ON = SCHED_ON && process.env.RESILIENT_RECOVERY !== '0' // #41: invert build-vs-recovery priority after a death (postDeathRecovery latch + bank re-arm). RESILIENT_RECOVERY=0 restores today byte-for-byte (deathsRecent>=2 preempt gate, un-suppressed respawn ladder, no latch)
 
 // Live brain settings the dashboard can change on the fly; brain-llm.js polls
@@ -544,8 +538,7 @@ const runner = {
   hpCooldownUntil: 0, // after a heal attempt: give regeneration a window
   maintainCooldownUntil: 0, // 10 min after a real pass, 5 after a no-op/bail
   ladderBlock: null, // { sig, blockedOn }: the world the last no-progress ladder pass failed in
-  noOp: new Map(), // job -> the world signature in which it achieved nothing (FIX 11 job identity)
-  recoveringHome: false // trekking home after a far respawn - go home outranks re-arming in the wild
+  noOp: new Map() // job -> the world signature in which it achieved nothing (FIX 11 job identity)
 }
 bot.on('spawn', () => {
   if (!deathPending) return // initial join is handled by the once('spawn') above
@@ -717,284 +710,23 @@ if (process.env.EQUIP_CARRIED_ARMOR !== '0') {
   }, 5000).unref?.()
 }
 
-// Cook reflex: idle near a furnace with raw meat in the pack -> cook it, like a player
-// tidying up after a hunt. Opportunistic (existing furnace + pack fuel only; provision
-// runs also cook right after each smelt while the furnace is hot). Only when IDLE so it
-// never fights a build's pathfinder. Set AUTO_COOK=0 to disable.
-let cookingMeat = false
-if (process.env.AUTO_COOK !== '0') {
-  setInterval(async () => {
-    if (cookingMeat || !bot.entity || commands.isBusy() || (commands.isEscaping && commands.isEscaping())) return
-    if (arbiter.maneuverActive()) return // a navigation owns the body - don't detour to a furnace mid-approach
-    cookingMeat = true
-    try {
-      const n = await provision.cookRawMeat(bot, {})
-      if (n > 0) note(`(auto-cook) cooked ${n} raw meat at the furnace`)
-    } catch { /* best-effort */ } finally { cookingMeat = false }
-  }, 30000).unref?.()
-}
-
-// Survival hunt: auto-eat can only eat food you HAVE. When the bot runs OUT of food and is
-// getting hungry, go kill a nearby animal so auto-eat has something to eat - otherwise it
-// starves to 1 hp and stalls (seen live: 0 food / 1 hp mid-build). Only when IDLE: during
-// a build the gather loop does this itself, and a reflex must not fight its pathfinder.
-// Body-side on purpose - the brain is HELD during builds and (verified via the decision
-// log) misreads its own hunger as a nearby player's. Set SURVIVAL_HUNT=0 to disable.
-let survivalHunting = false
-if (process.env.SURVIVAL_HUNT !== '0') {
-  setInterval(async () => {
-    if (SCHED_ON) return // S4: the scheduler tick owns survival dispatch
-    if (survivalHunting || !bot.entity) return
-    if (commands.isBusy && commands.isBusy()) return // the gather loop covers the build case
-    if (provision.isResting && provision.isResting()) return
-    if (provision.isSecuringFood && provision.isSecuringFood()) return
-    if (arbiter.maneuverActive()) return // don't chase an animal while a navigation drives the body
-    if (!provision.needsFood(bot)) return
-    survivalHunting = true
-    try {
-      // ONE food policy: eat -> bank -> cook -> hunt -> farm -> fish -> scout -> hold
-      // (provision.secureFood; it starved at 1hp with cooked food in its own chest, and
-      // later starved through hunt-only fallbacks in an animal-free region - both live).
-      const home = (provision.knownBed && provision.knownBed()) || undefined
-      if ((await provision.secureFood(bot, { home, canHold: true, say: m => bot.chat(String(m).slice(0, 200)) })).fed) note('(survival) food secured - was starving with an empty pack')
-    } catch (e) { /* transient - retry next tick */ } finally { survivalHunting = false }
-  }, 6000).unref?.()
-}
-
-// PROACTIVE TOP-UP: idle food decayed 20 -> 1 with NO refill until near-starvation (live) -
-// auto-eat only eats the PACK, and nothing WITHDREW from the bank until the food=2 crisis. When
-// IDLE and food dips below 14, top up to comfortable from the pack AND the bank (secureFood
-// eats pack -> withdraws banked food -> cooks -> eats), so it never coasts down to 1. (This
-// still spends finite bank food - which is exactly why the renewable wheat farm matters.)
-// Set FOOD_TOPUP=0 to disable.
-let toppingUpFood = false
-if (process.env.FOOD_TOPUP !== '0') {
-  setInterval(async () => {
-    if (MAINTAIN_ON) return // S6: food<14 is a survival need (secureFood dispatch owns it); the pack-points buffer is maintain step 1. FOOD_TOPUP=0 still disables step 1.
-    if (toppingUpFood || !bot.entity || bot.food == null || bot.food >= 14) return
-    if (commands.isBusy && commands.isBusy()) return // busy jobs run their own secureFood
-    if (provision.isResting && provision.isResting()) return
-    if (provision.isSecuringFood && provision.isSecuringFood()) return
-    if (provision.isRecoveringDegraded && provision.isRecoveringDegraded()) return // S5: the ladder owns the body between rungs
-    if (arbiter.maneuverActive && arbiter.maneuverActive()) return
-    toppingUpFood = true
-    try {
-      const home = (provision.knownBed && provision.knownBed()) || undefined
-      const before = bot.food
-      await provision.secureFood(bot, { home, threshold: 14, say: m => bot.chat(String(m).slice(0, 200)) })
-      if ((bot.food ?? 0) > before) note(`(food-topup) topped up ${before} -> ${bot.food} (bank/pack) - not waiting for starvation`)
-    } catch (e) { /* transient - retry next tick */ } finally { toppingUpFood = false }
-  }, 20000).unref?.()
-}
-
-// FOOD CRISIS (survival tier, fires EVEN WHILE BUSY): every work loop carries its own
-// hunger checks, but a wedged loop can starve the bot at 1hp for 20 minutes (live:
-// 0 food / 0.9hp mid-"gathering" at the hut). At food <= 2 with an empty pack, being
-// fed outranks the job - survival is the one legal interrupt (operator rule). The
-// running loop sees 'goal was changed' and recovers, same as any reflex interruption.
-// Disable with FOOD_CRISIS=0.
-let foodCrisis = false
-if (process.env.FOOD_CRISIS !== '0') {
-  setInterval(async () => {
-    if (SCHED_ON) return // S4: the scheduler tick owns survival dispatch
-    if (foodCrisis || !bot.entity || bot.food == null || bot.food > 2) return
-    if (provision.hasFood(bot)) return // auto-eat has it covered
-    if (provision.isResting && provision.isResting()) return
-    if (provision.isSecuringFood && provision.isSecuringFood()) return
-    if (commands.isEscaping && commands.isEscaping()) return
-    if (navigate.isRecovering()) return
-    foodCrisis = true
-    try {
-      note(`(food-crisis) food=${bot.food} hp=${(bot.health || 0).toFixed(1)} with an empty pack - dropping everything to feed`)
-      try { bot.pathfinder.setGoal(null) } catch {}
-      const home = (provision.knownBed && provision.knownBed()) || undefined
-      const ok = await provision.secureFood(bot, { home, canHold: true, threshold: 10, say: m => bot.chat(String(m).slice(0, 200)) })
-      note(`(food-crisis) ${ok.fed ? 'fed (or safely holding)' : 'still starving - will retry'}`)
-    } catch (e) { note(`(food-crisis) failed: ${e.message}`) } finally { foodCrisis = false }
-  }, 15000).unref?.()
-}
-
-// HP CRISIS (survival tier, fires EVEN WHILE BUSY): a hurt bot that is still endangered (dark
-// night or a mob in range) keeps grinding its job and whittles to death - live: an armored
-// far-gather went hp 18.7->11.7->0.77->DEAD, then lost its armor to a naked death-spiral. No
-// consumer acted on the arbiter's 'heal' need (build/gather bailed only on creeper/threat; the
-// one hp<=8 rest branch sat behind a "bail to safety" that fired first). This is that missing
-// consumer: when survivalNeed surfaces 'heal', STOP the job and shelter-and-heal. Firing while
-// busy IS the override (no isBusy gate on purpose). A live creeper/threat makes the need
-// 'creeper'/'threat' (not 'heal') so this waits for the flee to back off, THEN shelters. Disable
-// with HP_CRISIS=0.
-let hpCrisis = false
-let hpCrisisCooldownUntil = 0
-if (process.env.HP_CRISIS !== '0') {
-  setInterval(async () => {
-    if (SCHED_ON) return // S4: the scheduler tick owns survival dispatch
-    if (hpCrisis || !bot.entity || bot.health == null) return
-    if (Date.now() < hpCrisisCooldownUntil) return
-    const n = provision.survivalNeed(bot)
-    if (!n || n.need !== 'heal') return
-    if (commands.isEscaping && commands.isEscaping()) return
-    if (navigate.isRecovering() || navigate.isForceUnsticking()) return
-    if (provision.isResting()) return
-    if (provision.isSecuringFood && provision.isSecuringFood()) return
-    if (bot.isSleeping) return
-    hpCrisis = true
-    try {
-      note(`(hp-crisis) ${n.reason} - stopping the job to shelter and heal`)
-      const ok = await provision.recoverHp(bot, { say: m => bot.chat(String(m).slice(0, 200)) })
-      note(`(hp-crisis) ${ok ? 'recovered - the job can resume' : 'not fully recovered - resuming carefully'}`)
-    } catch (e) { note(`(hp-crisis) failed: ${e.message}`) } finally { hpCrisis = false; hpCrisisCooldownUntil = Date.now() + 60000 }
-  }, 8000).unref?.()
-}
-
-// PROACTIVE FOOD SUPPLY (base-setup goal, like the hut): a FED, SAFE, IDLE bot that lacks a
-// standing renewable food source ESTABLISHES one BEFORE the next hunger crisis - on a
-// no-animal, water-rich site that's a WHEAT FARM at the remembered pond. secureFood only
-// fired reactively at food<=12 and by food=1 it was too late to set up a multi-step source,
-// so it starved (live). This builds the farm while there's still time. Set FOOD_SUPPLY=0 off.
-let buildingFoodSupply = false
-if (process.env.FOOD_SUPPLY !== '0') {
-  setInterval(async () => {
-    try { provision.noteWaterCrossing(bot) } catch {} // FARM_EXPAND passive river-crossing note (self-throttled <=1/60s, O(1), never navigates) - runs before the MAINTAIN gate so it ticks in every era
-    if (MAINTAIN_ON) return // S6: farm tend/expand is maintain step 2. FOOD_SUPPLY=0 still disables step 2.
-    if (buildingFoodSupply || !bot.entity) return
-    if (commands.isBusy && commands.isBusy()) return // a job owns the body
-    if (provision.isResting && provision.isResting()) return
-    if (provision.isSecuringFood && provision.isSecuringFood()) return
-    if (provision.isRecoveringDegraded && provision.isRecoveringDegraded()) return // S5: the ladder owns the body between rungs
-    if (arbiter.maneuverActive()) return
-    if (bot.pathfinder && bot.pathfinder.goal) return // idle only - don't yank an active goal
-    if (!provision.needFoodSupply || !provision.needFoodSupply(bot)) return // fed + safe + no standing farm
-    buildingFoodSupply = true
-    try {
-      note('(food-supply) fed + idle but no standing food source - setting up the wheat farm at the remembered pond')
-      const home = (provision.knownBed && provision.knownBed()) || undefined
-      const r = await provision.ensureFoodSupply(bot, { home, say: m => bot.chat(String(m).slice(0, 200)) })
-      note('(food-supply) ' + (r && r.ok ? (r.reason || 'food supply set up') : 'deferred: ' + ((r && r.reason) || 'unknown')))
-    } catch (e) { note('(food-supply) failed: ' + e.message) } finally { buildingFoodSupply = false }
-  }, 45000).unref?.()
-}
-
-// Night-shelter: a NAKED bot at night with a hostile closing digs into a sealed pit and waits
-// it out - a creeper can't reach you underground (it died to one, unarmed, mid-build). Only
-// when IDLE: during a build the gather loop does this itself (a reflex must not fight its
-// pathfinder). Body-side because the brain is HELD during builds. Set NIGHT_SHELTER=0 to off.
-let sheltering = false
-let lastRestNote = 0
-if (process.env.NIGHT_SHELTER !== '0') {
-  setInterval(async () => {
-    if (RUNNER_ON) return // PLAN-one-runner S2: the tick owns nightShelter now - as a PROPOSAL the chooser weighs, not a second actor racing it through this guard stack
-    if (sheltering || !bot.entity) return
-    if (commands.isBusy && commands.isBusy()) return // the gather loop covers the build case
-    // A wedge-escape / nav recovery owns the body: re-entering the bunker now would stomp its
-    // manual step-out (ONE BODY, ONE ROUTE) - the live "step-out no progress" at the shallow
-    // bunker was the shelter reflex re-sealing the pit under the escape. Let the escape finish.
-    if (navigate.isForceUnsticking() || navigate.isRecovering()) return
-    if (provision.isSecuringFood && provision.isSecuringFood()) return // feeding run owns the body
-    if (provision.isRecoveringDegraded && provision.isRecoveringDegraded()) return // S5: the ladder owns the body between rungs
-    // Two triggers: VULNERABLE at night (naked - always rest, the death carousels were all
-    // naked), or simply IDLE at night with a bed on the map - a player with nothing to do
-    // goes to bed even in full iron (operator asked for exactly this). Armored + mid-task
-    // keeps working the night; armored + idle sleeps.
-    const idleNight = provision.isNight(bot) && !bot.pathfinder.goal && provision.knownBed && provision.knownBed()
-    if (!provision.shelterNeeded(bot) && !idleNight) return
-    // S6: don't yank a night indoor cook/courier into bed mid-deposit. shelterNeeded (a naked bot
-    // at dusk) still WINS - this only holds the idle-sleep while a maintain pass is running safe.
-    if (provision.isMaintaining && provision.isMaintaining() && !provision.shelterNeeded(bot)) return
-    // ETERNAL/FROZEN NIGHT: after the brief initial shelter, STOP re-bunkering (and stop
-    // idle-sleeping toward a dawn that won't come) - stand down so gearup/progress can run.
-    // Re-arming near the bunker is the real fix for "no armor, mobs about", not hiding forever
-    // (live 379,62,40, pinned 25+ min). flee/defend still guard acute threats; a normal night
-    // never trips nightStuck, so this is a no-op there.
-    if (provision.nightStuck && provision.nightStuck(bot)) return
-    sheltering = true
-    // note at most once per 2 min: a rest that resolves instantly (dusk head-start, can't
-    // sleep yet) used to print "rested for the night" every 5s - the log spam (live 07-13)
-    try { if (await provision.nightRest(bot, { say: m => bot.chat(String(m).slice(0, 200)) }) && Date.now() - lastRestNote > 120000) { lastRestNote = Date.now(); note('(shelter) rested for the night' + (provision.underArmored(bot) ? ' (bed or pit) - no armor, mobs about' : ' - nothing better to do than sleep')) } }
-    catch (e) { /* transient */ } finally { sheltering = false }
-  }, 5000).unref?.()
-}
-
-// GEAR-UP: a naked IDLE bot re-arms itself - body-side and brain-independent (the brain's
-// "leather from the wandering trader" fixation left it naked at the hut for hours while
-// iron sat mineable nearby - live 07-13). Morning + idle + fed + safe -> `armorup`, which
-// wears what it has, hunts cows only if cows actually exist, and otherwise runs the IRON
-// bootstrap (mine -> smelt -> craft -> wear). The persisted gearup back-off inside the
-// bootstrap keeps this from churning on a fruitless site. Set GEAR_REFLEX=0 to off.
-let gearing = false
-if (process.env.GEAR_REFLEX !== '0') {
-  setInterval(async () => {
-    if (MAINTAIN_ON) return // S6: gear-up is maintain step 6 (same executor, back-off, nightStuck exception). GEAR_REFLEX=0 still disables step 6.
-    if (gearing || !bot.entity) return
-    if (runner.recoveringHome) return // respawned far from base - GO HOME outranks re-arming in the wild
-    if (commands.isBusy && commands.isBusy()) return // a job owns the body (its camp flow gears)
-    if (arbiter.maneuverActive()) return // a navigation is driving - don't start the iron grind mid-walk
-    if (provision.isResting && provision.isResting()) return
-    if (provision.isSecuringFood && provision.isSecuringFood()) return
-    if (provision.isRecoveringDegraded && provision.isRecoveringDegraded()) return // S5: the ladder owns the body between rungs
-    if (commands.isEscaping && commands.isEscaping()) return
-    if (!provision.underArmored(bot)) return
-    const tod = bot.time ? bot.time.timeOfDay : 0
-    // dusk/night belong to the shelter reflex; mornings to the grind - UNLESS the night is
-    // frozen/eternal (dawn never comes, live). Then re-arming near the bunker is the ONLY way
-    // out of "no armor, mobs about", so gear up at night too. mayDoProgress (below) still holds
-    // for a live threat / hunger, keeping it careful; and the shelter reflex stands down for
-    // nightStuck so it won't fight this. Normal nights: tod<23500 so this still defers to shelter.
-    if (tod >= 11000 && !(provision.nightStuck && provision.nightStuck(bot))) return
-    // JOB ARBITER: gear-up is a PROGRESS job - don't start it while a SURVIVE need is unmet
-    // (food/hp/threat/shelter). The ONE authority replaces the old scattered food<X/hp<Y checks;
-    // the survive reflexes (feed/heal/shelter) resolve the need first, then gearup runs.
-    if (!provision.mayDoProgress(bot)) { const n = provision.survivalNeed(bot); if (n) note(`(gearup) holding - survival need first: ${n.need} (${n.reason})`); return }
-    const backoff = provision.gearupState && provision.gearupState()
-    if (backoff && backoff.until > Date.now()) return // recent fruitless grind - let it cool
-    gearing = true
-    try {
-      note('(gearup) under-armored and idle - going to get armor (iron if there are no cows)')
-      const r = await commands.handle(bot, 'armorup')
-      note('(gearup) ' + r)
-    } catch (e) { note('(gearup) failed: ' + e.message) } finally { gearing = false }
-  }, 60000).unref?.()
-}
-
-// HOME REPAIR: an idle bot standing AT a creeper-damaged base self-heals it as a SURVIVAL
-// reflex - not only inside the camp job. Home upkeep used to run ONLY in autoBuild's camp pass,
-// gated on a huge total BOM (~>=500), so ordinary creeper damage silently rotted the base for
-// hours. This shares the camp pass's exact chain via provision.maintainHome (apron -> bed ->
-// bank double-heal -> spawn re-assert -> structural repair + tidy -> consolidate). Fires only
-// when idle, already home (<=24b), and survival needs are met - repair is a PROGRESS job, so
-// food/hp/threat/shelter come first (won't stand still patching walls under attack). It does
-// NOT trek: crossing the world back to a far base is recover-home's job. Cooled down 5 min
-// after a pass so it can't churn. Set HOME_REPAIR=0 to disable.
-let repairingHome = false
-let lastHomeRepair = 0
-if (process.env.HOME_REPAIR !== '0') {
-  setInterval(async () => {
-    if (MAINTAIN_ON) return // S6: home repair is maintain step 9 (same gates). HOME_REPAIR=0 still disables step 9.
-    if (repairingHome || !bot.entity) return
-    if (runner.recoveringHome) return // respawned far from base - GO HOME outranks patching the base
-    if (commands.isBusy && commands.isBusy()) return // a job owns the body (its camp pass repairs)
-    if (arbiter.maneuverActive()) return // a navigation is driving - don't start a repair mid-walk
-    if (provision.isResting && provision.isResting()) return
-    if (provision.isSecuringFood && provision.isSecuringFood()) return
-    if (provision.isRecoveringDegraded && provision.isRecoveringDegraded()) return // S5: the ladder owns the body between rungs
-    if (commands.isEscaping && commands.isEscaping()) return
-    if (navigate.isForceUnsticking() || navigate.isRecovering()) return
-    // JOB ARBITER: home repair is a PROGRESS job - never run it while a SURVIVE need is unmet
-    // (food/hp/threat/shelter). This is how the base won't get patched while under attack.
-    if (!provision.mayDoProgress(bot)) return
-    if (Date.now() - lastHomeRepair < 300000) return // 5-min cooldown after a pass - don't churn
-    const hut = provision.hutAnchor(); if (!hut) return
-    // AT-HOME gate: only repair when actually near home. This reflex must NOT trek across the
-    // world - that's recover-home's job; repair only when already standing at the base.
-    if (bot.entity.position.distanceTo(hut) > 24) return
-    repairingHome = true
-    try {
-      const r = await provision.maintainHome(bot, hut, { isStopped: () => false, say: m => bot.chat(String(m).slice(0, 200)) })
-      lastHomeRepair = Date.now()
-      if (r && r.damaged) note('(home-repair) patched the base - ' + JSON.stringify({ bed: r.bed, chest: r.chestFixed, repair: r.repair && r.repair.missing, consolidated: r.consolidated }))
-      else note('(home-repair) base intact - nothing to fix')
-    } catch (e) { note('(home-repair) failed: ' + e.message) } finally { repairingHome = false }
-  }, 60000).unref?.()
-}
+// ==== THE NINE TIMERS THAT USED TO LIVE HERE (PLAN-one-runner S5) ==========================
+// auto-cook, survival-hunt, food-top-up, food-crisis, hp-crisis, food-supply, night-shelter,
+// gear-up and home-repair were nine independent setIntervals, each with its own guard stack of
+// four to eleven latch reads, each able to move the body the moment those latches happened to
+// read false. They are all PROPOSALS now - rows in bot/reflexes.js that the scheduler tick
+// weighs against everything else and dispatches through one path, where a decline is logged
+// with its blocker instead of being a silent `return`.
+//
+// Three of them (survival-hunt, food-crisis, hp-crisis) had already been dead code since S4:
+// `if (SCHED_ON) return` on the first line, ~90 lines of never-executed body behind it. Three
+// more (food-top-up, gear-up, home-repair) had been dead since S6 in the same way - they are
+// steps 1, 6 and 9 of the maintenance pass, and the registry records that ownership by name.
+// Deleting a dead branch is the fix; carrying it is the debt (DESIGN-PRINCIPLES, flag debt).
+//
+// What is NOT here, deliberately: the INSTANT class above (auto-eat, auto-equip) and the
+// time-critical SURVIVE reflexes below (auto-defend at 700ms, the drown escape at 2s). Those
+// never conflict or cannot afford a 15s tick, and scheduler.REFLEX_OWNED names the latter.
 
 // SCHEDULER TICK (S4, REDESIGN §3.2/§10): ONE dispatcher for the survival tier. Replaces the three
 // ad-hoc crisis timers above (SURVIVAL_HUNT/FOOD_CRISIS/HP_CRISIS early-return while SCHEDULER is
@@ -1118,6 +850,7 @@ if (SCHED_ON) {
       if (provision.isMaintaining && provision.isMaintaining()) return 'maintain'
       if (commands.isBusy && commands.isBusy()) return 'job'
       if (bot.pathfinder && bot.pathfinder.goal) return 'walk'
+      if (bot.targetDigBlock) return 'dig'
     } catch { /* a latch that cannot be read fails OPEN: an unreadable owner must never immobilise the bot */ }
     return null
   }
@@ -1221,6 +954,10 @@ if (SCHED_ON) {
       // 1. GUARDS (cheap; mirror the crisis reflexes). NOT gated on arbiter.maneuverActive() - a
       //    survival preempt must be able to interrupt a nav leg (same as FOOD_CRISIS today).
       if (!bot.entity || schedJob) return
+      // FARM_EXPAND's passive river-crossing note: O(1), self-throttled to <=1/60s, never
+      // navigates. It rode the FOOD_SUPPLY timer purely because that timer existed; when that
+      // timer was deleted (S5) this was the one line in it that still had a job to do.
+      try { provision.noteWaterCrossing(bot) } catch {}
       if (commands.isEscaping && commands.isEscaping()) return
       if (navigate.isRecovering() || navigate.isForceUnsticking()) return
       if (bot.isSleeping) return
@@ -2124,62 +1861,11 @@ if (process.env.WEDGE_WATCHDOG !== '0') {
   }, 5000).unref?.()
 }
 
-// Auto-collect: when idle (no active pathfinder goal) and a dropped item is close
-// by, walk over and pick it up - so the bot tidies up after a chop/hunt without the
-// brain micromanaging it. Skipped whenever it already has a goal (following / going
-// somewhere) so it never yanks itself off-task. Disable with AUTO_COLLECT=0.
-let collecting = false
-if (process.env.AUTO_COLLECT !== '0') {
-  setInterval(async () => {
-    if (collecting || !bot.entity || !bot.pathfinder || bot.pathfinder.goal) return
-    // never wander off mid-provision/build - those flows manage their own
-    // movement and pickups, and surprise walks force inventory desyncs
-    if (commands.isBusy && commands.isBusy()) return
-    if (arbiter.maneuverActive()) return // a navigation owns the body (e.g. entering the hut) - don't grab drops mid-approach
-    try {
-      const me = bot.entity.position
-      let best = null; let bestD = 8
-      for (const e of Object.values(bot.entities || {})) {
-        if (!e || !e.position) continue
-        if (e.name !== 'item') continue // real drops only (the 'item' entity type)
-        // NEVER dive for drops: items sunk in water lured the idle bot to the river
-        // bottom and it drowned reclaiming its own death-drops (test server, verified
-        // by the server log). Submerged junk isn't worth a corpse-run either way.
-        try {
-          const at = bot.blockAt(e.position.floored()); const above = bot.blockAt(e.position.floored().offset(0, 1, 0))
-          if ((at && /water/.test(at.name)) || (above && /water/.test(above.name))) continue
-        } catch {}
-        const d = e.position.distanceTo(me); if (d > 1.3 && d < bestD) { bestD = d; best = e }
-      }
-      if (!best) return
-      collecting = true
-      // range 0: actually walk ONTO the item's block - range 1 can count as "arrived"
-      // a block short, so the bot never touches the drop and never picks it up.
-      await bot.pathfinder.goto(new goals.GoalNear(best.position.x, best.position.y, best.position.z, 0))
-    } catch { /* item vanished / unreachable - retry next tick */ } finally { collecting = false }
-  }, 3000)
-}
+// (auto-collect moved to bot/reflexes.js as an IDLE-tier proposal - S5. It scored its own
+//  eagerness by distance there, so a drop underfoot is picked up and one 8b away is not worth
+//  the walk - which is what a player does, and what a 3s timer with a flat 8b radius could not.)
 
-// IDLE SCAFFOLD SWEEP: orphaned towers (a death or restart mid-harvest abandons them;
-// the operator kept finding dirt/cobble columns all over the forest) get torn down
-// whenever the bot idles near one - the registry persists, so restarts can't orphan.
-// Only registry entries older than 2 min (never yank scaffold a flow just placed).
-if (process.env.AUTO_SCAFFOLD_SWEEP !== '0') {
-  let sweeping = false
-  setInterval(async () => {
-    if (sweeping || !bot.entity || !bot.pathfinder || bot.pathfinder.goal) return
-    if ((commands.isBusy && commands.isBusy()) || (provision.isResting && provision.isResting())) return
-    if (navigate.isNavigating() || navigate.isRecovering()) return
-    try {
-      const scaffold = require('./scaffold.js')
-      const stale = scaffold.near(bot.entity.position, 20).filter(e => Date.now() - e.t > 120000)
-      if (!stale.length) return
-      sweeping = true
-      const n = await scaffold.teardown(bot, bot.entity.position, { radius: 20, max: 12 })
-      if (n) note(`(scaffold) idle sweep tore down ${n} orphaned block(s)`)
-    } catch {} finally { sweeping = false }
-  }, 45000)
-}
+// (the idle scaffold sweep moved to bot/reflexes.js as an IDLE-tier proposal - S5.)
 
 // DROWN CRISIS (survival tier, fires EVEN WHILE BUSY): the arbiter emits a 'drowning' need
 // (head underwater) but NOTHING consumed it - the bot drowned gear-mining into a pond aquifer.
@@ -2244,35 +1930,10 @@ if (process.env.AUTO_SURFACE !== '0') {
   }, 2000)
 }
 
-// Auto-torch (OPT-IN, default OFF - set AUTO_TORCH=1): a companion that lights the
-// way at night. Deliberately conservative because it's an autonomous block-placer:
-// only at night, only on natural ground (placeTorchNearby), throttled, and skipped
-// if a torch/lantern is already close - so it never spams or decorates builds.
-let lastTorchAt = 0
-let _torchIds = null
-function torchBlockIds (bot) {
-  if (_torchIds) return _torchIds
-  try {
-    const md = require('minecraft-data')(bot.version)
-    const ids = Object.values(md.blocksByName).filter(b => /torch|lantern/.test(b.name)).map(b => b.id)
-    if (ids.length) _torchIds = ids // cache only on success; leave null to retry if mcData wasn't ready
-    return ids
-  } catch { return [] } // don't cache a failure - a permanently-empty list would disable the dedup guard
-}
-const AUTO_TORCH_MS = parseInt(process.env.AUTO_TORCH_MS || '8000', 10)
-if (process.env.AUTO_TORCH === '1') {
-  setInterval(async () => {
-    if (!bot.entity || !bot.time || bot.time.timeOfDay < 13000) return // daytime - skip
-    if (bot.targetDigBlock) return // never interrupt a dig to decorate (aborts reset break progress)
-    if (Date.now() - lastTorchAt < AUTO_TORCH_MS) return
-    try {
-      const ids = torchBlockIds(bot)
-      if (ids.length && bot.findBlock({ matching: ids, maxDistance: 6 })) return // already lit nearby
-      const r = await commands.placeTorchNearby(bot)
-      if (/placed torch/.test(r)) { lastTorchAt = Date.now(); note(`(auto-torch) ${r}`) }
-    } catch { /* not ready / placement raced - retry next tick */ }
-  }, 3000)
-}
+// (auto-torch moved to bot/reflexes.js as an IDLE-tier proposal - PLAN-one-runner S5. It is
+//  still opt-in via AUTO_TORCH=1: an autonomous block-placer earns its way in, it is not
+//  granted one. As a proposal it can only run on a body nobody else wants, which is the
+//  guarantee its old `bot.targetDigBlock` check was reaching for.)
 
 // Gaze / attention reflex: make the bot's head behave like a real player's instead
 // of staring into space. Priority each tick: (1) face an attacker just after being

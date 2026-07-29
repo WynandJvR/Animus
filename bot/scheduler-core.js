@@ -45,6 +45,7 @@
 const arbiter = require('./arbiter.js')      // one-way: the survival-need authority (no cycle: arbiter requires nobody here)
 const scheduler = require('./scheduler.js')  // one-way, READ-ONLY reuse: isDegraded/bootstrapNeed/ironKeystoneActive/needProducer/JOB_CLASSES
 const gravePolicy = require('./grave-policy.js') // one-way: PURE grave decisions (#112 salvageVerdict / net-of-risk scoring)
+const reflexes = require('./reflexes.js')    // one-way: the proposal registry's PURE half (when/urgency); its executors require lazily
 
 // ---- tuning constants (the utility weights) ---------------------------------------------
 // Benefit tiers encode the operator's goal stack: survive > sustain > secure > build. They are
@@ -354,6 +355,15 @@ function chooseActivity (snapshot, opts) {
       reason: 'paying down ' + debt.n + ' outstanding commitment(s) - nearest is ' + debt.best.n + ' ' +
         debt.best.kind + ' cell(s) ' + Math.round(d) + 'b away' })
   }
+
+  // (B2c) HOUSEKEEPING - the IDLE-tier proposals from the reflex registry (PLAN-one-runner S5).
+  //      autoCollect / autoCook / scaffoldSweep / autoTorch used to be 3s-45s timers that moved
+  //      the body whenever a handful of latches happened to read false. As candidates they are
+  //      weighed like everything else, on the same benefit x urgency - risk signature, with the
+  //      SAME risk this function computed once - so a naked bot at dusk does not stop to pick up
+  //      a stick, and an idle one in daylight does exactly what a player would.
+  //      Their weights sit below W_RESUME (a waiting build wins) and above W_IDLE (beats idling).
+  for (const c of reflexes.proposalCandidates(s, { risk: riskLevel(s), riskWeight: W_RISK_MAINT })) cands.push(c)
 
   // (B3) BUILD / IDLE proceeds (null job). The baseline progress candidate, DOCKED live risk so an
   //      exposed bot never "just keeps building" - that dock is what pulls it home instead. When a
