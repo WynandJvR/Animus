@@ -159,6 +159,38 @@ t('3: refuse() is pure - the same ctx twice gives the same answer, and nothing i
   }
 })
 
+// ============ the no-op verdict is the EXECUTOR's, never a regex on its prose ==============
+// Live 2026-07-29 21:12, at hp 1 / food 0 / naked:
+//   (sched) recoverFromDegraded -> NOT recovered (stopped, blocked on no-progress)
+//   (sched) recoverFromDegraded achieved nothing - not re-dispatching it until the situation changes
+//   (core) chose build/idle: CRISIS UNANSWERED (...) - doing what i can instead: resuming the build
+// The ladder had been STOPPED by the watchdog's own fail-job lever. An interrupted pass proves
+// NOTHING about the world, and the regex could not tell that from "I tried everything".
+t('no-op: the runner latches on the executor\'s verdict, not on the shape of its sentence', () => {
+  const src = srcOf('index.js')
+  assert(!/NOOP_RE\s*=/.test(src.split('\n').filter(l => !/^\s*\/\//.test(l)).join('\n')), 'the prose regex is DELETED, not merely bypassed')
+  assert(/if \(obj && r\.noOp === true\)/.test(src), 'the latch reads an explicit verdict off the result')
+  assert(/runner\.noOp\.clear\(\)/.test(src), 'and crisis vitals clear it, like every other stale back-off')
+})
+
+t('no-op: an INTERRUPTED job never latches - not the ladder, not the food run', () => {
+  // the two transient blockers, pinned by name in the executors that produce them
+  const food = String(reflexes.get('secureFood').run)
+  assert(/blockedOn === 'busy'/.test(food) && /blockedOn === 'stopped'/.test(food), 'secureFood must exempt busy/stopped')
+  assert(/noOp: !r\.fed && !interrupted/.test(food), 'and latch only on a real world blocker')
+  const ladder = String(reflexes.get('recoveryLadder').run)
+  assert(/r\.reason === 'stopped'/.test(ladder), 'the ladder must exempt a stopped pass from its condition gate')
+  assert(/noOp: false/.test(ladder), 'and never arm the generic latch - runner.ladderBlock is its authority')
+})
+
+t('no-op: every executor that CAN latch says so from data, not from a string it built', () => {
+  for (const r of reflexes.dispatchable()) {
+    const src = String(r.run)
+    if (!/noOp/.test(src)) continue
+    assert(!/noOp:\s*\/|noOp:\s*.*\.test\(/.test(src), r.name + ': a no-op verdict must not be computed by matching text')
+  }
+})
+
 // ============ THE ORDERING RULE (what replaced the guard stacks) ==========================
 t('ordering: a proposal takes the body only from a lower tier - and a crisis is the one exception', () => {
   const crisis = { crisis: true }

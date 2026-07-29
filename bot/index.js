@@ -761,12 +761,27 @@ if (SCHED_ON) {
   //
   // Deliberately narrow: only a job that reported a NO-OP arms it. A job that did work, failed
   // loudly, or threw is left alone (a real failure often deserves an immediate retry).
-  const NOOP_RE = /^(no-op|nothing|could not|couldn't|not fed|NOT recovered|deferred|held|blocked)/i
+  // ==== THE JOB-IDENTITY LATCH IS THE EXECUTOR'S OWN VERDICT, NOT A REGEX ON ITS PROSE =====
+  //
+  // FIX 11's latch means "this ran in this exact world and achieved nothing, so running it again
+  // cannot produce a different result". It decided that by REGEX-MATCHING the result string:
+  //   NOOP_RE = /^(no-op|nothing|could not|couldn't|not fed|NOT recovered|deferred|held|blocked)/i
+  // Live, 2026-07-29 21:12, at hp 1 / food 0 / naked:
+  //   (sched) recoverFromDegraded -> NOT recovered (stopped, blocked on no-progress)
+  //   (sched) recoverFromDegraded achieved nothing - not re-dispatching it until the situation changes
+  //   (core) chose build/idle: CRISIS UNANSWERED (...) - doing what i can instead: resuming the build
+  // The ladder had been STOPPED - by the watchdog's own fail-job lever - and an interrupted pass
+  // proves NOTHING about the world. The regex could not tell "I tried everything and the world
+  // will not budge" from "someone stopped me mid-sentence", so a starving bot latched off its own
+  // recovery and went back to the build. (Ironically this only bit once the latch was keyed
+  // correctly: before that it silently never matched for the ladder at all.)
+  //
+  // So a proposal now SAYS whether it achieved nothing, from data it actually has - fed/blockedOn,
+  // rested true/false, steps.length - and the two transient blockers ('busy', 'stopped') are never
+  // a verdict about the world. A survival policy must not be decided by a regex on a log line.
   // runJob(name, executor, opts) - the ONE dispatch path. `opts.holds` is a proposal's DECLARED
   // hold ({ wake }): while it is in force the body is deliberately still and the watchdogs must
   // not read that stillness as a hang (PLAN §3.4; the 2026-07-29 creeper death).
-  // `opts.noOpLatch === false` opts a job out of the job-identity latch below - only graveSweep
-  // does, because it carries its own verdict-classed back-off and two of them would fight.
   const runJob = async (name, executor, opts = {}) => {
     // `jobKey` is the CHOOSER's name for this work; `name` is the executor's. They differ for two
     // jobs (recoveryLadder->recoverFromDegraded, graveSweep->recover) and the job-identity latch
@@ -777,11 +792,15 @@ if (SCHED_ON) {
     commands.touchProgress('dispatch:' + name) // S7 (d): a just-dispatched job is at zero idle (same t0 rule as beginActivity/H5c)
     const holdToken = opts.holds ? reflexes.beginHold(name, opts.holds.wake, opts.holds.ttlMs || 900000) : null
     try {
+      // An executor returns either a plain string (what happened, for the log) or
+      // { msg, noOp } - `noOp` being ITS OWN verdict that it ran to completion and the world
+      // would not budge. Nothing here inspects the prose.
       const r = await executor()
-      note('(sched) ' + name + ' -> ' + (r === false ? 'no-op/deferred' : (typeof r === 'string' ? r.split('\n')[0] : 'done')))
+      const obj = r && typeof r === 'object' && !Array.isArray(r)
+      const msg = obj ? (r.msg || 'done') : (r === false ? 'no-op/deferred' : (typeof r === 'string' ? r.split('\n')[0] : 'done'))
+      note('(sched) ' + name + ' -> ' + msg)
       try {
-        const noOp = opts.noOpLatch !== false && (r === false || (typeof r === 'string' && NOOP_RE.test(r.trim())))
-        if (noOp) {
+        if (obj && r.noOp === true) {
           const sig = scheduler.recoverySignature(await provision.schedulerState(bot))
           runner.noOp.set(jobKey, sig)
           note('(sched) ' + name + ' achieved nothing - not re-dispatching it until the situation changes')
@@ -896,7 +915,7 @@ if (SCHED_ON) {
     // (0) JOB IDENTITY (FIX 11): this job already ran in this exact world and achieved nothing.
     //     Running it again cannot produce a different result. The latch clears the instant the
     //     signature moves - a CONDITION, never a timer.
-    if (p.noOpLatch !== false && runner.noOp.has(job)) {
+    if (runner.noOp.has(job)) {
       let sig = ''
       try { sig = scheduler.recoverySignature(s) } catch {}
       if (sig && sig === runner.noOp.get(job)) return { key: job, why: 'already tried this in exactly this situation and it achieved nothing' }
@@ -1104,7 +1123,7 @@ if (SCHED_ON) {
           const altGate = alt && typeof alt.run === 'function' ? candidateRefusal({ job: alt.name, cls: 'survival' }, s) : { why: 'no executor' }
           if (!altGate) {
             note('(sched) ' + name + ' -> doing ' + alt.name + ' instead, which is what that refusal names')
-            await runJob(alt.label || alt.name, () => alt.run(bot, mkCtx(s, pick)), { jobKey: alt.name, holds: alt.holds, noOpLatch: alt.noOpLatch })
+            await runJob(alt.label || alt.name, () => alt.run(bot, mkCtx(s, pick)), { jobKey: alt.name, holds: alt.holds })
           }
         }
         return
@@ -1123,7 +1142,7 @@ if (SCHED_ON) {
         note('(sched) PREEMPT ' + name + ' (' + pick.reason + ') - stopping the maintenance pass, survival outranks chores')
       }
       // 8. DISPATCH. One line, for every proposal in the registry.
-      await runJob(name, () => chosen.run(bot, mkCtx(s, pick)), { jobKey: job, holds: chosen.holds, noOpLatch: chosen.noOpLatch })
+      await runJob(name, () => chosen.run(bot, mkCtx(s, pick)), { jobKey: job, holds: chosen.holds })
     } catch (e) { try { note('(sched) tick error: ' + e.message) } catch {} }
     finally {
       // FIX 19: the reschedule is DANGER-SCALED. A flat 15s±3s is a sampling rate chosen for a
@@ -1262,7 +1281,11 @@ if (SCHED_ON) {
             if (bot.health <= 6 || bot.food <= 2) {
               runner.graveCooldownUntil = runner.hpCooldownUntil = 0
               runner.ladderBlock = null // FIX 3: at crisis vitals, give the ladder a fresh look even if the world reads the same
-              note('(wd) crisis vitals - cleared the stale grave/hp back-offs and the ladder block so the next tick can dispatch')
+              // ...and the job-identity latch, for the same reason and by the same argument. It
+              // was the one back-off this clause did not clear, so at hp 1 / food 0 the ladder
+              // could be held off by it while every OTHER stale hold was being released.
+              runner.noOp.clear()
+              note('(wd) crisis vitals - cleared every stale back-off (grave/hp/ladder/no-op) so the next tick can dispatch')
             }
           }
         } else idleWorkSince = 0

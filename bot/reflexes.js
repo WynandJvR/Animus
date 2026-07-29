@@ -174,8 +174,11 @@ function _resetHolds () { holds.clear() }
 //   refuse    (ctx) -> reason string | null. The PERSISTENT conditions under which the executor
 //             cannot run. These used to be silent `return`s in the dispatcher; as refusals they
 //             re-enter selection in the same tick and are logged with their blocker.
-//   noOpLatch false to opt OUT of the runner's "did nothing in this exact world, don't repeat
-//             it" latch (only graveSweep, which carries its own verdict-classed back-off).
+//   run's result  a plain string (what happened, for the log) or { msg, noOp }. `noOp` is the
+//             executor's OWN verdict that it ran to completion and the world would not budge -
+//             the runner then refuses it until the world changes. It is never inferred from the
+//             prose: a regex on a result string could not tell "I tried everything" from "someone
+//             stopped me mid-sentence", and at hp 1 / food 0 it latched off the recovery ladder.
 //   label     the executor name to log, when it differs from the job name.
 //
 // ctx (built ONCE per tick by the runner):
@@ -220,12 +223,25 @@ def({
     const provision = require('./provision.js')
     const scheduler = require('./scheduler.js')
     const r = await provision.recoverFromDegraded(bot, { say: ctx.say })
-    if (!r.done && r.progressed === false && r.sig) {
+    // An INTERRUPTED pass proves nothing about the world, so it must not latch the condition
+    // gate either. 'busy'/'stopped'/'deadline' all mean the pass ended for reasons that have
+    // nothing to do with whether its rungs could have worked - and on 2026-07-29 21:12 a
+    // watchdog-stopped pass latched the ladder off at hp 1 / food 0 / naked, which is the
+    // failure this whole gate exists to prevent, arriving from the other direction.
+    const interrupted = r.reason === 'stopped' || r.reason === 'busy' || r.reason === 'deadline'
+    if (!r.done && !interrupted && r.progressed === false && r.sig) {
       ctx.runner.ladderBlock = { sig: r.sig, blockedOn: r.blockedOn || 'blocked' }
       ctx.note('(sched) ladder BLOCKED on ' + ctx.runner.ladderBlock.blockedOn + ' - ' + scheduler.blockerText(ctx.runner.ladderBlock.blockedOn) + '; standing down until the situation changes')
     } else ctx.runner.ladderBlock = null
-    return (r.done ? 'recovered' : 'NOT recovered (' + (r.reason || 'rungs exhausted') + (r.blockedOn ? ', blocked on ' + r.blockedOn : '') + ')') +
-           (r.rungs.length ? ' via ' + r.rungs.join(' > ') : '')
+    return {
+      msg: (r.done ? 'recovered' : 'NOT recovered (' + (r.reason || 'rungs exhausted') + (r.blockedOn ? ', blocked on ' + r.blockedOn : '') + ')') +
+                  (r.rungs.length ? ' via ' + r.rungs.join(' > ') : ''),
+      // NEVER the generic latch: the ladder's own condition gate (runner.ladderBlock, set above
+      // from r.progressed/r.sig) is the authority, and it is set from real per-rung data rather
+      // than from whether the pass happened to be interrupted. Two latches on one signature is
+      // one rule with two definitions, and the weaker one latched a starving bot's recovery off.
+      noOp: false
+    }
   }
 })
 
@@ -234,7 +250,6 @@ def({
   label: 'recover',
   tier: 'SURVIVE',
   why: 'a worthwhile grave at arm\'s reach IS the survival move - free gear, and often food',
-  noOpLatch: false, // it carries its own verdict-classed back-off (scheduler.graveCooldownMs)
   refuse: (ctx) => ctx.now < ctx.runner.graveCooldownUntil
     ? 'that grave just failed to open/reach - backing off before another attempt'
     : null,
@@ -281,7 +296,14 @@ def({
   run: async (bot, ctx) => {
     const provision = require('./provision.js')
     const r = await provision.secureFood(bot, { home: ctx.knownBed, canHold: true, say: ctx.say })
-    return r.fed ? 'fed (food ' + bot.food + ')' : 'not fed - blocked on ' + r.blockedOn
+    // 'busy'/'stopped' mean SOMEONE ELSE ended this pass - it proves nothing about the world and
+    // must never latch. 'night'/'food' are real conditions, and both are in the recovery
+    // signature, so the latch clears the moment either moves.
+    const interrupted = r.blockedOn === 'busy' || r.blockedOn === 'stopped'
+    return {
+      msg: r.fed ? 'fed (food ' + bot.food + ')' : 'not fed - blocked on ' + r.blockedOn,
+      noOp: !r.fed && !interrupted
+    }
   }
 })
 
@@ -310,7 +332,10 @@ def({
   run: async (bot, ctx) => {
     const provision = require('./provision.js')
     const rested = await provision.nightRest(bot, { say: ctx.say })
-    return rested ? 'sheltered for the night' : 'could not shelter (no bed, no diggable ground) - holding'
+    return {
+      msg: rested ? 'sheltered for the night' : 'could not shelter (no bed, no diggable ground) - holding',
+      noOp: !rested // no bed and no diggable ground here is a fact about THIS place: do not re-dig it every 15s
+    }
   }
 })
 
@@ -377,7 +402,7 @@ def({
   run: async (bot, ctx) => {
     const commands = require('./commands.js')
     const r = await require('./reclaim.js').reclaimPass(bot, { isStopped: () => !!(commands.isEscaping && commands.isEscaping()) })
-    return (r && r.reason) || 'nothing owed'
+    return { msg: (r && r.reason) || 'nothing owed', noOp: !(r && r.reclaimed > 0) }
   }
 })
 
@@ -463,7 +488,7 @@ def({
   run: async (bot, ctx) => {
     const provision = require('./provision.js')
     const n = await provision.cookRawMeat(bot, {})
-    return n > 0 ? 'cooked ' + n + ' raw meat at the furnace' : 'nothing cooked'
+    return { msg: n > 0 ? 'cooked ' + n + ' raw meat at the furnace' : 'nothing cooked', noOp: !(n > 0) }
   }
 })
 
@@ -477,7 +502,7 @@ def({
   run: async (bot, ctx) => {
     const scaffold = require('./scaffold.js')
     const n = await scaffold.teardown(bot, bot.entity.position, { radius: 20, max: 12 })
-    return n ? 'tore down ' + n + ' orphaned scaffold block(s)' : 'nothing reachable to tear down'
+    return { msg: n ? 'tore down ' + n + ' orphaned scaffold block(s)' : 'nothing reachable to tear down', noOp: !n }
   }
 })
 
