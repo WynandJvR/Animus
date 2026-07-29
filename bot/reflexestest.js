@@ -160,16 +160,31 @@ t('3: refuse() is pure - the same ctx twice gives the same answer, and nothing i
 })
 
 // ============ THE ORDERING RULE (what replaced the guard stacks) ==========================
-t('ordering: a proposal takes the body only from a STRICTLY lower tier', () => {
-  assert(reflexes.mayTakeBody('SURVIVE', 'job'), 'a survival need must be able to interrupt a build')
-  assert(reflexes.mayTakeBody('SURVIVE', 'walk'), 'a survival need must be able to interrupt a walk')
-  assert(!reflexes.mayTakeBody('SURVIVE', 'shelter'), 'two SURVIVE claimants must never preempt each other (audit LOOP C)')
-  assert(!reflexes.mayTakeBody('SURVIVE', 'ladder'), 'the ladder owns the body while it runs')
+t('ordering: a proposal takes the body only from a lower tier - and a crisis is the one exception', () => {
+  const crisis = { crisis: true }
+  assert(reflexes.mayTakeBody('SURVIVE', 'walk'), 'a survival need must be able to interrupt a bare walk')
+  assert(reflexes.mayTakeBody('SURVIVE', 'maintain'), 'a survival need must be able to interrupt chores')
+  assert(!reflexes.mayTakeBody('SURVIVE', 'job'), 'single-goal discipline: a build is not interrupted for non-crisis survival work')
+  assert(reflexes.mayTakeBody('SURVIVE', 'job', crisis), '...but a CRISIS-grade need preempts the build')
+  assert(!reflexes.mayTakeBody('SURVIVE', 'shelter'), 'two SURVIVE claimants must not alternate (audit LOOP C)')
+  assert(reflexes.mayTakeBody('SURVIVE', 'shelter', crisis), '...unless something strictly worse is live (#113)')
+  assert(!reflexes.mayTakeBody('SURVIVE', 'ladder'), 'the recovery ladder owns the body while it runs')
+  assert(!reflexes.mayTakeBody('SURVIVE', 'ladder', crisis), 'and a hard owner is not yielded even to a crisis - it IS the crisis response')
   assert(!reflexes.mayTakeBody('PROGRESS', 'job'), 'chores yield to a running job (single-goal discipline)')
   assert(!reflexes.mayTakeBody('PROGRESS', 'shelter'), 'chores yield to sheltering')
+  assert(!reflexes.mayTakeBody('PROGRESS', 'walk'), 'chores never yank an active walk')
   assert(!reflexes.mayTakeBody('IDLE', 'walk'), 'idle housekeeping never yanks an active walk')
   assert(reflexes.mayTakeBody('IDLE', null), 'an idle body is free for housekeeping')
   assert(reflexes.mayTakeBody('PROGRESS', null))
+})
+
+t('ordering: a body refusal always NAMES the owner it yielded to', () => {
+  for (const o of reflexes.BODY_OWNERS) {
+    const why = reflexes.bodyRefusal('IDLE', o.key)
+    assert(typeof why === 'string' && why.includes(o.label), o.key + ': the refusal must print the owner (' + why + ')')
+  }
+  assert.strictEqual(reflexes.bodyRefusal('SURVIVE', null), null, 'an idle body refuses nothing')
+  assert.strictEqual(reflexes.bodyRefusal('SURVIVE', 'nonsense'), null, 'an unknown owner must fail OPEN - a typo cannot immobilise the bot')
 })
 
 t('ordering: every BODY_OWNERS row has a tier the arbiter knows', () => {

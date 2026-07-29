@@ -24,6 +24,7 @@ const mining = require('./mining.js')        // PURE tool-durability model
 const scaffold = require('./scaffold.js')    // temp-block registry + teardown
 const scheduler = require('./scheduler.js')  // PURE tier/preemption decisions
 const foodSec = require('./food.js')         // PURE food-security decisions
+const reflexes = require('./reflexes.js')    // PLAN-one-runner S4: declared holds (a hold says it is alive; it does not fake progress)
 const navigate = require('./navigate.js')
 const provCore = require('./provision-core.js')
 const { AIRISH, REPLACEABLE, countItem, inventoryCounts, toolForBlock, gotoWithTimeout,
@@ -760,8 +761,15 @@ async function boundedHold (bot, { isStopped = () => false, say = () => {}, dead
   const dl = Date.now() + deadlineMs
   const near = (bot.entity && bot.entity.position) || target || bed
   let sealedPit = false
+  // PLAN-one-runner S4: this hold DECLARES itself rather than heartbeating. Same idea S7 H7 had,
+  // minus the lie - `touchP('boundedHold')` claimed forward progress every 5s while the bot was
+  // deliberately doing nothing. It now names its wakes and its deadline ONCE, both watchdogs read
+  // that single declaration (index.js), and the TTL means a crashed executor can never leave an
+  // eternal hold standing. The loop body is still the validity check: every named wake below is
+  // re-read each pass, so declaring a hold cannot mask a real hang.
+  const holdToken = reflexes.beginHold('boundedHold', 'foodInPack|grave|animal<=24|dawn|deadline', deadlineMs + 5000)
+  try {
   while (Date.now() < dl && !isStopped()) {
-    touchP('boundedHold') // S7 H7: a DECLARED hold with named wakes + a 90s deadline - the loop body IS the validity check
     if (foodCount(bot) > 0 || (bot.food ?? 0) > 4) return { held: true, wake: 'foodInPack' }
     // RE-CHECK THE BANK each pass (FORCE a fresh chest read): banked food a stale cache hid - or
     // food an operator/courier just restocked - is the fastest exit from the hold. Then eat it.
@@ -779,6 +787,7 @@ async function boundedHold (bot, { isStopped = () => false, say = () => {}, dead
     else if (isNight(bot) && !insideOwnStructure(bot) && !sealedPit) { sealedPit = true; try { await digInForNight(bot, { isStopped, say }) } catch (e) { dbg('boundedHold: seal-pit failed (' + e.message + ')') } }
     await new Promise(r => setTimeout(r, 5000))
   }
+  } finally { reflexes.endHold(holdToken); touchP('boundedHold:released') } // ONE honest stamp on the way out, so standing up again is not instantly "stale"
   const fed = foodCount(bot) > 0
   return { held: fed, wake: fed ? 'foodInPack' : 'deadline' }
 }

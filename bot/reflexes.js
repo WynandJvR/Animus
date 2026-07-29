@@ -68,31 +68,50 @@ function classOf (tier) { return CLASS_OF_TIER[tier] || 'idle' }
 //
 // A busy build sits at PROGRESS, so a SURVIVE proposal out-ranks it - which is correct and is
 // exactly what AUDIT FIX 4 restored (a nightShelter that could never fire because the reflex
-// checked isBusy()). The single-goal-discipline rule that a build is only interrupted for a
-// CRISIS-grade need is a separate, explicit gate in the runner - not a tier.
+// checked isBusy()). Two flags qualify the plain ranking, and both are pre-existing rules given
+// one definition instead of twelve:
+//   hard        never yielded. An escape, a navigation recovery and the recovery ladder drive
+//               the body themselves; every reflex in index.js already said "the ladder owns the
+//               body between rungs" in its own guard list - the tick was the one place that did
+//               not, so a shelter could start on top of a ladder rung that was sheltering.
+//   crisisOnly  yielded only to a CRISIS-grade need. This is single-goal discipline: a build is
+//               not interrupted to top up a buffer, and a bot already holed up for the night is
+//               not pulled back out except by something strictly worse (#113).
 const BODY_OWNERS = [
-  { key: 'escape', tier: 'SURVIVE', label: 'an escape' },
-  { key: 'navRecovery', tier: 'SURVIVE', label: 'a navigation recovery' },
-  { key: 'ladder', tier: 'SURVIVE', label: 'the recovery ladder' },
-  { key: 'foodRun', tier: 'SURVIVE', label: 'a food run' },
-  { key: 'shelter', tier: 'SURVIVE', label: 'the night shelter' },
+  { key: 'escape', tier: 'SURVIVE', hard: true, label: 'an escape' },
+  { key: 'navRecovery', tier: 'SURVIVE', hard: true, label: 'a navigation recovery' },
+  { key: 'ladder', tier: 'SURVIVE', hard: true, label: 'the recovery ladder' },
+  { key: 'foodRun', tier: 'SURVIVE', crisisOnly: true, label: 'a food run' },
+  { key: 'shelter', tier: 'SURVIVE', crisisOnly: true, label: 'the night shelter' },
   { key: 'maintain', tier: 'PROGRESS', label: 'a maintenance pass' },
-  { key: 'job', tier: 'PROGRESS', label: 'a job' },
+  { key: 'job', tier: 'PROGRESS', crisisOnly: true, label: 'a job' },
   { key: 'walk', tier: 'PROGRESS', label: 'a walk already in progress' }
 ]
 const ownerByKey = new Map(BODY_OWNERS.map(o => [o.key, o]))
 function ownerInfo (key) { return ownerByKey.get(key) || null }
 
-// THE ordering rule. A proposal may take the body only from a STRICTLY lower tier. Equal tiers
-// never preempt each other: two SURVIVE claimants alternating is the audit's LOOP C (net
-// displacement ~0 while hp went 8 -> 5 -> 2 -> dead), and one of them is usually this very
-// proposal already running.
-function mayTakeBody (tier, ownerKey) {
-  if (!ownerKey) return true
+// THE ordering rule, and the whole of what ~120 scattered latch checks used to say.
+// Returns null when the proposal may take the body, else the REASON it may not - because a
+// refusal that does not name its blocker is the silent `return` this work exists to delete.
+//
+// Equal tiers do not preempt each other by default: two SURVIVE claimants alternating is the
+// audit's LOOP C (net displacement ~0 while hp went 8 -> 5 -> 2 -> dead), and one of them is
+// usually this very proposal, already running.
+function bodyRefusal (tier, ownerKey, opts) {
+  if (!ownerKey) return null
   const o = ownerInfo(ownerKey)
-  if (!o) return true
-  return tierRank(tier) > tierRank(o.tier)
+  if (!o) return null
+  if (o.hard) return o.label + ' owns the body'
+  const rank = tierRank(tier)
+  const orank = tierRank(o.tier)
+  if (rank > orank && !o.crisisOnly) return null
+  if (o.crisisOnly && rank >= orank && rank === TIERS.SURVIVE) {
+    return (opts && opts.crisis) ? null : 'body busy (' + o.label + ') and this is not crisis-grade - single-goal discipline'
+  }
+  if (rank > orank) return null
+  return o.label + ' owns the body'
 }
+function mayTakeBody (tier, ownerKey, opts) { return bodyRefusal(tier, ownerKey, opts) == null }
 
 // ---- declared holds ---------------------------------------------------------------------
 // A hold is a proposal DELIBERATELY sitting still until a named condition (`wake`) occurs:
@@ -232,6 +251,11 @@ def({
   name: 'secureFood',
   tier: 'SURVIVE',
   why: 'the ONE food policy: eat -> bank -> cook -> hunt -> farm -> fish -> scout -> hold',
+  // When this proposal is refused, THIS is what happens instead. A refusal must perform the
+  // alternative it names or name the owner that will (DESIGN-PRINCIPLES §5) - the night-forage
+  // guard printed "sheltering, not foraging" while nothing sheltered, and the audit's D2 is
+  // exactly that class of comforting lie. As data, the promise is kept by the runner.
+  alternative: 'nightShelter',
   refuse: (ctx) => {
     // NIGHT-FORAGE GUARD (#11 - a live death: creeper at the hut doorstep while foraging at
     // night un-armoured). This was a silent hold: the tick logged "sheltering, not foraging"
@@ -388,6 +412,7 @@ module.exports = {
   CLASS_OF_TIER,
   BODY_OWNERS,
   ownerInfo,
+  bodyRefusal,
   mayTakeBody,
   REFLEXES,
   get,

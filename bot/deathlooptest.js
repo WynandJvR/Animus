@@ -275,31 +275,53 @@ t('FIX 19: the tick actually USES it, and does not jitter a crisis', () => {
 // FAIL-JOB at 90s -> tick re-arm -> `position FROZEN ~195s - forcing an escape` -> climbed out of
 // its own sealed pit into the dark -> killed by a creeper. The bot did the right thing and the
 // forward-progress watchdog dug it out to die. Sitting still until dawn IS the goal.
-t('FIX 22: the night-shelter hold heartbeats, like boundedHold already does', () => {
+// FIX 22 shipped a HEARTBEAT: the hold faked forward progress every 3s so the watchdog left it
+// alone. That worked and was still the wrong shape - every hold had to REMEMBER to do it (this
+// one had not, for its entire existence), and it claimed progress that never happened. It is a
+// DECLARED hold now (PLAN-one-runner S4): the waiter names its wake once and both watchdogs read
+// that single declaration, whoever called it.
+t('FIX 22: every waiting loop DECLARES its hold - no loop fakes progress any more', () => {
   const shelterSrc = require('fs').readFileSync(require('path').join(__dirname, 'provision-shelter.js'), 'utf8')
   const recSrc = require('fs').readFileSync(require('path').join(__dirname, 'provision-recovery.js'), 'utf8')
-  assert(/touchP\('nightShelter:hold'\)/.test(shelterSrc), 'digInForNight must mark itself alive while it waits out the night')
-  assert(/touchP\('boundedHold'\)/.test(recSrc), 'the precedent it follows still exists')
+  assert(/reflexes\.beginHold\('nightShelter:pit'/.test(shelterSrc), 'digInForNight must declare its hold while it waits out the night')
+  assert(/reflexes\.beginHold\('boundedHold'/.test(recSrc), 'the famine hold declares itself too')
+  assert(!/touchP\('nightShelter:hold'\)/.test(shelterSrc), 'the per-hold heartbeat is DELETED, not merely supplemented')
+  assert(!/touchP\('boundedHold'\)\s/.test(recSrc), 'and so is its precedent')
+  // both release exactly once, on the way out, even when the loop returns from inside
+  assert(/finally \{ reflexes\.endHold\(holdToken\)/.test(shelterSrc), 'the shelter hold is released in a finally')
+  assert(/finally \{ reflexes\.endHold\(holdToken\)/.test(recSrc), 'the famine hold is released in a finally')
 })
-t('FIX 22: the heartbeat sits INSIDE the loop that re-checks the world', () => {
+t('FIX 22: the declared hold still sits around a loop that re-checks the world', () => {
   const src = require('fs').readFileSync(require('path').join(__dirname, 'provision-shelter.js'), 'utf8')
-  const i = src.indexOf("touchP('nightShelter:hold')")
-  const after = src.slice(i, i + 900)
-  // The loop body must still be able to break out - a heartbeat may not mask a real hang.
+  const i = src.indexOf("reflexes.beginHold('nightShelter:pit'")
+  const after = src.slice(i, i + 1400)
+  // Declaring a hold must not mask a real hang: the loop body still breaks on every named wake.
   assert(/isNight\(bot\)/.test(after), 'still breaks at dawn')
   assert(/bot\.health/.test(after), 'still breaks when taking damage')
   assert(/inWaterNow\(bot\)/.test(after), 'still breaks when the pit floods')
 })
+t('FIX 22: BOTH watchdogs read the one declaration', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8')
+  // the forward-progress watchdog (which FAIL-JOBbed the ladder at 90s)...
+  assert(/const hold = reflexes\.activeHold\(\)/.test(src), 'the S7 watchdog consults the declared hold')
+  // ...and the position-freeze watchdog, which is the one that actually dug the bot out at 195s
+  assert(/\|\| reflexes\.activeHold\(\)\) \{ wdHist = \[\]; return \}/.test(src), 'the hard-wedge watchdog stands down for a declared hold')
+})
 
 // ============ LOOP C - a decision must produce an action ==================================
-t('LOOP C: every survival job the chooser can pick has a dispatch branch in the tick', () => {
+t('LOOP C: every survival job the chooser can pick has an executor that can run it', () => {
   // The tick used to be an exhaustive if/else over four names; nightShelter fell through to a log
-  // line and homecoming did not exist. Assert the dispatchable set is what the chooser can emit.
-  const src = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8')
+  // line and homecoming did not exist. Then it became an if/else over six, which is the same
+  // shape one incident later. It is a TABLE now (bot/reflexes.js), so this asks the table -
+  // enumerable data - instead of grepping index.js for a branch that must be spelled just so.
+  const reflexes = require('./reflexes.js')
   for (const job of ['graveSweep', 'secureFood', 'recoverHp', 'nightShelter', 'recoveryLadder', 'homecoming']) {
-    assert(new RegExp("pick\\.job === '" + job + "'").test(src), `the tick must handle a ${job} pick`)
+    const p = reflexes.get(job)
+    assert(p, `the registry has no row for ${job} - the chooser can pick a job nothing can run`)
+    assert(typeof p.run === 'function', `${job} is registered but has no executor`)
   }
-  assert(/has NO executor - nothing dispatched/.test(src), 'and an unhandled pick must be LOUD, not silent')
+  const src = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8')
+  assert(/NOTHING in the registry can run it - nothing dispatched/.test(src), 'and an unhandled pick must be LOUD, not silent')
 })
 t('LOOP C: every rung recoveryPlan can PLAN has an executor that can RUN it', () => {
   // The orchard rung was planned by recoveryPlan from S5 onward and never had an executor, so
@@ -320,7 +342,11 @@ t('LOOP C: every rung recoveryPlan can PLAN has an executor that can RUN it', ()
 t('LOOP C: nightShelter is dispatched, not logged-and-dropped', () => {
   const src = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8')
   assert(!/nightShelter - reflex-owned in S4, holding/.test(src), 'the "reflex-owned, holding" no-op is gone')
-  assert(/provision\.nightRest\(bot, \{ say: schedSay \}\)/.test(src), 'it calls the real shelter executor')
+  const shelterSrc = String(require('./reflexes.js').get('nightShelter').run)
+  assert(/provision\.nightRest\(bot,/.test(shelterSrc), 'it calls the real shelter executor')
+  // ...and there is exactly ONE nightShelter actor now. The 5s reflex that used to race the
+  // tick through eight private guards yields to the runner (PLAN-one-runner S2).
+  assert(/if \(RUNNER_ON\) return \/\/ PLAN-one-runner S2: the tick owns nightShelter/.test(src), 'the old shelter timer stands down for the runner')
 })
 
 console.log(fails ? `\n${fails} FAILURE(S)` : '\nall death-loop regression tests passed')

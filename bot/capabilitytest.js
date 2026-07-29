@@ -198,17 +198,21 @@ t('ITEM 2: every job the choosers can RETURN has a dispatch branch in the tick',
     })
   }
   assert(n === sizeOf(CHOOSER_DIMS) * ENV_MATRIX.length, 'the enumeration must be exhaustive, not sampled')
-  const src = srcOf('index.js')
+  // The tick's dispatch is a TABLE now (bot/reflexes.js), not a chain of `if`s, so this asks the
+  // table. That is the whole point of the registry: "can anything run this job?" is answered by
+  // data an offline test can enumerate, not by whether a branch in index.js is spelled just so.
+  const reflexes = require('./reflexes.js')
+  const reflexOwned = new Set(S.REFLEX_OWNED)
   const unhandled = []
   for (const [job, cls] of jobs) {
-    if (TAIL_JOBS.includes(job)) continue
-    if (cls === 'survival') {
-      if (!new RegExp("pick\\.job === '" + job + "'").test(src)) unhandled.push(job + ' (survival)')
-    } else if (!NON_SURVIVAL_BRANCHES.includes(job) && !new RegExp("pick\\.job === '" + job + "'").test(src)) {
-      unhandled.push(job + ' (' + cls + ')')
-    }
+    if (TAIL_JOBS.includes(job) || reflexOwned.has(job)) continue
+    const p = reflexes.get(job)
+    if (!p) { unhandled.push(job + ' (' + cls + ': no row in the registry)'); continue }
+    if (typeof p.run !== 'function' && !p.owner) unhandled.push(job + ' (' + cls + ': registered, but nothing can run it)')
   }
   assert.deepStrictEqual(unhandled, [], 'jobs a chooser can return with nothing in the tick to run them: ' + unhandled.join(', '))
+  // and the two branches the tick still handles by NAME (not by table) are still there
+  for (const j of NON_SURVIVAL_BRANCHES) assert(reflexes.get(j), 'the registry must carry ' + j)
   // and the spread must actually reach the interesting ones, or the assertion above proves nothing
   for (const j of ['recoveryLadder', 'nightShelter', 'homecoming', 'flee', 'maintenancePass', 'reclaim', 'graveSweep', 'secureFood', 'recoverHp']) {
     assert(jobs.has(j), `the chooser spread never produced "${j}" - widen the dimensions or this test is vacuous`)
@@ -217,10 +221,12 @@ t('ITEM 2: every job the choosers can RETURN has a dispatch branch in the tick',
 
 t('ITEM 2 (loud): an unhandled pick is a logged wiring bug, never a silent return', () => {
   const src = srcOf('index.js')
-  assert(/has NO executor - nothing dispatched \(this is a wiring bug, not a decision\)/.test(src), 'the executor-resolution miss is loud')
-  assert(/has NO branch for it - nothing dispatched \(this is a wiring bug, not a decision\)/.test(src), 'the job-name miss is loud')
+  assert(/NOTHING in the registry can run it - nothing dispatched \(this is a wiring bug, not a decision\)/.test(src), 'a job with no executor is loud')
   assert(!/\}\s*else return \/\/ unknown survival job name - do nothing/.test(src), 'the bare `else return` is gone')
   assert(/flee is REFLEX-owned/.test(src), 'the one job the tick deliberately does not run says so by name')
+  // ...and a REFUSED dispatch is loud too. That is the 780-to-82 gap: the tick declining a pick
+  // it had just made, silently, is the single most expensive silence in this codebase.
+  assert(/NOT dispatched: ' \+ gate\.why/.test(src), 'a declined dispatch prints its blocker')
 })
 
 // ============ ITEM 3 - every NEED_PRODUCERS producer exists ===============================

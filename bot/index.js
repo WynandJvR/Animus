@@ -36,6 +36,7 @@ const maintain = require('./maintain.js') // #40 F2: pure buffer needs() - to de
 const foodSec = require('./food.js') // #40 F3.2: pure busy-preempt food threshold (FOOD_SURVIVAL raises it 6 -> 10)
 const pov = require('./pov.js') // GUI-OVERHAUL §2: sliced DDA raycaster behind GET /pov (all logic lives in pov.js)
 const cycleDetect = require('./cycle-detect.js') // task #34: pure behavioral cycle/oscillation detector - fed into the S7 watchdog's existing ladder (no new subsystem)
+const reflexes = require('./reflexes.js') // PLAN-one-runner: the proposal registry + the ONE body-ownership rule the tick arbitrates with
 const SCHED_ON = process.env.SCHEDULER !== '0' // master flag: SCHEDULER=0 restores the S1-hotfix wiring byte-for-byte (gate takes the survivalAdmissible path, the tick never registers, the 3 reflexes run as today)
 const LADDER_ON = SCHED_ON && process.env.RECOVERY_LADDER !== '0' // S5: RECOVERY_LADDER=0 restores S4's recoveryLadder DOWNGRADE + the one-shot respawn grave gating byte-for-byte
 const MAINTAIN_ON = SCHED_ON && process.env.MAINTAIN !== '0' // S6: MAINTAIN=0 restores the defer-note + the four proactive reflexes on their old timers byte-for-byte
@@ -43,6 +44,12 @@ const WATCHDOG_ON = SCHED_ON && process.env.WATCHDOG !== '0' // S7: the in-proce
 const CYCLE_DETECT_ON = WATCHDOG_ON && process.env.CYCLE_DETECT !== '0' // task #34: the behavioral cycle detector. An S7 ORGAN (not a peer) - lives inside the wdTimer, so WATCHDOG=0 kills it too. CYCLE_DETECT=0 -> no sampling, no verdict override, no ring read: byte-identical to today.
 const OPP_ON = MAINTAIN_ON && process.env.OPPORTUNISTIC_MAINTAIN !== '0' // opportunistic at-hut maintenance during the build era; OPPORTUNISTIC_MAINTAIN=0 restores S6 byte-for-byte
 const CYCLE_SELFABORT_EXEMPT = process.env.CYCLE_SELFABORT_EXEMPT !== '0' // #49: exempt watchdog/preempt-induced "(stopped)" self-aborts from repeatFail eligibility. Default ON; =0 restores today byte-for-byte (the selfAbort ring field goes unread)
+// PLAN-one-runner.md: the scheduler tick is THE runner - the one component that decides who
+// moves the body. ONE_RUNNER=0 hands the body back to the old reflex timers, and it is the ONLY
+// new flag this work is allowed (PLAN §6.3): it must be DELETED once S5 has soaked, not left as
+// permanent debt. Every guard it replaces is a refusal the chooser can see, so a decline is
+// logged with its blocker instead of being a silent `return` (audit D1, the 780 -> 82 gap).
+const RUNNER_ON = SCHED_ON && process.env.ONE_RUNNER !== '0'
 const RESILIENT_ON = SCHED_ON && process.env.RESILIENT_RECOVERY !== '0' // #41: invert build-vs-recovery priority after a death (postDeathRecovery latch + bank re-arm). RESILIENT_RECOVERY=0 restores today byte-for-byte (deathsRecent>=2 preempt gate, un-suppressed respawn ladder, no latch)
 
 // Live brain settings the dashboard can change on the fly; brain-llm.js polls
@@ -527,7 +534,19 @@ bot.on('death', () => {
 // places the still-missing blocks. 'spawn' also fires on first join, so gate on a death.
 let deathPending = false
 let autoRecoverTries = 0 // consecutive auto death-drop recovery attempts (capped so recovery can't death-loop)
-let recoveringHome = false // trekking home after a far respawn - holds the idle gear-up reflex off (go home > re-arm in the wild)
+// THE RUNNER'S STATE (PLAN-one-runner.md). These were six loose module-level `sched*` variables
+// that the tick, the watchdog and three reflexes all poked independently. They are the runner's
+// own memory - back-offs, latches and the "who is walking home" flag - and the proposals in
+// reflexes.js read them in refuse() and write them in run(), through the tick's ctx. Grouping
+// them is what lets a proposal own its own back-off without index.js growing another global.
+const runner = {
+  graveCooldownUntil: 0, // a grave we just failed to open/reach - verdict-classed, not blanket
+  hpCooldownUntil: 0, // after a heal attempt: give regeneration a window
+  maintainCooldownUntil: 0, // 10 min after a real pass, 5 after a no-op/bail
+  ladderBlock: null, // { sig, blockedOn }: the world the last no-progress ladder pass failed in
+  noOp: new Map(), // job -> the world signature in which it achieved nothing (FIX 11 job identity)
+  recoveringHome: false // trekking home after a far respawn - go home outranks re-arming in the wild
+}
 bot.on('spawn', () => {
   if (!deathPending) return // initial join is handled by the once('spawn') above
   deathPending = false
@@ -863,6 +882,7 @@ let sheltering = false
 let lastRestNote = 0
 if (process.env.NIGHT_SHELTER !== '0') {
   setInterval(async () => {
+    if (RUNNER_ON) return // PLAN-one-runner S2: the tick owns nightShelter now - as a PROPOSAL the chooser weighs, not a second actor racing it through this guard stack
     if (sheltering || !bot.entity) return
     if (commands.isBusy && commands.isBusy()) return // the gather loop covers the build case
     // A wedge-escape / nav recovery owns the body: re-entering the bunker now would stomp its
@@ -905,7 +925,7 @@ if (process.env.GEAR_REFLEX !== '0') {
   setInterval(async () => {
     if (MAINTAIN_ON) return // S6: gear-up is maintain step 6 (same executor, back-off, nightStuck exception). GEAR_REFLEX=0 still disables step 6.
     if (gearing || !bot.entity) return
-    if (recoveringHome) return // respawned far from base - GO HOME outranks re-arming in the wild
+    if (runner.recoveringHome) return // respawned far from base - GO HOME outranks re-arming in the wild
     if (commands.isBusy && commands.isBusy()) return // a job owns the body (its camp flow gears)
     if (arbiter.maneuverActive()) return // a navigation is driving - don't start the iron grind mid-walk
     if (provision.isResting && provision.isResting()) return
@@ -950,7 +970,7 @@ if (process.env.HOME_REPAIR !== '0') {
   setInterval(async () => {
     if (MAINTAIN_ON) return // S6: home repair is maintain step 9 (same gates). HOME_REPAIR=0 still disables step 9.
     if (repairingHome || !bot.entity) return
-    if (recoveringHome) return // respawned far from base - GO HOME outranks patching the base
+    if (runner.recoveringHome) return // respawned far from base - GO HOME outranks patching the base
     if (commands.isBusy && commands.isBusy()) return // a job owns the body (its camp pass repairs)
     if (arbiter.maneuverActive()) return // a navigation is driving - don't start a repair mid-walk
     if (provision.isResting && provision.isResting()) return
@@ -984,14 +1004,9 @@ if (process.env.HOME_REPAIR !== '0') {
 let schedJob = null             // the single job-latch (I4): one scheduler dispatch at a time
 let schedLastLog = ''           // decision-change log throttle
 let schedHeldLog = ''           // busy-held note throttle (separate so it never clobbers the decision key)
-let schedGraveCooldownUntil = 0 // failed grave recovery -> don't hammer an unreachable grave
-// AUDIT FIX 3: the ladder's CONDITION gate, replacing a 60s cooldown. `sig` is the world the last
-// no-progress pass failed in (scheduler.recoverySignature); while the world still reads that way,
-// re-running the ladder cannot produce a different plan, so candidateRefusal refuses it and the
-// chooser spends the tick on something that can help. Cleared the moment the signature changes.
-let schedLadderBlock = null // { sig, blockedOn } | null
-let schedHpCooldownUntil = 0    // mirror of hpCrisisCooldownUntil (index.js hp-crisis)
-let schedMaintainCooldownUntil = 0 // S6: 10 min after a completed pass, 5 min after a no-op/bail (mirrors schedLadderCooldownUntil)
+// (the back-offs and latches that used to live here as five loose `sched*` globals are the
+//  runner's own state now - see `runner` above. AUDIT FIX 3's ladder CONDITION gate is
+//  runner.ladderBlock, and it is consulted by the recoveryLadder proposal's own refuse().)
 let schedOppLastWindowAt = 0 // last opportunistic window CLOSE (drives the checkupDue bit)
 let schedDeferNoted = ''        // one note per deferred job kind (nightShelter/maintain/degraded/ladder-reflex)
 let schedLastPick = null        // S7 idle-with-work: the tick's last pickJob decision
@@ -1014,25 +1029,42 @@ if (SCHED_ON) {
   //
   // Deliberately narrow: only a job that reported a NO-OP arms it. A job that did work, failed
   // loudly, or threw is left alone (a real failure often deserves an immediate retry).
-  const schedNoOp = new Map() // jobName -> signature of the world in which it did nothing
   const NOOP_RE = /^(no-op|nothing|could not|couldn't|not fed|NOT recovered|deferred|held|blocked)/i
-  const runJob = async (name, executor) => {
+  // runJob(name, executor, opts) - the ONE dispatch path. `opts.holds` is a proposal's DECLARED
+  // hold ({ wake }): while it is in force the body is deliberately still and the watchdogs must
+  // not read that stillness as a hang (PLAN §3.4; the 2026-07-29 creeper death).
+  // `opts.noOpLatch === false` opts a job out of the job-identity latch below - only graveSweep
+  // does, because it carries its own verdict-classed back-off and two of them would fight.
+  const runJob = async (name, executor, opts = {}) => {
+    // `jobKey` is the CHOOSER's name for this work; `name` is the executor's. They differ for two
+    // jobs (recoveryLadder->recoverFromDegraded, graveSweep->recover) and the job-identity latch
+    // must key off the chooser's, or it silently never matches the candidate it is meant to
+    // refuse - which is exactly what FIX 11 did for the ladder until this line existed.
+    const jobKey = opts.jobKey || name
     schedJob = { name, startedAt: Date.now() }
     commands.touchProgress('dispatch:' + name) // S7 (d): a just-dispatched job is at zero idle (same t0 rule as beginActivity/H5c)
+    const holdToken = opts.holds ? reflexes.beginHold(name, opts.holds.wake, opts.holds.ttlMs || 900000) : null
     try {
       const r = await executor()
       note('(sched) ' + name + ' -> ' + (r === false ? 'no-op/deferred' : (typeof r === 'string' ? r.split('\n')[0] : 'done')))
       try {
-        const noOp = r === false || (typeof r === 'string' && NOOP_RE.test(r.trim()))
+        const noOp = opts.noOpLatch !== false && (r === false || (typeof r === 'string' && NOOP_RE.test(r.trim())))
         if (noOp) {
           const sig = scheduler.recoverySignature(await provision.schedulerState(bot))
-          schedNoOp.set(name, sig)
+          runner.noOp.set(jobKey, sig)
           note('(sched) ' + name + ' achieved nothing - not re-dispatching it until the situation changes')
-        } else schedNoOp.delete(name)
+        } else runner.noOp.delete(jobKey)
       } catch {}
     }
     catch (e) { note('(sched) ' + name + ' failed: ' + e.message); if (CYCLE_DETECT_ON) { try { commands.recordOutcome('sched:' + name, false, e.message) } catch {} } } // task #34: today this only note()s+forgets; feed the outcome ring so a re-dispatch loop (gather held x8) is SEEN. Flag-gated so CYCLE_DETECT=0 leaves lastOutcome byte-identical.
-    finally { schedJob = null }
+    finally {
+      // Release the declared hold and touch progress ONCE, on the way out. That single touch is
+      // what the per-hold heartbeats were really for: without it a job that legitimately sat
+      // still for ten minutes is instantly stale when it stands up again. One honest stamp at
+      // release beats a 3-second heartbeat claiming progress that never happened.
+      if (holdToken) { reflexes.endHold(holdToken); commands.touchProgress('holdReleased:' + name) }
+      schedJob = null
+    }
   }
   // #65 DYNAMIC_CORE Phase 1 adapter: run the PURE schedulerCore.chooseActivity and shape its verdict
   // into the SAME `pick` object pickJob returns, so the whole dispatch block below is unchanged. The
@@ -1061,69 +1093,99 @@ if (SCHED_ON) {
   //
   // Only PERSISTENT conditions belong here. A momentary one (a job already latched, the tick
   // re-entering) is handled by the tick's own early-return, not by refusing a candidate.
+  //
+  // ==== PLAN-one-runner S2/S3: THE GUARD STACKS COLLAPSE INTO ONE QUESTION ==================
+  //
+  // Every candidate's "can the dispatcher actually run this?" is now answered in the same three
+  // steps, in this order, for every proposal in the registry:
+  //   (1) has this job already achieved nothing in exactly this world?   (FIX 11 job identity)
+  //   (2) who owns the body, and does this proposal out-rank them?       (reflexes.bodyRefusal)
+  //   (3) the proposal's OWN persistent conditions                       (its refuse(), one place)
+  // There is no per-job guard list any more. Adding a behaviour is adding a row to reflexes.js,
+  // not editing eleven other behaviours' guard stacks - which is the O(n^2) coupling (audit D5)
+  // that made a missing guard invisible until it killed the bot.
+
+  // WHO OWNS THE BODY, asked ONCE per tick, in one place. This single function replaces the ~120
+  // scattered latch reads across index.js. The ORDER matters: it reports the highest-tier owner
+  // first, because that is the one a proposal has to out-rank.
+  const bodyOwner = () => {
+    try {
+      if (commands.isEscaping && commands.isEscaping()) return 'escape'
+      if (navigate.isRecovering() || navigate.isForceUnsticking()) return 'navRecovery'
+      if (provision.isRecoveringDegraded && provision.isRecoveringDegraded()) return 'ladder'
+      if (provision.isSecuringFood && provision.isSecuringFood()) return 'foodRun'
+      if (provision.isResting && provision.isResting()) return 'shelter'
+      if (provision.isMaintaining && provision.isMaintaining()) return 'maintain'
+      if (commands.isBusy && commands.isBusy()) return 'job'
+      if (bot.pathfinder && bot.pathfinder.goal) return 'walk'
+    } catch { /* a latch that cannot be read fails OPEN: an unreadable owner must never immobilise the bot */ }
+    return null
+  }
+  // The tick's context, built ONCE per tick and handed to every refuse()/run(). One snapshot,
+  // one clock reading, one food threshold - so a refusal and the choice it feeds back into can
+  // never disagree about the world (the snapshot-TIMING drift #114 left open).
+  const mkCtx = (s, pick) => ({
+    s,
+    now: Date.now(),
+    nowMs: () => Date.now(), // executors run for minutes; a cooldown they set is stamped on the way out
+    foodThreshold: (() => { try { return foodSec.busyPreemptFood() } catch { return 6 } })(),
+    progressFoodMin: parseInt(process.env.PROGRESS_FOOD_MIN || '14', 10),
+    knownBed: (provision.knownBed && provision.knownBed()) || undefined,
+    nearestGrave: (s.graves || []).filter(g => g && !g.dangerous && g.value > 0 && g.dist != null).sort((a, b) => a.dist - b.dist)[0] || null,
+    pick: pick || null,
+    say: schedSay,
+    note,
+    runner
+  })
+  // Is this proposal crisis-grade RIGHT NOW - i.e. may it take the body off a build, or out of a
+  // shelter? The two existing authorities, unchanged: scheduler.preemptCrisisGrade (a death
+  // spiral / the post-death latch) and the arbiter's live survival need. Read off the tick
+  // snapshot rather than by re-scanning the world, so it agrees with the pick it is judging.
+  const crisisGrade = (p, s, ctx) => {
+    const latch = RESILIENT_ON && commands.isPostDeathRecovery && commands.isPostDeathRecovery()
+    if (scheduler.preemptCrisisGrade({ name: p.label || p.name, deathsRecent: s.deathsRecent || 0, postDeathRecovery: latch })) return true
+    try { return !!arbiter.jobSurvivalNeed(s, { foodThreshold: ctx.foodThreshold }) } catch { return false }
+  }
   const candidateRefusal = (c, s) => {
     if (!c) return null
     const job = c.job
-    // (0) JOB IDENTITY (FIX 11): this job already ran in this exact world and achieved nothing.
-    //     Running it again cannot produce a different result. Applies to every survival job, so
-    //     the ladder is no longer a special case with its own bespoke latch.
-    if (job && schedNoOp.has(job)) {
-      let sig = ''
-      try { sig = scheduler.recoverySignature(s) } catch {}
-      if (sig && sig === schedNoOp.get(job)) return { key: job, why: 'already tried this in exactly this situation and it achieved nothing' }
-      schedNoOp.delete(job) // the world moved - it is live again
-    }
     // (a) BUILD / IDLE - the #114 probe, unchanged: the same buildReady the executor enforces.
     if (job == null) {
       let r = null
       try { r = scheduler.buildReady(s) } catch { return null }
       return (r && !r.ok) ? { key: 'build', why: r.why + (r.need ? ' (needs ' + r.need + ')' : '') } : null
     }
-    // (b) RECOVERY LADDER - FIX 3's condition gate. A pass that made NO PROGRESS is not retried
-    //     until something it depends on has changed. Re-deriving an identical plan from an
-    //     identical world cannot produce a different result; on 2026-07-20 it produced 41 identical
-    //     `NOT recovered` passes while the food bar drained. A CONDITION, never a timer.
-    if (job === 'recoveryLadder' && schedLadderBlock) {
+    const p = reflexes.get(job)
+    // A job with no row in the registry is a WIRING BUG, not a refusal - the tick's dispatch tail
+    // says so out loud rather than swallowing it (and bot/reflexestest.js makes it impossible).
+    if (!p) return null
+    const ctx = mkCtx(s, c)
+    // (0) JOB IDENTITY (FIX 11): this job already ran in this exact world and achieved nothing.
+    //     Running it again cannot produce a different result. The latch clears the instant the
+    //     signature moves - a CONDITION, never a timer.
+    if (p.noOpLatch !== false && runner.noOp.has(job)) {
       let sig = ''
       try { sig = scheduler.recoverySignature(s) } catch {}
-      if (sig && sig === schedLadderBlock.sig) {
-        return { key: 'recoveryLadder', why: 'last pass made no progress and nothing has changed since - ' + scheduler.blockerText(schedLadderBlock.blockedOn) }
-      }
-      schedLadderBlock = null // the world moved: the ladder is live again
+      if (sig && sig === runner.noOp.get(job)) return { key: job, why: 'already tried this in exactly this situation and it achieved nothing' }
+      runner.noOp.delete(job) // the world moved - it is live again
     }
-    // (c) SECURE FOOD at night while under-armoured. This was the NIGHT_FORAGE_GUARD, and it was a
-    //     silent hold: the tick logged "sheltering, not foraging" and returned, while nothing
-    //     sheltered. As a refusal it hands the body to the nightShelter candidate, which now
-    //     actually shelters - the deferral finally names an action that happens.
-    if (job === 'secureFood' && process.env.NIGHT_FORAGE_GUARD !== '0') {
-      let sn = null
-      try { sn = provision.survivalNeed(bot, { foodThreshold: foodSec.busyPreemptFood() }) } catch {}
-      if (sn && sn.need === 'shelter') return { key: 'secureFood', why: 'un-armoured at night - foraging out into the dark is the death, not the hunger' }
+    // (1) BODY OWNERSHIP - the one ordering rule. This is the whole of what "if (isBusy()) return;
+    //     if (isResting()) return; if (isSecuringFood()) return; ..." used to say, and unlike
+    //     those it is LOGGED and re-routes the tick to something it can actually do.
+    const ownerKey = bodyOwner()
+    if (ownerKey) {
+      const why = reflexes.bodyRefusal(p.tier, ownerKey, { crisis: crisisGrade(p, s, ctx) })
+      if (why) return { key: job, why }
     }
-    // (d) GRAVE SWEEP on a verdict-classed back-off (a grave we just failed to reach).
-    if (job === 'graveSweep' && Date.now() < schedGraveCooldownUntil) {
-      return { key: 'graveSweep', why: 'that grave just failed to open/reach - backing off before another attempt' }
+    // (2) the proposal's own persistent conditions (its back-off, its night gate, ...) - written
+    //     once, beside the executor they gate, instead of scattered down the dispatcher.
+    if (typeof p.refuse === 'function') {
+      let why = null
+      try { why = p.refuse(ctx) } catch (e) { why = null } // a refusal that throws must not silently block the job
+      if (why) return { key: job, why }
     }
-    // (e) MAINTENANCE PASS - the two PERSISTENT gates from its dispatch block. At night the pass is
-    //     indoor-only, so being far from home makes it undispatchable, not merely delayed.
-    if (job === 'maintenancePass') {
-      if (Date.now() < schedMaintainCooldownUntil) return { key: 'maintenancePass', why: 'cooling off after the last maintenance pass' }
-      const night = !!(provision.isNight && provision.isNight(bot))
-      if (night && (s.homeDist == null || s.homeDist > 48)) return { key: 'maintenancePass', why: 'night chores are indoor-only and home is ' + (s.homeDist == null ? 'unknown' : Math.round(s.homeDist) + 'b') + ' away' }
-      // The dispatch block below ALSO refuses on a busy body, an owned pathfinder goal and an
-      // unmet survival need - and those were left as silent `return`s because they looked
-      // momentary. Measured live 2026-07-29 14:44-14:49: `bootstrap spawn` was picked SEVEN times
-      // and dispatched ZERO times while the bot sheltered through the night, with nothing logged -
-      // the very 780-to-82 gap this probe exists to close, still open on this path. "Busy
-      // sheltering until dawn" is not momentary. Every reason the dispatcher would decline is a
-      // reason the CHOOSER must see, or it keeps picking a job that cannot run.
-      if (provision.isResting && provision.isResting()) return { key: 'maintenancePass', why: 'sheltering - chores wait for daylight' }
-      if (provision.isSecuringFood && provision.isSecuringFood()) return { key: 'maintenancePass', why: 'securing food - chores wait' }
-      if (provision.isRecoveringDegraded && provision.isRecoveringDegraded()) return { key: 'maintenancePass', why: 'the recovery ladder owns the body' }
-      if (commands.isBusy && commands.isBusy()) return { key: 'maintenancePass', why: 'a job already owns the body' }
-      if (bot.pathfinder && bot.pathfinder.goal) return { key: 'maintenancePass', why: 'already walking somewhere' }
-      if (!provision.mayDoProgress(bot)) { const n = provision.survivalNeed(bot); return { key: 'maintenancePass', why: 'survival first: ' + (n ? n.reason || n.need : 'need unmet') } }
-    }
+    // (3) a proposal EXECUTED BY ANOTHER JOB is never dispatched on its own - it names its owner.
+    if (typeof p.run !== 'function') return { key: job, why: 'performed by ' + p.owner + ', which the chooser weighs on its own terms' }
     return null
   }
   let coreLastChoice = '' // log the CHOICE on change; dispatches, refusals and standoffs always log
@@ -1186,67 +1248,40 @@ if (SCHED_ON) {
         note(`(sched) pick=${pick ? pick.job : 'idle'}${pick && pick.preempt ? ' PREEMPT' : ''} reason="${pick ? pick.reason : 'idle'}" | hp=${s.hp} food=${s.food} packPts=${s.packFoodPts} armor=${s.armorPieces} graves=${(s.graves || []).length}${nearest ? '(near ' + Math.round(nearest.dist) + 'b)' : ''} home=${s.homeDist == null ? '?' : Math.round(s.homeDist) + 'b'}`)
       }
       schedLastPick = pick; schedLastPickAt = Date.now() // S7: expose the last decision to the idle-with-work watchdog
-      // 4. Non-survival results are IGNORED (progress = body/resume already owns the goal; maintain
-      //    dispatch is S6).
-      if (!pick || pick.cls !== 'survival') {
-        if (pick && pick.job === 'maintenancePass') {
-          if (!MAINTAIN_ON) {
-            if (schedDeferNoted !== 'maintain') { schedDeferNoted = 'maintain'; note('(sched) maintain needed - deferred to S6') }
-            return
-          }
-          // S6 DISPATCH: admission gates (cheap, mirror the reflexes it replaces) - idle body +
-          // idle pathfinder + fed + cooldown clear; at night restrict to indoor sub-steps AND
-          // only when already near home. runJob's single schedJob latch keeps one dispatch at a time.
-          if (schedJob || Date.now() < schedMaintainCooldownUntil) return
-          const busy = (commands.isBusy && commands.isBusy()) || (provision.isResting && provision.isResting()) || (provision.isSecuringFood && provision.isSecuringFood()) || (provision.isRecoveringDegraded && provision.isRecoveringDegraded())
-          if (busy) return
-          if (bot.pathfinder && bot.pathfinder.goal) return
-          if (!provision.mayDoProgress(bot)) return
-          const night = !!(provision.isNight && provision.isNight(bot))
-          if (night && (s.homeDist == null || s.homeDist > 48)) return // night: indoor-only, and only if already <=48b of home
-          if (provision.isMaintaining && provision.isMaintaining()) return
-          schedDeferNoted = ''
-          await runJob('maintenancePass', async () => {
-            // #117 HOME_IS_A_NEED: the chooser's bootstrap verdict is HANDED TO the executor, so
-            // 'spawn'/'shelter' reach their producers (ensureSpawnBed / ensureHomeShelter) instead
-            // of being computed, logged and dropped. Both pickJob and the DYNAMIC_CORE adapter
-            // already carry `bootstrap` on the pick - nothing downstream had ever read it.
-            const r = await provision.maintenancePass(bot, { say: schedSay, nightIndoorOnly: night, bootstrap: pick.bootstrap || null })
-            const worked = !!(r && r.steps && r.steps.length && !/^bail/.test(r.reason || ''))
-            schedMaintainCooldownUntil = Date.now() + (worked ? 600000 : 300000) // 10 min after a real pass, 5 min after a no-op/bail
-            return r && r.steps && r.steps.length ? r.steps.join('+') : (r && r.reason) || 'nothing due'
-          })
-          return
-        }
-        // #119 COMMITMENT_LEDGER (design §3.3): RECLAIM dispatch. Same admission gates as the
-        // maintain pass above - this is background work and it yields to everything real. It
-        // gets its own dispatch rather than riding maintenancePass because it is a different
-        // job with a different precondition: maintenance ESTABLISHES infra the bot needs,
-        // reclaim PAYS FOR what the bot already did to the world. Conflating them is how
-        // reclamation became a side effect of idleness in the first place.
-        if (pick && pick.job === 'reclaim') {
-          if (schedJob) return
-          const busyR = (commands.isBusy && commands.isBusy()) || (provision.isResting && provision.isResting()) || (provision.isSecuringFood && provision.isSecuringFood()) || (provision.isRecoveringDegraded && provision.isRecoveringDegraded())
-          if (busyR) return
-          if (bot.pathfinder && bot.pathfinder.goal) return
-          if (!provision.mayDoProgress(bot)) return
-          if (provision.isMaintaining && provision.isMaintaining()) return
-          // Never at night: reclamation is cosmetic work and the dark is where the deaths are.
-          // A CONDITION, not a cooldown - it clears the moment the sun does.
-          if (provision.isNight && provision.isNight(bot)) return
-          await runJob('reclaim', async () => {
-            const r = await require('./reclaim.js').reclaimPass(bot, { isStopped: () => !!(commands.isEscaping && commands.isEscaping()) })
-            return (r && r.reason) || 'nothing owed'
-          })
-          return
-        }
+      // ==== 4. DISPATCH - ONE table, ONE path (PLAN-one-runner S2/S3) =======================
+      //
+      // This was a chain of `if (pick.job === 'x')` branches, and each branch carried its own
+      // admission-gate stack - a SECOND copy of conditions candidateRefusal already knew. The
+      // maintain pass had seven of them, and measured live on 2026-07-29 they overruled the
+      // chooser seven times in five minutes while logging nothing. Both copies are gone: the
+      // registry names the executor, the refusal probe is the ONLY gate, and every decline is
+      // logged with its blocker and re-routed in the same tick.
+      const proposal = pick && pick.job ? reflexes.get(pick.job) : null
+      // (a) `flee` is REFLEX-owned, and says so. needProducer maps lava/fire/drowning/threat/
+      //     creeper to 'flee', which is not a scheduler job - the arbiter/escape stack acts on
+      //     those inside the tick, faster than any dispatch could. That was correct and totally
+      //     invisible until it was named (DESIGN-PRINCIPLES §5; scheduler.REFLEX_OWNED).
+      if (pick && pick.job === 'flee') {
+        if (schedDeferNoted !== 'flee') { schedDeferNoted = 'flee'; note('(sched) flee is REFLEX-owned (arbiter/escape stack handles it in-tick) - not dispatching a job for it: ' + pick.reason) }
+        return
+      }
+      // (b) the maintenance pass exists but is not wired in this era (MAINTAIN=0).
+      if (pick && pick.job === 'maintenancePass' && !MAINTAIN_ON) {
+        if (schedDeferNoted !== 'maintain') { schedDeferNoted = 'maintain'; note('(sched) maintain needed - deferred to S6') }
+        return
+      }
+      // (c) nothing here for the runner to drive: build / resume / the brain's own job own this
+      //     window, and so do the proposals whose owner is another job (gearup, homeRepair,
+      //     foodTopUp are steps of the maintenance pass). The one thing the tick still does in
+      //     this window is the opportunistic at-hut chore window, below.
+      if (!proposal || typeof proposal.run !== 'function') {
         // OPPORTUNISTIC MAINTENANCE (design-docs/DESIGN-opportunistic-maintenance.md):
         // during the build era pickJob can never pick maintenancePass (persistedBuild
         // shadows it, scheduler.js resumeGate) - so when the build's own life has the bot ALREADY
         // at the hut, open a brief bounded chore window: pause (never cancel) the build,
         // run the home-only maintenancePass, cool down, and let the 2-min re-arm resume it.
         if (!OPP_ON) return
-        if (schedJob || Date.now() < schedMaintainCooldownUntil) return
+        if (schedJob || Date.now() < runner.maintainCooldownUntil) return
         const checkupDue = Date.now() - schedOppLastWindowAt >= Number(process.env.OPP_CHECKUP_MS || 1800000)
         const elig = scheduler.oppMaintain(s, { checkupDue })
         if (!elig.ok) return
@@ -1274,10 +1309,10 @@ if (SCHED_ON) {
             const unwindBy = Date.now() + Number(process.env.OPP_UNWIND_MS || 90000)
             while ((commands.isBusy && commands.isBusy()) && Date.now() < unwindBy) {
               let crisis = null; try { crisis = provision.survivalNeed(bot, { foodThreshold: foodSec.busyPreemptFood() }) } catch {}
-              if (crisis) { schedMaintainCooldownUntil = Date.now() + abandonCd; return 'window abandoned - crisis (' + crisis.need + ') during unwind' + (foodNeedPending ? ' (food need pending - 60s retry)' : '') }
+              if (crisis) { runner.maintainCooldownUntil = Date.now() + abandonCd; return 'window abandoned - crisis (' + crisis.need + ') during unwind' + (foodNeedPending ? ' (food need pending - 60s retry)' : '') }
               await new Promise(r => setTimeout(r, 500))
             }
-            if (commands.isBusy && commands.isBusy()) { schedMaintainCooldownUntil = Date.now() + abandonCd; return 'window abandoned - build did not unwind in time' + (foodNeedPending ? ' (food need pending - 60s retry)' : '') }
+            if (commands.isBusy && commands.isBusy()) { runner.maintainCooldownUntil = Date.now() + abandonCd; return 'window abandoned - build did not unwind in time' + (foodNeedPending ? ' (food need pending - 60s retry)' : '') }
           }
           const windowEnd = Date.now() + Number(process.env.OPP_WINDOW_MS || 300000)
           const night = !!(provision.isNight && provision.isNight(bot))
@@ -1286,175 +1321,72 @@ if (SCHED_ON) {
             isStopped: () => Date.now() > windowEnd
           })
           const worked = !!(r && r.steps && r.steps.length && !/^bail/.test(r.reason || ''))
-          schedMaintainCooldownUntil = Date.now() + (worked ? 600000 : Number(process.env.OPP_NOOP_COOLDOWN_MS || 1800000))
+          runner.maintainCooldownUntil = Date.now() + (worked ? 600000 : Number(process.env.OPP_NOOP_COOLDOWN_MS || 1800000))
           schedOppLastWindowAt = Date.now()
           return 'opp window: ' + (r && r.steps && r.steps.length ? r.steps.join('+') : (r && r.reason) || 'nothing due')
         })
         return
       }
-      // 5. RESOLVE the executor (the dispatch map). `name` = the executor kind actually dispatched.
-      const knownBed = (provision.knownBed && provision.knownBed()) || undefined
-      let name = null
-      let executor = null
-      const wantSecureFood = () => { name = 'secureFood'; executor = async () => { const r = await provision.secureFood(bot, { home: knownBed, canHold: true, say: schedSay }); return r.fed ? `fed (food ${bot.food})` : `not fed - blocked on ${r.blockedOn}` } }
-      const wantRecoverHp = () => { name = 'recoverHp'; executor = () => provision.recoverHp(bot, { say: schedSay }) }
-      const wantRecover = () => { name = 'recover' } // recover has its own runner (cooldown needs the result); executor stays null
-      if (pick.job === 'graveSweep') wantRecover()
-      else if (pick.job === 'secureFood') wantSecureFood()
-      else if (pick.job === 'recoverHp') wantRecoverHp()
-      // AUDIT FIX 4: nightShelter DISPATCHES. It used to log "reflex-owned in S4, holding" and
-      // return - chosen 60 times on the 2026-07-20 tape while the bot slept 4 times, because the
-      // reflex it deferred to is gated on isBusy/isRecovering/isSecuringFood/isRecoveringDegraded
-      // and at least one of those is always true in exactly the situations that pick nightShelter.
-      // The scheduler decided to shelter and nobody sheltered. It now runs the same executor the
-      // reflex would have (nightRest: bed if there is one, sealed pit if there is not), so the
-      // decision produces the action (design principle 5).
-      // FIX 2: the walk home is a dispatched JOB now, not step 1 of a hardcoded respawn script.
-      // It is chosen when the bot is displaced and the crossing is survivable, and it is
-      // re-evaluated every tick - so a walk that is unsafe at 22:00 happens at dawn instead of
-      // being attempted once per death until one of the attempts kills the bot.
-      else if (pick.job === 'homecoming') {
-        name = 'homecoming'
-        executor = async () => {
-          recoveringHome = true
-          try {
-            const pr = commands.persistedResume && commands.persistedResume()
-            const rh = await provision.recoverHome(bot, { say: schedSay, resumeAt: pr && pr.at })
-            if (rh.arrived) return 'home' + (rh.bedOk ? ' - spawn re-anchored at the bed' : ' - bed could NOT be re-asserted')
-            if (rh.stabilise) return 'stood down mid-crossing (' + (rh.blockedOn || 'blocked') + '): ' + (rh.why || '')
-            return 'did not reach home this pass (' + Math.round(rh.dist || 0) + 'b out) - will pick it up again'
-          } finally { recoveringHome = false }
-        }
-      } else if (pick.job === 'nightShelter') {
-        if (provision.isResting && provision.isResting()) return // already sheltering - never double-drive
-        name = 'nightShelter'
-        executor = async () => {
-          const rested = await provision.nightRest(bot, { say: schedSay })
-          return rested ? 'sheltered for the night' : 'could not shelter (no bed, no diggable ground) - holding'
-        }
-      } else if (pick.job === 'recoveryLadder') {
-        if (LADDER_ON) {
-          // S5: EXECUTE the ladder (provision.recoverFromDegraded runs recoveryPlan first-feasible).
-          name = 'recoverFromDegraded'
-          executor = async () => {
-            const r = await provision.recoverFromDegraded(bot, { say: schedSay })
-            // FIX 3: a pass that achieved NOTHING latches its blocking condition + the signature of
-            // the world it failed in. candidateRefusal refuses the ladder until that signature
-            // changes, so the chooser spends the tick on something that can actually help instead
-            // of re-deriving the same infeasible plan every 60s (audit LOOP B).
-            if (!r.done && r.progressed === false && r.sig) {
-              schedLadderBlock = { sig: r.sig, blockedOn: r.blockedOn || 'blocked' }
-              note('(sched) ladder BLOCKED on ' + schedLadderBlock.blockedOn + ' - ' + scheduler.blockerText(schedLadderBlock.blockedOn) + '; standing down until the situation changes')
-            } else schedLadderBlock = null
-            return (r.done ? 'recovered' : 'NOT recovered (' + (r.reason || 'rungs exhausted') + (r.blockedOn ? ', blocked on ' + r.blockedOn : '') + ')') +
-                   (r.rungs.length ? ' via ' + r.rungs.join(' > ') : '')
-          }
-        } else {
-          // S4 DOWNGRADE (RECOVERY_LADDER=0 - do NOT build the ladder): re-read the single need and
-          // route to its producer; shelter/flee stay reflex-owned; a degraded-only state with a near
-          // grave = recover.
-          let need = null
-          try { need = provision.survivalNeed(bot) } catch {}
-          if (need) {
-            const prod = scheduler.needProducer(need.need)
-            if (prod === 'secureFood') wantSecureFood()
-            else if (prod === 'recoverHp') wantRecoverHp()
-            else { if (schedDeferNoted !== 'ladder-reflex') { schedDeferNoted = 'ladder-reflex'; note('(sched) ladder need ' + need.need + ' is reflex-owned (' + (prod || 'flee') + ') - holding') } return }
-          } else if (nearest && nearest.dist <= GRAVE_NEAR_LADDER) {
-            wantRecover()
-          } else { if (schedDeferNoted !== 'degraded') { schedDeferNoted = 'degraded'; note('(sched) degraded but no executor until S5 - holding') } return }
-        }
-      } else if (pick.job === 'flee') {
-        // REFLEX-OWNED, and now SAID SO. needProducer maps lava/fire/drowning/threat/creeper to
-        // 'flee', which is not a scheduler job - the arbiter/escape stack acts on those inside the
-        // tick, faster than any dispatch could. That was correct and completely invisible: the pick
-        // fell into the bare `else return` below, so the one job name the tick deliberately does
-        // not run was indistinguishable from a job it had simply never been wired for. Named owner,
-        // logged once per transition (DESIGN-PRINCIPLES §5; scheduler.REFLEX_OWNED).
-        if (schedDeferNoted !== 'flee') { schedDeferNoted = 'flee'; note('(sched) flee is REFLEX-owned (arbiter/escape stack handles it in-tick) - not dispatching a job for it: ' + pick.reason) }
-        return
-      } else {
-        // An unknown survival job name is a WIRING BUG, not a decision. It used to be a bare
+      // 5. LEGACY REMAP: RECOVERY_LADDER=0 keeps S4's downgrade - re-read the single need and
+      //    route to its producer, rather than running a ladder this era does not build.
+      let job = pick.job
+      if (job === 'recoveryLadder' && !LADDER_ON) {
+        let need = null
+        try { need = provision.survivalNeed(bot) } catch {}
+        if (need) {
+          const prod = scheduler.needProducer(need.need)
+          if (prod === 'secureFood' || prod === 'recoverHp') job = prod
+          else { if (schedDeferNoted !== 'ladder-reflex') { schedDeferNoted = 'ladder-reflex'; note('(sched) ladder need ' + need.need + ' is reflex-owned (' + (prod || 'flee') + ') - holding') } return }
+        } else if (nearest && nearest.dist <= GRAVE_NEAR_LADDER) {
+          job = 'graveSweep' // a degraded-only state with a near grave: the grave IS the recovery
+        } else { if (schedDeferNoted !== 'degraded') { schedDeferNoted = 'degraded'; note('(sched) degraded but no executor until S5 - holding') } return }
+      }
+      const chosen = job === pick.job ? proposal : reflexes.get(job)
+      if (!chosen || typeof chosen.run !== 'function') {
+        // A job name with no executor is a WIRING BUG, not a decision. It used to be a bare
         // `return`: a second, invisible decision-maker that unmade the chooser's verdict without
-        // a line in the log. bot/capabilitytest.js enumerates every job the chooser can emit
-        // against the branches above, so reaching here means the two drifted anyway - say so.
-        note('(sched) ' + pick.job + ' picked (cls=' + pick.cls + ') but the tick has NO branch for it - nothing dispatched (this is a wiring bug, not a decision): ' + pick.reason)
+        // a line in the log. bot/reflexestest.js enumerates every job the choosers can emit
+        // against this registry, so reaching here means the two drifted anyway - say so.
+        note('(sched) ' + job + ' picked (cls=' + pick.cls + ') but NOTHING in the registry can run it - nothing dispatched (this is a wiring bug, not a decision): ' + pick.reason)
         return
       }
-      if (name !== 'recover' && !executor) return
-      // NIGHT-FORAGE GUARD (#11 - live death: creeper at the hut doorstep, foraging at night un-armored).
-      // Its CONDITION now lives in candidateRefusal (c), so the chooser hands the body to nightShelter
-      // instead of the tick returning while nothing shelters. This is the last-resort backstop for the
-      // path that does not go through the chooser (DYNAMIC_CORE off): same rule, one definition.
-      if (name === 'secureFood' && process.env.NIGHT_FORAGE_GUARD !== '0') {
-        let sn = null; try { sn = provision.survivalNeed(bot, { foodThreshold: foodSec.busyPreemptFood() }) } catch {} // #40 F3.2: FOOD_SURVIVAL raises the food preempt 6 -> 10
-        if (sn && sn.need === 'shelter') {
-          if (schedDeferNoted !== 'night-forage') { schedDeferNoted = 'night-forage'; note('(sched) secureFood held - night + under-armored: sheltering, not foraging out into the dark (forage at dawn)') }
-          // Do not merely hold: shelter. A deferral must name an action that happens (principle 5).
-          if (!(provision.isResting && provision.isResting())) {
-            await runJob('nightShelter', async () => {
-              const rested = await provision.nightRest(bot, { say: schedSay })
-              return rested ? 'sheltered instead of foraging' : 'could not shelter - holding'
-            })
+      const name = chosen.label || chosen.name
+      // 6. THE FINAL GATE - the ONLY place a dispatch is declined, and it always says why.
+      //    Under DYNAMIC_CORE these refusals have already fed back into selection, so this is
+      //    near-inert by construction; on the plain pickJob path it IS the guard stack - the
+      //    same one, logged, instead of the eleven silent `return`s that used to live here.
+      const gate = candidateRefusal({ job, cls: chosen.tier === 'SURVIVE' ? 'survival' : pick.cls }, s)
+      if (gate) {
+        const key = 'refuse:' + gate.key + '|' + gate.why
+        if (schedHeldLog !== key) { schedHeldLog = key; note('(sched) ' + name + ' NOT dispatched: ' + gate.why) }
+        // A refusal must perform the alternative it names, or name the owner that will
+        // (DESIGN-PRINCIPLES §5). `alternative` is that promise as data: the night-forage guard
+        // used to print "sheltering, not foraging" while nothing sheltered, for two years.
+        if (chosen.alternative) {
+          const alt = reflexes.get(chosen.alternative)
+          const altGate = alt && typeof alt.run === 'function' ? candidateRefusal({ job: alt.name, cls: 'survival' }, s) : { why: 'no executor' }
+          if (!altGate) {
+            note('(sched) ' + name + ' -> doing ' + alt.name + ' instead, which is what that refusal names')
+            await runJob(alt.label || alt.name, () => alt.run(bot, mkCtx(s, pick)), { jobKey: alt.name, holds: alt.holds, noOpLatch: alt.noOpLatch })
           }
-          return
-        } else if (schedDeferNoted === 'night-forage') schedDeferNoted = ''
-      }
-      // 6. BUSY vs IDLE dispatch policy (single-goal discipline).
-      const bodyBusy = (commands.isBusy && commands.isBusy()) || (provision.isResting && provision.isResting()) || (provision.isSecuringFood && provision.isSecuringFood())
-      if (bodyBusy) {
-        // busy -> dispatch ONLY when crisis-grade: a near grave IS the survival move (recover), OR a
-        // crisis-grade vitals need (food<=SCHED_CRISIS_FOOD, or hp/threat/etc via survivalNeed).
-        // #41 P0.2: under the post-death latch, recoverFromDegraded is crisis-grade UNCONDITIONALLY
-        // (preempts on the FIRST death, not the third) - the deathsRecent>=2 gate no longer holds the
-        // naked bot's recovery behind the build. RESILIENT_RECOVERY=0 -> the >=2 gate byte-for-byte.
-        const latch = RESILIENT_ON && commands.isPostDeathRecovery && commands.isPostDeathRecovery()
-        let crisis = scheduler.preemptCrisisGrade({ name, deathsRecent: s.deathsRecent || 0, postDeathRecovery: latch }) // a death-spiral signature (>=2 recent deaths, or the post-death latch) may preempt the build
-        if (!crisis) { try { crisis = !!provision.survivalNeed(bot, { foodThreshold: foodSec.busyPreemptFood() }) } catch { crisis = false } } // #40 F3.2: busy job preempted for secureFood at food<=10 (FOOD_SURVIVAL), not <=6
-        if (!crisis) { if (schedHeldLog !== name) { schedHeldLog = name; note('(sched) ' + name + ' held - body busy, not crisis-grade (single-goal)') } return }
-        schedHeldLog = ''
-        if (commands.preemptForSurvival) commands.preemptForSurvival() // sets ONLY buildAbort; the build resumes via persistedResume
-        note('(sched) PREEMPT ' + name + ' (' + pick.reason + ') - crisis-grade survival outranks the busy job')
-      } else schedHeldLog = ''
-      // 7. LATCH CHECKS + COOLDOWNS (never double-drive) + 8. the single job-latch runner.
-      if (name === 'secureFood') { if (provision.isSecuringFood && provision.isSecuringFood()) return; await runJob(name, executor) }
-      else if (name === 'recoverFromDegraded') { if (provision.isRecoveringDegraded && provision.isRecoveringDegraded()) return; await runJob(name, executor) }
-      else if (name === 'recoverHp') {
-        if ((provision.isRecoveringHp && provision.isRecoveringHp()) || Date.now() < schedHpCooldownUntil) return
-        await runJob(name, executor)
-        schedHpCooldownUntil = Date.now() + 60000 // mirror hp-crisis: cool 60s after the attempt
-      } else if (name === 'recover') {
-        if (Date.now() < schedGraveCooldownUntil) return
-        schedJob = { name, startedAt: Date.now() }
-        commands.touchProgress('dispatch:recover') // S7 (d): zero-idle at t0
-        // task #18 M4: verdict-classed back-off (scheduler.graveCooldownMs) instead of a blanket 300s -
-        // a stalled PARTIAL comes straight back inside the despawn window. GRAVE_URGENT=0 -> the single
-        // 300s branch, byte-equivalent. remainMs is the nearest grave's despawn budget (from the snap).
-        const graveUrgentOn = process.env.GRAVE_URGENT !== '0'
-        const graveRemainMs = graveUrgentOn && nearest ? nearest.remainMs : undefined
-        try {
-          const r = await commands.handle(bot, 'recover', { source: 'scheduler' })
-          // success (retrieved/gone) marks the grave, it then leaves the snapshot; anything else keeps
-          // the grave with a result-classed cooldown (partial/capacity 30s, won't-open 120s, travel/
-          // throw scaled by the despawn budget) so we neither hammer it nor lose the despawn race.
-          const cd = scheduler.graveCooldownMs(r, { remainMs: graveRemainMs, flagOn: graveUrgentOn })
-          if (cd > 0) schedGraveCooldownUntil = Date.now() + cd
-          note('(sched) recover -> ' + String(r || '').split('\n')[0] + (graveUrgentOn && cd > 0 ? ' (cooldown ' + Math.round(cd / 1000) + 's)' : ''))
-        } catch (e) {
-          const cd = scheduler.graveCooldownMs('', { remainMs: graveRemainMs, flagOn: graveUrgentOn })
-          if (cd > 0) schedGraveCooldownUntil = Date.now() + cd
-          note('(sched) recover failed: ' + e.message)
         }
-        finally { schedJob = null }
-      } else if (executor) {
-        // Any other dispatchable survival job (nightShelter, homecoming). This branch exists
-        // because the chain above was an exhaustive list of four names: a job the chooser could
-        // pick but this ladder did not name fell straight through and ran NOTHING, silently -
-        // exactly the decision/dispatch gap FIX 4 is about. A named executor now always runs.
-        await runJob(name, executor)
-      } else {
-        note('(sched) ' + (name || pick.job) + ' picked but has NO executor - nothing dispatched (this is a wiring bug, not a decision)')
+        return
       }
+      schedHeldLog = ''
+      schedDeferNoted = ''
+      // 7. TAKE THE BODY. The ownership rule already said this proposal out-ranks whoever holds
+      //    it; taking it means telling that owner to stand down through the latch it already
+      //    polls. No new abort machinery - these are the same two levers the watchdog uses.
+      const ownerKey = bodyOwner()
+      if (ownerKey === 'job' || ownerKey === 'shelter' || ownerKey === 'foodRun') {
+        if (commands.preemptForSurvival) commands.preemptForSurvival() // sets ONLY buildAbort; the build resumes via persistedResume
+        note('(sched) PREEMPT ' + name + ' (' + pick.reason + ') - ' + (reflexes.ownerInfo(ownerKey) || {}).label + ' yields to a crisis-grade need')
+      } else if (ownerKey === 'maintain') {
+        try { provision.stopMaintenance() } catch {}
+        note('(sched) PREEMPT ' + name + ' (' + pick.reason + ') - stopping the maintenance pass, survival outranks chores')
+      }
+      // 8. DISPATCH. One line, for every proposal in the registry.
+      await runJob(name, () => chosen.run(bot, mkCtx(s, pick)), { jobKey: job, holds: chosen.holds, noOpLatch: chosen.noOpLatch })
     } catch (e) { try { note('(sched) tick error: ' + e.message) } catch {} }
     finally {
       // FIX 19: the reschedule is DANGER-SCALED. A flat 15s±3s is a sampling rate chosen for a
@@ -1494,13 +1426,29 @@ if (SCHED_ON) {
     let lastLivenessRearm = 0
     const cycRing = []            // task #34: bounded 48-sample position ring (~4min @ 5s)
     let cycState = { phase: 'idle', firedAt: -Infinity, cycleKey: null, workCount: 0 } // cycle-detect latch (mirrors wdState)
+    let heldNoted = ''
     const wdTimer = setInterval(() => {
       try {
-        // 1. GUARDS. Dead/absent body: nothing to watch. A DECLARED hold (bed-sleep, night-rest) is a
-        //    dawn-waking hold (I5) whose own inner watchdog stays the authority - heartbeat + return
-        //    (same reasoning WEDGE_WATCHDOG uses, expressed as a heartbeat instead of a clock reset).
+        // 1. GUARDS. Dead/absent body: nothing to watch.
+        //
+        // ==== PLAN-one-runner S4: A DECLARED HOLD IS ALIVE BY CONSTRUCTION ==================
+        // Sitting perfectly still until a named wake IS the goal - sealed in a pit until dawn,
+        // asleep in a bed, waiting out a famine indoors - so stillness must not read as a hang.
+        // This used to be true only for the two latches named here (isSleeping/isResting), which
+        // is why 2026-07-29 19:20-19:24 happened: the shelter that sealed the pit was a RUNG of
+        // the recovery ladder, so neither latch was set, the watchdog failed the ladder at 90s,
+        // the wedge watchdog dug the bot out at 195s and a creeper killed it at 19:24:33.
+        // reflexes.activeHold() is the general form: whoever waits DECLARES it and names the
+        // wake, once, and this is the one place that reads it (each hold used to have to
+        // remember to fake progress on its own heartbeat - and one of them forgot).
         if (!bot.entity || bot.health <= 0) return
-        if (bot.isSleeping || (provision.isResting && provision.isResting())) { commands.touchProgress('declaredHold'); return }
+        const hold = reflexes.activeHold()
+        if (bot.isSleeping || (provision.isResting && provision.isResting()) || hold) {
+          if (hold && heldNoted !== hold.label) { heldNoted = hold.label; note('(wd) ' + hold.label + ' is a DECLARED hold waking on ' + hold.wake + ' - stillness here is the goal, not a stall') }
+          commands.touchProgress('declaredHold')
+          return
+        }
+        if (heldNoted) heldNoted = ''
         // 2. the active job (sync, cheap - no snapshot build on the 5s path).
         const job = provision.activeJobInfo()
         const now = Date.now()
@@ -1558,7 +1506,7 @@ if (SCHED_ON) {
               try { provision.stopSurvivalJob() } catch {}
             }
             // recover/graveSweep: NO latch bites by design (recover ignores buildAbort) - log + recordOutcome
-            // only; its own travel deadlines unwind it and the tick applies schedGraveCooldownUntil. A
+            // only; its own travel deadlines unwind it and the tick applies runner.graveCooldownUntil. A
             // promise-hung recover is caught by GIVEUP next window (layer d's class).
           } else if (wdState.act === 'giveup') {
             note('(wd) stop latch ineffective on ' + job.name + ' - a hung promise; standing down, layer d (supervisor frozen-vitals/kill) owns this')
@@ -1575,8 +1523,8 @@ if (SCHED_ON) {
             lastKickAt = now
             note('(wd) IDLE WITH WORK 30s+: pick=' + (schedLastPick && schedLastPick.job) + ' undispatched - kicking')
             if (bot.health <= 6 || bot.food <= 2) {
-              schedGraveCooldownUntil = schedHpCooldownUntil = 0
-              schedLadderBlock = null // FIX 3: at crisis vitals, give the ladder a fresh look even if the world reads the same
+              runner.graveCooldownUntil = runner.hpCooldownUntil = 0
+              runner.ladderBlock = null // FIX 3: at crisis vitals, give the ladder a fresh look even if the world reads the same
               note('(wd) crisis vitals - cleared the stale grave/hp back-offs and the ladder block so the next tick can dispatch')
             }
           }
@@ -2129,7 +2077,11 @@ if (process.env.WEDGE_WATCHDOG !== '0') {
     // here just fought the night-shelter reflex, pit-escaping the very bunker the shelter
     // re-sealed 5s later (live 379,62,40: 20+ min of watchdog-vs-shelter, farm cells never
     // advanced). Reset the freeze clock so a fresh 2.5-min window starts once we truly leave.
-    if (bot.isSleeping || bot.targetDigBlock || (provision.isResting && provision.isResting())) { wdHist = []; return }
+    // PLAN-one-runner S4: ...and a DECLARED hold is the general form of "meant to sit still".
+    // THIS is the watchdog that actually killed the bot on 2026-07-29: `(watchdog) position
+    // FROZEN ~195s - forcing an escape` fired on a correctly sealed night shelter, because the
+    // shelter was a ladder RUNG and isResting() was therefore false. One rule, read in one place.
+    if (bot.isSleeping || bot.targetDigBlock || (provision.isResting && provision.isResting()) || reflexes.activeHold()) { wdHist = []; return }
     // Only stand down for our OWN force-escape. A regular recovery/escape that has the
     // position FROZEN for 2.5 minutes is by definition failing (live: the ladder looped
     // door/nudge/stepout "no progress" for 4+ minutes at 433,62,112 and the old
