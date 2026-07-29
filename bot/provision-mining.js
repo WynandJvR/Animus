@@ -910,7 +910,28 @@ async function grabNearbyOre (bot, oreRe, r, max, { isStopped = () => false } = 
   return got
 }
 
-function mineDanger (bot) { return nearHostile(bot, 6) || (bot.health ?? 20) < 12 || (process.env.LAVA_SAFE !== '0' && !!(bot.entity && (bot.entity.isInLava || bot.entity.onFire))) }
+// AUDIT 2026-07-29 FIX 14: a FLOODING TUNNEL joins the break-out reasons. On 2026-07-29 at
+// 15:10:33-35 three consecutive digs came back `block back: water` - the bot had breached an
+// aquifer - and it kept tunnelling, went under at :35 and drowned at :59. Being in a hole that is
+// filling with water is as much a reason to stop digging as a skeleton at 6 blocks, and this is
+// the one authority every dig loop already consults. The signal is a COUNT of consecutive
+// water-verified digs (pathfix.floodingNow), cleared by a single clean break - no clock.
+function mineDanger (bot) {
+  let flooding = false
+  try {
+    const pf = require('./pathfix.js')
+    flooding = pf.floodingNow()
+    // CONSUME the signal on read. It is a one-shot ALARM, not a state: the counter only ever
+    // cleared on a SUCCESSFUL dig, and this very function stops the bot digging - so a latched
+    // alarm would have blocked all mining forever, with nothing able to clear it. That is a
+    // deadlock of precisely the kind this audit exists to remove, and I wrote it an hour ago.
+    // Consuming it means each detection buys exactly one break-out; if the bot resumes digging
+    // into the same water it re-arms after FLOOD_DIGS more water-verified digs and breaks out again.
+    if (flooding) pf.clearFlood()
+  } catch {}
+  if (flooding) { dbg('  mineDanger: the cells i just dug came back WATER - this tunnel is flooding, breaking out'); return true }
+  return nearHostile(bot, 6) || (bot.health ?? 20) < 12 || (process.env.LAVA_SAFE !== '0' && !!(bot.entity && (bot.entity.isInLava || bot.entity.onFire)))
+}
 
 module.exports = {
   setDebugSink,

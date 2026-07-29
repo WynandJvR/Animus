@@ -272,5 +272,21 @@ eq(F.barrenStep(undefined, 'other'), { strikes: 1, skip: false }, 'undefined pri
   eq(F.dryHomeFarmMode({}), 'off', 'dry: defaults (no hut) -> off')
 }
 
+// ---- FIX 10 (audit 2026-07-29): enough flat CELLS, not a flat RATIO ----------------------
+// Live: "annulus off the hut not acceptable (tillable 197, flat 0.01) - deferring to fallback" x25,
+// after which the fallback sited a 2-cell farm. The ratio gate punishes a site for being BIG.
+{
+  const sc = (tillable, flatFrac, target = 33) => F.scoreFarmSite({ tillable, flatFrac, distHome: 10, target }, { minFlatFrac: 0.35 })
+  eq(sc(197, 0.20).acceptable, true, 'FIX10: 39 level cells covers a 33-cell target -> acceptable even at 20%')
+  eq(sc(197, 0.20).flatCells, 39, 'FIX10: the absolute count is reported, not just the ratio')
+  eq(sc(197, 0.01).acceptable, false, 'FIX10: 2 level cells is genuinely too rough - still rejected')
+  eq(sc(40, 0.90).acceptable, true, 'FIX10: a small uniform site is unchanged')
+  eq(F.scoreFarmSite({ tillable: 4, flatFrac: 1, distHome: 10, target: 33 }, { minFlatFrac: 0.35, minTillable: 6 }).acceptable, false,
+    'FIX10: the minTillable floor still applies')
+  // The gate must not become unconditional: with no target supplied, only the ratio can accept.
+  eq(F.scoreFarmSite({ tillable: 197, flatFrac: 0.2, distHome: 10 }, { minFlatFrac: 0.35 }).acceptable, false,
+    'FIX10: without a target the absolute-count escape cannot fire')
+}
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall farm tests passed')
 process.exit(failures ? 1 : 0)

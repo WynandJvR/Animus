@@ -140,7 +140,23 @@ function scoreFarmSite ({ tillable, flatFrac, distHome, target }, { distWeight =
   // sets the floor, default 0.6). The +4*flatFrac score term is unchanged.
   const gate = minFlatFrac != null ? minFlatFrac
     : (process.env.FARM_FLAT_SITE === '0' ? 0 : Number(process.env.FARM_FLAT_MIN || 0.6))
-  return { score: quality - distWeight * distHome, acceptable: tillable >= minTillable && (flatFrac || 0) >= gate }
+  // ==== AUDIT 2026-07-29 FIX 10: ENOUGH FLAT CELLS, NOT A FLAT RATIO =======================
+  // The gate asked "is most of this area flat?" when the question a farm actually poses is "are
+  // there enough flat cells to lay the plot?". Those differ whenever the scan is wide: a site with
+  // 197 tillable cells of which 40 are level is a FINE home for a 33-cell farm, and it scored
+  // 40/197 = 0.20 against a 0.35 floor and was rejected - "not acceptable - deferring to fallback"
+  // x25 on the live tape, after which the fallback sited a 2-cell farm.
+  // A ratio also punishes a site for being BIG, which is backwards.
+  // So: acceptable when the ratio is good (a genuinely uniform site) OR when the absolute number
+  // of level cells already covers the target. Nothing here picks a place - the caller still scores
+  // every candidate and takes the best; this only stops a good candidate being thrown away.
+  const flatCells = Math.round((flatFrac || 0) * (tillable || 0))
+  const enoughFlat = target != null && flatCells >= target
+  return {
+    score: quality - distWeight * distHome,
+    acceptable: tillable >= minTillable && ((flatFrac || 0) >= gate || enoughFlat),
+    flatCells
+  }
 }
 
 // ---- Root F (§3.6): home-anchored site selection BY COMPARISON --------------------------

@@ -318,4 +318,152 @@ reset the bot to a fresh spawn (delete its `world-gather/playerdata/<uuid>.dat*`
 respawns empty at world spawn). Savanna oak is sparse - the planner still hard-prefers
 oak for planks; picking whatever wood is local is a future planner improvement.
 
+## 14. Survival-systems audit (2026-07-29) - the three loops
+
+A full audit of the bot logic, driven by the 2026-07-20 flight recorder: **34 deaths in 4 h 46 m**,
+**32 of them recorded as cause `unknown`**, **780 job decisions producing 82 executions**. Full
+write-up in `design-docs/AUDIT-2026-07-29-survival-systems.md`; the operator's standing rules that
+came out of it are in **`docs/DESIGN-PRINCIPLES.md`** - read that before touching `bot/`.
+
+The three loops, and what they taught:
+
+1. **The respawn treadmill.** `recoverHome` was step 1 of a hardcoded post-respawn sequence and ran
+   *unconditionally* - any distance, any hour, any armour. Naked, at night, 470 b out, eight times
+   in seven minutes. It also owned the body for the whole walk, which suppressed the very shelter
+   reflex that would have saved it. **The rule the codebase already believed in** ("never set out
+   un-armoured at night", `scheduler.rungFeasible`) **was enforced on every ladder rung and not on
+   this walk, because this walk was not a rung.** One rule, two paths, one enforcement.
+   → `outboundBlocked()` is now the single definition; `journeyAdmissible()` gates every crossing;
+   the hardcoded sequence is deleted and going home is a `homecoming` candidate the chooser weighs.
+
+2. **The recovery-ladder livelock.** `recoverFromDegraded` keeps its `tried` set *per call*, so a
+   pass that achieved nothing returned `all rungs tried`, waited 60 s, and re-derived an identical
+   plan from an identical world - forever, while the food bar drained. It could not tell "ran and
+   achieved nothing" from "ran and recovered". Compounding it: `boundedHold` releases at `food > 4`
+   while the ladder's exit needs `food >= 14`, so the "hold" held for **0 ms**.
+   → A no-progress pass now reports `blockedOn` and is not retried until `recoverySignature()`
+   changes. A condition, never a cooldown.
+
+3. **Decisions that produced no action.** `nightShelter` was chosen 60 times and the bot slept 4
+   times - the dispatch branch was `note('reflex-owned, holding'); return`. The reflex it deferred
+   to is gated on four latches that are always set in exactly those situations.
+   → Every dispatch guard is now a refusal fed back to the chooser, and `nightShelter` runs
+   `nightRest`. An unhandled pick logs loudly instead of falling through.
+
+**Death attribution (the enabler).** `classifyDeathCause` read four things at the death *cell*, so
+it could only ever name the ways the world kills you standing still - mobs, explosions, starvation
+and suffocation were all `unknown`, which disables the hard hazard rung and keeps `dangerous` false.
+Meanwhile the server broadcasts `Animus was shot by Skeleton` in chat and we threw it away.
+`bot/death-cause.js` reads it (message > damage log > block reads).
+
+**Verified live** on the `world-gather` test server (real generated terrain, `spawn-monsters=true`,
+real night), bot spawned 1 022 b from a hut that does not exist there:
+
+```
+(core) chose nightShelter: crisis: night + under-armored        ← was a 1022b naked night march
+(sched) ladder BLOCKED on dawn - ... standing down until the situation changes
+(death) at -403,59,409 (mob - Zombie, via message)              ← was "unknown"
+```
+…and zero `trekking back before anything else`. In daylight the same bot chose `homecoming` and set
+off, so the stand-down is a **wait, not a strand**.
+
+**Watch out - ambient env overrides.** This machine carries permanent user-level `DYNAMIC_CORE=1`,
+`GRAVE_NEAR_LADDER=96`, `NAV_TERRAIN_PROFILE=1`, `WATER_ESCAPE=1`, `ROD_SUPPLY=1`,
+`FARM_FLAT_MIN=0.2`. **The live bot has never run the configuration the offline suite asserts** -
+`GRAVE_NEAR_LADDER=96` alone triples the radius in which one unretrieved grave pins `isDegraded`
+true for a naked bot (`#79` documents that pinning the ladder for 95 min at the *default* 32).
+`schedulertest.js` was red on a clean checkout for exactly this reason and is now ambient-proofed.
+
+Companion research docs: `design-docs/RESEARCH-2026-07-29-navigation.md` (verdict: **do not rewrite
+the pathfinder** - the A* budget was tuned in the wrong dimension and five movement profiles are
+chosen by call site) and `design-docs/RESEARCH-2026-07-29-other-bots.md` (AltoClef's one-runner +
+task-identity are the two primitives worth stealing).
+
+## 15. The capability registry (2026-07-29) - killing "exists but unreachable"
+
+The four defects fixed in §14's session are **one defect**, and this is the fix for the class rather
+than for the four instances. Plan: `design-docs/PLAN-capability-registry.md`.
+
+| Capability | Existed? | Reachable where it was needed? | Live cost |
+|---|---|---|---|
+| `trekOrchard` executor | planned since S5 | **No** - no key in `RUNG_EXECUTORS`, so `if (!RUNG_EXECUTORS[r.action]) continue` skipped it every pass | a food source the bot plants, remembers and can never eat from |
+| `ensurePillarFiller` | yes | **No** - wired only to `deadlockSuicideReset` | pillared **60×** with an empty pack without moving |
+| wool | — | **No** - no mob drops in any producer map | a lapis→dye chain for wool it did not have; **no spawn anchor, ever** |
+| `digStaircaseUp` | yes | **No** - only reachable from an underground-gated rung | 3+ min wedged in an open-sky shaft |
+
+**Common shape:** a planner NAMES something; nothing guarantees a producer EXISTS for the things a
+planner can name; and the miss is SILENT. Capability was wired one call site at a time, so "can the
+bot obtain wool?" was answered by whoever remembered to wire it.
+
+**`bot/capabilities.js`** is now the single answer - PURE data, no bot handle, no I/O. It holds the
+item producers (`gather` / `smelt` / `strip` / **`hunt`**) and the recovery ladder's action
+vocabulary. `GATHER_SOURCES` / `GATHER_TOOL` / `SMELT_MAP` / `STRIP_MAP` are **views** over it, so
+existing callers are untouched and there is exactly one place to add a capability.
+
+**`bot/capabilitytest.js`** is the part that makes the class extinct. It does not sample - it drives
+each planner over the **full cartesian product** of the snapshot dimensions that planner reads
+(13 824 ladder states × 3 env configs; 331 776 chooser states × 3), collects every distinct thing it
+can emit, and asserts a producer exists for each. Both directions: no planned action without an
+executor, and no executor no planner can name.
+
+Gaps it found and closed, none of which anyone had noticed:
+
+* **`flee` was a survival job with no dispatch branch.** `needProducer` maps lava/fire/drowning/
+  threat/creeper to `flee`; the tick's bare `else return` swallowed it. Correct behaviour (the
+  arbiter owns it in-tick) and completely invisible - indistinguishable from an unwired job.
+  → `scheduler.REFLEX_OWNED` names it, and the tick logs it by name.
+* **`acquire` was a producer that was not a job.** `NEED_PRODUCERS` names it for wood/planks/tool;
+  it existed in no `JOB_CLASSES` member list.
+* **`pale_oak_log` had no producer while `detectWood` scanned for it.** Three hand-kept wood lists
+  that had to agree (detectWood 9, `STRIP_MAP` 9, `GATHER_SOURCES` **8**). In a pale-oak grove
+  `primaryWood` came back `pale_oak`, every generic wood need resolved to `pale_oak_log`, and the
+  whole plan stranded as `unobtainable` **while standing in a forest**.
+* **`OUTBOUND_RE` was a second hand-written copy** of "which actions set out". Now derived from the
+  registry's `outbound` flag.
+
+**The `hunt` kind** is what was missing entirely, and it deleted more than it added: three
+near-identical ~55-line mob chases (`gatherWool`, `gatherLeather`, `huntSpiderForString`) collapsed
+onto one `huntForDrop(bot, n, {item})` driver parameterised by the registry, `planProvision` gained a
+`hunt` task type, and `runGather` became a **router** - so `gather white_wool 3` works for the same
+reason `gather cobblestone 32` does, with no per-item wiring. `gatherWool` itself is **deleted**: a
+named wrapper with no caller is the exact shape the registry exists to prevent.
+
+**The bed, which is the point.** `acquireBed`'s hand-wired "if the planner gives up, go kill sheep"
+bolt-on is gone. But deleting it exposed the real root cause underneath: `resources.acquire` is
+withdraw+craft only, so it *refused* any plan needing raw materials - `acquire white_bed: not
+craftable from holdings (needs gathering birch_log)`. The bolt-on had patched exactly **one** of the
+two materials a bed needs; the planks were just as unreachable. `acquire` now takes `gather: true`,
+opted into per caller, and the bootstrap caller uses it.
+
+**Verified live** on the `world-gather` test server (real terrain, redirected state, `:3011`):
+
+```
+reconcile: ... gather:birch_log,craft:birch_planks,craft:crafting_table,hunt:white_wool,craft:white_bed
+(cmd) gather white_wool 3 -> gathered 1/3 white_wool (only 1/3 off 1 sheep)   ← was flatly refused
+(cmd) gather dirt 4      -> gathered 5/4 dirt (done)                          ← block path unchanged
+(cmd) gather iron_ingot  -> I can't get iron_ingot straight from the world (it comes via smelt ...)
+acquire stone_pickaxe: not craftable from holdings (needs gathering oak_log,cobblestone) and this
+                       caller may not roam for it
+```
+
+The first line is the whole thing: that plan used to be
+`lapis_block > lapis_lazuli > blue_dye > blue_wool > black_dye > black_wool > bone_meal >
+white_dye > white_wool` - re-dyeing wool it did not own, in a field of sheep.
+
+…and the same session closed the loop, on wool the bot had hunted itself:
+
+```
+(core) chose maintenancePass: bootstrap spawn - establishing survival infra before the build
+reconcile: withdraw [] then craft:white_bed
+acquireBed: now holding a white_bed
+placeBedNear: bed verified at (-386, 75, 432) (both cells supported, standable beside it, ...)
+assertSpawn: [spawn_set] the server confirmed the spawn is set at (-386, 75, 432)
+spawn: [acquired] spawn asserted at the bed (-386, 75, 432) (spawn_set)
+```
+
+`spawn: [failed] no bed standing, none banked, and none craftable` was the line on **both** the
+2026-07-20 tape and the 2026-07-29 one. It is now `[acquired]`.
+
+Offline suite: **54/54 green** (`for f in bot/*test*.js; do node "$f"; done`).
+
 [natural-player goal]: the bot should behave indistinguishably from a real human player; believability beats raw capability.

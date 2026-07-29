@@ -48,7 +48,54 @@ const { workingPickCount } = provMining
 
 const P = () => require('./provision.js')
 
+let dbgSink = null // forwarded from provision.js's setDebugSink (see setDebugSink below)
+function setDebugSink (fn) { dbgSink = fn }
+const dbg = (...a) => {
+  const line = '[snap] ' + a.map(x => String(x)).join(' ')
+  if (process.env.BUILD_DEBUG) console.log(line)
+  if (dbgSink) dbgSink(line)
+}
+
+// ==== AUDIT 2026-07-29 FIX 5: A FAILED READ IS NOT A FACT ==================================
+// Every field below used to be wrapped in `try { ... } catch { s.X = <safe-looking default> }`,
+// SILENTLY. So a read that failed was recorded as a confident value and nothing anywhere could
+// tell the difference between "measured, and it is zero" and "could not measure":
+//   catch { s.bankFoodPts = 0; s.bankArmorPieces = 0; ... }  -> "the bank is empty"
+//   catch { s.graves = []; s.deathsRecent = 0 }              -> "I have never died"
+// Downstream those are not inert: an "empty" bank flips hasLadderReArm, which unblocks the
+// outbound treks that rungFeasible exists to gate; "never died" clears the death-spiral guard.
+//
+// `read` records the failure instead of hiding it: the field is set to the SAME fallback (so no
+// consumer changes behaviour on a healthy read), the failure is LOGGED with the field name and
+// the error, and the field is listed in `s.unknown` so anything that cares can tell the
+// difference. Design principle 10: unmeasured is not unmet - and it is not "fine" either.
+function reader (s) {
+  s.unknown = []
+  return function read (field, fn, fallback) {
+    try {
+      const v = fn()
+      return v
+    } catch (e) {
+      s.unknown.push(field)
+      dbg('read FAILED: ' + field + ' (' + (e && e.message) + ') - recorded as UNKNOWN, using ' + JSON.stringify(fallback))
+      return fallback
+    }
+  }
+}
+
 function survivalState (bot) {
+  // VITALS FIRST, and outside every try/catch that could take them down with it.
+  // survival-snapshot.js:133 wraps this whole function in a swallowing try, so before this an
+  // exception anywhere in the threat scan below erased hp, food, isNight, underArmored and
+  // nightStuck TOGETHER - and a snapshot with no vitals reads, to every pure decider, as
+  // "hp 20, food 20, no threat, daylight, armoured" (they all default a missing vital to 20).
+  // Verified: with vitals absent, jobSurvivalNeed returns null, isDegraded is false and a
+  // 500-block crossing is admissible. A blind bot must never believe it is a healthy one.
+  const vitals = {
+    food: bot.food,
+    hp: bot.health,
+    vitalsKnown: bot.food != null && bot.health != null
+  }
   const me = bot.entity && bot.entity.position
   let threatDist = null
   let creeperDist = null // tracked SEPARATELY: a creeper triggers avoidance at a longer range
@@ -86,17 +133,22 @@ function survivalState (bot) {
   }
   let drowning = false
   try { const h = me && bot.blockAt(me.floored().offset(0, 1, 0)); drowning = !!(h && /water|seagrass|kelp|bubble_column/.test(h.name)) } catch {}
+  // The world-memory-backed flags each get their OWN guard: before, one of them throwing took the
+  // vitals with it. They fail to their conservative side and say so.
+  let isNightV = false; let underArmoredV = false; let nightStuckV = false
+  try { isNightV = isNight(bot) } catch (e) { dbg('read FAILED: isNight (' + e.message + ')') }
+  try { underArmoredV = underArmored(bot) } catch (e) { underArmoredV = true; dbg('read FAILED: underArmored (' + e.message + ') - assuming UNDER-ARMOURED (the cautious side)') }
+  try { nightStuckV = nightStuck(bot) } catch (e) { dbg('read FAILED: nightStuck (' + e.message + ')') }
   return {
-    food: bot.food,
-    hp: bot.health,
+    ...vitals,
     threatDist,
     creeperDist,
     drowning,
     inLava: !!(bot.entity && bot.entity.isInLava),
-    onFire: false, // the auto-defend/hazard reflexes own fire; not a progress-gate need here
-    isNight: isNight(bot),
-    underArmored: underArmored(bot),
-    nightStuck: nightStuck(bot) // frozen/eternal night -> don't surface the "shelter" progress-block
+    onFire: !!(bot.entity && bot.entity.metadata && (bot.entity.metadata[0] & 0x01)), // was hardcoded false - a literal claim nothing measured
+    isNight: isNightV,
+    underArmored: underArmoredV,
+    nightStuck: nightStuckV // frozen/eternal night -> don't surface the "shelter" progress-block
   }
 }
 
@@ -130,7 +182,18 @@ function activeJobInfo () {
 
 async function schedulerState (bot) {
   const s = {}
-  try { Object.assign(s, survivalState(bot)) } catch {} // spread the base survival threat/vitals scan ONCE
+  const read = reader(s)
+  // The base scan. If it throws, the vitals are re-read DIRECTLY from the body rather than being
+  // lost - `bot.health`/`bot.food` are plain numbers that cannot throw, and every pure decider
+  // treats a missing vital as full health (scheduler.js:289 etc.), so losing them is the single
+  // most dangerous thing this snapshot can do.
+  try { Object.assign(s, survivalState(bot)) } catch (e) {
+    s.unknown.push('survivalState')
+    s.hp = bot.health; s.food = bot.food
+    s.vitalsKnown = bot.health != null && bot.food != null
+    s.underArmored = true // the cautious side while the scan is broken
+    dbg('read FAILED: survivalState (' + e.message + ') - vitals re-read direct from the body; threat/night UNKNOWN this tick')
+  }
   const me = (bot && bot.entity && bot.entity.position) || null
   const home = (() => { try { return hutAnchor() || knownBed() || null } catch { return null } })()
   // packFoodPts: the exact bank foodPoints sum (below), applied to the pack; foodTier<2 gates out
@@ -163,7 +226,13 @@ async function schedulerState (bot) {
     const commands = require('./commands.js')
     const g = commands.gravesSnapshot({ pos: me, home })
     s.graves = g.graves; s.deathsRecent = g.deathsRecent
-  } catch { s.graves = []; s.deathsRecent = 0 }
+  } catch (e) {
+    // NOT "I have never died": deathsRecent 0 clears the death-spiral guard (spiralActive,
+    // the anti-spiral rung gate, the death ratchet). Say so instead of asserting it.
+    s.unknown.push('graves')
+    s.graves = []; s.deathsRecent = 0
+    dbg('read FAILED: graves/deathsRecent (' + e.message + ') - the spiral guard is BLIND this tick')
+  }
   // homeDist: XZ to the hut anchor else the bed; null if neither.
   try { s.homeDist = (me && home) ? Math.hypot(me.x - home.x, me.z - home.z) : null } catch { s.homeDist = null }
   // bankFoodPts: cachedOnly chest counts near home -> foodPoints sum (the live HOME-FOOD-FIRST
@@ -184,7 +253,15 @@ async function schedulerState (bot) {
     s.rawIron = (s.rawIron || 0) + (totals.raw_iron || 0) + (totals.iron_ingot || 0)
     s.bankHasPick = Object.keys(totals).some(n => /_pickaxe$/.test(n))
     s.bankHasSword = Object.keys(totals).some(n => /_sword$/.test(n))
-  } catch { s.bankFoodPts = 0; s.bankArmorPieces = 0; s.bankHasPick = false; s.bankHasSword = false }
+  } catch (e) {
+    // NOT "the bank is empty". An empty-reading bank flips hasLadderReArm/reArmSourceAvailable to
+    // false, which UNBLOCKS the outbound treks rungFeasible exists to gate and lets recoveryReady
+    // declare "best-affordable - resuming with max caution". A chest-cache miss must not quietly
+    // change survival policy, so the failure is named and the field is flagged unknown.
+    s.unknown.push('bank')
+    s.bankFoodPts = 0; s.bankArmorPieces = 0; s.bankHasPick = false; s.bankHasSword = false
+    dbg('read FAILED: bank totals (' + e.message + ') - reading as empty, but it is UNKNOWN (re-arm/food verdicts are unreliable this tick)')
+  }
   // farm: standing wheat farm + XZ distance to its water anchor.
   try {
     const wf = loadWorldMem().wheatFarm
@@ -295,4 +372,4 @@ async function schedulerState (bot) {
   return s
 }
 
-module.exports = { survivalState, survivalNeed, mayDoProgress, activeJobInfo, schedulerState }
+module.exports = { survivalState, survivalNeed, mayDoProgress, activeJobInfo, schedulerState, setDebugSink }

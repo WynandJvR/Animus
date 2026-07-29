@@ -12,6 +12,7 @@ const { Vec3 } = require('vec3')
 const memory = require('./memory.js') // persistent named waypoints
 const schematic = require('./schematic.js') // download/parse + survival physical building
 const provision = require('./provision.js') // BOM -> gather/craft plan + execution
+const caps = require('./capabilities.js')   // the PURE capability registry: what the bot can obtain, and how
 const resources = require('./resources.js') // unified resource model: pack + verified chests, withdraw>craft>gather
 const mining = require('./mining.js') // pure tool-durability model (toolUsesLeft) for the freshPickaxes computation
 const navigate = require('./navigate.js') // unified navigation: ONE goto + the full stuck-recovery ladder
@@ -486,6 +487,7 @@ function travelMovements (bot) {
     const ids = bridge.map(n => md.itemsByName[n] && md.itemsByName[n].id).filter(x => x != null)
     if ('scafoldingBlocks' in m) m.scafoldingBlocks = ids
   } catch { /* mcData not ready - fall back to no bridging (routes around) */ }
+  require('./pathfix.js').applyPlaceCost(m) // FIX 6: a placement is a permanent 1x1 tower, not a free step
   try { const ex = provision.cropExclusionStep && provision.cropExclusionStep(bot); if (ex && Array.isArray(m.exclusionAreasStep)) m.exclusionAreasStep.push(ex) } catch {} // FARM_NO_TRAMPLE: treks bend around our crop cells (cost-only, never a wall/dig)
   try { const dx = provision.deathSpotExclusion && provision.deathSpotExclusion(bot); if (dx && Array.isArray(m.exclusionAreasStep)) m.exclusionAreasStep.push(dx) } catch {} // #85 DEATH_SPOT_COST: treks bend around the cells that keep killing the bot (cost-only)
   try { const px = provision.cropPlaceExclusion && provision.cropPlaceExclusion(bot); if (px && Array.isArray(m.exclusionAreasPlace)) m.exclusionAreasPlace.push(px) } catch {} // NO_PLACE_ON_FARM (fix #17): never bridge/place on our own farmland
@@ -2020,8 +2022,17 @@ async function handleInner (bot, line, opts = {}) {
       // capped per call so it can't strip a landscape on one decision.
       const item = a[0]
       const count = Math.min(parseInt(a[1] || '16', 10) || 16, 64)
-      if (!item) return `usage: gather <item> [count<=64]  (know how: ${Object.keys(provision.GATHER_SOURCES).join(', ')})`
-      if (!provision.GATHER_SOURCES[item]) return `I don't know how to gather ${item} (know: ${Object.keys(provision.GATHER_SOURCES).join(', ')})`
+      // What the bot can obtain from the world is the CAPABILITY REGISTRY's answer, not a
+      // hand-kept list here. This branch used to read GATHER_SOURCES directly, so `gather wool`
+      // was refused with "I don't know how to gather wool" while a sheep stood ten blocks away -
+      // the capability existed, this door just did not know about it. runGather routes to the
+      // right driver; all this needs to know is whether a producer exists at all.
+      const obtainable = Object.keys(caps.GATHER_SOURCES).concat(Object.keys(caps.HUNT_SOURCES))
+      if (!item) return `usage: gather <item> [count<=64]  (know how: ${obtainable.join(', ')})`
+      const cap = caps.producerFor(item)
+      if (!cap || (cap.via !== 'gather' && cap.via !== 'hunt')) {
+        return `I can't get ${item} straight from the world${cap ? ` (it comes via ${cap.via} - try "provision" or ask for what it is made of)` : ''} (I can gather/hunt: ${obtainable.join(', ')})`
+      }
       buildAbort = false // a PREVIOUS stop must not abort this fresh gather
       beginActivity('gather', `${count}x ${item}`)
       const r = await provision.runGather(bot, item, count, { isStopped: () => buildAbort, restoreMovements: () => setupMovements(bot), homeY: Math.floor(bot.entity.position.y) })

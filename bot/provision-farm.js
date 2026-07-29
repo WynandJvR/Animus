@@ -187,29 +187,56 @@ async function gatherSeedsNear (bot, want, { isStopped = () => false, near = nul
   const seedCount = () => countItem(bot, 'wheat_seeds')
   if (seedCount() >= want) return seedCount()
   if (process.env.FARM_SEED_BANK !== '0') { await withdrawSeedsFromBank(bot, want, { near, isStopped, say }); if (seedCount() >= want) return seedCount() }
-  const grassIds = ['short_grass', 'tall_grass', 'grass', 'fern', 'large_fern'].map(n => mcData.blocksByName[n] && mcData.blocksByName[n].id).filter(x => x != null)
+  // ==== AUDIT 2026-07-29 FIX 7: BREAK ONLY WHAT CAN ACTUALLY DROP A SEED ==================
+  // Live evidence, 2026-07-20: `seeds: broke 60 grass -> 0 seeds`, twice, and the farm was
+  // seed-starved 47 times in a row - tended 47 times, harvested 0, wheat 0, bread 0. A closed
+  // loop that never closed: no seeds -> no wheat -> no seeds.
+  //
+  // The cause is in this list. Only SHORT_GRASS and TALL_GRASS drop wheat seeds; `fern` and
+  // `large_fern` drop nothing at all when broken by hand. So in a fern-rich biome the gatherer
+  // spent its entire 60-break budget on blocks that are structurally incapable of yielding a
+  // seed - and then reported the effort ("broke 60") as though it were a result.
+  //
+  // Two changes, and the second is the one that generalises: target only seed-bearing blocks,
+  // and MEASURE YIELD, NOT EFFORT. A stretch of breaking that produces nothing means this patch
+  // is not paying, so move - the same lesson gatherLoop's NO_YIELD_LIMIT already learned about
+  // drops falling into gaps.
+  const grassIds = ['short_grass', 'tall_grass', 'grass'] // fern/large_fern drop NO seeds - never dig them for this
+    .map(n => mcData.blocksByName[n] && mcData.blocksByName[n].id).filter(x => x != null)
+  const NO_YIELD_BREAKS = Number(process.env.FARM_SEED_NO_YIELD || 12) // dry stretch before relocating
   let broken = 0; let legs = 0
+  let sinceYield = 0
+  let lastSeen = seedCount()
   const searchGrass = () => bot.findBlock({ matching: grassIds, maxDistance: 48 })
   while (seedCount() < want && broken < 60 && !isStopped()) {
     let g = searchGrass()
-    if (!g && legs < 4) { // barren here - roam a compass leg toward likely meadow, then re-search
+    // Relocate on a DRY STRETCH as well as on an empty one: standing in a patch that yields
+    // nothing is the same problem as standing in a patch with nothing in it.
+    if ((!g || sinceYield >= NO_YIELD_BREAKS) && legs < 4) {
       legs++
       const dir = [[1, 0], [-1, 0], [0, 1], [0, -1]][legs % 4]
       const tx = Math.round(bot.entity.position.x + dir[0] * 32); const tz = Math.round(bot.entity.position.z + dir[1] * 32)
-      dbg('  seeds: no grass in 48 - roaming a leg to ' + tx + ',' + tz + ' to find grass for seeds')
+      dbg('  seeds: ' + (g ? sinceYield + ' breaks with no seed' : 'no seed-bearing grass in 48') + ' - roaming a leg to ' + tx + ',' + tz)
       try { await S().walkStaged(bot, tx, tz, { isStopped, range: 6, timeoutMs: 40000 }) } catch {}
+      sinceYield = 0
       g = searchGrass()
     }
     if (!g) break
     try {
       if (bot.entity.position.distanceTo(g.position) > 4) await gotoWithTimeout(bot, new goals.GoalNear(g.position.x, g.position.y, g.position.z, 2), 10000)
-      await bot.dig(g); broken++
+      await bot.dig(g); broken++; sinceYield++
     } catch { break }
-    if (broken % 6 === 0) await collectDrops(bot, 6)
+    if (broken % 4 === 0) {
+      await collectDrops(bot, 6)
+      const now = seedCount()
+      if (now > lastSeen) { sinceYield = 0; lastSeen = now } // a yield resets the dry counter
+    }
   }
   await collectDrops(bot, 8)
-  dbg('  seeds: broke ' + broken + ' grass -> ' + seedCount() + ' seeds')
-  return seedCount()
+  // Report the RESULT, not the effort. "broke 60" reads like progress; "0 seeds" is the fact.
+  const got = seedCount()
+  dbg('  seeds: broke ' + broken + ' seed-bearing grass -> ' + got + ' seeds' + (got === 0 && broken > 0 ? ' - NONE YIELDED (this ground has no seeds to give)' : ''))
+  return got
 }
 
 async function placeFarmTorches (bot, cells, { isStopped = () => false } = {}) {

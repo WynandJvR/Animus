@@ -107,6 +107,31 @@ async function gotoOnce (bot, goal, ms = 20000, gopts = {}) {
       () => { clearTimeout(timer); done(resolve) },
       e => { clearTimeout(timer); done(reject, e) }
     )
+  }).finally(async () => {
+    // ==== AUDIT 2026-07-29 FIX 6: PAY THE DEBT WHERE IT WAS INCURRED ======================
+    // #119 pays scaffold debt in navigateTo's finally - once, when the WHOLE navigation ends.
+    // But the debt is created at the PILLAR, mid-leg, and paid at the GOAL, which is somewhere
+    // else entirely: by the time the navigation finishes the bot is 30 blocks past the tower it
+    // built and every one of those cells is out of closeOut's 4.5-block reach, so it "pays"
+    // nothing. Live proof: `session close: reclaimed` fired 3 times in 4h46m while the registry
+    // grew to 336 unpaid cells, 155 of them placed by the pathfinder under purpose 'goto'.
+    //
+    // A 1x1 tower is reachable EXACTLY ONCE - while the bot is still on or beside it, right
+    // after the leg that built it. That is this moment, so this is where it gets paid. Bounded
+    // to 3 cells and reach-only (never a walk), so the nav hot path stays cheap
+    // ([[body-first-priority]]); whatever is out of reach stays on the books as before.
+    try {
+      await scaffold.closeOut(bot, {
+        max: 3,
+        isStopped: gopts.isStopped,
+        exclude: p => {
+          try {
+            const prov = require('./provision.js')
+            return !!(prov.inBuildZone && prov.inBuildZone(p.x, p.z)) || !!(prov.ownHutAt && prov.ownHutAt(p)) || !!(prov.onHutApron && prov.onHutApron(null, p))
+          } catch { return true } // cannot tell whether a build owns it -> do not touch it
+        }
+      })
+    } catch (e) { dbg('leg closeOut failed (' + e.message + ') - the cells stay owed') }
   })
 }
 
@@ -820,8 +845,45 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
       run: async () => {
         const pit = detectPit(bot)
         if (!pit) return false
+        // ==== AUDIT 2026-07-29 FIX 12: A PILLAR NEEDS BLOCKS ===============================
+        // Live, on real terrain: the bot spawned into the shelter pit it had dug the night
+        // before, with an empty pack, and tried to pillar out SIXTY times without moving - hp 11,
+        // y 59.8, `recovery pit -> no progress` forever. It cannot pillar because it has nothing
+        // to place, and nothing in this rung ever noticed.
+        //
+        // The remedy already exists: ensurePillarFiller digs a couple of dirt blocks from nearby
+        // (never the bot's own support column, never a build/farm/liquid) - exactly what a player
+        // does when stuck in a hole. It was wired to precisely ONE caller, the last-resort suicide
+        // reset, and not to the rung whose entire job is climbing out of holes. Same shape as the
+        // orchard rung: the capability was written, tested and left unreachable from where it was
+        // needed.
+        let filler = true
+        try { filler = !!require('./scaffold.js').pickFiller(bot) } catch {}
+        if (!filler) {
+          dbg('recovery: in a PIT with nothing to pillar with - digging filler out of the wall first')
+          try { filler = await prov().ensurePillarFiller(bot, { isStopped, need: 4 }) } catch (e) { dbg('recovery: filler dig failed (' + e.message + ')') }
+          if (movedEnough()) return true // digging the wall opened a way out on its own
+          if (!filler) { dbg('recovery: no filler available and none diggable here - pillar rung cannot help, handing to the next rung'); return false }
+        }
         dbg('recovery: wedged in a PIT at ' + p0.floored() + ' - pillaring out to y=' + pit.rimY)
         try { await prov().pillarUpTo(bot, pit.rimY, { isStopped }) } catch (e) { dbg('recovery: pillar-out failed (' + e.message + ')') }
+        if (movedEnough()) return true
+        // ==== AUDIT 2026-07-29 FIX 17: IF YOU CANNOT PILLAR OUT, DIG OUT =====================
+        // Live, 16:28-16:31 on the live server: wedged in a 1x1 shaft (solid on all four sides at
+        // y61 AND y62, stone floor, open sky above), 3 dirt in the pack, needing ~4 blocks of
+        // pillar. `recovery pit -> no progress` on repeat, `stepout -> no progress`, and the
+        // watchdog's own force-escape gave up ("could not move me - will retry in 4 min"). The bot
+        // sat in that hole for over three minutes and only an operator teleport freed it.
+        //
+        // The ladder had no rung that could help: `pit` escapes by PILLARING only (needs filler >=
+        // the height), and `climb` - the rung that DIGS its way out via digStaircaseUp - is gated
+        // on being UNDERGROUND, i.e. under a solid ceiling. An open-sky shaft is neither, so
+        // nothing applied. Meanwhile digStaircaseUp, which cuts anti-grief-safe steps through
+        // natural stone and is exactly what a player with a pickaxe does, sat one require away.
+        // That is the fourth capability found today that exists, is tested, and is unreachable
+        // from the place that needs it.
+        dbg('recovery: pillar did not lift me out - cutting a staircase up the shaft wall instead')
+        try { await prov().digStaircaseUp(bot, pit.rimY + 1, { isStopped }) } catch (e) { dbg('recovery: staircase-out failed (' + e.message + ')') }
         return movedEnough()
       }
     },

@@ -936,6 +936,25 @@ async function ensureSpawnBed (bot, opts = {}) {
   } catch (e) { return R(false, 'failed', 'bed use failed (' + e.message + ')') }
 }
 
+// ---- crossingAdmissible (AUDIT 2026-07-29 FIX 2) ----------------------------------------
+// May the bot set out across `dist` blocks right now? Asks the ONE rule (scheduler.journeyAdmissible,
+// which shares outboundBlocked with every recovery rung) against a live snapshot.
+//
+// Both long walks in this file - the homecoming and the spawn re-anchor - used to be unconditional:
+// they computed a distance and started walking, whatever the hour, the armour, or how many corpses
+// the bot had already left on that route. That is audit LOOP A, and it was the single largest
+// killer on the 2026-07-20 tape. This is the probe they now both consult, including BETWEEN LEGS -
+// a 470-block crossing takes minutes, and the sun sets during it.
+async function crossingAdmissible (bot, dist) {
+  try {
+    const s = await P().schedulerState(bot)
+    return scheduler.journeyAdmissible(s, dist)
+  } catch (e) {
+    dbg('crossingAdmissible: snapshot failed (' + e.message + ') - allowing the crossing')
+    return { ok: true, blockedOn: null, why: 'snapshot unavailable' } // fail OPEN: never strand the bot on a broken read
+  }
+}
+
 async function recoverSpawnAnchor (bot, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const say = opts.say || (() => {})
@@ -947,9 +966,22 @@ async function recoverSpawnAnchor (bot, opts = {}) {
   if (tx == null) { dbg('spawn-recovery: no hut or bed remembered - nowhere to anchor'); return false }
   const dist = () => Math.hypot(tx - bot.entity.position.x, tz - bot.entity.position.z)
   if (dist() > 6) {
+    // FIX 2: a wrong spawn anchor is worth a long walk only if the walk is survivable. On the
+    // 2026-07-20 tape this was the SECOND unconditional 436b night crossing per respawn, stacked
+    // straight after recoverHome's - two chances to die per death.
+    const adm = await crossingAdmissible(bot, dist())
+    if (!adm.ok) {
+      dbg('spawn-recovery: NOT crossing ' + Math.round(dist()) + 'b to re-anchor - ' + adm.why + ' (blocked on ' + adm.blockedOn + ')')
+      say(`my spawn is wrong, but ${adm.why} - fixing it once i can cross safely`)
+      return false
+    }
     say(`my spawn point is wrong - heading home (${Math.round(dist())}b) to fix it before anything else`)
     dbg('spawn-recovery: trekking home ' + Math.round(dist()) + 'b to re-anchor the spawn')
     for (let leg = 0; leg < 3 && dist() > 6 && !isStopped(); leg++) {
+      if (leg > 0) {
+        const mid = await crossingAdmissible(bot, dist())
+        if (!mid.ok) { dbg('spawn-recovery: aborting the crossing mid-way - ' + mid.why); return false }
+      }
       try { await S().walkStaged(bot, tx, tz, { isStopped, range: 5, timeoutMs: 300000 }) } catch (e) { dbg('spawn-recovery: trek leg failed (' + e.message + ')') }
     }
   }
@@ -984,6 +1016,24 @@ async function recoverHome (bot, opts = {}) {
   })
   if (!decision.far) { dbg('recoverHome: ' + (decision.anchor ? 'within ' + Math.round(decision.dist) + 'b of the ' + decision.source + ' - already home, nothing to do' : 'no home anchor remembered - nothing to trek to')); return { ...decision, arrived: false } }
   const { anchor } = decision
+  // ---- AUDIT 2026-07-29 FIX 2: recovery targets a STATE, not a PLACE ----------------------
+  // This walk used to be unconditional and FIRST: whatever the distance, hour, armour or threat,
+  // step 1 after every respawn was "trek back before anything else". On 2026-07-20 that walked a
+  // naked bot 458-489 blocks through the dark eight times in seven minutes and it died every
+  // time - and because the walk owns the body (recoveringHome), the night-shelter reflex it
+  // needed was suppressed for the entire loop. The crossing was the death.
+  //
+  // Nothing is added here to compensate: the walk simply does not start when it is not
+  // survivable. The recovery ladder already plans exactly the right thing for a naked bot far
+  // from home at night (R0 eat+wear -> R2 digInForNight -> R5 hold, scheduler.recoveryPlan), and
+  // the respawn handler already hands it the body. It never got a turn because this function was
+  // holding it. Standing down IS the fix.
+  const adm = await crossingAdmissible(bot, decision.dist)
+  if (!adm.ok) {
+    dbg('recoverHome: NOT crossing ' + Math.round(decision.dist) + 'b - ' + adm.why + ' (blocked on ' + adm.blockedOn + ')')
+    say(`${Math.round(decision.dist)} blocks from home, but ${adm.why} - getting safe where i stand instead; i'll cross when that clears`)
+    return { ...decision, arrived: false, stabilise: true, blockedOn: adm.blockedOn, why: adm.why }
+  }
   // The exact line a live watcher greps for.
   say(`landed ${Math.round(decision.dist)} blocks from home - trekking back before anything else`)
   dbg('recoverHome: ' + Math.round(decision.dist) + 'b from the ' + decision.source + ' at ' + anchor.x + ',' + anchor.z + ' - going home before gear-up/gather')
@@ -998,6 +1048,17 @@ async function recoverHome (bot, opts = {}) {
   // tried. FOOD_HOLD is generous (<=10) because the remaining trek only burns more.
   const foodHold = Number(process.env.RECOVER_HOME_FOOD_HOLD || 10)
   for (let leg = 0; leg < maxLegs && distNow() > arrive && !isStopped(); leg++) {
+    // FIX 2, per leg: a 470b crossing takes minutes and the sun sets during it. Re-ask the same
+    // rule before every leg after the first, so a walk that started legal in daylight does not
+    // finish as a naked night march (which is precisely how the 08:42 cluster played out).
+    if (leg > 0) {
+      const mid = await crossingAdmissible(bot, distNow())
+      if (!mid.ok) {
+        dbg('recoverHome: aborting the crossing at leg ' + leg + ' (' + Math.round(distNow()) + 'b out) - ' + mid.why)
+        say(`stopping the walk home - ${mid.why}`)
+        return { ...decision, arrived: false, stabilise: true, blockedOn: mid.blockedOn, why: mid.why }
+      }
+    }
     if (bot.food != null && bot.food <= foodHold && !hasFood(bot)) {
       dbg('recoverHome: hungry en route (food ' + bot.food + ', empty pack) - securing food before pushing on')
       try { const got = await huntForFood(bot, { isStopped }); if (got) { await eatUp(bot).catch(() => {}) ; dbg('recoverHome: hunted + ate en route (food now ' + bot.food + ')') } else dbg('recoverHome: no food animal near the route - pressing on carefully') } catch (e) { dbg('recoverHome: en-route food secure failed (' + e.message + ')') }
@@ -1080,6 +1141,23 @@ const RUNG_EXECUTORS = {
     if (process.env.MAINTAIN !== '0') { try { await courierFoodToBank(bot, { isStopped: o.isStopped, say: o.say }) } catch (e) { o.dbg('(ladder) courier failed: ' + e.message) } }
     else o.dbg('(ladder) courier deferred (MAINTAIN=0)')
   },
+  // R3 orchard: harvest the OWN grove (AUDIT 2026-07-29 FIX 9). recoveryPlan has planned this rung
+  // since S5 and there has never been an executor for it, so `if (!RUNG_EXECUTORS[r.action]) continue`
+  // silently skipped it on EVERY pass - a food source the bot owns, plants and remembers, that the
+  // recovery ladder was structurally incapable of eating from. That is why "orchard" appears 9 times
+  // in a 13,824-line session. Mirrors the farm rung: go, take what is ripe, eat, courier the rest.
+  'trekOrchard+harvest+courierHome': async (bot, o) => {
+    const m = (() => { try { return require('./world-memory.js').loadWorldMem() } catch { return {} } })()
+    const orch = m && m.orchard
+    if (!orch || orch.x == null) { o.dbg('(ladder) R3 orchard: nothing planted/remembered'); return }
+    try { await S().walkStaged(bot, orch.x, orch.z, { isStopped: o.isStopped, range: 6, timeoutMs: 180000 }) } catch (e) { o.dbg('(ladder) R3 orchard trek failed: ' + e.message) }
+    if (o.isStopped()) return
+    // The grove is APPLES + logs: chopping our own trees is the harvest, and gatherLoop's
+    // orchard-first path already knows how to take a grown grove and replant it.
+    try { await P().gatherLoop(bot, 'oak_log', 8, { isStopped: o.isStopped, say: o.say, home: o.home }) } catch (e) { o.dbg('(ladder) R3 orchard harvest failed: ' + e.message) }
+    await eatUp(bot)
+    if (process.env.MAINTAIN !== '0') { try { await courierFoodToBank(bot, { isStopped: o.isStopped, say: o.say }) } catch (e) { o.dbg('(ladder) R3 orchard courier failed: ' + e.message) } }
+  },
   // R4: acquire NEW supply (hunt->fish->scout). canHold:false - the ladder owns holding (R5).
   'secureFood(hunt->fish->scout)': async (bot, o) => { await secureFood(bot, { home: o.home, canHold: false, isStopped: o.isStopped, say: o.say }) },
   // R5: the one bounded hold (bed-sleep -> hut -> pit; its own preference order covers both variants)
@@ -1129,9 +1207,30 @@ async function recoverFromDegraded (bot, { isStopped = () => false, say = () => 
   const tried = new Set()
   const deadline = Date.now() + maxMs
   const home = (() => { try { return hutAnchor() || knownBed() || null } catch { return null } })()
+  // AUDIT FIX 3: a pass must be able to tell "ran and achieved nothing" from "ran and recovered".
+  // It could not, so `NOT recovered (all rungs tried)` was re-dispatched every 60s against an
+  // unchanged world, forever (audit §1 LOOP B). `gained` is the honest measure; `blockedOn` is the
+  // condition that has to change before another pass could do better; `sig` is what the tick
+  // compares to decide whether anything relevant HAS changed.
+  let entry = null
+  const gainOf = (a, b) => !a || !b ? true : (
+    (b.food || 0) > (a.food || 0) || (b.hp || 0) > (a.hp || 0) ||
+    (b.armorPieces || 0) > (a.armorPieces || 0) || (b.packFoodPts || 0) > (a.packFoodPts || 0) ||
+    (!!(b.tools && b.tools.pick) && !(a.tools && a.tools.pick)) ||
+    (!!(b.tools && b.tools.sword) && !(a.tools && a.tools.sword)))
+  const stalled = (s) => {
+    let blockedOn = 'blocked'
+    try { blockedOn = scheduler.ladderBlocker(s) } catch {}
+    let sig = ''
+    try { sig = scheduler.recoverySignature(s) } catch {}
+    const progressed = gainOf(entry, s)
+    if (!progressed) dbg('(ladder) NO PROGRESS this pass - blocked on ' + blockedOn + ': ' + scheduler.blockerText(blockedOn))
+    return { progressed, blockedOn, sig }
+  }
   try {
     while (true) {
       const s = await P().schedulerState(bot)
+      if (!entry) entry = s
       _noteDeadlockProgress(bot) // #58: any food/hp gain this cycle clears the deadlock fail counter + no-food streak
       // P4: exit on recoveryReady (hp>=18, food>=14, 4 armor, pick&&sword; best-affordable escape) -
       // NOT the naked-tolerant ladderDone (RC-D). Clearing the exit clears the P0 latch so the build
@@ -1140,14 +1239,23 @@ async function recoverFromDegraded (bot, { isStopped = () => false, say = () => 
         const rr = scheduler.recoveryReady(s)
         if (rr.ready) { _deadlockFails = 0; try { require('./commands.js').clearPostDeathRecovery() } catch {} return { done: true, rungs, reason: reason || (rr.maxCaution ? 'recovered (best-affordable)' : 'recovered'), maxCaution: rr.maxCaution } }
       } else if (scheduler.ladderDone(s)) { _deadlockFails = 0; return { done: true, rungs, reason: reason || 'recovered' } }
-      if (isStopped() || S().isSurvStopped()) return { done: false, rungs, reason: 'stopped' } // S7: watchdog fail-job lever folded in
-      if (Date.now() > deadline) return { done: false, rungs, reason: 'deadline' }
+      if (isStopped() || S().isSurvStopped()) return { done: false, rungs, reason: 'stopped', ...stalled(s) } // S7: watchdog fail-job lever folded in
+      if (Date.now() > deadline) return { done: false, rungs, reason: 'deadline', ...stalled(s) }
       const plan = scheduler.recoveryPlan(s)
       let chosen = null
       for (const r of plan) {
         if (!scheduler.rungFeasible(r, s)) continue
         if (tried.has(r.action)) continue
-        if (!RUNG_EXECUTORS[r.action]) continue // no executor (e.g. trekOrchard) - skip, never binds
+        // A planned rung with no executor is a WIRING BUG, not a decision. This line used to be a
+        // bare `continue` with the comment "no executor (e.g. trekOrchard) - skip", and that is
+        // exactly how the orchard rung was planned on every pass for months while the bot starved
+        // next to its own grove. bot/capabilitytest.js now enumerates every action recoveryPlan can
+        // emit against this map, in both directions, so reaching here means the contract broke at
+        // runtime - which must be the loudest line in the log, not the quietest.
+        if (!RUNG_EXECUTORS[r.action]) {
+          dbg('(ladder) WIRING BUG: rung ' + r.rung + ':' + r.action + ' was planned and has NO executor - skipping it (capabilitytest.js should have caught this)')
+          continue
+        }
         chosen = r; break
       }
       // recoveryPlan is TOTAL (>=1 rung, R5 always appended); if every feasible rung is tried,
@@ -1179,9 +1287,9 @@ async function recoverFromDegraded (bot, { isStopped = () => false, say = () => 
           noteDeadlockReset() // stamp the cooldown + no-food streak BEFORE the attempt (an abort still holds off re-firing)
           let ok = false
           try { ok = await deadlockSuicideReset(bot, { isStopped, say }) } catch (e) { dbg('deadlock-reset: threw (' + e.message + ')') }
-          return { done: false, rungs, reason: ok ? 'deadlock-reset: died to reset' : 'deadlock-reset aborted (held)' }
+          return { done: false, rungs, reason: ok ? 'deadlock-reset: died to reset' : 'deadlock-reset aborted (held)', ...stalled(s) }
         }
-        return { done: false, rungs, reason: 'all rungs tried' }
+        return { done: false, rungs, reason: 'all rungs tried', ...stalled(s) }
       }
       tried.add(chosen.action)
       const label = chosen.rung + ':' + chosen.action

@@ -18,6 +18,7 @@
 const { Vec3 } = require('vec3')
 const { goals, Movements } = require('mineflayer-pathfinder')
 const foodSec = require('./food.js')   // PURE food-security decisions
+const capabilities = require('./capabilities.js') // the PURE capability registry - hunt producers (entity/drop/bounds)
 const farm = require('./farm.js')      // PURE wheat geometry + crop state
 const navigate = require('./navigate.js')
 const provCore = require('./provision-core.js')
@@ -362,59 +363,62 @@ async function huntForFood (bot, opts = {}) {
   return !tgt.isValid
 }
 
-async function huntSpiderForString (bot, opts = {}) {
-  const isStopped = opts.isStopped || (() => false)
-  if (!bot.entity) return false
-  let tgt = null; let best = opts.range || Number(process.env.ROD_SPIDER_RANGE || 16)
-  for (const e of Object.values(bot.entities || {})) {
-    if (!e || !e.position || (e.type !== 'mob' && e.type !== 'hostile')) continue
-    if (!ROD_SPIDERS.test((e.name || '').toLowerCase())) continue
-    const d = e.position.distanceTo(bot.entity.position); if (d < best) { best = d; tgt = e }
-  }
-  if (!tgt) return false
-  const items = bot.inventory ? bot.inventory.items() : []
-  const weapon = items.find(i => i.name.endsWith('_sword')) || items.find(i => i.name.endsWith('_axe'))
-  if (weapon) await bot.equip(weapon, 'hand').catch(() => {})
-  const killStart = Date.now()
-  try {
-    bot.pathfinder.setGoal(new goals.GoalFollow(tgt, 2), true)
-    while (tgt.isValid && Date.now() - killStart < 12000 && !isStopped()) {
-      if (bot.entity.position.distanceTo(tgt.position) <= 3.5) {
-        await bot.lookAt(tgt.position.offset(0, (tgt.height || 1) * 0.7, 0)).catch(() => {})
-        bot.attack(tgt)
-        await new Promise(r => setTimeout(r, 600))
-      } else { await new Promise(r => setTimeout(r, 300)) }
-    }
-  } finally { bot.pathfinder.setGoal(null) }
-  await collectDrops(bot, 8)
-  return !tgt.isValid
+// ==== huntForDrop - THE ONE MOB-DROP DRIVER ===============================================
+// There were three of these, ~55 lines each, differing only in which entity to look for, which
+// item to count, and how far to roam: gatherLeather (cows), gatherWool (sheep, added by AUDIT
+// FIX 16), huntSpiderForString (spiders). Three copies of one rule is how a rule drifts
+// (DESIGN-PRINCIPLES §4) - and, worse, adding a FOURTH mob drop meant writing a fourth copy AND
+// hand-wiring it into every caller that might want it, which is precisely why wool did not
+// exist as an obtainable thing for the first eighteen months of this bot's life.
+//
+// Now there is one driver, parameterised by a capability-registry entry, so every mob drop in
+// bot/capabilities.js is obtainable the moment it is declared - by planProvision, by the
+// resource model, and by any caller - with no further wiring.
+//
+// Bounded by construction so it can never become a wandering side-quest: a kill cap, a roam
+// fence around `home`, a bounded number of explores, a per-kill timeout and a hard deadline.
+// Returns { got, killed, item } where `got` counts the DROP FAMILY actually obtained - a sheep
+// drops its own colour, so a hunt asked for white_wool honestly reports the brown wool it got.
+function dropCount (bot, re) {
+  return (bot.inventory ? bot.inventory.items() : []).filter(i => re.test(i.name)).reduce((n, i) => n + i.count, 0)
 }
-
-async function gatherLeather (bot, target, opts = {}) {
+async function huntForDrop (bot, target, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const say = opts.say || (() => {})
+  const cap = opts.cap || (opts.item ? capabilities.producerFor(opts.item) : null)
+  if (!cap || cap.via !== 'hunt') return { got: 0, killed: 0, item: opts.item || null, reason: 'no hunt producer for ' + (opts.item || '?') }
+  const entityRe = cap.entity
+  const dropRe = cap.drop
+  const types = cap.types || ['mob', 'animal']
+  const want = Math.max(1, target || 1)
   const deadline = Date.now() + (opts.timeMs || 120000) // 2 min hard cap
-  const maxKills = opts.maxKills || 16
-  const maxExplores = opts.maxExplores != null ? opts.maxExplores : 2 // don't roam far for armor
+  const maxKills = opts.maxKills || cap.maxKills || 8
+  const maxExplores = opts.maxExplores != null ? opts.maxExplores : (cap.hostile ? 0 : 2) // don't roam far for optional gear
   const home = opts.home // roam fence anchor (build site), if given
   const maxRoam = opts.maxRoam || 48
-  const leatherNow = () => countItem(bot, 'leather')
-  const start = leatherNow()
-  bot.pathfinder.setMovements(S().gatherMovements(bot)) // anti-grief while chasing
+  const seekRange = opts.range || (cap.hostile ? Number(process.env.ROD_SPIDER_RANGE || 16) : 32)
+  const killMs = opts.killMs || (cap.hostile ? 12000 : 15000)
+  const start = dropCount(bot, dropRe)
+  const now = () => dropCount(bot, dropRe)
+  // Anti-grief movements while chasing (a chase must never authorise digging through a build).
+  // The hostile hunt has never set them - it is called mid-fishing with the caller's own
+  // movements live - so it keeps that behaviour rather than acquiring a new one here.
+  if (opts.movements !== false && !cap.hostile) bot.pathfinder.setMovements(S().gatherMovements(bot))
   let killed = 0
   let explores = 0
   try {
-    while (leatherNow() - start < target && killed < maxKills && Date.now() < deadline && !isStopped()) {
-      // nearest leather animal within the fence (never chase a cow beyond maxRoam of home)
-      let tgt = null; let best = 32
+    while (now() - start < want && killed < maxKills && Date.now() < deadline && !isStopped()) {
+      // nearest matching mob within the fence (never chase one beyond maxRoam of home)
+      let tgt = null; let best = seekRange
       for (const e of Object.values(bot.entities || {})) {
-        if (!e || !e.position || (e.type !== 'mob' && e.type !== 'animal')) continue
-        if (!LEATHER_ANIMALS.test((e.name || '').toLowerCase())) continue
+        if (!e || !e.position || !types.includes(e.type)) continue
+        if (!entityRe.test((e.name || '').toLowerCase())) continue
         if (home && Math.hypot(e.position.x - home.x, e.position.z - home.z) > maxRoam) continue
         const d = e.position.distanceTo(bot.entity.position); if (d < best) { best = d; tgt = e }
       }
-      if (!tgt) { // none in range - roam to find some, but only a couple times (armor is optional)
-        if (explores++ >= maxExplores) break
+      if (!tgt) { // none in range - roam to find some, but only a couple of times
+        if (explores >= maxExplores) break
+        explores++
         await S().explore(bot, explores, home, maxRoam)
         continue
       }
@@ -424,7 +428,7 @@ async function gatherLeather (bot, target, opts = {}) {
       if (weapon) await bot.equip(weapon, 'hand').catch(() => {})
       const killStart = Date.now()
       bot.pathfinder.setGoal(new goals.GoalFollow(tgt, 2), true)
-      while (tgt.isValid && Date.now() - killStart < 15000 && !isStopped()) {
+      while (tgt.isValid && Date.now() - killStart < killMs && !isStopped()) {
         if (bot.entity.position.distanceTo(tgt.position) <= 3.5) {
           await bot.lookAt(tgt.position.offset(0, (tgt.height || 1) * 0.7, 0)).catch(() => {})
           bot.attack(tgt)
@@ -435,16 +439,53 @@ async function gatherLeather (bot, target, opts = {}) {
       }
       bot.pathfinder.setGoal(null)
       if (!tgt.isValid) killed++
-      await collectDrops(bot, 8) // grab the dropped leather (and beef)
+      await collectDrops(bot, 8) // the drop we came for (and the meat)
     }
   } finally {
     bot.pathfinder.setGoal(null)
     if (opts.restoreMovements) opts.restoreMovements()
   }
-  const got = leatherNow() - start
-  if (got > 0) say(`got ${got} leather off ${killed} ${killed === 1 ? 'cow' : 'cows'}`)
-  return { leather: got, killed }
+  const got = now() - start
+  if (got > 0 && cap.label) {
+    // "off 1 cow", not "off 1 cows" - the bot talks like a player ([[natural-player-goal]]).
+    const mob = killed === 1 ? cap.label.replace(/s$/, '') : cap.label
+    say(`got ${got} ${(cap.family || opts.item || '').replace(/_/g, ' ') || cap.label} off ${killed} ${mob}`)
+  }
+  return { got, killed, item: opts.item || null }
 }
+
+// The three named hunts are now THIN CALLERS of the one driver. They keep their old signatures
+// and return shapes because the whole codebase calls them; what they no longer keep is their own
+// private copy of the chase loop.
+async function huntSpiderForString (bot, opts = {}) {
+  if (!bot.entity) return false
+  const r = await huntForDrop(bot, 1, { ...opts, item: 'string', maxKills: 1 })
+  return r.killed > 0
+}
+async function gatherLeather (bot, target, opts = {}) {
+  const r = await huntForDrop(bot, target, { ...opts, item: 'leather' })
+  return { leather: r.got, killed: r.killed }
+}
+
+// ==== AUDIT 2026-07-29 FIX 16: WOOL COMES OFF A SHEEP =====================================
+// The bot could not represent wool as something OBTAINABLE at all. Every producer map was
+// block-mining - none had a mob drop - so the bed planner had only crafting recipes to work
+// with and produced this, live:
+//   gather:acacia_log > craft:lapis_block > lapis_lazuli > blue_dye > blue_wool > black_dye
+//   > black_wool > bone_block > bone_meal > white_dye > white_wool > white_bed
+//   acquire white_bed: not craftable from holdings
+// It was trying to RE-DYE wool it did not have, standing in a field of sheep. And because no bed
+// could ever be made, no spawn anchor could ever be set, which is the root of the whole
+// death-costs-a-long-walk problem (`spawn: [failed] no bed standing, none banked, and none
+// craftable` - on both the 2026-07-20 tape and again today).
+//
+// Wool is now a `hunt` producer in bot/capabilities.js, so planProvision PLANS it like any other
+// material, res.acquire runs the plan, and the `gather wool` command drives the same driver.
+// gatherWool() itself is GONE: it was the hand-wired one-off, its only caller was acquireBed's
+// bolt-on, and a named wrapper with no caller is the very shape this whole registry exists to
+// make impossible. woolCount stays - it is a real inventory question the bed logic still asks.
+const WOOL_RE = /_wool$/
+function woolCount (bot) { return dropCount(bot, WOOL_RE) }
 
 async function ensureFoodSupply (bot, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
@@ -1018,5 +1059,5 @@ async function scoutHunt (bot, { isStopped = () => false, say = () => {}, maxMs 
 
 module.exports = {
   setDebugSink,
-  RAW_COOKABLE, FOOD_ANIMALS, LEATHER_ANIMALS, RISKY_EAT, ROD_SPIDERS, DFOOD_DEEP, DFOOD_FAR, _foodPlanHint, _securingFood, _foodFloorNoProgress, _foodFloorState, hasFood, foodCount, needsFood, nearestFoodAnimal, eatFromPackToComfortable, eatBestFood, eatUp, bakeBreadFromWheat, cookRawMeat, fishingEnabled, ensureFishingRod, fishForFood, huntForFood, huntSpiderForString, gatherLeather, ensureFoodSupply, needFoodSupply, bankFoodFirst, courierFoodToBank, foodPlanNow, topUpFoodForPlan, _setFoodPlanHint, isSecuringFood, escalateFoodFloor, secureFood, secureFoodInner, scoutForFood, scoutHunt
+  RAW_COOKABLE, FOOD_ANIMALS, LEATHER_ANIMALS, RISKY_EAT, ROD_SPIDERS, DFOOD_DEEP, DFOOD_FAR, _foodPlanHint, _securingFood, _foodFloorNoProgress, _foodFloorState, hasFood, foodCount, needsFood, nearestFoodAnimal, eatFromPackToComfortable, eatBestFood, eatUp, bakeBreadFromWheat, cookRawMeat, fishingEnabled, ensureFishingRod, fishForFood, huntForFood, huntForDrop, dropCount, huntSpiderForString, gatherLeather, woolCount, ensureFoodSupply, needFoodSupply, bankFoodFirst, courierFoodToBank, foodPlanNow, topUpFoodForPlan, _setFoodPlanHint, isSecuringFood, escalateFoodFloor, secureFood, secureFoodInner, scoutForFood, scoutHunt
 }

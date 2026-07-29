@@ -36,9 +36,9 @@ const provMaintain = require('./provision-maintain.js') // the chores: courier, 
 const survivalSnapshot = require('./survival-snapshot.js') // the plain-data view the PURE scheduler/arbiter consume
 const { survivalState, survivalNeed, mayDoProgress, activeJobInfo, schedulerState } = survivalSnapshot
 const { JUNK_RE, _maintaining, _maintStop, _maintState, isMaintaining, stopMaintenance, _setMaintaining, cleanupScaffold, dumpJunk, safekeepSweep, spareKitToBank, maintenancePass } = provMaintain
-const { DEADLOCK_HP, DEADLOCK_MAX_NOFOOD, DEADLOCK_FAILS, DEADLOCK_RESET_SOFT, DEADLOCK_SOFT_HP, DEADLOCK_SOFT_FOOD, DEADLOCK_SOFT_FAILS, DEADLOCK_RESET_COOLDOWN_MS, DEADLOCK_FALL_H, SUICIDE_EXIT_OPEN_SKY, SUICIDE_FALLBACK_DEATH, SUICIDE_DROWN, _deadlockFails, _deadlockResetting, _noteDeadlockProgress, noteDeadlockReset, deadlockResetDue, deadlockResetState, sampleColumnForSky, reachOpenSky, deadlockDieByFall, suicideByDrown, suicideByPitDrop, deadlockFallbackDeath, deadlockSuicideReset, _recoveringHp, recoverHp, isRecoveringHp, _resting, restUntilSafe, isResting, sleepInBedHere, nightRest, nightRestInner, boundedHold, sleepableNow, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, RUNG_EXECUTORS, recoveryReadyNow, _recoveringDegraded, recoverFromDegraded, isRecoveringDegraded } = provRecovery
+const { DEADLOCK_HP, DEADLOCK_MAX_NOFOOD, DEADLOCK_FAILS, DEADLOCK_RESET_SOFT, DEADLOCK_SOFT_HP, DEADLOCK_SOFT_FOOD, DEADLOCK_SOFT_FAILS, DEADLOCK_RESET_COOLDOWN_MS, DEADLOCK_FALL_H, SUICIDE_EXIT_OPEN_SKY, SUICIDE_FALLBACK_DEATH, SUICIDE_DROWN, _deadlockFails, _deadlockResetting, _noteDeadlockProgress, noteDeadlockReset, deadlockResetDue, deadlockResetState, sampleColumnForSky, reachOpenSky, ensurePillarFiller, deadlockDieByFall, suicideByDrown, suicideByPitDrop, deadlockFallbackDeath, deadlockSuicideReset, _recoveringHp, recoverHp, isRecoveringHp, _resting, restUntilSafe, isResting, sleepInBedHere, nightRest, nightRestInner, boundedHold, sleepableNow, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, RUNG_EXECUTORS, recoveryReadyNow, _recoveringDegraded, recoverFromDegraded, isRecoveringDegraded } = provRecovery
 const { DEFEND_WHEN_HIT_ON, NIGHT_FROZEN_MS, NIGHT_OVERLONG_MS, _nightStart, _todSeen, lastFlood, _sheltering, isSheltering, shelterSite, SHELTER_FARM_R, shelterFarmConflict, inWaterNow, ensureAshore, nearRecentFlood, findDiggableDryCell, scoutForWater, armorPieceCount, underArmored, lowHpCalm, shelterNeeded, nightStuck, nightRestWanted, sealShaft, digTorchAlcove, digInForNight, pickOpenSkyCell } = provShelter
-const { _foodFloorState, _setFoodPlanHint, RAW_COOKABLE, FOOD_ANIMALS, LEATHER_ANIMALS, RISKY_EAT, ROD_SPIDERS, DFOOD_DEEP, DFOOD_FAR, hasFood, foodCount, needsFood, nearestFoodAnimal, eatFromPackToComfortable, eatBestFood, eatUp, bakeBreadFromWheat, cookRawMeat, fishingEnabled, ensureFishingRod, fishForFood, huntForFood, huntSpiderForString, gatherLeather, ensureFoodSupply, needFoodSupply, bankFoodFirst, courierFoodToBank, foodPlanNow, topUpFoodForPlan, isSecuringFood, escalateFoodFloor, secureFood, secureFoodInner, scoutForFood, scoutHunt } = provFood
+const { _foodFloorState, _setFoodPlanHint, RAW_COOKABLE, FOOD_ANIMALS, LEATHER_ANIMALS, RISKY_EAT, ROD_SPIDERS, DFOOD_DEEP, DFOOD_FAR, hasFood, foodCount, needsFood, nearestFoodAnimal, eatFromPackToComfortable, eatBestFood, eatUp, bakeBreadFromWheat, cookRawMeat, fishingEnabled, ensureFishingRod, fishForFood, huntForFood, huntForDrop, huntSpiderForString, gatherLeather, woolCount, ensureFoodSupply, needFoodSupply, bankFoodFirst, courierFoodToBank, foodPlanNow, topUpFoodForPlan, isSecuringFood, escalateFoodFloor, secureFood, secureFoodInner, scoutForFood, scoutHunt } = provFood
 const { FACING_OFF, resolveBankCell, isBankStand, bankStandFor, gotoChest, placeStationInInterior, ensureChest, placeChestOriented, healBankDouble, chestCounts, depositMaterials, withdrawItem, migrateChestInto, consolidateBank, ownInfraCells, lonelyFurnace, consolidateFurnaces, litterPatrol } = provBank
 const { digShaftDown, digStaircaseUp, climbMovements, climbToSurface, pillarUpTo, mineTunnel, placeTorch, ensureTorches, miningPicks, bestPick, workingPickCount, workingMiningPick, carriedPickUsesLeft, craftOneFromInv, craftStonePickHere, ensureMiningKit, digStaircaseDown, enterExistingMine, branchMine, grabNearbyOre, mineDanger } = provMining
 const { surveyWaterSite, chooseFarmSite, PLANTABLE_GROUND, WHEAT_FARM_TARGET, farmFootprintHas, cropExclusionStep, cropPlaceExclusion, inAvoidBox, boneMealBlock, tillCell, withdrawSeedsFromBank, gatherSeedsNear, placeFarmTorches, levelPlotCell, ensureWheatFarm, replantCropCell, tendWheatFarm, hasStandingFarm, saplingFor, saplingCount, plantSaplingNear, boneMealSapling, fishSaplings, prepOrchardCell, plantGrove } = provFarm
@@ -74,7 +74,7 @@ const PROBE_MS = Math.max(200, parseInt(process.env.NAV_PROBE_MS || '1000', 10))
 // Visible, UNTHROTTLED build tracing to stdout (the say() progress goes through a 40s
 // throttle that hides failures). Enable with BUILD_DEBUG=1 to see every plan/task/smelt step.
 let dbgSink = null // injected by index.js: debug lines persist to logs/bot-events.log
-function setDebugSink (fn) { dbgSink = fn; worldMemory.setDebugSink(fn); provCore.setDebugSink(fn); provHut.setDebugSink(fn); provFarm.setDebugSink(fn); provMining.setDebugSink(fn); provBank.setDebugSink(fn); provFood.setDebugSink(fn); provShelter.setDebugSink(fn); provRecovery.setDebugSink(fn); provMaintain.setDebugSink(fn) } // forward: world-memory + core log through the same sink
+function setDebugSink (fn) { dbgSink = fn; worldMemory.setDebugSink(fn); provCore.setDebugSink(fn); provHut.setDebugSink(fn); provFarm.setDebugSink(fn); provMining.setDebugSink(fn); provBank.setDebugSink(fn); provFood.setDebugSink(fn); provShelter.setDebugSink(fn); provRecovery.setDebugSink(fn); provMaintain.setDebugSink(fn); survivalSnapshot.setDebugSink(fn) } // forward: world-memory + core log through the same sink (incl. [snap] failed-read traces)
 // fix #15 Piece C (flag DEFEND_WHEN_HIT, default ON, read once at module load - mirrors index.js):
 // a sealed shelter that is nonetheless TAKING DAMAGE (breached/leaky seal, mob fell in before the
 // cap) must bail out to fight/flee instead of holding _sheltering for up to 600s while hits land.
@@ -116,6 +116,7 @@ function gatherMovements (bot) {
   m.maxDropDown = 8 // hop down ledges like a player would (plateau spawns; verified live: default 4 = "No path" to a tree below a cliff)
   m.canDig = true
   m.digCost = 10 // strongly prefer walking around over chewing through a canopy
+  require('./pathfix.js').applyPlaceCost(m) // FIX 6: and prefer walking around over pillaring (a tower is permanent litter)
   m.liquidCost = 4 // route AROUND lakes: water was priced like land, so A* happily swam
   // (slow, drowning risk, and the brain panics "get out of water" the whole time)
   m.blocksCantBreak = new Set(
@@ -272,6 +273,7 @@ function wildTerrainMovements (bot) {
     const ids = bridge.map(n => md.itemsByName[n] && md.itemsByName[n].id).filter(x => x != null)
     if ('scafoldingBlocks' in m) m.scafoldingBlocks = ids
   } catch { /* mcData not ready */ }
+  require('./pathfix.js').applyPlaceCost(m) // FIX 6: pillaring is priced, not free
   // LAYER 1: the type whitelist inverted into the library's denylist (built exactly like
   // gatherMovements at provision.js:68-70). Any block whose NAME fails canWildBreakType is
   // un-breakable regardless of position - planks/logs/torches/chests/beds/glass/bricks/... .
@@ -845,50 +847,18 @@ function detectWood (bot) {
 }
 
 // ---- what the bot knows how to obtain directly from the world --------------
-// item name -> which BLOCKS to mine for it. Natural blocks only (anti-grief:
-// same philosophy as the MINABLE allowlist in commands.js).
-const GATHER_SOURCES = {
-  cobblestone: ['stone'], // mine natural STONE (drops cobble); never target placed cobblestone (a common player block)
-  raw_iron: ['iron_ore', 'deepslate_iron_ore'], // iron armor bootstrap (pillager patrols eat naked bots)
-  dirt: ['dirt', 'grass_block'],
-  sand: ['sand'],
-  red_sand: ['red_sand'],
-  gravel: ['gravel'],
-  clay_ball: ['clay'],
-  oak_log: ['oak_log'],
-  spruce_log: ['spruce_log'],
-  birch_log: ['birch_log'],
-  jungle_log: ['jungle_log'],
-  acacia_log: ['acacia_log'],
-  dark_oak_log: ['dark_oak_log'],
-  cherry_log: ['cherry_log'],
-  mangrove_log: ['mangrove_log']
-}
-
-// gathers that REQUIRE a tool or drop nothing / can't be mined. Stone mined with
-// bare hands drops NOTHING - a pickaxe is mandatory, not just faster.
-const GATHER_TOOL = {
-  cobblestone: 'wooden_pickaxe',
-  raw_iron: 'stone_pickaxe' // iron ore drops nothing below stone tier
-}
-
-// smelt-only outputs: output item -> furnace input item (recursively provisioned)
-const SMELT_MAP = {
-  iron_ingot: 'raw_iron',
-  glass: 'sand',
-  stone: 'cobblestone',
-  smooth_stone: 'stone',
-  brick: 'clay_ball',
-  smooth_sandstone: 'sandstone',
-  charcoal: 'oak_log'
-}
-
-// stripped logs aren't gathered or crafted - you strip a placed log with an axe.
-// output -> base log to gather (1:1). (wood/hyphae variants left out for now.)
-const STRIP_MAP = {}
-for (const w of ['oak', 'spruce', 'birch', 'jungle', 'acacia', 'dark_oak', 'cherry', 'mangrove', 'pale_oak']) {
-  STRIP_MAP[`stripped_${w}_log`] = `${w}_log`
-}
+// These four maps used to be hand-written literals HERE, and each one was maintained
+// independently of the planners that consume it - which is how wool ended up with no producer
+// anywhere while the bot stood in a field of sheep. They are now VIEWS over the single
+// capability registry (bot/capabilities.js), which bot/capabilitytest.js enumerates against
+// every planner. There is exactly one place to add a capability, and a gap is a red test.
+//   GATHER_SOURCES  item -> which natural BLOCKS to mine for it (anti-grief: natural only)
+//   GATHER_TOOL     item -> the tool the gather REQUIRES (bare hands drop nothing)
+//   SMELT_MAP       output -> furnace input (recursively provisioned)
+//   STRIP_MAP       stripped log -> base log to gather (axe a placed log, 1:1)
+//   HUNT_SOURCES    item -> which MOB drops it (kill it and take the drop)
+const capabilities = require('./capabilities.js')
+const { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, HUNT_SOURCES } = capabilities
 
 // fuel: a plank smelts ~1.5 items. We fuel with planks (4x more efficient per log
 // than burning raw logs). Value is exact for 1.21; we add a small buffer.
@@ -996,6 +966,7 @@ function planProvision (mcData, bom, inventory = {}, opts = {}) {
   const craftOrder = []         // craft item names, dependency order (leaf-first)
   const smelts = []             // {output, input, count}
   const strips = []             // {output, input, count}
+  const hunts = {}              // item -> count (mob drops; see capabilities.js `hunt`)
   const toolsNeeded = new Set()
   const unobtainable = {}
   let needsTable = false
@@ -1046,6 +1017,14 @@ function planProvision (mcData, bom, inventory = {}, opts = {}) {
       addGather(name, remaining)
       return
     }
+    // comes off a MOB. Checked BEFORE recipes on purpose: white_wool HAS a recipe (dye an
+    // existing wool), and preferring it is exactly what produced the live lapis->blue_dye->
+    // black_dye->bone_meal->white_dye chain for wool the bot did not own, in a field of sheep.
+    // A player kills the sheep. So does the bot, now, for every mob drop in the registry.
+    if (HUNT_SOURCES[name]) {
+      hunts[name] = (hunts[name] || 0) + remaining
+      return
+    }
     // smeltable (needs a furnace + fuel, planned once globally below)
     if (SMELT_MAP[name]) {
       furnaceNeeded = true
@@ -1061,7 +1040,7 @@ function planProvision (mcData, bom, inventory = {}, opts = {}) {
     const recipes = [...((item && mcData.recipes[item.id]) || [])].sort((a, b) => {
       // prefer variants (1) whose ingredients we already stock/plan, then (2) that
       // use the primary build wood - so generic wood needs converge on one tree.
-      const obtainable = n => n && (GATHER_SOURCES[n] || SMELT_MAP[n] || STRIP_MAP[n] || (avail[n] || 0) > 0 || gathers[n] || craftReq[n] || (mcData.itemsByName[n] && (mcData.recipes[mcData.itemsByName[n].id] || []).length > 0))
+      const obtainable = n => n && (GATHER_SOURCES[n] || SMELT_MAP[n] || STRIP_MAP[n] || HUNT_SOURCES[n] || (avail[n] || 0) > 0 || gathers[n] || hunts[n] || craftReq[n] || (mcData.itemsByName[n] && (mcData.recipes[mcData.itemsByName[n].id] || []).length > 0))
       const score = r => {
         const names = Object.keys(recipeIngredients(r)).map(id => mcData.items[id] && mcData.items[id].name)
         // HARD penalty for a variant with an ingredient we can't get any way (e.g. the
@@ -1164,6 +1143,7 @@ function planProvision (mcData, bom, inventory = {}, opts = {}) {
   const basics = craftOrder.filter(isBasic).sort((a, b) => basicPriority(a) - basicPriority(b))
   const finals = craftOrder.filter(n => !isBasic(n) && n !== 'furnace')
   const G = (n, c) => ({ type: 'gather', item: n, count: c, blocks: GATHER_SOURCES[n], tool: GATHER_TOOL[n] || null })
+  const H = (n, c) => ({ type: 'hunt', item: n, count: c, mob: HUNT_SOURCES[n].label, family: HUNT_SOURCES[n].family || null })
   const C = n => ({ type: 'craft', item: n, crafts: craftReq[n].crafts, perCraft: craftReq[n].perCraft, needsTable: craftReq[n].needsTable })
   // #26: charcoal is produced by its OWN smelt task and BURNED by the main smelt, so it must
   // run first. Recursion pushes it last -> stable-sort charcoal smelts to the front (SMART only;
@@ -1176,12 +1156,15 @@ function planProvision (mcData, bom, inventory = {}, opts = {}) {
     ...logGathers.map(([n, c]) => G(n, c)),
     ...basics.map(C),
     ...otherGathers.map(([n, c]) => G(n, c)),
+    // Hunts run AFTER the basics phase so the bot swings a crafted sword rather than a fist,
+    // and before the finals that consume the drop.
+    ...Object.entries(hunts).map(([n, c]) => H(n, c)),
     ...(craftReq.furnace ? [C('furnace')] : []),
     ...smeltsOrdered.map(s => ({ type: 'smelt', ...s })),
     ...strips.map(s => ({ type: 'strip', ...s })),
     ...finals.map(C)
   ]
-  return { tasks, gathers, crafts: craftReq, smelts, strips, tools: [...toolsNeeded], unobtainable, needsTable, used }
+  return { tasks, gathers, hunts, crafts: craftReq, smelts, strips, tools: [...toolsNeeded], unobtainable, needsTable, used }
 }
 
 // Current inventory as {itemName: count}.
@@ -1448,6 +1431,24 @@ async function runGather (bot, item, count, opts = {}) {
         return 0
       }
     } catch {}
+  }
+  // ROUTE BY PRODUCER. "Go and get me N of X from the world" is one question with more than one
+  // answer: some things are mined, some come off an animal. runGather is the single door, and the
+  // capability registry decides which driver answers - so `gather white_wool 3` works for the same
+  // reason `gather cobblestone 32` does, with no per-item wiring. Before this, every caller that
+  // wanted a mob drop had to know to call a different function by name, which is why wool was
+  // obtainable by exactly one hand-written call site and by nothing else in the codebase.
+  const cap = capabilities.producerFor(item)
+  if (cap && cap.via === 'hunt') {
+    const r = await huntForDrop(bot, count, { ...opts, item })
+    return { gathered: r.got, reason: r.got >= count ? `hunted ${r.killed} ${cap.label}` : `only ${r.got}/${count} off ${r.killed} ${cap.label}` }
+  }
+  if (!cap) {
+    // No producer at all. An honest, greppable refusal that names the alternatives, instead of a
+    // zero that the caller cannot tell from "found nothing out there".
+    const why = `no producer for ${item} in the capability registry - it is neither mined nor hunted (it may still be craftable: ask the resource model)`
+    dbg('runGather: ' + why)
+    return { gathered: 0, reason: why }
   }
   // Anchor to the PERSISTENT surface (homeY, from the build/provision run) if given, not
   // wherever we happen to be standing now - so a batch that starts underground (previous
@@ -2355,7 +2356,19 @@ async function gatherLoop (bot, item, count, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const mcData = require('minecraft-data')(bot.version)
   const sources = GATHER_SOURCES[item]
-  if (!sources) return { gathered: 0, reason: `don't know how to gather ${item}` }
+  // gatherLoop is the BLOCK-MINING loop; runGather is the router that sends mob drops to
+  // huntForDrop instead. Reaching here without a block source therefore means a caller went
+  // around the router - say which producer the registry actually has, rather than the flat
+  // "don't know how to gather X" that read identically for "there is no such capability" and
+  // "the capability exists and you called the wrong door".
+  if (!sources) {
+    const cap = capabilities.producerFor(item)
+    const why = cap
+      ? `${item} is not mined - it comes via ${cap.via}${cap.label ? ' (' + cap.label + ')' : ''}; call runGather, which routes it`
+      : `no producer for ${item} in the capability registry (mineable: ${Object.keys(GATHER_SOURCES).join(', ')})`
+    dbg('gatherLoop: ' + why)
+    return { gathered: 0, reason: why }
+  }
   // some blocks drop NOTHING without the right tool - fail loudly, don't spin
   const reqTool = GATHER_TOOL[item] // e.g. cobblestone needs a pickaxe
   if (reqTool) {
@@ -4137,6 +4150,16 @@ async function runPlan (bot, plan, opts = {}) {
         // before moving on, like a player would. Best-effort, never fails the plan.
         try { const c = await cookRawMeat(bot, opts); if (c > 0) dbg('  cooked', c, 'raw meat after the smelt') } catch {}
         if (made < task.count) break
+      } else if (task.type === 'hunt') {
+        // A mob drop. The hunt is bounded by the driver (kill cap, roam fence, deadline), and it
+        // reports the DROP FAMILY it actually got - a sheep drops its own colour, so a hunt asked
+        // for white_wool can honestly come back with 3 brown_wool. That is a real result, not a
+        // failure, and the caller re-plans against real holdings rather than being told a lie.
+        say(`hunting ${task.mob} for ${task.count}x ${task.item}...`)
+        const r = await huntForDrop(bot, task.count, { ...opts, item: task.item })
+        const exact = countItem(bot, task.item)
+        results.push({ task, ok: r.got >= task.count, note: `${r.got}/${task.count} off ${r.killed} ${task.mob}${task.family && exact < task.count ? ' (as ' + task.family + ', not ' + task.item + ')' : ''}` })
+        if (r.got < task.count) break
       } else if (task.type === 'strip') {
         say(`stripping ${task.count}x ${task.output}...`)
         const made = await runStrip(bot, task.output, task.input, task.count, opts)
@@ -4244,7 +4267,7 @@ const HUT_FURNITURE = /chest$|barrel$|furnace$|smoker$|crafting_table$|_bed$|_do
 // Read chest contents as { name: count } (build materials the chest is holding).
 // (chestCounts moved to provision-bank.js)
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, planProvision, smeltFuelPlan, fuelBankWithdrawAmount, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, manualHopFromWater, breachWaterPocket, breachDryPocket, escapeUpColumn, toolForBlock, migrateChestInto, consolidateBank, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, secureBase, secureBaseGate, sealHomeDescents, sealDescentsGate, worldTidy, litterSignature, inBuildZone, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, boundedHold, recoverFromDegraded, isRecoveringDegraded, deadlockResetDue, deadlockResetState, pickOpenSkyCell, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, sleepableNow, ensureSpawnBed, ensureHomeShelter, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, markBedUnusable, bedHeld, gearupState, gearupResult, gearupShouldArmBackoff, proactiveGearupGate, ironGrindMinedReal, resetIronGrindMined, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, noteWaterCrossing, lonelyFurnace, consolidateFurnaces, litterPatrol, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, surveyWaterSite, chooseFarmSite, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, planTrekRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, HUNT_SOURCES, huntForDrop, planProvision, smeltFuelPlan, fuelBankWithdrawAmount, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, digStaircaseUp, ensurePillarFiller, manualHopFromWater, breachWaterPocket, breachDryPocket, escapeUpColumn, toolForBlock, migrateChestInto, consolidateBank, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, woolCount, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, secureBase, secureBaseGate, sealHomeDescents, sealDescentsGate, worldTidy, litterSignature, inBuildZone, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, boundedHold, recoverFromDegraded, isRecoveringDegraded, deadlockResetDue, deadlockResetState, pickOpenSkyCell, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, sleepableNow, ensureSpawnBed, ensureHomeShelter, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, markBedUnusable, bedHeld, gearupState, gearupResult, gearupShouldArmBackoff, proactiveGearupGate, ironGrindMinedReal, resetIronGrindMined, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, furnaceCountFor, countFurnacesNear, ensureFurnaces, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, noteWaterCrossing, lonelyFurnace, consolidateFurnaces, litterPatrol, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, surveyWaterSite, chooseFarmSite, RAW_COOKABLE, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, planTrekRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
   maintenancePass, isMaintaining, stopMaintenance, _setMaintaining, courierFoodToBank, safekeepSweep, spareKitToBank, recoveryReadyNow, cropExclusionStep, cropPlaceExclusion, farmFootprintHas, hazardStepExclusion, waterStepExclusion, deathSpotExclusion, markHazardTraversal, setOperatorRouting, deepWaterUnderfoot, gatherSeedsNear,
   activeJobInfo, stopSurvivalJob, escalateFoodFloor, _foodFloorState,
   wildTerrainMovements, trekMovements, DIGGABLE_NATURAL, STRUCTURE_RE, canBreakNaturally,

@@ -285,16 +285,46 @@ async function acquireBed (bot, opts = {}) {
   const res = require('./resources.js') // lazy - resources requires provision at load
   const near = opts.near
   const planOpts = { primaryWood: (P().detectWood(bot) || 'oak') }
+  // A bed is a COLOUR family: any of the sixteen will anchor a spawn, and the wool the bot ends
+  // up holding decides which. So this is a two-pass loop, and the second pass exists for one
+  // structural reason - a pass can CHANGE holdings (the plan's sheep hunt puts brown wool in the
+  // pack when white was asked for), and the candidate list was computed from the holdings we had
+  // BEFORE that. Re-read, recompute, try again; if nothing moved, do not burn a second pass.
+  //
+  // This replaces AUDIT FIX 16's hand-wired "if the recipe planner gives up, go and kill sheep"
+  // bolt-on. Wool is now a `hunt` producer in the capability registry, so res.acquire ->
+  // planProvision plans the hunt itself, exactly like it plans a gather or a smelt - and the
+  // special case for the one material anybody happened to notice is gone (DESIGN-PRINCIPLES §1:
+  // deleting the patch layer is the fix).
   let totals = {}
-  try { totals = await res.totalCounts(bot, { near, maxDist: 24 }) } catch (e) { dbg('  acquireBed: holdings read failed (' + e.message + ')') }
-  for (const name of bedCandidates(totals)) {
+  const readTotals = async () => { try { return await res.totalCounts(bot, { near, maxDist: 24 }) } catch (e) { dbg('  acquireBed: holdings read failed (' + e.message + ')'); return {} } }
+  const sigOf = t => Object.keys(t).sort().map(n => n + ':' + t[n]).join(',')
+  totals = await readTotals()
+  let tried = []
+  for (let pass = 0; pass < 2; pass++) {
+    const before = sigOf(totals)
+    tried = bedCandidates(totals)
+    for (const name of tried) {
+      if (isStopped()) break
+      // gather:true - this is the BOOTSTRAP caller. A bot with nothing has no bank to withdraw
+      // from and no planks to craft from, so a withdraw+craft-only acquire refuses the whole task
+      // (`not craftable from holdings (needs gathering birch_log)` - verified live, and the reason
+      // no spawn anchor was ever laid). It may chop its own wood and hunt its own sheep; both legs
+      // are bounded by their own drivers (roam fence, kill cap, night gate, deadline).
+      try { await res.acquire(bot, name, 1, { near, isStopped, say: opts.say, planOpts, gather: true }) }
+      catch (e) { dbg('  acquireBed: ' + name + ' failed (' + e.message + ')') }
+      const got = bedInPack(bot)
+      if (got) { dbg('  acquireBed: now holding a ' + got.name); return got }
+    }
     if (isStopped()) break
-    try { await res.acquire(bot, name, 1, { near, isStopped, say: opts.say, planOpts }) }
-    catch (e) { dbg('  acquireBed: ' + name + ' failed (' + e.message + ')') }
-    const got = bedInPack(bot)
-    if (got) { dbg('  acquireBed: now holding a ' + got.name); return got }
+    totals = await readTotals()
+    if (sigOf(totals) === before) { dbg('  acquireBed: the pass changed nothing in my holdings - a second identical attempt cannot do better'); break }
+    dbg('  acquireBed: holdings changed during the attempt (wool/materials came in) - re-planning against what i actually hold')
   }
-  dbg('  acquireBed: no bed obtainable from holdings (' + bedCandidates(totals).join(', ') + ')')
+  // Report what IS, not what was hoped for (DESIGN-PRINCIPLES §7): the old line claimed "no sheep
+  // in reach" whether or not anything had ever gone looking for a sheep.
+  const wool = () => { try { return P().woolCount(bot) } catch { return 0 } }
+  dbg('  acquireBed: no bed obtainable - holding ' + wool() + ' wool [tried ' + tried.join(', ') + ']')
   return null
 }
 

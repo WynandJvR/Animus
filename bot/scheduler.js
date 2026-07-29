@@ -23,6 +23,7 @@
 const arbiter = require('./arbiter.js') // one-way: for jobSurvivalNeed (the single need authority)
 const mining = require('./mining.js')   // one-way: PURE ironKeystone decision (mining requires nothing)
 const gravePolicy = require('./grave-policy.js') // one-way: PURE grave decisions (#112 salvageVerdict / net-of-risk scoring)
+const capabilities = require('./capabilities.js') // one-way: the PURE capability registry (requires nothing) - the ladder's action vocabulary
 
 // IRON_KEYSTONE: is this bot on the keystone-blocker grind - fully naked (0 armor) and short of a
 // boots' worth of raw iron - so it MUST bank that first iron before ANY other progress? Reuses the
@@ -53,11 +54,20 @@ function _setNow (fn) { nowFn = fn || (() => Date.now()) }
 // Ranks encode the preemption table (REDESIGN §3.2): survival preempts progress/maintain/idle;
 // progress preempts maintain/idle; maintain preempts idle only; idle preempts nothing.
 const JOB_CLASSES = {
-  survival: { rank: 3, members: ['recoveryLadder', 'graveSweep', 'secureFood', 'recoverHp', 'nightShelter'] },
-  progress: { rank: 2, members: ['build', 'gearup', 'mine', 'gather', 'travel'] },
-  maintain: { rank: 1, members: ['maintenancePass'] },
+  survival: { rank: 3, members: ['recoveryLadder', 'graveSweep', 'secureFood', 'recoverHp', 'nightShelter', 'homecoming'] },
+  // 'acquire' is resources.acquire (withdraw > craft > gather) - the producer NEED_PRODUCERS names
+  // for wood/planks/tool. It was named there and existed nowhere here, so the one question the
+  // table exists to answer ("who makes this?") had an answer no layer could act on. (CAPABILITY
+  // REGISTRY, capabilitytest.js item 3.)
+  progress: { rank: 2, members: ['build', 'gearup', 'mine', 'gather', 'travel', 'acquire', 'brainJob'] },
+  maintain: { rank: 1, members: ['maintenancePass', 'reclaim'] },
   idle: { rank: 0, members: [] }
 }
+// Producers that are NOT scheduler jobs because a REFLEX owns them: the arbiter/escape stack acts
+// on lava/fire/drowning/threat/creeper within the tick, far faster than a job dispatch could. They
+// are listed HERE rather than left implicit so "who performs this?" always has a named owner
+// (DESIGN-PRINCIPLES §5) and so the contract test can tell a reflex from a wiring hole.
+const REFLEX_OWNED = ['flee']
 function classRank (cls) { return JOB_CLASSES[cls] ? JOB_CLASSES[cls].rank : -1 }
 
 // ---- commandClass -----------------------------------------------------------------------
@@ -600,7 +610,102 @@ function recoveryPlan (snapshot) {
 //    night" gate (mirrors shelterNeeded / arbiter shelter need). An ARMORED bot may still work the
 //    night (today's behavior). nightStuck lifts BOTH gates (arbiter.js:145-149; R5 rerunLadderByNight).
 // Everything else runs by night by design: R0 eat, R1 grave (its own night gate), R2 shelter, R5 hold.
-const OUTBOUND_RE = /^(trekFarm|trekOrchard|secureFood)/
+// WHICH actions set out has ONE definition: the `outbound` flag in the capability registry
+// (bot/capabilities.js RUNG_ACTIONS). OUTBOUND_RE is DERIVED from it so the regex can never
+// drift from the table the ladder is planned out of - the previous hand-written
+// /^(trekFarm|trekOrchard|secureFood)/ was a second copy of a rule that lives elsewhere.
+const OUTBOUND_RE = new RegExp('^(' + capabilities.rungActionNames().filter(a => capabilities.isOutboundAction(a))
+  .map(a => a.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')$')
+
+// ---- outboundBlocked (AUDIT 2026-07-29, defect: ONE RULE, TWO PATHS) --------------------
+// "Never set out un-armoured at night" is the single most load-bearing survival rule in this
+// codebase. It was written INSIDE rungFeasible, so it governed the recovery ladder's treks and
+// nothing else - and the one journey that is not a ladder rung, the post-respawn walk home, was
+// therefore exempt from it. On 2026-07-20 that exemption walked a naked bot 470 blocks through
+// the dark eight times in seven minutes, and it died every time (§1 LOOP A of the audit).
+//
+// The rule now has ONE definition, and every journey - rung or not - asks THIS function. Extracted
+// verbatim from rungFeasible's body: same clauses, same flags, same order, so the ladder's
+// behaviour is unchanged by the extraction and the homecoming inherits the rule it was missing.
+//
+// Returns the BLOCKING CONDITION as a string (what must change before setting out), or null when
+// the journey may proceed. A condition, never a timer - each one is provably re-checkable and
+// two of the three ('dawn', 'armor') have producers the scheduler already knows.
+function outboundBlocked (snapshot) {
+  const s = snapshot || {}
+  const night = !!s.isNight
+  const stuck = !!s.nightStuck
+  if (stuck) return null // eternal night: hiding is not a survivable resolution - go, carefully
+  if (!s.underArmored) return null // an armoured bot may work the night (today's behaviour)
+  if (process.env.RESILIENT_RECOVERY === '0') return night ? 'dawn' : null // today: night-only
+  // Night keeps the headline rule unconditionally. By day the block requires a re-arm source the
+  // ladder can ACTUALLY reach (#86 LADDER_REARM_REAL) - without that clause a bot with no bank kit
+  // and no grave would be permanently barred from the very treks that feed it.
+  if (night) return 'dawn'
+  const reArm = process.env.LADDER_REARM_REAL !== '0' ? hasLadderReArm(s) : reArmSourceAvailable(s)
+  return reArm ? 'armor' : null
+}
+
+// ---- journeyAdmissible (AUDIT FIX 2) ----------------------------------------------------
+// PURE. May the bot set out on a journey of `dist` blocks RIGHT NOW? This is outboundBlocked
+// plus the two things a rung never had to think about and a 470-block homecoming does: how far
+// the walk is, and whether the last few attempts at it ended in a corpse.
+//
+// The short-hop exemption is what keeps this from becoming a trap: a bot may ALWAYS move locally
+// (to a bed, out of a pit, to the animal it can see), so no condition here can ever leave it
+// unable to act. Only genuinely long, exposed journeys are gated.
+const SHORT_HOP = 32
+function journeyAdmissible (snapshot, dist, opts = {}) {
+  const s = snapshot || {}
+  const d = dist != null ? dist : 0
+  const shortHop = opts.shortHop != null ? opts.shortHop : SHORT_HOP
+  if (d <= shortHop) return { ok: true, blockedOn: null, why: 'short hop - always allowed' }
+  // FIX 5: a bot that cannot read its own vitals must not set out across open ground. Every
+  // predicate here defaults a missing vital to 20, so without this a BLIND snapshot reads as a
+  // perfectly healthy one and a 500-block crossing comes back `clear to travel` (demonstrated
+  // 2026-07-29). Short hops stay allowed above, so this can never immobilise the bot.
+  if (s.vitalsKnown === false || s.hp == null || s.food == null) {
+    return { ok: false, blockedOn: 'vitals', why: 'cannot read my own hp/food - not crossing open ground blind' }
+  }
+  if (s.nightStuck) return { ok: true, blockedOn: null, why: 'eternal night - waiting resolves nothing' }
+  // Immediate danger is the reflex stack's, not a travel decision - but do not START a long walk in it.
+  if (s.inLava || s.onFire || s.drowning) return { ok: false, blockedOn: 'danger', why: 'in immediate danger - not setting out' }
+  const hp = s.hp != null ? s.hp : 20
+  if (hp <= Number(process.env.JOURNEY_HP_FLOOR || 6)) return { ok: false, blockedOn: 'heal', why: 'hp ' + hp + ' - too hurt to cross open ground' }
+  const ob = outboundBlocked(s)
+  if (ob) return { ok: false, blockedOn: ob, why: ob === 'dawn' ? 'un-armoured at night - the dark is what keeps killing me' : 'un-armoured with a re-arm i can reach - re-arm before travelling' }
+  // THE SPIRAL CLAUSE. A bot that has died repeatedly and is still under-armoured must stop
+  // attempting the long crossing that is killing it, EVEN BY DAY. deathsRecent is a 20-minute
+  // window (grave.js), so this releases itself by condition - a bot that survives 20 minutes may
+  // try again. This is the clause that ends the treadmill: attempt 3 does not become attempt 8.
+  const far = Number(process.env.JOURNEY_FAR || 128)
+  if (d > far && (s.deathsRecent || 0) >= Number(process.env.SPIRAL_N || 3) && s.underArmored) {
+    return { ok: false, blockedOn: 'anchor', why: `${s.deathsRecent} deaths in the last 20 min and ${Math.round(d)}b to cross un-armoured - this crossing is what is killing me` }
+  }
+  const food = s.food != null ? s.food : 20
+  if (d > far && food < 6 && !(s.packFoodPts > 0)) return { ok: false, blockedOn: 'food', why: 'food ' + food + ' with an empty pack - would starve before arriving' }
+  return { ok: true, blockedOn: null, why: 'clear to travel' }
+}
+
+// ---- homecomingPlan (AUDIT FIX 2) -------------------------------------------------------
+// PURE. The post-respawn decision, as a VERDICT rather than an unconditional walk.
+//   'stay'      already home (or nowhere to go) - nothing to do
+//   'travel'    the crossing is survivable - go
+//   'stabilise' it is not - become safe HERE, and travel when `blockedOn` has cleared
+// `stabilise` is the whole point of the fix: recovery is reaching a survivable STATE, and the bot
+// must be able to reach one anywhere in the world, not only on one remembered coordinate.
+function homecomingPlan (snapshot, opts = {}) {
+  const s = snapshot || {}
+  const dist = s.homeDist
+  const homeDist = opts.homeDist != null ? opts.homeDist : dist
+  if (homeDist == null) return { action: 'stay', why: 'no home anchor remembered', blockedOn: null }
+  const far = opts.far != null ? opts.far : Number(process.env.RECOVER_HOME_DIST || 64)
+  if (homeDist <= far) return { action: 'stay', why: 'already home (' + Math.round(homeDist) + 'b)', blockedOn: null }
+  const j = journeyAdmissible(s, homeDist, opts)
+  if (j.ok) return { action: 'travel', why: 'clear to cross ' + Math.round(homeDist) + 'b home', blockedOn: null }
+  return { action: 'stabilise', why: j.why, blockedOn: j.blockedOn }
+}
+
 function rungFeasible (rung, snapshot) {
   const r = rung || {}
   const s = snapshot || {}
@@ -611,24 +716,84 @@ function rungFeasible (rung, snapshot) {
   // (R3/R4). rearmFromBank (walks HOME) + R0/R2/R5 stay admissible so the bot re-arms + holds, not
   // marches back into the death cluster. RESILIENT_RECOVERY=0 -> spiralActive() is always false.
   if (spiralActive(s) && !stuck && (r.rung === 'R1' || OUTBOUND_RE.test(r.action || ''))) return false
-  if (OUTBOUND_RE.test(r.action || '')) {
-    if (process.env.RESILIENT_RECOVERY !== '0') {
-      // P3: an outbound rung is inadmissible while under-armored BY DAY TOO (not only at night) -
-      // re-arm (rearmFromBank / grave) before any farm/orchard/forage trek. UNLESS nightStuck (can't
-      // wait for a day that won't come) OR the world has no re-arm source (P4 escape - don't trap it).
-      // #86 LADDER_REARM_REAL (default on): the source test must be what the LADDER can actually do
-      // (bank kit / safe grave = hasLadderReArm), NOT reArmSourceAvailable - its third clause counts
-      // "gearup not on back-off" as a source, so the moment the gearup cooldown expired the farm/
-      // forage rungs went permanently inadmissible at armor 0 and the bot idled at food 5 with
-      // mature wheat 60b away (live 05:15-05:45Z: every plan R1.5>R2>R5, R3/R4 never planned).
-      // =0 -> reArmSourceAvailable exactly as before.
-      // Night keeps the headline rule unconditionally (never forage out un-armored at night);
-      // by day the block requires the REAL source.
-      if (!!s.underArmored && !stuck && (night || (process.env.LADDER_REARM_REAL !== '0' ? hasLadderReArm(s) : reArmSourceAvailable(s)))) return false
-    } else if (night && !!s.underArmored && !stuck) return false // today: night-only
-  }
+  // P3 / #86 LADDER_REARM_REAL: the "never set out un-armoured" rule. Its definition now lives in
+  // outboundBlocked() above, because the post-respawn homecoming needs the SAME rule and used to
+  // have none (audit §1 LOOP A). Same clauses, same flags - one copy.
+  if (OUTBOUND_RE.test(r.action || '') && outboundBlocked(s)) return false
   return true
 }
+
+// ---- recoverySignature (AUDIT 2026-07-29 FIX 3) -----------------------------------------
+// PURE. A compact string of EVERYTHING the recovery ladder's plan and feasibility depend on.
+//
+// The livelock it exists to end (audit §1 LOOP B): recoverFromDegraded keeps its `tried` set per
+// CALL, so a pass that achieved nothing returns `all rungs tried`, the tick waits 60s, calls it
+// again with a fresh `tried` set against an unchanged world, and derives the identical plan with
+// the identical two no-op rungs. Forever - while the food bar drains. On 2026-07-20 the ladder was
+// chosen 300+ times and reported `NOT recovered` 41 times; the bot never left the loop under its
+// own power.
+//
+// Re-running a plan whose INPUTS have not changed cannot produce a different result. So a ladder
+// pass that made no progress is not retried until this signature changes - a CONDITION gate, never
+// a timer (design principle 6). Everything that could make a previously-infeasible rung feasible is
+// in here: the hour, the gear, the vitals, the graves, whether home/farm/bank can help.
+//
+// Vitals are bucketed deliberately. Exact values would change on every regen tick and re-open the
+// spin; buckets change when something MEANINGFUL happened. A bucket boundary crossing downward
+// (getting worse) is exactly when a fresh attempt is warranted, which is the behaviour we want.
+function recoverySignature (snapshot) {
+  const s = snapshot || {}
+  const bucket = (v, size) => (v == null ? 'x' : Math.floor(v / size))
+  const graves = gravesOf(s)
+  const near = graves.reduce((m, g) => (g && g.dist != null && g.dist < m ? g.dist : m), Infinity)
+  return [
+    'n' + (s.isNight ? 1 : 0) + (s.nightStuck ? 's' : ''),
+    'a' + (s.armorPieces != null ? s.armorPieces : 'x') + (s.underArmored ? 'u' : ''),
+    'h' + bucket(s.hp, 4),
+    'f' + bucket(s.food, 4),
+    'p' + (s.packFoodPts > 0 ? 1 : 0),
+    'b' + (s.bankFoodPts > 0 ? 1 : 0),
+    'g' + graves.length + (isFinite(near) ? ':' + Math.round(near / 16) : ''),
+    'H' + (s.homeDist == null ? 'x' : Math.round(s.homeDist / 32)),
+    'F' + (s.farm && s.farm.exists ? 1 : 0),
+    'k' + (bankHasSpareKit(s) ? 1 : 0),
+    'd' + (s.deathsRecent || 0),
+    't' + ((s.tools && s.tools.pick) ? 1 : 0) + ((s.tools && s.tools.sword) ? 1 : 0)
+  ].join('|')
+}
+
+// ---- ladderBlocker (AUDIT 2026-07-29 FIX 3) ---------------------------------------------
+// PURE. When a ladder pass achieved nothing, WHY? Names the condition that has to change before
+// another pass could do better - so the log says something actionable and the tick has a condition
+// to wait on instead of a 60-second timer.
+//
+// The rungs that can actually IMPROVE the bot's state (fetch gear, fetch food) are the productive
+// ones; R2's walk-home and R5's hold cannot move the ladder's exit condition by themselves, which
+// is exactly why a plan of only-R2-and-R5 spun forever on 2026-07-20 while food fell 9 -> 7.
+const PRODUCTIVE_RUNG_RE = /^(recoverGrave|rearmFromBank|trekFarm|trekOrchard|secureFood)/
+function ladderBlocker (snapshot) {
+  const s = snapshot || {}
+  const plan = recoveryPlan(s)
+  const productive = plan.filter(r => PRODUCTIVE_RUNG_RE.test(r.action || ''))
+  if (!productive.length) return 'no-producer' // nothing in the known world can supply what we lack
+  const feasible = productive.filter(r => rungFeasible(r, s))
+  if (!feasible.length) {
+    if (spiralActive(s) && !s.nightStuck) return 'spiral'
+    return outboundBlocked(s) || (s.isNight ? 'dawn' : 'blocked')
+  }
+  return 'no-progress' // a productive rung was allowed to run and still nothing improved
+}
+
+// PURE. The plain-language half of the same verdict - what the operator reads in the log.
+const BLOCKER_TEXT = {
+  dawn: 'un-armoured at night: every food/gear run is barred until morning',
+  armor: 're-arm first: there is gear i can reach and i should not forage without it',
+  spiral: 'death spiral: staying sealed near home instead of walking back into it',
+  'no-producer': 'nothing in the world i know of can supply this - no reachable grave, farm or forage',
+  'no-progress': 'the rungs that could have helped ran and produced nothing',
+  blocked: 'no rung that could help is admissible right now'
+}
+function blockerText (b) { return BLOCKER_TEXT[b] || String(b || 'unknown') }
 
 // ---- ladderDone (S5) --------------------------------------------------------------------
 // PURE exit predicate for recoverFromDegraded: vitals + gear restored. Uses the START food bar
@@ -735,6 +900,10 @@ function recoveryReady (snapshot) {
   // gates below forever. Reuses the best-affordable path (ready WITH maxCaution). Conservative: only
   // fires when reArmSourceAvailable is false (gearup on back-off), so a bot that could still gear up
   // keeps recovering. =0 -> gearUpUnachievable is always false, so the rest is byte-for-byte.
+  // FIX 5: "recovered" is a claim about vitals, so it may not be made from vitals nobody read.
+  // Without this, a snapshot whose vitals read failed defaults to hp 20 / food 20 and the bot
+  // declares itself recovered, clears the post-death latch and resumes the build.
+  if (s.vitalsKnown === false || s.hp == null || s.food == null) return { ready: false, maxCaution: true, reason: 'cannot read my own vitals - not calling myself recovered' }
   if (gearUpUnachievable(s)) return { ready: true, maxCaution: true, reason: 'gear-up unachievable (survivable, no re-arm source) - releasing the build, max caution' }
   if (!coreTools) return { ready: false, maxCaution: false, reason: 'missing core tools (pick/sword)' }
   if (!vitalsOk) return { ready: false, maxCaution: false, reason: 'vitals not restored (hp>=' + HP_OK + ' food>=14)' }
@@ -883,7 +1052,17 @@ module.exports = {
   graveCooldownMs,
   recoveryPlan,
   rungFeasible,
+  outboundBlocked,
+  journeyAdmissible,
+  homecomingPlan,
+  recoverySignature,
+  ladderBlocker,
+  blockerText,
+  PRODUCTIVE_RUNG_RE,
+  SHORT_HOP,
   OUTBOUND_RE,
+  isOutboundAction: capabilities.isOutboundAction, // the ONE definition; OUTBOUND_RE is derived from it
+  REFLEX_OWNED,
   ladderDone,
   recoveryReady,
   resumeGate,
@@ -904,6 +1083,7 @@ module.exports = {
   fightSuppressedWhenSubmerged,
   submergedEscapeDue,
   needProducer,
+  NEED_PRODUCERS, // exported so the capability contract test can ENUMERATE it, not sample it
   watchdog,
   wdPhase,
   JOB_CLASSES,

@@ -97,9 +97,12 @@ function nearRecentFlood (bot) {
   return Math.hypot(bot.entity.position.x - lastFlood.x, bot.entity.position.z - lastFlood.z) <= 6
 }
 
+// opts.exclude: [{x,y,z}] cells this search must NOT return again. A retry that re-picks the cell
+// that just failed is not a retry (AUDIT 2026-07-29; see the relocate loop in digInForNight).
 async function findDiggableDryCell (bot, opts = {}) {
   const radius = opts.radius || 24
   if (!bot.entity) return null
+  const excluded = new Set((opts.exclude || []).map(c => c && (c.x + ',' + c.y + ',' + c.z)).filter(Boolean))
   const mcData = require('minecraft-data')(bot.version)
   const GROUND_RE = /^(grass_block|dirt|coarse_dirt|rooted_dirt|podzol|mud|sand|red_sand|gravel|stone|deepslate|granite|diorite|andesite|tuff|clay|terracotta|netherrack|moss_block|snow_block|calcite)$/
   const ids = Object.values(mcData.blocksByName).filter(b => GROUND_RE.test(b.name)).map(b => b.id)
@@ -122,6 +125,7 @@ async function findDiggableDryCell (bot, opts = {}) {
     if (onHutApron(bot, feet)) continue
     // SHELTER_AVOID_FARM (fix #30): never relocate the pit into our own farm (floods/wrecks
     // the crop) - hold these aside and only fall back to them if NOTHING clear of the farm exists.
+    if (excluded.has(feet.x + ',' + feet.y + ',' + feet.z)) continue // already tried and failed this run
     if (shelterFarmConflict(bot, feet)) { nearFarm.push({ x: feet.x, y: feet.y, z: feet.z }); continue }
     cand.push({ x: feet.x, y: feet.y, z: feet.z })
   }
@@ -266,6 +270,11 @@ async function digTorchAlcove (bot, feet) {
   }
   return null
 }
+
+// FIX 15: cells where a pit was dug but the CAP could not be placed ("no solid neighbour to place
+// against"). Such a hole is a mob funnel, not a shelter, so the siting search must stop offering
+// it. A COUNT-bounded list of observations, not a timer - the geometry does not change on its own.
+const capFailedCells = []
 
 async function digInForNight (bot, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
@@ -453,6 +462,7 @@ async function digInForNight (bot, opts = {}) {
     let surfaceY = Math.floor(bot.entity.position.y)
     let shaft = bot.entity.position.floored()
     const RELOCATE_TRIES = 3
+    const relocFailed = [] // cells this call has already tried and ruled out - see the relocate block below
     for (let attempt = 0; attempt <= RELOCATE_TRIES && dug < 1 && !isStopped(); attempt++) {
       // CENTER on the feet cell. Digging from a cell edge (x.5/z.5) digs the column under
       // floored(feet) while the body stays supported by the NEIGHBOUR block - the bot opens a
@@ -500,12 +510,26 @@ async function digInForNight (bot, opts = {}) {
       // Blocked in place (water-adjacent / obstruction). Walk to the nearest diggable dry cell
       // and try again - PROGRESS instead of the 4s NO-OP spin. Widen the search each retry.
       if (attempt < RELOCATE_TRIES) {
-        const dry = await findDiggableDryCell(bot, { radius: 20 + attempt * 12 })
-        if (!dry) { dbg('shelter: no diggable dry ground within reach - cannot pit'); break }
+        // AUDIT 2026-07-29 - "a retry must differ from the attempt that failed".
+        // Live (test server, 14:02): all three relocation tries picked the IDENTICAL cell
+        // (-403,59,409), because the search had no memory of what it had just rejected and
+        // nothing checked whether the walk to it ARRIVED. The bot stood at y=62 re-evaluating a
+        // column at y=59, three times, then reported "no diggable ground" and held in the open all
+        // night - a third instance of the same defect class as the recovery-ladder livelock.
+        // Two things are now true: the cell we just failed at is EXCLUDED from the next search,
+        // and a walk that did not arrive marks its target failed rather than being retried blind.
+        const dry = await findDiggableDryCell(bot, { radius: 20 + attempt * 12, exclude: relocFailed.concat(capFailedCells) })
+        if (!dry) { dbg('shelter: no diggable dry ground within reach (' + relocFailed.length + ' cell(s) already ruled out) - cannot pit'); break }
         dbg('shelter: cannot dig here (water/obstruction) - relocating to diggable dry ground at ' + dry.toString() + ' (try ' + (attempt + 1) + '/' + RELOCATE_TRIES + ')')
         if (opts.say && attempt === 0) opts.say('ground here is too wet to dig into - moving to dry ground to shelter')
         try { await gotoWithTimeout(bot, new goals.GoalBlock(dry.x, dry.y, dry.z), 20000) } catch (e) { dbg('shelter: relocate walk failed (' + e.message + ')') }
         if (inWaterNow(bot)) { try { await ensureAshore(bot, isStopped) } catch {} }
+        // GROUNDED ARRIVAL CHECK: re-read where the body actually is. Anything more than a step
+        // away means the walk failed, and the cell is not a candidate we may test again.
+        const at = bot.entity.position.floored()
+        const arrived = Math.abs(at.x - dry.x) <= 1 && Math.abs(at.z - dry.z) <= 1 && Math.abs(at.y - dry.y) <= 1
+        relocFailed.push({ x: dry.x, y: dry.y, z: dry.z })
+        if (!arrived) dbg('shelter: relocate did NOT arrive (wanted ' + dry.toString() + ', standing at ' + at.toString() + ') - ruling that cell out')
       }
     }
     if (dug < 1) { dbg('shelter: NO-OP (dug 0 after ' + RELOCATE_TRIES + ' relocation tries) - caller must do something else'); return false } // genuinely nowhere diggable+dry nearby
@@ -525,7 +549,31 @@ async function digInForNight (bot, opts = {}) {
     // lands the torch there (not against some other still-open side).
     if (alcoveCell) { try { await placeTorch(bot) } catch {} }
     dbg('shelter: pit ' + (capped ? 'SEALED' : 'OPEN (cap failed - mob funnel risk)') + (sideHoles ? ' with ' + sideHoles + ' open side(s)' : '') + (alcoveCell ? ' (lit alcove)' : ''))
-    say(capped ? 'holed up till it\'s safe' : 'ducked into a hole till it\'s safe')
+    // ==== AUDIT 2026-07-29 FIX 15: AN UNCAPPABLE PIT IS NOT A SHELTER =====================
+    // Live, 15:39:24 -> 15:40:36, from nothing on the live server:
+    //   shelter: cap attempt 1 failed - no solid neighbour to place against
+    //   shelter: cap attempt 2 failed - no solid neighbour to place against
+    //   shelter: deep-cap attempt failed - no solid neighbour to place against
+    //   shelter: pit OPEN (cap failed - mob funnel risk)      <- the bot KNOWS
+    //   (shelter) rested for the night (bed or pit)           <- and rests in it anyway
+    //   (flee) low hp (1) ... (death) mob - Zombie            <- 72 seconds later
+    // The observation was exactly right and changed nothing about the decision - the audit's
+    // thesis in one incident. The relocate loop above only ever retried a failed DIG, so a spot
+    // that digs fine but cannot be sealed was accepted as a shelter every time.
+    //
+    // A cell whose cap cannot be placed is now REMEMBERED and EXCLUDED, and the failure is
+    // returned honestly so nightRest escalates to its next option (a real bed, another site)
+    // instead of bedding down in a mob funnel. Scoped to this life via the world epoch: geometry
+    // that could not be capped will not have changed by itself, but a fresh life re-tests it.
+    if (!capped) {
+      const here = { x: feet.x, y: feet.y, z: feet.z }
+      if (!capFailedCells.some(c => c.x === here.x && c.y === here.y && c.z === here.z)) capFailedCells.push(here)
+      while (capFailedCells.length > 24) capFailedCells.shift()
+      dbg('shelter: this hole CANNOT be capped (' + capFailedCells.length + ' such cell(s) ruled out) - not calling it a shelter; handing back so a real one can be found')
+      say('this hole won\'t close over - not sleeping in a mob funnel')
+      return false
+    }
+    say('holed up till it\'s safe')
     // 3) wait until DAY and no hostile near, or a hard timeout (~one full night). An OPEN
     // pit is NOT a shelter - don't squat in a mob funnel for 10 minutes: short deadline,
     // and bail immediately if we're taking hits down there (fight/flee reflexes resume).

@@ -370,11 +370,29 @@ async function acquire (bot, name, count = 1, opts = {}) {
   if (opts.craft === false) return packHas() > before
   const rec = await reconcile(bot, { [name]: count - packHas() }, { near: opts.near, planOpts: opts.planOpts })
   const gathersNeeded = Object.keys(rec.plan.gathers || {}).length
+  const huntsNeeded = Object.keys(rec.plan.hunts || {}).length
   const unobtainable = Object.keys(rec.plan.unobtainable || {}).length
-  if (gathersNeeded || unobtainable) {
-    dbg('acquire ' + name + ': not craftable from holdings (' +
-      (gathersNeeded ? 'needs gathering ' + Object.keys(rec.plan.gathers).join(',') : 'unobtainable ' + Object.keys(rec.plan.unobtainable).join(',')) + ')')
+  if (unobtainable) {
+    dbg('acquire ' + name + ': unobtainable ' + Object.keys(rec.plan.unobtainable).join(',') + ' - no amount of gathering fixes that')
     return packHas() > before
+  }
+  // GATHERING IS OPT-IN, per caller. acquire's default is withdraw+craft only, because most
+  // callers are mid-build at a site and must not wander off. But a BOOTSTRAP caller - "I own
+  // nothing and I need a bed" - has no bank to withdraw from and no materials to craft from, so
+  // refusing to gather refuses the whole task. That refusal is why the bot never once set a spawn
+  // anchor: `acquire white_bed: not craftable from holdings (needs gathering birch_log)` was the
+  // end of the road, and AUDIT FIX 16's sheep-hunt bolt-on patched exactly one of the TWO raw
+  // materials a bed needs (the wool), leaving the planks just as unreachable. One flag, honestly
+  // named, instead of a per-material workaround - and it is the CALLER that decides it may roam.
+  if ((gathersNeeded || huntsNeeded) && !opts.gather) {
+    dbg('acquire ' + name + ': not craftable from holdings (needs ' +
+      [gathersNeeded ? 'gathering ' + Object.keys(rec.plan.gathers).join(',') : null,
+        huntsNeeded ? 'hunting ' + Object.keys(rec.plan.hunts).join(',') : null].filter(Boolean).join(' + ') +
+      ') and this caller may not roam for it')
+    return packHas() > before
+  }
+  if (gathersNeeded || huntsNeeded) {
+    dbg('acquire ' + name + ': running the FULL plan (' + rec.plan.tasks.map(t => t.type + ':' + (t.item || t.output)).join(' > ') + ') - this caller may roam')
   }
   try { await runReconciled(bot, rec, { say: opts.say || (() => {}), isStopped: opts.isStopped, home: opts.near }) } catch (e) { dbg('acquire ' + name + ': craft chain failed (' + e.message + ')') }
   return packHas() >= count || packHas() > before

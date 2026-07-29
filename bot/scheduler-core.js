@@ -165,6 +165,7 @@ function footprintCost (/* candidate, s */) { return 0 }
 // on the right utility candidate. Progress/idle build names all fold onto the build(null) candidate.
 function bonusKeyFor (activeName) {
   if (activeName === 'maintenancePass') return 'maintenancePass'
+  if (activeName === 'homecoming') return 'homecoming'
   if (activeName === 'reclaim') return 'reclaim'
   if (activeName === 'nightShelter') return 'nightShelter'
   if (activeName === 'secureFood') return 'secureFood'
@@ -179,6 +180,18 @@ function chooseActivity (snapshot, opts) {
   const preemptFor = cls => activeCls ? (classRank(cls) > classRank(activeCls)) : false
   const mk = (job, cls, reason, score, extra) => Object.assign({ job, cls, reason, score, preempt: preemptFor(cls) }, extra || {})
 
+  // AUDIT 2026-07-29 FIX 4. The refusal map is consulted in PHASE A TOO, not only in Phase B.
+  //
+  // Before this, a survival verdict returned from Phase A unconditionally - so when its executor
+  // could not actually run (the ladder blocked on a condition nothing had changed; secureFood held
+  // because foraging out at night is what kills the bot), the tick logged the pick, hit a silent
+  // `return` in the dispatcher and did NOTHING. 780 decisions produced 82 executions on the
+  // 2026-07-20 tape. Falling through to the next admissible option is strictly better than idling:
+  // the crisis is still real, we simply do the best thing we CAN do about it.
+  const refusedMap = o.refused instanceof Map ? o.refused : null
+  const isRefused = k => !!(refusedMap && refusedMap.has(k))
+  const refusalOf = k => (refusedMap && refusedMap.get(k)) || 'declined'
+
   // ==== PHASE A: SURVIVAL HARD-DOMINANCE GUARD ===========================================
   // A real crisis wins regardless of every utility score. This mirrors scheduler.pickJob steps 1-3
   // EXACTLY (so flag-on is parity on the survival tier), just framed as a guard the way the directive
@@ -188,21 +201,26 @@ function chooseActivity (snapshot, opts) {
   // 1. immediate vitals/danger need. A COMPOUND degraded state runs the ladder (R0..R5 re-plan); a
   //    single clean need routes to its producer. `flee` is reflex-owned - the tick no-ops it (as today).
   if (need) {
-    if (degraded) return mk('recoveryLadder', 'survival', 'crisis: degraded - running the recovery ladder (' + (need.reason || need.need) + ')', CRISIS_SCORE)
-    const job = scheduler.needProducer(need.need) || 'recoverHp'
-    return mk(job, 'survival', 'crisis: ' + (need.reason || need.need), CRISIS_SCORE)
+    const job = degraded ? 'recoveryLadder' : (scheduler.needProducer(need.need) || 'recoverHp')
+    const why = degraded
+      ? 'crisis: degraded - running the recovery ladder (' + (need.reason || need.need) + ')'
+      : 'crisis: ' + (need.reason || need.need)
+    if (!isRefused(job)) return mk(job, 'survival', why, CRISIS_SCORE)
   }
   // 2. a near worthwhile grave is a first-class survival move (free gear at arm's reach), unless an
   //    acute flee is owed. Above the degraded-signature and everything discretionary (I3, as pickJob).
   const GRAVE_NEAR = Number(process.env.GRAVE_NEAR || 16)
   const GRAVE_URGENT_DIST = Number(process.env.GRAVE_URGENT_DIST || 96)
-  if (!fleeActive(s)) {
+  if (!fleeActive(s) && !isRefused('graveSweep')) {
     const g = nearestReachGrave(s, GRAVE_NEAR, GRAVE_URGENT_DIST)
     if (g) return mk('graveSweep', 'survival', 'near grave ' + Math.round(g.dist) + 'b' + (graveUrgent(g) ? ' (' + g.tier + ' - despawning)' : '') + ' - free gear', CRISIS_SCORE)
   }
   // 3. the compound-degraded signature with no single clean need (e.g. naked with a far-but-in-band
   //    grave) -> the ladder.
-  if (degraded) return mk('recoveryLadder', 'survival', 'crisis: degraded - running the recovery ladder', CRISIS_SCORE)
+  if (degraded && !isRefused('recoveryLadder')) return mk('recoveryLadder', 'survival', 'crisis: degraded - running the recovery ladder', CRISIS_SCORE)
+  // Every crisis response we would have chosen has been refused by its own executor. Say so once,
+  // loudly, and carry on into the utility phase - the bot must still do the best thing it can.
+  const crisisRefused = !!((need || degraded) && (isRefused('recoveryLadder') || isRefused('secureFood') || isRefused('recoverHp') || isRefused('nightShelter')))
 
   // ==== PHASE B: UTILITY CHOICE among the calm-window activities ==========================
   // No crisis is owed. Now it is a genuine trade-off: shelter before dark, bootstrap missing infra,
@@ -270,6 +288,42 @@ function chooseActivity (snapshot, opts) {
     const label = bn ? ('bootstrap ' + bn + (keystone ? ' (iron keystone)' : '')) : 'topping up low buffers'
     cands.push({ job: 'maintenancePass', cls: 'maintain', key: 'maintenancePass', order: 1, score, bootstrap: bn || undefined,
       reason: label + (yielded ? ' [home unreachable - deferring]' : '') + (inherits ? ' [the build is waiting on exactly this]' : '') + ' - establishing survival infra before the build' })
+  }
+
+  // (B1b) HOMECOMING - cross back to base after being DISPLACED (AUDIT 2026-07-29 FIX 2).
+  //
+  // This walk used to be step 1 of a hardcoded post-respawn sequence that ran unconditionally, and
+  // it was the single largest killer on the 2026-07-20 tape: 458-489 blocks, naked, in the dark,
+  // eight times in seven minutes. As a hardcoded step it could not be weighed against anything -
+  // not the hour, not the armour, not the eight corpses already on that route.
+  //
+  // As a CANDIDATE it is weighed like everything else, and its feasibility is the same
+  // journeyAdmissible every recovery rung uses. When the crossing is not survivable it scores
+  // REFUSED and the bot shelters/eats/gears instead - and it comes back on its own the moment the
+  // blocking condition clears, which is what makes the stand-down safe rather than a strand.
+  //
+  // It exists only when the bot is DISPLACED: after a death (the recovery latch), or idle with no
+  // build to be far away FOR. A bot that is 460b out because its build site is there is not
+  // displaced, and must never be walked home off its own job.
+  const homeDist = s.homeDist
+  const displacedByDeath = !!s.postDeathRecovery
+  const idleFarFromHome = !activeProgress && !s.persistedBuild && !s.brainJobPending
+  if (homeDist != null && homeDist > Number(process.env.RECOVER_HOME_DIST || 64) && (displacedByDeath || idleFarFromHome)) {
+    const adm = scheduler.journeyAdmissible(s, homeDist)
+    const away = clamp(homeDist / 256, 0, 1)
+    // Being home is worth more when the spawn anchor is broken (home is where it gets fixed) and
+    // more the further out we are - a 460b displacement is a different problem from a 70b one.
+    const urgency = clamp(0.4 + 0.35 * away + ((s.spawnAnchored === false || s.spawnSuspect === true) ? 0.2 : 0), 0, 1)
+    cands.push({
+      job: 'homecoming',
+      cls: 'survival',
+      key: 'homecoming',
+      order: 0,
+      score: adm.ok ? (W_SURVIVE * urgency - W_RISK_MAINT * riskLevel(s)) : REFUSED_SCORE,
+      reason: adm.ok
+        ? 'displaced ' + Math.round(homeDist) + 'b from base' + (displacedByDeath ? ' by a death' : '') + ' - crossing back while it is safe to'
+        : 'not crossing the ' + Math.round(homeDist) + 'b home: ' + adm.why + ' (waiting on ' + adm.blockedOn + ')'
+    })
   }
 
   // (B2b) RECLAIM - pay down what the bot owes the world (#119 COMMITMENT_LEDGER, design §3.3).
@@ -346,8 +400,12 @@ function chooseActivity (snapshot, opts) {
   // silent "chose build/idle" x6 that preceded 90s of standing still. `standoff` is data on the
   // verdict, so the caller can stop re-selecting on a condition rather than on a timer.
   const standoff = best.score <= REFUSED_SCORE
-  const extra = Object.assign({}, best.bootstrap ? { bootstrap: best.bootstrap } : null, standoff ? { standoff: true, refusals: cands.filter(c => c.score <= REFUSED_SCORE).map(c => c.key + ': ' + c.reason) } : null)
+  const extra = Object.assign({}, best.bootstrap ? { bootstrap: best.bootstrap } : null, standoff ? { standoff: true, refusals: cands.filter(c => c.score <= REFUSED_SCORE).map(c => c.key + ': ' + c.reason) } : null,
+    crisisRefused ? { crisisRefused: true } : null)
   const reason = (standoff ? 'standoff - every candidate refused; settling on ' + (best.job || 'build/idle') + ': ' : '') +
+    // FIX 4: name it when a real crisis is live but its own producer said it cannot run. This is the
+    // single most important line in the log when the bot is dying and looks idle.
+    (crisisRefused ? 'CRISIS UNANSWERED (' + [...(refusedMap ? refusedMap.entries() : [])].map(([k, v]) => k + ': ' + v).join('; ') + ') - doing what i can instead: ' : '') +
     best.reason + (bonused ? ' [holding - making progress]' : '')
   return mk(best.job, best.cls, reason, best.effective, Object.keys(extra).length ? extra : null)
 }

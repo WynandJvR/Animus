@@ -160,7 +160,25 @@ function surfaceYAt (bot, x, z, opts = {}) {
       continue                      // still above the world's ceiling - not yet data
     }
     sawKnown = true
-    if (isGroundBlock(r.block)) return { known: true, y: y + 1, groundY: y }
+    // ==== AUDIT 2026-07-29 FIX 8: OUR OWN LITTER IS NOT TERRAIN ==========================
+    // The mining descent asserted `INVARIANT VIOLATION - open sky at yN but the target claims a
+    // surface at yM` ten times in one session. The assertion was right and the target was wrong,
+    // and this is where the wrong target came from: this scan walks a column DOWNWARD and takes
+    // the first solid block as the surface - including a block the bot itself left floating in
+    // the air. With 336 unpaid scaffold cells standing (155 of them 1x1 pathfinder towers), the
+    // bot's own abandoned litter reads as ground, so "the surface" lands metres above the real
+    // one and every climb aimed at it overshoots into open sky.
+    //
+    // So the scaffold registry is not just a tidiness ledger - it is the only thing that can tell
+    // the terrain model which solid blocks are the world's and which are the bot's own mess.
+    // Skipping registered scaffold makes this scan describe the WORLD. (FIX 6 attacks the same
+    // problem from the other end by not leaving the towers there in the first place.)
+    if (isGroundBlock(r.block)) {
+      let ours = false
+      try { ours = !!require('./scaffold.js').isScaffold({ x: X, y, z: Z }) } catch {}
+      if (ours) continue // our own tower/bridge - keep looking for real ground beneath it
+      return { known: true, y: y + 1, groundY: y }
+    }
   }
   return UNKNOWN // unloaded column, or nothing solid in it at all
 }
@@ -327,7 +345,21 @@ function installPathfinderTuning (bot) {
         setTimeout(() => {
           try {
             const b = bot.blockAt(pos)
-            if (b && !AIR_RE.test(b.name)) dbg('dig at ' + pos.x + ',' + pos.y + ',' + pos.z + ' REJECTED by the server (block back: ' + b.name + ')')
+            if (b && !AIR_RE.test(b.name)) {
+              dbg('dig at ' + pos.x + ',' + pos.y + ',' + pos.z + ' REJECTED by the server (block back: ' + b.name + ')')
+              // ==== AUDIT 2026-07-29 FIX 14: A FLOODING TUNNEL IS A SIGNAL, NOT A LOG LINE ====
+              // Live, 15:10:33-35: three consecutive digs came back `block back: water` - the bot
+              // had breached an aquifer and was flooding its own tunnel. It kept digging, went
+              // under at :35 and drowned at :59. This verification SAW it three times and told
+              // nobody: the observation lived and died inside a setTimeout that only logs.
+              // Recording it lets the existing break-out authority (provision.mineDanger, which
+              // already yanks the bot out of a committed dig on low hp or a near hostile) treat
+              // "the hole I am in is filling with water" as what it plainly is - a reason to stop
+              // digging and get out. Grounded verification must produce an action.
+              if (/water|bubble_column/.test(b.name)) floodHits.push(Date.now())
+              else floodHits.length = 0 // a non-water rejection means we are not flooding
+              while (floodHits.length > 8) floodHits.shift()
+            } else floodHits.length = 0 // a clean break: whatever was flooding has stopped
           } catch {}
         }, 700)
       }
@@ -427,8 +459,19 @@ function installPathfinderTuning (bot) {
       }
     }
   }
-  // forbid the planner from digging those cells: safeToBreak is the single gate every
-  // dig move consults (prototype patch -> covers every Movements profile in the codebase)
+  // ==== AUDIT 2026-07-29 FIX 6: TOWERING IS NOT FREE =======================================
+  // mineflayer-pathfinder prices a block PLACEMENT at `placeCost = 1` - the same as taking one
+  // ordinary step. So A* will happily pillar rather than walk ten blocks around, and every one
+  // of those placements becomes a 1x1 tower the bot can never reach again to dismantle (a tower
+  // is reachable exactly once, while you are standing on it). 155 of the 336 unpaid cells in the
+  // live registry were placed by the pathfinder under purpose 'goto'.
+  //
+  // This does NOT forbid towering - the capability is load-bearing (without it there is "no path
+  // to a tree below a cliff"). It prices it honestly: at 12, A* takes a detour of up to ~12 steps
+  // before it will place a block, so towers become the last resort they should always have been.
+  // The VALUE lives here, in one place (PLACE_COST below); each Movements profile applies it via
+  // pathfix.applyPlaceCost(m). It cannot be set on the prototype because mineflayer-pathfinder's
+  // constructor assigns `this.placeCost = 1` as an own property, which would shadow it.
   const { Movements } = require('mineflayer-pathfinder')
   if (!Movements.prototype.__selfScaffoldGuard) {
     const orig = Movements.prototype.safeToBreak
@@ -440,17 +483,49 @@ function installPathfinderTuning (bot) {
     Movements.prototype.__selfScaffoldGuard = true
   }
 
-  // PATH RELIABILITY (operator: "fix the pathfinding, it seems unreliable"): the stock
-  // 5s think budget throws "Took too long to decide path" in tight/cluttered terrain
-  // (getting into the cramped hut, around furniture). More compute per attempt + a bigger
-  // per-tick slice makes short indoor paths actually resolve instead of bailing.
+  // ==== A* BUDGET (AUDIT 2026-07-29, navigation review) ====================================
+  //
+  // What was here: thinkTimeout 20000, tickTimeout 80, searchRadius -1. It was set in response to
+  // "fix the pathfinding, it seems unreliable" by giving the search FOUR TIMES more time - and it
+  // made the body less responsive, not more, for a reason worth writing down.
+  //
+  // `searchRadius: -1` means the A* has NO cost ceiling, so an UNREACHABLE goal does not fail
+  // fast: it enumerates every reachable node in every loaded chunk before it can prove failure.
+  // With a 20s think budget at 80ms of compute per 50ms tick, one impossible path could occupy the
+  // event loop, over-budget, for twenty seconds. The 2026-07-20 tape emitted `path noPath` 2722
+  // times in 4h46m - one every 6 seconds - so this was not a rare worst case, it was the normal
+  // operating mode, and it is the most likely reason short reflex moves kept reporting `short`
+  // (the body could not respond because A* owned the loop). [[body-first-priority]]
+  //
+  // The right knob is the SPACE, not the TIME. In this A* `searchRadius` is a DETOUR ALLOWANCE:
+  // maxCost = straight-line-distance + searchRadius (lib/astar.js). 192 permits a very generous
+  // way around an obstacle while making a genuinely impossible goal fail in a fraction of a
+  // second - and long treks are legged into ~48-64 block hops by walkStaged, so it never binds on
+  // a real route. tickTimeout returns to 40ms: a value above the 50ms tick can only make the body
+  // late. The think budget stays above stock (10s) for the cramped-interior case that motivated
+  // the original change - it just no longer has to expire to prove a wall is a wall.
   try {
     if (bot.pathfinder) {
-      bot.pathfinder.thinkTimeout = 20000 // ms to find a path (was 5000)
-      bot.pathfinder.tickTimeout = 80     // ms of compute per tick (was 40)
-      if ('searchRadius' in bot.pathfinder) bot.pathfinder.searchRadius = -1 // unbounded (default)
+      bot.pathfinder.thinkTimeout = Number(process.env.PATH_THINK_MS || 10000)
+      bot.pathfinder.tickTimeout = Number(process.env.PATH_TICK_MS || 40)
+      if ('searchRadius' in bot.pathfinder) bot.pathfinder.searchRadius = Number(process.env.PATH_SEARCH_RADIUS || 192)
     }
   } catch {}
 }
 
-module.exports = { installPathfinderTuning, selfPlacedNear, isSelfPlaced, placedOK, brokeOK, setDebugSink, setProgressSink, readCell, isGroundBlock, surfaceYAt, surveyCells, arrivedOK, epoch, sameEpoch, bumpEpoch }
+// FIX 6: the ONE definition of what a block placement costs the planner. Applied by every
+// Movements profile (commands.setupMovements/travelMovements, provision.gatherMovements/
+// trekMovements) so the five profiles cannot drift on this the way they have on everything else.
+// The schematic's buildMovements deliberately does NOT apply it - a build is SUPPOSED to pillar.
+// FIX 14: consecutive dig-verifications that came back WATER. Consumed by provision.mineDanger so
+// a bot digging into an aquifer breaks out instead of drowning in its own tunnel. A COUNT of
+// consecutive events, not a clock: one clean break clears it.
+const floodHits = []
+const FLOOD_DIGS = Number(process.env.FLOOD_DIGS || 2) // 2 in a row = the tunnel is filling, not a fluke
+function floodingNow () { return floodHits.length >= FLOOD_DIGS }
+function clearFlood () { floodHits.length = 0 }
+
+const PLACE_COST = Number(process.env.PATH_PLACE_COST || 12)
+function applyPlaceCost (m) { try { if (m && 'placeCost' in m) m.placeCost = PLACE_COST } catch {} ; return m }
+
+module.exports = { installPathfinderTuning, selfPlacedNear, isSelfPlaced, placedOK, brokeOK, setDebugSink, setProgressSink, readCell, isGroundBlock, surfaceYAt, surveyCells, arrivedOK, epoch, sameEpoch, bumpEpoch, PLACE_COST, applyPlaceCost, floodingNow, clearFlood, FLOOD_DIGS }

@@ -695,10 +695,16 @@ t('(#18) pickJob: GRAVE_URGENT=0 -> the 60b urgent grave is NOT picked (rollback
   finally { delete process.env.GRAVE_URGENT } // back to ON for the remaining band tests
 })
 t('(#18) recoveryPlan R1: an urgent 60b grave gets an R1 rung; a safe 60b grave does not', () => {
-  const urgent = S.recoveryPlan(snap({ hp: 5, food: 4, graves: [grave(60, { value: 20, tier: 'urgent' })], homeDist: 200 }))
-  assert(urgent.some(r => r.rung === 'R1' && r.action === 'recoverGrave'), 'urgent 60b grave -> R1 present (band widened past 32)')
-  const safe = S.recoveryPlan(snap({ hp: 5, food: 4, graves: [grave(60, { value: 20, tier: 'safe' })], homeDist: 200 }))
-  assert(!safe.some(r => r.rung === 'R1'), 'safe 60b grave -> no R1 (ladder band stays 32)')
+  // AMBIENT-PROOF (audit D4): this asserts the DEFAULT ladder band (32). This machine carries a
+  // permanent user-level GRAVE_NEAR_LADDER=96, which widened the band past the fixture's 60b and
+  // turned this test red on a clean checkout while the code was right - the same trap #103b and
+  // #115b were fixed for. Pin the band the assertion is about; the ambient value is restored after.
+  withEnv('GRAVE_NEAR_LADDER', null, () => {
+    const urgent = S.recoveryPlan(snap({ hp: 5, food: 4, graves: [grave(60, { value: 20, tier: 'urgent' })], homeDist: 200 }))
+    assert(urgent.some(r => r.rung === 'R1' && r.action === 'recoverGrave'), 'urgent 60b grave -> R1 present (band widened past 32)')
+    const safe = S.recoveryPlan(snap({ hp: 5, food: 4, graves: [grave(60, { value: 20, tier: 'safe' })], homeDist: 200 }))
+    assert(!safe.some(r => r.rung === 'R1'), 'safe 60b grave -> no R1 (ladder band stays 32)')
+  })
 })
 
 // ---- (#18) graveCooldownMs: verdict-classed re-dispatch back-off ------------------------------

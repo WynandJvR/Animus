@@ -30,8 +30,22 @@ const dbg = (...a) => {
 // exactly (byte-equivalent to fd90c9f). Longer retention is a POSITIVE own-block permission
 // (isScaffold/teardown only ever act on cells WE registered), so widening it never risks a
 // player block - the only cost is registry size, bounded by the sweep() cap guard below.
+// ==== AUDIT 2026-07-29 FIX 13: A DEBT THAT EXPIRES IS NOT A DEBT =========================
+// Measured on the live registry today: 336 cells, the oldest 10 DAYS old - and when the bot
+// restarted they did not get paid, they got SWEPT, because the 72h retention had long passed.
+// The blocks are still standing in the world; the bot simply stopped knowing they were its own.
+// Two things break when that happens, and #119 named neither:
+//   - the commitment ledger silently writes off what it owes, so the litter is permanent;
+//   - FIX 8's terrain model loses the only signal that tells a floating 1x1 tower from ground,
+//     so `surfaceYAt` starts reading the bot's own forgotten litter as the surface again.
+// Memory was never the reason for the timer - sweep()'s 512-entry cap guard below already bounds
+// the registry, evicting OLDEST-first and PLACED-before-SHAFT. So the cap is the real bound and
+// the clock was redundant. Retention is now effectively unbounded (a century), which under
+// [[no-blanket-time-holds]] is the honest expression: the registry shrinks when a cell is PAID or
+// found repurposed, not when a timer says the mess has become scenery.
+// SCAFFOLD_MAX_AGE_MS still overrides for anyone who wants the old behaviour.
 const MAX_AGE_MS = process.env.INFRA_CONSOLIDATE !== '0'
-  ? Number(process.env.SCAFFOLD_MAX_AGE_MS || 72 * 3600 * 1000)
+  ? Number(process.env.SCAFFOLD_MAX_AGE_MS || 100 * 365 * 24 * 3600 * 1000)
   : 6 * 3600 * 1000 // registry entries older than this are landscape now
 const FILE = process.env.SCAFFOLD_FILE || path.join(__dirname, 'scaffold-registry.json')
 const reg = new Map() // "x,y,z" -> { t, purpose }
