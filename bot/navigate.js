@@ -1500,7 +1500,21 @@ function reactiveTarget (pos, opts = {}) {
 function fleeSteerTarget (bot, pos, awayFrom, reach) {
   const Vec = Vec3
   const solidAt = (x, y, z) => { try { const b = bot.blockAt(new Vec(Math.floor(x), Math.floor(y), Math.floor(z))); return !!b && b.boundingBox === 'block' && !/water|lava/.test(b.name) } catch { return false } }
-  const walkable = (x, z) => { const fy = Math.floor(pos.y); return solidAt(x, fy - 1, z) && !solidAt(x, fy, z) && !solidAt(x, fy + 1, z) } // ground + air for feet+head
+  // AUDIT 2026-07-29: this used `!solidAt(feet) && !solidAt(head)` to mean "clear", and WATER IS
+  // NOT SOLID - so a lake with a sand bottom read as perfectly walkable and the bot fled a creeper
+  // straight into it and drowned. liquidCost cannot help here: a reactive flee drives the controls
+  // directly and never asks the pathfinder. Now it asks navProfile.standable, the ONE definition
+  // (see the header block there for the six that disagreed).
+  const nameAt = (x, y, z) => { try { const b = bot.blockAt(new Vec(Math.floor(x), Math.floor(y), Math.floor(z))); return b ? b.name : null } catch { return null } }
+  const walkable = (x, z) => {
+    const fy = Math.floor(pos.y)
+    return navProfile.standable({
+      groundSolid: solidAt(x, fy - 1, z),
+      ground: nameAt(x, fy - 1, z),
+      feet: nameAt(x, fy, z),
+      head: nameAt(x, fy + 1, z)
+    }) // dry policy: a retreat must never steer the body into water
+  }
   const baseAng = Math.atan2(pos.z - awayFrom.z, pos.x - awayFrom.x) // straight away from the threat
   for (const off of [0, 0.7, -0.7, 1.4, -1.4, 2.1, -2.1]) { // ~40deg steps outward; prefers straight-away, then sideways
     const a = baseAng + off

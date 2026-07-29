@@ -24,6 +24,44 @@ const WILD_SCOPE_RADIUS = 32
 // whitelisted as such and breakable anywhere the positional gate permits.
 const SCAFFOLD_BREAK_RE = /^(cobblestone|cobbled_deepslate)$/
 
+// ==== AUDIT 2026-07-29: ONE DEFINITION OF "CAN I STAND IN THIS CELL" =====================
+// Six places decided this independently and every one of them decided it slightly differently:
+//   shelter.feetCellDry        strict, dry, checks the sides   (the most correct of the six)
+//   pocket-escape.isBankCell   airish + solid below
+//   navigate.fleeSteerTarget   `!solidAt(feet)` - and WATER IS NOT SOLID
+//   navigate.swimToShore       accepts water as body space (deliberate: it is a swim target)
+//   provision.manualHopFromWater  same as swimToShore
+//   provision-shelter.findDiggableDryCell  delegates to feetCellDry
+// ...on top of THREE different ideas of "airish": shelter.js counts `null` (an unknown/unloaded
+// cell) as air, provision-core.js does not, pocket-escape.js uses a strict regex.
+//
+// What that cost, live on 2026-07-29: the bot fled a creeper straight into a lake and drowned.
+// fleeSteerTarget asks `solidAt(feet) === false` to mean "clear", and a water cell is not solid -
+// so a lake with a sand bottom reads as perfectly walkable. `liquidCost` cannot help, because a
+// reactive flee drives the controls directly and never consults the pathfinder at all.
+//
+// This is that decision, once. The difference between "somewhere dry to stand" and "somewhere to
+// swim toward" is now a NAMED ARGUMENT rather than six hand-written variants that each forgot
+// something different.
+//
+// PURE: names + a solidity boolean in, a verdict out. `groundSolid` is the caller's boundingBox
+// read (a block property, not a name) so this stays free of prismarine types.
+const STAND_WATER_RE = /water|seagrass|kelp|bubble_column/
+const STAND_LAVA_RE = /lava/
+const STAND_AIR_RE = /^(air|cave_air|void_air)$/
+function standable ({ groundSolid, ground, feet, head }, opts = {}) {
+  const allowWater = !!opts.allowWater
+  // UNKNOWN IS NEVER STANDABLE. shelter.js's AIRISH treats null as air, which is a fail-OPEN on an
+  // unloaded cell - exactly the class of bug the grounded-claims work removed everywhere else.
+  if (feet == null || head == null) return false
+  if (groundSolid === false) return false
+  if (ground != null && (STAND_WATER_RE.test(ground) || STAND_LAVA_RE.test(ground))) return false // no floor
+  // Lava is never acceptable body space, whatever allowWater says.
+  if (STAND_LAVA_RE.test(feet) || STAND_LAVA_RE.test(head)) return false
+  const okBody = n => STAND_AIR_RE.test(n) || (allowWater && STAND_WATER_RE.test(n))
+  return okBody(feet) && okBody(head)
+}
+
 // NAV Phase B (NAV_HAZARD_LEGS): the lava-hazard STEP predicate. travelMovements/wildTerrain
 // never priced lava at all (no liquidCost for it, and A* prices a lava-pool-edge cell like open
 // ground) - so a surface trek could route a leg right to a pool edge. HAZARD_RE matches the two
@@ -228,6 +266,8 @@ function findDryLandExit (feet, sampleName, opts = {}) {
 }
 
 module.exports = {
+  standable,
+  WILD_LIQUID_COST,
   WILD_DIG_COST,
   HAZARD_RE,
   HAZARD_STEP_COST,
