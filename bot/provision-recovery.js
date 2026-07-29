@@ -1163,7 +1163,7 @@ const RUNG_EXECUTORS = {
     if (o.isStopped()) return
     // The grove is APPLES + logs: chopping our own trees is the harvest, and gatherLoop's
     // orchard-first path already knows how to take a grown grove and replant it.
-    try { await P().gatherLoop(bot, 'oak_log', 8, { isStopped: o.isStopped, say: o.say, home: o.home }) } catch (e) { o.dbg('(ladder) R3 orchard harvest failed: ' + e.message) }
+    try { await S().gatherLoop(bot, 'oak_log', 8, { isStopped: o.isStopped, say: o.say, home: o.home }) } catch (e) { o.dbg('(ladder) R3 orchard harvest failed: ' + e.message) }
     await eatUp(bot)
     if (process.env.MAINTAIN !== '0') { try { await courierFoodToBank(bot, { isStopped: o.isStopped, say: o.say }) } catch (e) { o.dbg('(ladder) R3 orchard courier failed: ' + e.message) } }
   },

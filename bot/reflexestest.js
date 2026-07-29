@@ -288,14 +288,29 @@ t('4: a proposal that declares a hold names the condition that releases it', () 
 // ============ S5 - the self-proposing (IDLE-tier) housekeeping =============================
 // These four were 3s-45s timers. The whole point of moving them is that they can no longer
 // interrupt anything: they are scored, and an IDLE tier loses to every owner there is.
-t('S5: every self-proposing reflex is IDLE-tier and scores below a waiting build', () => {
+t('S5: housekeeping is IDLE-tier and scores below a waiting build', () => {
   const selfProposing = reflexes.REFLEXES.filter(r => typeof r.when === 'function')
   assert(selfProposing.length >= 4, 'the housekeeping proposals are missing (found ' + selfProposing.length + ')')
   const W_RESUME = 0.2 // scheduler-core's weight for "a saved build is waiting"
-  for (const r of selfProposing) {
-    assert.strictEqual(r.tier, 'IDLE', r.name + ': housekeeping that is not IDLE-tier can interrupt real work')
+  const housekeeping = selfProposing.filter(r => r.tier === 'IDLE')
+  assert(housekeeping.length >= 4, 'expected at least the four migrated timers')
+  for (const r of housekeeping) {
     assert(r.benefit != null && r.benefit < W_RESUME, r.name + ': benefit ' + r.benefit + ' would out-score a waiting build')
     assert(typeof r.run === 'function', r.name + ': a self-proposing reflex must be able to run itself')
+  }
+})
+
+t('S5: a self-proposing reflex ABOVE idle tier has to earn it', () => {
+  // spawnReassert is the one, and the bar is: it must out-rank a bootstrap chore and lose to
+  // sheltering at dusk. A survival-tier self-proposer that scored like a crisis would smuggle a
+  // hardcoded priority back in through the utility phase, which is what the core replaced.
+  const W_SECURE_CHORE = 0.6 * 0.9 // scheduler-core: W_SECURE x the armour-bootstrap urgency
+  const DUSK_SHELTER = 0.65 // W_SURVIVE x dusk x a typical exposure
+  for (const r of reflexes.REFLEXES.filter(x => typeof x.when === 'function' && x.tier !== 'IDLE')) {
+    assert.strictEqual(r.tier, 'SURVIVE', r.name + ': the only non-idle self-proposer we allow is survival work')
+    assert(r.benefit > W_SECURE_CHORE, r.name + ': would lose to an ordinary chore (' + r.benefit + ')')
+    assert(r.benefit < DUSK_SHELTER, r.name + ': would out-rank getting to shelter at dusk (' + r.benefit + ')')
+    assert(typeof r.run === 'function', r.name + ': must be able to run itself')
   }
 })
 

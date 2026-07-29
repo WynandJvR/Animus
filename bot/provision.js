@@ -4324,5 +4324,11 @@ module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, HUNT_SOURC
     get runSmeltSingle () { return runSmeltSingle }, // refactor fix: provision-food.js calls S().runSmeltSingle
     get gatherMovements () { return gatherMovements }, // refactor fix: provision-food.js calls S().gatherMovements
     get resolveBankCell () { return provBank.resolveBankCell }, // refactor fix: provision-farm.js reaches the bank fn via the bridge
-    get ensureTorches () { return provMining.ensureTorches } // refactor fix: provision-farm.js reaches the mining fn via the bridge
+    get ensureTorches () { return provMining.ensureTorches }, // refactor fix: provision-farm.js reaches the mining fn via the bridge
+    // AUDIT: the R3 ORCHARD rung called P().gatherLoop - and gatherLoop is on NEITHER surface
+    // (it is internal, and the public API exposes runGather, its router). So the call resolved to
+    // undefined, threw, and landed in the rung's own catch as "(ladder) R3 orchard harvest failed".
+    // The bot trekked to its orchard and came back with nothing, quietly, every time. That is the
+    // wrong-bridge class check-extraction.py exists to catch - it has been reporting this one.
+    get gatherLoop () { return gatherLoop }
   } }

@@ -358,6 +358,30 @@ def({
   }
 })
 
+def({
+  name: 'spawnReassert',
+  tier: 'SURVIVE',
+  why: 'the spawn anchor is KNOWN wrong - re-assert it at the bed before the next death costs 480 blocks',
+  // A respawn that landed far from the remembered bed PROVED the anchor is not what the bot
+  // thinks (provision.setSpawnSuspect). That is survival work: the difference between a death
+  // costing 11 blocks and one costing a 480-block naked walk home is exactly this flag.
+  // ONLY the `suspect` case, and that is the point. A merely UNCONFIRMED anchor is already
+  // bootstrapNeed's 'spawn' verdict, dispatched through maintenancePass STEP H (#117) - so a
+  // second row for it would be one rule with two definitions. What the old 45s timer uniquely
+  // did was repair a PROVEN-WRONG anchor while the build ran, by overriding its own idle gate;
+  // that is a survival-tier claim on the body, and expressing it as a tier is the whole point.
+  when: (s) => !!s.spawnSuspect && !!s.bedKnown && s.bedDist != null && s.bedDist <= 24,
+  // Ranks above a bootstrap chore (~0.54) and below sheltering at dusk (~0.65): fixing where you
+  // wake up matters more than armour and less than not dying tonight.
+  benefit: 0.62,
+  urgency: () => 1,
+  run: async (bot, ctx) => {
+    const provision = require('./provision.js')
+    const ok = (await provision.ensureSpawnBed(bot, { force: true, maxTrek: 40 })).ok
+    return { msg: ok ? 'suspect anchor re-asserted at the bed - back to normal' : 'could not re-assert the anchor here', noOp: !ok }
+  }
+})
+
 // -- PROGRESS (chores and re-arming: they yield to a build, and to everything above) --------
 
 def({

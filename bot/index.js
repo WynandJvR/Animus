@@ -728,6 +728,27 @@ if (process.env.EQUIP_CARRIED_ARMOR !== '0') {
 // time-critical SURVIVE reflexes below (auto-defend at 700ms, the drown escape at 2s). Those
 // never conflict or cannot afford a 15s tick, and scheduler.REFLEX_OWNED names the latter.
 
+// PLAN-one-runner: hoisted to module scope so ANY caller can ask the one authority.
+// The follow reflexes below consult it too - a sticky-follow that re-issues its goal on a
+// sheltering bot is the same defect as a reflex with its own private guard list.
+// WHO OWNS THE BODY, asked ONCE per tick, in one place. This single function replaces the ~120
+// scattered latch reads across index.js. The ORDER matters: it reports the highest-tier owner
+// first, because that is the one a proposal has to out-rank.
+const bodyOwner = () => {
+  try {
+    if (commands.isEscaping && commands.isEscaping()) return 'escape'
+    if (navigate.isRecovering() || navigate.isForceUnsticking()) return 'navRecovery'
+    if (provision.isRecoveringDegraded && provision.isRecoveringDegraded()) return 'ladder'
+    if (provision.isSecuringFood && provision.isSecuringFood()) return 'foodRun'
+    if (provision.isResting && provision.isResting()) return 'shelter'
+    if (provision.isMaintaining && provision.isMaintaining()) return 'maintain'
+    if (commands.isBusy && commands.isBusy()) return 'job'
+    if (bot.pathfinder && bot.pathfinder.goal) return 'walk'
+    if (bot.targetDigBlock) return 'dig'
+  } catch { /* a latch that cannot be read fails OPEN: an unreadable owner must never immobilise the bot */ }
+  return null
+}
+
 // SCHEDULER TICK (S4, REDESIGN §3.2/§10): ONE dispatcher for the survival tier. Replaces the three
 // ad-hoc crisis timers above (SURVIVAL_HUNT/FOOD_CRISIS/HP_CRISIS early-return while SCHEDULER is
 // on). Builds a snapshot, asks the pure pickJob which ONE job should own the body, and dispatches
@@ -856,23 +877,6 @@ if (SCHED_ON) {
   // not editing eleven other behaviours' guard stacks - which is the O(n^2) coupling (audit D5)
   // that made a missing guard invisible until it killed the bot.
 
-  // WHO OWNS THE BODY, asked ONCE per tick, in one place. This single function replaces the ~120
-  // scattered latch reads across index.js. The ORDER matters: it reports the highest-tier owner
-  // first, because that is the one a proposal has to out-rank.
-  const bodyOwner = () => {
-    try {
-      if (commands.isEscaping && commands.isEscaping()) return 'escape'
-      if (navigate.isRecovering() || navigate.isForceUnsticking()) return 'navRecovery'
-      if (provision.isRecoveringDegraded && provision.isRecoveringDegraded()) return 'ladder'
-      if (provision.isSecuringFood && provision.isSecuringFood()) return 'foodRun'
-      if (provision.isResting && provision.isResting()) return 'shelter'
-      if (provision.isMaintaining && provision.isMaintaining()) return 'maintain'
-      if (commands.isBusy && commands.isBusy()) return 'job'
-      if (bot.pathfinder && bot.pathfinder.goal) return 'walk'
-      if (bot.targetDigBlock) return 'dig'
-    } catch { /* a latch that cannot be read fails OPEN: an unreadable owner must never immobilise the bot */ }
-    return null
-  }
   // The tick's context, built ONCE per tick and handed to every refuse()/run(). One snapshot,
   // one clock reading, one food threshold - so a refusal and the choice it feeds back into can
   // never disagree about the world (the snapshot-TIMING drift #114 left open).
@@ -941,6 +945,7 @@ if (SCHED_ON) {
     return null
   }
   let coreLastChoice = '' // log the CHOICE on change; dispatches, refusals and standoffs always log
+  let coreTailNoted = ''  // one note per pickJob-still-wants-X transition (see the tail clause below)
   const coreAdapter = (s) => {
     const aj = s.activeJob || null
     const c = schedulerCore.selectWithRefusals(s, {
@@ -963,7 +968,31 @@ if (SCHED_ON) {
       coreLastChoice = key
       note('(core) chose ' + (c.job || 'build/idle') + ': ' + c.reason)
     }
-    if (c.job == null) return scheduler.pickJob(s) // build-may-proceed -> today's non-survival tail (parity: the core already cleared the survival tier)
+    if (c.job == null) {
+      // ==== ONE CHOOSER PER QUESTION ======================================================
+      // job==null means "no survival or maintain work is owed - the progress tail may proceed",
+      // so the tail is what we want from pickJob: build / resume / brain / idle. But pickJob
+      // answers the WHOLE question, survival tier included, and it has neither this tick's
+      // refusals nor the core's utility model - so it happily returns a survival job the core
+      // has just finished declining, against the same snapshot. Live:
+      //   (core) chose build/idle: CRISIS UNANSWERED (secureFood: body busy, not crisis-grade)
+      //   (sched) pick=secureFood PREEMPT reason="food 12 < 14"
+      //   (sched) secureFood NOT dispatched: body busy, not crisis-grade
+      // Three layers, one answer, two of them redundant - and the middle line reads like the bot
+      // is about to do something it has already ruled out twice. The core's own charter says it
+      // owns the survival + bootstrap-vs-build choice and pickJob owns the progress plumbing;
+      // taking pickJob's SURVIVAL verdict here is a contract violation, not a safety net.
+      const tail = scheduler.pickJob(s)
+      if (tail && tail.cls === 'survival') {
+        if (coreTailNoted !== tail.job) {
+          coreTailNoted = tail.job
+          note('(core) pickJob still wants ' + tail.job + ' ("' + tail.reason + '") - the core already weighed and declined it this tick; not re-opening a settled question')
+        }
+        return { job: null, cls: c.cls, reason: c.reason, preempt: false }
+      }
+      coreTailNoted = ''
+      return tail
+    }
     return { job: c.job, cls: c.cls, reason: c.reason, preempt: !!c.preempt, bootstrap: c.bootstrap }
   }
   const tick = async () => {
@@ -1041,14 +1070,18 @@ if (SCHED_ON) {
         const checkupDue = Date.now() - schedOppLastWindowAt >= Number(process.env.OPP_CHECKUP_MS || 1800000)
         const elig = scheduler.oppMaintain(s, { checkupDue })
         if (!elig.ok) return
-        // live re-checks the snapshot can't carry (mirror the S6 dispatch gates 1076-1082,
-        // minus the busy gate - busy is the POINT when preempting):
+        // OWNERSHIP, through the one rule. This was the last private guard stack in the tick -
+        // four latch reads plus two busy checks, saying (in its own words) what BODY_OWNERS says
+        // in one vocabulary. The window is a PROGRESS-tier claim with one twist the ordering rule
+        // cannot express on its own: on the preempt path a busy build is not an obstacle, it is
+        // the PRECONDITION (the whole point is to borrow the body while the build has it at home).
+        const oppOwner = bodyOwner()
+        const oppOwnerInfo = oppOwner ? reflexes.ownerInfo(oppOwner) : null
+        if (oppOwnerInfo && oppOwnerInfo.tier === 'SURVIVE') return // never borrow the body from survival work
         if (!provision.mayDoProgress(bot)) return
-        if ((provision.isMaintaining && provision.isMaintaining()) || (provision.isResting && provision.isResting()) ||
-            (provision.isSecuringFood && provision.isSecuringFood()) || (provision.isRecoveringDegraded && provision.isRecoveringDegraded())) return
-        const wasBusy = commands.isBusy && commands.isBusy()
-        if (elig.preempt && !wasBusy) return // activity says autobuild but the latch dropped - next tick re-reads
-        if (!elig.preempt && (wasBusy || (bot.pathfinder && bot.pathfinder.goal))) return // idle path must be TRULY idle
+        if (elig.preempt) {
+          if (oppOwner !== 'job') return // activity says autobuild but the latch dropped - next tick re-reads
+        } else if (oppOwner) return // the idle path must be TRULY idle - any owner at all disqualifies it
         note('(sched) OPPORTUNISTIC MAINTAIN - ' + elig.reason + (elig.preempt ? ' (pausing the build; it resumes via re-arm)' : ''))
         await runJob('maintenancePass', async () => {
           if (elig.preempt) {
@@ -1780,33 +1813,11 @@ if (process.env.AUTO_DEFEND !== '0') {
   }, 700)
 }
 
-// PROACTIVE SPAWN KEEPALIVE: re-assert the bed spawn whenever we're NEAR the bed and the
-// assert is stale (or the anchor is flagged suspect) - not only during resume passes.
-// Overnight the anchor silently reverted to world spawn and the bot only discovered it by
-// DYING 430 blocks out. Near-bed + idle = a 2-second bed activation; suspect overrides
-// the idle gate (survival tier beats the build). Disable with SPAWN_KEEPALIVE=0.
-if (process.env.SPAWN_KEEPALIVE !== '0') {
-  let spawnKeep = false
-  setInterval(async () => {
-    if (spawnKeep || !bot.entity || bot.health <= 0) return
-    try {
-      const suspect = !!(provision.isSpawnSuspect && provision.isSpawnSuspect())
-      const kb = provision.knownBed && provision.knownBed()
-      if (!kb) return
-      const d = Math.hypot(kb.x - bot.entity.position.x, kb.z - bot.entity.position.z)
-      if (d > 24) return // keepalive is a NEAR-bed reflex; far-anchor repair is recoverSpawnAnchor's job
-      if (bot.isSleeping || navigate.isRecovering() || navigate.isForceUnsticking() || (commands.isEscaping && commands.isEscaping())) return
-      if (!suspect) {
-        if (bot.pathfinder && bot.pathfinder.goal) return // someone is driving - don't hijack
-        if (navigate.isNavigating()) return
-        if (commands.isBusy && commands.isBusy()) return  // builds re-assert on their own passes
-      }
-      spawnKeep = true
-      const ok = (await provision.ensureSpawnBed(bot, { force: suspect, maxTrek: 40 })).ok
-      if (suspect && ok) note('(spawn) suspect anchor re-asserted at the bed - back to normal')
-    } catch { /* transient */ } finally { spawnKeep = false }
-  }, 45000).unref?.()
-}
+// (the proactive spawn keepalive moved to bot/reflexes.js as TWO proposals - PLAN-one-runner.
+//  It was one timer doing two jobs: a SURVIVE-tier repair when the anchor is known wrong (a bad
+//  anchor is how a death costs 480 blocks instead of 11), and an IDLE-tier top-up when it is
+//  merely unconfirmed. One timer, two tiers, one guard stack - so the survival half was gated
+//  behind the idle half's `if (pathfinder.goal) return`. They are separate rows now.)
 
 // HARD-WEDGE WATCHDOG: the last line of defense against multi-minute position freezes.
 // If the body has been TRYING to move (pathfinder goal set / a navigation active) but
@@ -2026,6 +2037,13 @@ let leashGaveUp = null
 if (process.env.LEASH !== '0') {
   setInterval(() => {
     if (!bot.entity || !bot.pathfinder) return
+    // PLAN-one-runner: the follow reflexes KEEP their 1.5s timers - a follow is the execution
+    // loop of a command the operator issued, not an autonomous reflex competing for the body,
+    // and putting it on the 15s tick would make following visibly laggy. What they had NO
+    // guards for at all was yielding: this re-issued its goal on a bot that was sheltering,
+    // fleeing or mid-recovery. They now ask the SAME one authority every proposal asks,
+    // instead of growing a private guard list of their own.
+    if (reflexes.bodyRefusal('PROGRESS', bodyOwner())) return
     try {
       const goal = bot.pathfinder.goal
       const target = goal && goal.entity // only entity-follows (not goto-to-coords)
@@ -2067,6 +2085,9 @@ if (process.env.LEASH !== '0') {
 let stickyFollowLogged = null
 if (process.env.STICKY_FOLLOW !== '0') {
   setInterval(() => {
+    // same one authority as the leash above (and as every proposal): a sticky-follow must never
+    // re-issue its goal on top of a shelter, an escape or a recovery.
+    if (reflexes.bodyRefusal('PROGRESS', bodyOwner())) return
     try {
       const r = commands.maybeResumeFollow && commands.maybeResumeFollow(bot)
       if (r) { // note only when the target changes, so we don't spam the log on each resume

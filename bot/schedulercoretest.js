@@ -215,6 +215,45 @@ t('20 stalled active job loses the bonus (no time-latch)', () => {
 
 // ---- summary table ----------------------------------------------------------------------
 console.log('\nSITUATION -> CHOSEN JOB')
+// ==== THE DUSK RAMP IS REACHABLE FROM THE REAL SNAPSHOT ==================================
+// duskProximity ramps 0 -> 1 across t=11000..13000 and that ramp is the SEED of the operator's
+// "dusk-recall must EMERGE from risk x time-to-nightfall, never a per-path night gate" rule.
+// It was written in #65 and then never ran: schedulerState did not put `timeOfDay` on the
+// snapshot, so it fell back to the boolean isNight (t>=13000) and the bot started heading home
+// at FULL DARK. A pure-function test alone could not catch that - the function was always
+// correct; nothing fed it. So this pins BOTH halves.
+t('DUSK RAMP: the ramp discriminates inside the dusk window', () => {
+  const base = { vitalsKnown: true, hp: 20, food: 20, armorPieces: 0, underArmored: true, homeDist: 120 }
+  const at = tod => C.duskProximity({ ...base, timeOfDay: tod })
+  assert.strictEqual(at(10500), 0, 'before dusk there is no urgency')
+  assert(at(11500) > 0 && at(11500) < 1, 'mid-dusk is a RAMP, not a step (' + at(11500) + ')')
+  assert(at(12800) > at(11500), 'and it rises as the sun goes down')
+  assert.strictEqual(at(13200), 1, 'full night is full urgency')
+  // ...and the boolean fallback cannot express any of that
+  assert.strictEqual(C.duskProximity({ ...base, isNight: false }), 0)
+  assert.strictEqual(C.duskProximity({ ...base, isNight: true }), 1)
+})
+t('DUSK RAMP: the snapshot actually SUPPLIES timeOfDay (the half that was missing)', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'survival-snapshot.js'), 'utf8')
+  assert(/s\.timeOfDay = .*bot\.time/.test(src), 'schedulerState must read timeOfDay off bot.time, or the ramp is dead code')
+})
+t('DUSK RAMP: a naked bot far from home pulls for shelter at DUSK, not at full dark', () => {
+  const base = {
+    vitalsKnown: true, hp: 20, food: 20, armorPieces: 0, underArmored: true, homeDist: 120,
+    homeReachable: false, graves: [], debt: { value: 0, n: 0, best: null }, packFoodPts: 200,
+    bankFoodPts: 400, bankArmorPieces: 4, bankHasPick: true, bankHasSword: true, spawnAnchored: true,
+    bedKnown: true, hutExists: true, hutVerified: true, baseLit: true, rawIron: 10,
+    tools: { pick: true, sparePick: true, axe: true, sword: true }, torches: 40, farm: { exists: true },
+    persistedBuild: true
+  }
+  const pick = tod => C.chooseActivity({ ...base, timeOfDay: tod, isNight: tod >= 13000 && tod < 23500 }, {}).job
+  assert.strictEqual(pick(12000), 'nightShelter', 'at dusk with 120b to walk, go NOW')
+  assert.notStrictEqual(pick(10500), 'nightShelter', 'at midday it does not even appear')
+  // and without the field, that same dusk moment is invisible - the regression this guards
+  const blind = C.chooseActivity({ ...base, isNight: false }, {}).job
+  assert.notStrictEqual(blind, 'nightShelter', 'the boolean fallback cannot see dusk at all')
+})
+
 console.log('-'.repeat(96))
 for (const [sit, job, reason] of rows) {
   console.log('  ' + sit.padEnd(40) + ' -> ' + String(job).padEnd(16) + ' | ' + String(reason).slice(0, 60))

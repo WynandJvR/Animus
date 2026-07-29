@@ -323,10 +323,13 @@ async function schedulerState (bot) {
     const kb = knownBed()
     const suspect = isSpawnSuspect()
     s.bedKnown = !!kb
+    // XZ to the bed itself (NOT homeDist, which anchors on the hut): the spawn-reassert proposal
+    // is a NEAR-BED claim - repairing an anchor you cannot reach is not a repair.
+    s.bedDist = (kb && me) ? Math.hypot(kb.x - me.x, kb.z - me.z) : null
     s.spawnSuspect = !!suspect
     s.spawnAnchored = !!(kb && kb.confirmed === true && !suspect)
     s.bedUnobtainable = bedUnobtainable()
-  } catch { s.bedKnown = false; s.spawnSuspect = false; s.spawnAnchored = false; s.bedUnobtainable = false }
+  } catch { s.bedKnown = false; s.bedDist = null; s.spawnSuspect = false; s.spawnAnchored = false; s.bedUnobtainable = false }
   // sleepableNow: can the server grant a sleep RIGHT NOW (night or thunder)? The condition gate
   // the unconfirmed-anchor re-assert waits on - ONE definition, provision-recovery's, reused here.
   try { s.sleepableNow = !!provRecovery.sleepableNow(bot) } catch { s.sleepableNow = false }
@@ -366,6 +369,14 @@ async function schedulerState (bot) {
       s.baseLit = !!(bl && bl.hut && bl.hut.x === hut.x && bl.hut.z === hut.z && (bl.torched || []).length > 0)
     }
   } catch { s.baseLit = null }
+  // timeOfDay. One property read off `bot.time`, and the reason it matters is out of all
+  // proportion to its size: scheduler-core.duskProximity is written to ramp 0 -> 1 across
+  // t=11000..13000, and that ramp is THE seed of the operator's "dusk-recall must EMERGE from
+  // risk x time-to-nightfall, never a per-path night gate" rule (#65 §1). Without this field it
+  // falls back to the boolean isNight (t>=13000), so for the whole life of the dynamic core the
+  // ramp has been dead code and the bot has started heading home at FULL DARK instead of at
+  // dusk - which is the two minutes that decide whether the walk home is survivable.
+  try { s.timeOfDay = (bot.time && typeof bot.time.timeOfDay === 'number') ? bot.time.timeOfDay : undefined } catch { s.timeOfDay = undefined }
   // ==== PLAN-one-runner S5: the HOUSEKEEPING facts ==========================================
   // The four idle-tier proposals (autoCollect / autoCook / scaffoldSweep / autoTorch) were 3s-45s
   // timers that each scanned for their own trigger and then moved the body if a handful of latches
