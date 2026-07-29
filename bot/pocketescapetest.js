@@ -162,5 +162,42 @@ t('degenerate: an already-open corridor to a bank -> digs:[]', () => {
   assert.deepStrictEqual(plan.exit, { dx: 2, dy: 0, dz: 0 })
 })
 
+// ---- FIX 18 (audit 2026-07-29): the classifier's verdict and its evidence are the SAME thing ----
+// Live, twice fatal: `open-water-with-bank -> rung hop` immediately followed by `manual water hop
+// found no bank`. Three components each had their own idea of "bank" (flood-fill radius 5 / the 8
+// adjacent cells / 8 surface rays), so the ladder was ordered by a premise its rungs could not act
+// on. The invariant: whenever classifySubmersion says with-bank, findBank must resolve the cell
+// that made it say so - that cell is what the rungs are now handed.
+{
+  // A bank 3 cells east: water everywhere, one airish cell over solid at (3,0,0).
+  const water = (dx, dy, dz) => 'water'
+  const withBank = grid({ '0,1,0': 'water', '3,0,0': 'air', '3,-1,0': 'stone' }, water)
+  t('FIX18: with-bank is only ever claimed when a bank CELL resolves', () => {
+    const sit = pe.classifySubmersion(withBank, null)
+    assert.strictEqual(sit, 'open-water-with-bank')
+    const b = pe.findBank(withBank, 5, 150)
+    assert.ok(b, 'the verdict must be backed by a locatable cell - that cell is what the rungs get')
+    assert.deepStrictEqual({ dx: b.dx, dy: b.dy, dz: b.dz }, { dx: 3, dy: 0, dz: 0 })
+  })
+  t('FIX18: a bank BEYOND the adjacent ring still counts (the hop rung used to miss exactly this)', () => {
+    const b = pe.findBank(withBank, 5, 150)
+    const adjacent = Math.abs(b.dx) <= 1 && Math.abs(b.dz) <= 1
+    assert.ok(!adjacent, 'this fixture is the live failure: a real bank the 8-neighbour search cannot see')
+  })
+  t('FIX18: no bank anywhere -> the verdict is NOT with-bank', () => {
+    const sealed = grid({ '0,1,0': 'water' }, (dx, dy, dz) => (Math.abs(dx) > 4 || Math.abs(dy) > 4 || Math.abs(dz) > 4) ? 'stone' : 'water')
+    const sit = pe.classifySubmersion(sealed, null)
+    assert.notStrictEqual(sit, 'open-water-with-bank')
+    assert.strictEqual(pe.findBank(sealed, 5, 150), null)
+  })
+  t('FIX18: escapeWater downgrades to no-bank when the cell cannot be resolved', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, 'navigate.js'), 'utf8')
+    assert(/classified with-bank but no bank cell resolved - treating as NO bank/.test(src),
+      'the premise and the evidence must not be allowed to disagree')
+    assert(/swimToShore\(bot, stop, bankAt\)/.test(src), 'the swim rung is handed the classifier\'s cell')
+    assert(/manualHopFromWater\(bot, bankAt\)/.test(src), 'the hop rung is handed the classifier\'s cell')
+  })
+}
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall pocket-escape tests passed')
 process.exit(failures ? 1 : 0)

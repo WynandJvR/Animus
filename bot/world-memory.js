@@ -699,6 +699,36 @@ function hazardAt (pos, opts) {
 function listHazards () { return hazardList().slice() }
 // A death happened here. Merges into the nearby record if one exists (deaths++), and RE-ARMS
 // escalation: a fresh death means the last "i walked through it fine" no longer proves anything.
+// ==== AUDIT 2026-07-29 FIX 21: A NEAR-MISS IS EVIDENCE TOO ================================
+// The hazard ledger only ever learned from DEATHS. Measured on the live tape today: of the 40
+// times the bot went under water, SEVENTEEN happened during a drown-escape - it climbed out of a
+// pocket and walked straight back into it, because surviving taught it nothing about the place.
+// It escaped 55 times and remembered none of them.
+//
+// A survived escape records the cell as a SOFT route cost, so A* bends around the pocket instead
+// of re-entering it. Deliberately NOT a death: `misses` is a separate array, so
+// gravePolicy.hazardHardArmed (which needs 2 DEATHS) can never be tripped by near-misses and a
+// survived scare can never wall off terrain. Bounded per record so a bad afternoon in a lake
+// cannot grow the ledger without limit.
+const HAZARD_MISS_MAX = 8
+function recordHazardMiss (pos, cause) {
+  try {
+    if (!pos || pos.x == null) return null
+    const list = hazardList()
+    const c = cause || 'unknown'
+    let rec = null
+    for (const h of list) if (gravePolicy.hazardBoxHas(pos, h, HAZARD_MERGE)) { rec = h; break }
+    if (!rec) { rec = { x: Math.floor(pos.x), y: Math.floor(pos.y), z: Math.floor(pos.z), cause: c, deaths: [], misses: [] }; list.push(rec) }
+    rec.misses = rec.misses || []
+    // Only the FIRST few matter: the cost is flat, so a hundred entries buy nothing and cost memory.
+    if (rec.misses.length < HAZARD_MISS_MAX) rec.misses.push(Date.now())
+    if (!rec.deaths || !rec.deaths.length) rec.cause = c // never overwrite a cause a DEATH established
+    saveWorldMem()
+    dbg('hazard: recorded a survived ' + c + ' near-miss at ' + rec.x + ',' + rec.y + ',' + rec.z + ' (' + rec.misses.length + ' here) - routes will bend around it')
+    return rec
+  } catch (e) { dbg('hazard: near-miss record failed - ' + e.message); return null }
+}
+
 function recordHazard (pos, cause) {
   try {
     if (!pos || pos.x == null) return null
@@ -770,7 +800,7 @@ module.exports = {
   rememberBed, knownBed, forgetBed, markBedUnusable, bedHeld, bedHoldUntil,
   setSpawnSuspect, isSpawnSuspect,
   noteBedUnobtainable, clearBedUnobtainable, bedUnobtainable, hutVerifiedNow, // #117 HOME_IS_A_NEED
-  recordHazard, hazardAt, listHazards, markTraversed, hazardsSeeded, markHazardsSeeded, // #112 HAZARD_NOT_LURE
+  recordHazard, recordHazardMiss, hazardAt, listHazards, markTraversed, hazardsSeeded, markHazardsSeeded, // #112 HAZARD_NOT_LURE
   setOperatorRouting, operatorRouting,
   WORLD_MEM_FILE
 }

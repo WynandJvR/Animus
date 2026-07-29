@@ -1456,7 +1456,27 @@ if (SCHED_ON) {
         note('(sched) ' + (name || pick.job) + ' picked but has NO executor - nothing dispatched (this is a wiring bug, not a decision)')
       }
     } catch (e) { try { note('(sched) tick error: ' + e.message) } catch {} }
-    finally { if (myGen === tickGen) setTimeout(tick, 15000 + (Math.random() * 6000 - 3000)) } // self-rescheduling => built-in jitter, one dispatch at a time; S7: a re-armed chain (tickGen++) orphans this stale one so two chains never coexist
+    finally {
+      // FIX 19: the reschedule is DANGER-SCALED. A flat 15s±3s is a sampling rate chosen for a
+      // calm bot and applied to a dying one - live 18:40, the bot fell to hp 1 and died 11
+      // seconds later with its next decision up to 18s away (the 8s HP_CRISIS reflex that used
+      // to cover this is disabled under SCHEDULER). Vitals are read straight off the body here:
+      // plain numbers that cannot throw, and the snapshot may not exist on an early return.
+      // Jitter is applied only to the CALM cadence - de-synchronising a crisis buys nothing.
+      if (myGen === tickGen) {
+        let delay = scheduler.TICK_CALM_MS
+        try {
+          delay = scheduler.tickDelayMs({
+            hp: bot.health,
+            food: bot.food,
+            inLava: !!(bot.entity && bot.entity.isInLava),
+            drowning: navigate.headInWater(bot)
+          })
+        } catch {}
+        if (delay >= scheduler.TICK_CALM_MS) delay += (Math.random() * 6000 - 3000)
+        setTimeout(tick, delay)
+      }
+    } // self-rescheduling; S7: a re-armed chain (tickGen++) orphans this stale one so two chains never coexist
   }
   setTimeout(tick, 15000)
 

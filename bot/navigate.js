@@ -167,8 +167,41 @@ function feetInWater (bot) {
 // the pathfinder can't plan a single move (watched live: legs no-pathed in <1s each and
 // the trek "blocked" in 2 seconds mid-channel). Do what a player does: float up, pick
 // the nearest shore cell, and swim straight at it on manual controls.
-async function swimToShore (bot, isStopped = () => false) {
+// FIX 18: `target` is the bank cell the CLASSIFIER found (escapeWater passes it). When supplied it
+// is authoritative - the whole defect was this function re-deriving "where is the shore" under a
+// different rule than the one that decided a shore exists. Omitted -> the original ray search, so
+// every other caller is unchanged.
+async function swimToShore (bot, isStopped = () => false, target = null) {
   const feet = bot.entity.position.floored()
+  // FIX 20b: only chase the classifier's cell when it is PLAUSIBLY SWIMMABLE from here. findBank
+  // flood-fills through water AND air in 3D, so it can return a bank reached via an air pocket the
+  // bot cannot swim through - and trying anyway costs seconds of air before the proven ray search
+  // even starts. Measured today: the escape ladder already succeeds 55 of 63 times, so any change
+  // that ADDS latency to the failure path makes the tail worse, not better. Near cells only.
+  if (target && Math.hypot(target.x - feet.x, target.z - feet.z) > 6) {
+    dbg('swim: the classifier\'s bank is ' + Math.round(Math.hypot(target.x - feet.x, target.z - feet.z)) + 'b out - not spending air on it, going straight to the ray search')
+    target = null
+  }
+  if (target) {
+    dbg('swim: heading for the bank the classifier found at (' + target.x + ', ' + target.y + ', ' + target.z + ')')
+    try {
+      bot.pathfinder.setGoal(null)
+      await bot.lookAt(new Vec3(target.x + 0.5, target.y + 0.5, target.z + 0.5), true)
+      bot.setControlState('forward', true); bot.setControlState('jump', true); bot.setControlState('sprint', true)
+      // FIX 20: the attempt is bounded by DISTANCE, not a flat 8s. Underwater the bot has ~20s of
+      // air for the WHOLE ladder, so one rung may not spend half of it on a swim it is not making
+      // progress on - the revocation probe will pull it out, but only after it has burned the time.
+      const swimBudget = Math.min(6000, 1500 + Math.hypot(target.x - feet.x, target.z - feet.z) * 900)
+      const t0 = Date.now()
+      while (Date.now() - t0 < swimBudget && !isStopped()) {
+        await new Promise(r => setTimeout(r, 120))
+        if (!headInWater(bot) && bot.entity.onGround) { bot.clearControlStates(); dbg('swim: ashore at the classifier\'s bank'); return true }
+        await bot.lookAt(new Vec3(target.x + 0.5, target.y + 0.5, target.z + 0.5), true).catch(() => {})
+      }
+    } catch (e) { dbg('swim: bank swim failed (' + e.message + ')') } finally { try { bot.clearControlStates() } catch {} }
+    if (!headInWater(bot)) return true
+    dbg('swim: could not reach the classifier\'s bank - falling back to the ray search')
+  }
   // water surface: first non-water cell going up
   let ySurf = feet.y
   for (let dy = 0; dy <= 12; dy++) {
@@ -297,6 +330,12 @@ async function escapeWater (bot, { isStopped = () => false, deadlineMs = 35000 }
   // The sampler IS the accountability. One interval, two block reads per tick, alive only while
   // the bot is actually drowning (body-first-priority: this must not cost anything in peacetime).
   const sampler = setInterval(() => { try { arbiter.sampleManeuvers() } catch {} }, ESCAPE_PROBE_MS)
+  // FIX 21: where the bot went under, and how hard the escape was - the inputs to the near-miss
+  // record at the end. Captured HERE, before any rung moves the body.
+  const startedAt = Date.now()
+  let rungsUsed = 0
+  let entryPos = null
+  try { entryPos = bot.entity.position.floored() } catch {}
   try {
     const dl = Date.now() + deadlineMs
     const wet = () => headInWater(bot)
@@ -317,9 +356,23 @@ async function escapeWater (bot, { isStopped = () => false, deadlineMs = 35000 }
       if (!ok) burned.add(kind)
       return ok ? 'out' : 'failed'
     }
+    // ==== AUDIT 2026-07-29 FIX 18: ONE DEFINITION OF "BANK" ==============================
+    // The classifier and the rungs each had their own, and they disagreed. Live, twice today
+    // (15:10 and 18:55, both fatal) and twice on the 07-20 tape:
+    //   drown-escape: open-water-with-bank -> rung hop      <- classifier: there IS a bank
+    //     manual water hop found no bank - still wet        <- executor: there is NOT
+    //   ...rise REVOKED... breach... DIED
+    // Three searches, three answers: findBank flood-fills 5 blocks in 3D; manualHopFromWater
+    // looks ONLY at the 8 immediately adjacent cells; swimToShore marches 8 compass rays at the
+    // water surface. So the ladder was ordered by a premise its own rungs could not act on, and
+    // burned every rung on it while the bot drowned.
+    // The classifier already KNOWS where the bank is - it computes the offset and throws it away.
+    // Hand that cell to the rungs instead of making each one rediscover it under a narrower rule.
+    // `bankAt` is refreshed every pass below, so a bank that opens mid-escape is picked up.
+    let bankAt = null
     const rungs = {
-      swim: (stop) => swimToShore(bot, stop),
-      hop: async () => { try { return await prov().manualHopFromWater(bot) } catch { return false } },
+      swim: (stop) => swimToShore(bot, stop, bankAt),
+      hop: async () => { try { return await prov().manualHopFromWater(bot, bankAt) } catch { return false } },
       breach: async (stop) => { try { return await prov().breachWaterPocket(bot, { isStopped: stop }) } catch { return false } },
       vertical: async (stop) => { try { return await prov().escapeUpColumn(bot, { isStopped: stop }) } catch { return false } },
       rise: (stop) => jumpForAir(bot, 6000, stop)
@@ -330,15 +383,41 @@ async function escapeWater (bot, { isStopped = () => false, deadlineMs = 35000 }
       // DIAGNOSE, then order the ladder by what is actually wrong. Re-classified every pass, so a
       // situation that changes under us (a breach opens a bank) re-orders immediately.
       let situation = 'open-water-with-bank'
+      bankAt = null
       try {
         const feet = bot.entity.position.floored()
         const read = (dx, dy, dz) => { const b = bot.blockAt(feet.offset(dx, dy, dz)); return b ? b.name : null }
         situation = pocketEscape.classifySubmersion(read, null)
+        // FIX 18: the SAME search the classifier used to decide "with bank" - so the rung that
+        // acts on that verdict aims at the very cell that produced it. Absolute, so the rungs
+        // need no knowledge of the classifier's relative frame.
+        const b = pocketEscape.findBank(read, 5, 150)
+        if (b) bankAt = feet.offset(b.dx, b.dy, b.dz)
       } catch {}
-      const order = pocketEscape.escapeRungOrder(situation) // capability gap H: 'submerged-enclosed' puts vertical FIRST
+      if (situation === 'open-water-with-bank' && !bankAt) {
+        // The premise and the evidence disagree - do not order the ladder by a bank nobody located.
+        dbg('drown-escape: classified with-bank but no bank cell resolved - treating as NO bank')
+        situation = 'open-water-no-bank'
+      }
+      let order = pocketEscape.escapeRungOrder(situation) // capability gap H: 'submerged-enclosed' puts vertical FIRST
+      // ==== AUDIT 2026-07-29 FIX 20: ORDER THE LADDER BY THE AIR BUDGET ===================
+      // Live 19:10:52-57, immediately after FIX 18 shipped: the hop reached the classifier's bank
+      // and put the bot on dirt - the capability worked - and it drowned three seconds later
+      // anyway, because `swim` ran first and burned ~8 of the ~20 seconds of air failing.
+      // Getting out is not enough; getting out IN TIME is the requirement.
+      // With a bank cell actually resolved, distance decides which rung is cheapest: a bank at
+      // arm's length is a 2-second jump, and swimming to it is the slow way to do the same thing.
+      if (bankAt && order.indexOf('hop') > 0) {
+        const d = Math.hypot(bankAt.x - bot.entity.position.x, bankAt.z - bot.entity.position.z)
+        if (d <= 2.5) {
+          order = ['hop', ...order.filter(k => k !== 'hop')]
+          dbg('drown-escape: bank is ' + d.toFixed(1) + 'b away - hopping before swimming (air is the budget)')
+        }
+      }
       const next = order.find(k => !burned.has(k))
       if (!next) { dbg('drown-escape: every rung burned for this crisis (' + situation + ') - honest give-up'); break }
       dbg('drown-escape: ' + situation + ' -> rung ' + next)
+      rungsUsed++
       const r = await runRung(next, rungs[next])
       if (r === 'out') break
     }
@@ -346,6 +425,18 @@ async function escapeWater (bot, { isStopped = () => false, deadlineMs = 35000 }
     // and it must be the same bot that went in.
     const out = !wet() && pathfix.sameEpoch(e0)
     dbg('drown-escape: ' + (out ? 'out of the water at ' + bot.entity.position.floored() : (pathfix.sameEpoch(e0) ? 'STILL WET after the ladder' : 'DIED - the escape outlived the bot, claiming nothing')))
+    // ==== AUDIT 2026-07-29 FIX 21: REMEMBER THE PLACE THAT NEARLY DROWNED YOU ============
+    // The hazard ledger only ever learned from DEATHS. Measured on today's tape: of 40 times the
+    // bot went under, SEVENTEEN were during a drown-escape - it climbed out of a pocket and walked
+    // straight back in, 55 escapes teaching it nothing about where they happened.
+    // A SURVIVED escape now records a soft route cost at the entry cell, so A* bends around the
+    // pocket instead of re-entering it. It is filed as a `miss`, never a death, so
+    // gravePolicy.hazardHardArmed (2 deaths) can never be tripped by it - surviving a scare must
+    // not be able to wall off terrain. Only NON-TRIVIAL escapes are recorded: one rung and out is
+    // ordinary swimming, and 55 records a session would be noise, not memory.
+    if (out && entryPos && (rungsUsed > 1 || Date.now() - startedAt > 3000)) {
+      try { require('./world-memory.js').recordHazardMiss(entryPos, 'drowning') } catch {}
+    }
     return out
   } finally { clearInterval(sampler); arbiter.endManeuver(tok); escapingWater = false }
 }

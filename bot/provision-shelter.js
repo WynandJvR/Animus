@@ -22,6 +22,9 @@
 const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
 const shelter = require('./shelter.js')   // PURE bed/hold timing
+// S7 forward-progress heartbeat (same helper provision-recovery.js uses). A DECLARED hold has to
+// say it is alive or the watchdog reads stillness as a hang - see FIX 22 in digInForNight.
+const touchP = tag => { try { require('./commands.js').touchProgress(tag) } catch {} }
 const navigate = require('./navigate.js')
 const provCore = require('./provision-core.js')
 const { AIRISH, REPLACEABLE, canBreakNaturally, countItem, inventoryCounts, toolForBlock,
@@ -582,6 +585,23 @@ async function digInForNight (bot, opts = {}) {
     const deadline = Date.now() + (fullySealed ? 600000 : 120000)
     const hp0 = bot.health || 20
     while (Date.now() < deadline && !isStopped()) {
+      // ==== AUDIT 2026-07-29 FIX 22: A DECLARED HOLD MUST SAY IT IS ALIVE ================
+      // THIS is what was killing the bot at night, and the chain is exact (live 19:20-19:24):
+      //   19:20:22  shelter: pit SEALED                      <- correct: holed up till dawn
+      //   19:21:07  (wd) NUDGE recoveryLadder - no verified progress for 45s
+      //   19:21:52  (wd) FAIL-JOB recoveryLadder - 90s       <- stop latch set on the ladder
+      //   19:22:57  (wd) scheduler tick chain stalled >90s - re-arming
+      //   19:23:32  (watchdog) position FROZEN ~195s - forcing an escape
+      //   19:23:32  recovery: stuck UNDERGROUND - climbing to the surface
+      //   19:24:33  (death) explosion - Creeper
+      // The bot did the right thing and the forward-progress watchdog dug it out into the dark to
+      // be killed. Sitting perfectly still until dawn IS the goal here, and stillness was read as
+      // a hang. boundedHold already heartbeats for exactly this reason (S7 H7); digInForNight -
+      // the rung that actually seals the pit and waits out the night - never did, so every night
+      // shelter inside the recovery ladder was on a 90-second fuse.
+      // The loop body IS the validity check: it re-reads night, hp, water and the seal every pass
+      // and breaks on any of them, so a heartbeat here cannot mask a real hang.
+      touchP('nightShelter:hold')
       if ((!isNight(bot) && !nearHostile(bot, 10)) || nightStuck(bot)) break // stuck night: climb out and re-arm rather than wait forever
       if ((!fullySealed || DEFEND_WHEN_HIT_ON) && (bot.health || 20) < hp0 - 3) { dbg('shelter: taking damage in the ' + (fullySealed ? 'SEALED pit - breached' : 'LEAKY pit') + ' - bailing out to fight/flee'); break }
       // DROWNING BAIL: water reaching the body cells means the pit is flooding - get out

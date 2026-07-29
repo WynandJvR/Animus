@@ -209,6 +209,88 @@ t('FIX 5: the snapshot can REPRESENT an unknown - vitals survive a scan failure'
   assert(!/onFire: false,/.test(src), 'onFire is measured, not hardcoded false')
 })
 
+// ============ FIX 19 - the decision cadence must scale with lethality =====================
+// Live 2026-07-29 18:40:37 -> 18:40:48: fell to hp 1, died to a second fall ELEVEN seconds later,
+// having made no deliberate decision in between - the tick reschedules at a flat 15s +/- 3s, and
+// the 8s HP_CRISIS reflex that used to cover this is disabled under SCHEDULER.
+t('FIX 19: a calm bot keeps the cheap cadence', () => {
+  assert.strictEqual(S.tickDelayMs({ hp: 20, food: 20 }), S.TICK_CALM_MS)
+})
+t('FIX 19: at hp 1 the bot may think every couple of seconds, not every 18', () => {
+  assert.strictEqual(S.tickDelayMs({ hp: 1, food: 20 }), S.TICK_CRISIS_MS)
+  assert(S.TICK_CRISIS_MS * 5 < 11000, 'the live window was 11s - a crisis tick must fit several times over')
+})
+t('FIX 19: drowning/lava/fire are crisis cadence regardless of hp', () => {
+  assert.strictEqual(S.tickDelayMs({ hp: 20, food: 20, drowning: true }), S.TICK_CRISIS_MS)
+  assert.strictEqual(S.tickDelayMs({ hp: 20, food: 20, inLava: true }), S.TICK_CRISIS_MS)
+  assert.strictEqual(S.tickDelayMs({ hp: 20, food: 20, onFire: true }), S.TICK_CRISIS_MS)
+})
+t('FIX 19: hurt-or-hunted gets the middle cadence', () => {
+  assert.strictEqual(S.tickDelayMs({ hp: 9, food: 20 }), S.TICK_ALERT_MS)
+  assert.strictEqual(S.tickDelayMs({ hp: 20, food: 20, threatDist: 4 }), S.TICK_ALERT_MS)
+  assert.strictEqual(S.tickDelayMs({ hp: 20, food: 20, creeperDist: 10 }), S.TICK_ALERT_MS)
+})
+t('FIX 19: starving is crisis cadence (food 0-2 kills as surely as damage)', () => {
+  assert.strictEqual(S.tickDelayMs({ hp: 20, food: 1 }), S.TICK_CRISIS_MS)
+})
+t('FIX 19: UNMEASURED vitals do not manufacture a crisis (they keep the calm rate)', () => {
+  assert.strictEqual(S.tickDelayMs({}), S.TICK_CALM_MS)
+})
+t('FIX 19: the tick actually USES it, and does not jitter a crisis', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8')
+  assert(/scheduler\.tickDelayMs\(/.test(src), 'the reschedule consults the pure cadence fn')
+  assert(!/setTimeout\(tick, 15000 \+ \(Math\.random/.test(src), 'the flat 15s reschedule is gone')
+  assert(/delay >= scheduler\.TICK_CALM_MS\) delay \+=/.test(src), 'jitter applies to the calm cadence only')
+})
+
+// ============ FIX 21 - a near-miss is evidence too ========================================
+// Measured live 2026-07-29: the bot went under water 40 times; SEVENTEEN of those were during a
+// drown-escape - it climbed out of a pocket and walked straight back in. It escaped successfully
+// 55 times and remembered none of them, because the hazard ledger only ever learned from DEATHS.
+{
+  const gp = require('./grave-policy.js')
+  const miss = { x: 10, y: 62, z: 10, cause: 'drowning', deaths: [], misses: [1, 2] }
+  const twoDeaths = { x: 20, y: 62, z: 20, cause: 'drowning', deaths: [1, 2], traversedSinceDeath: false }
+  t('FIX 21: a survived near-miss prices the route', () => {
+    assert(gp.hazardStepCost({ x: 10, y: 62, z: 10 }, 'water', [miss]) > 0, 'A* must bend around a pocket that nearly drowned us')
+  })
+  t('FIX 21: ...and costs nothing anywhere else', () => {
+    assert.strictEqual(gp.hazardStepCost({ x: 200, y: 62, z: 200 }, 'water', [miss]), 0)
+  })
+  t('FIX 21: a near-miss can NEVER harden into a wall (surviving must not close terrain)', () => {
+    assert.strictEqual(gp.hazardHardArmed(miss), false)
+  })
+  t('FIX 21: two real DEATHS still harden, exactly as before', () => {
+    assert.strictEqual(gp.hazardHardArmed(twoDeaths), true)
+  })
+  t('FIX 21: only a NON-TRIVIAL escape is recorded (55/session would be noise, not memory)', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, 'navigate.js'), 'utf8')
+    assert(/rungsUsed > 1 \|\| Date\.now\(\) - startedAt > 3000/.test(src), 'one rung and out is ordinary swimming')
+    assert(/recordHazardMiss\(entryPos, 'drowning'\)/.test(src), 'the ENTRY cell is what gets remembered')
+  })
+}
+
+// ============ FIX 22 - a declared hold must say it is alive ===============================
+// The exact live chain, 2026-07-29 19:20-19:24: `shelter: pit SEALED` -> watchdog NUDGE at 45s ->
+// FAIL-JOB at 90s -> tick re-arm -> `position FROZEN ~195s - forcing an escape` -> climbed out of
+// its own sealed pit into the dark -> killed by a creeper. The bot did the right thing and the
+// forward-progress watchdog dug it out to die. Sitting still until dawn IS the goal.
+t('FIX 22: the night-shelter hold heartbeats, like boundedHold already does', () => {
+  const shelterSrc = require('fs').readFileSync(require('path').join(__dirname, 'provision-shelter.js'), 'utf8')
+  const recSrc = require('fs').readFileSync(require('path').join(__dirname, 'provision-recovery.js'), 'utf8')
+  assert(/touchP\('nightShelter:hold'\)/.test(shelterSrc), 'digInForNight must mark itself alive while it waits out the night')
+  assert(/touchP\('boundedHold'\)/.test(recSrc), 'the precedent it follows still exists')
+})
+t('FIX 22: the heartbeat sits INSIDE the loop that re-checks the world', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, 'provision-shelter.js'), 'utf8')
+  const i = src.indexOf("touchP('nightShelter:hold')")
+  const after = src.slice(i, i + 900)
+  // The loop body must still be able to break out - a heartbeat may not mask a real hang.
+  assert(/isNight\(bot\)/.test(after), 'still breaks at dawn')
+  assert(/bot\.health/.test(after), 'still breaks when taking damage')
+  assert(/inWaterNow\(bot\)/.test(after), 'still breaks when the pit floods')
+})
+
 // ============ LOOP C - a decision must produce an action ==================================
 t('LOOP C: every survival job the chooser can pick has a dispatch branch in the tick', () => {
   // The tick used to be an exhaustive if/else over four names; nightShelter fell through to a log

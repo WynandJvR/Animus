@@ -966,6 +966,44 @@ function withinDeathZone (target, deathCells, r) {
   return deathCells.some(c => c && Math.hypot(c.x - target.x, c.z - target.z) <= R)
 }
 
+// ---- tickDelayMs (AUDIT 2026-07-29 FIX 19) ----------------------------------------------
+// PURE. How soon must the next decision be made?
+//
+// The scheduler tick rescheduled itself at a flat 15s ± 3s, whatever was happening. That is a
+// sampling rate chosen for a calm bot, applied to a dying one. Live, 2026-07-29 18:40: the bot
+// fell to hp 1 and died to a second fall ELEVEN SECONDS later, having made no deliberate decision
+// in between - its next one was up to 18 seconds away. The 8-second HP_CRISIS reflex that used to
+// cover this was switched off when the scheduler took over survival dispatch
+// (`if (SCHED_ON) return`), so the migration traded response time for central control and nobody
+// measured the cost.
+//
+// This is not a "blanket timer" of the kind the design principles forbid - those are *holds*, gates
+// on elapsed time. This is a SAMPLING RATE, and the rule is that it must be proportional to how
+// fast the situation can turn lethal. At hp 1 the world can end in under two seconds, so that is
+// how often the bot must be allowed to think.
+//
+// Caller adds jitter (only meaningful on the calm cadence; a crisis should not be de-synchronised).
+const TICK_CALM_MS = 15000
+const TICK_ALERT_MS = 6000
+const TICK_CRISIS_MS = 2000
+function tickDelayMs (vitals = {}, opts = {}) {
+  const calm = opts.calmMs != null ? opts.calmMs : TICK_CALM_MS
+  const alert = opts.alertMs != null ? opts.alertMs : TICK_ALERT_MS
+  const crisis = opts.crisisMs != null ? opts.crisisMs : TICK_CRISIS_MS
+  const hp = vitals.hp
+  const food = vitals.food
+  // CRISIS - death is seconds away regardless of what the bot is doing. Mirrors mortalDanger's
+  // class (lava/fire/drowning/critical hp) plus a starving-to-death floor.
+  if (vitals.inLava || vitals.onFire || vitals.drowning) return crisis
+  if (hp != null && hp <= (opts.hpCritical != null ? opts.hpCritical : 6)) return crisis
+  if (food != null && food <= 2) return crisis
+  // ALERT - hurt, or something is on us. Not lethal this second, but the situation is moving.
+  if (hp != null && hp <= (opts.hpLow != null ? opts.hpLow : 10)) return alert
+  if (vitals.threatDist != null && vitals.threatDist <= 6) return alert
+  if (vitals.creeperDist != null && vitals.creeperDist <= 12) return alert
+  return calm
+}
+
 // ---- watchdog ---------------------------------------------------------------------------
 // PURE danger-scaled forward-progress verdict (§6). Windows are additive thresholds on the SAME
 // idleMs (nudge at [nudgeMs, failMs), fail at >= failMs); failMs = 2*nudgeMs gives the
@@ -1056,6 +1094,10 @@ module.exports = {
   journeyAdmissible,
   homecomingPlan,
   recoverySignature,
+  tickDelayMs,
+  TICK_CALM_MS,
+  TICK_ALERT_MS,
+  TICK_CRISIS_MS,
   ladderBlocker,
   blockerText,
   PRODUCTIVE_RUNG_RE,

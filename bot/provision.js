@@ -324,8 +324,35 @@ function trekMovements (bot, safeThunk) {
 // higher) and hold jump+sprint+forward until we're standing on it. Bypasses the
 // pathfinder entirely - in water it never registers "on ground", so its planned jumps
 // never fire and it bobs in a puddle forever (library flaw, watched live for 8 minutes).
-async function manualHopFromWater (bot) {
+// FIX 18 (audit 2026-07-29): `target` is the bank cell the drown-escape CLASSIFIER located. This
+// function used to search only the 8 IMMEDIATELY ADJACENT cells, so it answered "found no bank"
+// to a classifier that had just found one 3 blocks away by flood-fill - and the escape ladder,
+// ordered by that classifier's verdict, burned its rungs on a premise this rung could not act on.
+// Twice fatal today. With a target it hops toward THAT cell; without one it behaves exactly as
+// before, so every other caller is untouched.
+async function manualHopFromWater (bot, target = null) {
   const feet = bot.entity.position.floored()
+  // FIX 20b: a hop is a JUMP - it can only reach an adjacent-ish cell. The classifier's bank can be
+  // several blocks away (flood-fill), and jumping at it burns ~3s of air achieving nothing before
+  // the adjacent-cell search runs. Live at 19:14 this fired three times in fifteen seconds. Only
+  // take the target when it is actually within hopping range.
+  if (target && (Math.abs(target.x - feet.x) > 2 || Math.abs(target.z - feet.z) > 2)) target = null
+  if (target) {
+    try {
+      bot.pathfinder.setGoal(null)
+      await bot.lookAt(new Vec3(target.x + 0.5, target.y + 1.2, target.z + 0.5), true)
+      bot.setControlState('jump', true); bot.setControlState('forward', true); bot.setControlState('sprint', true)
+      const t0 = Date.now()
+      while (Date.now() - t0 < 3000) {
+        await new Promise(r => setTimeout(r, 100))
+        const f = bot.blockAt(bot.entity.position.floored().offset(0, -1, 0))
+        if (f && f.boundingBox === 'block' && !/water/.test(f.name) && bot.entity.onGround) {
+          bot.clearControlStates(); dbg('  hopped out toward the classifier\'s bank onto ' + f.name); return true
+        }
+      }
+    } catch (e) { dbg('  hop: toward-bank hop failed (' + e.message + ')') } finally { try { bot.clearControlStates() } catch {} }
+    dbg('  hop: could not reach the classifier\'s bank - trying the adjacent cells')
+  }
   for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1]]) {
     for (const dy of [0, 1]) {
       const bank = bot.blockAt(feet.offset(dx, dy - 1, dz))   // the block we'd stand ON
