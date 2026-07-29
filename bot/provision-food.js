@@ -769,8 +769,37 @@ async function secureFoodInner (bot, opts = {}) {
   // justifies the EXPENSIVE discovery below (hunt/farm/fish/scout) - a moderately-fed bot
   // (e.g. food 15) must not go farming every planner round for the last few points. It eats
   // to comfortable from ready food when it can, and only truly hungry does it go get more.
-  const acquireTrigger = opts.threshold != null ? opts.threshold : 12
-  if ((bot.food ?? 20) > acquireTrigger) { dbg('secureFood: food=' + bot.food + ' > acquire-trigger ' + acquireTrigger + ' and ready food drained - not hunting/farming for the last points'); return { fed: true, blockedOn: null } }
+  // ==== THE DEAD BAND, CLOSED (2026-07-29) ================================================
+  // This trigger was a bare 12 while the SURVIVAL NEED fires below PROGRESS_FOOD_MIN (14). Two
+  // numbers, one rule, and the bot lived in the gap between them. Live, 21:35:08, food 13:
+  //   (core) chose recoveryLadder: crisis: degraded - running the recovery ladder (food 13 < 14)
+  //   [prov] (ladder) R4:secureFood -> executing
+  //   [prov] secureFood: food=13 > acquire-trigger 12 and ready food drained - not hunting
+  //   [prov] (ladder) R5:boundedHold -> holding where i am (food=13)
+  //   [prov] (ladder) NO PROGRESS this pass - blocked on no-progress
+  // ...and every maintenancePass in that band bailed too (`between()` uses the 14 threshold), so
+  // 12 < food <= 13 was a state in which the scheduler saw a crisis, the only producer that
+  // answers it stood down, and NOTHING could run. The bot idled there until it starved to 12.
+  //
+  // The guard's intent is right and stays: a moderately-fed bot must not trek off to hunt for the
+  // last two points. But it reasoned about the FOOD BAR alone. Food 13 with a stocked pack is a
+  // bot that will simply eat; food 13 with NOTHING is famine, and calling those the same thing is
+  // what made the band fatal. So the stand-down now requires a RESERVE to stand down onto, and
+  // with no reserve the trigger IS the need's own threshold - one number, from one place.
+  const PROGRESS_FOOD_MIN = parseInt(process.env.PROGRESS_FOOD_MIN || '14', 10)
+  // A reserve is food the bot will ACTUALLY EAT at this food level. foodCount counts every
+  // edible item, and rotten flesh is edible - but eatBestFood refuses it above food 6, so a pack
+  // of rotten flesh is not a fallback, it is the same famine with a full-looking inventory. That
+  // is the identical mistake one level down: calling two different things by one name.
+  const hasReserve = (bot.inventory ? bot.inventory.items() : []).some(i => {
+    try {
+      const md = require('minecraft-data')(bot.version)
+      if (!(md && md.foodsByName && md.foodsByName[i.name])) return false
+      return !RISKY_EAT.test(i.name) || (bot.food ?? 20) <= 6 // risky food only counts when the bot is desperate enough to eat it
+    } catch { return false }
+  })
+  const acquireTrigger = opts.threshold != null ? opts.threshold : (hasReserve ? 12 : PROGRESS_FOOD_MIN)
+  if ((bot.food ?? 20) > acquireTrigger) { dbg('secureFood: food=' + bot.food + ' > acquire-trigger ' + acquireTrigger + (hasReserve ? ' with food still in the pack' : '') + ' - not hunting/farming for the last points'); return { fed: true, blockedOn: null } }
   // #62 §A FOOD_BANK_FIRST (default on): BEFORE any farm trek / fishing / hold, if the hut BANK
   // holds edible food, withdraw enough to reach a safe food level and eat it - reachable even at
   // hp1 (the bank is at the hut), so it breaks the "far farm unreachable when weak" deadlock without

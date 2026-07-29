@@ -471,5 +471,40 @@ t('#64 foodNeedForPlan: DYNAMIC_FOOD=0 -> the fixed FOOD_PACK_RESERVE (byte-for-
   assert.strictEqual(F.foodNeedForPlan({ activity: 'deep-mine', depth: 100 }, { dynamicFood: true, max: 25 }), 25, 'DFOOD_MAX opt caps the ration')
 })
 
+// ==== THE DEAD BAND: the need's threshold and the producer's trigger must not disagree ====
+// Live 2026-07-29 21:35, food 13, nothing in the pack:
+//   (core) chose recoveryLadder: crisis: degraded - running the recovery ladder (food 13 < 14)
+//   [prov] secureFood: food=13 > acquire-trigger 12 and ready food drained - not hunting
+//   [prov] (ladder) NO PROGRESS this pass - blocked on no-progress
+// The scheduler saw a crisis below 14; the only producer that answers it stood down above 12;
+// every maintenancePass in that band bailed on the same 14. So 12 < food <= 13 with an empty
+// pack was a state in which NOTHING could run, and the bot idled in it until it starved.
+// This pins the INVARIANT, not the instance: for every food level the survival tier calls a
+// need, the producer must be willing to act - unless the bot has something to eat.
+t('DEAD BAND: no food level is BOTH a declared need and refused by its own producer', () => {
+  const PROGRESS_FOOD_MIN = 14 // survivalNeed / isDegraded default
+  const trigger = hasReserve => (hasReserve ? 12 : PROGRESS_FOOD_MIN) // as secureFood computes it
+  const band = []
+  for (let food = 0; food <= 20; food++) {
+    const isNeed = food < PROGRESS_FOOD_MIN
+    const acquires = !(food > trigger(false)) // the famine case: nothing edible in the pack
+    if (isNeed && !acquires) band.push(food)
+  }
+  assert.deepStrictEqual(band, [], 'food levels the scheduler calls a crisis and the producer refuses: ' + band.join(', '))
+})
+t('DEAD BAND: the anti-churn stand-down SURVIVES for a bot that has food to eat', () => {
+  const trigger = hasReserve => (hasReserve ? 12 : 14)
+  assert.strictEqual(13 > trigger(true), true, 'food 13 WITH a reserve still stands down')
+  assert.strictEqual(15 > trigger(false), true, 'and a comfortable bot stands down either way')
+  assert.strictEqual(13 > trigger(false), false, 'but food 13 with NOTHING is famine, not "the last few points"')
+})
+t('DEAD BAND: the trigger derives from the NEED\'s own constant, not a third number', () => {
+  const fs = require('fs'); const path = require('path')
+  const src = fs.readFileSync(path.join(__dirname, 'provision-food.js'), 'utf8')
+  assert(/PROGRESS_FOOD_MIN/.test(src), 'the trigger must read the SAME constant the need does')
+  assert(/hasReserve \? 12 : PROGRESS_FOOD_MIN/.test(src), 'and pick between them on whether a reserve exists')
+  assert(/RISKY_EAT\.test\(i\.name\)/.test(src), 'a pack of rotten flesh is not a reserve above food 6')
+})
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall food-security tests passed')
 process.exit(failures ? 1 : 0)
