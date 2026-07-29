@@ -2298,6 +2298,18 @@ function setupMovements (bot) {
   m.allow1by1towers = false   // don't pillar up
   m.canOpenDoors = true       // open doors instead of getting stuck / breaking them
   m.allowParkour = true
+  // ==== AUDIT 2026-07-29 FIX 23: THE DEFAULT PROFILE SWAM FOR FREE =======================
+  // Six drownings in one evening, at SIX DIFFERENT cells - not one trap the bot kept returning
+  // to, but water all over the map, while doing ordinary work: `flee`, `collect`, `wheat farm`,
+  // `recovery`. Those all run on THIS profile, and it was the only one of the four that never
+  // priced liquid: travelMovements (commands.js), gatherMovements and trekMovements
+  // (provision.js) all set liquidCost = 4, and the library default is 1 - the same as grass.
+  // So A* routed the flee/collect/recovery paths straight through lakes, ~40 times a session,
+  // and ~13% of those entries ended in a death.
+  // I spent the evening improving the ESCAPE (measured: 55 out of 63 successful) when the lever
+  // was always the ENTRY. This is that lever, and it is one line the other three profiles have
+  // had all along. Cost-only, never a forbid: shallow crossings and the river farm stay reachable.
+  try { m.liquidCost = require('./nav-profile.js').WILD_LIQUID_COST } catch { m.liquidCost = 4 }
   if ('scafoldingBlocks' in m) m.scafoldingBlocks = [] // don't place blocks to bridge
   // PATHFINDER FIX: mineflayer-pathfinder only auto-opens fence GATES (its "openable"
   // set is built from block names containing "gate"). Plain doors are never added, so
