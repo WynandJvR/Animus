@@ -1,0 +1,401 @@
+'use strict'
+// ==== THE REFLEX REGISTRY - proposals, not actors =========================================
+// ONE table that answers, for anything that can MOVE OR DIG the body: "what tier does it own
+// the body at, when may it run, who executes it, and what does it declare while it waits?"
+//
+// WHY IT EXISTS (design-docs/PLAN-one-runner.md; AUDIT-2026-07-29 defect D5). index.js ran 28
+// setInterval timers, roughly half of which could move the body, and they coordinated by each
+// checking the others' latches. Measured distinct latch reads in index.js alone:
+//
+//   25  commands.isBusy()             12  commands.isEscaping()        7  provision.isMaintaining()
+//   21  provision.isResting()         10  arbiter.maneuverActive()     7  navigate.isForceUnsticking()
+//   19  provision.isSecuringFood()     9  navigate.isRecovering()      5  provision.isNight()
+//
+// That is O(n^2) coupling: every new body-moving behaviour had to be added to every existing
+// one's guard list, and a MISSING guard was invisible until it killed the bot. It is also where
+// decisions went to die - a silent `return` inside a timer is a second, unlogged decision-maker,
+// and it is how 780 job decisions produced 82 executions on the 2026-07-20 tape.
+//
+// The two live failures this shape exists to make unrepresentable:
+//   (a) the decision/dispatch gap - the chooser picks, a guard stack silently unmakes the pick;
+//   (b) 2026-07-29 19:20-19:24 - the shelter correctly sealed a pit and sat still until dawn;
+//       the forward-progress watchdog correctly saw no progress; NOBODY owned the arbitration,
+//       so a correct hold looked exactly like a hang, it dug the bot out into the dark and a
+//       creeper killed it. `holds` (below) is the structural answer to that one.
+//
+// THE ONE RULE THAT REPLACES THE GUARD STACKS. A proposal declares the TIER at which it owns
+// the body; the runner asks ONE question - `mayTakeBody(proposal.tier, whoOwnsItNow)` - and a
+// refusal is LOGGED with its blocker instead of being a silent return. Adding a behaviour is
+// adding a row here, not editing every other behaviour's guard list.
+//
+// WHAT IS DELIBERATELY NOT HERE: the INSTANT class. Auto-eat, auto-equip-carried-armour and the
+// gaze reflex never move the body, so they cannot conflict with anything and cannot be starved
+// by an owner - they keep their own timers in index.js. Collapsing them would be churn for
+// nothing. Everything that MOVES or DIGS is a proposal.
+//
+// PURITY CONTRACT (bot/reflexestest.js enforces all of it):
+//   * top-level requires: arbiter.js ONLY (a leaf: zero requires of its own). Executors require
+//     provision/commands LAZILY inside run(), so scheduler-core.js can require this file for the
+//     pure half without dragging the world in, and an offline test can enumerate it.
+//   * `when` and `refuse` are PURE over the tick snapshot + the runner's own state. No clock of
+//     their own, no bot handle, no world reads.
+//   * NO PROPOSAL READS ANOTHER'S LATCH. isBusy/isResting/isSecuringFood/isRecoveringDegraded/
+//     maneuverActive et al. appear NOWHERE in this file. Arbitration is the runner's job, once,
+//     centrally - which is the entire point.
+
+const arbiter = require('./arbiter.js') // the ONE priority vocabulary (PRIORITY/priName). Zero requires of its own.
+
+// ---- tiers ------------------------------------------------------------------------------
+// The tier vocabulary IS arbiter.PRIORITY - re-exported, never copied, so there is no second
+// scale to drift (PLAN §3.1). A tier answers "who owns the body", which is the arbiter's
+// question, and it is the same scale a maneuver span is opened at.
+const TIERS = arbiter.PRIORITY // { IDLE:0, PROGRESS:1, PRESERVE:2, SURVIVE:3 }
+const TIER_NAMES = Object.keys(TIERS)
+function tierRank (tier) { return Object.prototype.hasOwnProperty.call(TIERS, tier) ? TIERS[tier] : -1 }
+
+// The scheduler's JOB CLASS for a tier. Two scales already existed and they disagree in the
+// middle on purpose: arbiter.PRESERVE outranks PROGRESS (a retreat beats a walk), while
+// scheduler.JOB_CLASSES ranks `progress` above `maintain` (a build beats chores). They are
+// answering different questions - who may drive the body RIGHT NOW vs which JOB deserves it -
+// so this is the ONE place the two are related, and nothing else maps between them.
+const CLASS_OF_TIER = { SURVIVE: 'survival', PRESERVE: 'maintain', PROGRESS: 'progress', IDLE: 'idle' }
+function classOf (tier) { return CLASS_OF_TIER[tier] || 'idle' }
+
+// ---- body ownership ---------------------------------------------------------------------
+// WHO can be holding the body, and at what tier. Data only: the runner owns the predicates
+// (they need bot/commands/navigate handles) and consults them in THIS order, top down. That
+// ordering plus `mayTakeBody` is the whole of what ~120 scattered latch checks used to say.
+//
+// A busy build sits at PROGRESS, so a SURVIVE proposal out-ranks it - which is correct and is
+// exactly what AUDIT FIX 4 restored (a nightShelter that could never fire because the reflex
+// checked isBusy()). The single-goal-discipline rule that a build is only interrupted for a
+// CRISIS-grade need is a separate, explicit gate in the runner - not a tier.
+const BODY_OWNERS = [
+  { key: 'escape', tier: 'SURVIVE', label: 'an escape' },
+  { key: 'navRecovery', tier: 'SURVIVE', label: 'a navigation recovery' },
+  { key: 'ladder', tier: 'SURVIVE', label: 'the recovery ladder' },
+  { key: 'foodRun', tier: 'SURVIVE', label: 'a food run' },
+  { key: 'shelter', tier: 'SURVIVE', label: 'the night shelter' },
+  { key: 'maintain', tier: 'PROGRESS', label: 'a maintenance pass' },
+  { key: 'job', tier: 'PROGRESS', label: 'a job' },
+  { key: 'walk', tier: 'PROGRESS', label: 'a walk already in progress' }
+]
+const ownerByKey = new Map(BODY_OWNERS.map(o => [o.key, o]))
+function ownerInfo (key) { return ownerByKey.get(key) || null }
+
+// THE ordering rule. A proposal may take the body only from a STRICTLY lower tier. Equal tiers
+// never preempt each other: two SURVIVE claimants alternating is the audit's LOOP C (net
+// displacement ~0 while hp went 8 -> 5 -> 2 -> dead), and one of them is usually this very
+// proposal already running.
+function mayTakeBody (tier, ownerKey) {
+  if (!ownerKey) return true
+  const o = ownerInfo(ownerKey)
+  if (!o) return true
+  return tierRank(tier) > tierRank(o.tier)
+}
+
+// ---- declared holds ---------------------------------------------------------------------
+// A hold is a proposal DELIBERATELY sitting still until a named condition (`wake`) occurs:
+// sealed in a pit until dawn, asleep in a bed, waiting out a famine indoors. Stillness is the
+// GOAL, so a forward-progress watchdog must not read it as a hang.
+//
+// Before this, each hold had to remember to fake progress on a heartbeat. digInForNight forgot,
+// and on 2026-07-29 the watchdog dug the bot out of its own sealed shelter into the dark, where
+// a creeper killed it. Heartbeating is also a lie in the log: nothing progressed.
+//
+// So a hold DECLARES itself, once, and is alive BY CONSTRUCTION for as long as it is declared.
+// The TTL is the hold's own deadline: a crashed executor can never leave an eternal hold
+// standing (the same bound arbiter.js puts on a maneuver span, for the same reason).
+const holds = new Map() // token -> { label, wake, since, until }
+let holdSeq = 0
+let nowFn = () => Date.now()
+function _setNow (fn) { nowFn = fn || (() => Date.now()) } // tests only
+
+function beginHold (label, wake, ttlMs) {
+  const token = 'h' + (++holdSeq)
+  const now = nowFn()
+  holds.set(token, { label: label || 'hold', wake: wake || 'unspecified', since: now, until: now + Math.max(1000, ttlMs || 60000) })
+  return token
+}
+function endHold (token) { return holds.delete(token) }
+// The live hold, or null. Expired entries are dropped here (lazily, on read) so nothing has to
+// run a sweeper timer - and an expired hold is NOT a hold: the watchdog gets the body back.
+function activeHold () {
+  const now = nowFn()
+  let best = null
+  for (const [token, h] of holds) {
+    if (h.until <= now) { holds.delete(token); continue }
+    if (!best || h.since < best.since) best = h
+  }
+  return best
+}
+function _resetHolds () { holds.clear() }
+
+// ---- the registry -------------------------------------------------------------------------
+// Each row is DATA plus at most two functions, and NONE of them acts on its own:
+//   name      the job name the chooser emits and the runner dispatches
+//   tier      body-ownership tier (a key of TIERS)
+//   why       one line: what this is FOR (read by a human at 3am, so keep it honest)
+//   run       the executor: async (bot, ctx) -> a short result string the runner logs
+//   owner     for a proposal EXECUTED BY ANOTHER JOB: the name of the job that performs it.
+//             `run` or `owner` is MANDATORY - "a decision must produce an action, or name who
+//             will" (DESIGN-PRINCIPLES §5), and the contract test enforces exactly that.
+//   holds     { wake } - this proposal deliberately waits; see beginHold above
+//   refuse    (ctx) -> reason string | null. The PERSISTENT conditions under which the executor
+//             cannot run. These used to be silent `return`s in the dispatcher; as refusals they
+//             re-enter selection in the same tick and are logged with their blocker.
+//   noOpLatch false to opt OUT of the runner's "did nothing in this exact world, don't repeat
+//             it" latch (only graveSweep, which carries its own verdict-classed back-off).
+//   label     the executor name to log, when it differs from the job name.
+//
+// ctx (built ONCE per tick by the runner):
+//   s               the tick's snapshot - ONE reality per decision, so a refusal and the choice
+//                   it feeds back into can never disagree about the world
+//   now             the tick's captured clock, for refuse(): pure comparisons, no clock read
+//   nowMs()         the LIVE clock, for run() only - an executor can run for minutes, so a
+//                   cooldown it sets must be stamped when it finishes, not when the tick began
+//   foodThreshold   the busy-preempt food threshold (food.busyPreemptFood)
+//   progressFoodMin the "may I do progress work" food floor (PROGRESS_FOOD_MIN)
+//   knownBed, nearestGrave, pick, say, note   the tick's already-computed handles
+//   runner          the runner's own mutable state (cooldowns, latches). Proposals READ it in
+//                   refuse() and WRITE it in run(); they never read each other's BODY latches.
+const REFLEXES = []
+function def (entry) {
+  REFLEXES.push(entry)
+  return entry
+}
+
+// -- SURVIVE ------------------------------------------------------------------------------
+
+def({
+  name: 'recoveryLadder',
+  label: 'recoverFromDegraded',
+  tier: 'SURVIVE',
+  why: 'the compound-degraded state (naked/starving/hurt at once) runs the R0..R5 ladder',
+  refuse: (ctx) => {
+    // FIX 3's CONDITION gate. A pass that made NO PROGRESS is not retried until something it
+    // depends on has changed: re-deriving an identical plan from an identical world cannot
+    // produce a different result, and on 2026-07-20 it produced 41 identical `NOT recovered`
+    // passes while the food bar drained. A condition, never a timer.
+    const b = ctx.runner.ladderBlock
+    if (!b) return null
+    const scheduler = require('./scheduler.js') // lazy + PURE (a snapshot in, a string out): no bot, no clock, no cycle at load
+    let sig = ''
+    try { sig = scheduler.recoverySignature(ctx.s) } catch {}
+    if (sig && sig === b.sig) return 'last pass made no progress and nothing has changed since - ' + scheduler.blockerText(b.blockedOn)
+    ctx.runner.ladderBlock = null // the world moved: the ladder is live again
+    return null
+  },
+  run: async (bot, ctx) => {
+    const provision = require('./provision.js')
+    const scheduler = require('./scheduler.js')
+    const r = await provision.recoverFromDegraded(bot, { say: ctx.say })
+    if (!r.done && r.progressed === false && r.sig) {
+      ctx.runner.ladderBlock = { sig: r.sig, blockedOn: r.blockedOn || 'blocked' }
+      ctx.note('(sched) ladder BLOCKED on ' + ctx.runner.ladderBlock.blockedOn + ' - ' + scheduler.blockerText(ctx.runner.ladderBlock.blockedOn) + '; standing down until the situation changes')
+    } else ctx.runner.ladderBlock = null
+    return (r.done ? 'recovered' : 'NOT recovered (' + (r.reason || 'rungs exhausted') + (r.blockedOn ? ', blocked on ' + r.blockedOn : '') + ')') +
+           (r.rungs.length ? ' via ' + r.rungs.join(' > ') : '')
+  }
+})
+
+def({
+  name: 'graveSweep',
+  label: 'recover',
+  tier: 'SURVIVE',
+  why: 'a worthwhile grave at arm\'s reach IS the survival move - free gear, and often food',
+  noOpLatch: false, // it carries its own verdict-classed back-off (scheduler.graveCooldownMs)
+  refuse: (ctx) => ctx.now < ctx.runner.graveCooldownUntil
+    ? 'that grave just failed to open/reach - backing off before another attempt'
+    : null,
+  run: async (bot, ctx) => {
+    const commands = require('./commands.js')
+    const scheduler = require('./scheduler.js')
+    // task #18 M4: a verdict-classed back-off instead of a blanket 300s - a stalled PARTIAL comes
+    // straight back inside the despawn window. remainMs is the nearest grave's despawn budget.
+    const graveUrgentOn = process.env.GRAVE_URGENT !== '0'
+    const remainMs = graveUrgentOn && ctx.nearestGrave ? ctx.nearestGrave.remainMs : undefined
+    try {
+      const r = await commands.handle(bot, 'recover', { source: 'scheduler' })
+      const cd = scheduler.graveCooldownMs(r, { remainMs, flagOn: graveUrgentOn })
+      if (cd > 0) ctx.runner.graveCooldownUntil = ctx.nowMs() + cd
+      return String(r || '').split('\n')[0] + (graveUrgentOn && cd > 0 ? ' (cooldown ' + Math.round(cd / 1000) + 's)' : '')
+    } catch (e) {
+      const cd = scheduler.graveCooldownMs('', { remainMs, flagOn: graveUrgentOn })
+      if (cd > 0) ctx.runner.graveCooldownUntil = ctx.nowMs() + cd
+      throw e
+    }
+  }
+})
+
+def({
+  name: 'secureFood',
+  tier: 'SURVIVE',
+  why: 'the ONE food policy: eat -> bank -> cook -> hunt -> farm -> fish -> scout -> hold',
+  refuse: (ctx) => {
+    // NIGHT-FORAGE GUARD (#11 - a live death: creeper at the hut doorstep while foraging at
+    // night un-armoured). This was a silent hold: the tick logged "sheltering, not foraging"
+    // and returned, while NOTHING sheltered. As a refusal it hands the body to the nightShelter
+    // candidate, which does shelter - the deferral finally names an action that happens.
+    if (process.env.NIGHT_FORAGE_GUARD === '0') return null
+    const sn = arbiter.jobSurvivalNeed(ctx.s, { foodThreshold: ctx.foodThreshold })
+    return (sn && sn.need === 'shelter')
+      ? 'un-armoured at night - foraging out into the dark is the death, not the hunger'
+      : null
+  },
+  run: async (bot, ctx) => {
+    const provision = require('./provision.js')
+    const r = await provision.secureFood(bot, { home: ctx.knownBed, canHold: true, say: ctx.say })
+    return r.fed ? 'fed (food ' + bot.food + ')' : 'not fed - blocked on ' + r.blockedOn
+  }
+})
+
+def({
+  name: 'recoverHp',
+  tier: 'SURVIVE',
+  why: 'hurt and still endangered: stop the job, get somewhere safe and heal',
+  refuse: (ctx) => ctx.now < ctx.runner.hpCooldownUntil
+    ? 'just tried to heal - letting regeneration have a window before trying again'
+    : null,
+  run: async (bot, ctx) => {
+    const provision = require('./provision.js')
+    try { return await provision.recoverHp(bot, { say: ctx.say }) } finally {
+      ctx.runner.hpCooldownUntil = ctx.nowMs() + 60000 // as the old hp-crisis reflex did: cool 60s after the attempt
+    }
+  }
+})
+
+def({
+  name: 'nightShelter',
+  tier: 'SURVIVE',
+  why: 'dusk + exposure: a bed if there is one, a sealed pit if there is not',
+  // A DECLARED HOLD. Sitting perfectly still until dawn is the goal, not a hang - and this is
+  // the row that stops a watchdog digging the bot out of its own shelter (see beginHold).
+  holds: { wake: 'dawn' },
+  run: async (bot, ctx) => {
+    const provision = require('./provision.js')
+    const rested = await provision.nightRest(bot, { say: ctx.say })
+    return rested ? 'sheltered for the night' : 'could not shelter (no bed, no diggable ground) - holding'
+  }
+})
+
+def({
+  name: 'homecoming',
+  tier: 'SURVIVE',
+  why: 'displaced (usually by a death): cross back to base while the crossing is survivable',
+  run: async (bot, ctx) => {
+    const provision = require('./provision.js')
+    const commands = require('./commands.js')
+    ctx.runner.recoveringHome = true
+    try {
+      const pr = commands.persistedResume && commands.persistedResume()
+      const rh = await provision.recoverHome(bot, { say: ctx.say, resumeAt: pr && pr.at })
+      if (rh.arrived) return 'home' + (rh.bedOk ? ' - spawn re-anchored at the bed' : ' - bed could NOT be re-asserted')
+      if (rh.stabilise) return 'stood down mid-crossing (' + (rh.blockedOn || 'blocked') + '): ' + (rh.why || '')
+      return 'did not reach home this pass (' + Math.round(rh.dist || 0) + 'b out) - will pick it up again'
+    } finally { ctx.runner.recoveringHome = false }
+  }
+})
+
+// -- PROGRESS (chores and re-arming: they yield to a build, and to everything above) --------
+
+def({
+  name: 'maintenancePass',
+  tier: 'PROGRESS',
+  why: 'establish the missing survival infra (spawn/armor/food-reserve/lit base), then upkeep',
+  refuse: (ctx) => {
+    if (ctx.now < ctx.runner.maintainCooldownUntil) return 'cooling off after the last maintenance pass'
+    // At night the pass is indoor-only, so being far from home makes it UNDISPATCHABLE, not
+    // merely delayed - the chooser must see that or it keeps picking a job that cannot run
+    // (measured 2026-07-29 14:44-14:49: `bootstrap spawn` picked 7x, dispatched 0x, silently).
+    if (ctx.s.isNight && (ctx.s.homeDist == null || ctx.s.homeDist > 48)) {
+      return 'night chores are indoor-only and home is ' + (ctx.s.homeDist == null ? 'unknown' : Math.round(ctx.s.homeDist) + 'b') + ' away'
+    }
+    const n = arbiter.jobSurvivalNeed(ctx.s, { foodThreshold: ctx.progressFoodMin })
+    if (n) return 'survival first: ' + (n.reason || n.need)
+    return null
+  },
+  run: async (bot, ctx) => {
+    const provision = require('./provision.js')
+    // #117 HOME_IS_A_NEED: the chooser's bootstrap verdict is HANDED TO the executor, so
+    // 'spawn'/'shelter' reach their producers instead of being computed, logged and dropped.
+    const r = await provision.maintenancePass(bot, { say: ctx.say, nightIndoorOnly: !!ctx.s.isNight, bootstrap: (ctx.pick && ctx.pick.bootstrap) || null })
+    const worked = !!(r && r.steps && r.steps.length && !/^bail/.test(r.reason || ''))
+    ctx.runner.maintainCooldownUntil = ctx.nowMs() + (worked ? 600000 : 300000) // 10 min after a real pass, 5 after a no-op/bail
+    return r && r.steps && r.steps.length ? r.steps.join('+') : (r && r.reason) || 'nothing due'
+  }
+})
+
+def({
+  name: 'reclaim',
+  tier: 'PROGRESS',
+  why: 'pay down what the bot owes the world (#119) - it competes for the body, it never wins it',
+  refuse: (ctx) => {
+    // Never at night: reclamation is cosmetic work and the dark is where the deaths are. A
+    // CONDITION, not a cooldown - it clears the moment the sun does.
+    if (ctx.s.isNight) return 'tidying up is daytime work - the dark is where the deaths are'
+    const n = arbiter.jobSurvivalNeed(ctx.s, { foodThreshold: ctx.progressFoodMin })
+    if (n) return 'survival first: ' + (n.reason || n.need)
+    return null
+  },
+  run: async (bot, ctx) => {
+    const commands = require('./commands.js')
+    const r = await require('./reclaim.js').reclaimPass(bot, { isStopped: () => !!(commands.isEscaping && commands.isEscaping()) })
+    return (r && r.reason) || 'nothing owed'
+  }
+})
+
+// -- PROGRESS, executed by another job ------------------------------------------------------
+// These three used to be standalone 60s/20s/45s timers with their own guard stacks. They are
+// STEPS of the maintenance pass now (steps 1, 6 and 9), so the registry records them as
+// proposals with a NAMED OWNER rather than as executors that would double-drive the body.
+// This is DESIGN-PRINCIPLES §5 as data: a proposal that does not perform its own action must
+// name the one that does, and bot/reflexestest.js checks that the owner really exists.
+
+def({
+  name: 'foodTopUp',
+  tier: 'PROGRESS',
+  owner: 'maintenancePass',
+  why: 'top the pack food buffer up from the bank BEFORE hunger becomes a crisis (maintain step 1)'
+})
+
+def({
+  name: 'gearup',
+  tier: 'PROGRESS',
+  owner: 'maintenancePass',
+  why: 'an under-armoured bot re-arms itself: wear what it has, else the iron bootstrap (maintain step 6)'
+})
+
+def({
+  name: 'homeRepair',
+  tier: 'PROGRESS',
+  owner: 'maintenancePass',
+  why: 'creeper damage to the base is repaired from home, never trekked to (maintain step 9)'
+})
+
+// ---- lookups ------------------------------------------------------------------------------
+const byName = new Map(REFLEXES.map(r => [r.name, r]))
+function get (name) { return byName.get(name) || null }
+function names () { return REFLEXES.map(r => r.name) }
+// Every proposal that can actually be DISPATCHED (it has an executor of its own).
+function dispatchable () { return REFLEXES.filter(r => typeof r.run === 'function') }
+
+module.exports = {
+  TIERS,
+  TIER_NAMES,
+  tierRank,
+  classOf,
+  CLASS_OF_TIER,
+  BODY_OWNERS,
+  ownerInfo,
+  mayTakeBody,
+  REFLEXES,
+  get,
+  names,
+  dispatchable,
+  beginHold,
+  endHold,
+  activeHold,
+  _resetHolds,
+  _setNow
+}
