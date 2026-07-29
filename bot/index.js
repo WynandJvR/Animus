@@ -946,6 +946,10 @@ if (SCHED_ON) {
   }
   let coreLastChoice = '' // log the CHOICE on change; dispatches, refusals and standoffs always log
   let coreTailNoted = ''  // one note per pickJob-still-wants-X transition (see the tail clause below)
+  // job|why -> printed. Bounded by construction: the keys are (candidate x its own refusal
+  // reasons), a small closed set. Cleared whenever the CHOSEN line changes, so a genuinely new
+  // situation re-prints its refusals and a stuck one does not repeat them every two seconds.
+  const coreRefusalNoted = new Map()
   const coreAdapter = (s) => {
     const aj = s.activeJob || null
     const c = schedulerCore.selectWithRefusals(s, {
@@ -953,7 +957,17 @@ if (SCHED_ON) {
       activeCls: aj && aj.cls,
       lastProgressAt: aj && aj.lastProgressAt, // verified-progress timestamp (caller-provided; drives the anti-thrash bonus)
       now: Date.now()                          // caller's clock - the pure core compares timestamps, never reads a clock
-    }, candidateRefusal, (cand, rf) => note('(core) ' + (cand.job || 'build/idle') + ' REFUSED: ' + rf.why + ' - re-selecting in this tick (no watchdog wait)'))
+    }, candidateRefusal, (cand, rf) => {
+      // THROTTLED, on the same argument the chosen-line uses (design principle 7): a standoff
+      // prints four of these per tick, the tick runs every 2s at crisis vitals, and live that
+      // was ~7000 near-identical lines an hour burying the ones that mattered - which is the
+      // exact log-flooding this audit criticised. Print each distinct refusal when it ARISES
+      // and when its reason CHANGES; the standoff itself is already named on the chosen line.
+      const k = (cand.job || 'build/idle') + '|' + rf.why
+      if (coreRefusalNoted.get(k)) return
+      coreRefusalNoted.set(k, true)
+      note('(core) ' + (cand.job || 'build/idle') + ' REFUSED: ' + rf.why + ' - re-selecting in this tick (no watchdog wait)')
+    })
     // Logging discipline (design principle 7): the unchanged choice was printed every tick - 780
     // near-identical lines that buried the 82 that mattered. Print it when it CHANGES, and always
     // print a standoff or an unanswered crisis, which are the lines a post-mortem needs.
@@ -966,6 +980,7 @@ if (SCHED_ON) {
     const key = (c.job || 'build/idle') + '|' + c.reason
     if (key !== coreLastChoice) {
       coreLastChoice = key
+      coreRefusalNoted.clear() // a new situation: let its refusals speak once each
       note('(core) chose ' + (c.job || 'build/idle') + ': ' + c.reason)
     }
     if (c.job == null) {

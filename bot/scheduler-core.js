@@ -202,11 +202,33 @@ function chooseActivity (snapshot, opts) {
   // 1. immediate vitals/danger need. A COMPOUND degraded state runs the ladder (R0..R5 re-plan); a
   //    single clean need routes to its producer. `flee` is reflex-owned - the tick no-ops it (as today).
   if (need) {
-    const job = degraded ? 'recoveryLadder' : (scheduler.needProducer(need.need) || 'recoverHp')
+    const producer = scheduler.needProducer(need.need) || 'recoverHp'
+    const job = degraded ? 'recoveryLadder' : producer
     const why = degraded
       ? 'crisis: degraded - running the recovery ladder (' + (need.reason || need.need) + ')'
       : 'crisis: ' + (need.reason || need.need)
     if (!isRefused(job)) return mk(job, 'survival', why, CRISIS_SCORE)
+    // THE COMPOUND ROUTE IS NOT THE ONLY ROUTE (found live 2026-07-29 22:15, hp 3.17, food 17):
+    //   (core) recoveryLadder REFUSED: last pass made no progress and nothing has changed since
+    //   (core) maintenancePass REFUSED: survival first: hp 3.1666 <= 6
+    //   (core) reclaim REFUSED: survival first: hp 3.1666 <= 6
+    //   (core) build/idle REFUSED: post-death recovery in progress
+    // ...for minutes, at three hearts, with a full food bar. Every candidate refused and the bot
+    // stood still - because a DEGRADED state routes to the ladder, and when the ladder is refused
+    // this clause fell straight through to the utility phase, where `recoverHp` is not a candidate
+    // at ALL. The need was 'heal', its producer exists, works, and carries its own cooldown, and
+    // nothing could reach it. FIX 4 taught Phase A to see refusals; this is the half it missed -
+    // seeing a refusal has to mean trying the next thing that can help, not giving up on the tier.
+    // ...but ONLY to a producer that does not have to set out. The ladder is usually refused
+    // BECAUSE the world is not survivable to walk in (blocked on 'dawn'), and routing round it to
+    // secureFood would send a naked bot foraging into exactly the dark that killed it - the death
+    // rungFeasible exists to bar. `outboundBlocked` is that one rule and this asks it, so the
+    // fallback can reach recoverHp (heal where you stand) and can never reach an outbound trek.
+    // Caught by deathlooptest's LOOP B fixture before it ever ran live.
+    const outbound = scheduler.producerIsOutbound(producer) && !!scheduler.outboundBlocked(s)
+    if (degraded && producer !== job && !outbound && !isRefused(producer)) {
+      return mk(producer, 'survival', why + ' [the ladder is refused - running the need\'s own producer instead]', CRISIS_SCORE)
+    }
   }
   // 2. a near worthwhile grave is a first-class survival move (free gear at arm's reach), unless an
   //    acute flee is owed. Above the degraded-signature and everything discretionary (I3, as pickJob).

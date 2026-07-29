@@ -105,6 +105,13 @@ function commandClass (line) {
 // (consume-what-exists) / R1 (nearest win) / R5 (one bounded dawn-hold), never an unnamed wait.
 // lava/fire/drowning/threat/creeper are REFLEX-owned; the scheduler never schedules them as jobs
 // (they map to 'flee' so a blockedOn tag resolves, but pickJob routes danger through arbiter).
+// Which of those producers SET OUT across open ground? The same question capabilities.RUNG_ACTIONS
+// answers for ladder rungs, asked of producers, and governed by the SAME rule (outboundBlocked):
+// "never forage or trek out un-armoured at night". It exists because the chooser may route a live
+// need straight to its producer when the compound ladder is refused, and without this that route
+// would happily send a naked bot foraging into the dark - the exact death rungFeasible bars.
+const OUTBOUND_PRODUCERS = new Set(['secureFood', 'gearup', 'mine', 'acquire'])
+const producerIsOutbound = p => OUTBOUND_PRODUCERS.has(p)
 const NEED_PRODUCERS = {
   food: 'secureFood',
   heal: 'recoverHp',
@@ -1105,6 +1112,8 @@ module.exports = {
   OUTBOUND_RE,
   isOutboundAction: capabilities.isOutboundAction, // the ONE definition; OUTBOUND_RE is derived from it
   REFLEX_OWNED,
+  OUTBOUND_PRODUCERS,
+  producerIsOutbound,
   ladderDone,
   recoveryReady,
   resumeGate,

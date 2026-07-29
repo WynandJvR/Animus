@@ -143,6 +143,45 @@ t('LOOP B: with the ladder refused, sheltering is what the bot picks at night', 
   const c = core.chooseActivity(THE_LIVELOCK, { refused })
   assert.strictEqual(c.job, 'nightShelter', 'naked + dark + nothing else to do = go to bed, which is what ends the night')
 })
+// ==== THE TOTAL STANDOFF (found live 2026-07-29 22:15, hp 3.17, food 17) =================
+//   (core) recoveryLadder REFUSED: last pass made no progress and nothing has changed since
+//   (core) maintenancePass REFUSED: survival first: hp 3.1666 <= 6
+//   (core) reclaim REFUSED: survival first: hp 3.1666 <= 6
+//   (core) build/idle REFUSED: post-death recovery in progress
+// ...repeated every two seconds, at three hearts, with a FULL food bar. A degraded state routes
+// to the ladder; when the ladder is refused Phase A fell through to the utility phase, where
+// recoverHp is not a candidate at all - so the need was 'heal', its producer existed, worked, and
+// carried its own cooldown, and nothing on any path could reach it.
+const THE_STANDOFF = snap({
+  hp: 3.1666, food: 17, armorPieces: 0, underArmored: true, isNight: false,
+  homeDist: null, postDeathRecovery: true, graves: []
+})
+t('STANDOFF: a refused ladder falls back to the NEED\'s own producer, not to idling', () => {
+  const refused = new Map([['recoveryLadder', 'no progress'], ['maintenancePass', 'survival first'], ['reclaim', 'survival first'], ['build', 'post-death recovery']])
+  const c = core.chooseActivity(THE_STANDOFF, { refused })
+  assert.strictEqual(c.job, 'recoverHp', 'three hearts and a full food bar: heal. Got ' + c.job)
+  assert(/ladder is refused/.test(c.reason), 'and the reason says which route it took and why')
+})
+t('STANDOFF: the fallback NEVER routes to an outbound producer while setting out is barred', () => {
+  // this is the regression the LOOP B fixture caught before it shipped: naked + night + food 5,
+  // the ladder blocked on 'dawn' precisely BECAUSE foraging out is the death - so falling back to
+  // secureFood would have walked the bot into it.
+  const refused = new Map([['recoveryLadder', 'blocked on dawn']])
+  const c = core.chooseActivity(THE_LIVELOCK, { refused })
+  assert.notStrictEqual(c.job, 'secureFood', 'a naked bot must not be routed out to forage at night')
+  assert.strictEqual(c.job, 'nightShelter', 'the answer at night is shelter')
+  // ...and the rule it asks is the SHARED one, not a copy
+  assert.strictEqual(S.producerIsOutbound('secureFood'), true)
+  assert.strictEqual(S.producerIsOutbound('recoverHp'), false)
+  assert.strictEqual(S.outboundBlocked(THE_LIVELOCK), 'dawn')
+})
+t('STANDOFF: when even the producer is refused, the verdict is an HONEST standoff, not a lie', () => {
+  const refused = new Map([['recoveryLadder', 'no progress'], ['recoverHp', 'cooling off'], ['maintenancePass', 'x'], ['reclaim', 'x'], ['build', 'x'], ['nightShelter', 'x']])
+  const c = core.chooseActivity(THE_STANDOFF, { refused })
+  assert(c.standoff, 'it must SAY every candidate refused')
+  assert(Array.isArray(c.refusals) && c.refusals.length > 0, 'and name them')
+})
+
 t('LOOP B: a ladder with a REACHABLE food producer is not blocked at all', () => {
   const day = Object.assign({}, THE_LIVELOCK, { isNight: false, armorPieces: 4, underArmored: false })
   assert.strictEqual(S.ladderBlocker(day), 'no-progress', 'by day with armour the food rungs are admissible')
