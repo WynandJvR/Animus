@@ -178,6 +178,22 @@ t('ordering: a proposal takes the body only from a lower tier - and a crisis is 
   assert(reflexes.mayTakeBody('PROGRESS', null))
 })
 
+t('ordering: NOTHING preempts itself, crisis or not (found live, 90s after the runner went in)', () => {
+  // A build's own gather loop had called secureFood, so the food-run latch was set; food hit 9,
+  // the crisis-grade rule let secureFood preempt secureFood, the second copy returned instantly
+  // and armed the no-op latch - which would then have suppressed the REAL food response.
+  assert(!reflexes.mayTakeBody('SURVIVE', 'foodRun', { crisis: true, name: 'secureFood' }), 'secureFood must not preempt a running food run')
+  assert(!reflexes.mayTakeBody('SURVIVE', 'shelter', { crisis: true, name: 'nightShelter' }), 'nightShelter must not preempt itself')
+  assert(!reflexes.mayTakeBody('PROGRESS', 'maintain', { name: 'maintenancePass' }), 'the maintenance pass must not preempt itself')
+  // ...and a DIFFERENT survival job still may, which is the whole point of the crisis override
+  assert(reflexes.mayTakeBody('SURVIVE', 'foodRun', { crisis: true, name: 'recoverHp' }), 'a different crisis-grade job may still take the body')
+  // every latch that a proposal's own executor sets must declare which proposal that is, or this
+  // rule silently stops covering it
+  for (const o of reflexes.BODY_OWNERS.filter(x => x.owns)) {
+    assert(reflexes.get(o.owns), o.key + ': owns "' + o.owns + '", which is not a registered proposal')
+  }
+})
+
 t('ordering: a body refusal always NAMES the owner it yielded to', () => {
   for (const o of reflexes.BODY_OWNERS) {
     const why = reflexes.bodyRefusal('IDLE', o.key)
@@ -235,6 +251,50 @@ t('4: a proposal that declares a hold names the condition that releases it', () 
   }
   const shelter = reflexes.get('nightShelter')
   assert(shelter && shelter.holds && shelter.holds.wake === 'dawn', 'the night shelter is the hold the watchdog dug the bot out of - it must declare one')
+})
+
+// ============ S5 - the self-proposing (IDLE-tier) housekeeping =============================
+// These four were 3s-45s timers. The whole point of moving them is that they can no longer
+// interrupt anything: they are scored, and an IDLE tier loses to every owner there is.
+t('S5: every self-proposing reflex is IDLE-tier and scores below a waiting build', () => {
+  const selfProposing = reflexes.REFLEXES.filter(r => typeof r.when === 'function')
+  assert(selfProposing.length >= 4, 'the housekeeping proposals are missing (found ' + selfProposing.length + ')')
+  const W_RESUME = 0.2 // scheduler-core's weight for "a saved build is waiting"
+  for (const r of selfProposing) {
+    assert.strictEqual(r.tier, 'IDLE', r.name + ': housekeeping that is not IDLE-tier can interrupt real work')
+    assert(r.benefit != null && r.benefit < W_RESUME, r.name + ': benefit ' + r.benefit + ' would out-score a waiting build')
+    assert(typeof r.run === 'function', r.name + ': a self-proposing reflex must be able to run itself')
+  }
+})
+
+t('S5: a proposal candidate is only offered when its own condition holds', () => {
+  const quiet = { dropDist: null, rawMeat: 0, furnaceDist: null, scaffoldDebtNear: 0, isNight: false, torches: 0 }
+  assert.deepStrictEqual(reflexes.proposalCandidates(quiet, { risk: 0 }).map(c => c.job), [], 'nothing to do => no candidates')
+  const busy = { dropDist: 3, rawMeat: 6, furnaceDist: 5, scaffoldDebtNear: 9, isNight: false, torches: 0 }
+  const jobs = reflexes.proposalCandidates(busy, { risk: 0 }).map(c => c.job).sort()
+  assert.deepStrictEqual(jobs, ['autoCollect', 'autoCook', 'scaffoldSweep'], 'got ' + jobs.join(','))
+  for (const c of reflexes.proposalCandidates(busy, { risk: 0 })) {
+    assert.strictEqual(c.cls, 'idle', c.job + ': a housekeeping candidate must be idle-class')
+    assert(c.score > 0 && c.score < 0.2, c.job + ': score ' + c.score + ' is outside the housekeeping band')
+  }
+})
+
+t('S5: urgency falls off with distance - a drop underfoot is worth more than one 8b away', () => {
+  const near = reflexes.proposalCandidates({ dropDist: 1.5 }, { risk: 0 })[0]
+  const far = reflexes.proposalCandidates({ dropDist: 7.5 }, { risk: 0 })[0]
+  assert(near && far && near.score > far.score, 'a nearer drop must score higher')
+  assert.deepStrictEqual(reflexes.proposalCandidates({ dropDist: 20 }, { risk: 0 }), [], 'and beyond the band there is no candidate at all')
+})
+
+t('S5: live risk docks housekeeping - a bot in danger does not stop to tidy up', () => {
+  const calm = reflexes.proposalCandidates({ dropDist: 2 }, { risk: 0, riskWeight: 0.15 })[0]
+  const risky = reflexes.proposalCandidates({ dropDist: 2 }, { risk: 1, riskWeight: 0.15 })[0]
+  assert(calm.score > risky.score, 'the same drop must be worth less when the world is dangerous')
+})
+
+t('S5: a when() that throws is a proposal that does not run, never a crash', () => {
+  const poison = { get dropDist () { throw new Error('unreadable') } }
+  assert.doesNotThrow(() => reflexes.proposalCandidates(poison, { risk: 0 }))
 })
 
 // ============ the registry is the record of what the runner can do =========================

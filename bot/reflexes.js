@@ -77,13 +77,20 @@ function classOf (tier) { return CLASS_OF_TIER[tier] || 'idle' }
 //   crisisOnly  yielded only to a CRISIS-grade need. This is single-goal discipline: a build is
 //               not interrupted to top up a buffer, and a bot already holed up for the night is
 //               not pulled back out except by something strictly worse (#113).
+//   owns        the PROPOSAL whose executor sets this latch. A proposal may never take the body
+//               from itself, at any tier, crisis or not - it is already doing the thing. Found
+//               live within 90 seconds of the runner going in: a build's own gather loop had
+//               called secureFood (so the latch was set), food hit 9, and the crisis-grade rule
+//               happily let secureFood preempt secureFood. The second one returned "not fed -
+//               blocked on busy" instantly and armed the no-op latch, which would then have
+//               suppressed the REAL food response. That is audit LOOP C in miniature.
 const BODY_OWNERS = [
   { key: 'escape', tier: 'SURVIVE', hard: true, label: 'an escape' },
   { key: 'navRecovery', tier: 'SURVIVE', hard: true, label: 'a navigation recovery' },
-  { key: 'ladder', tier: 'SURVIVE', hard: true, label: 'the recovery ladder' },
-  { key: 'foodRun', tier: 'SURVIVE', crisisOnly: true, label: 'a food run' },
-  { key: 'shelter', tier: 'SURVIVE', crisisOnly: true, label: 'the night shelter' },
-  { key: 'maintain', tier: 'PROGRESS', label: 'a maintenance pass' },
+  { key: 'ladder', tier: 'SURVIVE', hard: true, owns: 'recoveryLadder', label: 'the recovery ladder' },
+  { key: 'foodRun', tier: 'SURVIVE', crisisOnly: true, owns: 'secureFood', label: 'a food run' },
+  { key: 'shelter', tier: 'SURVIVE', crisisOnly: true, owns: 'nightShelter', label: 'the night shelter' },
+  { key: 'maintain', tier: 'PROGRESS', owns: 'maintenancePass', label: 'a maintenance pass' },
   { key: 'job', tier: 'PROGRESS', crisisOnly: true, label: 'a job' },
   { key: 'walk', tier: 'PROGRESS', label: 'a walk already in progress' },
   { key: 'dig', tier: 'PROGRESS', label: 'a dig in progress' } // aborting a dig resets its break progress - never for housekeeping
@@ -102,6 +109,9 @@ function bodyRefusal (tier, ownerKey, opts) {
   if (!ownerKey) return null
   const o = ownerInfo(ownerKey)
   if (!o) return null
+  // NOTHING preempts itself. Checked before every other rule, including the crisis override:
+  // "the crisis is real" is never a reason to start a second copy of the response to it.
+  if (opts && opts.name && o.owns && o.owns === opts.name) return o.label + ' IS this job - it is already running'
   if (o.hard) return o.label + ' owns the body'
   const rank = tierRank(tier)
   const orank = tierRank(o.tier)

@@ -907,7 +907,7 @@ if (SCHED_ON) {
     //     those it is LOGGED and re-routes the tick to something it can actually do.
     const ownerKey = bodyOwner()
     if (ownerKey) {
-      const why = reflexes.bodyRefusal(p.tier, ownerKey, { crisis: crisisGrade(p, s, ctx) })
+      const why = reflexes.bodyRefusal(p.tier, ownerKey, { crisis: crisisGrade(p, s, ctx), name: p.name })
       if (why) return { key: job, why }
     }
     // (2) the proposal's own persistent conditions (its back-off, its night gate, ...) - written
