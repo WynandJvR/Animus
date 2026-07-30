@@ -244,6 +244,25 @@ t('INVARIANT: no (bad,total) pair answers "patch" when nothing is standing', () 
 // the west wall, on open ground - while the hut's own bed cell stayed empty:
 //   [prov] camp: hut bed -> none   /   [prov] bed-upgrade: [noop] the anchor is already usable
 // Every bedUsable check passed because every one asked about the BED and none asked WHERE it is.
+// ==== SHELL vs FURNISHING (live 2026-07-30) ============================================
+// 45/47 placed, the misses were FURNISHING (0 wool -> no bed), yet registration required a
+// PERFECT build - so hutAnchor() stayed null and a standing shelter counted as no hut at all,
+// silently disabling banking, bed placement and hut maintenance.
+t('isShellCell: the shell is what encloses you - planks, door, clear interior', () => {
+  for (const n of ['oak_planks', 'birch_planks', 'oak_door', 'spruce_door', 'air', 'cave_air']) {
+    assert.strictEqual(H.isShellCell(n), true, n + ' is part of the shell')
+  }
+})
+t('isShellCell: furnishing is NOT the shell - its absence is debt, not homelessness', () => {
+  for (const n of ['white_bed', 'red_bed', 'chest', 'trapped_chest', 'furnace', 'smoker', 'crafting_table']) {
+    assert.strictEqual(H.isShellCell(n), false, n + ' must not gate whether the hut counts as home')
+  }
+})
+t('isShellCell: the live failure - a missing BED cannot make the shell unverified', () => {
+  assert.strictEqual(H.isShellCell('white_bed'), false)
+  assert.strictEqual(H.isShellCell('oak_planks'), true)
+})
+
 t('THE OUTDOOR ANCHOR: the live bed cell is provably OUTSIDE the live hut box', () => {
   const hut = { x: 188, y: 67, z: -104 }          // the hut actually built, 6x6
   assert.strictEqual(H.inBox(hut, 185, -102), false, 'the bed the bot kept was outside its own hut')

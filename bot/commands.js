@@ -2803,18 +2803,51 @@ async function autoBuild (bot, schem, at, opts = {}) {
                   const sv2 = pathfixMod.surveyCells(bot, hutCells, hutModel.cellMismatch)
                   const bad2 = sv2.bad
                   const builtClean = sv2.verdict === 'OK' && hr.total && hr.placed >= hr.total
-                  if (builtClean) {
-                    say('safehouse rebuilt clean - walls, door, bed, furnace, bank all in place')
-                    hutRepairLatch = { lastBad: 0, lastAction: 'rebuild', ts: Date.now() }
+                  // ==== "DOES IT SHELTER ME" IS NOT "IS IT PERFECT" (2026-07-30) ==============
+                  // Registration required a PERFECT build. Live: 45/47 placed, and the misses were
+                  // FURNISHING (0 wool held, so `camp: hut bed -> none`) while walls, roof and door
+                  // were all up. The all-or-nothing gate left hutAnchor() NULL, so a standing
+                  // shelter counted as NO HUT AT ALL and silently disabled everything keyed off it:
+                  //   consolidate: no bank chest inside the hut yet
+                  //   safekeep: no hut bank chest - skipping / bed-upgrade: [noop]
+                  // #115's proof requirement is NOT loosened: the shell survey is a grounded re-read
+                  // of exactly the enclosing cells, and UNKNOWN still claims nothing (below).
+                  // Furnishing gaps remain repair debt in the latch, they just no longer make the
+                  // bot homeless. `encloses` is computed here so there stays exactly ONE
+                  // rememberInfra('hut') write site (the census invariant in onehutpathtest).
+                  let shellOK = false; let shellN = 0
+                  try {
+                    const shellCells = hutCells.filter(c => hutModel.isShellCell((c && c.want) || 'air'))
+                    shellN = shellCells.length
+                    if (shellN) {
+                      const svShell = pathfixMod.surveyCells(bot, shellCells, hutModel.cellMismatch)
+                      shellOK = svShell.verdict === 'OK'
+                      if (!shellOK) dbg('camp: shell survey ' + svShell.verdict + ' (' + svShell.bad + ' bad, ' + svShell.unknown + ' unknown of ' + shellN + ') - not a hut that encloses me')
+                    }
+                  } catch (e) { dbg('camp: shell survey failed (' + e.message + ') - claiming no shell') }
+                  const encloses = builtClean || shellOK
+                  if (encloses) {
                     // PROOF-BACKED INGESTION: the hut record is written HERE, from the verify that
                     // earned it, and nowhere else. The old unconditional rememberInfra('hut') ran
                     // after a 0/94 build and gave insideOwnStructure a phantom to hold the bot in.
-                    try { provision.rememberInfra && provision.rememberInfra('hut', hutAt, { proof: { verdict: sv2.verdict, epoch: pathfixMod.epoch() } }) } catch (e) { dbg('camp: hut memory write rejected (' + e.message + ')') }
+                    try { provision.rememberInfra && provision.rememberInfra('hut', hutAt, { proof: { verdict: builtClean ? sv2.verdict : 'SHELL_OK', shell: !builtClean, epoch: pathfixMod.epoch() } }) } catch (e) { dbg('camp: hut memory write rejected (' + e.message + ')') }
+                  }
+                  if (builtClean) {
+                    say('safehouse rebuilt clean - walls, door, bed, furnace, bank all in place')
+                    hutRepairLatch = { lastBad: 0, lastAction: 'rebuild', ts: Date.now() }
                   } else if (sv2.verdict === 'UNKNOWN') {
                     dbg('camp: rebuild verify UNKNOWN (' + sv2.unknown + '/' + sv2.total + ' unreadable) - claiming nothing, latching the pre-build damage so the next pass patches')
                     say("i built at the safehouse but i can't see it well enough to say it's done")
                     hutRepairLatch = { lastBad: bad, lastAction: 'rebuild', ts: Date.now() }
-                  } else { dbg('camp: rebuild NOT clean - ' + bad2 + ' cell(s) still off, placed ' + hr.placed + '/' + hr.total); say('rebuilt the safehouse but ' + bad2 + ' cell(s) still off - no destructive retry until it improves'); hutRepairLatch = { lastBad: bad2, lastAction: 'rebuild', ts: Date.now() } }
+                  } else {
+                    dbg('camp: rebuild NOT clean - ' + bad2 + ' cell(s) still off, placed ' + hr.placed + '/' + hr.total)
+                    say('rebuilt the safehouse but ' + bad2 + ' cell(s) still off - no destructive retry until it improves')
+                    hutRepairLatch = { lastBad: bad2, lastAction: 'rebuild', ts: Date.now() }
+                    if (shellOK) {
+                      dbg('camp: the SHELL verified OK (' + shellN + ' cells) - registered the hut; the ' + bad2 + ' remaining cell(s) are furnishing debt, not a reason to disown a standing shelter')
+                      say('the safehouse shell is sound - calling it home; still need to finish the furnishings')
+                    }
+                  }
                 }
               }
             }

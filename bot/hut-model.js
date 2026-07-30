@@ -256,6 +256,26 @@ function cellClass (name) {
   return name
 }
 
+// ==== SHELL vs FURNISHING: "does it shelter me" is not "is it perfect" (2026-07-30) ======
+// A hut is only REGISTERED (rememberInfra('hut')) when the build verified PERFECT:
+//   const builtClean = sv2.verdict === 'OK' && hr.total && hr.placed >= hr.total
+// Live 2026-07-30 the hut built 45/47 with 1 cell off - the missing cells were FURNISHING (it
+// held 0 wool, so `camp: hut bed -> none`). The walls, roof and door were all up. But because
+// the gate is all-or-nothing, `hutAnchor()` stayed null and a 96%-complete shelter counted as NO
+// HUT AT ALL, which silently killed everything keyed off it:
+//   consolidate: no bank chest inside the hut yet / safekeep: no hut bank chest - skipping
+//   bed-upgrade: [noop] ... / reconcileInfra: bed 0->0
+// The shelter existed in the world and not in the bot's model.
+//
+// The all-or-nothing gate was deliberate (#115: unconditional registration once let the bot
+// "believe home was established and walk away for hours"), so the fix is NOT to loosen the proof.
+// It is that "proven to exist" and "proven perfect" are two different claims and the code only
+// had one. The SHELL - planks, the door, and the interior air that must stay clear - is what makes
+// a hut shelter you. Furnishing gaps are repair debt, tracked and patched, never a reason to
+// disown the building. This is the shell half, PURE so the split is one definition:
+const SHELL_CLASSES = new Set(['plank', 'door', 'air'])
+function isShellCell (wantName) { return SHELL_CLASSES.has(cellClass(wantName)) }
+
 // TRUE when the world block `gotName` does NOT satisfy the schematic's `wantName` for a hut
 // cell. Tolerant by class - a birch-plank patch satisfies an oak-plank cell, a trapped_chest
 // a chest cell - so a legitimate repairHutStructure patch doesn't read as permanent damage
@@ -447,6 +467,7 @@ module.exports = {
   canonicalLitterTorch,
   litterSignature,
   cellClass,
+  isShellCell,
   cellMismatch,
   decideHutRepair,
   baseTorchAnchors,

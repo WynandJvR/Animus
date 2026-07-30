@@ -466,6 +466,25 @@ t('#121: the hut anti-thrash latch is written from EVIDENCE, not from an attempt
   assert.ok(!/hutRepairLatch = \{/.test(untouched),
     'an untouched refusal must not write the latch - it proves nothing about rebuilding')
 })
+// #115 extended: the SHELL registration path must be as grounded as the perfect-build path.
+// A hut is now registered when its shell verifies even if furnishing is missing - but "verifies"
+// must mean OK, never merely "not BAD". An UNKNOWN survey (unloaded chunk, failed read) is exactly
+// the absence-of-observation that #115 exists to stop being read as observation-of-absence.
+t('#115: a shell survey may register a hut only on OK - never on UNKNOWN', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'commands.js'), 'utf8')
+  const i = src.indexOf('let shellOK = false')
+  assert.ok(i > 0, 'the shell survey still exists')
+  const blk = src.slice(i, i + 900)
+  const line = (blk.split('\n').find(l => /shellOK\s*=\s*svShell/.test(l)) || '')
+  assert.ok(line, 'the shell verdict must be assigned from the survey')
+  assert.ok(/svShell\.verdict === 'OK'/.test(line),
+    'shellOK must require verdict OK; "!== BAD" would let an UNKNOWN chunk register a hut: ' + line.trim())
+  assert.ok(!/!==\s*'BAD'/.test(line), 'not-BAD is not evidence of OK')
+})
+// (the "exactly ONE rememberInfra('hut') write site" invariant is already pinned, correctly and
+//  comment-aware, by onehutpathtest.js's census - it caught this very refactor adding a second.
+//  Not duplicated here: a second, weaker copy of an invariant is worse than one good one.)
+
 t('#121: absence is not damage - the model cannot answer "patch" with nothing standing', () => {
   const H = require('./hut-model.js')
   assert.strictEqual(H.decideHutRepair({ bad: 136, solidTotal: 136, lastBad: 136, lastAction: 'rebuild' }), 'rebuild')
