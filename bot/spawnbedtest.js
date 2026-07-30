@@ -782,20 +782,25 @@ t('SOURCE: the swap holds no blanket time window (condition gates only)', () => 
 // resource model "do I have a bed?", which reads pack + chests; a bed STANDING IN THE WORLD is
 // invisible to it. So it owned a bed, needed a bed, and was told to go find wool.
 function relocWorld (opts = {}) {
-  const bot = fakeBot({ x: 2.5, z: 2.5, items: [] })
-  bot.entity.position = new Vec3(2.5, 66, 2.5)
+  const bot = fakeBot({ items: [] })
   const hut = { x: 0, y: 65, z: 0 } // 6x6, interior bed cells (2,66,2)+(2,66,3)
+  // the real bot WALKS to the bed before breaking it; stand where that walk ends unless a test
+  // is specifically reproducing the failed-goto that started all this.
+  bot.entity.position = new Vec3(opts.at ? opts.at[0] : -2.5, opts.at ? opts.at[1] : 66, opts.at ? opts.at[2] : 0.5)
   for (let x = 0; x <= 5; x++) for (let z = 0; z <= 5; z++) bot._override(new Vec3(x, 65, z), 'oak_planks')
   bot._override(new Vec3(-3, 65, 0), 'grass_block')
   bot._override(new Vec3(-3, 65, 1), 'grass_block')
   if (opts.bedInside) {
+    bot.entity.position = new Vec3(2.5, 66, 2.5)
     bot._override(new Vec3(2, 66, 2), 'white_bed', { part: 'foot', facing: 'south' })
     bot._override(new Vec3(2, 66, 3), 'white_bed', { part: 'head', facing: 'south' })
     worldMemory.rememberBed({ x: 2, y: 66, z: 2 })
   } else {
-    bot._override(new Vec3(-3, 66, 0), 'white_bed', { part: 'foot', facing: 'south' })
+    // opts.orphanHead reproduces the half-broken bed the ungrounded first version left behind:
+    // the foot cell air, the HEAD still standing, and memory still pointing at it.
+    if (!opts.orphanHead) bot._override(new Vec3(-3, 66, 0), 'white_bed', { part: 'foot', facing: 'south' })
     bot._override(new Vec3(-3, 66, 1), 'white_bed', { part: 'head', facing: 'south' })
-    worldMemory.rememberBed({ x: -3, y: 66, z: 0 })
+    worldMemory.rememberBed({ x: -3, y: 66, z: opts.orphanHead ? 1 : 0 })
   }
   return { bot, hut }
 }
@@ -846,6 +851,40 @@ ta('RELOCATE ROLLBACK: if it cannot lay inside, the bed goes BACK where it was',
   assert.strictEqual(r.how, 'rolled-back', r.why)
   assert.ok(/_bed$/.test(bot.blockAt(new Vec3(-3, 66, 0)).name), 'the anchor is standing again where it started')
   assert.strictEqual(bot.blockAt(new Vec3(2, 66, 2)).name, 'air', 'and nothing was left half-done inside')
+})
+
+// ==== dig() RESOLVING IS NOT EVIDENCE (live 2026-07-30, the FIRST run of relocateBedInto) =====
+// A goto lost a fight with the hut doorway and left the bot at (190,70,-105) - six blocks and a
+// wall from the bed. dig() resolved anyway, and the code announced `BROKE the bed and did not
+// recover the item - no anchor now`. The world said otherwise: foot cell air, HEAD STILL STANDING
+// at 185,68,-102. A half-broken bed, and a false report of having lost it.
+ta('RECLAIM GROUNDED: out of reach after a failed goto -> KEPT, and nothing is swung at', async () => {
+  resetWorldMem()
+  const { bot, hut } = relocWorld({ at: [8.5, 70, 8.5] }) // where the failed goto actually left it
+  const r = await provHut.relocateBedInto(bot, hut, {})
+  assert.strictEqual(r.how, 'kept', r.why)
+  assert.ok(/within reach/.test(r.why), 'and it must say so: ' + r.why)
+  assert.ok(!bot._ops.some(o => o.op === 'dig'), 'a bed 8 blocks away must never be dug at')
+  assert.ok(/_bed$/.test(bot.blockAt(new Vec3(-3, 66, 0)).name), 'the anchor still stands')
+})
+
+ta('RECLAIM GROUNDED: the server refusing the break is KEPT, never "I lost my bed"', async () => {
+  resetWorldMem()
+  const { bot, hut } = relocWorld()
+  bot.dig = async () => { bot._ops.push({ op: 'dig' }) } // swing lands, block does NOT go away
+  const r = await provHut.relocateBedInto(bot, hut, {})
+  assert.strictEqual(r.how, 'kept', r.why)
+  assert.ok(/did not remove/.test(r.why), 'the verdict must come from a world RE-READ: ' + r.why)
+  assert.ok(/_bed$/.test(bot.blockAt(new Vec3(-3, 66, 0)).name), 'and the bed is still there, because it is')
+})
+
+ta('RECLAIM: the ORPHAN half left by the ungrounded run is reclaimed, not stepped over', async () => {
+  resetWorldMem()
+  const { bot, hut } = relocWorld({ orphanHead: true }) // foot air, head standing
+  const r = await provHut.relocateBedInto(bot, hut, {})
+  assert.strictEqual(r.how, 'moved', r.why)
+  assert.ok(/_bed$/.test(bot.blockAt(new Vec3(2, 66, 2)).name), 'the salvaged half is a whole bed indoors again')
+  assert.strictEqual(bot.blockAt(new Vec3(-3, 66, 1)).name, 'air', 'and the orphan is gone from outside')
 })
 
 ta('RELOCATE: hostiles nearby DEFER it - not a thing to do standing outside with a mob on us', async () => {

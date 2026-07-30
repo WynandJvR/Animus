@@ -730,14 +730,33 @@ async function relocateBedInto (bot, hut, opts = {}) {
     if (!AIRISH(cb.name)) return R('blocked', 'the interior bed site is blocked by ' + cb.name + ' - cleanup owns that, not this')
     if (fl.boundingBox !== 'block') return R('blocked', 'no solid floor under the interior bed site at ' + c.toString())
   }
-  // 1) RECLAIM. The item lands in the pack, which is what makes every later step reversible.
-  try { if (bot.entity.position.distanceTo(oldFoot) > 3) await gotoWithTimeout(bot, new goals.GoalNear(oldFoot.x, oldFoot.y, oldFoot.z, 2), 15000) } catch {}
-  const target = bot.blockAt(oldFoot) || old
-  try { await bot.dig(target) } catch (e) { return R('kept', 'could not break my own bed to move it (' + e.message + ') - it still stands where it was') }
+  // 1) RECLAIM - GROUNDED AT EVERY STEP. `bot.dig()` RESOLVING IS NOT EVIDENCE THE BLOCK IS GONE.
+  //    Live 2026-07-30, the first run of this very function: a goto lost a fight with the hut
+  //    doorway and left the bot at (190,70,-105), six blocks and a wall away from the bed; dig
+  //    resolved anyway; and this code announced `BROKE the bed and did not recover the item - no
+  //    anchor now`. The world said otherwise - foot cell air, HEAD STILL STANDING at 185,68,-102.
+  //    A half-broken bed and a false report of losing it, written by the one file that exists to
+  //    stop exactly this. So: verify ARRIVAL, verify REACH, and verify the BREAK by re-reading
+  //    (pathfix.brokeOK - the primitive that already owns this claim). A bed that did not break
+  //    is 'kept': nothing was lost, and the next pass may try again.
+  //    Iterating over the cells that ACTUALLY read as a bed is also what repairs the orphan half
+  //    the buggy run left behind - the remembered cell alone would have been air.
+  const pathfix = require('./pathfix.js')
+  const bedCells = [oldFoot, oldHead].filter(c => { const b = bot.blockAt(c); return b && /_bed$/.test(b.name) })
+  if (!bedCells.length) return R('noop', 'nothing reads as a bed at the remembered footprint any more')
+  for (const c of bedCells) {
+    const b = bot.blockAt(c)
+    if (!b || !/_bed$/.test(b.name)) continue // the partner half went with the first break
+    try { if (bot.entity.position.distanceTo(c) > 3) await gotoWithTimeout(bot, new goals.GoalNear(c.x, c.y, c.z, 2), 15000) } catch {}
+    if (bot.entity.position.distanceTo(c) > 4.5) return R('kept', 'could not get within reach of my bed at ' + c.toString() + ' (still ' + bot.entity.position.distanceTo(c).toFixed(1) + 'b away) - not swinging at a block I cannot touch')
+    if (bot.canDigBlock && !bot.canDigBlock(b)) return R('kept', 'my bed at ' + c.toString() + ' is not diggable from where I stand - it still stands')
+    try { await bot.dig(b) } catch (e) { return R('kept', 'could not break my own bed to move it (' + e.message + ') - it still stands where it was') }
+    if (!(await pathfix.brokeOK(bot, c, { timeoutMs: 1200 }))) return R('kept', 'the server did not remove my bed at ' + c.toString() + ' - it still stands, nothing lost')
+  }
   await collectDrops(bot, 4)
   if (!bedInPack(bot)) {
     await collectDrops(bot, 6) // one wider sweep - the drop is at our feet
-    if (!bedInPack(bot)) return R('failed', 'BROKE the bed and did not recover the item - no anchor now; ensureSpawnBed must lay a new one')
+    if (!bedInPack(bot)) return R('failed', 'the bed broke and the drop was not recovered - no anchor now; ensureSpawnBed must lay a new one')
   }
   // 2) RE-LAY, inside. On failure put it back exactly where it was: the item is in the pack, so
   //    this rollback cannot itself fail for want of a bed.
