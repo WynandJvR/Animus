@@ -191,6 +191,65 @@ async function bakeBreadFromWheat (bot, opts = {}) {
   } catch (e) { dbg('  bakeBread: skipped (' + e.message + ')'); return 0 }
 }
 
+// ==== FOOD I ALREADY OWN, SITTING IN MY OWN FURNACE (2026-07-30) =========================
+// #119 COMMITMENT_LEDGER made "my items are inside a container over there" REPRESENTABLE - the
+// write-ahead in noteFurnaceHoldings records the slots while the window is open, so an
+// interrupted smelt is nameable afterwards. It then gave that debt exactly ONE payer: `reclaim`,
+// a TIDINESS candidate that defers on "tidying up is daytime work".
+//
+// Live 2026-07-30: a smelt was interrupted at 16:42 leaving 3 beef in the hut furnace at
+// 185,67,-106. At 21:01 the bot was at food 0, hp 0.48, SEVEN BLOCKS AWAY, logging
+// `secureFood: FARM FLOOR ... fishing dry -> establishing/leveling the farm` while re-reading
+// that furnace's own record and never opening it. It starved next to its own dinner.
+//
+// The root is a CLASSIFICATION error, not a missing feature: cooked meat in my own furnace is
+// FOOD, and the food chain's "what do I already have" step reads pack + CHESTS (totalCounts) -
+// a furnace is neither. So the pantry cannot see it and only housekeeping can, and housekeeping
+// waits for a calm afternoon the starving bot never reaches.
+//
+// Bounded and guarded like the rest of the chain: own furnaces only, near home, only when the
+// recorded slots name something edible (a debt recorded RAW as `beef` is now `cooked_beef` in
+// the window, so the RECORD is matched loosely and whatever the window actually shows is taken),
+// and every window read SETTLES the debt on a grounded observation - never on an assumption.
+async function drainOwnFurnaceFood (bot, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const near = opts.home || hutAnchor() || knownBed() || (bot.entity && bot.entity.position)
+  if (!near) return 0
+  const maxDist = opts.maxDist != null ? opts.maxDist : 32
+  let debts = []
+  try { debts = require('./ledger.js').debts({ kind: 'container', near, maxDist }) } catch (e) { dbg('  furnace-food: ledger read failed (' + e.message + ')'); return 0 }
+  const mcData = require('minecraft-data')(bot.version)
+  const foods = (mcData && mcData.foodsByName) || {}
+  const edibleRecord = items => Object.keys(items || {}).some(n => foods[n] || foods['cooked_' + n])
+  const owed = debts.filter(d => d.container === 'furnace' && edibleRecord(d.items))
+  if (!owed.length) return 0
+  let got = 0
+  for (const d of owed.slice(0, 2)) { // bound the detour - this is a rung, not an errand list
+    if (isStopped()) break
+    const pos = new Vec3(d.x, d.y, d.z)
+    dbg('  furnace-food: my own furnace at ' + d.x + ',' + d.y + ',' + d.z + ' holds ' + JSON.stringify(d.items) + ' (owed since the smelt was interrupted) - going to take it')
+    try { if (bot.entity.position.distanceTo(pos) > 2.5) await gotoWithTimeout(bot, new goals.GoalNear(pos.x, pos.y, pos.z, 2), 20000) } catch {}
+    if (bot.entity.position.distanceTo(pos) > 4) { dbg('  furnace-food: could not get to ' + d.x + ',' + d.z + ' - leaving the debt standing'); continue }
+    const blk = bot.blockAt(pos)
+    if (!blk || !/furnace$/.test(blk.name)) { dbg('  furnace-food: no furnace at ' + d.x + ',' + d.z + ' any more - settling the debt'); try { worldMemory.settleContainer('furnace', { x: d.x, y: d.y, z: d.z }) } catch {}; continue }
+    let fur = null
+    try { fur = await bot.openFurnace(blk) } catch (e) { dbg('  furnace-food: could not open the furnace (' + e.message + ') - debt stands'); continue }
+    try {
+      for (const take of ['takeOutput', 'takeInput']) {
+        const slot = take === 'takeOutput' ? (fur.outputItem && fur.outputItem()) : (fur.inputItem && fur.inputItem())
+        if (!slot || !slot.name || !(slot.count > 0)) continue
+        const want = slot.count // read BEFORE the take: mineflayer may hand back the same object
+        try { const it = await fur[take](); const n = (it && it.count) || want; got += n; dbg('  furnace-food: took ' + n + 'x ' + ((it && it.name) || slot.name) + ' out of my furnace') } catch (e) { dbg('  furnace-food: ' + take + ' failed (' + e.message + ')') }
+      }
+      // GROUNDED SETTLE: record what the window ACTUALLY shows now, so an empty read settles the
+      // debt and a partial take leaves the remainder nameable. Never assume it is empty.
+      try { P().noteFurnaceHoldings(bot, { x: d.x, y: d.y, z: d.z }, fur) } catch (e) { dbg('  furnace-food: re-note failed (' + e.message + ')') }
+    } finally { try { fur.close() } catch {} }
+  }
+  if (got) dbg('  furnace-food: recovered ' + got + ' item(s) from my own furnace(s)')
+  return got
+}
+
 async function cookRawMeat (bot, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const mcData = require('minecraft-data')(bot.version)
@@ -830,6 +889,13 @@ async function secureFoodInner (bot, opts = {}) {
   // hp1 (the bank is at the hut), so it breaks the "far farm unreachable when weak" deadlock without
   // a 100b trek. Bounded (maxDist 64, never forces a far trek) + guarded (a dry/unreachable bank
   // falls through with nothing lost). FOOD_BANK_FIRST=0 -> the whole branch is skipped (byte-for-byte).
+  // #119b MY OWN FURNACE IS A PANTRY - runs BEFORE the bank read, because it is nearer and
+  // because the bank read structurally cannot see it (totalCounts = pack + chests). An
+  // interrupted smelt's cooked meat is food I have already paid for; going and getting it
+  // outranks hunting, fishing and levelling the farm. See drainOwnFurnaceFood.
+  try {
+    if (await drainOwnFurnaceFood(bot, { home, isStopped, say })) { await eatUp(bot); if (fedEnough()) return { fed: true, blockedOn: null } }
+  } catch (e) { dbg('secureFood: own-furnace pantry failed (' + e.message + ')') }
   if (process.env.FOOD_BANK_FIRST !== '0') {
     try { await bankFoodFirst(bot, { home, isStopped, say }) } catch (e) { dbg('secureFood: bank-first failed (' + e.message + ')') }
     if (fedEnough()) return { fed: true, blockedOn: null }
@@ -1114,5 +1180,5 @@ async function scoutHunt (bot, { isStopped = () => false, say = () => {}, maxMs 
 module.exports = {
   setDebugSink,
   REGEN_FOOD_MIN,
-  RAW_COOKABLE, FOOD_ANIMALS, LEATHER_ANIMALS, RISKY_EAT, ROD_SPIDERS, DFOOD_DEEP, DFOOD_FAR, _foodPlanHint, _securingFood, _foodFloorNoProgress, _foodFloorState, hasFood, foodCount, needsFood, nearestFoodAnimal, eatFromPackToComfortable, eatBestFood, eatUp, bakeBreadFromWheat, cookRawMeat, fishingEnabled, ensureFishingRod, fishForFood, huntForFood, huntForDrop, dropCount, huntSpiderForString, gatherLeather, woolCount, ensureFoodSupply, needFoodSupply, bankFoodFirst, courierFoodToBank, foodPlanNow, topUpFoodForPlan, _setFoodPlanHint, isSecuringFood, escalateFoodFloor, secureFood, secureFoodInner, scoutForFood, scoutHunt
+  RAW_COOKABLE, FOOD_ANIMALS, LEATHER_ANIMALS, RISKY_EAT, ROD_SPIDERS, DFOOD_DEEP, DFOOD_FAR, _foodPlanHint, _securingFood, _foodFloorNoProgress, _foodFloorState, hasFood, foodCount, needsFood, nearestFoodAnimal, eatFromPackToComfortable, eatBestFood, eatUp, bakeBreadFromWheat, cookRawMeat, drainOwnFurnaceFood, fishingEnabled, ensureFishingRod, fishForFood, huntForFood, huntForDrop, dropCount, huntSpiderForString, gatherLeather, woolCount, ensureFoodSupply, needFoodSupply, bankFoodFirst, courierFoodToBank, foodPlanNow, topUpFoodForPlan, _setFoodPlanHint, isSecuringFood, escalateFoodFloor, secureFood, secureFoodInner, scoutForFood, scoutHunt
 }

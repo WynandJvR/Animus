@@ -348,6 +348,54 @@ t('summary() excludes graves so the same debt cannot be counted into two competi
   assert.ok(!('grave' in (s.best || {})), 'graves stay graveSweep-s, at the survival tier')
 })
 
+// ==== #119b THE DEBT ONLY HOUSEKEEPING COULD PAY (live 2026-07-30) ==========================
+// #119 made "my items are inside a container over there" REPRESENTABLE, and gave it exactly ONE
+// payer: `reclaim`, a TIDINESS candidate that defers on "tidying up is daytime work". A smelt
+// interrupted at 16:42 left 3 beef in the hut furnace at 185,67,-106. At 21:01 the bot was at
+// food 0, hp 0.48, SEVEN BLOCKS AWAY, logging `secureFood: FARM FLOOR ... fishing dry ->
+// establishing/leveling the farm` while re-reading that furnace's record and never opening it.
+// It starved beside its own dinner. Cooked meat in my own furnace is FOOD, not housekeeping.
+t('food: meat owed in my OWN furnace is drained by the FOOD chain, and the debt settles on the read', async () => {
+  const provFood = require('./provision-food.js')
+  const F = { x: 185, y: 67, z: -106 }
+  worldMem.rememberInfra('hut', { x: 188, y: 67, z: -104 }, { proof: { verdict: 'OK', epoch: require('./pathfix.js').epoch() } })
+  worldMem.noteContainer('furnace', F, { beef: 3, oak_planks: 3 }) // recorded RAW, now cooked in the window
+  assert.strictEqual(worldMem.containerDebts({ x: 188, z: -104 }, 32).filter(d => d.x === F.x).length, 1, 'the debt is on the books')
+  const out = { name: 'cooked_beef', count: 3 }
+  const fur = {
+    outputItem: () => (out.count ? { name: out.name, count: out.count } : null),
+    inputItem: () => null,
+    fuelItem: () => null,
+    takeOutput: async () => { const r = { name: out.name, count: out.count }; out.count = 0; return r },
+    takeInput: async () => null,
+    close () {}
+  }
+  const bot = {
+    version: '1.21.11',
+    entity: { position: new Vec3(F.x + 0.5, F.y, F.z + 0.5) },
+    inventory: { items: () => [] },
+    blockAt: p => ({ name: 'furnace', position: p, boundingBox: 'block' }),
+    openFurnace: async () => fur
+  }
+  const got = await provFood.drainOwnFurnaceFood(bot, { home: { x: 188, y: 67, z: -104 } })
+  assert.strictEqual(got, 3, 'it must actually take the cooked meat out')
+  assert.strictEqual(out.count, 0, 'the furnace output slot is emptied')
+  assert.strictEqual(worldMem.containerDebts({ x: 188, z: -104 }, 32).filter(d => d.x === F.x).length, 0,
+    'and the debt SETTLES on the grounded window read - not on an assumption')
+})
+
+t('food: the own-furnace pantry runs in secureFood BEFORE hunting/fishing/farming', async () => {
+  // A rung that exists but is only reachable after the outward legs is the #119 defect again.
+  const src = fs.readFileSync(path.join(__dirname, 'provision-food.js'), 'utf8')
+  const i = src.indexOf('drainOwnFurnaceFood(bot, { home, isStopped, say })')
+  assert.ok(i > 0, 'secureFood must call the own-furnace pantry')
+  const bank = src.indexOf('bankFoodFirst(bot, { home, isStopped, say })')
+  const hunt = src.indexOf('huntForFood(bot, { isStopped, range: 32 })')
+  assert.ok(bank > 0 && hunt > 0, 'the bank and hunt legs must still exist')
+  assert.ok(i < bank, 'the furnace is NEARER than the bank and invisible to it - it goes first')
+  assert.ok(i < hunt, 'food I already own must outrank going hunting')
+})
+
 ;(async () => {
   for (const [name, fn] of queue) {
     try { await fn(); console.log('PASS  ' + name) } catch (e) { failures++; console.log('FAIL  ' + name + '\n      ' + e.message) }
