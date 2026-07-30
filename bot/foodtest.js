@@ -506,5 +506,68 @@ t('DEAD BAND: the trigger derives from the NEED\'s own constant, not a third num
   assert(/RISKY_EAT\.test\(i\.name\)/.test(src), 'a pack of rotten flesh is not a reserve above food 6')
 })
 
+// ==== THE HEALING DEAD BAND (2026-07-30): food has MORE THAN ONE consumer ================
+// The tests above pin the PROGRESS consumer (needs food >= 14). But regeneration needs
+// food >= 18, and the recovery ladder's R4 rung asked for food with NO threshold - so a request
+// meaning "feed me so I can HEAL" inherited the "can I keep working" number. Live 09:26Z:
+//   [prov] secureFood: food=16 > acquire-trigger 14 - not hunting/farming for the last points
+//   (core) chose build/idle: CRISIS UNANSWERED (recoveryLadder ...; recoverHp ...; maintenancePass ...)
+// hp 3.17 / food 16: too fed for the producer to act, too hungry to regenerate. 20+ minutes stuck.
+//
+// #123 matched the trigger to ONE need. That is not the invariant - this is: EVERY consumer must
+// be able to get the resource up to the level IT needs. Sweeping the consumers (not just the food
+// levels) is what makes a third consumer fail here instead of on a live night.
+const REGEN_FOOD_MIN = 18   // Minecraft regen rule, mirrored from provision-food.js
+const PROGRESS_MIN = 14     // survivalNeed / isDegraded default
+
+// each consumer: the level it needs, and the threshold it passes to secureFood
+const CONSUMERS = [
+  { name: 'progress (keep working)', needs: PROGRESS_MIN, asks: null },
+  { name: 'healing (regenerate hp)', needs: REGEN_FOOD_MIN, asks: REGEN_FOOD_MIN }
+]
+// as secureFood computes it: opts.threshold ?? (hasReserve ? 12 : PROGRESS_FOOD_MIN)
+const triggerFor = (asks, hasReserve) => asks != null ? asks : (hasReserve ? 12 : PROGRESS_MIN)
+
+t('DEAD BAND (all consumers): no consumer is left needing food its own request will not fetch', () => {
+  const bands = []
+  for (const c of CONSUMERS) {
+    for (let food = 0; food <= 20; food++) {
+      const isNeed = food < c.needs                              // this consumer cannot proceed here
+      const acquires = !(food > triggerFor(c.asks, false))       // famine case: nothing edible in the pack
+      if (isNeed && !acquires) bands.push(c.name + ' @ food ' + food)
+    }
+  }
+  assert.deepStrictEqual(bands, [], 'uninhabitable (need declared, producer refuses): ' + bands.join('; '))
+})
+
+t('DEAD BAND: the exact live state - hp 3.17 / food 16 / empty pack - now acquires', () => {
+  const healing = CONSUMERS.find(c => c.asks === REGEN_FOOD_MIN)
+  assert.strictEqual(16 > triggerFor(healing.asks, false), false, 'food 16 must NOT stand down when the point is to heal')
+  assert.strictEqual(16 > triggerFor(null, false), true, 'while the progress consumer at 16 still correctly stands down')
+})
+
+t('DEAD BAND: asking on behalf of healing does not make the bot hunt forever', () => {
+  const healing = CONSUMERS.find(c => c.asks === REGEN_FOOD_MIN)
+  assert.strictEqual(18 > triggerFor(healing.asks, false), false, 'at 18 it stops needing MORE...')
+  // ...and secureFood's own fedEnough (comfortable = REGEN_FOOD_MIN) returns fed immediately at 18,
+  // so reaching the regen threshold ends the chain rather than starting a trek.
+  assert.strictEqual(REGEN_FOOD_MIN >= 18, true, 'comfortable and the regen rule are the same number')
+})
+
+t('ANTI-DRIFT: the regen threshold is NAMED once, and the healing rung asks for it', () => {
+  const fs = require('fs'); const path = require('path')
+  const food = fs.readFileSync(path.join(__dirname, 'provision-food.js'), 'utf8')
+  const rec = fs.readFileSync(path.join(__dirname, 'provision-recovery.js'), 'utf8')
+  assert(/const REGEN_FOOD_MIN = 18/.test(food), 'the game rule must have ONE name')
+  assert(/REGEN_FOOD_MIN,/.test(food), 'and be exported so consumers can ask for it')
+  // recoverHp's can-I-heal gate must read the constant, not a bare 18
+  assert(!/\(bot\.food \?\? 20\) < 18\b/.test(rec), 'recoverHp must not re-derive the regen threshold')
+  assert(/REGEN_FOOD_MIN/.test(rec), 'recovery must consult the named rule')
+  // the R4 rung must state WHY it wants food
+  const r4 = rec.slice(rec.indexOf("'secureFood(hunt->fish->scout)'"))
+  assert(/threshold: provFood\.REGEN_FOOD_MIN/.test(r4.slice(0, 400)),
+    'the healing rung must ask at the HEALING threshold, not inherit the progress default')
+})
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall food-security tests passed')
 process.exit(failures ? 1 : 0)

@@ -102,8 +102,18 @@ function nearestFoodAnimal (bot, maxDist = 40) {
   return best
 }
 
+// ==== THE REGEN THRESHOLD, NAMED ONCE (2026-07-30) ======================================
+// Minecraft only regenerates health while the food bar is >= 18. That is a GAME RULE, not a
+// tuning knob - but it was written as a bare `18` in six places across this file and
+// provision-recovery.js (cook-before-eat, risky-eat-when-hurt, eatUp's stop point, `comfortable`
+// x2, and recoverHp's can-I-heal gate). Six copies of one rule, and - the part that actually bit -
+// NO NAME FOR IT, so a caller that needed food IN ORDER TO HEAL had nothing to ask for and
+// silently inherited the PROGRESS threshold (14) instead. See THE HEALING DEAD BAND at
+// `secureFood`'s acquireTrigger below. Same disease as the 12..14 band #123 closed, one level up.
+const REGEN_FOOD_MIN = 18
+
 async function eatFromPackToComfortable (bot, isStopped = () => false) {
-  try { if (bot.food != null && bot.food < 18 && Object.keys(RAW_COOKABLE).some(n => countItem(bot, n) > 0)) await cookRawMeat(bot, { isStopped }) } catch {}
+  try { if (bot.food != null && bot.food < REGEN_FOOD_MIN && Object.keys(RAW_COOKABLE).some(n => countItem(bot, n) > 0)) await cookRawMeat(bot, { isStopped }) } catch {}
   try { await eatUp(bot) } catch {}
 }
 
@@ -126,7 +136,7 @@ async function eatBestFood (bot) {
   // ever know about them. So the hold-out is condition-gated on the arbiter's live crisis instead:
   // in mortal danger, rotten flesh beats dying. Lazy require breaks the module cycle; evaluated
   // ONLY when we are otherwise about to hold out, so the vitals scan stays off the hot path.
-  if (RISKY_EAT.test(food.name) && bot.food > 6 && !((bot.health ?? 20) <= 8 && bot.food < 18)) {
+  if (RISKY_EAT.test(food.name) && bot.food > 6 && !((bot.health ?? 20) <= 8 && bot.food < REGEN_FOOD_MIN)) {
     let dying = false
     try {
       const arbiter = require('./arbiter.js')
@@ -141,7 +151,7 @@ async function eatBestFood (bot) {
 
 async function eatUp (bot) {
   for (let i = 0; i < 6; i++) {
-    if (bot.food == null || bot.food >= 18) return
+    if (bot.food == null || bot.food >= REGEN_FOOD_MIN) return
     const r = await eatBestFood(bot).catch(() => 'err')
     if (!/^ate /.test(r)) return
   }
@@ -572,7 +582,7 @@ function needFoodSupply (bot) {
 
 async function bankFoodFirst (bot, { home = null, isStopped = () => false, say = () => {} } = {}) {
   if (process.env.FOOD_BANK_FIRST === '0') return { fed: false }
-  const comfortable = 18
+  const comfortable = REGEN_FOOD_MIN
   if (bot.food != null && bot.food >= comfortable) return { fed: true }
   if (isStopped()) return { fed: false }
   const anchor = home || hutAnchor() || knownBed()
@@ -729,7 +739,7 @@ async function secureFoodInner (bot, opts = {}) {
   // mine at food=10 and died). "Fed" = the food bar is COMFORTABLE (>=18) - the surplus food
   // left in the pack after eating up to 18 IS the carried buffer. The old release at food>12
   // OR "3 food items" is exactly what let it leave hungry with cooked meat in the pack.
-  const comfortable = opts.comfortable != null ? opts.comfortable : 18
+  const comfortable = opts.comfortable != null ? opts.comfortable : REGEN_FOOD_MIN
   const fedEnough = () => bot.food != null && bot.food >= comfortable
   let triedHomeFood = false // HOME FOOD FIRST: at most ONE home trek per call (loop-safe)
   if (fedEnough()) return { fed: true, blockedOn: null }
@@ -798,6 +808,21 @@ async function secureFoodInner (bot, opts = {}) {
       return !RISKY_EAT.test(i.name) || (bot.food ?? 20) <= 6 // risky food only counts when the bot is desperate enough to eat it
     } catch { return false }
   })
+  // ==== THE HEALING DEAD BAND, CLOSED (2026-07-30) ========================================
+  // #123 above matched this trigger to the PROGRESS need (14). But food has more than one
+  // consumer, and the OTHER one is healing: regen requires food >= REGEN_FOOD_MIN (18). The
+  // recovery ladder's R4 rung asked for food with no `threshold`, so a request that meant "feed me
+  // so I can HEAL" silently inherited the "can I keep working" number. Live 2026-07-30 09:26Z,
+  // hp 3.17 / food 16 / empty pack:
+  //   [prov] secureFood: food=16 > acquire-trigger 14 - not hunting/farming for the last points
+  //   (core) chose build/idle: CRISIS UNANSWERED (recoveryLadder ...; recoverHp ...; maintenancePass ...)
+  // 15 <= food < 18 was uninhabitable WHENEVER hp was the thing that needed fixing: too fed for the
+  // producer to act, too hungry to regenerate. The bot sat at 3.17 hp for 20+ minutes.
+  //
+  // The lesson #123 did not generalise: matching a producer's trigger to ONE need is not enough.
+  // Every consumer must state the threshold for WHY it wants the resource, or the second consumer
+  // inherits a dead band. `opts.threshold` already existed - the healing caller just never used it.
+  // Callers now say why (see RUNG_EXECUTORS R4 in provision-recovery.js).
   const acquireTrigger = opts.threshold != null ? opts.threshold : (hasReserve ? 12 : PROGRESS_FOOD_MIN)
   if ((bot.food ?? 20) > acquireTrigger) { dbg('secureFood: food=' + bot.food + ' > acquire-trigger ' + acquireTrigger + (hasReserve ? ' with food still in the pack' : '') + ' - not hunting/farming for the last points'); return { fed: true, blockedOn: null } }
   // #62 §A FOOD_BANK_FIRST (default on): BEFORE any farm trek / fishing / hold, if the hut BANK
@@ -1088,5 +1113,6 @@ async function scoutHunt (bot, { isStopped = () => false, say = () => {}, maxMs 
 
 module.exports = {
   setDebugSink,
+  REGEN_FOOD_MIN,
   RAW_COOKABLE, FOOD_ANIMALS, LEATHER_ANIMALS, RISKY_EAT, ROD_SPIDERS, DFOOD_DEEP, DFOOD_FAR, _foodPlanHint, _securingFood, _foodFloorNoProgress, _foodFloorState, hasFood, foodCount, needsFood, nearestFoodAnimal, eatFromPackToComfortable, eatBestFood, eatUp, bakeBreadFromWheat, cookRawMeat, fishingEnabled, ensureFishingRod, fishForFood, huntForFood, huntForDrop, dropCount, huntSpiderForString, gatherLeather, woolCount, ensureFoodSupply, needFoodSupply, bankFoodFirst, courierFoodToBank, foodPlanNow, topUpFoodForPlan, _setFoodPlanHint, isSecuringFood, escalateFoodFloor, secureFood, secureFoodInner, scoutForFood, scoutHunt
 }

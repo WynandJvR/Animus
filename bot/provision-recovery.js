@@ -554,7 +554,7 @@ async function recoverHp (bot, opts = {}) {
       hpPrev = hp
       if (hp >= resumeHp) return true
       if (nightStuck(bot)) return false                              // frozen night: hand back, act (re-arm, don't hide)
-      if ((bot.food ?? 20) < 18 && !hasFood(bot)) return false       // can't regen with no food - the food chain owns acquisition
+      if ((bot.food ?? 20) < provFood.REGEN_FOOD_MIN && !hasFood(bot)) return false // can't regen with no food - the food chain owns acquisition (R4 now asks AT this threshold)
       if (hp < hp0 - 2) return false                                 // still taking damage while 'recovering' - release to flee/defend
       await new Promise(r => setTimeout(r, 2000))
     }
@@ -1168,7 +1168,13 @@ const RUNG_EXECUTORS = {
     if (process.env.MAINTAIN !== '0') { try { await courierFoodToBank(bot, { isStopped: o.isStopped, say: o.say }) } catch (e) { o.dbg('(ladder) R3 orchard courier failed: ' + e.message) } }
   },
   // R4: acquire NEW supply (hunt->fish->scout). canHold:false - the ladder owns holding (R5).
-  'secureFood(hunt->fish->scout)': async (bot, o) => { await secureFood(bot, { home: o.home, canHold: false, isStopped: o.isStopped, say: o.say }) },
+  // THE HEALING DEAD BAND (2026-07-30): this rung runs because the bot is DEGRADED - it wants food
+  // in order to REGENERATE, not merely to keep working. Without an explicit threshold it inherited
+  // secureFood's progress default (PROGRESS_FOOD_MIN 14) while recoverHp needs REGEN_FOOD_MIN (18),
+  // so 15..17 was a band where the ladder asked for food, the producer said "you have enough", and
+  // the bot could not heal. Live: hp 3.17 / food 16, CRISIS UNANSWERED, 20+ minutes.
+  // Say WHY we want the food, and the producer answers the right question.
+  'secureFood(hunt->fish->scout)': async (bot, o) => { await secureFood(bot, { home: o.home, canHold: false, isStopped: o.isStopped, say: o.say, threshold: provFood.REGEN_FOOD_MIN }) },
   // R5: the one bounded hold (bed-sleep -> hut -> pit; its own preference order covers both variants)
   'boundedHold:sleep': async (bot, o) => { await boundedHold(bot, { isStopped: o.isStopped, say: o.say }) },
   'boundedHold:sealPit': async (bot, o) => { await boundedHold(bot, { isStopped: o.isStopped, say: o.say }) },
