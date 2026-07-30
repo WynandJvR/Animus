@@ -754,7 +754,58 @@ const bodyOwner = () => {
 // on). Builds a snapshot, asks the pure pickJob which ONE job should own the body, and dispatches
 // ONLY survival-class jobs to the existing executors (graveSweep->recover, secureFood, recoverHp),
 // preempting a busy body only on a crisis-grade need or a near grave. SCHEDULER=0 removes it entirely.
+// ==== THE DISPATCH SLOT IS A LEASE, NOT A FLAG (2026-07-30) ==============================
+// `schedJob` is an EXCLUSIVE claim on the body: while it is set, the scheduler tick returns early
+// and dispatches nothing (see `dispatchBusy()` consumers below). Its release was coupled to
+// `runJob`'s promise resolving - so an executor that never resolves held the slot FOREVER and the
+// bot could never run another job. Live 2026-07-30, repeatedly, on three different jobs:
+//   (wd) stop latch ineffective on recoveryLadder - a hung promise; standing down, layer d ... owns this
+//   (wd) stop latch ineffective on secureFood     - a hung promise; ...
+//   (wd) stop latch ineffective on recover        - a hung promise; ...  (every 2-3 min, for hours)
+// The escalation ladder's last rung (GIVEUP) only LOGGED and deferred to "layer d", which never
+// collected them. So NUDGE -> FAIL-JOB -> GIVEUP ended in a rung with no power, and every latch in
+// the system is COOPERATIVE: it can only be seen by a job that awaits something polling isStopped().
+// A job hung in an await that never settles cannot observe any of them, by construction.
+//
+// reflexes.js already solved this for body HOLDS and states the rule in its own comment:
+// "an expired hold is NOT a hold: the watchdog gets the body back" (activeHold drops expired
+// entries lazily on read). The dispatch slot was the one exclusive claim exempt from that rule.
+// This applies the EXISTING rule rather than adding a special case: the slot carries an expiry, is
+// checked on read, and can be REVOKED. A generation counter makes the revocation safe - a
+// late-resolving abandoned executor must never clear its successor's slot.
+const DISPATCH_LEASE_MS = parseInt(process.env.DISPATCH_LEASE_MS || '600000', 10)
 let schedJob = null             // the single job-latch (I4): one scheduler dispatch at a time
+let schedGen = 0                // bumped on every dispatch AND every revoke - the anti-clobber epoch
+
+// The slot, or null - expiring a stale lease lazily on read, exactly as reflexes.activeHold does.
+// This is the ONE definition of "is a dispatch in flight"; nothing may test `schedJob` directly.
+function dispatchBusy () {
+  if (!schedJob) return null
+  if (schedJob.until != null && schedJob.until <= Date.now()) {
+    const stale = schedJob
+    revokeDispatch('lease expired after ' + Math.round((Date.now() - stale.startedAt) / 1000) + 's')
+    return null
+  }
+  return schedJob
+}
+
+// Take the body back from a job that cannot give it back. Releases the declared hold, frees the
+// slot, bumps the epoch, and - critically - lets go of the CONTROLS and the nav goal: an abandoned
+// executor may still be steering, and two actors driving one body is precisely what the one-runner
+// work forbids. The abandoned promise is left to settle into nothing; its `finally` is epoch-guarded.
+function revokeDispatch (why) {
+  const j = schedJob
+  if (!j) return false
+  schedJob = null
+  schedGen++
+  try { if (j.holdToken) reflexes.endHold(j.holdToken) } catch {}
+  try { if (bot.pathfinder) bot.pathfinder.setGoal(null) } catch {}
+  try { bot.clearControlStates() } catch {}
+  try { commands.touchProgress('dispatchRevoked:' + j.name) } catch {}
+  note('(wd) REVOKED the dispatch slot from ' + j.name + ' - ' + why + '; the body is free for the next job')
+  try { commands.recordOutcome('revoke:' + j.name, false, why) } catch {}
+  return true
+}
 let schedLastLog = ''           // decision-change log throttle
 let schedHeldLog = ''           // busy-held note throttle (separate so it never clobbers the decision key)
 // (the back-offs and latches that used to live here as five loose `sched*` globals are the
@@ -809,9 +860,15 @@ if (SCHED_ON) {
     // must key off the chooser's, or it silently never matches the candidate it is meant to
     // refuse - which is exactly what FIX 11 did for the ladder until this line existed.
     const jobKey = opts.jobKey || name
-    schedJob = { name, startedAt: Date.now() }
+    // The lease: this dispatch owns the slot until it returns OR the lease runs out, whichever is
+    // first. `myGen` is the epoch this executor belongs to - if the slot is revoked underneath it,
+    // the epoch moves on and this executor's `finally` must not touch its successor's state.
+    const myGen = ++schedGen
+    const startedAt = Date.now()
+    schedJob = { name, startedAt, gen: myGen, until: startedAt + DISPATCH_LEASE_MS, holdToken: null }
     commands.touchProgress('dispatch:' + name) // S7 (d): a just-dispatched job is at zero idle (same t0 rule as beginActivity/H5c)
     const holdToken = opts.holds ? reflexes.beginHold(name, opts.holds.wake, opts.holds.ttlMs || 900000) : null
+    if (schedJob && schedJob.gen === myGen) schedJob.holdToken = holdToken // so a revoke can release it
     try {
       // An executor returns either a plain string (what happened, for the log) or
       // { msg, noOp } - `noOp` being ITS OWN verdict that it ran to completion and the world
@@ -834,8 +891,18 @@ if (SCHED_ON) {
       // what the per-hold heartbeats were really for: without it a job that legitimately sat
       // still for ten minutes is instantly stale when it stands up again. One honest stamp at
       // release beats a 3-second heartbeat claiming progress that never happened.
-      if (holdToken) { reflexes.endHold(holdToken); commands.touchProgress('holdReleased:' + name) }
-      schedJob = null
+      // EPOCH-GUARDED. If the slot was revoked while this executor was hung, the body has already
+      // been handed to someone else - a late return must release only ITS OWN hold and then keep its
+      // hands off. Clearing `schedJob` unconditionally here would silently free the SUCCESSOR's slot
+      // and let two jobs run at once, which is the exact invariant the one-runner work established.
+      const mine = schedJob && schedJob.gen === myGen
+      if (holdToken) reflexes.endHold(holdToken) // idempotent (Map.delete) - safe either way
+      if (mine) {
+        commands.touchProgress('holdReleased:' + name)
+        schedJob = null
+      } else if (holdToken) {
+        note('(sched) ' + name + ' returned after its slot was revoked - releasing its hold only, not the current job\'s')
+      }
     }
   }
   // #65 DYNAMIC_CORE Phase 1 adapter: run the PURE schedulerCore.chooseActivity and shape its verdict
@@ -1016,7 +1083,7 @@ if (SCHED_ON) {
     try {
       // 1. GUARDS (cheap; mirror the crisis reflexes). NOT gated on arbiter.maneuverActive() - a
       //    survival preempt must be able to interrupt a nav leg (same as FOOD_CRISIS today).
-      if (!bot.entity || schedJob) return
+      if (!bot.entity || dispatchBusy()) return
       // FARM_EXPAND's passive river-crossing note: O(1), self-throttled to <=1/60s, never
       // navigates. It rode the FOOD_SUPPLY timer purely because that timer existed; when that
       // timer was deleted (S5) this was the one line in it that still had a job to do.
@@ -1081,7 +1148,7 @@ if (SCHED_ON) {
         // at the hut, open a brief bounded chore window: pause (never cancel) the build,
         // run the home-only maintenancePass, cool down, and let the 2-min re-arm resume it.
         if (!OPP_ON) return
-        if (schedJob || Date.now() < runner.maintainCooldownUntil) return
+        if (dispatchBusy() || Date.now() < runner.maintainCooldownUntil) return
         const checkupDue = Date.now() - schedOppLastWindowAt >= Number(process.env.OPP_CHECKUP_MS || 1800000)
         const elig = scheduler.oppMaintain(s, { checkupDue })
         if (!elig.ok) return
@@ -1313,14 +1380,35 @@ if (SCHED_ON) {
             // only; its own travel deadlines unwind it and the tick applies runner.graveCooldownUntil. A
             // promise-hung recover is caught by GIVEUP next window (layer d's class).
           } else if (wdState.act === 'giveup') {
-            note('(wd) stop latch ineffective on ' + job.name + ' - a hung promise; standing down, layer d (supervisor frozen-vitals/kill) owns this')
+            // GIVEUP USED TO ONLY LOG. It set no latch, freed nothing, and deferred to "layer d
+            // (supervisor frozen-vitals/kill)" - which did not collect these: live 2026-07-30 the
+            // same line repeated every 2-3 minutes for hours on `recover`, `recoveryLadder` and
+            // `secureFood`. A rung with no power is not a rung, and it was the LAST one, so the
+            // ladder's terminal state was "log forever".
+            // Every latch above it is COOPERATIVE - only a job that awaits something polling
+            // isStopped() can see one. The whole point of the final rung is the case where that
+            // assumption has already failed, so the final rung must NOT be cooperative. It now takes
+            // the body back by revoking the dispatch lease (§ the slot is a lease, not a flag).
+            note('(wd) stop latch ineffective on ' + job.name + ' - a hung promise; taking the body back')
+            // Unconditional statement, deliberately NOT folded into the `if` below: the revoke is the
+            // rung's whole purpose, and an action buried in a condition is an action that can be
+            // quietly disabled (a `false &&` reads as still-present to a source-level guard).
+            const revoked = revokeDispatch('hung promise: no verified progress for ' + Math.round((now - (job.lastProgressAt || job.startedAt || now)) / 1000) + 's and the stop latch did not bite')
+            if (!revoked) {
+              // No slot to revoke: the hang is inside a non-dispatch path (a brain command or a
+              // reflex). Clear the nav goal + controls so the body is at least steerable again.
+              note('(wd) ' + job.name + ' holds no dispatch slot - releasing the controls instead')
+              try { if (bot.pathfinder) bot.pathfinder.setGoal(null) } catch {}
+              try { bot.clearControlStates() } catch {}
+              try { commands.touchProgress('giveupRelease:' + job.name) } catch {}
+            }
           }
         }
         // 7. IDLE-WITH-WORK (§6 item 3): a survival pick sits undispatched while the body is truly idle
         //    (no busy activity, no pathfinder goal, no schedJob) and no latch job is running. Continuous
         //    >30s -> kick; at CRISIS vitals also clear the stale scheduler cooldowns so the next tick
         //    dispatches (the surgical fix for "sat frozen while graves gleamed 3b away"). Rate-limited 60s.
-        const idleBody = !(commands.isBusy && commands.isBusy()) && !(bot.pathfinder && bot.pathfinder.goal) && !schedJob
+        const idleBody = !(commands.isBusy && commands.isBusy()) && !(bot.pathfinder && bot.pathfinder.goal) && !dispatchBusy()
         if (schedLastPick && schedLastPick.cls === 'survival' && job == null && idleBody) {
           if (!idleWorkSince) idleWorkSince = now
           if (now - idleWorkSince > 30000 && now - lastKickAt > 60000) {
