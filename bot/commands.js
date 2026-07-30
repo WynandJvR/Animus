@@ -2582,13 +2582,41 @@ async function autoBuild (bot, schem, at, opts = {}) {
         const pathfixMod = require('./pathfix.js') // #115: the grounded-claim contract
         const hutSchem = await schematic.loadFile('hut.schem', bot.version)
         const st = hutSchem.start(); const en = hutSchem.end()
-        const known = (provision.listInfra ? provision.listInfra('hut', bot) : []).find(e => Math.hypot(e.x - at.x, e.z - at.z) <= 150)
-        let hutAt
-        if (known) hutAt = new Vec3(known.x, known.y, known.z)
-        else {
-          const kb = provision.knownBed && provision.knownBed()
-          hutAt = snapToGround(bot, hutSchem, new Vec3(kb ? kb.x + 3 : Math.round(at.x) - 16, kb ? kb.y - 1 : Math.floor(at.y), kb ? kb.z - 2 : Math.round(at.z)))
+        // The schematic as ANCHOR-RELATIVE cells - ONE list, shared by the anchor search, the
+        // survey and the damage split, so those three can never disagree about which cell is
+        // which again. (dx = x - st.x, matching repairHutStructure; this loop used to use a raw
+        // `hutAt.x + x`, a latent divergence from the repairer whenever start() isn't 0,0,0.)
+        const relCells = []
+        for (let y = st.y; y <= en.y; y++) for (let z = st.z; z <= en.z; z++) for (let x = st.x; x <= en.x; x++) {
+          const w = hutSchem.getBlock(new Vec3(x, y, z))
+          relCells.push({ dx: x - st.x, dy: y - st.y, dz: z - st.z, want: (w && w.name) || 'air' })
         }
+        const worldRead = (x, y, z) => bot.blockAt(new Vec3(x, y, z))
+        const known = (provision.listInfra ? provision.listInfra('hut', bot) : []).find(e => Math.hypot(e.x - at.x, e.z - at.z) <= 150)
+        const resolveAnchor = () => {
+          if (known) return new Vec3(known.x, known.y, known.z)
+          const kb = provision.knownBed && provision.knownBed()
+          const seed = new Vec3(kb ? kb.x + 3 : Math.round(at.x) - 16, kb ? kb.y - 1 : Math.floor(at.y), kb ? kb.z - 2 : Math.round(at.z))
+          // ==== FIND THE HUT BEFORE SITING ONE (2026-07-30) ==============================
+          // This seed is derived from the BED, and while infra.hut is empty it is recomputed
+          // EVERY pass - so the hut's coordinate frame was a function of a movable object.
+          // Live: the bed went 185,-103 -> 185,-102 and dragged the anchor from z=-105 to
+          // z=-104. Under the stale frame world z=-100 read as the z=5 RIM WALL and the
+          // repairer walled up the interior with 10 planks, then reported damage it had just
+          // created. snapToGround made it stick: its "resume in place" escape accepts ANY
+          // frame matching >=5 cells, and a plank box offset by one clears that easily.
+          // A structure's location is a property of the STRUCTURE: look for the building that
+          // is actually standing, and only fall back to the bed heuristic to SITE a hut that
+          // does not exist yet. bestAnchor refuses on an ambiguous or unloaded window, so
+          // "I can't tell" still lands on the siting path rather than on a guess.
+          const found = hutModel.bestAnchor(seed, relCells, worldRead, { radius: 2 })
+          if (!found) return snapToGround(bot, hutSchem, seed)
+          if (found.anchor.x !== seed.x || found.anchor.y !== seed.y || found.anchor.z !== seed.z) {
+            dbg('camp: hut FOUND standing at ' + found.anchor.x + ',' + found.anchor.y + ',' + found.anchor.z + ' (' + found.match + '/' + found.total + ' cells match, runner-up ' + found.runnerUp + ') - the bed-derived seed ' + seed.x + ',' + seed.y + ',' + seed.z + ' was off; using the building, not the bed')
+          }
+          return new Vec3(found.anchor.x, found.anchor.y, found.anchor.z)
+        }
+        let hutAt = resolveAnchor()
         // GROUNDED mismatch count - furniture cells INCLUDED (real block reads). #37: also tally
         // solidTotal (non-air schematic cells) in the SAME loop (one extra counter, no new pass).
         // The tolerant cellMismatch classifier is THE classifier now (#108): a birch-plank patch on
@@ -2602,11 +2630,8 @@ async function autoBuild (bot, schem, at, opts = {}) {
         // bot decided `rebuild (bad=111/136)` from ~200b away underground, emptied the bank,
         // cleared the site, died, and four seconds later announced `0 cell(s) still off,
         // placed 0/94`. A survey that cannot see its subject must REFUSE TO DECIDE.
-        const hutCells = []
-        for (let y = st.y; y <= en.y; y++) for (let z = st.z; z <= en.z; z++) for (let x = st.x; x <= en.x; x++) {
-          const w = hutSchem.getBlock(new Vec3(x, y, z))
-          hutCells.push({ pos: new Vec3(hutAt.x + x, hutAt.y + y, hutAt.z + z), want: (w && w.name) || 'air' })
-        }
+        const cellsAt = a => relCells.map(c => ({ pos: new Vec3(a.x + c.dx, a.y + c.dy, a.z + c.dz), want: c.want }))
+        let hutCells = cellsAt(hutAt)
         const surveyHut = () => pathfixMod.surveyCells(bot, hutCells, hutModel.cellMismatch)
         let sv = surveyHut()
         if (sv.verdict === 'UNKNOWN') {
@@ -2614,6 +2639,16 @@ async function autoBuild (bot, schem, at, opts = {}) {
           // the blind pass are PARTIAL and are never used for anything.
           dbg('camp: hut survey UNKNOWN (' + sv.unknown + '/' + sv.total + ' cells unreadable) - travelling to the anchor to look before deciding anything')
           try { await travelFar(bot, { x: hutAt.x, y: hutAt.y, z: hutAt.z }, { isStopped, say }) } catch (e) { dbg('camp: hut approach failed (' + e.message + ')') }
+          // RE-RESOLVE now that the chunks are loaded. bestAnchor refuses on an unloaded window,
+          // so the pre-travel anchor may have come from the bed-derived siting fallback - i.e.
+          // exactly the guess that drifted. Deciding from it after arriving would re-open the
+          // whole bug at range: survey UNKNOWN -> travel -> patch a hut that isn't there.
+          const re = resolveAnchor()
+          if (re.x !== hutAt.x || re.y !== hutAt.y || re.z !== hutAt.z) {
+            dbg('camp: on arrival the hut resolves to ' + re.x + ',' + re.y + ',' + re.z + ' (was ' + hutAt.x + ',' + hutAt.y + ',' + hutAt.z + ' from an unloaded guess) - re-surveying against the building')
+            hutAt = re
+            hutCells = cellsAt(hutAt)
+          }
           sv = surveyHut()
         }
         const hutVerdict = sv.verdict
@@ -2665,6 +2700,13 @@ async function autoBuild (bot, schem, at, opts = {}) {
           // refuses, it never proceeds. (verdict 'OK' means bad===0, which decideHutRepair already
           // answers 'none' to, so only a genuinely-BAD, genuinely-SEEN hut can be touched.)
           const decision = hutVerdict === 'UNKNOWN' ? 'none' : hutModel.decideHutRepair({ bad, solidTotal, lastBad: hutRepairLatch.lastBad, lastAction: hutRepairLatch.lastAction })
+          // ONE damage line, split by the role that names each part's OWNER (2026-07-30). Three
+          // subsystems used to print three different totals for the same hut in the same second
+          // (`2 cell(s) off` / `bad=14/136` / `12 bad of 176`) and no line said which of them any
+          // code could actually act on. enclosure -> repairHutStructure, clearance ->
+          // cleanupHutInterior, furnishing -> repairHutStructure.
+          const dmg = hutModel.hutDamage(relCells, hutAt, worldRead)
+          dbg('camp: hut damage @' + hutAt.x + ',' + hutAt.y + ',' + hutAt.z + ' enclosure=' + dmg.enclosure.length + ' clearance=' + dmg.clearance.length + ' furnishing=' + dmg.furnishing.length + ' unknown=' + dmg.unknown + ' of ' + dmg.total)
           dbg('camp: hut repair decision=' + decision + ' (verdict=' + hutVerdict + ', bad=' + bad + '/' + solidTotal + ' solid' + (sv.unknown ? ', unknown=' + sv.unknown : '') + ', lastBad=' + hutRepairLatch.lastBad + ' lastAction=' + hutRepairLatch.lastAction + ')')
           if (decision === 'patch') {
             // COMMON CASE: SKIP the destructive teardown entirely. provision.maintainHome (below)
@@ -2864,6 +2906,12 @@ async function autoBuild (bot, schem, at, opts = {}) {
         // #115 preserved: OK only, never "not BAD" - an UNKNOWN cell claims nothing. Idempotent,
         // and the single rememberInfra('hut') write site in this file (census, onehutpathtest).
         try {
+          // isShellCell is ENCLOSURE-ONLY as of 2026-07-30 (hut-model cellRole): planks + door.
+          // It used to include the 44 interior AIR cells, and that is what deadlocked the bot for
+          // five hours - an air cell holding a block was counted here as "not a shelter" while
+          // repairHutStructure structurally could not see air cells at all and strayCells could
+          // not see planks, so NOTHING could clear it. Interior obstruction is now real debt with
+          // a real owner (cleanupHutInterior) instead of a permanent veto on being home.
           const shellCells = hutCells.filter(c => hutModel.isShellCell((c && c.want) || 'air'))
           if (shellCells.length) {
             const svShell = pathfixMod.surveyCells(bot, shellCells, hutModel.cellMismatch)
@@ -2871,7 +2919,7 @@ async function autoBuild (bot, schem, at, opts = {}) {
             const already = !!(provision.hutAnchor && provision.hutAnchor())
             if (shellOK) {
               if (!already) {
-                dbg('camp: the SHELL verified OK (' + shellCells.length + ' cells) - registering the hut; any remaining cell(s) are furnishing debt, not a reason to disown a standing shelter')
+                dbg('camp: the ENCLOSURE verified OK (' + shellCells.length + ' plank/door cells) at ' + hutAt.x + ',' + hutAt.y + ',' + hutAt.z + ' - registering the hut; interior clutter and furnishing gaps are repair debt, not a reason to disown a standing shelter')
                 say('the safehouse shell is sound - calling it home')
               }
               provision.rememberInfra && provision.rememberInfra('hut', hutAt, { proof: { verdict: 'SHELL_OK', shell: true, epoch: pathfixMod.epoch() } })

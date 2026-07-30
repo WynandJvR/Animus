@@ -160,16 +160,28 @@ function freeStandCells (a, read) {
   return out
 }
 
-// STRAY filler blocks sitting in interior AIR cells (dy 1..h-2) - loose dirt/cobble on the
-// floor slab or piled on furniture. Skips the floor slab (dy0) and roof (dy h-1) planks.
-// These are what cleanup digs. Returns [{x,y,z,name}].
+// What may occupy an interior AIR cell and be removed: loose filler AND the hut's own plank.
+// PLANKS were added 2026-07-30: with the anchor drifted one cell (see bestAnchor below) the
+// repairer walled the interior row z=4 with 10 oak_planks, and because strayCells only matched
+// dirt/cobble the bot printed `interior already clean` next to `12 bad` for five hours. A plank
+// standing in the bot's OWN interior is its own over-placement - it is the single material the
+// hut is built from - and clearing it is restoring the building to spec, not griefing.
+// Deliberately NOT furniture: a bed/chest/furnace/table/torch indoors is a furnished home, and
+// the bed in particular is the spawn anchor and is not in the schematic at all.
+const INTERIOR_PLANK_RE = /^[a-z_]+_planks$/
+const isInteriorObstruction = name =>
+  !!name && !FURNITURE_RE.test(name) && (STRAY_FILLER_RE.test(name) || INTERIOR_PLANK_RE.test(name))
+
+// STRAY blocks sitting in interior AIR cells (dy 1..h-2) - filler on the floor slab, piled on
+// furniture, or the bot's own misplaced planks. Skips the floor slab (dy0) and roof (dy h-1)
+// planks, which are fabric. These are what cleanup digs. Returns [{x,y,z,name}].
 function strayCells (a, read) {
   const out = []
   for (const [x, z] of interiorColumns(a)) {
     for (let dy = 1; dy <= DIMS.h - 2; dy++) {
       const y = a.y + dy
       const b = read(x, y, z)
-      if (b && !AIRISH(b.name) && STRAY_FILLER_RE.test(b.name)) out.push({ x, y, z, name: b.name })
+      if (b && !AIRISH(b.name) && isInteriorObstruction(b.name)) out.push({ x, y, z, name: b.name })
     }
   }
   return out
@@ -211,6 +223,95 @@ function floorHoles (a, read) {
     if (!b || AIRISH(b.name) || /water|lava/.test(b.name)) out.push({ x, y, z })
   }
   return out
+}
+
+// ---- WHERE IS MY HUT: the anchor is found, never derived (2026-07-30) ---------------
+// THE LIVE BUG. With infra.hut empty the camp step computed the hut's coordinate frame from
+// the BED: `snapToGround(bot, schem, Vec3(kb.x+3, kb.y-1, kb.z-2))`. The bed moved one block
+// (185,-103 at 14:03 -> 185,-102 at 16:52) and took the whole hut with it (anchor z -105 ->
+// -104). Under the stale frame world z=-100 read as the z=5 RIM WALL, so the repairer dutifully
+// walled it up: 10 planks straight across the interior. It also explains `place plank at
+// (191,67,-105)`, a cell outside the real hut entirely.
+//
+// A structure's location is a property of the STRUCTURE. These two PURE functions resolve it
+// from the world - the frame where the building actually stands - so a neighbour that moves
+// can never move the hut. `relCells` is the schematic as [{dx,dy,dz,want}]; `read(x,y,z)`
+// returns a block-like {name} or null/undefined for "not loaded" (which is UNKNOWN, never a
+// match - the #115 rule holds here too: a frame nobody can see wins nothing).
+
+// How well does the standing world match the schematic if the anchor were `at`?
+function anchorFit (relCells, at, read) {
+  let match = 0; let known = 0
+  for (const c of (relCells || [])) {
+    const b = read(at.x + c.dx, at.y + c.dy, at.z + c.dz)
+    if (b == null) continue
+    known++
+    if (!cellMismatch(c.want, b.name)) match++
+  }
+  return { match, known, total: (relCells || []).length }
+}
+
+// The best-fitting anchor within `radius` of `seed`, or null when nothing fits confidently.
+// Confidence has three parts, all necessary: enough of the window is LOADED (minKnown), the
+// winner actually looks like the hut (minMatch), and it beats the runner-up by `margin` so an
+// ambiguous frame refuses rather than guesses. Deterministic tie-break toward the seed.
+function bestAnchor (seed, relCells, read, opts = {}) {
+  const radius = opts.radius != null ? opts.radius : 2
+  const minKnown = opts.minKnown != null ? opts.minKnown : 0.9
+  const minMatch = opts.minMatch != null ? opts.minMatch : 0.6
+  const margin = opts.margin != null ? opts.margin : 4
+  const total = (relCells || []).length
+  if (!seed || !total) return null
+  const scored = []
+  for (let dx = -radius; dx <= radius; dx++) {
+    for (let dy = -radius; dy <= radius; dy++) {
+      for (let dz = -radius; dz <= radius; dz++) {
+        const at = { x: seed.x + dx, y: seed.y + dy, z: seed.z + dz }
+        const f = anchorFit(relCells, at, read)
+        if (f.known < minKnown * total) continue          // too much unloaded to judge
+        scored.push({ at, ...f, off: Math.abs(dx) + Math.abs(dy) + Math.abs(dz) })
+      }
+    }
+  }
+  if (!scored.length) return null
+  scored.sort((a, b) => (b.match - a.match) || (a.off - b.off))
+  const best = scored[0]
+  if (best.match < minMatch * total) return null           // nothing here looks like the hut
+  const rival = scored.find(s => s.at.x !== best.at.x || s.at.y !== best.at.y || s.at.z !== best.at.z)
+  if (rival && best.match - rival.match < margin) return null // ambiguous - refuse to guess
+  return { anchor: best.at, match: best.match, known: best.known, total, runnerUp: rival ? rival.match : 0 }
+}
+
+// ---- ONE DEFINITION OF HUT DAMAGE (2026-07-30) --------------------------------------
+// repairHutStructure counted 136 cells, the camp decision 180, the shell survey 176, and they
+// disagreed forever (`2 cell(s) off` / `bad=14/136` / `12 bad of 176`, same hut, same second).
+// Worse, the only repair actor could not SEE the direction the surveys were counting. This is
+// the single scan all three read from, split by the role that names each part's OWNER:
+//   enclosure  -> repairHutStructure places it, and it alone gates registration
+//   clearance  -> cleanupHutInterior digs it
+//   furnishing -> repairHutStructure places it
+// UNKNOWN cells are counted separately and never as damage (#115).
+function hutDamage (relCells, at, read) {
+  const out = { enclosure: [], clearance: [], furnishing: [], unknown: 0, total: (relCells || []).length }
+  for (const c of (relCells || [])) {
+    const p = { x: at.x + c.dx, y: at.y + c.dy, z: at.z + c.dz }
+    const b = read(p.x, p.y, p.z)
+    if (b == null) { out.unknown++; continue }
+    if (!cellMismatch(c.want, b.name)) continue
+    out[cellRole(c.want)].push({ x: p.x, y: p.y, z: p.z, want: c.want, got: b.name })
+  }
+  return out
+}
+
+// Which duplicate station to KEEP. Live 2026-07-30 cleanupHutInterior deduped by scan order
+// (lowest z first), so it kept the strays at z=-101 and dug the table + furnace standing in the
+// schematic's OWN cells at z=-100 - manufacturing the two furniture holes repairHut then
+// reported as damage forever. The schematic decides: a station in its designed cell is the
+// keeper. Stable, so same-priority cells keep their scan order.
+function dedupeOrder (cells, protectedCells) {
+  const prot = protectedCells || []
+  const isProt = c => prot.some(p => p.x === c.x && p.y === c.y && p.z === c.z)
+  return (cells || []).map((c, i) => ({ c, i })).sort((a, b) => (isProt(b.c) ? 1 : 0) - (isProt(a.c) ? 1 : 0) || (a.i - b.i)).map(e => e.c)
 }
 
 // ---- pure registry reconcile helpers (offline-testable) ---------------------------
@@ -270,11 +371,35 @@ function cellClass (name) {
 // The all-or-nothing gate was deliberate (#115: unconditional registration once let the bot
 // "believe home was established and walk away for hours"), so the fix is NOT to loosen the proof.
 // It is that "proven to exist" and "proven perfect" are two different claims and the code only
-// had one. The SHELL - planks, the door, and the interior air that must stay clear - is what makes
-// a hut shelter you. Furnishing gaps are repair debt, tracked and patched, never a reason to
-// disown the building. This is the shell half, PURE so the split is one definition:
-const SHELL_CLASSES = new Set(['plank', 'door', 'air'])
-function isShellCell (wantName) { return SHELL_CLASSES.has(cellClass(wantName)) }
+// had one. Furnishing gaps are repair debt, tracked and patched, never a reason to disown the
+// building.
+//
+// ==== ROLES: ONE VOCABULARY, ONE ACTOR EACH (2026-07-30) ================================
+// The first cut of this split put the interior AIR cells in the shell, reasoning that "the
+// interior that must stay clear" is part of what shelters you. Live, that produced damage NO
+// CODE COULD REPAIR: repairHutStructure opens with `if (schema wants air) continue - never
+// fill`, so it cannot see an air cell at all, and strayCells only matched dirt/cobble, so it
+// could not see a PLANK sitting in one. The bot had walled its own interior row (10 planks at
+// world z=-100, measured) and every pass read `12 bad` and `interior already clean` together,
+// forever. A cell counted as damage by a survey and visible to no actor is a deadlock by
+// construction - it is the shape of every bug in this session.
+//
+// So each cell's want-name has exactly one ROLE, and each role has exactly one owner:
+//   'enclosure'  planks + door -> what makes it SHELTER you.  Gates registration.
+//   'clearance'  air           -> must be free of non-furniture. Owned by cleanupHutInterior.
+//   'furnishing' chest/furnace/table/anything else -> repair debt. Owned by repairHutStructure.
+// isShellCell is now enclosure-only. That is 525e235's "does it shelter me is not is it
+// perfect" applied one level deeper: a crafting table standing one cell off does not make a
+// bot homeless, and a 130-plank box with both door halves up IS a shelter. The claim stays
+// strict about the thing it actually asserts.
+const ENCLOSURE_CLASSES = new Set(['plank', 'door'])
+function cellRole (wantName) {
+  const c = cellClass(wantName)
+  if (ENCLOSURE_CLASSES.has(c)) return 'enclosure'
+  if (c === 'air') return 'clearance'
+  return 'furnishing'
+}
+function isShellCell (wantName) { return cellRole(wantName) === 'enclosure' }
 
 // TRUE when the world block `gotName` does NOT satisfy the schematic's `wantName` for a hut
 // cell. Tolerant by class - a birch-plank patch satisfies an oak-plank cell, a trapped_chest
@@ -467,7 +592,13 @@ module.exports = {
   canonicalLitterTorch,
   litterSignature,
   cellClass,
+  cellRole,
   isShellCell,
+  isInteriorObstruction,
+  anchorFit,
+  bestAnchor,
+  hutDamage,
+  dedupeOrder,
   cellMismatch,
   decideHutRepair,
   baseTorchAnchors,

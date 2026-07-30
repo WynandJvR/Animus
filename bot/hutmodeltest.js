@@ -248,9 +248,29 @@ t('INVARIANT: no (bad,total) pair answers "patch" when nothing is standing', () 
 // 45/47 placed, the misses were FURNISHING (0 wool -> no bed), yet registration required a
 // PERFECT build - so hutAnchor() stayed null and a standing shelter counted as no hut at all,
 // silently disabling banking, bed placement and hut maintenance.
-t('isShellCell: the shell is what encloses you - planks, door, clear interior', () => {
-  for (const n of ['oak_planks', 'birch_planks', 'oak_door', 'spruce_door', 'air', 'cave_air']) {
-    assert.strictEqual(H.isShellCell(n), true, n + ' is part of the shell')
+// ==== ROLES: EVERY COUNTED DAMAGE HAS AN OWNER (live 2026-07-30) ======================
+// This test used to assert that AIR is part of the shell. That definition deadlocked the bot
+// for five hours: an interior air cell holding a block counted as "not a shelter", while
+// repairHutStructure opens with `if (schema wants air) continue` (it can only ADD blocks) and
+// strayCells only matched dirt/cobble (never planks). Measured live at 188,67,-104: 12 bad
+// shell cells, 10 of them oak_planks the bot had itself placed across its interior, and
+// `interior already clean` printed in the same second. Damage counted by a survey and visible
+// to no actor is a deadlock by construction.
+t('cellRole: enclosure / clearance / furnishing - one role per cell, one owner per role', () => {
+  for (const n of ['oak_planks', 'birch_planks', 'oak_door', 'spruce_door']) assert.strictEqual(H.cellRole(n), 'enclosure', n)
+  for (const n of ['air', 'cave_air', 'void_air']) assert.strictEqual(H.cellRole(n), 'clearance', n)
+  for (const n of ['chest', 'trapped_chest', 'furnace', 'smoker', 'crafting_table', 'white_bed']) assert.strictEqual(H.cellRole(n), 'furnishing', n)
+})
+t('isShellCell: the shell is the ENCLOSURE - planks and door only', () => {
+  for (const n of ['oak_planks', 'birch_planks', 'oak_door', 'spruce_door']) {
+    assert.strictEqual(H.isShellCell(n), true, n + ' encloses you')
+  }
+})
+t('THE FIVE-HOUR DEADLOCK: an interior air cell may not veto being home', () => {
+  // repairHutStructure cannot see a schematic-air cell at all, so if this returns true the
+  // registration gate is once again stricter than any actor can satisfy.
+  for (const n of ['air', 'cave_air', 'void_air']) {
+    assert.strictEqual(H.isShellCell(n), false, n + ' is clearance debt, not part of the enclosure')
   }
 })
 t('isShellCell: furnishing is NOT the shell - its absence is debt, not homelessness', () => {
@@ -370,6 +390,79 @@ async function stampTest () {
     assert.strictEqual(s.table.length, 1, 'one crafting table')
     assert.strictEqual(s.furnace.length, 1, 'one furnace')
     assert(s.chest.every(c => c.y === 66) && s.table.every(c => c.y === 66) && s.furnace.every(c => c.y === 66), 'furniture stands at anchor.y+1')
+  })
+
+  // ==== THE LIVE HUT OF 2026-07-30, REPRODUCED EXACTLY ===============================
+  // Probed cell-by-cell off the running bot's control API at anchor 188,67,-104:
+  //   bad=14  shellBad=12  unknown=0
+  //   10x oak_planks across the INTERIOR row rel z=4, y rel 1..3, x rel 1..4
+  //   crafting_table at rel (1,1,3) and furnace at rel (4,1,3)  - strays kept by the dedupe
+  //   rel (1,1,4) and (4,1,4) EMPTY - the schematic's own table/furnace cells, dug by it
+  // The cause was an anchor derived from the BED: the bed moved 185,-103 -> 185,-102 and the
+  // frame slid z=-105 -> z=-104, so the repairer read the interior row as the rim wall and
+  // walled it up. These fixtures are that world, so a regression reproduces the real bug.
+  const relCells = []
+  for (let y = st.y; y <= en.y; y++) for (let z = st.z; z <= en.z; z++) for (let x = st.x; x <= en.x; x++) {
+    const b = schem.getBlock(new Vec3(x, y, z))
+    relCells.push({ dx: x - st.x, dy: y - st.y, dz: z - st.z, want: (b && b.name) || 'air' })
+  }
+  const dmgWorld = new Map(sw)
+  const dkey = (dx, dy, dz) => skey(SA.x + dx, SA.y + dy, SA.z + dz)
+  for (let dx = 1; dx <= 4; dx++) for (let dy = 1; dy <= 3; dy++) dmgWorld.set(dkey(dx, dy, 4), { name: 'oak_planks', boundingBox: 'block' })
+  dmgWorld.set(dkey(1, 1, 3), { name: 'crafting_table', boundingBox: 'block' })
+  dmgWorld.set(dkey(4, 1, 3), { name: 'furnace', boundingBox: 'block' })
+  dmgWorld.delete(dkey(1, 1, 4)); dmgWorld.delete(dkey(4, 1, 4))
+  // bot.blockAt semantics: a LOADED empty cell is an air block; null means NOT LOADED.
+  const dread = (x, y, z) => dmgWorld.get(skey(x, y, z)) || { name: y <= SA.y - 1 ? 'dirt' : 'air', boundingBox: y <= SA.y - 1 ? 'block' : 'empty' }
+
+  t('LIVE 2026-07-30: hutDamage splits the real damage by OWNER - enclosure 0, clearance 12, furnishing 2', () => {
+    const d = H.hutDamage(relCells, SA, dread)
+    assert.strictEqual(d.unknown, 0, 'the whole box is loaded in this fixture')
+    assert.strictEqual(d.enclosure.length, 0, 'every plank and both door halves stood - the hut DID enclose the bot')
+    assert.strictEqual(d.clearance.length, 12, '10 misplaced planks + 2 stray stations in cells the schematic wants clear')
+    assert.strictEqual(d.furnishing.length, 2, 'the table and furnace cells the dedupe emptied')
+    // and the sum is the number the live decision printed
+    assert.strictEqual(d.enclosure.length + d.clearance.length + d.furnishing.length, 14, 'bad=14, exactly as logged live')
+  })
+
+  t('LIVE 2026-07-30: the ENCLOSURE was sound, so the hut must REGISTER despite 12 cells of debt', () => {
+    const shell = relCells.filter(c => H.isShellCell(c.want))
+    assert.strictEqual(shell.length, 132, 'enclosure = 130 planks + 2 door halves (NOT the 44 air cells)')
+    const bad = shell.filter(c => H.cellMismatch(c.want, dread(SA.x + c.dx, SA.y + c.dy, SA.z + c.dz).name))
+    assert.strictEqual(bad.length, 0, 'THE DEADLOCK: with air in the shell this was 12 and the bot was homeless for 5 hours')
+  })
+
+  t('LIVE 2026-07-30: strayCells SEES the 10 misplaced planks (it printed "interior already clean")', () => {
+    const strays = H.strayCells(SA, dread)
+    const planks = strays.filter(s => /_planks$/.test(s.name))
+    assert.strictEqual(planks.length, 10, 'the interior wall the bot built is obstruction cleanup must dig')
+    assert(!strays.some(s => H.FURNITURE_RE.test(s.name)), 'furniture indoors is a furnished home, never obstruction')
+  })
+
+  t('ANCHOR: bestAnchor recovers the true frame from the DRIFTED bed-derived seed', () => {
+    const drifted = { x: SA.x, y: SA.y, z: SA.z - 1 } // exactly the live -105 vs -104 slip
+    const r = H.bestAnchor(drifted, relCells, dread, { radius: 2 })
+    assert(r, 'the standing hut must be found')
+    assert.deepStrictEqual({ x: r.anchor.x, y: r.anchor.y, z: r.anchor.z }, SA, 'it must land on the building, not the seed')
+    assert(r.match - r.runnerUp >= 4, 'and win by a clear margin (' + r.match + ' vs ' + r.runnerUp + ')')
+  })
+
+  t('ANCHOR: bestAnchor REFUSES on an unloaded window - a frame nobody can see wins nothing', () => {
+    assert.strictEqual(H.bestAnchor(SA, relCells, () => null, { radius: 2 }), null)
+  })
+
+  t('ANCHOR: bestAnchor REFUSES on bare ground - nothing standing means SITE one, never patch one', () => {
+    const bare = (x, y, z) => ({ name: y <= SA.y - 1 ? 'dirt' : 'air', boundingBox: y <= SA.y - 1 ? 'block' : 'empty' })
+    assert.strictEqual(H.bestAnchor(SA, relCells, bare, { radius: 2 }), null)
+  })
+
+  t('DEDUPE: the station in its SCHEMATIC cell is the keeper (it used to dig exactly that one)', () => {
+    const stray = { x: SA.x + 1, y: SA.y + 1, z: SA.z + 3 }
+    const designed = { x: SA.x + 1, y: SA.y + 1, z: SA.z + 4 }
+    // scan order puts the stray first - the live bug kept it and dug the designed cell
+    const ordered = H.dedupeOrder([stray, designed], [designed])
+    assert.deepStrictEqual(ordered[0], designed, 'the keeper is the one the schematic designed')
+    assert.deepStrictEqual(ordered[1], stray, 'the stray is what gets dug')
   })
 
   t('STAMP hut.schem: floorHoles=0 intact, =1 after deleting a floor plank at anchor.y', () => {

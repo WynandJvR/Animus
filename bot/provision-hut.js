@@ -851,6 +851,24 @@ async function loadHutSchem (version) {
   } catch (e) { dbg('repairHut: schematic load failed (' + e.message + ')'); return null }
 }
 
+// The cells the SCHEMATIC designates for each station kind, in WORLD coords. The one authority
+// on "which of these two crafting tables is the real one". Live 2026-07-30 cleanupHutInterior
+// deduped by scan order and dug the table + furnace standing in their DESIGNED cells, keeping
+// the strays - which is where the two permanent `furniture 0/2` holes came from.
+async function schemStationCells (bot, hut) {
+  const out = { table: [], furnace: [], chest: [], bed: [], torch: [], other: [] }
+  const schem = await loadHutSchem(bot.version)
+  if (!schem || !hut) return out
+  const st = schem.start(); const en = schem.end()
+  for (let y = st.y; y <= en.y; y++) for (let z = st.z; z <= en.z; z++) for (let x = st.x; x <= en.x; x++) {
+    const w = schem.getBlock(new Vec3(x, y, z))
+    if (!w || !w.name || !hutModel.FURNITURE_RE.test(w.name)) continue
+    const kind = hutModel.furnitureKind(w.name)
+    if (out[kind]) out[kind].push({ x: hut.x + (x - st.x), y: hut.y + (y - st.y), z: hut.z + (z - st.z) })
+  }
+  return out
+}
+
 function reconcileInfra (bot) {
   const m = loadWorldMem()
   const infra = m.infra = m.infra || {}
@@ -900,6 +918,10 @@ async function cleanupHutInterior (bot, hut, opts = {}) {
   const read = hutReader(bot)
   const maxPasses = opts.maxPasses || 4
   let dug = 0; let removedDupes = 0; let pass = 0
+  // The schematic decides which duplicate is the keeper. A load failure must not turn the
+  // dedupe destructive again, so on failure we keep NOTHING protected and skip deduping.
+  let schemStations = null
+  try { schemStations = await schemStationCells(bot, hut) } catch (e) { dbg('  huttidy: schematic station cells unavailable (' + e.message + ') - skipping the duplicate pass rather than guessing which to dig') }
   const digAt = async (c) => {
     const p = new Vec3(c.x, c.y, c.z)
     const b = bot.blockAt(p)
@@ -916,11 +938,13 @@ async function cleanupHutInterior (bot, hut, opts = {}) {
     // 1) stray filler (dig top-down so a pile clears cleanly)
     const strays = hutModel.strayCells(hut, read).sort((a, b) => b.y - a.y)
     for (const s of strays) { if (isStopped()) break; if (await digAt(s)) dug++ }
-    // 2) duplicate stations: keep the FIRST of each kind, dig the rest (a second table
-    //    boxes the bot in; only one is needed). Chests are exempt (a double chest is two
-    //    legit adjacent cells) and so are beds (one bed, never dig the spawn anchor here).
-    for (const kind of ['table', 'furnace']) {
-      const cells = hutModel.stationCells(hut, read)[kind] || []
+    // 2) duplicate stations: keep the one standing in its SCHEMATIC cell and dig the rest (a
+    //    second table boxes the bot in; only one is needed). Chests are exempt (a double chest is
+    //    two legit adjacent cells) and so are beds (one bed, never dig the spawn anchor here).
+    //    Keeping the FIRST by scan order is what made this pass DESTRUCTIVE: it dug the station
+    //    in the designed cell and kept the stray, so repairHut re-reported the hole forever.
+    for (const kind of (schemStations ? ['table', 'furnace'] : [])) {
+      const cells = hutModel.dedupeOrder(hutModel.stationCells(hut, read)[kind] || [], schemStations[kind] || [])
       for (let i = 1; i < cells.length; i++) {
         if (isStopped()) break
         if (await digAt(cells[i])) { removedDupes++; dbg('  huttidy: removed duplicate ' + kind + ' at ' + cells[i].x + ',' + cells[i].y + ',' + cells[i].z) }
