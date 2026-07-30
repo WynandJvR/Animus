@@ -2763,18 +2763,33 @@ async function autoBuild (bot, schem, at, opts = {}) {
                   await restoreBank() // ALWAYS re-deposit the treasury (never strand the bank)
                 }
                 if (!hr || hr.refused || !hr.placed) {
-                  // Honest report: no infra record, no "rebuilt" claim, no success latch. But the
-                  // ANTI-THRASH latch MUST still bite. By this point the bank has been emptied and
-                  // clearVolume has already torn the site down - a refusal here means "we destroyed
-                  // and rebuilt NOTHING". Leaving hutRepairLatch untouched would let decideHutRepair
-                  // return 'rebuild' again next pass (stalled = lastAction != null && !improved), so
-                  // every pass would clear the site afresh. We therefore record the TRUTH - the
-                  // pre-build damage count, unimproved - which is what forces the next pass down to
-                  // the non-destructive 'patch' route. lastBad is `bad`, never 0: this is the
-                  // opposite of a success record.
+                  // Honest report: no infra record, no "rebuilt" claim, no success latch.
+                  // ==== #121 NO_OP_IS_A_VERDICT, APPLIED HERE (2026-07-30) ====================
+                  // The anti-thrash latch DOES need to bite when a rebuild actually tore the site
+                  // down and put nothing back - otherwise every pass re-clears the site. That was
+                  // this block's reasoning and it stands. But it assumed the teardown had ALREADY
+                  // HAPPENED by the time we get here, and for an ENTRY refusal that is false:
+                  //   [schem] build: REFUSED at entry - stop signal already live (nothing placed, nothing claimed)
+                  //   camp: hut build -> placed 0/0 REFUSED(stopped)
+                  //   camp: bank restored (188 redeposited)
+                  // buildSurvival returns `cleared: 0` there - it refused BEFORE the world scan, so
+                  // nothing was dug, nothing spent, and the bank went straight back. Latching from
+                  // that recorded evidence we never gathered, and because `stalled` is
+                  // `lastAction != null && !improved`, it PERMANENTLY downgraded the decision to
+                  // 'patch' - which cannot create 136 cells that were never there. Live 2026-07-30
+                  // the bot then looped calling an absent hut "creeper damage ... patching 135
+                  // block(s)" and never built anything for hours.
+                  // So: latch on evidence, not on attempts. A refusal that TOUCHED the site is a
+                  // real (bad) outcome; a refusal that touched nothing proves nothing about whether
+                  // rebuilding works, and must leave the decision free to try again.
                   const why = (hr && hr.refused) || 'nothing-placed'
-                  hutRepairLatch = { lastBad: bad, lastAction: 'rebuild', ts: Date.now() }
-                  dbg('camp: hut rebuild REFUSED (' + why + ') - no infra written, no claim; latched lastBad=' + bad + ' (unimproved) so the next pass patches instead of re-clearing the site')
+                  const touched = !!hr && (((hr.cleared || 0) > 0) || ((hr.placed || 0) > 0))
+                  if (touched) {
+                    hutRepairLatch = { lastBad: bad, lastAction: 'rebuild', ts: Date.now() }
+                    dbg('camp: hut rebuild REFUSED (' + why + ') after disturbing the site (cleared=' + (hr.cleared || 0) + ' placed=' + (hr.placed || 0) + ') - no infra written, no claim; latched lastBad=' + bad + ' (unimproved) so the next pass patches instead of re-clearing the site')
+                  } else {
+                    dbg('camp: hut rebuild REFUSED (' + why + ') and the site was UNTOUCHED (cleared=0 placed=0, bank restored) - that proves nothing about rebuilding, so the anti-thrash latch is left alone (#121)')
+                  }
                   say(why === 'stopped' ? 'i was told to stop before i could work on the safehouse - nothing done' : 'i could not get at the safehouse site to build - nothing done, i will try again')
                 } else {
                   // VERIFY with the SHARED tolerant classifier - MANDATORY (the VERIFY_SUCCESS_MSG=0

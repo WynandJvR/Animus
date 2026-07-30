@@ -435,6 +435,42 @@ t('NO TIME HOLDS: nothing this slice added gates on elapsed time', () => {
     'the grounded-claim contract must be condition-only - no timers, no cooldowns, no holds')
 })
 
+// ==== #121 NO_OP_IS_A_VERDICT applied to the hut anti-thrash latch (live 2026-07-30) ======
+// The latch that stops a destructive rebuild-loop was written from ANY failed rebuild, including
+// one refused AT ENTRY - before the world scan, before any clearing, with the bank put straight
+// back (buildSurvival returns cleared:0 there). Latching from an untouched site recorded evidence
+// that was never gathered, and because `stalled = lastAction != null && !improved` it PERMANENTLY
+// downgraded the decision to 'patch', which cannot create cells that were never there:
+//   [schem] build: REFUSED at entry - stop signal already live (nothing placed, nothing claimed)
+//   camp: hut build -> placed 0/0 REFUSED(stopped)   /   camp: bank restored (188 redeposited)
+//   ...then for hours: decision=patch, "creeper damage on my hut - patching 135 block(s)"
+t('#121: the hut anti-thrash latch is written from EVIDENCE, not from an attempt', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'commands.js'), 'utf8')
+  const i = src.indexOf("const why = (hr && hr.refused) || 'nothing-placed'")
+  assert.ok(i > 0, 'the rebuild-refusal site still exists')
+  const blk = src.slice(i, i + 1400)
+  // The site-disturbed test must actually READ the world evidence. Asserting that the text
+  // `hr.cleared` appears somewhere in the block is too weak - `const touched = true` satisfies it
+  // while restoring the exact live bug (found by mutation-testing this pin). So read the
+  // ASSIGNMENT LINE and require the evidence in it.
+  const touchedLine = (blk.split('\n').find(l => /const touched\s*=/.test(l)) || '')
+  assert.ok(touchedLine, 'the site-disturbed test must exist')
+  assert.ok(/hr\.cleared/.test(touchedLine),
+    'the latch condition must read cleared>0 - the proof the teardown really happened - not a constant: ' + touchedLine.trim())
+  assert.ok(/hr\.placed/.test(touchedLine), 'placed>0 counts as disturbed too')
+  assert.ok(!/=\s*(true|false)\s*$/.test(touchedLine.trim()), 'a constant here re-creates the live bug')
+  assert.ok(/if \(touched\) \{/.test(blk), 'and the latch write must sit inside it')
+  // an UNTOUCHED refusal must take a branch that does NOT assign the latch
+  const untouched = blk.slice(blk.indexOf('} else {'))
+  assert.ok(untouched.length > 0, 'there must be an untouched branch')
+  assert.ok(!/hutRepairLatch = \{/.test(untouched),
+    'an untouched refusal must not write the latch - it proves nothing about rebuilding')
+})
+t('#121: absence is not damage - the model cannot answer "patch" with nothing standing', () => {
+  const H = require('./hut-model.js')
+  assert.strictEqual(H.decideHutRepair({ bad: 136, solidTotal: 136, lastBad: 136, lastAction: 'rebuild' }), 'rebuild')
+})
+
 for (const k of ENV_KEYS) { if (SAVED[k] === undefined) delete process.env[k]; else process.env[k] = SAVED[k] }
 console.log('')
 if (fail) { console.log(fail + ' FAILED (' + pass + ' passed)'); process.exit(1) }

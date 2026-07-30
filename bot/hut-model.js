@@ -280,6 +280,20 @@ function decideHutRepair ({ bad, solidTotal, lastBad, lastAction } = {}) {
     const stalled = lastAction != null && !improved
     if (!stalled) return 'rebuild'
   }
+  // ==== ABSENCE IS NOT DAMAGE (2026-07-30) ==============================================
+  // Falling through to 'patch' when EVERY cell is missing is an answer that cannot work:
+  // there is no structure to repair, and the patch route ("re-places missing planks") had
+  // nothing to anchor to. Live 2026-07-30, bad=136 of solidTotal=136 for hours:
+  //   camp: hut repair decision=patch (verdict=BAD, bad=136/136 solid, lastAction=rebuild)
+  //   (build) creeper damage on my hut - patching 135 block(s)
+  // ...calling a hut that was never built "creeper damage", forever, because the stall latch
+  // had downgraded the only capable action. The latch write is fixed at its source (see
+  // commands.js #121), and this is the independent guard: when nothing is standing, the
+  // decision is a BUILD regardless of what has been tried, because 'patch' is not merely
+  // worse here - it is incapable. Guarded on a grounded solidTotal; the caller has already
+  // refused to decide at all on an UNKNOWN survey (#115), so this can only fire on a hut the
+  // bot has genuinely LOOKED at and found absent.
+  if (solidTotal > 0 && bad >= solidTotal) return 'rebuild'
   return 'patch'
 }
 

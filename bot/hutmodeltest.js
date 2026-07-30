@@ -206,6 +206,39 @@ t('decideHutRepair: rebuild LOCKED OUT when lastBad did not improve (kills the r
   // a prior PATCH that didn't help also locks the destructive path down to patch
   assert.strictEqual(H.decideHutRepair({ bad: 70, solidTotal: 135, lastBad: 70, lastAction: 'patch' }), 'patch')
 })
+// ==== ABSENCE IS NOT DAMAGE (live 2026-07-30) ==========================================
+// The stall latch above is right to lock out a DESTRUCTIVE rebuild that achieved nothing. But
+// when EVERY cell is missing there is no structure to patch, so 'patch' is not the safer answer -
+// it is the incapable one. Live, for hours, with bad=136 of solidTotal=136:
+//   camp: hut repair decision=patch (verdict=BAD, bad=136/136 solid, lastAction=rebuild)
+//   (build) creeper damage on my hut - patching 135 block(s)
+// ...the bot called a hut that was NEVER BUILT "creeper damage" and patched empty air forever.
+t('decideHutRepair: TOTAL ABSENCE is a build, even when the stall latch is set', () => {
+  // the exact live state: nothing standing, a prior rebuild that improved nothing
+  assert.strictEqual(H.decideHutRepair({ bad: 136, solidTotal: 136, lastBad: 136, lastAction: 'rebuild' }), 'rebuild')
+  assert.strictEqual(H.decideHutRepair({ bad: 136, solidTotal: 136, lastBad: 136, lastAction: 'patch' }), 'rebuild')
+  // ...and with no latch at all it was already a rebuild - unchanged
+  assert.strictEqual(H.decideHutRepair({ bad: 136, solidTotal: 136 }), 'rebuild')
+})
+t('decideHutRepair: a hut that is merely WRECKED still respects the stall latch', () => {
+  // one cell short of absent -> the anti-thrash rule still owns it (no destructive re-clear loop)
+  assert.strictEqual(H.decideHutRepair({ bad: 135, solidTotal: 136, lastBad: 135, lastAction: 'rebuild' }), 'patch')
+})
+t('decideHutRepair: absence needs a GROUNDED total - solidTotal 0 cannot mean "rebuild"', () => {
+  // an empty/unsurveyed schematic must not read as "everything is missing"
+  assert.strictEqual(H.decideHutRepair({ bad: 10, solidTotal: 0, lastBad: 10, lastAction: 'rebuild' }), 'patch')
+})
+t('INVARIANT: no (bad,total) pair answers "patch" when nothing is standing', () => {
+  const bad = []
+  for (const total of [24, 30, 94, 135, 136, 200]) {
+    for (const la of [null, 'patch', 'rebuild']) {
+      const d = H.decideHutRepair({ bad: total, solidTotal: total, lastBad: total, lastAction: la })
+      if (d === 'patch') bad.push(`total=${total} lastAction=${la}`)
+    }
+  }
+  assert.deepStrictEqual(bad, [], 'these would patch a hut that does not exist: ' + bad.join('; '))
+})
+
 t('cellMismatch: tolerant by class (planks / chest / furnace / table / door / air)', () => {
   assert.strictEqual(H.cellMismatch('oak_planks', 'birch_planks'), false, 'any plank satisfies a plank cell')
   assert.strictEqual(H.cellMismatch('chest', 'trapped_chest'), false, 'a trapped_chest satisfies a chest cell')
