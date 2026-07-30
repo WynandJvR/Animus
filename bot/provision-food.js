@@ -228,7 +228,12 @@ async function drainOwnFurnaceFood (bot, opts = {}) {
     if (isStopped()) break
     const pos = new Vec3(d.x, d.y, d.z)
     dbg('  furnace-food: my own furnace at ' + d.x + ',' + d.y + ',' + d.z + ' holds ' + JSON.stringify(d.items) + ' (owed since the smelt was interrupted) - going to take it')
-    try { if (bot.entity.position.distanceTo(pos) > 2.5) await gotoWithTimeout(bot, new goals.GoalNear(pos.x, pos.y, pos.z, 2), 20000) } catch {}
+    // THE ONE NAV ENTRY POINT, not a bare goto. The furnace sits OUTSIDE the hut and the bot is
+    // usually INSIDE it, so the trip crosses its own door - and a plain gotoWithTimeout answered
+    // `noPath` in 59ms, live, from six blocks away: `furnace-food: could not get to 185,-106`.
+    // navigateTo owns the door-crossing and the recovery ladder; re-deriving that here is exactly
+    // the inline-nav-hack the unified-navigation work exists to prevent.
+    try { if (bot.entity.position.distanceTo(pos) > 2.5) await navigate.navigateTo(bot, new goals.GoalNear(pos.x, pos.y, pos.z, 2), { timeoutMs: 20000, label: 'furnace-food' }) } catch (e) { dbg('  furnace-food: nav to ' + d.x + ',' + d.z + ' failed (' + e.message + ')') }
     if (bot.entity.position.distanceTo(pos) > 4) { dbg('  furnace-food: could not get to ' + d.x + ',' + d.z + ' - leaving the debt standing'); continue }
     const blk = bot.blockAt(pos)
     if (!blk || !/furnace$/.test(blk.name)) { dbg('  furnace-food: no furnace at ' + d.x + ',' + d.z + ' any more - settling the debt'); try { worldMemory.settleContainer('furnace', { x: d.x, y: d.y, z: d.z }) } catch {}; continue }
