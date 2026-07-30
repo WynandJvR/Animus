@@ -2922,7 +2922,15 @@ async function autoBuild (bot, schem, at, opts = {}) {
                 dbg('camp: the ENCLOSURE verified OK (' + shellCells.length + ' plank/door cells) at ' + hutAt.x + ',' + hutAt.y + ',' + hutAt.z + ' - registering the hut; interior clutter and furnishing gaps are repair debt, not a reason to disown a standing shelter')
                 say('the safehouse shell is sound - calling it home')
               }
-              provision.rememberInfra && provision.rememberInfra('hut', hutAt, { proof: { verdict: 'SHELL_OK', shell: true, epoch: pathfixMod.epoch() } })
+              // The proof carries the survey's OWN verdict, never an invented token. It used to
+              // pass verdict:'SHELL_OK', and proofHolds only ever accepts 'OK' - so this write
+              // was REJECTED every time it fired. Live 2026-07-30, one second apart:
+              //   camp: the ENCLOSURE verified OK (132 plank/door cells) - registering the hut
+              //   [mem] REJECTED unverified hut at 188,67,-104 - proof did not hold
+              // The bot said it was registering its home and its memory said no. `shell: true`
+              // stays as the SCOPE tag; the verdict is what the survey actually returned (this
+              // branch is gated on shellOK, so it is 'OK' and the claim is exact).
+              provision.rememberInfra && provision.rememberInfra('hut', hutAt, { proof: { verdict: svShell.verdict, shell: true, epoch: pathfixMod.epoch() } })
             } else if (!already) {
               dbg('camp: shell survey ' + svShell.verdict + ' (' + svShell.bad + ' bad, ' + svShell.unknown + ' unknown of ' + shellCells.length + ') - not yet a hut that encloses me, claiming nothing')
             }

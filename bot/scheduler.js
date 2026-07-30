@@ -1047,21 +1047,48 @@ function watchdog (activeJob, vitals, now) {
 // giveup lands on the next fail-job observation after the fail (>=5s / one watchdog pass later - the
 // bounded reading of "still failing after the fail was applied"; the exact failMs delay is not
 // safety-critical, this branch only hands a latch-immune hang to the supervisor).
-function wdPhase (prev, verdict, jobKey) {
+// How long a stop latch gets to BITE before "it did not bite" is an honest conclusion. Every
+// latch in the lever map is COOPERATIVE - a job only observes it when it next polls isStopped(),
+// which it cannot do while parked in an await. The hang that produced this was a 20s windowOpen
+// timeout with one retry, so a cooperative job needs ~40s of room; 60s gives it that.
+// This is a DEADLINE ON AN ATTEMPT (the latch's attempt to stop the job), not a delay before
+// thinking: the fail rung still fires instantly, and the ladder still escalates - it just has to
+// wait for the evidence it claims to have.
+const LATCH_GRACE_MS = 60000
+
+function wdPhase (prev, verdict, jobKey, now, opts = {}) {
   const p = prev || {}
   if (jobKey == null) return { phase: 'ok', jobKey: null, act: 'none' }
   const phase = (p.jobKey === jobKey) ? (p.phase || 'ok') : 'ok' // a new job resets the ladder
   if (verdict === 'ok') return { phase: 'ok', jobKey, act: 'none' }
   if (verdict === 'nudge') {
-    if (phase === 'ok') return { phase: 'nudged', jobKey, act: 'nudge' }
-    return { phase, jobKey, act: 'none' } // already escalated further - a nudge never de-escalates
+    if (phase === 'ok') return { phase: 'nudged', jobKey, act: 'nudge', failedAt: p.failedAt }
+    return { phase, jobKey, act: 'none', failedAt: p.failedAt } // already escalated - a nudge never de-escalates
   }
   if (verdict === 'fail-job') {
-    if (phase === 'ok' || phase === 'nudged') return { phase: 'failed', jobKey, act: 'fail' }
-    if (phase === 'failed') return { phase: 'gaveup', jobKey, act: 'giveup' } // latch didn't bite
-    return { phase: 'gaveup', jobKey, act: 'none' } // already gave up - silence for this jobKey
+    if (phase === 'ok' || phase === 'nudged') return { phase: 'failed', jobKey, act: 'fail', failedAt: now }
+    if (phase === 'failed') {
+      // ==== GIVEUP IS A VERDICT ABOUT THE LATCH, SO IT NEEDS EVIDENCE (2026-07-30) ==========
+      // This used to escalate on the NEXT fail-job verdict, unconditionally. The watchdog ticks
+      // every 5s and the verdict is derived from lastProgressAt - which of course has not moved
+      // 5s later - so `failed -> gaveup` was not an inference, it was a countdown. Live, every
+      // giveup on autobuild landed EXACTLY 5.0s after its FAIL-JOB, twelve times in five hours:
+      //   18:14:38 (wd) FAIL-JOB autobuild - no verified progress for 245s - setting its stop latch
+      //   18:14:43 (wd) stop latch ineffective on autobuild - a hung promise; taking the body back
+      //   18:14:43 (wd) autobuild holds no dispatch slot - releasing the controls instead
+      // ...and 10s later `chose build/idle: continuing the active build [holding - making
+      // progress]`. The job was slow, not hung, and the terminal rung yanked its controls.
+      // "The latch did not bite" is a claim about the latch; it may only be made once the latch
+      // has actually had the chance. A missing clock is UNKNOWN, and the destructive rung fails
+      // CLOSED on unknown - it waits rather than seizing the body.
+      const grace = opts.latchGraceMs != null ? opts.latchGraceMs : LATCH_GRACE_MS
+      const since = (now != null && p.failedAt != null) ? now - p.failedAt : null
+      if (since == null || since < grace) return { phase: 'failed', jobKey, act: 'none', failedAt: p.failedAt }
+      return { phase: 'gaveup', jobKey, act: 'giveup', failedAt: p.failedAt, latchIdleMs: since }
+    }
+    return { phase: 'gaveup', jobKey, act: 'none', failedAt: p.failedAt } // already gave up - silence for this jobKey
   }
-  return { phase, jobKey, act: 'none' }
+  return { phase, jobKey, act: 'none', failedAt: p.failedAt }
 }
 
 // ---- graveCooldownMs (task #18 M4) ------------------------------------------------------

@@ -356,25 +356,69 @@ t('(e) watchdog: patient (else) windows 120000/240000; idle 0 -> ok; null job ->
 t('(e) wdPhase: ok->nudge->fail->giveup sequencing, latch-once, verdict-ok + jobKey resets', () => {
   const K = 'travel@1000'
   let st = { phase: 'ok', jobKey: null }
-  const step = (verdict, jobKey) => { st = S.wdPhase(st, verdict, jobKey); return st.act }
+  let clock = 1000
+  const step = (verdict, jobKey, dt) => { clock += (dt || 0); st = S.wdPhase(st, verdict, jobKey, clock); return st.act }
   assert.strictEqual(step('ok', K), 'none', 'ok -> none')
   assert.strictEqual(step('nudge', K), 'nudge', 'first nudge fires')
   assert.strictEqual(step('nudge', K), 'none', 'nudge latches - only the first fires')
   assert.strictEqual(step('fail-job', K), 'fail', 'first fail-job fires the fail')
-  assert.strictEqual(step('fail-job', K), 'giveup', 'still failing AFTER the fail -> giveup (latch did not bite)')
-  assert.strictEqual(step('fail-job', K), 'none', 'giveup is once, then silence for this jobKey')
+  assert.strictEqual(step('fail-job', K, 5000), 'none', 'THE LIVE BUG: 5s later the latch has not had its chance - no giveup')
+  assert.strictEqual(step('fail-job', K, 90000), 'giveup', 'once the latch has had 60s+ and nothing moved -> giveup')
+  assert.strictEqual(step('fail-job', K, 5000), 'none', 'giveup is once, then silence for this jobKey')
   // an ok verdict resets the ladder
   assert.strictEqual(step('ok', K), 'none')
   assert.strictEqual(step('nudge', K), 'nudge', 'after an ok reset, nudge fires again')
   // a jobKey change resets to ok regardless of prior phase
   st = { phase: 'failed', jobKey: K }
-  assert.strictEqual(S.wdPhase(st, 'nudge', 'gather@2000').act, 'nudge', 'new jobKey resets -> nudge fires')
+  assert.strictEqual(S.wdPhase(st, 'nudge', 'gather@2000', clock).act, 'nudge', 'new jobKey resets -> nudge fires')
   // a straight-to-fail (tick interval > nudge window) still fails once from phase ok
-  assert.strictEqual(S.wdPhase({ phase: 'ok', jobKey: 'x' }, 'fail-job', 'x').act, 'fail')
+  assert.strictEqual(S.wdPhase({ phase: 'ok', jobKey: 'x' }, 'fail-job', 'x', clock).act, 'fail')
   // null jobKey (no active job) -> never acts, resets phase
-  const r = S.wdPhase({ phase: 'failed', jobKey: 'x' }, 'fail-job', null)
+  const r = S.wdPhase({ phase: 'failed', jobKey: 'x' }, 'fail-job', null, clock)
   assert.strictEqual(r.act, 'none')
   assert.strictEqual(r.phase, 'ok')
+})
+
+// ==== THE 5-SECOND GIVEUP (live 2026-07-30) ==================================================
+// Twelve times in five hours, on a job that was slow rather than hung:
+//   18:14:38 (wd) FAIL-JOB autobuild - no verified progress for 245s - setting its stop latch
+//   18:14:43 (wd) stop latch ineffective on autobuild - a hung promise; taking the body back
+//   18:14:53 (core) chose build/idle: continuing the active build ... [holding - making progress]
+// Every gap was EXACTLY 5.0s - one watchdog tick. `failed -> gaveup` fired on the next fail-job
+// verdict, and that verdict is derived from lastProgressAt, which cannot have moved in 5s. So the
+// terminal rung's premise ("the stop latch did not bite") was never observed, only assumed.
+t('(e) wdPhase: GIVEUP needs EVIDENCE the latch failed, not merely the next tick', () => {
+  const K = 'autobuild@1'
+  const failed = S.wdPhase({ phase: 'nudged', jobKey: K }, 'fail-job', K, 100000)
+  assert.strictEqual(failed.act, 'fail')
+  assert.strictEqual(failed.failedAt, 100000, 'the fail rung must record WHEN the latch was set')
+  // one tick later: the cooperative latch has not had a single chance to be polled
+  for (const dt of [5000, 15000, 30000, 59000]) {
+    assert.strictEqual(S.wdPhase(failed, 'fail-job', K, 100000 + dt).act, 'none',
+      'at +' + (dt / 1000) + 's the latch has not had its chance - giveup would be a guess')
+  }
+  assert.strictEqual(S.wdPhase(failed, 'fail-job', K, 100000 + 60000).act, 'giveup', 'at the grace boundary it fires')
+  // and it still FIRES - the rung keeps its teeth (55857e6: a rung with no power is not a rung)
+  const gave = S.wdPhase(failed, 'fail-job', K, 100000 + 120000)
+  assert.strictEqual(gave.act, 'giveup')
+  assert.strictEqual(gave.latchIdleMs, 120000, 'and it reports how long the latch had')
+})
+
+t('(e) wdPhase: a MISSING clock fails CLOSED - the destructive rung never fires on unknown', () => {
+  // The giveup rung seizes the body. "I cannot tell how long the latch has had" must mean WAIT,
+  // never "go ahead" - an unmeasured field must never invent a verdict.
+  const failed = { phase: 'failed', jobKey: 'x', failedAt: 100000 }
+  assert.strictEqual(S.wdPhase(failed, 'fail-job', 'x', null).act, 'none', 'no clock -> no giveup')
+  assert.strictEqual(S.wdPhase({ phase: 'failed', jobKey: 'x' }, 'fail-job', 'x', 999999).act, 'none', 'no failedAt -> no giveup')
+})
+
+t('(e) wdPhase: progress DURING the grace resets the ladder - a slow job is never seized', () => {
+  const K = 'autobuild@1'
+  let st = S.wdPhase({ phase: 'nudged', jobKey: K }, 'fail-job', K, 100000)
+  assert.strictEqual(st.act, 'fail')
+  st = S.wdPhase(st, 'ok', K, 110000) // the build placed a block: verified progress
+  assert.strictEqual(st.phase, 'ok', 'real progress clears the ladder')
+  assert.strictEqual(S.wdPhase(st, 'fail-job', K, 400000).act, 'fail', 'and the next failure starts over at fail, not giveup')
 })
 
 // ---- (f) every hold carries a valid wake (focused restatement of (d)) --------------------

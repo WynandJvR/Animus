@@ -1358,7 +1358,7 @@ if (SCHED_ON) {
             }
           }
         }
-        wdState = scheduler.wdPhase(wdState, verdict, jobKey)
+        wdState = scheduler.wdPhase(wdState, verdict, jobKey, now)
         if (job && wdState.act !== 'none') {
           const base = job.lastProgressAt != null ? job.lastProgressAt : (job.startedAt != null ? job.startedAt : now)
           const idle = Math.round((now - base) / 1000)
@@ -1389,18 +1389,29 @@ if (SCHED_ON) {
             // isStopped() can see one. The whole point of the final rung is the case where that
             // assumption has already failed, so the final rung must NOT be cooperative. It now takes
             // the body back by revoking the dispatch lease (§ the slot is a lease, not a flag).
-            note('(wd) stop latch ineffective on ' + job.name + ' - a hung promise; taking the body back')
+            note('(wd) stop latch ineffective on ' + job.name + ' - a hung promise; taking the body back (latch set ' + Math.round((wdState.latchIdleMs || 0) / 1000) + 's ago)')
             // Unconditional statement, deliberately NOT folded into the `if` below: the revoke is the
             // rung's whole purpose, and an action buried in a condition is an action that can be
             // quietly disabled (a `false &&` reads as still-present to a source-level guard).
             const revoked = revokeDispatch('hung promise: no verified progress for ' + Math.round((now - (job.lastProgressAt || job.startedAt || now)) / 1000) + 's and the stop latch did not bite')
             if (!revoked) {
-              // No slot to revoke: the hang is inside a non-dispatch path (a brain command or a
-              // reflex). Clear the nav goal + controls so the body is at least steerable again.
-              note('(wd) ' + job.name + ' holds no dispatch slot - releasing the controls instead')
-              try { if (bot.pathfinder) bot.pathfinder.setGoal(null) } catch {}
-              try { bot.clearControlStates() } catch {}
-              try { commands.touchProgress('giveupRelease:' + job.name) } catch {}
+              // No slot to revoke: the hang is inside a non-dispatch path (a brain command, a
+              // reflex, or autobuild - which runs INLINE and so never takes a lease). Yanking the
+              // nav goal and the control states out from under a job that is merely SLOW breaks
+              // it, so this last resort asks the progress clock to agree that it is stuck.
+              const stalled = (() => { try { return !!commands.progressInfo().stalled } catch { return false } })()
+              if (!stalled) {
+                // NOT terminal: the rung stays ARMED at 'failed' rather than latching 'gaveup'.
+                // A giveup that declines to act and then goes silent forever is the exact defect
+                // 55857e6 fixed - a rung with no power is not a rung.
+                note('(wd) ' + job.name + ' holds no dispatch slot and its progress clock is NOT stalled - leaving the controls alone, staying armed')
+                wdState = { ...wdState, phase: 'failed', act: 'none' }
+              } else {
+                note('(wd) ' + job.name + ' holds no dispatch slot - releasing the controls instead')
+                try { if (bot.pathfinder) bot.pathfinder.setGoal(null) } catch {}
+                try { bot.clearControlStates() } catch {}
+                try { commands.touchProgress('giveupRelease:' + job.name) } catch {}
+              }
             }
           }
         }

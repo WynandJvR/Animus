@@ -134,6 +134,41 @@ t('census: the hut rebuild may not record infra / claim / latch from a REFUSED o
   assert(/builtClean/.test(guard), "rememberInfra('hut') must be gated on builtClean")
 })
 
+// ==== THE REJECTED CLAIM (live 2026-07-30) ===================================================
+// The census above pins that there is ONE hut write site and that it passes a `proof:`. That is
+// necessary and was NOT sufficient: the site passed `verdict: 'SHELL_OK'`, an invented token, and
+// world-memory's proofHolds only ever accepts 'OK'. So the write was REJECTED every single time
+// it fired, and the two lines landed one second apart:
+//   camp: the ENCLOSURE verified OK (132 plank/door cells) - registering the hut
+//   [mem] REJECTED unverified hut at 188,67,-104 - proof did not hold
+// The bot announced it was recording its home and its memory silently dropped it - a claim made
+// in a vocabulary the receiver does not speak. A source grep for the string would not have caught
+// this; the only honest pin EXECUTES the write site's own proof shape against the real validator.
+t('census: the hut write site\'s proof must be one world-memory ACTUALLY ACCEPTS', () => {
+  const pathfix = require('./pathfix.js')
+  const worldMemory = require('./world-memory.js')
+  const code = SOURCE_FILES.find(f => f.file === 'commands.js').code
+  const i = code.indexOf("rememberInfra('hut'")
+  assert(i > 0, "the hut write site was not found")
+  const call = code.slice(i, code.indexOf('\n', i))
+  const m = call.match(/\{\s*proof:\s*(\{.*\})\s*\}\s*\)/)
+  assert(m, 'the write site must pass a literal proof object: ' + call.trim())
+  // The branch is gated on shellOK, so the survey verdict there is 'OK'; resolve the two live
+  // expressions and evaluate the literal EXACTLY as written.
+  const literal = m[1]
+    .replace(/svShell\.verdict/g, "'OK'")
+    .replace(/pathfixMod\.epoch\(\)/g, String(pathfix.epoch()))
+  assert(!/[a-zA-Z_$][\w$]*\s*\./.test(literal.replace(/'[^']*'/g, "''")),
+    'the proof still references an unresolved expression - teach this test about it: ' + literal)
+  // eslint-disable-next-line no-eval
+  const proof = eval('(' + literal + ')') // eslint-disable-line
+  const before = (worldMemory.loadWorldMem().infra || {}).hut || []
+  worldMemory.rememberInfra('hut', { x: 456, y: 68, z: -142 }, { proof })
+  const after = (worldMemory.loadWorldMem().infra || {}).hut || []
+  assert(after.length > before.length, 'the proof the write site actually sends was REJECTED - the hut can never register')
+  assert.strictEqual(after[after.length - 1].verified, true, 'and it must land as VERIFIED, not as an unproven hint')
+})
+
 t('census/anti-grief: a REFUSED hut rebuild still latches the UNIMPROVED damage count', () => {
   // By the time a rebuild can refuse, the bank has been emptied and clearVolume has already torn
   // the site down. decideHutRepair only declines a second destructive pass when the latch says the
