@@ -1246,6 +1246,7 @@ async function navigateToInner (bot, goal, opts = {}) {
   let crossings = 0 // atomic doorway pre-flight crossings this nav (capped so a threshold flicker can't ping-pong)
   let stalls = 0    // consecutive goto+recovery cycles that netted < 2.5b of real travel
   let unstuck = false // forceUnstick fired once already this nav
+  let digOutTried = false // the bounded dig-out escalation fired once already this nav
   // Time spent parked while a REFLEX held the pathfinder must not consume the deadline:
   // in a reflex storm (creeper standoff re-fleeing every second, live 2h+) every nav
   // burned its whole budget waiting and DIED at the deadline check before the recovery
@@ -1344,6 +1345,27 @@ async function navigateToInner (bot, goal, opts = {}) {
         // honestly (unreachable goal, or the escape is already spent).
         if (stalled && opts.escalate !== false && !unstuck && !isForceUnsticking() && !bot.isSleeping && !bot.targetDigBlock && Date.now() < dl()) {
           dbg(label + 'no recovery rung applied but wedged (stall ' + stalls + ') - retrying toward escalation')
+          continue
+        }
+        // ==== NO ROUTE IS THE WEDGE EVIDENCE (2026-07-30) ==================================
+        // The dig-out rung was armed ONLY by opts.digOut, which the watchdog sets from a
+        // MEASURED POSITIONAL FREEZE. A bot that can still shuffle around inside a dead end is
+        // not frozen, so it never qualified - and live, boxed into a 1x1 alcove beside its own
+        // front door at hp 0.48 / food 0, it printed this for over an hour:
+        //   nav to 185,-106 failed (path ended short of the goal (tried: door x3, climb x2, nudge x2))
+        // Stuckness was being judged by the BODY ("am I moving?") when the condition that
+        // actually matters is the OUTCOME ("can I get anywhere?"). Exhausting every rung with
+        // the goal still unreachable IS that evidence, and it is strictly stronger than a
+        // freeze: a freeze can be a mob shoving us, while this is the ladder's own verdict.
+        //
+        // The ANTI-GRIEF ENVELOPE IS UNCHANGED. drybreach still refuses inside our own
+        // structure, still uses the escapeDiggable whitelist, still bounded (<=8/12 digs, 25s)
+        // and still aborts near hostiles. Only the TRIGGER moves from "the body froze" to "no
+        // route exists" - which is what makes getting unstuck adaptive instead of scripted.
+        if (opts.escalate !== false && !digOutTried && !isForceUnsticking() && !bot.isSleeping && !bot.targetDigBlock) {
+          digOutTried = true
+          dbg(label + 'every rung failed and the goal is STILL unreachable - escalating to a bounded dig-out')
+          try { await forceUnstick(bot, { isStopped, digOut: true }) } catch (e) { dbg(label + 'dig-out escalation failed (' + e.message + ')') }
           continue
         }
         throw honestFail(lastErr, counts, label, recoveryMs, reflexWaitMs)
