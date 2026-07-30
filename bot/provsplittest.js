@@ -212,6 +212,24 @@ function ok (cond, label) { eq(!!cond, true, label) }
   eq(provFarm.inAvoidBox(null, 5, 5), false, 'farm: inAvoidBox with no box')
 }
 
+// ---- COLLECT MUST CROSS ITS OWN DOOR (live 2026-07-31) -------------------------------------
+// The farm wraps the hut, so the bot is usually INSIDE and its harvest drops are OUTSIDE - every
+// pickup crosses its own doorway. collectDrops used a BARE pathfinder goto, which answered
+// `No path to the goal!` for items on flat ground FOUR BLOCKS away:
+//   harvested 6 ... sweep ended with 11 item(s) still visible: 196,68,-100(unreach) ...
+// ...while the castle build sat blocked on a bank food reserve (bootstrapNeed: reserve < 40)
+// that those exact drops were meant to fill. That is the whole no-progress livelock.
+// This is #82c's "losing ~60% of drops, cause unknown" - the cause.
+{
+  const src = fs.readFileSync(path.join(__dirname, 'provision-core.js'), 'utf8')
+  const i = src.indexOf('collect: goto drop at')
+  ok(i > 0, 'collect: the drop-sweep still exists')
+  const region = src.slice(Math.max(0, i - 1400), i)
+  ok(/navigateTo\(/.test(region), 'collect: the drop sweep must use the ONE nav entry point (door-aware), not a bare goto')
+  ok(!/gotoWithTimeout\(bot, new goals\.GoalNear\(target\.position/.test(src),
+    'collect: no bare gotoWithTimeout to a drop - that is what stranded the harvest outside the hut')
+}
+
 try { fs.rmSync(TMP, { recursive: true, force: true }) } catch {}
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

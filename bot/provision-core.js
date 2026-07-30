@@ -109,16 +109,32 @@ async function collectDrops (bot, radius = 10, { patience = 1 } = {}) {
       continue
     }
     empties = 0
-    if (process.env.COLLECT_ROBUST !== '0') {
+    {
       // #82 COLLECT_ROBUST: (a) range 1, not 0 - farm drops sit ON FARMLAND, which the
       // anti-trample movement exclusion refuses to path INTO, so every range-0 goto to a farm
       // drop failed; standing in the ADJACENT cell is inside the pickup magnet and tramples
       // nothing. (b) a failed goto skips THAT item and keeps sweeping - the old catch{return}
       // let one unpathable drop abandon the whole field (live: harvested 22 -> wheat 4).
-      try { await gotoWithTimeout(bot, new goals.GoalNear(target.position.x, target.position.y, target.position.z, 1), 10000) } catch (e) { dbg('  collect: goto drop at ' + Math.round(target.position.x) + ',' + Math.round(target.position.y) + ',' + Math.round(target.position.z) + ' failed (' + e.message + ') - skipping it'); unreachable.add(target.id); continue }
-    } else {
-      try { await gotoWithTimeout(bot, new goals.GoalNear(target.position.x, target.position.y, target.position.z, 0), 10000) } catch { return }
+      // (c) THE ONE NAV ENTRY POINT, not a bare goto (2026-07-31). #82c's open question was
+      // "the harvest keeps losing ~60% of drops with zero goto failures logged" - this is the
+      // cause, and it now logs loudly: the farm wraps the hut, so the bot is usually INSIDE and
+      // the drops are OUTSIDE, and every pickup has to cross its own door. gotoWithTimeout is a
+      // bare pathfinder goto with no door handling, so it answered `No path to the goal!` for
+      // items on flat ground FOUR BLOCKS AWAY. Live 2026-07-31 01:34: `harvested 6` and
+      // `sweep ended with 11 item(s) still visible ... (unreach)`, while the build sat blocked
+      // on a bank food reserve those very drops were supposed to fill.
+      // navigate.navigateTo owns door-crossing and the recovery ladder - same fix as the furnace
+      // pantry (c9ab8ec). Kept range 1 (never path INTO farmland) and the skip-on-fail sweep.
+      try {
+        const nav = require('./navigate.js')
+        await nav.navigateTo(bot, new goals.GoalNear(target.position.x, target.position.y, target.position.z, 1), { timeoutMs: 10000, label: 'collect' })
+      } catch (e) { dbg('  collect: goto drop at ' + Math.round(target.position.x) + ',' + Math.round(target.position.y) + ',' + Math.round(target.position.z) + ' failed (' + e.message + ') - skipping it'); unreachable.add(target.id); continue }
     }
+    // The COLLECT_ROBUST=0 rollback leg is DELETED, not repaired. It was a second copy of this
+    // one operation carrying BOTH original defects (range 0 -> refuses to path onto farmland;
+    // catch{return} -> one unpathable drop abandons the whole field) AND the bare-goto door
+    // blindness fixed above. Two implementations of one rule is how the rule drifts - the #108
+    // precedent applies. Rollback is `git revert`, never a second living implementation.
     await new Promise(r => setTimeout(r, 250))
   }
 }
