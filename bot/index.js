@@ -1972,7 +1972,15 @@ if (process.env.AUTO_SURFACE !== '0') {
       // head-based reflex and the feet-based recovery `water` rung agree on "actually out". Purely the
       // success LABEL + cooldown gate; the escape it ran is unchanged. Flag OFF => today's head-based ok.
       if (!pathfix.sameEpoch(e0)) { note('(drown-crisis) I died down there - not claiming an escape I did not make') } else {
-        const out = (process.env.WATER_ESCAPE === '1') ? !navigate.feetInWater(bot) : ok
+        // ONE PREDICATE, BOTH SIDES (2026-07-30). This used to be `!feetInWater` under the flag and
+        // the raw `ok` without it, while escapeWater's ladder stopped on `headInWater` - so the
+        // escape declared success in a state its caller called failure, 1ms apart, and the reflex
+        // re-fired every 4s. Worse: the ladder stopped, ENDED the maneuver and released the body
+        // while the bot was still afloat, so it sank and drowned holding the success claim (twice,
+        // 10:34 and 10:35). `navigate.outOfWater` is now the single definition both sides read, so a
+        // success here means the same thing the escape was working toward. Flag no longer changes
+        // the predicate - a correct verdict is not opt-in.
+        const out = navigate.outOfWater(bot) && ok
         note(`(drown-crisis) ${out ? 'out of the water' : 'still wet - re-evaluating while I am still under'}`)
       }
     } catch (e) { note(`(drown-crisis) failed: ${e.message}`) } finally { drowning = false; wetHist = 0; drownStart = 0 }

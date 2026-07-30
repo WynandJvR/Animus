@@ -100,6 +100,36 @@ function waterPolicy (m) {
   return m
 }
 
+// ==== ONE DEFINITION OF "IS THE ESCAPE ACTUALLY FINISHED?" (2026-07-30) ==================
+// TWO DEATHS, ten minutes apart, both preceded by the escape announcing success:
+//   10:34:33 [nav] drown-escape: out of the water at (-8, 62, 117)   <- claimed, maneuver ENDED
+//   10:34:43 (death) at -8,62,115 (drowning - Drowned, via message)
+//   10:35:50 (death) at -9,62,110 (drowning - Drowned, via message)
+// `rung rise` swims UP the water column until the HEAD clears. escapeWater's loop condition was
+// `headInWater(bot)`, so a bot bobbing at the surface satisfied it: the ladder stopped, the maneuver
+// ENDED and released the body, and a bot that is treading water with nothing underfoot SINKS. It
+// drowned holding a success claim. Meanwhile its caller (index.js, WATER_ESCAPE=1) judged by the
+// FEET and said "still wet" 1ms later - two predicates for one question, and the escape could not
+// satisfy its own caller by construction.
+//
+// The two questions are genuinely different and BOTH stay:
+//   "am I in danger?" -> the HEAD and air. Unchanged; still what TRIGGERS the reflex.
+//   "am I done?"      -> do I have a FLOOR. That is this predicate.
+// Treading water is head-clear-with-no-floor - precisely the state the old test called success.
+//
+// The log contains the proof this is right: at 10:35:27, when `rise` was REVOKED instead of
+// believed, the ladder escalated - "bank is 1.3b away - hopping" - and the bot got out and lived.
+// The ladder HAS a working rung; the false success stopped it from ever reaching it. Escalating is
+// what saves the bot; releasing the body early is what kills it.
+//
+// PURE: names + the caller's boundingBox read. UNKNOWN fails CLOSED (keep working the bounded
+// ladder) - the same rule standable() uses, for the same reason.
+function escapeComplete ({ head, groundSolid }) {
+  if (head == null) return false
+  if (STAND_WATER_RE.test(head) || STAND_LAVA_RE.test(head)) return false // still submerged
+  return groundSolid === true                                            // no floor => afloat => not out
+}
+
 // NAV Phase B (NAV_HAZARD_LEGS): the lava-hazard STEP predicate. travelMovements/wildTerrain
 // never priced lava at all (no liquidCost for it, and A* prices a lava-pool-edge cell like open
 // ground) - so a surface trek could route a leg right to a pool edge. HAZARD_RE matches the two
@@ -305,6 +335,7 @@ function findDryLandExit (feet, sampleName, opts = {}) {
 
 module.exports = {
   standable,
+  escapeComplete,
   waterPolicy,
   WILD_LIQUID_COST,
   WILD_DIG_COST,

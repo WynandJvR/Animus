@@ -168,5 +168,67 @@ t('ANTI-DRIFT: waterPolicy is exported so there is something to consult', () => 
   assert.strictEqual(typeof np.waterPolicy, 'function')
 })
 
+// ==== "IS THE ESCAPE FINISHED?" - the predicate that let it drown holding a success claim ====
+// Live 2026-07-30, TWO deaths ten minutes apart, each preceded by the escape announcing victory:
+//   10:34:33 [nav] drown-escape: out of the water at (-8, 62, 117)
+//   10:34:43 (death) at -8,62,115 (drowning - Drowned, via message)
+// escapeWater's loop tested headInWater, so a bot TREADING water (head clear, nothing underfoot)
+// satisfied it: the ladder stopped, the maneuver ENDED, the body was released, the bot sank.
+// The fix is not a new rung - it is that "am I done" asks for a FLOOR, so the ladder escalates to
+// the rung that works (`hop`) instead of believing `rise`.
+const EC = np.escapeComplete
+
+t('THE DROWNING: treading water (head clear, NO floor) is NOT finished', () => {
+  assert.strictEqual(EC({ head: 'air', groundSolid: false }), false)
+})
+t('...still submerged is not finished either', () => {
+  assert.strictEqual(EC({ head: 'water', groundSolid: true }), false)
+})
+t('standing in a 1-deep puddle IS finished - a floor underfoot is the whole point', () => {
+  assert.strictEqual(EC({ head: 'air', groundSolid: true }), true)
+})
+t('the water FAMILY counts as submerged, not as clear air', () => {
+  for (const n of ['water', 'flowing_water', 'seagrass', 'kelp', 'bubble_column']) {
+    assert.strictEqual(EC({ head: n, groundSolid: true }), false, n + ' overhead must not read as out')
+  }
+})
+t('a lava ceiling is never "out"', () => {
+  assert.strictEqual(EC({ head: 'lava', groundSolid: true }), false)
+})
+t('UNKNOWN head -> not finished (fails CLOSED, keep working the bounded ladder)', () => {
+  assert.strictEqual(EC({ head: null, groundSolid: true }), false)
+})
+t('the two questions stay SEPARATE: escapeComplete is not standable', () => {
+  // submerged with a floor: standable(allowWater) says "you may swim here", escapeComplete says
+  // "you are not out yet". Conflating them is what produced the false victory.
+  assert.strictEqual(S({ groundSolid: true, ground: 'sand', feet: 'water', head: 'water' }, { allowWater: true }), true)
+  assert.strictEqual(EC({ head: 'water', groundSolid: true }), false)
+})
+
+// ---- ANTI-DRIFT: one predicate, read by BOTH sides -------------------------------------
+t('ANTI-DRIFT: escapeWater stops on outOfWater, NOT on headInWater', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'navigate.js'), 'utf8')
+  const i = src.indexOf('async function escapeWater')
+  assert(i > 0, 'escapeWater still exists')
+  const body = src.slice(i, i + 3000)
+  assert(/const wet = \(\) => !outOfWater\(bot\)/.test(body),
+    'the ladder must keep working until the bot actually has a floor')
+  assert(!/const wet = \(\) => headInWater\(bot\)/.test(body),
+    'the head-clear stop is what ended the maneuver on a floating bot')
+})
+t('ANTI-DRIFT: the drown-crisis caller judges by the SAME predicate', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'index.js'), 'utf8')
+  assert(/navigate\.outOfWater\(bot\)/.test(src), 'index must read the one definition')
+  assert(!/\?\s*!navigate\.feetInWater\(bot\)\s*:\s*ok/.test(src),
+    'a correct success verdict must not be behind a flag')
+})
+t('ANTI-DRIFT: outOfWater delegates to nav-profile instead of re-deriving', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'navigate.js'), 'utf8')
+  const i = src.indexOf('function outOfWater')
+  assert(i > 0, 'outOfWater exists')
+  assert(/navProfile\.escapeComplete\(/.test(src.slice(i, i + 700)), 'it must consult the one definition')
+  assert.strictEqual(typeof np.escapeComplete, 'function')
+})
+
 console.log(fails ? `\n${fails} FAILURE(S)` : '\nall water-contract tests passed')
 process.exit(fails ? 1 : 0)

@@ -257,6 +257,25 @@ function headInWater (bot) {
   try { const h = bot.entity && bot.blockAt(bot.entity.position.floored().offset(0, 1, 0)); return !!(h && /water|seagrass|kelp|bubble_column/.test(h.name)) } catch { return false }
 }
 
+// THE ONE READ OF "the escape is actually finished" - the bot-side sampler for
+// navProfile.escapeComplete. headInWater alone was the old test, and a bot TREADING water satisfies
+// it (head clear, nothing underfoot) - so the escape declared victory, ended the maneuver, released
+// the body, and the bot sank and drowned. Twice, live 2026-07-30. `groundSolid` is the floor read
+// that distinguishes "standing in a puddle" (done) from "afloat at the surface" (not done).
+// Used by BOTH escapeWater's loop and index.js's drown-crisis verdict, so the two cannot disagree.
+function outOfWater (bot) {
+  try {
+    if (!bot.entity) return false
+    const f = bot.entity.position.floored()
+    const h = bot.blockAt(f.offset(0, 1, 0))
+    const g = bot.blockAt(f.offset(0, -1, 0))
+    return navProfile.escapeComplete({
+      head: h ? h.name : null,
+      groundSolid: !!(g && g.boundingBox === 'block' && !/water|lava/.test(g.name))
+    })
+  } catch { return false }
+}
+
 // ROOFED-FLOOD rung: no shore to swim to and no adjacent bank to hop - so rise straight UP
 // the water column toward an air pocket (face up, hold jump = swim up in water). Bounded.
 // Deliberately NOT climbToSurface (its digs REFUSE water, provision.js climbToSurface - it would
@@ -338,7 +357,12 @@ async function escapeWater (bot, { isStopped = () => false, deadlineMs = 35000 }
   try { entryPos = bot.entity.position.floored() } catch {}
   try {
     const dl = Date.now() + deadlineMs
-    const wet = () => headInWater(bot)
+    // NOT `headInWater` any more. The ladder must keep working until the bot actually HAS A FLOOR:
+    // a bot treading water is head-clear, and stopping there ended the maneuver, released the body
+    // and let it sink - it drowned twice on 2026-07-30 holding a success claim. Same predicate the
+    // caller judges by (index.js drown-crisis), so the escape can satisfy its own caller.
+    // The TRIGGER is still head-based - this changes only when the ladder STOPS.
+    const wet = () => !outOfWater(bot)
     if (!wet()) return true
     try { bot.stopDigging() } catch {} // a mid-dig await would otherwise hold the body underwater
     try { bot.pathfinder.setGoal(null) } catch {}
@@ -1606,4 +1630,4 @@ function honestFail (lastErr, counts, label, recoveryMs, reflexWaitMs) {
   return e
 }
 
-module.exports = { navigateTo, navigateToPreempt, gotoOnce, openNearbyDoor, crossOwnDoor, crossVerdict, enterStructure, exitStructure, swimToShore, escapeWater, escapeToDryLand, isEscapingWater, headInWater, feetInWater, jumpForAir, isNavigating, isRecovering, isForceUnsticking, forceUnstick, setDebugSink, detectPit, goalWasChanged, reactiveMove, reactiveTarget, reactiveDone, setDeliberateDrown, isDeliberateDrown, drownReflexSkips }
+module.exports = { navigateTo, navigateToPreempt, gotoOnce, openNearbyDoor, crossOwnDoor, crossVerdict, enterStructure, exitStructure, swimToShore, escapeWater, escapeToDryLand, isEscapingWater, headInWater, feetInWater, outOfWater, jumpForAir, isNavigating, isRecovering, isForceUnsticking, forceUnstick, setDebugSink, detectPit, goalWasChanged, reactiveMove, reactiveTarget, reactiveDone, setDeliberateDrown, isDeliberateDrown, drownReflexSkips }
