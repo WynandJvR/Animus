@@ -117,8 +117,9 @@ function gatherMovements (bot) {
   m.canDig = true
   m.digCost = 10 // strongly prefer walking around over chewing through a canopy
   require('./pathfix.js').applyPlaceCost(m) // FIX 6: and prefer walking around over pillaring (a tower is permanent litter)
-  m.liquidCost = 4 // route AROUND lakes: water was priced like land, so A* happily swam
-  // (slow, drowning risk, and the brain panics "get out of water" the whole time)
+  navProfile.waterPolicy(m) // route AROUND lakes, and never plan a fall INTO one: water was priced
+  // like land, so A* happily swam (slow, drowning risk, and the brain panics "get out of water"
+  // the whole time). ONE definition for all six profiles - this one had never bounded the drop.
   m.blocksCantBreak = new Set(
     Object.values(md.blocksByName).filter(b => !/_leaves$/.test(b.name)).map(b => b.id)
   )
@@ -260,12 +261,11 @@ function wildTerrainMovements (bot) {
   const md = require('minecraft-data')(bot.version)
   m.canDig = true
   m.digCost = navProfile.WILD_DIG_COST // 20: dig only when the walk-around is massively worse
-  m.liquidCost = navProfile.WILD_LIQUID_COST // 4: route AROUND water, don't swim (NAV-P0 parity)
+  navProfile.waterPolicy(m) // 4: route AROUND water, don't swim, don't fall in (NAV-P0 parity)
   m.allow1by1towers = true
   m.canOpenDoors = true
   m.allowParkour = true
   m.maxDropDown = 4 // don't plunge into caves/ravines chasing the target's XZ (travelMovements parity)
-  if ('infiniteLiquidDropdownDistance' in m) m.infiniteLiquidDropdownDistance = false
   if ('allowSprinting' in m) m.allowSprinting = true
   // Bridge gaps/ravines with cheap carried blocks (travelMovements' bridge families).
   try {

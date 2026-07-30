@@ -93,5 +93,80 @@ t('ANTI-DRIFT: standable is exported so there is something to consult', () => {
   assert.strictEqual(typeof np.standable, 'function')
 })
 
-console.log(fails ? `\n${fails} FAILURE(S)` : '\nall standable-contract tests passed')
+// ==== THE OTHER HALF: "how does this bot ENTER water" ====================================
+// standable() governs the REACTIVE path (a steer picking a cell directly). waterPolicy() governs
+// the PLANNED path (what A* charges for water). Both were duplicated per-caller; both drowned the
+// bot. FIX 23 set liquidCost on the default profile and stopped there - but there were SIX
+// Movements profiles, and four of them still let the pathfinder plan an UNBOUNDED FALL into water
+// (infiniteLiquidDropdownDistance defaults to true). The bot did not stumble in; A* aimed it.
+
+t('waterPolicy prices water above land', () => {
+  const m = { liquidCost: 1, infiniteLiquidDropdownDistance: true }
+  np.waterPolicy(m)
+  assert.strictEqual(m.liquidCost, np.WILD_LIQUID_COST)
+  assert(m.liquidCost > 1, 'water must not be priced like grass')
+})
+t('waterPolicy bounds the drop INTO water', () => {
+  const m = { liquidCost: 1, infiniteLiquidDropdownDistance: true }
+  np.waterPolicy(m)
+  assert.strictEqual(m.infiniteLiquidDropdownDistance, false)
+})
+t('waterPolicy is COST-only: it never forbids (stays under the library cost>100 drop threshold)', () => {
+  const m = {}
+  np.waterPolicy(m)
+  assert(m.liquidCost < 100, 'a forbid would make the river farm / fishing spot unreachable')
+})
+t('waterPolicy does not invent a field the library lacks, and tolerates null', () => {
+  const m = { liquidCost: 1 }                       // older pathfinder: no dropdown field
+  np.waterPolicy(m)
+  assert.strictEqual('infiniteLiquidDropdownDistance' in m, false, 'a dead property reads as configured')
+  assert.doesNotThrow(() => np.waterPolicy(null))
+})
+t('waterPolicy leaves per-profile settings alone (climb/build legitimately differ)', () => {
+  const m = { maxDropDown: 8, canDig: true, allowParkour: false, liquidCost: 1 }
+  np.waterPolicy(m)
+  assert.strictEqual(m.maxDropDown, 8)
+  assert.strictEqual(m.canDig, true)
+  assert.strictEqual(m.allowParkour, false)
+})
+
+// ---- THE ANTI-DRIFT PIN: every profile must be stamped -----------------------------------
+// A SEVENTH `new Movements` added without water policy is this bug returning. Scanning the source
+// is what makes that impossible rather than merely unlikely: a new profile fails this test on the
+// commit that adds it, not on the night it drowns the bot.
+const PROFILE_FILES = ['commands.js', 'provision.js', 'provision-mining.js', 'schematic.js']
+t('ANTI-DRIFT: EVERY `new Movements` site applies waterPolicy', () => {
+  let sites = 0
+  for (const f of PROFILE_FILES) {
+    const src = fs.readFileSync(path.join(__dirname, f), 'utf8')
+    const lines = src.split('\n')
+    lines.forEach((ln, i) => {
+      if (!/new Movements\s*\(/.test(ln)) return
+      sites++
+      // the stamp must appear inside the same profile function - bounded look-ahead to the next
+      // `function ` at column 0, or 60 lines, whichever comes first.
+      let end = i + 1
+      while (end < lines.length && end - i < 60 && !/^function /.test(lines[end])) end++
+      const body = lines.slice(i, end).join('\n')
+      assert(/waterPolicy\s*\(m\)/.test(body),
+        `${f}:${i + 1} builds a Movements profile with no water policy - it will swim for free and fall into lakes`)
+    })
+  }
+  assert(sites >= 6, `expected the 6 known profiles, scanned ${sites} - did a file move?`)
+})
+t('ANTI-DRIFT: nobody hand-sets liquidCost / the drop flag outside nav-profile.js', () => {
+  for (const f of PROFILE_FILES) {
+    const src = fs.readFileSync(path.join(__dirname, f), 'utf8')
+    const code = src.split('\n').filter(l => !/^\s*(\/\/|\*)/.test(l)).join('\n') // ignore comments
+    assert(!/^\s*m\.liquidCost\s*=/m.test(code),
+      `${f} sets liquidCost by hand - that is the per-profile copy that drifted`)
+    assert(!/^\s*if \('infiniteLiquidDropdownDistance' in m\)/m.test(code),
+      `${f} sets the drop flag by hand - route it through waterPolicy()`)
+  }
+})
+t('ANTI-DRIFT: waterPolicy is exported so there is something to consult', () => {
+  assert.strictEqual(typeof np.waterPolicy, 'function')
+})
+
+console.log(fails ? `\n${fails} FAILURE(S)` : '\nall water-contract tests passed')
 process.exit(fails ? 1 : 0)

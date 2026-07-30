@@ -62,6 +62,44 @@ function standable ({ groundSolid, ground, feet, head }, opts = {}) {
   return okBody(feet) && okBody(head)
 }
 
+// ==== AUDIT 2026-07-29: ONE DEFINITION OF "HOW THIS BOT ENTERS WATER" ====================
+// FIX 23 (commit b7bd94b) gave the DEFAULT profile a liquidCost because it was the only one of
+// FOUR that swam for free. That was the wrong shape of fix: there are SIX Movements profiles, not
+// four, and water policy is hand-copied into each one. So each profile forgot a DIFFERENT half:
+//
+//   profile                            liquidCost   infiniteLiquidDropdownDistance
+//   travelMovements   commands.js       4            false
+//   setupMovements    commands.js       4 (FIX 23)   *** library default: true ***
+//   gatherMovements   provision.js      4            *** library default: true ***
+//   trekMovements     provision.js      4            false
+//   climbMovements    provision-mining  *** 1 ***    *** true ***
+//   buildMovements    schematic.js      *** 1 ***    *** true ***
+//
+// Both defaults are drowning vectors, and the second is the nastier one: with
+// infiniteLiquidDropdownDistance true the pathfinder deliberately plans a drop of ANY height into
+// water (movements.js getMoveDropDown:487 only bounds the fall when the flag is false). The bot
+// does not stumble into the pond - A* aims it off the cliff.
+//
+// Patching the four missing cells would be the fifth round of the same whack-a-mole. This is the
+// structural fix: ONE function that stamps water policy onto ANY Movements instance, called at
+// every `new Movements` site, with a source-scanning ANTI-DRIFT pin in standabletest.js so a
+// SEVENTH profile cannot be added without it.
+//
+// Deliberately NARROW: this owns only "what does water cost, and may we fall into it". maxDropDown,
+// canDig, parkour and pillaring legitimately differ per profile and are NOT unified here - a stamp
+// that flattened those would break the climb/build profiles it is meant to protect.
+// Both settings are COST-ONLY or fall-bounding, never a forbid: shallow crossings, the river farm
+// and the fishing spot all stay reachable.
+function waterPolicy (m) {
+  if (!m) return m
+  m.liquidCost = WILD_LIQUID_COST
+  // Guarded `in` checks: older pathfinder builds lack the field, and blind assignment would add a
+  // dead property that reads as configured. Absent field => the library cannot bound the drop and
+  // there is nothing to set; present => bound it to maxDropDown, whatever this profile set that to.
+  if ('infiniteLiquidDropdownDistance' in m) m.infiniteLiquidDropdownDistance = false
+  return m
+}
+
 // NAV Phase B (NAV_HAZARD_LEGS): the lava-hazard STEP predicate. travelMovements/wildTerrain
 // never priced lava at all (no liquidCost for it, and A* prices a lava-pool-edge cell like open
 // ground) - so a surface trek could route a leg right to a pool edge. HAZARD_RE matches the two
@@ -267,6 +305,7 @@ function findDryLandExit (feet, sampleName, opts = {}) {
 
 module.exports = {
   standable,
+  waterPolicy,
   WILD_LIQUID_COST,
   WILD_DIG_COST,
   HAZARD_RE,
@@ -276,7 +315,6 @@ module.exports = {
   WATER_STEP_COST,
   deepWaterHazard,
   findDryLandExit,
-  WILD_LIQUID_COST,
   INFRA_BREAK_RADIUS,
   WILD_SCOPE_RADIUS,
   SCAFFOLD_BREAK_RE,

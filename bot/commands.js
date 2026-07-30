@@ -476,8 +476,7 @@ function travelMovements (bot) {
   m.canOpenDoors = true
   m.allowParkour = true
   m.maxDropDown = 4           // don't plunge into caves/ravines chasing the target's XZ
-  m.liquidCost = 4            // NAV P0: route AROUND water - library default is 1 (priced like land) so A* happily swam lakes; mirrors gatherMovements (provision.js). Treks are how the bot reaches water-pocket geometry.
-  if ('infiniteLiquidDropdownDistance' in m) m.infiniteLiquidDropdownDistance = false
+  require('./nav-profile.js').waterPolicy(m) // ONE definition of what water costs / may we fall in
   if ('allowSprinting' in m) m.allowSprinting = true
   // Bridge gaps/ravines with cheap blocks the bot is carrying (dirt/cobble/gravel...).
   // Only used where a bridge is actually needed; on open ground it just walks.
@@ -2307,9 +2306,11 @@ function setupMovements (bot) {
   // So A* routed the flee/collect/recovery paths straight through lakes, ~40 times a session,
   // and ~13% of those entries ended in a death.
   // I spent the evening improving the ESCAPE (measured: 55 out of 63 successful) when the lever
-  // was always the ENTRY. This is that lever, and it is one line the other three profiles have
-  // had all along. Cost-only, never a forbid: shallow crossings and the river farm stay reachable.
-  try { m.liquidCost = require('./nav-profile.js').WILD_LIQUID_COST } catch { m.liquidCost = 4 }
+  // was always the ENTRY.
+  // ...and FIX 23 as first written was still too small: it set liquidCost here and left
+  // infiniteLiquidDropdownDistance at the library's `true`, so THIS profile still let A* plan an
+  // unbounded drop into water. Water policy now comes from ONE place for all six profiles.
+  require('./nav-profile.js').waterPolicy(m)
   if ('scafoldingBlocks' in m) m.scafoldingBlocks = [] // don't place blocks to bridge
   // PATHFINDER FIX: mineflayer-pathfinder only auto-opens fence GATES (its "openable"
   // set is built from block names containing "gate"). Plain doors are never added, so

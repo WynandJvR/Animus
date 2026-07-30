@@ -202,6 +202,11 @@ function climbMovements (bot) {
   m.allowParkour = true
   m.maxDropDown = 4
   m.digCost = 1
+  // This profile is the ESCAPE from a shaft/pocket, and it was one of two that had NO water policy
+  // at all: liquidCost 1 (water priced like grass) and an unbounded drop into water. A climb-out
+  // that routes through a flooded cave is how a recovery turns into a drowning. Cost-only, so a
+  // genuinely water-only escape route is still taken - just last.
+  require('./nav-profile.js').waterPolicy(m)
   // ...but only if it has blocks to pillar WITH - give the pathfinder our cheap filler
   // so allow1by1towers can actually place a tower (else it can't rise over a gap/void).
   try {

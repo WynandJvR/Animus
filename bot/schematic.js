@@ -234,6 +234,9 @@ function buildMovements (bot) {
   const md = require('minecraft-data')(bot.version)
   const ids = SCAFFOLD_BLOCKS.map(n => md.itemsByName[n] && md.itemsByName[n].id).filter(x => x != null)
   if ('scafoldingBlocks' in m) m.scafoldingBlocks = ids
+  // The other profile that had NO water policy: liquidCost 1 and an unbounded drop into water, so
+  // walking between placements would happily wade a lake or step off the build into one. Cost-only.
+  require('./nav-profile.js').waterPolicy(m)
   return m
 }
 
