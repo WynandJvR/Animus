@@ -896,6 +896,67 @@ ta('RELOCATE: hostiles nearby DEFER it - not a thing to do standing outside with
   assert.ok(!bot._ops.some(o => o.op === 'dig'), 'and it did not break the bed first')
 })
 
+// ==== THE HUT MUST BE ENTERABLE (live 2026-07-30) ============================================
+// The anchor drift built the drifted frame's rim wall one block north of the real hut, including
+// BOTH halves of an oak_door at 190,68/69,-105 - directly in front of the real door at
+// 190,68,-104. The bot could not path in: 116 door-assist failures, `crossOwnDoor(in): still on
+// the wrong side`, so it slept outdoors and died to mobs three times in forty minutes. The hut
+// survey read 0 bad of 180 throughout, because all of it sits OUTSIDE the hut box.
+function doorApproachWorld (opts = {}) {
+  const bot = fakeBot({ items: [] })
+  const hut = { x: 0, y: 65, z: 0 }
+  bot.entity.position = new Vec3(2.5, 66, -1.5) // on its own doorstep
+  for (let x = 0; x <= 5; x++) for (let z = 0; z <= 5; z++) {
+    bot._override(new Vec3(x, 65, z), 'oak_planks')
+    bot._override(new Vec3(x, 69, z), 'oak_planks')
+    if (x === 0 || x === 5 || z === 0 || z === 5) for (let y = 66; y <= 68; y++) bot._override(new Vec3(x, y, z), 'oak_planks')
+  }
+  bot._override(new Vec3(2, 66, 0), 'oak_door', { part: 'lower', facing: 'north' }) // the REAL door
+  bot._override(new Vec3(2, 67, 0), 'oak_door', { part: 'upper', facing: 'north' })
+  bot._override(new Vec3(2, 65, -1), 'oak_planks')
+  if (opts.ghost === 'unloaded') bot._override(new Vec3(2, 66, -1), null)
+  else if (opts.ghost) {
+    bot._override(new Vec3(2, 66, -1), opts.ghost, { part: 'lower', facing: 'east' })
+    if (opts.ghost === 'oak_door') bot._override(new Vec3(2, 67, -1), 'oak_door', { part: 'upper', facing: 'east' })
+  }
+  return { bot, hut }
+}
+
+ta('APPROACH: the ghost door standing in its own doorway is RECLAIMED', async () => {
+  resetWorldMem()
+  const { bot, hut } = doorApproachWorld({ ghost: 'oak_door' })
+  const r = await provHut.clearDoorApproach(bot, hut, {})
+  assert.strictEqual(r.how, 'cleared', r.why)
+  assert.strictEqual(bot.blockAt(new Vec3(2, 66, -1)).name, 'air', 'the doorstep is walkable again')
+  assert.strictEqual(bot.blockAt(new Vec3(2, 67, -1)).name, 'air', 'both halves, not just the one it tripped over')
+  assert.ok(/_door$/.test(bot.blockAt(new Vec3(2, 66, 0)).name), 'and the REAL door is untouched')
+})
+
+ta('APPROACH ANTI-GRIEF: a chest on the doorstep is NOT mine to clear', async () => {
+  resetWorldMem()
+  const { bot, hut } = doorApproachWorld({ ghost: 'chest' })
+  const r = await provHut.clearDoorApproach(bot, hut, {})
+  assert.strictEqual(r.how, 'blocked', r.why)
+  assert.ok(!bot._ops.some(o => o.op === 'dig'), 'furniture is never litter, whatever it is standing in')
+  assert.strictEqual(bot.blockAt(new Vec3(2, 66, -1)).name, 'chest')
+})
+
+ta('APPROACH: an UNLOADED doorstep claims nothing and digs nothing', async () => {
+  resetWorldMem()
+  const { bot, hut } = doorApproachWorld({ ghost: 'unloaded' })
+  const r = await provHut.clearDoorApproach(bot, hut, {})
+  assert.strictEqual(r.how, 'unknown', r.why)
+  assert.ok(!bot._ops.some(o => o.op === 'dig'))
+})
+
+ta('APPROACH: an already-walkable doorstep is a fast no-op', async () => {
+  resetWorldMem()
+  const { bot, hut } = doorApproachWorld()
+  const r = await provHut.clearDoorApproach(bot, hut, {})
+  assert.strictEqual(r.how, 'clear', r.why)
+  assert.ok(!bot._ops.some(o => o.op === 'dig'))
+})
+
 runQueued().then(() => {
   try { fs.rmSync(TMP, { recursive: true, force: true }) } catch {}
   console.log(failures ? `\n${failures} FAILED` : '\nall passed')

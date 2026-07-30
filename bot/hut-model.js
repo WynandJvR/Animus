@@ -111,6 +111,24 @@ function outsideCell (a, door) {
   return { x: door.x + dx, z: door.z + dz }
 }
 
+// THE DOORWAY MUST BE APPROACHABLE (2026-07-30). The cells a player's body occupies while
+// standing in front of the door - the outside cell at feet (dy1) and head (dy2) height. If they
+// are not passable the hut cannot be entered AT ALL, however sound its shell.
+//
+// Live: the anchor drift (see bestAnchor) built the drifted frame's whole z=0 rim wall one block
+// north of the real hut - planks at 189/191,68,-105, a floor plank at 190,67,-105, and BOTH
+// halves of an oak_door at 190,68/69,-105, directly in front of the real door at 190,68,-104.
+// The bot could not path into its own house: 116 door-assist failures in two hours
+// (`force-walk did not clear` / `crossOwnDoor(in): still on the wrong side`), so it slept
+// outdoors and died to mobs three times in forty minutes. The hut survey read 0 bad of 180 the
+// whole time, because every one of those blocks is OUTSIDE the hut box and nothing looks there.
+// A shell that is sound and cannot be entered is not shelter.
+function approachCells (a, door) {
+  const out = outsideCell(a, door)
+  if (!out) return []
+  return [{ x: out.x, y: a.y + 1, z: out.z }, { x: out.x, y: a.y + 2, z: out.z }]
+}
+
 // Classify one cell: 'outside' | 'wall' | 'door' | 'floor' | 'interior' | 'furniture' |
 // 'stray'. `door` may be passed (else detected). Furniture/stray need a world read.
 function classifyCell (a, read, x, y, z, door) {
@@ -618,6 +636,7 @@ module.exports = {
   doorwayColumn,
   thresholdCell,
   outsideCell,
+  approachCells,
   classifyCell,
   furnitureKind,
   freeStandCells,

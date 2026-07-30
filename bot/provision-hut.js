@@ -1273,12 +1273,59 @@ async function ensureHomeShelter (bot, opts = {}) {
   return R(false, 'partial', 'patched what I could at ' + hut.x + ',' + hut.z + ' but ' + after.bad + ' cell(s) are still off' + (home && home.damaged ? '' : ' (nothing was placed - out of materials?)'))
 }
 
+// THE HUT MUST BE ENTERABLE - the actor for hutModel.approachCells (2026-07-30).
+// The anchor drift built the drifted frame's rim wall one block off the real hut, including BOTH
+// halves of an oak_door at 190,68/69,-105 standing directly in front of the real door. 116
+// door-assist failures, `crossOwnDoor(in): still on the wrong side`, and a bot sleeping outdoors
+// and dying to mobs beside a hut whose survey read 0 bad of 180 - because every one of those
+// blocks sits OUTSIDE the hut box, where nothing looks.
+//
+// ANTI-GRIEF, deliberately narrow: at most the TWO cells of the bot's own doorstep, only when the
+// hut is registered, and only blocks that are the fabric the bot itself builds with (plank, door,
+// filler). Furniture is never touched, an unknown block is never touched, and an unloaded cell
+// claims nothing. Every break is reach-checked and verified by a world re-read.
+async function clearDoorApproach (bot, hut, opts = {}) {
+  const R = (how, why) => { dbg('door-approach: [' + how + '] ' + why); return { how, why } }
+  hut = hut || hutAnchor()
+  if (!hut) return R('noop', 'no hut registered - nothing owns a doorway yet')
+  const read = hutReader(bot)
+  const door = hutModel.doorwayColumn(hut, read, { preferDoorBlock: true })
+  if (!door) return R('noop', 'no doorway found on the hut rim')
+  const cells = hutModel.approachCells(hut, door)
+  if (!cells.length) return R('noop', 'no approach cells for that doorway')
+  const pathfix = require('./pathfix.js')
+  let cleared = 0
+  for (const c of cells) {
+    if (opts.isStopped && opts.isStopped()) break
+    const p = new Vec3(c.x, c.y, c.z)
+    const b = bot.blockAt(p)
+    if (!b) return R('unknown', 'the approach cell ' + p.toString() + ' is not loaded - claiming nothing')
+    if (AIRISH(b.name)) continue
+    const mine = (hutModel.WALL_RE.test(b.name) || hutModel.DOOR_RE.test(b.name) || hutModel.STRAY_FILLER_RE.test(b.name)) && !hutModel.FURNITURE_RE.test(b.name)
+    if (!mine) return R('blocked', 'my doorstep is blocked by ' + b.name + ' at ' + p.toString() + ' - not mine to clear')
+    try { if (bot.entity.position.distanceTo(p) > 3) await navigate.gotoOnce(bot, new goals.GoalNear(p.x, p.y, p.z, 2), 12000) } catch {}
+    if (bot.entity.position.distanceTo(p) > 4.5) return R('deferred', 'cannot get within reach of my own doorstep at ' + p.toString())
+    if (bot.canDigBlock && !bot.canDigBlock(b)) return R('deferred', b.name + ' at ' + p.toString() + ' is not diggable from where I stand')
+    const tool = toolForBlock(bot, b.name); if (tool) await bot.equip(tool, 'hand').catch(() => {})
+    try { await bot.dig(b) } catch (e) { return R('deferred', 'could not clear ' + b.name + ' at ' + p.toString() + ' (' + e.message + ')') }
+    if (!(await pathfix.brokeOK(bot, p, { timeoutMs: 1200 }))) return R('deferred', 'the server kept ' + b.name + ' at ' + p.toString() + ' - claiming nothing')
+    cleared++
+    dbg('door-approach: reclaimed ' + b.name + ' at ' + p.toString() + ' - it was standing in my own doorway')
+  }
+  if (cleared) { await collectDrops(bot, 4); return R('cleared', cleared + ' block(s) taken out of my own doorway') }
+  return R('clear', 'the doorway approach is walkable')
+}
+
 async function maintainHome (bot, hutAt, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const say = opts.say || (() => {})
   hutAt = hutAt || hutAnchor()
-  const out = { bed: null, bedUpgrade: null, chestFixed: false, repair: null, consolidated: 0, damaged: false }
+  const out = { bed: null, bedUpgrade: null, chestFixed: false, repair: null, consolidated: 0, approach: null, damaged: false }
   if (!hutAt) return out
+  // FIRST, because every other step here assumes the bot can GET IN. A doorway it cannot stand
+  // in front of makes the bed, the bank and the tidy unreachable, and the shell survey cannot
+  // see the problem at all - the obstruction is outside the box.
+  try { const ap = await clearDoorApproach(bot, hutAt, { isStopped, say }); out.approach = ap.how; if (ap.how === 'cleared') out.damaged = true } catch (e) { dbg('camp: door approach failed (' + e.message + ')') }
   try { await ensureHutApron(bot, hutAt, { isStopped, say }) } catch (e) { dbg('camp: apron fill failed (' + e.message + ')') }
   // rebuild/verify the bed. Anything but 'present' means a bed was missing/placed/unplaceable
   // = the home needed work.
@@ -1727,7 +1774,7 @@ async function worldTidy (bot, opts = {}) {
 
 module.exports = {
   setDebugSink, insideHutBox,
-  insideHutBox, ownHutAt, onHutApron, insideOwnStructure, hasSolidCeiling, hutAnchor, hutReader, ensureHomeShelter, stepOffApron, ensureHutApron, healHomeCrater, ensureHutBed, relocateBedInto, layBedAt, bedInPack, bedCandidates, acquireBed, placeBedNear, bedFootprint, bedUsable, assertSpawnOn, ensureBedSite, upgradeBedPlacement, freeInteriorCell, findHutDoorway, hutFreeCells, furnitureInHut, stationInHut, stationSlot, loadHutSchem, reconcileInfra, cleanupHutInterior, repairHutStructure, recallAndReach, maintainHut, maintainHome,
+  insideHutBox, ownHutAt, onHutApron, insideOwnStructure, hasSolidCeiling, hutAnchor, hutReader, ensureHomeShelter, stepOffApron, ensureHutApron, clearDoorApproach, healHomeCrater, ensureHutBed, relocateBedInto, layBedAt, bedInPack, bedCandidates, acquireBed, placeBedNear, bedFootprint, bedUsable, assertSpawnOn, ensureBedSite, upgradeBedPlacement, freeInteriorCell, findHutDoorway, hutFreeCells, furnitureInHut, stationInHut, stationSlot, loadHutSchem, reconcileInfra, cleanupHutInterior, repairHutStructure, recallAndReach, maintainHut, maintainHome,
   secureBase, secureBaseGate: hutModel.secureBaseGate,
   sealHomeDescents, sealDescentsGate: hutModel.sealDescentsGate,
   worldTidy, litterSignature: hutModel.litterSignature
