@@ -660,6 +660,101 @@ async function placeBedNear (bot, near, opts = {}) {
   return null
 }
 
+// THE ONE implementation of "lay the bed I am carrying at EXACTLY these two cells". Extracted
+// 2026-07-30 so the hut placement, the relocate, and the relocate's ROLLBACK are the same code:
+// three copies of a placement idiom is three chances for the rollback to behave differently from
+// the placement it is undoing. Verifies by RE-READING the world, never by the call resolving.
+// Returns the landed bed block, or null.
+async function layBedAt (bot, foot, head, opts = {}) {
+  const bedItem = bedInPack(bot)
+  if (!bedItem) return null
+  for (const c of [foot, head]) {
+    const cb = bot.blockAt(c); const fl = bot.blockAt(c.offset(0, -1, 0))
+    if (cb && !AIRISH(cb.name)) { dbg('  layBed: ' + c.toString() + ' blocked by ' + cb.name); return null }
+    if (!fl || fl.boundingBox !== 'block') { dbg('  layBed: no solid floor under ' + c.toString()); return null }
+  }
+  if (bot.entity.position.distanceTo(foot) > 3) { try { await gotoWithTimeout(bot, new goals.GoalNear(foot.x, foot.y, foot.z, 2), 15000) } catch {} }
+  try {
+    await bot.equip(bedItem, 'hand')
+    await bot.lookAt(head.offset(0.5, 0.0, 0.5), true) // face the head cell so the bed lays along foot->head
+    await bot.placeBlock(bot.blockAt(foot.offset(0, -1, 0)), new Vec3(0, 1, 0))
+  } catch (e) { dbg('  layBed: place failed (' + e.message + ')'); return null }
+  await new Promise(r => setTimeout(r, 400))
+  for (const c of [foot, head]) { const b = bot.blockAt(c); if (b && /_bed$/.test(b.name)) return b }
+  dbg('  layBed: placement at ' + foot.toString() + ' did not verify (world re-read)')
+  return null
+}
+
+// ==== A BED IN THE WRONG ROOM IS NOT A MISSING BED (2026-07-30) =========================
+// Live: the hut stood registered at 188,67,-104 with its interior bed cells (190,68,-102/-101)
+// free and floored, and the bot's OWN white_bed stood at 185,68,-103/-102, outside the west
+// wall. It could not sleep - `nightRest: 4.7b from the bed block` / `sleep failed (the bed is
+// too far)` x3 / `bed unusable - holding off 120s` / `pitting instead` - so it dug a hole to
+// sleep in, every night, five blocks from its own bed inside its own finished house.
+//
+// The root is that the system had no MOVE. It had `ensureHutBed` -> acquireBed (get a bed I do
+// not have) and `upgradeBedPlacement` (acquire a BETTER bed, never touching the standing one).
+// Both ask the resource model "do I have a bed?", which reads pack + chests - and a bed standing
+// in the world is invisible to it. So the bot owned a bed, needed a bed, and was told to go find
+// wool. With no sheep that is an unbounded wait, and the deadlock is silent.
+//
+// Why this may reclaim the anchor when upgradeBedPlacement may NOT: #110's create-then-destroy
+// exists because RE-CREATION MIGHT BE IMPOSSIBLE - break your only bed to chase a better site and
+// a failed craft leaves you with no spawn at all. That risk does not exist here, because the
+// replacement IS the item the dig puts in the pack. The guarantee #110 actually protects ("never
+// be left unable to re-create the anchor") is preserved exactly; what is dropped is the
+// over-broad demand for a SECOND bed. Every failure path below re-lays the bed, and the last one
+// leaves it in the pack where ensureSpawnBed will lay it.
+//
+// Ordered so nothing irreversible happens before it is known to be worth doing: the destination
+// is verified free, floored and reachable BEFORE the old bed is touched.
+async function relocateBedInto (bot, hut, opts = {}) {
+  const say = opts.say || (() => {})
+  const R = (how, why) => { dbg('bed-relocate: [' + how + '] ' + why); return { how, why } }
+  if (!hut) return R('noop', 'no hut registered - an open-ground camp keeps its open-ground anchor')
+  const kb = knownBed()
+  if (!kb) return R('noop', 'no bed remembered - there is nothing to move')
+  const old = bot.blockAt(new Vec3(kb.x, kb.y, kb.z))
+  if (!old || !/_bed$/.test(old.name)) return R('noop', 'nothing reads as a bed at the remembered spot - reconciliation, not a move')
+  const fp = bedFootprint(bot, old.position)
+  const oldFoot = fp ? fp.foot : old.position
+  const oldHead = fp ? fp.head : old.position
+  if (insideHutBox(oldFoot, hut) || insideHutBox(oldHead, hut)) return R('noop', 'the anchor is already inside the hut')
+  // standing still breaking and laying a bed outside is not a thing to do with a mob on us
+  if (nearHostile(bot, 10)) return R('deferred', 'hostiles within 10b - not standing outside laying a bed')
+  const foot = new Vec3(hut.x + 2, hut.y + 1, hut.z + 2)
+  const head = new Vec3(hut.x + 2, hut.y + 1, hut.z + 3)
+  for (const c of [foot, head]) {
+    const cb = bot.blockAt(c); const fl = bot.blockAt(c.offset(0, -1, 0))
+    if (!cb || !fl) return R('noop', 'the interior bed site at ' + c.toString() + ' is not loaded - refusing to dig a bed I might not be able to re-lay')
+    if (!AIRISH(cb.name)) return R('blocked', 'the interior bed site is blocked by ' + cb.name + ' - cleanup owns that, not this')
+    if (fl.boundingBox !== 'block') return R('blocked', 'no solid floor under the interior bed site at ' + c.toString())
+  }
+  // 1) RECLAIM. The item lands in the pack, which is what makes every later step reversible.
+  try { if (bot.entity.position.distanceTo(oldFoot) > 3) await gotoWithTimeout(bot, new goals.GoalNear(oldFoot.x, oldFoot.y, oldFoot.z, 2), 15000) } catch {}
+  const target = bot.blockAt(oldFoot) || old
+  try { await bot.dig(target) } catch (e) { return R('kept', 'could not break my own bed to move it (' + e.message + ') - it still stands where it was') }
+  await collectDrops(bot, 4)
+  if (!bedInPack(bot)) {
+    await collectDrops(bot, 6) // one wider sweep - the drop is at our feet
+    if (!bedInPack(bot)) return R('failed', 'BROKE the bed and did not recover the item - no anchor now; ensureSpawnBed must lay a new one')
+  }
+  // 2) RE-LAY, inside. On failure put it back exactly where it was: the item is in the pack, so
+  //    this rollback cannot itself fail for want of a bed.
+  const laid = await layBedAt(bot, foot, head, opts)
+  if (!laid) {
+    const back = await layBedAt(bot, oldFoot, oldHead, opts)
+    if (back) { try { await assertSpawnOn(bot, back, { allowUnconfirmed: true, say }) } catch {} ; return R('rolled-back', 'could not lay the bed inside - put it back at ' + oldFoot.toString()) }
+    return R('failed', 'could not lay the bed inside OR back outside - it is safe in my pack')
+  }
+  // 3) ASSERT. allowUnconfirmed: at this instant the bot genuinely has NO other anchor (the old
+  //    one is gone), which is exactly the case #110 documents for it - and an unconfirmed record
+  //    says confirmed:false rather than claiming a spawn the server never granted.
+  try { await assertSpawnOn(bot, laid, { allowUnconfirmed: true, say }) } catch {}
+  say('moved my bed inside the hut - no more sleeping in a hole next to my own house')
+  return R('moved', 'anchor moved from ' + oldFoot.x + ',' + oldFoot.z + ' to ' + laid.position.toString())
+}
+
 async function ensureHutBed (bot, at, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const say = opts.say || (() => {})
@@ -678,36 +773,27 @@ async function ensureHutBed (bot, at, opts = {}) {
       return 'present'
     }
   }
-  // 2) carrying a bed? lay it on an interior floor cell. foot (2,1,2) + head (2,1,3): both must
+  const foot = new Vec3(at.x + 2, at.y + 1, at.z + 2)
+  const head = new Vec3(at.x + 2, at.y + 1, at.z + 3)
+  // 2) I already OWN a bed - it is just in the wrong room. Moving it beats sourcing a second
+  //    one, and must be tried BEFORE acquireBed: a bed standing in the world is invisible to
+  //    the resource model (it reads pack + chests), so acquire answers "no bed obtainable" and
+  //    sends the bot hunting wool while its own bed stands five blocks away. That is the
+  //    deadlock that had it sleeping in a pit beside a finished hut.
+  const moved = await relocateBedInto(bot, at, { isStopped, say })
+  if (moved && moved.how === 'moved') return 'placed'
+
+  // 3) carrying a bed? lay it on an interior floor cell. foot (2,1,2) + head (2,1,3): both must
   //    be air over a solid floor. (chest 4,1,1/2, furnace 4,1,4, table 1,1,4 are all clear of this.)
   // No bed in the pack: acquireBed is the one source of truth - withdraw a banked bed,
   // else craft one from total holdings (this is where the old planks-in-pack gate lived).
   const bedItem = await acquireBed(bot, { near: { x: at.x + 2, y: at.y + 1, z: at.z + 2 }, isStopped, say: opts.say })
   if (!bedItem) return 'none'
-  const foot = new Vec3(at.x + 2, at.y + 1, at.z + 2)
-  const head = new Vec3(at.x + 2, at.y + 1, at.z + 3)
-  for (const c of [foot, head]) {
-    const cb = bot.blockAt(c); const fl = bot.blockAt(c.offset(0, -1, 0))
-    if (cb && !AIRISH(cb.name)) { dbg('  ensureHutBed: interior spot blocked by ' + cb.name); return 'fail' }
-    if (!fl || fl.boundingBox !== 'block') { dbg('  ensureHutBed: no solid floor under the bed spot'); return 'fail' }
-  }
-  try { await gotoWithTimeout(bot, new goals.GoalNear(foot.x, foot.y, foot.z, 2), 15000) } catch {}
-  try {
-    await bot.equip(bedItem, 'hand')
-    await bot.lookAt(head.offset(0.5, 0.0, 0.5), true) // face +z so the head lays toward (2,1,3)
-    await bot.placeBlock(bot.blockAt(foot.offset(0, -1, 0)), new Vec3(0, 1, 0))
-  } catch (e) { dbg('  ensureHutBed: place failed (' + e.message + ')'); return 'fail' }
-  await new Promise(r => setTimeout(r, 400))
-  for (let dz = 0; dz <= 5; dz++) for (let dx = 0; dx <= 5; dx++) { // verify a bed actually landed, then set spawn
-    const b = bot.blockAt(new Vec3(at.x + dx, at.y + 1, at.z + dz))
-    if (b && /_bed$/.test(b.name)) {
-      try { await assertSpawnOn(bot, b, { allowUnconfirmed: true, say }) } catch {}
-      say('set my bed in the hut - spawn point secured')
-      return 'placed'
-    }
-  }
-  dbg('  ensureHutBed: placement did not verify - bed still in pack')
-  return 'fail'
+  const laid = await layBedAt(bot, foot, head, { isStopped, say })
+  if (!laid) { dbg('  ensureHutBed: placement did not verify - bed still in pack'); return 'fail' }
+  try { await assertSpawnOn(bot, laid, { allowUnconfirmed: true, say }) } catch {}
+  say('set my bed in the hut - spawn point secured')
+  return 'placed'
 }
 
 function freeInteriorCell (bot, hut, near) {
@@ -1622,7 +1708,7 @@ async function worldTidy (bot, opts = {}) {
 
 module.exports = {
   setDebugSink, insideHutBox,
-  insideHutBox, ownHutAt, onHutApron, insideOwnStructure, hasSolidCeiling, hutAnchor, hutReader, ensureHomeShelter, stepOffApron, ensureHutApron, healHomeCrater, ensureHutBed, bedInPack, bedCandidates, acquireBed, placeBedNear, bedFootprint, bedUsable, assertSpawnOn, ensureBedSite, upgradeBedPlacement, freeInteriorCell, findHutDoorway, hutFreeCells, furnitureInHut, stationInHut, stationSlot, loadHutSchem, reconcileInfra, cleanupHutInterior, repairHutStructure, recallAndReach, maintainHut, maintainHome,
+  insideHutBox, ownHutAt, onHutApron, insideOwnStructure, hasSolidCeiling, hutAnchor, hutReader, ensureHomeShelter, stepOffApron, ensureHutApron, healHomeCrater, ensureHutBed, relocateBedInto, layBedAt, bedInPack, bedCandidates, acquireBed, placeBedNear, bedFootprint, bedUsable, assertSpawnOn, ensureBedSite, upgradeBedPlacement, freeInteriorCell, findHutDoorway, hutFreeCells, furnitureInHut, stationInHut, stationSlot, loadHutSchem, reconcileInfra, cleanupHutInterior, repairHutStructure, recallAndReach, maintainHut, maintainHome,
   secureBase, secureBaseGate: hutModel.secureBaseGate,
   sealHomeDescents, sealDescentsGate: hutModel.sealDescentsGate,
   worldTidy, litterSignature: hutModel.litterSignature

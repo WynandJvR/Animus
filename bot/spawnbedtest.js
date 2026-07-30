@@ -773,6 +773,90 @@ t('SOURCE: the swap holds no blanket time window (condition gates only)', () => 
 })
 
 
+// ==== A BED IN THE WRONG ROOM IS NOT A MISSING BED (live 2026-07-30) =========================
+// The hut stood registered at 188,67,-104 with its interior bed cells free and floored, and the
+// bot's own white_bed stood at 185,68,-103/-102, outside the west wall. It could not reach it
+// through the wall - `4.7b from the bed block` / `sleep failed (the bed is too far)` x3 /
+// `pitting instead` - so it dug a hole to sleep in, every night, beside its own finished house.
+// Root: the system had no MOVE. ensureHutBed -> acquireBed and upgradeBedPlacement both ask the
+// resource model "do I have a bed?", which reads pack + chests; a bed STANDING IN THE WORLD is
+// invisible to it. So it owned a bed, needed a bed, and was told to go find wool.
+function relocWorld (opts = {}) {
+  const bot = fakeBot({ x: 2.5, z: 2.5, items: [] })
+  bot.entity.position = new Vec3(2.5, 66, 2.5)
+  const hut = { x: 0, y: 65, z: 0 } // 6x6, interior bed cells (2,66,2)+(2,66,3)
+  for (let x = 0; x <= 5; x++) for (let z = 0; z <= 5; z++) bot._override(new Vec3(x, 65, z), 'oak_planks')
+  bot._override(new Vec3(-3, 65, 0), 'grass_block')
+  bot._override(new Vec3(-3, 65, 1), 'grass_block')
+  if (opts.bedInside) {
+    bot._override(new Vec3(2, 66, 2), 'white_bed', { part: 'foot', facing: 'south' })
+    bot._override(new Vec3(2, 66, 3), 'white_bed', { part: 'head', facing: 'south' })
+    worldMemory.rememberBed({ x: 2, y: 66, z: 2 })
+  } else {
+    bot._override(new Vec3(-3, 66, 0), 'white_bed', { part: 'foot', facing: 'south' })
+    bot._override(new Vec3(-3, 66, 1), 'white_bed', { part: 'head', facing: 'south' })
+    worldMemory.rememberBed({ x: -3, y: 66, z: 0 })
+  }
+  return { bot, hut }
+}
+
+ta('RELOCATE: a bed OUTSIDE a registered hut is MOVED in - never re-sourced from wool', async () => {
+  resetWorldMem()
+  const { bot, hut } = relocWorld()
+  const r = await provHut.relocateBedInto(bot, hut, {})
+  assert.strictEqual(r.how, 'moved', r.why)
+  assert.ok(/_bed$/.test(bot.blockAt(new Vec3(2, 66, 2)).name), 'the bed now stands in the hut interior')
+  assert.strictEqual(bot.blockAt(new Vec3(-3, 66, 0)).name, 'air', 'and no longer outside the wall')
+})
+
+ta('RELOCATE SAFETY: a BLOCKED interior site refuses - the standing bed is never broken', async () => {
+  resetWorldMem()
+  const { bot, hut } = relocWorld()
+  bot._override(new Vec3(2, 66, 2), 'cobblestone')
+  const r = await provHut.relocateBedInto(bot, hut, {})
+  assert.strictEqual(r.how, 'blocked', r.why)
+  assert.ok(!bot._ops.some(o => o.op === 'dig'), 'NOTHING may be dug until the destination is proven')
+  assert.ok(/_bed$/.test(bot.blockAt(new Vec3(-3, 66, 0)).name), 'the old anchor still stands')
+})
+
+ta('RELOCATE SAFETY: an UNLOADED interior site refuses - absence of observation is not a free cell', async () => {
+  resetWorldMem()
+  const { bot, hut } = relocWorld()
+  bot._override(new Vec3(2, 66, 2), null) // never sent that chunk
+  const r = await provHut.relocateBedInto(bot, hut, {})
+  assert.strictEqual(r.how, 'noop', r.why)
+  assert.ok(!bot._ops.some(o => o.op === 'dig'), 'a bed must never be broken toward a cell we cannot see')
+})
+
+ta('RELOCATE: already inside is a NO-OP - it must not re-lay the anchor every pass', async () => {
+  resetWorldMem()
+  const { bot, hut } = relocWorld({ bedInside: true })
+  const r = await provHut.relocateBedInto(bot, hut, {})
+  assert.strictEqual(r.how, 'noop', r.why)
+  assert.ok(!bot._ops.some(o => o.op === 'dig'))
+})
+
+ta('RELOCATE ROLLBACK: if it cannot lay inside, the bed goes BACK where it was', async () => {
+  resetWorldMem()
+  const { bot, hut } = relocWorld()
+  const origPlace = bot.placeBlock.bind(bot)
+  let n = 0
+  bot.placeBlock = async (ref, face) => { n++; if (n === 1) throw new Error('server refused the placement'); return origPlace(ref, face) }
+  const r = await provHut.relocateBedInto(bot, hut, {})
+  assert.strictEqual(r.how, 'rolled-back', r.why)
+  assert.ok(/_bed$/.test(bot.blockAt(new Vec3(-3, 66, 0)).name), 'the anchor is standing again where it started')
+  assert.strictEqual(bot.blockAt(new Vec3(2, 66, 2)).name, 'air', 'and nothing was left half-done inside')
+})
+
+ta('RELOCATE: hostiles nearby DEFER it - not a thing to do standing outside with a mob on us', async () => {
+  resetWorldMem()
+  const { bot, hut } = relocWorld()
+  bot.entities = { 1: { id: 1, type: 'mob', name: 'zombie', position: new Vec3(4, 66, 4) } }
+  const r = await provHut.relocateBedInto(bot, hut, {})
+  assert.strictEqual(r.how, 'deferred', r.why)
+  assert.ok(!bot._ops.some(o => o.op === 'dig'), 'and it did not break the bed first')
+})
+
 runQueued().then(() => {
   try { fs.rmSync(TMP, { recursive: true, force: true }) } catch {}
   console.log(failures ? `\n${failures} FAILED` : '\nall passed')
