@@ -949,6 +949,47 @@ ta('APPROACH: an UNLOADED doorstep claims nothing and digs nothing', async () =>
   assert.ok(!bot._ops.some(o => o.op === 'dig'))
 })
 
+// Minutes after clearDoorApproach cleared the ghost door from 190,68,-105, the generic furnace
+// placer put a FURNACE in that cell and the bot sealed itself inside its own house
+// (`force-walk did not clear, at (190,68,-104)`, livelocked at hp 0.48 / food 0). The doorstep is
+// RESERVED - the inside face already is, via thresholdCell/freeStandCells.
+ta('APPROACH: my OWN furnace misplaced in the doorway is drained, then reclaimed', async () => {
+  resetWorldMem()
+  const { bot, hut } = doorApproachWorld({ ghost: 'furnace' })
+  let closed = false
+  bot.openFurnace = async () => ({
+    outputItem: () => null, inputItem: () => null, fuelItem: () => null,
+    takeOutput: async () => null, takeInput: async () => null, takeFuel: async () => null,
+    close () { closed = true }
+  })
+  const r = await provHut.clearDoorApproach(bot, hut, {})
+  assert.strictEqual(r.how, 'cleared', r.why)
+  assert.ok(closed, 'the window must be closed, not leaked')
+  assert.strictEqual(bot.blockAt(new Vec3(2, 66, -1)).name, 'air', 'the doorway is walkable again')
+})
+
+ta('APPROACH ANTI-GRIEF: a doorway furnace that still HOLDS things is left standing', async () => {
+  resetWorldMem()
+  const { bot, hut } = doorApproachWorld({ ghost: 'furnace' })
+  bot.openFurnace = async () => ({
+    outputItem: () => ({ name: 'iron_ingot', count: 4 }), inputItem: () => null, fuelItem: () => null,
+    takeOutput: async () => { throw new Error('pack full') }, takeInput: async () => null, takeFuel: async () => null,
+    close () {}
+  })
+  const r = await provHut.clearDoorApproach(bot, hut, {})
+  assert.strictEqual(r.how, 'deferred', r.why)
+  assert.ok(/still holds/.test(r.why), r.why)
+  assert.strictEqual(bot.blockAt(new Vec3(2, 66, -1)).name, 'furnace', 'a container whose contents I could not take is never broken')
+})
+
+ta('APPROACH ANTI-GRIEF: a doorway CHEST is never reclaimed, empty or not', async () => {
+  resetWorldMem()
+  const { bot, hut } = doorApproachWorld({ ghost: 'chest' })
+  const r = await provHut.clearDoorApproach(bot, hut, {})
+  assert.strictEqual(r.how, 'blocked', r.why)
+  assert.strictEqual(bot.blockAt(new Vec3(2, 66, -1)).name, 'chest', 'the bank is never a path problem to solve')
+})
+
 ta('APPROACH: an already-walkable doorstep is a fast no-op', async () => {
   resetWorldMem()
   const { bot, hut } = doorApproachWorld()

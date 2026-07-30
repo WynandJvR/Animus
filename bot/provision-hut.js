@@ -1301,8 +1301,32 @@ async function clearDoorApproach (bot, hut, opts = {}) {
     const b = bot.blockAt(p)
     if (!b) return R('unknown', 'the approach cell ' + p.toString() + ' is not loaded - claiming nothing')
     if (AIRISH(b.name)) continue
-    const mine = (hutModel.WALL_RE.test(b.name) || hutModel.DOOR_RE.test(b.name) || hutModel.STRAY_FILLER_RE.test(b.name)) && !hutModel.FURNITURE_RE.test(b.name)
-    if (!mine) return R('blocked', 'my doorstep is blocked by ' + b.name + ' at ' + p.toString() + ' - not mine to clear')
+    // THE DOORSTEP IS RESERVED. hutModel.thresholdCell already keeps the INSIDE face of the door
+    // clear ("a bed/table here blocks the entrance, live") and freeStandCells excludes it. The
+    // OUTSIDE face had no such protection because nothing modelled it - so minutes after this
+    // function cleared the ghost door from 190,68,-105, the generic furnace placer put a FURNACE
+    // in the cell, and the bot sealed itself inside its own house: `door-assist: force-walk did
+    // not clear, at (190,68,-104)`, livelocked at hp 0.48 / food 0.
+    // A furnace in my doorway is MISPLACED furniture, not furniture. Reclaiming it is allowed -
+    // narrowly: furnace/table only (NEVER a chest, NEVER the bed/spawn anchor), and a furnace is
+    // DRAINED through the ledger's own write-ahead first, so nothing inside it is ever destroyed.
+    const fabric = (hutModel.WALL_RE.test(b.name) || hutModel.DOOR_RE.test(b.name) || hutModel.STRAY_FILLER_RE.test(b.name)) && !hutModel.FURNITURE_RE.test(b.name)
+    const misplacedStation = /^(furnace|smoker|crafting_table)$/.test(b.name)
+    if (!fabric && !misplacedStation) return R('blocked', 'my doorstep is blocked by ' + b.name + ' at ' + p.toString() + ' - not mine to clear')
+    if (misplacedStation && /furnace|smoker/.test(b.name)) {
+      // EMPTY IT FIRST, and prove it empty by a window read - a debt is never destroyed to open
+      // a path. If it will not open or will not empty, the block stays and we say so.
+      let fur = null
+      try { fur = await bot.openFurnace(b) } catch (e) { return R('deferred', 'a furnace sits in my doorway at ' + p.toString() + ' and would not open (' + e.message + ') - not breaking a container I have not read') }
+      let left = 0
+      try {
+        for (const take of ['takeOutput', 'takeInput', 'takeFuel']) { try { if (fur[take]) await fur[take]() } catch {} }
+        for (const slot of [fur.outputItem && fur.outputItem(), fur.inputItem && fur.inputItem(), fur.fuelItem && fur.fuelItem()]) if (slot && slot.count > 0) left += slot.count
+        try { P().noteFurnaceHoldings(bot, { x: p.x, y: p.y, z: p.z }, fur) } catch {}
+      } finally { try { fur.close() } catch {} }
+      if (left > 0) return R('deferred', 'the furnace in my doorway still holds ' + left + ' item(s) I could not take - leaving it standing')
+      await collectDrops(bot, 3)
+    }
     try { if (bot.entity.position.distanceTo(p) > 3) await navigate.gotoOnce(bot, new goals.GoalNear(p.x, p.y, p.z, 2), 12000) } catch {}
     if (bot.entity.position.distanceTo(p) > 4.5) return R('deferred', 'cannot get within reach of my own doorstep at ' + p.toString())
     if (bot.canDigBlock && !bot.canDigBlock(b)) return R('deferred', b.name + ' at ' + p.toString() + ' is not diggable from where I stand')
