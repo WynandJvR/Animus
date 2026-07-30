@@ -426,6 +426,26 @@ function bedUsable (bot, pos) {
     if (!here) return { ok: false, why: 'unknown chunk at ' + c.toString() }
     if (!/_bed$/.test(here.name)) return { ok: false, why: 'cell ' + c.toString() + ' is not part of the bed' }
   }
+  // ==== THE ANCHOR MUST BE INSIDE THE SHELTER (2026-07-30) ==============================
+  // Live: the hut stood 6x6 at 188,67,-104 and the spawn bed sat at 185,68,-102 - THREE BLOCKS
+  // OUTSIDE the west wall, on open ground - while the hut's own bed cell stayed empty:
+  //   [prov] acquireBed: no bed obtainable - holding 0 wool [tried white_bed]
+  //   [prov] camp: hut bed -> none
+  //   [prov] bed-upgrade: [noop] the anchor is already usable
+  // Every check here passed, because every check asked about the BED and none asked WHERE it is.
+  // So the bot had to leave shelter, at night, to use its own anchor - and upgradeBedPlacement,
+  // whose entire job is to move a bad anchor, was told the anchor was fine.
+  // The operator's question was "why is it even POSSIBLE to place the bed outside its hut" and the
+  // answer was that nothing anywhere asserted the invariant. This is that assertion, in the one
+  // predicate every caller already consults - so an outdoor anchor now reports NOT usable and the
+  // existing upgrade path (acquire -> place inside -> assert -> roll back on no evidence) moves it.
+  // GUARDED so it can only ever help: it fires only when a hut is actually registered AND the
+  // survey of it is grounded. No hut, or an unknown one, leaves today's verdict untouched - a bot
+  // camping in the open must keep its open-ground anchor.
+  const hut = hutAnchor()
+  if (hut && !insideHutBox(fp.foot, hut) && !insideHutBox(fp.head, hut)) {
+    return { ok: false, why: 'the anchor is OUTSIDE my hut at ' + hut.x + ',' + hut.z + ' - a bed I must leave shelter to reach is not a usable anchor' }
+  }
   return bedPairSafe(bot, fp.foot, fp.head)
 }
 

@@ -239,6 +239,32 @@ t('INVARIANT: no (bad,total) pair answers "patch" when nothing is standing', () 
   assert.deepStrictEqual(bad, [], 'these would patch a hut that does not exist: ' + bad.join('; '))
 })
 
+// ==== THE SPAWN ANCHOR MUST BE INSIDE THE SHELTER (live 2026-07-30) ====================
+// The hut stood 6x6 at 188,67,-104 and the spawn bed sat at 185,68,-102 - three blocks outside
+// the west wall, on open ground - while the hut's own bed cell stayed empty:
+//   [prov] camp: hut bed -> none   /   [prov] bed-upgrade: [noop] the anchor is already usable
+// Every bedUsable check passed because every one asked about the BED and none asked WHERE it is.
+t('THE OUTDOOR ANCHOR: the live bed cell is provably OUTSIDE the live hut box', () => {
+  const hut = { x: 188, y: 67, z: -104 }          // the hut actually built, 6x6
+  assert.strictEqual(H.inBox(hut, 185, -102), false, 'the bed the bot kept was outside its own hut')
+  // the hut box itself: x 188..193, z -104..-99
+  assert.strictEqual(H.inBox(hut, 188, -104), true, 'the anchor corner is inside')
+  assert.strictEqual(H.inBox(hut, 193, -99), true, 'the far corner is inside')
+  assert.strictEqual(H.inBox(hut, 194, -99), false, 'one past the east wall is outside')
+  assert.strictEqual(H.inBox(hut, 188, -98), false, 'one past the south wall is outside')
+})
+t('ANTI-DRIFT: bedUsable asks WHERE the bed is, not just what it is', () => {
+  const fs = require('fs'); const path = require('path')
+  const src = fs.readFileSync(path.join(__dirname, 'provision-hut.js'), 'utf8')
+  const i = src.indexOf('function bedUsable')
+  assert.ok(i > 0, 'bedUsable still exists')
+  const body = src.slice(i, src.indexOf('function bedPairSafe', i) > i ? src.indexOf('\n}', src.indexOf('return bedPairSafe', i)) : i + 3000)
+  assert.ok(/insideHutBox\(/.test(body), 'it must consult hut containment - an anchor outside shelter is not usable')
+  assert.ok(/hutAnchor\(\)/.test(body), 'and read the registered hut to compare against')
+  // guarded: no hut registered must leave the old verdict alone (a bot camping rough keeps its bed)
+  assert.ok(/if \(hut &&/.test(body), 'the containment rule must be guarded on a hut actually existing')
+})
+
 t('cellMismatch: tolerant by class (planks / chest / furnace / table / door / air)', () => {
   assert.strictEqual(H.cellMismatch('oak_planks', 'birch_planks'), false, 'any plank satisfies a plank cell')
   assert.strictEqual(H.cellMismatch('chest', 'trapped_chest'), false, 'a trapped_chest satisfies a chest cell')
