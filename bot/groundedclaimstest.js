@@ -472,9 +472,9 @@ t('#121: the hut anti-thrash latch is written from EVIDENCE, not from an attempt
 // the absence-of-observation that #115 exists to stop being read as observation-of-absence.
 t('#115: a shell survey may register a hut only on OK - never on UNKNOWN', () => {
   const src = fs.readFileSync(path.join(__dirname, 'commands.js'), 'utf8')
-  const i = src.indexOf('let shellOK = false')
+  const i = src.indexOf('const shellCells = hutCells.filter')
   assert.ok(i > 0, 'the shell survey still exists')
-  const blk = src.slice(i, i + 900)
+  const blk = src.slice(i, i + 1200)
   const line = (blk.split('\n').find(l => /shellOK\s*=\s*svShell/.test(l)) || '')
   assert.ok(line, 'the shell verdict must be assigned from the survey')
   assert.ok(/svShell\.verdict === 'OK'/.test(line),

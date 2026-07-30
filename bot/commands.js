@@ -2815,23 +2815,10 @@ async function autoBuild (bot, schem, at, opts = {}) {
                   // Furnishing gaps remain repair debt in the latch, they just no longer make the
                   // bot homeless. `encloses` is computed here so there stays exactly ONE
                   // rememberInfra('hut') write site (the census invariant in onehutpathtest).
-                  let shellOK = false; let shellN = 0
-                  try {
-                    const shellCells = hutCells.filter(c => hutModel.isShellCell((c && c.want) || 'air'))
-                    shellN = shellCells.length
-                    if (shellN) {
-                      const svShell = pathfixMod.surveyCells(bot, shellCells, hutModel.cellMismatch)
-                      shellOK = svShell.verdict === 'OK'
-                      if (!shellOK) dbg('camp: shell survey ' + svShell.verdict + ' (' + svShell.bad + ' bad, ' + svShell.unknown + ' unknown of ' + shellN + ') - not a hut that encloses me')
-                    }
-                  } catch (e) { dbg('camp: shell survey failed (' + e.message + ') - claiming no shell') }
-                  const encloses = builtClean || shellOK
-                  if (encloses) {
-                    // PROOF-BACKED INGESTION: the hut record is written HERE, from the verify that
-                    // earned it, and nowhere else. The old unconditional rememberInfra('hut') ran
-                    // after a 0/94 build and gave insideOwnStructure a phantom to hold the bot in.
-                    try { provision.rememberInfra && provision.rememberInfra('hut', hutAt, { proof: { verdict: builtClean ? sv2.verdict : 'SHELL_OK', shell: !builtClean, epoch: pathfixMod.epoch() } }) } catch (e) { dbg('camp: hut memory write rejected (' + e.message + ')') }
-                  }
+                  // Registration itself is NOT here - see registerIfEncloses() below, which runs
+                  // once per camp pass so a hut brought up by PATCHING registers too, not only one
+                  // built by a rebuild. Keeping it out of this branch is also what preserves the
+                  // single-write-site census invariant.
                   if (builtClean) {
                     say('safehouse rebuilt clean - walls, door, bed, furnace, bank all in place')
                     hutRepairLatch = { lastBad: 0, lastAction: 'rebuild', ts: Date.now() }
@@ -2843,10 +2830,6 @@ async function autoBuild (bot, schem, at, opts = {}) {
                     dbg('camp: rebuild NOT clean - ' + bad2 + ' cell(s) still off, placed ' + hr.placed + '/' + hr.total)
                     say('rebuilt the safehouse but ' + bad2 + ' cell(s) still off - no destructive retry until it improves')
                     hutRepairLatch = { lastBad: bad2, lastAction: 'rebuild', ts: Date.now() }
-                    if (shellOK) {
-                      dbg('camp: the SHELL verified OK (' + shellN + ' cells) - registered the hut; the ' + bad2 + ' remaining cell(s) are furnishing debt, not a reason to disown a standing shelter')
-                      say('the safehouse shell is sound - calling it home; still need to finish the furnishings')
-                    }
                   }
                 }
               }
@@ -2866,6 +2849,37 @@ async function autoBuild (bot, schem, at, opts = {}) {
         // base self-heals during ordinary idle survival too, not only on a full camp BOM.
         // Each step still no-ops fast when its piece is intact - behaviour identical here.
         try { await provision.maintainHome(bot, hutAt, { isStopped, say }) } catch (e) { dbg('camp: home maintenance failed (' + e.message + ')') }
+        // ==== THE ONE HUT REGISTRATION POINT (2026-07-30) ==================================
+        // Registration used to live inside the REBUILD branch, so a hut brought up by PATCHING
+        // could never be recorded. Live 2026-07-30 that is exactly what happened - patch was
+        // working and the hut was steadily repairing itself, and it still counted as no hut:
+        //   14:04 hut repair decision=patch (bad=39/136)
+        //   14:22 hut repair decision=patch (bad=20/136)
+        //   14:39 hut repair decision=patch (bad=18/136)     <- 118 of 136 cells correct
+        //   ...and hutAnchor() null the whole time, so no banking, no bed indoors, no maintenance.
+        // Registration belongs to the WORLD's state, not to whichever code path last touched it.
+        // So it runs HERE, once per camp pass, after every repair route has had its turn: a
+        // grounded re-read of the SHELL cells (planks, door, clear interior - what actually
+        // encloses you) decides, and furnishing gaps stay as repair debt in the latch.
+        // #115 preserved: OK only, never "not BAD" - an UNKNOWN cell claims nothing. Idempotent,
+        // and the single rememberInfra('hut') write site in this file (census, onehutpathtest).
+        try {
+          const shellCells = hutCells.filter(c => hutModel.isShellCell((c && c.want) || 'air'))
+          if (shellCells.length) {
+            const svShell = pathfixMod.surveyCells(bot, shellCells, hutModel.cellMismatch)
+            const shellOK = svShell.verdict === 'OK'
+            const already = !!(provision.hutAnchor && provision.hutAnchor())
+            if (shellOK) {
+              if (!already) {
+                dbg('camp: the SHELL verified OK (' + shellCells.length + ' cells) - registering the hut; any remaining cell(s) are furnishing debt, not a reason to disown a standing shelter')
+                say('the safehouse shell is sound - calling it home')
+              }
+              provision.rememberInfra && provision.rememberInfra('hut', hutAt, { proof: { verdict: 'SHELL_OK', shell: true, epoch: pathfixMod.epoch() } })
+            } else if (!already) {
+              dbg('camp: shell survey ' + svShell.verdict + ' (' + svShell.bad + ' bad, ' + svShell.unknown + ' unknown of ' + shellCells.length + ') - not yet a hut that encloses me, claiming nothing')
+            }
+          }
+        } catch (e) { dbg('camp: shell registration check failed (' + e.message + ') - claiming no hut') }
       }
     } catch (e) { dbg('camp: hut failed (' + e.message + ') - continuing') }
     // (The old reach-based bank-migration + furnish + threshold-apron are RETIRED: the
