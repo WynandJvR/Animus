@@ -237,6 +237,32 @@ const bot = mineflayer.createBot({
   disableChatSigning: true
 })
 
+// THE RUNNER OWNS EVERY BODY READ (reflexes invariant 2). A hold DECLARES its premise by NAME;
+// this is the ONE place that resolves it, read by BOTH watchdogs - two copies of this rule is how
+// one watchdog ends up trusting a hold the other has already disowned. An unknown premise name
+// stays TRUSTED: a new hold must never be silently stripped of its suppression by a resolver that
+// has not been taught about it, and neither must a bot that really is sealed in.
+const holdPremiseOK = kind => {
+  if (kind !== 'sheltered') return true
+  try { if (bot.isSleeping) return true } catch {}
+  try { if (provision.isResting && provision.isResting()) return true } catch {}
+  try { if (provision.insideOwnStructure && provision.insideOwnStructure(bot)) return true } catch {}
+  // A SEALED NIGHT PIT is a ceiling a few blocks under the SURFACE - the 2026-07-29 case this
+  // whole mechanism exists for (digInForNight caps a shallow hole and sets no latch, so nothing
+  // else vouches for it). A bare hasSolidCeiling is NOT that test: underground, a mine roof
+  // satisfies it trivially, which is how the bot went on claiming "sheltering until dawn" at y37
+  // - thirty-one blocks below its own hut - even after the premise was introduced. So the ceiling
+  // only counts near the surface, measured against a GROUNDED read; UNKNOWN fails safe (trusted).
+  try {
+    if (provision.hasSolidCeiling && provision.hasSolidCeiling(bot, 4)) {
+      const s = require('./pathfix.js').surfaceYAt(bot, bot.entity.position.x, bot.entity.position.z)
+      if (!s || !s.known || s.y == null) return true
+      if (s.y - bot.entity.position.y <= Number(process.env.SHELTER_PIT_DEPTH || 5)) return true
+    }
+  } catch { return true }
+  return false
+}
+
 bot.loadPlugin(pathfinder)
 
 // DURABLE enchant-crash guard (replaces the fragile node_modules edit, see NOTES §4).
@@ -1310,32 +1336,6 @@ if (SCHED_ON) {
   // unwinds its honest-failure path and the next 15s tick's pickJob re-plans) -> GIVEUP (log once; a
   // latch-immune hung promise is layer d's class). Plus idle-with-work (crisis-cooldown clear + kick)
   // and a generation-guarded tick-liveness re-arm. WATCHDOG=0 -> this whole block never runs.
-// THE RUNNER OWNS EVERY BODY READ (reflexes invariant 2). A hold DECLARES its premise by NAME;
-// this is the ONE place that resolves it, read by BOTH watchdogs - two copies of this rule is how
-// one watchdog ends up trusting a hold the other has already disowned. An unknown premise name
-// stays TRUSTED: a new hold must never be silently stripped of its suppression by a resolver that
-// has not been taught about it, and neither must a bot that really is sealed in.
-const holdPremiseOK = kind => {
-  if (kind !== 'sheltered') return true
-  try { if (bot.isSleeping) return true } catch {}
-  try { if (provision.isResting && provision.isResting()) return true } catch {}
-  try { if (provision.insideOwnStructure && provision.insideOwnStructure(bot)) return true } catch {}
-  // A SEALED NIGHT PIT is a ceiling a few blocks under the SURFACE - the 2026-07-29 case this
-  // whole mechanism exists for (digInForNight caps a shallow hole and sets no latch, so nothing
-  // else vouches for it). A bare hasSolidCeiling is NOT that test: underground, a mine roof
-  // satisfies it trivially, which is how the bot went on claiming "sheltering until dawn" at y37
-  // - thirty-one blocks below its own hut - even after the premise was introduced. So the ceiling
-  // only counts near the surface, measured against a GROUNDED read; UNKNOWN fails safe (trusted).
-  try {
-    if (provision.hasSolidCeiling && provision.hasSolidCeiling(bot, 4)) {
-      const s = require('./pathfix.js').surfaceYAt(bot, bot.entity.position.x, bot.entity.position.z)
-      if (!s || !s.known || s.y == null) return true
-      if (s.y - bot.entity.position.y <= Number(process.env.SHELTER_PIT_DEPTH || 5)) return true
-    }
-  } catch { return true }
-  return false
-}
-
   if (WATCHDOG_ON) {
     let wdState = { phase: 'ok', jobKey: null }
     let idleWorkSince = 0

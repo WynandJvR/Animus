@@ -354,6 +354,31 @@ t('FIX 22: BOTH watchdogs read the one declaration', () => {
   assert(/const hold = reflexes\.activeHold\(holdPremiseOK\)/.test(src), 'the S7 watchdog must RESOLVE the premise, not trust it blindly')
   assert(/reflexes\.activeHold\(holdPremiseOK\)/.test(wedgeLine), 'the hard-wedge watchdog must resolve it with the SAME resolver')
   assert.strictEqual((src.match(/const holdPremiseOK =/g) || []).length, 1, 'exactly ONE definition of the premise resolver - two copies is how the watchdogs drift apart')
+  // ...and it must be declared at MODULE SCOPE. Shipped 2026-07-31 declared at brace depth 1, so
+  // the wedge watchdog - in a different branch of the tree - threw
+  //   ReferenceError: holdPremiseOK is not defined   at index.js:2015
+  // every time its 5s timer fired. The process died, run.js restarted it, and the bot rejoined
+  // the server every ~18 seconds for half an hour. `node --check` passes (the SYNTAX is valid) and
+  // all 58 offline suites passed (none of them fire that timer), and the source pin above matched
+  // the TEXT `activeHold(holdPremiseOK)` without ever asking whether the NAME RESOLVES.
+  // A brace-depth check is the cheap version of that question.
+  {
+    const lines = src.split('\n')
+    let depth = 0; let inStr = null; let inCom = false; let declDepth = null
+    for (const line of lines) {
+      if (/^const holdPremiseOK =/.test(line) && declDepth === null) declDepth = depth
+      for (let j = 0; j < line.length; j++) {
+        const c = line[j]; const n = line[j + 1]
+        if (inCom) { if (c === '*' && n === '/') { inCom = false; j++ } continue }
+        if (inStr) { if (c === '\\') { j++; continue } if (c === inStr) inStr = null; continue }
+        if (c === '/' && n === '/') break
+        if (c === '/' && n === '*') { inCom = true; j++; continue }
+        if (c === '"' || c === "'" || c === '`') { inStr = c; continue }
+        if (c === '{') depth++; else if (c === '}') depth--
+      }
+    }
+    assert.strictEqual(declDepth, 0, 'holdPremiseOK must be declared at MODULE scope (found brace depth ' + declDepth + ') - both watchdogs live in different scopes and a nested declaration is a ReferenceError in whichever one cannot see it')
+  }
   // ...and the ceiling clause must be DEPTH-BOUNDED. A bare hasSolidCeiling is trivially true in
   // any mine, so the bot kept claiming "sheltering until dawn" at y37 - 31 blocks under its own
   // hut - even after the premise landed. A sealed night pit is a ceiling NEAR THE SURFACE.
