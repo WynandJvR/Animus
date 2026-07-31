@@ -141,20 +141,50 @@ let holdSeq = 0
 let nowFn = () => Date.now()
 function _setNow (fn) { nowFn = fn || (() => Date.now()) } // tests only
 
-function beginHold (label, wake, ttlMs) {
+// A HOLD IS A CLAIM, AND A CLAIM NEEDS EVIDENCE (2026-07-31). A hold names a WAKE condition, and
+// the watchdog trusts it completely - "stillness here is the goal, not a stall". That is only
+// honest while the holder is ACTUALLY in the state it claims. It was not:
+//   13:46:20 nightRest: bed remembered at 190,68,-102 (11 blocks) - heading there
+//   13:46:20 (wd) nightShelter is a DECLARED hold waking on dawn - stillness here is the goal
+//   13:46:27 recovery: stuck UNDERGROUND at (188,37,-111) - climbing to the surface y=66
+// nightShelter declared "I am resting until dawn" while still ELEVEN BLOCKS AWAY and THIRTY-ONE
+// BLOCKS UNDERGROUND, then failed to climb out. The hold suppressed the stall clock, the TTL was
+// refreshed by every re-dispatch, and the bot sat in a mineshaft for half an hour "sheltering".
+// So a hold may also name its PREMISE - the thing that must be true for its stillness to be
+// deliberate. `premise(bot) === false` means the holder is not in the state it claims, and the
+// hold stops suppressing (see activeHold). Holds with no premise behave exactly as before.
+function beginHold (label, wake, ttlMs, opts = {}) {
   const token = 'h' + (++holdSeq)
   const now = nowFn()
-  holds.set(token, { label: label || 'hold', wake: wake || 'unspecified', since: now, until: now + Math.max(1000, ttlMs || 60000) })
+  holds.set(token, {
+    label: label || 'hold',
+    wake: wake || 'unspecified',
+    since: now,
+    until: now + Math.max(1000, ttlMs || 60000),
+    premise: typeof opts.premise === 'string' && opts.premise ? opts.premise : null
+  })
   return token
 }
 function endHold (token) { return holds.delete(token) }
 // The live hold, or null. Expired entries are dropped here (lazily, on read) so nothing has to
 // run a sweeper timer - and an expired hold is NOT a hold: the watchdog gets the body back.
-function activeHold () {
+// `premiseOK(name) -> bool` is supplied BY THE RUNNER, which owns every body read; this file only
+// ever knows the premise's NAME (invariant 2). Omit it and holds behave exactly as they always did.
+function activeHold (premiseOK) {
   const now = nowFn()
   let best = null
   for (const [token, h] of holds) {
     if (h.until <= now) { holds.delete(token); continue }
+    // A CONTRADICTED PREMISE IS NOT A HOLD. Not deleted - the holder may yet reach the state it
+    // claims (it is usually still walking there) - it simply stops vouching for stillness until
+    // then, so the watchdog can see a body that is STUCK rather than waiting. An unresolvable or
+    // THROWING premise stays trusted: this must never be the thing that strands a bot that really
+    // is sealed in, which is the case this whole mechanism exists for.
+    if (h.premise && typeof premiseOK === 'function') {
+      let ok = true
+      try { ok = premiseOK(h.premise) !== false } catch { ok = true }
+      if (!ok) continue
+    }
     if (!best || h.since < best.since) best = h
   }
   return best
@@ -328,7 +358,10 @@ def({
   why: 'dusk + exposure: a bed if there is one, a sealed pit if there is not',
   // A DECLARED HOLD. Sitting perfectly still until dawn is the goal, not a hang - and this is
   // the row that stops a watchdog digging the bot out of its own shelter (see beginHold).
-  holds: { wake: 'dawn' },
+  // ...and its PREMISE, DECLARED BY NAME: stillness here is deliberate only once the bot is
+  // actually sheltered. This row states WHICH premise; the runner owns reading the body for it
+  // (invariant 2 - no body latch is read in this file, arbitration belongs to the runner, once).
+  holds: { wake: 'dawn', premise: 'sheltered' },
   run: async (bot, ctx) => {
     const provision = require('./provision.js')
     const rested = await provision.nightRest(bot, { say: ctx.say })

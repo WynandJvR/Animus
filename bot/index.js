@@ -870,7 +870,7 @@ if (SCHED_ON) {
     // The t0 stamp above is this dispatch's OWN mark. Remember it, so the release below can tell
     // "this job did something" from "this job merely ran" - see the finally.
     const t0Progress = (() => { try { return commands.progressInfo().at } catch { return 0 } })()
-    const holdToken = opts.holds ? reflexes.beginHold(name, opts.holds.wake, opts.holds.ttlMs || 900000) : null
+    const holdToken = opts.holds ? reflexes.beginHold(name, opts.holds.wake, opts.holds.ttlMs || 900000, { premise: opts.holds.premise }) : null
     if (schedJob && schedJob.gen === myGen) schedJob.holdToken = holdToken // so a revoke can release it
     try {
       // An executor returns either a plain string (what happened, for the log) or
@@ -1310,6 +1310,20 @@ if (SCHED_ON) {
   // unwinds its honest-failure path and the next 15s tick's pickJob re-plans) -> GIVEUP (log once; a
   // latch-immune hung promise is layer d's class). Plus idle-with-work (crisis-cooldown clear + kick)
   // and a generation-guarded tick-liveness re-arm. WATCHDOG=0 -> this whole block never runs.
+// THE RUNNER OWNS EVERY BODY READ (reflexes invariant 2). A hold DECLARES its premise by NAME;
+// this is the ONE place that resolves it, read by BOTH watchdogs - two copies of this rule is how
+// one watchdog ends up trusting a hold the other has already disowned. An unknown premise name
+// stays TRUSTED: a new hold must never be silently stripped of its suppression by a resolver that
+// has not been taught about it, and neither must a bot that really is sealed in.
+const holdPremiseOK = kind => {
+  if (kind !== 'sheltered') return true
+  try { if (bot.isSleeping) return true } catch {}
+  try { if (provision.isResting && provision.isResting()) return true } catch {}
+  try { if (provision.insideOwnStructure && provision.insideOwnStructure(bot)) return true } catch {}
+  try { if (provision.hasSolidCeiling && provision.hasSolidCeiling(bot, 4)) return true } catch {}
+  return false
+}
+
   if (WATCHDOG_ON) {
     let wdState = { phase: 'ok', jobKey: null }
     let idleWorkSince = 0
@@ -1333,7 +1347,7 @@ if (SCHED_ON) {
         // wake, once, and this is the one place that reads it (each hold used to have to
         // remember to fake progress on its own heartbeat - and one of them forgot).
         if (!bot.entity || bot.health <= 0) return
-        const hold = reflexes.activeHold()
+        const hold = reflexes.activeHold(holdPremiseOK)
         if (bot.isSleeping || (provision.isResting && provision.isResting()) || hold) {
           if (hold && heldNoted !== hold.label) { heldNoted = hold.label; note('(wd) ' + hold.label + ' is a DECLARED hold waking on ' + hold.wake + ' - stillness here is the goal, not a stall') }
           commands.touchProgress('declaredHold')
@@ -1986,7 +2000,7 @@ if (process.env.WEDGE_WATCHDOG !== '0') {
     // THIS is the watchdog that actually killed the bot on 2026-07-29: `(watchdog) position
     // FROZEN ~195s - forcing an escape` fired on a correctly sealed night shelter, because the
     // shelter was a ladder RUNG and isResting() was therefore false. One rule, read in one place.
-    if (bot.isSleeping || bot.targetDigBlock || (provision.isResting && provision.isResting()) || reflexes.activeHold()) { wdHist = []; return }
+    if (bot.isSleeping || bot.targetDigBlock || (provision.isResting && provision.isResting()) || reflexes.activeHold(holdPremiseOK)) { wdHist = []; return }
     // Only stand down for our OWN force-escape. A regular recovery/escape that has the
     // position FROZEN for 2.5 minutes is by definition failing (live: the ladder looped
     // door/nudge/stepout "no progress" for 4+ minutes at 433,62,112 and the old

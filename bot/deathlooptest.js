@@ -342,9 +342,18 @@ t('FIX 22: the declared hold still sits around a loop that re-checks the world',
 t('FIX 22: BOTH watchdogs read the one declaration', () => {
   const src = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8')
   // the forward-progress watchdog (which FAIL-JOBbed the ladder at 90s)...
-  assert(/const hold = reflexes\.activeHold\(\)/.test(src), 'the S7 watchdog consults the declared hold')
+  assert(/const hold = reflexes\.activeHold\(/.test(src), 'the S7 watchdog consults the declared hold')
   // ...and the position-freeze watchdog, which is the one that actually dug the bot out at 195s
-  assert(/\|\| reflexes\.activeHold\(\)\) \{ wdHist = \[\]; return \}/.test(src), 'the hard-wedge watchdog stands down for a declared hold')
+  const wedgeLine = src.split('\n').find(l => /wdHist = \[\]; return \}/.test(l)) || ''
+  assert(/reflexes\.activeHold\(/.test(wedgeLine), 'the hard-wedge watchdog stands down for a declared hold')
+  // 2026-07-31: a hold now also DECLARES its premise and the RUNNER resolves it (reflexes may not
+  // read the body - invariant 2). BOTH watchdogs must pass that resolver, and it must be the SAME
+  // one - otherwise a hold whose premise is false keeps vouching for stillness to one of them.
+  // nightShelter claimed "resting until dawn" while stuck 31 blocks underground, and the bot sat
+  // in a mineshaft for half an hour.
+  assert(/const hold = reflexes\.activeHold\(holdPremiseOK\)/.test(src), 'the S7 watchdog must RESOLVE the premise, not trust it blindly')
+  assert(/reflexes\.activeHold\(holdPremiseOK\)/.test(wedgeLine), 'the hard-wedge watchdog must resolve it with the SAME resolver')
+  assert.strictEqual((src.match(/const holdPremiseOK =/g) || []).length, 1, 'exactly ONE definition of the premise resolver - two copies is how the watchdogs drift apart')
 })
 
 // ============ LOOP C - a decision must produce an action ==================================

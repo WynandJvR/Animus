@@ -361,5 +361,53 @@ t('registry: the six behaviours PLAN §S1 names are all present', () => {
   }
 })
 
+// ==== A HOLD IS A CLAIM, AND A CLAIM NEEDS EVIDENCE (live 2026-07-31) ========================
+// nightShelter declared "I am resting until dawn" while still ELEVEN BLOCKS from its bed and
+// THIRTY-ONE BLOCKS UNDERGROUND, then failed to climb out:
+//   13:46:20 nightRest: bed remembered at 190,68,-102 (11 blocks) - heading there
+//   13:46:20 (wd) nightShelter is a DECLARED hold waking on dawn - stillness here is the goal
+//   13:46:27 recovery: stuck UNDERGROUND at (188,37,-111) - climbing to the surface y=66
+// The hold suppressed the stall clock, its TTL was refreshed by every re-dispatch, and the bot
+// sat in a mineshaft for half an hour "sheltering". A hold names WHEN it wakes; it must also be
+// able to name what makes its stillness deliberate.
+t('HOLD PREMISE: a contradicted premise stops vouching for stillness', () => {
+  reflexes._resetHolds()
+  let sheltered = false
+  reflexes.beginHold('nightShelter', 'dawn', 600000, { premise: 'sheltered' })
+  assert.strictEqual(reflexes.activeHold(() => sheltered), null,
+    'THE MINESHAFT: not sheltered means the watchdog must still be able to see a stuck body')
+  sheltered = true
+  assert(reflexes.activeHold(() => sheltered), 'once it IS sheltered, stillness is the goal again')
+})
+
+t('HOLD PREMISE: it is not deleted - the holder may still be walking there', () => {
+  reflexes._resetHolds()
+  let sheltered = false
+  reflexes.beginHold('nightShelter', 'dawn', 600000, { premise: 'sheltered' })
+  assert.strictEqual(reflexes.activeHold(() => sheltered), null, 'contradicted now')
+  sheltered = true
+  assert(reflexes.activeHold(() => sheltered), 'and it recovers without needing a fresh dispatch')
+})
+
+t('HOLD PREMISE: a THROWING premise is trusted - never strand a sealed-in bot on a bad predicate', () => {
+  reflexes._resetHolds()
+  reflexes.beginHold('nightShelter', 'dawn', 600000, { premise: 'sheltered' })
+  assert(reflexes.activeHold(() => sheltered), 'unknown must fail SAFE here - the sealed pit is the case this row exists for')
+})
+
+t('HOLD PREMISE: a hold with NO premise behaves exactly as before', () => {
+  reflexes._resetHolds()
+  reflexes.beginHold('someOtherJob', 'whatever', 600000)
+  assert(reflexes.activeHold(() => sheltered), 'existing holders are unaffected')
+})
+
+t('HOLD PREMISE: the TTL still bites regardless of premise', () => {
+  reflexes._resetHolds()
+  reflexes.beginHold('nightShelter', 'dawn', 1000, { premise: 'sheltered' })
+  reflexes._setNow(() => Date.now() + 5000)
+  assert.strictEqual(reflexes.activeHold(() => true), null, 'an expired hold is not a hold, premise or not')
+  reflexes._setNow(null)
+})
+
 console.log(`\nreflexes: ${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)
