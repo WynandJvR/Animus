@@ -139,5 +139,55 @@ t('anti-grief: a plank ceiling is not breached vertically -> null', () => {
   assert.strictEqual(plan, null, 'never digs up through a player floor')
 })
 
+// ==== THE INDOOR RUNG'S WITNESS (live 2026-07-31) ============================================
+// Sibling case to the dry wedge: wedged INSIDE our own hut, where digging and pillaring are both
+// (correctly) forbidden, so the ONLY legal escape is a short step to a free interior cell. The bot
+// sat on its own crafting_table at (189,69,-100) with three free floor cells beside it and looped
+// for hours:
+//   recovery: wedged INSIDE own structure ... stepping to free interior cell (190,68,-100)
+//   recovery indoor -> no progress
+//   (wd) NUDGE -> FAIL-JOB -> stop latch ineffective -> releasing the controls   ...every 5 min
+// The rung WORKED. The witness was wrong: the shared movedEnough() wants >=2b horizontally OR a
+// GAIN in y, and the correct escape here is 1 block across and 1 block DOWN off the furniture.
+// A rung judged by a metric its own success cannot satisfy can never report success.
+const movedEnoughModel = (p0, p1) => Math.hypot(p1.x - p0.x, p1.z - p0.z) >= 2 || Math.floor(p1.y) > Math.floor(p0.y)
+const indoorOKModel = (p0, p1, cell) => {
+  const arrived = Math.hypot(p1.x - (cell.x + 0.5), p1.z - (cell.z + 0.5)) < 0.8 && Math.floor(p1.y) === Math.floor(cell.y)
+  return arrived || movedEnoughModel(p0, p1)
+}
+
+t('INDOOR WITNESS: the live false negative - stepping off the table scores as FAILURE on displacement', () => {
+  const onTable = { x: 189.5, y: 69, z: -100.5 }      // perched on the crafting_table
+  const freeCell = { x: 190, y: 68, z: -100 }          // the adjacent free floor cell it aimed at
+  const landed = { x: 190.5, y: 68, z: -99.5 }         // it got there (block centre): 1 across, 1 DOWN
+  assert.strictEqual(movedEnoughModel(onTable, landed), false,
+    'the old witness calls a PERFECT escape a failure - this is the hours-long loop')
+  assert.strictEqual(indoorOKModel(onTable, landed, freeCell), true,
+    'judged by its own goal, arriving in the cell it aimed at IS success')
+})
+
+t('INDOOR WITNESS: genuinely not moving is still a failure', () => {
+  const onTable = { x: 189.5, y: 69, z: -100.5 }
+  const freeCell = { x: 190, y: 68, z: -100 }
+  assert.strictEqual(indoorOKModel(onTable, { x: 189.5, y: 69, z: -100.4 }, freeCell), false,
+    'a rung that did not reach its cell and did not travel must still report failure')
+})
+
+t('INDOOR WITNESS: a big lateral escape still counts even if it missed the exact cell', () => {
+  const p0 = { x: 189.5, y: 69, z: -100.5 }
+  const freeCell = { x: 190, y: 68, z: -100 }
+  assert.strictEqual(indoorOKModel(p0, { x: 193.5, y: 69, z: -100.5 }, freeCell), true)
+})
+
+t('ANTI-DRIFT: the indoor rung is judged by arrivedAtCell, not bare movedEnough', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, 'navigate.js'), 'utf8')
+  const i = src.indexOf("kind: 'indoor'")
+  assert(i > 0, 'the indoor rung exists')
+  const rung = src.slice(i, src.indexOf('kind:', i + 40))
+  assert(/arrivedAtCell/.test(rung), 'the indoor rung must define its own success test')
+  assert(/indoorOK\(\)/.test(rung), 'and must be judged by it')
+  assert(!/return movedEnough\(\)\s*$/m.test(rung), 'a bare displacement verdict is back - that is the hours-long loop')
+})
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall dig-out (dry-wedge) tests passed')
 process.exit(failures ? 1 : 0)

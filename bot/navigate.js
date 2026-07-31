@@ -873,11 +873,30 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
         const cell = prov().freeInteriorCell ? prov().freeInteriorCell(bot) : null
         if (!cell) { dbg('recovery: inside own structure but no free interior cell - holding (never pillaring indoors)'); return false }
         dbg('recovery: wedged INSIDE own structure at ' + p0.floored() + ' - stepping to free interior cell ' + cell + ' (no pillaring indoors)')
+        // ==== THIS RUNG IS JUDGED BY ITS OWN GOAL, NOT BY DISPLACEMENT (2026-07-31) =========
+        // The shared movedEnough() asks for >=2b of horizontal travel OR a GAIN in y. This rung's
+        // whole job is the opposite: a SHORT step to an adjacent free cell in a 4x4 interior,
+        // very often DOWNWARD off the furniture the bot climbed onto. So the correct escape
+        // scores as failure on both clauses. Live 2026-07-31: the bot sat on its own crafting
+        // table at (189,69,-100) with three free floor cells beside it, and every pass logged
+        //   recovery: wedged INSIDE own structure ... stepping to free interior cell (190,68,-100)
+        //   recovery indoor -> no progress
+        // ...then the ladder escalated, forceUnstick's stepout put it BACK on the table, and the
+        // whole watchdog cycle repeated every 5 minutes for hours. The rung was working; the
+        // WITNESS was wrong. Success here is "I am standing in the cell I aimed at" - a verdict
+        // read from the world, not a displacement threshold borrowed from a different rung.
+        const arrivedAtCell = () => {
+          try {
+            const p1 = bot.entity.position
+            return Math.hypot(p1.x - (cell.x + 0.5), p1.z - (cell.z + 0.5)) < 0.8 && Math.floor(p1.y) === Math.floor(cell.y)
+          } catch { return false }
+        }
+        const indoorOK = () => arrivedAtCell() || movedEnough()
         // duringRecovery: this rung runs INSIDE recoverOnce's recoveringDepth++ span, so
         // without the flag gotoOnce's yield gate would make this OWN goto wait up to 45s
         // before it even starts whenever a free interior cell exists (latent 45s dead wait).
         try { await gotoOnce(bot, new goals.GoalNear(cell.x, cell.y, cell.z, 0), 8000, { duringRecovery: true }) } catch {}
-        if (movedEnough()) return true
+        if (indoorOK()) return true
         // the no-dig planner couldn't thread the cramped interior - manual step toward the
         // free cell (still no placement): face it, walk, hop once if we bump.
         try {
@@ -891,7 +910,7 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
             if (Date.now() - t0 > 500 && bot.entity.position.distanceTo(p0) < 0.3) { bot.setControlState('jump', true); await new Promise(r => setTimeout(r, 150)); bot.setControlState('jump', false) }
           }
         } catch {} finally { bot.clearControlStates() }
-        return movedEnough()
+        return indoorOK()
       }
     },
     { // in water the pathfinder never registers "on ground", so its planned jumps never
