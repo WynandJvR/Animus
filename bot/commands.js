@@ -1160,7 +1160,7 @@ async function handleInner (bot, line, opts = {}) {
       // - that tug-of-war is exactly the old naked-at-the-hut carousel.
       if (isBusy()) return 'busy with a job - armor has to wait its turn'
       buildAbort = false // a previous stop must not abort this fresh request
-      provisioning = true
+      provisioning = true; claimStamp('provisioning')
       beginActivity('gearup', 'armor')
       try {
         // anchor the grind at HOME when home is nearby (bank + furnace live there);
@@ -1196,7 +1196,7 @@ async function handleInner (bot, line, opts = {}) {
       // reflex re-clutters mid-sweep (the arbiter maneuver + isBusy both hold).
       if (isBusy()) return 'busy with a job - hut cleanup has to wait its turn'
       buildAbort = false
-      provisioning = true
+      provisioning = true; claimStamp('provisioning')
       beginActivity('huttidy', 'hut interior')
       try {
         const say = m => bot.chat(String(m).slice(0, 256))
@@ -1978,7 +1978,7 @@ async function handleInner (bot, line, opts = {}) {
           )
         }
         at = snapToGround(bot, loadedSchem.schem, at) // sit it on the ground, never floating
-        building = true; buildAbort = false
+        building = true; claimStamp('building'); buildAbort = false
         // Long-running (minutes) - run detached, chat progress, and return the
         // kickoff line now so the command/HTTP call doesn't block for the whole build.
         schematic.buildSurvival(bot, loadedSchem.schem, at, {
@@ -2006,7 +2006,7 @@ async function handleInner (bot, line, opts = {}) {
           if (n.some(Number.isNaN)) return 'usage: schematic clear [here | <x> <y> <z>]'
           at = new Vec3(n[0], n[1], n[2])
         }
-        building = true; buildAbort = false
+        building = true; claimStamp('building'); buildAbort = false
         schematic.clearVolume(bot, loadedSchem.schem, at, { isStopped: () => buildAbort })
           .then(rm => { building = false; setupMovements(bot); bot.chat(`cleared ${rm} block(s) - site flat at ${at.x},${at.y},${at.z}, ready to build`) })
           .catch(e => { building = false; setupMovements(bot); bot.chat(`clear error: ${e.message}`) })
@@ -2064,7 +2064,7 @@ async function handleInner (bot, line, opts = {}) {
       if (provisioning) return 'already provisioning - say "stop" to cancel first'
       if (unob.length) return `can't provision: no way to obtain ${unob.join(', ')}`
       if (!plan.tasks.length) return 'inventory already covers the bill of materials - ready to build'
-      provisioning = true; buildAbort = false
+      provisioning = true; claimStamp('provisioning'); buildAbort = false
       beginActivity('provision', `${plan.tasks.length} steps`)
       // long-running: run detached (like schematic build), chat progress
       provision.runPlan(bot, plan, {
@@ -2106,7 +2106,7 @@ async function handleInner (bot, line, opts = {}) {
         at = new Vec3(at.x - Math.floor((st.x + en.x) / 2), at.y - st.y, at.z - Math.floor((st.z + en.z) / 2))
       }
       at = snapToGround(bot, loadedSchem.schem, at) // sit it on the ground, never floating
-      building = true; buildAbort = false; buildInterrupted = false; resumeDeaths = 0
+      building = true; claimStamp('building'); buildAbort = false; buildInterrupted = false; resumeDeaths = 0
       beginActivity('autobuild', loadedSchem.name)
       resumeJob = { schem: loadedSchem.schem, at } // remembered so a death can't lose the build
       persistResume(loadedSchem.name, at) // ...and on DISK so a process restart can't either
@@ -2335,7 +2335,44 @@ function setupMovements (bot) {
 // stopped the walk to the site 500 blocks out and the build never began.
 let buildReqActive = false
 function setBuildReqActive (v) { buildReqActive = !!v }
-function isBusy () { return building || provisioning || buildReqActive }
+// ==== AN EXCLUSIVE CLAIM ON THE BODY IS A LEASE, NEVER A BARE BOOLEAN (2026-07-31) ==========
+// `building`/`provisioning`/`buildReqActive` are each set true, then cleared in a `finally`.
+// That is only sufficient while the awaited work RESOLVES. On 2026-07-31 `planner.gearUp` HUNG:
+// the finally never ran, `provisioning` stayed true, and isBusy() has gated the scheduler ever
+// since - the tick chain re-armed, ran, and refused to dispatch ANYTHING for 51 minutes while
+// the bot stood frozen at (242,45,-102) with 0/4 armour:
+//   16:24:06 (core) chose maintenancePass          <- the last job ever chosen
+//   17:15:32 (wd) NUDGE maintenancePass - no verified progress for 120s
+//
+// This is the FOURTH exclusive claim with this exact defect, and the repo has already fixed the
+// other three and written the rule down each time:
+//   reflexes.activeHold - "an expired hold is NOT a hold: the watchdog gets the body back"
+//   dispatchBusy        - "the slot is a LEASE, not a flag" (55857e6)
+//   telemetry.activityInfo - the same, earlier today
+// Fixing instances one at a time IS the whack-a-mole. The rule is: the only thing that clears a
+// boolean is code that runs, and a hung promise is precisely the case where code does not run.
+// So every claim here carries a stamp and expires lazily on read, like the other three.
+// Clearing stays EXACTLY as it was (the finallys are correct and still authoritative); this only
+// bounds how long a claim can outlive the work that made it.
+const BODY_CLAIM_LEASE_MS = parseInt(process.env.BODY_CLAIM_LEASE_MS || '900000', 10)
+let claimAt = { building: 0, provisioning: 0, buildReqActive: 0 }
+function claimStamp (which) { claimAt[which] = Date.now() }
+function claimLive (which, flag) {
+  if (!flag) return false
+  const at = claimAt[which]
+  if (at && Date.now() - at > BODY_CLAIM_LEASE_MS) {
+    try { logFn('(claim) ' + which + ' outlived its ' + Math.round(BODY_CLAIM_LEASE_MS / 60000) + 'min lease - releasing the body (a hung promise never ran its finally)') } catch {}
+    claimAt[which] = 0
+    if (which === 'building') building = false
+    else if (which === 'provisioning') provisioning = false
+    else buildReqActive = false
+    return false
+  }
+  return true
+}
+function isBusy () {
+  return claimLive('building', building) || claimLive('provisioning', provisioning) || claimLive('buildReqActive', buildReqActive)
+}
 function isEscaping () { return escaping }
 
 // Sticky-follow reflex (called on a timer by the body). If the bot was told to
@@ -3192,7 +3229,7 @@ async function resumeBuild (bot) {
   const job = resumeJob
   const say = throttledSay(bot)
   buildInterrupted = false // consumed: we ARE the resume now
-  building = true; buildAbort = false // safe: the old loop is provably gone
+  building = true; claimStamp('building'); buildAbort = false // safe: the old loop is provably gone
   beginActivity('autobuild', `resume @ ${job.at.x},${job.at.y},${job.at.z}`)
   checklistBegin(JOB_STEPS)
   checklistStep('travel to site') // covers rest-first + grave detour + the trek itself

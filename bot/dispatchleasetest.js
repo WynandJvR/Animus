@@ -278,5 +278,35 @@ t('ANTI-DRIFT: activityInfo expires lazily on READ, like activeHold and dispatch
   assert(/activity = null/.test(fn), 'and must DROP the stale entry on read, not merely hide it')
 })
 
+// ==== THE FOURTH EXCLUSIVE CLAIM: isBusy (live 2026-07-31) ==================================
+// `provisioning = true; try { await planner.gearUp(...) } finally { provisioning = false }` is
+// correct ONLY while the awaited work resolves. planner.gearUp HUNG, the finally never ran,
+// provisioning stayed true, and isBusy() gated the scheduler for 51 MINUTES - the tick chain
+// re-armed, ran, and refused to dispatch anything while the bot stood frozen at (242,45,-102):
+//   16:24:06 (core) chose maintenancePass     <- the last job ever chosen
+//   17:15:32 (wd) NUDGE maintenancePass - no verified progress for 120s
+// Three sibling claims had already been given leases (reflex hold / dispatch slot / activity
+// label). Fixing them one at a time was the whack-a-mole; this pins the RULE.
+t('THE 51-MINUTE GATE: a body claim cannot outlive its lease', () => {
+  delete require.cache[require.resolve('./commands.js')]
+  process.env.BODY_CLAIM_LEASE_MS = '900000'
+  const cmds = require('./commands.js')
+  assert.strictEqual(cmds.isBusy(), false, 'nothing is claimed to begin with')
+})
+
+t('ANTI-DRIFT: every body claim is STAMPED where it is taken, and expires on READ', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'commands.js'), 'utf8')
+  // the three claims isBusy() reads
+  for (const c of ['building', 'provisioning', 'buildReqActive']) {
+    const sets = (src.match(new RegExp('\\b' + c + ' = true\\b', 'g')) || []).length
+    const stamps = (src.match(new RegExp("claimStamp\\('" + c + "'\\)", 'g')) || []).length
+    assert.strictEqual(stamps, sets, c + ': every `= true` must be stamped (' + sets + ' sets, ' + stamps + ' stamps) - an unstamped claim has no lease and can hang the scheduler forever')
+  }
+  const i = src.indexOf('function isBusy')
+  const fn = src.slice(i, i + 400)
+  assert(/claimLive\(/.test(fn), 'isBusy must read claims through the expiry, not the raw booleans')
+  assert(!/return building \|\| provisioning \|\| buildReqActive/.test(src), 'the bare-boolean isBusy is back - that is the 51-minute stall')
+})
+
 console.log(fails ? `\n${fails} FAILURE(S)` : '\nall dispatch-lease tests passed')
 process.exit(fails ? 1 : 0)
