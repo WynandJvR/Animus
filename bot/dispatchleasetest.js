@@ -257,25 +257,27 @@ t('ACTIVITY LEASE: a fresh activity is live', () => {
   assert(a && a.name === 'gearup', 'a just-begun activity must report')
 })
 
-t('THE 52-MINUTE GHOST: an activity past its lease is NOT an activity', () => {
+t('THE 52-MINUTE GHOST: the phantom label is cleared by EVIDENCE, not by a clock', () => {
   delete require.cache[require.resolve('./telemetry.js')]
-  process.env.ACTIVITY_LEASE_MS = '1'
   const tel = require('./telemetry.js')
   tel.beginActivity('gearup', 'armor')
-  const t0 = Date.now(); while (Date.now() - t0 < 5) { /* let the 1ms lease pass */ }
-  assert.strictEqual(tel.activityInfo(), null,
-    'a hung promise must not leave a permanent phantom job for the watchdog to chase')
-  delete require.cache[require.resolve('./telemetry.js')]
-  process.env.ACTIVITY_LEASE_MS = '900000'
+  assert(tel.activityInfo(), 'a live activity reports while its work is running')
+  // the watchdog's terminal rung - after the full verified-progress ladder - reclaims it
+  assert.strictEqual(tel.clearActivity('watchdog giveup'), true, 'the rung must be able to drop a hung label')
+  assert.strictEqual(tel.activityInfo(), null, 'a hung promise must not leave a permanent phantom job for the watchdog to chase')
 })
 
-t('ANTI-DRIFT: activityInfo expires lazily on READ, like activeHold and dispatchBusy', () => {
-  const src = fs.readFileSync(path.join(__dirname, 'telemetry.js'), 'utf8')
-  const i = src.indexOf('function activityInfo')
-  assert(i > 0, 'activityInfo exists')
-  const fn = src.slice(i, i + 420)
-  assert(/ACTIVITY_LEASE_MS/.test(fn), 'the activity must carry an expiry')
-  assert(/activity = null/.test(fn), 'and must DROP the stale entry on read, not merely hide it')
+t('NO INVENTED TIMERS: neither the activity nor the body claim carries a lease of its own', () => {
+  // The first cut of both fixes used a 15-minute constant. DESIGN-PRINCIPLES #6 forbids the
+  // blanket timer and #3 asks for a condition over a constant; the verified-progress ladder IS
+  // the condition, and the giveup rung is its one owner. A number reappearing here means someone
+  // has gone back to guessing how long "too long" is.
+  const tel = fs.readFileSync(path.join(__dirname, 'telemetry.js'), 'utf8')
+  const cmd = fs.readFileSync(path.join(__dirname, 'commands.js'), 'utf8')
+  assert(!/ACTIVITY_LEASE_MS/.test(tel), 'the activity label must not re-grow a timer')
+  assert(!/BODY_CLAIM_LEASE_MS/.test(cmd), 'the body claim must not re-grow a timer')
+  assert(/function clearActivity/.test(tel), 'the label is reclaimed by an explicit call from the watchdog')
+  assert(/function releaseBodyClaims/.test(cmd), 'so is the body claim')
 })
 
 // ==== THE FOURTH EXCLUSIVE CLAIM: isBusy (live 2026-07-31) ==================================
@@ -287,25 +289,33 @@ t('ANTI-DRIFT: activityInfo expires lazily on READ, like activeHold and dispatch
 //   17:15:32 (wd) NUDGE maintenancePass - no verified progress for 120s
 // Three sibling claims had already been given leases (reflex hold / dispatch slot / activity
 // label). Fixing them one at a time was the whack-a-mole; this pins the RULE.
-t('THE 51-MINUTE GATE: a body claim cannot outlive its lease', () => {
+t('THE 51-MINUTE GATE: releaseBodyClaims frees the body isBusy was holding', () => {
   delete require.cache[require.resolve('./commands.js')]
-  process.env.BODY_CLAIM_LEASE_MS = '900000'
   const cmds = require('./commands.js')
   assert.strictEqual(cmds.isBusy(), false, 'nothing is claimed to begin with')
+  assert.strictEqual(cmds.releaseBodyClaims('nothing held'), null, 'releasing nothing reports nothing - an honest no-op')
 })
 
-t('ANTI-DRIFT: every body claim is STAMPED where it is taken, and expires on READ', () => {
+t('ANTI-DRIFT: the giveup rung releases the CLAIM, not just the nav goal', () => {
+  // The rung decided "hung - take the body back" and then cleared only the pathfinder goal, which
+  // was never what held the body: `provisioning` gates every dispatch through isBusy(). A decision
+  // must produce an action (#5).
+  const idx = fs.readFileSync(path.join(__dirname, 'index.js'), 'utf8')
+  const i = idx.indexOf('holds no dispatch slot - releasing the controls instead')
+  assert(i > 0, 'the no-lease giveup branch still exists')
+  const branch = idx.slice(i, i + 1400)
+  assert(/releaseBodyClaims\(/.test(branch), 'the terminal rung must release the body claim - clearing the nav goal alone leaves isBusy true forever')
+  assert(/clearControlStates/.test(branch), 'and still let go of the controls')
+})
+
+t('ANTI-DRIFT: every body claim is STAMPED where it is taken (so the release can report it)', () => {
   const src = fs.readFileSync(path.join(__dirname, 'commands.js'), 'utf8')
-  // the three claims isBusy() reads
   for (const c of ['building', 'provisioning', 'buildReqActive']) {
     const sets = (src.match(new RegExp('\\b' + c + ' = true\\b', 'g')) || []).length
     const stamps = (src.match(new RegExp("claimStamp\\('" + c + "'\\)", 'g')) || []).length
-    assert.strictEqual(stamps, sets, c + ': every `= true` must be stamped (' + sets + ' sets, ' + stamps + ' stamps) - an unstamped claim has no lease and can hang the scheduler forever')
+    assert.strictEqual(stamps, sets, c + ': every `= true` must be stamped (' + sets + ' sets, ' + stamps + ' stamps)')
   }
-  const i = src.indexOf('function isBusy')
-  const fn = src.slice(i, i + 400)
-  assert(/claimLive\(/.test(fn), 'isBusy must read claims through the expiry, not the raw booleans')
-  assert(!/return building \|\| provisioning \|\| buildReqActive/.test(src), 'the bare-boolean isBusy is back - that is the 51-minute stall')
+  assert(/function releaseBodyClaims/.test(src), 'and there must be exactly one place that hands the body back')
 })
 
 console.log(fails ? `\n${fails} FAILURE(S)` : '\nall dispatch-lease tests passed')

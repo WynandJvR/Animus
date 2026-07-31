@@ -2354,24 +2354,38 @@ function setBuildReqActive (v) { buildReqActive = !!v }
 // So every claim here carries a stamp and expires lazily on read, like the other three.
 // Clearing stays EXACTLY as it was (the finallys are correct and still authoritative); this only
 // bounds how long a claim can outlive the work that made it.
-const BODY_CLAIM_LEASE_MS = parseInt(process.env.BODY_CLAIM_LEASE_MS || '900000', 10)
-let claimAt = { building: 0, provisioning: 0, buildReqActive: 0 }
+// The first cut of this gave each claim a 15-MINUTE LEASE. That was a blanket timer and an
+// invented number - DESIGN-PRINCIPLES #6 forbids exactly that ("gate on has the world changed in
+// a way that matters, not on N minutes have passed"), and #3 asks for a CONDITION over a
+// constant. It was also useless as a backstop: 15 minutes of a dead bot is the incident, not the
+// cure. DELETED, both of them.
+//
+// The condition that actually matters is "is the work behind this claim still making verified
+// progress", and the watchdog ALREADY measures precisely that - on real world events
+// (itemDelta / moved8b), escalating NUDGE -> FAIL-JOB -> GIVEUP. Its terminal rung exists to say
+// "this job is hung, take the body back", and it was already the ONE owner of that decision. It
+// simply never finished the job: it cleared the pathfinder goal and left the claim set, so
+// isBusy() stayed true and the scheduler still could not dispatch (51 minutes of nothing,
+// 2026-07-31). A decision must produce an action - #5. So that rung calls this, and no claim
+// needs a clock of its own.
+let claimAt = { building: 0, provisioning: 0, buildReqActive: 0 } // WHEN, for the log line only
 function claimStamp (which) { claimAt[which] = Date.now() }
-function claimLive (which, flag) {
-  if (!flag) return false
-  const at = claimAt[which]
-  if (at && Date.now() - at > BODY_CLAIM_LEASE_MS) {
-    try { logFn('(claim) ' + which + ' outlived its ' + Math.round(BODY_CLAIM_LEASE_MS / 60000) + 'min lease - releasing the body (a hung promise never ran its finally)') } catch {}
-    claimAt[which] = 0
-    if (which === 'building') building = false
-    else if (which === 'provisioning') provisioning = false
-    else buildReqActive = false
-    return false
-  }
-  return true
-}
-function isBusy () {
-  return claimLive('building', building) || claimLive('provisioning', provisioning) || claimLive('buildReqActive', buildReqActive)
+function isBusy () { return building || provisioning || buildReqActive }
+
+// Release every exclusive claim on the body. Called ONLY by the watchdog's terminal rung, and
+// only after the full verified-progress ladder has run - so this is evidence of a hung promise,
+// never a timeout. Returns what it actually released, for an honest log line.
+function releaseBodyClaims (why) {
+  const held = []
+  const now = Date.now()
+  if (building) { held.push('building' + (claimAt.building ? '(' + Math.round((now - claimAt.building) / 1000) + 's)' : '')); building = false }
+  if (provisioning) { held.push('provisioning' + (claimAt.provisioning ? '(' + Math.round((now - claimAt.provisioning) / 1000) + 's)' : '')); provisioning = false }
+  if (buildReqActive) { held.push('buildReqActive' + (claimAt.buildReqActive ? '(' + Math.round((now - claimAt.buildReqActive) / 1000) + 's)' : '')); buildReqActive = false }
+  if (!held.length) return null
+  claimAt = { building: 0, provisioning: 0, buildReqActive: 0 }
+  try { telemetry.clearActivity(why) } catch {}
+  try { logFn('(claim) released ' + held.join(', ') + ' - ' + (why || 'hung promise') + '; the finally never ran, so the body was never handed back') } catch {}
+  return held.join(', ')
 }
 function isEscaping () { return escaping }
 
@@ -3349,4 +3363,4 @@ async function resumeBuild (bot) {
   }
 }
 
-module.exports = { handle, state, setupMovements, travelMovements, eatFood, placeTorchNearby, isBusy, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume, flagSpawnSuspect, worthwhileGrave, shouldChaseGrave, graveLootVerdict, gravesSnapshot, graveUrgency, graveCompare, equipCarriedArmor, activityInfo, preemptForSurvival, setDebugSink, finishDisposition, resumeHoldRemaining, markResumePaused, touchProgress, progressInfo, markStalled, _resetProgress, recentOutcomes, setPostDeathRecovery, isPostDeathRecovery, clearPostDeathRecovery, postDeathRecoveryHeldMs }
+module.exports = { handle, state, setupMovements, travelMovements, eatFood, placeTorchNearby, isBusy, releaseBodyClaims, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume, flagSpawnSuspect, worthwhileGrave, shouldChaseGrave, graveLootVerdict, gravesSnapshot, graveUrgency, graveCompare, equipCarriedArmor, activityInfo, preemptForSurvival, setDebugSink, finishDisposition, resumeHoldRemaining, markResumePaused, touchProgress, progressInfo, markStalled, _resetProgress, recentOutcomes, setPostDeathRecovery, isPostDeathRecovery, clearPostDeathRecovery, postDeathRecoveryHeldMs }

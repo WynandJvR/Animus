@@ -60,12 +60,21 @@ function setBot (bot) { globalBot = bot }
 //   dispatchBusy        - "the slot is a LEASE, not a flag" (55857e6)
 // The activity label was the last exclusive claim exempt from it. Now it expires lazily on read,
 // exactly as those two do, so a hung promise can no longer leave a permanent phantom job.
-const ACTIVITY_LEASE_MS = parseInt(process.env.ACTIVITY_LEASE_MS || '900000', 10)
+// The first cut of this bounded the label with a 15-MINUTE LEASE. That was a blanket timer and a
+// number I invented - exactly what DESIGN-PRINCIPLES #6 forbids ("gate on has the world changed
+// in a way that matters, not on N minutes have passed") - and 15 minutes is far too long to be a
+// useful backstop anyway. DELETED. The condition that actually matters is "is the work behind
+// this label still making verified progress", and the watchdog already measures precisely that
+// and escalates NUDGE -> FAIL-JOB -> GIVEUP on it. Its terminal rung is the ONE owner of
+// reclaiming a hung body, and it calls clearActivity() below. One owner, no constant.
+function activityInfo () { return activity ? { name: activity.name, detail: activity.detail, startedAt: activity.startedAt } : null }
 
-function activityInfo () {
-  if (!activity) return null
-  if (Date.now() - activity.startedAt > ACTIVITY_LEASE_MS) { activity = null; return null } // expired -> not an activity
-  return { name: activity.name, detail: activity.detail, startedAt: activity.startedAt }
+// Drop a label whose work is provably hung. Only the watchdog's terminal rung calls this, and
+// only after the full verified-progress ladder has run - so this is evidence, never a timeout.
+function clearActivity (why) {
+  if (!activity) return false
+  activity = null
+  return true
 }
 
 function beginActivity (name, detail) { activity = { name, detail: detail || '', startedAt: Date.now() }; touchProgress('begin:' + name) } // S7: a just-started job is at zero idle - a stale clock must never insta-fail it
@@ -210,7 +219,7 @@ function trackPosition (bot, opts = {}) {
 module.exports = {
   setDebugSink,
   setBot,
-  activityInfo,
+  activityInfo, clearActivity,
   beginActivity,
   endActivity,
   recordOutcome,

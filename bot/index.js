@@ -1456,6 +1456,15 @@ if (SCHED_ON) {
                 note('(wd) ' + job.name + ' holds no dispatch slot - releasing the controls instead')
                 try { if (bot.pathfinder) bot.pathfinder.setGoal(null) } catch {}
                 try { bot.clearControlStates() } catch {}
+                // ...AND THE BODY CLAIM. This rung decides "hung - take the body back", and used
+                // to stop at the nav goal, which is not what was holding the body: `provisioning`
+                // (isBusy) stays true when a hung promise never runs its `finally`, and isBusy
+                // gates EVERY dispatch. Live 2026-07-31 the tick chain re-armed, ran, and refused
+                // to dispatch anything for 51 minutes while the bot stood frozen at (242,45,-102).
+                // A decision must produce an action (#5). This is the ONE owner of reclaiming a
+                // hung body, and it is condition-driven - the verified-progress ladder above is
+                // the evidence, so no claim needs a clock of its own (#3, #6).
+                try { const freed = commands.releaseBodyClaims('watchdog giveup on ' + job.name); if (freed) note('(wd) ...and released the body claim it was still holding: ' + freed) } catch {}
                 try { commands.touchProgress('giveupRelease:' + job.name) } catch {}
               }
             }
