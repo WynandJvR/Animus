@@ -784,6 +784,8 @@ async function topUpFoodForPlan (bot, plan, { home = null, isStopped = () => fal
 function _setFoodPlanHint (p) { const prev = _foodPlanHint; _foodPlanHint = p || null; return prev }
 
 function isSecuringFood () { return _securingFood }
+// FORCE-release (watchdog terminal rung only) - see releaseMaintainLatch.
+function releaseFoodLatch () { const was = _securingFood; _securingFood = false; return was }
 
 function escalateFoodFloor () { if (process.env.FOOD_FLOOR !== '0') _foodFloorNoProgress = foodSec.foodFloorEscalation(_foodFloorNoProgress, false) }
 
@@ -1185,5 +1187,5 @@ async function scoutHunt (bot, { isStopped = () => false, say = () => {}, maxMs 
 module.exports = {
   setDebugSink,
   REGEN_FOOD_MIN,
-  RAW_COOKABLE, FOOD_ANIMALS, LEATHER_ANIMALS, RISKY_EAT, ROD_SPIDERS, DFOOD_DEEP, DFOOD_FAR, _foodPlanHint, _securingFood, _foodFloorNoProgress, _foodFloorState, hasFood, foodCount, needsFood, nearestFoodAnimal, eatFromPackToComfortable, eatBestFood, eatUp, bakeBreadFromWheat, cookRawMeat, drainOwnFurnaceFood, fishingEnabled, ensureFishingRod, fishForFood, huntForFood, huntForDrop, dropCount, huntSpiderForString, gatherLeather, woolCount, ensureFoodSupply, needFoodSupply, bankFoodFirst, courierFoodToBank, foodPlanNow, topUpFoodForPlan, _setFoodPlanHint, isSecuringFood, escalateFoodFloor, secureFood, secureFoodInner, scoutForFood, scoutHunt
+  RAW_COOKABLE, FOOD_ANIMALS, LEATHER_ANIMALS, RISKY_EAT, ROD_SPIDERS, DFOOD_DEEP, DFOOD_FAR, _foodPlanHint, _securingFood, _foodFloorNoProgress, _foodFloorState, hasFood, foodCount, needsFood, nearestFoodAnimal, eatFromPackToComfortable, eatBestFood, eatUp, bakeBreadFromWheat, cookRawMeat, drainOwnFurnaceFood, fishingEnabled, ensureFishingRod, fishForFood, huntForFood, huntForDrop, dropCount, huntSpiderForString, gatherLeather, woolCount, ensureFoodSupply, needFoodSupply, bankFoodFirst, courierFoodToBank, foodPlanNow, topUpFoodForPlan, _setFoodPlanHint, isSecuringFood, releaseFoodLatch, escalateFoodFloor, secureFood, secureFoodInner, scoutForFood, scoutHunt
 }

@@ -308,6 +308,38 @@ t('ANTI-DRIFT: the giveup rung releases the CLAIM, not just the nav goal', () =>
   assert(/clearControlStates/.test(branch), 'and still let go of the controls')
 })
 
+t('THE 4.5-HOUR GHOST: a stuck provision latch is released too, not just isBusy', () => {
+  // The exact live state, 2026-07-31 18:06-22:30: activityInfo() null, isBusy() false, and
+  // `_maintaining` alone reporting 'maintenancePass' to activeJobInfo forever. The scheduler
+  // dispatched NOTHING for four and a half hours. stopMaintenance() cannot help - it is a
+  // COOPERATIVE flag the pass polls, and a hung await polls nothing.
+  delete require.cache[require.resolve('./commands.js')]
+  const cmds = require('./commands.js')
+  const pm = require('./provision-maintain.js')
+  const ss = require('./survival-snapshot.js')
+  pm._setMaintaining(true)
+  assert.strictEqual(cmds.isBusy(), false, 'isBusy is clean - this ghost is NOT one of its flags')
+  const before = ss.activeJobInfo()
+  assert(before && before.name === 'maintenancePass', 'the phantom job is what the watchdog chases')
+  const freed = cmds.releaseBodyClaims('watchdog giveup on maintenancePass')
+  assert(freed && /maintaining/.test(freed), 'the reclaimer must free the provision latch too: ' + freed)
+  assert.strictEqual(ss.activeJobInfo(), null, 'and the phantom job is gone, so the scheduler can dispatch again')
+})
+
+t('ANTI-DRIFT: the reclaimer covers EVERY latch activeJobInfo can report', () => {
+  // activeJobInfo names a job from five provision latches. Any one of them left out is another
+  // 4.5-hour stall waiting to happen, in a different costume.
+  const snap = fs.readFileSync(path.join(__dirname, 'survival-snapshot.js'), 'utf8')
+  const cmd = fs.readFileSync(path.join(__dirname, 'commands.js'), 'utf8')
+  const i = snap.indexOf('function activeJobInfo')
+  const fn = snap.slice(i, snap.indexOf('async function schedulerState', i))
+  const latches = [...fn.matchAll(/if \((is[A-Za-z]+)\(\)\)/g)].map(m => m[1])
+  assert(latches.length >= 5, 'expected the five job latches, found ' + latches.join(','))
+  const rel = cmd.slice(cmd.indexOf('function releaseBodyClaims'), cmd.indexOf('function releaseBodyClaims') + 2200)
+  assert(/releaseMaintainLatch/.test(rel) && /releaseFoodLatch/.test(rel) && /releaseRecoveryLatches/.test(rel),
+    'the reclaimer must force-release the maintain, food and recovery latch groups - ' + latches.join(',') + ' can each name a phantom job')
+})
+
 t('ANTI-DRIFT: every body claim is STAMPED where it is taken (so the release can report it)', () => {
   const src = fs.readFileSync(path.join(__dirname, 'commands.js'), 'utf8')
   for (const c of ['building', 'provisioning', 'buildReqActive']) {

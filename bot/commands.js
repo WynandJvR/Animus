@@ -2381,6 +2381,20 @@ function releaseBodyClaims (why) {
   if (building) { held.push('building' + (claimAt.building ? '(' + Math.round((now - claimAt.building) / 1000) + 's)' : '')); building = false }
   if (provisioning) { held.push('provisioning' + (claimAt.provisioning ? '(' + Math.round((now - claimAt.provisioning) / 1000) + 's)' : '')); provisioning = false }
   if (buildReqActive) { held.push('buildReqActive' + (claimAt.buildReqActive ? '(' + Math.round((now - claimAt.buildReqActive) / 1000) + 's)' : '')); buildReqActive = false }
+  // ...and the PROVISION-SIDE job latches. These are the same defect in three more modules:
+  // `_maintaining`/`_securingFood`/`_recoveringHp`/`_resting`/`_recoveringDegraded` are each set
+  // true and cleared in a `finally` that a hung await never reaches. They are NOT part of
+  // isBusy() - they feed survival-snapshot.activeJobInfo(), which is what the watchdog reads to
+  // NAME the job. Live 2026-07-31: activityInfo() was correctly null, isBusy() was false, and
+  // `_maintaining` alone kept reporting 'maintenancePass' for 4.5 HOURS while the scheduler
+  // dispatched nothing. stopMaintenance()/stopSurvivalJob() cannot help - they are COOPERATIVE
+  // stop flags, and a hung await polls nothing. This rung is the one place allowed to force them.
+  const P = (() => { try { return require('./provision.js') } catch { return null } })()
+  if (P) {
+    try { if (P.releaseMaintainLatch && P.releaseMaintainLatch()) held.push('maintaining') } catch {}
+    try { if (P.releaseFoodLatch && P.releaseFoodLatch()) held.push('securingFood') } catch {}
+    try { if (P.releaseRecoveryLatches && P.releaseRecoveryLatches()) held.push('recovery/resting') } catch {}
+  }
   if (!held.length) return null
   claimAt = { building: 0, provisioning: 0, buildReqActive: 0 }
   try { telemetry.clearActivity(why) } catch {}

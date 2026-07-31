@@ -60,6 +60,10 @@ const _maintState = {} // module-local per-step cadence (stepDue); NOT persisted
 function isMaintaining () { return _maintaining }
 
 function stopMaintenance () { _maintStop = true }
+// FORCE-release, for the watchdog's terminal rung only: stopMaintenance is COOPERATIVE (it sets a
+// flag the pass polls), and a hung await never polls anything. _maintaining then reports
+// 'maintenancePass' to activeJobInfo forever - which is what the watchdog chased for 4.5 hours.
+function releaseMaintainLatch () { const was = _maintaining; _maintaining = false; _maintStop = false; return was }
 
 function _setMaintaining (v) { _maintaining = !!v }
 
@@ -514,5 +518,5 @@ async function maintenancePass (bot, opts = {}) {
 
 module.exports = {
   setDebugSink,
-  JUNK_RE, _maintaining, _maintStop, _maintState, isMaintaining, stopMaintenance, _setMaintaining, cleanupScaffold, dumpJunk, safekeepSweep, spareKitToBank, maintenancePass
+  JUNK_RE, _maintaining, _maintStop, _maintState, isMaintaining, stopMaintenance, releaseMaintainLatch, _setMaintaining, cleanupScaffold, dumpJunk, safekeepSweep, spareKitToBank, maintenancePass
 }
