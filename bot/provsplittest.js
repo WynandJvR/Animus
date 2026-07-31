@@ -222,12 +222,29 @@ function ok (cond, label) { eq(!!cond, true, label) }
 // This is #82c's "losing ~60% of drops, cause unknown" - the cause.
 {
   const src = fs.readFileSync(path.join(__dirname, 'provision-core.js'), 'utf8')
-  const i = src.indexOf('collect: goto drop at')
+  // anchor on CODE, not on the log prose - the prose is also quoted in comments elsewhere
+  const i = src.indexOf('unreachable.add(target.id)')
   ok(i > 0, 'collect: the drop-sweep still exists')
   const region = src.slice(Math.max(0, i - 1400), i)
   ok(/navigateTo\(/.test(region), 'collect: the drop sweep must use the ONE nav entry point (door-aware), not a bare goto')
   ok(!/gotoWithTimeout\(bot, new goals\.GoalNear\(target\.position/.test(src),
     'collect: no bare gotoWithTimeout to a drop - that is what stranded the harvest outside the hut')
+}
+
+// ---- THE SHARED SHORT-HOP MUST BE DOOR-AWARE (live 2026-07-31) -----------------------------
+// gotoWithTimeout is what nearly every provision module uses to step to a cell near home, and it
+// was a BARE navigate.gotoOnce. The farm wraps the hut and the bank sits outside it, so those hops
+// cross the bot's own doorway - and a bare goto answers 'No path to the goal!' four blocks out.
+// Three subsystems failed on it in one day (furnace pantry, drop collect, wheat farm) before the
+// primitive itself was fixed. Two call-site patches was whack-a-mole; this pins the root.
+{
+  const core = fs.readFileSync(path.join(__dirname, 'provision-core.js'), 'utf8')
+  const i = core.indexOf('function gotoWithTimeout')
+  ok(i > 0, 'short-hop: gotoWithTimeout exists')
+  const body = core.slice(i, i + 320)
+  ok(/navigateTo\s*\(/.test(body), 'short-hop: must route through the ONE door-aware nav entry point')
+  ok(/escalate:\s*false/.test(body), 'short-hop: a 10s hop must NOT inherit the full recovery ladder (recursion into forceUnstick)')
+  ok(!/return\s+navigate\.gotoOnce\s*\(/.test(body), 'short-hop: the bare goto is back - three subsystems break when it is')
 }
 
 try { fs.rmSync(TMP, { recursive: true, force: true }) } catch {}

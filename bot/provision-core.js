@@ -70,8 +70,22 @@ function toolForBlock (bot, blockName) {
   return items[0] || null
 }
 
+// THE SHARED SHORT-HOP. This was `navigate.gotoOnce` - a single BARE pathfinder attempt with no
+// door handling - and it is what nearly every provision module uses to step to a cell near home.
+// The farm WRAPS the hut and the bank/furnaces sit outside it, so most of those hops cross the
+// bot's own doorway, which a bare goto cannot do: it answers `No path to the goal!` for a cell
+// FOUR BLOCKS away. Three separate subsystems failed on this in a single day:
+//   furnace-food: could not get to 185,-106                 (c9ab8ec - patched at the call site)
+//   collect: goto drop at 193,68,-95 failed (No path)       (0ae206c - patched at the call site)
+//   wheat farm [dry]: cell failed (No path to the goal!)    <- 26 RIPE wheat it could not reach,
+//     while the castle sat blocked on a food reserve those very crops were meant to fill
+// Two call-site patches is whack-a-mole; the defect is in the primitive, so it is fixed here.
+//
+// navigateTo is the ONE entry point that owns the door pre-flight. `escalate: false` keeps this a
+// SHORT HOP: the doorway is handled, but the full stuck-recovery ladder (and its dig-out) stays
+// the property of a real navigation - so a 10-second hop can never recurse into forceUnstick.
 function gotoWithTimeout (bot, goal, ms) {
-  return navigate.gotoOnce(bot, goal, ms)
+  return navigate.navigateTo(bot, goal, { timeoutMs: ms, escalate: false })
 }
 
 async function collectDrops (bot, radius = 10, { patience = 1 } = {}) {
