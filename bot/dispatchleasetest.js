@@ -186,5 +186,56 @@ t('ANTI-DRIFT: a revoke lets go of the CONTROLS, not just the bookkeeping', () =
   assert(/clearControlStates/.test(fn), 'two actors driving one body is the invariant this breaks')
 })
 
+// ==== A JOB THAT MERELY RAN IS NOT PROGRESS (live 2026-07-31) ================================
+// The build and the opportunistic maintain livelocked at ~90s per cycle:
+//   OPPORTUNISTIC MAINTAIN - at the hut mid-build (pausing the build; it resumes via re-arm)
+//   maintenancePass -> window abandoned - build did not unwind in time (60s retry)
+// maintenancePass returns a plain STRING there, so runJob's finally stamped
+// `holdReleased:maintenancePass` every cycle and reset the progress clock. The body did not move
+// for 5.5 HOURS - not one [prov]/[build]/[nav] line - and the watchdog fired ZERO nudges, because
+// the livelock kept feeding the very witness meant to catch it. A record written from an ATTEMPT
+// instead of from EVIDENCE. The MODEL of the rule (the live wiring is pinned by source below):
+function runJobProgress (progressAt, { touchedDuringRun }) {
+  const t0 = progressAt + 1                   // touchProgress('dispatch:'+name) - this job's own t0
+  const at = touchedDuringRun ? t0 + 500 : t0 // did anything real stamp between dispatch and release?
+  return at !== t0 ? at + 1 : at              // stamp on release ONLY if the job did something
+}
+
+t('PROGRESS: a job that DID work stamps on release (a quiet ten-minute job stays fresh)', () => {
+  const before = 1000
+  const after = runJobProgress(before, { touchedDuringRun: true })
+  assert(after > before + 1, 'real work during the run must refresh the clock on release')
+})
+
+t('THE 5.5-HOUR FREEZE: a job that touched NOTHING must not stamp progress on release', () => {
+  const before = 1000
+  const t0 = before + 1
+  const after = runJobProgress(before, { touchedDuringRun: false })
+  assert.strictEqual(after, t0, 'an abandoned window may not age the clock - the watchdog must keep counting')
+})
+
+t('THE 5.5-HOUR FREEZE: the clock must AGE inside an abandoned dispatch so NUDGE can fire', () => {
+  // The dispatch stamp legitimately zeroes the clock (a fresh job is not stale). What was fatal
+  // is the RELEASE stamp: with it, a 60s abandoned window was bracketed by two stamps and the
+  // clock never reached the 40s nudge while a job was active. Without it, idle ages normally.
+  const NUDGE_AT = 40000
+  const dispatchAt = 100000
+  const abandonedFor = 60000
+  const clockAtRelease = runJobProgress(dispatchAt - 1, { touchedDuringRun: false })
+  const idleWhileActive = (dispatchAt + abandonedFor) - clockAtRelease
+  assert(idleWhileActive >= NUDGE_AT,
+    'a 60s window that did nothing must show ' + Math.round(idleWhileActive / 1000) + 's of idle - enough for the watchdog to nudge')
+})
+
+t('ANTI-DRIFT: the live release stamp is CONDITIONAL on the job having touched progress', () => {
+  const i = SRC.indexOf("touchProgress('holdReleased:'")
+  assert(i > 0, 'the release stamp exists')
+  const window = SRC.slice(Math.max(0, i - 900), i + 200)
+  assert(/didWork/.test(window), 'the release stamp must be gated on the job having done something')
+  assert(/t0Progress/.test(window), 'it must compare against this dispatch\'s own t0 stamp')
+  assert(!/^\s*commands\.touchProgress\('holdReleased:' \+ name\)\s*$/m.test(SRC),
+    'an UNCONDITIONAL release stamp is back - that is what blinded the watchdog for 5.5 hours')
+})
+
 console.log(fails ? `\n${fails} FAILURE(S)` : '\nall dispatch-lease tests passed')
 process.exit(fails ? 1 : 0)

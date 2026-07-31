@@ -867,6 +867,9 @@ if (SCHED_ON) {
     const startedAt = Date.now()
     schedJob = { name, startedAt, gen: myGen, until: startedAt + DISPATCH_LEASE_MS, holdToken: null }
     commands.touchProgress('dispatch:' + name) // S7 (d): a just-dispatched job is at zero idle (same t0 rule as beginActivity/H5c)
+    // The t0 stamp above is this dispatch's OWN mark. Remember it, so the release below can tell
+    // "this job did something" from "this job merely ran" - see the finally.
+    const t0Progress = (() => { try { return commands.progressInfo().at } catch { return 0 } })()
     const holdToken = opts.holds ? reflexes.beginHold(name, opts.holds.wake, opts.holds.ttlMs || 900000) : null
     if (schedJob && schedJob.gen === myGen) schedJob.holdToken = holdToken // so a revoke can release it
     try {
@@ -898,7 +901,24 @@ if (SCHED_ON) {
       const mine = schedJob && schedJob.gen === myGen
       if (holdToken) reflexes.endHold(holdToken) // idempotent (Map.delete) - safe either way
       if (mine) {
-        commands.touchProgress('holdReleased:' + name)
+        // ==== A JOB THAT MERELY RAN IS NOT PROGRESS (2026-07-31) ==========================
+        // This stamp used to be UNCONDITIONAL, and it blinded the one mechanism whose whole job
+        // is to notice a frozen bot. Live: the build and the opportunistic maintain livelocked -
+        //   OPPORTUNISTIC MAINTAIN - at the hut mid-build (pausing the build; it resumes via re-arm)
+        //   maintenancePass -> window abandoned - build did not unwind in time (60s retry)
+        // ...every ~90s. maintenancePass returns a plain string there, so each abandoned window
+        // stamped `holdReleased:maintenancePass` and reset the progress clock. The body did NOT
+        // MOVE FOR 5.5 HOURS (no [prov]/[build]/[nav] line at all) and the watchdog never fired a
+        // single NUDGE, because the livelock kept feeding its witness.
+        // That is this session's defect one more time: a record written from an ATTEMPT instead of
+        // from EVIDENCE. The release stamp is honest ONLY for a job that actually did something -
+        // the case its comment describes ("a job that legitimately sat still for ten minutes").
+        // So: stamp only if something touched progress BETWEEN dispatch and release. If nothing
+        // did, this job ran and the world did not budge, and the watchdog must keep aging.
+        let didWork = true
+        try { didWork = commands.progressInfo().at !== t0Progress } catch {}
+        if (didWork) commands.touchProgress('holdReleased:' + name)
+        else note('(sched) ' + name + ' released having touched nothing - NOT stamping progress (a frozen body must stay visible to the watchdog)')
         schedJob = null
       } else if (holdToken) {
         note('(sched) ' + name + ' returned after its slot was revoked - releasing its hold only, not the current job\'s')
