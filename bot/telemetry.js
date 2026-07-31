@@ -44,7 +44,29 @@ function setBot (bot) { globalBot = bot }
 // schedulerState can read the active op's name/detail/startedAt WITHOUT building the
 // heavyweight state(bot) snapshot (blockAtCursor/entity summaries) on every tick.
 // null when nothing is running.
-function activityInfo () { return activity ? { name: activity.name, detail: activity.detail, startedAt: activity.startedAt } : null }
+// ==== AN ACTIVITY IS A LEASE, NOT A FLAG (2026-07-31) =======================================
+// beginActivity/endActivity are correctly paired at every call site (try / catch / finally). That
+// is only sufficient while the awaited work RESOLVES. `planner.gearUp` did not: it hung, so the
+// try body never finished, the catch never fired, endActivity never ran - and the label stayed
+// open for FIFTY-TWO MINUTES. The bot stood frozen at (216,58,-124) reporting
+// `activity: gearup, forSec: 3150` while the watchdog failed a job that was not running:
+//   (wd) NUDGE gearup -> FAIL-JOB gearup -> stop latch ineffective -> gearup holds no dispatch
+//   slot - releasing the controls        ...19 times, every 2.5 minutes
+// It held no dispatch slot because maintenancePass had long since returned. The watchdog was
+// chasing a ghost, and had nothing it could revoke.
+//
+// This is the SAME rule the repo already applies twice, and states in its own comments:
+//   reflexes.activeHold - "an expired hold is NOT a hold: the watchdog gets the body back"
+//   dispatchBusy        - "the slot is a LEASE, not a flag" (55857e6)
+// The activity label was the last exclusive claim exempt from it. Now it expires lazily on read,
+// exactly as those two do, so a hung promise can no longer leave a permanent phantom job.
+const ACTIVITY_LEASE_MS = parseInt(process.env.ACTIVITY_LEASE_MS || '900000', 10)
+
+function activityInfo () {
+  if (!activity) return null
+  if (Date.now() - activity.startedAt > ACTIVITY_LEASE_MS) { activity = null; return null } // expired -> not an activity
+  return { name: activity.name, detail: activity.detail, startedAt: activity.startedAt }
+}
 
 function beginActivity (name, detail) { activity = { name, detail: detail || '', startedAt: Date.now() }; touchProgress('begin:' + name) } // S7: a just-started job is at zero idle - a stale clock must never insta-fail it
 

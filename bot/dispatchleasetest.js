@@ -237,5 +237,46 @@ t('ANTI-DRIFT: the live release stamp is CONDITIONAL on the job having touched p
     'an UNCONDITIONAL release stamp is back - that is what blinded the watchdog for 5.5 hours')
 })
 
+// ==== THE ACTIVITY LABEL IS THE THIRD EXCLUSIVE CLAIM (live 2026-07-31) ======================
+// beginActivity/endActivity are correctly paired at every call site. That is only sufficient
+// while the awaited work RESOLVES - and `planner.gearUp` hung, so the try body never finished,
+// the catch never fired, and the label stayed open for FIFTY-TWO MINUTES:
+//   activity: {name:'gearup', forSec:3150}   body frozen at (216,58,-124), moving:false
+//   (wd) NUDGE gearup -> FAIL-JOB gearup -> stop latch ineffective on gearup
+//   (wd) gearup holds no dispatch slot - releasing the controls    ...19x, every 2.5 min
+// It held no slot because maintenancePass had long since returned: the watchdog was failing a
+// job that was not running, and had nothing to revoke. Same rule as the other two exclusive
+// claims - "an expired hold is NOT a hold", "the slot is a LEASE, not a flag" - now applied to
+// the last one that was exempt.
+t('ACTIVITY LEASE: a fresh activity is live', () => {
+  delete require.cache[require.resolve('./telemetry.js')]
+  process.env.ACTIVITY_LEASE_MS = '900000'
+  const tel = require('./telemetry.js')
+  tel.beginActivity('gearup', 'armor')
+  const a = tel.activityInfo()
+  assert(a && a.name === 'gearup', 'a just-begun activity must report')
+})
+
+t('THE 52-MINUTE GHOST: an activity past its lease is NOT an activity', () => {
+  delete require.cache[require.resolve('./telemetry.js')]
+  process.env.ACTIVITY_LEASE_MS = '1'
+  const tel = require('./telemetry.js')
+  tel.beginActivity('gearup', 'armor')
+  const t0 = Date.now(); while (Date.now() - t0 < 5) { /* let the 1ms lease pass */ }
+  assert.strictEqual(tel.activityInfo(), null,
+    'a hung promise must not leave a permanent phantom job for the watchdog to chase')
+  delete require.cache[require.resolve('./telemetry.js')]
+  process.env.ACTIVITY_LEASE_MS = '900000'
+})
+
+t('ANTI-DRIFT: activityInfo expires lazily on READ, like activeHold and dispatchBusy', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'telemetry.js'), 'utf8')
+  const i = src.indexOf('function activityInfo')
+  assert(i > 0, 'activityInfo exists')
+  const fn = src.slice(i, i + 420)
+  assert(/ACTIVITY_LEASE_MS/.test(fn), 'the activity must carry an expiry')
+  assert(/activity = null/.test(fn), 'and must DROP the stale entry on read, not merely hide it')
+})
+
 console.log(fails ? `\n${fails} FAILURE(S)` : '\nall dispatch-lease tests passed')
 process.exit(fails ? 1 : 0)
