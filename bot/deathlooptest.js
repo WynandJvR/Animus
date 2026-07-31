@@ -354,6 +354,13 @@ t('FIX 22: BOTH watchdogs read the one declaration', () => {
   assert(/const hold = reflexes\.activeHold\(holdPremiseOK\)/.test(src), 'the S7 watchdog must RESOLVE the premise, not trust it blindly')
   assert(/reflexes\.activeHold\(holdPremiseOK\)/.test(wedgeLine), 'the hard-wedge watchdog must resolve it with the SAME resolver')
   assert.strictEqual((src.match(/const holdPremiseOK =/g) || []).length, 1, 'exactly ONE definition of the premise resolver - two copies is how the watchdogs drift apart')
+  // ...and the ceiling clause must be DEPTH-BOUNDED. A bare hasSolidCeiling is trivially true in
+  // any mine, so the bot kept claiming "sheltering until dawn" at y37 - 31 blocks under its own
+  // hut - even after the premise landed. A sealed night pit is a ceiling NEAR THE SURFACE.
+  const resolver = src.slice(src.indexOf('const holdPremiseOK ='), src.indexOf('if (WATCHDOG_ON)'))
+  assert(/hasSolidCeiling/.test(resolver), 'the sealed-pit case must still be vouched for (2026-07-29)')
+  assert(/surfaceYAt/.test(resolver), 'the ceiling only counts near the SURFACE - a mine roof is not shelter')
+  assert(!/hasSolidCeiling\(bot, 4\)\) return true/.test(resolver), 'a bare ceiling test is back - every mine reads as shelter')
 })
 
 // ============ LOOP C - a decision must produce an action ==================================

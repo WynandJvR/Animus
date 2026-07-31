@@ -1320,7 +1320,19 @@ const holdPremiseOK = kind => {
   try { if (bot.isSleeping) return true } catch {}
   try { if (provision.isResting && provision.isResting()) return true } catch {}
   try { if (provision.insideOwnStructure && provision.insideOwnStructure(bot)) return true } catch {}
-  try { if (provision.hasSolidCeiling && provision.hasSolidCeiling(bot, 4)) return true } catch {}
+  // A SEALED NIGHT PIT is a ceiling a few blocks under the SURFACE - the 2026-07-29 case this
+  // whole mechanism exists for (digInForNight caps a shallow hole and sets no latch, so nothing
+  // else vouches for it). A bare hasSolidCeiling is NOT that test: underground, a mine roof
+  // satisfies it trivially, which is how the bot went on claiming "sheltering until dawn" at y37
+  // - thirty-one blocks below its own hut - even after the premise was introduced. So the ceiling
+  // only counts near the surface, measured against a GROUNDED read; UNKNOWN fails safe (trusted).
+  try {
+    if (provision.hasSolidCeiling && provision.hasSolidCeiling(bot, 4)) {
+      const s = require('./pathfix.js').surfaceYAt(bot, bot.entity.position.x, bot.entity.position.z)
+      if (!s || !s.known || s.y == null) return true
+      if (s.y - bot.entity.position.y <= Number(process.env.SHELTER_PIT_DEPTH || 5)) return true
+    }
+  } catch { return true }
   return false
 }
 
