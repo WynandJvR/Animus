@@ -350,5 +350,29 @@ t('ANTI-DRIFT: every body claim is STAMPED where it is taken (so the release can
   assert(/function releaseBodyClaims/.test(src), 'and there must be exactly one place that hands the body back')
 })
 
+// ==== A KICK THAT ONLY LOGS IS NOT A KICK (live 2026-08-01) =================================
+// The IDLE-WITH-WORK clause detects a survival pick sitting undispatched while the body is truly
+// idle, announces "kicking", and then - unless vitals were at crisis - did nothing at all. Live,
+// at FULL hp and food, with the castle build resumed and waiting 17 blocks away:
+//   (wd) IDLE WITH WORK 30s+: pick=recoveryLadder undispatched - kicking   x4, no dispatch
+// The bot stood still for four minutes being "kicked".
+t('IDLE-WITH-WORK: the kick clears the stale back-offs at ANY vitals, not only at crisis', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'index.js'), 'utf8')
+  const i = src.indexOf("IDLE WITH WORK 30s+")
+  assert(i > 0, 'the idle-with-work clause still exists')
+  const clause = src.slice(i, i + 1800)
+  // the remedy must not sit behind a vitals gate - the condition that names the branch is enough
+  assert(!/if \(bot\.health <= 6 \|\| bot\.food <= 2\) \{[\s\S]{0,400}runner\.noOp\.clear\(\)/.test(clause),
+    'the clearing is gated on crisis vitals again - at any healthy reading the kick is just a log line')
+  for (const back of ['runner.graveCooldownUntil', 'runner.hpCooldownUntil', 'runner.ladderBlock', 'runner.noOp.clear()']) {
+    assert(clause.includes(back), 'the kick must actually clear ' + back)
+  }
+  // and it has to be reachable: the clears sit directly in the clause body, not inside any `if`
+  const body = clause.slice(clause.indexOf('undispatched - kicking'))
+  const clears = body.indexOf('runner.graveCooldownUntil')
+  const anyIf = body.slice(0, clears).lastIndexOf('if (')
+  assert(anyIf === -1, 'nothing may stand between detecting the stall and clearing the back-offs')
+})
+
 console.log(fails ? `\n${fails} FAILURE(S)` : '\nall dispatch-lease tests passed')
 process.exit(fails ? 1 : 0)

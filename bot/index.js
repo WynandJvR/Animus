@@ -1493,15 +1493,20 @@ if (SCHED_ON) {
           if (now - idleWorkSince > 30000 && now - lastKickAt > 60000) {
             lastKickAt = now
             note('(wd) IDLE WITH WORK 30s+: pick=' + (schedLastPick && schedLastPick.job) + ' undispatched - kicking')
-            if (bot.health <= 6 || bot.food <= 2) {
-              runner.graveCooldownUntil = runner.hpCooldownUntil = 0
-              runner.ladderBlock = null // FIX 3: at crisis vitals, give the ladder a fresh look even if the world reads the same
-              // ...and the job-identity latch, for the same reason and by the same argument. It
-              // was the one back-off this clause did not clear, so at hp 1 / food 0 the ladder
-              // could be held off by it while every OTHER stale hold was being released.
-              runner.noOp.clear()
-              note('(wd) crisis vitals - cleared every stale back-off (grave/hp/ladder/no-op) so the next tick can dispatch')
-            }
+            // ==== A KICK THAT ONLY LOGS IS NOT A KICK (live 2026-08-01) ==========================
+            // The clearing used to be gated on crisis vitals, so at any healthy reading this whole
+            // branch was a message and nothing else. Live, at FULL hp and food, with the castle
+            // resumed and waiting:
+            //   (wd) IDLE WITH WORK 30s+: pick=recoveryLadder undispatched - kicking   x4, no dispatch
+            // The bot stood at (195,68,-97) for four minutes being "kicked".
+            // What makes a back-off stale is not the vitals - it is the body sitting idle with work
+            // pending. Every one of these exists to stop the scheduler SPINNING, and 30s of an idle
+            // body holding an undispatched survival pick is proof they have stopped doing that job.
+            // So the remedy runs whenever the condition that names it holds.
+            runner.graveCooldownUntil = runner.hpCooldownUntil = 0
+            runner.ladderBlock = null // give the ladder a fresh look even if the world reads the same
+            runner.noOp.clear() // ...and the job-identity latch, for the same reason
+            note('(wd) ...cleared every stale back-off (grave/hp/ladder/no-op) so the next tick can dispatch')
           }
         } else idleWorkSince = 0
         // 8. TICK-LIVENESS: the self-rescheduling chain itself died (a hung await -> its finally never
