@@ -235,6 +235,31 @@ t('THE SEALED HUT: only a death counts as a reset; an attempt only stamps the co
   assert.strictEqual(st.count, 0, 'the five phantom resets are gone')
 })
 
+// Reach caps the shaft at 3 from the rim; killing at hp 1 needs 4. The 4th block costs a descent,
+// the descent costs filler, and inside a hut every dirt block is buried under the plank floor the
+// bot stands on - so ensurePillarFiller's line-of-sight check skips all of it. The shaft itself
+// digs through that dirt. The scan took the first non-forbidden column and picked the one already
+// open to air: 3b of shaft, no spoil, nothing to climb back with.
+t('THE SEALED HUT: the pit column must pay for the descent it requires', () => {
+  const fs = require('fs')
+  const path = require('path')
+  const src = fs.readFileSync(path.join(__dirname, 'provision-recovery.js'), 'utf8')
+  const i = src.indexOf('async function suicideByPitDrop')
+  const fn = src.slice(i, src.indexOf('async function deadlockFallbackDeath'))
+
+  assert(/const yieldsFiller = \(b\) =>/.test(fn), 'the scan knows which blocks yield placeable spoil')
+  assert(/scaffold\.FILLER_RE\.test\(b\.name\) \|\| b\.name === 'grass_block'/.test(fn),
+    'spoil is judged by the SAME filler predicate pillarUpTo will use - not a second private list')
+  assert(/const spoilValue = \(fx, fz\) => \{[\s\S]{0,220}for \(let dy = -1; dy >= -3; dy--\)/.test(fn),
+    'spoil is counted over the REACHABLE stage-A range, since that is all the bot can actually dig from the rim')
+  // the scan compares candidates instead of returning the first one that is merely allowed
+  assert(!/if \(ok\) return \{ dx, dz, fx, fz \}/.test(fn), 'first-allowed-wins is what picked the barren column')
+  assert(/if \(!best \|\| cand\.spoil > best\.spoil\) best = cand/.test(fn), 'it must pick the best-yielding column, not the first')
+  // and the free-vs-floor preference still outranks spoil: a column that costs the hut nothing wins first
+  assert(/let dir = scan\(false\)[\s\S]*const spendFloor = !dir && trapped/.test(fn),
+    'spoil is a tie-break WITHIN a pass - it must never promote spending a hut floor cell over a free column')
+})
+
 async function main () {
   // (a) ensurePillarFiller returns true IMMEDIATELY when the pack already has filler (stub bot).
   //     The stub has NO entity: if the early pickFiller short-circuit failed, the `!bot.entity`

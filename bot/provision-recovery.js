@@ -491,9 +491,25 @@ async function suicideByPitDrop (bot, { isStopped = () => false, home = null, sa
     return null
   }
   const DEPTH = Math.max(6, DEADLOCK_FALL_H)
+  // ==== THE PIT HAS TO PAY FOR ITS OWN DESCENT (live 2026-08-01) ============================
+  // Reach caps the shaft at 3 from the rim; killing at hp 1 needs 4. The 4th block costs a
+  // descent, the descent costs filler to climb back, and inside a hut there IS no reachable
+  // filler - every dirt block near the bot is buried under the plank floor it is standing on, so
+  // ensurePillarFiller's canDigBlock line-of-sight check skips all 64 candidates and it spends
+  // 77s returning false. But the shaft itself passes straight THROUGH that dirt: digging it is
+  // the filler acquisition, and ensurePillarFiller already ends with a collectDrops sweep.
+  // The scan just took the first column that was not forbidden, and picked the one whose cells
+  // were already open air - 3b of shaft and nothing to climb back with:
+  //   deadlock-reset: no filler to climb back to the rim - not descending (shaft stays 3b)
+  //   deadlock-reset: pit only 3b deep (need 4 to kill at hp 1) - ABORTING this fallback
+  // So prefer the column that yields the spoil the plan needs. Not a heuristic - the plan pays
+  // for itself, or it is not a plan.
+  const yieldsFiller = (b) => !!b && !AIRISH(b.name) && (scaffold.FILLER_RE.test(b.name) || b.name === 'grass_block')
+  const spoilValue = (fx, fz) => { let n = 0; for (let dy = -1; dy >= -3; dy--) { if (yieldsFiller(bot.blockAt(new Vec3(fx, feet.y + dy, fz)))) n++ } return n }
   // Two passes: PREFER a column that costs the hut nothing. Only if none exists - and only when
   // provably trapped - spend a floor cell. Cheapest sufficient escape, not the first one found.
   const scan = (allowOwnHut) => {
+    let best = null
     for (const [dx, dz] of mining.DIRS) {
       const fx = feet.x + dx; const fz = feet.z + dz
       let ok = true
@@ -501,13 +517,16 @@ async function suicideByPitDrop (bot, { isStopped = () => false, home = null, sa
         const cell = new Vec3(fx, feet.y + dy, fz)
         if (pitBlocked(cell, bot.blockAt(cell), allowOwnHut)) { ok = false; break }
       }
-      if (ok) return { dx, dz, fx, fz }
+      if (!ok) continue
+      const cand = { dx, dz, fx, fz, spoil: spoilValue(fx, fz) }
+      if (!best || cand.spoil > best.spoil) best = cand
     }
-    return null
+    return best
   }
   let dir = scan(false)
   const spendFloor = !dir && trapped
   if (spendFloor) { dir = scan(true); if (dir) dbg('deadlock-reset: no free column - spending a hut floor cell at ' + dir.fx + ',' + dir.fz + ' (repairHutStructure re-places it)') }
+  if (dir) dbg('deadlock-reset: pit column ' + dir.fx + ',' + dir.fz + ' yields ' + dir.spoil + ' filler block(s) for the climb back')
   if (!dir) { dbg('deadlock-reset: no diggable pit column beside the hut - ABORTING this fallback'); return false }
   const digAt = async (v) => {
     const b = bot.blockAt(v)
