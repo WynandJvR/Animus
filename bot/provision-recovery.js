@@ -479,21 +479,35 @@ async function suicideByPitDrop (bot, { isStopped = () => false, home = null, sa
     return true
   }
   say('resetting - digging a pit to drop into')
+  // Open drop measured from the RIM - the only number that decides lethality, so it is read from
+  // the world every time rather than inferred from what we believe we dug.
+  const openDrop = () => { let d = 0; for (let dy = -1; dy >= -(DEPTH + 1); dy--) { const b = bot.blockAt(new Vec3(dir.fx, feet.y + dy, dir.fz)); if (!b || AIRISH(b.name)) d++; else break } return d }
+  const lethalMin = (bot.health != null ? bot.health : DEADLOCK_HP) + 3
   // Stage A: dig the reachable top of the front shaft (feet-1 .. feet-3).
   for (let dy = -1; dy >= -3 && Date.now() < deadline; dy--) { if (!(await digAt(new Vec3(dir.fx, feet.y + dy, dir.fz)))) { dbg('deadlock-reset: pit stage A blocked - ABORTING this fallback'); return false } }
-  // Descend ONE into our own cell to regain reach for the lower shaft.
-  const under = new Vec3(feet.x, feet.y - 1, feet.z)
-  await digAt(under) // digAt itself enforces every exclusion now (pitBlocked) - one predicate, not a second copy of the list
-  try { await stepInto(bot, under, { isStopped }) } catch {}
-  const lowY = Math.floor(bot.entity.position.y)
-  // Stage B: from the lower stance, dig the front shaft deeper (down to feet.y-DEPTH).
-  for (let y = lowY - 1; y >= feet.y - DEPTH && Date.now() < deadline; y--) { if (!(await digAt(new Vec3(dir.fx, y, dir.fz)))) break }
-  // Climb the ONE block back to rim level so the step-off falls the full shaft depth.
-  if (Math.floor(bot.entity.position.y) < feet.y) { try { await pillarUpTo(bot, feet.y, { isStopped: () => isStopped() || Date.now() > deadline }) } catch {} }
-  // Measure the achieved open drop in the front column from the rim.
-  let drop = 0
-  for (let dy = -1; dy >= -(DEPTH + 1); dy--) { const b = bot.blockAt(new Vec3(dir.fx, feet.y + dy, dir.fz)); if (!b || AIRISH(b.name)) drop++; else break }
-  const lethalMin = (bot.health != null ? bot.health : DEADLOCK_HP) + 3
+  // ==== A STEP YOU CANNOT UNDO IS NOT A STEP YOU MAY TAKE (live 2026-08-01) ==================
+  // Stage B reached deeper by DESCENDING one into our own cell, then pillared back to the rim.
+  // But the reset STASHES the pack before it dies, so pillarUpTo had no filler - and the bot was
+  // left one block BELOW the rim it was supposed to step off, with nothing to climb:
+  //   deadlock-reset: no free column - spending a hut floor cell at 192,-100
+  //   deadlock-reset: pit only 0b deep (need 4) or not at rim - ABORTING this fallback
+  // Reach caps stage A at 3 blocks and lethality needs hp+3, so the descent is genuinely needed -
+  // but it is now taken only when stage A is short AND we hold the filler to come back up.
+  if (openDrop() < lethalMin && Date.now() < deadline) {
+    const canReturn = await ensurePillarFiller(bot, { isStopped: () => isStopped() || Date.now() > deadline }).catch(() => false)
+    if (!canReturn) dbg('deadlock-reset: no filler to climb back to the rim - not descending (shaft stays ' + openDrop() + 'b)')
+    else {
+      const under = new Vec3(feet.x, feet.y - 1, feet.z)
+      await digAt(under) // digAt itself enforces every exclusion now (pitBlocked) - one predicate, not a second copy of the list
+      try { await stepInto(bot, under, { isStopped }) } catch {}
+      const lowY = Math.floor(bot.entity.position.y)
+      // Stage B: from the lower stance, dig the front shaft deeper (down to feet.y-DEPTH).
+      for (let y = lowY - 1; y >= feet.y - DEPTH && Date.now() < deadline; y--) { if (!(await digAt(new Vec3(dir.fx, y, dir.fz)))) break }
+      // Climb the ONE block back to rim level so the step-off falls the full shaft depth.
+      if (Math.floor(bot.entity.position.y) < feet.y) { try { await pillarUpTo(bot, feet.y, { isStopped: () => isStopped() || Date.now() > deadline }) } catch {} }
+    }
+  }
+  const drop = openDrop()
   if (drop < lethalMin || Math.floor(bot.entity.position.y) < feet.y) { dbg('deadlock-reset: pit only ' + drop + 'b deep (need ' + lethalMin + ') or not at rim - ABORTING this fallback'); return false }
   // Step off the rim into the shaft and fall.
   let died = false

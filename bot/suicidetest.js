@@ -142,6 +142,27 @@ t('THE SEALED HUT: when trapped, the pit may be dug where it stands', () => {
     'it must try the free columns FIRST and spend a floor cell only when trapped with no alternative')
 })
 
+// The reset STASHES the pack before it dies, so by the time the pit is dug there is no filler.
+// Stage B used to descend one block to regain reach and then pillar back to the rim - with an
+// empty pack that pillar is a no-op, and the bot ends up BELOW the rim it must step off:
+//   deadlock-reset: pit only 0b deep (need 4) or not at rim - ABORTING this fallback
+t('THE SEALED HUT: the descent is taken only when it is needed AND reversible', () => {
+  const fs = require('fs')
+  const path = require('path')
+  const src = fs.readFileSync(path.join(__dirname, 'provision-recovery.js'), 'utf8')
+  const i = src.indexOf('async function suicideByPitDrop')
+  const fn = src.slice(i, src.indexOf('async function deadlockFallbackDeath'))
+  const gate = fn.indexOf('if (openDrop() < lethalMin')
+  const descend = fn.indexOf('await stepInto(bot, under')
+  assert(gate > 0 && descend > gate, 'the descent must sit INSIDE the needed-and-reversible gate')
+  assert(/const canReturn = await ensurePillarFiller\(bot/.test(fn), 'it must secure the filler that buys the climb back BEFORE descending')
+  assert(/if \(!canReturn\) dbg\([\s\S]{0,120}not descending/.test(fn), 'no filler -> it must NOT descend (stay at the rim) rather than descend and strand itself')
+  assert(fn.indexOf('const canReturn') < descend, 'the check must precede the step, not follow it')
+  // lethality is still read from the WORLD, never inferred from what we believe we dug
+  assert(/const openDrop = \(\) => \{[\s\S]{0,200}bot\.blockAt/.test(fn), 'the drop is measured by re-reading the column')
+  assert(/const drop = openDrop\(\)/.test(fn), 'the final verdict re-measures rather than reusing a stale count')
+})
+
 async function main () {
   // (a) ensurePillarFiller returns true IMMEDIATELY when the pack already has filler (stub bot).
   //     The stub has NO entity: if the early pickFiller short-circuit failed, the `!bot.entity`
