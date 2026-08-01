@@ -125,7 +125,7 @@ function lastOutcomeInfo () { return lastOutcome }
 // guard: the oscillation predicate requires ZERO work touches across its whole window, so real
 // back-and-forth work (which always moves an item or a block) can never be flagged. Inert unless the
 // watchdog's cycle detector reads it (like S7's touchProgress: cheap + unread == byte-identical).
-const CYCLE_WORK_TAGS = new Set(['itemDelta', 'placed', 'broke', 'smelt', 'regen', 'ladderRung', 'maintStep'])
+const CYCLE_WORK_TAGS = new Set(['itemDelta', 'placed', 'broke', 'smelt', 'regen', 'ladderRung', 'maintStep', 'harvest', 'replant'])
 let bodyProgress = { at: Date.now(), by: 'boot', stalled: false, workCount: 0 }
 function touchProgress (tag) { const w = bodyProgress.workCount || 0; bodyProgress = { at: Date.now(), by: tag || '', stalled: false, workCount: CYCLE_WORK_TAGS.has(tag) ? w + 1 : w } } // any touch clears stalled; WORK tags also bump workCount
 function progressInfo () { return bodyProgress }

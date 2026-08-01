@@ -1102,6 +1102,21 @@ async function tendWheatFarm (bot, { isStopped = () => false, say = () => {} } =
         try {
           if (bot.entity.position.distanceTo(p) > 4) await gotoWithTimeout(bot, new goals.GoalNear(p.x, p.y, p.z, 2), 10000)
           await bot.dig(b); harvested++
+          // ==== A HARVESTED CROP IS VERIFIED PROGRESS (2026-08-01) ==========================
+          // The only automatic progress signal for this work is `itemDelta`, which fires on a
+          // change in TOTAL ITEM COUNT (grave.snapInventory). A tend pass harvests a crop and
+          // REPLANTS the cell, so it gains a wheat plus seeds and immediately spends seeds - the
+          // net count barely moves, and the bot doing real work looked identical to a bot doing
+          // nothing. Live 2026-08-01 with 15 ripe cells four blocks away:
+          //   13:48:14 farm health: wheat=17(mature 15)
+          //   13:47:58 (wd) FAIL-JOB secureFood - no verified progress for 46s
+          //   13:48:58 (wd) REVOKED the dispatch slot from secureFood
+          //   13:49:09 wheat farm tended: harvested 1, replanted 2  -> then food 0, famine hold
+          // The sweep was killed after ONE cell, every time, and the bot starved beside a full
+          // field. The witness was measuring the wrong thing - so the work reports itself. This
+          // is EVIDENCE, not a free stamp: the block is gone from the world (bot.dig resolved
+          // against a crop we had already read as mature).
+          try { require('./commands.js').touchProgress('harvest') } catch {}
           // STAND ON THE DROP, then collect wider + patiently. A wheat drop from a cell against
           // the pond bounces toward the water edge and takes a beat to settle; walking onto the
           // crop cell (where the wheat stood, on top of the farmland) puts the pickup box over
@@ -1109,7 +1124,7 @@ async function tendWheatFarm (bot, { isStopped = () => false, say = () => {} } =
           // This is the core "harvested N -> wheat=0" fix.
           try { await gotoWithTimeout(bot, new goals.GoalNear(p.x, p.y, p.z, 0), 6000) } catch {}
           await collectDrops(bot, 6, { patience: 5 })
-          if (await replantCropCell(bot, p, { isStopped })) replanted++ // reseed the cell we just cleared
+          if (await replantCropCell(bot, p, { isStopped })) { replanted++; try { require('./commands.js').touchProgress('replant') } catch {} } // reseed the cell we just cleared
         } catch (e) { dbg('  wheat harvest failed (' + e.message + ')') }
       } else if (age != null) {
         await boneMealBlock(bot, p, 2) // still growing - speed it up if bones allow
@@ -1119,7 +1134,7 @@ async function tendWheatFarm (bot, { isStopped = () => false, say = () => {} } =
       // farm converges back to full instead of decaying to zero (ensureWheatFarm won't re-run
       // once a farm is registered, so tend is the ONLY repair path).
       replantOk = await replantCropCell(bot, p, { isStopped })
-      if (replantOk) replanted++
+      if (replantOk) { replanted++; try { require('./commands.js').touchProgress('replant') } catch {} }
     } // 'flooded'/'blocked': leave it - not fixable from here (retirement below handles a persistent one)
     // FARM_RESEED: tally + age the health of PERSISTED cells only (foldins aren't in the ledger).
     // #87 DRY_HOME_FARM §B verified: a slow-growing dry cell is a `wheat` block at ANY age (0..7), so

@@ -288,5 +288,28 @@ eq(F.barrenStep(undefined, 'other'), { strikes: 1, skip: false }, 'undefined pri
     'FIX10: without a target the absolute-count escape cannot fire')
 }
 
+// ==== A HARVEST MUST REPORT ITSELF AS PROGRESS (live 2026-08-01) =============================
+// The only automatic progress signal for tending is `itemDelta`, which fires on a change in TOTAL
+// ITEM COUNT. A tend cell harvests a crop and REPLANTS it - gaining a wheat plus seeds, then
+// spending seeds - so the net count barely moves and real work looked exactly like idling:
+//   13:48:14 farm health: wheat=17(mature 15)      <- fifteen ripe cells, four blocks away
+//   13:47:58 (wd) FAIL-JOB secureFood - no verified progress for 46s
+//   13:48:58 (wd) REVOKED the dispatch slot from secureFood
+//   13:49:09 wheat farm tended: harvested 1, replanted 2   -> food 0, famine hold, starving
+// The sweep was killed after ONE cell every time. The witness measured the wrong thing.
+{
+  const fs = require('fs')
+  const path = require('path')
+  const src = fs.readFileSync(path.join(__dirname, 'provision-farm.js'), 'utf8')
+  const i = src.indexOf('await bot.dig(b); harvested++')
+  eq(i > 0, true, 'progress: the harvest site still exists')
+  const after = src.slice(i, i + 1600)
+  eq(/touchProgress\('harvest'\)/.test(after), true, "progress: a harvested crop must stamp the clock - itemDelta cannot see a harvest+replant cell")
+  eq(/touchProgress\('replant'\)/.test(src), true, 'progress: a replanted cell is a real world change too')
+  const tel = fs.readFileSync(path.join(__dirname, 'telemetry.js'), 'utf8')
+  const tags = (tel.match(/const CYCLE_WORK_TAGS = new Set\(\[[^\]]*\]/) || [''])[0]
+  eq(/'harvest'/.test(tags) && /'replant'/.test(tags), true, 'progress: both count as WORK, or the cycle detector still reads a tend as idling')
+}
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall farm tests passed')
 process.exit(failures ? 1 : 0)
