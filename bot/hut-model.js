@@ -123,10 +123,23 @@ function outsideCell (a, door) {
 // outdoors and died to mobs three times in forty minutes. The hut survey read 0 bad of 180 the
 // whole time, because every one of those blocks is OUTSIDE the hut box and nothing looks there.
 // A shell that is sound and cannot be entered is not shelter.
+// The approach is the doorstep AND ITS WAY OUT. Doorstep-only was tried first and was not enough:
+// the cell one further out kept filling, so the doorstep became a 1x1 dead end that can only be
+// left by a STEP UP - and a bot at food 0 cannot jump (vanilla). Live 2026-08-01 that closed every
+// exit at once: hp 1, food 0, farm bare, and the suicide-reset itself aborting with
+//   deadlock-reset: could not step clear of the hut for a pit - ABORTING this fallback
+// It could not eat, could not leave to fix that, and could not die to reset - one blocked cell.
+// This is NOT cleanup after a dead bug: that cell was dirt one day and cobblestone the next, so
+// it refills from ordinary play, which is precisely what an approach invariant is for.
 function approachCells (a, door) {
   const out = outsideCell(a, door)
-  if (!out) return []
-  return [{ x: out.x, y: a.y + 1, z: out.z }, { x: out.x, y: a.y + 2, z: out.z }]
+  if (!out || !door) return []
+  const dx = out.x - door.x; const dz = out.z - door.z // straight out, never back toward the hut
+  const cells = []
+  for (const c of [out, { x: out.x + dx, z: out.z + dz }]) {
+    cells.push({ x: c.x, y: a.y + 1, z: c.z }, { x: c.x, y: a.y + 2, z: c.z })
+  }
+  return cells
 }
 
 // Classify one cell: 'outside' | 'wall' | 'door' | 'floor' | 'interior' | 'furniture' |

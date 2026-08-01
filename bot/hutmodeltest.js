@@ -468,11 +468,15 @@ async function stampTest () {
   t('APPROACH: the doorstep cells are the body-sized column just OUTSIDE the door', () => {
     const d = H.doorwayColumn(SA, sread)
     const cells = H.approachCells(SA, d)
-    assert.strictEqual(cells.length, 2, 'feet and head')
+    assert.strictEqual(cells.length, 4, 'doorstep feet+head, and the egress cell feet+head - a doorstep you cannot leave is not an approach')
     const out = H.outsideCell(SA, d)
-    assert.deepStrictEqual(cells.map(c => c.x + ',' + c.y + ',' + c.z),
+    assert.deepStrictEqual(cells.slice(0, 2).map(c => c.x + ',' + c.y + ',' + c.z),
       [out.x + ',' + (SA.y + 1) + ',' + out.z, out.x + ',' + (SA.y + 2) + ',' + out.z])
     assert.ok(!H.inBox(SA, cells[0].x, cells[0].z), 'the doorstep is outside the box - which is why nothing surveyed it')
+    // ...and the egress column runs straight OUT, never back toward the hut
+    const away = { x: out.x - d.x, z: out.z - d.z }
+    assert.deepStrictEqual({ x: cells[2].x, z: cells[2].z }, { x: out.x + away.x, z: out.z + away.z },
+      'the way out must lead away from the hut - a doorstep you cannot leave is not an approach')
   })
 
   t('APPROACH: the LIVE geometry - it names exactly where the ghost door stood', () => {
@@ -480,7 +484,7 @@ async function stampTest () {
     // and the bot could not path into its own house (116 door-assist failures).
     const live = { x: 188, y: 67, z: -104 }
     const cells = H.approachCells(live, { x: 190, z: -104 })
-    assert.deepStrictEqual(cells.map(c => c.x + ',' + c.y + ',' + c.z), ['190,68,-105', '190,69,-105'])
+    assert.deepStrictEqual(cells.map(c => c.x + ',' + c.y + ',' + c.z), ['190,68,-105', '190,69,-105', '190,68,-106', '190,69,-106'])
   })
 
   t('STAMP hut.schem: floorHoles=0 intact, =1 after deleting a floor plank at anchor.y', () => {
