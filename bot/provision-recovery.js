@@ -418,7 +418,22 @@ async function suicideByPitDrop (bot, { isStopped = () => false, home = null, sa
   const deadline = Date.now() + 60000
   // Get clear of the hut apron + interior so we never dig the doorstep/footprint.
   try { await stepOffApron(bot, { isStopped, home, tag: 'suicide-pit' }) } catch {}
-  if (insideOwnStructure(bot) || onHutApron(bot)) { dbg('deadlock-reset: could not step clear of the hut for a pit - ABORTING this fallback'); return false }
+  // ==== A GUARD PROTECTING THE THING THAT TRAPS YOU IS NOT ANTI-GRIEF (2026-08-01) =========
+  // This used to ABORT outright when it could not step clear. That is right in general - never
+  // dig your own doorstep/footprint - but it made the LAST RESORT defeatable by the very
+  // structure it needs to escape. Live: a single cobblestone at HEAD height one step outside the
+  // door (190,69,-106) sealed the bot in, and every exit went with it - no food (bare farm, empty
+  // pantry), no way out to fix that, and no way to die and reset:
+  //   deadlock-reset: walking out to open-sky cell 196,69,-104 ... 198,67,-104
+  //   deadlock-reset: still under my own roof - trying fallback deaths (drown / pit-drop)
+  //   deadlock-reset: could not step clear of the hut for a pit - ABORTING this fallback
+  // ...at hp 1, indefinitely. So when the bot is provably TRAPPED (stepOffApron ran and we are
+  // still inside), the pit may be dug WHERE IT STANDS. This is the terminal rung of the terminal
+  // rung: the structure is the bot's OWN, the damage is a floor cell, and repairHutStructure's
+  // whole job is re-placing missing plank cells - so it is self-healing, unlike the deadlock.
+  // The farm footprint and every non-own-hut exclusion below still apply untouched.
+  const trapped = insideOwnStructure(bot) || onHutApron(bot)
+  if (trapped) dbg('deadlock-reset: TRAPPED under my own roof and out of every other exit - digging the pit where I stand (the floor is repairable; the deadlock is not)')
   const feet = bot.entity.position.floored()
   // Pick the first of the 4 compass directions whose forward column is diggable natural terrain and
   // NOT on the wheat-farm footprint, from feet level down 6.
@@ -429,7 +444,8 @@ async function suicideByPitDrop (bot, { isStopped = () => false, home = null, sa
     let ok = true
     for (let dy = -1; dy >= -DEPTH; dy--) {
       const cell = new Vec3(fx, feet.y + dy, fz)
-      if (scaffold.onFarmFootprint(cell) || farmFootprintHas(cell) || ownHutAt(cell)) { ok = false; break } // #115: exclusions use the geometric predicate - they must fail PROTECTIVE
+      if (scaffold.onFarmFootprint(cell) || farmFootprintHas(cell)) { ok = false; break } // #115: exclusions use the geometric predicate - they must fail PROTECTIVE
+      if (!trapped && ownHutAt(cell)) { ok = false; break } // ...but when TRAPPED inside it, the hut is the thing we must escape (see above); its floor is repairable, the deadlock is not
       const b = bot.blockAt(cell)
       if (b && /water|lava/.test(b.name)) { ok = false; break }
       if (b && !AIRISH(b.name) && !canBreakNaturally(b)) { ok = false; break } // protected/build block in the shaft

@@ -100,6 +100,32 @@ t('#76 §B: pillarUpTo\'s open-sky break is guarded by opts.ignoreOpenSkyBreak (
     ':230 open-sky break is additively guarded by !opts.ignoreOpenSkyBreak')
 })
 
+// ==== THE LAST RESORT MUST NOT BE VETOED BY THE THING TRAPPING IT (live 2026-08-01) =========
+// A single cobblestone at HEAD height one step outside the door (190,69,-106) sealed the bot in.
+// Every exit went with it: no food (bare farm, empty pantry), no way out to fix that, and no way
+// to die and reset - because the pit fallback ABORTS when it cannot step clear of the hut:
+//   deadlock-reset: could not step clear of the hut for a pit - ABORTING this fallback
+//   deadlock-reset: fallback deaths could not kill - ABORTING to hold
+// ...at hp 1, indefinitely. Never digging your own doorstep is right in general; letting that
+// guard defeat the LAST RESORT is not. The floor is repairable (repairHutStructure re-places
+// missing plank cells); the deadlock is not.
+t('THE SEALED HUT: when trapped, the pit may be dug where it stands', () => {
+  const fs = require('fs')
+  const path = require('path')
+  const src = fs.readFileSync(path.join(__dirname, 'provision-recovery.js'), 'utf8')
+  const i = src.indexOf('async function suicideByPitDrop')
+  assert(i > 0, 'the pit fallback still exists')
+  const fn = src.slice(i, i + 4200)
+  assert(!/if \(insideOwnStructure\(bot\) \|\| onHutApron\(bot\)\) \{ dbg\('deadlock-reset: could not step clear/.test(fn),
+    'the unconditional abort is back - that is the sealed-hut deadlock')
+  assert(/const trapped = insideOwnStructure\(bot\) \|\| onHutApron\(bot\)/.test(fn), 'it must still DETECT being trapped')
+  assert(/!trapped && ownHutAt\(cell\)/.test(fn),
+    'the own-hut exclusion must yield ONLY when trapped - otherwise the bot digs its own floor casually')
+  // ...and every other exclusion stays unconditional
+  assert(/scaffold\.onFarmFootprint\(cell\) \|\| farmFootprintHas\(cell\)/.test(fn), 'the farm footprint is never dug, trapped or not')
+  assert(/water\|lava/.test(fn), 'the water/lava guard stays')
+})
+
 async function main () {
   // (a) ensurePillarFiller returns true IMMEDIATELY when the pack already has filler (stub bot).
   //     The stub has NO entity: if the early pickFiller short-circuit failed, the `!bot.entity`
