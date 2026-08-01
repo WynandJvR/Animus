@@ -476,9 +476,7 @@ module.exports = {
   MAX_RESELECT,
   // exported for offline testing / reuse
   duskProximity,
-  shelterExposure,
   riskLevel,
-  footprintCost,
   nearestReachGrave,
   fleeActive
 }

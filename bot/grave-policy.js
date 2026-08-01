@@ -275,5 +275,5 @@ module.exports = {
   graveValue, graveWorthIt, graveUrgency, graveUrgencyRank, graveCompare, shouldChaseGrave, graveLootVerdict, deathSpotCost,
   hazardBoxHas, classifyDeathCause, causeWritesOff, hazardStepCost, hazardHardArmed, salvageVerdict,
   graveNetValue, graveScore, graveSalvageBlocked,
-  HAZARD_MEDIUM, HAZARD_HARD_DEATHS, HAZARD_FORBID
+  HAZARD_MEDIUM, HAZARD_FORBID
 }

@@ -329,7 +329,6 @@ function stepDue (state, key, intervalMs, now, jitterFrac = 0.3) {
 
 module.exports = {
   needs,
-  BUFFERS,
   courierPlan,
   safekeepPlan,
   spareKitCourierPlan,

@@ -616,17 +616,12 @@ function litterSignature (ctx) {
 
 module.exports = {
   REBUILD_MIN,
-  TIDY_FILLER_RE,
-  TIDY_TORCH_RE,
   isTidyFiller,
   isTidyTorch,
   canonicalLitterTorch,
   litterSignature,
-  cellClass,
   cellRole,
   isShellCell,
-  isInteriorObstruction,
-  anchorFit,
   bestAnchor,
   hutDamage,
   dedupeOrder,

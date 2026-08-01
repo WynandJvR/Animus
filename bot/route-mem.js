@@ -337,13 +337,11 @@ function planOverGraph (graph, from, to, opts = {}) {
 }
 
 module.exports = {
-  ROUTE_CAP, WEDGE_CAP, WEDGE_MERGE_R, ROUTE_MIN_LEN, ROUTE_LEN_SANITY, ROUTE_MATCH_TOL,
-  WEDGE_STEER_CORRIDOR, INFRA_SUPPRESS_R,
-  GRAPH_JUNCTION_R, GRAPH_MAX_NODES, GRAPH_ENDPOINT_TOL,
-  dist, pointToSegDist, turnAngle, polylineLength,
+  ROUTE_MIN_LEN, ROUTE_LEN_SANITY, GRAPH_MAX_NODES,
+  dist, polylineLength,
   thinPolyline, canonEndpoints, matchRoute, routeCursor,
   routeLenOk, routeUsable, routeShouldEvict, mergeRoute,
   wedgeWeight, mergeWedge, wedgeOnSegment, wedgeNearXZ,
   suppressedNearAnchors, activeWedges,
-  buildGraph, nearestNode, planOverGraph
+  buildGraph, planOverGraph
 }

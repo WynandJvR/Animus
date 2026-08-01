@@ -66,4 +66,4 @@ function facesForAxis (faces, axis) {
   return kept.length ? kept : faces
 }
 
-module.exports = { FACING_VEC, AXIS_VEC, facingVec, isFacing3D, axisVec, isTopHalf, resolveOrientation, axisOfVec, facesForAxis }
+module.exports = { facingVec, resolveOrientation, axisOfVec, facesForAxis }

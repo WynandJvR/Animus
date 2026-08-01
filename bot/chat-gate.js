@@ -25,7 +25,6 @@ function chatLogTail (n) { return chatLog.slice(-(n || 40)) }
 
 let lastAddressedAt = 0 // when a player last addressed the bot (gates brain chatter)
 let lastReplyAt = 0     // when the bot last spoke a reply
-function addressedAt () { return lastAddressedAt }
 
 // gaze/attention state (the gaze reflex in index.js reads this): who last spoke to us (eye
 // contact while replying), and a window where a manual look/turn owns the head.
@@ -173,10 +172,8 @@ function gateImpactful (line) {
 
 module.exports = {
   recordChatLog, chatLogTail,
-  recordChat, clearPendingChat, pendingChat, addressedAt,
-  noteManualLook, gazeState,
-  normSay, tooSimilar, isDupSay, recordSaid, gateSay,
+  recordChat, clearPendingChat, pendingChat,
+  noteManualLook, gazeState, gateSay,
   busyReplyDue, markBusyReply,
   gateImpactful,
-  MAX_DELIVERIES, CHAT_COOLDOWN_MS, VIBE_CHAT_MS, NARRATION_RE, SAY_DUP_WINDOW_MS, RECENT_SAY_MAX, IMPACT_COOLDOWN_MS
-}
+  MAX_DELIVERIES, CHAT_COOLDOWN_MS, VIBE_CHAT_MS, SAY_DUP_WINDOW_MS }

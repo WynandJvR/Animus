@@ -241,4 +241,4 @@ function escapeRungOrder (situation) {
   }
 }
 
-module.exports = { planPocketBreach, planHorizontal, planVertical, classifySubmersion, escapeRungOrder, ESCAPE_RUNGS, findBank, hasCeiling, isBankCell, AIRISH_RE, isFluid, isWater, isSolid, waterSurfaceDy }
+module.exports = { planPocketBreach, classifySubmersion, escapeRungOrder, ESCAPE_RUNGS, findBank, isBankCell, isWater, isSolid, waterSurfaceDy }

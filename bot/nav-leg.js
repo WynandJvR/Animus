@@ -126,7 +126,6 @@ module.exports = {
   bandedHeuristic,
   makeGoalNearXZBanded,
   PROBE_ROTATIONS,
-  rotateBearing,
   legCandidates,
   chooseProbedLeg
 }

@@ -170,4 +170,4 @@ function settle (entry) {
   } catch {}
 }
 
-module.exports = { debts, clusters, summary, owe, settle, KINDS, SCAFFOLD_VALUE, SHAFT_VALUE }
+module.exports = { debts, clusters, summary, owe, settle }

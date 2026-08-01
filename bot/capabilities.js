@@ -154,7 +154,6 @@ function rungActionNames () { return Object.keys(RUNG_ACTIONS) }
 module.exports = {
   ITEMS,
   WOODS,
-  WOOL_COLOURS,
   GATHER_SOURCES,
   GATHER_TOOL,
   SMELT_MAP,

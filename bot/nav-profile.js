@@ -339,7 +339,6 @@ module.exports = {
   waterPolicy,
   WILD_LIQUID_COST,
   WILD_DIG_COST,
-  HAZARD_RE,
   HAZARD_STEP_COST,
   hazardExclusion,
   WATER_RE,

@@ -44,6 +44,23 @@ function armorSlot (name) {
   return null
 }
 
+// The armor pieces the bot ACTUALLY has equipped, per slot (null if bare). Read straight from
+// the armor inventory slots, so /state reflects worn gear and the brain can't claim to be wearing
+// something it isn't (or re-wear what it has on).
+// ONE DEFINITION (§4): perception.js (as `wornArmor`) and planner.js each carried a byte-identical
+// copy of this - planner's noting it was "inlined rather than imported from commands.js" to dodge a
+// cycle. gear.js requires nothing, so both import it from here instead and the rule cannot drift.
+function wornBySlot (bot) {
+  const out = { head: null, torso: null, legs: null, feet: null }
+  try {
+    for (const slot of ['head', 'torso', 'legs', 'feet']) {
+      const it = bot.inventory && bot.inventory.slots[bot.getEquipmentDestSlot(slot)]
+      if (it) out[slot] = it.name
+    }
+  } catch { /* not spawned / slots not ready */ }
+  return out
+}
+
 // Best armor piece among candidates for one slot (strongest material wins).
 function bestArmor (pieces) {
   for (const m of ARMOR_MATS) { const p = pieces.find(i => i.name.startsWith(m)); if (p) return p }
@@ -68,4 +85,4 @@ const LEATHER_PIECES = [
   { item: 'leather_boots', slot: 'feet', leather: 4 }
 ]
 
-module.exports = { bestTool, armorSlot, bestArmor, armorRank, ARMOR_MAT, ARMOR_RANK, ARMOR_MATS, TOOL_MATS, LEATHER_PIECES }
+module.exports = { bestTool, armorSlot, wornBySlot, bestArmor, armorRank, ARMOR_MAT, ARMOR_RANK, LEATHER_PIECES }

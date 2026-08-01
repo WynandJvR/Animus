@@ -135,7 +135,7 @@ function readSince (sinceMs, opts) {
   return out
 }
 
-module.exports = { compactSample, shouldRotate, appendSample, appendLineRotating, readSince, num, HISTORY_FILE, HISTORY_CAP }
+module.exports = { compactSample, shouldRotate, appendSample, appendLineRotating, readSince, num }
 
 // CLI entry: `node loghistory.js [sinceMs]` - defaults to the last hour.
 if (require.main === module) {

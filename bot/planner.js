@@ -383,18 +383,11 @@ async function runGoal (bot, goal, opts = {}) {
 
 // ---- slice-1 goal: iron armor, the player way ---------------------------------------
 
-// Worn armor per slot. Inlined (8 lines) rather than imported from commands.js -
-// commands requires this module, so requiring it back would be a cycle.
-function wornBySlot (bot) {
-  const out = { head: null, torso: null, legs: null, feet: null }
-  try {
-    for (const slot of ['head', 'torso', 'legs', 'feet']) {
-      const it = bot.inventory && bot.inventory.slots[bot.getEquipmentDestSlot(slot)]
-      if (it) out[slot] = it.name
-    }
-  } catch { /* not spawned / slots not ready */ }
-  return out
-}
+// Worn armor per slot, from gear.js - the ONE definition (§4). This used to be an inlined copy
+// "rather than imported from commands.js - commands requires this module, so requiring it back
+// would be a cycle"; gear.js requires nothing, so importing it here is cycle-free and the rule
+// now exists exactly once (perception.wornArmor is the same function).
+const wornBySlot = require('./gear.js').wornBySlot
 
 const ARMOR_SLOT_RE = { head: /_helmet$/, torso: /_chestplate$/, legs: /_leggings$/, feet: /_boots$/ }
 const ARMOR_ORDER = ['netherite', 'diamond', 'iron', 'chainmail', 'golden', 'leather', 'turtle']
@@ -604,4 +597,4 @@ async function gearUp (bot, opts = {}) {
   return { progressed, msg }
 }
 
-module.exports = { decide, runGoal, gearUp, gearupProgressed, relocate, regroupForCraft, shouldRegroupForCraft, packHasToolFor, taskKey, setDebugSink }
+module.exports = { decide, runGoal, gearUp, gearupProgressed, relocate, shouldRegroupForCraft, packHasToolFor, taskKey, setDebugSink }

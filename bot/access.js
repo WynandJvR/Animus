@@ -128,4 +128,4 @@ function parseBuildRequest (message, botName, cfg = {}) {
 // BRAIN_ALLOW_CHEATS=1. Shared by BOTH bodies so the two lists can't drift apart.
 const CHEAT_CMDS = /^(give|fill|setblock|clear|clearinv|wall|tower|house|schem|schematic|provision|autobuild|cancelbuild|abandonbuild|stash|unstash|gamemode|tp)\b/i
 
-module.exports = { operatorSet, isOperator, isAddressed, parseBuildRequest, CHEAT_CMDS }
+module.exports = { isOperator, isAddressed, parseBuildRequest, CHEAT_CMDS }

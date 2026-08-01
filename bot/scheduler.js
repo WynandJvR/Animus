@@ -529,7 +529,6 @@ function oppMaintain (snapshot, opts) {
 // removes a rung - it only sequences it. Every hold-type action names a provable `wake`
 // (I5). Build R0->R5, appending each rung whose precondition could apply, then ALWAYS append
 // R5 so the list is never empty.
-const WAKE_SET = ['dawn', 'foodInPack', 'grave', 'animal<=24']
 function recoveryPlan (snapshot) {
   const s = snapshot || {}
   const plan = []
@@ -1134,12 +1133,9 @@ module.exports = {
   TICK_CRISIS_MS,
   ladderBlocker,
   blockerText,
-  PRODUCTIVE_RUNG_RE,
-  SHORT_HOP,
   OUTBOUND_RE,
   isOutboundAction: capabilities.isOutboundAction, // the ONE definition; OUTBOUND_RE is derived from it
   REFLEX_OWNED,
-  OUTBOUND_PRODUCERS,
   producerIsOutbound,
   ladderDone,
   recoveryReady,
@@ -1165,7 +1161,6 @@ module.exports = {
   watchdog,
   wdPhase,
   JOB_CLASSES,
-  WAKE_SET,
   _setNow,
   setDebugSink,
   _reset: () => { nowFn = () => Date.now() } // test hygiene (module is near-stateless)

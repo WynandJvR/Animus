@@ -29,4 +29,4 @@ function isSelfCell (pos, botFeet) {
   return pos.x === botFeet.x && pos.z === botFeet.z && (pos.y === botFeet.y || pos.y === botFeet.y + 1)
 }
 
-module.exports = { orderPlacements, isSelfCell, dist2 }
+module.exports = { orderPlacements, isSelfCell }

@@ -50,7 +50,6 @@ const arbiter = require('./arbiter.js') // the ONE priority vocabulary (PRIORITY
 // scale to drift (PLAN §3.1). A tier answers "who owns the body", which is the arbiter's
 // question, and it is the same scale a maneuver span is opened at.
 const TIERS = arbiter.PRIORITY // { IDLE:0, PROGRESS:1, PRESERVE:2, SURVIVE:3 }
-const TIER_NAMES = Object.keys(TIERS)
 function tierRank (tier) { return Object.prototype.hasOwnProperty.call(TIERS, tier) ? TIERS[tier] : -1 }
 
 // The scheduler's JOB CLASS for a tier. Two scales already existed and they disagree in the
@@ -612,10 +611,8 @@ function dispatchable () { return REFLEXES.filter(r => typeof r.run === 'functio
 
 module.exports = {
   TIERS,
-  TIER_NAMES,
   tierRank,
   classOf,
-  CLASS_OF_TIER,
   BODY_OWNERS,
   ownerInfo,
   bodyRefusal,

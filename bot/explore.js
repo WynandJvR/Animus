@@ -54,4 +54,4 @@ function sectorKeyAt (x, z, home, opts = {}) {
   return best ? best.key : null
 }
 
-module.exports = { OCTANTS, OCT_NAMES, octantSweep, firstUnswept, sectorKeyAt }
+module.exports = { octantSweep, firstUnswept, sectorKeyAt }

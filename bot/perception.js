@@ -83,19 +83,12 @@ function nearbyPlayers (bot) {
     .sort((a, b) => a.dist - b.dist)
 }
 
-// The armor pieces the bot ACTUALLY has equipped, per slot (null if bare). Read
-// straight from the armor inventory slots, so /state reflects worn gear and the
-// brain can't claim to be wearing something it isn't (or re-wear what it has on).
-function wornArmor (bot) {
-  const out = { head: null, torso: null, legs: null, feet: null }
-  try {
-    for (const slot of ['head', 'torso', 'legs', 'feet']) {
-      const it = bot.inventory && bot.inventory.slots[bot.getEquipmentDestSlot(slot)]
-      if (it) out[slot] = it.name
-    }
-  } catch { /* not spawned / slots not ready */ }
-  return out
-}
+// The armor pieces the bot ACTUALLY has equipped, per slot (null if bare) - so /state reflects
+// worn gear and the brain can't claim to be wearing something it isn't (or re-wear what it has on).
+// The read itself lives in gear.js (§4 one rule, one definition: planner.js had a byte-identical
+// copy). gear.js requires nothing, so this top-level require adds no cycle. The name `wornArmor`
+// stays on perception's surface because commands.js/index.js call it.
+const wornArmor = require('./gear.js').wornBySlot
 
 // Does this block hold water at head height (so a submerged head = drowning)? True for
 // a water source/flow, a bubble column, aquatic plants that only grow underwater

@@ -273,7 +273,6 @@ function proofHolds (kind, pos, proof) {
   if (proof.known === false) return false // an UNKNOWN read proves nothing
   return false
 }
-function infraVerified (e) { return !!(e && e.verified) }
 // blockAt returns null for "nothing there" AND for "never sent that chunk"; readCell is the
 // one place allowed to tell them apart, so memory reads the world through it too.
 function readCellOf (bot, e) { try { return require('./pathfix.js').readCell(bot, { x: e.x, y: e.y, z: e.z }) } catch { return { known: false, block: null } } }
@@ -792,10 +791,9 @@ module.exports = {
   rememberRoute, recallRoute, planTrekRoute, dementRoute,
   recordWedge, listWedges,
   rememberSpot, forgetSpot, recallSpot,
-  rememberInfra, recallInfra, forgetInfra, listInfra, recallInfraVerified, infraVerified, proofHolds,
-  noteContainer, settleContainer, containerDebts, contentsValue, // #119 COMMITMENT_LEDGER (container class)
-  loadMines, rememberMine, recallMine, forgetMine, updateMineProgress,
-  searchCellKey, markSearched, isSearchedDry, clearSearched,
+  rememberInfra, recallInfra, forgetInfra, listInfra, recallInfraVerified, proofHolds,
+  noteContainer, settleContainer, containerDebts, // #119 COMMITMENT_LEDGER (container class)
+  loadMines, rememberMine, recallMine, forgetMine, updateMineProgress, markSearched, isSearchedDry, clearSearched,
   gearupState, gearupResult, gearupShouldArmBackoff, proactiveGearupGate,
   rememberBed, knownBed, forgetBed, markBedUnusable, bedHeld, bedHoldUntil,
   setSpawnSuspect, isSpawnSuspect,

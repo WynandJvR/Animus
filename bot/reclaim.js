@@ -276,4 +276,4 @@ async function reclaimPass (bot, opts = {}) {
   return { ok: true, paid: removed, reason: 'tore down ' + removed + ' placed block(s)' }
 }
 
-module.exports = { reclaimPass, healShafts, reclaimContainer, isProtected, familyOf, setDebugSink }
+module.exports = { reclaimPass, healShafts, isProtected, familyOf, setDebugSink }

@@ -112,6 +112,6 @@ function bedHoldMs (kind) {
 }
 
 module.exports = {
-  AIRISH, FLUID_RE, UNDIGGABLE_RE, shelterDiggable, feetCellDry, rankByDistance, alcoveSafe, farmConflict,
+  AIRISH, shelterDiggable, feetCellDry, rankByDistance, alcoveSafe, farmConflict,
   sleepFailKind, bedHoldMs, BED_HOLD_MS, BED_HOLD_MONSTER_MS, BED_HOLD_FELLSHORT_MS
 }

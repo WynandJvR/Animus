@@ -29,10 +29,6 @@
 // (lava/fire/drowning/void/fall) keeps its exact spelling, so `causeWritesOff` and `HAZARD_MEDIUM`
 // keep working byte-for-byte and the new causes simply stop being lies.
 
-// Causes this module can produce. The first five are grave-policy's existing vocabulary.
-const CAUSES = ['void', 'lava', 'fire', 'drowning', 'fall', 'explosion', 'mob', 'starvation',
-  'suffocation', 'cactus', 'magic', 'lightning', 'freezing', 'unknown']
-
 // ---------------------------------------------------------------------------
 // LAYER 1 - the server's own death message.
 //
@@ -234,13 +230,9 @@ function installDamageTracker (bot) {
 }
 
 module.exports = {
-  CAUSES,
-  DAMAGE_WINDOW_MS,
   RING_MAX,
   parseDeathMessage,
   causeFromDamage,
-  attackerFromDamage,
   attributeDeath,
-  installDamageTracker,
-  nearestHostile
+  installDamageTracker
 }

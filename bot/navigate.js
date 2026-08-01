@@ -1473,15 +1473,6 @@ function enterStructure (bot, hut, opts = {}) {
   return runOnNavChain(() => crossOwnDoor(bot, hut, 'in', opts))
 }
 
-// Public EXIT: the symmetric mutex-wrapped shell. Returns whether it got outside.
-function exitStructure (bot, hut, opts = {}) {
-  const P = require('./provision.js')
-  hut = hut || (P.listInfra && P.listInfra('hut')[0])
-  if (!hut) return Promise.resolve(false)
-  if (!(P.insideOwnStructure && P.insideOwnStructure(bot))) return Promise.resolve(true) // already out
-  return runOnNavChain(() => crossOwnDoor(bot, hut, 'out', opts))
-}
-
 // ---- watchdog FORCE-ESCAPE ---------------------------------------------------------
 // Called by index.js's freeze watchdog when the position has been FROZEN for minutes
 // while something was trying to move (live: 2h creeper standoff in a cave pocket; the
@@ -1671,4 +1662,4 @@ function honestFail (lastErr, counts, label, recoveryMs, reflexWaitMs) {
   return e
 }
 
-module.exports = { navigateTo, navigateToPreempt, gotoOnce, openNearbyDoor, crossOwnDoor, crossVerdict, enterStructure, exitStructure, swimToShore, escapeWater, escapeToDryLand, isEscapingWater, headInWater, feetInWater, outOfWater, jumpForAir, isNavigating, isRecovering, isForceUnsticking, forceUnstick, setDebugSink, detectPit, goalWasChanged, reactiveMove, reactiveTarget, reactiveDone, setDeliberateDrown, isDeliberateDrown, drownReflexSkips }
+module.exports = { navigateTo, navigateToPreempt, gotoOnce, crossOwnDoor, crossVerdict, enterStructure, swimToShore, escapeWater, escapeToDryLand, isEscapingWater, headInWater, feetInWater, outOfWater, jumpForAir, isNavigating, isRecovering, isForceUnsticking, forceUnstick, setDebugSink, reactiveMove, reactiveTarget, reactiveDone, setDeliberateDrown, isDeliberateDrown, drownReflexSkips }

@@ -231,7 +231,6 @@ module.exports = {
   pushOutcomeRing,
   recentOutcomes,
   cycleFailClass,
-  cycleCellOf,
   checklistBegin,
   checklistStep,
   checklistInfo,
@@ -239,8 +238,5 @@ module.exports = {
   trackPosition,
   stuckInfo,
   resetProgressAnchor,
-  CYCLE_WORK_TAGS,
-  CYCLE_OUTCOME_MAX,
-  STUCK_WINDOW_MS,
-  STUCK_DIST
+  CYCLE_WORK_TAGS
 }
