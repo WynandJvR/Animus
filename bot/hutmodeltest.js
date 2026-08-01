@@ -503,3 +503,44 @@ stampTest().then(() => {
   console.log('FAIL  stamp test threw\n      ' + e.stack)
   process.exit(1)
 })
+
+// ==== WHERE YOU ALREADY ARE IS NOT A DESTINATION (live 2026-08-01) =========================
+// freeInteriorCell sorts free cells by distance from the bot and returns the nearest - so whenever
+// the bot was already standing on one, it got handed its OWN cell. The indoor escape rung judges
+// itself by "am I standing in the cell I aimed at" (correct, since 2026-07-31), which that answer
+// makes a tautology: goal_reached fires instantly and the escape succeeds without moving.
+//   recovery: wedged INSIDE own structure at (189,68,-102) - stepping to free interior cell (189,68,-102)
+//   recovery indoor -> MOVED / forceUnstick: indoor moved us to (189, 68, -102)
+//   HARD-WEDGED at (189,68,-102): 23 consecutive failed escapes over ~3 min
+t('freeInteriorCell never offers the cell the bot is standing in', () => {
+  const PH = require('./provision-hut.js')
+  const a = { x: 0, y: 64, z: 0 }
+  // solid floor at a.y, air at feet (a.y+1) and head (a.y+2) -> every interior column is free
+  const mk = (at) => ({
+    entity: { position: { x: at.x + 0.5, y: at.y, z: at.z + 0.5, floored: () => ({ x: at.x, y: at.y, z: at.z }) } },
+    blockAt: (v) => (v.y <= a.y ? { name: 'stone', boundingBox: 'block' } : { name: 'air', boundingBox: 'empty' })
+  })
+  const all = H.freeStandCells(a, (x, y, z) => (y <= a.y ? { name: 'stone', boundingBox: 'block' } : { name: 'air', boundingBox: 'empty' }))
+  assert.ok(all.length >= 2, 'the fixture must offer more than one free cell, got ' + all.length)
+
+  for (const occupied of all) {
+    const got = PH.freeInteriorCell(mk(occupied), a)
+    assert.ok(got, 'a bot standing on a free cell must still be offered somewhere to go (got null from ' + JSON.stringify(occupied) + ')')
+    assert.ok(!(got.x === occupied.x && got.z === occupied.z && Math.floor(got.y) === occupied.y),
+      'offered the occupied cell ' + got + ' - that is the 23-no-op escape loop')
+  }
+
+  // ...and with exactly one free cell, occupied, the honest answer is null - not "step where you are"
+  const one = all[0]
+  const onlyOne = (x, y, z) => {
+    if (y <= a.y) return { name: 'stone', boundingBox: 'block' }
+    if (x === one.x && z === one.z) return { name: 'air', boundingBox: 'empty' }
+    return { name: 'oak_planks', boundingBox: 'block' }
+  }
+  const botOnIt = {
+    entity: { position: { x: one.x + 0.5, y: one.y, z: one.z + 0.5, floored: () => ({ x: one.x, y: one.y, z: one.z }) } },
+    blockAt: (v) => onlyOne(v.x, v.y, v.z)
+  }
+  assert.strictEqual(PH.freeInteriorCell(botOnIt, a), null, 'no cell to step to must report null, never the cell underfoot')
+})
+

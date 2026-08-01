@@ -818,9 +818,25 @@ async function ensureHutBed (bot, at, opts = {}) {
 function freeInteriorCell (bot, hut, near) {
   hut = hut || hutAnchor()
   if (!hut) return null
-  const cells = hutModel.freeStandCells(hut, hutReader(bot))
+  let cells = hutModel.freeStandCells(hut, hutReader(bot))
   if (!cells.length) return null
   const p = near || bot.entity.position
+  // ==== WHERE YOU ALREADY ARE IS NOT A DESTINATION (live 2026-08-01) ========================
+  // This sorts by distance from the bot and returns the NEAREST free cell - which, whenever the
+  // bot is already standing on one, is its own cell at distance zero. The indoor escape rung
+  // exists to move the bot OFF where it is wedged, and its witness (correctly, since 2026-07-31)
+  // is "am I standing in the cell I aimed at". Handed the occupied cell, that witness is a
+  // tautology: the goto reports goal_reached instantly and the escape succeeds without moving.
+  //   recovery: wedged INSIDE own structure at (189,68,-102) - stepping to free interior cell (189,68,-102)
+  //   recovery indoor -> MOVED
+  //   forceUnstick: indoor moved us to (189, 68, -102)     <- the cell it started in
+  //   HARD-WEDGED at (189,68,-102): 23 consecutive failed escapes over ~3 min
+  // Twenty-three no-ops, each reporting success. Fixed HERE rather than at the call site, because
+  // the defect is in what this function promises: a cell you can step to. You cannot step to the
+  // one you occupy.
+  const here = (() => { try { return bot.entity ? bot.entity.position.floored() : null } catch { return null } })()
+  if (here) cells = cells.filter(c => !(c.x === here.x && c.z === here.z && Math.floor(c.y) === here.y))
+  if (!cells.length) return null
   cells.sort((a, b) => Math.hypot(a.x - p.x, a.z - p.z) - Math.hypot(b.x - p.x, b.z - p.z))
   const c = cells[0]
   return new Vec3(c.x, c.y, c.z)
