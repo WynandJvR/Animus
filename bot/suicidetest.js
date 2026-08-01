@@ -115,7 +115,7 @@ t('THE SEALED HUT: when trapped, the pit may be dug where it stands', () => {
   const src = fs.readFileSync(path.join(__dirname, 'provision-recovery.js'), 'utf8')
   const i = src.indexOf('async function suicideByPitDrop')
   assert(i > 0, 'the pit fallback still exists')
-  const fn = src.slice(i, i + 4600)
+  const fn = src.slice(i, src.indexOf('async function deadlockFallbackDeath')) // whole function - never a guessed byte window
   assert(!/if \(insideOwnStructure\(bot\) \|\| onHutApron\(bot\)\) \{ dbg\('deadlock-reset: could not step clear/.test(fn),
     'the unconditional abort is back - that is the sealed-hut deadlock')
   assert(/const trapped = insideOwnStructure\(bot\) \|\| onHutApron\(bot\)/.test(fn), 'it must still DETECT being trapped')
@@ -161,6 +161,40 @@ t('THE SEALED HUT: the descent is taken only when it is needed AND reversible', 
   // lethality is still read from the WORLD, never inferred from what we believe we dug
   assert(/const openDrop = \(\) => \{[\s\S]{0,200}bot\.blockAt/.test(fn), 'the drop is measured by re-reading the column')
   assert(/const drop = openDrop\(\)/.test(fn), 'the final verdict re-measures rather than reusing a stale count')
+})
+
+// stepOffApron walks a trapped bot into its own walls for the full 60s. The deadline was stamped
+// BEFORE it, so every `Date.now() < deadline` guard downstream was already false: stage A never
+// ran, the descent gate never ran, and the abort blamed depth for a pit that was never dug.
+//   15:35:21 remembered water at 184,-73 is only 1 deep - not drownable
+//   15:36:24 TRAPPED under my own roof ...            <- 63s inside stepOffApron
+//   15:36:24 pit only 0b deep (need 4) or not at rim  <- 2ms later, having dug nothing
+t('THE SEALED HUT: setup cannot spend the dig budget, and running out of time says so', () => {
+  const fs = require('fs')
+  const path = require('path')
+  const src = fs.readFileSync(path.join(__dirname, 'provision-recovery.js'), 'utf8')
+  const i = src.indexOf('async function suicideByPitDrop')
+  const fn = src.slice(i, src.indexOf('async function deadlockFallbackDeath'))
+
+  // the dig's clock starts AFTER the walking, so setup can never charge its time to the work
+  const step = fn.indexOf('await stepOffApron(bot')
+  const dl = fn.indexOf('const deadline = Date.now()')
+  assert(step > 0 && dl > step, 'the dig deadline must be stamped AFTER stepOffApron, not before it')
+  assert(/setupDeadline/.test(fn) && fn.indexOf('const setupDeadline') < step, 'the step-off gets its own bounded slice')
+  assert(/stepOffApron\(bot, \{ isStopped: \(\) => isStopped\(\) \|\| Date\.now\(\) > setupDeadline/.test(fn),
+    'that slice must actually be enforced on stepOffApron, not merely declared')
+
+  // an expired budget is a named outcome, not a loop condition that silently skips the work
+  assert(/const outOfTime = \(\) => Date\.now\(\) >= deadline/.test(fn), 'time exhaustion is a named predicate')
+  assert(!/for \(let dy = -1; dy >= -3 && Date\.now\(\) < deadline; dy--\)/.test(fn),
+    'stage A must not hide exhaustion in its loop condition - that is how "0b deep" got reported for a pit never dug')
+  assert(/out of time in pit stage A/.test(fn), 'stage A reports running out of time as itself')
+  assert(/out of time before the deepening descent/.test(fn), 'the descent gate reports running out of time as itself')
+
+  // and the two terminal failures stop sharing one message
+  assert(!/if \(drop < lethalMin \|\| Math\.floor\(bot\.entity\.position\.y\) < feet\.y\)/.test(fn),
+    'depth and rim must not be reported by a single ambiguous message')
+  assert(/pit only ' \+ drop \+ 'b deep/.test(fn) && /below the rim at y/.test(fn), 'each terminal failure names itself')
 })
 
 async function main () {

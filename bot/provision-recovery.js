@@ -415,9 +415,20 @@ async function suicideByDrown (bot, { isStopped = () => false, home = null, say 
 
 async function suicideByPitDrop (bot, { isStopped = () => false, home = null, say = () => {} } = {}) {
   if (!bot.entity) return false
-  const deadline = Date.now() + 60000
+  // ==== SETUP MUST NOT SPEND THE WORK'S BUDGET (live 2026-08-01) ============================
+  // The deadline used to be stamped HERE, before stepOffApron - which on a trapped bot walks into
+  // its own walls for the full 60s. Every later stage is guarded by `Date.now() < deadline`, so
+  // they all silently no-opped and the abort blamed depth for work that never ran:
+  //   15:35:21 deadlock-reset: remembered water at 184,-73 is only 1 deep - not drownable
+  //   15:36:24 deadlock-reset: TRAPPED under my own roof ...   <- 63s of stepOffApron
+  //   15:36:24 deadlock-reset: pit only 0b deep (need 4) or not at rim - ABORTING  <- 2ms later
+  // The step-off is SETUP. It gets its own bounded slice; the dig's budget starts when the dig
+  // does, so what the walking spends can never be charged to the digging.
+  const PIT_BUDGET_MS = 60000
+  const setupDeadline = Date.now() + PIT_BUDGET_MS
   // Get clear of the hut apron + interior so we never dig the doorstep/footprint.
-  try { await stepOffApron(bot, { isStopped, home, tag: 'suicide-pit' }) } catch {}
+  try { await stepOffApron(bot, { isStopped: () => isStopped() || Date.now() > setupDeadline, home, tag: 'suicide-pit' }) } catch {}
+  const deadline = Date.now() + PIT_BUDGET_MS
   // ==== A GUARD PROTECTING THE THING THAT TRAPS YOU IS NOT ANTI-GRIEF (2026-08-01) =========
   // This used to ABORT outright when it could not step clear. That is right in general - never
   // dig your own doorstep/footprint - but it made the LAST RESORT defeatable by the very
@@ -483,8 +494,15 @@ async function suicideByPitDrop (bot, { isStopped = () => false, home = null, sa
   // the world every time rather than inferred from what we believe we dug.
   const openDrop = () => { let d = 0; for (let dy = -1; dy >= -(DEPTH + 1); dy--) { const b = bot.blockAt(new Vec3(dir.fx, feet.y + dy, dir.fz)); if (!b || AIRISH(b.name)) d++; else break } return d }
   const lethalMin = (bot.health != null ? bot.health : DEADLOCK_HP) + 3
+  // Running out of time is its OWN outcome, said out loud. It used to be a loop condition, so an
+  // expired budget was indistinguishable from "the work ran and the world refused" - which is how
+  // a pit that was never dug got reported as "only 0b deep".
+  const outOfTime = () => Date.now() >= deadline
   // Stage A: dig the reachable top of the front shaft (feet-1 .. feet-3).
-  for (let dy = -1; dy >= -3 && Date.now() < deadline; dy--) { if (!(await digAt(new Vec3(dir.fx, feet.y + dy, dir.fz)))) { dbg('deadlock-reset: pit stage A blocked - ABORTING this fallback'); return false } }
+  for (let dy = -1; dy >= -3; dy--) {
+    if (outOfTime()) { dbg('deadlock-reset: out of time in pit stage A (shaft is ' + openDrop() + 'b) - ABORTING this fallback'); return false }
+    if (!(await digAt(new Vec3(dir.fx, feet.y + dy, dir.fz)))) { dbg('deadlock-reset: pit stage A blocked at ' + dir.fx + ',' + (feet.y + dy) + ',' + dir.fz + ' - ABORTING this fallback'); return false }
+  }
   // ==== A STEP YOU CANNOT UNDO IS NOT A STEP YOU MAY TAKE (live 2026-08-01) ==================
   // Stage B reached deeper by DESCENDING one into our own cell, then pillared back to the rim.
   // But the reset STASHES the pack before it dies, so pillarUpTo had no filler - and the bot was
@@ -493,8 +511,9 @@ async function suicideByPitDrop (bot, { isStopped = () => false, home = null, sa
   //   deadlock-reset: pit only 0b deep (need 4) or not at rim - ABORTING this fallback
   // Reach caps stage A at 3 blocks and lethality needs hp+3, so the descent is genuinely needed -
   // but it is now taken only when stage A is short AND we hold the filler to come back up.
-  if (openDrop() < lethalMin && Date.now() < deadline) {
-    const canReturn = await ensurePillarFiller(bot, { isStopped: () => isStopped() || Date.now() > deadline }).catch(() => false)
+  if (openDrop() < lethalMin) {
+    if (outOfTime()) { dbg('deadlock-reset: out of time before the deepening descent (shaft is ' + openDrop() + 'b, need ' + lethalMin + ') - ABORTING this fallback'); return false }
+    const canReturn = await ensurePillarFiller(bot, { isStopped: () => isStopped() || outOfTime() }).catch(() => false)
     if (!canReturn) dbg('deadlock-reset: no filler to climb back to the rim - not descending (shaft stays ' + openDrop() + 'b)')
     else {
       const under = new Vec3(feet.x, feet.y - 1, feet.z)
@@ -502,13 +521,15 @@ async function suicideByPitDrop (bot, { isStopped = () => false, home = null, sa
       try { await stepInto(bot, under, { isStopped }) } catch {}
       const lowY = Math.floor(bot.entity.position.y)
       // Stage B: from the lower stance, dig the front shaft deeper (down to feet.y-DEPTH).
-      for (let y = lowY - 1; y >= feet.y - DEPTH && Date.now() < deadline; y--) { if (!(await digAt(new Vec3(dir.fx, y, dir.fz)))) break }
+      for (let y = lowY - 1; y >= feet.y - DEPTH && !outOfTime(); y--) { if (!(await digAt(new Vec3(dir.fx, y, dir.fz)))) break }
       // Climb the ONE block back to rim level so the step-off falls the full shaft depth.
-      if (Math.floor(bot.entity.position.y) < feet.y) { try { await pillarUpTo(bot, feet.y, { isStopped: () => isStopped() || Date.now() > deadline }) } catch {} }
+      if (Math.floor(bot.entity.position.y) < feet.y) { try { await pillarUpTo(bot, feet.y, { isStopped: () => isStopped() || outOfTime() }) } catch {} }
     }
   }
   const drop = openDrop()
-  if (drop < lethalMin || Math.floor(bot.entity.position.y) < feet.y) { dbg('deadlock-reset: pit only ' + drop + 'b deep (need ' + lethalMin + ') or not at rim - ABORTING this fallback'); return false }
+  // One message for two different failures reads as a guess. Each says which one it was.
+  if (drop < lethalMin) { dbg('deadlock-reset: pit only ' + drop + 'b deep (need ' + lethalMin + ' to kill at hp ' + bot.health + ') - ABORTING this fallback'); return false }
+  if (Math.floor(bot.entity.position.y) < feet.y) { dbg('deadlock-reset: pit is ' + drop + 'b deep but I am below the rim at y' + Math.floor(bot.entity.position.y) + ' (rim y' + feet.y + ') - ABORTING this fallback'); return false }
   // Step off the rim into the shaft and fall.
   let died = false
   const onDeath = () => { died = true }
