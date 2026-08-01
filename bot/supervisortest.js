@@ -38,6 +38,7 @@ function hbAt (now, o) {
   }
 }
 // grace-over starting state (started 10 min ago)
+const T_OFFLINE = sup.T.OFFLINE_POLLS_KILL
 const over = () => sup.freshState(NOW - 10 * MIN)
 
 // ---- decision cases (§9 table) -----------------------------------------------------
@@ -130,6 +131,39 @@ t('#12 movement resets the frozen streak', () => {
   r = sup.decide(hbAt(NOW + 15000, { progressAgo: 6 * MIN, pos: { x: 13, y: 64, z: 10 }, activity: 'gather' }), 'ok', NOW + 15000, st); st = r.st
   assert.strictEqual(r.action, 'ok', 'B moved -> not frozen')
   assert.strictEqual(st.frozenPolls, 0, 'streak reset by movement')
+})
+
+// ==== THE NINE-HOUR OFFLINE (live 2026-08-01) ==============================================
+// The server closed at 04:30:02 ("KICKED: Server closed" / "disconnected: socketClosed"). The
+// process stayed up, /health kept answering, and the bot sat OFFLINE for nine hours emitting
+// nothing but its 2-minute resume timer - no scheduler pick, no watchdog line, all day.
+// A disconnected bot is correctly excluded from the FROZEN check ("a disconnected bot is NOT a
+// wedge"), and nothing else owned it, so it fell out of every verdict. Not being in the world is
+// the most total failure there is.
+t('#13 THE NINE-HOUR OFFLINE: a sustained disconnect is a kill class', () => {
+  let st = over()
+  let r
+  for (let i = 0; i < T_OFFLINE; i++) {
+    r = sup.decide(hbAt(NOW + i * 15000, { connected: false, activity: null }), 'ok', NOW + i * 15000, st)
+    st = r.st
+  }
+  assert.strictEqual(r.action, 'kill', 'a bot that is not in the world must be restarted')
+  assert.strictEqual(r.why, 'offline-streak', 'and it must say so: ' + r.why)
+})
+
+t('#13b a BRIEF disconnect is absorbed - reconnecting resets the streak', () => {
+  let st = over()
+  let r = sup.decide(hbAt(NOW, { connected: false, activity: null }), 'ok', NOW, st); st = r.st
+  assert.strictEqual(r.action, 'ok', 'one offline poll is not a verdict')
+  r = sup.decide(hbAt(NOW + 15000, { connected: true, activity: null }), 'ok', NOW + 15000, st); st = r.st
+  assert.strictEqual(st.offlinePolls, 0, 'a reconnect clears the streak - normal server hiccups must not restart the bot')
+})
+
+t('#13c ANTI-DRIFT: connected must not be derived from bot.entity, which survives a disconnect', () => {
+  const idx = fs.readFileSync(path.join(__dirname, 'index.js'), 'utf8')
+  assert(!/connected: !!bot\.entity/.test(idx), 'the heartbeat is reading a stale entity again - that is the nine-hour lie')
+  assert(/bot\.on\('end'[^)]*\)\s*=>\s*\{\s*connected = false/.test(idx), "bot.on('end') must record the disconnect")
+  assert(/spawned: connected && !!bot\.entity/.test(idx), '/health must report the live connection, not a stale entity')
 })
 
 // ---- I/O helper cases (§8.3) -------------------------------------------------------

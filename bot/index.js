@@ -237,6 +237,8 @@ const bot = mineflayer.createBot({
   disableChatSigning: true
 })
 
+let connected = false // live connection state - the ONLY honest source for /health (see bot.on('end'))
+
 // THE RUNNER OWNS EVERY BODY READ (reflexes invariant 2). A hold DECLARES its premise by NAME;
 // this is the ONE place that resolves it, read by BOTH watchdogs - two copies of this rule is how
 // one watchdog ends up trusting a hold the other has already disowned. An unknown premise name
@@ -483,7 +485,18 @@ bot.on('kicked', (reason) => {
   note(`KICKED: ${r}`)
 })
 bot.on('error', (err) => note(`ERROR: ${err.message}`))
-bot.on('end', (reason) => note(`disconnected: ${reason}`))
+// ==== A DISCONNECT MUST BE VISIBLE TO THE SUPERVISOR (2026-08-01) ==========================
+// 'end' used to only LOG. `bot.entity` survives the disconnect, so GET /health went on
+// answering {ok:true, spawned:true} - and the supervisor, whose entire job is to notice a dead
+// body, was told everything was fine. The server closed at 04:30:02 and the bot sat there
+// disconnected for NINE HOURS, emitting nothing but its 2-minute resume timer:
+//   KICKED: {"type":"string","value":"Server closed"} / disconnected: socketClosed
+//   ...then 339x `resume: bootstrap needed (food)` and not one scheduler or watchdog line.
+// Same defect as the rest of this session: a claim (`spawned`) read from a STALE artefact
+// instead of from the live condition. The connection state is now recorded where the probe
+// can see it, so "spawned" means CONNECTED and the supervisor can do its job.
+bot.on('end', (reason) => { connected = false; note(`disconnected: ${reason}`) })
+bot.on('login', () => { connected = true })
 
 // Death recovery: remember WHERE we died (last known spot) and whether it's DANGEROUS
 // to return to (lava/fire/void nearby - going back would just re-kill us and the items
@@ -2301,7 +2314,7 @@ function survivalAdmissible (bot) {
   return { allow: false, reason: 'no survival need and no grave in reach' }
 }
 const server = http.createServer((req, res) => {
-  if (req.method === 'GET' && req.url === '/health') return send(res, 200, { ok: true, spawned: !!bot.entity })
+  if (req.method === 'GET' && req.url === '/health') return send(res, 200, { ok: true, spawned: connected && !!bot.entity, connected })
   if (req.method === 'GET' && (req.url === '/state' || req.url.startsWith('/state?'))) {
     // guard like /cmd: the brain polls this constantly; a state-assembly throw
     // must never become an uncaught exception that kills the process
@@ -2517,7 +2530,7 @@ const server = http.createServer((req, res) => {
       username: saved.username, operators: saved.operators || [],
       aliases: saved.aliases || [], bedrockPort: saved.bedrockPort,
       floodgatePrefix: saved.floodgatePrefix, controlHost: saved.controlHost, controlPort: saved.controlPort,
-      connected: !!bot.entity, // is it actually in-world right now?
+      connected: connected && !!bot.entity, // is it actually in-world right now? (bot.entity SURVIVES a disconnect - the live socket state is the only honest answer; 2026-08-01, nine hours offline reported as connected)
       liveHost: process.env.MC_HOST || saved.host, livePort: process.env.MC_PORT || saved.port
     })
   }
@@ -2622,7 +2635,7 @@ if (process.env.STATE_HISTORY !== '0') {
       // stops false-flagging a bot standing still at a furnace for 10 min of real smelting.
       if (WATCHDOG_ON) { try { hbLastProgressAt = Math.max(hbLastProgressAt, commands.progressInfo().at) } catch {} }
       if (p) hbLastPos = p
-      try { fs.writeFileSync(HEARTBEAT_FILE, JSON.stringify(Object.assign({}, sample, { connected: !!bot.entity, lastProgressAt: hbLastProgressAt }))) } catch {}
+      try { fs.writeFileSync(HEARTBEAT_FILE, JSON.stringify(Object.assign({}, sample, { connected: connected && !!bot.entity, lastProgressAt: hbLastProgressAt }))) } catch {}
     } catch { /* telemetry must never kill the bot */ }
   }
   const historyTimer = setInterval(historyTick, 5000)

@@ -37,6 +37,7 @@ const T = {
   PROBE_TIMEOUT_MS: 5000, //    GET /health hard timeout
   POST_TIMEOUT_MS: 10000, //    POST /cmd disconnect-but-keep-running timeout
   DOWN_POLLS_KILL: 3, //        probe down 3 consecutive polls (~45s) -> kill
+  OFFLINE_POLLS_KILL: 4, //    consecutive polls with hb.connected === false before restarting (a brief reconnect is absorbed)
   FROZEN_POLLS_KILL: 3 //       nudge at 1, wait at 2, kill at 3
 }
 
@@ -47,6 +48,7 @@ function freshState (now) {
     lastKillAt: 0,
     lastNudgeAt: 0,
     downPolls: 0,
+    offlinePolls: 0,
     frozenPolls: 0,
     prevPos: null,
     prevActivity: null
@@ -73,6 +75,7 @@ function decide (hb, probe, now, st) {
   //    LEFTOVER stale heartbeat from before a restart is harmless (fresh write lands ~5s in).
   if (now - st.startedAt < T.START_GRACE_MS) {
     st.downPolls = 0
+    st.offlinePolls = 0
     st.frozenPolls = 0
     if (hb) { st.prevPos = hb.pos || null; st.prevActivity = (typeof hb.activity === 'string') ? hb.activity : null }
     return { action: 'grace', st }
@@ -98,12 +101,24 @@ function decide (hb, probe, now, st) {
     st.prevActivity = (typeof hb.activity === 'string') ? hb.activity : null
   }
 
-  // 4. Kill class: stale-OR-silent heartbeat, sustained probe silence, or a frozen streak
-  //    that outlasted the nudge. stale = a live file whose t stopped advancing (commands.state
-  //    is permanently throwing -> restart is correct); null hb is never stale.
+  // 3b. OFFLINE-streak. A disconnected bot is correctly excluded from the FROZEN check above
+  //     ("a disconnected bot is NOT a wedge") - but nothing then owned it, so it was excluded
+  //     from every verdict. 2026-08-01: the server closed at 04:30, the process stayed up and
+  //     healthy, and the bot sat offline for NINE HOURS emitting only its 2-minute resume timer.
+  //     The heartbeat and /health both said connected, because both read `bot.entity`, which
+  //     SURVIVES a disconnect (fixed at source too). Not being in the world is the most total
+  //     failure there is; a process that is up but not playing is exactly what this supervisor
+  //     exists to restart. Brief reconnects are absorbed by the streak, like every other class.
+  const offline = probe === 'ok' && hb != null && hb.connected === false
+  if (offline) st.offlinePolls = (st.offlinePolls || 0) + 1
+  else st.offlinePolls = 0
+
+  // 4. Kill class: stale-OR-silent heartbeat, sustained probe silence, an offline streak, or a
+  //    frozen streak that outlasted the nudge. stale = a live file whose t stopped advancing
+  //    (commands.state is permanently throwing -> restart is correct); null hb is never stale.
   const stale = hb != null && typeof hb.t === 'number' && now - hb.t > T.HB_STALE_MS
-  if (stale || st.downPolls >= T.DOWN_POLLS_KILL || st.frozenPolls >= T.FROZEN_POLLS_KILL) {
-    const why = stale ? 'heartbeat-stale' : (st.downPolls >= T.DOWN_POLLS_KILL ? 'probe-silent' : 'frozen-after-nudge')
+  if (stale || st.downPolls >= T.DOWN_POLLS_KILL || st.offlinePolls >= T.OFFLINE_POLLS_KILL || st.frozenPolls >= T.FROZEN_POLLS_KILL) {
+    const why = stale ? 'heartbeat-stale' : (st.downPolls >= T.DOWN_POLLS_KILL ? 'probe-silent' : (st.offlinePolls >= T.OFFLINE_POLLS_KILL ? 'offline-streak' : 'frozen-after-nudge'))
     if (st.lastKillAt > 0 && now - st.lastKillAt < T.KILL_COOLDOWN_MS) {
       // Rate-limited: do NOT reset counters - re-evaluated next poll so a crash-looping bug
       // surfaces in the log instead of masking itself.
@@ -111,6 +126,7 @@ function decide (hb, probe, now, st) {
     }
     st.lastKillAt = now
     st.downPolls = 0
+    st.offlinePolls = 0
     st.frozenPolls = 0
     return { action: 'kill', st, why }
   }
