@@ -115,15 +115,31 @@ t('THE SEALED HUT: when trapped, the pit may be dug where it stands', () => {
   const src = fs.readFileSync(path.join(__dirname, 'provision-recovery.js'), 'utf8')
   const i = src.indexOf('async function suicideByPitDrop')
   assert(i > 0, 'the pit fallback still exists')
-  const fn = src.slice(i, i + 4200)
+  const fn = src.slice(i, i + 4600)
   assert(!/if \(insideOwnStructure\(bot\) \|\| onHutApron\(bot\)\) \{ dbg\('deadlock-reset: could not step clear/.test(fn),
     'the unconditional abort is back - that is the sealed-hut deadlock')
   assert(/const trapped = insideOwnStructure\(bot\) \|\| onHutApron\(bot\)/.test(fn), 'it must still DETECT being trapped')
-  assert(/!trapped && ownHutAt\(cell\)/.test(fn),
-    'the own-hut exclusion must yield ONLY when trapped - otherwise the bot digs its own floor casually')
-  // ...and every other exclusion stays unconditional
-  assert(/scaffold\.onFarmFootprint\(cell\) \|\| farmFootprintHas\(cell\)/.test(fn), 'the farm footprint is never dug, trapped or not')
-  assert(/water\|lava/.test(fn), 'the water/lava guard stays')
+
+  // ONE predicate. The first fix lifted only the GEOMETRIC guard (ownHutAt) and the MATERIAL one
+  // (canBreakNaturally -> STRUCTURE_RE matches oak_planks) still vetoed all four hut-floor columns:
+  //   deadlock-reset: no diggable pit column beside the hut - ABORTING this fallback
+  // Two copies of "do not dig the hut" is how a half-lifted concession looks. There must be one.
+  assert(/const pitBlocked = \(cell, b, allowOwnHut\) =>/.test(fn), 'the exclusions live in ONE predicate')
+  assert(/if \(ownHutAt\(cell\)\) return allowOwnHut \? null : 'own-hut'/.test(fn),
+    'own-hut must be the ONE exclusion the concession lifts - geometric and material together')
+  assert(/if \(pitBlocked\(v, b, spendFloor\)\) return false/.test(fn),
+    'the DIG consults the same predicate - not a second hand-written copy of the list')
+  assert(!/if \(\/water\|lava\/\.test\(b\.name\) \|\| !canBreakNaturally\(b\)\) return false/.test(fn),
+    'the old duplicated guard inside digAt is gone (that was the second copy)')
+
+  // ...and every other exclusion stays unconditional, trapped or not
+  assert(/if \(scaffold\.onFarmFootprint\(cell\) \|\| farmFootprintHas\(cell\)\) return 'farm'/.test(fn), 'the farm footprint is never dug')
+  assert(/if \(\/water\|lava\/\.test\(b\.name\)\) return 'fluid'/.test(fn), 'the water/lava guard stays')
+  assert(/if \(!canBreakNaturally\(b\)\) return 'build'/.test(fn), "someone else's build is never dug")
+
+  // cheapest sufficient escape: a column that costs the hut nothing is always preferred
+  assert(/let dir = scan\(false\)[\s\S]*const spendFloor = !dir && trapped[\s\S]*dir = scan\(true\)/.test(fn),
+    'it must try the free columns FIRST and spend a floor cell only when trapped with no alternative')
 })
 
 async function main () {

@@ -435,28 +435,43 @@ async function suicideByPitDrop (bot, { isStopped = () => false, home = null, sa
   const trapped = insideOwnStructure(bot) || onHutApron(bot)
   if (trapped) dbg('deadlock-reset: TRAPPED under my own roof and out of every other exit - digging the pit where I stand (the floor is repairable; the deadlock is not)')
   const feet = bot.entity.position.floored()
-  // Pick the first of the 4 compass directions whose forward column is diggable natural terrain and
-  // NOT on the wheat-farm footprint, from feet level down 6.
-  const DEPTH = Math.max(6, DEADLOCK_FALL_H)
-  let dir = null
-  for (const [dx, dz] of mining.DIRS) {
-    const fx = feet.x + dx; const fz = feet.z + dz
-    let ok = true
-    for (let dy = -1; dy >= -DEPTH; dy--) {
-      const cell = new Vec3(fx, feet.y + dy, fz)
-      if (scaffold.onFarmFootprint(cell) || farmFootprintHas(cell)) { ok = false; break } // #115: exclusions use the geometric predicate - they must fail PROTECTIVE
-      if (!trapped && ownHutAt(cell)) { ok = false; break } // ...but when TRAPPED inside it, the hut is the thing we must escape (see above); its floor is repairable, the deadlock is not
-      const b = bot.blockAt(cell)
-      if (b && /water|lava/.test(b.name)) { ok = false; break }
-      if (b && !AIRISH(b.name) && !canBreakNaturally(b)) { ok = false; break } // protected/build block in the shaft
-    }
-    if (ok) { dir = { dx, dz, fx, fz }; break }
+  // ONE predicate, consulted by BOTH the column scan and the dig - because "do not dig the hut" was
+  // encoded TWICE (geometrically via ownHutAt, materially via canBreakNaturally/STRUCTURE_RE, which
+  // matches oak_planks). Lifting only the first left the second vetoing all four columns:
+  //   deadlock-reset: no diggable pit column beside the hut - ABORTING this fallback
+  // The trapped concession is exactly one thing: MY OWN HUT, geometric and material together.
+  // The farm footprint, water/lava, and anyone else's build stay unconditional, trapped or not.
+  const pitBlocked = (cell, b, allowOwnHut) => {
+    if (scaffold.onFarmFootprint(cell) || farmFootprintHas(cell)) return 'farm' // #115: exclusions use the geometric predicate - they must fail PROTECTIVE
+    if (!b || AIRISH(b.name)) return null
+    if (/water|lava/.test(b.name)) return 'fluid'
+    if (ownHutAt(cell)) return allowOwnHut ? null : 'own-hut'
+    if (!canBreakNaturally(b)) return 'build' // someone else's / protected block in the shaft
+    return null
   }
+  const DEPTH = Math.max(6, DEADLOCK_FALL_H)
+  // Two passes: PREFER a column that costs the hut nothing. Only if none exists - and only when
+  // provably trapped - spend a floor cell. Cheapest sufficient escape, not the first one found.
+  const scan = (allowOwnHut) => {
+    for (const [dx, dz] of mining.DIRS) {
+      const fx = feet.x + dx; const fz = feet.z + dz
+      let ok = true
+      for (let dy = -1; dy >= -DEPTH; dy--) {
+        const cell = new Vec3(fx, feet.y + dy, fz)
+        if (pitBlocked(cell, bot.blockAt(cell), allowOwnHut)) { ok = false; break }
+      }
+      if (ok) return { dx, dz, fx, fz }
+    }
+    return null
+  }
+  let dir = scan(false)
+  const spendFloor = !dir && trapped
+  if (spendFloor) { dir = scan(true); if (dir) dbg('deadlock-reset: no free column - spending a hut floor cell at ' + dir.fx + ',' + dir.fz + ' (repairHutStructure re-places it)') }
   if (!dir) { dbg('deadlock-reset: no diggable pit column beside the hut - ABORTING this fallback'); return false }
   const digAt = async (v) => {
     const b = bot.blockAt(v)
     if (!b || AIRISH(b.name)) return true
-    if (/water|lava/.test(b.name) || !canBreakNaturally(b)) return false
+    if (pitBlocked(v, b, spendFloor)) return false
     if (bot.canDigBlock && !bot.canDigBlock(b)) return false
     const tool = toolForBlock(bot, b.name)
     if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
@@ -468,7 +483,7 @@ async function suicideByPitDrop (bot, { isStopped = () => false, home = null, sa
   for (let dy = -1; dy >= -3 && Date.now() < deadline; dy--) { if (!(await digAt(new Vec3(dir.fx, feet.y + dy, dir.fz)))) { dbg('deadlock-reset: pit stage A blocked - ABORTING this fallback'); return false } }
   // Descend ONE into our own cell to regain reach for the lower shaft.
   const under = new Vec3(feet.x, feet.y - 1, feet.z)
-  if (!(scaffold.onFarmFootprint(under) || farmFootprintHas(under) || ownHutAt(under))) { await digAt(under) } // #115: geometric exclusion (fail protective)
+  await digAt(under) // digAt itself enforces every exclusion now (pitBlocked) - one predicate, not a second copy of the list
   try { await stepInto(bot, under, { isStopped }) } catch {}
   const lowY = Math.floor(bot.entity.position.y)
   // Stage B: from the lower stance, dig the front shaft deeper (down to feet.y-DEPTH).
