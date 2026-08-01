@@ -258,6 +258,16 @@ t('THE SEALED HUT: the pit column must pay for the descent it requires', () => {
   // and the free-vs-floor preference still outranks spoil: a column that costs the hut nothing wins first
   assert(/let dir = scan\(false\)[\s\S]*const spendFloor = !dir && trapped/.test(fn),
     'spoil is a tie-break WITHIN a pass - it must never promote spending a hut floor cell over a free column')
+
+  // PERMISSION IS NOT VIABILITY. Once the first attempt dug 193,-103 that column was all air, so
+  // it passed the free pass every time, the floor pass never ran, and the bot re-chose its own
+  // useless hole forever - 3b of shaft, no spoil to buy the 4th block, abort, repeat.
+  assert(/const achievable = \(fx, fz, allowOwnHut\) =>/.test(fn), 'a column is judged by the depth it can actually produce')
+  assert(/if \(depth < lethalMin\) continue/.test(fn),
+    'a column that cannot reach a killing drop is not a candidate - being free does not make it one')
+  assert(/return Math\.min\(clearable, spoilValue\(fx, fz\) >= 1 \? REACH_ROWS \+ 1 : REACH_ROWS\)/.test(fn),
+    'achievable depth must account for reach, and for the descent being affordable only when the column pays for it')
+  assert(fn.indexOf('const lethalMin') < fn.indexOf('const scan ='), 'lethalMin must be known before the scan can use it')
 })
 
 async function main () {

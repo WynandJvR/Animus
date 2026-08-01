@@ -506,19 +506,36 @@ async function suicideByPitDrop (bot, { isStopped = () => false, home = null, sa
   // for itself, or it is not a plan.
   const yieldsFiller = (b) => !!b && !AIRISH(b.name) && (scaffold.FILLER_RE.test(b.name) || b.name === 'grass_block')
   const spoilValue = (fx, fz) => { let n = 0; for (let dy = -1; dy >= -3; dy--) { if (yieldsFiller(bot.blockAt(new Vec3(fx, feet.y + dy, fz)))) n++ } return n }
+  const lethalMin = (bot.health != null ? bot.health : DEADLOCK_HP) + 3
+  // ==== PERMISSION IS NOT VIABILITY (live 2026-08-01) ========================================
+  // Preferring the column that costs the hut nothing is right, but only among columns that can
+  // actually DO the job. After the first attempt dug 193,-103, that column was all air - so it
+  // passed the free pass every time, the floor pass never ran, and the bot re-chose its own
+  // useless hole forever: 3b of shaft, no spoil to buy the 4th block, abort, repeat.
+  //   deadlock-reset: pit column 193,-103 yields 0 filler block(s) for the climb back
+  //   deadlock-reset: pit only 3b deep (need 4 to kill at hp 1) - ABORTING this fallback
+  // A free column that cannot reach lethal depth is not cheaper than a floor cell. It is not a
+  // candidate at all. So viability is decided FIRST, and cost only ranks what survives it.
+  const REACH_ROWS = 3 // what stage A can clear below the rim before it must descend
+  const achievable = (fx, fz, allowOwnHut) => {
+    let clearable = 0
+    for (let dy = -1; dy >= -DEPTH; dy--) {
+      const cell = new Vec3(fx, feet.y + dy, fz)
+      if (pitBlocked(cell, bot.blockAt(cell), allowOwnHut)) break
+      clearable++
+    }
+    // the descent past REACH_ROWS is only affordable if this column's own spoil pays for the climb back
+    return Math.min(clearable, spoilValue(fx, fz) >= 1 ? REACH_ROWS + 1 : REACH_ROWS)
+  }
   // Two passes: PREFER a column that costs the hut nothing. Only if none exists - and only when
   // provably trapped - spend a floor cell. Cheapest sufficient escape, not the first one found.
   const scan = (allowOwnHut) => {
     let best = null
     for (const [dx, dz] of mining.DIRS) {
       const fx = feet.x + dx; const fz = feet.z + dz
-      let ok = true
-      for (let dy = -1; dy >= -DEPTH; dy--) {
-        const cell = new Vec3(fx, feet.y + dy, fz)
-        if (pitBlocked(cell, bot.blockAt(cell), allowOwnHut)) { ok = false; break }
-      }
-      if (!ok) continue
-      const cand = { dx, dz, fx, fz, spoil: spoilValue(fx, fz) }
+      const depth = achievable(fx, fz, allowOwnHut)
+      if (depth < lethalMin) continue // cannot produce a killing drop - not a candidate, free or not
+      const cand = { dx, dz, fx, fz, spoil: spoilValue(fx, fz), depth }
       if (!best || cand.spoil > best.spoil) best = cand
     }
     return best
@@ -526,7 +543,7 @@ async function suicideByPitDrop (bot, { isStopped = () => false, home = null, sa
   let dir = scan(false)
   const spendFloor = !dir && trapped
   if (spendFloor) { dir = scan(true); if (dir) dbg('deadlock-reset: no free column - spending a hut floor cell at ' + dir.fx + ',' + dir.fz + ' (repairHutStructure re-places it)') }
-  if (dir) dbg('deadlock-reset: pit column ' + dir.fx + ',' + dir.fz + ' yields ' + dir.spoil + ' filler block(s) for the climb back')
+  if (dir) dbg('deadlock-reset: pit column ' + dir.fx + ',' + dir.fz + ' - reachable depth ' + dir.depth + 'b (need ' + lethalMin + '), yields ' + dir.spoil + ' filler block(s) for the climb back')
   if (!dir) { dbg('deadlock-reset: no diggable pit column beside the hut - ABORTING this fallback'); return false }
   const digAt = async (v) => {
     const b = bot.blockAt(v)
@@ -542,7 +559,6 @@ async function suicideByPitDrop (bot, { isStopped = () => false, home = null, sa
   // Open drop measured from the RIM - the only number that decides lethality, so it is read from
   // the world every time rather than inferred from what we believe we dug.
   const openDrop = () => { let d = 0; for (let dy = -1; dy >= -(DEPTH + 1); dy--) { const b = bot.blockAt(new Vec3(dir.fx, feet.y + dy, dir.fz)); if (!b || AIRISH(b.name)) d++; else break } return d }
-  const lethalMin = (bot.health != null ? bot.health : DEADLOCK_HP) + 3
   // Running out of time is its OWN outcome, said out loud. It used to be a loop condition, so an
   // expired budget was indistinguishable from "the work ran and the world refused" - which is how
   // a pit that was never dug got reported as "only 0b deep".
