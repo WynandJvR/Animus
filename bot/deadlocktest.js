@@ -160,5 +160,39 @@ t('deadlockResetState exports the persisted { at, count } shape', () => {
   assert.ok('at' in s && 'count' in s, 'has at + count')
 })
 
+// ==== THE LAST RESORT WAS UNREACHABLE (live 2026-08-01) =====================================
+// #58's suicide-reset sits at the bottom of the ladder's `if (!chosen)` "all rungs tried" branch,
+// and its own comment says "Runs LAST, after every ladder rung failed". It never ran once. Every
+// pass left through the EARLIER `stopped` exit, because the watchdog sets the stop latch whenever
+// it fail-jobs the ladder for no verified progress:
+//   (ladder) NO PROGRESS this pass - blocked on no-progress
+//   (sched) recoverFromDegraded -> NOT recovered (stopped, blocked on no-progress)
+// Live state at the time: hp 1, food 0, empty pack, empty pantry, bare farm, FOURTEEN no-progress
+// passes - and world-memory's deadlockReset still {at:0,count:0}. The exact state it exists for.
+t('THE UNREACHABLE LAST RESORT: the stopped exit must consult the deadlock detector', () => {
+  const fs = require('fs')
+  const path = require('path')
+  const src = fs.readFileSync(path.join(__dirname, 'provision-recovery.js'), 'utf8')
+  const i = src.indexOf("if (isStopped() || S().isSurvStopped())")
+  assert(i > 0, 'the stopped exit still exists')
+  const branch = src.slice(i, i + 1800)
+  assert(/deadlockResetDue\(/.test(branch),
+    'the stopped exit must evaluate the deadlock detector - otherwise the suicide reset is dead code, as it was all of 2026-08-01')
+  assert(/deadlockSuicideReset\(/.test(branch), 'and must be able to actually fire it')
+  // ...and the ordinary stop must still return immediately: the guard is the hp/food floor.
+  assert(/shp <= DEADLOCK_HP && sfood === 0/.test(branch),
+    'only the hp<=2/food-0 floor may delay a stop - a normal stop at survivable vitals returns at once')
+})
+
+t('THE UNREACHABLE LAST RESORT: the detector agrees at the exact live numbers', () => {
+  const P = require('./provision-recovery.js')
+  assert.strictEqual(P.deadlockResetDue({ hp: 1, food: 0, hasPackFood: false, failCount: 4, sinceLastResetMs: 9e9 }, {}), true,
+    'hp1/food0/no pack/4 failed cycles IS the deadlock - it must fire')
+  assert.strictEqual(P.deadlockResetDue({ hp: 20, food: 20, hasPackFood: false, failCount: 9, sinceLastResetMs: 9e9 }, {}), false,
+    'a healthy bot that merely stopped must never suicide')
+  assert.strictEqual(P.deadlockResetDue({ hp: 1, food: 0, hasPackFood: true, failCount: 9, sinceLastResetMs: 9e9 }, {}), false,
+    'holding edible food is always an exit that beats dying')
+})
+
 if (failures) { console.log('\n' + failures + ' FAILED'); process.exit(1) }
 console.log('\nALL PASS')

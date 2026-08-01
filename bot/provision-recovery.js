@@ -1254,7 +1254,39 @@ async function recoverFromDegraded (bot, { isStopped = () => false, say = () => 
         const rr = scheduler.recoveryReady(s)
         if (rr.ready) { _deadlockFails = 0; try { require('./commands.js').clearPostDeathRecovery() } catch {} return { done: true, rungs, reason: reason || (rr.maxCaution ? 'recovered (best-affordable)' : 'recovered'), maxCaution: rr.maxCaution } }
       } else if (scheduler.ladderDone(s)) { _deadlockFails = 0; return { done: true, rungs, reason: reason || 'recovered' } }
-      if (isStopped() || S().isSurvStopped()) return { done: false, rungs, reason: 'stopped', ...stalled(s) } // S7: watchdog fail-job lever folded in
+      // ==== THE LAST RESORT MUST BE REACHABLE FROM THE EXIT WE ACTUALLY TAKE (2026-08-01) =====
+      // #58's suicide-reset lives at the bottom of the `if (!chosen)` "all rungs tried" branch and
+      // its comment says "Runs LAST, after every ladder rung failed". It never ran. Every pass left
+      // through THIS line instead - the watchdog sets the stop latch whenever it fail-jobs the
+      // ladder for no verified progress, so the ladder returns `stopped` and the last resort is
+      // skipped. Live 2026-08-01: hp 1, food 0, empty pack, empty pantry, bare farm, FOURTEEN
+      // no-progress passes, and deadlockReset still {at:0,count:0} - the exact state it exists for.
+      //   (ladder) NO PROGRESS this pass - blocked on no-progress
+      //   (sched) recoverFromDegraded -> NOT recovered (stopped, blocked on no-progress)
+      // Being STOPPED while genuinely deadlocked is not a reason to skip the last resort; it is the
+      // strongest evidence you need it. So the deadlock state is evaluated BEFORE honouring the
+      // stop, and only in the hp<=2/food-0/no-pack floor the pure detector already gates on - a
+      // normal stop, at any survivable vitals, still returns immediately exactly as before.
+      if (isStopped() || S().isSurvStopped()) {
+        const shp = bot.health != null ? bot.health : 20
+        const sfood = bot.food != null ? bot.food : 20
+        const sPack = foodCount(bot) >= 1
+        if (shp <= DEADLOCK_HP && sfood === 0 && !sPack) {
+          _deadlockFails++
+          const ds = deadlockResetState()
+          const dueNow = deadlockResetDue(
+            { hp: shp, food: sfood, hasPackFood: sPack, failCount: _deadlockFails, sinceLastResetMs: Date.now() - (ds.at || 0) },
+            { enabled: process.env.DEADLOCK_RESET !== '0' })
+          if (dueNow && (ds.count || 0) < DEADLOCK_MAX_NOFOOD) {
+            dbg('deadlock-reset: STOPPED at hp' + shp + '/food0 with no pack food and ' + _deadlockFails + ' failed cycles - the stop latch must not veto the last resort')
+            noteDeadlockReset()
+            let ok = false
+            try { ok = await deadlockSuicideReset(bot, { isStopped: () => false, say }) } catch (e) { dbg('deadlock-reset: threw (' + e.message + ')') }
+            return { done: false, rungs, reason: ok ? 'deadlock-reset: died to reset' : 'deadlock-reset aborted (held)', ...stalled(s) }
+          }
+        }
+        return { done: false, rungs, reason: 'stopped', ...stalled(s) } // S7: watchdog fail-job lever folded in
+      }
       if (Date.now() > deadline) return { done: false, rungs, reason: 'deadline', ...stalled(s) }
       const plan = scheduler.recoveryPlan(s)
       let chosen = null
