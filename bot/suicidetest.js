@@ -250,8 +250,8 @@ t('THE SEALED HUT: the pit column must pay for the descent it requires', () => {
   assert(/const yieldsFiller = \(b\) =>/.test(fn), 'the scan knows which blocks yield placeable spoil')
   assert(/scaffold\.FILLER_RE\.test\(b\.name\) \|\| b\.name === 'grass_block'/.test(fn),
     'spoil is judged by the SAME filler predicate pillarUpTo will use - not a second private list')
-  assert(/const spoilValue = \(fx, fz\) => \{[\s\S]{0,220}for \(let dy = -1; dy >= -3; dy--\)/.test(fn),
-    'spoil is counted over the REACHABLE stage-A range, since that is all the bot can actually dig from the rim')
+  assert(/const \{ depth, spoil \} = columnPlan\(fx, fz, allowOwnHut\)/.test(fn),
+    'depth and spoil come from ONE walk of the column, so the estimate cannot describe a different shaft than the one built')
   // the scan compares candidates instead of returning the first one that is merely allowed
   assert(!/if \(ok\) return \{ dx, dz, fx, fz \}/.test(fn), 'first-allowed-wins is what picked the barren column')
   assert(/if \(!best \|\| cand\.spoil > best\.spoil\) best = cand/.test(fn), 'it must pick the best-yielding column, not the first')
@@ -262,11 +262,17 @@ t('THE SEALED HUT: the pit column must pay for the descent it requires', () => {
   // PERMISSION IS NOT VIABILITY. Once the first attempt dug 193,-103 that column was all air, so
   // it passed the free pass every time, the floor pass never ran, and the bot re-chose its own
   // useless hole forever - 3b of shaft, no spoil to buy the 4th block, abort, repeat.
-  assert(/const achievable = \(fx, fz, allowOwnHut\) =>/.test(fn), 'a column is judged by the depth it can actually produce')
+  assert(/const columnPlan = \(fx, fz, allowOwnHut\) =>/.test(fn), 'a column is judged by the depth it can actually produce')
   assert(/if \(depth < lethalMin\) continue/.test(fn),
     'a column that cannot reach a killing drop is not a candidate - being free does not make it one')
-  assert(/return Math\.min\(clearable, spoilValue\(fx, fz\) >= 1 \? REACH_ROWS \+ 1 : REACH_ROWS\)/.test(fn),
-    'achievable depth must account for reach, and for the descent being affordable only when the column pays for it')
+  assert(/return \{ depth: rows \+ \(spoil >= 1 \? 1 : 0\), spoil \}/.test(fn),
+    'a descent buys exactly one row, and only when the column pays for the climb back')
+  // reach is ASKED, never guessed: a hardcoded row count said 3 where the world said 2
+  assert(!/REACH_ROWS/.test(fn), 'no invented reach constant - the dig is the authority on how far the arm goes')
+  assert(/const reachableNow = \(cell\) => \{[\s\S]{0,200}bot\.canDigBlock/.test(fn),
+    'reach must be decided by the same canDigBlock the dig itself uses')
+  assert(/if \(!reachableNow\(cell\)\) \{ dbg\([\s\S]{0,180}break \}/.test(fn),
+    "arm's length ENDS stage A - it must not abort the fallback the way a real blockage does")
   assert(fn.indexOf('const lethalMin') < fn.indexOf('const scan ='), 'lethalMin must be known before the scan can use it')
 })
 

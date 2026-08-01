@@ -505,8 +505,14 @@ async function suicideByPitDrop (bot, { isStopped = () => false, home = null, sa
   // So prefer the column that yields the spoil the plan needs. Not a heuristic - the plan pays
   // for itself, or it is not a plan.
   const yieldsFiller = (b) => !!b && !AIRISH(b.name) && (scaffold.FILLER_RE.test(b.name) || b.name === 'grass_block')
-  const spoilValue = (fx, fz) => { let n = 0; for (let dy = -1; dy >= -3; dy--) { if (yieldsFiller(bot.blockAt(new Vec3(fx, feet.y + dy, fz)))) n++ } return n }
   const lethalMin = (bot.health != null ? bot.health : DEADLOCK_HP) + 3
+  // How far the arm reaches is the DIG's business, so ask the dig - bot.canDigBlock is the same
+  // authority digAt uses. A guessed row count said 3 and the world said 2:
+  //   deadlock-reset: pit column 192,-102 - reachable depth 4b (need 4)
+  //   deadlock-reset: pit stage A blocked at 192,65,-102 - ABORTING this fallback
+  // ...and running out of arm was reported as a blockage that killed the whole fallback, when it
+  // is simply where stage A ends and the descent begins.
+  const reachableNow = (cell) => { const b = bot.blockAt(cell); if (!b || AIRISH(b.name)) return true; return !(bot.canDigBlock && !bot.canDigBlock(b)) }
   // ==== PERMISSION IS NOT VIABILITY (live 2026-08-01) ========================================
   // Preferring the column that costs the hut nothing is right, but only among columns that can
   // actually DO the job. After the first attempt dug 193,-103, that column was all air - so it
@@ -516,16 +522,20 @@ async function suicideByPitDrop (bot, { isStopped = () => false, home = null, sa
   //   deadlock-reset: pit only 3b deep (need 4 to kill at hp 1) - ABORTING this fallback
   // A free column that cannot reach lethal depth is not cheaper than a floor cell. It is not a
   // candidate at all. So viability is decided FIRST, and cost only ranks what survives it.
-  const REACH_ROWS = 3 // what stage A can clear below the rim before it must descend
-  const achievable = (fx, fz, allowOwnHut) => {
-    let clearable = 0
+  // Depth and spoil come from ONE walk down the column, over exactly the rows stage A will dig -
+  // so the estimate cannot describe a different shaft than the one that gets built.
+  const columnPlan = (fx, fz, allowOwnHut) => {
+    let rows = 0; let spoil = 0
     for (let dy = -1; dy >= -DEPTH; dy--) {
       const cell = new Vec3(fx, feet.y + dy, fz)
-      if (pitBlocked(cell, bot.blockAt(cell), allowOwnHut)) break
-      clearable++
+      const b = bot.blockAt(cell)
+      if (pitBlocked(cell, b, allowOwnHut)) break
+      if (!reachableNow(cell)) break // arm's length from the rim - the rest is what a descent is for
+      rows++
+      if (yieldsFiller(b)) spoil++
     }
-    // the descent past REACH_ROWS is only affordable if this column's own spoil pays for the climb back
-    return Math.min(clearable, spoilValue(fx, fz) >= 1 ? REACH_ROWS + 1 : REACH_ROWS)
+    // a descent buys exactly one more row, and only if this column's own spoil pays the climb back
+    return { depth: rows + (spoil >= 1 ? 1 : 0), spoil }
   }
   // Two passes: PREFER a column that costs the hut nothing. Only if none exists - and only when
   // provably trapped - spend a floor cell. Cheapest sufficient escape, not the first one found.
@@ -533,9 +543,9 @@ async function suicideByPitDrop (bot, { isStopped = () => false, home = null, sa
     let best = null
     for (const [dx, dz] of mining.DIRS) {
       const fx = feet.x + dx; const fz = feet.z + dz
-      const depth = achievable(fx, fz, allowOwnHut)
+      const { depth, spoil } = columnPlan(fx, fz, allowOwnHut)
       if (depth < lethalMin) continue // cannot produce a killing drop - not a candidate, free or not
-      const cand = { dx, dz, fx, fz, spoil: spoilValue(fx, fz), depth }
+      const cand = { dx, dz, fx, fz, spoil, depth }
       if (!best || cand.spoil > best.spoil) best = cand
     }
     return best
@@ -563,10 +573,13 @@ async function suicideByPitDrop (bot, { isStopped = () => false, home = null, sa
   // expired budget was indistinguishable from "the work ran and the world refused" - which is how
   // a pit that was never dug got reported as "only 0b deep".
   const outOfTime = () => Date.now() >= deadline
-  // Stage A: dig the reachable top of the front shaft (feet-1 .. feet-3).
-  for (let dy = -1; dy >= -3; dy--) {
+  // Stage A: dig the front shaft as deep as the arm actually reaches from the rim - reach is asked,
+  // not assumed, and hitting the end of it ENDS the stage rather than failing the fallback.
+  for (let dy = -1; dy >= -DEPTH; dy--) {
+    const cell = new Vec3(dir.fx, feet.y + dy, dir.fz)
     if (outOfTime()) { dbg('deadlock-reset: out of time in pit stage A (shaft is ' + openDrop() + 'b) - ABORTING this fallback'); return false }
-    if (!(await digAt(new Vec3(dir.fx, feet.y + dy, dir.fz)))) { dbg('deadlock-reset: pit stage A blocked at ' + dir.fx + ',' + (feet.y + dy) + ',' + dir.fz + ' - ABORTING this fallback'); return false }
+    if (!reachableNow(cell)) { dbg('deadlock-reset: pit stage A reached arm\'s length at y' + (feet.y + dy) + ' (shaft is ' + openDrop() + 'b) - the descent takes it from here'); break }
+    if (!(await digAt(cell))) { dbg('deadlock-reset: pit stage A blocked at ' + dir.fx + ',' + (feet.y + dy) + ',' + dir.fz + ' - ABORTING this fallback'); return false }
   }
   // ==== A STEP YOU CANNOT UNDO IS NOT A STEP YOU MAY TAKE (live 2026-08-01) ==================
   // Stage B reached deeper by DESCENDING one into our own cell, then pillared back to the rim.
