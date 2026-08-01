@@ -197,6 +197,44 @@ t('THE SEALED HUT: setup cannot spend the dig budget, and running out of time sa
   assert(/pit only ' \+ drop \+ 'b deep/.test(fn) && /below the rim at y/.test(fn), 'each terminal failure names itself')
 })
 
+// ==== THE GIVE-UP COUNTER COUNTED ATTEMPTS, NOT RESETS (live 2026-08-01) ===================
+// `at` (anti-loop gap) and `count` (give-up cap) were stamped together BEFORE the attempt, so
+// every ABORT was recorded as a completed reset. Five aborts later the persisted state read
+// {"at":...,"count":5} against DEADLOCK_MAX_NOFOOD=5 and the last resort had permanently disabled
+// itself over five deaths that never happened - the bot had not died once.
+t('THE SEALED HUT: only a death counts as a reset; an attempt only stamps the cooldown', () => {
+  const fs = require('fs')
+  const path = require('path')
+  const src = fs.readFileSync(path.join(__dirname, 'provision-recovery.js'), 'utf8')
+
+  // the two jobs are separate functions: one touches `at` only, the other bumps `count`
+  const att = src.slice(src.indexOf('function noteDeadlockAttempt'), src.indexOf('function noteDeadlockReset'))
+  assert(att.length > 0, 'noteDeadlockAttempt exists')
+  assert(/d\.at = Date\.now\(\)/.test(att), 'the attempt stamps the anti-loop gap')
+  assert(!/d\.count/.test(att), 'the attempt must NOT touch the give-up count - that is what made aborts look like resets')
+  const res = src.slice(src.indexOf('function noteDeadlockReset'), src.indexOf('function migrateDeadlockCounter'))
+  assert(/d\.count = \(d\.count \|\| 0\) \+ 1/.test(res), 'only the completed-reset path bumps the count')
+
+  // every call site: attempt before, reset only when the suicide actually returned true
+  const sites = src.split('deadlockSuicideReset(bot')
+  assert(sites.length === 3, 'both suicide call sites are covered by this pin (update it if a third appears)')
+  for (const before of sites.slice(0, -1)) {
+    assert(/noteDeadlockAttempt\(\)[\s\S]{0,400}$/.test(before), 'the cooldown is stamped before the attempt')
+    assert(!/noteDeadlockReset\(\)[\s\S]{0,400}$/.test(before), 'the count must NOT be bumped before the attempt')
+  }
+  for (const after of sites.slice(1)) {
+    assert(/if \(ok\) noteDeadlockReset\(\)/.test(after.slice(0, 400)), 'the count is bumped only when the reset actually died')
+  }
+
+  // a count written under the old meaning is phantom and must be migrated, not left to disable the bot
+  assert(/if \(!d \|\| d\.counts === 'deaths'\) return/.test(src), 'the migration is idempotent and marks the new meaning')
+  assert(/deadlockResetState \(\) \{ migrateDeadlockCounter\(\)/.test(src), 'every read migrates first, so a stale count cannot keep vetoing')
+  const R2 = require('./provision-recovery.js')
+  const st = R2.deadlockResetState()
+  assert.strictEqual(st.counts, 'deaths', 'reading the state stamps the new meaning')
+  assert.strictEqual(st.count, 0, 'the five phantom resets are gone')
+})
+
 async function main () {
   // (a) ensurePillarFiller returns true IMMEDIATELY when the pack already has filler (stub bot).
   //     The stub has NO entity: if the early pickFiller short-circuit failed, the `!bot.entity`

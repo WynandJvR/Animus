@@ -120,12 +120,42 @@ function _noteDeadlockProgress (bot) {
   }
 }
 
+// ==== THE GIVE-UP COUNTER COUNTED ATTEMPTS, NOT RESETS (live 2026-08-01) ===================
+// One counter was doing two unrelated jobs: `at` is the anti-loop gap (about ATTEMPTS - an abort
+// must still hold off re-firing) and `count` is the give-up cap (about OUTCOMES - "resets keep
+// happening and food never improves, so stop spinning suicides"). Stamping both before the
+// attempt made every ABORT look like a completed reset. Five aborts later:
+//   {"at":1785591260158,"count":5}   with DEADLOCK_MAX_NOFOOD = 5
+//   deadlock-reset: 5 resets with no food gained - ...holding, not spinning suicides
+// ...and the last resort had permanently disabled itself over five deaths that never happened.
+// The bot had not died once. Same defect as the rest of today: a verdict recorded from an ATTEMPT
+// instead of from evidence. So: the gap is stamped on every attempt, the cap only on a real death.
+function noteDeadlockAttempt () {
+  const m = loadWorldMem()
+  const d = m.deadlockReset = m.deadlockReset || { at: 0, count: 0 }
+  d.at = Date.now()
+  saveWorldMem()
+}
+
 function noteDeadlockReset () {
   const m = loadWorldMem()
   const d = m.deadlockReset = m.deadlockReset || { at: 0, count: 0 }
   d.at = Date.now(); d.count = (d.count || 0) + 1
   saveWorldMem()
   if (d.count >= Math.min(3, DEADLOCK_MAX_NOFOOD)) dbg('deadlock-reset: ' + d.count + ' resets with no food gained - the food SOURCE is still broken (no water / farm won\'t establish)')
+}
+
+// The persisted count now means something it did not mean before, so a count written under the old
+// meaning cannot be trusted - and left alone it keeps the last resort disabled forever. Migrate it
+// once, in code, rather than by hand-editing the world: an unmarked count is phantom, so drop it.
+function migrateDeadlockCounter () {
+  const m = loadWorldMem()
+  const d = m.deadlockReset
+  if (!d || d.counts === 'deaths') return
+  const was = d.count || 0
+  d.count = 0; d.counts = 'deaths'
+  saveWorldMem()
+  if (was) dbg('deadlock-reset: cleared ' + was + ' phantom reset(s) - that counter recorded attempts, not deaths')
 }
 
 function deadlockResetDue ({ hp, food, hasPackFood, failCount, sinceLastResetMs }, opts = {}) {
@@ -153,7 +183,7 @@ function deadlockResetDue ({ hp, food, hasPackFood, failCount, sinceLastResetMs 
   return false
 }
 
-function deadlockResetState () { return loadWorldMem().deadlockReset || { at: 0, count: 0 } }
+function deadlockResetState () { migrateDeadlockCounter(); return loadWorldMem().deadlockReset || { at: 0, count: 0 } }
 
 function sampleColumnForSky (bot, x, z, surfaceY, ceil) {
   const nameAt = (ax, ay, az) => { try { const b = bot.blockAt(new Vec3(ax, ay, az)); return b && b.name } catch { return null } }
@@ -1345,9 +1375,10 @@ async function recoverFromDegraded (bot, { isStopped = () => false, say = () => 
             { enabled: process.env.DEADLOCK_RESET !== '0' })
           if (dueNow && (ds.count || 0) < DEADLOCK_MAX_NOFOOD) {
             dbg('deadlock-reset: STOPPED at hp' + shp + '/food0 with no pack food and ' + _deadlockFails + ' failed cycles - the stop latch must not veto the last resort')
-            noteDeadlockReset()
+            noteDeadlockAttempt() // the anti-loop gap is about attempts...
             let ok = false
             try { ok = await deadlockSuicideReset(bot, { isStopped: () => false, say }) } catch (e) { dbg('deadlock-reset: threw (' + e.message + ')') }
+            if (ok) noteDeadlockReset() // ...the give-up cap is about deaths that actually happened
             return { done: false, rungs, reason: ok ? 'deadlock-reset: died to reset' : 'deadlock-reset aborted (held)', ...stalled(s) }
           }
         }
@@ -1397,9 +1428,10 @@ async function recoverFromDegraded (bot, { isStopped = () => false, say = () => 
         if (due && (dstate.count || 0) >= DEADLOCK_MAX_NOFOOD) {
           dbg('deadlock-reset: ' + dstate.count + ' resets with no food gained - the food SOURCE is still broken (no water / farm won\'t establish); holding, not spinning suicides')
         } else if (due && !isStopped()) {
-          noteDeadlockReset() // stamp the cooldown + no-food streak BEFORE the attempt (an abort still holds off re-firing)
+          noteDeadlockAttempt() // stamp the cooldown BEFORE the attempt (an abort still holds off re-firing)
           let ok = false
           try { ok = await deadlockSuicideReset(bot, { isStopped, say }) } catch (e) { dbg('deadlock-reset: threw (' + e.message + ')') }
+          if (ok) noteDeadlockReset() // but only a death counts toward "resets keep gaining me nothing"
           return { done: false, rungs, reason: ok ? 'deadlock-reset: died to reset' : 'deadlock-reset aborted (held)', ...stalled(s) }
         }
         return { done: false, rungs, reason: 'all rungs tried', ...stalled(s) }
@@ -1435,5 +1467,5 @@ function releaseRecoveryLatches () { const was = _recoveringDegraded || _recover
 
 module.exports = {
   setDebugSink,
-  DEADLOCK_HP, DEADLOCK_MAX_NOFOOD, DEADLOCK_FAILS, DEADLOCK_RESET_SOFT, DEADLOCK_SOFT_HP, DEADLOCK_SOFT_FOOD, DEADLOCK_SOFT_FAILS, DEADLOCK_RESET_COOLDOWN_MS, DEADLOCK_FALL_H, SUICIDE_EXIT_OPEN_SKY, SUICIDE_FALLBACK_DEATH, SUICIDE_DROWN, SUICIDE_PILLAR_WORKS, _deadlockFails, _deadlockResetting, _noteDeadlockProgress, noteDeadlockReset, deadlockResetDue, deadlockResetState, sampleColumnForSky, reachOpenSky, ensurePillarFiller, deadlockDieByFall, suicideByDrown, suicideByPitDrop, deadlockFallbackDeath, deadlockSuicideReset, _recoveringHp, recoverHp, isRecoveringHp, _resting, restUntilSafe, isResting, sleepInBedHere, nightRest, nightRestInner, boundedHold, sleepableNow, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, RUNG_EXECUTORS, recoveryReadyNow, _recoveringDegraded, recoverFromDegraded, isRecoveringDegraded, releaseRecoveryLatches
+  DEADLOCK_HP, DEADLOCK_MAX_NOFOOD, DEADLOCK_FAILS, DEADLOCK_RESET_SOFT, DEADLOCK_SOFT_HP, DEADLOCK_SOFT_FOOD, DEADLOCK_SOFT_FAILS, DEADLOCK_RESET_COOLDOWN_MS, DEADLOCK_FALL_H, SUICIDE_EXIT_OPEN_SKY, SUICIDE_FALLBACK_DEATH, SUICIDE_DROWN, SUICIDE_PILLAR_WORKS, _deadlockFails, _deadlockResetting, _noteDeadlockProgress, noteDeadlockAttempt, noteDeadlockReset, migrateDeadlockCounter, deadlockResetDue, deadlockResetState, sampleColumnForSky, reachOpenSky, ensurePillarFiller, deadlockDieByFall, suicideByDrown, suicideByPitDrop, deadlockFallbackDeath, deadlockSuicideReset, _recoveringHp, recoverHp, isRecoveringHp, _resting, restUntilSafe, isResting, sleepInBedHere, nightRest, nightRestInner, boundedHold, sleepableNow, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, RUNG_EXECUTORS, recoveryReadyNow, _recoveringDegraded, recoverFromDegraded, isRecoveringDegraded, releaseRecoveryLatches
 }
