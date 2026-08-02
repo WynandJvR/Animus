@@ -26,6 +26,7 @@ const scheduler = require('./scheduler.js')  // PURE tier/preemption decisions
 const foodSec = require('./food.js')         // PURE food-security decisions
 const reflexes = require('./reflexes.js')    // PLAN-one-runner S4: declared holds (a hold says it is alive; it does not fake progress)
 const navigate = require('./navigate.js')
+const navProfile = require('./nav-profile.js') // PURE terrain policy: standable + digEscapeVerdict (no bot-module cycle - it requires nothing)
 const provCore = require('./provision-core.js')
 const { AIRISH, countItem, toolForBlock, gotoWithTimeout, collectDrops, stepInto, nearHostile, isNight } = provCore // canBreakNaturally is no longer reached directly here - provCore.digBlocked composes it
 const worldMemory = require('./world-memory.js')
@@ -270,7 +271,19 @@ async function ensurePillarFiller (bot, { isStopped = () => false, need = DEADLO
     .sort((a, b) => bot.entity.position.distanceTo(a) - bot.entity.position.distanceTo(b))
   let dug = 0
   let skipProtected = 0 // candidates refused by the positional/material dig-permission rule
-  let skipPitRisk = 0   // candidates refused because taking them would leave a >=2-deep hole
+  let skipPitRisk = 0   // candidates refused because the cell below is not solid: I would drop further than I dug
+  let skipNoWayOut = 0  // candidates refused because the pocket they'd leave has no climbable rim
+  // THE POST-DIG WORLD. The escape question must be asked against the world as it WILL BE, not
+  // as it was when the pass started: cells already taken this pass are AIR, and a candidate whose
+  // only way out is a hole this very loop dug is not a way out. Without this, each individual dig
+  // is legal and the SEQUENCE excavates a trench - which is how a 1-block scrape becomes the
+  // 2-deep pocket the bot fell into at (190,64,-103).
+  const removed = new Set()
+  const sample = (x, y, z) => {
+    if (removed.has(x + ',' + y + ',' + z)) return { name: 'air', solid: false }
+    const b = bot.blockAt(new Vec3(x, y, z))
+    return b ? { name: b.name, solid: b.boundingBox === 'block' } : null
+  }
   for (const p of cands) {
     if (dug >= need || isStopped() || Date.now() > deadline) break
     if (p.x === feet.x && p.z === feet.z) continue // never dig our own support column
@@ -282,17 +295,24 @@ async function ensurePillarFiller (bot, { isStopped = () => false, need = DEADLO
     // the house. This is the dig that hollowed 16 cells out from under the hut floor.
     if (provCore.digBlocked(bot, p, b)) { skipProtected++; continue }
     if (bot.canDigBlock && !bot.canDigBlock(b)) continue
-    // ...AND DO NOT MANUFACTURE THE PIT WE KEEP GETTING WEDGED IN. If the cell below this one
-    // is not solid, removing this block leaves a >=2-deep hole - the exact shape behind 41 "in
-    // a PIT" recoveries. A candidate that costs a rescue is not a candidate.
-    const under = bot.blockAt(p.offset(0, -1, 0))
-    if (!under || under.boundingBox !== 'block') { skipPitRisk++; continue }
+    // ...AND DO NOT MANUFACTURE THE PIT WE KEEP GETTING WEDGED IN. This used to ask only "is the
+    // cell below this one solid?", which is true of every block on a hillside - so at
+    // (202,65,-103) it passed, the dig left a pocket whose rim stands two blocks up, and on
+    // 2026-08-02 the bot DIED OF A FALL at (190,64,-103) in one of its own holes. The question a
+    // player actually asks is "after I take this block, can I climb out of the cell I just made?"
+    // and there is now one definition of it (navProfile.digEscapeVerdict, built on the one
+    // definition of `standable`), asked against the post-dig world so chained digs cannot form a
+    // trench. A candidate that costs a rescue is not a candidate.
+    const verdict = navProfile.digEscapeVerdict({ x: p.x, y: p.y, z: p.z }, sample)
+    if (verdict === 'boxed') { skipNoWayOut++; continue }
+    if (verdict) { skipPitRisk++; continue } // 'nofloor' / 'unknown' - I would drop further than I dug, or I cannot see
     const above = bot.blockAt(p.offset(0, 1, 0))
     if (above && /water|lava/.test(above.name)) continue // don't open a liquid flow onto ourselves
     const tool = toolForBlock(bot, b.name)
     if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
     try { await bot.dig(b) } catch { continue }
     dug++
+    removed.add(p.x + ',' + p.y + ',' + p.z) // the world the NEXT candidate is judged against
     try { await stepInto(bot, p, { isStopped }) } catch {} // step onto the dug cell so the dirt drop is picked up
     // pickFiller is truthy after ONE collected dirt, but the lethal pillar needs `need` placements -
     // only stop early once the pack holds enough filler for the whole tower.
@@ -300,7 +320,7 @@ async function ensurePillarFiller (bot, { isStopped = () => false, need = DEADLO
     if (fillerCount >= need) break // enough for the full lethal pillar - stop, don't strip more
   }
   try { await collectDrops(bot, 4) } catch {} // final sweep for any drop we walked past
-  dbg('  filler dig: dug ' + dug + '/' + cands.length + ' candidates (skipped ' + skipProtected + ' own-infra/farm, ' + skipPitRisk + ' pit-risk)')
+  dbg('  filler dig: dug ' + dug + '/' + cands.length + ' candidates (skipped ' + skipProtected + ' own-infra/farm, ' + skipPitRisk + ' pit-risk, ' + skipNoWayOut + ' no-way-out)')
   return !!scaffold.pickFiller(bot)
 }
 

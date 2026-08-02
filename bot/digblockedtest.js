@@ -170,12 +170,21 @@ t('ensurePillarFiller consults digBlocked and NEVER passes allowOwnInfra (MUTATI
 })
 
 t('ensurePillarFiller refuses to MANUFACTURE the pit it keeps getting wedged in', () => {
+  // SUPERSEDED, NOT RELAXED (2026-08-02). This used to pin the guard's exact text - "is the block
+  // BELOW my candidate solid?" - which is true of every block on a hillside, so it passed at
+  // (202,65,-103) and the bot DIED OF A FALL at (190,64,-103) in the hole it left. The intent
+  // this test states is unchanged and now asked properly, against navProfile.digEscapeVerdict
+  // ("after I take this block, can I climb out of the cell I just made?"), evaluated on the
+  // post-dig world so chained digs cannot form a trench. The geometry lives in digescapetest.js.
   const i = rec.indexOf('async function ensurePillarFiller')
   const fn = rec.slice(i, rec.indexOf('\n// Deliberate, bounded death by FALL', i))
-  assert.ok(/const under = bot\.blockAt\(p\.offset\(0, -1, 0\)\)/.test(fn) &&
-            /if \(!under \|\| under\.boundingBox !== 'block'\) \{ skipPitRisk\+\+; continue \}/.test(fn),
-    'a candidate whose removal leaves a >=2-deep hole is not a candidate - 41 PIT recoveries in one day')
-  assert.ok(/filler dig: dug ' \+ dug \+ '\/' \+ cands\.length \+ ' candidates \(skipped ' \+ skipProtected \+ ' own-infra\/farm, ' \+ skipPitRisk \+ ' pit-risk\)/.test(fn),
+  assert.ok(/const verdict = navProfile\.digEscapeVerdict\(\{ x: p\.x, y: p\.y, z: p\.z \}, sample\)/.test(fn) &&
+            /if \(verdict === 'boxed'\) \{ skipNoWayOut\+\+; continue \}/.test(fn) &&
+            /if \(verdict\) \{ skipPitRisk\+\+; continue \}/.test(fn),
+    'a candidate whose removal leaves a hole I cannot climb out of is not a candidate - 41 PIT recoveries in one day, then a fall death')
+  assert.ok(!/const under = bot\.blockAt\(p\.offset\(0, -1, 0\)\)/.test(fn),
+    'the weaker question must be GONE, not stacked in front of the real one (#1)')
+  assert.ok(/filler dig: dug ' \+ dug \+ '\/' \+ cands\.length \+ ' candidates \(skipped ' \+ skipProtected \+ ' own-infra\/farm, ' \+ skipPitRisk \+ ' pit-risk, ' \+ skipNoWayOut \+ ' no-way-out\)/.test(fn),
     'one greppable line with the numbers in it (#7)')
 })
 

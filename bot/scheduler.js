@@ -1019,6 +1019,32 @@ function tickDelayMs (vitals = {}, opts = {}) {
 const SURVIVAL_NUDGE_MS = 45000
 const SURVIVAL_FAIL_MS = 90000
 
+// ==== THE CRISIS WINDOW MUST NOT CUT THE JOB THAT ENDS THE CRISIS (2026-08-02) ============
+// The critical-vitals window (20s/40s) used to be tested FIRST, so it applied to every job -
+// including the survival job dispatched precisely to answer that crisis. The hungrier the bot
+// got, the LESS time its food run was given, which inverts the whole point of the escalation:
+//   17:17:48 (wd) NUDGE secureFood - no verified progress for 23s (hp 19 food 2) - marking stalled
+//   17:18:08 (wd) FAIL-JOB secureFood - no verified progress for 43s - setting its stop latch
+//   17:18:46 [prov] farm health: inspected 10/41 cell(s) - SCAN CUT (stopped) after 10: wheat=8(mature 8)
+// The stop latch cut the tend pass at cell 10 of 41 with EIGHT MATURE WHEAT standing in the
+// field, and the bot went on oscillating food 20->0 for hours. Cutting the answer to a crisis
+// does not produce a better alternative: the chooser re-picks the same job (it is still the
+// need), which restarts from zero and throws away the walk it had already paid for.
+//
+// What the short window is FOR is the other case - work that is NOT the answer (a build, a
+// chore, a trek) must be taken off the body fast when death is seconds away, so the chooser can
+// hand the body to survival. So the window is selected by the JOB'S OWN CLASS, which already
+// exists and is already what the snapshot reports (survival-snapshot.activeJobInfo -> cls, from
+// commandClass / the survival latches). No job is named here: `secureFood` is not special, the
+// SURVIVAL CLASS is - single-goal discipline (#11) says the chooser already decided this job is
+// the response, and the supervisor's job is to give that response its window, not to second-
+// guess it 20 seconds in.
+//
+// It also makes the two DERIVED ceilings true again. navigate.supervisorPatienceMs() and
+// provision-recovery.RUNG_NOPROGRESS_MS both restate SURVIVAL_FAIL_MS as "the instant the
+// supervisor concludes this survival job is hung" - a promise the crisis branch quietly broke,
+// leaving the inner layers budgeting to 90s while the supervisor was cutting at 40s. One rule,
+// one number ([[threshold-seams]]).
 function watchdog (activeJob, vitals, now) {
   if (!activeJob) return 'ok'
   const t = now != null ? now : nowFn()
@@ -1027,8 +1053,9 @@ function watchdog (activeJob, vitals, now) {
     : (activeJob.startedAt != null ? activeJob.startedAt : t)
   const idleMs = t - base
   let nudgeMs, failMs
-  if ((v.hp != null && v.hp <= 6) || (v.food != null && v.food <= 2)) { nudgeMs = 20000; failMs = 40000 } // critical: seconds
-  else if (activeJob.cls === 'survival') { nudgeMs = SURVIVAL_NUDGE_MS; failMs = SURVIVAL_FAIL_MS }
+  const critical = (v.hp != null && v.hp <= 6) || (v.food != null && v.food <= 2)
+  if (activeJob.cls === 'survival') { nudgeMs = SURVIVAL_NUDGE_MS; failMs = SURVIVAL_FAIL_MS } // the answer to the crisis keeps its window AT the crisis
+  else if (critical) { nudgeMs = 20000; failMs = 40000 } // critical, and this work is not the answer: seconds
   else { nudgeMs = 120000; failMs = 240000 } // patient when cheap
   if (idleMs >= failMs) return 'fail-job'
   if (idleMs >= nudgeMs) return 'nudge'

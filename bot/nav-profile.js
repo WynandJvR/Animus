@@ -62,6 +62,59 @@ function standable ({ groundSolid, ground, feet, head }, opts = {}) {
   return okBody(feet) && okBody(head)
 }
 
+// ==== "AFTER I TAKE THIS BLOCK, CAN I CLIMB OUT OF THE CELL I JUST MADE?" (2026-08-02) ====
+// The bot died of a FALL at (190,64,-103) into one of its own holes. The dig that makes those
+// holes (provision-recovery.ensurePillarFiller, the filler dig that feeds a pillar-out) asked a
+// weaker question - "is the block BELOW my candidate solid?" - which is true of every block on a
+// hillside. At (202,65,-103) y64 was solid, so the guard passed; but the rim around the emptied
+// cell stands two blocks up on a slope, so ONE legal dig leaves a pocket the bot cannot step out
+// of. It then walks into it (the dig steps onto the cell to collect the drop), and the pit rung,
+// the pillar and eventually a fall get to pay for it.
+//
+// The right question is the one a player asks before digging down: where do I end up, and can I
+// get out? Answering it as a RESCUE (widen detectPit, pillar out) is a second copy of the escape
+// rule and only pays after the bot is already stuck; PREVENTION is the root (#1).
+//
+// PURE, and it reuses `standable` above rather than inventing a seventh idea of "can I stand
+// here" - the whole reason that function exists. `sample(x,y,z) -> { name, solid } | null` is the
+// caller's world read, and the caller is expected to report cells IT HAS ALREADY REMOVED THIS
+// PASS as air, so a chain of legal digs cannot quietly excavate a trench.
+//
+// Verdicts (null = the dig is safe; a string = the reason it is refused, for the log):
+//   'nofloor'  the cell below the candidate is not solid (or unreadable): removing the block
+//              drops me FURTHER than I dug. This is the old guard's question, kept as one arm.
+//   'boxed'    I could stand in the emptied cell, and none of its 4 neighbours is standable at
+//              the same level or one step up - a pocket with no rim to climb.
+//   'unknown'  an unreadable (unloaded) cell in the answer. Fails CLOSED, exactly as `standable`
+//              treats an unknown cell: never dig on a guess.
+//   null       either the emptied cell is a NICHE the body cannot occupy at all (a solid block
+//              above it: no pit is created), or it has a climbable rim.
+const RIM_DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1]]
+const STEP_UP = 1 // vanilla step height - a rim one block up is walkable, two blocks up is a wall
+function digEscapeVerdict (cell, sample) {
+  if (!cell || typeof sample !== 'function') return 'unknown'
+  const at = (x, y, z) => { try { return sample(x, y, z) || null } catch { return null } }
+  const floor = at(cell.x, cell.y - 1, cell.z)
+  if (!floor) return 'unknown'
+  if (!floor.solid) return 'nofloor'
+  const head = at(cell.x, cell.y + 1, cell.z)
+  if (!head) return 'unknown'
+  if (head.solid) return null // a niche in a wall: the body cannot occupy it, so it is not a pit
+  for (const [dx, dz] of RIM_DIRS) {
+    for (let dy = 0; dy <= STEP_UP; dy++) {
+      const x = cell.x + dx; const y = cell.y + dy; const z = cell.z + dz
+      const g = at(x, y - 1, z); const f = at(x, y, z); const h = at(x, y + 1, z)
+      if (standable({
+        groundSolid: g ? g.solid : false,
+        ground: g ? g.name : null,
+        feet: f ? f.name : null,
+        head: h ? h.name : null
+      })) return null
+    }
+  }
+  return 'boxed'
+}
+
 // ==== AUDIT 2026-07-29: ONE DEFINITION OF "HOW THIS BOT ENTERS WATER" ====================
 // FIX 23 (commit b7bd94b) gave the DEFAULT profile a liquidCost because it was the only one of
 // FOUR that swam for free. That was the wrong shape of fix: there are SIX Movements profiles, not
@@ -335,6 +388,7 @@ function findDryLandExit (feet, sampleName, opts = {}) {
 
 module.exports = {
   standable,
+  digEscapeVerdict,
   escapeComplete,
   waterPolicy,
   WILD_LIQUID_COST,

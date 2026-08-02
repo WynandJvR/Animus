@@ -28,6 +28,10 @@ const { dbg, setDebugSink } = require('./debug-sink.js').makeDebug('[nav]')
 
 const prov = () => require('./provision.js') // lazy - see layering note above
 const provMining = () => require('./provision-mining.js') // LAZY: provision-mining top-requires navigate, so a top-level import here would be a real cycle
+// The forward-progress clock, written ONLY from evidence (see the stamp in recoverOnce). Lazy
+// require + swallowed failure: the house `touchP` pattern (provision-*.js), so telemetry can
+// never turn a navigation into an exception and there is no load-order cycle with commands.js.
+const touchP = tag => { try { require('./commands.js').touchProgress(tag) } catch {} }
 
 // ---- reflex arbitration ------------------------------------------------------------
 // While a recovery is physically maneuvering (pillaring out of a pit, threading a
@@ -1242,6 +1246,34 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
     let ok = false
     try { ok = await step.run() } catch (e) { dbg('recovery ' + step.kind + ' threw: ' + e.message) } finally { endRecoverySpan() }
     dbg('recovery ' + step.kind + ' -> ' + (ok ? 'MOVED' : 'no progress'))
+    // ==== THE LEG ALREADY PROVED IT MOVED, AND THREW THE PROOF AWAY (2026-08-02) ==========
+    // `ok` is this ladder's OWN world verdict, under the contract at the top of this section:
+    // "a recovery worked if the bot demonstrably MOVED (>=2 blocks horizontally or rose >=1) or
+    // the entry vouches for itself - re-read the world, never trust intent". That is the same
+    // class of evidence the supervisor calls verified progress; it was simply never reported,
+    // because telemetry's own witness re-anchors at 8 BLOCKS and a leg spent in nudge/stepout
+    // rungs moves the body two or three. So a leg doing exactly the right thing looked dead:
+    //   [nav] leg took 30.3s: attempt 6s, budget 24s, ceiling 90s, reflex-hold 0s, recoveries 2 in 26s
+    //   (wd) FAIL-JOB secureFood - no verified progress for 43s - setting its stop latch
+    // Two witnesses of one fact, and the supervisor was reading the coarser one (#4).
+    //
+    // This is the SAME RULE the layers above already live by - provision-recovery H5a stamps
+    // `ladderRung` for "a bounded, live-verified rung completed", provision-maintain H5b stamps
+    // `maintStep`, the farm stamps `harvest`/`replant`. The nav ladder was the one bounded unit
+    // of work that completed without saying so. ONE place: every escalator that runs the ladder
+    // (navigateToInner, walkStaged's forceUnstick, the freeze watchdog's force-escape) goes
+    // through here, so there is one definition and nothing to drift.
+    //
+    // IT IS AN EVENT, NOT A CREDIT. Nothing is suppressed and nothing expires: the moment the
+    // rungs stop verifying movement the clock ages again, so a genuinely hung leg (parked in an
+    // await, body still) stamps nothing and the NUDGE -> FAIL-JOB -> GIVEUP ladder runs exactly
+    // as it does today. That is deliberately unlike a declared hold, which would vouch for a
+    // dead leg until its TTL and would blind the cycle detector and the freeze watchdog too.
+    //
+    // NOT a CYCLE_WORK_TAG (telemetry.js), deliberately: escaping is not producing. An A<->B
+    // recovery oscillation must keep looking like a cycle to cycle-detect.js, which excludes on
+    // workCount - so this stamp says "the body is not frozen", never "the job is productive".
+    if (ok) touchP('navRung:' + step.kind)
     if (ok) return step.kind
     // no progress from this tool - spend its remaining budget so the next pass tries the
     // next rung instead of hammering the same one
