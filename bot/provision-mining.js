@@ -20,6 +20,7 @@
 const { Vec3 } = require('vec3')
 const { goals, Movements } = require('mineflayer-pathfinder')
 const mining = require('./mining.js')       // PURE depth model + branch geometry
+const provFood = () => require('./provision-food.js') // LAZY: provision-food.js top-requires this module, so an eager import here would be a real cycle
 const provShelter = () => require('./provision-shelter.js') // LAZY: provision-shelter.js top-requires this module, so an eager import here would be a real cycle
 const navigate = require('./navigate.js')
 const scaffold = require('./scaffold.js')
@@ -707,9 +708,9 @@ async function branchMine (bot, item, count, opts = {}) {
   // -> no top-up, hint inert (courier falls back to the fixed FOOD_PACK_RESERVE - byte-for-byte #62).
   let _minePlanHintPrev = null; const _dynFood = process.env.DYNAMIC_FOOD !== '0'
   if (_dynFood) {
-    const minePlan = S().foodPlanNow(bot, null, { activity: 'deep-mine', depth: Math.max(0, Math.floor(surfaceY) - targetY) })
-    _minePlanHintPrev = S()._setFoodPlanHint(minePlan)
-    if (!isStopped()) { try { await S().topUpFoodForPlan(bot, minePlan, { home: opts.home, isStopped }) } catch {} }
+    const minePlan = provFood().foodPlanNow(bot, null, { activity: 'deep-mine', depth: Math.max(0, Math.floor(surfaceY) - targetY) })
+    _minePlanHintPrev = provFood()._setFoodPlanHint(minePlan)
+    if (!isStopped()) { try { await provFood().topUpFoodForPlan(bot, minePlan, { home: opts.home, isStopped }) } catch {} }
   }
 
   // JOB ARBITER (survive > progress): a progress job (deep mining) may not START while an
@@ -722,16 +723,16 @@ async function branchMine (bot, item, count, opts = {}) {
       dbg('  branchMine: SURVIVE need before descending: ' + need.need + ' (' + need.reason + ') - resolving before progress')
       if (need.need === 'food') {
         if (opts.say) say('too hungry to mine deep - eating first')
-        try { await P().secureFood(bot, { home: opts.home, isStopped, say: opts.say, threshold: 14 }) } catch (e) { dbg('  branchMine: pre-mine secureFood failed (' + e.message + ')') }
+        try { await provFood().secureFood(bot, { home: opts.home, isStopped, say: opts.say, threshold: 14 }) } catch (e) { dbg('  branchMine: pre-mine secureFood failed (' + e.message + ')') }
         need = P().survivalNeed(bot)
       }
-      if (need) { if (_dynFood) S()._setFoodPlanHint(_minePlanHintPrev); return { gathered: got(), reason: 'yielding to survival need (' + need.need + ') before descending - resume when met', descended: descended() } }
+      if (need) { if (_dynFood) provFood()._setFoodPlanHint(_minePlanHintPrev); return { gathered: got(), reason: 'yielding to survival need (' + need.need + ') before descending - resume when met', descended: descended() } }
     }
   }
   // Past the pre-descent guard window: from here the descent puts the bot underground, where the
   // courier's physical-state read (depth>=DFOOD_DEEP) already sizes the deep-mine ration - so the
   // explicit hint is only needed for the surface pre-descent secureFood above. Restore it now.
-  if (_dynFood) S()._setFoodPlanHint(_minePlanHintPrev)
+  if (_dynFood) provFood()._setFoodPlanHint(_minePlanHintPrev)
 
   // SELF-SUFFICIENT TOOLING: keep a working pickaxe at depth. Re-tool BEFORE the held pick
   // breaks (while it can still mine the cobble a new pick needs) and only when no spare

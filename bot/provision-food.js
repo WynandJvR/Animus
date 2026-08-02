@@ -18,6 +18,7 @@
 const { Vec3 } = require('vec3')
 const { goals, Movements } = require('mineflayer-pathfinder')
 const foodSec = require('./food.js')   // PURE food-security decisions
+const provRecovery = () => require('./provision-recovery.js') // LAZY: provision-recovery.js top-requires this module, so an eager import here would be a real cycle
 const capabilities = require('./capabilities.js') // the PURE capability registry - hunt producers (entity/drop/bounds)
 const farm = require('./farm.js')      // PURE wheat geometry + crop state
 const navigate = require('./navigate.js')
@@ -1122,7 +1123,7 @@ async function secureFoodInner (bot, opts = {}) {
   if (opts.canHold && triedHomeFood && foodSec.famineHoldFood(bot.food) && !safeToForage && !isStopped()) {
     dbg('secureFood: famine-hold - food=' + bot.food + ' and home stores dry - holding indoors, not trekking out to fish/scout')
     say('nothing to eat out here and home is dry - holing up rather than starving on a fishing trip')
-    try { await P().boundedHold(bot, { isStopped, say }) } catch {}
+    try { await provRecovery().boundedHold(bot, { isStopped, say }) } catch {}
     const fedH = foodCount(bot) > 0
     return { fed: fedH, blockedOn: fedH ? null : (isStopped() ? 'stopped' : (isNight(bot) ? 'night' : 'food')) }
   }
@@ -1165,7 +1166,7 @@ async function secureFoodInner (bot, opts = {}) {
   }
   // 7) famine hold: NOTHING panned out - get home/indoors and sit it out (bounded; the
   // caller or the crisis reflex re-runs the whole chain later).
-  if (opts.canHold && (bot.food ?? 20) <= 1 && !isStopped()) { try { await P().boundedHold(bot, { isStopped, say }) } catch {} }
+  if (opts.canHold && (bot.food ?? 20) <= 1 && !isStopped()) { try { await provRecovery().boundedHold(bot, { isStopped, say }) } catch {} }
   const fed = foodCount(bot) > 0
   return { fed, blockedOn: fed ? null : (isStopped() ? 'stopped' : (isNight(bot) ? 'night' : 'food')) }
 }

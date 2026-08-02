@@ -1,6 +1,6 @@
 'use strict'
 // OFFLINE unit test for fix #13 (infra litter consolidation). No bot, no live world.
-//  - provision.lonelyFurnace: the PURE structure scan that gates legacy/untagged field
+//  - provBank.lonelyFurnace: the PURE structure scan that gates legacy/untagged field
 //    furnaces (bare/own-table/torch => reclaimable; anything player-built within 5 => never).
 //  - scaffold.js retention env (INFRA_CONSOLIDATE on => 72h / off => 6h) + sweep() size-cap
 //    eviction (oldest-first down to 512, flag-on only; flag-off = unbounded like fd90c9f).
@@ -20,6 +20,7 @@ function t (name, fn) { try { fn(); console.log('PASS  ' + name) } catch (e) { f
 
 // ---- lonelyFurnace (pure) -------------------------------------------------------------
 const provision = require('./provision.js')
+const provBank = require('./provision-bank.js')
 
 // fake world reader: blocks is a map "x,y,z" -> block name.
 function reader (blocks) {
@@ -29,40 +30,40 @@ const cell = { x: 100, y: 64, z: 200 }
 const fKey = '100,64,200'
 
 t('lonelyFurnace: a bare furnace (nothing around) => true', () => {
-  assert.strictEqual(provision.lonelyFurnace(reader({ [fKey]: 'furnace' }), cell, new Set()), true)
+  assert.strictEqual(provBank.lonelyFurnace(reader({ [fKey]: 'furnace' }), cell, new Set()), true)
 })
 
 t('lonelyFurnace: furnace + own-remembered table nearby => true', () => {
   const tableKey = '101,64,200'
   const b = reader({ [fKey]: 'furnace', [tableKey]: 'crafting_table' })
-  assert.strictEqual(provision.lonelyFurnace(b, cell, new Set([tableKey])), true, 'own table is exempt')
+  assert.strictEqual(provBank.lonelyFurnace(b, cell, new Set([tableKey])), true, 'own table is exempt')
 })
 
 t('lonelyFurnace: furnace + a torch nearby => true', () => {
   const b = reader({ [fKey]: 'furnace', '100,65,200': 'wall_torch' })
-  assert.strictEqual(provision.lonelyFurnace(b, cell, new Set()), true, 'a torch alone is not a base')
+  assert.strictEqual(provBank.lonelyFurnace(b, cell, new Set()), true, 'a torch alone is not a base')
 })
 
 t('lonelyFurnace: furnace + UN-remembered planks/chest/door/cobble => false', () => {
   for (const name of ['oak_planks', 'chest', 'oak_door', 'cobblestone']) {
     const b = reader({ [fKey]: 'furnace', '102,64,201': name })
-    assert.strictEqual(provision.lonelyFurnace(b, cell, new Set()), false, name + ' nearby => not lonely')
+    assert.strictEqual(provBank.lonelyFurnace(b, cell, new Set()), false, name + ' nearby => not lonely')
   }
 })
 
 t('lonelyFurnace: an UN-remembered table (someone else\'s) => false', () => {
   const b = reader({ [fKey]: 'furnace', '101,64,200': 'crafting_table' })
-  assert.strictEqual(provision.lonelyFurnace(b, cell, new Set()), false, 'a table NOT in own memory disqualifies')
+  assert.strictEqual(provBank.lonelyFurnace(b, cell, new Set()), false, 'a table NOT in own memory disqualifies')
 })
 
 t('lonelyFurnace: a build block OUTSIDE radius 5 is ignored => true', () => {
   const b = reader({ [fKey]: 'furnace', '107,64,200': 'oak_planks' }) // 7 blocks away
-  assert.strictEqual(provision.lonelyFurnace(b, cell, new Set()), true, 'radius-5 scan does not reach 7b')
+  assert.strictEqual(provBank.lonelyFurnace(b, cell, new Set()), true, 'radius-5 scan does not reach 7b')
 })
 
 t('lonelyFurnace: a torch AND own-table both exempt, still true', () => {
   const b = reader({ [fKey]: 'furnace', '99,64,200': 'torch', '101,64,200': 'crafting_table' })
-  assert.strictEqual(provision.lonelyFurnace(b, cell, new Set(['101,64,200'])), true)
+  assert.strictEqual(provBank.lonelyFurnace(b, cell, new Set(['101,64,200'])), true)
 })
 
 // ---- scaffold.js retention + size-cap eviction ----------------------------------------

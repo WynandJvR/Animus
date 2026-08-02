@@ -17,10 +17,11 @@
 
 const assert = require('assert')
 const nav = require('./nav-profile.js')
+const provCore = require('./provision-core.js')
 const provision = require('./provision.js') // for DIGGABLE_NATURAL / STRUCTURE_RE (the live regexes)
 
-const DIGGABLE = provision.DIGGABLE_NATURAL
-const STRUCTURE = provision.STRUCTURE_RE
+const DIGGABLE = provCore.DIGGABLE_NATURAL
+const STRUCTURE = provCore.STRUCTURE_RE
 const canType = (name) => nav.canWildBreakType(name, DIGGABLE, STRUCTURE)
 
 let failures = 0
@@ -32,7 +33,7 @@ function t (name, fn) {
 t('provision exports the shared regexes + canBreakNaturally', () => {
   assert(DIGGABLE instanceof RegExp, 'DIGGABLE_NATURAL exported as a RegExp')
   assert(STRUCTURE instanceof RegExp, 'STRUCTURE_RE exported as a RegExp')
-  assert(typeof provision.canBreakNaturally === 'function', 'canBreakNaturally exported')
+  assert(typeof provCore.canBreakNaturally === 'function', 'canBreakNaturally exported')
 })
 
 // ---- case 1: whitelist NEVER admits a STRUCTURE_RE family (except the 2 scaffold names) -----

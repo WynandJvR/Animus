@@ -10,6 +10,10 @@ const path = require('path')
 const { goals, Movements } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
 const memory = require('./memory.js') // persistent named waypoints
+const provRecovery = () => require('./provision-recovery.js') // LAZY: provision-recovery.js top-requires this module, so an eager import here would be a real cycle
+const provFood = () => require('./provision-food.js') // LAZY: provision-food.js top-requires this module, so an eager import here would be a real cycle
+const provBank = () => require('./provision-bank.js') // LAZY: provision-bank.js top-requires this module, so an eager import here would be a real cycle
+const provCore = () => require('./provision-core.js') // LAZY: provision-core.js top-requires this module, so an eager import here would be a real cycle
 const provShelter = () => require('./provision-shelter.js') // LAZY: provision-shelter.js top-requires this module, so an eager import here would be a real cycle
 const provFarm = () => require('./provision-farm.js') // LAZY: provision-farm.js top-requires this module, so an eager import here would be a real cycle
 const schematic = require('./schematic.js') // download/parse + survival physical building
@@ -81,7 +85,7 @@ function preemptForSurvival () { buildAbort = true }
 // #41 RESILIENT_RECOVERY (P0): the post-death recovery LATCH. Set on bot.on('death'); while set,
 // recovery OWNS the bot and OUTRANKS build-resume (resumeBuild waits, kept on disk), recovery is
 // crisis-grade unconditionally, and recovery-class commands are not muzzled by the busy-gate. Cleared
-// ONLY when recoveryReady (P4, via provision.recoveryReadyNow / the scheduler tick). RESILIENT_
+// ONLY when recoveryReady (P4, via provRecovery().recoveryReadyNow / the scheduler tick). RESILIENT_
 // RECOVERY=0 -> reads return false (inert) = today byte-for-byte. Stamps set-time for the P4 ceiling.
 let postDeathRecovery = false
 let postDeathRecoveryAt = 0
@@ -320,11 +324,11 @@ async function travelFar (bot, dest, opts = {}) {
       // Without this the bot starved to 1 hp / got killed naked before it ever arrived.
       // The time spent is credited against the travel clock (a night-shelter must not time
       // out the trip). travelFar's movement profile is restored after.
-      if (Date.now() - lastSurvival > 12000 && (provision.needsFood(bot) || provShelter().nightRestWanted(bot))) {
+      if (Date.now() - lastSurvival > 12000 && (provFood().needsFood(bot) || provShelter().nightRestWanted(bot))) {
         lastSurvival = Date.now(); const sv0 = Date.now()
         try {
-          if (provision.needsFood(bot)) { say('starving - sorting out food before i push on'); await provision.secureFood(bot, { isStopped, say, scoutHunt: false, canHold: false }) } // mid-trek: eat/bank/hunt/fish nearby; no cross-country scouting or holing up - the trek itself may be the way home
-          else { escaping = true; try { if (provShelter().underArmored(bot)) await provision.restUntilSafe(bot, { isStopped, say }); else await provision.nightRest(bot, { isStopped, say }) } finally { escaping = false } }
+          if (provFood().needsFood(bot)) { say('starving - sorting out food before i push on'); await provFood().secureFood(bot, { isStopped, say, scoutHunt: false, canHold: false }) } // mid-trek: eat/bank/hunt/fish nearby; no cross-country scouting or holing up - the trek itself may be the way home
+          else { escaping = true; try { if (provShelter().underArmored(bot)) await provRecovery().restUntilSafe(bot, { isStopped, say }); else await provRecovery().nightRest(bot, { isStopped, say }) } finally { escaping = false } }
         } catch { /* keep travelling regardless */ }
         climbTimeMs += Date.now() - sv0
         bot.pathfinder.setMovements(travelMovements(bot)); lastD = Infinity; continue
@@ -516,8 +520,8 @@ const FOLLOW_RANGE = Math.max(1, parseInt(process.env.FOLLOW_RANGE || '3', 10))
 // Eat the best food in inventory so the bot doesn't starve. Returns a status
 // string. Safe to call often - no-ops if already full or no food on hand.
 // ONE eating policy: the ranking (filling-safe first, risky food only when starving or
-// critically hurt) lives in provision.eatBestFood, shared with the secureFood chain.
-async function eatFood (bot) { return provision.eatBestFood(bot) }
+// critically hurt) lives in provFood().eatBestFood, shared with the secureFood chain.
+async function eatFood (bot) { return provFood().eatBestFood(bot) }
 
 // Natural ground a torch may be auto-placed on. Anchored/explicit so crafted or
 // build blocks (planks, bricks, wool, glass, concrete...) never qualify - the
@@ -624,13 +628,13 @@ async function provisionArmor (bot, opts = {}) {
         let blk = null; try { blk = bot.blockAt(new Vec3(e.x, e.y, e.z)) } catch {}
         if (!blk || !/chest/.test(blk.name || '')) continue
         let counts = {}
-        try { counts = await provision.chestCounts(bot, blk) } catch { continue }
+        try { counts = await provBank().chestCounts(bot, blk) } catch { continue }
         for (const slot of bareSlots()) {
           const cand = Object.keys(counts).filter(n => counts[n] > 0 && armorSlot(n) === slot).map(n => ({ name: n }))
           const pick = bestArmor(cand)
           if (!pick) continue
           try {
-            const got = await provision.withdrawItem(bot, blk, pick.name, 1)
+            const got = await provBank().withdrawItem(bot, blk, pick.name, 1)
             if (got > 0) { const it = inv().find(i => i.name === pick.name); if (it) { await bot.equip(it, slot); wore.push(pick.name + ' (from bank)') } }
           } catch { /* transient - leave the slot for the leather/iron path */ }
         }
@@ -644,11 +648,11 @@ async function provisionArmor (bot, opts = {}) {
   const cowsAround = !!bot.entity && Object.values(bot.entities || {}).some(e => e && e.position && /^(cow|mooshroom)$/.test((e.name || '').toLowerCase()) && e.position.distanceTo(bot.entity.position) <= 48)
   if (cowsAround && !isStopped()) {
     const stillMissing = LEATHER_PIECES.filter(p => !wornArmor(bot)[p.slot])
-    const have = () => provision.inventoryCounts(bot).leather || 0
+    const have = () => provCore().inventoryCounts(bot).leather || 0
     const needLeather = stillMissing.reduce((s, p) => s + p.leather, 0)
     if (have() < needLeather) {
       say(`no armor on me - hunting cows for leather (${have()}/${needLeather})`)
-      try { await provision.gatherLeather(bot, needLeather - have(), { say, isStopped, restoreMovements: restore, home: opts.home, maxRoam: opts.maxRoam, maxExplores: opts.maxExplores, timeMs: opts.timeMs }) }
+      try { await provFood().gatherLeather(bot, needLeather - have(), { say, isStopped, restoreMovements: restore, home: opts.home, maxRoam: opts.maxRoam, maxExplores: opts.maxExplores, timeMs: opts.timeMs }) }
       catch (e) { say(`(leather hunt cut short: ${e.message})`) }
     }
     // Ensure a crafting table exists (leather armor needs only leather + a table).
@@ -657,7 +661,7 @@ async function provisionArmor (bot, opts = {}) {
       catch {
         try {
           const wood = provision.detectWood(bot) || 'oak'
-          const plan = provision.planProvision(mcData, { crafting_table: 1 }, provision.inventoryCounts(bot), { primaryWood: wood })
+          const plan = provision.planProvision(mcData, { crafting_table: 1 }, provCore().inventoryCounts(bot), { primaryWood: wood })
           if (plan.tasks.length) await provision.runPlan(bot, plan, { say, isStopped, restoreMovements: restore })
         } catch (e) { say(`(no table and couldn't make one: ${e.message})`) }
       }
@@ -714,7 +718,7 @@ async function ironArmorBootstrap (bot, opts = {}) {
     const min = Math.max(1, Math.round((gb.until - Date.now()) / 60000))
     return { progressed: false, msg: `iron grind cooling off after ${gb.fails} fruitless tries - retrying in ~${min} min` }
   }
-  const ironScore = () => { const c = provision.inventoryCounts(bot); return (c.raw_iron || 0) + (c.iron_ingot || 0) * 2 }
+  const ironScore = () => { const c = provCore().inventoryCounts(bot); return (c.raw_iron || 0) + (c.iron_ingot || 0) * 2 }
   const bareBefore = bareCount(); const ironBefore = ironScore()
   let failReason = null
   // INCREMENTAL, CHEAPEST-FIRST (operator: graceful degradation). Gathering all 24 iron
@@ -789,7 +793,7 @@ async function ironArmorBootstrap (bot, opts = {}) {
   // BANK the gear-up progress: loose iron in the pack dies with the bot (the ~12
   // ingots' worth mined "across attempts" all evaporated in graves, live). Worn
   // armor is in equipment slots - depositing touches only the loose surplus.
-  try { const c = provision.inventoryCounts(bot); if ((c.raw_iron || 0) + (c.iron_ingot || 0) > 0) await resources.autoBank(bot, { near: { x: Math.round(at.x), y: Math.floor(at.y), z: Math.round(at.z) }, keepDirt: opts.keepDirt || 16, isStopped }) } catch {}
+  try { const c = provCore().inventoryCounts(bot); if ((c.raw_iron || 0) + (c.iron_ingot || 0) > 0) await resources.autoBank(bot, { near: { x: Math.round(at.x), y: Math.floor(at.y), z: Math.round(at.z) }, keepDirt: opts.keepDirt || 16, isStopped }) } catch {}
   restore()
   const bareNow = bareCount()
   const msg = !bareNow ? 'full set on'
@@ -822,14 +826,14 @@ async function survivalPrep (bot, opts = {}) {
     if (!hasKind('sword')) want.wooden_sword = 1
     say(`gearing up before the trip - ${Object.keys(want).map(t => t.replace('wooden_', '')).join(' + ')}`)
     try {
-      const p = provision.planProvision(mcData, want, provision.inventoryCounts(bot), { primaryWood })
+      const p = provision.planProvision(mcData, want, provCore().inventoryCounts(bot), { primaryWood })
       if (p.tasks.length) await provision.runPlan(bot, p, { say, isStopped, restoreMovements: restore })
     } catch (e) { say(`(couldn't make tools yet: ${e.message})`) }
   }
   // 2) food for the road - hunt a couple animals for meat (auto-eat feeds on it, raw is fine).
-  if (!isStopped() && !provision.hasFood(bot)) {
+  if (!isStopped() && !provFood().hasFood(bot)) {
     say('grabbing some food for the road')
-    try { for (let i = 0; i < 3 && !provision.hasFood(bot) && !isStopped(); i++) { if (!await provision.huntForFood(bot, { isStopped })) break } } catch { /* no animals - travel-phase hunt covers it */ }
+    try { for (let i = 0; i < 3 && !provFood().hasFood(bot) && !isStopped(); i++) { if (!await provFood().huntForFood(bot, { isStopped })) break } } catch { /* no animals - travel-phase hunt covers it */ }
   }
   // 3) leather armor if cows/leather are around (bounded; proceeds naked if not - the shelter
   //    reflex covers a still-naked bot at night). NO iron fallback here: the iron grind is a
@@ -839,7 +843,7 @@ async function survivalPrep (bot, opts = {}) {
     try { const r = await provisionArmor(bot, { say, isStopped, restoreMovements: restore, ironFallback: false }); if (r) say(r) } catch (e) { say(`(armor prep: ${e.message})`) }
   }
   restore()
-  return { armed: hasKind('sword'), fed: provision.hasFood(bot), armored: !Object.values(wornArmor(bot)).some(v => !v) }
+  return { armed: hasKind('sword'), fed: provFood().hasFood(bot), armored: !Object.values(wornArmor(bot)).some(v => !v) }
 }
 
 // Walk onto nearby dropped items to pick them up (so "I dropped it, put it on"
@@ -1049,7 +1053,7 @@ async function handleInner (bot, line, opts = {}) {
         say(`heading to ${x},${y},${z} to hunt`)
         try { await travelFar(bot, { x, y, z }, { isStopped: () => buildAbort, say }) } catch (e) { dbg('huntat travel: ' + e.message) }
         let kills = 0
-        for (let k = 0; k < 6 && !buildAbort; k++) { if (!await provision.huntForFood(bot, { isStopped: () => buildAbort, range: 40 })) break; kills++ }
+        for (let k = 0; k < 6 && !buildAbort; k++) { if (!await provFood().huntForFood(bot, { isStopped: () => buildAbort, range: 40 })) break; kills++ }
         if (kills > 0) { try { provision.rememberInfra('pasture', bot.entity.position) } catch {} }
         endActivity(kills > 0, `hunted ${kills} at ${x},${z}`)
         return kills > 0 ? `hunted ${kills} animal(s) at ${x},${y},${z} - remembered the pasture` : `got to ${x},${y},${z} but found no animals in range`
@@ -1082,9 +1086,9 @@ async function handleInner (bot, line, opts = {}) {
       // path (the lock's guard returns fast if one's already running - honest, not silent).
       const before = bot.food
       const home = (provision.knownBed && provision.knownBed()) || undefined
-      try { await provision.secureFood(bot, { home, threshold: 18, canHold: false, say: m => bot.chat(String(m).slice(0, 200)) }) } catch (e) { return `tried to get food but hit an error: ${e.message}` }
+      try { await provFood().secureFood(bot, { home, threshold: 18, canHold: false, say: m => bot.chat(String(m).slice(0, 200)) }) } catch (e) { return `tried to get food but hit an error: ${e.message}` }
       const now = bot.food
-      return now > before ? `got food and ate (food ${before} -> ${now})` : (provision.hasFood(bot) ? 'got food from the chest' : `checked the bank/food sources - nothing available right now (food ${now})`)
+      return now > before ? `got food and ate (food ${before} -> ${now})` : (provFood().hasFood(bot) ? 'got food from the chest' : `checked the bank/food sources - nothing available right now (food ${now})`)
     }
 
     case 'drop':
@@ -1271,10 +1275,10 @@ async function handleInner (bot, line, opts = {}) {
       const meNight = bot.entity && bot.entity.position
       const graveDistNight = meNight ? Math.hypot(d.x - meNight.x, d.z - meNight.z) : Infinity
       const urgentNear = process.env.GRAVE_URGENT !== '0' && graveUrgency(d).tier !== 'safe' && graveDistNight <= Number(process.env.GRAVE_NEAR_LADDER || 32)
-      if (provision.isNight(bot) && provShelter().underArmored(bot) && !urgentNear) {
+      if (provCore().isNight(bot) && provShelter().underArmored(bot) && !urgentNear) {
         try { bot.chat('night and no gear - resting before i go get my stuff') } catch {}
-        try { await provision.restUntilSafe(bot, { isStopped: () => false }) } catch {}
-      } else if (urgentNear && provision.isNight(bot) && provShelter().underArmored(bot)) {
+        try { await provRecovery().restUntilSafe(bot, { isStopped: () => false }) } catch {}
+      } else if (urgentNear && provCore().isNight(bot) && provShelter().underArmored(bot)) {
         try { bot.chat("grave's about to despawn and it's right here - grabbing it before it's gone, then i'll rest") } catch {}
       }
       // #115 GROUNDED_CLAIMS. Everything below this line used to be asserted, never observed:
@@ -1829,7 +1833,7 @@ async function handleInner (bot, line, opts = {}) {
         // no bed in scan range - but if we REMEMBER our bed, go sleep in it like a player
         // (night only: nightRest's fallback digs a pit, which makes no sense at noon)
         const kb = provision.knownBed && provision.knownBed()
-        if (kb && provision.isNight(bot)) { const ok = await provision.nightRest(bot, { say: m => bot.chat(String(m).slice(0, 200)) }); return ok ? 'slept in my own bed' : `couldn't make it to my bed at ${kb.x},${kb.y},${kb.z}` }
+        if (kb && provCore().isNight(bot)) { const ok = await provRecovery().nightRest(bot, { say: m => bot.chat(String(m).slice(0, 200)) }); return ok ? 'slept in my own bed' : `couldn't make it to my bed at ${kb.x},${kb.y},${kb.z}` }
         if (kb) return `no bed nearby (mine's at ${kb.x},${kb.y},${kb.z} - i'll head there at night)`
         return 'no bed nearby'
       }
@@ -1853,7 +1857,7 @@ async function handleInner (bot, line, opts = {}) {
     case 'fish': {
       // fish until a few meals are in the pack (rod crafted from sticks+string if needed)
       beginActivity('fish', 'nearest water')
-      const ok = await provision.fishForFood(bot, { isStopped: () => buildAbort, say: m => bot.chat(String(m).slice(0, 200)) })
+      const ok = await provFood().fishForFood(bot, { isStopped: () => buildAbort, say: m => bot.chat(String(m).slice(0, 200)) })
       endActivity(ok, ok ? 'caught dinner' : 'no luck')
       return ok ? 'got some fish in the pack' : "couldn't fish here (no rod/string, no water, or no bites)"
     }
@@ -2052,7 +2056,7 @@ async function handleInner (bot, line, opts = {}) {
       // scaffold dirt for anything the bot can't reach from the ground - verified
       // live: without pillar blocks the roof of even a 3-tall box is unreachable
       if (loadedSchem.schem.size.y > 2) bom.dirt = (bom.dirt || 0) + 8 + 2 * loadedSchem.schem.size.y
-      const plan = provision.planProvision(mcData, bom, provision.inventoryCounts(bot), { furnacesNearby: provision.countFurnacesNear(bot) })
+      const plan = provision.planProvision(mcData, bom, provCore().inventoryCounts(bot), { furnacesNearby: provision.countFurnacesNear(bot) })
       const planLines = plan.tasks.map(t =>
         t.type === 'gather' ? `gather ${t.count}x ${t.item}${t.tool ? ` [${t.tool}]` : ''}`
           : t.type === 'craft' ? `craft ${t.crafts * t.perCraft}x ${t.item}${t.needsTable ? ' (table)' : ''}`
@@ -2186,8 +2190,8 @@ async function handleInner (bot, line, opts = {}) {
     case 'stash': {
       // deposit all build materials into a nearby/crafted chest (keeps tools/food)
       try {
-        const chest = await provision.ensureChest(bot, {})
-        const n = await provision.depositMaterials(bot, chest, { keepDirt: 8 })
+        const chest = await provBank().ensureChest(bot, {})
+        const n = await provBank().depositMaterials(bot, chest, { keepDirt: 8 })
         return `stashed ${n} item(s) in the chest at ${chest.position.x},${chest.position.y},${chest.position.z}`
       } catch (e) { return `couldn't stash: ${e.message}` }
     }
@@ -2200,7 +2204,7 @@ async function handleInner (bot, line, opts = {}) {
       const chestId = mcData.blocksByName.chest && mcData.blocksByName.chest.id
       const chest = chestId ? bot.findBlock({ matching: chestId, maxDistance: 8 }) : null
       if (!chest) return 'no chest within reach'
-      try { const got = await provision.withdrawItem(bot, chest, name, count); return got ? `took ${got} ${name}` : `no ${name} in the chest` } catch (e) { return `couldn't unstash: ${e.message}` }
+      try { const got = await provBank().withdrawItem(bot, chest, name, count); return got ? `took ${got} ${name}` : `no ${name} in the chest` } catch (e) { return `couldn't unstash: ${e.message}` }
     }
 
     case 'clearinv': {
@@ -2537,7 +2541,7 @@ async function autoBuild (bot, schem, at, opts = {}) {
   if (primaryWood && primaryWood !== 'oak') say(`(using ${primaryWood} wood - it's what's around)`)
 
   // Already have everything? Just build.
-  const inv0 = provision.inventoryCounts(bot)
+  const inv0 = provCore().inventoryCounts(bot)
   if (!Object.entries(bom).some(([n, c]) => (inv0[n] || 0) < c)) {
     say('i have all the materials - building')
     checklistStep('build')
@@ -2600,7 +2604,7 @@ async function autoBuild (bot, schem, at, opts = {}) {
   let chest = null
   async function stash () {
     try {
-      if (!chest) chest = await provision.ensureChest(bot, { isStopped })
+      if (!chest) chest = await provBank().ensureChest(bot, { isStopped })
       await resources.autoBank(bot, { near: home, keepDirt: KEEP_DIRT, isStopped })
     } catch (e) { say(`(couldn't stash yet: ${e.message})`) }
   }
@@ -2618,13 +2622,13 @@ async function autoBuild (bot, schem, at, opts = {}) {
     try {
       // a chest needs 8 planks - craft them from carried logs first (live: camp skipped
       // the chest with "need 8 planks" while holding 22 raw logs)
-      const invC = provision.inventoryCounts(bot)
+      const invC = provCore().inventoryCounts(bot)
       const plankCount = Object.entries(invC).filter(([n]) => /_planks$/.test(n)).reduce((s, [, c]) => s + c, 0)
       if (plankCount < 8) {
         const logName = Object.keys(invC).find(n => /_log$/.test(n) && invC[n] >= 2)
         if (logName) await handle(bot, `craft ${logName.replace('_log', '_planks')} 8`).catch(() => {})
       }
-      chest = await provision.ensureChest(bot, { isStopped, home: { x: at.x, y: at.y, z: at.z } })
+      chest = await provBank().ensureChest(bot, { isStopped, home: { x: at.x, y: at.y, z: at.z } })
     } catch (e) { dbg('camp: chest skipped (' + e.message + ')') }
     try { await provision.ensureFurnace(bot, { isStopped, home: { x: at.x, y: at.y, z: at.z } }) } catch (e) { dbg('camp: furnace skipped (' + e.message + ')') }
     // BED / SPAWN ANCHOR (#107 SPAWN_BED): one idempotent call. This step used to own its own
@@ -2634,7 +2638,7 @@ async function autoBuild (bot, schem, at, opts = {}) {
     // hut bed cell when a hut stands, and falls back to open ground. Camp is no longer the only
     // site that can produce a bed, and it is no longer allowed to decide we cannot have one.
     try {
-      const r = await provision.ensureSpawnBed(bot, { near: { x: at.x, y: at.y, z: at.z }, isStopped, say })
+      const r = await provRecovery().ensureSpawnBed(bot, { near: { x: at.x, y: at.y, z: at.z }, isStopped, say })
       dbg('camp: bed -> ' + r.how + (r.why ? ' (' + r.why + ')' : ''))
     } catch (e) { dbg('camp: bed step failed (' + e.message + ')') }
     try {
@@ -2752,10 +2756,10 @@ async function autoBuild (bot, schem, at, opts = {}) {
             let target = null
             const cc = findCell(/chest/)
             if (cc) { const cb = bot.blockAt(cc); if (cb && /chest/.test(cb.name)) target = cb }
-            if (!target) { try { target = await provision.ensureChest(bot, { home: hutAt, isStopped }) } catch (e) { dbg('camp: restore ensureChest failed (' + e.message + ')') } }
+            if (!target) { try { target = await provBank().ensureChest(bot, { home: hutAt, isStopped }) } catch (e) { dbg('camp: restore ensureChest failed (' + e.message + ')') } }
             if (target && target.position) {
               try {
-                const back = await provision.depositMaterials(bot, target, { keepDirt: 8, all: true })
+                const back = await provBank().depositMaterials(bot, target, { keepDirt: 8, all: true })
                 provision.rememberInfra('chest', target.position)
                 dbg('camp: bank restored (' + (back != null ? back : '?') + ' redeposited)')
                 hutPendingRestore = null
@@ -2831,14 +2835,14 @@ async function autoBuild (bot, schem, at, opts = {}) {
                 if (!cr.known) { emptied = false; dbg('camp: bank chest at ' + c.x + ',' + c.y + ',' + c.z + ' is in an unloaded chunk - contents UNKNOWN, not tearing anything down'); break }
                 const cb = cr.block; if (!/chest/.test(cb.name)) continue // seen, and it is not a chest: nothing of ours to empty
                 let counts = {}
-                try { counts = await provision.chestCounts(bot, cb) } catch (e) { emptied = false; dbg('camp: bank read FAILED at ' + c.x + ',' + c.y + ',' + c.z + ' (' + e.message + ') - contents UNKNOWN, aborting the teardown'); break }
-                for (const n of Object.keys(counts)) { saved[n] = (saved[n] || 0) + counts[n]; try { await provision.withdrawItem(bot, cb, n, counts[n]) } catch {} }
+                try { counts = await provBank().chestCounts(bot, cb) } catch (e) { emptied = false; dbg('camp: bank read FAILED at ' + c.x + ',' + c.y + ',' + c.z + ' (' + e.message + ') - contents UNKNOWN, aborting the teardown'); break }
+                for (const n of Object.keys(counts)) { saved[n] = (saved[n] || 0) + counts[n]; try { await provBank().withdrawItem(bot, cb, n, counts[n]) } catch {} }
                 // #115: `catch { left = { unknown: 1 } }` was groping for exactly the third state
                 // this slice adds. A chest read that FAILED tells us nothing about what is inside
                 // it - and "I could not look" must never become "it is not empty enough, but also
                 // the survey said the bank was verified empty". UNKNOWN => not emptied, explicitly.
                 let left = {}; let leftUnknown = false
-                try { left = await provision.chestCounts(bot, cb) } catch (e) { leftUnknown = true; dbg('camp: bank re-read FAILED at ' + c.x + ',' + c.y + ',' + c.z + ' (' + e.message + ') - contents UNKNOWN, treating as not emptied') }
+                try { left = await provBank().chestCounts(bot, cb) } catch (e) { leftUnknown = true; dbg('camp: bank re-read FAILED at ' + c.x + ',' + c.y + ',' + c.z + ' (' + e.message + ') - contents UNKNOWN, treating as not emptied') }
                 if (leftUnknown || Object.keys(left).length) { emptied = false; dbg('camp: bank chest at ' + c.x + ',' + c.y + ',' + c.z + ' still holds ' + (leftUnknown ? 'UNKNOWN contents' : Object.keys(left).join(',') + ' (pack full?)')); break }
               }
               const savedN = Object.values(saved).reduce((s, n) => s + n, 0)
@@ -3085,7 +3089,7 @@ async function autoBuild (bot, schem, at, opts = {}) {
       try { const fed = await resources.ensureFood(bot, { near: home, threshold: 16 }); if (fed) say('grabbed food from my chest') } catch {} // 16 ~ auto-eat's 17: restock before it grumbles
       // Bank empty AND starving? Run the whole food chain (hunt/farm/fish/scout/hold)
       // BEFORE the round - a round is minutes of work and the site can be eaten bare.
-      if (provision.needsFood(bot)) { try { await provision.secureFood(bot, { isStopped, say, home, canHold: true }) } catch (e) { dbg('material food chain failed (' + e.message + ')') } }
+      if (provFood().needsFood(bot)) { try { await provFood().secureFood(bot, { isStopped, say, home, canHold: true }) } catch (e) { dbg('material food chain failed (' + e.message + ')') } }
       // HURT + ENDANGERED at round start? Shelter-and-heal BEFORE marching back into the mob
       // field (the hp12->0.77 treadmill: the loop only checked food and re-entered the dark
       // hurt). The latch makes this inline entry and the index.js hp-crisis reflex mutually
@@ -3093,7 +3097,7 @@ async function autoBuild (bot, schem, at, opts = {}) {
       // Also covers the LIVELOCK state the arbiter heal need misses (hp<12, no hostile, day - not
       // "critical" and not "endangered"): lowHpCalm catches it so the bank-side recover (pack just
       // topped up by ensureFood above) gets a shot before the round marches back out hurt.
-      { const sn = provision.survivalNeed(bot); if ((sn && sn.need === 'heal') || provShelter().lowHpCalm(bot)) { try { await provision.recoverHp(bot, { isStopped, say }) } catch (e) { dbg('material hp recover failed (' + e.message + ')') } } }
+      { const sn = provision.survivalNeed(bot); if ((sn && sn.need === 'heal') || provShelter().lowHpCalm(bot)) { try { await provRecovery().recoverHp(bot, { isStopped, say }) } catch (e) { dbg('material hp recover failed (' + e.message + ')') } } }
       try { await resources.ensurePackRoom(bot, 6, { near: home, keepDirt: KEEP_DIRT, isStopped }) } catch {}
       // START EACH ROUND FROM THE SITE, ON THE SURFACE. A failed gather can leave the bot
       // stranded deep in a cave 40+ blocks off (verified live: cobble round ended at y=61,
@@ -3144,7 +3148,7 @@ async function autoBuild (bot, schem, at, opts = {}) {
       // skeleton chase and the grave despawned with it (oak 103 -> 1, live). Any
       // meaningful pile of build material gets deposited whenever we're at the site;
       // a death now costs at most one round's haul.
-      const invPile = (provision.inventoryCounts(bot)[name] || 0)
+      const invPile = (provCore().inventoryCounts(bot)[name] || 0)
       if (slotsUsed() >= STASH_AT || invPile >= 48) await stash()
       const bad = results.filter(r => !r.ok)
       if (bad.length && (await totalHave(name)) <= before) {
@@ -3174,7 +3178,7 @@ async function autoBuild (bot, schem, at, opts = {}) {
   })
   if (chest || resources.verifiedChests(bot, home, 32).length) {
     await stash()
-    const invDirt = provision.inventoryCounts(bot).dirt || 0
+    const invDirt = provCore().inventoryCounts(bot).dirt || 0
     if (invDirt < KEEP_DIRT) await resources.withdrawItems(bot, 'dirt', KEEP_DIRT - invDirt, { near: home }).catch(() => {})
     say('materials stashed - building now')
   } else say('got the materials - building now')
@@ -3246,7 +3250,7 @@ async function resumeBuild (bot) {
     // re-check (RECOVERY_MAX_MS ceiling, stuck-release, latch clearing). It can only release EARLIER
     // than the pure recoveryReady term, never later - so the executor is never STRICTER than the
     // chooser, which is the direction that could reproduce the standoff.
-    if (s && s.postDeathRecovery) { try { s.recoveryReady = await provision.recoveryReadyNow(bot) } catch { s.recoveryReady = true } }
+    if (s && s.postDeathRecovery) { try { s.recoveryReady = await provRecovery().recoveryReadyNow(bot) } catch { s.recoveryReady = true } }
     let r = null
     try { r = require('./scheduler.js').buildReady(s) } catch {}
     if (r && !r.ok) {
@@ -3284,9 +3288,9 @@ async function resumeBuild (bot) {
     // NIGHT-FIRST: a fresh respawn is naked; prepping/trekking at night IS the death loop
     // (verified live: 3 deaths in 90s at spawn). We respawn AT the bed - sleep in it (or
     // pit as fallback) until morning, THEN gear up and go.
-    if (provision.isNight(bot) && provShelter().underArmored(bot)) {
+    if (provCore().isNight(bot) && provShelter().underArmored(bot)) {
       dbg('resume: night + no armor - resting till morning before heading back (BLOCKING)')
-      try { await provision.restUntilSafe(bot, { isStopped: () => buildAbort, say }) } catch {}
+      try { await provRecovery().restUntilSafe(bot, { isStopped: () => buildAbort, say }) } catch {}
     }
     if (buildAbort) return (result = { stopped: true, placed: 0, total: 0 })
     // SPAWN FIRST when the anchor is known WRONG (survival tier - the world-spawn
@@ -3301,7 +3305,7 @@ async function resumeBuild (bot) {
       try { await survivalPrep(bot, { say, isStopped: () => buildAbort }) } catch (e) { dbg('resume: prep before spawn-recovery failed (' + e.message + ')') }
       if (buildAbort) return (result = { stopped: true, placed: 0, total: 0 })
       try {
-        const ok = await provision.recoverSpawnAnchor(bot, { isStopped: () => buildAbort, say })
+        const ok = await provRecovery().recoverSpawnAnchor(bot, { isStopped: () => buildAbort, say })
         if (ok) spawnSuspect = false
         dbg('resume: spawn-recovery ' + (ok ? 'RESTORED the anchor' : 'did not restore the anchor - continuing, will retry next respawn'))
       } catch (e) { dbg('resume: spawn-recovery failed (' + e.message + ')') }
@@ -3359,7 +3363,7 @@ async function resumeBuild (bot) {
     // broken/obstructed/moved) - the fix for the world-spawn death carousel: without
     // this every future death respawns at 0,0 naked and the job never converges.
     try {
-      const r = await provision.ensureSpawnBed(bot, { isStopped: () => buildAbort, say, force: spawnIsSuspect() })
+      const r = await provRecovery().ensureSpawnBed(bot, { isStopped: () => buildAbort, say, force: spawnIsSuspect() })
       if (r.ok) spawnSuspect = false
       dbg('resume: spawn bed ' + (r.ok ? 'asserted (' + r.how + ')' : 'NOT asserted - ' + r.why))
     } catch (e) { dbg('resume: spawn assert failed (' + e.message + ')') }

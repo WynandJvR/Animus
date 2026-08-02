@@ -18,6 +18,7 @@
 const { goals } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
 const arbiter = require('./arbiter.js') // priority body-ownership: reflexes defer to a running maneuver
+const provRecovery = () => require('./provision-recovery.js') // LAZY: provision-recovery.js top-requires this module, so an eager import here would be a real cycle
 const navProfile = require('./nav-profile.js') // PURE terrain policy - findDryLandExit (WATER_ESCAPE); no bot-module cycle
 
 let dbgSink = null // injected by index.js: debug lines persist to logs/bot-events.log
@@ -996,7 +997,7 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
         try { filler = !!require('./scaffold.js').pickFiller(bot) } catch {}
         if (!filler) {
           dbg('recovery: in a PIT with nothing to pillar with - digging filler out of the wall first')
-          try { filler = await prov().ensurePillarFiller(bot, { isStopped, need: 4 }) } catch (e) { dbg('recovery: filler dig failed (' + e.message + ')') }
+          try { filler = await provRecovery().ensurePillarFiller(bot, { isStopped, need: 4 }) } catch (e) { dbg('recovery: filler dig failed (' + e.message + ')') }
           if (movedEnough()) return true // digging the wall opened a way out on its own
           if (!filler) { dbg('recovery: no filler available and none diggable here - pillar rung cannot help, handing to the next rung'); return false }
         }

@@ -4,6 +4,7 @@
 
 const assert = require('assert')
 const F = require('./food.js')
+const provBank = require('./provision-bank.js')
 
 let failures = 0
 function t (name, fn) { try { fn(); console.log('PASS  ' + name) } catch (e) { failures++; console.log('FAIL  ' + name + '\n      ' + e.message) } }
@@ -52,9 +53,9 @@ t('foodTier: bad->2, raw meat->1, ready-to-eat (cooked/bread/veg)->0', () => {
   assert.strictEqual(F.BAD_FOOD.test('cooked_chicken'), false, 'cooked_chicken is not bad')
 })
 
-t('RAW_COOKABLE_FOOD matches provision.RAW_COOKABLE keys (single source of truth)', () => {
+t('RAW_COOKABLE_FOOD matches provision-food.RAW_COOKABLE keys (single source of truth)', () => {
   let RAW_COOKABLE
-  try { RAW_COOKABLE = require('./provision.js').RAW_COOKABLE } catch (e) { console.log('      (skip: provision.js not loadable offline: ' + e.message + ')'); return }
+  try { RAW_COOKABLE = require('./provision-food.js').RAW_COOKABLE } catch (e) { console.log('      (skip: provision-food.js not loadable offline: ' + e.message + ')'); return }
   for (const name of Object.keys(RAW_COOKABLE)) assert.strictEqual(F.RAW_COOKABLE_FOOD.test(name), true, name + ' (a provision raw-cookable) must be tier 1')
 })
 
@@ -298,18 +299,18 @@ t('#51: famineHoldFood releases the indoor hold ONLY in the food 3-6 hp-crisis, 
 t('#52 FISH_FROM_BANK: isBankStand - dry standable cell WITH adjacent water is a bank; flooded/landlocked is not', () => {
   let P
   try { P = require('./provision.js') } catch (e) { console.log('      (skip: provision.js not loadable offline: ' + e.message + ')'); return }
-  if (typeof P.isBankStand !== 'function') { console.log('      (skip: isBankStand not exported)'); return }
+  if (typeof provBank.isBankStand !== 'function') { console.log('      (skip: isBankStand not exported)'); return }
   const drySides = ['air', 'air', 'grass_block', 'dirt'] // dry feet-level neighbours (solid land + air, no fluid)
   // a genuinely dry standable pocket next to open water -> castable bank
-  assert.strictEqual(P.isBankStand('air', 'air', drySides, true), true, 'dry 2-air pocket + adjacent water -> bank stand')
+  assert.strictEqual(provBank.isBankStand('air', 'air', drySides, true), true, 'dry 2-air pocket + adjacent water -> bank stand')
   // no water in reach -> cannot cast -> not a fishing bank (even if perfectly dry)
-  assert.strictEqual(P.isBankStand('air', 'air', drySides, false), false, 'dry but landlocked -> not a fishing bank')
+  assert.strictEqual(provBank.isBankStand('air', 'air', drySides, false), false, 'dry but landlocked -> not a fishing bank')
   // feet submerged -> feetCellDry false -> never a stand (the drowning cell we must avoid)
-  assert.strictEqual(P.isBankStand('water', 'air', drySides, true), false, 'submerged feet -> not a stand')
+  assert.strictEqual(provBank.isBankStand('water', 'air', drySides, true), false, 'submerged feet -> not a stand')
   // a puddle laps at a feet-level side -> feetCellDry false -> reject (would flood the stand)
-  assert.strictEqual(P.isBankStand('air', 'air', ['water', 'air', 'air', 'air'], true), false, 'water at a feet-level side -> not a stand')
+  assert.strictEqual(provBank.isBankStand('air', 'air', ['water', 'air', 'air', 'air'], true), false, 'water at a feet-level side -> not a stand')
   // head blocked (not 2 air) -> not standable
-  assert.strictEqual(P.isBankStand('air', 'stone', drySides, true), false, 'head not air -> not standable')
+  assert.strictEqual(provBank.isBankStand('air', 'stone', drySides, true), false, 'head not air -> not standable')
 })
 
 t('#61 SKIP_DEAD_FISHING: shouldFish - the fishing gate is DEFAULT OFF, true ONLY at FISHING_ENABLED=1', () => {

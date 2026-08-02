@@ -21,6 +21,9 @@ const { pathfinder, goals } = require('mineflayer-pathfinder')
 try { require('fs').accessSync(require('path').join(__dirname, 'config.json')) } catch { require('fs').copyFileSync(require('path').join(__dirname, 'config.example.json'), require('path').join(__dirname, 'config.json')) }
 const cfg = require('./config.json')
 const commands = require('./commands.js')
+const provRecovery = require('./provision-recovery.js')
+const provFood = require('./provision-food.js')
+const provCore = require('./provision-core.js')
 const provMaintain = require('./provision-maintain.js')
 const provShelter = require('./provision-shelter.js')
 const provision = require('./provision.js') // for the body-side survival-hunt reflex
@@ -193,7 +196,7 @@ if (process.env.AUTO_RESUME !== '0') {
       const saved = commands.persistedResume && commands.persistedResume()
       if (!saved) return
       if (commands.isBusy && commands.isBusy()) return
-      if (provision.isResting && provision.isResting()) return
+      if (provRecovery.isResting && provRecovery.isResting()) return
       if (provMaintain.isMaintaining && provMaintain.isMaintaining()) return // an opp/idle maintenance pass owns the body - resume right after it
       // Don't fight the scheduler: while a survival need is active IT owns the body (actively
       // preempting the build for recovery), so re-issuing `resumebuild` every 2min just churns -
@@ -249,7 +252,7 @@ let connected = false // live connection state - the ONLY honest source for /hea
 const holdPremiseOK = kind => {
   if (kind !== 'sheltered') return true
   try { if (bot.isSleeping) return true } catch {}
-  try { if (provision.isResting && provision.isResting()) return true } catch {}
+  try { if (provRecovery.isResting && provRecovery.isResting()) return true } catch {}
   try { if (provision.insideOwnStructure && provision.insideOwnStructure(bot)) return true } catch {}
   // A SEALED NIGHT PIT is a ceiling a few blocks under the SURFACE - the 2026-07-29 case this
   // whole mechanism exists for (digInForNight caps a shallow hole and sets no latch, so nothing
@@ -670,7 +673,7 @@ bot.on('spawn', () => {
             autoRecoverTries++
             note(`(respawn) degraded/grave after death - running the recovery ladder (try ${autoRecoverTries}/3)`)
             try {
-              const r = await provision.recoverFromDegraded(bot, { say: m => note('(respawn) ' + m), reason: 'respawn' })
+              const r = await provRecovery.recoverFromDegraded(bot, { say: m => note('(respawn) ' + m), reason: 'respawn' })
               note(`(respawn) ladder -> ${r.done ? 'recovered' : 'not fully recovered'} via ${r.rungs.join(' > ') || '(no rung ran)'}`)
               if (r.done || !(commands.worthwhileGrave && commands.worthwhileGrave())) autoRecoverTries = 0
             } catch (e) { note(`(respawn) ladder failed: ${e.message}`) }
@@ -779,9 +782,9 @@ const bodyOwner = () => {
   try {
     if (commands.isEscaping && commands.isEscaping()) return 'escape'
     if (navigate.isRecovering() || navigate.isForceUnsticking()) return 'navRecovery'
-    if (provision.isRecoveringDegraded && provision.isRecoveringDegraded()) return 'ladder'
-    if (provision.isSecuringFood && provision.isSecuringFood()) return 'foodRun'
-    if (provision.isResting && provision.isResting()) return 'shelter'
+    if (provRecovery.isRecoveringDegraded && provRecovery.isRecoveringDegraded()) return 'ladder'
+    if (provFood.isSecuringFood && provFood.isSecuringFood()) return 'foodRun'
+    if (provRecovery.isResting && provRecovery.isResting()) return 'shelter'
     if (provMaintain.isMaintaining && provMaintain.isMaintaining()) return 'maintain'
     if (commands.isBusy && commands.isBusy()) return 'job'
     if (bot.pathfinder && bot.pathfinder.goal) return 'walk'
@@ -1251,7 +1254,7 @@ if (SCHED_ON) {
             if (commands.isBusy && commands.isBusy()) { runner.maintainCooldownUntil = Date.now() + abandonCd; return 'window abandoned - build did not unwind in time' + (foodNeedPending ? ' (food need pending - 60s retry)' : '') }
           }
           const windowEnd = Date.now() + Number(process.env.OPP_WINDOW_MS || 300000)
-          const night = !!(provision.isNight && provision.isNight(bot))
+          const night = !!(provCore.isNight && provCore.isNight(bot))
           const r = await provMaintain.maintenancePass(bot, {
             say: schedSay, nightIndoorOnly: night, opportunistic: true,
             isStopped: () => Date.now() > windowEnd
@@ -1379,7 +1382,7 @@ if (SCHED_ON) {
         // remember to fake progress on its own heartbeat - and one of them forgot).
         if (!bot.entity || bot.health <= 0) return
         const hold = reflexes.activeHold(holdPremiseOK)
-        if (bot.isSleeping || (provision.isResting && provision.isResting()) || hold) {
+        if (bot.isSleeping || (provRecovery.isResting && provRecovery.isResting()) || hold) {
           if (hold && heldNoted !== hold.label) { heldNoted = hold.label; note('(wd) ' + hold.label + ' is a DECLARED hold waking on ' + hold.wake + ' - stillness here is the goal, not a stall') }
           commands.touchProgress('declaredHold')
           return
@@ -1415,7 +1418,7 @@ if (SCHED_ON) {
               // food re-loop - BUMP the floor's no-progress counter so its next dispatch ESCALATES
               // (widen the water scout, active fishing over a passive hold) instead of re-running the
               // identical failing sequence. FOOD_FLOOR=0 -> escalateFoodFloor is a no-op.
-              if (process.env.FOOD_FLOOR !== '0' && /recoverFromDegraded|recoveryLadder|secureFood/.test(job.name || '')) { try { provision.escalateFoodFloor() } catch {} }
+              if (process.env.FOOD_FLOOR !== '0' && /recoverFromDegraded|recoveryLadder|secureFood/.test(job.name || '')) { try { provFood.escalateFoodFloor() } catch {} }
             } else {
               note('(wd) CYCLE ' + det.kind + ' with no active job - clearing the goal so the brain sees the loop')
               try { commands.recordOutcome('cycle:' + det.kind, false, 'A<->B loop broken (no job to fail)') } catch {}
@@ -1990,7 +1993,7 @@ if (process.env.AUTO_DEFEND !== '0') {
           bankRods: 0
         })
         lastSpiderMelee = null
-        if (need) { spiderLootBusy = true; provision.collectDrops(bot, 6).catch(() => {}).then(() => { spiderLootBusy = false }) }
+        if (need) { spiderLootBusy = true; provCore.collectDrops(bot, 6).catch(() => {}).then(() => { spiderLootBusy = false }) }
       }
       if (!target) { defendEquipped = false; lastDefendTarget = null; return }
       if (!defendEquipped) {
@@ -2045,7 +2048,7 @@ if (process.env.WEDGE_WATCHDOG !== '0') {
     // THIS is the watchdog that actually killed the bot on 2026-07-29: `(watchdog) position
     // FROZEN ~195s - forcing an escape` fired on a correctly sealed night shelter, because the
     // shelter was a ladder RUNG and isResting() was therefore false. One rule, read in one place.
-    if (bot.isSleeping || bot.targetDigBlock || (provision.isResting && provision.isResting()) || reflexes.activeHold(holdPremiseOK)) { wdHist = []; return }
+    if (bot.isSleeping || bot.targetDigBlock || (provRecovery.isResting && provRecovery.isResting()) || reflexes.activeHold(holdPremiseOK)) { wdHist = []; return }
     // Only stand down for our OWN force-escape. A regular recovery/escape that has the
     // position FROZEN for 2.5 minutes is by definition failing (live: the ladder looped
     // door/nudge/stepout "no progress" for 4+ minutes at 433,62,112 and the old
@@ -2132,7 +2135,7 @@ if (process.env.AUTO_SURFACE !== '0') {
     if (persistedMs < 16000) {
       if (commands.isEscaping && commands.isEscaping()) return
       if (navigate.isRecovering() || navigate.isForceUnsticking()) return
-      if (provision.isResting && provision.isResting()) return
+      if (provRecovery.isResting && provRecovery.isResting()) return
     }
     if (bot.isSleeping) return
     drowning = true
@@ -2387,7 +2390,7 @@ const server = http.createServer((req, res) => {
         note(`(cmd) ${line}${rz} -> held (a saved build job exists - the brain may not cancel it)`)
         return send(res, 200, "held: there's a build to finish - i shouldn't stop it")
       }
-      const bodyBusy = (commands.isBusy && commands.isBusy()) || (provision.isResting && provision.isResting()) || (provision.isSecuringFood && provision.isSecuringFood()) || (provision.isRecoveringDegraded && provision.isRecoveringDegraded())
+      const bodyBusy = (commands.isBusy && commands.isBusy()) || (provRecovery.isResting && provRecovery.isResting()) || (provFood.isSecuringFood && provFood.isSecuringFood()) || (provRecovery.isRecoveringDegraded && provRecovery.isRecoveringDegraded())
       const trimmedLine = String(line).trim()
       // S4 (REDESIGN §3.4): classify read-only via scheduler.commandClass when SCHEDULER is on.
       // Deliberate, documented widening: commandClass's perception set adds turn|lookbehind|
@@ -2433,19 +2436,19 @@ const server = http.createServer((req, res) => {
         // survival need (a build/gather: commands.isBusy) is deliberately absent from this list.
         // Most urgent wins when several are latched at once.
         const holdNeed = [
-          (provision.isRecoveringDegraded && provision.isRecoveringDegraded()) ? 'heal' : null,
-          (provision.isSecuringFood && provision.isSecuringFood()) ? 'food' : null,
-          (provision.isResting && provision.isResting()) ? 'shelter' : null
+          (provRecovery.isRecoveringDegraded && provRecovery.isRecoveringDegraded()) ? 'heal' : null,
+          (provFood.isSecuringFood && provFood.isSecuringFood()) ? 'food' : null,
+          (provRecovery.isResting && provRecovery.isResting()) ? 'shelter' : null
         ].filter(Boolean).sort((a, b) => arbiter.needRank(a) - arbiter.needRank(b))[0] || null
         const liveCrisis = (() => { try { return provision.survivalNeed(bot) } catch { return null } })()
         const holdAdm = arbiter.holdAdmissible(liveCrisis, holdNeed)
         if (defendPreempt) {
-          const label = commands.isBusy && commands.isBusy() ? 'busy building' : (provision.isSecuringFood && provision.isSecuringFood() ? 'securing food' : 'night-resting')
+          const label = commands.isBusy && commands.isBusy() ? 'busy building' : (provFood.isSecuringFood && provFood.isSecuringFood() ? 'securing food' : 'night-resting')
           note(`(cmd) ${line}${rz} -> PREEMPT (under attack) - defense outranks the ${label} hold`)
           if (commands.preemptForSurvival) commands.preemptForSurvival() // stop latch; a build resumes via persistedResume
           // fall through: the command runs and owns the body
         } else if (recoveryMove) {
-          const label = commands.isBusy && commands.isBusy() ? 'busy building' : (provision.isSecuringFood && provision.isSecuringFood() ? 'securing food' : 'night-resting')
+          const label = commands.isBusy && commands.isBusy() ? 'busy building' : (provFood.isSecuringFood && provFood.isSecuringFood() ? 'securing food' : 'night-resting')
           note(`(cmd) ${line}${rz} -> PREEMPT (post-death recovery) - recovery outranks the ${label} hold`)
           if (commands.preemptForSurvival) commands.preemptForSurvival() // stop latch; a build resumes via persistedResume
           // fall through: the recovery command runs and owns the body
@@ -2464,7 +2467,7 @@ const server = http.createServer((req, res) => {
           if (commands.preemptForSurvival) commands.preemptForSurvival() // stop latch; a build resumes via persistedResume
           // fall through: the command runs
         } else {
-          const label = commands.isBusy && commands.isBusy() ? 'busy building' : (provision.isSecuringFood && provision.isSecuringFood() ? 'securing food' : 'night-resting')
+          const label = commands.isBusy && commands.isBusy() ? 'busy building' : (provFood.isSecuringFood && provFood.isSecuringFood() ? 'securing food' : 'night-resting')
           note(`(cmd) ${line}${rz} -> held (${survivalCmd ? 'no survival need: ' + adm.reason : label}) - brain command suppressed`)
           // If a PLAYER just asked for this (the held command is the brain answering them),
           // don't leave them on read - the BODY replies once with what it's doing. Verified

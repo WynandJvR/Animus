@@ -3580,10 +3580,10 @@ const KEEP_WHEN_ALL = /_pickaxe$|_axe$|_shovel$|_sword$|_hoe$|^shears$|_helmet$|
 // (furnishHut DELETED in #110 - zero callers, and it carried three destroy-before-create paths)
 
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, HUNT_SOURCES, huntForDrop, planProvision, smeltFuelPlan, fuelBankWithdrawAmount, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, ensurePillarFiller, manualHopFromWater, breachWaterPocket, breachDryPocket, escapeUpColumn, toolForBlock, migrateChestInto, consolidateBank, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, woolCount, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, secureBase, secureBaseGate, sealHomeDescents, sealDescentsGate, worldTidy, litterSignature, inBuildZone, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, releaseFoodLatch, boundedHold, recoverFromDegraded, isRecoveringDegraded, releaseRecoveryLatches, deadlockResetDue, deadlockResetState, eatBestFood, nightRest, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, sleepableNow, ensureSpawnBed, ensureHomeShelter, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, markBedUnusable, bedHeld, gearupState, gearupResult, gearupShouldArmBackoff, proactiveGearupGate, ironGrindMinedReal, resetIronGrindMined, isNight, countFurnacesNear, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, noteWaterCrossing, lonelyFurnace, consolidateFurnaces, litterPatrol, RAW_COOKABLE, noteFurnaceHoldings, ensureFoodSupply, needFoodSupply, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, setBuildZone, setDebugSink, rememberRoute, recallRoute, planTrekRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
-  courierFoodToBank, recoveryReadyNow, hazardStepExclusion, waterStepExclusion, deathSpotExclusion, markHazardTraversal, setOperatorRouting, deepWaterUnderfoot, 
-  activeJobInfo, stopSurvivalJob, escalateFoodFloor, _foodFloorState, trekMovements, DIGGABLE_NATURAL, STRUCTURE_RE, canBreakNaturally,
-  collectDrops, huntSpiderForString, ensureFishingRod, isBankStand,
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, HUNT_SOURCES, planProvision, smeltFuelPlan, fuelBankWithdrawAmount, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, detectWood, KEEP_ON_BOT, manualHopFromWater, breachWaterPocket, breachDryPocket, escapeUpColumn, toolForBlock, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, secureBase, secureBaseGate, sealHomeDescents, sealDescentsGate, worldTidy, litterSignature, inBuildZone, deadlockResetDue, deadlockResetState, rememberBed, knownBed, ensureHomeShelter, setSpawnSuspect, isSpawnSuspect, markBedUnusable, bedHeld, gearupState, gearupResult, gearupShouldArmBackoff, proactiveGearupGate, ironGrindMinedReal, resetIronGrindMined, countFurnacesNear, dumpJunk, listInfra, rememberInfra, forgetInfra, noteWaterCrossing, noteFurnaceHoldings, ensureHutApron, ensureHutBed, survivalState, survivalNeed, mayDoProgress, schedulerState, setBuildZone, setDebugSink, rememberRoute, recallRoute, planTrekRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
+  hazardStepExclusion, waterStepExclusion, deathSpotExclusion, markHazardTraversal, setOperatorRouting, deepWaterUnderfoot, 
+  activeJobInfo, stopSurvivalJob, trekMovements, 
+  
   bedInPack, bedCandidates, acquireBed, placeBedNear, bedFootprint, // #107 SPAWN_BED: the bed acquire/lay primitives ensureSpawnBed stands on
   bedUsable, assertSpawnOn, ensureBedSite, upgradeBedPlacement, // #110 ANCHOR_INVARIANT: the anchor predicate, the ONE spawn-assert, site prep, and the only legal swap
   // SIBLING BRIDGE: internals the split-out provision-* modules legitimately need at RUNTIME
@@ -3591,9 +3591,6 @@ module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, HUNT_SOURC
   // these are not part of the API index.js/commands.js/scheduler.js call, and the double
   // underscore is the signal. Siblings reach them via require('./provision.js').__siblings.
   __siblings: {
-    get foodPlanNow () { return provFood.foodPlanNow },
-    get topUpFoodForPlan () { return provFood.topUpFoodForPlan },
-    get _setFoodPlanHint () { return provFood._setFoodPlanHint },
     // inWaterNow/armorPieceCount live in provision-shelter, but provision-mining CANNOT
     // import it: provision-shelter already requires provision-mining, so a direct import
     // would be a genuine cycle. Bank and food import them directly; mining uses these.
@@ -3606,7 +3603,6 @@ module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, HUNT_SOURC
     clearSurvStop () { _survStop = false }, // refactor fix: sibling modules clear the per-dispatch latch through this setter (was a broken write to the getter)
     get runSmeltSingle () { return runSmeltSingle }, // refactor fix: provision-food.js calls S().runSmeltSingle
     get gatherMovements () { return gatherMovements }, // refactor fix: provision-food.js calls S().gatherMovements
-    get resolveBankCell () { return provBank.resolveBankCell }, // refactor fix: provision-farm.js reaches the bank fn via the bridge
     // AUDIT: the R3 ORCHARD rung called P().gatherLoop - and gatherLoop is on NEITHER surface
     // (it is internal, and the public API exposes runGather, its router). So the call resolved to
     // undefined, threw, and landed in the rung's own catch as "(ladder) R3 orchard harvest failed".

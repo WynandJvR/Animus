@@ -25,6 +25,9 @@
 const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
 const hutModel = require('./hut-model.js')   // PURE self-structure model + repair decision
+const provRecovery = () => require('./provision-recovery.js') // LAZY: provision-recovery.js top-requires this module, so an eager import here would be a real cycle
+const provFood = () => require('./provision-food.js') // LAZY: provision-food.js top-requires this module, so an eager import here would be a real cycle
+const provBank = () => require('./provision-bank.js') // LAZY: provision-bank.js top-requires this module, so an eager import here would be a real cycle
 const provShelter = () => require('./provision-shelter.js') // LAZY: provision-shelter.js top-requires this module, so an eager import here would be a real cycle
 const navigate = require('./navigate.js')    // unified navigation
 const mining = require('./mining.js')        // PURE tool-durability model
@@ -352,7 +355,7 @@ async function acquireBed (bot, opts = {}) {
   }
   // Report what IS, not what was hoped for (DESIGN-PRINCIPLES §7): the old line claimed "no sheep
   // in reach" whether or not anything had ever gone looking for a sheep.
-  const wool = () => { try { return P().woolCount(bot) } catch { return 0 } }
+  const wool = () => { try { return provFood().woolCount(bot) } catch { return 0 } }
   dbg('  acquireBed: no bed obtainable - holding ' + wool() + ' wool [tried ' + tried.join(', ') + ']')
   return null
 }
@@ -1457,18 +1460,18 @@ async function maintainHome (bot, hutAt, opts = {}) {
   // BANK DOUBLE-CHEST HEAL (liveability, every pass): a rebuild that left the bank as two
   // mismatched single chests gets re-faced into one connected double. Idempotent: a merged
   // pair is a fast no-op (returns false).
-  try { if (await P().healBankDouble(bot, { x: hutAt.x, y: hutAt.y, z: hutAt.z }, { isStopped, say })) { out.chestFixed = true; out.damaged = true; say('fixed the bank - one proper double chest again') } } catch (e) { dbg('camp: bank double-heal failed (' + e.message + ')') }
+  try { if (await provBank().healBankDouble(bot, { x: hutAt.x, y: hutAt.y, z: hutAt.z }, { isStopped, say })) { out.chestFixed = true; out.damaged = true; say('fixed the bank - one proper double chest again') } } catch (e) { dbg('camp: bank double-heal failed (' + e.message + ')') }
   // SPAWN re-assert: a bed standing in the hut is worthless if the server anchor drifted -
   // use it again so every death keeps coming home. A no-op when the anchored bed still stands
   // (condition-gated inside ensureSpawnBed, no time window).
-  try { const r = await P().ensureSpawnBed(bot, { isStopped, say }); dbg('camp: spawn -> ' + r.how + (r.why ? ' (' + r.why + ')' : '')) } catch (e) { dbg('camp: spawn assert failed (' + e.message + ')') }
+  try { const r = await provRecovery().ensureSpawnBed(bot, { isStopped, say }); dbg('camp: spawn -> ' + r.how + (r.why ? ' (' + r.why + ')' : '')) } catch (e) { dbg('camp: spawn assert failed (' + e.message + ')') }
   // SELF-HEALING structure + interior (liveability, every pass): reconcile the registry, REPAIR
   // creeper damage (missing wall/door/furniture cells), then tidy the interior. Early no-op when
   // already clean+intact. repair.missing (0 = intact) is the cheap structural-damage signal.
   try { const mr = await maintainHut(bot, hutAt, { isStopped, say }); if (mr) { out.repair = mr.repair || null; if (mr.repair && mr.repair.missing) out.damaged = true; if (!mr.clean && !mr.skipped) { out.damaged = true; dbg('camp: hut self-heal -> ' + JSON.stringify({ ok: mr.ok, dug: mr.dug, dupes: mr.removedDupes, passes: mr.passes })) } } } catch (e) { dbg('camp: hut self-heal failed (' + e.message + ')') }
   // HOME BANK (operator promise): the hut chest is the ONE treasury - ferry every loose field
   // chest within 64 into it and pack the empties up. Idempotent.
-  try { const nc = await P().consolidateBank(bot, hutAt, { isStopped, say }); if (nc) { out.consolidated = nc; out.damaged = true; dbg('camp: consolidated ' + nc + ' field chest(s) into the bank') } } catch (e) { dbg('camp: bank consolidation failed (' + e.message + ')') }
+  try { const nc = await provBank().consolidateBank(bot, hutAt, { isStopped, say }); if (nc) { out.consolidated = nc; out.damaged = true; dbg('camp: consolidated ' + nc + ' field chest(s) into the bank') } } catch (e) { dbg('camp: bank consolidation failed (' + e.message + ')') }
   return out
 }
 
@@ -1870,7 +1873,7 @@ async function worldTidy (bot, opts = {}) {
   // the sealer/scaffold still has filler on hand). Never blocks the pass; any failure is swallowed.
   if (reclaimed) {
     try {
-      const bank = S().resolveBankCell(bot) // #94 fix: resolveBankCell lives on the __siblings bridge, not the facade (caught by the core builder's bridge audit)
+      const bank = provBank().resolveBankCell(bot) // #94 fix: resolveBankCell lives on the __siblings bridge, not the facade (caught by the core builder's bridge audit)
       if (bank) {
         const keepEach = Math.max(0, Number(process.env.TIDY_KEEP_FILLER || 64))
         const deposits = []
@@ -1881,7 +1884,7 @@ async function worldTidy (bot, opts = {}) {
         }
         if (deposits.length) {
           const chestBlock = bot.blockAt(new Vec3(bank.x, bank.y, bank.z))
-          if (chestBlock && /chest$/.test(chestBlock.name)) await P().depositMaterials(bot, chestBlock, { deposits })
+          if (chestBlock && /chest$/.test(chestBlock.name)) await provBank().depositMaterials(bot, chestBlock, { deposits })
         }
       }
     } catch (e) { dbg('  worldTidy: bank deposit failed (' + e.message + ')') }

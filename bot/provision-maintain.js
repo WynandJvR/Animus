@@ -13,6 +13,7 @@
 const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
 const maintain = require('./maintain.js')   // PURE buffer floors + hysteresis
+const provRecovery = () => require('./provision-recovery.js') // LAZY: provision-recovery.js top-requires this module, so an eager import here would be a real cycle
 const foodSec = require('./food.js')
 const mining = require('./mining.js')
 const scaffold = require('./scaffold.js')
@@ -267,7 +268,7 @@ async function maintenancePass (bot, opts = {}) {
     // condition-gated internally (ensureSpawnBed's STOOD rung, ensureHomeShelter's OK survey), so
     // a pass dispatched for some other reason costs a couple of in-memory reads here.
     if (opts.bootstrap === 'spawn') {
-      try { const r = await P().ensureSpawnBed(bot, { isStopped, say }); if (r && r.ok) stepDone('spawn(' + r.how + ')'); else dbg('  maint: spawn anchor not established (' + ((r && r.why) || '?') + ')') } catch (e) { dbg('  maint: spawn anchor failed (' + e.message + ')') }
+      try { const r = await provRecovery().ensureSpawnBed(bot, { isStopped, say }); if (r && r.ok) stepDone('spawn(' + r.how + ')'); else dbg('  maint: spawn anchor not established (' + ((r && r.why) || '?') + ')') } catch (e) { dbg('  maint: spawn anchor failed (' + e.message + ')') }
       if (between()) return { ok: true, steps, reason: 'bail:survival' }
     } else if (opts.bootstrap === 'shelter') {
       try { const r = await P().ensureHomeShelter(bot, { isStopped, say }); if (r && r.ok) stepDone('shelter(' + r.how + ')'); else dbg('  maint: shelter not established (' + ((r && r.why) || '?') + ')') } catch (e) { dbg('  maint: shelter failed (' + e.message + ')') }

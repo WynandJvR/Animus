@@ -44,6 +44,8 @@
 //     centrally - which is the entire point.
 
 const arbiter = require('./arbiter.js') // the ONE priority vocabulary (PRIORITY/priName). Zero requires of its own.
+const provRecovery = () => require('./provision-recovery.js') // LAZY: provision-recovery.js top-requires this module, so an eager import here would be a real cycle
+const provFood = () => require('./provision-food.js') // LAZY: provision-food.js top-requires this module, so an eager import here would be a real cycle
 const provMaintain = () => require('./provision-maintain.js') // LAZY: provision-maintain.js top-requires this module, so an eager import here would be a real cycle
 
 // ---- tiers ------------------------------------------------------------------------------
@@ -252,7 +254,7 @@ def({
   run: async (bot, ctx) => {
     const provision = require('./provision.js')
     const scheduler = require('./scheduler.js')
-    const r = await provision.recoverFromDegraded(bot, { say: ctx.say })
+    const r = await provRecovery().recoverFromDegraded(bot, { say: ctx.say })
     // An INTERRUPTED pass proves nothing about the world, so it must not latch the condition
     // gate either. 'busy'/'stopped'/'deadline' all mean the pass ended for reasons that have
     // nothing to do with whether its rungs could have worked - and on 2026-07-29 21:12 a
@@ -325,7 +327,7 @@ def({
   },
   run: async (bot, ctx) => {
     const provision = require('./provision.js')
-    const r = await provision.secureFood(bot, { home: ctx.knownBed, canHold: true, say: ctx.say })
+    const r = await provFood().secureFood(bot, { home: ctx.knownBed, canHold: true, say: ctx.say })
     // 'busy'/'stopped' mean SOMEONE ELSE ended this pass - it proves nothing about the world and
     // must never latch. 'night'/'food' are real conditions, and both are in the recovery
     // signature, so the latch clears the moment either moves.
@@ -346,7 +348,7 @@ def({
     : null,
   run: async (bot, ctx) => {
     const provision = require('./provision.js')
-    try { return await provision.recoverHp(bot, { say: ctx.say }) } finally {
+    try { return await provRecovery().recoverHp(bot, { say: ctx.say }) } finally {
       ctx.runner.hpCooldownUntil = ctx.nowMs() + 60000 // as the old hp-crisis reflex did: cool 60s after the attempt
     }
   }
@@ -364,7 +366,7 @@ def({
   holds: { wake: 'dawn', premise: 'sheltered' },
   run: async (bot, ctx) => {
     const provision = require('./provision.js')
-    const rested = await provision.nightRest(bot, { say: ctx.say })
+    const rested = await provRecovery().nightRest(bot, { say: ctx.say })
     return {
       msg: rested ? 'sheltered for the night' : 'could not shelter (no bed, no diggable ground) - holding',
       noOp: !rested // no bed and no diggable ground here is a fact about THIS place: do not re-dig it every 15s
@@ -384,7 +386,7 @@ def({
     //  home-repair TIMERS - "go home outranks re-arming in the wild". Both are proposals now,
     //  and the tier ordering says the same thing without a flag: homecoming is SURVIVE and
     //  owns the body, so nothing at PROGRESS can start underneath it.)
-    const rh = await provision.recoverHome(bot, { say: ctx.say, resumeAt: pr && pr.at })
+    const rh = await provRecovery().recoverHome(bot, { say: ctx.say, resumeAt: pr && pr.at })
     if (rh.arrived) return 'home' + (rh.bedOk ? ' - spawn re-anchored at the bed' : ' - bed could NOT be re-asserted')
     if (rh.stabilise) return 'stood down mid-crossing (' + (rh.blockedOn || 'blocked') + '): ' + (rh.why || '')
     return 'did not reach home this pass (' + Math.round(rh.dist || 0) + 'b out) - will pick it up again'
@@ -410,7 +412,7 @@ def({
   urgency: () => 1,
   run: async (bot, ctx) => {
     const provision = require('./provision.js')
-    const ok = (await provision.ensureSpawnBed(bot, { force: true, maxTrek: 40 })).ok
+    const ok = (await provRecovery().ensureSpawnBed(bot, { force: true, maxTrek: 40 })).ok
     return { msg: ok ? 'suspect anchor re-asserted at the bed - back to normal' : 'could not re-assert the anchor here', noOp: !ok }
   }
 })
@@ -544,7 +546,7 @@ def({
   urgency: (s) => Math.min(1, (s.rawMeat || 0) / 8) * Math.max(0.2, 1 - (s.furnaceDist || 0) / 24),
   run: async (bot, ctx) => {
     const provision = require('./provision.js')
-    const n = await provision.cookRawMeat(bot, {})
+    const n = await provFood().cookRawMeat(bot, {})
     return { msg: n > 0 ? 'cooked ' + n + ' raw meat at the furnace' : 'nothing cooked', noOp: !(n > 0) }
   }
 })

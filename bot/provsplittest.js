@@ -93,21 +93,17 @@ function ok (cond, label) { eq(!!cond, true, label) }
 // here - `git log -L92,92:provsplittest.js` replays every past adjustment and its reasoning.
 {
   const pub = Object.keys(provision).filter(k => k !== '__siblings')
-  eq(pub.length, 154, 'facade: provision.js still exports exactly 154 public names')
+  eq(pub.length, 98, 'facade: provision.js still exports exactly 98 public names')
 
   const moved = [
     [worldMemory, ['listInfra', 'rememberInfra', 'forgetInfra', 'recordWedge', 'listWedges', 'ownInfraAnchors',
       'rememberRoute', 'recallRoute', 'planTrekRoute', 'dementRoute', 'knownBed', 'rememberBed',
       'markBedUnusable', 'bedHeld', 'setSpawnSuspect', 'isSpawnSuspect', 'gearupState', 'gearupResult']],
-    [provCore, ['inventoryCounts', 'toolForBlock', 'collectDrops', 'isNight', 'canBreakNaturally']],
+    [provCore, ['toolForBlock']], // the rest LEFT - see below (toolForBlock stays: scaffold.js reaches it through a function-local require)
     [provHut, ['hutAnchor', 'ownHutAt', 'onHutApron', 'insideOwnStructure', 'hasSolidCeiling',
       'maintainHome', 'maintainHut', 'repairHutStructure', 'ensureHutApron', 'ensureHutBed',
       'worldTidy', 'litterSignature', 'bedInPack', 'bedCandidates', 'acquireBed', 'placeBedNear']],
     // provision-mining is NOT here any more - see the "left the facade" block below.
-    [provBank, ['ensureChest', 'depositMaterials', 'withdrawItem', 'chestCounts', 'consolidateBank',
-      'healBankDouble', 'migrateChestInto', 'lonelyFurnace', 'consolidateFurnaces', 'litterPatrol']],
-    [provFood, ['hasFood', 'foodCount', 'needsFood', 'secureFood', 'fishForFood', 'huntForFood',
-      'ensureFoodSupply', 'eatBestFood', 'cookRawMeat', 'scoutForFood', 'RAW_COOKABLE']]
   ]
   let checked = 0
   for (const [mod, names] of moved) {
@@ -117,7 +113,6 @@ function ok (cond, label) { eq(!!cond, true, label) }
       checked++
     }
   }
-  ok(checked >= 50, 'facade: checked ' + checked + ' moved names')
 
   // ---- provision-mining LEFT the facade (2026-08-02) ---------------------------------------
   // The facade was scaffolding for the split: keep one import stable while code moved. The
@@ -136,14 +131,31 @@ function ok (cond, label) { eq(!!cond, true, label) }
     [provMining, ['branchMine', 'digStaircaseDown', 'climbToSurface', 'pillarUpTo', 'digStaircaseUp']],
     [provFarm, ['ensureWheatFarm', 'tendWheatFarm', 'hasStandingFarm', 'surveyWaterSite', 'chooseFarmSite', 'cropExclusionStep', 'cropPlaceExclusion', 'gatherSeedsNear']],
     [provShelter, ['isSheltering', 'scoutForWater', 'underArmored', 'shelterNeeded', 'nightStuck', 'nightRestWanted', 'digInForNight', 'pickOpenSkyCell']],
-    [provMaintain, ['isMaintaining', 'stopMaintenance', 'releaseMaintainLatch', 'maintenancePass', 'safekeepSweep', 'spareKitToBank']]
+    [provMaintain, ['isMaintaining', 'stopMaintenance', 'releaseMaintainLatch', 'maintenancePass', 'safekeepSweep', 'spareKitToBank']],
+    [provCore, ['inventoryCounts', 'collectDrops', 'isNight', 'canBreakNaturally']],
+    [provBank, ['ensureChest', 'depositMaterials', 'withdrawItem', 'chestCounts', 'consolidateBank',
+      'healBankDouble', 'migrateChestInto', 'lonelyFurnace', 'consolidateFurnaces', 'litterPatrol']],
+    [provFood, ['hasFood', 'foodCount', 'needsFood', 'secureFood', 'fishForFood', 'huntForFood',
+      'ensureFoodSupply', 'eatBestFood', 'cookRawMeat', 'scoutForFood', 'RAW_COOKABLE',
+      'releaseFoodLatch', 'isSecuringFood', 'courierFoodToBank']],
+    [require('./provision-recovery.js'), ['recoverHp', 'isRecoveringHp', 'restUntilSafe', 'isResting',
+      'nightRest', 'boundedHold', 'sleepableNow', 'ensureSpawnBed', 'recoverSpawnAnchor',
+      'homeRecoveryDecision', 'recoverHome', 'recoveryReadyNow', 'recoverFromDegraded',
+      'isRecoveringDegraded', 'releaseRecoveryLatches', 'ensurePillarFiller']]
   ]
   for (const [mod, names] of LEFT) {
     for (const n of names) {
       eq(provision[n], undefined, 'facade: provision.' + n + ' is GONE (callers import the owner directly)')
-      eq(typeof mod[n], 'function', 'direct: the owner module still binds ' + n)
+      ok(mod[n] !== undefined, 'direct: the owner module still binds ' + n) // may be a table (RAW_COOKABLE), not a function
+      checked++
     }
   }
+  // Counted across BOTH lists on purpose: as the facade shrinks, names migrate from "still
+  // exported and identical" to "gone, owner still binds it". Either way this file verified them,
+  // so the floor guards against the test quietly going vacuous - not against the facade shrinking.
+  ok(checked >= 50, 'facade: verified ' + checked + ' names across still-exported + departed')
+  for (const n of ['foodPlanNow', 'topUpFoodForPlan', '_setFoodPlanHint']) eq(provision.__siblings[n], undefined, 'bridge: ' + n + ' left (owners import provision-food directly)')
+  eq(provision.__siblings.resolveBankCell, undefined, 'bridge: resolveBankCell left (farm/hut lazy-require provision-bank directly)')
   eq(provision.__siblings.inWaterNow, undefined, 'bridge: inWaterNow left (owners import provision-shelter directly)')
   eq(provision.__siblings.armorPieceCount, undefined, 'bridge: armorPieceCount left too')
   eq(provision.__siblings.ensureTorches, undefined, 'bridge: ensureTorches left (farm/hut lazy-require mining directly)')
@@ -162,8 +174,7 @@ function ok (cond, label) { eq(!!cond, true, label) }
   // eagerly import shelter) but a LAZY require expresses that honestly and names the owner, where
   // the bridge just hid it behind a shared bag. The bridge should hold only what genuinely cannot
   // be a direct import - and 'lazy' still counts as direct.
-  const expected = ['foodPlanNow', 'topUpFoodForPlan', '_setFoodPlanHint',
-    'placeFromInventory', 'scaffoldDigOK', 'walkStaged', 'KEEP_WHEN_ALL',
+  const expected = ['placeFromInventory', 'scaffoldDigOK', 'walkStaged', 'KEEP_WHEN_ALL',
     'explore', 'isSurvStopped']
   for (const n of expected) ok(s[n] !== undefined, 'bridge: __siblings.' + n + ' resolves (not undefined)')
   ok(!Object.keys(provision).includes('walkStaged'), 'bridge: internals stay OFF the public surface')

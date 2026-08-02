@@ -20,6 +20,7 @@
 const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
 const farm = require('./farm.js')             // PURE plot geometry + crop maturity
+const provBank = () => require('./provision-bank.js') // LAZY: provision-bank.js top-requires this module, so an eager import here would be a real cycle
 const scaffold = require('./scaffold.js')     // temp-block registry + teardown
 const navigate = require('./navigate.js')
 const provCore = require('./provision-core.js')
@@ -202,7 +203,7 @@ async function withdrawSeedsFromBank (bot, want, { near = null, isStopped = () =
   const have = countItem(bot, 'wheat_seeds')
   if (farm.seedBankWithdrawAmount(Infinity, have, want) <= 0) return have // pack already has `want`
   try {
-    const anchor = near || S().resolveBankCell(bot) || hutAnchor() ||
+    const anchor = near || provBank().resolveBankCell(bot) || hutAnchor() ||
       (bot.entity && bot.entity.position ? { x: Math.round(bot.entity.position.x), z: Math.round(bot.entity.position.z) } : null)
     // craft:false -> pure bank WITHDRAW only (wheat_seeds is not craftable; acquire would refuse to
     // gather anyway, but craft:false skips the reconcile/chest-read churn and can't throw outward).
@@ -444,7 +445,7 @@ async function ensureDryHomeFarm (bot, home, hut, { isStopped = () => false, say
       // #88: the chest cache goes stale-blind when the post-stash read fails (standing-on-chest) -
       // a stale-empty cache made reconcile plan a multi-minute wood gather for a hoe/planks the bank
       // held. Force a fresh bank read before planning; best-effort (cache still used if it fails).
-      try { const cell = S().resolveBankCell(bot); if (cell) await res.readChest(bot, cell) } catch (e2) { dbg('  wheat farm [dry]: bank re-read failed (' + e2.message + ') - planning from cache') }
+      try { const cell = provBank().resolveBankCell(bot); if (cell) await res.readChest(bot, cell) } catch (e2) { dbg('  wheat farm [dry]: bank re-read failed (' + e2.message + ') - planning from cache') }
       const rec = await res.reconcile(bot, { wooden_hoe: 1 }, { near: hut, maxAgeMs: 0, planOpts: { primaryWood: P().detectWood(bot) || 'oak' } })
       dbg('  wheat farm [dry]: acquiring a wooden hoe (' + (rec.plan.tasks.map(t => `${t.type}:${t.item || t.output}`).join(' > ') || (rec.withdraws.length ? 'from bank' : 'from hand')) + ')')
       if (rec.withdraws.length || rec.plan.tasks.length) await res.runReconciled(bot, rec, { isStopped, say, home: hut })

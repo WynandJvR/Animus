@@ -24,6 +24,9 @@
 
 const { goals } = require('mineflayer-pathfinder')
 const provision = require('./provision.js')
+const provRecovery = () => require('./provision-recovery.js') // LAZY: provision-recovery.js top-requires this module, so an eager import here would be a real cycle
+const provFood = () => require('./provision-food.js') // LAZY: provision-food.js top-requires this module, so an eager import here would be a real cycle
+const provCore = () => require('./provision-core.js') // LAZY: provision-core.js top-requires this module, so an eager import here would be a real cycle
 const provMaintain = () => require('./provision-maintain.js') // LAZY: provision-maintain.js top-requires this module, so an eager import here would be a real cycle
 const provShelter = () => require('./provision-shelter.js') // LAZY: provision-shelter.js top-requires this module, so an eager import here would be a real cycle
 const provMining = require('./provision-mining.js') // climbToSurface - direct, not via the facade
@@ -229,12 +232,12 @@ async function regroupForCraft (bot, anchor, { isStopped = () => false, say = ()
 // the gaps BETWEEN leaves.) Cheap when nothing's wrong: secureFood early-returns when
 // fed, the night predicates are simple reads.
 async function survivalCheckpoint (bot, opts) {
-  try { if (provision.isResting() || provision.isSecuringFood()) return } catch {}
-  try { await provision.secureFood(bot, { threshold: 12, say: opts.say, isStopped: opts.isStopped, home: opts.home }) } catch (e) { dbg('checkpoint food: ' + e.message) }
+  try { if (provRecovery().isResting() || provFood().isSecuringFood()) return } catch {}
+  try { await provFood().secureFood(bot, { threshold: 12, say: opts.say, isStopped: opts.isStopped, home: opts.home }) } catch (e) { dbg('checkpoint food: ' + e.message) }
   try {
     if (provShelter().shelterNeeded(bot) || provShelter().nightRestWanted(bot)) {
       dbg('checkpoint: night/shelter first - the goal waits')
-      await provision.nightRest(bot, { say: opts.say, isStopped: opts.isStopped })
+      await provRecovery().nightRest(bot, { say: opts.say, isStopped: opts.isStopped })
     }
   } catch (e) { dbg('checkpoint rest: ' + e.message) }
 }
@@ -318,7 +321,7 @@ async function runGoal (bot, goal, opts = {}) {
       }
       tried.push('withdraw:0') // bank unreachable - reconcile re-routes next round
     }
-    const pack = provision.inventoryCounts(bot)
+    const pack = provCore().inventoryCounts(bot)
     const d = decide(mcData, goal, rec.holdings, { plan: rec.plan, pack, blocked: activeBlocked(), planOpts: planOpts() })
     if (d.done) return { ok: true, rounds: round, tried }
     if (d.type === 'unobtainable') return { ok: false, reason: 'unobtainable: ' + d.items.join(', '), rounds: round, tried }
@@ -464,7 +467,7 @@ async function gearUp (bot, opts = {}) {
   // lifts the gate exactly like the rung rule; an armored bot may still work the night.
   if (process.env.GEARUP_NIGHT_GATE !== '0') {
     try {
-      const night = provision.isNight && provision.isNight(bot)
+      const night = provCore().isNight && provCore().isNight(bot)
       const apc = provision.__siblings && provision.__siblings.armorPieceCount // facade doesn't export it; the bridge does
       const naked = apc ? apc(bot) < 1 : false // unknown armor -> fail-open (don't gate an armored bot)
       const stuck = provShelter().nightStuck && provShelter().nightStuck(bot)
@@ -561,7 +564,7 @@ async function gearUp (bot, opts = {}) {
   // dies with the bot; banked iron survives and counts next pass). Worn armor is in
   // equipment slots - depositing only touches the loose surplus.
   try {
-    const c = provision.inventoryCounts(bot)
+    const c = provCore().inventoryCounts(bot)
     if ((c.raw_iron || 0) + (c.iron_ingot || 0) > 0) await resources.autoBank(bot, { near: at, keepDirt: opts.keepDirt || 16, isStopped })
   } catch {}
   if (opts.restoreMovements) { try { opts.restoreMovements() } catch {} }

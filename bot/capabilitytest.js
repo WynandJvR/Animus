@@ -24,6 +24,7 @@ const assert = require('assert')
 const fs = require('fs')
 const path = require('path')
 const caps = require('./capabilities.js')
+const provFood = require('./provision-food.js')
 const S = require('./scheduler.js')
 const core = require('./scheduler-core.js')
 const { RUNG_EXECUTORS } = require('./provision-recovery.js')
@@ -498,7 +499,7 @@ async function item4 () {
   })
   t('SILENT SKIPS: gatherWool the hand-written one-off is deleted, not merely unused', () => {
     assert(!provision.gatherWool, 'a named wrapper with no caller is the shape this registry exists to prevent')
-    assert(typeof provision.huntForDrop === 'function', 'and the one generic driver took its place')
+    assert(typeof provFood.huntForDrop === 'function', 'and the one generic driver took its place')
     const src = srcOf('provision-food.js')
     const chases = (src.match(/new goals\.GoalFollow\(tgt, 2\)/g) || []).length
     assert(chases <= 2, 'the mob-chase loop must not be copy-pasted per animal again (found ' + chases + ' copies)')

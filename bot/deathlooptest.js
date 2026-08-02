@@ -423,11 +423,11 @@ t('LOOP C: nightShelter is dispatched, not logged-and-dropped', () => {
   const src = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8')
   assert(!/nightShelter - reflex-owned in S4, holding/.test(src), 'the "reflex-owned, holding" no-op is gone')
   const shelterSrc = String(require('./reflexes.js').get('nightShelter').run)
-  assert(/provision\.nightRest\(bot,/.test(shelterSrc), 'it calls the real shelter executor')
+  assert(/provRecovery\(\)\.nightRest\(bot,/.test(shelterSrc), 'it calls the real shelter executor - through provision-recovery, its OWNER, not the facade')
   // ...and there is exactly ONE nightShelter actor now. The 5s reflex that used to race the tick
   // through eight private guards is DELETED, not merely gated (PLAN-one-runner S5).
   assert(!/process\.env\.NIGHT_SHELTER/.test(src), 'the rival night-shelter timer is gone from index.js')
-  assert(!/provision\.nightRest\(bot, \{ say: m => bot\.chat/.test(src), 'and so is its call into the shelter executor')
+  assert(!/nightRest\(bot, \{ say: m => bot\.chat/.test(src), 'and so is its call into the shelter executor')
 })
 
 console.log(fails ? `\n${fails} FAILURE(S)` : '\nall death-loop regression tests passed')

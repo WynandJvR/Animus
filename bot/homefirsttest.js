@@ -36,6 +36,7 @@ process.env.WORLD_MEM_FILE = MEMFILE
 try { fs.unlinkSync(MEMFILE) } catch {}
 
 const S = require('./scheduler.js')
+const provRecovery = require('./provision-recovery.js')
 const provMaintain = require('./provision-maintain.js')
 const worldMemory = require('./world-memory.js')
 const pathfix = require('./pathfix.js')
@@ -276,13 +277,13 @@ function fakeBot () {
 // between() report a survival need so the pass bails honestly instead of running the whole chore
 // chain against a fake world.
 async function runOnePass (bootstrap) {
-  const realSpawn = provision.ensureSpawnBed
+  const realSpawn = provRecovery.ensureSpawnBed
   const realShelter = provision.ensureHomeShelter
   const realNeed = provision.survivalNeed
   const realState = provision.schedulerState
   const calls = []
   let done = false
-  provision.ensureSpawnBed = async () => { calls.push('ensureSpawnBed'); done = true; return { ok: true, how: 'acquired', why: 'test' } }
+  provRecovery.ensureSpawnBed = async () => { calls.push('ensureSpawnBed'); done = true; return { ok: true, how: 'acquired', why: 'test' } }
   provision.ensureHomeShelter = async () => { calls.push('ensureHomeShelter'); done = true; return { ok: true, how: 'repaired', why: 'test' } }
   provision.survivalNeed = () => (done ? { need: 'test-bail' } : null)
   provision.schedulerState = async () => ({ homeReachable: false, armorPieces: 4, tools: {}, packFoodPts: 0 })
@@ -290,7 +291,7 @@ async function runOnePass (bootstrap) {
     const r = await provMaintain.maintenancePass(fakeBot(), { bootstrap, say: () => {} })
     return { calls, steps: (r && r.steps) || [] }
   } finally {
-    provision.ensureSpawnBed = realSpawn; provision.ensureHomeShelter = realShelter
+    provRecovery.ensureSpawnBed = realSpawn; provision.ensureHomeShelter = realShelter
     provision.survivalNeed = realNeed; provision.schedulerState = realState
   }
 }

@@ -30,6 +30,10 @@ const { goals, Movements } = require('mineflayer-pathfinder')
 const Build = require('mineflayer-builder/lib/Build')
 const interactable = require('mineflayer-builder/lib/interactable.json')
 const provision = require('./provision.js') // night-shelter during builds (shelterNeeded/digInForNight)
+const provRecovery = () => require('./provision-recovery.js') // LAZY: provision-recovery.js top-requires this module, so an eager import here would be a real cycle
+const provFood = () => require('./provision-food.js') // LAZY: provision-food.js top-requires this module, so an eager import here would be a real cycle
+const provBank = () => require('./provision-bank.js') // LAZY: provision-bank.js top-requires this module, so an eager import here would be a real cycle
+const provCore = () => require('./provision-core.js') // LAZY: provision-core.js top-requires this module, so an eager import here would be a real cycle
 const provShelter = () => require('./provision-shelter.js') // LAZY: provision-shelter.js top-requires this module, so an eager import here would be a real cycle
 const buildorder = require('./buildorder.js') // pure placement order: bottom-up then nearest + self-cell trap guard
 const orient = require('./orient.js') // pure orientation fallback when the builder lib's facingData lacks a block
@@ -392,7 +396,7 @@ function makeSourcer (bot, at, opts) {
   const home = opts.home || { x: at.x, y: at.y, z: at.z }
   const resources = require('./resources.js')
   let lastRestock = 0
-  const have = name => (provision.inventoryCounts(bot)[name] || 0)
+  const have = name => (provCore().inventoryCounts(bot)[name] || 0)
   return async function source (name, needed) {
     if (isStopped()) return 'stopped'
     const want = Math.max(1, needed || 1)
@@ -502,14 +506,14 @@ async function tryPlace (bot, build, action, item) {
   // CHESTS place DELIBERATELY (facing + merging are load-bearing): the generic path
   // gave the hut bank two mismatched singles (418,66,86 east + 418,66,87 north, live) -
   // a chest faces its placer, and the sneak used when the reference block is a chest
-  // (to avoid opening it) also SUPPRESSES merging. provision.placeChestOriented stands
+  // (to avoid opening it) also SUPPRESSES merging. provBank().placeChestOriented stands
   // on the schematic-facing side, clicks the floor (never the partner chest), no sneak,
   // and world-verifies the facing - so two adjacent schematic chests merge into the
   // double. Falls through to the generic path when the oriented one can't even try
   // (no floor yet / stand cell blocked); a later pass retries.
   if (/(^|_)chest$/.test(item.name) && properties.facing) {
     try {
-      if (await provision.placeChestOriented(bot, action.pos, properties.facing)) return true
+      if (await provBank().placeChestOriented(bot, action.pos, properties.facing)) return true
     } catch (e) { /* fall through to the generic path */ }
     const there = bot.blockAt(action.pos)
     if (there && /chest$/.test(there.name)) return true // landed (maybe imperfect facing) - don't double-place
@@ -760,7 +764,7 @@ async function buildSurvival (bot, schem, at, opts = {}) {
             // UNLESS the creeper is genuinely point-blank (<=8b), where resuming risks the blast.
             const st = provision.survivalState ? provision.survivalState(bot) : null
             const cd = st ? st.creeperDist : null
-            if (Date.now() - pauseStart >= 90000 && !provision.isResting() && !(cd != null && cd <= 8)) {
+            if (Date.now() - pauseStart >= 90000 && !provRecovery().isResting() && !(cd != null && cd <= 8)) {
               survivePauseSuppressUntil = Date.now() + 120000
               capped = true
               dbg('build: threat pause hit the 90s cap (can\'t-reach standoff, creeperDist=' + (cd == null ? 'n/a' : cd.toFixed(1)) + ') - resuming, re-pause suppressed 120s')
@@ -776,7 +780,7 @@ async function buildSurvival (bot, schem, at, opts = {}) {
           lastSurvive = Date.now()
           if (need && need.need === 'food') {
             dbg('build: SURVIVE need (food) mid-build - securing food before the next block')
-            try { await provision.secureFood(bot, { isStopped, say, threshold: 14 }) } catch {}
+            try { await provFood().secureFood(bot, { isStopped, say, threshold: 14 }) } catch {}
             bot.pathfinder.setMovements(moves)
             continue
           }
@@ -787,7 +791,7 @@ async function buildSurvival (bot, schem, at, opts = {}) {
       // it out, then carry on building.
       if (provShelter().nightRestWanted(bot) && Date.now() - lastShelter > 15000) {
         lastShelter = Date.now()
-        try { await provision.nightRest(bot, { isStopped, say }) } catch {}
+        try { await provRecovery().nightRest(bot, { isStopped, say }) } catch {}
         bot.pathfinder.setMovements(moves) // the night-rest reset movements - restore the build profile
         continue
       }
