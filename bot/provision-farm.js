@@ -24,13 +24,13 @@ const provBank = () => require('./provision-bank.js') // LAZY: provision-bank.js
 const scaffold = require('./scaffold.js')     // temp-block registry + teardown
 const navigate = require('./navigate.js')
 const provCore = require('./provision-core.js')
-const { AIRISH, REPLACEABLE, canBreakNaturally, countItem, inventoryCounts, toolForBlock,
-  gotoWithTimeout, collectDrops, stepInto, placeAt, nearHostile, isNight } = provCore
+const { AIRISH, REPLACEABLE, canBreakNaturally, countItem, toolForBlock, gotoWithTimeout, collectDrops,
+  placeAt, nearHostile, isNight } = provCore
 const worldMemory = require('./world-memory.js')
 const { loadWorldMem, saveWorldMem, listInfra, rememberInfra, forgetInfra, recallInfra,
   rememberSpot, clearSearched } = worldMemory
 const provHut = require('./provision-hut.js')
-const { hutAnchor, insideOwnStructure, ownHutAt, hasSolidCeiling } = provHut
+const { hutAnchor, ownHutAt, hasSolidCeiling } = provHut
 
 // The provisioning layer, resolved at CALL time (see the note above).
 const P = () => require('./provision.js')
@@ -1490,5 +1490,5 @@ async function plantGrove (bot, home, logItem, { isStopped = () => false, say = 
 module.exports = {
   setDebugSink,
   surveyWaterSite, chooseFarmSite, // #118 FARM_SITED_FROM_HOME (Root F)
-  PLANTABLE_GROUND, WHEAT_FARM_TARGET, farmFootprintHas, cropExclusionStep, cropPlaceExclusion, inAvoidBox, boneMealBlock, tillCell, withdrawSeedsFromBank, gatherSeedsNear, placeFarmTorches, levelPlotCell, ensureWheatFarm, replantCropCell, tendWheatFarm, hasStandingFarm, saplingFor, saplingCount, plantSaplingNear, boneMealSapling, fishSaplings, prepOrchardCell, plantGrove
+  WHEAT_FARM_TARGET, farmFootprintHas, cropExclusionStep, cropPlaceExclusion, inAvoidBox, boneMealBlock, withdrawSeedsFromBank, gatherSeedsNear, placeFarmTorches, ensureWheatFarm, replantCropCell, tendWheatFarm, hasStandingFarm, saplingFor, saplingCount, plantSaplingNear, boneMealSapling, fishSaplings, plantGrove
 }

@@ -222,7 +222,6 @@ module.exports = {
   progressInfo,
   markStalled,
   _resetProgress,
-  pushOutcomeRing,
   recentOutcomes,
   cycleFailClass,
   checklistBegin,

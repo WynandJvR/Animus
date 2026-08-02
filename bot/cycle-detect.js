@@ -136,6 +136,5 @@ function step (prev, det, now) {
 
 module.exports = {
   detect,
-  step,
-  _consts: { OSC_WINDOW_MS, OSC_MIN_SAMPLES, OSC_NET_MAX, OSC_GROSS_MIN, CELL, OSC_COVERAGE, OSC_MIN_ALT, FAIL_WINDOW_MS, FAIL_K, FAIL_CELL_MATCH, COOLDOWN_MS }
+  step
 }

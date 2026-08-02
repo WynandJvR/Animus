@@ -74,7 +74,7 @@ refreshOllamaModels(); setInterval(refreshOllamaModels, 30000).unref?.()
 // Chat, the outgoing say-gate and gaze/attention state live in chat-gate.js. The event
 // handlers and the gaze reflex below consume it; gateSay takes commands.isBusy injected.
 const chatGate = require('./chat-gate.js')
-const { recordChatLog, recordChat, clearPendingChat, noteManualLook, gateImpactful, MAX_DELIVERIES } = chatGate
+const { recordChatLog, recordChat, clearPendingChat, noteManualLook, gateImpactful } = chatGate
 const gateSay = (line, fromBrain) => chatGate.gateSay(line, fromBrain, {
   isBusy: commands.isBusy,
   // #113: the crisis probe the chatter budgets consult. Evaluated ONLY on the unprompted-quip

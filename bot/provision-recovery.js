@@ -27,28 +27,26 @@ const foodSec = require('./food.js')         // PURE food-security decisions
 const reflexes = require('./reflexes.js')    // PLAN-one-runner S4: declared holds (a hold says it is alive; it does not fake progress)
 const navigate = require('./navigate.js')
 const provCore = require('./provision-core.js')
-const { AIRISH, REPLACEABLE, countItem, inventoryCounts, toolForBlock, gotoWithTimeout,
-  collectDrops, stepInto, placeAt, nearHostile, isNight, canBreakNaturally } = provCore
+const { AIRISH, countItem, toolForBlock, gotoWithTimeout, collectDrops, stepInto, nearHostile, isNight,
+  canBreakNaturally } = provCore
 const worldMemory = require('./world-memory.js')
-const { loadWorldMem, saveWorldMem, listInfra, rememberInfra, recallInfra, knownBed,
-  rememberBed, forgetBed, markBedUnusable, bedHeld, setSpawnSuspect, isSpawnSuspect,
-  noteBedUnobtainable, clearBedUnobtainable } = worldMemory
+const { loadWorldMem, saveWorldMem, listInfra, recallInfra, knownBed, rememberBed, forgetBed, markBedUnusable,
+  bedHeld, isSpawnSuspect, noteBedUnobtainable, clearBedUnobtainable } = worldMemory
 const provHut = require('./provision-hut.js')
-const { hutAnchor, insideOwnStructure, hasSolidCeiling, ownHutAt, onHutApron, maintainHome,
-  ensureHutBed, stepOffApron, bedUsable, assertSpawnOn } = provHut
+const { hutAnchor, insideOwnStructure, hasSolidCeiling, ownHutAt, onHutApron, ensureHutBed, stepOffApron,
+  bedUsable, assertSpawnOn } = provHut
 const provShelter = require('./provision-shelter.js')
-const { isSheltering, shelterNeeded, nightStuck, nightRestWanted, digInForNight, underArmored,
-  lowHpCalm, inWaterNow, ensureAshore, pickOpenSkyCell, shelterSite, _sheltering } = provShelter
+const { shelterNeeded, nightStuck, digInForNight, underArmored, inWaterNow, ensureAshore, pickOpenSkyCell,
+  shelterSite, _sheltering } = provShelter
 const provMining = require('./provision-mining.js')
 const { pillarUpTo } = provMining
 const provFarm = require('./provision-farm.js')
 const { tendWheatFarm, farmFootprintHas } = provFarm
 const provFood = require('./provision-food.js')
-const { hasFood, foodCount, needsFood, secureFood, eatBestFood, isSecuringFood, eatUp,
-  eatFromPackToComfortable, huntForFood, cookRawMeat, bakeBreadFromWheat, bankFoodFirst,
-  courierFoodToBank, RAW_COOKABLE, FOOD_ANIMALS } = provFood
+const { hasFood, foodCount, secureFood, eatUp, eatFromPackToComfortable, huntForFood, cookRawMeat,
+  bakeBreadFromWheat, bankFoodFirst, courierFoodToBank, RAW_COOKABLE, FOOD_ANIMALS } = provFood
 const provBank = require('./provision-bank.js')
-const { resolveBankCell, depositMaterials, withdrawItem, chestCounts } = provBank
+const { resolveBankCell, depositMaterials } = provBank
 
 const P = () => require('./provision.js')
 const S = () => require('./provision.js').__siblings
@@ -1613,5 +1611,5 @@ function releaseRecoveryLatches () { const was = _recoveringDegraded || _recover
 
 module.exports = {
   setDebugSink,
-  DEADLOCK_HP, DEADLOCK_MAX_NOFOOD, DEADLOCK_FAILS, DEADLOCK_RESET_SOFT, DEADLOCK_SOFT_HP, DEADLOCK_SOFT_FOOD, DEADLOCK_SOFT_FAILS, DEADLOCK_RESET_COOLDOWN_MS, DEADLOCK_FALL_H, SUICIDE_EXIT_OPEN_SKY, SUICIDE_FALLBACK_DEATH, SUICIDE_DROWN, SUICIDE_PILLAR_WORKS, _deadlockFails, _deadlockResetting, _noteDeadlockProgress, noteDeadlockAttempt, noteDeadlockReset, migrateDeadlockCounter, deadlockResetDue, deadlockResetState, sampleColumnForSky, reachOpenSky, ensurePillarFiller, deadlockDieByFall, suicideByDrown, suicideByPitDrop, deadlockFallbackDeath, deadlockSuicideReset, _recoveringHp, recoverHp, isRecoveringHp, _resting, restUntilSafe, isResting, sleepInBedHere, nightRest, nightRestInner, boundedHold, sleepableNow, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, RUNG_EXECUTORS, recoveryReadyNow, _recoveringDegraded, recoverFromDegraded, isRecoveringDegraded, releaseRecoveryLatches
+  DEADLOCK_HP, DEADLOCK_MAX_NOFOOD, DEADLOCK_FAILS, DEADLOCK_RESET_SOFT, SUICIDE_PILLAR_WORKS, noteDeadlockAttempt, noteDeadlockReset, migrateDeadlockCounter, deadlockResetDue, deadlockResetState, ensurePillarFiller, deadlockDieByFall, suicideByPitDrop, deadlockFallbackDeath, deadlockSuicideReset, _recoveringHp, recoverHp, isRecoveringHp, _resting, restUntilSafe, isResting, sleepInBedHere, nightRest, nightRestInner, boundedHold, sleepableNow, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, RUNG_EXECUTORS, recoveryReadyNow, _recoveringDegraded, recoverFromDegraded, isRecoveringDegraded, releaseRecoveryLatches
 }

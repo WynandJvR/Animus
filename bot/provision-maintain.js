@@ -19,24 +19,21 @@ const mining = require('./mining.js')
 const scaffold = require('./scaffold.js')
 const navigate = require('./navigate.js')
 const provCore = require('./provision-core.js')
-const { AIRISH, countItem, inventoryCounts, toolForBlock, gotoWithTimeout, collectDrops, nearHostile, isNight } = provCore
+const { countItem, collectDrops, isNight } = provCore
 const worldMemory = require('./world-memory.js')
-const { loadWorldMem, saveWorldMem, listInfra, rememberInfra, recallInfra, knownBed,
-  gearupState, proactiveGearupGate } = worldMemory
+const { loadWorldMem, knownBed, gearupState, proactiveGearupGate } = worldMemory
 const provHut = require('./provision-hut.js')
-const { hutAnchor, insideOwnStructure, ownHutAt, maintainHome, secureBase, secureBaseGate, sealHomeDescents, sealDescentsGate, worldTidy } = provHut
+const { hutAnchor, maintainHome, secureBase, secureBaseGate, sealHomeDescents, sealDescentsGate, worldTidy } = provHut
 const provBank = require('./provision-bank.js')
-const { resolveBankCell, depositMaterials, withdrawItem, chestCounts, consolidateBank,
-  lonelyFurnace, consolidateFurnaces, litterPatrol } = provBank
+const { resolveBankCell, depositMaterials, consolidateFurnaces, litterPatrol } = provBank
 const provMining = require('./provision-mining.js')
 const { ensureTorches, miningPicks } = provMining
 const provFarm = require('./provision-farm.js')
 const { WHEAT_FARM_TARGET } = provFarm
 const provFood = require('./provision-food.js')
-const { hasFood, foodCount, courierFoodToBank, RAW_COOKABLE, cookRawMeat, eatUp,
-  bakeBreadFromWheat, ensureFoodSupply } = provFood
+const { courierFoodToBank, RAW_COOKABLE, cookRawMeat, eatUp, bakeBreadFromWheat, ensureFoodSupply } = provFood
 const provShelter = require('./provision-shelter.js')
-const { underArmored, nightStuck } = provShelter
+const { nightStuck } = provShelter
 
 const P = () => require('./provision.js')
 const S = () => require('./provision.js').__siblings
@@ -534,5 +531,5 @@ async function maintenancePass (bot, opts = {}) {
 
 module.exports = {
   setDebugSink,
-  JUNK_RE, _maintaining, _maintStop, _maintState, isMaintaining, stopMaintenance, releaseMaintainLatch, _setMaintaining, cleanupScaffold, dumpJunk, safekeepSweep, spareKitToBank, maintenancePass
+  JUNK_RE, _maintaining, _maintStop, isMaintaining, stopMaintenance, releaseMaintainLatch, _setMaintaining, cleanupScaffold, dumpJunk, safekeepSweep, spareKitToBank, maintenancePass
 }

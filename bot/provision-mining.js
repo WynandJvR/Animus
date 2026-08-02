@@ -25,16 +25,14 @@ const provShelter = () => require('./provision-shelter.js') // LAZY: provision-s
 const navigate = require('./navigate.js')
 const scaffold = require('./scaffold.js')
 const provCore = require('./provision-core.js')
-const { AIRISH, REPLACEABLE, canBreakNaturally, countItem, inventoryCounts, toolForBlock,
-  gotoWithTimeout, collectDrops, stepInto, placeAt, nearHostile, isNight, SHELTER_HOSTILE,
-  STRUCTURE_RE } = provCore
+const { AIRISH, canBreakNaturally, countItem, toolForBlock, gotoWithTimeout, collectDrops, stepInto,
+  nearHostile, STRUCTURE_RE } = provCore
 const worldMemory = require('./world-memory.js')
-const { loadWorldMem, saveWorldMem, loadMines, rememberMine, recallMine, forgetMine,
-  updateMineProgress, listInfra, rememberInfra, recallInfra } = worldMemory
+const { rememberMine, recallMine, forgetMine, updateMineProgress } = worldMemory
 const provFarm = require('./provision-farm.js')
 const { cropExclusionStep, cropPlaceExclusion } = provFarm
 const provHut = require('./provision-hut.js')
-const { hutAnchor, insideOwnStructure, hasSolidCeiling, onHutApron, stepOffApron } = provHut
+const { insideOwnStructure, hasSolidCeiling, onHutApron, stepOffApron } = provHut
 
 const P = () => require('./provision.js')          // public provisioning surface, at call time
 const S = () => require('./provision.js').__siblings // internals shared between provision-* modules
@@ -981,5 +979,5 @@ function mineDanger (bot) {
 
 module.exports = {
   setDebugSink,
-  digShaftDown, digStaircaseUp, climbMovements, climbToSurface, pillarUpTo, mineTunnel, placeTorch, ensureTorches, miningPicks, bestPick, workingPickCount, workingMiningPick, carriedPickUsesLeft, craftOneFromInv, craftStonePickHere, ensureMiningKit, digStaircaseDown, enterExistingMine, branchMine, grabNearbyOre, mineDanger
+  digShaftDown, digStaircaseUp, climbMovements, climbToSurface, pillarUpTo, mineTunnel, placeTorch, ensureTorches, miningPicks, workingPickCount, ensureMiningKit, digStaircaseDown, enterExistingMine, branchMine, mineDanger
 }

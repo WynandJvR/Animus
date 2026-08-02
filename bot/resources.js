@@ -21,6 +21,13 @@ const fs = require('fs')
 const path = require('path')
 const { Vec3 } = require('vec3')
 const provision = require('./provision')
+// The chest/pack primitives left the provision facade in be4ad17 (FACADE: core, bank, food
+// and recovery leave). This file was not rewritten with the rest, so every call below read
+// `undefined` and every failure landed in a catch that blames the world - see the note on
+// readChest. Import them from the modules that own them now. Neither top-level requires
+// resources.js back (they reach it lazily, inside functions), so this adds no cycle.
+const provBank = require('./provision-bank.js') // chestCounts, withdrawItem, ensureChest, depositMaterials
+const provCore = require('./provision-core.js') // inventoryCounts
 const restock = require('./restock') // pure multi-material batching decision
 
 let dbgSink = null
@@ -145,7 +152,7 @@ async function readChest (bot, e) {
   if (!blk || !/chest/.test(blk.name)) return (loadCache()[cellKey(e)] || {}).counts || {}
   if (chestCoolingOff(e)) return (loadCache()[cellKey(e)] || {}).counts || {} // dead chest - don't walk, use the cache
   try {
-    const counts = await provision.chestCounts(bot, blk)
+    const counts = await provBank.chestCounts(bot, blk)
     const ent = loadCache()[cellKey(e)] = loadCache()[cellKey(e)] || {}
     ent.counts = counts; ent.at = Date.now()
     saveCache()
@@ -166,7 +173,7 @@ function cachedChest (e) { return loadCache()[cellKey(e)] || null }
 // when fresh (default 3 min); stale/unknown chests get a real walk-and-read unless
 // opts.cachedOnly (cheap mode for reflexes that must not send the bot walking).
 async function totalCounts (bot, opts = {}) {
-  const out = { ...provision.inventoryCounts(bot) }
+  const out = { ...provCore.inventoryCounts(bot) }
   const maxAge = opts.maxAgeMs != null ? opts.maxAgeMs : 180000
   for (const e of verifiedChests(bot, opts.near, opts.maxDist)) {
     const c = cachedChest(e)
@@ -195,7 +202,7 @@ async function withdrawItems (bot, name, count, opts = {}) {
     const blk = bot.blockAt(new Vec3(e.x, e.y, e.z))
     if (!blk || !/chest/.test(blk.name)) continue
     try {
-      const n = await provision.withdrawItem(bot, blk, name, count - got)
+      const n = await provBank.withdrawItem(bot, blk, name, count - got)
       got += n
       chestWorked(e)
       await readChest(bot, e) // we're standing here - refresh the cache with a real read
@@ -235,14 +242,14 @@ async function autoBank (bot, opts = {}) {
       if (b && /chest/.test(b.name)) { blk = b; cell = e; break }
     }
     if (!blk && opts.mayCreate) {
-      try { blk = await provision.ensureChest(bot, { isStopped: opts.isStopped, home: opts.near }) } catch (e) { dbg('autoBank: no chest and cannot make one (' + e.message + ')'); break }
+      try { blk = await provBank.ensureChest(bot, { isStopped: opts.isStopped, home: opts.near }) } catch (e) { dbg('autoBank: no chest and cannot make one (' + e.message + ')'); break }
       cell = blk && { x: blk.position.x, y: blk.position.y, z: blk.position.z }
     }
     if (!blk) break // no more chests and can't/won't make one
     tried.add(cellKey(cell))
     const before = packMaterialCount(bot)
     try {
-      const n = await provision.depositMaterials(bot, blk, { keepDirt: opts.keepDirt || 0 })
+      const n = await provBank.depositMaterials(bot, blk, { keepDirt: opts.keepDirt || 0 })
       total += n || 0
       await readChest(bot, cell)
     } catch (e) { dbg('autoBank: deposit failed (' + e.message + ')') }
@@ -276,7 +283,7 @@ async function ensurePackRoom (bot, minFree = 4, opts = {}) {
         const e = verifiedChests(bot, opts.near)[0]
         const blk = e && bot.blockAt(new Vec3(e.x, e.y, e.z))
         if (blk && /chest/.test(blk.name)) {
-          const n = await provision.depositMaterials(bot, blk, { deposits: plan })
+          const n = await provBank.depositMaterials(bot, blk, { deposits: plan })
           if (n) { dbg('ensurePackRoom: shed ' + n + ' surplus item(s) to the bank (' + free() + ' slots free)'); try { await readChest(bot, e) } catch {} }
         }
       }
@@ -300,7 +307,7 @@ async function ensurePackRoom (bot, minFree = 4, opts = {}) {
 // recover from the old hut) - never withdrawn, just trusted.
 async function reconcile (bot, bom, opts = {}) {
   const mcData = require('minecraft-data')(bot.version)
-  const pack = provision.inventoryCounts(bot)
+  const pack = provCore.inventoryCounts(bot)
   const chestTotals = {}
   for (const e of verifiedChests(bot, opts.near, opts.maxDist)) {
     const c = cachedChest(e)
@@ -361,7 +368,7 @@ async function runReconciled (bot, rec, opts = {}) {
 // and gets the material. Returns true when the pack now holds at least `count` (or gained
 // any, for count>1 partials).
 async function acquire (bot, name, count = 1, opts = {}) {
-  const packHas = () => provision.inventoryCounts(bot)[name] || 0
+  const packHas = () => provCore.inventoryCounts(bot)[name] || 0
   const before = packHas()
   if (before >= count) return true
   // withdraw a BATCH (fewer bank trips for bulk blocks) but only ever CRAFT the shortfall
@@ -406,7 +413,7 @@ async function acquire (bot, name, count = 1, opts = {}) {
 // picks what/how much (most-needed first, capped). Returns total items withdrawn.
 async function restockFromBank (bot, remainingBom, opts = {}) {
   if (!remainingBom || !Object.keys(remainingBom).length) return 0
-  const pack = provision.inventoryCounts(bot)
+  const pack = provCore.inventoryCounts(bot)
   // cheap bank tally: cached counts across verified chests near `near` (no forced re-reads)
   const bank = {}
   for (const e of verifiedChests(bot, opts.near, opts.maxDist)) {

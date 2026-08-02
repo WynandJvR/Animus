@@ -197,7 +197,9 @@ function count () { return reg.size }
 // pillar placer could brick over the crops the pathfinder's cropPlaceExclusion already avoids.
 // Lazy-consults provision's wheatFarm memory; false on any error / flag off. Callers gate placement.
 function onFarmFootprint (pos) {
-  try { return require('./provision.js').farmFootprintHas(pos) } catch { return false }
+  // farmFootprintHas moved to provision-farm.js and left the facade in ea48895; through the old
+  // spelling this threw and the catch answered "not farm" for every cell, disarming the guard.
+  try { return require('./provision-farm.js').farmFootprintHas(pos) } catch { return false }
 }
 
 // ---- filler policy -----------------------------------------------------------------

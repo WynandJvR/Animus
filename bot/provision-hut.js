@@ -32,12 +32,11 @@ const provShelter = () => require('./provision-shelter.js') // LAZY: provision-s
 const navigate = require('./navigate.js')    // unified navigation
 const mining = require('./mining.js')        // PURE tool-durability model
 const provCore = require('./provision-core.js')
-const { AIRISH, REPLACEABLE, canBreakNaturally, countItem, inventoryCounts, toolForBlock,
-  gotoWithTimeout, collectDrops, stepInto, placeAt, nearHostile, isNight } = provCore
+const { AIRISH, REPLACEABLE, canBreakNaturally, countItem, toolForBlock, gotoWithTimeout, collectDrops,
+  placeAt, nearHostile, isNight } = provCore
 const worldMemory = require('./world-memory.js')
 const INFRA_BLOCK = { table: /crafting_table$/, furnace: /furnace$/, chest: /chest$/, bed: /_bed$/ } // refactor fix: the reconcileInfra consumer moved here but this const stayed (unexported) in world-memory.js -> ReferenceError
-const { loadWorldMem, saveWorldMem, listInfra, rememberInfra, forgetInfra, recallInfra,
-  recallInfraVerified, knownBed, rememberBed, forgetBed } = worldMemory
+const { loadWorldMem, saveWorldMem, listInfra, rememberInfra, forgetInfra, recallInfra, knownBed, rememberBed } = worldMemory
 
 // The provisioning layer, resolved at CALL time (see the late-binding note above).
 const P = () => require('./provision.js')
@@ -886,6 +885,9 @@ function freeInteriorCell (bot, hut, near) {
 // bot actually stands in to cross the threshold), or null - derived from the self-structure
 // model (schema-correct 6-wide rim, not the old 5-wide dx/dz 0..4 scan). anchor.y is the
 // floor plank slab, so the walkable door cell is hut.y+1.
+// UNWIRED (audit 2026-08-02): no caller anywhere - the door-crossing path derives its own
+// cell. Kept, not deleted, for the §5 reason on needFoodSupply: the absent call is the
+// finding. Wire it or drop it.
 function findHutDoorway (bot, hut) {
   const d = hutModel.doorwayColumn(hut, hutReader(bot), { preferDoorBlock: process.env.DOOR_CROSS_GEOMETRIC !== '0' })
   return d ? new Vec3(d.x, hut.y + 1, d.z) : null
@@ -1896,7 +1898,7 @@ async function worldTidy (bot, opts = {}) {
 
 module.exports = {
   setDebugSink, insideHutBox,
-  insideHutBox, ownHutAt, onHutApron, insideOwnStructure, hasSolidCeiling, hutAnchor, hutReader, ensureHomeShelter, stepOffApron, ensureHutApron, clearDoorApproach, healHomeCrater, ensureHutBed, relocateBedInto, bedInPack, bedCandidates, acquireBed, placeBedNear, bedFootprint, bedUsable, assertSpawnOn, ensureBedSite, upgradeBedPlacement, freeInteriorCell, findHutDoorway, hutFreeCells, furnitureInHut, stationInHut, stationSlot, loadHutSchem, reconcileInfra, cleanupHutInterior, repairHutStructure, recallAndReach, maintainHut, maintainHome,
+  insideHutBox, ownHutAt, onHutApron, insideOwnStructure, hasSolidCeiling, hutAnchor, ensureHomeShelter, stepOffApron, ensureHutApron, clearDoorApproach, healHomeCrater, ensureHutBed, relocateBedInto, bedInPack, bedCandidates, acquireBed, placeBedNear, bedFootprint, bedUsable, assertSpawnOn, ensureBedSite, upgradeBedPlacement, freeInteriorCell, findHutDoorway, hutFreeCells, furnitureInHut, stationInHut, stationSlot, reconcileInfra, cleanupHutInterior, repairHutStructure, recallAndReach, maintainHut, maintainHome,
   secureBase, secureBaseGate: hutModel.secureBaseGate,
   sealHomeDescents, sealDescentsGate: hutModel.sealDescentsGate,
   worldTidy, litterSignature: hutModel.litterSignature

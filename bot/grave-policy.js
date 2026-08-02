@@ -272,7 +272,7 @@ function graveScore (g) { return graveNetValue(g) / (1 + (g && g.dist != null ? 
 function graveSalvageBlocked (g) { return !!(g && g.salvage && g.salvage.go === false) }
 
 module.exports = {
-  graveValue, graveWorthIt, graveUrgency, graveUrgencyRank, graveCompare, shouldChaseGrave, graveLootVerdict, deathSpotCost,
+  graveValue, graveWorthIt, graveUrgency, graveCompare, shouldChaseGrave, graveLootVerdict, deathSpotCost,
   hazardBoxHas, classifyDeathCause, causeWritesOff, hazardStepCost, hazardHardArmed, salvageVerdict,
   graveNetValue, graveScore, graveSalvageBlocked,
   HAZARD_MEDIUM, HAZARD_FORBID

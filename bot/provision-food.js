@@ -23,22 +23,19 @@ const capabilities = require('./capabilities.js') // the PURE capability registr
 const farm = require('./farm.js')      // PURE wheat geometry + crop state
 const navigate = require('./navigate.js')
 const provCore = require('./provision-core.js')
-const { AIRISH, REPLACEABLE, canBreakNaturally, countItem, inventoryCounts, toolForBlock,
-  gotoWithTimeout, collectDrops, stepInto, placeAt, nearHostile, isNight } = provCore
+const { AIRISH, countItem, inventoryCounts, gotoWithTimeout, collectDrops, nearHostile, isNight } = provCore
 const worldMemory = require('./world-memory.js')
 // #118: listInfra + forgetInfra dropped - the only consumer was ensureFoodSupply's arrival-time
 // forget-and-continue purge over remembered ponds, which the write-time qualifier replaced.
-const { loadWorldMem, saveWorldMem, rememberInfra, recallInfra, rememberSpot,
-  recallSpot, forgetSpot, markSearched, isSearchedDry, clearSearched,
-  recallInfraVerified, knownBed } = worldMemory
+const { loadWorldMem, saveWorldMem, rememberInfra, recallInfra, recallInfraVerified, knownBed } = worldMemory
 const provHut = require('./provision-hut.js')
-const { hutAnchor, insideOwnStructure, hasSolidCeiling } = provHut
+const { hutAnchor, hasSolidCeiling } = provHut
 const provFarm = require('./provision-farm.js')
 const { hasStandingFarm, tendWheatFarm, ensureWheatFarm, WHEAT_FARM_TARGET } = provFarm
 const provShelter = require('./provision-shelter.js') // inWaterNow: don't fish from inside the pond
 const { inWaterNow } = provShelter
 const provBank = require('./provision-bank.js')
-const { resolveBankCell, isBankStand, bankStandFor, chestCounts, withdrawItem, depositMaterials } = provBank
+const { resolveBankCell, bankStandFor, depositMaterials } = provBank
 
 const P = () => require('./provision.js')
 const S = () => require('./provision.js').__siblings
@@ -59,7 +56,8 @@ const FOOD_ANIMALS = /^(cow|mooshroom|pig|chicken|sheep|rabbit)$/
 // Animals that drop LEATHER when killed. Cows/mooshrooms are the reliable, common
 // source (0-2 leather each); we hunt those, not horses/llamas. This is the raw
 // material for leather armor - the "from nothing" armor tier (no mining/smelting).
-const LEATHER_ANIMALS = /^(cow|mooshroom)$/
+// (The animal-name regex that used to live here went unused once gatherLeather started
+// filtering on the DROP via huntForDrop({item:'leather'}) - the name test was never consulted.)
 
 const RISKY_EAT = /^(rotten_flesh|chicken|spider_eye|poisonous_potato|pufferfish)$/
 
@@ -71,7 +69,7 @@ const RISKY_EAT = /^(rotten_flesh|chicken|spider_eye|poisonous_potato|pufferfish
 // BOUNDED: ONE pass, no loop; the string need + flag gate live at the ensureFishingRod call site.
 // Returns true if a spider died. Uses the movement profile already set (chasing needs no digging,
 // so anti-grief holds).
-const ROD_SPIDERS = /^(spider|cave_spider)$/
+// (Likewise, huntSpiderForString filters on the 'string' drop, not on a spider-name regex.)
 
 // the home baseline when unknown) so a stale/absent job label never mis-sizes the ration. `override`
 // lets a caller that KNOWS its plan (branchMine knows the descent target depth) force the numbers.
@@ -90,7 +88,6 @@ let _securingFood = false
 // instead of re-running the identical failing sequence. Capped (foodFloorEscalation).
 let _foodFloorNoProgress = 0
 
-function _foodFloorState () { return _foodFloorNoProgress }
 
 function hasFood (bot) {
   const md = require('minecraft-data')(bot.version)
@@ -687,8 +684,14 @@ async function ensureFoodSupply (bot, opts = {}) {
 }
 
 // Cheap check (NO bank walk): should a fed, idle, safe bot proactively establish its food
-// supply now? The index reflex gates on this. Renewable = a standing wheat farm; banked food
-// is treated as 0 here (cheap) - the bank is the reactive pantry, not the durable supply.
+// supply now? Renewable = a standing wheat farm; banked food is treated as 0 here (cheap) -
+// the bank is the reactive pantry, not the durable supply.
+//
+// UNWIRED (audit 2026-08-02): the line above used to read "The index reflex gates on this."
+// Nothing calls it - not index.js, not a reflex row, not the scheduler. So the proactive
+// food-supply decision is computed nowhere and the gate it describes does not exist. Left in
+// place deliberately: DESIGN-PRINCIPLES §5 says a decision must produce an action, and
+// deleting the decision hides the missing action instead of fixing it. Wire it or drop it.
 function needFoodSupply (bot) {
   if (!bot.entity || bot.food == null) return false
   const safe = !nearHostile(bot, 12) && (bot.health ?? 20) >= 12 && !isNight(bot) && !hasSolidCeiling(bot, 12)
@@ -1256,5 +1259,5 @@ async function scoutHunt (bot, { isStopped = () => false, say = () => {}, maxMs 
 module.exports = {
   setDebugSink,
   REGEN_FOOD_MIN,
-  RAW_COOKABLE, FOOD_ANIMALS, LEATHER_ANIMALS, RISKY_EAT, ROD_SPIDERS, DFOOD_DEEP, DFOOD_FAR, _foodPlanHint, _securingFood, _foodFloorNoProgress, _foodFloorState, hasFood, foodCount, needsFood, nearestFoodAnimal, eatFromPackToComfortable, eatBestFood, eatUp, bakeBreadFromWheat, cookRawMeat, drainOwnFurnaceFood, fishingEnabled, ensureFishingRod, fishForFood, huntForFood, huntForDrop, huntSpiderForString, gatherLeather, woolCount, ensureFoodSupply, needFoodSupply, bankFoodFirst, courierFoodToBank, foodPlanNow, topUpFoodForPlan, _setFoodPlanHint, isSecuringFood, releaseFoodLatch, escalateFoodFloor, secureFood, secureFoodInner, scoutForFood, scoutHunt
+  RAW_COOKABLE, FOOD_ANIMALS, RISKY_EAT, DFOOD_DEEP, _foodPlanHint, _securingFood, hasFood, foodCount, needsFood, nearestFoodAnimal, eatFromPackToComfortable, eatBestFood, eatUp, bakeBreadFromWheat, cookRawMeat, drainOwnFurnaceFood, fishingEnabled, ensureFishingRod, fishForFood, huntForFood, huntForDrop, gatherLeather, woolCount, ensureFoodSupply, needFoodSupply, bankFoodFirst, courierFoodToBank, foodPlanNow, topUpFoodForPlan, _setFoodPlanHint, isSecuringFood, releaseFoodLatch, escalateFoodFloor, secureFood, secureFoodInner, scoutForFood, scoutHunt
 }

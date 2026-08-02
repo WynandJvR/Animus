@@ -30,18 +30,18 @@ const routeMem = require('./route-mem.js') // PURE route/wedge geometry: replay 
 const hutModel = require('./hut-model.js') // PURE self-structure model + #37 repair decision (decideHutRepair) / tolerant classifier (cellMismatch)
 const navLeg = require('./nav-leg.js') // PURE leg-planning core (NAV Phase B): Y-banded surface-trek leg goal so travelFar legs can't ride a cave 45b down to lava
 const gravePolicy = require('./grave-policy.js') // PURE grave decisions (worth/urgency/order/chase-gate/loot-verdict); the LEDGER itself stays here
-const { graveValue, graveWorthIt, graveUrgency, graveUrgencyRank, graveCompare, shouldChaseGrave, graveLootVerdict } = gravePolicy
+const { graveValue, graveUrgency, graveCompare, shouldChaseGrave, graveLootVerdict } = gravePolicy
 const perception = require('./perception.js') // read-only world/self observation; state() below stitches these with the records THIS file owns
-const { HOSTILE, facing, summariseEntities, biomeName, nearestThreat, nearbyPlayers, wornArmor, isWaterlogged, hazards } = perception
+const { HOSTILE, facing, summariseEntities, biomeName, nearestThreat, nearbyPlayers, wornArmor, hazards } = perception
 const opBuild = require('./op-build.js') // LEGACY operator /fill+/setblock builders + position/player helpers (NOT the survival build path)
-const { blockPos, anchorInFront, fill, setblock, normName, findPlayer, buildWall, buildTower, buildHouse } = opBuild
+const { blockPos, anchorInFront, fill, setblock, findPlayer, buildWall, buildTower, buildHouse } = opBuild
 const gear = require('./gear.js') // PURE gear picks (which tool for a block, which slot/material of armor); the acting code stays here
-const { bestTool, armorSlot, bestArmor, armorRank, ARMOR_MAT, ARMOR_RANK, LEATHER_PIECES } = gear
+const { bestTool, armorSlot, bestArmor, armorRank, ARMOR_MAT, LEATHER_PIECES } = gear
 const telemetry = require('./telemetry.js') // activity/outcome/progress/checklist/stuck records; trackTick below still orchestrates it with the death snapshot
 const grave = require('./grave.js') // the death LEDGER + carried-items snapshot (grave-policy.js holds the pure decisions)
 const resumeStore = require('./resume-store.js') // the saved-build FILE + pause timing + finish disposition (the build latches stay here)
 const { persistResume, clearPersistedResume, persistedResume, markResumePaused, resumeHoldRemaining, finishDisposition } = resumeStore
-const { activityInfo, beginActivity, endActivity, recordOutcome, touchProgress, progressInfo, markStalled, _resetProgress, pushOutcomeRing, recentOutcomes, checklistBegin, checklistStep, JOB_STEPS } = telemetry
+const { activityInfo, beginActivity, endActivity, recordOutcome, touchProgress, progressInfo, markStalled, _resetProgress, recentOutcomes, checklistBegin, checklistStep, JOB_STEPS } = telemetry
 const GoalNearXZBanded = navLeg.makeGoalNearXZBanded(goals.Goal) // Y-aware drop-in for goals.GoalNearXZ (NAV_HAZARD_LEGS)
 const NAV_HAZARD_LEGS = process.env.NAV_HAZARD_LEGS !== '0' // NAV Phase B (default ON): Y-band the trek leg goal + price lava in travelMovements; =0 => today's Y-blind GoalNearXZ + no lava cost, byte-for-byte
 const WATER_SAFE = process.env.WATER_SAFE !== '0' // task #45 (default ON): price OVER-THE-HEAD water in travelMovements so legs route around a pond aquifer (shallow water stays free -> farm/fishing reachable); =0 => no water cost, byte-for-byte

@@ -34,24 +34,20 @@ const provRecovery = require('./provision-recovery.js') // R0-R5 degraded ladder
 const provMaintain = require('./provision-maintain.js') // the chores: courier, safekeep, spare kit, junk, scaffold sweep
 const survivalSnapshot = require('./survival-snapshot.js') // the plain-data view the PURE scheduler/arbiter consume
 const { survivalState, survivalNeed, mayDoProgress, activeJobInfo, schedulerState } = survivalSnapshot
-const { JUNK_RE, _maintaining, _maintStop, _maintState, isMaintaining, stopMaintenance, releaseMaintainLatch, _setMaintaining, cleanupScaffold, dumpJunk, safekeepSweep, spareKitToBank, maintenancePass } = provMaintain
-const { DEADLOCK_HP, DEADLOCK_MAX_NOFOOD, DEADLOCK_FAILS, DEADLOCK_RESET_SOFT, DEADLOCK_SOFT_HP, DEADLOCK_SOFT_FOOD, DEADLOCK_SOFT_FAILS, DEADLOCK_RESET_COOLDOWN_MS, DEADLOCK_FALL_H, SUICIDE_EXIT_OPEN_SKY, SUICIDE_FALLBACK_DEATH, SUICIDE_DROWN, _deadlockFails, _deadlockResetting, _noteDeadlockProgress, noteDeadlockReset, deadlockResetDue, deadlockResetState, sampleColumnForSky, reachOpenSky, ensurePillarFiller, deadlockDieByFall, suicideByDrown, suicideByPitDrop, deadlockFallbackDeath, deadlockSuicideReset, _recoveringHp, recoverHp, isRecoveringHp, _resting, restUntilSafe, isResting, sleepInBedHere, nightRest, nightRestInner, boundedHold, sleepableNow, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, RUNG_EXECUTORS, recoveryReadyNow, _recoveringDegraded, recoverFromDegraded, isRecoveringDegraded, releaseRecoveryLatches } = provRecovery
-const { DEFEND_WHEN_HIT_ON, NIGHT_FROZEN_MS, NIGHT_OVERLONG_MS, _nightStart, _todSeen, lastFlood, _sheltering, isSheltering, shelterSite, SHELTER_FARM_R, shelterFarmConflict, inWaterNow, ensureAshore, nearRecentFlood, findDiggableDryCell, scoutForWater, armorPieceCount, underArmored, lowHpCalm, shelterNeeded, nightStuck, nightRestWanted, sealShaft, digTorchAlcove, digInForNight, pickOpenSkyCell } = provShelter
-const { _foodFloorState, _setFoodPlanHint, RAW_COOKABLE, FOOD_ANIMALS, LEATHER_ANIMALS, RISKY_EAT, ROD_SPIDERS, DFOOD_DEEP, DFOOD_FAR, hasFood, foodCount, needsFood, nearestFoodAnimal, eatFromPackToComfortable, eatBestFood, eatUp, bakeBreadFromWheat, cookRawMeat, fishingEnabled, ensureFishingRod, fishForFood, huntForFood, huntForDrop, huntSpiderForString, gatherLeather, woolCount, ensureFoodSupply, needFoodSupply, bankFoodFirst, courierFoodToBank, foodPlanNow, topUpFoodForPlan, isSecuringFood, releaseFoodLatch, escalateFoodFloor, secureFood, secureFoodInner, scoutForFood, scoutHunt } = provFood
-const { FACING_OFF, resolveBankCell, isBankStand, bankStandFor, gotoChest, placeStationInInterior, ensureChest, placeChestOriented, healBankDouble, chestCounts, depositMaterials, withdrawItem, migrateChestInto, consolidateBank, ownInfraCells, lonelyFurnace, consolidateFurnaces, litterPatrol } = provBank
-const { digShaftDown, digStaircaseUp, climbMovements, climbToSurface, pillarUpTo, mineTunnel, placeTorch, ensureTorches, miningPicks, bestPick, workingPickCount, workingMiningPick, carriedPickUsesLeft, craftOneFromInv, craftStonePickHere, ensureMiningKit, digStaircaseDown, enterExistingMine, branchMine, grabNearbyOre, mineDanger } = provMining
-const { surveyWaterSite, chooseFarmSite, PLANTABLE_GROUND, WHEAT_FARM_TARGET, farmFootprintHas, cropExclusionStep, cropPlaceExclusion, inAvoidBox, boneMealBlock, tillCell, withdrawSeedsFromBank, gatherSeedsNear, placeFarmTorches, levelPlotCell, ensureWheatFarm, replantCropCell, tendWheatFarm, hasStandingFarm, saplingFor, saplingCount, plantSaplingNear, boneMealSapling, fishSaplings, prepOrchardCell, plantGrove } = provFarm
-const { ownHutAt, onHutApron, insideOwnStructure, hasSolidCeiling, stepOffApron, ensureHutApron, healHomeCrater, ensureHomeShelter, ensureHutBed, bedInPack, bedCandidates, acquireBed, placeBedNear, bedFootprint, bedUsable, assertSpawnOn, ensureBedSite, upgradeBedPlacement, hutAnchor, hutReader, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, loadHutSchem, repairHutStructure, maintainHut, maintainHome, recallAndReach, findHutDoorway, hutFreeCells, furnitureInHut, insideHutBox, secureBase, secureBaseGate, sealHomeDescents, sealDescentsGate, worldTidy, litterSignature } = provHut
-const { AIRISH, REPLACEABLE, SHELTER_HOSTILE, STRUCTURE_RE, DIGGABLE_NATURAL, canBreakNaturally,
-  inventoryCounts, countItem, isNight, nearHostile,
-  toolForBlock, gotoWithTimeout, collectDrops, stepInto, placeAt } = provCore
+const { cleanupScaffold, dumpJunk } = provMaintain
+const { deadlockResetDue, deadlockResetState, recoverHp, restUntilSafe, nightRest } = provRecovery
+const { armorPieceCount, underArmored, nightStuck, nightRestWanted } = provShelter
+const { _setFoodPlanHint, hasFood, foodCount, needsFood, eatFromPackToComfortable, cookRawMeat, huntForFood, huntForDrop, foodPlanNow, topUpFoodForPlan, isSecuringFood, secureFood, scoutHunt } = provFood
+const { resolveBankCell, placeStationInInterior } = provBank
+const { digShaftDown, digStaircaseUp, climbMovements, climbToSurface, pillarUpTo, mineTunnel, digStaircaseDown, enterExistingMine, branchMine, mineDanger } = provMining
+const { cropExclusionStep, cropPlaceExclusion, saplingFor, saplingCount, plantSaplingNear, boneMealSapling, fishSaplings, plantGrove } = provFarm
+const { ownHutAt, onHutApron, insideOwnStructure, hasSolidCeiling, stepOffApron, hutAnchor, recallAndReach } = provHut
+const { AIRISH, REPLACEABLE, STRUCTURE_RE, DIGGABLE_NATURAL, canBreakNaturally, inventoryCounts, countItem,
+  isNight, nearHostile, toolForBlock, gotoWithTimeout, collectDrops, stepInto } = provCore
 const { loadWorldMem, saveWorldMem, ownInfraAnchors, rememberRoute, recallRoute, planTrekRoute, dementRoute,
-  recordWedge, listWedges, rememberSpot, forgetSpot, recallSpot,
-  rememberInfra, recallInfra, forgetInfra, listInfra, recallInfraVerified, WORLD_MEM_FILE,
-  loadMines, rememberMine, recallMine, forgetMine, updateMineProgress,
-  markSearched, isSearchedDry, clearSearched, gearupState, gearupResult,
-  gearupShouldArmBackoff, proactiveGearupGate,
-  rememberBed, knownBed, forgetBed, markBedUnusable, bedHeld, setSpawnSuspect, isSpawnSuspect,
+  recordWedge, listWedges, rememberSpot, forgetSpot, recallSpot, rememberInfra, recallInfra, forgetInfra,
+  listInfra, recallMine, markSearched, isSearchedDry, gearupState, gearupResult, gearupShouldArmBackoff,
+  proactiveGearupGate, rememberBed, knownBed, markBedUnusable, bedHeld, setSpawnSuspect, isSpawnSuspect,
   setOperatorRouting } = worldMemory // #112: the operator-routing latch is set by commands.handle through this facade
 const pocketEscape = require('./pocket-escape.js') // PURE pocket-breach geometry: plan a bounded dig out of a flooded, roofed pocket (water-wedge escape)
 const navProfile = require('./nav-profile.js') // PURE nav-terrain policy: wild-profile type whitelist, scope gate, per-position break exclusion (NAV Phase 1)

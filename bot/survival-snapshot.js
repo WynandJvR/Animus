@@ -24,20 +24,22 @@ const scheduler = require('./scheduler.js') // PURE tier/preemption decisions
 const foodSec = require('./food.js')        // PURE food-security decisions
 const maintain = require('./maintain.js')   // PURE buffer floors
 const provCore = require('./provision-core.js')
-const { countItem, inventoryCounts, isNight, nearHostile, AIRISH, SHELTER_HOSTILE } = provCore
+const { countItem, isNight, AIRISH, SHELTER_HOSTILE } = provCore
 const worldMemory = require('./world-memory.js')
-const { loadWorldMem, listInfra, recallInfra, knownBed, isSpawnSuspect, gearupState, bedUnobtainable,
-  hutVerifiedNow } = worldMemory
+const { loadWorldMem, recallInfra, knownBed, isSpawnSuspect, gearupState, bedUnobtainable, hutVerifiedNow } = worldMemory
 const provHut = require('./provision-hut.js')
-const { hutAnchor, insideOwnStructure, hasSolidCeiling } = provHut
+const { hutAnchor } = provHut
 const provShelter = require('./provision-shelter.js')
-const { isSheltering, shelterNeeded, nightStuck, nightRestWanted, underArmored, lowHpCalm,
-  armorPieceCount, inWaterNow } = provShelter
+const { nightStuck, underArmored, armorPieceCount } = provShelter
 const provFood = require('./provision-food.js')
-const { hasFood, foodCount, needsFood, isSecuringFood, needFoodSupply, hasStandingFarm, RAW_COOKABLE } = provFood
+const { isSecuringFood, RAW_COOKABLE } = provFood
+// hasStandingFarm is provision-farm's, not provision-food's. Destructured from the wrong
+// module it read `undefined`, so s.farm.exists threw into its catch and the snapshot the
+// PURE scheduler reads reported "no wheat farm" on every tick, however good the farm was.
+const provFarm = require('./provision-farm.js')
+const { hasStandingFarm } = provFarm
 const provRecovery = require('./provision-recovery.js')
-const { isRecoveringHp, isRecoveringDegraded, isResting, recoveryReadyNow, deadlockResetDue,
-  deadlockResetState } = provRecovery
+const { isRecoveringHp, isRecoveringDegraded, isResting } = provRecovery
 // NOTE: sleepableNow is reached via provRecovery.<name> at CALL time, not destructured here -
 // provision-recovery requires this module's siblings, so a name captured at load time can be
 // undefined (module-map's swallowed-ReferenceError trap).

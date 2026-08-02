@@ -71,3 +71,7 @@ bot/scaffold-registry.json
 # session state archives + rotated log artifacts
 state-archive-oldbase/
 *.jsonl.old
+
+# hand/tool-made state snapshots (same live-world coordinates as the runtime state above)
+state-backup-*/
+state-archive-*/

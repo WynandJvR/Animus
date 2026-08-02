@@ -21,16 +21,13 @@ const { goals } = require('mineflayer-pathfinder')
 const navigate = require('./navigate.js')
 const scaffold = require('./scaffold.js')
 const provCore = require('./provision-core.js')
-const { AIRISH, REPLACEABLE, canBreakNaturally, countItem, inventoryCounts, toolForBlock,
-  gotoWithTimeout, collectDrops, stepInto, placeAt, nearHostile, isNight, STRUCTURE_RE } = provCore
+const { AIRISH, countItem, toolForBlock, gotoWithTimeout, collectDrops, placeAt, STRUCTURE_RE } = provCore
 const worldMemory = require('./world-memory.js')
-const { loadWorldMem, saveWorldMem, listInfra, rememberInfra, forgetInfra, recallInfra,
-  recallInfraVerified, ownInfraAnchors } = worldMemory
+const { loadWorldMem, listInfra, rememberInfra, forgetInfra } = worldMemory
 const provShelter = require('./provision-shelter.js') // shelterSite: a bank stand must not sit in a shelter pit
 const { shelterSite } = provShelter
 const provHut = require('./provision-hut.js')
-const { hutAnchor, insideOwnStructure, hasSolidCeiling, freeInteriorCell, stationSlot,
-  onHutApron, ownHutAt, recallAndReach, insideHutBox } = provHut
+const { hutAnchor, insideOwnStructure, stationSlot, onHutApron, ownHutAt, recallAndReach, insideHutBox } = provHut
 
 const P = () => require('./provision.js')
 const S = () => require('./provision.js').__siblings
@@ -634,5 +631,5 @@ async function litterPatrol (bot, home, { isStopped = () => false, say = () => {
 
 module.exports = {
   setDebugSink,
-  FACING_OFF, resolveBankCell, isBankStand, bankStandFor, gotoChest, placeStationInInterior, ensureChest, placeChestOriented, healBankDouble, chestCounts, depositMaterials, withdrawItem, migrateChestInto, consolidateBank, ownInfraCells, lonelyFurnace, consolidateFurnaces, litterPatrol
+  FACING_OFF, resolveBankCell, isBankStand, bankStandFor, placeStationInInterior, ensureChest, placeChestOriented, healBankDouble, chestCounts, depositMaterials, withdrawItem, migrateChestInto, consolidateBank, lonelyFurnace, consolidateFurnaces, litterPatrol
 }

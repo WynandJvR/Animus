@@ -30,14 +30,14 @@ const touchP = tag => { try { require('./commands.js').touchProgress(tag) } catc
 const reflexes = require('./reflexes.js')
 const navigate = require('./navigate.js')
 const provCore = require('./provision-core.js')
-const { AIRISH, REPLACEABLE, canBreakNaturally, countItem, inventoryCounts, toolForBlock,
-  gotoWithTimeout, collectDrops, stepInto, placeAt, nearHostile, isNight, SHELTER_HOSTILE } = provCore
+const { AIRISH, canBreakNaturally, countItem, toolForBlock, gotoWithTimeout, collectDrops, placeAt,
+  nearHostile, isNight } = provCore
 const worldMemory = require('./world-memory.js')
-const { loadWorldMem, saveWorldMem, listInfra, rememberInfra, recallInfra, forgetInfra, knownBed } = worldMemory
+const { loadWorldMem, listInfra, rememberInfra, recallInfra, forgetInfra, knownBed } = worldMemory
 const provHut = require('./provision-hut.js')
-const { hutAnchor, insideOwnStructure, hasSolidCeiling, ownHutAt, onHutApron } = provHut
+const { insideOwnStructure, onHutApron } = provHut
 const provMining = require('./provision-mining.js')
-const { mineDanger, ensureTorches, placeTorch, climbToSurface } = provMining
+const { ensureTorches, placeTorch, climbToSurface } = provMining
 
 const P = () => require('./provision.js')
 const S = () => require('./provision.js').__siblings
@@ -681,5 +681,5 @@ function pickOpenSkyCell (cells) {
 
 module.exports = {
   setDebugSink, setBuildZone, inBuildZone,
-  DEFEND_WHEN_HIT_ON, NIGHT_FROZEN_MS, NIGHT_OVERLONG_MS, _nightStart, _todSeen, lastFlood, _sheltering, isSheltering, shelterSite, SHELTER_FARM_R, shelterFarmConflict, inWaterNow, ensureAshore, nearRecentFlood, findDiggableDryCell, scoutForWater, armorPieceCount, underArmored, lowHpCalm, shelterNeeded, nightStuck, nightRestWanted, sealShaft, digTorchAlcove, digInForNight, pickOpenSkyCell
+  DEFEND_WHEN_HIT_ON, _sheltering, isSheltering, shelterSite, SHELTER_FARM_R, shelterFarmConflict, inWaterNow, ensureAshore, findDiggableDryCell, scoutForWater, armorPieceCount, underArmored, lowHpCalm, shelterNeeded, nightStuck, nightRestWanted, sealShaft, digInForNight, pickOpenSkyCell
 }
