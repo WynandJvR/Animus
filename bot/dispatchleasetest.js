@@ -308,6 +308,43 @@ t('ANTI-DRIFT: the giveup rung releases the CLAIM, not just the nav goal', () =>
   assert(/clearControlStates/.test(branch), 'and still let go of the controls')
 })
 
+// ==== "THE BODY IS FREE FOR THE NEXT JOB" WAS NOT TRUE (measured 2026-08-02) =============
+// The slot is only ONE of the two records of "this job owns the body". The other is the executor's
+// own latch, raised before the await and lowered in a `finally` a hung executor never reaches - and
+// reflexes.BODY_OWNERS reads THOSE, not the slot. `ladder` is hard:true, so it refuses everything.
+//   18:12:40 (wd) REVOKED the dispatch slot from recoverFromDegraded - lease expired after 605s;
+//                 the body is free for the next job
+//   ...then, for the next NINETEEN minutes, at hp 20 / food 20 / armor 0, on one block, through a
+//   whole night: "(core) nightShelter REFUSED: the recovery ladder owns the body", and
+//   "(core) chose build/idle: standoff ... CRISIS UNANSWERED (nightShelter: the recovery ladder
+//   owns the body; maintenancePass: ...; reclaim: ...; scaffoldSweep: ...)".
+// The two branches of ONE verdict disagreed about what taking the body back means: the no-slot
+// branch below released the claim, the revoke branch printed that it had.
+t('REVOKE: taking the slot back also takes the LATCH back - the two records of one claim (#4/#7)', () => {
+  const idx = fs.readFileSync(path.join(__dirname, 'index.js'), 'utf8')
+  const i = idx.indexOf('function revokeDispatch (why)')
+  assert(i > 0, 'revokeDispatch still exists')
+  const fn = idx.slice(i, idx.indexOf('\nlet schedLastLog', i))
+  assert(/releaseBodyClaims\(/.test(fn),
+    'MUTATION CHECK: delete this call and the revoke goes back to freeing a slot nothing reads while ' +
+    'the latch the chooser DOES read stays set - 19 minutes of CRISIS UNANSWERED, measured')
+  assert(/schedJob = null/.test(fn) && /schedGen\+\+/.test(fn), 'and it still frees the slot and bumps the epoch')
+  // the release must be the SAME function the giveup rung uses - not a second idea of "free" (#4)
+  const cmd = fs.readFileSync(path.join(__dirname, 'commands.js'), 'utf8')
+  assert(/function releaseBodyClaims/.test(cmd), 'through the one owner')
+  assert(!/_recoveringDegraded = false/.test(fn), 'and never by reaching into another module\'s latch itself')
+})
+
+t('REVOKE: the release is BEHIND the verdict, never a timeout on a job that is merely slow', () => {
+  const idx = fs.readFileSync(path.join(__dirname, 'index.js'), 'utf8')
+  // exactly two callers, and both are already terminal judgements about an abandoned executor:
+  // the 600s dispatch lease expiring, and the watchdog giveup rung after its full progress ladder.
+  const callers = (idx.match(/revokeDispatch\(/g) || []).length // the definition is `revokeDispatch (why)` - a space, so it is not counted
+  assert.strictEqual(callers, 2, 'exactly TWO callers (lease expiry, giveup rung) - found ' + callers)
+  assert(/revokeDispatch\('lease expired after /.test(idx), 'caller 1: the lease')
+  assert(/revokeDispatch\('hung promise: /.test(idx), 'caller 2: the giveup rung')
+})
+
 t('THE 4.5-HOUR GHOST: a stuck provision latch is released too, not just isBusy', () => {
   // The exact live state, 2026-07-31 18:06-22:30: activityInfo() null, isBusy() false, and
   // `_maintaining` alone reporting 'maintenancePass' to activeJobInfo forever. The scheduler

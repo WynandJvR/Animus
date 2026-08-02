@@ -838,6 +838,31 @@ function dispatchBusy () {
 // slot, bumps the epoch, and - critically - lets go of the CONTROLS and the nav goal: an abandoned
 // executor may still be steering, and two actors driving one body is precisely what the one-runner
 // work forbids. The abandoned promise is left to settle into nothing; its `finally` is epoch-guarded.
+//
+// ==== "THE BODY IS FREE FOR THE NEXT JOB" HAD TO BE MADE TRUE (2026-08-02) ================
+// It was not. The slot is only ONE of the two records of "this job owns the body"; the other is the
+// executor's own latch (`_recoveringDegraded`, `_maintaining`, `_securingFood`, `_resting`,
+// `provisioning`), raised before the await and lowered in a `finally` a hung executor never reaches.
+// reflexes.BODY_OWNERS reads THOSE, not the slot - and `ladder` is `hard: true`, so it refuses
+// everything, at every tier, crisis included.
+//
+// Live, 18:12:40 local:
+//   (wd) REVOKED the dispatch slot from recoverFromDegraded - lease expired after 605s; the body is free
+//   (core) maintenancePass REFUSED: the recovery ladder owns the body      <- for the next 19 minutes
+//   (core) nightShelter    REFUSED: the recovery ladder owns the body
+//   (core) chose build/idle: standoff ... CRISIS UNANSWERED (nightShelter: the recovery ladder owns
+//          the body; ...) | hp=20 food=20 armor=0
+// The bot stood on one block, hp 20 / food 20 / naked, from 18:00 to 18:31 - through a full night -
+// refused by a ladder that had not existed for nineteen of those minutes. The log line was a lie in
+// exactly the way #7 forbids: it reported an intent, not what happened.
+//
+// The release itself needed no new machinery and no fourth actor on the reclaim path: the WATCHDOG
+// GIVEUP rung's `!revoked` branch already did precisely this (index.js, "...AND THE BODY CLAIM"),
+// so the two branches of one verdict disagreed about what taking the body back means. The call
+// moves HERE, where the verdict is made, and the duplicate is deleted from that branch (#4).
+// Both callers of this function are already terminal judgements about an abandoned executor - a
+// 600s lease expiry, and the giveup rung after its full verified-progress ladder - so this is never
+// reached for a job that is merely slow.
 function revokeDispatch (why) {
   const j = schedJob
   if (!j) return false
@@ -848,6 +873,11 @@ function revokeDispatch (why) {
   try { bot.clearControlStates() } catch {}
   try { commands.touchProgress('dispatchRevoked:' + j.name) } catch {}
   note('(wd) REVOKED the dispatch slot from ' + j.name + ' - ' + why + '; the body is free for the next job')
+  // ...and the latch that OUTLIVES the slot, which is the one the chooser actually reads.
+  try {
+    const freed = commands.releaseBodyClaims('dispatch revoked: ' + j.name + ' - ' + why)
+    if (freed) note('(wd) ...and released the body claim ' + j.name + ' was still holding: ' + freed + ' - without this the chooser refuses every candidate to a job that no longer exists')
+  } catch (e) { try { note('(wd) ...body-claim release threw: ' + e.message) } catch {} }
   try { commands.recordOutcome('revoke:' + j.name, false, why) } catch {}
   return true
 }
@@ -1196,6 +1226,24 @@ if (SCHED_ON) {
           note('(sched) tick gated by ' + key + ' for ' + Math.round((now - schedGateSince) / 1000) + 's (>' +
             Math.round(TICK_STALE_MS / 1000) + 's) - no job has been picked since; force-release owner: ' +
             ours.map(([n, , o]) => n + '->' + o).join(', '))
+          // ...AND THE OWNER IS CALLED (2026-08-02). Naming a force-release and not invoking it is
+          // a decision that produces no action (#5) - the log line above was already the complete
+          // diagnosis and the complete instruction, printed at nobody. Live 18:39:09-18:47:06 it
+          // printed six times, once per 90s, while `nav-recovering` held the tick for 476 SECONDS:
+          // the chooser made ZERO decisions in that window and the bot died six times, naked, at
+          // night, to mobs. Every rule this audit is about - the hp abort, the night rule, the
+          // crisis pick - lives downstream of this `return` and none of them ran.
+          // This is a DEADLINE ON AN ATTEMPT, not a delay before thinking (#6): the gate has had
+          // TICK_STALE_MS of continuous, uninterrupted hold to clear itself, which is the same
+          // number rungs 7 and 8 already use to call a chain dead. `ours` excludes engine-state, so
+          // a genuinely sleeping bot is never disturbed. releaseBodyClaims is the EXISTING terminal
+          // rung and already owns all three of our gates (commands.js owners table) - no new actor.
+          try {
+            const freed = commands.releaseBodyClaims('tick gated by ' + key + ' for ' + Math.round((now - schedGateSince) / 1000) + 's')
+            note(freed
+              ? '(sched) ...force-released: ' + freed + ' - the chooser gets the body back'
+              : '(sched) ...force-release found nothing to take back: the gate is held by something outside releaseBodyClaims\' owners table - this is a wiring hole, not a decision')
+          } catch (e) { note('(sched) ...force-release threw: ' + e.message) }
         }
         return
       }
@@ -1559,9 +1607,9 @@ if (SCHED_ON) {
                 // (isBusy) stays true when a hung promise never runs its `finally`, and isBusy
                 // gates EVERY dispatch. Live 2026-07-31 the tick chain re-armed, ran, and refused
                 // to dispatch anything for 51 minutes while the bot stood frozen at (242,45,-102).
-                // A decision must produce an action (#5). This is the ONE owner of reclaiming a
-                // hung body, and it is condition-driven - the verified-progress ladder above is
-                // the evidence, so no claim needs a clock of its own (#3, #6).
+                // A decision must produce an action (#5). This is condition-driven - the
+                // verified-progress ladder above is the evidence (#3, #6). 2026-08-02: the SAME
+                // act revokeDispatch now performs when there IS a slot; only this branch did it.
                 try { const freed = commands.releaseBodyClaims('watchdog giveup on ' + job.name); if (freed) note('(wd) ...and released the body claim it was still holding: ' + freed) } catch {}
                 try { commands.touchProgress('giveupRelease:' + job.name) } catch {}
               }

@@ -430,5 +430,80 @@ t('LOOP C: nightShelter is dispatched, not logged-and-dropped', () => {
   assert(!/nightRest\(bot, \{ say: m => bot\.chat/.test(src), 'and so is its call into the shelter executor')
 })
 
+// ============ LOOP D - THE GEARUP TREK (measured 2026-08-02 18:43-18:47 local) ============
+// The same defect outboundBlocked's own comment describes, arriving from the other direction.
+// From logs/state-history.jsonl, four consecutive lives inside four minutes:
+//   18:43:45 activity=gearup armor=0 isDay=FALSE pos 191,-104 hp 20  (home is 188,-104)
+//   18:44:40                              pos 254,-161 hp 0.2 -> killed by a Zombie
+//   ...respawn, set out again, die at 216,-150; again, 203,-72; again, 141,-78.
+// `gearup` is the journey an unarmoured bot makes to FIND armour. It is not a ladder rung and not
+// a scheduler dispatch - it is commands.js `armorup`, whose only abort was `buildAbort` - so the
+// hp abort (food.outboundRungAdmissible, one caller: the ladder) and the crossing hp floor
+// (journeyAdmissible, one caller: the homecoming) both existed and neither was ever asked.
+const THE_GEARUP_TREK = snap({
+  hp: 2.3, food: 15, armorPieces: 0, underArmored: true, isNight: true,
+  homeDist: 90, homeReachable: true, deathsRecent: 3, postDeathRecovery: true
+})
+
+t('LOOP D: an hp-2 bot is NOT fit to be out - and that verdict no longer belongs to the ladder alone', () => {
+  const a = S.outboundAdmissible(THE_GEARUP_TREK)
+  assert.strictEqual(a.ok, false, 'two hearts, 90b out, naked, at night')
+  assert.strictEqual(a.blockedOn, 'heal', 'and the blocker names the producer that clears it (needProducer -> recoverHp)')
+  assert.strictEqual(S.needProducer(a.blockedOn), 'recoverHp', 'a blocker with an owner, not a bare refusal (#5)')
+})
+
+t('LOOP D: the hp clause fires on its OWN, with no help from the armour/dark clause', () => {
+  // isolate it: fully armoured, broad daylight, so outboundBlocked provably returns null and the
+  // ONLY thing that can refuse is the hp abort that used to govern ladder rungs and nothing else.
+  const hurtButArmoured = snap({ hp: 4, armorPieces: 4, underArmored: false, isNight: false })
+  assert.strictEqual(S.outboundBlocked(hurtButArmoured), null, 'the dark rule has nothing to say here')
+  assert.strictEqual(S.outboundAdmissible(hurtButArmoured).ok, false, 'and the hp rule still stops the trek')
+  assert.strictEqual(S.outboundAdmissible(snap({ hp: 7, armorPieces: 4, underArmored: false })).ok, true, 'hp 7 is above the line - work carries on')
+})
+
+t('LOOP D INVARIANT: journeyAdmissible and the ladder rung ask ONE function for the hp abort', () => {
+  const hurt = snap({ hp: 3, food: 20, armorPieces: 4, underArmored: false })
+  const j = S.journeyAdmissible(hurt, 400)
+  const o = S.outboundAdmissible(hurt)
+  assert.strictEqual(j.ok, false)
+  assert.strictEqual(j.blockedOn, o.blockedOn, 'same blocker')
+  assert.strictEqual(j.why, o.why, 'same words, because it is the same call')
+  // MUTATION CHECK: restore the hand-written `hp <= JOURNEY_HP_FLOOR` copy and this fails.
+  const src = require('fs').readFileSync(require('path').join(__dirname, 'scheduler.js'), 'utf8')
+  assert(!/process\.env\.JOURNEY_HP_FLOOR/.test(src), 'the duplicate flag is READ nowhere - it is deleted, not renamed (the name survives only in the comment that records why)')
+  assert(/foodSec\.outboundRungAdmissible/.test(src), 'and the one definition is delegated to, not copied')
+})
+
+t('LOOP D: the FOOD_FLOOR fishing carve-out stays CALLER-scoped - a starving rung may go, a crossing may not', () => {
+  const starving = snap({ hp: 1, food: 0, armorPieces: 4, underArmored: false })
+  assert.strictEqual(S.outboundAdmissible(starving, { food: 0 }).ok, true,
+    'the ladder passes food ONLY for the secureFood rung: one bounded fishing trip beats sitting at hp1/food0 forever')
+  assert.strictEqual(S.outboundAdmissible(starving).ok, false, 'every other caller passes nothing and gets the plain hp abort')
+  assert.strictEqual(S.journeyAdmissible(starving, 400).ok, false, 'so a 400-block crossing at one heart is still refused')
+})
+
+t('LOOP D: the ARMORUP EXCURSION asks the rule - it is the journey, and it had no abort but buildAbort', () => {
+  const cmd = require('fs').readFileSync(require('path').join(__dirname, 'commands.js'), 'utf8')
+  const i = cmd.indexOf("case 'gearup': {")
+  assert(i > 0, 'the armorup/gearup case still exists')
+  const body = cmd.slice(i, cmd.indexOf("case 'huttidy'", i))
+  assert(/outboundAdmissible/.test(body), 'the excursion asks the ONE rule')
+  // MUTATION CHECK: put `isStopped: () => buildAbort` back on either driver and this fails.
+  assert(!/isStopped: \(\) => buildAbort/.test(body),
+    'neither the planner nor the bootstrap driver may be handed the bare build latch any more - ' +
+    'that latch means "a build preempted me", never "I am dying"')
+  assert((body.match(/isStopped: gearupStopped/g) || []).length === 2, 'BOTH drivers (planner.gearUp and provisionArmor) get the composed stop')
+})
+
+t('LOOP D: the outbound-PRODUCER route asks the whole question, not half of it', () => {
+  const core2 = require('fs').readFileSync(require('path').join(__dirname, 'scheduler-core.js'), 'utf8')
+  assert(/scheduler\.outboundAdmissible\(s\)\.ok/.test(core2), 'the producer fallback asks the composed rule')
+  assert(!/producerIsOutbound\(producer\) && !!scheduler\.outboundBlocked\(s\)/.test(core2),
+    'MUTATION CHECK: restore the armour/dark-only test and this fails')
+  // ...and the LOOP B behaviour it already guaranteed is unchanged.
+  const refused = new Map([['recoveryLadder', 'blocked on dawn']])
+  assert.strictEqual(core.chooseActivity(THE_LIVELOCK, { refused }).job, 'nightShelter')
+})
+
 console.log(fails ? `\n${fails} FAILURE(S)` : '\nall death-loop regression tests passed')
 process.exit(fails ? 1 : 0)

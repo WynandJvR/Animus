@@ -1185,9 +1185,39 @@ async function handleInner (bot, line, opts = {}) {
         // via PLANNER_GEARUP=0.
         const usePlanner = cmd === 'planarmor' || process.env.PLANNER_GEARUP !== '0'
         const sayFn = m => bot.chat(String(m).slice(0, 256))
+        // ==== ONE RULE, EVERY JOURNEY (2026-08-02) =========================================
+        // This excursion goes 70-170 blocks out to mine iron or hunt leather, and it is BY
+        // DEFINITION the journey an unarmoured bot makes. Its only abort was `buildAbort` - a
+        // latch set by a build preempt and by the watchdog, neither of which is "I am dying".
+        // So the ladder's hp abort (food.outboundRungAdmissible, one caller: the ladder) and the
+        // long-crossing hp floor (journeyAdmissible, one caller: the homecoming) both existed and
+        // NEITHER governed this. Measured 18:43-18:47 local: naked, at night, hp 20 -> 0, four
+        // times in four minutes, up to 170b out, `activity=gearup` throughout.
+        // scheduler.outboundAdmissible is the ONE composed verdict; this asks it on the same
+        // cooperative poll every executor already honours.
+        // WHAT HAPPENS INSTEAD (#5): the excursion RETURNS. That is the whole action it owes -
+        // returning runs this case's `finally`, which drops `provisioning`, which frees the body;
+        // the scheduler tick's very next pick then owns recovery, and at hp<=6/armor 0 that is the
+        // degraded signature -> recoveryLadder (R2 heal/shelter) or, if the ladder is refused, the
+        // Phase-A fallback to recoverHp - which the same rule now stops from routing back out here.
+        // No new actor, no new behaviour: the same hand-off a cut ladder rung already makes.
+        let gearupStopReason = ''
+        const gearupStopped = () => {
+          if (buildAbort) return true
+          let adm = null
+          try { adm = require('./scheduler.js').outboundAdmissible({ hp: bot.health }) } catch { return false }
+          if (adm.ok) return false
+          if (!gearupStopReason) {
+            gearupStopReason = adm.why
+            dbg('gearup: ABORTING the excursion - ' + adm.why + ' (hp ' + bot.health + ', ' +
+              (bot.entity && at ? Math.round(Math.hypot(at.x - bot.entity.position.x, at.z - bot.entity.position.z)) + 'b from the anchor' : 'anchor unknown') +
+              '); the body is free and the scheduler owns recovery from here (blocked on ' + adm.blockedOn + ')')
+          }
+          return true
+        }
         const r = usePlanner
-          ? (await planner.gearUp(bot, { say: sayFn, isStopped: () => buildAbort, at, restoreMovements: () => setupMovements(bot) })).msg
-          : await provisionArmor(bot, { say: sayFn, isStopped: () => buildAbort, at })
+          ? (await planner.gearUp(bot, { say: sayFn, isStopped: gearupStopped, at, restoreMovements: () => setupMovements(bot) })).msg
+          : await provisionArmor(bot, { say: sayFn, isStopped: gearupStopped, at })
         endActivity(!/still no armor|no progress|cooling off/.test(r), r)
         return r
       } catch (e) { endActivity(false, e.message); throw e } finally { provisioning = false }
@@ -2380,9 +2410,15 @@ let claimAt = { building: 0, provisioning: 0, buildReqActive: 0 } // WHEN, for t
 function claimStamp (which) { claimAt[which] = Date.now() }
 function isBusy () { return building || provisioning || buildReqActive }
 
-// Release every exclusive claim on the body. Called ONLY by the watchdog's terminal rung, and
-// only after the full verified-progress ladder has run - so this is evidence of a hung promise,
-// never a timeout. Returns what it actually released, for an honest log line.
+// Release every exclusive claim on the body. Every caller is a TERMINAL verdict that an executor
+// has been abandoned - never a timeout on a job that is merely slow. As of 2026-08-02 there are
+// three, and they are the three places that already decided exactly that:
+//   index.js revokeDispatch      the dispatch lease expired (600s) or the giveup rung revoked it -
+//                                the slot is gone, and this is the OTHER record of the same claim
+//   index.js watchdog GIVEUP     the hung job held no slot, after the full verified-progress ladder
+//   index.js tick-gate deadline  a tick gate held the chooser out for TICK_STALE_MS uninterrupted,
+//                                after the log had named this function as its owner for 90s at a time
+// Returns what it actually released, for an honest log line.
 function releaseBodyClaims (why) {
   const held = []
   const now = Date.now()

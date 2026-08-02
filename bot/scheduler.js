@@ -24,6 +24,7 @@ const arbiter = require('./arbiter.js') // one-way: for jobSurvivalNeed (the sin
 const mining = require('./mining.js')   // one-way: PURE ironKeystone decision (mining requires nothing)
 const gravePolicy = require('./grave-policy.js') // one-way: PURE grave decisions (#112 salvageVerdict / net-of-risk scoring)
 const capabilities = require('./capabilities.js') // one-way: the PURE capability registry (requires nothing) - the ladder's action vocabulary
+const foodSec = require('./food.js') // one-way: PURE food/hp predicates (food.js requires NOTHING) - the ONE hp-abort definition
 
 // IRON_KEYSTONE: is this bot on the keystone-blocker grind - fully naked (0 armor) and short of a
 // boots' worth of raw iron - so it MUST bank that first iron before ANY other progress? Reuses the
@@ -646,6 +647,44 @@ function outboundBlocked (snapshot) {
   return reArm ? 'armor' : null
 }
 
+// ---- outboundAdmissible (AUDIT 2026-08-02, defect: ONE RULE, THREE PATHS) ---------------
+// "Am I fit to be out there right now?" has exactly two clauses, and they had three copies:
+//
+//   the ARMOUR/DARK clause - outboundBlocked(), above. Extracted on 2026-07-29 and genuinely
+//                            shared since (rungFeasible + journeyAdmissible + the producer route).
+//   the HP clause          - written TWICE, with two env names and the same default of 6:
+//                            food.outboundRungAdmissible (LADDER_HP_ABORT), reachable from exactly
+//                            ONE call site - the recovery ladder's per-rung isStopped - and a
+//                            hand-written `hp <= JOURNEY_HP_FLOOR` inside journeyAdmissible, which
+//                            only long crossings ask.
+//
+// So every journey that is neither a ladder rung nor a homecoming asked NEITHER. That is the same
+// exemption outboundBlocked's own comment describes, arriving from the other direction, and it was
+// measured on 2026-08-02 18:43-18:47 local: `activity=gearup`, armor 0, isNight TRUE, four deaths
+// in four minutes at 254,-161 / 216,-150 / 203,-72 / 141,-78 (70-170b from home at 188,-104), hp
+// 20 -> 0 each time. `gearup` is BY DEFINITION the journey an unarmoured bot makes to find armour,
+// and it is a COMMAND (commands.js armorup) rather than a rung or a scheduler dispatch - so no
+// layer in the system had a rule to ask about it.
+//
+// This is the ONE composed verdict, and every journey asks THIS. The hp clause DELEGATES to
+// food.outboundRungAdmissible rather than re-stating it, so the FOOD_FLOOR carve-outs (the one
+// bounded fishing rung may run at 1 hp when the bot is genuinely starving) keep their single
+// definition too. `opts` is the CALLER's decision about whether that carve-out applies - it is
+// deliberately narrow (the ladder passes food ONLY for the secureFood rung), and passing nothing
+// gives the plain hp<=6 abort, which is what every non-food journey wants.
+//
+// Returns the same {ok, blockedOn, why} shape journeyAdmissible returns, so a caller can feed
+// `blockedOn` straight to needProducer and get the job that clears it (#5: name the owner).
+function outboundAdmissible (snapshot, opts = {}) {
+  const s = snapshot || {}
+  if (!foodSec.outboundRungAdmissible(s.hp, opts)) {
+    return { ok: false, blockedOn: 'heal', why: 'hp ' + s.hp + ' - too hurt to be out in the open' }
+  }
+  const ob = outboundBlocked(s)
+  if (ob) return { ok: false, blockedOn: ob, why: ob === 'dawn' ? 'un-armoured at night - the dark is what keeps killing me' : 'un-armoured with a re-arm i can reach - re-arm before travelling' }
+  return { ok: true, blockedOn: null, why: 'fit to be out' }
+}
+
 // ---- journeyAdmissible (AUDIT FIX 2) ----------------------------------------------------
 // PURE. May the bot set out on a journey of `dist` blocks RIGHT NOW? This is outboundBlocked
 // plus the two things a rung never had to think about and a 470-block homecoming does: how far
@@ -670,10 +709,14 @@ function journeyAdmissible (snapshot, dist, opts = {}) {
   if (s.nightStuck) return { ok: true, blockedOn: null, why: 'eternal night - waiting resolves nothing' }
   // Immediate danger is the reflex stack's, not a travel decision - but do not START a long walk in it.
   if (s.inLava || s.onFire || s.drowning) return { ok: false, blockedOn: 'danger', why: 'in immediate danger - not setting out' }
-  const hp = s.hp != null ? s.hp : 20
-  if (hp <= Number(process.env.JOURNEY_HP_FLOOR || 6)) return { ok: false, blockedOn: 'heal', why: 'hp ' + hp + ' - too hurt to cross open ground' }
-  const ob = outboundBlocked(s)
-  if (ob) return { ok: false, blockedOn: ob, why: ob === 'dawn' ? 'un-armoured at night - the dark is what keeps killing me' : 'un-armoured with a re-arm i can reach - re-arm before travelling' }
+  // THE TWO CLAUSES, through their ONE definition. This used to be a hand-written `hp <=
+  // JOURNEY_HP_FLOOR` (a second name for LADDER_HP_ABORT, same default 6, same meaning) followed
+  // by the shared outboundBlocked. JOURNEY_HP_FLOOR is DELETED, not renamed - it was a duplicate
+  // of a rule that already had an owner, and a flag no deployment sets (#4, and the flag-debt
+  // habit: prefer deleting a dead flag to adding one). No opts: the FOOD_FLOOR fishing carve-out
+  // is a RUNG-level decision and must never admit a 400-block crossing at 3 hp.
+  const adm = outboundAdmissible(s)
+  if (!adm.ok) return { ok: false, blockedOn: adm.blockedOn, why: adm.why }
   // THE SPIRAL CLAUSE. A bot that has died repeatedly and is still under-armoured must stop
   // attempting the long crossing that is killing it, EVEN BY DAY. deathsRecent is a 20-minute
   // window (grave.js), so this releases itself by condition - a bot that survives 20 minutes may
@@ -1154,6 +1197,7 @@ module.exports = {
   recoveryPlan,
   rungFeasible,
   outboundBlocked,
+  outboundAdmissible,
   journeyAdmissible,
   homecomingPlan,
   recoverySignature,

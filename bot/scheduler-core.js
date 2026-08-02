@@ -225,7 +225,15 @@ function chooseActivity (snapshot, opts) {
     // rungFeasible exists to bar. `outboundBlocked` is that one rule and this asks it, so the
     // fallback can reach recoverHp (heal where you stand) and can never reach an outbound trek.
     // Caught by deathlooptest's LOOP B fixture before it ever ran live.
-    const outbound = scheduler.producerIsOutbound(producer) && !!scheduler.outboundBlocked(s)
+    // ...and it asked only the ARMOUR/DARK half of that question. It now asks the WHOLE of it
+    // (scheduler.outboundAdmissible: the same outboundBlocked, plus the hp abort that used to be
+    // reachable only from a ladder rung). MEASURED, and stated because the finding matters more
+    // than the change: the hp half is INERT on this path today - arbiter.jobSurvivalNeed returns
+    // 'heal' for every state at hp<=6, so `producer` here is recoverHp and never an outbound one.
+    // The route was already closed, by a precedence in another module. Asking the one composed
+    // rule costs nothing and closes it by construction instead, so a future re-ordering of that
+    // precedence cannot silently re-open a door onto a trek at two hearts.
+    const outbound = scheduler.producerIsOutbound(producer) && !scheduler.outboundAdmissible(s).ok
     if (degraded && producer !== job && !outbound && !isRefused(producer)) {
       return mk(producer, 'survival', why + ' [the ladder is refused - running the need\'s own producer instead]', CRISIS_SCORE)
     }

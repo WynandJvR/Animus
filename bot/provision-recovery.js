@@ -1701,8 +1701,16 @@ async function recoverFromDegraded (bot, { isStopped = () => false, say = () => 
       // long trekFarm/trekOrchard trek gets {} -> today's pure hp<=6 abort (the §5 invariant: the
       // farm trek still aborts, only the fishing leg is admitted). FOOD_FLOOR=0 -> {} for all.
       const foodAcqRung = process.env.FOOD_FLOOR !== '0' && /^secureFood/.test(chosen.action || '')
+      // ONE RULE, EVERY JOURNEY (2026-08-02): this used to call food.outboundRungAdmissible direct,
+      // and it was that function's ONLY caller - which is precisely how the hp abort came to govern
+      // ladder rungs and nothing else. It now asks scheduler.outboundAdmissible, the ONE composed
+      // verdict every other journey asks. The snapshot carries hp ONLY, deliberately: the
+      // ARMOUR/DARK half of that verdict was already applied to this rung at ADMISSION time
+      // (rungFeasible -> outboundBlocked), so re-asking it mid-rung would be a second enforcement
+      // of one rule, and `underArmored` absent makes outboundBlocked return null. Same numbers,
+      // same order, same behaviour as before the extraction - one definition instead of two.
       const rungAdmissible = outbound
-        ? () => isStopped() || !foodSec.outboundRungAdmissible(bot.health, foodAcqRung ? { food: bot.food } : {})
+        ? () => isStopped() || !scheduler.outboundAdmissible({ hp: bot.health }, foodAcqRung ? { food: bot.food } : {}).ok
         : isStopped
       // ROOT G: the rung carries its own deadline (see boundedRung). A cut is reported by a THROW,
       // so it lands in the SAME catch a rung failure has always landed in - the ladder marks the

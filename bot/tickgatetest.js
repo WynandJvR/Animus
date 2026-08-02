@@ -150,6 +150,39 @@ t('a long-held gate is NAMED, with its age, and is throttled by the shared stale
     'a sleeping bot must not raise a complaint every 90s all night (#8) - only OUR gates can')
 })
 
+// ---- 5. #5: naming a force-release and not calling it is a decision with no action ------
+// Measured 2026-08-02 18:39:09-18:47:06 local: the line from section 4 printed SIX times, once
+// per 90s, ending "...force-release owner: nav-recovering->navigate.releaseNavLatches" - while
+// nav-recovering held the tick for 476 SECONDS. In that window the chooser made zero decisions
+// and the bot died six times, naked, at night, to mobs. Every survival rule in this codebase -
+// the hp abort, the night rule, the crisis pick - lives downstream of that `return`.
+t('a gate held past the deadline CALLS the owner it names (#5)', () => {
+  const i = idx.indexOf('const gatedBy = TICK_GATES.filter')
+  const body = idx.slice(i, idx.indexOf('\n      schedGateKey = \'\'', i))
+  assert.ok(/commands\.releaseBodyClaims\(/.test(body),
+    'MUTATION CHECK: delete the call and this fails - the log line alone was already the complete ' +
+    'diagnosis AND the complete instruction, printed at nobody, for eight minutes')
+  assert.ok(/const freed = commands\.releaseBodyClaims/.test(body) && /note\(freed/.test(body),
+    'and it reports what it ACTUALLY took back, never what it meant to (#7)')
+  assert.ok(/wiring hole/.test(body),
+    'a release that frees NOTHING means the gate is held by something outside the owners table - ' +
+    'that is a wiring hole and must say so, not read as success')
+})
+
+t('the release is a DEADLINE ON THE GATE, not a second clock (#4/#6)', () => {
+  const i = idx.indexOf('const gatedBy = TICK_GATES.filter')
+  const body = idx.slice(i, idx.indexOf('\n      schedGateKey = \'\'', i))
+  // the act and the note share ONE condition - so the log can never claim a release that did not
+  // happen, and no third number joins TICK_STALE_MS.
+  const code = body.split('\n').filter(l => !/^\s*\/\//.test(l)).join('\n')
+  const durations = (code.match(/\b\d{4,}\b/g) || []).filter(n => n !== '1000') // 1000 = ms->s for the log line
+  assert.ok(/TICK_STALE_MS/.test(code) && durations.length === 0,
+    'every duration here is the SHARED staleness number - a fourth copy of "too long" is #4 all over again')
+  assert.ok(!/setTimeout|setInterval|Date\.now\(\) \+ /.test(code), 'and it starts no cooldown of its own')
+  assert.ok(/ours\.length && now - schedGateSince > TICK_STALE_MS/.test(body),
+    'the gate must have had TICK_STALE_MS of CONTINUOUS hold - schedGateSince resets whenever the gate set changes')
+})
+
 t('ROOT H adds NO new env flag', () => {
   assert.ok(!/process\.env/.test(gateBlock), 'the gate table is plain code')
   assert.ok(!/process\.env/.test(nav.slice(nav.indexOf('function releaseNavLatches'), nav.indexOf('function releaseNavLatches') + 500)))
