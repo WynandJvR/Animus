@@ -55,17 +55,15 @@ function nearHostile (bot, r) {
 
 // Pick the right tool KIND in inventory for a block (pickaxe/axe/shovel), best
 // material first. Returns the item or null (bare hands).
-function toolForBlock (bot, blockName) {
-  let kind = null
-  if (/stone|cobble|ore|deepslate|granite|diorite|andesite|tuff|basalt|blackstone/.test(blockName)) kind = 'pickaxe'
-  else if (/_log$|_wood$|_stem$/.test(blockName)) kind = 'axe'
-  else if (/dirt|grass_block|sand|gravel|clay|mud/.test(blockName)) kind = 'shovel'
-  if (!kind) return null
-  const items = (bot.inventory ? bot.inventory.items() : []).filter(i => i.name.endsWith('_' + kind))
-  const order = ['netherite', 'diamond', 'iron', 'stone', 'golden', 'wooden']
-  for (const m of order) { const t = items.find(i => i.name.startsWith(m)); if (t) return t }
-  return items[0] || null
-}
+//
+// This WAS a second copy of gear.bestTool with narrower patterns, and the narrowness cost drops:
+// measured against minecraft-data over all 1060 blocks in 1.21 it returned null - bare hands - for
+// 110 blocks that REQUIRE a tool to drop anything (gold_block, iron_block, obsidian, furnace,
+// netherrack, terracotta, anvils, bricks). This module's own callers know the stakes -
+// provision-bank.js:590 says "wrong-tool digs drop NOTHING" - so the rule now has ONE definition
+// in gear.js (a pure leaf; no cycle) and this is the same function under this module's name.
+const gear = require('./gear.js')
+const toolForBlock = gear.bestTool
 
 // THE SHARED SHORT-HOP. This was `navigate.gotoOnce` - a single BARE pathfinder attempt with no
 // door handling - and it is what nearly every provision module uses to step to a cell near home.

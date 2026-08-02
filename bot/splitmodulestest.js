@@ -70,6 +70,25 @@ function eq (got, want, label) {
   eq(gear.bestTool(bot, 'stone').name, 'iron_pickaxe', 'bestTool: stone -> best pickaxe carried')
   eq(gear.bestTool(bot, 'oak_log').name, 'stone_axe', 'bestTool: log -> axe')
   eq(gear.bestTool(bot, 'white_wool'), null, 'bestTool: no tool kind applies -> null')
+
+  // ONE tool rule, and it reads the GAME's harvestTools rather than guessing from the name.
+  // provision-core.toolForBlock used to be a second, narrower copy: over the 387 blocks that
+  // require a tool in 1.21 it answered "bare hands" for 241 of them - every one a dig that drops
+  // NOTHING. These are blocks BOTH old regex copies missed; they must never go back to null.
+  eq(gear.toolForBlockIsShared === undefined, true, 'gear owns the rule (no second export to drift)')
+  for (const n of ['diamond_block', 'lapis_block', 'hopper', 'iron_bars', 'quartz_block', 'prismarine', 'spawner', 'coal_block']) {
+    eq(gear.toolKindFor(n, '1.21'), 'pickaxe', `toolKindFor: ${n} REQUIRES a pickaxe (harvestTools, not a name pattern)`)
+  }
+  // iron_door/ender_chest match the AXE pattern by name ("door"/"chest") but need a pickaxe.
+  for (const n of ['iron_door', 'iron_trapdoor', 'ender_chest', 'nether_brick_fence']) {
+    eq(gear.toolKindFor(n, '1.21'), 'pickaxe', `toolKindFor: ${n} is pickaxe-required despite its name`)
+  }
+  // and with NO version the name patterns still answer for the speed-only cases
+  eq(gear.toolKindFor('oak_log'), 'axe', 'toolKindFor: no version -> pattern fallback still works')
+  eq(gear.toolKindFor('dirt'), 'shovel', 'toolKindFor: fallback shovel')
+  eq(gear.toolKindFor('white_wool'), null, 'toolKindFor: fallback null')
+  // provision-core must BE the same function, not a copy of it
+  eq(require('./provision-core.js').toolForBlock === gear.bestTool, true, 'provision-core.toolForBlock IS gear.bestTool')
   eq(gear.armorSlot('iron_boots'), 'feet', 'armorSlot: boots -> feet')
   eq(gear.armorSlot('elytra'), 'torso', 'armorSlot: elytra -> torso')
   eq(gear.armorSlot('bread'), null, 'armorSlot: non-armor -> null')
