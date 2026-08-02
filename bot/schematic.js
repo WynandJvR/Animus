@@ -30,6 +30,7 @@ const { goals, Movements } = require('mineflayer-pathfinder')
 const Build = require('mineflayer-builder/lib/Build')
 const interactable = require('mineflayer-builder/lib/interactable.json')
 const provision = require('./provision.js') // night-shelter during builds (shelterNeeded/digInForNight)
+const provShelter = () => require('./provision-shelter.js') // LAZY: provision-shelter.js top-requires this module, so an eager import here would be a real cycle
 const buildorder = require('./buildorder.js') // pure placement order: bottom-up then nearest + self-cell trap guard
 const orient = require('./orient.js') // pure orientation fallback when the builder lib's facingData lacks a block
 const navigate = require('./navigate.js') // the ONE deadline-goto implementation
@@ -784,7 +785,7 @@ async function buildSurvival (bot, schem, at, opts = {}) {
       // NIGHT SHELTER (same as gatherLoop/runSmelt): a naked bot placing blocks at night is
       // a stationary target - it died at 29/44 to night mobs (verified live). Dig in, wait
       // it out, then carry on building.
-      if (provision.nightRestWanted(bot) && Date.now() - lastShelter > 15000) {
+      if (provShelter().nightRestWanted(bot) && Date.now() - lastShelter > 15000) {
         lastShelter = Date.now()
         try { await provision.nightRest(bot, { isStopped, say }) } catch {}
         bot.pathfinder.setMovements(moves) // the night-rest reset movements - restore the build profile

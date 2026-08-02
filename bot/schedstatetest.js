@@ -25,6 +25,7 @@ const GRAVE = { x: 112, y: 65, z: 100, at: NOW, dangerous: false, items: { notab
 fs.writeFileSync(process.env.DEATH_FILE, JSON.stringify({ deaths: [GRAVE] }))
 
 const provision = require('./provision.js')
+const provMaintain = require('./provision-maintain.js')
 require('./commands.js') // required for its side-effect: loads the death-ledger fixture that schedulerState reads via gravesSnapshot
 
 // ---- harness (async: schedulerState is async) ----
@@ -157,11 +158,11 @@ t('(h5) FIX #20 rollback: TOOL_TIER_UPGRADE=0 -> existence-only', async () => {
 // (i) S6: activeJob synthesizes maintenancePass/maintain when the latch is set
 t('(i) activeJob = maintenancePass/maintain when the maintain latch is set', async () => {
   try {
-    provision._setMaintaining(true)
+    provMaintain._setMaintaining(true)
     const s = await provision.schedulerState(stubBot({}))
     assert.ok(s.activeJob && s.activeJob.name === 'maintenancePass', 'activeJob is the maintenance pass')
     assert.strictEqual(s.activeJob.cls, 'maintain', 'classified rank-1 maintain')
-  } finally { provision._setMaintaining(false) }
+  } finally { provMaintain._setMaintaining(false) }
   const s2 = await provision.schedulerState(stubBot({}))
   assert.ok(!s2.activeJob || s2.activeJob.name !== 'maintenancePass', 'latch cleared -> no synthetic maintain job')
 })
@@ -171,7 +172,7 @@ t('(i) activeJob = maintenancePass/maintain when the maintain latch is set', asy
 t('(j) S7: activeJob carries the progress clock; markStalled -> blockedOn:stalled; touch clears', async () => {
   const commands = require('./commands.js')
   try {
-    provision._setMaintaining(true)
+    provMaintain._setMaintaining(true)
     // a seeded touch is the job's progress clock -> lastProgressAt reflects it (not null)
     commands.touchProgress('seed')
     const at0 = commands.progressInfo().at
@@ -187,7 +188,7 @@ t('(j) S7: activeJob carries the progress clock; markStalled -> blockedOn:stalle
     commands.touchProgress('clear')
     s = await provision.schedulerState(stubBot({}))
     assert.strictEqual(s.activeJob.blockedOn, null, 'a touch clears the stalled marker')
-  } finally { provision._setMaintaining(false); commands._resetProgress() }
+  } finally { provMaintain._setMaintaining(false); commands._resetProgress() }
 })
 
 // (k) S7: activeJobInfo is exported, sync, and returns null when no job/latch is active

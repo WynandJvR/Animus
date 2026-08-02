@@ -93,7 +93,7 @@ function ok (cond, label) { eq(!!cond, true, label) }
 // here - `git log -L92,92:provsplittest.js` replays every past adjustment and its reasoning.
 {
   const pub = Object.keys(provision).filter(k => k !== '__siblings')
-  eq(pub.length, 180, 'facade: provision.js still exports exactly 180 public names')
+  eq(pub.length, 154, 'facade: provision.js still exports exactly 154 public names')
 
   const moved = [
     [worldMemory, ['listInfra', 'rememberInfra', 'forgetInfra', 'recordWedge', 'listWedges', 'ownInfraAnchors',
@@ -103,7 +103,6 @@ function ok (cond, label) { eq(!!cond, true, label) }
     [provHut, ['hutAnchor', 'ownHutAt', 'onHutApron', 'insideOwnStructure', 'hasSolidCeiling',
       'maintainHome', 'maintainHut', 'repairHutStructure', 'ensureHutApron', 'ensureHutBed',
       'worldTidy', 'litterSignature', 'bedInPack', 'bedCandidates', 'acquireBed', 'placeBedNear']],
-    [provFarm, ['ensureWheatFarm', 'tendWheatFarm', 'hasStandingFarm', 'WHEAT_FARM_TARGET']],
     // provision-mining is NOT here any more - see the "left the facade" block below.
     [provBank, ['ensureChest', 'depositMaterials', 'withdrawItem', 'chestCounts', 'consolidateBank',
       'healBankDouble', 'migrateChestInto', 'lonelyFurnace', 'consolidateFurnaces', 'litterPatrol']],
@@ -131,10 +130,22 @@ function ok (cond, label) { eq(!!cond, true, label) }
   // navigate.js reached these through its OWN lazy accessor (`prov()`, not `P()`), so a grep for
   // the usual spellings missed four live vertical-escape call sites. Assert the DIRECT binding
   // resolves, not merely that the facade dropped the name.
-  for (const n of ['branchMine', 'digStaircaseDown', 'climbToSurface', 'pillarUpTo', 'digStaircaseUp']) {
-    eq(provision[n], undefined, 'facade: provision.' + n + ' is GONE (callers import provision-mining directly)')
-    eq(typeof provMining[n], 'function', 'direct: provision-mining.' + n + ' is the one binding')
+  const provShelter = require('./provision-shelter.js')
+  const provMaintain = require('./provision-maintain.js')
+  const LEFT = [
+    [provMining, ['branchMine', 'digStaircaseDown', 'climbToSurface', 'pillarUpTo', 'digStaircaseUp']],
+    [provFarm, ['ensureWheatFarm', 'tendWheatFarm', 'hasStandingFarm', 'surveyWaterSite', 'chooseFarmSite', 'cropExclusionStep', 'cropPlaceExclusion', 'gatherSeedsNear']],
+    [provShelter, ['isSheltering', 'scoutForWater', 'underArmored', 'shelterNeeded', 'nightStuck', 'nightRestWanted', 'digInForNight', 'pickOpenSkyCell']],
+    [provMaintain, ['isMaintaining', 'stopMaintenance', 'releaseMaintainLatch', 'maintenancePass', 'safekeepSweep', 'spareKitToBank']]
+  ]
+  for (const [mod, names] of LEFT) {
+    for (const n of names) {
+      eq(provision[n], undefined, 'facade: provision.' + n + ' is GONE (callers import the owner directly)')
+      eq(typeof mod[n], 'function', 'direct: the owner module still binds ' + n)
+    }
   }
+  eq(provision.__siblings.inWaterNow, undefined, 'bridge: inWaterNow left (owners import provision-shelter directly)')
+  eq(provision.__siblings.armorPieceCount, undefined, 'bridge: armorPieceCount left too')
   eq(provision.__siblings.ensureTorches, undefined, 'bridge: ensureTorches left (farm/hut lazy-require mining directly)')
   eq(typeof provMining.ensureTorches, 'function', 'direct: provision-mining.ensureTorches still resolves')
 }
@@ -146,12 +157,13 @@ function ok (cond, label) { eq(!!cond, true, label) }
   const s = provision.__siblings
   ok(s && typeof s === 'object', 'bridge: __siblings exists')
   // shelterSite left the bridge when provision-shelter was extracted: bank and food now
-  // import it directly (no cycle in that direction). inWaterNow STAYS because provision-mining
-  // cannot import provision-shelter - shelter already requires mining, so it would be a real
-  // cycle. That asymmetry is the point: the bridge should hold only what genuinely cannot be
-  // a direct import.
-  const expected = ['foodPlanNow', 'topUpFoodForPlan', '_setFoodPlanHint', 'armorPieceCount',
-    'inWaterNow', 'placeFromInventory', 'scaffoldDigOK', 'walkStaged', 'KEEP_WHEN_ALL',
+  // import it directly (no cycle in that direction). inWaterNow and armorPieceCount followed it
+  // on 2026-08-02: the cycle they were dodging is real (shelter requires mining, so mining cannot
+  // eagerly import shelter) but a LAZY require expresses that honestly and names the owner, where
+  // the bridge just hid it behind a shared bag. The bridge should hold only what genuinely cannot
+  // be a direct import - and 'lazy' still counts as direct.
+  const expected = ['foodPlanNow', 'topUpFoodForPlan', '_setFoodPlanHint',
+    'placeFromInventory', 'scaffoldDigOK', 'walkStaged', 'KEEP_WHEN_ALL',
     'explore', 'isSurvStopped']
   for (const n of expected) ok(s[n] !== undefined, 'bridge: __siblings.' + n + ' resolves (not undefined)')
   ok(!Object.keys(provision).includes('walkStaged'), 'bridge: internals stay OFF the public surface')

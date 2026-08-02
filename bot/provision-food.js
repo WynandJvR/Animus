@@ -394,7 +394,7 @@ async function fishForFood (bot, { isStopped = () => false, say = () => {}, targ
       try { await S().walkStaged(bot, known.x, known.z, { isStopped, range: 6, timeoutMs: 120000 }) } catch {}
       waters = findWaters()
     }
-    if (!waters.length && scout && !isStopped()) waters = await P().scoutForWater(bot, { isStopped, rings: scoutRings })
+    if (!waters.length && scout && !isStopped()) waters = await provShelter().scoutForWater(bot, { isStopped, rings: scoutRings })
   }
   if (!waters.length) { dbg('  fishing: no surface water within 48' + (scout ? ' (scout came up dry too)' : '')); return false }
   // #52 FISH_FROM_BANK (default on): fish standing on a DRY SOLID BANK at the water's edge - never IN

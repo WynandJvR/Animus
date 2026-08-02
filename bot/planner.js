@@ -24,6 +24,8 @@
 
 const { goals } = require('mineflayer-pathfinder')
 const provision = require('./provision.js')
+const provMaintain = () => require('./provision-maintain.js') // LAZY: provision-maintain.js top-requires this module, so an eager import here would be a real cycle
+const provShelter = () => require('./provision-shelter.js') // LAZY: provision-shelter.js top-requires this module, so an eager import here would be a real cycle
 const provMining = require('./provision-mining.js') // climbToSurface - direct, not via the facade
 const resources = require('./resources.js')
 const navigate = require('./navigate.js')
@@ -230,7 +232,7 @@ async function survivalCheckpoint (bot, opts) {
   try { if (provision.isResting() || provision.isSecuringFood()) return } catch {}
   try { await provision.secureFood(bot, { threshold: 12, say: opts.say, isStopped: opts.isStopped, home: opts.home }) } catch (e) { dbg('checkpoint food: ' + e.message) }
   try {
-    if (provision.shelterNeeded(bot) || provision.nightRestWanted(bot)) {
+    if (provShelter().shelterNeeded(bot) || provShelter().nightRestWanted(bot)) {
       dbg('checkpoint: night/shelter first - the goal waits')
       await provision.nightRest(bot, { say: opts.say, isStopped: opts.isStopped })
     }
@@ -465,7 +467,7 @@ async function gearUp (bot, opts = {}) {
       const night = provision.isNight && provision.isNight(bot)
       const apc = provision.__siblings && provision.__siblings.armorPieceCount // facade doesn't export it; the bridge does
       const naked = apc ? apc(bot) < 1 : false // unknown armor -> fail-open (don't gate an armored bot)
-      const stuck = provision.nightStuck && provision.nightStuck(bot)
+      const stuck = provShelter().nightStuck && provShelter().nightStuck(bot)
       if (night && naked && !stuck) return { progressed: false, msg: 'deferred: naked at night - gearing up at dawn (sheltering now)' }
     } catch {}
   }
@@ -479,8 +481,8 @@ async function gearUp (bot, opts = {}) {
       const hut = provision.hutAnchor && provision.hutAnchor()
       let building = false
       try { const c = require('./commands.js'); building = !!(c.persistedResume && c.persistedResume()) } catch {}
-      if (hut && bot.entity && bot.entity.position.distanceTo(hut) <= 24 && !building && provision.safekeepSweep) {
-        await provision.safekeepSweep(bot, { isStopped, say })
+      if (hut && bot.entity && bot.entity.position.distanceTo(hut) <= 24 && !building && provMaintain().safekeepSweep) {
+        await provMaintain().safekeepSweep(bot, { isStopped, say })
       }
     }
   } catch (e) { dbg('gearUp: pre-excursion safekeep skipped (' + e.message + ')') }

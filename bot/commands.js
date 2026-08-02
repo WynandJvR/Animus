@@ -10,6 +10,8 @@ const path = require('path')
 const { goals, Movements } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
 const memory = require('./memory.js') // persistent named waypoints
+const provShelter = () => require('./provision-shelter.js') // LAZY: provision-shelter.js top-requires this module, so an eager import here would be a real cycle
+const provFarm = () => require('./provision-farm.js') // LAZY: provision-farm.js top-requires this module, so an eager import here would be a real cycle
 const schematic = require('./schematic.js') // download/parse + survival physical building
 const provision = require('./provision.js') // BOM -> gather/craft plan + execution
 const provMining = require('./provision-mining.js') // shafts/staircases/branch mine + the vertical escape (climbToSurface) - direct, not via the facade
@@ -318,11 +320,11 @@ async function travelFar (bot, dest, opts = {}) {
       // Without this the bot starved to 1 hp / got killed naked before it ever arrived.
       // The time spent is credited against the travel clock (a night-shelter must not time
       // out the trip). travelFar's movement profile is restored after.
-      if (Date.now() - lastSurvival > 12000 && (provision.needsFood(bot) || provision.nightRestWanted(bot))) {
+      if (Date.now() - lastSurvival > 12000 && (provision.needsFood(bot) || provShelter().nightRestWanted(bot))) {
         lastSurvival = Date.now(); const sv0 = Date.now()
         try {
           if (provision.needsFood(bot)) { say('starving - sorting out food before i push on'); await provision.secureFood(bot, { isStopped, say, scoutHunt: false, canHold: false }) } // mid-trek: eat/bank/hunt/fish nearby; no cross-country scouting or holing up - the trek itself may be the way home
-          else { escaping = true; try { if (provision.underArmored(bot)) await provision.restUntilSafe(bot, { isStopped, say }); else await provision.nightRest(bot, { isStopped, say }) } finally { escaping = false } }
+          else { escaping = true; try { if (provShelter().underArmored(bot)) await provision.restUntilSafe(bot, { isStopped, say }); else await provision.nightRest(bot, { isStopped, say }) } finally { escaping = false } }
         } catch { /* keep travelling regardless */ }
         climbTimeMs += Date.now() - sv0
         bot.pathfinder.setMovements(travelMovements(bot)); lastD = Infinity; continue
@@ -488,9 +490,9 @@ function travelMovements (bot) {
     if ('scafoldingBlocks' in m) m.scafoldingBlocks = ids
   } catch { /* mcData not ready - fall back to no bridging (routes around) */ }
   require('./pathfix.js').applyPlaceCost(m) // FIX 6: a placement is a permanent 1x1 tower, not a free step
-  try { const ex = provision.cropExclusionStep && provision.cropExclusionStep(bot); if (ex && Array.isArray(m.exclusionAreasStep)) m.exclusionAreasStep.push(ex) } catch {} // FARM_NO_TRAMPLE: treks bend around our crop cells (cost-only, never a wall/dig)
+  try { const ex = provFarm().cropExclusionStep && provFarm().cropExclusionStep(bot); if (ex && Array.isArray(m.exclusionAreasStep)) m.exclusionAreasStep.push(ex) } catch {} // FARM_NO_TRAMPLE: treks bend around our crop cells (cost-only, never a wall/dig)
   try { const dx = provision.deathSpotExclusion && provision.deathSpotExclusion(bot); if (dx && Array.isArray(m.exclusionAreasStep)) m.exclusionAreasStep.push(dx) } catch {} // #85 DEATH_SPOT_COST: treks bend around the cells that keep killing the bot (cost-only)
-  try { const px = provision.cropPlaceExclusion && provision.cropPlaceExclusion(bot); if (px && Array.isArray(m.exclusionAreasPlace)) m.exclusionAreasPlace.push(px) } catch {} // NO_PLACE_ON_FARM (fix #17): never bridge/place on our own farmland
+  try { const px = provFarm().cropPlaceExclusion && provFarm().cropPlaceExclusion(bot); if (px && Array.isArray(m.exclusionAreasPlace)) m.exclusionAreasPlace.push(px) } catch {} // NO_PLACE_ON_FARM (fix #17): never bridge/place on our own farmland
   // NAV Phase B: price lava (+lava-adjacent pool edges) so surface-trek legs route AROUND it at
   // plan time (cost-only, never a forbid). Flag-gated so NAV_HAZARD_LEGS=0 is byte-for-byte today.
   try { if (NAV_HAZARD_LEGS && provision.hazardStepExclusion && Array.isArray(m.exclusionAreasStep)) m.exclusionAreasStep.push(provision.hazardStepExclusion(bot)) } catch {}
@@ -1066,7 +1068,7 @@ async function handleInner (bot, line, opts = {}) {
         // #118: the operator POINTING at water is a claim, not an observation - we just travelled
         // there, so survey it and store what we actually saw. An operator-named cave pool is then
         // an honest disqualified record instead of a 150s trek the siting comparison keeps picking.
-        try { provision.rememberInfra('water', { x, y, z }, provision.surveyWaterSite(bot, { x, y, z })) } catch {}
+        try { provision.rememberInfra('water', { x, y, z }, provFarm().surveyWaterSite(bot, { x, y, z })) } catch {}
         return `remembered water at ${x},${y},${z} - i'll farm/fish there when i need to`
       } catch (e) { return `couldn't get to ${x},${y},${z}: ${e.message}` }
     }
@@ -1269,10 +1271,10 @@ async function handleInner (bot, line, opts = {}) {
       const meNight = bot.entity && bot.entity.position
       const graveDistNight = meNight ? Math.hypot(d.x - meNight.x, d.z - meNight.z) : Infinity
       const urgentNear = process.env.GRAVE_URGENT !== '0' && graveUrgency(d).tier !== 'safe' && graveDistNight <= Number(process.env.GRAVE_NEAR_LADDER || 32)
-      if (provision.isNight(bot) && provision.underArmored(bot) && !urgentNear) {
+      if (provision.isNight(bot) && provShelter().underArmored(bot) && !urgentNear) {
         try { bot.chat('night and no gear - resting before i go get my stuff') } catch {}
         try { await provision.restUntilSafe(bot, { isStopped: () => false }) } catch {}
-      } else if (urgentNear && provision.isNight(bot) && provision.underArmored(bot)) {
+      } else if (urgentNear && provision.isNight(bot) && provShelter().underArmored(bot)) {
         try { bot.chat("grave's about to despawn and it's right here - grabbing it before it's gone, then i'll rest") } catch {}
       }
       // #115 GROUNDED_CLAIMS. Everything below this line used to be asserted, never observed:
@@ -2390,11 +2392,18 @@ function releaseBodyClaims (why) {
   // `_maintaining` alone kept reporting 'maintenancePass' for 4.5 HOURS while the scheduler
   // dispatched nothing. stopMaintenance()/stopSurvivalJob() cannot help - they are COOPERATIVE
   // stop flags, and a hung await polls nothing. This rung is the one place allowed to force them.
-  const P = (() => { try { return require('./provision.js') } catch { return null } })()
-  if (P) {
-    try { if (P.releaseMaintainLatch && P.releaseMaintainLatch()) held.push('maintaining') } catch {}
-    try { if (P.releaseFoodLatch && P.releaseFoodLatch()) held.push('securingFood') } catch {}
-    try { if (P.releaseRecoveryLatches && P.releaseRecoveryLatches()) held.push('recovery/resting') } catch {}
+  // Each latch is force-released through the module that OWNS it, not through the provision
+  // facade. These were `P.releaseX && P.releaseX()` against a facade lookup, and the `&&` is a
+  // silent skip: the day a name stops being re-exported, this rung quietly releases nothing and
+  // the ghost comes back. Requiring the owner makes a missing function a loud TypeError instead.
+  // Inline requires - this runs inside a function, so there is no load-order cycle.
+  const owners = [
+    ['./provision-maintain.js', 'releaseMaintainLatch', 'maintaining'],
+    ['./provision-food.js', 'releaseFoodLatch', 'securingFood'],
+    ['./provision-recovery.js', 'releaseRecoveryLatches', 'recovery/resting']
+  ]
+  for (const [mod, fn, label] of owners) {
+    try { if (require(mod)[fn]()) held.push(label) } catch {}
   }
   if (!held.length) return null
   claimAt = { building: 0, provisioning: 0, buildReqActive: 0 }
@@ -3010,7 +3019,7 @@ async function autoBuild (bot, schem, at, opts = {}) {
     // WHEAT FARM (operator order): renewable food at the camp - the region can run dry
     // of animals and the bot starved to death working. Water-edge plot, best-effort.
     checklistStep('camp: wheat farm')
-    try { const ok = await provision.ensureWheatFarm(bot, { x: at.x, z: at.z }, { isStopped, say, avoid }); dbg('camp: wheat farm -> ' + ok) } catch (e) { dbg('camp: wheat farm failed (' + e.message + ')') }
+    try { const ok = await provFarm().ensureWheatFarm(bot, { x: at.x, z: at.z }, { isStopped, say, avoid }); dbg('camp: wheat farm -> ' + ok) } catch (e) { dbg('camp: wheat farm failed (' + e.message + ')') }
     // REMEMBER the camp as a PLACE (operator rule): a named waypoint in persistent memory
     // - the brain sees it in /state waypoints and can `goto camp`; it survives restarts.
     try { const r = await handle(bot, 'remember camp'); dbg('camp: waypoint -> ' + r) } catch {}
@@ -3084,7 +3093,7 @@ async function autoBuild (bot, schem, at, opts = {}) {
       // Also covers the LIVELOCK state the arbiter heal need misses (hp<12, no hostile, day - not
       // "critical" and not "endangered"): lowHpCalm catches it so the bank-side recover (pack just
       // topped up by ensureFood above) gets a shot before the round marches back out hurt.
-      { const sn = provision.survivalNeed(bot); if ((sn && sn.need === 'heal') || provision.lowHpCalm(bot)) { try { await provision.recoverHp(bot, { isStopped, say }) } catch (e) { dbg('material hp recover failed (' + e.message + ')') } } }
+      { const sn = provision.survivalNeed(bot); if ((sn && sn.need === 'heal') || provShelter().lowHpCalm(bot)) { try { await provision.recoverHp(bot, { isStopped, say }) } catch (e) { dbg('material hp recover failed (' + e.message + ')') } } }
       try { await resources.ensurePackRoom(bot, 6, { near: home, keepDirt: KEEP_DIRT, isStopped }) } catch {}
       // START EACH ROUND FROM THE SITE, ON THE SURFACE. A failed gather can leave the bot
       // stranded deep in a cave 40+ blocks off (verified live: cobble round ended at y=61,
@@ -3275,7 +3284,7 @@ async function resumeBuild (bot) {
     // NIGHT-FIRST: a fresh respawn is naked; prepping/trekking at night IS the death loop
     // (verified live: 3 deaths in 90s at spawn). We respawn AT the bed - sleep in it (or
     // pit as fallback) until morning, THEN gear up and go.
-    if (provision.isNight(bot) && provision.underArmored(bot)) {
+    if (provision.isNight(bot) && provShelter().underArmored(bot)) {
       dbg('resume: night + no armor - resting till morning before heading back (BLOCKING)')
       try { await provision.restUntilSafe(bot, { isStopped: () => buildAbort, say }) } catch {}
     }

@@ -21,7 +21,7 @@ try { N = require('./navigate.js') } catch (e) { console.log('FAIL  navigate.js 
 try { R = require('./provision-recovery.js') } catch (e) { console.log('FAIL  provision-recovery.js not loadable offline: ' + e.message); process.exit(1) }
 
 // ---- §A: pickOpenSkyCell ---------------------------------------------------------------
-const pick = P.pickOpenSkyCell
+const pick = require('./provision-shelter.js').pickOpenSkyCell // left the facade 2026-08-02; owner module is the one binding
 
 t('picks the FIRST open-sky stand-able cell', () => {
   const cells = [

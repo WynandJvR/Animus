@@ -44,6 +44,7 @@
 //     centrally - which is the entire point.
 
 const arbiter = require('./arbiter.js') // the ONE priority vocabulary (PRIORITY/priName). Zero requires of its own.
+const provMaintain = () => require('./provision-maintain.js') // LAZY: provision-maintain.js top-requires this module, so an eager import here would be a real cycle
 
 // ---- tiers ------------------------------------------------------------------------------
 // The tier vocabulary IS arbiter.PRIORITY - re-exported, never copied, so there is no second
@@ -436,7 +437,7 @@ def({
     const provision = require('./provision.js')
     // #117 HOME_IS_A_NEED: the chooser's bootstrap verdict is HANDED TO the executor, so
     // 'spawn'/'shelter' reach their producers instead of being computed, logged and dropped.
-    const r = await provision.maintenancePass(bot, { say: ctx.say, nightIndoorOnly: !!ctx.s.isNight, bootstrap: (ctx.pick && ctx.pick.bootstrap) || null })
+    const r = await provMaintain().maintenancePass(bot, { say: ctx.say, nightIndoorOnly: !!ctx.s.isNight, bootstrap: (ctx.pick && ctx.pick.bootstrap) || null })
     const worked = !!(r && r.steps && r.steps.length && !/^bail/.test(r.reason || ''))
     ctx.runner.maintainCooldownUntil = ctx.nowMs() + (worked ? 600000 : 300000) // 10 min after a real pass, 5 after a no-op/bail
     return r && r.steps && r.steps.length ? r.steps.join('+') : (r && r.reason) || 'nothing due'

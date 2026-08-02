@@ -36,6 +36,7 @@ process.env.WORLD_MEM_FILE = MEMFILE
 try { fs.unlinkSync(MEMFILE) } catch {}
 
 const S = require('./scheduler.js')
+const provMaintain = require('./provision-maintain.js')
 const worldMemory = require('./world-memory.js')
 const pathfix = require('./pathfix.js')
 
@@ -286,7 +287,7 @@ async function runOnePass (bootstrap) {
   provision.survivalNeed = () => (done ? { need: 'test-bail' } : null)
   provision.schedulerState = async () => ({ homeReachable: false, armorPieces: 4, tools: {}, packFoodPts: 0 })
   try {
-    const r = await provision.maintenancePass(fakeBot(), { bootstrap, say: () => {} })
+    const r = await provMaintain.maintenancePass(fakeBot(), { bootstrap, say: () => {} })
     return { calls, steps: (r && r.steps) || [] }
   } finally {
     provision.ensureSpawnBed = realSpawn; provision.ensureHomeShelter = realShelter

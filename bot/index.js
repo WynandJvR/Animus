@@ -21,6 +21,8 @@ const { pathfinder, goals } = require('mineflayer-pathfinder')
 try { require('fs').accessSync(require('path').join(__dirname, 'config.json')) } catch { require('fs').copyFileSync(require('path').join(__dirname, 'config.example.json'), require('path').join(__dirname, 'config.json')) }
 const cfg = require('./config.json')
 const commands = require('./commands.js')
+const provMaintain = require('./provision-maintain.js')
+const provShelter = require('./provision-shelter.js')
 const provision = require('./provision.js') // for the body-side survival-hunt reflex
 const gravePolicy = require('./grave-policy.js') // PURE: the death-cause taxonomy the death handler stamps (#112)
 const deathCause = require('./death-cause.js') // AUDIT D3: real attribution (server death message > damage log > block reads)
@@ -192,7 +194,7 @@ if (process.env.AUTO_RESUME !== '0') {
       if (!saved) return
       if (commands.isBusy && commands.isBusy()) return
       if (provision.isResting && provision.isResting()) return
-      if (provision.isMaintaining && provision.isMaintaining()) return // an opp/idle maintenance pass owns the body - resume right after it
+      if (provMaintain.isMaintaining && provMaintain.isMaintaining()) return // an opp/idle maintenance pass owns the body - resume right after it
       // Don't fight the scheduler: while a survival need is active IT owns the body (actively
       // preempting the build for recovery), so re-issuing `resumebuild` every 2min just churns -
       // the body gets yanked toward the site, then bumped straight back to survival, spamming
@@ -355,7 +357,7 @@ bot.on('chat', (username, message) => {
     const direct = directCommand(message, username)
     if (direct && access.isOperator(username, cfg)) {
       // S6: an operator's deterministic order STOPS a running maintenance pass so the body is free.
-      if (provision.isMaintaining && provision.isMaintaining()) { try { const dcls = scheduler.commandClass(direct); if (dcls !== 'perception' && dcls !== 'chat') provision.stopMaintenance() } catch {} }
+      if (provMaintain.isMaintaining && provMaintain.isMaintaining()) { try { const dcls = scheduler.commandClass(direct); if (dcls !== 'perception' && dcls !== 'chat') provMaintain.stopMaintenance() } catch {} }
       note(`(direct-cmd) ${username}: "${message}" -> ${direct}`)
       commands.handle(bot, direct, { source: 'operator' })
         .then(r => note(`(direct-cmd) ${r}`))
@@ -780,7 +782,7 @@ const bodyOwner = () => {
     if (provision.isRecoveringDegraded && provision.isRecoveringDegraded()) return 'ladder'
     if (provision.isSecuringFood && provision.isSecuringFood()) return 'foodRun'
     if (provision.isResting && provision.isResting()) return 'shelter'
-    if (provision.isMaintaining && provision.isMaintaining()) return 'maintain'
+    if (provMaintain.isMaintaining && provMaintain.isMaintaining()) return 'maintain'
     if (commands.isBusy && commands.isBusy()) return 'job'
     if (bot.pathfinder && bot.pathfinder.goal) return 'walk'
     if (bot.targetDigBlock) return 'dig'
@@ -1250,7 +1252,7 @@ if (SCHED_ON) {
           }
           const windowEnd = Date.now() + Number(process.env.OPP_WINDOW_MS || 300000)
           const night = !!(provision.isNight && provision.isNight(bot))
-          const r = await provision.maintenancePass(bot, {
+          const r = await provMaintain.maintenancePass(bot, {
             say: schedSay, nightIndoorOnly: night, opportunistic: true,
             isStopped: () => Date.now() > windowEnd
           })
@@ -1316,7 +1318,7 @@ if (SCHED_ON) {
         if (commands.preemptForSurvival) commands.preemptForSurvival() // sets ONLY buildAbort; the build resumes via persistedResume
         note('(sched) PREEMPT ' + name + ' (' + pick.reason + ') - ' + (reflexes.ownerInfo(ownerKey) || {}).label + ' yields to a crisis-grade need')
       } else if (ownerKey === 'maintain') {
-        try { provision.stopMaintenance() } catch {}
+        try { provMaintain.stopMaintenance() } catch {}
         note('(sched) PREEMPT ' + name + ' (' + pick.reason + ') - stopping the maintenance pass, survival outranks chores')
       }
       // 8. DISPATCH. One line, for every proposal in the registry.
@@ -1435,7 +1437,7 @@ if (SCHED_ON) {
             if (/^(autobuild|gather|provision|travel|come|huntat|fish|huttidy|gearup)$/.test(job.name)) {
               try { commands.preemptForSurvival() } catch {} // sets ONLY buildAbort; persistedResume stays intact -> a failed build PAUSES, never cancels
             } else if (job.name === 'maintenancePass') {
-              try { provision.stopMaintenance() } catch {}
+              try { provMaintain.stopMaintenance() } catch {}
             } else if (job.name === 'secureFood' || job.name === 'recoverHp' || job.name === 'recoverFromDegraded' || job.name === 'recoveryLadder') {
               try { provision.stopSurvivalJob() } catch {}
             }
@@ -1722,7 +1724,7 @@ if (process.env.AUTO_DEFEND !== '0') {
     // yields there; but an enderman teleported into the hut, or a leaky pit, must be FOUGHT
     // - we're armored and win - not passively absorbed to death (live: 'attack enderman
     // suppressed' then died). The moment we take damage, defense/flee re-engages.
-    if (provision.isSheltering && provision.isSheltering() && !beingHit && !creeperClose) return
+    if (provShelter.isSheltering && provShelter.isSheltering() && !beingHit && !creeperClose) return
     // task #45: HEAD UNDERWATER -> stand down. The bot drowned twice trading blows with a Drowned
     // while submerged (`(flee) PINNED ... can't flee, fighting`). While the head is underwater the
     // SURVIVE-tier drown-escape (AUTO_SURFACE) owns the body and swims to the nearest bank (also
@@ -1954,7 +1956,7 @@ if (process.env.AUTO_DEFEND !== '0') {
           const d = e.position.distanceTo(me); if (d < sd) { sd = d; shooter = e }
         }
         if (shooter && sd > 3.5) {
-          const armored = !provision.underArmored(bot)
+          const armored = !provShelter.underArmored(bot)
           if (armored) {
             bot.pathfinder.setGoal(new goals.GoalNear(shooter.position.x, shooter.position.y, shooter.position.z, 2))
             if (Date.now() - lastChargeNoteAt > 5000) { lastChargeNoteAt = Date.now(); note(`(defend) being shot - charging the ${shooter.name} ${sd.toFixed(1)}m`) }
@@ -2491,7 +2493,7 @@ const server = http.createServer((req, res) => {
       noteManualLook(line)
       // S6: an incoming progress/survival command STOPS a running maintenance pass (the pass
       // unwinds at its next poll; the incoming job takes the body). perception/chat never do.
-      if (provision.isMaintaining && provision.isMaintaining() && cls !== 'perception' && cls !== 'chat') provision.stopMaintenance()
+      if (provMaintain.isMaintaining && provMaintain.isMaintaining() && cls !== 'perception' && cls !== 'chat') provMaintain.stopMaintenance()
       try {
         const result = await commands.handle(bot, line, { source: fromSupervisor ? 'supervisor' : 'brain' })
         // A non-perception command is the brain's response to any waiting player,

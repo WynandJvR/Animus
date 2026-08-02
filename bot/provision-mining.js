@@ -20,6 +20,7 @@
 const { Vec3 } = require('vec3')
 const { goals, Movements } = require('mineflayer-pathfinder')
 const mining = require('./mining.js')       // PURE depth model + branch geometry
+const provShelter = () => require('./provision-shelter.js') // LAZY: provision-shelter.js top-requires this module, so an eager import here would be a real cycle
 const navigate = require('./navigate.js')
 const scaffold = require('./scaffold.js')
 const provCore = require('./provision-core.js')
@@ -636,7 +637,7 @@ async function enterExistingMine (bot, mine, opts = {}) {
     dbg('  reEnter: could not reach the mine level (y' + Math.floor(bot.entity.position.y) + ' vs ' + mine.level + ') - staircase gone/blocked, digging fresh')
     return false
   }
-  if (S().inWaterNow(bot)) { dbg('  reEnter: mine is flooded - abandoning it'); return false }
+  if (provShelter().inWaterNow(bot)) { dbg('  reEnter: mine is flooded - abandoning it'); return false }
   // 3) to the corridor tip so we mine FRESH stone, not re-walk the open corridor
   if (mine.tip) { try { await gotoWithTimeout(bot, new goals.GoalNear(mine.tip.x, mine.tip.y, mine.tip.z, 2), 30000) } catch {} }
   dbg('  reEnter: back in my mine at y' + Math.floor(bot.entity.position.y) + ' (level ' + mine.level + ', ' + (mine.branches || 0) + ' branches done) - MINING, not re-digging')
@@ -677,9 +678,9 @@ async function branchMine (bot, item, count, opts = {}) {
     ymax: parseInt(process.env.ARMOR_BOOTSTRAP_YMAX || '58', 10),
     retreatDist: parseInt(process.env.ARMOR_BOOTSTRAP_RETREAT_DIST || '10', 10)
   }
-  const bootNow = () => mining.armorBootstrapMining(S().armorPieceCount(bot), countItem(bot, 'raw_iron'), bootCfg)
+  const bootNow = () => mining.armorBootstrapMining(provShelter().armorPieceCount(bot), countItem(bot, 'raw_iron'), bootCfg)
   const boot0 = bootNow()
-  const plan = mining.deepMinePlan(S().armorPieceCount(bot), {
+  const plan = mining.deepMinePlan(provShelter().armorPieceCount(bot), {
     targetY: process.env.IRON_TARGET_Y != null ? parseInt(process.env.IRON_TARGET_Y, 10) : undefined,
     // bootstrapping -> the shallow-band floor overrides the naked target (y28); else today's exactly.
     nakedY: boot0.active ? boot0.targetY : (process.env.MINE_NAKED_Y != null ? parseInt(process.env.MINE_NAKED_Y, 10) : undefined)

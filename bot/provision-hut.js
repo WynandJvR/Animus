@@ -25,6 +25,7 @@
 const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
 const hutModel = require('./hut-model.js')   // PURE self-structure model + repair decision
+const provShelter = () => require('./provision-shelter.js') // LAZY: provision-shelter.js top-requires this module, so an eager import here would be a real cycle
 const navigate = require('./navigate.js')    // unified navigation
 const mining = require('./mining.js')        // PURE tool-durability model
 const provCore = require('./provision-core.js')
@@ -1161,7 +1162,7 @@ async function repairHutStructure (bot, hut, opts = {}) {
   if (!hut) return { skipped: 'no hut' }
   if (process.env.HUT_REPAIR === '0') return { skipped: 'disabled' }
   // repairing under attack means standing still placing blocks while a mob hits us - defer.
-  if (nearHostile(bot, 10) && P().underArmored(bot)) return { skipped: 'hostiles near' }
+  if (nearHostile(bot, 10) && provShelter().underArmored(bot)) return { skipped: 'hostiles near' }
   const schem = await loadHutSchem(bot.version)
   if (!schem) return { skipped: 'no schematic' }
   const st = schem.start(); const en = schem.end()
