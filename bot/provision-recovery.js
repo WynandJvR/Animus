@@ -27,13 +27,12 @@ const foodSec = require('./food.js')         // PURE food-security decisions
 const reflexes = require('./reflexes.js')    // PLAN-one-runner S4: declared holds (a hold says it is alive; it does not fake progress)
 const navigate = require('./navigate.js')
 const provCore = require('./provision-core.js')
-const { AIRISH, countItem, toolForBlock, gotoWithTimeout, collectDrops, stepInto, nearHostile, isNight,
-  canBreakNaturally } = provCore
+const { AIRISH, countItem, toolForBlock, gotoWithTimeout, collectDrops, stepInto, nearHostile, isNight } = provCore // canBreakNaturally is no longer reached directly here - provCore.digBlocked composes it
 const worldMemory = require('./world-memory.js')
 const { loadWorldMem, saveWorldMem, listInfra, recallInfra, knownBed, rememberBed, forgetBed, markBedUnusable,
   bedHeld, isSpawnSuspect, noteBedUnobtainable, clearBedUnobtainable } = worldMemory
 const provHut = require('./provision-hut.js')
-const { hutAnchor, insideOwnStructure, hasSolidCeiling, ownHutAt, onHutApron, ensureHutBed, stepOffApron,
+const { hutAnchor, insideOwnStructure, hasSolidCeiling, onHutApron, ensureHutBed, stepOffApron,
   bedUsable, assertSpawnOn } = provHut
 const provShelter = require('./provision-shelter.js')
 const { shelterNeeded, nightStuck, digInForNight, underArmored, inWaterNow, ensureAshore, pickOpenSkyCell,
@@ -41,7 +40,7 @@ const { shelterNeeded, nightStuck, digInForNight, underArmored, inWaterNow, ensu
 const provMining = require('./provision-mining.js')
 const { pillarUpTo } = provMining
 const provFarm = require('./provision-farm.js')
-const { tendWheatFarm, farmFootprintHas } = provFarm
+const { tendWheatFarm } = provFarm // farmFootprintHas is no longer reached directly here - provCore.digBlocked composes it
 const provFood = require('./provision-food.js')
 const { hasFood, foodCount, secureFood, eatUp, eatFromPackToComfortable, huntForFood, cookRawMeat,
   bakeBreadFromWheat, bankFoodFirst, courierFoodToBank, RAW_COOKABLE, FOOD_ANIMALS } = provFood
@@ -270,14 +269,24 @@ async function ensurePillarFiller (bot, { isStopped = () => false, need = DEADLO
     .filter(p => Math.abs(p.y - feet.y) <= 3) // surface blocks within +-3y of the feet
     .sort((a, b) => bot.entity.position.distanceTo(a) - bot.entity.position.distanceTo(b))
   let dug = 0
+  let skipProtected = 0 // candidates refused by the positional/material dig-permission rule
+  let skipPitRisk = 0   // candidates refused because taking them would leave a >=2-deep hole
   for (const p of cands) {
     if (dug >= need || isStopped() || Date.now() > deadline) break
     if (p.x === feet.x && p.z === feet.z) continue // never dig our own support column
     const b = bot.blockAt(p)
     if (!b || !DIRT_RE.test(b.name)) continue
-    if (scaffold.onFarmFootprint(p) || farmFootprintHas(p)) continue // never dig the wheat-farm footprint
-    if (!canBreakNaturally(b)) continue // registered build / protected block
+    // ONE dig-permission rule (provCore.digBlocked): farm footprint, fluids, someone else's
+    // build - AND the ground under our own hut/infra/farm, which the material rule structurally
+    // could not see. NEVER allowOwnInfra here: a few blocks of filler are not worth undermining
+    // the house. This is the dig that hollowed 16 cells out from under the hut floor.
+    if (provCore.digBlocked(bot, p, b)) { skipProtected++; continue }
     if (bot.canDigBlock && !bot.canDigBlock(b)) continue
+    // ...AND DO NOT MANUFACTURE THE PIT WE KEEP GETTING WEDGED IN. If the cell below this one
+    // is not solid, removing this block leaves a >=2-deep hole - the exact shape behind 41 "in
+    // a PIT" recoveries. A candidate that costs a rescue is not a candidate.
+    const under = bot.blockAt(p.offset(0, -1, 0))
+    if (!under || under.boundingBox !== 'block') { skipPitRisk++; continue }
     const above = bot.blockAt(p.offset(0, 1, 0))
     if (above && /water|lava/.test(above.name)) continue // don't open a liquid flow onto ourselves
     const tool = toolForBlock(bot, b.name)
@@ -291,6 +300,7 @@ async function ensurePillarFiller (bot, { isStopped = () => false, need = DEADLO
     if (fillerCount >= need) break // enough for the full lethal pillar - stop, don't strip more
   }
   try { await collectDrops(bot, 4) } catch {} // final sweep for any drop we walked past
+  dbg('  filler dig: dug ' + dug + '/' + cands.length + ' candidates (skipped ' + skipProtected + ' own-infra/farm, ' + skipPitRisk + ' pit-risk)')
   return !!scaffold.pickFiller(bot)
 }
 
@@ -521,16 +531,12 @@ async function suicideByPitDrop (bot, { isStopped = () => false, home = null, sa
   // encoded TWICE (geometrically via ownHutAt, materially via canBreakNaturally/STRUCTURE_RE, which
   // matches oak_planks). Lifting only the first left the second vetoing all four columns:
   //   deadlock-reset: no diggable pit column beside the hut - ABORTING this fallback
-  // The trapped concession is exactly one thing: MY OWN HUT, geometric and material together.
+  // The trapped concession is exactly one thing: MY OWN INFRA, geometric and material together.
   // The farm footprint, water/lava, and anyone else's build stay unconditional, trapped or not.
-  const pitBlocked = (cell, b, allowOwnHut) => {
-    if (scaffold.onFarmFootprint(cell) || farmFootprintHas(cell)) return 'farm' // #115: exclusions use the geometric predicate - they must fail PROTECTIVE
-    if (!b || AIRISH(b.name)) return null
-    if (/water|lava/.test(b.name)) return 'fluid'
-    if (ownHutAt(cell)) return allowOwnHut ? null : 'own-hut'
-    if (!canBreakNaturally(b)) return 'build' // someone else's / protected block in the shaft
-    return null
-  }
+  // 2026-08-02: that predicate is now provCore.digBlocked - THE dig-permission rule, shared with
+  // every material digger, so the concession and the protection cannot drift into two copies
+  // again. `allowOwnInfra` is the same latch `allowOwnHut` was, widened to the support column the
+  // shaft has to pass through anyway (the spoil is what pays for the climb back).
   const DEPTH = Math.max(6, DEADLOCK_FALL_H)
   // ==== THE PIT HAS TO PAY FOR ITS OWN DESCENT (live 2026-08-01) ============================
   // Reach caps the shaft at 3 from the rim; killing at hp 1 needs 4. The 4th block costs a
@@ -565,12 +571,12 @@ async function suicideByPitDrop (bot, { isStopped = () => false, home = null, sa
   // candidate at all. So viability is decided FIRST, and cost only ranks what survives it.
   // Depth and spoil come from ONE walk down the column, over exactly the rows stage A will dig -
   // so the estimate cannot describe a different shaft than the one that gets built.
-  const columnPlan = (fx, fz, allowOwnHut) => {
+  const columnPlan = (fx, fz, allowOwnInfra) => {
     let rows = 0; let spoil = 0
     for (let dy = -1; dy >= -DEPTH; dy--) {
       const cell = new Vec3(fx, feet.y + dy, fz)
       const b = bot.blockAt(cell)
-      if (pitBlocked(cell, b, allowOwnHut)) break
+      if (provCore.digBlocked(bot, cell, b, { allowOwnInfra })) break
       if (!reachableNow(cell)) break // arm's length from the rim - the rest is what a descent is for
       rows++
       if (yieldsFiller(b)) spoil++
@@ -580,11 +586,11 @@ async function suicideByPitDrop (bot, { isStopped = () => false, home = null, sa
   }
   // Two passes: PREFER a column that costs the hut nothing. Only if none exists - and only when
   // provably trapped - spend a floor cell. Cheapest sufficient escape, not the first one found.
-  const scan = (allowOwnHut) => {
+  const scan = (allowOwnInfra) => {
     let best = null
     for (const [dx, dz] of mining.DIRS) {
       const fx = feet.x + dx; const fz = feet.z + dz
-      const { depth, spoil } = columnPlan(fx, fz, allowOwnHut)
+      const { depth, spoil } = columnPlan(fx, fz, allowOwnInfra)
       if (depth < lethalMin) continue // cannot produce a killing drop - not a candidate, free or not
       const cand = { dx, dz, fx, fz, spoil, depth }
       if (!best || cand.spoil > best.spoil) best = cand
@@ -599,7 +605,7 @@ async function suicideByPitDrop (bot, { isStopped = () => false, home = null, sa
   const digAt = async (v) => {
     const b = bot.blockAt(v)
     if (!b || AIRISH(b.name)) return true
-    if (pitBlocked(v, b, spendFloor)) return false
+    if (provCore.digBlocked(bot, v, b, { allowOwnInfra: spendFloor })) return false
     if (bot.canDigBlock && !bot.canDigBlock(b)) return false
     const tool = toolForBlock(bot, b.name)
     if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
@@ -636,7 +642,7 @@ async function suicideByPitDrop (bot, { isStopped = () => false, home = null, sa
     if (!canReturn) dbg('deadlock-reset: no filler to climb back to the rim - not descending (shaft stays ' + openDrop() + 'b)')
     else {
       const under = new Vec3(feet.x, feet.y - 1, feet.z)
-      await digAt(under) // digAt itself enforces every exclusion now (pitBlocked) - one predicate, not a second copy of the list
+      await digAt(under) // digAt itself enforces every exclusion now (provCore.digBlocked) - one predicate, not a second copy of the list
       try { await stepInto(bot, under, { isStopped }) } catch {}
       const lowY = Math.floor(bot.entity.position.y)
       // Stage B: from the lower stance, dig the front shaft deeper (down to feet.y-DEPTH).

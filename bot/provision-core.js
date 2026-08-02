@@ -225,9 +225,43 @@ const DIGGABLE_NATURAL = /^(dirt|coarse_dirt|rooted_dirt|grass_block|podzol|myce
 
 function canBreakNaturally (block) { return !!block && DIGGABLE_NATURAL.test(block.name) && !STRUCTURE_RE.test(block.name) }
 
+// THE ONE ANSWER TO "MAY THIS BLOCK BE REMOVED". Returns the blocker string, or null for
+// permitted. Hoisted here from provision-recovery.js's local `pitBlocked` (2026-08-01) with
+// the arms in the SAME order, because a second copy of a dig-permission rule is how the
+// 2026-08-01 sealed-hut deadlock happened: "do not dig the hut" was written twice (geometric
+// ownHutAt + material canBreakNaturally) and lifting one left the other vetoing.
+//
+// What is NEW here is the own-infra arm. canBreakNaturally is MATERIAL-ONLY, so it protected
+// the hut's planks and never the dirt under them, and nothing anywhere was positional about
+// the ground beneath registered infra. That is why 16 hut floor cells stood over air on
+// 2026-08-02 and why the filler dug the 2-deep holes beside the farm that the bot then wedged
+// in. Own-infra now means the hut box + its support columns + point-infra columns + the
+// farm's support ring - all derived from the registry, no magic radius, no invented depth.
+//
+// `allowOwnInfra` is the TRAPPED carve-out, and it bypasses the own-infra arm exactly as
+// `allowOwnHut` did - INCLUDING skipping the material check for those cells: a bot trapped
+// under its own roof may dig its own floor AND the dirt beneath it, because the shaft's spoil
+// is what pays for the climb back (provision-recovery.js). The protection therefore cannot
+// entomb the bot - the trapped rung bypasses it by construction, on the same latch as before.
+// The farm footprint, fluids, and other people's builds stay unconditional, trapped or not.
+//
+// Cheap by construction (#8): pure arithmetic over cached registry reads, first match wins,
+// no world reads of its own - ensurePillarFiller calls it over up to 64 candidates.
+function digBlocked (bot, cell, b, { allowOwnInfra = false } = {}) {
+  const scaffold = require('./scaffold.js')
+  const provFarm = require('./provision-farm.js')
+  const provHut = require('./provision-hut.js')
+  if (scaffold.onFarmFootprint(cell) || provFarm.farmFootprintHas(cell)) return 'farm' // #115: exclusions use the geometric predicate - they must fail PROTECTIVE
+  if (!b || AIRISH(b.name)) return null
+  if (/water|lava/.test(b.name)) return 'fluid'
+  if (provHut.ownHutAt(cell) || provHut.ownInfraSupportAt(cell) || provFarm.farmSupportHas(cell)) return allowOwnInfra ? null : 'own-infra'
+  if (!canBreakNaturally(b)) return 'build' // someone else's / protected block
+  return null
+}
+
 module.exports = {
   setDebugSink,
-  AIRISH, REPLACEABLE, SHELTER_HOSTILE, STRUCTURE_RE, DIGGABLE_NATURAL, canBreakNaturally,
+  AIRISH, REPLACEABLE, SHELTER_HOSTILE, STRUCTURE_RE, DIGGABLE_NATURAL, canBreakNaturally, digBlocked,
   inventoryCounts, countItem, isNight, nearHostile, toolForBlock,
   gotoWithTimeout, collectDrops, stepInto, placeAt
 }

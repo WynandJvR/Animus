@@ -44,6 +44,60 @@ const isRim = (a, x, z) => inBox(a, x, z) && (x === a.x || x === a.x + DIMS.w - 
 const isCorner = (a, x, z) => (x === a.x || x === a.x + DIMS.w - 1) && (z === a.z || z === a.z + DIMS.l - 1)
 const isInterior = (a, x, z) => inBox(a, x, z) && !isRim(a, x, z) // 6-wide -> interior dx/dz 1..4 (4x4)
 
+// THE SUPPORT REGION of a hut: the ground this structure stands on. Anti-grief has always
+// protected the hut's FABRIC (planks, materially, via canBreakNaturally/STRUCTURE_RE) and
+// never the DIRT UNDERNEATH IT - so the filler/strip diggers hollowed out the ground under
+// the floor. Live 2026-08-02: 16 hut floor cells had air directly beneath them, and the pit
+// band beside the plot is what fed 41 "wedged in a PIT" recoveries.
+//
+// Footprint + a ONE-CELL RING (the wall perimeter's lateral support and the doorstep), and
+// y <= anchor.y (the floor slab and EVERYTHING BELOW IT). The depth is deliberately
+// UNBOUNDED rather than a K-block plane: this hut stands on a slope (natural grade y66 to
+// the west, y65 to the east), so any fixed plane under-protects one side and over-protects
+// the other, and the next hut on different ground invalidates whatever number was picked.
+// "The whole column" needs no number at all and is the honest meaning of "do not remove
+// support". It costs 8x8 = 64 columns of an infinite world; miners route around them.
+//
+// Interior cells ABOVE the floor are NOT in the region - tidying/repair inside the hut is
+// unaffected.
+const inSupport = (a, x, y, z) =>
+  x >= a.x - 1 && x <= a.x + DIMS.w && z >= a.z - 1 && z <= a.z + DIMS.l && y <= a.y
+
+// THE SUB-FLOOR REGION: the space under the hut's own floor, inside its footprint. Named ONCE,
+// here, because it was a blind spot BETWEEN three predicates rather than a missing check in any
+// one of them (2026-08-02):
+//   inBox / ownHutAt   stop AT the floor (y >= anchor.y) - so a bot under its own floor is
+//                      geometrically "not in the hut", and every own-structure guard reads false.
+//   inSupport (above)  extends downward without bound and includes the 1-cell RING - correct for
+//                      a DIG-PERMISSION rule, wrong as a description of an enclosed space (a ring
+//                      cell has no floor above it, so nothing can be trapped under one).
+//   healHomeCrater     refuses the footprint by construction ("NEVER inside the hut").
+// Live: the bot walked into that gap at (193,65,-102) - feet air, head air, ceiling its OWN
+// oak_planks floor, solid grade E and W - and the goal it was pursuing (the bank, inside the hut)
+// was unreachable from beneath the floor. It sat there for minutes.
+//
+// FOOTPRINT ONLY and strictly BELOW the floor plane, so: a cell with no floor above it is open
+// ground and not a crawlspace, and the hut INTERIOR can never be named by this predicate.
+const underFloor = (a, x, y, z) => inBox(a, x, z) && y < a.y
+
+// Every footprint column as [x,z] pairs - the columns whose floor plank must stand on something.
+function floorColumns (a) {
+  const out = []
+  for (let x = a.x; x <= a.x + DIMS.w - 1; x++) for (let z = a.z; z <= a.z + DIMS.l - 1; z++) out.push([x, z])
+  return out
+}
+
+// The 1-cell RING around the footprint as [x,z] pairs - the open ground the hut stands next to.
+// This is where the natural grade can actually be read (inside the footprint it is buried under
+// the hut), and it is where a bot stands to work on the underside of its own floor.
+function ringColumns (a) {
+  const out = []
+  for (let x = a.x - 1; x <= a.x + DIMS.w; x++) for (let z = a.z - 1; z <= a.z + DIMS.l; z++) {
+    if (!inBox(a, x, z)) out.push([x, z])
+  }
+  return out
+}
+
 // The interior 4x4 columns as [x,z] pairs (the fix: 1..4, not the old 1..3).
 function interiorColumns (a) {
   const out = []
@@ -638,6 +692,10 @@ module.exports = {
   STRAY_FILLER_RE,
   box,
   inBox,
+  inSupport,
+  underFloor,
+  floorColumns,
+  ringColumns,
   isRim,
   isInterior,
   interiorColumns,

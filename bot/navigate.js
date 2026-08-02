@@ -42,6 +42,29 @@ function isNavigating () { return navDepth > 0 }
 let forceUnsticking = false
 function isForceUnsticking () { return forceUnsticking }
 
+// ---- ROOT H (2026-08-02): these two latches GATE THE SCHEDULER TICK -------------------
+// index.js's tick returns early while `isRecovering() || isForceUnsticking()` (its TICK_GATES
+// table). Both are raised before an await and lowered in a `finally` - which is correct for a
+// throw and useless for a hang: a promise that never settles never reaches its finally, so ONE
+// hung await inside a recovery span pins the tick shut permanently. Live 2026-08-02: the tick
+// ran every cycle (the liveness rung never fired) yet `schedLastPick` went 412s stale, i.e. the
+// tick was returning before it ever picked a job. This is the FOURTH instance of the identical
+// defect (`_maintaining` cost 4.5h on 07-31; `_recoveringDegraded` cost a death today), and the
+// cure is the one commands.js already documents: the watchdog's terminal rung force-releases the
+// latch THROUGH THE MODULE THAT OWNS IT.
+//
+// recoveringDepth is a COUNTER, not a boolean, so a force-release to 0 leaves any outer spans
+// still unwinding: their `finally` would then drive it NEGATIVE, and isRecovering()'s `> 0` test
+// would read a LATER, legitimate recovery span as "not recovering" - the protection inverted.
+// So every decrement goes through endRecoverySpan(), clamped at 0. One definition, five callers.
+function endRecoverySpan () { recoveringDepth = Math.max(0, recoveringDepth - 1) }
+function releaseNavLatches () {
+  const held = []
+  if (recoveringDepth > 0) { held.push('recoveringDepth(' + recoveringDepth + ')'); recoveringDepth = 0 }
+  if (forceUnsticking) { held.push('forceUnsticking'); forceUnsticking = false }
+  return held.length ? held.join('+') : null
+}
+
 // PHASE A flag: the bounded reactive-move primitive (reactiveMove, below) is the PRIMARY tool
 // for time-critical short moves (creeper flee, low-hp radial retreat, hut-retreat approach,
 // recovery nudge/stepout) instead of a long, timeout-prone goto. =0 => every adopter falls
@@ -605,6 +628,22 @@ function doorNearby (bot, towards) { // cheap existence probe - gates the ladder
     return doorScanPoints(bot, towards).some(pt => (bot.findBlocks({ point: pt, matching: ids, maxDistance: 16, count: 1 }) || []).length > 0)
   } catch { return false }
 }
+// ONE PHYSICAL DOOR, ONE CELL: its FOOT (the lower half). findBlocks matches BOTH halves of a
+// door, so the collection loop below used to produce two candidates for one doorway - each
+// burning a 15s gotoOnce and a door-budget slot on the same piece of wood, and making the
+// "N door/gate candidates" line a lie. The HALF normalisation already existed, but only inside
+// the per-candidate geometry, i.e. AFTER the goto had been spent. This is that same rule, one
+// definition (#4), applied at collection time as well.
+// Gates/trapdoors carry no `half` property and pass through unchanged. An unreadable block
+// (unloaded chunk) passes through unchanged too - fail-open, because the per-candidate loop
+// already re-reads and tolerates a bad cell.
+function doorFootCell (bot, p) {
+  try {
+    const b = bot.blockAt(p)
+    const half = b && b.getProperties ? (b.getProperties() || {}).half : null
+    return half === 'upper' ? p.offset(0, -1, 0) : p
+  } catch { return p }
+}
 async function openNearbyDoor (bot, opts = {}) {
   // GEOMETRIC ARRIVAL (DOOR_CROSS_GEOMETRIC): crossOwnDoor threads its inside-ness predicate
   // in as opts.done - once the bot is on the target side (through ANY opening: the door OR a
@@ -617,8 +656,9 @@ async function openNearbyDoor (bot, opts = {}) {
     const seen = new Set(); const cands = []
     for (const pt of doorScanPoints(bot, opts.towards)) {
       for (const c of (bot.findBlocks({ point: pt, matching: ids, maxDistance: 16, count: 8 }) || [])) {
-        const k = c.x + ',' + c.y + ',' + c.z
-        if (!seen.has(k)) { seen.add(k); cands.push(c) }
+        const foot = doorFootCell(bot, c) // both halves of one door collapse to one candidate
+        const k = foot.x + ',' + foot.y + ',' + foot.z
+        if (!seen.has(k)) { seen.add(k); cands.push(foot) }
       }
     }
     if (opts.doorAt) {
@@ -643,7 +683,10 @@ async function openNearbyDoor (bot, opts = {}) {
       // the pathfinder cannot ROUTE through door cells at all (it only bumps them open
       // on direct lines), and "open" is normalized to "walk line clear" further down
       // (for a sideways-hung door those are OPPOSITES - see passageClear).
-      try { await gotoOnce(bot, new goals.GoalNear(p.x, p.y, p.z, 2), 15000, { duringRecovery: true }) } catch (e) { dbg('door-assist: cannot reach door at ' + p + ' (' + e.message + ')'); continue }
+      // GoalChanged here means SOMEONE ELSE called setGoal mid-goto. Which writer it was has
+      // never been identifiable from the tape, so the line names every span that owned the body
+      // at the moment it failed instead of leaving the next investigation to guess (#7).
+      try { await gotoOnce(bot, new goals.GoalNear(p.x, p.y, p.z, 2), 15000, { duringRecovery: true }) } catch (e) { dbg('door-assist: cannot reach door at ' + p + ' (' + e.message + ')' + (/goal was changed/i.test(e.message || '') ? ' - active spans: [' + arbiter.describeSpans() + ']' : '')); continue }
       if (bot.entity.position.distanceTo(p) > 4) continue
       try {
         // WALK THROUGH the doorway before re-planning: the pathfinder won't ROUTE
@@ -654,9 +697,9 @@ async function openNearbyDoor (bot, opts = {}) {
         // Foot cell from the HALF property, never from the bot's y: a mid-hop read
         // (feet momentarily at y+1) picked the UPPER half here and shifted every
         // geometry probe one block up (live: bogus 'blocked side' flips at the hut).
-        let half = null
-        try { half = (blk.getProperties() || {}).half || null } catch {}
-        const base = half === 'upper' ? p.offset(0, -1, 0) : p
+        // Same rule as the collection loop, ONE definition - and the re-read is deliberate:
+        // a candidate can go stale between collection and arrival.
+        const base = doorFootCell(bot, p)
         const before = bot.entity.position.clone()
         // CROSSING AXIS from WALL GEOMETRY, not the door's facing blockstate. facing
         // encodes the PLACER'S YAW at hang time, not which way the wall runs - the bot
@@ -1155,7 +1198,7 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
     counts[step.kind] = (counts[step.kind] || 0) + 1
     recoveringDepth++
     let ok = false
-    try { ok = await step.run() } catch (e) { dbg('recovery ' + step.kind + ' threw: ' + e.message) } finally { recoveringDepth-- }
+    try { ok = await step.run() } catch (e) { dbg('recovery ' + step.kind + ' threw: ' + e.message) } finally { endRecoverySpan() }
     dbg('recovery ' + step.kind + ' -> ' + (ok ? 'MOVED' : 'no progress'))
     if (ok) return step.kind
     // no progress from this tool - spend its remaining budget so the next pass tries the
@@ -1450,7 +1493,7 @@ async function crossOwnDoor (bot, hut, dir, opts = {}) {
       // the candidate sort to the chosen door column. Old opts when the flag is off.
       await openNearbyDoor(bot, GEO ? { towards, isStopped, done, doorAt: door } : { towards, isStopped })
     }
-  } catch (e) { dbg('crossOwnDoor: crossing failed (' + e.message + ')') } finally { recoveringDepth--; arbiter.endManeuver(tok) }
+  } catch (e) { dbg('crossOwnDoor: crossing failed (' + e.message + ')') } finally { endRecoverySpan(); arbiter.endManeuver(tok) }
   const ok = done()
   dbg('crossOwnDoor(' + dir + '): ' + (ok ? 'on the intended side' : 'still on the wrong side') + ' (door ' + door.x + ',' + door.z + ')')
   if (GEO) { // F3: record the outcome; a run of failures trips the cross-nav cooldown
@@ -1507,7 +1550,7 @@ async function forceUnstick (bot, opts = {}) {
       const buried = provHut().hasSolidCeiling(bot, 12, { ignoreLeaves: true })
       if (!buried && !detectPit(bot)) break
     }
-  } finally { recoveringDepth--; forceUnsticking = false; bot.clearControlStates() }
+  } finally { endRecoverySpan(); forceUnsticking = false; bot.clearControlStates() }
   const p1 = bot.entity.position
   return Math.hypot(p1.x - p0.x, p1.z - p0.z) >= 1.5 || Math.abs(p1.y - p0.y) >= 1
 }
@@ -1644,7 +1687,7 @@ async function reactiveMove (bot, opts = {}) {
     }
   } finally {
     bot.clearControlStates()
-    recoveringDepth--
+    endRecoverySpan()
     arbiter.endManeuver(tok)
     reactiveMoving = false
   }
@@ -1661,4 +1704,4 @@ function honestFail (lastErr, counts, label, recoveryMs, reflexWaitMs) {
   return e
 }
 
-module.exports = { navigateTo, navigateToPreempt, gotoOnce, crossOwnDoor, crossVerdict, enterStructure, swimToShore, escapeWater, escapeToDryLand, isEscapingWater, headInWater, feetInWater, outOfWater, jumpForAir, isNavigating, isRecovering, isForceUnsticking, forceUnstick, setDebugSink, reactiveMove, reactiveTarget, reactiveDone, setDeliberateDrown, isDeliberateDrown, drownReflexSkips }
+module.exports = { doorFootCell, navigateTo, navigateToPreempt, gotoOnce, crossOwnDoor, crossVerdict, enterStructure, swimToShore, escapeWater, escapeToDryLand, isEscapingWater, headInWater, feetInWater, outOfWater, jumpForAir, isNavigating, isRecovering, isForceUnsticking, releaseNavLatches, forceUnstick, setDebugSink, reactiveMove, reactiveTarget, reactiveDone, setDeliberateDrown, isDeliberateDrown, drownReflexSkips }

@@ -56,6 +56,26 @@ function farmFootprintHas (pos) {
   } catch { return false }
 }
 
+// THE GROUND THE PLOT STANDS ON. farmFootprintHas protects the crop cells themselves; nothing
+// protected what holds them up, so the filler digs cut 2+ deep holes in the band just beside the
+// plot (184..186,-95 live) and the bot then wedged in them - 41 "in a PIT" recoveries in a day.
+// Ring of 1 laterally (a farmland cell whose neighbour column is hollowed slumps/floods just the
+// same), and y <= thatCell.y - 1: everything BELOW that cell's own surface, whole column, for the
+// same reason the hut's support region is depth-unbounded (see hutModel.inSupport). PER CELL, not
+// one global plane - the plot spans two levels (y67 and y68 live), so a single plane would
+// under-protect the lower half. Pure arithmetic over the cached world-memory read; no world I/O.
+function farmSupportHas (pos) {
+  if (!pos) return false
+  try {
+    const wf = loadWorldMem().wheatFarm
+    const cells = wf && wf.cells
+    if (!cells || !cells.length) return false
+    const x = Math.floor(pos.x); const y = Math.floor(pos.y); const z = Math.floor(pos.z)
+    for (const c of cells) { if (Math.abs(x - c.x) <= 1 && Math.abs(z - c.z) <= 1 && y <= c.y - 1) return true }
+    return false
+  } catch { return false }
+}
+
 // ANTI-TRAMPLING (FARM_NO_TRAMPLE, §5.5): a SOFT additive per-block cost on our OWN persisted
 // wheat cells (+ the farmland under them + the hop-over cell) so travel/gather/climb routes bend
 // AROUND the plot instead of jumping across it (a jump-landing is what reverts farmland). It is
@@ -1490,5 +1510,5 @@ async function plantGrove (bot, home, logItem, { isStopped = () => false, say = 
 module.exports = {
   setDebugSink,
   surveyWaterSite, chooseFarmSite, // #118 FARM_SITED_FROM_HOME (Root F)
-  WHEAT_FARM_TARGET, farmFootprintHas, cropExclusionStep, cropPlaceExclusion, inAvoidBox, boneMealBlock, withdrawSeedsFromBank, gatherSeedsNear, placeFarmTorches, ensureWheatFarm, replantCropCell, tendWheatFarm, hasStandingFarm, saplingFor, saplingCount, plantSaplingNear, boneMealSapling, fishSaplings, plantGrove
+  WHEAT_FARM_TARGET, farmFootprintHas, farmSupportHas, cropExclusionStep, cropPlaceExclusion, inAvoidBox, boneMealBlock, withdrawSeedsFromBank, gatherSeedsNear, placeFarmTorches, ensureWheatFarm, replantCropCell, tendWheatFarm, hasStandingFarm, saplingFor, saplingCount, plantSaplingNear, boneMealSapling, fishSaplings, plantGrove
 }

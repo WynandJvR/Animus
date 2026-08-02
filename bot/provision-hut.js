@@ -49,6 +49,12 @@ let _hutSchemCache = null
 
 const insideHutBox = (p, hut) => hutModel.inBox(hut, p.x, p.z)
 
+// THE two ground-fill material rules for home repair, in one place (#4). Byte-for-byte the pair
+// that ensureHutApron, healHomeCrater and underpinHutFloor each used to re-declare locally: cheap
+// terrain filler first so planks are saved for the fabric, then anything that will stand up.
+const DIRTLIKE = /^(dirt|coarse_dirt|cobblestone|cobbled_deepslate|stone|granite|diorite|andesite|tuff|gravel|netherrack)$/
+const ANYFILL = /(_planks|dirt|cobblestone|cobbled_deepslate|stone)$/
+
 // The hut is 6x5x6 (hut.schem: anchor + 0..5 in x/z, + 0..4 in y). Being INSIDE it is
 // not "underground": before this predicate the roofed interior tripped hasSolidCeiling,
 // so climb-out dug through the bot's own roof, pit-escape pillared dirt onto the floor,
@@ -59,6 +65,41 @@ function ownHutAt (pos) {
   for (const h of listInfra('hut')) {
     if (x >= h.x && x <= h.x + 5 && z >= h.z && z <= h.z + 5 && y >= h.y && y <= h.y + 4) return h
   }
+  return null
+}
+
+// "Is this cell holding up something of MINE?" - the positional half of dig permission, and
+// the answer to the failure the material rule structurally cannot see: canBreakNaturally is
+// MATERIAL-ONLY, so the hut's planks were protected while the dirt they stand on was fair
+// game to every filler/strip/tunnel dig. Live 2026-08-02: 16 hut floor cells with air
+// directly beneath them, and 2+ deep holes beside the farm that the bot then wedged in.
+//
+// Two shapes, both derived from the registry - no magic radius, no invented depth:
+//   hut        -> hutModel.inSupport: footprint + a 1-cell ring, whole column at/below the floor
+//   point infra-> the 3x3 column BENEATH a chest/furnace/table/bed (they mostly stand inside a
+//                 hut and are covered twice; harmless, and it protects the ones that don't).
+// PURE GEOMETRY, no world reads - the same fail-PROTECTIVE contract as ownHutAt (see the
+// deliberate two-functions note above insideOwnStructure). Returns the record, or null.
+const POINT_INFRA_KINDS = ['chest', 'furnace', 'table', 'bed']
+function ownInfraSupportAt (pos) {
+  if (!pos) return null
+  const x = Math.floor(pos.x); const y = Math.floor(pos.y); const z = Math.floor(pos.z)
+  for (const h of listInfra('hut')) { if (hutModel.inSupport(h, x, y, z)) return h }
+  for (const kind of POINT_INFRA_KINDS) {
+    for (const e of listInfra(kind)) {
+      if (Math.abs(x - e.x) <= 1 && Math.abs(z - e.z) <= 1 && y < e.y) return e
+    }
+  }
+  return null
+}
+
+// "Am I (is this cell) in the crawlspace UNDER my own floor?" - the registry-side reader of
+// hutModel.underFloor, which is where that region is defined and why. Pure geometry, no world
+// reads, same fail-PROTECTIVE contract as ownHutAt. Returns the hut record, or null.
+function underOwnFloorAt (pos) {
+  if (!pos) return null
+  const x = Math.floor(pos.x); const y = Math.floor(pos.y); const z = Math.floor(pos.z)
+  for (const h of listInfra('hut')) { if (hutModel.underFloor(h, x, y, z)) return h }
   return null
 }
 
@@ -187,8 +228,6 @@ async function ensureHutApron (bot, at, opts = {}) {
   if (!dl || !/_door$/.test(dl.name)) return 0
   // get within reach of the threshold
   try { await gotoWithTimeout(bot, new goals.GoalNearXZ(doorX, at.z, 2), 20000) } catch {}
-  const DIRTLIKE = /^(dirt|coarse_dirt|cobblestone|cobbled_deepslate|stone|granite|diorite|andesite|tuff|gravel|netherrack)$/
-  const ANYFILL = /(_planks|dirt|cobblestone|cobbled_deepslate|stone)$/
   const fillCell = async (wx, wy, wz) => {
     const b = bot.blockAt(new Vec3(wx, wy, wz))
     if (b && b.boundingBox === 'block' && !AIRISH(b.name)) return false // already solid
@@ -226,8 +265,6 @@ async function healHomeCrater (bot, at, opts = {}) {
   const say = opts.say || (() => {})
   const reposition = opts.reposition !== false
   const floorY = at.y; const doorX = at.x + 2
-  const DIRTLIKE = /^(dirt|coarse_dirt|cobblestone|cobbled_deepslate|stone|granite|diorite|andesite|tuff|gravel|netherrack)$/
-  const ANYFILL = /(_planks|dirt|cobblestone|cobbled_deepslate|stone)$/
   const X0 = doorX - 2; const X1 = doorX + 5    // 414..421 - FULL crater width incl. the east pit
   const Z1 = at.z - 1; const Z0 = at.z - 4      // 84..81 - out to the crater's north edge
   const solidAt = (x, y, z) => { const b = bot.blockAt(new Vec3(x, y, z)); return !!(b && b.boundingBox === 'block' && !AIRISH(b.name)) }
@@ -278,6 +315,173 @@ async function healHomeCrater (bot, at, opts = {}) {
   if (filled) { say(`patched the creeper crater at my door - bridged ${filled} block(s) so it's walkable`); dbg('  crater heal: bridged ' + filled + '/' + holes + ' surface hole(s), x' + X0 + '-' + X1 + ' z' + Z0 + '-' + Z1 + (targets.length ? ' (' + targets.length + ' left for a later pass)' : '')) }
   else dbg('  crater heal: ' + holes + ' surface hole(s), none bridgeable from here' + (reposition ? '' : ' (no-reposition pass)'))
   return filled
+}
+
+// UNDERPIN THE FLOOR (ROOT G, 2026-08-02). A hut floor is snapped to one median surface height,
+// so on sloping ground part of it SPANS the slope with nothing underneath - a roofed, laterally
+// open crawlspace under the bot's own house. Live: the bot walked into it and stood at
+// (193,65,-102) - feet air, head air, ceiling its own oak_planks floor, grade solid E and W - for
+// minutes, while the goal it was pursuing (the bank, INSIDE the hut) was unreachable from beneath
+// the floor: 'bank: every rung failed and the goal is STILL unreachable', 'HARD-WEDGED dry',
+// 'recovery drybreach -> no progress', on a loop.
+//
+// WHY FILLING, and not a recovery rung that recognises the state: the failure is "a space exists
+// under my own structure that I can enter and cannot leave". A rung that routes the bot out
+// leaves the trap standing to swallow it again tomorrow - it treats the symptom. Sealing only the
+// lateral mouths would leave a dark enclosed cavity under the house, which is a mob spawner. The
+// floor standing on something removes the space itself, is what a real player builds (#13), and
+// costs nothing extra: this is the SAME work as sealing the mouths, plus the interior columns.
+//
+// WHY IT IS NOT EXPENSIVE, and does not fill natural terrain: it only ever places into AIR, it
+// only goes down to the LOWEST GRADE READ AROUND THE HUT'S OWN PERIMETER (the 1-cell ring, the
+// one place the natural surface is still visible), and it stops each column at the first solid
+// block. On the live hut that is grade y66 west / y65 east under a floor at y67 - so the west
+// side is already supported and does no work at all, and the east side gets the two cells that
+// are the trap. A column with no readable grade within the hut's own height is a CLIFF, not a
+// slope: it simply does not lower the fill floor, and the deep void stays a cave (sealHomeDescents'
+// business, not this function's).
+//
+// ANTI-GRIEF: this only PLACES, and placing is not digging - provCore.digBlocked is not consulted
+// and cannot be, because there is no dig to permit. It therefore cannot re-create the 2026-08-01
+// sealed-hut entombment from the protection side. From the FILL side the entombment risk is real
+// and is answered directly: if the bot is itself under its own floor the whole pass refuses (step
+// 0), no cell holding the bot or any entity is ever filled, and every target is strictly BELOW the
+// floor plane (hutModel.underFloor), so the hut interior is unreachable by construction. Every
+// placement is verified through placeAt -> pathfix.placedOK; the pass is capped at one slab's
+// worth of blocks and yields to isStopped.
+async function underpinHutFloor (bot, at, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const say = opts.say || (() => {})
+  at = at || hutAnchor()
+  if (!at || !bot.entity) return { skipped: 'no hut', filled: 0, holes: 0 }
+  const floorY = at.y
+
+  // 0. NEVER SEAL MYSELF IN. Filling the crawlspace while standing in it is precisely the
+  //    2026-08-01 shape (anti-something entombing the bot), so the refusal is unconditional and
+  //    it NAMES the state - which is also the log line that makes the next occurrence one grep.
+  const meCell = bot.entity.position.floored()
+  if (underOwnFloorAt(meCell)) {
+    dbg('  underpin: I am UNDER my own floor at ' + meCell.toString() + ' (ceiling y' + floorY +
+      ' is my own hut) - refusing to fill the space I am standing in; getting out comes first')
+    return { skipped: 'under my own floor', filled: 0, holes: 0 }
+  }
+
+  // 1. HOW FAR DOWN DOES THE FLOOR HAVE TO REACH? Read it, never assume it (#10). The natural
+  //    grade is only visible on the 1-cell ring (inside the footprint it is under the hut), and
+  //    the scan depth is the hut's OWN height - below that it is not a floor over a slope.
+  const gradeY = (x, z) => {
+    for (let y = floorY - 1; y >= floorY - hutModel.DIMS.h; y--) {
+      const b = bot.blockAt(new Vec3(x, y, z))
+      if (!b) return null
+      if (b.boundingBox === 'block' && !AIRISH(b.name)) return y
+    }
+    return null
+  }
+  const ring = hutModel.ringColumns(at)
+  const grades = []
+  for (const [x, z] of ring) { const g = gradeY(x, z); if (g != null) grades.push(g) }
+  if (grades.length * 2 < ring.length) {
+    dbg('  underpin: only ' + grades.length + '/' + ring.length + ' perimeter columns are readable - not deciding how deep my own floor should reach on that')
+    return { skipped: 'grade unreadable', filled: 0, holes: 0 }
+  }
+  const lowestY = Math.min(...grades)
+
+  // 2. TARGETS: air directly under a floor plank that is REALLY THERE, down to the first solid
+  //    block or the perimeter's lowest grade, whichever comes first. A missing floor plank is
+  //    repairHutStructure's job, not this one; an unreadable cell stops its column (unknown is
+  //    not empty).
+  const onFarm = (c) => { try { return !!require('./scaffold.js').onFarmFootprint(new Vec3(c.x, c.y, c.z)) } catch { return false } }
+  const targets = []
+  let columns = 0; let unknown = 0
+  for (const [x, z] of hutModel.floorColumns(at)) {
+    const plank = bot.blockAt(new Vec3(x, floorY, z))
+    if (!plank) { unknown++; continue }
+    if (!(plank.boundingBox === 'block' && !AIRISH(plank.name))) continue
+    let col = 0
+    for (let y = floorY - 1; y >= lowestY; y--) {
+      const b = bot.blockAt(new Vec3(x, y, z))
+      if (!b) { unknown++; break }
+      if (!AIRISH(b.name)) break                 // solid ground, or a fluid/plant that is not mine to displace
+      if (onFarm({ x, y, z })) break             // never the crop plot, even under my own floor
+      targets.push({ x, y, z }); col++
+    }
+    if (col) columns++
+  }
+  const holes = targets.length
+  if (!holes) return { filled: 0, holes: 0, remaining: 0, lowestY, unknown }
+
+  // 3. MATERIAL: from the pack, topped up from the bank if bare. Never blocks on it.
+  const haveFill = () => (bot.inventory ? bot.inventory.items() : []).some(i => DIRTLIKE.test(i.name) || ANYFILL.test(i.name))
+  if (!haveFill()) { try { await require('./resources.js').withdrawItems(bot, 'cobblestone', 16, { near: at, maxDist: 64 }) } catch {} }
+  if (!haveFill()) {
+    dbg('  underpin: ' + holes + ' cell(s) of my own floor stand on air and I have no filler aboard or banked - resuming next pass')
+    return { skipped: 'no filler', filled: 0, holes, remaining: holes, lowestY, unknown }
+  }
+
+  // 4. FILL. Order: the columns FARTHEST from the perimeter first, and within a column bottom-up.
+  //    Deepest-first because filling the rim first walls the bot out of the interior it still has
+  //    to reach; bottom-up because that is how ensureHutApron already learned to do this - each
+  //    layer then has a solid face beneath it to place against (placeAt's first candidate is the
+  //    cell below). Note this is NOT healHomeCrater's problem: that one bridges a walk SURFACE
+  //    across an open pit and must never depth-fill, because the pathfinder cannot route across
+  //    the pit to reach the far side. Here every target has the bot's own floor one to two cells
+  //    above it and solid grade within a couple of blocks laterally, and the bot works from the
+  //    perimeter ring - it never has to stand over the hole it is filling.
+  const CAP = hutModel.DIMS.w * hutModel.DIMS.l   // one slab's worth of blocks per pass; resumable
+  const depthOf = (x, z) => Math.min(x - (at.x - 1), (at.x + hutModel.DIMS.w) - x, z - (at.z - 1), (at.z + hutModel.DIMS.l) - z)
+  targets.sort((a, b) => (depthOf(b.x, b.z) - depthOf(a.x, a.z)) || (a.y - b.y))
+  const stands = []
+  for (const [x, z] of ring) {
+    const g = gradeY(x, z); if (g == null) continue
+    const feet = bot.blockAt(new Vec3(x, g + 1, z)); const head = bot.blockAt(new Vec3(x, g + 2, z))
+    if (feet && head && AIRISH(feet.name) && AIRISH(head.name)) stands.push({ x, y: g + 1, z })
+  }
+  const occupied = (c) => {
+    try {
+      for (const id in bot.entities) {
+        const e = bot.entities[id]
+        if (!e || !e.position) continue
+        const h = Math.max(1, Math.ceil(e.height || 1))
+        if (Math.floor(e.position.x) === c.x && Math.floor(e.position.z) === c.z &&
+            c.y >= Math.floor(e.position.y) && c.y < Math.floor(e.position.y) + h) return true
+      }
+    } catch {}
+    return false
+  }
+  let filled = 0; let progress = true; let guard = 0; let walks = 0
+  while (targets.length && progress && filled < CAP && guard++ < 8 && !isStopped()) {
+    progress = false
+    for (let i = 0; i < targets.length && filled < CAP && !isStopped(); i++) {
+      const t = targets[i]
+      const v = new Vec3(t.x, t.y, t.z)
+      const b = bot.blockAt(v)
+      if (!b || !AIRISH(b.name)) { targets.splice(i, 1); i--; continue } // already solid (ours or the world's)
+      if (occupied(t)) continue
+      if (bot.entity.position.distanceTo(v.offset(0.5, 0.5, 0.5)) > 4.3) {
+        if (walks >= CAP) continue
+        let reached = false
+        const near = stands.map(s => ({ s, d: Math.hypot(s.x - t.x, s.z - t.z) })).sort((p, q) => p.d - q.d).slice(0, 2)
+        for (const { s } of near) {
+          walks++
+          try { await gotoWithTimeout(bot, new goals.GoalBlock(s.x, s.y, s.z), 8000) } catch {}
+          if (bot.entity.position.distanceTo(v.offset(0.5, 0.5, 0.5)) <= 4.5) { reached = true; break }
+        }
+        if (!reached) continue
+      }
+      if (occupied(t)) continue // we moved; a mob may have wandered in
+      let ok = await placeAt(bot, v, DIRTLIKE)   // cheap filler first (save planks for the fabric)
+      if (!ok) ok = await placeAt(bot, v, ANYFILL)
+      if (ok) { filled++; targets.splice(i, 1); i--; progress = true }
+    }
+  }
+  if (filled) {
+    say(`shored up the ground under my own floor - ${filled} block(s); part of it was standing over a hole big enough to walk into`)
+    dbg('  underpin: filled ' + filled + '/' + holes + ' cell(s) under the floor across ' + columns + ' column(s), y' + lowestY + '..' + (floorY - 1) +
+      (targets.length ? ' (' + targets.length + ' left for a later pass)' : '') + (unknown ? ', ' + unknown + ' cell(s) unloaded - claiming nothing about those' : ''))
+  } else {
+    dbg('  underpin: ' + holes + ' cell(s) of my own floor stand on air (y' + lowestY + '..' + (floorY - 1) + ', ' + columns + ' column(s)) - none placeable from here (' + (placeAt.lastFail || '?') + ')')
+  }
+  return { filled, holes, remaining: targets.length, lowestY, unknown }
 }
 
 // ---- BEDS: one place that knows how to GET a bed and how to LAY one -------------------------
@@ -1420,12 +1624,18 @@ async function maintainHome (bot, hutAt, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const say = opts.say || (() => {})
   hutAt = hutAt || hutAnchor()
-  const out = { bed: null, bedUpgrade: null, chestFixed: false, repair: null, consolidated: 0, approach: null, damaged: false }
+  const out = { bed: null, bedUpgrade: null, chestFixed: false, repair: null, consolidated: 0, approach: null, underpin: 0, damaged: false }
   if (!hutAt) return out
   // FIRST, because every other step here assumes the bot can GET IN. A doorway it cannot stand
   // in front of makes the bed, the bank and the tidy unreachable, and the shell survey cannot
   // see the problem at all - the obstruction is outside the box.
   try { const ap = await clearDoorApproach(bot, hutAt, { isStopped, say }); out.approach = ap.how; if (ap.how === 'cleared') out.damaged = true } catch (e) { dbg('camp: door approach failed (' + e.message + ')') }
+  // SECOND, for the same reason the door approach is first: everything below assumes the bot can
+  // move around its own home. A floor spanning air is a trap the bot walks into and cannot leave
+  // (live 2026-08-02, (193,65,-102)), and from inside it the bed, the bank and the tidy are all
+  // unreachable - the pass does not merely fail, it stops running. Idempotent and silent on an
+  // intact foundation: 0 placements when every floor plank already stands on something.
+  try { const un = await underpinHutFloor(bot, hutAt, { isStopped, say }); out.underpin = un.filled || 0; if (un.filled) out.damaged = true } catch (e) { dbg('camp: floor underpin failed (' + e.message + ')') }
   try { await ensureHutApron(bot, hutAt, { isStopped, say }) } catch (e) { dbg('camp: apron fill failed (' + e.message + ')') }
   // rebuild/verify the bed. Anything but 'present' means a bed was missing/placed/unplaceable
   // = the home needed work.
@@ -1874,7 +2084,7 @@ async function worldTidy (bot, opts = {}) {
 
 module.exports = {
   setDebugSink, insideHutBox,
-  insideHutBox, ownHutAt, onHutApron, insideOwnStructure, hasSolidCeiling, hutAnchor, ensureHomeShelter, stepOffApron, ensureHutApron, clearDoorApproach, healHomeCrater, ensureHutBed, relocateBedInto, bedInPack, bedCandidates, acquireBed, placeBedNear, bedFootprint, bedUsable, assertSpawnOn, ensureBedSite, upgradeBedPlacement, freeInteriorCell, stationInHut, stationSlot, reconcileInfra, cleanupHutInterior, repairHutStructure, recallAndReach, maintainHut, maintainHome,
+  insideHutBox, ownHutAt, ownInfraSupportAt, underOwnFloorAt, underpinHutFloor, onHutApron, insideOwnStructure, hasSolidCeiling, hutAnchor, ensureHomeShelter, stepOffApron, ensureHutApron, clearDoorApproach, healHomeCrater, ensureHutBed, relocateBedInto, bedInPack, bedCandidates, acquireBed, placeBedNear, bedFootprint, bedUsable, assertSpawnOn, ensureBedSite, upgradeBedPlacement, freeInteriorCell, stationInHut, stationSlot, reconcileInfra, cleanupHutInterior, repairHutStructure, recallAndReach, maintainHut, maintainHome,
   secureBase, secureBaseGate: hutModel.secureBaseGate,
   sealHomeDescents, sealDescentsGate: hutModel.sealDescentsGate,
   worldTidy, litterSignature: hutModel.litterSignature

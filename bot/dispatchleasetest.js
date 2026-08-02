@@ -335,7 +335,11 @@ t('ANTI-DRIFT: the reclaimer covers EVERY latch activeJobInfo can report', () =>
   const fn = snap.slice(i, snap.indexOf('async function schedulerState', i))
   const latches = [...fn.matchAll(/if \((is[A-Za-z]+)\(\)\)/g)].map(m => m[1])
   assert(latches.length >= 5, 'expected the five job latches, found ' + latches.join(','))
-  const rel = cmd.slice(cmd.indexOf('function releaseBodyClaims'), cmd.indexOf('function releaseBodyClaims') + 2200)
+  // slice to the END of the function, not a magic byte count: ROOT H (2026-08-02) added two more
+  // latches and their rationale, and a fixed 2200-char window silently cut the assertion's own
+  // evidence in half - the test was measuring comment length, not coverage.
+  const relStart = cmd.indexOf('function releaseBodyClaims')
+  const rel = cmd.slice(relStart, cmd.indexOf('\nfunction ', relStart + 1))
   assert(/releaseMaintainLatch/.test(rel) && /releaseFoodLatch/.test(rel) && /releaseRecoveryLatches/.test(rel),
     'the reclaimer must force-release the maintain, food and recovery latch groups - ' + latches.join(',') + ' can each name a phantom job')
 })

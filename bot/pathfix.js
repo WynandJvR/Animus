@@ -98,6 +98,148 @@ function sweep () {
   saveTrail()
 }
 
+// ---- BOUNDED BODY PRIMITIVES (ROOT A, 2026-08-02) ------------------------------------
+// mineflayer's dig() and look() end in `await task.promise`, and those tasks settle ONLY on
+// an event that a chunk unload / a lost server echo can simply never deliver:
+//   digging.js:192  onBlockUpdate returns early unless newBlock?.type === 0, and every
+//                   blockUpdate listener gets (null, null) on unload -> null?.type !== 0.
+//   digging.js:143  finishDigging then nulls bot.targetDigBlock, so digging.js:166's
+//                   `if (!bot.targetDigBlock) return` makes bot.stopDigging() a NO-OP - the
+//                   per-position blockUpdate listener is the only settle path left.
+//   physics.js:354  await lookingTask.promise, finished only by a converged 'move' event or
+//                   by the NEXT bot.look() call (physics.js:330-331).
+// An await that can never return defeats every cooperative `isStopped()/deadline` loop in the
+// codebase: ensurePillarFiller checks its deadline at the loop TOP and then hangs forever on
+// `await bot.dig(b)` (provision-recovery.js:274/285). The bound is what re-arms the cooperative
+// model - once no single await can outlive its own physics, every loop is back at its own check
+// within one bound. So the rule lives HERE, at the primitive, not at 55 call sites (#4).
+const DIG_GRACE_MS = 10000       // dig bound = bot.digTime(block) + this. digTime is the engine's
+                                 // own answer for this block/tool, so a legitimately slow dig
+                                 // (obsidian by hand) is never falsely cut; the grace covers look
+                                 // convergence + server echo lag.
+const LOOK_BOUND_MS = 2000       // a look converges in a few 50ms physics ticks
+const CUT_SETTLE_GRACE_MS = 250  // how long the cutter waits for the forced settle to land
+
+// ---- CRAFT BOUND (ROOT F, 2026-08-02) ------------------------------------------------
+// CORRECTION TO THE BRIEF, read not guessed: `once(emitter, event, timeout = 20000)`
+// (mineflayer/lib/promise_utils.js:75) DEFAULTS to a 20s timeout, and onceWithCleanup removes
+// its listener when that fires (:70). So craft.js:40's `await once(bot, 'windowOpen')` is not
+// an eternal await - it rejects after 20s. provision.js:2872's `if (!/windowOpen/.test(...))`
+// retry is the live proof: that error is reachable, so it is thrown.
+//
+// The defect is therefore not "never settles", it is "settles far too late, several times over".
+// EVERY window round-trip inside a craft carries its own 20s allowance: the window open, plus
+// (on 1.21, where transactionPacketExists is false) each grid-slot click via
+// waitForWindowUpdate -> once(window,'updateSlot:0') (inventory.js:456-459), plus putAway's
+// once(window,'updateSlot:N') (inventory.js:650). A 3x3 recipe is up to 20 such round-trips, so
+// one craftOnce can legitimately hold the body for minutes. Live 2026-08-02: the recovery ladder
+// ran `craft:crafting_table > craft:stick > craft:wooden_hoe` from a crawlspace under the hut
+// floor where no table could be reached or placed; at ~20s per window-open failure plus
+// provision.js's re-approach-and-retry that is ~55s per item, ~165s for the chain - which is
+// exactly the `no verified progress for 154s` the watchdog measured before revoking the slot.
+//
+// The bound is derived from the engine's own per-round-trip answer, WINDOW_TIMEOUT = 5000
+// (inventory.js:16) - the considered number, as opposed to `once`'s generic 20000 default - and
+// from the click count:
+//   +1 WINDOW_TIMEOUT: the ONE round-trip we allow to be pathologically slow. If more than one
+//                      is that slow the craft is not progressing.
+//   +1 WINDOW_TIMEOUT: the whole click sequence. craftOnce's worst case is ~20 round-trips
+//                      (1 open + <=18 grid clicks + putAway + the out-shape putAways); at the
+//                      server's 50ms tick a healthy sequence costs ~1s, so this is 5x headroom.
+// = 10000ms per craftOnce, which is deliberately HALF `once`'s 20s default, so this bound always
+// wins deterministically instead of racing the engine's own timeout. bot.craft loops craftOnce
+// `count` times (craft.js:19-21), so the bound scales with count - it is a per-craft budget, not
+// a per-call one.
+const WINDOW_TIMEOUT_MS = 5000   // mineflayer's own WINDOW_TIMEOUT (inventory.js:16), restated
+const CRAFT_BOUND_MS = WINDOW_TIMEOUT_MS * 2 // per craftOnce; x count in the wrapper
+
+// THE one bounded await for raw mineflayer body promises. Races `promise` against `ms`.
+//   settles first  -> its outcome passes through untouched (resolve OR reject).
+//   deadline first -> run `settle()` (the primitive-specific force-settle), wait up to
+//                     CUT_SETTLE_GRACE_MS for the underlying to land, then ALWAYS throw
+//                     `<label> cut after <ms>ms (bounded)` regardless of whether it landed.
+//                     Deterministic contract, so it is testable and callers cannot branch on luck.
+// The raw promise's ONLY continuation is the bookkeeping wrapper below, which never rejects and
+// never runs caller code. That is what makes "a hung call resolving into a dead context" -
+// a second body-mover appearing minutes later - unrepresentable rather than merely unlikely.
+async function bounded (label, promise, ms, settle) {
+  const t0 = Date.now()
+  let settled = false
+  const tracked = Promise.resolve(promise).then(
+    v => { settled = true; return { ok: true, v } },
+    e => { settled = true; return { ok: false, e } }
+  )
+  let cutTimer = null
+  const outcome = await Promise.race([tracked, new Promise(r => { cutTimer = setTimeout(() => r(null), ms) })])
+  clearTimeout(cutTimer)
+  if (outcome) { if (outcome.ok) return outcome.v; throw outcome.e }
+  try { if (settle) settle() } catch (e) { dbg('(bounded) ' + label + ' settle action threw: ' + (e && e.message)) }
+  let graceTimer = null
+  await Promise.race([tracked, new Promise(r => { graceTimer = setTimeout(r, CUT_SETTLE_GRACE_MS) })])
+  clearTimeout(graceTimer)
+  const inGrace = settled
+  if (!inGrace) tracked.then(() => { try { dbg('(bounded) ' + label + ' settled LATE after ' + (Date.now() - t0) + 'ms - result discarded') } catch {} })
+  dbg('(bounded) ' + label + ' cut after ' + ms + 'ms - settle sent, underlying settled=' + (inGrace ? 'yes' : 'no') + ' within ' + CUT_SETTLE_GRACE_MS + 'ms')
+  throw new Error(label + ' cut after ' + ms + 'ms (bounded)')
+}
+
+// The dig force-settle. TWO paths, because there are two shapes of stuck dig:
+//  1. the task is still armed (finishDigging has not run) -> stopDigging() cancels it properly.
+//  2. THE LIVE HANG: finishDigging already fired, targetDigBlock is null, stopDigging returned
+//     at digging.js:166 without touching the task, and the per-position blockUpdate listener is
+//     the only thing that can still finish it. Emit that event with a type-0 newBlock so
+//     onBlockUpdate (digging.js:192) runs its own cleanup and finishes the task.
+// oldBlock null is fine - onBlockUpdate inspects only newBlock.type. And finishDigging has
+// already zeroed the cell locally (digging.js:158), so this asserts nothing about the world
+// that mineflayer has not already assumed. Nothing in bot/ listens on 'blockUpdate:<pos>', and
+// mineflayer-pathfinder listens on the GENERIC 'blockUpdate' (its index.js:398), not this one.
+function forceSettleDig (bot, block) {
+  try { bot.stopDigging() } catch {}
+  try {
+    const p = block && block.position
+    if (p) bot.emit('blockUpdate:' + p, null, { type: 0, position: p })
+  } catch {}
+}
+
+// The craft force-settle. It does exactly what craft() itself does on ANY craft error
+// (craft.js:27-33) - the library's own cleanup, executed by us because the library's error path
+// is unreachable while its promise is still pending. Two parts, and the FIRST one is the one
+// that matters:
+//
+//  1. UNHOOK the craft's own pending `once(bot, 'windowOpen')` (craft.js:40). Left in place it is
+//     a live one-shot listener with up to 20s to run: the next window ANY job opens would resolve
+//     the abandoned craft, which then reads e.g. a CHEST as its crafting table, throws
+//     'non craftingTable used as craftingTable' (craft.js:43-45), and craft()'s catch CLOSES THAT
+//     WINDOW (craft.js:28-31) - a second body-mover slamming a container shut under the job that
+//     opened it, minutes after the caller gave up. bounded()'s bookkeeping wrapper cannot prevent
+//     this: it stops CALLER code from running late, not the library's own internals. Removing the
+//     listener leaves the abandoned promise pending forever and genuinely inert. Only listeners
+//     THIS call added are removed (snapshot taken before the call), so a concurrent opener's
+//     listener is never touched.
+//  2. CLOSE our table window if one is open. NARROW ON PURPOSE - a crafting window only; a
+//     chest/furnace window is somebody else's and is never closed here. This cannot corrupt the
+//     inventory: closeWindow copies the window's inventory section back into bot.inventory
+//     (inventory.js:412/417-427), and vanilla returns an unfinished grid to the player as drops at
+//     his feet - which is strictly better than leaving it stranded in a window nothing will ever
+//     close. In the live shape (stuck at the window OPEN) nothing has been clicked at all, so
+//     there is no half-completed craft to lose.
+function forceSettleCraft (bot, listenersBefore) {
+  let unhooked = 0
+  try {
+    const before = listenersBefore || []
+    for (const l of bot.listeners('windowOpen')) {
+      if (!before.includes(l)) { bot.removeListener('windowOpen', l); unhooked++ }
+    }
+  } catch {}
+  let closed = 'none'
+  try {
+    const w = bot.currentWindow
+    if (w && /crafting/.test(w.type || '')) { bot.closeWindow(w); closed = 'crafting' }
+    else if (w) closed = 'left ' + w.type + ' alone (not mine)'
+  } catch (e) { closed = 'close threw: ' + (e && e.message) }
+  dbg('(bounded) craft force-settle: unhooked ' + unhooked + ' pending windowOpen wait(s), window=' + closed)
+}
+
 // ---- GROUNDED WORLD READS ------------------------------------------------------------
 // THE one honest block read. mineflayer returns null both for "there is nothing there"
 // and for "I have never been sent that chunk" - and the codebase has been reading the
@@ -330,7 +472,15 @@ function installPathfinderTuning (bot) {
     bot.dig = async function (block, ...rest) {
       const pos = block && block.position && block.position.clone ? block.position.clone() : (block && block.position)
       try {
-        await origDig(block, ...rest)
+        // ROOT A: the dig is BOUNDED by the engine's own physics answer for this block/tool.
+        // A cut throws, which lands in the catch below and is re-judged against the world by
+        // brokeOK - so a cut dig whose block is actually gone still resolves as the success it
+        // was, and a cut dig whose block still stands rethrows into the failure path all 55
+        // call sites already have. No call site changes; no success-shaped timeout exists.
+        let digMs = 5000 + DIG_GRACE_MS
+        try { const t = bot.digTime(block); if (Number.isFinite(t) && t >= 0) digMs = t + DIG_GRACE_MS } catch {}
+        await bounded('dig at ' + (pos ? pos.x + ',' + pos.y + ',' + pos.z : '?'), origDig(block, ...rest), digMs,
+          () => forceSettleDig(bot, block))
       } catch (e) {
         if (!pos) throw e
         await new Promise(r => setTimeout(r, 150))
@@ -359,6 +509,51 @@ function installPathfinderTuning (bot) {
           } catch {}
         }, 700)
       }
+    }
+
+    // LOOK BOUND (ROOT A). Wrapping bot.look covers bot.lookAt (physics.js:357 calls
+    // bot.look by dynamic dispatch), dig's own pre-dig look (digging.js:121) and
+    // activateBlock's (inventory.js:195) - so a stalled head no longer hangs digs, doors
+    // and levers. A FORCED look never awaits the task (physics.js:325-328), so it cannot
+    // hang and is passed straight through untouched (the pathfinder's per-tick
+    // bot.look(yaw, 0) at its index.js:607 is the only hot caller and it is fire-and-forget).
+    // A CUT look is a SUCCESS, not an error: the settle action IS the requested look, forced -
+    // it finishes the stuck lookingTask (physics.js:330-331) and snaps the head. Callers see
+    // no change beyond "never hangs".
+    const origLook = bot.look.bind(bot)
+    bot.look = async function (yaw, pitch, force) {
+      if (force) return origLook(yaw, pitch, true)
+      try {
+        return await bounded('look', origLook(yaw, pitch, false), LOOK_BOUND_MS,
+          () => { try { const p = origLook(yaw, pitch, true); if (p && p.catch) p.catch(() => {}) } catch {} })
+      } catch (e) {
+        if (/cut after/.test((e && e.message) || '')) return // the forced look DID the look
+        throw e
+      }
+    }
+
+    // CRAFT BOUND (ROOT F). bot.craft is the one body primitive that bypasses the openBlock
+    // wrapper below entirely: it calls `bot.activateBlock` + `once(bot,'windowOpen')` itself
+    // (craft.js:39-41), so none of the reach disambiguation, retry or deadline under this comment
+    // has ever applied to it. Bounding it HERE covers all 12 bot.craft( call sites in bot/ by
+    // dynamic dispatch, exactly as the dig and look wrappers do - no call site migrates, and every
+    // one of them already has a failure path, because bounded() reports a cut as a THROW.
+    const origCraft = typeof bot.craft === 'function' ? bot.craft.bind(bot) : null
+    if (origCraft) bot.craft = async function (recipe, count, craftingTable) {
+      const n = Math.max(1, parseInt(count ?? 1, 10) || 1)
+      let what = 'recipe'
+      try {
+        const id = recipe && recipe.result && recipe.result.id
+        const it = id != null && bot.registry && bot.registry.items && bot.registry.items[id]
+        what = (it && it.name) || ('item#' + id)
+      } catch {}
+      // snapshot BEFORE the call so the settle can tell this craft's windowOpen wait from anyone
+      // else's (see forceSettleCraft)
+      let before = []
+      try { before = bot.listeners('windowOpen').slice() } catch {}
+      return bounded('craft ' + what + ' x' + n + (craftingTable ? ' at a table' : ' in the 2x2'),
+        origCraft(recipe, count, craftingTable), CRAFT_BOUND_MS * n,
+        () => forceSettleCraft(bot, before))
     }
 
     // WINDOW-OPEN VERIFICATION (same disease, container flavor): the lib's openBlock /
@@ -524,4 +719,4 @@ function clearFlood () { floodHits.length = 0 }
 const PLACE_COST = Number(process.env.PATH_PLACE_COST || 12)
 function applyPlaceCost (m) { try { if (m && 'placeCost' in m) m.placeCost = PLACE_COST } catch {} ; return m }
 
-module.exports = { installPathfinderTuning, selfPlacedNear, isSelfPlaced, placedOK, brokeOK, setDebugSink, setProgressSink, readCell, surfaceYAt, surveyCells, arrivedOK, epoch, sameEpoch, bumpEpoch, applyPlaceCost, floodingNow, clearFlood, FLOOD_DIGS }
+module.exports = { installPathfinderTuning, selfPlacedNear, isSelfPlaced, placedOK, brokeOK, setDebugSink, setProgressSink, readCell, surfaceYAt, surveyCells, arrivedOK, epoch, sameEpoch, bumpEpoch, applyPlaceCost, floodingNow, clearFlood, FLOOD_DIGS, bounded, forceSettleDig, forceSettleCraft, DIG_GRACE_MS, LOOK_BOUND_MS, CUT_SETTLE_GRACE_MS, WINDOW_TIMEOUT_MS, CRAFT_BOUND_MS }

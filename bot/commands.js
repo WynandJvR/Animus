@@ -2389,6 +2389,16 @@ function releaseBodyClaims (why) {
   if (building) { held.push('building' + (claimAt.building ? '(' + Math.round((now - claimAt.building) / 1000) + 's)' : '')); building = false }
   if (provisioning) { held.push('provisioning' + (claimAt.provisioning ? '(' + Math.round((now - claimAt.provisioning) / 1000) + 's)' : '')); provisioning = false }
   if (buildReqActive) { held.push('buildReqActive' + (claimAt.buildReqActive ? '(' + Math.round((now - claimAt.buildReqActive) / 1000) + 's)' : '')); buildReqActive = false }
+  // ROOT H 2026-08-02: ...and this module's OWN two latches of the same shape, which this rung
+  // had never released. `escaping` (:99) is set at :301/:332 and cleared only in a finally;
+  // `recovering` (:97) is the recover mutex at :1244, same shape. The finding that made this
+  // urgent: `escaping` GATES THE SCHEDULER TICK (index.js TICK_GATES) while `building`/
+  // `provisioning`/`buildReqActive` above do not - so this rung was force-releasing latches that
+  // cannot stall the chooser and missing the one that can. A hung await inside either span leaves
+  // the tick returning early forever, which is exactly what was measured live (tick fresh,
+  // schedLastPick 412s stale).
+  if (escaping) { held.push('escaping'); escaping = false }
+  if (recovering) { held.push('recovering'); recovering = false }
   // ...and the PROVISION-SIDE job latches. These are the same defect in three more modules:
   // `_maintaining`/`_securingFood`/`_recoveringHp`/`_resting`/`_recoveringDegraded` are each set
   // true and cleared in a `finally` that a hung await never reaches. They are NOT part of
@@ -2405,7 +2415,11 @@ function releaseBodyClaims (why) {
   const owners = [
     ['./provision-maintain.js', 'releaseMaintainLatch', 'maintaining'],
     ['./provision-food.js', 'releaseFoodLatch', 'securingFood'],
-    ['./provision-recovery.js', 'releaseRecoveryLatches', 'recovery/resting']
+    ['./provision-recovery.js', 'releaseRecoveryLatches', 'recovery/resting'],
+    // ROOT H: navigate's recoveringDepth/forceUnsticking are the two remaining tick gates this
+    // rung could not reach. Same contract as the three above - the OWNING module exports the
+    // release, so a rename is a loud TypeError here rather than a silent skip.
+    ['./navigate.js', 'releaseNavLatches', 'nav-recovering/force-unstick']
   ]
   for (const [mod, fn, label] of owners) {
     try { if (require(mod)[fn]()) held.push(label) } catch {}

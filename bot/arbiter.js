@@ -136,6 +136,19 @@ function topManeuver () {
   return top ? { label: top.label, pri: top.pri } : null
 }
 
+// WHO IS DRIVING, in one greppable string (#7). Read-only over the same span map, for log
+// lines that would otherwise say a goal "was changed" by nobody in particular:
+//   'cross-door@PRESERVE(8s), reactive-move@SURVIVE(2s)'  |  '' when nothing is maneuvering.
+// The remaining TTL is the number that matters at a failure - it says whether the other
+// mover is just starting or about to expire.
+function describeSpans () {
+  prune()
+  const now = nowFn()
+  const out = []
+  for (const s of spans.values()) out.push(s.label + '@' + priName(s.pri) + '(' + Math.max(0, Math.round((s.until - now) / 1000)) + 's)')
+  return out.join(', ')
+}
+
 // Is a maneuver of tier >= minPri currently driving the body? A reflex passes its OWN
 // tier: true means "someone at least as important as me owns the body - defer, don't
 // steal the goal." Default PROGRESS: the common case (idle reflexes yielding to any
@@ -355,6 +368,7 @@ module.exports = {
   maneuverRevoked,
   PROBE_STALLS,
   topManeuver,
+  describeSpans,
   maneuverActive,
   mayInterrupt,
   setDebugSink,

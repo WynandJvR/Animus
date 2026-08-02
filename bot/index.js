@@ -862,6 +862,34 @@ let schedLastPick = null        // S7 idle-with-work: the tick's last pickJob de
 let schedLastPickAt = 0
 let schedLastTickAt = 0          // S7 tick-liveness: last time the tick body entered (the watchdog re-arms if this goes >90s stale)
 let tickGen = 0                 // S7 generation guard: a resurrected tick chain can never coexist with the live one
+// ONE number, two consumers (#4): rung 7 asks "is the last pick still a live decision?" and rung 8
+// asks "is the tick chain still alive?" - they are the same question about the same chain, and they
+// drifted into a hard-coded 90000 in one and an unchecked staleness in the other. A chain quieter
+// than this is presumed dead: with the dispatch-and-return change below the tick re-enters every
+// few seconds even while a job runs, so silence this long is anomalous, never merely slow.
+const TICK_STALE_MS = 90000
+let schedGateKey = ''            // ROOT H: which tick gate is currently held (throttle key)
+let schedGateSince = 0           // ...and since when, so the note can carry the number
+let schedGateNotedAt = 0         // ...and when we last said so, so it is not chatty (#8)
+// ROOT H (2026-08-02): THE list of latches that can gate the scheduler tick, each naming WHO can
+// force-release it. It exists because the tick's gate list and commands.releaseBodyClaims' release
+// list are two copies of one rule (#4) and they had already drifted: the rung released
+// building/provisioning/buildReqActive - none of which gate the tick - and released none of the
+// four that do. Live 2026-08-02: the tick ran every cycle (rung 8 never fired, schedLastTickAt
+// fresh) and yet schedLastPick went 412s stale, i.e. every single cycle returned here, silently,
+// for seven minutes. A decision that produces no action and says nothing is the defect (#5, #7).
+//   third column = the owner of the force-release. 'engine-state' means it is NOT ours: a bot that
+//   is genuinely asleep SHOULD gate the tick, and mineflayer clears bot.isSleeping itself on wake,
+//   so there is nothing to release and a long hold there is legitimate - which is also why only
+//   the non-engine gates can raise the stuck-gate note below.
+// tickgatetest.js reads this table and fails if a gate here has no force-release in
+// releaseBodyClaims, so a future gate cannot be added without one.
+const TICK_GATES = [
+  ['escaping', () => !!(commands.isEscaping && commands.isEscaping()), 'commands.releaseBodyClaims'],
+  ['nav-recovering', () => !!navigate.isRecovering(), 'navigate.releaseNavLatches'],
+  ['nav-force-unstick', () => !!navigate.isForceUnsticking(), 'navigate.releaseNavLatches'],
+  ['sleeping', () => !!bot.isSleeping, 'engine-state']
+]
 if (SCHED_ON) {
   const GRAVE_NEAR_LADDER = Number(process.env.GRAVE_NEAR_LADDER || 32)
   const schedSay = m => bot.chat(String(m).slice(0, 200))
@@ -1153,9 +1181,25 @@ if (SCHED_ON) {
       // navigates. It rode the FOOD_SUPPLY timer purely because that timer existed; when that
       // timer was deleted (S5) this was the one line in it that still had a job to do.
       try { provision.noteWaterCrossing(bot) } catch {}
-      if (commands.isEscaping && commands.isEscaping()) return
-      if (navigate.isRecovering() || navigate.isForceUnsticking()) return
-      if (bot.isSleeping) return
+      // ROOT H: ONE read of the gate table - the gate decision and the log line can no longer
+      // disagree about who is holding the body, and a gate that holds longer than the chain is
+      // allowed to be quiet (TICK_STALE_MS, the same number rungs 7 and 8 use) says so with its
+      // age. Throttled to at most one line per TICK_STALE_MS per distinct gate set (#8).
+      const gatedBy = TICK_GATES.filter(([, p]) => { try { return !!p() } catch { return false } })
+      if (gatedBy.length) {
+        const key = gatedBy.map(([n]) => n).join('+')
+        const now = Date.now()
+        if (schedGateKey !== key) { schedGateKey = key; schedGateSince = now; schedGateNotedAt = 0 }
+        const ours = gatedBy.filter(([, , owner]) => owner !== 'engine-state')
+        if (ours.length && now - schedGateSince > TICK_STALE_MS && now - schedGateNotedAt > TICK_STALE_MS) {
+          schedGateNotedAt = now
+          note('(sched) tick gated by ' + key + ' for ' + Math.round((now - schedGateSince) / 1000) + 's (>' +
+            Math.round(TICK_STALE_MS / 1000) + 's) - no job has been picked since; force-release owner: ' +
+            ours.map(([n, , o]) => n + '->' + o).join(', '))
+        }
+        return
+      }
+      schedGateKey = ''; schedGateSince = 0; schedGateNotedAt = 0
       // 2. SNAPSHOT + decision.
       const s = await provision.schedulerState(bot)
       // #41 P4: the SINGLE place the post-death latch clears on a regular cadence - the moment the
@@ -1234,7 +1278,12 @@ if (SCHED_ON) {
           if (oppOwner !== 'job') return // activity says autobuild but the latch dropped - next tick re-reads
         } else if (oppOwner) return // the idle path must be TRULY idle - any owner at all disqualifies it
         note('(sched) OPPORTUNISTIC MAINTAIN - ' + elig.reason + (elig.preempt ? ' (pausing the build; it resumes via re-arm)' : ''))
-        await runJob('maintenancePass', async () => {
+        // DISPATCH AND RETURN (ROOT E) - see the dispatch at the bottom of this tick for why.
+        // This one matters MOST: the opportunistic window runs maintenancePass, whose chest/craft
+        // flows go through the two mineflayer waits that are still unbounded (bot.craft and
+        // putAway both end in a bare `once(window, 'updateSlot:...')`). Awaiting it here put the
+        // whole tick chain behind exactly the promises ROOT A does not cover.
+        runJob('maintenancePass', async () => {
           if (elig.preempt) {
             commands.preemptForSurvival() // sets ONLY buildAbort; persistedResume intact (I-3)
             // #40 F2: if this windfall-deposit window is abandoned WHILE a pack/bank food need is
@@ -1264,7 +1313,7 @@ if (SCHED_ON) {
           runner.maintainCooldownUntil = Date.now() + (worked ? 600000 : Number(process.env.OPP_NOOP_COOLDOWN_MS || 1800000))
           schedOppLastWindowAt = Date.now()
           return 'opp window: ' + (r && r.steps && r.steps.length ? r.steps.join('+') : (r && r.reason) || 'nothing due')
-        })
+        }).catch(e => { try { note('(sched) runJob(maintenancePass) leaked an error: ' + e.message) } catch {} })
         return
       }
       // 5. LEGACY REMAP: RECOVERY_LADDER=0 keeps S4's downgrade - re-read the single need and
@@ -1307,7 +1356,9 @@ if (SCHED_ON) {
           const altGate = alt && typeof alt.run === 'function' ? candidateRefusal({ job: alt.name, cls: 'survival' }, s) : { why: 'no executor' }
           if (!altGate) {
             note('(sched) ' + name + ' -> doing ' + alt.name + ' instead, which is what that refusal names')
-            await runJob(alt.label || alt.name, () => alt.run(bot, mkCtx(s, pick)), { jobKey: alt.name, holds: alt.holds })
+            // DISPATCH AND RETURN (ROOT E) - see the dispatch at the bottom of this tick for why.
+            runJob(alt.label || alt.name, () => alt.run(bot, mkCtx(s, pick)), { jobKey: alt.name, holds: alt.holds })
+              .catch(e => { try { note('(sched) runJob(' + (alt.label || alt.name) + ') leaked an error: ' + e.message) } catch {} })
           }
         }
         return
@@ -1325,8 +1376,31 @@ if (SCHED_ON) {
         try { provMaintain.stopMaintenance() } catch {}
         note('(sched) PREEMPT ' + name + ' (' + pick.reason + ') - stopping the maintenance pass, survival outranks chores')
       }
-      // 8. DISPATCH. One line, for every proposal in the registry.
-      await runJob(name, () => chosen.run(bot, mkCtx(s, pick)), { jobKey: job, holds: chosen.holds })
+      // 8. DISPATCH AND RETURN. One line, for every proposal in the registry.
+      //
+      // ROOT E (2026-08-02): this used to `await` the executor, which made the tick chain a
+      // hostage of every promise a job could get stuck on. The re-arm lives in this tick's
+      // `finally`, so an executor that never settles means the finally never runs, means THERE
+      // IS NO NEXT TICK - the scheduler is dead until the watchdog's liveness rung notices,
+      // 90-300s later. That is exactly how the bot went structurally dead at 13:47 on a single
+      // hung `await bot.dig(b)` inside ensurePillarFiller.
+      //
+      // The await was also a SECOND mutual-exclusion mechanism for a rule the lease already
+      // owns (#4). runJob takes the lease SYNCHRONOUSLY - there is no await between its entry
+      // and `schedJob = {...}` - so the slot is held before this call returns and the next tick
+      // exits at the `dispatchBusy()` early-return. No double dispatch is possible. The epoch
+      // guards (myGen/schedGen in runJob, myGen/tickGen here) are untouched, so a late-resolving
+      // abandoned executor still cannot clear a successor's slot. Nothing below this line in the
+      // tick body depended on the ordering: outcome handling, the noOp latch and hold release all
+      // live inside runJob itself.
+      //
+      // What changes: the tick keeps ticking while a job runs (schedLastTickAt stays fresh, so
+      // rung 8 stops false-alarming on a legitimately slow job, and crisis-scaled re-arm delays
+      // keep being recomputed from live vitals). runJob catches everything internally, so the
+      // .catch below is a defense line rather than a path - but an unhandled rejection escaping a
+      // dispatcher is never acceptable.
+      runJob(name, () => chosen.run(bot, mkCtx(s, pick)), { jobKey: job, holds: chosen.holds })
+        .catch(e => { try { note('(sched) runJob(' + name + ') leaked an error: ' + e.message) } catch {} })
     } catch (e) { try { note('(sched) tick error: ' + e.message) } catch {} }
     finally {
       // FIX 19: the reschedule is DANGER-SCALED. A flat 15s±3s is a sampling rate chosen for a
@@ -1364,6 +1438,7 @@ if (SCHED_ON) {
     let idleWorkSince = 0
     let lastKickAt = 0
     let lastLivenessRearm = 0
+    let stalePickNoted = '' // one honest line per staleness episode (the heldNoted throttle idiom)
     const cycRing = []            // task #34: bounded 48-sample position ring (~4min @ 5s)
     let cycState = { phase: 'idle', firedAt: -Infinity, cycleKey: null, workCount: 0 } // cycle-detect latch (mirrors wdState)
     let heldNoted = ''
@@ -1497,12 +1572,22 @@ if (SCHED_ON) {
         //    (no busy activity, no pathfinder goal, no schedJob) and no latch job is running. Continuous
         //    >30s -> kick; at CRISIS vitals also clear the stale scheduler cooldowns so the next tick
         //    dispatches (the surgical fix for "sat frozen while graves gleamed 3b away"). Rate-limited 60s.
+        //
+        //    STALENESS-HONEST (ROOT E, 2026-08-02): `schedLastPick` was read with NO freshness
+        //    check, so when the tick chain died this rung asserted a live decision from a dead
+        //    chain - "pick=recoveryLadder undispatched - kicking", 20x in one day, about a pick
+        //    nothing was ever going to dispatch - and cleared back-offs nothing would consume. A
+        //    pick older than TICK_STALE_MS is not a decision, it is a fossil: say so, and leave
+        //    the recovery to the liveness re-arm below that actually owns it (#5, #7).
         const idleBody = !(commands.isBusy && commands.isBusy()) && !(bot.pathfinder && bot.pathfinder.goal) && !dispatchBusy()
-        if (schedLastPick && schedLastPick.cls === 'survival' && job == null && idleBody) {
+        const survivalPickIdle = !!(schedLastPick && schedLastPick.cls === 'survival' && job == null && idleBody)
+        const pickAgeMs = schedLastPickAt ? now - schedLastPickAt : Infinity
+        if (survivalPickIdle && (now - schedLastPickAt) <= TICK_STALE_MS) {
+          stalePickNoted = ''
           if (!idleWorkSince) idleWorkSince = now
           if (now - idleWorkSince > 30000 && now - lastKickAt > 60000) {
             lastKickAt = now
-            note('(wd) IDLE WITH WORK 30s+: pick=' + (schedLastPick && schedLastPick.job) + ' undispatched - kicking')
+            note('(wd) IDLE WITH WORK 30s+: pick=' + schedLastPick.job + ' (' + Math.round(pickAgeMs / 1000) + 's old) undispatched - kicking')
             // ==== A KICK THAT ONLY LOGS IS NOT A KICK (live 2026-08-01) ==========================
             // The clearing used to be gated on crisis vitals, so at any healthy reading this whole
             // branch was a message and nothing else. Live, at FULL hp and food, with the castle
@@ -1518,13 +1603,29 @@ if (SCHED_ON) {
             runner.noOp.clear() // ...and the job-identity latch, for the same reason
             note('(wd) ...cleared every stale back-off (grave/hp/ladder/no-op) so the next tick can dispatch')
           }
-        } else idleWorkSince = 0
+        } else if (survivalPickIdle) {
+          // The pick is STALE. No kick, no back-off clearing - just the truth, once per episode.
+          idleWorkSince = 0
+          const k = 'stale:' + schedLastPick.job
+          if (stalePickNoted !== k) {
+            stalePickNoted = k
+            note("(wd) idle-with-work: last pick '" + schedLastPick.job + "' is " + Math.round(pickAgeMs / 1000) + 's stale (>' + Math.round(TICK_STALE_MS / 1000) + 's) - tick chain suspect, deferring to the liveness re-arm')
+          }
+        } else { idleWorkSince = 0; stalePickNoted = '' }
         // 8. TICK-LIVENESS: the self-rescheduling chain itself died (a hung await -> its finally never
         //    ran). Re-arm with the generation guard (tickGen++ orphans any later-resolving stale chain;
-        //    schedJob still guarantees one dispatch). Rate-limited to once per 5 min.
-        if (schedLastTickAt && now - schedLastTickAt > 90000 && now - lastLivenessRearm > 300000) {
+        //    schedJob still guarantees one dispatch).
+        //    ROOT E: the detection threshold is now the SHARED TICK_STALE_MS (same 90s, one name), and
+        //    the rate limit drops from a flat 300s to that same number. With dispatch-and-return a
+        //    stale chain is anomalous rather than the price of a long job, tickGen++ makes re-arming
+        //    idempotent-safe (a duplicate chain is orphaned by myGen !== tickGen), so every watchdog
+        //    pass that still MEASURES staleness may act - a deadline on an attempt, not a delay
+        //    before thinking (#6). This rung is kept as the backstop for a hang in the tick body
+        //    itself (e.g. `await provision.schedulerState(bot)`, the one await left ahead of the
+        //    dispatch); it is no longer the primary recovery.
+        if (schedLastTickAt && now - schedLastTickAt > TICK_STALE_MS && now - lastLivenessRearm > TICK_STALE_MS) {
           lastLivenessRearm = now
-          note('(wd) scheduler tick chain stalled >90s - re-arming (generation guard prevents a double chain)')
+          note('(wd) scheduler tick chain stalled ' + Math.round((now - schedLastTickAt) / 1000) + 's (>' + Math.round(TICK_STALE_MS / 1000) + 's) - re-arming (generation guard prevents a double chain)')
           tickGen++
           setTimeout(tick, 0)
         }
@@ -2391,7 +2492,22 @@ const server = http.createServer((req, res) => {
         note(`(cmd) ${line}${rz} -> held (a saved build job exists - the brain may not cancel it)`)
         return send(res, 200, "held: there's a build to finish - i shouldn't stop it")
       }
-      const bodyBusy = (commands.isBusy && commands.isBusy()) || (provRecovery.isResting && provRecovery.isResting()) || (provFood.isSecuringFood && provFood.isSecuringFood()) || (provRecovery.isRecoveringDegraded && provRecovery.isRecoveringDegraded())
+      // ONE definition of "who holds the body" for this gate (ROOT C, 2026-08-02): the same four
+      // latches, in the same order bodyBusy always tested them, read ONCE. Both the gate and the
+      // label derive from it, so the label can only ever name a latch that is actually SET.
+      // Before this, `bodyBusy` tested four latches while the label was
+      //   isBusy ? 'busy building' : (isSecuringFood ? 'securing food' : 'night-resting')
+      // - 'night-resting' as an UNCONDITIONAL else. So a hung recoverFromDegraded printed
+      // `held (night-resting)` 53 times in one day and sent a real investigation after a bed.
+      // A log line must state what happened, never what was assumed (#7).
+      const holdActive = [
+        ['busy building', () => commands.isBusy && commands.isBusy()],
+        ['night-resting', () => provRecovery.isResting && provRecovery.isResting()],
+        ['securing food', () => provFood.isSecuringFood && provFood.isSecuringFood()],
+        ['recovering-degraded', () => provRecovery.isRecoveringDegraded && provRecovery.isRecoveringDegraded()]
+      ].filter(([, p]) => { try { return !!p() } catch { return false } }).map(([n]) => n)
+      const bodyBusy = holdActive.length > 0
+      const holdLabel = holdActive.join('+') || 'unlabeled-hold'
       const trimmedLine = String(line).trim()
       // S4 (REDESIGN §3.4): classify read-only via scheduler.commandClass when SCHEDULER is on.
       // Deliberate, documented widening: commandClass's perception set adds turn|lookbehind|
@@ -2444,13 +2560,11 @@ const server = http.createServer((req, res) => {
         const liveCrisis = (() => { try { return provision.survivalNeed(bot) } catch { return null } })()
         const holdAdm = arbiter.holdAdmissible(liveCrisis, holdNeed)
         if (defendPreempt) {
-          const label = commands.isBusy && commands.isBusy() ? 'busy building' : (provFood.isSecuringFood && provFood.isSecuringFood() ? 'securing food' : 'night-resting')
-          note(`(cmd) ${line}${rz} -> PREEMPT (under attack) - defense outranks the ${label} hold`)
+          note(`(cmd) ${line}${rz} -> PREEMPT (under attack) - defense outranks the ${holdLabel} hold`)
           if (commands.preemptForSurvival) commands.preemptForSurvival() // stop latch; a build resumes via persistedResume
           // fall through: the command runs and owns the body
         } else if (recoveryMove) {
-          const label = commands.isBusy && commands.isBusy() ? 'busy building' : (provFood.isSecuringFood && provFood.isSecuringFood() ? 'securing food' : 'night-resting')
-          note(`(cmd) ${line}${rz} -> PREEMPT (post-death recovery) - recovery outranks the ${label} hold`)
+          note(`(cmd) ${line}${rz} -> PREEMPT (post-death recovery) - recovery outranks the ${holdLabel} hold`)
           if (commands.preemptForSurvival) commands.preemptForSurvival() // stop latch; a build resumes via persistedResume
           // fall through: the recovery command runs and owns the body
         } else if (survivalCmd && adm.allow) {
@@ -2468,8 +2582,7 @@ const server = http.createServer((req, res) => {
           if (commands.preemptForSurvival) commands.preemptForSurvival() // stop latch; a build resumes via persistedResume
           // fall through: the command runs
         } else {
-          const label = commands.isBusy && commands.isBusy() ? 'busy building' : (provFood.isSecuringFood && provFood.isSecuringFood() ? 'securing food' : 'night-resting')
-          note(`(cmd) ${line}${rz} -> held (${survivalCmd ? 'no survival need: ' + adm.reason : label}) - brain command suppressed`)
+          note(`(cmd) ${line}${rz} -> held (${survivalCmd ? 'no survival need: ' + adm.reason : holdLabel}) - brain command suppressed`)
           // If a PLAYER just asked for this (the held command is the brain answering them),
           // don't leave them on read - the BODY replies once with what it's doing. Verified
           // live: "digital go sleep" -> six silent holds and the player heard nothing.

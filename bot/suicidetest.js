@@ -124,18 +124,30 @@ t('THE SEALED HUT: when trapped, the pit may be dug where it stands', () => {
   // (canBreakNaturally -> STRUCTURE_RE matches oak_planks) still vetoed all four hut-floor columns:
   //   deadlock-reset: no diggable pit column beside the hut - ABORTING this fallback
   // Two copies of "do not dig the hut" is how a half-lifted concession looks. There must be one.
-  assert(/const pitBlocked = \(cell, b, allowOwnHut\) =>/.test(fn), 'the exclusions live in ONE predicate')
-  assert(/if \(ownHutAt\(cell\)\) return allowOwnHut \? null : 'own-hut'/.test(fn),
-    'own-hut must be the ONE exclusion the concession lifts - geometric and material together')
-  assert(/if \(pitBlocked\(v, b, spendFloor\)\) return false/.test(fn),
+  //
+  // 2026-08-02: that one predicate was HOISTED out of this function to provCore.digBlocked, so
+  // every material digger consults it too (the hut's planks were protected while the dirt under
+  // them was not). The assertions below are the SAME meanings, retargeted at where the rule now
+  // lives - the local copy must be GONE, and the concession must still exist.
+  assert(!/const pitBlocked = /.test(fn), 'the local copy of the rule is gone - it lives in provCore.digBlocked now')
+  const core = fs.readFileSync(path.join(__dirname, 'provision-core.js'), 'utf8')
+  assert(/function digBlocked \(bot, cell, b, \{ allowOwnInfra = false \} = \{\}\)/.test(core),
+    'the exclusions live in ONE predicate, and it takes the trapped carve-out as a parameter')
+  assert(/if \(provHut\.ownHutAt\(cell\) \|\| provHut\.ownInfraSupportAt\(cell\) \|\| provFarm\.farmSupportHas\(cell\)\) return allowOwnInfra \? null : 'own-infra'/.test(core),
+    'own-infra must be the ONE exclusion the concession lifts - geometric and material together')
+  assert(/if \(provCore\.digBlocked\(bot, v, b, \{ allowOwnInfra: spendFloor \}\)\) return false/.test(fn),
     'the DIG consults the same predicate - not a second hand-written copy of the list')
   assert(!/if \(\/water\|lava\/\.test\(b\.name\) \|\| !canBreakNaturally\(b\)\) return false/.test(fn),
     'the old duplicated guard inside digAt is gone (that was the second copy)')
 
   // ...and every other exclusion stays unconditional, trapped or not
-  assert(/if \(scaffold\.onFarmFootprint\(cell\) \|\| farmFootprintHas\(cell\)\) return 'farm'/.test(fn), 'the farm footprint is never dug')
-  assert(/if \(\/water\|lava\/\.test\(b\.name\)\) return 'fluid'/.test(fn), 'the water/lava guard stays')
-  assert(/if \(!canBreakNaturally\(b\)\) return 'build'/.test(fn), "someone else's build is never dug")
+  assert(/if \(scaffold\.onFarmFootprint\(cell\) \|\| provFarm\.farmFootprintHas\(cell\)\) return 'farm'/.test(core), 'the farm footprint is never dug')
+  assert(/if \(\/water\|lava\/\.test\(b\.name\)\) return 'fluid'/.test(core), 'the water/lava guard stays')
+  assert(/if \(!canBreakNaturally\(b\)\) return 'build'/.test(core), "someone else's build is never dug")
+  // ...and the material check must stay BEHIND the own-infra arm, or the trapped concession dies
+  // again exactly the way it did on 2026-08-01 (planks are not canBreakNaturally).
+  assert(core.indexOf("return allowOwnInfra ? null : 'own-infra'") < core.indexOf("return 'build'"),
+    'the own-infra concession must be decided BEFORE the material rule can veto the hut floor')
 
   // cheapest sufficient escape: a column that costs the hut nothing is always preferred
   assert(/let dir = scan\(false\)[\s\S]*const spendFloor = !dir && trapped[\s\S]*dir = scan\(true\)/.test(fn),
@@ -250,7 +262,7 @@ t('THE SEALED HUT: the pit column must pay for the descent it requires', () => {
   assert(/const yieldsFiller = \(b\) =>/.test(fn), 'the scan knows which blocks yield placeable spoil')
   assert(/scaffold\.FILLER_RE\.test\(b\.name\) \|\| b\.name === 'grass_block'/.test(fn),
     'spoil is judged by the SAME filler predicate pillarUpTo will use - not a second private list')
-  assert(/const \{ depth, spoil \} = columnPlan\(fx, fz, allowOwnHut\)/.test(fn),
+  assert(/const \{ depth, spoil \} = columnPlan\(fx, fz, allowOwnInfra\)/.test(fn),
     'depth and spoil come from ONE walk of the column, so the estimate cannot describe a different shaft than the one built')
   // the scan compares candidates instead of returning the first one that is merely allowed
   assert(!/if \(ok\) return \{ dx, dz, fx, fz \}/.test(fn), 'first-allowed-wins is what picked the barren column')
@@ -262,7 +274,7 @@ t('THE SEALED HUT: the pit column must pay for the descent it requires', () => {
   // PERMISSION IS NOT VIABILITY. Once the first attempt dug 193,-103 that column was all air, so
   // it passed the free pass every time, the floor pass never ran, and the bot re-chose its own
   // useless hole forever - 3b of shaft, no spoil to buy the 4th block, abort, repeat.
-  assert(/const columnPlan = \(fx, fz, allowOwnHut\) =>/.test(fn), 'a column is judged by the depth it can actually produce')
+  assert(/const columnPlan = \(fx, fz, allowOwnInfra\) =>/.test(fn), 'a column is judged by the depth it can actually produce')
   assert(/if \(depth < lethalMin\) continue/.test(fn),
     'a column that cannot reach a killing drop is not a candidate - being free does not make it one')
   assert(/return \{ depth: rows \+ \(spoil >= 1 \? 1 : 0\), spoil \}/.test(fn),

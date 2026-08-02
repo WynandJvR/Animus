@@ -64,7 +64,11 @@ async function digShaftDown (bot, maxDepth, opts = {}) {
       for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const a = bot.blockAt(feet.offset(dx, 0, dz)); const b = bot.blockAt(feet.offset(dx, -1, dz)); sides.push(a && a.name, b && b.name) }
       if (mining.digExposureHazard(sides) !== 'ok') break
     }
-    if (!canBreakNaturally(below)) break // anti-grief: never dig a player-placed block
+    // ONE dig-permission rule (provCore.digBlocked). The apron guard above keeps the shaft off
+    // the doorstep; this keeps it off everything ELSE that holds our own structures up - the
+    // farm's support ring included, which is where the 2-deep holes the bot wedged in came from.
+    // A refusal just ends the shaft here (it is a descent, not an escape - nothing can be entombed).
+    if (provCore.digBlocked(bot, below.position, below)) break // anti-grief: never dig a player-placed or load-bearing block
     const tool = toolForBlock(bot, below.name)
     if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
     if (bot.canDigBlock && !bot.canDigBlock(below)) break
@@ -389,7 +393,10 @@ async function mineTunnel (bot, itemName, maxLen, dirIdx, opts = {}) {
     for (const p of [aheadUp, ahead]) {
       const b = bot.blockAt(p)
       if (!b || AIRISH(b.name)) continue
-      if (!canBreakNaturally(b)) { return countItem(bot, itemName) - before } // anti-grief: hit a player block -> stop tunnelling
+      // ONE dig-permission rule (provCore.digBlocked): a player build, a fluid, the crop plot -
+      // AND the ground under our own hut/infra/farm, which the material rule could not see. The
+      // tunnel already stops on a refusal, so protection reads as 'the face is blocked'.
+      if (provCore.digBlocked(bot, p, b)) { return countItem(bot, itemName) - before } // anti-grief: hit a protected block -> stop tunnelling
       const tool = toolForBlock(bot, b.name)
       if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
       if (bot.canDigBlock && !bot.canDigBlock(b)) { return countItem(bot, itemName) - before }
@@ -585,7 +592,7 @@ async function digStaircaseDown (bot, targetY, opts = {}) {
       const b = bot.blockAt(p)
       if (!b || AIRISH(b.name)) return true
       if (/lava|water/.test(b.name)) return false
-      if (!canBreakNaturally(b)) return false
+      if (provCore.digBlocked(bot, p, b)) return false // one rule: builds, fluids, farm, AND own-infra support ground
       const tool = toolForBlock(bot, b.name)
       if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
       if (bot.canDigBlock && !bot.canDigBlock(b)) return false
@@ -930,7 +937,7 @@ async function grabNearbyOre (bot, oreRe, r, max, { isStopped = () => false } = 
   for (const p of found) {
     if (isStopped() || got >= max) break
     const b = bot.blockAt(p)
-    if (!b || !canBreakNaturally(b)) continue
+    if (!b || provCore.digBlocked(bot, p, b)) continue // one rule: never bycatch a block holding up our own infra
     // The 6 face-neighbour names, read ONCE for the exposure skip + the fluid safety probe.
     const nb = [p.offset(1, 0, 0), p.offset(-1, 0, 0), p.offset(0, 0, 1), p.offset(0, 0, -1), p.offset(0, 1, 0), p.offset(0, -1, 0)]
       .map(q => { const bb = bot.blockAt(q); return bb ? bb.name : null })
