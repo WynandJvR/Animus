@@ -683,20 +683,6 @@ async function ensureFoodSupply (bot, opts = {}) {
   return { ok: hasStandingFarm() || foodCount(bot) > 0, reason: hasStandingFarm() ? 'wheat farm planted' : 'still looking for a farmable open-sky pond (swept, none tillable yet - will retry)' }
 }
 
-// Cheap check (NO bank walk): should a fed, idle, safe bot proactively establish its food
-// supply now? Renewable = a standing wheat farm; banked food is treated as 0 here (cheap) -
-// the bank is the reactive pantry, not the durable supply.
-//
-// UNWIRED (audit 2026-08-02): the line above used to read "The index reflex gates on this."
-// Nothing calls it - not index.js, not a reflex row, not the scheduler. So the proactive
-// food-supply decision is computed nowhere and the gate it describes does not exist. Left in
-// place deliberately: DESIGN-PRINCIPLES §5 says a decision must produce an action, and
-// deleting the decision hides the missing action instead of fixing it. Wire it or drop it.
-function needFoodSupply (bot) {
-  if (!bot.entity || bot.food == null) return false
-  const safe = !nearHostile(bot, 12) && (bot.health ?? 20) >= 12 && !isNight(bot) && !hasSolidCeiling(bot, 12)
-  return foodSec.needsFoodSupply(bot.food, hasStandingFarm(), foodCount(bot), 0, safe)
-}
 
 // #62 §A FOOD_BANK_FIRST (default on): the crisis deadlock-breaker. At hp1/food0 the far farm is
 // UNREACHABLE, but the hut BANK is not - if it holds edible food, WITHDRAW enough to reach a safe
@@ -1259,5 +1245,5 @@ async function scoutHunt (bot, { isStopped = () => false, say = () => {}, maxMs 
 module.exports = {
   setDebugSink,
   REGEN_FOOD_MIN,
-  RAW_COOKABLE, FOOD_ANIMALS, RISKY_EAT, DFOOD_DEEP, _foodPlanHint, _securingFood, hasFood, foodCount, needsFood, nearestFoodAnimal, eatFromPackToComfortable, eatBestFood, eatUp, bakeBreadFromWheat, cookRawMeat, drainOwnFurnaceFood, fishingEnabled, ensureFishingRod, fishForFood, huntForFood, huntForDrop, gatherLeather, woolCount, ensureFoodSupply, needFoodSupply, bankFoodFirst, courierFoodToBank, foodPlanNow, topUpFoodForPlan, _setFoodPlanHint, isSecuringFood, releaseFoodLatch, escalateFoodFloor, secureFood, secureFoodInner, scoutForFood, scoutHunt
+  RAW_COOKABLE, FOOD_ANIMALS, RISKY_EAT, DFOOD_DEEP, _foodPlanHint, _securingFood, hasFood, foodCount, needsFood, nearestFoodAnimal, eatFromPackToComfortable, eatBestFood, eatUp, bakeBreadFromWheat, cookRawMeat, drainOwnFurnaceFood, fishingEnabled, ensureFishingRod, fishForFood, huntForFood, huntForDrop, gatherLeather, woolCount, ensureFoodSupply, bankFoodFirst, courierFoodToBank, foodPlanNow, topUpFoodForPlan, _setFoodPlanHint, isSecuringFood, releaseFoodLatch, escalateFoodFloor, secureFood, secureFoodInner, scoutForFood, scoutHunt
 }

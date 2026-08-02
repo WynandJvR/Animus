@@ -885,32 +885,8 @@ function freeInteriorCell (bot, hut, near) {
 // bot actually stands in to cross the threshold), or null - derived from the self-structure
 // model (schema-correct 6-wide rim, not the old 5-wide dx/dz 0..4 scan). anchor.y is the
 // floor plank slab, so the walkable door cell is hut.y+1.
-// UNWIRED (audit 2026-08-02): no caller anywhere - the door-crossing path derives its own
-// cell. Kept, not deleted, for the §5 reason on needFoodSupply: the absent call is the
-// finding. Wire it or drop it.
-function findHutDoorway (bot, hut) {
-  const d = hutModel.doorwayColumn(hut, hutReader(bot), { preferDoorBlock: process.env.DOOR_CROSS_GEOMETRIC !== '0' })
-  return d ? new Vec3(d.x, hut.y + 1, d.z) : null
-}
 
-// Standable FREE interior cells (Vec3s), from the model: the CORRECT 4x4 interior (dx/dz
-// 1..4), floor-level only, threshold excluded, sorted furthest-from-door. The old scan was
-// a 3x3 (dx/dz 1..3) that missed the very cells the bot wedged in, and could return a cell
-// perched on a furniture/dirt pile.
-function hutFreeCells (bot, hut) {
-  return hutModel.freeStandCells(hut, hutReader(bot)).map(c => new Vec3(c.x, c.y, c.z))
-}
 
-// Is a block of kind `itemRe` already standing inside the hut interior? Scans the correct
-// 4x4x(5) interior via the model, so a duplicate at dx/dz 4 (missed by the old 3x3) is seen.
-function furnitureInHut (bot, hut, itemRe) {
-  const read = hutReader(bot)
-  for (const [x, z] of hutModel.interiorColumns(hut)) for (let dy = 0; dy < hutModel.DIMS.h; dy++) {
-    const b = read(x, hut.y + dy, z)
-    if (b && itemRe.test(b.name)) return new Vec3(x, hut.y + dy, z)
-  }
-  return null
-}
 
 // #110 upgradeBedPlacement - MAINTENANCE ONLY, and the ONLY code in the tree permitted to dig
 // a bed that memory points at. This is where the quality judgment went after it was taken OUT
@@ -1898,7 +1874,7 @@ async function worldTidy (bot, opts = {}) {
 
 module.exports = {
   setDebugSink, insideHutBox,
-  insideHutBox, ownHutAt, onHutApron, insideOwnStructure, hasSolidCeiling, hutAnchor, ensureHomeShelter, stepOffApron, ensureHutApron, clearDoorApproach, healHomeCrater, ensureHutBed, relocateBedInto, bedInPack, bedCandidates, acquireBed, placeBedNear, bedFootprint, bedUsable, assertSpawnOn, ensureBedSite, upgradeBedPlacement, freeInteriorCell, findHutDoorway, hutFreeCells, furnitureInHut, stationInHut, stationSlot, reconcileInfra, cleanupHutInterior, repairHutStructure, recallAndReach, maintainHut, maintainHome,
+  insideHutBox, ownHutAt, onHutApron, insideOwnStructure, hasSolidCeiling, hutAnchor, ensureHomeShelter, stepOffApron, ensureHutApron, clearDoorApproach, healHomeCrater, ensureHutBed, relocateBedInto, bedInPack, bedCandidates, acquireBed, placeBedNear, bedFootprint, bedUsable, assertSpawnOn, ensureBedSite, upgradeBedPlacement, freeInteriorCell, stationInHut, stationSlot, reconcileInfra, cleanupHutInterior, repairHutStructure, recallAndReach, maintainHut, maintainHome,
   secureBase, secureBaseGate: hutModel.secureBaseGate,
   sealHomeDescents, sealDescentsGate: hutModel.sealDescentsGate,
   worldTidy, litterSignature: hutModel.litterSignature
