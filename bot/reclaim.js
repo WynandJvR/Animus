@@ -36,13 +36,7 @@ const ledger = require('./ledger.js')
 const provHut = require('./provision-hut.js')
 const scaffold = require('./scaffold.js')
 
-let dbgSink = null
-function setDebugSink (fn) { dbgSink = fn }
-const dbg = (...a) => {
-  const line = '[reclaim] ' + a.map(x => String(x)).join(' ')
-  if (process.env.BUILD_DEBUG) console.log(line)
-  if (dbgSink) dbgSink(line)
-}
+const { dbg, setDebugSink } = require('./debug-sink.js').makeDebug('[reclaim]') // §4: one definition of the sink rule; this module still owns its own sink
 
 // ---- material families (invariant 5) ------------------------------------------------------
 // Coarse on purpose. "Was it soil or was it rock" is the entire question - a grass_block hole

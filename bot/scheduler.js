@@ -38,13 +38,7 @@ function ironKeystoneActive (s) {
   ).active
 }
 
-let dbgSink = null
-function setDebugSink (fn) { dbgSink = fn }
-const dbg = (...a) => {
-  const line = '[sched] ' + a.map(x => String(x)).join(' ')
-  if (process.env.BUILD_DEBUG) console.log(line)
-  if (dbgSink) dbgSink(line)
-}
+const { dbg, setDebugSink } = require('./debug-sink.js').makeDebug('[sched]') // §4: one definition of the sink rule; this module still owns its own sink
 
 // Injectable clock so watchdog/deadline math is deterministically unit-testable.
 let nowFn = () => Date.now()

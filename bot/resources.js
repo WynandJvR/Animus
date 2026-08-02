@@ -30,13 +30,7 @@ const provBank = require('./provision-bank.js') // chestCounts, withdrawItem, en
 const provCore = require('./provision-core.js') // inventoryCounts
 const restock = require('./restock') // pure multi-material batching decision
 
-let dbgSink = null
-function setDebugSink (fn) { dbgSink = fn }
-const dbg = (...a) => {
-  const line = '[res] ' + a.map(x => String(x)).join(' ')
-  if (process.env.BUILD_DEBUG) console.log(line)
-  if (dbgSink) dbgSink(line)
-}
+const { dbg, setDebugSink } = require('./debug-sink.js').makeDebug('[res]') // §4: one definition of the sink rule; this module still owns its own sink
 
 // ---- persisted chest cache ----------------------------------------------------
 // { "x,y,z": { counts: {item: n}, at: epochMs } } - last GOOD read of each chest.

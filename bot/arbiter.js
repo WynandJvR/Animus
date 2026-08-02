@@ -29,13 +29,7 @@
 // SAFETY: every span carries a TTL and auto-expires, so a mover that crashes without
 // releasing can never wedge the reflexes permanently (the ledger self-heals).
 
-let dbgSink = null
-function setDebugSink (fn) { dbgSink = fn }
-const dbg = (...a) => {
-  const line = '[arb] ' + a.map(x => String(x)).join(' ')
-  if (process.env.BUILD_DEBUG) console.log(line)
-  if (dbgSink) dbgSink(line)
-}
+const { dbg, setDebugSink } = require('./debug-sink.js').makeDebug('[arb]') // §4: one definition of the sink rule; this module still owns its own sink
 
 const PRIORITY = { IDLE: 0, PROGRESS: 1, PRESERVE: 2, SURVIVE: 3 }
 const NAMES = ['IDLE', 'PROGRESS', 'PRESERVE', 'SURVIVE']

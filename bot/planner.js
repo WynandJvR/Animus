@@ -35,13 +35,7 @@ const resources = require('./resources.js')
 const navigate = require('./navigate.js')
 const mining = require('./mining.js') // pure tool-durability model (toolUsesLeft) for the freshPickaxes computation
 
-let dbgSink = null
-function setDebugSink (fn) { dbgSink = fn }
-const dbg = (...a) => {
-  const line = '[plan] ' + a.map(x => String(x)).join(' ')
-  if (process.env.BUILD_DEBUG) console.log(line)
-  if (dbgSink) dbgSink(line)
-}
+const { dbg, setDebugSink } = require('./debug-sink.js').makeDebug('[plan]') // §4: one definition of the sink rule; this module still owns its own sink
 
 // ---- pure decision logic (offline-testable: bot/plannertest.js) -------------------
 

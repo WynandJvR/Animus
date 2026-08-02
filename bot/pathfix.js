@@ -34,15 +34,11 @@ function saveTrail () {
 
 function key (p) { return `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}` }
 
-let dbgSink = null // injected by index.js: debug lines persist to logs/bot-events.log
-function setDebugSink (fn) { dbgSink = fn }
+// §4: one definition of the sink rule; this module still owns its own sink. index.js injects
+// it so debug lines persist to logs/bot-events.log.
+const { dbg, setDebugSink } = require('./debug-sink.js').makeDebug('[verify]')
 let progressSink = null // S7 H3: injected by index.js (commands.touchProgress) - fired ONLY on a VERIFIED place/break transition
 function setProgressSink (fn) { progressSink = fn }
-const dbg = (...a) => {
-  const line = '[verify] ' + a.map(x => String(x)).join(' ')
-  if (process.env.BUILD_DEBUG) console.log(line)
-  if (dbgSink) dbgSink(line)
-}
 
 // ---- UNIVERSAL PLACE/BREAK VERIFICATION --------------------------------------------
 // On Paper a place/break is not "done" until the world says so: the server often never

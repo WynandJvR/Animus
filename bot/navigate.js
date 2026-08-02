@@ -22,13 +22,9 @@ const provHut = () => require('./provision-hut.js') // LAZY: provision-hut.js to
 const provRecovery = () => require('./provision-recovery.js') // LAZY: provision-recovery.js top-requires this module, so an eager import here would be a real cycle
 const navProfile = require('./nav-profile.js') // PURE terrain policy - findDryLandExit (WATER_ESCAPE); no bot-module cycle
 
-let dbgSink = null // injected by index.js: debug lines persist to logs/bot-events.log
-function setDebugSink (fn) { dbgSink = fn }
-const dbg = (...a) => {
-  const line = '[nav] ' + a.map(x => String(x)).join(' ')
-  if (process.env.BUILD_DEBUG) console.log(line)
-  if (dbgSink) dbgSink(line)
-}
+// §4: one definition of the sink rule; this module still owns its own sink. index.js injects
+// it so debug lines persist to logs/bot-events.log.
+const { dbg, setDebugSink } = require('./debug-sink.js').makeDebug('[nav]')
 
 const prov = () => require('./provision.js') // lazy - see layering note above
 const provMining = () => require('./provision-mining.js') // LAZY: provision-mining top-requires navigate, so a top-level import here would be a real cycle

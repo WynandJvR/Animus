@@ -50,13 +50,9 @@ const { workingPickCount } = provMining
 
 const P = () => require('./provision.js')
 
-let dbgSink = null // forwarded from provision.js's setDebugSink (see setDebugSink below)
-function setDebugSink (fn) { dbgSink = fn }
-const dbg = (...a) => {
-  const line = '[snap] ' + a.map(x => String(x)).join(' ')
-  if (process.env.BUILD_DEBUG) console.log(line)
-  if (dbgSink) dbgSink(line)
-}
+// §4: one definition of the sink rule; this module still owns its own sink, forwarded from
+// provision.js's setDebugSink.
+const { dbg, setDebugSink } = require('./debug-sink.js').makeDebug('[snap]')
 
 // ==== AUDIT 2026-07-29 FIX 5: A FAILED READ IS NOT A FACT ==================================
 // Every field below used to be wrapped in `try { ... } catch { s.X = <safe-looking default> }`,

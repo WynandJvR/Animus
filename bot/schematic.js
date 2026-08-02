@@ -58,13 +58,7 @@ if (Build.prototype && !Build.prototype._gpdGuarded) {
 // of those lines threw ReferenceError into a swallowing try/catch (the module-map trap), so the
 // build loop has been silently emitting none of its diagnostics. Defined here and wired from
 // index.js like every other module's sink.
-let dbgSink = null
-function setDebugSink (fn) { dbgSink = fn }
-const dbg = (...a) => {
-  const line = '[schem] ' + a.map(x => String(x)).join(' ')
-  if (process.env.BUILD_DEBUG) console.log(line)
-  if (dbgSink) dbgSink(line)
-}
+const { dbg, setDebugSink } = require('./debug-sink.js').makeDebug('[schem]') // §4: one definition of the sink rule; this module still owns its own sink
 
 // Where local .schem files live (also the download cache). Gitignored - runtime data.
 const SCHEM_DIR = path.join(__dirname, 'schematics')

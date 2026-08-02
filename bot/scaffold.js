@@ -17,13 +17,7 @@
 const fs = require('fs')
 const path = require('path')
 
-let dbgSink = null
-function setDebugSink (fn) { dbgSink = fn }
-const dbg = (...a) => {
-  const line = '[scaffold] ' + a.map(x => String(x)).join(' ')
-  if (process.env.BUILD_DEBUG) console.log(line)
-  if (dbgSink) dbgSink(line)
-}
+const { dbg, setDebugSink } = require('./debug-sink.js').makeDebug('[scaffold]') // §4: one definition of the sink rule; this module still owns its own sink
 
 // Retention: with INFRA_CONSOLIDATE on, own-scaffold memory survives 72h (env-tunable) so the
 // far-pillar litter patrol can still claim towers that outlive a 6h window; flag off => 6h
