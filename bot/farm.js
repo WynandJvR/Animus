@@ -40,8 +40,17 @@ const BANK_DYS = [0, 1]
 //   'gone'    -> air / replaceable veg -> (re)plant here.
 //   'flooded' -> water/lava washed in -> a bad cell (re-tilling won't hold a seed).
 //   'blocked' -> some other solid block -> not plantable.
+// ==== UNKNOWN IS A STATE (2026-08-02) ====================================================
+// `null` used to fold into 'gone'. A null here is `bot.blockAt(cell)` on an UNLOADED chunk -
+// "I could not look" - and calling that "the crop is missing" is the exact error #10 forbids
+// ("Unmeasured is not unmet"). It had teeth: an unread cell was replanted (pointlessly - the
+// ground read is null too), then aged by cellHealthStep as a dead cell, and RETIRED off the
+// farm record after 3 such passes. A farm can be deleted, cell by cell, by a chunk that was
+// slow to load. 'unknown' is now its own arm and every caller must decide what to do with it;
+// the tend loop skips those cells untouched and REPORTS the count.
 function cropCellState (name) {
-  if (name == null || name === 'air' || name === 'cave_air' || name === 'void_air') return 'gone'
+  if (name == null) return 'unknown'
+  if (name === 'air' || name === 'cave_air' || name === 'void_air') return 'gone'
   if (name === 'wheat') return 'wheat'
   if (/water|lava/.test(name)) return 'flooded'
   if (/^(short_grass|tall_grass|grass|fern|large_fern|dead_bush|snow|vine)$/.test(name)) return 'gone' // replaceable veg -> plant over it
@@ -125,6 +134,36 @@ function orderBankCandidates (cands, anchor) {
     if (da !== db) return da - db
     return (a.band || 0) - (b.band || 0) // tie: inner band (1) first
   })
+}
+
+// ==== A TEND PASS IS A WALK, NOT A ZIG-ZAG (2026-08-02) ==================================
+// tendWheatFarm iterated m.wheatFarm.cells in PERSISTED INSERTION ORDER - the order the plot
+// happened to be tilled in, which for the live 41-cell plot alternates between the band south
+// of the hut and the band east of it: 190,-97 then 195,-102 then 191,-97 then 195,-103...
+// Every consecutive pair is 5-8 blocks apart, so the harvest paid a full `gotoWithTimeout` per
+// cell (the >4b gate) and crossed the hut's corner over and over. Nothing about that order is
+// derived from anything; it is an accident of history that costs ~5x the walking, and the tend
+// pass has to finish inside the supervisor's patience.
+//
+// Greedy nearest-neighbour from where the bot actually stands. PURE, O(n^2) on a few dozen
+// cells (~1.7k distance tests for the live plot - nothing on the body's budget, [[body-first]]),
+// returns a SORTED COPY, never mutates. Deterministic tie-break (x then z then y) so two runs
+// over the same plot produce the same route.
+function orderCellsNearest (cells, from) {
+  const rest = (cells || []).slice()
+  const out = []
+  let cur = { x: (from && from.x) || 0, y: (from && from.y) || 0, z: (from && from.z) || 0 }
+  while (rest.length) {
+    let bi = 0; let bd = Infinity
+    for (let i = 0; i < rest.length; i++) {
+      const c = rest[i]
+      const d = Math.hypot(c.x - cur.x, c.z - cur.z) + Math.abs((c.y || 0) - (cur.y || 0))
+      if (d < bd - 1e-9 || (Math.abs(d - bd) <= 1e-9 && (c.x - rest[bi].x || c.z - rest[bi].z || (c.y || 0) - (rest[bi].y || 0)) < 0)) { bd = d; bi = i }
+    }
+    cur = rest[bi]
+    out.push(rest.splice(bi, 1)[0])
+  }
+  return out
 }
 
 // §4.4 score a candidate water edge, DISTANCE-DOMINANT. Nearest ACCEPTABLE site wins. quality is
@@ -264,4 +303,4 @@ function foodCrisisFarmAction ({ hasStandingFarm = false, food = 20, harvestFirs
   return 'establish'
 }
 
-module.exports = { bankUsable, BANK_DYS, cropCellState, cellHealthStep, plotShouldUnlatch, matureForHarvest, farmlandReady, tillableBank, expansionMaxed, barrenStep, orderBankCandidates, scoreFarmSite, farmSiteQualified, rankFarmSites, shouldResite, plotCollectRadius, footprintHasCell, seedBankWithdrawAmount, foodCrisisFarmAction, dryHomeFarmMode }
+module.exports = { bankUsable, BANK_DYS, cropCellState, cellHealthStep, plotShouldUnlatch, matureForHarvest, farmlandReady, tillableBank, expansionMaxed, barrenStep, orderBankCandidates, orderCellsNearest, scoreFarmSite, farmSiteQualified, rankFarmSites, shouldResite, plotCollectRadius, footprintHasCell, seedBankWithdrawAmount, foodCrisisFarmAction, dryHomeFarmMode }

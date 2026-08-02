@@ -27,7 +27,13 @@ eq(F.BANK_DYS, [0, 1], 'BANK_DYS is [level, one-up]')
 // ---- cropCellState: only a real wheat block counts (the "faith" fix) --------------
 eq(F.cropCellState('wheat'), 'wheat', 'a wheat block counts as a standing crop')
 eq(F.cropCellState('air'), 'gone', 'air -> gone (replant)')
-eq(F.cropCellState(null), 'gone', 'null (unloaded-ish) -> gone')
+// UNKNOWN IS A STATE (2026-08-02). null = `bot.blockAt` on an unloaded chunk = "I could not
+// look". Folding it into 'gone' made the tend loop replant a cell it cannot read and then age it
+// toward RETIREMENT - a farm deletable, cell by cell, by slow chunk loading (#10: unmeasured is
+// not unmet). It must never again read as an empty cell.
+eq(F.cropCellState(null), 'unknown', 'null (chunk not loaded) -> unknown, NOT gone')
+eq(F.cropCellState(undefined), 'unknown', 'an unreadable cell is unknown however it arrives')
+eq(F.cropCellState(null) === F.cropCellState('air'), false, 'unreadable and empty must be distinguishable')
 eq(F.cropCellState('cave_air'), 'gone', 'cave_air -> gone')
 eq(F.cropCellState('short_grass'), 'gone', 'grass over the cell -> gone (plant over it)')
 eq(F.cropCellState('water'), 'flooded', 'water washed in -> flooded')
@@ -309,6 +315,22 @@ eq(F.barrenStep(undefined, 'other'), { strikes: 1, skip: false }, 'undefined pri
   const tel = fs.readFileSync(path.join(__dirname, 'telemetry.js'), 'utf8')
   const tags = (tel.match(/const CYCLE_WORK_TAGS = new Set\(\[[^\]]*\]/) || [''])[0]
   eq(/'harvest'/.test(tags) && /'replant'/.test(tags), true, 'progress: both count as WORK, or the cycle detector still reads a tend as idling')
+}
+
+// ---- the tend scan must report what it SAW, not what it assumed (2026-08-02) --------------
+// `farm health: wheat=0(mature 0) gone=0 flooded=0 blocked=0` printed nine times in six minutes
+// for a plot holding 24 crops (17 mature). All five counters zero for a 41-cell plot cannot mean
+// "41 bare cells" - bare reads as `gone` - it means the loop tallied NOTHING, because the
+// isStopped() break fired on the first cell. It read as farm loss and sent the investigation the
+// wrong way. These guard the honest line and the untouched-unknown rule.
+{
+  const src = require('fs').readFileSync(require('path').join(__dirname, 'provision-farm.js'), 'utf8')
+  eq(/farm health: inspected ' \+ cSeen \+ '\/' \+ cells\.length/.test(src), true,
+    'scan: the health line must say how many of the plot\'s cells were actually inspected')
+  eq(/SCAN CUT \(stopped\)/.test(src), true, 'scan: a scan cut short must SAY it was cut - never report a partial pass as a complete one')
+  eq(/if \(state === 'unknown'\) \{ cUnknown\+\+; continue \}/.test(src), true,
+    'scan: an unreadable cell is skipped untouched - never replanted, never aged toward retirement')
+  eq(/if \(isStopped\(\)\) \{ cut = true; break \}/.test(src), true, 'scan: the stop that ends the pass is what the line reports')
 }
 
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall farm tests passed')

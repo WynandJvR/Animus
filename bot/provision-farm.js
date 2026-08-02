@@ -1156,6 +1156,13 @@ async function tendWheatFarm (bot, { isStopped = () => false, say = () => {} } =
     if (ownCells.length && !isOurs(p)) continue // don't wander into a foreign/village field
     seen.add(k); cells.push(new Vec3(p.x, p.y, p.z))
   }
+  // WALK THE PLOT, don't zig-zag it. The persisted order is the order the cells were tilled in;
+  // for the live 41-cell plot it alternates between the band south of the hut and the band east
+  // of it, so almost every cell was 5-8b from the last one and paid a full goto (the >4b gate
+  // below) - five times the walking, on a pass that has to finish inside the supervisor's
+  // patience. Route from where the bot is actually standing (walkStaged has just put it at the
+  // plot). Pure + unit-tested in farm.js; see the header there.
+  cells = farm.orderCellsNearest(cells, bot.entity.position.floored()).map(c => new Vec3(c.x, c.y, c.z))
   let harvested = 0; let replanted = 0
   // FARM_RESEED (§4.2): a cell-health ledger that retires cells the field can no longer hold
   // (water-washed / obstructed) so the record stops "standing" dead and the maxed latch can
@@ -1168,10 +1175,25 @@ async function tendWheatFarm (bot, { isStopped = () => false, say = () => {} } =
   const cellHealth = RESEED ? m.wheatFarm.cellHealth : null
   const retired = [] // keys retired THIS pass
   let cWheat = 0; let cMature = 0; let cGone = 0; let cFlooded = 0; let cBlocked = 0
+  // ==== THE SCAN MUST REPORT WHAT IT ACTUALLY SAW (2026-08-02) =============================
+  // `farm health: wheat=0(mature 0) gone=0 flooded=0 blocked=0` was printed nine times in six
+  // minutes for a farm that held 24 crops, 17 of them mature - and it sent the investigation
+  // after a farm-loss bug that did not exist. All five counters zero for a 41-cell plot cannot
+  // mean "41 bare cells" (bare reads as `gone`) and cannot mean "unloaded" (that read as `gone`
+  // too, until cropCellState grew an `unknown` arm). It means THE LOOP TALLIED NOTHING: the
+  // `isStopped()` break below fired on the FIRST cell, because the ladder rung had already been
+  // cut. A partial scan reported as a complete one is a #7/#10 violation on its own - so the
+  // line now says how many of the plot's cells were actually inspected, and names the cut.
+  let cSeen = 0; let cUnknown = 0
+  let cut = false
   for (const p of cells) {
-    if (isStopped()) break
+    if (isStopped()) { cut = true; break }
+    cSeen++
     const b = bot.blockAt(p)
     const state = farm.cropCellState(b && b.name)
+    // UNKNOWN: the chunk is not loaded. Do NOT replant it (the ground read is null too), do NOT
+    // age it toward retirement - a cell we could not see has told us nothing about itself.
+    if (state === 'unknown') { cUnknown++; continue }
     let replantOk = null // captured for the 'gone' branch -> cellHealthStep
     if (state === 'wheat') {
       const age = b.getProperties ? b.getProperties().age : null
@@ -1249,7 +1271,9 @@ async function tendWheatFarm (bot, { isStopped = () => false, say = () => {} } =
       saveWorldMem()
       dbg('  farm reseed: retired ' + retired.length + ' dead cell(s), ' + survivors.length + ' live remain' + (unlatch ? ', maxed cleared' : ''))
     }
-    dbg('  farm health: wheat=' + cWheat + '(mature ' + cMature + ') gone=' + cGone + ' flooded=' + cFlooded + ' blocked=' + cBlocked + ' retired-total=' + retired.length)
+    dbg('  farm health: inspected ' + cSeen + '/' + cells.length + ' cell(s)' + (cut ? ' - SCAN CUT (stopped) after ' + cSeen : '') +
+      (cUnknown ? ' - ' + cUnknown + ' UNREADABLE (chunk not loaded; not replanted, not aged)' : '') +
+      ': wheat=' + cWheat + '(mature ' + cMature + ') gone=' + cGone + ' flooded=' + cFlooded + ' blocked=' + cBlocked + ' retired-total=' + retired.length)
     // Immediate reseed while standing at the pond: retirement freed the maxed latch, so let the
     // EXISTING ensure ring till+plant fresh cells with the seeds on hand (bounded, block-verified;
     // water is within 48 by construction so no trek in the normal case). One attempt per pass;

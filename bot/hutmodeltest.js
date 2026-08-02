@@ -317,33 +317,15 @@ t('cellMismatch: tolerant by class (planks / chest / furnace / table / door / ai
   assert.strictEqual(H.cellMismatch('white_bed', 'crafting_table'), true, 'unrelated blocks mismatch')
 })
 
-// ---- F3 door-cross ledger core (pure crossVerdict, from navigate.js) -------------------
-// The cross-nav loop-breaker: 3 failed crossings of a (hut,dir) in a 90s window -> a 120s
-// cooldown; a success clears the entry. navigate.js keeps only the Map + the clock; the
-// transition is this pure function.
+// ---- the F3 door-cross cooldown is GONE (2026-08-02) ----------------------------------
+// Four crossVerdict cases used to live here. The ledger they tested made crossOwnDoor do
+// NOTHING for 120s after 3 failed crossings, handing off to a "plain goto" that cannot cross
+// a closed door - so the bot sat sealed inside its own hut and starved. The cooldown is
+// deleted in navigate.js (see the block where it used to be declared); the door crossing must
+// now be ATTEMPTED, and fail loudly, every time it is asked. This case guards the deletion.
 const nav = require('./navigate.js')
-t('crossVerdict: success returns a null entry (a working door never cools down)', () => {
-  const r = nav.crossVerdict({ fails: 2, firstAt: 1000, coolUntil: 0 }, 5000, true)
-  assert.strictEqual(r.entry, null)
-  assert.strictEqual(r.cooled, false)
-})
-t('crossVerdict: 3 fails inside the 90s window trip a 120s cooldown', () => {
-  let r = nav.crossVerdict(null, 1000, false)
-  assert.strictEqual(r.entry.fails, 1); assert.strictEqual(r.cooled, false); assert.strictEqual(r.entry.coolUntil, 0)
-  r = nav.crossVerdict(r.entry, 2000, false)
-  assert.strictEqual(r.entry.fails, 2); assert.strictEqual(r.cooled, false); assert.strictEqual(r.entry.coolUntil, 0)
-  r = nav.crossVerdict(r.entry, 3000, false)
-  assert.strictEqual(r.entry.fails, 3); assert.strictEqual(r.cooled, true); assert.strictEqual(r.entry.coolUntil, 3000 + 120000)
-})
-t('crossVerdict: a fail past the 90s window resets the count to 1', () => {
-  const r = nav.crossVerdict({ fails: 2, firstAt: 1000, coolUntil: 0 }, 1000 + 90001, false)
-  assert.strictEqual(r.entry.fails, 1, 'window elapsed -> fresh count')
-  assert.strictEqual(r.entry.firstAt, 1000 + 90001)
-  assert.strictEqual(r.cooled, false)
-})
-t('crossVerdict: a success after failures clears the entry (restores normal door behavior)', () => {
-  const r = nav.crossVerdict({ fails: 3, firstAt: 1000, coolUntil: 200000 }, 5000, true)
-  assert.strictEqual(r.entry, null)
+t('the door-cross cooldown no longer exists (a crossing is never silently skipped)', () => {
+  assert.strictEqual(typeof nav.crossVerdict, 'undefined', 'crossVerdict must stay deleted - a cooled-down crossing seals the bot in')
 })
 
 // ---- ANTI-DIVERGENCE: stamp the REAL hut.schem and assert the model reads it -----------

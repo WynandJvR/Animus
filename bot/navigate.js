@@ -99,15 +99,22 @@ function drownReflexSkips (deliberate) { return !!deliberate }
 // (verified live: froze a 432-block build for 10+ minutes; froze the whole brain loop).
 // This used to exist as three identical copies (commands/provision/schematic).
 async function gotoOnce (bot, goal, ms = 20000, gopts = {}) {
-  // Yield to a watchdog FORCE-ESCAPE and to any ACTIVE RECOVERY maneuver: their manual
-  // control-state driving must not fight a concurrent goto's physics ticks (the pathfinder
-  // rewrites the controls every tick, so the manual escape LOSES - live: step-out rungs
-  // reported 'no progress' for 3+ minutes at 433,62,112 while another flow's goto stomped
-  // them). Bounded wait. Door-assist's own gotos pass duringRecovery to skip the gate
-  // (they ARE the recovery).
+  // `ms` IS THE ATTEMPT (2026-08-02). Yield to a watchdog FORCE-ESCAPE and to any ACTIVE
+  // RECOVERY maneuver: their manual control-state driving must not fight a concurrent goto's
+  // physics ticks (the pathfinder rewrites the controls every tick, so the manual escape LOSES -
+  // live: step-out rungs reported 'no progress' for 3+ minutes at 433,62,112 while another flow's
+  // goto stomped them). Door-assist's own gotos pass duringRecovery to skip the gate (they ARE
+  // the recovery).
+  //
+  // The wait used to carry its OWN 45s bound, spent BEFORE the `ms` timer even started - so a
+  // caller that asked for a 15s attempt could be gone for 60s, and navigateToInner's deadline
+  // arithmetic (which hands this `ms`) never saw it. #6 says a bound must be a deadline on an
+  // ATTEMPT: there is one attempt here, it is `ms` long, and the yield is part of it.
+  const started = Date.now()
   if ((forceUnsticking || recoveringDepth > 0) && !gopts.duringRecovery) {
-    const t0 = Date.now()
-    while ((forceUnsticking || recoveringDepth > 0) && Date.now() - t0 < 45000) await new Promise(r => setTimeout(r, 250))
+    while ((forceUnsticking || recoveringDepth > 0) && Date.now() - started < ms) await new Promise(r => setTimeout(r, 250))
+    const waited = Date.now() - started
+    if (waited > 1000) dbg('goto: yielded ' + Math.round(waited / 1000) + 's of its own ' + Math.round(ms / 1000) + 's attempt to a recovery/force-escape')
   }
   // SCAFFOLD SESSION: any block the pathfinder places while EXECUTING a goto (bridge,
   // 1x1 tower) is by definition movement scaffold, never build fabric - build blocks
@@ -124,7 +131,7 @@ async function gotoOnce (bot, goal, ms = 20000, gopts = {}) {
     const timer = setTimeout(() => {
       try { bot.pathfinder.setGoal(null) } catch {}
       done(reject, new Error('goto timed out'))
-    }, ms)
+    }, Math.max(500, ms - (Date.now() - started))) // whatever the yield above did not spend
     bot.pathfinder.goto(goal).then(
       () => { clearTimeout(timer); done(resolve) },
       e => { clearTimeout(timer); done(reject, e) }
@@ -675,6 +682,11 @@ async function openNearbyDoor (bot, opts = {}) {
       cands.sort((a, b) => a.distanceTo(bot.entity.position) - b.distanceTo(bot.entity.position))
     }
     dbg('door-assist: ' + cands.length + ' door/gate candidates near me/goal')
+    // ONE close-in walk per call, spent on the FIRST candidate we cannot path to. The candidates
+    // are sorted best-first (crossOwnDoor pins the chosen doorway; otherwise nearest), so the
+    // first one is the door worth walking at - and a village with eight doors can never turn this
+    // into eight blind walks. The rest fall back to the honest logged skip.
+    let closedIn = false
     for (const p of cands) {
       if (isDone()) return true // already on the target side (e.g. entered through the hole) - stop
       const blk = bot.blockAt(p)
@@ -686,8 +698,38 @@ async function openNearbyDoor (bot, opts = {}) {
       // GoalChanged here means SOMEONE ELSE called setGoal mid-goto. Which writer it was has
       // never been identifiable from the tape, so the line names every span that owned the body
       // at the moment it failed instead of leaving the next investigation to guess (#7).
-      try { await gotoOnce(bot, new goals.GoalNear(p.x, p.y, p.z, 2), 15000, { duringRecovery: true }) } catch (e) { dbg('door-assist: cannot reach door at ' + p + ' (' + e.message + ')' + (/goal was changed/i.test(e.message || '') ? ' - active spans: [' + arbiter.describeSpans() + ']' : '')); continue }
-      if (bot.entity.position.distanceTo(p) > 4) continue
+      let planFail = null
+      try { await gotoOnce(bot, new goals.GoalNear(p.x, p.y, p.z, 2), 15000, { duringRecovery: true }) } catch (e) { planFail = e.message; dbg('door-assist: cannot reach door at ' + p + ' (' + e.message + ')' + (/goal was changed/i.test(e.message || '') ? ' - active spans: [' + arbiter.describeSpans() + ']' : '')) }
+      // ==== THE CROSSING IS THE LAST RESORT - IT MAY NOT GIVE UP SILENTLY (2026-08-02) ========
+      // This was `if (distanceTo(p) > 4) continue` - a measurement that produced NO ACTION and
+      // NO LINE (#5, #7). Two ways to land here, and the second is invisible: mineflayer-pathfinder's
+      // goto RESOLVES SUCCESSFULLY when the planner returns status 'noPath' with an EMPTY path
+      // (node_modules/mineflayer-pathfinder/lib/goto.js:24 - `if (results.path.length === 0) cleanup()`),
+      // which is exactly what a bot wedged among its own furniture gets. navigateToInner already
+      // knows that resolve is a lie and re-checks goal.isEnd (:1361); this loop believed it and
+      // then dropped the ONLY door.
+      //
+      // Live 2026-08-02 16:19-16:28, the bot sealed inside its own hut at (191,68,-100) with the
+      // door 4.1b away at (190,68,-104): every crossing printed `1 door/gate candidates`, skipped
+      // it here in 2ms, and reported `still on the wrong side`. Three of those tripped the F3
+      // cooldown (now deleted), the harvest goals were all OUTSIDE, and the bot starved to hp1/food0
+      // beside 17 mature wheat.
+      //
+      // The pathfinder is not the only way to travel four blocks, and this crossing already drives
+      // the body on controls for the doorway itself. So: measure, and if we are short, WALK - with
+      // the bounded reactive primitive the nudge/step-out rungs use (<=2.5s, measured net move, no
+      // sprint/no hop so it cannot overshoot a doorway or need a jump the bot may not have at food 0).
+      // Only then may we skip, and the skip says the numbers.
+      let dist = bot.entity.position.distanceTo(p)
+      if (dist > 4 && !closedIn && !isDone()) {
+        closedIn = true
+        dbg('door-assist: ' + (planFail ? 'no route' : 'goto ended short') + ' to the door at ' + p + ' - ' + dist.toFixed(1) + 'b away, walking at it on controls')
+        try { await reactiveMove(bot, { toward: { x: p.x + 0.5, y: p.y, z: p.z + 0.5 }, arriveB: 2, budgetMs: 2500, sprint: false, jump: false, isStopped: opts.isStopped, priority: arbiter.PRIORITY.SURVIVE }) } catch (e) { dbg('door-assist: close-in walk failed (' + e.message + ')') }
+        const after = bot.entity.position.distanceTo(p)
+        dbg('door-assist: close-in ' + dist.toFixed(1) + 'b -> ' + after.toFixed(1) + 'b toward the door at ' + p)
+        dist = after
+      }
+      if (dist > 4) { dbg('door-assist: SKIPPING the door at ' + p + ' - still ' + dist.toFixed(1) + 'b away after a goto AND a 2.5s walk'); continue }
       try {
         // WALK THROUGH the doorway before re-planning: the pathfinder won't ROUTE
         // through even an open door that isn't on the direct line (verified in the hut
@@ -1227,30 +1269,25 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
 // "recovered". Serialize behind a mutex: the body can only walk one route at a time; a
 // queued flow just experiences a slower nav (honest) instead of a phantom wedge.
 let navChain = Promise.resolve()
-// DOOR-CROSS LEDGER (F3, DOOR_CROSS_GEOMETRIC): the per-nav caps (crossings<2, tries<2,
-// door budget 3) are each individually bounded, but every CALLER retry (pathfix attempt
-// loop, comeToPlayer re-issue, planner/supervisor) builds a FRESH nav with fresh caps, so
-// the in/out oscillation is unbounded ACROSS navs. This module-level ledger counts failed
-// crossings keyed by (hut,dir): 3 fails in a 90s window -> a 120s cooldown during which
-// crossOwnDoor no-ops (returns done()) and the plain goto takes over (it reaches interior
-// goals via the same hole the loop kept using); a success deletes the entry. Consulted only
-// under the flag; DOOR_CROSS_GEOMETRIC=0 never touches it.
-const doorCrossLedger = new Map() // `${hut.x},${hut.y},${hut.z}:${dir}` -> { fails, firstAt, coolUntil }
-// PURE ledger transition (unit-tested offline; navigate.js keeps only the Map + the clock).
-// `e` = prior entry (or null); `now` = ms; `ok` = did the crossing succeed. Returns the NEXT
-// entry (null => delete it) and whether a cooldown was FRESHLY triggered (for the one log line).
-function crossVerdict (e, now, ok) {
-  if (ok) return { entry: null, cooled: false } // a working door never cools down
-  const WINDOW_MS = 90000; const COOL_MS = 120000
-  let fails = (e && typeof e.fails === 'number') ? e.fails : 0
-  let firstAt = (e && typeof e.firstAt === 'number') ? e.firstAt : now
-  if (now - firstAt > WINDOW_MS) { fails = 0; firstAt = now } // window elapsed -> fresh count
-  fails++
-  let coolUntil = (e && typeof e.coolUntil === 'number') ? e.coolUntil : 0
-  let cooled = false
-  if (fails >= 3) { coolUntil = now + COOL_MS; cooled = true }
-  return { entry: { fails, firstAt, coolUntil }, cooled }
-}
+// ==== THE DOOR-CROSS COOLDOWN IS DELETED (2026-08-02) ==================================
+// F3 was a module-level ledger keyed by (hut,dir): 3 failed crossings in 90s armed a 120s
+// cooldown during which crossOwnDoor did NO MANEUVER AT ALL and returned done(), on the
+// stated grounds that "the plain goto takes over". For an EXIT that claim is false by this
+// module's own documentation (see the door pre-flight note in navigateToInner: "the
+// pathfinder cannot PLAN through a closed door, so a plain goto to a cell INSIDE our hut -
+// or from inside OUT to a world goal - burns its whole timeout unplannably"). The cooldown
+// therefore disabled the ONLY mechanism that can leave the hut and named a successor that
+// cannot do the job - #5, and a blanket timer hiding a livelock - #6.
+//
+// Live 2026-08-02 16:19-16:28+: `crossOwnDoor(out): cooling down - plain goto takes over
+// (door 190,-104)` ~40 times in nine minutes, interleaved with three real attempts that all
+// said `still on the wrong side` and immediately re-armed it. The bot never left. It starved
+// at hp1/food0 inside a hut wrapped by its own mature wheat.
+//
+// What actually made the crossings fail is fixed above (door-assist's silent give-up), and
+// the oscillation F3 was aimed at is already bounded per-nav (crossings<2, tries<2, door
+// budget 3) and now by the nav leg ceiling. A crossing that cannot work must FAIL LOUDLY every
+// time it is asked, not go quiet for two minutes. Deleting the patch layer is the fix (#1).
 // Serialize a body onto the single-pathfinder mutex (see the note above). Any async fn
 // that drives the pathfinder/controls end-to-end - a full navigateTo, or an atomic
 // enter/exit-door shell - queues here so two flows never fight over the controls.
@@ -1294,9 +1331,42 @@ function navigateTo (bot, goal, opts = {}) {
 // predates this). Never use for routine navigation - the mutex exists for a reason.
 function navigateToPreempt (bot, goal, opts = {}) { return navigateToInner(bot, goal, opts) }
 
+// ==== ONE NUMBER FOR "THIS LEG HAS TAKEN TOO LONG" ([[threshold-seams]], 2026-08-02) ======
+// Two layers were each bounding the same thing with their own number, and the OUTER one was
+// the impatient one:
+//   nav      deadline = max(90000, timeoutMs*4), + up to 90s of reflex credit, + a 45s
+//            force-unstick gate inside gotoOnce  -> a caller asking for 10s could legitimately
+//            run ~180-278s, logging NOTHING.
+//   supervisor  concludes "no verified progress" at scheduler.SURVIVAL_FAIL_MS and revokes the
+//            dispatch slot LATCH_GRACE_MS later.
+// So the watchdog killed work that was still legally inside its budget and called merely-slow
+// work "hung". A nav leg is the INNER layer: it must give its caller an honest answer BEFORE
+// the supervisor draws a conclusion, so the supervisor's own patience IS the ceiling. Same
+// derivation provision-recovery.js:1362 already uses for RUNG_NOPROGRESS_MS - the number is
+// restated, never re-invented, and there is no env knob on it.
+const LADDER_ATTEMPTS = 4 // a leg is worth this many `timeoutMs` attempts before it is hopeless
+function supervisorPatienceMs () {
+  // Lazy: scheduler.js sits above us in the load order (it requires provision -> navigate), so
+  // an eager import is a real cycle. Reached once per navigateTo. The literal is a last-resort
+  // fallback for a scheduler that failed to load at all - i.e. when there is no supervisor to
+  // race - and is deliberately the same value, never a second policy.
+  try { const s = require('./scheduler.js'); if (Number.isFinite(s.SURVIVAL_FAIL_MS)) return s.SURVIVAL_FAIL_MS } catch {}
+  return 90000
+}
+// PURE (unit-tested): the overall budget for ONE navigateTo. The caller's timeoutMs finally
+// means something - four attempts' worth - an explicit deadlineMs still wins, and NEITHER may
+// outlive the supervisor's patience. Never shorter than a single attempt.
+function navLegBudget (timeoutMs, deadlineMs, ceilingMs) {
+  const asked = deadlineMs || timeoutMs * LADDER_ATTEMPTS
+  return Math.max(timeoutMs, Math.min(asked, ceilingMs))
+}
+
 async function navigateToInner (bot, goal, opts = {}) {
   const timeoutMs = opts.timeoutMs || 20000
-  const deadline = Date.now() + (opts.deadlineMs || Math.max(90000, timeoutMs * 4))
+  const ceilingMs = supervisorPatienceMs()
+  const budgetMs = navLegBudget(timeoutMs, opts.deadlineMs, ceilingMs)
+  const startedAt = Date.now()
+  const deadline = startedAt + budgetMs
   const isStopped = opts.isStopped || (() => false)
   const budgets = Object.assign(defaultBudgets(), opts.budgets || {})
   const counts = {}
@@ -1311,9 +1381,15 @@ async function navigateToInner (bot, goal, opts = {}) {
   // Time spent parked while a REFLEX held the pathfinder must not consume the deadline:
   // in a reflex storm (creeper standoff re-fleeing every second, live 2h+) every nav
   // burned its whole budget waiting and DIED at the deadline check before the recovery
-  // ladder ever ran once. Credit the wait back (bounded) so recovery always gets a shot.
+  // ladder ever ran once. Credit the wait back so recovery always gets a shot.
+  //
+  // The credit is NOT separately capped any more (it was `min(reflexWaitMs, 90000)` - a second
+  // invented number on top of the deadline's own). It does not need to be: this is the SAME
+  // rule the supervisor applies to itself - boundedRung re-bases its no-progress clock for
+  // every moment a hold is declared (provision-recovery.js:1391). Both layers ignore time the
+  // body was legitimately owned by someone else; one rule, one definition (#4).
   let reflexWaitMs = 0
-  const dl = () => deadline + Math.min(reflexWaitMs, 90000)
+  const dl = () => deadline + reflexWaitMs
   navDepth++
   // Claim the body for this maneuver's whole duration so idle/opportunistic reflexes
   // (collect/torch/gaze/follow-resume) and NON-EMERGENCY flee don't steal the goal
@@ -1434,7 +1510,21 @@ async function navigateToInner (bot, goal, opts = {}) {
       recoveries++
       dbg(label + 'recovered via ' + rescued + ' - retrying the path')
     }
-  } finally { navDepth--; arbiter.endManeuver(manTok) }
+  } finally {
+    navDepth--; arbiter.endManeuver(manTok)
+    // #7: a leg that outlives the caller's OWN timeoutMs used to be completely silent - up to
+    // a ~4 minute window with nothing in the tape but the caller's eventual error (or, on
+    // success, nothing at all), which is how "slow" and "hung" became indistinguishable. One
+    // greppable line, with the numbers, and only when the condition is true (#8: no per-leg
+    // telemetry on the healthy path).
+    const took = Date.now() - startedAt
+    if (took > timeoutMs) {
+      dbg(label + 'leg took ' + (took / 1000).toFixed(1) + 's: attempt ' + Math.round(timeoutMs / 1000) +
+        's, budget ' + Math.round(budgetMs / 1000) + 's, ceiling ' + Math.round(ceilingMs / 1000) +
+        's, reflex-hold ' + Math.round(reflexWaitMs / 1000) + 's, recoveries ' + recoveries +
+        ' in ' + Math.round(recoveryMs / 1000) + 's')
+    }
+  }
 }
 
 // ---- ENTER / EXIT my own structure (nav slice B) -----------------------------------
@@ -1469,15 +1559,6 @@ async function crossOwnDoor (bot, hut, dir, opts = {}) {
   const done = () => dir === 'in'
     ? !!(provHut().insideOwnStructure && provHut().insideOwnStructure(bot))
     : !(provHut().insideOwnStructure && provHut().insideOwnStructure(bot))
-  // F3: during a cooldown (3 failed crossings of this hut/dir in 90s) do NO maneuver at all -
-  // return the geometric done() so the caller's plain goto takes over (it reaches interior
-  // goals via the hole, which is the route the pathfinder kept proving works). No walking, no
-  // fail counting while cooled; the entry clears on cooldown expiry / next success.
-  const ledgerKey = hut.x + ',' + hut.y + ',' + hut.z + ':' + dir
-  if (GEO) {
-    const e = doorCrossLedger.get(ledgerKey)
-    if (e && e.coolUntil > Date.now()) { dbg('crossOwnDoor(' + dir + '): cooling down - plain goto takes over (door ' + door.x + ',' + door.z + ')'); return done() }
-  }
   const tok = arbiter.beginManeuver('cross-door', opts.priority != null ? opts.priority : arbiter.PRIORITY.PRESERVE, 25000)
   recoveringDepth++
   try {
@@ -1495,12 +1576,7 @@ async function crossOwnDoor (bot, hut, dir, opts = {}) {
     }
   } catch (e) { dbg('crossOwnDoor: crossing failed (' + e.message + ')') } finally { endRecoverySpan(); arbiter.endManeuver(tok) }
   const ok = done()
-  dbg('crossOwnDoor(' + dir + '): ' + (ok ? 'on the intended side' : 'still on the wrong side') + ' (door ' + door.x + ',' + door.z + ')')
-  if (GEO) { // F3: record the outcome; a run of failures trips the cross-nav cooldown
-    const { entry, cooled } = crossVerdict(doorCrossLedger.get(ledgerKey), Date.now(), ok)
-    if (entry) doorCrossLedger.set(ledgerKey, entry); else doorCrossLedger.delete(ledgerKey)
-    if (cooled) dbg('crossOwnDoor: 3 failed crossings of hut ' + hut.x + ',' + hut.y + ',' + hut.z + ' - cooling down 120s, plain goto takes over')
-  }
+  dbg('crossOwnDoor(' + dir + '): ' + (ok ? 'on the intended side' : 'still on the wrong side') + ' (door ' + door.x + ',' + door.z + ', hut ' + hut.x + ',' + hut.y + ',' + hut.z + ')')
   return ok
 }
 
@@ -1704,4 +1780,4 @@ function honestFail (lastErr, counts, label, recoveryMs, reflexWaitMs) {
   return e
 }
 
-module.exports = { doorFootCell, navigateTo, navigateToPreempt, gotoOnce, crossOwnDoor, crossVerdict, enterStructure, swimToShore, escapeWater, escapeToDryLand, isEscapingWater, headInWater, feetInWater, outOfWater, jumpForAir, isNavigating, isRecovering, isForceUnsticking, releaseNavLatches, forceUnstick, setDebugSink, reactiveMove, reactiveTarget, reactiveDone, setDeliberateDrown, isDeliberateDrown, drownReflexSkips }
+module.exports = { doorFootCell, navigateTo, navigateToPreempt, gotoOnce, crossOwnDoor, openNearbyDoor, navLegBudget, enterStructure, swimToShore, escapeWater, escapeToDryLand, isEscapingWater, headInWater, feetInWater, outOfWater, jumpForAir, isNavigating, isRecovering, isForceUnsticking, releaseNavLatches, forceUnstick, setDebugSink, reactiveMove, reactiveTarget, reactiveDone, setDeliberateDrown, isDeliberateDrown, drownReflexSkips }
