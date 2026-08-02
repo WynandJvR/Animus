@@ -14,6 +14,7 @@
 
 const assert = require('assert')
 const H = require('./hut-model.js')
+const provHut = require('./provision-hut.js')
 const p = require('./provision.js') // pin the facade wiring (the split can drift a re-export)
 
 let failures = 0
@@ -126,18 +127,18 @@ t('BOTH regimes: SEAL_HOME_DESCENTS=0 never admits; ON admits only in a calm win
 
 // ---- facade wiring (the split can silently drop a re-export) -------------------------
 t('facade: provision.js re-exports secureBase + secureBaseGate, and the gate IS the model fn', () => {
-  assert.strictEqual(typeof p.secureBase, 'function', 'secureBase re-exported')
-  assert.strictEqual(typeof p.secureBaseGate, 'function', 'secureBaseGate re-exported')
-  assert.strictEqual(p.secureBaseGate, H.secureBaseGate, 're-export IS the model fn, not a drifting copy')
+  assert.strictEqual(typeof provHut.secureBase, 'function', 'secureBase re-exported')
+  assert.strictEqual(typeof provHut.secureBaseGate, 'function', 'secureBaseGate re-exported')
+  assert.strictEqual(provHut.secureBaseGate, H.secureBaseGate, 're-export IS the model fn, not a drifting copy')
   // the pure gate behaves identically through the facade
-  assert.strictEqual(p.secureBaseGate(SAFE, { safeHp: 14 }), true)
+  assert.strictEqual(provHut.secureBaseGate(SAFE, { safeHp: 14 }), true)
 })
 
 t('facade: provision.js re-exports sealHomeDescents + sealDescentsGate (#89), gate IS the model fn', () => {
-  assert.strictEqual(typeof p.sealHomeDescents, 'function', 'sealHomeDescents re-exported')
-  assert.strictEqual(typeof p.sealDescentsGate, 'function', 'sealDescentsGate re-exported')
-  assert.strictEqual(p.sealDescentsGate, H.sealDescentsGate, 're-export IS the model fn, not a drifting copy')
-  assert.strictEqual(p.sealDescentsGate(SAFE, { safeHp: 12 }), true)
+  assert.strictEqual(typeof provHut.sealHomeDescents, 'function', 'sealHomeDescents re-exported')
+  assert.strictEqual(typeof provHut.sealDescentsGate, 'function', 'sealDescentsGate re-exported')
+  assert.strictEqual(provHut.sealDescentsGate, H.sealDescentsGate, 're-export IS the model fn, not a drifting copy')
+  assert.strictEqual(provHut.sealDescentsGate(SAFE, { safeHp: 12 }), true)
 })
 
 console.log(failures ? ('\n' + failures + ' FAILED') : '\nALL PASS')

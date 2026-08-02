@@ -1102,7 +1102,7 @@ async function ensureSpawnBed (bot, opts = {}) {
   // rung ACQUIRED - no bed block anywhere we can reach. Get one (withdraw > craft) and lay it.
   let how = bb ? 'stood' : null
   if (!bb && !isStopped()) {
-    const item = await P().acquireBed(bot, { near, isStopped, say: opts.say }).catch(() => null)
+    const item = await provHut.acquireBed(bot, { near, isStopped, say: opts.say }).catch(() => null)
     if (!item) {
       // #117: RECORD THE EXHAUSTED PLAN, so the 'spawn' bootstrap verdict can step aside for
       // armor/base/build instead of re-picking a producer that has nothing left to try. This is
@@ -1118,7 +1118,7 @@ async function ensureSpawnBed (bot, opts = {}) {
       if (r === 'present' || r === 'placed') return R(true, 'acquired', 'made a ' + item.name + ' and set spawn on it in the hut')
       dbg('spawn: hut cell would not take the bed (' + r + ') - laying it on open ground instead')
     }
-    bb = await P().placeBedNear(bot, near, { isStopped, say: opts.say }).catch(() => null)
+    bb = await provHut.placeBedNear(bot, near, { isStopped, say: opts.say }).catch(() => null)
     if (!bb) return R(false, 'failed', 'holding a ' + item.name + ' but found nowhere near home to lay it')
   }
   if (!bb) return R(false, 'failed', 'no bed to anchor on and nothing could be acquired')

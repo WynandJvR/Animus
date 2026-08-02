@@ -33,6 +33,7 @@
 // is dispatched from the maintain tier - it yields to every real need by construction.
 
 const ledger = require('./ledger.js')
+const provHut = require('./provision-hut.js')
 const scaffold = require('./scaffold.js')
 
 let dbgSink = null
@@ -71,8 +72,8 @@ function isProtected (p) {
   try {
     const prov = require('./provision.js')
     if (prov.inBuildZone && prov.inBuildZone(p.x, p.z)) return true
-    if (prov.ownHutAt && prov.ownHutAt(p)) return true
-    if (prov.onHutApron && prov.onHutApron(null, p)) return true // (bot, pos) - the apron test takes the cell as its SECOND arg
+    if (provHut.ownHutAt && provHut.ownHutAt(p)) return true
+    if (provHut.onHutApron && provHut.onHutApron(null, p)) return true // (bot, pos) - the apron test takes the cell as its SECOND arg
     if (scaffold.onFarmFootprint(p)) return true
     return false
   } catch { return true }

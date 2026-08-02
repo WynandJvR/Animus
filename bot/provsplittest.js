@@ -93,16 +93,14 @@ function ok (cond, label) { eq(!!cond, true, label) }
 // here - `git log -L92,92:provsplittest.js` replays every past adjustment and its reasoning.
 {
   const pub = Object.keys(provision).filter(k => k !== '__siblings')
-  eq(pub.length, 98, 'facade: provision.js still exports exactly 98 public names')
+  eq(pub.length, 68, 'facade: provision.js still exports exactly 68 public names')
 
   const moved = [
     [worldMemory, ['listInfra', 'rememberInfra', 'forgetInfra', 'recordWedge', 'listWedges', 'ownInfraAnchors',
       'rememberRoute', 'recallRoute', 'planTrekRoute', 'dementRoute', 'knownBed', 'rememberBed',
       'markBedUnusable', 'bedHeld', 'setSpawnSuspect', 'isSpawnSuspect', 'gearupState', 'gearupResult']],
     [provCore, ['toolForBlock']], // the rest LEFT - see below (toolForBlock stays: scaffold.js reaches it through a function-local require)
-    [provHut, ['hutAnchor', 'ownHutAt', 'onHutApron', 'insideOwnStructure', 'hasSolidCeiling',
-      'maintainHome', 'maintainHut', 'repairHutStructure', 'ensureHutApron', 'ensureHutBed',
-      'worldTidy', 'litterSignature', 'bedInPack', 'bedCandidates', 'acquireBed', 'placeBedNear']],
+    [provHut, ['ownHutAt', 'insideOwnStructure']], // the rest LEFT - pathfix.js still reaches these two through a function-local require
     // provision-mining is NOT here any more - see the "left the facade" block below.
   ]
   let checked = 0
@@ -138,6 +136,10 @@ function ok (cond, label) { eq(!!cond, true, label) }
     [provFood, ['hasFood', 'foodCount', 'needsFood', 'secureFood', 'fishForFood', 'huntForFood',
       'ensureFoodSupply', 'eatBestFood', 'cookRawMeat', 'scoutForFood', 'RAW_COOKABLE',
       'releaseFoodLatch', 'isSecuringFood', 'courierFoodToBank']],
+    [provHut, ['hutAnchor', 'onHutApron', 'hasSolidCeiling', 'maintainHome', 'maintainHut',
+      'repairHutStructure', 'ensureHutApron', 'ensureHutBed', 'worldTidy', 'litterSignature',
+      'bedInPack', 'bedCandidates', 'acquireBed', 'placeBedNear', 'secureBase', 'sealHomeDescents',
+      'reconcileInfra', 'stationInHut', 'stationSlot', 'freeInteriorCell', 'ensureHomeShelter']],
     [require('./provision-recovery.js'), ['recoverHp', 'isRecoveringHp', 'restUntilSafe', 'isResting',
       'nightRest', 'boundedHold', 'sleepableNow', 'ensureSpawnBed', 'recoverSpawnAnchor',
       'homeRecoveryDecision', 'recoverHome', 'recoveryReadyNow', 'recoverFromDegraded',

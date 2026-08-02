@@ -36,6 +36,7 @@ process.env.WORLD_MEM_FILE = MEMFILE
 try { fs.unlinkSync(MEMFILE) } catch {}
 
 const S = require('./scheduler.js')
+const provHut = require('./provision-hut.js')
 const provRecovery = require('./provision-recovery.js')
 const provMaintain = require('./provision-maintain.js')
 const worldMemory = require('./world-memory.js')
@@ -278,20 +279,20 @@ function fakeBot () {
 // chain against a fake world.
 async function runOnePass (bootstrap) {
   const realSpawn = provRecovery.ensureSpawnBed
-  const realShelter = provision.ensureHomeShelter
+  const realShelter = provHut.ensureHomeShelter
   const realNeed = provision.survivalNeed
   const realState = provision.schedulerState
   const calls = []
   let done = false
   provRecovery.ensureSpawnBed = async () => { calls.push('ensureSpawnBed'); done = true; return { ok: true, how: 'acquired', why: 'test' } }
-  provision.ensureHomeShelter = async () => { calls.push('ensureHomeShelter'); done = true; return { ok: true, how: 'repaired', why: 'test' } }
+  provHut.ensureHomeShelter = async () => { calls.push('ensureHomeShelter'); done = true; return { ok: true, how: 'repaired', why: 'test' } }
   provision.survivalNeed = () => (done ? { need: 'test-bail' } : null)
   provision.schedulerState = async () => ({ homeReachable: false, armorPieces: 4, tools: {}, packFoodPts: 0 })
   try {
     const r = await provMaintain.maintenancePass(fakeBot(), { bootstrap, say: () => {} })
     return { calls, steps: (r && r.steps) || [] }
   } finally {
-    provRecovery.ensureSpawnBed = realSpawn; provision.ensureHomeShelter = realShelter
+    provRecovery.ensureSpawnBed = realSpawn; provHut.ensureHomeShelter = realShelter
     provision.survivalNeed = realNeed; provision.schedulerState = realState
   }
 }
@@ -320,7 +321,7 @@ async function main () {
     // ensureHomeShelter never sites or raises a FIRST hut - that has exactly one implementation and
     // it is the build's camp step (§8.2). With nothing on the books it says so; it does not guess.
     const mem = worldMemory.loadWorldMem(); if (mem.infra) delete mem.infra.hut
-    const r = await provision.ensureHomeShelter(fakeBot(), {})
+    const r = await provHut.ensureHomeShelter(fakeBot(), {})
     assert.strictEqual(r.ok, false)
     assert.strictEqual(r.how, 'no-hut', 'expected an honest no-hut verdict, got ' + JSON.stringify(r))
   })

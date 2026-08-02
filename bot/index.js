@@ -21,6 +21,7 @@ const { pathfinder, goals } = require('mineflayer-pathfinder')
 try { require('fs').accessSync(require('path').join(__dirname, 'config.json')) } catch { require('fs').copyFileSync(require('path').join(__dirname, 'config.example.json'), require('path').join(__dirname, 'config.json')) }
 const cfg = require('./config.json')
 const commands = require('./commands.js')
+const provHut = require('./provision-hut.js')
 const provRecovery = require('./provision-recovery.js')
 const provFood = require('./provision-food.js')
 const provCore = require('./provision-core.js')
@@ -253,7 +254,7 @@ const holdPremiseOK = kind => {
   if (kind !== 'sheltered') return true
   try { if (bot.isSleeping) return true } catch {}
   try { if (provRecovery.isResting && provRecovery.isResting()) return true } catch {}
-  try { if (provision.insideOwnStructure && provision.insideOwnStructure(bot)) return true } catch {}
+  try { if (provHut.insideOwnStructure && provHut.insideOwnStructure(bot)) return true } catch {}
   // A SEALED NIGHT PIT is a ceiling a few blocks under the SURFACE - the 2026-07-29 case this
   // whole mechanism exists for (digInForNight caps a shallow hole and sets no latch, so nothing
   // else vouches for it). A bare hasSolidCeiling is NOT that test: underground, a mine roof
@@ -261,7 +262,7 @@ const holdPremiseOK = kind => {
   // - thirty-one blocks below its own hut - even after the premise was introduced. So the ceiling
   // only counts near the surface, measured against a GROUNDED read; UNKNOWN fails safe (trusted).
   try {
-    if (provision.hasSolidCeiling && provision.hasSolidCeiling(bot, 4)) {
+    if (provHut.hasSolidCeiling && provHut.hasSolidCeiling(bot, 4)) {
       const s = require('./pathfix.js').surfaceYAt(bot, bot.entity.position.x, bot.entity.position.z)
       if (!s || !s.known || s.y == null) return true
       if (s.y - bot.entity.position.y <= Number(process.env.SHELTER_PIT_DEPTH || 5)) return true
@@ -645,7 +646,7 @@ bot.on('spawn', () => {
       // So they still happen - when they are survivable, retried every tick instead of once per
       // death, and losing to shelter/food/heal when those matter more. This handler's whole job is
       // now to set the latch and let the scheduler think (design principle 3).
-      const homeAnchor = (provision.hutAnchor && provision.hutAnchor()) || (provision.knownBed && provision.knownBed()) || null
+      const homeAnchor = (provHut.hutAnchor && provHut.hutAnchor()) || (provision.knownBed && provision.knownBed()) || null
       // 3) DEATH-DROP GRAVE RECOVERY, now SURVIVAL-GATED. Only chase the grave when the bot is
       // SAFE + FED and the grave is reasonably reachable (shouldChaseGrave). A naked/starving
       // bot, or a grave far across hostile ground, DEFERS - never trek to it while it would
@@ -1771,7 +1772,7 @@ if (process.env.AUTO_DEFEND !== '0') {
         // avoid maneuver) so a bot safe inside its hut never walks back OUT the door into a
         // creeper's blast radius. The creeper can't reach; hold position. A real hit re-arms.
         if (isCreeper && !beingHit) {
-          try { if (provision.insideOwnStructure && provision.insideOwnStructure(bot)) return } catch {}
+          try { if (provHut.insideOwnStructure && provHut.insideOwnStructure(bot)) return } catch {}
         }
         // 2) COMMITTED CREEPER AVOID - runs BEFORE the PROGRESS deferral, so a creeper at 6-12m
         // is backed off from even mid-build/mid-mine (the incompleteness that got the bot blown
@@ -1803,13 +1804,13 @@ if (process.env.AUTO_DEFEND !== '0') {
                 // Already inside our own walls? The creeper can't reach - just hold/re-seal,
                 // never re-navigate to a fixed interior cell (that furniture-blind goto was
                 // unsatisfiable when a table/bed sat on hut+2,+2 -> looped to the 40s deadline).
-                if (provision.insideOwnStructure && provision.insideOwnStructure(bot)) {
+                if (provHut.insideOwnStructure && provHut.insideOwnStructure(bot)) {
                   note('(flee) creeper near home but already inside the hut - holding, door stays sealed')
                 } else {
                   note(`(flee) creeper ${fbest.toFixed(1)}m near home - retreating INTO the hut`)
                   // Target a FREE interior floor cell (furniture-aware), not the fixed hut+2,+2;
                   // the nav's door pre-flight crosses the doorway to reach it. Fallback to center.
-                  const cell = (() => { try { return provision.freeInteriorCell ? provision.freeInteriorCell(bot, hut) : null } catch { return null } })()
+                  const cell = (() => { try { return provHut.freeInteriorCell ? provHut.freeInteriorCell(bot, hut) : null } catch { return null } })()
                   const gx = cell ? cell.x : hut.x + 2; const gy = cell ? cell.y : hut.y + 1; const gz = cell ? cell.z : hut.z + 2
                   if (REACTIVE_MOVE_ON) { // Phase A: reactive control-driven approach toward home (no 20s goto), then the EXISTING atomic door crossing (crossOwnDoor/#33 kept exactly as-is)
                     try { await navigate.reactiveMove(bot, { toward: { x: gx, y: gy, z: gz }, reach: 16, arriveB: 2, budgetMs: 2500, priority: arbiter.PRIORITY.SURVIVE }) } catch {}

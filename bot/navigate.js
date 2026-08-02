@@ -18,6 +18,7 @@
 const { goals } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
 const arbiter = require('./arbiter.js') // priority body-ownership: reflexes defer to a running maneuver
+const provHut = () => require('./provision-hut.js') // LAZY: provision-hut.js top-requires this module, so an eager import here would be a real cycle
 const provRecovery = () => require('./provision-recovery.js') // LAZY: provision-recovery.js top-requires this module, so an eager import here would be a real cycle
 const navProfile = require('./nav-profile.js') // PURE terrain policy - findDryLandExit (WATER_ESCAPE); no bot-module cycle
 
@@ -129,7 +130,7 @@ async function gotoOnce (bot, goal, ms = 20000, gopts = {}) {
         exclude: p => {
           try {
             const prov = require('./provision.js')
-            return !!(prov.inBuildZone && prov.inBuildZone(p.x, p.z)) || !!(prov.ownHutAt && prov.ownHutAt(p)) || !!(prov.onHutApron && prov.onHutApron(null, p))
+            return !!(prov.inBuildZone && prov.inBuildZone(p.x, p.z)) || !!(provHut().ownHutAt && provHut().ownHutAt(p)) || !!(provHut().onHutApron && provHut().onHutApron(null, p))
           } catch { return true } // cannot tell whether a build owns it -> do not touch it
         }
       })
@@ -513,8 +514,8 @@ async function escapeToDryLand (bot, { goalDir = null, isStopped = () => false, 
   // RUNG 2: an unclimbable lip the swim couldn't make - pillar up under OPEN SKY, then step off.
   // Reuses the already-anti-grief pillarUpTo (refuses indoors :1586, refuses water-overhead :1602,
   // natural/own-scaffold filler only :1603, self-terminates on clear sky :1594) - NO new placement.
-  const roofed = () => { try { return !!(prov().hasSolidCeiling && prov().hasSolidCeiling(bot, 8, { ignoreLeaves: true })) } catch { return false } }
-  const indoors = () => { try { return !!(prov().insideOwnStructure && prov().insideOwnStructure(bot)) } catch { return false } }
+  const roofed = () => { try { return !!(provHut().hasSolidCeiling && provHut().hasSolidCeiling(bot, 8, { ignoreLeaves: true })) } catch { return false } }
+  const indoors = () => { try { return !!(provHut().insideOwnStructure && provHut().insideOwnStructure(bot)) } catch { return false } }
   if (Date.now() < dl && !isStopped() && !roofed() && !indoors()) {
     let ySurf = feet.y
     for (let dy = 0; dy <= 12; dy++) { const n = sample(feet.x, feet.y + dy, feet.z); if (!n || !/water/.test(n)) { ySurf = feet.y + dy; break } }
@@ -557,8 +558,8 @@ function detectPit (bot) {
     }
   }
   if (pitWalls < 3) return null
-  if (prov().insideOwnStructure && prov().insideOwnStructure(bot)) return null // my own hut is not a pit - don't pillar dirt in the living room
-  if (prov().hasSolidCeiling(bot, 20, { ignoreLeaves: true })) return null // roofed = not a pit
+  if (provHut().insideOwnStructure && provHut().insideOwnStructure(bot)) return null // my own hut is not a pit - don't pillar dirt in the living room
+  if (provHut().hasSolidCeiling(bot, 20, { ignoreLeaves: true })) return null // roofed = not a pit
   return { rimY }
 }
 
@@ -734,7 +735,7 @@ async function openNearbyDoor (bot, opts = {}) {
         // Is the GOAL itself inside a structure of ours (e.g. the hut chest), or out in
         // the world? This, not raw goal-distance, decides which way to cross a doorway.
         let goalInside = false
-        try { goalInside = !!(opts.towards && typeof opts.towards.x === 'number' && prov().ownHutAt && prov().ownHutAt(new Vec3(opts.towards.x, opts.towards.y != null ? opts.towards.y : base.y, opts.towards.z))) } catch {}
+        try { goalInside = !!(opts.towards && typeof opts.towards.x === 'number' && provHut().ownHutAt && provHut().ownHutAt(new Vec3(opts.towards.x, opts.towards.y != null ? opts.towards.y : base.y, opts.towards.z))) } catch {}
         const posCovered = skyless(posSide); const negCovered = skyless(negSide)
         if (posCovered !== negCovered) {
           // One doorway side is ROOFED (inside a room), the other OPEN (outside). Cross to
@@ -808,13 +809,13 @@ async function openNearbyDoor (bot, opts = {}) {
         // (live: trapped at 418,67,89). ownHutAt-gated + survival place from our own filler
         // + skips solids => anti-grief and a no-op on a healthy apron. The step-out below
         // then lands on solid ground and the retry routes across.
-        const ownHut = prov().ownHutAt && prov().ownHutAt(p)
+        const ownHut = provHut().ownHutAt && provHut().ownHutAt(p)
         try {
-          if (ownHut && prov().healHomeCrater) {
+          if (ownHut && provHut().healHomeCrater) {
             // QUICK patch from the doorway (no repositioning - a rim walk here would pull
             // us off the crossing line): fill only the reachable western lane so the
             // step-out below lands on solid ground.
-            const n = await prov().healHomeCrater(bot, ownHut, { isStopped: opts.isStopped, reposition: false })
+            const n = await provHut().healHomeCrater(bot, ownHut, { isStopped: opts.isStopped, reposition: false })
             if (n) dbg('door-assist: quick-healed ' + n + ' crater cell(s) from the doorway')
           }
         } catch (e3) { dbg('door-assist: crater heal skipped (' + e3.message + ')') }
@@ -834,8 +835,8 @@ async function openNearbyDoor (bot, opts = {}) {
         // touch (live: the bot fell into the unhealed (419,62,84) and died). From inside
         // (an entry crossing) this no-ops - it can't reach the outside cells anyway.
         try {
-          if (ownHut && prov().healHomeCrater && !(prov().ownHutAt && prov().ownHutAt(bot.entity.position.floored()))) {
-            const n = await prov().healHomeCrater(bot, ownHut, { isStopped: opts.isStopped, reposition: true })
+          if (ownHut && provHut().healHomeCrater && !(provHut().ownHutAt && provHut().ownHutAt(bot.entity.position.floored()))) {
+            const n = await provHut().healHomeCrater(bot, ownHut, { isStopped: opts.isStopped, reposition: true })
             if (n) dbg('door-assist: full-healed ' + n + ' crater cell(s) around home')
           }
         } catch (e5) { dbg('door-assist: full crater heal skipped (' + e5.message + ')') }
@@ -870,9 +871,9 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
       // and uses only the no-dig pathfinder to reach a real floor-standing cell from the
       // self-structure model - no block placement, so the roof/furniture stay clean.
       kind: 'indoor',
-      when: () => { try { return !!(prov().insideOwnStructure && prov().insideOwnStructure(bot)) } catch { return false } },
+      when: () => { try { return !!(provHut().insideOwnStructure && provHut().insideOwnStructure(bot)) } catch { return false } },
       run: async () => {
-        const cell = prov().freeInteriorCell ? prov().freeInteriorCell(bot) : null
+        const cell = provHut().freeInteriorCell ? provHut().freeInteriorCell(bot) : null
         if (!cell) { dbg('recovery: inside own structure but no free interior cell - holding (never pillaring indoors)'); return false }
         dbg('recovery: wedged INSIDE own structure at ' + p0.floored() + ' - stepping to free interior cell ' + cell + ' (no pillaring indoors)')
         // ==== THIS RUNG IS JUDGED BY ITS OWN GOAL, NOT BY DISPLACEMENT (2026-07-31) =========
@@ -964,8 +965,8 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
       kind: 'wetbreach',
       when: () => process.env.WATER_WEDGE_ESCAPE !== '0' &&
         feetInWater(bot) && !headInWater(bot) &&
-        prov().hasSolidCeiling(bot, 8, { ignoreLeaves: true }) &&
-        !(prov().insideOwnStructure && prov().insideOwnStructure(bot)),
+        provHut().hasSolidCeiling(bot, 8, { ignoreLeaves: true }) &&
+        !(provHut().insideOwnStructure && provHut().insideOwnStructure(bot)),
       run: async () => {
         dbg('recovery: WATER POCKET at ' + p0.floored() + ' - breaching toward the nearest bank')
         try { await prov().breachWaterPocket(bot, { isStopped, wide: !!opts.desperate }) } catch (e) { dbg('recovery: wetbreach failed (' + e.message + ')') }
@@ -1035,7 +1036,7 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
     },
     { // buried underground (real ceiling, not a canopy): staircase/pillar up to daylight.
       kind: 'climb',
-      when: () => opts.climb !== false && prov().hasSolidCeiling(bot, 12, { ignoreLeaves: true }),
+      when: () => opts.climb !== false && provHut().hasSolidCeiling(bot, 12, { ignoreLeaves: true }),
       run: async () => {
         // GROUNDED TARGET (#111). This rung used to hand climbToSurface `feet.y + 10` - a
         // number, not a place. Every hop left the bot ten blocks up and still under a ceiling,
@@ -1141,7 +1142,7 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
       kind: 'drybreach',
       when: () => process.env.DIGOUT_ESCAPE !== '0' && !!opts.digOut &&
         !feetInWater(bot) &&
-        !(prov().insideOwnStructure && prov().insideOwnStructure(bot)),
+        !(provHut().insideOwnStructure && provHut().insideOwnStructure(bot)),
       run: async () => {
         dbg('recovery: HARD-WEDGED dry at ' + p0.floored() + ' - digging out (bounded)')
         try { await prov().breachDryPocket(bot, { isStopped, wide: !!opts.desperate }) } catch (e) { dbg('recovery: drybreach failed (' + e.message + ')') }
@@ -1240,7 +1241,7 @@ function navigateTo (bot, goal, opts = {}) {
           exclude: p => {
             try {
               const prov = require('./provision.js')
-              return !!(prov.inBuildZone && prov.inBuildZone(p.x, p.z)) || !!(prov.ownHutAt && prov.ownHutAt(p)) || !!(prov.onHutApron && prov.onHutApron(null, p))
+              return !!(prov.inBuildZone && prov.inBuildZone(p.x, p.z)) || !!(provHut().ownHutAt && provHut().ownHutAt(p)) || !!(provHut().onHutApron && provHut().onHutApron(null, p))
             } catch { return true } // cannot tell whether a build owns it -> do not touch it
           }
         })
@@ -1297,8 +1298,8 @@ async function navigateToInner (bot, goal, opts = {}) {
         try {
           const P = prov()
           const xz = goalXZ(goal); const gy = goalY(goal)
-          const goalHut = xz && P.ownHutAt ? P.ownHutAt(new Vec3(xz.x, gy != null ? gy : bot.entity.position.y, xz.z)) : null
-          const botHut = P.insideOwnStructure ? P.insideOwnStructure(bot) : null
+          const goalHut = xz && provHut().ownHutAt ? provHut().ownHutAt(new Vec3(xz.x, gy != null ? gy : bot.entity.position.y, xz.z)) : null
+          const botHut = provHut().insideOwnStructure ? provHut().insideOwnStructure(bot) : null
           let atGoal = false
           try { atGoal = goal.isEnd(bot.entity.position.floored()) } catch {}
           if (goalHut && !botHut) { crossings++; dbg(label + 'door pre-flight: crossing IN to reach an interior goal'); await crossOwnDoor(bot, goalHut, 'in', { isStopped, priority: opts.priority }) }
@@ -1427,8 +1428,8 @@ async function crossOwnDoor (bot, hut, dir, opts = {}) {
     ? (inside ? { x: inside.x, y: hut.y, z: inside.z } : null)
     : (out ? { x: out.x, y: hut.y, z: out.z } : null)
   const done = () => dir === 'in'
-    ? !!(P.insideOwnStructure && P.insideOwnStructure(bot))
-    : !(P.insideOwnStructure && P.insideOwnStructure(bot))
+    ? !!(provHut().insideOwnStructure && provHut().insideOwnStructure(bot))
+    : !(provHut().insideOwnStructure && provHut().insideOwnStructure(bot))
   // F3: during a cooldown (3 failed crossings of this hut/dir in 90s) do NO maneuver at all -
   // return the geometric done() so the caller's plain goto takes over (it reaches interior
   // goals via the hole, which is the route the pathfinder kept proving works). No walking, no
@@ -1471,7 +1472,7 @@ function enterStructure (bot, hut, opts = {}) {
   const P = require('./provision.js')
   hut = hut || (P.listInfra && P.listInfra('hut')[0])
   if (!hut) { dbg('enterStructure: no hut known'); return Promise.resolve(false) }
-  if (P.insideOwnStructure && P.insideOwnStructure(bot)) return Promise.resolve(true)
+  if (provHut().insideOwnStructure && provHut().insideOwnStructure(bot)) return Promise.resolve(true)
   return runOnNavChain(() => crossOwnDoor(bot, hut, 'in', opts))
 }
 
@@ -1506,8 +1507,8 @@ async function forceUnstick (bot, opts = {}) {
       // keep going only while still boxed in (buried or pitted) - once in the open the
       // normal flows take back over. Inside our own hut a "free interior cell" IS the
       // destination - not buried, not a pit - so stop once the indoor rung has moved us.
-      try { if (prov().insideOwnStructure && prov().insideOwnStructure(bot) && rescued === 'indoor') break } catch {}
-      const buried = prov().hasSolidCeiling(bot, 12, { ignoreLeaves: true })
+      try { if (provHut().insideOwnStructure && provHut().insideOwnStructure(bot) && rescued === 'indoor') break } catch {}
+      const buried = provHut().hasSolidCeiling(bot, 12, { ignoreLeaves: true })
       if (!buried && !detectPit(bot)) break
     }
   } finally { recoveringDepth--; forceUnsticking = false; bot.clearControlStates() }

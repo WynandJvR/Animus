@@ -271,7 +271,7 @@ async function maintenancePass (bot, opts = {}) {
       try { const r = await provRecovery().ensureSpawnBed(bot, { isStopped, say }); if (r && r.ok) stepDone('spawn(' + r.how + ')'); else dbg('  maint: spawn anchor not established (' + ((r && r.why) || '?') + ')') } catch (e) { dbg('  maint: spawn anchor failed (' + e.message + ')') }
       if (between()) return { ok: true, steps, reason: 'bail:survival' }
     } else if (opts.bootstrap === 'shelter') {
-      try { const r = await P().ensureHomeShelter(bot, { isStopped, say }); if (r && r.ok) stepDone('shelter(' + r.how + ')'); else dbg('  maint: shelter not established (' + ((r && r.why) || '?') + ')') } catch (e) { dbg('  maint: shelter failed (' + e.message + ')') }
+      try { const r = await provHut.ensureHomeShelter(bot, { isStopped, say }); if (r && r.ok) stepDone('shelter(' + r.how + ')'); else dbg('  maint: shelter not established (' + ((r && r.why) || '?') + ')') } catch (e) { dbg('  maint: shelter failed (' + e.message + ')') }
       if (between()) return { ok: true, steps, reason: 'bail:survival' }
     }
 

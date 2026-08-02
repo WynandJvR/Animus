@@ -10,6 +10,7 @@ const path = require('path')
 const { goals, Movements } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
 const memory = require('./memory.js') // persistent named waypoints
+const provHut = () => require('./provision-hut.js') // LAZY: provision-hut.js top-requires this module, so an eager import here would be a real cycle
 const provRecovery = () => require('./provision-recovery.js') // LAZY: provision-recovery.js top-requires this module, so an eager import here would be a real cycle
 const provFood = () => require('./provision-food.js') // LAZY: provision-food.js top-requires this module, so an eager import here would be a real cycle
 const provBank = () => require('./provision-bank.js') // LAZY: provision-bank.js top-requires this module, so an eager import here would be a real cycle
@@ -283,7 +284,7 @@ async function travelFar (bot, dest, opts = {}) {
   // Are we buried in a cave WELL below the (surface) target? We only ever climb for this -
   // an open valley/ravine below the target (can see sky) is fine to just walk through.
   const buried = () => opts.climbOut !== false && bot.entity &&
-    bot.entity.position.y < dest.y - 6 && provision.hasSolidCeiling(bot)
+    bot.entity.position.y < dest.y - 6 && provHut().hasSolidCeiling(bot)
   // Dig straight up to the surface. Holds off the sideways flee reflex (rising IS the
   // escape) and doesn't bill the climb against the travel clock. Returns true if we rose.
   const surfaceOut = async (reason) => {
@@ -1207,7 +1208,7 @@ async function handleInner (bot, line, opts = {}) {
       beginActivity('huttidy', 'hut interior')
       try {
         const say = m => bot.chat(String(m).slice(0, 256))
-        const r = await provision.cleanupHutInterior(bot, null, { say, isStopped: () => buildAbort })
+        const r = await provHut().cleanupHutInterior(bot, null, { say, isStopped: () => buildAbort })
         const msg = r.ok
           ? `hut is tidy - dug ${r.dug} stray block(s), removed ${r.removedDupes} duplicate station(s) in ${r.passes} pass(es); registry reconciled`
           : `hut cleanup incomplete after ${r.passes} pass(es) - still: ${r.remaining.join(', ')} (dug ${r.dug}, removed ${r.removedDupes})`
@@ -1845,7 +1846,7 @@ async function handleInner (bot, line, opts = {}) {
         // at world origin. Day-clicking sets NOTHING on this server. Still click (it costs
         // nothing and the bed is worth remembering), but report what the SERVER confirmed.
         try {
-          const a = await provision.assertSpawnOn(bot, bed, { allowUnconfirmed: true, say })
+          const a = await provHut().assertSpawnOn(bot, bed, { allowUnconfirmed: true, say })
           if (a.ok && a.how !== 'unconfirmed') return `can't sleep now (${e.message}) - but i set my spawn at this bed`
           if (a.ok) return `can't sleep now (${e.message}) - i clicked the bed and i'll remember it, but the server did NOT move my spawn; i'll set it properly when i sleep here tonight`
         } catch {}
@@ -2788,7 +2789,7 @@ async function autoBuild (bot, schem, at, opts = {}) {
           dbg('camp: hut damage @' + hutAt.x + ',' + hutAt.y + ',' + hutAt.z + ' enclosure=' + dmg.enclosure.length + ' clearance=' + dmg.clearance.length + ' furnishing=' + dmg.furnishing.length + ' unknown=' + dmg.unknown + ' of ' + dmg.total)
           dbg('camp: hut repair decision=' + decision + ' (verdict=' + hutVerdict + ', bad=' + bad + '/' + solidTotal + ' solid' + (sv.unknown ? ', unknown=' + sv.unknown : '') + ', lastBad=' + hutRepairLatch.lastBad + ' lastAction=' + hutRepairLatch.lastAction + ')')
           if (decision === 'patch') {
-            // COMMON CASE: SKIP the destructive teardown entirely. provision.maintainHome (below)
+            // COMMON CASE: SKIP the destructive teardown entirely. provHut().maintainHome (below)
             // runs repairHutStructure - re-places missing planks bottom-up, the door from OUTSIDE,
             // and missing furniture at their exact cells (materials via the resource model), and
             // NEVER opens/empties/digs the bank. Latch the pre-repair count so a pass that improves
@@ -2871,13 +2872,13 @@ async function autoBuild (bot, schem, at, opts = {}) {
                     // non-refused build. It has moved to the post-verify below, where an OK
                     // survey can be passed as its proof. A build that placed blocks is not
                     // evidence that a hut stands.
-                    try { await provision.ensureHutApron(bot, hutAt, { isStopped, say }) } catch (e) { dbg('camp: apron fill failed (' + e.message + ')') }
+                    try { await provHut().ensureHutApron(bot, hutAt, { isStopped, say }) } catch (e) { dbg('camp: apron fill failed (' + e.message + ')') }
                     try { await handle(bot, 'collect') } catch {}
                     const bedCell = findCell(/_bed$/)
                     // #110: evidence or no claim - assertSpawnOn is the one primitive allowed
                     // to record a spawn. A post-rebuild bot has no proven anchor, so an
                     // unconfirmed click is still recorded, but recorded as unconfirmed.
-                    if (bedCell) { const bb = bot.blockAt(bedCell); if (bb && /_bed$/.test(bb.name)) { try { await provision.assertSpawnOn(bot, bb, { allowUnconfirmed: true, say }) } catch {} } }
+                    if (bedCell) { const bb = bot.blockAt(bedCell); if (bb && /_bed$/.test(bb.name)) { try { await provHut().assertSpawnOn(bot, bb, { allowUnconfirmed: true, say }) } catch {} } }
                     try { await handle(bot, 'remember hut') } catch {}
                   }
                 } finally {
@@ -2966,10 +2967,10 @@ async function autoBuild (bot, schem, at, opts = {}) {
         // decoupled from the rebuild. Idempotent: a filled apron / placed bed is a fast no-op.
         // ONE code path shared with the survival HOME-REPAIR reflex (index.js): apron -> bed
         // -> bank double-heal -> spawn re-assert -> structural repair + interior tidy ->
-        // consolidate field chests. Extracted to provision.maintainHome so a creeper-damaged
+        // consolidate field chests. Extracted to provHut().maintainHome so a creeper-damaged
         // base self-heals during ordinary idle survival too, not only on a full camp BOM.
         // Each step still no-ops fast when its piece is intact - behaviour identical here.
-        try { await provision.maintainHome(bot, hutAt, { isStopped, say }) } catch (e) { dbg('camp: home maintenance failed (' + e.message + ')') }
+        try { await provHut().maintainHome(bot, hutAt, { isStopped, say }) } catch (e) { dbg('camp: home maintenance failed (' + e.message + ')') }
         // ==== THE ONE HUT REGISTRATION POINT (2026-07-30) ==================================
         // Registration used to live inside the REBUILD branch, so a hut brought up by PATCHING
         // could never be recorded. Live 2026-07-30 that is exactly what happened - patch was
@@ -2995,7 +2996,7 @@ async function autoBuild (bot, schem, at, opts = {}) {
           if (shellCells.length) {
             const svShell = pathfixMod.surveyCells(bot, shellCells, hutModel.cellMismatch)
             const shellOK = svShell.verdict === 'OK'
-            const already = !!(provision.hutAnchor && provision.hutAnchor())
+            const already = !!(provHut().hutAnchor && provHut().hutAnchor())
             if (shellOK) {
               if (!already) {
                 dbg('camp: the ENCLOSURE verified OK (' + shellCells.length + ' plank/door cells) at ' + hutAt.x + ',' + hutAt.y + ',' + hutAt.z + ' - registering the hut; interior clutter and furnishing gaps are repair debt, not a reason to disown a standing shelter')
@@ -3104,7 +3105,7 @@ async function autoBuild (bot, schem, at, opts = {}) {
       // climb-out only reached y=62, and the NEXT round's log gather then started underground
       // and was doomed -> two bad rounds -> stone skipped -> 0/44 build). Recover first.
       const meY = Math.floor(bot.entity.position.y)
-      if (meY < home.y - 6 && provision.hasSolidCeiling(bot)) {
+      if (meY < home.y - 6 && provHut().hasSolidCeiling(bot)) {
         dbg('material', name, 'starting round buried at y=' + meY + ' - climbing to surface first')
         try { await provMining.climbToSurface(bot, home.y, { isStopped }) } catch {}
       }

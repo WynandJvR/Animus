@@ -24,6 +24,7 @@
 
 const { goals } = require('mineflayer-pathfinder')
 const provision = require('./provision.js')
+const provHut = () => require('./provision-hut.js') // LAZY: provision-hut.js top-requires this module, so an eager import here would be a real cycle
 const provRecovery = () => require('./provision-recovery.js') // LAZY: provision-recovery.js top-requires this module, so an eager import here would be a real cycle
 const provFood = () => require('./provision-food.js') // LAZY: provision-food.js top-requires this module, so an eager import here would be a real cycle
 const provCore = () => require('./provision-core.js') // LAZY: provision-core.js top-requires this module, so an eager import here would be a real cycle
@@ -186,7 +187,7 @@ async function relocate (bot, startIdx, { isStopped = () => false } = {}) {
     const tz = Math.round(start.z + dir[1] * dist)
     // Never move the anchor ONTO the hut: its no-dig apron is the reference trap -
     // an anchor there makes every future shaft illegal again.
-    if (provision.onHutApron(bot, { x: tx, y: Math.floor(start.y), z: tz })) continue
+    if (provHut().onHutApron(bot, { x: tx, y: Math.floor(start.y), z: tz })) continue
     try {
       await navigate.navigateTo(bot, new goals.GoalNearXZ(tx, tz, 6), { deadlineMs: 60000, isStopped, label: 'plan-reloc' })
     } catch (e) { dbg('relocate leg to ' + tx + ',' + tz + ' failed (' + e.message + ')') }
@@ -210,7 +211,7 @@ async function relocate (bot, startIdx, { isStopped = () => false } = {}) {
 // but that climb can fall short (slow/stuck nav, live) - this is the belt-and-suspenders
 // that GUARANTEES the craft happens somewhere it can succeed.
 async function regroupForCraft (bot, anchor, { isStopped = () => false, say = () => {} } = {}) {
-  const underground = () => { try { return provision.hasSolidCeiling(bot, 45, { ignoreLeaves: true }) && !provision.insideOwnStructure(bot) } catch { return false } }
+  const underground = () => { try { return provHut().hasSolidCeiling(bot, 45, { ignoreLeaves: true }) && !provHut().insideOwnStructure(bot) } catch { return false } }
   const far = () => { const p = bot.entity && bot.entity.position; return !!p && Math.hypot(p.x - anchor.x, p.z - anchor.z) > 6 }
   if (!underground() && !far()) return false
   dbg('regroup for craft: at y=' + Math.floor(bot.entity.position.y) + ' (underground=' + underground() + ' far=' + Math.round(far() ? Math.hypot(bot.entity.position.x - anchor.x, bot.entity.position.z - anchor.z) : 0) + ') - to open ground at the anchor before crafting')
@@ -356,7 +357,7 @@ async function runGoal (bot, goal, opts = {}) {
     // ends naked (live). Gathers are exempt (they dig down on purpose).
     {
       let underground = false; let far = false
-      try { underground = provision.hasSolidCeiling(bot, 45, { ignoreLeaves: true }) && !provision.insideOwnStructure(bot) } catch {}
+      try { underground = provHut().hasSolidCeiling(bot, 45, { ignoreLeaves: true }) && !provHut().insideOwnStructure(bot) } catch {}
       try { const p = bot.entity.position; far = Math.hypot(p.x - anchor.x, p.z - anchor.z) > 6 } catch {}
       if (shouldRegroupForCraft(t.type, underground, far) && !isStopped()) await regroupForCraft(bot, anchor, { isStopped, say })
     }
@@ -481,7 +482,7 @@ async function gearUp (bot, opts = {}) {
   // Behind MAINTAIN (+ MAINT_SAFEKEEP / build-placement refusal inside safekeepSweep).
   try {
     if (process.env.SCHEDULER !== '0' && process.env.MAINTAIN !== '0') {
-      const hut = provision.hutAnchor && provision.hutAnchor()
+      const hut = provHut().hutAnchor && provHut().hutAnchor()
       let building = false
       try { const c = require('./commands.js'); building = !!(c.persistedResume && c.persistedResume()) } catch {}
       if (hut && bot.entity && bot.entity.position.distanceTo(hut) <= 24 && !building && provMaintain().safekeepSweep) {
