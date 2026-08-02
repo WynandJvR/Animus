@@ -1010,6 +1010,15 @@ function tickDelayMs (vitals = {}, opts = {}) {
 // "second consecutive window -> fail" damping without per-call state. `now` defaults to nowFn().
 // NOTE: uses `!= null` (not `||`) to read the timestamps so an epoch-0 lastProgressAt/startedAt
 // is honored rather than treated as "unset" (the `||` in the design pseudocode would misread 0).
+
+// The survival job's forward-progress windows, named because a SECOND reader needs them:
+// provision-recovery's rung deadline is derived from SURVIVAL_FAIL_MS + LATCH_GRACE_MS, i.e.
+// from the exact instant this supervisor concludes a survival job is hung and its stop latch
+// has provably failed to bite. Extracted, not copied (#4) - the literals used to live only
+// inside watchdog() below, so any second reader would have been a drifting duplicate.
+const SURVIVAL_NUDGE_MS = 45000
+const SURVIVAL_FAIL_MS = 90000
+
 function watchdog (activeJob, vitals, now) {
   if (!activeJob) return 'ok'
   const t = now != null ? now : nowFn()
@@ -1019,7 +1028,7 @@ function watchdog (activeJob, vitals, now) {
   const idleMs = t - base
   let nudgeMs, failMs
   if ((v.hp != null && v.hp <= 6) || (v.food != null && v.food <= 2)) { nudgeMs = 20000; failMs = 40000 } // critical: seconds
-  else if (activeJob.cls === 'survival') { nudgeMs = 45000; failMs = 90000 }
+  else if (activeJob.cls === 'survival') { nudgeMs = SURVIVAL_NUDGE_MS; failMs = SURVIVAL_FAIL_MS }
   else { nudgeMs = 120000; failMs = 240000 } // patient when cheap
   if (idleMs >= failMs) return 'fail-job'
   if (idleMs >= nudgeMs) return 'nudge'
@@ -1154,6 +1163,9 @@ module.exports = {
   NEED_PRODUCERS, // exported so the capability contract test can ENUMERATE it, not sample it
   watchdog,
   wdPhase,
+  SURVIVAL_NUDGE_MS,
+  SURVIVAL_FAIL_MS,
+  LATCH_GRACE_MS,
   JOB_CLASSES,
   _setNow,
   setDebugSink,

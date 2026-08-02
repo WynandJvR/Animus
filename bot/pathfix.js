@@ -240,6 +240,92 @@ function forceSettleCraft (bot, listenersBefore) {
   dbg('(bounded) craft force-settle: unhooked ' + unhooked + ' pending windowOpen wait(s), window=' + closed)
 }
 
+// ---- THE BODY-PRIMITIVE REGISTRY (ROOT G, 2026-08-02) --------------------------------
+// WHY THIS EXISTS. Cancellation in this codebase is COOPERATIVE: every loop polls isStopped()
+// or its own deadline BETWEEN awaits. So a single `await bot.<x>(...)` that does not settle
+// defeats the whole model - the loop never gets back to its own check. ROOT A bounded dig and
+// look, ROOT F bounded craft, and each time the hang moved to a different entry point. Fixing
+// them one at a time cannot close a CLASS; only an enumeration can.
+//
+// SO THE ENUMERATION IS THE ARTEFACT, and it lives here as data. Every `await bot.X(` that
+// appears anywhere in bot/*.js must have a row below - either in BODY_BOUNDS (pathfix installs
+// the wrapper) or in NATIVELY_BOUNDED (mineflayer already bounds it, and the row cites the
+// file:line that does). bodyboundtest.js re-derives the enumeration FROM SOURCE and fails when
+// a call site appears for an entry point nobody has classified. That test, not any wrapper, is
+// what stops the fifth recurrence.
+//
+// A CORRECTION TO THE ENUMERATION THE WORK STARTED FROM. The command
+//     grep -rhoE "await bot\.[a-zA-Z_]+\(" --include=*.js bot/ | grep -v node_modules
+// reports 37 distinct entry points. It is wrong: `-h` suppresses the filename, so the
+// `grep -v node_modules` filter has nothing to match on and mineflayer's OWN internal
+// `await bot.X(` calls are counted as ours. The true set - `for f in bot/*.js; do grep -ohE ...`
+// - is 18. The 19 phantoms (openBlock/openEntity/openVillager/openAnvil/openEnchantmentTable/
+// putAway/moveSlotItem/transfer/putSelectedItemRange/tossStack/unequip/trade/fish/elytraFly/
+// writeBook/tabComplete/waitForTicks/waitForChunksToLoad/placeEntity/_genericPlace) are lines
+// inside bot/node_modules/mineflayer/lib/plugins/*.js. They are still classified below where
+// they are REACHED indirectly (openBlock, putAway, clickWindow, transfer...), because that is
+// what actually bounds our call.
+//
+// AND THE FINDING, stated plainly: after reading the library source for all 18, NONE of the
+// entry points our code awaits is unbounded today. Adding a wrapper to any of them would be a
+// new guard in front of working behaviour, which principle #1 calls a patch. What was missing
+// was not a bound - it was the WRITTEN-DOWN, TESTED enumeration. That is what this is.
+//
+// Row shape: { by, where, cut, worstMs }
+//   by      what makes the await settle, in one line
+//   where   the file:line that does it (library path relative to bot/node_modules/mineflayer/)
+//   cut     what a caller sees when the bound bites: 'throws' | 'succeeds' | 'n/a'
+//   worstMs the static worst case where one exists; null when it is derived at call time
+const MF = 'mineflayer/lib/plugins/'
+
+// Wrapped HERE, in installPathfinderTuning. One rule, one definition: the numbers are the
+// consts above, not copies of them.
+const BODY_BOUNDS = {
+  dig: { by: 'pathfix bounded() + forceSettleDig; cut is re-judged against the world by brokeOK', where: 'pathfix.js bot.dig wrapper', cut: 'throws', worstMs: null, bound: 'bot.digTime(block) + DIG_GRACE_MS' },
+  look: { by: 'pathfix bounded(); the settle IS the requested look, forced', where: 'pathfix.js bot.look wrapper', cut: 'succeeds', worstMs: LOOK_BOUND_MS, bound: 'LOOK_BOUND_MS' },
+  craft: { by: 'pathfix bounded() + forceSettleCraft', where: 'pathfix.js bot.craft wrapper', cut: 'throws', worstMs: null, bound: 'CRAFT_BOUND_MS * count' },
+  placeBlock: { by: 'pathfix verifiedPlace: bounded lookAt + placedOK poll deadline', where: 'pathfix.js verifiedPlace', cut: 'throws', worstMs: 1200 + LOOK_BOUND_MS, bound: 'LOOK_BOUND_MS + placedOK timeoutMs 1200' },
+  _placeBlockWithOptions: { by: 'same wrapper as placeBlock (this IS the wrapped primitive)', where: 'pathfix.js verifiedPlace', cut: 'throws', worstMs: 1200 + LOOK_BOUND_MS, bound: 'LOOK_BOUND_MS + placedOK timeoutMs 1200' },
+  // The window race below. NOTE for whoever reads this next: its worst case is large -
+  // 2 attempts x (gotoOnce 12000 + lookAt + race 5000/8000) + the LOS face-walk goto - and the
+  // abandoned attempt's `once(bot,'windowOpen')` (20s, promise_utils.js:75) is NOT unhooked the
+  // way forceSettleCraft unhooks craft's. It is BOUNDED, so it is not the hang class; it is the
+  // slowest bounded body call in the codebase and the one place a late settle can still touch a
+  // window somebody else opened.
+  openBlock: { by: 'pathfix window race + one retry + reach disambiguation', where: 'pathfix.js openBlock/openEntity wrapper', cut: 'throws', worstMs: 2 * (12000 + LOOK_BOUND_MS) + 5000 + 8000 + 500, bound: '2 attempts of (approach goto + lookAt + open race)' },
+  openEntity: { by: 'pathfix window race + one retry + reach disambiguation', where: 'pathfix.js openBlock/openEntity wrapper', cut: 'throws', worstMs: 2 * (12000 + LOOK_BOUND_MS) + 5000 + 8000 + 500, bound: '2 attempts of (approach goto + lookAt + open race)' }
+}
+
+// NOT wrapped, ON PURPOSE. mineflayer already bounds these; the row says with what. Adding a
+// wrapper here would be a second definition of a bound that already exists (#4) and a guard in
+// front of working behaviour (#1). Every claim was read in the installed source, not assumed.
+const NATIVELY_BOUNDED = {
+  lookAt: { by: 'delegates to bot.look by dynamic dispatch, so the look wrapper covers it', where: MF + 'physics.js:357', cut: 'succeeds', worstMs: LOOK_BOUND_MS },
+  openContainer: { by: 'delegates to bot.openBlock / bot.openEntity, so the wrapper above covers it', where: MF + 'chest.js:19,21', cut: 'throws', worstMs: BODY_BOUNDS.openBlock.worstMs },
+  openFurnace: { by: 'delegates to bot.openBlock, so the wrapper above covers it', where: MF + 'furnace.js:16', cut: 'throws', worstMs: BODY_BOUNDS.openBlock.worstMs },
+  activateBlock: { by: 'awaits only bot.lookAt(pos,false); the interact itself is a synchronous packet write', where: MF + 'inventory.js:195', cut: 'succeeds', worstMs: LOOK_BOUND_MS },
+  activateEntity: { by: 'awaits only bot.lookAt(pos,false); the use_entity packet is a synchronous write', where: MF + 'inventory.js:245', cut: 'succeeds', worstMs: LOOK_BOUND_MS },
+  activateEntityAt: { by: 'awaits only bot.lookAt(pos,false); the use_entity packet is a synchronous write', where: MF + 'inventory.js:256', cut: 'succeeds', worstMs: LOOK_BOUND_MS },
+  attack: { by: 'fully SYNCHRONOUS (returns undefined) - awaiting it can never suspend', where: MF + 'entities.js:839', cut: 'n/a', worstMs: 0 },
+  wake: { by: 'one synchronous entity_action write; no await inside', where: MF + 'bed.js:67', cut: 'n/a', worstMs: 0 },
+  consume: { by: 'withTimeout(eatingTask.promise, CONSUME_TIMEOUT)', where: MF + 'inventory.js:14,112', cut: 'throws', worstMs: 2500 },
+  sleep: { by: 'waitUntilSleep(): a 3s setTimeout that REJECTS with "bot is not sleeping"', where: MF + 'bed.js:156-167', cut: 'throws', worstMs: 3000 },
+  // The window family. On 1.21 `transactionPacketExists` is FALSE (minecraft-data: 1.8..1.16.5),
+  // so clickWindow does NOT take the WINDOW_TIMEOUT branch at inventory.js:636 - it takes
+  // waitForWindowUpdate (inventory.js:644), which awaits nothing at all unless the window is the
+  // 2x2 inventory grid (slots 1-4), a crafting table (slots 1-9) or a merchant. For every
+  // container window - which is every clickWindow our code makes - it returns immediately.
+  // Where it DOES await, it is `once(...)`, whose default timeout is 20000 (promise_utils.js:75),
+  // not infinity. NOTE the brief's claim that equip is bounded by WINDOW_TIMEOUT=5000 at
+  // inventory.js:636 is true only on <=1.16.5; on this server that line is unreachable.
+  clickWindow: { by: 'waitForWindowUpdate returns immediately for container windows; where it waits it is once() with its 20000 default', where: MF + 'inventory.js:451-478,644 + promise_utils.js:75', cut: 'throws', worstMs: 20000 },
+  equip: { by: 'moveSlotItem -> clickWindow on bot.inventory at slots 5-8/36-45, none of which is the 1-4 grid range waitForWindowUpdate waits on', where: MF + 'simple_inventory.js:88-126', cut: 'throws', worstMs: 20000 },
+  toss: { by: 'transfer -> clickWindow; the transferOne recursion is driven by `count`, not by an event', where: MF + 'simple_inventory.js:29 + ' + MF + 'inventory.js:284', cut: 'throws', worstMs: 20000 }
+}
+
+// One row per entry point, whichever half it lives in. Consumed by bodyboundtest.js.
+function bodyEntryPointRow (name) { return BODY_BOUNDS[name] || NATIVELY_BOUNDED[name] || null }
+
 // ---- GROUNDED WORLD READS ------------------------------------------------------------
 // THE one honest block read. mineflayer returns null both for "there is nothing there"
 // and for "I have never been sent that chunk" - and the codebase has been reading the
@@ -719,4 +805,4 @@ function clearFlood () { floodHits.length = 0 }
 const PLACE_COST = Number(process.env.PATH_PLACE_COST || 12)
 function applyPlaceCost (m) { try { if (m && 'placeCost' in m) m.placeCost = PLACE_COST } catch {} ; return m }
 
-module.exports = { installPathfinderTuning, selfPlacedNear, isSelfPlaced, placedOK, brokeOK, setDebugSink, setProgressSink, readCell, surfaceYAt, surveyCells, arrivedOK, epoch, sameEpoch, bumpEpoch, applyPlaceCost, floodingNow, clearFlood, FLOOD_DIGS, bounded, forceSettleDig, forceSettleCraft, DIG_GRACE_MS, LOOK_BOUND_MS, CUT_SETTLE_GRACE_MS, WINDOW_TIMEOUT_MS, CRAFT_BOUND_MS }
+module.exports = { installPathfinderTuning, selfPlacedNear, isSelfPlaced, placedOK, brokeOK, setDebugSink, setProgressSink, readCell, surfaceYAt, surveyCells, arrivedOK, epoch, sameEpoch, bumpEpoch, applyPlaceCost, floodingNow, clearFlood, FLOOD_DIGS, bounded, forceSettleDig, forceSettleCraft, DIG_GRACE_MS, LOOK_BOUND_MS, CUT_SETTLE_GRACE_MS, WINDOW_TIMEOUT_MS, CRAFT_BOUND_MS, BODY_BOUNDS, NATIVELY_BOUNDED, bodyEntryPointRow }

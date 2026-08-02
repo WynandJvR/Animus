@@ -1325,6 +1325,87 @@ async function recoverHome (bot, opts = {}) {
   return { ...decision, arrived: true, bedOk }
 }
 
+// ---- THE RUNG DEADLINE (ROOT G, 2026-08-02) -------------------------------------------
+// The ladder's own termination argument is "at most one execution per action, all inside
+// RECOVERY_MAX_MS". Both halves are checked at the TOP of the loop, which is exactly the
+// cooperative model a non-settling await defeats: the loop never comes back to its check, the
+// ladder never advances, and the tape reads
+//     (wd) FAIL-JOB recoveryLadder - no verified progress for 90s - setting its stop latch
+//     (wd) stop latch ineffective on recoveryLadder - a hung promise; taking the body back
+// - the supervisor tearing down the WHOLE job because one rung would not end. The right unit to
+// bound is the rung: a rung that cannot finish should cost the ladder one rung, not the ladder.
+//
+// IT IS A NO-PROGRESS DEADLINE, NOT A DURATION ONE - and that is the whole design, because rung
+// durations are not comparable. R2's home leg is a walkStaged(timeoutMs: 180000); R5 is a
+// boundedHold that DELIBERATELY sits still for BOUNDED_HOLD_MS; sleepInBed waits out a Minecraft
+// night. Any single duration long enough for the night rungs would be useless against a hang, and
+// any duration short enough to catch a hang would cut a legitimate trek. What every legitimate
+// rung DOES have in common is that the body keeps producing verified progress (walkStaged,
+// digs, places and pickups all stamp telemetry.touchProgress), or the rung DECLARES a hold and
+// says what wakes it. So:
+//
+//   the clock re-bases on verified progress, and on any moment a hold is declared;
+//   it fires only when neither has happened for RUNG_NOPROGRESS_MS.
+//
+// This is a deadline on an ATTEMPT (#6), not a blanket timer: nothing waits for it before acting,
+// it is armed only while a rung is running, and the WORLD CHANGING (progress) clears it - a
+// healthy rung can run for an hour and never come near it. It cannot freeze a healthy bot.
+//
+// THE NUMBER IS NOT INVENTED. It is scheduler.SURVIVAL_FAIL_MS + scheduler.LATCH_GRACE_MS: the
+// exact instant the supervisor has already concluded (a) this survival job has made no verified
+// progress for its whole fail window, and (b) the stop latch it then set provably did not bite.
+// At that instant the job is going to be revoked anyway. Cutting the RUNG a moment before that
+// is strictly better than losing the ladder, and by construction it can never fire while the
+// supervisor still considers the job healthy.
+// No env switch on it, deliberately: it is not a knob, it is the supervisor's own conclusion
+// restated (flag debt is real debt - DESIGN-PRINCIPLES standing habits).
+const RUNG_NOPROGRESS_MS = scheduler.SURVIVAL_FAIL_MS + scheduler.LATCH_GRACE_MS
+const RUNG_POLL_MS = 1000 // the clock's own resolution; it reads two timestamps and moves no body
+
+// THE SETTLE, and it is the honest one for this API. There is no library handle to cancel a rung
+// with - a rung is OUR code, a composition of dozens of awaits. What it does have is the
+// cooperative stop it already polls on every loop. So the cut FLIPS THAT STOP: the abandoned rung
+// sees isStopped() === true at its next check and unwinds itself, instead of continuing to drive
+// the body underneath the next rung. That is the whole hazard forceSettleCraft exists for
+// (a second body-mover appearing minutes later), answered with the mechanism this codebase
+// already has. It is best-effort by nature: a rung parked in a genuinely non-settling await will
+// never reach its next check - which is why the primitives are bounded at pathfix (ROOT A/F) and
+// why this is DEFENCE IN DEPTH, not the primary fix.
+async function boundedRung (bot, label, baseStopped, run, opts = {}) {
+  const noProgressMs = opts.noProgressMs != null ? opts.noProgressMs : RUNG_NOPROGRESS_MS
+  const now = opts.now || (() => Date.now())
+  const progressAt = opts.progressAt || (() => { try { return require('./commands.js').progressInfo().at } catch { return now() } })
+  const heldNow = opts.heldNow || (() => { try { return !!reflexes.activeHold() } catch { return false } })
+  let cut = false
+  const stopped = () => cut || baseStopped()
+  let settled = false
+  const t0 = now()
+  const tracked = Promise.resolve().then(() => run(stopped)).then(
+    v => { settled = true; return { ok: true, v } },
+    e => { settled = true; return { ok: false, e } })
+  let timer = null
+  const watcher = new Promise(resolve => {
+    let base = now() // last verified progress, or the last moment a hold vouched for the stillness
+    timer = setInterval(() => {
+      if (settled) return
+      if (heldNow()) { base = now(); return } // a DECLARED hold is the rung doing its job
+      const at = progressAt()
+      if (at > base) base = at
+      if (now() - base >= noProgressMs) resolve('cut')
+    }, opts.pollMs || RUNG_POLL_MS)
+    if (timer && timer.unref) timer.unref() // never hold the process open on this clock
+  })
+  let outcome
+  try { outcome = await Promise.race([tracked, watcher]) } finally { clearInterval(timer) }
+  if (outcome !== 'cut') { if (outcome.ok) return outcome.v; throw outcome.e }
+  cut = true // the settle: the abandoned rung's own isStopped() now says stop
+  const waited = Math.round((now() - t0) / 1000)
+  dbg('(ladder) ' + label + ' CUT after ' + waited + 's - no verified progress for ' + Math.round(noProgressMs / 1000) +
+    's and no declared hold; stop flipped for the abandoned rung, advancing the ladder')
+  if (!settled) tracked.then(() => { try { dbg('(ladder) ' + label + ' settled LATE after ' + Math.round((now() - t0) / 1000) + 's - result discarded') } catch {} })
+  throw new Error(label + ' cut after ' + Math.round(noProgressMs / 1000) + 's with no verified progress (bounded rung)')
+}
+
 const RUNG_EXECUTORS = {
   // R0: eat what we carry, then wear every carried piece (bare `wear` = wantAll; never downgrades)
   'eatPack+wearFromPack': async (bot, o) => { await eatUp(bot); try { await require('./commands.js').handle(bot, 'wear') } catch (e) { o.dbg('(ladder) wear failed: ' + e.message) } },
@@ -1600,10 +1681,14 @@ async function recoverFromDegraded (bot, { isStopped = () => false, say = () => 
       // long trekFarm/trekOrchard trek gets {} -> today's pure hp<=6 abort (the §5 invariant: the
       // farm trek still aborts, only the fishing leg is admitted). FOOD_FLOOR=0 -> {} for all.
       const foodAcqRung = process.env.FOOD_FLOOR !== '0' && /^secureFood/.test(chosen.action || '')
-      const rungStopped = outbound
+      const rungAdmissible = outbound
         ? () => isStopped() || !foodSec.outboundRungAdmissible(bot.health, foodAcqRung ? { food: bot.food } : {})
         : isStopped
-      try { await RUNG_EXECUTORS[chosen.action](bot, { isStopped: rungStopped, say, home, dbg }) }
+      // ROOT G: the rung carries its own deadline (see boundedRung). A cut is reported by a THROW,
+      // so it lands in the SAME catch a rung failure has always landed in - the ladder marks the
+      // action tried and advances to the next rung instead of the supervisor revoking the whole
+      // job 154s later.
+      try { await boundedRung(bot, label, rungAdmissible, stop => RUNG_EXECUTORS[chosen.action](bot, { isStopped: stop, say, home, dbg })) }
       catch (e) { dbg('(ladder) ' + label + ' failed: ' + e.message) }
       rungs.push(label)
       touchP('ladderRung') // S7 H5a: a bounded, live-verified rung completed
@@ -1617,5 +1702,6 @@ function releaseRecoveryLatches () { const was = _recoveringDegraded || _recover
 
 module.exports = {
   setDebugSink,
-  DEADLOCK_HP, DEADLOCK_MAX_NOFOOD, DEADLOCK_FAILS, DEADLOCK_RESET_SOFT, SUICIDE_PILLAR_WORKS, noteDeadlockAttempt, noteDeadlockReset, migrateDeadlockCounter, deadlockResetDue, deadlockResetState, ensurePillarFiller, deadlockDieByFall, suicideByPitDrop, deadlockFallbackDeath, deadlockSuicideReset, _recoveringHp, recoverHp, isRecoveringHp, _resting, restUntilSafe, isResting, sleepInBedHere, nightRest, nightRestInner, boundedHold, sleepableNow, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, RUNG_EXECUTORS, recoveryReadyNow, _recoveringDegraded, recoverFromDegraded, isRecoveringDegraded, releaseRecoveryLatches
+  DEADLOCK_HP, DEADLOCK_MAX_NOFOOD, DEADLOCK_FAILS, DEADLOCK_RESET_SOFT, SUICIDE_PILLAR_WORKS, noteDeadlockAttempt, noteDeadlockReset, migrateDeadlockCounter, deadlockResetDue, deadlockResetState, ensurePillarFiller, deadlockDieByFall, suicideByPitDrop, deadlockFallbackDeath, deadlockSuicideReset, _recoveringHp, recoverHp, isRecoveringHp, _resting, restUntilSafe, isResting, sleepInBedHere, nightRest, nightRestInner, boundedHold, sleepableNow, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, RUNG_EXECUTORS, recoveryReadyNow, _recoveringDegraded, recoverFromDegraded, isRecoveringDegraded, releaseRecoveryLatches,
+  boundedRung, RUNG_NOPROGRESS_MS
 }
