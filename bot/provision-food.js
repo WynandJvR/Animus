@@ -43,27 +43,37 @@ const P = () => require('./provision.js')
 const S = () => require('./provision.js').__siblings
 const touchP = tag => { try { require('./commands.js').touchProgress(tag) } catch {} }
 
-let dbgSink = null
-function setDebugSink (fn) { dbgSink = fn }
-const dbg = (...a) => {
-  const line = '[prov] ' + a.map(x => String(x)).join(' ')
-  if (process.env.BUILD_DEBUG) console.log(line)
-  if (dbgSink) dbgSink(line)
-}
+const { dbg, setDebugSink } = require('./debug-sink.js').makeDebug('[prov]') // §4: one definition of the sink rule; this module still owns its own sink
 
+// Raw meats a furnace can cook, and what they become. Fish included - the bot eats those too.
 const RAW_COOKABLE = {
   beef: 'cooked_beef', porkchop: 'cooked_porkchop', chicken: 'cooked_chicken',
   mutton: 'cooked_mutton', rabbit: 'cooked_rabbit', cod: 'cooked_cod', salmon: 'cooked_salmon'
 }
 
+// Animals whose drops FEED you (raw meat is edible). Used by the survival-hunt so a long
+// job in a food-poor area doesn't run the bot down to 0 food / 1 hp with nothing to eat.
 const FOOD_ANIMALS = /^(cow|mooshroom|pig|chicken|sheep|rabbit)$/
 
+// Animals that drop LEATHER when killed. Cows/mooshrooms are the reliable, common
+// source (0-2 leather each); we hunt those, not horses/llamas. This is the raw
+// material for leather armor - the "from nothing" armor tier (no mining/smelting).
 const LEATHER_ANIMALS = /^(cow|mooshroom)$/
 
 const RISKY_EAT = /^(rotten_flesh|chicken|spider_eye|poisonous_potato|pufferfish)$/
 
+// ROD_SUPPLY (M2): a bounded near-clone of huntForFood that finishes off a NEARBY spider for its
+// STRING drop (a rod = 3 sticks + 2 string, and on this no-animal site spiders-at-night are the
+// only realistic string source). Same GoalFollow/attack/collect shape + ~12s cap as huntForFood,
+// but targets spider|cave_spider within `range` (default 16b) - NEVER a hunt across the map, never
+// a creeper/skeleton. No-op if no spider is near (honest, like huntForFood on an empty field).
+// BOUNDED: ONE pass, no loop; the string need + flag gate live at the ensureFishingRod call site.
+// Returns true if a spider died. Uses the movement profile already set (chasing needs no digging,
+// so anti-grief holds).
 const ROD_SPIDERS = /^(spider|cave_spider)$/
 
+// the home baseline when unknown) so a stale/absent job label never mis-sizes the ration. `override`
+// lets a caller that KNOWS its plan (branchMine knows the descent target depth) force the numbers.
 const DFOOD_DEEP = () => Number(process.env.DFOOD_DEEP_DEPTH || 8)   // >= this far below surface = "in a mine"
 
 const DFOOD_FAR = () => Number(process.env.DFOOD_FAR_DIST || 48)     // > this from home = an excursion buffer
@@ -72,6 +82,11 @@ let _foodPlanHint = null
 
 let _securingFood = false
 
+// FOOD_FLOOR F4: the no-progress escalation counter (module-local; a restart re-allows a fresh
+// attempt). Advanced by the floor branch on a zero-food dispatch, reset on food gain, and BUMPED
+// by the watchdog's `(wd) CYCLE repeatFail` on the recovery ladder (index.js) - so the eternal
+// re-loop escalates (widen the water scout one ring + active fishing over a passive outdoor hold)
+// instead of re-running the identical failing sequence. Capped (foodFloorEscalation).
 let _foodFloorNoProgress = 0
 
 function _foodFloorState () { return _foodFloorNoProgress }
@@ -82,12 +97,16 @@ function hasFood (bot) {
   return (bot.inventory ? bot.inventory.items() : []).some(i => foods[i.name])
 }
 
+// How many edible items it's carrying (for "stock up" decisions, not just "any food?").
 function foodCount (bot) {
   const md = require('minecraft-data')(bot.version)
   const foods = (md && md.foodsByName) || {}
   return (bot.inventory ? bot.inventory.items() : []).reduce((n, i) => n + (foods[i.name] ? i.count : 0), 0)
 }
 
+// The ONLY time the bot must go hunt: it's hungry AND has nothing to eat. (With food on
+// hand, auto-eat handles it; well-fed, no need.) food<=6 = hunger low enough that regen
+// has stopped, so act before it hits 0 and gets pinned at 1 hp.
 function needsFood (bot) { return bot.food != null && bot.food <= 6 && !hasFood(bot) }
 
 function nearestFoodAnimal (bot, maxDist = 40) {
@@ -112,11 +131,15 @@ function nearestFoodAnimal (bot, maxDist = 40) {
 // `secureFood`'s acquireTrigger below. Same disease as the 12..14 band #123 closed, one level up.
 const REGEN_FOOD_MIN = 18
 
+// Eat what's in the pack up to comfortable - cook raw meat FIRST (raw is poor food), then eat.
+// Fixes "idled at food=13 holding beef" - never sit hungry with food in hand.
 async function eatFromPackToComfortable (bot, isStopped = () => false) {
   try { if (bot.food != null && bot.food < REGEN_FOOD_MIN && Object.keys(RAW_COOKABLE).some(n => countItem(bot, n) > 0)) await cookRawMeat(bot, { isStopped }) } catch {}
   try { await eatUp(bot) } catch {}
 }
 
+// One EATING policy (commands.eatFood delegates here): most filling SAFE food first;
+// risky food only when starving (<=6) or critically hurt with hunger already low.
 async function eatBestFood (bot) {
   if (bot.food != null && bot.food >= 20) return 'not hungry'
   const mcData = require('minecraft-data')(bot.version)
@@ -149,6 +172,8 @@ async function eatBestFood (bot) {
   return `ate ${food.name} (food ${bot.food})`
 }
 
+// Eat down the pack until reasonably full or out of (safe) food - one bite of the chain's
+// hard-won meat doesn't stop the next starve 10 minutes later.
 async function eatUp (bot) {
   for (let i = 0; i < 6; i++) {
     if (bot.food == null || bot.food >= REGEN_FOOD_MIN) return
@@ -157,6 +182,12 @@ async function eatUp (bot) {
   }
 }
 
+// BAKE BREAD from banked wheat (the live rescue): the bot's bank wheat is RAW/inedible, so a
+// starving bot standing at home with 5 wheat + a farm still can't eat without baking. Top up
+// the pack from the bank (runCraft only crafts from ON-HAND) then craft bread at the home
+// table via runCraft - the SAME primitive tendWheatFarm/fishing-rod use (ensureTable finds/
+// places the table; bot.recipesFor/bot.craft; verified through the pathfix path). Skips
+// GRACEFULLY (returns 0, never throws) if no table is reachable or the wheat can't be found.
 async function bakeBreadFromWheat (bot, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const home = opts.home || null
@@ -255,6 +286,8 @@ async function drainOwnFurnaceFood (bot, opts = {}) {
   return got
 }
 
+// never crafts/places a furnace for this, needs fuel already in the pack, bounded to two
+// meat types per pass. Returns how many items came out cooked (0 = nothing to do).
 async function cookRawMeat (bot, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const mcData = require('minecraft-data')(bot.version)
@@ -290,6 +323,11 @@ async function cookRawMeat (bot, opts = {}) {
   return cooked
 }
 
+// #61 SKIP_DEAD_FISHING - the runtime fishing gate. Fishing is confirmed DEAD on this stack (0
+// catches all session); every fishing entry point consults THIS, so a single flag governs them
+// all. DEFAULT OFF (the deliberate exception to the usual default-ON convention - see food.shouldFish).
+// FISHING_ENABLED=1 restores today's fishing behavior byte-for-byte. GATE only: all rod/string/#52
+// machinery is kept intact so re-enabling is a one-flag flip if fishing is ever fixed upstream.
 function fishingEnabled () { return foodSec.shouldFish(process.env) }
 
 async function ensureFishingRod (bot, { isStopped = () => false, home } = {}) {
@@ -409,6 +447,10 @@ async function fishForFood (bot, { isStopped = () => false, say = () => {}, targ
   return edible() > 0
 }
 
+// Kill the nearest food animal and collect the meat (auto-eat then eats it, raw is fine).
+// Bounded: one animal within ~24 blocks, ~12s. Returns true if something died. Uses the
+// movement profile already set (chasing needs no digging, so anti-grief holds). No-op if
+// no animal is near - it can't conjure food from an empty field.
 async function huntForFood (bot, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   if (!bot.entity) return false
@@ -536,6 +578,11 @@ async function huntSpiderForString (bot, opts = {}) {
   const r = await huntForDrop(bot, 1, { ...opts, item: 'string', maxKills: 1 })
   return r.killed > 0
 }
+// Hunt nearby cows for LEATHER until we have `target` more in inventory, or we hit
+// the bounds (max kills / time / no-animals-found). BOUNDED on purpose: a survival
+// run must never HANG here when no cows are around - it returns whatever it got and
+// the caller proceeds with a partial (or empty) armor set. Returns {leather, killed}.
+// Same movement/anti-grief profile as gathering (can't tunnel through builds).
 async function gatherLeather (bot, target, opts = {}) {
   const r = await huntForDrop(bot, target, { ...opts, item: 'leather' })
   return { leather: r.got, killed: r.killed }
@@ -638,12 +685,23 @@ async function ensureFoodSupply (bot, opts = {}) {
   return { ok: hasStandingFarm() || foodCount(bot) > 0, reason: hasStandingFarm() ? 'wheat farm planted' : 'still looking for a farmable open-sky pond (swept, none tillable yet - will retry)' }
 }
 
+// Cheap check (NO bank walk): should a fed, idle, safe bot proactively establish its food
+// supply now? The index reflex gates on this. Renewable = a standing wheat farm; banked food
+// is treated as 0 here (cheap) - the bank is the reactive pantry, not the durable supply.
 function needFoodSupply (bot) {
   if (!bot.entity || bot.food == null) return false
   const safe = !nearHostile(bot, 12) && (bot.health ?? 20) >= 12 && !isNight(bot) && !hasSolidCeiling(bot, 12)
   return foodSec.needsFoodSupply(bot.food, hasStandingFarm(), foodCount(bot), 0, safe)
 }
 
+// #62 §A FOOD_BANK_FIRST (default on): the crisis deadlock-breaker. At hp1/food0 the far farm is
+// UNREACHABLE, but the hut BANK is not - if it holds edible food, WITHDRAW enough to reach a safe
+// food level and EAT it BEFORE any farm trek / fishing / hold. Reuses resources.ensureFood (the
+// same hut-anchored, range-bounded withdraw step 1 uses) gated by the pure bankFoodWithdrawPts
+// decision (only bothers when the bank actually holds food worth pulling). BOUNDED (maxDist 64 -
+// never a far trek) and fully guarded: a dry/unreachable bank falls straight through with nothing
+// lost. Anchors on hutAnchor()/knownBed() (works even when opts.home is null, the ladder/crisis
+// dispatch). Returns { fed }. FOOD_BANK_FIRST=0 -> immediate no-op (byte-for-byte).
 async function bankFoodFirst (bot, { home = null, isStopped = () => false, say = () => {} } = {}) {
   if (process.env.FOOD_BANK_FIRST === '0') return { fed: false }
   const comfortable = REGEN_FOOD_MIN
@@ -674,6 +732,10 @@ async function bankFoodFirst (bot, { home = null, isStopped = () => false, say =
   return { fed: bot.food != null && bot.food >= comfortable }
 }
 
+// THE COURIER (§5.2): deposit the pack's food surplus into the hut bank so R2's raid-the-cache
+// always works. Reuses depositMaterials' open/deposit/close body via the explicit-list mode; the
+// pure maintain.courierPlan decides what moves. Refreshes the chest cache so bankFoodPts updates
+// next tick. Returns how many food items were banked.
 async function courierFoodToBank (bot, { isStopped = () => false, say = () => {}, snap = null } = {}) {
   const res = require('./resources.js')
   const maintain = require('./maintain.js')
@@ -759,6 +821,10 @@ function foodPlanNow (bot, snap, override) {
   return override ? Object.assign(plan, override) : plan     // an explicit caller plan wins (knows its target)
 }
 
+// resources.acquire, bank-first: craft:false so it never kicks off a gather right before the trip).
+// Bounded (a loaf count), fail-safe (bank unreachable/empty -> withdraw no-ops -> the job proceeds with
+// what's carried; never blocks). DYNAMIC_FOOD=0 -> the caller skips this entirely (no top-up). Returns
+// the loaves withdrawn (0 if already stocked / nothing banked).
 async function topUpFoodForPlan (bot, plan, { home = null, isStopped = () => false } = {}) {
   try {
     const needPts = foodSec.foodNeedForPlan(plan)
@@ -1104,6 +1170,8 @@ async function secureFoodInner (bot, opts = {}) {
   return { fed, blockedOn: fed ? null : (isStopped() ? 'stopped' : (isNight(bot) ? 'night' : 'food')) }
 }
 
+// from a river of sheep). Remembers finds: animals -> 'pasture' infra, water -> 'water' infra.
+// Returns { found: 'animals'|'water'|null, kills }. Bounded by maxMs + maxLegs.
 async function scoutForFood (bot, home, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const say = opts.say || (() => {})

@@ -24,13 +24,7 @@ const { goals } = require('mineflayer-pathfinder') // GoalNear, for the drop-col
 const navigate = require('./navigate.js') // unified navigation: ONE goto + the stuck-recovery ladder
 const mining = require('./mining.js')     // PURE tool-durability model (stepInto reads it)
 
-let dbgSink = null // forwarded from provision.js's setDebugSink
-function setDebugSink (fn) { dbgSink = fn }
-const dbg = (...a) => {
-  const line = '[prov] ' + a.map(x => String(x)).join(' ')
-  if (process.env.BUILD_DEBUG) console.log(line)
-  if (dbgSink) dbgSink(line)
-}
+const { dbg, setDebugSink } = require('./debug-sink.js').makeDebug('[prov]') // §4: one definition of the sink rule; this module still owns its own sink
 
 const AIRISH = n => n === 'air' || n === 'cave_air' || n === 'void_air'
 
@@ -38,6 +32,7 @@ const REPLACEABLE = /^(air|cave_air|void_air|short_grass|grass|tall_grass|fern|l
 
 const SHELTER_HOSTILE = /zombie|skeleton|spider|creeper|husk|drowned|witch|pillager|vindicator|stray|bogged|phantom|slime|enderman|silverfish|cave_spider|warden/
 
+// Current inventory as {itemName: count}.
 function inventoryCounts (bot) {
   const out = {}
   for (const i of (bot.inventory ? bot.inventory.items() : [])) out[i.name] = (out[i.name] || 0) + i.count
@@ -58,6 +53,8 @@ function nearHostile (bot, r) {
   return false
 }
 
+// Pick the right tool KIND in inventory for a block (pickaxe/axe/shovel), best
+// material first. Returns the item or null (bare hands).
 function toolForBlock (bot, blockName) {
   let kind = null
   if (/stone|cobble|ore|deepslate|granite|diorite|andesite|tuff|basalt|blackstone/.test(blockName)) kind = 'pickaxe'
@@ -88,6 +85,9 @@ function gotoWithTimeout (bot, goal, ms) {
   return navigate.navigateTo(bot, goal, { timeoutMs: ms, escalate: false })
 }
 
+// Walk onto nearby dropped items so they're picked up. Waits for drops to settle,
+// then sweeps the nearest item repeatedly (walk ONTO it - range 0). More persistent
+// than before because scattered drops on jagged terrain were being left behind.
 async function collectDrops (bot, radius = 10, { patience = 1 } = {}) {
   await new Promise(r => setTimeout(r, 250)) // let freshly-broken drops settle/land
   let empties = 0
@@ -153,6 +153,13 @@ async function collectDrops (bot, radius = 10, { patience = 1 } = {}) {
   }
 }
 
+// Cheap ADJACENT step for the mining loops (the mine-one-pause-one fix): walk ONE block into
+// a cell the dig loop just cleared and floor-verified, driving controls directly instead of
+// re-issuing a full pathfinder goto per block. Look at the cell centre at ~eye height, hold
+// forward (+ a jump when stepping UP), poll ~20ms until our floored position is the cell (or
+// we're within 0.35b of its centre horizontally), hard-capped by `ms`. ALWAYS clears controls
+// in `finally` so a survival flee/defend reflex firing after the loop breaks gets clean
+// controls (same discipline as pillarUpTo). Returns whether we arrived. Never digs or places.
 async function stepInto (bot, cell, { jump = false, ms = 1200, isStopped = () => false } = {}) {
   if (process.env.LAVA_SAFE !== '0') { // #41 belt-and-braces for EVERY caller: never walk into a lava cell or onto a lava floor (death 2 walked sideways into lava). Returning false falls through to the caller's pathfinder goto, which refuses lava cells natively.
     const dst = bot.blockAt(cell); const dstFloor = bot.blockAt(cell.offset(0, -1, 0))
@@ -177,6 +184,8 @@ async function stepInto (bot, cell, { jump = false, ms = 1200, isStopped = () =>
   return arrived
 }
 
+// Place a block from inventory (name matching `match`) AT world position `target`, using any
+// solid neighbouring face to place against. Best-effort; returns whether a block landed.
 async function placeAt (bot, target, match) {
   placeAt.lastFail = null // observability: WHY the last placement failed (cap-fail debugging)
   const item = (bot.inventory ? bot.inventory.items() : []).find(i => match.test(i.name))
@@ -208,6 +217,12 @@ async function placeAt (bot, target, match) {
 // Shared - nav-profile.js reasons about the same distinction.
 const STRUCTURE_RE = /planks$|stairs$|_slab$|fence|_door$|trapdoor$|_wall$|glass|_bed$|torch|lantern|crafting_table|^furnace$|chest|barrel|bookshelf|ladder|_sign$|_carpet$|wool$|brick|cobblestone|_wood$|smooth_|polished_|composter|loom|^bell$|dirt_path|farmland|hay_block|stripped_/
 
+// ANTI-GRIEF for EVERY dig primitive (strip-shaft, tunnel, staircase, pillar, shelter): the
+// ONLY blocks any of them may break are NATURAL terrain/ore - never a player-placed build
+// block. `canBreakNaturally` is the single gate; without it the climb-out/strip-mine punch
+// straight through a base's floor/wall (bot.canDigBlock is a reach/harvest test, NOT a
+// protection check). Note: `cobblestone` is deliberately EXCLUDED (it's a common player
+// block) - the strip-mine digs `stone` and gets cobble as the drop.
 const DIGGABLE_NATURAL = /^(dirt|coarse_dirt|rooted_dirt|grass_block|podzol|mycelium|moss_block|stone|deepslate|granite|diorite|andesite|tuff|calcite|dripstone_block|pointed_dripstone|sand|red_sand|gravel|clay|mud|sandstone|red_sandstone|snow_block|snow|powder_snow|ice|packed_ice|blue_ice|frosted_ice|netherrack|soul_sand|soul_soil|magma_block|blackstone|basalt|end_stone)$|terracotta$|_ore$/
 
 function canBreakNaturally (block) { return !!block && DIGGABLE_NATURAL.test(block.name) && !STRUCTURE_RE.test(block.name) }

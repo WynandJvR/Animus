@@ -41,16 +41,18 @@ const P = () => require('./provision.js')
 const S = () => require('./provision.js').__siblings
 const touchP = tag => { try { require('./commands.js').touchProgress(tag) } catch {} }
 
-let dbgSink = null
-function setDebugSink (fn) { dbgSink = fn }
-const dbg = (...a) => {
-  const line = '[prov] ' + a.map(x => String(x)).join(' ')
-  if (process.env.BUILD_DEBUG) console.log(line)
-  if (dbgSink) dbgSink(line)
-}
+const { dbg, setDebugSink } = require('./debug-sink.js').makeDebug('[prov]') // §4: one definition of the sink rule; this module still owns its own sink
 
+// slots the build materials need (seen live: ~8 slots of trash mid-castle-provision).
+// Toss what has no use; KEEP bones (they become bone meal for the tree farm) and a small
+// rotten-flesh famine reserve (the risky-food ranking eats it only when starving).
 const JUNK_RE = /^(rotten_flesh|spider_eye|poisonous_potato|flint|feather|egg|beetroot_seeds|melon_seeds|pumpkin_seeds|arrow|gunpowder|phantom_membrane|rabbit_hide|rabbit_foot|ink_sac|glow_ink_sac|slime_ball|fermented_spider_eye)$/ // string STAYS (fishing rods!); wheat_seeds stay (the farm)
 
+// The single maintain-class job. A thin, bounded composition of EXISTING routines keyed off
+// maintain.needs(snapshot): harvest orchard, tend/expand the farm, cook+bake, COURIER the food
+// surplus into the bank, SAFEKEEP spare kit, then top up gear/tools/torches + repair home. It
+// NEVER preempts progress/build (rank 1, tick admission, command-path stopMaintenance) and bails
+// on any survival need. MAINTAIN=0 -> the tick never dispatches this (defer-note restored).
 let _maintaining = false
 
 let _maintStop = false
@@ -67,6 +69,8 @@ function releaseMaintainLatch () { const was = _maintaining; _maintaining = fals
 
 function _setMaintaining (v) { _maintaining = !!v }
 
+// dirt towers (operator: "a massive mess"). The patch layer remembers every self-placed
+// block; after a harvest, ride the tower back down and pocket the dirt.
 async function cleanupScaffold (bot, around, { isStopped = () => false } = {}) {
   // Registry-driven (bot/scaffold.js) + the legacy trail for towers placed before the
   // registry existed. Away from builds only (alsoTrail sweeps ALL own placements).
@@ -110,6 +114,10 @@ async function dumpJunk (bot) {
   return tossed
 }
 
+// SAFEKEEPING (§5.3, FIRM): stash spare tools + build-material surplus into the bank so a death
+// mid-excursion costs only the bounded loadout. Same bank + deposit mode as the courier; the pure
+// maintain.safekeepPlan (never the last working tool of a kind) decides. REFUSES during build
+// placement (belt-and-suspenders; trigger 3 lives in planner). Returns how many items were stashed.
 async function safekeepSweep (bot, { isStopped = () => false, say = () => {}, duringBuildOk = false } = {}) {
   if (process.env.MAINT_SAFEKEEP === '0') return 0
   try {
@@ -157,6 +165,11 @@ async function safekeepSweep (bot, { isStopped = () => false, say = () => {}, du
   return n
 }
 
+// SPARE-KIT COURIER (#41 RESILIENT_RECOVERY, §P2): deposit a SURPLUS/dupe spare set (4 armor + pick
+// + sword) into the hut bank so a post-death respawn can withdraw + re-arm (rearmFromBank) WITHOUT
+// depending on a lost/lethal grave. Same bank + deposit machinery as the food courier; the pure
+// maintain.spareKitCourierPlan (never strips the bot's only kit) decides what moves. Returns how
+// many spare items were banked. SPAREKIT=0 / RESILIENT_RECOVERY=0 -> no-op.
 async function spareKitToBank (bot, { isStopped = () => false, say = () => {} } = {}) {
   if (process.env.RESILIENT_RECOVERY === '0' || process.env.SPAREKIT === '0') return 0
   const res = require('./resources.js')
@@ -192,6 +205,8 @@ async function spareKitToBank (bot, { isStopped = () => false, say = () => {} } 
   return n
 }
 
+// maintenancePass(bot, opts) - the orchestrator. opts: { say, nightIndoorOnly, isStopped }.
+// Returns { ok, steps: [label...], reason } for the tick's one-line note.
 async function maintenancePass (bot, opts = {}) {
   if (_maintaining) return { ok: false, steps: [], reason: 'busy' }
   _maintaining = true; _maintStop = false

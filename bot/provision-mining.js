@@ -37,13 +37,7 @@ const { hutAnchor, insideOwnStructure, hasSolidCeiling, onHutApron, stepOffApron
 const P = () => require('./provision.js')          // public provisioning surface, at call time
 const S = () => require('./provision.js').__siblings // internals shared between provision-* modules
 
-let dbgSink = null // forwarded from provision.js's setDebugSink
-function setDebugSink (fn) { dbgSink = fn }
-const dbg = (...a) => {
-  const line = '[prov] ' + a.map(x => String(x)).join(' ')
-  if (process.env.BUILD_DEBUG) console.log(line)
-  if (dbgSink) dbgSink(line)
-}
+const { dbg, setDebugSink } = require('./debug-sink.js').makeDebug('[prov]') // §4: one definition of the sink rule; this module still owns its own sink
 
 async function digShaftDown (bot, maxDepth, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
@@ -194,6 +188,9 @@ async function digStaircaseUp (bot, targetY, opts = {}) {
   }
 }
 
+// Movement profile for DIGGING OUR WAY BACK to the surface after strip-mining: it may
+// break the overburden (canDig) and pillar up, so a stone ceiling can't trap us. Only
+// used to escape a mine we dug ourselves - never near player builds.
 function climbMovements (bot) {
   const m = new Movements(bot)
   m.canDig = true
@@ -259,6 +256,10 @@ async function climbToSurface (bot, targetY, opts = {}) {
   }
 }
 
+// Pillar STRAIGHT UP to targetY: dig any block above the head, then jump and - at the top
+// of the hop, once we've actually cleared a block - place a filler block underfoot. The
+// mob-safest escape: you rise onto a 1-wide column above ground mobs and can't be walked
+// back down into the pit. Stops on lava/water above, out of filler, or protected blocks.
 async function pillarUpTo (bot, targetY, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   if (insideOwnStructure(bot)) { dbg('  pillar: inside my own hut - not pillaring through the roof'); return }
@@ -350,6 +351,10 @@ async function pillarUpTo (bot, targetY, opts = {}) {
   bot.clearControlStates()
 }
 
+// Mine a straight horizontal 1x2 TUNNEL forward, collecting drops at our feet so cobble
+// isn't lost down a pit (the generic loop mined the floor and dropped it into the hole).
+// Digs the two blocks ahead (feet + head level), sweeps drops, steps in, repeats. Safe:
+// stops at lava/water or a missing floor (cave). Returns net `itemName` gained.
 async function mineTunnel (bot, itemName, maxLen, dirIdx, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const DANGER = /lava|water/
@@ -426,6 +431,8 @@ async function mineTunnel (bot, itemName, maxLen, dirIdx, opts = {}) {
   return countItem(bot, itemName) - before
 }
 
+// Place a torch on the floor beneath us if we carry one - lights the mine so mobs don't
+// spawn in the fresh tunnels (a lightly-armored bot dies to a dark-cave ambush). Best-effort.
 async function placeTorch (bot) {
   const torch = (bot.inventory ? bot.inventory.items() : []).find(i => i.name === 'torch')
   if (!torch) return false
@@ -442,6 +449,10 @@ async function placeTorch (bot) {
   return false
 }
 
+// Make a few torches so the mine can be lit: coal/charcoal (1) + stick (1) -> 4 torches, no
+// table needed. Best-effort - the bot picks up coal as bycatch while tunnelling, and carries
+// sticks from tool-crafting; if it has neither it just mines darker (the efba7bd reflex is
+// the backstop). Never throws.
 async function ensureTorches (bot, want = 8) {
   try {
     if (countItem(bot, 'torch') >= want) return
@@ -457,6 +468,9 @@ async function ensureTorches (bot, want = 8) {
   } catch { /* best-effort */ }
 }
 
+// Pickaxes in the pack (stone-or-better - the tier that actually drops iron/stone), with
+// their remaining uses. A deep mine wears these out; if none has uses left the bot can't
+// mine and (before this) got dragged to a surface table -> stranded on cave terrain (live).
 function miningPicks (bot) {
   return (bot.inventory ? bot.inventory.items() : [])
     .filter(i => /(stone|iron|diamond|netherite)_pickaxe$/.test(i.name))
@@ -471,6 +485,8 @@ function workingMiningPick (bot) { return !!bestPick(bot) }
 
 function carriedPickUsesLeft (bot) { return miningPicks(bot).reduce((s, p) => s + p.usesLeft, 0) }
 
+// Craft ONE of `itemName` from carried ingredients at `tableBlock` (or the 2x2 grid when
+// null). Best-effort, never throws. Returns whether one was made.
 async function craftOneFromInv (bot, itemName, tableBlock = null) {
   const mcData = require('minecraft-data')(bot.version)
   const it = mcData.itemsByName[itemName]; if (!it) return false
@@ -481,6 +497,10 @@ async function craftOneFromInv (bot, itemName, tableBlock = null) {
   return countItem(bot, itemName) > before
 }
 
+// Craft a stone pickaxe RIGHT HERE (surface OR depth) - LOCAL only, never walking to a
+// remembered surface table (that walk is the stranding). Mines a little cobble with the
+// still-working pick if short (why we re-tool BEFORE the pick breaks), tops up sticks from
+// carried planks, places a carried/crafted table beside us, and crafts. Returns success.
 async function craftStonePickHere (bot, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const mcData = require('minecraft-data')(bot.version)
@@ -509,6 +529,10 @@ async function craftStonePickHere (bot, opts = {}) {
   return ok && workingMiningPick(bot)
 }
 
+// UP-FRONT mining kit (surface, before the descent): carry enough pick durability for the
+// excursion + a table + sticks so a break at depth is re-tooled IN PLACE, never a surface
+// round-trip. Best-effort with carried materials (the bot already made its first stone pick,
+// so it has cobble/planks/sticks around); depth re-tool + honest bail cover any shortfall.
 async function ensureMiningKit (bot, depth, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   // a table to carry for depth re-tool
@@ -524,6 +548,11 @@ async function ensureMiningKit (bot, depth, opts = {}) {
   dbg('  ensureMiningKit: stone_picks=' + countItem(bot, 'stone_pickaxe') + ' pickUsesLeft=' + carriedPickUsesLeft(bot) + ' table=' + countItem(bot, 'crafting_table') + ' sticks=' + countItem(bot, 'stick') + ' (est ' + estBlocks + ' blocks, wanted ' + toCraft + ' spares)')
 }
 
+// Dig a single WALKABLE staircase DOWN to targetY (one entrance, back-out-able - the fix
+// for N scattered vertical shafts). Each step clears the forward feet+head cells and the
+// forward-down tread, then walks onto it. SAFETY: never step onto lava/water/void - probe
+// the landing's floor first (mining.descentSafety). Returns { reached, reason, blocked }
+// where `blocked` (lava/water/void) tells branchMine to relocate the entrance.
 async function digStaircaseDown (bot, targetY, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const dirIdx = ((opts.dirIdx || 0) % 4 + 4) % 4
@@ -614,6 +643,14 @@ async function enterExistingMine (bot, mine, opts = {}) {
   return true
 }
 
+// ONE organized branch mine for a DEEP ore (iron/gold/copper/...). Descends a single
+// staircase to the iron band (~y16, mining.targetMineY) - relocating the entrance on
+// water/lava/void instead of stalling - then drives a central corridor with perpendicular
+// branches (classic 2-3-spaced branch mine: far more ore per hole than the old scattered
+// shafts), torch-lit, with ore-in-the-walls bycatch. RE-ENTERS a persisted mine when one
+// exists (spend the budget mining, not re-descending). Danger (mob closes / hp crashes) ->
+// climb out and bail to the deployed survival reflexes. Bounded by count + a wall-clock
+// deadline + a branch cap. Returns { gathered, reason }.
 async function branchMine (bot, item, count, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const say = opts.say || (() => {})
@@ -884,6 +921,8 @@ async function branchMine (bot, item, count, opts = {}) {
   return { gathered: got(), reason: got() >= count ? 'done' : (Date.now() >= deadline ? 'out of time' : 'worked the branches'), descended: descended() }
 }
 
+// Mine up to `max` blocks matching `oreRe` within `r` of the bot - opportunistic bycatch
+// while tunnelling (coal for the furnace, etc.). Only natural blocks; best-effort.
 async function grabNearbyOre (bot, oreRe, r, max, { isStopped = () => false } = {}) {
   const FLUID = process.env.MINE_FLUID !== '0'
   let got = 0

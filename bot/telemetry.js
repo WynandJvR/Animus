@@ -25,13 +25,7 @@
 const fs = require('fs')
 const path = require('path')
 
-let dbgSink = null // forwarded from commands.js's setDebugSink
-function setDebugSink (fn) { dbgSink = fn }
-const dbg = (...a) => {
-  const line = '[build] ' + a.map(x => String(x)).join(' ')
-  if (process.env.BUILD_DEBUG) console.log(line)
-  if (dbgSink) dbgSink(line)
-}
+const { dbg, setDebugSink } = require('./debug-sink.js').makeDebug('[build]') // §4: one definition of the sink rule; this module still owns its own sink
 
 // ---- ACTIVITY + OUTCOME --------------------------------------------------------------
 let activity = null    // { name, detail, startedAt } - a long op running RIGHT NOW

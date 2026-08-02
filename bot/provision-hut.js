@@ -39,18 +39,16 @@ const { loadWorldMem, saveWorldMem, listInfra, rememberInfra, forgetInfra, recal
 const P = () => require('./provision.js')
 const S = () => require('./provision.js').__siblings // refactor fix: reach the __siblings-bridge walkStaged
 
-let dbgSink = null // forwarded from provision.js's setDebugSink
-function setDebugSink (fn) { dbgSink = fn }
-const dbg = (...a) => {
-  const line = '[prov] ' + a.map(x => String(x)).join(' ')
-  if (process.env.BUILD_DEBUG) console.log(line)
-  if (dbgSink) dbgSink(line)
-}
+const { dbg, setDebugSink } = require('./debug-sink.js').makeDebug('[prov]') // §4: one definition of the sink rule; this module still owns its own sink
 
 let _hutSchemCache = null
 
 const insideHutBox = (p, hut) => hutModel.inBox(hut, p.x, p.z)
 
+// The hut is 6x5x6 (hut.schem: anchor + 0..5 in x/z, + 0..4 in y). Being INSIDE it is
+// not "underground": before this predicate the roofed interior tripped hasSolidCeiling,
+// so climb-out dug through the bot's own roof, pit-escape pillared dirt onto the floor,
+// and fishing/farming refused to run "in a cave" while the bot stood in its living room.
 function ownHutAt (pos) {
   if (!pos) return null
   const x = Math.floor(pos.x); const y = Math.floor(pos.y); const z = Math.floor(pos.z)
@@ -125,10 +123,19 @@ function hasSolidCeiling (bot, upTo = 45, opts = {}) {
   return false
 }
 
+// The hut anchor entry (infra.hut[0]), or null. The model keys off this min corner.
 function hutAnchor () { return (listInfra('hut')[0]) || null }
 
+// A world-read closure for the hut-model's pure functions.
 function hutReader (bot) { return (x, y, z) => bot.blockAt(new Vec3(x, y, z)) }
 
+// step-off tried ONE fixed target (home if far, else the +12,+12 diagonal) with one goto - if
+// that single direction was wedged/cratered/watered it returned 0 forever, so a stone gather at
+// a dirt-surface hut never got underground (task #22, R2). With STONE_RELOCATE on we rotate the 4
+// mining.DIRS at `radius` blocks (exactly branchMine's entrance-relocation pattern) and stop at
+// the first cell clear of the apron AND the hut interior. STONE_RELOCATE=0 restores today's
+// one-shot target (byte-for-byte movement). NEVER digs. Returns true if we ended clear of the
+// apron; the caller keeps its own refuse-and-return on false.
 async function stepOffApron (bot, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const h = onHutApron(bot)
@@ -160,6 +167,13 @@ async function stepOffApron (bot, opts = {}) {
   return !onHutApron(bot) && !insideOwnStructure(bot)
 }
 
+// After the hut builds, GUARANTEE a flush doorstep. The ground right in front of the door is
+// often 1-2 blocks below the hut floor (median-surface snap + natural slope + gather shafts),
+// so the bot steps straight out the door into a pit and then struggles to get back into its own
+// safehouse ("hole at the front door", seen live repeatedly). onHutApron only STOPS new digging;
+// this positively FILLS the exit lane up to floor level. Best-effort + idempotent: runs each camp
+// pass and re-heals any hole a gather cycle re-opens. `at` = hut anchor; the schematic door sits
+// at rel (2,*,0) on the z=0 wall, so it opens toward -z (outside = at.z - 1).
 async function ensureHutApron (bot, at, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const say = opts.say || (() => {})
@@ -190,6 +204,19 @@ async function ensureHutApron (bot, at, opts = {}) {
   return filled
 }
 
+// Heal a CREEPER CRATER around the home's exit - the wider cousin of ensureHutApron. A
+// blast ate the terrain in front of the door into a multi-deep bowl (live: air down to
+// y62 spanning ~x414-421 / z81-85, incl. an EAST pit at x419-420 the door lane misses);
+// the pathfinder can't route ACROSS it, so the bot is trapped at its threshold AND falls
+// into the far side and dies (live: fell into (419,62,84)). Fills the FULL footprint flush
+// at floorY, bottom-up (each layer sits on the one below). Two modes:
+//   reposition=false: place only what's reachable from WHERE THE BOT STANDS (the doorway,
+//     mid-crossing) - a fast western-lane patch so the step-out lands solid.
+//   reposition=true: also walk the rim (GoalNearXZ settles on reachable ground, never in
+//     the pit - canDig=false) to reach the far EAST columns the doorway can't touch.
+// Own-hut only (caller gates on ownHutAt) + survival place from the bot's own filler +
+// skips solid cells => anti-grief and idempotent (0 places on a healthy apron). Returns
+// cells placed. `at` = hut anchor.
 async function healHomeCrater (bot, at, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const say = opts.say || (() => {})
@@ -774,6 +801,11 @@ async function relocateBedInto (bot, hut, opts = {}) {
   return R('moved', 'anchor moved from ' + oldFoot.x + ',' + oldFoot.z + ' to ' + laid.position.toString())
 }
 
+// bed rode around unplaced forever, no spawn). If a bed already stands in the hut, (re)assert
+// spawn on it once; else, if we're carrying one, walk inside (the apron is filled so entry
+// works) and lay it on an interior floor cell clear of the furniture, then set spawn. Every
+// place is verified (Fable's placedOK is live) - a fail just leaves the bed in the pack, no
+// worse than before. Returns 'present' | 'placed' | 'none' | 'fail'. `at` = hut anchor.
 async function ensureHutBed (bot, at, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const say = opts.say || (() => {})
@@ -815,6 +847,9 @@ async function ensureHutBed (bot, at, opts = {}) {
   return 'placed'
 }
 
+// A standable FREE interior cell (floor-level, schema-correct 4x4, threshold excluded),
+// nearest to `near` (default: the bot). This is the ONLY sanctioned way to unstick INSIDE
+// the hut - step here, NEVER pillar dirt through the roof. Returns a Vec3 or null.
 function freeInteriorCell (bot, hut, near) {
   hut = hut || hutAnchor()
   if (!hut) return null
@@ -842,15 +877,25 @@ function freeInteriorCell (bot, hut, near) {
   return new Vec3(c.x, c.y, c.z)
 }
 
+// The doorway rim column, as a Vec3 at the door-lower / feet cell (anchor.y+1, the cell a
+// bot actually stands in to cross the threshold), or null - derived from the self-structure
+// model (schema-correct 6-wide rim, not the old 5-wide dx/dz 0..4 scan). anchor.y is the
+// floor plank slab, so the walkable door cell is hut.y+1.
 function findHutDoorway (bot, hut) {
   const d = hutModel.doorwayColumn(hut, hutReader(bot), { preferDoorBlock: process.env.DOOR_CROSS_GEOMETRIC !== '0' })
   return d ? new Vec3(d.x, hut.y + 1, d.z) : null
 }
 
+// Standable FREE interior cells (Vec3s), from the model: the CORRECT 4x4 interior (dx/dz
+// 1..4), floor-level only, threshold excluded, sorted furthest-from-door. The old scan was
+// a 3x3 (dx/dz 1..3) that missed the very cells the bot wedged in, and could return a cell
+// perched on a furniture/dirt pile.
 function hutFreeCells (bot, hut) {
   return hutModel.freeStandCells(hut, hutReader(bot)).map(c => new Vec3(c.x, c.y, c.z))
 }
 
+// Is a block of kind `itemRe` already standing inside the hut interior? Scans the correct
+// 4x4x(5) interior via the model, so a duplicate at dx/dz 4 (missed by the old 3x3) is seen.
 function furnitureInHut (bot, hut, itemRe) {
   const read = hutReader(bot)
   for (const [x, z] of hutModel.interiorColumns(hut)) for (let dy = 0; dy < hutModel.DIMS.h; dy++) {
@@ -948,6 +993,8 @@ function bedObtainable (bot, totals) {
   return sum(/_wool$/) >= 3 && (sum(/_planks$/) >= 3 || sum(/_log$/) >= 1 || sum(/_wood$/) >= 1)
 }
 
+// A station of `kind` physically standing in the hut interior (world scan, not the lying
+// registry), or null. The authoritative "do I already have one inside" check.
 function stationInHut (bot, kind, hut) {
   hut = hut || hutAnchor()
   if (!hut) return null
@@ -955,6 +1002,9 @@ function stationInHut (bot, kind, hut) {
   return cells.length ? new Vec3(cells[0].x, cells[0].y, cells[0].z) : null
 }
 
+// Where to place a NEW station of `kind` inside the hut - a free interior FLOOR cell (Vec3),
+// or null when `desired` of that kind already stand (never duplicate) or the interior is
+// full. The placement guard the ensure*/furnish flows consult so they stop re-duplicating.
 function stationSlot (bot, kind, desired = 1, hut) {
   hut = hut || hutAnchor()
   if (!hut) return null
@@ -990,6 +1040,13 @@ async function schemStationCells (bot, hut) {
   return out
 }
 
+// REGISTRY INTEGRITY: reconcile the infra registry against the WORLD so the bot's model of
+// its own home matches reality. The live registry was garbage (12 crafting_table entries,
+// 7 furnaces, 0 beds for a bed that exists) because nothing pruned dead/duplicate cells.
+// For every kind: dedupe exact cells and DROP entries whose loaded cell no longer holds
+// the block (unloaded/unknown kept). Then re-seed from what physically stands INSIDE the
+// hut (the authoritative count) so the true stations are always registered - including the
+// bed (also mirrored into m.bed / knownBed, the spawn anchor). Returns a summary.
 function reconcileInfra (bot) {
   const m = loadWorldMem()
   const infra = m.infra = m.infra || {}
@@ -1031,6 +1088,9 @@ function reconcileInfra (bot) {
   return summary
 }
 
+// interior is clean - not best-effort. Uses the self-structure model to know stray vs
+// legit. Operator-triggerable (the `huttidy` command) to fix the current dirty hut.
+// Returns { ok, passes, remaining, dug, removedDupes }.
 async function cleanupHutInterior (bot, hut, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const say = opts.say || (() => {})
@@ -1193,6 +1253,9 @@ async function repairHutStructure (bot, hut, opts = {}) {
   return { planks: plankDone, doors: doorDone, furniture: furnDone, missing }
 }
 
+// Walk to REMEMBERED ones (up to 3 nearest) and verify each still stands; forget the dead.
+// Trying only the single nearest made one stale entry cause a brand-new placement while a
+// perfectly good chest stood 9 blocks further (live: three chests at one site).
 async function recallAndReach (bot, kind, blockId, maxDist, reach) {
   for (let attempt = 0; attempt < 3; attempt++) {
     const known = recallInfra(kind, bot.entity.position, maxDist)
@@ -1207,6 +1270,11 @@ async function recallAndReach (bot, kind, blockId, maxDist, reach) {
   return null
 }
 
+// SELF-HEALING hut maintenance for the camp pass: reconcile the registry against the world,
+// REPAIR structural creeper damage (missing wall/door/floor/roof + chest/furnace/table), then
+// tidy the interior IFF a cheap model scan says it's dirty (stray filler / duplicate station /
+// floor hole) - an early no-op when the hut is already clean+intact, so it's safe to run every
+// pass. Returns { clean/cleanup..., repair }. Gated by the caller's isStopped.
 async function maintainHut (bot, hut, opts = {}) {
   hut = hut || hutAnchor()
   if (!hut) return { skipped: 'no hut' }
@@ -1356,6 +1424,15 @@ async function clearDoorApproach (bot, hut, opts = {}) {
   return R('clear', 'the doorway approach is walkable')
 }
 
+// SURVIVAL-REFLEX home upkeep, shared with the camp pass (commands.js) so there is ONE code
+// path. Runs the SAME liveability chain the camp pass always ran - apron -> bed -> bank
+// double-heal -> spawn re-assert -> structural repair + interior tidy -> consolidate field
+// chests - each step in its own try/catch with the SAME 'camp:' dbg lines. Extracted so a
+// creeper-damaged base self-heals during ordinary idle survival too, not only inside a full
+// camp job (which gates on a ~>=500-block BOM). Each underlying step already no-ops fast when
+// its piece is intact, so this is cheap to run when nothing is broken - no forced rebuilds.
+// Returns { bed, chestFixed, repair, consolidated, damaged }; `damaged` is true when any step
+// actually did work, so the reflex can log/back off meaningfully when the home was intact.
 async function maintainHome (bot, hutAt, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const say = opts.say || (() => {})

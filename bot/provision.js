@@ -16,7 +16,6 @@ const navigate = require('./navigate.js') // unified navigation (it lazy-require
 const scaffold = require('./scaffold.js') // scaffold manager: temp-block registry, filler policy, teardown
 // (the hut-model require left with the hut code; provision-hut.js owns that classification now)
 const mining = require('./mining.js') // pure mining strategy: depth model, descent-safety, branch-mine geometry
-// (shelterSite moved to provision-shelter.js)
 const foodSec = require('./food.js') // pure food-security decisions: when to proactively build a fishing supply
 const farm = require('./farm.js') // pure wheat-farm geometry (flood-safe bank pick) + crop-state (VERIFIED wheat, never faith)
 const arbiter = require('./arbiter.js') // JOB-LEVEL arbitration: survive > progress authority (jobSurvivalNeed/jobMayProgress)
@@ -77,11 +76,6 @@ const PROBE_MS = Math.max(200, parseInt(process.env.NAV_PROBE_MS || '1000', 10))
 // throttle that hides failures). Enable with BUILD_DEBUG=1 to see every plan/task/smelt step.
 let dbgSink = null // injected by index.js: debug lines persist to logs/bot-events.log
 function setDebugSink (fn) { dbgSink = fn; worldMemory.setDebugSink(fn); provCore.setDebugSink(fn); provHut.setDebugSink(fn); provFarm.setDebugSink(fn); provMining.setDebugSink(fn); provBank.setDebugSink(fn); provFood.setDebugSink(fn); provShelter.setDebugSink(fn); provRecovery.setDebugSink(fn); provMaintain.setDebugSink(fn); survivalSnapshot.setDebugSink(fn) } // forward: world-memory + core log through the same sink (incl. [snap] failed-read traces)
-// fix #15 Piece C (flag DEFEND_WHEN_HIT, default ON, read once at module load - mirrors index.js):
-// a sealed shelter that is nonetheless TAKING DAMAGE (breached/leaky seal, mob fell in before the
-// cap) must bail out to fight/flee instead of holding _sheltering for up to 600s while hits land.
-// =0 reverts both pit waits to their old `!fullySealed`/`!recapped`-only damage bails.
-// (DEFEND_WHEN_HIT_ON moved to provision-shelter.js)
 const dbg = (...a) => {
   const line = '[prov] ' + a.map(x => String(x)).join(' ')
   if (process.env.BUILD_DEBUG) console.log(line)
@@ -131,13 +125,6 @@ function gatherMovements (bot) {
   return m
 }
 
-// ANTI-TRAMPLING (FARM_NO_TRAMPLE, §5.5): a SOFT additive per-block cost on our OWN persisted
-// wheat cells (+ the farmland under them + the hop-over cell) so travel/gather/climb routes bend
-// AROUND the plot instead of jumping across it (a jump-landing is what reverts farmland). It is
-// COST ONLY - never a wall, never a dig; position-keyed to our exact cells so reverted (dirt)
-// cells stay protected and FOREIGN village farmland is never avoided. Returns fn(block)->0|COST,
-// or null (flag off / no farm). Built ONCE per movements construction (A*-hot path).
-// (cropExclusionStep moved to provision-farm.js)
 
 // NAV Phase B (NAV_HAZARD_LEGS): the lava-hazard STEP exclusion closure for a trek Movements
 // profile. Wraps the PURE navProfile.hazardExclusion with a live-world block-name sampler so A*
@@ -230,14 +217,6 @@ function deepWaterUnderfoot (bot) {
   } catch { return false }
 }
 
-// NO_PLACE_ON_FARM (fix #17): a per-block PLACEMENT exclusion (fed to Movements.exclusionAreasPlace)
-// that FORBIDS the pathfinder from bridging/scaffolding a block onto our OWN farmland or the crop
-// cell just above it - placing cobble there destroys the farmland/crop and floods it (#28/#31).
-// cropExclusionStep already makes those cells high-COST to STEP on; this makes PLACEMENT on them
-// effectively forbidden (a huge additive cost - the exact idiom the break exclusion uses). Same
-// column set + y-window (cy-1..cy+1) as cropExclusionStep; only our own wheatFarm, never foreign
-// village farmland. Returns fn(block)->0|COST, or null (flag off / no farm).
-// (cropPlaceExclusion moved to provision-farm.js)
 
 // #56 FARM_EXCLUDE_YFIX (defense-in-depth): does the wheat-farm footprint (any crop cell, its
 // farmland, or the block just above one - the ±1 y-window at each cell's OWN level) contain `pos`?
@@ -812,14 +791,6 @@ async function walkStaged (bot, tx, tz, opts = {}) {
 // next to them must NOT be chopped for wood - that's griefing. Natural trees have
 // none of these around them.
 // (STRUCTURE_RE moved to provision-core.js)
-// ANTI-GRIEF for EVERY dig primitive (strip-shaft, tunnel, staircase, pillar, shelter): the
-// ONLY blocks any of them may break are NATURAL terrain/ore - never a player-placed build
-// block. `canBreakNaturally` is the single gate; without it the climb-out/strip-mine punch
-// straight through a base's floor/wall (bot.canDigBlock is a reach/harvest test, NOT a
-// protection check). Note: `cobblestone` is deliberately EXCLUDED (it's a common player
-// block) - the strip-mine digs `stone` and gets cobble as the drop.
-// (DIGGABLE_NATURAL moved to provision-core.js)
-// (canBreakNaturally moved to provision-core.js)
 // NAV Phase 1 (DESIGN §4.3e): a PRECISE, expiring positive permission for the bot's OWN
 // registry-proven scaffold (cobble pillar/staircase/fill it placed itself). Flag-gated
 // (DEFAULT OFF - unset/!=='1' => always false, byte-identical to today). Never a regex
@@ -1196,21 +1167,14 @@ function planProvision (mcData, bom, inventory = {}, opts = {}) {
   return { tasks, gathers, hunts, crafts: craftReq, smelts, strips, tools: [...toolsNeeded], unobtainable, needsTable, used }
 }
 
-// Current inventory as {itemName: count}.
-// (inventoryCounts moved to provision-core.js)
 
 // ---- executors (live bot) ----------------------------------------------------
 
-// (countItem moved to provision-core.js)
 
 // pathfinder.goto with a deadline (goto can hang forever on an unreachable target).
 // One shared implementation now - navigate.js.
 // (gotoWithTimeout moved to provision-core.js)
 
-// Walk onto nearby dropped items so they're picked up. Waits for drops to settle,
-// then sweeps the nearest item repeatedly (walk ONTO it - range 0). More persistent
-// than before because scattered drops on jagged terrain were being left behind.
-// (collectDrops moved to provision-core.js)
 
 // Walk ~48 blocks in a rotating compass direction to reach fresh, unexplored
 // terrain (loads new chunks) when the current area is tapped out. Returns whether
@@ -1275,60 +1239,18 @@ const FILLER_RE = scaffold.FILLER_RE // ONE filler list - scaffold.js owns it (t
 // (onHutApron moved to provision-hut.js)
 
 // ---- OWN-STRUCTURE AWARENESS ---------------------------------------------------
-// The hut is 6x5x6 (hut.schem: anchor + 0..5 in x/z, + 0..4 in y). Being INSIDE it is
-// not "underground": before this predicate the roofed interior tripped hasSolidCeiling,
-// so climb-out dug through the bot's own roof, pit-escape pillared dirt onto the floor,
-// and fishing/farming refused to run "in a cave" while the bot stood in its living room.
-// (ownHutAt moved to provision-hut.js)
 // Feet (or `pos`) inside one of the bot's own roofed structures. Returns the hut anchor
 // entry or null - truthiness is the common use.
 // (insideOwnStructure moved to provision-hut.js)
 
 // STEP OFF THE HUT APRON before sinking a shaft/staircase, so the doorstep itself is never dug
 // (the onHutApron refusal is KEPT) but "just off the apron" is actually reachable. The old
-// step-off tried ONE fixed target (home if far, else the +12,+12 diagonal) with one goto - if
-// that single direction was wedged/cratered/watered it returned 0 forever, so a stone gather at
-// a dirt-surface hut never got underground (task #22, R2). With STONE_RELOCATE on we rotate the 4
-// mining.DIRS at `radius` blocks (exactly branchMine's entrance-relocation pattern) and stop at
-// the first cell clear of the apron AND the hut interior. STONE_RELOCATE=0 restores today's
-// one-shot target (byte-for-byte movement). NEVER digs. Returns true if we ended clear of the
-// apron; the caller keeps its own refuse-and-return on false.
-// (stepOffApron moved to provision-hut.js)
 
-// After the hut builds, GUARANTEE a flush doorstep. The ground right in front of the door is
-// often 1-2 blocks below the hut floor (median-surface snap + natural slope + gather shafts),
-// so the bot steps straight out the door into a pit and then struggles to get back into its own
-// safehouse ("hole at the front door", seen live repeatedly). onHutApron only STOPS new digging;
-// this positively FILLS the exit lane up to floor level. Best-effort + idempotent: runs each camp
-// pass and re-heals any hole a gather cycle re-opens. `at` = hut anchor; the schematic door sits
-// at rel (2,*,0) on the z=0 wall, so it opens toward -z (outside = at.z - 1).
-// (ensureHutApron moved to provision-hut.js)
 
-// Heal a CREEPER CRATER around the home's exit - the wider cousin of ensureHutApron. A
-// blast ate the terrain in front of the door into a multi-deep bowl (live: air down to
-// y62 spanning ~x414-421 / z81-85, incl. an EAST pit at x419-420 the door lane misses);
-// the pathfinder can't route ACROSS it, so the bot is trapped at its threshold AND falls
-// into the far side and dies (live: fell into (419,62,84)). Fills the FULL footprint flush
-// at floorY, bottom-up (each layer sits on the one below). Two modes:
-//   reposition=false: place only what's reachable from WHERE THE BOT STANDS (the doorway,
-//     mid-crossing) - a fast western-lane patch so the step-out lands solid.
-//   reposition=true: also walk the rim (GoalNearXZ settles on reachable ground, never in
-//     the pit - canDig=false) to reach the far EAST columns the doorway can't touch.
-// Own-hut only (caller gates on ownHutAt) + survival place from the bot's own filler +
-// skips solid cells => anti-grief and idempotent (0 places on a healthy apron). Returns
-// cells placed. `at` = hut anchor.
-// (healHomeCrater moved to provision-hut.js)
 
 // Make sure the hut has a usable BED and our spawn is set on it. Runs every camp pass
 // (decoupled from the bad>3 rebuild, where the only bed path used to live - so a recovered
-// bed rode around unplaced forever, no spawn). If a bed already stands in the hut, (re)assert
-// spawn on it once; else, if we're carrying one, walk inside (the apron is filled so entry
-// works) and lay it on an interior floor cell clear of the furniture, then set spawn. Every
-// place is verified (Fable's placedOK is live) - a fail just leaves the bed in the pack, no
-// worse than before. Returns 'present' | 'placed' | 'none' | 'fail'. `at` = hut anchor.
-// (ensureHutBed moved to provision-hut.js)
 
-// (digShaftDown moved to provision-mining.js)
 
 // Classic pillar-up: rise to targetY by clearing the 2 blocks above and placing a
 // filler block (cobble/dirt we carry) under our feet each hop. STOPS exactly at targetY
@@ -1340,16 +1262,11 @@ const FILLER_RE = scaffold.FILLER_RE // ONE filler list - scaffold.js owns it (t
 // feet+head cells there and our own head clearance, then walk onto it. Stops at targetY.
 // (digStaircaseUp moved to provision-mining.js)
 
-// Movement profile for DIGGING OUR WAY BACK to the surface after strip-mining: it may
-// break the overburden (canDig) and pillar up, so a stone ceiling can't trap us. Only
-// used to escape a mine we dug ourselves - never near player builds.
-// (climbMovements moved to provision-mining.js)
 
 // Is there a solid ceiling overhead? i.e. are we in a cave/underground rather than out in
 // the open under the sky. Scans the column above the head for a real (block-shaped) block.
 // Lets travel tell "dropped into a cave" (climb out) apart from "walking through a valley"
 // (fine - don't pointlessly pillar up in the open).
-// (hasSolidCeiling moved to provision-hut.js)
 
 // Escape UPWARD when stranded underground (e.g. cross-country travel dropped us into a
 // cave/ravine we can't path out of): dig a walkable staircase up to targetY with dig-
@@ -1359,70 +1276,17 @@ const FILLER_RE = scaffold.FILLER_RE // ONE filler list - scaffold.js owns it (t
 // into open sky even if that's below targetY (no point digging a hill from the inside).
 // (climbToSurface moved to provision-mining.js)
 
-// Pillar STRAIGHT UP to targetY: dig any block above the head, then jump and - at the top
-// of the hop, once we've actually cleared a block - place a filler block underfoot. The
-// mob-safest escape: you rise onto a 1-wide column above ground mobs and can't be walked
-// back down into the pit. Stops on lava/water above, out of filler, or protected blocks.
-// (pillarUpTo moved to provision-mining.js)
 
-// Cheap ADJACENT step for the mining loops (the mine-one-pause-one fix): walk ONE block into
-// a cell the dig loop just cleared and floor-verified, driving controls directly instead of
-// re-issuing a full pathfinder goto per block. Look at the cell centre at ~eye height, hold
-// forward (+ a jump when stepping UP), poll ~20ms until our floored position is the cell (or
-// we're within 0.35b of its centre horizontally), hard-capped by `ms`. ALWAYS clears controls
-// in `finally` so a survival flee/defend reflex firing after the loop breaks gets clean
-// controls (same discipline as pillarUpTo). Returns whether we arrived. Never digs or places.
-// (stepInto moved to provision-core.js)
 
-// Mine a straight horizontal 1x2 TUNNEL forward, collecting drops at our feet so cobble
-// isn't lost down a pit (the generic loop mined the floor and dropped it into the hole).
-// Digs the two blocks ahead (feet + head level), sweeps drops, steps in, repeats. Safe:
-// stops at lava/water or a missing floor (cave). Returns net `itemName` gained.
-// (mineTunnel moved to provision-mining.js)
 
 // ---- ORGANIZED BRANCH MINE (mining-strategy-design.md) ---------------------------------
-// Place a torch on the floor beneath us if we carry one - lights the mine so mobs don't
-// spawn in the fresh tunnels (a lightly-armored bot dies to a dark-cave ambush). Best-effort.
-// (placeTorch moved to provision-mining.js)
 
-// Make a few torches so the mine can be lit: coal/charcoal (1) + stick (1) -> 4 torches, no
-// table needed. Best-effort - the bot picks up coal as bycatch while tunnelling, and carries
-// sticks from tool-crafting; if it has neither it just mines darker (the efba7bd reflex is
-// the backstop). Never throws.
-// (ensureTorches moved to provision-mining.js)
 
 // ---- SELF-SUFFICIENT tooling at depth -------------------------------------------------
-// Pickaxes in the pack (stone-or-better - the tier that actually drops iron/stone), with
-// their remaining uses. A deep mine wears these out; if none has uses left the bot can't
-// mine and (before this) got dragged to a surface table -> stranded on cave terrain (live).
-// (miningPicks moved to provision-mining.js)
-// (bestPick moved to provision-mining.js)
-// (workingPickCount moved to provision-mining.js)
-// (workingMiningPick moved to provision-mining.js)
-// (carriedPickUsesLeft moved to provision-mining.js)
 
-// Craft ONE of `itemName` from carried ingredients at `tableBlock` (or the 2x2 grid when
-// null). Best-effort, never throws. Returns whether one was made.
-// (craftOneFromInv moved to provision-mining.js)
 
-// Craft a stone pickaxe RIGHT HERE (surface OR depth) - LOCAL only, never walking to a
-// remembered surface table (that walk is the stranding). Mines a little cobble with the
-// still-working pick if short (why we re-tool BEFORE the pick breaks), tops up sticks from
-// carried planks, places a carried/crafted table beside us, and crafts. Returns success.
-// (craftStonePickHere moved to provision-mining.js)
 
-// UP-FRONT mining kit (surface, before the descent): carry enough pick durability for the
-// excursion + a table + sticks so a break at depth is re-tooled IN PLACE, never a surface
-// round-trip. Best-effort with carried materials (the bot already made its first stone pick,
-// so it has cobble/planks/sticks around); depth re-tool + honest bail cover any shortfall.
-// (ensureMiningKit moved to provision-mining.js)
 
-// Dig a single WALKABLE staircase DOWN to targetY (one entrance, back-out-able - the fix
-// for N scattered vertical shafts). Each step clears the forward feet+head cells and the
-// forward-down tread, then walks onto it. SAFETY: never step onto lava/water/void - probe
-// the landing's floor first (mining.descentSafety). Returns { reached, reason, blocked }
-// where `blocked` (lava/water/void) tells branchMine to relocate the entrance.
-// (digStaircaseDown moved to provision-mining.js)
 
 // ---- PERSISTENT MINE (world-memory 'mines'): remember a dug mine so the next excursion
 // RE-ENTERS it instead of re-digging the descent (on cave terrain the descent ate the whole
@@ -1434,19 +1298,7 @@ const FILLER_RE = scaffold.FILLER_RE // ONE filler list - scaffold.js owns it (t
 // gone/blocked/flooded so branchMine digs fresh + re-persists.
 // (enterExistingMine moved to provision-mining.js)
 
-// ONE organized branch mine for a DEEP ore (iron/gold/copper/...). Descends a single
-// staircase to the iron band (~y16, mining.targetMineY) - relocating the entrance on
-// water/lava/void instead of stalling - then drives a central corridor with perpendicular
-// branches (classic 2-3-spaced branch mine: far more ore per hole than the old scattered
-// shafts), torch-lit, with ore-in-the-walls bycatch. RE-ENTERS a persisted mine when one
-// exists (spend the budget mining, not re-descending). Danger (mob closes / hp crashes) ->
-// climb out and bail to the deployed survival reflexes. Bounded by count + a wall-clock
-// deadline + a branch cap. Returns { gathered, reason }.
-// (branchMine moved to provision-mining.js)
 
-// Mine up to `max` blocks matching `oreRe` within `r` of the bot - opportunistic bycatch
-// while tunnelling (coal for the furnace, etc.). Only natural blocks; best-effort.
-// (grabNearbyOre moved to provision-mining.js)
 
 async function runGather (bot, item, count, opts = {}) {
   // #91 GATHER_NIGHT_GATE (default on): a NAKED bot must not roam the dark for materials - the
@@ -1537,56 +1389,17 @@ async function runGather (bot, item, count, opts = {}) {
   }
 }
 
-// Animals that drop LEATHER when killed. Cows/mooshrooms are the reliable, common
-// source (0-2 leather each); we hunt those, not horses/llamas. This is the raw
-// material for leather armor - the "from nothing" armor tier (no mining/smelting).
-// (LEATHER_ANIMALS moved to provision-food.js)
 
-// Hunt nearby cows for LEATHER until we have `target` more in inventory, or we hit
-// the bounds (max kills / time / no-animals-found). BOUNDED on purpose: a survival
-// run must never HANG here when no cows are around - it returns whatever it got and
-// the caller proceeds with a partial (or empty) armor set. Returns {leather, killed}.
-// Same movement/anti-grief profile as gathering (can't tunnel through builds).
-// (gatherLeather moved to provision-food.js)
 
-// Animals whose drops FEED you (raw meat is edible). Used by the survival-hunt so a long
-// job in a food-poor area doesn't run the bot down to 0 food / 1 hp with nothing to eat.
-// (FOOD_ANIMALS moved to provision-food.js)
-// (hasFood moved to provision-food.js)
-// How many edible items it's carrying (for "stock up" decisions, not just "any food?").
-// (foodCount moved to provision-food.js)
-// The ONLY time the bot must go hunt: it's hungry AND has nothing to eat. (With food on
-// hand, auto-eat handles it; well-fed, no need.) food<=6 = hunger low enough that regen
-// has stopped, so act before it hits 0 and gets pinned at 1 hp.
-// (needsFood moved to provision-food.js)
-// Kill the nearest food animal and collect the meat (auto-eat then eats it, raw is fine).
-// Bounded: one animal within ~24 blocks, ~12s. Returns true if something died. Uses the
-// movement profile already set (chasing needs no digging, so anti-grief holds). No-op if
-// no animal is near - it can't conjure food from an empty field.
-// (huntForFood moved to provision-food.js)
 
-// ROD_SUPPLY (M2): a bounded near-clone of huntForFood that finishes off a NEARBY spider for its
-// STRING drop (a rod = 3 sticks + 2 string, and on this no-animal site spiders-at-night are the
-// only realistic string source). Same GoalFollow/attack/collect shape + ~12s cap as huntForFood,
-// but targets spider|cave_spider within `range` (default 16b) - NEVER a hunt across the map, never
-// a creeper/skeleton. No-op if no spider is near (honest, like huntForFood on an empty field).
-// BOUNDED: ONE pass, no loop; the string need + flag gate live at the ensureFishingRod call site.
-// Returns true if a spider died. Uses the movement profile already set (chasing needs no digging,
-// so anti-grief holds).
-// (ROD_SPIDERS moved to provision-food.js)
-// (huntSpiderForString moved to provision-food.js)
 
 // ---- night survival: dig-in shelter for a NAKED bot ------------------------------
-// (SHELTER_HOSTILE moved to provision-core.js)
-// (_sheltering moved to provision-shelter.js)
-// (isSheltering moved to provision-shelter.js) // reflexes (flee/defend) yield while true
 
 // NEVER rest IN water. The night carousel drowned the bot in its own flooding pit
 // (observed on test server, hp 20 -> death while every command was held): resting flows
 // cycled dig attempts while it bobbed in a basin, and nothing ever LEFT the water.
 // Every rest/shelter entry point gets ashore first; bounded, honest about failure.
 // (inWaterNow moved to provision-shelter.js)
-// (ensureAshore moved to provision-shelter.js)
 
 // Find the nearest DIGGABLE DRY cell to shelter at - a standable surface cell whose column a
 // safe night-pit can actually be dug into (solid ground, no lava/water below OR beside the
@@ -1600,14 +1413,7 @@ async function runGather (bot, item, count, opts = {}) {
 // Reuses the pure shelterSite.farmConflict predicate. Flag off (=0) restores today (never null-
 // gates), so the bot can bunker anywhere it could before.
 // (SHELTER_FARM_R moved to provision-shelter.js)
-// (shelterFarmConflict moved to provision-shelter.js)
 
-// (findDiggableDryCell moved to provision-shelter.js)
-// Where a shelter pit last FLOODED - do not dig another hole next to the same aquifer
-// for a while (the re-dig loop beside water is the entombment/drowning mechanism).
-// (lastFlood moved to provision-shelter.js)
-// (nearRecentFlood moved to provision-shelter.js)
-// (nearHostile moved to provision-core.js)
 // DANGER WHILE MINING: a cave hostile has closed to melee/bow range, or hp is crashing.
 // The idle flee/defend reflexes can't help mid-dig (the bot is committed inside bot.dig()
 // awaits, not the pathfinder), so the tight dig loops + the gather loop poll THIS and bail
@@ -1619,45 +1425,9 @@ async function runGather (bot, item, count, opts = {}) {
 // only while endangered; food at food<14). The material-round heal entry widens on THIS so the
 // bank-side recover gets a second chance. Flag-gated with the gather recover path (GATHER_HP_RECOVER).
 // (lowHpCalm moved to provision-shelter.js)
-// (underArmored moved to provision-shelter.js)
-// How many armor slots are actually worn (0-4). Modulates the deep-mine plan (deepMinePlan):
-// a naked bot digs shallower/shorter so it doesn't die on the same deep excursion an armored
-// bot survives (naked-deep deaths, live). Complements underArmored (which is a boolean gate).
-// (armorPieceCount moved to provision-shelter.js)
-// (isNight moved to provision-core.js)
-// Fire night-rest whenever we're under-armored and DUSK is falling. This USED to also wait for
-// a hostile within 12 blocks - which meant the bot wandered exposed all night and only started
-// digging once a skeleton was already shooting it (verified live: 7 night deaths in one
-// evening, several while "sheltering"). A naked player doesn't wait to be chased: at dusk they
-// go to bed or hole up BEFORE the mobs arrive. Trigger at DUSK (12200), NOT mob-spawn (13000):
-// a fresh pit takes ~15-20s to dig + seal, so starting after dark means a zombie walks straight
-// into the open hole mid-dig (verified live: began the pit at timeOfDay 13618, a zombie walked
-// in during the dig, died). The ~800-tick (~40s) head start lets the pit be sealed before any
-// mob spawns. isNight (13000) stays the trigger for the ARMORED "wanted" cases below.
-// (shelterNeeded moved to provision-shelter.js)
-// FROZEN / ETERNAL NIGHT: on the live server doDaylightCycle is off - timeOfDay is pinned in the
-// night band and DAWN NEVER COMES (grounded live: tod stuck ~15438, delta 0 over 45s). Left to
-// the normal rhythm the bot shelters forever: underArmored -> shelterNeeded -> it re-seals its
-// bunker every cycle, and gearup is night-gated so it never re-arms - the exact "no armor, mobs
-// about" hole it never climbed out of (live 379,62,40, pinned 25+ min). Detect a night that will
-// not end so the reflexes can shelter BRIEFLY, then resume careful progress (gear up first). On a
-// NORMAL server timeOfDay always advances, so this never trips and nights end at dawn as before.
-// (NIGHT_FROZEN_MS moved to provision-shelter.js)
-// (NIGHT_OVERLONG_MS moved to provision-shelter.js)
-// (_todSeen moved to provision-shelter.js)
-// (_nightStart moved to provision-shelter.js)
-// (nightStuck moved to provision-shelter.js)
-// Rest is WANTED (not just needed) when night catches us with the bed close by - even in
-// full armor a player sleeps if home is right there (operator rule: safer overall). Far
-// from the bed and armored, keep working the night; the commute would cost more than the
-// safety buys.
-// (nightRestWanted moved to provision-shelter.js)
 // (anti-grief helpers canBreakNaturally / structureNearby are defined up top, next to
 // STRUCTURE_RE, and shared by every dig primitive + the shelter + the gather filter.)
 
-// Place a block from inventory (name matching `match`) AT world position `target`, using any
-// solid neighbouring face to place against. Best-effort; returns whether a block landed.
-// (placeAt moved to provision-core.js)
 
 // ACTIVE BUILD ZONE (set by autoBuild, cleared when it ends): the shelter must never dig
 // its bunker inside the build footprint - a pit under the castle floor is a hole in the
@@ -1681,19 +1451,8 @@ function inBuildZone (x, z) { return !!buildZone && x >= buildZone.x1 && x <= bu
 // Returns { capped, sideHoles, capPos } (capPos = the cell we actually capped, for breakout).
 // (sealShaft moved to provision-shelter.js)
 
-// Widen ONE floor-level neighbour of `feet` into a torch alcove so a sealed pit can be LIT.
-// PROBE everything first (world re-reads): the candidate must be natural + breakable, and its
-// floor, far wall, both side faces AND ceiling must all be solid non-liquid (alcoveSafe) with no
-// liquid on any of its 6 faces - so cutting the one cell keeps the box a complete seal. ONE
-// attempt, first candidate that passes; returns the dug cell Vec3 or null. The ONLY new dig in
-// the shelter flow, gated by canBreakNaturally (anti-grief) + the liquid probes.
-// (digTorchAlcove moved to provision-shelter.js)
 
-// (digInForNight moved to provision-shelter.js)
 
-// Pick the right tool KIND in inventory for a block (pickaxe/axe/shovel), best
-// material first. Returns the item or null (bare hands).
-// (toolForBlock moved to provision-core.js)
 
 // ---- WORLD MEMORY lives in world-memory.js ------------------------------------------
 // The semantic map (resource spots, own-infra registry, proven routes, learned wedges)
@@ -1731,41 +1490,14 @@ function noteWaterCrossing (bot) {
 }
 
 // ---- SELF-STRUCTURE integrity + declutter (self-structure-model-design.md) ----------
-// The hut anchor entry (infra.hut[0]), or null. The model keys off this min corner.
-// (hutAnchor moved to provision-hut.js)
-// A world-read closure for the hut-model's pure functions.
-// (hutReader moved to provision-hut.js)
 
-// A standable FREE interior cell (floor-level, schema-correct 4x4, threshold excluded),
-// nearest to `near` (default: the bot). This is the ONLY sanctioned way to unstick INSIDE
-// the hut - step here, NEVER pillar dirt through the roof. Returns a Vec3 or null.
-// (freeInteriorCell moved to provision-hut.js)
 
-// REGISTRY INTEGRITY: reconcile the infra registry against the WORLD so the bot's model of
-// its own home matches reality. The live registry was garbage (12 crafting_table entries,
-// 7 furnaces, 0 beds for a bed that exists) because nothing pruned dead/duplicate cells.
-// For every kind: dedupe exact cells and DROP entries whose loaded cell no longer holds
-// the block (unloaded/unknown kept). Then re-seed from what physically stands INSIDE the
-// hut (the authoritative count) so the true stations are always registered - including the
-// bed (also mirrored into m.bed / knownBed, the spawn anchor). Returns a summary.
-// (reconcileInfra moved to provision-hut.js)
 
 // INTERIOR CLEANUP with a VERIFIED postcondition: dig every stray filler block in the
 // interior (floor piles + head-height pillar remnants), remove DUPLICATE in-hut stations
 // (keep one per kind), fill floor holes, and RE-RUN until a fresh world read confirms the
-// interior is clean - not best-effort. Uses the self-structure model to know stray vs
-// legit. Operator-triggerable (the `huttidy` command) to fix the current dirty hut.
-// Returns { ok, passes, remaining, dug, removedDupes }.
-// (cleanupHutInterior moved to provision-hut.js)
 
-// A station of `kind` physically standing in the hut interior (world scan, not the lying
-// registry), or null. The authoritative "do I already have one inside" check.
-// (stationInHut moved to provision-hut.js)
 
-// Where to place a NEW station of `kind` inside the hut - a free interior FLOOR cell (Vec3),
-// or null when `desired` of that kind already stand (never duplicate) or the interior is
-// full. The placement guard the ensure*/furnish flows consult so they stop re-duplicating.
-// (stationSlot moved to provision-hut.js)
 
 // STRUCTURAL REPAIR (creeper damage): compare the hut SCHEMATIC to the world and rebuild any
 // missing shell block (wall/floor/roof plank + door) and any missing furniture (chest/furnace/
@@ -1778,31 +1510,9 @@ function noteWaterCrossing (bot) {
 // Best-effort + bounded; returns { planks, doors, furniture, missing } (or {skipped}).
 // `hut` = the hut anchor (min corner = schematic origin; floor at anchor.y, walls anchor.y+1..).
 // (_hutSchemCache moved to provision-hut.js)
-// (loadHutSchem moved to provision-hut.js)
-// (repairHutStructure moved to provision-hut.js)
 
-// SELF-HEALING hut maintenance for the camp pass: reconcile the registry against the world,
-// REPAIR structural creeper damage (missing wall/door/floor/roof + chest/furnace/table), then
-// tidy the interior IFF a cheap model scan says it's dirty (stray filler / duplicate station /
-// floor hole) - an early no-op when the hut is already clean+intact, so it's safe to run every
-// pass. Returns { clean/cleanup..., repair }. Gated by the caller's isStopped.
-// (maintainHut moved to provision-hut.js)
 
-// SURVIVAL-REFLEX home upkeep, shared with the camp pass (commands.js) so there is ONE code
-// path. Runs the SAME liveability chain the camp pass always ran - apron -> bed -> bank
-// double-heal -> spawn re-assert -> structural repair + interior tidy -> consolidate field
-// chests - each step in its own try/catch with the SAME 'camp:' dbg lines. Extracted so a
-// creeper-damaged base self-heals during ordinary idle survival too, not only inside a full
-// camp job (which gates on a ~>=500-block BOM). Each underlying step already no-ops fast when
-// its piece is intact, so this is cheap to run when nothing is broken - no forced rebuilds.
-// Returns { bed, chestFixed, repair, consolidated, damaged }; `damaged` is true when any step
-// actually did work, so the reflex can log/back off meaningfully when the home was intact.
-// (maintainHome moved to provision-hut.js)
 
-// Walk to REMEMBERED ones (up to 3 nearest) and verify each still stands; forget the dead.
-// Trying only the single nearest made one stale entry cause a brand-new placement while a
-// perfectly good chest stood 9 blocks further (live: three chests at one site).
-// (recallAndReach moved to provision-hut.js)
 
 // (searched-cell + gearup memory moved to world-memory.js)
 // (bed + spawn-suspect memory moved to world-memory.js)
@@ -1814,39 +1524,9 @@ function noteWaterCrossing (bot) {
 // shift it a cell), else lay a fresh one in the hut. Bounded, honest return.
 // (ensureSpawnBed moved to provision-recovery.js)
 
-// WRONG-ANCHOR RECOVERY, survival tier: the server respawn anchor is lost or far (the
-// world-spawn carousel - every death dropped the bot ~430 blocks from home, and it could
-// never re-assert because the re-assert only ran "when home"). Getting home and re-
-// asserting the hut bed IS the goal here, above build/gather/gear: long-legged trek
-// straight to the remembered bed (or the hut), then a FORCED ensureSpawnBed. No 120-block
-// maxTrek cop-out - this is exactly the "too far" case. Honest return; the caller retries
-// on the next respawn (the persisted spawn-suspect flag survives deaths and restarts).
-// (recoverSpawnAnchor moved to provision-recovery.js)
 
-// GO-HOME-FIRST decision (PURE, offline-testable): the bot's hut BED got creeper-destroyed,
-// so the server respawn fell back to WORLD SPAWN ~570 blocks from base - and live it then
-// just GEARED UP out in the wilderness, abandoning its hut/farm/chest and re-doing everything
-// from scratch far away. A bot 500 blocks from home should WALK HOME, not re-build its life in
-// the wild. This picks the home anchor (hut > remembered bed > persisted build site) and
-// decides whether we landed far enough to trek home BEFORE any gear-up/local gathering. XZ
-// distance only - respawn Y varies, and "far" is a horizontal concept. No bot handle, just
-// data, so the "am I far from home -> go home" logic is unit-tested without a world.
-// (homeRecoveryDecision moved to provision-recovery.js)
 
-// GO-HOME-FIRST recovery, survival tier (outranks gear-up/gather): if we respawned FAR from
-// home, trek back BEFORE resuming any local work, then rebuild the bed + re-assert the spawn
-// so future deaths return HOME instead of world spawn - closing the "abandon base at world
-// spawn" loop. Bounded (maxLegs) + honest: an unreachable home fails loudly and the caller
-// retries on the next respawn rather than wedging forever. Food/threat survival still applies
-// en route (auto-eat + nav's water/pit/climb recovery run through walkStaged). Distinct from
-// recoverSpawnAnchor (which is gated on the spawn-suspect flag AND no build to resume): this
-// fires purely on DISTANCE, considers the build site as a fallback anchor, and explicitly
-// rebuilds the bed. RECOVER_HOME=0 disables it at the caller.
-// (recoverHome moved to provision-recovery.js)
 
-// Sleep in the remembered bed if we're standing near it. Returns true only if we actually
-// slept through to daylight (or the night got skipped) - anything else falls back to the pit.
-// (sleepInBedHere moved to provision-recovery.js)
 
 // Night survival, in a player's order of preference: WALK HOME AND SLEEP if the bed is in
 // range, else seal a pit where we stand. Every digInForNight call site goes through this.
@@ -1855,9 +1535,6 @@ function noteWaterCrossing (bot) {
 // 14 deaths in 6 min with the brain fighting the body for control). index.js holds brain
 // commands while isResting(), same as the build busy-guard.
 // (_resting moved to provision-recovery.js)
-// (isResting moved to provision-recovery.js)
-// (nightRest moved to provision-recovery.js)
-// (nightRestInner moved to provision-recovery.js)
 
 // ---- WHEAT FARM (operator order: "make the wheat farm now so it stops starving").
 // The Sonnet shepherd proved the region can run dry of animals - the bot worked at 1hp
@@ -1866,62 +1543,14 @@ function noteWaterCrossing (bot) {
 // when bones allow, harvested into bread.
 // (boneMealBlock moved to provision-farm.js)
 
-// Till a bank block (dirt/grass) to farmland, VERIFIED by a world re-read. Returns:
-//   'farmland' - the cell is farmland now (already was, or the hoe took)
-//   'flooded'  - the crop cell above holds water that won't clear (unfarmable here)
-//   'unfarmable' | 'nohoe' | false - couldn't till (bad base / no hoe / hoe was a no-op)
-// ROOT CAUSE of the live "till did not take (got dirt)": MC only converts dirt->farmland
-// when the block DIRECTLY ABOVE is air (HoeItem checks pos.above().isAir()). If water has
-// flowed into the crop cell (a bank at the waterline, or flow opened by digging the veg),
-// the hoe is a SILENT no-op and the block stays dirt - reproduced live + on the test server.
-// Equip/reach/look are all fine (a clean dry cell tills first try); the ONLY blocker is a
-// non-air crop cell. So: guarantee the crop cell is air (clear veg/water, let flow settle,
-// re-read) BEFORE firing the hoe - then the till takes. A cell that keeps re-flooding is
-// genuinely unfarmable (water would wash the seed out too) and is honestly reported 'flooded'.
-// (tillCell moved to provision-farm.js)
 
-// (WHEAT_FARM_TARGET moved to provision-farm.js)
 
-// #59 §A FARM_SEED_BANK (default on): WITHDRAW wheat_seeds from the hut bank BEFORE breaking any
-// grass - a chest full of seeds was invisible to the farm (the loop-open bug: "seed-starved ...
-// deferred" while 1.5 stacks sat banked). Resource-model correct (withdraw > gather). Bounded +
-// NEVER throws the food path (bank unreachable / no chest -> quietly returns, caller falls through
-// to the grass fallback). FARM_SEED_BANK=0 -> no-op (grass-only, byte-for-byte). Returns the seed
-// count on hand after the attempt.
-// (withdrawSeedsFromBank moved to provision-farm.js)
 
-// SEED GATHERING (extracted from ensureWheatFarm step 3, §5.4): break tall grass/ferns for
-// wheat_seeds up to `want`, roaming a few compass legs if the immediate area is barren. Same
-// grassIds / roam legs / budgets as before (behavior identical when want=3). Now also reusable
-// by the tend path so a seed-starved plot self-fills. Returns the seed count on hand.
-// #59 §A FARM_SEED_BANK: raid the bank FIRST (all three seed sites route through here), then this
-// grass loop is the FALLBACK for whatever the bank couldn't supply. =0 -> straight to grass.
-// (gatherSeedsNear moved to provision-farm.js)
 
-// #56 FARM_TORCH (§C): light the plot for growth (light>=9) + mob suppression. Torches go on DRY,
-// NON-crop ground just outside/between the crop cells (never on farmland - a torch can't sit on it,
-// and never on a crop cell - that would kill the wheat), spaced ~6b so they don't cluster. Only
-// places torches the bot HAS (ensureTorches crafts from coal+stick if cheap, else we place what we
-// carry) - it NEVER blocks farm establishment on missing torches. Mirrors the orchard's placeAt(..,
-// /^torch$/) + ensureTorches. Returns how many were placed.
-// (placeFarmTorches moved to provision-farm.js)
 
-// (ensureWheatFarm moved to provision-farm.js)
 
 // (Re)establish ONE crop cell: till the farmland if needed, then plant a seed - VERIFIED by
-// a world re-read (returns true only if a `wheat` block actually stands after). This is the
-// self-heal primitive tend uses to re-plant cells a creeper/trample/failed-plant emptied.
-// `cropPos` = the crop cell (one above the farmland). Needs a seed; tills only if a hoe is on
-// hand and the base is real dirt/grass (never water/air/stone).
-// (replantCropCell moved to provision-farm.js)
 
-// Visit the farm: harvest ripe wheat (age 7), replant harvested cells, RE-PLANT any cell the
-// world says is empty/destroyed (creeper/trample/failed plant), bone-meal what's still growing,
-// and craft bread (3 wheat each). Called when hungry + huntless AND proactively by the food
-// supply pass. GROUNDED: reads the EXACT persisted crop cells and block-reads each - the old
-// blind `findBlocks(wheat)` scan returned nothing when planting had faith-failed, so tend
-// logged `harvested 0` forever. Robust to partial destruction: re-plants missing cells.
-// (tendWheatFarm moved to provision-farm.js)
 
 // ---- FISHING: the food of last resort that works ANYWHERE with water (the guardian
 // escort proved this region has no animals - one sheep in 40 minutes - and the bot
@@ -1929,8 +1558,6 @@ function noteWaterCrossing (bot) {
 // string; raw cod/salmon are safe food the auto-eat handles.
 // (ensureFishingRod moved to provision-food.js)
 
-// A standing wheat farm (planted + remembered) = the renewable food source.
-// (hasStandingFarm moved to provision-farm.js) // a 0-cell (stale/failed) record is NOT a standing farm - else the food system thinks farming is handled when there's no plot
 
 // PROACTIVE FOOD SUPPLY (base-setup goal, like the hut): while FED + SAFE, ESTABLISH the wheat
 // farm at the REMEMBERED open-sky pond so the next hunger crisis never happens - the farm is
@@ -1945,68 +1572,24 @@ function noteWaterCrossing (bot) {
 // - it never swept SW toward the actual food). Returns { name, dist } | null.
 // (nearestFoodAnimal moved to provision-food.js)
 
-// Eat what's in the pack up to comfortable - cook raw meat FIRST (raw is poor food), then eat.
-// Fixes "idled at food=13 holding beef" - never sit hungry with food in hand.
-// (eatFromPackToComfortable moved to provision-food.js)
 
-// (ensureFoodSupply moved to provision-food.js)
 
-// Cheap check (NO bank walk): should a fed, idle, safe bot proactively establish its food
-// supply now? The index reflex gates on this. Renewable = a standing wheat farm; banked food
-// is treated as 0 here (cheap) - the bank is the reactive pantry, not the durable supply.
-// (needFoodSupply moved to provision-food.js)
 
 // ---- JOB-LEVEL ARBITER: the bot->state snapshot the pure authority (arbiter.jobSurvivalNeed)
-// reads. This is the ONE place the scattered survival predicates are gathered; every progress
-// job consults survivalNeed(bot)/mayDoProgress(bot) instead of its own food/hp/threat checks.
-// (survivalState moved to survival-snapshot.js)
-// The highest UNMET survival need blocking progress, or null. opts.foodThreshold: 14 to START a
-// progress job (default), 6 for a mid-activity CRITICAL bail. THE single authority.
-// (survivalNeed moved to survival-snapshot.js)
-// May a progress job (gearup/build/mine/gather) run RIGHT NOW? False when a SURVIVE need is
-// unmet. Callers yield to the need (secure food / flee / shelter) and resume once it's met.
-// (mayDoProgress moved to survival-snapshot.js)
 
 // SCHEDULER SNAPSHOT (S4, DESIGN §4): assemble the full plain-data snapshot the pure scheduler
 // (scheduler.js) consumes - a SUPERSET of survivalState(bot). Async because the bank read
 // (resources.totalCounts) is async; both call sites (the /cmd busy-gate and the ~15s tick) are
-// async. Every sub-read is individually try/catch-wrapped so a half-broken world yields a PARTIAL
-// snapshot (an absent field = "not blocking" per the scheduler contract), never a throw. The bank
-// read is cachedOnly (MANDATORY, REDESIGN §11: never walk the bot from a tick). SCHEDULER=0 never
-// calls this.
-// ACTIVE-JOB SYNTHESIS (S7 §3.3), factored out of schedulerState so BOTH the snapshot AND the 5s
-// watchdog interval read ONE definition. SYNC + cheap (no bank reads, no awaits): commands' running
-// activity first (classified), else the five survival latches - exactly as before. Two fields are
-// now REAL: lastProgressAt = max(the verified-progress clock, this job's own startedAt) so a job
-// entered by a path that forgot to touch at t0 still starts its clock at startedAt rather than
-// inheriting a stale global clock (the pure watchdog prefers lastProgressAt when non-null, so a
-// too-old value would insta-fail a fresh job); blockedOn = the §6 nudge marker, cleared by any touch.
-// Never throws.
-// (activeJobInfo moved to survival-snapshot.js)
 
-// (schedulerState moved to survival-snapshot.js)
 
 // #52 FISH_FROM_BANK — PURE bank-stand predicate. A cell is a safe fishing STAND iff its feet/head
 // are a genuinely-dry standable pocket (shelterSite.feetCellDry: 2 air, no water in feet/head or the
 // 4 feet-level neighbours - never a puddle edge that floods) AND some water is horizontally adjacent
 // so a cast actually reaches the pond. hasAdjacentWater is computed at the GROUND level by the caller
 // (feet-level water is excluded by feetCellDry). Extracted for unit testing.
-// (isBankStand moved to provision-bank.js)
 
-// #52 FISH_FROM_BANK — the nearest DRY, castable bank stand cell adjacent to water `w`, or null.
-// Scans solid ground blocks within ~3b horizontally of w (a small y-window covers a flush shore or a
-// one-block lip), tests each with isBankStand, and returns the feet Vec3 nearest the bot. Never picks
-// a cell in/under water - the whole point is to fish standing dry, casting INTO the pond.
-// (bankStandFor moved to provision-bank.js)
 
-// #61 SKIP_DEAD_FISHING - the runtime fishing gate. Fishing is confirmed DEAD on this stack (0
-// catches all session); every fishing entry point consults THIS, so a single flag governs them
-// all. DEFAULT OFF (the deliberate exception to the usual default-ON convention - see food.shouldFish).
-// FISHING_ENABLED=1 restores today's fishing behavior byte-for-byte. GATE only: all rod/string/#52
-// machinery is kept intact so re-enabling is a one-flag flip if fishing is ever fixed upstream.
-// (fishingEnabled moved to provision-food.js)
 
-// (fishForFood moved to provision-food.js)
 
 // ---- SECURE FOOD: the ONE "get me fed" routine -------------------------------------
 // Every starving flow funnels here (gather loop, travel legs, smelt rotations, material
@@ -2016,90 +1599,26 @@ function noteWaterCrossing (bot) {
 // instead of working on at 1hp. Starvation itself stops at half a heart - every actual
 // starve-death was chip damage taken while it kept working (verified live, repeatedly).
 // (RISKY_EAT moved to provision-food.js)
-// One EATING policy (commands.eatFood delegates here): most filling SAFE food first;
-// risky food only when starving (<=6) or critically hurt with hunger already low.
-// (eatBestFood moved to provision-food.js)
 
-// Eat down the pack until reasonably full or out of (safe) food - one bite of the chain's
-// hard-won meat doesn't stop the next starve 10 minutes later.
-// (eatUp moved to provision-food.js)
 
-// BAKE BREAD from banked wheat (the live rescue): the bot's bank wheat is RAW/inedible, so a
-// starving bot standing at home with 5 wheat + a farm still can't eat without baking. Top up
-// the pack from the bank (runCraft only crafts from ON-HAND) then craft bread at the home
-// table via runCraft - the SAME primitive tendWheatFarm/fishing-rod use (ensureTable finds/
-// places the table; bot.recipesFor/bot.craft; verified through the pathfix path). Skips
-// GRACEFULLY (returns 0, never throws) if no table is reachable or the wheat can't be found.
-// (bakeBreadFromWheat moved to provision-food.js)
 
-// #62 §A FOOD_BANK_FIRST (default on): the crisis deadlock-breaker. At hp1/food0 the far farm is
-// UNREACHABLE, but the hut BANK is not - if it holds edible food, WITHDRAW enough to reach a safe
-// food level and EAT it BEFORE any farm trek / fishing / hold. Reuses resources.ensureFood (the
-// same hut-anchored, range-bounded withdraw step 1 uses) gated by the pure bankFoodWithdrawPts
-// decision (only bothers when the bank actually holds food worth pulling). BOUNDED (maxDist 64 -
-// never a far trek) and fully guarded: a dry/unreachable bank falls straight through with nothing
-// lost. Anchors on hutAnchor()/knownBed() (works even when opts.home is null, the ladder/crisis
-// dispatch). Returns { fed }. FOOD_BANK_FIRST=0 -> immediate no-op (byte-for-byte).
-// (bankFoodFirst moved to provision-food.js)
 
-// (_securingFood moved to provision-food.js)
-// (isSecuringFood moved to provision-food.js)
-// FOOD_FLOOR F4: the no-progress escalation counter (module-local; a restart re-allows a fresh
-// attempt). Advanced by the floor branch on a zero-food dispatch, reset on food gain, and BUMPED
-// by the watchdog's `(wd) CYCLE repeatFail` on the recovery ladder (index.js) - so the eternal
-// re-loop escalates (widen the water scout one ring + active fishing over a passive outdoor hold)
-// instead of re-running the identical failing sequence. Capped (foodFloorEscalation).
-// (_foodFloorNoProgress moved to provision-food.js)
-// (escalateFoodFloor moved to provision-food.js)
-// (_foodFloorState moved to provision-food.js) // test/introspection seam
-// (secureFood moved to provision-food.js)
-// (secureFoodInner moved to provision-food.js)
 
 // PROACTIVE, SYSTEMATIC food scouting (the core exploration fix): sweep UNSEARCHED ground
 // outward in a real pattern (explore.octantSweep - 8 octants x expanding rings around home)
 // to FIND animals + water, biased AWAY from sectors swept recently (persisted, decaying
 // negative-memory in worldMem.scouted). The old scoutHunt re-tread stale remembered pastures
 // (NE/SE) and never covered the SW/NW where the food actually was (live: starved 88 blocks
-// from a river of sheep). Remembers finds: animals -> 'pasture' infra, water -> 'water' infra.
-// Returns { found: 'animals'|'water'|null, kills }. Bounded by maxMs + maxLegs.
-// (scoutForFood moved to provision-food.js)
 
 // Walk expanding legs looking for food animals. Remembers where it finds them
 // ('pasture' infra) so the next famine treks straight back instead of re-searching.
-// (scoutHunt moved to provision-food.js)
 
-// BOUNDED HOLD (S5, replaces the old famine-hold - the I5 migration): nothing edible anywhere -> retreat
-// home/indoors and WAIT in the ONE bounded way whose wake provably occurs, instead of dying to
-// chip damage at 1hp. Built FROM the old famine-hold's proven body (same get-home preamble + 90s re-eval
-// loop with the FORCED-FRESH bank re-check - the 11h-stale-cache starvation fix, DO NOT LOSE IT),
-// PLUS a grave-appeared wake (a fresh grave IS a recovery input - the ladder's next pass runs R1)
-// and a sealed-pit branch (existing digInForNight) for night-exposed-no-bed. Refuses to hold on
-// nightStuck (eternal night has no dawn wake - the caller acts by night instead). The hard deadline
-// is unconditional (BOUNDED_HOLD_MS, default 90s). Returns { held, wake }.
-// (boundedHold moved to provision-recovery.js)
 
-// Bounded water scout: 4 cardinal legs x expanding radius, scanning for surface water at
-// each stop. Feeds BOTH fishing and the wheat farm (found ponds land in 'water' memory).
-// (scoutForWater moved to provision-shelter.js)
 
 // ---- SCAFFOLD TEARDOWN: the pathfinder pillars up to tall canopies and abandons the
-// dirt towers (operator: "a massive mess"). The patch layer remembers every self-placed
-// block; after a harvest, ride the tower back down and pocket the dirt.
-// (cleanupScaffold moved to provision-maintain.js)
 
 // ---- INVENTORY HYGIENE: mob-drop junk (spider eyes, string, flint...) quietly eats the
-// slots the build materials need (seen live: ~8 slots of trash mid-castle-provision).
-// Toss what has no use; KEEP bones (they become bone meal for the tree farm) and a small
-// rotten-flesh famine reserve (the risky-food ranking eats it only when starving).
-// (JUNK_RE moved to provision-maintain.js)
-// (dumpJunk moved to provision-maintain.js)
 
-// HOLD until the night is survived: a nightRest attempt returns false when another flow
-// already holds the shelter lock (the idle reflex sealed a pit while a resume was booting)
-// - and callers treated false as "carry on", walking straight back into the dark (died
-// that way at 350,64,36). This BLOCKS until day/armored/stopped, re-attempting rest
-// whenever nothing else is resting.
-// (restUntilSafe moved to provision-recovery.js)
 
 // LOW-HP SHELTER-AND-HOLD: a hurt bot that is still exposed (dark night or a mob in range) is
 // grinding to death (live: armored far-gather 18.7->11.7->0.77->dead). Latched like secureFood/
@@ -2109,72 +1628,18 @@ function noteWaterCrossing (bot) {
 // (3 min), and BAILS honestly when it can't recover here (frozen night, out of food, still taking
 // damage) so the food chain / flee / defend that DO own those cases take over.
 // (_recoveringHp moved to provision-recovery.js)
-// (isRecoveringHp moved to provision-recovery.js)
-// (recoverHp moved to provision-recovery.js)
 
 // RECOVERY LADDER (S5): the rung->executor map. Every action string that recoveryPlan emits maps
 // to an EXISTING, bounded, live-verified executor (no new dig/place/nav paths). `commands` is a
 // LAZY require (cycle-safe). `o` = { isStopped, say, home, dbg }. Actions with no executor
 // (trekOrchard - a WOOD grove, not a food producer) are simply absent -> the ladder skips them.
-// (RUNG_EXECUTORS moved to provision-recovery.js)
 
-// (_recoveringDegraded moved to provision-recovery.js)
-// (isRecoveringDegraded moved to provision-recovery.js)
 
 // ==== #58 DEADLOCK_RESET: suicide-reset an unbreakable hp<=2/food0 starvation deadlock =========
-// See DESIGN-deadlock-suicide-reset.md. The bot floors at hp1/food0 FOREVER when no food is
-// reachable (fishing dead, no water for the farm) - starvation never kills on Normal, so the
-// recovery ladder pings the same failing rungs and makes zero progress. A respawn is a CLEAN full
-// reset (hp20/food20 at the bed) that lets it range far enough to actually reach food. So when
-// GENUINELY deadlocked: STASH EVERYTHING at the bank (empty pack -> empty grave -> zero loss),
-// deliberately DIE (fall damage), respawn fresh, recover properly from full. DEADLOCK_RESET=0 ->
-// today's hold-and-starve, byte-for-byte (the detector never fires, no code path changes).
-// (DEADLOCK_HP moved to provision-recovery.js)
-// (DEADLOCK_FAILS moved to provision-recovery.js)
-// (DEADLOCK_FALL_H moved to provision-recovery.js)
-// (DEADLOCK_RESET_COOLDOWN_MS moved to provision-recovery.js)
-// (DEADLOCK_MAX_NOFOOD moved to provision-recovery.js)
-// #63 SUICIDE_DIES (default on): make the suicide-reset actually DIE when it can't pillar-to-fall
-// under its own roof. §A robustly reaches OPEN SKY before pillaring; §B falls back to DROWN then
-// PIT-DROP when open sky is unreachable. Each `=0` -> today's fall-only-then-abort byte-for-byte.
-// (SUICIDE_EXIT_OPEN_SKY moved to provision-recovery.js)
-// (SUICIDE_FALLBACK_DEATH moved to provision-recovery.js)
-// (SUICIDE_DROWN moved to provision-recovery.js)
-// (_deadlockFails moved to provision-recovery.js)
-// (_deadlockResetting moved to provision-recovery.js)
 
-// PURE detector (unit-tested): does a GENUINE multi-cycle deadlock warrant a suicide-reset NOW?
-// Fires ONLY at hp<=HP & food===0 & no pack food & failCount>=FAILS & the cooldown has elapsed,
-// with the flag on. Everything is passed in (no bot / no I/O) so the trigger is fully testable.
-// opts.enabled===false (the DEADLOCK_RESET=0 flag) hard-disables it; hp/fails/cooldownMs override
-// the module defaults for the unit tests.
-// (deadlockResetDue moved to provision-recovery.js)
 
-// Persisted (world-mem, the gearupState pattern) so a restart can't bypass the cooldown or the
-// no-food back-off. { at: last reset timestamp, count: consecutive resets with no food gained }.
-// (deadlockResetState moved to provision-recovery.js)
-// Record that a reset is FIRING (called once, before the stash+die): stamps the cooldown clock and
-// bumps the no-food streak. Stamping on FIRE (not on success) guarantees the detector can't re-fire
-// for DEADLOCK_RESET_COOLDOWN_MS even if this attempt aborts - so an unreachable bank / un-diable
-// spot can never spin retries. The WARNING surfaces the real root (food source still broken).
-// (noteDeadlockReset moved to provision-recovery.js)
 // Any REAL food/hp progress clears both the in-run fail counter and the persisted no-food streak
 // (the food source works again). Called each recover cycle + on a successful recovery.
-// (_noteDeadlockProgress moved to provision-recovery.js)
-// #41 P4: is post-death recovery complete enough to let the build drive again? Builds the snapshot
-// and asks scheduler.recoveryReady; CLEARS the P0 latch when ready (so resumeBuild proceeds). A hard
-// RECOVERY_MAX_MS ceiling on how long the latch has been held guarantees the build is never trapped
-// forever (P4 "never hides forever"), and any error fails OPEN (ready) - a snapshot glitch must not
-// stall a saved build. RESILIENT_RECOVERY=0 -> always ready (the latch is inert).
-// (recoveryReadyNow moved to provision-recovery.js)
-// RECOVER FROM DEGRADED (S5): the survival-class orchestrator that EXECUTES scheduler.recoveryPlan.
-// Loops { s = schedulerState; exit on ladderDone/isStopped/deadline; plan = recoveryPlan(s); take
-// the FIRST rung that is rungFeasible + has an executor + this run hasn't tried; run it; mark tried
-// on BOTH success and failure (once per action per run => <=8 executions => termination); re-loop -
-// each rung changes the world, so we re-snapshot + re-plan }. Bounded by RECOVERY_MAX_MS (default
-// 15 min), the once-per-action rule, and isStopped. No distance gates (recoveryPlan owns
-// sequencing), no new dig/place, no buildAbort/resumeJob touching. Returns { done, rungs, reason }.
-// (recoverFromDegraded moved to provision-recovery.js)
 
 // #58 DEADLOCK_RESET - the last-resort suicide-reset action (impure). STASH ALL non-essential at
 // the bank (aggressive: raw_iron/tools/materials, leave the pack empty so the grave holds nothing),
@@ -2183,85 +1648,21 @@ function noteWaterCrossing (bot) {
 // unreachable, chest full, can't pillar, didn't die) - NEVER suicides while still holding gear.
 // Returns true only if the bot actually died. The cooldown timestamp is stamped by the caller
 // (noteDeadlockReset) BEFORE this runs, so an abort still imposes the full anti-loop gap.
-// (deadlockSuicideReset moved to provision-recovery.js)
 
-// #63 SUICIDE_DIES §A (PURE, unit-tested): given a list of candidate cells each already world-
-// sampled + tagged { solidCeiling, standable }, return the FIRST that is genuine OPEN SKY and
-// stand-able (!solidCeiling && standable), else null. The suicide-reset uses this to choose where
-// to walk before pillaring for the lethal fall. Pure -> testable without a live bot.
-// (pickOpenSkyCell moved to provision-shelter.js)
 
-// #63 §A: world-sample the column at (x,z) near surfaceY. Find the top stand-able cell (solid non-
-// fluid floor with 2 air above) within a small vertical window, and whether that cell is inside our
-// own hut or has a SOLID ceiling within `ceil` blocks (leaves ignored - a canopy isn't a roof).
-// Returns { x, y, z, standable, solidCeiling }; a not-standable column reports standable:false.
-// (sampleColumnForSky moved to provision-recovery.js)
 
-// #63 SUICIDE_DIES §A: robustly get the bot to an OPEN-SKY, stand-able cell before pillaring for the
-// lethal fall (pillarUpTo refuses under our own roof). The live bug: a single 6-block step-out
-// failed to clear a big hut. Instead we sample a RING of candidate columns at radius 8-12 around the
-// hut anchor (8 compass bearings), rank them with pickOpenSkyCell, walk to the first genuinely open-
-// sky one, and RE-VERIFY open sky on arrival with the bot-position predicate (the authority) before
-// returning. Bounded (~deadlineMs, default 60s). Returns whether the bot ends genuinely under open
-// sky; the caller falls through to §B when it can't. SUICIDE_EXIT_OPEN_SKY=0 -> not called.
-// (reachOpenSky moved to provision-recovery.js)
 
-// #63 SUICIDE_DIES §B: FALLBACK deaths when pillar+fall can't be set up (still under our own roof).
-// Tries, in order, each independently bounded and abort-to-hold on failure: (1) DROWN in remembered
-// deep water, (2) PIT-DROP into a dug shaft beside the hut. Returns true only if the bot actually
-// died. SUICIDE_FALLBACK_DEATH=0 -> not called (caller aborts as today). Never wedges.
-// (deadlockFallbackDeath moved to provision-recovery.js)
 
-// #63 §B.1: DROWN on purpose. Walk to the nearest remembered DEEP (>=2) water, drive into it, then
-// clear all controls (crucially NOT jump) so the bot SINKS and its head stays submerged - the
-// navigate deliberate-drown latch stops the drown-escape reflex from swimming it out - and wait for
-// oxygen to deplete to death. Bounded (~90s total). The latch is set in the try and cleared in the
-// finally, so a normal accidental water entry ALWAYS still escapes. Returns true only if it died.
-// (suicideByDrown moved to provision-recovery.js)
 
-// #63 §B.2: PIT-DROP. Dig a ~6-deep OPEN shaft in the column one step FORWARD (never on the build
-// footprint / farm), then step into it so the >=5b fall kills at hp<=2. Because reach caps a single-
-// position dig at ~3-4 blocks, we deepen in two stages: dig the front column from the surface, drop
-// ONE into our own cell to regain reach, dig the front column deeper, then pillar the ONE block back
-// up so we stand at the shaft rim and step off. Bounded; refuses build/farm/protected blocks and
-// aborts to hold on any snag. Returns true only if the bot actually died.
-// (suicideByPitDrop moved to provision-recovery.js)
 
-// Deliberate, bounded death by FALL (the most controllable method - no reflex fights it, unlike
-// drowning which WATER_ESCAPE would resist). Get to open sky near home (pillarUpTo refuses under
-// our own roof), pillar ~DEADLOCK_FALL_H, then step off the edge -> a >=3b fall is lethal at hp<=2.
-// Bounded 30s; returns true only if the bot actually died, else aborts to holding (never wedges).
-// #63 SUICIDE_DIES: §A robustly reaches open sky first (reachOpenSky); if still roofed, §B falls
-// back to drown/pit-drop before the honest abort. Both flags =0 -> today's fall-only-then-abort.
-// (deadlockDieByFall moved to provision-recovery.js)
 
 // ==== S6: PROACTIVE MAINTENANCE PASS (§4.2/§5) ===========================================
-// The single maintain-class job. A thin, bounded composition of EXISTING routines keyed off
-// maintain.needs(snapshot): harvest orchard, tend/expand the farm, cook+bake, COURIER the food
-// surplus into the bank, SAFEKEEP spare kit, then top up gear/tools/torches + repair home. It
-// NEVER preempts progress/build (rank 1, tick admission, command-path stopMaintenance) and bails
-// on any survival need. MAINTAIN=0 -> the tick never dispatches this (defer-note restored).
-// (_maintaining moved to provision-maintain.js)
-// (_maintStop moved to provision-maintain.js)
-// (isMaintaining moved to provision-maintain.js)
-// (stopMaintenance moved to provision-maintain.js) // the running pass unwinds at its next isStopped poll
-// (_setMaintaining moved to provision-maintain.js) // test-only seam (schedstatetest activeJob synthesis)
-// (_maintState moved to provision-maintain.js)
 
-// Resolve the hut bank chest exactly as consolidateBank does: the bed-adjacent chest inside the
-// hut, else the nearest verified chest <=16b of the hut anchor. null (log+skip) if no bank -
-// making one is maintainHome's job (step 9). Returns the chest cell {x,y,z} or null.
-// (resolveBankCell moved to provision-bank.js)
 
 // ==== #64 DYNAMIC_FOOD (§B/§C wiring) =======================================================
 // Read "what is the bot about to do" from bot position + the scheduler snapshot into the PURE
 // foodNeedForPlan's plan shape {activity, distHome, depth, homeReachable}. PHYSICAL-FIRST + robust
 // (the mandate: derive distHome from bot pos vs hutAnchor, depth from surface Y vs bot Y; default to
-// the home baseline when unknown) so a stale/absent job label never mis-sizes the ration. `override`
-// lets a caller that KNOWS its plan (branchMine knows the descent target depth) force the numbers.
-// (DFOOD_DEEP moved to provision-food.js)
-// (DFOOD_FAR moved to provision-food.js)
-// (foodPlanNow moved to provision-food.js)
 
 // The imminent-excursion plan hint: set by branchMine/runGather at the pre-trip point so the courier
 // (which can fire from the pre-mine secureFood) keeps the TRIP-sized ration instead of stripping food
@@ -2269,7 +1670,6 @@ function noteWaterCrossing (bot) {
 // is imminent" guard). Save/restore nests correctly (runGather -> branchMine). Only ever consulted
 // when DYNAMIC_FOOD is on.
 // (_foodPlanHint moved to provision-food.js)
-// (_setFoodPlanHint moved to provision-food.js)
 
 // IRON_KEYSTONE: minedReal signal for the fruitless-count fix. Set true by gatherLoop the moment a
 // keystone-active iron grind GENUINELY descends into the shallow band and mines it (so a grind that
@@ -2285,101 +1685,24 @@ const IRON_KEYSTONE_ON = () => process.env.IRON_KEYSTONE !== '0'
 
 // §C - BOUNDED, FAIL-SAFE pre-trip food top-up. Before a deep-mine / far excursion, if the pack food
 // (points) is below what the plan needs, WITHDRAW the shortfall as bread from the bank (reuse
-// resources.acquire, bank-first: craft:false so it never kicks off a gather right before the trip).
-// Bounded (a loaf count), fail-safe (bank unreachable/empty -> withdraw no-ops -> the job proceeds with
-// what's carried; never blocks). DYNAMIC_FOOD=0 -> the caller skips this entirely (no top-up). Returns
-// the loaves withdrawn (0 if already stocked / nothing banked).
-// (topUpFoodForPlan moved to provision-food.js)
 
-// THE COURIER (§5.2): deposit the pack's food surplus into the hut bank so R2's raid-the-cache
-// always works. Reuses depositMaterials' open/deposit/close body via the explicit-list mode; the
-// pure maintain.courierPlan decides what moves. Refreshes the chest cache so bankFoodPts updates
-// next tick. Returns how many food items were banked.
-// (courierFoodToBank moved to provision-food.js)
 
-// SAFEKEEPING (§5.3, FIRM): stash spare tools + build-material surplus into the bank so a death
-// mid-excursion costs only the bounded loadout. Same bank + deposit mode as the courier; the pure
-// maintain.safekeepPlan (never the last working tool of a kind) decides. REFUSES during build
-// placement (belt-and-suspenders; trigger 3 lives in planner). Returns how many items were stashed.
-// (safekeepSweep moved to provision-maintain.js)
 
-// SPARE-KIT COURIER (#41 RESILIENT_RECOVERY, §P2): deposit a SURPLUS/dupe spare set (4 armor + pick
-// + sword) into the hut bank so a post-death respawn can withdraw + re-arm (rearmFromBank) WITHOUT
-// depending on a lost/lethal grave. Same bank + deposit machinery as the food courier; the pure
-// maintain.spareKitCourierPlan (never strips the bot's only kit) decides what moves. Returns how
-// many spare items were banked. SPAREKIT=0 / RESILIENT_RECOVERY=0 -> no-op.
-// (spareKitToBank moved to provision-maintain.js)
 
-// maintenancePass(bot, opts) - the orchestrator. opts: { say, nightIndoorOnly, isStopped }.
-// Returns { ok, steps: [label...], reason } for the tick's one-line note.
-// (maintenancePass moved to provision-maintain.js)
 
 // ---- INFRA CONSOLIDATION (fix #13) --------------------------------------------------------
-// Every "x,y,z" cell the bot has in its OWN infra memory, any kind. Used by lonelyFurnace to
-// exempt the bot's own table/chest/torch next to a camp furnace from the structure scan.
-// (ownInfraCells moved to provision-bank.js)
 
-// PURE: is the furnace at `cell` "in the middle of nowhere" - i.e. nothing PLAYER-built within
-// radius 5? readBlock(x,y,z) -> block|null. ownCells: Set/array of "x,y,z" the bot placed. A
-// STRUCTURE_RE hit disqualifies UNLESS it's (a) the furnace cell itself, (b) an own-remembered
-// cell (bot's own camp table/chest), or (c) a torch (the bot lights its own smelt camps). Any
-// other structure block (planks, door, wall, chest, another furnace...) => false, never touched.
-// Offline-unit-testable with a fake reader (exported).
-// (lonelyFurnace moved to provision-bank.js)
 
-// STEP 10 body: reclaim up to 2 scattered field furnaces per pass (>KEEP_R and <=MAX_R from the
-// hut). A bounded generalization of furnishHut's grab() - SAME primitives, NO new dig path:
-// re-read blockAt at the cell, require name==='furnace' EXACTLY (a player blast_furnace never
-// qualifies), toolForBlock('stone'), dig, collectDrops, forgetInfra. Eligibility is evaluated
-// AFTER walking to the furnace (so the lonely-furnace structure scan reads LOADED blocks - a
-// far furnace's chunk is unloaded and would scan blind; this is strictly safer than a pre-walk
-// scan). Returns the count reclaimed.
-// (consolidateFurnaces moved to provision-bank.js)
 
-// STEP 11 body: walk to ONE far registered scaffold cluster within LITTER_PATROL_R of home and
-// teardownVerified it. Registry-only + hut box excluded (alsoTrail OFF - the pathfix trail
-// remembers build fabric near home). Reuses scaffold.teardownVerified UNMODIFIED (its own
-// FILLER_RE re-read + canDigBlock + exclude gates). Returns blocks removed.
-// (litterPatrol moved to provision-bank.js)
 
 // ---- TREE FARMING (user-approved): the castle region is chopped bare, so the bot keeps
-// its own wood supply alive like a player would - replant after every chop, fish saplings
-// out of the leaves when it has none, and when the land is truly dry, plant a grove near
-// home and let it grow instead of wandering 300 blocks into the night.
-// (PLANTABLE_GROUND moved to provision-farm.js)
-// (saplingFor moved to provision-farm.js)
-// (saplingCount moved to provision-farm.js)
 
-// Is this XZ inside the current build's keep-out box? (footprint + canopy margin,
-// threaded down from autoBuild) - NEVER plant a future tree inside the castle.
-// (inAvoidBox moved to provision-farm.js)
 
-// Plant one sapling on open ground near `around` (a just-felled trunk or a grove cell).
-// (plantSaplingNear moved to provision-farm.js)
 
-// Bone-meal a planted sapling until it grows (or we run out) - turns the tree farm from
-// "wait ~20 min per tree" into "instant tree" whenever skeletons have paid their dues.
-// Crafts bone meal from bones on the fly (2x2 recipe, no table needed).
-// (boneMealSapling moved to provision-farm.js)
 
-// No saplings in the pack? Break a handful of this tree's leaves (natural only) and sweep
-// the drops - oak leaves shed a sapling ~5% of the time, so 10-12 leaves is a fair shot.
-// (fishSaplings moved to provision-farm.js)
 
-// PREP one orchard cell at (cx, ~baseY, cz): find the ground, clear vegetation above it,
-// shave natural bumps toward plot level, fill a shallow dip with dirt, and top non-soil
-// with dirt. Returns the plantable ground block, or null.
-// (prepOrchardCell moved to provision-farm.js)
 
-// Level ONE plot cell toward baseY: clear soft cover, shave a bump (<=2, natural only),
-// fill a 1-deep dip with dirt. The whole-plot flattening pass (operator review: "very
-// uneven terrain, not a clean flat area") - each call is cheap when the cell's already flat.
-// (levelPlotCell moved to provision-farm.js)
 
-// Plant an ORCHARD: an even grid (5-block lanes) on prepped, level ground near - but
-// never inside - the build's keep-out box. Operator spec: "a nice opening with flat
-// ground, trees planted evenly so it's easy to navigate and use". Returns count planted.
-// (plantGrove moved to provision-farm.js)
 
 async function gatherLoop (bot, item, count, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
@@ -4106,14 +3429,9 @@ async function runSmeltMulti (bot, output, input, count, positions, opts = {}) {
   return made
 }
 
-// Raw meats a furnace can cook, and what they become. Fish included - the bot eats those too.
-// (RAW_COOKABLE moved to provision-food.js)
 
 // Cook whatever raw meat we're carrying in a NEARBY furnace - the player-like tidy-up
 // ("standing at the furnace anyway? toss the porkchops in"). Opportunistic on purpose:
-// never crafts/places a furnace for this, needs fuel already in the pack, bounded to two
-// meat types per pass. Returns how many items came out cooked (0 = nothing to do).
-// (cookRawMeat moved to provision-food.js)
 
 // Strip `count` base logs into stripped logs: place a log, right-click with an
 // axe to strip it in-world, then mine it back. Returns number produced.
@@ -4221,7 +3539,6 @@ const KEEP_ON_BOT = /_pickaxe$|_axe$|_shovel$|_sword$|_hoe$|^shears$|_helmet$|_c
 // null if no interior cell / not near the hut (caller falls back to its normal placement).
 // (placeStationInInterior moved to provision-bank.js)
 
-// (ensureChest moved to provision-bank.js)
 
 // ---- ORIENTED chest placement + double-chest heal -----------------------------------
 // The hut bank must be ONE connected double chest. After the creeper rebuild the camp
@@ -4234,15 +3551,11 @@ const KEEP_ON_BOT = /_pickaxe$|_axe$|_shovel$|_sword$|_hoe$|^shears$|_helmet$|_c
 // sneak, verify the facing landed - with one side-flip retry in case the convention is
 // inverted. A wrong-facing chest is dug back up (fresh + empty + our own block).
 // (FACING_OFF moved to provision-bank.js)
-// (placeChestOriented moved to provision-bank.js)
 
 // Detect two ADJACENT own single chests in the hut and re-place them with ONE shared
 // perpendicular facing so they merge into a double. Contents move one chest at a time
 // (the pack never holds the whole treasury); a chest is only dug once it READS empty.
-// Returns true when the pair reads as a connected double afterwards.
-// (healBankDouble moved to provision-bank.js)
 
-// (gotoChest moved to provision-bank.js)
 
 // Deposit all BUILD MATERIALS (everything not in KEEP_ON_BOT) into the chest, so
 // the pack doesn't overflow mid-provision. Keeps `keepDirt` dirt for bridging.
@@ -4252,24 +3565,11 @@ const KEEP_ON_BOT = /_pickaxe$|_axe$|_shovel$|_sword$|_hoe$|^shears$|_helmet$|_c
 // the usual working set (KEEP_ON_BOT). NOTE: the camp rebuild always passed all:true;
 // it was silently ignored until now, leaving planks/coal stuck in the pack.
 const KEEP_WHEN_ALL = /_pickaxe$|_axe$|_shovel$|_sword$|_hoe$|^shears$|_helmet$|_chestplate$|_leggings$|_boots$|^torch$|flint_and_steel|_bucket$|^bucket$|^fishing_rod$|^cooked_|^bread$|_apple$/
-// (depositMaterials moved to provision-bank.js)
 
-// Withdraw up to `count` of `itemName` from the chest. Returns how many came out.
-// (withdrawItem moved to provision-bank.js)
 
 // ---- CHEST MIGRATION (operator promise): the banking chest lived in the open - one
-// creeper by the treasury loses the economy. Once the safehouse stands, the bank moves
-// INSIDE. Item-safe order: the new chest exists and is verified before anything leaves
-// the old one; the old chest is only dug up once it reads EMPTY.
-// (migrateChestInto moved to provision-bank.js)
 
 // ---- HOME BANK CONSOLIDATION (operator promise): ONE canonical treasury - the chest
-// inside the hut. Every other remembered chest within `radius` gets ferried into it and
-// dug up (item-safe: withdraw -> deposit round trips; the old chest is only removed once
-// it reads EMPTY). Field stashes from old camps stop rotting in the open where one
-// creeper audit loses the economy. Idempotent - runs every camp pass, fast no-op when
-// the bank is the only chest. Returns how many field chests were fully consolidated.
-// (consolidateBank moved to provision-bank.js)
 
 // ---- FURNISH THE HUT (operator: "wheres the bed crafting table and furnace?"): the
 // camp's loose infra moves indoors with the bank. Furnace and table get dug up and
@@ -4277,23 +3577,8 @@ const KEEP_WHEN_ALL = /_pickaxe$|_axe$|_shovel$|_sword$|_hoe$|^shears$|_helmet$|
 // 6-wide footprint (via the model), not the old +4 (5-wide) box that misclassified the
 // far wall row - used to tell an IN-hut station/chest from a field one.
 // (insideHutBox moved to provision-hut.js)
-// The doorway rim column, as a Vec3 at the door-lower / feet cell (anchor.y+1, the cell a
-// bot actually stands in to cross the threshold), or null - derived from the self-structure
-// model (schema-correct 6-wide rim, not the old 5-wide dx/dz 0..4 scan). anchor.y is the
-// floor plank slab, so the walkable door cell is hut.y+1.
-// (findHutDoorway moved to provision-hut.js)
-// Standable FREE interior cells (Vec3s), from the model: the CORRECT 4x4 interior (dx/dz
-// 1..4), floor-level only, threshold excluded, sorted furthest-from-door. The old scan was
-// a 3x3 (dx/dz 1..3) that missed the very cells the bot wedged in, and could return a cell
-// perched on a furniture/dirt pile.
-// (hutFreeCells moved to provision-hut.js)
-// Is a block of kind `itemRe` already standing inside the hut interior? Scans the correct
-// 4x4x(5) interior via the model, so a duplicate at dx/dz 4 (missed by the old 3x3) is seen.
-// (furnitureInHut moved to provision-hut.js)
 // (furnishHut DELETED in #110 - zero callers, and it carried three destroy-before-create paths)
 
-// Read chest contents as { name: count } (build materials the chest is holding).
-// (chestCounts moved to provision-bank.js)
 
 module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, HUNT_SOURCES, huntForDrop, planProvision, smeltFuelPlan, fuelBankWithdrawAmount, inventoryCounts, runGather, runCraft, runSmelt, runStrip, runPlan, branchMine, digStaircaseDown, ensureTable, ensureFurnace, ensureChest, depositMaterials, withdrawItem, chestCounts, detectWood, KEEP_ON_BOT, climbToSurface, pillarUpTo, digStaircaseUp, ensurePillarFiller, manualHopFromWater, breachWaterPocket, breachDryPocket, escapeUpColumn, toolForBlock, migrateChestInto, consolidateBank, placeChestOriented, healBankDouble, hasSolidCeiling, insideOwnStructure, ownHutAt, onHutApron, healHomeCrater, gatherLeather, woolCount, freeInteriorCell, reconcileInfra, cleanupHutInterior, stationInHut, stationSlot, maintainHut, maintainHome, hutAnchor, repairHutStructure, secureBase, secureBaseGate, sealHomeDescents, sealDescentsGate, worldTidy, litterSignature, inBuildZone, huntForFood, hasFood, needsFood, secureFood, isSecuringFood, releaseFoodLatch, boundedHold, recoverFromDegraded, isRecoveringDegraded, releaseRecoveryLatches, deadlockResetDue, deadlockResetState, pickOpenSkyCell, eatBestFood, scoutForWater, digInForNight, nightRest, nightRestWanted, restUntilSafe, isResting, recoverHp, isRecoveringHp, rememberBed, knownBed, sleepableNow, ensureSpawnBed, ensureHomeShelter, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, setSpawnSuspect, isSpawnSuspect, markBedUnusable, bedHeld, gearupState, gearupResult, gearupShouldArmBackoff, proactiveGearupGate, ironGrindMinedReal, resetIronGrindMined, isSheltering, shelterNeeded, isNight, nightStuck, underArmored, countFurnacesNear, cookRawMeat, dumpJunk, listInfra, rememberInfra, forgetInfra, noteWaterCrossing, lonelyFurnace, consolidateFurnaces, litterPatrol, ensureWheatFarm, tendWheatFarm, WHEAT_FARM_TARGET, surveyWaterSite, chooseFarmSite, RAW_COOKABLE, noteFurnaceHoldings, ensureFoodSupply, needFoodSupply, hasStandingFarm, scoutForFood, fishForFood, ensureHutApron, ensureHutBed, foodCount, survivalState, survivalNeed, mayDoProgress, schedulerState, lowHpCalm, setBuildZone, setDebugSink, rememberRoute, recallRoute, planTrekRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
   maintenancePass, isMaintaining, releaseMaintainLatch, stopMaintenance, _setMaintaining, courierFoodToBank, safekeepSweep, spareKitToBank, recoveryReadyNow, cropExclusionStep, cropPlaceExclusion, farmFootprintHas, hazardStepExclusion, waterStepExclusion, deathSpotExclusion, markHazardTraversal, setOperatorRouting, deepWaterUnderfoot, gatherSeedsNear,

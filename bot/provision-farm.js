@@ -35,14 +35,11 @@ const { hutAnchor, insideOwnStructure, ownHutAt, hasSolidCeiling } = provHut
 const P = () => require('./provision.js')
 const S = () => require('./provision.js').__siblings // refactor fix: reach __siblings-bridge fns (walkStaged, resolveBankCell, ensureTorches)
 
-let dbgSink = null // forwarded from provision.js's setDebugSink
-function setDebugSink (fn) { dbgSink = fn }
-const dbg = (...a) => {
-  const line = '[prov] ' + a.map(x => String(x)).join(' ')
-  if (process.env.BUILD_DEBUG) console.log(line)
-  if (dbgSink) dbgSink(line)
-}
+const { dbg, setDebugSink } = require('./debug-sink.js').makeDebug('[prov]') // §4: one definition of the sink rule; this module still owns its own sink
 
+// its own wood supply alive like a player would - replant after every chop, fish saplings
+// out of the leaves when it has none, and when the land is truly dry, plant a grove near
+// home and let it grow instead of wandering 300 blocks into the night.
 const PLANTABLE_GROUND = /^(grass_block|dirt|podzol|coarse_dirt|rooted_dirt|mud|moss_block)$/
 
 const WHEAT_FARM_TARGET = Number(process.env.WHEAT_FARM_TARGET || (process.env.FARM_EXPAND !== '0' ? 33 : 20)) // §4.8: 33 (~11 bread/cycle, breaks the food death-spiral) when FARM_EXPAND on; 20 off. >=20 crop cells: 12 barely covered 0->full (10 wheat ~3 bread ~15 hunger); 20 -> ~6 bread -> 0->full + surplus/buffer (was 12/6)
@@ -57,6 +54,12 @@ function farmFootprintHas (pos) {
   } catch { return false }
 }
 
+// ANTI-TRAMPLING (FARM_NO_TRAMPLE, §5.5): a SOFT additive per-block cost on our OWN persisted
+// wheat cells (+ the farmland under them + the hop-over cell) so travel/gather/climb routes bend
+// AROUND the plot instead of jumping across it (a jump-landing is what reverts farmland). It is
+// COST ONLY - never a wall, never a dig; position-keyed to our exact cells so reverted (dirt)
+// cells stay protected and FOREIGN village farmland is never avoided. Returns fn(block)->0|COST,
+// or null (flag off / no farm). Built ONCE per movements construction (A*-hot path).
 function cropExclusionStep (bot) {
   if (process.env.FARM_NO_TRAMPLE === '0') return null
   let cells = null
@@ -85,6 +88,13 @@ function cropExclusionStep (bot) {
   }
 }
 
+// NO_PLACE_ON_FARM (fix #17): a per-block PLACEMENT exclusion (fed to Movements.exclusionAreasPlace)
+// that FORBIDS the pathfinder from bridging/scaffolding a block onto our OWN farmland or the crop
+// cell just above it - placing cobble there destroys the farmland/crop and floods it (#28/#31).
+// cropExclusionStep already makes those cells high-COST to STEP on; this makes PLACEMENT on them
+// effectively forbidden (a huge additive cost - the exact idiom the break exclusion uses). Same
+// column set + y-window (cy-1..cy+1) as cropExclusionStep; only our own wheatFarm, never foreign
+// village farmland. Returns fn(block)->0|COST, or null (flag off / no farm).
 function cropPlaceExclusion (bot) {
   if (process.env.NO_PLACE_ON_FARM === '0') return null
   let cells = null
@@ -111,6 +121,8 @@ function cropPlaceExclusion (bot) {
   }
 }
 
+// Is this XZ inside the current build's keep-out box? (footprint + canopy margin,
+// threaded down from autoBuild) - NEVER plant a future tree inside the castle.
 function inAvoidBox (avoid, x, z) { return !!avoid && x >= avoid.x1 && x <= avoid.x2 && z >= avoid.z1 && z <= avoid.z2 }
 
 async function boneMealBlock (bot, pos, times) {
@@ -129,6 +141,18 @@ async function boneMealBlock (bot, pos, times) {
   }
 }
 
+// Till a bank block (dirt/grass) to farmland, VERIFIED by a world re-read. Returns:
+//   'farmland' - the cell is farmland now (already was, or the hoe took)
+//   'flooded'  - the crop cell above holds water that won't clear (unfarmable here)
+//   'unfarmable' | 'nohoe' | false - couldn't till (bad base / no hoe / hoe was a no-op)
+// ROOT CAUSE of the live "till did not take (got dirt)": MC only converts dirt->farmland
+// when the block DIRECTLY ABOVE is air (HoeItem checks pos.above().isAir()). If water has
+// flowed into the crop cell (a bank at the waterline, or flow opened by digging the veg),
+// the hoe is a SILENT no-op and the block stays dirt - reproduced live + on the test server.
+// Equip/reach/look are all fine (a clean dry cell tills first try); the ONLY blocker is a
+// non-air crop cell. So: guarantee the crop cell is air (clear veg/water, let flow settle,
+// re-read) BEFORE firing the hoe - then the till takes. A cell that keeps re-flooding is
+// genuinely unfarmable (water would wash the seed out too) and is honestly reported 'flooded'.
 async function tillCell (bot, cell) {
   const cropPos = cell.position.offset(0, 1, 0)
   let base = bot.blockAt(cell.position)
@@ -166,6 +190,12 @@ async function tillCell (bot, cell) {
   return (tilled && farm.farmlandReady(tilled.name)) ? 'farmland' : false
 }
 
+// #59 §A FARM_SEED_BANK (default on): WITHDRAW wheat_seeds from the hut bank BEFORE breaking any
+// grass - a chest full of seeds was invisible to the farm (the loop-open bug: "seed-starved ...
+// deferred" while 1.5 stacks sat banked). Resource-model correct (withdraw > gather). Bounded +
+// NEVER throws the food path (bank unreachable / no chest -> quietly returns, caller falls through
+// to the grass fallback). FARM_SEED_BANK=0 -> no-op (grass-only, byte-for-byte). Returns the seed
+// count on hand after the attempt.
 async function withdrawSeedsFromBank (bot, want, { near = null, isStopped = () => false, say = () => {} } = {}) {
   if (process.env.FARM_SEED_BANK === '0') return countItem(bot, 'wheat_seeds')
   const have = countItem(bot, 'wheat_seeds')
@@ -182,6 +212,12 @@ async function withdrawSeedsFromBank (bot, want, { near = null, isStopped = () =
   return now
 }
 
+// SEED GATHERING (extracted from ensureWheatFarm step 3, §5.4): break tall grass/ferns for
+// wheat_seeds up to `want`, roaming a few compass legs if the immediate area is barren. Same
+// grassIds / roam legs / budgets as before (behavior identical when want=3). Now also reusable
+// by the tend path so a seed-starved plot self-fills. Returns the seed count on hand.
+// #59 §A FARM_SEED_BANK: raid the bank FIRST (all three seed sites route through here), then this
+// grass loop is the FALLBACK for whatever the bank couldn't supply. =0 -> straight to grass.
 async function gatherSeedsNear (bot, want, { isStopped = () => false, near = null, say = () => {} } = {}) {
   const mcData = require('minecraft-data')(bot.version)
   const seedCount = () => countItem(bot, 'wheat_seeds')
@@ -239,6 +275,12 @@ async function gatherSeedsNear (bot, want, { isStopped = () => false, near = nul
   return got
 }
 
+// #56 FARM_TORCH (§C): light the plot for growth (light>=9) + mob suppression. Torches go on DRY,
+// NON-crop ground just outside/between the crop cells (never on farmland - a torch can't sit on it,
+// and never on a crop cell - that would kill the wheat), spaced ~6b so they don't cluster. Only
+// places torches the bot HAS (ensureTorches crafts from coal+stick if cheap, else we place what we
+// carry) - it NEVER blocks farm establishment on missing torches. Mirrors the orchard's placeAt(..,
+// /^torch$/) + ensureTorches. Returns how many were placed.
 async function placeFarmTorches (bot, cells, { isStopped = () => false } = {}) {
   if (!cells || !cells.length) return 0
   if (countItem(bot, 'torch') < 1) { try { await S().ensureTorches(bot, 4) } catch {} } // craft a few if coal+stick on hand; best-effort
@@ -267,6 +309,9 @@ async function placeFarmTorches (bot, cells, { isStopped = () => false } = {}) {
   return placed
 }
 
+// Level ONE plot cell toward baseY: clear soft cover, shave a bump (<=2, natural only),
+// fill a 1-deep dip with dirt. The whole-plot flattening pass (operator review: "very
+// uneven terrain, not a clean flat area") - each call is cheap when the cell's already flat.
 async function levelPlotCell (bot, cx, baseY, cz, { isStopped = () => false } = {}) {
   let ground = null
   for (let y = baseY + 3; y >= baseY - 2; y--) {
@@ -993,6 +1038,10 @@ async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () =
   return merged.length > 0
 }
 
+// a world re-read (returns true only if a `wheat` block actually stands after). This is the
+// self-heal primitive tend uses to re-plant cells a creeper/trample/failed-plant emptied.
+// `cropPos` = the crop cell (one above the farmland). Needs a seed; tills only if a hoe is on
+// hand and the base is real dirt/grass (never water/air/stone).
 async function replantCropCell (bot, cropPos, { isStopped = () => false } = {}) {
   const seeds = (bot.inventory ? bot.inventory.items() : []).find(i => i.name === 'wheat_seeds')
   if (!seeds) return false
@@ -1018,6 +1067,12 @@ async function replantCropCell (bot, cropPos, { isStopped = () => false } = {}) 
   return !!(crop && crop.name === 'wheat')
 }
 
+// Visit the farm: harvest ripe wheat (age 7), replant harvested cells, RE-PLANT any cell the
+// world says is empty/destroyed (creeper/trample/failed plant), bone-meal what's still growing,
+// and craft bread (3 wheat each). Called when hungry + huntless AND proactively by the food
+// supply pass. GROUNDED: reads the EXACT persisted crop cells and block-reads each - the old
+// blind `findBlocks(wheat)` scan returned nothing when planting had faith-failed, so tend
+// logged `harvested 0` forever. Robust to partial destruction: re-plants missing cells.
 async function tendWheatFarm (bot, { isStopped = () => false, say = () => {} } = {}) {
   const m = loadWorldMem()
   if (!m.wheatFarm) return false
@@ -1203,12 +1258,14 @@ async function tendWheatFarm (bot, { isStopped = () => false, say = () => {} } =
   return harvested > 0 || replanted > 0 || countItem(bot, 'bread') > 0
 }
 
+// A standing wheat farm (planted + remembered) = the renewable food source.
 function hasStandingFarm () { const wf = loadWorldMem().wheatFarm; return !!(wf && wf.cells && wf.cells.length > 0) }
 
 function saplingFor (logItem) { return logItem.replace(/_log$/, '_sapling') }
 
 function saplingCount (bot, logItem) { return (bot.inventory ? bot.inventory.items() : []).filter(i => i.name === saplingFor(logItem)).reduce((s, i) => s + i.count, 0) }
 
+// Plant one sapling on open ground near `around` (a just-felled trunk or a grove cell).
 async function plantSaplingNear (bot, around, logItem, opts = {}) {
   const sap = (bot.inventory ? bot.inventory.items() : []).find(i => i.name === saplingFor(logItem))
   if (!sap) return false
@@ -1233,6 +1290,9 @@ async function plantSaplingNear (bot, around, logItem, opts = {}) {
   return false
 }
 
+// Bone-meal a planted sapling until it grows (or we run out) - turns the tree farm from
+// "wait ~20 min per tree" into "instant tree" whenever skeletons have paid their dues.
+// Crafts bone meal from bones on the fly (2x2 recipe, no table needed).
 async function boneMealSapling (bot, sapPos) {
   const mcData = require('minecraft-data')(bot.version)
   const items = () => bot.inventory ? bot.inventory.items() : []
@@ -1260,6 +1320,8 @@ async function boneMealSapling (bot, sapPos) {
   return !/_sapling$/.test((bot.blockAt(sapPos) || {}).name || '')
 }
 
+// No saplings in the pack? Break a handful of this tree's leaves (natural only) and sweep
+// the drops - oak leaves shed a sapling ~5% of the time, so 10-12 leaves is a fair shot.
 async function fishSaplings (bot, around, logItem, { isStopped = () => false } = {}) {
   const mcData = require('minecraft-data')(bot.version)
   const leaf = mcData.blocksByName[logItem.replace(/_log$/, '_leaves')]
@@ -1274,6 +1336,9 @@ async function fishSaplings (bot, around, logItem, { isStopped = () => false } =
   if (broken) { await collectDrops(bot, 6); dbg('  leaf-fished ' + broken + ' leaves -> ' + saplingCount(bot, logItem) + ' saplings') }
 }
 
+// PREP one orchard cell at (cx, ~baseY, cz): find the ground, clear vegetation above it,
+// shave natural bumps toward plot level, fill a shallow dip with dirt, and top non-soil
+// with dirt. Returns the plantable ground block, or null.
 async function prepOrchardCell (bot, cx, baseY, cz, { isStopped = () => false } = {}) {
   // find ground: first solid block scanning down from a bit above plot level
   let ground = null
@@ -1327,6 +1392,9 @@ async function prepOrchardCell (bot, cx, baseY, cz, { isStopped = () => false } 
   return ground
 }
 
+// Plant an ORCHARD: an even grid (5-block lanes) on prepped, level ground near - but
+// never inside - the build's keep-out box. Operator spec: "a nice opening with flat
+// ground, trees planted evenly so it's easy to navigate and use". Returns count planted.
 async function plantGrove (bot, home, logItem, { isStopped = () => false, say = () => {}, avoid = null, max = 8 } = {}) {
   if (saplingCount(bot, logItem) < 1) return 0
   // anchor shifted +24 south of the original (pre-leveling) plot: the operator ordered

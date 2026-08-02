@@ -54,14 +54,15 @@ const P = () => require('./provision.js')
 const S = () => require('./provision.js').__siblings
 const touchP = tag => { try { require('./commands.js').touchProgress(tag) } catch {} }
 
-let dbgSink = null
-function setDebugSink (fn) { dbgSink = fn }
-const dbg = (...a) => {
-  const line = '[prov] ' + a.map(x => String(x)).join(' ')
-  if (process.env.BUILD_DEBUG) console.log(line)
-  if (dbgSink) dbgSink(line)
-}
+const { dbg, setDebugSink } = require('./debug-sink.js').makeDebug('[prov]') // §4: one definition of the sink rule; this module still owns its own sink
 
+// See DESIGN-deadlock-suicide-reset.md. The bot floors at hp1/food0 FOREVER when no food is
+// reachable (fishing dead, no water for the farm) - starvation never kills on Normal, so the
+// recovery ladder pings the same failing rungs and makes zero progress. A respawn is a CLEAN full
+// reset (hp20/food20 at the bed) that lets it range far enough to actually reach food. So when
+// GENUINELY deadlocked: STASH EVERYTHING at the bank (empty pack -> empty grave -> zero loss),
+// deliberately DIE (fall damage), respawn fresh, recover properly from full. DEADLOCK_RESET=0 ->
+// today's hold-and-starve, byte-for-byte (the detector never fires, no code path changes).
 const DEADLOCK_HP = Number(process.env.DEADLOCK_HP || 2)          // fire only at hp<=this
 
 const DEADLOCK_MAX_NOFOOD = Number(process.env.DEADLOCK_MAX_NOFOOD || 5) // back off after N resets that gained no food
@@ -90,6 +91,9 @@ const DEADLOCK_RESET_COOLDOWN_MS = Number(process.env.DEADLOCK_RESET_COOLDOWN_MS
 
 const DEADLOCK_FALL_H = Number(process.env.DEADLOCK_FALL_H || 6)  // pillar height for the lethal fall
 
+// #63 SUICIDE_DIES (default on): make the suicide-reset actually DIE when it can't pillar-to-fall
+// under its own roof. §A robustly reaches OPEN SKY before pillaring; §B falls back to DROWN then
+// PIT-DROP when open sky is unreachable. Each `=0` -> today's fall-only-then-abort byte-for-byte.
 const SUICIDE_EXIT_OPEN_SKY = process.env.SUICIDE_EXIT_OPEN_SKY !== '0' // §A: reach open sky (ring at r8-12), not just a single 6-block step
 
 const SUICIDE_FALLBACK_DEATH = process.env.SUICIDE_FALLBACK_DEATH !== '0' // §B: drown / pit-drop when pillar+fall can't be set up
@@ -137,6 +141,10 @@ function noteDeadlockAttempt () {
   saveWorldMem()
 }
 
+// Record that a reset is FIRING (called once, before the stash+die): stamps the cooldown clock and
+// bumps the no-food streak. Stamping on FIRE (not on success) guarantees the detector can't re-fire
+// for DEADLOCK_RESET_COOLDOWN_MS even if this attempt aborts - so an unreachable bank / un-diable
+// spot can never spin retries. The WARNING surfaces the real root (food source still broken).
 function noteDeadlockReset () {
   const m = loadWorldMem()
   const d = m.deadlockReset = m.deadlockReset || { at: 0, count: 0 }
@@ -158,6 +166,11 @@ function migrateDeadlockCounter () {
   if (was) dbg('deadlock-reset: cleared ' + was + ' phantom reset(s) - that counter recorded attempts, not deaths')
 }
 
+// PURE detector (unit-tested): does a GENUINE multi-cycle deadlock warrant a suicide-reset NOW?
+// Fires ONLY at hp<=HP & food===0 & no pack food & failCount>=FAILS & the cooldown has elapsed,
+// with the flag on. Everything is passed in (no bot / no I/O) so the trigger is fully testable.
+// opts.enabled===false (the DEADLOCK_RESET=0 flag) hard-disables it; hp/fails/cooldownMs override
+// the module defaults for the unit tests.
 function deadlockResetDue ({ hp, food, hasPackFood, failCount, sinceLastResetMs }, opts = {}) {
   if (opts.enabled === false) return false
   const HP = opts.hp != null ? opts.hp : DEADLOCK_HP
@@ -183,8 +196,14 @@ function deadlockResetDue ({ hp, food, hasPackFood, failCount, sinceLastResetMs 
   return false
 }
 
+// Persisted (world-mem, the gearupState pattern) so a restart can't bypass the cooldown or the
+// no-food back-off. { at: last reset timestamp, count: consecutive resets with no food gained }.
 function deadlockResetState () { migrateDeadlockCounter(); return loadWorldMem().deadlockReset || { at: 0, count: 0 } }
 
+// #63 §A: world-sample the column at (x,z) near surfaceY. Find the top stand-able cell (solid non-
+// fluid floor with 2 air above) within a small vertical window, and whether that cell is inside our
+// own hut or has a SOLID ceiling within `ceil` blocks (leaves ignored - a canopy isn't a roof).
+// Returns { x, y, z, standable, solidCeiling }; a not-standable column reports standable:false.
 function sampleColumnForSky (bot, x, z, surfaceY, ceil) {
   const nameAt = (ax, ay, az) => { try { const b = bot.blockAt(new Vec3(ax, ay, az)); return b && b.name } catch { return null } }
   let foundY = null
@@ -201,6 +220,13 @@ function sampleColumnForSky (bot, x, z, surfaceY, ceil) {
   return { x, y: foundY, z, standable: true, solidCeiling }
 }
 
+// #63 SUICIDE_DIES §A: robustly get the bot to an OPEN-SKY, stand-able cell before pillaring for the
+// lethal fall (pillarUpTo refuses under our own roof). The live bug: a single 6-block step-out
+// failed to clear a big hut. Instead we sample a RING of candidate columns at radius 8-12 around the
+// hut anchor (8 compass bearings), rank them with pickOpenSkyCell, walk to the first genuinely open-
+// sky one, and RE-VERIFY open sky on arrival with the bot-position predicate (the authority) before
+// returning. Bounded (~deadlineMs, default 60s). Returns whether the bot ends genuinely under open
+// sky; the caller falls through to §B when it can't. SUICIDE_EXIT_OPEN_SKY=0 -> not called.
 async function reachOpenSky (bot, { isStopped = () => false, home = null, deadlineMs = 60000 } = {}) {
   const deadline = Date.now() + deadlineMs
   const CEIL = DEADLOCK_FALL_H + 2
@@ -270,6 +296,12 @@ async function ensurePillarFiller (bot, { isStopped = () => false, need = DEADLO
   return !!scaffold.pickFiller(bot)
 }
 
+// Deliberate, bounded death by FALL (the most controllable method - no reflex fights it, unlike
+// drowning which WATER_ESCAPE would resist). Get to open sky near home (pillarUpTo refuses under
+// our own roof), pillar ~DEADLOCK_FALL_H, then step off the edge -> a >=3b fall is lethal at hp<=2.
+// Bounded 30s; returns true only if the bot actually died, else aborts to holding (never wedges).
+// #63 SUICIDE_DIES: §A robustly reaches open sky first (reachOpenSky); if still roofed, §B falls
+// back to drown/pit-drop before the honest abort. Both flags =0 -> today's fall-only-then-abort.
 async function deadlockDieByFall (bot, { isStopped = () => false, home = null, say = () => {} } = {}) {
   if (!bot.entity) return false
   // #76b: the 30s budget predates ensurePillarFiller - walk-out + digging + pillaring consumed all
@@ -402,6 +434,11 @@ async function deadlockDieByFall (bot, { isStopped = () => false, home = null, s
   } finally { try { bot.removeListener('death', onDeath) } catch {}; bot.clearControlStates() }
 }
 
+// #63 §B.1: DROWN on purpose. Walk to the nearest remembered DEEP (>=2) water, drive into it, then
+// clear all controls (crucially NOT jump) so the bot SINKS and its head stays submerged - the
+// navigate deliberate-drown latch stops the drown-escape reflex from swimming it out - and wait for
+// oxygen to deplete to death. Bounded (~90s total). The latch is set in the try and cleared in the
+// finally, so a normal accidental water entry ALWAYS still escapes. Returns true only if it died.
 async function suicideByDrown (bot, { isStopped = () => false, home = null, say = () => {} } = {}) {
   if (!bot.entity) return false
   const here = bot.entity.position.floored()
@@ -443,6 +480,12 @@ async function suicideByDrown (bot, { isStopped = () => false, home = null, say 
   } finally { navigate.setDeliberateDrown(false); try { bot.removeListener('death', onDeath) } catch {}; try { bot.clearControlStates() } catch {} }
 }
 
+// #63 §B.2: PIT-DROP. Dig a ~6-deep OPEN shaft in the column one step FORWARD (never on the build
+// footprint / farm), then step into it so the >=5b fall kills at hp<=2. Because reach caps a single-
+// position dig at ~3-4 blocks, we deepen in two stages: dig the front column from the surface, drop
+// ONE into our own cell to regain reach, dig the front column deeper, then pillar the ONE block back
+// up so we stand at the shaft rim and step off. Bounded; refuses build/farm/protected blocks and
+// aborts to hold on any snag. Returns true only if the bot actually died.
 async function suicideByPitDrop (bot, { isStopped = () => false, home = null, say = () => {} } = {}) {
   if (!bot.entity) return false
   // ==== SETUP MUST NOT SPEND THE WORK'S BUDGET (live 2026-08-01) ============================
@@ -628,6 +671,10 @@ async function suicideByPitDrop (bot, { isStopped = () => false, home = null, sa
   } finally { try { bot.removeListener('death', onDeath) } catch {}; try { bot.clearControlStates() } catch {} }
 }
 
+// #63 SUICIDE_DIES §B: FALLBACK deaths when pillar+fall can't be set up (still under our own roof).
+// Tries, in order, each independently bounded and abort-to-hold on failure: (1) DROWN in remembered
+// deep water, (2) PIT-DROP into a dug shaft beside the hut. Returns true only if the bot actually
+// died. SUICIDE_FALLBACK_DEATH=0 -> not called (caller aborts as today). Never wedges.
 async function deadlockFallbackDeath (bot, { isStopped = () => false, home = null, say = () => {} } = {}) {
   if (SUICIDE_DROWN) {
     try { if (await suicideByDrown(bot, { isStopped, home, say })) return true } catch (e) { dbg('deadlock-reset: drown fallback threw (' + e.message + ')') }
@@ -710,6 +757,11 @@ function isRecoveringHp () { return _recoveringHp }
 
 let _resting = false
 
+// HOLD until the night is survived: a nightRest attempt returns false when another flow
+// already holds the shelter lock (the idle reflex sealed a pit while a resume was booting)
+// - and callers treated false as "carry on", walking straight back into the dark (died
+// that way at 350,64,36). This BLOCKS until day/armored/stopped, re-attempting rest
+// whenever nothing else is resting.
 async function restUntilSafe (bot, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const maxFails = opts.maxShelterFails || 4
@@ -745,6 +797,8 @@ function sleepableNow (bot) {
   return ((bot.thunderState || 0) > 0) || !!(bot.time && bot.time.timeOfDay >= 12542 && bot.time.timeOfDay <= 23458)
 }
 
+// Sleep in the remembered bed if we're standing near it. Returns true only if we actually
+// slept through to daylight (or the night got skipped) - anything else falls back to the pit.
 async function sleepInBedHere (bot, { say = () => {}, isStopped = () => false } = {}) {
   const mcData = require('minecraft-data')(bot.version)
   const bedIds = Object.values(mcData.blocksByName).filter(b => /_bed$/.test(b.name)).map(b => b.id)
@@ -881,6 +935,14 @@ async function nightRestInner (bot, opts = {}) {
   return digInForNight(bot, opts)
 }
 
+// BOUNDED HOLD (S5, replaces the old famine-hold - the I5 migration): nothing edible anywhere -> retreat
+// home/indoors and WAIT in the ONE bounded way whose wake provably occurs, instead of dying to
+// chip damage at 1hp. Built FROM the old famine-hold's proven body (same get-home preamble + 90s re-eval
+// loop with the FORCED-FRESH bank re-check - the 11h-stale-cache starvation fix, DO NOT LOSE IT),
+// PLUS a grave-appeared wake (a fresh grave IS a recovery input - the ladder's next pass runs R1)
+// and a sealed-pit branch (existing digInForNight) for night-exposed-no-bed. Refuses to hold on
+// nightStuck (eternal night has no dawn wake - the caller acts by night instead). The hard deadline
+// is unconditional (BOUNDED_HOLD_MS, default 90s). Returns { held, wake }.
 async function boundedHold (bot, { isStopped = () => false, say = () => {}, deadlineMs = Number(process.env.BOUNDED_HOLD_MS || 90000) } = {}) {
   if (nightStuck(bot)) return { held: false, wake: 'nightStuck' } // eternal night: act, don't wait for a dawn that won't come
   const hut = listInfra('hut')[0] || null
@@ -1108,6 +1170,13 @@ async function crossingAdmissible (bot, dist) {
   }
 }
 
+// WRONG-ANCHOR RECOVERY, survival tier: the server respawn anchor is lost or far (the
+// world-spawn carousel - every death dropped the bot ~430 blocks from home, and it could
+// never re-assert because the re-assert only ran "when home"). Getting home and re-
+// asserting the hut bed IS the goal here, above build/gather/gear: long-legged trek
+// straight to the remembered bed (or the hut), then a FORCED ensureSpawnBed. No 120-block
+// maxTrek cop-out - this is exactly the "too far" case. Honest return; the caller retries
+// on the next respawn (the persisted spawn-suspect flag survives deaths and restarts).
 async function recoverSpawnAnchor (bot, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const say = opts.say || (() => {})
@@ -1144,6 +1213,14 @@ async function recoverSpawnAnchor (bot, opts = {}) {
   return ok
 }
 
+// GO-HOME-FIRST decision (PURE, offline-testable): the bot's hut BED got creeper-destroyed,
+// so the server respawn fell back to WORLD SPAWN ~570 blocks from base - and live it then
+// just GEARED UP out in the wilderness, abandoning its hut/farm/chest and re-doing everything
+// from scratch far away. A bot 500 blocks from home should WALK HOME, not re-build its life in
+// the wild. This picks the home anchor (hut > remembered bed > persisted build site) and
+// decides whether we landed far enough to trek home BEFORE any gear-up/local gathering. XZ
+// distance only - respawn Y varies, and "far" is a horizontal concept. No bot handle, just
+// data, so the "am I far from home -> go home" logic is unit-tested without a world.
 function homeRecoveryDecision ({ hut, bed, resumeAt, pos, dist } = {}) {
   const D = dist != null ? dist : Number(process.env.RECOVER_HOME_DIST || 64)
   // Anchor priority: the HUT is true home (its bed is the spawn we want back). A lone
@@ -1159,6 +1236,15 @@ function homeRecoveryDecision ({ hut, bed, resumeAt, pos, dist } = {}) {
   return { anchor, source, dist: d, far: d > D }
 }
 
+// GO-HOME-FIRST recovery, survival tier (outranks gear-up/gather): if we respawned FAR from
+// home, trek back BEFORE resuming any local work, then rebuild the bed + re-assert the spawn
+// so future deaths return HOME instead of world spawn - closing the "abandon base at world
+// spawn" loop. Bounded (maxLegs) + honest: an unreachable home fails loudly and the caller
+// retries on the next respawn rather than wedging forever. Food/threat survival still applies
+// en route (auto-eat + nav's water/pit/climb recovery run through walkStaged). Distinct from
+// recoverSpawnAnchor (which is gated on the spawn-suspect flag AND no build to resume): this
+// fires purely on DISTANCE, considers the build site as a fallback anchor, and explicitly
+// rebuilds the bed. RECOVER_HOME=0 disables it at the caller.
 async function recoverHome (bot, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const say = opts.say || (() => {})
@@ -1327,6 +1413,11 @@ const RUNG_EXECUTORS = {
   'rerunLadderByNight': async (bot, o) => { o.dbg('(ladder) rerun by night - re-planning') }
 }
 
+// #41 P4: is post-death recovery complete enough to let the build drive again? Builds the snapshot
+// and asks scheduler.recoveryReady; CLEARS the P0 latch when ready (so resumeBuild proceeds). A hard
+// RECOVERY_MAX_MS ceiling on how long the latch has been held guarantees the build is never trapped
+// forever (P4 "never hides forever"), and any error fails OPEN (ready) - a snapshot glitch must not
+// stall a saved build. RESILIENT_RECOVERY=0 -> always ready (the latch is inert).
 async function recoveryReadyNow (bot) {
   if (process.env.RESILIENT_RECOVERY === '0') return true
   const commands = require('./commands.js')
@@ -1358,6 +1449,13 @@ async function recoveryReadyNow (bot) {
 
 let _recoveringDegraded = false
 
+// RECOVER FROM DEGRADED (S5): the survival-class orchestrator that EXECUTES scheduler.recoveryPlan.
+// Loops { s = schedulerState; exit on ladderDone/isStopped/deadline; plan = recoveryPlan(s); take
+// the FIRST rung that is rungFeasible + has an executor + this run hasn't tried; run it; mark tried
+// on BOTH success and failure (once per action per run => <=8 executions => termination); re-loop -
+// each rung changes the world, so we re-snapshot + re-plan }. Bounded by RECOVERY_MAX_MS (default
+// 15 min), the once-per-action rule, and isStopped. No distance gates (recoveryPlan owns
+// sequencing), no new dig/place, no buildAbort/resumeJob touching. Returns { done, rungs, reason }.
 async function recoverFromDegraded (bot, { isStopped = () => false, say = () => {}, maxMs = Number(process.env.RECOVERY_MAX_MS || 900000), reason } = {}) {
   if (_recoveringDegraded) return { done: false, rungs: [], reason: 'busy' }
   _recoveringDegraded = true

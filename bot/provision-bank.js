@@ -35,16 +35,13 @@ const { hutAnchor, insideOwnStructure, hasSolidCeiling, freeInteriorCell, statio
 const P = () => require('./provision.js')
 const S = () => require('./provision.js').__siblings
 
-let dbgSink = null
-function setDebugSink (fn) { dbgSink = fn }
-const dbg = (...a) => {
-  const line = '[prov] ' + a.map(x => String(x)).join(' ')
-  if (process.env.BUILD_DEBUG) console.log(line)
-  if (dbgSink) dbgSink(line)
-}
+const { dbg, setDebugSink } = require('./debug-sink.js').makeDebug('[prov]') // §4: one definition of the sink rule; this module still owns its own sink
 
 const FACING_OFF = { north: [0, -1], south: [0, 1], west: [-1, 0], east: [1, 0] }
 
+// Resolve the hut bank chest exactly as consolidateBank does: the bed-adjacent chest inside the
+// hut, else the nearest verified chest <=16b of the hut anchor. null (log+skip) if no bank -
+// making one is maintainHome's job (step 9). Returns the chest cell {x,y,z} or null.
 function resolveBankCell (bot) {
   try {
     const bank = listInfra('chest', bot).find(e => ownHutAt({ x: e.x, y: e.y, z: e.z }))
@@ -60,6 +57,10 @@ function isBankStand (feetName, headName, sideNames, hasAdjacentWater) {
   return shelterSite.feetCellDry(feetName, headName, sideNames || [])
 }
 
+// #52 FISH_FROM_BANK — the nearest DRY, castable bank stand cell adjacent to water `w`, or null.
+// Scans solid ground blocks within ~3b horizontally of w (a small y-window covers a flush shore or a
+// one-block lip), tests each with isBankStand, and returns the feet Vec3 nearest the bot. Never picks
+// a cell in/under water - the whole point is to fish standing dry, casting INTO the pond.
 function bankStandFor (bot, w) {
   if (!bot.entity || !w) return null
   const nameAt = p => { const b = bot.blockAt(p); return b ? b.name : null }
@@ -201,6 +202,7 @@ async function placeChestOriented (bot, target, want, opts = {}) {
   return false
 }
 
+// Returns true when the pair reads as a connected double afterwards.
 async function healBankDouble (bot, hut, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const list = listInfra('chest', bot).filter(e => insideHutBox(e, hut))
@@ -322,6 +324,7 @@ async function healBankDouble (bot, hut, opts = {}) {
   return !!merged
 }
 
+// Read chest contents as { name: count } (build materials the chest is holding).
 async function chestCounts (bot, chestBlock) {
   await gotoChest(bot, chestBlock)
   const chest = await bot.openContainer(chestBlock)
@@ -366,6 +369,7 @@ async function depositMaterials (bot, chestBlock, opts = {}) {
   return n
 }
 
+// Withdraw up to `count` of `itemName` from the chest. Returns how many came out.
 async function withdrawItem (bot, chestBlock, itemName, count) {
   const mcData = require('minecraft-data')(bot.version)
   const def = mcData.itemsByName[itemName]
@@ -381,6 +385,9 @@ async function withdrawItem (bot, chestBlock, itemName, count) {
   return got
 }
 
+// creeper by the treasury loses the economy. Once the safehouse stands, the bank moves
+// INSIDE. Item-safe order: the new chest exists and is verified before anything leaves
+// the old one; the old chest is only dug up once it reads EMPTY.
 async function migrateChestInto (bot, oldPos, hut, { isStopped = () => false, say = () => {} } = {}) {
   // WALL-HUGGING interior cells (operator: "why did it place its chest in the middle") -
   // the centre [2,2] stays walkable; corners/edges first. Collect free cells, then find
@@ -448,6 +455,11 @@ async function migrateChestInto (bot, oldPos, hut, { isStopped = () => false, sa
   return true
 }
 
+// inside the hut. Every other remembered chest within `radius` gets ferried into it and
+// dug up (item-safe: withdraw -> deposit round trips; the old chest is only removed once
+// it reads EMPTY). Field stashes from old camps stop rotting in the open where one
+// creeper audit loses the economy. Idempotent - runs every camp pass, fast no-op when
+// the bank is the only chest. Returns how many field chests were fully consolidated.
 async function consolidateBank (bot, hut, { isStopped = () => false, say = () => {}, radius = 64 } = {}) {
   const chests = listInfra('chest', bot)
   const bank = chests.find(e => ownHutAt({ x: e.x, y: e.y, z: e.z }))
@@ -500,6 +512,8 @@ async function consolidateBank (bot, hut, { isStopped = () => false, say = () =>
   return consolidated
 }
 
+// Every "x,y,z" cell the bot has in its OWN infra memory, any kind. Used by lonelyFurnace to
+// exempt the bot's own table/chest/torch next to a camp furnace from the structure scan.
 function ownInfraCells () {
   const infra = (loadWorldMem().infra || {})
   const set = new Set()
@@ -511,6 +525,12 @@ function ownInfraCells () {
   return set
 }
 
+// PURE: is the furnace at `cell` "in the middle of nowhere" - i.e. nothing PLAYER-built within
+// radius 5? readBlock(x,y,z) -> block|null. ownCells: Set/array of "x,y,z" the bot placed. A
+// STRUCTURE_RE hit disqualifies UNLESS it's (a) the furnace cell itself, (b) an own-remembered
+// cell (bot's own camp table/chest), or (c) a torch (the bot lights its own smelt camps). Any
+// other structure block (planks, door, wall, chest, another furnace...) => false, never touched.
+// Offline-unit-testable with a fake reader (exported).
 function lonelyFurnace (readBlock, cell, ownCells) {
   const own = ownCells instanceof Set ? ownCells : new Set(ownCells || [])
   const cx = Math.floor(cell.x); const cy = Math.floor(cell.y); const cz = Math.floor(cell.z)
@@ -533,6 +553,13 @@ function lonelyFurnace (readBlock, cell, ownCells) {
   return true
 }
 
+// STEP 10 body: reclaim up to 2 scattered field furnaces per pass (>KEEP_R and <=MAX_R from the
+// hut). A bounded generalization of furnishHut's grab() - SAME primitives, NO new dig path:
+// re-read blockAt at the cell, require name==='furnace' EXACTLY (a player blast_furnace never
+// qualifies), toolForBlock('stone'), dig, collectDrops, forgetInfra. Eligibility is evaluated
+// AFTER walking to the furnace (so the lonely-furnace structure scan reads LOADED blocks - a
+// far furnace's chunk is unloaded and would scan blind; this is strictly safer than a pre-walk
+// scan). Returns the count reclaimed.
 async function consolidateFurnaces (bot, { isStopped = () => false, say = () => {} } = {}) {
   const home = hutAnchor()
   if (!home) return 0
@@ -574,6 +601,10 @@ async function consolidateFurnaces (bot, { isStopped = () => false, say = () => 
   return reclaimed
 }
 
+// STEP 11 body: walk to ONE far registered scaffold cluster within LITTER_PATROL_R of home and
+// teardownVerified it. Registry-only + hut box excluded (alsoTrail OFF - the pathfix trail
+// remembers build fabric near home). Reuses scaffold.teardownVerified UNMODIFIED (its own
+// FILLER_RE re-read + canDigBlock + exclude gates). Returns blocks removed.
 async function litterPatrol (bot, home, { isStopped = () => false, say = () => {} } = {}) {
   const R = Number(process.env.LITTER_PATROL_R || 64)
   const now = Date.now()

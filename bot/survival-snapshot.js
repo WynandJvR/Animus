@@ -83,6 +83,8 @@ function reader (s) {
   }
 }
 
+// reads. This is the ONE place the scattered survival predicates are gathered; every progress
+// job consults survivalNeed(bot)/mayDoProgress(bot) instead of its own food/hp/threat checks.
 function survivalState (bot) {
   // VITALS FIRST, and outside every try/catch that could take them down with it.
   // survival-snapshot.js:133 wraps this whole function in a swallowing try, so before this an
@@ -152,14 +154,30 @@ function survivalState (bot) {
   }
 }
 
+// The highest UNMET survival need blocking progress, or null. opts.foodThreshold: 14 to START a
+// progress job (default), 6 for a mid-activity CRITICAL bail. THE single authority.
 function survivalNeed (bot, opts = {}) {
   if (!bot.entity) return null
   const foodThreshold = opts.foodThreshold != null ? opts.foodThreshold : parseInt(process.env.PROGRESS_FOOD_MIN || '14', 10)
   return arbiter.jobSurvivalNeed(survivalState(bot), { ...opts, foodThreshold })
 }
 
+// May a progress job (gearup/build/mine/gather) run RIGHT NOW? False when a SURVIVE need is
+// unmet. Callers yield to the need (secure food / flee / shelter) and resume once it's met.
 function mayDoProgress (bot, opts = {}) { return survivalNeed(bot, opts) == null }
 
+// async. Every sub-read is individually try/catch-wrapped so a half-broken world yields a PARTIAL
+// snapshot (an absent field = "not blocking" per the scheduler contract), never a throw. The bank
+// read is cachedOnly (MANDATORY, REDESIGN §11: never walk the bot from a tick). SCHEDULER=0 never
+// calls this.
+// ACTIVE-JOB SYNTHESIS (S7 §3.3), factored out of schedulerState so BOTH the snapshot AND the 5s
+// watchdog interval read ONE definition. SYNC + cheap (no bank reads, no awaits): commands' running
+// activity first (classified), else the five survival latches - exactly as before. Two fields are
+// now REAL: lastProgressAt = max(the verified-progress clock, this job's own startedAt) so a job
+// entered by a path that forgot to touch at t0 still starts its clock at startedAt rather than
+// inheriting a stale global clock (the pure watchdog prefers lastProgressAt when non-null, so a
+// too-old value would insta-fail a fresh job); blockedOn = the §6 nudge marker, cleared by any touch.
+// Never throws.
 function activeJobInfo () {
   const commands = require('./commands.js')
   const prog = (() => { try { return commands.progressInfo() } catch { return { at: 0, stalled: false } } })()

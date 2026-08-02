@@ -37,13 +37,7 @@ const NAV_WAYPOINT_GRAPH = process.env.NAV_WAYPOINT_GRAPH !== '0'
 let buildZone = null
 function setBuildZone (box) { buildZone = box || null }
 
-let dbgSink = null // forwarded from provision.js's setDebugSink
-function setDebugSink (fn) { dbgSink = fn }
-const dbg = (...a) => {
-  const line = '[prov] ' + a.map(x => String(x)).join(' ')
-  if (process.env.BUILD_DEBUG) console.log(line)
-  if (dbgSink) dbgSink(line)
-}
+const { dbg, setDebugSink } = require('./debug-sink.js').makeDebug('[prov]') // §4: one definition of the sink rule; this module still owns its own sink
 
 // ---- WORLD MEMORY (semantic map, layer 1: resources) --------------------------------
 // Perception ends at loaded chunks (~64 blocks) and exploration was memoryless - every

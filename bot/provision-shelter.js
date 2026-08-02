@@ -47,16 +47,21 @@ let buildZone = null
 function setBuildZone (box) { buildZone = box || null }
 function inBuildZone (x, z) { return !!buildZone && x >= buildZone.x1 && x <= buildZone.x2 && z >= buildZone.z1 && z <= buildZone.z2 }
 
-let dbgSink = null
-function setDebugSink (fn) { dbgSink = fn }
-const dbg = (...a) => {
-  const line = '[prov] ' + a.map(x => String(x)).join(' ')
-  if (process.env.BUILD_DEBUG) console.log(line)
-  if (dbgSink) dbgSink(line)
-}
+const { dbg, setDebugSink } = require('./debug-sink.js').makeDebug('[prov]') // §4: one definition of the sink rule; this module still owns its own sink
 
+// fix #15 Piece C (flag DEFEND_WHEN_HIT, default ON, read once at module load - mirrors index.js):
+// a sealed shelter that is nonetheless TAKING DAMAGE (breached/leaky seal, mob fell in before the
+// cap) must bail out to fight/flee instead of holding _sheltering for up to 600s while hits land.
+// =0 reverts both pit waits to their old `!fullySealed`/`!recapped`-only damage bails.
 const DEFEND_WHEN_HIT_ON = process.env.DEFEND_WHEN_HIT !== '0'
 
+// FROZEN / ETERNAL NIGHT: on the live server doDaylightCycle is off - timeOfDay is pinned in the
+// night band and DAWN NEVER COMES (grounded live: tod stuck ~15438, delta 0 over 45s). Left to
+// the normal rhythm the bot shelters forever: underArmored -> shelterNeeded -> it re-seals its
+// bunker every cycle, and gearup is night-gated so it never re-arms - the exact "no armor, mobs
+// about" hole it never climbed out of (live 379,62,40, pinned 25+ min). Detect a night that will
+// not end so the reflexes can shelter BRIEFLY, then resume careful progress (gear up first). On a
+// NORMAL server timeOfDay always advances, so this never trips and nights end at dawn as before.
 const NIGHT_FROZEN_MS = parseInt(process.env.NIGHT_STUCK_MS || '90000', 10) // tod pinned this long at night = dawn isn't coming
 
 const NIGHT_OVERLONG_MS = 900000 // ...or one continuous night runs 15 min (a normal night's dark is ~8-9 min; backstop for a non-frozen but stuck/very-laggy night)
@@ -65,6 +70,8 @@ let _nightStart = 0 // start of the current unbroken night
 
 let _todSeen = { tod: null, at: 0 } // last time timeOfDay changed meaningfully
 
+// Where a shelter pit last FLOODED - do not dig another hole next to the same aquifer
+// for a while (the re-dig loop beside water is the entombment/drowning mechanism).
 let lastFlood = null // {x, z, at}
 
 let _sheltering = false
@@ -144,6 +151,8 @@ async function findDiggableDryCell (bot, opts = {}) {
   return null
 }
 
+// Bounded water scout: 4 cardinal legs x expanding radius, scanning for surface water at
+// each stop. Feeds BOTH fishing and the wheat farm (found ponds land in 'water' memory).
 async function scoutForWater (bot, { isStopped = () => false, maxMs = 150000, rings } = {}) {
   const mcData = require('minecraft-data')(bot.version)
   const waterId = mcData.blocksByName.water.id
@@ -165,6 +174,9 @@ async function scoutForWater (bot, { isStopped = () => false, maxMs = 150000, ri
   return []
 }
 
+// How many armor slots are actually worn (0-4). Modulates the deep-mine plan (deepMinePlan):
+// a naked bot digs shallower/shorter so it doesn't die on the same deep excursion an armored
+// bot survives (naked-deep deaths, live). Complements underArmored (which is a boolean gate).
 function armorPieceCount (bot) {
   let n = 0
   try { for (const s of ['head', 'torso', 'legs', 'feet']) { if (bot.inventory && bot.inventory.slots[bot.getEquipmentDestSlot(s)]) n++ } } catch { return 0 }
@@ -180,6 +192,15 @@ function lowHpCalm (bot) {
   return (bot.health ?? 20) < 12 && !nearHostile(bot, 6)
 }
 
+// Fire night-rest whenever we're under-armored and DUSK is falling. This USED to also wait for
+// a hostile within 12 blocks - which meant the bot wandered exposed all night and only started
+// digging once a skeleton was already shooting it (verified live: 7 night deaths in one
+// evening, several while "sheltering"). A naked player doesn't wait to be chased: at dusk they
+// go to bed or hole up BEFORE the mobs arrive. Trigger at DUSK (12200), NOT mob-spawn (13000):
+// a fresh pit takes ~15-20s to dig + seal, so starting after dark means a zombie walks straight
+// into the open hole mid-dig (verified live: began the pit at timeOfDay 13618, a zombie walked
+// in during the dig, died). The ~800-tick (~40s) head start lets the pit be sealed before any
+// mob spawns. isNight (13000) stays the trigger for the ARMORED "wanted" cases below.
 function shelterNeeded (bot) { return !!(bot.time && bot.time.timeOfDay >= 12200 && bot.time.timeOfDay < 23500) && underArmored(bot) }
 
 function nightStuck (bot) {
@@ -192,6 +213,10 @@ function nightStuck (bot) {
   return (now - _todSeen.at) > NIGHT_FROZEN_MS || (now - _nightStart) > NIGHT_OVERLONG_MS
 }
 
+// Rest is WANTED (not just needed) when night catches us with the bed close by - even in
+// full armor a player sleeps if home is right there (operator rule: safer overall). Far
+// from the bed and armored, keep working the night; the commute would cost more than the
+// safety buys.
 function nightRestWanted (bot) {
   if (shelterNeeded(bot)) return true
   if (!isNight(bot) || !bot.entity) return false
@@ -253,6 +278,12 @@ async function sealShaft (bot, interior = {}) {
   return { capped, sideHoles, capPos }
 }
 
+// Widen ONE floor-level neighbour of `feet` into a torch alcove so a sealed pit can be LIT.
+// PROBE everything first (world re-reads): the candidate must be natural + breakable, and its
+// floor, far wall, both side faces AND ceiling must all be solid non-liquid (alcoveSafe) with no
+// liquid on any of its 6 faces - so cutting the one cell keeps the box a complete seal. ONE
+// attempt, first candidate that passes; returns the dug cell Vec3 or null. The ONLY new dig in
+// the shelter flow, gated by canBreakNaturally (anti-grief) + the liquid probes.
 async function digTorchAlcove (bot, feet) {
   const SIDES = [[1, 0], [-1, 0], [0, 1], [0, -1]]
   const N6 = [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0], [0, -1, 0]]
@@ -638,6 +669,10 @@ async function digInForNight (bot, opts = {}) {
   } finally { _sheltering = false; bot.clearControlStates && bot.clearControlStates() }
 }
 
+// #63 SUICIDE_DIES §A (PURE, unit-tested): given a list of candidate cells each already world-
+// sampled + tagged { solidCeiling, standable }, return the FIRST that is genuine OPEN SKY and
+// stand-able (!solidCeiling && standable), else null. The suicide-reset uses this to choose where
+// to walk before pillaring for the lethal fall. Pure -> testable without a live bot.
 function pickOpenSkyCell (cells) {
   if (!Array.isArray(cells)) return null
   for (const c of cells) { if (c && !c.solidCeiling && c.standable) return c }
