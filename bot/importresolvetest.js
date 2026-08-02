@@ -158,6 +158,106 @@ eq(unresolved.length, 0, 'every cross-module import resolves to a real export')
   eq(typeof provFarm.farmFootprintHas, 'function', 'scaffold.js depends on provision-farm.farmFootprintHas')
 }
 
+// ---- CALL SHAPE: never pass more arguments than the target accepts ------------------------
+// Resolving a NAME is not the same as calling it correctly, and this repo has shipped that bug
+// before (3aabb63: "a call-shape bug that HAD already shipped"). Arity OVERFLOW - more args than
+// the callee declares, with no rest param - is near-always a real defect: the caller believes a
+// different signature, so its trailing arguments are silently dropped.
+//
+// UNDERFLOW is deliberately NOT asserted. The house style declares trailing params bare and
+// defaults them inside (`maxAgeMs || MAX_AGE_MS`, `opts = {}`, `if (tag)`), so 112 production
+// call sites legitimately pass fewer - every one audited on 2026-08-02 and all guarded.
+{
+  // Blank comments and string CONTENT to '~' (not spaces, or a lone string arg counts as zero
+  // args) while preserving offsets, so prose and filenames cannot look like code.
+  const scrubAll = s => {
+    let out = '', i = 0
+    while (i < s.length) {
+      const c = s[i], d = s[i + 1]
+      if (c === '/' && d === '/') { while (i < s.length && s[i] !== '\n') { out += ' '; i++ } continue }
+      if (c === '/' && d === '*') { const e = s.indexOf('*/', i + 2); const stop = e < 0 ? s.length : e + 2; for (let k = i; k < stop; k++) out += s[k] === '\n' ? '\n' : ' '; i = stop; continue }
+      if (c === "'" || c === '"' || c === '`') {
+        const q = c; out += '~'; i++
+        while (i < s.length && s[i] !== q) { if (s[i] === '\\') { out += '~'; i++ } out += s[i] === '\n' ? '\n' : '~'; i++ }
+        out += '~'; i++; continue
+      }
+      out += c; i++
+    }
+    return out
+  }
+  const splitTop = str => {
+    const out = []; let d = 0, cur = ''
+    for (const c of str) {
+      if ('([{'.includes(c)) d++
+      else if (')]}'.includes(c)) d--
+      if (c === ',' && d === 0) { out.push(cur); cur = ''; continue }
+      cur += c
+    }
+    if (cur.trim()) out.push(cur)
+    return out.filter(x => x.trim() !== '')
+  }
+  // null => unknowable (spread / unbalanced); else the argument count
+  const argCount = (s, open) => {
+    let d = 0, i = open
+    for (; i < s.length; i++) { if (s[i] === '(') d++; else if (s[i] === ')') { d--; if (!d) break } }
+    if (d !== 0) return null
+    const inner = s.slice(open + 1, i)
+    if (!inner.trim()) return 0
+    let depth = 0, commas = 0
+    for (let k = 0; k < inner.length; k++) {
+      const c = inner[k]
+      if ('([{'.includes(c)) depth++
+      else if (')]}'.includes(c)) depth--
+      else if (c === ',' && depth === 0) commas++
+      else if (depth === 0 && inner.slice(k, k + 3) === '...') return null
+    }
+    return commas + 1
+  }
+
+  const cleanOf = {}
+  for (const f of all) cleanOf[f] = scrubAll(fs.readFileSync(path.join(BOT, f), 'utf8').split(String.fromCharCode(13)).join(''))
+
+  const SIG = {}
+  for (const f of files) {
+    const s = cleanOf[f]; SIG[f] = {}
+    const rx = /(?:^|\n)\s*(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/g
+    let m
+    while ((m = rx.exec(s))) {
+      const open = s.indexOf('(', m.index + m[0].length - 1)
+      let d = 0, i = open
+      for (; i < s.length; i++) { if (s[i] === '(') d++; else if (s[i] === ')') { d--; if (!d) break } }
+      const parts = splitTop(s.slice(open + 1, i))
+      if (!SIG[f][m[1]]) SIG[f][m[1]] = { total: parts.length, rest: parts.some(p => p.trim().startsWith('...')) }
+    }
+  }
+
+  const overflow = []
+  for (const f of all) {
+    const s = cleanOf[f]
+    const rawSrc = fs.readFileSync(path.join(BOT, f), 'utf8').split(String.fromCharCode(13)).join('')
+    // aliases come from the RAW source: scrubbing blanks the './module.js' path
+    const alias = {}
+    let a
+    const areq = /^(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*'\.\/([\w.-]+)'\s*\)(?!\s*\.)/gm
+    while ((a = areq.exec(rawSrc))) alias[a[1]] = norm(a[2])
+    for (const [al, target] of Object.entries(alias)) {
+      if (!SIG[target]) continue
+      const rx = new RegExp('(?<![\\w$.])' + al.replace(/\$/g, '\\$') + '\\.([A-Za-z_$][\\w$]*)\\s*\\(', 'g')
+      let m
+      while ((m = rx.exec(s))) {
+        const sig = SIG[target][m[1]]
+        if (!sig || sig.rest) continue
+        const n = argCount(s, m.index + m[0].length - 1)
+        if (n !== null && n > sig.total) {
+          overflow.push(`${f}:${s.slice(0, m.index).split('\n').length}  ${al}.${m[1]}(...) passes ${n}, ${target} declares ${sig.total}`)
+        }
+      }
+    }
+  }
+  for (const o of overflow) console.log('     ' + o)
+  eq(overflow.length, 0, 'no call passes more arguments than the target function accepts')
+}
+
 // The resource model must reach the bank through a binding that EXISTS - the original bug was
 // invisible precisely because `provision.chestCounts` was a legal expression that read undefined.
 {
