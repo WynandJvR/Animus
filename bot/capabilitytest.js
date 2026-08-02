@@ -223,7 +223,12 @@ t('ITEM 2 (loud): an unhandled pick is a logged wiring bug, never a silent retur
   const src = srcOf('index.js')
   assert(/NOTHING in the registry can run it - nothing dispatched \(this is a wiring bug, not a decision\)/.test(src), 'a job with no executor is loud')
   assert(!/\}\s*else return \/\/ unknown survival job name - do nothing/.test(src), 'the bare `else return` is gone')
-  assert(/flee is REFLEX-owned/.test(src), 'the one job the tick deliberately does not run says so by name')
+  // The tick must NAME the job it deliberately declines to run. This used to grep for the literal
+  // "flee is REFLEX-owned" - which passed while the branch tested `pick.job === 'flee'` and the
+  // scheduler.REFLEX_OWNED list it cited went unread. The branch now consults the LIST and names
+  // whichever job matched, so assert both halves: the list is the gate, and the log still names it.
+  assert(/scheduler\.REFLEX_OWNED\.includes\(pick\.job\)/.test(src), 'the REFLEX_OWNED list is the gate, not a hardcoded job name')
+  assert(/' is REFLEX-owned/.test(src), 'the declined job is named in the log')
   // ...and a REFUSED dispatch is loud too. That is the 780-to-82 gap: the tick declining a pick
   // it had just made, silently, is the single most expensive silence in this codebase.
   assert(/NOT dispatched: ' \+ gate\.why/.test(src), 'a declined dispatch prints its blocker')

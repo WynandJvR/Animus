@@ -1187,8 +1187,12 @@ if (SCHED_ON) {
       //     creeper to 'flee', which is not a scheduler job - the arbiter/escape stack acts on
       //     those inside the tick, faster than any dispatch could. That was correct and totally
       //     invisible until it was named (DESIGN-PRINCIPLES §5; scheduler.REFLEX_OWNED).
-      if (pick && pick.job === 'flee') {
-        if (schedDeferNoted !== 'flee') { schedDeferNoted = 'flee'; note('(sched) flee is REFLEX-owned (arbiter/escape stack handles it in-tick) - not dispatching a job for it: ' + pick.reason) }
+      //     The LIST is the authority, not this branch: it used to test `pick.job === 'flee'`
+      //     while the comment pointed at scheduler.REFLEX_OWNED, so a second reflex-owned job
+      //     added to that list would have been dispatched anyway - named in one place, enforced
+      //     in another, which is the drift §4 exists to stop.
+      if (pick && scheduler.REFLEX_OWNED.includes(pick.job)) {
+        if (schedDeferNoted !== pick.job) { schedDeferNoted = pick.job; note('(sched) ' + pick.job + ' is REFLEX-owned (arbiter/escape stack handles it in-tick) - not dispatching a job for it: ' + pick.reason) }
         return
       }
       // (b) the maintenance pass exists but is not wired in this era (MAINTAIN=0).
