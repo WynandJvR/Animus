@@ -24,6 +24,7 @@
 
 const { goals } = require('mineflayer-pathfinder')
 const provision = require('./provision.js')
+const provMining = require('./provision-mining.js') // climbToSurface - direct, not via the facade
 const resources = require('./resources.js')
 const navigate = require('./navigate.js')
 const mining = require('./mining.js') // pure tool-durability model (toolUsesLeft) for the freshPickaxes computation
@@ -212,7 +213,7 @@ async function regroupForCraft (bot, anchor, { isStopped = () => false, say = ()
   // 1) climb out first if buried - a goto CAN'T plan out of a sealed shaft (no-dig travel
   //    profile), so the anchor walk below would just churn the recovery ladder (the slow
   //    3-min climb-out the operator saw). Surface on a dig-capable staircase/pillar first.
-  if (underground()) { try { await provision.climbToSurface(bot, anchor.y, { isStopped }) } catch (e) { dbg('regroup climb-out: ' + e.message) } }
+  if (underground()) { try { await provMining.climbToSurface(bot, anchor.y, { isStopped }) } catch (e) { dbg('regroup climb-out: ' + e.message) } }
   // 2) walk back to the anchor's open ground (recovery ladder handles any residual pit/water)
   try { await navigate.navigateTo(bot, new goals.GoalNearXZ(anchor.x, anchor.z, 4), { deadlineMs: 60000, isStopped, label: 'plan-regroup' }) } catch (e) { dbg('regroup goto anchor: ' + e.message) }
   return true

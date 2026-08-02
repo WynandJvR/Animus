@@ -12,6 +12,7 @@ const { Vec3 } = require('vec3')
 const memory = require('./memory.js') // persistent named waypoints
 const schematic = require('./schematic.js') // download/parse + survival physical building
 const provision = require('./provision.js') // BOM -> gather/craft plan + execution
+const provMining = require('./provision-mining.js') // shafts/staircases/branch mine + the vertical escape (climbToSurface) - direct, not via the facade
 const caps = require('./capabilities.js')   // the PURE capability registry: what the bot can obtain, and how
 const resources = require('./resources.js') // unified resource model: pack + verified chests, withdraw>craft>gather
 const mining = require('./mining.js') // pure tool-durability model (toolUsesLeft) for the freshPickaxes computation
@@ -291,7 +292,7 @@ async function travelFar (bot, dest, opts = {}) {
     say(reason)
     const cs = Date.now(); const yBefore = Math.floor(bot.entity.position.y)
     escaping = true
-    try { await provision.climbToSurface(bot, surf.y, { isStopped, surfaceY: surf.y }) }
+    try { await provMining.climbToSurface(bot, surf.y, { isStopped, surfaceY: surf.y }) }
     catch { /* couldn't cut up from here */ } finally { escaping = false }
     climbTimeMs += Date.now() - cs
     bot.pathfinder.setMovements(travelMovements(bot))
@@ -3092,7 +3093,7 @@ async function autoBuild (bot, schem, at, opts = {}) {
       const meY = Math.floor(bot.entity.position.y)
       if (meY < home.y - 6 && provision.hasSolidCeiling(bot)) {
         dbg('material', name, 'starting round buried at y=' + meY + ' - climbing to surface first')
-        try { await provision.climbToSurface(bot, home.y, { isStopped }) } catch {}
+        try { await provMining.climbToSurface(bot, home.y, { isStopped }) } catch {}
       }
       // Walk home ONLY when there's a reason: pack full enough to stash, or the last
       // round made no progress (reset from a known-good anchor). Unconditionally walking

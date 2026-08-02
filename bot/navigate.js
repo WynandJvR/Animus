@@ -29,6 +29,7 @@ const dbg = (...a) => {
 }
 
 const prov = () => require('./provision.js') // lazy - see layering note above
+const provMining = () => require('./provision-mining.js') // LAZY: provision-mining top-requires navigate, so a top-level import here would be a real cycle
 
 // ---- reflex arbitration ------------------------------------------------------------
 // While a recovery is physically maneuvering (pillaring out of a pit, threading a
@@ -517,7 +518,7 @@ async function escapeToDryLand (bot, { goalDir = null, isStopped = () => false, 
     let ySurf = feet.y
     for (let dy = 0; dy <= 12; dy++) { const n = sample(feet.x, feet.y + dy, feet.z); if (!n || !/water/.test(n)) { ySurf = feet.y + dy; break } }
     dbg('escapeToDryLand: unclimbable lip - pillaring to y=' + (ySurf + 1) + ' then stepping off')
-    try { await prov().pillarUpTo(bot, ySurf + 1, { isStopped }) } catch (e) { dbg('escapeToDryLand: pillar failed (' + e.message + ')') }
+    try { await provMining().pillarUpTo(bot, ySurf + 1, { isStopped }) } catch (e) { dbg('escapeToDryLand: pillar failed (' + e.message + ')') }
     if (!feetInWater(bot) && bot.entity.onGround) { // now on the tower top - step off onto the dry cell
       try {
         try { bot.pathfinder.setGoal(null) } catch {}
@@ -1000,7 +1001,7 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
           if (!filler) { dbg('recovery: no filler available and none diggable here - pillar rung cannot help, handing to the next rung'); return false }
         }
         dbg('recovery: wedged in a PIT at ' + p0.floored() + ' - pillaring out to y=' + pit.rimY)
-        try { await prov().pillarUpTo(bot, pit.rimY, { isStopped }) } catch (e) { dbg('recovery: pillar-out failed (' + e.message + ')') }
+        try { await provMining().pillarUpTo(bot, pit.rimY, { isStopped }) } catch (e) { dbg('recovery: pillar-out failed (' + e.message + ')') }
         if (movedEnough()) return true
         // ==== AUDIT 2026-07-29 FIX 17: IF YOU CANNOT PILLAR OUT, DIG OUT =====================
         // Live, 16:28-16:31 on the live server: wedged in a 1x1 shaft (solid on all four sides at
@@ -1017,7 +1018,7 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
         // That is the fourth capability found today that exists, is tested, and is unreachable
         // from the place that needs it.
         dbg('recovery: pillar did not lift me out - cutting a staircase up the shaft wall instead')
-        try { await prov().digStaircaseUp(bot, pit.rimY + 1, { isStopped }) } catch (e) { dbg('recovery: staircase-out failed (' + e.message + ')') }
+        try { await provMining().digStaircaseUp(bot, pit.rimY + 1, { isStopped }) } catch (e) { dbg('recovery: staircase-out failed (' + e.message + ')') }
         return movedEnough()
       }
     },
@@ -1050,7 +1051,7 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
         const local = !!xz && Math.abs(Math.floor(xz.x) - feet.x) <= 1 && Math.abs(Math.floor(xz.z) - feet.z) <= 1
         const targetY = (local && gy != null) ? Math.max(surf.y, Math.floor(gy)) : surf.y
         dbg('recovery: stuck UNDERGROUND at ' + p0.floored() + ' - climbing to the surface y=' + targetY + ' (ground reads y' + surf.groundY + ')')
-        try { await prov().climbToSurface(bot, targetY, { isStopped, surfaceY: surf.y }) } catch (e) { dbg('recovery: climb-out failed (' + e.message + ')') }
+        try { await provMining().climbToSurface(bot, targetY, { isStopped, surfaceY: surf.y }) } catch (e) { dbg('recovery: climb-out failed (' + e.message + ')') }
         return movedEnough()
       }
     },

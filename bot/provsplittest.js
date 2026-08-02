@@ -93,7 +93,7 @@ function ok (cond, label) { eq(!!cond, true, label) }
 // here - `git log -L92,92:provsplittest.js` replays every past adjustment and its reasoning.
 {
   const pub = Object.keys(provision).filter(k => k !== '__siblings')
-  eq(pub.length, 185, 'facade: provision.js still exports exactly 185 public names')
+  eq(pub.length, 180, 'facade: provision.js still exports exactly 180 public names')
 
   const moved = [
     [worldMemory, ['listInfra', 'rememberInfra', 'forgetInfra', 'recordWedge', 'listWedges', 'ownInfraAnchors',
@@ -104,7 +104,7 @@ function ok (cond, label) { eq(!!cond, true, label) }
       'maintainHome', 'maintainHut', 'repairHutStructure', 'ensureHutApron', 'ensureHutBed',
       'worldTidy', 'litterSignature', 'bedInPack', 'bedCandidates', 'acquireBed', 'placeBedNear']],
     [provFarm, ['ensureWheatFarm', 'tendWheatFarm', 'hasStandingFarm', 'WHEAT_FARM_TARGET']],
-    [provMining, ['branchMine', 'digStaircaseDown', 'climbToSurface', 'pillarUpTo']],
+    // provision-mining is NOT here any more - see the "left the facade" block below.
     [provBank, ['ensureChest', 'depositMaterials', 'withdrawItem', 'chestCounts', 'consolidateBank',
       'healBankDouble', 'migrateChestInto', 'lonelyFurnace', 'consolidateFurnaces', 'litterPatrol']],
     [provFood, ['hasFood', 'foodCount', 'needsFood', 'secureFood', 'fishForFood', 'huntForFood',
@@ -119,6 +119,24 @@ function ok (cond, label) { eq(!!cond, true, label) }
     }
   }
   ok(checked >= 50, 'facade: checked ' + checked + ' moved names')
+
+  // ---- provision-mining LEFT the facade (2026-08-02) ---------------------------------------
+  // The facade was scaffolding for the split: keep one import stable while code moved. The
+  // split landed, so a name still on it is coupling, not API. mining goes first because only
+  // ONE of its five public names had a real caller outside provision.js - the other four were
+  // reachable but never reached. Callers now import provision-mining.js directly.
+  //
+  // The trap this closes: `provision.NAME` on a name that is no longer exported is `undefined`,
+  // and this file's whole premise is that undefined-inside-a-catch reads as "nothing here".
+  // navigate.js reached these through its OWN lazy accessor (`prov()`, not `P()`), so a grep for
+  // the usual spellings missed four live vertical-escape call sites. Assert the DIRECT binding
+  // resolves, not merely that the facade dropped the name.
+  for (const n of ['branchMine', 'digStaircaseDown', 'climbToSurface', 'pillarUpTo', 'digStaircaseUp']) {
+    eq(provision[n], undefined, 'facade: provision.' + n + ' is GONE (callers import provision-mining directly)')
+    eq(typeof provMining[n], 'function', 'direct: provision-mining.' + n + ' is the one binding')
+  }
+  eq(provision.__siblings.ensureTorches, undefined, 'bridge: ensureTorches left (farm/hut lazy-require mining directly)')
+  eq(typeof provMining.ensureTorches, 'function', 'direct: provision-mining.ensureTorches still resolves')
 }
 
 // ---- 3. THE __siblings BRIDGE --------------------------------------------------------------

@@ -34,6 +34,7 @@ const { hutAnchor, insideOwnStructure, ownHutAt, hasSolidCeiling } = provHut
 // The provisioning layer, resolved at CALL time (see the note above).
 const P = () => require('./provision.js')
 const S = () => require('./provision.js').__siblings // refactor fix: reach __siblings-bridge fns (walkStaged, resolveBankCell, ensureTorches)
+const provMining = () => require('./provision-mining.js') // LAZY on purpose: provision-mining top-requires this module, so a top-level import here would be a real cycle
 
 const { dbg, setDebugSink } = require('./debug-sink.js').makeDebug('[prov]') // §4: one definition of the sink rule; this module still owns its own sink
 
@@ -283,7 +284,7 @@ async function gatherSeedsNear (bot, want, { isStopped = () => false, near = nul
 // /^torch$/) + ensureTorches. Returns how many were placed.
 async function placeFarmTorches (bot, cells, { isStopped = () => false } = {}) {
   if (!cells || !cells.length) return 0
-  if (countItem(bot, 'torch') < 1) { try { await S().ensureTorches(bot, 4) } catch {} } // craft a few if coal+stick on hand; best-effort
+  if (countItem(bot, 'torch') < 1) { try { await provMining().ensureTorches(bot, 4) } catch {} } // craft a few if coal+stick on hand; best-effort
   if (countItem(bot, 'torch') < 1) { dbg('  wheat farm: no torches on hand (skipping lighting - establishment not blocked)'); return 0 }
   const cropCols = new Set(cells.map(c => c.x + ',' + c.z))
   // spaced anchors (~6b apart) so torches cover perimeter + interior without clustering.

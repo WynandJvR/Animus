@@ -38,6 +38,7 @@ const { loadWorldMem, saveWorldMem, listInfra, rememberInfra, forgetInfra, recal
 // The provisioning layer, resolved at CALL time (see the late-binding note above).
 const P = () => require('./provision.js')
 const S = () => require('./provision.js').__siblings // refactor fix: reach the __siblings-bridge walkStaged
+const provMining = () => require('./provision-mining.js') // LAZY on purpose: provision-mining top-requires this module, so a top-level import here would be a real cycle
 
 const { dbg, setDebugSink } = require('./debug-sink.js').makeDebug('[prov]') // §4: one definition of the sink rule; this module still owns its own sink
 
@@ -1520,7 +1521,7 @@ async function secureBase (bot, opts = {}) {
       const res = require('./resources.js')
       if (countItem(bot, 'coal') + countItem(bot, 'charcoal') < 1) { try { await res.withdrawItems(bot, 'coal', 8, { near: hut, maxDist: 64 }) } catch {} }
       if (countItem(bot, 'stick') < 1) { try { await res.withdrawItems(bot, 'stick', 4, { near: hut, maxDist: 64 }) } catch {} }
-      await S().ensureTorches(bot, want)
+      await provMining().ensureTorches(bot, want)
     } catch (e) { dbg('  secureBase: torch supply failed (' + e.message + ')') }
   }
 
