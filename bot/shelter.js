@@ -111,7 +111,27 @@ function bedHoldMs (kind) {
   return BED_HOLD_MS // unusable (and any unknown kind)
 }
 
+// ---- THE HOMEWARD DEADLINE (2026-08-02) -------------------------------------------------
+// Two numbers that were literals in two different files, and that together state the only
+// promise an outbound journey has to keep: BE BACK IN TIME.
+//
+//   SHELTER_TOD     the tick at which the bot's own shelter rule fires (provision-shelter.
+//                   shelterNeeded). Not 13000 (full dark): a pit takes ~15-20s to dig and seal,
+//                   so the rule takes a ~800-tick head start. That is the DEADLINE.
+//   BED_TREK_RANGE  how far nightRest will walk to reach the remembered bed when the caller
+//                   is a recovery (provision-recovery.recoverHp passes it). Past this the
+//                   shelter code gives up on the bed and digs a hole - which is precisely the
+//                   `nightRest: bed too far (108 > 32) - pitting here` line that says the bot
+//                   spent another night away from its bank, farm and furnace. That is the
+//                   ARRIVAL RADIUS: get inside it and the bed, and everything at home, works.
+//
+// scheduler.homeLeash derives the outbound leash from BOTH, so the distance an excursion may
+// wander and the distance the shelter code will walk home can never drift apart again (#4).
+const SHELTER_TOD = 12200
+const BED_TREK_RANGE = 32
+
 module.exports = {
   AIRISH, shelterDiggable, feetCellDry, rankByDistance, alcoveSafe, farmConflict,
-  sleepFailKind, bedHoldMs, BED_HOLD_MS, BED_HOLD_MONSTER_MS, BED_HOLD_FELLSHORT_MS
+  sleepFailKind, bedHoldMs, BED_HOLD_MS, BED_HOLD_MONSTER_MS, BED_HOLD_FELLSHORT_MS,
+  SHELTER_TOD, BED_TREK_RANGE
 }

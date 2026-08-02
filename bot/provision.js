@@ -660,7 +660,11 @@ async function walkStaged (bot, tx, tz, opts = {}) {
       const pt = replay.pts[cur]
       lx = pt.x; lz = pt.z; replayLeg = true
     } else if (stalls === 0) {
-      const step = Math.min(48, d)
+      // The clean-leg length and its deadline are NAMED in scheduler.js because they are also the
+      // only statement this codebase makes about how fast the bot covers ground, and
+      // scheduler.homeLeash derives the outbound leash from exactly that budget. Same numbers as
+      // before; one definition, so a re-tune of the trek re-tunes the leash with it (#4).
+      const step = Math.min(scheduler.TREK_LEG_BLOCKS, d)
       lx = p.x + ux * step; lz = p.z + uz * step
       // WEDGE SOFT-STEER (bearing mode only; proven routes are NOT wedge-checked): if the
       // straight leg clips a learned, still-active, non-suppressed wedge, try the same
@@ -710,7 +714,7 @@ async function walkStaged (bot, tx, tz, opts = {}) {
       const step = Math.min(24, d)
       lx = p.x + rx * step; lz = p.z + rz * step
     }
-    const legDeadline = stalls === 0 ? 75000 : 30000
+    const legDeadline = stalls === 0 ? scheduler.TREK_LEG_DEADLINE_MS : 30000
     const legTimeout = stalls === 0 ? 30000 : 12000
     const legStart = { x: p.x, z: p.z }
     // Each leg runs through the UNIFIED navigator (navigate.js): the water-hop, pit

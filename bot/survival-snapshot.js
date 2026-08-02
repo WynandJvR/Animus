@@ -83,7 +83,12 @@ function reader (s) {
 
 // reads. This is the ONE place the scattered survival predicates are gathered; every progress
 // job consults survivalNeed(bot)/mayDoProgress(bot) instead of its own food/hp/threat checks.
-function survivalState (bot) {
+// opts.threats === false skips the entity/LOS scan and leaves threatDist/creeperDist null. That
+// exists for ONE caller - excursionState below, which feeds the sync stop-poll of a running
+// excursion and is asked many times a second by the nav loops. journeyAdmissible reads no threat
+// field, so the scan buys that caller nothing and would buy it with event-loop budget (#8).
+// Nothing else may pass it: a null threatDist elsewhere reads as "no mob", which is a lie.
+function survivalState (bot, opts = {}) {
   // VITALS FIRST, and outside every try/catch that could take them down with it.
   // survival-snapshot.js:133 wraps this whole function in a swallowing try, so before this an
   // exception anywhere in the threat scan below erased hp, food, isNight, underArmored and
@@ -99,7 +104,7 @@ function survivalState (bot) {
   const me = bot.entity && bot.entity.position
   let threatDist = null
   let creeperDist = null // tracked SEPARATELY: a creeper triggers avoidance at a longer range
-  if (me) {
+  if (me && opts.threats !== false) {
     // LOS/reachability gate: a hostile walled off behind solid rock (deep in a cave, on the
     // far side of a shaft wall) is NOT a live progress-block - discount it so a fully-enclosed
     // mob doesn't freeze mining/build forever. Close floor (<=5b) ALWAYS counts (may be right
@@ -150,6 +155,63 @@ function survivalState (bot) {
     underArmored: underArmoredV,
     nightStuck: nightStuckV // frozen/eternal night -> don't surface the "shelter" progress-block
   }
+}
+
+// ---- excursionState (2026-08-02) ---------------------------------------------------------
+// SYNC. The JOURNEY view of the world: survivalState plus the only two facts a journey needs
+// that a survival need does not - how far home is, and what time it is.
+//
+// It exists because scheduler.excursionAdmissible has to be askable from a running excursion's
+// `isStopped` poll, which is synchronous; schedulerState is async (it awaits the bank read) and
+// can never be asked there. Rather than let the poll hand-roll a snapshot - which is how you get
+// a second, drifting definition of homeDist and timeOfDay - this IS where those two are computed,
+// and schedulerState folds it in below. One definition of each, two consumers.
+//
+// WHAT IT DELIBERATELY DOES NOT READ, and what that means (#10 - the omissions are named, not
+// silently defaulted). Both are async or costly, and both fail to the CAUTIOUS side here:
+//   packFoodPts   absent -> journeyAdmissible's "food <6 with an empty pack" clause can refuse a
+//                 >128b excursion while the pack actually holds bread. The bot aborts to the
+//                 scheduler, which eats and re-picks: a false stop, never a false GO.
+//   bank* holdings absent -> bankHasSpareKit reads false, so the daylight armour clause fires only
+//                 on a near SAFE GRAVE with gear - which is a genuine "go get your own kit back"
+//                 and not a reason to keep mining new iron.
+// homeAnchor / journeyFacts / graveFacts: the reads BOTH snapshots make, extracted so they have
+// one definition rather than one copy per snapshot (#4). Each caller still owns how it reports a
+// failed read - schedulerState lists it in s.unknown, the poll logs it - because "could not
+// measure" means something different to a tick than it does to a bot already out in the field.
+function homeAnchor () { try { return hutAnchor() || knownBed() || null } catch { return null } }
+// homeDist: XZ to the hut anchor else the bed; null if neither.
+// timeOfDay: one property read off `bot.time`, and the reason it matters is out of all
+// proportion to its size: scheduler-core.duskProximity is written to ramp 0 -> 1 across
+// t=11000..13000, and that ramp is THE seed of the operator's "dusk-recall must EMERGE from
+// risk x time-to-nightfall, never a per-path night gate" rule (#65 §1). Without this field it
+// falls back to the boolean isNight (t>=13000), so for the whole life of the dynamic core the
+// ramp has been dead code and the bot has started heading home at FULL DARK instead of at dusk -
+// which is the two minutes that decide whether the walk home is survivable. It is also the
+// DEADLINE half of scheduler.homeLeash: without it an excursion has no leash at all.
+function journeyFacts (bot, home) {
+  const me = (bot && bot.entity && bot.entity.position) || null
+  const f = { homeDist: null, timeOfDay: undefined }
+  try { f.homeDist = (me && home) ? Math.hypot(me.x - home.x, me.z - home.z) : null } catch { f.homeDist = null }
+  try { f.timeOfDay = (bot.time && typeof bot.time.timeOfDay === 'number') ? bot.time.timeOfDay : undefined } catch { f.timeOfDay = undefined }
+  return f
+}
+function graveFacts (pos, home) {
+  try { const g = require('./commands.js').gravesSnapshot({ pos, home }); return { graves: g.graves, deathsRecent: g.deathsRecent, failed: null } }
+  catch (e) { return { graves: [], deathsRecent: 0, failed: (e && e.message) || 'unknown' } }
+}
+
+function excursionState (bot) {
+  const s = survivalState(bot, { threats: false })
+  const home = homeAnchor()
+  Object.assign(s, journeyFacts(bot, home))
+  // The spiral clause inside journeyAdmissible is one of the reasons the crossing rule is worth
+  // asking outbound at all, and it is blind without deathsRecent. NOT "I have never died": a
+  // failed read says so rather than clearing the guard silently (#10).
+  const g = graveFacts((bot && bot.entity && bot.entity.position) || null, home)
+  s.graves = g.graves; s.deathsRecent = g.deathsRecent
+  if (g.failed) dbg('excursionState: graves/deathsRecent read FAILED (' + g.failed + ') - the spiral guard is BLIND for this poll')
+  return s
 }
 
 // The highest UNMET survival need blocking progress, or null. opts.foodThreshold: 14 to START a
@@ -238,24 +300,41 @@ async function schedulerState (bot) {
   try { s.spareSwordInPack = (bot.inventory ? bot.inventory.items() : []).filter(i => /_sword$/.test(i.name)).reduce((n, i) => n + i.count, 0) >= 2 } catch { s.spareSwordInPack = false }
   // graves + deathsRecent from the death ledger. LAZY require: commands already requires provision,
   // so a top-level require would be a cycle (established pattern - cf. the inline resources require).
-  try {
-    const commands = require('./commands.js')
-    const g = commands.gravesSnapshot({ pos: me, home })
+  {
+    const g = graveFacts(me, home)
     s.graves = g.graves; s.deathsRecent = g.deathsRecent
-  } catch (e) {
     // NOT "I have never died": deathsRecent 0 clears the death-spiral guard (spiralActive,
     // the anti-spiral rung gate, the death ratchet). Say so instead of asserting it.
-    s.unknown.push('graves')
-    s.graves = []; s.deathsRecent = 0
-    dbg('read FAILED: graves/deathsRecent (' + e.message + ') - the spiral guard is BLIND this tick')
+    if (g.failed) {
+      s.unknown.push('graves')
+      dbg('read FAILED: graves/deathsRecent (' + g.failed + ') - the spiral guard is BLIND this tick')
+    }
   }
-  // homeDist: XZ to the hut anchor else the bed; null if neither.
-  try { s.homeDist = (me && home) ? Math.hypot(me.x - home.x, me.z - home.z) : null } catch { s.homeDist = null }
+  // homeDist + timeOfDay, through the SAME reads the sync excursion poll makes (journeyFacts).
+  Object.assign(s, journeyFacts(bot, home))
   // bankFoodPts: cachedOnly chest counts near home -> foodPoints sum (the live HOME-FOOD-FIRST
   // pattern). cachedOnly is MANDATORY so the tick never walks the bot to open a chest.
   try {
     let totals = {}
-    if (home) totals = await require('./resources.js').totalCounts(bot, { cachedOnly: true, near: home, maxDist: 64 })
+    // ==== AN UNREAD CHEST IS NOT AN EMPTY BANK (2026-08-02) =============================
+    // Every bank field below is a LOWER BOUND, because a chest nobody has ever managed to
+    // open contributes nothing to the tally. Until now that was indistinguishable from a
+    // chest opened and found bare, and the difference is not cosmetic: with the bank chest
+    // sealed by a block dropped on its lid, `bankFoodPts` read 0 forever, bootstrapNeed held
+    // the castle on 'food', and the recovery ladder skipped its rearmFromBank rung and went
+    // mining for iron the bank already held. `bankUnknownChests` is the field that makes the
+    // difference sayable - and #10 puts the burden on the CONSUMER: a field that was never
+    // measured must never invent a need. The cachedOnly contract is untouched (the tick still
+    // never walks the bot); the answer to an unread bank is to REPORT the uncertainty and let
+    // an owner that already walks - maintenancePass, the ladder's rearmFromBank - go and look.
+    let det = { chests: 0, read: 0, unknown: 0 }
+    if (home) { det = await require('./resources.js').totalCountsDetailed(bot, { cachedOnly: true, near: home, maxDist: 64 }); totals = det.counts }
+    s.bankChests = det.chests
+    s.bankUnknownChests = det.unknown
+    if (det.unknown > 0) {
+      s.unknown.push('bank')
+      dbg('bank PARTIAL: ' + det.unknown + '/' + det.chests + ' chest(s) near home have never been read - every bank* field below is a LOWER BOUND, not a measurement')
+    }
     const md = require('minecraft-data')(bot.version); const foods = (md && md.foodsByName) || {}
     let pts = 0
     for (const [n, c] of Object.entries(totals)) if (foods[n]) pts += (foods[n].foodPoints || 0) * c
@@ -276,6 +355,11 @@ async function schedulerState (bot) {
     // change survival policy, so the failure is named and the field is flagged unknown.
     s.unknown.push('bank')
     s.bankFoodPts = 0; s.bankArmorPieces = 0; s.bankHasPick = false; s.bankHasSword = false
+    // ...and now it is unknown to the CONSUMERS too, not only to the log. `1` is a floor, not a
+    // count: the read threw before it could enumerate anything, so all we can honestly say is
+    // "at least one chest went unread". Every consumer tests `> 0`, so an absent field (an old
+    // or hand-built snapshot) keeps today's behaviour exactly - the field only ever ADDS doubt.
+    s.bankUnknownChests = 1
     dbg('read FAILED: bank totals (' + e.message + ') - reading as empty, but it is UNKNOWN (re-arm/food verdicts are unreliable this tick)')
   }
   // farm: standing wheat farm + XZ distance to its water anchor.
@@ -385,14 +469,9 @@ async function schedulerState (bot) {
       s.baseLit = !!(bl && bl.hut && bl.hut.x === hut.x && bl.hut.z === hut.z && (bl.torched || []).length > 0)
     }
   } catch { s.baseLit = null }
-  // timeOfDay. One property read off `bot.time`, and the reason it matters is out of all
-  // proportion to its size: scheduler-core.duskProximity is written to ramp 0 -> 1 across
-  // t=11000..13000, and that ramp is THE seed of the operator's "dusk-recall must EMERGE from
-  // risk x time-to-nightfall, never a per-path night gate" rule (#65 §1). Without this field it
-  // falls back to the boolean isNight (t>=13000), so for the whole life of the dynamic core the
-  // ramp has been dead code and the bot has started heading home at FULL DARK instead of at
-  // dusk - which is the two minutes that decide whether the walk home is survivable.
-  try { s.timeOfDay = (bot.time && typeof bot.time.timeOfDay === 'number') ? bot.time.timeOfDay : undefined } catch { s.timeOfDay = undefined }
+  // (timeOfDay was read here. It is read in journeyFacts now, alongside homeDist and folded in
+  //  above, because scheduler.homeLeash needs BOTH from the SYNC excursion poll as well as from
+  //  this tick - and two snapshots reading the clock two ways is exactly the drift #4 forbids.)
   // ==== PLAN-one-runner S5: the HOUSEKEEPING facts ==========================================
   // The four idle-tier proposals (autoCollect / autoCook / scaffoldSweep / autoTorch) were 3s-45s
   // timers that each scanned for their own trigger and then moved the body if a handful of latches
@@ -438,4 +517,4 @@ async function schedulerState (bot) {
   return s
 }
 
-module.exports = { survivalState, survivalNeed, mayDoProgress, activeJobInfo, schedulerState, setDebugSink }
+module.exports = { survivalState, excursionState, survivalNeed, mayDoProgress, activeJobInfo, schedulerState, setDebugSink }

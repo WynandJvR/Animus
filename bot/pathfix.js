@@ -508,6 +508,21 @@ function installPathfinderTuning (bot) {
     const origPBWO = bot._placeBlockWithOptions.bind(bot)
     async function verifiedPlace (referenceBlock, faceVector, options) {
       const target = referenceBlock.position.plus(faceVector)
+      // ANTI-BRICK (2026-08-02). THIS is where the place rule belongs, for the same reason the
+      // three patches below live here: it is the ONE placement primitive. bot.placeBlock is
+      // rebuilt on it, mineflayer-builder's tryPlace calls it directly (index.js:95) and
+      // mineflayer-pathfinder's own scaffolding goes through bot.placeBlock (index.js:556) - so
+      // a guard at any CALLER (placeAt, pillarUpTo, the builder) would leave the library's own
+      // placements unguarded, and the library's are the ones that drop filler on the furniture
+      // while merely walking past. A refusal THROWS, which is the failure shape every caller
+      // already handles (placeAt returns false with the blocker, pillarUpTo retries elsewhere,
+      // the pathfinder resetPath('place_error')s and re-paths).
+      const heldName = bot.heldItem && bot.heldItem.name
+      const refuse = require('./provision-core.js').placeBlocked(bot, target, heldName)
+      if (refuse) {
+        dbg('REFUSING to place ' + heldName + ' at ' + Math.floor(target.x) + ',' + Math.floor(target.y) + ',' + Math.floor(target.z) + ' - ' + refuse + ' (that cell must stay open; clear the blocker or place elsewhere)')
+        throw new Error(`refusing to place ${heldName} at ${Math.floor(target.x)},${Math.floor(target.y)},${Math.floor(target.z)}: ${refuse}`)
+      }
       let before = null
       try { const b0 = bot.blockAt(target); before = b0 ? b0.stateId : null } catch {}
       try {

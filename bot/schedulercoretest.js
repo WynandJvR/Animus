@@ -235,7 +235,11 @@ t('DUSK RAMP: the ramp discriminates inside the dusk window', () => {
 })
 t('DUSK RAMP: the snapshot actually SUPPLIES timeOfDay (the half that was missing)', () => {
   const src = fs.readFileSync(path.join(__dirname, 'survival-snapshot.js'), 'utf8')
-  assert(/s\.timeOfDay = .*bot\.time/.test(src), 'schedulerState must read timeOfDay off bot.time, or the ramp is dead code')
+  // (the read moved into journeyFacts on 2026-08-02 - scheduler.homeLeash needs the same clock
+  //  from the SYNC excursion poll, and two snapshots reading it two ways is the drift #4 forbids.
+  //  BOTH halves are still pinned: the read exists, and schedulerState folds it onto s.)
+  assert(/timeOfDay = .*bot\.time/.test(src), 'the snapshot must read timeOfDay off bot.time, or the ramp is dead code')
+  assert(/Object\.assign\(s, journeyFacts\(bot, home\)\)/.test(src), 'and schedulerState must put it ON the snapshot')
 })
 t('DUSK RAMP: a naked bot far from home pulls for shelter at DUSK, not at full dark', () => {
   const base = {

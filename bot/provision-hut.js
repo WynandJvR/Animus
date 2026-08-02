@@ -93,6 +93,91 @@ function ownInfraSupportAt (pos) {
   return null
 }
 
+// ==== THE PLACEMENT RESERVATIONS (2026-08-02) ============================================
+// The three registry-side predicates provCore.placeBlocked composes. Same contract as
+// ownInfraSupportAt above: derived from the infra registry, no magic coordinates, and they
+// fail PROTECTIVE (an exclusion that cannot see must not permit).
+//
+// WHY: anti-grief had a positional DIG rule (digBlocked) and NOTHING positional about PLACING.
+// Live 2026-08-02 a dirt block landed in the cell directly above the bank chest at
+// 192,68,-103; in vanilla an opaque full cube there makes the chest unopenable
+// (Chest.isBlockedChestByBlock -> isSolidBlocking), so every read failed, the resource model
+// reported an empty bank, and the operator had to break the block by hand.
+
+// "Is this cell the HEADROOM of a container that needs it?" Derived from the BLOCK, not
+// blanket-banned over all infra: in 1.21 only the chest family is blocked by an opaque cube
+// above it. A furnace, a crafting table and a barrel have no such rule (the barrel exists
+// precisely so an obstructed container can still be opened), so they are NOT claimed here -
+// over-claiming would forbid ordinary building over the bot's own furnace for no reason.
+// Only kind 'chest' is registered for real chests (INFRA_BLOCK.chest = /chest$/), so the
+// registry kind IS the block class. Returns the container record, or null.
+function containerHeadroomAt (pos) {
+  if (!pos) return null
+  const x = Math.floor(pos.x); const y = Math.floor(pos.y); const z = Math.floor(pos.z)
+  for (const e of listInfra('chest')) { if (e.x === x && e.z === z && y === e.y + 1) return e }
+  return null
+}
+
+// "Is this cell a registered bed?" Both halves are remembered (infra.bed holds head+foot), and
+// knownBed() is the spawn anchor - the single most expensive thing in the world to lose, since
+// without it every death is a 400b walk home (see scheduler bootstrapNeed 'spawn').
+function ownBedCellAt (pos) {
+  if (!pos) return null
+  const x = Math.floor(pos.x); const y = Math.floor(pos.y); const z = Math.floor(pos.z)
+  for (const e of listInfra('bed')) { if (e.x === x && e.y === y && e.z === z) return e }
+  try { const kb = knownBed(); if (kb && kb.x === x && kb.y === y && kb.z === z) return kb } catch {}
+  return null
+}
+
+// THE DOORWAY, MEMOISED. hutModel.doorwayColumn is a rim SCAN (up to ~48 blockAt reads with
+// preferDoorBlock), and placeBlocked is asked in loops - so the scan result is remembered per
+// anchor and re-validated with ONE read of the cached column's lower course. It is re-detected
+// only when that cell stops looking like a doorway, which is exactly when the answer can have
+// changed. No clock, no TTL: the condition is the invalidation ([[no-blanket-time-holds]]).
+let _doorMemo = null // { key, door }
+function hutDoorway (bot, hut) {
+  hut = hut || hutAnchor()
+  if (!hut || !bot) return null
+  const k = hut.x + ',' + hut.y + ',' + hut.z
+  const read = hutReader(bot)
+  if (_doorMemo && _doorMemo.key === k) {
+    const lo = read(_doorMemo.door.x, hut.y + 1, _doorMemo.door.z)
+    // still the doorway while that cell holds a door or is anything but the plank shell. A
+    // null read is UNKNOWN and keeps the memo (the same rule doorwayColumn itself follows).
+    if (!lo || hutModel.DOOR_RE.test(lo.name) || !hutModel.WALL_RE.test(lo.name)) return _doorMemo.door
+  }
+  const door = hutModel.doorwayColumn(hut, read, { preferDoorBlock: true })
+  if (door) _doorMemo = { key: k, door }
+  return door
+}
+
+// "Is this cell the doorway itself, or the body column that must stay clear in front of it?"
+// Returns 'door' | 'approach' | null.
+//
+// The approach is hutModel.approachCells - the doorstep AND its way out - and it is here
+// because the 2026-07-30 precedent proved the gap is AT THE PLACEMENT SITE: thresholdCell /
+// freeStandCells reserve the INSIDE face, so the generic furnace placer chose the doorstep
+// because nothing told it the OUTSIDE face was reserved. d4cf46c ("SEALED IN: the bot could
+// not get out of its own front door") is the same cell filled by a different placer.
+//
+// CHEAP BY CONSTRUCTION: a pure arithmetic bounds test on the hut box + its 2-cell ring comes
+// FIRST, so a cell anywhere else in the world costs no world read at all - only cells at the
+// bot's own front door ever reach the memoised detector.
+function doorwayReservationAt (bot, pos, hut) {
+  if (!pos || !bot) return null
+  hut = hut || hutAnchor()
+  if (!hut) return null
+  const x = Math.floor(pos.x); const y = Math.floor(pos.y); const z = Math.floor(pos.z)
+  if (y !== hut.y + 1 && y !== hut.y + 2) return null // the door/body courses only (dy1..dy2)
+  const D = hutModel.DIMS
+  if (x < hut.x - 2 || x > hut.x + D.w + 1 || z < hut.z - 2 || z > hut.z + D.l + 1) return null
+  const door = hutDoorway(bot, hut)
+  if (!door) return null // no doorway found: unmeasured is not reserved (#10)
+  if (x === door.x && z === door.z) return 'door'
+  for (const c of hutModel.approachCells(hut, door)) { if (c.x === x && c.y === y && c.z === z) return 'approach' }
+  return null
+}
+
 // "Am I (is this cell) in the crawlspace UNDER my own floor?" - the registry-side reader of
 // hutModel.underFloor, which is where that region is defined and why. Pure geometry, no world
 // reads, same fail-PROTECTIVE contract as ownHutAt. Returns the hut record, or null.
@@ -2084,6 +2169,7 @@ async function worldTidy (bot, opts = {}) {
 
 module.exports = {
   setDebugSink, insideHutBox,
+  containerHeadroomAt, ownBedCellAt, hutDoorway, doorwayReservationAt,
   insideHutBox, ownHutAt, ownInfraSupportAt, underOwnFloorAt, underpinHutFloor, onHutApron, insideOwnStructure, hasSolidCeiling, hutAnchor, ensureHomeShelter, stepOffApron, ensureHutApron, clearDoorApproach, healHomeCrater, ensureHutBed, relocateBedInto, bedInPack, bedCandidates, acquireBed, placeBedNear, bedFootprint, bedUsable, assertSpawnOn, ensureBedSite, upgradeBedPlacement, freeInteriorCell, stationInHut, stationSlot, reconcileInfra, cleanupHutInterior, repairHutStructure, recallAndReach, maintainHut, maintainHome,
   secureBase, secureBaseGate: hutModel.secureBaseGate,
   sealHomeDescents, sealDescentsGate: hutModel.sealDescentsGate,

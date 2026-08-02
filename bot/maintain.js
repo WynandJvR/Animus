@@ -77,8 +77,14 @@ function needs (snapshot) {
   //    armor in the pack, or a spare pick/sword) - never a demand to CRAFT a spare, only to bank one
   //    it already has. Gated on the bank fields being MEASURED (absent -> not measured -> no need),
   //    so today's snapshots (no bank-spare fields) never trigger it. SPAREKIT=0 / flag off -> off.
+  //    2026-08-02: "MEASURED" now means what it says. `s.bankArmorPieces != null` proved only
+  //    that the snapshot ran the read, not that the read SAW anything - a chest that has never
+  //    been opened (sealed by a block on its lid, live) contributes 0 and is indistinguishable
+  //    from a chest opened and found bare, so this emitted a spareKit deficit for a bank that
+  //    may hold a full spare set. bankUnknownChests > 0 is exactly "I could not look", and #10
+  //    says a field that was never measured must never invent a need. Absent -> as before.
   const spareKitOn = process.env.RESILIENT_RECOVERY !== '0' && process.env.SPAREKIT !== '0'
-  if (spareKitOn && s.bankArmorPieces != null) {
+  if (spareKitOn && s.bankArmorPieces != null && !((s.bankUnknownChests || 0) > 0)) {
     // a DONATABLE dupe = UNWORN pack armor (worn armor is kept), or a SECOND sword (the bot keeps 1).
     // Deliberately NOT tools.sparePick: a 2nd pick is the bot's intended keep-2 loadout (safekeepPlan),
     // not surplus - only a 3rd+ pick is, which the courier plan banks opportunistically once triggered.

@@ -188,6 +188,12 @@ async function placeAt (bot, target, match) {
   placeAt.lastFail = null // observability: WHY the last placement failed (cap-fail debugging)
   const item = (bot.inventory ? bot.inventory.items() : []).find(i => match.test(i.name))
   if (!item) { placeAt.lastFail = 'no matching item in inventory'; return false }
+  // THE PLACEMENT RULE, asked ONCE and BEFORE the equip (#4: the same placeBlocked
+  // pathfix.verifiedPlace enforces, so there is one definition and no way to drift). Asking it
+  // here as well is not a second guard - it is what turns a thrown refusal from the primitive,
+  // repeated once per candidate face, into one honest lastFail line naming the blocker.
+  const blocked = placeBlocked(bot, target, item.name)
+  if (blocked) { placeAt.lastFail = 'refused: ' + blocked; dbg('  placeAt: REFUSING ' + item.name + ' at ' + target.toString() + ' - ' + blocked); return false }
   await bot.equip(item, 'hand').catch(() => {})
   let sawRef = false
   for (const [dx, dy, dz] of [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]]) {
@@ -259,9 +265,72 @@ function digBlocked (bot, cell, b, { allowOwnInfra = false } = {}) {
   return null
 }
 
+// ==== THE PLACE MIRROR OF digBlocked (2026-08-02) =========================================
+// digBlocked answers "may this block be REMOVED". Nothing anywhere answered "may a block be
+// PUT HERE" - placeAt scanned six faces for anything solid to place against and never once
+// asked what the placement would cover, seal or shut. That is the whole gap:
+//
+//   a dirt block landed at 192,69,-103, directly above the bank chest at 192,68,-103. In
+//   vanilla an opaque full cube above a chest makes it unopenable, so every chest read threw
+//   a genuine in-reach window failure, resources.js reported {} for that chest, and the
+//   snapshot the PURE scheduler reasons from called the bank EMPTY. The operator broke the
+//   block by hand. Nothing in the codebase could have refused that placement.
+//
+// SEALING vs NOT. What makes these cells matter is that they must stay OPENABLE or WALKABLE,
+// so the question is not "is this my block" but "does this placement shut the cell". A torch,
+// a sign, a carpet, a rail, a door, a trapdoor hang or lie flat and shut nothing; a full cube
+// does. The allow-list is deliberately the SMALL side (fail PROTECTIVE, #115): an item nobody
+// listed is treated as sealing, which costs at most a refused placement of something exotic.
+const NON_SEALING_RE = /^(torch|wall_torch|soul_torch|redstone_torch|lantern|soul_lantern|ladder|vine|lever|tripwire_hook|flower_pot|end_rod|chain|[a-z_]*_(sign|banner|carpet|button|pressure_plate|rail|sapling|seeds|door|trapdoor|pane|candle|coral_fan|torch)|rail|wheat_seeds|redstone|repeater|comparator|string)$/
+
+// THE ONE ANSWER TO "MAY A BLOCK BE PUT IN THIS CELL". Returns the blocker string, or null for
+// permitted - the same shape, contract and cheapness as digBlocked above, and asked by the
+// same discipline: ONE definition, every placer (provision-core.placeAt for an early honest
+// refusal, and pathfix.verifiedPlace - the single wrapped placement primitive every other
+// placer in the process funnels through, including mineflayer-pathfinder's own scaffolding
+// and mineflayer-builder's tryPlace).
+//
+// ARMS, IN ORDER (first match wins), each with the exemption that makes it a rule about
+// OBSTRUCTION rather than a blanket ban - a rule that could not put the door back in the
+// doorway would be a bug, not a guard:
+//   1. chest-headroom  the cell directly above a registered chest. Derived from the block:
+//                      only the chest family needs headroom in 1.21; a furnace, a table and a
+//                      barrel do not, so they are not claimed. Any NON-sealing placement is
+//                      fine (a torch above a chest does not stop it opening).
+//   2. bed             a registered bed cell (either half / the spawn anchor). Exempt: a bed.
+//   3. door            the doorway column at the door courses. Exempt: a door.
+//   4. door-approach   hutModel.approachCells - the body column just outside the doorway.
+//                      Any non-sealing placement is fine.
+//
+// NO CARVE-OUT, DELIBERATELY, and this is the anti-entombment answer. A PLACE rule cannot trap
+// the bot the way a dig rule can, so it needs no `allowOwnInfra` twin - and the two paths that
+// legitimately place blocks AROUND the body (provision-shelter digInForNight -> sealShaft)
+// already step 12 blocks clear of the hut apron before they dig (provision-shelter.js
+// "shelter: on my hut apron - stepping clear"), so a survival pit's walls and cap cannot reach
+// a reserved cell. In the one case where that step-clear walk fails and the bot pits ON its own
+// doorstep, refusing is still the right answer: d4cf46c ("SEALED IN: the bot could not get out
+// of its own front door") is what the other choice costs, and the refusal is logged with the
+// blocker so the pit reports the hole it could not close (#7).
+//
+// CHEAP BY CONSTRUCTION (#8), same bar as digBlocked: arms 1-2 are pure arithmetic over cached
+// registry reads. Arm 3-4 bounds-tests the hut box in arithmetic FIRST and only then consults
+// the memoised doorway, so a cell anywhere but the bot's own front door costs no world read.
+function placeBlocked (bot, cell, itemName) {
+  if (!cell || !itemName) return null // nothing placed, nothing to refuse
+  const provHut = require('./provision-hut.js')
+  const seals = !NON_SEALING_RE.test(itemName)
+  if (seals && provHut.containerHeadroomAt(cell)) return 'chest-headroom'
+  if (provHut.ownBedCellAt(cell) && !/_bed$/.test(itemName)) return 'bed'
+  const dw = provHut.doorwayReservationAt(bot, cell)
+  if (dw === 'door' && !/_door$/.test(itemName)) return 'door'
+  if (dw === 'approach' && seals) return 'door-approach'
+  return null
+}
+
 module.exports = {
   setDebugSink,
   AIRISH, REPLACEABLE, SHELTER_HOSTILE, STRUCTURE_RE, DIGGABLE_NATURAL, canBreakNaturally, digBlocked,
+  NON_SEALING_RE, placeBlocked,
   inventoryCounts, countItem, isNight, nearHostile, toolForBlock,
   gotoWithTimeout, collectDrops, stepInto, placeAt
 }

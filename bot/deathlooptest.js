@@ -505,5 +505,152 @@ t('LOOP D: the outbound-PRODUCER route asks the whole question, not half of it',
   assert.strictEqual(core.chooseActivity(THE_LIVELOCK, { refused }).job, 'nightShelter')
 })
 
+// ============ LOOP E - THE EXCURSION THAT NEVER CAME HOME (measured 2026-08-02) ============
+// Six hours of uptime and NOTHING to show for it: inventory [], armor 0/4, the bank chest at
+// 192,68,-103 empty, buildProgress null. Not a hang - the bot simply was never at home to use
+// its own infrastructure. From logs/bot-events.log, the same four lines every night:
+//   (sched) pick=recoverHp reason="crisis: hp 8.97 <= 10 while night" | armor=0 home=108b
+//   [prov] nightRest: bed too far (108 > 32) - pitting here
+//   (auto-eat) ate rotten_flesh (food 20)
+// Its farm (41 registered cells), bed, chest and furnace were all at home ~188,-104.
+//
+// THE ROOT, the same defect a third time: three rules govern any journey, and the third was
+// still single-caller. journeyAdmissible's every caller is INBOUND - the homecoming candidate
+// (scheduler-core B1b), recoverHome and recoverSpawnAnchor (via crossingAdmissible) and
+// homecomingPlan - so the rule that says "this crossing is too far" had never been asked by a
+// journey walking AWAY. Nothing leashed how far the gearup/gather excursions went.
+const THE_LONG_AFTERNOON = snap({
+  hp: 18, food: 14, armorPieces: 0, underArmored: true, isNight: false,
+  homeDist: 108, homeReachable: false, timeOfDay: 10000, packFoodPts: 20
+})
+
+t('LOOP E: the leash is a CONDITION - it shrinks with the daylight, it is not a radius', () => {
+  const at = tod => S.homeLeash(snap({ timeOfDay: tod }))
+  assert(at(0) > at(6000), 'dawn allows further out than noon (' + Math.round(at(0)) + ' vs ' + Math.round(at(6000)) + ')')
+  assert(at(6000) > at(10000), 'noon further than mid-afternoon')
+  assert(at(10000) > at(11500), 'and it keeps closing as the sun goes down')
+  assert(at(11500) > at(12500), 'right through dusk')
+  // ...and past the deadline it is EXACTLY the range the shelter code will walk to the bed.
+  const shelter = require('./shelter.js')
+  assert.strictEqual(at(12500), shelter.BED_TREK_RANGE, 'at dusk the leash IS the bed trek range')
+  assert.strictEqual(at(15000), shelter.BED_TREK_RANGE, 'and it stays there all night')
+  // MUTATION CHECK: hard-code 32 (or any radius) into homeLeash and the ramp assertions above fail;
+  // return a constant leash and every > comparison fails.
+})
+
+t('LOOP E: the leash is DERIVED - from the shelter deadline, the bed range and the trek budget', () => {
+  const shelter = require('./shelter.js')
+  const pace = S.TREK_LEG_BLOCKS / (S.TREK_LEG_DEADLINE_MS / 1000)
+  const expect = tod => shelter.BED_TREK_RANGE + ((shelter.SHELTER_TOD - tod) / 20) * pace
+  assert.strictEqual(S.homeLeash(snap({ timeOfDay: 10000 })), expect(10000), 'no third invented number')
+  assert.strictEqual(S.homeLeash(snap({ timeOfDay: 6000 })), expect(6000))
+  // MUTATION CHECK: change any of the three sources and this fails, because the leash is computed
+  // from those exact three and nothing else.
+  const src = require('fs').readFileSync(require('path').join(__dirname, 'scheduler.js'), 'utf8')
+  assert(/shelterTiming\.BED_TREK_RANGE/.test(src) && /shelterTiming\.SHELTER_TOD/.test(src),
+    'the deadline and the arrival radius are READ from shelter.js, not re-typed here')
+})
+
+t('LOOP E: #10 - with no clock reading there is no deadline, so no leash is invented', () => {
+  assert.strictEqual(S.homeLeash(snap({ timeOfDay: undefined })), Infinity, 'unmeasured is not unmet')
+  assert.strictEqual(S.homeLeash(snap({ timeOfDay: undefined, isNight: true })), require('./shelter.js').BED_TREK_RANGE,
+    '...but a different sensor saying it is dark PROVES the deadline has passed')
+})
+
+t('LOOP E: THE MEASURED CASE - 108b out in the afternoon is refused, and the refusal GOES HOME', () => {
+  const a = S.excursionAdmissible(THE_LONG_AFTERNOON)
+  assert.strictEqual(a.ok, false, '108b out at t=10000 is past the leash (' + Math.round(S.homeLeash(THE_LONG_AFTERNOON)) + 'b)')
+  assert.strictEqual(a.stage, 'leash', 'and it is the LEASH that stopped it, not the crossing rule')
+  assert.strictEqual(a.returnHome, true, '#5: the leash is the last moment the walk home still fits - so take it')
+  assert.strictEqual(a.blockedOn, 'home')
+  // ...and earlier in the same day, at the same spot, it is allowed to be out there.
+  assert.strictEqual(S.excursionAdmissible({ ...THE_LONG_AFTERNOON, timeOfDay: 4000 }).ok, true,
+    'the leash recalls the bot by the CLOCK, it does not fence it in')
+})
+
+t('LOOP E: a naked bot far out AT NIGHT stands down - it is not marched home through the dark', () => {
+  // Both clauses refuse here. The order matters: marching 108b naked in the dark is the exact
+  // 2026-07-20 carousel, so the crossing rule wins and the scheduler shelters where the bot stands.
+  const night = { ...THE_LONG_AFTERNOON, isNight: true, timeOfDay: 15000 }
+  const a = S.excursionAdmissible(night)
+  assert.strictEqual(a.ok, false)
+  assert.strictEqual(a.stage, 'crossing', 'the crossing rule is asked BEFORE the leash')
+  assert.strictEqual(a.blockedOn, 'dawn', 'and its blocker is the dark - a condition that provably clears')
+  assert.strictEqual(a.returnHome, false, 'NOTHING walks this bot home tonight')
+})
+
+t('LOOP E: the excursion finally asks the DISTANCE rule - same call, same blocker, same words', () => {
+  const spiral = snap({ hp: 20, food: 20, armorPieces: 0, underArmored: true, isNight: false,
+    homeDist: 300, timeOfDay: 0, deathsRecent: 4 })
+  const j = S.journeyAdmissible(spiral, 300)
+  const e = S.excursionAdmissible(spiral)
+  assert.strictEqual(j.ok, false, 'four deaths and a 300b naked crossing is the spiral clause')
+  assert.strictEqual(e.ok, false, 'and the excursion inherits it now that it asks')
+  assert.strictEqual(e.blockedOn, j.blockedOn, 'same blocker, because it is the same function')
+  assert(e.why.startsWith(j.why), 'same words')
+  // MUTATION CHECK: drop the journeyAdmissible call from excursionAdmissible and this fails -
+  // the leash alone would pass this fixture (t=0 leash is ~420b).
+  assert(S.homeLeash(spiral) > 300, 'proof that only the crossing clause can be refusing here')
+})
+
+t('LOOP E: NO DEADLOCK - gearing up at your own door is always legal, naked, at night', () => {
+  const atHome = snap({ hp: 20, food: 20, armorPieces: 0, underArmored: true, isNight: true,
+    timeOfDay: 15000, homeDist: 12, bankArmorPieces: 4 })
+  assert.strictEqual(S.excursionAdmissible(atHome).ok, true,
+    'journeyAdmissible SHORT_HOP keeps close work admissible - the armour clause must never bar the ' +
+    'one journey an unarmoured bot makes at every distance')
+  // ...and the hp clause still bites at EVERY distance, including underfoot.
+  assert.strictEqual(S.excursionAdmissible({ ...atHome, hp: 3 }).ok, false, 'three hearts is three hearts at any range')
+  assert.strictEqual(S.excursionAdmissible({ ...atHome, hp: 3 }).stage, 'fit')
+  assert.strictEqual(S.excursionAdmissible({ ...atHome, hp: 3 }).returnHome, false,
+    'a hurt bot heals where it stands - the scheduler owns that, not a walk')
+})
+
+t('LOOP E: no home anchor -> nothing to be leashed to (never strands a homeless bot)', () => {
+  assert.strictEqual(S.excursionAdmissible(snap({ homeDist: null, timeOfDay: 15000, isNight: true })).ok, true)
+})
+
+t('LOOP E WIRING: BOTH excursions ask the one poll, and neither carries the bare build latch', () => {
+  const cmd = require('fs').readFileSync(require('path').join(__dirname, 'commands.js'), 'utf8')
+  assert(/function makeExcursionStop \(bot, label\)/.test(cmd), 'there is ONE excursion stop-poll')
+  assert(/excursionAdmissible\(require\('\.\/survival-snapshot\.js'\)\.excursionState\(bot\)\)/.test(cmd),
+    'and it asks the ONE composed verdict against the sync journey snapshot')
+  const gearBody = cmd.slice(cmd.indexOf("case 'gearup': {"), cmd.indexOf("case 'huttidy'"))
+  const gathBody = cmd.slice(cmd.indexOf("case 'gather': {"), cmd.indexOf("case 'provision': {"))
+  assert(/makeExcursionStop\(bot, 'gearup'\)/.test(gearBody), 'gearup uses it')
+  assert(/makeExcursionStop\(bot, 'gather'\)/.test(gathBody), 'gather - which treks just as far - uses the SAME one')
+  // MUTATION CHECK: put `isStopped: () => buildAbort` back on either and this fails.
+  assert(!/isStopped: \(\) => buildAbort/.test(gearBody + gathBody),
+    'the build latch means "a build preempted me", never "I am dying" and never "I am too far out"')
+})
+
+t('LOOP E WIRING #5: the aborting excursion RETURNS HOME, via the existing homecoming owner', () => {
+  const cmd = require('fs').readFileSync(require('path').join(__dirname, 'commands.js'), 'utf8')
+  const fn = cmd.slice(cmd.indexOf('async function excursionGoHome'), cmd.indexOf('let recovering = false'))
+  assert(/provRecovery\(\)\.recoverHome\(bot, \{ say, dist: v\.leash \}\)/.test(fn),
+    'it calls recoverHome - the same owner reflexes.js `homecoming` dispatches - and hands it the ' +
+    'leash as its own "how far is far", so the two cannot disagree about being out of position')
+  assert(/if \(!v \|\| !v\.returnHome\) return null/.test(fn), 'and ONLY the leash stage triggers it')
+  assert(!/walkStaged|GoalNear|pathfinder/.test(fn), 'MUTATION CHECK: no new walk is written here')
+  const gearBody = cmd.slice(cmd.indexOf("case 'gearup': {"), cmd.indexOf("case 'huttidy'"))
+  const gathBody = cmd.slice(cmd.indexOf("case 'gather': {"), cmd.indexOf("case 'provision': {"))
+  assert(/excursionGoHome\(bot, gearupStopped, 'gearup'/.test(gearBody), 'gearup performs it')
+  assert(/excursionGoHome\(bot, gatherStopped, 'gather'/.test(gathBody), 'gather performs it')
+})
+
+t('LOOP E INVARIANT: the leash inputs have ONE definition each, in the file that owns them', () => {
+  const read = f => require('fs').readFileSync(require('path').join(__dirname, f), 'utf8')
+  // the DEADLINE: the shelter rule that fires at it reads it from shelter.js
+  assert(/timeOfDay >= shelter\.SHELTER_TOD/.test(read('provision-shelter.js')),
+    'shelterNeeded reads SHELTER_TOD - MUTATION: re-type 12200 here and the leash can drift off the rule it serves')
+  // the ARRIVAL RADIUS: the shelter call that enforces it reads it from shelter.js
+  assert(/bedRange: shelterSite\.BED_TREK_RANGE/.test(read('provision-recovery.js')),
+    'recoverHp passes BED_TREK_RANGE - MUTATION: re-type 32 here and "bed too far (108 > 32)" comes back')
+  // the PACE: the trek loop the leash models reads its budget from the same constants
+  const prov = read('provision.js')
+  assert(/Math\.min\(scheduler\.TREK_LEG_BLOCKS, d\)/.test(prov), 'walkStaged legs ARE the leash pace numerator')
+  assert(/scheduler\.TREK_LEG_DEADLINE_MS : 30000/.test(prov), '...and its budget is the denominator')
+})
+
 console.log(fails ? `\n${fails} FAILURE(S)` : '\nall death-loop regression tests passed')
 process.exit(fails ? 1 : 0)

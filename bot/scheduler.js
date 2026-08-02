@@ -25,6 +25,7 @@ const mining = require('./mining.js')   // one-way: PURE ironKeystone decision (
 const gravePolicy = require('./grave-policy.js') // one-way: PURE grave decisions (#112 salvageVerdict / net-of-risk scoring)
 const capabilities = require('./capabilities.js') // one-way: the PURE capability registry (requires nothing) - the ladder's action vocabulary
 const foodSec = require('./food.js') // one-way: PURE food/hp predicates (food.js requires NOTHING) - the ONE hp-abort definition
+const shelterTiming = require('./shelter.js') // one-way: PURE shelter timing (shelter.js requires NOTHING) - the ONE homeward deadline + bed arrival radius
 
 // IRON_KEYSTONE: is this bot on the keystone-blocker grind - fully naked (0 armor) and short of a
 // boots' worth of raw iron - so it MUST bank that first iron before ANY other progress? Reuses the
@@ -316,8 +317,19 @@ function bootstrapNeed (snapshot) {
   // the bot - never livelock on an unreachable bank). It stocks toward FOOD_RESERVE_TARGET (~40 pts /
   // 8 loaves) via the EXISTING maintenancePass farm->bake->courier chain (#62 courier-bake, bounded &
   // survival-yielding), so a genuinely durable reserve accumulates. Armor/base keep BOOTSTRAP_HP(14).
+  // UNMEASURED IS NOT UNMET, applied to the reserve (2026-08-02). `reserve` is a LOWER BOUND
+  // whenever a chest near home has never been read (snapshot.bankUnknownChests), and this
+  // verdict HOLDS THE BUILD - so firing it on an unread bank is inventing a need from a field
+  // nobody measured. Live: a block dropped on the bank chest's lid made it unopenable, every
+  // read failed, bankFoodPts read 0 forever, and this clause held the castle on 'food'
+  // permanently while ~8 loaves sat in the chest. Standing down here does NOT abandon the
+  // bank: maintain.needs('bankFood') still fires on the same low number and its producer
+  // (the maintenancePass courier/bake chain) OPENS the chest, which is the read that resolves
+  // the uncertainty. A verdict that holds progress must be measured; a verdict that goes and
+  // looks need not be. Absent field -> today's behaviour byte-for-byte.
   if (s.homeReachable && fed &&
       hp >= Number(process.env.FOOD_RESERVE_HP || 8) &&
+      !((s.bankUnknownChests || 0) > 0) &&
       reserve < Number(process.env.FOOD_RESERVE_TARGET || 40)) return 'food'
   if (hp < Number(process.env.BOOTSTRAP_HP || 14)) return null
   if (!fed) return null
@@ -553,11 +565,21 @@ function recoveryPlan (snapshot) {
   // from a lost/lethal grave (RC-C). AFTER R0/R1, BEFORE any outbound R3/R4. Needs home reachable +
   // a bank that can fill the deficit + a naked/toolless bot. NOT an OUTBOUND rung (walks HOME), so
   // rungFeasible never day/night/spiral-gates it. RESILIENT_RECOVERY=0 -> the rung is never planned.
+  //
+  // AND "I COULD NOT LOOK" IS A REASON TO GO, NOT A REASON TO STAY (2026-08-02). The three
+  // bank fields below are a LOWER BOUND when a chest near home has never been read, so a bank
+  // full of armour that the bot cannot open reads exactly like an empty one - and this rung,
+  // gated on the lower bound, was then SKIPPED, dropping the ladder through to the outbound
+  // gearup/mining rungs. Live: the bank chest was sealed by a block on its lid, so the bot went
+  // mining for iron it already owned. rearmFromBank is a HOME rung - it walks to the bank and
+  // OPENS it - so planning it on an unmeasured bank is the cheap way to resolve the uncertainty
+  // and it is strictly better than a mining trip. Absent field -> today's behaviour exactly.
   if (process.env.RESILIENT_RECOVERY !== '0') {
     const underArmored = armorPieces < 4
     const toolless = !(s.tools && s.tools.pick && s.tools.sword)
-    const bankHelpsArmor = underArmored && (s.bankArmorPieces || 0) >= 1
-    const bankHelpsTools = toolless && (!!s.bankHasPick || !!s.bankHasSword)
+    const bankUnknown = (s.bankUnknownChests || 0) > 0
+    const bankHelpsArmor = underArmored && ((s.bankArmorPieces || 0) >= 1 || bankUnknown)
+    const bankHelpsTools = toolless && (!!s.bankHasPick || !!s.bankHasSword || bankUnknown)
     if (homeReachable && (bankHelpsArmor || bankHelpsTools)) plan.push({ rung: 'R1.5', action: 'rearmFromBank' })
   }
 
@@ -728,6 +750,102 @@ function journeyAdmissible (snapshot, dist, opts = {}) {
   const food = s.food != null ? s.food : 20
   if (d > far && food < 6 && !(s.packFoodPts > 0)) return { ok: false, blockedOn: 'food', why: 'food ' + food + ' with an empty pack - would starve before arriving' }
   return { ok: true, blockedOn: null, why: 'clear to travel' }
+}
+
+// ---- homeLeash / excursionAdmissible (AUDIT 2026-08-02, defect: ONE RULE, A THIRD PATH) --
+// The DISTANCE half of "may I set out" had the same shape as the other two: one definition,
+// and only the journeys that were already thinking about distance ever asked it. Every caller
+// of journeyAdmissible is INBOUND - the homecoming candidate (scheduler-core B1b), the
+// post-respawn walk (provision-recovery.recoverHome via crossingAdmissible), the spawn
+// re-anchor, homecomingPlan. So the rule that says "this crossing is too far to survive" had
+// never once been asked by a journey that was walking AWAY from home.
+//
+// Measured over ~6 hours on 2026-08-02: inventory [], armor 0/4, bank empty, buildProgress null.
+// The bot was never at home to use any of it. The loop, from logs/bot-events.log:
+//   (sched) pick=recoverHp reason="crisis: hp 8.97 <= 10 while night" | armor=0 home=108b
+//   [prov] nightRest: bed too far (108 > 32) - pitting here
+// The armorup/gearup excursion walked 108-140b out, night fell, its own bed was out of range,
+// so it dug a hole and ate rotten flesh. Its farm (41 cells), bed, chest and furnace were all
+// at home. Nothing leashed how far it went, because the leash was only ever consulted by the
+// walk back.
+//
+// homeLeash is a CONDITION, not a radius (#6). It is the whole of the promise an outbound
+// journey owes: BE BACK IN TIME. Two facts the world already states, and no third invented one:
+//
+//   the DEADLINE  shelter.SHELTER_TOD - the tick provision-shelter.shelterNeeded fires at. Past
+//                 it the bot wants to be sheltered, and being sheltered anywhere but home is how
+//                 six hours produced nothing.
+//   the ARRIVAL   shelter.BED_TREK_RANGE - how far nightRest will walk to the bed. Inside it the
+//                 bed, bank, furnace and farm are all usable; outside it the bot pits in a hole.
+//   the PACE      what walkStaged BUDGETS for covering ground: one clean leg is TREK_LEG_BLOCKS
+//                 over TREK_LEG_DEADLINE_MS. It is a deadline rather than a measured speed, so it
+//                 is pessimistic - and pessimistic is the right side for a leash, because a bot
+//                 that assumes it is slower than it is turns for home early.
+//
+// leash = arrival radius + (ticks to the deadline / 20 per second) x pace. At dawn that is
+// ~420b, at noon ~230b, at t=11500 ~54b, and from dusk onward exactly BED_TREK_RANGE - the bot
+// is allowed to be exactly as far out as it can still get back from, and not one block further.
+// It shrinks continuously through the afternoon, so the excursion is recalled by the clock
+// rather than by anyone's idea of a safe radius.
+const TREK_LEG_BLOCKS = 48        // walkStaged's clean-leg length
+const TREK_LEG_DEADLINE_MS = 75000 // ...and the wall clock it budgets for one
+const TREK_PACE_BPS = TREK_LEG_BLOCKS / (TREK_LEG_DEADLINE_MS / 1000) // 0.64 b/s, the budgeted pace
+const TICKS_PER_SEC = 20
+function homeLeash (snapshot) {
+  const s = snapshot || {}
+  const arrival = shelterTiming.BED_TREK_RANGE
+  const tod = s.timeOfDay
+  // #10: unmeasured is not unmet. With no clock reading there is no deadline to plan against, so
+  // this imposes no leash at all - EXCEPT that isNight is read by a different sensor, and if that
+  // one says it is dark then the deadline has provably already passed.
+  if (typeof tod !== 'number') return s.isNight ? arrival : Infinity
+  const t = ((tod % 24000) + 24000) % 24000
+  const ticksLeft = t < shelterTiming.SHELTER_TOD ? shelterTiming.SHELTER_TOD - t : 0
+  return arrival + (ticksLeft / TICKS_PER_SEC) * TREK_PACE_BPS
+}
+
+// May the bot be OUT here, doing outbound work, right now? The composed verdict for a journey
+// that is walking away from home rather than toward it. Three clauses, all of them owned
+// elsewhere, none of them restated here:
+//
+//   'fit'      outboundAdmissible, asked with the hp-only view ON PURPOSE. gearup IS the journey
+//              an unarmoured bot makes to find armour, so the armour/dark clause must not be able
+//              to refuse it at EVERY distance or the bot could never re-arm at its own door. It
+//              still governs - through the crossing clause, where journeyAdmissible's SHORT_HOP
+//              exemption keeps close-to-home work always legal.
+//   'crossing' journeyAdmissible against the distance home. This is the clause that had no
+//              outbound caller. Its action is the one already shipped: the excursion returns, the
+//              body is freed and the scheduler's next pick owns recovery.
+//   'leash'    homeLeash. Its action is different and it is the whole point of the fix (#5): the
+//              leash is DEFINED as the last moment the walk home still fits in the day, so at the
+//              instant it trips that walk is feasible by construction - and the caller performs
+//              it, through the existing homecoming owner. `returnHome` says so on the verdict
+//              rather than leaving the caller to guess which refusals mean "come back".
+//
+// Order matters: crossing before leash. If a naked bot at night is 108b out, BOTH refuse - and
+// marching it 108b home through the dark is the exact 2026-07-20 death carousel. The crossing
+// clause wins, the bot shelters where it stands, and the leash's job is to make sure that
+// situation is never reached in the first place.
+function excursionAdmissible (snapshot, opts = {}) {
+  const s = snapshot || {}
+  const fit = outboundAdmissible({ hp: s.hp }, opts)
+  if (!fit.ok) return { ...fit, stage: 'fit', returnHome: false }
+  const d = s.homeDist
+  if (d == null) return { ok: true, blockedOn: null, why: 'no home anchor remembered - nothing to be leashed to', stage: 'leash', returnHome: false }
+  const j = journeyAdmissible(s, d, opts)
+  if (!j.ok) return { ok: false, blockedOn: j.blockedOn, why: j.why + ' (and i am ' + Math.round(d) + 'b out)', stage: 'crossing', returnHome: false }
+  const leash = homeLeash(s)
+  if (d > leash) {
+    return {
+      ok: false,
+      blockedOn: 'home',
+      why: Math.round(d) + 'b from home with only ' + Math.round(leash) + 'b of daylight left to walk - going back while i still can',
+      stage: 'leash',
+      returnHome: true,
+      leash
+    }
+  }
+  return { ok: true, blockedOn: null, why: 'within ' + Math.round(leash) + 'b of home - still time to get back', stage: 'leash', returnHome: false, leash }
 }
 
 // ---- homecomingPlan (AUDIT FIX 2) -------------------------------------------------------
@@ -1199,6 +1317,10 @@ module.exports = {
   outboundBlocked,
   outboundAdmissible,
   journeyAdmissible,
+  homeLeash,
+  excursionAdmissible,
+  TREK_LEG_BLOCKS,
+  TREK_LEG_DEADLINE_MS,
   homecomingPlan,
   recoverySignature,
   tickDelayMs,

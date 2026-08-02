@@ -94,6 +94,74 @@ function setPostDeathRecovery (v) { if (v) { if (!postDeathRecovery) postDeathRe
 function isPostDeathRecovery () { return process.env.RESILIENT_RECOVERY !== '0' && postDeathRecovery }
 function clearPostDeathRecovery () { postDeathRecovery = false; postDeathRecoveryAt = 0 }
 function postDeathRecoveryHeldMs () { return postDeathRecovery ? Date.now() - postDeathRecoveryAt : 0 }
+// ==== THE EXCURSION STOP-POLL: ONE RULE, EVERY OUTBOUND JOB (2026-08-02) ====================
+// An EXCURSION is a long outbound command that walks the bot away from home to fetch something:
+// `armorup`/`gearup` (mine iron, hunt leather) and `gather` (fell a grove, mine an ore body).
+// Both used to be governed by `buildAbort` alone - a latch set by a build preempt and by the
+// watchdog, neither of which means "I am dying" or "I am too far out". The last round gave gearup
+// the hp/fitness half of the rule; NEITHER ever asked the DISTANCE half, and gather asked
+// nothing at all.
+//
+// What that cost, measured over ~6h on 2026-08-02: inventory [], armor 0/4, bank chest empty,
+// buildProgress null. The bot wandered 108-140b out, night fell, its own bed was outside the 32b
+// range its shelter code will walk, so it dug a hole and ate rotten flesh - every night. The farm,
+// the bank, the furnace and the bed were all at home the whole time, and being home is what lets
+// harvest -> bake -> bank -> the castle's food bootstrap run at all.
+//
+// scheduler.excursionAdmissible is the ONE composed verdict: fitness (hp), then the crossing rule
+// every other journey asks (journeyAdmissible), then the leash (homeLeash) - "do not go past the
+// point where you can still get home before you need home". This is the ONE place any excursion
+// asks it, so the two commands cannot drift.
+//
+// #5, THE ACTION. The verdict says which refusals mean "come back", and they are not the same:
+//   stage 'fit' / 'crossing'  the excursion RETURNS and that is the whole action it owes -
+//                             returning drops `provisioning`, which frees the body, and the
+//                             scheduler tick's next pick owns recovery (heal / shelter / ladder).
+//                             Marching a naked bot home through the dark is the 2026-07-20 death
+//                             carousel; standing down IS the fix, and it already has an owner.
+//   stage 'leash'             the leash is DEFINED as the last moment the walk home still fits in
+//                             the day, so at the instant it trips that walk is feasible by
+//                             construction. `returnHome` is set and the caller performs it via
+//                             provision-recovery.recoverHome - the existing homecoming owner, the
+//                             same one the `homecoming` reflex row dispatches. No new walk.
+//
+// Returns the poll itself with `.verdict()` (the refusal that stopped it, or null) so the caller
+// can act on it after its driver unwinds. Sticky: the FIRST refusal is what gets reported and
+// acted on, so a verdict cannot be overwritten by a later, different one mid-unwind.
+function makeExcursionStop (bot, label) {
+  let verdict = null
+  const poll = () => {
+    if (buildAbort) return true
+    if (verdict) return true
+    let adm = null
+    try { adm = require('./scheduler.js').excursionAdmissible(require('./survival-snapshot.js').excursionState(bot)) } catch { return false }
+    if (adm.ok) return false
+    verdict = adm
+    dbg(label + ': ABORTING the excursion (' + adm.stage + ') - ' + adm.why +
+      '; ' + (adm.returnHome ? 'walking home now via recoverHome' : 'the body is free and the scheduler owns recovery from here') +
+      ' (blocked on ' + adm.blockedOn + ')')
+    return true
+  }
+  poll.verdict = () => verdict
+  return poll
+}
+
+// The #5 half of makeExcursionStop, and the reason the leash is not just another refusal: when the
+// leash trips, GO HOME. Home is where the bed, bank, furnace and farm are. recoverHome is the
+// existing owner (reflexes.js `homecoming` dispatches the same call) and it is handed the leash as
+// its own "how far is far" so the two cannot disagree about whether this bot is out of position.
+// recoverHome re-asks crossingAdmissible per leg and may stand down honestly; that is its
+// contract, and its stand-down is logged by it, not asserted here (#7).
+async function excursionGoHome (bot, poll, label, say) {
+  const v = poll && poll.verdict && poll.verdict()
+  if (!v || !v.returnHome) return null
+  try {
+    const rh = await provRecovery().recoverHome(bot, { say, dist: v.leash })
+    dbg(label + ': homecoming -> ' + (rh.arrived ? 'HOME' : (rh.stabilise ? 'stood down mid-crossing (' + rh.blockedOn + ')' : 'did not arrive (' + Math.round(rh.dist || 0) + 'b out)')))
+    return rh
+  } catch (e) { dbg(label + ': homecoming FAILED (' + e.message + ') - still ' + Math.round(v.leash || 0) + 'b+ from home'); return null }
+}
+
 let recovering = false // recover mutex - concurrent recovers raced inventory diffs (live)
 let provisioning = false
 let escaping = false   // true while digging UP out of a cave - the flee reflex must not
@@ -1189,37 +1257,26 @@ async function handleInner (bot, line, opts = {}) {
         // This excursion goes 70-170 blocks out to mine iron or hunt leather, and it is BY
         // DEFINITION the journey an unarmoured bot makes. Its only abort was `buildAbort` - a
         // latch set by a build preempt and by the watchdog, neither of which is "I am dying".
-        // So the ladder's hp abort (food.outboundRungAdmissible, one caller: the ladder) and the
-        // long-crossing hp floor (journeyAdmissible, one caller: the homecoming) both existed and
-        // NEITHER governed this. Measured 18:43-18:47 local: naked, at night, hp 20 -> 0, four
-        // times in four minutes, up to 170b out, `activity=gearup` throughout.
-        // scheduler.outboundAdmissible is the ONE composed verdict; this asks it on the same
-        // cooperative poll every executor already honours.
-        // WHAT HAPPENS INSTEAD (#5): the excursion RETURNS. That is the whole action it owes -
-        // returning runs this case's `finally`, which drops `provisioning`, which frees the body;
-        // the scheduler tick's very next pick then owns recovery, and at hp<=6/armor 0 that is the
-        // degraded signature -> recoveryLadder (R2 heal/shelter) or, if the ladder is refused, the
-        // Phase-A fallback to recoverHp - which the same rule now stops from routing back out here.
-        // No new actor, no new behaviour: the same hand-off a cut ladder rung already makes.
-        let gearupStopReason = ''
-        const gearupStopped = () => {
-          if (buildAbort) return true
-          let adm = null
-          try { adm = require('./scheduler.js').outboundAdmissible({ hp: bot.health }) } catch { return false }
-          if (adm.ok) return false
-          if (!gearupStopReason) {
-            gearupStopReason = adm.why
-            dbg('gearup: ABORTING the excursion - ' + adm.why + ' (hp ' + bot.health + ', ' +
-              (bot.entity && at ? Math.round(Math.hypot(at.x - bot.entity.position.x, at.z - bot.entity.position.z)) + 'b from the anchor' : 'anchor unknown') +
-              '); the body is free and the scheduler owns recovery from here (blocked on ' + adm.blockedOn + ')')
-          }
-          return true
-        }
+        // So the ladder's hp abort (food.outboundRungAdmissible) and the long-crossing rule
+        // (journeyAdmissible) both existed and NEITHER governed this. Measured 18:43-18:47 local:
+        // naked, at night, hp 20 -> 0, four times in four minutes, up to 170b out.
+        //
+        // The last round gave it the hp half (scheduler.outboundAdmissible). The DISTANCE half was
+        // still single-caller - every journeyAdmissible caller is INBOUND - so nothing leashed how
+        // far this went, and six hours later the bot had nothing: it was never home to use its own
+        // bank, farm, furnace or bed. makeExcursionStop asks the ONE composed verdict
+        // (scheduler.excursionAdmissible = outboundAdmissible + journeyAdmissible + homeLeash) and
+        // owns the #5 hand-off for every stage; `gather` asks the identical poll.
+        const gearupStopped = makeExcursionStop(bot, 'gearup')
         const r = usePlanner
           ? (await planner.gearUp(bot, { say: sayFn, isStopped: gearupStopped, at, restoreMovements: () => setupMovements(bot) })).msg
           : await provisionArmor(bot, { say: sayFn, isStopped: gearupStopped, at })
+        // The leash's ACTION, before this case reports: walk back to the bed/bank/furnace while
+        // the daylight the leash measured is still there. Refusals of the other two stages hand
+        // the body to the scheduler instead - see makeExcursionStop.
+        const gHome = await excursionGoHome(bot, gearupStopped, 'gearup', sayFn)
         endActivity(!/still no armor|no progress|cooling off/.test(r), r)
-        return r
+        return gHome && gHome.arrived ? r + ' (came home before dark)' : r
       } catch (e) { endActivity(false, e.message); throw e } finally { provisioning = false }
     }
 
@@ -2072,9 +2129,16 @@ async function handleInner (bot, line, opts = {}) {
       }
       buildAbort = false // a PREVIOUS stop must not abort this fresh gather
       beginActivity('gather', `${count}x ${item}`)
-      const r = await provision.runGather(bot, item, count, { isStopped: () => buildAbort, restoreMovements: () => setupMovements(bot), homeY: Math.floor(bot.entity.position.y) })
+      // ONE RULE, EVERY JOURNEY: `gather` treks to groves and ore bodies exactly as far as
+      // `armorup` does, and it had NO abort but the build latch - so nothing stopped it setting
+      // out hurt, and nothing leashed how far it wandered before dusk. Same poll, same verdict,
+      // same homecoming (makeExcursionStop / excursionGoHome).
+      const gatherStopped = makeExcursionStop(bot, 'gather')
+      const say = m => bot.chat(String(m).slice(0, 256))
+      const r = await provision.runGather(bot, item, count, { isStopped: gatherStopped, restoreMovements: () => setupMovements(bot), homeY: Math.floor(bot.entity.position.y) })
+      const gHome = await excursionGoHome(bot, gatherStopped, 'gather', say)
       endActivity(r.gathered >= count, `${r.gathered}/${count} ${item}: ${r.reason}`)
-      return `gathered ${r.gathered}/${count} ${item} (${r.reason})`
+      return `gathered ${r.gathered}/${count} ${item} (${r.reason})` + (gHome && gHome.arrived ? ' - came home before dark' : '')
     }
 
     case 'provision': {

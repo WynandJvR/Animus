@@ -201,7 +201,10 @@ function lowHpCalm (bot) {
 // into the open hole mid-dig (verified live: began the pit at timeOfDay 13618, a zombie walked
 // in during the dig, died). The ~800-tick (~40s) head start lets the pit be sealed before any
 // mob spawns. isNight (13000) stays the trigger for the ARMORED "wanted" cases below.
-function shelterNeeded (bot) { return !!(bot.time && bot.time.timeOfDay >= 12200 && bot.time.timeOfDay < 23500) && underArmored(bot) }
+// SHELTER_TOD (12200) now lives in shelter.js: scheduler.homeLeash has to know the exact tick
+// this rule fires at in order to have the bot HOME by then, and a second copy of the deadline
+// would drift from the rule it is supposed to serve (#4).
+function shelterNeeded (bot) { return !!(bot.time && bot.time.timeOfDay >= shelter.SHELTER_TOD && bot.time.timeOfDay < 23500) && underArmored(bot) }
 
 function nightStuck (bot) {
   if (!bot || !bot.time) return false

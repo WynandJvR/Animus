@@ -756,9 +756,12 @@ async function recoverHp (bot, opts = {}) {
     try { bot.pathfinder.setGoal(null) } catch {}
     // regen needs food>=18 - eat FIRST so the hold below actually heals.
     await eatFromPackToComfortable(bot, isStopped)
-    // Get behind cover if it's dark or a mob is near. bedRange 32: sleep in a nearby bed if home
-    // is right there, but don't trek 200b through the dark - pit where we stand past that.
-    if (isNight(bot) || nearHostile(bot, 16)) { try { await nightRest(bot, { isStopped, say, bedRange: 32 }) } catch {} }
+    // Get behind cover if it's dark or a mob is near. BED_TREK_RANGE: sleep in a nearby bed if home
+    // is right there, but don't trek 200b through the dark - pit where we stand past that. That
+    // range is now a NAMED constant in shelter.js because it is also the arrival radius
+    // scheduler.homeLeash leashes the outbound excursions to: the distance the bot may wander is
+    // the distance it can still walk back INSIDE this radius before nightfall (#4).
+    if (isNight(bot) || nearHostile(bot, 16)) { try { await nightRest(bot, { isStopped, say, bedRange: shelterSite.BED_TREK_RANGE }) } catch {} }
     await eatFromPackToComfortable(bot, isStopped)
     const dl = Date.now() + 180000
     const hp0 = bot.health ?? 20

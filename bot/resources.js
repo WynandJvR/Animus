@@ -55,9 +55,50 @@ const cellKey = e => `${e.x},${e.y},${e.z}`
 // COUNTS survive the cooldown (the stock is presumably still in there - only the WALK is
 // suppressed), so the bank tally doesn't sawtooth. Any successful open clears the record.
 const REACH_FAIL_RE = /goto timed out|window did not open|openBlock|no path|took too long|path ended short/i
+
+// ---- SEALED, NOT DEAD (2026-08-02) ----------------------------------------------------
+// The code CAN already tell "too far" from "the window did not open while I was standing on
+// it": pathfix's openBlock wrapper throws `cannot reach the container (Nb away after approach)`
+// for the first and `... (2 attempts, in reach 1.1b - genuine window failure)` for the second.
+// What it could not tell was WHY an in-reach open fails, so a chest made unopenable by a block
+// dropped on top of it earned the same growing cool-off as a broken one and, at five strikes,
+// was DEREGISTERED - the mechanism by which a real, full double chest leaves the bank entirely.
+//
+// A chest is blocked in vanilla by an opaque full cube in the cell directly ABOVE it
+// (Chest.isBlockedChestByBlock -> isSolidBlocking). That is one world read at the failure site,
+// and it is a GROUNDED positive test, not an inference from the error text: if the block is
+// there, the chest is fine and the WORLD is the thing that is broken. Returns the blocking
+// block's name, or null (including for an unloaded read - which is unknown, never "sealed").
+function sealedBy (bot, e) {
+  try {
+    const above = bot.blockAt(new Vec3(e.x, e.y + 1, e.z))
+    if (!above) return null // unloaded: cannot tell, and "cannot tell" is not "sealed"
+    if (above.boundingBox !== 'block') return null
+    if (/^(air|cave_air|void_air)$/.test(above.name)) return null
+    return above.name
+  } catch { return null }
+}
+
 function chestFailed (bot, e, err) {
   const msg = (err && err.message) || ''
   if (!REACH_FAIL_RE.test(msg)) return // a reflex stealing the goal is not the chest's fault
+  // SEALED: an in-reach open that failed with a solid block sitting on the lid. Not a strike,
+  // not a cool-off, never a deregistration - the chest is intact and the obstruction is repair
+  // debt with a real owner (provision-hut.cleanupHutInterior digs interior strays; the operator
+  // command is `huttidy`). #7: the refusal names the blocker AND what would clear it.
+  if (!/cannot reach the container/i.test(msg)) {
+    const by = sealedBy(bot, e)
+    if (by) {
+      const c = loadCache(); const k = cellKey(e)
+      const ent = c[k] = c[k] || { counts: {}, at: 0 }
+      ent.sealedBy = by; ent.sealedAt = Date.now()
+      saveCache()
+      dbg('chest at ' + k + ' is SEALED by ' + by + ' at ' + e.x + ',' + (e.y + 1) + ',' + e.z +
+        ' - a solid block above a chest makes it unopenable; the bank is NOT empty, it is unreadable. ' +
+        'Clearing that cell (cleanupHutInterior / `huttidy`) reopens it. No strike, no cool-off.')
+      return
+    }
+  }
   // BLAME SCOPE: only count a failure the bot suffered NEAR the chest. A bot wedged in a
   // hole 30 blocks out fails to reach EVERYTHING - that poisoned the perfectly good hut
   // chest's record and deregistered it (live, 05:27). Far failure = the BOT's nav problem.
@@ -103,7 +144,7 @@ function chestFailed (bot, e, err) {
 }
 function chestWorked (e) {
   const ent = loadCache()[cellKey(e)]
-  if (ent && (ent.fails || ent.failUntil || ent.farFails)) { delete ent.fails; delete ent.failUntil; delete ent.farFails; saveCache() } // #104: success clears the far-fail streak too
+  if (ent && (ent.fails || ent.failUntil || ent.farFails || ent.sealedBy)) { delete ent.fails; delete ent.failUntil; delete ent.farFails; delete ent.sealedBy; delete ent.sealedAt; saveCache() } // #104: success clears the far-fail streak too; a chest that opened is not sealed
 }
 function chestCoolingOff (e) {
   const ent = loadCache()[cellKey(e)]
@@ -166,18 +207,55 @@ function cachedChest (e) { return loadCache()[cellKey(e)] || null }
 // {item: count} across pack + verified chests. Chest counts come from the cache
 // when fresh (default 3 min); stale/unknown chests get a real walk-and-read unless
 // opts.cachedOnly (cheap mode for reflexes that must not send the bot walking).
-async function totalCounts (bot, opts = {}) {
-  const out = { ...provCore.inventoryCounts(bot) }
+// ==== "I LOOKED AND IT IS EMPTY" IS NOT "I COULD NOT LOOK" (2026-08-02) ==================
+// The `cachedOnly` line below used to be the whole story: `counts = (c && c.counts) || {}`.
+// A chest that has NEVER been read successfully (its cache entry is `at: 0`, which is exactly
+// what a chest sealed by a block above it produces - see chestFailed) contributed {}, i.e.
+// ZERO, and the caller could not tell that from a chest read a second ago and found bare.
+// Live 2026-08-02: chest-cache.json held {"192,68,-103":{"counts":{},"at":0,"fails":1,...}} for
+// a real double chest, and `survival-snapshot.schedulerState` - the snapshot the PURE scheduler
+// reasons from - therefore reported the bank as EMPTY on every tick. Design principle #10:
+// unmeasured is not unmet; a field that was never measured must never invent a need.
+//
+// So the traversal now REPORTS its own uncertainty. `counts` is unchanged for every existing
+// caller (it is a LOWER BOUND, which is the honest reading of a partial bank), and alongside it
+// comes the number of chests that contributed nothing because nobody could look. The tally is
+// the same single pass - there is one definition of "what do I own" and one of "how much of it
+// did I actually see", produced together so they cannot drift.
+//
+// It deliberately does NOT go and read: cachedOnly exists precisely so a cheap reflex/tick is
+// never sent walking ([[body-first-priority]]). The answer to a cold bank is to REPORT THE
+// UNCERTAINTY, and to let the consumers that own a walk (maintenancePass, the recovery ladder's
+// rearmFromBank rung) be the ones that go and look.
+// THE LINE BETWEEN KNOWN AND UNKNOWN IS "HAS THIS CHEST EVER BEEN READ", not "is the reading
+// fresh". `at` is only ever written by a SUCCESSFUL open, so `at > 0` means the counts are a
+// real measurement - possibly an old one, and an old measurement is still evidence. `at` falsy
+// (no cache entry, or the `{"counts":{},"at":0,"fails":1}` shape a sealed chest leaves behind)
+// means nobody has ever seen inside, and THAT is the state that must not read as zero.
+// Every number this returns is therefore identical to what totalCounts returned before; the
+// only new thing is that the caller can now tell how much of the bank it did not see.
+//   chests   how many verified chests were in scope
+//   read     how many contributed a real reading (ever opened; fresh, stale, or opened now)
+//   unknown  how many have never been read at all
+async function totalCountsDetailed (bot, opts = {}) {
+  const counts = { ...provCore.inventoryCounts(bot) }
   const maxAge = opts.maxAgeMs != null ? opts.maxAgeMs : 180000
+  let chests = 0; let read = 0; let unknown = 0
   for (const e of verifiedChests(bot, opts.near, opts.maxDist)) {
+    chests++
     const c = cachedChest(e)
-    let counts
-    if (c && c.counts && (Date.now() - c.at < maxAge)) counts = c.counts
-    else if (opts.cachedOnly) counts = (c && c.counts) || {}
-    else counts = await readChest(bot, e)
-    for (const [n, k] of Object.entries(counts || {})) out[n] = (out[n] || 0) + k
+    let got
+    if (c && c.counts && (Date.now() - c.at < maxAge)) got = c.counts
+    else if (opts.cachedOnly) got = (c && c.counts) || {}
+    else got = await readChest(bot, e)
+    for (const [n, k] of Object.entries(got || {})) counts[n] = (counts[n] || 0) + k
+    if ((cachedChest(e) || {}).at) read++; else unknown++
   }
-  return out
+  return { counts, chests, read, unknown }
+}
+
+async function totalCounts (bot, opts = {}) {
+  return (await totalCountsDetailed(bot, opts)).counts
 }
 
 async function totalHave (bot, name, opts = {}) { return (await totalCounts(bot, opts))[name] || 0 }
@@ -501,6 +579,8 @@ async function ensureFood (bot, opts = {}) {
 module.exports = {
   verifiedChests,
   readChest,
+  sealedBy,
+  totalCountsDetailed,
   totalCounts,
   totalHave,
   withdrawItems,
