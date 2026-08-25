@@ -22,7 +22,7 @@ const ROUTE_MIN_LEN = 64      // don't record a route shorter than this (nothing
 const ROUTE_LEN_SANITY = 1.6  // reject a "route" whose polyline is >1.6x the straight line
 const ROUTE_MATCH_TOL = 24    // endpoints within 24b (either orientation) = the same route
 const WEDGE_STEER_CORRIDOR = 2 // a wedge within 2b of a leg segment clips it
-const INFRA_SUPPRESS_R = 12   // NEVER record/steer a wedge within 12b of our own infra
+const INFRA_SUPPRESS_R = 12   // never STEER around a wedge within 12b of our own infra (recording it is fine - and since 2026-08-25 mandatory: see world-memory.recordWedge)
 const H24 = 24 * 3600 * 1000
 const D7 = 7 * 24 * 3600 * 1000
 
@@ -209,12 +209,18 @@ function wedgeOnSegment (wedges, p, q, corridor = WEDGE_STEER_CORRIDOR, now = Da
   return null
 }
 
-// ---- own-infra suppression (BOTH record + recall side) -----------------------------
+// ---- own-infra suppression (RECALL side only, since 2026-08-25) --------------------
 // The #1 rule: the bot must NEVER avoid its own hut/build/bank, even if it wedged there.
-// suppressedNearAnchors is the single predicate used on BOTH sides: at record time a pos
-// this close to any anchor is not stored; at recall time every wedge is re-checked against
-// the CURRENT anchor list before it may steer (so a hut built after a wedge, or a stale
-// anchor, retroactively neutralises it).
+// suppressedNearAnchors is the single predicate that enforces it: at recall time every wedge
+// is re-checked against the CURRENT anchor list before it may steer (so a hut built after a
+// wedge, or a stale anchor, retroactively neutralises it).
+// It used to be applied on the RECORD side too, which was not the rule twice over - it was
+// the rule once and blindness once: 1,269 "wedge: not recording - within 12b of own infra"
+// lines in four days meant the bot could not learn the wedges it hits most often, because
+// they are near the thing it visits most (review 2026-08-25, D5/§3.6). Recording is now
+// unconditional and the near-home ones carry a `nearOwnInfra` tag; this predicate still
+// decides, live, which of them may steer. Its OTHER caller (provision.escapeDiggable's
+// wild-log check: never fell a tree next to my own base) is unaffected.
 function suppressedNearAnchors (anchors, pos, r = INFRA_SUPPRESS_R) {
   if (!Array.isArray(anchors)) return false
   for (const a of anchors) { if (Math.hypot(a.x - pos.x, a.z - pos.z) <= r) return true }

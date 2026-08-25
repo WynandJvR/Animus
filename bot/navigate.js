@@ -21,6 +21,7 @@ const arbiter = require('./arbiter.js') // priority body-ownership: reflexes def
 const provHut = () => require('./provision-hut.js') // LAZY: provision-hut.js top-requires this module, so an eager import here would be a real cycle
 const provRecovery = () => require('./provision-recovery.js') // LAZY: provision-recovery.js top-requires this module, so an eager import here would be a real cycle
 const navProfile = require('./nav-profile.js') // PURE terrain policy - findDryLandExit (WATER_ESCAPE); no bot-module cycle
+const selfWorld = require('./self-world.js') // THE one self/world truth: is this cell mine? am I at home? (review 2026-08-25 D5/§3.4). Registry arithmetic only - no bot-module cycle
 
 // §4: one definition of the sink rule; this module still owns its own sink. index.js injects
 // it so debug lines persist to logs/bot-events.log.
@@ -948,6 +949,13 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
   }
   const xz = goalXZ(goal)
   const twd = xz ? { x: xz.x, z: xz.z, y: goalY(goal) } : null // door scans also look near the GOAL
+  // ONE SELF/WORLD TRUTH (review 2026-08-25 §3.4): say WHERE WE ARE before naming a rung.
+  // For four hours on 2026-08-03 the log's only account of a bot standing two blocks from its
+  // own bed was `stuck UNDERGROUND ... climbing to the surface y=72` - a sentence made of two
+  // wrong beliefs (the roof read as terrain, the hut read as a cave). The bot's own structures
+  // are in the registry; there is no excuse for the log not to say "I am at home" (principle #7).
+  const here = selfWorld.homeVolumeAt(p0.floored())
+  if (here) dbg('recovery: I am AT HOME (' + here.zone + ') at ' + p0.floored() + ' - the way out of my own house is the DOOR, never the roof')
   const ladder = [
     { // HARD INVARIANT - wedged INSIDE the bot's own structure: step to a schema-correct
       // FREE interior cell, and NEVER pillar/dig/dirt-fill in the living room. Live, the
@@ -1120,8 +1128,22 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
       run: async () => openNearbyDoor(bot, { towards: twd })
     },
     { // buried underground (real ceiling, not a canopy): staircase/pillar up to daylight.
+      //
+      // ==== NOT APPLICABLE INSIDE MY OWN HOME (review 2026-08-25 D5/§3.4) ==================
+      // This rung works by CUTTING: climbToSurface digs a staircase / pillars up. In the cells
+      // the one dig rule protects - the hut fabric and the ground it stands on
+      // (provision-core.digBlocked's own-infra arm, asked here through self-world.noDigAt so
+      // there is no second copy of it) - every swing is refused by construction. Live
+      // 2026-08-03: 243 x `climb -> no progress` at the bot's own doorstep, each one a rung
+      // taking the body, burning its budget and reporting a failure it could never have avoided.
+      // A rung that cannot succeed by construction is NOT APPLICABLE, not a failed attempt -
+      // the same lesson the door rung's 16b gate was paid for. Falling through leaves the
+      // situation to the rungs that actually fit a house: indoor and door.
+      // This changes NOTHING about what may be dug: those digs were already refused. It only
+      // stops asking.
       kind: 'climb',
-      when: () => opts.climb !== false && provHut().hasSolidCeiling(bot, 12, { ignoreLeaves: true }),
+      when: () => opts.climb !== false && provHut().hasSolidCeiling(bot, 12, { ignoreLeaves: true }) &&
+        !selfWorld.noDigAt(bot.entity.position.floored()),
       run: async () => {
         // GROUNDED TARGET (#111). This rung used to hand climbToSurface `feet.y + 10` - a
         // number, not a place. Every hop left the bot ten blocks up and still under a ceiling,
@@ -1633,9 +1655,11 @@ async function forceUnstick (bot, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const p0 = bot.entity.position.clone()
   // WEDGE-MEMORY (semantic-world-map slice 1): this single choke point covers all three
-  // forceUnstick escalators (walkStaged, the nav ladder, the watchdog). recordWedge no-ops
-  // under 12b own-infra suppression (the #1 rule); the reflex-dominated exclusion is
-  // INHERITED (the escalators already refuse forceUnstick while a survival reflex holds).
+  // forceUnstick escalators (walkStaged, the nav ladder, the watchdog). Since 2026-08-25
+  // recordWedge records EVERY wedge, including the ones at home (tagged nearOwnInfra) - the
+  // "never avoid your own base" rule is enforced once, on the steer side, in listWedges. The
+  // reflex-dominated exclusion is INHERITED (the escalators already refuse forceUnstick while
+  // a survival reflex holds).
   try { prov().recordWedge(p0) } catch {}
   forceUnsticking = true
   recoveringDepth++

@@ -397,10 +397,21 @@ function surfaceYAt (bot, x, z, opts = {}) {
     // the terrain model which solid blocks are the world's and which are the bot's own mess.
     // Skipping registered scaffold makes this scan describe the WORLD. (FIX 6 attacks the same
     // problem from the other end by not leaving the towers there in the first place.)
+    //
+    // ==== 2026-08-25 (review D5/§3.4): AND NEITHER IS OUR OWN HOUSE =====================
+    // FIX 8 skipped registered SCAFFOLD and stopped there, so the other half of the bot's own
+    // masonry still read as terrain: its hut roof slab, its walls, its floor. Live 2026-08-03
+    // at (190,69,-100) that produced a "surface" at y72 - the hut's roof course - which the
+    // climb rung then tried to reach by cutting, and digBlocked (correctly) refused: 243
+    // `climb -> no progress` lines two blocks from the bot's own bed. One subsystem's
+    // protected structure was another subsystem's terrain.
+    // self-world.ownBlockAt is now the ONE definition of "this solid block is mine, not the
+    // world's", shared with provision-hut.hasSolidCeiling scanning the other way. Skipping it
+    // makes this scan describe the WORLD - which is the only thing it ever claimed to do.
     if (isGroundBlock(r.block)) {
-      let ours = false
-      try { ours = !!require('./scaffold.js').isScaffold({ x: X, y, z: Z }) } catch {}
-      if (ours) continue // our own tower/bridge - keep looking for real ground beneath it
+      let ours = null
+      try { ours = require('./self-world.js').ownBlockAt({ x: X, y, z: Z }) } catch {}
+      if (ours) continue // our own tower/bridge/roof/wall/floor - keep looking for real ground beneath it
       return { known: true, y: y + 1, groundY: y }
     }
   }

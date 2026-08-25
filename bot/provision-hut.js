@@ -25,6 +25,7 @@
 const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
 const hutModel = require('./hut-model.js')   // PURE self-structure model + repair decision
+const selfWorld = require('./self-world.js') // THE one self/world truth: is this cell mine? am I at home? (review 2026-08-25 D5/§3.4)
 const provRecovery = () => require('./provision-recovery.js') // LAZY: provision-recovery.js top-requires this module, so an eager import here would be a real cycle
 const provFood = () => require('./provision-food.js') // LAZY: provision-food.js top-requires this module, so an eager import here would be a real cycle
 const provBank = () => require('./provision-bank.js') // LAZY: provision-bank.js top-requires this module, so an eager import here would be a real cycle
@@ -59,14 +60,10 @@ const ANYFILL = /(_planks|dirt|cobblestone|cobbled_deepslate|stone)$/
 // not "underground": before this predicate the roofed interior tripped hasSolidCeiling,
 // so climb-out dug through the bot's own roof, pit-escape pillared dirt onto the floor,
 // and fishing/farming refused to run "in a cave" while the bot stood in its living room.
-function ownHutAt (pos) {
-  if (!pos) return null
-  const x = Math.floor(pos.x); const y = Math.floor(pos.y); const z = Math.floor(pos.z)
-  for (const h of listInfra('hut')) {
-    if (x >= h.x && x <= h.x + 5 && z >= h.z && z <= h.z + 5 && y >= h.y && y <= h.y + 4) return h
-  }
-  return null
-}
+// #4 (2026-08-25): the box test itself moved to self-world.js, the ONE place that answers
+// "is this cell mine". This stayed as the name every anti-grief exclusion already calls, and
+// it is byte-for-byte the same region (footprint x dy0..4) - a delegation, not a redefinition.
+function ownHutAt (pos) { return selfWorld.ownHutBoxAt(pos) }
 
 // "Is this cell holding up something of MINE?" - the positional half of dig permission, and
 // the answer to the failure the material rule structurally cannot see: canBreakNaturally is
@@ -80,18 +77,10 @@ function ownHutAt (pos) {
 //                 hut and are covered twice; harmless, and it protects the ones that don't).
 // PURE GEOMETRY, no world reads - the same fail-PROTECTIVE contract as ownHutAt (see the
 // deliberate two-functions note above insideOwnStructure). Returns the record, or null.
-const POINT_INFRA_KINDS = ['chest', 'furnace', 'table', 'bed']
-function ownInfraSupportAt (pos) {
-  if (!pos) return null
-  const x = Math.floor(pos.x); const y = Math.floor(pos.y); const z = Math.floor(pos.z)
-  for (const h of listInfra('hut')) { if (hutModel.inSupport(h, x, y, z)) return h }
-  for (const kind of POINT_INFRA_KINDS) {
-    for (const e of listInfra(kind)) {
-      if (Math.abs(x - e.x) <= 1 && Math.abs(z - e.z) <= 1 && y < e.y) return e
-    }
-  }
-  return null
-}
+// #4 (2026-08-25): moved to self-world.ownSupportAt with the arms and the order unchanged.
+// The kind list moved with it (self-world.POINT_INFRA_KINDS) so the support columns and the
+// fabric cells can never come to disagree about which registry kinds are the bot's own.
+function ownInfraSupportAt (pos) { return selfWorld.ownSupportAt(pos) }
 
 // ==== THE PLACEMENT RESERVATIONS (2026-08-02) ============================================
 // The three registry-side predicates provCore.placeBlocked composes. Same contract as
@@ -181,19 +170,11 @@ function doorwayReservationAt (bot, pos, hut) {
 // "Am I (is this cell) in the crawlspace UNDER my own floor?" - the registry-side reader of
 // hutModel.underFloor, which is where that region is defined and why. Pure geometry, no world
 // reads, same fail-PROTECTIVE contract as ownHutAt. Returns the hut record, or null.
-function underOwnFloorAt (pos) {
-  if (!pos) return null
-  const x = Math.floor(pos.x); const y = Math.floor(pos.y); const z = Math.floor(pos.z)
-  for (const h of listInfra('hut')) { if (hutModel.underFloor(h, x, y, z)) return h }
-  return null
-}
+function underOwnFloorAt (pos) { return selfWorld.underOwnFloorAt(pos) } // #4: one definition, in self-world.js
 
 function onHutApron (bot, pos) {
-  const p = pos || bot.entity.position.floored()
-  for (const h of listInfra('hut')) {
-    if (p.x >= h.x - 2 && p.x <= h.x + 6 && p.z >= h.z - 2 && p.z <= h.z + 6) return h
-  }
-  return null
+  // #4: the 2-cell ring is self-world.onOwnApronAt - the same cells, one definition.
+  return selfWorld.onOwnApronAt(pos || bot.entity.position.floored())
 }
 
 // #115 GROUNDED_CLAIMS - VERIFIED OCCUPANCY. This used to be `ownHutAt(p)`: a pure geometry
@@ -234,20 +215,43 @@ function insideOwnStructure (bot, pos) {
   return h
 }
 
+// "Is there a roof of THE WORLD over my head?" - the one question every "am I buried"
+// consumer asks (climb-out, travel surfacing, the fishing/farming gates, /state hazards).
+//
+// ==== MY OWN ROOF IS NOT A CAVE ROOF (review 2026-08-25, D5/§3.4) ======================
+// This scan used to take the first solid block overhead as a ceiling, with exactly ONE
+// exemption: the verified hut INTERIOR. Everything else the bot had built read as bedrock
+// over its head. Two cells the exemption missed, and both of them are AT HOME:
+//   - the crawlspace UNDER the bot's own floor (hutModel.underFloor). Geometrically "not in
+//     the hut" - ownHutAt stops AT the floor slab - so insideOwnStructure said no, the floor
+//     planks overhead said "buried", the climb rung fired, and digBlocked correctly refused
+//     to cut the bot's own floor. `climb -> no progress`, 243 times on 2026-08-03.
+//   - the doorstep/apron under the bot's own eaves, and any cell under its own registered
+//     scaffold - same shape, same outcome.
+// The fix is not another exemption: it is that a solid block of MY OWN FABRIC is not part of
+// the world's roof, full stop - the same rule pathfix.surfaceYAt applies scanning DOWNWARD
+// for the ground (self-world.ownBlockAt is that one rule). Skip it and keep looking: if there
+// really is stone above my house, this still says yes; if all that stands between me and the
+// sky is my own hut, this now says no, and the ladder falls through to the DOOR rung.
+// Deliberately NOT skipped: self-world's SUPPORT region. The dirt my hut stands on is the
+// world's ground that I happen to be forbidden to cut - see the FABRIC vs SUPPORT note in
+// self-world.js. Calling it "not a ceiling" would say "open sky" from the bottom of a mine.
 function hasSolidCeiling (bot, upTo = 45, opts = {}) {
   if (!bot.entity) return false
-  // Inside the bot's own hut: roofed, yes - underground, no. Without this the interior
-  // read as a cave and every "buried" consumer (climb-out, travel surfacing, the fishing/
-  // farming gates, /state hazards) misfired while the bot idled at home.
+  // Inside the bot's own hut: roofed, yes - underground, no. Kept as the CHEAP, world-VERIFIED
+  // short-circuit (insideOwnStructure spot-reads the shell, so it also proves the hut is really
+  // there); the own-fabric skip below is what covers everywhere else at home.
   if (insideOwnStructure(bot)) return false
   const base = bot.entity.position.floored()
   for (let dy = 2; dy <= upTo; dy++) {
-    const b = bot.blockAt(base.offset(0, dy, 0))
+    const cell = base.offset(0, dy, 0)
+    const b = bot.blockAt(cell)
     if (!b || AIRISH(b.name) || b.boundingBox !== 'block') continue
     // leaves have a 'block' bounding box but a canopy isn't a cave roof - so an
     // "underground" check (opts.ignoreLeaves) sees through a tree, while travelFar's
     // buried() check (default) still treats an overhang as cover.
     if (opts.ignoreLeaves && /_leaves$/.test(b.name)) continue
+    if (selfWorld.ownBlockAt(cell)) continue // my own roof/wall/floor/scaffold - mine, not the world's
     return true
   }
   return false

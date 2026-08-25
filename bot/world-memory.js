@@ -155,22 +155,44 @@ function dementRoute (route) {
     saveWorldMem()
   } catch (e) { dbg('route: dement failed - ' + e.message) }
 }
-// Record a physical stuck-spot (forceUnstick fired here). NO-OP under 12b own-infra
-// suppression (record side of the #1 rule) - a wedge at/near home must never be learned.
+// Record a physical stuck-spot (forceUnstick fired here).
+//
+// ==== THE 12b BLIND SPOT IS DELETED (review 2026-08-25, D5/§3.6) ========================
+// This function used to open with a record-side veto:
+//     if (suppressedNearAnchors(ownInfraAnchors(), pos)) { dbg('wedge: not recording ...'); return }
+// It fired 1,269 times in four days. That is not a guard, it is a switch that turned wedge
+// LEARNING off exactly where wedges happen - the doorstep, the crawlspace, the bank chest,
+// the live build site - because those are the places the bot visits most. The bot then spent
+// the same day wedging at its own front door with no memory that it had ever done so.
+//
+// The rule the veto was protecting is real and survives untouched: THE BOT MUST NEVER AVOID
+// ITS OWN HUT/BUILD/BANK, even if it wedged there. But that is a RECALL rule about steering,
+// and listWedges() below has always enforced it independently, against the CURRENT anchor
+// list. Enforcing it twice bought nothing and cost the memory. So: record everything, TAG the
+// ones at home `nearOwnInfra`, and let the steer side keep doing its own job. The tag is the
+// fact ("this wedge is at home"), not the policy.
+// The record now carries `n` too, so `grep 'wedge: recorded'` is a histogram of where the bot
+// actually gets stuck instead of 1,269 identical refusals (principle #7).
 function recordWedge (pos) {
   try {
     if (!pos || typeof pos.x !== 'number') return
-    if (routeMem.suppressedNearAnchors(ownInfraAnchors(), pos)) { dbg('wedge: not recording - within 12b of own infra (' + Math.round(pos.x) + ',' + Math.round(pos.z) + ')'); return }
     const m = loadWorldMem()
     const wedges = m.wedges = m.wedges || []
-    routeMem.mergeWedge(wedges, pos)
+    const nearOwn = routeMem.suppressedNearAnchors(ownInfraAnchors(), pos)
+    const rec = routeMem.mergeWedge(wedges, pos)
+    // re-stamped on every merge, never sticky: infra comes and goes, and a wedge's tag must
+    // describe where my stuff is NOW, the same way the recall filter re-checks it.
+    if (nearOwn) rec.nearOwnInfra = true; else delete rec.nearOwnInfra
     saveWorldMem()
-    dbg('wedge: recorded stuck-spot ' + Math.round(pos.x) + ',' + Math.round(pos.z))
+    dbg('wedge: recorded stuck-spot ' + Math.round(pos.x) + ',' + Math.round(pos.z) + (nearOwn ? ' nearOwnInfra' : '') + ' (n=' + (rec.n || 1) + ')')
   } catch (e) { dbg('wedge: record failed - ' + e.message) }
 }
 // The steer-eligible wedge list: alive (age-weighted) AND re-checked NOW against the
-// current infra list (recall side of the #1 rule) - a hut built after a wedge, or a stale
-// entry near home, is filtered out before it can ever steer routing.
+// current infra list - THE recall-side home rule, and since 2026-08-25 the ONLY place it is
+// enforced (the record-side copy is deleted above). A hut built after a wedge, or a stale
+// entry near home, is filtered out before it can ever steer routing. Wedges tagged
+// nearOwnInfra are therefore learned and counted but never used to route the bot away from
+// its own home - which is exactly the distinction the old blind spot could not make.
 function listWedges () {
   try { return routeMem.activeWedges((loadWorldMem().wedges) || [], ownInfraAnchors()) } catch { return [] }
 }
