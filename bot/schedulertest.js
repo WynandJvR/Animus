@@ -161,7 +161,7 @@ t('(#65) bootstrapNeed: BOOTSTRAP_PRIORITY=0 -> always null (byte-for-byte)', ()
   })
 })
 t('(#65) pickJob: healthy naked bot with a saved build -> maintenancePass (bootstrap) OVER the build', () => withBootstrap(() => {
-  const s = snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: true, bankFoodPts: STOCKED, activeJob: null, persistedBuild: true })
+  const s = snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: true, bankFoodPts: STOCKED, activeJob: null, persistedBuild: true, hutExists: true })
   const pj = S.pickJob(s)
   assert.strictEqual(pj.job, 'maintenancePass', 'bootstrap beats build-resume')
   assert.strictEqual(pj.cls, 'maintain')
@@ -202,7 +202,7 @@ t('(IRON_KEYSTONE) ironKeystoneActive: naked + <4 iron -> true; armored / iron-s
 t('(IRON_KEYSTONE) pickJob: naked keystone bot with a saved build -> holds the build for the armor grind', () => {
   // BOOTSTRAP_PRIORITY off so bn is null and we'd otherwise resume the build - the keystone still holds it.
   withEnv('IRON_KEYSTONE', '1', () => withEnv('BOOTSTRAP_PRIORITY', '0', () => {
-    const s = snap({ hp: 20, food: 20, armorPieces: 0, rawIron: 0, homeReachable: true, activeJob: null, persistedBuild: true })
+    const s = snap({ hp: 20, food: 20, armorPieces: 0, rawIron: 0, homeReachable: true, activeJob: null, persistedBuild: true, hutExists: true })
     const pj = S.pickJob(s)
     assert.strictEqual(pj.job, 'maintenancePass', 'keystone holds the build')
     assert.strictEqual(pj.bootstrap, 'armor', 'on the armor grind')
@@ -268,7 +268,7 @@ t('(#108) bootstrapNeed: the FOOD_RESERVE_FIRST=0 duplicate verdict is GONE - th
   })
 })
 t('(#74) pickJob: healthy naked bot with a saved build -> bootstrap FOOD over the build (reserve first)', () => withReserveFirst(() => {
-  const s = snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: true, bankFoodPts: 0, activeJob: null, persistedBuild: true })
+  const s = snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: true, bankFoodPts: 0, activeJob: null, persistedBuild: true, hutExists: true })
   const pj = S.pickJob(s)
   assert.strictEqual(pj.job, 'maintenancePass', 'bootstrap beats build-resume')
   assert.strictEqual(pj.bootstrap, 'food', 'carries the food-reserve bootstrap need (reserve-first)')
@@ -1010,3 +1010,26 @@ t('(#86) rungFeasible: under-armored outbound is blocked only by a REAL ladder r
 
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall scheduler tests passed')
 process.exit(failures ? 1 : 0)
+
+// ---- #102 CAMP_FIRST: the other side of the three tests above ----------------------------
+// Each of #65 / #74 / IRON_KEYSTONE holds the build back for a bootstrap errand. All three are
+// scoped to a bot that ALREADY HAS SHELTER: while no hut stands, the saved build's own CAMP
+// step IS the missing infra, so holding the build prevents the very thing the hold is for.
+// buildReady always carried this exemption; pickJob re-derived the question without it and
+// pickJob is what dispatches - so live on 2026-08-25 the bot ground on armor for four hours
+// with no hut, no bed, no farm and no castle. These pin BOTH sides so they cannot drift again.
+t('(#102) pickJob: naked bot, saved build, NO HUT -> the BUILD is picked (its camp step is the shelter)', () => withBootstrap(() => {
+  const s = snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: true, bankFoodPts: STOCKED, activeJob: null, persistedBuild: true, hutExists: false })
+  const pj = S.pickJob(s)
+  assert.strictEqual(pj && pj.job, 'build', 'no hut -> the build goes first so the camp step can run')
+}))
+
+t('(#102) campFirstExempt is ONE definition - buildReady and pickJob cannot disagree', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, 'scheduler.js'), 'utf8')
+  const defs = (src.match(/function campFirstExempt/g) || []).length
+  assert.strictEqual(defs, 1, 'exactly one definition of the camp-first rule')
+  const priv = /const noHut = process\.env\.CAMP_FIRST/.test(src)
+  assert.ok(!priv, 'no caller may re-derive the rule privately (that seam cost four live hours)')
+  const uses = (src.match(/campFirstExempt\(s\)/g) || []).length
+  assert.ok(uses >= 3, 'buildReady + the bootstrap clause + the iron keystone all ask it, got ' + uses)
+})

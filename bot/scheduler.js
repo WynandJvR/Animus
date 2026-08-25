@@ -421,7 +421,7 @@ function buildReady (snapshot) {
   //     own CAMP steps ARE the missing infra, so the job is let through to establish shelter.
   if (process.env.BOOTSTRAP_PRIORITY !== '0') {
     const bn = bootstrapNeed(s)
-    const noHut = process.env.CAMP_FIRST !== '0' && !s.hutExists
+    const noHut = campFirstExempt(s) // #4: the ONE definition, shared with pickJob
     if (bn && !noHut) return { ok: false, why: 'bootstrap needed (' + bn + ')', need: bn, exempt: false }
     if (bn && noHut) return { ok: true, why: 'bootstrap ' + bn + ' pending but NO HUT stands - the camp step establishes shelter first (#102)', need: null, exempt: true }
   }
@@ -505,6 +505,18 @@ function buildVerdict (counts) {
   }
 }
 
+// #102 CAMP_FIRST, THE ONE DEFINITION. While NO hut stands, the saved build's own CAMP step IS
+// the missing survival infra, so a bootstrap need must NOT hold the build back - building the
+// camp is how the bootstrap gets done. This lived only inside buildReady(), which is consulted
+// AFTER a build is dispatched; pickJob is what dispatches, and it re-derived the bootstrap-vs-
+// build question WITHOUT the exemption. Two definitions of one rule, and the selector won.
+// Both callers now ask here (#4), so they cannot drift again.
+function campFirstExempt (s) {
+  if (process.env.CAMP_FIRST === '0') return false
+  if (!s || !s.persistedBuild) return false   // nothing to let through
+  if (s.buildHoldMs > 0) return false          // the job layer stood this build down (item 7)
+  return !s.hutExists
+}
 // ---- pickJob ----------------------------------------------------------------------------
 // The single owning-job selector (I3, §3.2, §5 entry). null => idle. `preempt` is true only
 // when there IS an active victim whose class rank the returned job exceeds (the S4 dispatcher
@@ -555,7 +567,17 @@ function pickJob (snapshot) {
   //     rank 1 can't preempt a busy build - the build is held at resumeBuild's bootstrap gate meanwhile).
   //     BOOTSTRAP_PRIORITY=0 -> bootstrapNeed is always null -> the build resumes exactly as today.
   const bn = bootstrapNeed(s)
-  if (bn) return { job: 'maintenancePass', cls: 'maintain', reason: 'bootstrap: ' + bn + ' before resuming the build', preempt: false, bootstrap: bn }
+  // #102 CAMP_FIRST, ASKED HERE TOO - ONE RULE, ONE DEFINITION (#4). This returned
+  // maintenancePass on ANY bootstrap need, unconditionally, and the comment above assumed the
+  // build was "held at resumeBuild's bootstrap gate meanwhile". It was not: buildReady carries
+  // the #102 exemption (while NO hut stands the build's own CAMP step IS the missing infra, so
+  // the build is let through to establish shelter) - but buildReady is only consulted AFTER the
+  // build is dispatched, and pickJob is what dispatches. So the selector and the gate disagreed,
+  // the selector won, and the build was never selected while any bootstrap need stood.
+  // Live 2026-08-25: "chose build/idle: ...NO HUT stands" printed 12 times, "pick=build" zero
+  // with no hut, no bed, no farm and no castle - all four blocked behind this one line.
+  const campFirst = campFirstExempt(s)
+  if (bn && !campFirst) return { job: 'maintenancePass', cls: 'maintain', reason: 'bootstrap: ' + bn + ' before resuming the build', preempt: false, bootstrap: bn }
 
   // IRON_KEYSTONE COMMIT (anti-thrash): a fully-naked bot short of its first boots' worth of iron must
   // NOT resume the build and range for wood - that thrash (iron at the bed <-> oak at the far site every
@@ -564,7 +586,11 @@ function pickJob (snapshot) {
   // need still outranks this). Fires only when we'd otherwise resume the build (bn was null): bootstrap's
   // #65/#74 ordering above is untouched. Flag off -> ironKeystoneActive false -> the build resumes as
   // today, byte-for-byte.
-  if (s.persistedBuild && ironKeystoneActive(s)) {
+  // ...AND THE KEYSTONE ASKS #102 TOO. Same seam as the bootstrap clause above: this held a naked
+  // bot on the armor-iron errand whether or not a hut stood. With NO hut the camp step IS the
+  // shelter that stops the naked thrash this clause exists to prevent, so holding the build here
+  // prevents the very fix. Third consumer of one rule; all three now ask campFirstExempt (#4).
+  if (s.persistedBuild && ironKeystoneActive(s) && !campFirstExempt(s)) {
     return { job: 'maintenancePass', cls: 'maintain', reason: 'iron keystone: banking first armor iron before resuming the build (no naked thrash)', preempt: false, bootstrap: 'armor' }
   }
   // A STOOD-DOWN BUILD IS NOT THE JOB (review item 7). This clause used to shadow steps 5 and 6
