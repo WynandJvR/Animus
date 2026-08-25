@@ -250,7 +250,18 @@ function hasSolidCeiling (bot, upTo = 45, opts = {}) {
     // leaves have a 'block' bounding box but a canopy isn't a cave roof - so an
     // "underground" check (opts.ignoreLeaves) sees through a tree, while travelFar's
     // buried() check (default) still treats an overhang as cover.
-    if (opts.ignoreLeaves && /_leaves$/.test(b.name)) continue
+    // A CANOPY IS NOT A CAVE ROOF - AND IN A SAVANNA THE CANOPY IS MADE OF LOGS (2026-08-25,
+    // live). This tested `_leaves$` only. That is sufficient in a forest, where the thing over
+    // your head is leaves; it is wrong in a savanna, where acacia holds its branches out
+    // sideways as horizontal runs of acacia_log over open ground. The bot stood on grass at
+    // y65 in biome=savanna, looking at an oak_log five blocks up, and every craft in the run
+    // was refused with `regroup for craft: (underground=true)` - 0 crafts in four hours, which
+    // blocked planks -> table -> pickaxe -> hut -> home anchor -> farm -> bed, all of it.
+    // EVERY ignoreLeaves caller is asking "am I in a cave / underground", and standing under a
+    // tree - or under a wooden roof - is not underground. So the option ignores the whole
+    // canopy, not just its leaves. The DEFAULT (ignoreLeaves off) is the `buried()`/cover
+    // question, where an overhang of any material legitimately counts as cover, and is unchanged.
+    if (opts.ignoreLeaves && /(_leaves|_log|_wood|_stem|_hyphae)$/.test(b.name)) continue
     if (selfWorld.ownBlockAt(cell)) continue // my own roof/wall/floor/scaffold - mine, not the world's
     return true
   }
