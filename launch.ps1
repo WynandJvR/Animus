@@ -52,10 +52,13 @@ if (-not $up) {
   Read-Host "Press Enter to still try starting the brain, or close this window to stop"
 }
 
-# --- open the dashboard in the browser -------------------------------------
+# --- the control surface is Animus.exe, NOT a browser ----------------------
+# This used to Start-Process the URL. The browser dashboard was RETIRED when the
+# native GUI landed (index.js: "the old browser dashboard is gone - the Animus GUI
+# is the control surface now"), and :3001 has served a one-line string ever since.
+# So the launcher was opening a tab that says "use the other thing".
 if ($up) {
-  Write-Host "Opening dashboard: http://127.0.0.1:3001" -ForegroundColor Cyan
-  Start-Process 'http://127.0.0.1:3001'
+  Write-Host "Control surface: Animus.exe (the GUI). :3001 is the API it talks to." -ForegroundColor Cyan
 }
 
 # --- 3. start the BRAIN in its own window (proven Ollama-native config) -----

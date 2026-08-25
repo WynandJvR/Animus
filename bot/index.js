@@ -43,6 +43,7 @@ const foodSec = require('./food.js') // #40 F3.2: pure busy-preempt food thresho
 const pov = require('./pov.js') // GUI-OVERHAUL §2: sliced DDA raycaster behind GET /pov (all logic lives in pov.js)
 const reflexes = require('./reflexes.js') // PLAN-one-runner: the proposal registry + the ONE body-ownership rule the tick arbitrates with
 const attempts = require('./attempts.js') // review §3.3: attempt memory keyed (job, step, 4b-cell) - replaces runner.noOp + runner.ladderBlock
+const cmdGate = require('./gate.js') // M1 of the deadlock-free-arbitration design: THE refusal registry - the nine brain-command gates as ROWS, one evaluator, one place a `held (` may be built
 const SCHED_ON = process.env.SCHEDULER !== '0' // master flag: SCHEDULER=0 restores the S1-hotfix wiring byte-for-byte (gate takes the survivalAdmissible path, the tick never registers, the 3 reflexes run as today)
 const LADDER_ON = SCHED_ON && process.env.RECOVERY_LADDER !== '0' // S5: RECOVERY_LADDER=0 restores S4's recoveryLadder DOWNGRADE + the one-shot respawn grave gating byte-for-byte
 const MAINTAIN_ON = SCHED_ON && process.env.MAINTAIN !== '0' // S6: MAINTAIN=0 restores the defer-note + the four proactive reflexes on their old timers byte-for-byte
@@ -2673,155 +2674,92 @@ const server = http.createServer((req, res) => {
       // local process gains nothing the loopback bind (controlHost 127.0.0.1) didn't already give.
       // It stays inside the CHEAT confinement below (defense in depth) and can never run any other verb.
       const fromSupervisor = req.headers['x-supervisor'] === '1' && /^(stop|recover)\s*$/i.test(String(line).trim())
-      // BRAIN CONFINEMENT: block world-editing/admin commands on the API path so
-      // the autonomous brain can't grief or dupe. Operators use in-game !commands.
-      if (process.env.BRAIN_ALLOW_CHEATS !== '1' && CHEAT_CMDS.test(String(line).trim())) {
-        note(`(cmd) ${line}${rz} -> BLOCKED (world-edit/admin is operator-only)`)
-        return send(res, 200, 'blocked: world-editing/admin commands are operator-only')
-      }
-      // While an operator-triggered build/provision is driving the body, don't let
-      // the brain's own commands fight it - allow only perception + chat so the brain
-      // holds (and can still talk) until the build finishes. NOTE: `stop` is deliberately
-      // NOT whitelisted here - the autonomous brain must not be able to cancel an
-      // operator's build on a heartbeat whim (it did, repeatedly, stranding the bot far
-      // from the site). A real OPERATOR's "stop" still works: it comes through the
-      // bot.on('chat') directCommand path, which calls commands.handle directly and
-      // bypasses this gate entirely. So only the brain's self-issued stop is suppressed.
-      // Also held while NIGHT-RESTING: the brain's goto/attack was yanking the pathfinder
-      // out from under the shelter dig / bed trek - it must not fight the body for the
-      // controls in the exact moments survival depends on them (death carousels, verified
-      // on test server). Same read-only whitelist applies.
-      // The busy-gap loophole: between build phases isBusy() is briefly false, and the
-      // brain's `stop` slipped through and CLEARED the persisted castle job ("can't
-      // recover, stuck in maze" -> stopped, live). While a saved build job exists on
-      // disk, the brain's stop is always suppressed - that file is operator intent.
-      if (!fromSupervisor && /^stop\b/i.test(String(line).trim()) && commands.persistedResume && commands.persistedResume()) {
-        note(`(cmd) ${line}${rz} -> held (a saved build job exists - the brain may not cancel it)`)
-        return send(res, 200, "held: there's a build to finish - i shouldn't stop it")
-      }
-      // ONE definition of "who holds the body" for this gate (ROOT C, 2026-08-02): the same four
-      // latches, in the same order bodyBusy always tested them, read ONCE. Both the gate and the
-      // label derive from it, so the label can only ever name a latch that is actually SET.
-      // Before this, `bodyBusy` tested four latches while the label was
-      //   isBusy ? 'busy building' : (isSecuringFood ? 'securing food' : 'night-resting')
-      // - 'night-resting' as an UNCONDITIONAL else. So a hung recoverFromDegraded printed
-      // `held (night-resting)` 53 times in one day and sent a real investigation after a bed.
-      // A log line must state what happened, never what was assumed (#7).
-      // ...AND ONE MORE THING A LATCH CANNOT SAY: WHETHER IT IS STILL ALIVE (2026-08-25, review D2).
-      // ROOT C gave the gate and its label one reading of the four latches, which made the label
-      // honest about what was SET. It could not make it honest about what was RUNNING - these were
-      // still four raw latch reads, the last private guard stack of the shape reflexes.js exists to
-      // delete. Live 2026-08-03, 110 times: `held (busy building+securing food)` - TWO owners of one
-      // body, because a secureFood promise abandoned at 16:54:51 left `_securingFood` up for the
-      // remaining 3h15m of the process. Every brain command in that window was suppressed by a job
-      // that no longer existed. The SET is unchanged (these four, in this order, and nothing else
-      // gates a brain command); what changed is that each one now has to still hold a LIVE claim -
-      // bodyOwner() writes the registry through first, so a lease that expired is not a hold.
-      bodyOwner()
-      const holdActive = [
-        ['busy building', 'job'],
-        ['night-resting', 'shelter'],
-        ['securing food', 'foodRun'],
-        ['recovering-degraded', 'ladder']
-      ].filter(([, key]) => { try { const c = reflexes.claimInfo(key); return !!c && !c.stalled } catch { return false } }).map(([n]) => n)
-      const bodyBusy = holdActive.length > 0
-      const holdLabel = holdActive.join('+') || 'unlabeled-hold'
+      // ==== THE GATE IS A TABLE NOW (bot/gate.js, M1 of the deadlock-free-arbitration design) ===
+      // Nine hand-written branches used to live here: the CHEAT confinement, the saved-build stop
+      // hold, the body-hold with its four PREEMPT arms and its two refusals, and one-job-at-a-time.
+      // Together they were a SECOND ARBITER - a decision function over the brain's proposals,
+      // disjoint from scheduler-core's candidate set, with no executable floor and no feedback. A
+      // refused command simply evaporated: no successor, nothing recorded, nothing re-chosen. Two
+      // total decision functions over disjoint sets are not a total function over the union, which
+      // is how the machine deadlocked on 2026-08-25 with every layer in it working as designed:
+      // this stack refused `mine 23 64 -13 «need to get materials to craft armor»` twenty-one
+      // times on behalf of a saved build whose own reconcile list asked for cobblestone and
+      // raw_iron, while that build's gearup FAIL-JOBed every 93 seconds.
+      //
+      // The branches are UNCHANGED - byte-for-byte, swept in gatetest.js against a transcription of
+      // themselves and replayed against every held/PREEMPT line in both event logs - but they are
+      // ROWS now, and a row must declare whose interest it serves, what it reads, and what happens
+      // INSTEAD of what it refuses. Add a ROW, never a branch: gatetest.js fails the build if a
+      // `held (` is constructed anywhere outside gate.js.
+      //
+      // What stays HERE is the EFFECT half - log it, preempt, answer the player, answer the HTTP
+      // request. Those touch the body, the chat and the socket; gate.js may touch none of them,
+      // which is what makes the table testable with a plain object and no bot at all.
       const trimmedLine = String(line).trim()
       // S4 (REDESIGN §3.4): classify read-only via scheduler.commandClass when SCHEDULER is on.
       // Deliberate, documented widening: commandClass's perception set adds turn|lookbehind|
       // waypoints|places|help to the old whitelist - all read-only/head-only ("perception/chat ->
       // allow as today"). SCHEDULER=0 keeps the old regex byte-for-byte.
       const cls = SCHED_ON ? scheduler.commandClass(trimmedLine) : null
-      const readOnly = SCHED_ON ? (cls === 'perception' || cls === 'chat')
-        : /^(state|scan|find|block|entities|inventory|look|say)\b/i.test(trimmedLine)
-      if (bodyBusy && !readOnly && !fromSupervisor) {
-        // S1 HOTFIX (REDESIGN §3.4): survival-class commands are no longer muzzled by the body's
-        // own hold - they PREEMPT it. The live freeze: `recover`/`eat`/`wear` suppressed for 8+
-        // minutes at 1hp/food 0 while the famine-hold sat inside `_securingFood` with iron in a grave
-        // 3b away. When a real survival need exists (or a grave is at arm's reach) the command
-        // sets the stop latch (the failing hold unwinds; any build resumes via persistedResume)
-        // and falls through to run. Progress-class commands keep exactly today's suppression.
-        // S1_HOTFIX=0 restores the old blanket hold. `stop`-suppression + the persisted-build
-        // hold above are UNTOUCHED (they guard operator intent, orthogonal to survival).
-        // S4: survival-class via commandClass + decide via the pure admissible(schedulerState).
-        // commandClass's survival vocabulary is wider than S1's regex (equip/gearup/hunt/...), but
-        // admissible still requires a REAL need or a near grave, so a whimsical gearup at full health
-        // while a build runs is still HELD (now with the scheduler's greppable reason). SCHEDULER=0
-        // restores S1_HOTFIX + survivalAdmissible byte-for-byte.
-        // fix #15 Piece D: being actively DAMAGED is a survival situation - a brain attack/defend
-        // must not be muzzled by the build/rest hold while a mob is hitting us (the 18:27 death:
-        // every attack/defend logged `held (night-resting)` while a zombie beat the bot). Checked
-        // BEFORE the survival-class check; mirrors the S1/S4 survival PREEMPT (pause, not cancel,
-        // any build via preemptForSurvival -> resumes through persistedResume). The 8s beingHitNow()
-        // window bounds it. attack/defend stay 'progress' class in scheduler.js - no reclassify.
-        const defenseCmd = /^(attack|defend)\b/i.test(trimmedLine)
-        const defendPreempt = DEFEND_WHEN_HIT_ON && defenseCmd && beingHitNow()
-        // #41 P0.4: while the post-death recovery latch is set, recovery-class commands are NOT muzzled
-        // by the busy-gate (RC-A: goto home / recover / retreat were all held "busy building" while the
-        // build dragged the naked bot back). A recovery MOVE (recover/getstuff/retreat/goto-home) passes
-        // even though `goto`/`travel` are progress-class; survival commands use admissibleUnderLatch so
-        // a bare `recover` at deathsRecent==1 passes in the post-death window. RESILIENT off -> unchanged.
-        const latchOn = RESILIENT_ON && commands.isPostDeathRecovery && commands.isPostDeathRecovery()
-        const recoveryMove = latchOn && SCHED_ON && scheduler.isRecoveryMove(trimmedLine)
-        const survivalCmd = SCHED_ON ? (cls === 'survival')
-          : (process.env.S1_HOTFIX !== '0' && /^(recover|getstuff|eat|wear|armorup|sleep)\b/i.test(trimmedLine))
-        const adm = survivalCmd ? (SCHED_ON ? scheduler.admissibleUnderLatch('survival', trimmedLine, await provision.schedulerState(bot), latchOn) : survivalAdmissible(bot)) : null
+      const proposal = {
+        line,
+        trimmed: trimmedLine,
+        why,
+        cls,
+        fromSupervisor,
+        readOnly: SCHED_ON ? (cls === 'perception' || cls === 'chat')
+          : /^(state|scan|find|block|entities|inventory|look|say)/i.test(trimmedLine),
+        // S4: survival class via commandClass. Its survival vocabulary is wider than S1's regex
+        // (equip/gearup/hunt/...), but the gate's `adm` still demands a REAL need or a near grave,
+        // so a whimsical gearup at full health while a build runs is still held. SCHEDULER=0
+        // restores the S1_HOTFIX regex byte-for-byte.
+        survival: SCHED_ON ? (cls === 'survival')
+          : (process.env.S1_HOTFIX !== '0' && /^(recover|getstuff|eat|wear|armorup|sleep)/i.test(trimmedLine))
+      }
+      const verdict = await cmdGate.decide(proposal, {
+        cheatsAllowed: () => process.env.BRAIN_ALLOW_CHEATS === '1',
+        persistedResume: () => (commands.persistedResume ? commands.persistedResume() : null),
+        // bodyOwner() writes the claim registry through BEFORE the four latches are read, so a
+        // lease that has expired is not a hold (review D2). It revokes, releases and logs - which
+        // is exactly why gate.js reads it lazily, and only where the if-stack read it.
+        syncClaims: () => bodyOwner(),
+        claimInfo: key => reflexes.claimInfo(key),
+        defendWhenHit: () => DEFEND_WHEN_HIT_ON,
+        beingHit: () => beingHitNow(),
+        postDeathLatch: () => RESILIENT_ON && commands.isPostDeathRecovery && commands.isPostDeathRecovery(),
+        recoveryMoveCmd: t => SCHED_ON && scheduler.isRecoveryMove(t),
+        admissible: async (t, latchOn) => (SCHED_ON
+          ? scheduler.admissibleUnderLatch('survival', t, await provision.schedulerState(bot), latchOn)
+          : survivalAdmissible(bot)),
         // #113 CRISIS_OUTRANKS_PEACETIME (DESIGN §3.4 D2): what the hold IS FOR, computed from the
-        // predicates themselves rather than from the display label below - a hold that serves no
-        // survival need (a build/gather: commands.isBusy) is deliberately absent from this list.
-        // Most urgent wins when several are latched at once.
-        const holdNeed = [
+        // predicates themselves rather than from the display label - a hold that serves no survival
+        // need (a build/gather: commands.isBusy) is deliberately absent from this list. Most urgent
+        // wins when several are latched at once (gate.js sorts by arbiter.needRank).
+        holdNeeds: () => [
           (provRecovery.isRecoveringDegraded && provRecovery.isRecoveringDegraded()) ? 'heal' : null,
           (provFood.isSecuringFood && provFood.isSecuringFood()) ? 'food' : null,
           (provRecovery.isResting && provRecovery.isResting()) ? 'shelter' : null
-        ].filter(Boolean).sort((a, b) => arbiter.needRank(a) - arbiter.needRank(b))[0] || null
-        const liveCrisis = (() => { try { return provision.survivalNeed(bot) } catch { return null } })()
-        const holdAdm = arbiter.holdAdmissible(liveCrisis, holdNeed)
-        if (defendPreempt) {
-          note(`(cmd) ${line}${rz} -> PREEMPT (under attack) - defense outranks the ${holdLabel} hold`)
+        ].filter(Boolean),
+        liveCrisis: () => provision.survivalNeed(bot)
+      })
+      if (verdict) {
+        note(`(cmd) ${line}${rz} -> ${verdict.text}`)
+        if (verdict.preempt) {
           if (commands.preemptForSurvival) commands.preemptForSurvival() // stop latch; a build resumes via persistedResume
           // fall through: the command runs and owns the body
-        } else if (recoveryMove) {
-          note(`(cmd) ${line}${rz} -> PREEMPT (post-death recovery) - recovery outranks the ${holdLabel} hold`)
-          if (commands.preemptForSurvival) commands.preemptForSurvival() // stop latch; a build resumes via persistedResume
-          // fall through: the recovery command runs and owns the body
-        } else if (survivalCmd && adm.allow) {
-          note(`(cmd) ${line}${rz} -> PREEMPT (${adm.reason}) - survival outranks the current hold`)
-          if (commands.preemptForSurvival) commands.preemptForSurvival() // set the stop latch; a build resumes via persistedResume
-          // fall through: the survival command runs and owns the body
-        } else if (!holdAdm.ok) {
-          // #113 CRISIS_OUTRANKS_PEACETIME (DESIGN §3.4 D2): the ONLY thing that reaches here is a
-          // command the verb/label machinery above was about to suppress. It may not be suppressed
-          // while a strictly-worse crisis is live - the 15:51 tape is four `goto hut «get out of
-          // water»` answered `held (securing food)` and then a corpse. Admissibility is computed
-          // from the arbiter's live need tier (holdAdm), never from the verb or the label, so this
-          // covers lava/fire/critical-hp/threat identically - there is no water special case.
-          note(`(cmd) ${line}${rz} -> PREEMPT (crisis) - ${holdAdm.reason}`)
-          if (commands.preemptForSurvival) commands.preemptForSurvival() // stop latch; a build resumes via persistedResume
-          // fall through: the command runs
         } else {
-          note(`(cmd) ${line}${rz} -> held (${survivalCmd ? 'no survival need: ' + adm.reason : holdLabel}) - brain command suppressed`)
           // If a PLAYER just asked for this (the held command is the brain answering them),
           // don't leave them on read - the BODY replies once with what it's doing. Verified
           // live: "digital go sleep" -> six silent holds and the player heard nothing.
-          if (chatGate.busyReplyDue(20000, 30000)) {
+          if (verdict.busyReply && chatGate.busyReplyDue(20000, 30000)) {
             chatGate.markBusyReply()
             let doing = 'working'
             try { const a = commands.state(bot).activity; if (a && a.name) doing = a.name + (a.detail ? ' (' + a.detail + ')' : '') } catch {}
             bot.chat(`can't right now - busy with ${doing}. say "stop" first if you need me to drop it`.slice(0, 200))
             clearPendingChat() // that IS the answer - stop the brain re-trying the same order
           }
-          return send(res, 200, "busy building right now - I'll hold until it's done")
+          return send(res, 200, verdict.reply)
         }
-      }
-      // ONE JOB AT A TIME (operator order): while a saved build job exists, the brain may
-      // not wander the body off on side-trips in the idle gap before the resume re-arms -
-      // it walked 240 blocks from the site that way (live). Survival (eat/fish/farm/sleep/
-      // flee/recover), perception, and chat stay allowed; everything that MOVES is held.
-      if (!bodyBusy && commands.persistedResume && commands.persistedResume() &&
-          /^(goto|travel|explore|collect|gather|mine|chop|dig|follow|come|build)\b/i.test(String(line).trim())) {
-        note(`(cmd) ${line}${rz} -> held (a build job is waiting - one job at a time)`)
-        return send(res, 200, "held: i have a build to get back to - no side trips")
       }
       const drop = gateSay(line, true) || gateImpactful(line) // brain: gated chat + repeat-guard
       if (drop) { note(`(cmd) ${line}${rz} -> skipped (${drop})`); return send(res, 200, `skipped: ${drop}`) }
@@ -2843,11 +2781,14 @@ const server = http.createServer((req, res) => {
     })
     return
   }
-  // ---- dashboard UI ---------------------------------------------------------
-  if (req.method === 'GET' && (req.url === '/' || req.url === '/ui' || req.url === '/ui.html')) {
-    // the browser dashboard is retired - the Animus GUI talks to this same API
-    return send(res, 200, 'Animus control API. Use the Animus GUI (Animus.exe).')
-  }
+  // ---- NO WEB UI. THE CONTROL SURFACE IS Animus.exe ---------------------------
+  // The browser dashboard was retired when the native GUI landed, but its ROUTES stayed
+  // behind serving a string that told you to go use the other thing - and launch.ps1 kept
+  // dutifully opening a tab to read it. A retired feature that still answers on its old
+  // address is not retired, it is a decoy: it makes `/` look like a UI to anyone probing
+  // the port, and it kept the stale "open the dashboard" step alive in RUN.md and the
+  // launcher for weeks. Deleting the route is the retirement (#1: remove, don't wrap).
+  // /state, /cmd, /log, /pov, /brain and /health are the API the GUI actually uses.
   // Live brain settings (model / goal / on-off) for the dashboard + the brain.
   if (req.method === 'GET' && req.url === '/brain') {
     return send(res, 200, { settings: brainSettings, models: ollamaModels })
