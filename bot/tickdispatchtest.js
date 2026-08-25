@@ -52,8 +52,28 @@ t('the safety net the change depends on is untouched: the lease is taken SYNCHRO
   const head = src.slice(i, src.indexOf('schedJob = { name, jobKey, startedAt', i)) // jobKey rides in the slot since 2026-08-25 (the claim registry's driver); the invariant below is unchanged
   assert.ok(head.length > 0 && !/\bawait\b/.test(head),
     'there must be NO await between runJob entry and taking the slot, or dispatch-and-return could double-dispatch')
-  assert.ok(/if \(!bot\.entity \|\| dispatchBusy\(\)\) return/.test(src),
-    'and the next tick must still early-return while the slot is held')
+  // ==== WHAT THIS PIN MEANS AFTER REVIEW ITEM 7 (2026-08-25) ==============================
+  // It used to read `if (!bot.entity || dispatchBusy()) return` and it pinned TWO rules with one
+  // line: (a) a dispatch in flight ends the tick, and (b) therefore the same job can never be
+  // dispatched twice. (b) is the one THIS file is about - it is what makes dispatch-and-return
+  // safe - and it is unchanged. (a) was only ever a proxy for it, and item 7 broke the proxy: the
+  // BUILD is dispatched through this slot now, and a build runs for HOURS, so "a dispatch ends the
+  // tick" would have meant the chooser could not weigh a night shelter, a food run, a grave or the
+  // terminal action for the whole of that time - the 2026-08-03 standoff, rebuilt deliberately.
+  // gatingDispatch keeps (a) for SURVIVE-tier work, where nothing out-ranks the incumbent so there
+  // is genuinely nothing left to decide, and hands the PROGRESS-tier half to the ordering rule -
+  // which is where arbitration belongs, and which now STATES (b) instead of inheriting it.
+  assert.ok(/if \(!bot\.entity \|\| gatingDispatch\(\)\) return/.test(src),
+    'the tick must still early-return on an in-flight dispatch it is not allowed to out-rank')
+  assert.ok(/function gatingDispatch \(\)/.test(src) && /reflexes\.tierRank\(row\.tier\) >= reflexes\.TIERS\.SURVIVE/.test(src),
+    'and gatingDispatch must keep that early-return for SURVIVE-tier dispatches')
+  // (b), now that it is a rule rather than a side effect. Without BOTH of these, letting the tick
+  // keep choosing re-opens the double-dispatch window between runJob taking the slot and its
+  // executor raising the body latch the ownership rule reads.
+  assert.ok(/if \(infl\.jobKey === job\) return \{ key: job, why: 'it is already running/.test(src),
+    'a job holding the slot must be refused BY IDENTITY - it is the incumbent, not a candidate')
+  assert.ok(/if \(reflexes\.tierRank\(p\.tier\) <= irank\) return \{ key: job, why: infl\.name \+ ' holds the dispatch slot/.test(src),
+    'and a candidate that does not out-rank the incumbent may not be dispatched on top of it')
   assert.ok(/const myGen = \+\+schedGen/.test(src) && /schedJob && schedJob\.gen === myGen/.test(src),
     'the anti-clobber epoch guards are unweakened - a late abandoned executor still cannot clear a successor\'s slot')
 })

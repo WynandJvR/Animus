@@ -433,7 +433,76 @@ function buildReady (snapshot) {
       return { ok: false, why: 'death spiral + the build site sits in a recent death cluster', need: 'recovery', exempt: false }
     }
   }
+  // (4) THE JOB LAYER'S OWN VERDICT (review item 7 / D6). The plan was STOOD DOWN - by the
+  //     re-plan/abandon rung below, by a shortfall finish, or by the give-up-after-N-deaths
+  //     guard - and until that hold lapses the build is not a thing this bot is doing. The hold
+  //     already existed; what did not exist is anyone in the DECISION layer knowing about it.
+  //     It was honoured by exactly one reader, the 2-minute resume re-arm timer in index.js, and
+  //     that timer is gone with item 7 - so the number has to be where the readiness predicate
+  //     is, or a stood-down build would be re-picked and re-dispatched every fifteen seconds and
+  //     the verdict would be a log line with no effect (#5).
+  if (s.buildHoldMs > 0) {
+    return { ok: false, why: 'the build is stood down for ' + Math.round(s.buildHoldMs / 1000) + 's' + (s.buildPausedWhy ? ' (' + s.buildPausedWhy + ')' : '') + ' - "resumebuild" overrides', need: null, exempt: false }
+  }
   return { ok: true, why: 'survival infra in order', need: null, exempt: false }
+}
+
+// ---- buildVerdict: THE JOB LAYER CONCLUDES (review item 7 / D6) ---------------------------
+// PURE - two counters in, a verdict out, no clock and no bot.
+//
+// THE DEFECT IT ANSWERS. "gearing up before the trip... gathering 3x oak_log" restarted every
+// ~20 minutes for a whole day, each attempt identical: no counter, no verdict, no re-plan, no
+// abandon. The job layer had a chooser above it and an executor below it and NOTHING in between
+// that could conclude anything about a PLAN. Zero builds completed in four days.
+//
+// attempts.js counts; this decides. ONE threshold and TWO verdicts, because "this failed HERE"
+// and "this step failed" are different facts with different remedies - and telling them apart is
+// the whole reason item 7 had to give attempt memory a real `step` (until now every job's step
+// was '-', so one bucket per job could not distinguish bad ground from a bad plan).
+//
+// THE TWO COUNTERS ARE NOT THE SAME COUNTER, and the distinction is load-bearing:
+//   planN  consecutive passes of THIS STEP that achieved nothing, anywhere, in any world. The
+//          job layer keeps it itself (attempts key (build, step, 'plan'), written with an empty
+//          signature so nothing clears it but a pass that worked). It is the TRIGGER, because it
+//          is the only one that survives the bot walking around and the sun coming up.
+//   cellN  how many of those happened right here, in one 4b cell, in a world that still reads the
+//          same - i.e. the count attempt memory itself keeps, and which it DELETES the moment the
+//          recovery signature moves. That volatility is correct for a REFUSAL (a changed world
+//          deserves a fresh try) and useless as a trigger, so it is not used as one. It is the
+//          DISCRIMINATOR: N failures that were all in one place, in one unchanged world, accuse
+//          the ground; N failures spread across places or worlds accuse the plan.
+//
+//   RE-PLAN  the ground is the suspect. Stand the plan down, let the chooser spend the window on
+//            the enabling work, come back when the world (and usually the place) has moved.
+//   ABANDON  the place is exonerated and the step is what cannot be done. Set the job DOWN with a
+//            stated reason - never delete it (that erased a castle live once already), never
+//            retry it silently.
+// Both name an action the caller performs and a reason the log, the chat and the brain all see. A
+// verdict with no action is the 847-times-a-day standoff in a new costume (#5).
+const BUILD_VERDICT_N = Math.max(2, Number(process.env.BUILD_VERDICT_N || 3))
+function buildVerdict (counts) {
+  const c = counts || {}
+  const step = c.step || '-'
+  const cellN = Number(c.cellN) || 0
+  const planN = Number(c.planN) || 0
+  if (planN < BUILD_VERDICT_N) return null
+  // RE-PLAN IS OFFERED ONCE, AND ONLY ONCE (#6 - a deadline on an attempt, never a repeating
+  // delay). `planN === BUILD_VERDICT_N` is the FIRST crossing: at that moment "the ground is the
+  // suspect" is a hypothesis worth acting on, so the plan is stood down briefly and given one
+  // more go. Every crossing after it is that hypothesis already tested and refuted - the bot did
+  // stand down, something did change, and the step still achieved nothing - so it escalates
+  // instead of re-offering the same remedy. A verdict that keeps prescribing the treatment that
+  // did not work is the 4-minute force-escape retry this review deleted, wearing a new hat.
+  const here = cellN >= BUILD_VERDICT_N && planN === BUILD_VERDICT_N
+  return {
+    verdict: here ? 're-plan' : 'abandon',
+    step,
+    n: planN,
+    cellN,
+    why: here
+      ? '"' + step + '" has achieved nothing here ' + cellN + ' times running - the ground is the suspect, so the plan gets one stand-down and one more go'
+      : '"' + step + '" has achieved nothing ' + planN + ' times running' + (cellN >= BUILD_VERDICT_N ? ', including after a stand-down' : ', and not always in the same place') + ' - this is the plan failing, not the ground'
+  }
 }
 
 // ---- pickJob ----------------------------------------------------------------------------
@@ -498,7 +567,12 @@ function pickJob (snapshot) {
   if (s.persistedBuild && ironKeystoneActive(s)) {
     return { job: 'maintenancePass', cls: 'maintain', reason: 'iron keystone: banking first armor iron before resuming the build (no naked thrash)', preempt: false, bootstrap: 'armor' }
   }
-  if (s.persistedBuild) return { job: 'build', cls: 'progress', reason: 'resuming a saved operator build', preempt: false }
+  // A STOOD-DOWN BUILD IS NOT THE JOB (review item 7). This clause used to shadow steps 5 and 6
+  // unconditionally, so a saved build on disk meant "maintain and idle are unreachable" whatever
+  // the build's own state - which is fine while the build is a job the bot is doing, and is a
+  // fifteen-minute paralysis the moment the job layer concludes it is not. Same one number as
+  // buildReady reads (#4): the hold on the saved job, asked once, in the snapshot.
+  if (s.persistedBuild && !(s.buildHoldMs > 0)) return { job: 'build', cls: 'progress', reason: 'resuming a saved operator build', preempt: false }
   if (s.brainJobPending) return { job: 'brainJob', cls: 'progress', reason: 'brain job queued', preempt: false }
 
   // 5. MAINTAIN (only when NO progress job, NO survival need, buffers unmet). maintain rank 1 <
@@ -1327,6 +1401,8 @@ module.exports = {
   bootstrapNeed,
   spawnBootstrapDue,
   buildReady,
+  buildVerdict,
+  BUILD_VERDICT_N,
   ironKeystoneActive,
   oppMaintain,
   graveCooldownMs,

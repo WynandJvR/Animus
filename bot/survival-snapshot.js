@@ -410,7 +410,14 @@ async function schedulerState (bot) {
     s.persistedBuild = !!saved
     s.buildSite = (saved && saved.at) ? { x: saved.at.x, y: saved.at.y, z: saved.at.z } : null
     s.postDeathRecovery = !!(commands.isPostDeathRecovery && commands.isPostDeathRecovery())
-  } catch { s.persistedBuild = false; s.buildSite = null; s.postDeathRecovery = false }
+    // THE STOOD-DOWN HOLD, WHERE THE CHOOSER CAN SEE IT (review item 7). This number is not new -
+    // markResumePaused has stamped it since the shortfall/give-up work - but its only reader was
+    // the 2-minute resume re-arm timer in index.js, and item 7 deletes that timer along with the
+    // rest of the build's private drive train. The caller owns the clock (this file), exactly as
+    // it does for recentDeathCells, so scheduler.buildReady/pickJob stay pure.
+    s.buildHoldMs = saved ? commands.resumeHoldRemaining(saved, Date.now()) : 0
+    s.buildPausedWhy = (saved && saved.pausedWhy) || null
+  } catch { s.persistedBuild = false; s.buildSite = null; s.postDeathRecovery = false; s.buildHoldMs = 0; s.buildPausedWhy = null }
   // recentDeathCells: the P5c spiral window, computed HERE (the caller owns the clock) so
   // buildReady stays pure/clockless. Same 20-min window the old inline gate used.
   try {

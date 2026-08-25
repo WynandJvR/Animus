@@ -135,7 +135,14 @@ function lastOutcomeInfo () { return lastOutcome }
 // task #34 (cycle detector): workCount stays PRODUCTION-ONLY and separate from advanceCount -
 // the oscillation predicate requires ZERO work touches across its whole window, and crediting
 // travel to it would let a chest<->build shuttle hide from the detector.
-const CYCLE_WORK_TAGS = new Set(['itemDelta', 'placed', 'broke', 'smelt', 'regen', 'ladderRung', 'maintStep', 'harvest', 'replant'])
+// 'jobStep' joins them with review item 7: §3.1 lists "a completed checklist step" alongside a
+// verified place/dig as a world-state delta, and it is the ONLY evidence a build's bootstrap half
+// produces - the trek to the site, the survey, the tool-making and the camp steps can run for
+// twenty minutes without a single itemDelta, which is how a build that was genuinely working read
+// to the watchdog exactly like a build that was wedged. It is credited by a RATCHET (checklistStep
+// below), never by re-entry: without that, the castle's 20-minute restart loop would have paid
+// itself eleven step-touches per lap and fed the very clock that was supposed to catch it.
+const CYCLE_WORK_TAGS = new Set(['itemDelta', 'placed', 'broke', 'smelt', 'regen', 'ladderRung', 'maintStep', 'harvest', 'replant', 'jobStep'])
 const GROUND_TAGS = new Set(['newGround']) // the anti-spin ratchet's stamp; see trackPosition
 let bodyProgress = { at: Date.now(), by: 'boot', stalled: false, workCount: 0, advanceCount: 0, advanceAt: Date.now() }
 function touchProgress (tag) {
@@ -219,16 +226,39 @@ function recentOutcomes () { return recentOutcomesRing }
 // flight recorder and /state always show exactly which step the job is on ("what is it doing"
 // is never a guess). Cleared when the autobuild activity ends; each step's own code still
 // decides whether it applies (no-op = quick).
-let jobList = null // { steps: [names], current, startedAt }
+let jobList = null // { steps: [names], current, startedAt, reached }
 const JOB_STEPS = ['travel to site', 'survey the site', 'basic tools', 'stone pickaxe',
   'camp: chest/furnace/bed', 'camp: safehouse hut', 'camp: bank into hut', 'camp: wheat farm', 'armor up', 'gather materials', 'build']
-function checklistBegin (steps) { jobList = { steps: steps.slice(), current: null, startedAt: Date.now() } }
+function checklistBegin (steps) { jobList = { steps: steps.slice(), current: null, startedAt: Date.now(), reached: -1 } }
+// ==== A CHECKLIST STEP IS PLAN-LEVEL PROGRESS - ONCE (review item 7) =======================
+// The list stopped being purely observational here. Two consumers now read it:
+//   * the WORK LEDGER - reaching a step this job has not reached before is a world-state delta
+//     (§3.1), and it is the only one the build's bootstrap half emits for minutes at a time;
+//   * ATTEMPT MEMORY - reflexes' build row publishes `current` as the `step` half of the
+//     (job, step, cell) key, which is what lets "gathering failed here" be a different fact
+//     from "this whole build failed here".
+// `reached` is a RATCHET, and it is the whole safety of the first consumer. The castle build
+// re-entered its checklist from step 1 every ~20 minutes all day on 2026-08-03; crediting each
+// touch would have paid that loop eleven advances a lap and re-armed the watchdog it was meant
+// to trip - the navRung defect (D1) rebuilt in a new place. Only FORWARD movement past the
+// furthest step this checklist has ever reached counts, so a re-run of covered steps is worth
+// exactly zero, the same rule the new-ground trail applies to displacement.
 function checklistStep (name) {
   if (!jobList) return
   jobList.current = name
-  dbg(`[job] step ${jobList.steps.indexOf(name) + 1}/${jobList.steps.length}: ${name}`)
+  lastStep = name
+  const idx = jobList.steps.indexOf(name)
+  if (idx > jobList.reached) { jobList.reached = idx; touchProgress('jobStep') }
+  dbg(`[job] step ${idx + 1}/${jobList.steps.length}: ${name}`)
 }
 function checklistInfo () { return jobList }
+// THE STEP, WHICH MUST OUTLIVE THE LIST. `jobList` dies with the autobuild activity (endActivity),
+// and the job-level verdict is reached AFTER the pass returns - so a reader that only sees the
+// live list would record every failure against step '-' and attempt memory would be back to one
+// bucket per job, which is exactly the state item 7 was given to fix. This is the step the plan
+// was ON when it stopped, which is the thing the verdict is about.
+let lastStep = '-'
+function checklistStepName () { return (jobList && jobList.current) || lastStep || '-' }
 
 // ---- STUCK DETECTION -----------------------------------------------------------------
 // The body is TRYING to get somewhere but making no progress. Driven by index.js on a 1s tick.
@@ -310,6 +340,7 @@ module.exports = {
   checklistBegin,
   checklistStep,
   checklistInfo,
+  checklistStepName,
   JOB_STEPS,
   trackPosition,
   stuckInfo,

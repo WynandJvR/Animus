@@ -123,7 +123,15 @@ const BODY_OWNERS = [
   { key: 'foodRun', tier: 'SURVIVE', crisisOnly: true, owns: 'secureFood', label: 'a food run' },
   { key: 'shelter', tier: 'SURVIVE', crisisOnly: true, owns: 'nightShelter', label: 'the night shelter' },
   { key: 'maintain', tier: 'PROGRESS', owns: 'maintenancePass', label: 'a maintenance pass' },
-  { key: 'job', tier: 'PROGRESS', crisisOnly: true, label: 'a job' },
+  // `owns: 'build'` since review item 7. The `job` latch (commands.isBusy) is raised by every
+  // commands-level activity, but exactly ONE of them is a proposal the chooser dispatches - the
+  // build - and this is the line that says so. Two things follow from it, and item 2 named both
+  // as the open ones: the build can no longer preempt itself, and an advance produced while the
+  // build holds the dispatch slot is CREDITED to this claim instead of ageing it. That closes
+  // item 2's watch note verbatim - "the `job` claim's 300s window can revoke a genuinely-running
+  // autobuild's `building` latch if a dispatched job is the driver" - because with the build IN
+  // the slot it IS the driver, and drivingClaim resolves it here.
+  { key: 'job', tier: 'PROGRESS', crisisOnly: true, owns: 'build', label: 'a job' },
   { key: 'walk', tier: 'PROGRESS', engine: true, label: 'a walk already in progress' },
   { key: 'dig', tier: 'PROGRESS', engine: true, label: 'a dig in progress' } // aborting a dig resets its break progress - never for housekeeping
 ]
@@ -709,6 +717,128 @@ def({
 })
 
 // -- PROGRESS (chores and re-arming: they yield to a build, and to everything above) --------
+
+// ==== THE BUILD IS A JOB LIKE ANY OTHER (structural review 2026-08-25, D6 / item 7) =========
+//
+// WHAT WAS HERE BEFORE: nothing. The build had no row, because it had no dispatcher. It was
+// driven by THREE private timers in index.js - a 25s boot one-shot, a 120s re-arm interval and
+// a loop in the respawn handler - each of which called commands.resumeBuild directly, took the
+// body without a lease, and answered to nobody. The review's D6 states the consequence: "the
+// noOp latch tracks SURVIVAL jobs only, and autobuild runs inline outside the dispatch/lease
+// system entirely", so item 3's attempt memory could not remember a build's failures, item 2's
+// claim registry could not tell whose work an advance was, and the watchdog's last rung found
+// "no dispatch slot" and stood down. The castle's bootstrap step - gather 3 oak logs - restarted
+// every twenty minutes for a whole day, identically, and zero builds completed in four days.
+//
+// It is one row now. The chooser weighs it, ONE dispatcher runs it, it holds the lease while it
+// runs, the watchdog can revoke it, and every failure is remembered against (job, step, cell).
+//
+// THE STEP HALF OF THAT KEY IS THIS ROW'S REAL CONTRIBUTION. `step()` is what index.js's stepOf
+// has been looking for since item 3 shipped with a placeholder: until now every job's step was
+// '-', so "gathering failed at the site" and "the whole build failed at the site" were the same
+// record and neither could escalate. The checklist has published the step all along (telemetry
+// JOB_STEPS); nothing read it.
+//
+// NOT `refuse`-free and not terminal: a build is the most interruptible thing the bot does.
+const buildRow = def({
+  name: 'build',      // the CHOOSER's name for it (scheduler.pickJob emits this)
+  label: 'autobuild', // the EXECUTOR's name, for the log - the same split recoveryLadder uses
+  tier: 'PROGRESS',
+  why: 'the saved operator build: work the checklist, step by step, and reach a verdict when a step will not move',
+  // PURE-ish by the same rule `when`/`refuse` follow: it reads the telemetry checklist and
+  // nothing else - no bot handle, no world read, no body latch.
+  step: () => { try { return require('./telemetry.js').checklistStepName() } catch { return '-' } },
+  refuse: (ctx) => {
+    const scheduler = require('./scheduler.js') // lazy + PURE (numbers out, no bot) - same shape claimStaleMs uses
+    if (!ctx.s.persistedBuild) return 'there is no saved build to resume'
+    // #114 ONE_READINESS, unchanged and now asked from a third place with the SAME function:
+    // the chooser's feasibility term, commands.resumeBuild's own gate, and this refusal are one
+    // predicate. The stand-down hold the verdict below sets is inside it (buildReady clause 4),
+    // so the abandon verdict actually stops the chooser re-picking the build - which is the
+    // difference between a verdict and a log line (#5).
+    let r = null
+    try { r = scheduler.buildReady(ctx.s) } catch { return null }
+    return (r && !r.ok) ? r.why + (r.need ? ' (needs ' + r.need + ')' : '') : null
+  },
+  run: async (bot, ctx) => {
+    const commands = require('./commands.js')
+    const scheduler = require('./scheduler.js')
+    const attempts = require('./attempts.js')
+    const r = await commands.resumeBuild(bot)
+    const step = buildRow.step()
+    const placed = (r && Number(r.placed)) || 0
+    // WHAT COUNTS AS "THIS ACHIEVED NOTHING", and it is the executor's data, never a regex on
+    // its prose (the rule this file already states for the ladder and the food run):
+    //   aborted     somebody else ended the pass (the stop latch, a preempt, a death). An
+    //               interrupted pass proves NOTHING about the world and must not be remembered -
+    //               2026-07-29 21:12 latched the recovery ladder off at hp1/food0 exactly this way.
+    //   deferred    a precondition held it; the refusal above owns that, not this memory.
+    //   unreachable three full travel attempts and the site is still out of reach. That IS the
+    //               world's answer to the 'travel to site' step, in this place.
+    //   placed 0    it ran the whole way through and moved not one block.
+    const interrupted = !!(r && (r.aborted || r.deferred))
+    const noOp = !!r && !interrupted && (r.unreachable === true || placed === 0)
+    const msg = !r
+      ? 'nothing to resume'
+      : (r.deferred
+          ? 'held: ' + (r.why || 'precondition')
+          : (r.unreachable
+              ? 'the site is out of reach'
+              : (placed === 0 && r.why
+                  ? r.why
+                  : placed + '/' + (r.total || 0) + ' placed' + (r.skipped ? ', ' + r.skipped + ' skipped' : '') + (r.stopped ? ' (stopped)' : ''))))
+    if (!noOp) {
+      // The plan moved. Forget what this step owes at plan level, so a build that gets going
+      // again does not carry a two-thirds-full abandon counter into its next bad patch.
+      try { attempts.forget('build', step, 'plan') } catch {}
+      try { attempts.forget('build', step, 'plan@' + attempts.cellOf(bot.entity && bot.entity.position)) } catch {}
+      return { msg, noOp: false }
+    }
+    // ---- THE VERDICT ---------------------------------------------------------------------
+    // The runner records THIS pass's (build, step, cell) attempt after we return, so the count
+    // it is about to write is prior+1 - the same arithmetic the terminal row does for its own
+    // reset counter, for the same reason (a row cannot read a record that does not exist yet).
+    const cell = attempts.cellOf(bot.entity && bot.entity.position)
+    const why = (r && r.unreachable) ? 'could not reach the site' : ((r && r.why) || 'the pass placed nothing')
+    // ---- THE JOB LAYER'S OWN COUNTERS ----------------------------------------------------
+    // Both live in attempt memory under SYNTHETIC cells - the idiom the terminal row already
+    // uses for its synthetic 'reset' step - and both are written with an EMPTY signature, which
+    // is what makes them counters rather than gates: attempts.futile only ever clears a record
+    // whose signature has moved, and an empty one never has.
+    //
+    // WHY THEY CANNOT BE THE RECORD THE RUNNER WRITES. That one is a GATE, and it is correctly
+    // volatile: a changed world deserves a fresh attempt, so `futile` deletes it on read and its
+    // count restarts at 1. Live, the recovery signature moves within minutes (the hour bucket,
+    // the food bucket), so a counter built on it could never reach three and the verdict would
+    // be unreachable - the same "the re-arm is unreachable from the state the latch fired in"
+    // shape, arriving from the opposite direction. These two are never read by `futile`; they are
+    // cleared by a pass that WORKED, by the abandon verdict, and by the terminal full reset.
+    //   planN  this step has achieved nothing N times running, anywhere - the TRIGGER.
+    //   hereN  ...and how many of those were in THIS 4b cell - the DISCRIMINATOR that tells
+    //          "the ground is bad" (re-plan) from "the step is impossible" (abandon).
+    const planN = attempts.record('build', step, 'plan', { now: ctx.nowMs(), why, sig: '' }).n
+    const hereN = attempts.record('build', step, 'plan@' + cell, { now: ctx.nowMs(), why, sig: '' }).n
+    const v = scheduler.buildVerdict({ step, cellN: hereN, planN })
+    if (!v) return { msg, noOp: true, noOpWhy: why }
+    // Both rungs stand the plan down through the ONE existing lever - markResumePaused. It is
+    // not a delete: the job stays on disk, "resumebuild" overrides it, and the operator's intent
+    // survives (giving up used to clearPersistedResume and it erased a castle live). What differs
+    // between the rungs is how long the bot is asked to leave it alone, and how loudly it says so.
+    const abandon = v.verdict === 'abandon'
+    // The counter has done its job once the plan is SET DOWN: a fresh start (the hold lapsing, or
+    // an operator "resumebuild") deserves a clean slate, or the very first failure after it would
+    // abandon again on a count nobody earned. A RE-PLAN keeps counting on purpose - it is the
+    // lighter verdict, and a re-plan that changes nothing must escalate rather than repeat.
+    if (abandon) try { attempts.forget('build', step, 'plan'); attempts.forget('build', step, 'plan@' + cell) } catch {}
+    const holdMs = abandon ? undefined : Number(process.env.BUILD_REPLAN_HOLD_MS || 120000) // undefined -> resumeHoldRemaining's own RESUME_HOLD_MS (15 min)
+    try { commands.markResumePaused((abandon ? 'abandon: ' : 're-plan: ') + v.why, holdMs) } catch {}
+    ctx.note('(build) ' + v.verdict + ': ' + v.why + ' [step "' + step + '", cell ' + cell + ', ' + why + '] - the plan is stood down' + (abandon ? '; "resumebuild" restarts it, "cancelbuild" drops it' : ' for ' + Math.round(holdMs / 1000) + 's'))
+    try { commands.recordOutcome('build:' + v.verdict, false, v.why) } catch {}
+    try { commands.noteJobVerdict({ job: 'build', step, verdict: v.verdict, why: v.why }) } catch {}
+    if (abandon) try { ctx.say('i can\'t get past "' + step + '" - setting that build down for now') } catch {}
+    return { msg: msg + ' -> ' + v.verdict, noOp: true, noOpWhy: why }
+  }
+})
 
 def({
   name: 'maintenancePass',

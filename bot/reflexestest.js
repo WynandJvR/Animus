@@ -559,11 +559,19 @@ t('terminal: the runner NEVER refuses the floor, and the refusal check is the FI
   const idx = srcOf('index.js')
   const i = idx.indexOf('const candidateRefusal = (c, s) => {')
   assert(i > 0, 'the one refusal path still exists')
-  const fn = idx.slice(i, i + 3500)
-  assert(/if \(p\.terminal\) return null/.test(fn), 'the floor is never refused, by any rule in this function')
+  // 5000, widened from 3500 when review item 7 added the slot-rank clause (0a) between the two
+  // lines below. The window is arbitrary and was never the point of the pin; what IS the point is
+  // that both lines exist and are in this order, so they are asserted PRESENT before they are
+  // compared - a window too short used to make both indexOf calls -1 and fail for the wrong reason
+  // (and a window too long would have made a DELETED line pass as -1 < n).
+  const fn = idx.slice(i, i + 5000)
+  const iTerm = fn.indexOf('if (p.terminal) return null')
+  const iOwner = fn.indexOf('const ownerKey = bodyOwner()')
+  assert(iTerm >= 0, 'the floor is never refused, by any rule in this function')
+  assert(iOwner >= 0, 'the ownership rule still lives in the one refusal path')
   // ...and BEFORE the ownership rule and the proposal's own refuse(), or "never refused" is a
   // claim two branches above can already have broken.
-  assert(fn.indexOf('if (p.terminal) return null') < fn.indexOf('const ownerKey = bodyOwner()'),
+  assert(iTerm < iOwner,
     'the terminal bypass must precede the body-ownership rule - it TAKES the body, it does not queue for it')
   assert(fn.indexOf('if (p.terminal) return null') < fn.indexOf('attempts.futile('),
     '...and precede attempt memory: a floor that can be remembered as futile is not a floor')

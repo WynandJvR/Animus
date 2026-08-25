@@ -2053,12 +2053,19 @@ async function handleInner (bot, line, opts = {}) {
         // "center" makes the reference point (coords, or "here" = bot's feet) the
         // MIDDLE of the footprint instead of the origin corner. The natural-language
         // "build it here" path uses this so the build is centred on where you stand.
-        let center = false
-        if (originArgs[0] && originArgs[0].toLowerCase() === 'center') { center = true; originArgs = originArgs.slice(1) }
+        // OPERATOR RULE (2026-08-25): COORDINATES NAME THE CENTRE, NOT THE CORNER. This defaulted
+        // to the origin corner with `center` as an opt-in token, so `build 9 65 -80` put a 32x32
+        // castle 15 blocks off in x AND z from the point the operator meant - and the operator has
+        // to remember a magic word to get what they asked for. The default is now what they mean;
+        // `corner` opts out for the rare case someone is thinking in origin coordinates. `center`
+        // is still accepted so old muscle memory and any saved command keep working.
+        let center = true
+        if (originArgs[0] && originArgs[0].toLowerCase() === 'center') originArgs = originArgs.slice(1)
+        else if (originArgs[0] && originArgs[0].toLowerCase() === 'corner') { center = false; originArgs = originArgs.slice(1) }
         let at
         if (!originArgs.length || originArgs[0] === 'here') { const p = blockPos(bot); at = new Vec3(p.x, p.y, p.z) } else {
           const n = originArgs.slice(0, 3).map(Number)
-          if (n.some(Number.isNaN)) return 'usage: schematic build [here | [center] <x> <y> <z>] [clear]'
+          if (n.some(Number.isNaN)) return 'usage: schematic build [here | [corner] <x> <y> <z>] [clear]   (coords are the CENTRE; `corner` to use them as the origin corner)'
           at = new Vec3(n[0], n[1], n[2])
         }
         // Centre horizontally on the reference point; keep Y as the base so the
@@ -2194,8 +2201,15 @@ async function handleInner (bot, line, opts = {}) {
       // landing a centred castle ~20 blocks off the operator's point (offset build = grief).
       const doClear = rest.some(t => t.toLowerCase() === 'clear')
       let originArgs = rest.filter(t => t.toLowerCase() !== 'clear')
-      let center = false
-      if (originArgs[0] && originArgs[0].toLowerCase() === 'center') { center = true; originArgs = originArgs.slice(1) }
+      // OPERATOR RULE (2026-08-25): COORDINATES NAME THE CENTRE, NOT THE CORNER. This defaulted
+      // to the origin corner with `center` as an opt-in token, so `build 9 65 -80` put a 32x32
+      // castle 15 blocks off in x AND z from the point the operator meant - and the operator has
+      // to remember a magic word to get what they asked for. The default is now what they mean;
+      // `corner` opts out for the rare case someone is thinking in origin coordinates. `center`
+      // is still accepted so old muscle memory and any saved command keep working.
+      let center = true
+      if (originArgs[0] && originArgs[0].toLowerCase() === 'center') originArgs = originArgs.slice(1)
+      else if (originArgs[0] && originArgs[0].toLowerCase() === 'corner') { center = false; originArgs = originArgs.slice(1) }
       let at
       if (!originArgs.length || originArgs[0] === 'here') { const p = blockPos(bot); at = new Vec3(p.x, p.y, p.z) } else {
         const n = originArgs.slice(0, 3).map(Number)
@@ -2379,6 +2393,7 @@ function state (bot) {
     progress: (() => { const bp = progressInfo(); return { agoSec: Math.round((Date.now() - bp.at) / 1000), by: bp.by, stalled: bp.stalled } })(), // S7 verified-progress clock (last verified touch + the nudge's stalled flag)
     buildProgress, // REAL numbers (material have/need) - the brain answers progress questions from THIS
     checklist: (() => { const jl = telemetry.checklistInfo(); return jl ? { step: jl.current, n: jl.steps.indexOf(jl.current) + 1, of: jl.steps.length, steps: jl.steps } : null })(), // the job's step-by-step plan + where it is (operator order: goals get checklists)
+    jobVerdict: jobVerdictInfo(), // review item 7: the job layer CONCLUDED something about the plan (re-plan/abandon) - a proposal the brain sees even while the body is owned
     lastResult: (() => { const lo = telemetry.lastOutcomeInfo(); return (lo && Date.now() - lo.at < 180000) // how the last long/detached/failed op ended (results that don't come back via /cmd)
       ? { action: lo.action, ok: lo.ok, detail: lo.detail, ageSec: Math.round((Date.now() - lo.at) / 1000) }
       : null })(),
@@ -2546,6 +2561,36 @@ function releaseBodyClaims (why, opts = {}) {
 }
 function isEscaping () { return escaping }
 
+// ---- THE JOB LAYER'S VERDICT, WHERE THE BRAIN CAN SEE IT (review item 7 / D6) -------------
+// The brain was the ONE component proposing something different on the day the bot died - and it
+// was suppressed 653 times ("held (busy building+securing food) - brain command suppressed") plus
+// 110 more times in chat. Single-goal discipline is right and stays: what was missing is that the
+// brain was never TOLD the job it was being held for had concluded it could not proceed.
+//
+// The suppression is on what the brain SENDS, never on what it READS - /state is not gated by
+// busy - so this is the channel that reaches it while the body is owned, and it is deliberately a
+// PROPOSAL and not an order: it names the step, the count and the two things a human or a brain
+// can do about it ("resumebuild" restarts the plan now, "cancelbuild" drops it). Nothing here
+// moves the body; the ACTION half of the verdict is the stand-down the reflex row performs.
+// One record, replaced not accumulated, and it ages out on read like every other /state field.
+let jobVerdict = null // { job, step, verdict, why, at }
+const JOB_VERDICT_TTL_MS = 900000
+function noteJobVerdict (v) { jobVerdict = v ? { ...v, at: Date.now() } : null }
+function jobVerdictInfo () {
+  if (!jobVerdict) return null
+  if (Date.now() - jobVerdict.at > JOB_VERDICT_TTL_MS) { jobVerdict = null; return null }
+  return {
+    job: jobVerdict.job,
+    step: jobVerdict.step,
+    verdict: jobVerdict.verdict,
+    why: jobVerdict.why,
+    ageSec: Math.round((Date.now() - jobVerdict.at) / 1000),
+    proposal: jobVerdict.verdict === 'abandon'
+      ? 'this build is set down, not cancelled - say "resumebuild" to try it again now, or "cancelbuild" to drop it'
+      : 'this plan is stood down for a bit so something else can change the world - it comes back on its own'
+  }
+}
+
 // Sticky-follow reflex (called on a timer by the body). If the bot was told to
 // follow someone but the follow goal got replaced by a transient brain action
 // (attack/goto/scan) and the body is now IDLE, re-issue the follow goal so it keeps
@@ -2563,15 +2608,38 @@ function maybeResumeFollow (bot) {
   return `resumed following ${followTarget}`
 }
 
-// Highest SOLID (non-air, non-leaf) block Y at a column - the ground surface. Used to
-// sit a build on the ground instead of floating a block up (a floating foundation has
-// nothing to place against, so the whole build fails - verified: 0/44 when floating).
+// Highest SOLID block Y at a column - the ground surface. Used to sit a build on the ground
+// instead of floating a block up (a floating foundation has nothing to place against, so the
+// whole build fails - verified: 0/44 when floating).
+//
+// ==== THE FOURTH GROUND TRUTH (structural review 2026-08-25, D5/§3.4 - closed by item 7) ====
+// This was a PRIVATE copy of surfaceYAt, and it was the one the review's item-4 agent left
+// standing on purpose because it decides where blocks get PLACED rather than merely where the
+// bot walks. It had its own idea of what a solid block is (`boundingBox === 'block'` minus
+// air/leaves - so vines, scaffolding and bamboo read as ground) and, far worse, it had NO
+// own-fabric skip at all. self-world.ownBlockAt is now the one definition of "this solid block
+// is mine, not the world's", and every other column scan in the process already routes through
+// it; this one did not, so the bot's own scaffold towers, its own hut roof and its own half-built
+// courses read to the SITER as terrain. That is the mechanism behind "fucks up its hut build":
+// snapToGround samples the footprint, takes the median surface and sits the bottom course one
+// above it - so a single unpaid 1x1 pathfinder tower inside the footprint drags the median up
+// and the whole build is sited in the air, or on top of the thing it was trying to finish.
+// (FIX 8's note in pathfix.js is the same finding from the navigation side: 336 unpaid scaffold
+// cells, 155 of them 1x1 towers, "the bot's own abandoned litter reads as ground".)
+//
+// WHAT IS DELIBERATELY PRESERVED: the WINDOW. pathfix.surfaceYAt scans a whole world column by
+// default, and handing this caller a whole column would let a cliff overhang forty blocks up
+// become the "surface" of a build site - a change to where blocks get placed in the opposite,
+// worse direction. The old +6/-48 band around the requested origin is passed through as
+// maxY/minY, which pathfix already accepts, so the region searched is unchanged to the block.
+// The other change is UNKNOWN handling, and it is in the safe direction: this used to read
+// mineflayer's null (never-loaded chunk) as "not ground" and keep scanning, i.e. guess; pathfix
+// fails closed, so an unreadable column now contributes NO sample and snapToGround falls back to
+// the origin it was given instead of to a fabricated one (#10 - unmeasured is not unmet).
 function surfaceYAt (bot, x, z, fromY) {
-  for (let y = Math.floor(fromY) + 6; y > fromY - 48; y--) {
-    const b = bot.blockAt(new Vec3(x, y, z))
-    if (b && b.boundingBox === 'block' && !/air$|_leaves$/.test(b.name)) return y
-  }
-  return null
+  const base = Math.floor(fromY)
+  const s = require('./pathfix.js').surfaceYAt(bot, x, z, { maxY: base + 6, minY: base - 47 })
+  return s.known ? s.groundY : null
 }
 
 // Snap the build origin so its bottom solid layer rests on the ground at the footprint's
@@ -3347,6 +3415,33 @@ function setResumeJob (pt) { if (loadedSchem && pt) { resumeJob = { schem: loade
 // build's chest if it survived) and Build diffs world-vs-schematic, so it just finishes
 // the missing blocks. Returns the result, or null if there's nothing to resume.
 async function resumeBuild (bot) {
+  // ==== ARM FROM DISK WHEN THE MEMORY IS EMPTY (review item 7) =============================
+  // `resumeJob` is a CACHE of resume-job.json, and the only thing that ever filled it from disk
+  // was the `resumebuild` COMMAND. That is why the deleted boot timer had to issue a command
+  // instead of calling this function: after a restart the record is on disk and this returned
+  // null. With the build dispatched by the chooser there is no timer left to do the loading, so
+  // the executor arms itself - the file is the record, the variable is the copy of it.
+  // The pause stamp is deliberately NOT cleared here. Only an explicit operator `resumebuild`
+  // overrides a stand-down, and the chooser will not dispatch this while one is in force
+  // (scheduler.buildReady reads the same buildHoldMs, which this function's own gate below then
+  // re-checks - one predicate, three askers, #114).
+  if (!resumeJob) {
+    const saved = persistedResume()
+    if (saved && saved.name && saved.at) {
+      try {
+        loadedSchem = { schem: await schematic.loadFile(saved.name, bot.version), name: saved.name }
+        resumeJob = { schem: loadedSchem.schem, at: new Vec3(saved.at.x, saved.at.y, saved.at.z) }
+        dbg('resume: armed "' + saved.name + '" from disk at ' + saved.at.x + ',' + saved.at.y + ',' + saved.at.z)
+      } catch (e) {
+        // A saved job whose schematic will not load is a real, world-shaped failure of this
+        // plan, not an interruption - so it is reported as a pass that placed nothing, which is
+        // what lets attempt memory count it and the job-level verdict eventually set it down.
+        // Returning `deferred` here would make it invisible to both and re-tried every tick.
+        dbg('resume: could not reload schematic "' + saved.name + '": ' + e.message)
+        return { placed: 0, total: 0, why: 'the saved schematic "' + saved.name + '" will not load: ' + e.message }
+      }
+    }
+  }
   if (!resumeJob) { buildInterrupted = false; return null } // nothing to do; clear any stale flag
   // Give-up guard: N consecutive deaths without reaching the site = a death loop (lethal
   // respawn area / unreachable site). Say so, clear the job, stop retrying - else every
@@ -3421,7 +3516,7 @@ async function resumeBuild (bot) {
       dbg('resume: night + no armor - resting till morning before heading back (BLOCKING)')
       try { await provRecovery().restUntilSafe(bot, { isStopped: () => buildAbort, say }) } catch {}
     }
-    if (buildAbort) return (result = { stopped: true, placed: 0, total: 0 })
+    if (buildAbort) return (result = { stopped: true, placed: 0, total: 0, aborted: true })
     // SPAWN FIRST when the anchor is known WRONG (survival tier - the world-spawn
     // carousel root): BEFORE any grave detour or site trek, get home and re-anchor the
     // bed. A deep corpse-run on a broken anchor is how one death became an all-night
@@ -3432,13 +3527,13 @@ async function resumeBuild (bot) {
     if (spawnIsSuspect()) {
       dbg('resume: spawn anchor is SUSPECT - going home to re-anchor before anything else')
       try { await survivalPrep(bot, { say, isStopped: () => buildAbort }) } catch (e) { dbg('resume: prep before spawn-recovery failed (' + e.message + ')') }
-      if (buildAbort) return (result = { stopped: true, placed: 0, total: 0 })
+      if (buildAbort) return (result = { stopped: true, placed: 0, total: 0, aborted: true })
       try {
         const ok = await provRecovery().recoverSpawnAnchor(bot, { isStopped: () => buildAbort, say })
         if (ok) spawnSuspect = false
         dbg('resume: spawn-recovery ' + (ok ? 'RESTORED the anchor' : 'did not restore the anchor - continuing, will retry next respawn'))
       } catch (e) { dbg('resume: spawn-recovery failed (' + e.message + ')') }
-      if (buildAbort) return (result = { stopped: true, placed: 0, total: 0 })
+      if (buildAbort) return (result = { stopped: true, placed: 0, total: 0, aborted: true })
     }
     // GET THE STUFF BACK first when it's safe: a recovery detour beats re-gathering the whole kit.
     // NOTE (task #18): the live AxGraves plugin DESPAWNS graves on a timer - recover itself now
@@ -3459,7 +3554,7 @@ async function resumeBuild (bot) {
         say("my stuff's too deep in that cave - not worth dying for, moving on")
       } else {
         try { const r = await handle(bot, 'recover'); dbg('resume: recover -> ' + String(r).split(String.fromCharCode(10))[0]) } catch (e) { dbg('resume: recover failed (' + e.message + ')') }
-        if (buildAbort) return (result = { stopped: true, placed: 0, total: 0 })
+        if (buildAbort) return (result = { stopped: true, placed: 0, total: 0, aborted: true })
       }
     }
     const me = bot.entity.position
@@ -3477,14 +3572,20 @@ async function resumeBuild (bot) {
         if (!near && !buildAbort) dbg('resume: travel attempt ' + (attempt + 1) + ' fell short (' + (tr && tr.reason) + ') - retrying')
       }
     }
-    if (buildAbort) return (result = { stopped: true, placed: 0, total: 0 }) // died/stopped mid-travel
+    if (buildAbort) return (result = { stopped: true, placed: 0, total: 0, aborted: true }) // died/stopped mid-travel
     if (!near) {
       // Still can't reach the site: KEEP the job for the next respawn/attempt instead of
       // "building" from here - autoBuild far from the site skips everything and reports done.
       say("can't reach the build site right now - i'll try again")
       travelBlocked = true
       buildInterrupted = true // route the finally through the keep-the-job branch
-      return (result = { stopped: true, placed: 0, total: 0 })
+      // `unreachable`, NOT `aborted` (review item 7). The five returns above are somebody ELSE
+      // ending this pass (the stop latch, a preempt, a death) and an interrupted pass proves
+      // nothing about the world - the job layer must never record an attempt for one. THIS one is
+      // the world's own answer to the 'travel to site' step: three full travel attempts and the
+      // site is still out of reach. That is a fact worth remembering about this step, in this
+      // place, and telling them apart is the difference between a verdict and a coin toss.
+      return (result = { stopped: true, placed: 0, total: 0, unreachable: true })
     }
     resumeDeaths = 0; dbg('resume: back at the site - death counter reset')
     // SPAWN GUARANTEE: while we're home, make sure the respawn anchor really is the hut
@@ -3520,4 +3621,4 @@ async function resumeBuild (bot) {
   }
 }
 
-module.exports = { handle, state, setupMovements, travelMovements, eatFood, placeTorchNearby, isBusy, releaseBodyClaims, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume, flagSpawnSuspect, worthwhileGrave, shouldChaseGrave, graveLootVerdict, gravesSnapshot, graveUrgency, graveCompare, equipCarriedArmor, activityInfo, preemptForSurvival, setDebugSink, finishDisposition, resumeHoldRemaining, markResumePaused, touchProgress, progressInfo, jobProgress, suppressJobIdle, advanceInfo, markStalled, _resetProgress, recentOutcomes, setPostDeathRecovery, isPostDeathRecovery, clearPostDeathRecovery, postDeathRecoveryHeldMs }
+module.exports = { noteJobVerdict, jobVerdictInfo, handle, state, setupMovements, travelMovements, eatFood, placeTorchNearby, isBusy, releaseBodyClaims, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume, flagSpawnSuspect, worthwhileGrave, shouldChaseGrave, graveLootVerdict, gravesSnapshot, graveUrgency, graveCompare, equipCarriedArmor, activityInfo, preemptForSurvival, setDebugSink, finishDisposition, resumeHoldRemaining, markResumePaused, touchProgress, progressInfo, jobProgress, suppressJobIdle, advanceInfo, markStalled, _resetProgress, recentOutcomes, setPostDeathRecovery, isPostDeathRecovery, clearPostDeathRecovery, postDeathRecoveryHeldMs }

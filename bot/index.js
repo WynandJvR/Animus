@@ -156,63 +156,33 @@ arbiter.setDebugSink(noteDebug) // [arb] maneuver begin/end/expire + reflex defe
 // A build job saved to disk survived a process restart - let the operator know it's resumable.
 try {
   const rj = commands.persistedResume && commands.persistedResume()
-  if (rj) {
-    note(`(resume) saved build found: "${rj.name}" at ${rj.at.x},${rj.at.y},${rj.at.z}`)
-    // AUTO-RESUME on boot (AUTO_RESUME=0 to disable): a saved job means the last process
-    // died/restarted mid-build - continue it unattended so the operator can walk away.
-    if (process.env.AUTO_RESUME !== '0') {
-      setTimeout(async () => {
-        try {
-          // NOT SPAWNED YET: the 25s below assumes a cached-token login, which is fast. A
-          // FIRST/expired-token login is a device-code flow that waits on a human, so this
-          // timer can fire while bot.entity is still undefined - and resumebuild's chat
-          // announce then throws `bot._client.chat is not a function`, which is UNCAUGHT and
-          // kills the process. run.js restarts it, prints a NEW device code, and invalidates
-          // the one being typed - an unwinnable login loop (hit live 2026-07-18).
-          // Skipping is safe: the 2-minute re-arm below already guards on bot.entity and
-          // will pick the job up as soon as we are actually in the world.
-          if (!bot.entity) { note('(resume) boot auto-resume skipped - not spawned yet (login still in progress); the re-arm will retry'); return }
-          if (commands.isBusy && commands.isBusy()) return // something else already driving
-          const hold = commands.resumeHoldRemaining ? commands.resumeHoldRemaining(commands.persistedResume(), Date.now()) : 0
-          if (hold > 0) { note(`(resume) held (paused, ${Math.round(hold / 1000)}s left - "resumebuild" overrides)`); return }
-          const r = await commands.handle(bot, 'resumebuild')
-          note(`(resume) auto: ${String(r).split(String.fromCharCode(10))[0]}`)
-        } catch (e) { note(`(resume) auto failed: ${e.message}`) }
-      }, 25000) // let spawn/chunks settle first
-    }
-  }
+  if (rj) note(`(resume) saved build found: "${rj.name}" at ${rj.at.x},${rj.at.y},${rj.at.z} - the chooser owns picking it up`)
 } catch {}
-// RE-ARM: the boot auto-resume is one-shot, and a resume whose travel retries all fail
-// ends SILENTLY with the job still on disk - the bot then idles forever while the brain
-// gets bored (verified live: 3 blocked travels at 19:09-19:14, then nothing for good).
-// Every 2 minutes: saved job + idle bot + not resting = try the resume again. (Was 5 -
-// with brain side-trips held while a job waits, a long idle gap has no upside.)
-if (process.env.AUTO_RESUME !== '0') {
-  let resumeHeldLogged = false // log the pause-hold once per state change, not every tick
-  setInterval(async () => {
-    try {
-      if (!bot.entity) return
-      const saved = commands.persistedResume && commands.persistedResume()
-      if (!saved) return
-      if (commands.isBusy && commands.isBusy()) return
-      if (provRecovery.isResting && provRecovery.isResting()) return
-      if (provMaintain.isMaintaining && provMaintain.isMaintaining()) return // an opp/idle maintenance pass owns the body - resume right after it
-      // Don't fight the scheduler: while a survival need is active IT owns the body (actively
-      // preempting the build for recovery), so re-issuing `resumebuild` every 2min just churns -
-      // the body gets yanked toward the site, then bumped straight back to survival, spamming
-      // "back online". Hold until progress is admissible again (mayDoProgress == no survival need).
-      if (provision.mayDoProgress && !provision.mayDoProgress(bot)) { if (!resumeHeldLogged) { note('(resume) held (survival need active - the scheduler owns the body)'); resumeHeldLogged = true }; return }
-      const hold = commands.resumeHoldRemaining ? commands.resumeHoldRemaining(saved, Date.now()) : 0
-      if (hold > 0) {
-        if (!resumeHeldLogged) { note(`(resume) held (paused, ${Math.round(hold / 1000)}s left - "resumebuild" overrides)`); resumeHeldLogged = true }
-        return
-      }
-      resumeHeldLogged = false
-      const r = await commands.handle(bot, 'resumebuild')
-      note(`(resume) re-arm: ${String(r).split(String.fromCharCode(10))[0]}`)
-    } catch (e) { note(`(resume) re-arm failed: ${e.message}`) }
-  }, 120000).unref?.()
-}
+// ==== THE BUILD'S THREE PRIVATE DRIVERS ARE DELETED (2026-08-25, review D6 / item 7) =======
+//
+// A 25-second boot one-shot and a 120-second re-arm interval stood here, and a third copy lived
+// inside the respawn handler. Each of them read the saved job off disk, re-derived its own idea
+// of "is the body free" from a hand-written stack of latch reads (isBusy / isResting /
+// isMaintaining / mayDoProgress / resumeHoldRemaining), and then called `resumebuild` - taking
+// the body with no lease, no jobKey, no attempt memory and nothing the chooser could weigh it
+// against. That is the shape PLAN-one-runner deleted everywhere else in this file eight months
+// ago ("add a ROW, never a new setInterval"), left standing for the one job that runs longest.
+//
+// The review's D6 is the bill for it: the build layer had no plan-level memory and no abandonment
+// verdict, because none of the three timers could HAVE one - a timer that fires every two minutes
+// is not a decision-maker, it is a retry. "gathering 3x oak_log" restarted every twenty minutes
+// all day and nothing anywhere counted it.
+//
+// It is a row in reflexes.js now (`build`), dispatched by the ONE dispatcher, holding the ONE
+// lease, remembered by attempt memory against (job, step, cell), and refused out loud when it
+// cannot run. Everything the timers uniquely did survives, in the place that owns it:
+//   * "is the body free"      -> reflexes.bodyRefusal, via candidateRefusal (logged, not silent)
+//   * "is a survival need on" -> the chooser weighs the build against it every tick
+//   * the pause hold          -> scheduler.buildReady, from the snapshot's buildHoldMs
+//   * "retry if a travel leg failed" -> the tick itself, every ~15s, with a verdict at the end
+//     of it instead of an unbounded loop
+// The OPERATOR path is untouched: `resumebuild` typed by a human still goes through
+// commands.handle and still overrides a stand-down hold, which is the whole point of a hold.
 
 // Env overrides (so the same body can target the lab or a live server without
 // editing config.json): MC_HOST / MC_PORT / MC_USERNAME / MC_AUTH / MC_VERSION.
@@ -714,16 +684,19 @@ bot.on('spawn', () => {
           autoRecoverTries = 0 // nothing worthwhile pending - reset the cap
         }
       }
-      for (let attempt = 0; attempt < 3; attempt++) { // deferred = old build loop still unwinding
-        const r = commands.resumeBuild && await commands.resumeBuild(bot)
-        if (r && r.deferred) { note('(resume) old build still unwinding - retrying in 30s'); await new Promise(res => setTimeout(res, 30000)); continue }
-        if (r) note(`(resume) build ${r.stopped ? 'STOPPED' : 'finished'} after respawn: ${r.placed}/${r.total} placed`)
-        else note('(resume) nothing to resume')
-        // (spawn-anchor repair is handled ABOVE as an unconditional survival priority - step 2
-        // of the respawn order - so it no longer waits for "no build to resume".)
-        return
-      }
-      note('(resume) gave up waiting for the old build loop - will try on the next respawn')
+      // ==== THE RESPAWN NO LONGER RESUMES THE BUILD ITSELF (review D6 / item 7) ============
+      // A `for (attempt < 3)` loop stood here calling commands.resumeBuild directly, with a
+      // 30-second sleep between tries. It was the third of the build's three private drivers and
+      // the least defensible of them: it re-entered the longest job in the process from inside a
+      // death handler, on a body that had just respawned, holding no lease and answering to
+      // nobody - so the same build could be driven from here and from the 120s re-arm at once,
+      // and neither knew about the other.
+      // Nothing is lost by deleting it. #41 P0.1 already routes a post-death resume through
+      // scheduler.buildReady's postDeathRecovery gate ("the build waits, kept on disk, never
+      // driving the naked bot back into the death cell"), and the chooser picks the build up on
+      // its own tick the moment recovery reports ready - which is the ONE driver, weighing it
+      // against everything else, exactly as it does every other job.
+      if (commands.persistedResume && commands.persistedResume()) note('(resume) a saved build is waiting - the chooser resumes it once post-death recovery reports ready')
     } catch (e) { note(`(resume) failed: ${e.message}`) }
   }, 7000)
 })
@@ -891,14 +864,52 @@ let schedGen = 0                // bumped on every dispatch AND every revoke - t
 
 // The slot, or null - expiring a stale lease lazily on read, exactly as reflexes.activeHold does.
 // This is the ONE definition of "is a dispatch in flight"; nothing may test `schedJob` directly.
+// ==== ...AND THE LEASE IS RENEWED BY EVIDENCE (2026-08-25, review item 7) ==================
+// `until` was a flat 600s from dispatch, which is a blanket timer (#6) and was survivable only
+// because nothing dispatched here ran longer than a few minutes. Item 7 puts the BUILD in this
+// slot, and a build legitimately runs for hours: a flat expiry would have revoked a healthy
+// build - clearing its nav goal, its control states and its body claims - every ten minutes,
+// forever. The fix is not a bigger number for the build (that is a second definition of "hung",
+// and the seam comes straight back). It is the rule item 2 already wrote for body claims, said
+// once more here: a lease that is producing world-state deltas does not expire. So the deadline
+// is measured from the LAST ADVANCE, not from the dispatch - identical behaviour for a hung
+// executor (it produces nothing, so `adv` never moves and it dies at startedAt+600s exactly as
+// before) and unbounded for one that is actually working, which is what a lease should mean.
+// The advance record is the process-wide one on purpose: the slot-holder IS the driver (that is
+// drivingClaim's whole premise), so while it holds the slot its work is the work.
 function dispatchBusy () {
   if (!schedJob) return null
-  if (schedJob.until != null && schedJob.until <= Date.now()) {
+  const adv = (() => { try { return commands.advanceInfo().at || 0 } catch { return 0 } })()
+  const deadline = Math.max(schedJob.until || 0, adv + DISPATCH_LEASE_MS)
+  if (schedJob.until != null && deadline <= Date.now()) {
     const stale = schedJob
-    revokeDispatch('lease expired after ' + Math.round((Date.now() - stale.startedAt) / 1000) + 's')
+    revokeDispatch('lease expired after ' + Math.round((Date.now() - stale.startedAt) / 1000) + 's with no world delta for ' + Math.round((Date.now() - Math.max(adv, stale.startedAt)) / 1000) + 's')
     return null
   }
   return schedJob
+}
+// THE IN-FLIGHT DISPATCH, WHEN IT STILL ENDS THE TICK (review item 7).
+//
+// `if (dispatchBusy()) return` was the tick's first guard, and for as long as every dispatch was
+// a few minutes long it was a fair proxy for "the body is taken, there is nothing to decide".
+// With the build dispatched like everything else it stops being one: a chooser that cannot make
+// a decision for the several HOURS a castle takes is the 2026-08-03 day rebuilt on purpose - the
+// night shelter, the food run, the grave sweep, the recovery ladder and the terminal action are
+// all dispatched from this tick and every one of them would have been unreachable.
+//
+// The slot was doing arbitration's job. Arbitration has an owner: reflexes.bodyRefusal, plus the
+// slot-rank clause in candidateRefusal below. So a dispatch of PROGRESS tier or lower no longer
+// ends the tick - the tick keeps choosing, and the ONLY things that can be dispatched over the
+// incumbent are the ones that already out-rank it and already have to preempt it first (step 7),
+// which is exactly what happened while the build ran INLINE. A SURVIVE-tier dispatch still ends
+// the tick: nothing out-ranks survival work, so there is genuinely nothing left to decide.
+function gatingDispatch () {
+  const d = dispatchBusy()
+  if (!d) return null
+  const row = d.jobKey ? reflexes.get(d.jobKey) : null
+  // No row (a legacy/unknown key) -> treat it as gating, the conservative direction.
+  if (!row || reflexes.tierRank(row.tier) >= reflexes.TIERS.SURVIVE) return d
+  return null
 }
 
 // Take the body back from a job that cannot give it back. Releases the declared hold, frees the
@@ -1216,6 +1227,23 @@ if (SCHED_ON) {
     //      terminal row may not carry a refuse()). If this ever returns a refusal, the chooser is
     //      back to accepting "no" for an answer and the bot stands still for 3 hours.
     if (p.terminal) return null
+    // (0a) THE SLOT IS A CLAIM TOO (review item 7). The tick's first guard used to end the tick
+    //      on ANY dispatch in flight, and that early-return was carrying the whole of "one job at
+    //      a time" on its own. `gatingDispatch` hands the PROGRESS-tier half of that duty back to
+    //      the ordering rule, so the rule has to say it: an incumbent that holds the slot is not
+    //      a candidate, and a candidate that does not OUT-RANK the incumbent may not be dispatched
+    //      on top of it. Without this the same job could be dispatched twice in the window between
+    //      runJob taking the slot and its executor raising its body latch - the exact race the
+    //      early-return closed by accident.
+    {
+      const infl = dispatchBusy()
+      if (infl) {
+        if (infl.jobKey === job) return { key: job, why: 'it is already running - it holds the dispatch slot (' + Math.round((Date.now() - infl.startedAt) / 1000) + 's)' }
+        const irow = infl.jobKey ? reflexes.get(infl.jobKey) : null
+        const irank = irow ? reflexes.tierRank(irow.tier) : reflexes.TIERS.PROGRESS
+        if (reflexes.tierRank(p.tier) <= irank) return { key: job, why: infl.name + ' holds the dispatch slot and this does not out-rank it' }
+      }
+    }
     const ctx = mkCtx(s, c)
     // (0) ATTEMPT MEMORY (review §3.3, replacing FIX 11's job-identity latch): this job already
     //     ran HERE, in a world that still reads the same, and achieved nothing. Running it again
@@ -1340,7 +1368,7 @@ if (SCHED_ON) {
     try {
       // 1. GUARDS (cheap; mirror the crisis reflexes). NOT gated on arbiter.maneuverActive() - a
       //    survival preempt must be able to interrupt a nav leg (same as FOOD_CRISIS today).
-      if (!bot.entity || dispatchBusy()) return
+      if (!bot.entity || gatingDispatch()) return // see gatingDispatch: a PROGRESS-tier dispatch (the build) no longer mutes the chooser for hours
       // FARM_EXPAND's passive river-crossing note: O(1), self-throttled to <=1/60s, never
       // navigates. It rode the FOOD_SUPPLY timer purely because that timer existed; when that
       // timer was deleted (S5) this was the one line in it that still had a job to do.
@@ -1443,7 +1471,12 @@ if (SCHED_ON) {
         // at the hut, open a brief bounded chore window: pause (never cancel) the build,
         // run the home-only maintenancePass, cool down, and let the 2-min re-arm resume it.
         if (!OPP_ON) return
-        if (dispatchBusy() || Date.now() < runner.maintainCooldownUntil) return
+        // gatingDispatch, not dispatchBusy (review item 7): the whole point of this window is to
+        // borrow the body from a RUNNING build, and since the build now holds the dispatch slot,
+        // asking `dispatchBusy()` here would have deleted the opportunistic pass outright. The
+        // preempt arm below still proves the build owns the body (oppOwner === 'job') and still
+        // waits for it to unwind before touching anything, so nothing double-drives.
+        if (gatingDispatch() || Date.now() < runner.maintainCooldownUntil) return
         const checkupDue = Date.now() - schedOppLastWindowAt >= Number(process.env.OPP_CHECKUP_MS || 1800000)
         const elig = scheduler.oppMaintain(s, { checkupDue })
         if (!elig.ok) return
@@ -1738,10 +1771,15 @@ if (SCHED_ON) {
             // quietly disabled (a `false &&` reads as still-present to a source-level guard).
             const revoked = revokeDispatch('hung promise: no verified progress for ' + Math.round((now - (job.lastProgressAt || job.startedAt || now)) / 1000) + 's and the stop latch did not bite')
             if (!revoked) {
-              // No slot to revoke: the hang is inside a non-dispatch path (a brain command, a
-              // reflex, or autobuild - which runs INLINE and so never takes a lease). Yanking the
-              // nav goal and the control states out from under a job that is merely SLOW breaks
-              // it, so this last resort asks the progress clock to agree that it is stuck.
+              // No slot to revoke: the hang is inside a non-dispatch path - a brain command, a
+              // reflex, or an OPERATOR-issued `autobuild`/`gather`, which enter through
+              // commands.handle rather than through the chooser. (Autonomy's own build is no
+              // longer in that list: since review item 7 it is dispatched like every other job
+              // and holds the lease, so a hung build is revoked by the line above instead of
+              // falling through to this branch - which is what "autobuild runs INLINE and so
+              // never takes a lease" used to mean, and why the last rung so often had nothing to
+              // take back.) Yanking the nav goal and the control states out from under a job that
+              // is merely SLOW breaks it, so this last resort asks the progress clock to agree.
               const stalled = (() => { try { return !!commands.progressInfo().stalled } catch { return false } })()
               if (!stalled) {
                 // NOT terminal: the rung stays ARMED at 'failed' rather than latching 'gaveup'.
