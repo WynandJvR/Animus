@@ -49,7 +49,7 @@ t('every dispatch carries a .catch - a dispatcher may never leak an unhandled re
 t('the safety net the change depends on is untouched: the lease is taken SYNCHRONOUSLY', () => {
   const i = src.indexOf('const runJob = async (name, executor, opts = {}) => {')
   assert.ok(i > 0, 'runJob still exists')
-  const head = src.slice(i, src.indexOf('schedJob = { name, startedAt', i))
+  const head = src.slice(i, src.indexOf('schedJob = { name, jobKey, startedAt', i)) // jobKey rides in the slot since 2026-08-25 (the claim registry's driver); the invariant below is unchanged
   assert.ok(head.length > 0 && !/\bawait\b/.test(head),
     'there must be NO await between runJob entry and taking the slot, or dispatch-and-return could double-dispatch')
   assert.ok(/if \(!bot\.entity \|\| dispatchBusy\(\)\) return/.test(src),
@@ -97,10 +97,12 @@ t('a STALE pick logs the truth and clears NOTHING', () => {
   assert.ok(elseIdx > 0, 'there is an explicit stale branch, not a silent fall-through (#5, #7)')
   const stale = rung.slice(elseIdx)
   assert.ok(/stale/.test(stale), 'and it says the word - the next reader of the tape must not have to infer it')
-  assert.ok(!/runner\.graveCooldownUntil/.test(stale) && !/runner\.noOp\.clear\(\)/.test(stale),
+  assert.ok(!/runner\.graveCooldownUntil/.test(stale) && !/attempts\.forgetAll/.test(stale),
     'a stale pick must NOT clear back-offs that nothing is going to consume')
   const kick = rung.slice(0, elseIdx)
-  assert.ok(/runner\.graveCooldownUntil = runner\.hpCooldownUntil = 0/.test(kick) && /runner\.noOp\.clear\(\)/.test(kick),
+  // (runner.noOp.clear() -> attempts.forgetAll(): the job-identity latch is deleted, and the
+  //  attempt memory that replaced it is what the kick now forgets. Same assertion, new name.)
+  assert.ok(/runner\.graveCooldownUntil = runner\.hpCooldownUntil = 0/.test(kick) && /attempts\.forgetAll/.test(kick),
     'the fresh-pick kick still actually kicks (a kick that only logs is not a kick)')
 })
 

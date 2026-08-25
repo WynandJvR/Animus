@@ -136,7 +136,14 @@ t('LOOP B: a refused ladder does NOT leave the bot idle - the chooser picks the 
   const c = core.chooseActivity(THE_LIVELOCK, { refused })
   assert(c, 'a verdict is always returned')
   assert.notStrictEqual(c.job, 'recoveryLadder', 'the refused job is not re-chosen')
-  assert(/CRISIS UNANSWERED/.test(c.reason), 'and the log says a crisis is live but its producer declined')
+  // WAS: assert(/CRISIS UNANSWERED/.test(c.reason)). That assertion pinned a LIE, and the live log
+  // paid for it 847 times in a day: here the ladder is refused and the chooser answers the crisis
+  // with nightShelter - a real survival action, dispatched - while the reason line shouted that the
+  // crisis was unanswered. 353 of the 847 were this shape (the chosen job was not even the build
+  // fallback). Under §3.3 the line means exactly one thing: nobody answered. So the behaviour this
+  // test was bought to protect - a refused ladder never leaves the bot idle - is asserted directly.
+  assert.strictEqual(c.cls, 'survival', 'the crisis still gets a survival-class answer. Got ' + c.job)
+  assert(!/CRISIS UNANSWERED/.test(c.reason), 'and a crisis that IS answered must not be logged as unanswered: ' + c.reason)
 })
 t('LOOP B: with the ladder refused, sheltering is what the bot picks at night', () => {
   const refused = new Map([['recoveryLadder', 'blocked on dawn']])
@@ -650,6 +657,103 @@ t('LOOP E INVARIANT: the leash inputs have ONE definition each, in the file that
   const prov = read('provision.js')
   assert(/Math\.min\(scheduler\.TREK_LEG_BLOCKS, d\)/.test(prov), 'walkStaged legs ARE the leash pace numerator')
   assert(/scheduler\.TREK_LEG_DEADLINE_MS : 30000/.test(prov), '...and its budget is the denominator')
+})
+
+// ============ D3: THE ARBITER MAY NOT ACCEPT "NO" FOR AN ANSWER ===========================
+// (structural review 2026-08-25, §3.3. The HEAD-era day these fixtures come from: 847 ticks of
+// `CRISIS UNANSWERED`, 494 of them settling on "continuing the active build" - 63% of every
+// decision the bot made was the do-nothing fallback - while 736 + 651 refusals cited two anti-loop
+// latches whose only re-arm was a world change a wedged bot cannot produce.)
+const attempts = require('./attempts.js')
+const reflexes = require('./reflexes.js')
+
+t('D3 ATTEMPT MEMORY: the re-arm is REACHABLE FROM A WEDGE - moving four blocks clears it', () => {
+  attempts._reset()
+  const here = { x: 100.5, y: 64, z: 200.5 }
+  const cell = attempts.cellOf(here)
+  attempts.record('nightShelter', '-', cell, { sig: 'FROZEN', why: 'no bed and no diggable ground', now: 1 })
+  assert(attempts.futile('nightShelter', '-', cell, 'FROZEN'), 'in the same cell, same world: provably pointless, refuse it')
+  // THE WHOLE POINT. The old latch keyed on recoverySignature, which has no position in it, so a
+  // bot standing still at full hp had a frozen key and stayed disqualified forever. Four blocks:
+  const moved = attempts.cellOf({ x: 105.5, y: 64, z: 200.5 })
+  assert.notStrictEqual(moved, cell, 'four blocks is a different cell')
+  assert.strictEqual(attempts.futile('nightShelter', '-', moved, 'FROZEN'), null,
+    'and somewhere else it is a fresh attempt - THIS is the re-arm the signature latch could not reach')
+})
+t('D3 ATTEMPT MEMORY: the world moving still clears it, in place (the old re-arm survives)', () => {
+  attempts._reset()
+  const cell = attempts.cellOf({ x: 0, y: 64, z: 0 })
+  attempts.record('recoveryLadder', '-', cell, { sig: 'n1|f1', why: 'blocked on dawn', now: 1 })
+  assert(attempts.futile('recoveryLadder', '-', cell, 'n1|f1'), 'same world: still pointless')
+  assert.strictEqual(attempts.futile('recoveryLadder', '-', cell, 'n0|f1'), null, 'dawn broke: live again')
+  assert.strictEqual(attempts.futile('recoveryLadder', '-', cell, 'n1|f1'), null, 'and the stale record is DROPPED on read, not left to rot')
+})
+t('D3 ATTEMPT MEMORY: a different step is a different attempt (item 7 plugs into this key)', () => {
+  attempts._reset()
+  const cell = attempts.cellOf({ x: 0, y: 64, z: 0 })
+  attempts.record('autobuild', 'gather:oak_log', cell, { sig: 'W', why: 'no logs in reach', now: 1 })
+  assert(attempts.futile('autobuild', 'gather:oak_log', cell, 'W'), 'that step, here, achieved nothing')
+  assert.strictEqual(attempts.futile('autobuild', 'place:wall', cell, 'W'), null, 'another step has its own memory')
+})
+t('D3 ATTEMPT MEMORY: it is bounded, and a full reset spares only the terminal action\'s own record', () => {
+  attempts._reset()
+  for (let i = 0; i < attempts.MAX_RECORDS + 40; i++) attempts.record('j' + i, '-', 'c' + i, { sig: 'x', now: i })
+  assert(attempts.size() <= attempts.MAX_RECORDS, 'a map that only grows is a leak with a slow fuse')
+  attempts._reset()
+  attempts.record('secureFood', '-', 'c1', { sig: 'x', now: 1 })
+  attempts.record(reflexes.TERMINAL, 'reset', 'c1', { sig: '', now: 1 })
+  const n = attempts.forgetAll({ except: reflexes.TERMINAL })
+  assert.strictEqual(n, 1, 'the refusals are cleared - a reset that leaves them standing is not a reset')
+  assert(attempts.recall(reflexes.TERMINAL, 'reset', 'c1'), 'but a memory that erases itself cannot escalate')
+})
+
+// ---- the terminal tier ------------------------------------------------------------------
+const CRISIS_REFUSED = () => new Map([
+  ['recoveryLadder', 'last pass made no progress and nothing has changed since'],
+  ['secureFood', 'un-armoured at night - foraging out into the dark is the death'],
+  ['nightShelter', 'already tried this here and it achieved nothing'],
+  ['recoverHp', 'just tried to heal'],
+  ['maintenancePass', 'a job owns the body'],
+  ['reclaim', 'a job owns the body'],
+  ['build', 'post-death recovery in progress']
+])
+t('D3 TERMINAL: a crisis every candidate refused produces an ACTION, never a fallback', () => {
+  const c = core.chooseActivity(THE_LIVELOCK, { refused: CRISIS_REFUSED() })
+  assert.strictEqual(c.job, reflexes.TERMINAL, 'the floor runs. Got ' + c.job)
+  assert.strictEqual(c.cls, 'survival', 'and it outranks whatever holds the body')
+  assert(!/CRISIS UNANSWERED/.test(c.reason), 'the accepted-standoff outcome is gone: ' + c.reason)
+  assert(/recoveryLadder: |nightShelter: /.test(c.reason), 'and the terminal line still names every refusal it stepped over (#7)')
+})
+t('D3 TERMINAL: the floor is EXECUTABLE - the row exists, dispatches, and cannot refuse', () => {
+  const row = reflexes.get(reflexes.TERMINAL)
+  assert(row, 'the name the core chooses must be a real registry row - otherwise the arbiter is total on paper only')
+  assert.strictEqual(typeof row.run, 'function', 'it has an executor of its own (never an `owner` it defers to)')
+  assert.strictEqual(row.refuse, undefined, 'and NO refuse(), by contract - not one that returns null, absent')
+  assert.strictEqual(reflexes.REFLEXES.filter(r => r.terminal).length, 1, 'exactly one floor')
+})
+t('D3 TERMINAL: a crisis somebody is ALREADY ANSWERING is not unanswered (248 of the 847)', () => {
+  const c = core.chooseActivity(THE_LIVELOCK, { refused: CRISIS_REFUSED(), survivalActor: { key: 'foodRun', label: 'a food run' } })
+  assert.notStrictEqual(c.job, reflexes.TERMINAL, 'the terminal must not yank the body off a live food run')
+  assert(/being answered by a food run/.test(c.reason), 'and the log says who is answering it: ' + c.reason)
+  assert(!/CRISIS UNANSWERED/.test(c.reason), 'a crisis with an actor was never unanswered')
+})
+t('D3 TERMINAL: a need that is not crisis-grade does NOT abandon the build (220 of the 847)', () => {
+  const c = core.chooseActivity(THE_LIVELOCK, { refused: CRISIS_REFUSED(), crisisGrade: false })
+  assert.notStrictEqual(c.job, reflexes.TERMINAL, 'a sub-crisis need may not full-reset the bot; that is thrash, not rescue')
+  assert(/not crisis-grade/.test(c.reason), 'and the line says exactly that instead of crying crisis: ' + c.reason)
+})
+t('D3 TERMINAL: CRISIS UNANSWERED survives ONLY as a defect detector, target count zero', () => {
+  // The one path that can still print it: the floor itself refused, which it has no way to do.
+  const refused = CRISIS_REFUSED(); refused.set(reflexes.TERMINAL, 'someone gave the floor a refuse()')
+  const c = core.chooseActivity(THE_LIVELOCK, { refused })
+  assert(/CRISIS UNANSWERED/.test(c.reason), 'it is still printed when it is genuinely true')
+  assert(/wiring defect/.test(c.reason), '...and it says the line itself is the bug report')
+})
+t('D3 TERMINAL: an ANSWERED crisis never borrows the alarm (353 of the 847)', () => {
+  // only the ladder refused: nightShelter is chosen and dispatched, which IS an answer.
+  const c = core.chooseActivity(THE_LIVELOCK, { refused: new Map([['recoveryLadder', 'no progress']]) })
+  assert.strictEqual(c.job, 'nightShelter')
+  assert(!/CRISIS UNANSWERED/.test(c.reason), 'the chooser answered it - saying otherwise is the log lying (#7)')
 })
 
 console.log(fails ? `\n${fails} FAILURE(S)` : '\nall death-loop regression tests passed')

@@ -43,6 +43,7 @@ const foodSec = require('./food.js') // #40 F3.2: pure busy-preempt food thresho
 const pov = require('./pov.js') // GUI-OVERHAUL §2: sliced DDA raycaster behind GET /pov (all logic lives in pov.js)
 const cycleDetect = require('./cycle-detect.js') // task #34: pure behavioral cycle/oscillation detector - fed into the S7 watchdog's existing ladder (no new subsystem)
 const reflexes = require('./reflexes.js') // PLAN-one-runner: the proposal registry + the ONE body-ownership rule the tick arbitrates with
+const attempts = require('./attempts.js') // review §3.3: attempt memory keyed (job, step, 4b-cell) - replaces runner.noOp + runner.ladderBlock
 const SCHED_ON = process.env.SCHEDULER !== '0' // master flag: SCHEDULER=0 restores the S1-hotfix wiring byte-for-byte (gate takes the survivalAdmissible path, the tick never registers, the 3 reflexes run as today)
 const LADDER_ON = SCHED_ON && process.env.RECOVERY_LADDER !== '0' // S5: RECOVERY_LADDER=0 restores S4's recoveryLadder DOWNGRADE + the one-shot respawn grave gating byte-for-byte
 const MAINTAIN_ON = SCHED_ON && process.env.MAINTAIN !== '0' // S6: MAINTAIN=0 restores the defer-note + the four proactive reflexes on their old timers byte-for-byte
@@ -581,9 +582,16 @@ let autoRecoverTries = 0 // consecutive auto death-drop recovery attempts (cappe
 const runner = {
   graveCooldownUntil: 0, // a grave we just failed to open/reach - verdict-classed, not blanket
   hpCooldownUntil: 0, // after a heal attempt: give regeneration a window
-  maintainCooldownUntil: 0, // 10 min after a real pass, 5 after a no-op/bail
-  ladderBlock: null, // { sig, blockedOn }: the world the last no-progress ladder pass failed in
-  noOp: new Map() // job -> the world signature in which it achieved nothing (FIX 11 job identity)
+  maintainCooldownUntil: 0 // 10 min after a real pass, 5 after a no-op/bail
+  // `ladderBlock` and `noOp` LIVED HERE, and both are deleted (structural review D3 / §3.6).
+  // They were two latches keyed on the same fingerprint - scheduler.recoverySignature - saying
+  // the same true sentence ("re-running a plan whose inputs have not changed cannot produce a
+  // different result") about the same jobs. Neither could ever re-arm from a wedge, because
+  // position is not in that fingerprint: a bot stuck at full hp beside its house has a signature
+  // that cannot move, so both latched their targets off permanently (736 + 651 refusals in one
+  // HEAD-era day). One rule with two definitions, and both definitions unreachable from the state
+  // they fired in. The rule is written once now, in attempts.js, keyed by (job, step, 4b-cell) -
+  // so the re-arm is reachable by the one thing a stuck bot can be made to do: move.
 }
 bot.on('spawn', () => {
   if (!deathPending) return // initial join is handled by the once('spawn') above
@@ -779,19 +787,81 @@ if (process.env.EQUIP_CARRIED_ARMOR !== '0') {
 // WHO OWNS THE BODY, asked ONCE per tick, in one place. This single function replaces the ~120
 // scattered latch reads across index.js. The ORDER matters: it reports the highest-tier owner
 // first, because that is the one a proposal has to out-rank.
+//
+// ==== ...AND A CLAIM IS A LEASE (2026-08-25, structural review D2) ==========================
+// This used to BE the registry: nine `if`s, first match wins, and whatever it returned was the
+// final word on who owns the body. Nothing in the process watched a claim. On 2026-08-03 16:54:51
+// the recovery ladder's rung deadline abandoned a secureFood promise, `_securingFood` was never
+// lowered, and this function answered `foodRun` for THREE HOURS AND FIFTEEN MINUTES - through 328
+// ownership refusals, 110 `held (busy building+securing food)` double-owner lines and the process
+// dying at 20:10 - on behalf of a job that had not existed since lunchtime.
+//
+// The latches are still the only witnesses to who is working, so they are still read here. What
+// changed is that they are OBSERVATIONS now, not verdicts: they are written through to the ONE
+// claim registry (reflexes.syncClaims), each raise opens a lease, and a lease lives only while the
+// work behind it produces world-state deltas - the item-1 work ledger, the same evidence the
+// supervisor judges a job by, on the same window it calls a job hung. An owner that has produced
+// nothing since then is not an owner, and its latch is taken back through the ONE release path.
+//
+// Each latch is probed under its own try/catch rather than one around all nine. The old shape
+// failed open for the WHOLE body - one unreadable latch hid the other eight, including a live
+// escape - and "an unreadable owner must never immobilise the bot" is satisfied better, not
+// worse, by dropping only the latch that could not be read.
+const bodyLatches = () => {
+  const up = []
+  const probe = (key, fn) => { try { if (fn()) up.push(key) } catch { /* this ONE latch is unreadable: it does not get to own the body, and it does not hide the others */ } }
+  probe('escape', () => commands.isEscaping && commands.isEscaping())
+  probe('navRecovery', () => navigate.isRecovering() || navigate.isForceUnsticking())
+  probe('ladder', () => provRecovery.isRecoveringDegraded && provRecovery.isRecoveringDegraded())
+  probe('foodRun', () => provFood.isSecuringFood && provFood.isSecuringFood())
+  probe('shelter', () => provRecovery.isResting && provRecovery.isResting())
+  probe('maintain', () => provMaintain.isMaintaining && provMaintain.isMaintaining())
+  probe('job', () => commands.isBusy && commands.isBusy())
+  probe('walk', () => bot.pathfinder && bot.pathfinder.goal)
+  probe('dig', () => bot.targetDigBlock)
+  return up
+}
+// WHO IS DRIVING - i.e. which claim a world delta belongs to. Item 1 left this gap open by name:
+// "while one job holds the ledger key, ANY advance in the process credits it". The dispatch slot
+// is the answer, and it already exists: it names the job the CHOOSER put on the body, and
+// BODY_OWNERS.owns names the claim that job raises. At 16:54 the slot held the ladder, not the
+// food run it had abandoned - so the ladder's rungs credit the ladder, and the corpse ages.
+// Fallbacks, in order: a commands-level activity (autobuild, a brain command) raises no registry
+// row but IS the `job` claim by construction; failing that the top live claim, because with no
+// dispatch and no busy latch nothing else could have produced the delta.
+const drivingClaim = (up) => {
+  const d = dispatchBusy()
+  const k = d && d.jobKey ? reflexes.claimOfJob(d.jobKey) : null
+  if (k) return k
+  if (up.includes('job')) return 'job'
+  return up.find(key => !((reflexes.ownerInfo(key) || {}).engine)) || null
+}
+// A lease expired. The claim stops being an owner the moment syncClaims says so - it does NOT wait
+// for the latch to be honoured, because a hung promise is precisely the case where nothing honours
+// anything. The latch behind it is then taken back through the ONE release path, scoped to this
+// claim: without that, `isSecuringFood()` keeps answering true and every future food run returns
+// `blocked on busy` at its own front door (44 of the 328 refusals in the terminal window).
+const revokeClaim = (c) => {
+  const row = reflexes.ownerInfo(c.key) || {}
+  note('(claim) REVOKED ' + c.key + ' (' + (row.label || c.key) + ') - ' + c.why + '; it is not an owner any more')
+  try {
+    const freed = commands.releaseBodyClaims('claim lease expired: ' + c.key + ' - ' + c.why, { only: [c.key] })
+    note(freed
+      ? '(claim) ...and took back the latch it was still holding: ' + freed
+      : '(claim) ...nothing to take back: the latch behind ' + c.key + ' is outside releaseBodyClaims\' owners table - a wiring hole, not a decision')
+  } catch (e) { try { note('(claim) ...release threw: ' + e.message) } catch {} }
+  try { commands.recordOutcome('claim:' + c.key, false, c.why) } catch {}
+}
 const bodyOwner = () => {
   try {
-    if (commands.isEscaping && commands.isEscaping()) return 'escape'
-    if (navigate.isRecovering() || navigate.isForceUnsticking()) return 'navRecovery'
-    if (provRecovery.isRecoveringDegraded && provRecovery.isRecoveringDegraded()) return 'ladder'
-    if (provFood.isSecuringFood && provFood.isSecuringFood()) return 'foodRun'
-    if (provRecovery.isResting && provRecovery.isResting()) return 'shelter'
-    if (provMaintain.isMaintaining && provMaintain.isMaintaining()) return 'maintain'
-    if (commands.isBusy && commands.isBusy()) return 'job'
-    if (bot.pathfinder && bot.pathfinder.goal) return 'walk'
-    if (bot.targetDigBlock) return 'dig'
-  } catch { /* a latch that cannot be read fails OPEN: an unreadable owner must never immobilise the bot */ }
-  return null
+    const up = bodyLatches()
+    // An unreadable ledger is NOT evidence that an owner is stuck (#10): syncClaims makes no
+    // revocation verdict without it, so this passes the absence through rather than inventing one.
+    const ev = (() => { try { return commands.advanceInfo() } catch { return { at: null } } })()
+    const r = reflexes.syncClaims(up, { driver: drivingClaim(up), at: ev.at })
+    for (const c of r.revoked) revokeClaim(c)
+    return r.owner
+  } catch { /* the registry itself failing must never immobilise the bot */ return null }
 }
 
 // SCHEDULER TICK (S4, REDESIGN §3.2/§10): ONE dispatcher for the survival tier. Replaces the three
@@ -884,8 +954,9 @@ function revokeDispatch (why) {
 let schedLastLog = ''           // decision-change log throttle
 let schedHeldLog = ''           // busy-held note throttle (separate so it never clobbers the decision key)
 // (the back-offs and latches that used to live here as five loose `sched*` globals are the
-//  runner's own state now - see `runner` above. AUDIT FIX 3's ladder CONDITION gate is
-//  runner.ladderBlock, and it is consulted by the recoveryLadder proposal's own refuse().)
+//  runner's own state now - see `runner` above. The two that were keyed on recoverySignature -
+//  FIX 3's ladder gate and FIX 11's job-identity latch - are gone entirely: "I tried this and it
+//  achieved nothing" is a fact about a PLACE and lives in attempts.js, asked once for every job.)
 let schedOppLastWindowAt = 0 // last opportunistic window CLOSE (drives the checkupDue bit)
 let schedDeferNoted = ''        // one note per deferred job kind (nightShelter/maintain/degraded/ladder-reflex)
 let schedLastPick = null        // S7 idle-with-work: the tick's last pickJob decision
@@ -954,6 +1025,18 @@ if (SCHED_ON) {
   // So a proposal now SAYS whether it achieved nothing, from data it actually has - fed/blockedOn,
   // rested true/false, steps.length - and the two transient blockers ('busy', 'stopped') are never
   // a verdict about the world. A survival policy must not be decided by a regex on a log line.
+  // THE STEP HALF OF THE ATTEMPT KEY (job, step, cell) - review §3.3.
+  // A job that plans in steps names the step it is attempting, so "gathering 3x oak_log failed
+  // here" is remembered about THAT step and not about the whole build. Nothing declares one yet:
+  // checklist steps arrive with item 7 (job-level verdicts), and until then every job has exactly
+  // one step, '-'. It is a function rather than a literal precisely so the RECORD side and the
+  // QUERY side can never key on two different things (#4) - both call this, and item 7 fills it in
+  // in ONE place.
+  const stepOf = (jobKey) => {
+    const p = reflexes.get(jobKey)
+    if (p && typeof p.step === 'function') { try { return String(p.step() || '-') } catch { return '-' } }
+    return '-'
+  }
   // runJob(name, executor, opts) - the ONE dispatch path. `opts.holds` is a proposal's DECLARED
   // hold ({ wake }): while it is in force the body is deliberately still and the watchdogs must
   // not read that stillness as a hang (PLAN §3.4; the 2026-07-29 creeper death).
@@ -968,11 +1051,19 @@ if (SCHED_ON) {
     // the epoch moves on and this executor's `finally` must not touch its successor's state.
     const myGen = ++schedGen
     const startedAt = Date.now()
-    schedJob = { name, startedAt, gen: myGen, until: startedAt + DISPATCH_LEASE_MS, holdToken: null }
-    commands.touchProgress('dispatch:' + name) // S7 (d): a just-dispatched job is at zero idle (same t0 rule as beginActivity/H5c)
-    // The t0 stamp above is this dispatch's OWN mark. Remember it, so the release below can tell
-    // "this job did something" from "this job merely ran" - see the finally.
-    const t0Progress = (() => { try { return commands.progressInfo().at } catch { return 0 } })()
+    // `jobKey` rides in the slot because the slot is the answer to "who is driving" (see
+    // drivingClaim above): BODY_OWNERS.owns is keyed by the CHOOSER's name, and `name` here is the
+    // executor's - they differ for recoveryLadder/graveSweep, which is exactly the pair the claim
+    // registry must not mis-credit.
+    schedJob = { name, jobKey, startedAt, gen: myGen, until: startedAt + DISPATCH_LEASE_MS, holdToken: null }
+    // NO t0 STAMP. `touchProgress('dispatch:' + name)` used to live here so a just-dispatched job
+    // read as zero-idle - but it wrote that into the ONE global progress cell, so being dispatched
+    // told every OTHER reader the body had progressed. The work ledger re-bases on the new jobKey
+    // by itself (telemetry.jobProgress), which is the same guarantee without the lie (review D1).
+    // What this dispatch still needs is a BASELINE, so the release below can tell "this job did
+    // something" from "this job merely ran" - and the honest baseline is the work counter, not a
+    // timestamp anything could have refreshed.
+    const t0Progress = (() => { try { return commands.progressInfo().advanceCount || 0 } catch { return 0 } })()
     const holdToken = opts.holds ? reflexes.beginHold(name, opts.holds.wake, opts.holds.ttlMs || 900000, { premise: opts.holds.premise }) : null
     if (schedJob && schedJob.gen === myGen) schedJob.holdToken = holdToken // so a revoke can release it
     try {
@@ -984,11 +1075,20 @@ if (SCHED_ON) {
       const msg = obj ? (r.msg || 'done') : (r === false ? 'no-op/deferred' : (typeof r === 'string' ? r.split('\n')[0] : 'done'))
       note('(sched) ' + name + ' -> ' + msg)
       try {
+        // THE VERDICT IS RECORDED AGAINST A PLACE, NOT AGAINST AN ABSTRACT WORLD (review §3.3).
+        // Same executor verdict as before (`r.noOp`, data the executor computed, never a regex on
+        // its prose); what changed is the KEY. The signature still rides along - as the record's
+        // "and the world still reads the same" clearing condition, never as the key - so this is
+        // strictly MORE re-armable than the latch it replaces: moving 4 blocks, changing step or
+        // changing the world each re-arms it, where before only the last could, and only the last
+        // was unreachable from a wedge.
+        const cell = attempts.cellOf(bot.entity && bot.entity.position)
         if (obj && r.noOp === true) {
-          const sig = scheduler.recoverySignature(await provision.schedulerState(bot))
-          runner.noOp.set(jobKey, sig)
-          note('(sched) ' + name + ' achieved nothing - not re-dispatching it until the situation changes')
-        } else runner.noOp.delete(jobKey)
+          let sig = ''
+          try { sig = scheduler.recoverySignature(await provision.schedulerState(bot)) } catch {}
+          const rec = attempts.record(jobKey, stepOf(jobKey), cell, { sig, why: r.noOpWhy || 'it ran to completion and the world would not budge', now: Date.now() })
+          note('(sched) ' + name + ' achieved nothing HERE (cell ' + cell + ', attempt ' + rec.n + ') - not re-dispatching it until i move, it changes step, or the world does')
+        } else attempts.forget(jobKey, stepOf(jobKey), cell)
       } catch {}
     }
     catch (e) { note('(sched) ' + name + ' failed: ' + e.message); if (CYCLE_DETECT_ON) { try { commands.recordOutcome('sched:' + name, false, e.message) } catch {} } } // task #34: today this only note()s+forgets; feed the outcome ring so a re-dispatch loop (gather held x8) is SEEN. Flag-gated so CYCLE_DETECT=0 leaves lastOutcome byte-identical.
@@ -1019,7 +1119,7 @@ if (SCHED_ON) {
         // So: stamp only if something touched progress BETWEEN dispatch and release. If nothing
         // did, this job ran and the world did not budge, and the watchdog must keep aging.
         let didWork = true
-        try { didWork = commands.progressInfo().at !== t0Progress } catch {}
+        try { didWork = (commands.progressInfo().advanceCount || 0) !== t0Progress } catch {}
         if (didWork) commands.touchProgress('holdReleased:' + name)
         else note('(sched) ' + name + ' released having touched nothing - NOT stamping progress (a frozen body must stay visible to the watchdog)')
         schedJob = null
@@ -1105,15 +1205,26 @@ if (SCHED_ON) {
     // A job with no row in the registry is a WIRING BUG, not a refusal - the tick's dispatch tail
     // says so out loud rather than swallowing it (and bot/reflexestest.js makes it impossible).
     if (!p) return null
+    // (00) THE TERMINAL ACTION IS NEVER REFUSED (review §3.3). Not "is refused for fewer
+    //      reasons" - never, by any rule in this function, including body ownership: it TAKES the
+    //      body (step 7 below) rather than waiting for it. This is the single line that makes the
+    //      arbiter a total function, and reflexestest.js pins the other half of the contract (a
+    //      terminal row may not carry a refuse()). If this ever returns a refusal, the chooser is
+    //      back to accepting "no" for an answer and the bot stands still for 3 hours.
+    if (p.terminal) return null
     const ctx = mkCtx(s, c)
-    // (0) JOB IDENTITY (FIX 11): this job already ran in this exact world and achieved nothing.
-    //     Running it again cannot produce a different result. The latch clears the instant the
-    //     signature moves - a CONDITION, never a timer.
-    if (runner.noOp.has(job)) {
+    // (0) ATTEMPT MEMORY (review §3.3, replacing FIX 11's job-identity latch): this job already
+    //     ran HERE, in a world that still reads the same, and achieved nothing. Running it again
+    //     from this same cell cannot produce a different result - but moving four blocks, or
+    //     changing step, or the world moving, each makes it live again. The old latch had only
+    //     the last of those three re-arms and it was unreachable from a wedge, which is how a
+    //     stuck bot disqualified its own rescuer permanently (736 refusals in a day).
+    {
       let sig = ''
       try { sig = scheduler.recoverySignature(s) } catch {}
-      if (sig && sig === runner.noOp.get(job)) return { key: job, why: 'already tried this in exactly this situation and it achieved nothing' }
-      runner.noOp.delete(job) // the world moved - it is live again
+      const cell = attempts.cellOf(bot.entity && bot.entity.position)
+      const rec = attempts.futile(job, stepOf(job), cell, sig)
+      if (rec) return { key: job, why: 'already tried this here (cell ' + cell + ', attempt ' + rec.n + ') and it achieved nothing - ' + rec.why + '; moving, changing step or the world changing re-arms it' }
     }
     // (1) BODY OWNERSHIP - the one ordering rule. This is the whole of what "if (isBusy()) return;
     //     if (isResting()) return; if (isSecuringFood()) return; ..." used to say, and unlike
@@ -1142,10 +1253,29 @@ if (SCHED_ON) {
   const coreRefusalNoted = new Map()
   const coreAdapter = (s) => {
     const aj = s.activeJob || null
+    // IS ANYBODY ALREADY ANSWERING THE CRISIS? (review §3.3, case (a)). bodyOwner() is the claim
+    // registry's effective owner and a revoked claim is not an owner (item 2), so a SURVIVE-tier
+    // owner here is one whose work produced a world delta inside the watchdog's own fail window.
+    // That is an ACTOR, and a crisis with an actor is not unanswered - which is what 248 of the
+    // 847 CRISIS UNANSWERED lines actually were. It is also what stops the terminal action from
+    // yanking the body out from under a live escape or a food run that is genuinely feeding us.
+    const ownerKey = bodyOwner()
+    const ownerRow = ownerKey ? reflexes.ownerInfo(ownerKey) : null
+    const survivalActor = ownerRow && ownerRow.tier === 'SURVIVE' ? { key: ownerKey, label: ownerRow.label } : null
+    // ...and the SAME crisis-grade verdict the ownership rule applies, asked for the terminal row,
+    // so "crisis" cannot mean one thing to the chooser and another to the body-ownership rule (#4).
+    const terminalRow = reflexes.get(reflexes.TERMINAL) || { name: reflexes.TERMINAL }
+    // (the only thing crisisGrade reads off a ctx is the food threshold, so this builds that one
+    //  field rather than a whole mkCtx per tick - #8, body budget before observability)
+    const crisis = (() => {
+      try { return crisisGrade(terminalRow, s, { foodThreshold: foodSec.busyPreemptFood() }) } catch { return null }
+    })()
     const c = schedulerCore.selectWithRefusals(s, {
       activeJob: aj && aj.name,
       activeCls: aj && aj.cls,
       lastProgressAt: aj && aj.lastProgressAt, // verified-progress timestamp (caller-provided; drives the anti-thrash bonus)
+      survivalActor,                           // §3.3 case (a): who is already acting
+      crisisGrade: crisis,                     // §3.3 case (b): may this need take the body at all
       now: Date.now()                          // caller's clock - the pure core compares timestamps, never reads a clock
     }, candidateRefusal, (cand, rf) => {
       // THROTTLED, on the same argument the chosen-line uses (design principle 7): a standoff
@@ -1417,7 +1547,15 @@ if (SCHED_ON) {
       //    it; taking it means telling that owner to stand down through the latch it already
       //    polls. No new abort machinery - these are the same two levers the watchdog uses.
       const ownerKey = bodyOwner()
-      if (ownerKey === 'job' || ownerKey === 'shelter' || ownerKey === 'foodRun') {
+      if (chosen.terminal) {
+        // THE TERMINAL ACTION TAKES THE BODY (§3.3). Not "out-ranks whoever holds it" - takes it.
+        // Every other proposal here asks the ordering rule for permission and stands down when the
+        // answer is no; that is exactly the mechanism that let a crisis go 847 ticks unanswered.
+        // The floor is the one row for which the answer cannot be no, so the claims go, through the
+        // ONE release path (the executor repeats this on its own - a decision that depends on its
+        // executor having been reached is not a decision).
+        try { const freed = commands.releaseBodyClaims('terminal action taking the body: ' + pick.reason); if (freed) note('(sched) TERMINAL ' + name + ' - took the body from ' + freed) } catch (e) { try { note('(sched) TERMINAL claim release threw: ' + e.message) } catch {} }
+      } else if (ownerKey === 'job' || ownerKey === 'shelter' || ownerKey === 'foodRun') {
         if (commands.preemptForSurvival) commands.preemptForSurvival() // sets ONLY buildAbort; the build resumes via persistedResume
         note('(sched) PREEMPT ' + name + ' (' + pick.reason + ') - ' + (reflexes.ownerInfo(ownerKey) || {}).label + ' yields to a crisis-grade need')
       } else if (ownerKey === 'maintain') {
@@ -1505,10 +1643,24 @@ if (SCHED_ON) {
         // wake, once, and this is the one place that reads it (each hold used to have to
         // remember to fake progress on its own heartbeat - and one of them forgot).
         if (!bot.entity || bot.health <= 0) return
+        // 1b. THE CLAIM REGISTRY'S HEARTBEAT (review item 2). Leases are opened, credited and
+        // revoked inside bodyOwner(), and every OTHER caller of it is downstream of something that
+        // can itself be blocked: the tick returns early on a held TICK_GATE, and the two follow
+        // reflexes are opt-out. A dead owner holding the body is exactly the state in which those
+        // callers go quiet, so the one loop that is nobody's dependent asks the question too - the
+        // same 5s pass that already judges whether a JOB is advancing, now also judging whether an
+        // OWNER is. Deliberately before the declared-hold branch below: a hold's suppression is
+        // stamped every pass, so the claim it vouches for is already fresh from the last one.
+        bodyOwner()
         const hold = reflexes.activeHold(holdPremiseOK)
         if (bot.isSleeping || (provRecovery.isResting && provRecovery.isResting()) || hold) {
           if (hold && heldNoted !== hold.label) { heldNoted = hold.label; note('(wd) ' + hold.label + ' is a DECLARED hold waking on ' + hold.wake + ' - stillness here is the goal, not a stall') }
-          commands.touchProgress('declaredHold')
+          // A HOLD SUPPRESSES THE CLOCK; IT DOES NOT FEED IT. This used to be
+          // touchProgress('declaredHold'), which announced verified progress to every reader of
+          // the one progress cell every 5s while the bot sat perfectly still - the opposite of
+          // what a hold means (#7). The ledger's own suppression says exactly what is true:
+          // these seconds are not counted against the job, and nothing was achieved in them.
+          commands.suppressJobIdle()
           return
         }
         if (heldNoted) heldNoted = ''
@@ -1517,7 +1669,7 @@ if (SCHED_ON) {
         const now = Date.now()
         // 3. pure verdict + escalation phase.
         let verdict = scheduler.watchdog(job, { hp: bot.health, food: bot.food }, now)
-        const jobKey = job ? (job.name + '@' + (job.startedAt || '')) : null
+        const jobKey = job ? job.key : null // ONE definition of the key - activeJobInfo builds it, the work ledger is filed under it, this reducer escalates on it (#4)
         // 3b. task #34 BEHAVIORAL CYCLE DETECTION (an S7 organ): sample position into a bounded ring
         //     and, when the pure detector flags an oscillation / repeat-fail, synthesize a fail-job
         //     verdict into the UNMODIFIED wdPhase + lever map (max-severity merge - a real fail-job is
@@ -1647,9 +1799,8 @@ if (SCHED_ON) {
             // body holding an undispatched survival pick is proof they have stopped doing that job.
             // So the remedy runs whenever the condition that names it holds.
             runner.graveCooldownUntil = runner.hpCooldownUntil = 0
-            runner.ladderBlock = null // give the ladder a fresh look even if the world reads the same
-            runner.noOp.clear() // ...and the job-identity latch, for the same reason
-            note('(wd) ...cleared every stale back-off (grave/hp/ladder/no-op) so the next tick can dispatch')
+            const forgotten = attempts.forgetAll({ except: reflexes.TERMINAL }) // the ladder's own latch is one of these now - one clear, one rule
+            note('(wd) ...cleared every stale back-off (grave/hp) and forgot ' + forgotten + ' attempt record(s) so the next tick can dispatch')
           }
         } else if (survivalPickIdle) {
           // The pick is STALE. No kick, no back-off clearing - just the truth, once per episode.
@@ -2548,12 +2699,23 @@ const server = http.createServer((req, res) => {
       // - 'night-resting' as an UNCONDITIONAL else. So a hung recoverFromDegraded printed
       // `held (night-resting)` 53 times in one day and sent a real investigation after a bed.
       // A log line must state what happened, never what was assumed (#7).
+      // ...AND ONE MORE THING A LATCH CANNOT SAY: WHETHER IT IS STILL ALIVE (2026-08-25, review D2).
+      // ROOT C gave the gate and its label one reading of the four latches, which made the label
+      // honest about what was SET. It could not make it honest about what was RUNNING - these were
+      // still four raw latch reads, the last private guard stack of the shape reflexes.js exists to
+      // delete. Live 2026-08-03, 110 times: `held (busy building+securing food)` - TWO owners of one
+      // body, because a secureFood promise abandoned at 16:54:51 left `_securingFood` up for the
+      // remaining 3h15m of the process. Every brain command in that window was suppressed by a job
+      // that no longer existed. The SET is unchanged (these four, in this order, and nothing else
+      // gates a brain command); what changed is that each one now has to still hold a LIVE claim -
+      // bodyOwner() writes the registry through first, so a lease that expired is not a hold.
+      bodyOwner()
       const holdActive = [
-        ['busy building', () => commands.isBusy && commands.isBusy()],
-        ['night-resting', () => provRecovery.isResting && provRecovery.isResting()],
-        ['securing food', () => provFood.isSecuringFood && provFood.isSecuringFood()],
-        ['recovering-degraded', () => provRecovery.isRecoveringDegraded && provRecovery.isRecoveringDegraded()]
-      ].filter(([, p]) => { try { return !!p() } catch { return false } }).map(([n]) => n)
+        ['busy building', 'job'],
+        ['night-resting', 'shelter'],
+        ['securing food', 'foodRun'],
+        ['recovering-degraded', 'ladder']
+      ].filter(([, key]) => { try { const c = reflexes.claimInfo(key); return !!c && !c.stalled } catch { return false } }).map(([n]) => n)
       const bodyBusy = holdActive.length > 0
       const holdLabel = holdActive.join('+') || 'unlabeled-hold'
       const trimmedLine = String(line).trim()

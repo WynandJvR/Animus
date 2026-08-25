@@ -167,27 +167,38 @@ t('(i) activeJob = maintenancePass/maintain when the maintain latch is set', asy
   assert.ok(!s2.activeJob || s2.activeJob.name !== 'maintenancePass', 'latch cleared -> no synthetic maintain job')
 })
 
-// (j) S7: activeJob.lastProgressAt/blockedOn are now REAL (no more "null until S7") - the synthesis
-// carries the verified-progress clock; markStalled surfaces blockedOn:'stalled'; a touch clears it.
-t('(j) S7: activeJob carries the progress clock; markStalled -> blockedOn:stalled; touch clears', async () => {
+// (j) S7: activeJob.lastProgressAt/blockedOn are REAL - and since 2026-08-25 they are the JOB'S
+// WORK LEDGER, not the process's pulse. What changed and why (review D1): the clock used to be one
+// global cell that ANY touchProgress refreshed, so a nav rescue's 2-block jiggle was booked as the
+// build's progress and the fail rung never came. Now only an ADVANCE (production, or new ground)
+// moves it, and the marker `stalled` is cleared by the same evidence rather than by any wiggle.
+// The old form of this test seeded `touchProgress('seed')` and asserted the clock moved; that is
+// precisely the behaviour that had to go, so the seed is now a work tag.
+t('(j) work ledger: activeJob carries the WORK clock; a wiggle does not clear stalled, an advance does', async () => {
   const commands = require('./commands.js')
   try {
     provMaintain._setMaintaining(true)
-    // a seeded touch is the job's progress clock -> lastProgressAt reflects it (not null)
-    commands.touchProgress('seed')
-    const at0 = commands.progressInfo().at
+    const at0 = Date.now()
+    commands.touchProgress('harvest') // an ADVANCE: this is what a job's clock is made of
     let s = await provision.schedulerState(stubBot({}))
     assert.strictEqual(typeof s.activeJob.lastProgressAt, 'number', 'lastProgressAt is a real number (not null)')
-    assert.ok(s.activeJob.lastProgressAt >= at0, 'lastProgressAt >= the seeded touch time')
+    assert.ok(s.activeJob.lastProgressAt >= at0, 'lastProgressAt >= the verified work')
     assert.strictEqual(s.activeJob.blockedOn, null, 'no stall -> blockedOn null')
     // markStalled surfaces the nudge marker
     commands.markStalled()
     s = await provision.schedulerState(stubBot({}))
     assert.strictEqual(s.activeJob.blockedOn, 'stalled', 'markStalled -> blockedOn:stalled')
-    // any touch clears it
-    commands.touchProgress('clear')
+    // THE POINT: a non-work touch is not an answer to "is this job advancing"
+    const before = s.activeJob.lastProgressAt
+    commands.touchProgress('navRung:stepout')
     s = await provision.schedulerState(stubBot({}))
-    assert.strictEqual(s.activeJob.blockedOn, null, 'a touch clears the stalled marker')
+    assert.strictEqual(s.activeJob.blockedOn, 'stalled', 'a nav rescue must NOT clear the nudge marker')
+    assert.strictEqual(s.activeJob.lastProgressAt, before, 'a nav rescue must NOT wind the job clock')
+    // ...and verified work does both
+    commands.touchProgress('placed')
+    s = await provision.schedulerState(stubBot({}))
+    assert.strictEqual(s.activeJob.blockedOn, null, 'an advance clears the stalled marker')
+    assert.ok(s.activeJob.lastProgressAt > before, 'an advance re-bases the job clock')
   } finally { provMaintain._setMaintaining(false); commands._resetProgress() }
 })
 

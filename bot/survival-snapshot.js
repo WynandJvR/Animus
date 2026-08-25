@@ -32,19 +32,19 @@ const { hutAnchor } = provHut
 const provShelter = require('./provision-shelter.js')
 const { nightStuck, underArmored, armorPieceCount } = provShelter
 const provFood = require('./provision-food.js')
-const { isSecuringFood, RAW_COOKABLE } = provFood
+const { isSecuringFood, securingFoodSince, RAW_COOKABLE } = provFood
 // hasStandingFarm is provision-farm's, not provision-food's. Destructured from the wrong
 // module it read `undefined`, so s.farm.exists threw into its catch and the snapshot the
 // PURE scheduler reads reported "no wheat farm" on every tick, however good the farm was.
 const provFarm = require('./provision-farm.js')
 const { hasStandingFarm } = provFarm
 const provRecovery = require('./provision-recovery.js')
-const { isRecoveringHp, isRecoveringDegraded, isResting } = provRecovery
+const { isRecoveringHp, isRecoveringDegraded, isResting, recoveringHpSince, recoveringDegradedSince, restingSince } = provRecovery
 // NOTE: sleepableNow is reached via provRecovery.<name> at CALL time, not destructured here -
 // provision-recovery requires this module's siblings, so a name captured at load time can be
 // undefined (module-map's swallowed-ReferenceError trap).
 const provMaintain = require('./provision-maintain.js')
-const { isMaintaining } = provMaintain
+const { isMaintaining, maintainingSince } = provMaintain
 const provMining = require('./provision-mining.js')
 const { workingPickCount } = provMining
 
@@ -232,29 +232,53 @@ function mayDoProgress (bot, opts = {}) { return survivalNeed(bot, opts) == null
 // calls this.
 // ACTIVE-JOB SYNTHESIS (S7 §3.3), factored out of schedulerState so BOTH the snapshot AND the 5s
 // watchdog interval read ONE definition. SYNC + cheap (no bank reads, no awaits): commands' running
-// activity first (classified), else the five survival latches - exactly as before. Two fields are
-// now REAL: lastProgressAt = max(the verified-progress clock, this job's own startedAt) so a job
-// entered by a path that forgot to touch at t0 still starts its clock at startedAt rather than
-// inheriting a stale global clock (the pure watchdog prefers lastProgressAt when non-null, so a
-// too-old value would insta-fail a fresh job); blockedOn = the §6 nudge marker, cleared by any touch.
+// activity first (classified), else the five survival latches - exactly as before.
+//
+// ==== lastProgressAt IS THE JOB'S LEDGER, NOT THE PROCESS'S PULSE (2026-08-25) =============
+// It used to be `max(the ONE global progress clock, this job's startedAt)`, and that global cell
+// was refreshed by ANY touchProgress from ANY subsystem - 8b of motion, a fresh dispatch, a label
+// opening, a declared hold, and every nav recovery rung that moved the body at all. So the
+// question "is THIS job advancing" was answered with "did anything at all happen to the body",
+// and on 2026-08-03 the freeze watchdog's own 2-block rescue wound the clock of the build it was
+// rescuing, 32 times, holding the fail rung 45s out of reach for four hours (review D1).
+// Now it reads commands.jobProgress(key), the per-jobKey WORK LEDGER: it advances only on a
+// world-state delta (production or new ground) and it re-bases on ITS OWN startedAt when the key
+// changes - which is what the old `max(..., startedAt)` was reaching for and could not have,
+// because a global cell has no idea whose job it is.
+// `key` is published here so the watchdog's escalation reducer keys off the SAME string the
+// ledger does (#4 - it used to build its own copy of this expression in index.js).
+// blockedOn = the §6 nudge marker, now cleared by an ADVANCE rather than by any touch.
 // Never throws.
 function activeJobInfo () {
   const commands = require('./commands.js')
-  const prog = (() => { try { return commands.progressInfo() } catch { return { at: 0, stalled: false } } })()
-  const mk = (name, cls, startedAt) => ({
-    name,
-    cls,
-    startedAt: startedAt != null ? startedAt : null,
-    lastProgressAt: Math.max(prog.at || 0, startedAt || 0),
-    blockedOn: prog.stalled ? 'stalled' : null
-  })
+  const mk = (name, cls, startedAt) => {
+    const key = name + '@' + (startedAt || '')
+    const prog = (() => { try { return commands.jobProgress(key, startedAt) } catch { return { at: startedAt || 0, stalled: false } } })()
+    return {
+      name,
+      cls,
+      key,
+      startedAt: startedAt != null ? startedAt : null,
+      lastProgressAt: prog.at,
+      blockedOn: prog.stalled ? 'stalled' : null
+    }
+  }
   const a = commands.activityInfo && commands.activityInfo()
   if (a && a.name) return mk(a.name, scheduler.commandClass(a.name), a.startedAt)
-  if (isRecoveringDegraded()) return mk('recoveryLadder', 'survival', null)
-  if (isSecuringFood()) return mk('secureFood', 'survival', null)
-  if (isRecoveringHp()) return mk('recoverHp', 'survival', null)
-  if (isResting()) return mk('nightShelter', 'survival', null)
-  if (isMaintaining()) return mk('maintenancePass', 'maintain', null)
+  // ...each with the instant ITS OWN LATCH WENT UP as startedAt (2026-08-25, review item 2). These
+  // five used to pass null, so the key was 'secureFood@' - the same string on every dispatch - and
+  // run #2 of a job inherited run #1's exhausted clock. Only the module that raises a latch knows
+  // when it was raised, so that is where the stamp lives (provFood.securingFoodSince et al); a
+  // whole-body force-release clears it with the latch, so a released ghost cannot leave one behind.
+  if (isRecoveringDegraded()) return mk('recoveryLadder', 'survival', recoveringDegradedSince() || null)
+  if (isSecuringFood()) return mk('secureFood', 'survival', securingFoodSince() || null)
+  if (isRecoveringHp()) return mk('recoverHp', 'survival', recoveringHpSince() || null)
+  if (isResting()) return mk('nightShelter', 'survival', restingSince() || null)
+  if (isMaintaining()) return mk('maintenancePass', 'maintain', maintainingSince() || null)
+  // NO JOB. Close the ledger entry, so the NEXT job of the same name is a NEW job. Filing it
+  // HERE keeps one reconciliation point: activeJobInfo is the only caller of jobProgress, and it
+  // calls it on every path, with a key or with null.
+  try { commands.jobProgress(null, null) } catch {}
   return null
 }
 

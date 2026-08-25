@@ -80,6 +80,7 @@ const DFOOD_FAR = () => Number(process.env.DFOOD_FAR_DIST || 48)     // > this f
 let _foodPlanHint = null
 
 let _securingFood = false
+let _securingFoodAt = 0 // when the latch went up; see securingFoodSince()
 
 // FOOD_FLOOR F4: the no-progress escalation counter (module-local; a restart re-allows a fresh
 // attempt). Advanced by the floor branch on a zero-food dispatch, reset on food gain, and BUMPED
@@ -841,15 +842,21 @@ function _setFoodPlanHint (p) { const prev = _foodPlanHint; _foodPlanHint = p ||
 
 function isSecuringFood () { return _securingFood }
 // FORCE-release (watchdog terminal rung only) - see releaseMaintainLatch.
-function releaseFoodLatch () { const was = _securingFood; _securingFood = false; return was }
+function releaseFoodLatch () { const was = _securingFood; _securingFood = false; _securingFoodAt = 0; return was }
+// WHEN THIS LATCH WENT UP (2026-08-25, review item 1's handoff). The survival-latch jobs had no
+// startedAt at all, so survival-snapshot keyed them as 'secureFood@' - the SAME string on every
+// dispatch - and the work ledger could not tell run #1 from run #2: a re-dispatch inherited the
+// previous run's exhausted clock. The honest zero-mark is the instant the latch was raised, and
+// this is the only place that knows it.
+function securingFoodSince () { return _securingFood ? _securingFoodAt : 0 }
 
 function escalateFoodFloor () { if (process.env.FOOD_FLOOR !== '0') _foodFloorNoProgress = foodSec.foodFloorEscalation(_foodFloorNoProgress, false) }
 
 async function secureFood (bot, opts = {}) {
   if (_securingFood) return { fed: false, blockedOn: 'busy' }
-  _securingFood = true
-  S().clearSurvStop(); touchP('secureFood') // S7 H5c: per-dispatch latch clear + zero-idle at t0
-  try { return await secureFoodInner(bot, opts) } finally { _securingFood = false }
+  _securingFood = true; _securingFoodAt = Date.now()
+  S().clearSurvStop(); touchP('secureFood') // S7 H5c: per-dispatch latch clear. The stamp is now a BODY-clock mark only - the job's zero-idle comes from the work ledger re-basing on its key (telemetry.js)
+  try { return await secureFoodInner(bot, opts) } finally { _securingFood = false; _securingFoodAt = 0 }
 }
 
 async function secureFoodInner (bot, opts = {}) {
@@ -1245,5 +1252,5 @@ async function scoutHunt (bot, { isStopped = () => false, say = () => {}, maxMs 
 module.exports = {
   setDebugSink,
   REGEN_FOOD_MIN,
-  RAW_COOKABLE, FOOD_ANIMALS, RISKY_EAT, DFOOD_DEEP, _foodPlanHint, _securingFood, hasFood, foodCount, needsFood, nearestFoodAnimal, eatFromPackToComfortable, eatBestFood, eatUp, bakeBreadFromWheat, cookRawMeat, drainOwnFurnaceFood, fishingEnabled, ensureFishingRod, fishForFood, huntForFood, huntForDrop, gatherLeather, woolCount, ensureFoodSupply, bankFoodFirst, courierFoodToBank, foodPlanNow, topUpFoodForPlan, _setFoodPlanHint, isSecuringFood, releaseFoodLatch, escalateFoodFloor, secureFood, secureFoodInner, scoutForFood, scoutHunt
+  RAW_COOKABLE, FOOD_ANIMALS, RISKY_EAT, DFOOD_DEEP, _foodPlanHint, _securingFood, hasFood, foodCount, needsFood, nearestFoodAnimal, eatFromPackToComfortable, eatBestFood, eatUp, bakeBreadFromWheat, cookRawMeat, drainOwnFurnaceFood, fishingEnabled, ensureFishingRod, fishForFood, huntForFood, huntForDrop, gatherLeather, woolCount, ensureFoodSupply, bankFoodFirst, courierFoodToBank, foodPlanNow, topUpFoodForPlan, _setFoodPlanHint, isSecuringFood, securingFoodSince, releaseFoodLatch, escalateFoodFloor, secureFood, secureFoodInner, scoutForFood, scoutHunt
 }

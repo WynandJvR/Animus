@@ -86,6 +86,36 @@ function classOf (tier) { return CLASS_OF_TIER[tier] || 'idle' }
 //               happily let secureFood preempt secureFood. The second one returned "not fed -
 //               blocked on busy" instantly and armed the no-op latch, which would then have
 //               suppressed the REAL food response. That is audit LOOP C in miniature.
+//
+// ==== A CLAIM IS A LEASE, RENEWED BY EVIDENCE (2026-08-25, structural review D2/§3.2) =======
+// This table used to be a NAME TABLE and nothing more: the runner polled nine unrelated booleans
+// and looked the winner's label up here. Every one of those booleans is raised before an await and
+// lowered in a `finally` - which is sufficient only while the awaited work RESOLVES. The repo has
+// now written that same sentence four times, for holds, for the dispatch slot, for the activity
+// label and for commands' own build latches. The body-owner latches were the last exclusive claim
+// with neither expiry nor heartbeat, and they are the OLDEST and the most powerful: a `hard` row
+// refuses every proposal at every tier, crisis included.
+//
+// 2026-08-03 16:54:51. The recovery ladder's rung deadline ABANDONED a secureFood promise and
+// advanced to the next rung. `_securingFood` was never lowered, because the abandoned promise
+// never reached its `finally` and never will. For the next 3h15m - to process death at 20:10 -
+// the foodRun row above answered every question about the body on behalf of a job that had not
+// existed since lunchtime:
+//   328 ownership refusals citing it ("a food run owns the body" x321, "a food run IS this job" x44)
+//   110 `held (busy building+securing food)` lines - TWO owners of one body, at once
+//   ladder rung R4 instantly `blockedOn:'busy'` against its own dead sibling's latch
+// Not one of those lines was wrong about the latch. The latch was wrong about the world.
+//
+// So the table becomes the REGISTRY (below): the runner reports which latches it OBSERVES raised,
+// a claim is opened for each, and a claim is only alive while EVIDENCE says the work behind it is
+// moving - the item-1 work ledger, the same world-delta record the watchdog judges a job by. Two
+// fields make the difference, and both already exist in this file's own vocabulary:
+//   engine    the "latch" is engine state (a pathfinder goal, a dig target), not a promise's
+//             boolean. mineflayer clears these itself, so there is nothing to expire and revoking
+//             one means yanking the controls - the rescue path (review item 5), not this one.
+//             Same distinction index.js's TICK_GATES already draws with its 'engine-state' owner.
+//   owns      doubles as the job->claim map: it is how an advance is credited to the claim that
+//             produced it instead of to whichever claim happens to sit on top of it.
 const BODY_OWNERS = [
   { key: 'escape', tier: 'SURVIVE', hard: true, label: 'an escape' },
   { key: 'navRecovery', tier: 'SURVIVE', hard: true, label: 'a navigation recovery' },
@@ -94,11 +124,18 @@ const BODY_OWNERS = [
   { key: 'shelter', tier: 'SURVIVE', crisisOnly: true, owns: 'nightShelter', label: 'the night shelter' },
   { key: 'maintain', tier: 'PROGRESS', owns: 'maintenancePass', label: 'a maintenance pass' },
   { key: 'job', tier: 'PROGRESS', crisisOnly: true, label: 'a job' },
-  { key: 'walk', tier: 'PROGRESS', label: 'a walk already in progress' },
-  { key: 'dig', tier: 'PROGRESS', label: 'a dig in progress' } // aborting a dig resets its break progress - never for housekeeping
+  { key: 'walk', tier: 'PROGRESS', engine: true, label: 'a walk already in progress' },
+  { key: 'dig', tier: 'PROGRESS', engine: true, label: 'a dig in progress' } // aborting a dig resets its break progress - never for housekeeping
 ]
 const ownerByKey = new Map(BODY_OWNERS.map(o => [o.key, o]))
 function ownerInfo (key) { return ownerByKey.get(key) || null }
+// The job->claim direction of `owns`. The dispatch slot names the job the chooser put on the body;
+// this says which claim that job raises, so an advance can be credited to the right lease.
+function claimOfJob (jobKey) {
+  if (!jobKey) return null
+  for (const o of BODY_OWNERS) if (o.owns === jobKey) return o.key
+  return null
+}
 
 // THE ordering rule, and the whole of what ~120 scattered latch checks used to say.
 // Returns null when the proposal may take the body, else the REASON it may not - because a
@@ -193,6 +230,99 @@ function activeHold (premiseOK) {
 }
 function _resetHolds () { holds.clear() }
 
+// ---- the claim registry -----------------------------------------------------------------
+// ONE record of who holds the body, written through by the runner's single observation of the
+// nine latches (index.js bodyOwner). A claim is `{ key, takenAt, lastDeltaAt, revokedAt, why }`
+// and it is a LEASE: alive only while the work behind it is producing world-state deltas.
+//
+// THE WINDOW IS NOT A NUMBER I CHOSE. "This work is hung" is a verdict this repo already owns and
+// has already priced, in one place, twice-derived: scheduler.SURVIVAL_FAIL_MS is the instant the
+// supervisor concludes a survival job has made no verified progress, and LATCH_GRACE_MS is how
+// long its (cooperative) stop latch then gets to actually bite before "it did not bite" is an
+// honest statement. Their sum is already navigate.js's leg ceiling and provision-recovery's
+// RUNG_NOPROGRESS_MS. A claim is exactly the same question asked of an owner instead of a job, so
+// it gets exactly the same number - a THIRD literal here would be the seam coming back
+// ([[threshold-seams]]). Non-survival claims use the patient window the same watchdog uses.
+// This is a deadline on an ATTEMPT (the work's attempt to move the world), not a delay before
+// thinking (#6): every credited delta pushes it out again, so a claim that is doing anything at
+// all never expires, and one that has done nothing since the supervisor gave up on it is gone.
+const claims = new Map() // key -> claim
+let claimWindows = null  // memoised {survive, patient}; scheduler.js is required LAZILY (this file's load-order contract)
+function claimStaleMs (row) {
+  if (!claimWindows) {
+    const d = { survive: 150000, patient: 300000 } // the same sums, for the impossible case where scheduler.js will not load
+    try {
+      const s = require('./scheduler.js') // lazy + PURE, exactly as recoveryLadder.refuse does below: numbers out, no bot, no cycle at load
+      if (Number.isFinite(s.SURVIVAL_FAIL_MS) && Number.isFinite(s.PATIENT_FAIL_MS) && Number.isFinite(s.LATCH_GRACE_MS)) {
+        claimWindows = { survive: s.SURVIVAL_FAIL_MS + s.LATCH_GRACE_MS, patient: s.PATIENT_FAIL_MS + s.LATCH_GRACE_MS }
+      }
+    } catch {}
+    if (!claimWindows) return row.tier === 'SURVIVE' ? d.survive : d.patient
+  }
+  return row.tier === 'SURVIVE' ? claimWindows.survive : claimWindows.patient
+}
+
+// The ONE call the runner makes. `raised` = the owner keys whose latch it just observed true;
+// `ev` = { driver, at } - which claim the work ledger's advances belong to, and when that ledger
+// last moved (or last had its stillness vouched for by a declared hold).
+//
+// WHY THE DRIVER AND NOT "anything that happened": while one job holds the ledger key, ANY advance
+// in the process credits it - the honest gap item 1 left open and named. Crediting every live
+// claim from the same stream would re-open the exact hole this exists to close: at 16:54 the build
+// was the thing (not) moving and the dead food run was the thing on top, so a shared clock lets the
+// corpse live on the build's evidence. The runner names ONE driver - the claim raised by the job in
+// the dispatch slot, else the generic `job` claim a commands-level activity raises, else the top
+// live claim, because nothing else could have produced the delta.
+//
+// Returns { owner, revoked }: the effective owner key (highest-ordered LIVE claim - a revoked claim
+// is not an owner, exactly as an expired hold is not a hold) and the claims revoked on this call,
+// for the runner to act on and log.
+function syncClaims (raised, ev = {}) {
+  const now = ev.now != null ? ev.now : nowFn()
+  const up = new Set(raised || [])
+  // A latch that has gone DOWN closes its claim: the `finally` ran, which is the normal path and
+  // the one this whole mechanism is not about. It is also what un-revokes a key - the next raise of
+  // a latch that actually came down is a NEW claim with a fresh window, while a revoked latch that
+  // never came down stays the same claim and stays revoked (a corpse does not get a second lease).
+  for (const key of Array.from(claims.keys())) if (!up.has(key)) claims.delete(key)
+  for (const key of up) {
+    if (!ownerByKey.has(key)) continue
+    if (!claims.has(key)) claims.set(key, { key, takenAt: now, lastDeltaAt: now, revokedAt: 0, why: '' })
+  }
+  const d = ev.driver && claims.get(ev.driver)
+  if (d && !d.revokedAt && ev.at != null && ev.at > d.lastDeltaAt) d.lastDeltaAt = ev.at
+  const revoked = []
+  // NO EVIDENCE, NO VERDICT (#10 - "unmeasured is not unmet"). A caller that cannot read the work
+  // ledger has not shown that anything is stuck; it has shown that it cannot tell. Revoking on that
+  // would make an unreadable telemetry cell take the body off every live owner at once.
+  if (ev.at == null) return { owner: claimOwner(), revoked }
+  for (const c of claims.values()) {
+    const row = ownerByKey.get(c.key)
+    if (!row || row.engine || c.revokedAt) continue
+    const idle = now - c.lastDeltaAt
+    const stale = claimStaleMs(row)
+    if (idle < stale) continue
+    c.revokedAt = now
+    c.why = 'no world delta credited to it for ' + Math.round(idle / 1000) + 's (>' + Math.round(stale / 1000) + 's), held ' + Math.round((now - c.takenAt) / 1000) + 's'
+    revoked.push(c)
+  }
+  return { owner: claimOwner(), revoked }
+}
+// The effective owner: BODY_OWNERS order (highest tier first - the one a proposal has to out-rank),
+// skipping revoked claims. This is the whole of what "a dead owner holds the body forever" cost.
+function claimOwner () {
+  for (const o of BODY_OWNERS) { const c = claims.get(o.key); if (c && !c.revokedAt) return o.key }
+  return null
+}
+// The claim record, or null - so "the owner is stuck" is a readable fact rather than an inference
+// (§3.2). `stalled` is the revocation itself: a claim that reached its window IS the stuck owner.
+function claimInfo (key) {
+  const c = claims.get(key)
+  return c ? { key: c.key, takenAt: c.takenAt, lastDeltaAt: c.lastDeltaAt, stalled: !!c.revokedAt, why: c.why } : null
+}
+function claimsInfo () { return BODY_OWNERS.map(o => claimInfo(o.key)).filter(Boolean) }
+function _resetClaims () { claims.clear() }
+
 // ---- the registry -------------------------------------------------------------------------
 // Each row is DATA plus at most two functions, and NONE of them acts on its own:
 //   name      the job name the chooser emits and the runner dispatches
@@ -206,11 +336,16 @@ function _resetHolds () { holds.clear() }
 //   refuse    (ctx) -> reason string | null. The PERSISTENT conditions under which the executor
 //             cannot run. These used to be silent `return`s in the dispatcher; as refusals they
 //             re-enter selection in the same tick and are logged with their blocker.
-//   run's result  a plain string (what happened, for the log) or { msg, noOp }. `noOp` is the
-//             executor's OWN verdict that it ran to completion and the world would not budge -
-//             the runner then refuses it until the world changes. It is never inferred from the
-//             prose: a regex on a result string could not tell "I tried everything" from "someone
-//             stopped me mid-sentence", and at hp 1 / food 0 it latched off the recovery ladder.
+//   terminal  this row is the arbiter's floor (§3.3): it may NOT carry a `refuse`, the runner
+//             never gates it on body ownership or attempt memory, and it takes the body instead
+//             of waiting for it. Exactly one row is terminal; reflexestest.js pins both halves.
+//   run's result  a plain string (what happened, for the log) or { msg, noOp, noOpWhy }. `noOp`
+//             is the executor's OWN verdict that it ran to completion and the world would not
+//             budge, and `noOpWhy` is the blocker it names; the runner then records that as an
+//             ATTEMPT AT THIS PLACE (attempts.js) and refuses the job until the bot moves, the
+//             step changes or the world moves. It is never inferred from the prose: a regex on a
+//             result string could not tell "I tried everything" from "someone stopped me
+//             mid-sentence", and at hp 1 / food 0 it latched off the recovery ladder.
 //   label     the executor name to log, when it differs from the job name.
 //
 // ctx (built ONCE per tick by the runner):
@@ -232,47 +367,162 @@ function def (entry) {
 
 // -- SURVIVE ------------------------------------------------------------------------------
 
+// ==== THE TERMINAL ACTION: the arbiter is a TOTAL function ================================
+// (structural review 2026-08-25, D3 / §3.3)
+//
+// THE OUTCOME THIS ROW EXISTS TO MAKE IMPOSSIBLE. In one HEAD-era day: 847 ticks in which a
+// crisis was detected, every candidate response refused, and the chooser logged
+//   (core) chose build/idle: CRISIS UNANSWERED (...) - doing what i can instead: continuing the
+//   active build
+// 63% of ALL decisions were that do-nothing fallback. Every individual refusal was honest and
+// every one of them was logged - FIX 4 saw to that - and they still summed to zero action, which
+// is principle #5 violated at the system level rather than at any one line. A detected crisis in
+// which every candidate refuses is a BUG IN THE ARBITER, not a valid outcome.
+//
+// So the candidate list ends in an action that CANNOT refuse. This row has no `refuse` at all -
+// not one that returns null, ABSENT - and reflexestest.js fails the build if a `terminal` row
+// ever grows one. It needs no pathfinding to be useful, no other subsystem, and no free body: it
+// TAKES the body (§3.2 - the claims are leases, and this is the lease-holder of last resort).
+//
+// What it does, in order, each step guaranteed executable and each one a real world action:
+//   1. EAT WHAT IS IN THE PACK. The commonest crisis is hunger, the commonest absurdity is a
+//      starving bot standing on food it owns. No walking, no furnace, no chest - pack only.
+//   2. FREE THE BODY. Revoke every claim, drop the nav goal and the control states, and abandon
+//      the active job through the EXISTING preempt lever (buildAbort only - persistedResume
+//      survives, so the build pauses and never cancels). Then forget every attempt record but
+//      this row's own: those records are what refused the crisis responses, the world they were
+//      recorded in no longer exists, and a reset that leaves the refusals standing is not a reset.
+//   3. GO SOMEWHERE SAFE. recoverHome is the EXISTING "walk to the verified anchor" and it owns
+//      the one rule that must not be overridden here - crossingAdmissible, which is what stops a
+//      naked bot night-marching 458 blocks to its death. "Everything allowed" (§3.3) does not
+//      mean "the death is allowed". If the crossing is barred, the reset above still happened.
+//
+// The move matters for more than safety: leaving the cell is what re-arms attempt memory for
+// every candidate that refused here (attempts.js), so the terminal does not have to know which
+// refusals it is clearing - walking away clears them by construction.
+//
+// WHAT IT DELIBERATELY DOES NOT DO: break the wedge. Physically un-wedging the body is the one
+// rescue path of §3.5, which item 5 consolidates and which must report its failure BACK to this
+// arbiter; wiring this row into today's rung-pile (navigate.forceUnstick, the 4-minute freeze
+// watchdog) would give the terminal action a dependency on a layer that is about to be deleted.
+// What this row guarantees today is that a crisis always produces an action and that every
+// previously-refused responder is admissible again on the very next tick - including the ones
+// whose job IS to move the body.
+const TERMINAL = 'terminalAction'
+def({
+  name: TERMINAL,
+  label: 'terminal',
+  tier: 'SURVIVE',
+  terminal: true,
+  why: 'a detected crisis that every candidate refused: eat, free the body, abandon the job, go somewhere safe',
+  // NO `refuse`. BY CONTRACT. See above, and reflexestest.js.
+  run: async (bot, ctx) => {
+    const commands = require('./commands.js')
+    const attempts = require('./attempts.js')
+    const provFoodM = provFood()
+    const did = []
+    const pos = bot.entity && bot.entity.position
+    const cell = attempts.cellOf(pos)
+    // This row's OWN memory, kept across its own reset: "how many full resets have happened in
+    // this cell". It gates nothing (a terminal action that could refuse itself would not be one)
+    // - it is the escalation verdict item 5's rescue path will consume, and the number a human
+    // greps for when the bot is hard-wedged.
+    const prior = attempts.recall(TERMINAL, 'reset', cell)
+    const pass = (prior ? prior.n : 0) + 1
+
+    // 1. EAT FROM THE PACK -----------------------------------------------------------------
+    try {
+      if (bot.food != null && bot.food < 20) {
+        const before = bot.food
+        await provFoodM.eatUp(bot) // pack only: equip + consume. No nav, no furnace, no chest.
+        if (bot.food > before) did.push('ate from the pack (food ' + before + ' -> ' + bot.food + ')')
+      }
+    } catch (e) { did.push('could not eat (' + e.message + ')') }
+
+    // 2. FREE THE BODY ---------------------------------------------------------------------
+    try { const freed = commands.releaseBodyClaims('terminal action: crisis unanswered' + (pass > 1 ? ' (reset #' + pass + ' in this cell)' : '')); if (freed) did.push('revoked the body claims: ' + freed) } catch (e) { did.push('claim revoke threw (' + e.message + ')') }
+    try { if (commands.preemptForSurvival) { commands.preemptForSurvival(); did.push('abandoned the active job (its resume is persisted)') } } catch {}
+    try { if (bot.pathfinder) bot.pathfinder.setGoal(null) } catch {}
+    try { bot.clearControlStates() } catch {}
+    const forgotten = attempts.forgetAll({ except: TERMINAL })
+    if (forgotten) did.push('forgot ' + forgotten + ' attempt record(s) - every refused responder is admissible again')
+
+    // 3. GO SOMEWHERE SAFE -----------------------------------------------------------------
+    let moved = ''
+    try {
+      const pr = commands.persistedResume && commands.persistedResume()
+      // ONE THRESHOLD, NOT TWO ([[threshold-seams]]). recoverHome's default "far" is 64b - it was
+      // written for a respawn on the other side of the world, and for that caller a bot 40b from
+      // its door is already home. For the floor, "far" means "not AT the anchor", and this
+      // function already owns a number for that: its arrival radius. Passing the same 8 to both
+      // ends is what makes the walk happen at all in the case that matters most - a bot stuck a
+      // short distance from its own door, where a 64b gate would return "not far" and move nothing.
+      const rh = await provRecovery().recoverHome(bot, { say: ctx.say, resumeAt: pr && pr.at, dist: 8, arrive: 8 })
+      if (rh.arrived) moved = 'reached the home anchor'
+      else if (rh.stabilise) moved = 'did NOT cross to home (' + (rh.blockedOn || 'blocked') + ': ' + (rh.why || '') + ') - staying put is the safer half of the reset'
+      // "not far" has TWO causes and they are not the same news (#7): standing at the anchor, and
+      // having no anchor to stand at. The second one is the bot's whole predicament, not a success.
+      else if (rh.far === false) moved = rh.anchor ? 'already at the home anchor' : 'no home anchor is remembered - there is nowhere safer to walk to'
+      else moved = 'still ' + Math.round(rh.dist || 0) + 'b from home after this pass'
+    } catch (e) { moved = 'the walk home threw (' + e.message + ')' }
+    did.push(moved)
+
+    const nowCell = attempts.cellOf(bot.entity && bot.entity.position)
+    // Step 'reset', not '-', ON PURPOSE: the runner's generic bookkeeping forgets (jobKey, '-',
+    // cell) for every job that did NOT return a no-op verdict, and this row never returns one. A
+    // counter the generic path could erase would reset itself every pass and could never say
+    // "third full reset in this cell", which is the one thing it is for.
+    attempts.record(TERMINAL, 'reset', cell, { now: ctx.nowMs(), why: 'full reset ran here', sig: '' })
+    if (pass > 1 && nowCell === cell) {
+      // A statement of fact for the log, and the condition item 5's unstick() is owed: a full
+      // reset has now run N times in this same 4b cell and the body is still in it.
+      ctx.note('(terminal) HARD-WEDGED: full reset #' + pass + ' in cell ' + cell + ' and the body did not leave it - a physical un-wedge is the missing rung')
+    }
+    return {
+      msg: 'full reset #' + pass + ' - ' + did.join('; '),
+      // NEVER a no-op verdict. A terminal action that could latch itself off is not terminal, and
+      // the arbiter would be back to accepting "no" for an answer.
+      noOp: false
+    }
+  }
+})
+
 def({
   name: 'recoveryLadder',
   label: 'recoverFromDegraded',
   tier: 'SURVIVE',
   why: 'the compound-degraded state (naked/starving/hurt at once) runs the R0..R5 ladder',
-  refuse: (ctx) => {
-    // FIX 3's CONDITION gate. A pass that made NO PROGRESS is not retried until something it
-    // depends on has changed: re-deriving an identical plan from an identical world cannot
-    // produce a different result, and on 2026-07-20 it produced 41 identical `NOT recovered`
-    // passes while the food bar drained. A condition, never a timer.
-    const b = ctx.runner.ladderBlock
-    if (!b) return null
-    const scheduler = require('./scheduler.js') // lazy + PURE (a snapshot in, a string out): no bot, no clock, no cycle at load
-    let sig = ''
-    try { sig = scheduler.recoverySignature(ctx.s) } catch {}
-    if (sig && sig === b.sig) return 'last pass made no progress and nothing has changed since - ' + scheduler.blockerText(b.blockedOn)
-    ctx.runner.ladderBlock = null // the world moved: the ladder is live again
-    return null
-  },
+  // NO BESPOKE refuse ANY MORE (structural review §3.6). This row used to carry FIX 3's own
+  // condition gate - `runner.ladderBlock`, a { sig, blockedOn } pair compared against
+  // recoverySignature - and the comment right below it complained, correctly, that "two latches
+  // on one signature is one rule with two definitions". It was: the generic job-identity latch
+  // and this one, both keyed on the same fingerprint, and both unreachable from a wedge because
+  // POSITION IS NOT IN THAT FINGERPRINT (651 x "last pass made no progress and nothing has
+  // changed since" in a day, at a bot that could not move). The rule is now written ONCE, in
+  // attempts.js, keyed by (job, step, cell) and asked by the runner for EVERY job - so the ladder
+  // is refused when it has achieved nothing HERE, and re-armed by moving, by the world changing,
+  // or by the terminal action's reset. The blocker text this row used to compute is carried on
+  // the record instead (`noOpWhy` below), so the refusal still names what has to change (#7).
   run: async (bot, ctx) => {
     const provision = require('./provision.js')
     const scheduler = require('./scheduler.js')
     const r = await provRecovery().recoverFromDegraded(bot, { say: ctx.say })
-    // An INTERRUPTED pass proves nothing about the world, so it must not latch the condition
-    // gate either. 'busy'/'stopped'/'deadline' all mean the pass ended for reasons that have
+    // An INTERRUPTED pass proves nothing about the world, so it must not record an attempt
+    // either. 'busy'/'stopped'/'deadline' all mean the pass ended for reasons that have
     // nothing to do with whether its rungs could have worked - and on 2026-07-29 21:12 a
     // watchdog-stopped pass latched the ladder off at hp 1 / food 0 / naked, which is the
     // failure this whole gate exists to prevent, arriving from the other direction.
     const interrupted = r.reason === 'stopped' || r.reason === 'busy' || r.reason === 'deadline'
-    if (!r.done && !interrupted && r.progressed === false && r.sig) {
-      ctx.runner.ladderBlock = { sig: r.sig, blockedOn: r.blockedOn || 'blocked' }
-      ctx.note('(sched) ladder BLOCKED on ' + ctx.runner.ladderBlock.blockedOn + ' - ' + scheduler.blockerText(ctx.runner.ladderBlock.blockedOn) + '; standing down until the situation changes')
-    } else ctx.runner.ladderBlock = null
+    const blocked = !r.done && !interrupted && r.progressed === false
     return {
       msg: (r.done ? 'recovered' : 'NOT recovered (' + (r.reason || 'rungs exhausted') + (r.blockedOn ? ', blocked on ' + r.blockedOn : '') + ')') +
                   (r.rungs.length ? ' via ' + r.rungs.join(' > ') : ''),
-      // NEVER the generic latch: the ladder's own condition gate (runner.ladderBlock, set above
-      // from r.progressed/r.sig) is the authority, and it is set from real per-rung data rather
-      // than from whether the pass happened to be interrupted. Two latches on one signature is
-      // one rule with two definitions, and the weaker one latched a starving bot's recovery off.
-      noOp: false
+      // The SAME data-driven verdict as before (r.progressed / r.blockedOn, computed from real
+      // per-rung facts), now spoken in the one vocabulary every other row uses. Never inferred
+      // from the prose: a regex on a result string could not tell "I tried everything" from
+      // "someone stopped me mid-sentence", and at hp 1 / food 0 it latched off the recovery ladder.
+      noOp: blocked,
+      noOpWhy: blocked ? scheduler.blockerText(r.blockedOn || 'blocked') : undefined
     }
   }
 })
@@ -614,12 +864,19 @@ function dispatchable () { return REFLEXES.filter(r => typeof r.run === 'functio
 
 module.exports = {
   TIERS,
+  TERMINAL, // the ONE name of the terminal action - scheduler-core chooses it, index.js dispatches it, one definition (#4)
   tierRank,
   classOf,
   BODY_OWNERS,
   ownerInfo,
+  claimOfJob,
   bodyRefusal,
   mayTakeBody,
+  syncClaims,
+  claimOwner,
+  claimInfo,
+  claimsInfo,
+  _resetClaims,
   REFLEXES,
   get,
   names,

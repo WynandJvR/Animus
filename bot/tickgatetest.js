@@ -83,9 +83,17 @@ const relStart = cmd.indexOf('function releaseBodyClaims')
 const rel = cmd.slice(relStart, cmd.indexOf('\nfunction ', relStart + 1))
 
 t('releaseBodyClaims resets commands\' OWN tick-gating latches, not only the ones that never gated it', () => {
-  assert.ok(/if \(escaping\) \{[^}]*escaping = false \}/.test(rel),
+  // 2026-08-25 (review item 2): the release is now SCOPEABLE to a single body claim, because the
+  // claim registry revokes ONE expired lease at a time and taking a live maintenance pass down with
+  // a dead food run would be the coarse-release bug wearing a new hat. So each line carries the
+  // claim key it belongs to. What must not change is what this test was written for: a WHOLE-BODY
+  // release (no scope) still clears both of commands' own tick-gating latches.
+  assert.ok(/const want = k => !only \|\| only\.includes\(k\)/.test(rel),
+    'an omitted scope must mean EVERY claim - the tick-gate deadline rung passes no scope and depends on that')
+  assert.ok(/if \(want\('escape'\) && escaping\) \{[^}]*escaping = false \}/.test(rel),
     '`escaping` (commands.js:99) GATES THE TICK and was never force-released')
-  assert.ok(/if \(recovering\) \{[^}]*recovering = false \}/.test(rel), 'the recover mutex is the same shape')
+  assert.ok(/if \(!only && recovering\) \{[^}]*recovering = false \}/.test(rel),
+    'the recover mutex is the same shape - and it backs no body-owner claim, so only a whole-body release reaches it')
 })
 
 t('releaseBodyClaims reaches navigate through the OWNING module, like the other three', () => {

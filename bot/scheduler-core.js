@@ -33,8 +33,15 @@
 // chooseActivity(snapshot, opts) -> { job, cls, reason, score, preempt, bootstrap[, standoff, refusals] }
 //   opts.refused: (#114) a Map of candidate key -> why, for candidates whose EXECUTOR already declined
 //            THIS tick; they score out and the tick re-selects. All-refused => standoff:true + refusals.
+//   opts.survivalActor: (§3.3) { key, label } of a LIVE SURVIVE-tier body claim, or null. "Somebody
+//            is already answering the crisis" - the runner reads it off the claim registry, where a
+//            claim is alive only while its work is producing world deltas (item 2).
+//   opts.crisisGrade: (§3.3) the runner's OWN verdict that this need may take the body off a build.
+//            The same crisisGrade() the ownership rule uses, so the two layers cannot mean two
+//            different things by "crisis" (#4). Absent => the core falls back to its own need.
 //   job    : an EXISTING dispatchable job name the S4 tick already knows how to run -
 //            recoveryLadder | graveSweep | secureFood | recoverHp | nightShelter | maintenancePass
+//            | terminalAction (the floor of §3.3 - always executable, never refusable)
 //            | 'flee' (reflex-owned, the tick no-ops it exactly as pickJob does) | null (build/idle
 //            may proceed - the adapter hands null off to the existing build/resume/brain/idle tail).
 //   cls    : survival | maintain | progress | idle (the preemption tier).
@@ -249,9 +256,29 @@ function chooseActivity (snapshot, opts) {
   // 3. the compound-degraded signature with no single clean need (e.g. naked with a far-but-in-band
   //    grave) -> the ladder.
   if (degraded && !isRefused('recoveryLadder')) return mk('recoveryLadder', 'survival', 'crisis: degraded - running the recovery ladder', CRISIS_SCORE)
-  // Every crisis response we would have chosen has been refused by its own executor. Say so once,
-  // loudly, and carry on into the utility phase - the bot must still do the best thing it can.
-  const crisisRefused = !!((need || degraded) && (isRefused('recoveryLadder') || isRefused('secureFood') || isRefused('recoverHp') || isRefused('nightShelter')))
+  // ==== EVERY CRISIS RESPONSE REFUSED - THE THREE THINGS THAT CAN MEAN (review D3 / §3.3) ====
+  // This used to collapse to one flag, `crisisRefused`, and one log line, CRISIS UNANSWERED, and
+  // that line was printed 847 times in a day - while it meant three completely different things:
+  //
+  //   (a) SOMEONE IS ALREADY DOING IT. 248 of those lines refused the ladder or secureFood with
+  //       "body busy (a food run)" / "a food run IS this job - it is already running". The crisis
+  //       had an answer; the answer was already running and the log called it unanswered. Since
+  //       item 2 a claim is a LEASE - a SURVIVE-tier owner still on the registry has produced a
+  //       world delta inside the watchdog's own fail window, so it IS acting, and a corpse (the
+  //       3h15m food-run zombie) is not an owner at all any more. `o.survivalActor` is that fact.
+  //   (b) THE NEED IS NOT CRISIS-GRADE. 220 more read "body busy (a job) and this is not
+  //       crisis-grade - single-goal discipline": a build legitimately holds the body because the
+  //       need has not reached the threshold at which anything may preempt it. Nothing is wrong;
+  //       the word "crisis" is being used with two different meanings in two layers (#4). The
+  //       runner hands its OWN verdict in (`o.crisisGrade`, the same crisisGrade() the ownership
+  //       rule uses), so the two cannot drift.
+  //   (c) NOBODY IS ACTING AND NOBODY MAY. That is the real defect, and it is the only one that
+  //       gets the terminal action below.
+  const crisisProducerRefused = !!((need || degraded) && (isRefused('recoveryLadder') || isRefused('secureFood') || isRefused('recoverHp') || isRefused('nightShelter')))
+  const survivalActor = o.survivalActor || null
+  // A caller that does not supply a crisis-grade verdict (the offline fixtures) falls back to the
+  // core's own need - it may not INVENT a stricter one, and it may not silently disarm the floor.
+  const crisisGrade = o.crisisGrade != null ? !!o.crisisGrade : !!(need || degraded)
 
   // ==== PHASE B: UTILITY CHOICE among the calm-window activities ==========================
   // No crisis is owed. Now it is a genuine trade-off: shelter before dark, bootstrap missing infra,
@@ -440,12 +467,42 @@ function chooseActivity (snapshot, opts) {
   // silent "chose build/idle" x6 that preceded 90s of standing still. `standoff` is data on the
   // verdict, so the caller can stop re-selecting on a condition rather than on a timer.
   const standoff = best.score <= REFUSED_SCORE
-  const extra = Object.assign({}, best.bootstrap ? { bootstrap: best.bootstrap } : null, standoff ? { standoff: true, refusals: cands.filter(c => c.score <= REFUSED_SCORE).map(c => c.key + ': ' + c.reason) } : null,
+  const refusalList = () => [...(refusedMap ? refusedMap.entries() : [])].map(([k, v]) => k + ': ' + v).join('; ')
+  const standoffExtra = standoff ? { standoff: true, refusals: cands.filter(c => c.score <= REFUSED_SCORE).map(c => c.key + ': ' + c.reason) } : null
+
+  // ==== THE FLOOR: THE ARBITER IS A TOTAL FUNCTION (review D3 / §3.3) =======================
+  // Reached only when all four of these hold, which is case (c) above and nothing else:
+  //   - a crisis is live AND crisis-grade (case (b) is not this),
+  //   - every producer of an answer to it refused,
+  //   - no live SURVIVE-tier claim is already acting on it (case (a) is not this),
+  //   - and the winner of the utility phase is not itself a real survival answer - a refused
+  //     ladder that lands on nightShelter HAS answered the crisis, and calling that "unanswered"
+  //     was the third lie in this line (353 of the 847 were not even the build fallback).
+  // When it is reached, the terminal action RUNS. It cannot refuse - it carries no refuse() and
+  // the runner never gates it (reflexes.js TERMINAL) - so "every candidate refused" ceases to be
+  // a reachable outcome and CRISIS UNANSWERED below becomes a defect detector with target zero.
+  const crisisAnswered = best.cls === 'survival' && best.score > REFUSED_SCORE
+  const crisisUnanswered = crisisProducerRefused && crisisGrade && !survivalActor && !crisisAnswered
+  if (crisisUnanswered && !isRefused(reflexes.TERMINAL)) {
+    return mk(reflexes.TERMINAL, 'survival',
+      'TERMINAL: a crisis nobody will answer (' + refusalList() + ') - eating, freeing the body, abandoning the job and getting somewhere safe',
+      CRISIS_SCORE, Object.assign({ terminal: true }, standoffExtra))
+  }
+  // A crisis whose answer is ALREADY RUNNING, and a crisis that is not crisis-grade, are both
+  // legitimate - they get an honest line each instead of borrowing the alarm (#7).
+  const crisisHeld = crisisProducerRefused && survivalActor
+    ? 'crisis being answered by ' + (survivalActor.label || survivalActor.key) + ' (' + refusalList() + ') - meanwhile: '
+    : (crisisProducerRefused && !crisisGrade
+      ? 'crisis pending but not crisis-grade, so nothing may take the body (' + refusalList() + ') - continuing with: '
+      : '')
+  // ...which leaves CRISIS UNANSWERED meaning exactly ONE thing: the terminal action itself
+  // refused, which it has no way to do. If this line ever appears, a row is missing from the
+  // registry or someone gave the floor a refuse() - a wiring bug, and the line says so.
+  const crisisRefused = crisisUnanswered
+  const extra = Object.assign({}, best.bootstrap ? { bootstrap: best.bootstrap } : null, standoffExtra,
     crisisRefused ? { crisisRefused: true } : null)
   const reason = (standoff ? 'standoff - every candidate refused; settling on ' + (best.job || 'build/idle') + ': ' : '') +
-    // FIX 4: name it when a real crisis is live but its own producer said it cannot run. This is the
-    // single most important line in the log when the bot is dying and looks idle.
-    (crisisRefused ? 'CRISIS UNANSWERED (' + [...(refusedMap ? refusedMap.entries() : [])].map(([k, v]) => k + ': ' + v).join('; ') + ') - doing what i can instead: ' : '') +
+    (crisisRefused ? 'CRISIS UNANSWERED - THE TERMINAL ACTION ITSELF REFUSED (' + refusalList() + '), which is a wiring defect, not a valid outcome - doing what i can instead: ' : crisisHeld) +
     best.reason + (bonused ? ' [holding - making progress]' : '')
   return mk(best.job, best.cls, reason, best.effective, Object.keys(extra).length ? extra : null)
 }

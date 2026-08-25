@@ -170,7 +170,11 @@ t('no-op: the runner latches on the executor\'s verdict, not on the shape of its
   const src = srcOf('index.js')
   assert(!/NOOP_RE\s*=/.test(src.split('\n').filter(l => !/^\s*\/\//.test(l)).join('\n')), 'the prose regex is DELETED, not merely bypassed')
   assert(/if \(obj && r\.noOp === true\)/.test(src), 'the latch reads an explicit verdict off the result')
-  assert(/runner\.noOp\.clear\(\)/.test(src), 'and crisis vitals clear it, like every other stale back-off')
+  // (was: runner.noOp.clear(). The job-identity latch is DELETED - the executor's verdict is now
+  //  RECORDED against the place it was reached in (attempts.js), and the idle-with-work kick
+  //  forgets those records instead of clearing a Map. Same guarantee, one rule instead of two.)
+  assert(/attempts\.record\(jobKey, stepOf\(jobKey\), cell/.test(src), 'the verdict is recorded against (job, step, cell)')
+  assert(/attempts\.forgetAll/.test(src), 'and a stale-back-off kick clears it, like every other stale back-off')
 })
 
 t('no-op: an INTERRUPTED job never latches - not the ladder, not the food run', () => {
@@ -180,7 +184,17 @@ t('no-op: an INTERRUPTED job never latches - not the ladder, not the food run', 
   assert(/noOp: !r\.fed && !interrupted/.test(food), 'and latch only on a real world blocker')
   const ladder = String(reflexes.get('recoveryLadder').run)
   assert(/r\.reason === 'stopped'/.test(ladder), 'the ladder must exempt a stopped pass from its condition gate')
-  assert(/noOp: false/.test(ladder), 'and never arm the generic latch - runner.ladderBlock is its authority')
+  // WAS: assert(/noOp: false/.test(ladder), '...runner.ladderBlock is its authority'). That
+  // authority is DELETED (review D3 / §3.6): the ladder's bespoke signature latch and the generic
+  // job-identity one were one rule with two definitions, and BOTH re-armed only on a world change
+  // that a wedged bot cannot produce. The ladder now speaks the same vocabulary as every other row,
+  // from the same per-rung data it always used (r.progressed / r.blockedOn), and the memory it
+  // feeds is keyed by PLACE. What this test bought - an interrupted pass never latches - is
+  // unchanged and asserted harder: the exemption is pinned as an expression, not as a constant.
+  assert(/noOp: blocked/.test(ladder), 'the ladder arms the ONE memory, from its own data')
+  assert(/const blocked = !r\.done && !interrupted && r\.progressed === false/.test(ladder),
+    'and only when the pass ran to completion and truly moved nothing')
+  assert(!reflexes.get('recoveryLadder').refuse, 'the bespoke ladder gate is GONE, not bypassed')
 })
 
 t('no-op: every executor that CAN latch says so from data, not from a string it built', () => {
@@ -407,6 +421,138 @@ t('HOLD PREMISE: the TTL still bites regardless of premise', () => {
   reflexes._setNow(() => Date.now() + 5000)
   assert.strictEqual(reflexes.activeHold(() => true), null, 'an expired hold is not a hold, premise or not')
   reflexes._setNow(null)
+})
+
+// ============ CONTRACT 5 - a claim is a LEASE, not a boolean ==============================
+// The 2026-08-25 structural review's D2. `bodyOwner()` used to BE the registry: nine `if`s, first
+// match wins, no expiry and no heartbeat - so a promise abandoned by a supervising deadline held
+// the body until the process died. 2026-08-03 16:54:51 -> 20:10, 3h15m, 328 refusals citing a
+// corpse. These enumerate the lease against the things that must agree with it.
+const CLAIM_NOW = 1000000
+function claimClock (fn) {
+  let now = CLAIM_NOW
+  reflexes._setNow(() => now)
+  reflexes._resetClaims()
+  const step = ms => { now += ms; return now }
+  try { fn(step, () => now) } finally { reflexes._setNow(null); reflexes._resetClaims() }
+}
+
+t('5: the claim window is DERIVED from the supervisor, never a literal of its own', () => {
+  const src = srcOf('reflexes.js')
+  assert(/s\.SURVIVAL_FAIL_MS \+ s\.LATCH_GRACE_MS/.test(src) && /s\.PATIENT_FAIL_MS \+ s\.LATCH_GRACE_MS/.test(src),
+    'a claim is "this work is hung" asked of an owner instead of a job - the same verdict, so the same numbers (#4)')
+  assert.strictEqual(typeof scheduler.PATIENT_FAIL_MS, 'number', 'the patient window must be a NAME, not a literal inside watchdog()')
+  claimClock((step) => {
+    reflexes.syncClaims(['foodRun'], { now: CLAIM_NOW, driver: null, at: CLAIM_NOW })
+    const justUnder = step(scheduler.SURVIVAL_FAIL_MS + scheduler.LATCH_GRACE_MS - 1)
+    assert.strictEqual(reflexes.syncClaims(['foodRun'], { now: justUnder, driver: null, at: CLAIM_NOW }).revoked.length, 0, 'not one millisecond early')
+    const at = step(1)
+    assert.strictEqual(reflexes.syncClaims(['foodRun'], { now: at, driver: null, at: CLAIM_NOW }).revoked.length, 1, 'and not one late')
+  })
+})
+
+t('5: THE 16:54:51 ZOMBIE - an abandoned claim stops owning the body, and stops being cited', () => {
+  claimClock((step, now) => {
+    // the ladder abandons a secureFood rung on its deadline and advances; _securingFood is never lowered.
+    reflexes.syncClaims(['ladder', 'foodRun'], { now: now(), driver: 'ladder', at: now() })
+    assert.strictEqual(reflexes.claimOwner(), 'ladder')
+    let revoked = []
+    for (let i = 0; i < 40; i++) { const tt = step(10000); revoked = revoked.concat(reflexes.syncClaims(['ladder', 'foodRun'], { now: tt, driver: 'ladder', at: tt }).revoked) }
+    assert.deepStrictEqual(revoked.map(c => c.key), ['foodRun'], 'the ladder keeps producing, so ONLY the corpse expires')
+    assert.strictEqual(reflexes.claimOwner(), 'ladder', 'and the body belongs to the thing that is actually working')
+    assert(reflexes.claimInfo('foodRun').stalled, '"the owner is stuck" must be a readable fact, not an inference')
+    assert.strictEqual(reflexes.bodyRefusal('SURVIVE', reflexes.claimOwner(), { name: 'secureFood' }),
+      'the recovery ladder owns the body', 'the LIVE owner still refuses - this is not an amnesty')
+    reflexes.syncClaims(['foodRun'], { now: now(), driver: null, at: CLAIM_NOW }) // the ladder returns; only the corpse is left
+    assert.strictEqual(reflexes.claimOwner(), null, 'a revoked claim is not an owner (an expired hold is not a hold)')
+    assert.strictEqual(reflexes.bodyRefusal('SURVIVE', reflexes.claimOwner(), { name: 'secureFood' }), null,
+      '"a food run owns the body" x321 and "a food run IS this job" x44 both become unsayable')
+  })
+})
+
+t('5: evidence is credited to the DRIVER - a shared clock is what let the corpse live', () => {
+  claimClock((step, now) => {
+    reflexes.syncClaims(['foodRun', 'job'], { now: now(), driver: 'job', at: now() })
+    let revoked = []
+    for (let i = 0; i < 20; i++) { const tt = step(10000); revoked = revoked.concat(reflexes.syncClaims(['foodRun', 'job'], { now: tt, driver: 'job', at: tt }).revoked) }
+    assert.deepStrictEqual(revoked.map(c => c.key), ['foodRun'],
+      'a build that IS advancing must not renew the dead food latch sitting on top of it (the `held (busy building+securing food)` line, 110x)')
+    assert.strictEqual(reflexes.claimOwner(), 'job')
+  })
+})
+
+t('5: engine state is observed, never revoked - yanking the controls is the rescue path', () => {
+  claimClock((step) => {
+    let revoked = []
+    for (let i = 0; i < 80; i++) { const tt = step(10000); revoked = revoked.concat(reflexes.syncClaims(['walk', 'dig'], { now: tt, driver: null, at: 0 }).revoked) }
+    assert.deepStrictEqual(revoked, [], 'a pathfinder goal and a dig target are mineflayer state, not a promise\'s boolean')
+    assert.strictEqual(reflexes.claimOwner(), 'walk', 'they still own the body, exactly as before')
+  })
+})
+
+t('5: a latch that never comes down stays revoked; one that does gets a fresh lease', () => {
+  claimClock((step, now) => {
+    reflexes.syncClaims(['foodRun'], { now: now(), driver: null, at: now() })
+    const tt = step(200000)
+    assert.strictEqual(reflexes.syncClaims(['foodRun'], { now: tt, driver: null, at: CLAIM_NOW }).revoked.length, 1)
+    assert.strictEqual(reflexes.syncClaims(['foodRun'], { now: tt, driver: 'foodRun', at: tt }).owner, null,
+      'a corpse does not get a second lease off somebody else\'s evidence')
+    reflexes.syncClaims([], { now: tt, driver: null, at: tt })          // the `finally` finally ran
+    assert.strictEqual(reflexes.syncClaims(['foodRun'], { now: tt, driver: null, at: tt }).owner, 'foodRun',
+      'and the next REAL food run is a new claim with a clean window')
+  })
+})
+
+t('5: every revocable claim has a force-release owner, and the runner writes through the registry', () => {
+  // The tickgatetest.js invariant, applied to claims: a claim the registry can revoke but nothing
+  // can take the latch back from is a ghost that keeps answering `blocked on busy` at its own door.
+  const cmd = srcOf('commands.js')
+  const relStart = cmd.indexOf('function releaseBodyClaims')
+  const rel = cmd.slice(relStart, cmd.indexOf('\nfunction ', relStart + 1))
+  for (const o of reflexes.BODY_OWNERS) {
+    if (o.engine) continue
+    assert(rel.includes("'" + o.key + "'"), o.key + ' is revocable but releaseBodyClaims names no latch for it - a wiring hole, not a decision')
+  }
+  const idx = srcOf('index.js')
+  assert(/reflexes\.syncClaims\(up, \{ driver: drivingClaim\(up\), at: ev\.at \}\)/.test(idx),
+    'index.js bodyOwner must WRITE THROUGH the registry - a private `if (isX()) return` chain is the defect coming back')
+  assert(!/if \(commands\.isEscaping && commands\.isEscaping\(\)\) return 'escape'/.test(idx),
+    'the nine-boolean first-match-wins chain is deleted, not shadowed')
+})
+
+// ============ THE FLOOR: the runner half of §3.3's contract ================================
+// The core can only be a total function if the runner honours the row it lands on. Two lines in
+// index.js carry that, and both of them are the kind of line a later refactor deletes without
+// noticing, because nothing else breaks when they go - it just quietly becomes possible again for
+// a crisis to go 847 ticks unanswered.
+t('terminal: the runner NEVER refuses the floor, and the refusal check is the FIRST thing it does', () => {
+  const idx = srcOf('index.js')
+  const i = idx.indexOf('const candidateRefusal = (c, s) => {')
+  assert(i > 0, 'the one refusal path still exists')
+  const fn = idx.slice(i, i + 3500)
+  assert(/if \(p\.terminal\) return null/.test(fn), 'the floor is never refused, by any rule in this function')
+  // ...and BEFORE the ownership rule and the proposal's own refuse(), or "never refused" is a
+  // claim two branches above can already have broken.
+  assert(fn.indexOf('if (p.terminal) return null') < fn.indexOf('const ownerKey = bodyOwner()'),
+    'the terminal bypass must precede the body-ownership rule - it TAKES the body, it does not queue for it')
+  assert(fn.indexOf('if (p.terminal) return null') < fn.indexOf('attempts.futile('),
+    '...and precede attempt memory: a floor that can be remembered as futile is not a floor')
+})
+t('terminal: dispatching the floor takes the body rather than asking for it', () => {
+  const idx = srcOf('index.js')
+  const i = idx.indexOf('// 7. TAKE THE BODY')
+  assert(i > 0, 'the take-the-body step still exists')
+  const step = idx.slice(i, i + 2000)
+  assert(/if \(chosen\.terminal\) \{/.test(step), 'the floor has its own branch there')
+  assert(/releaseBodyClaims\('terminal action taking the body/.test(step),
+    'and it revokes the claims through the ONE release path, before the executor is even reached')
+})
+t('terminal: the core and the registry agree on the name, in one definition', () => {
+  assert.strictEqual(typeof reflexes.TERMINAL, 'string')
+  assert(reflexes.get(reflexes.TERMINAL), 'the exported name resolves to a row')
+  const coreSrc = srcOf('scheduler-core.js')
+  assert(/reflexes\.TERMINAL/.test(coreSrc), 'the core names it by the registry constant, never by a re-typed string (#4)')
+  assert(!/'terminalAction'/.test(coreSrc), 'a re-typed literal is how two layers drift apart')
 })
 
 console.log(`\nreflexes: ${pass} passed, ${fail} failed`)

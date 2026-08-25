@@ -52,6 +52,7 @@ const JUNK_RE = /^(rotten_flesh|spider_eye|poisonous_potato|flint|feather|egg|be
 // NEVER preempts progress/build (rank 1, tick admission, command-path stopMaintenance) and bails
 // on any survival need. MAINTAIN=0 -> the tick never dispatches this (defer-note restored).
 let _maintaining = false
+let _maintainingAt = 0 // when the latch went up; see maintainingSince()
 
 let _maintStop = false
 
@@ -63,9 +64,15 @@ function stopMaintenance () { _maintStop = true }
 // FORCE-release, for the watchdog's terminal rung only: stopMaintenance is COOPERATIVE (it sets a
 // flag the pass polls), and a hung await never polls anything. _maintaining then reports
 // 'maintenancePass' to activeJobInfo forever - which is what the watchdog chased for 4.5 hours.
-function releaseMaintainLatch () { const was = _maintaining; _maintaining = false; _maintStop = false; return was }
+function releaseMaintainLatch () { const was = _maintaining; _maintaining = false; _maintainingAt = 0; _maintStop = false; return was }
+// WHEN THIS LATCH WENT UP (2026-08-25, review item 1's handoff). The survival-latch jobs had no
+// startedAt at all, so survival-snapshot keyed them as 'maintenancePass@' - the SAME string on every
+// dispatch - and the work ledger could not tell run #1 from run #2: a re-dispatch inherited the
+// previous run's exhausted clock. The honest zero-mark is the instant the latch was raised, and
+// this is the only place that knows it.
+function maintainingSince () { return _maintaining ? _maintainingAt : 0 }
 
-function _setMaintaining (v) { _maintaining = !!v }
+function _setMaintaining (v) { _maintaining = !!v; _maintainingAt = _maintaining ? Date.now() : 0 }
 
 // dirt towers (operator: "a massive mess"). The patch layer remembers every self-placed
 // block; after a harvest, ride the tower back down and pocket the dirt.
@@ -207,8 +214,8 @@ async function spareKitToBank (bot, { isStopped = () => false, say = () => {} } 
 // Returns { ok, steps: [label...], reason } for the tick's one-line note.
 async function maintenancePass (bot, opts = {}) {
   if (_maintaining) return { ok: false, steps: [], reason: 'busy' }
-  _maintaining = true; _maintStop = false
-  touchP('maintenancePass') // S7 H5c: zero-idle at t0
+  _maintaining = true; _maintainingAt = Date.now(); _maintStop = false
+  touchP('maintenancePass') // S7 H5c: a BODY-clock mark. The job's zero-idle now comes from the work ledger re-basing on its key (telemetry.js) - it is no longer this line's job to fake it
   const say = opts.say || (() => {})
   const nightIndoorOnly = !!opts.nightIndoorOnly
   const opportunistic = !!opts.opportunistic // at-hut window during the build era: home-anchored steps only, and the safekeep build-guard is lifted (the caller paused the build and stands at the bank)
@@ -526,10 +533,10 @@ async function maintenancePass (bot, opts = {}) {
       try { const n = await litterPatrol(bot, home, { isStopped, say }); if (n) stepDone('litter(' + n + ')') } catch (e) { dbg('  maint: litterPatrol failed (' + e.message + ')') }
     }
     return { ok: true, steps, reason: steps.length ? steps.join('+') : 'nothing due' }
-  } finally { _maintaining = false }
+  } finally { _maintaining = false; _maintainingAt = 0 }
 }
 
 module.exports = {
   setDebugSink,
-  JUNK_RE, _maintaining, _maintStop, isMaintaining, stopMaintenance, releaseMaintainLatch, _setMaintaining, cleanupScaffold, dumpJunk, safekeepSweep, spareKitToBank, maintenancePass
+  JUNK_RE, _maintaining, _maintStop, isMaintaining, maintainingSince, stopMaintenance, releaseMaintainLatch, _setMaintaining, cleanupScaffold, dumpJunk, safekeepSweep, spareKitToBank, maintenancePass
 }

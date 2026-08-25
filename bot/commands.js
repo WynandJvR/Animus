@@ -41,7 +41,7 @@ const telemetry = require('./telemetry.js') // activity/outcome/progress/checkli
 const grave = require('./grave.js') // the death LEDGER + carried-items snapshot (grave-policy.js holds the pure decisions)
 const resumeStore = require('./resume-store.js') // the saved-build FILE + pause timing + finish disposition (the build latches stay here)
 const { persistResume, clearPersistedResume, persistedResume, markResumePaused, resumeHoldRemaining, finishDisposition } = resumeStore
-const { activityInfo, beginActivity, endActivity, recordOutcome, touchProgress, progressInfo, markStalled, _resetProgress, recentOutcomes, checklistBegin, checklistStep, JOB_STEPS } = telemetry
+const { activityInfo, beginActivity, endActivity, recordOutcome, touchProgress, progressInfo, jobProgress, suppressJobIdle, advanceInfo, markStalled, _resetProgress, recentOutcomes, checklistBegin, checklistStep, JOB_STEPS } = telemetry
 const GoalNearXZBanded = navLeg.makeGoalNearXZBanded(goals.Goal) // Y-aware drop-in for goals.GoalNearXZ (NAV_HAZARD_LEGS)
 const NAV_HAZARD_LEGS = process.env.NAV_HAZARD_LEGS !== '0' // NAV Phase B (default ON): Y-band the trek leg goal + price lava in travelMovements; =0 => today's Y-blind GoalNearXZ + no lava cost, byte-for-byte
 const WATER_SAFE = process.env.WATER_SAFE !== '0' // task #45 (default ON): price OVER-THE-HEAD water in travelMovements so legs route around a pond aquifer (shallow water stays free -> farm/fishing reachable); =0 => no water cost, byte-for-byte
@@ -2464,7 +2464,7 @@ function setBuildReqActive (v) { buildReqActive = !!v }
 //
 // The condition that actually matters is "is the work behind this claim still making verified
 // progress", and the watchdog ALREADY measures precisely that - on real world events
-// (itemDelta / moved8b), escalating NUDGE -> FAIL-JOB -> GIVEUP. Its terminal rung exists to say
+// (itemDelta / newGround), escalating NUDGE -> FAIL-JOB -> GIVEUP. Its terminal rung exists to say
 // "this job is hung, take the body back", and it was already the ONE owner of that decision. It
 // simply never finished the job: it cleared the pathfinder goal and left the claim set, so
 // isBusy() stayed true and the scheduler still could not dispatch (51 minutes of nothing,
@@ -2475,20 +2475,30 @@ function claimStamp (which) { claimAt[which] = Date.now() }
 function isBusy () { return building || provisioning || buildReqActive }
 
 // Release every exclusive claim on the body. Every caller is a TERMINAL verdict that an executor
-// has been abandoned - never a timeout on a job that is merely slow. As of 2026-08-02 there are
-// three, and they are the three places that already decided exactly that:
+// has been abandoned - never a timeout on a job that is merely slow. As of 2026-08-25 there are
+// four, and they are the four places that already decided exactly that:
 //   index.js revokeDispatch      the dispatch lease expired (600s) or the giveup rung revoked it -
 //                                the slot is gone, and this is the OTHER record of the same claim
 //   index.js watchdog GIVEUP     the hung job held no slot, after the full verified-progress ladder
 //   index.js tick-gate deadline  a tick gate held the chooser out for TICK_STALE_MS uninterrupted,
 //                                after the log had named this function as its owner for 90s at a time
+//   index.js revokeClaim         ONE body claim's lease expired - it produced no world delta for
+//                                the same window the supervisor calls a job hung (reflexes.syncClaims)
 // Returns what it actually released, for an honest log line.
-function releaseBodyClaims (why) {
+//
+// `opts.only` = the claim keys (reflexes.BODY_OWNERS) this release is about. THE OWNERS TABLE IS
+// STILL THE ONE TABLE - a per-claim revocation must not be a second, drifting copy of it (#4), and
+// it must not be a blanket one either: taking down `securingFood` because a food run died is right,
+// taking down a live maintenance pass with it is the whack-a-mole this file has already paid for.
+// Omit it and this is the whole-body release it has always been, byte for byte.
+function releaseBodyClaims (why, opts = {}) {
+  const only = Array.isArray(opts.only) && opts.only.length ? opts.only : null
+  const want = k => !only || only.includes(k)
   const held = []
   const now = Date.now()
-  if (building) { held.push('building' + (claimAt.building ? '(' + Math.round((now - claimAt.building) / 1000) + 's)' : '')); building = false }
-  if (provisioning) { held.push('provisioning' + (claimAt.provisioning ? '(' + Math.round((now - claimAt.provisioning) / 1000) + 's)' : '')); provisioning = false }
-  if (buildReqActive) { held.push('buildReqActive' + (claimAt.buildReqActive ? '(' + Math.round((now - claimAt.buildReqActive) / 1000) + 's)' : '')); buildReqActive = false }
+  if (want('job') && building) { held.push('building' + (claimAt.building ? '(' + Math.round((now - claimAt.building) / 1000) + 's)' : '')); building = false }
+  if (want('job') && provisioning) { held.push('provisioning' + (claimAt.provisioning ? '(' + Math.round((now - claimAt.provisioning) / 1000) + 's)' : '')); provisioning = false }
+  if (want('job') && buildReqActive) { held.push('buildReqActive' + (claimAt.buildReqActive ? '(' + Math.round((now - claimAt.buildReqActive) / 1000) + 's)' : '')); buildReqActive = false }
   // ROOT H 2026-08-02: ...and this module's OWN two latches of the same shape, which this rung
   // had never released. `escaping` (:99) is set at :301/:332 and cleared only in a finally;
   // `recovering` (:97) is the recover mutex at :1244, same shape. The finding that made this
@@ -2497,8 +2507,8 @@ function releaseBodyClaims (why) {
   // cannot stall the chooser and missing the one that can. A hung await inside either span leaves
   // the tick returning early forever, which is exactly what was measured live (tick fresh,
   // schedLastPick 412s stale).
-  if (escaping) { held.push('escaping'); escaping = false }
-  if (recovering) { held.push('recovering'); recovering = false }
+  if (want('escape') && escaping) { held.push('escaping'); escaping = false }
+  if (!only && recovering) { held.push('recovering'); recovering = false } // the `recover` mutex raises no body-owner claim of its own - whole-body releases only
   // ...and the PROVISION-SIDE job latches. These are the same defect in three more modules:
   // `_maintaining`/`_securingFood`/`_recoveringHp`/`_resting`/`_recoveringDegraded` are each set
   // true and cleared in a `finally` that a hung await never reaches. They are NOT part of
@@ -2512,21 +2522,26 @@ function releaseBodyClaims (why) {
   // silent skip: the day a name stops being re-exported, this rung quietly releases nothing and
   // the ghost comes back. Requiring the owner makes a missing function a loud TypeError instead.
   // Inline requires - this runs inside a function, so there is no load-order cycle.
+  //   fourth column = the body-owner claim key(s) this entry's latches raise, so `opts.only` can
+  //   name one lease without disturbing the others. The filter is also PASSED THROUGH to the
+  //   release function: provision-recovery owns two distinct claims (the ladder and the shelter)
+  //   behind one call, and releasing both because one died would be a new bug of the old shape.
   const owners = [
-    ['./provision-maintain.js', 'releaseMaintainLatch', 'maintaining'],
-    ['./provision-food.js', 'releaseFoodLatch', 'securingFood'],
-    ['./provision-recovery.js', 'releaseRecoveryLatches', 'recovery/resting'],
+    ['./provision-maintain.js', 'releaseMaintainLatch', 'maintaining', ['maintain']],
+    ['./provision-food.js', 'releaseFoodLatch', 'securingFood', ['foodRun']],
+    ['./provision-recovery.js', 'releaseRecoveryLatches', 'recovery/resting', ['ladder', 'shelter']],
     // ROOT H: navigate's recoveringDepth/forceUnsticking are the two remaining tick gates this
     // rung could not reach. Same contract as the three above - the OWNING module exports the
     // release, so a rename is a loud TypeError here rather than a silent skip.
-    ['./navigate.js', 'releaseNavLatches', 'nav-recovering/force-unstick']
+    ['./navigate.js', 'releaseNavLatches', 'nav-recovering/force-unstick', ['navRecovery']]
   ]
-  for (const [mod, fn, label] of owners) {
-    try { if (require(mod)[fn]()) held.push(label) } catch {}
+  for (const [mod, fn, label, keys] of owners) {
+    if (only && !keys.some(want)) continue
+    try { if (require(mod)[fn](only)) held.push(label) } catch {}
   }
   if (!held.length) return null
-  claimAt = { building: 0, provisioning: 0, buildReqActive: 0 }
-  try { telemetry.clearActivity(why) } catch {}
+  if (want('job')) claimAt = { building: 0, provisioning: 0, buildReqActive: 0 }
+  if (!only) { try { telemetry.clearActivity(why) } catch {} } // one dead claim is not proof the ACTIVITY label is dead; that verdict has its own owner (the watchdog's terminal rung)
   try { logFn('(claim) released ' + held.join(', ') + ' - ' + (why || 'hung promise') + '; the finally never ran, so the body was never handed back') } catch {}
   return held.join(', ')
 }
@@ -3506,4 +3521,4 @@ async function resumeBuild (bot) {
   }
 }
 
-module.exports = { handle, state, setupMovements, travelMovements, eatFood, placeTorchNearby, isBusy, releaseBodyClaims, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume, flagSpawnSuspect, worthwhileGrave, shouldChaseGrave, graveLootVerdict, gravesSnapshot, graveUrgency, graveCompare, equipCarriedArmor, activityInfo, preemptForSurvival, setDebugSink, finishDisposition, resumeHoldRemaining, markResumePaused, touchProgress, progressInfo, markStalled, _resetProgress, recentOutcomes, setPostDeathRecovery, isPostDeathRecovery, clearPostDeathRecovery, postDeathRecoveryHeldMs }
+module.exports = { handle, state, setupMovements, travelMovements, eatFood, placeTorchNearby, isBusy, releaseBodyClaims, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume, flagSpawnSuspect, worthwhileGrave, shouldChaseGrave, graveLootVerdict, gravesSnapshot, graveUrgency, graveCompare, equipCarriedArmor, activityInfo, preemptForSurvival, setDebugSink, finishDisposition, resumeHoldRemaining, markResumePaused, touchProgress, progressInfo, jobProgress, suppressJobIdle, advanceInfo, markStalled, _resetProgress, recentOutcomes, setPostDeathRecovery, isPostDeathRecovery, clearPostDeathRecovery, postDeathRecoveryHeldMs }

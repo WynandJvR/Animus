@@ -57,16 +57,47 @@ t('(a) trackTick: a 3b circle for 60 ticks -> ZERO touches (displacement-from-an
   assert.strictEqual(touchedSinceReset(), false, 'a bot pacing a 3b circle must never touch progress')
 })
 
-t('(a) trackTick: a 9b step -> exactly one moved8b touch + re-anchor', () => {
+t('(a) trackTick: a 9b step -> exactly one newGround touch + re-anchor', () => {
   const items = [{ name: 'cobblestone', count: 10 }]
-  commands.trackTick(stubBot(new Vec3(200, 64, 200), items)) // prime the anchor at 200,200
+  commands.trackTick(stubBot(new Vec3(200, 64, 200), items)) // prime the trail at 200,200
   commands._resetProgress()
-  commands.trackTick(stubBot(new Vec3(209, 64, 200), items)) // 9b east -> >= 8 -> touch
-  assert.strictEqual(commands.progressInfo().by, 'moved8b', 'a 9b displacement touches moved8b')
+  commands.trackTick(stubBot(new Vec3(209, 64, 200), items)) // 9b east -> >= 8 from every anchor -> touch
+  assert.strictEqual(commands.progressInfo().by, 'newGround', 'a 9b displacement onto unvisited ground touches newGround')
   // re-anchored at the new spot: a further 3b (total 12 from the OLD anchor, only 3 from the new) must NOT touch
   commands._resetProgress()
   commands.trackTick(stubBot(new Vec3(212, 64, 200), items))
   assert.strictEqual(touchedSinceReset(), false, 'the anchor moved to 209 - a further 3b does not touch (proves re-anchor)')
+})
+
+// ==== THE RATCHET: RE-TREADING IS NOT PROGRESS (2026-08-25, review §3.1) ========================
+// The single anchor above killed spinning inside an 8b pocket - the only case it was built for -
+// but it paid an A<->B shuttle on EVERY lap, because B is always 8b from A. The terminal 2026-08-03
+// hang oscillated at 2b and so never collected on it, but a wider shuttle would have, and the
+// watchdog cannot be allowed to accept a lap as an advance. So the anchor is now a TRAIL: a stamp
+// requires the step to be new ground relative to EVERY remembered anchor.
+t('(a) trackTick: an A<->B shuttle over 9b legs stamps ONCE, not once per leg', () => {
+  const items = [{ name: 'cobblestone', count: 10 }]
+  const A = new Vec3(400, 64, 400)
+  const B = new Vec3(409, 64, 400)
+  commands.trackTick(stubBot(A, items)) // prime the trail at A
+  commands._resetProgress()
+  commands.trackTick(stubBot(B, items)) // A -> B is genuinely new ground: one stamp
+  assert.strictEqual(commands.progressInfo().by, 'newGround', 'the first leg out IS new ground')
+  commands._resetProgress()
+  for (let i = 0; i < 10; i++) { commands.trackTick(stubBot(A, items)); commands.trackTick(stubBot(B, items)) }
+  assert.strictEqual(touchedSinceReset(), false, 'ten laps over ground already walked must be worth exactly zero')
+})
+
+t('(a) trackTick: ...and real travel still stamps every leg', () => {
+  const items = [{ name: 'cobblestone', count: 10 }]
+  commands.trackTick(stubBot(new Vec3(600, 64, 600), items))
+  let stamps = 0
+  for (let i = 1; i <= 10; i++) {
+    commands._resetProgress()
+    commands.trackTick(stubBot(new Vec3(600 + 9 * i, 64, 600), items)) // a straight line away
+    if (commands.progressInfo().by === 'newGround') stamps++
+  }
+  assert.strictEqual(stamps, 10, 'a trek onto unvisited ground must keep the job clock alive every leg')
 })
 
 // ---- (b) item-count delta ----------------------------------------------------------------------

@@ -744,14 +744,15 @@ async function deadlockSuicideReset (bot, { isStopped = () => false, say = () =>
 }
 
 let _recoveringHp = false
+let _recoveringHpAt = 0
 
 async function recoverHp (bot, opts = {}) {
   const isStopped = () => S().isSurvStopped() || (opts.isStopped ? opts.isStopped() : false) // S7: fold the watchdog latch into the abort poll
   const say = opts.say || (() => {})
   const resumeHp = opts.resumeHp != null ? opts.resumeHp : 16
   if (_recoveringHp) return false
-  _recoveringHp = true
-  S().clearSurvStop(); touchP('recoverHp') // S7 H5c: per-dispatch latch clear + zero-idle at t0
+  _recoveringHp = true; _recoveringHpAt = Date.now()
+  S().clearSurvStop(); touchP('recoverHp') // S7 H5c: per-dispatch latch clear. The stamp is now a BODY-clock mark only - the job's zero-idle comes from the work ledger re-basing on its key (telemetry.js)
   try {
     try { bot.pathfinder.setGoal(null) } catch {}
     // regen needs food>=18 - eat FIRST so the hold below actually heals.
@@ -777,12 +778,13 @@ async function recoverHp (bot, opts = {}) {
       await new Promise(r => setTimeout(r, 2000))
     }
     return (bot.health ?? 20) >= resumeHp
-  } finally { _recoveringHp = false }
+  } finally { _recoveringHp = false; _recoveringHpAt = 0 }
 }
 
 function isRecoveringHp () { return _recoveringHp }
 
 let _resting = false
+let _restingAt = 0
 
 // HOLD until the night is survived: a nightRest attempt returns false when another flow
 // already holds the shelter lock (the idle reflex sealed a pit while a resume was booting)
@@ -919,8 +921,8 @@ async function sleepInBedHere (bot, { say = () => {}, isStopped = () => false } 
 }
 
 async function nightRest (bot, opts = {}) {
-  _resting = true
-  try { return await nightRestInner(bot, opts) } finally { _resting = false }
+  _resting = true; _restingAt = Date.now()
+  try { return await nightRestInner(bot, opts) } finally { _resting = false; _restingAt = 0 }
 }
 
 async function nightRestInner (bot, opts = {}) {
@@ -1397,6 +1399,11 @@ const RUNG_POLL_MS = 1000 // the clock's own resolution; it reads two timestamps
 async function boundedRung (bot, label, baseStopped, run, opts = {}) {
   const noProgressMs = opts.noProgressMs != null ? opts.noProgressMs : RUNG_NOPROGRESS_MS
   const now = opts.now || (() => Date.now())
+  // NOTE which clock this is (2026-08-25): bodyProgress.at, the BODY clock - ANY touch, including
+  // the new-ground ratchet. That is the right one HERE: the question a rung asks is "is the body
+  // still doing something", not "is the job advancing" (the supervisor's question, which now reads
+  // the per-job work ledger). A rung that walks for three minutes is a rung doing its job; a rung
+  // shuttling inside an 8b pocket stamps nothing and gets cut, which is what this deadline is for.
   const progressAt = opts.progressAt || (() => { try { return require('./commands.js').progressInfo().at } catch { return now() } })
   const heldNow = opts.heldNow || (() => { try { return !!reflexes.activeHold() } catch { return false } })
   let cut = false
@@ -1556,6 +1563,7 @@ async function recoveryReadyNow (bot) {
 }
 
 let _recoveringDegraded = false
+let _recoveringDegradedAt = 0
 
 // RECOVER FROM DEGRADED (S5): the survival-class orchestrator that EXECUTES scheduler.recoveryPlan.
 // Loops { s = schedulerState; exit on ladderDone/isStopped/deadline; plan = recoveryPlan(s); take
@@ -1566,8 +1574,8 @@ let _recoveringDegraded = false
 // sequencing), no new dig/place, no buildAbort/resumeJob touching. Returns { done, rungs, reason }.
 async function recoverFromDegraded (bot, { isStopped = () => false, say = () => {}, maxMs = Number(process.env.RECOVERY_MAX_MS || 900000), reason } = {}) {
   if (_recoveringDegraded) return { done: false, rungs: [], reason: 'busy' }
-  _recoveringDegraded = true
-  S().clearSurvStop(); touchP('recoverFromDegraded') // S7 H5c: per-dispatch latch clear + zero-idle at t0
+  _recoveringDegraded = true; _recoveringDegradedAt = Date.now()
+  S().clearSurvStop(); touchP('recoverFromDegraded') // S7 H5c: per-dispatch latch clear. The stamp is now a BODY-clock mark only - the job's zero-idle comes from the work ledger re-basing on its key (telemetry.js)
   const rungs = []
   const tried = new Set()
   const deadline = Date.now() + maxMs
@@ -1575,8 +1583,12 @@ async function recoverFromDegraded (bot, { isStopped = () => false, say = () => 
   // AUDIT FIX 3: a pass must be able to tell "ran and achieved nothing" from "ran and recovered".
   // It could not, so `NOT recovered (all rungs tried)` was re-dispatched every 60s against an
   // unchanged world, forever (audit §1 LOOP B). `gained` is the honest measure; `blockedOn` is the
-  // condition that has to change before another pass could do better; `sig` is what the tick
-  // compares to decide whether anything relevant HAS changed.
+  // condition that has to change before another pass could do better.
+  // (`sig` - a recoverySignature of the pass's exit state - used to ride along here too, and it
+  //  was the ONE input to the ladder's own anti-loop gate. That gate is deleted, D3/§3.6: the
+  //  signature has no position in it, so a wedged bot's key could not move and the ladder latched
+  //  itself off permanently. The verdict below is unchanged and now feeds attempt memory, which is
+  //  keyed by PLACE; nothing reads the signature from here any more, so it stops being computed.)
   let entry = null
   const gainOf = (a, b) => !a || !b ? true : (
     (b.food || 0) > (a.food || 0) || (b.hp || 0) > (a.hp || 0) ||
@@ -1586,11 +1598,9 @@ async function recoverFromDegraded (bot, { isStopped = () => false, say = () => 
   const stalled = (s) => {
     let blockedOn = 'blocked'
     try { blockedOn = scheduler.ladderBlocker(s) } catch {}
-    let sig = ''
-    try { sig = scheduler.recoverySignature(s) } catch {}
     const progressed = gainOf(entry, s)
     if (!progressed) dbg('(ladder) NO PROGRESS this pass - blocked on ' + blockedOn + ': ' + scheduler.blockerText(blockedOn))
-    return { progressed, blockedOn, sig }
+    return { progressed, blockedOn }
   }
   try {
     while (true) {
@@ -1724,15 +1734,39 @@ async function recoverFromDegraded (bot, { isStopped = () => false, say = () => 
       rungs.push(label)
       touchP('ladderRung') // S7 H5a: a bounded, live-verified rung completed
     }
-  } finally { _recoveringDegraded = false }
+  } finally { _recoveringDegraded = false; _recoveringDegradedAt = 0 }
 }
 
 function isRecoveringDegraded () { return _recoveringDegraded }
 // FORCE-release (watchdog terminal rung only) - see releaseMaintainLatch.
-function releaseRecoveryLatches () { const was = _recoveringDegraded || _recoveringHp || _resting || _sheltering; _recoveringDegraded = false; _recoveringHp = false; _resting = false; _sheltering = false; return was }
+// `only` = the body-owner claim keys the caller is revoking (commands.releaseBodyClaims' owners
+// table passes its filter straight through). This module is the one release site that backs TWO
+// distinct claims - the recovery LADDER and the night SHELTER - and taking both down because one
+// of them died would be a fresh instance of the coarse-release bug the claim registry exists to
+// end. Omitted -> the whole-body release it has always been, byte for byte. `_recoveringHp` raises
+// no body-owner claim at all, so only a whole-body release reaches it.
+function releaseRecoveryLatches (only) {
+  const want = k => !Array.isArray(only) || !only.length || only.includes(k)
+  const all = !Array.isArray(only) || !only.length
+  let was = false
+  if (want('ladder') && _recoveringDegraded) { _recoveringDegraded = false; _recoveringDegradedAt = 0; was = true }
+  if (all && _recoveringHp) { _recoveringHp = false; _recoveringHpAt = 0; was = true }
+  if (want('shelter') && (_resting || _sheltering)) { _resting = false; _restingAt = 0; _sheltering = false; was = true }
+  return was
+}
+
+// WHEN THIS LATCH WENT UP (2026-08-25, review item 1's handoff). The survival-latch jobs had no
+// startedAt at all, so survival-snapshot keyed them as '<latch>@' - the SAME string on every
+// dispatch - and the work ledger could not tell run #1 from run #2: a re-dispatch inherited the
+// previous run's exhausted clock. The honest zero-mark is the instant the latch was raised, and
+// this is the only place that knows it.
+function recoveringHpSince () { return _recoveringHp ? _recoveringHpAt : 0 }
+function restingSince () { return _resting ? _restingAt : 0 }
+function recoveringDegradedSince () { return _recoveringDegraded ? _recoveringDegradedAt : 0 }
 
 module.exports = {
   setDebugSink,
+  recoveringHpSince, restingSince, recoveringDegradedSince,
   DEADLOCK_HP, DEADLOCK_MAX_NOFOOD, DEADLOCK_FAILS, DEADLOCK_RESET_SOFT, SUICIDE_PILLAR_WORKS, noteDeadlockAttempt, noteDeadlockReset, migrateDeadlockCounter, deadlockResetDue, deadlockResetState, ensurePillarFiller, deadlockDieByFall, suicideByPitDrop, deadlockFallbackDeath, deadlockSuicideReset, _recoveringHp, recoverHp, isRecoveringHp, _resting, restUntilSafe, isResting, sleepInBedHere, nightRest, nightRestInner, boundedHold, sleepableNow, ensureSpawnBed, recoverSpawnAnchor, homeRecoveryDecision, recoverHome, RUNG_EXECUTORS, recoveryReadyNow, _recoveringDegraded, recoverFromDegraded, isRecoveringDegraded, releaseRecoveryLatches,
   boundedRung, RUNG_NOPROGRESS_MS
 }

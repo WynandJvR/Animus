@@ -80,54 +80,100 @@ t('THE DERIVED CEILINGS ARE TRUE AGAIN: nav and the ladder budget to the number 
   }
 })
 
-// ---- N2: the leg reports the movement it already verified --------------------------------
-t('THE LEG PROVED IT MOVED: the nav ladder stamps its OWN world verdict, once, and only on `ok`', () => {
+// ---- N2: THE LEG MAY NOT WRITE ITS OWN REPORT CARD (rewritten 2026-08-25) ----------------
+// N2's original fix was a stamp in navigate.recoverOnce: `if (ok) touchP('navRung:' + step.kind)`,
+// so a leg grinding through nudge/stepout rungs told the supervisor it was alive. It worked, and
+// then it killed the bot. 2026-08-03 16:54 -> 20:10, wedged one block from its own hut:
+//   (watchdog) position FROZEN ~195s at (190,69,-100) - forcing an escape
+//   [nav] recovery: step-out 2 cell(s) toward 192,-100  -> stepout -> MOVED
+//   [nav] recovery: step-out 2 cell(s) toward 190,-100  -> stepout -> MOVED
+//   (wd) NUDGE autobuild - no verified progress for ~121s - marking stalled
+// The freeze watchdog fires at 195s and the job watchdog's fail rung is at 240s, so the rescue
+// reset the job clock 45 SECONDS before it could fire - 32 times on an exact 4-minute period, zero
+// FAIL-JOB in the last 4h15m, and the process died "continuing" a build that had not moved.
+// The seam was never nav's patience; it was that ONE progress cell answered two questions. It no
+// longer does (telemetry.js): the BODY clock takes any touch, the per-job WORK LEDGER takes only a
+// world-state delta - production, or NEW GROUND. A leg that gets somewhere keeps its job alive
+// through the ratchet, which is evidence the rescuer cannot manufacture; a leg shuttling inside a
+// pocket keeps nothing alive, and being failed is the correct verdict for it.
+t('THE STAMP IS GONE: nav may not touch the progress clock at all', () => {
   const nav = fs.readFileSync(path.join(__dirname, 'navigate.js'), 'utf8')
-  const i = nav.indexOf('async function recoverOnce')
-  assert(i > 0, 'recoverOnce exists')
-  const body = nav.slice(i, nav.indexOf('\n// ---- THE entry point', i))
-  assert(/if \(ok\) touchP\('navRung:' \+ step\.kind\)/.test(body),
-    'the stamp must hang off the ladder\'s own verified verdict (`ok`), inside recoverOnce')
-  assert.strictEqual((nav.match(/touchP\('navRung/g) || []).length, 1,
-    'ONE definition: every escalator (navigateToInner / walkStaged / the freeze watchdog) runs this ladder')
-  // A record written from an ATTEMPT instead of from EVIDENCE is the defect that blinded the
-  // watchdog for 5.5 hours on 2026-07-31. There must be no unconditional stamp anywhere in nav.
-  assert(!/^\s*touchP\('navRung/m.test(nav), 'an unconditional nav stamp would feed the witness while frozen')
-  assert(/const touchP = tag => \{ try \{ require\('\.\/commands\.js'\)\.touchProgress\(tag\)/.test(nav),
-    'the house touchP pattern - lazy + swallowed, so telemetry can never fail a navigation')
-  // AND NOT A HOLD. A declared hold would vouch for a DEAD leg until its TTL and would stand the
-  // whole watchdog down (index.js returns early on activeHold) - including the cycle detector and
-  // the position-freeze watchdog. An event has no TTL to outlive the leg.
+  assert(/async function recoverOnce/.test(nav), 'recoverOnce still exists')
+  assert(!/^\s*if \(ok\) touchP\('navRung/m.test(nav), 'the rescue stamp is back - that is the 4-hour hang')
+  assert(!/^\s*const touchP = /m.test(nav), 'no progress sink in navigate.js: a rescuer may not vouch for the job it is rescuing')
+  assert(!/touchProgress/.test(nav.replace(/\/\/.*$/gm, '')), 'no live touchProgress call anywhere in nav (comments explaining the deletion are fine)')
+  // AND STILL NOT A HOLD (the original N2 pin, unchanged). A declared hold would vouch for a DEAD
+  // leg until its TTL and stand the whole watchdog down - index.js returns early on activeHold,
+  // taking the cycle detector and the position-freeze watchdog with it.
   assert(!/beginHold\(/.test(nav), 'a nav leg must not declare a hold - stillness is not what it is doing')
 })
 
-t('THE HANG IS STILL CAUGHT: a leg that verifies nothing ages exactly as before', () => {
-  // The stamp is an event, so "alive" ends the instant the rungs stop verifying movement. Model
-  // it on the pure watchdog: a job whose last stamp was at t0 is nudged and failed on schedule
-  // no matter how long the leg claims to have been running.
-  const hung = { startedAt: 0, lastProgressAt: 0, cls: 'survival' }
-  assert.strictEqual(S.watchdog(hung, CRISIS, S.SURVIVAL_NUDGE_MS), 'nudge')
-  assert.strictEqual(S.watchdog(hung, CRISIS, S.SURVIVAL_FAIL_MS), 'fail-job')
-  // ...and a rung that verified movement 1ms ago re-bases it, which is the whole point.
-  const alive = { startedAt: 0, lastProgressAt: S.SURVIVAL_FAIL_MS - 1, cls: 'survival' }
-  assert.strictEqual(S.watchdog(alive, CRISIS, S.SURVIVAL_FAIL_MS), 'ok')
+t('THE RATCHET IS THE WITNESS NOW: new ground advances the ledger, re-tread does not', () => {
+  telemetry._resetProgress()
+  const p0 = telemetry.progressInfo()
+  telemetry.touchProgress('newGround')
+  assert.strictEqual(telemetry.progressInfo().advanceCount, p0.advanceCount + 1, 'new ground IS an advance')
+  assert.strictEqual(telemetry.progressInfo().workCount, p0.workCount,
+    'but it is not PRODUCTION - cycle-detect excludes on workCount and must still see a work-free shuttle')
 })
 
-t('ESCAPING IS NOT PRODUCING: a nav stamp clears the stall clock but never bumps workCount', () => {
+t('ESCAPING IS NOT PRODUCING, AND IT IS NOT PROGRESS EITHER', () => {
   telemetry._resetProgress()
-  telemetry.touchProgress('begin:secureFood')
-  const w0 = telemetry.progressInfo().workCount || 0
+  const before = telemetry.progressInfo()
   telemetry.markStalled()
   assert.strictEqual(telemetry.progressInfo().stalled, true)
-  telemetry.touchProgress('navRung:stepout')
+  telemetry.touchProgress('navRung:stepout') // the tag the deleted stamp used
   const p = telemetry.progressInfo()
-  assert.strictEqual(p.by, 'navRung:stepout', 'the clock records WHAT moved it')
-  assert.strictEqual(p.stalled, false, 'a verified rung means the body is not frozen')
-  assert.strictEqual(p.workCount || 0, w0,
-    'a recovery rung is escape work, not production - cycle-detect excludes on workCount and must still see an A<->B loop')
-  // by contrast, real production does bump it (the tag family this deliberately stays out of)
+  assert.strictEqual(p.by, 'navRung:stepout', 'the BODY clock still records WHAT moved it')
+  assert.strictEqual(p.stalled, true, 'a rescue rung must NOT clear the nudge marker - that is what laundered the hang')
+  assert.strictEqual(p.advanceCount, before.advanceCount, 'a rescue rung is not an advance')
+  assert.strictEqual(p.workCount, before.workCount, 'nor production')
+  // by contrast, real production is both
   telemetry.touchProgress('harvest')
-  assert.strictEqual(telemetry.progressInfo().workCount, w0 + 1, 'harvest is production')
+  const q = telemetry.progressInfo()
+  assert.strictEqual(q.workCount, before.workCount + 1, 'harvest is production')
+  assert.strictEqual(q.advanceCount, before.advanceCount + 1, '...and therefore an advance')
+  assert.strictEqual(q.stalled, false, '...and it clears the marker')
+})
+
+t('THE LEDGER IS PER JOB: a fresh key starts at its OWN startedAt, and only an advance moves it', () => {
+  telemetry._resetProgress()
+  const started = Date.now() - 60000
+  const a = telemetry.jobProgress('autobuild@' + started, started)
+  assert.strictEqual(a.at, started, 'a job entered without any stamp starts its clock at startedAt, not at "now"')
+  telemetry.touchProgress('navRung:stepout')
+  assert.strictEqual(telemetry.jobProgress('autobuild@' + started, started).at, started,
+    'a rescue may not re-base the job it is rescuing - this is the 2026-08-03 hang, asserted')
+  telemetry.touchProgress('placed')
+  assert(telemetry.jobProgress('autobuild@' + started, started).at > started, 'a verified place does re-base it')
+  // ...and the next job does not inherit it
+  const later = Date.now()
+  assert.strictEqual(telemetry.jobProgress('secureFood@', null).at <= later + 5, true, 'a different key gets its own entry')
+})
+
+t('A RE-DISPATCH IS A NEW JOB: the survival latches share one key, so the entry must be closed', () => {
+  // 'secureFood@' is the same string on every dispatch (a latch job has no startedAt). Without the
+  // close-on-idle below, run #2 would arrive holding run #1's exhausted clock and fail instantly -
+  // which is what the deleted `zero-idle at t0` stamps were compensating for, from a global cell.
+  telemetry._resetProgress()
+  const first = telemetry.jobProgress('secureFood@', null).at
+  telemetry.jobProgress(null, null) // activeJobInfo's no-job path: the run ended
+  const second = telemetry.jobProgress('secureFood@', null).at
+  assert(second >= first, 'the second dispatch gets its own clock, not the leftovers of the first run')
+  // ...but while ONE run is live, re-reading it must NOT re-base (that would be a clock nobody could fail)
+  const held = telemetry.jobProgress('secureFood@', null).at
+  assert.strictEqual(held, second, 'reading the clock twice may not reset it')
+})
+
+t('THE ESCALATION CAN NOW REACH ITS FAIL RUNG: 240s of rescue-only motion IS a fail-job', () => {
+  // The exact terminal arithmetic. A non-critical job nudges at 120s and fails at 240s; the freeze
+  // watchdog's escape lands at 195s and "succeeds". Under the old clock that reset idle to 0 every
+  // 4 minutes forever. Under the ledger the escape stamps nothing the supervisor reads.
+  const started = 0
+  const job = { name: 'autobuild', cls: 'progress', startedAt: started, lastProgressAt: started }
+  assert.strictEqual(S.watchdog(job, { hp: 20, food: 20 }, 120000), 'nudge')
+  assert.strictEqual(S.watchdog(job, { hp: 20, food: 20 }, 195000), 'nudge', 'the 195s escape must not de-escalate it')
+  assert.strictEqual(S.watchdog(job, { hp: 20, food: 20 }, 240000), 'fail-job', 'and the fail rung is REACHABLE')
 })
 
 console.log(fails ? `\n${fails} FAILURE(S)` : '\nall leg-patience tests passed')

@@ -28,10 +28,10 @@ const { dbg, setDebugSink } = require('./debug-sink.js').makeDebug('[nav]')
 
 const prov = () => require('./provision.js') // lazy - see layering note above
 const provMining = () => require('./provision-mining.js') // LAZY: provision-mining top-requires navigate, so a top-level import here would be a real cycle
-// The forward-progress clock, written ONLY from evidence (see the stamp in recoverOnce). Lazy
-// require + swallowed failure: the house `touchP` pattern (provision-*.js), so telemetry can
-// never turn a navigation into an exception and there is no load-order cycle with commands.js.
-const touchP = tag => { try { require('./commands.js').touchProgress(tag) } catch {} }
+// NO touchP HERE, deliberately (2026-08-25). This module used to hold the house `touchP` helper
+// for one caller - the recovery-rung stamp in recoverOnce - and that stamp is deleted: a rescue
+// may not vouch for the job it is rescuing. Navigation reports movement by MOVING; telemetry's
+// new-ground ratchet is what reads it. Re-adding a progress sink to this file is re-adding D1.
 
 // ---- reflex arbitration ------------------------------------------------------------
 // While a recovery is physically maneuvering (pillaring out of a pit, threading a
@@ -1246,34 +1246,33 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
     let ok = false
     try { ok = await step.run() } catch (e) { dbg('recovery ' + step.kind + ' threw: ' + e.message) } finally { endRecoverySpan() }
     dbg('recovery ' + step.kind + ' -> ' + (ok ? 'MOVED' : 'no progress'))
-    // ==== THE LEG ALREADY PROVED IT MOVED, AND THREW THE PROOF AWAY (2026-08-02) ==========
-    // `ok` is this ladder's OWN world verdict, under the contract at the top of this section:
-    // "a recovery worked if the bot demonstrably MOVED (>=2 blocks horizontally or rose >=1) or
-    // the entry vouches for itself - re-read the world, never trust intent". That is the same
-    // class of evidence the supervisor calls verified progress; it was simply never reported,
-    // because telemetry's own witness re-anchors at 8 BLOCKS and a leg spent in nudge/stepout
-    // rungs moves the body two or three. So a leg doing exactly the right thing looked dead:
-    //   [nav] leg took 30.3s: attempt 6s, budget 24s, ceiling 90s, reflex-hold 0s, recoveries 2 in 26s
-    //   (wd) FAIL-JOB secureFood - no verified progress for 43s - setting its stop latch
-    // Two witnesses of one fact, and the supervisor was reading the coarser one (#4).
+    // ==== ESCAPING IS NOT PROGRESS, AND THIS STAMP KILLED THE BOT (deleted 2026-08-25) ====
+    // `if (ok) touchP('navRung:' + step.kind)` stood here. It was added on 2026-08-02 to stop a
+    // survival job being failed at 43s while one of its legs was legitimately grinding through
+    // nudge/stepout rungs, and its own comment conceded what it was: "this stamp says 'the body
+    // is not frozen', never 'the job is productive'". Nothing downstream could tell the
+    // difference, because there was ONE progress clock and the supervisor read it.
     //
-    // This is the SAME RULE the layers above already live by - provision-recovery H5a stamps
-    // `ladderRung` for "a bounded, live-verified rung completed", provision-maintain H5b stamps
-    // `maintStep`, the farm stamps `harvest`/`replant`. The nav ladder was the one bounded unit
-    // of work that completed without saying so. ONE place: every escalator that runs the ladder
-    // (navigateToInner, walkStaged's forceUnstick, the freeze watchdog's force-escape) goes
-    // through here, so there is one definition and nothing to drift.
+    // What that cost, 2026-08-03 16:54 -> 20:10, wedged one block from its own hut:
+    //   (watchdog) position FROZEN ~195s at (190,69,-100) - forcing an escape
+    //   [nav] recovery: step-out 2 cell(s) toward 192,-100  -> stepout -> MOVED
+    //   [nav] recovery: step-out 2 cell(s) toward 190,-100  -> stepout -> MOVED
+    //   (wd) NUDGE autobuild - no verified progress for ~121s ... - marking stalled
+    // The freeze watchdog fires at 195s; the job watchdog's fail rung is at 240s. Every rescue
+    // netted 1.6-2.2b, returned MOVED, stamped here, and reset the job clock 45 SECONDS BEFORE
+    // it could fail. Thirty-two times on an exact 4-minute period, zero FAIL-JOB in the last
+    // 4h15m, and the process died still "continuing the active build" (review D1/§1a).
+    // The delegation it relied on was circular: it left A<->B to cycle-detect.js, which needs
+    // >=48b of gross path in 180s and therefore never fired, and which in turn delegates slow
+    // oscillation back to "the freeze watchdogs' domain" - whose remedy is this stamp.
     //
-    // IT IS AN EVENT, NOT A CREDIT. Nothing is suppressed and nothing expires: the moment the
-    // rungs stop verifying movement the clock ages again, so a genuinely hung leg (parked in an
-    // await, body still) stamps nothing and the NUDGE -> FAIL-JOB -> GIVEUP ladder runs exactly
-    // as it does today. That is deliberately unlike a declared hold, which would vouch for a
-    // dead leg until its TTL and would blind the cycle detector and the freeze watchdog too.
-    //
-    // NOT a CYCLE_WORK_TAG (telemetry.js), deliberately: escaping is not producing. An A<->B
-    // recovery oscillation must keep looking like a cycle to cycle-detect.js, which excludes on
-    // workCount - so this stamp says "the body is not frozen", never "the job is productive".
-    if (ok) touchP('navRung:' + step.kind)
+    // The 2026-08-02 defect is answered instead by giving the two questions two clocks
+    // (telemetry.js): a leg that actually gets somewhere stamps `newGround` from the ratchet and
+    // keeps the job clock alive; a leg that shuttles inside a pocket stamps nothing, and being
+    // failed is the correct verdict for it. Nothing here has to be trusted about it, which is
+    // the point - the rescuer may not write the report card on the job it is rescuing.
+    // The body-is-not-frozen question still has its own honest witnesses: bodyProgress.at (any
+    // touch, which boundedRung reads) and the freeze watchdog's own position ring.
     if (ok) return step.kind
     // no progress from this tool - spend its remaining budget so the next pass tries the
     // next rung instead of hammering the same one

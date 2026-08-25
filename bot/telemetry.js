@@ -71,7 +71,7 @@ function clearActivity (why) {
   return true
 }
 
-function beginActivity (name, detail) { activity = { name, detail: detail || '', startedAt: Date.now() }; touchProgress('begin:' + name) } // S7: a just-started job is at zero idle - a stale clock must never insta-fail it
+function beginActivity (name, detail) { activity = { name, detail: detail || '', startedAt: Date.now() } } // no t0 stamp: `startedAt` IS this job's zero-idle mark, and the work ledger re-bases on the new key (the old touchProgress('begin:') told EVERY reader the body had progressed - a lie a fresh label had no business telling)
 
 // Record an outcome the brain should NOTICE: any FAILURE, a DETACHED flow (build/
 // provision/autobuild resolve after /cmd already returned, so their result never
@@ -108,23 +108,92 @@ function recordOutcome (action, ok, detail) { lastOutcome = { action, ok: !!ok, 
 
 function lastOutcomeInfo () { return lastOutcome }
 
-// ---- S7 FORWARD-PROGRESS LATCH -------------------------------------------------------
-// A module-level heartbeat advanced ONLY by VERIFIED progress via touchProgress (an anchored 8b
-// displacement, an item-count delta, a pathfix-verified place/break, a collected smelt output, a
-// completed rung/step, a regen tick, a valid pass of a DECLARED hold). Read by
-// provision.activeJobInfo -> the 5s watchdog. One object write per touch; a job spinning/hung in
-// place touches NOTHING - that is the whole point. WATCHDOG=0 leaves these as inert timestamps.
-// task #34 (cycle detector): a MONOTONIC workCount, advanced ONLY by a WORK tag (item/block/smelt/
-// heal/rung/chore progress - never by movement or a fresh dispatch). It is the chest<->build shuttle
-// guard: the oscillation predicate requires ZERO work touches across its whole window, so real
-// back-and-forth work (which always moves an item or a block) can never be flagged. Inert unless the
-// watchdog's cycle detector reads it (like S7's touchProgress: cheap + unread == byte-identical).
+// ---- S7 FORWARD-PROGRESS: TWO CLOCKS, BECAUSE THERE ARE TWO QUESTIONS ----------------
+// There used to be ONE cell here and every touchProgress(tag) refreshed its timestamp, so
+// "IS THIS JOB ADVANCING" was answered by "did ANYTHING happen to the body". Those are two
+// different questions, and on 2026-08-03 16:54-20:10 they came apart and the process died in
+// the gap. The bot was wedged one block from its own hut. The freeze watchdog fired at 195s,
+// its step-out rungs netted 1.6-2.2b, returned MOVED and stamped navRung: - and the JOB
+// watchdog's 240s fail rung, 45 seconds short, reset to zero. Thirty-two times, on an exact
+// 4-minute period, for four hours: 32 NUDGE lines, ZERO FAIL-JOB, zero work of any kind.
+// The layer whose entire purpose is to detect a stuck job was fed a clock that the stuck-ness
+// itself wound (structural review 2026-08-25, D1).
+//
+// So the two questions have two records now:
+//   bodyProgress   IS THE BODY DOING ANYTHING - any touch refreshes `at`. Read by /state, by the
+//                  heartbeat merge and by provision-recovery's boundedRung (a rung that is
+//                  walking is a rung doing its job). It is NOT a verdict about a job.
+//   the WORK LEDGER (below)  IS THIS JOB ADVANCING - a WORLD-STATE DELTA, keyed by jobKey. The
+//                  ONLY input to activeJobInfo.lastProgressAt -> scheduler.watchdog -> wdPhase.
+//
+// An ADVANCE is production (CYCLE_WORK_TAGS: an item/block/smelt/heal/rung/chore delta, all of
+// them already re-read from the world by pathfix or by their own verify) or NEW GROUND (the
+// ratchet in trackPosition below). Explicitly NOT an advance, and each one deleted at its call
+// site rather than filtered here: being dispatched, a label opening, a declared hold existing,
+// a navigation recovery rung returning ok, and re-treading ground already covered.
+//
+// task #34 (cycle detector): workCount stays PRODUCTION-ONLY and separate from advanceCount -
+// the oscillation predicate requires ZERO work touches across its whole window, and crediting
+// travel to it would let a chest<->build shuttle hide from the detector.
 const CYCLE_WORK_TAGS = new Set(['itemDelta', 'placed', 'broke', 'smelt', 'regen', 'ladderRung', 'maintStep', 'harvest', 'replant'])
-let bodyProgress = { at: Date.now(), by: 'boot', stalled: false, workCount: 0 }
-function touchProgress (tag) { const w = bodyProgress.workCount || 0; bodyProgress = { at: Date.now(), by: tag || '', stalled: false, workCount: CYCLE_WORK_TAGS.has(tag) ? w + 1 : w } } // any touch clears stalled; WORK tags also bump workCount
+const GROUND_TAGS = new Set(['newGround']) // the anti-spin ratchet's stamp; see trackPosition
+let bodyProgress = { at: Date.now(), by: 'boot', stalled: false, workCount: 0, advanceCount: 0, advanceAt: Date.now() }
+function touchProgress (tag) {
+  const p = bodyProgress
+  const now = Date.now()
+  const work = CYCLE_WORK_TAGS.has(tag)
+  const advance = work || GROUND_TAGS.has(tag)
+  bodyProgress = {
+    at: now,                                              // the BODY clock: any touch
+    by: tag || '',
+    stalled: advance ? false : p.stalled,                 // the nudge marker is a verdict about the JOB, so only an ADVANCE clears it
+    workCount: (p.workCount || 0) + (work ? 1 : 0),
+    advanceCount: (p.advanceCount || 0) + (advance ? 1 : 0),
+    advanceAt: advance ? now : (p.advanceAt || now)
+  }
+}
 function progressInfo () { return bodyProgress }
-function markStalled () { bodyProgress.stalled = true } // the nudge's blockedOn='stalled' marker; cleared by the next touch
-function _resetProgress () { bodyProgress = { at: Date.now(), by: 'reset', stalled: false, workCount: 0 } } // test seam (house pattern: _setNow/_setMaintaining)
+function markStalled () { bodyProgress.stalled = true } // the nudge's blockedOn='stalled' marker; cleared by the next ADVANCE (never by a wiggle)
+
+// ---- THE WORK LEDGER (per job) -------------------------------------------------------
+// Reconciled LAZILY ON READ, the idiom this repo already uses for the other two exclusive
+// records (reflexes.activeHold drops an expired hold on read; the dispatch slot is a lease).
+// Two things it makes true that the global cell could not:
+//   * A JOB'S CLOCK STARTS AT ITS OWN startedAt. That is exactly what the five `zero-idle at
+//     t0` touches (begin:, dispatch:, and the survival t0 stamps) were faking through a global
+//     cell, and faking it globally is what let any subsystem hand any other subsystem a fresh
+//     clock. Now it is structural: a new key re-bases, nobody has to remember to stamp.
+//   * WORK IS CREDITED TO THE JOB THAT WAS RUNNING, not to the process. A rescue can no longer
+//     gift its jiggle to a build, because a jiggle is not an advance AND because the ledger
+//     belongs to the key.
+// NOTE the remaining honest gap, left for the ownership work (review item 2): while one job
+// holds the key, ANY advance in the process credits it. Closing that needs a claim registry
+// that says who is driving - not another counter here.
+let workLedger = { key: null, at: 0, count: 0 }
+let idleSuppressedAt = 0 // a DECLARED hold vouches for stillness: it SUPPRESSES this clock, it never feeds it
+function jobProgress (jobKey, startedAt) {
+  const now = Date.now()
+  const c = bodyProgress.advanceCount || 0
+  if (workLedger.key !== jobKey) {
+    workLedger = { key: jobKey, at: (startedAt != null ? startedAt : now), count: c }
+    bodyProgress.stalled = false // the nudge marker belongs to the job that was nudged; a new job has not been
+  }
+  else if (c !== workLedger.count) workLedger = { key: jobKey, at: bodyProgress.advanceAt || now, count: c }
+  return { at: Math.max(workLedger.at, idleSuppressedAt), stalled: !!bodyProgress.stalled, workCount: bodyProgress.workCount || 0 }
+}
+// The watchdog's declared-hold branch calls this instead of stamping progress. "Sitting still IS
+// the goal" is a reason not to count the seconds; it is not evidence that the job advanced, and
+// writing it into the one progress cell told every other reader it was (#7).
+function suppressJobIdle () { idleSuppressedAt = Date.now() }
+// THE SAME EVIDENCE, WITHOUT A JOB KEY (review item 2). A body CLAIM is not a job: it has its own
+// takenAt and it is not the thing the watchdog re-bases per dispatch, so it cannot ask jobProgress
+// (which would re-key the ledger out from under the watchdog on every read). What it needs is the
+// other half of the same record - WHEN DID THE WORLD LAST MOVE, or when was stillness last vouched
+// for by a declared hold - and that is exactly `advanceAt` and `idleSuppressedAt`. One reading of
+// one pair of cells: cheap enough for the ownership question, which is asked on the 1.5s follow
+// timers as well as on the tick ([[body-first-priority]]).
+function advanceInfo () { return { at: Math.max(bodyProgress.advanceAt || 0, idleSuppressedAt), count: bodyProgress.advanceCount || 0 } }
+function _resetProgress () { bodyProgress = { at: Date.now(), by: 'reset', stalled: false, workCount: 0, advanceCount: 0, advanceAt: Date.now() }; workLedger = { key: null, at: 0, count: 0 }; idleSuppressedAt = 0 } // test seam (house pattern: _setNow/_setMaintaining)
 
 // ---- OUTCOME RING (task #34) ---------------------------------------------------------
 // A bounded 16-entry history of how recent long ops ENDED, so the repeat-fail predicate can SEE
@@ -172,11 +241,13 @@ function checklistInfo () { return jobList }
 let posHist = []       // ring of { x, y, z, t }
 let stuckSince = 0
 let tryingSince = 0    // when the CURRENT move attempt began (goal/activity became active)
-let progAnchor = null  // S7 H1: the position the bot last made 8b of real progress from (anti-spin anchor; reset on respawn)
+let groundTrail = []   // S7 H1: the last GROUND_TRAIL_MAX anchors of new ground (anti-spin ratchet; reset on respawn)
 const STUCK_WINDOW_MS = 12000
 const STUCK_DIST = 1.5
+const GROUND_STEP = 8      // how far is "somewhere else"
+const GROUND_TRAIL_MAX = 16 // ~128b of remembered trail - long enough that an A<->B shuttle never escapes it
 function stuckInfo () { return stuckSince }
-function resetProgressAnchor () { progAnchor = null } // recordDeath: the respawn teleport must re-anchor cleanly (a huge displacement is not progress)
+function resetProgressAnchor () { groundTrail = [] } // recordDeath: the respawn teleport must re-anchor cleanly (a huge displacement is not progress)
 
 // The position/stuck half of the old trackTick. `opts.isBusy` / `opts.escaping` are the
 // commands.js build latches, injected rather than reached for (see the cycle note above).
@@ -189,12 +260,21 @@ function trackPosition (bot, opts = {}) {
   const p = ent.position
   posHist.push({ x: p.x, y: p.y, z: p.z, t: now })
   while (posHist.length && now - posHist[0].t > STUCK_WINDOW_MS + 2000) posHist.shift()
-  // S7 H1 (before the isBusy early-return below - busy bodies are exactly who we watch): anchored
-  // 8b-displacement heartbeat. The anchor advances ONLY when the bot gets 8 blocks from where it
-  // last made progress, so a bot spinning/bobbing/pacing inside an 8b pocket NEVER touches
-  // (displacement-from-anchor, not path length) - the anti-spin is by construction. Cost: one hypot/s.
-  if (!progAnchor) progAnchor = { x: p.x, y: p.y, z: p.z }
-  else if (Math.hypot(p.x - progAnchor.x, p.y - progAnchor.y, p.z - progAnchor.z) >= 8) { touchProgress('moved8b'); progAnchor = { x: p.x, y: p.y, z: p.z } }
+  // S7 H1 (before the isBusy early-return below - busy bodies are exactly who we watch): the
+  // NEW-GROUND RATCHET. It used to be a single anchor: 8 blocks from where you last stamped and
+  // you stamped again. That killed spinning/bobbing/pacing inside an 8b pocket, which is the only
+  // case it was built for - but it happily paid an A<->B shuttle twice per lap, because B is
+  // always 8b from A. Displacement is only evidence of progress when the ground is NEW, so the
+  // anchor became a TRAIL: a stamp requires GROUND_STEP from EVERY remembered anchor, and
+  // re-treading covered ground is worth exactly zero (structural review 2026-08-25, §3.1's
+  // ratchet). Cost: <=16 hypots/s, on the tick that already ran one (#8).
+  // What it deliberately does NOT know is the job's GOAL, so new ground walked while ESCAPING
+  // still counts. That last mile needs the job to publish where it is going - review item 7.
+  if (!groundTrail.some(a => Math.hypot(p.x - a.x, p.y - a.y, p.z - a.z) < GROUND_STEP)) {
+    if (groundTrail.length) touchProgress('newGround') // the first anchor after a respawn/boot is a starting point, not a journey
+    groundTrail.push({ x: p.x, y: p.y, z: p.z })
+    if (groundTrail.length > GROUND_TRAIL_MAX) groundTrail.shift()
+  }
   const goal = bot.pathfinder && bot.pathfinder.goal
   const following = goal && goal.constructor && goal.constructor.name === 'GoalFollow'
   const trying = (goal && !following) || (activity && /^(travel|gather|come|recover)$/.test(activity.name))
@@ -220,6 +300,9 @@ module.exports = {
   lastOutcomeInfo,
   touchProgress,
   progressInfo,
+  jobProgress,
+  suppressJobIdle,
+  advanceInfo,
   markStalled,
   _resetProgress,
   recentOutcomes,

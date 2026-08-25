@@ -139,18 +139,22 @@ function eq (got, want, label) {
   eq(telemetry.progressInfo().workCount, 0, 'telemetry: reset zeroes workCount')
 
   // only WORK tags bump workCount - movement and dispatch must not
-  telemetry.touchProgress('moved8b')
-  eq(telemetry.progressInfo().workCount, 0, 'telemetry: movement is progress but NOT work')
+  telemetry.touchProgress('newGround')
+  eq(telemetry.progressInfo().workCount, 0, 'telemetry: new ground is an ADVANCE but NOT work')
+  eq(telemetry.progressInfo().advanceCount, 1, 'telemetry: ...and it does advance the job ledger')
   telemetry.touchProgress('placed')
   eq(telemetry.progressInfo().workCount, 1, 'telemetry: a placed block IS work')
-  telemetry.touchProgress('begin:gather')
-  eq(telemetry.progressInfo().workCount, 1, 'telemetry: a fresh dispatch is not work')
+  telemetry.touchProgress('navRung:stepout')
+  eq(telemetry.progressInfo().workCount, 1, 'telemetry: a rescue rung is not work')
+  eq(telemetry.progressInfo().advanceCount, 2, 'telemetry: ...and not an advance either (2026-08-25 D1)')
 
-  // stalled is set by the nudge and cleared by ANY touch
+  // stalled is set by the nudge and cleared by an ADVANCE - never by a wiggle
   telemetry.markStalled()
   eq(telemetry.progressInfo().stalled, true, 'telemetry: markStalled latches')
+  telemetry.touchProgress('dispatch:gather')
+  eq(telemetry.progressInfo().stalled, true, 'telemetry: a non-advance touch must NOT clear stalled')
   telemetry.touchProgress('regen')
-  eq(telemetry.progressInfo().stalled, false, 'telemetry: any touch clears stalled')
+  eq(telemetry.progressInfo().stalled, false, 'telemetry: verified work clears stalled')
 
   // failClass strips coords so repeats of the same failure match
   eq(telemetry.cycleFailClass('door at 433,62,112'), 'door at #,#,#', 'telemetry: failClass strips coordinates')

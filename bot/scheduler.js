@@ -1180,6 +1180,12 @@ function tickDelayMs (vitals = {}, opts = {}) {
 const SURVIVAL_NUDGE_MS = 45000
 const SURVIVAL_FAIL_MS = 90000
 
+// ...and the PATIENT window, named for the same reason (review item 2). A body CLAIM at a
+// non-survival tier is declared hung on exactly the schedule this supervisor declares a
+// non-survival JOB hung, and a second literal 240000 in reflexes.js would be one rule with two
+// definitions (#4) - the seam that [[threshold-seams]] is a whole memory about.
+const PATIENT_FAIL_MS = 240000
+
 // ==== THE CRISIS WINDOW MUST NOT CUT THE JOB THAT ENDS THE CRISIS (2026-08-02) ============
 // The critical-vitals window (20s/40s) used to be tested FIRST, so it applied to every job -
 // including the survival job dispatched precisely to answer that crisis. The hungrier the bot
@@ -1217,7 +1223,7 @@ function watchdog (activeJob, vitals, now) {
   const critical = (v.hp != null && v.hp <= 6) || (v.food != null && v.food <= 2)
   if (activeJob.cls === 'survival') { nudgeMs = SURVIVAL_NUDGE_MS; failMs = SURVIVAL_FAIL_MS } // the answer to the crisis keeps its window AT the crisis
   else if (critical) { nudgeMs = 20000; failMs = 40000 } // critical, and this work is not the answer: seconds
-  else { nudgeMs = 120000; failMs = 240000 } // patient when cheap
+  else { nudgeMs = PATIENT_FAIL_MS / 2; failMs = PATIENT_FAIL_MS } // patient when cheap (failMs = 2*nudgeMs, as the header says)
   if (idleMs >= failMs) return 'fail-job'
   if (idleMs >= nudgeMs) return 'nudge'
   return 'ok'
@@ -1358,6 +1364,7 @@ module.exports = {
   wdPhase,
   SURVIVAL_NUDGE_MS,
   SURVIVAL_FAIL_MS,
+  PATIENT_FAIL_MS,
   LATCH_GRACE_MS,
   JOB_CLASSES,
   _setNow,

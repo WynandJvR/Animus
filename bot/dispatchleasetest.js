@@ -196,7 +196,7 @@ t('ANTI-DRIFT: a revoke lets go of the CONTROLS, not just the bookkeeping', () =
 // the livelock kept feeding the very witness meant to catch it. A record written from an ATTEMPT
 // instead of from EVIDENCE. The MODEL of the rule (the live wiring is pinned by source below):
 function runJobProgress (progressAt, { touchedDuringRun }) {
-  const t0 = progressAt + 1                   // touchProgress('dispatch:'+name) - this job's own t0
+  const t0 = progressAt + 1                   // this dispatch's own baseline (2026-08-25: the advanceCount read at dispatch; it used to be a touchProgress('dispatch:'+name) stamp, which told every reader the body had progressed just for being dispatched)
   const at = touchedDuringRun ? t0 + 500 : t0 // did anything real stamp between dispatch and release?
   return at !== t0 ? at + 1 : at              // stamp on release ONLY if the job did something
 }
@@ -215,7 +215,8 @@ t('THE 5.5-HOUR FREEZE: a job that touched NOTHING must not stamp progress on re
 })
 
 t('THE 5.5-HOUR FREEZE: the clock must AGE inside an abandoned dispatch so NUDGE can fire', () => {
-  // The dispatch stamp legitimately zeroes the clock (a fresh job is not stale). What was fatal
+  // A fresh job legitimately starts at zero idle - since 2026-08-25 the work ledger gives it that
+  // by re-basing on its own jobKey, rather than by stamping a global cell. What was fatal
   // is the RELEASE stamp: with it, a 60s abandoned window was bracketed by two stamps and the
   // clock never reached the 40s nudge while a job was active. Without it, idle ages normally.
   const NUDGE_AT = 40000
@@ -403,9 +404,14 @@ t('IDLE-WITH-WORK: the kick clears the stale back-offs at ANY vitals, not only a
   assert(i > 0, 'the idle-with-work clause still exists')
   const clause = src.slice(i, i + 1800)
   // the remedy must not sit behind a vitals gate - the condition that names the branch is enough
-  assert(!/if \(bot\.health <= 6 \|\| bot\.food <= 2\) \{[\s\S]{0,400}runner\.noOp\.clear\(\)/.test(clause),
+  assert(!/if \(bot\.health <= 6 \|\| bot\.food <= 2\) \{[\s\S]{0,400}attempts\.forgetAll/.test(clause),
     'the clearing is gated on crisis vitals again - at any healthy reading the kick is just a log line')
-  for (const back of ['runner.graveCooldownUntil', 'runner.hpCooldownUntil', 'runner.ladderBlock', 'runner.noOp.clear()']) {
+  // runner.ladderBlock / runner.noOp.clear() WERE two of the four names checked here. They are
+  // deleted (review D3/§3.6): "I tried this and it achieved nothing" is a fact about a place now,
+  // and attempts.forgetAll() is the ONE clear that covers what both of them used to hold. The
+  // behaviour this test bought - the kick actually clears the back-offs, at any vitals - is
+  // unchanged and still asserted; only the number of things to clear went from four to three.
+  for (const back of ['runner.graveCooldownUntil', 'runner.hpCooldownUntil', 'attempts.forgetAll']) {
     assert(clause.includes(back), 'the kick must actually clear ' + back)
   }
   // and it has to be reachable: the clears sit directly in the clause body, not inside any `if`
