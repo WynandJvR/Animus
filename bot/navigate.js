@@ -1819,6 +1819,26 @@ async function unstick (bot, goal, opts = {}) {
   // The floor may not refuse itself (§3.3): a forced rescue re-tries rungs this cell has already
   // failed, because the alternative is a terminal action that cannot break the wedge it names.
   if (!opts.force) for (const kind of plan) { if (attempts.recall('unstick', kind, cell)) { triedSet.add(kind); skipped.add(kind) } }
+  // EVERY RUNG SKIPPED IS THE SAME DEAD END `force` EXISTS FOR - SO TAKE IT (2026-08-25, live).
+  // The skip above is right: a rung that achieved nothing in this 4b cell should not be re-run
+  // while nothing has changed. But when it disqualifies the WHOLE plan, the rescue returns
+  // 'tried nothing applicable' and the body does not move - and #5 says a decision must produce
+  // an action. `force` already re-tries skipped rungs, and its own comment says why: the
+  // alternative is a floor 'that cannot break the wedge it names'. Its only caller is the
+  // terminal action, which arms on a CRISIS - so a bot at hp20/food20 trapped in a pit it dug
+  // could never reach it. Live: (6,61,14), plan pit>nudge>stepout all skipped, 37 failures,
+  // 617 wedges recorded at that spot, `in my bunker (lid open)` on a loop, in DAYLIGHT, while
+  // holding two pickaxes five blocks under open sky. Trapped-but-healthy belonged to nobody.
+  // Self-forcing here is not a new authority: it is the existing force path, reached by the
+  // condition that force was written for. The attempt records for this cell are cleared so the
+  // retry is honest bookkeeping rather than a rung pretending it was never tried - and if the
+  // retry achieves nothing they are simply written again, so this bounds nothing away.
+  const allSkipped = plan.length > 0 && skipped.size === plan.length
+  if (allSkipped) {
+    dbg('unstick: EVERY rung already failed in this cell (' + Array.from(skipped).join(',') + ') - self-forcing rather than standing still (#5)')
+    for (const kind of plan) { try { attempts.forget('unstick', kind, cell) } catch {} }
+    triedSet.clear(); skipped.clear()
+  }
   if (skipped.size) dbg('unstick: skipping ' + Array.from(skipped).join(',') + ' - already achieved nothing in this cell')
   let via = null
   unsticking = true
