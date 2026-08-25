@@ -103,7 +103,20 @@ function decide (hb, probe, now, st) {
   // heartbeat is FRESH (the staleness check above is untouched and still kills a hung process
   // that leaves a stale `hold` behind), and a hold that outlives its own wake stops being
   // published by reflexes.activeHold, so it cannot latch this open forever.
-  const held = hb != null && hb.hold && typeof hb.hold.label === 'string'
+  // A HOLD MAY VOUCH FOR STILLNESS, BUT NOT FOREVER (2026-08-25, second live finding). The first
+  // version of this honoured any published hold outright, on the assumption - written into its own
+  // commit message - that "a hold that outlives its own wake stops being published". THAT IS FALSE.
+  // Live at 00:00 the heartbeat was 3s fresh and still carried {label:'nightShelter', wake:'dawn'}
+  // AFTER DAWN, with activity:None and lastProgressAt 696s stale: the scheduler tick had been dead
+  // for eleven minutes and this layer - the LAST resort, the one that exists precisely for when
+  // in-process state is the thing that is broken - stood down on that in-process state's say-so.
+  // A watchdog that an unfalsifiable claim can silence indefinitely is not a watchdog.
+  // So the hold is honoured only while the bot's OWN progress clock is still moving within a
+  // freeze window of the hold. Sleeping through a night touches that clock (the shelter's rungs
+  // and the sleep itself are work); a dead tick does not. Beyond that the claim must be re-earned,
+  // and stillness stops being vouched for by the process that has stopped reporting.
+  const holdFresh = hb != null && typeof hb.lastProgressAt === 'number' && (now - hb.lastProgressAt) <= T.FROZEN_MS
+  const held = hb != null && hb.hold && typeof hb.hold.label === 'string' && holdFresh
   const frozen = probe === 'ok' && hb != null && hb.connected !== false && !held &&
     typeof hb.activity === 'string' && hb.activity &&
     typeof hb.lastProgressAt === 'number' && now - hb.lastProgressAt > T.FROZEN_MS &&
