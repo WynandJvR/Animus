@@ -161,7 +161,14 @@ t('THE RESCUE REPORTS, IT DOES NOT RE-ARM: no timer is set on the failure path',
   const i = n.indexOf('async function unstick')
   assert.ok(i > 0, 'found unstick')
   const body = n.slice(i)
-  assert.ok(!/setTimeout|setInterval/.test(body.slice(0, body.indexOf('\n}\n'))), 'a rescue that schedules itself is the 4-minute heartbeat coming back')
+  // CRLF-SAFE, AND IT PROVES IT FOUND THE END (2026-08-25). This read body.indexOf('\n}\n'),
+  // which is -1 on a CRLF checkout (core.autocrlf=true here) - and slice(0, -1) is then the WHOLE
+  // REST OF THE FILE, so the pin matched a setTimeout hundreds of lines below unstick and flipped
+  // green-to-red the moment git normalised line endings at commit. A pin that silently widens to
+  // the whole file is not a pin. Assert the boundary exists, then slice to it.
+  const endIdx = body.search(/\r?\n\}\r?\n/)
+  assert.ok(endIdx > 0, 'found the end of unstick() - the pin must not silently widen to the whole file')
+  assert.ok(!/setTimeout|setInterval/.test(body.slice(0, endIdx)), 'a rescue that schedules itself is the 4-minute heartbeat coming back')
   assert.ok(/verdict: 'exhausted'/.test(body), 'it returns the verdict instead')
 })
 

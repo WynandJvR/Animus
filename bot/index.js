@@ -2980,8 +2980,24 @@ if (process.env.STATE_HISTORY !== '0') {
       // S7 (§3.4e): merge the VERIFIED-progress clock so layer d (supervise.js frozen-vitals, 5 min)
       // stops false-flagging a bot standing still at a furnace for 10 min of real smelting.
       if (WATCHDOG_ON) { try { hbLastProgressAt = Math.max(hbLastProgressAt, commands.progressInfo().at) } catch {} }
+      // THE DECLARED HOLD, PUBLISHED (2026-08-25, live). supervise.js is a SECOND reader of
+      // "is this bot stalled" and it lives in another process, so the only thing it can know is
+      // what this file tells it. Review item 1 correctly stopped a hold from stamping
+      // touchProgress('declaredHold') - a bot sitting still on purpose was announcing verified
+      // progress every 5s, which is the exact lie #7 forbids. But `lastProgressAt` above is
+      // derived from that same body clock, so the honest clock made a night shelter look FROZEN
+      // to the supervisor, which stopped the bot four times in twenty minutes on 2026-08-25
+      // while it was sheltering correctly - once mid-gather.
+      // The fix is not to put the lie back. It is that BOTH readers get the same fact: the
+      // in-process watchdog already asks reflexes.activeHold(holdPremiseOK) on its own 5s pass
+      // (§ "whoever waits DECLARES it and names the wake"), and this publishes that same answer.
+      // One rule, one definition, two readers (#4). `hold` is the label, `holdWake` names what
+      // ends it - so a supervisor can log WHY it stood down, not just that it did.
+      let hbHold = null
+      try { const h = reflexes.activeHold(holdPremiseOK); if (h) hbHold = { label: h.label, wake: h.wake } } catch {}
+      try { if (!hbHold && (bot.isSleeping || (provRecovery.isResting && provRecovery.isResting()))) hbHold = { label: bot.isSleeping ? 'sleeping' : 'resting', wake: 'dawn' } } catch {}
       if (p) hbLastPos = p
-      try { fs.writeFileSync(HEARTBEAT_FILE, JSON.stringify(Object.assign({}, sample, { connected: connected && !!bot.entity, lastProgressAt: hbLastProgressAt }))) } catch {}
+      try { fs.writeFileSync(HEARTBEAT_FILE, JSON.stringify(Object.assign({}, sample, { connected: connected && !!bot.entity, hold: hbHold, lastProgressAt: hbLastProgressAt }))) } catch {}
     } catch { /* telemetry must never kill the bot */ }
   }
   const historyTimer = setInterval(historyTick, 5000)

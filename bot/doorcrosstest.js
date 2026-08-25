@@ -78,7 +78,7 @@ t('navigateTo: a leg that outlives the caller\'s timeoutMs SAYS SO, with its num
   const src = require('fs').readFileSync(require('path').join(__dirname, 'navigate.js'), 'utf8')
   const tail = src.slice(src.indexOf('async function navigateToInner'))
   assert.ok(/if \(took > timeoutMs\) \{/.test(tail), 'the long-leg line must be emitted on the real condition, not disabled')
-  const line = (tail.match(/dbg\(label \+ 'leg took[\s\S]{0,400}?\)\n/) || [''])[0]
+  const line = (tail.match(/dbg\(label \+ 'leg took[\s\S]{0,400}?\)\r?\n/) || [''])[0]
   for (const n of ['budget', 'ceiling', 'reflex-hold', 'recoveries']) {
     assert.ok(line.includes(n), 'the long-leg line must carry ' + n + ' - one greppable line with the numbers in it')
   }

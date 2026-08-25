@@ -60,7 +60,7 @@ t('the table names ALL FOUR latches the gate tests, and each key is bound to its
     assert.ok(new RegExp("probe\\('" + key + "', .*" + pred.replace('.', '\\.')).test(latches),
       'claim ' + key + ' is bound to ' + pred + ' in bodyLatches - the label can still only name a latch that is SET')
   }
-  assert.ok(/bodyOwner\(\)\n {6}const holdActive = \[/.test(code),
+  assert.ok(/bodyOwner\(\)\r?\n {6}const holdActive = \[/.test(code),
     'the registry is written through immediately before the labels are read, so a revoked lease cannot print as a hold')
 })
 

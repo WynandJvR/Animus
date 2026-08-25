@@ -89,7 +89,22 @@ function decide (hb, probe, now, st) {
   //    same pos AND same activity as last poll, and /health still answers. An idle bot
   //    standing still at home (activity null) is NOT a wedge; a disconnected bot is NOT a
   //    wedge. First poll after start has prevPos === null -> never frozen (baseline builds).
-  const frozen = probe === 'ok' && hb != null && hb.connected !== false &&
+  // A DECLARED HOLD IS NOT A FREEZE (2026-08-25, live). This layer judges "stalled" from the
+  // heartbeat alone, in another process, so it used to be structurally unable to tell a bot
+  // sheltering through the night from one wedged in a hole - both are connected, both have a
+  // named activity, both sit perfectly still. It stopped the bot FOUR times in twenty minutes
+  // while nightShelter was holding correctly, once killing a gather mid-run.
+  // The in-process watchdog has always known the difference (reflexes.activeHold: "whoever
+  // waits DECLARES it and names the wake"), and index.js now publishes that answer into the
+  // heartbeat. Reading it here is what makes the two layers share ONE definition of stalled
+  // (#4) instead of each inventing its own - which is the whole class of defect the
+  // 2026-08-25 structural review was about.
+  // NOTE this is deliberately NOT a blanket exemption: the hold is only honoured while the
+  // heartbeat is FRESH (the staleness check above is untouched and still kills a hung process
+  // that leaves a stale `hold` behind), and a hold that outlives its own wake stops being
+  // published by reflexes.activeHold, so it cannot latch this open forever.
+  const held = hb != null && hb.hold && typeof hb.hold.label === 'string'
+  const frozen = probe === 'ok' && hb != null && hb.connected !== false && !held &&
     typeof hb.activity === 'string' && hb.activity &&
     typeof hb.lastProgressAt === 'number' && now - hb.lastProgressAt > T.FROZEN_MS &&
     st.prevPos && hb.pos && samePos(st.prevPos, hb.pos) &&
