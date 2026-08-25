@@ -1212,18 +1212,30 @@ const PATIENT_FAIL_MS = 240000
 // supervisor concludes this survival job is hung" - a promise the crisis branch quietly broke,
 // leaving the inner layers budgeting to 90s while the supervisor was cutting at 40s. One rule,
 // one number ([[threshold-seams]]).
+// THE WINDOWS, EXTRACTED (review 2026-08-25, item 5). These three lines used to live only
+// inside watchdog() below, and a SECOND reader had grown a second copy of the answer: reflexes.js
+// prices a body CLAIM at SURVIVAL_FAIL_MS + LATCH_GRACE_MS / PATIENT_FAIL_MS + LATCH_GRACE_MS
+// - FIXED, whatever the vitals - while this function cuts a non-answering job at 40s when death is
+// seconds away. So at critical vitals a hung owner kept the body for 300s while the job it was
+// hanging was failed at 40s and given up on at ~100s, and only the watchdog's giveup rung's
+// whole-body releaseBodyClaims closed that 200-second hole. Item 5 shrinks that rung to a scoped
+// lease revoke (§3.6), which is only safe once the LEASE ITSELF knows about the crisis. One rule,
+// one definition (#4): both readers now ask this.
+// PURE. cls: 'survival' (the answer to the crisis - it keeps its full window) | anything else.
+function failWindows (cls, vitals) {
+  const v = vitals || {}
+  const critical = (v.hp != null && v.hp <= 6) || (v.food != null && v.food <= 2)
+  if (cls === 'survival') return { nudgeMs: SURVIVAL_NUDGE_MS, failMs: SURVIVAL_FAIL_MS } // the answer to the crisis keeps its window AT the crisis
+  if (critical) return { nudgeMs: 20000, failMs: 40000 } // critical, and this work is not the answer: seconds
+  return { nudgeMs: PATIENT_FAIL_MS / 2, failMs: PATIENT_FAIL_MS } // patient when cheap (failMs = 2*nudgeMs, as the header says)
+}
 function watchdog (activeJob, vitals, now) {
   if (!activeJob) return 'ok'
   const t = now != null ? now : nowFn()
-  const v = vitals || {}
   const base = activeJob.lastProgressAt != null ? activeJob.lastProgressAt
     : (activeJob.startedAt != null ? activeJob.startedAt : t)
   const idleMs = t - base
-  let nudgeMs, failMs
-  const critical = (v.hp != null && v.hp <= 6) || (v.food != null && v.food <= 2)
-  if (activeJob.cls === 'survival') { nudgeMs = SURVIVAL_NUDGE_MS; failMs = SURVIVAL_FAIL_MS } // the answer to the crisis keeps its window AT the crisis
-  else if (critical) { nudgeMs = 20000; failMs = 40000 } // critical, and this work is not the answer: seconds
-  else { nudgeMs = PATIENT_FAIL_MS / 2; failMs = PATIENT_FAIL_MS } // patient when cheap (failMs = 2*nudgeMs, as the header says)
+  const { nudgeMs, failMs } = failWindows(activeJob.cls, vitals)
   if (idleMs >= failMs) return 'fail-job'
   if (idleMs >= nudgeMs) return 'nudge'
   return 'ok'
@@ -1364,6 +1376,7 @@ module.exports = {
   wdPhase,
   SURVIVAL_NUDGE_MS,
   SURVIVAL_FAIL_MS,
+  failWindows,
   PATIENT_FAIL_MS,
   LATCH_GRACE_MS,
   JOB_CLASSES,

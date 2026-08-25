@@ -98,7 +98,7 @@ async function gotoChest (bot, chestBlock) {
     // The bank lives INSIDE the hut - a plain goto can't plan through the door, so go straight
     // through the UNIFIED navigator (its door pre-flight crosses in). Tight at-base budgets.
     try {
-      await navigate.navigateTo(bot, new goals.GoalNear(chestBlock.position.x, chestBlock.position.y, chestBlock.position.z, 2), { timeoutMs: 15000, deadlineMs: 35000, climb: false, budgets: { door: 2, pit: 0, nudge: 1, stepout: 1 }, label: 'bank' })
+      await navigate.navigateTo(bot, new goals.GoalNear(chestBlock.position.x, chestBlock.position.y, chestBlock.position.z, 2), { timeoutMs: 15000, deadlineMs: 35000, climb: false, rescue: 'light', label: 'bank' })
     } catch {}
   }
 }
@@ -145,7 +145,7 @@ async function ensureChest (bot, opts = {}) {
   if (countItem(bot, 'chest') === 0) {
     const table = await P().ensureTable(bot, opts)
     // Unified navigator (door pre-flight crosses into the hut if the table's inside); tight at-base budgets.
-    if (bot.entity.position.distanceTo(table.position) > 3) { try { await navigate.navigateTo(bot, new goals.GoalNear(table.position.x, table.position.y, table.position.z, 2), { timeoutMs: 15000, deadlineMs: 35000, climb: false, budgets: { door: 2, pit: 0, nudge: 1, stepout: 1 }, label: 'chest-table-reach' }) } catch {} }
+    if (bot.entity.position.distanceTo(table.position) > 3) { try { await navigate.navigateTo(bot, new goals.GoalNear(table.position.x, table.position.y, table.position.z, 2), { timeoutMs: 15000, deadlineMs: 35000, climb: false, rescue: 'light', label: 'chest-table-reach' }) } catch {} }
     const recipe = bot.recipesFor(mcData.itemsByName.chest.id, null, 1, table)[0]
     if (!recipe) throw new Error('cannot craft a chest (need 8 planks)')
     await bot.craft(recipe, 1, table)
@@ -178,7 +178,7 @@ async function placeChestOriented (bot, target, want, opts = {}) {
       // door-assist approach: the stand cell is INSIDE the hut and a raw goto can't plan
       // through the closed door (live: the heal's re-place silently failed from outside)
       const nav = require('./navigate.js')
-      await nav.navigateTo(bot, new goals.GoalBlock(stand.x, stand.y, stand.z), { timeoutMs: 15000, deadlineMs: 35000, climb: false, budgets: { door: 2, pit: 0, water: 0, nudge: 1, stepout: 1 }, label: 'chest-stand' })
+      await nav.navigateTo(bot, new goals.GoalBlock(stand.x, stand.y, stand.z), { timeoutMs: 15000, deadlineMs: 35000, climb: false, rescue: 'light', label: 'chest-stand' })
     } catch (e) { dbg('  orientedChest: cannot reach the stand cell ' + stand + ' (' + e.message + ')'); continue }
     const cur = bot.blockAt(target)
     if (cur && /chest/.test(cur.name)) return false // filled meanwhile

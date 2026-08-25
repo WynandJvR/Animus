@@ -371,7 +371,7 @@ async function digInForNight (bot, opts = {}) {
           // reflex-protected open-align-step-through - robust vs the plain goto that timed out
           // trying to path into the closed box and got its goal stolen mid-crossing (live).
           if (!await nav.enterStructure(bot, hutNear, { isStopped })) {
-            await nav.navigateTo(bot, new goals.GoalNear(hutNear.x + 2, hutNear.y + 1, hutNear.z + 2, 1), { timeoutMs: 20000, deadlineMs: 45000, isStopped, climb: false, budgets: { door: 2, pit: 0, water: 1, nudge: 1 }, label: 'shelter-home' })
+            await nav.navigateTo(bot, new goals.GoalNear(hutNear.x + 2, hutNear.y + 1, hutNear.z + 2, 1), { timeoutMs: 20000, deadlineMs: 45000, isStopped, climb: false, rescue: 'light', label: 'shelter-home' })
           }
         } catch (e) { dbg('shelter: could not get inside my hut (' + e.message + ')') }
       }

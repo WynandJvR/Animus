@@ -8,7 +8,7 @@
 // checking the others' latches. Measured distinct latch reads in index.js alone:
 //
 //   25  commands.isBusy()             12  commands.isEscaping()        7  provision.isMaintaining()
-//   21  provision.isResting()         10  arbiter.maneuverActive()     7  navigate.isForceUnsticking()
+//   21  provision.isResting()         10  arbiter.maneuverActive()     7  navigate.isUnsticking()
 //   19  provision.isSecuringFood()     9  navigate.isRecovering()      5  provision.isNight()
 //
 // That is O(n^2) coupling: every new body-moving behaviour had to be added to every existing
@@ -242,29 +242,43 @@ function _resetHolds () { holds.clear() }
 // honest statement. Their sum is already navigate.js's leg ceiling and provision-recovery's
 // RUNG_NOPROGRESS_MS. A claim is exactly the same question asked of an owner instead of a job, so
 // it gets exactly the same number - a THIRD literal here would be the seam coming back
-// ([[threshold-seams]]). Non-survival claims use the patient window the same watchdog uses.
+// ([[threshold-seams]]). Non-survival claims use the patient window the same watchdog uses, and
+// since 2026-08-25 they scale with the vitals the same way it does (see claimStaleMs below).
 // This is a deadline on an ATTEMPT (the work's attempt to move the world), not a delay before
 // thinking (#6): every credited delta pushes it out again, so a claim that is doing anything at
 // all never expires, and one that has done nothing since the supervisor gave up on it is gone.
 const claims = new Map() // key -> claim
-let claimWindows = null  // memoised {survive, patient}; scheduler.js is required LAZILY (this file's load-order contract)
-function claimStaleMs (row) {
-  if (!claimWindows) {
-    const d = { survive: 150000, patient: 300000 } // the same sums, for the impossible case where scheduler.js will not load
+// THE WINDOW IS DANGER-SCALED, because the verdict it restates is (review 2026-08-25, item 5).
+// It used to memoise a fixed pair - SURVIVAL_FAIL_MS + LATCH_GRACE_MS (150s) and PATIENT_FAIL_MS
+// + LATCH_GRACE_MS (300s) - which is right for a calm bot and wrong for a dying one. The
+// supervisor cuts a job that is NOT the answer to the crisis at 40s when hp <= 6 or food <= 2 and
+// gives up on it ~100s in; a claim priced at a flat 300s therefore let a hung owner hold the body
+// for 200 seconds AFTER the process had concluded its work was dead. The only thing covering that
+// hole was the giveup rung's whole-body releaseBodyClaims, which §3.6 shrinks to a scoped lease
+// revoke - so the hole has to be closed at the source, not compensated for downstream (#1).
+// scheduler.failWindows is now the ONE definition of "how long before this is hung", asked here
+// with the caller's vitals and by the job supervisor with the same ones. A claim whose row is
+// SURVIVE keeps the full survival window whatever the vitals, exactly as the answer to a crisis
+// keeps its own - the crisis window must never cut the response to the crisis (f247a87).
+let sched = null // memoised MODULE handle (scheduler.js is required LAZILY - this file's load-order contract)
+let schedTried = false
+function claimStaleMs (row, vitals) {
+  if (!schedTried) {
+    schedTried = true
     try {
       const s = require('./scheduler.js') // lazy + PURE, exactly as recoveryLadder.refuse does below: numbers out, no bot, no cycle at load
-      if (Number.isFinite(s.SURVIVAL_FAIL_MS) && Number.isFinite(s.PATIENT_FAIL_MS) && Number.isFinite(s.LATCH_GRACE_MS)) {
-        claimWindows = { survive: s.SURVIVAL_FAIL_MS + s.LATCH_GRACE_MS, patient: s.PATIENT_FAIL_MS + s.LATCH_GRACE_MS }
-      }
+      if (typeof s.failWindows === 'function' && Number.isFinite(s.LATCH_GRACE_MS)) sched = s
     } catch {}
-    if (!claimWindows) return row.tier === 'SURVIVE' ? d.survive : d.patient
   }
-  return row.tier === 'SURVIVE' ? claimWindows.survive : claimWindows.patient
+  const survive = row.tier === 'SURVIVE'
+  if (!sched) return survive ? 150000 : 300000 // the same sums, for the impossible case where scheduler.js will not load
+  return sched.failWindows(survive ? 'survival' : 'progress', vitals).failMs + sched.LATCH_GRACE_MS
 }
 
 // The ONE call the runner makes. `raised` = the owner keys whose latch it just observed true;
-// `ev` = { driver, at } - which claim the work ledger's advances belong to, and when that ledger
-// last moved (or last had its stillness vouched for by a declared hold).
+// `ev` = { driver, at, vitals } - which claim the work ledger's advances belong to, when that
+// ledger last moved (or last had its stillness vouched for by a declared hold), and the live
+// vitals, because how long 'no delta' is allowed to last depends on how close death is (item 5).
 //
 // WHY THE DRIVER AND NOT "anything that happened": while one job holds the ledger key, ANY advance
 // in the process credits it - the honest gap item 1 left open and named. Crediting every live
@@ -300,7 +314,7 @@ function syncClaims (raised, ev = {}) {
     const row = ownerByKey.get(c.key)
     if (!row || row.engine || c.revokedAt) continue
     const idle = now - c.lastDeltaAt
-    const stale = claimStaleMs(row)
+    const stale = claimStaleMs(row, ev.vitals)
     if (idle < stale) continue
     c.revokedAt = now
     c.why = 'no world delta credited to it for ' + Math.round(idle / 1000) + 's (>' + Math.round(stale / 1000) + 's), held ' + Math.round((now - c.takenAt) / 1000) + 's'
@@ -401,13 +415,16 @@ function def (entry) {
 // every candidate that refused here (attempts.js), so the terminal does not have to know which
 // refusals it is clearing - walking away clears them by construction.
 //
-// WHAT IT DELIBERATELY DOES NOT DO: break the wedge. Physically un-wedging the body is the one
-// rescue path of §3.5, which item 5 consolidates and which must report its failure BACK to this
-// arbiter; wiring this row into today's rung-pile (navigate.forceUnstick, the 4-minute freeze
-// watchdog) would give the terminal action a dependency on a layer that is about to be deleted.
-// What this row guarantees today is that a crisis always produces an action and that every
-// previously-refused responder is admissible again on the very next tick - including the ones
-// whose job IS to move the body.
+// AND, SINCE ITEM 5, IT BREAKS THE WEDGE. This row used to stop short of that on purpose: the
+// only tools available were the 4-minute freeze watchdog and forceUnstick's rung-pile, and giving
+// the floor a dependency on a layer that was about to be deleted would have been the wrong wiring.
+// navigate.unstick is that layer's replacement and it is accountable to this arbiter - it plans
+// from where the body actually is, bounds itself on attempt memory, and RETURNS a verdict instead
+// of re-arming a timer. So step 3 calls it, and only on the evidence that it is needed: a full
+// reset has already run in THIS 4b cell and the body is still in it. That is exactly the
+// HARD-WEDGED condition this row used to log and hand to nobody, and it is what closes the churn
+// item 3 left open - the terminal fires, nothing physically changes, the re-armed responders no-op,
+// the terminal fires again. Something now changes the world between those two ticks, or says why not.
 const TERMINAL = 'terminalAction'
 def({
   name: TERMINAL,
@@ -447,7 +464,29 @@ def({
     const forgotten = attempts.forgetAll({ except: TERMINAL })
     if (forgotten) did.push('forgot ' + forgotten + ' attempt record(s) - every refused responder is admissible again')
 
-    // 3. GO SOMEWHERE SAFE -----------------------------------------------------------------
+    // 3. BREAK THE WEDGE, IF THIS CELL HAS ALREADY EATEN A RESET ---------------------------
+    // Not on the first pass: a bot that merely lost its way is freed by steps 1-2 plus the walk
+    // home below, and running escape maneuvers on a body that can walk is how the old ladder
+    // became the main loop. `pass > 1` means a full reset already ran in this same 4b cell and
+    // the body did not leave it - the only `prior` record this row keeps, and a condition, never
+    // a timer. `force` because the floor may not refuse itself: the rungs this cell has already
+    // failed are re-tried here, since the alternative is a terminal action that cannot break the
+    // wedge it named. digOut/desperate ride the SAME escalation the deleted freeze watchdog used
+    // to reach after two failed escapes at one cell - on stronger evidence (a reset apiece), and
+    // with the dig permission rules (provision-core.digBlocked, scaffold.js) untouched.
+    if (pass > 1) {
+      try {
+        const nav = require('./navigate.js') // lazily, like every executor here (invariant: nothing heavy at load)
+        const r = await nav.unstick(bot, null, { force: true, digOut: pass >= 3, desperate: pass >= 4, holdOK: ctx.holdOK, why: 'terminal full reset #' + pass })
+        did.push(r.moved
+          ? 'BROKE THE WEDGE via ' + r.via + ' (' + r.plan.join('>') + ')'
+          : (r.verdict === 'held'
+              ? 'did NOT force an un-wedge - a declared hold vouches for this stillness'
+              : 'could not break the wedge: ' + r.verdict + ' after trying ' + (r.tried.join(', ') || 'nothing applicable')))
+      } catch (e) { did.push('the un-wedge threw (' + e.message + ')') }
+    }
+
+    // 4. GO SOMEWHERE SAFE -----------------------------------------------------------------
     let moved = ''
     try {
       const pr = commands.persistedResume && commands.persistedResume()
@@ -474,9 +513,11 @@ def({
     // "third full reset in this cell", which is the one thing it is for.
     attempts.record(TERMINAL, 'reset', cell, { now: ctx.nowMs(), why: 'full reset ran here', sig: '' })
     if (pass > 1 && nowCell === cell) {
-      // A statement of fact for the log, and the condition item 5's unstick() is owed: a full
-      // reset has now run N times in this same 4b cell and the body is still in it.
-      ctx.note('(terminal) HARD-WEDGED: full reset #' + pass + ' in cell ' + cell + ' and the body did not leave it - a physical un-wedge is the missing rung')
+      // A statement of fact for the log: a full reset has now run N times in this same 4b cell,
+      // the rescue above was asked to break it, and the body is STILL in it. This is the honest
+      // end of the line - there is deliberately nothing below it that retries on a clock.
+      ctx.note('(terminal) HARD-WEDGED: full reset #' + pass + ' in cell ' + cell + ' and the body did not leave it' +
+        (pass > 1 ? ' - the rescue was forced and could not free it either' : ''))
     }
     return {
       msg: 'full reset #' + pass + ' - ' + did.join('; '),

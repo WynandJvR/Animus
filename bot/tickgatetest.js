@@ -7,7 +7,7 @@
 // fresh and the tick WAS running every cycle - and yet `schedLastPick` went 412s stale, so every
 // cycle returned before index.js:1182 ever assigned it. The gates between are `dispatchBusy()`
 // (ruled out: revokeDispatch reported "holds no dispatch slot"), `commands.isEscaping()`,
-// `navigate.isRecovering()/isForceUnsticking()`, and `bot.isSleeping`.
+// `navigate.isRecovering()/isUnsticking()`, and `bot.isSleeping`.
 //
 // All of ours are the SAME defect the repo has now hit four times: a latch raised before an await
 // and lowered in a `finally` - correct for a throw, useless for a hang. `_maintaining` cost 4.5
@@ -75,7 +75,7 @@ t('navigate: every decrement goes through the clamped helper - no bare `recoveri
   assert.ok(/function endRecoverySpan \(\) \{ recoveringDepth = Math\.max\(0, recoveringDepth - 1\) \}/.test(nav),
     'one definition of "this span is over"')
   assert.strictEqual((nav.match(/endRecoverySpan\(\)/g) || []).length, 5,
-    'the definition plus its four call sites (recoverOnce, crossOwnDoor, forceUnstick, reactiveMove)')
+    'the definition plus its four call sites (recoverOnce, crossOwnDoor, unstick, reactiveMove)')
 })
 
 // ---- 2. the release list actually covers the gate list ---------------------------------
@@ -110,7 +110,7 @@ const gateBlock = idx.slice(gateStart, idx.indexOf('\n]', gateStart) + 2)
 
 t('index.js names its tick gates in ONE table', () => {
   assert.ok(gateBlock.length > 40, 'TICK_GATES exists')
-  for (const g of ['escaping', 'nav-recovering', 'nav-force-unstick', 'sleeping']) {
+  for (const g of ['escaping', 'nav-recovering', 'nav-unstick', 'sleeping']) {
     assert.ok(gateBlock.includes("'" + g + "'"), 'the table names ' + g)
   }
 })
@@ -140,7 +140,7 @@ t('the tick reads the table - the gate decision and the log can no longer disagr
   const i = idx.indexOf('const tick = async () =>')
   const body = idx.slice(i, i + 4000)
   assert.ok(/const gatedBy = TICK_GATES\.filter/.test(body), 'ONE read of the gates')
-  assert.ok(!/if \(navigate\.isRecovering\(\) \|\| navigate\.isForceUnsticking\(\)\) return/.test(body),
+  assert.ok(!/if \(navigate\.isRecovering\(\) \|\| navigate\.isUnsticking\(\)\) return/.test(body),
     'the hand-written copy of the gate list is gone (MUTATION CHECK: restore it and this fails)')
   assert.ok(!/if \(bot\.isSleeping\) return/.test(body), 'and so is the sleeping copy')
 })

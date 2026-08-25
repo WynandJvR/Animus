@@ -595,14 +595,15 @@ async function walkStaged (bot, tx, tz, opts = {}) {
   // identical failing leg up to 3x at ~75s each (~195-225s frozen -> death at night). Now:
   // on a MEASURED <3b stall we (a) rotate the next leg off the blocked bearing to DETOUR
   // around the obstacle, and (b) after the first retry still wedged, escalate ONCE to the
-  // aggressive manual escape (navigate.forceUnstick - the same ladder the 150s watchdog
-  // uses) so the freeze breaks in tens of seconds, not minutes. The escape logic lives in
-  // navigate.js; this loop only picks waypoints and asks for the escape.
+  // ONE rescue path (navigate.unstick - review 2026-08-25 item 5) so the freeze breaks in tens
+  // of seconds, not minutes. The rescue logic lives in navigate.js; this loop only picks waypoints
+  // and asks for the escape. There is no "150s watchdog" behind it any more - that timer is
+  // deleted, and an unstick that runs out of options RETURNS that instead of retrying on a clock.
   let stalls = 0
   let unstuck = false
   // ROUTE-REUSE + WEDGE-MEMORY (semantic-world-map slice 1): learn/replay treks so the Nth
   // home->timber run doesn't blind-plan into the 1st run's wedge. Waypoint choice ONLY - the
-  // recovery ladder / forceUnstick / reflexes below are untouched.
+  // recovery rungs / unstick / reflexes below are untouched.
   const startPos = { x: bot.entity.position.x, z: bot.entity.position.z }
   const LAVA_SAFE = process.env.LAVA_SAFE !== '0' // #41 §2a: a surface trek's XZ-blind GoalNearXZ can thread a cave mouth 45b DOWN to lava - climb out before it parks on a pool edge
   const surfaceRef = opts.surfaceY != null ? opts.surfaceY : Math.floor(bot.entity.position.y) // trek's reference surface (gather plumbs surfaceY; else where we set off from)
@@ -612,7 +613,7 @@ async function walkStaged (bot, tx, tz, opts = {}) {
   const pushCrumb = q => { if (Math.hypot(q.x - lastCrumb.x, q.z - lastCrumb.z) >= 8) { lastCrumb = { x: q.x, z: q.z }; crumbs.push(lastCrumb) } }
   // REPLAY a proven route (if one exists between here and the goal): walk its thinned points
   // as the leg targets instead of a blind bearing. A measured stall mid-replay dements the
-  // route and FALLS THROUGH to today's bearing/rotate/forceUnstick from the current position.
+  // route and FALLS THROUGH to today's bearing/rotate/unstick from the current position.
   // NAV Phase C leg-target source (priority: graph plan > whole-route replay > bearing+probe).
   // The GRAPH composes segments from >=2 proven routes (a shared corridor recallRoute can't
   // stitch); a single matching route still goes through recallRoute below.
@@ -703,7 +704,7 @@ async function walkStaged (bot, tx, tz, opts = {}) {
     } else if (NAV_LADDER_DIET) {
       // NAV_LADDER_DIET (Phase C / §5-P4): the reactive rotate-detour retires (the leg probe now
       // rotates PREEMPTIVELY at selection time, before a leg is committed). On a stall just re-aim
-      // the direct bearing; repeated failure degrades to forceUnstick/watchdog as before.
+      // the direct bearing; repeated failure degrades to the one rescue path as before.
       const step = Math.min(24, d)
       lx = p.x + ux * step; lz = p.z + uz * step
     } else {
@@ -732,8 +733,7 @@ async function walkStaged (bot, tx, tz, opts = {}) {
     try {
       navRes = await navigate.navigateTo(bot, legGoal, {
         timeoutMs: legTimeout, deadlineMs: legDeadline, isStopped, label: 'walkStaged',
-        budgets: { water: 1, pit: 1, door: 1, climb: 1, nudge: 1 }, // one rescue of each kind per leg - this loop retries legs
-        escalate: false, doorPreflight: false, // THIS loop owns the measured-stall forceUnstick; a near-home leg must not spuriously cross a door
+        escalate: false, doorPreflight: false, // THIS loop owns the measured-stall unstick; a near-home leg must not spuriously cross a door
         // Pin the leg profile (NAV-P0 remainder + NAV Phase 1). Flag OFF => trekMovements returns
         // travelMovements(bot) - the no-dig profile walkStaged was always meant to trek under
         // (its legs otherwise inherit whatever ambient profile is set, often the wedge-prone
@@ -768,17 +768,19 @@ async function walkStaged (bot, tx, tz, opts = {}) {
       if (graphLeg) { graphPlan = null; dbg('walkStaged: graph route stalled - abandoning, falling back to replay/bearing'); replay = recallRoute({ x: np.x, z: np.z }, { x: tx, z: tz }); continue }
       // MEASURED stall mid-replay -> the proven route is stale here. Dement it (fail++, 2
       // consecutive fails evict) and abandon the cursor; the next leg falls through to
-      // today's blind bearing/rotate/forceUnstick from the current position, UNCHANGED.
+      // today's blind bearing/rotate/unstick from the current position, UNCHANGED.
       if (replayLeg) { dementRoute(replay.route); replay = null; dbg('walkStaged: route replay stalled - demented, falling back to blind bearing'); continue }
       stalls++
-      // After ONE failed retry still wedged, break the freeze with the aggressive manual
-      // escape - at most once per walkStaged call. Gated like the watchdog (never while
-      // asleep or mid-dig). A truly immovable bot then degrades to an honest give-up +
-      // the 150s watchdog backstop, never a manual-controls loop.
+      // After ONE failed retry still wedged, break the freeze with the one rescue path - at most
+      // once per walkStaged call, never while asleep or mid-dig. `escalate: false` keeps this
+      // exactly where it has always been: THIS loop owns its own escalation, and its rescue may
+      // not reach the cutting rungs (the old call passed no digOut, so drybreach could never
+      // apply). A truly immovable bot degrades to an honest give-up, which the supervisor's work
+      // ledger then escalates - there is no watchdog backstop behind this any more, by design.
       if (stalls === 2 && !unstuck && !bot.isSleeping && !bot.targetDigBlock) {
         unstuck = true
-        dbg('walkStaged: wedged after retry at ' + Math.round(np.x) + ',' + Math.round(np.z) + ' - forceUnstick')
-        try { await navigate.forceUnstick(bot, { isStopped }) } catch {}
+        dbg('walkStaged: wedged after retry at ' + Math.round(np.x) + ',' + Math.round(np.z) + ' - unstick')
+        try { await navigate.unstick(bot, null, { isStopped, escalate: false, why: 'walkStaged leg wedged' }) } catch {}
         continue
       }
       if (stalls >= 4) { dbg('walkStaged: giving up wedged at ' + Math.round(np.x) + ',' + Math.round(np.z)); return false }
@@ -2766,7 +2768,7 @@ async function ensureTable (bot, opts = {}) {
     if (bot.entity.position.distanceTo(t.position) <= 3) return true
     // Through the UNIFIED navigator (not a raw goto): a table INSIDE our hut is unplannable
     // through a closed door, so the nav's door pre-flight crosses first. Tight at-base budgets.
-    try { await navigate.navigateTo(bot, new goals.GoalNear(t.position.x, t.position.y, t.position.z, 2), { timeoutMs: 15000, deadlineMs: 35000, climb: false, budgets: { door: 2, pit: 0, nudge: 1, stepout: 1 }, label: 'table-reach' }); return true } catch (e) { dbg('  ensureTable: cannot reach table at', t.position.toString(), '-', e.message); return false }
+    try { await navigate.navigateTo(bot, new goals.GoalNear(t.position.x, t.position.y, t.position.z, 2), { timeoutMs: 15000, deadlineMs: 35000, climb: false, rescue: 'light', label: 'table-reach' }); return true } catch (e) { dbg('  ensureTable: cannot reach table at', t.position.toString(), '-', e.message); return false }
   }
   let table = bot.findBlock({ matching: tableId, maxDistance: 16 }) // `let`: the place path below reassigns it
   if (table && await reach(table)) { rememberInfra('table', table.position); return table }
@@ -3018,7 +3020,7 @@ async function ensureFurnaces (bot, n, opts = {}) {
     dbg('  ensureFurnaces: at my hut - stepping to the utility spot before placing')
     try {
       const nav = require('./navigate.js') // door-assist: a plain goto can't route out through the hut door
-      await nav.navigateTo(bot, new goals.GoalNearXZ(h.x + 9, h.z + 9, 2), { timeoutMs: 20000, deadlineMs: 40000, isStopped, climb: false, budgets: { door: 2, pit: 0, water: 1, nudge: 1 }, label: 'utility-spot' })
+      await nav.navigateTo(bot, new goals.GoalNearXZ(h.x + 9, h.z + 9, 2), { timeoutMs: 20000, deadlineMs: 40000, isStopped, climb: false, rescue: 'light', label: 'utility-spot' })
     } catch (e) { dbg('  ensureFurnaces: utility-spot walk failed (' + e.message + ') - placing where i can') }
   }
   let attempts = 0

@@ -78,7 +78,7 @@ const toolForBlock = gear.bestTool
 //
 // navigateTo is the ONE entry point that owns the door pre-flight. `escalate: false` keeps this a
 // SHORT HOP: the doorway is handled, but the full stuck-recovery ladder (and its dig-out) stays
-// the property of a real navigation - so a 10-second hop can never recurse into forceUnstick.
+// the property of a real navigation - so a 10-second hop can never recurse into the one rescue path (navigate.unstick).
 function gotoWithTimeout (bot, goal, ms) {
   return navigate.navigateTo(bot, goal, { timeoutMs: ms, escalate: false })
 }

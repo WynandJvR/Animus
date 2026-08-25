@@ -290,7 +290,7 @@ function ok (cond, label) { eq(!!cond, true, label) }
   ok(i > 0, 'short-hop: gotoWithTimeout exists')
   const body = core.slice(i, i + 320)
   ok(/navigateTo\s*\(/.test(body), 'short-hop: must route through the ONE door-aware nav entry point')
-  ok(/escalate:\s*false/.test(body), 'short-hop: a 10s hop must NOT inherit the full recovery ladder (recursion into forceUnstick)')
+  ok(/escalate:\s*false/.test(body), 'short-hop: a 10s hop must NOT inherit the full recovery ladder (recursion into unstick)')
   ok(!/return\s+navigate\.gotoOnce\s*\(/.test(body), 'short-hop: the bare goto is back - three subsystems break when it is')
 }
 

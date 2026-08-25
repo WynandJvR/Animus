@@ -155,7 +155,7 @@ function dementRoute (route) {
     saveWorldMem()
   } catch (e) { dbg('route: dement failed - ' + e.message) }
 }
-// Record a physical stuck-spot (forceUnstick fired here).
+// Record a physical stuck-spot (the one rescue path could not free the body here).
 //
 // ==== THE 12b BLIND SPOT IS DELETED (review 2026-08-25, D5/§3.6) ========================
 // This function used to open with a record-side veto:
@@ -186,6 +186,17 @@ function recordWedge (pos) {
     saveWorldMem()
     dbg('wedge: recorded stuck-spot ' + Math.round(pos.x) + ',' + Math.round(pos.z) + (nearOwn ? ' nearOwnInfra' : '') + ' (n=' + (rec.n || 1) + ')')
   } catch (e) { dbg('wedge: record failed - ' + e.message) }
+}
+// THE RESCUE SIDE'S READ (review 2026-08-25 D4/§3.5, item 5). listWedges() below is the STEER
+// list and it deliberately drops the nearOwnInfra ones - the bot must NEVER route around its
+// own house. That is right for routing and it left the tag written by nobody's reader: since
+// the record-side veto was deleted (item 4) every wedge at the doorstep has been on the books,
+// and nothing asked. "Has this exact cell trapped me before, and how often" is a different
+// question from "should I route around it", and it is the one the one rescue path uses to
+// escalate on EVIDENCE instead of on a 4-minute timer. No suppression here, by design: the
+// answer is a fact, and unstick() never steers on it.
+function recallWedge (pos) {
+  try { return routeMem.wedgeAt((loadWorldMem().wedges) || [], pos) } catch { return null }
 }
 // The steer-eligible wedge list: alive (age-weighted) AND re-checked NOW against the
 // current infra list - THE recall-side home rule, and since 2026-08-25 the ONLY place it is
@@ -805,7 +816,7 @@ module.exports = {
   setDebugSink, setBuildZone,
   loadWorldMem, saveWorldMem, ownInfraAnchors,
   rememberRoute, recallRoute, planTrekRoute, dementRoute,
-  recordWedge, listWedges,
+  recordWedge, listWedges, recallWedge,
   rememberSpot, forgetSpot, recallSpot,
   rememberInfra, recallInfra, forgetInfra, listInfra, recallInfraVerified, proofHolds,
   noteContainer, settleContainer, containerDebts, // #119 COMMITMENT_LEDGER (container class)

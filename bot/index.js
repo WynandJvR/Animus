@@ -41,16 +41,13 @@ const schedulerCore = require('./scheduler-core.js') // #65 DYNAMIC_CORE Phase 1
 const maintain = require('./maintain.js') // #40 F2: pure buffer needs() - to detect a pending food (pack/bank) need when an opp window is abandoned
 const foodSec = require('./food.js') // #40 F3.2: pure busy-preempt food threshold (FOOD_SURVIVAL raises it 6 -> 10)
 const pov = require('./pov.js') // GUI-OVERHAUL §2: sliced DDA raycaster behind GET /pov (all logic lives in pov.js)
-const cycleDetect = require('./cycle-detect.js') // task #34: pure behavioral cycle/oscillation detector - fed into the S7 watchdog's existing ladder (no new subsystem)
 const reflexes = require('./reflexes.js') // PLAN-one-runner: the proposal registry + the ONE body-ownership rule the tick arbitrates with
 const attempts = require('./attempts.js') // review §3.3: attempt memory keyed (job, step, 4b-cell) - replaces runner.noOp + runner.ladderBlock
 const SCHED_ON = process.env.SCHEDULER !== '0' // master flag: SCHEDULER=0 restores the S1-hotfix wiring byte-for-byte (gate takes the survivalAdmissible path, the tick never registers, the 3 reflexes run as today)
 const LADDER_ON = SCHED_ON && process.env.RECOVERY_LADDER !== '0' // S5: RECOVERY_LADDER=0 restores S4's recoveryLadder DOWNGRADE + the one-shot respawn grave gating byte-for-byte
 const MAINTAIN_ON = SCHED_ON && process.env.MAINTAIN !== '0' // S6: MAINTAIN=0 restores the defer-note + the four proactive reflexes on their old timers byte-for-byte
 const WATCHDOG_ON = SCHED_ON && process.env.WATCHDOG !== '0' // S7: the in-process forward-progress watchdog. WATCHDOG=0 -> no interval, no heartbeat merge, no wdPhase call; the touchProgress hooks remain as inert timestamps nobody reads (behaviorally byte-identical)
-const CYCLE_DETECT_ON = WATCHDOG_ON && process.env.CYCLE_DETECT !== '0' // task #34: the behavioral cycle detector. An S7 ORGAN (not a peer) - lives inside the wdTimer, so WATCHDOG=0 kills it too. CYCLE_DETECT=0 -> no sampling, no verdict override, no ring read: byte-identical to today.
 const OPP_ON = MAINTAIN_ON && process.env.OPPORTUNISTIC_MAINTAIN !== '0' // opportunistic at-hut maintenance during the build era; OPPORTUNISTIC_MAINTAIN=0 restores S6 byte-for-byte
-const CYCLE_SELFABORT_EXEMPT = process.env.CYCLE_SELFABORT_EXEMPT !== '0' // #49: exempt watchdog/preempt-induced "(stopped)" self-aborts from repeatFail eligibility. Default ON; =0 restores today byte-for-byte (the selfAbort ring field goes unread)
 const RESILIENT_ON = SCHED_ON && process.env.RESILIENT_RECOVERY !== '0' // #41: invert build-vs-recovery priority after a death (postDeathRecovery latch + bank re-arm). RESILIENT_RECOVERY=0 restores today byte-for-byte (deathsRecent>=2 preempt gate, un-suppressed respawn ladder, no latch)
 
 // Live brain settings the dashboard can change on the fly; brain-llm.js polls
@@ -811,7 +808,7 @@ const bodyLatches = () => {
   const up = []
   const probe = (key, fn) => { try { if (fn()) up.push(key) } catch { /* this ONE latch is unreadable: it does not get to own the body, and it does not hide the others */ } }
   probe('escape', () => commands.isEscaping && commands.isEscaping())
-  probe('navRecovery', () => navigate.isRecovering() || navigate.isForceUnsticking())
+  probe('navRecovery', () => navigate.isRecovering() || navigate.isUnsticking())
   probe('ladder', () => provRecovery.isRecoveringDegraded && provRecovery.isRecoveringDegraded())
   probe('foodRun', () => provFood.isSecuringFood && provFood.isSecuringFood())
   probe('shelter', () => provRecovery.isResting && provRecovery.isResting())
@@ -858,7 +855,7 @@ const bodyOwner = () => {
     // An unreadable ledger is NOT evidence that an owner is stuck (#10): syncClaims makes no
     // revocation verdict without it, so this passes the absence through rather than inventing one.
     const ev = (() => { try { return commands.advanceInfo() } catch { return { at: null } } })()
-    const r = reflexes.syncClaims(up, { driver: drivingClaim(up), at: ev.at })
+    const r = reflexes.syncClaims(up, { driver: drivingClaim(up), at: ev.at, vitals: { hp: bot.health, food: bot.food } })
     for (const c of r.revoked) revokeClaim(c)
     return r.owner
   } catch { /* the registry itself failing must never immobilise the bot */ return null }
@@ -988,7 +985,7 @@ let schedGateNotedAt = 0         // ...and when we last said so, so it is not ch
 const TICK_GATES = [
   ['escaping', () => !!(commands.isEscaping && commands.isEscaping()), 'commands.releaseBodyClaims'],
   ['nav-recovering', () => !!navigate.isRecovering(), 'navigate.releaseNavLatches'],
-  ['nav-force-unstick', () => !!navigate.isForceUnsticking(), 'navigate.releaseNavLatches'],
+  ['nav-unstick', () => !!navigate.isUnsticking(), 'navigate.releaseNavLatches'],
   ['sleeping', () => !!bot.isSleeping, 'engine-state']
 ]
 if (SCHED_ON) {
@@ -1091,7 +1088,7 @@ if (SCHED_ON) {
         } else attempts.forget(jobKey, stepOf(jobKey), cell)
       } catch {}
     }
-    catch (e) { note('(sched) ' + name + ' failed: ' + e.message); if (CYCLE_DETECT_ON) { try { commands.recordOutcome('sched:' + name, false, e.message) } catch {} } } // task #34: today this only note()s+forgets; feed the outcome ring so a re-dispatch loop (gather held x8) is SEEN. Flag-gated so CYCLE_DETECT=0 leaves lastOutcome byte-identical.
+    catch (e) { note('(sched) ' + name + ' failed: ' + e.message); try { commands.recordOutcome('sched:' + name, false, e.message) } catch {} } // a failed dispatch is an OUTCOME the brain and the flight recorder must see; it used to be gated behind CYCLE_DETECT (default on), and the dead side of that flag went with cycle-detect.js (review §3.6 / DESIGN-PRINCIPLES flag debt)
     finally {
       // Release the declared hold and touch progress ONCE, on the way out. That single touch is
       // what the per-hold heartbeats were really for: without it a job that legitimately sat
@@ -1181,6 +1178,13 @@ if (SCHED_ON) {
     pick: pick || null,
     say: schedSay,
     note,
+    // A DECLARED HOLD IS ALIVE BY CONSTRUCTION, and the runner is the only layer that can judge a
+    // hold's PREMISE (holdPremiseOK reads the body; reflexes.js only ever knows the premise's
+    // name). The supervisor already asks this on its 5s pass; the terminal action needs the same
+    // answer before it forces a physical un-wedge, because "sitting perfectly still until dawn"
+    // is a goal and the layer that could not tell the difference dug the bot out of its own
+    // sealed shelter on 2026-07-29 and got it killed by a creeper. One reader, one definition.
+    holdOK: () => { try { return reflexes.activeHold(holdPremiseOK) } catch { return null } },
     runner
   })
   // Is this proposal crisis-grade RIGHT NOW - i.e. may it take the body off a build, or out of a
@@ -1625,8 +1629,6 @@ if (SCHED_ON) {
     let lastKickAt = 0
     let lastLivenessRearm = 0
     let stalePickNoted = '' // one honest line per staleness episode (the heldNoted throttle idiom)
-    const cycRing = []            // task #34: bounded 48-sample position ring (~4min @ 5s)
-    let cycState = { phase: 'idle', firedAt: -Infinity, cycleKey: null, workCount: 0 } // cycle-detect latch (mirrors wdState)
     let heldNoted = ''
     const wdTimer = setInterval(() => {
       try {
@@ -1670,38 +1672,27 @@ if (SCHED_ON) {
         // 3. pure verdict + escalation phase.
         let verdict = scheduler.watchdog(job, { hp: bot.health, food: bot.food }, now)
         const jobKey = job ? job.key : null // ONE definition of the key - activeJobInfo builds it, the work ledger is filed under it, this reducer escalates on it (#4)
-        // 3b. task #34 BEHAVIORAL CYCLE DETECTION (an S7 organ): sample position into a bounded ring
-        //     and, when the pure detector flags an oscillation / repeat-fail, synthesize a fail-job
-        //     verdict into the UNMODIFIED wdPhase + lever map (max-severity merge - a real fail-job is
-        //     never downgraded). SURVIVE-tier maneuvers + escaping suppress it (invariant 6); the
-        //     sleep/rest declared-hold early-returns above already exclude declared holds.
-        if (CYCLE_DETECT_ON && !(commands.isEscaping && commands.isEscaping()) && !arbiter.maneuverActive(arbiter.PRIORITY.SURVIVE)) {
-          const pp = bot.entity && bot.entity.position
-          if (pp) {
-            let wc = 0; try { wc = commands.progressInfo().workCount || 0 } catch {}
-            cycRing.push({ t: now, x: pp.x, y: pp.y, z: pp.z, cycleKey: job ? job.name : null, workCount: wc }) // job NAME, not per-dispatch jobKey (root cause 2b)
-            if (cycRing.length > 48) cycRing.shift()
-          }
-          let outRing = []; try { outRing = commands.recentOutcomes() } catch {}
-          if (CYCLE_SELFABORT_EXEMPT) outRing = outRing.filter(r => !(r.selfAbort && !r.ok)) // #49: drop self-abort FAILS (watchdog/preempt "(stopped)" pauses); keep successes + genuine fails so repeatFail still latches on real failures
-          const det = cycleDetect.detect(cycRing, outRing, now)
-          cycState = cycleDetect.step(cycState, det, now)
-          if (cycState.act === 'break') {
-            if (job) {
-              note('(wd) CYCLE ' + det.kind + ' on ' + job.name + ' - forcing fail-job (behavioral loop, not a freeze)')
-              verdict = 'fail-job' // synthetic - flows through the UNMODIFIED wdPhase/lever map below
-              // FOOD_FLOOR F4: a repeatFail cycle on the survival ladder / secureFood is the eternal
-              // food re-loop - BUMP the floor's no-progress counter so its next dispatch ESCALATES
-              // (widen the water scout, active fishing over a passive hold) instead of re-running the
-              // identical failing sequence. FOOD_FLOOR=0 -> escalateFoodFloor is a no-op.
-              if (process.env.FOOD_FLOOR !== '0' && /recoverFromDegraded|recoveryLadder|secureFood/.test(job.name || '')) { try { provFood.escalateFoodFloor() } catch {} }
-            } else {
-              note('(wd) CYCLE ' + det.kind + ' with no active job - clearing the goal so the brain sees the loop')
-              try { commands.recordOutcome('cycle:' + det.kind, false, 'A<->B loop broken (no job to fail)') } catch {}
-              try { if (bot.pathfinder) bot.pathfinder.setGoal(null) } catch {} // honest cancel the nav stack understands; NO forceUnstick (the body can move - the decision is stuck)
-            }
-          }
-        }
+        // ==== THE CYCLE DETECTOR IS DELETED (review 2026-08-25, D4/§3.6, item 5) ==========
+        // A ~40-line block stood here: a bounded 48-sample position ring, an outcome-ring read
+        // with a self-abort filter, cycleDetect.detect/step, and a synthetic `fail-job` verdict
+        // merged into wdPhase. cycle-detect.js is gone with it.
+        //
+        // It was the third detector in a circle of three and it never caught anything after
+        // 04:09 on the day the bot died. Its oscillation predicate needs >=48 BLOCKS of gross
+        // path inside a 180s window (cycle-detect.js:27); the terminal wedge shuttled 1.6-2.2b
+        // per escape burst, roughly 6-8b per 4-minute cycle - an order of magnitude under the
+        // floor - so slow oscillation was invisible to it BY CONSTRUCTION. Its own comment
+        // delegated that case to "the freeze watchdogs' domain", and navigate.js's navRung stamp
+        // delegated A<->B detection to IT. Each of the three deferred to the next; none acted.
+        // It was also suppressed outright while any SURVIVE maneuver or escape held the body -
+        // i.e. during precisely the episodes worth detecting.
+        //
+        // §3.1 leaves ONE stall test: no world delta credited to this job for its window. That
+        // is what the lines below already compute, from the per-job work ledger, on evidence a
+        // rescue cannot manufacture. A second detector with a different definition of "stuck"
+        // was never a safety net; it was a second opinion nobody reconciled (#4).
+        // (A cheap A<->B check may live INSIDE unstick if one is ever needed - §3.6 says so
+        // explicitly - where it would be a fact about one rescue, not a rival verdict about a job.)
         wdState = scheduler.wdPhase(wdState, verdict, jobKey, now)
         if (job && wdState.act !== 'none') {
           const base = job.lastProgressAt != null ? job.lastProgressAt : (job.startedAt != null ? job.startedAt : now)
@@ -1719,6 +1710,14 @@ if (SCHED_ON) {
               try { provMaintain.stopMaintenance() } catch {}
             } else if (job.name === 'secureFood' || job.name === 'recoverHp' || job.name === 'recoverFromDegraded' || job.name === 'recoveryLadder') {
               try { provision.stopSurvivalJob() } catch {}
+              // FOOD_FLOOR F4: BUMP the floor's no-progress counter so the next dispatch ESCALATES
+              // (widen the water scout, active fishing over a passive hold) instead of re-running
+              // the identical failing sequence. This used to hang off cycle-detect's repeatFail
+              // verdict - a detector that fired zero times after 04:09 on the day the bot died.
+              // The trigger it needed already existed one line up: the supervisor concluding, from
+              // the work ledger, that this exact job has produced nothing. One evidence source, not
+              // two (#4). FOOD_FLOOR=0 -> escalateFoodFloor is a no-op.
+              if (process.env.FOOD_FLOOR !== '0' && /recoverFromDegraded|recoveryLadder|secureFood/.test(job.name || '')) { try { provFood.escalateFoodFloor() } catch {} }
             }
             // recover/graveSweep: NO latch bites by design (recover ignores buildAbort) - log + recordOutcome
             // only; its own travel deadlines unwind it and the tick applies runner.graveCooldownUntil. A
@@ -1762,8 +1761,24 @@ if (SCHED_ON) {
                 // A decision must produce an action (#5). This is condition-driven - the
                 // verified-progress ladder above is the evidence (#3, #6). 2026-08-02: the SAME
                 // act revokeDispatch now performs when there IS a slot; only this branch did it.
-                try { const freed = commands.releaseBodyClaims('watchdog giveup on ' + job.name); if (freed) note('(wd) ...and released the body claim it was still holding: ' + freed) } catch {}
-                try { commands.touchProgress('giveupRelease:' + job.name) } catch {}
+                // ...AND THE BODY CLAIM - SCOPED TO THIS JOB'S OWN LEASE (review §3.6, item 5).
+                const claimKey = reflexes.claimOfJob(job.name) || 'job' // the claim THIS job raises; 'job' is the commands-level activity (autobuild runs inline and takes no lease)
+                try { const freed = commands.releaseBodyClaims('watchdog giveup on ' + job.name, { only: [claimKey] }); if (freed) note('(wd) ...and released the ' + claimKey + ' claim it was still holding: ' + freed) } catch {}
+                // WHY IT IS SCOPED NOW. This was a WHOLE-BODY releaseBodyClaims: it cleared every
+                // latch in the owners table because ONE job was hung - the coarse-release bug item
+                // 2 removed everywhere else and deliberately left standing here. The reason it had
+                // to stay was a threshold seam, not a design: at critical vitals this rung fires at
+                // ~100s while a body claim was priced at a FIXED 150s/300s, so nothing else would
+                // have taken the latch back for another 200 seconds. That seam is closed at its
+                // source - scheduler.failWindows is now the ONE definition of "how long before this
+                // is hung" and reflexes.claimStaleMs asks it with the live vitals - so the registry
+                // revokes this same lease on the same schedule, and the line above is the belt to
+                // its braces rather than a second, blunter mechanism.
+                // NO touchProgress HERE. `touchProgress('giveupRelease:' + job.name)` stood on the
+                // next line: the supervisor announcing to every reader of the body clock that
+                // something had happened, at the exact instant it concluded that nothing had. It
+                // is the same class as the navRung stamp item 1 deleted - a layer vouching for the
+                // work it just declared dead (#7).
               }
             }
           }
@@ -2117,7 +2132,7 @@ if (process.env.AUTO_DEFEND !== '0') {
                     try { await navigate.enterStructure(bot, hut, { isStopped: () => false, priority: arbiter.PRIORITY.SURVIVE }) } catch {}
                   } else {
                     await navigate.navigateToPreempt(bot, new goals.GoalNear(gx, gy, gz, 1),
-                      { timeoutMs: 15000, deadlineMs: CREEPER_BACKOFF_ON ? 20000 : 40000, climb: false, priority: arbiter.PRIORITY.SURVIVE, budgets: { door: 3, pit: 0, water: 0, nudge: 1, stepout: 1 }, label: 'hut-retreat' })
+                      { timeoutMs: 15000, deadlineMs: CREEPER_BACKOFF_ON ? 20000 : 40000, climb: false, priority: arbiter.PRIORITY.SURVIVE, rescue: 'light', label: 'hut-retreat' })
                   }
                   note('(flee) inside the hut - door-assist sealed the door behind me')
                 }
@@ -2136,7 +2151,7 @@ if (process.env.AUTO_DEFEND !== '0') {
                   const dest = me.plus(away.scaled(20 / (away.norm() || 1))) // 20b -> past the creeper's 16m follow range -> deaggro (no boundary jitter)
                   await navigate.navigateToPreempt(bot, new goals.GoalNear(Math.floor(dest.x), Math.floor(me.y), Math.floor(dest.z), 2),
                     CREEPER_BACKOFF_ON
-                      ? { timeoutMs: 6000, deadlineMs: 12000, priority: arbiter.PRIORITY.SURVIVE, label: 'creeper-backoff', budgets: { nudge: 1, stepout: 1, climb: 0, pit: 0, door: 0, indoor: 0, water: 1, wetbreach: 0 } } // fix #10 F2: 1.5s-fuse threat - ladder-light, the burst is the fallback not the ladder
+                      ? { timeoutMs: 6000, deadlineMs: 12000, priority: arbiter.PRIORITY.SURVIVE, label: 'creeper-backoff', rescue: 'light' } // fix #10 F2: 1.5s-fuse threat - rescue-light (no cutting/pillaring rung under a 1.5s fuse); the burst is the fallback
                       : { timeoutMs: 15000, deadlineMs: 40000, priority: arbiter.PRIORITY.SURVIVE, label: 'creeper-backoff' })
                 }
               }
@@ -2316,81 +2331,36 @@ if (process.env.AUTO_DEFEND !== '0') {
 //  merely unconfirmed. One timer, two tiers, one guard stack - so the survival half was gated
 //  behind the idle half's `if (pathfinder.goal) return`. They are separate rows now.)
 
-// HARD-WEDGE WATCHDOG: the last line of defense against multi-minute position freezes.
-// If the body has been TRYING to move (pathfinder goal set / a navigation active) but
-// the position hasn't budged for 2.5 minutes, force an escape through the recovery
-// ladder directly (navigate.forceUnstick: hop, step-out, pillar/climb - all manual
-// controls + natural-terrain digs only). Catches the cases the per-nav ladder can't:
-// reflex storms that eat every nav's deadline, and isBusy() builds where the normal
-// stuck detector is deliberately blind (live: a 2h creeper-standoff freeze in a cave
-// pocket showed stuck:null the whole time). Disable with WEDGE_WATCHDOG=0.
-if (process.env.WEDGE_WATCHDOG !== '0') {
-  let wdHist = [] // ring of {x,y,z,t}
-  let wdBusy = false
-  let wdLastFire = 0
-  let wdFailPos = null // where the last force-escape failed (for the same-cell streak)
-  let wdFailStreak = 0 // consecutive same-cell force-escape failures
-  const DIGOUT_ON = process.env.DIGOUT_ESCAPE !== '0' // hard-wedge dig-out escape (default ON; =0 restores today)
-  setInterval(async () => {
-    if (wdBusy || !bot.entity || bot.health <= 0) return
-    const now = Date.now()
-    const p = bot.entity.position
-    wdHist.push({ x: p.x, y: p.y, z: p.z, t: now })
-    while (wdHist.length && now - wdHist[0].t > 200000) wdHist.shift()
-    // "trying to move" = someone is steering; a bot smelting/sleeping/digging in place is fine
-    const trying = !!(bot.pathfinder && bot.pathfinder.goal) || navigate.isNavigating()
-    if (!trying) return
-    // Deliberate stillness is NOT a wedge. While SHELTERING/RESTING (bunker night-wait, bed
-    // sleep) - or asleep / mid-dig - the bot is MEANT to sit still: firing the force-escape
-    // here just fought the night-shelter reflex, pit-escaping the very bunker the shelter
-    // re-sealed 5s later (live 379,62,40: 20+ min of watchdog-vs-shelter, farm cells never
-    // advanced). Reset the freeze clock so a fresh 2.5-min window starts once we truly leave.
-    // PLAN-one-runner S4: ...and a DECLARED hold is the general form of "meant to sit still".
-    // THIS is the watchdog that actually killed the bot on 2026-07-29: `(watchdog) position
-    // FROZEN ~195s - forcing an escape` fired on a correctly sealed night shelter, because the
-    // shelter was a ladder RUNG and isResting() was therefore false. One rule, read in one place.
-    if (bot.isSleeping || bot.targetDigBlock || (provRecovery.isResting && provRecovery.isResting()) || reflexes.activeHold(holdPremiseOK)) { wdHist = []; return }
-    // Only stand down for our OWN force-escape. A regular recovery/escape that has the
-    // position FROZEN for 2.5 minutes is by definition failing (live: the ladder looped
-    // door/nudge/stepout "no progress" for 4+ minutes at 433,62,112 and the old
-    // isRecovering() gate kept this watchdog silent the whole time).
-    if (navigate.isForceUnsticking()) return
-    const old = wdHist.find(h => now - h.t >= 150000)
-    if (!old) return // not enough history yet
-    const moved = Math.hypot(p.x - old.x, p.y - old.y, p.z - old.z)
-    if (moved >= 1.5) return
-    if (now - wdLastFire < 240000) return // one forced escape per 4 min - never a tight loop
-    wdLastFire = now
-    wdBusy = true
-    try {
-      note(`(watchdog) position FROZEN ~${Math.round((now - old.t) / 1000)}s at ${p.floored()} while trying to move - forcing an escape`)
-      const ok = await navigate.forceUnstick(bot, { digOut: DIGOUT_ON && wdFailStreak >= 1 })
-      if (ok) {
-        note(`(watchdog) force-escape MOVED me to ${bot.entity.position.floored()}`)
-        wdHist = []; wdFailStreak = 0; wdFailPos = null
-      } else {
-        // ESCALATION (water-wedge escape, Change B): track consecutive same-cell failures.
-        // The 4-min retry cadence (wdLastFire) is deliberately unchanged; nothing here aborts
-        // or cancels a job (stop semantics are protected and an abort can't move the body).
-        const cur = bot.entity.position
-        if (wdFailPos && Math.hypot(cur.x - wdFailPos.x, cur.y - wdFailPos.y, cur.z - wdFailPos.z) <= 4) wdFailStreak++
-        else wdFailStreak = 1
-        wdFailPos = { x: cur.x, y: cur.y, z: cur.z }
-        note('(watchdog) force-escape could not move me - will retry in 4 min')
-        if (wdFailStreak === 2) {
-          // ~8 min frozen on the same cell: ONE immediate retry with the wider breach budget.
-          note('(watchdog) 2nd failed escape at the same cell - one DESPERATE retry (wider breach)')
-          let ok2 = false
-          try { ok2 = await navigate.forceUnstick(bot, { desperate: true, digOut: DIGOUT_ON }) } catch (e) { note(`(watchdog) desperate retry failed: ${e.message}`) }
-          if (ok2) { note(`(watchdog) DESPERATE escape MOVED me to ${bot.entity.position.floored()}`); wdHist = []; wdFailStreak = 0; wdFailPos = null }
-        } else if (wdFailStreak >= 3) {
-          const mins = Math.round((now - old.t) / 60000)
-          note(`(watchdog) HARD-WEDGED at ${cur.floored()}: ${wdFailStreak} consecutive failed escapes over ~${mins} min - out of tools, will keep retrying${DIGOUT_ON ? ' (dig-out tried)' : ''}`)
-        }
-      }
-    } catch (e) { note(`(watchdog) force-escape failed: ${e.message}`) } finally { wdBusy = false }
-  }, 5000).unref?.()
-}
+// ==== THE FREEZE WATCHDOG IS DELETED (structural review 2026-08-25, D4/§3.5(3), item 5) ====
+// `if (process.env.WEDGE_WATCHDOG !== '0') { ... }` stood here: a 5s timer that measured a 150s
+// positional freeze, logged `(watchdog) position FROZEN ~195s at (x,y,z) - forcing an escape`,
+// ran navigate.forceUnstick, and on failure armed a FLAT 4-MINUTE RETRY plus a same-cell failure
+// streak and a "DESPERATE" second escape. It was the fifth independent stall detector in this
+// process and the one that killed the bot.
+//
+// The arithmetic, verified in the log: the job supervisor's non-critical fail rung is at 240s.
+// This timer fired at 195s - FORTY-FIVE SECONDS EARLIER - and its step-out rungs always
+// "succeeded" by netting 1.6-2.2 blocks, which (through the navRung stamp deleted with item 1)
+// reset the job clock to zero. NUDGE at ~120s, escape at ~195s, clock reset, repeat: the exact
+// 4-minute period observed 32 times on 2026-08-03 between 16:54 and 20:10, zero FAIL-JOB in
+// 4h15m, process death with the bot standing two blocks from its own bed. Two watchdogs, one
+// body, and the faster one was the one with no evidence ([[threshold-seams]], between layers).
+//
+// Everything it did is now owned, once, by things that can be held to account:
+//   * "is the body physically wedged"      -> unstick() (navigate.js) - one plan, chosen from
+//                                             WHERE the body is, bounded by attempt memory keyed
+//                                             to a 4b cell, escalating on evidence, never on a
+//                                             timer, and returning a VERDICT when it is spent.
+//   * "is this JOB going nowhere"          -> scheduler.watchdog on the per-job work ledger
+//                                             (item 1): NUDGE -> FAIL-JOB -> GIVEUP, on world
+//                                             deltas only. Nothing can wind that clock any more.
+//   * "who rescues when the job is dead"   -> the arbiter's terminal action (item 3), which takes
+//                                             the body, resets, and is the ONE caller allowed to
+//                                             force a rescue in a cell that has already failed.
+// There is deliberately NO replacement timer. A blanket retry is what hid this livelock for four
+// hours (#1, #6), and DIGOUT_ESCAPE / WEDGE_WATCHDOG were its two remaining flags: the dig-out
+// escalation is now armed by unstick's own record of having failed here, which is strictly more
+// evidence than "the body has not moved for 150s". No dig permission changed with any of it.
 
 // (auto-collect moved to bot/reflexes.js as an IDLE-tier proposal - S5. It scored its own
 //  eagerness by distance there, so a drop underfoot is picked up and one 8b away is not worth
@@ -2435,7 +2405,7 @@ if (process.env.AUTO_SURFACE !== '0') {
     // fire ANYWAY (closes gate-starvation). bot.isSleeping is always respected.
     if (persistedMs < 16000) {
       if (commands.isEscaping && commands.isEscaping()) return
-      if (navigate.isRecovering() || navigate.isForceUnsticking()) return
+      if (navigate.isRecovering() || navigate.isUnsticking()) return
       if (provRecovery.isResting && provRecovery.isResting()) return
     }
     if (bot.isSleeping) return

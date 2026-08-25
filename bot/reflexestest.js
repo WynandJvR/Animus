@@ -61,7 +61,7 @@ t('2: no body latch is read anywhere in reflexes.js', () => {
     .filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l)) // drop comment-only lines; the header NAMES these latches on purpose
     .join('\n')
   const LATCHES = ['isBusy', 'isResting', 'isSecuringFood', 'isRecoveringDegraded', 'isRecoveringHp',
-    'isMaintaining', 'isRecovering', 'isForceUnsticking', 'isNavigating', 'maneuverActive', 'isSheltering']
+    'isMaintaining', 'isRecovering', 'isUnsticking', 'isNavigating', 'maneuverActive', 'isSheltering']
   const found = LATCHES.filter(l => new RegExp('\\b' + l + '\\s*\\(').test(src))
   assert.deepStrictEqual(found, [], 'reflexes.js reads body latches directly: ' + found.join(', ') + ' - arbitration belongs to the runner, once')
   // isEscaping is the ONE exception and it must stay a single, named use: reclaim passes it as
@@ -439,8 +439,8 @@ function claimClock (fn) {
 
 t('5: the claim window is DERIVED from the supervisor, never a literal of its own', () => {
   const src = srcOf('reflexes.js')
-  assert(/s\.SURVIVAL_FAIL_MS \+ s\.LATCH_GRACE_MS/.test(src) && /s\.PATIENT_FAIL_MS \+ s\.LATCH_GRACE_MS/.test(src),
-    'a claim is "this work is hung" asked of an owner instead of a job - the same verdict, so the same numbers (#4)')
+  assert(/sched\.failWindows\(survive \? 'survival' : 'progress', vitals\)\.failMs \+ sched\.LATCH_GRACE_MS/.test(src),
+    'a claim is "this work is hung" asked of an owner instead of a job - the same verdict, so it ASKS for the same window (#4)')
   assert.strictEqual(typeof scheduler.PATIENT_FAIL_MS, 'number', 'the patient window must be a NAME, not a literal inside watchdog()')
   claimClock((step) => {
     reflexes.syncClaims(['foodRun'], { now: CLAIM_NOW, driver: null, at: CLAIM_NOW })
@@ -448,6 +448,36 @@ t('5: the claim window is DERIVED from the supervisor, never a literal of its ow
     assert.strictEqual(reflexes.syncClaims(['foodRun'], { now: justUnder, driver: null, at: CLAIM_NOW }).revoked.length, 0, 'not one millisecond early')
     const at = step(1)
     assert.strictEqual(reflexes.syncClaims(['foodRun'], { now: at, driver: null, at: CLAIM_NOW }).revoked.length, 1, 'and not one late')
+  })
+})
+
+// ==== THE WINDOW SCALES WITH THE CRISIS (review 2026-08-25, item 5) ========================
+// The seam this closes: at hp<=6 / food<=2 the supervisor fails a job that is NOT the answer to
+// the crisis at 40s and gives up on it at ~100s, while a PROGRESS-tier claim was priced at a flat
+// 300s. For 200 seconds the process had concluded the work was dead and the body still had an
+// owner - a hole only the giveup rung's WHOLE-BODY releaseBodyClaims covered, which is why item 2
+// could not shrink that rung to a scoped lease revoke. Now the lease knows about the crisis.
+t('5: a PROGRESS claim is revoked on the CRISIS window when death is seconds away', () => {
+  claimClock((step) => {
+    const crisis = { hp: 3, food: 1 }
+    reflexes.syncClaims(['job'], { now: CLAIM_NOW, driver: null, at: CLAIM_NOW, vitals: crisis })
+    const w = scheduler.failWindows('progress', crisis).failMs + scheduler.LATCH_GRACE_MS
+    assert(w < scheduler.PATIENT_FAIL_MS + scheduler.LATCH_GRACE_MS, 'the crisis window really is the shorter one')
+    const justUnder = step(w - 1)
+    assert.strictEqual(reflexes.syncClaims(['job'], { now: justUnder, driver: null, at: CLAIM_NOW, vitals: crisis }).revoked.length, 0, 'not one millisecond early')
+    const at = step(1)
+    assert.strictEqual(reflexes.syncClaims(['job'], { now: at, driver: null, at: CLAIM_NOW, vitals: crisis }).revoked.length, 1,
+      'a hung non-answering owner must not outlive by 200 seconds the job it is hanging')
+  })
+})
+
+t('5: ...but the crisis window NEVER cuts a SURVIVE claim - the answer to the crisis keeps its own', () => {
+  claimClock((step) => {
+    const crisis = { hp: 3, food: 1 }
+    reflexes.syncClaims(['foodRun'], { now: CLAIM_NOW, driver: null, at: CLAIM_NOW, vitals: crisis })
+    const justUnder = step(scheduler.SURVIVAL_FAIL_MS + scheduler.LATCH_GRACE_MS - 1)
+    assert.strictEqual(reflexes.syncClaims(['foodRun'], { now: justUnder, driver: null, at: CLAIM_NOW, vitals: crisis }).revoked.length, 0,
+      'f247a87 the other way round: the hungrier the bot, the LESS time its food run would get')
   })
 })
 
@@ -514,7 +544,7 @@ t('5: every revocable claim has a force-release owner, and the runner writes thr
     assert(rel.includes("'" + o.key + "'"), o.key + ' is revocable but releaseBodyClaims names no latch for it - a wiring hole, not a decision')
   }
   const idx = srcOf('index.js')
-  assert(/reflexes\.syncClaims\(up, \{ driver: drivingClaim\(up\), at: ev\.at \}\)/.test(idx),
+  assert(/reflexes\.syncClaims\(up, \{ driver: drivingClaim\(up\), at: ev\.at, vitals: \{ hp: bot\.health, food: bot\.food \} \}\)/.test(idx),
     'index.js bodyOwner must WRITE THROUGH the registry - a private `if (isX()) return` chain is the defect coming back')
   assert(!/if \(commands\.isEscaping && commands\.isEscaping\(\)\) return 'escape'/.test(idx),
     'the nine-boolean first-match-wins chain is deleted, not shadowed')

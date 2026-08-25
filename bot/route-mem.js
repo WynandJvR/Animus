@@ -209,6 +209,20 @@ function wedgeOnSegment (wedges, p, q, corridor = WEDGE_STEER_CORRIDOR, now = Da
   return null
 }
 
+// THE SAME SPOT, LOOKED UP (review 2026-08-25 item 5). mergeWedge already owns the answer to
+// "is this the wedge I recorded before" - WEDGE_MERGE_R - and the one rescue path needs to ask
+// it WITHOUT recording: "has this cell trapped me before, and how often". A second radius here
+// would be the merge rule with two definitions (#4), so this shares the default. Age-decayed by
+// the same wedgeWeight, so a spot that has become passable again reads as unknown.
+function wedgeAt (wedges, pos, now = Date.now(), r = WEDGE_MERGE_R) {
+  if (!Array.isArray(wedges) || !pos) return null
+  for (const w of wedges) {
+    if (wedgeWeight(w, now) <= 0) continue
+    if (Math.hypot(w.x - pos.x, w.z - pos.z) <= r) return w
+  }
+  return null
+}
+
 // ---- own-infra suppression (RECALL side only, since 2026-08-25) --------------------
 // The #1 rule: the bot must NEVER avoid its own hut/build/bank, even if it wedged there.
 // suppressedNearAnchors is the single predicate that enforces it: at recall time every wedge
@@ -347,7 +361,7 @@ module.exports = {
   dist, polylineLength,
   thinPolyline, canonEndpoints, matchRoute, routeCursor,
   routeLenOk, routeUsable, routeShouldEvict, mergeRoute,
-  wedgeWeight, mergeWedge, wedgeOnSegment, wedgeNearXZ,
+  wedgeWeight, mergeWedge, wedgeAt, wedgeOnSegment, wedgeNearXZ,
   suppressedNearAnchors, activeWedges,
   buildGraph, planOverGraph
 }

@@ -22,6 +22,8 @@ const provHut = () => require('./provision-hut.js') // LAZY: provision-hut.js to
 const provRecovery = () => require('./provision-recovery.js') // LAZY: provision-recovery.js top-requires this module, so an eager import here would be a real cycle
 const navProfile = require('./nav-profile.js') // PURE terrain policy - findDryLandExit (WATER_ESCAPE); no bot-module cycle
 const selfWorld = require('./self-world.js') // THE one self/world truth: is this cell mine? am I at home? (review 2026-08-25 D5/§3.4). Registry arithmetic only - no bot-module cycle
+const attempts = require('./attempts.js') // PURE + LEAF (no requires of its own): the (job, step, 4b-cell) memory that BOUNDS the one rescue path, and that the arbiter reads (review 2026-08-25 §3.3/§3.5)
+const worldMemory = require('./world-memory.js') // the wedge/infra registry. Already in this module's load graph via self-world.js - reached directly so the rescue can ASK what it learned about a cell (recallWedge)
 
 // §4: one definition of the sink rule; this module still owns its own sink. index.js injects
 // it so debug lines persist to logs/bot-events.log.
@@ -43,12 +45,14 @@ function isRecovering () { return recoveringDepth > 0 }
 // Active navigations (for observability + later flow arbitration).
 let navDepth = 0
 function isNavigating () { return navDepth > 0 }
-// A watchdog force-escape is driving on manual controls - other gotos must stand down.
-let forceUnsticking = false
-function isForceUnsticking () { return forceUnsticking }
+// THE ONE rescue (unstick, below) is driving the body on manual controls - other gotos must
+// stand down. Named for what it is since 2026-08-25: there is no "force escape" any more, and
+// a latch that outlives the layer it was named after is the next drift (#4).
+let unsticking = false
+function isUnsticking () { return unsticking }
 
 // ---- ROOT H (2026-08-02): these two latches GATE THE SCHEDULER TICK -------------------
-// index.js's tick returns early while `isRecovering() || isForceUnsticking()` (its TICK_GATES
+// index.js's tick returns early while `isRecovering() || isUnsticking()` (its TICK_GATES
 // table). Both are raised before an await and lowered in a `finally` - which is correct for a
 // throw and useless for a hang: a promise that never settles never reaches its finally, so ONE
 // hung await inside a recovery span pins the tick shut permanently. Live 2026-08-02: the tick
@@ -66,7 +70,7 @@ function endRecoverySpan () { recoveringDepth = Math.max(0, recoveringDepth - 1)
 function releaseNavLatches () {
   const held = []
   if (recoveringDepth > 0) { held.push('recoveringDepth(' + recoveringDepth + ')'); recoveringDepth = 0 }
-  if (forceUnsticking) { held.push('forceUnsticking'); forceUnsticking = false }
+  if (unsticking) { held.push('unsticking'); unsticking = false }
   return held.length ? held.join('+') : null
 }
 
@@ -116,8 +120,8 @@ async function gotoOnce (bot, goal, ms = 20000, gopts = {}) {
   // arithmetic (which hands this `ms`) never saw it. #6 says a bound must be a deadline on an
   // ATTEMPT: there is one attempt here, it is `ms` long, and the yield is part of it.
   const started = Date.now()
-  if ((forceUnsticking || recoveringDepth > 0) && !gopts.duringRecovery) {
-    while ((forceUnsticking || recoveringDepth > 0) && Date.now() - started < ms) await new Promise(r => setTimeout(r, 250))
+  if ((unsticking || recoveringDepth > 0) && !gopts.duringRecovery) {
+    while ((unsticking || recoveringDepth > 0) && Date.now() - started < ms) await new Promise(r => setTimeout(r, 250))
     const waited = Date.now() - started
     if (waited > 1000) dbg('goto: yielded ' + Math.round(waited / 1000) + 's of its own ' + Math.round(ms / 1000) + 's attempt to a recovery/force-escape')
   }
@@ -933,14 +937,23 @@ async function openNearbyDoor (bot, opts = {}) {
   return false
 }
 
-// ---- the recovery ladder --------------------------------------------------------
-// Ordered, situation-gated, per-type budgets. Each entry: when() says whether it can
-// help right now; run() maneuvers. A recovery "worked" if the bot demonstrably MOVED
-// (>=2 blocks horizontally or rose >=1) or the entry vouches for itself (door-assist
-// returns whether it crossed) - re-read the world, never trust intent.
-function defaultBudgets () { return { indoor: 3, water: 2, wetbreach: 1, door: 3, pit: 2, climb: 2, nudge: 2, stepout: 2 } }
-
-async function recoverOnce (bot, goal, counts, budgets, opts) {
+// ---- the recovery maneuvers, and the plan runner --------------------------------
+// The CATALOGUE of maneuvers the body owns. Each entry: when() says whether it can help right
+// now (a world re-read, at the moment it would run); run() maneuvers and reports whether the
+// bot demonstrably MOVED (>=2 blocks horizontally or rose >=1) or vouches for itself (the
+// door-assist returns whether it crossed, the indoor rung whether it reached its cell) - always
+// read from the world, never from intent.
+//
+// ==== IT IS NOT A LADDER ANY MORE (review 2026-08-25 §3.5(2), item 5) ==================
+// `defaultBudgets()` stood here - `{ indoor: 3, water: 2, wetbreach: 1, door: 3, pit: 2,
+// climb: 2, nudge: 2, stepout: 2 }` - and every caller could hand its own copy. That made the
+// ORDER a fixed script (#3) and the BOUND a per-call counter that the next call re-armed to
+// zero (#6): 532 step-outs, 325 `recovery: stuck`, 243 `climb -> no progress` and 151
+// `drybreach -> no progress` in a single HEAD-era day, at a bot that was not moving.
+// unstick() below chooses WHICH maneuvers apply from WHERE THE BODY IS, and the bound is a
+// fact about that place (attempts.js), which moving re-arms. recoverOnce is now just the
+// executor of that plan: an ordered list of kinds in, the kind that moved us out.
+async function recoverOnce (bot, goal, plan, opts) {
   const isStopped = opts.isStopped || (() => false)
   const p0 = bot.entity.position.clone()
   const movedEnough = () => {
@@ -1257,17 +1270,34 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
       }
     }
   ]
-  for (const step of ladder) {
+  // RUN THE PLAN, IN ORDER, EACH RUNG AT MOST ONCE (review 2026-08-25 §3.5(2), item 5).
+  // What stood here was a per-rung BUDGET table: `counts[kind] >= budgets[kind] ? continue`,
+  // plus, on a failure, `counts[kind] = budgets[kind]` to "spend its remaining budget". Thirteen
+  // call sites hand-tuned that table (`{ door: 2, pit: 0, nudge: 1, stepout: 1 }`), which is
+  // thirteen private copies of one policy, none of them a condition about the world (#6). Worse,
+  // the counters were PER navigateTo: a fresh call re-armed every rung, so the same doomed rung
+  // ran forever at the same cell - 532 step-outs, 243 `climb -> no progress` and 151
+  // `drybreach -> no progress` in one HEAD-era day, at a bot that never moved.
+  // The bound is now a fact about a PLACE, held in attempts.js and asked by unstick(): a rung
+  // that achieved nothing in this 4b cell is not offered again until the cell, the world or a
+  // full reset says otherwise. Within one rescue, `tried` is the whole of the bookkeeping.
+  const byKind = new Map(ladder.map(r => [r.kind, r]))
+  const tried = opts.tried instanceof Set ? opts.tried : new Set()
+  for (const kind of (plan || [])) {
     if (isStopped()) return null
-    if ((counts[step.kind] || 0) >= (budgets[step.kind] != null ? budgets[step.kind] : 0)) continue
+    if (tried.has(kind)) continue
+    const step = byKind.get(kind)
+    if (!step) continue
     let applies = false
     try { applies = step.when() } catch {}
+    // The plan says "this maneuver can help HERE"; when() is the world re-read at the moment it
+    // would run. A rung that does not apply is NOT an attempt and is not remembered as one.
     if (!applies) continue
-    counts[step.kind] = (counts[step.kind] || 0) + 1
+    tried.add(kind)
     recoveringDepth++
     let ok = false
-    try { ok = await step.run() } catch (e) { dbg('recovery ' + step.kind + ' threw: ' + e.message) } finally { endRecoverySpan() }
-    dbg('recovery ' + step.kind + ' -> ' + (ok ? 'MOVED' : 'no progress'))
+    try { ok = await step.run() } catch (e) { dbg('recovery ' + kind + ' threw: ' + e.message) } finally { endRecoverySpan() }
+    dbg('recovery ' + kind + ' -> ' + (ok ? 'MOVED' : 'no progress'))
     // ==== ESCAPING IS NOT PROGRESS, AND THIS STAMP KILLED THE BOT (deleted 2026-08-25) ====
     // `if (ok) touchP('navRung:' + step.kind)` stood here. It was added on 2026-08-02 to stop a
     // survival job being failed at 43s while one of its legs was legitimately grinding through
@@ -1284,21 +1314,9 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
     // netted 1.6-2.2b, returned MOVED, stamped here, and reset the job clock 45 SECONDS BEFORE
     // it could fail. Thirty-two times on an exact 4-minute period, zero FAIL-JOB in the last
     // 4h15m, and the process died still "continuing the active build" (review D1/§1a).
-    // The delegation it relied on was circular: it left A<->B to cycle-detect.js, which needs
-    // >=48b of gross path in 180s and therefore never fired, and which in turn delegates slow
-    // oscillation back to "the freeze watchdogs' domain" - whose remedy is this stamp.
-    //
-    // The 2026-08-02 defect is answered instead by giving the two questions two clocks
-    // (telemetry.js): a leg that actually gets somewhere stamps `newGround` from the ratchet and
-    // keeps the job clock alive; a leg that shuttles inside a pocket stamps nothing, and being
-    // failed is the correct verdict for it. Nothing here has to be trusted about it, which is
-    // the point - the rescuer may not write the report card on the job it is rescuing.
-    // The body-is-not-frozen question still has its own honest witnesses: bodyProgress.at (any
-    // touch, which boundedRung reads) and the freeze watchdog's own position ring.
-    if (ok) return step.kind
-    // no progress from this tool - spend its remaining budget so the next pass tries the
-    // next rung instead of hammering the same one
-    counts[step.kind] = Math.max(counts[step.kind], budgets[step.kind] != null ? budgets[step.kind] : 0)
+    // (2026-08-25, item 5: BOTH ends of that collision are now gone - the stamp with item 1,
+    // and the 195s freeze watchdog with this item. There is no timer left that can rescue.)
+    if (ok) return kind
   }
   return null
 }
@@ -1312,7 +1330,7 @@ async function recoverOnce (bot, goal, counts, budgets, opts) {
 //
 // opts: timeoutMs (per goto attempt, default 20000) | deadlineMs (overall) | isStopped
 //       | movements: () => Movements re-asserted before each attempt (recoveries switch
-//         profiles) | budgets: per-rung recovery caps (see defaultBudgets) | climb:false
+//         profiles) | rescue:'light' (a time-critical leg: no cutting/pillaring rungs) | climb:false
 //         to disable the climb rung (trek loops that manage their own surfacing)
 //       | label (debug tag)
 // ONE BODY, ONE ROUTE: concurrent navigateTo calls fight over the single pathfinder and
@@ -1421,16 +1439,13 @@ async function navigateToInner (bot, goal, opts = {}) {
   const startedAt = Date.now()
   const deadline = startedAt + budgetMs
   const isStopped = opts.isStopped || (() => false)
-  const budgets = Object.assign(defaultBudgets(), opts.budgets || {})
-  const counts = {}
+  const counts = {} // per-rung run COUNTS for the honest failure message only - never a gate (review §3.5: the bound is attempt memory, keyed to a cell)
   const label = opts.label ? opts.label + ': ' : ''
   let interrupts = 0
   let recoveries = 0
   let recoveryMs = 0
   let crossings = 0 // atomic doorway pre-flight crossings this nav (capped so a threshold flicker can't ping-pong)
   let stalls = 0    // consecutive goto+recovery cycles that netted < 2.5b of real travel
-  let unstuck = false // forceUnstick fired once already this nav
-  let digOutTried = false // the bounded dig-out escalation fired once already this nav
   // Time spent parked while a REFLEX held the pathfinder must not consume the deadline:
   // in a reflex storm (creeper standoff re-fleeing every second, live 2h+) every nav
   // burned its whole budget waiting and DIED at the deadline check before the recovery
@@ -1504,15 +1519,22 @@ async function navigateToInner (bot, goal, opts = {}) {
       }
       if (Date.now() >= dl() || isStopped()) throw honestFail(lastErr, counts, label, recoveryMs, reflexWaitMs)
       const r0 = Date.now()
-      const rescued = await recoverOnce(bot, goal, counts, budgets, opts)
+      // ONE RESCUE, ONE CALL (review 2026-08-25 §3.5, item 5). Three layers used to live in this
+      // block: recoverOnce with its per-rung budget table, a stall-counted forceUnstick "ONCE per
+      // nav", and a second forceUnstick({digOut}) for "every rung failed and the goal is STILL
+      // unreachable". Each was added after a different incident and none could see the others, so
+      // a wedged leg ran the same rungs three ways and reported MOVED after netting two blocks.
+      // unstick() is that whole stack: it asks WHERE the body is, plans for it, bounds itself on
+      // attempt memory keyed to this 4b cell, escalates to the cutting rungs on the EVIDENCE that
+      // the non-cutting plan already failed here, and returns a verdict when it is out of options.
+      const res = await unstick(bot, goal, { isStopped, climb: opts.climb, rescue: opts.rescue, escalate: opts.escalate !== false, why: (opts.label || 'nav') + ' leg' })
       recoveryMs += Date.now() - r0
-      // MEASURED-STALL ESCALATION (mirrors walkStaged): a whole goto+recovery cycle that
-      // netted < 2.5b of real travel - and wasn't dominated by a survival-reflex HOLD
-      // (reflexWaitMs, the same exclusion walkStaged uses, so we never fight a flee/shelter
-      // hold) - is a wedge. Two in a row and we break it with the aggressive manual escape
-      // (forceUnstick), ONCE per nav, gated like the watchdog (never asleep/mid-dig, and not
-      // while a force-escape already drives). escalate:false (walkStaged/travelFar legs)
-      // keeps sole ownership of THEIR own escalation - no double-unstick.
+      for (const k of res.tried) counts[k] = (counts[k] || 0) + 1 // for honestFail's "tried:" line ONLY - a log fingerprint, never a gate
+      const rescued = res.moved ? res.via : null
+      // MEASURED-STALL PATIENCE (mirrors walkStaged): a whole goto+rescue cycle that netted < 2.5b
+      // of real travel - and wasn't dominated by a survival-reflex HOLD (reflexWaitMs, the same
+      // exclusion walkStaged uses) - is a wedge, and the next goto attempt gets a shorter leash.
+      // It no longer TRIGGERS anything: escalation belongs to unstick, on its own evidence.
       let stalled = false
       if (opts.escalate !== false) {
         const moved = Math.hypot(bot.entity.position.x - cyclePos.x, bot.entity.position.z - cyclePos.z)
@@ -1520,42 +1542,33 @@ async function navigateToInner (bot, goal, opts = {}) {
         const reflexDominated = (reflexWaitMs - cycleReflex0) > cycleElapsed / 2
         stalled = moved < 2.5 && !reflexDominated
         stalls = stalled ? stalls + 1 : 0
-        if (stalls >= 2 && !unstuck && !bot.isSleeping && !bot.targetDigBlock && !isForceUnsticking()) {
-          unstuck = true
-          dbg(label + 'measured wedge ~' + moved.toFixed(1) + 'b/' + Math.round(cycleElapsed / 1000) + 's x' + stalls + ' - forceUnstick')
-          try { await forceUnstick(bot, { isStopped }) } catch {}
-          if (rescued) recoveries++
-          continue
-        }
       }
       if (!rescued) {
-        // No rung helped this pass. If we're measurably wedged and still hold the escape +
-        // deadline budget, keep going so the stall counter can reach the escalation instead
-        // of bailing to the caller/watchdog on the first failed recovery. Otherwise give up
-        // honestly (unreachable goal, or the escape is already spent).
-        if (stalled && opts.escalate !== false && !unstuck && !isForceUnsticking() && !bot.isSleeping && !bot.targetDigBlock && Date.now() < dl()) {
-          dbg(label + 'no recovery rung applied but wedged (stall ' + stalls + ') - retrying toward escalation')
-          continue
-        }
-        // ==== NO ROUTE IS THE WEDGE EVIDENCE (2026-07-30) ==================================
-        // The dig-out rung was armed ONLY by opts.digOut, which the watchdog sets from a
-        // MEASURED POSITIONAL FREEZE. A bot that can still shuffle around inside a dead end is
+        // No rung helped this pass. If we are measurably wedged and still hold deadline budget,
+        // keep going: unstick escalates itself on the next call now that this cell is on its
+        // books ("the non-cutting plan already failed here" arms the bounded dig-out), so the
+        // retry is what reaches the escalation. Its verdict says whether that is worth anything.
+        //
+        // ==== NO ROUTE IS THE WEDGE EVIDENCE (2026-07-30, preserved) ========================
+        // The dig-out rung was once armed ONLY by opts.digOut, which the freeze watchdog set from
+        // a MEASURED POSITIONAL FREEZE. A bot that can still shuffle around inside a dead end is
         // not frozen, so it never qualified - and live, boxed into a 1x1 alcove beside its own
         // front door at hp 0.48 / food 0, it printed this for over an hour:
         //   nav to 185,-106 failed (path ended short of the goal (tried: door x3, climb x2, nudge x2))
-        // Stuckness was being judged by the BODY ("am I moving?") when the condition that
-        // actually matters is the OUTCOME ("can I get anywhere?"). Exhausting every rung with
-        // the goal still unreachable IS that evidence, and it is strictly stronger than a
-        // freeze: a freeze can be a mob shoving us, while this is the ladder's own verdict.
-        //
-        // The ANTI-GRIEF ENVELOPE IS UNCHANGED. drybreach still refuses inside our own
-        // structure, still uses the escapeDiggable whitelist, still bounded (<=8/12 digs, 25s)
-        // and still aborts near hostiles. Only the TRIGGER moves from "the body froze" to "no
-        // route exists" - which is what makes getting unstuck adaptive instead of scripted.
-        if (opts.escalate !== false && !digOutTried && !isForceUnsticking() && !bot.isSleeping && !bot.targetDigBlock) {
-          digOutTried = true
-          dbg(label + 'every rung failed and the goal is STILL unreachable - escalating to a bounded dig-out')
-          try { await forceUnstick(bot, { isStopped, digOut: true }) } catch (e) { dbg(label + 'dig-out escalation failed (' + e.message + ')') }
+        // Stuckness was being judged by the BODY ("am I moving?") when the condition that actually
+        // matters is the OUTCOME ("can I get anywhere?"). Exhausting every rung with the goal still
+        // unreachable IS that evidence and it is strictly stronger than a freeze. That trigger
+        // survives verbatim - it is now unstick's `failedHere >= 1`, recorded per cell instead of
+        // per nav, so it is not re-armed to zero by the next caller.
+        // The ANTI-GRIEF ENVELOPE IS UNCHANGED: drybreach still refuses inside our own structure
+        // and wherever the one dig rule protects the cell, still uses the escapeDiggable
+        // whitelist, still bounded (<=8/12 digs, 25s), still aborts near hostiles.
+        // Only a rescue that TRIED and failed is worth retrying toward its own escalation. 'held'
+        // (a declared hold vouches for this stillness), 'busy' (another rescue owns the body) and
+        // 'stopped' are all answers about someone else, and looping on them is a spin.
+        const worthRetrying = res.verdict === 'exhausted' || res.verdict === 'no-plan'
+        if (stalled && worthRetrying && opts.escalate !== false && !bot.isSleeping && !bot.targetDigBlock && Date.now() < dl()) {
+          dbg(label + 'rescue verdict ' + res.verdict + ' (stall ' + stalls + ') - retrying the leg; the next rescue escalates on its own record')
           continue
         }
         throw honestFail(lastErr, counts, label, recoveryMs, reflexWaitMs)
@@ -1644,46 +1657,217 @@ function enterStructure (bot, hut, opts = {}) {
   return runOnNavChain(() => crossOwnDoor(bot, hut, 'in', opts))
 }
 
-// ---- watchdog FORCE-ESCAPE ---------------------------------------------------------
-// Called by index.js's freeze watchdog when the position has been FROZEN for minutes
-// while something was trying to move (live: 2h creeper standoff in a cave pocket; the
-// 12-min surface wedge). Runs the recovery ladder directly - no goal needed - with the
-// door rung OFF (door-assist calls gotoOnce, which yields to us: deadlock). Sets
-// forceUnsticking so concurrent gotos stand down instead of fighting the manual
-// controls, and recoveringDepth so the flee/defend reflexes hold off.
-async function forceUnstick (bot, opts = {}) {
+// ---- THE ONE RESCUE PATH: unstick() -------------------------------------------------
+//
+// ==== WHAT THIS DELETED, AND WHY (structural review 2026-08-25, D4 / §3.5, item 5) ======
+// Rescue used to be a STACK of five independent stall detectors, each added after one
+// incident, each blind to the others:
+//   1. index.js's freeze watchdog  - "position FROZEN ~195s ... forcing an escape", then a
+//      flat 4-MINUTE retry, a same-cell failure streak and a "DESPERATE" re-run.
+//   2. forceUnstick                - a SECOND run of the same ladder with a second budget table.
+//   3. the ladder's per-rung budgets - thirteen hand-tuned copies of one policy.
+//   4. cycle-detect.js             - suppressed by its own >=48b gross-path floor, so it could
+//      not see slow oscillation, and it delegated that case back to (1).
+//   5. navigate's per-leg no-progress tallies.
+// They interlocked destructively. The freeze watchdog fires at 195s; the job watchdog's fail
+// rung is at 240s; every force-escape "succeeded" by 1.6-2.2b and (through the old navRung
+// stamp) reset the job clock 45 seconds before it could fail. 32 times on an exact 4-minute
+// period, to process death at 20:10 with the bot two blocks from its own bed. A rescuer invoked
+// 3,081 times in four days is not a rescuer, it is the main loop.
+//
+// So there is ONE rescue now, and it is a PLAN, not a rung pile:
+//   1. ASK WHERE I AM FIRST (self-world, the one ownership truth): inside my own structure ->
+//      the DOOR, never the roof; at home -> the door; a pit -> pillar/staircase; water -> shore;
+//      otherwise -> the open-ground rungs. A rung the situation cannot use is never offered.
+//   2. BOUNDED, AND THE BOUND IS A CONDITION. Each rung runs at most once per rescue, and a rung
+//      that achieved nothing IN THIS 4-BLOCK CELL is not offered again until the cell changes,
+//      the world changes, or a full reset clears the record (attempts.js - the same memory the
+//      arbiter uses, and the same one the terminal action re-arms by walking away).
+//   3. ESCALATION IS EVIDENCE, NOT A TIMER. The cutting rungs (drybreach, and the wider breach)
+//      arm when the non-cutting plan has already failed HERE, or when this cell is on the books
+//      as a wedge (world-memory's nearOwnInfra-tagged records are finally read by something).
+//      No cooldown, no 4-minute retry: there is nothing here that fires on the clock.
+//   4. FAILURE IS A VERDICT. When the plan is spent, unstick RETURNS THAT. It does not re-arm
+//      itself. The job's work ledger keeps running, the supervisor reaches NUDGE -> FAIL-JOB ->
+//      GIVEUP on honest evidence, and the arbiter's terminal action (reflexes.terminalAction) is
+//      the floor that takes the body and calls back in here with `force`.
+// NOTHING IN HERE TOUCHES A PROGRESS LEDGER. A rescuer may not write the report card on the job
+// it is rescuing (#7, and D1's whole autopsy).
+//
+// DIG PERMISSION IS UNCHANGED by any of this. provision-core.digBlocked / placeBlocked and
+// scaffold.js remain the only authority; the plan merely stops OFFERING maneuvers the one dig
+// rule would refuse (selfWorld.noDigAt), which removes 243 futile attempts and grants nothing.
+
+// The rungs that work by CUTTING or by a long placement sequence. A time-critical leg (a
+// 1.5s-fuse creeper back-off) may not run one: it would spend the whole fuse pillaring.
+const SLOW_RUNGS = new Set(['pit', 'climb', 'wetbreach', 'drybreach'])
+
+// PURE (unit-tested: bot/unsticktest.js). WHERE AM I -> which maneuvers can possibly help,
+// in order. No bot, no world reads, no clock: `w` is the situation, already read once.
+//   w.indoors  inside my own structure      w.home    in the home volume (structure/under-floor/support/apron)
+//   w.wet/.submerged  feet/head in water    w.roofed  a solid ceiling overhead
+//   w.pit      an open-sky hole             w.door    a door within reach
+//   w.noDig    the one dig rule protects this cell (nothing here may be cut, by construction)
+//   w.climb    the caller allows the surface climb    w.cut  the cutting escalation is armed
+//   w.light    a time-critical leg: fast rungs only
+function unstickPlan (w) {
+  const plan = []
+  const add = (...kinds) => { for (const k of kinds) if (k && !plan.includes(k)) plan.push(k) }
+  // 1. WATER FIRST. A submerged bot has seconds; nothing else on this list matters yet, and
+  //    the water rung delegates a drowning bot to escapeWater, the single owner (#116).
+  if (w.submerged) add('water')
+  else if (w.wet) { add('water'); if (w.roofed && !w.indoors) add('wetbreach') }
+  // 2. THE WAY OUT OF MY OWN HOUSE IS THE DOOR (§3.4). For four hours on 2026-08-03 the log's
+  //    only account of a bot standing two blocks from its own bed was "stuck UNDERGROUND ...
+  //    climbing to the surface" - a sentence made of two wrong beliefs. Indoors, the plan is
+  //    step-to-a-free-cell then the door; never the roof, never a dirt pillar in the living room.
+  if (w.indoors) add('indoor', 'door', 'stepout')
+  else if (w.home) { add('door'); if (w.pit) add('pit'); add('stepout', 'nudge') }
+  else {
+    if (w.pit) add('pit')
+    if (w.door) add('door')
+    if (w.roofed && w.climb && !w.noDig) add('climb')
+    add('nudge', 'stepout')
+  }
+  // 3. THE LAST RESORT, and only on the evidence the caller already gathered. `!w.noDig` is the
+  //    permission truth asked once (self-world), not a second copy of "don't cut your own house".
+  if (w.cut && !w.indoors && !w.wet && !w.noDig) add('drybreach')
+  return w.light ? plan.filter(k => !SLOW_RUNGS.has(k)) : plan
+}
+
+// THE accountable rescue. Returns a VERDICT, never a promise to try again later:
+//   { moved, via, verdict, plan, tried, cell, n }
+//   verdict: 'moved' | 'exhausted' | 'no-plan' | 'stopped'
+// `goal` may be null (a rescue with nowhere to be - the terminal action's call). opts:
+//   isStopped | climb:false | rescue:'light' | escalate:false (the caller owns escalation)
+//   | digOut / desperate (the terminal action's deepest passes) | force (ignore this cell's
+//   attempt records - the floor may not refuse itself) | why (who asked, for the log)
+async function unstick (bot, goal, opts = {}) {
+  // ONE BODY, ONE RESCUE. Two rescues driving manual control-states at once is the 433,62,112
+  // failure verbatim: a bank-withdraw nav and the build travel each ran their own ladder,
+  // interleaved every ~2s, and every manual step-out was stomped by the other flow's goto physics
+  // while the position stayed frozen for minutes and both "recovered". The old shape spelled this
+  // as a `!isForceUnsticking()` guard at each of the three escalation call sites - three copies of
+  // one rule, and one of them (walkStaged) never had it. It belongs here, once, where the latch is.
+  if (unsticking) {
+    dbg('unstick: a rescue is already driving the body - not starting a second one')
+    return { moved: false, via: null, verdict: 'busy', plan: [], tried: [], cell: null, n: 0 }
+  }
   const isStopped = opts.isStopped || (() => false)
+  // No body, no rescue. The floor calls this from a crisis path where the entity can be briefly
+  // absent (a respawn in flight), and an unreadable body is not evidence of a wedge (#10).
+  if (!bot.entity || !bot.entity.position) return { moved: false, via: null, verdict: 'no-body', plan: [], tried: [], cell: null, n: 0 }
   const p0 = bot.entity.position.clone()
-  // WEDGE-MEMORY (semantic-world-map slice 1): this single choke point covers all three
-  // forceUnstick escalators (walkStaged, the nav ladder, the watchdog). Since 2026-08-25
-  // recordWedge records EVERY wedge, including the ones at home (tagged nearOwnInfra) - the
-  // "never avoid your own base" rule is enforced once, on the steer side, in listWedges. The
-  // reflex-dominated exclusion is INHERITED (the escalators already refuse forceUnstick while
-  // a survival reflex holds).
-  try { prov().recordWedge(p0) } catch {}
-  forceUnsticking = true
+  const feet = p0.floored()
+  const cell = attempts.cellOf(feet)
+  const now = Date.now()
+  // 1. WHERE AM I - one truth, asked once (review §3.4).
+  const home = selfWorld.homeVolumeAt(feet)
+  const indoors = (() => { try { return !!(provHut().insideOwnStructure && provHut().insideOwnStructure(bot)) } catch { return false } })()
+  // ...AND WHAT DO I ALREADY KNOW ABOUT THIS SPOT. recordWedge has tagged the ones at home
+  // `nearOwnInfra` since 2026-08-25 and listWedges (the STEER side) correctly refuses to route
+  // the bot away from its own base because of them - which left them recorded and read by
+  // nobody. They are evidence for the RESCUE side: "this cell has trapped me before" is exactly
+  // the fact that should make the escalation arrive sooner instead of on a 4-minute timer.
+  const known = (() => { try { return worldMemory.recallWedge(feet) } catch { return null } })()
+  const spent = attempts.recall('unstick', 'exhausted', cell)
+  const failedHere = Math.max(spent ? spent.n : 0, known && known.n > 1 ? known.n - 1 : 0)
+  const escalate = opts.escalate !== false
+  const light = opts.rescue === 'light'
+  const w = {
+    indoors,
+    home: !!home,
+    wet: feetInWater(bot),
+    submerged: headInWater(bot),
+    roofed: (() => { try { return !!provHut().hasSolidCeiling(bot, 12, { ignoreLeaves: true }) } catch { return false } })(),
+    pit: !!detectPit(bot),
+    door: doorNearby(bot, goalXZ(goal)),
+    noDig: !!selfWorld.noDigAt(feet),
+    climb: opts.climb !== false,
+    cut: escalate && !light && (opts.digOut === true || failedHere >= 1),
+    light
+  }
+  const desperate = opts.desperate === true || failedHere >= 2
+  const plan = unstickPlan(w)
+  const where = indoors ? 'INSIDE my own structure' : (home ? 'at home (' + home.zone + ')' : (w.submerged ? 'submerged' : (w.wet ? 'in water' : (w.pit ? 'in a pit' : (w.roofed ? 'under a ceiling' : 'in the open')))))
+  // ONE greppable line with the numbers in it (#7), and it names the SITUATION before the tools.
+  dbg('unstick: ' + where + ' at ' + feet + ' (cell ' + cell + ') - plan ' + (plan.join(' > ') || 'NONE') +
+    (failedHere ? ' [failed here x' + failedHere + (known && known.nearOwnInfra ? ', a known wedge at home' : (known ? ', a known wedge' : '')) + ']' : '') +
+    (w.cut ? ' [cutting armed]' : '') + (desperate ? ' [wide]' : '') + (light ? ' [light leg]' : '') + (opts.why ? ' - ' + opts.why : ''))
+  if (!plan.length) {
+    dbg('unstick: NO PLAN applies at ' + feet + ' - reporting that instead of thrashing')
+    return { moved: false, via: null, verdict: 'no-plan', plan, tried: [], cell, n: failedHere }
+  }
+  // A DECLARED HOLD IS NOT A WEDGE. Sitting perfectly still until a named wake IS the goal - sealed
+  // in a pit until dawn, asleep in a bed, waiting out a famine indoors - and the layer that could
+  // not tell that from a hang was the freeze watchdog: on 2026-07-29 it fired on a correctly sealed
+  // night shelter, dug the bot out into the dark, and a creeper killed it at 19:24:33. That guard
+  // moves here with the rest of that watchdog's job, and it is asked of the ONE authority
+  // (reflexes.activeHold) through the caller, because only the runner can judge a hold's PREMISE -
+  // a shelter that declares "resting until dawn" while still eleven blocks away vouches for
+  // nothing, and must not be able to stand a rescue down. A caller that supplies no reader gets
+  // today's behaviour exactly: the rungs never consulted holds, only the deleted watchdog did.
+  const hold = (() => { try { return opts.holdOK ? opts.holdOK() : null } catch { return null } })()
+  if (hold) {
+    dbg('unstick: standing down - ' + hold.label + ' is a DECLARED hold waking on ' + hold.wake + '; stillness here is the goal, not a wedge')
+    return { moved: false, via: null, verdict: 'held', plan, tried: [], cell, n: failedHere }
+  }
+  // 2. RUN IT. The body is taken on manual controls for the duration (concurrent gotos yield),
+  //    and the flee/defend reflexes hold off - unchanged coordination, one owner now instead of two.
+  const triedSet = new Set()
+  const skipped = new Set() // what this cell has ALREADY failed - not attempts, and never re-recorded as such
+  // The floor may not refuse itself (§3.3): a forced rescue re-tries rungs this cell has already
+  // failed, because the alternative is a terminal action that cannot break the wedge it names.
+  if (!opts.force) for (const kind of plan) { if (attempts.recall('unstick', kind, cell)) { triedSet.add(kind); skipped.add(kind) } }
+  if (skipped.size) dbg('unstick: skipping ' + Array.from(skipped).join(',') + ' - already achieved nothing in this cell')
+  let via = null
+  unsticking = true
   recoveringDepth++
   try {
     try { bot.pathfinder.setGoal(null) } catch {}
     bot.clearControlStates()
-    const counts = {}
-    // indoor FIRST + generous: a wedge inside the hut must be freed by stepping to a free
-    // interior cell, never by the dirt-pillaring the pit/climb rungs would otherwise try.
-    const budgets = { indoor: 3, water: 1, wetbreach: 1, pit: 2, door: 0, climb: 2, nudge: 0, stepout: 2, drybreach: 1 }
-    for (let i = 0; i < 4 && !isStopped(); i++) {
-      const rescued = await recoverOnce(bot, null, counts, budgets, { isStopped, desperate: !!opts.desperate, digOut: !!opts.digOut })
+    // A rescue WITH a goal hands back the moment a rung moves us: the goto is the real arrival
+    // test, and re-running rungs against a stale reading is how the old ladder shuttled. A rescue
+    // with NO goal (the terminal action) keeps going while still boxed in - one rung rarely frees
+    // a buried bot - which is the only thing forceUnstick's 4-iteration loop was ever for.
+    const passes = goal ? 1 : 3
+    for (let i = 0; i < passes && !isStopped(); i++) {
+      const rescued = await recoverOnce(bot, goal, plan, { isStopped, tried: triedSet, digOut: w.cut, desperate, climb: w.climb })
       if (!rescued) break
-      dbg('forceUnstick: ' + rescued + ' moved us to ' + bot.entity.position.floored())
-      // keep going only while still boxed in (buried or pitted) - once in the open the
-      // normal flows take back over. Inside our own hut a "free interior cell" IS the
-      // destination - not buried, not a pit - so stop once the indoor rung has moved us.
-      try { if (provHut().insideOwnStructure && provHut().insideOwnStructure(bot) && rescued === 'indoor') break } catch {}
-      const buried = provHut().hasSolidCeiling(bot, 12, { ignoreLeaves: true })
+      via = rescued
+      dbg('unstick: ' + rescued + ' moved us to ' + bot.entity.position.floored())
+      if (goal) break
+      if (indoors && rescued === 'indoor') break
+      let buried = false
+      try { buried = !!provHut().hasSolidCeiling(bot, 12, { ignoreLeaves: true }) } catch {}
       if (!buried && !detectPit(bot)) break
     }
-  } finally { endRecoverySpan(); forceUnsticking = false; bot.clearControlStates() }
+  } finally { endRecoverySpan(); unsticking = false; bot.clearControlStates() }
+  // 3. THE VERDICT, read from the world (never from intent).
   const p1 = bot.entity.position
-  return Math.hypot(p1.x - p0.x, p1.z - p0.z) >= 1.5 || Math.abs(p1.y - p0.y) >= 1
+  const moved = Math.hypot(p1.x - p0.x, p1.z - p0.z) >= 1.5 || Math.abs(p1.y - p0.y) >= 1
+  const tried = Array.from(triedSet).filter(k => !skipped.has(k))
+  if (isStopped() && !moved) return { moved: false, via, verdict: 'stopped', plan, tried, cell, n: failedHere }
+  if (moved) {
+    // The cell is behind us. Its records die with it - not because a timer expired, but because
+    // the thing they were about (being stuck HERE) stopped being true.
+    attempts.forget('unstick', 'exhausted', cell)
+    for (const k of triedSet) attempts.forget('unstick', k, cell) // the whole cell's memory, skipped ones included - we are not in it any more
+    return { moved: true, via, verdict: 'moved', plan, tried, cell, n: failedHere }
+  }
+  // ==== FAILURE IS A VERDICT, NOT A RETRY (§3.5(3)) =====================================
+  // What used to happen here: nothing was returned to anyone, and index.js's freeze watchdog
+  // re-fired the identical escape 4 minutes later, forever. There is no timer in this branch.
+  // The record is what the arbiter reads (candidateRefusal asks attempts.futile for every job),
+  // the wedge memory is what the next rescue reads, and the supervisor's honest clock is what
+  // escalates - to the terminal action, which is the one caller allowed to force a rescue.
+  for (const k of tried) attempts.record('unstick', k, cell, { now, why: 'the ' + k + ' maneuver achieved nothing here' })
+  const rec = attempts.record('unstick', 'exhausted', cell, { now, why: 'the whole rescue plan (' + plan.join('>') + ') achieved nothing here' })
+  try { prov().recordWedge(p0) } catch {} // a stuck-spot is a place the rescue could NOT free me
+  dbg('unstick FAILED at ' + feet + ' (' + where + '): tried ' + (tried.join(', ') || 'nothing applicable') +
+    (skipped.size ? ' (' + Array.from(skipped).join(',') + ' already failed here)' : '') +
+    ' - attempt ' + rec.n + ' in this cell. No retry is armed; the job clock keeps running and the arbiter owns what happens next.')
+  return { moved: false, via: null, verdict: 'exhausted', plan, tried, cell, n: rec.n }
 }
 
 // ---- reactiveMove: the bounded reactive-move primitive (NAV_REACTIVE_MOVE, Phase A) -------
@@ -1835,4 +2019,4 @@ function honestFail (lastErr, counts, label, recoveryMs, reflexWaitMs) {
   return e
 }
 
-module.exports = { doorFootCell, navigateTo, navigateToPreempt, gotoOnce, crossOwnDoor, openNearbyDoor, navLegBudget, enterStructure, swimToShore, escapeWater, escapeToDryLand, isEscapingWater, headInWater, feetInWater, outOfWater, jumpForAir, isNavigating, isRecovering, isForceUnsticking, releaseNavLatches, forceUnstick, setDebugSink, reactiveMove, reactiveTarget, reactiveDone, setDeliberateDrown, isDeliberateDrown, drownReflexSkips }
+module.exports = { doorFootCell, navigateTo, navigateToPreempt, gotoOnce, crossOwnDoor, openNearbyDoor, navLegBudget, enterStructure, swimToShore, escapeWater, escapeToDryLand, isEscapingWater, headInWater, feetInWater, outOfWater, jumpForAir, isNavigating, isRecovering, isUnsticking, releaseNavLatches, unstick, unstickPlan, setDebugSink, reactiveMove, reactiveTarget, reactiveDone, setDeliberateDrown, isDeliberateDrown, drownReflexSkips }

@@ -986,7 +986,7 @@ async function boundedHold (bot, { isStopped = () => false, say = () => {}, dead
     if (hut && !insideOwnStructure(bot) && Math.hypot(target.x - bot.entity.position.x, target.z - bot.entity.position.z) <= 12) {
       try {
         const nav = require('./navigate.js')
-        await nav.navigateTo(bot, new goals.GoalNear(target.x, target.y, target.z, 1), { timeoutMs: 20000, deadlineMs: 45000, isStopped, climb: false, budgets: { door: 2, pit: 1, water: 1, nudge: 1 }, label: 'famine-home' })
+        await nav.navigateTo(bot, new goals.GoalNear(target.x, target.y, target.z, 1), { timeoutMs: 20000, deadlineMs: 45000, isStopped, climb: false, label: 'famine-home' })
       } catch (e) { dbg('boundedHold: could not get indoors (' + e.message + ')') }
     }
   }
@@ -1160,7 +1160,7 @@ async function ensureSpawnBed (bot, opts = {}) {
   if (bot.entity.position.distanceTo(bb.position) > 2.5) {
     try {
       const nav = require('./navigate.js') // door-assist: the bed lives indoors
-      await nav.navigateTo(bot, new goals.GoalNear(bb.position.x, bb.position.y, bb.position.z, 2), { timeoutMs: 20000, deadlineMs: 45000, isStopped, climb: false, budgets: { door: 2, pit: 1, water: 1, nudge: 1 }, label: 'spawn-bed' })
+      await nav.navigateTo(bot, new goals.GoalNear(bb.position.x, bb.position.y, bb.position.z, 2), { timeoutMs: 20000, deadlineMs: 45000, isStopped, climb: false, label: 'spawn-bed' })
     } catch (e) { return R(false, 'failed', 'cannot reach the bed (' + e.message + ')') }
   }
   try {

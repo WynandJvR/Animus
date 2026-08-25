@@ -485,7 +485,6 @@ async function travelFar (bot, dest, opts = {}) {
       try {
         const nav = await navigate.navigateTo(bot, legGoal, {
           timeoutMs: 30000, deadlineMs: 75000, isStopped, climb: false, label: 'travel',
-          budgets: { water: 1, pit: 1, door: 1, nudge: 1 }, // one rescue of each kind per leg - the trip loop retries legs
           escalate: false, doorPreflight: false, // this trek loop owns its own stall handling; a near-home leg must not spuriously cross a door
           // NAV Phase 1 selector: flag OFF (default) => travelMovements(bot), byte-identical
           // no-dig behavior; flag ON + >32b from home => the wild dig-capable profile.
@@ -2530,7 +2529,7 @@ function releaseBodyClaims (why, opts = {}) {
     ['./provision-maintain.js', 'releaseMaintainLatch', 'maintaining', ['maintain']],
     ['./provision-food.js', 'releaseFoodLatch', 'securingFood', ['foodRun']],
     ['./provision-recovery.js', 'releaseRecoveryLatches', 'recovery/resting', ['ladder', 'shelter']],
-    // ROOT H: navigate's recoveringDepth/forceUnsticking are the two remaining tick gates this
+    // ROOT H: navigate's recoveringDepth/unsticking are the two remaining tick gates this
     // rung could not reach. Same contract as the three above - the OWNING module exports the
     // release, so a rename is a loud TypeError here rather than a silent skip.
     ['./navigate.js', 'releaseNavLatches', 'nav-recovering/force-unstick', ['navRecovery']]

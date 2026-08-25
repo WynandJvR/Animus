@@ -408,7 +408,7 @@ async function fishForFood (bot, { isStopped = () => false, say = () => {}, targ
       if (isStopped()) return false
       const stand = bankStandFor(bot, cw)
       if (!stand) continue
-      try { await nav.navigateTo(bot, new goals.GoalBlock(stand.x, stand.y, stand.z), { timeoutMs: 20000, deadlineMs: 40000, budgets: { water: 0, pit: 0, door: 1, nudge: 1, stepout: 1 }, label: 'fish-stand' }) } catch {}
+      try { await nav.navigateTo(bot, new goals.GoalBlock(stand.x, stand.y, stand.z), { timeoutMs: 20000, deadlineMs: 40000, rescue: 'light', label: 'fish-stand' }) } catch {}
       if (isStopped()) return false
       if (inWaterNow(bot)) { dbg('  fishing: arrived wet at the ' + cw.x + ',' + cw.z + ' bank - trying the next water'); continue }
       w = cw; stood = true; break // standing DRY on the bank - cast at this water

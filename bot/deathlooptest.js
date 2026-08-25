@@ -346,20 +346,28 @@ t('FIX 22: the declared hold still sits around a loop that re-checks the world',
   assert(/bot\.health/.test(after), 'still breaks when taking damage')
   assert(/inWaterNow\(bot\)/.test(after), 'still breaks when the pit floods')
 })
-t('FIX 22: BOTH watchdogs read the one declaration', () => {
+t('FIX 22: the ONE watchdog reads the one declaration - and nothing else can dig a hold out', () => {
   const src = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8')
+  const nav = require('fs').readFileSync(require('path').join(__dirname, 'navigate.js'), 'utf8')
   // the forward-progress watchdog (which FAIL-JOBbed the ladder at 90s)...
   assert(/const hold = reflexes\.activeHold\(/.test(src), 'the S7 watchdog consults the declared hold')
-  // ...and the position-freeze watchdog, which is the one that actually dug the bot out at 195s
-  const wedgeLine = src.split('\n').find(l => /wdHist = \[\]; return \}/.test(l)) || ''
-  assert(/reflexes\.activeHold\(/.test(wedgeLine), 'the hard-wedge watchdog stands down for a declared hold')
+  // ...and the position-freeze watchdog that dug the bot out at 195s is GONE, not guarded.
+  const code = src.replace(/^\s*\/\/.*$/gm, '') // the tombstones quote both names on purpose; the ban is on the CODE
+  assert(!/position FROZEN/.test(code), 'the freeze watchdog stays deleted - a tombstone comment is fine, a timer is not')
+  assert(!/WEDGE_WATCHDOG/.test(code), 'and its flag with it')
+  // The one rescue path that CAN move the body physically stands down for a declared hold.
+  assert(/opts\.holdOK \? opts\.holdOK\(\) : null/.test(nav) && /verdict: 'held'/.test(nav),
+    'unstick stands down for a hold its caller vouches for - stillness can be the goal')
   // 2026-07-31: a hold now also DECLARES its premise and the RUNNER resolves it (reflexes may not
   // read the body - invariant 2). BOTH watchdogs must pass that resolver, and it must be the SAME
   // one - otherwise a hold whose premise is false keeps vouching for stillness to one of them.
   // nightShelter claimed "resting until dawn" while stuck 31 blocks underground, and the bot sat
   // in a mineshaft for half an hour.
   assert(/const hold = reflexes\.activeHold\(holdPremiseOK\)/.test(src), 'the S7 watchdog must RESOLVE the premise, not trust it blindly')
-  assert(/reflexes\.activeHold\(holdPremiseOK\)/.test(wedgeLine), 'the hard-wedge watchdog must resolve it with the SAME resolver')
+  assert(/holdOK: \(\) => \{[^}]*reflexes\.activeHold\(holdPremiseOK\)/.test(src),
+    'the runner hands the SAME resolver to the terminal action, which is now the only layer that can move a holding body')
+  const rfx = require('fs').readFileSync(require('path').join(__dirname, 'reflexes.js'), 'utf8')
+  assert(/holdOK: ctx\.holdOK/.test(rfx), 'and the terminal action passes it into the rescue instead of trusting every hold')
   assert.strictEqual((src.match(/const holdPremiseOK =/g) || []).length, 1, 'exactly ONE definition of the premise resolver - two copies is how the watchdogs drift apart')
   // ...and it must be declared at MODULE SCOPE. Shipped 2026-07-31 declared at brace depth 1, so
   // the wedge watchdog - in a different branch of the tree - threw
