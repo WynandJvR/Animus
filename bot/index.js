@@ -32,6 +32,7 @@ const gravePolicy = require('./grave-policy.js') // PURE: the death-cause taxono
 const deathCause = require('./death-cause.js') // AUDIT D3: real attribution (server death message > damage log > block reads)
 const resources = require('./resources.js') // unified pack+chest resource model (food withdraw)
 const navigate = require('./navigate.js') // unified navigation (isRecovering gates the reflexes)
+const body = require('./body.js') // BODY LIVENESS: is the physics simulation ticking at all? (the one owner of that fact + the re-arm)
 const arbiter = require('./arbiter.js') // priority body-ownership: reflexes defer to a running navigation maneuver
 const access = require('./access.js')
 const schematic = require('./schematic.js')
@@ -147,6 +148,7 @@ commands.setDebugSink(noteDebug)
 provision.setDebugSink(noteDebug)
 resources.setDebugSink(noteDebug)
 navigate.setDebugSink(noteDebug)
+body.setDebugSink(noteDebug); body.setNoteSink(note) // [body] SIMULATION OFF / re-armed transitions go to the MAIN log: they explain every 'stuck' that follows
 require('./pathfix.js').setDebugSink(noteDebug) // [verify] place/dig world-recheck traces
 require('./pathfix.js').setProgressSink(commands.touchProgress) // [S7] a pathfix-VERIFIED place/break -> the forward-progress heartbeat
 require('./scaffold.js').setDebugSink(noteDebug) // [scaffold] registry/teardown traces
@@ -213,6 +215,7 @@ const bot = mineflayer.createBot({
 })
 
 let connected = false // live connection state - the ONLY honest source for /health (see bot.on('end'))
+body.install(bot) // hooks physicsTick + the four events that can switch mineflayer's simulation off (body.js)
 
 // THE RUNNER OWNS EVERY BODY READ (reflexes invariant 2). A hold DECLARES its premise by NAME;
 // this is the ONE place that resolves it, read by BOTH watchdogs - two copies of this rule is how
@@ -491,7 +494,9 @@ let lastAlivePos = null
 setInterval(() => { if (bot.entity && bot.health > 0) lastAlivePos = bot.entity.position.clone() }, 1000).unref?.()
 // Feed the stuck-detector: samples position + evaluates "trying but not progressing".
 // Surfaced in /state.stuck so the brain can change approach instead of re-wedging.
-setInterval(() => { try { commands.trackTick(bot) } catch {} }, 1000).unref?.()
+// ...and the body-liveness check rides the same 1s tick: an alive body that has stopped ticking is
+// re-armed here (body.js) - the INSTANT class, it moves nothing, so it is not a reflex row.
+setInterval(() => { try { commands.trackTick(bot) } catch {}; try { body.check(bot) } catch (e) { note('(body) check threw: ' + e.message) } }, 1000).unref?.()
 bot.on('death', () => {
   const p = (bot.entity && bot.entity.position) || lastAlivePos
   if (!p) return

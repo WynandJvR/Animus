@@ -24,6 +24,7 @@ const caps = require('./capabilities.js')   // the PURE capability registry: wha
 const resources = require('./resources.js') // unified resource model: pack + verified chests, withdraw>craft>gather
 const mining = require('./mining.js') // pure tool-durability model (toolUsesLeft) for the freshPickaxes computation
 const navigate = require('./navigate.js') // unified navigation: ONE goto + the full stuck-recovery ladder
+const body = require('./body.js') // body liveness (leaf module: requires only debug-sink)
 const planner = require('./planner.js') // re-planning goal driver (slice 1: gear-up behind the planarmor/PLANNER_GEARUP seam)
 const arbiter = require('./arbiter.js') // priority body-ownership (sticky-follow defers to a running maneuver)
 const routeMem = require('./route-mem.js') // PURE route/wedge geometry: replay proven treks + soft-steer around learned wedges (semantic-world-map slice 1)
@@ -2404,7 +2405,12 @@ function state (bot) {
   // can tell when a goal silently died and skip inferences during long autonomous
   // flows instead of assuming "the body is still executing my last behaviour".
   const pf = bot.pathfinder
-  const moving = pf && typeof pf.isMoving === 'function' ? pf.isMoving() : false
+  // HONEST: 'moving' used to be the pathfinder's opinion alone, and the pathfinder cannot tell that
+  // the simulation it drives has been switched off - so /state said moving:true for 36 minutes at a
+  // frozen coordinate (2026-08-26). A body that is not being simulated is not moving, whatever the
+  // planner thinks (body.js is the one owner of that fact).
+  const bodyInfo = body.info(bot)
+  const moving = (pf && typeof pf.isMoving === 'function' ? pf.isMoving() : false) && bodyInfo.simulating
   const goal = pf && pf.goal ? ((pf.goal.constructor && pf.goal.constructor.name) || 'goal') : null
 
   return {
@@ -2437,7 +2443,8 @@ function state (bot) {
     players,
     alone: players.length === 0, // no OTHER players nearby (you are never in this list)
     threat: nearestThreat(bot),   // nearest hostile, or null
-    moving,                       // is the body currently pathing somewhere?
+    moving,                       // is the body currently pathing somewhere? (AND being simulated - see above)
+    body: bodyInfo,               // { simulating, hz, offForSec, lastEvent, vehicle, rearms, rearmsFailed } - body.js
     goal,                         // current pathfinder goal type (GoalFollow/GoalNear/...) or null
     busy: isBusy(),               // an operator build/provision is driving the body - the brain should hold
     maneuver: (() => { try { const m = arbiter.topManeuver(); return m ? { label: m.label, tier: arbiter.priName(m.pri) } : null } catch { return null } })(), // the priority-arbiter's current body owner (a navigation in progress), so goal-thrash is visible in /state

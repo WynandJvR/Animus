@@ -28,6 +28,14 @@ const worldMemory = require('./world-memory.js') // the wedge/infra registry. Al
 // §4: one definition of the sink rule; this module still owns its own sink. index.js injects
 // it so debug lines persist to logs/bot-events.log.
 const { dbg, setDebugSink } = require('./debug-sink.js').makeDebug('[nav]')
+// BODY LIVENESS (2026-08-26). Every rescue below reads stillness as evidence about the TERRAIN.
+// It is only that when the body is being simulated at all: mineflayer switches its physics off on
+// login/death/respawn/mount and only a server position sync switches it back, and when that sync
+// never comes nothing can move the body - not a goto, not a control state, not gravity. That day
+// this file logged 2,352 rescue lines against a paralysed body and recorded the cells as wedges.
+// body.js is the one owner of the fact and of the re-arm; here we only ASK, and refuse to call
+// paralysis a wedge. Leaf module (requires only debug-sink) - no cycle.
+const body = require('./body.js')
 
 const prov = () => require('./provision.js') // lazy - see layering note above
 const provMining = () => require('./provision-mining.js') // LAZY: provision-mining top-requires navigate, so a top-level import here would be a real cycle
@@ -124,6 +132,15 @@ async function gotoOnce (bot, goal, ms = 20000, gopts = {}) {
     while ((unsticking || recoveringDepth > 0) && Date.now() - started < ms) await new Promise(r => setTimeout(r, 250))
     const waited = Date.now() - started
     if (waited > 1000) dbg('goto: yielded ' + Math.round(waited / 1000) + 's of its own ' + Math.round(ms / 1000) + 's attempt to a recovery/force-escape')
+  }
+  // A goto on a body that is not being simulated cannot succeed and cannot fail honestly: the
+  // pathfinder plans, nothing moves, the attempt times out and the caller reads 'wedged'. Spend the
+  // attempt WAITING for the re-arm instead (body.check runs on the 1s tick), and if it does not come
+  // say exactly that. The wait is inside `ms` - the bound stays a deadline on this attempt (#6).
+  if (!body.simulating()) {
+    const back = await body.waitSimulating(Math.max(0, ms - (Date.now() - started)), gopts.isStopped)
+    if (!back) throw new Error('body not simulating (no physics for ' + Math.round(body.offForMs() / 1000) + 's, ' + body.info(bot).lastEvent + ') - nothing can move it until body.js re-arms it')
+    dbg('goto: waited ' + Math.round((Date.now() - started) / 1000) + 's for the body to be simulated again')
   }
   // SCAFFOLD SESSION: any block the pathfinder places while EXECUTING a goto (bridge,
   // 1x1 tower) is by definition movement scaffold, never build fabric - build blocks
@@ -1653,6 +1670,13 @@ async function navigateToInner (bot, goal, opts = {}) {
       // the non-cutting plan already failed here, and returns a verdict when it is out of options.
       const res = await unstick(bot, goal, { isStopped, climb: opts.climb, rescue: opts.rescue, escalate: opts.escalate !== false, why: (opts.label || 'nav') + ' leg' })
       recoveryMs += Date.now() - r0
+      // A paralysed body: wait for body.js to re-arm it (within this leg's deadline) and retry the
+      // path as if nothing happened - because for the terrain, nothing did. Not a stall, not a rescue.
+      if (res.verdict === 'dead-body') {
+        const back = await body.waitSimulating(Math.max(0, dl() - Date.now()), isStopped)
+        if (back) { dbg(label + 'body simulated again - retrying the leg'); continue }
+        throw honestFail(new Error('body not simulating (' + body.info(bot).lastEvent + ') - the re-arm did not come within the deadline'), counts, label, recoveryMs, reflexWaitMs)
+      }
       for (const k of res.tried) counts[k] = (counts[k] || 0) + 1 // for honestFail's "tried:" line ONLY - a log fingerprint, never a gate
       const rescued = res.moved ? res.via : null
       // MEASURED-STALL PATIENCE (mirrors walkStaged): a whole goto+rescue cycle that netted < 2.5b
@@ -1883,6 +1907,14 @@ async function unstick (bot, goal, opts = {}) {
   // No body, no rescue. The floor calls this from a crisis path where the entity can be briefly
   // absent (a respawn in flight), and an unreadable body is not evidence of a wedge (#10).
   if (!bot.entity || !bot.entity.position) return { moved: false, via: null, verdict: 'no-body', plan: [], tried: [], cell: null, n: 0 }
+  // PARALYSIS IS NOT A WEDGE. No rung can move a body that is not being simulated, and its stillness
+  // says nothing about this cell - so no plan, no attempt record, no wedge record (those poisoned the
+  // steering for days). The verdict names the real condition; body.check owns the cure.
+  if (!body.simulating()) {
+    const bi = body.info(bot)
+    dbg('unstick: the body is NOT BEING SIMULATED (no physicsTick for ' + bi.offForSec + 's, last event ' + bi.lastEvent + ', vehicle=' + bi.vehicle + ') - paralysis, not terrain: no rung runs, nothing is recorded, body.js re-arms it')
+    return { moved: false, via: null, verdict: 'dead-body', plan: [], tried: [], cell: null, n: 0 }
+  }
   const p0 = bot.entity.position.clone()
   const feet = p0.floored()
   const cell = attempts.cellOf(feet)
