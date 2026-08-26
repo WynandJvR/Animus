@@ -369,7 +369,12 @@ t('ANTI-DRIFT: the reclaimer covers EVERY latch activeJobInfo can report', () =>
   // 4.5-hour stall waiting to happen, in a different costume.
   const snap = fs.readFileSync(path.join(__dirname, 'survival-snapshot.js'), 'utf8')
   const cmd = fs.readFileSync(path.join(__dirname, 'commands.js'), 'utf8')
-  const i = snap.indexOf('function activeJobInfo')
+  // The window starts at survivalRunActive, not activeJobInfo: the four SURVIVAL latches were
+  // extracted there (2026-08-26) so the core could ask "is survival work actually running" without
+  // going through activeJobInfo, which returns on the build's activityInfo first and never reached
+  // them. Both functions are the job-naming path and both feed activeJobInfo, so the window covers
+  // the pair - anchored on the function names, never a byte count, for the reason stated below.
+  const i = snap.indexOf('function survivalRunActive')
   const fn = snap.slice(i, snap.indexOf('async function schedulerState', i))
   const latches = [...fn.matchAll(/if \((is[A-Za-z]+)\(\)\)/g)].map(m => m[1])
   assert(latches.length >= 5, 'expected the five job latches, found ' + latches.join(','))

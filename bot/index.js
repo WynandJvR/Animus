@@ -1302,7 +1302,14 @@ if (SCHED_ON) {
     // yanking the body out from under a live escape or a food run that is genuinely feeding us.
     const ownerKey = bodyOwner()
     const ownerRow = ownerKey ? reflexes.ownerInfo(ownerKey) : null
-    const survivalActor = ownerRow && ownerRow.tier === 'SURVIVE' ? { key: ownerKey, label: ownerRow.label } : null
+    // ...and a SURVIVAL RUN NESTED INSIDE A PROGRESS JOB IS STILL SOMEBODY ANSWERING (2026-08-26).
+    // bodyOwner() knows who HOLDS the body; it does not know what the body is DOING. The build
+    // holds a PROGRESS claim while running the food chain inside itself (resumeBuild's material
+    // chain, travelFar's mid-trek block), so this read null and the terminal action killed the very
+    // job that was feeding us - 14s in, mid-farm-build, every cycle. s.survivalRun answers from the
+    // producers' own latches instead of from the claim label (§10: the world, not a proxy).
+    const survivalActor = (ownerRow && ownerRow.tier === 'SURVIVE' ? { key: ownerKey, label: ownerRow.label } : null) ||
+      (s.survivalRun ? { key: s.survivalRun.key, label: s.survivalRun.label } : null)
     // ...and the SAME crisis-grade verdict the ownership rule applies, asked for the terminal row,
     // so "crisis" cannot mean one thing to the chooser and another to the body-ownership rule (#4).
     const terminalRow = reflexes.get(reflexes.TERMINAL) || { name: reflexes.TERMINAL }

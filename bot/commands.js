@@ -920,7 +920,11 @@ async function survivalPrep (bot, opts = {}) {
     const p = provision.planProvision(mcData, { wooden_sword: 1 }, provCore().inventoryCounts(bot), { primaryWood })
     if (p.tasks.length) await provision.runPlan(bot, p, { say, isStopped: stop, restoreMovements: restore })
   } catch (e) { say(`(couldn't make a sword: ${e.message})`) }
-  if (!hasKind('sword')) say('(no wood around for a sword - heading off without one)')
+  // STOPPED IS NOT EMPTY (§7). This said "no wood around" whenever it ended without a sword - and
+  // live on 2026-08-26 it said exactly that one line after logging `gathering 2x acacia_log`, because
+  // the terminal action had taken the body 10s in. Reporting a preemption as a fact about the world
+  // is the same class of lie this whole session has been about; name which one actually happened.
+  if (!hasKind('sword')) say(isStopped() ? '(sword gather interrupted - heading off without one)' : (Date.now() - t0 > SWORD_MS ? '(no sword in time - heading off without one)' : '(no wood around for a sword - heading off without one)'))
   restore()
   return outcome()
 }

@@ -249,6 +249,33 @@ function mayDoProgress (bot, opts = {}) { return survivalNeed(bot, opts) == null
 // ledger does (#4 - it used to build its own copy of this expression in index.js).
 // blockedOn = the §6 nudge marker, now cleared by an ADVANCE rather than by any touch.
 // Never throws.
+// WHAT SURVIVAL WORK IS ACTUALLY RUNNING - a fact about the WORLD, not about whose body-claim
+// happens to wrap it (2026-08-26). These latches are raised by the survival producers themselves,
+// so they are true whether the run was dispatched as a SURVIVE-tier job or called from inside a
+// PROGRESS one - and the build calls them constantly: resumeBuild's material chain runs secureFood,
+// travelFar's inline block runs secureFood and nightRest mid-trek.
+//
+// activeJobInfo below returns on the FIRST match, and `activityInfo()` (the build) matches first -
+// so when the build was running, these latches were never even consulted and the core concluded
+// nobody was answering the crisis. It then fired the terminal action and killed the build, which
+// was at that moment building a wheat farm TO ANSWER THAT CRISIS. Live 2026-08-26:
+//   12:38:21 (build) fishing does nothing here - building the farm so i can actually eat
+//   12:38:31 (core) chose terminalAction: TERMINAL: a crisis nobody will answer (secureFood: ...)
+//   12:38:31 (sched) TERMINAL terminal - took the body from building(14s)
+// index.js's survivalActor comment already states the intent - "what stops the terminal action from
+// yanking the body out from under ... a food run that is genuinely feeding us" - it just asked the
+// claim registry, which knows who holds the body, not what the body is doing. One definition, two
+// callers (§4), and it answers from the latch rather than from the label (§10).
+function survivalRunActive () {
+  try {
+    if (isRecoveringDegraded()) return { key: 'recoveryLadder', label: 'recoveryLadder', since: recoveringDegradedSince() || null }
+    if (isSecuringFood()) return { key: 'secureFood', label: 'secureFood', since: securingFoodSince() || null }
+    if (isRecoveringHp()) return { key: 'recoverHp', label: 'recoverHp', since: recoveringHpSince() || null }
+    if (isResting()) return { key: 'nightShelter', label: 'nightShelter', since: restingSince() || null }
+  } catch { /* a latch accessor is a plain boolean read; if it throws, claim nothing */ }
+  return null
+}
+
 function activeJobInfo () {
   const commands = require('./commands.js')
   const mk = (name, cls, startedAt) => {
@@ -270,10 +297,8 @@ function activeJobInfo () {
   // run #2 of a job inherited run #1's exhausted clock. Only the module that raises a latch knows
   // when it was raised, so that is where the stamp lives (provFood.securingFoodSince et al); a
   // whole-body force-release clears it with the latch, so a released ghost cannot leave one behind.
-  if (isRecoveringDegraded()) return mk('recoveryLadder', 'survival', recoveringDegradedSince() || null)
-  if (isSecuringFood()) return mk('secureFood', 'survival', securingFoodSince() || null)
-  if (isRecoveringHp()) return mk('recoverHp', 'survival', recoveringHpSince() || null)
-  if (isResting()) return mk('nightShelter', 'survival', restingSince() || null)
+  const sr = survivalRunActive()
+  if (sr) return mk(sr.key, 'survival', sr.since)
   if (isMaintaining()) return mk('maintenancePass', 'maintain', maintainingSince() || null)
   // NO JOB. Close the ledger entry, so the NEXT job of the same name is a NEW job. Filing it
   // HERE keeps one reconciliation point: activeJobInfo is the only caller of jobProgress, and it
@@ -400,6 +425,10 @@ async function schedulerState (bot) {
   // activeJob: the running activity/survival-latch synthesis (S7: factored into activeJobInfo so the
   // snapshot and the 5s watchdog share ONE definition; lastProgressAt/blockedOn are now REAL data).
   try { s.activeJob = activeJobInfo() } catch { s.activeJob = null }
+  // Published SEPARATELY from activeJob on purpose: activeJob names who owns the body, this names
+  // what survival work is in flight. When the build owns the body and is running the food chain
+  // inside itself, those two are different answers and the core needs the second one.
+  try { s.survivalRun = survivalRunActive() } catch { s.survivalRun = null }
   // #114 ONE_READINESS: the inputs scheduler.buildReady needs, so the CHOOSER can evaluate the
   // build's precondition with the same data the EXECUTOR does (one predicate, one snapshot).
   // All cheap: two in-memory reads that were already on this path (persistedResume, grave ledger)
@@ -548,4 +577,4 @@ async function schedulerState (bot) {
   return s
 }
 
-module.exports = { survivalState, excursionState, survivalNeed, mayDoProgress, activeJobInfo, schedulerState, setDebugSink }
+module.exports = { survivalState, excursionState, survivalNeed, mayDoProgress, activeJobInfo, survivalRunActive, schedulerState, setDebugSink }
