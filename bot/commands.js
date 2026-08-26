@@ -1427,7 +1427,7 @@ async function handleInner (bot, line, opts = {}) {
       if (travelled) {
         beginActivity('recover', `${d.x},${d.y},${d.z}`)
         const r = await travelFar(bot, { x: d.x, y: d.y, z: d.z }, { isStopped: () => false, say: m => bot.chat(String(m).slice(0, 256)) })
-        if (!r.ok && !pathfix.arrivedOK(bot, graveGoal)) { endActivity(false, r.reason); return `couldn't get back to where i died (${d.x},${d.y},${d.z}): ${r.reason}` }
+        if (!r.ok && !pathfix.arrivedOK(bot, graveGoal)) { endActivity(false, r.reason); grave.noteGraveTrip(d, false, r.reason); return `couldn't get back to where i died (${d.x},${d.y},${d.z}): ${r.reason}` }
       }
       // The approach, no longer swallowed. graves end up in pits/caves, so the full ladder still
       // runs - but its failure is now a REPORTED failure, not a silent one.

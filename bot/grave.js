@@ -126,17 +126,39 @@ function recordDeath (info) {
 // (task #18: an about-to-despawn grave outranks a richer one that can still wait; expired graves -
 // past 1.5x the despawn window - drop off the candidate list, but are NEVER auto-marked retrieved:
 // only a physical visit that confirms absence marks 'gone', or the 24h ledger expiry reaps them.)
+// A TRIP THAT CANNOT REACH THE GRAVE IS THE WORLD ANSWERING (2026-08-26). Every other reason a
+// grave leaves the candidate list is evidence - retrieved, dangerous, not worth it, despawned, a
+// medium we cannot survive - but "I physically could not get there" was recorded NOWHERE, so a
+// grave the bot cannot reach stayed top of the list and the corpse run retried forever. Live, after
+// dying at the bottom of the ravine it had fallen into:
+//   (cmd) recover -> couldn't get back to where i died (75,43,-2): timed out
+//   (cmd) goto 75 43 -2 -> got near but couldn't settle: goto timed out (tried: pit, climb x2, nudge x3, drybreach x2, stepout)
+//   ...three times in ninety seconds, food draining, and because recoveryLadder is survival-tier it
+//   outranked the build the whole time, so the bot never left for the castle.
+// TWO failures, not one: a single timeout can be a mob, a chunk load, a bad moment. Two says the
+// route is the problem. This DEFERS like #112's salvage verdict rather than writing the grave off -
+// the row and its value stay on the books, and any success clears the count - but it stops the bot
+// spending its day on a hole it has already proved it cannot enter.
+const GRAVE_TRIP_FAILS_MAX = 2
+function noteGraveTrip (d, ok, why) {
+  if (!d) return
+  if (ok) { if (d.tripFails) { d.tripFails = 0; persistDeath() } return }
+  d.tripFails = (d.tripFails || 0) + 1
+  persistDeath()
+}
+function graveReachable (d) { return (d.tripFails || 0) < GRAVE_TRIP_FAILS_MAX }
+
 function bestGrave () {
   const now = Date.now()
   // #112: `graveSalvage(d).go` is the new clause - a grave in a medium the bot cannot survive is
   // not a candidate at all. It is DEFERRED, not written off: the ledger keeps the row and the
   // value, and the verdict flips as soon as the bot proves it can get through there alive.
-  const c = deathLedger.filter(d => !d.retrieved && !d.dangerous && graveWorthIt(d) && now - (d.at || 0) < 24 * 3600 * 1000 && graveUrgency(d, now).tier !== 'expired' && graveSalvage(d).go)
+  const c = deathLedger.filter(d => !d.retrieved && !d.dangerous && graveWorthIt(d) && graveReachable(d) && now - (d.at || 0) < 24 * 3600 * 1000 && graveUrgency(d, now).tier !== 'expired' && graveSalvage(d).go)
   c.sort((a, b) => graveCompare(a, b, now))
   return c[0] || null
 }
 
-function unretrievedGraves () { return deathLedger.filter(d => !d.retrieved && !d.dangerous && graveWorthIt(d) && graveSalvage(d).go).length } // only graves actually worth a trip
+function unretrievedGraves () { return deathLedger.filter(d => !d.retrieved && !d.dangerous && graveWorthIt(d) && graveReachable(d) && graveSalvage(d).go).length } // only graves actually worth a trip
 // The worthwhile-but-DEFERRED graves: still owned, still on the books, just behind a condition.
 // The `recover` command needs these so it reports honestly instead of falling through to the
 // "nothing worth going back for" branch and marking the row retrieved (which would throw the gear away).
@@ -180,4 +202,4 @@ function gravesSnapshot ({ pos, home, now, ledger: injected } = {}) {
   return { graves, deathsRecent }
 }
 
-module.exports = { persistDeath, snapInventory, recordDeath, bestGrave, unretrievedGraves, worthwhileGrave, gravesSnapshot, ledger, lastDeathInfo, graveSalvage, deferredGraves, DEATH_FILE }
+module.exports = { persistDeath, noteGraveTrip, graveReachable, snapInventory, recordDeath, bestGrave, unretrievedGraves, worthwhileGrave, gravesSnapshot, ledger, lastDeathInfo, graveSalvage, deferredGraves, DEATH_FILE }
