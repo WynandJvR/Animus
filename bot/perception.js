@@ -132,7 +132,7 @@ function hazards (bot) {
     // hasSolidCeiling moved to provision-hut.js and left the facade in be4ad17; through the old
     // spelling this threw and the catch reported underground:false EVERYWHERE. Still lazy - the
     // require stays inside the call to keep it off the top-level cycle.
-    underground: (() => { try { return require('./provision-hut.js').hasSolidCeiling(bot, 45, { ignoreLeaves: true }) } catch { return false } })(),
+    underground: (() => { try { return require('./provision-hut.js').isUnderground(bot) } catch { return false } })(),
     onFire,
     inLava: !!(ent && ent.isInLava),
     inWater: !!(ent && ent.isInWater),

@@ -236,6 +236,18 @@ function insideOwnStructure (bot, pos) {
 // Deliberately NOT skipped: self-world's SUPPORT region. The dirt my hut stands on is the
 // world's ground that I happen to be forbidden to cut - see the FABRIC vs SUPPORT note in
 // self-world.js. Calling it "not a ceiling" would say "open sky" from the bottom of a mine.
+// AM I UNDERGROUND? One name for the question, because it had none (2026-08-26). perception.js
+// inlined `hasSolidCeiling(bot, 45, { ignoreLeaves: true })` to answer it for the state API, and
+// nothing else could ask - the scheduler's snapshot never carried it, so no responder could gate on
+// it. A healthy bot at the bottom of a shaft therefore had NO OWNER for the decision "go up": no
+// crisis fires at hp20/food20, and the only climb-out in the codebase lives inside runGather's
+// finally. Live 2026-08-26 it sat at y31 in a 1x1 shaft holding 56 dirt - every tool to leave, and
+// nothing to tell it to. Named here, beside the primitive it wraps, so the state API and the
+// scheduler answer it identically (rule 4).
+function isUnderground (bot) {
+  try { return !!hasSolidCeiling(bot, 45, { ignoreLeaves: true }) } catch { return false }
+}
+
 function hasSolidCeiling (bot, upTo = 45, opts = {}) {
   if (!bot.entity) return false
   // Inside the bot's own hut: roofed, yes - underground, no. Kept as the CHEAP, world-VERIFIED
@@ -2185,7 +2197,7 @@ async function worldTidy (bot, opts = {}) {
 module.exports = {
   setDebugSink, insideHutBox,
   containerHeadroomAt, ownBedCellAt, hutDoorway, doorwayReservationAt,
-  insideHutBox, ownHutAt, ownInfraSupportAt, underOwnFloorAt, underpinHutFloor, onHutApron, insideOwnStructure, hasSolidCeiling, hutAnchor, ensureHomeShelter, stepOffApron, ensureHutApron, clearDoorApproach, healHomeCrater, ensureHutBed, relocateBedInto, bedInPack, bedCandidates, acquireBed, placeBedNear, bedFootprint, bedUsable, assertSpawnOn, ensureBedSite, upgradeBedPlacement, freeInteriorCell, stationInHut, stationSlot, reconcileInfra, cleanupHutInterior, repairHutStructure, recallAndReach, maintainHut, maintainHome,
+  insideHutBox, ownHutAt, ownInfraSupportAt, underOwnFloorAt, underpinHutFloor, onHutApron, insideOwnStructure, hasSolidCeiling, isUnderground, hutAnchor, ensureHomeShelter, stepOffApron, ensureHutApron, clearDoorApproach, healHomeCrater, ensureHutBed, relocateBedInto, bedInPack, bedCandidates, acquireBed, placeBedNear, bedFootprint, bedUsable, assertSpawnOn, ensureBedSite, upgradeBedPlacement, freeInteriorCell, stationInHut, stationSlot, reconcileInfra, cleanupHutInterior, repairHutStructure, recallAndReach, maintainHut, maintainHome,
   secureBase, secureBaseGate: hutModel.secureBaseGate,
   sealHomeDescents, sealDescentsGate: hutModel.sealDescentsGate,
   worldTidy, litterSignature: hutModel.litterSignature

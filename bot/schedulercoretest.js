@@ -52,7 +52,7 @@ t('01 dusk-far-naked -> nightShelter', () => {
 
 // 2. day-healthy-no-reserve -> maintenancePass (food bootstrap). The calm-window infra build.
 t('02 day-healthy-no-reserve -> maintenancePass (bootstrap food)', () => {
-  const c = choose('day-healthy-no-reserve', snap({ bankFoodPts: 0, farm: { exists: false } }))
+  const c = choose('day-healthy-no-reserve', snap({ bankFoodPts: 0, farm: { exists: false }, persistedBuild: false }))
   assert.strictEqual(c.job, 'maintenancePass', 'got ' + c.job)
   assert.strictEqual(c.cls, 'maintain')
   assert.strictEqual(c.bootstrap, 'food')
@@ -155,7 +155,11 @@ t('12 idle, nothing pressing -> null (idle)', () => {
 
 // 13. base UNLIT (armored, reserve full, home reachable, day) -> maintenancePass (bootstrap base).
 t('13 base unlit -> maintenancePass (bootstrap base)', () => {
-  const c = choose('base-unlit', snap({ baseLit: false }))
+  // persistedBuild:false - this case is about the BOOTSTRAP TIER's own scoring. It inherited
+  // persistedBuild:true from the shared fixture, which (with no hut) also made it a #102
+  // camp-first case, where buildReady deliberately exempts the build and the bootstrap stands
+  // down. Two scenarios in one test; this pins the one it is named for.
+  const c = choose('base-unlit', snap({ baseLit: false, persistedBuild: false }))
   assert.strictEqual(c.job, 'maintenancePass', 'got ' + c.job)
   assert.strictEqual(c.bootstrap, 'base')
 })
@@ -169,7 +173,11 @@ t('14 naked + far grave (in ladder band) -> recoveryLadder', () => {
 
 // 15. dusk but ARMORED + a food-reserve bootstrap due -> maintenancePass beats a weak dusk signal.
 t('15 dusk armored + reserve low -> maintenancePass (food) beats weak dusk', () => {
-  const c = choose('dusk-armored-reserve', snap({ armorPieces: 4, underArmored: false, homeDist: 6, homeReachable: true, bankFoodPts: 0, farm: { exists: false }, timeOfDay: 12300 }))
+  // persistedBuild:false - this case is about the BOOTSTRAP TIER's own scoring. It inherited
+  // persistedBuild:true from the shared fixture, which (with no hut) also made it a #102
+  // camp-first case, where buildReady deliberately exempts the build and the bootstrap stands
+  // down. Two scenarios in one test; this pins the one it is named for.
+  const c = choose('dusk-armored-reserve', snap({ armorPieces: 4, underArmored: false, homeDist: 6, homeReachable: true, bankFoodPts: 0, farm: { exists: false }, timeOfDay: 12300, persistedBuild: false }))
   assert.strictEqual(c.job, 'maintenancePass', 'a strong food bootstrap outscores a low-exposure dusk, got ' + c.job)
   assert.strictEqual(c.bootstrap, 'food')
 })
@@ -197,7 +205,7 @@ t('18 crisis vs active build -> preempt=true', () => {
 
 // 19. bootstrap while IDLE -> maintenancePass with preempt=false (maintain never preempts; no victim).
 t('19 bootstrap while idle -> maintenancePass, preempt=false', () => {
-  const c = choose('bootstrap-idle', snap({ bankFoodPts: 0, farm: { exists: false }, activeJob: null }))
+  const c = choose('bootstrap-idle', snap({ bankFoodPts: 0, farm: { exists: false }, activeJob: null, persistedBuild: false }))
   assert.strictEqual(c.job, 'maintenancePass')
   assert.strictEqual(c.preempt, false, 'maintain rank cannot preempt; and there is no active victim')
 })

@@ -313,7 +313,21 @@ function chooseActivity (snapshot, opts) {
   const buildCls = (activeProgress || s.persistedBuild || s.brainJobPending) ? 'progress' : 'idle'
   const buildWant = base - W_RISK_BUILD * riskLevel(s)
 
-  let bn = scheduler.bootstrapNeed(s)
+  // #102 CAMP FIRST, HONOURED BY THE LAYER THAT ACTUALLY CHOOSES (2026-08-26). buildReady already
+  // decides this and publishes the verdict as `exempt`: with a bootstrap need pending and NO HUT
+  // standing, the build is let through, because the build's OWN camp step is what establishes the
+  // shelter - AT THE SITE, which is where the camp belongs. pickJob honours it by not proposing
+  // maintenancePass at all. This core never read the flag, so one rule was a STAND-DOWN in one
+  // selector and a scoring contest in the other, and here W_SECURE * urgency simply beat buildWant:
+  //   (core) chose build/idle: resuming the saved build - bootstrap spawn pending but NO HUT stands
+  //   (sched) autobuild NOT dispatched: maintenancePass holds the dispatch slot
+  // printed all afternoon while a saved build waited 320 blocks away, and again the moment the
+  // operator teleported the bot to the surface to give it a clean run. Exactly the symptom #102 was
+  // written for on 2026-08-25; the fix landed in the selector that is no longer in charge.
+  // A score cannot express "stand down" - only not being a candidate can - so it is honoured the
+  // way pickJob honours it. Upkeep is untouched: this is the bootstrap-vs-build question only, and
+  // br.exempt is that question already answered (rule 4, one rule one definition).
+  let bn = br.exempt ? null : scheduler.bootstrapNeed(s)
   let keystone = false
   if (!bn && s.persistedBuild && scheduler.ironKeystoneActive(s)) { bn = 'armor'; keystone = true }
   const upkeep = !bn && !!s.maintainNeeded

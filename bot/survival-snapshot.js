@@ -425,6 +425,9 @@ async function schedulerState (bot) {
   // activeJob: the running activity/survival-latch synthesis (S7: factored into activeJobInfo so the
   // snapshot and the 5s watchdog share ONE definition; lastProgressAt/blockedOn are now REAL data).
   try { s.activeJob = activeJobInfo() } catch { s.activeJob = null }
+  // Published so a responder can GATE on being buried. The state API has reported this every tick
+  // for months and the chooser never saw it, which is why nothing owned "go up" (provision-hut.isUnderground).
+  try { s.underground = provHut.isUnderground(bot) } catch { s.underground = false }
   // Published SEPARATELY from activeJob on purpose: activeJob names who owns the body, this names
   // what survival work is in flight. When the build owns the body and is running the food chain
   // inside itself, those two are different answers and the core needs the second one.
