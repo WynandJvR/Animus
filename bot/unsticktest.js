@@ -196,26 +196,26 @@ process.exit(failures ? 1 : 0)
 // of 4 walls solid (a crater is a bowl - it widens upward, so the bottom neighbours are air) and
 // `roofed` needs a ceiling (a crater is open to the sky). Neither fired, so the plan was
 // nudge>stepout and NEITHER OF THOSE GOES UP. It could not leave by construction.
-t('a crater with open sky still gets the climb rung - depth alone is enough', () => {
+t('a cell that has already defeated the flat rungs gets the climb rung - evidence, not depth', () => {
   const P = require('./navigate.js').unstickPlan
-  const crater = P({ belowGrade: true, climb: true, roofed: false, pit: false })
-  assert.ok(crater.includes('climb'), 'five blocks down with open sky must get a rung that goes UP')
+  const crater = P({ trappedHere: true, climb: true, roofed: false, pit: false })
+  assert.ok(crater.includes('climb'), 'a cell that keeps defeating nudge/stepout must get a rung that goes UP')
   assert.ok(crater.indexOf('climb') < crater.indexOf('nudge'), 'and it must come before the flat-ground rungs')
 })
 
 t('flat open ground is UNCHANGED - this must not make every walk a climb', () => {
   const P = require('./navigate.js').unstickPlan
-  assert.deepStrictEqual(P({ belowGrade: false, climb: true, roofed: false, pit: false }), ['nudge', 'stepout'])
+  assert.deepStrictEqual(P({ trappedHere: false, climb: true, roofed: false, pit: false }), ['nudge', 'stepout'])
 })
 
 t('a crater AT HOME is still a crater', () => {
   const P = require('./navigate.js').unstickPlan
-  const p = P({ home: true, belowGrade: true, climb: true, roofed: false, pit: false })
+  const p = P({ home: true, trappedHere: true, climb: true, roofed: false, pit: false })
   assert.ok(p.includes('climb'), 'being near my own base does not make a hole shallower')
   assert.ok(p.indexOf('door') === 0, 'the door still comes first at home (the 2026-08-03 lesson)')
 })
 
 t('noDig still vetoes the climb - the crater fix may not cut what digBlocked refuses', () => {
   const P = require('./navigate.js').unstickPlan
-  assert.ok(!P({ belowGrade: true, climb: true, noDig: true, roofed: false }).includes('climb'))
+  assert.ok(!P({ trappedHere: true, climb: true, noDig: true, roofed: false }).includes('climb'))
 })

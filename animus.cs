@@ -907,6 +907,19 @@ class Animus : Form
                         brainGoal = "" + cfg["goal"];
                         if (!tbGoal.Focused) tbGoal.Text = brainGoal;
                     }
+                    // THE MODEL BOX MUST TRACK THE LIVE SETTING (2026-08-26). It was filled once at
+                    // startup from LoadModel() and never refreshed, so it showed whatever was last
+                    // typed here while the brain ran something else. Operator, pointing at it:
+                    // "why does the ui still say this then?" - and rightly: the box read qwen3:14b
+                    // while llama3.2 was resident and serving every decision. Worse, that stored
+                    // setting is what the brain OBEYS - brain-llm.js does (settings.model || LLM_MODEL)
+                    // - so the env var loses to it, and a stale box is not cosmetic, it is the source
+                    // of truth being invisible. Same focus guard as the goal field.
+                    if (cfg.ContainsKey("model") && cfg["model"] != null)
+                    {
+                        string liveModel = "" + cfg["model"];
+                        if (!cbModel.Focused && cbModel.Text != liveModel) cbModel.Text = liveModel;
+                    }
                 }
             }
             catch { }
@@ -944,7 +957,19 @@ class Animus : Form
             }
             else SetVal(lvPlayers, "alone");
             Dictionary<string, object> act = Obj(st, "activity");
-            SetVal(lvActivity, act == null ? "idle" : S(act, "name") + " · " + S(act, "detail") + " · " + S(act, "forSec") + "s");
+            // "Doing: idle" was the same lie the header chip used to tell, in a second place. An
+            // activity of null does NOT mean idle - it means no ACTIVITY, while a hold or a waiting
+            // build may still own the bot. Operator, twice: "why does the gui say its idle?" and
+            // "just saying idle if its holding a job is confusing". Same fields, same order as the
+            // chip, so the two lines can never disagree about what the bot is doing.
+            if (act != null) SetVal(lvActivity, S(act, "name") + " · " + S(act, "detail") + " · " + S(act, "forSec") + "s");
+            else {
+                Dictionary<string, object> hAct = Obj(st, "hold");
+                Dictionary<string, object> sAct = Obj(st, "savedBuild");
+                if (hAct != null) SetVal(lvActivity, "holding · " + S(hAct, "label") + " · until " + S(hAct, "wake"));
+                else if (sAct != null) SetVal(lvActivity, (B(sAct, "held") ? "build stood down · " : "build waiting · ") + S(sAct, "name"));
+                else SetVal(lvActivity, "idle");
+            }
             lvActivity.ForeColor = act == null ? Muted : Txt;
             System.Collections.IList inv = st.ContainsKey("inventory") ? st["inventory"] as System.Collections.IList : null;
             if (inv != null && inv.Count > 0)

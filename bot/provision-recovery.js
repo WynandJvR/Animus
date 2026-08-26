@@ -196,7 +196,14 @@ function deadlockResetDue ({ hp, food, hasPackFood, failCount, sinceLastResetMs 
 
 // Persisted (world-mem, the gearupState pattern) so a restart can't bypass the cooldown or the
 // no-food back-off. { at: last reset timestamp, count: consecutive resets with no food gained }.
-function deadlockResetState () { migrateDeadlockCounter(); return loadWorldMem().deadlockReset || { at: 0, count: 0 } }
+// A FRESH WORLD IS ALREADY IN THE NEW MEANING (2026-08-26). The fallback here returned
+// { at: 0, count: 0 } with no , so a world-memory with no deadlockReset record reported
+// state in the OLD schema - and migrateDeadlockCounter early-returns on a missing record, so
+// nothing ever stamped it. Latent since the migration shipped; invisible until the operator asked
+// for a clean state and the file was deleted, at which point suicidetest failed on a bot that had
+// done nothing wrong. A default must be well-formed in the CURRENT schema: no history to migrate
+// is not the same as history in the old meaning.
+function deadlockResetState () { migrateDeadlockCounter(); return loadWorldMem().deadlockReset || { at: 0, count: 0, counts: 'deaths' } }
 
 // #63 §A: world-sample the column at (x,z) near surfaceY. Find the top stand-able cell (solid non-
 // fluid floor with 2 air above) within a small vertical window, and whether that cell is inside our

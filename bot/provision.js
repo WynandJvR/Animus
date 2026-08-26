@@ -2377,6 +2377,16 @@ async function gatherLoop (bot, item, count, opts = {}) {
       // 3b still skips the offending tree and its immediate neighbours - what the rule was written
       // to do - without a fresh navigation wedge at base blinding the forest around it.
       .filter(p => !routeMem.wedgeNearXZ(wedges, p, 3))
+    // INSTRUMENT (2026-08-26): one number that decides where the gather dies. I guessed wrong
+    // three times on this - the tool gate, the wedge radius, the species lock - so measure it.
+    // raw = what the world offers; kept = what survives the filter chain above.
+    //   raw=0            -> genuinely no wood in range
+    //   raw>0, kept=0    -> a FILTER is eating them
+    //   kept>0, no gain  -> the WALK hangs
+    try {
+      const _raw = (bot.findBlocks({ matching: ids, maxDistance: 64, count: 32 }) || []).length
+      dbg('  gather scan: raw=' + _raw + ' kept=' + candidates.length + ' item=' + item + ' feetY=' + Math.floor(bot.entity.position.y) + ' surfaceY=' + surfaceY)
+    } catch (e) { dbg('  gather scan: probe failed ' + e.message) }
     // ORCHARD MODE (operator rule): grinding one tree per chunk wastes the day. Sparse
     // area (about one tree visible) + a real sapling stock + a big remaining need ->
     // plant a 16-tree orchard near the site RIGHT NOW (don't wait for total dryness) and

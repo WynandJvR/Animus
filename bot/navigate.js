@@ -1159,8 +1159,8 @@ async function recoverOnce (bot, goal, plan, opts) {
       // started offering climb in a crater - and the rung then DECLINED it, because its own when still
       // demanded a CEILING. Live: 8 plans containing climb, 0 climbs run, bot still in the hole. A rung
       // whose plan-level and rung-level conditions disagree is two definitions of one rule (#4).
-      // belowGrade is computed ONCE in unstick (against the surrounding rim) and passed in here.
-      when: () => opts.climb !== false && (opts.belowGrade || provHut().hasSolidCeiling(bot, 12, { ignoreLeaves: true })) &&
+      // trappedHere is computed ONCE in unstick (from wedge evidence) and passed in here.
+      when: () => opts.climb !== false && (opts.trappedHere || provHut().hasSolidCeiling(bot, 12, { ignoreLeaves: true })) &&
         !selfWorld.noDigAt(bot.entity.position.floored()),
       run: async () => {
         // GROUNDED TARGET (#111). This rung used to hand climbToSurface `feet.y + 10` - a
@@ -1469,7 +1469,17 @@ async function navigateToInner (bot, goal, opts = {}) {
   // mid-approach - the door-loop fix. Priority is the caller's tier (a flee hut-retreat
   // via navigateToPreempt passes SURVIVE; ordinary navigation is PROGRESS). The TTL is a
   // leak-safety cap (refreshed each loop); the finally end() is the real release.
-  const manTtl = () => Math.min(60000, timeoutMs + 8000)
+  // A MANEUVER MUST OUTLAST THE SLOWEST RECOVERY IT AUTHORIZES (2026-08-26, live). This was sized
+  // to the WALK - an 8s leg bought a 16s maneuver - but a nav leg can trigger unstick, and unstick
+  // can trigger a bare-handed dig-out. Breaking stone with no pickaxe is ~7.5s per block, so
+  // climbing 3-4 blocks out of a hole is 20-30s and the maneuver killed it at 16s. Every time.
+  //   [arb] maneuver BEGIN nav PROGRESS ttl=16000
+  //   [nav] recovery: stuck UNDERGROUND at (0,62,-3) - climbing to the surface y=66
+  //   [arb] maneuver EXPIRED nav PROGRESS
+  // The bot had 31 reachable trees (raw=32 kept=31) and could not climb out of the hole to walk to
+  // one, because the escape was budgeted as if it were a stroll. The floor is the cost of the
+  // slowest legal escape, not of the walk that happened to reveal the need for one.
+  const manTtl = () => Math.min(60000, Math.max(35000, timeoutMs + 8000))
   const manTok = arbiter.beginManeuver(opts.label || 'nav', opts.priority != null ? opts.priority : arbiter.PRIORITY.PROGRESS, manTtl())
   try {
     for (;;) {
@@ -1727,13 +1737,13 @@ function unstickPlan (w) {
   //    climbing to the surface" - a sentence made of two wrong beliefs. Indoors, the plan is
   //    step-to-a-free-cell then the door; never the roof, never a dirt pillar in the living room.
   if (w.indoors) add('indoor', 'door', 'stepout')
-  else if (w.home) { add('door'); if (w.pit) add('pit'); if (w.belowGrade && w.climb && !w.noDig) add('climb'); add('stepout', 'nudge') }
+  else if (w.home) { add('door'); if (w.pit) add('pit'); if (w.trappedHere && w.climb && !w.noDig) add('climb'); add('stepout', 'nudge') }
   else {
     if (w.pit) add('pit')
     if (w.door) add('door')
     // ...or simply DOWN A HOLE with open sky above it (the crater case). The climb rung is the only
     // rung that goes UP; gating it on a ceiling meant an open-topped hole had no way out at all.
-    if ((w.roofed || w.belowGrade) && w.climb && !w.noDig) add('climb')
+    if ((w.roofed || w.trappedHere) && w.climb && !w.noDig) add('climb')
     add('nudge', 'stepout')
   }
   // 3. THE LAST RESORT, and only on the evidence the caller already gathered. `!w.noDig` is the
@@ -1795,24 +1805,17 @@ async function unstick (bot, goal, opts = {}) {
     // (neither of which climbs), and could not leave BY CONSTRUCTION: 1,019 recorded failures in one
     // cell, the operator watching it sit in a crater. Being in a hole is about how far down you are,
     // not about what is over your head. Uses the item-4 surface read, so its own fabric is not ground.
-    belowGrade: (() => {
-      // MEASURE THE RIM, NOT THE FLOOR. The first cut of this read surfaceYAt at the bot's OWN
-      // column and never once fired: a hole's own column has no ground above it - that is what
-      // makes it a hole - so the scan returned the crater floor the bot was standing on and the
-      // depth came out as zero. Live: 17 'in the open' plans, 0 climbs, still in the crater.
-      // Depth is a comparison with the SURROUNDING ground, so sample the neighbours and take the
-      // highest known rim. Bounded to feet+16 so this is four short column reads, not four
-      // full-world scans, and 'unknown' contributes nothing rather than guessing.
-      try {
-        const sf = require('./pathfix.js').surfaceYAt
-        let rim = null
-        for (const [dx, dz] of [[4, 0], [-4, 0], [0, 4], [0, -4]]) {
-          const r = sf(bot, feet.x + dx, feet.z + dz, { maxY: feet.y + 16 })
-          if (r && r.known && r.y != null && (rim == null || r.y > rim)) rim = r.y
-        }
-        return rim != null && (rim - feet.y) >= 3
-      } catch { return false }
-    })(),
+    // NO GEOMETRY GUESS HERE. Two earlier versions of this invented constants the world never
+    // told us - sample at +/-4, depth >= 3, quorum 3-of-4 - and both were wrong on real terrain:
+    // the first read the bot's own column (a hole has no ground above it, so depth came out zero),
+    // the second read the MAX of four neighbours, so the foot of any savanna rise became a 'hole'
+    // and the bot tried to climb out of open grass. Operator: "obviously this is gonna cause
+    // problems, the bot should be dynamic and adapt to its environment" - principle #3, and right.
+    // Any fixed radius breaks somewhere: a 2-deep pit, a crater wider than the samples, a shaft.
+    // So the situation is judged by what the world SAYS (roofed / pit, both already read above)
+    // and the crater case by EVIDENCE - this cell has already defeated the flat-ground rungs,
+    // which failedHere counts from the wedge memory. Evidence, not a ruler.
+    trappedHere: failedHere >= 2,
     door: doorNearby(bot, goalXZ(goal)),
     noDig: !!selfWorld.noDigAt(feet),
     climb: opts.climb !== false,
@@ -1884,7 +1887,7 @@ async function unstick (bot, goal, opts = {}) {
     // a buried bot - which is the only thing forceUnstick's 4-iteration loop was ever for.
     const passes = goal ? 1 : 3
     for (let i = 0; i < passes && !isStopped(); i++) {
-      const rescued = await recoverOnce(bot, goal, plan, { isStopped, tried: triedSet, digOut: w.cut, desperate, climb: w.climb, belowGrade: w.belowGrade })
+      const rescued = await recoverOnce(bot, goal, plan, { isStopped, tried: triedSet, digOut: w.cut, desperate, climb: w.climb, trappedHere: w.trappedHere })
       if (!rescued) break
       via = rescued
       dbg('unstick: ' + rescued + ' moved us to ' + bot.entity.position.floored())
