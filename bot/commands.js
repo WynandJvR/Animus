@@ -895,7 +895,22 @@ async function survivalPrep (bot, opts = {}) {
     say(`gearing up before the trip - ${Object.keys(want).map(t => t.replace('wooden_', '')).join(' + ')}`)
     try {
       const p = provision.planProvision(mcData, want, provCore().inventoryCounts(bot), { primaryWood })
-      if (p.tasks.length) await provision.runPlan(bot, p, { say, isStopped, restoreMovements: restore })
+      // A DEADLINE ON THE ATTEMPT, NOT A DELAY BEFORE THINKING (#6). This awaited runPlan with no
+      // bound, so a gather that finds NOTHING still owned the trip. Live 2026-08-25/26: the planner
+      // locked to the nearest species (detectWood, 64b) and the gatherer then returned
+      // `gather acacia_log 0/1 mined=0 dry=0 strip=0 reachFails=0` - zero candidates, zero attempts -
+      // relocating and re-scanning for the same absent wood until the day was gone. The castle trip
+      // never started, 26 deaths overnight, and the bot held TWO pickaxes and a sword throughout.
+      // Tools are a NICE-TO-HAVE for the trek; the trek is the job. The bound is generous for a real
+      // gather (a tree is seconds away when one exists) and short enough that an empty forest cannot
+      // eat a Minecraft day. Whatever got made is kept - runPlan crafts as it goes.
+      const TOOL_MS = Number(process.env.TRIP_TOOL_MS || 90000)
+      if (p.tasks.length) {
+        const _t0 = Date.now()
+        const _stop = () => isStopped() || (Date.now() - _t0 > TOOL_MS)
+        await provision.runPlan(bot, p, { say, isStopped: _stop, restoreMovements: restore })
+        if (Date.now() - _t0 > TOOL_MS) say('(no ' + Object.keys(want).map(t => t.replace('wooden_', '')).join('/') + ' nearby - heading off with what i have)')
+      }
     } catch (e) { say(`(couldn't make tools yet: ${e.message})`) }
   }
   // 2) food for the road - hunt a couple animals for meat (auto-eat feeds on it, raw is fine).
