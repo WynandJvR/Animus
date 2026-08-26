@@ -381,8 +381,12 @@ t('ANTI-DRIFT: the reclaimer covers EVERY latch activeJobInfo can report', () =>
   // slice to the END of the function, not a magic byte count: ROOT H (2026-08-02) added two more
   // latches and their rationale, and a fixed 2200-char window silently cut the assertion's own
   // evidence in half - the test was measuring comment length, not coverage.
-  const relStart = cmd.indexOf('function releaseBodyClaims')
-  const rel = cmd.slice(relStart, cmd.indexOf('\nfunction ', relStart + 1))
+  // The reclaimer's latch NAMING moved into the BODY_LATCHES table it reads (2026-08-26), so the
+  // release and the "is it held" query cannot describe two different worlds. THE INVARIANT THIS
+  // TEST ENFORCES IS UNCHANGED - every latch must still be named where the reclaimer names it -
+  // so the window simply starts at the table and still ends at the end of releaseBodyClaims.
+  const relStart = cmd.indexOf('const BODY_LATCHES')
+  const rel = cmd.slice(relStart, cmd.indexOf('\nfunction ', cmd.indexOf('function releaseBodyClaims') + 1))
   assert(/releaseMaintainLatch/.test(rel) && /releaseFoodLatch/.test(rel) && /releaseRecoveryLatches/.test(rel),
     'the reclaimer must force-release the maintain, food and recovery latch groups - ' + latches.join(',') + ' can each name a phantom job')
 })

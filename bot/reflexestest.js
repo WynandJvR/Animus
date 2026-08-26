@@ -537,8 +537,12 @@ t('5: every revocable claim has a force-release owner, and the runner writes thr
   // The tickgatetest.js invariant, applied to claims: a claim the registry can revoke but nothing
   // can take the latch back from is a ghost that keeps answering `blocked on busy` at its own door.
   const cmd = srcOf('commands.js')
-  const relStart = cmd.indexOf('function releaseBodyClaims')
-  const rel = cmd.slice(relStart, cmd.indexOf('\nfunction ', relStart + 1))
+  // The reclaimer's latch NAMING moved into the BODY_LATCHES table it reads (2026-08-26), so the
+  // release and the "is it held" query cannot describe two different worlds. THE INVARIANT THIS
+  // TEST ENFORCES IS UNCHANGED - every latch must still be named where the reclaimer names it -
+  // so the window simply starts at the table and still ends at the end of releaseBodyClaims.
+  const relStart = cmd.indexOf('const BODY_LATCHES')
+  const rel = cmd.slice(relStart, cmd.indexOf('\nfunction ', cmd.indexOf('function releaseBodyClaims') + 1))
   for (const o of reflexes.BODY_OWNERS) {
     if (o.engine) continue
     assert(rel.includes("'" + o.key + "'"), o.key + ' is revocable but releaseBodyClaims names no latch for it - a wiring hole, not a decision')

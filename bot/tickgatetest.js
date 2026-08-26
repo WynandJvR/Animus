@@ -79,8 +79,12 @@ t('navigate: every decrement goes through the clamped helper - no bare `recoveri
 })
 
 // ---- 2. the release list actually covers the gate list ---------------------------------
-const relStart = cmd.indexOf('function releaseBodyClaims')
-const rel = cmd.slice(relStart, cmd.indexOf('\nfunction ', relStart + 1))
+// The reclaimer's latch NAMING moved into the BODY_LATCHES table it reads (2026-08-26), so the
+// release and the "is it held" query cannot describe two different worlds. THE INVARIANT THIS
+// TEST ENFORCES IS UNCHANGED - every latch must still be named where the reclaimer names it -
+// so the window simply starts at the table and still ends at the end of releaseBodyClaims.
+const relStart = cmd.indexOf('const BODY_LATCHES')
+const rel = cmd.slice(relStart, cmd.indexOf('\nfunction ', cmd.indexOf('function releaseBodyClaims') + 1))
 
 t('releaseBodyClaims resets commands\' OWN tick-gating latches, not only the ones that never gated it', () => {
   // 2026-08-25 (review item 2): the release is now SCOPEABLE to a single body claim, because the

@@ -887,13 +887,43 @@ let schedGen = 0                // bumped on every dispatch AND every revoke - t
 // before) and unbounded for one that is actually working, which is what a lease should mean.
 // The advance record is the process-wide one on purpose: the slot-holder IS the driver (that is
 // drivingClaim's whole premise), so while it holds the slot its work is the work.
+// THE SLOT DERIVES FROM THE CLAIM; IT MAY NOT OUTLIVE IT (2026-08-26).
+// The dispatch slot and the body claim were INDEPENDENT state describing one fact - "who has the
+// body" - so every path that freed one had to remember the other by hand. revokeDispatch was taught
+// to (its own comment: "the latch that OUTLIVES the slot, which is the one the chooser actually
+// reads"); the tick-gate force-release was not. It freed the claim, left the slot standing on its
+// 10-minute lease, and the chooser then refused every candidate to a job that no longer existed -
+// live, at spawn, 340 blocks from the castle:
+//   16:04:33 (claim) released maintaining, nav-recovering/force-unstick - the finally never ran
+//   16:04:46 (core)  maintenancePass REFUSED: it is already running - it holds the dispatch slot (125s)
+// Pairing the calls at every release site would be a fifth hand-written copy of one fact. Deriving
+// is not: the slot ASKS, in the one function every reader goes through, so no release path can get
+// it wrong because no release path is involved. commands.bodyClaimHeld reads the same table
+// releaseBodyClaims force-clears, so the question and the answer cannot describe two worlds.
+//
+// A RELEASED CLAIM IS AN EXPIRED LEASE - not a second authority, and that is why it is expressed by
+// zeroing the deadline rather than by a revoke of its own. "This executor is gone" is precisely the
+// verdict the 600s lease exists to reach; the claim being down has PROVEN it instead of waiting it
+// out. So there is still exactly one revoke here, still behind a verdict, on exactly the old
+// schedule for every case the claim cannot speak to.
+//
+// `sawClaim` covers the one legitimate gap: the window between runJob taking the slot and the
+// executor raising its latch (the race the slot exists to close). Until the claim has been seen up
+// once its absence proves nothing; after that, its absence is the job being over.
 function dispatchBusy () {
   if (!schedJob) return null
+  const j = schedJob
+  const claimKey = (() => { try { return reflexes.claimOfJob(j.name) } catch { return null } })()
+  const claimUp = claimKey ? commands.bodyClaimHeld(claimKey) : false
+  if (claimUp) j.sawClaim = true
+  const claimGone = !!(claimKey && j.sawClaim && !claimUp)
   const adv = (() => { try { return commands.advanceInfo().at || 0 } catch { return 0 } })()
-  const deadline = Math.max(schedJob.until || 0, adv + DISPATCH_LEASE_MS)
+  const deadline = claimGone ? 0 : Math.max(schedJob.until || 0, adv + DISPATCH_LEASE_MS)
   if (schedJob.until != null && deadline <= Date.now()) {
     const stale = schedJob
-    revokeDispatch('lease expired after ' + Math.round((Date.now() - stale.startedAt) / 1000) + 's with no world delta for ' + Math.round((Date.now() - Math.max(adv, stale.startedAt)) / 1000) + 's')
+    revokeDispatch('lease expired after ' + Math.round((Date.now() - stale.startedAt) / 1000) + 's' + (claimGone
+      ? ' - its ' + claimKey + ' claim was released; a slot may not outlive the claim it was taken for'
+      : ' with no world delta for ' + Math.round((Date.now() - Math.max(adv, stale.startedAt)) / 1000) + 's'))
     return null
   }
   return schedJob

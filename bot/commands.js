@@ -2571,6 +2571,60 @@ function isBusy () { return building || provisioning || buildReqActive }
 // it must not be a blanket one either: taking down `securingFood` because a food run died is right,
 // taking down a live maintenance pass with it is the whack-a-mole this file has already paid for.
 // Omit it and this is the whole-body release it has always been, byte for byte.
+// ==== ONE TABLE, TWO READERS: RELEASING A CLAIM AND ASKING FOR ONE (2026-08-26) ============
+// This mapping used to live INSIDE releaseBodyClaims as a release-only list, so the system could
+// force a latch down but had no way to ASK whether it was still up. Everything that needed to know
+// therefore kept a private answer, and those answers drifted - which is the disease behind a whole
+// day of bugs. The one that made it urgent: index.js's dispatch SLOT is separate state from the
+// body CLAIM, and the tick-gate force-release freed the claim without touching the slot, so the
+// chooser refused every candidate to a job that had already been released:
+//   16:04:33 (claim) released maintaining, nav-recovering/force-unstick - the finally never ran
+//   16:04:46 (core)  maintenancePass REFUSED: it is already running - it holds the dispatch slot (125s)
+// ...for the full 10-minute DISPATCH_LEASE_MS, while the bot stood still 340 blocks from its build.
+// revokeDispatch had already been taught to release the claim; the mirror case was left, because
+// the two directions were two hand-written pairings rather than one fact.
+//
+// The table is DATA now, at module scope, and `bodyClaimHeld` reads the SAME rows the release does,
+// so the query cannot describe a different world from the release (rule 4). Four separate guards
+// (dispatchleasetest, reflexestest, tickgatetest x2) assert that every latch is named where the
+// reclaimer can be seen to name it - that invariant is UNCHANGED and still theirs to enforce; they
+// now read this table, which is where the naming lives. The owning module still exports both
+// halves, so a rename is a loud TypeError rather than a silent skip.
+//   mod      - the module that OWNS these latches
+//   release  - its force-release, which takes the same `only` filter
+//   label    - what to print when it actually freed something
+//   claims   - body-owner claim key -> that module's own predicate for "is it up"
+// The row SHAPE is unchanged on purpose - [module, release, label, claims] - because three guards
+// read these rows by shape and by quoted claim key, and this change is about removing a duplicated
+// FACT, not about restyling a table they already police. Only the fourth column gained meaning: it
+// was a list of claim keys, it is now key -> the owning module's own "is it up" predicate.
+const BODY_LATCHES = [
+  ['./provision-maintain.js', 'releaseMaintainLatch', 'maintaining', { 'maintain': 'isMaintaining' }],
+  ['./provision-food.js', 'releaseFoodLatch', 'securingFood', { 'foodRun': 'isSecuringFood' }],
+  // provision-recovery owns two DISTINCT claims behind one release call; releasing both because
+  // one died would be a new bug of the old shape, which is why `only` is passed through.
+  ['./provision-recovery.js', 'releaseRecoveryLatches', 'recovery/resting', { 'ladder': 'isRecoveringDegraded', 'shelter': 'isResting' }],
+  // ROOT H: navigate's recoveringDepth/unsticking are the two remaining tick gates this rung
+  // could not reach. Same contract as the three above - the OWNING module exports the release, so
+  // a rename is a loud TypeError here rather than the silent skip a facade `&&` gives.
+  ['./navigate.js', 'releaseNavLatches', 'nav-recovering/force-unstick', { 'navRecovery': 'isRecovering' }]
+]
+
+// Is this body-owner claim CURRENTLY held? Reads the same latches releaseBodyClaims force-clears,
+// through the same table. Pure: no writes, no leases opened or credited, safe on the hot path.
+// 'job' and 'escape' are this module's own latches - the same two releaseBodyClaims clears inline.
+function bodyClaimHeld (key) {
+  if (!key) return false
+  if (key === 'job') return !!(building || provisioning || buildReqActive)
+  if (key === 'escape') return !!escaping
+  for (const [mod, , , claims] of BODY_LATCHES) {
+    const fn = claims[key]
+    if (!fn) continue
+    try { return !!require(mod)[fn]() } catch { return false }
+  }
+  return false
+}
+
 function releaseBodyClaims (why, opts = {}) {
   const only = Array.isArray(opts.only) && opts.only.length ? opts.only : null
   const want = k => !only || only.includes(k)
@@ -2606,17 +2660,9 @@ function releaseBodyClaims (why, opts = {}) {
   //   name one lease without disturbing the others. The filter is also PASSED THROUGH to the
   //   release function: provision-recovery owns two distinct claims (the ladder and the shelter)
   //   behind one call, and releasing both because one died would be a new bug of the old shape.
-  const owners = [
-    ['./provision-maintain.js', 'releaseMaintainLatch', 'maintaining', ['maintain']],
-    ['./provision-food.js', 'releaseFoodLatch', 'securingFood', ['foodRun']],
-    ['./provision-recovery.js', 'releaseRecoveryLatches', 'recovery/resting', ['ladder', 'shelter']],
-    // ROOT H: navigate's recoveringDepth/unsticking are the two remaining tick gates this
-    // rung could not reach. Same contract as the three above - the OWNING module exports the
-    // release, so a rename is a loud TypeError here rather than a silent skip.
-    ['./navigate.js', 'releaseNavLatches', 'nav-recovering/force-unstick', ['navRecovery']]
-  ]
-  for (const [mod, fn, label, keys] of owners) {
-    if (only && !keys.some(want)) continue
+  const owners = BODY_LATCHES
+  for (const [mod, fn, label, claims] of owners) {
+    if (only && !Object.keys(claims).some(want)) continue
     try { if (require(mod)[fn](only)) held.push(label) } catch {}
   }
   if (!held.length) return null
@@ -3695,4 +3741,4 @@ async function resumeBuild (bot) {
   }
 }
 
-module.exports = { setHoldInfo, noteJobVerdict, jobVerdictInfo, handle, state, setupMovements, travelMovements, eatFood, placeTorchNearby, isBusy, releaseBodyClaims, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume, flagSpawnSuspect, worthwhileGrave, shouldChaseGrave, graveLootVerdict, gravesSnapshot, graveUrgency, graveCompare, equipCarriedArmor, activityInfo, preemptForSurvival, setDebugSink, finishDisposition, resumeHoldRemaining, markResumePaused, touchProgress, progressInfo, jobProgress, suppressJobIdle, advanceInfo, markStalled, _resetProgress, recentOutcomes, setPostDeathRecovery, isPostDeathRecovery, clearPostDeathRecovery, postDeathRecoveryHeldMs }
+module.exports = { setHoldInfo, noteJobVerdict, jobVerdictInfo, handle, state, setupMovements, travelMovements, eatFood, placeTorchNearby, isBusy, releaseBodyClaims, bodyClaimHeld, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume, flagSpawnSuspect, worthwhileGrave, shouldChaseGrave, graveLootVerdict, gravesSnapshot, graveUrgency, graveCompare, equipCarriedArmor, activityInfo, preemptForSurvival, setDebugSink, finishDisposition, resumeHoldRemaining, markResumePaused, touchProgress, progressInfo, jobProgress, suppressJobIdle, advanceInfo, markStalled, _resetProgress, recentOutcomes, setPostDeathRecovery, isPostDeathRecovery, clearPostDeathRecovery, postDeathRecoveryHeldMs }
