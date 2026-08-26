@@ -82,7 +82,27 @@ function ownInfraAnchors () {
   const out = []
   const push = e => { if (e && typeof e.x === 'number' && typeof e.z === 'number') out.push({ x: e.x, z: e.z }) }
   const infra = m.infra || {}
-  for (const kind of ['hut', 'bed', 'chest', 'table', 'furnace', 'shelter', 'water']) for (const e of (infra[kind] || [])) push(e)
+  // WATER IS A DISCOVERY, NOT A CONSTRUCTION (2026-08-26). These anchors exist for ONE purpose:
+  // anti-grief - "do not break the things we built" (nav-profile.breakExclusion refuses anything
+  // within INFRA_BREAK_RADIUS of one, and wildAllowedAt refuses the dig profile entirely within
+  // WILD_SCOPE_RADIUS). Every other kind here is something the bot PLACED. 'water' is something it
+  // merely NOTICED - scoutForFood records open-sky water so the wheat farm can find it later.
+  // Protecting a river from the bot is meaningless, and it is actively harmful: the memory is
+  // written the moment the water is seen, which is exactly when the bot is standing in it.
+  //
+  // Live 2026-08-26, stuck in a river at 145.7,-116.3 for six minutes at hp 10 / food 7:
+  //   [prov] scoutForFood: remembered OPEN-SKY water at 144,-117 (farmable)
+  //   [prov] wedge: recorded stuck-spot 146,-116 nearOwnInfra (n=79)
+  //   [nav]  unstick: ... [failed here x77, a known wedge at home]
+  //   [nav]  unstick FAILED ... tried nothing applicable (climb already failed here)
+  // It registered the water it was drowning in as its own property, two blocks away, and the
+  // anti-grief gate then forbade it from touching the bank it needed to climb - and told it it was
+  // "at home", 150 blocks from anything it had ever built. A rule meant to protect other people's
+  // work was turned against the bot by its own eyesight.
+  //
+  // The farm PLOT anchor (m.wheatFarm, pushed below) is a construction and stays; the crops have
+  // their own no-trample exclusion. Nothing else consulted this list for water.
+  for (const kind of ['hut', 'bed', 'chest', 'table', 'furnace', 'shelter']) for (const e of (infra[kind] || [])) push(e)
   if (m.bed) push(m.bed)                       // the spawn bed (mirrored outside infra too)
   if (m.wheatFarm) push(m.wheatFarm)           // our farm plot anchor
   if (buildZone) push({ x: (buildZone.x1 + buildZone.x2) / 2, z: (buildZone.z1 + buildZone.z2) / 2 }) // active build job
