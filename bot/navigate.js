@@ -1234,6 +1234,7 @@ async function navigateToInner (bot, goal, opts = {}) {
   let recoveryMs = 0
   let crossings = 0 // atomic doorway pre-flight crossings this nav (capped so a threshold flicker can't ping-pong)
   let stalls = 0    // consecutive goto+recovery cycles that netted < 2.5b of real travel
+  let noSprint = false // the server refused a sprint-jump on this leg: every profile handed to the planner from now on walks
   // Time spent parked while a REFLEX held the pathfinder must not consume the deadline:
   // in a reflex storm (creeper standoff re-fleeing every second, live 2h+) every nav
   // burned its whole budget waiting and DIED at the deadline check before the recovery
@@ -1268,7 +1269,8 @@ async function navigateToInner (bot, goal, opts = {}) {
     for (;;) {
       arbiter.refreshManeuver(manTok, manTtl())
       if (isStopped()) throw new Error('stopped')
-      if (opts.movements) { try { bot.pathfinder.setMovements(opts.movements()) } catch {} }
+      if (opts.movements) { try { const m = opts.movements(); if (noSprint && m) m.allowSprinting = false; bot.pathfinder.setMovements(m) } catch {} }
+      else if (noSprint) { try { const m = bot.pathfinder.movements; if (m) m.allowSprinting = false } catch {} }
       // INTERIOR DOOR PRE-FLIGHT: the pathfinder cannot PLAN through a closed door, so a
       // plain goto to a cell INSIDE our hut (or from inside OUT to a world goal) burns its
       // whole timeout unplannably. Cross the doorway FIRST with the atomic, mutex-FREE
@@ -1345,7 +1347,7 @@ async function navigateToInner (bot, goal, opts = {}) {
       const reflexDominated = (reflexWaitMs - cycleReflex0) > cycleElapsed / 2
       stalls = (moved < 2.5 && !reflexDominated) ? stalls + 1 : 0
       if (res.verdict === 'held' || res.verdict === 'busy' || res.verdict === 'stopped') throw honestFail(lastErr, counts, label, recoveryMs, reflexWaitMs)
-      if (res.verdict === 'pinned' && Date.now() < dl()) { dbg(label + 'was pinned by the server - re-planning from ' + bot.entity.position.floored()); continue }
+      if (res.verdict === 'pinned' && Date.now() < dl()) { noSprint = true; dbg(label + 'was pinned by the server - re-planning from ' + bot.entity.position.floored() + ' without sprint for the rest of this leg'); continue }
       if (!rescued) {
         // Nothing here was a rescue's job (or the one that applied did not move us): the terrain is the
         // PLANNER's. Re-plan from where the body actually is - the world may have changed under the last
