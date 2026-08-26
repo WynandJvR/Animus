@@ -1916,6 +1916,29 @@ async function unstick (bot, goal, opts = {}) {
   // The record is what the arbiter reads (candidateRefusal asks attempts.futile for every job),
   // the wedge memory is what the next rescue reads, and the supervisor's honest clock is what
   // escalates - to the terminal action, which is the one caller allowed to force a rescue.
+  // NOTHING RAN IS THE DEAD END, AND IT IS READ FROM THE WORLD (2026-08-26). The self-force above
+  // PREDICTS this dead end from bookkeeping - `skipped.size === plan.length` - but a rung can fail
+  // to run for two different reasons: it was LATCHED off (skipped), or it was simply INAPPLICABLE
+  // here. Only the first is counted, so a plan of climb>nudge>stepout with climb latched and the
+  // other two inapplicable slips past the guard and returns 'tried nothing applicable' - the exact
+  // outcome that branch exists to prevent, and its own comment says why (#5: a decision must
+  // produce an action). Live 2026-08-26, stuck in a river at 145.7,-116.3:
+  //   [nav] unstick: skipping climb - already achieved nothing in this cell
+  //   [nav] unstick FAILED ... tried nothing applicable (climb already failed here) - attempt 13
+  // 87 recorded wedges in one cell, hp 10, food 7, the body never once moving. Worse, those
+  // records were EARNED UNDER DIFFERENT RULES: every one predates NAV_TERRAIN_PROFILE, so "climb
+  // achieved nothing" was measured by a bot forbidden to dig - a verdict about a world that no
+  // longer exists.
+  // So detect the dead end instead of predicting it: nothing was attempted, the body did not move,
+  // and something was latched off. Clear this cell and run the plan once, forced - the SAME
+  // authority the allSkipped branch already takes, reached by the condition it was written for.
+  // Bounded by _selfForced: one retry, then the honest failure verdict below (§6).
+  if (!moved && !tried.length && skipped.size && !opts.force && !opts._selfForced && !isStopped()) {
+    dbg('unstick: NOTHING was attempted (' + Array.from(skipped).join(',') + ' latched, the rest inapplicable) - clearing this cell and forcing one retry rather than standing still (#5)')
+    for (const k of plan) { try { attempts.forget('unstick', k, cell) } catch {} }
+    try { attempts.forget('unstick', 'exhausted', cell) } catch {}
+    return unstick(bot, goal, Object.assign({}, opts, { force: true, _selfForced: true }))
+  }
   for (const k of tried) attempts.record('unstick', k, cell, { now, why: 'the ' + k + ' maneuver achieved nothing here' })
   const rec = attempts.record('unstick', 'exhausted', cell, { now, why: 'the whole rescue plan (' + plan.join('>') + ') achieved nothing here' })
   try { prov().recordWedge(p0) } catch {} // a stuck-spot is a place the rescue could NOT free me
