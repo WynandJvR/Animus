@@ -1722,11 +1722,13 @@ function unstickPlan (w) {
   //    climbing to the surface" - a sentence made of two wrong beliefs. Indoors, the plan is
   //    step-to-a-free-cell then the door; never the roof, never a dirt pillar in the living room.
   if (w.indoors) add('indoor', 'door', 'stepout')
-  else if (w.home) { add('door'); if (w.pit) add('pit'); add('stepout', 'nudge') }
+  else if (w.home) { add('door'); if (w.pit) add('pit'); if (w.belowGrade && w.climb && !w.noDig) add('climb'); add('stepout', 'nudge') }
   else {
     if (w.pit) add('pit')
     if (w.door) add('door')
-    if (w.roofed && w.climb && !w.noDig) add('climb')
+    // ...or simply DOWN A HOLE with open sky above it (the crater case). The climb rung is the only
+    // rung that goes UP; gating it on a ceiling meant an open-topped hole had no way out at all.
+    if ((w.roofed || w.belowGrade) && w.climb && !w.noDig) add('climb')
     add('nudge', 'stepout')
   }
   // 3. THE LAST RESORT, and only on the evidence the caller already gathered. `!w.noDig` is the
@@ -1781,6 +1783,19 @@ async function unstick (bot, goal, opts = {}) {
     submerged: headInWater(bot),
     roofed: (() => { try { return !!provHut().hasSolidCeiling(bot, 12, { ignoreLeaves: true }) } catch { return false } })(),
     pit: !!detectPit(bot),
+    // DEPTH IS A SITUATION, NOT A CEILING (2026-08-26, live). detectPit needs 3 of 4 walls solid
+    // and refuses anything roofed; `roofed` needs a ceiling. A CREEPER CRATER is neither - it is a
+    // bowl, so it widens upward and the neighbours at the bottom are air, and it is open to the sky.
+    // So a bot five blocks under the surface classified as 'in the open', got the plan nudge>stepout
+    // (neither of which climbs), and could not leave BY CONSTRUCTION: 1,019 recorded failures in one
+    // cell, the operator watching it sit in a crater. Being in a hole is about how far down you are,
+    // not about what is over your head. Uses the item-4 surface read, so its own fabric is not ground.
+    belowGrade: (() => {
+      try {
+        const s = require('./pathfix.js').surfaceYAt(bot, feet.x, feet.z)
+        return !!(s && s.known && s.y != null && (s.y - feet.y) >= 3)
+      } catch { return false }
+    })(),
     door: doorNearby(bot, goalXZ(goal)),
     noDig: !!selfWorld.noDigAt(feet),
     climb: opts.climb !== false,

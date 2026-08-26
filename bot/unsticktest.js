@@ -187,3 +187,35 @@ t('THE FLOOR CALLS IT, AND ONLY ON EVIDENCE: the terminal action breaks the wedg
 
 console.log(failures ? '\n' + failures + ' FAILURE(S)' : '\nall unstick (one rescue path) tests passed')
 process.exit(failures ? 1 : 0)
+
+// ============ THE CRATER: depth is a situation, not a ceiling ==============================
+// 2026-08-26. The operator, watching it: "why is it just constnatly stuck a fucking small creeper
+// crater?" - and the tape agreed, 1,019 recorded failures in ONE cell:
+//   unstick: in the open at (-1,60,2) - plan nudge > stepout [failed here x1019, a known wedge]
+// It sat five blocks under the surface and was classified IN THE OPEN, because detectPit needs 3
+// of 4 walls solid (a crater is a bowl - it widens upward, so the bottom neighbours are air) and
+// `roofed` needs a ceiling (a crater is open to the sky). Neither fired, so the plan was
+// nudge>stepout and NEITHER OF THOSE GOES UP. It could not leave by construction.
+t('a crater with open sky still gets the climb rung - depth alone is enough', () => {
+  const P = require('./navigate.js').unstickPlan
+  const crater = P({ belowGrade: true, climb: true, roofed: false, pit: false })
+  assert.ok(crater.includes('climb'), 'five blocks down with open sky must get a rung that goes UP')
+  assert.ok(crater.indexOf('climb') < crater.indexOf('nudge'), 'and it must come before the flat-ground rungs')
+})
+
+t('flat open ground is UNCHANGED - this must not make every walk a climb', () => {
+  const P = require('./navigate.js').unstickPlan
+  assert.deepStrictEqual(P({ belowGrade: false, climb: true, roofed: false, pit: false }), ['nudge', 'stepout'])
+})
+
+t('a crater AT HOME is still a crater', () => {
+  const P = require('./navigate.js').unstickPlan
+  const p = P({ home: true, belowGrade: true, climb: true, roofed: false, pit: false })
+  assert.ok(p.includes('climb'), 'being near my own base does not make a hole shallower')
+  assert.ok(p.indexOf('door') === 0, 'the door still comes first at home (the 2026-08-03 lesson)')
+})
+
+t('noDig still vetoes the climb - the crater fix may not cut what digBlocked refuses', () => {
+  const P = require('./navigate.js').unstickPlan
+  assert.ok(!P({ belowGrade: true, climb: true, noDig: true, roofed: false }).includes('climb'))
+})
