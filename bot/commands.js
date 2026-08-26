@@ -2421,6 +2421,14 @@ function state (bot) {
     activity: (() => { const a = activityInfo(); return a ? { name: a.name, detail: a.detail, forSec: Math.round((Date.now() - a.startedAt) / 1000) } : null })(), // a long op still running from a past turn
     progress: (() => { const bp = progressInfo(); return { agoSec: Math.round((Date.now() - bp.at) / 1000), by: bp.by, stalled: bp.stalled } })(), // S7 verified-progress clock (last verified touch + the nudge's stalled flag)
     buildProgress, // REAL numbers (material have/need) - the brain answers progress questions from THIS
+    // WHAT IS IT ACTUALLY DOING (2026-08-26, operator: "just saying idle if its holding a job is
+    // confusing"). The GUI's driver chip fell through to `idle` whenever there was no threat,
+    // hazard, maneuver, stuck flag, activity or movement - which is exactly the state a bot is in
+    // while it HOLDS a job it cannot start: sheltering until dawn, or sitting on a saved build
+    // waiting for a bootstrap. Those are three different situations and all three read `idle`.
+    // The chip can only say what /state carries, so /state now carries them.
+    hold: (() => { try { const h = require('./reflexes.js').activeHold(); return h ? { label: h.label, wake: h.wake } : null } catch { return null } })(),
+    savedBuild: (() => { try { const j = persistedResume(); if (!j) return null; const held = !!(j.pausedAt && j.pauseHoldMs && Date.now() - j.pausedAt < j.pauseHoldMs); return { name: j.name, at: j.at, held } } catch { return null } })(),
     checklist: (() => { const jl = telemetry.checklistInfo(); return jl ? { step: jl.current, n: jl.steps.indexOf(jl.current) + 1, of: jl.steps.length, steps: jl.steps } : null })(), // the job's step-by-step plan + where it is (operator order: goals get checklists)
     jobVerdict: jobVerdictInfo(), // review item 7: the job layer CONCLUDED something about the plan (re-plan/abandon) - a proposal the brain sees even while the body is owned
     lastResult: (() => { const lo = telemetry.lastOutcomeInfo(); return (lo && Date.now() - lo.at < 180000) // how the last long/detached/failed op ended (results that don't come back via /cmd)

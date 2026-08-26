@@ -1023,6 +1023,21 @@ class Animus : Form
         if (activity != null)
         { SetChip(S(activity, "name") + " · " + S(activity, "detail") + " (" + S(activity, "forSec") + "s)", Accent); return; }
         if (moving && goal.Length > 0) { SetChip("moving · " + goal, Accent); return; }
+        // BEFORE FALLING THROUGH TO "idle" (2026-08-26, operator: "just saying idle if its holding
+        // a job is confusing"). Everything above this point is a subsystem that is ACTING. A bot
+        // that is holding is not acting and not idle - it is waiting on something nameable, and
+        // three different situations used to render identically as "idle": sheltering until dawn,
+        // sitting on a saved build it cannot start, and genuinely having nothing to do.
+        Dictionary<string, object> hold = Obj(st, "hold");
+        if (hold != null)
+        { SetChip("HOLDING · " + S(hold, "label") + " · until " + S(hold, "wake"), Amber); return; }
+        Dictionary<string, object> saved = Obj(st, "savedBuild");
+        if (saved != null)
+        {
+            bool bheld = B(saved, "held");
+            SetChip((bheld ? "BUILD STOOD DOWN · " : "BUILD WAITING · ") + S(saved, "name"), bheld ? Muted : Amber);
+            return;
+        }
         SetChip(brainEnabled ? "idle · brain on" : "idle", Muted);
     }
 
