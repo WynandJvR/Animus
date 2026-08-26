@@ -950,11 +950,35 @@ def({
       const d = e.position.distanceTo(me)
       if (d > 1.3 && d < bestD) { bestD = d; best = e }
     }
-    if (!best) return 'nothing on the ground any more'
+    if (!best) return { msg: 'nothing on the ground any more', noOp: true }
     // range 0: actually walk ONTO the item's block - range 1 can count as "arrived" a block
     // short, so the bot never touches the drop and never picks it up.
-    await bot.pathfinder.goto(new goals.GoalNear(best.position.x, best.position.y, best.position.z, 0))
-    return 'picked up a drop ' + Math.round(bestD) + 'b away'
+    // COUNT THE PACK, NOT THE WALK (2026-08-26). This returned a bare success STRING the moment
+    // goto resolved - so noOp was undefined, the runner scored it as real work, and it never
+    // latched. goto reports success on an empty path (see navigate.js), so an unreachable drop
+    // re-armed this every tick and it held the body away from the castle trek indefinitely:
+    //   (core) chose autoCollect ... (sched) pick=null ... autoCollect holds the dispatch slot
+    // for minutes, at a standstill, with the pack unchanged at dirt x7 + rotten_flesh x1.
+    // Whether an item was PICKED UP is a fact about the pack, not about the walk - so read it.
+    // autoCook, immediately below, already had the right shape; this is now the same shape.
+    const packSize = () => (bot.inventory ? bot.inventory.items() : []).reduce((n, i) => n + i.count, 0)
+    const before = packSize()
+    // AND A DEADLINE ON THE ATTEMPT (DESIGN §6). The raw bot.pathfinder.goto here was UNBOUNDED,
+    // so an item it could not reach pinned the body indefinitely - live 2026-08-26 12:27-12:29,
+    // ONE invocation held the dispatch slot past 79s at a dead standstill while the chooser said
+    // "resuming the saved build" every tick and could not have it. A tidy-up job must never be
+    // able to outrank the trek by simply refusing to end. navigate.gotoOnce IS the bounded walk
+    // (it clears the goal and rejects on timeout) and is the one nav entry point; calling
+    // pathfinder directly from a reflex was the bug beneath the bug. A drop <=8b away is seconds.
+    const nav = require('./navigate.js') // lazily, like every executor here (invariant: nothing heavy at load)
+    try { await nav.gotoOnce(bot, new goals.GoalNear(best.position.x, best.position.y, best.position.z, 0), 8000) } catch { /* timed out / unreachable - the pack check below is the verdict */ }
+    // Collection is a server packet that lands a tick or two AFTER arrival - measuring
+    // immediately would call every genuine pickup a no-op. Bounded and only on this path.
+    try { await bot.waitForTicks(10) } catch {}
+    const gained = packSize() - before
+    return gained > 0
+      ? { msg: 'picked up ' + gained + ' item(s) ' + Math.round(bestD) + 'b away', noOp: false }
+      : { msg: 'walked to a drop ' + Math.round(bestD) + 'b away and it was still not in the pack', noOp: true }
   }
 })
 

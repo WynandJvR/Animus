@@ -320,7 +320,11 @@ const NATIVELY_BOUNDED = {
   // inventory.js:636 is true only on <=1.16.5; on this server that line is unreachable.
   clickWindow: { by: 'waitForWindowUpdate returns immediately for container windows; where it waits it is once() with its 20000 default', where: MF + 'inventory.js:451-478,644 + promise_utils.js:75', cut: 'throws', worstMs: 20000 },
   equip: { by: 'moveSlotItem -> clickWindow on bot.inventory at slots 5-8/36-45, none of which is the 1-4 grid range waitForWindowUpdate waits on', where: MF + 'simple_inventory.js:88-126', cut: 'throws', worstMs: 20000 },
-  toss: { by: 'transfer -> clickWindow; the transferOne recursion is driven by `count`, not by an event', where: MF + 'simple_inventory.js:29 + ' + MF + 'inventory.js:284', cut: 'throws', worstMs: 20000 }
+  toss: { by: 'transfer -> clickWindow; the transferOne recursion is driven by `count`, not by an event', where: MF + 'simple_inventory.js:29 + ' + MF + 'inventory.js:284', cut: 'throws', worstMs: 20000 },
+  // Its own setTimeout REJECTS at ticks*50 + 5000 and removes the physicsTick listener, so it can
+  // never outlive that even on a frozen server. worstMs is quoted for the longest wait our code
+  // asks for (autoCollect's 10-tick pickup settle = 5500ms); a longer call would scale from there.
+  waitForTicks: { by: 'its own setTimeout rejects at ticks*50 + 5000ms and detaches the physicsTick listener', where: MF + 'physics.js:453-461', cut: 'throws', worstMs: 5500 }
 }
 
 // One row per entry point, whichever half it lives in. Consumed by bodyboundtest.js.
