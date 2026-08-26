@@ -645,11 +645,31 @@ function installPathfinderTuning (bot) {
       // ...and why the library dropped a path it was following (stuck / dig_error / place_error /
       // goal_moved ...): the other half of the plan story, throttled per reason.
       let lastResetAt = 0; let lastResetWhy = ''
+      let lastPlan = null // the path the library is following (it assigns results.path after emitting)
+      bot.on('path_update', (r) => { if (r && Array.isArray(r.path)) lastPlan = r.path })
       bot.on('path_reset', (why) => {
         const now = Date.now()
         if (why === lastResetWhy && now - lastResetAt < 2000) return
         lastResetWhy = why; lastResetAt = now
-        try { dbg('plan: RESET (' + why + ') at ' + bot.entity.position.floored()) } catch {}
+        try {
+          const p = bot.entity.position
+          let detail = ''
+          if (why === 'stuck') {
+            // THE PHYSICAL FACTS of not reaching the next node - so "stuck" names a cause, not a feeling:
+            // where the node is and how far, what the controls were doing, whether the physics had ground,
+            // and what the world says at the feet/head cells here and at the node.
+            const n = lastPlan && lastPlan.length ? lastPlan[0] : null
+            const { Vec3 } = require('vec3')
+            const nm = v => { try { const b = bot.blockAt(v); return b ? b.name : '?' } catch { return '?' } }
+            const cs = ['forward', 'back', 'left', 'right', 'jump', 'sprint', 'sneak'].filter(k => { try { return bot.controlState[k] } catch { return false } }).join('+') || 'none'
+            const v = bot.entity.velocity
+            detail = ' - next node ' + (n ? n.x + ',' + n.y + ',' + n.z + ' (' + Math.hypot(n.x + 0.5 - p.x, n.z + 0.5 - p.z).toFixed(2) + 'b away, dy ' + (n.y - Math.floor(p.y)) + (n.toBreak && n.toBreak.length ? ', ' + n.toBreak.length + ' dig' : '') + (n.toPlace && n.toPlace.length ? ', ' + n.toPlace.length + ' place' : '') + ')' : 'none') +
+              ', me ' + p.x.toFixed(2) + ',' + p.y.toFixed(2) + ',' + p.z.toFixed(2) + ' onGround=' + bot.entity.onGround + ' vel=' + v.x.toFixed(2) + ',' + v.y.toFixed(2) + ',' + v.z.toFixed(2) + ' controls=' + cs +
+              ' | here feet=' + nm(p.floored()) + ' head=' + nm(p.floored().offset(0, 1, 0)) + ' below=' + nm(p.floored().offset(0, -1, 0)) +
+              (n ? ' | node feet=' + nm(new Vec3(n.x, n.y, n.z)) + ' head=' + nm(new Vec3(n.x, n.y + 1, n.z)) + ' below=' + nm(new Vec3(n.x, n.y - 1, n.z)) : '')
+          }
+          dbg('plan: RESET (' + why + ') at ' + p.floored() + detail)
+        } catch (e) { dbg('plan: RESET (' + why + ')') }
       })
       let lastPlanAt = 0; let lastPlanKey = ''
       bot.on('path_update', (r) => {
@@ -675,7 +695,8 @@ function installPathfinderTuning (bot) {
           const last = r.path.length ? r.path[r.path.length - 1] : null
           let firstDig = null
           for (const m of r.path) { if (m.toBreak && m.toBreak.length) { firstDig = m.toBreak[0]; break } }
-          dbg('plan: ' + r.status + ' ' + r.path.length + ' move(s)' + (last ? ' to ' + last.x + ',' + last.y + ',' + last.z : '') +
+          const first = r.path.length ? r.path[0] : null
+          dbg('plan: ' + r.status + ' ' + r.path.length + ' move(s)' + (first ? ' via ' + first.x + ',' + first.y + ',' + first.z : '') + (last ? ' to ' + last.x + ',' + last.y + ',' + last.z : '') +
             (digs ? ', ' + digs + ' dig(s) first at ' + firstDig.x + ',' + firstDig.y + ',' + firstDig.z : '') + (places ? ', ' + places + ' placement(s)' : '') +
             (Number.isFinite(r.cost) ? ', cost ' + Math.round(r.cost) : '') + (r.time != null ? ', ' + Math.round(r.time) + 'ms' : ''))
         } catch {}
