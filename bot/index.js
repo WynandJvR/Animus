@@ -1683,6 +1683,7 @@ if (SCHED_ON) {
     let lastLivenessRearm = 0
     let stalePickNoted = '' // one honest line per staleness episode (the heldNoted throttle idiom)
     let heldNoted = ''
+    let wdOtherNoted = '' // one line per (hold,job) pair when a hold is NOT the thing holding the body (#7: say it once, not every 5s)
     const wdTimer = setInterval(() => {
       try {
         // 1. GUARDS. Dead/absent body: nothing to watch.
@@ -1708,7 +1709,37 @@ if (SCHED_ON) {
         // stamped every pass, so the claim it vouches for is already fresh from the last one.
         bodyOwner()
         const hold = reflexes.activeHold(holdPremiseOK)
-        if (bot.isSleeping || (provRecovery.isResting && provRecovery.isResting()) || hold) {
+        // A HOLD VOUCHES FOR ITS OWN HOLDER, NOT FOR THE WHOLE BOT (2026-08-26; the handoff's
+        // long-open ROOT O). This branch returned on ANY live hold, from ANY responder, BEFORE
+        // reading which job actually owns the body - so one responder's legitimate stillness
+        // excused a completely different one's stall. Live, at spawn, 344 blocks from the castle:
+        //   (core) maintenancePass REFUSED: it is already running - it holds the dispatch slot (235s)
+        //   (wd)   nightShelter is a DECLARED hold waking on dawn - stillness here is the goal
+        // nightShelter was legitimately waiting for dawn; maintenancePass had the body and was
+        // frozen; and because the hold check returned first, the watchdog never even LOOKED at the
+        // job it was supposed to be judging. The build was re-chosen every tick and could never be
+        // dispatched. `activeHold` returns the OLDEST hold, so the excuse need not even come from
+        // anything related to the work that is stuck.
+        // Sleeping and resting stay unconditional - those are genuinely the whole body. Only the
+        // generic hold is scoped, and only when we can positively identify a DIFFERENT responder:
+        // no job, or an unresolvable one, keeps today's behaviour, because failing to strand a bot
+        // that really is sealed in is the whole reason this mechanism exists.
+        const heldJob = provision.activeJobInfo()
+        const holdCoversJob = (() => {
+          if (!hold) return false
+          if (!heldJob || !heldJob.name) return true            // nothing else is running to be excused
+          if (hold.label === heldJob.name) return true
+          try {
+            const r = reflexes.get(heldJob.name); if (r && (r.label === hold.label || r.name === hold.label)) return true
+            const h = reflexes.get(hold.label); if (h && (h.label === heldJob.name || h.name === heldJob.name)) return true
+          } catch { return true }                               // unresolvable -> trust the hold
+          return false
+        })()
+        if (hold && !holdCoversJob && wdOtherNoted !== hold.label + '|' + heldJob.name) {
+          wdOtherNoted = hold.label + '|' + heldJob.name
+          note('(wd) ' + hold.label + ' holds for ' + hold.wake + ', but ' + heldJob.name + ' owns the body - a hold excuses its OWN stillness only; judging ' + heldJob.name + ' normally')
+        }
+        if (bot.isSleeping || (provRecovery.isResting && provRecovery.isResting()) || (hold && holdCoversJob)) {
           if (hold && heldNoted !== hold.label) { heldNoted = hold.label; note('(wd) ' + hold.label + ' is a DECLARED hold waking on ' + hold.wake + ' - stillness here is the goal, not a stall') }
           // A HOLD SUPPRESSES THE CLOCK; IT DOES NOT FEED IT. This used to be
           // touchProgress('declaredHold'), which announced verified progress to every reader of
@@ -1719,8 +1750,9 @@ if (SCHED_ON) {
           return
         }
         if (heldNoted) heldNoted = ''
-        // 2. the active job (sync, cheap - no snapshot build on the 5s path).
-        const job = provision.activeJobInfo()
+        // 2. the active job (sync, cheap - no snapshot build on the 5s path). Already read above
+        // for the hold-scoping test; reuse it rather than paying for a second read (#8).
+        const job = heldJob
         const now = Date.now()
         // 3. pure verdict + escalation phase.
         let verdict = scheduler.watchdog(job, { hp: bot.health, food: bot.food }, now)
