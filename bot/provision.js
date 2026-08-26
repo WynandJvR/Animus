@@ -2366,7 +2366,17 @@ async function gatherLoop (bot, item, count, opts = {}) {
       .filter(p => Math.hypot(p.x - home.x, p.z - home.z) <= maxRoam + 8)
       // Skip any candidate within 8b of a live wedge (the waterlogged tree that froze us):
       // the scan falls through to the next tree / timber-sweep exactly like "no candidates".
-      .filter(p => !routeMem.wedgeNearXZ(wedges, p, 8))
+      // WEDGE RADIUS: 8 -> 3 (2026-08-26, live). The rule is right and its comment says exactly what
+      // it is for: 'the waterlogged tree that froze us' - ONE tree. 8 blocks is not one tree, it is a
+      // 200-block disc, and review item 4 (correctly) stopped suppressing wedge RECORDS near home,
+      // so the home area now accumulates them: 18 wedges inside the 64b scan, spanning x-12..18
+      // z1..57, denying ~3,600 of 12,900 block^2 - concentrated exactly where the bot and its trees
+      // are. Result: `gather acacia_log 0/1 mined=0 dry=0 strip=0 reachFails=0` - ZERO candidates,
+      // never even an attempt, for hours. The bot needed ONE log for ONE axe to start the castle
+      // trip, and 26 deaths overnight all trace back through that axe.
+      // 3b still skips the offending tree and its immediate neighbours - what the rule was written
+      // to do - without a fresh navigation wedge at base blinding the forest around it.
+      .filter(p => !routeMem.wedgeNearXZ(wedges, p, 3))
     // ORCHARD MODE (operator rule): grinding one tree per chunk wastes the day. Sparse
     // area (about one tree visible) + a real sapling stock + a big remaining need ->
     // plant a 16-tree orchard near the site RIGHT NOW (don't wait for total dryness) and
