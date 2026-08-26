@@ -33,6 +33,10 @@ const deathCause = require('./death-cause.js') // AUDIT D3: real attribution (se
 const resources = require('./resources.js') // unified pack+chest resource model (food withdraw)
 const navigate = require('./navigate.js') // unified navigation (isRecovering gates the reflexes)
 const body = require('./body.js') // BODY LIVENESS: is the physics simulation ticking at all? (the one owner of that fact + the re-arm)
+// COLLISION MARGIN (2026-08-26): the hitbox never rests exactly on a block face. Paper 1.21.11 build
+// 116+ treats exact contact with a whole block as an intersection and teleports the player back on
+// its next move (~18 syncs/s, every jump onto a step refused). Prototype patch, installed at load.
+const collisionMargin = require('./collision-margin.js').install()
 const arbiter = require('./arbiter.js') // priority body-ownership: reflexes defer to a running navigation maneuver
 const access = require('./access.js')
 const schematic = require('./schematic.js')
@@ -148,7 +152,8 @@ commands.setDebugSink(noteDebug)
 provision.setDebugSink(noteDebug)
 resources.setDebugSink(noteDebug)
 navigate.setDebugSink(noteDebug)
-body.setDebugSink(noteDebug); body.setNoteSink(note) // [body] SIMULATION OFF / re-armed transitions go to the MAIN log: they explain every 'stuck' that follows
+body.setDebugSink(noteDebug); body.setNoteSink(note)
+note('(body) collision margin ' + (collisionMargin.installed ? 'installed (' + collisionMargin.margin + ')' : 'NOT installed: ' + collisionMargin.why)) // [body] SIMULATION OFF / re-armed transitions go to the MAIN log: they explain every 'stuck' that follows
 require('./pathfix.js').setDebugSink(noteDebug) // [verify] place/dig world-recheck traces
 require('./pathfix.js').setProgressSink(commands.touchProgress) // [S7] a pathfix-VERIFIED place/break -> the forward-progress heartbeat
 require('./scaffold.js').setDebugSink(noteDebug) // [scaffold] registry/teardown traces
