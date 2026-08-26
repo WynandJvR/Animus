@@ -179,6 +179,21 @@ const { persistDeath, snapInventory, bestGrave, unretrievedGraves, worthwhileGra
 function recordDeath (info) {
   const { abortLongOp } = grave.recordDeath(info)
   if (abortLongOp) buildAbort = true // a death aborts a standalone gather/provision (it has no death handling of its own)
+  // A DEATH ENDS WHATEVER THE BODY WAS DOING (2026-08-26). The activity label survived respawns, so
+  // a job that was running when the bot died went on reporting itself from the new body - and
+  // activeJobInfo() reads the label FIRST, so the whole system believed that job was still running.
+  // Live: the bot died to a zombie at 17:13:42 while travelling; at 17:19 the label still read
+  //   act: { name: 'travel', forSec: 694 }   goal: null   busy: false   stuck: 307s
+  // 694 seconds - it had begun at 17:07, BEFORE the death. The watchdog's ladder had already run
+  // NUDGE -> FAIL-JOB on the pre-death job and the death reset it mid-escalation, so GIVEUP - the
+  // ONE owner of clearActivity - never fired, and the phantom had no other way to die. The bot
+  // stood at 25.7,3.3 jumping into a wall for five minutes while everything downstream read
+  // "already travelling" and left it alone.
+  // The label's whole contract is "what is this body doing now", and after a respawn the answer is
+  // categorically NOTHING - which is a fact, not a timeout, so it is exactly what clearActivity is
+  // for. This does not weaken the ladder: the ladder judges LIVE work, and the one thing it cannot
+  // observe is work whose body no longer exists.
+  try { if (telemetry.clearActivity('death: the body that was doing this no longer exists')) dbg('death: cleared the stale activity label - a respawned bot is not still doing what it died doing') } catch {}
 }
 // activityInfo now lives in telemetry.js (destructured at the top of this file).
 
