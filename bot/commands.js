@@ -2427,7 +2427,7 @@ function state (bot) {
     // while it HOLDS a job it cannot start: sheltering until dawn, or sitting on a saved build
     // waiting for a bootstrap. Those are three different situations and all three read `idle`.
     // The chip can only say what /state carries, so /state now carries them.
-    hold: (() => { try { const h = require('./reflexes.js').activeHold(); return h ? { label: h.label, wake: h.wake } : null } catch { return null } })(),
+    hold: _liveHold,   // published by the runner (see setHoldInfo) - NOT re-derived here
     savedBuild: (() => { try { const j = persistedResume(); if (!j) return null; const held = !!(j.pausedAt && j.pauseHoldMs && Date.now() - j.pausedAt < j.pauseHoldMs); return { name: j.name, at: j.at, held } } catch { return null } })(),
     checklist: (() => { const jl = telemetry.checklistInfo(); return jl ? { step: jl.current, n: jl.steps.indexOf(jl.current) + 1, of: jl.steps.length, steps: jl.steps } : null })(), // the job's step-by-step plan + where it is (operator order: goals get checklists)
     jobVerdict: jobVerdictInfo(), // review item 7: the job layer CONCLUDED something about the plan (re-plan/abandon) - a proposal the brain sees even while the body is owned
@@ -3437,6 +3437,14 @@ function markBuildInterrupted () {
 // long travel to the site still resumes - the most likely death window for a naked bot.
 // Uses the loaded schematic + the requested point (approximate origin); autoBuild later
 // overwrites `at` with the precise ground-snapped origin.
+// THE HOLD, AS THE RUNNER SEES IT. /state must not re-derive this: reflexes.activeHold(premiseOK)
+// only CHECKS the premise when it is handed a checker, and holdPremiseOK lives in index.js with
+// the bot handle it needs. Calling activeHold() bare here returned a hold the runner had already
+// judged dead - the same stale-hold lie that froze the tick twice, except rendered on the GUI as
+// fact. One authority (#4): the runner computes it once for the heartbeat and publishes it here.
+let _liveHold = null
+function setHoldInfo (h) { _liveHold = h || null }
+
 function setResumeJob (pt) { if (loadedSchem && pt) { resumeJob = { schem: loadedSchem.schem, at: new Vec3(pt.x, pt.y, pt.z) }; resumeDeaths = 0; persistResume(loadedSchem.name, pt) } }
 
 // DISK-PERSISTED resume: the in-memory resumeJob dies with the process (restart/crash/
@@ -3658,4 +3666,4 @@ async function resumeBuild (bot) {
   }
 }
 
-module.exports = { noteJobVerdict, jobVerdictInfo, handle, state, setupMovements, travelMovements, eatFood, placeTorchNearby, isBusy, releaseBodyClaims, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume, flagSpawnSuspect, worthwhileGrave, shouldChaseGrave, graveLootVerdict, gravesSnapshot, graveUrgency, graveCompare, equipCarriedArmor, activityInfo, preemptForSurvival, setDebugSink, finishDisposition, resumeHoldRemaining, markResumePaused, touchProgress, progressInfo, jobProgress, suppressJobIdle, advanceInfo, markStalled, _resetProgress, recentOutcomes, setPostDeathRecovery, isPostDeathRecovery, clearPostDeathRecovery, postDeathRecoveryHeldMs }
+module.exports = { setHoldInfo, noteJobVerdict, jobVerdictInfo, handle, state, setupMovements, travelMovements, eatFood, placeTorchNearby, isBusy, releaseBodyClaims, isEscaping, maybeResumeFollow, recordDeath, markBuildInterrupted, resumeBuild, trackTick, recordOutcome, setBuildReqActive, survivalPrep, setResumeJob, setLogger, persistedResume, flagSpawnSuspect, worthwhileGrave, shouldChaseGrave, graveLootVerdict, gravesSnapshot, graveUrgency, graveCompare, equipCarriedArmor, activityInfo, preemptForSurvival, setDebugSink, finishDisposition, resumeHoldRemaining, markResumePaused, touchProgress, progressInfo, jobProgress, suppressJobIdle, advanceInfo, markStalled, _resetProgress, recentOutcomes, setPostDeathRecovery, isPostDeathRecovery, clearPostDeathRecovery, postDeathRecoveryHeldMs }

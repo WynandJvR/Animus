@@ -2967,6 +2967,9 @@ if (process.env.STATE_HISTORY !== '0') {
       let hbHold = null
       try { const h = reflexes.activeHold(holdPremiseOK); if (h) hbHold = { label: h.label, wake: h.wake } } catch {}
       try { if (!hbHold && (bot.isSleeping || (provRecovery.isResting && provRecovery.isResting()))) hbHold = { label: bot.isSleeping ? 'sleeping' : 'resting', wake: 'dawn' } } catch {}
+      // ...and publish it to /state, so the GUI's chip and the heartbeat agree by construction
+      // rather than by two modules each asking reflexes their own way (#4).
+      try { commands.setHoldInfo(hbHold) } catch {}
       if (p) hbLastPos = p
       try { fs.writeFileSync(HEARTBEAT_FILE, JSON.stringify(Object.assign({}, sample, { connected: connected && !!bot.entity, hold: hbHold, lastProgressAt: hbLastProgressAt }))) } catch {}
     } catch { /* telemetry must never kill the bot */ }
