@@ -1481,13 +1481,20 @@ async function unstick (bot, goal, opts = {}) {
   // one move the server accepts is AWAY from the offending block, i.e. back to the centre of the cell
   // the feet are in. Do that, bounded, and let the planner re-plan (hardened: no corner-cutting).
   if (body.pinned()) {
-    const centre = new Vec3(feet.x + 0.5, feet.y, feet.z + 0.5)
-    dbg('unstick: PINNED by the server at ' + p0.x.toFixed(2) + ',' + p0.y.toFixed(2) + ',' + p0.z.toFixed(2) + ' (' + body.info(bot).syncs2s + ' syncs/2s) - stepping to the cell centre ' + centre + ' and re-planning')
+    // The refused move is the one the planner was pushing: the body's facing. The one move the server
+    // accepts is the OPPOSITE - away from the face it is flush against - so back off a full block
+    // (not to the cell centre: live, a 0.2b recentre was accepted and the very next plan pushed
+    // straight back into the same face). Then re-plan with sprint OFF on this profile: every pin
+    // seen was a sprint-jump into a block face, and a walking jump from a block back is the move a
+    // vanilla client makes. Evidence-driven, not a constant: the profile keeps sprinting elsewhere.
+    const yaw = bot.entity.yaw
+    const back = new Vec3(p0.x + Math.sin(yaw) * 1.0, p0.y, p0.z + Math.cos(yaw) * 1.0) // facing is (-sin, -cos); this is behind
+    dbg('unstick: PINNED by the server at ' + p0.x.toFixed(2) + ',' + p0.y.toFixed(2) + ',' + p0.z.toFixed(2) + ' (' + body.info(bot).syncs2s + ' syncs/2s) - backing off to ' + back.floored() + ' and re-planning without sprint')
     try { bot.pathfinder.setGoal(null) } catch {}
-    let r = null
-    try { r = await reactiveMove(bot, { toward: centre, budgetMs: 800, reach: 1, arriveB: 0.15, jump: false, sprint: false, isStopped, priority: arbiter.PRIORITY.PROGRESS }) } catch (e) { dbg('unstick: recentre threw: ' + e.message) }
+    try { const m = bot.pathfinder && bot.pathfinder.movements; if (m && m.allowSprinting) { m.allowSprinting = false; dbg('unstick: sprint OFF for this profile - the server refused sprint-jumps here') } } catch {}
+    try { await reactiveMove(bot, { toward: back, budgetMs: 1200, reach: 1.2, arriveB: 0.2, jump: false, sprint: false, isStopped, priority: arbiter.PRIORITY.PROGRESS }) } catch (e) { dbg('unstick: back-off threw: ' + e.message) }
     const p1 = bot.entity.position
-    return { moved: relocated(p0, p1), via: 'recentre', verdict: 'pinned', plan: ['recentre'], tried: ['recentre'], cell: null, n: 0 }
+    return { moved: relocated(p0, p1), via: 'backoff', verdict: 'pinned', plan: ['backoff'], tried: ['backoff'], cell: null, n: 0 }
   }
   const indoors = (() => { try { return !!(provHut().insideOwnStructure && provHut().insideOwnStructure(bot)) } catch { return false } })()
   const w = {
