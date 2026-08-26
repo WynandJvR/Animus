@@ -285,7 +285,13 @@ function ctxFor (state, log) {
     recoveryMoveCmd: () => { tick('recoveryMoveCmd'); return state.recoveryMoveCmd },
     admissible: async () => { tick('admissible'); return state.adm },
     holdNeeds: () => { tick('holdNeeds'); return state._holdNeeds || [] },
-    liveCrisis: () => { tick('liveCrisis'); return state._crisis || null }
+    liveCrisis: () => { tick('liveCrisis'); return state._crisis || null },
+    // M3's lease reader. DEFAULTS TO NOT-STALLED, deliberately: the pre-extraction if-stack had
+    // no lease, so 'principal in good standing' IS the world D and E are proving inertness
+    // against. Sweeping it as a free variable would make D compare the new behaviour with the
+    // old and call the difference a bug - the difference is the entire point of M3. The stalled
+    // half is pinned by its own cases below, against the live tape that motivated it.
+    principalStalled: () => { tick('principalStalled'); return !!state.principalStalled }
   }
 }
 // The gate reads bodyBusy/holdLabel through the claim registry; the sweep drives them directly by
@@ -558,7 +564,7 @@ async function main () {
     }
   })
 
-  await ta('G: the /cmd handler no longer reads the saved build itself', () => {
+  await ta('G: the /cmd handler reads the saved build only to FEED the gate, never to decide with', () => {
     // The if-stack's only evidence was `persistedResume()` - it read the file and nothing else,
     // which is exactly why it could refuse a build's own materials on the build's behalf. The
     // handler now asks the table; the file is reached through the injected accessor, once.
@@ -575,9 +581,20 @@ async function main () {
       .map(l => l.replace(/\/\/.*$/, '')) // trailing comments too: several lines EXPLAIN the file
       .filter(l => /persistedResume/.test(l))
       .filter(l => !/persistedResume: \(\) => \(commands\.persistedResume \? commands\.persistedResume\(\) : null\)/.test(l))
+      // ...and the one M3 added, for the same reason: it FEEDS the gate. The rule this pin buys is
+      // that the handler may not DECIDE with the saved build - only gate.js may. A line inside a ctx
+      // accessor is an injection, not a decision. Anything that branches on it still fails here.
+      .filter(l => !/const j = commands\.persistedResume && commands\.persistedResume\(\)/.test(l))
       .map(l => l.trim())
     assert.deepStrictEqual(gates, [], 'the handler reads the saved build itself again: ' + gates.join(' | '))
     assert(/persistedResume: \(\) => \(commands\.persistedResume/.test(handler), 'and the injection is still there')
+    // The sharper half, which is what the pin is actually for: no CONTROL FLOW in the handler may
+    // turn on the saved build. Feeding it to gate.js is allowed; `if (persistedResume())` is not.
+    const branches = stripComments(handler).split(String.fromCharCode(10))
+      .filter(l => /persistedResume/.test(l))
+      .filter(l => /(if|while|\?|&&|\|\|)\s*\(?\s*commands\.persistedResume/.test(l))
+      .map(l => l.trim())
+    assert.deepStrictEqual(branches, [], 'the handler BRANCHES on the saved build - that decision belongs to gate.js: ' + branches.join(' | '))
   })
 
   await ta('G: the nine branches are gone from index.js and the table has nine rows', () => {
@@ -618,3 +635,34 @@ async function main () {
 }
 
 main().catch(e => { console.error((e && e.stack) || e); process.exit(1) })
+
+// ============ M3 - THE LEASE: a gate may not refuse for a principal that is not running =====
+// 2026-08-26 04:00:26, verbatim from logs/bot-events.log:
+//   (cmd) goto hut <<fire is a problem, need to get to safety>> -> held (a build job is waiting)
+//   (cmd) goto hut <<get out of fire>>                          -> held (a build job is waiting)
+//   (death) at -6,61,0 (mob - Zombie)                           <- three seconds later
+// The build being protected was blocked on crafting ONE AXE and had been FAIL-JOBing for hours.
+// 26 deaths overnight, zero progress. persistedBuild only ever meant A FILE EXISTS ON DISK.
+t('M3: a STALLED build does not get to refuse the escape that would save the bot', () => {
+  const p = { trimmed: 'goto hut', survival: false, readOnly: false, fromSupervisor: false }
+  const base = { persistedBuild: { name: 'castle' }, bodyBusy: false, holdLabel: '', cheatsAllowed: false }
+  const running = gate.evaluate(p, { ...base, principalStalled: false }, 'idle')
+  const stalled = gate.evaluate(p, { ...base, principalStalled: true }, 'idle')
+  assert(running && running.key === 'oneJobAtATime', 'a build that IS running still bars side trips')
+  assert(stalled === null, 'a STALLED build may not bar the escape - this is the line that killed it')
+})
+
+t('M3: the lease frees ONLY the leased row - an unleased refusal is untouched', () => {
+  const stop = { trimmed: 'stop', survival: false, readOnly: false, fromSupervisor: false }
+  const s = { persistedBuild: { name: 'castle' }, principalStalled: true, bodyBusy: false, holdLabel: '', cheatsAllowed: false }
+  const v = gate.evaluate(stop, s, 'pre-body')
+  assert(v && v.key === 'stopSavedBuild', 'stopSavedBuild is operator-intent, has no lease, and still fires')
+})
+
+t('M3: every row that DECLARES a lease is actually evaluated against it', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, 'gate.js'), 'utf8')
+  const declared = (src.match(/voidWhen: 'principalStalled'/g) || []).length
+  assert(declared >= 3, 'the three principal rows still declare their lease, got ' + declared)
+  assert(/row\.voidWhen === 'principalStalled' && s\.principalStalled/.test(src),
+    'evaluate() must READ the lease - M1 declared it and nothing evaluated it, which is how 04:00 happened')
+})

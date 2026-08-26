@@ -365,6 +365,24 @@ function snapshot (p, ctx) {
   })
   lazy('bodyBusy', () => s._hold.length > 0)
   lazy('holdLabel', () => s._hold.join('+') || 'unlabeled-hold')
+  // M3: IS THE PRINCIPAL IN GOOD STANDING? A gate refuses ON BEHALF OF something. If that
+  // something is not actually progressing, the refusal is not arbitration - it is a hostage
+  // situation. Live 2026-08-26 04:00:26, verbatim:
+  //   goto hut <<fire is a problem, need to get to safety>> -> held (a build job is waiting)
+  //   goto hut <<get out of fire>>                          -> held (a build job is waiting)
+  //   (death) at -6,61,0 (mob - Zombie)                     <- THREE SECONDS LATER
+  // The build it was protecting could not run: it was blocked on crafting one axe, and had
+  // been FAIL-JOBing for hours. Twenty-six deaths overnight, zero progress, and this row
+  // refusing the escape each time. `persistedBuild` only means A FILE EXISTS ON DISK - it was
+  // never evidence that a build is under way, and that is the whole defect.
+  // Good standing = the saved job is not stood down (buildHoldMs) AND its work ledger has
+  // advanced inside one fail window. Both are numbers the runner already computes; this reads
+  // them, it does not invent a third definition (#4).
+  lazy('principalStalled', () => {
+    try { return !!ctx.principalStalled() } catch { return true } // unknown -> STALLED: a gate that
+    // cannot prove its principal is alive must not refuse. Fails OPEN, deliberately: the failure
+    // mode of guessing wrong here is a side-trip; the failure mode of the old default was a corpse.
+  })
   lazy('defendWhenHit', () => !!ctx.defendWhenHit())
   lazy('beingHit', () => !!ctx.beingHit())
   lazy('postDeathLatch', () => !!ctx.postDeathLatch())
@@ -412,7 +430,13 @@ function render (row, p, s) {
 function evaluate (p, s, scopeKey) {
   for (const row of ROWS) {
     if (row.scope !== scopeKey) continue
-    if (row.applies(p, s)) return render(row, p, s)
+    if (!row.applies(p, s)) continue
+    // M3: THE LEASE. `voidWhen: 'principalStalled'` was DECLARED by M1 and evaluated by nothing -
+    // the row said what it was refusing on behalf of and then refused regardless. Evaluating it is
+    // the difference between a gate and a hostage-taker. A voided row does not refuse; the scan
+    // continues, so a later row in the same scope still gets its say and the scope stays total.
+    if (row.voidWhen === 'principalStalled' && s.principalStalled) continue
+    return render(row, p, s)
   }
   return null
 }

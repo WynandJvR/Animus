@@ -2719,6 +2719,27 @@ const server = http.createServer((req, res) => {
       const verdict = await cmdGate.decide(proposal, {
         cheatsAllowed: () => process.env.BRAIN_ALLOW_CHEATS === '1',
         persistedResume: () => (commands.persistedResume ? commands.persistedResume() : null),
+        // M3's LEASE READER. Answers, for gate.js, whether the saved build is a principal in
+        // GOOD STANDING - i.e. whether it may still refuse things on its own behalf. It is NOT a
+        // new definition of stalled: it reads the two numbers the runner already maintains.
+        //   1. the job layer stood the build down (item 7's markResumePaused -> buildHoldMs)
+        //   2. its work ledger (item 1) has not advanced inside one PATIENT fail window
+        // Either one means the build is not making progress, so a survival move is not a
+        // 'side trip' competing with it - there is nothing to compete with.
+        principalStalled: () => {
+          try {
+            const j = commands.persistedResume && commands.persistedResume()
+            if (!j) return true                                  // no saved job at all
+            if (j.pausedAt && j.pauseHoldMs && Date.now() - j.pausedAt < j.pauseHoldMs) return true // stood down
+            const info = provision.activeJobInfo && provision.activeJobInfo()
+            // The build is only advancing if IT is the active job AND its ledger moved recently.
+            if (!info || !/build|autobuild/.test(String(info.name || ''))) return true
+            const last = info.lastProgressAt
+            if (typeof last !== 'number') return true
+            const win = (scheduler.failWindows ? scheduler.failWindows('progress', { hp: bot.health, food: bot.food }).failMs : 240000)
+            return (Date.now() - last) > win
+          } catch { return true }                                // unknown -> stalled; see gate.js
+        },
         // bodyOwner() writes the claim registry through BEFORE the four latches are read, so a
         // lease that has expired is not a hold (review D2). It revokes, releases and logs - which
         // is exactly why gate.js reads it lazily, and only where the if-stack read it.
