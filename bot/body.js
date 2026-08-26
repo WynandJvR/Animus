@@ -156,7 +156,10 @@ function install (bot) {
       if (recent >= 10 && now - lastPinNoteAt >= 3000) {
         lastPinNoteAt = now
         const f = v => v.x.toFixed(2) + ',' + v.y.toFixed(2) + ',' + v.z.toFixed(2)
-        note('PINNED by the server: ' + recent + ' position syncs in 2s, last one moved me ' + d.toFixed(3) + 'b to ' + f(to) + ' (client had ' + f(e) + ') - the server refuses every move from here')
+        // teleportId is the server's own counter: a real teleport increments it every time. flags say
+        // absolute vs relative; yaw/pitch say whether the sender restores a stored look (a
+        // cancelled-move plugin teleports to `from` WITH from's yaw/pitch).
+        note('PINNED by the server: ' + recent + ' position syncs in 2s, last one moved me ' + d.toFixed(3) + 'b to ' + f(to) + ' (client had ' + f(e) + ') teleportId=' + p.teleportId + ' flags=' + JSON.stringify(rel) + ' yaw=' + (typeof p.yaw === 'number' ? p.yaw.toFixed(1) : '?') + ' pitch=' + (typeof p.pitch === 'number' ? p.pitch.toFixed(1) : '?') + ' - the server refuses every move from here')
       }
       while (corrections.length && now - corrections[0].t > 10000) corrections.shift()
       if (d < 0.5) return
