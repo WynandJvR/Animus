@@ -74,6 +74,16 @@ let _todSeen = { tod: null, at: 0 } // last time timeOfDay changed meaningfully
 // for a while (the re-dig loop beside water is the entombment/drowning mechanism).
 let lastFlood = null // {x, z, at}
 
+// WHAT COUNTS AS A LID. Module scope because TWO functions need it and only one used to declare it
+// (2026-08-26, live). It was a `const` inside sealShaft, while digInForNight's "a shelter needs a lid"
+// guard - added the same day to stop the bot digging itself sixteen blocks straight down - referenced
+// it from a different scope. So that guard threw ReferenceError EVERY time it was reached, and the
+// throw surfaced only as one swallowed line from the scheduler:
+//     (sched) nightShelter failed: CAP_RE is not defined
+// The night-shelter job therefore died instantly on every dispatch and the bot spent every night
+// standing in the open. One constant, one definition, both readers (#4).
+const CAP_RE = /terracotta|dirt|cobble|stone|gravel|sand|netherrack|deepslate|tuff|granite|diorite|andesite|clay|mud|_planks$|_log$|_concrete/
+
 let _sheltering = false
 
 function isSheltering () { return _sheltering }
@@ -241,7 +251,6 @@ function nightRestWanted (bot) {
 }
 
 async function sealShaft (bot, interior = {}) {
-  const CAP_RE = /terracotta|dirt|cobble|stone|gravel|sand|netherrack|deepslate|tuff|granite|diorite|andesite|clay|mud|_planks$|_log$|_concrete/
   const SIDES = [[1, 0], [-1, 0], [0, 1], [0, -1]]
   const feet = interior.feet || bot.entity.position.floored()
   const keep = [interior.feet, interior.head, interior.alcoveCell].filter(Boolean)
