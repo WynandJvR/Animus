@@ -22,7 +22,18 @@ const ROUTE_MIN_LEN = 64      // don't record a route shorter than this (nothing
 const ROUTE_LEN_SANITY = 1.6  // reject a "route" whose polyline is >1.6x the straight line
 const ROUTE_MATCH_TOL = 24    // endpoints within 24b (either orientation) = the same route
 const WEDGE_STEER_CORRIDOR = 2 // a wedge within 2b of a leg segment clips it
-const INFRA_SUPPRESS_R = 12   // never STEER around a wedge within 12b of our own infra (recording it is fine - and since 2026-08-25 mandatory: see world-memory.recordWedge)
+const INFRA_SUPPRESS_R = 3    // 12 -> 3 (2026-08-26, live). The RULE is right - a bot that steers
+// away from its own front door cannot get home - but 12b is not a doorway, it is the whole camp.
+// The bot had recorded 617 wedges around its base (correctly: review item 4 made near-home
+// recording mandatory) and was then forbidden from steering around ANY of them. It knew where
+// every hole was and was not allowed to use it. Live, escaping one straight into the next:
+//   unstick: in the open at (-3,62,-3) [failed here x19, a known wedge at home]
+//   unstick: stepout moved us to (-1,61,-3)
+//   unstick: under a ceiling at (-1,61,-3) [failed here x11, a known wedge at home]
+// A wedge within 3b of infra plausibly IS the doorway and stays suppressed; beyond that it is a
+// hazard the bot paid to learn about. Steering is a 2b corridor clip (WEDGE_STEER_CORRIDOR), so
+// routing around a hole near the door does not stop it reaching the door.
+//   (was: never STEER around a wedge within 12b of our own infra (recording it is fine - and since 2026-08-25 mandatory: see world-memory.recordWedge)
 const H24 = 24 * 3600 * 1000
 const D7 = 7 * 24 * 3600 * 1000
 
@@ -357,6 +368,7 @@ function planOverGraph (graph, from, to, opts = {}) {
 }
 
 module.exports = {
+  INFRA_SUPPRESS_R, // exported so tests pin the RULE at whatever the radius is, never a literal (#4)
   ROUTE_MIN_LEN, ROUTE_LEN_SANITY, GRAPH_MAX_NODES,
   dist, polylineLength,
   thinPolyline, canonEndpoints, matchRoute, routeCursor,

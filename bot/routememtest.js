@@ -134,8 +134,17 @@ t('recall-side suppression retroactively kills a pre-existing wedge when an anch
   // with no infra nearby it is a live, steer-eligible wedge
   assert.strictEqual(rm.activeWedges(wedges, [], now).length, 1, 'alive + unsuppressed when no infra near')
   // now a hut exists 6b away -> the same wedge must vanish from the steer-eligible list
-  const anchors = [{ x: 506, z: 500 }]
+  // INSIDE the radius, whatever it is - the doorway case this rule exists for. Pinned against the
+  // exported constant, not a literal: on 2026-08-26 the radius went 12 -> 3 because 12b is not a
+  // doorway, it is the whole camp, and the bot had 617 recorded holes around its base that it was
+  // forbidden from steering around. A test that hardcodes the old number fails a correct change.
+  const R = rm.INFRA_SUPPRESS_R
+  const anchors = [{ x: 500 + (R - 1), z: 500 }]
   assert.strictEqual(rm.activeWedges(wedges, anchors, now).length, 0, 'infra appearing near a wedge neutralises it at recall time')
+  // ...and OUTSIDE it the wedge stays steer-eligible, which is the whole point of the change:
+  // a hole the bot paid to learn about, well clear of its door, must be avoidable.
+  const far = [{ x: 500 + (R + 6), z: 500 }]
+  assert.strictEqual(rm.activeWedges(wedges, far, now).length, 1, 'a wedge beyond the doorway radius stays avoidable')
   // the stored entry itself is untouched (suppression is a read-time filter, not a delete)
   assert.strictEqual(wedges.length, 1, 'record retained, only filtered on read')
 })
