@@ -1395,14 +1395,35 @@ async function runGather (bot, item, count, opts = {}) {
     // staircase up, a straight pillar-up, then a pathfinder dig-out. Any one that works
     // ends it - so a cave with awkward geometry can't strand us.
     try {
-      const need = () => bot.entity && bot.entity.position.y < surfaceY - 2
+      // ASK THE COLUMN, NOT THE CALLER (#111, 2026-08-26). `need()` compared against surfaceY, and
+      // surfaceY is whatever the CALLER passed as homeY - which six of the seven call sites derive
+      // from the bot's own position (commands.js:2183 is literally
+      // `homeY: Math.floor(bot.entity.position.y)`). So the test read "am I below where I am",
+      // false by construction, and this entire ladder - written for exactly the case its comment
+      // names, "fell into a cave" - could never run. Live 2026-08-26: the bot walked around inside
+      // a cave near spawn for over an hour, planning wood gathers it could not reach, while
+      //   [prov] runGather acacia_log x5 surfaceY=44 ... at (35, 44, -2)   hazards.underground: true
+      // and the recovery rung, which asks pathfix, had the real answer the whole time (y52).
+      // The target is the HIGHER of the caller's reference and the column's real surface: a caller
+      // that means "come back to my mine at y20" still gets it, and a bot that fell down a hole
+      // gets out of the hole. Fixing it here rather than at the callers is deliberate - seven
+      // hand-corrected copies of "where is the surface" is the disease, not the cure.
+      const columnY = (() => {
+        try {
+          const me = bot.entity.position.floored()
+          const g = require('./pathfix.js').surfaceYAt(bot, me.x, me.z)
+          return (g && g.known && typeof g.y === 'number') ? g.y : null
+        } catch { return null }
+      })()
+      const topY = columnY != null ? Math.max(surfaceY, columnY) : surfaceY
+      const need = () => bot.entity && bot.entity.position.y < topY - 2
       if (need()) {
-        dbg('  runGather climb-out from y=' + Math.floor(bot.entity.position.y) + ' to surfaceY=' + surfaceY)
+        dbg('  runGather climb-out from y=' + Math.floor(bot.entity.position.y) + ' to y=' + topY + ' (caller surfaceY=' + surfaceY + ', column reads ' + (columnY == null ? 'UNKNOWN' : columnY) + ')')
         bot.pathfinder.setGoal(null)
         for (const climb of [
-          () => digStaircaseUp(bot, surfaceY, { isStopped: opts.isStopped }),
-          () => pillarUpTo(bot, surfaceY, { isStopped: opts.isStopped }),
-          () => { bot.pathfinder.setMovements(climbMovements(bot)); return gotoWithTimeout(bot, new goals.GoalY(surfaceY), 30000) }
+          () => digStaircaseUp(bot, topY, { isStopped: opts.isStopped }),
+          () => pillarUpTo(bot, topY, { isStopped: opts.isStopped }),
+          () => { bot.pathfinder.setMovements(climbMovements(bot)); return gotoWithTimeout(bot, new goals.GoalY(topY), 30000) }
         ]) { if (!need()) break; try { await climb() } catch {} }
         dbg('  runGather climb-out ended at y=' + Math.floor(bot.entity.position.y))
       }
