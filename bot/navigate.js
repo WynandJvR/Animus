@@ -581,6 +581,32 @@ async function escapeToDryLand (bot, { goalDir = null, isStopped = () => false, 
 // pillar to, or null. Only counts as a pit under open sky - a walled corner INSIDE a
 // roofed room is a door/climb problem, not a pillar problem (pillaring indoors just
 // bonks the ceiling).
+// ==== ONE DEFINITION OF "THE RESCUE MOVED ME" (2026-08-26, live) =========================
+// There were FOUR, and they disagreed with each other by design accident:
+//   stepout's own success test          >= 1.0b        "we broke the freeze - that's the job"
+//   recoverOnce.movedEnough (climb/pit) >= 2.0b or y+
+//   unstick's final verdict             >= 1.5b or |dy|>=1
+//   the travel leg's stall detector     < 2.5b == stalled
+// So a step-out that netted 1.3b reported MOVED to its own rung and FAILED to the verdict two
+// lines later - and the verdict is the half that writes history. Live at spawn:
+//   [nav] recovery stepout -> MOVED
+//   [nav] unstick: stepout moved us to (0, 61, -3)
+//   [prov] wedge: recorded stuck-spot 1,-1 (n=4)
+//   [nav] unstick FAILED at (0, 61, -2) (in the open): tried nudge, stepout - attempt 4
+// The rescue worked, the body was somewhere else, and the same instant it was booked as a
+// failure: an "achieved nothing here" record against EVERY rung it tried (so they are skipped
+// next time) plus a wedge. Those false wedges are the input to `trappedHere`, which is what
+// front-loads the expensive climbing rung - so this defect manufactures the evidence for the
+// other one, and the bot shuffled 1.3b at a time between two cells for minutes while its own
+// memory filled up with failures it had not had.
+// A rescue exists to break a freeze so the planner can re-plan, and one block of relocation
+// does that. One threshold, asked once, by everyone who asks the question (#4).
+const RESCUE_MOVED_B = 1.0
+function relocated (p0, p1) {
+  if (!p0 || !p1) return false
+  return Math.hypot(p1.x - p0.x, p1.z - p0.z) >= RESCUE_MOVED_B || Math.abs(p1.y - p0.y) >= 1
+}
+
 function detectPit (bot) {
   const f0 = bot.entity.position.floored()
   let pitWalls = 0; let rimY = f0.y
@@ -967,10 +993,7 @@ async function recoverOnce (bot, goal, plan, opts) {
     } catch { return true }
   }
 
-  const movedEnough = () => {
-    const p1 = bot.entity.position
-    return Math.hypot(p1.x - p0.x, p1.z - p0.z) >= 2 || Math.floor(p1.y) > Math.floor(p0.y)
-  }
+  const movedEnough = () => relocated(p0, bot.entity.position)
   const xz = goalXZ(goal)
   const twd = xz ? { x: xz.x, z: xz.z, y: goalY(goal) } : null // door scans also look near the GOAL
   // ONE SELF/WORLD TRUTH (review 2026-08-25 §3.4): say WHERE WE ARE before naming a rung.
@@ -1339,8 +1362,7 @@ async function recoverOnce (bot, goal, plan, opts) {
               }
             } catch {} finally { bot.clearControlStates() }
           }
-          const p1 = bot.entity.position
-          if (Math.hypot(p1.x - p0.x, p1.z - p0.z) >= 1.0) return true // we broke the freeze - that's the job
+          if (relocated(p0, bot.entity.position)) return true // we broke the freeze - that's the job
         }
         return false
       }
@@ -1987,7 +2009,7 @@ async function unstick (bot, goal, opts = {}) {
   } finally { endRecoverySpan(); unsticking = false; bot.clearControlStates() }
   // 3. THE VERDICT, read from the world (never from intent).
   const p1 = bot.entity.position
-  const moved = Math.hypot(p1.x - p0.x, p1.z - p0.z) >= 1.5 || Math.abs(p1.y - p0.y) >= 1
+  const moved = relocated(p0, p1)
   const tried = Array.from(triedSet).filter(k => !skipped.has(k))
   if (isStopped() && !moved) return { moved: false, via, verdict: 'stopped', plan, tried, cell, n: failedHere }
   if (moved) {
