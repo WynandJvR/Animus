@@ -1288,7 +1288,6 @@ if (SCHED_ON) {
     return null
   }
   let coreLastChoice = '' // log the CHOICE on change; dispatches, refusals and standoffs always log
-  let coreTailNoted = ''  // one note per pickJob-still-wants-X transition (see the tail clause below)
   // job|why -> printed. Bounded by construction: the keys are (candidate x its own refusal
   // reasons), a small closed set. Cleared whenever the CHOSEN line changes, so a genuinely new
   // situation re-prints its refusals and a stuck one does not repeat them every two seconds.
@@ -1359,16 +1358,20 @@ if (SCHED_ON) {
       // is about to do something it has already ruled out twice. The core's own charter says it
       // owns the survival + bootstrap-vs-build choice and pickJob owns the progress plumbing;
       // taking pickJob's SURVIVAL verdict here is a contract violation, not a safety net.
-      const tail = scheduler.pickJob(s)
-      if (tail && tail.cls === 'survival') {
-        if (coreTailNoted !== tail.job) {
-          coreTailNoted = tail.job
-          note('(core) pickJob still wants ' + tail.job + ' ("' + tail.reason + '") - the core already weighed and declined it this tick; not re-opening a settled question')
-        }
-        return { job: null, cls: c.cls, reason: c.reason, preempt: false }
-      }
-      coreTailNoted = ''
-      return tail
+      // ...so ASK FOR THE TAIL, don't ask the whole question and throw the answer away. This used
+      // to call pickJob(s), and on a survival answer returned { job: null } - discarding the
+      // PROGRESS TAIL along with the survival verdict it meant to ignore, so NOTHING was
+      // dispatched. A decision must produce an action (§5); this one produced a log line.
+      // Live 2026-08-26 12:26-12:33, the castle trek dead in the water at 61,-33:
+      //   (core) chose build/idle: ... - continuing with: resuming the saved build - survival infra in order
+      //   (core) pickJob still wants secureFood ("food 10 < 14") - ... not re-opening a settled question
+      //   (sched) pick=null
+      // every tick, with hp/food frozen and the body idle. The standoff was unbreakable by
+      // construction: food 10 is a need but not crisis-grade, secureFood is latched off because it
+      // ran here and achieved nothing, and food only falls - so the veto could never lift, and the
+      // one job that WOULD have moved the bot (and fed it en route) was the one being discarded.
+      // tailOnly cannot return cls 'survival', so there is no answer left to throw away.
+      return scheduler.pickJob(s, { tailOnly: true })
     }
     return { job: c.job, cls: c.cls, reason: c.reason, preempt: !!c.preempt, bootstrap: c.bootstrap }
   }

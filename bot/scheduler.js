@@ -521,14 +521,21 @@ function campFirstExempt (s) {
 // The single owning-job selector (I3, §3.2, §5 entry). null => idle. `preempt` is true only
 // when there IS an active victim whose class rank the returned job exceeds (the S4 dispatcher
 // then sets the victim's stop latch). First match wins.
-function pickJob (snapshot) {
+// `opts.tailOnly` asks the NARROWER question: the PROGRESS TAIL only - build / resume / brain /
+// idle - with the survival tier (steps 1-3) skipped. It exists because the dynamic core already
+// owns the survival decision and only ever wanted the tail from here; without it the core had to
+// ask the whole question and then DISCARD a survival answer it had just declined, which threw the
+// progress tail away with it and dispatched nothing at all (see index.js). One selector still owns
+// the progress plumbing (§4) - the caller just asks for the part it does not already own.
+function pickJob (snapshot, opts) {
   const s = snapshot || {}
+  const tailOnly = !!(opts && opts.tailOnly)
   const activeCls = s.activeJob && s.activeJob.cls
   const preemptFor = cls => (s.activeJob ? classRank(cls) > classRank(activeCls) : false)
   const degraded = isDegraded(s)
 
   // 1. IMMEDIATE-DANGER / vitals survival need (arbiter is the authority).
-  const need = arbiter.jobSurvivalNeed(s)
+  const need = tailOnly ? null : arbiter.jobSurvivalNeed(s)
   if (need) {
     const preempt = preemptFor('survival')
     // a COMPOUND degraded state runs the ladder (R0..R5 + re-plan); a single clean need -> its
@@ -547,14 +554,14 @@ function pickJob (snapshot) {
   //    old 33-96b dead zone exactly when the despawn timer matters); a safe grave keeps GRAVE_NEAR.
   const GRAVE_NEAR = Number(process.env.GRAVE_NEAR || 16)
   const GRAVE_URGENT_DIST = Number(process.env.GRAVE_URGENT_DIST || 96)
-  if (!fleeActive(s)) {
+  if (!tailOnly && !fleeActive(s)) {
     const g = nearestReachGrave(s, GRAVE_NEAR, GRAVE_URGENT_DIST)
     if (g) return { job: 'graveSweep', cls: 'survival', reason: `grave ${Math.round(g.dist)}b${graveUrgent(g) ? ' (' + g.tier + ' - despawning)' : ''} - free gear`, preempt: preemptFor('survival') }
   }
 
   // 3. DEGRADED SIGNATURE -> recovery ladder (need was null-but-degraded, e.g. naked with a
   //    far grave and food 12).
-  if (degraded) return { job: 'recoveryLadder', cls: 'survival', reason: 'degraded - running the ladder', preempt: preemptFor('survival') }
+  if (!tailOnly && degraded) return { job: 'recoveryLadder', cls: 'survival', reason: 'degraded - running the ladder', preempt: preemptFor('survival') }
 
   // 4. ACTIVE PROGRESS job continues (single-goal discipline). An ALREADY-running progress job is
   //    never preempted here (bootstrap is below crisis-survival but above only the build-RESUME tier).
