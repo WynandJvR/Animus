@@ -1337,7 +1337,28 @@ async function runGather (bot, item, count, opts = {}) {
   // wherever we happen to be standing now - so a batch that starts underground (previous
   // climb-out fell short, or we fell in a cave) still knows where the real surface is and
   // won't sink deeper. Falls back to the current spot when there's no home reference.
-  const surfaceY = opts.homeY != null ? opts.homeY : Math.floor(bot.entity.position.y)
+  // THE SURFACE IS A FACT ABOUT THE COLUMN, NOT ABOUT WHERE I HAPPEN TO STAND (#111, 2026-08-26).
+  // This defaulted to `Math.floor(bot.entity.position.y)` - it DEFINED the surface as the bot's own
+  // feet - and the climb-out guard 40 lines below asks `position.y < surfaceY - 2`. Against a
+  // self-referential surface that is false by construction, so a BURIED bot could never conclude it
+  // was buried and the climb-out was unreachable whenever the caller omitted homeY. Live 2026-08-26,
+  // trapped at y44 under a stone ceiling with an empty pack:
+  //   [prov] runGather acacia_log x2 surfaceY=44 ... at (35, 44, -2)
+  //   [prov] gather scan: raw=32 kept=32 item=acacia_log feetY=44 surfaceY=44
+  // ...planning a wood-gathering trip as though it were standing in the savanna, on repeat, while
+  // hazards.underground read true and the recovery rung - which asks pathfix - had just correctly
+  // reported the real surface as y52. Two readings of one fact, and the work planned off the wrong
+  // one. This is #111 GROUNDED_SURFACE, which deleted the same arithmetic guess from navigate.js
+  // and never reached here. pathfix.surfaceYAt reads the column and FAILS CLOSED (`known`), so an
+  // unloaded chunk falls back to today's behaviour rather than inventing a target.
+  const surfaceY = opts.homeY != null ? opts.homeY : (() => {
+    try {
+      const me = bot.entity.position.floored()
+      const s = require('./pathfix.js').surfaceYAt(bot, me.x, me.z)
+      if (s && s.known && typeof s.y === 'number') return s.y
+    } catch {}
+    return Math.floor(bot.entity.position.y)
+  })()
   // XZ home anchor for the ROAM FENCE (keeps gathering from drifting away from the build).
   // Prefer an explicit home {x,z}; else the homeY-implied spot; else where we stand now.
   const home = opts.home || { x: Math.round(bot.entity.position.x), y: surfaceY, z: Math.round(bot.entity.position.z) }
