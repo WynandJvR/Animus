@@ -69,6 +69,7 @@ let corrections = []         // ring of { t, from, to } for syncs that displaced
 let groundFixes = 0
 let lastGroundNoteAt = 0
 let syncs = []               // ring of t for EVERY position sync (a per-tick correction is < 0.5b and still a refusal)
+let syncIds = []             // ring of { t, id } - a REAL server teleport carries a NEW id every time; repeats of one id are re-sends
 let lastPinNoteAt = 0
 let lastCorrectionNoteAt = 0
 let noteFn = null            // index.js injects note() so transitions land in the main log
@@ -150,6 +151,7 @@ function install (bot) {
       const to = { x: rel.x ? e.x + p.x : p.x, y: rel.y ? e.y + p.y : p.y, z: rel.z ? e.z + p.z : p.z }
       const d = Math.hypot(to.x - e.x, to.y - e.y, to.z - e.z)
       syncs.push(now); while (syncs.length && now - syncs[0] > 10000) syncs.shift()
+      syncIds.push({ t: now, id: p.teleportId }); while (syncIds.length && now - syncIds[0].t > 2000) syncIds.shift()
       // PINNED: the server answers (nearly) every client move with a teleport back. Ten in two seconds is
       // five a second - no legitimate teleport rate - and it is why the body 'cannot reach' a node 1.7b away.
       const recent = syncs.filter(t => now - t <= 2000).length
@@ -159,7 +161,9 @@ function install (bot) {
         // teleportId is the server's own counter: a real teleport increments it every time. flags say
         // absolute vs relative; yaw/pitch say whether the sender restores a stored look (a
         // cancelled-move plugin teleports to `from` WITH from's yaw/pitch).
-        note('PINNED by the server: ' + recent + ' position syncs in 2s, last one moved me ' + d.toFixed(3) + 'b to ' + f(to) + ' (client had ' + f(e) + ') teleportId=' + p.teleportId + ' flags=' + JSON.stringify(rel) + ' yaw=' + (typeof p.yaw === 'number' ? p.yaw.toFixed(1) : '?') + ' pitch=' + (typeof p.pitch === 'number' ? p.pitch.toFixed(1) : '?') + ' - the server refuses every move from here')
+        const hist = {}; for (const r of syncIds) hist[r.id] = (hist[r.id] || 0) + 1
+        const idsTxt = Object.entries(hist).map(([k, n]) => k + 'x' + n).join(' ')
+        note('PINNED by the server: ' + recent + ' position syncs in 2s (ids ' + idsTxt + '), last one moved me ' + d.toFixed(3) + 'b to ' + f(to) + ' (client had ' + f(e) + ') flags=' + JSON.stringify(rel) + ' yaw=' + (typeof p.yaw === 'number' ? p.yaw.toFixed(1) : '?') + ' pitch=' + (typeof p.pitch === 'number' ? p.pitch.toFixed(1) : '?') + ' - the server refuses every move from here')
       }
       while (corrections.length && now - corrections[0].t > 10000) corrections.shift()
       if (d < 0.5) return
@@ -287,6 +291,6 @@ async function waitSimulating (ms, isStopped) {
 }
 
 // test hooks
-function _reset () { groundFixes = 0; lastGroundNoteAt = 0; syncs = []; lastPinNoteAt = 0; corrections = []; lastCorrectionNoteAt = 0; installed = false; lastTickAt = 0; ticks = 0; hzTicks = 0; hzAt = 0; hz = 0; lastPositionAt = 0; lastTeleportId = 0; connected = false; deadSince = 0; lastRearmAt = 0; rearms = 0; rearmsFailed = 0; tape = []; pendingVerdict = null }
+function _reset () { syncIds = []; groundFixes = 0; lastGroundNoteAt = 0; syncs = []; lastPinNoteAt = 0; corrections = []; lastCorrectionNoteAt = 0; installed = false; lastTickAt = 0; ticks = 0; hzTicks = 0; hzAt = 0; hz = 0; lastPositionAt = 0; lastTeleportId = 0; connected = false; deadSince = 0; lastRearmAt = 0; rearms = 0; rearmsFailed = 0; tape = []; pendingVerdict = null }
 
 module.exports = { install, check, info, simulating, simulatingAt, shouldRearm, offForMs, waitSimulating, pinned, standing, standingOn, setNoteSink, setDebugSink, SILENCE_MS, REARM_GAP_MS, _reset }
