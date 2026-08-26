@@ -213,10 +213,19 @@ function classifyDeathCause ({ y, hazardNear, headWater, feetWater, oxygen, fall
 // PURE: the per-step verdict for one candidate cell, replacing the cost-only closure. `name` is
 // the candidate block's name (pathfinder hands the block in). `hazards` is plain data:
 // [{ x, y, z, cause, hard }]. Returns 0, the soft cost, or HAZARD_FORBID.
-//   - soft rung (unchanged #85 semantics, cost 40): every armed hazard prices its box.
-//   - hard rung: only where `hard` is set AND the cell reads as the medium that did the killing.
-// A hazard with no readable medium (fall/mob/unknown) never hard-forbids: a wall nothing can
-// walk through is a wall nothing can prove safe again, and §5 forbids walling off terrain.
+//   - soft rung: a cell inside a remembered hazard's box that STILL READS AS THE MEDIUM that did
+//     the killing (water for a drowning, lava/fire for a burn) costs COST - A* bends around it.
+//   - hard rung: the same cell, once the hazard is armed (2 deaths, no survived traversal), is
+//     FORBIDDEN.
+// A cell that does not read as the medium costs NOTHING, whatever happened near it. The #85
+// version priced EVERY cell in the box (cost 40, radius 4, +8/-2) - a mob death at spawn made
+// every block of spawn cost 41 to walk on, and once a bare-hand stone dig was honestly priced at
+// ~34 (nav-profile.js WILD_DIG_COST) the planner tunnelled through the crater wall rather than walk
+// across its own death box; the operator watched it punch stone with a clear exit beside it
+// (2026-08-26). A mob is not terrain: the ground did not kill the bot and the ground cannot be
+// priced for it. A hazard with no readable medium (fall/mob/unknown/void) therefore prices
+// nothing here (the fall ledger and the mob hazard escalation live elsewhere) and never forbids:
+// a wall nothing can walk through is a wall nothing can prove safe again (§5).
 function hazardStepCost (p, name, hazards, opts = {}) {
   if (!p || !hazards || !hazards.length) return 0
   const COST = opts.cost != null ? opts.cost : 40
@@ -224,7 +233,8 @@ function hazardStepCost (p, name, hazards, opts = {}) {
   for (const h of hazards) {
     if (!hazardBoxHas(p, h, opts)) continue
     const medium = HAZARD_MEDIUM[h.cause]
-    if (h.hard && medium && name && medium.test(name)) return HAZARD_FORBID
+    if (!(medium && name && medium.test(name))) continue // the cell is not the killer: free
+    if (h.hard) return HAZARD_FORBID
     out = COST
   }
   return out

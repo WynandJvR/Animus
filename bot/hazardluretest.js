@@ -141,11 +141,11 @@ const spotsArmed = [{ x: D1.x, y: D1.y, z: D1.z, cause: 'drowning', hard: true }
 const spotsSoft = [{ x: D1.x, y: D1.y, z: D1.z, cause: 'drowning', hard: false }]
 eq(GP.hazardStepCost(at(D1.x, D1.y, D1.z), 'water', spotsArmed, {}), GP.HAZARD_FORBID, 'step: armed hazard + the cell is still water -> FORBID (pathfinder drops any neighbour over 100)')
 ok(GP.HAZARD_FORBID > 100, 'step: the forbid really is above pathfinder\'s drop threshold')
-eq(GP.hazardStepCost(at(D1.x, D1.y, D1.z), 'stone', spotsArmed, {}), 40, 'step: armed hazard but the pocket has DRAINED -> back to the soft cost (self-releasing)')
+eq(GP.hazardStepCost(at(D1.x, D1.y, D1.z), 'stone', spotsArmed, {}), 0, 'step: armed hazard but the pocket has DRAINED -> the cell is not the killer any more: FREE (the ground is not priced for what the water did)')
 eq(GP.hazardStepCost(at(D1.x, D1.y, D1.z), 'water', spotsSoft, {}), 40, 'step: one death -> soft cost even in the water')
 eq(GP.hazardStepCost(at(D1.x + 9, D1.y, D1.z), 'water', spotsArmed, {}), 0, 'step: outside the box -> free')
-eq(GP.hazardStepCost(at(D1.x, D1.y, D1.z), 'water', [{ x: D1.x, y: D1.y, z: D1.z, cause: 'fall', hard: true }], {}), 40,
-  'step: a cause with NO readable medium never hard-forbids - an unreleasable wall is forbidden by §5')
+eq(GP.hazardStepCost(at(D1.x, D1.y, D1.z), 'water', [{ x: D1.x, y: D1.y, z: D1.z, cause: 'fall', hard: true }], {}), 0,
+  'step: a cause with NO readable medium prices nothing and never forbids - an unreleasable wall is forbidden by §5, and a mob/fall death at spawn must not make spawn dearer to walk than to tunnel')
 eq(GP.hazardStepCost(at(D1.x, D1.y, D1.z), 'water', [], {}), 0, 'step: no hazards -> free')
 
 // markTraversed is the wired release, and it is evidence-shaped: it only ever sets a flag.

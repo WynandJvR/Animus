@@ -633,6 +633,34 @@ function installPathfinderTuning (bot) {
       bot.on('goal_reached', () => settle('goal_reached'))
       bot.on('path_update', (r) => { if (r && (r.status === 'noPath' || r.status === 'timeout')) settle('path ' + r.status) })
     }
+    // THE PLAN IS EVIDENCE (2026-08-26, #7). Every computed path used to be invisible: the operator
+    // watched the bot punch a stone wall with a clear exit beside it, and nothing in the tape said
+    // "the planner chose 2 digs over 12 steps because those steps cost 41 each". One line per
+    // computed path, with the numbers that decide it - status, length, digs, placements, first dig
+    // cell - so a bad plan is readable the moment it is made, not reverse-engineered from a stall.
+    // Throttled to one line per 2s per status so a partial-path re-plan loop stays greppable, not
+    // a flood ([[body-first-priority]]: this runs per plan, never per tick).
+    if (!bot.__pathfixPlanLog) {
+      bot.__pathfixPlanLog = true
+      let lastPlanAt = 0; let lastPlanKey = ''
+      bot.on('path_update', (r) => {
+        try {
+          if (!r || !Array.isArray(r.path)) return
+          const digs = r.path.reduce((n, m) => n + ((m.toBreak && m.toBreak.length) || 0), 0)
+          const places = r.path.reduce((n, m) => n + ((m.toPlace && m.toPlace.length) || 0), 0)
+          const key = r.status + ':' + (digs > 0) + ':' + (places > 0)
+          const now = Date.now()
+          if (key === lastPlanKey && now - lastPlanAt < 2000) return
+          lastPlanKey = key; lastPlanAt = now
+          const last = r.path.length ? r.path[r.path.length - 1] : null
+          let firstDig = null
+          for (const m of r.path) { if (m.toBreak && m.toBreak.length) { firstDig = m.toBreak[0]; break } }
+          dbg('plan: ' + r.status + ' ' + r.path.length + ' move(s)' + (last ? ' to ' + last.x + ',' + last.y + ',' + last.z : '') +
+            (digs ? ', ' + digs + ' dig(s) first at ' + firstDig.x + ',' + firstDig.y + ',' + firstDig.z : '') + (places ? ', ' + places + ' placement(s)' : '') +
+            (Number.isFinite(r.cost) ? ', cost ' + Math.round(r.cost) : '') + (r.time != null ? ', ' + Math.round(r.time) + 'ms' : ''))
+        } catch {}
+      })
+    }
 
     // DIG VERIFICATION, same philosophy, different physics: mineflayer zeroes the cell
     // locally when the dig timer elapses, so (a) a dig ERROR with the block actually
