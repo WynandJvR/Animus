@@ -91,6 +91,30 @@ async function t (name, fn) { await fn(); passed++; console.log('  ok  ' + name)
     const p4 = [mk(1, true)]
     assert.strictEqual(pf.truncatePartialPlan(p4, 'partial'), 1); assert.strictEqual(p4.length, 0)
   })
+  await t('hardenMovements: a diagonal past the corner of a solid block is NOT planned; both sides clear -> still planned', async () => {
+    const pf = require('./pathfix.js')
+    const md = require('minecraft-data')('1.21.11')
+    const Block = require('prismarine-block')('1.21.11')
+    const { Movements } = require('mineflayer-pathfinder')
+    const Move = require('mineflayer-pathfinder/lib/move')
+    // flat grass at y63; at (3,64,8) one solid block on the corner of the (4,8)->(3,9) diagonal
+    const solid = new Set(['3,64,8'])
+    const blockAt = (pos) => {
+      const x = Math.floor(pos.x), y = Math.floor(pos.y), z = Math.floor(pos.z)
+      const name = y <= 63 ? 'grass_block' : (solid.has(x + ',' + y + ',' + z) ? 'grass_block' : 'air')
+      const b = Block.fromStateId(md.blocksByName[name].defaultState, 0); b.position = new Vec3(x, y, z); return b
+    }
+    const fb = { registry: md, version: '1.21.11', entities: {}, entity: { position: new Vec3(4.5, 64, 8.5), height: 1.62, onGround: true, effects: {} }, inventory: { items: () => [], slots: [] }, pathfinder: { bestHarvestTool: () => null }, game: { minY: -64, height: 384 }, blockAt }
+    const m = pf.hardenMovements(new Movements(fb))
+    m.canDig = false; m.entityIntersections = {}
+    const start = new Move(4, 64, 8, 0, 0)
+    const nb = m.getNeighbors(start).map(n => n.x + ',' + n.y + ',' + n.z)
+    assert(!nb.includes('3,64,9'), 'the corner-cut past (3,64,8) must not be offered: ' + nb.join(' '))
+    assert(nb.includes('5,64,9') && nb.includes('5,64,7') && nb.includes('3,64,7') === false, 'diagonals with both sides clear stay: ' + nb.join(' '))
+    assert(nb.includes('4,64,9') && nb.includes('5,64,8'), 'the straight moves around the corner are there')
+    // idempotent: hardening twice wraps once
+    const before = m.getMoveDiagonal; pf.hardenMovements(m); assert.strictEqual(m.getMoveDiagonal, before)
+  })
   console.log('gototest: ' + passed + ' passed')
   process.exit(0)
 })().catch(e => { console.error(e); process.exit(1) })

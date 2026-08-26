@@ -940,6 +940,13 @@ function installPathfinderTuning (bot) {
   try {
     if (bot.pathfinder) {
       bot.pathfinder.thinkTimeout = Number(process.env.PATH_THINK_MS || 10000)
+      // EVERY profile is hardened the moment it is handed to the planner - one hook, five profiles.
+      if (!bot.pathfinder.__hardenedSet) {
+        bot.pathfinder.__hardenedSet = true
+        const origSet = bot.pathfinder.setMovements
+        bot.pathfinder.setMovements = (m) => origSet(hardenMovements(m))
+        if (bot.pathfinder.movements) hardenMovements(bot.pathfinder.movements)
+      }
       bot.pathfinder.tickTimeout = Number(process.env.PATH_TICK_MS || 40)
       if ('searchRadius' in bot.pathfinder) bot.pathfinder.searchRadius = Number(process.env.PATH_SEARCH_RADIUS || 192)
     }
@@ -958,6 +965,30 @@ const FLOOD_DIGS = Number(process.env.FLOOD_DIGS || 2) // 2 in a row = the tunne
 function floodingNow () { return floodHits.length >= FLOOD_DIGS }
 function clearFlood () { floodHits.length = 0 }
 
+// ==== NO CORNER-CUTTING (2026-08-26, live) ================================================
+// mineflayer-pathfinder allows a diagonal when EITHER orthogonal neighbour is free (getMoveDiagonal
+// takes the cheaper side), i.e. it plans the squeeze past the corner of a solid block. Vanilla
+// physics can do that squeeze; the client's prismarine-physics resolves the corner a hair
+// differently, and the SERVER then answers every tick with a teleport back ('moved wrongly'):
+// 35 position syncs per 2s at (4.31,64.00,8.30), next node the diagonal (3.5,9.5) with (3,64,8)
+// solid on the corner, for as long as the plan stood. Not terrain, not a wedge: a move THIS body's
+// physics cannot reproduce to the server's satisfaction. So this body does not plan it: a diagonal
+// needs BOTH sides clear at feet and head; otherwise A* takes the two straight moves (cost 2 vs
+// 1.41 - the path is a hair longer, and every step of it is one the server accepts).
+function hardenMovements (m) {
+  if (!m || m.__noCornerCut || typeof m.getMoveDiagonal !== 'function') return m
+  m.__noCornerCut = true
+  const orig = m.getMoveDiagonal.bind(m)
+  m.getMoveDiagonal = function (node, dir, neighbors) {
+    const y = this.getBlock(node, dir.x, 0, dir.z).physical ? 1 : 0 // the library's own 'diagonal jump-up' offset
+    const side1 = this.getBlock(node, 0, y, dir.z); const side1h = this.getBlock(node, 0, y + 1, dir.z)
+    const side2 = this.getBlock(node, dir.x, y, 0); const side2h = this.getBlock(node, dir.x, y + 1, 0)
+    if (!(side1.safe && side1h.safe && side2.safe && side2h.safe)) return
+    return orig(node, dir, neighbors)
+  }
+  return m
+}
+
 // PURE (gototest.js): drop everything from the first move that digs or places when the plan is
 // only PARTIAL; returns how many moves were held back. A complete plan is never touched.
 function truncatePartialPlan (path, status) {
@@ -972,4 +1003,4 @@ function truncatePartialPlan (path, status) {
 const PLACE_COST = Number(process.env.PATH_PLACE_COST || 12)
 function applyPlaceCost (m) { try { if (m && 'placeCost' in m) m.placeCost = PLACE_COST } catch {} ; return m }
 
-module.exports = { truncatePartialPlan, installPathfinderTuning, selfPlacedNear, isSelfPlaced, placedOK, brokeOK, setDebugSink, setProgressSink, readCell, surfaceYAt, isNarrowSpan, surveyCells, arrivedOK, epoch, sameEpoch, bumpEpoch, applyPlaceCost, floodingNow, clearFlood, FLOOD_DIGS, bounded, forceSettleDig, forceSettleCraft, DIG_GRACE_MS, LOOK_BOUND_MS, CUT_SETTLE_GRACE_MS, WINDOW_TIMEOUT_MS, CRAFT_BOUND_MS, BODY_BOUNDS, NATIVELY_BOUNDED, bodyEntryPointRow }
+module.exports = { truncatePartialPlan, hardenMovements, installPathfinderTuning, selfPlacedNear, isSelfPlaced, placedOK, brokeOK, setDebugSink, setProgressSink, readCell, surfaceYAt, isNarrowSpan, surveyCells, arrivedOK, epoch, sameEpoch, bumpEpoch, applyPlaceCost, floodingNow, clearFlood, FLOOD_DIGS, bounded, forceSettleDig, forceSettleCraft, DIG_GRACE_MS, LOOK_BOUND_MS, CUT_SETTLE_GRACE_MS, WINDOW_TIMEOUT_MS, CRAFT_BOUND_MS, BODY_BOUNDS, NATIVELY_BOUNDED, bodyEntryPointRow }

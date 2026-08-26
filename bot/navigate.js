@@ -1345,6 +1345,7 @@ async function navigateToInner (bot, goal, opts = {}) {
       const reflexDominated = (reflexWaitMs - cycleReflex0) > cycleElapsed / 2
       stalls = (moved < 2.5 && !reflexDominated) ? stalls + 1 : 0
       if (res.verdict === 'held' || res.verdict === 'busy' || res.verdict === 'stopped') throw honestFail(lastErr, counts, label, recoveryMs, reflexWaitMs)
+      if (res.verdict === 'pinned' && Date.now() < dl()) { dbg(label + 'was pinned by the server - re-planning from ' + bot.entity.position.floored()); continue }
       if (!rescued) {
         // Nothing here was a rescue's job (or the one that applied did not move us): the terrain is the
         // PLANNER's. Re-plan from where the body actually is - the world may have changed under the last
@@ -1475,6 +1476,19 @@ async function unstick (bot, goal, opts = {}) {
   }
   const p0 = bot.entity.position.clone()
   const feet = p0.floored()
+  // PINNED BY THE SERVER (body.js): every move from this exact spot is being refused - typically a
+  // hitbox a hair inside a block's corner where client and server physics disagree. Not terrain: the
+  // one move the server accepts is AWAY from the offending block, i.e. back to the centre of the cell
+  // the feet are in. Do that, bounded, and let the planner re-plan (hardened: no corner-cutting).
+  if (body.pinned()) {
+    const centre = new Vec3(feet.x + 0.5, feet.y, feet.z + 0.5)
+    dbg('unstick: PINNED by the server at ' + p0.x.toFixed(2) + ',' + p0.y.toFixed(2) + ',' + p0.z.toFixed(2) + ' (' + body.info(bot).syncs2s + ' syncs/2s) - stepping to the cell centre ' + centre + ' and re-planning')
+    try { bot.pathfinder.setGoal(null) } catch {}
+    let r = null
+    try { r = await reactiveMove(bot, { toward: centre, budgetMs: 800, reach: 1, arriveB: 0.15, jump: false, sprint: false, isStopped, priority: arbiter.PRIORITY.PROGRESS }) } catch (e) { dbg('unstick: recentre threw: ' + e.message) }
+    const p1 = bot.entity.position
+    return { moved: relocated(p0, p1), via: 'recentre', verdict: 'pinned', plan: ['recentre'], tried: ['recentre'], cell: null, n: 0 }
+  }
   const indoors = (() => { try { return !!(provHut().insideOwnStructure && provHut().insideOwnStructure(bot)) } catch { return false } })()
   const w = {
     indoors,

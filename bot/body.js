@@ -221,10 +221,14 @@ function info (bot) {
     vehicle: !!(bot && bot.vehicle),
     corrections10s: corrections.filter(c => now - c.t <= 10000).length,
     syncs2s: syncs.filter(t => now - t <= 2000).length,
+    pinned: pinned(now),
     rearms,
     rearmsFailed
   }
 }
+// PINNED: the server is answering (nearly) every move with a teleport back - ten syncs in two
+// seconds is five a second, no legitimate rate. The nav layer asks this before calling anything a wedge.
+function pinned (now) { now = now || Date.now(); return syncs.filter(t => now - t <= 2000).length >= 10 }
 // How long the body has been silent (0 when ticking) - the nav layer's one question.
 function offForMs (now) { now = now || Date.now(); return simulating(now) || !deadSince ? 0 : now - deadSince }
 // Bounded wait for the simulation to come back (the re-arm is check()'s job; this only waits).
@@ -237,4 +241,4 @@ async function waitSimulating (ms, isStopped) {
 // test hooks
 function _reset () { syncs = []; lastPinNoteAt = 0; corrections = []; lastCorrectionNoteAt = 0; installed = false; lastTickAt = 0; ticks = 0; hzTicks = 0; hzAt = 0; hz = 0; lastPositionAt = 0; lastTeleportId = 0; connected = false; deadSince = 0; lastRearmAt = 0; rearms = 0; rearmsFailed = 0; tape = []; pendingVerdict = null }
 
-module.exports = { install, check, info, simulating, simulatingAt, shouldRearm, offForMs, waitSimulating, setNoteSink, setDebugSink, SILENCE_MS, REARM_GAP_MS, _reset }
+module.exports = { install, check, info, simulating, simulatingAt, shouldRearm, offForMs, waitSimulating, pinned, setNoteSink, setDebugSink, SILENCE_MS, REARM_GAP_MS, _reset }
