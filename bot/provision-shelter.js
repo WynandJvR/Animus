@@ -513,9 +513,37 @@ async function digInForNight (bot, opts = {}) {
       shaft = bot.entity.position.floored() // the column we dig - we must END UP inside it
       // 1) dig straight down 2, keeping the blocks (need one to cap with). NEVER dig into a
       //    void/lava/water below, and ONLY natural terrain (never a player build block).
+      //
+      // "KEEPING THE BLOCKS" IS A PRECONDITION, NOT A HOPE (2026-08-26). This loop assumed the spoil
+      // would become the cap. Bare-handed that is only true for dirt/gravel/sand; stone, andesite
+      // and deepslate list harvestTools and drop NOTHING without a pickaxe. So an empty-handed bot
+      // in stone dug a pit, could not cap it, correctly refused to call an uncapped pit a shelter -
+      // and the next dispatch dug TWO BLOCKS DEEPER, forever. Live 2026-08-26, same x/z, one block
+      // at a time:
+      //   16:37:50 y=44   16:39:50 y=36   16:41:20 y=28
+      // Sixteen blocks straight down into a shaft it had no pickaxe to leave and no blocks to
+      // pillar out of. The bot buried itself trying to shelter.
+      // A shelter needs a LID. If we hold no cap material and the spoil will not yield any, digging
+      // cannot produce a shelter and can only deepen the hole - so it is refused here, at the one
+      // place that knows, rather than discovered again after every dig (rule 5: the refusal names
+      // the blocker, and nightShelter's caller then reports honestly that it cannot shelter here).
+      const holdsCap = () => (bot.inventory ? bot.inventory.items() : []).some(i => CAP_RE.test(i.name))
+      const willDropCap = (b) => {
+        if (!b || !CAP_RE.test(b.name)) return false
+        try {
+          const md = require('minecraft-data')(bot.version)
+          const def = md.blocksByName[b.name]
+          if (!def || !def.harvestTools) return true // drops bare-handed (dirt/gravel/sand/grass)
+          return !!toolForBlock(bot, b.name)         // needs a tool and we have one
+        } catch { return false }                      // unreadable -> assume no drop, the safe side
+      }
       for (let i = 0; i < 2 && !isStopped(); i++) {
         const feet = bot.entity.position.floored()
         const below = bot.blockAt(feet.offset(0, -1, 0))
+        if (!holdsCap() && !willDropCap(below)) {
+          dbg('shelter: NOT digging at ' + i + ' - no cap material in the pack and ' + (below ? below.name : 'the floor') + ' will not drop one without a tool; a pit i cannot lid is just a deeper hole')
+          break
+        }
         const below2 = bot.blockAt(feet.offset(0, -2, 0))
         if (!below || AIRISH(below.name) || /lava|water/.test(below.name) || !canBreakNaturally(below)) { dbg('shelter: dig blocked at ' + i + ' (' + (below ? below.name : 'unloaded') + ')'); break }
         if (below2 && /lava|water/.test(below2.name)) { dbg('shelter: liquid 2 below - not digging'); break }
