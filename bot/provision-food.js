@@ -90,17 +90,31 @@ let _securingFoodAt = 0 // when the latch went up; see securingFoodSince()
 let _foodFloorNoProgress = 0
 
 
-function hasFood (bot) {
+// ONE DEFINITION OF "FOOD" (DESIGN §4). Being EDIBLE is not the same as being food this bot will
+// EAT: eatBestFood refuses RISKY_EAT above food 6, so a pack of rotten flesh at food 11 is famine
+// with a full-looking inventory. Carrying both meanings under one name is what made secureFood's
+// terminal `fed = foodCount(bot) > 0` report FED at food 11 holding one rotten flesh (live
+// 2026-08-26 12:14-12:20): the food<14 crisis re-fired every ~15s, the reflex saw fed=true so it
+// never latched as a no-op, and it preempted the castle trek permanently - a crisis that could not
+// clear, because food only falls. The same trap was already found ONE LEVEL UP and fixed by
+// inlining a private copy of this rule at secureFood's acquire-trigger; that copy is now deleted
+// and calls this instead (DESIGN §1: unify, don't add a second guard).
+// So `food`, everywhere, means: WOULD THIS BOT EAT IT RIGHT NOW. It mirrors eatBestFood's own gate
+// - which is what makes it self-correcting: at food<=6 the flesh becomes food again, by both names.
+function edibleNow (bot, name) {
   const md = require('minecraft-data')(bot.version)
   const foods = (md && md.foodsByName) || {}
-  return (bot.inventory ? bot.inventory.items() : []).some(i => foods[i.name])
+  if (!foods[name]) return false
+  return !RISKY_EAT.test(name) || (bot.food ?? 20) <= 6
 }
 
-// How many edible items it's carrying (for "stock up" decisions, not just "any food?").
+function hasFood (bot) {
+  return (bot.inventory ? bot.inventory.items() : []).some(i => edibleNow(bot, i.name))
+}
+
+// How many items it's carrying that it would eat now (for "stock up" decisions, not just "any?").
 function foodCount (bot) {
-  const md = require('minecraft-data')(bot.version)
-  const foods = (md && md.foodsByName) || {}
-  return (bot.inventory ? bot.inventory.items() : []).reduce((n, i) => n + (foods[i.name] ? i.count : 0), 0)
+  return (bot.inventory ? bot.inventory.items() : []).reduce((n, i) => n + (edibleNow(bot, i.name) ? i.count : 0), 0)
 }
 
 // The ONLY time the bot must go hunt: it's hungry AND has nothing to eat. (With food on
@@ -926,17 +940,11 @@ async function secureFoodInner (bot, opts = {}) {
   // what made the band fatal. So the stand-down now requires a RESERVE to stand down onto, and
   // with no reserve the trigger IS the need's own threshold - one number, from one place.
   const PROGRESS_FOOD_MIN = parseInt(process.env.PROGRESS_FOOD_MIN || '14', 10)
-  // A reserve is food the bot will ACTUALLY EAT at this food level. foodCount counts every
-  // edible item, and rotten flesh is edible - but eatBestFood refuses it above food 6, so a pack
-  // of rotten flesh is not a fallback, it is the same famine with a full-looking inventory. That
-  // is the identical mistake one level down: calling two different things by one name.
-  const hasReserve = (bot.inventory ? bot.inventory.items() : []).some(i => {
-    try {
-      const md = require('minecraft-data')(bot.version)
-      if (!(md && md.foodsByName && md.foodsByName[i.name])) return false
-      return !RISKY_EAT.test(i.name) || (bot.food ?? 20) <= 6 // risky food only counts when the bot is desperate enough to eat it
-    } catch { return false }
-  })
+  // A reserve is food the bot will ACTUALLY EAT at this food level - which is now simply what
+  // hasFood means (see edibleNow). This used to inline its own copy of that rule because hasFood
+  // still counted rotten flesh; the copy fixed the acquire-trigger and left the SAME bug live in
+  // every other caller, including this function's own terminal `fed`. Rule unified, copy deleted.
+  const hasReserve = hasFood(bot)
   // ==== THE HEALING DEAD BAND, CLOSED (2026-07-30) ========================================
   // #123 above matched this trigger to the PROGRESS need (14). But food has more than one
   // consumer, and the OTHER one is healing: regen requires food >= REGEN_FOOD_MIN (18). The
@@ -1163,7 +1171,11 @@ async function secureFoodInner (bot, opts = {}) {
   // 7) famine hold: NOTHING panned out - get home/indoors and sit it out (bounded; the
   // caller or the crisis reflex re-runs the whole chain later).
   if (opts.canHold && (bot.food ?? 20) <= 1 && !isStopped()) { try { await provRecovery().boundedHold(bot, { isStopped, say }) } catch {} }
-  const fed = foodCount(bot) > 0
+  // The whole chain came up empty. "Fed" here means A RESERVE IT WOULD EAT - not "an edible item
+  // exists". Reporting fed=true off a rotten flesh it refuses to eat made the reflex mark this a
+  // success (noOp:false -> no latch), so the unclearable food crisis re-dispatched forever and
+  // starved the build of the body (DESIGN §5/§7: never report an outcome the world does not show).
+  const fed = hasFood(bot)
   return { fed, blockedOn: fed ? null : (isStopped() ? 'stopped' : (isNight(bot) ? 'night' : 'food')) }
 }
 

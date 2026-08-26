@@ -504,7 +504,32 @@ t('DEAD BAND: the trigger derives from the NEED\'s own constant, not a third num
   const src = fs.readFileSync(path.join(__dirname, 'provision-food.js'), 'utf8')
   assert(/PROGRESS_FOOD_MIN/.test(src), 'the trigger must read the SAME constant the need does')
   assert(/hasReserve \? 12 : PROGRESS_FOOD_MIN/.test(src), 'and pick between them on whether a reserve exists')
-  assert(/RISKY_EAT\.test\(i\.name\)/.test(src), 'a pack of rotten flesh is not a reserve above food 6')
+  // The reserve rule used to be INLINED here as a private copy, and this line pinned that copy.
+  // The copy fixed the acquire-trigger and left every other caller of hasFood/foodCount with the
+  // old permissive meaning - which is how secureFood's terminal `fed` reported FED at food 11 on
+  // one rotten flesh (live 2026-08-26) and preempted the castle build forever. The rule now lives
+  // in edibleNow() and hasFood/foodCount are defined FROM it, so pin the shared rule instead of a
+  // copy of it (DESIGN §4) - and assert the behaviour underneath, which a regex could never see.
+  assert(/function edibleNow /.test(src), 'the reserve rule has ONE definition: edibleNow')
+  assert(/RISKY_EAT\.test\(name\)/.test(src), 'a pack of rotten flesh is not a reserve above food 6')
+  assert(/const hasReserve = hasFood\(bot\)/.test(src), 'and secureFood asks it through hasFood, not a private copy')
+})
+t('DEAD BAND: rotten flesh is famine, not a reserve - by every name that asks', () => {
+  const provFood = require('./provision-food.js')
+  const mkBot = food => ({ version: '1.21.1', food, inventory: { items: () => [{ name: 'rotten_flesh', count: 5 }] } })
+  // THE LIVE BUG (2026-08-26 12:14-12:20): food 11, one rotten flesh, and secureFood returned
+  // fed=true off `foodCount(bot) > 0`. The reflex read that as success, never latched a no-op, and
+  // the food<14 crisis re-dispatched every ~15s - preempting the trek permanently, and unable to
+  // ever clear because food only falls. eatBestFood refuses the flesh above food 6, so "I have
+  // food" and "I have food I will eat" MUST be the same sentence.
+  assert.strictEqual(provFood.hasFood(mkBot(11)), false, 'food 11: flesh it refuses to eat is not food')
+  assert.strictEqual(provFood.foodCount(mkBot(11)), 0, 'and it does not count toward the pack reserve')
+  // Self-correcting at the bottom: below 6 eatBestFood WILL eat it, so it becomes food again.
+  assert.strictEqual(provFood.hasFood(mkBot(6)), true, 'food 6: now it will eat it, so now it is food')
+  assert.strictEqual(provFood.foodCount(mkBot(6)), 5, 'and it counts')
+  // Real food is food at any level - the rule narrows risky items only.
+  const bread = food => ({ version: '1.21.1', food, inventory: { items: () => [{ name: 'bread', count: 2 }] } })
+  assert.strictEqual(provFood.hasFood(bread(11)), true, 'bread at food 11 is still food')
 })
 
 // ==== THE HEALING DEAD BAND (2026-07-30): food has MORE THAN ONE consumer ================

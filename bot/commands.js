@@ -781,16 +781,12 @@ async function ironArmorBootstrap (bot, opts = {}) {
   const at = opts.at || (bot.entity && bot.entity.position)
   if (!at) return { progressed: false, msg: 'not spawned yet' }
   const avoid = opts.avoid || null
-  // ONE BUDGET FOR THE WHOLE PREP (2026-08-26). Each of the three steps below was individually
-  // bounded or bounded-ish, and together they still ate every Minecraft day: tools, then hunting,
-  // then armour, and by the time prep finished it was dusk and the bot sheltered instead of
-  // walking. It sat 95 blocks from the castle site for a full day/night cycle, repeatedly, with
-  // food and a sword in the pack. THE TREK IS THE JOB. Prep serves the trek; when prep costs more
-  // than the trek is worth, we leave with what we have and finish gearing up at the site.
-  const PREP_MS = Number(process.env.TRIP_PREP_MS || 180000)
-  const _prep0 = Date.now()
-  const prepSpent = () => Date.now() - _prep0 > PREP_MS
-  const _outOfTime = () => isStopped() || prepSpent()
+  // (The "one budget for the whole prep" block that used to sit here was declared in THIS function
+  // but every one of its four use sites was in survivalPrep, a separate function - so it threw
+  // `_outOfTime is not defined` on every call, was swallowed by survivalPrep's catch, and silently
+  // disabled tools+food+armour for a month. survivalPrep is now sword-only and needs no budget of
+  // its own, so the dead declaration is gone rather than rehomed: the trip it was bounding no
+  // longer exists. ironArmorBootstrap keeps its own persisted convergence back-off, below.)
   const primaryWood = provision.detectWood(bot) || 'oak'
   const bareCount = () => Object.values(wornArmor(bot)).filter(v => !v).length
   if (!bareCount()) return { progressed: false, msg: 'already armored in every slot' }
@@ -883,14 +879,27 @@ async function ironArmorBootstrap (bot, opts = {}) {
   return { progressed, msg }
 }
 
-// SURVIVAL PREP before a long trek to a far build site. The bot spawns with NOTHING and the
-// site is often ~600 blocks away - trekking there naked/unarmed/starving is where it kept
-// dying. So FIRST, near spawn (safer, and the gather flow shelters/eats itself), secure the
-// survival basics, THEN travel equipped: (1) a wooden SWORD + pickaxe + axe (fight + tools),
-// (2) a little food (hunt animals), (3) leather armor if cows are around. All bounded - if a
-// resource isn't available it makes what it can and moves on (never blocks the build). The
-// tool/armor bootstraps inside autoBuild then no-op (they check hasKind/wornArmor). Idempotent,
-// so it's also safe to re-run after a death mid-trek strips the gear.
+// SWORD BEFORE THE TREK - and nothing else (2026-08-26).
+// This used to craft the tool set, hunt for food and make leather armour at spawn before setting
+// off. Every one of those is already done elsewhere, and done BETTER:
+//   * tools  -> the `basic tools` checklist step at the site, which goes through
+//               resources.reconcile and therefore pulls wood from the BANK; this copy called
+//               planProvision raw and chopped fresh timber next to a full chest.
+//   * armour -> the `armor up` checklist step at the site: leather AND an iron pass. Leather-only
+//               here was strictly worse.
+//   * food + night -> travelFar's own inline survival block (see ~line 396), which eats, hunts and
+//               shelters MID-TREK at the moment the need is real, and credits the time against the
+//               travel clock so a night can't time the trip out.
+// Prep was written before travelFar could do any of that, and was never removed when it could -
+// only defanged (e1d5238 capped the whole thing at 180s because it was eating a whole Minecraft
+// day and the bot sat 95 blocks from the site through a full day/night cycle). Duplicated rules
+// drift and the drift is invisible (DESIGN §4); this was the copy that drifted. Deleted, not tuned
+// again (DESIGN §1: removing a behaviour is the fix; a third budget would have been the patch).
+//
+// What the trek genuinely CANNOT borrow from the site is a WEAPON. travelFar answers hunger and
+// darkness but not the zombie already swinging, and auto-defend with bare fists barely scratches
+// one. That is one tree and a few seconds, so it stays - bounded, and never blocking: no wood, no
+// sword, still leave. Idempotent (it checks the pack first), so re-running after a death is free.
 async function survivalPrep (bot, opts = {}) {
   const say = opts.say || (() => {})
   const isStopped = opts.isStopped || (() => false)
@@ -898,48 +907,22 @@ async function survivalPrep (bot, opts = {}) {
   const mcData = require('minecraft-data')(bot.version)
   const primaryWood = provision.detectWood(bot) || 'oak'
   const hasKind = k => (bot.inventory ? bot.inventory.items() : []).some(i => i.name.endsWith('_' + k))
-  // 1) tools + a SWORD (chop wood -> planks/sticks/table -> tools). The sword is the key add -
-  //    auto-defend with bare fists barely dents a mob; with a sword it kills what hunts it.
-  if (!isStopped() && (!hasKind('pickaxe') || !hasKind('axe') || !hasKind('sword'))) {
-    const want = {}
-    if (!hasKind('pickaxe')) want.wooden_pickaxe = 1
-    if (!hasKind('axe')) want.wooden_axe = 1
-    if (!hasKind('sword')) want.wooden_sword = 1
-    say(`gearing up before the trip - ${Object.keys(want).map(t => t.replace('wooden_', '')).join(' + ')}`)
-    try {
-      const p = provision.planProvision(mcData, want, provCore().inventoryCounts(bot), { primaryWood })
-      // A DEADLINE ON THE ATTEMPT, NOT A DELAY BEFORE THINKING (#6). This awaited runPlan with no
-      // bound, so a gather that finds NOTHING still owned the trip. Live 2026-08-25/26: the planner
-      // locked to the nearest species (detectWood, 64b) and the gatherer then returned
-      // `gather acacia_log 0/1 mined=0 dry=0 strip=0 reachFails=0` - zero candidates, zero attempts -
-      // relocating and re-scanning for the same absent wood until the day was gone. The castle trip
-      // never started, 26 deaths overnight, and the bot held TWO pickaxes and a sword throughout.
-      // Tools are a NICE-TO-HAVE for the trek; the trek is the job. The bound is generous for a real
-      // gather (a tree is seconds away when one exists) and short enough that an empty forest cannot
-      // eat a Minecraft day. Whatever got made is kept - runPlan crafts as it goes.
-      const TOOL_MS = Number(process.env.TRIP_TOOL_MS || 90000)
-      if (p.tasks.length) {
-        const _t0 = Date.now()
-        const _stop = () => _outOfTime() || (Date.now() - _t0 > TOOL_MS)
-        await provision.runPlan(bot, p, { say, isStopped: _stop, restoreMovements: restore })
-        if (Date.now() - _t0 > TOOL_MS) say('(no ' + Object.keys(want).map(t => t.replace('wooden_', '')).join('/') + ' nearby - heading off with what i have)')
-      }
-    } catch (e) { say(`(couldn't make tools yet: ${e.message})`) }
-  }
-  // 2) food for the road - hunt a couple animals for meat (auto-eat feeds on it, raw is fine).
-  if (!_outOfTime() && !provFood().hasFood(bot)) {
-    say('grabbing some food for the road')
-    try { for (let i = 0; i < 3 && !provFood().hasFood(bot) && !_outOfTime(); i++) { if (!await provFood().huntForFood(bot, { isStopped })) break } } catch { /* no animals - travel-phase hunt covers it */ }
-  }
-  // 3) leather armor if cows/leather are around (bounded; proceeds naked if not - the shelter
-  //    reflex covers a still-naked bot at night). NO iron fallback here: the iron grind is a
-  //    long cave dive and the camp flow runs it AFTER the hut/bank/farm (operator order) -
-  //    front-loading it onto every trek would starve the camp steps out again.
-  if (!_outOfTime() && Object.values(wornArmor(bot)).some(v => !v)) {
-    try { const r = await provisionArmor(bot, { say, isStopped, restoreMovements: restore, ironFallback: false }); if (r) say(r) } catch (e) { say(`(armor prep: ${e.message})`) }
-  }
+  const outcome = () => ({ armed: hasKind('sword'), fed: provFood().hasFood(bot), armored: !Object.values(wornArmor(bot)).some(v => !v) })
+  if (isStopped() || hasKind('sword')) return outcome()
+  // A DEADLINE ON THE ATTEMPT, NOT A DELAY BEFORE THINKING (DESIGN §6). Generous for a real gather
+  // - a tree is seconds away where one exists - and short enough that an empty savanna cannot eat
+  // the daylight the trek needs. Whatever got crafted along the way is kept; runPlan crafts as it goes.
+  const SWORD_MS = Number(process.env.TRIP_SWORD_MS || 45000)
+  const t0 = Date.now()
+  const stop = () => isStopped() || Date.now() - t0 > SWORD_MS
+  say('grabbing a sword before i set off')
+  try {
+    const p = provision.planProvision(mcData, { wooden_sword: 1 }, provCore().inventoryCounts(bot), { primaryWood })
+    if (p.tasks.length) await provision.runPlan(bot, p, { say, isStopped: stop, restoreMovements: restore })
+  } catch (e) { say(`(couldn't make a sword: ${e.message})`) }
+  if (!hasKind('sword')) say('(no wood around for a sword - heading off without one)')
   restore()
-  return { armed: hasKind('sword'), fed: provFood().hasFood(bot), armored: !Object.values(wornArmor(bot)).some(v => !v) }
+  return outcome()
 }
 
 // Walk onto nearby dropped items to pick them up (so "I dropped it, put it on"
