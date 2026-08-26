@@ -148,20 +148,44 @@ async function gotoOnce (bot, goal, ms = 20000, gopts = {}) {
   // later tear down exactly those, even right next to a build made of the same material.
   const scaffold = require('./scaffold.js')
   scaffold.beginSession('goto')
+  // ==== THE DEADLINE IS ON PROGRESS, NOT ON THE CLOCK (2026-08-26, live) ======================
+  // `ms` used to be a wall clock: the goto was cut at `ms` whatever it was doing. Since the
+  // planner may now carve a step out of a hole (nav-profile.js WILD_DIG_COST), a leg can be
+  // legitimately BUSY for longer than any attempt window - one bare-hand stone step is two 7.5s
+  // digs - and a wall clock cut it mid-dig every time, handed the body to the rescue rungs, and
+  // the next attempt re-planned from scratch. DESIGN-PRINCIPLES #6: a bound is a deadline on an
+  // ATTEMPT, gated on "has the world changed", not "N seconds passed". So `ms` now means "this
+  // long WITHOUT PROGRESS", where progress is read from the world - a block dug, or the feet on
+  // new ground (>= 1b in XZ; bobbing in place is not progress) - and `gopts.hardMs` is the
+  // absolute cap the CALLER owns (navigateToInner passes its leg deadline). A caller that passes
+  // no hardMs gets exactly the old wall clock: cap = ms.
+  const hardMs = Math.max(ms, Number(gopts.hardMs) || 0)
   return new Promise((resolve, reject) => {
     let settled = false
+    let lastProgress = started // the yield above spent part of the attempt: that time was not progress
+    let anchor = bot.entity.position.clone()
+    let digs = 0
+    const onDig = () => { digs++; lastProgress = Date.now() }
+    bot.on('diggingCompleted', onDig)
     // #119: hand the bot in so the closing frame can flag what it placed as OWED and queue it
     // for navigateTo's closeOut. Nothing is dug here - this callback is synchronous and on the
     // nav hot path ([[body-first-priority]]).
-    const done = (fn, v) => { if (!settled) { settled = true; scaffold.endSession(bot); fn(v) } }
-    const timer = setTimeout(() => {
+    const done = (fn, v) => { if (!settled) { settled = true; clearInterval(watch); bot.removeListener('diggingCompleted', onDig); scaffold.endSession(bot); fn(v) } }
+    const watch = setInterval(() => {
+      const now = Date.now()
+      const p = bot.entity && bot.entity.position
+      if (p && Math.hypot(p.x - anchor.x, p.z - anchor.z) >= 1) { anchor = p.clone(); lastProgress = now }
+      const idle = now - lastProgress
+      const capped = now - started >= hardMs
+      if (idle < ms && !capped) return
       try { bot.pathfinder.setGoal(null) } catch {}
-      done(reject, new Error('goto timed out'))
-    }, Math.max(500, ms - (Date.now() - started))) // whatever the yield above did not spend
-    bot.pathfinder.goto(goal).then(
-      () => { clearTimeout(timer); done(resolve) },
-      e => { clearTimeout(timer); done(reject, e) }
-    )
+      // The prefix is load-bearing (resources.js REACH_FAIL_RE); the rest says which bound bit.
+      const took = Math.round((now - started) / 1000)
+      done(reject, new Error('goto timed out' + (capped && idle < ms
+        ? ' (hard cap ' + Math.round(hardMs / 1000) + 's reached while still progressing' + (digs ? ', ' + digs + ' dig(s)' : '') + ')'
+        : (now - started > ms + 250 ? ' (no progress for ' + Math.round(idle / 1000) + 's after ' + took + 's' + (digs ? ', ' + digs + ' dig(s)' : '') + ')' : ''))))
+    }, 250)
+    bot.pathfinder.goto(goal).then(() => done(resolve), e => done(reject, e))
   }).finally(async () => {
     // ==== AUDIT 2026-07-29 FIX 6: PAY THE DEBT WHERE IT WAS INCURRED ======================
     // #119 pays scaffold debt in navigateTo's finally - once, when the WHOLE navigation ends.
@@ -1636,7 +1660,9 @@ async function navigateToInner (bot, goal, opts = {}) {
       let lastErr
       try {
         const attemptMs = stalls >= 1 ? Math.min(timeoutMs, 10000) : timeoutMs // shrink after the first stall
-        await gotoOnce(bot, goal, Math.min(attemptMs, Math.max(2000, dl() - Date.now())))
+        // attempt = the no-progress window; the leg's own deadline is the hard cap, so a leg that is
+        // still carving/walking keeps its body until it stops getting anywhere (gotoOnce, above).
+        await gotoOnce(bot, goal, Math.min(attemptMs, Math.max(2000, dl() - Date.now())), { isStopped, hardMs: Math.max(2000, dl() - Date.now()) })
         // GROUNDED, not optimistic: goto "succeeds" WITHOUT ARRIVING when the planner
         // returns an empty path (wedged in a pit = zero legal moves, verified live) or
         // settles at the closest reachable node. Only the goal's own isEnd on our real

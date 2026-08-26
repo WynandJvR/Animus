@@ -11,10 +11,25 @@
 // filesystem. The FLAG (NAV_TERRAIN_PROFILE) is the CALLER's concern - this module is inert
 // data until the selector chooses to consult it.
 
-// digCost 20: dig only when the walk-around is massively worse (precedent gatherMovements 10);
+// ==== A DIG COSTS WHAT IT COSTS: TIME (2026-08-26, live) =====================================
+// mineflayer-pathfinder prices a dig as (1 + 3 * digSeconds) * digCost and REFUSES any move whose
+// total cost passes 100 (movements.js `if (cost > 100) return`). digCost was 20 - "dig only when
+// the walk-around is massively worse" - which read well and meant, in the library's arithmetic,
+// that a bare-hand stone dig (7.5s) cost 470: not expensive, FORBIDDEN. So the planner could not
+// carve one step out of a hole without a pickaxe, said `noPath` at spawn's crater, and 2,200 lines
+// of hand-written rescue rungs took over and dug the bot sideways and deeper. Every pit deeper
+// than one jump, entered with an empty pack, was a trap by pricing.
+// The honest unit is the one the planner already uses: ONE = one block walked. A player walks
+// WALK_BPS blocks per second, so t seconds of digging is worth WALK_BPS*t blocks of walking, and
+// digCost = WALK_BPS/3 makes the library's formula read exactly that (plus its own ~1.4 fixed
+// overhead per dig). Bare-hand dirt (0.75s) ~ 4.6 blocks; stone with a wooden pick (1.15s) ~ 6.4;
+// bare-hand stone ~ 34 (a player will not punch stone to save thirty blocks, but WILL to leave a
+// hole); obsidian (250s) ~ 1000, still impossible. Nothing here is tuned to a hole: A* weighs
+// "carve" against "walk around" by the same clock in every geometry. Derived, not chosen.
 // liquidCost 4: route AROUND water (NAV-P0 / gatherMovements precedent); 16b positional break
 // gate around own infra; 32b scope gate for switching the profile on at all.
-const WILD_DIG_COST = 20
+const WALK_BPS = 4.3 // a property of Minecraft (sprint-walk ~4.3 blocks/s), not a knob - the ONE definition
+const WILD_DIG_COST = WALK_BPS / 3
 const WILD_LIQUID_COST = 4
 const INFRA_BREAK_RADIUS = 16
 const WILD_SCOPE_RADIUS = 32
@@ -393,6 +408,7 @@ module.exports = {
   waterPolicy,
   WILD_LIQUID_COST,
   WILD_DIG_COST,
+  WALK_BPS,
   HAZARD_STEP_COST,
   hazardExclusion,
   WATER_RE,

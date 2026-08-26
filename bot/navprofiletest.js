@@ -152,8 +152,14 @@ t('wildAllowedAt: null buildZone tolerated; empty anchors => allowed; buildZone+
 })
 
 // ---- constants sanity (operator-fixed) ------------------------------------------------------
-t('constants: digCost>=20, radii 16/32, liquidCost 4', () => {
-  assert(nav.WILD_DIG_COST >= 20, 'digCost >= 20')
+t('constants: digCost is the walking-time unit conversion, radii 16/32, liquidCost 4', () => {
+  // (1 + 3t) * digCost is the library's labour formula; the cap it refuses past is 100.
+  const labour = t => (1 + 3 * t) * nav.WILD_DIG_COST
+  assert(Math.abs(nav.WILD_DIG_COST - nav.WALK_BPS / 3) < 1e-9, 'digCost = WALK_BPS/3 (a dig costs its walking-time)')
+  assert(labour(7.5) < 100, 'bare-hand STONE (7.5s) must stay PLANNABLE - it is the escape from any pit without a pickaxe: ' + labour(7.5))
+  assert(labour(7.5) > 30, 'but dearer than a 30-block walk, so open ground is walked around, not punched through: ' + labour(7.5))
+  assert(labour(0.75) < 6, 'bare-hand dirt is a few blocks: ' + labour(0.75))
+  assert(labour(250) > 100, 'obsidian bare-handed stays impossible: ' + labour(250))
   assert.strictEqual(nav.INFRA_BREAK_RADIUS, 16)
   assert.strictEqual(nav.WILD_SCOPE_RADIUS, 32)
   assert.strictEqual(nav.WILD_LIQUID_COST, 4)

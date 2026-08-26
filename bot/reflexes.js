@@ -976,8 +976,9 @@ def({
     // underfoot and too mean for one 8b away round an obstacle. A walk's honest deadline is how
     // far it has to walk. WALK_BPS is a property of Minecraft (a player walks ~4.3 blocks/s), not
     // a tuning knob; x3 covers pathing that is never a straight line, and the floor covers the
-    // fixed cost of planning a path at all.
-    const WALK_BPS = 4.3
+    // fixed cost of planning a path at all. ONE definition (nav-profile.js) - the planner's dig
+    // pricing is derived from the same number.
+    const { WALK_BPS } = require('./nav-profile.js')
     const budgetMs = Math.round(1000 + (bestD / WALK_BPS) * 3 * 1000)
     try { await nav.gotoOnce(bot, new goals.GoalNear(best.position.x, best.position.y, best.position.z, 0), budgetMs) } catch { /* timed out / unreachable - the pack check below is the verdict */ }
     // ...AND THE SETTLE IS AN EVENT, NOT A DELAY (§6: never a delay before thinking). Collection is

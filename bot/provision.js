@@ -237,7 +237,7 @@ function wildTerrainMovements (bot) {
   const m = new Movements(bot)
   const md = require('minecraft-data')(bot.version)
   m.canDig = true
-  m.digCost = navProfile.WILD_DIG_COST // 20: dig only when the walk-around is massively worse
+  m.digCost = navProfile.WILD_DIG_COST // a dig costs its walking-time equivalent (nav-profile.js) - so A* can carve a step out of a hole bare-handed, and still walks around anything it can walk around
   navProfile.waterPolicy(m) // 4: route AROUND water, don't swim, don't fall in (NAV-P0 parity)
   m.allow1by1towers = true
   m.canOpenDoors = true
