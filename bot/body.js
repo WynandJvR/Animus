@@ -70,6 +70,13 @@ let groundFixes = 0
 let lastGroundNoteAt = 0
 let syncs = []               // ring of t for EVERY position sync (a per-tick correction is < 0.5b and still a refusal)
 let syncIds = []             // ring of { t, id } - a REAL server teleport carries a NEW id every time; repeats of one id are re-sends
+// PACKET TRACE (2026-08-26): the last ~80 movement-related packets in BOTH directions - clientbound
+// position syncs (id, pos, flags) and serverbound teleport_confirm / position / position_look - so
+// a pin can be read at the wire: did the client ack every sync with the exact id, and what did it
+// send next? Dumped as ONE line when pinned, at most once per 60s.
+let trace = []
+let lastTraceDumpAt = 0
+function traceAdd (e) { trace.push(e); if (trace.length > 80) trace.shift() }
 let lastPinNoteAt = 0
 let lastCorrectionNoteAt = 0
 let noteFn = null            // index.js injects note() so transitions land in the main log
@@ -112,7 +119,9 @@ function install (bot) {
   try {
     const rawWrite = bot._client.write.bind(bot._client)
     bot._client.write = (name, params) => {
+      if (name === 'teleport_confirm' && params) traceAdd({ t: Date.now(), d: '>', n: 'ack', id: params.teleportId })
       if ((name === 'position' || name === 'position_look') && params) {
+        traceAdd({ t: Date.now(), d: '>', n: name === 'position' ? 'pos' : 'posl', x: params.x, y: params.y, z: params.z, g: params.flags && typeof params.flags === 'object' ? params.flags.onGround : params.onGround })
         const flagged = params.flags && typeof params.flags === 'object' ? params.flags.onGround : params.onGround
         if (flagged === false && standing(bot)) {
           groundFixes++
@@ -152,6 +161,7 @@ function install (bot) {
       const d = Math.hypot(to.x - e.x, to.y - e.y, to.z - e.z)
       syncs.push(now); while (syncs.length && now - syncs[0] > 10000) syncs.shift()
       syncIds.push({ t: now, id: p.teleportId }); while (syncIds.length && now - syncIds[0].t > 2000) syncIds.shift()
+      traceAdd({ t: now, d: '<', n: 'sync', id: p.teleportId, x: to.x, y: to.y, z: to.z, f: Object.keys(rel).filter(k => rel[k]).join('') || '-' })
       // PINNED: the server answers (nearly) every client move with a teleport back. Ten in two seconds is
       // five a second - no legitimate teleport rate - and it is why the body 'cannot reach' a node 1.7b away.
       const recent = syncs.filter(t => now - t <= 2000).length
@@ -163,6 +173,12 @@ function install (bot) {
         // cancelled-move plugin teleports to `from` WITH from's yaw/pitch).
         const hist = {}; for (const r of syncIds) hist[r.id] = (hist[r.id] || 0) + 1
         const idsTxt = Object.entries(hist).map(([k, n]) => k + 'x' + n).join(' ')
+        if (now - lastTraceDumpAt >= 60000) {
+          lastTraceDumpAt = now
+          const t0 = trace.length ? trace[0].t : now
+          const line = trace.map(e => '+' + (e.t - t0) + 'ms ' + e.d + e.n + (e.id != null ? '#' + e.id : '') + (e.x != null ? '@' + e.x.toFixed(2) + ',' + e.y.toFixed(2) + ',' + e.z.toFixed(2) : '') + (e.f ? '/' + e.f : '') + (e.g != null ? (e.g ? '/g' : '/air') : '')).join(' ')
+          note('PACKET TRACE while pinned (< from server, > to server; ack = teleport_confirm): ' + line)
+        }
         note('PINNED by the server: ' + recent + ' position syncs in 2s (ids ' + idsTxt + '), last one moved me ' + d.toFixed(3) + 'b to ' + f(to) + ' (client had ' + f(e) + ') flags=' + JSON.stringify(rel) + ' yaw=' + (typeof p.yaw === 'number' ? p.yaw.toFixed(1) : '?') + ' pitch=' + (typeof p.pitch === 'number' ? p.pitch.toFixed(1) : '?') + ' - the server refuses every move from here')
       }
       while (corrections.length && now - corrections[0].t > 10000) corrections.shift()
@@ -291,6 +307,6 @@ async function waitSimulating (ms, isStopped) {
 }
 
 // test hooks
-function _reset () { syncIds = []; groundFixes = 0; lastGroundNoteAt = 0; syncs = []; lastPinNoteAt = 0; corrections = []; lastCorrectionNoteAt = 0; installed = false; lastTickAt = 0; ticks = 0; hzTicks = 0; hzAt = 0; hz = 0; lastPositionAt = 0; lastTeleportId = 0; connected = false; deadSince = 0; lastRearmAt = 0; rearms = 0; rearmsFailed = 0; tape = []; pendingVerdict = null }
+function _reset () { trace = []; lastTraceDumpAt = 0; syncIds = []; groundFixes = 0; lastGroundNoteAt = 0; syncs = []; lastPinNoteAt = 0; corrections = []; lastCorrectionNoteAt = 0; installed = false; lastTickAt = 0; ticks = 0; hzTicks = 0; hzAt = 0; hz = 0; lastPositionAt = 0; lastTeleportId = 0; connected = false; deadSince = 0; lastRearmAt = 0; rearms = 0; rearmsFailed = 0; tape = []; pendingVerdict = null }
 
 module.exports = { install, check, info, simulating, simulatingAt, shouldRearm, offForMs, waitSimulating, pinned, standing, standingOn, setNoteSink, setDebugSink, SILENCE_MS, REARM_GAP_MS, _reset }
