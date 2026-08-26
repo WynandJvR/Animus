@@ -1163,7 +1163,23 @@ async function secureFoodInner (bot, opts = {}) {
   if (fedEnough()) return { fed: true, blockedOn: null }
   // 6) crisis: SYSTEMATICALLY sweep unexplored ground for animals + water (not the old
   // re-tread-stale-pastures scoutHunt) - the SW/NW food the bot never found was here.
-  if (bot.food <= 4 && !isStopped() && opts.scoutHunt !== false && !isNight(bot)) {
+  //
+  // THE GATE IS "EVERYTHING CHEAPER FAILED", NOT A FOOD NUMBER (2026-08-26). This read
+  // `bot.food <= 4`, while the scheduler declares a food crisis at food < 14 - so from 5 to 13 the
+  // bot called it a crisis and then refused the ONE producer left that could answer it. Every
+  // cheaper leg had already come up empty (pack, bank, cook, hunt-visible, farm, fishing), so
+  // nothing acted, the crisis could not clear, and the terminal floor fired forever - which is what
+  // stopped the castle trek dead at 146,-115 with food 9 and a chicken-less plain in every
+  // direction. The same dead band this file has now closed twice (the 12..14 stand-down, and
+  // rotten-flesh-is-not-a-reserve); this is the third and last mouth of it.
+  //
+  // Reaching line 6 AT ALL is the condition (§3: a condition, not a constant) - it means steps 0-5
+  // ran and produced nothing in THIS call. A food number layered on top of that is a second,
+  // worse guess about the same question. The real bounds stay where bounds belong: scoutForFood is
+  // deadline-bounded and remembers swept sectors with a 30-min decay so it never re-treads, and
+  // `opts.scoutHunt === false` still holds mid-trek (travelFar passes it - there, the trek IS the
+  // sweep and cross-country detours are what the trek was for).
+  if (!isStopped() && opts.scoutHunt !== false && !isNight(bot)) {
     try { await scoutForFood(bot, home || undefined, { isStopped, say, maxMs: opts.scoutMs || 180000 }) } catch (e) { dbg('secureFood: scout failed (' + e.message + ')') }
     await cookIfRaw(); await eatUp(bot)
     if (fedEnough()) return { fed: true, blockedOn: null }
