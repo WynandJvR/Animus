@@ -122,9 +122,15 @@ t('08 moderate hunger (food 10) -> secureFood', () => {
 })
 
 // 9. naked-healthy-fed, home FAR (day) -> maintenancePass (bootstrap armor; armor needs no home).
-t('09 naked healthy, home far, day -> maintenancePass (bootstrap armor)', () => {
-  const c = choose('naked-far-day', snap({ armorPieces: 0, underArmored: true, homeDist: 90, homeReachable: false, bankFoodPts: 60, rawIron: 0, farm: { exists: true }, timeOfDay: 6000 }))
-  assert.strictEqual(c.job, 'maintenancePass', 'got ' + c.job)
+// THE SITE FIRST (operator, 2026-08-26): with a saved build and NO hut standing, the camp at the site
+// is the first job (#102) - the iron keystone must not pull the bot into mining at spawn first.
+t('09 naked healthy, home far, day, NO hut -> the build (camp at the site) goes first, not the keystone', () => {
+  const c = choose('naked-far-day-nohut', snap({ armorPieces: 0, underArmored: true, homeDist: 90, homeReachable: false, bankFoodPts: 60, rawIron: 0, farm: { exists: true }, timeOfDay: 6000, hutExists: false }))
+  assert.notStrictEqual(c && c.job, 'maintenancePass', 'the keystone must not pre-empt the trek while no camp stands, got ' + (c && c.job))
+})
+t('09b naked healthy, home far, day, hut STANDS -> maintenancePass (bootstrap armor, the iron keystone)', () => {
+  const c = choose('naked-far-day-hut', snap({ armorPieces: 0, underArmored: true, homeDist: 90, homeReachable: false, bankFoodPts: 60, rawIron: 0, farm: { exists: true }, timeOfDay: 6000, hutExists: true }))
+  assert.strictEqual(c.job, 'maintenancePass', 'got ' + (c && c.job))
   assert.strictEqual(c.bootstrap, 'armor', 'armor bootstrap needs no home, got ' + c.bootstrap)
 })
 

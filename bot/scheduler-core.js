@@ -329,7 +329,14 @@ function chooseActivity (snapshot, opts) {
   // br.exempt is that question already answered (rule 4, one rule one definition).
   let bn = br.exempt ? null : scheduler.bootstrapNeed(s)
   let keystone = false
-  if (!bn && s.persistedBuild && scheduler.ironKeystoneActive(s)) { bn = 'armor'; keystone = true }
+  // THE SITE FIRST (operator, 2026-08-26): "why is the bot mining anything before it even got to the
+  // build site and established the hut?" The iron keystone re-entered through this line what #102
+  // had just stood down: with NO hut standing the camp step at the site is the first job, and a
+  // naked bot at spawn was sent to dig for iron 340 blocks from where its camp belongs -
+  //   (sched) pick=maintenancePass reason="bootstrap armor (iron keystone) - establishing survival infra before the build"
+  // - all evening. The keystone is a real rule (bank a boots' worth of iron before other progress);
+  // it applies once there is a camp to bank it at. br.exempt IS "no camp yet" (buildReady, #102).
+  if (!bn && !br.exempt && s.persistedBuild && scheduler.ironKeystoneActive(s)) { bn = 'armor'; keystone = true }
   const upkeep = !bn && !!s.maintainNeeded
   if (bn || upkeep) {
     // urgency by kind: armor is the biggest survivability multiplier; food-reserve the enabler; base
