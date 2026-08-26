@@ -356,6 +356,56 @@ function isGroundBlock (block) {
   return block.boundingBox === 'block' // plants, water, lava, torches, snow layers: not a floor
 }
 
+// ==== TERRAIN HAS WIDTH; LITTER, LEDGES AND BRIDGES DO NOT (2026-08-26, live) ==========
+// This file's surface locator and provision-hut.hasSolidCeiling are the same world-read pointed
+// in opposite directions - "what is the top of my column" and "is there a roof over my column" -
+// and BOTH answered by scanning ONE column and trusting the first solid cell they met. A column
+// is one block wide, so a single strip of blocks floating in open air is, to both of them,
+// indistinguishable from forty metres of overburden.
+//
+// Live 2026-08-26, spawn: a 1-wide, 3-long grass strip at y65 hung over the bot's crater at
+// (0,61,-2) - our own unregistered litter. From that one strip:
+//   - hasSolidCeiling said ROOFED, so isUnderground() said true, so secureFood deferred the
+//     wheat farm as a "real cave roof" and every craft/regroup was gated off;
+//   - unstickPlan therefore led every rescue with the climb rung, ahead of nudge/stepout - the
+//     two rungs that would simply have walked it out;
+//   - surfaceYAt called the top of the strip THE SURFACE, so that climb was aimed at y66, a
+//     cell on top of a one-block ledge, and could never report arrival.
+// 19 recorded failures in one cell, hours of it, one step from open grass. The operator's words:
+// "its literally stuck in a small crater it can easily walk/break out of."
+//
+// The distinguishing fact is EXTENT. Real ground and a real cave roof continue sideways; a
+// bridge, an overhang lip, a branch and our own abandoned scaffold are one block wide with air
+// on both sides - you step out from under them, you do not cut through them. Asked ONCE, here,
+// so the two readers cannot disagree about it (#4: one definition of one rule).
+//
+// SKIPPING IS SAFE BECAUSE IT CONTINUES THE SCAN, not because it decides anything: a narrow rib
+// under real overburden is skipped and the broad stone above it is still found, so a cave stays
+// a cave. The only thing that changes is that a speck can no longer BE the answer.
+//
+// Unknown cells count as SOLID. "Narrow" is the permissive verdict - it is what stops a roof
+// being a roof - so an unreadable neighbour must never be the reason we reach it (fail closed:
+// an unloaded chunk keeps exactly today's answer).
+function isNarrowSpan (bot, x, y, z, opts = {}) {
+  const maxWidth = Number.isFinite(opts.maxWidth) ? opts.maxWidth : 1
+  const solidAt = (dx, dz) => {
+    const r = readCell(bot, { x: x + dx, y, z: z + dz })
+    if (!r.known) return true // unreadable -> assume terrain
+    return !!r.block && r.block.boundingBox === 'block' && !AIR_RE.test(r.block.name)
+  }
+  for (const [ax, az] of [[1, 0], [0, 1]]) {
+    let run = 1 // the cell itself
+    for (const sign of [1, -1]) {
+      for (let d = 1; d <= maxWidth; d++) {
+        if (!solidAt(ax * d * sign, az * d * sign)) break
+        run++
+      }
+    }
+    if (run <= maxWidth) return true // you can step sideways out from under this
+  }
+  return false
+}
+
 // GROUNDED SURFACE LOCATOR (#111). Scans the column (x,z) top-down and returns the cell a
 // player would STAND IN on the surface: `y` = one above the topmost ground block,
 // `groundY` = that block. There is no arithmetic guess anywhere in it - it reads the world.
@@ -416,6 +466,13 @@ function surfaceYAt (bot, x, z, opts = {}) {
       let ours = null
       try { ours = require('./self-world.js').ownBlockAt({ x: X, y, z: Z }) } catch {}
       if (ours) continue // our own tower/bridge/roof/wall/floor - keep looking for real ground beneath it
+      // ...AND NEITHER IS A ONE-BLOCK LEDGE, whoever left it (2026-08-26). The registry above can
+      // only disown litter it still REMEMBERS, and it is lossy by construction - a reset, a crash, a
+      // block placed before the registry existed, or a dirt tower the world quietly turned to grass.
+      // The live 1x3 strip at y65 over (0,61,-2) was in no registry, so this scan called it THE
+      // SURFACE and every climb was aimed five blocks up at the top of a one-block bridge. Extent is
+      // the world-read that needs no memory: see isNarrowSpan above.
+      if (isNarrowSpan(bot, X, y, Z)) continue // a ledge/branch/bridge - not the top of the terrain
       return { known: true, y: y + 1, groundY: y }
     }
   }
@@ -835,4 +892,4 @@ function clearFlood () { floodHits.length = 0 }
 const PLACE_COST = Number(process.env.PATH_PLACE_COST || 12)
 function applyPlaceCost (m) { try { if (m && 'placeCost' in m) m.placeCost = PLACE_COST } catch {} ; return m }
 
-module.exports = { installPathfinderTuning, selfPlacedNear, isSelfPlaced, placedOK, brokeOK, setDebugSink, setProgressSink, readCell, surfaceYAt, surveyCells, arrivedOK, epoch, sameEpoch, bumpEpoch, applyPlaceCost, floodingNow, clearFlood, FLOOD_DIGS, bounded, forceSettleDig, forceSettleCraft, DIG_GRACE_MS, LOOK_BOUND_MS, CUT_SETTLE_GRACE_MS, WINDOW_TIMEOUT_MS, CRAFT_BOUND_MS, BODY_BOUNDS, NATIVELY_BOUNDED, bodyEntryPointRow }
+module.exports = { installPathfinderTuning, selfPlacedNear, isSelfPlaced, placedOK, brokeOK, setDebugSink, setProgressSink, readCell, surfaceYAt, isNarrowSpan, surveyCells, arrivedOK, epoch, sameEpoch, bumpEpoch, applyPlaceCost, floodingNow, clearFlood, FLOOD_DIGS, bounded, forceSettleDig, forceSettleCraft, DIG_GRACE_MS, LOOK_BOUND_MS, CUT_SETTLE_GRACE_MS, WINDOW_TIMEOUT_MS, CRAFT_BOUND_MS, BODY_BOUNDS, NATIVELY_BOUNDED, bodyEntryPointRow }

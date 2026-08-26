@@ -32,6 +32,7 @@ const provBank = () => require('./provision-bank.js') // LAZY: provision-bank.js
 const provShelter = () => require('./provision-shelter.js') // LAZY: provision-shelter.js top-requires this module, so an eager import here would be a real cycle
 const navigate = require('./navigate.js')    // unified navigation
 const mining = require('./mining.js')        // PURE tool-durability model
+const pathfix = require('./pathfix.js')      // leaf module (fs/path only) - safe to top-require: shared world-reads (isNarrowSpan)
 const provCore = require('./provision-core.js')
 const { AIRISH, REPLACEABLE, canBreakNaturally, countItem, toolForBlock, gotoWithTimeout, collectDrops,
   placeAt, nearHostile, isNight } = provCore
@@ -275,6 +276,18 @@ function hasSolidCeiling (bot, upTo = 45, opts = {}) {
     // question, where an overhang of any material legitimately counts as cover, and is unchanged.
     if (opts.ignoreLeaves && /(_leaves|_log|_wood|_stem|_hyphae)$/.test(b.name)) continue
     if (selfWorld.ownBlockAt(cell)) continue // my own roof/wall/floor/scaffold - mine, not the world's
+    // A CEILING ONE BLOCK WIDE IS NOT A CEILING - IT IS SOMETHING YOU STEP OUT FROM UNDER
+    // (2026-08-26, live). The own-block skip above disowns litter the registry still remembers;
+    // it cannot see litter the registry forgot, nor a natural overhang lip, nor a player's
+    // 1-wide bridge. All three read here as forty metres of overburden, because a column scan
+    // has no idea how wide the thing it hit is. One unregistered 1x3 grass strip at y65 over the
+    // bot's crater made isUnderground() true for hours: the wheat farm was deferred as a 'real
+    // cave roof', crafting was gated off, and unstickPlan led every rescue with the climb rung
+    // instead of the nudge/stepout that would have walked it out in one step.
+    // pathfix.isNarrowSpan is the shared definition - the same one surfaceYAt uses coming the
+    // other way, so the two readers cannot disagree (#4). Skipping CONTINUES the scan, so a
+    // narrow rib under real overburden still finds the broad stone above it: a cave stays a cave.
+    if (pathfix.isNarrowSpan(bot, cell.x, cell.y, cell.z)) continue
     return true
   }
   return false
