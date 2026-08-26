@@ -135,18 +135,7 @@ const climbRung = navSrc.slice(navSrc.indexOf("kind: 'climb'"), navSrc.indexOf("
 // strip comments: the ban is on the EXPRESSION, and the comment above it quotes the deleted one.
 const climbCode = climbRung.split('\n').filter(l => !/^\s*\/\//.test(l)).join('\n')
 
-t('climb rung: the blind `position.y + 10` target expression is DELETED', () => {
-  assert.ok(climbRung.length > 200, 'found the climb rung')
-  assert.ok(!/position\.y\)\s*\+\s*10/.test(climbCode), 'the +10 expression must not exist')
-  assert.ok(!/\+\s*\d+/.test(climbCode), 'no arithmetic climb target at all')
-})
-
-t('climb rung: the target comes from surfaceYAt and UNKNOWN REFUSES rather than guessing', () => {
-  assert.ok(/surfaceYAt\(bot, feet\.x, feet\.z\)/.test(climbCode), 'targets the located surface')
-  assert.ok(/!surf\.known/.test(climbCode) && /return false/.test(climbCode), 'refuses on UNKNOWN')
-  assert.ok(/surfaceY: surf\.y/.test(climbCode), 'hands the grounded surface down for the invariant assertion')
-})
-
+// (the navigate.js climb rung was deleted with the rescue ladder on 2026-08-26; climbToSurface itself is pinned below)
 t('travelFar surfaceOut: the remote `dest.y` guess is gone, replaced by the own-column read', () => {
   const cmdSrc = fs.readFileSync(path.join(__dirname, 'commands.js'), 'utf8')
   const fn = cmdSrc.slice(cmdSrc.indexOf('const surfaceOut = async'), cmdSrc.indexOf('const surfaceOut = async') + 1200)

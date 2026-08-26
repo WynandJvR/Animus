@@ -267,20 +267,11 @@ pin('DELETED: and it was not replaced by another cooldown/backoff timer on the d
   (src) => src.replace('let drowning = false', 'let cooldownUntil = Date.now() + 10000\n  let drowning = false'))
 
 // The drowning bot must never reach the wetbreach rung - that is the other end of the loop.
-pin('WIRED: the wetbreach recovery rung is gated OFF while the head is underwater',
-  'navigate.js',
-  (src) => {
-    const m = src.match(/kind: 'wetbreach',[\s\S]*?run: async/)
-    assert.ok(m, 'could not locate the wetbreach rung - the landmark moved, fix this pin')
-    return /!headInWater\(bot\)/.test(m[0])
-  },
-  (src) => src.replace('feetInWater(bot) && !headInWater(bot) &&', 'feetInWater(bot) &&'))
-
-// The water rung must delegate to the one owner instead of running a rival ladder.
+// (the wetbreach rung was deleted with the rescue ladder on 2026-08-26 - water pockets are the planner's: digs are priced, not forbidden)
 pin('WIRED: the water recovery rung delegates a DROWNING bot to escapeWater (single owner)',
   'navigate.js',
   (src) => {
-    const m = src.match(/kind: 'water',[\s\S]*?kind: 'wetbreach'/)
+    const m = src.match(/kind: 'water',[\s\S]*?kind: 'door'/)
     assert.ok(m, 'could not locate the water rung - the landmark moved, fix this pin')
     return /if \(headInWater\(bot\)\)[\s\S]{0,200}escapeWater\(bot/.test(m[0])
   },

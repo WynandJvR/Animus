@@ -74,8 +74,8 @@ t('navigate: every decrement goes through the clamped helper - no bare `recoveri
   assert.ok(!/recoveringDepth--/.test(nav), 'a bare decrement is how the counter goes negative')
   assert.ok(/function endRecoverySpan \(\) \{ recoveringDepth = Math\.max\(0, recoveringDepth - 1\) \}/.test(nav),
     'one definition of "this span is over"')
-  assert.strictEqual((nav.match(/endRecoverySpan\(\)/g) || []).length, 5,
-    'the definition plus its four call sites (recoverOnce, crossOwnDoor, unstick, reactiveMove)')
+  assert.strictEqual((nav.match(/endRecoverySpan\(\)/g) || []).length, 4,
+    'the definition plus its three call sites (crossOwnDoor, unstick, reactiveMove) - recoverOnce lost its own span with the ladder, 2026-08-26')
 })
 
 // ---- 2. the release list actually covers the gate list ---------------------------------

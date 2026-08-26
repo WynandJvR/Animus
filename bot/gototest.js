@@ -79,6 +79,18 @@ async function t (name, fn) { await fn(); passed++; console.log('  ok  ' + name)
     await nav.gotoOnce(bot, {}, 600, { hardMs: 5000 })
     assert.strictEqual(bot.listenerCount('diggingCompleted'), 0)
   })
+  await t('truncatePartialPlan: a partial plan is cut before its first dig/place; a complete one is untouched', async () => {
+    const pf = require('./pathfix.js')
+    const mk = (n, brk, plc) => ({ x: n, y: 0, z: 0, toBreak: brk ? [{ x: n, y: 1, z: 0 }] : [], toPlace: plc ? [{ x: n, y: -1, z: 0 }] : [] })
+    const p1 = [mk(1), mk(2), mk(3, true), mk(4), mk(5, false, true)]
+    assert.strictEqual(pf.truncatePartialPlan(p1, 'partial'), 3); assert.strictEqual(p1.length, 2)
+    const p2 = [mk(1), mk(2, true)]
+    assert.strictEqual(pf.truncatePartialPlan(p2, 'success'), 0); assert.strictEqual(p2.length, 2)
+    const p3 = [mk(1), mk(2)]
+    assert.strictEqual(pf.truncatePartialPlan(p3, 'partial'), 0); assert.strictEqual(p3.length, 2)
+    const p4 = [mk(1, true)]
+    assert.strictEqual(pf.truncatePartialPlan(p4, 'partial'), 1); assert.strictEqual(p4.length, 0)
+  })
   console.log('gototest: ' + passed + ' passed')
   process.exit(0)
 })().catch(e => { console.error(e); process.exit(1) })

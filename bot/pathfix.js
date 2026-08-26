@@ -646,6 +646,17 @@ function installPathfinderTuning (bot) {
       bot.on('path_update', (r) => {
         try {
           if (!r || !Array.isArray(r.path)) return
+          // A GUESS MAY WALK, NEVER CUT (2026-08-26, live). A 'partial' result is the best node the
+          // search reached in one 40ms tick - a guess, refined on the next tick - and the library
+          // executes it as if it were the plan: at the spawn crater the 40ms guess put a bare-hand
+          // stone dig first, the bot started the 7.5s dig, the full plan (13 steps, no digs, cost 20)
+          // arrived 200ms later and had to wait for the dig, the dig was cut, the path reset, and the
+          // next tick's guess dug the same wall again - the operator watched it "mining into a stone
+          // wall with a clear path out". Walking the free prefix of a guess is harmless; committing a
+          // block on one is not. `results.path` is the array the pathfinder will follow (it assigns
+          // after emitting), so the truncation is what runs.
+          const cut = truncatePartialPlan(r.path, r.status)
+          if (cut) dbg('plan: partial - holding ' + cut + ' move(s) that dig/place until the search completes (a guess may walk, never cut)')
           const digs = r.path.reduce((n, m) => n + ((m.toBreak && m.toBreak.length) || 0), 0)
           const places = r.path.reduce((n, m) => n + ((m.toPlace && m.toPlace.length) || 0), 0)
           const key = r.status + ':' + (digs > 0) + ':' + (places > 0)
@@ -917,7 +928,18 @@ const FLOOD_DIGS = Number(process.env.FLOOD_DIGS || 2) // 2 in a row = the tunne
 function floodingNow () { return floodHits.length >= FLOOD_DIGS }
 function clearFlood () { floodHits.length = 0 }
 
+// PURE (gototest.js): drop everything from the first move that digs or places when the plan is
+// only PARTIAL; returns how many moves were held back. A complete plan is never touched.
+function truncatePartialPlan (path, status) {
+  if (status !== 'partial' || !Array.isArray(path)) return 0
+  const k = path.findIndex(m => (m.toBreak && m.toBreak.length) || (m.toPlace && m.toPlace.length))
+  if (k < 0) return 0
+  const cut = path.length - k
+  path.length = k
+  return cut
+}
+
 const PLACE_COST = Number(process.env.PATH_PLACE_COST || 12)
 function applyPlaceCost (m) { try { if (m && 'placeCost' in m) m.placeCost = PLACE_COST } catch {} ; return m }
 
-module.exports = { installPathfinderTuning, selfPlacedNear, isSelfPlaced, placedOK, brokeOK, setDebugSink, setProgressSink, readCell, surfaceYAt, isNarrowSpan, surveyCells, arrivedOK, epoch, sameEpoch, bumpEpoch, applyPlaceCost, floodingNow, clearFlood, FLOOD_DIGS, bounded, forceSettleDig, forceSettleCraft, DIG_GRACE_MS, LOOK_BOUND_MS, CUT_SETTLE_GRACE_MS, WINDOW_TIMEOUT_MS, CRAFT_BOUND_MS, BODY_BOUNDS, NATIVELY_BOUNDED, bodyEntryPointRow }
+module.exports = { truncatePartialPlan, installPathfinderTuning, selfPlacedNear, isSelfPlaced, placedOK, brokeOK, setDebugSink, setProgressSink, readCell, surfaceYAt, isNarrowSpan, surveyCells, arrivedOK, epoch, sameEpoch, bumpEpoch, applyPlaceCost, floodingNow, clearFlood, FLOOD_DIGS, bounded, forceSettleDig, forceSettleCraft, DIG_GRACE_MS, LOOK_BOUND_MS, CUT_SETTLE_GRACE_MS, WINDOW_TIMEOUT_MS, CRAFT_BOUND_MS, BODY_BOUNDS, NATIVELY_BOUNDED, bodyEntryPointRow }

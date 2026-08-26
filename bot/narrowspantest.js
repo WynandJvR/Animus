@@ -122,26 +122,7 @@ t('LIVE FIXTURE: the surface of my column is the real ground, not the top of the
   assert.notStrictEqual(s.y, 66, 'y66 - the top of a one-block bridge - is what the climb chased for hours')
 })
 
-t('LIVE FIXTURE: the climb rung now DECLINES here and hands the attempt to the walking rungs', () => {
-  // The plan ORDER is unchanged and stays unsticktest's business: a cell with wedge history still
-  // offers climb first (the crater fix, 31beccc - a bowl is open to the sky and nudge/stepout do
-  // not go up). What changed is that the rung can now tell this crater from a burial, so it costs
-  // milliseconds instead of the whole ~35s maneuver.
-  const b = craterWorld()
-  const feetY = Math.floor(b.entity.position.y)
-  const plan = navigate.unstickPlan({ indoors: false, home: false, wet: false, submerged: false, roofed: provHut.hasSolidCeiling(b, 12, { ignoreLeaves: true }), pit: false, trappedHere: true, door: false, noDig: false, climb: true, cut: false, light: false })
-  assert.ok(plan.includes('nudge') && plan.includes('stepout'), 'the walk-out rungs are in the plan')
-  // These are the exact three terms the climb rung declines on (navigate.js, kind:'climb'):
-  //   targetY <= feet.y && !roofed && !inPit  ->  "nothing to climb to"
-  // Before the fix targetY was 66 - the top of the floating strip - so it never declined, and
-  // climbToSurface's need() (feet.y < targetY && hasSolidCeiling) stayed true until the maneuver
-  // expired. Both terms are now false, so the rung returns immediately and nudge/stepout run.
-  assert.ok(pathfix.surfaceYAt(b, 0, -2).y <= feetY, 'targetY is no longer above the bot')
-  assert.strictEqual(provHut.hasSolidCeiling(b, 12, { ignoreLeaves: true }), false, 'and there is no roof')
-  // ...while a REAL ceiling still gets the climb rung, because that is what it is for.
-  const roofedPlan = navigate.unstickPlan({ indoors: false, home: false, wet: false, submerged: false, roofed: true, pit: false, trappedHere: false, door: false, noDig: false, climb: true, cut: false, light: false })
-  assert.ok(roofedPlan.includes('climb'), 'a real ceiling still gets the climb rung')
-})
+// (the climb rung was deleted with the rescue ladder on 2026-08-26: a crater is terrain, and terrain is the planner's)
 
 // ---- 3. THE REGRESSION GUARD: a cave must stay a cave ---------------------------------------
 t('a real cave roof is still a ceiling', () => {

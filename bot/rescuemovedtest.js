@@ -37,10 +37,10 @@ t('there is exactly ONE relocation threshold constant', () => {
   assert.strictEqual(decls.length, 1, 'one constant, declared once')
 })
 
-t('all three rescue call sites ask the SAME helper', () => {
-  // recoverOnce.movedEnough, the stepout rung, and unstick's verdict.
+t('every rescue call site asks the SAME helper', () => {
+  // recoverOnce.movedEnough and unstick's verdict (the stepout rung went with the ladder, 2026-08-26).
   const uses = code.match(/relocated\s*\(/g) || []
-  assert.ok(uses.length >= 4, 'the definition plus at least three callers, got ' + uses.length)
+  assert.ok(uses.length >= 3, 'the definition plus at least two callers, got ' + uses.length)
   assert.ok(/movedEnough\s*=\s*\(\)\s*=>\s*relocated\(/.test(code), 'recoverOnce.movedEnough delegates')
   assert.ok(/const moved\s*=\s*relocated\(p0, p1\)/.test(code), "unstick's verdict delegates")
 })

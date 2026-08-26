@@ -172,12 +172,7 @@ t('the three truths agree: in the crawlspace, nothing claims a climb is needed',
 // ---- 6. the climb rung is gated by the one dig rule ----------------------------------
 {
   const navSrc = fs.readFileSync(path.join(__dirname, 'navigate.js'), 'utf8')
-  const climbRung = navSrc.slice(navSrc.indexOf("kind: 'climb'"), navSrc.indexOf("kind: 'nudge'"))
-  const climbCode = climbRung.split('\n').filter(l => !/^\s*\/\//.test(l)).join('\n')
-  t('climb rung: NOT APPLICABLE where the one dig rule protects the cell', () => {
-    assert.ok(/noDigAt/.test(climbCode), 'the gate asks self-world.noDigAt, not a private copy of "is this my house"')
-    assert.ok(/when:/.test(climbCode), 'it is a WHEN gate (not applicable), not a run() that burns the budget')
-  })
+  // (the climb rung was deleted with the rescue ladder on 2026-08-26)
   t('recoverOnce says WHERE it is before naming a rung', () => {
     assert.ok(/homeVolumeAt/.test(navSrc) && /I am AT HOME/.test(navSrc), 'the log names the home volume')
   })
