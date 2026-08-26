@@ -685,7 +685,7 @@ function installPathfinderTuning (bot) {
           // block on one is not. `results.path` is the array the pathfinder will follow (it assigns
           // after emitting), so the truncation is what runs.
           const cut = truncatePartialPlan(r.path, r.status)
-          if (cut) dbg('plan: partial - holding ' + cut + ' move(s) that dig/place until the search completes (a guess may walk, never cut)')
+          if (cut && Date.now() - (bot.__pathfixCutNotedAt || 0) >= 5000) { bot.__pathfixCutNotedAt = Date.now(); dbg('plan: partial - holding ' + cut + ' move(s) that dig/place until the search completes (a guess may walk, never cut)') }
           const digs = r.path.reduce((n, m) => n + ((m.toBreak && m.toBreak.length) || 0), 0)
           const places = r.path.reduce((n, m) => n + ((m.toPlace && m.toPlace.length) || 0), 0)
           const key = r.status + ':' + (digs > 0) + ':' + (places > 0)
