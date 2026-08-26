@@ -1791,9 +1791,21 @@ async function unstick (bot, goal, opts = {}) {
     // cell, the operator watching it sit in a crater. Being in a hole is about how far down you are,
     // not about what is over your head. Uses the item-4 surface read, so its own fabric is not ground.
     belowGrade: (() => {
+      // MEASURE THE RIM, NOT THE FLOOR. The first cut of this read surfaceYAt at the bot's OWN
+      // column and never once fired: a hole's own column has no ground above it - that is what
+      // makes it a hole - so the scan returned the crater floor the bot was standing on and the
+      // depth came out as zero. Live: 17 'in the open' plans, 0 climbs, still in the crater.
+      // Depth is a comparison with the SURROUNDING ground, so sample the neighbours and take the
+      // highest known rim. Bounded to feet+16 so this is four short column reads, not four
+      // full-world scans, and 'unknown' contributes nothing rather than guessing.
       try {
-        const s = require('./pathfix.js').surfaceYAt(bot, feet.x, feet.z)
-        return !!(s && s.known && s.y != null && (s.y - feet.y) >= 3)
+        const sf = require('./pathfix.js').surfaceYAt
+        let rim = null
+        for (const [dx, dz] of [[4, 0], [-4, 0], [0, 4], [0, -4]]) {
+          const r = sf(bot, feet.x + dx, feet.z + dz, { maxY: feet.y + 16 })
+          if (r && r.known && r.y != null && (rim == null || r.y > rim)) rim = r.y
+        }
+        return rim != null && (rim - feet.y) >= 3
       } catch { return false }
     })(),
     door: doorNearby(bot, goalXZ(goal)),
