@@ -1653,8 +1653,22 @@ async function handleInner (bot, line, opts = {}) {
       // explicit long-distance walk (staged). Handy on its own and used before a
       // far-away build. Same staged logic goto uses for distant targets.
       // The brain writes "travel 244,64,169" (commas) - accept both separators.
-      const [x, y, z] = a.join(' ').split(/[\s,]+/).filter(Boolean).slice(0, 3).map(Number)
-      if ([x, y, z].some(Number.isNaN)) return 'usage: travel <x> <y> <z>'
+      let [x, y, z] = a.join(' ').split(/[\s,]+/).filter(Boolean).slice(0, 3).map(Number)
+      // TRAVEL ACCEPTS A WAYPOINT TOO (2026-08-26, live). `goto` has resolved named waypoints since
+      // forever; `travel` demanded raw coordinates and answered a name with a usage string. The brain
+      // does not know the difference - it is one idea, 'walk to X' - and llama3.2 reached for the
+      // long-distance verb precisely when the distance was long:
+      //   (cmd) travel hut  <<digging out>>                  -> usage: travel <x> <y> <z>
+      //   (cmd) travel camp <<trying to get to a safer spot>> -> usage: travel <x> <y> <z>
+      // Every one of those was an escape attempt that bounced off a syntax error while the bot sat in
+      // a creeper crater. One rule, one definition (#4): the same waypoint table goto reads.
+      if ([x, y, z].some(Number.isNaN) && a.length === 1) {
+        const wp = memory.getWaypoint(a[0])
+        if (wp) { x = wp.x; y = wp.y; z = wp.z } else {
+          return `no waypoint "${a[0]}" (known: ${memory.waypointNames().join(', ') || 'none'})`
+        }
+      }
+      if ([x, y, z].some(Number.isNaN)) return 'usage: travel <x> <y> <z> | travel <waypoint>'
       buildAbort = false
       beginActivity('travel', `${x},${y},${z}`)
       const r = await travelFar(bot, { x, y, z }, { isStopped: () => buildAbort, say: m => bot.chat(String(m).slice(0, 256)) })
