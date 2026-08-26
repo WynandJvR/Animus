@@ -230,6 +230,15 @@ const holdPremiseOK = kind => {
   // satisfies it trivially, which is how the bot went on claiming "sheltering until dawn" at y37
   // - thirty-one blocks below its own hut - even after the premise was introduced. So the ceiling
   // only counts near the surface, measured against a GROUNDED read; UNKNOWN fails safe (trusted).
+  // A HOLD THAT NAMES ITS WAKE MUST DIE AT THAT WAKE (2026-08-26, live, twice). The sealed-pit
+  // premise below is a DAY/NIGHT claim - `nightShelter waking on dawn` - and nothing ever checked
+  // whether dawn had come. activeHold() tests only a TTL and this premise, so at 08:36 the
+  // heartbeat still published {label:'nightShelter', wake:'dawn'} in broad DAYLIGHT, the tick sat
+  // dead behind it, and the run lost hours to it twice. I first patched the SUPERVISOR to tolerate
+  // the lie; this is the lie itself. Sleeping and resting keep their own wakes and returned above;
+  // being inside a real structure is not a night claim either. Only the pit branch is scoped to
+  // night, because only the pit branch means 'sealed in until dawn'.
+  try { if (bot.time && bot.time.isDay) return false } catch {}
   try {
     if (provHut.hasSolidCeiling && provHut.hasSolidCeiling(bot, 4)) {
       const s = require('./pathfix.js').surfaceYAt(bot, bot.entity.position.x, bot.entity.position.z)
