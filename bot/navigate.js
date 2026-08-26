@@ -1177,6 +1177,25 @@ async function recoverOnce (bot, goal, plan, opts) {
         const gy = goalY(goal)
         const local = !!xz && Math.abs(Math.floor(xz.x) - feet.x) <= 1 && Math.abs(Math.floor(xz.z) - feet.z) <= 1
         const targetY = (local && gy != null) ? Math.max(surf.y, Math.floor(gy)) : surf.y
+        // YOU CANNOT CLIMB TO WHERE YOU ALREADY ARE (2026-08-26). `trappedHere` (31beccc) lets this
+        // rung fire on EVIDENCE - "the flat-ground rungs have already failed in this cell" - instead
+        // of demanding a ceiling, which was right: a crater has no ceiling and the bot still needs
+        // out. But evidence that the OTHER rungs failed is not evidence that there is anything ABOVE
+        // to climb to, and this rung is FIRST in the plan, so on the surface it burned the whole
+        // rescue on a no-op and then recorded "climb achieved nothing here" - which is how the cell
+        // accrued the latch that the unstick fix above had to force past. Live 2026-08-26, wedged at
+        // spawn under open sky:
+        //   recovery: stuck UNDERGROUND at (-1,61,-3) - climbing to the surface y=61 (ground reads y60)
+        //   recovery climb -> no progress
+        // Feet at 61, target 61. It can never succeed and it can never stop being chosen.
+        // The rung's precondition is not "have I failed here", it is "is the surface ABOVE me" -
+        // a fact about the column, which is exactly what surfaceYAt already answers. Declining
+        // hands the attempt to nudge/stepout instead of spending it, and records nothing (§7:
+        // a no-op is not a failed maneuver, and the ladder must not learn from one).
+        if (targetY <= feet.y) {
+          dbg('recovery: climb DECLINED at ' + p0.floored() + ' - the surface is y' + targetY + ' and my feet are already at y' + feet.y + ' (ground reads y' + surf.groundY + ') - nothing above to climb to; leaving the attempt for the surface rungs')
+          return false
+        }
         dbg('recovery: stuck UNDERGROUND at ' + p0.floored() + ' - climbing to the surface y=' + targetY + ' (ground reads y' + surf.groundY + ')')
         try { await provMining().climbToSurface(bot, targetY, { isStopped, surfaceY: surf.y }) } catch (e) { dbg('recovery: climb-out failed (' + e.message + ')') }
         return movedEnough()
