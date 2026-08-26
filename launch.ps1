@@ -1,6 +1,6 @@
 # Animus launcher - starts the BOT (connects per bot/config.json) and the BRAIN
-# (qwen3:14b via Ollama) in two windows. Edit bot/config.json once for your
-# server, make sure Ollama has qwen3:14b, then run this. See RUN.md.
+# (qwen3.5:4b via Ollama) in two windows. Edit bot/config.json once for your
+# server, make sure Ollama has qwen3.5:4b, then run this. See RUN.md.
 
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
@@ -18,7 +18,7 @@ if (-not (Test-Path (Join-Path $botDir 'node_modules'))) {
   Push-Location $botDir; npm install; Pop-Location
 }
 # Ollama + model check (non-fatal - warn only)
-$model = 'qwen3:14b'
+$model = 'qwen3.5:4b'
 try {
   $list = (& ollama list) 2>$null
   if ($list -notmatch [regex]::Escape($model)) {
@@ -37,7 +37,17 @@ if ($cfg.auth -eq 'microsoft') {
 
 # --- 1. start the BOT in its own window ------------------------------------
 Write-Host "`nStarting BOT..." -ForegroundColor Green
-$botCmd = "Set-Location '$botDir'; `$host.UI.RawUI.WindowTitle='Animus BOT'; node run.js"
+# NAV_TERRAIN_PROFILE=1 (2026-08-26, operator's call): the bot may DIG NATURAL TERRAIN out in the
+# wild. Off since it was written, which is why it could only ever walk on ground that already
+# existed - it bridged over hills with carried dirt, wedged itself in tree canopies, and on
+# 2026-08-26 sat in a river at 145,-116 for minutes unable to climb the bank while every survival
+# job above it was killed by the watchdog for "no progress". Anti-grief is UNCHANGED and layered:
+# nav-profile.breakExclusion refuses any block within 16b of own infra, inside the build zone +16b
+# pad, or any crafted/scaffold type not registry-proven as the bot's own; canWildBreakType permits
+# only natural terrain + leaves; wildAllowedAt only engages the dig profile 32b OUTSIDE home/build
+# scope. Set to 0 (or unset) to revert to the no-dig profile instantly - the selector reads it per
+# leg, so nothing else has to change.
+$botCmd = "Set-Location '$botDir'; `$host.UI.RawUI.WindowTitle='Animus BOT'; `$env:NAV_TERRAIN_PROFILE='1'; node run.js"
 Start-Process powershell -ArgumentList @('-NoExit', '-Command', $botCmd)
 
 # --- 2. wait for the bot's control API to come up --------------------------
@@ -62,7 +72,7 @@ if ($up) {
 }
 
 # --- 3. start the BRAIN in its own window (proven Ollama-native config) -----
-Write-Host "Starting BRAIN (qwen3:14b via Ollama)..." -ForegroundColor Green
+Write-Host "Starting BRAIN (qwen3.5:4b via Ollama)..." -ForegroundColor Green
 $goal = 'Stay near players, help when asked, and behave like a normal survival player.'
 $brain = @"
 Set-Location '$botDir'
