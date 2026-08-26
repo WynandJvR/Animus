@@ -1099,6 +1099,28 @@ async function recoverOnce (bot, goal, plan, opts) {
       run: async () => {
         const pit = detectPit(bot)
         if (!pit) return false
+        // ==== A RIM ONE BLOCK UP IS A STEP, NOT A PILLAR (2026-08-26, live) =================
+        // detectPit answers "am I in a hole" from 3-of-4 solid neighbours, and it says YES to a
+        // one-block scrape exactly as loudly as to a six-deep shaft - rimY is the only thing that
+        // tells them apart, and this rung never read it before deciding HOW to leave. So a bot
+        // standing in a 1-deep slot went straight to "pillar out", found an empty pack, and left
+        // to mine filler it did not need - holding the body for the full 150s claim lease while
+        // `nudge` and `stepout`, the two rungs that would simply have stepped up onto the rim,
+        // sat behind it in the plan and never ran. Operator, watching it: "its literally out in
+        // the open in a small pit it can walk out of wtf is going on?"
+        //   [nav] unstick: in a pit at (-1,60,-2) - plan pit > nudge > stepout
+        //   [nav] recovery: in a PIT with nothing to pillar with - digging filler out of the wall
+        //   (claim) REVOKED navRecovery - no world delta credited to it for 150s, held 150s
+        // Feet at y60, every neighbour stone at y60 and air at y61: rimY 61, one step. A player
+        // jumps. This is the same defect as the crater's phantom ceiling in a different rung - an
+        // expensive maneuver chosen ahead of the cheap one that fits, then eating the whole window.
+        // Declining is the fix, not a new capability: it hands the attempt to the rungs that walk,
+        // and records nothing (a no-op is not a failed maneuver).
+        const feetNow = bot.entity.position.floored()
+        if (pit.rimY <= feetNow.y + 1) {
+          dbg('recovery: pit DECLINED at ' + feetNow + ' - the rim is y' + pit.rimY + ', one step above my feet at y' + feetNow.y + ' - that is a step up, not a pillar; leaving it to the walking rungs')
+          return false
+        }
         // ==== AUDIT 2026-07-29 FIX 12: A PILLAR NEEDS BLOCKS ===============================
         // Live, on real terrain: the bot spawned into the shelter pit it had dug the night
         // before, with an empty pack, and tried to pillar out SIXTY times without moving - hp 11,
