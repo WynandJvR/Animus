@@ -956,6 +956,17 @@ async function openNearbyDoor (bot, opts = {}) {
 async function recoverOnce (bot, goal, plan, opts) {
   const isStopped = opts.isStopped || (() => false)
   const p0 = bot.entity.position.clone()
+  // "Is there ground under me to push off?" - the question nudge/stepout actually mean. onGround is
+  // true only when the physics engine says so THIS TICK; a solid block within two below is the fact.
+  const supported = () => {
+    try {
+      if (bot.entity.onGround) return true
+      const f = bot.entity.position.floored()
+      for (let dy = 1; dy <= 2; dy++) { const b = bot.blockAt(f.offset(0, -dy, 0)); if (b && b.boundingBox === 'block') return true }
+      return false
+    } catch { return true }
+  }
+
   const movedEnough = () => {
     const p1 = bot.entity.position
     return Math.hypot(p1.x - p0.x, p1.z - p0.z) >= 2 || Math.floor(p1.y) > Math.floor(p0.y)
@@ -1227,7 +1238,19 @@ async function recoverOnce (bot, goal, plan, opts) {
     { // surface wedge the planner just can't solve: face the target and jump-sprint at
       // it - but never blind over a drop (cliff check).
       kind: 'nudge',
-      when: () => !!xz && bot.entity.onGround && !cliffAhead(bot, xz.x, xz.z),
+      // SUPPORTED IS A FACT ABOUT THE WORLD; onGround IS A PHYSICS INSTANT (2026-08-26).
+      // Both surface rungs gated on bot.entity.onGround, which flickers false on every bob, step
+      // edge and shallow hole. So a bot jittering in a one-block dip read as AIRBORNE, nudge and
+      // stepout both refused, and with `climb` excluded by the anti-grief no-dig zone near spawn
+      // the rescue plan contained rungs that could none of them run:
+      //   [nav] unstick: in the open at (-6,62,1) - plan nudge > stepout [failed here x7]
+      //   [nav] unstick FAILED: tried nothing applicable - attempt 2 in this cell
+      //   onGround: false   blockBelow: grass_block   dirt x13
+      // Plainly standing on grass, holding blocks, and no rung in the ladder would touch it. The
+      // question these rungs actually mean is "is there ground under me to push off" - which is a
+      // world read, not a one-tick physics flag. Unreadable -> assume supported, because a refusal
+      // is what stranded it.
+      when: () => !!xz && supported() && !cliffAhead(bot, xz.x, xz.z),
       run: async () => {
         dbg('recovery: surface nudge at ' + p0.floored() + ' toward ' + Math.round(xz.x) + ',' + Math.round(xz.z))
         if (REACTIVE_MOVE_ON) { // Phase A: the 2s sprint-jump-toward-the-goal IS reactiveMove(toward) - one bounded code path
@@ -1251,7 +1274,7 @@ async function recoverOnce (bot, goal, plan, opts) {
       // Unlike the nudge this needs no goal, tolerates a step down, and probes each of 8
       // directions instead of blindly charging one.
       kind: 'stepout',
-      when: () => bot.entity.onGround || feetInWater(bot),
+      when: () => supported() || feetInWater(bot),
       run: async () => {
         try { bot.pathfinder.setGoal(null) } catch {}
         bot.clearControlStates()
