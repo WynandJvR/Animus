@@ -544,6 +544,9 @@ async function travelFar (bot, dest, opts = {}) {
 // canDig stays FALSE, so it never breaks blocks to path (no griefing) - but permits
 // the things a survival player does to get past terrain: bridge gaps/ravines and
 // pillar with cheap filler blocks from inventory, parkour, open doors, and swim.
+// THE ONE bridge/pillar block list, read by BOTH movement configs (#4).
+const SCAFFOLD_BRIDGE = ['dirt', 'cobblestone', 'cobbled_deepslate', 'netherrack', 'stone', 'gravel', 'dirt_path', 'andesite', 'granite', 'diorite']
+
 function travelMovements (bot) {
   const m = new Movements(bot)
   m.canDig = false            // never destroy blocks (anti-grief)
@@ -557,7 +560,7 @@ function travelMovements (bot) {
   // Only used where a bridge is actually needed; on open ground it just walks.
   try {
     const md = require('minecraft-data')(bot.version)
-    const bridge = ['dirt', 'cobblestone', 'cobbled_deepslate', 'netherrack', 'stone', 'gravel', 'dirt_path', 'andesite', 'granite', 'diorite']
+    const bridge = SCAFFOLD_BRIDGE
     const ids = bridge.map(n => md.itemsByName[n] && md.itemsByName[n].id).filter(x => x != null)
     if ('scafoldingBlocks' in m) m.scafoldingBlocks = ids
   } catch { /* mcData not ready - fall back to no bridging (routes around) */ }
@@ -2457,7 +2460,16 @@ function setupMovements (bot) {
   const m = new Movements(bot)
   m.allowFreeMotion = true
   m.canDig = false            // NEVER break blocks to make a path (was griefing builds)
-  m.allow1by1towers = false   // don't pillar up
+  // PILLARING IS HOW YOU GET OUT OF A HOLE (2026-08-26). canDig:false is the anti-grief rule that
+  // matters and it STAYS - the bot must never chew through somebody's build to make a path. But
+  // with canDig:false AND allow1by1towers:false AND no scaffolding blocks, the pathfinder can only
+  // walk on terrain that already exists, and Minecraft climbing needs a ONE BLOCK step. A creeper
+  // crater has a 2-3 block inner wall. So there was NO LEGAL MOVE OUT of any hole with a steep
+  // side, and the bot sat in a small crater for hours while three separate rescue rungs were the
+  // only exits in the entire system - which is why every bug in those rungs cost a whole day.
+  // Placing a dirt block under your own feet is not griefing; it is what a player does. The
+  // scaffold registry already owns tracking and tearing down temp blocks, so these are paid for.
+  m.allow1by1towers = true    // pillar up - the standard way out of a hole (scaffold.js tears them down)
   m.canOpenDoors = true       // open doors instead of getting stuck / breaking them
   m.allowParkour = true
   // ==== AUDIT 2026-07-29 FIX 23: THE DEFAULT PROFILE SWAM FOR FREE =======================
@@ -2474,7 +2486,17 @@ function setupMovements (bot) {
   // infiniteLiquidDropdownDistance at the library's `true`, so THIS profile still let A* plan an
   // unbounded drop into water. Water policy now comes from ONE place for all six profiles.
   require('./nav-profile.js').waterPolicy(m)
-  if ('scafoldingBlocks' in m) m.scafoldingBlocks = [] // don't place blocks to bridge
+  // ...AND SOMETHING TO PILLAR WITH. allow1by1towers above is inert without this: an empty
+  // scafoldingBlocks list means the pathfinder may tower but has NO BLOCK to place, which is the
+  // same trap one field over. travelMovements has carried the real list all along - so the bot
+  // could bridge and climb while walking to the castle and not while doing anything else, which
+  // is 17 call sites of one behaviour and 7 of another (#4). Same list, same source, both configs.
+  try {
+    const md = require('minecraft-data')(bot.version)
+    const ids = SCAFFOLD_BRIDGE.map(n => md.itemsByName[n] && md.itemsByName[n].id).filter(x => x != null)
+    if ('scafoldingBlocks' in m) m.scafoldingBlocks = ids
+  } catch { if ('scafoldingBlocks' in m) m.scafoldingBlocks = [] }
+  require('./pathfix.js').applyPlaceCost(m) // a placement is a permanent 1x1 tower, not a free step
   // PATHFINDER FIX: mineflayer-pathfinder only auto-opens fence GATES (its "openable"
   // set is built from block names containing "gate"). Plain doors are never added, so
   // with digging off a door reads as an impassable WALL - the bot detours to a nearby
