@@ -1155,7 +1155,12 @@ async function recoverOnce (bot, goal, plan, opts) {
       // This changes NOTHING about what may be dug: those digs were already refused. It only
       // stops asking.
       kind: 'climb',
-      when: () => opts.climb !== false && provHut().hasSolidCeiling(bot, 12, { ignoreLeaves: true }) &&
+            // THE SAME GATE, ONE LAYER DOWN (2026-08-26). unstickPlan learned that depth is a situation and
+      // started offering climb in a crater - and the rung then DECLINED it, because its own when still
+      // demanded a CEILING. Live: 8 plans containing climb, 0 climbs run, bot still in the hole. A rung
+      // whose plan-level and rung-level conditions disagree is two definitions of one rule (#4).
+      // belowGrade is computed ONCE in unstick (against the surrounding rim) and passed in here.
+      when: () => opts.climb !== false && (opts.belowGrade || provHut().hasSolidCeiling(bot, 12, { ignoreLeaves: true })) &&
         !selfWorld.noDigAt(bot.entity.position.floored()),
       run: async () => {
         // GROUNDED TARGET (#111). This rung used to hand climbToSurface `feet.y + 10` - a
@@ -1879,7 +1884,7 @@ async function unstick (bot, goal, opts = {}) {
     // a buried bot - which is the only thing forceUnstick's 4-iteration loop was ever for.
     const passes = goal ? 1 : 3
     for (let i = 0; i < passes && !isStopped(); i++) {
-      const rescued = await recoverOnce(bot, goal, plan, { isStopped, tried: triedSet, digOut: w.cut, desperate, climb: w.climb })
+      const rescued = await recoverOnce(bot, goal, plan, { isStopped, tried: triedSet, digOut: w.cut, desperate, climb: w.climb, belowGrade: w.belowGrade })
       if (!rescued) break
       via = rescued
       dbg('unstick: ' + rescued + ' moved us to ' + bot.entity.position.floored())
