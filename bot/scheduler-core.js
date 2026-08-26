@@ -424,7 +424,11 @@ function chooseActivity (snapshot, opts) {
   //      every genuine need and to an actively-progressing build, and beats idling. It is docked
   //      the same live risk as other maintain work - a naked bot at dusk does not tidy.
   const debt = s.debt || null
-  if (debt && debt.best && debt.value > 0) {
+  // THE SITE FIRST (operator, 2026-08-26), same rule as the keystone above: with a saved build and no
+  // camp standing, tidying old shafts at spawn does not compete with the trek - live it took the
+  // body ("reclaim holds the dispatch slot and this does not out-rank it") and walked the bot back
+  // from 314b to spawn to descend a shaft the moment the trek began.
+  if (debt && debt.best && debt.value > 0 && !br.exempt) {
     const value = clamp(debt.value / 120, 0, 1)          // saturating: 120 points of debt is "a lot"
     const d = debt.best.dist != null ? debt.best.dist : 256
     const proximity = clamp(1 - d / 128, 0, 1)           // feasibility: 0 beyond 128b, 1 underfoot

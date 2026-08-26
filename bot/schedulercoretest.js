@@ -128,6 +128,10 @@ t('09 naked healthy, home far, day, NO hut -> the build (camp at the site) goes 
   const c = choose('naked-far-day-nohut', snap({ armorPieces: 0, underArmored: true, homeDist: 90, homeReachable: false, bankFoodPts: 60, rawIron: 0, farm: { exists: true }, timeOfDay: 6000, hutExists: false }))
   assert.notStrictEqual(c && c.job, 'maintenancePass', 'the keystone must not pre-empt the trek while no camp stands, got ' + (c && c.job))
 })
+t('09c saved build, NO hut, debt underfoot -> reclaim is not proposed; the site comes first', () => {
+  const c = choose('nohut-debt', snap({ hutExists: false, debt: { n: 52, value: 200, best: { n: 17, kind: 'shaft', dist: 3 } }, timeOfDay: 6000 }))
+  assert.notStrictEqual(c && c.job, 'reclaim', 'got ' + (c && c.job))
+})
 t('09b naked healthy, home far, day, hut STANDS -> maintenancePass (bootstrap armor, the iron keystone)', () => {
   const c = choose('naked-far-day-hut', snap({ armorPieces: 0, underArmored: true, homeDist: 90, homeReachable: false, bankFoodPts: 60, rawIron: 0, farm: { exists: true }, timeOfDay: 6000, hutExists: true }))
   assert.strictEqual(c.job, 'maintenancePass', 'got ' + (c && c.job))
