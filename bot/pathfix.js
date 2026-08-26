@@ -642,6 +642,15 @@ function installPathfinderTuning (bot) {
     // a flood ([[body-first-priority]]: this runs per plan, never per tick).
     if (!bot.__pathfixPlanLog) {
       bot.__pathfixPlanLog = true
+      // ...and why the library dropped a path it was following (stuck / dig_error / place_error /
+      // goal_moved ...): the other half of the plan story, throttled per reason.
+      let lastResetAt = 0; let lastResetWhy = ''
+      bot.on('path_reset', (why) => {
+        const now = Date.now()
+        if (why === lastResetWhy && now - lastResetAt < 2000) return
+        lastResetWhy = why; lastResetAt = now
+        try { dbg('plan: RESET (' + why + ') at ' + bot.entity.position.floored()) } catch {}
+      })
       let lastPlanAt = 0; let lastPlanKey = ''
       bot.on('path_update', (r) => {
         try {

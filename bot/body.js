@@ -52,6 +52,13 @@ let lastRearmAt = 0
 let rearms = 0
 let rearmsFailed = 0
 let tape = []                // ring of { t, ev, detail } - the events that can switch simulation off
+// SERVER CORRECTIONS (2026-08-26): a clientbound position sync that MOVES the body is the server
+// refusing what the client did ("moved wrongly") - the client walked into cells the server does
+// not agree are passable, or the server holds the player somewhere else entirely. Live: the bot
+// walked 1.8b and was put back at the same 0.1b-exact spot every 3s for minutes, with the planner
+// re-planning a perfectly good path each time. Without this ring the log says only 'stuck'.
+let corrections = []         // ring of { t, from, to } for syncs that displaced the body >= 0.5b
+let lastCorrectionNoteAt = 0
 let noteFn = null            // index.js injects note() so transitions land in the main log
 let installed = false        // install() ran on a real bot. Until then nothing is MEASURED, and an
                              // unmeasured body is not a paralysed one (DESIGN-PRINCIPLES #10) - the
@@ -101,7 +108,28 @@ function install (bot) {
   bot.on('spawn', () => record('spawn'))
   bot.on('mount', () => record('mount', bot.vehicle ? (bot.vehicle.name || bot.vehicle.type || 'entity') + '#' + bot.vehicle.id : 'entity'))
   bot.on('dismount', (v) => record('dismount', v ? (v.name || v.type || 'entity') + '#' + v.id : 'unknown'))
-  bot._client.on('position', (p) => { lastPositionAt = Date.now(); if (p && typeof p.teleportId === 'number') lastTeleportId = p.teleportId })
+  // PREPENDED so it runs before mineflayer's own handler moves bot.entity - `from` is where the
+  // client had the body, `to` is where the server puts it.
+  bot._client.prependListener('position', (p) => {
+    const now = Date.now()
+    lastPositionAt = now
+    if (p && typeof p.teleportId === 'number') lastTeleportId = p.teleportId
+    try {
+      const e = bot.entity && bot.entity.position
+      if (!e || !p || typeof p.x !== 'number') return
+      const rel = p.flags && typeof p.flags === 'object' ? p.flags : {}
+      const to = { x: rel.x ? e.x + p.x : p.x, y: rel.y ? e.y + p.y : p.y, z: rel.z ? e.z + p.z : p.z }
+      const d = Math.hypot(to.x - e.x, to.y - e.y, to.z - e.z)
+      while (corrections.length && now - corrections[0].t > 10000) corrections.shift()
+      if (d < 0.5) return
+      corrections.push({ t: now, from: { x: e.x, y: e.y, z: e.z }, to })
+      if (now - lastCorrectionNoteAt >= 3000) {
+        lastCorrectionNoteAt = now
+        const f = v => v.x.toFixed(1) + ',' + v.y.toFixed(1) + ',' + v.z.toFixed(1)
+        note('SERVER CORRECTION: the client had me at ' + f(e) + ', the server put me at ' + f(to) + ' (' + d.toFixed(1) + 'b; ' + corrections.length + ' in 10s) - the server refuses that movement: client/server world or state disagree there')
+      }
+    } catch {}
+  })
 }
 
 function snapshot (bot, now) {
@@ -180,6 +208,7 @@ function info (bot) {
     offForSec: sim || !deadSince ? 0 : Math.round((now - deadSince) / 1000),
     lastEvent: lastEvent(now),
     vehicle: !!(bot && bot.vehicle),
+    corrections10s: corrections.filter(c => now - c.t <= 10000).length,
     rearms,
     rearmsFailed
   }
@@ -194,6 +223,6 @@ async function waitSimulating (ms, isStopped) {
 }
 
 // test hooks
-function _reset () { installed = false; lastTickAt = 0; ticks = 0; hzTicks = 0; hzAt = 0; hz = 0; lastPositionAt = 0; lastTeleportId = 0; connected = false; deadSince = 0; lastRearmAt = 0; rearms = 0; rearmsFailed = 0; tape = []; pendingVerdict = null }
+function _reset () { corrections = []; lastCorrectionNoteAt = 0; installed = false; lastTickAt = 0; ticks = 0; hzTicks = 0; hzAt = 0; hz = 0; lastPositionAt = 0; lastTeleportId = 0; connected = false; deadSince = 0; lastRearmAt = 0; rearms = 0; rearmsFailed = 0; tape = []; pendingVerdict = null }
 
 module.exports = { install, check, info, simulating, simulatingAt, shouldRearm, offForMs, waitSimulating, setNoteSink, setDebugSink, SILENCE_MS, REARM_GAP_MS, _reset }
