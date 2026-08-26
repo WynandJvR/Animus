@@ -37,7 +37,20 @@ const { hutAnchor, insideOwnStructure, hasSolidCeiling, onHutApron, ensureHutBed
   bedUsable, assertSpawnOn } = provHut
 const provShelter = require('./provision-shelter.js')
 const { shelterNeeded, nightStuck, digInForNight, underArmored, inWaterNow, ensureAshore, pickOpenSkyCell,
-  shelterSite, _sheltering } = provShelter
+  shelterSite } = provShelter
+// `_sheltering` USED TO BE DESTRUCTURED HERE, AND THAT WAS THE BUG (2026-08-26, live). It is a `let`
+// in provision-shelter, so this line captured its VALUE - `false`, once, at require time - and every
+// read below was of a dead local that could never become true and whose assignment could never be
+// seen by the module that owns the flag. Three separate things silently became wrong:
+//   isResting()             under-reported, so the claim system could not tell shelter was held;
+//   releaseRecoveryLatches  "cleared" the dead copy, so the REAL latch was never lowered - which is
+//                           the log line `nothing to take back: the latch behind shelter is outside
+//                           releaseBodyClaims' owners table - a wiring hole, not a decision`;
+//   digInForNight           reads the real flag, so once a revoked shelter left it up, every later
+//                           dig-in returned false at its first line and the bot spent every night
+//                           standing in the open (live: three deaths in ten minutes at spawn).
+// Always reach a live latch through its owner's accessor. Never destructure mutable state.
+const shelterHeld = () => provShelter.isSheltering()
 const provMining = require('./provision-mining.js')
 const { pillarUpTo } = provMining
 const provFarm = require('./provision-farm.js')
@@ -825,7 +838,7 @@ async function restUntilSafe (bot, opts = {}) {
   return true
 }
 
-function isResting () { return _resting || _sheltering }
+function isResting () { return _resting || shelterHeld() }
 
 // Can the server grant a sleep RIGHT NOW? A pure world-condition read (the same window
 // sleepInBedHere enforces) - the condition gate the unconfirmed-spawn re-assert waits on.
@@ -950,7 +963,7 @@ async function nightRestInner (bot, opts = {}) {
   // on a 2s hold -> pitting instead" dumbness). sleepInBedHere still bails/pits on a real monster or
   // sleep-timing block, so this only recovers the reachable-bed case. =0 -> today's byte-for-byte.
   const bedClickable = bed && bot.entity && Math.hypot(bed.x - bot.entity.position.x, bed.z - bot.entity.position.z) <= 4
-  const bedOk = bed && bot.entity && !_sheltering && (!bedHeld(bed) || (process.env.BED_HELD_OVERRIDE !== '0' && bedClickable))
+  const bedOk = bed && bot.entity && !shelterHeld() && (!bedHeld(bed) || (process.env.BED_HELD_OVERRIDE !== '0' && bedClickable))
   if (bedOk) {
     const d = Math.hypot(bed.x - bot.entity.position.x, bed.z - bot.entity.position.z)
     if (d <= (opts.bedRange || 200)) {
@@ -1758,7 +1771,10 @@ function releaseRecoveryLatches (only) {
   let was = false
   if (want('ladder') && _recoveringDegraded) { _recoveringDegraded = false; _recoveringDegradedAt = 0; was = true }
   if (all && _recoveringHp) { _recoveringHp = false; _recoveringHpAt = 0; was = true }
-  if (want('shelter') && (_resting || _sheltering)) { _resting = false; _restingAt = 0; _sheltering = false; was = true }
+  // Clear the REAL shelter latch through its owner, not a dead local copy (see the note at the
+  // require above). Without this the 150s claim revoke freed nothing and digInForNight was bricked
+  // for the rest of the process - the bot stood in the open every night after the first revoke.
+  if (want('shelter') && (_resting || shelterHeld())) { _resting = false; _restingAt = 0; provShelter.releaseShelterLatch(); was = true }
   return was
 }
 

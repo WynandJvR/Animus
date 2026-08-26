@@ -78,6 +78,18 @@ let _sheltering = false
 
 function isSheltering () { return _sheltering }
 
+// THE LATCH MUST BE RELEASABLE BY THE LAYER THAT REVOKES IT (2026-08-26, live).
+// digInForNight raises `_sheltering` and lowers it in its own `finally` - which is right until the
+// claim lease force-revokes the shelter at 150s, because then the finally never runs and the flag
+// stays UP FOREVER. digInForNight's first line is `if (!bot.entity || _sheltering) return false`,
+// so from that moment the bot can never dig a night shelter again for the life of the process: it
+// stands in the open until dawn and takes the night on the chin (live: three deaths in ten minutes,
+// hp 20 -> 3 -> dead to a zombie, at spawn, holding 30 dirt).
+// The revoke path DID try - commands.BODY_LATCHES routes the 'shelter' claim at
+// provision-recovery.releaseRecoveryLatches - but it could only ever clear a DEAD COPY; see the
+// note on the export below. This is the real release, owned by the module that owns the flag.
+function releaseShelterLatch () { const was = _sheltering; _sheltering = false; return was }
+
 const shelterSite = require('./shelter.js') // pure shelter-siting: "can a safe pit be dug here" + nearest diggable dry cell
 
 const SHELTER_FARM_R = Number(process.env.SHELTER_FARM_R || 7)
@@ -712,5 +724,9 @@ function pickOpenSkyCell (cells) {
 
 module.exports = {
   setDebugSink, setBuildZone, inBuildZone,
-  DEFEND_WHEN_HIT_ON, _sheltering, isSheltering, shelterSite, SHELTER_FARM_R, shelterFarmConflict, inWaterNow, ensureAshore, findDiggableDryCell, scoutForWater, armorPieceCount, underArmored, lowHpCalm, shelterNeeded, nightStuck, nightRestWanted, sealShaft, digInForNight, pickOpenSkyCell
+  // `_sheltering` IS NOT EXPORTED, AND MUST NOT BE. It is a `let`, so putting it in this object
+  // literal exports its VALUE - a snapshot of `false` taken once, at require time. provision-recovery
+  // destructured that snapshot and then owned a dead variable that could never change and could never
+  // be cleared, while believing it held the live latch. Ask isSheltering(); clear releaseShelterLatch().
+  DEFEND_WHEN_HIT_ON, isSheltering, releaseShelterLatch, shelterSite, SHELTER_FARM_R, shelterFarmConflict, inWaterNow, ensureAshore, findDiggableDryCell, scoutForWater, armorPieceCount, underArmored, lowHpCalm, shelterNeeded, nightStuck, nightRestWanted, sealShaft, digInForNight, pickOpenSkyCell
 }
