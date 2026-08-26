@@ -1202,7 +1202,20 @@ async function recoverOnce (bot, goal, plan, opts) {
         // alone (#4: the plan-level and rung-level conditions must not disagree).
         let roofed = false
         try { roofed = provHut().hasSolidCeiling(bot, 12, { ignoreLeaves: true }) } catch { roofed = true } // unreadable -> assume roofed, i.e. keep the old behaviour
-        if (targetY <= feet.y && !roofed) {
+        // ...AND A PIT IS NOT A ROOF, WHICH BOTH MY EARLIER CUTS MISSED (2026-08-26). surfaceYAt
+        // reads the bot's OWN COLUMN, so at the bottom of an open-topped pit the pit FLOOR *is* that
+        // column's surface: targetY == feet.y with no roof overhead, and the rung declined - refusing
+        // to pillar out of precisely the hole it exists to leave. Live, wedged at spawn in one of the
+        // bot's own abandoned shelter pits, holding 11 dirt, every other rung spent:
+        //   [nav] unstick: EVERY rung already failed in this cell (climb,nudge,stepout,drybreach)
+        // `trappedHere` is what used to let this fire, and removing it without replacing it was my
+        // regression - twice: once breaking the buried case (fixed with `roofed`), now the pit case.
+        // detectPit is the world-read that names it, and the ladder below already consults it, so
+        // the decline needs BOTH: no roof AND no pit. Unreadable -> assume present, because refusing
+        // to climb is the harmful direction.
+        let inPit = true
+        try { inPit = !!detectPit(bot) } catch { inPit = true }
+        if (targetY <= feet.y && !roofed && !inPit) {
           dbg('recovery: climb DECLINED at ' + p0.floored() + ' - open sky above and the surface is y' + targetY + ', my feet are already at y' + feet.y + ' (ground reads y' + surf.groundY + ') - nothing to climb to; leaving the attempt for the surface rungs')
           return false
         }
