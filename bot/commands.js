@@ -778,6 +778,16 @@ async function ironArmorBootstrap (bot, opts = {}) {
   const at = opts.at || (bot.entity && bot.entity.position)
   if (!at) return { progressed: false, msg: 'not spawned yet' }
   const avoid = opts.avoid || null
+  // ONE BUDGET FOR THE WHOLE PREP (2026-08-26). Each of the three steps below was individually
+  // bounded or bounded-ish, and together they still ate every Minecraft day: tools, then hunting,
+  // then armour, and by the time prep finished it was dusk and the bot sheltered instead of
+  // walking. It sat 95 blocks from the castle site for a full day/night cycle, repeatedly, with
+  // food and a sword in the pack. THE TREK IS THE JOB. Prep serves the trek; when prep costs more
+  // than the trek is worth, we leave with what we have and finish gearing up at the site.
+  const PREP_MS = Number(process.env.TRIP_PREP_MS || 180000)
+  const _prep0 = Date.now()
+  const prepSpent = () => Date.now() - _prep0 > PREP_MS
+  const _outOfTime = () => isStopped() || prepSpent()
   const primaryWood = provision.detectWood(bot) || 'oak'
   const bareCount = () => Object.values(wornArmor(bot)).filter(v => !v).length
   if (!bareCount()) return { progressed: false, msg: 'already armored in every slot' }
@@ -907,22 +917,22 @@ async function survivalPrep (bot, opts = {}) {
       const TOOL_MS = Number(process.env.TRIP_TOOL_MS || 90000)
       if (p.tasks.length) {
         const _t0 = Date.now()
-        const _stop = () => isStopped() || (Date.now() - _t0 > TOOL_MS)
+        const _stop = () => _outOfTime() || (Date.now() - _t0 > TOOL_MS)
         await provision.runPlan(bot, p, { say, isStopped: _stop, restoreMovements: restore })
         if (Date.now() - _t0 > TOOL_MS) say('(no ' + Object.keys(want).map(t => t.replace('wooden_', '')).join('/') + ' nearby - heading off with what i have)')
       }
     } catch (e) { say(`(couldn't make tools yet: ${e.message})`) }
   }
   // 2) food for the road - hunt a couple animals for meat (auto-eat feeds on it, raw is fine).
-  if (!isStopped() && !provFood().hasFood(bot)) {
+  if (!_outOfTime() && !provFood().hasFood(bot)) {
     say('grabbing some food for the road')
-    try { for (let i = 0; i < 3 && !provFood().hasFood(bot) && !isStopped(); i++) { if (!await provFood().huntForFood(bot, { isStopped })) break } } catch { /* no animals - travel-phase hunt covers it */ }
+    try { for (let i = 0; i < 3 && !provFood().hasFood(bot) && !_outOfTime(); i++) { if (!await provFood().huntForFood(bot, { isStopped })) break } } catch { /* no animals - travel-phase hunt covers it */ }
   }
   // 3) leather armor if cows/leather are around (bounded; proceeds naked if not - the shelter
   //    reflex covers a still-naked bot at night). NO iron fallback here: the iron grind is a
   //    long cave dive and the camp flow runs it AFTER the hut/bank/farm (operator order) -
   //    front-loading it onto every trek would starve the camp steps out again.
-  if (!isStopped() && Object.values(wornArmor(bot)).some(v => !v)) {
+  if (!_outOfTime() && Object.values(wornArmor(bot)).some(v => !v)) {
     try { const r = await provisionArmor(bot, { say, isStopped, restoreMovements: restore, ironFallback: false }); if (r) say(r) } catch (e) { say(`(armor prep: ${e.message})`) }
   }
   restore()
