@@ -179,5 +179,31 @@ t('info() is honest: off -> hz 0 and offForSec counts; disconnect clears the sil
   assert.strictEqual(body.offForMs(), 0)
 })
 
+t('ground flag: a position packet claiming onGround=false while standing on a full block is corrected to true; mid-air stays false', () => {
+  body._reset(); notes.length = 0
+  const bot = fakeBot()
+  const sent = []
+  bot._client.write = (name, p) => { sent.push({ name, p }) }
+  const solid = { boundingBox: 'block', name: 'grass_block', shapes: [[0, 0, 0, 1, 1, 1]] }
+  bot.blockAt = (v) => (v.y === 63 ? solid : { boundingBox: 'empty', name: 'air', shapes: [] })
+  bot.entity.velocity = { x: 0, y: -0.08, z: 0 }
+  body.install(bot)
+  bot._client.write('position_look', { x: 10.5, y: 64, z: -3.5, yaw: 0, pitch: 0, onGround: false, flags: { onGround: false, hasHorizontalCollision: undefined } })
+  assert.strictEqual(sent[0].p.onGround, true, 'standing on grass at y=64 -> true')
+  assert.strictEqual(sent[0].p.flags.onGround, true)
+  assert.strictEqual(body.info(bot).groundFixes, 1)
+  bot.entity.position = new Vec3(10.5, 64.42, -3.5) // mid-jump: nothing under the feet at 64.41
+  bot._client.write('position', { x: 10.5, y: 64.42, z: -3.5, onGround: false, flags: { onGround: false } })
+  assert.strictEqual(sent[1].p.onGround, false, 'mid-air stays false')
+  bot.entity.position = new Vec3(10.5, 64, -3.5); bot.entity.velocity = { x: 0, y: 0.42, z: 0 } // first frame of a jump, still at ground height
+  bot._client.write('position', { x: 10.5, y: 64, z: -3.5, onGround: false, flags: { onGround: false } })
+  assert.strictEqual(sent[2].p.onGround, false, 'rising -> not on ground')
+  bot.entity.velocity = { x: 0, y: 0, z: 0 }
+  bot._client.write('position', { x: 10.5, y: 64, z: -3.5, onGround: true, flags: { onGround: true } })
+  assert.strictEqual(body.info(bot).groundFixes, 1, 'an honest true is passed through untouched')
+  assert.strictEqual(sent[3].p.onGround, true)
+  assert.ok(notes.some(n => /ground flag corrected/.test(n)), notes.join(' | '))
+})
+
 Date.now = realNow
 console.log('bodytest: ' + passed + ' passed')

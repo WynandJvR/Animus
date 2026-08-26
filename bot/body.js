@@ -58,6 +58,16 @@ let tape = []                // ring of { t, ev, detail } - the events that can 
 // walked 1.8b and was put back at the same 0.1b-exact spot every 3s for minutes, with the planner
 // re-planning a perfectly good path each time. Without this ring the log says only 'stuck'.
 let corrections = []         // ring of { t, from, to } for syncs that displaced the body >= 0.5b
+// THE CLIENT MUST NOT LIE ABOUT THE GROUND (2026-08-26, live). mineflayer's position handler sets
+// bot.entity.onGround = false and in the same call replies to the server's teleport with a
+// position_look packet carrying that false - for a body standing on a block. A vanilla server
+// ignores the flag; a movement enforcer (anti-cheat) reads 'not on ground while on the ground' as
+// spoofing, sets the player back (a teleport), the handler replies false again, and the loop
+// sustains itself at ~16 syncs/s: jump-ups refused with and without sprint, the body held at
+// mid-jump heights, pinned within seconds of every login. groundFixes counts the packets whose flag
+// was corrected to what the world says.
+let groundFixes = 0
+let lastGroundNoteAt = 0
 let syncs = []               // ring of t for EVERY position sync (a per-tick correction is < 0.5b and still a refusal)
 let lastPinNoteAt = 0
 let lastCorrectionNoteAt = 0
@@ -96,6 +106,23 @@ function shouldRearm (s, now) {
 
 function install (bot) {
   installed = true
+  // Every outgoing position/position_look packet is checked against the world: standing on a
+  // block (feet on its top, not rising) => onGround true, whatever the entity flag says right now.
+  try {
+    const rawWrite = bot._client.write.bind(bot._client)
+    bot._client.write = (name, params) => {
+      if ((name === 'position' || name === 'position_look') && params) {
+        const flagged = params.flags && typeof params.flags === 'object' ? params.flags.onGround : params.onGround
+        if (flagged === false && standing(bot)) {
+          groundFixes++
+          params = Object.assign({}, params, { onGround: true }, params.flags && typeof params.flags === 'object' ? { flags: Object.assign({}, params.flags, { onGround: true }) } : {})
+          const now = Date.now()
+          if (now - lastGroundNoteAt >= 5000) { lastGroundNoteAt = now; note('ground flag corrected to TRUE on an outgoing position packet (' + groundFixes + ' so far) - mineflayer answered a teleport with onGround=false while standing on ' + (standingOn(bot) || 'a block')) }
+        }
+      }
+      return rawWrite(name, params)
+    }
+  } catch {}
   bot.on('physicsTick', () => {
     const now = Date.now()
     lastTickAt = now
@@ -142,6 +169,23 @@ function install (bot) {
     } catch {}
   })
 }
+
+// PURE over world reads: are the feet resting on the top of a solid block, and not rising?
+function standingOn (bot) {
+  try {
+    const e = bot.entity; if (!e || !e.position) return null
+    const v = e.velocity; if (v && v.y > 0.001) return null
+    const p = e.position
+    const { Vec3 } = require('vec3')
+    const cell = new Vec3(Math.floor(p.x), Math.floor(p.y - 0.01), Math.floor(p.z))
+    const b = bot.blockAt(cell)
+    if (!b || b.boundingBox !== 'block') return null
+    let top = cell.y + 1
+    if (Array.isArray(b.shapes) && b.shapes.length) top = cell.y + Math.max(...b.shapes.map(sh => sh[4]))
+    return Math.abs(p.y - top) <= 0.02 ? b.name : null
+  } catch { return null }
+}
+function standing (bot) { return !!standingOn(bot) }
 
 function snapshot (bot, now) {
   return {
@@ -220,6 +264,7 @@ function info (bot) {
     lastEvent: lastEvent(now),
     vehicle: !!(bot && bot.vehicle),
     corrections10s: corrections.filter(c => now - c.t <= 10000).length,
+    groundFixes,
     syncs2s: syncs.filter(t => now - t <= 2000).length,
     pinned: pinned(now),
     rearms,
@@ -239,6 +284,6 @@ async function waitSimulating (ms, isStopped) {
 }
 
 // test hooks
-function _reset () { syncs = []; lastPinNoteAt = 0; corrections = []; lastCorrectionNoteAt = 0; installed = false; lastTickAt = 0; ticks = 0; hzTicks = 0; hzAt = 0; hz = 0; lastPositionAt = 0; lastTeleportId = 0; connected = false; deadSince = 0; lastRearmAt = 0; rearms = 0; rearmsFailed = 0; tape = []; pendingVerdict = null }
+function _reset () { groundFixes = 0; lastGroundNoteAt = 0; syncs = []; lastPinNoteAt = 0; corrections = []; lastCorrectionNoteAt = 0; installed = false; lastTickAt = 0; ticks = 0; hzTicks = 0; hzAt = 0; hz = 0; lastPositionAt = 0; lastTeleportId = 0; connected = false; deadSince = 0; lastRearmAt = 0; rearms = 0; rearmsFailed = 0; tape = []; pendingVerdict = null }
 
-module.exports = { install, check, info, simulating, simulatingAt, shouldRearm, offForMs, waitSimulating, pinned, setNoteSink, setDebugSink, SILENCE_MS, REARM_GAP_MS, _reset }
+module.exports = { install, check, info, simulating, simulatingAt, shouldRearm, offForMs, waitSimulating, pinned, standing, standingOn, setNoteSink, setDebugSink, SILENCE_MS, REARM_GAP_MS, _reset }
