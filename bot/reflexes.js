@@ -971,10 +971,27 @@ def({
     // (it clears the goal and rejects on timeout) and is the one nav entry point; calling
     // pathfinder directly from a reflex was the bug beneath the bug. A drop <=8b away is seconds.
     const nav = require('./navigate.js') // lazily, like every executor here (invariant: nothing heavy at load)
-    try { await nav.gotoOnce(bot, new goals.GoalNear(best.position.x, best.position.y, best.position.z, 0), 8000) } catch { /* timed out / unreachable - the pack check below is the verdict */ }
-    // Collection is a server packet that lands a tick or two AFTER arrival - measuring
-    // immediately would call every genuine pickup a no-op. Bounded and only on this path.
-    try { await bot.waitForTicks(10) } catch {}
+    // THE BOUND COMES FROM THE DISTANCE, NOT FROM A NUMBER I PICKED (DESIGN §3). This was a flat
+    // 8000ms, which is the same class of guess as any fixed radius: too generous for a drop
+    // underfoot and too mean for one 8b away round an obstacle. A walk's honest deadline is how
+    // far it has to walk. WALK_BPS is a property of Minecraft (a player walks ~4.3 blocks/s), not
+    // a tuning knob; x3 covers pathing that is never a straight line, and the floor covers the
+    // fixed cost of planning a path at all.
+    const WALK_BPS = 4.3
+    const budgetMs = Math.round(1000 + (bestD / WALK_BPS) * 3 * 1000)
+    try { await nav.gotoOnce(bot, new goals.GoalNear(best.position.x, best.position.y, best.position.z, 0), budgetMs) } catch { /* timed out / unreachable - the pack check below is the verdict */ }
+    // ...AND THE SETTLE IS AN EVENT, NOT A DELAY (§6: never a delay before thinking). Collection is
+    // a server packet that lands a tick or two after arrival, so measuring immediately would call
+    // every genuine pickup a no-op - but `waitForTicks(10)` answered that by guessing how long the
+    // packet takes. mineflayer already emits `playerCollect` when it actually arrives, so wait for
+    // THE THING, with a deadline only as the backstop for a pickup that never happens.
+    await new Promise(resolve => {
+      let done = false
+      const finish = () => { if (done) return; done = true; clearTimeout(t); bot.removeListener('playerCollect', onCollect); resolve() }
+      const onCollect = (collector) => { if (collector && bot.entity && collector.id === bot.entity.id) finish() }
+      const t = setTimeout(finish, budgetMs) // no collect ever landed: the pack check below is still the verdict
+      bot.on('playerCollect', onCollect)
+    })
     const gained = packSize() - before
     return gained > 0
       ? { msg: 'picked up ' + gained + ' item(s) ' + Math.round(bestD) + 'b away', noOp: false }

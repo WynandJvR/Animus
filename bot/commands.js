@@ -912,7 +912,17 @@ async function survivalPrep (bot, opts = {}) {
   // A DEADLINE ON THE ATTEMPT, NOT A DELAY BEFORE THINKING (DESIGN §6). Generous for a real gather
   // - a tree is seconds away where one exists - and short enough that an empty savanna cannot eat
   // the daylight the trek needs. Whatever got crafted along the way is kept; runPlan crafts as it goes.
-  const SWORD_MS = Number(process.env.TRIP_SWORD_MS || 45000)
+  // THE CONDITION COMES FIRST (DESIGN §3). detectWood already answers "is there a log within 64
+  // blocks" - it returns the nearest species or null - so an empty plain is answered by a FACT
+  // about the world, not by standing around until a timer I invented runs out. No wood in range:
+  // say so and leave now, which is what the whole sword-only rewrite was for.
+  if (!provision.detectWood(bot)) { say('(no wood anywhere near - heading off without a sword)'); restore(); return outcome() }
+  // ...AND THE BOUND IS DERIVED, NOT CHOSEN. This was 45000, a number with nothing behind it. The
+  // house rule for a deadline is to derive it from an existing one (bodyboundtest pins that for the
+  // rung deadline: SURVIVAL_FAIL_MS + LATCH_GRACE_MS). Here the honest ceiling is the SUPERVISOR's
+  // patience: past that the watchdog fails the job this prep runs inside, so budget spent beyond it
+  // is spent on a job that is already dead. Tune the supervisor and this follows.
+  const SWORD_MS = Number(process.env.TRIP_SWORD_MS || require('./scheduler.js').SURVIVAL_FAIL_MS)
   const t0 = Date.now()
   const stop = () => isStopped() || Date.now() - t0 > SWORD_MS
   say('grabbing a sword before i set off')

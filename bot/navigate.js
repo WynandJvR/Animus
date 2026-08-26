@@ -1192,8 +1192,18 @@ async function recoverOnce (bot, goal, plan, opts) {
         // a fact about the column, which is exactly what surfaceYAt already answers. Declining
         // hands the attempt to nudge/stepout instead of spending it, and records nothing (§7:
         // a no-op is not a failed maneuver, and the ladder must not learn from one).
-        if (targetY <= feet.y) {
-          dbg('recovery: climb DECLINED at ' + p0.floored() + ' - the surface is y' + targetY + ' and my feet are already at y' + feet.y + ' (ground reads y' + surf.groundY + ') - nothing above to climb to; leaving the attempt for the surface rungs')
+        // ...but ONLY UNDER OPEN SKY. surfaceYAt answers "the floor of my column as I can see it",
+        // and inside a cave that is the cell the bot is standing in - so `targetY <= feet.y` is ALSO
+        // true 15 blocks underground, where climbing is the entire point. Declining on the bare
+        // comparison broke the buried case to fix the surface one (caught live minutes after
+        // deploy: "climb DECLINED at (-1,52,-3) - the surface is y46 and my feet are already at
+        // y46" while `underground: true`). The distinguishing fact is a ROOF, which is what the
+        // rung's own `when` already asks - so ask it here too rather than trusting the Y compare
+        // alone (#4: the plan-level and rung-level conditions must not disagree).
+        let roofed = false
+        try { roofed = provHut().hasSolidCeiling(bot, 12, { ignoreLeaves: true }) } catch { roofed = true } // unreadable -> assume roofed, i.e. keep the old behaviour
+        if (targetY <= feet.y && !roofed) {
+          dbg('recovery: climb DECLINED at ' + p0.floored() + ' - open sky above and the surface is y' + targetY + ', my feet are already at y' + feet.y + ' (ground reads y' + surf.groundY + ') - nothing to climb to; leaving the attempt for the surface rungs')
           return false
         }
         dbg('recovery: stuck UNDERGROUND at ' + p0.floored() + ' - climbing to the surface y=' + targetY + ' (ground reads y' + surf.groundY + ')')

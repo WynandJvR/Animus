@@ -60,6 +60,12 @@ const FOOD_ANIMALS = /^(cow|mooshroom|pig|chicken|sheep|rabbit)$/
 // filtering on the DROP via huntForDrop({item:'leather'}) - the name test was never consulted.)
 
 const RISKY_EAT = /^(rotten_flesh|chicken|spider_eye|poisonous_potato|pufferfish)$/
+// ONE NAME FOR "DESPERATE ENOUGH TO EAT RUBBISH" (2026-08-26). The number 6 was written as a bare
+// literal in THREE places - eatBestFood's refusal, needsFood's trigger, and edibleNow - and the
+// third of those was added by the very commit that unified hasFood/foodCount, which is precisely
+// the drift that commit argued against. Tune it here or nowhere: if these three ever disagree the
+// food dead band reopens silently, which is the failure this file has now closed three times.
+const RISKY_EAT_MAX_FOOD = Number(process.env.RISKY_EAT_MAX_FOOD || 6)
 
 // ROD_SUPPLY (M2): a bounded near-clone of huntForFood that finishes off a NEARBY spider for its
 // STRING drop (a rod = 3 sticks + 2 string, and on this no-animal site spiders-at-night are the
@@ -105,7 +111,7 @@ function edibleNow (bot, name) {
   const md = require('minecraft-data')(bot.version)
   const foods = (md && md.foodsByName) || {}
   if (!foods[name]) return false
-  return !RISKY_EAT.test(name) || (bot.food ?? 20) <= 6
+  return !RISKY_EAT.test(name) || (bot.food ?? 20) <= RISKY_EAT_MAX_FOOD
 }
 
 function hasFood (bot) {
@@ -120,7 +126,7 @@ function foodCount (bot) {
 // The ONLY time the bot must go hunt: it's hungry AND has nothing to eat. (With food on
 // hand, auto-eat handles it; well-fed, no need.) food<=6 = hunger low enough that regen
 // has stopped, so act before it hits 0 and gets pinned at 1 hp.
-function needsFood (bot) { return bot.food != null && bot.food <= 6 && !hasFood(bot) }
+function needsFood (bot) { return bot.food != null && bot.food <= RISKY_EAT_MAX_FOOD && !hasFood(bot) }
 
 function nearestFoodAnimal (bot, maxDist = 40) {
   const me = bot.entity && bot.entity.position
@@ -172,7 +178,7 @@ async function eatBestFood (bot) {
   // ever know about them. So the hold-out is condition-gated on the arbiter's live crisis instead:
   // in mortal danger, rotten flesh beats dying. Lazy require breaks the module cycle; evaluated
   // ONLY when we are otherwise about to hold out, so the vitals scan stays off the hot path.
-  if (RISKY_EAT.test(food.name) && bot.food > 6 && !((bot.health ?? 20) <= 8 && bot.food < REGEN_FOOD_MIN)) {
+  if (RISKY_EAT.test(food.name) && bot.food > RISKY_EAT_MAX_FOOD && !((bot.health ?? 20) <= 8 && bot.food < REGEN_FOOD_MIN)) {
     let dying = false
     try {
       const arbiter = require('./arbiter.js')
