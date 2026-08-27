@@ -508,7 +508,11 @@ async function digInForNight (bot, opts = {}) {
         // build site (19:12, then a spider at dusk). The first fresh dig at the site sealed fine
         // (19:08 "pit SEALED") - it is the OLD hole on the slope that will not. Forget it, get out
         // of it, and let the fresh-dig path below pick a dry cell whose walls are all ground.
-        if (!recapped) {
+        // ...BUT NEVER AT NIGHT (2026-08-27 23:26): the first cut of this rule forced the lid open
+        // in the dark, put the bot on the surface among zombies and skeletons, and it died at dawn.
+        // A leaky hole at night is still the safest place there is; the forget-and-dig-fresh move
+        // is daylight's. At night a leaky re-entry falls through to the wait below, until dawn.
+        if (!recapped && !isNight(bot)) {
           dbg('shelter: the old bunker will not seal (' + (seal0.sideHoles || 0) + ' side(s) open' + (seal0.capped ? '' : ', no lid') + ') - forgetting it and digging fresh')
           try { forgetInfra('shelter', listInfra('shelter').find(e => e.x === oldPit.x && e.z === oldPit.z)) } catch {}
           try { await breakOut(bot, { isStopped, force: true }) } catch {}
