@@ -552,6 +552,20 @@ bot.on('death', () => {
   // until recoveryReady (P4). Cleared by provision.recoveryReadyNow / the scheduler tick. Reads are
   // flag-gated (isPostDeathRecovery), so RESILIENT_RECOVERY=0 leaves this inert = today byte-for-byte.
   commands.setPostDeathRecovery && commands.setPostDeathRecovery(true)
+  // THE BODY THOSE JOBS WERE DRIVING NO LONGER EXISTS (2026-08-27). Live 18:07-18:14: the
+  // recovery ladder dispatched at 18:07:11 was mid-trek when the bot drowned. Its promise kept
+  // running on the RESPAWNED body (it sprinted 140b from spawn back toward the farm, at night,
+  // naked), its claim stayed live (deaths and respawns ARE world deltas, so the lease never
+  // expired), and the scheduler dispatched NOTHING for seven minutes and six deaths -
+  //   (wd) nightShelter:bunker holds ..., but recoveryLadder owns the body
+  // while the brain's armorup and the reflexes actually drove it. A death ends every job. The
+  // watchdog's lever map (below, FAIL-JOB) is pulled in full HERE - the one place that knows the
+  // body is gone - and every body claim is released, so the post-death latch above hands a FRESH
+  // ladder a body with no other driver. All three levers are existing, already-polled latches.
+  try { commands.preemptForSurvival() } catch {}          // build-class jobs (persistedResume survives - the build pauses)
+  try { provMaintain.stopMaintenance() } catch {}          // maintenancePass
+  try { provision.stopSurvivalJob() } catch {}             // secureFood / recoverHp / the ladder
+  try { const freed = commands.releaseBodyClaims('death at ' + info.x + ',' + info.y + ',' + info.z + ' - the body those jobs were driving is gone'); if (freed) note('(death) released the claims of the jobs that were driving the body: ' + freed) } catch {}
   deathPending = true
   note(`(death) at ${info.x},${info.y},${info.z} (${cause}${att.attacker ? ' - ' + att.attacker : ''}, via ${att.source})${dangerous ? ' - LAVA/FIRE/VOID, risky to return' : ' - can go recover'}`)
 })
@@ -2219,6 +2233,12 @@ if (process.env.AUTO_DEFEND !== '0') {
         if (isCreeper && !beingHit) {
           try { if (provHut.insideOwnStructure && provHut.insideOwnStructure(bot)) return } catch {}
         }
+        // 1b) SEALED IN a 1x1 pocket (own night bunker) and untouched: the same fact as own walls -
+        // nothing can reach me and there is nowhere to run. Live 2026-08-27, 12:03-18:00: this
+        // reflex burst "away" every 3.5s for hours from a creeper 3.7m outside the lid (netted
+        // 0.0b every time), and that SURVIVE maneuver held the body so the rescue that opens the
+        // lid never got to run. A real hit re-arms it (a hit means the pocket is NOT sealed).
+        if (!beingHit) { try { if (navigate.sealedIn(bot)) return } catch {} }
         // 2) COMMITTED CREEPER AVOID - runs BEFORE the PROGRESS deferral, so a creeper at 6-12m
         // is backed off from even mid-build/mid-mine (the incompleteness that got the bot blown
         // up: a preventive creeper reaction used to defer to any progress maneuver). ONE latched

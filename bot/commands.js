@@ -2379,6 +2379,17 @@ async function handleInner (bot, line, opts = {}) {
       if ([x, y, z].some(Number.isNaN)) return 'usage: tp <x> <y> <z>'
       bot.chat(`/tp ${bot.username} ${x} ${y} ${z}`); return `tp -> ${x},${y},${z}`
     }
+    case 'die': {
+      // OPERATOR ONLY (2026-08-27, operator: "if it's necessary kill it so it can start fresh from
+      // spawn"): a deliberate reset by death - respawn at the spawn point at full hp/food. It is
+      // the existing last-resort primitive (deadlockDieByFall: walk to open sky, pillar, step off),
+      // reachable from the GUI/API with the operator's authority and from nowhere else - the brain
+      // cannot say it. Whatever is in the pack goes to the grave, which is the operator's call.
+      if (opts.source !== 'operator') return 'die is operator-only'
+      try { if (require('./navigate.js').sealedIn(bot)) await require('./provision-shelter.js').breakOut(bot, { force: true }) } catch {}
+      const ok = await provRecovery().deadlockDieByFall(bot, { say: opts.say || (() => {}) })
+      return ok ? 'died to reset - respawning at spawn' : 'could not die by fall here (no open sky to pillar under, or no filler block)'
+    }
     case 'gamemode':
       bot.chat(`/gamemode ${a[0] || 'creative'} ${bot.username}`); return `gamemode ${a[0]}`
 

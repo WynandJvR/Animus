@@ -148,7 +148,7 @@ function nearestFoodAnimal (bot, maxDist = 40) {
 // NO NAME FOR IT, so a caller that needed food IN ORDER TO HEAL had nothing to ask for and
 // silently inherited the PROGRESS threshold (14) instead. See THE HEALING DEAD BAND at
 // `secureFood`'s acquireTrigger below. Same disease as the 12..14 band #123 closed, one level up.
-const REGEN_FOOD_MIN = 18
+const REGEN_FOOD_MIN = foodSec.REGEN_FOOD_MIN // the game rule has ONE definition, in the pure module (food.js)
 
 // Eat what's in the pack up to comfortable - cook raw meat FIRST (raw is poor food), then eat.
 // Fixes "idled at food=13 holding beef" - never sit hungry with food in hand.

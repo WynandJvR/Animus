@@ -983,7 +983,20 @@ function rungFeasible (rung, snapshot) {
   // P5 anti-spiral: during a death spiral, seal near the hut - no grave chase (R1), no outbound trek
   // (R3/R4). rearmFromBank (walks HOME) + R0/R2/R5 stay admissible so the bot re-arms + holds, not
   // marches back into the death cluster. RESILIENT_RECOVERY=0 -> spiralActive() is always false.
-  if (spiralActive(s) && !stuck && (r.rung === 'R1' || OUTBOUND_RE.test(r.action || ''))) return false
+  if (spiralActive(s) && !stuck && (r.rung === 'R1' || OUTBOUND_RE.test(r.action || ''))) {
+    // THE HOLD MUST BE ABLE TO HEAL, OR IT IS NOT AN ANSWER (2026-08-27). The spiral clause reduces
+    // the plan to "seal near home and hold", and a hold heals only by natural regeneration, which
+    // the game grants at food >= REGEN_FOOD_MIN (18) - or by eating what is in the pack. Below that
+    // with an empty pack, holding produces nothing, and the plan it leaves (R5 alone) woke on
+    // `food > 4` instantly, ran no producer, and flip-flopped with the terminal action every 2s:
+    //   (ladder) NO PROGRESS this pass - blocked on spiral: death spiral: staying sealed near home
+    // at hp 0.7 / food 12, in daylight, for as long as the deaths stayed in the window. So the ONE
+    // producer of what the hold cannot make - the food rung - stays admissible in a spiral when the
+    // hold cannot heal. The night rule below (outboundBlocked -> 'dawn') still bars it in the dark,
+    // which is where the deaths in the window happened; the far trek (R3) stays suppressed.
+    const holdCanHeal = (s.food == null || s.food >= foodSec.REGEN_FOOD_MIN) || (s.packFoodPts || 0) > 0
+    if (!(/^secureFood/.test(r.action || '') && !holdCanHeal)) return false
+  }
   // P3 / #86 LADDER_REARM_REAL: the "never set out un-armoured" rule. Its definition now lives in
   // outboundBlocked() above, because the post-respawn homecoming needs the SAME rule and used to
   // have none (audit §1 LOOP A). Same clauses, same flags - one copy.

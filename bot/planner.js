@@ -172,6 +172,21 @@ const DIRS = [[1, 0], [0, 1], [-1, 0], [0, -1], [1, 1], [-1, 1], [-1, -1], [1, -
 
 async function relocate (bot, startIdx, { isStopped = () => false } = {}) {
   const start = bot.entity.position.clone()
+  // A RELOCATION IS A ROAM (2026-08-27). runGather refuses to roam the dark naked (#91
+  // GATHER_NIGHT_GATE) - and this, the planner's answer to that refusal ("fresh ground beats a
+  // fixed spot"), then walked the same naked bot 40b into the same dark. Live 18:12:09-16:
+  //   runGather oak_log: naked at night - deferring the roam to dawn
+  //   round 2: relocate for oak_log - fresh ground beats a fixed spot
+  //   (death) at 60,68,-63 (explosion - Creeper)
+  // Same rule, same three reads, same flag; the gather's deferral is honoured here too.
+  if (process.env.GATHER_NIGHT_GATE !== '0') {
+    try {
+      if (provCore().isNight(bot) && provShelter().armorPieceCount(bot) < 1 && !provShelter().nightStuck(bot)) {
+        dbg('relocate: naked at night - not roaming the dark for fresh ground (waits for dawn like the gather it serves)')
+        return { ok: false, tries: 0, blockedOn: 'dawn' }
+      }
+    } catch {}
+  }
   for (let t = 0; t < DIRS.length; t++) {
     if (isStopped()) break
     const i = startIdx + t

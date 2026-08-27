@@ -24,7 +24,7 @@ const srcOf = f => fs.readFileSync(path.join(__dirname, f), 'utf8')
 const code = f => srcOf(f).replace(/^\s*\/\/.*$/gm, '') // strip comment-only lines: tombstones QUOTE what was deleted
 
 // ============ 1. THE PLAN NAMES ONLY WHAT THE PLANNER CANNOT DO =============================
-const base = { indoors: false, wet: false, submerged: false, door: false }
+const base = { indoors: false, wet: false, submerged: false, door: false, sealed: false }
 t('plan: on plain terrain there is NO rescue - the planner re-plans', () => {
   assert.deepStrictEqual(nav.unstickPlan(base), [])
 })
@@ -44,6 +44,15 @@ t('plan: inside my own structure -> indoor then door (never the roof)', () => {
 t('plan: a door nearby, outdoors -> door', () => {
   assert.deepStrictEqual(nav.unstickPlan({ ...base, door: true }), ['door'])
 })
+t('plan: sealed in a 1x1 pocket -> sealed (the planner cannot dig within 32b of own infra, and the pocket is own infra)', () => {
+  assert.deepStrictEqual(nav.unstickPlan({ ...base, sealed: true }), ['sealed'])
+})
+t('plan: sealed AND submerged -> water first (seconds), then sealed', () => {
+  assert.deepStrictEqual(nav.unstickPlan({ ...base, sealed: true, submerged: true }), ['water', 'sealed'])
+})
+t('plan: sealed inside my own house -> the door first, the lid last', () => {
+  assert.deepStrictEqual(nav.unstickPlan({ ...base, sealed: true, indoors: true }), ['indoor', 'door', 'sealed'])
+})
 t('plan: is pure - the same snapshot always gives the same plan', () => {
   const w = { ...base, wet: true, door: true }
   assert.deepStrictEqual(nav.unstickPlan(w), nav.unstickPlan(w))
@@ -56,9 +65,13 @@ t('strip: no pit / climb / nudge / stepout / drybreach / wetbreach rung exists i
     assert(!navCode.includes("kind: '" + k + "'"), 'rung ' + k + ' still defined')
   }
 })
-t('strip: the kept rungs are exactly indoor, water, door', () => {
+t('strip: the kept rungs are exactly indoor, water, door, sealed', () => {
+  // 'sealed' (2026-08-27) is the fourth thing A* physically cannot do: leave a 1x1 pocket inside
+  // the 32b no-dig scope of the bot's own infra - which its own night bunker is. Its responder is
+  // provision-shelter.breakOut, the module that sealed the pocket; navigate.js owns no dig here.
   const kinds = [...navCode.matchAll(/kind: '([a-z]+)'/g)].map(m => m[1]).sort()
-  assert.deepStrictEqual(kinds, ['door', 'indoor', 'water'])
+  assert.deepStrictEqual(kinds, ['door', 'indoor', 'sealed', 'water'])
+  assert(navCode.includes("provShelter().breakOut(bot"), 'the sealed rung delegates to the shelter, it does not dig')
 })
 t('strip: no per-cell attempt memory and no wedge records are written by the rescue', () => {
   assert(!navCode.includes("attempts.record('unstick'"), 'attempts.record(unstick) still present')

@@ -102,7 +102,14 @@ function ownInfraAnchors () {
   //
   // The farm PLOT anchor (m.wheatFarm, pushed below) is a construction and stays; the crops have
   // their own no-trample exclusion. Nothing else consulted this list for water.
-  for (const kind of ['hut', 'bed', 'chest', 'table', 'furnace', 'shelter']) for (const e of (infra[kind] || [])) push(e)
+  // A HOLE IS NOT FABRIC (2026-08-27). 'shelter' is a pit the bot DUG, and it was on this list -
+  // so every night bunker turned the 32b around it into a no-dig zone for the planner, and every
+  // pit the bot fell into near one became a prison: noPath in 1ms, no filler to pillar, the walls
+  // undiggable BY ITS OWN RULE. Live, twice in one afternoon: sealed under its own lid at
+  // 197,64,-179 for four hours, then at the bottom of a 4-deep shaft at world spawn (-2,57,-1),
+  // four registered shelters within 10b. The rule protects things the bot BUILT from the bot;
+  // a pit is the one thing it built that it must be able to cut through.
+  for (const kind of ['hut', 'bed', 'chest', 'table', 'furnace']) for (const e of (infra[kind] || [])) push(e)
   if (m.bed) push(m.bed)                       // the spawn bed (mirrored outside infra too)
   if (m.wheatFarm) push(m.wheatFarm)           // our farm plot anchor
   if (buildZone) push({ x: (buildZone.x1 + buildZone.x2) / 2, z: (buildZone.z1 + buildZone.z2) / 2 }) // active build job

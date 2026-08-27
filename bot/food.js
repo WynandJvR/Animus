@@ -131,6 +131,11 @@ function busyPreemptFood (opts = {}) {
   return Number(process.env.SCHED_CRISIS_FOOD || (on ? 10 : 6))
 }
 
+// THE GAME'S REGEN RULE, ONE NAME (2026-08-27). Natural regeneration needs food >= 18. Every
+// consumer that asks "can holding still heal me?" reads THIS; provision-food.js imports it
+// (foodtest pins both ends). A second copy of the number is a dead band waiting to happen.
+const REGEN_FOOD_MIN = 18
+
 // #51 FOOD_FLOOR_HP - the ONE shared "must actively FISH NOW" predicate (PURE). Fires at genuine
 // starvation (food<=floorFood, the existing floor) OR during an hp-crisis that can't self-heal with
 // NO food on hand (the food 3-6 dead-zone livelock: hp4/food4 in the hut, barren farm + dry bank,
@@ -145,9 +150,16 @@ function foodFloorTriggered (opts = {}) {
   const food = opts.food, hp = opts.hp, hasPackFood = !!opts.hasPackFood
   const hpCrisisOn = opts.foodFloorHp != null ? opts.foodFloorHp : (process.env.FOOD_FLOOR_HP !== '0')
   const hpTrig = Number(process.env.FOOD_FLOOR_HP_HP || 6)     // hp at/below this = crisis needing food to heal
-  const foodTrig = Number(process.env.FOOD_FLOOR_HP_FOOD || 6) // food at/below this + hp-crisis + no food -> fish
+  // THE FOOD BOUND IS THE GAME'S REGEN RULE, NOT A KNOB (2026-08-27). Below REGEN_FOOD_MIN a hurt
+  // bot cannot heal by holding still, so with nothing to eat in the pack the ONLY way its hp rises
+  // is to go and get food - at food 4, and exactly as much at food 9 or 15. `food <= 6`
+  // (an env knob of its own, deleted) was a second number for the same rule, and 7..17 was the band it
+  // left uninhabitable. Live 2026-08-27, hp 1 / food 9, empty pack: every food rung inadmissible
+  // (secureFood returned in 3ms, 1,295 ladder passes), the hold healed nothing (no regen below 18),
+  // and the bot sat sealed in its bunker for two hours until food decayed to 0 and made it worse.
+  // [[threshold-seams]]: a need's threshold and its producer's trigger must be ONE number.
   const starve = food != null && food <= floorFood && !hasPackFood                                  // existing starvation floor
-  const hpCrisis = hpCrisisOn && hp != null && hp <= hpTrig && food != null && food <= foodTrig && !hasPackFood // #51 dead-zone
+  const hpCrisis = hpCrisisOn && hp != null && hp <= hpTrig && food != null && food < REGEN_FOOD_MIN && !hasPackFood // hurt + cannot regen + nothing to eat
   return starve || hpCrisis
 }
 
@@ -349,4 +361,4 @@ function foodNeedForPlan (plan = {}, opts = {}) {
   return Math.round(need)
 }
 
-module.exports = { BAD_FOOD, RAW_COOKABLE_FOOD, foodTier, hasFoodSupply, needsFoodSupply, shouldSweepForFood, foodSupplyAction, shouldTrekHomeForFood, breadFromWheat, wheatWithdrawForBake, bankFoodWithdrawPts, foodSurplusToBank, farmExpandGate, foodNeedForPlan, inLoopFoodTrigger, busyPreemptFood, foodFloorTriggered, outboundRungAdmissible, famineHoldFood, foodFloorEscalation, foodFloorEscalated, AUTO_EAT_AT, needStringForRod, shouldFish }
+module.exports = { REGEN_FOOD_MIN, BAD_FOOD, RAW_COOKABLE_FOOD, foodTier, hasFoodSupply, needsFoodSupply, shouldSweepForFood, foodSupplyAction, shouldTrekHomeForFood, breadFromWheat, wheatWithdrawForBake, bankFoodWithdrawPts, foodSurplusToBank, farmExpandGate, foodNeedForPlan, inLoopFoodTrigger, busyPreemptFood, foodFloorTriggered, outboundRungAdmissible, famineHoldFood, foodFloorEscalation, foodFloorEscalated, AUTO_EAT_AT, needStringForRod, shouldFish }

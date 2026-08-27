@@ -82,7 +82,12 @@ let lastFlood = null // {x, z, at}
 //     (sched) nightShelter failed: CAP_RE is not defined
 // The night-shelter job therefore died instantly on every dispatch and the bot spent every night
 // standing in the open. One constant, one definition, both readers (#4).
-const CAP_RE = /terracotta|dirt|cobble|stone|gravel|sand|netherrack|deepslate|tuff|granite|diorite|andesite|clay|mud|_planks$|_log$|_concrete/
+// grass_block / podzol / mycelium / rooted_dirt (2026-08-27): these DROP DIRT bare-handed, and the
+// 2026-08-26 "keeping the blocks is a precondition" check reads this list for "will the floor
+// yield a lid". Without them a naked bot standing on GRASS - i.e. every respawn - was told
+// "grass_block will not drop one without a tool; a pit i cannot lid is just a deeper hole" and
+// could not dig in at night at all. Live 18:07-18:14: six deaths in seven minutes at spawn.
+const CAP_RE = /terracotta|dirt|grass_block|podzol|mycelium|cobble|stone|gravel|sand|netherrack|deepslate|tuff|granite|diorite|andesite|clay|mud|_planks$|_log$|_concrete/
 
 let _sheltering = false
 
@@ -403,6 +408,9 @@ async function digInForNight (bot, opts = {}) {
       const dl = Date.now() + 600000
       const hpIn = bot.health || 20
       let hurtInside = false
+      // A DECLARED HOLD, like the fresh pit's (below) - see the note at the bunker re-entry.
+      const holdHut = reflexes.beginHold('nightShelter:hut', 'dawn|hostile-gone|damage|flooding', dl - Date.now() + 5000)
+      try {
       while (Date.now() < dl && !isStopped()) {
         // hold through the DUSK HEAD-START too (shelterNeeded fires at 12200, isNight at
         // 13000): breaking on "!isNight" alone made this return success instantly at dusk,
@@ -412,6 +420,7 @@ async function digInForNight (bot, opts = {}) {
         if (inWaterNow(bot)) { dbg('shelter: hut interior flooding - bailing'); hurtInside = true; break }
         await new Promise(r => setTimeout(r, 3000))
       }
+      } finally { reflexes.endHold(holdHut); touchP('shelterHold:released') }
       if (!hurtInside) return true
       // Hurt while holed up inside the hut (an enderman teleported in, a mob at the door):
       // do NOT abandon the walls to dig a pit - RELEASE the shelter so the now-ungated
@@ -449,9 +458,12 @@ async function digInForNight (bot, opts = {}) {
     const oldPit = recallInfra('shelter', bot.entity.position, 24)
     if (oldPit) {
       dbg('shelter: reusing my bunker at ' + oldPit.x + ',' + oldPit.y + ',' + oldPit.z)
-      try { await gotoWithTimeout(bot, new goals.GoalBlock(oldPit.x, oldPit.y, oldPit.z), 15000) } catch {}
-      const here = bot.entity.position.floored()
-      if (Math.abs(here.x - oldPit.x) <= 1 && Math.abs(here.z - oldPit.z) <= 1 && here.y <= oldPit.y + 1) {
+      const inPit = () => { const h = bot.entity.position.floored(); return Math.abs(h.x - oldPit.x) <= 1 && Math.abs(h.z - oldPit.z) <= 1 && h.y <= oldPit.y + 1 }
+      // ALREADY IN IT: never ask the planner to walk to a cell it cannot reach from inside a sealed
+      // pit. Live 2026-08-27 that goto answered noPath in 1ms, the rescue behind it opened the lid
+      // at night with a creeper 3.7m outside, and the rung was cut 150s later mid-"walk".
+      if (!inPit()) { try { await gotoWithTimeout(bot, new goals.GoalBlock(oldPit.x, oldPit.y, oldPit.z), 15000) } catch {} }
+      if (inPit()) {
         // we're in the old hole - RE-SEAL it (walls too, not just the lid: a reused pit can have
         // caved-in / re-opened sides), light a torch alcove if we carry one, then wait the night.
         const feet0 = bot.entity.position.floored()
@@ -466,6 +478,14 @@ async function digInForNight (bot, opts = {}) {
         say(recapped ? 'back in my bunker for the night' : 'in my bunker (lid open)')
         const dl = Date.now() + (recapped ? 600000 : 120000)
         const hpX = bot.health || 20
+        // A DECLARED HOLD (2026-08-27). The fresh-pit wait below has declared one since S4; this
+        // re-entry path was added later and never did - so it looked, to boundedRung and the claim
+        // lease, exactly like a hung rung: "no verified progress for 150s and no declared hold",
+        // cut at 150s EVERY night (live 14:31, 15:37, ...), its exit tail then ran with isStopped()
+        // already true and opened nothing, and R5 sealed the lid again. Sitting sealed until dawn
+        // IS this rung's job; it says so now, once, with its own deadline as the TTL.
+        const holdBunker = reflexes.beginHold('nightShelter:bunker', 'dawn|hostile-gone|damage|flooding', dl - Date.now() + 5000)
+        try {
         while (Date.now() < dl && !isStopped()) {
           if ((!isNight(bot) && !nearHostile(bot, 10)) || nightStuck(bot)) break // stuck night: don't squat till a dawn that won't come
           if ((!recapped || DEFEND_WHEN_HIT_ON) && (bot.health || 20) < hpX - 3) { dbg('shelter: taking damage in the ' + (recapped ? 'SEALED bunker - breached' : 'open bunker') + ' - bailing out to fight/flee'); break }
@@ -478,12 +498,10 @@ async function digInForNight (bot, opts = {}) {
           }
           await new Promise(r => setTimeout(r, 3000))
         }
-        try {
-          const cap = bot.blockAt(capPos0)
-          if (cap && !AIRISH(cap.name) && (!bot.canDigBlock || bot.canDigBlock(cap))) { try { await bot.dig(cap) } catch {} }
-          await collectDrops(bot, 3)
-          await climbToSurface(bot, Math.floor(bot.entity.position.y) + 4, { isStopped })
-        } catch {}
+        } finally { reflexes.endHold(holdBunker); touchP('shelterHold:released') }
+        // the ONE way out of a pit (breakOut) - not "dig the cap i remember and climb to feet+4":
+        // a re-used bunker can have gained a second lid course, and +4 was an arithmetic guess (#111)
+        try { await breakOut(bot, { isStopped }) } catch (e) { dbg('shelter: bunker exit failed (' + e.message + ')') }
         return true
       }
       dbg('shelter: could not re-enter the bunker - digging fresh')
@@ -710,15 +728,90 @@ async function digInForNight (bot, opts = {}) {
     //    which cuts steps and needs NO filler blocks) - pillarUpTo alone stranded the bot
     //    when it had no dirt left (deaths strip inventory), ratcheting it deeper each night.
     try {
-      const cap = bot.blockAt(capPos)
-      if (cap && !AIRISH(cap.name) && (!bot.canDigBlock || bot.canDigBlock(cap))) { try { await bot.dig(cap) } catch {} }
-      await collectDrops(bot, 3) // recover the cap block as filler
-      await climbToSurface(bot, surfaceY, { isStopped })
-      // a FLOODED pit defeats climbToSurface (its dig primitives refuse water) - swim out
+      await breakOut(bot, { isStopped, surfaceY })
+      // a FLOODED pit defeats the climb (its dig primitives refuse water) - swim out
       if (inWaterNow(bot)) await ensureAshore(bot, isStopped)
     } catch {}
     return true
   } finally { _sheltering = false; bot.clearControlStates && bot.clearControlStates() }
+}
+
+// ==== BREAK OUT: the ONE way out of my own pit (2026-08-27) ====================================
+// Live 2026-08-27, 12:03-16:01: the bot sat sealed in its own bunker at 197,64,-179 for four hours -
+// a 1x1 air pocket under two dirt courses and its own plank lid, hp 1, a creeper waiting outside.
+// The chain: the re-used-bunker wait was not a declared hold, so the ladder cut it at 150s every
+// night; a cut rung's exit tail runs with isStopped() already true, so it opened nothing; the next
+// R5 sealPit re-sealed the lid; by day the planner refused every move (nav-profile.wildAllowedAt:
+// no digging within 32b of own infra - and the bunker IS own infra) and returned noPath in 1ms;
+// unstick called the pocket "terrain" and handed it back to the planner; the terminal action fired
+// 1,000+ full resets that touched nothing. Nobody OWNED "i am sealed in". This does: the shelter
+// sealed the pit, the shelter opens it - and navigate.unstick's 'sealed' rung calls it, so a body
+// that finds itself sealed in on ANY path (not just the shelter's own dawn) has an owner.
+//
+// What it may dig: the column straight above its own head, and only cells that are natural terrain
+// (canBreakNaturally - the anti-grief rule every other shelter dig obeys) or, within 3b of a
+// REGISTERED own shelter, a cap-type block (CAP_RE: the lid / side-fill this module places from
+// the pack). Nothing sideways, nothing below, never a liquid (an aquifer overhead = do not open it),
+// never inside the bot's own house (that is a door problem, provision-hut's). Bounded to 8 cells.
+// Then it climbs to the RIM THE DIG ITSELF FOUND - the y of the topmost lid cell it removed, a
+// block that was really there - never an arithmetic "+4" (#111), and never a column read of its
+// own now-open shaft (which would report the pit floor as the surface). pillarUpTo is asked with
+// that rim as its hard stop; if the pack has no filler, the staircase cut is the fallback.
+// Returns true when the feet ended at or above the rim.
+// Does the pack hold a block the shelter would cap with - which is also the block a pillar climbs on.
+function holdsCapMaterial (bot) { return (bot.inventory ? bot.inventory.items() : []).some(i => CAP_RE.test(i.name)) }
+
+async function breakOut (bot, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  if (!bot.entity || !bot.entity.position) return false
+  if (insideOwnStructure(bot)) { dbg('shelter: break-out refused - inside my own structure; the way out is the door'); return false }
+  // THE LID STAYS ON AT NIGHT. A sealed pit is the shelter's whole purpose; opening it in the dark
+  // (a creeper was 3.7m outside, live) is the death the pit exists to prevent. The night wait
+  // above owns "until dawn"; this only ever opens by day - or when the operator forces it (`die`).
+  if (!opts.force && isNight(bot)) { dbg('shelter: break-out deferred - night: the lid stays on until dawn'); return false }
+  const p0 = bot.entity.position.clone()
+  const feet0 = p0.floored()
+  const ownPit = (() => { try { return recallInfra('shelter', p0, 3) } catch { return null } })()
+  dbg('shelter: break-out at ' + feet0 + (ownPit ? ' (my registered pit at ' + ownPit.x + ',' + ownPit.y + ',' + ownPit.z + ')' : ' (no registered pit within 3b - natural terrain only)') + (opts.force ? ' [forced]' : ''))
+  const mayDig = (b) => {
+    if (/water|lava/.test(b.name)) return false
+    if (canBreakNaturally(b)) return true
+    return !!ownPit && CAP_RE.test(b.name)
+  }
+  let rimY = null
+  let dug = 0
+  for (let dy = 2; dy <= 8 && !isStopped(); dy++) {
+    const cell = feet0.offset(0, dy, 0)
+    const b = bot.blockAt(cell)
+    if (!b) { dbg('shelter: break-out - column unreadable at ' + cell + ' - stopping'); break }
+    if (!AIRISH(b.name)) {
+      if (!mayDig(b)) { dbg('shelter: break-out REFUSED at ' + cell + ' (' + b.name + ') - not natural terrain and not my own lid; not my block to cut'); break }
+      if (bot.canDigBlock && !bot.canDigBlock(b)) { dbg('shelter: break-out - canDigBlock=false for ' + b.name + ' at ' + cell); break }
+      const tool = toolForBlock(bot, b.name)
+      if (tool) await bot.equip(tool, 'hand').catch(() => {})
+      dbg('shelter: break-out - digging ' + b.name + ' at ' + cell)
+      try { await bot.dig(b) } catch (e) { dbg('shelter: break-out dig failed at ' + cell + ' (' + e.message + ')'); break }
+      dug++
+      rimY = cell.y // the topmost lid cell removed so far - a block that was really there
+    }
+    // the cell is open: is the sky open above it? (any block counts - own lid, litter, a canopy)
+    let roofed = false
+    for (let k = 1; k <= 24; k++) { const a = bot.blockAt(cell.offset(0, k, 0)); if (a && !AIRISH(a.name) && a.boundingBox === 'block') { roofed = true; break } }
+    if (!roofed) { if (rimY == null) rimY = cell.y - 1; break }
+  }
+  if (dug) { try { await collectDrops(bot, 3) } catch {} }
+  const surfaceY = rimY != null ? rimY : (Number.isFinite(opts.surfaceY) ? opts.surfaceY : null)
+  if (surfaceY == null) { dbg('shelter: break-out - opened ' + dug + ' cell(s) above ' + feet0 + ' but found no rim within 8 - not climbing blind'); return false }
+  const atRim = () => bot.entity && Math.floor(bot.entity.position.y) >= surfaceY
+  if (!atRim()) {
+    dbg('shelter: break-out - opened ' + dug + ' cell(s) above ' + feet0 + ', climbing to the rim y' + surfaceY)
+    // the rim is a grounded stop (a block we removed), so the open-sky guard may stand down here
+    try { await provMining.pillarUpTo(bot, surfaceY, { isStopped, surfaceY, ignoreOpenSkyBreak: true }) } catch (e) { dbg('shelter: break-out pillar failed (' + e.message + ')') }
+    if (!atRim() && !isStopped()) { try { await provMining.digStaircaseUp(bot, surfaceY, { isStopped, escape: true, surfaceY }) } catch (e) { dbg('shelter: break-out staircase failed (' + e.message + ')') } }
+  }
+  const out = atRim()
+  dbg('shelter: break-out -> ' + (out ? 'OUT at ' : 'still in at ') + (bot.entity ? bot.entity.position.floored() : '?') + ' (rim y' + surfaceY + ', dug ' + dug + ')')
+  return out
 }
 
 // #63 SUICIDE_DIES §A (PURE, unit-tested): given a list of candidate cells each already world-
@@ -737,5 +830,5 @@ module.exports = {
   // literal exports its VALUE - a snapshot of `false` taken once, at require time. provision-recovery
   // destructured that snapshot and then owned a dead variable that could never change and could never
   // be cleared, while believing it held the live latch. Ask isSheltering(); clear releaseShelterLatch().
-  DEFEND_WHEN_HIT_ON, isSheltering, releaseShelterLatch, shelterSite, SHELTER_FARM_R, shelterFarmConflict, inWaterNow, ensureAshore, findDiggableDryCell, scoutForWater, armorPieceCount, underArmored, lowHpCalm, shelterNeeded, nightStuck, nightRestWanted, sealShaft, digInForNight, pickOpenSkyCell
+  DEFEND_WHEN_HIT_ON, isSheltering, releaseShelterLatch, shelterSite, SHELTER_FARM_R, shelterFarmConflict, inWaterNow, ensureAshore, findDiggableDryCell, scoutForWater, armorPieceCount, underArmored, lowHpCalm, shelterNeeded, nightStuck, nightRestWanted, sealShaft, digInForNight, breakOut, holdsCapMaterial, pickOpenSkyCell
 }

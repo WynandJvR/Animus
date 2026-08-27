@@ -18,6 +18,7 @@
 const { goals } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
 const arbiter = require('./arbiter.js') // priority body-ownership: reflexes defer to a running maneuver
+const provShelter = () => require('./provision-shelter.js') // LAZY: provision-shelter.js top-requires navigate.js - a real cycle
 const provHut = () => require('./provision-hut.js') // LAZY: provision-hut.js top-requires this module, so an eager import here would be a real cycle
 const navProfile = require('./nav-profile.js') // PURE terrain policy - findDryLandExit (WATER_ESCAPE); no bot-module cycle
 const selfWorld = require('./self-world.js') // THE one self/world truth: is this cell mine? am I at home? (review 2026-08-25 D5/§3.4). Registry arithmetic only - no bot-module cycle
@@ -1048,6 +1049,16 @@ async function recoverOnce (bot, goal, plan, opts) {
         return indoorOK()
       }
     },
+    { // SEALED IN a 1x1 pocket (own night bunker, a cave-in): see sealedIn - the shelter that
+      // sealed it owns the way out. Judged by its own goal: feet above where they started.
+      kind: 'sealed',
+      when: () => sealedIn(bot),
+      run: async () => {
+        dbg('recovery sealed: asking the shelter to open my pit at ' + p0.floored())
+        const out = await provShelter().breakOut(bot, { isStopped })
+        return out || bot.entity.position.y > p0.y + 0.9 || movedEnough()
+      }
+    },
     { // in water the pathfinder never registers "on ground", so its planned jumps never
       // fire - it stands in a puddle forever (watched live, 8 min). Shallow trench: hop
       // straight onto the adjacent bank. Deep water (mid-river, no adjacent bank): swim
@@ -1458,7 +1469,34 @@ function unstickPlan (w) {
   if (w.submerged || w.wet) add('water') // a submerged bot has seconds; nothing else matters yet
   if (w.indoors) add('indoor', 'door')    // the way out of my own house is the door
   else if (w.door) add('door')
+  if (w.sealed) add('sealed')            // a 1x1 pocket: the shelter that sealed it opens it
   return plan
+}
+
+// SEALED IN (2026-08-27): a 1x1 pocket - solid on all four sides at feet AND head, solid overhead.
+// The planner cannot leave it: digging is priced only on the wild profile, and that profile is
+// refused within 32b of the bot's own infra (nav-profile.wildAllowedAt) - and the pocket the bot
+// is most often sealed in IS its own infra, its night bunker. So its planner answered noPath in
+// 1ms for four hours (live, 197,64,-179) while unstick called the pocket "terrain". It is a
+// rescue's job, and the owner is the module that sealed it: provision-shelter.breakOut. Inside the
+// bot's own HOUSE is not this - that is 'indoor' (the door), which unstickPlan asks first.
+// Fail CLOSED: an unloaded neighbour is not a wall, so an unreadable pocket is not "sealed".
+// Two shapes, one fact - "i cannot leave my column": walled on all four sides at feet AND head, and
+// either (a) a lid within 8 above (a sealed bunker, or a shaft dug down under a cap - live at
+// world spawn, 4 deep, lid at +4) or (b) nothing in the pack to pillar out with (an open pit the
+// planner can only leave by towering, and the pack is empty - every respawn). With filler in the
+// pack and open sky above, the planner's own tower move is the exit and this is not a rescue.
+function sealedIn (bot) {
+  try {
+    if (!bot.entity || !bot.entity.position) return false
+    const feet = bot.entity.position.floored()
+    const solid = (dx, dy, dz) => { const b = bot.blockAt(feet.offset(dx, dy, dz)); return !!b && b.boundingBox === 'block' && !/_leaves$/.test(b.name) }
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { if (!solid(dx, 0, dz) || !solid(dx, 1, dz)) return false }
+    for (let dy = 2; dy <= 8; dy++) { if (solid(0, dy, 0)) return true }
+    let filler = true
+    try { filler = provShelter().holdsCapMaterial(bot) } catch {}
+    return !filler
+  } catch { return false }
 }
 
 async function unstick (bot, goal, opts = {}) {
@@ -1503,10 +1541,11 @@ async function unstick (bot, goal, opts = {}) {
     indoors,
     wet: feetInWater(bot),
     submerged: headInWater(bot),
-    door: doorNearby(bot, goalXZ(goal))
+    door: doorNearby(bot, goalXZ(goal)),
+    sealed: sealedIn(bot)
   }
   const plan = unstickPlan(w)
-  const where = indoors ? 'INSIDE my own structure' : (w.submerged ? 'submerged' : (w.wet ? 'in water' : 'on terrain'))
+  const where = indoors ? 'INSIDE my own structure' : (w.submerged ? 'submerged' : (w.wet ? 'in water' : (w.sealed ? 'SEALED IN a 1x1 pocket' : 'on terrain')))
   if (!plan.length) {
     // ONE greppable line (#7): the situation, and who owns it.
     dbg('unstick: ' + where + ' at ' + feet + " - nothing here is a rescue's job; the terrain is the planner's (re-plan)" + (opts.why ? ' - ' + opts.why : ''))
@@ -1689,4 +1728,4 @@ function honestFail (lastErr, counts, label, recoveryMs, reflexWaitMs) {
   return e
 }
 
-module.exports = { doorFootCell, navigateTo, navigateToPreempt, gotoOnce, crossOwnDoor, openNearbyDoor, navLegBudget, enterStructure, swimToShore, escapeWater, escapeToDryLand, isEscapingWater, headInWater, feetInWater, outOfWater, jumpForAir, isNavigating, isRecovering, isUnsticking, releaseNavLatches, unstick, unstickPlan, setDebugSink, reactiveMove, reactiveTarget, reactiveDone, setDeliberateDrown, isDeliberateDrown, drownReflexSkips }
+module.exports = { sealedIn, doorFootCell, navigateTo, navigateToPreempt, gotoOnce, crossOwnDoor, openNearbyDoor, navLegBudget, enterStructure, swimToShore, escapeWater, escapeToDryLand, isEscapingWater, headInWater, feetInWater, outOfWater, jumpForAir, isNavigating, isRecovering, isUnsticking, releaseNavLatches, unstick, unstickPlan, setDebugSink, reactiveMove, reactiveTarget, reactiveDone, setDeliberateDrown, isDeliberateDrown, drownReflexSkips }

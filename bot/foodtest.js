@@ -195,13 +195,18 @@ t('FOOD_FLOOR F1: outboundRungAdmissible - a STARVING bot (food<=floorFood) may 
   assert.strictEqual(F.outboundRungAdmissible(1, { food: 0, floorFood: 2, ...FF }), true, 'hp1 food0 (<=floorFood) -> admit the fishing floor')
   assert.strictEqual(F.outboundRungAdmissible(1, { food: 2, floorFood: 2, ...FF }), true, 'hp1 food2 (==floorFood) -> admit')
   // NARROW: a merely-scratched, not-starving bot still aborts outbound at hp<=6 (the §5 invariant).
-  assert.strictEqual(F.outboundRungAdmissible(1, { food: 12, ...FF }), false, 'hp1 food12 (>floorFood) -> still aborts (no death-march)')
-  assert.strictEqual(F.outboundRungAdmissible(5, { food: 12, ...FF }), false, 'hp5 food12 -> still aborts as today')
+  // 2026-08-27: "not starving" is not the test - "can holding still heal me" is. Below the regen
+  // line (18) with nothing to eat, holding cannot; the food rung is the only producer of hp.
+  assert.strictEqual(F.outboundRungAdmissible(1, { food: 12, ...FF }), true, 'hp1 food12 (<18, empty pack): holding cannot heal -> admit the food rung')
+  assert.strictEqual(F.outboundRungAdmissible(5, { food: 12, ...FF }), true, 'hp5 food12 -> same: admit')
+  assert.strictEqual(F.outboundRungAdmissible(1, { food: 18, ...FF }), false, 'hp1 food18: regen works, the hold heals -> abort as before (no death-march)')
+  assert.strictEqual(F.outboundRungAdmissible(1, { food: 12, hasPackFood: true, ...FF }), false, 'hp1 food12 carrying food: eat, do not go out')
   // #51 FOOD_FLOOR_HP: hp3/food3 is the dead-zone livelock - with the hp-crisis clause ON the fishing
   // rung is now ADMITTED (was: aborts). With FOOD_FLOOR_HP=0 it aborts exactly as before (byte-for-byte).
   assert.strictEqual(F.outboundRungAdmissible(3, { food: 3, ...FF, foodFloorHp: true }), true, '#51: hp3 food3 (hp-crisis, no food) -> admit the fishing rung')
   assert.strictEqual(F.outboundRungAdmissible(3, { food: 3, ...FF, foodFloorHp: false }), false, 'FOOD_FLOOR_HP=0 -> hp3 food3 aborts as today (byte-for-byte)')
-  assert.strictEqual(F.outboundRungAdmissible(3, { food: 8, ...FF, foodFloorHp: true }), false, 'hp3 food8 (>dead-zone) -> still aborts (not a food-crisis)')
+  assert.strictEqual(F.outboundRungAdmissible(3, { food: 8, ...FF, foodFloorHp: true }), true, 'hp3 food8 (<18, empty pack) -> admit (the 7..17 band is no longer a dead band)')
+  assert.strictEqual(F.outboundRungAdmissible(3, { food: 18, ...FF, foodFloorHp: true }), false, 'hp3 food18 -> regen works, abort')
   // GUARDRAIL: no food passed (trekFarm rung) -> today's pure hp-abort, carve-out inert.
   assert.strictEqual(F.outboundRungAdmissible(1, FF), false, 'no food passed (trekFarm) -> hp1 aborts as today')
   assert.strictEqual(F.outboundRungAdmissible(7, { food: 0, ...FF }), true, 'hp7 -> admissible anyway (above the abort line)')
@@ -253,7 +258,7 @@ t('ROD_SUPPLY: needStringForRod - seek string ONLY when rod-less, reserve-dry, a
   assert.strictEqual(F.needStringForRod({ hasRod: false }), true, 'undefined counts default to 0 -> cold-start true')
 })
 
-t('#51 FOOD_FLOOR_HP: foodFloorTriggered - fish at food<=2 OR (hp<=6 & food<=6 & no pack food)', () => {
+t('#51 FOOD_FLOOR_HP: foodFloorTriggered - fish at food<=2 OR (hp<=6 & food<REGEN 18 & no pack food)', () => {
   const on = { foodFloor: true, foodFloorHp: true } // pin flags for determinism (avoid env)
   // existing starvation floor (food<=2, dry pack)
   assert.strictEqual(F.foodFloorTriggered({ food: 2, hasPackFood: false, ...on }), true, 'food<=2 dry -> fish (existing floor)')
@@ -263,8 +268,11 @@ t('#51 FOOD_FLOOR_HP: foodFloorTriggered - fish at food<=2 OR (hp<=6 & food<=6 &
   assert.strictEqual(F.foodFloorTriggered({ food: 6, hp: 6, hasPackFood: false, ...on }), true, 'hp6/food6 edge -> fish')
   // a healthy bot must NOT over-fish in the food 3-6 zone
   assert.strictEqual(F.foodFloorTriggered({ food: 4, hp: 20, hasPackFood: false, ...on }), false, 'hp20/food4 -> not an hp-crisis, no fish')
-  // food above the dead-zone even at low hp -> no fish (regen zone / eat path)
-  assert.strictEqual(F.foodFloorTriggered({ food: 8, hp: 4, hasPackFood: false, ...on }), false, 'food8 -> above the dead-zone, no fish')
+  // below the REGEN line at low hp with nothing to eat -> fish; at/above it the hold heals
+  assert.strictEqual(F.foodFloorTriggered({ food: 8, hp: 4, hasPackFood: false, ...on }), true, 'food8/hp4 dry -> cannot regen below 18, fish')
+  assert.strictEqual(F.foodFloorTriggered({ food: 17, hp: 4, hasPackFood: false, ...on }), true, 'food17/hp4 dry -> still cannot regen, fish')
+  assert.strictEqual(F.foodFloorTriggered({ food: 18, hp: 4, hasPackFood: false, ...on }), false, 'food18/hp4 -> regen works, no fish')
+  assert.strictEqual(F.foodFloorTriggered({ food: 8, hp: 7, hasPackFood: false, ...on }), false, 'food8/hp7 -> not an hp-crisis, no fish')
   // carrying food -> eat, never fish
   assert.strictEqual(F.foodFloorTriggered({ food: 4, hp: 4, hasPackFood: true, ...on }), false, 'hp-crisis but carrying food -> eat')
   // FOOD_FLOOR_HP=0 -> only the food<=2 case (byte-for-byte today)
@@ -584,8 +592,13 @@ t('ANTI-DRIFT: the regen threshold is NAMED once, and the healing rung asks for 
   const fs = require('fs'); const path = require('path')
   const food = fs.readFileSync(path.join(__dirname, 'provision-food.js'), 'utf8')
   const rec = fs.readFileSync(path.join(__dirname, 'provision-recovery.js'), 'utf8')
-  assert(/const REGEN_FOOD_MIN = 18/.test(food), 'the game rule must have ONE name')
-  assert(/REGEN_FOOD_MIN,/.test(food), 'and be exported so consumers can ask for it')
+  const pure = fs.readFileSync(path.join(__dirname, 'food.js'), 'utf8')
+  assert(/const REGEN_FOOD_MIN = 18/.test(pure), 'the game rule must have ONE name, in the pure module')
+  assert(!/const REGEN_FOOD_MIN = 18/.test(food), 'provision-food.js must not carry a second copy of the number')
+  assert(/REGEN_FOOD_MIN = foodSec\.REGEN_FOOD_MIN/.test(food), 'provision-food.js imports it from food.js')
+  assert(/REGEN_FOOD_MIN,/.test(food), 'and re-exports it so consumers can ask for it')
+  assert(/food < REGEN_FOOD_MIN && !hasPackFood/.test(pure), 'the hp-crisis food bound IS the regen rule (no FOOD_FLOOR_HP_FOOD knob)')
+  assert(!/FOOD_FLOOR_HP_FOOD/.test(pure), 'the second number is gone')
   // recoverHp's can-I-heal gate must read the constant, not a bare 18
   assert(!/\(bot\.food \?\? 20\) < 18\b/.test(rec), 'recoverHp must not re-derive the regen threshold')
   assert(/REGEN_FOOD_MIN/.test(rec), 'recovery must consult the named rule')

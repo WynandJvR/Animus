@@ -910,8 +910,16 @@ t('(#41 P5) spiralActive: deathsRecent >= SPIRAL_N(3) -> true; <3 -> false; flag
 t('(#41 P5) rungFeasible: spiral -> grave (R1) + outbound suppressed, home rungs stay', () => withResilient(() => {
   const s = snap({ deathsRecent: 3, isNight: false, underArmored: false, armorPieces: 4 })
   assert.strictEqual(S.rungFeasible({ rung: 'R1', action: 'recoverGrave' }, s), false, 'no grave chase in a spiral')
-  assert.strictEqual(S.rungFeasible({ rung: 'R4', action: 'secureFood(hunt->fish->scout)' }, s), false, 'no outbound trek in a spiral')
+  assert.strictEqual(S.rungFeasible({ rung: 'R4', action: 'secureFood(hunt->fish->scout)' }, s), false, 'no outbound trek in a spiral (food 20: the hold heals)')
   assert.strictEqual(S.rungFeasible({ rung: 'R1.5', action: 'rearmFromBank' }, s), true, 're-arm at home stays feasible')
+  // 2026-08-27: the hold must be able to heal, or it is not an answer - below the regen line with
+  // an empty pack the food rung is the ONE producer of hp and stays admissible BY DAY; at night the
+  // dawn rule still bars it; the far farm trek stays suppressed either way.
+  const hungry = snap({ deathsRecent: 3, isNight: false, underArmored: false, armorPieces: 4, food: 12, packFoodPts: 0 })
+  assert.strictEqual(S.rungFeasible({ rung: 'R4', action: 'secureFood(hunt->fish->scout)' }, hungry), true, 'spiral + food 12 + empty pack: holding cannot heal -> the food rung runs')
+  assert.strictEqual(S.rungFeasible({ rung: 'R3', action: 'trekFarm+tend+harvest+courierHome' }, hungry), false, 'the far trek stays suppressed in a spiral')
+  assert.strictEqual(S.rungFeasible({ rung: 'R4', action: 'secureFood(hunt->fish->scout)' }, snap({ ...hungry, packFoodPts: 6 })), false, 'food in the pack: eat it, hold - no outbound')
+  assert.strictEqual(S.rungFeasible({ rung: 'R4', action: 'secureFood(hunt->fish->scout)' }, snap({ ...hungry, isNight: true, underArmored: true, armorPieces: 0 })), false, 'naked at night: still barred (dawn)')
   assert.strictEqual(S.rungFeasible({ rung: 'R2', action: 'gotoHome+ensureFood(forceFresh)+cook+eat' }, s), true, 'home rungs stay feasible')
 }))
 
