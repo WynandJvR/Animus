@@ -58,6 +58,17 @@ t('matchRoute: 23.9b matches, 24.1b rejects (both orientations)', () => {
   assert.strictEqual(rm.matchRoute(routes, { x: 24.1, z: 0 }, { x: 200, z: 0 }, 24), null, '24.1b rejected')
 })
 
+// ---- routeCursor: with the goal known, a node must bring the body CLOSER -------------------
+t('routeCursor(pts, pos, goal) never targets a node farther from the goal than pos already is', () => {
+  // spawn -> farm -> site, body already past the farm and off to the side of the first segment
+  const pts = [{ x: 0, z: 0 }, { x: 150, z: -115 }, { x: 244, z: -261 }]
+  const pos = { x: 204, z: -190 }
+  const goal = { x: 244, z: -261 }
+  assert.strictEqual(rm.routeCursor(pts, pos, goal), 2, 'the farm node is behind the body: aim at the site')
+  assert.strictEqual(rm.routeCursor(pts, { x: 60, z: -40 }, goal), 1, 'still before the farm: the farm node shortens the way')
+  assert.strictEqual(rm.routeCursor(pts, pos), rm.routeCursor(pts, pos, undefined), 'no goal -> the old forward-only answer')
+})
+
 // ---- routeCursor: forward-only -----------------------------------------------------
 t('routeCursor never targets a point behind pos', () => {
   const pts = [{ x: 0, z: 0 }, { x: 10, z: 0 }, { x: 20, z: 0 }, { x: 30, z: 0 }, { x: 40, z: 0 }]

@@ -782,7 +782,7 @@ async function breakOut (bot, opts = {}) {
   const ownPit = (() => { try { return recallInfra('shelter', p0, 3) } catch { return null } })()
   const mayDig = (b) => {
     if (/water|lava/.test(b.name)) return false
-    if (canBreakNaturally(b)) return true
+    if (canBreakNaturally(b) || /_leaves$/.test(b.name)) return true // a canopy over the lid is not a build (live: refused birch_leaves at +4)
     return !!ownPit && CAP_RE.test(b.name)
   }
   const SIDES4 = [[1, 0], [-1, 0], [0, 1], [0, -1]]

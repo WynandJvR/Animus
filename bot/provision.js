@@ -587,7 +587,10 @@ async function breachDryPocket (bot, opts = {}) {
 // full-featured cousin with door-assist; this is the light provision-side version for
 // memory/bed/grove treks that can't import it without a require cycle.)
 async function walkStaged (bot, tx, tz, opts = {}) {
-  const isStopped = opts.isStopped || (() => false)
+  // a trek that outlives the body that started it is over (pathfix bumps its epoch on death) -
+  // see commands.travelFar for the live case
+  const epoch0 = require('./pathfix.js').epoch()
+  const isStopped = () => (opts.isStopped ? !!opts.isStopped() : false) || !require('./pathfix.js').sameEpoch(epoch0)
   const budgetMs = opts.timeoutMs || 180000
   const startTime = Date.now()
   const deadline = startTime + budgetMs
@@ -653,11 +656,11 @@ async function walkStaged (bot, tx, tz, opts = {}) {
     let replayLeg = false
     let graphLeg = false
     if (graphPlan) {
-      const cur = routeMem.routeCursor(graphPlan.pts, p)
+      const cur = routeMem.routeCursor(graphPlan.pts, p, { x: tx, z: tz })
       const pt = graphPlan.pts[cur]
       lx = pt.x; lz = pt.z; graphLeg = true
     } else if (replay) {
-      const cur = routeMem.routeCursor(replay.pts, p)
+      const cur = routeMem.routeCursor(replay.pts, p, { x: tx, z: tz })
       const pt = replay.pts[cur]
       lx = pt.x; lz = pt.z; replayLeg = true
     } else if (stalls === 0) {

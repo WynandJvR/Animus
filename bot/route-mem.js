@@ -128,7 +128,7 @@ function matchRoute (routes, from, to, tol = ROUTE_MATCH_TOL) {
 // segment's FAR endpoint - i.e. the next point along the direction of travel. Because it
 // keys off which segment we're on rather than which vertex is nearest, re-solving the
 // cursor each leg only ever moves FORWARD (it can never hand back a point already passed).
-function routeCursor (pts, pos) {
+function routeCursor (pts, pos, goal) {
   if (!Array.isArray(pts) || pts.length === 0) return 0
   if (pts.length === 1) return 0
   let bestSeg = 0; let bestDev = Infinity
@@ -136,7 +136,18 @@ function routeCursor (pts, pos) {
     const dev = pointToSegDist(pos, pts[i], pts[i + 1])
     if (dev < bestDev) { bestDev = dev; bestSeg = i }
   }
-  return Math.min(bestSeg + 1, pts.length - 1)
+  let cur = Math.min(bestSeg + 1, pts.length - 1)
+  // A PROVEN ROUTE MAY ONLY SHORTEN THE WAY (2026-08-27). "Forward along the polyline" is not
+  // "forward toward the goal": the nearest segment can be an earlier one lying off to the side,
+  // and its far endpoint then sits BEHIND the body. Live, twice: the trek was 60b from the site
+  // at 204,-190, composed a 3-node graph route, and walked 150b back to the farm node at
+  // 152,-116 to "join" it (the operator watched it run to where it died, turn around and run
+  // back). So with the goal known, skip every node that is not nearer the goal than the body is.
+  if (goal && Number.isFinite(goal.x) && Number.isFinite(goal.z)) {
+    const here = dist(pos, goal)
+    while (cur < pts.length - 1 && dist(pts[cur], goal) >= here) cur++
+  }
+  return cur
 }
 
 // ---- route sanity + fail-decay -----------------------------------------------------

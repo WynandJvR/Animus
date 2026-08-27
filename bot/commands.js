@@ -337,7 +337,13 @@ async function travelFar (bot, dest, opts = {}) {
   // time is already credited out below so a legit slow trek isn't punished.
   const d0 = (bot.entity && bot.entity.position) ? Math.hypot(dest.x - bot.entity.position.x, dest.z - bot.entity.position.z) : 0
   const deadlineMs = opts.deadlineMs || Math.max(300000, Math.round(d0 * 2500))
-  const isStopped = opts.isStopped || (() => false)
+  // THE BODY THAT STARTED THIS TREK CAN DIE UNDER IT (2026-08-27). The death handler flips
+  // buildAbort, and the respawn's resume re-arms it (buildAbort=false) seven seconds later -
+  // before this loop's 90s leg has polled once. So the pre-death trek carried on driving the
+  // RESPAWNED body from spawn (live 19:42-19:46, twice) while a fresh resume was dispatched on
+  // top of it. pathfix bumps its epoch on every death; a loop that outlives its epoch is over.
+  const epoch0 = require('./pathfix.js').epoch()
+  const isStopped = () => (opts.isStopped ? !!opts.isStopped() : false) || !require('./pathfix.js').sameEpoch(epoch0)
   const say = opts.say || (() => {})
   const start = Date.now()
   let lastD = Infinity
@@ -447,11 +453,11 @@ async function travelFar (bot, dest, opts = {}) {
       let replayLeg = false
       let graphLeg = false
       if (graphPlan) {
-        const cur = routeMem.routeCursor(graphPlan.pts, me)
+        const cur = routeMem.routeCursor(graphPlan.pts, me, { x: dest.x, z: dest.z })
         const pt = graphPlan.pts[cur]
         wx = pt.x; wz = pt.z; graphLeg = true
       } else if (replay) {
-        const cur = routeMem.routeCursor(replay.pts, me)
+        const cur = routeMem.routeCursor(replay.pts, me, { x: dest.x, z: dest.z })
         const pt = replay.pts[cur]
         wx = pt.x; wz = pt.z; replayLeg = true
       } else {
