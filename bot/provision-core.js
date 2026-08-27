@@ -95,6 +95,14 @@ async function collectDrops (bot, radius = 10, { patience = 1 } = {}) {
     for (const e of Object.values(bot.entities || {})) {
       if (!e || !e.position || e.name !== 'item') continue
       if (unreachable.has(e.id)) continue
+      // A DROP IN THE WATER WITH A HOSTILE ABOUT IS NOT WORTH WADING FOR (2026-08-27). Three deaths
+      // at one pond in one evening, all the same shape: a harvested wheat rolls into the farm pond,
+      // this sweep walks in after it, and the Drowned living there finishes the bot. A player lets
+      // a floating wheat go when something is in the water with it.
+      try {
+        const cell = bot.blockAt(e.position)
+        if (cell && /water/.test(cell.name) && nearHostile(bot, 16)) { unreachable.add(e.id); dbg('  collect: leaving a drop in the water at ' + e.position.floored() + ' - a hostile is within 16b, not wading in'); continue }
+      } catch {}
       const d = e.position.distanceTo(bot.entity.position)
       if (d < best) { best = d; target = e }
     }

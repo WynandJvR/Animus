@@ -382,6 +382,24 @@ async function digInForNight (bot, opts = {}) {
       dbg('shelter: too close to the pit that flooded - moving to ' + Math.round(away.x) + ',' + Math.round(away.z) + ' first')
       try { await gotoWithTimeout(bot, new goals.GoalNearXZ(away.x, away.z, 2), 15000) } catch {}
     }
+    // NEVER BUNKER BESIDE OPEN WATER (2026-08-27). A pond is where a Drowned lives; the pit at
+    // 171,63,-136 was five blocks from the farm pond and the bot died in it at dawn - the third
+    // death at that pond. A player does not sleep on the bank. Step clear of any water within 8b
+    // before the in-place dig / the dry-cell search below picks a spot.
+    try {
+      const mdW = require('minecraft-data')(bot.version)
+      const wid = mdW.blocksByName.water && mdW.blocksByName.water.id
+      const wb = wid != null ? bot.findBlock({ matching: wid, maxDistance: 8 }) : null
+      if (wb) {
+        const p0w = bot.entity.position
+        let dx = p0w.x - wb.position.x, dz = p0w.z - wb.position.z
+        if (Math.abs(dx) < 0.5 && Math.abs(dz) < 0.5) { dx = 1; dz = 0 }
+        const n = Math.hypot(dx, dz) || 1
+        const away = { x: Math.round(wb.position.x + (dx / n) * 14), z: Math.round(wb.position.z + (dz / n) * 14) }
+        dbg('shelter: open water at ' + wb.position + ' within 8b - stepping clear to ' + away.x + ',' + away.z + ' before digging (a pond is where a Drowned lives)')
+        try { await gotoWithTimeout(bot, new goals.GoalNearXZ(away.x, away.z, 2), 15000) } catch {}
+      }
+    } catch {}
     // NEVER dig the bunker inside the active build footprint - step just past the nearest
     // edge first (a pit under the castle floor is a hole in the build, operator rule).
     const p0 = bot.entity.position
