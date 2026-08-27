@@ -411,6 +411,7 @@ function buildReady (snapshot) {
   // (1) #41 P0.1 - after a death, RECOVERY owns the bot and OUTRANKS build-resume. The build waits,
   //     kept on disk, never driving the naked bot back into the death cell.
   if (s.postDeathRecovery) {
+    // (the camp-first answer lives in recoveryReady itself - ONE definition, 2026-08-27)
     const ready = typeof s.recoveryReady === 'boolean' ? s.recoveryReady : recoveryReady(s).ready
     if (resumeGate({ postDeathRecovery: true, ready }) === 'wait') {
       return { ok: false, why: 'post-death recovery in progress', need: 'recovery', exempt: false }
@@ -851,8 +852,15 @@ function journeyAdmissible (snapshot, dist, opts = {}) {
   // window (grave.js), so this releases itself by condition - a bot that survives 20 minutes may
   // try again. This is the clause that ends the treadmill: attempt 3 does not become attempt 8.
   const far = Number(process.env.JOURNEY_FAR || 128)
-  if (d > far && (s.deathsRecent || 0) >= Number(process.env.SPIRAL_N || 3) && s.underArmored) {
-    return { ok: false, blockedOn: 'anchor', why: `${s.deathsRecent} deaths in the last 20 min and ${Math.round(d)}b to cross un-armoured - this crossing is what is killing me` }
+  // "THIS CROSSING IS WHAT IS KILLING ME" IS A CLAIM ABOUT WHERE THE DEATHS WERE (2026-08-27). The
+  // window counted every death; a naked bot respawning at world spawn in the dark dies THERE,
+  // three times a night, and the count then barred it from the daylight crossing for the next 20
+  // minutes - i.e. for the day - after which it was night at spawn again. The snapshot now carries
+  // `deathsAway` (recent deaths farther than 32b from where the body stands - deaths on the way,
+  // not deaths at the door); a snapshot without it keeps the old count, so nothing gets weaker.
+  const spiralDeaths = s.deathsAway != null ? s.deathsAway : (s.deathsRecent || 0)
+  if (d > far && spiralDeaths >= Number(process.env.SPIRAL_N || 3) && s.underArmored) {
+    return { ok: false, blockedOn: 'anchor', why: `${spiralDeaths} deaths away from here in the last 20 min and ${Math.round(d)}b to cross un-armoured - this crossing is what is killing me` }
   }
   const food = s.food != null ? s.food : 20
   if (d > far && food < 6 && !(s.packFoodPts > 0)) return { ok: false, blockedOn: 'food', why: 'food ' + food + ' with an empty pack - would starve before arriving' }
@@ -1185,6 +1193,16 @@ function recoveryReady (snapshot) {
   // Without this, a snapshot whose vitals read failed defaults to hp 20 / food 20 and the bot
   // declares itself recovered, clears the post-death latch and resumes the build.
   if (s.vitalsKnown === false || s.hp == null || s.food == null) return { ready: false, maxCaution: true, reason: 'cannot read my own vitals - not calling myself recovered' }
+  // THE SITE FIRST, AFTER A DEATH TOO (2026-08-27). This predicate demands pick+sword and armour
+  // (or no source of it) - the right bar for a bot with a camp to walk back to. With NO hut
+  // standing the camp step at the site IS the shelter (#102) and the tools and armour are made
+  // THERE; a from-nothing bot that has died owns no pick, so the post-death latch this predicate
+  // clears held the camp hostage to gear it can only make at the camp (nine deaths today, the trek
+  // never proposed by day) - and once the build was let through by the exemption alone, the latch
+  // kept the ladder crisis-grade and it preempted the trek every tick: two owners, one body,
+  // ping-pong between the farm and the road. So while no hut stands, vitals restored IS recovered
+  // - said HERE, once, so the tick clears the latch and buildReady reads the same answer.
+  if (campFirstExempt(s) && vitalsOk) return { ready: true, maxCaution: true, reason: 'no hut stands - the camp step at the site is the recovery (#102); vitals restored' }
   if (gearUpUnachievable(s)) return { ready: true, maxCaution: true, reason: 'gear-up unachievable (survivable, no re-arm source) - releasing the build, max caution' }
   if (!coreTools) return { ready: false, maxCaution: false, reason: 'missing core tools (pick/sword)' }
   if (!vitalsOk) return { ready: false, maxCaution: false, reason: 'vitals not restored (hp>=' + HP_OK + ' food>=14)' }

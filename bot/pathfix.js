@@ -944,8 +944,23 @@ function installPathfinderTuning (bot) {
       if (!bot.pathfinder.__hardenedSet) {
         bot.pathfinder.__hardenedSet = true
         const origSet = bot.pathfinder.setMovements
-        bot.pathfinder.setMovements = (m) => origSet(hardenMovements(m))
-        if (bot.pathfinder.movements) hardenMovements(bot.pathfinder.movements)
+        // ...and every profile carries the SPRINT verdict for this body's food (food.sprintAffordable):
+        // the pathfinder re-reads movements.allowSprinting every tick, the trek rebuilds its profile
+        // every attempt, so a bar that drops below the line stops the sprint within one attempt. A
+        // profile that already says no (the pinned-body back-off, navigate.js) is left saying no.
+        const sprintPolicy = (m) => {
+          try {
+            if (m && 'allowSprinting' in m && m.allowSprinting) {
+              const md = require('minecraft-data')(bot.version); const foods = (md && md.foodsByName) || {}
+              let packFoodPts = 0
+              for (const i of (bot.inventory ? bot.inventory.items() : [])) if (foods[i.name]) packFoodPts += (foods[i.name].foodPoints || 0) * i.count
+              m.allowSprinting = require('./food.js').sprintAffordable({ food: bot.food, packFoodPts })
+            }
+          } catch {}
+          return m
+        }
+        bot.pathfinder.setMovements = (m) => origSet(hardenMovements(sprintPolicy(m)))
+        if (bot.pathfinder.movements) hardenMovements(sprintPolicy(bot.pathfinder.movements))
       }
       bot.pathfinder.tickTimeout = Number(process.env.PATH_TICK_MS || 40)
       if ('searchRadius' in bot.pathfinder) bot.pathfinder.searchRadius = Number(process.env.PATH_SEARCH_RADIUS || 192)

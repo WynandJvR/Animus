@@ -136,6 +136,17 @@ function busyPreemptFood (opts = {}) {
 // (foodtest pins both ends). A second copy of the number is a dead band waiting to happen.
 const REGEN_FOOD_MIN = 18
 
+// SPRINT ONLY WHAT YOU CAN REPLACE (2026-08-27, PURE). Sprint-jumping across the map is how the bot
+// spends its food bar: live, 12 -> 0 in six minutes of trekking, 20 -> 6 in three, with nothing in
+// the pack to put it back - then it arrives at the farm too hungry to regenerate and too weak to
+// sprint anyway (the game forbids it at food <= 6). A player with an empty pack and a half bar
+// walks. So: sprint when there is food in the pack to pay for it, or the bar is at/above the regen
+// line (the same ONE number - above it the food is a surplus, below it it is the hp budget).
+function sprintAffordable ({ food, packFoodPts } = {}) {
+  if ((packFoodPts || 0) > 0) return true
+  return food == null || food >= REGEN_FOOD_MIN
+}
+
 // #51 FOOD_FLOOR_HP - the ONE shared "must actively FISH NOW" predicate (PURE). Fires at genuine
 // starvation (food<=floorFood, the existing floor) OR during an hp-crisis that can't self-heal with
 // NO food on hand (the food 3-6 dead-zone livelock: hp4/food4 in the hut, barren farm + dry bank,
@@ -361,4 +372,4 @@ function foodNeedForPlan (plan = {}, opts = {}) {
   return Math.round(need)
 }
 
-module.exports = { REGEN_FOOD_MIN, BAD_FOOD, RAW_COOKABLE_FOOD, foodTier, hasFoodSupply, needsFoodSupply, shouldSweepForFood, foodSupplyAction, shouldTrekHomeForFood, breadFromWheat, wheatWithdrawForBake, bankFoodWithdrawPts, foodSurplusToBank, farmExpandGate, foodNeedForPlan, inLoopFoodTrigger, busyPreemptFood, foodFloorTriggered, outboundRungAdmissible, famineHoldFood, foodFloorEscalation, foodFloorEscalated, AUTO_EAT_AT, needStringForRod, shouldFish }
+module.exports = { REGEN_FOOD_MIN, sprintAffordable, BAD_FOOD, RAW_COOKABLE_FOOD, foodTier, hasFoodSupply, needsFoodSupply, shouldSweepForFood, foodSupplyAction, shouldTrekHomeForFood, breadFromWheat, wheatWithdrawForBake, bankFoodWithdrawPts, foodSurplusToBank, farmExpandGate, foodNeedForPlan, inLoopFoodTrigger, busyPreemptFood, foodFloorTriggered, outboundRungAdmissible, famineHoldFood, foodFloorEscalation, foodFloorEscalated, AUTO_EAT_AT, needStringForRod, shouldFish }

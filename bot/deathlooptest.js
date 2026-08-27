@@ -59,6 +59,12 @@ t('LOOP A: a DAYLIGHT crossing is still refused while the bot is spiralling and 
   const j = S.journeyAdmissible(day, 486)
   assert.strictEqual(j.ok, false, '3+ deaths in 20 min + naked + far = the crossing IS the thing killing us')
   assert.strictEqual(j.blockedOn, 'anchor')
+  // 2026-08-27: ...when the deaths were ON THE WAY. Seven deaths at the respawn point itself are
+  // not evidence about the road: with deathsAway 0 the daylight crossing is admissible.
+  const atTheDoor = Object.assign({}, day, { deathsAway: 0 })
+  assert.strictEqual(S.journeyAdmissible(atTheDoor, 486).ok, true, 'spawn-night deaths do not bar the daylight crossing')
+  const onTheRoad = Object.assign({}, day, { deathsAway: 3 })
+  assert.strictEqual(S.journeyAdmissible(onTheRoad, 486).blockedOn, 'anchor', 'three deaths on the way still do')
 })
 t('LOOP A: a SHORT hop is never blocked (no gate may ever leave the bot unable to act)', () => {
   for (const d of [0, 5, 16, 32]) {

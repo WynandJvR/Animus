@@ -124,6 +124,15 @@ t('#114 buildReady: calm + provisioned -> ok (the control)', () => {
 })
 
 t('#114 buildReady: post-death latch + not recovered -> refuse with need=recovery (#41 P0.1)', () => {
+  // 2026-08-27 THE SITE FIRST, AFTER A DEATH TOO: with NO hut standing and vitals back, a dead
+  // bot with no pick and no armour is let through to the camp step (that is where the tools are
+  // made); with a hut standing the full recoveryReady bar holds as before.
+  {
+    const naked = calm({ postDeathRecovery: true, hp: 20, food: 20, armorPieces: 0, packArmorPieces: 0, bankArmorPieces: 0, rawIron: 0, tools: { pick: false, sword: false }, hutExists: false, homeReachable: false, homeDist: 300 })
+    assert.strictEqual(scheduler.buildReady(naked).ok, true, 'no hut + vitals back -> the camp step is the recovery')
+    assert.strictEqual(scheduler.buildReady(calm({ ...naked, hutExists: true })).ok, false, 'a hut stands -> recoveryReady (pick/sword) still gates the resume')
+    assert.strictEqual(scheduler.buildReady(calm({ ...naked, hp: 9 })).ok, false, 'no hut but hp 9 -> not yet (vitals first)')
+  }
   const r = scheduler.buildReady(calm({ postDeathRecovery: true, hp: 4, food: 4, armorPieces: 0 }))
   assert.strictEqual(r.ok, false)
   assert.strictEqual(r.need, 'recovery')

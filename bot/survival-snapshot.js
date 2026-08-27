@@ -457,7 +457,11 @@ async function schedulerState (bot) {
     s.recentDeathCells = require('./grave.js').ledger()
       .filter(d => d && now - (d.at || 0) < 20 * 60000)
       .map(d => ({ x: d.x, z: d.z }))
-  } catch { s.recentDeathCells = [] }
+    // deathsAway: the recent deaths that happened somewhere ELSE - farther than 32b from where the
+    // body stands now. A bot at spawn counting its spawn-night deaths against a daylight crossing
+    // is judging the road by what happened at the door (journeyAdmissible's spiral clause).
+    s.deathsAway = me ? s.recentDeathCells.filter(c => Math.hypot(c.x - me.x, c.z - me.z) > 32).length : s.recentDeathCells.length
+  } catch { s.recentDeathCells = []; s.deathsAway = 0 }
   // hutExists: does a hut anchor stand in memory? (#102 CAMP_FIRST's noHut exemption reads this;
   // bootstrapNeed's #103 clause already referenced the field but nothing ever set it.)
   try { s.hutExists = !!hutAnchor() } catch { s.hutExists = false }

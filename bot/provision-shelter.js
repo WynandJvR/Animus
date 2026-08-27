@@ -294,7 +294,16 @@ async function sealShaft (bot, interior = {}) {
     const f = bot.entity.position.floored()
     const below = bot.blockAt(f.offset(0, -1, 0))
     const below2 = bot.blockAt(f.offset(0, -2, 0))
-    if (below && !AIRISH(below.name) && !/lava|water/.test(below.name) && canBreakNaturally(below) &&
+    // BOUNDED BY THE RIM (2026-08-27). This last resort ran on EVERY failed lid, and the lid failed
+    // on every re-seal ("place did not land ... (world re-read)"), so each night-cycle dug the
+    // floor one deeper: live at the build site, feet 65 -> 57 in one night, an 8-deep well the
+    // bot then had to climb out of at dawn. The comment above names the bound - "a 3-deep shaft
+    // with a lid at -2 still seals" - so that IS the bound: the floor may go to rim-3 and no
+    // further. The caller passes the rim (the fresh dig's surface, the re-used pit's registered y).
+    const rimY = Number.isFinite(interior.rimY) ? interior.rimY : null
+    const deeperOK = rimY == null || (f.y - 1) >= rimY - 3
+    if (!deeperOK) dbg('shelter: NOT digging deeper - the floor is already ' + (rimY - f.y) + ' below the rim y' + rimY + '; deeper is a well, not a shelter')
+    if (deeperOK && below && !AIRISH(below.name) && !/lava|water/.test(below.name) && canBreakNaturally(below) &&
         !(below2 && /lava|water/.test(below2.name))) {
       try {
         await bot.dig(below); await new Promise(r => setTimeout(r, 300)); await collectDrops(bot, 3)
@@ -470,7 +479,7 @@ async function digInForNight (bot, opts = {}) {
         const head0 = feet0.offset(0, 1, 0)
         let alcove0 = null
         if (countItem(bot, 'torch') > 0) { try { alcove0 = await digTorchAlcove(bot, feet0) } catch {} }
-        const seal0 = await sealShaft(bot, { feet: feet0, head: head0, alcoveCell: alcove0 })
+        const seal0 = await sealShaft(bot, { feet: feet0, head: head0, alcoveCell: alcove0, rimY: oldPit.y })
         if (alcove0) { try { await placeTorch(bot) } catch {} }
         const capPos0 = seal0.capPos
         const recapped = seal0.capped && !seal0.sideHoles
@@ -651,7 +660,7 @@ async function digInForNight (bot, opts = {}) {
     if (countItem(bot, 'torch') > 0) { try { alcoveCell = await digTorchAlcove(bot, feet) } catch {} }
     // WALLS FIRST, THEN CAP (sealShaft) - the head ring gives the cap solid faces so it seals in
     // open-cave geometry, and the alcove cell is kept OPEN (not walled) for the torch.
-    const { capped, sideHoles, capPos } = await sealShaft(bot, { feet, head, alcoveCell })
+    const { capped, sideHoles, capPos } = await sealShaft(bot, { feet, head, alcoveCell, rimY: surfaceY })
     // Light it: after sealing, the alcove is the sole open floor-level neighbour, so placeTorch
     // lands the torch there (not against some other still-open side).
     if (alcoveCell) { try { await placeTorch(bot) } catch {} }
@@ -770,47 +779,63 @@ async function breakOut (bot, opts = {}) {
   // above owns "until dawn"; this only ever opens by day - or when the operator forces it (`die`).
   if (!opts.force && isNight(bot)) { dbg('shelter: break-out deferred - night: the lid stays on until dawn'); return false }
   const p0 = bot.entity.position.clone()
-  const feet0 = p0.floored()
   const ownPit = (() => { try { return recallInfra('shelter', p0, 3) } catch { return null } })()
-  dbg('shelter: break-out at ' + feet0 + (ownPit ? ' (my registered pit at ' + ownPit.x + ',' + ownPit.y + ',' + ownPit.z + ')' : ' (no registered pit within 3b - natural terrain only)') + (opts.force ? ' [forced]' : ''))
   const mayDig = (b) => {
     if (/water|lava/.test(b.name)) return false
     if (canBreakNaturally(b)) return true
     return !!ownPit && CAP_RE.test(b.name)
   }
-  let rimY = null
+  const SIDES4 = [[1, 0], [-1, 0], [0, 1], [0, -1]]
+  const solidAt = (c) => { const b = bot.blockAt(c); return !!b && !AIRISH(b.name) && b.boundingBox === 'block' }
+  // the first solid cell over the head (a lid), or null = open sky
+  const lidAbove = (feet) => { for (let k = 2; k <= 24; k++) { const c = feet.offset(0, k, 0); if (solidAt(c)) return c } return null }
+  // the lowest level at/above the feet with a side opening - where the body can step OUT
+  const openingY = (feet) => {
+    for (let dy = 0; dy <= 12; dy++) {
+      const y = feet.y + dy
+      let walled = true
+      for (const [dx, dz] of SIDES4) { const b = bot.blockAt(new Vec3(feet.x + dx, y, feet.z + dz)); if (!b || AIRISH(b.name)) { walled = false; break } }
+      if (!walled) return y
+    }
+    return null
+  }
+  const climbTo = async (target) => {
+    try { await provMining.pillarUpTo(bot, target, { isStopped, surfaceY: target, ignoreOpenSkyBreak: true }) } catch (e) { dbg('shelter: break-out pillar failed (' + e.message + ')') }
+    if (bot.entity && Math.floor(bot.entity.position.y) < target && !isStopped()) { try { await provMining.digStaircaseUp(bot, target, { isStopped, escape: true, surfaceY: target }) } catch (e) { dbg('shelter: break-out staircase failed (' + e.message + ')') } }
+  }
+  dbg('shelter: break-out at ' + p0.floored() + (ownPit ? ' (my registered pit at ' + ownPit.x + ',' + ownPit.y + ',' + ownPit.z + ')' : ' (no registered pit within 3b - natural terrain only)') + (opts.force ? ' [forced]' : ''))
   let dug = 0
-  for (let dy = 2; dy <= 8 && !isStopped(); dy++) {
-    const cell = feet0.offset(0, dy, 0)
-    const b = bot.blockAt(cell)
-    if (!b) { dbg('shelter: break-out - column unreadable at ' + cell + ' - stopping'); break }
-    if (!AIRISH(b.name)) {
-      if (!mayDig(b)) { dbg('shelter: break-out REFUSED at ' + cell + ' (' + b.name + ') - not natural terrain and not my own lid; not my block to cut'); break }
-      if (bot.canDigBlock && !bot.canDigBlock(b)) { dbg('shelter: break-out - canDigBlock=false for ' + b.name + ' at ' + cell); break }
+  // REACH-AWARE (2026-08-27): the arm reaches ~4 blocks. The first cut of this dug the column
+  // "up to 8" from the floor and hit canDigBlock=false at +7 (out of reach), then guessed a rim.
+  // Now: open what the arm reaches, climb, look again - bounded passes, every step a world read.
+  for (let pass = 0; pass < 8 && !isStopped(); pass++) {
+    const feet = bot.entity.position.floored()
+    const lid = lidAbove(feet)
+    if (lid && lid.y - feet.y <= 4) {
+      const b = bot.blockAt(lid)
+      if (!mayDig(b)) { dbg('shelter: break-out REFUSED at ' + lid + ' (' + b.name + ') - not natural terrain and not my own lid; not my block to cut'); return false }
+      if (bot.canDigBlock && !bot.canDigBlock(b)) { dbg('shelter: break-out - canDigBlock=false for ' + b.name + ' at ' + lid); return false }
       const tool = toolForBlock(bot, b.name)
       if (tool) await bot.equip(tool, 'hand').catch(() => {})
-      dbg('shelter: break-out - digging ' + b.name + ' at ' + cell)
-      try { await bot.dig(b) } catch (e) { dbg('shelter: break-out dig failed at ' + cell + ' (' + e.message + ')'); break }
+      dbg('shelter: break-out - digging ' + b.name + ' at ' + lid)
+      try { await bot.dig(b) } catch (e) { dbg('shelter: break-out dig failed at ' + lid + ' (' + e.message + ')'); return false }
       dug++
-      rimY = cell.y // the topmost lid cell removed so far - a block that was really there
+      continue
     }
-    // the cell is open: is the sky open above it? (any block counts - own lid, litter, a canopy)
-    let roofed = false
-    for (let k = 1; k <= 24; k++) { const a = bot.blockAt(cell.offset(0, k, 0)); if (a && !AIRISH(a.name) && a.boundingBox === 'block') { roofed = true; break } }
-    if (!roofed) { if (rimY == null) rimY = cell.y - 1; break }
+    // no lid within reach: the next move is UP - to the rim if the sky is open, else to just under the lid
+    const rim = openingY(feet)
+    if (rim != null && rim === feet.y && !lid) break // standing at an opening under open sky: out
+    const target = lid ? lid.y - 2 : rim
+    if (target == null) { dbg('shelter: break-out - no side opening within 12 above ' + feet + ' and open sky - not climbing blind'); break }
+    if (feet.y >= target) break
+    dbg('shelter: break-out - climbing ' + feet.y + ' -> ' + target + (lid ? ' (to reach the lid at y' + lid.y + ')' : ' (the rim)'))
+    await climbTo(target)
+    if (!bot.entity || Math.floor(bot.entity.position.y) <= feet.y) { dbg('shelter: break-out - could not climb from ' + feet); break }
   }
   if (dug) { try { await collectDrops(bot, 3) } catch {} }
-  const surfaceY = rimY != null ? rimY : (Number.isFinite(opts.surfaceY) ? opts.surfaceY : null)
-  if (surfaceY == null) { dbg('shelter: break-out - opened ' + dug + ' cell(s) above ' + feet0 + ' but found no rim within 8 - not climbing blind'); return false }
-  const atRim = () => bot.entity && Math.floor(bot.entity.position.y) >= surfaceY
-  if (!atRim()) {
-    dbg('shelter: break-out - opened ' + dug + ' cell(s) above ' + feet0 + ', climbing to the rim y' + surfaceY)
-    // the rim is a grounded stop (a block we removed), so the open-sky guard may stand down here
-    try { await provMining.pillarUpTo(bot, surfaceY, { isStopped, surfaceY, ignoreOpenSkyBreak: true }) } catch (e) { dbg('shelter: break-out pillar failed (' + e.message + ')') }
-    if (!atRim() && !isStopped()) { try { await provMining.digStaircaseUp(bot, surfaceY, { isStopped, escape: true, surfaceY }) } catch (e) { dbg('shelter: break-out staircase failed (' + e.message + ')') } }
-  }
-  const out = atRim()
-  dbg('shelter: break-out -> ' + (out ? 'OUT at ' : 'still in at ') + (bot.entity ? bot.entity.position.floored() : '?') + ' (rim y' + surfaceY + ', dug ' + dug + ')')
+  const feetEnd = bot.entity ? bot.entity.position.floored() : null
+  const out = !!feetEnd && openingY(feetEnd) === feetEnd.y && !lidAbove(feetEnd)
+  dbg('shelter: break-out -> ' + (out ? 'OUT at ' : 'still in at ') + (feetEnd || '?') + ' (dug ' + dug + ')')
   return out
 }
 

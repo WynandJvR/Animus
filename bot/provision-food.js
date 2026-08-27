@@ -1243,7 +1243,14 @@ async function scoutForFood (bot, home, opts = {}) {
     // credit the sector we ACTUALLY reached (a trek that fell short shouldn't mark the far one)
     const hereKey = explore.sectorKeyAt(bot.entity.position.x, bot.entity.position.z, anchor, { rings })
     if (hereKey) { searched.add(hereKey); scouted[hereKey] = Date.now() }
-    searched.add(wp.key); scouted[wp.key] = Date.now(); saveWorldMem()
+    // ...and the far one ONLY when we got there (2026-08-27). The line below used to run
+    // unconditionally - the comment above said "shouldn't", the code marked it anyway - so eight
+    // legs that each failed in 200ms from the bottom of a shaft came back as "24 sectors already
+    // swept", and the next famine found "every sector swept recently - nothing new to check" 144b
+    // in every direction the bot had never seen. A sector is swept when the eyes were there.
+    const arrived = Math.hypot(bot.entity.position.x - wp.x, bot.entity.position.z - wp.z) <= 16
+    if (arrived) { searched.add(wp.key); scouted[wp.key] = Date.now() } else dbg('  scoutForFood: leg to ' + wp.name + ' ring ' + wp.ring + ' fell short (' + Math.round(Math.hypot(bot.entity.position.x - wp.x, bot.entity.position.z - wp.z)) + 'b off) - NOT marking it swept')
+    saveWorldMem()
     visited++
     if (rememberWaterNear()) foundWater = true
     if (seesFood()) {

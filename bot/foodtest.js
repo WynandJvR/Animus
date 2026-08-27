@@ -588,6 +588,15 @@ t('DEAD BAND: asking on behalf of healing does not make the bot hunt forever', (
   assert.strictEqual(REGEN_FOOD_MIN >= 18, true, 'comfortable and the regen rule are the same number')
 })
 
+t('sprintAffordable: sprint only what the pack can replace, or above the regen line (ONE number)', () => {
+  assert.strictEqual(F.sprintAffordable({ food: 20, packFoodPts: 0 }), true, 'full bar -> sprint')
+  assert.strictEqual(F.sprintAffordable({ food: 18, packFoodPts: 0 }), true, 'at the regen line -> sprint (the food is a surplus)')
+  assert.strictEqual(F.sprintAffordable({ food: 17, packFoodPts: 0 }), false, 'below it with an empty pack -> walk (that bar is the hp budget)')
+  assert.strictEqual(F.sprintAffordable({ food: 8, packFoodPts: 5 }), true, 'food in the pack pays for it -> sprint')
+  assert.strictEqual(F.sprintAffordable({ food: 3, packFoodPts: 0 }), false, 'starving, empty pack -> walk')
+  assert.strictEqual(F.sprintAffordable({}), true, 'unknown food -> no opinion, the game decides')
+})
+
 t('ANTI-DRIFT: the regen threshold is NAMED once, and the healing rung asks for it', () => {
   const fs = require('fs'); const path = require('path')
   const food = fs.readFileSync(path.join(__dirname, 'provision-food.js'), 'utf8')
