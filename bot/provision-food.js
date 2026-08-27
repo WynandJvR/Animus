@@ -1080,7 +1080,13 @@ async function secureFoodInner (bot, opts = {}) {
       !fedEnough() && foodCount(bot) < 1 && !isStopped()) {
     const wf = loadWorldMem().wheatFarm
     const hp = bot.health ?? 20
-    const safe = hp > Number(process.env.FARM_HARVEST_HP || 10) && !isNight(bot) && !nearHostile(bot, 12)
+    // ONE hp rule, the carve-out-aware one (2026-08-27). This was `hp > FARM_HARVEST_HP(10)` - a
+    // THIRD number for the same rule (the ladder's abort at 6, the regen line at 18) - so at hp 4 /
+    // food 10 with an empty pack the ladder admitted secureFood (holding cannot heal below 18) and
+    // this line then refused the one farm that could feed it: "unsafe to trek (hp=4)", all day, at
+    // spawn. outboundRungAdmissible says yes exactly when holding cannot heal; night/hostile stay.
+    const fit = foodSec.outboundRungAdmissible(hp, { food: bot.food, hasPackFood: foodCount(bot) > 0 })
+    const safe = fit && !isNight(bot) && !nearHostile(bot, 12)
     if (wf && safe) {
       dbg('secureFood: HARVEST-FIRST - standing farm at ' + wf.x + ',' + wf.z + ' (food=' + bot.food + ' hp=' + hp + ') -> trekking to harvest it before establishing anew')
       say('i have a farm - harvesting it instead of starving next to it')
