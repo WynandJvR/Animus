@@ -178,6 +178,15 @@ function nearestReachGrave (s, band, urgentBand) {
 // R1 planned (out of band), and every other job (farm/bootstrap/iron) starved. Naked with no
 // reachable grave is bootstrapNeed('armor')'s job, not a compound-degraded state. Flag =0 ->
 // today's raw-count clause byte-for-byte.
+// CAN HOLDING STILL HEAL ME? The game's rule, one place: natural regeneration needs food >= 18
+// (REGEN_FOOD_MIN), or there is something in the pack to eat. Every "wait until vitals are back"
+// clause below asks this first - a wait that cannot heal is not a wait, it is a pin (live 2026-08-27:
+// hp 11.7 / food 14 / empty pack, the ratchet said "degraded", the camp bar said "not 18 yet",
+// and the day went to farm chores at the wrong end of the map).
+function holdCanHeal (s) {
+  return s.food == null || s.food >= foodSec.REGEN_FOOD_MIN || (s.packFoodPts || 0) > 0
+}
+
 function isDegraded (s) {
   const graves = gravesOf(s)
   const graveHook = process.env.DEGRADED_GRAVE_REACHABLE !== '0'
@@ -190,7 +199,7 @@ function isDegraded (s) {
   // ratchet pins only at night or when vitals are actually dented. Flag =0 -> the blanket hold.
   const ratchet = (s.deathsRecent || 0) >= 2 &&
     (process.env.DEATH_RATCHET_DAY_RELEASE === '0' ||
-      (!!s.isNight || (s.hp != null && s.hp < 14) || (s.food != null && s.food < 14)))
+      (!!s.isNight || (s.hp != null && s.hp < 14 && holdCanHeal(s)) || (s.food != null && s.food < 14)))
   return (s.hp != null && s.hp <= 6) ||
          (s.food != null && s.food <= 6) ||
          (s.armorPieces === 0 && graveHook) ||
@@ -1002,8 +1011,7 @@ function rungFeasible (rung, snapshot) {
     // producer of what the hold cannot make - the food rung - stays admissible in a spiral when the
     // hold cannot heal. The night rule below (outboundBlocked -> 'dawn') still bars it in the dark,
     // which is where the deaths in the window happened; the far trek (R3) stays suppressed.
-    const holdCanHeal = (s.food == null || s.food >= foodSec.REGEN_FOOD_MIN) || (s.packFoodPts || 0) > 0
-    if (!(/^secureFood/.test(r.action || '') && !holdCanHeal)) return false
+    if (!(/^secureFood/.test(r.action || '') && !holdCanHeal(s))) return false
   }
   // P3 / #86 LADDER_REARM_REAL: the "never set out un-armoured" rule. Its definition now lives in
   // outboundBlocked() above, because the post-respawn homecoming needs the SAME rule and used to
@@ -1202,7 +1210,12 @@ function recoveryReady (snapshot) {
   // kept the ladder crisis-grade and it preempted the trek every tick: two owners, one body,
   // ping-pong between the farm and the road. So while no hut stands, vitals restored IS recovered
   // - said HERE, once, so the tick clears the latch and buildReady reads the same answer.
-  if (campFirstExempt(s) && vitalsOk) return { ready: true, maxCaution: true, reason: 'no hut stands - the camp step at the site is the recovery (#102); vitals restored' }
+  // ...and "vitals restored" for the walk to the camp means NOT IN THE HP CRISIS (hp > 6, the
+  // crisis line) and fed to the progress line (food >= 14) - the two numbers the crisis and the
+  // food need already use. HP_OK (18) is the regen line; below food 18 nothing but eating reaches
+  // it, and the food is at the camp. (2026-08-27: hp 11.7 / food 14 sat "not recovered" all day.)
+  const campVitals = hp > 6 && food >= 14
+  if (campFirstExempt(s) && (vitalsOk || (campVitals && !holdCanHeal(s)))) return { ready: true, maxCaution: true, reason: 'no hut stands - the camp step at the site is the recovery (#102); ' + (vitalsOk ? 'vitals restored' : 'out of the crisis and holding cannot heal further without food') }
   if (gearUpUnachievable(s)) return { ready: true, maxCaution: true, reason: 'gear-up unachievable (survivable, no re-arm source) - releasing the build, max caution' }
   if (!coreTools) return { ready: false, maxCaution: false, reason: 'missing core tools (pick/sword)' }
   if (!vitalsOk) return { ready: false, maxCaution: false, reason: 'vitals not restored (hp>=' + HP_OK + ' food>=14)' }

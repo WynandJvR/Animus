@@ -131,7 +131,9 @@ t('#114 buildReady: post-death latch + not recovered -> refuse with need=recover
     const naked = calm({ postDeathRecovery: true, hp: 20, food: 20, armorPieces: 0, packArmorPieces: 0, bankArmorPieces: 0, rawIron: 0, tools: { pick: false, sword: false }, hutExists: false, homeReachable: false, homeDist: 300 })
     assert.strictEqual(scheduler.buildReady(naked).ok, true, 'no hut + vitals back -> the camp step is the recovery')
     assert.strictEqual(scheduler.buildReady(calm({ ...naked, hutExists: true })).ok, false, 'a hut stands -> recoveryReady (pick/sword) still gates the resume')
-    assert.strictEqual(scheduler.buildReady(calm({ ...naked, hp: 9 })).ok, false, 'no hut but hp 9 -> not yet (vitals first)')
+    assert.strictEqual(scheduler.buildReady(calm({ ...naked, hp: 5 })).ok, false, 'no hut but hp 5 -> not yet (still in the hp crisis)')
+    assert.strictEqual(scheduler.buildReady(calm({ ...naked, hp: 9, food: 14, packFoodPts: 0 })).ok, true, 'no hut, hp 9 / food 14, empty pack: holding cannot heal -> the camp is the recovery')
+    assert.strictEqual(scheduler.buildReady(calm({ ...naked, hp: 9, food: 20, packFoodPts: 0 })).ok, false, 'no hut, hp 9 / food 20: holding heals -> wait for the regen')
   }
   const r = scheduler.buildReady(calm({ postDeathRecovery: true, hp: 4, food: 4, armorPieces: 0 }))
   assert.strictEqual(r.ok, false)
