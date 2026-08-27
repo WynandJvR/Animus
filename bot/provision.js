@@ -609,7 +609,17 @@ async function walkStaged (bot, tx, tz, opts = {}) {
   // recovery rungs / unstick / reflexes below are untouched.
   const startPos = { x: bot.entity.position.x, z: bot.entity.position.z }
   const LAVA_SAFE = process.env.LAVA_SAFE !== '0' // #41 §2a: a surface trek's XZ-blind GoalNearXZ can thread a cave mouth 45b DOWN to lava - climb out before it parks on a pool edge
-  const surfaceRef = opts.surfaceY != null ? opts.surfaceY : Math.floor(bot.entity.position.y) // trek's reference surface (gather plumbs surfaceY; else where we set off from)
+  // THE REFERENCE SURFACE IS A GROUNDED READ, NOT MY OWN FEET (#111, and live 2026-08-27 20:37-20:47):
+  // a trek that set off from the bottom of a spawn shaft took y=56 as "the surface", so the depth
+  // guard below never fired and the planner threaded partial plans through the cave network under
+  // spawn for the whole day (y 43-57, farm never reached). Read the column's surface; fall back to
+  // the feet only when the read is UNKNOWN. And if we are buried at the start, climb out first.
+  const surfRead = (() => { try { return require('./pathfix.js').surfaceYAt(bot, startPos.x, startPos.z) } catch { return { known: false } } })()
+  const surfaceRef = opts.surfaceY != null ? opts.surfaceY : (surfRead.known && Number.isFinite(surfRead.y) ? surfRead.y : Math.floor(bot.entity.position.y))
+  if (opts.surfaceY == null && surfRead.known && Math.floor(bot.entity.position.y) < surfaceRef - 3 && hasSolidCeiling(bot, 24, { ignoreLeaves: true })) {
+    dbg('walkStaged: setting off ' + (surfaceRef - Math.floor(bot.entity.position.y)) + 'b under a roof at ' + bot.entity.position.floored() + ' - climbing to the surface y' + surfaceRef + ' first')
+    try { await climbToSurface(bot, surfaceRef, { isStopped, surfaceY: surfaceRef }) } catch (e) { dbg('walkStaged: climb-out failed (' + e.message + ')') }
+  }
   const d0 = Math.hypot(tx - startPos.x, tz - startPos.z) // straight-line trek length (for the >=64b record gate)
   const crumbs = [{ x: startPos.x, z: startPos.z }]
   let lastCrumb = crumbs[0]
