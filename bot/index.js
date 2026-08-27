@@ -815,6 +815,30 @@ if (process.env.EQUIP_CARRIED_ARMOR !== '0') {
 // failed open for the WHOLE body - one unreadable latch hid the other eight, including a live
 // escape - and "an unreadable owner must never immobilise the bot" is satisfied better, not
 // worse, by dropping only the latch that could not be read.
+// A PATHFINDER GOAL NOBODY IS DRIVING IS NOT A WALK (2026-08-27). The 'walk' owner used to be
+// "the pathfinder has a goal" - and a goal outlives the goto that set it whenever that goto times
+// out or its caller returns without clearing (gotoWithTimeout, a reflex approach). The claim is an
+// ENGINE claim (reflexes.js), exempt from the lease on purpose, so nothing ever revoked it: live
+// 21:21-21:31 at the build site, hp 19 / food 16, "autobuild NOT dispatched: a walk already in
+// progress owns the body" every tick for a day and a night while the body stood still. A walk is a
+// goal WITH a driver: a live navigateTo, a maneuver span, or the pathfinder actually moving. A goal
+// with none of those for 20s of measured stillness is stale, and the one honest act is to clear
+// it - it also blocks every later goto with "goal taken by a reflex".
+let walkIdleSince = 0
+const walkInProgress = () => {
+  const pf = bot.pathfinder
+  if (!pf || !pf.goal) { walkIdleSince = 0; return false }
+  let driven = false
+  try { driven = navigate.isNavigating() || (typeof pf.isMoving === 'function' && pf.isMoving()) || arbiter.maneuverActive(-1e9) } catch { driven = true }
+  if (driven) { walkIdleSince = 0; return true }
+  const now = Date.now()
+  if (!walkIdleSince) { walkIdleSince = now; return true }
+  if (now - walkIdleSince < 20000) return true
+  try { note('(body) a pathfinder goal with nobody driving it for ' + Math.round((now - walkIdleSince) / 1000) + 's (' + (pf.goal && pf.goal.constructor ? pf.goal.constructor.name : 'goal') + ') - not a walk; clearing it so the chooser can dispatch') } catch {}
+  try { pf.setGoal(null) } catch {}
+  walkIdleSince = 0
+  return false
+}
 const bodyLatches = () => {
   const up = []
   const probe = (key, fn) => { try { if (fn()) up.push(key) } catch { /* this ONE latch is unreadable: it does not get to own the body, and it does not hide the others */ } }
@@ -825,7 +849,7 @@ const bodyLatches = () => {
   probe('shelter', () => provRecovery.isResting && provRecovery.isResting())
   probe('maintain', () => provMaintain.isMaintaining && provMaintain.isMaintaining())
   probe('job', () => commands.isBusy && commands.isBusy())
-  probe('walk', () => bot.pathfinder && bot.pathfinder.goal)
+  probe('walk', walkInProgress)
   probe('dig', () => bot.targetDigBlock)
   return up
 }
