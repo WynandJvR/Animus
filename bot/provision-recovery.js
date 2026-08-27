@@ -1632,7 +1632,14 @@ async function recoverFromDegraded (bot, { isStopped = () => false, say = () => 
       // may resume. RESILIENT_RECOVERY=0 restores ladderDone byte-for-byte.
       if (process.env.RESILIENT_RECOVERY !== '0') {
         const rr = scheduler.recoveryReady(s)
-        if (rr.ready) { _deadlockFails = 0; try { require('./commands.js').clearPostDeathRecovery() } catch {} return { done: true, rungs, reason: reason || (rr.maxCaution ? 'recovered (best-affordable)' : 'recovered'), maxCaution: rr.maxCaution } }
+        // RECOVERED MEANS NOTHING DEGRADED REMAINS (2026-08-27 22:19-22:26). recoveryReady answers
+        // the build-resume question ("may the build have the body back?") and, with no hut
+        // standing, says yes at hp 20 / food 19. The chooser asks a different question - isDegraded,
+        // whose night ratchet says "night + under-armoured" - and dispatched this ladder every 15s
+        // all night while it returned "recovered" in 0ms, touching nothing, the body standing in
+        // the open. Both must agree before this exits: ready AND not degraded. At night that means
+        // R2 digs in; at dawn the ratchet releases and the exit is honest.
+        if (rr.ready && !scheduler.isDegraded(s)) { _deadlockFails = 0; try { require('./commands.js').clearPostDeathRecovery() } catch {} return { done: true, rungs, reason: reason || (rr.maxCaution ? 'recovered (best-affordable)' : 'recovered'), maxCaution: rr.maxCaution } }
       } else if (scheduler.ladderDone(s)) { _deadlockFails = 0; return { done: true, rungs, reason: reason || 'recovered' } }
       // ==== THE LAST RESORT MUST BE REACHABLE FROM THE EXIT WE ACTUALLY TAKE (2026-08-01) =====
       // #58's suicide-reset lives at the bottom of the `if (!chosen)` "all rungs tried" branch and

@@ -1473,7 +1473,7 @@ function graveCooldownMs (result, { remainMs, flagOn, hotMs, blanketMs } = {}) {
   return Math.min(blanket, Math.max(60000, isFinite(rem) ? rem / 2 : blanket))
 }
 
-module.exports = { campFirstExempt,
+module.exports = { isDegraded, campFirstExempt,
   pickJob,
   bootstrapNeed,
   spawnBootstrapDue,
