@@ -131,8 +131,13 @@ function postDeathRecoveryHeldMs () { return postDeathRecovery ? Date.now() - po
 // acted on, so a verdict cannot be overwritten by a later, different one mid-unwind.
 function makeExcursionStop (bot, label) {
   let verdict = null
+  // THE BODY THIS EXCURSION STARTED WITH CAN DIE UNDER IT (2026-08-27): pathfix bumps its epoch on
+  // every death; a poll that outlives its epoch says stop. Without this the pre-death gather ran
+  // on from spawn ("gather cobblestone 0/3 pos=-10,64,-1 distHome=363") while the resume re-armed
+  // buildAbort=false believing "the old loop is provably gone".
+  const epoch0 = require('./pathfix.js').epoch()
   const poll = () => {
-    if (buildAbort) return true
+    if (buildAbort || !require('./pathfix.js').sameEpoch(epoch0)) return true
     if (verdict) return true
     let adm = null
     try { adm = require('./scheduler.js').excursionAdmissible(require('./survival-snapshot.js').excursionState(bot)) } catch { return false }
@@ -3574,6 +3579,9 @@ function setResumeJob (pt) { if (loadedSchem && pt) { resumeJob = { schem: loade
 // build's chest if it survived) and Build diffs world-vs-schematic, so it just finishes
 // the missing blocks. Returns the result, or null if there's nothing to resume.
 async function resumeBuild (bot) {
+  // a resume that outlives the body it started with is over (pathfix bumps its epoch on death) - see makeExcursionStop
+  const epoch0 = require('./pathfix.js').epoch()
+  const bodyGone = () => !require('./pathfix.js').sameEpoch(epoch0)
   // ==== ARM FROM DISK WHEN THE MEMORY IS EMPTY (review item 7) =============================
   // `resumeJob` is a CACHE of resume-job.json, and the only thing that ever filled it from disk
   // was the `resumebuild` COMMAND. That is why the deleted boot timer had to issue a command
@@ -3675,7 +3683,7 @@ async function resumeBuild (bot) {
       dbg('resume: night + no armor - resting till morning before heading back (BLOCKING)')
       try { await provRecovery().restUntilSafe(bot, { isStopped: () => buildAbort, say }) } catch {}
     }
-    if (buildAbort) return (result = { stopped: true, placed: 0, total: 0, aborted: true })
+    if (buildAbort || bodyGone()) return (result = { stopped: true, placed: 0, total: 0, aborted: true })
     // SPAWN FIRST when the anchor is known WRONG (survival tier - the world-spawn
     // carousel root): BEFORE any grave detour or site trek, get home and re-anchor the
     // bed. A deep corpse-run on a broken anchor is how one death became an all-night
@@ -3686,13 +3694,13 @@ async function resumeBuild (bot) {
     if (spawnIsSuspect()) {
       dbg('resume: spawn anchor is SUSPECT - going home to re-anchor before anything else')
       try { await survivalPrep(bot, { say, isStopped: () => buildAbort }) } catch (e) { dbg('resume: prep before spawn-recovery failed (' + e.message + ')') }
-      if (buildAbort) return (result = { stopped: true, placed: 0, total: 0, aborted: true })
+      if (buildAbort || bodyGone()) return (result = { stopped: true, placed: 0, total: 0, aborted: true })
       try {
         const ok = await provRecovery().recoverSpawnAnchor(bot, { isStopped: () => buildAbort, say })
         if (ok) spawnSuspect = false
         dbg('resume: spawn-recovery ' + (ok ? 'RESTORED the anchor' : 'did not restore the anchor - continuing, will retry next respawn'))
       } catch (e) { dbg('resume: spawn-recovery failed (' + e.message + ')') }
-      if (buildAbort) return (result = { stopped: true, placed: 0, total: 0, aborted: true })
+      if (buildAbort || bodyGone()) return (result = { stopped: true, placed: 0, total: 0, aborted: true })
     }
     // GET THE STUFF BACK first when it's safe: a recovery detour beats re-gathering the whole kit.
     // NOTE (task #18): the live AxGraves plugin DESPAWNS graves on a timer - recover itself now
@@ -3713,7 +3721,7 @@ async function resumeBuild (bot) {
         say("my stuff's too deep in that cave - not worth dying for, moving on")
       } else {
         try { const r = await handle(bot, 'recover'); dbg('resume: recover -> ' + String(r).split(String.fromCharCode(10))[0]) } catch (e) { dbg('resume: recover failed (' + e.message + ')') }
-        if (buildAbort) return (result = { stopped: true, placed: 0, total: 0, aborted: true })
+        if (buildAbort || bodyGone()) return (result = { stopped: true, placed: 0, total: 0, aborted: true })
       }
     }
     const me = bot.entity.position
@@ -3731,7 +3739,7 @@ async function resumeBuild (bot) {
         if (!near && !buildAbort) dbg('resume: travel attempt ' + (attempt + 1) + ' fell short (' + (tr && tr.reason) + ') - retrying')
       }
     }
-    if (buildAbort) return (result = { stopped: true, placed: 0, total: 0, aborted: true }) // died/stopped mid-travel
+    if (buildAbort || bodyGone()) return (result = { stopped: true, placed: 0, total: 0, aborted: true }) // died/stopped mid-travel
     if (!near) {
       // Still can't reach the site: KEEP the job for the next respawn/attempt instead of
       // "building" from here - autoBuild far from the site skips everything and reports done.
