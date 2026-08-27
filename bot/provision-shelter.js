@@ -31,7 +31,7 @@ const reflexes = require('./reflexes.js')
 const navigate = require('./navigate.js')
 const provCore = require('./provision-core.js')
 const { AIRISH, canBreakNaturally, countItem, toolForBlock, gotoWithTimeout, collectDrops, placeAt,
-  nearHostile, isNight } = provCore
+  nearHostile, isNight, isFirstLight } = provCore
 const worldMemory = require('./world-memory.js')
 const { loadWorldMem, listInfra, rememberInfra, recallInfra, forgetInfra, knownBed } = worldMemory
 const provHut = require('./provision-hut.js')
@@ -528,7 +528,7 @@ async function digInForNight (bot, opts = {}) {
         const holdBunker = reflexes.beginHold('nightShelter:bunker', 'dawn|hostile-gone|damage|flooding', dl - Date.now() + 5000)
         try {
         while (Date.now() < dl && !isStopped()) {
-          if ((!isNight(bot) && !nearHostile(bot, 10)) || nightStuck(bot)) break // stuck night: don't squat till a dawn that won't come
+          if ((!isNight(bot) && !isFirstLight(bot) && !nearHostile(bot, 10)) || nightStuck(bot)) break // stuck night: don't squat till a dawn that won't come
           if ((!recapped || DEFEND_WHEN_HIT_ON) && (bot.health || 20) < hpX - 3) { dbg('shelter: taking damage in the ' + (recapped ? 'SEALED bunker - breached' : 'open bunker') + ' - bailing out to fight/flee'); break }
           // same flooding bail as the fresh-pit wait: a reused bunker beside an aquifer
           // can flood too, and this loop had no way out (drowned sealed, test server)
@@ -752,7 +752,7 @@ async function digInForNight (bot, opts = {}) {
     const holdToken = reflexes.beginHold('nightShelter:pit', 'dawn|hostile-gone|damage|flooding', deadline - Date.now() + 5000)
     try {
     while (Date.now() < deadline && !isStopped()) {
-      if ((!isNight(bot) && !nearHostile(bot, 10)) || nightStuck(bot)) break // stuck night: climb out and re-arm rather than wait forever
+      if ((!isNight(bot) && !isFirstLight(bot) && !nearHostile(bot, 10)) || nightStuck(bot)) break // stuck night: climb out and re-arm rather than wait forever
       if ((!fullySealed || DEFEND_WHEN_HIT_ON) && (bot.health || 20) < hp0 - 3) { dbg('shelter: taking damage in the ' + (fullySealed ? 'SEALED pit - breached' : 'LEAKY pit') + ' - bailing out to fight/flee'); break }
       // DROWNING BAIL: water reaching the body cells means the pit is flooding - get out
       // NOW, sealed or not (a "sealed" pit beside an aquifer drowned the bot at 4hp, live)
@@ -811,7 +811,7 @@ async function breakOut (bot, opts = {}) {
   // THE LID STAYS ON AT NIGHT. A sealed pit is the shelter's whole purpose; opening it in the dark
   // (a creeper was 3.7m outside, live) is the death the pit exists to prevent. The night wait
   // above owns "until dawn"; this only ever opens by day - or when the operator forces it (`die`).
-  if (!opts.force && isNight(bot)) { dbg('shelter: break-out deferred - night: the lid stays on until dawn'); return false }
+  if (!opts.force && (isNight(bot) || isFirstLight(bot))) { dbg('shelter: break-out deferred - ' + (isNight(bot) ? 'night' : 'first light, the undead have not burned yet') + ': the lid stays on'); return false }
   const p0 = bot.entity.position.clone()
   const ownPit = (() => { try { return recallInfra('shelter', p0, 3) } catch { return null } })()
   const mayDig = (b) => {

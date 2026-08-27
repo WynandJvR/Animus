@@ -42,6 +42,10 @@ function inventoryCounts (bot) {
 function countItem (bot, name) { return inventoryCounts(bot)[name] || 0 }
 
 function isNight (bot) { return !!(bot.time && bot.time.timeOfDay >= 13000 && bot.time.timeOfDay < 23500) }
+// FIRST LIGHT IS NOT MORNING (2026-08-27 23:50-23:52): the pit opened at tod 23400, the job resumed
+// at the site, and a zombie the sun had not yet burned killed a full-hp bot in ninety seconds. The
+// night's undead burn off in the first ~1000 ticks of the day; a player waits for the sun to be up.
+function isFirstLight (bot) { return !!(bot.time && (bot.time.timeOfDay >= 23000 || bot.time.timeOfDay < 1000)) }
 
 function nearHostile (bot, r) {
   const me = bot.entity && bot.entity.position; if (!me) return false
@@ -339,6 +343,6 @@ module.exports = {
   setDebugSink,
   AIRISH, REPLACEABLE, SHELTER_HOSTILE, STRUCTURE_RE, DIGGABLE_NATURAL, canBreakNaturally, digBlocked,
   NON_SEALING_RE, placeBlocked,
-  inventoryCounts, countItem, isNight, nearHostile, toolForBlock,
+  inventoryCounts, countItem, isNight, isFirstLight, nearHostile, toolForBlock,
   gotoWithTimeout, collectDrops, stepInto, placeAt
 }
