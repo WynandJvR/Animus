@@ -1223,6 +1223,18 @@ async function tendWheatFarm (bot, { isStopped = () => false, say = () => {} } =
           // This is the core "harvested N -> wheat=0" fix.
           try { await gotoWithTimeout(bot, new goals.GoalNear(p.x, p.y, p.z, 0), 6000) } catch {}
           await collectDrops(bot, 6, { patience: 5 })
+          // EAT AS SOON AS A LOAF IS POSSIBLE WHEN THE HARVEST IS THE MEDICINE (2026-08-27). Live
+          // 21:11-21:14: hp 4, food 7, the bot harvested 16 wheat cell by cell for three minutes
+          // and would only bake AFTER the last cell; a spider killed it at dusk with the whole
+          // harvest in its pack. A player at hp 4 eats the first loaf, then keeps harvesting.
+          try {
+            const hurt = (bot.health ?? 20) <= 6 || (bot.food ?? 20) < 6
+            if (hurt && countItem(bot, 'wheat') >= 3) {
+              const pf = require('./provision-food.js')
+              dbg('  harvest: hurt (hp ' + bot.health + ' food ' + bot.food + ') and holding ' + countItem(bot, 'wheat') + ' wheat - baking and eating NOW, the rest of the field can wait')
+              await pf.bakeBreadFromWheat(bot, { isStopped }); await pf.eatUp(bot)
+            }
+          } catch (e) { dbg('  harvest: bake-and-eat mid-harvest failed (' + e.message + ')') }
           if (await replantCropCell(bot, p, { isStopped })) { replanted++; try { require('./commands.js').touchProgress('replant') } catch {} } // reseed the cell we just cleared
         } catch (e) { dbg('  wheat harvest failed (' + e.message + ')') }
       } else if (age != null) {
