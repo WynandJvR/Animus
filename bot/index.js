@@ -544,7 +544,11 @@ bot.on('death', () => {
   })
   const cause = att.cause
   const dangerous = gravePolicy.causeWritesOff(cause) // lava/fire/void: the stuff is gone (unchanged semantics)
-  const info = { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z), cause, attacker: att.attacker || null, causeSource: att.source, dangerous, at: Date.now(), retrieved: false }
+  // underground: a solid, non-leaf ceiling over the death cell within 24 blocks - the fact the
+  // grave-salvage verdict reads to keep a naked bot out of a cave grave (grave-policy.salvageVerdict)
+  let underground = false
+  try { for (let dy = 2; dy <= 24; dy++) { const b = bot.blockAt(p.offset(0, dy, 0)); if (b && b.boundingBox === 'block' && !/_leaves$/.test(b.name)) { underground = true; break } } } catch {}
+  const info = { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z), cause, attacker: att.attacker || null, causeSource: att.source, dangerous, underground, at: Date.now(), retrieved: false }
   try { if (damageLog) damageLog.clear() } catch {} // this death consumed the window; the next one starts clean
   commands.recordDeath(info)
   commands.markBuildInterrupted && commands.markBuildInterrupted() // keep the build to resume

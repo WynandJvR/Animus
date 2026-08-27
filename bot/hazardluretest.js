@@ -103,6 +103,15 @@ eq(worldMemory.hazardAt(D1).deaths.length, 2, 'lifetime: with both deaths intact
 const pocket = worldMemory.hazardAt(D1)
 const graveRow = { x: D1.x, y: D1.y, z: D1.z, value: 40 }
 const onePocket = { x: D1.x, y: D1.y, z: D1.z, cause: 'drowning', deaths: [1], traversedSinceDeath: false }
+// 2026-08-27: the DARK is a medium too - an underground grave is deferred while the bot is naked
+{
+  const cave = { x: 284, y: 57, z: -291, value: 40, underground: true }
+  eq(GP.salvageVerdict(cave, null, { armored: false }).go, false, 'salvage: underground + no armour -> deferred')
+  ok(/underground/.test(GP.salvageVerdict(cave, null, { armored: false }).why), 'salvage: and it says why')
+  eq(GP.salvageVerdict(cave, null, { armored: true }).go, true, 'salvage: armoured -> the cave grave is back on the books')
+  eq(GP.salvageVerdict(cave, null, {}).go, true, 'salvage: armour unknown -> no veto (absence of a reading is not a verdict)')
+  eq(GP.salvageVerdict({ x: 1, y: 64, z: 1, value: 40, underground: false }, null, { armored: false }).go, true, 'salvage: a surface grave is untouched by the clause')
+}
 let v = GP.salvageVerdict(graveRow, onePocket)
 eq(v.go, false, 'salvage: ONE drowning death already rules the grave out - the MEDIUM is the gate, not a body count')
 ok(/drowning/.test(v.why), 'salvage: and it says so in the bot\'s own words')

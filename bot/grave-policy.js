@@ -261,6 +261,14 @@ function hazardHardArmed (h) { return !!h && Array.isArray(h.deaths) && h.deaths
 function salvageVerdict (grave, hazard, caps = {}) {
   const deaths = (hazard && Array.isArray(hazard.deaths)) ? hazard.deaths.length : 0
   const discount = 1 / (1 + deaths) // value is NETTED, never gross
+  // AN UNDERGROUND GRAVE IS NOT A NAKED BOT'S JOB (2026-08-27). The medium clauses below know
+  // water and lava; they did not know the DARK. Live: the 41-log grave at 284,57,-291 sat in a
+  // cave, the resume's grave detour walked a bot with no armour and hp 9.6 into it at dawn, a
+  // skeleton took it to 1.6 and the next death was 30b away. Recorded at death time
+  // (`underground` = a solid ceiling over the death cell), judged against what the bot wears
+  // NOW (caps.armored) - so the verdict flips as soon as it wears armour, and a surface grave is
+  // untouched by this clause. Deferred, never written off.
+  if (grave && grave.underground && caps.armored === false) return { go: false, why: `my grave at ${grave.x},${grave.y},${grave.z} is underground and i have no armour - deferred while i have no armour`, discount }
   if (!hazard) return { go: true, why: 'no hazard recorded here', discount: 1 }
   const cause = hazard.cause || 'unknown'
   // survived: the bot has stood in this cell alive and out of the medium since the last death

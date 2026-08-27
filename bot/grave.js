@@ -69,8 +69,11 @@ try {
 // what is the loot worth net of that risk? Pure decision (grave-policy) over the hazard record
 // (world-memory) - this file only joins the two.
 function graveSalvage (d, caps) {
-  try { return salvageVerdict(d, worldMemory.hazardAt(d), caps) } catch { return { go: true, why: 'no hazard data', discount: 1 } }
+  // what the bot wears NOW is a capability the verdict reads (the underground clause); the rolling
+  // inventory snapshot below is the one reader of the armour slots this module already has
+  try { return salvageVerdict(d, worldMemory.hazardAt(d), Object.assign({ armored: lastWornCount > 0 }, caps || {})) } catch { return { go: true, why: 'no hazard data', discount: 1 } }
 }
+let lastWornCount = 0 // armour pieces worn at the last snapInventory (rolling, every few seconds)
 
 // Live references for the call sites that scan/mark the ledger directly (the `recover`
 // command marks a grave retrieved, the degraded signature counts recent deaths). Returning
@@ -95,6 +98,7 @@ function snapInventory (bot) {
     // count>=10 bulk bar was abandoned. This tally is build-only, so junk (dirt/seeds) never trips it.
     const build = items.filter(i => /_log$|_planks$|_wood$|^cobblestone$|^stone$|^cobbled_deepslate$|^deepslate$/.test(i.name)).reduce((s, i) => s + i.count, 0)
     invSnap = { count, notable: notable.concat(worn), build, at: Date.now() }
+    lastWornCount = worn.length
     // H2: any total-count change (craft/withdraw/deposit/pickup/eat/toss) is verified progress.
     if (lastItemCount !== -1 && count !== lastItemCount) telemetry.touchProgress('itemDelta')
     lastItemCount = count

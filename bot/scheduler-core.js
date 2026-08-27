@@ -336,7 +336,12 @@ function chooseActivity (snapshot, opts) {
   //   (sched) pick=maintenancePass reason="bootstrap armor (iron keystone) - establishing survival infra before the build"
   // - all evening. The keystone is a real rule (bank a boots' worth of iron before other progress);
   // it applies once there is a camp to bank it at. br.exempt IS "no camp yet" (buildReady, #102).
-  if (!bn && !br.exempt && s.persistedBuild && scheduler.ironKeystoneActive(s)) { bn = 'armor'; keystone = true }
+  // ...and br.exempt is only COMPUTED when a bootstrap need exists (buildReady step 2). On a day
+  // with no need it reads false, and the keystone walked right back in through this line: live
+  // 2026-08-27 20:27 "pick=maintenancePass reason=bootstrap armor (iron keystone)" at spawn, 355b
+  // from the site, the trek never started. "No camp yet" is campFirstExempt(s) itself - ask it.
+  const campFirst = scheduler.campFirstExempt(s)
+  if (!bn && !br.exempt && !campFirst && s.persistedBuild && scheduler.ironKeystoneActive(s)) { bn = 'armor'; keystone = true }
   const upkeep = !bn && !!s.maintainNeeded
   if (bn || upkeep) {
     // urgency by kind: armor is the biggest survivability multiplier; food-reserve the enabler; base
@@ -428,7 +433,7 @@ function chooseActivity (snapshot, opts) {
   // camp standing, tidying old shafts at spawn does not compete with the trek - live it took the
   // body ("reclaim holds the dispatch slot and this does not out-rank it") and walked the bot back
   // from 314b to spawn to descend a shaft the moment the trek began.
-  if (debt && debt.best && debt.value > 0 && !br.exempt) {
+  if (debt && debt.best && debt.value > 0 && !br.exempt && !campFirst) {
     const value = clamp(debt.value / 120, 0, 1)          // saturating: 120 points of debt is "a lot"
     const d = debt.best.dist != null ? debt.best.dist : 256
     const proximity = clamp(1 - d / 128, 0, 1)           // feasibility: 0 beyond 128b, 1 underfoot
@@ -445,7 +450,10 @@ function chooseActivity (snapshot, opts) {
   //      SAME risk this function computed once - so a naked bot at dusk does not stop to pick up
   //      a stick, and an idle one in daylight does exactly what a player would.
   //      Their weights sit below W_RESUME (a waiting build wins) and above W_IDLE (beats idling).
-  for (const c of reflexes.proposalCandidates(s, { risk: riskLevel(s), riskWeight: W_RISK_MAINT })) cands.push(c)
+  // THE SITE FIRST, for the tidy-up proposals too: the scaffold sweep took the body for five
+  // minutes at spawn on 2026-08-27 20:21 ("tear down the orphaned towers") the moment the trek
+  // began, and dusk came before it resumed. With no camp standing, old towers at spawn wait.
+  for (const c of reflexes.proposalCandidates(s, { risk: riskLevel(s), riskWeight: W_RISK_MAINT })) { if (campFirst && /scaffoldSweep/.test(String(c.key || c.job || ''))) continue; cands.push(c) }
 
   // (B3) BUILD / IDLE proceeds (null job). The baseline progress candidate, DOCKED live risk so an
   //      exposed bot never "just keeps building" - that dock is what pulls it home instead. When a
