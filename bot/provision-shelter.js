@@ -484,8 +484,18 @@ async function digInForNight (bot, opts = {}) {
         const capPos0 = seal0.capPos
         const recapped = seal0.capped && !seal0.sideHoles
         dbg('shelter: bunker re-entered, ' + (recapped ? 'RE-SEALED' : 'OPEN (leaky)') + (seal0.sideHoles ? ' ' + seal0.sideHoles + ' side(s)' : ''))
-        say(recapped ? 'back in my bunker for the night' : 'in my bunker (lid open)')
-        const dl = Date.now() + (recapped ? 600000 : 120000)
+        // A PIT I CANNOT SEAL IS NOT A SHELTER (2026-08-27, the same rule 9ac68c0 applied to the
+        // fresh dig). A re-used bunker that comes up leaky used to be squatted in for 120s and
+        // re-registered - four open sides at the farm (18:49, a zombie walked in) and three at the
+        // build site (19:12, then a spider at dusk). The first fresh dig at the site sealed fine
+        // (19:08 "pit SEALED") - it is the OLD hole on the slope that will not. Forget it, get out
+        // of it, and let the fresh-dig path below pick a dry cell whose walls are all ground.
+        if (!recapped) {
+          dbg('shelter: the old bunker will not seal (' + (seal0.sideHoles || 0) + ' side(s) open' + (seal0.capped ? '' : ', no lid') + ') - forgetting it and digging fresh')
+          try { forgetInfra('shelter', listInfra('shelter').find(e => e.x === oldPit.x && e.z === oldPit.z)) } catch {}
+          try { await breakOut(bot, { isStopped, force: true }) } catch {}
+        } else {
+        const dl = Date.now() + 600000
         const hpX = bot.health || 20
         // A DECLARED HOLD (2026-08-27). The fresh-pit wait below has declared one since S4; this
         // re-entry path was added later and never did - so it looked, to boundedRung and the claim
@@ -512,8 +522,10 @@ async function digInForNight (bot, opts = {}) {
         // a re-used bunker can have gained a second lid course, and +4 was an arithmetic guess (#111)
         try { await breakOut(bot, { isStopped }) } catch (e) { dbg('shelter: bunker exit failed (' + e.message + ')') }
         return true
+        }
+      } else {
+        dbg('shelter: could not re-enter the bunker - digging fresh')
       }
-      dbg('shelter: could not re-enter the bunker - digging fresh')
     }
     // ON A TREE CANOPY? The shelter can't dig leaves (not in DIGGABLE_NATURAL) and used to
     // NO-OP in a 5s loop all night (reproduced on test server, savanna oak). Leaves are
