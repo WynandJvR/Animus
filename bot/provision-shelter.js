@@ -693,7 +693,28 @@ async function digInForNight (bot, opts = {}) {
       surfaceY = shaft.y + shaftDepth
       dbg('shelter: already ' + shaftDepth + ' deep in a shaft at ' + shaft + ' (rim y' + surfaceY + ') - re-sealing it, not digging a deeper one')
     }
-    // (the dig loop below is skipped when `dug` is already 1)
+    // (the dig loop below is skipped when `dug` is already 2)
+    // A CAVE IS PERMANENT NIGHT - NEVER PIT UNDER A ROOF (2026-08-28 17:10-17:12). The bot fled into
+    // the water pocket under the farm at hp 4, dug its pit on the cave floor at y53 (SEALED, and it
+    // survived the night), and at first light the break-out opened into a cave where the undead
+    // never burn: zombie, dead, 40 logs and every tool in a grave. Not in a shaft of its own making,
+    // under a solid ceiling, with the real surface more than two above: climb out FIRST (the same
+    // grounded climb runGather uses), then dig where the sun reaches the lid.
+    if (dug < 2) {
+      let roofed = false
+      try { roofed = !!require('./provision-hut.js').hasSolidCeiling(bot, 24, { ignoreLeaves: true }) } catch { roofed = false }
+      if (roofed && !insideOwnStructure(bot)) {
+        const me = bot.entity.position.floored()
+        let columnY = null
+        try { const g = require('./pathfix.js').surfaceYAt(bot, me.x, me.z); columnY = (g && g.known && typeof g.y === 'number') ? g.y : null } catch { columnY = null }
+        if (columnY != null && columnY > me.y + 2) {
+          dbg('shelter: under a roof at ' + me + ' with the surface at y' + columnY + ' - a cave is permanent night; climbing out before digging in')
+          try { await provMining.climbToSurface(bot, columnY, { isStopped, surfaceY: columnY }) } catch (e) { dbg('shelter: climb out of the cave failed (' + e.message + ')') }
+          surfaceY = Math.floor(bot.entity.position.y)
+          shaft = bot.entity.position.floored()
+        }
+      }
+    }
     const relocFailed = [] // cells this call has already tried and ruled out - see the relocate block below
     // A PIT IS TWO DEEP OR IT IS NOT A PIT (2026-08-28 16:17). One dig, then "water beside the next
     // cell - not digging deeper", was accepted as a hole: feet one below the surface, head AT the
