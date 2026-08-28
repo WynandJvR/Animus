@@ -776,7 +776,10 @@ const buildRow = def({
     //   unreachable three full travel attempts and the site is still out of reach. That IS the
     //               world's answer to the 'travel to site' step, in this place.
     //   placed 0    it ran the whole way through and moved not one block.
-    const interrupted = !!(r && (r.aborted || r.deferred))
+    // ...and a pass CUT by a preempt (r.stopped - the graveSweep took the body 4b from a free
+    // grave mid-gather, 2026-08-28 11:44) did not run to completion either: it proves nothing about
+    // this cell, and recording it as "achieved nothing HERE" locked the build out for the day.
+    const interrupted = !!(r && (r.aborted || r.deferred || r.stopped))
     const noOp = !!r && !interrupted && (r.unreachable === true || placed === 0)
     const msg = !r
       ? 'nothing to resume'
