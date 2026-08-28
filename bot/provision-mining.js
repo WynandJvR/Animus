@@ -98,11 +98,21 @@ async function digStaircaseUp (bot, targetY, opts = {}) {
   const FACE6 = [new Vec3(1, 0, 0), new Vec3(-1, 0, 0), new Vec3(0, 1, 0), new Vec3(0, -1, 0), new Vec3(0, 0, 1), new Vec3(0, 0, -1)]
   const nameAt = (v) => { const b = bot.blockAt(v); return b ? b.name : null }
   const DIRS = [new Vec3(1, 0, 0), new Vec3(0, 0, 1), new Vec3(-1, 0, 0), new Vec3(0, 0, -1)]
+  // MAY THIS CELL BE OPENED - asked of the CANDIDATE before a direction is chosen, and again of the
+  // block before the dig. It used to live only in digIf, so the soft-first pick chose the direction
+  // with the cheapest-LOOKING cells and then had its dig refused - eight times, the same direction,
+  // in 5ms, silently (live 2026-08-28 15:31 at 27,54,-12: the "soft" way up was the bot's own
+  // acacia-log wall, the stone way up was never tried). opts.mayDig is the caller's own-block
+  // carve-out (breakOut: cap material bounding the shaft the body is sealed in).
+  const permitted = (b) => {
+    if (!b || AIRISH(b.name)) return true
+    if (/lava|water/.test(b.name)) return false
+    return canBreakNaturally(b) || S().scaffoldDigOK(b) || !!(opts.mayDig && opts.mayDig(b)) // anti-grief: never a player build
+  }
   const digIf = async (p) => {
     const b = bot.blockAt(p)
     if (!b || AIRISH(b.name)) return true
-    if (/lava|water/.test(b.name)) return false
-    if (!canBreakNaturally(b) && !S().scaffoldDigOK(b)) return false // anti-grief: don't cut through a player build (own registry-proven scaffold allowed under NAV_TERRAIN_PROFILE)
+    if (!permitted(b)) { dbg('  staircase: not my block to cut - ' + b.name + ' at ' + p.toString()); return false }
     const tool = toolForBlock(bot, b.name)
     if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
     if (bot.canDigBlock && !bot.canDigBlock(b)) return false
@@ -153,6 +163,9 @@ async function digStaircaseUp (bot, targetY, opts = {}) {
         const cand = DIRS[(di + k) % 4]
         const cFloor = feet.plus(cand); const cFeet = cFloor.offset(0, 1, 0); const cHead = cFloor.offset(0, 2, 0)
         const under = cFloor.offset(0, -1, 0)
+        // a direction whose step cells may not be cut is not a candidate (see `permitted` above)
+        const refused = [cFeet, cHead].map(c => bot.blockAt(c)).find(b => !permitted(b))
+        if (refused) { lastHz = 'undiggable ' + refused.name; continue }
         const probe = []
         for (const c of [feet.offset(0, 2, 0), cFeet, cHead, cFloor]) { probe.push(nameAt(c)); for (const n of FACE6) probe.push(nameAt(c.plus(n))) }
         const hz = mining.climbStepSafety(nameAt(under), nameAt(under.offset(0, -1, 0)), probe)
@@ -304,7 +317,7 @@ async function pillarUpTo (bot, targetY, opts = {}) {
       const above = bot.blockAt(feet.offset(0, up, 0))
       if (above && !AIRISH(above.name)) {
         if (/lava|water/.test(above.name)) { bot.clearControlStates(); return }
-        if (!canBreakNaturally(above) && !S().scaffoldDigOK(above)) { bot.clearControlStates(); return } // anti-grief: don't pillar up through a build (own registry-proven scaffold allowed under NAV_TERRAIN_PROFILE)
+        if (!canBreakNaturally(above) && !S().scaffoldDigOK(above) && !(opts.mayDig && opts.mayDig(above))) { dbg('  pillar: not my block to cut overhead - ' + above.name + ' at ' + feet.offset(0, up, 0).toString()); bot.clearControlStates(); return } // anti-grief: don't pillar up through a build (own registry-proven scaffold / the caller's own-block carve-out allowed)
         if (bot.canDigBlock && !bot.canDigBlock(above)) { bot.clearControlStates(); return }
         const tool = toolForBlock(bot, above.name)
         if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})

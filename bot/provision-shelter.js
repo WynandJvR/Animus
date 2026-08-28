@@ -909,10 +909,19 @@ async function breakOut (bot, opts = {}) {
   if (!opts.force && lidNow && (isNight(bot) || isFirstLight(bot))) { dbg('shelter: break-out deferred - ' + (isNight(bot) ? 'night' : 'first light, the undead have not burned yet') + ': the lid stays on'); return false }
   if (!opts.force && !lidNow && (isNight(bot) || isFirstLight(bot))) dbg('shelter: break-out at ' + (isNight(bot) ? 'night' : 'first light') + ' from a hole with NO lid - nothing to keep on, climbing out')
   const ownPit = (() => { try { return recallInfra('shelter', p0, 3) } catch { return null } })()
+  // MY OWN WALLS ARE MINE TO CUT (2026-08-28 15:31). The registry only knows pits that SEALED, so a
+  // leaky pit's walls - placed by sealShaft out of whatever the pack held, acacia logs that night -
+  // were "not my block to cut" the next morning and the climb died in 5ms. The evidence of
+  // ownership is geometric, the same carve-out digBlocked grants a bot trapped under its own
+  // roof: a block of cap material bounding the 1x1 column the body stands in, from the feet to
+  // the rim, is a wall this file placed. Nobody builds a 1x1 shaft around the bot but the bot.
+  const f0 = p0.floored()
+  const depth0 = shaftDepthHere(bot)
+  const boundsMyShaft = (pos) => !!pos && Math.abs(pos.x - f0.x) <= 1 && Math.abs(pos.z - f0.z) <= 1 && pos.y >= f0.y && pos.y <= f0.y + Math.max(depth0, 1) + 2
   const mayDig = (b) => {
     if (/water|lava/.test(b.name)) return false
     if (canBreakNaturally(b) || /_leaves$/.test(b.name)) return true // a canopy over the lid is not a build (live: refused birch_leaves at +4)
-    return !!ownPit && CAP_RE.test(b.name)
+    return CAP_RE.test(b.name) && (!!ownPit || boundsMyShaft(b.position))
   }
   const SIDES4 = [[1, 0], [-1, 0], [0, 1], [0, -1]]
   const solidAt = (c) => { const b = bot.blockAt(c); return !!b && !AIRISH(b.name) && b.boundingBox === 'block' }
@@ -929,8 +938,8 @@ async function breakOut (bot, opts = {}) {
     return null
   }
   const climbTo = async (target) => {
-    try { await provMining.pillarUpTo(bot, target, { isStopped, surfaceY: target, ignoreOpenSkyBreak: true }) } catch (e) { dbg('shelter: break-out pillar failed (' + e.message + ')') }
-    if (bot.entity && Math.floor(bot.entity.position.y) < target && !isStopped()) { try { await provMining.digStaircaseUp(bot, target, { isStopped, escape: true, surfaceY: target }) } catch (e) { dbg('shelter: break-out staircase failed (' + e.message + ')') } }
+    try { await provMining.pillarUpTo(bot, target, { isStopped, surfaceY: target, ignoreOpenSkyBreak: true, mayDig }) } catch (e) { dbg('shelter: break-out pillar failed (' + e.message + ')') }
+    if (bot.entity && Math.floor(bot.entity.position.y) < target && !isStopped()) { try { await provMining.digStaircaseUp(bot, target, { isStopped, escape: true, surfaceY: target, mayDig }) } catch (e) { dbg('shelter: break-out staircase failed (' + e.message + ')') } }
   }
   dbg('shelter: break-out at ' + p0.floored() + (ownPit ? ' (my registered pit at ' + ownPit.x + ',' + ownPit.y + ',' + ownPit.z + ')' : ' (no registered pit within 3b - natural terrain only)') + (opts.force ? ' [forced]' : ''))
   let dug = 0
