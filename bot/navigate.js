@@ -1074,6 +1074,18 @@ async function recoverOnce (bot, goal, plan, opts) {
         return out || bot.entity.position.y > p0.y + 0.9 || movedEnough()
       }
     },
+    { // BELOW GRADE, no plan (see sunkenIn): the shelter's own climb, judged by the feet rising.
+      kind: 'sunken',
+      when: () => sunkenIn(bot),
+      run: async () => {
+        const f = p0.floored()
+        const s = require('./pathfix.js').surfaceYAt(bot, f.x, f.z)
+        if (!s || !s.known || !Number.isFinite(s.y)) return false
+        dbg('recovery sunken: ' + (s.y - f.y) + ' below grade at ' + f + ' with no plan - climbing a staircase to y' + s.y)
+        try { await provMining().climbToSurface(bot, s.y, { isStopped, surfaceY: s.y }) } catch (e) { dbg('recovery sunken: climb failed (' + e.message + ')') }
+        return bot.entity.position.y > p0.y + 0.9 || movedEnough()
+      }
+    },
     { // in water the pathfinder never registers "on ground", so its planned jumps never
       // fire - it stands in a puddle forever (watched live, 8 min). Shallow trench: hop
       // straight onto the adjacent bank. Deep water (mid-river, no adjacent bank): swim
@@ -1557,7 +1569,23 @@ function unstickPlan (w) {
   if (w.indoors) add('indoor', 'door')    // the way out of my own house is the door
   else if (w.door) add('door')
   if (w.sealed) add('sealed')            // a 1x1 pocket: the shelter that sealed it opens it
+  else if (w.sunken) add('sunken')       // below grade and the planner has nothing: a staircase up to grade
   return plan
+}
+
+// BELOW GRADE WITH NO WAY UP (2026-08-28 17:45). The sunken farm plot at the camp is four blocks under
+// the surface; the planner answered noPath in 1ms from inside it and the cobble gather spun 0.6s
+// cycles for as long as the day lasted ("returning home to strip there" -> noPath -> again). Not a
+// 1x1 shaft (sealedIn), not water, not indoors - just a hole in the ground the planner will not
+// climb out of. The grounded surface read says how far under the body stands; two or more, and the
+// way out is the same staircase the shelter uses, judged by the feet rising.
+function sunkenIn (bot) {
+  try {
+    if (!bot.entity || !bot.entity.position || feetInWater(bot)) return false
+    const f = bot.entity.position.floored()
+    const s = require('./pathfix.js').surfaceYAt(bot, f.x, f.z)
+    return !!(s && s.known && Number.isFinite(s.y) && s.y - f.y >= 2)
+  } catch { return false }
 }
 
 // SEALED IN (2026-08-27): a 1x1 pocket - solid on all four sides at feet AND head, solid overhead.
@@ -1638,7 +1666,8 @@ async function unstick (bot, goal, opts = {}) {
     wet: feetInWater(bot),
     submerged: headInWater(bot),
     door: doorNearby(bot, goalXZ(goal)),
-    sealed: sealedIn(bot)
+    sealed: sealedIn(bot),
+    sunken: sunkenIn(bot)
   }
   const plan = unstickPlan(w)
   const where = indoors ? 'INSIDE my own structure' : (w.submerged ? 'submerged' : (w.wet ? 'in water' : (w.sealed ? 'SEALED IN a 1x1 pocket' : 'on terrain')))

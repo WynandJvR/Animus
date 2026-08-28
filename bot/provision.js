@@ -1809,6 +1809,7 @@ async function gatherLoop (bot, item, count, opts = {}) {
   let dryExplores = 0 // consecutive explores that turned up nothing new
   let noYield = 0     // blocks mined lately with NO item gain (drops lost to gaps)
   let stripDug = 0    // times we've strip-mined DOWN this gather (bounded)
+  let idleBeats = 0; let lastBeatPos = null; let lastBeatGot = null // NOTHING CHANGES BY ASKING AGAIN (2026-08-28 17:45): 0.6s cycles of scan->relocate(void)->strip dug=0->'returning home'->noPath, for as long as the day lasted
   let reachFails = 0  // consecutive "found stone but couldn't reach it" (buried -> strip-mine)
   let mineReentryTried = false // stone-relocate (#22): re-enter a known mine at most once per gather
   let saidNoStone = false      // stone-relocate: fire the "no stone up here" say at most once per gather
@@ -2283,6 +2284,13 @@ async function gatherLoop (bot, item, count, opts = {}) {
       lastBeat = Date.now()
       const p = bot.entity.position.floored()
       dbg('  gather', item, (countItem(bot, item) - start) + '/' + count, 'pos=' + p.x + ',' + p.y + ',' + p.z, 'mined=' + mined, 'dry=' + dryExplores, 'strip=' + stripDug, 'reachFails=' + reachFails, 'distHome=' + Math.round(distHome()))
+      // A gather whose body has not moved and whose count has not changed across three beats (15s)
+      // is not gathering; it ends honestly so the caller can decide, instead of spinning until dusk.
+      const gotNow = countItem(bot, item) - start
+      const sameSpot = lastBeatPos && Math.hypot(p.x - lastBeatPos.x, p.z - lastBeatPos.z) < 0.5 && Math.abs(p.y - lastBeatPos.y) < 0.5
+      idleBeats = (sameSpot && lastBeatGot === gotNow) ? idleBeats + 1 : 0
+      lastBeatPos = { x: p.x, y: p.y, z: p.z }; lastBeatGot = gotNow
+      if (idleBeats >= 3) { dbg('  gather ' + item + ': body unmoved and count unchanged for ' + idleBeats + ' beats at ' + p.x + ',' + p.y + ',' + p.z + ' - nothing here changes by asking again; ending the gather'); break }
     }
     if (isStopped()) return { gathered: countItem(bot, item) - start, reason: 'stopped' }
     if (timedOut()) return { gathered: countItem(bot, item) - start, reason: 'out of time - building with what i have' }

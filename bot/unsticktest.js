@@ -65,12 +65,12 @@ t('strip: no pit / climb / nudge / stepout / drybreach / wetbreach rung exists i
     assert(!navCode.includes("kind: '" + k + "'"), 'rung ' + k + ' still defined')
   }
 })
-t('strip: the kept rungs are exactly indoor, water, door, sealed', () => {
+t('strip: the kept rungs are exactly indoor, water, door, sealed, sunken', () => {
   // 'sealed' (2026-08-27) is the fourth thing A* physically cannot do: leave a 1x1 pocket inside
   // the 32b no-dig scope of the bot's own infra - which its own night bunker is. Its responder is
   // provision-shelter.breakOut, the module that sealed the pocket; navigate.js owns no dig here.
   const kinds = [...navCode.matchAll(/kind: '([a-z]+)'/g)].map(m => m[1]).sort()
-  assert.deepStrictEqual(kinds, ['door', 'indoor', 'sealed', 'water'])
+  assert.deepStrictEqual(kinds, ['door', 'indoor', 'sealed', 'sunken', 'water']) // 'sunken' (2026-08-28): below grade with no plan - the shelter's staircase, judged by the feet rising
   assert(navCode.includes("provShelter().breakOut(bot"), 'the sealed rung delegates to the shelter, it does not dig')
 })
 t('strip: no per-cell attempt memory and no wedge records are written by the rescue', () => {
