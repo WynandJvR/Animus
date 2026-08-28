@@ -165,6 +165,12 @@ function waterPolicy (m) {
   // dead property that reads as configured. Absent field => the library cannot bound the drop and
   // there is nothing to set; present => bound it to maxDropDown, whatever this profile set that to.
   if ('infiniteLiquidDropdownDistance' in m) m.infiniteLiquidDropdownDistance = false
+  // NO CAUSEWAYS (2026-08-28 16:11, drowned at 222,60,-242). The planner "bridges" a pond by placing
+  // blocks INTO water cells, one at a time, from the bank; the block that does not land is the step
+  // into three-deep water, and the farm pond has now taken four lives that way. A player does not
+  // build across a pond to reach a wheat drop; they walk around. Placing into a water cell is priced
+  // at the library's forbid weight in every profile that shares this policy - ONE definition (#4).
+  if (Array.isArray(m.exclusionAreasPlace)) m.exclusionAreasPlace.push(block => (block && block.name && WATER_RE.test(block.name)) ? 100 : 0)
   return m
 }
 
