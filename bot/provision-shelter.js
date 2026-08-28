@@ -144,6 +144,15 @@ function inWaterNow (bot) {
 async function ensureAshore (bot, isStopped = () => false) {
   if (!inWaterNow(bot)) return true
   dbg('rest: in water - getting ashore before any resting')
+  // A WET BODY IN ITS OWN POCKET SWIMS NOWHERE (2026-08-28 16:17-16:24). swimToShore and the hop both
+  // need open water and a bank; under a lid there is neither, and this returned false to a caller
+  // that then held all night standing in the pool. The pocket is opened FIRST - breakOut, which a
+  // flooded pocket forces at any hour - and only then is there a shore to reach.
+  if (pitHere(bot) || shaftDepthHere(bot) >= 1) {
+    dbg('rest: wet inside my own pocket at ' + bot.entity.position.floored() + ' - opening it before looking for a shore')
+    try { await breakOut(bot, { isStopped }) } catch (e) { dbg('rest: could not open the flooded pocket (' + e.message + ')') }
+    if (!inWaterNow(bot)) return true
+  }
   try { if (await navigate.swimToShore(bot, isStopped)) return true } catch {}
   try { await P().manualHopFromWater(bot) } catch {}
   return !inWaterNow(bot)
