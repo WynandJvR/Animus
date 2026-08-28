@@ -186,16 +186,9 @@ async function eatBestFood (bot) {
     } catch {}
     if (!dying) return 'only risky food left - holding out'
   }
-  // DON'T EAT RAW WHAT COOKS 3x BETTER (2026-08-28, operator: "i dont want it to waste food"). Raw
-  // mutton/beef/... is worth ~1/3 of cooked. When the best food on hand is RAW cookable and the bot is
-  // only mildly hungry (above the floor) and not in mortal danger, HOLD it - the food-securing pass
-  // (secureFood/cookRawMeat at food < REGEN_FOOD_MIN) cooks it, and cooked meat is then the preferred bite.
-  {
-    let _dying = false
-    try { _dying = require('./arbiter.js').mortalDanger(require('./survival-snapshot.js').survivalNeed(bot)) } catch {}
-    const RAW_HOLD_FLOOR = Number(process.env.RAW_HOLD_FLOOR || 8)
-    if (foodSec.RAW_COOKABLE_FOOD.test(food.name) && bot.food > RAW_HOLD_FLOOR && !_dying) return 'raw meat on hand - worth cooking first, holding'
-  }
+  // (a raw-meat hold lived here; it trapped the bot in the degraded food band - holding mutton at
+  //  food 12 kept it hungry+degraded and it never furnished. Reverted 2026-08-28 21:30. secureFood's
+  //  cook pass still cooks raw meat and eatBestFood prefers cooked by food-points, so most is cooked.)
   await bot.equip(food, 'hand')
   await bot.consume()
   return `ate ${food.name} (food ${bot.food})`
