@@ -290,8 +290,14 @@ async function climbToSurface (bot, targetY, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const surfaceY = Number.isFinite(opts.surfaceY) ? opts.surfaceY : targetY
   const prev = bot.pathfinder && bot.pathfinder.movements
+  // The ceiling gate is for the MINE-ESCAPE caller: don't pillar into open air chasing a rough
+  // surface guess. But an OPEN-AIR DEPRESSION (2026-08-29: sunk 2 below its own door, night, open
+  // sky) has no ceiling by definition, so the gate made climbToSurface a 1ms no-op and the 'sunken'
+  // recovery could never lift the bot out - it starved in a pit beside the hut. `toRim` is the
+  // sunken caller saying "I pass a GROUNDED rim as surfaceY; that bounds the climb, so a ceiling is
+  // not required" - pillarUpTo/digStaircaseUp both hard-stop at surfaceY, so there is no tower risk.
   const need = () => bot.entity && Math.floor(bot.entity.position.y) < targetY &&
-    hasSolidCeiling(bot) && !isStopped()
+    (opts.toRim || hasSolidCeiling(bot)) && !isStopped()
   try {
     // 1) SPIRAL STAIRCASE up - cuts a WALKABLE ramp to the surface (fast, and once up we
     //    can just walk on out). Proven to clear tens of blocks of solid overburden. The

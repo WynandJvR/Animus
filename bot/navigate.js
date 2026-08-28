@@ -1082,7 +1082,7 @@ async function recoverOnce (bot, goal, plan, opts) {
         const rim = sunkenRimY(bot)
         if (rim == null) return false
         dbg('recovery sunken: ' + (rim - f.y) + ' below the rim at ' + f + ' with no plan - climbing a staircase to y' + rim)
-        try { await provMining().climbToSurface(bot, rim, { isStopped, surfaceY: rim }) } catch (e) { dbg('recovery sunken: climb failed (' + e.message + ')') }
+        try { await provMining().climbToSurface(bot, rim, { isStopped, surfaceY: rim, toRim: true }) } catch (e) { dbg('recovery sunken: climb failed (' + e.message + ')') }
         return bot.entity.position.y > p0.y + 0.9 || movedEnough()
       }
     },
