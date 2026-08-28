@@ -559,10 +559,9 @@ async function escapeToDryLand (bot, { goalDir = null, isStopped = () => false, 
   const feet = bot.entity.position.floored()
   // The finder returns only a cell with a REAL swim corridor (flood-fill, not blind rays) and a
   // genuinely-dry climbable top, ranked toward the goal. No dry land in range => honest hold (below).
-  const exit = navProfile.findDryLandExit({ x: feet.x, y: feet.y, z: feet.z }, sample, { maxR: 16, goalDir, solidAt })
+  let exit = navProfile.findDryLandExit({ x: feet.x, y: feet.y, z: feet.z }, sample, { maxR: 16, goalDir, solidAt })
   if (!exit) { dbg('escapeToDryLand: no reachable dry land within range - holding (never wedging)'); return false }
-  dbg('escapeToDryLand: relocating to dry cell ' + exit.x + ',' + exit.y + ',' + exit.z + (goalDir ? ' (goal-biased)' : ''))
-  // CORRECTED success test (design §3b): standing on reachable dry land - onGround-and-dry OR within
+  // CORRECTED success test (design 3b): standing on reachable dry land - onGround-and-dry OR within
   // 0.7b of the exit cell and no longer treading (feet not water). NOT the unsatisfiable
   // onGround-AND-dry-floor-AND-!feetInWater the swim rungs use (deep water never reports onGround).
   const reached = () => {
@@ -572,19 +571,35 @@ async function escapeToDryLand (bot, { goalDir = null, isStopped = () => false, 
     return Math.hypot(p.x - (exit.x + 0.5), p.z - (exit.z + 0.5)) <= 0.7
   }
   // RUNG 1 (<=12s): swim/step straight at the exit on the swimToShore control idiom.
-  try {
-    try { bot.pathfinder.setGoal(null) } catch {}
-    const t0 = Date.now()
-    bot.setControlState('jump', true) // float/climb the water column
-    bot.setControlState('forward', true)
-    bot.setControlState('sprint', true)
-    while (Date.now() - t0 < 12000 && Date.now() < dl && !isStopped()) {
-      try { await bot.lookAt(new Vec3(exit.x + 0.5, bot.entity.position.y + 0.4, exit.z + 0.5), true) } catch {}
-      await new Promise(r => setTimeout(r, 120))
-      if (reached()) { dbg('escapeToDryLand: reached dry land at ' + bot.entity.position.floored()); return true }
+  const swimTo = async (why) => {
+    dbg('escapeToDryLand: relocating to dry cell ' + exit.x + ',' + exit.y + ',' + exit.z + why)
+    try {
+      try { bot.pathfinder.setGoal(null) } catch {}
+      const t0 = Date.now()
+      bot.setControlState('jump', true) // float/climb the water column
+      bot.setControlState('forward', true)
+      bot.setControlState('sprint', true)
+      while (Date.now() - t0 < 12000 && Date.now() < dl && !isStopped()) {
+        try { await bot.lookAt(new Vec3(exit.x + 0.5, bot.entity.position.y + 0.4, exit.z + 0.5), true) } catch {}
+        await new Promise(r => setTimeout(r, 120))
+        if (reached()) { dbg('escapeToDryLand: reached dry land at ' + bot.entity.position.floored()); return true }
+      }
+    } finally { bot.clearControlStates() }
+    return !feetInWater(bot) // the swim landed us dry (onGround may lag) - done
+  }
+  if (await swimTo(goalDir ? ' (goal-biased)' : '')) return true
+  // THE GOAL SIDE IS A PREFERENCE, NOT THE ONLY ANSWER (2026-08-28 16:26-16:28). The goal-biased exit
+  // was ten blocks off across an unclimbable lip while the one-step bank stood two cells away; the
+  // swim failed three times in a row and the leg gave up "still wet". Air is the budget of an escape:
+  // when the preferred side cannot be made, the NEAREST exit is tried before any pillar.
+  if (goalDir && Date.now() < dl && !isStopped()) {
+    const f2 = bot.entity.position.floored()
+    const nearest = navProfile.findDryLandExit({ x: f2.x, y: f2.y, z: f2.z }, sample, { maxR: 16, goalDir: null, solidAt })
+    if (nearest && (nearest.x !== exit.x || nearest.z !== exit.z || nearest.y !== exit.y)) {
+      exit = nearest
+      if (await swimTo(' (the goal-side exit could not be made - nearest instead)')) return true
     }
-  } finally { bot.clearControlStates() }
-  if (!feetInWater(bot)) return true // the swim landed us dry (onGround may lag) - done
+  }
   // RUNG 2: an unclimbable lip the swim couldn't make - pillar up under OPEN SKY, then step off.
   // Reuses the already-anti-grief pillarUpTo (refuses indoors :1586, refuses water-overhead :1602,
   // natural/own-scaffold filler only :1603, self-terminates on clear sky :1594) - NO new placement.

@@ -372,17 +372,14 @@ function findDryLandExit (feet, sampleName, opts = {}) {
   const q = [seed]
   let budget = opts.maxVisited || 6000
   let best = null
+  const cands = []
   const consider = (nx, ny, nz) => {
     if (!solidAt(nx, ny - 1, nz)) return               // floor must be a full solid block (not water/lava)
     if (!isAir(nx, ny, nz) || !isAir(nx, ny + 1, nz)) return // genuinely DRY: feet + head both air (rejects a 1-deep shelf)
     const dxg = (nx + 0.5) - (feet.x + 0.5); const dzg = (nz + 0.5) - (feet.z + 0.5)
     const dist = Math.hypot(dxg, dzg)
     const proj = goalDir ? (dxg * goalDir.x + dzg * goalDir.z) : 0
-    const cand = { x: nx, y: ny, z: nz, dist, proj }
-    const wins = !best
-      ? true
-      : (goalDir ? (cand.proj > best.proj || (cand.proj === best.proj && cand.dist < best.dist)) : (cand.dist < best.dist))
-    if (wins) best = cand
+    cands.push({ x: nx, y: ny, z: nz, dist, proj })
   }
   const NB = [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0], [0, -1, 0]]
   const HOR = [[1, 0], [-1, 0], [0, 1], [0, -1]]
@@ -401,6 +398,13 @@ function findDryLandExit (feet, sampleName, opts = {}) {
       if (!isWater(nx, ny, nz)) continue // the fill only crosses WATER - a wall/terrain blocks it (corridor guarantee)
       seen.add(k); q.push({ x: nx, y: ny, z: nz })
     }
+  }
+  // Goal side first (leave the pond TOWARD the build), then distance - the §2c rule navprofiletest pins.
+  // When the goal-side exit cannot be made (an unclimbable lip, 2026-08-28 16:26), the CALLER asks
+  // again with no goalDir and gets the nearest exit; the bias is a preference, not the only answer.
+  if (cands.length) {
+    cands.sort((a, b) => goalDir ? ((b.proj - a.proj) || (a.dist - b.dist)) : (a.dist - b.dist))
+    best = cands[0]
   }
   if (!best) return null
   const bdist = best.dist || 1
