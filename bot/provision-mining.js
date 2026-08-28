@@ -241,7 +241,7 @@ async function digStaircaseUp (bot, targetY, opts = {}) {
     let arrived = false
     if (FLUID) { arrived = await stepInto(bot, sFeet, { jump: true, isStopped }) }
     if (!arrived) { try { await gotoWithTimeout(bot, new goals.GoalBlock(sFeet.x, sFeet.y, sFeet.z), 6000) } catch {} }
-    if (Math.floor(bot.entity.position.y) <= y0) stuck++; else stuck = 0
+    if (Math.floor(bot.entity.position.y) <= y0) stuck++; else { stuck = 0; try { require('./telemetry.js').touchProgress('staircase') } catch {} } // A LEVEL GAINED IS PROGRESS (2026-08-28 19:29): the watchdog failed the ladder at 93s mid-climb, 18 below the rim, because bare-hand digs are not pathfix-verified
   }
 }
 
