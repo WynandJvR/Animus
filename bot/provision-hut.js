@@ -1533,6 +1533,30 @@ async function repairHutStructure (bot, hut, opts = {}) {
       if (!(bot.inventory ? bot.inventory.items() : []).some(i => /_planks$/.test(i.name))) { dbg('repairHut: out of planks - ' + (missPlank.length - plankDone) + ' wall cell(s) left'); break }
       await clearCell(wp, /_planks$/)
       if (bot.entity.position.distanceTo(wp) > 4) { try { await navigate.gotoOnce(bot, new goals.GoalNear(wp.x, wp.y, wp.z, 2), 12000) } catch {} }
+      // STEP OFF THE CELL I AM ABOUT TO FILL (2026-08-28 18:50). GoalNear(cell, 2) may end ON the cell -
+      // on the wall top, feet in the roof cell itself - and a block cannot be placed through a body:
+      // "place did not land" twice, the last two shell cells, the hut two planks short of a roof.
+      // An adjacent standable cell at this level or one up (onto the roof) is the stand-off.
+      {
+        const feetC = bot.entity.position.floored()
+        if (feetC.x === wp.x && feetC.z === wp.z && (feetC.y === wp.y || feetC.y + 1 === wp.y)) {
+          let stood = false
+          for (const dy of [0, 1]) {
+            for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+              const c = wp.offset(dx, dy, dz)
+              const fb = bot.blockAt(c); const hb = bot.blockAt(c.offset(0, 1, 0)); const ub = bot.blockAt(c.offset(0, -1, 0))
+              if (fb && AIRRE.test(fb.name) && hb && AIRRE.test(hb.name) && ub && !AIRRE.test(ub.name)) {
+                try { await navigate.gotoOnce(bot, new goals.GoalBlock(c.x, c.y, c.z), 6000) } catch {}
+                const f2 = bot.entity.position.floored()
+                stood = !(f2.x === wp.x && f2.z === wp.z)
+                if (stood) break
+              }
+            }
+            if (stood) break
+          }
+          if (!stood) dbg('repairHut: standing in the cell to fill at ' + wp.toString() + ' and no stand-off cell beside it - the placement will not land')
+        }
+      }
       if (await placeAt(bot, wp, /_planks$/)) plankDone++
       else dbg('repairHut: could not place plank at ' + wp.toString() + ' (' + placeAt.lastFail + ')')
     }
