@@ -1584,14 +1584,14 @@ function sealedIn (bot) {
     let depth = 0
     try { depth = provShelter().shaftDepthHere(bot) } catch { depth = 0 }
     if (depth < 2) return false
-    for (let dy = 2; dy <= 8; dy++) { if (solid(0, dy, 0)) return true }
-    // OPEN SKY: sealed in all the same unless the pack can PILLAR to the rim. "Holds any cap
-    // material" said one dirt in a five-deep stone shaft was the planner's problem (live 15:28,
-    // 27,53,-12: 'on terrain' x64 in a hot loop, no rung, no climb). The shelter's breakOut owns
-    // every shaft the planner cannot leave, and one block per level is what leaving costs.
-    let filler = 0
-    try { filler = provShelter().capMaterialCount(bot) } catch { filler = 0 }
-    return filler < depth
+    // EVERY SHAFT IS THE SHELTER'S (2026-08-28 17:26). The first cut kept "the pack can pillar to the
+    // rim" as the planner's case. Live, five times today, the planner answered noPath in 1ms from
+    // inside a 1x1 shaft whatever the pack held - the last time with 64 planks aboard, in its own
+    // opened pit at the camp, with the bank chests 14b away 'unreachable' and the hut build refused
+    // as unreachable. The pillar the planner never plans is exactly what breakOut does. A lid or
+    // open sky makes no difference to who owns the way out; it only decides whether the way out
+    // waits for daylight (breakOut's own rule).
+    return true
   } catch { return false }
 }
 
