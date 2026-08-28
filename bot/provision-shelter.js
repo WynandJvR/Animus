@@ -393,7 +393,16 @@ async function digInForNight (bot, opts = {}) {
     // IN WATER? Get ashore FIRST - digging attempts from a water column all fail while
     // the bot drowns through the retry carousel (watched it die that way on the test
     // server). If we can't reach land, say so honestly instead of pretending to shelter.
-    if (!(await ensureAshore(bot, isStopped))) { dbg('shelter: stuck in water - cannot dig in here'); return false }
+    if (!(await ensureAshore(bot, isStopped))) {
+      // STUCK IN WATER IS A PLACE TO LEAVE, NOT A NIGHT TO GIVE UP (2026-08-28 10:04). This used to
+      // return false here, the row recorded "achieved nothing HERE", and the bot stood at the pond
+      // all night with no shelter attempted anywhere else - phantoms took it at 10:10. The water
+      // rescue that every trek already uses (escapeToDryLand, goal-biased, flood-fill to the nearest
+      // dry cell) is the honest next step; only if the body is STILL wet after it is the night lost.
+      dbg('shelter: stuck in water - relocating to dry land before digging (escapeToDryLand)')
+      try { await navigate.escapeToDryLand(bot, { isStopped }) } catch (e) { dbg('shelter: dry-land relocation failed (' + e.message + ')') }
+      if (inWaterNow(bot)) { dbg('shelter: still in water after the dry-land relocation - cannot dig in here'); return false }
+    }
     // Don't dig a fresh hole beside the aquifer that just flooded the last one - walk
     // clear of it first (re-digging at the same wet spot is the drowning loop).
     if (nearRecentFlood(bot)) {
