@@ -88,6 +88,20 @@ function reader (s) {
 // excursion and is asked many times a second by the nav loops. journeyAdmissible reads no threat
 // field, so the scan buys that caller nothing and would buy it with event-loop budget (#8).
 // Nothing else may pass it: a null threatDist elsewhere reads as "no mob", which is a lie.
+// THE PANTRY, READ SYNC (2026-08-28 18:19): the food-need grade (arbiter.jobSurvivalNeed) is derived from
+// pack, bank and animals in sight. The schematic builder asks survivalNeed(bot) every 5s mid-build
+// with the SYNC state, which carried none of them - so "unmeasured" kept today's verdict and the
+// hut pass paused at food 13 to "secure food" it had no source for. packFoodPts is an inventory
+// read; the bank figure is the scheduler tick's last MEASUREMENT (stamped below), used while fresh.
+let lastBankFood = { pts: null, at: 0 }
+function packFoodPtsOf (bot) {
+  try {
+    const md = require('minecraft-data')(bot.version); const foods = (md && md.foodsByName) || {}
+    let pts = 0
+    for (const i of (bot.inventory ? bot.inventory.items() : [])) { if (foods[i.name] && foodSec.foodTier(i.name) < 2) pts += (foods[i.name].foodPoints || 0) * i.count }
+    return pts
+  } catch { return 0 }
+}
 function survivalState (bot, opts = {}) {
   // VITALS FIRST, and outside every try/catch that could take them down with it.
   // survival-snapshot.js:133 wraps this whole function in a swallowing try, so before this an
@@ -153,6 +167,8 @@ function survivalState (bot, opts = {}) {
     ...vitals,
     threatDist,
     animalsNear,
+    packFoodPts: packFoodPtsOf(bot),
+    bankFoodPts: (Date.now() - lastBankFood.at < 60000) ? lastBankFood.pts : null,
     creeperDist,
     drowning,
     inLava: !!(bot.entity && bot.entity.isInLava),
@@ -394,6 +410,7 @@ async function schedulerState (bot) {
     let pts = 0
     for (const [n, c] of Object.entries(totals)) if (foods[n]) pts += (foods[n].foodPoints || 0) * c
     s.bankFoodPts = pts
+    lastBankFood = { pts, at: Date.now() }
     // #41 RESILIENT_RECOVERY: what the bank holds toward ONE spare set (same cachedOnly read as
     // bankFoodPts - never walks). Feeds maintain.needs(spareKit), scheduler.recoveryReady, and the
     // rearmFromBank rung gate. Absent -> maintain treats spareKit as "not measured" (no spurious need).
