@@ -325,6 +325,16 @@ function syncClaims (raised, ev = {}) {
   }
   const d = ev.driver && claims.get(ev.driver)
   if (d && !d.revokedAt && ev.at != null && ev.at > d.lastDeltaAt) d.lastDeltaAt = ev.at
+  // A CLAIM RAISED DURING THE DRIVER'S TENURE IS THE DRIVER'S WORK (2026-08-28 16:10, 16:34). The
+  // recovery ladder holds the dispatch slot and runs its food rung; the rung raises `foodRun`; every
+  // advance is credited to `ladder` and the food run's own lease starves - "REVOKED foodRun - no
+  // world delta credited to it for 151s" in the middle of a 275b trek it was demonstrably making.
+  // A nested claim's evidence is its parent's evidence: whatever the driver is credited, every claim
+  // taken while the driver held (takenAt strictly after the driver's) is credited too. Older, unrelated claims
+  // (the 16:54 corpse on top of a live build) are untouched - they predate the driver.
+  if (d && !d.revokedAt && ev.at != null) {
+    for (const c of claims.values()) { if (c !== d && !c.revokedAt && c.takenAt > d.takenAt && ev.at > c.lastDeltaAt) c.lastDeltaAt = ev.at }
+  }
   const revoked = []
   // NO EVIDENCE, NO VERDICT (#10 - "unmeasured is not unmet"). A caller that cannot read the work
   // ledger has not shown that anything is stuck; it has shown that it cannot tell. Revoking on that
