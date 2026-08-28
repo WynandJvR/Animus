@@ -47,6 +47,8 @@ const maintain = require('./maintain.js') // #40 F2: pure buffer needs() - to de
 const foodSec = require('./food.js') // #40 F3.2: pure busy-preempt food threshold (FOOD_SURVIVAL raises it 6 -> 10)
 const pov = require('./pov.js') // GUI-OVERHAUL §2: sliced DDA raycaster behind GET /pov (all logic lives in pov.js)
 const reflexes = require('./reflexes.js') // PLAN-one-runner: the proposal registry + the ONE body-ownership rule the tick arbitrates with
+// a declared hold belongs to the job on the body at declaration (the runner owns the job reads)
+reflexes.setHoldJobResolver(() => { try { const j = provision.activeJobInfo(); return j && j.name } catch { return null } })
 const attempts = require('./attempts.js') // review §3.3: attempt memory keyed (job, step, 4b-cell) - replaces runner.noOp + runner.ladderBlock
 const cmdGate = require('./gate.js') // M1 of the deadlock-free-arbitration design: THE refusal registry - the nine brain-command gates as ROWS, one evaluator, one place a `held (` may be built
 const SCHED_ON = process.env.SCHEDULER !== '0' // master flag: SCHEDULER=0 restores the S1-hotfix wiring byte-for-byte (gate takes the survivalAdmissible path, the tick never registers, the 3 reflexes run as today)
@@ -1811,6 +1813,7 @@ if (SCHED_ON) {
           if (!hold) return false
           if (!heldJob || !heldJob.name) return true            // nothing else is running to be excused
           if (hold.label === heldJob.name) return true
+          if (hold.job && hold.job === heldJob.name) return true // declared while this job held the body (reflexes.setHoldJobResolver)
           try {
             const r = reflexes.get(heldJob.name); if (r && (r.label === hold.label || r.name === hold.label)) return true
             const h = reflexes.get(hold.label); if (h && (h.label === heldJob.name || h.name === heldJob.name)) return true

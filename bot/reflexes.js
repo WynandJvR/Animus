@@ -200,15 +200,27 @@ function _setNow (fn) { nowFn = fn || (() => Date.now()) } // tests only
 // So a hold may also name its PREMISE - the thing that must be true for its stillness to be
 // deliberate. `premise(bot) === false` means the holder is not in the state it claims, and the
 // hold stops suppressing (see activeHold). Holds with no premise behave exactly as before.
+// A HOLD BELONGS TO WHOEVER HELD THE BODY WHEN IT WAS DECLARED (2026-08-28). The watchdog scopes a
+// hold to the job on the body by LABEL ("a hold excuses its OWN stillness only"), and a hold
+// declared by shelter code running inside a recovery-ladder rung is labelled nightShelter:* while
+// the body belongs to the ladder - so the ladder's claim was never vouched for, the lease cut it
+// at 150s every night, the re-dispatch dug the pit two deeper, and the floor went 65 -> 62 in one
+// evening. The runner installs the resolver (it owns the job reads); a hold records the job name
+// at declaration and the watchdog treats that as ownership, exactly like a label match.
+let holdJobResolver = null
+function setHoldJobResolver (fn) { holdJobResolver = typeof fn === 'function' ? fn : null }
 function beginHold (label, wake, ttlMs, opts = {}) {
   const token = 'h' + (++holdSeq)
   const now = nowFn()
+  let job = null
+  try { job = holdJobResolver ? (holdJobResolver() || null) : null } catch { job = null }
   holds.set(token, {
     label: label || 'hold',
     wake: wake || 'unspecified',
     since: now,
     until: now + Math.max(1000, ttlMs || 60000),
-    premise: typeof opts.premise === 'string' && opts.premise ? opts.premise : null
+    premise: typeof opts.premise === 'string' && opts.premise ? opts.premise : null,
+    job: typeof job === 'string' && job ? job : null
   })
   return token
 }
@@ -1098,7 +1110,7 @@ module.exports = {
   names,
   dispatchable,
   proposalCandidates,
-  beginHold,
+  beginHold, setHoldJobResolver,
   endHold,
   activeHold,
   _resetHolds,
