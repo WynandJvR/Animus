@@ -527,8 +527,10 @@ async function schedulerState (bot) {
       try {
         const items = bot.inventory ? bot.inventory.items() : []
         if (items.some(i => /_bed$/.test(i.name))) return true
+        // planks OR logs (1 log = 4 planks): a bed is 3 wool of one colour + 3 planks, and the bot
+        // usually carries LOGS not planks, so counting only planks read 'unobtainable' with logs in hand.
         const wool = {}; let planks = 0
-        for (const i of items) { if (/_wool$/.test(i.name)) wool[i.name] = (wool[i.name] || 0) + i.count; if (/_planks$/.test(i.name)) planks += i.count }
+        for (const i of items) { if (/_wool$/.test(i.name)) wool[i.name] = (wool[i.name] || 0) + i.count; if (/_planks$/.test(i.name)) planks += i.count; if (/_log$/.test(i.name)) planks += i.count * 4 }
         return planks >= 3 && Object.values(wool).some(n => n >= 3)
       } catch { return false }
     })()
