@@ -495,7 +495,9 @@ async function item4 () {
     const src = srcOf('provision-hut.js')
     assert(!/gatherWool/.test(src), 'the wool bolt-on is gone - wool is a registry producer like anything else')
     assert(/holdings changed during the attempt/.test(src), 'and the retry is CONDITIONED on holdings actually moving, not on the material being wool')
-    assert(/planOpts, gather: true/.test(src), 'and the bootstrap caller is allowed to GATHER - a bot with nothing has no bank to withdraw from')
+    // 2026-08-28: the bootstrap caller may gather ONCE A HUT STANDS (the walls come before the bed);
+    // with no hut it is craft/withdraw only - not a per-material workaround, a site-first gate.
+    assert(/planOpts, gather: mayRoam/.test(src) && /const mayRoam = !!hutAnchor\(\)/.test(src), 'and the bootstrap caller is allowed to GATHER once a hut stands - a bot with nothing has no bank to withdraw from')
   })
   t('SILENT SKIPS: gatherWool the hand-written one-off is deleted, not merely unused', () => {
     assert(!provision.gatherWool, 'a named wrapper with no caller is the shape this registry exists to prevent')

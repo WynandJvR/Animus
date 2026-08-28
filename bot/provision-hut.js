@@ -671,7 +671,13 @@ async function acquireBed (bot, opts = {}) {
       // (`not craftable from holdings (needs gathering birch_log)` - verified live, and the reason
       // no spawn anchor was ever laid). It may chop its own wood and hunt its own sheep; both legs
       // are bounded by their own drivers (roam fence, kill cap, night gate, deadline).
-      try { await res.acquire(bot, name, 1, { near, isStopped, say: opts.say, planOpts, gather: true }) }
+      // ...THE WALLS COME BEFORE THE BED (2026-08-28). With no hut standing, this roam - "hunt
+      // white_wool x3", may roam - took the bot 120b from the site every morning chasing sheep and
+      // acacia, and dusk found it out there (live 09:34, 09:52). The camp's own hut step is the
+      // first job at the site (#102); the bed is craft/withdraw-only until a hut stands to put it in.
+      const mayRoam = !!hutAnchor()
+      if (!mayRoam) dbg('  acquireBed: no hut stands yet - not roaming for wool/wood; the bed comes after the walls (craft/withdraw only)')
+      try { await res.acquire(bot, name, 1, { near, isStopped, say: opts.say, planOpts, gather: mayRoam }) }
       catch (e) { dbg('  acquireBed: ' + name + ' failed (' + e.message + ')') }
       const got = bedInPack(bot)
       if (got) { dbg('  acquireBed: now holding a ' + got.name); return got }
