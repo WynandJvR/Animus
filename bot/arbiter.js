@@ -208,6 +208,12 @@ function jobSurvivalNeed (state, opts = {}) {
   const endangered = (s.isNight && !s.nightStuck) || (s.threatDist != null && s.threatDist <= 16) || (s.creeperDist != null && s.creeperDist <= 16)
   if (s.hp != null && s.hp <= hpLow && endangered) return { tier: PRIORITY.SURVIVE, need: 'heal', reason: 'hp ' + s.hp + ' <= ' + hpLow + ' while ' + (s.isNight ? 'night' : 'threatened') }
   // HUNGER (SURVIVE): a progress job must not run while genuinely hungry (it mined starving)
+  // AT NIGHT, HOME BEFORE HUNGER (2026-08-28 19:20). Food 6 ranked the food need above the night-shelter
+  // need, secureFood became crisis-grade, and a naked bot foraged in the dark with its own registered
+  // hut twenty blocks away - zombie. Hunger above zero does no damage; the dark does. Under-armoured at
+  // night the shelter need comes first (the food run resumes at first light); at food 0 the hunger is
+  // the crisis again.
+  if (s.isNight && s.underArmored && !s.nightStuck && s.food != null && s.food > 0 && s.food < foodThreshold) return { tier: PRIORITY.SURVIVE, need: 'shelter', reason: 'night + under-armored (hungry, food ' + s.food + ' - home before hunger)' }
   if (s.food != null && s.food < foodThreshold) {
     // A FOOD NEED WITH NO ANSWER IS A CHORE, NOT A CRISIS (2026-08-28). Four site-days went to secureFood
     // at food 9..13 with an empty pack, an empty bank and no animal in sight - one bread a day from the
