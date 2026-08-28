@@ -518,7 +518,20 @@ async function schedulerState (bot) {
     s.bedDist = (kb && me) ? Math.hypot(kb.x - me.x, kb.z - me.z) : null
     s.spawnSuspect = !!suspect
     s.spawnAnchored = !!(kb && kb.confirmed === true && !suspect)
-    s.bedUnobtainable = bedUnobtainable()
+    // A STALE "NO BED" LATCH MUST YIELD TO WOOL IN THE PACK (2026-08-28). bedUnobtainable was set when
+    // the bot had 0 wool and persisted (epoch-scoped) - so when the operator handed it wool it still
+    // read "no bed obtainable" and the spawn bootstrap stayed suppressed, sending it to grind armour
+    // instead of making the bed. A bed is only unobtainable if the latch holds AND none is craftable
+    // from what is held NOW: a bed item, or >=3 of one wool colour + >=3 planks.
+    s.bedUnobtainable = bedUnobtainable() && !(() => {
+      try {
+        const items = bot.inventory ? bot.inventory.items() : []
+        if (items.some(i => /_bed$/.test(i.name))) return true
+        const wool = {}; let planks = 0
+        for (const i of items) { if (/_wool$/.test(i.name)) wool[i.name] = (wool[i.name] || 0) + i.count; if (/_planks$/.test(i.name)) planks += i.count }
+        return planks >= 3 && Object.values(wool).some(n => n >= 3)
+      } catch { return false }
+    })()
   } catch { s.bedKnown = false; s.bedDist = null; s.spawnSuspect = false; s.spawnAnchored = false; s.bedUnobtainable = false }
   // sleepableNow: can the server grant a sleep RIGHT NOW (night or thunder)? The condition gate
   // the unconfirmed-anchor re-assert waits on - ONE definition, provision-recovery's, reused here.
