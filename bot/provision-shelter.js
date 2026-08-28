@@ -498,7 +498,14 @@ async function digInForNight (bot, opts = {}) {
     // night out - walls and roof beat any hole in the ground, and pitting here is how
     // the interior kept getting defaced (dirt piles, floor holes - live, repeatedly).
     if (!insideOwnStructure(bot)) {
-      const hutNear = onHutApron(bot)
+      // HOME WITHIN A WALK IS THE SHELTER (2026-08-28 19:18, the first night with a registered hut): the
+      // apron test alone sent the bot to dig a pit 20b from its own door after a bank run. A registered
+      // hut within HOME_NIGHT_LEASH is entered and waited out - the same door crossing the apron case
+      // uses; farther than that, or with no hut, the pit below is still the answer.
+      const HOME_NIGHT_LEASH = 48
+      const hutHome = (() => { try { const h = require('./provision-hut.js').hutAnchor(); return (h && Math.hypot(h.x - bot.entity.position.x, h.z - bot.entity.position.z) <= HOME_NIGHT_LEASH) ? h : null } catch { return null } })()
+      const hutNear = onHutApron(bot) || hutHome
+      if (hutNear && hutHome && !onHutApron(bot)) dbg('shelter: my hut at ' + hutHome.x + ',' + hutHome.y + ',' + hutHome.z + ' is ' + Math.round(Math.hypot(hutHome.x - bot.entity.position.x, hutHome.z - bot.entity.position.z)) + 'b away - going home instead of digging in')
       if (hutNear) {
         try {
           const nav = require('./navigate.js') // lazy - navigate requires provision the same way
