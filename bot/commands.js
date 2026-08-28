@@ -1389,6 +1389,13 @@ async function handleInner (bot, line, opts = {}) {
       // if far. HONEST: verifies items actually landed in the pack before marking the grave
       // done (it used to say "grabbed what i could" after picking up nothing, forever).
       const d = bestGrave()
+      // NAKED AT NIGHT, THE GRAVE WAITS FOR FIRST LIGHT (2026-08-28 19:20-19:23): the ladder's R1 fired on the
+      // dying body and drove every respawn through the dark toward a grave 235b away - four deaths in three
+      // minutes. A grave at arm's reach is still taken (free gear, zero trek); farther is a trek, and treks are for daylight.
+      if (d && provCore().isNight(bot) && provShelter().underArmored(bot)) {
+        const me = bot.entity.position; const dist = Math.hypot(d.x - me.x, d.z - me.z)
+        if (dist > Number(process.env.GRAVE_NEAR || 16)) { dbg('recover: night + no armour - the grave at ' + d.x + ',' + d.y + ',' + d.z + ' (' + Math.round(dist) + 'b) waits for first light'); return 'night and no armour - my stuff at ' + d.x + ',' + d.z + ' waits for first light' }
+      }
       if (!d) {
         const burned = grave.ledger().find(x => !x.retrieved && x.dangerous)
         if (burned) { burned.retrieved = true; persistDeath(); return `i died in lava/fire at ${burned.x},${burned.y},${burned.z} - my stuff burned up, not walking back into that` }
