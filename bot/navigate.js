@@ -1254,11 +1254,42 @@ function goalInWater (bot, goal) {
   } catch { return false }
 }
 
+// The nearest column within r of (x,z) whose surface is dry ground, or null. A trek's bearing hop
+// that lands on a lake is re-aimed here, not refused (2026-08-28 10:32: three instant refusals of
+// a lake waypoint made the resume call the site "unreachable" for a whole day).
+function nearestDryXZ (bot, x, z, r = 12) {
+  try {
+    const pf = require('./pathfix.js')
+    const wet = b => !!b && /water|kelp|seagrass|bubble_column/.test(b.name)
+    for (let ring = 1; ring <= r; ring++) {
+      for (let dx = -ring; dx <= ring; dx++) {
+        for (let dz = -ring; dz <= ring; dz++) {
+          if (Math.max(Math.abs(dx), Math.abs(dz)) !== ring) continue
+          const X = Math.floor(x) + dx; const Z = Math.floor(z) + dz
+          const sfc = pf.surfaceYAt(bot, X, Z)
+          if (!sfc || !sfc.known || !Number.isFinite(sfc.y)) continue
+          const feet = bot.blockAt(new Vec3(X, sfc.y, Z)); const ground = bot.blockAt(new Vec3(X, sfc.y - 1, Z))
+          if (feet && !wet(feet) && ground && !wet(ground) && ground.boundingBox === 'block') return { x: X + 0.5, z: Z + 0.5 }
+        }
+      }
+    }
+  } catch {}
+  return null
+}
+
 async function navigateToInner (bot, goal, opts = {}) {
   if (!opts.wet && goalInWater(bot, goal)) {
     const xz = goalXZ(goal)
-    dbg((opts.label ? opts.label + ': ' : '') + 'REFUSING the walk - the goal at ' + Math.round(xz.x) + ',' + Math.round(xz.z) + ' is in the water; a walk does not end in the water')
-    throw new Error('the goal is in the water - a walk does not end in the water')
+    // A WAYPOINT in the water (an XZ goal with no y - a trek's bearing hop) is RE-AIMED at the
+    // nearest dry column; only a real destination cell in the water is refused outright.
+    const alt = (goalY(goal) == null && typeof goal.x === 'number' && typeof goal.z === 'number') ? nearestDryXZ(bot, xz.x, xz.z, 12) : null
+    if (alt) {
+      dbg((opts.label ? opts.label + ': ' : '') + 'the waypoint at ' + Math.round(xz.x) + ',' + Math.round(xz.z) + ' is in the water - re-aiming at the nearest dry ground ' + Math.round(alt.x) + ',' + Math.round(alt.z))
+      goal.x = alt.x; goal.z = alt.z
+    } else {
+      dbg((opts.label ? opts.label + ': ' : '') + 'REFUSING the walk - the goal at ' + Math.round(xz.x) + ',' + Math.round(xz.z) + ' is in the water; a walk does not end in the water')
+      throw new Error('the goal is in the water - a walk does not end in the water')
+    }
   }
   const timeoutMs = opts.timeoutMs || 20000
   const ceilingMs = supervisorPatienceMs()
