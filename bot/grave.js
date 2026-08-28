@@ -186,6 +186,11 @@ function gravesSnapshot ({ pos, home, now, ledger: injected } = {}) {
   const graves = []
   for (const d of led) {
     if (!d || d.retrieved || !graveWorthIt(d) || t - (d.at || 0) >= 24 * 3600 * 1000) continue
+    // ONE FILTER, TWO READERS (2026-08-28 11:12): bestGrave (what `recover` will actually fetch)
+    // drops a grave recorded UNREACHABLE (640bf95); this snapshot did not, so the chooser's
+    // naked-with-free-gear hook kept saying "degraded", R1 ran `recover` which found nothing to do
+    // in 1ms, and the ladder owned every morning at the site (R3 farm trek, 100b away, at full food).
+    if (!graveReachable(d)) continue
     const u = graveUrgency(d, t) // task #18 despawn budget (safe when GRAVE_URGENT off / clock unset)
     if (u.tier === 'expired') continue // past 1.5x the despawn window - stop chasing a ghost (never auto-marked retrieved)
     const dBot = pos ? Math.hypot(d.x - pos.x, d.z - pos.z) : Infinity
