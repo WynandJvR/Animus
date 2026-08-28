@@ -71,9 +71,10 @@ try {
 function graveSalvage (d, caps) {
   // what the bot wears NOW is a capability the verdict reads (the underground clause); the rolling
   // inventory snapshot below is the one reader of the armour slots this module already has
-  try { return salvageVerdict(d, worldMemory.hazardAt(d), Object.assign({ armored: lastWornCount > 0 }, caps || {})) } catch { return { go: true, why: 'no hazard data', discount: 1 } }
+  try { return salvageVerdict(d, worldMemory.hazardAt(d), Object.assign({ armored: lastWornCount > 0, hp: lastHp, night: lastNight }, caps || {})) } catch { return { go: true, why: 'no hazard data', discount: 1 } }
 }
 let lastWornCount = 0 // armour pieces worn at the last snapInventory (rolling, every few seconds)
+let lastHp = null; let lastNight = null // vitals at the last snap - the salvage verdict reads them (a daylight walk at full health is not a lure)
 
 // Live references for the call sites that scan/mark the ledger directly (the `recover`
 // command marks a grave retrieved, the degraded signature counts recent deaths). Returning
@@ -99,6 +100,7 @@ function snapInventory (bot) {
     const build = items.filter(i => /_log$|_planks$|_wood$|^cobblestone$|^stone$|^cobbled_deepslate$|^deepslate$/.test(i.name)).reduce((s, i) => s + i.count, 0)
     invSnap = { count, notable: notable.concat(worn), build, at: Date.now() }
     lastWornCount = worn.length
+    try { lastHp = typeof bot.health === 'number' ? bot.health : null; const tod = bot.time && bot.time.timeOfDay; lastNight = typeof tod === 'number' ? (tod >= 13000 && tod < 23500) : null } catch { lastHp = null; lastNight = null }
     // H2: any total-count change (craft/withdraw/deposit/pickup/eat/toss) is verified progress.
     if (lastItemCount !== -1 && count !== lastItemCount) telemetry.touchProgress('itemDelta')
     lastItemCount = count

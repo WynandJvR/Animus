@@ -279,7 +279,14 @@ function salvageVerdict (grave, hazard, caps = {}) {
   // here, or the caller established a dry standpoint by a grounded read at approach time.
   const survived = !!hazard.traversedSinceDeath || caps.dryStandpoint === true
   if (causeWritesOff(cause)) return { go: false, why: `i died in ${cause} at ${hazard.x},${hazard.y},${hazard.z} - the stuff is gone`, discount }
-  if (hazardHardArmed(hazard) && !survived) return { go: false, why: `${deaths} deaths at ${hazard.x},${hazard.y},${hazard.z} and i have not got through there alive since`, discount }
+  // A DAYLIGHT WALK AT FULL HEALTH TO AN OPEN-SKY GRAVE IS NOT A LURE (2026-08-28 18:00). The sinkhole
+  // under the farm took three lives - two zombie nights and one four-block fall at hp 2 - and the
+  // hard-arm then wrote off a 193-item grave (the whole hut BOM) lying open-sky, ten blocks from the
+  // hut cell. The medium there is air; what killed was the hour and the hp. Fall/mob hazards stay
+  // armed at night, hurt, or underground; by day at hp >= 16 in the open the walk is the walk any
+  // player makes. Drowning/lava/fire keep the full rule - their medium IS the danger.
+  const walkable = /^(fall|mob)$/.test(cause) && !!grave && !grave.underground && caps.night === false && typeof caps.hp === 'number' && caps.hp >= 16
+  if (hazardHardArmed(hazard) && !survived && !walkable) return { go: false, why: `${deaths} deaths at ${hazard.x},${hazard.y},${hazard.z} and i have not got through there alive since`, discount }
   if (HAZARD_MEDIUM[cause] && !survived) return { go: false, why: `${cause} killed me at ${hazard.x},${hazard.y},${hazard.z} and i still cannot get out of that`, discount }
   return { go: true, why: `${deaths} death(s) here - worth ${Math.round(discount * 100)}% of face value`, discount }
 }
