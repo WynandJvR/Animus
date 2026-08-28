@@ -3403,7 +3403,13 @@ async function autoBuild (bot, schem, at, opts = {}) {
   checklistStep('armor up')
   const anyBare = () => Object.values(wornArmor(bot)).some(v => !v)
   const cowsNear = () => Object.values(bot.entities || {}).some(e => e && e.position && /^(cow|mooshroom)$/.test((e.name || '').toLowerCase()) && Math.hypot(e.position.x - at.x, e.position.z - at.z) <= 48)
-  if (!isStopped() && process.env.ARMOR_BOOTSTRAP !== '0' && anyBare() && cowsNear()) {
+  // THE HUT COMES FIRST, AND 'FIRST' MEANS STANDING (2026-08-28 18:46): a camp pass that ended with the
+  // shell still 32 cells short handed the day to the iron grind - a cave dive - because this step only
+  // asked whether the camp pass had RUN. With a site camp required, no registered hut = no iron yet.
+  const hutRequired = totalBom >= 500 && process.env.SITE_CAMP !== '0' && process.env.SITE_HUT !== '0'
+  const hutStanding = (() => { try { return !!(provHut().hutAnchor && provHut().hutAnchor()) } catch { return false } })()
+  if (hutRequired && !hutStanding) dbg('armor up: SKIPPED - the safehouse has no shell yet; the hut comes first (iron is a cave dive)')
+  if (!isStopped() && !(hutRequired && !hutStanding) && process.env.ARMOR_BOOTSTRAP !== '0' && anyBare() && cowsNear()) {
     // leather pass only (cows verified nearby); iron runs as its own tuned pass below
     try { const r = await provisionArmor(bot, { say, isStopped, restoreMovements: restore, home: { x: at.x, z: at.z }, maxRoam: 48, maxExplores: 1, timeMs: 60000, ironFallback: false }); if (r) say(r) }
     catch (e) { say(`(armor bootstrap skipped: ${e.message})`) }

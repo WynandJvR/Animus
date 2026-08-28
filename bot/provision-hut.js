@@ -1523,7 +1523,10 @@ async function repairHutStructure (bot, hut, opts = {}) {
   //    still works structurally, but matching keeps the camp's mismatch count quiet).
   let plankDone = 0
   if (missPlank.length) {
-    try { await res.acquire(bot, 'oak_planks', Math.min(missPlank.length, 128), { near, batch: 64, isStopped, say, planOpts: { primaryWood: 'oak' } }) } catch (e) { dbg('repairHut: plank acquire failed (' + e.message + ')') }
+    // gather:true (2026-08-28 18:45): the patch path was withdraw/craft-only while the rebuild path chops
+    // its own 39 logs - so a hut 32 planks short of a shell was abandoned ("out of planks - 32 wall
+    // cell(s) left") and the day went to the iron grind. The hut is the shelter; its wood may be cut.
+    try { await res.acquire(bot, 'oak_planks', Math.min(missPlank.length, 128), { near, batch: 64, isStopped, say, gather: true, planOpts: { primaryWood: 'oak' } }) } catch (e) { dbg('repairHut: plank acquire failed (' + e.message + ')') }
     for (const wp of missPlank.sort((a, b) => a.y - b.y)) {
       if (isStopped()) break
       const g = bot.blockAt(wp); if (g && /_planks$/.test(g.name)) { plankDone++; continue }
