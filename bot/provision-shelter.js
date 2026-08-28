@@ -951,7 +951,13 @@ async function breakOut (bot, opts = {}) {
   // it only keeps the body where no job can drive it. Open sky: the climb proceeds at any hour.
   const p0 = bot.entity.position.clone()
   const lidNow = (() => { const f = p0.floored(); for (let k = 2; k <= 24; k++) { const b = bot.blockAt(f.offset(0, k, 0)); if (b && !AIRISH(b.name) && b.boundingBox === 'block') return true } return false })()
-  if (!opts.force && lidNow && (isNight(bot) || isFirstLight(bot))) { dbg('shelter: break-out deferred - ' + (isNight(bot) ? 'night' : 'first light, the undead have not burned yet') + ': the lid stays on'); return false }
+  // ...AND NEVER WHEN THE POCKET IS A POOL (2026-08-28 16:17-16:21): a lidded pit that flooded held
+  // the body in water all night - every rescue ("escapeToDryLand", the drown ladder) failed under
+  // the lid and every caller that reached here was told the lid stays on. Water is the one thing
+  // the lid does not protect from; wet feet in a sealed pocket force the climb at any hour.
+  const wetNow = inWaterNow(bot)
+  if (!opts.force && wetNow && lidNow) dbg('shelter: break-out at ' + (isNight(bot) ? 'night' : 'first light') + ' from a FLOODED pocket - the lid keeps water in, not danger out; climbing')
+  if (!opts.force && !wetNow && lidNow && (isNight(bot) || isFirstLight(bot))) { dbg('shelter: break-out deferred - ' + (isNight(bot) ? 'night' : 'first light, the undead have not burned yet') + ': the lid stays on'); return false }
   if (!opts.force && !lidNow && (isNight(bot) || isFirstLight(bot))) dbg('shelter: break-out at ' + (isNight(bot) ? 'night' : 'first light') + ' from a hole with NO lid - nothing to keep on, climbing out')
   const ownPit = (() => { try { return recallInfra('shelter', p0, 3) } catch { return null } })()
   // MY OWN WALLS ARE MINE TO CUT (2026-08-28 15:31). The registry only knows pits that SEALED, so a
