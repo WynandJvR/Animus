@@ -168,7 +168,17 @@ async function digStaircaseUp (bot, targetY, opts = {}) {
         if (refused) { lastHz = 'undiggable ' + refused.name; continue }
         const probe = []
         for (const c of [feet.offset(0, 2, 0), cFeet, cHead, cFloor]) { probe.push(nameAt(c)); for (const n of FACE6) probe.push(nameAt(c.plus(n))) }
-        const hz = mining.climbStepSafety(nameAt(under), nameAt(under.offset(0, -1, 0)), probe)
+        // THE TREAD IS THE FLOOR WHEN IT IS SOLID (2026-08-28 15:40). descentSafety's 'void' means
+        // "nothing under where I would land / a cave I would break into" - a dig-DOWN rule. Asked of
+        // the support UNDER a solid stone tread it called every direction 'void' in a pit over a cave
+        // ("all 4 directions hazardous (void)") and the bot could not climb one block. A player steps
+        // onto a solid block over a cave without a thought. Only a tread that must be PLACED needs the
+        // support under it probed; a solid tread is its own support.
+        const treadName = nameAt(cFloor)
+        const treadSolid = treadName != null && !AIRISH(treadName)
+        const hz = treadSolid
+          ? mining.climbStepSafety(treadName, treadName, probe)
+          : mining.climbStepSafety(nameAt(under), nameAt(under.offset(0, -1, 0)), probe)
         if (hz === 'ok') {
           if (!SOFT_FIRST) { chosen = { dir: cand, off: k }; break }
           const openCost = [cFeet, cHead].reduce((a, c) => { const n = nameAt(c); return a + (n == null || AIRISH(n) ? 0 : (SOFT_RE.test(n) ? 0 : 1)) }, 0)

@@ -301,7 +301,17 @@ async function sealShaft (bot, interior = {}) {
   }
   // 2) CAP SECOND - the head ring now gives the cap cell solid neighbours so placeAt succeeds.
   let capPos = bot.entity.position.floored().offset(0, 2, 0)
-  let capped = await placeAt(bot, capPos, CAP_RE)
+  // A LID THAT IS ALREADY THERE IS A LID (2026-08-28 15:40). A re-used 3-deep shaft has its lid at
+  // feet+3 with one air cell under it - sealed, by this file's own deep-cap design. Asking only
+  // "did MY cap land at feet+2" answered "no lid" about a lidded pit, and the no-lid rule then
+  // forced it open at night. The world is read first: a solid over the head at +2 or +3, with
+  // nothing but air between, is the lid, and nothing is placed.
+  const solidCell = (p) => { const b = bot.blockAt(p); return !!b && !AIRISH(b.name) && b.boundingBox === 'block' && !/lava|water/.test(b.name) }
+  const feetNow = bot.entity.position.floored()
+  const lidAlready = solidCell(feetNow.offset(0, 2, 0)) ? feetNow.offset(0, 2, 0) : (solidCell(feetNow.offset(0, 3, 0)) ? feetNow.offset(0, 3, 0) : null)
+  let capped = false
+  if (lidAlready) { capped = true; capPos = lidAlready; dbg('shelter: lid already in place at ' + lidAlready.toString() + ' - nothing to cap') }
+  else capped = await placeAt(bot, capPos, CAP_RE)
   if (!capped) dbg('shelter: cap attempt 1 failed - ' + (placeAt.lastFail || '?'))
   // VERIFY the cap landed (placement can miss from inside a 1x1 pit) and retry once - an
   // uncapped pit is a mob funnel (they fall in ON TOP of the bot, seen live).

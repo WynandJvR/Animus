@@ -2044,6 +2044,9 @@ if (process.env.ANTI_AFK !== '0') {
 const HOSTILE_RE = require('./perception.js').HOSTILE // ONE canonical hostile list (was a byte-identical copy of commands.js's)
 // never AUTO-melee these: creepers explode point-blank, ghast/warden/wither are ranged/deadly
 const NO_AUTO_MELEE = /creeper|ghast|warden|wither_boss|^wither$/i
+// melee hostiles a sprinting player outpaces - the unarmed flee (below) runs from these; ranged
+// shooters have their own branch (RANGED_RE), creepers theirs (the 12b flee)
+const MELEE_WALKER_RE = /^(zombie|zombie_villager|husk|drowned|zombified_piglin|wither_skeleton|vindicator|spider|cave_spider|silverfish|endermite|hoglin|zoglin|ravager|piglin_brute)$/i
 // below this health, DISENGAGE from any hostile (retreat) instead of trading hits -
 // how it survived to death overnight was by fighting a skeleton while low. Tunable.
 const RETREAT_HP = parseInt(process.env.RETREAT_HP || '8', 10)
@@ -2248,6 +2251,27 @@ if (process.env.AUTO_DEFEND !== '0') {
           if (d < best) { best = d; flee = e; why = `low hp (${Math.round(hp)})` }
         }
         if (flee) fbest = flee.position.distanceTo(me)
+      }
+      // EMPTY-HANDED AND NAKED, A MELEE HOSTILE IS OUTRUN, NOT BOXED (2026-08-28). Bare fists do 1 of a
+      // zombie's 20 hp per swing while it does 3 of ours per hit; the auto-defend below still stood and
+      // punched at full health and the bot died three times on one daytime trek (15:08 153,-140 zombie,
+      // 15:10 77,-61 creeper mid-fight, 15:12 43,-32). A player with no sword and no armour runs - a
+      // sprinting player outpaces every walker in this list - and the cornered case is unchanged:
+      // PINNED + hit falls through to the fight (fightNotFlee), exactly as for the low-hp flee.
+      if (!flee) {
+        const packItems = bot.inventory ? bot.inventory.items() : []
+        const armed = packItems.some(i => /_sword$|_axe$/.test(i.name))
+        if (!armed && provShelter.underArmored(bot)) {
+          let best = 9
+          for (const e of Object.values(bot.entities || {})) {
+            if (!e || !e.position || (e.type !== 'mob' && e.type !== 'hostile')) continue
+            if (!MELEE_WALKER_RE.test(e.name || '')) continue
+            const d = e.position.distanceTo(me)
+            if (!fleeThreatens(bot, me, e, d, 9)) continue
+            if (d < best) { best = d; flee = e; why = `unarmed vs ${e.name}` }
+          }
+          if (flee) fbest = flee.position.distanceTo(me)
+        }
       }
       if (flee) {
         const now = Date.now()
