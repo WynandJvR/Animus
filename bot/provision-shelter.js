@@ -605,6 +605,7 @@ async function digInForNight (bot, opts = {}) {
         // cut at 150s EVERY night (live 14:31, 15:37, ...), its exit tail then ran with isStopped()
         // already true and opened nothing, and R5 sealed the lid again. Sitting sealed until dawn
         // IS this rung's job; it says so now, once, with its own deadline as the TTL.
+        let bunkerFlooded = false
         const holdBunker = reflexes.beginHold('nightShelter:bunker', 'dawn|hostile-gone|damage|flooding', dl - Date.now() + 5000)
         try {
         while (Date.now() < dl && !isStopped()) {
@@ -615,6 +616,8 @@ async function digInForNight (bot, opts = {}) {
           if (inWaterNow(bot)) {
             dbg('shelter: reused bunker is FLOODING - emergency exit')
             lastFlood = { x: bot.entity.position.x, z: bot.entity.position.z, at: Date.now() }
+            bunkerFlooded = true
+            try { forgetInfra('shelter', listInfra('shelter').find(e => e.x === oldPit.x && e.z === oldPit.z)) } catch {}
             break
           }
           await new Promise(r => setTimeout(r, 3000))
@@ -622,7 +625,9 @@ async function digInForNight (bot, opts = {}) {
         } finally { reflexes.endHold(holdBunker); touchP('shelterHold:released') }
         // the ONE way out of a pit (breakOut) - not "dig the cap i remember and climb to feet+4":
         // a re-used bunker can have gained a second lid course, and +4 was an arithmetic guess (#111)
-        try { await breakOut(bot, { isStopped }) } catch (e) { dbg('shelter: bunker exit failed (' + e.message + ')') }
+        // A flooding bunker is left now, lid or not, and is not reported as shelter (see the fresh pit).
+        try { await breakOut(bot, { isStopped, force: bunkerFlooded }) } catch (e) { dbg('shelter: bunker exit failed (' + e.message + ')') }
+        if (bunkerFlooded) { try { if (inWaterNow(bot)) await ensureAshore(bot, isStopped) } catch {}; dbg('shelter: the bunker flooded - NOT sheltered; handing back so a dry cell can be found'); return false }
         return true
         }
       } else {
@@ -675,13 +680,17 @@ async function digInForNight (bot, opts = {}) {
     let shaftDepth = shaftDepthHere(bot)
     if (shaftDepth < 2 && pitHere(bot)) shaftDepth = 2 // walled at the feet, 3/4 at the head: a pit, its rim one above the head
     if (shaftDepth >= 2) {
-      dug = 1 // the hole exists; nothing below is dug for it
+      dug = 2 // the hole exists (a full one); nothing below is dug for it
       surfaceY = shaft.y + shaftDepth
       dbg('shelter: already ' + shaftDepth + ' deep in a shaft at ' + shaft + ' (rim y' + surfaceY + ') - re-sealing it, not digging a deeper one')
     }
     // (the dig loop below is skipped when `dug` is already 1)
     const relocFailed = [] // cells this call has already tried and ruled out - see the relocate block below
-    for (let attempt = 0; attempt <= RELOCATE_TRIES && dug < 1 && !isStopped(); attempt++) {
+    // A PIT IS TWO DEEP OR IT IS NOT A PIT (2026-08-28 16:17). One dig, then "water beside the next
+    // cell - not digging deeper", was accepted as a hole: feet one below the surface, head AT the
+    // surface, two side cells open to the air, and the water beside it came in. Anything the dig
+    // loop leaves shallower than two is a step, not a shelter, and the relocation looks elsewhere.
+    for (let attempt = 0; attempt <= RELOCATE_TRIES && dug < 2 && !isStopped(); attempt++) {
       // CENTER on the feet cell. Digging from a cell edge (x.5/z.5) digs the column under
       // floored(feet) while the body stays supported by the NEIGHBOUR block - the bot opens a
       // perfect pit and stands beside it with the "cap" aimed at thin air (every 'ducked into
@@ -689,6 +698,7 @@ async function digInForNight (bot, opts = {}) {
       try { const f0 = bot.entity.position.floored(); await gotoWithTimeout(bot, new goals.GoalBlock(f0.x, f0.y, f0.z), 4000) } catch {}
       surfaceY = Math.floor(bot.entity.position.y)
       shaft = bot.entity.position.floored() // the column we dig - we must END UP inside it
+      dug = 0 // this column's count; a one-deep attempt elsewhere is not credit here
       // 1) dig straight down 2, keeping the blocks (need one to cap with). NEVER dig into a
       //    void/lava/water below, and ONLY natural terrain (never a player build block).
       //
@@ -764,7 +774,8 @@ async function digInForNight (bot, opts = {}) {
         }
         dug++
       }
-      if (dug >= 1) break
+      if (dug >= 2) break
+      if (dug === 1) { dbg('shelter: dug 1 at ' + shaft + ' and the next cell was refused - a one-deep hole is a step, not a shelter; relocating'); relocFailed.push({ x: shaft.x, y: shaft.y, z: shaft.z }) }
       // Blocked in place (water-adjacent / obstruction). Walk to the nearest diggable dry cell
       // and try again - PROGRESS instead of the 4s NO-OP spin. Widen the search each retry.
       if (attempt < RELOCATE_TRIES) {
@@ -790,7 +801,7 @@ async function digInForNight (bot, opts = {}) {
         if (!arrived) dbg('shelter: relocate did NOT arrive (wanted ' + dry.toString() + ', standing at ' + at.toString() + ') - ruling that cell out')
       }
     }
-    if (dug < 1) { dbg('shelter: NO-OP (dug 0 after ' + RELOCATE_TRIES + ' relocation tries) - caller must do something else'); return false } // genuinely nowhere diggable+dry nearby
+    if (dug < 2) { dbg('shelter: NO-OP (dug ' + dug + ' after ' + RELOCATE_TRIES + ' relocation tries) - caller must do something else'); return false } // genuinely nowhere diggable+dry nearby
     if (Math.floor(bot.entity.position.y) >= surfaceY) { dbg('shelter: dug ' + dug + ' but NEVER FELL IN (still at surface) - aborting, not pretending'); return false }
     await collectDrops(bot, 3)
     // LIT ALCOVE: BEFORE sealing, if we carry a torch, widen ONE floor-level neighbour into a
@@ -862,6 +873,7 @@ async function digInForNight (bot, opts = {}) {
     // so no matter WHO called this (the standalone shelter, or the ladder rung that killed it).
     // The loop body is still the validity check: it re-reads night, hp, water and the seal every
     // pass and breaks on any of them, so declaring a hold cannot mask a real hang.
+    let flooded = false
     const holdToken = reflexes.beginHold('nightShelter:pit', 'dawn|hostile-gone|damage|flooding', deadline - Date.now() + 5000)
     try {
     while (Date.now() < deadline && !isStopped()) {
@@ -874,7 +886,9 @@ async function digInForNight (bot, opts = {}) {
         // remember the spot so the next shelter attempt digs somewhere DRY, and drop the
         // registered bunker here - re-entering a flooded pit is not shelter
         lastFlood = { x: bot.entity.position.x, z: bot.entity.position.z, at: Date.now() }
+        flooded = true
         try { const reg = recallInfra('shelter', bot.entity.position, 3); if (reg) forgetInfra('shelter', listInfra('shelter').find(e => e.x === reg.x && e.z === reg.z)) } catch {}
+        { const here = bot.entity.position.floored(); if (!capFailedCells.some(c => c.x === here.x && c.y === here.y && c.z === here.z)) capFailedCells.push({ x: here.x, y: here.y, z: here.z }); while (capFailedCells.length > 24) capFailedCells.shift() }
         break
       }
       await new Promise(r => setTimeout(r, 3000))
@@ -883,11 +897,15 @@ async function digInForNight (bot, opts = {}) {
     // 4) break the cap and climb back to the surface. Use climbToSurface (staircase-up,
     //    which cuts steps and needs NO filler blocks) - pillarUpTo alone stranded the bot
     //    when it had no dirt left (deaths strip inventory), ratcheting it deeper each night.
+    // A FLOODING PIT IS LEFT NOW, LID OR NOT (2026-08-28 16:17): "break-out deferred - night: the
+    // lid stays on" kept the body standing in water under its own lid, and the rung then reported
+    // "sheltered for the night". Water in the pit is the one thing the lid does not protect from.
     try {
-      await breakOut(bot, { isStopped, surfaceY })
+      await breakOut(bot, { isStopped, surfaceY, force: flooded })
       // a FLOODED pit defeats the climb (its dig primitives refuse water) - swim out
       if (inWaterNow(bot)) await ensureAshore(bot, isStopped)
     } catch {}
+    if (flooded) { dbg('shelter: the pit flooded - NOT sheltered; handing back so a dry cell can be found'); return false }
     return true
   } finally { _sheltering = false; bot.clearControlStates && bot.clearControlStates() }
 }
