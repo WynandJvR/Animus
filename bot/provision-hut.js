@@ -364,9 +364,14 @@ async function ensureHutApron (bot, at, opts = {}) {
   // door width +-1, the immediate step-out row. Fill support (floorY-1) THEN walk-surface (floorY),
   // bottom-up so each layer has a solid face beneath/beside to place against. A block at floorY tops
   // out flush with the inside floor -> a level walk through the door instead of a fall.
-  for (let dx = -1; dx <= 1 && !isStopped(); dx++) {
-    if (await fillCell(doorX + dx, floorY - 1, outZ)) filled++
-    if (await fillCell(doorX + dx, floorY, outZ)) filled++
+  // TWO ROWS OUT, LIKE approachCells (2026-08-28 19:02): the doorstep row was solid but the ground one
+  // block further dropped two (230,67/68,-263 air) - a step out and forward landed in a hole. The
+  // apron reaches as far as the cleared approach does, so what the door opens onto is walkable.
+  for (const oz of [outZ, outZ - 1]) {
+    for (let dx = -1; dx <= 1 && !isStopped(); dx++) {
+      if (await fillCell(doorX + dx, floorY - 1, oz)) filled++
+      if (await fillCell(doorX + dx, floorY, oz)) filled++
+    }
   }
   if (filled) { say(`sealed the doorstep - filled ${filled} apron cell(s) so the exit stays walkable`); dbg('  apron: filled ' + filled + ' doorstep cell(s) at ' + doorX + ',' + floorY + ',' + outZ) }
   return filled
