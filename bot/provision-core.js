@@ -151,7 +151,10 @@ async function collectDrops (bot, radius = 10, { patience = 1 } = {}) {
       // pantry (c9ab8ec). Kept range 1 (never path INTO farmland) and the skip-on-fail sweep.
       try {
         const nav = require('./navigate.js')
-        await nav.navigateTo(bot, new goals.GoalNear(target.position.x, target.position.y, target.position.z, 1), { timeoutMs: 10000, label: 'collect' })
+        // A DROP A FEW BLOCKS AWAY IS A FEW SECONDS' WALK (2026-08-28 12:32-12:37): with no deadline the
+        // leg budget grew to 40s per drop, and three unreachable drops on the crop cells / pond edge
+        // cost every farm pass two minutes. The budget is the distance: ~1s per block plus a floor.
+        await nav.navigateTo(bot, new goals.GoalNear(target.position.x, target.position.y, target.position.z, 1), { timeoutMs: Math.min(10000, 2000 + Math.round(best) * 800), deadlineMs: Math.min(12000, 3000 + Math.round(best) * 1000), label: 'collect' })
       } catch (e) { dbg('  collect: goto drop at ' + Math.round(target.position.x) + ',' + Math.round(target.position.y) + ',' + Math.round(target.position.z) + ' failed (' + e.message + ') - skipping it'); unreachable.add(target.id); continue }
     }
     // The COLLECT_ROBUST=0 rollback leg is DELETED, not repaired. It was a second copy of this
