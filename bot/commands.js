@@ -2398,8 +2398,10 @@ async function handleInner (bot, line, opts = {}) {
       // cannot say it. Whatever is in the pack goes to the grave, which is the operator's call.
       if (opts.source !== 'operator') return 'die is operator-only'
       try { if (require('./navigate.js').sealedIn(bot)) await require('./provision-shelter.js').breakOut(bot, { force: true }) } catch {}
-      const ok = await provRecovery().deadlockDieByFall(bot, { say: opts.say || (() => {}) })
-      return ok ? 'died to reset - respawning at spawn' : 'could not die by fall here (no open sky to pillar under, or no filler block)'
+      let ok = await provRecovery().deadlockDieByFall(bot, { say: opts.say || (() => {}) })
+      // no filler / no open sky: the same fallbacks the deadlock reset uses (drown, pit drop)
+      if (!ok) { try { ok = await provRecovery().deadlockFallbackDeath(bot, { say: opts.say || (() => {}) }) } catch {} }
+      return ok ? 'died to reset - respawning at spawn' : 'could not die here (no open sky to pillar under, no filler block, no water, no pit)'
     }
     case 'gamemode':
       bot.chat(`/gamemode ${a[0] || 'creative'} ${bot.username}`); return `gamemode ${a[0]}`
