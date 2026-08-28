@@ -296,21 +296,9 @@ async function climbToSurface (bot, targetY, opts = {}) {
     // 1) SPIRAL STAIRCASE up - cuts a WALKABLE ramp to the surface (fast, and once up we
     //    can just walk on out). Proven to clear tens of blocks of solid overburden. The
     //    flee reflex is held off (escaping flag) so mobs can't drag us off it mid-climb.
-    // A PICK BEFORE A STONE CLIMB (2026-08-28 19:35). Bare-handed, one level of stone took 46s and the leg
-    // cycled before the second; the pack held three oak logs the whole time - a table and a wooden
-    // pickaxe. A player in a cave with logs and no pick makes the pick first. withdraw > craft only,
-    // never a roam (the body is under a roof); nothing craftable = the bare-hand climb as before.
-    // ONCE, AND NEVER FROM INSIDE ITSELF (2026-08-28 19:41): acquire -> ensureTable -> walk to a remembered table
-    // 300b away -> 'climbing to the surface first' -> climbToSurface -> acquire ... 1754 times, the event loop
-    // starved and the control API died. A module-level latch: the pick step runs once per climb and never
-    // re-enters; the inner climb is the bare-hand one.
-    if (!climbToSurface._pickBusy && need() && !(bot.inventory ? bot.inventory.items() : []).some(i => /_pickaxe$/.test(i.name))) {
-      climbToSurface._pickBusy = true
-      try {
-        await require('./resources.js').acquire(bot, 'wooden_pickaxe', 1, { isStopped, gather: false, near: bot.entity.position })
-        if ((bot.inventory ? bot.inventory.items() : []).some(i => /_pickaxe$/.test(i.name))) dbg('  climb: made a pickaxe from what i carry before cutting stone')
-      } catch (e) { dbg('  climb: no pickaxe craftable from the pack (' + e.message + ') - climbing bare-handed') } finally { climbToSurface._pickBusy = false }
-    }
+    // (a pick-first step lived here; it recursed through ensureTable's far-table walk and starved the
+    //  event loop - reverted 2026-08-28 19:44. The bare-hand climb below is slow but self-contained, and
+    //  digStaircaseUp now credits progress per level (59cc672) so the watchdog does not cut it.)
     if (need()) {
       if (bot.pathfinder) bot.pathfinder.setMovements(climbMovements(bot))
       const y0 = bot.entity.position.y
