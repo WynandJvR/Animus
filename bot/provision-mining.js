@@ -212,7 +212,7 @@ function climbMovements (bot) {
   // so allow1by1towers can actually place a tower (else it can't rise over a gap/void).
   try {
     const md = require('minecraft-data')(bot.version)
-    const fill = ['dirt', 'cobblestone', 'cobbled_deepslate', 'netherrack', 'stone', 'gravel', 'andesite', 'granite', 'diorite', 'tuff']
+    const fill = require('./nav-profile.js').PILLAR_ITEMS // ONE list
     const ids = fill.map(n => md.itemsByName[n] && md.itemsByName[n].id).filter(x => x != null)
     if ('scafoldingBlocks' in m) m.scafoldingBlocks = ids
     // ANTI-GRIEF: canDig=true here would otherwise let the pathfinder cut THROUGH a player

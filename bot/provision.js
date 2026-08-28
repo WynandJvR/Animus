@@ -99,7 +99,7 @@ function gatherMovements (bot) {
   // unable to climb to the surface for the next gather step). Scaffolds only with
   // cheap blocks it's likely to be holding while mining (dirt/cobble/stone family).
   m.allow1by1towers = true
-  const SCAFFOLD = ['dirt', 'grass_block', 'cobblestone', 'cobbled_deepslate', 'gravel', 'andesite', 'diorite', 'granite', 'tuff', 'stone']
+  const SCAFFOLD = navProfile.PILLAR_ITEMS // ONE list
   if ('scafoldingBlocks' in m) m.scafoldingBlocks = SCAFFOLD.map(n => md.itemsByName[n] && md.itemsByName[n].id).filter(x => x != null)
   m.canOpenDoors = true
   m.allowParkour = false // WALK between resources instead of sprint-hopping every gap - the
@@ -246,7 +246,7 @@ function wildTerrainMovements (bot) {
   if ('allowSprinting' in m) m.allowSprinting = true
   // Bridge gaps/ravines with cheap carried blocks (travelMovements' bridge families).
   try {
-    const bridge = ['dirt', 'cobblestone', 'cobbled_deepslate', 'netherrack', 'stone', 'gravel', 'dirt_path', 'andesite', 'granite', 'diorite']
+    const bridge = navProfile.PILLAR_ITEMS // ONE list
     const ids = bridge.map(n => md.itemsByName[n] && md.itemsByName[n].id).filter(x => x != null)
     if ('scafoldingBlocks' in m) m.scafoldingBlocks = ids
   } catch { /* mcData not ready */ }

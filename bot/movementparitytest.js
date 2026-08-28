@@ -98,11 +98,21 @@ t('both can pillar, and BOTH have blocks to pillar with (allow1by1towers is iner
 })
 
 t('the bridge/pillar block list has ONE definition, read by both (#4)', () => {
+  // 2026-08-28: the ONE definition moved to nav-profile.PILLAR_ITEMS (planks joined it; a bot in a
+  // 2-deep pit with four planks had "no block to place" while four hand-lists disagreed). Every
+  // profile that towers or bridges reads THAT list; no file carries a literal copy any more.
   const src = fs.readFileSync(path.join(__dirname, 'commands.js'), 'utf8')
-  const defs = (src.match(/const SCAFFOLD_BRIDGE = \[/g) || []).length
-  assert.strictEqual(defs, 1, 'exactly one list; two copies drift and this whole file is about drift')
+  const np = fs.readFileSync(path.join(__dirname, 'nav-profile.js'), 'utf8')
+  assert.strictEqual((np.match(/const PILLAR_ITEMS = \[/g) || []).length, 1, 'exactly one list, in nav-profile; two copies drift and this whole file is about drift')
+  assert.ok(/PILLAR_ITEMS,/.test(np.split('module.exports')[1]), 'and it is exported')
+  assert.ok(/const SCAFFOLD_BRIDGE = require\('\.\/nav-profile\.js'\)\.PILLAR_ITEMS/.test(src), 'commands.js reads the shared list, it does not copy it')
   assert.ok(/const bridge = SCAFFOLD_BRIDGE/.test(src), 'travelMovements reads the shared list')
   assert.ok(/SCAFFOLD_BRIDGE\.map/.test(src), 'setupMovements reads the shared list')
+  for (const f of ['commands.js', 'provision.js', 'provision-mining.js']) {
+    const body = fs.readFileSync(path.join(__dirname, f), 'utf8').replace(/^\s*\/\/.*$/gm, '')
+    assert.ok(!/\['dirt', 'cobblestone'/.test(body) && !/\['dirt', 'grass_block', 'cobblestone'/.test(body), f + ' carries no literal copy of the pillar list')
+  }
+  assert.ok(/birch_planks/.test(np), 'planks are on the list - a player pillars with what is in the hand')
 })
 
 t('they may still differ on SPEED and COMFORT - this guard is not a straitjacket', () => {

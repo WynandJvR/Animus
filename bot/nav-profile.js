@@ -401,7 +401,17 @@ function findDryLandExit (feet, sampleName, opts = {}) {
   return { x: best.x, y: best.y, z: best.z, dir: { x: ((best.x + 0.5) - (feet.x + 0.5)) / bdist, z: ((best.z + 0.5) - (feet.z + 0.5)) / bdist } }
 }
 
-module.exports = {
+// WHAT THE BOT MAY PILLAR / BRIDGE WITH - ONE LIST (2026-08-28). Three profiles carried three
+// hand-lists (commands.SCAFFOLD_BRIDGE, provision gather SCAFFOLD, wild bridge) and none had
+// planks, so a bot standing in a 2-deep pit with four birch planks in its pack had "no block to
+// place" and the planner answered noPath all morning (live 09:32-09:38 at the site). A player
+// pillars with whatever solid block is in the hand. Logs are deliberately NOT here - they are the
+// hut's bill of materials; planks are cheap spoil. Falling blocks (sand/gravel) stay on the list
+// as they were: placed on solid they hold, and the registry tears towers down afterwards anyway.
+const PILLAR_ITEMS = ['dirt', 'grass_block', 'cobblestone', 'cobbled_deepslate', 'netherrack', 'stone', 'gravel', 'dirt_path', 'andesite', 'granite', 'diorite', 'tuff',
+  'oak_planks', 'spruce_planks', 'birch_planks', 'jungle_planks', 'acacia_planks', 'dark_oak_planks', 'mangrove_planks', 'cherry_planks', 'bamboo_planks', 'crimson_planks', 'warped_planks']
+
+module.exports = { PILLAR_ITEMS,
   standable,
   digEscapeVerdict,
   escapeComplete,

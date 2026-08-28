@@ -327,7 +327,7 @@ async function comeToPlayer (bot, name, deadlineMs = 30000) {
 // make it unreachable. Returns { ok, reason, dist }. Honors an isStopped() abort.
 // Blocks the bot can bridge/pillar with. Count how many it's carrying so travel can
 // top up (gather dirt) before setting off, so a ravine/water gap can't strand it.
-const BRIDGE_MATERIALS = ['dirt', 'cobblestone', 'cobbled_deepslate', 'gravel', 'stone', 'dirt_path', 'andesite', 'granite', 'diorite', 'netherrack', 'coarse_dirt']
+const BRIDGE_MATERIALS = require('./nav-profile.js').PILLAR_ITEMS // ONE list (a fifth copy lived here)
 function bridgingBlockCount (bot) {
   const items = bot.inventory ? bot.inventory.items() : []
   return items.filter(i => BRIDGE_MATERIALS.includes(i.name)).reduce((n, i) => n + i.count, 0)
@@ -572,7 +572,7 @@ async function travelFar (bot, dest, opts = {}) {
 // the things a survival player does to get past terrain: bridge gaps/ravines and
 // pillar with cheap filler blocks from inventory, parkour, open doors, and swim.
 // THE ONE bridge/pillar block list, read by BOTH movement configs (#4).
-const SCAFFOLD_BRIDGE = ['dirt', 'cobblestone', 'cobbled_deepslate', 'netherrack', 'stone', 'gravel', 'dirt_path', 'andesite', 'granite', 'diorite']
+const SCAFFOLD_BRIDGE = require('./nav-profile.js').PILLAR_ITEMS // ONE list (nav-profile.PILLAR_ITEMS)
 
 function travelMovements (bot) {
   const m = new Movements(bot)
