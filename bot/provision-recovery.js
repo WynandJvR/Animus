@@ -1480,6 +1480,18 @@ const RUNG_EXECUTORS = {
   'rearmFromBank': async (bot, o) => {
     const home = o.home
     const res = require('./resources.js')
+    // ARM BEFORE THE TREK (2026-08-28, death spiral): rearm walked ~200b home NAKED and only WITHDREW -
+    // but every sword was in an un-recovered grave and the bank held none, so it trekked defenceless and
+    // died in a loop. A wooden sword from the LOGS ALREADY IN THE PACK (gather:false - no roam, just
+    // craft: log->planks->sword at the carried table) defends the walk; the bank upgrade still happens on
+    // arrival. Cheap, and the direct cause of the un-armed deaths.
+    try {
+      const armed = () => (bot.inventory ? bot.inventory.items() : []).some(i => /_sword$/.test(i.name))
+      if (!armed() && !o.isStopped()) {
+        try { await res.acquire(bot, 'wooden_sword', 1, { isStopped: o.isStopped, gather: false, near: bot.entity && bot.entity.position }) } catch (e) { o.dbg('(ladder) rearm: sword craft failed (' + e.message + ')') }
+        if (armed()) { o.dbg('(ladder) rearm: made a wooden sword before the trek home'); const sw = (bot.inventory ? bot.inventory.items() : []).find(i => /_sword$/.test(i.name)); if (sw) await bot.equip(sw, 'hand').catch(() => {}) }
+      }
+    } catch {}
     if (home && bot.entity) { try { await S().walkStaged(bot, home.x, home.z, { isStopped: o.isStopped, range: 6, timeoutMs: 180000 }) } catch (e) { o.dbg('(ladder) R1.5 home trek failed: ' + e.message) } }
     if (o.isStopped()) return
     let totals = {}
