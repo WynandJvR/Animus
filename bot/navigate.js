@@ -1079,10 +1079,10 @@ async function recoverOnce (bot, goal, plan, opts) {
       when: () => sunkenIn(bot),
       run: async () => {
         const f = p0.floored()
-        const s = require('./pathfix.js').surfaceYAt(bot, f.x, f.z)
-        if (!s || !s.known || !Number.isFinite(s.y)) return false
-        dbg('recovery sunken: ' + (s.y - f.y) + ' below grade at ' + f + ' with no plan - climbing a staircase to y' + s.y)
-        try { await provMining().climbToSurface(bot, s.y, { isStopped, surfaceY: s.y }) } catch (e) { dbg('recovery sunken: climb failed (' + e.message + ')') }
+        const rim = sunkenRimY(bot)
+        if (rim == null) return false
+        dbg('recovery sunken: ' + (rim - f.y) + ' below the rim at ' + f + ' with no plan - climbing a staircase to y' + rim)
+        try { await provMining().climbToSurface(bot, rim, { isStopped, surfaceY: rim }) } catch (e) { dbg('recovery sunken: climb failed (' + e.message + ')') }
         return bot.entity.position.y > p0.y + 0.9 || movedEnough()
       }
     },
@@ -1579,14 +1579,24 @@ function unstickPlan (w) {
 // 1x1 shaft (sealedIn), not water, not indoors - just a hole in the ground the planner will not
 // climb out of. The grounded surface read says how far under the body stands; two or more, and the
 // way out is the same staircase the shelter uses, judged by the feet rising.
-function sunkenIn (bot) {
+// The RIM, not the column (2026-08-28 18:13, 38 terminal resets overnight): a sunken crop trench is
+// its own column's surface, so "surface minus feet" read 1 while the walls stood two and three
+// above the body. The rim is the highest surface among the four horizontal neighbours; two or more
+// above the feet and the body is in a hole. Returns the rim y (or null) so the climb has a target.
+function sunkenRimY (bot) {
   try {
-    if (!bot.entity || !bot.entity.position || feetInWater(bot)) return false
+    if (!bot.entity || !bot.entity.position || feetInWater(bot)) return null
     const f = bot.entity.position.floored()
-    const s = require('./pathfix.js').surfaceYAt(bot, f.x, f.z)
-    return !!(s && s.known && Number.isFinite(s.y) && s.y - f.y >= 2)
-  } catch { return false }
+    const pf = require('./pathfix.js')
+    let rim = null
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const s = pf.surfaceYAt(bot, f.x + dx, f.z + dz)
+      if (s && s.known && Number.isFinite(s.y) && (rim == null || s.y > rim)) rim = s.y
+    }
+    return (rim != null && rim - f.y >= 2) ? rim : null
+  } catch { return null }
 }
+function sunkenIn (bot) { return sunkenRimY(bot) != null }
 
 // SEALED IN (2026-08-27): a 1x1 pocket - solid on all four sides at feet AND head, solid overhead.
 // The planner cannot leave it: digging is priced only on the wild profile, and that profile is
