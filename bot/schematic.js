@@ -821,7 +821,13 @@ async function buildSurvival (bot, schem, at, opts = {}) {
       // the build finishes with what it CAN make instead of hanging forever on the first iron_bar.
       if (!haveItem(bot, item.name)) {
         if (opts.skip && opts.skip.has(item.name)) { build.removeAction(action); matSkipped++; continue }
-        const got = await waitForMaterial(bot, item.name, { isStopped, source }, action.count)
+        // ASK FOR WHAT THE BUILD STILL NEEDS, NOT action.count (2026-08-28 17:47). The library's
+        // action.count is not "cells of this item left"; for the hut's one furnace it read 16, the
+        // sourcer planned gather:cobblestone x127 > craft:furnace x16, and the day went into a cave.
+        // The honest number is the placements of this item still on the action list.
+        let remaining = 0
+        try { for (const a of build.actions) { if (a && a.type === 'place') { const it = build.getItemForState(a.state); if (it && it.name === item.name) remaining++ } } } catch { remaining = 0 }
+        const got = await waitForMaterial(bot, item.name, { isStopped, source }, Math.max(1, remaining || 1))
         bot.pathfinder.setMovements(moves) // sourcing may have swapped in gatherMovements - restore the build profile
         if (got === false) { stopped = true; break }        // operator stopped
         if (got === null) { // gave up after the deadline - skip this material everywhere
