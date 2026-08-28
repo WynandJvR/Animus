@@ -1544,7 +1544,8 @@ async function repairHutStructure (bot, hut, opts = {}) {
       // An adjacent standable cell at this level or one up (onto the roof) is the stand-off.
       {
         const feetC = bot.entity.position.floored()
-        if (feetC.x === wp.x && feetC.z === wp.z && (feetC.y === wp.y || feetC.y + 1 === wp.y)) {
+        // ...or standing ON it (feet one above - the roof cell under my own boots, 19:12: 'patched planks 1/2')
+        if (feetC.x === wp.x && feetC.z === wp.z && (feetC.y === wp.y || feetC.y + 1 === wp.y || feetC.y === wp.y + 1)) {
           let stood = false
           for (const dy of [0, 1]) {
             for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
