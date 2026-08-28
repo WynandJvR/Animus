@@ -1550,11 +1550,20 @@ function sealedIn (bot) {
     if (!bot.entity || !bot.entity.position) return false
     const feet = bot.entity.position.floored()
     const solid = (dx, dy, dz) => { const b = bot.blockAt(feet.offset(dx, dy, dz)); return !!b && b.boundingBox === 'block' && !/_leaves$/.test(b.name) }
-    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { if (!solid(dx, 0, dz) || !solid(dx, 1, dz)) return false }
+    // THE SHAFT TEST IS THE SHELTER'S (2026-08-28): shaftDepthHere - walled at feet and head on all
+    // four sides, a dead-end pocket (the torch alcove) counting as a wall. The four-solid-walls
+    // test here read the alcove as an exit and the bot spent 90s planning noPath from its own pit.
+    let depth = 0
+    try { depth = provShelter().shaftDepthHere(bot) } catch { depth = 0 }
+    if (depth < 2) return false
     for (let dy = 2; dy <= 8; dy++) { if (solid(0, dy, 0)) return true }
-    let filler = true
-    try { filler = provShelter().holdsCapMaterial(bot) } catch {}
-    return !filler
+    // OPEN SKY: sealed in all the same unless the pack can PILLAR to the rim. "Holds any cap
+    // material" said one dirt in a five-deep stone shaft was the planner's problem (live 15:28,
+    // 27,53,-12: 'on terrain' x64 in a hot loop, no rung, no climb). The shelter's breakOut owns
+    // every shaft the planner cannot leave, and one block per level is what leaving costs.
+    let filler = 0
+    try { filler = provShelter().capMaterialCount(bot) } catch { filler = 0 }
+    return filler < depth
   } catch { return false }
 }
 

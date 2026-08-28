@@ -889,6 +889,8 @@ async function digInForNight (bot, opts = {}) {
 // Returns true when the feet ended at or above the rim.
 // Does the pack hold a block the shelter would cap with - which is also the block a pillar climbs on.
 function holdsCapMaterial (bot) { return (bot.inventory ? bot.inventory.items() : []).some(i => CAP_RE.test(i.name)) }
+// How many blocks the pack could pillar with (the sealed-in test: one per level to the rim).
+function capMaterialCount (bot) { return (bot.inventory ? bot.inventory.items() : []).filter(i => CAP_RE.test(i.name)).reduce((n, i) => n + (i.count || 0), 0) }
 
 async function breakOut (bot, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
@@ -982,5 +984,5 @@ module.exports = {
   // literal exports its VALUE - a snapshot of `false` taken once, at require time. provision-recovery
   // destructured that snapshot and then owned a dead variable that could never change and could never
   // be cleared, while believing it held the live latch. Ask isSheltering(); clear releaseShelterLatch().
-  DEFEND_WHEN_HIT_ON, isSheltering, releaseShelterLatch, shelterSite, SHELTER_FARM_R, shelterFarmConflict, inWaterNow, ensureAshore, findDiggableDryCell, scoutForWater, armorPieceCount, underArmored, lowHpCalm, shelterNeeded, nightStuck, nightRestWanted, sealShaft, digInForNight, breakOut, holdsCapMaterial, pickOpenSkyCell
+  DEFEND_WHEN_HIT_ON, shaftDepthHere, capMaterialCount, isSheltering, releaseShelterLatch, shelterSite, SHELTER_FARM_R, shelterFarmConflict, inWaterNow, ensureAshore, findDiggableDryCell, scoutForWater, armorPieceCount, underArmored, lowHpCalm, shelterNeeded, nightStuck, nightRestWanted, sealShaft, digInForNight, breakOut, holdsCapMaterial, pickOpenSkyCell
 }
