@@ -268,7 +268,11 @@ function salvageVerdict (grave, hazard, caps = {}) {
   // (`underground` = a solid ceiling over the death cell), judged against what the bot wears
   // NOW (caps.armored) - so the verdict flips as soon as it wears armour, and a surface grave is
   // untouched by this clause. Deferred, never written off.
-  if (grave && grave.underground && caps.armored === false) return { go: false, why: `my grave at ${grave.x},${grave.y},${grave.z} is underground and i have no armour - deferred while i have no armour`, discount }
+  // DEEP underground, not merely under a roof (2026-08-28 17:12): a grave 11 blocks below the camp,
+  // in a pocket the bot walks into by daylight, held 40 logs and every tool and was deferred "while i
+  // have no armour" - which this bot has never had. The record now carries the depth measured at
+  // death (index.js); a shallow pocket (<= 12) is fetched, a deep cave (or an unknown depth) waits.
+  if (grave && grave.underground && caps.armored === false && !(typeof grave.depth === 'number' && grave.depth <= 12)) return { go: false, why: `my grave at ${grave.x},${grave.y},${grave.z} is ${typeof grave.depth === 'number' ? grave.depth + ' deep' : 'underground (depth unknown)'} and i have no armour - deferred while i have no armour`, discount }
   if (!hazard) return { go: true, why: 'no hazard recorded here', discount: 1 }
   const cause = hazard.cause || 'unknown'
   // survived: the bot has stood in this cell alive and out of the medium since the last death

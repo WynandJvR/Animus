@@ -550,7 +550,13 @@ bot.on('death', () => {
   // grave-salvage verdict reads to keep a naked bot out of a cave grave (grave-policy.salvageVerdict)
   let underground = false
   try { for (let dy = 2; dy <= 24; dy++) { const b = bot.blockAt(p.offset(0, dy, 0)); if (b && b.boundingBox === 'block' && !/_leaves$/.test(b.name)) { underground = true; break } } } catch {}
-  const info = { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z), cause, attacker: att.attacker || null, causeSource: att.source, dangerous, underground, at: Date.now(), retrieved: false }
+  // HOW FAR UNDER (2026-08-28 17:12). "underground" alone wrote off a grave 11 blocks below the site
+  // - 40 logs and every tool, next to the camp, walked into by daylight - as if it were a deep cave
+  // (grave-policy salvageVerdict: underground + no armour -> deferred). The depth is measured HERE,
+  // while the chunk is loaded, with the grounded surface read; unknown stays unknown (fail closed).
+  let depth = null
+  try { const g = pathfix.surfaceYAt(bot, Math.floor(p.x), Math.floor(p.z)); if (g && g.known && typeof g.y === 'number') depth = g.y - Math.floor(p.y) } catch { depth = null }
+  const info = { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z), cause, attacker: att.attacker || null, causeSource: att.source, dangerous, underground, depth, at: Date.now(), retrieved: false }
   try { if (damageLog) damageLog.clear() } catch {} // this death consumed the window; the next one starts clean
   commands.recordDeath(info)
   commands.markBuildInterrupted && commands.markBuildInterrupted() // keep the build to resume
