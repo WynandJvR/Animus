@@ -513,7 +513,13 @@ t('LOOP D: the ARMORUP EXCURSION asks the rule - it is the journey, and it had n
   assert(!/isStopped: \(\) => buildAbort/.test(body),
     'neither the planner nor the bootstrap driver may be handed the bare build latch any more - ' +
     'that latch means "a build preempted me", never "I am dying"')
-  assert((body.match(/isStopped: gearupStopped/g) || []).length === 3, 'all THREE drivers (the wooden-sword-first acquire, planner.gearUp and provisionArmor) get the composed stop, never the bare build latch') // 2026-08-28: +1 for the arm-first sword craft
+  // The two CROSSING drivers (planner.gearUp, provisionArmor) get the composed excursion stop.
+  assert((body.match(/isStopped: gearupStopped/g) || []).length === 2, 'both CROSSING drivers (planner.gearUp and provisionArmor) get the composed excursion stop, never the bare build latch')
+  // The wooden-sword-first self-arm crosses NOWHERE, so it must run under the LOCAL (body-gone)
+  // stop, never the crossing/spiral veto - else a naked bot that has died 3x cannot arm itself
+  // out of the spiral (2026-08-28). It must NOT be handed gearupStopped.
+  assert(/const localStop = makeBodyGoneStop\(bot\)/.test(body), 'the self-arm has a LOCAL body-gone stop')
+  assert(/acquire\(bot, 'wooden_sword', 1, \{ isStopped: localStop/.test(body), 'the wooden-sword-first self-arm runs under the LOCAL stop, not the crossing veto')
 })
 
 t('LOOP D: the outbound-PRODUCER route asks the whole question, not half of it', () => {

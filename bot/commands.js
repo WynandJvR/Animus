@@ -152,6 +152,22 @@ function makeExcursionStop (bot, label) {
   return poll
 }
 
+// The LOCAL half of the stop family (2026-08-28). makeExcursionStop gates a long CROSSING
+// (its composed verdict includes the spiral clause: "3 deaths away + 265b to cross un-armoured").
+// But some steps of a gear-up cross NOWHERE - arming a wooden sword from wood at your feet,
+// hunting the cow you can already see. journeyAdmissible exempts exactly these (SHORT_HOP: "a
+// bot may ALWAYS move locally, so no condition can leave it unable to act"), and the death
+// spiral (2026-08-28) was the excursion stop vetoing them anyway: a naked bot that had died 3x
+// could not gather wood for a sword because the SAME poll that stops the 265b iron trek also
+// stopped the local self-arm - so it stayed naked, kept almost-dying, and the 20-min spiral
+// window never got a chance to close. A body-gone stop trips only when THIS body is no longer
+// the one that started the act (death bumps pathfix's epoch) or the build was aborted - never on
+// distance/spiral. Local self-defence is always allowed; the crossing stop still owns the trek.
+function makeBodyGoneStop (bot) {
+  const epoch0 = require('./pathfix.js').epoch()
+  return () => buildAbort || !require('./pathfix.js').sameEpoch(epoch0)
+}
+
 // The #5 half of makeExcursionStop, and the reason the leash is not just another refusal: when the
 // leash trips, GO HOME. Home is where the bed, bank, furnace and farm are. recoverHome is the
 // existing owner (reflexes.js `homecoming` dispatches the same call) and it is handed the leash as
@@ -1324,11 +1340,15 @@ async function handleInner (bot, line, opts = {}) {
         // ARM WITH A WOODEN SWORD FIRST (2026-08-28, death spiral): a naked bot went straight to the iron
         // grind and was killed un-armed by spiders/zombies on every excursion (sword-making was buried last
         // in the tools step behind a mining-gated stone_sword + 15-min cooldown). A wooden sword is the
-        // cheapest survival buy - it lets auto-defend kill a mob. Uses the excursion stop, before the mining.
+        // cheapest survival buy - it lets auto-defend kill a mob. It is a LOCAL act (gather wood at your
+        // feet, craft, equip) that crosses nowhere, so it runs under a body-gone stop, NOT the crossing
+        // stop - the earlier version gated it on gearupStopped and the spiral clause ("3 deaths away, 265b
+        // to cross") vetoed the self-arm too, so a naked bot could never arm itself out of the spiral.
+        const localStop = makeBodyGoneStop(bot)
         try {
           const armed = () => (bot.inventory ? bot.inventory.items() : []).some(i => /_sword$/.test(i.name))
-          if (!armed() && !gearupStopped()) {
-            await resources.acquire(bot, 'wooden_sword', 1, { isStopped: gearupStopped, gather: true, near: bot.entity && bot.entity.position })
+          if (!armed() && !localStop()) {
+            await resources.acquire(bot, 'wooden_sword', 1, { isStopped: localStop, gather: true, near: bot.entity && bot.entity.position })
             const sw = (bot.inventory ? bot.inventory.items() : []).find(i => /_sword$/.test(i.name))
             if (sw) { await bot.equip(sw, 'hand').catch(() => {}); dbg('gearup: made+equipped a wooden sword before the armour grind') }
           }

@@ -327,7 +327,7 @@ class Animus : Form
             SetStop("Stop", Danger); // reset the stop button when (re)starting
             string m = cbModel.Text.Trim(); RunBg(delegate { StartBot(); StartBrain(m); });
         });
-        tips.SetToolTip(btnStart, "Bot + brain run in their own terminal windows; closing this panel leaves them running.");
+        tips.SetToolTip(btnStart, "Bot + brain run headless. This panel owns them: closing it stops the bot.");
         btnStop = Primary(rootScroll, "Stop", Danger, DangerHi, delegate { RunBg(StopAll); });
     }
 
@@ -1947,6 +1947,53 @@ class Animus : Form
         SetStop("Stopped", Ghost);
         botUp = false;
         stateFails = 3;   // an explicit stop is known-dead: no grace window
+    }
+
+    // ---- the panel and the body are ONE thing ------------------------------
+    // OPERATOR RULE (2026-08-27): closing the GUI stops the bot. This window used to be a
+    // DETACHED api client - close it and the body kept running on the live server with nobody
+    // watching (found at health 1, food 0, underground, spamming chat). That is the same class
+    // of defect as the stale "Animus BRAIN" window titles: the thing you closed did not track
+    // the world. Close now means stop, and it goes through the SAME StopAll the Stop button
+    // calls, so there is one definition of "stopped" and it cannot drift.
+    bool closeStopDone = false;
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        if (!closeStopDone)
+        {
+            closeStopDone = true;
+            // Pollers first, so nothing races the kill or repaints a dead bot as live.
+            try { statusTimer.Stop(); liveTimer.Stop(); povTimer.Stop(); } catch { }
+            // Hide the window so the close feels instant, but run StopAll SYNCHRONOUSLY: it
+            // has to finish before this process exits or the kill never lands.
+            try { Visible = false; } catch { }
+            try { StopAll(); } catch (Exception ex) { Debug.WriteLine(ex); }
+            WitnessCloseStop();
+        }
+        base.OnFormClosing(e);
+    }
+
+    // The GUI's status strip dies with the GUI, so a stop that FAILED on close would be
+    // silent - precisely the invisible failure the log exists to catch. Leave the verdict on
+    // disk, read from the WORLD (control port + surviving pids), never from StopAll's say-so.
+    void WitnessCloseStop()
+    {
+        try
+        {
+            List<int> left = new List<int>();
+            foreach (string needle in new string[] { "run.js", "index.js", "brain-llm.js" })
+                left.AddRange(NodePidsMatching(needle));
+            bool up = ControlPortAnswers();
+            string line = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  gui closed -> "
+                + (up || left.Count > 0
+                    ? ("STOP FAILED: " + left.Count + " node process(es) left"
+                       + (up ? " and :3001 still answers" : "") + " - kill them by hand")
+                    : "bot stopped (:3001 closed)") + Environment.NewLine;
+            string dir = Path.Combine(Root, "logs");
+            if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+            File.AppendAllText(Path.Combine(dir, "gui-stop.log"), line);
+        }
+        catch { }
     }
 
     void SetStop(string text, Color bg)
