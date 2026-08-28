@@ -1787,6 +1787,43 @@ async function clearDoorApproach (bot, hut, opts = {}) {
 // its piece is intact, so this is cheap to run when nothing is broken - no forced rebuilds.
 // Returns { bed, chestFixed, repair, consolidated, damaged }; `damaged` is true when any step
 // actually did work, so the reflex can log/back off meaningfully when the home was intact.
+// LIGHT THE INSIDE (2026-08-28 20:24). baseTorchAnchors lights the exterior RING and explicitly skips
+// inBox cells, so a sealed 6x6 hut's 4x4 interior floor stays DARK - and a sealed room is worse than an
+// open camp, because a mob that spawns in it is trapped there with the bot. Live: "taking damage INSIDE
+// the hut", the bot went out unarmed to fight it and died at its own door. One torch at the interior
+// centre lights the whole room (light 14 at source, a corner is ~3 away => 11 > 0, no spawn). Torch is in
+// FURNITURE_RE, so cleanupHutInterior never removes it; withdraw>craft only (bank coal+sticks), never a roam.
+async function ensureHutInteriorLit (bot, hut, opts = {}) {
+  const isStopped = opts.isStopped || (() => false)
+  const say = opts.say || (() => {})
+  if (!hut || !bot || !bot.entity) return { how: 'noop', why: 'no hut/body' }
+  const torchY = hut.y + 1 // sits on the floor layer at hut.y, feet level
+  const cands = [{ x: hut.x + 2, y: torchY, z: hut.z + 2 }, { x: hut.x + 3, y: torchY, z: hut.z + 3 }]
+  const litAt = (c) => { try { const b = bot.blockAt(new Vec3(c.x, c.y, c.z)); return !!b && /torch/.test(b.name) } catch { return false } }
+  // already a torch anywhere in the interior? (scan the 4x4x3 interior box) -> lit, no-op
+  try {
+    for (let dx = 1; dx <= DIMS.w - 2; dx++) for (let dz = 1; dz <= DIMS.l - 2; dz++) for (let dy = 1; dy <= DIMS.h - 2; dy++) {
+      const b = bot.blockAt(new Vec3(hut.x + dx, hut.y + dy, hut.z + dz)); if (b && /torch/.test(b.name)) return { how: 'lit', why: 'already a torch inside' }
+    }
+  } catch {}
+  if (countItem(bot, 'torch') < 1) {
+    try { await require('./resources.js').acquire(bot, 'torch', 2, { near: hut, isStopped, gather: false, say }) } catch (e) { dbg('  interior-light: torch acquire failed (' + e.message + ')') }
+  }
+  if (countItem(bot, 'torch') < 1) { dbg('  interior-light: no torch and none craftable from the bank (need coal+stick) - hut stays dark'); return { how: 'skip', why: 'no torch' } }
+  if (!insideOwnStructure(bot)) { try { await require('./navigate.js').enterStructure(bot, hut, { isStopped }) } catch (e) { dbg('  interior-light: could not get inside (' + e.message + ')') } }
+  let placed = 0
+  for (const c of cands) {
+    if (isStopped() || countItem(bot, 'torch') < 1) break
+    if (litAt(c)) continue
+    const floor = bot.blockAt(new Vec3(c.x, c.y - 1, c.z))
+    if (!floor || AIRISH(floor.name)) continue // need a solid floor under the torch
+    try { if (bot.entity.position.distanceTo(new Vec3(c.x + 0.5, c.y, c.z + 0.5)) > 3.5) await gotoWithTimeout(bot, new goals.GoalNear(c.x, c.y, c.z, 2), 8000) } catch {}
+    if (await placeAt(bot, new Vec3(c.x, c.y, c.z), /^torch$/)) { placed++; break } // one is enough for a 6x6
+  }
+  if (placed) { say('lit the inside so nothing spawns in here'); dbg('  interior-light: placed ' + placed + ' interior torch') }
+  return { how: placed ? 'lit' : 'skip', placed }
+}
+
 async function maintainHome (bot, hutAt, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const say = opts.say || (() => {})
@@ -1804,6 +1841,7 @@ async function maintainHome (bot, hutAt, opts = {}) {
   // intact foundation: 0 placements when every floor plank already stands on something.
   try { const un = await underpinHutFloor(bot, hutAt, { isStopped, say }); out.underpin = un.filled || 0; if (un.filled) out.damaged = true } catch (e) { dbg('camp: floor underpin failed (' + e.message + ')') }
   try { await ensureHutApron(bot, hutAt, { isStopped, say }) } catch (e) { dbg('camp: apron fill failed (' + e.message + ')') }
+  try { const li = await ensureHutInteriorLit(bot, hutAt, { isStopped, say }); out.interiorLit = li.how; if (li.how === 'lit' && li.placed) out.damaged = true } catch (e) { dbg('camp: interior light failed (' + e.message + ')') }
   // rebuild/verify the bed. Anything but 'present' means a bed was missing/placed/unplaceable
   // = the home needed work.
   try { const bs = await ensureHutBed(bot, hutAt, { isStopped, say }); out.bed = bs; dbg('camp: hut bed -> ' + bs); if (bs !== 'present') out.damaged = true } catch (e) { dbg('camp: hut bed failed (' + e.message + ')') }
@@ -2252,7 +2290,7 @@ async function worldTidy (bot, opts = {}) {
 module.exports = {
   setDebugSink, insideHutBox,
   containerHeadroomAt, ownBedCellAt, hutDoorway, doorwayReservationAt,
-  insideHutBox, ownHutAt, ownInfraSupportAt, underOwnFloorAt, underpinHutFloor, onHutApron, insideOwnStructure, hasSolidCeiling, isUnderground, hutAnchor, ensureHomeShelter, stepOffApron, ensureHutApron, clearDoorApproach, healHomeCrater, ensureHutBed, relocateBedInto, bedInPack, bedCandidates, acquireBed, placeBedNear, bedFootprint, bedUsable, assertSpawnOn, ensureBedSite, upgradeBedPlacement, freeInteriorCell, stationInHut, stationSlot, reconcileInfra, cleanupHutInterior, repairHutStructure, recallAndReach, maintainHut, maintainHome,
+  insideHutBox, ownHutAt, ownInfraSupportAt, underOwnFloorAt, underpinHutFloor, onHutApron, insideOwnStructure, hasSolidCeiling, isUnderground, hutAnchor, ensureHomeShelter, stepOffApron, ensureHutApron, clearDoorApproach, healHomeCrater, ensureHutBed, relocateBedInto, bedInPack, bedCandidates, acquireBed, placeBedNear, bedFootprint, bedUsable, assertSpawnOn, ensureBedSite, upgradeBedPlacement, freeInteriorCell, stationInHut, stationSlot, reconcileInfra, cleanupHutInterior, repairHutStructure, ensureHutInteriorLit, recallAndReach, maintainHut, maintainHome,
   secureBase, secureBaseGate: hutModel.secureBaseGate,
   sealHomeDescents, sealDescentsGate: hutModel.sealDescentsGate,
   worldTidy, litterSignature: hutModel.litterSignature
