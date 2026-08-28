@@ -504,7 +504,10 @@ async function digInForNight (bot, opts = {}) {
       // uses; farther than that, or with no hut, the pit below is still the answer.
       const HOME_NIGHT_LEASH = 48
       const hutHome = (() => { try { const h = require('./provision-hut.js').hutAnchor(); return (h && Math.hypot(h.x - bot.entity.position.x, h.z - bot.entity.position.z) <= HOME_NIGHT_LEASH) ? h : null } catch { return null } })()
-      const hutNear = onHutApron(bot) || hutHome
+      const homeHut = hutHome || (() => { const a = onHutApron(bot); return a || null })()
+      const homeLit = hutInteriorLit(bot, homeHut)
+      if (homeHut && !homeLit) dbg('shelter: my hut at ' + homeHut.x + ',' + homeHut.y + ',' + homeHut.z + ' is UNLIT (mobs spawn inside) - digging a lit pit instead of going home')
+      const hutNear = homeLit ? (onHutApron(bot) || hutHome) : null
       if (hutNear && hutHome && !onHutApron(bot)) dbg('shelter: my hut at ' + hutHome.x + ',' + hutHome.y + ',' + hutHome.z + ' is ' + Math.round(Math.hypot(hutHome.x - bot.entity.position.x, hutHome.z - bot.entity.position.z)) + 'b away - going home instead of digging in')
       if (hutNear) {
         try {
@@ -988,6 +991,19 @@ async function digInForNight (bot, opts = {}) {
 // that rim as its hard stop; if the pack has no filler, the staircase cut is the fallback.
 // Returns true when the feet ended at or above the rim.
 // Does the pack hold a block the shelter would cap with - which is also the block a pillar climbs on.
+// A DARK HUT IS A MOB TRAP, NOT A SHELTER (2026-08-28 20:58, creeper INSIDE the hut). baseTorchAnchors
+// lights the exterior ring but the interior stays dark until it has coal for a torch - so a sealed,
+// unlit hut spawns mobs inside, and the home-within-a-walk rule was sending an un-geared bot into that
+// to be blown up. Prefer the hut only when it is LIT; otherwise the lit pit below is the safe choice.
+function hutInteriorLit (bot, hut) {
+  if (!hut || !bot) return false
+  try {
+    for (let dx = 1; dx <= 4; dx++) for (let dz = 1; dz <= 4; dz++) for (let dy = 1; dy <= 3; dy++) {
+      const b = bot.blockAt(new Vec3(hut.x + dx, hut.y + dy, hut.z + dz)); if (b && /torch|lantern/.test(b.name)) return true
+    }
+  } catch {}
+  return false
+}
 function holdsCapMaterial (bot) { return (bot.inventory ? bot.inventory.items() : []).some(i => CAP_RE.test(i.name)) }
 // How many blocks the pack could pillar with (the sealed-in test: one per level to the rim).
 function capMaterialCount (bot) { return (bot.inventory ? bot.inventory.items() : []).filter(i => CAP_RE.test(i.name)).reduce((n, i) => n + (i.count || 0), 0) }
