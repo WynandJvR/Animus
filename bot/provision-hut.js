@@ -1739,7 +1739,10 @@ async function clearDoorApproach (bot, hut, opts = {}) {
     // A furnace in my doorway is MISPLACED furniture, not furniture. Reclaiming it is allowed -
     // narrowly: furnace/table only (NEVER a chest, NEVER the bed/spawn anchor), and a furnace is
     // DRAINED through the ledger's own write-ahead first, so nothing inside it is ever destroyed.
-    const fabric = (hutModel.WALL_RE.test(b.name) || hutModel.DOOR_RE.test(b.name) || hutModel.STRAY_FILLER_RE.test(b.name)) && !hutModel.FURNITURE_RE.test(b.name)
+    // ...and a tree's leaves (2026-08-28 19:02): a birch canopy stood in the two cells straight out of the
+    // door at 230,69,-262/-263 - natural, never a build, and not on the fabric list, so the doorway stayed
+    // blocked by something nobody was allowed to cut. Leaves are always the bot's to clear (breakOut's rule).
+    const fabric = ((hutModel.WALL_RE.test(b.name) || hutModel.DOOR_RE.test(b.name) || hutModel.STRAY_FILLER_RE.test(b.name)) && !hutModel.FURNITURE_RE.test(b.name)) || /_leaves$/.test(b.name)
     const misplacedStation = /^(furnace|smoker|crafting_table)$/.test(b.name)
     if (!fabric && !misplacedStation) return R('blocked', 'my doorstep is blocked by ' + b.name + ' at ' + p.toString() + ' - not mine to clear')
     if (misplacedStation && /furnace|smoker/.test(b.name)) {
