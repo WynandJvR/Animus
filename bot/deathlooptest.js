@@ -513,7 +513,7 @@ t('LOOP D: the ARMORUP EXCURSION asks the rule - it is the journey, and it had n
   assert(!/isStopped: \(\) => buildAbort/.test(body),
     'neither the planner nor the bootstrap driver may be handed the bare build latch any more - ' +
     'that latch means "a build preempted me", never "I am dying"')
-  assert((body.match(/isStopped: gearupStopped/g) || []).length === 2, 'BOTH drivers (planner.gearUp and provisionArmor) get the composed stop')
+  assert((body.match(/isStopped: gearupStopped/g) || []).length === 3, 'all THREE drivers (the wooden-sword-first acquire, planner.gearUp and provisionArmor) get the composed stop, never the bare build latch') // 2026-08-28: +1 for the arm-first sword craft
 })
 
 t('LOOP D: the outbound-PRODUCER route asks the whole question, not half of it', () => {

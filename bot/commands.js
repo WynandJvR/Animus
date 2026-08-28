@@ -1321,6 +1321,18 @@ async function handleInner (bot, line, opts = {}) {
         // (scheduler.excursionAdmissible = outboundAdmissible + journeyAdmissible + homeLeash) and
         // owns the #5 hand-off for every stage; `gather` asks the identical poll.
         const gearupStopped = makeExcursionStop(bot, 'gearup')
+        // ARM WITH A WOODEN SWORD FIRST (2026-08-28, death spiral): a naked bot went straight to the iron
+        // grind and was killed un-armed by spiders/zombies on every excursion (sword-making was buried last
+        // in the tools step behind a mining-gated stone_sword + 15-min cooldown). A wooden sword is the
+        // cheapest survival buy - it lets auto-defend kill a mob. Uses the excursion stop, before the mining.
+        try {
+          const armed = () => (bot.inventory ? bot.inventory.items() : []).some(i => /_sword$/.test(i.name))
+          if (!armed() && !gearupStopped()) {
+            await resources.acquire(bot, 'wooden_sword', 1, { isStopped: gearupStopped, gather: true, near: bot.entity && bot.entity.position })
+            const sw = (bot.inventory ? bot.inventory.items() : []).find(i => /_sword$/.test(i.name))
+            if (sw) { await bot.equip(sw, 'hand').catch(() => {}); dbg('gearup: made+equipped a wooden sword before the armour grind') }
+          }
+        } catch (e) { dbg('gearup: wooden-sword-first failed (' + e.message + ')') }
         const r = usePlanner
           ? (await planner.gearUp(bot, { say: sayFn, isStopped: gearupStopped, at, restoreMovements: () => setupMovements(bot) })).msg
           : await provisionArmor(bot, { say: sayFn, isStopped: gearupStopped, at })
