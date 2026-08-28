@@ -1593,7 +1593,13 @@ function sunkenRimY (bot) {
       const s = pf.surfaceYAt(bot, f.x + dx, f.z + dz)
       if (s && s.known && Number.isFinite(s.y) && (rim == null || s.y > rim)) rim = s.y
     }
-    return (rim != null && rim - f.y >= 2) ? rim : null
+    // >= 1 (2026-08-29): sunkenIn is consulted ONLY inside the stuck-recovery ladder, and 'sunken'
+    // is its LAST resort (after door/indoor/sealed/water), firing only when the planner returned
+    // noPath. A bot stuck ONE below a rim it cannot step up to - boxed 1 under its own doorstep by
+    // the hut walls - is exactly that case and must get the climb. The old >= 2 left it frozen 1
+    // below the rim, starving. The rim read (max of the 4 neighbours, not the column) already fixed
+    // the trench-false-read that >= 2 was chosen for, so lowering the floor costs nothing there.
+    return (rim != null && rim - f.y >= 1) ? rim : null
   } catch { return null }
 }
 function sunkenIn (bot) { return sunkenRimY(bot) != null }

@@ -139,7 +139,11 @@ async function digStaircaseUp (bot, targetY, opts = {}) {
   while (Math.floor(bot.entity.position.y) < targetY && !isStopped() && stuck < 8) {
     if (LAVA_SAFE && dangerNow()) break // #41: in-lava/on-fire (+hostile/low-hp when NOT escaping) -> stop digging & hand control back
     if (surfaceY != null && Math.floor(bot.entity.position.y) >= surfaceY) break // #111 NO OVERSHOOT: the surface is the end of the climb, not a waypoint
-    if (Math.floor(bot.entity.position.y) > startY && !hasSolidCeiling(bot, 20, { ignoreLeaves: true })) { // broke into open sky - done
+    // toRim (2026-08-29): the sunken caller is climbing OUT OF AN OPEN-AIR PIT to a GROUNDED rim, so
+    // open sky below that rim is EXPECTED, not an ungrounded-target violation - line 141 (>= surfaceY)
+    // is the exact stop. Without this exemption the guard halted the climb one block under its own
+    // doorstep and the bot starved 1 below the rim (it had reached y67 of a y68 rim).
+    if (!opts.toRim && Math.floor(bot.entity.position.y) > startY && !hasSolidCeiling(bot, 20, { ignoreLeaves: true })) { // broke into open sky - done
       // #111: same demotion as pillarUpTo - with a grounded targetY the loop bound is the stop
       // condition and open sky BELOW the claimed surface is an ungrounded-target assertion.
       if (surfaceY != null && Math.floor(bot.entity.position.y) < surfaceY) dbg('  staircase: INVARIANT VIOLATION - open sky at y' + Math.floor(bot.entity.position.y) + ' but the target claims a surface at y' + surfaceY + ' (ungrounded target) - stopping')
@@ -308,7 +312,7 @@ async function climbToSurface (bot, targetY, opts = {}) {
     if (need()) {
       if (bot.pathfinder) bot.pathfinder.setMovements(climbMovements(bot))
       const y0 = bot.entity.position.y
-      try { await digStaircaseUp(bot, targetY, { isStopped, escape: true, surfaceY }) } catch (e) { if (process.env.CLIMB_DEBUG) console.error('[climb] staircase threw', e.message) } // #97: climbToSurface IS the escape - only lava/fire may abort the dig
+      try { await digStaircaseUp(bot, targetY, { isStopped, escape: true, surfaceY, toRim: opts.toRim }) } catch (e) { if (process.env.CLIMB_DEBUG) console.error('[climb] staircase threw', e.message) } // #97: climbToSurface IS the escape - only lava/fire may abort the dig
       if (process.env.CLIMB_DEBUG) console.error(`[climb] staircase ${y0.toFixed(1)} -> ${bot.entity.position.y.toFixed(1)} (target ${targetY})`)
     }
     // 2) PILLAR STRAIGHT UP as a fallback - if the staircase stalls (awkward/open cavern
