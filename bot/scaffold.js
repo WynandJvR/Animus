@@ -263,6 +263,12 @@ async function teardown (bot, around, opts = {}) {
       if (!b) { abandon(col, p.y, 'UNKNOWN cell (chunk not loaded)'); break } // a null is not "already gone" - fail closed, keep the debt
       if (!FILLER_RE.test(b.name)) { forget(p); continue } // repurposed: nothing of ours here to strand
       if (bot.entity.position.distanceTo(b.position) > 4.5) {
+        // THE SWEEP RADIUS BOUNDS THE WALK, NOT ONLY THE LIST (2026-08-28 15:52-15:53). A sweep
+        // "near 95,-82" walked column after column - 77,-21, 28,-11, 60,2, 37,-24 - seventy blocks
+        // back into the spawn cave in the middle of a trek, eight seconds a column. A tidy-up is
+        // a few steps off the path; anything farther than the radius from where the sweep began
+        // is another sweep's job, from there.
+        if (Math.hypot(p.x - around.x, p.z - around.z) > radius) { abandon(col, p.y, 'outside the sweep radius (' + radius + 'b from ' + Math.round(around.x) + ',' + Math.round(around.z) + ') - not walking for it'); break }
         try { await require('./navigate.js').gotoOnce(bot, new goals.GoalNear(p.x, p.y, p.z, 3), 8000) } catch {}
         // goto reports success on paths it never walked - the arrival claim is the re-read distance
         if (bot.entity.position.distanceTo(b.position) > 4.5) { abandon(col, p.y, 'cannot reach it'); break }

@@ -955,7 +955,9 @@ async function survivalPrep (bot, opts = {}) {
   say('grabbing a sword before i set off')
   try {
     const p = provision.planProvision(mcData, { wooden_sword: 1 }, provCore().inventoryCounts(bot), { primaryWood })
-    if (p.tasks.length) await provision.runPlan(bot, p, { say, isStopped: stop, restoreMovements: restore })
+    // maxRoam 32: a sword on the way is cut from the nearest tree, never fetched from a remembered
+    // grove across the map (2026-08-28: a 70b walk back through the spawn cave, the day's trek undone)
+    if (p.tasks.length) await provision.runPlan(bot, p, { say, isStopped: stop, restoreMovements: restore, maxRoam: 32 })
   } catch (e) { say(`(couldn't make a sword: ${e.message})`) }
   // STOPPED IS NOT EMPTY (§7). This said "no wood around" whenever it ended without a sword - and
   // live on 2026-08-26 it said exactly that one line after logging `gathering 2x acacia_log`, because

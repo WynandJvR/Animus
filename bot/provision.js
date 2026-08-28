@@ -1836,7 +1836,12 @@ async function gatherLoop (bot, item, count, opts = {}) {
   // LOCAL_WOOD then fences the WILD base roam back to a bounded radius (default 96) so the
   // bot prefers the local orchard over 94-130b treks; widenFence still stretches it when
   // wood is GENUINELY inaccessible. LW off -> woodRoamCap is a no-op (byte-for-byte).
-  const MAX_ROAM = woodPolicy.woodRoamCap(parseInt(process.env.GATHER_MAX_ROAM || (reqTool ? '64' : (isLogGather ? '160' : '96')), 10), isLogGather, LW)
+  // opts.maxRoam: the CALLER's fence when the gather is a side quest (the trek's sword prep: two
+  // logs from the nearest tree, not a 160b roam back to a remembered grove through a cave - live
+  // 2026-08-28 15:52, the day's trek undone in a minute). The policy cap still applies on top.
+  const MAX_ROAM = Math.min(
+    woodPolicy.woodRoamCap(parseInt(process.env.GATHER_MAX_ROAM || (reqTool ? '64' : (isLogGather ? '160' : '96')), 10), isLogGather, LW),
+    Number.isFinite(opts.maxRoam) && opts.maxRoam > 0 ? opts.maxRoam : Infinity)
   // The fence is ADAPTIVE: when this site's resource is genuinely inaccessible inside it
   // (verified live: stone under the site was a flooded aquifer - every shaft/dive aborted
   // on water), a player walks FURTHER. waterAborts/failed shafts widen it in +32 steps.
