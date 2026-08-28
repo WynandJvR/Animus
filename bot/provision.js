@@ -757,6 +757,14 @@ async function walkStaged (bot, tx, tz, opts = {}) {
     } catch (e) { navErr = e }
     const np = bot.entity.position
     const moved = Math.hypot(np.x - legStart.x, np.z - legStart.z)
+    // A STALL IS "NO CLOSER TO THE GOAL", NOT "DID NOT MOVE" (2026-08-28 12:01-12:25). In a shallow
+    // swamp every leg moved 3-8 blocks - a partial plan, then the shore rescue's hop - and never
+    // counted as a stall, so the bearing never rotated and the bot re-entered the same water for
+    // 25 minutes at hp 0.2. travelFar has always measured this by goal distance (nd >= lastD - 3);
+    // this loop now asks the same question, and its rotate / unstick / give-up chain engages.
+    const dLeg0 = Math.hypot(tx - legStart.x, tz - legStart.z)
+    const dLeg1 = Math.hypot(tx - np.x, tz - np.z)
+    const progressed = dLeg1 <= dLeg0 - 3
     // A leg that spent most of its clock PARKED for a survival reflex (creeper standoff,
     // flee-yield) is NOT a wedge - reflexWaitMs (from the nav's success return or its
     // honest error) tells us the body was held, not blocked. Never count that as a stall
@@ -773,7 +781,7 @@ async function walkStaged (bot, tx, tz, opts = {}) {
       try { await climbToSurface(bot, Math.min(surfaceRef, Math.floor(np.y) + 20), { isStopped }) } catch {}
       continue
     }
-    if (moved < 3 && !reflexDominated) {
+    if ((moved < 3 || !progressed) && !reflexDominated) {
       // MEASURED stall on a composed GRAPH leg -> this stitched corridor doesn't hold here.
       // Abandon the graph plan for THIS trek and fall through to whole-route replay / bearing from
       // the current position (the underlying routes still dement through their own replay - the
