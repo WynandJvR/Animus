@@ -224,6 +224,7 @@ async function digStaircaseUp (bot, targetY, opts = {}) {
       dir = DIRS[di % 4]; di++
     }
     sFloor = feet.plus(dir)                        // block we'll stand on (same Y as feet)
+    dbg('  staircase: pass at ' + feet.toString() + ' -> dir ' + dir.x + ',' + dir.z + ' (target y' + targetY + ', held ' + ((bot.heldItem && bot.heldItem.name) || 'nothing') + ')') // one line per pass (2026-08-28 19:34: an 18-level climb stalled silently for 90s and the watchdog cut it)
     sFeet = feet.plus(dir).offset(0, 1, 0)         // new feet cell
     sHead = feet.plus(dir).offset(0, 2, 0)         // new head cell
     const fb = bot.blockAt(sFloor)
@@ -235,7 +236,7 @@ async function digStaircaseUp (bot, targetY, opts = {}) {
         try { if (under && !AIRISH(under.name)) { await bot.placeBlock(under, new Vec3(0, 1, 0)); scaffold.add(sFloor, 'staircase') } } catch {}
       }
     }
-    if (!(await digIf(sFeet)) || !(await digIf(sHead))) { stuck++; continue }
+    if (!(await digIf(sFeet)) || !(await digIf(sHead))) { dbg('  staircase: step cells not opened at ' + sFeet.toString() + ' (stuck ' + (stuck + 1) + ')'); stuck++; continue }
     // CHEAP ADJACENT STEP UP onto the just-cleared tread (forward + a jump pulse); fall through
     // to today's exact per-step goto if it doesn't arrive. The stuck-counter below is unchanged.
     let arrived = false
