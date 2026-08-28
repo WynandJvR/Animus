@@ -118,7 +118,10 @@ function makeBot (world, feet, opts = {}) {
     entity: { position: new Vec3(feet.x + 0.5, feet.y, feet.z + 0.5), height: 1.62 },
     entities: opts.entities || {},
     inventory: { items: () => (opts.noFill ? [] : [{ name: 'dirt', count: 64, slot: 36 }]) },
-    equip: async () => {},
+    // placeAt re-reads the HAND after the equip (2026-08-28: "must be holding an item to place"
+    // twice live) - the double models a hand, as the real client does.
+    equip: async (item) => { bot.heldItem = item },
+    heldItem: null,
     lookAt: async () => {},
     blockAt: (p) => world.at(Math.floor(p.x), Math.floor(p.y), Math.floor(p.z)),
     placed: [],

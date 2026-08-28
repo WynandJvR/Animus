@@ -209,7 +209,17 @@ async function placeAt (bot, target, match) {
   // repeated once per candidate face, into one honest lastFail line naming the blocker.
   const blocked = placeBlocked(bot, target, item.name)
   if (blocked) { placeAt.lastFail = 'refused: ' + blocked; dbg('  placeAt: REFUSING ' + item.name + ' at ' + target.toString() + ' - ' + blocked); return false }
-  await bot.equip(item, 'hand').catch(() => {})
+  // THE EQUIP IS VERIFIED, NOT ASSUMED (2026-08-28). The swallowed equip left placeBlock to
+  // throw "must be holding an item to place" - live twice today, both on a shelter lid
+  // (14:23 deep-cap, 15:16 side hole): the pit stayed open. Same contract as the world
+  // re-reads: the hand is re-read after the equip, and one retry is allowed before the
+  // failure is reported as what it is - a hand that is not holding the block.
+  const holding = () => { const h = bot.heldItem; return !!h && h.name === item.name }
+  for (let k = 0; k < 2 && !holding(); k++) {
+    try { await bot.equip(item, 'hand') } catch (e) { placeAt.lastFail = 'equip ' + item.name + ': ' + e.message }
+    if (!holding()) await new Promise(r => setTimeout(r, 150))
+  }
+  if (!holding()) { placeAt.lastFail = placeAt.lastFail || ('equip ' + item.name + ' did not land in the hand (hand re-read)'); return false }
   let sawRef = false
   for (const [dx, dy, dz] of [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]]) {
     const ref = bot.blockAt(target.offset(dx, dy, dz))

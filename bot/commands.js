@@ -3377,12 +3377,22 @@ async function autoBuild (bot, schem, at, opts = {}) {
     //  deterministically. Operator: "furniture part of the schematic so we stop these issues".)
     // WHEAT FARM (operator order): renewable food at the camp - the region can run dry
     // of animals and the bot starved to death working. Water-edge plot, best-effort.
-    checklistStep('camp: wheat farm')
-    try { const ok = await provFarm().ensureWheatFarm(bot, { x: at.x, z: at.z }, { isStopped, say, avoid }); dbg('camp: wheat farm -> ' + ok) } catch (e) { dbg('camp: wheat farm failed (' + e.message + ')') }
-    // REMEMBER the camp as a PLACE (operator rule): a named waypoint in persistent memory
-    // - the brain sees it in /state waypoints and can `goto camp`; it survives restarts.
-    try { const r = await handle(bot, 'remember camp'); dbg('camp: waypoint -> ' + r) } catch {}
-    dbg('camp: setup pass done')
+    // A STOPPED PASS STOPS HERE (2026-08-28 14:22). The hut step honours the stop latch, but the
+    // steps after it did not: a pass cut by a death ran its tail from the RESPAWN point - "wheat
+    // farm -> false", then `remember camp` wrote the camp waypoint at -1,66,-3 (world spawn, 350b
+    // from the site). Nothing below is meaningful off-site or after a stop.
+    if (isStopped()) {
+      dbg('camp: setup pass STOPPED after the hut step - farm/waypoint skipped (nothing claimed)')
+    } else {
+      checklistStep('camp: wheat farm')
+      try { const ok = await provFarm().ensureWheatFarm(bot, { x: at.x, z: at.z }, { isStopped, say, avoid }); dbg('camp: wheat farm -> ' + ok) } catch (e) { dbg('camp: wheat farm failed (' + e.message + ')') }
+      // REMEMBER the camp as a PLACE (operator rule): a named waypoint in persistent memory
+      // - the brain sees it in /state waypoints and can `goto camp`; it survives restarts.
+      // The camp IS the site (the build anchor) - never the bot's own feet, which is wherever
+      // the pass happened to be standing when it got here.
+      try { const wp = memory.setWaypoint('camp', { x: at.x, y: at.y, z: at.z }); dbg('camp: waypoint -> remembered "camp" at ' + (wp ? wp.x + ',' + wp.y + ',' + wp.z : '?') + ' (the site)') } catch (e) { dbg('camp: waypoint failed (' + e.message + ')') }
+      dbg('camp: setup pass done')
+    }
   }
   // ARMOR AFTER CAMP (operator order: "set up the hut FIRST"): camp is minutes of safe
   // surface work; the iron grind is a long death-prone cave dive that kept restarting

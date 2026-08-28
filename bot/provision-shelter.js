@@ -160,6 +160,7 @@ async function findDiggableDryCell (bot, opts = {}) {
   const radius = opts.radius || 24
   if (!bot.entity) return null
   const excluded = new Set((opts.exclude || []).map(c => c && (c.x + ',' + c.y + ',' + c.z)).filter(Boolean))
+  const excludedNear = (opts.exclude || []).filter(c => c && Number.isFinite(c.x) && Number.isFinite(c.z))
   const mcData = require('minecraft-data')(bot.version)
   const GROUND_RE = /^(grass_block|dirt|coarse_dirt|rooted_dirt|podzol|mud|sand|red_sand|gravel|stone|deepslate|granite|diorite|andesite|tuff|clay|terracotta|netherrack|moss_block|snow_block|calcite)$/
   const ids = Object.values(mcData.blocksByName).filter(b => GROUND_RE.test(b.name)).map(b => b.id)
@@ -185,6 +186,9 @@ async function findDiggableDryCell (bot, opts = {}) {
     // SHELTER_AVOID_FARM (fix #30): never relocate the pit into our own farm (floods/wrecks
     // the crop) - hold these aside and only fall back to them if NOTHING clear of the farm exists.
     if (excluded.has(feet.x + ',' + feet.y + ',' + feet.z)) continue // already tried and failed this run
+    // a cell one block over from an uncappable hole IS that hole's rim (2026-08-28): the fresh
+    // column would open into the old shaft. Same 2b XZ rule as the in-place dig, one definition.
+    if (excludedNear.some(c => Math.abs(c.x - feet.x) <= 2 && Math.abs(c.z - feet.z) <= 2)) continue
     if (shelterFarmConflict(bot, feet)) { nearFarm.push({ x: feet.x, y: feet.y, z: feet.z }); continue }
     cand.push({ x: feet.x, y: feet.y, z: feet.z })
   }
@@ -370,6 +374,23 @@ async function digTorchAlcove (bot, feet) {
 // it. A COUNT-bounded list of observations, not a timer - the geometry does not change on its own.
 const capFailedCells = []
 
+// How many walled levels stand above the feet before a side opens (0 = a side is open at feet
+// level; 2+ = the body is in a shaft it cannot step out of). A side cell is a WALL when it is
+// solid, or when it is a dead-end pocket - air with solid beyond it and solid above it, which is
+// exactly the torch alcove digTorchAlcove cuts: it leads nowhere and admits nothing. Every cell is
+// a live world read; unloaded reads as not-solid (the safe side: an unknown wall is not a wall).
+// Bounded at 12 levels - the deepest hole this file will ever have dug.
+function shaftDepthHere (bot) {
+  if (!bot.entity || !bot.entity.position) return 0
+  const feet = bot.entity.position.floored()
+  const SIDES4 = [[1, 0], [-1, 0], [0, 1], [0, -1]]
+  const solid = (x, y, z) => { const b = bot.blockAt(new Vec3(x, y, z)); return !!b && !AIRISH(b.name) && b.boundingBox === 'block' && !/_leaves$/.test(b.name) }
+  const wall = (dx, y, dz) => solid(feet.x + dx, y, feet.z + dz) || (solid(feet.x + 2 * dx, y, feet.z + 2 * dz) && solid(feet.x + dx, y + 1, feet.z + dz))
+  let depth = 0
+  for (; depth < 12; depth++) { const y = feet.y + depth; if (!SIDES4.every(([dx, dz]) => wall(dx, y, dz))) break }
+  return depth
+}
+
 async function digInForNight (bot, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const say = opts.say || (() => {})
@@ -492,7 +513,19 @@ async function digInForNight (bot, opts = {}) {
     // the previous night's holes, ENTOMBED the bot in a hillside (live - needed a rescue
     // agent). If a registered shelter is within 24, go sit in it and re-SEAL instead (24 not
     // 12: a branch-mine head drifts, and a bounded goto to a known bunker beats a fresh dig).
-    const oldPit = recallInfra('shelter', bot.entity.position, 24)
+    // ...AND ONLY A PIT AT MY OWN LEVEL (2026-08-28 15:08). recallInfra is XZ-only, so a cave
+    // bunker at y48 was "within 24" of a bot standing on the surface at y64 with hp 7 - the walk
+    // to it is a cave dive, which is the death the shelter exists to prevent. A pit more than a
+    // short drop below or above the feet is not HERE; it is a trek, and treks are the planner's.
+    let oldPit = recallInfra('shelter', bot.entity.position, 24)
+    if (oldPit && Math.abs(oldPit.y - Math.floor(bot.entity.position.y)) > 3) {
+      dbg('shelter: my bunker at ' + oldPit.x + ',' + oldPit.y + ',' + oldPit.z + ' is ' + Math.abs(oldPit.y - Math.floor(bot.entity.position.y)) + ' levels off mine - not here, digging fresh')
+      oldPit = null
+    }
+    if (oldPit && capFailedCells.some(c => Math.abs(c.x - oldPit.x) <= 2 && Math.abs(c.z - oldPit.z) <= 2)) {
+      dbg('shelter: my bunker at ' + oldPit.x + ',' + oldPit.y + ',' + oldPit.z + ' is a hole already proven uncappable this life - not re-entering it')
+      oldPit = null
+    }
     if (oldPit) {
       dbg('shelter: reusing my bunker at ' + oldPit.x + ',' + oldPit.y + ',' + oldPit.z)
       const inPit = () => { const h = bot.entity.position.floored(); return Math.abs(h.x - oldPit.x) <= 1 && Math.abs(h.z - oldPit.z) <= 1 && h.y <= oldPit.y + 1 }
@@ -522,9 +555,20 @@ async function digInForNight (bot, opts = {}) {
         // in the dark, put the bot on the surface among zombies and skeletons, and it died at dawn.
         // A leaky hole at night is still the safest place there is; the forget-and-dig-fresh move
         // is daylight's. At night a leaky re-entry falls through to the wait below, until dawn.
-        if (!recapped && !isNight(bot)) {
-          dbg('shelter: the old bunker will not seal (' + (seal0.sideHoles || 0) + ' side(s) open' + (seal0.capped ? '' : ', no lid') + ') - forgetting it and digging fresh')
+        // ...EXCEPT THAT A HOLE WITH NO LID IS NOT "THE SAFEST PLACE THERE IS" (2026-08-28). The
+        // night rule above was written for a bunker that could still be lidded. Live today the
+        // bunker at 212,63,-258 came up "OPEN (leaky)" - no lid - three times, was squatted in
+        // because it was night, and the bot died IN it at 15:03 (zombie). Every FRESH pit dug today
+        // sealed (13:21, 13:36, 13:37, 14:39). Twenty seconds of digging five blocks away beats
+        // a night in a funnel; the "never at night" clause now covers only the lid-on-walls-open
+        // case, where the walls really are most of a shelter. A no-lid re-entry is forgotten and
+        // ruled out for this life (so the fresh dig does not start beside the same hole), and
+        // there is no lid to force open - breakOut is only a climb.
+        const noLid = !seal0.capped
+        if (!recapped && (noLid || !isNight(bot))) {
+          dbg('shelter: the old bunker will not seal (' + (seal0.sideHoles || 0) + ' side(s) open' + (seal0.capped ? '' : ', no lid') + ') - forgetting it and digging fresh' + (noLid && isNight(bot) ? ' (night, but a hole with no lid is a funnel, not a shelter)' : ''))
           try { forgetInfra('shelter', listInfra('shelter').find(e => e.x === oldPit.x && e.z === oldPit.z)) } catch {}
+          if (noLid) { const here = bot.entity.position.floored(); if (!capFailedCells.some(c => c.x === here.x && c.y === here.y && c.z === here.z)) capFailedCells.push({ x: here.x, y: here.y, z: here.z }); while (capFailedCells.length > 24) capFailedCells.shift() }
           try { await breakOut(bot, { isStopped, force: true }) } catch {}
         } else {
         const dl = Date.now() + 600000
@@ -594,6 +638,21 @@ async function digInForNight (bot, opts = {}) {
     let surfaceY = Math.floor(bot.entity.position.y)
     let shaft = bot.entity.position.floored()
     const RELOCATE_TRIES = 3
+    // ALREADY IN A SHAFT? THEN THIS IS A RE-SEAL, NOT A DIG (2026-08-28 15:16-15:22, live). A pit
+    // "SEALED with 1 open side" is held 120s, its hold ends, the chooser dispatches nightShelter
+    // again, and this fresh-dig path ran from INSIDE the hole with the rim taken as its own feet:
+    // feet 56 -> 54 -> 53 in six minutes, two blocks per pass, until it stood on bare stone with
+    // no dirt left and could dig no more. The rim-3 bound could not see it - each pass had a new
+    // "rim". The world answers this before any dig: walled at feet AND head on all four sides
+    // (a dead-end pocket - the torch alcove - is a wall, not a way out) means the body is in a
+    // shaft, the rim is the first open level above, and the only honest work is to seal THAT.
+    const shaftDepth = shaftDepthHere(bot)
+    if (shaftDepth >= 2) {
+      dug = 1 // the hole exists; nothing below is dug for it
+      surfaceY = shaft.y + shaftDepth
+      dbg('shelter: already ' + shaftDepth + ' deep in a shaft at ' + shaft + ' (rim y' + surfaceY + ') - re-sealing it, not digging a deeper one')
+    }
+    // (the dig loop below is skipped when `dug` is already 1)
     const relocFailed = [] // cells this call has already tried and ruled out - see the relocate block below
     for (let attempt = 0; attempt <= RELOCATE_TRIES && dug < 1 && !isStopped(); attempt++) {
       // CENTER on the feet cell. Digging from a cell edge (x.5/z.5) digs the column under
@@ -630,8 +689,17 @@ async function digInForNight (bot, opts = {}) {
         } catch { return false }                      // unreadable -> assume no drop, the safe side
       }
       // in place only if no open water lies within 5b of the feet; else straight to the dry-cell search
-      const pitHereOK = !(attempt === 0 && waterWithin(bot, shaft, 5))
+      let pitHereOK = !(attempt === 0 && waterWithin(bot, shaft, 5))
       if (!pitHereOK) dbg('shelter: open water within 5b of ' + shaft + ' - not pitting here (a pond is where a Drowned lives), looking for a dry cell')
+      // ...and never BESIDE a hole this life already proved uncappable (2026-08-28 15:00). After an
+      // abandoned bunker the body stands on its rim, and "dig where I stand" opened a fresh column
+      // right next to the old shaft - side holes into it, no lid, leaky again ("dig blocked at 1
+      // (birch_planks)": it was re-digging its own old lid). The dry-cell search already excludes
+      // these cells; the in-place dig has to honour the same list, or the exclusion is a fiction.
+      if (pitHereOK && capFailedCells.some(c => Math.abs(c.x - shaft.x) <= 2 && Math.abs(c.z - shaft.z) <= 2)) {
+        pitHereOK = false
+        dbg('shelter: ' + shaft + ' is within 2b of a hole proven uncappable this life - not pitting beside it, looking for a dry cell')
+      }
       for (let i = 0; pitHereOK && i < 2 && !isStopped(); i++) {
         const feet = bot.entity.position.floored()
         const below = bot.blockAt(feet.offset(0, -1, 0))
@@ -734,6 +802,11 @@ async function digInForNight (bot, opts = {}) {
       while (capFailedCells.length > 24) capFailedCells.shift()
       dbg('shelter: this hole CANNOT be capped (' + capFailedCells.length + ' such cell(s) ruled out) - not calling it a shelter; handing back so a real one can be found')
       say('this hole won\'t close over - not sleeping in a mob funnel')
+      // HAND THE BODY BACK ON THE SURFACE (2026-08-28). Returning from inside the funnel left the
+      // next dispatch standing in it: "dig where I stand" is now refused beside a ruled-out hole,
+      // so the relocation walk has to start from ground the planner can leave. No lid here, so
+      // breakOut is a climb at any hour.
+      try { await breakOut(bot, { isStopped }) } catch (e) { dbg('shelter: climb out of the uncappable hole failed (' + e.message + ')') }
       return false
     }
     say('holed up till it\'s safe')
@@ -824,8 +897,15 @@ async function breakOut (bot, opts = {}) {
   // THE LID STAYS ON AT NIGHT. A sealed pit is the shelter's whole purpose; opening it in the dark
   // (a creeper was 3.7m outside, live) is the death the pit exists to prevent. The night wait
   // above owns "until dawn"; this only ever opens by day - or when the operator forces it (`die`).
-  if (!opts.force && (isNight(bot) || isFirstLight(bot))) { dbg('shelter: break-out deferred - ' + (isNight(bot) ? 'night' : 'first light, the undead have not burned yet') + ': the lid stays on'); return false }
+  // ...WHEN THERE IS A LID (2026-08-28). "The lid stays on" was said of open sky too: a bot in a
+  // hole with nothing over its head was left there at first light, the next job (the sword gather,
+  // 15:05) started with the body three blocks down in a 1x1 shaft the planner answered noPath from,
+  // and 90s of the morning went to standing in a pit. With no lid the deferral keeps nothing on -
+  // it only keeps the body where no job can drive it. Open sky: the climb proceeds at any hour.
   const p0 = bot.entity.position.clone()
+  const lidNow = (() => { const f = p0.floored(); for (let k = 2; k <= 24; k++) { const b = bot.blockAt(f.offset(0, k, 0)); if (b && !AIRISH(b.name) && b.boundingBox === 'block') return true } return false })()
+  if (!opts.force && lidNow && (isNight(bot) || isFirstLight(bot))) { dbg('shelter: break-out deferred - ' + (isNight(bot) ? 'night' : 'first light, the undead have not burned yet') + ': the lid stays on'); return false }
+  if (!opts.force && !lidNow && (isNight(bot) || isFirstLight(bot))) dbg('shelter: break-out at ' + (isNight(bot) ? 'night' : 'first light') + ' from a hole with NO lid - nothing to keep on, climbing out')
   const ownPit = (() => { try { return recallInfra('shelter', p0, 3) } catch { return null } })()
   const mayDig = (b) => {
     if (/water|lava/.test(b.name)) return false
