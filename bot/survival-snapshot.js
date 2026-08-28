@@ -136,6 +136,11 @@ function survivalState (bot, opts = {}) {
       if (threatDist == null || d < threatDist) threatDist = d
     }
   }
+  // FOOD ANSWERS IN SIGHT (2026-08-28): animals within 32b - the world's own answer to a food need
+  // (arbiter.jobSurvivalNeed: at food 7..13 with an empty pack and bank and nothing to hunt, food is a
+  // chore the build outranks, not a crisis). Counted, not judged; an unloaded entity list reads 0.
+  let animalsNear = 0
+  try { if (me) for (const e of Object.values(bot.entities || {})) { if (e && e.position && e.type === 'animal' && e.position.distanceTo(me) <= 32) animalsNear++ } } catch { animalsNear = 0 }
   let drowning = false
   try { const h = me && bot.blockAt(me.floored().offset(0, 1, 0)); drowning = !!(h && /water|seagrass|kelp|bubble_column/.test(h.name)) } catch {}
   // The world-memory-backed flags each get their OWN guard: before, one of them throwing took the
@@ -147,6 +152,7 @@ function survivalState (bot, opts = {}) {
   return {
     ...vitals,
     threatDist,
+    animalsNear,
     creeperDist,
     drowning,
     inLava: !!(bot.entity && bot.entity.isInLava),

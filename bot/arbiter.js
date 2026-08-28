@@ -208,7 +208,18 @@ function jobSurvivalNeed (state, opts = {}) {
   const endangered = (s.isNight && !s.nightStuck) || (s.threatDist != null && s.threatDist <= 16) || (s.creeperDist != null && s.creeperDist <= 16)
   if (s.hp != null && s.hp <= hpLow && endangered) return { tier: PRIORITY.SURVIVE, need: 'heal', reason: 'hp ' + s.hp + ' <= ' + hpLow + ' while ' + (s.isNight ? 'night' : 'threatened') }
   // HUNGER (SURVIVE): a progress job must not run while genuinely hungry (it mined starving)
-  if (s.food != null && s.food < foodThreshold) return { tier: PRIORITY.SURVIVE, need: 'food', reason: 'food ' + s.food + ' < ' + foodThreshold }
+  if (s.food != null && s.food < foodThreshold) {
+    // A FOOD NEED WITH NO ANSWER IS A CHORE, NOT A CRISIS (2026-08-28). Four site-days went to secureFood
+    // at food 9..13 with an empty pack, an empty bank and no animal in sight - one bread a day from the
+    // farm - while the hut that ends the loop sat unbuilt with its planks in the pack. Below the
+    // degraded bound it is a crisis whatever the pantry holds; above it, a need only the world can
+    // answer takes the body only when the world CAN answer it (pack, bank, or an animal within reach).
+    // An unmeasured pantry is not an empty one (#10): states without the facts keep today's verdict.
+    const measured = s.packFoodPts != null && s.bankFoodPts != null && s.animalsNear != null
+    const answer = (s.packFoodPts || 0) > 0 || (s.bankFoodPts || 0) > 0 || (s.animalsNear || 0) > 0
+    if (!(measured && !answer && s.food > hpCritical)) return { tier: PRIORITY.SURVIVE, need: 'food', reason: 'food ' + s.food + ' < ' + foodThreshold }
+    // ...else: a chore - fall through to the remaining SURVIVE checks (night + under-armored)
+  }
   // NIGHT SHELTER for a naked bot (SURVIVE) - but NOT on a frozen/eternal night. When dawn
   // never comes (live: doDaylightCycle off, timeOfDay pinned) hiding is not a survivable
   // resolution - the bot must re-arm to get safe - so don't let "shelter" block progress
