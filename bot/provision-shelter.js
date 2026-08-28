@@ -88,6 +88,23 @@ let lastFlood = null // {x, z, at}
 // "grass_block will not drop one without a tool; a pit i cannot lid is just a deeper hole" and
 // could not dig in at night at all. Live 18:07-18:14: six deaths in seven minutes at spawn.
 const CAP_RE = /terracotta|dirt|grass_block|podzol|mycelium|cobble|stone|gravel|sand|netherrack|deepslate|tuff|granite|diorite|andesite|clay|mud|_planks$|_log$|_concrete/
+// Is there open water within r blocks (XZ) of this feet cell, at feet level or one below? A pond is
+// where a Drowned lives; a night pit is not dug beside one. This is a property of the SITE, read
+// per candidate - the "step away from the nearest water block" vector it replaces (2026-08-27,
+// one day old) pointed INTO the lake body and drowned the bot at 05:42 the same night.
+function waterWithin (bot, feet, r) {
+  try {
+    for (let dx = -r; dx <= r; dx++) {
+      for (let dz = -r; dz <= r; dz++) {
+        for (const dy of [0, -1]) {
+          const b = bot.blockAt(new Vec3(feet.x + dx, feet.y + dy, feet.z + dz))
+          if (b && /water/.test(b.name)) return true
+        }
+      }
+    }
+  } catch {}
+  return false
+}
 
 let _sheltering = false
 
@@ -161,6 +178,8 @@ async function findDiggableDryCell (bot, opts = {}) {
     if (!shelterSite.shelterDiggable(below, below2, SIDES.map(([dx, dz]) => nameAt(gp.offset(dx, 0, dz))), below3)) continue
     // must be real natural ground the anti-grief dig will actually break (not a player block)
     const gb = bot.blockAt(gp); if (gb && !canBreakNaturally(gb)) continue
+    // not beside open water (a Drowned's pond) - see waterWithin
+    if (waterWithin(bot, feet, 5)) continue
     // never relocate the pit onto our own hut apron (defaces the doorstep)
     if (onHutApron(bot, feet)) continue
     // SHELTER_AVOID_FARM (fix #30): never relocate the pit into our own farm (floods/wrecks
@@ -382,24 +401,6 @@ async function digInForNight (bot, opts = {}) {
       dbg('shelter: too close to the pit that flooded - moving to ' + Math.round(away.x) + ',' + Math.round(away.z) + ' first')
       try { await gotoWithTimeout(bot, new goals.GoalNearXZ(away.x, away.z, 2), 15000) } catch {}
     }
-    // NEVER BUNKER BESIDE OPEN WATER (2026-08-27). A pond is where a Drowned lives; the pit at
-    // 171,63,-136 was five blocks from the farm pond and the bot died in it at dawn - the third
-    // death at that pond. A player does not sleep on the bank. Step clear of any water within 8b
-    // before the in-place dig / the dry-cell search below picks a spot.
-    try {
-      const mdW = require('minecraft-data')(bot.version)
-      const wid = mdW.blocksByName.water && mdW.blocksByName.water.id
-      const wb = wid != null ? bot.findBlock({ matching: wid, maxDistance: 8 }) : null
-      if (wb) {
-        const p0w = bot.entity.position
-        let dx = p0w.x - wb.position.x, dz = p0w.z - wb.position.z
-        if (Math.abs(dx) < 0.5 && Math.abs(dz) < 0.5) { dx = 1; dz = 0 }
-        const n = Math.hypot(dx, dz) || 1
-        const away = { x: Math.round(wb.position.x + (dx / n) * 14), z: Math.round(wb.position.z + (dz / n) * 14) }
-        dbg('shelter: open water at ' + wb.position + ' within 8b - stepping clear to ' + away.x + ',' + away.z + ' before digging (a pond is where a Drowned lives)')
-        try { await gotoWithTimeout(bot, new goals.GoalNearXZ(away.x, away.z, 2), 15000) } catch {}
-      }
-    } catch {}
     // NEVER dig the bunker inside the active build footprint - step just past the nearest
     // edge first (a pit under the castle floor is a hole in the build, operator rule).
     const p0 = bot.entity.position
@@ -619,7 +620,10 @@ async function digInForNight (bot, opts = {}) {
           return !!toolForBlock(bot, b.name)         // needs a tool and we have one
         } catch { return false }                      // unreadable -> assume no drop, the safe side
       }
-      for (let i = 0; i < 2 && !isStopped(); i++) {
+      // in place only if no open water lies within 5b of the feet; else straight to the dry-cell search
+      const pitHereOK = !(attempt === 0 && waterWithin(bot, shaft, 5))
+      if (!pitHereOK) dbg('shelter: open water within 5b of ' + shaft + ' - not pitting here (a pond is where a Drowned lives), looking for a dry cell')
+      for (let i = 0; pitHereOK && i < 2 && !isStopped(); i++) {
         const feet = bot.entity.position.floored()
         const below = bot.blockAt(feet.offset(0, -1, 0))
         if (!holdsCap() && !willDropCap(below)) {

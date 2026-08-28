@@ -1231,7 +1231,35 @@ function navLegBudget (timeoutMs, deadlineMs, ceilingMs) {
   return Math.max(timeoutMs, Math.min(asked, ceilingMs))
 }
 
+// A WALK NEVER ENDS IN THE WATER (2026-08-28). Every water layer this bot has - the planner's water
+// policy, the drown reflex, swimToShore, escapeToDryLand - answers "how do i get OUT". None of them
+// asked whether the goal itself was IN. Live 05:42: a goal at 161,62,-312 sat in a lake; the planner
+// found a fine path (2 placements), the body went under at y57 and a Drowned finished it - after
+// every escape rung had just put it ashore. So the ONE nav entry point asks, before planning: is the
+// cell this walk would end in water? Then the walk is refused, in the same shape every other nav
+// failure has (a thrown reason), and the caller does what it does with any unreachable goal.
+// `opts.wet: true` is the only way through, for a caller that means to enter water (none do today).
+function goalInWater (bot, goal) {
+  try {
+    const xz = goalXZ(goal)
+    if (!xz) return false
+    const X = Math.floor(xz.x); const Z = Math.floor(xz.z)
+    let y = goalY(goal)
+    if (y == null) { const s = require('./pathfix.js').surfaceYAt(bot, X, Z); if (!s || !s.known || !Number.isFinite(s.y)) return false; y = s.y }
+    const Y = Math.floor(y)
+    const wet = b => !!b && /water|kelp|seagrass|bubble_column/.test(b.name)
+    const feet = bot.blockAt(new Vec3(X, Y, Z)); const ground = bot.blockAt(new Vec3(X, Y - 1, Z))
+    if (!feet && !ground) return false // unloaded: no verdict
+    return wet(feet) || (!!feet && AIRISH(feet.name) && wet(ground))
+  } catch { return false }
+}
+
 async function navigateToInner (bot, goal, opts = {}) {
+  if (!opts.wet && goalInWater(bot, goal)) {
+    const xz = goalXZ(goal)
+    dbg((opts.label ? opts.label + ': ' : '') + 'REFUSING the walk - the goal at ' + Math.round(xz.x) + ',' + Math.round(xz.z) + ' is in the water; a walk does not end in the water')
+    throw new Error('the goal is in the water - a walk does not end in the water')
+  }
   const timeoutMs = opts.timeoutMs || 20000
   const ceilingMs = supervisorPatienceMs()
   const budgetMs = navLegBudget(timeoutMs, opts.deadlineMs, ceilingMs)
