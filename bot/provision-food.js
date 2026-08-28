@@ -910,6 +910,13 @@ async function secureFoodInner (bot, opts = {}) {
   } catch {}
   await eatUp(bot)
   if (fedEnough()) return { fed: true, blockedOn: null }
+  // 0b) BAKE WHAT WE CARRY (2026-08-28 11:33). Eight wheat and a crafting table in the pack, food 13,
+  // and this chain walked past them to the pond for floating drops - baking only ever happened
+  // inside the farm/home branches. Wheat in the pack is bread in waiting; a player bakes it first.
+  if (countItem(bot, 'wheat') >= 3) {
+    try { await bakeBreadFromWheat(bot, { isStopped, home }); await eatUp(bot) } catch (e) { dbg('secureFood: bake-what-i-carry failed (' + e.message + ')') }
+    if (fedEnough()) return { fed: true, blockedOn: null }
+  }
   // 1) the pantry: withdraw banked food. FORCE A FRESH chest read (opts.forceFresh) - a stale
   // cache reported the bank empty for 11h and the bot starved AT its own chest without ever
   // re-opening it (live). A hungry bot near its bank must really open it before giving up.
