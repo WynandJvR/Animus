@@ -555,7 +555,7 @@ bot.on('death', () => {
   // (grave-policy salvageVerdict: underground + no armour -> deferred). The depth is measured HERE,
   // while the chunk is loaded, with the grounded surface read; unknown stays unknown (fail closed).
   let depth = null
-  try { const g = pathfix.surfaceYAt(bot, Math.floor(p.x), Math.floor(p.z)); if (g && g.known && typeof g.y === 'number') depth = g.y - Math.floor(p.y) } catch { depth = null }
+  try { const g = require('./pathfix.js').surfaceYAt(bot, Math.floor(p.x), Math.floor(p.z)); if (g && g.known && typeof g.y === 'number') depth = g.y - Math.floor(p.y) } catch { depth = null }
   const info = { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z), cause, attacker: att.attacker || null, causeSource: att.source, dangerous, underground, depth, at: Date.now(), retrieved: false }
   try { if (damageLog) damageLog.clear() } catch {} // this death consumed the window; the next one starts clean
   commands.recordDeath(info)
