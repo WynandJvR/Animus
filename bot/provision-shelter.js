@@ -198,6 +198,7 @@ async function findDiggableDryCell (bot, opts = {}) {
     // a cell one block over from an uncappable hole IS that hole's rim (2026-08-28): the fresh
     // column would open into the old shaft. Same 2b XZ rule as the in-place dig, one definition.
     if (excludedNear.some(c => Math.abs(c.x - feet.x) <= 2 && Math.abs(c.z - feet.z) <= 2)) continue
+    if (nearDeathCluster(feet.x, feet.z)) continue // never beside a death cluster (see HAZARD_PIT_R)
     if (shelterFarmConflict(bot, feet)) { nearFarm.push({ x: feet.x, y: feet.y, z: feet.z }); continue }
     cand.push({ x: feet.x, y: feet.y, z: feet.z })
   }
@@ -392,6 +393,21 @@ async function digTorchAlcove (bot, feet) {
 // against"). Such a hole is a mob funnel, not a shelter, so the siting search must stop offering
 // it. A COUNT-bounded list of observations, not a timer - the geometry does not change on its own.
 const capFailedCells = []
+// A PIT BESIDE WHAT KILLS IS A PIT BESIDE WHAT KILLS (2026-08-28 18:23, the sinkhole's 4th death).
+// The dry-cell search and the in-place dig ignored the death ledger; "diggable dry ground at
+// (229,64,-245)" was the sinkhole's rim and the bot went over it at night. A death cluster (two or
+// more deaths at one hazard, the hard-arm the router already bends around) keeps every pit at least
+// this far away. Read live from world-memory; no hazards = no exclusion.
+const HAZARD_PIT_R = 8
+function nearDeathCluster (x, z) {
+  try {
+    for (const h of (worldMemoryMod().listHazards() || [])) {
+      if (h && Array.isArray(h.deaths) && h.deaths.length >= 2 && Math.hypot(h.x - x, h.z - z) <= HAZARD_PIT_R) return h
+    }
+  } catch {}
+  return null
+}
+function worldMemoryMod () { return require('./world-memory.js') }
 
 // How many walled levels stand above the feet before a side opens (0 = a side is open at feet
 // level; 2+ = the body is in a shaft it cannot step out of). A side cell is a WALL when it is
@@ -763,6 +779,8 @@ async function digInForNight (bot, opts = {}) {
       // right next to the old shaft - side holes into it, no lid, leaky again ("dig blocked at 1
       // (birch_planks)": it was re-digging its own old lid). The dry-cell search already excludes
       // these cells; the in-place dig has to honour the same list, or the exclusion is a fiction.
+      const cluster = pitHereOK ? nearDeathCluster(shaft.x, shaft.z) : null
+      if (cluster) { pitHereOK = false; dbg('shelter: ' + shaft + ' is within ' + HAZARD_PIT_R + 'b of a death cluster at ' + cluster.x + ',' + cluster.y + ',' + cluster.z + ' (' + cluster.deaths.length + ' deaths) - not pitting beside what kills, looking for a dry cell') }
       if (pitHereOK && capFailedCells.some(c => Math.abs(c.x - shaft.x) <= 2 && Math.abs(c.z - shaft.z) <= 2)) {
         pitHereOK = false
         dbg('shelter: ' + shaft + ' is within 2b of a hole proven uncappable this life - not pitting beside it, looking for a dry cell')
