@@ -90,6 +90,11 @@ async function digShaftDown (bot, maxDepth, opts = {}) {
   return dug
 }
 
+// A block that FALLS when what is under it is opened. Read live; unloaded is "not falling" (the
+// caller then refuses on its own diggability checks, never on an invented hazard).
+const FALLING_RE = /gravel$|sand$|concrete_powder$|^anvil$|^chipped_anvil$|^damaged_anvil$/
+function fallingBlockAt (bot, cell) { const b = bot.blockAt(cell); return b && FALLING_RE.test(b.name) ? b.name : null }
+
 async function digStaircaseUp (bot, targetY, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   if (insideOwnStructure(bot)) { dbg('  staircase: inside my own hut - not cutting up through it'); return }
@@ -142,6 +147,31 @@ async function digStaircaseUp (bot, targetY, opts = {}) {
     }
     const y0 = Math.floor(bot.entity.position.y)
     const feet = bot.entity.position.floored()
+    // GRAVEL OVER MY HEAD IS NOT A CEILING TO OPEN (2026-08-28 15:49, suffocation at 13,47,6). The
+    // head-clearance dig opened the bot's own column under a gravel stack; the stack came down into
+    // the head cell and the bot suffocated in it over thirty seconds. A player under gravel steps out
+    // from under it first. So: with a falling block at +2 or +3 of MY column, this pass does not
+    // open that column - it cuts a SIDEWAYS cell at feet/head level whose own overhead is not falling
+    // and steps into it; the next pass climbs from there.
+    const fallingOver = fallingBlockAt(bot, feet.offset(0, 2, 0)) || fallingBlockAt(bot, feet.offset(0, 3, 0))
+    if (fallingOver) {
+      let stepped = false
+      for (let k = 0; k < 4 && !stepped && !isStopped(); k++) {
+        const cand = DIRS[(di + k) % 4]
+        const sF = feet.plus(cand); const sH = sF.offset(0, 1, 0)
+        const floorB = bot.blockAt(sF.offset(0, -1, 0))
+        if (!floorB || AIRISH(floorB.name) || /lava|water/.test(floorB.name)) continue
+        if (fallingBlockAt(bot, sF.offset(0, 2, 0)) || fallingBlockAt(bot, sF.offset(0, 3, 0))) continue
+        if (!permitted(bot.blockAt(sF)) || !permitted(bot.blockAt(sH))) continue
+        if (!(await digIf(sH)) || !(await digIf(sF))) continue // head first: the cell we open never has an open cell above it
+        try { await gotoWithTimeout(bot, new goals.GoalBlock(sF.x, sF.y, sF.z), 5000) } catch {}
+        stepped = Math.abs(bot.entity.position.x - (sF.x + 0.5)) < 0.7 && Math.abs(bot.entity.position.z - (sF.z + 0.5)) < 0.7
+      }
+      dbg('  staircase: ' + fallingOver + ' over my head at ' + feet.toString() + ' - not opening my own column; ' + (stepped ? 'stepped out from under it' : 'no side cell to step into'))
+      if (!stepped) { stuck++; continue }
+      di++
+      continue
+    }
     await digIf(feet.offset(0, 2, 0))             // our own head-clearance to move up
     let dir, sFloor, sFeet, sHead
     if (LAVA_SAFE) {
@@ -327,6 +357,9 @@ async function pillarUpTo (bot, targetY, opts = {}) {
       const above = bot.blockAt(feet.offset(0, up, 0))
       if (above && !AIRISH(above.name)) {
         if (/lava|water/.test(above.name)) { bot.clearControlStates(); return }
+        // a gravel/sand stack overhead comes down into the head cell when opened (suffocation at
+        // 13,47,6, 2026-08-28) - a pillar cannot step aside, so it stops and the staircase sidesteps
+        if (fallingBlockAt(bot, feet.offset(0, up, 0)) || fallingBlockAt(bot, feet.offset(0, up + 1, 0))) { dbg('  pillar: ' + above.name + ' stack over my head at ' + feet.offset(0, up, 0).toString() + ' - not opening it from below'); bot.clearControlStates(); return }
         if (!canBreakNaturally(above) && !S().scaffoldDigOK(above) && !(opts.mayDig && opts.mayDig(above))) { dbg('  pillar: not my block to cut overhead - ' + above.name + ' at ' + feet.offset(0, up, 0).toString()); bot.clearControlStates(); return } // anti-grief: don't pillar up through a build (own registry-proven scaffold / the caller's own-block carve-out allowed)
         if (bot.canDigBlock && !bot.canDigBlock(above)) { bot.clearControlStates(); return }
         const tool = toolForBlock(bot, above.name)
