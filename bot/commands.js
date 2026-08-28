@@ -3434,6 +3434,16 @@ async function autoBuild (bot, schem, at, opts = {}) {
   // `skip` collects materials we can't fully get (unobtainable / no-progress / stuck) so the
   // BUILD phase drops those placements instead of hanging forever begging for them.
   checklistStep('gather materials')
+  // THE CASTLE WAITS FOR THE HUT (2026-08-28 18:53). With the shell two cells short the pass went on to
+  // the castle's own BOM and its cobble gather walked the bot into the sinkhole beside the hut at dusk
+  // (skeleton, the sixth death there). A pass that cannot yet build the shelter has nothing to gather
+  // for the castle; it ends as STOPPED (the job stays on disk, the next camp pass finishes the hut) -
+  // never as "done with 0 placed", which is how a job gets cleared.
+  if (hutRequired && !(() => { try { return !!(provHut().hutAnchor && provHut().hutAnchor()) } catch { return false } })()) {
+    dbg('gather materials: DEFERRED - the safehouse has no shell yet; the castle waits for the hut (job kept)')
+    say('the safehouse first - the castle can wait')
+    return { stopped: true, phase: 'provision', placed: 0, total: 0, deferred: 'hut' }
+  }
   const skip = new Set()
   const BATCH = 96
   const home = { x: Math.round(at.x), y: Math.floor(at.y), z: Math.round(at.z) } // roam-fence anchor
