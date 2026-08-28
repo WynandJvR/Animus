@@ -132,6 +132,19 @@ async function ensureChest (bot, opts = {}) {
   // Reuse the site chest we REMEMBER (tight radius - the stash chest belongs at the site).
   const knownC = await recallAndReach(bot, 'chest', chestId, 24, async () => true)
   if (knownC) { rememberInfra('chest', knownC.position); return knownC }
+  // A CHEST I CANNOT REACH IS NOT A CHEST I DO NOT HAVE (2026-08-28). Every failed reach - a trench
+  // leg, a pond leg, a wedge - fell through to "make a chest and put it here", and the camp grew
+  // three field chests (209,-257 / 206,-259 / the cave stash at 286,-295). A registered chest that
+  // is STANDING (world re-read, loaded chunk) within the camp radius is the bank; not reaching it
+  // is the walk's problem to hand back, never a reason to manufacture another.
+  {
+    const anchor = (opts.home && typeof opts.home.x === 'number') ? opts.home : bot.entity.position
+    const standing = listInfra('chest').find(e => {
+      if (!e || Math.hypot(e.x - anchor.x, e.z - anchor.z) > 32) return false
+      try { const b = bot.blockAt(new Vec3(e.x, e.y, e.z)); return !!b && /chest$/.test(b.name) } catch { return false }
+    })
+    if (standing) throw new Error('bank chest at ' + standing.x + ',' + standing.y + ',' + standing.z + ' stands but could not be reached from here - not placing another')
+  }
   if (countItem(bot, 'chest') === 0) {
     // ASK THE RESOURCE MODEL FIRST (#108, same rule as the bed in #107). This used to plan
     // straight from the pack: `recipesFor` sees carried PLANKS only, so a bot holding a stack of
