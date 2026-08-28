@@ -3691,10 +3691,17 @@ async function resumeBuild (bot) {
     // NIGHT-FIRST: a fresh respawn is naked; prepping/trekking at night IS the death loop
     // (verified live: 3 deaths in 90s at spawn). We respawn AT the bed - sleep in it (or
     // pit as fallback) until morning, THEN gear up and go.
-    if (provCore().isNight(bot) && provShelter().underArmored(bot)) {
-      dbg('resume: night + no armor - resting till morning before heading back (BLOCKING)')
+    // ONE RULE FOR "TOO DARK TO BE OUT" (2026-08-28): shelterNeeded - the shelter's own dusk trigger
+    // (SHELTER_TOD 12200 + under-armored), not isNight (13000). The 800-tick gap was a seam: the
+    // resume passed this check at dusk, the sword prep spent its 90s budget resting in a pit, and
+    // the trek then set off into the night ("digging up to the surface before i head out", 15:38).
+    // Asked again AFTER the prep for the same reason - the prep can consume the rest of the day.
+    const restIfDark = async (when) => {
+      if (!provShelter().shelterNeeded(bot)) return
+      dbg('resume: dusk/night + no armor ' + when + ' - resting till morning before heading back (BLOCKING)')
       try { await provRecovery().restUntilSafe(bot, { isStopped: () => buildAbort, say }) } catch {}
     }
+    await restIfDark('at resume')
     if (buildAbort || bodyGone()) return (result = { stopped: true, placed: 0, total: 0, aborted: true })
     // SPAWN FIRST when the anchor is known WRONG (survival tier - the world-spawn
     // carousel root): BEFORE any grave detour or site trek, get home and re-anchor the
@@ -3745,6 +3752,8 @@ async function resumeBuild (bot) {
       // 600 blocks from the site (verified live: it "finished" 0/2350 all-skipped from
       // the respawn point and CLEARED the castle job).
       try { await survivalPrep(bot, { say, isStopped: () => buildAbort }) } catch (e) { say(`(prep: ${e.message})`) }
+      await restIfDark('after the sword prep')
+      if (buildAbort || bodyGone()) return (result = { stopped: true, placed: 0, total: 0, aborted: true })
       for (let attempt = 0; attempt < 3 && !near && !buildAbort; attempt++) {
         const tr = await travelFar(bot, { x: job.at.x, y: job.at.y, z: job.at.z }, { isStopped: () => buildAbort, say })
         near = (tr && tr.ok) || Math.hypot(job.at.x - bot.entity.position.x, job.at.z - bot.entity.position.z) <= 40

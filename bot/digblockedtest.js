@@ -195,9 +195,11 @@ t('the material diggers in provision-mining consult the same rule', () => {
   // ...and the ESCAPE digs are deliberately NOT migrated: a bot trapped in a cave under its own
   // hut must still be able to dig upward/outward through natural ground (#2 outranks tidiness).
   const up = min.slice(min.indexOf('async function digStaircaseUp'), min.indexOf('async function digStaircaseDown'))
-  assert.ok(/canBreakNaturally\(b\) && !S\(\)\.scaffoldDigOK\(b\)/.test(up),
+  // (2026-08-28: the gate is `permitted` - the same material rule, asked per CANDIDATE direction, plus
+  // the caller's own-block carve-out opts.mayDig. Still never digBlocked, still cannot entomb the bot.)
+  assert.ok(/canBreakNaturally\(b\) \|\| S\(\)\.scaffoldDigOK\(b\) \|\| !!\(opts\.mayDig && opts\.mayDig\(b\)\)/.test(up),
     'digStaircaseUp keeps exactly today\'s material gate - the protection must never be able to entomb the bot')
-  assert.ok(/if \(!canBreakNaturally\(above\) && !S\(\)\.scaffoldDigOK\(above\)\)/.test(min),
+  assert.ok(/if \(!canBreakNaturally\(above\) && !S\(\)\.scaffoldDigOK\(above\) && !\(opts\.mayDig && opts\.mayDig\(above\)\)\)/.test(min),
     'and so does pillarUpTo')
 })
 

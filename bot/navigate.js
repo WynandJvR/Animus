@@ -1304,6 +1304,7 @@ async function navigateToInner (bot, goal, opts = {}) {
   let recoveryMs = 0
   let crossings = 0 // atomic doorway pre-flight crossings this nav (capped so a threshold flicker can't ping-pong)
   let stalls = 0    // consecutive goto+recovery cycles that netted < 2.5b of real travel
+  let idleCycles = 0 // consecutive cycles in which NOTHING moved the body (3D) - plan, rescue, or reflex
   let noSprint = false // the server refused a sprint-jump on this leg: every profile handed to the planner from now on walks
   // Time spent parked while a REFLEX held the pathfinder must not consume the deadline:
   // in a reflex storm (creeper standoff re-fleeing every second, live 2h+) every nav
@@ -1423,6 +1424,18 @@ async function navigateToInner (bot, goal, opts = {}) {
         // PLANNER's. Re-plan from where the body actually is - the world may have changed under the last
         // attempt (a block dug, a step climbed) - until this leg's deadline says otherwise. That deadline,
         // not a rung count, is what ends a leg that is going nowhere (#6).
+        // ...UNLESS NOTHING IS CHANGING (2026-08-28). "The world may have changed under the last attempt"
+        // is the whole reason to ask again - and when the plan was noPath in 1ms, no rung applied and the
+        // body stands exactly where it stood, it has not. Live at first light in a sealed pit: 818
+        // identical ask-plan-rescue cycles in 40s, ~20 per second, until the deadline. The condition is
+        // the world's, not a clock's: three full cycles with the body unmoved in 3D (a dig-out moves Y,
+        // and counts) end the leg, and the caller hears the honest verdict.
+        const idle3d = bot.entity.position.distanceTo(cyclePos) < 0.5
+        idleCycles = idle3d ? idleCycles + 1 : 0
+        if (idleCycles >= 3) {
+          dbg(label + 'rescue verdict ' + res.verdict + ' and the body has not moved in ' + idleCycles + ' cycles - nothing here changes by asking again; ending the leg')
+          throw honestFail(lastErr, counts, label, recoveryMs, reflexWaitMs)
+        }
         if (opts.escalate !== false && Date.now() < dl() && !bot.isSleeping) {
           dbg(label + 'rescue verdict ' + res.verdict + ' (stall ' + stalls + ') - re-planning the leg from ' + bot.entity.position.floored())
           continue
