@@ -400,6 +400,22 @@ function shaftDepthHere (bot) {
   for (; depth < 12; depth++) { const y = feet.y + depth; if (!SIDES4.every(([dx, dz]) => wall(dx, y, dz))) break }
   return depth
 }
+// A PIT WITH ONE HEAD-LEVEL HOLE IS STILL A PIT (2026-08-28 15:57 -> 16:00). Walled 4/4 at the feet
+// and 3/4 at the head is the "SEALED with 1 open side" hole this file digs on a slope; the shaft test
+// above (4/4 at both levels) read it as open ground and the next dispatch dug two blocks deeper from
+// inside it. For the question "am I standing in a hole of my own making that I should re-seal, not
+// deepen", this is the honest shape. (sealedIn in navigate.js keeps the stricter 4/4 test: a single
+// head-level opening can be a legal jump-out for the planner.)
+function pitHere (bot) {
+  if (!bot.entity || !bot.entity.position) return false
+  const feet = bot.entity.position.floored()
+  const SIDES4 = [[1, 0], [-1, 0], [0, 1], [0, -1]]
+  const solid = (x, y, z) => { const b = bot.blockAt(new Vec3(x, y, z)); return !!b && !AIRISH(b.name) && b.boundingBox === 'block' && !/_leaves$/.test(b.name) }
+  const wall = (dx, y, dz) => solid(feet.x + dx, y, feet.z + dz) || (solid(feet.x + 2 * dx, y, feet.z + 2 * dz) && solid(feet.x + dx, y + 1, feet.z + dz))
+  const feetWalled = SIDES4.every(([dx, dz]) => wall(dx, feet.y, dz))
+  const headWalls = SIDES4.filter(([dx, dz]) => wall(dx, feet.y + 1, dz)).length
+  return feetWalled && headWalls >= 3
+}
 
 async function digInForNight (bot, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
@@ -656,7 +672,8 @@ async function digInForNight (bot, opts = {}) {
     // "rim". The world answers this before any dig: walled at feet AND head on all four sides
     // (a dead-end pocket - the torch alcove - is a wall, not a way out) means the body is in a
     // shaft, the rim is the first open level above, and the only honest work is to seal THAT.
-    const shaftDepth = shaftDepthHere(bot)
+    let shaftDepth = shaftDepthHere(bot)
+    if (shaftDepth < 2 && pitHere(bot)) shaftDepth = 2 // walled at the feet, 3/4 at the head: a pit, its rim one above the head
     if (shaftDepth >= 2) {
       dug = 1 // the hole exists; nothing below is dug for it
       surfaceY = shaft.y + shaftDepth
