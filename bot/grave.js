@@ -91,6 +91,9 @@ function snapInventory (bot) {
     const items = bot.inventory ? bot.inventory.items() : []
     const worn = []
     for (const s of ['head', 'torso', 'legs', 'feet']) { const it = bot.inventory && bot.inventory.slots[bot.getEquipmentDestSlot(s)]; if (it) worn.push(it.name) }
+    // vitals are stamped BEFORE the empty-pack return: a fresh respawn is exactly the bot that has a
+    // grave to judge, and it carries nothing (2026-08-28 18:03: the 193-item grave skipped again)
+    try { lastHp = typeof bot.health === 'number' ? bot.health : null; const tod = bot.time && bot.time.timeOfDay; lastNight = typeof tod === 'number' ? (tod >= 13000 && tod < 23500) : null } catch { lastHp = null; lastNight = null }
     if (!items.length && !worn.length) return
     const notable = items.filter(i => /_(pickaxe|axe|sword|shovel|hoe|helmet|chestplate|leggings|boots)$|_ingot$|^diamond|^emerald/.test(i.name)).map(i => i.name)
     const count = items.reduce((s, i) => s + i.count, 0) + worn.length
@@ -100,7 +103,6 @@ function snapInventory (bot) {
     const build = items.filter(i => /_log$|_planks$|_wood$|^cobblestone$|^stone$|^cobbled_deepslate$|^deepslate$/.test(i.name)).reduce((s, i) => s + i.count, 0)
     invSnap = { count, notable: notable.concat(worn), build, at: Date.now() }
     lastWornCount = worn.length
-    try { lastHp = typeof bot.health === 'number' ? bot.health : null; const tod = bot.time && bot.time.timeOfDay; lastNight = typeof tod === 'number' ? (tod >= 13000 && tod < 23500) : null } catch { lastHp = null; lastNight = null }
     // H2: any total-count change (craft/withdraw/deposit/pickup/eat/toss) is verified progress.
     if (lastItemCount !== -1 && count !== lastItemCount) telemetry.touchProgress('itemDelta')
     lastItemCount = count
