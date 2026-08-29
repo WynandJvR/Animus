@@ -903,6 +903,19 @@ async function openNearbyDoor (bot, opts = {}) {
           return true
         }
         if (blockedSolid(base.offset(dx * sign * 2, 0, dz * sign * 2)) && !blockedSolid(base.offset(-dx * sign * 2, 0, -dz * sign * 2))) { sign = -sign; how += ' FLIPPED (chosen side blocked)' }
+        // GRADE-AWARE (2026-08-29): do NOT force-walk out onto a side that is a PIT the bot cannot
+        // climb back out of - the "a crater beyond the doorstep is still crossable, recoveries handle
+        // the climb" premise above created an INFINITE door<->pit loop live: door-assist stepped the
+        // bot into a 2-3 deep pit south of its own door, the sunken recovery climbed it back TO THE
+        // DOOR (not out of the trap), and this stepped it in again for ~50 min. A far side the bot
+        // cannot stand on within +/-1 (walkable=false) that is NOT a wall (blockedSolid=false) is that
+        // pit. When the OTHER side IS walkable, cross THERE - into the sheltered hut is safe, and from
+        // a non-looping base the bot's own gather/bridge can fill the pit. Only flips if a walkable
+        // side exists, so a genuine step-down-and-continue exit (walkable at +/-1) is unaffected.
+        const isUnwalkablePit = (c) => !walkable(c) && !blockedSolid(c)
+        if (isUnwalkablePit(base.offset(dx * sign * 2, 0, dz * sign * 2)) && walkable(base.offset(-dx * sign * 2, 0, -dz * sign * 2))) {
+          sign = -sign; how += ' FLIPPED (chosen side is an unbridgeable pit -> walkable side)'
+        }
         dbg('door-assist: exit side ' + (dx ? (sign > 0 ? 'east' : 'west') : (sign > 0 ? 'south' : 'north')) + how)
         // Align on the inside cell in front of the door (pathfinder CAN reach that).
         try { await gotoOnce(bot, new goals.GoalBlock(base.x - dx * sign, base.y, base.z - dz * sign), 8000, { duringRecovery: true }) } catch (e2) { dbg('door-assist: could not align (' + e2.message + ')') }
