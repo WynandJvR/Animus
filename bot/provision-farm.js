@@ -345,12 +345,32 @@ async function levelPlotCell (bot, cx, baseY, cz, { isStopped = () => false } = 
   let ground = null
   for (let y = baseY + 3; y >= baseY - 2; y--) {
     const b = bot.blockAt(new Vec3(cx, y, cz)); const a = bot.blockAt(new Vec3(cx, y + 1, cz))
-    if (b && b.boundingBox === 'block' && a && (AIRISH(a.name) || REPLACEABLE.test(a.name))) { ground = b; break }
+    // passable-above by the world's bounding box (torch/cover included) - one rule with groundAt
+    if (b && b.boundingBox === 'block' && a && (AIRISH(a.name) || (a.boundingBox === 'empty' && !/water|lava/.test(a.name)) || REPLACEABLE.test(a.name))) { ground = b; break }
   }
   // EVERY FAILED CELL SAYS WHY (2026-08-30 20:50, live: "leveled 0/2 of 20" and nothing else) - #7
   const fail = (why) => { dbg('  level cell ' + cx + ',' + cz + ' -> ' + why + ' (target y' + baseY + ', me ' + bot.entity.position.floored() + ')'); return false }
   if (!ground) return fail('no ground within y' + (baseY - 2) + '..' + (baseY + 3) + ' (' + [3, 2, 1, 0, -1, -2].map(d => { const b = bot.blockAt(new Vec3(cx, baseY + d, cz)); return (b ? b.name : '?') }).join('/') + ')')
   if (ground.position.y === baseY && AIRISH((bot.blockAt(ground.position.offset(0, 1, 0)) || { name: 'air' }).name)) return true // already flat
+  // A TREE IS FELLED FROM THE GROUND, NOT SHAVED FROM THE TOP (2026-08-30 21:28, live: "could not get within
+  // reach of birch_leaves at y74" - the shave walked at the canopy). For a log/leaf column, stand at its base
+  // and cut upward within arm's reach; what stays out of reach decays once the trunk is gone, and the next
+  // pass reads the lower, honest surface.
+  if (/_log$|_leaves$/.test(ground.name)) {
+    try { await gotoWithTimeout(bot, new goals.GoalNear(cx, baseY, cz, 2), 8000) } catch (e) { return fail('could not stand at the base of the ' + ground.name + ' column (' + (e && e.message) + ')') }
+    let cut = 0
+    for (let y = baseY + 1; y <= ground.position.y && cut < 6; y++) {
+      const b = bot.blockAt(new Vec3(cx, y, cz))
+      if (!b || AIRISH(b.name)) continue
+      if (!/_log$|_leaves$/.test(b.name) && !canBreakNaturally(b)) break
+      if (bot.entity.position.distanceTo(b.position) > 4.5) break // the rest decays / next pass
+      const tool = toolForBlock(bot, b.name)
+      if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
+      try { await bot.dig(b); cut++ } catch (e) { return fail('felling stopped at ' + b.name + ' y' + y + ' (' + e.message + ')') }
+    }
+    if (cut) { try { await collectDrops(bot, 3) } catch {} }
+    return fail(cut ? 'felled ' + cut + ' block(s) of the tree - re-reading next pass' : 'a ' + ground.name + ' column i could not start cutting')
+  }
   if (bot.entity.position.distanceTo(ground.position) > 4) { try { await gotoWithTimeout(bot, new goals.GoalNear(cx, ground.position.y, cz, 3), 8000) } catch (e) { return fail('could not get within reach of ' + ground.name + ' at y' + ground.position.y + ' (' + (e && e.message) + ')') } }
   for (let dy = 1; dy <= 2; dy++) { // soft cover off first
     const v = bot.blockAt(ground.position.offset(0, dy, 0))
@@ -417,7 +437,11 @@ const PLOT_L = Number(process.env.FARM_PLOT_L || PLOT_SIDE)
 // anywhere in the walk marks the sample wet. Unreadable (unloaded chunk) is unknown, never a guess (#10).
 function groundAt (bot, x, z, aroundY, span = 3, deep = 8) {
   let water = false
-  const passableAbove = (a) => AIRISH(a.name) || REPLACEABLE.test(a.name) || a.name === 'wheat'
+  // the world's own word for passable: an empty bounding box that is not a fluid (torch, leaf_litter, grass,
+  // flowers, wheat...). The name-list version made a single torch on a stone surface read the whole column as
+  // a chasm - "no ground within y59..64 (stone/stone/stone/dirt/dirt/coal_ore)", live 21:24 - the same
+  // empty-bbox lesson as the 08-29 leaf_litter bug (#4: one rule).
+  const passableAbove = (a) => AIRISH(a.name) || (a.boundingBox === 'empty' && !/water|lava/.test(a.name)) || REPLACEABLE.test(a.name)
   for (let y = aroundY + deep; y >= aroundY - deep; y--) {
     const b = bot.blockAt(new Vec3(x, y, z)); const a = bot.blockAt(new Vec3(x, y + 1, z))
     if (!b || !a) return { groundY: null, water } // can't see the column - no verdict on it
