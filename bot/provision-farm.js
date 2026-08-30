@@ -399,8 +399,13 @@ async function levelPlotCell (bot, cx, baseY, cz, { isStopped = () => false } = 
 // around it, and the rectangle+walkway is ONE surface (farm.plotSurfaceVerdict): every plot cell at baseY,
 // every walkway cell within a step, no water and no drop in it. It is surveyed from the world, leveled until
 // the survey passes (resumable across passes - the plot is remembered in world memory), and only THEN planted.
-const PLOT_W = Number(process.env.FARM_PLOT_W || 6)
-const PLOT_L = Number(process.env.FARM_PLOT_L || 6)
+// The plot's side is DERIVED, not chosen: the smallest square that covers the farm-size target
+// (WHEAT_FARM_TARGET, itself set by bread economics - ~11 loaves/cycle). Target 33 -> 6x6 = 36 cells,
+// which also matches the hut's own 6x6 footprint. Raise the target and the plot grows with it;
+// env FARM_PLOT_W/L still override for a deliberate shape (operator asked "why 6x6", 2026-08-30).
+const PLOT_SIDE = Math.max(3, Math.ceil(Math.sqrt(WHEAT_FARM_TARGET)))
+const PLOT_W = Number(process.env.FARM_PLOT_W || PLOT_SIDE)
+const PLOT_L = Number(process.env.FARM_PLOT_L || PLOT_SIDE)
 
 // The ground of one column: the first full block below passable air, scanning aroundY+span..aroundY-span;
 // water anywhere in that column (or as the ground) marks the sample wet. Unreadable -> groundY null (#10).
@@ -558,9 +563,19 @@ async function ensureDryHomeFarm (bot, home, hut, { isStopped = () => false, say
     if (!hoe) { dbg('  wheat farm [plot]: still no hoe - deferred'); return existingLen > 0 || !!m.dryPlot }
   }
   const ownedCols = new Set((expand ? ((m.wheatFarm && m.wheatFarm.cells) || []) : []).map(c => c.x + ',' + c.z))
+  // A STONE FLOOR IS RE-FLOORED, NOT SKIPPED (2026-08-30, operator: "stone is not an issue if it uses its pickaxe
+  // and replaces stone flooring with dirt so shit can actually grow"). A plot cut into a hillside levels to bare
+  // stone; those cells used to be silently dropped here and the rectangle planted with holes in it. Any solid,
+  // naturally-breakable top the bot may cut is a candidate - the planting loop swaps it for dirt first.
+  const swappableTop = (b) => !!b && b.boundingBox === 'block' && !farm.tillableBank(b.name) && (canBreakNaturally(b) || /^(cobblestone|cobbled_deepslate)$/.test(b.name)) && !/water|lava/.test(b.name)
   const cands = farm.rectCells(plot.rect, 0).filter(c => !ownedCols.has(c.x + ',' + c.z))
     .map(c => ({ x: c.x, z: c.z, y: plot.baseY, block: bot.blockAt(new Vec3(c.x, plot.baseY, c.z)) }))
-    .filter(c => c.block && farm.tillableBank(c.block.name))
+    .filter(c => c.block && (farm.tillableBank(c.block.name) || swappableTop(c.block)))
+  const swapsNeeded = cands.filter(c => swappableTop(c.block)).length
+  if (swapsNeeded && countItem(bot, 'dirt') < swapsNeeded && !isStopped()) {
+    try { await require('./resources.js').withdrawItems(bot, 'dirt', Math.min(64, swapsNeeded + 8), { near: hut, maxDist: 48 }) } catch {}
+    if (countItem(bot, 'dirt') < Math.min(swapsNeeded, 8) && !isStopped()) { try { await P().runGather(bot, 'dirt', swapsNeeded + 8, { isStopped, restoreMovements: () => {}, home: { x: cx, z: cz } }) } catch (e) { dbg('  wheat farm [plot]: dirt for the stone swap failed (' + e.message + ')') } }
+  }
   const seedCount = () => countItem(bot, 'wheat_seeds')
   const seedWant = Math.max(3, Math.min(12, cands.length))
   if (seedCount() < seedWant) {
@@ -579,7 +594,18 @@ async function ensureDryHomeFarm (bot, home, hut, { isStopped = () => false, say
       if (bot.entity.position.distanceTo(cell.position) > 4) await gotoWithTimeout(bot, new goals.GoalNear(cell.position.x, cell.position.y, cell.position.z, 2), 12000)
       const veg = bot.blockAt(cell.position.offset(0, 1, 0))
       if (veg && !AIRISH(veg.name)) { try { await bot.dig(veg) } catch {} }
-      const tr = await tillCell(bot, cell)
+      let cellNow = bot.blockAt(cell.position)
+      if (cellNow && swappableTop(cellNow)) { // pickaxe off the stone, dirt in its place - then till that
+        const dirtItem = (bot.inventory ? bot.inventory.items() : []).find(i => /^dirt$/.test(i.name))
+        if (!dirtItem) { dbg('  wheat farm [plot]: ' + cellNow.name + ' top at ' + cell.position.toString() + ' and no dirt to re-floor it - next pass'); continue }
+        const tool = toolForBlock(bot, cellNow.name)
+        if (tool) await bot.equip(tool, 'hand').catch(() => {})
+        try { await bot.dig(cellNow); await collectDrops(bot, 2) } catch (e) { dbg('  wheat farm [plot]: could not cut the ' + cellNow.name + ' top at ' + cell.position.toString() + ' (' + e.message + ')'); continue }
+        if (!await placeAt(bot, cell.position, /^dirt$/)) { dbg('  wheat farm [plot]: dirt re-floor did not place at ' + cell.position.toString()); continue }
+        cellNow = bot.blockAt(cell.position)
+        if (!cellNow || !farm.tillableBank(cellNow.name)) continue
+      }
+      const tr = await tillCell(bot, cellNow || cell)
       if (tr === 'nohoe') { dbg('  wheat farm [plot]: hoe vanished mid-pass - aborting'); break }
       if (tr !== 'farmland') { dbg('  wheat farm [plot]: till did not take at ' + cell.position.toString() + ' (' + tr + ', got ' + ((bot.blockAt(cell.position) || {}).name || '?') + ')'); continue }
       const tilled = bot.blockAt(cell.position)
