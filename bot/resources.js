@@ -177,6 +177,21 @@ function verifiedChests (bot, near, maxDist = 32) {
     if (kept.some(k => k.y === e.y && Math.abs(k.x - e.x) + Math.abs(k.z - e.z) === 1)) continue // other half of a double
     kept.push(e)
   }
+  // AT NAKED NIGHT THE PANTRY IS THE CHEST INSIDE THE WALLS (2026-08-30 18:21, live): secureFood's fresh
+  // read walked out of the hut to the field chest 22b away at tod 13300, un-armoured, with the bed 4b behind
+  // it. The per-chest journey rule above only gates walks > 32b; the shelter rule (scheduler.outboundBlocked,
+  // the same one every outbound rung asks) is the one that says "not outside tonight". A chest inside the
+  // bot's own structure is not outside.
+  try {
+    const st = require('./survival-snapshot.js').excursionState(bot)
+    const blocked = require('./scheduler.js').outboundBlocked(st)
+    if (blocked) {
+      const provHut = require('./provision-hut.js')
+      const inside = kept.filter(e => !!provHut.insideOwnStructure(bot, { x: e.x + 0.5, y: e.y, z: e.z + 0.5 }))
+      if (inside.length !== kept.length) dbg('chests: ' + (kept.length - inside.length) + ' exterior chest(s) skipped - ' + (blocked === 'dawn' ? 'un-armoured at night: the pantry is what is inside my walls' : 'un-armoured with a re-arm in reach: not walking the field') + (inside.length ? '' : ' (none inside)'))
+      return inside
+    }
+  } catch { /* an unreadable snapshot does not veto a bank read; the per-chest journey rule still applies */ }
   return kept
 }
 
@@ -187,7 +202,19 @@ async function readChest (bot, e) {
   if (!blk || !/chest/.test(blk.name)) return (loadCache()[cellKey(e)] || {}).counts || {}
   if (chestCoolingOff(e)) return (loadCache()[cellKey(e)] || {}).counts || {} // dead chest - don't walk, use the cache
   try {
-    const counts = await provBank.chestCounts(bot, blk)
+    // A READ THAT NEVER SETTLES IS A FAILED READ (2026-08-30 17:47-18:15, live): secureFood's "step 1 - the
+    // pantry (fresh read)" went silent at the hut chest for 90s+ on every cycle, the watchdog cut the job,
+    // the tick re-picked it 2.5 min later, and the food "crisis" stayed alive all day because an unmeasured
+    // bank is not a measured-empty one. Every primitive under here is bounded on paper; this is the bound
+    // on the whole attempt (#6: a deadline on an attempt), and it names where it was cut.
+    const CHEST_READ_MS = 45000
+    const t0 = Date.now()
+    dbg('chest read: opening ' + cellKey(e) + ' (' + Math.round(bot.entity.position.distanceTo(new Vec3(e.x, e.y, e.z))) + 'b away)')
+    const counts = await Promise.race([
+      provBank.chestCounts(bot, blk),
+      new Promise((resolve, reject) => setTimeout(() => reject(new Error('chest read did not settle within ' + Math.round(CHEST_READ_MS / 1000) + 's (open/read/close) - treating it as a failed read')), CHEST_READ_MS))
+    ])
+    dbg('chest read: ' + cellKey(e) + ' -> ' + Object.keys(counts).length + ' item kind(s) in ' + Math.round((Date.now() - t0) / 1000) + 's')
     const ent = loadCache()[cellKey(e)] = loadCache()[cellKey(e)] || {}
     ent.counts = counts; ent.at = Date.now()
     saveCache()
@@ -266,9 +293,22 @@ async function totalHave (bot, name, opts = {}) { return (await totalCounts(bot,
 // Returns how many actually came out. Refreshes each touched chest's cache.
 async function withdrawItems (bot, name, count, opts = {}) {
   let got = 0
+  let farNoted = false
   for (const e of verifiedChests(bot, opts.near, opts.maxDist)) {
     if (got >= count) break
     if (chestCoolingOff(e) && !opts.includeCooling) continue // repeatedly unreachable - a working chest must get the walk instead
+    // THE WALK TO A CHEST IS A JOURNEY (2026-08-30 00:12, live): `near` is HOME, so the chest set is "within 32b
+    // of the hut" - and the body may be 260b away at world spawn, at night, naked. The bank run then walked
+    // the dark until a zombie and a spider ended it ("cannot reach the container (258.9b away after
+    // approach)"). Every other journey asks scheduler.journeyAdmissible; a bank run asks it here, per chest.
+    try {
+      const me = bot.entity && bot.entity.position
+      const d = me ? Math.hypot(e.x - me.x, e.z - me.z) : 0
+      if (d > 32) {
+        const j = require('./scheduler.js').journeyAdmissible(require('./survival-snapshot.js').excursionState(bot), d)
+        if (!j.ok) { if (!farNoted) { farNoted = true; dbg('withdraw ' + name + ': the chest at ' + e.x + ',' + e.z + ' is ' + Math.round(d) + 'b off and ' + j.why + ' - not walking to the bank') } continue }
+      }
+    } catch { /* an unreadable snapshot does not veto the walk; the executors keep their own guards */ }
     const c = cachedChest(e)
     if (c && c.counts && !(c.counts[name] > 0) && Date.now() - c.at < 60000) continue // fresh read says empty - skip the walk
     const blk = bot.blockAt(new Vec3(e.x, e.y, e.z))
@@ -444,7 +484,7 @@ async function acquire (bot, name, count = 1, opts = {}) {
   const before = packHas()
   if (before >= count) return true
   // withdraw a BATCH (fewer bank trips for bulk blocks) but only ever CRAFT the shortfall
-  await withdrawItems(bot, name, Math.max(count, opts.batch || 0) - packHas(), { near: opts.near })
+  await withdrawItems(bot, name, Math.max(count, opts.batch || 0) - packHas(), { near: opts.near, maxDist: opts.maxDist })
   if (packHas() >= count) return true
   if (opts.craft === false) return packHas() > before
   const rec = await reconcile(bot, { [name]: count - packHas() }, { near: opts.near, planOpts: opts.planOpts })
@@ -473,7 +513,9 @@ async function acquire (bot, name, count = 1, opts = {}) {
   if (gathersNeeded || huntsNeeded) {
     dbg('acquire ' + name + ': running the FULL plan (' + rec.plan.tasks.map(t => t.type + ':' + (t.item || t.output)).join(' > ') + ') - this caller may roam')
   }
-  try { await runReconciled(bot, rec, { say: opts.say || (() => {}), isStopped: opts.isStopped, home: opts.near }) } catch (e) { dbg('acquire ' + name + ': craft chain failed (' + e.message + ')') }
+  // roam bounds (maxRoam / maxExplores / timeMs) ride through to the hunt driver when the caller sets
+  // them - the bed bootstrap derives them from the daylight leash (provision-hut.acquireBed)
+  try { await runReconciled(bot, rec, { say: opts.say || (() => {}), isStopped: opts.isStopped, home: opts.near, maxRoam: opts.maxRoam, maxExplores: opts.maxExplores, timeMs: opts.timeMs }) } catch (e) { dbg('acquire ' + name + ': craft chain failed (' + e.message + ')') }
   return packHas() >= count || packHas() > before
 }
 

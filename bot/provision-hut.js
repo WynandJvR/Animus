@@ -542,7 +542,16 @@ async function underpinHutFloor (bot, at, opts = {}) {
 
   // 3. MATERIAL: from the pack, topped up from the bank if bare. Never blocks on it.
   const haveFill = () => (bot.inventory ? bot.inventory.items() : []).some(i => DIRTLIKE.test(i.name) || ANYFILL.test(i.name))
-  if (!haveFill()) { try { await require('./resources.js').withdrawItems(bot, 'cobblestone', 16, { near: at, maxDist: 64 }) } catch {} }
+  // A PLAYER WITH A HOLE UNDER THE FLOOR DIGS SOME DIRT (2026-08-30 09:39, live: "18 cell(s) of my own
+  // floor stand on air and I have no filler aboard or banked - resuming next pass" - and every pass said
+  // it). This only ever WITHDREW; the resource model's rule is withdraw > craft > gather, and the ground
+  // outside the door is the gather. Cobble first (needs a pick), dirt when it has none - both bounded
+  // gathers near home, and the crawlspace fill below still runs from the perimeter ring.
+  if (!haveFill()) {
+    const res = require('./resources.js')
+    try { await res.acquire(bot, 'cobblestone', 16, { near: at, maxDist: 64, gather: true, isStopped, say }) } catch (e) { dbg('  underpin: cobble gather failed (' + e.message + ')') }
+    if (!haveFill() && !isStopped()) { try { await res.acquire(bot, 'dirt', 16, { near: at, maxDist: 64, gather: true, isStopped, say }) } catch (e) { dbg('  underpin: dirt gather failed (' + e.message + ')') } }
+  }
   if (!haveFill()) {
     dbg('  underpin: ' + holes + ' cell(s) of my own floor stand on air and I have no filler aboard or banked - resuming next pass')
     return { skipped: 'no filler', filled: 0, holes, remaining: holes, lowestY, unknown }
@@ -626,6 +635,20 @@ function bedInPack (bot) {
   return (bot.inventory ? bot.inventory.items() : []).find(i => /_bed$/.test(i.name)) || null
 }
 
+// CAN A BED BE MADE FROM WHAT IS HELD, WITHOUT ROAMING? PURE over a {item: count} holdings map (pack,
+// bank, or both - the caller decides which). A bed is 3 wool of ONE colour + 3 planks, and the bot
+// usually carries LOGS not planks (1 log = 4 planks). A bed item already held counts. This is the
+// arithmetic the survival snapshot's bedUnobtainable override and the night bed-craft both need -
+// written once here (#4), so the two can never disagree about what "craftable" means.
+function bedCraftableFrom (holdings) {
+  const t = holdings || {}
+  if (Object.keys(t).some(n => /_bed$/.test(n) && t[n] > 0)) return true
+  let planks = 0
+  for (const n of Object.keys(t)) { if (/_planks$/.test(n)) planks += t[n]; if (/_log$/.test(n)) planks += t[n] * 4 }
+  if (planks < 3) return false
+  return Object.keys(t).some(n => /_wool$/.test(n) && t[n] >= 3)
+}
+
 // Bed item names worth ASKING the resource model for, best first: a bed already sitting in
 // our own chests (any colour - a withdraw is free), then a bed whose wool we hold enough of,
 // then white_bed as the universal fallback. PURE - unit-testable without a bot or a world.
@@ -682,7 +705,27 @@ async function acquireBed (bot, opts = {}) {
       // first job at the site (#102); the bed is craft/withdraw-only until a hut stands to put it in.
       const mayRoam = !!hutAnchor()
       if (!mayRoam) dbg('  acquireBed: no hut stands yet - not roaming for wool/wood; the bed comes after the walls (craft/withdraw only)')
-      try { await res.acquire(bot, name, 1, { near, isStopped, say: opts.say, planOpts, gather: mayRoam }) }
+      // HOW FAR MAY THE SHEEP HUNT RANGE? (2026-08-30) The hunt's default fence is 48b and two explore legs -
+      // sized for "optional gear", and no sheep has ever grazed within 48b of this hut, so the bed - the one
+      // item that ends the death carousel - was never obtainable. The bed is not optional gear. By day the
+      // honest bound is the daylight leash (scheduler.homeLeash: how far out the body can be and still walk
+      // home before the shelter hour), the leg count is what that distance holds at the explorer's 48b
+      // stride, and the time budget is the time left until that hour. All three derived, none invented;
+      // at dusk the leash is the bed-trek radius and the hunt stays at home.
+      let roam = {}
+      if (mayRoam) {
+        try {
+          const sched = require('./scheduler.js')
+          const st = require('./survival-snapshot.js').excursionState(bot)
+          const leash = sched.homeLeash(st)
+          const tod = bot.time && bot.time.timeOfDay
+          const shelterTod = require('./shelter.js').SHELTER_TOD
+          const ticksLeft = (typeof tod === 'number' && tod < shelterTod) ? shelterTod - tod : 0
+          if (Number.isFinite(leash) && leash > 48) roam = { maxRoam: Math.round(leash), maxExplores: Math.max(2, Math.ceil(leash / 48)), timeMs: Math.max(120000, ticksLeft * 50) }
+          if (roam.maxRoam) dbg('  acquireBed: the wool hunt may range ' + roam.maxRoam + 'b (' + roam.maxExplores + ' legs, ' + Math.round(roam.timeMs / 60000) + ' min of daylight)')
+        } catch (e) { dbg('  acquireBed: leash read failed (' + e.message + ') - default fence') }
+      }
+      try { await res.acquire(bot, name, 1, { near, isStopped, say: opts.say, planOpts, gather: mayRoam, ...roam }) }
       catch (e) { dbg('  acquireBed: ' + name + ' failed (' + e.message + ')') }
       const got = bedInPack(bot)
       if (got) { dbg('  acquireBed: now holding a ' + got.name); return got }
@@ -1793,6 +1836,25 @@ async function clearDoorApproach (bot, hut, opts = {}) {
 // the hut", the bot went out unarmed to fight it and died at its own door. One torch at the interior
 // centre lights the whole room (light 14 at source, a corner is ~3 away => 11 > 0, no spawn). Torch is in
 // FURNITURE_RE, so cleanupHutInterior never removes it; withdraw>craft only (bank coal+sticks), never a roam.
+// IS THE ROOM LIT? A world read of the 4x4x3 interior box: true when a torch/lantern stands inside,
+// false when every interior cell was read and none does, null when the interior could not be read
+// (chunk not loaded) - "unmeasured is not unmet" (#10): a null must never be treated as dark.
+// ONE definition, three readers: the night shelter (light it before holding), the survival
+// snapshot's baseLit (an unlit room is an unlit base) and secureBase (which lights it).
+function hutInteriorLit (bot, hut) {
+  if (!hut || !bot) return null
+  let unread = false
+  try {
+    const DIMS = hutModel.DIMS
+    for (let dx = 1; dx <= DIMS.w - 2; dx++) for (let dz = 1; dz <= DIMS.l - 2; dz++) for (let dy = 1; dy <= DIMS.h - 2; dy++) {
+      const b = bot.blockAt(new Vec3(hut.x + dx, hut.y + dy, hut.z + dz))
+      if (!b) { unread = true; continue }
+      if (/torch|lantern/.test(b.name)) return true
+    }
+  } catch { return null }
+  return unread ? null : false
+}
+
 async function ensureHutInteriorLit (bot, hut, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const say = opts.say || (() => {})
@@ -1800,14 +1862,12 @@ async function ensureHutInteriorLit (bot, hut, opts = {}) {
   const torchY = hut.y + 1 // sits on the floor layer at hut.y, feet level
   const cands = [{ x: hut.x + 2, y: torchY, z: hut.z + 2 }, { x: hut.x + 3, y: torchY, z: hut.z + 3 }]
   const litAt = (c) => { try { const b = bot.blockAt(new Vec3(c.x, c.y, c.z)); return !!b && /torch/.test(b.name) } catch { return false } }
-  // already a torch anywhere in the interior? (scan the 4x4x3 interior box) -> lit, no-op
-  try {
-    for (let dx = 1; dx <= DIMS.w - 2; dx++) for (let dz = 1; dz <= DIMS.l - 2; dz++) for (let dy = 1; dy <= DIMS.h - 2; dy++) {
-      const b = bot.blockAt(new Vec3(hut.x + dx, hut.y + dy, hut.z + dz)); if (b && /torch/.test(b.name)) return { how: 'lit', why: 'already a torch inside' }
-    }
-  } catch {}
+  // already a torch anywhere in the interior? -> lit, no-op (hutInteriorLit is the one reader)
+  if (hutInteriorLit(bot, hut) === true) return { how: 'lit', why: 'already a torch inside' }
   if (countItem(bot, 'torch') < 1) {
-    try { await require('./resources.js').acquire(bot, 'torch', 2, { near: hut, isStopped, gather: false, say }) } catch (e) { dbg('  interior-light: torch acquire failed (' + e.message + ')') }
+    // opts.maxDist bounds which chests the withdraw may walk to: the night shelter passes the hut's own
+    // radius (no 20b walk to the field chest in the dark); the daytime base pass leaves the default
+    try { await require('./resources.js').acquire(bot, 'torch', 2, { near: hut, maxDist: opts.maxDist, isStopped, gather: false, say }) } catch (e) { dbg('  interior-light: torch acquire failed (' + e.message + ')') }
   }
   if (countItem(bot, 'torch') < 1) { dbg('  interior-light: no torch and none craftable from the bank (need coal+stick) - hut stays dark'); return { how: 'skip', why: 'no torch' } }
   if (!insideOwnStructure(bot)) { try { await require('./navigate.js').enterStructure(bot, hut, { isStopped }) } catch (e) { dbg('  interior-light: could not get inside (' + e.message + ')') } }
@@ -1922,6 +1982,14 @@ async function secureBase (bot, opts = {}) {
     } catch (e) { dbg('  secureBase: torch supply failed (' + e.message + ')') }
   }
 
+  // 2a) LIGHT THE ROOM FIRST (2026-08-29). ensureHutInteriorLit existed since 2026-08-28 and had no
+  //     caller at all - so the ring got lit while the room the bot SLEEPS in stayed dark, the night
+  //     shelter then refused the dark hut and dug a pit beside it instead (the 16:37 fall death, with
+  //     the bed wool in its pack). One torch inside is the cheapest safety this pass can buy; it runs
+  //     before the ring so a torch-short pass spends its first torch where the bot actually is at night.
+  let interior = null
+  if (!isStopped()) { try { interior = await ensureHutInteriorLit(bot, hut, { isStopped, say }) } catch (e) { dbg('  secureBase: interior light failed (' + e.message + ')') } }
+
   // 2) LIGHT THE PERIMETER - bounded, survival-yielding. Reuse placeAt(/^torch$/) (the same
   //    primitive placeFarmTorches uses) at a solid, non-crop ground cell at/near each anchor.
   const scaffoldMod = (() => { try { return require('./scaffold.js') } catch { return null } })()
@@ -1961,7 +2029,7 @@ async function secureBase (bot, opts = {}) {
   if (!isStopped()) { try { sealed = await repairHutStructure(bot, hut, { isStopped, say }) } catch (e) { dbg('  secureBase: seal failed (' + e.message + ')') } }
 
   if (placed) { dbg('  secureBase: lit ' + placed + ' perimeter cell(s) (ring ' + bl.torched.length + '/' + anchors.length + ' anchors)'); say('spawn-proofing home - lit ' + placed + ' dark spot(s) around the base') }
-  return { placed, ringTorches: bl.torched.length, anchors: anchors.length, remaining: Math.max(0, remaining.length - placed), sealed }
+  return { placed, ringTorches: bl.torched.length, anchors: anchors.length, remaining: Math.max(0, remaining.length - placed), sealed, interior: interior && interior.how }
 }
 
 // SEAL_HOME_DESCENTS (#89, default ON): CAP the cave/shaft mouths that funnel mobs up into the hut.
@@ -2290,7 +2358,7 @@ async function worldTidy (bot, opts = {}) {
 module.exports = {
   setDebugSink, insideHutBox,
   containerHeadroomAt, ownBedCellAt, hutDoorway, doorwayReservationAt,
-  insideHutBox, ownHutAt, ownInfraSupportAt, underOwnFloorAt, underpinHutFloor, onHutApron, insideOwnStructure, hasSolidCeiling, isUnderground, hutAnchor, ensureHomeShelter, stepOffApron, ensureHutApron, clearDoorApproach, healHomeCrater, ensureHutBed, relocateBedInto, bedInPack, bedCandidates, acquireBed, placeBedNear, bedFootprint, bedUsable, assertSpawnOn, ensureBedSite, upgradeBedPlacement, freeInteriorCell, stationInHut, stationSlot, reconcileInfra, cleanupHutInterior, repairHutStructure, ensureHutInteriorLit, recallAndReach, maintainHut, maintainHome,
+  insideHutBox, ownHutAt, ownInfraSupportAt, underOwnFloorAt, underpinHutFloor, onHutApron, insideOwnStructure, hasSolidCeiling, isUnderground, hutAnchor, ensureHomeShelter, stepOffApron, ensureHutApron, clearDoorApproach, healHomeCrater, ensureHutBed, relocateBedInto, bedInPack, bedCandidates, bedCraftableFrom, acquireBed, hutInteriorLit, placeBedNear, bedFootprint, bedUsable, assertSpawnOn, ensureBedSite, upgradeBedPlacement, freeInteriorCell, stationInHut, stationSlot, reconcileInfra, cleanupHutInterior, repairHutStructure, ensureHutInteriorLit, recallAndReach, maintainHut, maintainHome,
   secureBase, secureBaseGate: hutModel.secureBaseGate,
   sealHomeDescents, sealDescentsGate: hutModel.sealDescentsGate,
   worldTidy, litterSignature: hutModel.litterSignature

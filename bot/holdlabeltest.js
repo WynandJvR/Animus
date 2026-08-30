@@ -69,10 +69,11 @@ t('the table names ALL FOUR latches the gate tests, and each key is bound to its
     ['busy building', 'job', 'commands.isBusy'],
     ['night-resting', 'shelter', 'provRecovery.isResting'],
     ['securing food', 'foodRun', 'provFood.isSecuringFood'],
-    ['recovering-degraded', 'ladder', 'provRecovery.isRecoveringDegraded']
+    ['recovering-degraded', 'ladder', 'provRecovery.isRecoveringDegraded'],
+    ['maintaining', 'maintain', 'provMaintain.isMaintaining'] // 2026-08-29: the maintenance pass (the bed bootstrap runs inside it) holds the body too
   ]
   assert.deepStrictEqual(gate.BODY_HOLD_LATCHES, expect.map(([l, k]) => [l, k]),
-    'the four labels, bound to their claim keys, in the order bodyBusy always tested them')
+    'the five labels, bound to their claim keys, in the order bodyBusy always tested them')
   for (const [, key, pred] of expect) {
     assert.ok(new RegExp("probe\\('" + key + "', .*" + pred.replace('.', '\\.')).test(latches),
       'claim ' + key + ' is bound to ' + pred + ' in bodyLatches - the label can still only name a latch that is SET')

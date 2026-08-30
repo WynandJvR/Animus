@@ -266,7 +266,16 @@ async function bakeBreadFromWheat (bot, opts = {}) {
 // and every window read SETTLES the debt on a grounded observation - never on an assumption.
 async function drainOwnFurnaceFood (bot, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
-  const near = opts.home || hutAnchor() || knownBed() || (bot.entity && bot.entity.position)
+  // A PANTRY IS A PANTRY WITHIN A WALK (2026-08-29 23:40, live): the anchor was the hut at ANY distance,
+  // so a bot 320b away at world spawn, food 12, mid sheep-hunt, read "my own furnace holds mutton:1 -
+  // going to take it" and set off across the map for one chop. Home food counts when home is within
+  // HOME_NIGHT_LEASH (the one "within a walk" radius the shelter and the bed use); farther, the pantry
+  // is wherever the body stands, and the hunt/fish rungs behind this one answer the hunger.
+  const here = bot.entity && bot.entity.position
+  const home = opts.home || hutAnchor() || knownBed()
+  const homeNear = !!(home && here && Math.hypot(home.x - here.x, home.z - here.z) <= provShelter.HOME_NIGHT_LEASH)
+  if (home && here && !homeNear) dbg('  furnace-food: home is ' + Math.round(Math.hypot(home.x - here.x, home.z - here.z)) + 'b off - only a furnace near where i stand counts')
+  const near = homeNear ? home : here
   if (!near) return 0
   const maxDist = opts.maxDist != null ? opts.maxDist : 32
   let debts = []
@@ -544,6 +553,7 @@ async function huntForDrop (bot, target, opts = {}) {
   if (opts.movements !== false && !cap.hostile) bot.pathfinder.setMovements(S().gatherMovements(bot))
   let killed = 0
   let explores = 0
+  const visitedMem = new Set() // sightings already walked to in this hunt
   try {
     while (now() - start < want && killed < maxKills && Date.now() < deadline && !isStopped()) {
       // nearest matching mob within the fence (never chase one beyond maxRoam of home)
@@ -554,7 +564,16 @@ async function huntForDrop (bot, target, opts = {}) {
         if (home && Math.hypot(e.position.x - home.x, e.position.z - home.z) > maxRoam) continue
         const d = e.position.distanceTo(bot.entity.position); if (d < best) { best = d; tgt = e }
       }
-      if (!tgt) { // none in range - roam to find some, but only a couple of times
+      if (!tgt) { // none in range - a remembered sighting first, then roam to find some (a couple of times)
+        const mem = worldMemory.recallMobSpot(entityRe, bot.entity.position, visitedMem)
+        if (mem && (!home || Math.hypot(mem.x - home.x, mem.z - home.z) <= maxRoam) && Date.now() < deadline) {
+          visitedMem.add(mem.x + ',' + mem.z)
+          dbg('  hunt ' + (cap.label || opts.item) + ': i remember ' + mem.key.slice(4) + ' near ' + mem.x + ',' + mem.z + ' (' + Math.round(mem.dist) + 'b) - going there before roaming blind')
+          try { await S().walkStaged(bot, mem.x, mem.z, { isStopped, range: 8, timeoutMs: Math.min(100000, Math.max(15000, deadline - Date.now())) }) } catch {}
+          if (Math.hypot(bot.entity.position.x - mem.x, bot.entity.position.z - mem.z) > 24) { try { worldMemory.forgetSpot(mem.key, mem, false) } catch {} } // could not get there this time - a little less confidence
+          continue
+        }
+        if (mem && home) dbg('  hunt ' + (cap.label || opts.item) + ': i remember ' + mem.key.slice(4) + ' at ' + mem.x + ',' + mem.z + ' but it is ' + Math.round(Math.hypot(mem.x - home.x, mem.z - home.z)) + 'b from the fence (leash ' + Math.round(maxRoam) + 'b) - not today')
         if (explores >= maxExplores) break
         explores++
         await S().explore(bot, explores, home, maxRoam)
@@ -900,6 +919,7 @@ async function secureFoodInner (bot, opts = {}) {
   // eat -> withdraw -> cook steps below own the body and can walk to the bank/furnace.
   try { if (bot.pathfinder && bot.pathfinder.goal) bot.pathfinder.setGoal(null) } catch {}
   dbg('secureFood: food=' + bot.food + ' packFood=' + foodCount(bot))
+  dbg('secureFood: step 0 - eat what i carry')
   // 0) eat what we carry. COOK-BEFORE-EAT: if the pack's only non-bad food is RAW meat (tier 1
   // and NO ready-to-eat tier-0 food), cook it first (mirror eatFromPackToComfortable) so it
   // doesn't scarf raw mutton at 1/3 value next to a furnace. GUARDED to "no tier-0 in pack" so
@@ -913,6 +933,7 @@ async function secureFoodInner (bot, opts = {}) {
   } catch {}
   await eatUp(bot)
   if (fedEnough()) return { fed: true, blockedOn: null }
+  dbg('secureFood: step 0b - bake what i carry')
   // 0b) BAKE WHAT WE CARRY (2026-08-28 11:33). Eight wheat and a crafting table in the pack, food 13,
   // and this chain walked past them to the pond for floating drops - baking only ever happened
   // inside the farm/home branches. Wheat in the pack is bread in waiting; a player bakes it first.
@@ -920,6 +941,7 @@ async function secureFoodInner (bot, opts = {}) {
     try { await bakeBreadFromWheat(bot, { isStopped, home }); await eatUp(bot) } catch (e) { dbg('secureFood: bake-what-i-carry failed (' + e.message + ')') }
     if (fedEnough()) return { fed: true, blockedOn: null }
   }
+  dbg('secureFood: step 1 - the pantry (bank withdraw, fresh read)')
   // 1) the pantry: withdraw banked food. FORCE A FRESH chest read (opts.forceFresh) - a stale
   // cache reported the bank empty for 11h and the bot starved AT its own chest without ever
   // re-opening it (live). A hungry bot near its bank must really open it before giving up.
@@ -931,6 +953,7 @@ async function secureFoodInner (bot, opts = {}) {
     if (got) { dbg('secureFood: withdrew ' + got + ' food from the bank'); await cookIfRaw(); await eatUp(bot) }
   } catch (e) { dbg('secureFood: bank check failed (' + e.message + ')') }
   if (fedEnough()) return { fed: true, blockedOn: null }
+  dbg('secureFood: step 2 - cook raw meat')
   // 2) raw meat in the pack + a furnace in reach -> cook (3x the food value of raw)
   await cookIfRaw(); await eatUp(bot)
   if (fedEnough()) return { fed: true, blockedOn: null }
@@ -994,6 +1017,7 @@ async function secureFoodInner (bot, opts = {}) {
     try { await bankFoodFirst(bot, { home, isStopped, say }) } catch (e) { dbg('secureFood: bank-first failed (' + e.message + ')') }
     if (fedEnough()) return { fed: true, blockedOn: null }
   }
+  dbg('secureFood: step 2.5 - home food first / harvest first')
   // 2.5) HOME FOOD FIRST (HOME_FOOD_FIRST=0 restores today's behavior). Step 1's bank withdraw
   // is RANGE-BOUNDED (maxDist 64): once the bot has drifted beyond it, that read silently
   // no-ops and the chain below marches OUTWARD (scout) hunting NEW food while the bot's own
@@ -1017,7 +1041,24 @@ async function secureFoodInner (bot, opts = {}) {
       for (const [n, c] of Object.entries(totals)) if (foodsH[n]) bankFoodPts += (foodsH[n].foodPoints || 0) * c
       const wheatCount = totals.wheat || 0
       const snap = { distHome, bankFoodPts, wheatCount, hasFarm: hasStandingFarm() }
-      if (foodSec.shouldTrekHomeForFood(snap, { range })) {
+      // THE TREK HOME IS A JOURNEY LIKE ANY OTHER (2026-08-29 23:46, live): "313b out, bankFoodPts=8 ->
+      // trekking home" at food 12, from a cave, ninety seconds before dusk, naked, after three deaths
+      // on that very crossing. shouldTrekHomeForFood says whether home is WORTH it; whether the crossing
+      // is SURVIVABLE is scheduler.journeyAdmissible (the spiral/dark/hp clauses every homecoming asks)
+      // plus the daylight leash (homeLeash: how far out the bot can be and still walk in before dusk).
+      // Refused here, the chain falls through to the local rungs - hunt/fish/scout where the body is.
+      let trekOK = foodSec.shouldTrekHomeForFood(snap, { range })
+      if (trekOK) {
+        try {
+          const sched = require('./scheduler.js')
+          const st = require('./survival-snapshot.js').excursionState(bot)
+          const j = sched.journeyAdmissible(st, distHome)
+          const leash = sched.homeLeash(st)
+          if (!j.ok) { trekOK = false; dbg('secureFood: HOME FOOD FIRST refused - ' + j.why + ' (' + Math.round(distHome) + 'b); using what is near me instead') }
+          else if (distHome > leash) { trekOK = false; dbg('secureFood: HOME FOOD FIRST refused - ' + Math.round(distHome) + 'b out with ' + Math.round(leash) + 'b of daylight left to walk; using what is near me instead') }
+        } catch (e) { dbg('secureFood: journey check failed (' + e.message + ') - not trekking blind'); trekOK = false }
+      }
+      if (trekOK) {
         say('starving out here - heading home to eat from my own stores')
         dbg('secureFood: HOME FOOD FIRST - ' + Math.round(distHome) + 'b out (range ' + range + '), bankFoodPts=' + bankFoodPts + ' wheat=' + wheatCount + ' farm=' + snap.hasFarm + ' -> trekking home')
         try { await S().walkStaged(bot, anchor.x, anchor.z, { isStopped, range: 6, timeoutMs: 180000 }) } catch (e) { dbg('  home-food: trek home failed (' + e.message + ')') }
@@ -1096,7 +1137,10 @@ async function secureFoodInner (bot, opts = {}) {
     // this line then refused the one farm that could feed it: "unsafe to trek (hp=4)", all day, at
     // spawn. outboundRungAdmissible says yes exactly when holding cannot heal; night/hostile stay.
     const fit = foodSec.outboundRungAdmissible(hp, { food: bot.food, hasPackFood: foodCount(bot) > 0 })
-    const safe = fit && !isNight(bot) && !nearHostile(bot, 12)
+    // ...and not once the SHELTER hour has struck (2026-08-30 00:27, live): isNight is tick 13000, the naked bot's
+    // shelter fires at 12200 (shelterNeeded), and in that seam this trek walked it out of its own hut into the
+    // farm pond in the dark - spider, death #6. One deadline: the shelter's.
+    const safe = fit && !isNight(bot) && !provShelter.shelterNeeded(bot) && !nearHostile(bot, 12)
     if (wf && safe) {
       dbg('secureFood: HARVEST-FIRST - standing farm at ' + wf.x + ',' + wf.z + ' (food=' + bot.food + ' hp=' + hp + ') -> trekking to harvest it before establishing anew')
       say('i have a farm - harvesting it instead of starving next to it')

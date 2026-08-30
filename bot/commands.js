@@ -350,7 +350,29 @@ function bridgingBlockCount (bot) {
 }
 
 
+// EVERY JOURNEY ASKS THE ONE RULE (2026-08-29 23:49-23:50, live): the brain's `goto camp` - a 20s
+// pathfinder sprint toward a waypoint 300b away, re-issued every minute all night - walked a naked
+// hp-10 bot from spawn into the dark and got it killed at 209,-140. scheduler.journeyAdmissible is the
+// rule every homecoming, rung and excursion already asks (dark, hp, spiral, food); the brain's
+// goto/travel/come simply never asked it. A short hop is always allowed - this cannot immobilise.
+function journeyRefusal (bot, dist) {
+  try {
+    const st = require('./survival-snapshot.js').excursionState(bot)
+    const j = require('./scheduler.js').journeyAdmissible(st, dist)
+    return j.ok ? null : ('not setting out ' + Math.round(dist) + 'b - ' + j.why)
+  } catch (e) { return null } // an unreadable snapshot does not veto a move; the executors keep their own guards
+}
+
 async function travelFar (bot, dest, opts = {}) {
+  // A DESTINATION THAT IS NOT A NUMBER IS NOT A TREK (2026-08-29 23:22, live): a caller handed this a
+  // dest with NaN coordinates; every leg "arrived" instantly at GoalNearXZ(NaN), `nd` was NaN, the
+  // stall test (nd >= lastD - 3) is false for NaN, so nothing ever counted - 501 legs in 45 seconds,
+  // ten log lines a second, the event loop spent on nothing. Refuse up front and name the caller.
+  if (!dest || !Number.isFinite(dest.x) || !Number.isFinite(dest.z)) {
+    const where = (new Error().stack || '').split('\n').slice(2, 5).map(l => l.trim()).join(' <- ')
+    dbg('travelFar: REFUSED a non-finite destination ' + JSON.stringify(dest) + ' (' + where + ')')
+    throw new Error('travelFar: non-finite destination ' + JSON.stringify(dest))
+  }
   const arrive = opts.arrive || 16       // horizontal "close enough" to hand off
   const hop = opts.hop || 32             // per-leg distance (well within view distance)
   // Scale the deadline with distance (~2.5s/block + a 5-min floor). A fixed 5 min timed out
@@ -592,7 +614,13 @@ const SCAFFOLD_BRIDGE = require('./nav-profile.js').PILLAR_ITEMS // ONE list (na
 
 function travelMovements (bot) {
   const m = new Movements(bot)
-  m.canDig = false            // never destroy blocks (anti-grief)
+  // LEAVES ARE NOBODY'S BUILDING (2026-08-30 00:42, live): this profile had canDig=false outright, so
+  // inside the WILD_SCOPE_RADIUS of home - where the dig-capable wild profile is off - a bot standing in
+  // a birch canopy at 202,69,-257 got "partial 0 move(s)" from every plan and the bed's sheep hunt burned
+  // all five explore legs in seven seconds without moving. The gather profile has cut leaves (and only
+  // leaves) since day one; the trek profile now does the same. Anti-grief is untouched: every block
+  // that is not a leaf stays in blocksCantBreak, and the canopy is priced so walking around still wins.
+  m.canDig = require('./nav-profile.js').leavesOnlyDig(m, bot) // leaves only; everything else stays unbreakable
   m.allow1by1towers = true    // pillar up to climb out of / over things
   m.canOpenDoors = true
   m.allowParkour = true
@@ -1080,7 +1108,7 @@ async function handleInner (bot, line, opts = {}) {
       // ever produce plain chat, never a command. Also bound the length.
       const msg = a.join(' ').replace(/^[\s/]+/, '').replace(/[\r\n]/g, ' ').trim()
       if (!msg) return 'nothing to say'
-      bot.chat(msg.slice(0, 256)); return 'said'
+      ;(bot._rawChat || bot.chat).call(bot, msg.slice(0, 256)); return 'said' // _rawChat bypasses the "only the brain speaks" mute; falls back to bot.chat where no wrapper is installed (tests/bedrock)
     }
 
     case 'state':
@@ -1304,6 +1332,22 @@ async function handleInner (bot, line, opts = {}) {
       // brain's side-trips (goto trader, wander) must not yank the pathfinder mid-mine
       // - that tug-of-war is exactly the old naked-at-the-hut carousel.
       if (isBusy()) return 'busy with a job - armor has to wait its turn'
+      // ...AND A FOOD RUN / LADDER / SHELTER IS A JOB TOO (2026-08-30 18:18, live): isBusy reads three
+      // build-side latches, so with secureFood holding the body (its latch is securingFood) the brain's
+      // armorup walked straight in, planner.gearUp took the pathfinder from the food run at the hut door,
+      // and two drivers fought over one body for three minutes. The claims table is the ONE record of who
+      // owns the body (reflexes.BODY_OWNERS); ask it.
+      { const owner = (() => { try { return require('./reflexes.js').claimOwner() } catch { return null } })()
+        if (owner) { const o = (() => { try { return require('./reflexes.js').ownerInfo(owner) } catch { return null } })(); return 'busy with ' + ((o && o.label) || owner) + ' - armor has to wait its turn' } }
+      // THE PRODUCER'S OWN VERDICT, BEFORE THE BODY IS TAKEN (2026-08-29). scheduler.commandCanAct is
+      // the one rule the /cmd gate asks when the body is busy; asked here too, so an idle body does
+      // not get marked busy, run gearup, and abort it 5ms later ("un-armoured at night") - forty
+      // times a night, each one a "no progress" line and a body the chooser could not dispatch.
+      try {
+        const s0 = await provision.schedulerState(bot)
+        const can = require('./scheduler.js').commandCanAct(cmd, s0)
+        if (!can.ok) return can.why
+      } catch {}
       buildAbort = false // a previous stop must not abort this fresh request
       provisioning = true; claimStamp('provisioning')
       beginActivity('gearup', 'armor')
@@ -1352,7 +1396,17 @@ async function handleInner (bot, line, opts = {}) {
             const sw = (bot.inventory ? bot.inventory.items() : []).find(i => /_sword$/.test(i.name))
             if (sw) { await bot.equip(sw, 'hand').catch(() => {}); dbg('gearup: made+equipped a wooden sword before the armour grind') }
           }
-        } catch (e) { dbg('gearup: wooden-sword-first failed (' + e.message + ')') }
+          // ...AND A WOODEN PICKAXE (2026-08-29, live all evening): the sword lets the bot fight; the pick is
+          // what lets it get COBBLE - the block it pillars with, caps a pit with, climbs a cave with and
+          // crafts stone tools from. Tonight's bot spent a night in a cave at y43-49 with "no solid tread
+          // ... and nothing to lay one with": bare-handed stone drops nothing, so it had no way up. Same
+          // LOCAL act, same body-gone stop, one more log's worth of wood.
+          const picked = () => (bot.inventory ? bot.inventory.items() : []).some(i => /_pickaxe$/.test(i.name))
+          if (!picked() && !localStop()) {
+            await resources.acquire(bot, 'wooden_pickaxe', 1, { isStopped: localStop, gather: true, near: bot.entity && bot.entity.position })
+            if (picked()) dbg('gearup: made a wooden pickaxe before the armour grind')
+          }
+        } catch (e) { dbg('gearup: wooden-sword/pick-first failed (' + e.message + ')') }
         const r = usePlanner
           ? (await planner.gearUp(bot, { say: sayFn, isStopped: gearupStopped, at, restoreMovements: () => setupMovements(bot) })).msg
           : await provisionArmor(bot, { say: sayFn, isStopped: gearupStopped, at })
@@ -1420,13 +1474,25 @@ async function handleInner (bot, line, opts = {}) {
       // returns to a lava/fire death, bails if lava/fire has since appeared. Stage-travels
       // if far. HONEST: verifies items actually landed in the pack before marking the grave
       // done (it used to say "grabbed what i could" after picking up nothing, forever).
-      const d = bestGrave()
-      // NAKED AT NIGHT, THE GRAVE WAITS FOR FIRST LIGHT (2026-08-28 19:20-19:23): the ladder's R1 fired on the
-      // dying body and drove every respawn through the dark toward a grave 235b away - four deaths in three
-      // minutes. A grave at arm's reach is still taken (free gear, zero trek); farther is a trek, and treks are for daylight.
-      if (d && provCore().isNight(bot) && provShelter().underArmored(bot)) {
+      // THE GRAVE THE CHOOSER SAW IS THE GRAVE THIS FETCHES (2026-08-30 10:00 + 11:2x, live): the scheduler
+      // picked graveSweep for "near grave 2b" and this handler walked off toward the most VALUABLE grave
+      // 164b away - two rankers, one of them blind to distance. bestGrave ranks with the chooser's own
+      // score when it knows where the body is.
+      const d = bestGrave(bot.entity && bot.entity.position)
+      // A CORPSE RUN IS A JOURNEY AND ASKS THE ONE JOURNEY RULE (2026-08-30). This used to carry two
+      // private night gates on provCore.isNight (tick 13000): the first let a 22b grave go at dusk, the
+      // second SLEPT THE NIGHT INSIDE THIS HANDLER (restUntilSafe with an isStopped that never stops) -
+      // the dispatch slot read as a hung promise, the `recovering` mutex stayed up, every later `recover`
+      // answered "already recovering", and at 11:2x a naked bot set out for a far grave at tod 12500
+      // (inside the shelter's 12200 deadline, outside isNight's 13000) and died in a river at night.
+      // scheduler.journeyAdmissible is the rule every other trek asks: arm's reach (SHORT_HOP) is always
+      // allowed - free gear, zero trek - and beyond it the naked-night / spiral / food clauses decide.
+      // Sheltering is the nightShelter job's, not this handler's: a refusal names the blocker and returns,
+      // and the chooser's next pick owns what happens (#5).
+      if (d && bot.entity) {
         const me = bot.entity.position; const dist = Math.hypot(d.x - me.x, d.z - me.z)
-        if (dist > Number(process.env.GRAVE_NEAR || 16)) { dbg('recover: night + no armour - the grave at ' + d.x + ',' + d.y + ',' + d.z + ' (' + Math.round(dist) + 'b) waits for first light'); return 'night and no armour - my stuff at ' + d.x + ',' + d.z + ' waits for first light' }
+        const refusal = journeyRefusal(bot, dist)
+        if (refusal) { dbg('recover: the grave at ' + d.x + ',' + d.y + ',' + d.z + ' (' + Math.round(dist) + 'b) waits - ' + refusal); return 'my stuff at ' + d.x + ',' + d.z + ' waits - ' + refusal }
       }
       if (!d) {
         const burned = grave.ledger().find(x => !x.retrieved && x.dangerous)
@@ -1446,21 +1512,8 @@ async function handleInner (bot, line, opts = {}) {
       // ("so an old stop doesn't kill the fresh recover") UN-ABORTED every zombie flow
       // mid-flight - three trek loops resurrected and fought over the bot (live, 20:47).
       // Recovery's own travels ignore stop; it's short and the operator can wait it out.
-      // NIGHT GATE: a naked corpse-run in the dark is how death carousels start (the brain
-      // fires `recover` the moment it sees the grave, respawn is at night, armor is IN the
-      // grave). Sleep/shelter first - BUT (task #18) AxGraves graves despawn on a timer, they do
-      // NOT keep: a near, about-to-despawn grave (urgent/critical tier within GRAVE_NEAR_LADDER)
-      // is grabbed FIRST - arm's reach IS the survival move (same S1 near-override argument) - and
-      // the rest happens after. Far + night + under-armored still rests (the night trek IS the loop).
-      const meNight = bot.entity && bot.entity.position
-      const graveDistNight = meNight ? Math.hypot(d.x - meNight.x, d.z - meNight.z) : Infinity
-      const urgentNear = process.env.GRAVE_URGENT !== '0' && graveUrgency(d).tier !== 'safe' && graveDistNight <= Number(process.env.GRAVE_NEAR_LADDER || 32)
-      if (provCore().isNight(bot) && provShelter().underArmored(bot) && !urgentNear) {
-        try { bot.chat('night and no gear - resting before i go get my stuff') } catch {}
-        try { await provRecovery().restUntilSafe(bot, { isStopped: () => false }) } catch {}
-      } else if (urgentNear && provCore().isNight(bot) && provShelter().underArmored(bot)) {
-        try { bot.chat("grave's about to despawn and it's right here - grabbing it before it's gone, then i'll rest") } catch {}
-      }
+      // (The second night gate that used to live here - "rest inside this handler until dawn" - is gone:
+      // see the journey rule above. One rule, one owner for the night.)
       // #115 GROUNDED_CLAIMS. Everything below this line used to be asserted, never observed:
       //   - `Math.hypot(d.x-me.x, d.z-me.z)` is XZ-ONLY, so a grave 18 blocks STRAIGHT DOWN
       //     measured 7.6 blocks away and the approach was skipped as "already here".
@@ -1704,6 +1757,7 @@ async function handleInner (bot, line, opts = {}) {
           }
           return `no waypoint "${a[0]}" (known: ${memory.waypointNames().join(', ') || 'none'})`
         }
+        { const me = bot.entity.position; const jr = journeyRefusal(bot, Math.hypot(wp.x - me.x, wp.z - me.z)); if (jr) return jr }
         try { await gotoTimedDA(bot, new goals.GoalNear(wp.x, wp.y, wp.z, 1), 20000) } catch (e) { return `couldn't reach ${a[0]}: ${e.message}` }
         // gotoTimed can resolve without actually arriving (pathfinder settles at the
         // closest reachable node) - verify the real distance so we never claim a lie.
@@ -1715,6 +1769,7 @@ async function handleInner (bot, line, opts = {}) {
       // FAR targets can't be reached by one pathfind (unloaded chunks + A* budget),
       // so stage the trip: walk there in hops until close, then a precise approach.
       const me0 = bot.entity.position
+      { const jr = journeyRefusal(bot, Math.hypot(x - me0.x, z - me0.z)); if (jr) return jr }
       if (Math.hypot(x - me0.x, z - me0.z) > 80) {
         buildAbort = false // a previous "stop" must not abort this fresh trip
         const r = await travelFar(bot, { x, y, z }, { isStopped: () => buildAbort, say: m => bot.chat(String(m).slice(0, 256)) })
@@ -1747,6 +1802,7 @@ async function handleInner (bot, line, opts = {}) {
         }
       }
       if ([x, y, z].some(Number.isNaN)) return 'usage: travel <x> <y> <z> | travel <waypoint>'
+      { const me = bot.entity.position; const jr = journeyRefusal(bot, Math.hypot(x - me.x, z - me.z)); if (jr) return jr }
       buildAbort = false
       beginActivity('travel', `${x},${y},${z}`)
       const r = await travelFar(bot, { x, y, z }, { isStopped: () => buildAbort, say: m => bot.chat(String(m).slice(0, 256)) })
@@ -1818,6 +1874,12 @@ async function handleInner (bot, line, opts = {}) {
       if (!target) return 'no hostile mobs nearby'
       const items = bot.inventory ? bot.inventory.items() : []
       const weapon = items.find(i => i.name.endsWith('_sword')) || items.find(i => i.name.endsWith('_axe'))
+      // NAKED AND BARE-HANDED IS NOT A FIGHT (2026-08-30 00:12, live): the brain issued `attack zombie` every
+      // two seconds while the flee reflex (index.js MELEE_WALKER: unarmed + naked -> outrun) pulled the other
+      // way - "goal taken by a reflex" x3, then a spider and a creeper finished it. The reflex's own rule,
+      // asked here: with no weapon and no armour the body belongs to the flee, and attack says so.
+      const naked = !items.some(i => /_(helmet|chestplate|leggings|boots)$/.test(i.name)) && !(bot.inventory && bot.inventory.slots && [5, 6, 7, 8].some(k => bot.inventory.slots[k]))
+      if (!weapon && naked) return 'unarmed and naked - not picking a fight with a ' + (target.name || 'mob') + '; the flee reflex owns this'
       if (weapon) await bot.equip(weapon, 'hand').catch(() => {})
       await bot.lookAt(target.position.offset(0, 1, 0), true).catch(() => {})
       bot.attack(target)
@@ -2543,7 +2605,7 @@ function state (bot) {
 function setupMovements (bot) {
   const m = new Movements(bot)
   m.allowFreeMotion = true
-  m.canDig = false            // NEVER break blocks to make a path (was griefing builds)
+  m.canDig = require('./nav-profile.js').leavesOnlyDig(m, bot) // leaves only; everything else stays unbreakable (2026-08-30 - same rule as travelMovements, see nav-profile)
   // PILLARING IS HOW YOU GET OUT OF A HOLE (2026-08-26). canDig:false is the anti-grief rule that
   // matters and it STAYS - the bot must never chew through somebody's build to make a path. But
   // with canDig:false AND allow1by1towers:false AND no scaffolding blocks, the pathfinder can only

@@ -97,9 +97,14 @@ async function gotoChest (bot, chestBlock) {
   if (bot.entity.position.distanceTo(chestBlock.position) > 3) {
     // The bank lives INSIDE the hut - a plain goto can't plan through the door, so go straight
     // through the UNIFIED navigator (its door pre-flight crosses in). Tight at-base budgets.
+    // (2026-08-30 18:21: a 4b walk to the hut chest did not settle in 45s and nothing said where it was - the
+    // door crossing is inside this call; its outcome and time are the line the next post-mortem needs)
+    const t0 = Date.now()
     try {
       await navigate.navigateTo(bot, new goals.GoalNear(chestBlock.position.x, chestBlock.position.y, chestBlock.position.z, 2), { timeoutMs: 15000, deadlineMs: 35000, climb: false, rescue: 'light', label: 'bank' })
-    } catch {}
+    } catch (e) { dbg('  bank: walk to the chest ' + chestBlock.position + ' FAILED after ' + Math.round((Date.now() - t0) / 1000) + 's (' + e.message + ')') }
+    const dEnd = bot.entity.position.distanceTo(chestBlock.position)
+    if (dEnd > 3) dbg('  bank: walk to the chest ' + chestBlock.position + ' ended ' + dEnd.toFixed(1) + 'b short after ' + Math.round((Date.now() - t0) / 1000) + 's')
   }
 }
 
@@ -337,9 +342,11 @@ async function healBankDouble (bot, hut, opts = {}) {
 // Read chest contents as { name: count } (build materials the chest is holding).
 async function chestCounts (bot, chestBlock) {
   await gotoChest(bot, chestBlock)
+  dbg('  bank: at the chest ' + chestBlock.position + ' - opening')
   const chest = await bot.openContainer(chestBlock)
   const out = {}
-  try { for (const i of chest.containerItems()) out[i.name] = (out[i.name] || 0) + i.count } finally { chest.close() }
+  try { for (const i of chest.containerItems()) out[i.name] = (out[i.name] || 0) + i.count } finally { try { chest.close() } catch (e) { dbg('  bank: close failed (' + e.message + ')') } }
+  dbg('  bank: read ' + chestBlock.position + ' - ' + Object.keys(out).length + ' kind(s), closed')
   return out
 }
 
@@ -385,13 +392,15 @@ async function withdrawItem (bot, chestBlock, itemName, count) {
   const def = mcData.itemsByName[itemName]
   if (!def || count <= 0) return 0
   await gotoChest(bot, chestBlock)
+  dbg('  bank: at the chest ' + chestBlock.position + ' - opening for ' + count + ' ' + itemName)
   const chest = await bot.openContainer(chestBlock)
   let got = 0
   try {
     const have = chest.containerItems().filter(i => i.name === itemName).reduce((a, b) => a + b.count, 0)
     const take = Math.min(count, have)
+    dbg('  bank: ' + chestBlock.position + ' holds ' + have + ' ' + itemName + ' - taking ' + take)
     if (take > 0) { await chest.withdraw(def.id, null, take); got = take }
-  } finally { chest.close() }
+  } finally { try { chest.close() } catch (e) { dbg('  bank: close failed (' + e.message + ')') } }
   return got
 }
 

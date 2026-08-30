@@ -271,6 +271,21 @@ function forgetSpot (item, spot, hard) {
   if (spot.tries >= 2) { const i = list.indexOf(spot); if (i >= 0) list.splice(i, 1) }
   saveWorldMem()
 }
+// The hunt's read of the sightings above: the nearest remembered spot of ANY species matching the
+// capability's entity regex (a bed wants /^sheep$/; leather wants cows or mooshrooms). Same scoring and
+// the same visited/dry/rest filters as recallSpot - it IS recallSpot over the 'mob:*' keys.
+function recallMobSpot (entityRe, pos, visited) {
+  const m = loadWorldMem()
+  let best = null; let bd = Infinity
+  for (const k of Object.keys(m)) {
+    if (!k.startsWith('mob:') || !entityRe.test(k.slice(4))) continue
+    const sp = recallSpot(k, pos, visited || new Set())
+    if (!sp) continue
+    const d = Math.hypot(sp.x - pos.x, sp.z - pos.z)
+    if (d < bd) { bd = d; best = { ...sp, key: k, dist: d } }
+  }
+  return best
+}
 function recallSpot (item, pos, visited) {
   const list = loadWorldMem()[item] || []
   // SCORED pick (not just nearest-unvisited): skip exhausted/cooling spots, and prefer a spot
@@ -840,6 +855,7 @@ function operatorRouting () { return _operatorRouting > 0 }
 
 
 module.exports = {
+  recallMobSpot,
   setDebugSink, setBuildZone,
   loadWorldMem, saveWorldMem, ownInfraAnchors,
   rememberRoute, recallRoute, planTrekRoute, dementRoute,

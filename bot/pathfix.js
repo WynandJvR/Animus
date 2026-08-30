@@ -347,7 +347,12 @@ function readCell (bot, pos) {
 
 // Canopy and clutter are not ground. A leaf block has a 'block' bounding box but standing
 // "on the surface" never means standing in a treetop, and the climb-out must not aim at one.
-const NOT_GROUND_RE = /_leaves$|^(vine|glow_lichen|scaffolding|bamboo|cave_vines|cave_vines_plant|weeping_vines|twisting_vines)/
+// A TREE IS NOT THE GROUND (2026-08-29, live 23:17-23:19 at spawn): leaves were excluded, LOGS were not, so under
+// an acacia the "surface" read as the trunk/branch top (y74 over ground at y66) and the sunken recovery dug
+// STAIRCASES UP THE TREE ("8 below the rim - climbing a staircase to y74"), the gather's climb-out aimed at the
+// canopy, and the bed gather stalled. Same canopy list provision-hut.hasSolidCeiling(ignoreLeaves) uses for the
+// mirror question "is that a roof over me" - the two scans must disown the same blocks (#4).
+const NOT_GROUND_RE = /(_leaves|_log|_wood|_stem|_hyphae|mushroom_block|mushroom_stem)$|^(vine|glow_lichen|scaffolding|bamboo|cave_vines|cave_vines_plant|weeping_vines|twisting_vines)/
 
 function isGroundBlock (block) {
   if (!block || !block.name) return false
@@ -764,7 +769,12 @@ function installPathfinderTuning (bot) {
     // no change beyond "never hangs".
     const origLook = bot.look.bind(bot)
     bot.look = async function (yaw, pitch, force) {
-      if (force) return origLook(yaw, pitch, true)
+      // A FORCED LOOK IS BOUNDED TOO (2026-08-29 23:36, live): the sunken climb reached the rim at (30,67,-11)
+      // and its promise never settled - "climb CUT after 60s ... neither rose nor reported". Every wait
+      // under it is bounded except this one: stepInto's lookAt(..., true) rides physicsTick to resolve,
+      // and a body whose simulation has just been re-armed/teleported can miss it. Forced, the yaw and
+      // pitch are already set synchronously, so a cut is a success and the head is where it was asked.
+      if (force) return bounded('look(force)', origLook(yaw, pitch, true), LOOK_BOUND_MS, () => {}).catch(e => { if (/cut after/.test((e && e.message) || '')) return; throw e })
       try {
         return await bounded('look', origLook(yaw, pitch, false), LOOK_BOUND_MS,
           () => { try { const p = origLook(yaw, pitch, true); if (p && p.catch) p.catch(() => {}) } catch {} })

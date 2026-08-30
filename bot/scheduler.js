@@ -213,10 +213,72 @@ function isDegraded (s) {
 // returns allow:true here ("no survival objection", busy-gate still applies); survival is
 // allowed iff a real vitals need exists OR a worthwhile, non-dangerous grave is within reach
 // and no melee hostile is on us. (I1: no body latch can muzzle a real survival need.)
-function admissible (cmdClass, snapshot) {
+// ---- commandCanAct (2026-08-29) -----------------------------------------------------------
+// PURE. Would this survival-class command DO anything right now, or is its producer provably barred?
+// "A decision must produce an action" (#5) cuts both ways: a command the gate ADMITS - and whose
+// admission PREEMPTS the shelter's hold - must be one that can act. Today's tape: the brain issued
+// `armorup` ~40 times an hour all night; every one was admitted as survival-class under the post-death
+// latch ("survival command owns the body"), PREEMPTED the night shelter's hold, ran gearup - which
+// aborted in 5ms with "un-armoured at night - the dark is what keeps killing me" - and left the body
+// standing outside its bunker. `wear` with no armour in the pack, `eat` with no food, `sleep` with no
+// bed did the same for nothing. The verdicts below are the PRODUCERS' own rules asked up front, not
+// new rules: the gearup excursion asks excursionAdmissible; wear/eat consume the pack; sleep needs a
+// bed and a sleepable hour; recover needs a grave it may walk to. Unknown verbs stay admissible.
+// Returns { ok, why } - why names the blocker so the refusal line is greppable and the brain learns.
+function commandCanAct (line, snapshot) {
+  const s = snapshot || {}
+  const raw = (line == null ? '' : String(line)).trim().replace(/^[!/]+/, '')
+  const verb = raw.split(/\s+/)[0].toLowerCase()
+  const no = why => ({ ok: false, why: verb + ' cannot act now - ' + why })
+  if (verb === 'armorup' || verb === 'gearup' || verb === 'planarmor') {
+    // GEARING UP SERVES NO LIVE CRISIS (2026-08-30 00:00, live at the hut door): the gate admits a
+    // survival-class command whenever ANY survival need is live, so with food at 7 the brain's armorup
+    // was let in "because there is a need" - and gearup's own goto then fought the food run's door
+    // crossing ("The goal was changed before it could be completed", twice a second). The iron grind
+    // answers none of lava/fire/drowning/heal/threat/creeper/food/shelter; while one is live the body
+    // belongs to its producer. arbiter.jobSurvivalNeed is the one definition of "live need".
+    const need = arbiter.jobSurvivalNeed(s)
+    if (need) return no('a live survival need (' + need.need + ': ' + need.reason + ') owns the body - gearing up waits')
+    const ex = excursionAdmissible(s)
+    if (!ex.ok) return no(ex.why)
+    return { ok: true, why: 'excursion admissible' }
+  }
+  if (verb === 'wear' || verb === 'equip') {
+    if ((s.packArmorPieces || 0) < 1 && verb === 'wear') return no('no armour in the pack to put on')
+    return { ok: true, why: 'gear in the pack' }
+  }
+  if (verb === 'eat') {
+    if (!(s.packFoodPts > 0)) return no('nothing edible in the pack')
+    return { ok: true, why: 'food in the pack' }
+  }
+  if (verb === 'sleep') {
+    if (!s.bedKnown) return no('no bed i know of')
+    if (s.sleepableNow === false) return no('not a sleepable hour (needs night or thunder)')
+    return { ok: true, why: 'bed known and sleepable' }
+  }
+  if (verb === 'recover' || verb === 'getstuff') {
+    const graves = gravesOf(s).filter(g => g && g.dist != null && !g.dangerous)
+    if (!graves.length) return no('no grave i can reach')
+    const near = graves.reduce((m, g) => Math.min(m, g.dist), Infinity)
+    const j = journeyAdmissible(s, near)
+    if (!j.ok) return no('the grave is ' + Math.round(near) + 'b off and ' + j.why)
+    return { ok: true, why: 'grave reachable' }
+  }
+  if (verb === 'hunt' || verb === 'fish') {
+    const ob = outboundAdmissible(s)
+    if (!ob.ok) return no(ob.why)
+    return { ok: true, why: 'fit to be out' }
+  }
+  return { ok: true, why: 'no producer gate for ' + verb }
+}
+
+function admissible (cmdClass, snapshot, line) {
   const s = snapshot || {}
   if (cmdClass === 'perception' || cmdClass === 'chat') return { allow: true, reason: 'read-only/chat always allowed' }
   if (cmdClass === 'survival') {
+    // a survival command whose producer is barred right now is not admitted at all - not even to
+    // preempt (see commandCanAct); the reason names the blocker
+    if (line != null) { const can = commandCanAct(line, s); if (!can.ok) return { allow: false, reason: can.why } }
     const need = arbiter.jobSurvivalNeed(s)
     if (need) return { allow: true, reason: need.reason || need.need }
     // near-grave override (I1/I3): free gear at arm's reach IS the survival move, even with no
@@ -348,24 +410,43 @@ function bootstrapNeed (snapshot) {
   // Armor reduces the CHANCE of a death; the anchor reduces the PRICE of every death that
   // still happens, and it costs one craft. Needs no home - ensureSpawnBed lays on open ground.
   if (spawnBootstrapDue(s)) return 'spawn'
-  // (2) ARMOR - the biggest survivability multiplier; fires whenever fully naked (no home required).
   const armorPieces = s.armorPieces != null ? s.armorPieces : 0
-  if (armorPieces === 0) return 'armor'
-  // (3) SHELTER (#117) - a hut that is ON THE BOOKS but does not verify this life. That is the
-  // phantom-hut state exactly (registry box, no structure), and its producer is the repair path
-  // (ensureHomeShelter -> maintainHome), which is now runnable OUTSIDE the build job.
-  // Deliberately NOT fired when no hut is registered at all: siting-and-raising a first hut has
-  // exactly one implementation and it lives in the build's camp step, which buildReady's #102
-  // noHut exemption already hands the body to. Claiming a need whose producer does not exist is
-  // how a verdict becomes a livelock, so the homeless case stays with the camp step until that
-  // implementation is extracted - and it is no longer reached by returning null for EVERYTHING.
-  if (s.hutExists && s.hutVerified === false) return 'shelter'
-  // The rest is home-bank/hut infra - only a bootstrap need when home is reachable enough for the
-  // maintenancePass to actually establish it.
-  if (s.homeReachable) {
-    // (4) BASE LIT - spawn-proof the home (#69 secureBase). Only when provably not yet lit.
-    if (s.baseLit === false) return 'base'
+  // SHELTER (#117): a hut ON THE BOOKS that does not verify this life (phantom-hut - registry box,
+  // no structure); its producer is the repair path (ensureHomeShelter -> maintainHome). NOT fired
+  // when no hut is registered at all - raising a FIRST hut lives in the build's camp step (buildReady
+  // #102 noHut hands the body there); claiming a need whose producer does not exist livelocks.
+  const shelterDue = s.hutExists && s.hutVerified === false
+  // BASE LIT (#69 secureBase): spawn-proof + mob-proof the home, only when provably not-yet-lit and
+  // home is reachable enough for the maintenancePass to actually establish it.
+  const baseDue = s.homeReachable && s.baseLit === false
+  // SECURE THE HOME BASE BEFORE THE NAKED IRON GRIND (2026-08-29, operator call). ARMOR means IRON,
+  // which lives 200-340b away in a mine; a naked bot cannot safely cross that, so gearup's own guard
+  // ABORTED every excursion ("un-armoured at night is what keeps killing me") and armor NEVER
+  // completed - while the hut it stood in stayed UNLIT and it died in a dark it could have walled
+  // out with the coal already in its chest. So a bot that HAS a home verifies + lights it FIRST
+  // (local, zero-excursion, from banked coal): a lit sealed hut makes night survivable unarmoured,
+  // deaths stop costing a 300b naked walk home, and iron can then be mined in daylight from a safe
+  // base. A homeless/far bot has neither clause true and falls straight through to armor, exactly as
+  // before. SAFE_BASE_FIRST=0 restores the old armor-before-base order byte-for-byte.
+  if (process.env.SAFE_BASE_FIRST !== '0') {
+    if (shelterDue) return 'shelter'
+    if (baseDue) return 'base'
+    // ARMOR GATES THE BUILD ONLY WHILE A DEATH IS EXPENSIVE (2026-08-29, operator's goal order: bed ->
+    // castle materials). Armour is the biggest survivability multiplier, but its producer is the iron
+    // grind 200-340b out, which a naked bot has never once completed here (every excursion aborts at
+    // dusk) - so "armor before the build" meant "never the build". What armour buys is a cheaper
+    // death; a CONFIRMED spawn anchor at home buys the same thing (respawn ten blocks from the chest,
+    // not 350b away in the dark). With the anchor down, the naked bot gets on with the castle's
+    // own gather - which mines stone and meets iron on the way - and the maintenance pass crafts
+    // armour from what the bank holds (maintain.needs armorNeed). Without the anchor, armour stays
+    // the gate exactly as before.
+    if (armorPieces === 0 && !s.spawnAnchored) return 'armor'
+    return null
   }
+  // (2) ARMOR - the biggest survivability multiplier; fires whenever fully naked (no home required).
+  if (armorPieces === 0) return 'armor'
+  if (shelterDue) return 'shelter' // (3) hut repair
+  if (baseDue) return 'base' // (4) spawn-proof the home
   return null
 }
 
@@ -661,7 +742,7 @@ function recoveryPlan (snapshot) {
   const armorPieces = s.armorPieces != null ? s.armorPieces : 0
   const packArmorPieces = s.packArmorPieces || 0 // armor carried in the pack, wearable by R0
   const homeDist = s.homeDist != null ? s.homeDist : null
-  const isNight = !!s.isNight
+  const isNight = nakedNight(s) // the shelter's deadline, not tick 13000 - see nakedNight
   const nightStuck = !!s.nightStuck
   const deathRatchet = (s.deathsRecent || 0) >= 2
   const GRAVE_NEAR_LADDER = Number(process.env.GRAVE_NEAR_LADDER || 32)
@@ -701,9 +782,14 @@ function recoveryPlan (snapshot) {
   }
 
   // R2 shelter + home food cache.
+  // AT NIGHT, THE WALLS COME BEFORE THE PANTRY (2026-08-30 00:11, live): the food rung ran first and its
+  // bank run - a door crossing whose goal every reflex and brain command kept stealing - held a naked bot
+  // outside its own hut in the dark for two minutes until a mob killed it 18b from the door. The chest is
+  // INSIDE the hut: sheltering first loses nothing (the hut hold feeds from the interior chest), and the
+  // food rung still follows for a bot that cannot sleep. By day the order is unchanged.
   if (homeReachable) {
-    plan.push({ rung: 'R2', action: 'gotoHome+ensureFood(forceFresh)+cook+eat' })
     if (isNight) plan.push({ rung: 'R2', action: 'sleepInBed', wake: 'dawn' })
+    plan.push({ rung: 'R2', action: 'gotoHome+ensureFood(forceFresh)+cook+eat' })
   } else if (isNight) {
     plan.push({ rung: 'R2', action: 'digInForNight', wake: 'dawn' })
   }
@@ -771,9 +857,17 @@ const OUTBOUND_RE = new RegExp('^(' + capabilities.rungActionNames().filter(a =>
 // Returns the BLOCKING CONDITION as a string (what must change before setting out), or null when
 // the journey may proceed. A condition, never a timer - each one is provably re-checkable and
 // two of the three ('dawn', 'armor') have producers the scheduler already knows.
+// "NIGHT" FOR A NAKED BOT IS THE SHELTER'S DEADLINE, NOT MIDNIGHT (2026-08-30 00:27 + 00:47, live): the bot
+// was holding INSIDE its hut at dusk (tod 12700) when the ladder's food rung set off to the farm; twenty minutes
+// later, home at dusk again, the same plan ran a bank run before the shelter. isNight is tick 13000, the naked
+// bot's shelter fires at SHELTER_TOD (12200), and the 800-tick seam between them is exactly when it should
+// already be indoors. ONE definition, read by the plan, the rung gate and the outbound rule (threshold seams
+// kill: the 12..14 food dead band did). Unmeasured clock -> the isNight sensor alone (#10).
+function nakedNight (s) { return shelterTiming.nakedNight(s) } // ONE definition (shelter.js) - the arbiter reads the same one
+
 function outboundBlocked (snapshot) {
   const s = snapshot || {}
-  const night = !!s.isNight
+  const night = nakedNight(s)
   const stuck = !!s.nightStuck
   if (stuck) return null // eternal night: hiding is not a survivable resolution - go, carefully
   if (!s.underArmored) return null // an armoured bot may work the night (today's behaviour)
@@ -994,7 +1088,7 @@ function homecomingPlan (snapshot, opts = {}) {
 function rungFeasible (rung, snapshot) {
   const r = rung || {}
   const s = snapshot || {}
-  const night = !!s.isNight
+  const night = nakedNight(s) // the shelter's deadline - one definition with recoveryPlan/outboundBlocked
   const stuck = !!s.nightStuck
   if (r.dayGated && night && !stuck) return false
   // P5 anti-spiral: during a death spiral, seal near the hut - no grave chase (R1), no outbound trek
@@ -1017,6 +1111,15 @@ function rungFeasible (rung, snapshot) {
   // outboundBlocked() above, because the post-respawn homecoming needs the SAME rule and used to
   // have none (audit §1 LOOP A). Same clauses, same flags - one copy.
   if (OUTBOUND_RE.test(r.action || '') && outboundBlocked(s)) return false
+  // ...AND AN OUTBOUND RUNG IS LEASHED TO THE DAYLIGHT LEFT (2026-08-30 00:45, live): at tod 11666 the food
+  // rung's scout walked a naked bot 95b north of its hut - thirty seconds before the shelter hour - because
+  // rungs asked only "is it night" and never "can i still get home". homeLeash is the excursion rule's own
+  // answer (how far out the body may be and still walk in before SHELTER_TOD); a rung that would set out
+  // from beyond it is not admissible. Armoured bots keep the night, as outboundBlocked already says.
+  if (OUTBOUND_RE.test(r.action || '') && s.underArmored && s.homeDist != null) {
+    const leash = homeLeash(s)
+    if (Number.isFinite(leash) && s.homeDist > leash) return false
+  }
   return true
 }
 
@@ -1255,10 +1358,16 @@ function isRecoveryMove (line) {
 }
 function admissibleUnderLatch (cmdClass, line, snapshot, postDeathRecovery) {
   if (postDeathRecovery && process.env.RESILIENT_RECOVERY !== '0') {
-    if (cmdClass === 'survival') return { allow: true, reason: 'post-death recovery - survival command owns the body' }
+    if (cmdClass === 'survival') {
+      // the latch lets a survival command own the body - but only one that can act (commandCanAct);
+      // an armorup that gearup will abort in 5ms owns nothing, and used to preempt the shelter to do it
+      const can = commandCanAct(line, snapshot)
+      if (!can.ok) return { allow: false, reason: can.why }
+      return { allow: true, reason: 'post-death recovery - survival command owns the body' }
+    }
     if (isRecoveryMove(line)) return { allow: true, reason: 'post-death recovery - recovery move allowed' }
   }
-  return admissible(cmdClass, snapshot)
+  return admissible(cmdClass, snapshot, line)
 }
 
 // spiralActive(snapshot) -> bool. P5 anti-spiral: deathsRecent >= SPIRAL_N(3) within the 20-min
@@ -1508,7 +1617,7 @@ module.exports = { isDegraded, campFirstExempt,
   recoveryReady,
   resumeGate,
   preemptCrisisGrade,
-  admissibleUnderLatch,
+  admissibleUnderLatch, commandCanAct, nakedNight,
   isRecoveryMove,
   spiralActive,
   withinDeathZone,

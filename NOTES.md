@@ -19,13 +19,17 @@ Read this before debugging "it's slow / it griefs / it ignores me" again.
 
 ## 2. The brain model - what works (THE key discovery)
 
-| Model | Speed (real bot prompts) | Verdict |
-|---|---|---|
-| `qwen2.5:14b` | ~0.7-1.2 s | fast but dumb - fixates, spams, ignores requests |
-| **`qwen3:14b`** | **~0.5-1 s** (thinking OFF) | **winner - fast AND good at natural language** |
-| `qwen3:14b` via OpenAI `/v1` | **5-43 s** | thinking can't be disabled there → unusable |
-| `gemma4:12b` | ~18-25 s | too slow even though it fits GPU |
-| `gemma4:26b` / `qwen3.5:35b-a3b` | 15-45 s | spill to CPU - unusable; fine for *coding* (not real-time) |
+| Model | Size | Warm median | Verdict (bench 2026-08-26, `design-docs/brain-bench/RESULTS-2026-08-26.md`) |
+|---|---|---|---|
+| **`gemma4:12b`** | 7.6 GB | **~1.05 s** | **winner** - 19/20 right response, 11/12 facts, **6/6 acts in emergency** (only model to `attack` a point-blank zombie / `travel` from a creeper) |
+| `phi4:14b` | 9.1 GB | ~0.88 s | close 2nd - 18/20, 10/12 facts, 6/6 emergencies |
+| `qwen3.5:9b` | 6.6 GB | ~0.87 s | 12/12 facts but 4/6 emergencies |
+| `qwen3:14b` | 9.3 GB | ~0.83 s | the OLD winner below was wrong: **1/6 emergencies** - narrates "i'm stuck in this hole" with a zombie in melee (20+ times in the real log), 4 fixations |
+| `qwen3.5:4b` | 3.4 GB | ~0.75 s | worst tested - **2/10 malformed JSON** (body got nothing) |
+| `llama3.1:8b` / `llama3.2:3b` | 4.9 / 2.0 GB | 0.58 / 0.38 s | fast but ungrounded (2/6, 1/6 facts) - "empty-handed" while holding dirt; no bigger small Llama exists |
+| `gemma4:26b` / `qwen3.6:35b-a3b` | 17-23 GB | 15-45 s | spill to CPU - unusable; fine for *coding* (not real-time) |
+
+The 2026-06/07 table that stood here said `qwen3:14b` wins and `gemma4:12b` takes 18-25 s. Both were stale by 2026-08: gemma4:12b runs at 1.0-1.5 s on Ollama 0.31.1 and qwen3:14b was the source of the "stuck in this hole" narration under threat. Losing models were removed from Ollama on 2026-08-29; only `gemma4:12b` is installed for the bot.
 
 **Qwen3 has a hybrid "thinking" mode. It MUST be disabled or it's as slow as the big models.**
 The OpenAI-compatible `/v1/chat/completions` endpoint **cannot** turn it off. Ollama's **native `/api/chat` with `think:false`** can.
@@ -34,7 +38,7 @@ The OpenAI-compatible `/v1/chat/completions` endpoint **cannot** turn it off. Ol
 ```
 LLM_URL=http://127.0.0.1:11434/api/chat
 OLLAMA_NATIVE=1
-LLM_MODEL=qwen3:14b
+LLM_MODEL=gemma4:12b
 ```
 (`brain-llm.js` switches request shape + response parsing on `OLLAMA_NATIVE`.)
 
@@ -467,3 +471,73 @@ spawn: [acquired] spawn asserted at the bed (-386, 75, 432) (spawn_set)
 Offline suite: **54/54 green** (`for f in bot/*test*.js; do node "$f"; done`).
 
 [natural-player goal]: the bot should behave indistinguishably from a real human player; believability beats raw capability.
+
+## 16. The death carousel (2026-08-29) - no bed, dark hut, a brain that preempts the shelter
+
+26 deaths in one day, nearly all around WORLD SPAWN 350b from the hut. The loop: no bed -> every death respawns at
+spawn -> the naked night trek home dies -> repeat. What was actually wrong (each fixed at the root, all live-tested):
+
+- **The night shelter refused its own hut when it was dark** ("UNLIT - digging a lit pit instead") and dug beside it
+  at night; the pit got cut at 150s and the bot fell to its death with the bed wool in its pack. The interior
+  lighter (`ensureHutInteriorLit`) existed and had NO caller. Now: the hut is the shelter regardless, lit from the
+  chest inside it (`secureBase` lights the room before the ring; `baseLit` = ring AND room; `hutInteriorLit` is
+  the one tri-state reader).
+- **Brain survival commands preempted the shelter for nothing.** `armorup` ~40x/hour was admitted as "survival
+  owns the body", broke the hold, and gearup aborted in 5ms. `scheduler.commandCanAct` asks the producer's own
+  rule first (excursionAdmissible / pack contents / bed known / grave reachable); a command that cannot act is
+  refused with the blocker and never preempts. The maintenance pass (where the bed bootstrap runs) is now a
+  body-hold latch for the gate, and only a PREEMPT verdict stops it.
+- **Ground cover and trees fooled the world model.** 1.21.5 `leaf_litter`/grass/flowers (empty bbox) read as
+  "the floor" (no pit in forests) and as "not air" (no pond exit); tree logs read as the terrain surface (staircases
+  dug up trees; "the lid" was a canopy). The world's own bounding box decides now; logs/stems are not ground.
+- **Far home, wrong anchor.** The bed's sheep-hunt fence and the furnace-food pantry were anchored on the hut at ANY
+  distance. Within `HOME_NIGHT_LEASH` (48) home is home; farther, the bed is laid where the bot stands
+  (`relocateBedInto` moves it later) and only a furnace near the body counts.
+- **Dead time.** The 10/30-minute post-maintenance cooldown is gone (the chooser's attempt memory is the condition
+  gate); the dry-cell search ranks water/death-cluster cells instead of excluding them; `travelFar` refuses a
+  non-finite destination (a NaN trek ran 501 instant legs); the sunken climb has a 60s deadline and names where
+  the body is when cut; a hold's premise is a WORLD read (asleep / inside own walls / under a lid), never the
+  latch of the job being judged.
+- **Armour no longer gates the castle once a spawn anchor exists** - a naked bot never completed the 200-340b iron
+  grind; with the bed down a death is cheap, the castle's own gather runs, and maintenance arms from banked iron.
+
+Deploy = `POST /config {"reconnect":true}` (body-only hot reload, ~3s, keeps position). Watch:
+`grep -E "hazard: recorded|pit SEALED|cannot act now|spawn: |_wool" logs/bot-events.log`.
+
+
+## 17. The bed is in (2026-08-30) - and thirteen more roots under the carousel
+
+Operator dropped 3 wool + an iron set in the hut chest; the bot crafted the bed at 17:00 (`withdraw [3 white_wool]
+then craft:white_bed`), slept, and sleeping SKIPS THE NIGHT - no death since 16:29 after 21 that afternoon. What the
+day's 21 deaths and stalls were actually made of (each fixed at the root, all hot-loaded and watched live):
+
+- **`recover` owned the night twice over.** Two private gates on `provCore.isNight` (tick 13000): one let a far grave
+  go at dusk (tod 12500 is inside the shelter hour, outside isNight - a river death at night), the other SLEPT INSIDE
+  THE HANDLER (`restUntilSafe` with an isStopped that never stops), so the dispatch read as a hung promise, the
+  `recovering` mutex stayed up ("already recovering" all morning) and the supervisor restarted the process on
+  frozen vitals. Now: `journeyRefusal` (the ONE journey rule; arm's reach always allowed) and no sleeping in recover.
+- **Two grave rankers.** The chooser scored graves by value-over-distance and said "near grave 2b"; `bestGrave` was
+  value-only and walked toward a richer grave 164b away. `graveCompare(a, b, now, pos)` - one ranker.
+- **Two definitions of "walled".** `sealedIn` (a dead-end alcove is a wall) and `breakOut`'s rim finder (an alcove is
+  an exit) disagreed about one cell for ten hours: "SEALED IN" / "break-out -> OUT (dug 0)". `columnWall` is the one test.
+- **The hut hold never re-read its premise** ("hurt INSIDE the hut" fired with the body 185b away) and released the
+  walls on any hit (naked: 40b into the dark, creeper). Premise is a world read every cycle; hurt inside stays inside
+  unless the hostile is IN the box.
+- **Nobody remembered the sheep.** The wool hunt roamed blind from the hut while sheep stood 60b from world spawn,
+  seen every respawn. `survival-snapshot` writes animal sightings to `rememberSpot('mob:<name>')`; `huntForDrop`
+  walks to a remembered sighting (inside the leash) before exploring.
+- **Underpin only withdrew filler** ("18 cells stand on air, no filler banked" - the bank had 61 dirt; the WALK was
+  refused from spawn). It acquires (withdraw > craft > gather) cobble, then dirt.
+- **Naked mine.** `mineDanger`'s hostile band is armour-aware for every dig loop (NAKED_RETREAT_DIST), and a naked
+  descent that stops on a cave RELOCATES instead of "mining HERE" (the two cave deaths 25b from the hut).
+- **Silent tick.** Every early return of the scheduler tick logs its reason (throttled); the `sleeping` gate is
+  grounded (isSleeping AND a bed under the body).
+- **Silent chest read.** `readChest` races the whole open/read/close against 45s and every stage logs; the pantry
+  at naked night is the chest INSIDE the walls (it had walked out to the field chest at tod 13300 with the bed 4b
+  behind it). `armorup` asks `reflexes.claimOwner()` (the one owner record) - `isBusy()` saw only build latches and
+  the brain's armorup drove `gearUp` under a running food run.
+- `shelter.js` owns `nakedNight`; the arbiter keeps `isNight` for its CRISIS clauses on purpose (dusk is the scored
+  "heading home", not the ladder's dig-in).
+
+Open: the water-edge farm at 217,-244 (cratered, 5 drownings) should be retired for a flat plot; the castle gather
+has not yet been observed running by day; no armour is banked.

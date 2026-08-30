@@ -554,7 +554,12 @@ function isEscapingWater () { return escapingWater }
 async function escapeToDryLand (bot, { goalDir = null, isStopped = () => false, deadlineMs = 25000 } = {}) {
   if (drownReflexSkips(deliberateDrown)) { dbg('escapeToDryLand: deliberate-drown latch set (suicide-reset) - NOT escaping, letting it drown'); return false } // #63 §B.1
   const dl = Date.now() + deadlineMs
-  const sample = (x, y, z) => { try { const b = bot.blockAt(new Vec3(x, y, z)); return b && b.name } catch { return null } }
+  // GROUND COVER IS AIR TO A SWIMMER (2026-08-29, live 23:11-23:14: drowned/mobbed in a 2-deep forest pond
+  // at 112,-115 after "unclimbable lip - honest give-up"). findDryLandExit wants an exit cell whose feet
+  // and head are AIR by name; a forest bank wears short_grass, leaf_litter, flowers - blocks the world
+  // reports with an EMPTY bounding box, i.e. nothing to stand in the way - so every bank was rejected
+  // and the only "exit" was the lip it could not climb. Cover reads as air here; fluids keep their name.
+  const sample = (x, y, z) => { try { const b = bot.blockAt(new Vec3(x, y, z)); if (!b) return null; return (b.boundingBox === 'empty' && !/water|lava|seagrass|kelp|bubble_column/.test(b.name)) ? 'air' : b.name } catch { return null } }
   const solidAt = (x, y, z) => { try { const b = bot.blockAt(new Vec3(x, y, z)); return !!b && b.boundingBox === 'block' && !/water|lava/.test(b.name) } catch { return false } }
   const feet = bot.entity.position.floored()
   // The finder returns only a cell with a REAL swim corridor (flood-fill, not blind rays) and a
@@ -1095,6 +1100,13 @@ async function recoverOnce (bot, goal, plan, opts) {
         const rim = sunkenRimY(bot)
         if (rim == null) return false
         dbg('recovery sunken: ' + (rim - f.y) + ' below the rim at ' + f + ' with no plan - climbing a staircase to y' + rim)
+        // A CLIMB IS AN ATTEMPT WITH A DEADLINE (2026-08-29 23:27 + 23:31, live, same cell twice): the climb
+        // from (28,63,-13) logged one staircase pass and then NOTHING for minutes - no rung result, no leg
+        // result, the nav latch up, the tick gated behind it, the bot standing in a crater at night. Every
+        // primitive under it is bounded, so the silence is a loop of bounded no-ops (pillar/staircase
+        // passes that neither rise nor log). The rung cannot be allowed to be that quiet: it gets the
+        // leg's own recovery budget and, when cut, says where the body is so the next reader can see it.
+        // (the deadline lives in climbToSurface itself - one bound for every caller)
         try { await provMining().climbToSurface(bot, rim, { isStopped, surfaceY: rim, toRim: true }) } catch (e) { dbg('recovery sunken: climb failed (' + e.message + ')') }
         return bot.entity.position.y > p0.y + 0.9 || movedEnough()
       }

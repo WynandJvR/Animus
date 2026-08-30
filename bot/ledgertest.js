@@ -247,11 +247,14 @@ t('reclaim LOSES to real work: an active build keeps the body', () => {
 })
 
 t('reclaim LOSES to a bootstrap need: survival infra outranks the backlog', () => {
+  // (2026-08-29) the need pinned here is the SPAWN ANCHOR: a naked bot with a confirmed bed is free to
+  // work (armour no longer gates while a death is cheap), so nakedness alone is not a bootstrap need
+  // any more - an unanchored bot still has one, and it must beat the backlog.
   const c = core.chooseActivity(calmSnapshot({
-    armorPieces: 0, underArmored: true, rawIron: 0, bankArmorPieces: 0,
+    armorPieces: 0, underArmored: true, rawIron: 0, bankArmorPieces: 0, spawnAnchored: false, bedKnown: false,
     debt: { value: 400, n: 200, best: { kind: 'scaffold', x: 10, y: 64, z: 10, dist: 0, n: 40, value: 40 } }
   }), {})
-  assert.notStrictEqual(c.job, 'reclaim', 'chose ' + c.job + ' - a naked bot does not tidy')
+  assert.notStrictEqual(c.job, 'reclaim', 'chose ' + c.job + ' - a bot without a spawn anchor does not tidy')
 })
 
 t('a far, cheap debt never wins the body (proximity IS the feasibility term)', () => {

@@ -156,13 +156,13 @@ function noteGraveTrip (d, ok, why) {
 }
 function graveReachable (d) { return (d.tripFails || 0) < GRAVE_TRIP_FAILS_MAX }
 
-function bestGrave () {
+function bestGrave (pos) {
   const now = Date.now()
   // #112: `graveSalvage(d).go` is the new clause - a grave in a medium the bot cannot survive is
   // not a candidate at all. It is DEFERRED, not written off: the ledger keeps the row and the
   // value, and the verdict flips as soon as the bot proves it can get through there alive.
   const c = deathLedger.filter(d => !d.retrieved && !d.dangerous && graveWorthIt(d) && graveReachable(d) && now - (d.at || 0) < 24 * 3600 * 1000 && graveUrgency(d, now).tier !== 'expired' && graveSalvage(d).go)
-  c.sort((a, b) => graveCompare(a, b, now))
+  c.sort((a, b) => graveCompare(a, b, now, pos)) // distance-aware when the caller knows where the body is
   return c[0] || null
 }
 

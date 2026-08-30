@@ -63,7 +63,9 @@ t('the safety net the change depends on is untouched: the lease is taken SYNCHRO
   // gatingDispatch keeps (a) for SURVIVE-tier work, where nothing out-ranks the incumbent so there
   // is genuinely nothing left to decide, and hands the PROGRESS-tier half to the ordering rule -
   // which is where arbitration belongs, and which now STATES (b) instead of inheriting it.
-  assert.ok(/if \(!bot\.entity \|\| gatingDispatch\(\)\) return/.test(src),
+  // (2026-08-30: the early return now NAMES itself - noteEarlyReturn - so a muted chooser is one grep, not a
+  // post-mortem; the guard is the same guard.)
+  assert.ok(/const gd = gatingDispatch\(\)[\s\S]{0,400}if \(gd\) \{ noteEarlyReturn\([^\n]*\); return \}/.test(src),
     'the tick must still early-return on an in-flight dispatch it is not allowed to out-rank')
   assert.ok(/function gatingDispatch \(\)/.test(src) && /reflexes\.tierRank\(row\.tier\) >= reflexes\.TIERS\.SURVIVE/.test(src),
     'and gatingDispatch must keep that early-return for SURVIVE-tier dispatches')

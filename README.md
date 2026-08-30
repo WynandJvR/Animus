@@ -152,7 +152,7 @@ The bot can run itself with a local LLM via `brain-llm.js`. With Ollama:
 
 ```bash
 cd bot && \
-  LLM_URL=http://127.0.0.1:11434/api/chat OLLAMA_NATIVE=1 LLM_MODEL=qwen3:14b \
+  LLM_URL=http://127.0.0.1:11434/api/chat OLLAMA_NATIVE=1 LLM_MODEL=gemma4:12b \
   GOAL="follow the player and build a small house" \
   node brain-llm.js
 ```

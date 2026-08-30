@@ -6,7 +6,7 @@ One-time setup, then it's a double-click every time.
 
 1. **Make sure Ollama has the brain model** (only needed once):
    ```
-   ollama pull qwen3:14b
+   ollama pull gemma4:12b
    ```
    And make sure Ollama is running (it usually runs in the background on Windows).
 
@@ -33,7 +33,7 @@ One-time setup, then it's a double-click every time.
 
 That opens two windows and your **dashboard** in the browser:
 - **Animus BOT** - connects to your server. **On the very first run** it prints a `microsoft.com/link` code - open that link in a browser and enter the code to log the bot's account in. (It caches after that, so you only do it once.)
-- **Animus BRAIN** - the qwen3:14b brain that drives it.
+- **Animus BRAIN** - the gemma4:12b brain that drives it.
 - **Dashboard** at **http://127.0.0.1:3001** - live status, inventory, chat/activity, a command box, and a **brain switcher** (see below).
 
 To stop: close either window.
@@ -56,6 +56,6 @@ Open in any browser (the launcher opens it for you). It shows the bot's live hea
 ## If something's off
 
 - **Bot window closes / never spawns:** wrong host/port/version, or the Microsoft login wasn't finished. Check the BOT window text.
-- **Brain does nothing / errors:** Ollama isn't running, or `qwen3:14b` isn't pulled (`ollama pull qwen3:14b`).
+- **Brain does nothing / errors:** Ollama isn't running, or `gemma4:12b` isn't pulled (`ollama pull gemma4:12b`).
 - **"not an operator":** add your exact in-game name to `operators` in `bot/config.json`.
 - Prefer the terminal? You can still run the two pieces by hand - see `NOTES.md` §2 (brain env) and §3 (live-server launch).

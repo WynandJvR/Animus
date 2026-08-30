@@ -951,7 +951,31 @@ async function nightRestInner (bot, opts = {}) {
   // dusk catches the bot swimming often enough (rivers everywhere) - get to land BEFORE
   // deciding bed-vs-pit, or the pit path dig-fails in a loop while it drowns
   await ensureAshore(bot, isStopped)
-  const bed = knownBed()
+  let bed = knownBed()
+  // NO BED, BUT THE MAKINGS OF ONE AT HOME -> MAKE IT NOW (2026-08-29). Dusk at the hut with wool in
+  // the bank is exactly when a player crafts the bed and sleeps in it; the bot instead walked past its
+  // own chest to hold in the dark, because the bed producer (ensureSpawnBed) only ever ran in the calm
+  // daytime bootstrap tier - which a bot that is "degraded" every night (naked + night) never reaches.
+  // Gated on facts, never on hope: a registered hut within HOME_NIGHT_LEASH, and bedCraftableFrom over
+  // the pack + that hut's verified chests reading TRUE - so this never roams for wool or logs (the
+  // acquire below is withdraw+craft when holdings suffice; gathers would only be planned if they did
+  // not, and this gate says they do). Any failure falls through to the shelter exactly as before.
+  if (!bed && bot.entity) {
+    try {
+      const hut = provHut.hutAnchor()
+      const near = hut && Math.hypot(hut.x - bot.entity.position.x, hut.z - bot.entity.position.z) <= provShelter.HOME_NIGHT_LEASH
+      if (near) {
+        const totals = await require('./resources.js').totalCounts(bot, { near: hut, maxDist: 24 })
+        if (provHut.bedCraftableFrom(totals)) {
+          dbg('nightRest: no bed, but wool + planks are at home - making the bed before the night')
+          const r = await ensureSpawnBed(bot, { isStopped, say })
+          dbg('nightRest: bed-at-dusk -> ' + (r && r.how) + ' (' + ((r && r.why) || '') + ')')
+          bed = knownBed()
+          if (r && r.ok && r.how !== 'stood' && /slept/.test(r.why || '')) return true // the sleep already carried the night
+        }
+      }
+    } catch (e) { dbg('nightRest: bed-at-dusk attempt failed (' + e.message + ')') }
+  }
   // THE CHOKE POINT (fix #14): a bed on an unusable-hold falls straight to the pit with ZERO
   // bed prefix (no ~40s doomed 2x20s goto) - de-looping EVERY nightRest caller without touching
   // a signature. Within the hold window the bed attempt provably can't succeed (position-
@@ -1069,8 +1093,19 @@ async function ensureSpawnBed (bot, opts = {}) {
   if (!bot.entity) return R(false, 'failed', 'no body yet')
   const m = loadWorldMem()
   const bed = knownBed()
+  // THE HUT IS THE BED'S HOME ONLY WHEN THE HUT IS WITHIN A WALK (2026-08-29). Every rung below used to
+  // anchor on the registered hut at ANY distance: a bot stranded 344b away at world spawn planned
+  // "hunt:white_wool" with the roam fence on the hut, so the sheep grazing beside it were out of
+  // bounds, the bed could never be made where it stood, and it slept in the open there all night
+  // (26 deaths). A player stranded at spawn kills three sheep THERE, lays the bed THERE, and moves it
+  // home when they get home - which relocateBedInto already does for a far bed. So: the hut rungs and
+  // the hut-anchored fence apply when the hut is within HOME_NIGHT_LEASH (the same radius the night
+  // shelter calls "home within a walk"); farther than that, this call is here precisely because the
+  // crossing home is not admissible right now, and the bed goes on open ground where the body is.
   const hut0 = listInfra('hut')[0]
-  const near = opts.near || (hut0 ? { x: hut0.x + 2, y: hut0.y + 1, z: hut0.z + 2 } : bot.entity.position)
+  const hutInReach = !!(hut0 && bot.entity && Math.hypot(hut0.x + 2 - bot.entity.position.x, hut0.z + 2 - bot.entity.position.z) <= provShelter.HOME_NIGHT_LEASH)
+  if (hut0 && !hutInReach) dbg('spawn: my hut at ' + hut0.x + ',' + hut0.z + ' is ' + Math.round(Math.hypot(hut0.x + 2 - bot.entity.position.x, hut0.z + 2 - bot.entity.position.z)) + 'b off - anchoring the bed where i stand (relocateBedInto moves it home later)')
+  const near = opts.near || (hutInReach ? { x: hut0.x + 2, y: hut0.y + 1, z: hut0.z + 2 } : bot.entity.position)
 
   // rung STOOD - CONDITION-gated, never a time window. The old gate was "asserted within the
   // hour", which both re-trekked a perfectly good anchor after 60 minutes and blindly trusted
@@ -1118,10 +1153,10 @@ async function ensureSpawnBed (bot, opts = {}) {
     return null // 'none' / 'fail' -> fall through to the open-ground + acquire rungs
   }
 
-  if (!bed && hut0) {
+  if (!bed && hutInReach) {
     const r = await hutRung('no bed remembered at all - the hut bed cell is the play')
     if (r) return r
-  } else if (bed && hut0 && Math.hypot(bed.x - (hut0.x + 2), bed.z - (hut0.z + 2)) > 24) {
+  } else if (bed && hutInReach && Math.hypot(bed.x - (hut0.x + 2), bed.z - (hut0.z + 2)) > 24) {
     // PREFER THE HUT BED: a remembered bed far from the hut is a stale anchor (the overnight
     // carousel re-learned a bed at world spawn and kept "asserting" THERE) - never keep it
     // silently while a home hut exists. The far bed stays an honest fallback below.
@@ -1162,7 +1197,7 @@ async function ensureSpawnBed (bot, opts = {}) {
     }
     try { clearBedUnobtainable() } catch {}
     how = 'acquired'
-    if (hut0) {
+    if (hutInReach) {
       const r = await ensureHutBed(bot, new Vec3(hut0.x, hut0.y, hut0.z), opts).catch(() => 'fail')
       if (r === 'present' || r === 'placed') return R(true, 'acquired', 'made a ' + item.name + ' and set spawn on it in the hut')
       dbg('spawn: hut cell would not take the bed (' + r + ') - laying it on open ground instead')

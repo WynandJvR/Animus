@@ -175,37 +175,53 @@ async function findDiggableDryCell (bot, opts = {}) {
   const ids = Object.values(mcData.blocksByName).filter(b => GROUND_RE.test(b.name)).map(b => b.id)
   const found = bot.findBlocks({ matching: ids, maxDistance: radius, count: 96 }) || []
   const nameAt = p => { const b = bot.blockAt(p); return b ? b.name : null }
+  // a standable cell may hold ground cover (leaf_litter, grass, flowers - empty bounding box, the
+  // world's own word for "passable"); feetCellDry is name-based, so cover reads as air here. Fluids
+  // also have an empty box and must NOT: they keep their name (feetCellDry rejects them by name).
+  const standName = p => { const b = bot.blockAt(p); if (!b) return null; return (b.boundingBox === 'empty' && !/water|lava|seagrass|kelp|bubble_column/.test(b.name)) ? 'air' : b.name }
   const SIDES = [[1, 0], [-1, 0], [0, 1], [0, -1]]
   const cand = []
   const nearFarm = [] // fix #30: cells inside the farm buffer - used ONLY as a last resort
+  // A CELL BESIDE WATER OR A DEATH CLUSTER IS A WORSE SHELTER, NOT A NON-SHELTER (2026-08-29). Both
+  // used to be hard exclusions, and at world spawn - a savanna pond ringed by the day's own graves -
+  // they excluded every one of 96 candidates: "no diggable dry ground within reach" x30 while the bot
+  // stood on open grass all night and died there. A sealed pit beside a pond, or eight blocks from
+  // where it died, is still a sealed pit. So these are a PREFERENCE tier: clear cells first, these
+  // when nothing clear exists, the farm buffer (crops) only after that. Ranking, not refusing.
+  const risky = []
+  // WHY WAS EVERY CELL REJECTED? (2026-08-30 01:32, live: "no diggable dry ground after 3 relocation tries"
+  // at spawn with the risky tier in - and nothing said which rule emptied the field). Counted per rule.
+  const rej = { wet: 0, undiggable: 0, placed: 0, apron: 0, tried: 0, rim: 0 }
   for (const gp of found) {
     const feet = gp.offset(0, 1, 0); const head = gp.offset(0, 2, 0)
     // standable + dry to STAND on (no water in the feet/head cell or its horizontal neighbours)
-    if (!shelterSite.feetCellDry(nameAt(feet), nameAt(head), SIDES.map(([dx, dz]) => nameAt(feet.offset(dx, 0, dz))))) continue
+    if (!shelterSite.feetCellDry(standName(feet), standName(head), SIDES.map(([dx, dz]) => nameAt(feet.offset(dx, 0, dz))))) { rej.wet++; continue }
     // a safe pit can be dug straight down from here (solid, no fluid below/beside the shaft,
     // and not a thin shelf over a cave - below3 lets shelterDiggable reject a void two deep)
     const below = nameAt(gp); const below2 = nameAt(gp.offset(0, -1, 0)); const below3 = nameAt(gp.offset(0, -2, 0))
-    if (!shelterSite.shelterDiggable(below, below2, SIDES.map(([dx, dz]) => nameAt(gp.offset(dx, 0, dz))), below3)) continue
+    if (!shelterSite.shelterDiggable(below, below2, SIDES.map(([dx, dz]) => nameAt(gp.offset(dx, 0, dz))), below3)) { rej.undiggable++; continue }
     // must be real natural ground the anti-grief dig will actually break (not a player block)
-    const gb = bot.blockAt(gp); if (gb && !canBreakNaturally(gb)) continue
-    // not beside open water (a Drowned's pond) - see waterWithin
-    if (waterWithin(bot, feet, 5)) continue
+    const gb = bot.blockAt(gp); if (gb && !canBreakNaturally(gb)) { rej.placed++; continue }
     // never relocate the pit onto our own hut apron (defaces the doorstep)
-    if (onHutApron(bot, feet)) continue
+    if (onHutApron(bot, feet)) { rej.apron++; continue }
     // SHELTER_AVOID_FARM (fix #30): never relocate the pit into our own farm (floods/wrecks
     // the crop) - hold these aside and only fall back to them if NOTHING clear of the farm exists.
-    if (excluded.has(feet.x + ',' + feet.y + ',' + feet.z)) continue // already tried and failed this run
+    if (excluded.has(feet.x + ',' + feet.y + ',' + feet.z)) { rej.tried++; continue } // already tried and failed this run
     // a cell one block over from an uncappable hole IS that hole's rim (2026-08-28): the fresh
     // column would open into the old shaft. Same 2b XZ rule as the in-place dig, one definition.
-    if (excludedNear.some(c => Math.abs(c.x - feet.x) <= 2 && Math.abs(c.z - feet.z) <= 2)) continue
-    if (nearDeathCluster(feet.x, feet.z)) continue // never beside a death cluster (see HAZARD_PIT_R)
+    if (excludedNear.some(c => Math.abs(c.x - feet.x) <= 2 && Math.abs(c.z - feet.z) <= 2)) { rej.rim++; continue }
     if (shelterFarmConflict(bot, feet)) { nearFarm.push({ x: feet.x, y: feet.y, z: feet.z }); continue }
+    // beside open water (a Drowned's pond - see waterWithin) or a death cluster (HAZARD_PIT_R): second tier
+    if (waterWithin(bot, feet, 5) || nearDeathCluster(feet.x, feet.z)) { risky.push({ x: feet.x, y: feet.y, z: feet.z }); continue }
     cand.push({ x: feet.x, y: feet.y, z: feet.z })
   }
   const ranked = shelterSite.rankByDistance(cand, bot.entity.position)
   if (ranked.length) return new Vec3(ranked[0].x, ranked[0].y, ranked[0].z)
+  const rankedRisky = shelterSite.rankByDistance(risky, bot.entity.position)
+  if (rankedRisky.length) { dbg('shelter: no dry diggable ground clear of water and death clusters - taking the nearest cell beside one (' + rankedRisky.length + ' such; a sealed pit there still beats open ground)'); return new Vec3(rankedRisky[0].x, rankedRisky[0].y, rankedRisky[0].z) }
   // LAST RESORT (survival > farm): no dry diggable ground clear of the farm - take a farm-buffer
   // cell rather than freeze exposed all night, and log the override.
+  dbg('shelter: dry-cell search found NO cell in ' + found.length + ' candidates within ' + radius + 'b - rejected: ' + Object.entries(rej).filter(([, n]) => n).map(([k, n]) => k + ' ' + n).join(', ') + (nearFarm.length ? ' (farm buffer ' + nearFarm.length + ')' : ''))
   const rankedFarm = shelterSite.rankByDistance(nearFarm, bot.entity.position)
   if (rankedFarm.length) { dbg('shelter: NO dry diggable ground clear of the farm - relocating INTO the farm buffer as a last resort (survival > crops)'); return new Vec3(rankedFarm[0].x, rankedFarm[0].y, rankedFarm[0].z) }
   return null
@@ -399,6 +415,11 @@ const capFailedCells = []
 // more deaths at one hazard, the hard-arm the router already bends around) keeps every pit at least
 // this far away. Read live from world-memory; no hazards = no exclusion.
 const HAZARD_PIT_R = 8
+function hutModelDims () { try { return require('./hut-model.js').DIMS } catch { return { w: 6, l: 6 } } }
+// HOME WITHIN A WALK: a registered hut within this many blocks is the night shelter (entered, lit,
+// waited out) and the place a bed gets made at dusk; farther, the pit is the answer. One number, two
+// readers (digInForNight here, nightRest in provision-recovery).
+const HOME_NIGHT_LEASH = 48
 function nearDeathCluster (x, z) {
   try {
     for (const h of (worldMemoryMod().listHazards() || [])) {
@@ -415,12 +436,20 @@ function worldMemoryMod () { return require('./world-memory.js') }
 // exactly the torch alcove digTorchAlcove cuts: it leads nowhere and admits nothing. Every cell is
 // a live world read; unloaded reads as not-solid (the safe side: an unknown wall is not a wall).
 // Bounded at 12 levels - the deepest hole this file will ever have dug.
+// THE ONE WALL TEST (2026-08-30 03:17, live: a whole day standing still 410b out). "Is this side of the
+// column a wall?" - a solid block, OR a one-deep dead-end pocket (the torch alcove: air with solid beyond
+// and solid over it). shaftDepthHere and pitHere had it; breakOut's rim finder did not, so the same cell
+// read "SEALED IN a 1x1 pocket" to the rescue and "OUT (dug 0)" to the break-out, ten times a minute,
+// for ten hours. One definition, three readers.
+function columnWall (bot, feet, dx, y, dz) {
+  const solid = (x, yy, z) => { const b = bot.blockAt(new Vec3(x, yy, z)); return !!b && !AIRISH(b.name) && b.boundingBox === 'block' && !/_leaves$/.test(b.name) }
+  return solid(feet.x + dx, y, feet.z + dz) || (solid(feet.x + 2 * dx, y, feet.z + 2 * dz) && solid(feet.x + dx, y + 1, feet.z + dz))
+}
 function shaftDepthHere (bot) {
   if (!bot.entity || !bot.entity.position) return 0
   const feet = bot.entity.position.floored()
   const SIDES4 = [[1, 0], [-1, 0], [0, 1], [0, -1]]
-  const solid = (x, y, z) => { const b = bot.blockAt(new Vec3(x, y, z)); return !!b && !AIRISH(b.name) && b.boundingBox === 'block' && !/_leaves$/.test(b.name) }
-  const wall = (dx, y, dz) => solid(feet.x + dx, y, feet.z + dz) || (solid(feet.x + 2 * dx, y, feet.z + 2 * dz) && solid(feet.x + dx, y + 1, feet.z + dz))
+  const wall = (dx, y, dz) => columnWall(bot, feet, dx, y, dz)
   let depth = 0
   for (; depth < 12; depth++) { const y = feet.y + depth; if (!SIDES4.every(([dx, dz]) => wall(dx, y, dz))) break }
   return depth
@@ -435,8 +464,7 @@ function pitHere (bot) {
   if (!bot.entity || !bot.entity.position) return false
   const feet = bot.entity.position.floored()
   const SIDES4 = [[1, 0], [-1, 0], [0, 1], [0, -1]]
-  const solid = (x, y, z) => { const b = bot.blockAt(new Vec3(x, y, z)); return !!b && !AIRISH(b.name) && b.boundingBox === 'block' && !/_leaves$/.test(b.name) }
-  const wall = (dx, y, dz) => solid(feet.x + dx, y, feet.z + dz) || (solid(feet.x + 2 * dx, y, feet.z + 2 * dz) && solid(feet.x + dx, y + 1, feet.z + dz))
+  const wall = (dx, y, dz) => columnWall(bot, feet, dx, y, dz)
   const feetWalled = SIDES4.every(([dx, dz]) => wall(dx, feet.y, dz))
   const headWalls = SIDES4.filter(([dx, dz]) => wall(dx, feet.y + 1, dz)).length
   return feetWalled && headWalls >= 3
@@ -502,12 +530,15 @@ async function digInForNight (bot, opts = {}) {
       // apron test alone sent the bot to dig a pit 20b from its own door after a bank run. A registered
       // hut within HOME_NIGHT_LEASH is entered and waited out - the same door crossing the apron case
       // uses; farther than that, or with no hut, the pit below is still the answer.
-      const HOME_NIGHT_LEASH = 48
+      // ...AND A DARK HUT IS STILL THE SHELTER (2026-08-29). The 2026-08-28 rule "prefer the hut only
+      // when it is LIT; otherwise the lit pit" sent the bot 12b from its own door to dig, twice in one
+      // night, and both digs ended the same way: the pit rung was cut at 150s, the brain's armorup
+      // preempted the hold, and at 16:37 it fell to its death beside the hut with the bed wool in its
+      // pack. The room being dark is a problem the bot can FIX from inside (provision-hut's
+      // ensureHutInteriorLit: coal+stick from the bank, one torch on the floor - the producer existed
+      // and nothing called it); an open dig in the dark is not. So: enter, then light it, below.
       const hutHome = (() => { try { const h = require('./provision-hut.js').hutAnchor(); return (h && Math.hypot(h.x - bot.entity.position.x, h.z - bot.entity.position.z) <= HOME_NIGHT_LEASH) ? h : null } catch { return null } })()
-      const homeHut = hutHome || (() => { const a = onHutApron(bot); return a || null })()
-      const homeLit = hutInteriorLit(bot, homeHut)
-      if (homeHut && !homeLit) dbg('shelter: my hut at ' + homeHut.x + ',' + homeHut.y + ',' + homeHut.z + ' is UNLIT (mobs spawn inside) - digging a lit pit instead of going home')
-      const hutNear = homeLit ? (onHutApron(bot) || hutHome) : null
+      const hutNear = onHutApron(bot) || hutHome
       if (hutNear && hutHome && !onHutApron(bot)) dbg('shelter: my hut at ' + hutHome.x + ',' + hutHome.y + ',' + hutHome.z + ' is ' + Math.round(Math.hypot(hutHome.x - bot.entity.position.x, hutHome.z - bot.entity.position.z)) + 'b away - going home instead of digging in')
       if (hutNear) {
         try {
@@ -521,7 +552,21 @@ async function digInForNight (bot, opts = {}) {
         } catch (e) { dbg('shelter: could not get inside my hut (' + e.message + ')') }
       }
     }
-    if (insideOwnStructure(bot)) {
+    const hutIn = insideOwnStructure(bot)
+    if (hutIn) {
+      // LIGHT THE ROOM BEFORE HOLDING IN IT. A sealed dark 4x4 room spawns a mob IN with the bot (the
+      // 2026-08-28 20:58 creeper). The fix is a torch, not a pit: withdraw coal+stick from the bank,
+      // craft, place one on the floor (ensureHutInteriorLit). If no torch can be made, say so and hold
+      // anyway - "taking damage INSIDE" below still releases the shelter to fight, and a closed door
+      // between the bot and the night beats an open dig in it.
+      const litNow = provHut.hutInteriorLit(bot, hutIn)
+      if (litNow === false) {
+        let lit = null
+        // maxDist = the hut's own box: at night the torch comes from the chest INSIDE or not at all
+        try { lit = await provHut.ensureHutInteriorLit(bot, hutIn, { isStopped, say, maxDist: Math.max(hutModelDims().w, hutModelDims().l) }) } catch (e) { dbg('shelter: interior light failed (' + e.message + ')') }
+        if (lit && lit.how === 'lit') dbg('shelter: lit the inside of my hut before holding')
+        else dbg('shelter: my hut at ' + hutIn.x + ',' + hutIn.y + ',' + hutIn.z + ' stays UNLIT (' + ((lit && lit.why) || 'no torch') + ') - holding inside anyway; a closed door beats an open dig at night, and a hit inside releases me to fight')
+      }
       dbg('shelter: inside my own hut - waiting out the night, no digging')
       say('holed up at home for the night')
       const dl = Date.now() + 600000
@@ -530,16 +575,56 @@ async function digInForNight (bot, opts = {}) {
       // A DECLARED HOLD, like the fresh pit's (below) - see the note at the bunker re-entry.
       const holdHut = reflexes.beginHold('nightShelter:hut', 'dawn|hostile-gone|damage|flooding', dl - Date.now() + 5000)
       try {
+      let fedAt = 0
+      let hpIn2 = hpIn
+      let leftTheBox = false
+      // Which hostile is INSIDE my walls right now? (the hut box: w x h x l from its anchor)
+      const hostileInside = () => {
+        try {
+          const dims = hutModelDims()
+          for (const e of Object.values(bot.entities || {})) {
+            if (!e || !e.position || !provCore.SHELTER_HOSTILE.test((e.name || '').toLowerCase())) continue
+            const p = e.position
+            if (p.x >= hutIn.x && p.x < hutIn.x + dims.w && p.z >= hutIn.z && p.z < hutIn.z + dims.l && p.y >= hutIn.y && p.y < hutIn.y + dims.h) return e
+          }
+        } catch {}
+        return null
+      }
       while (Date.now() < dl && !isStopped()) {
         // hold through the DUSK HEAD-START too (shelterNeeded fires at 12200, isNight at
         // 13000): breaking on "!isNight" alone made this return success instantly at dusk,
         // so the 5s reflex re-entered forever - the "waiting out the night" log spam (live)
         if ((!shelterNeeded(bot) && !isNight(bot) && !nearHostile(bot, 10)) || nightStuck(bot)) break // stuck night: stop waiting for a dawn that won't come
-        if ((bot.health || 20) < hpIn - 3) { dbg('shelter: taking damage INSIDE the hut - releasing shelter to FIGHT'); hurtInside = true; break }
+        // THE PREMISE IS A WORLD READ, EVERY CYCLE (2026-08-30 04:12, live): "taking damage INSIDE the hut -
+        // releasing shelter to FIGHT" fired with the body 185b from the hut - a goal-steal had walked it out
+        // of the box minutes earlier and this loop never looked. A hold whose body has left its walls is over.
+        if (!insideOwnStructure(bot)) { dbg('shelter: my body is no longer inside the hut (' + bot.entity.position.floored() + ') - the hold is over; re-entering is the next pass\'s job'); leftTheBox = true; break }
+        if ((bot.health || 20) < hpIn2 - 3) {
+          // HURT INDOORS: STAY INDOORS (2026-08-30 05:33, live). This used to release the shelter to fight on
+          // any hit; naked, the flee reflex then ran the bot 40b into the dark and a creeper killed it. A
+          // hostile INSIDE the box is the one thing worth releasing for (the fight is in here anyway);
+          // anything else - an arrow through a gap, a mob at the door - is a reason to keep the walls.
+          const inside = hostileInside()
+          if (inside) { dbg('shelter: taking damage INSIDE the hut from a ' + inside.name + ' that is IN the box - releasing shelter to FIGHT it'); hurtInside = true; break }
+          const nh = (() => { try { let b = null; let bd = Infinity; for (const e of Object.values(bot.entities || {})) { if (!e || !e.position || !provCore.SHELTER_HOSTILE.test((e.name || '').toLowerCase())) continue; const d = e.position.distanceTo(bot.entity.position); if (d < bd) { bd = d; b = e } } return b ? b.name + ' ' + bd.toFixed(1) + 'b away (outside my walls)' : 'no hostile in sight' } catch { return '?' } })()
+          dbg('shelter: hurt INSIDE the hut (hp ' + hpIn2 + ' -> ' + bot.health + ', ' + nh + ') - staying inside; the walls are the treatment, not the dark')
+          hpIn2 = bot.health || 20 // re-baseline so one hit is judged once, not every 3s
+        }
         if (inWaterNow(bot)) { dbg('shelter: hut interior flooding - bailing'); hurtInside = true; break }
+        // THE PANTRY IS IN THE ROOM (2026-08-30): a hungry bot holding in its hut eats from the chest inside
+        // it - the same in-range pantry read the famine hold does, bounded to the hut box so it never
+        // opens the door for it. Once a minute at most; food >= 18 is what lets hp regenerate overnight.
+        if ((bot.food || 0) < 18 && Date.now() - fedAt > 60000) {
+          fedAt = Date.now()
+          try {
+            const got = await require('./resources.js').ensureFood(bot, { near: hutIn, threshold: 20, minPack: 1, maxDist: Math.max(hutModelDims().w, hutModelDims().l), forceFresh: fedAt === 0 })
+            if (got) { await require('./provision-food.js').eatUp(bot); dbg('shelter: ate from the chest inside the hut (food ' + bot.food + ')') }
+          } catch (e) { dbg('shelter: interior pantry failed (' + e.message + ')') }
+        }
         await new Promise(r => setTimeout(r, 3000))
       }
       } finally { reflexes.endHold(holdHut); touchP('shelterHold:released') }
+      if (leftTheBox) return false // not sheltered: the caller's next pass re-enters (or pits) - never "held" a hut it left
       if (!hurtInside) return true
       // Hurt while holed up inside the hut (an enderman teleported in, a mob at the door):
       // do NOT abandon the walls to dig a pit - RELEASE the shelter so the now-ungated
@@ -789,15 +874,27 @@ async function digInForNight (bot, opts = {}) {
       // right next to the old shaft - side holes into it, no lid, leaky again ("dig blocked at 1
       // (birch_planks)": it was re-digging its own old lid). The dry-cell search already excludes
       // these cells; the in-place dig has to honour the same list, or the exclusion is a fiction.
-      const cluster = pitHereOK ? nearDeathCluster(shaft.x, shaft.z) : null
+      const cluster = (pitHereOK && attempt === 0) ? nearDeathCluster(shaft.x, shaft.z) : null
       if (cluster) { pitHereOK = false; dbg('shelter: ' + shaft + ' is within ' + HAZARD_PIT_R + 'b of a death cluster at ' + cluster.x + ',' + cluster.y + ',' + cluster.z + ' (' + cluster.deaths.length + ' deaths) - not pitting beside what kills, looking for a dry cell') }
       if (pitHereOK && capFailedCells.some(c => Math.abs(c.x - shaft.x) <= 2 && Math.abs(c.z - shaft.z) <= 2)) {
         pitHereOK = false
         dbg('shelter: ' + shaft + ' is within 2b of a hole proven uncappable this life - not pitting beside it, looking for a dry cell')
       }
-      for (let i = 0; pitHereOK && i < 2 && !isStopped(); i++) {
+      for (let i = 0, cover = 0; pitHereOK && i < 2 && !isStopped(); i++) {
         const feet = bot.entity.position.floored()
         const below = bot.blockAt(feet.offset(0, -1, 0))
+        // GROUND COVER IS NOT A FLOOR (2026-08-29, live 23:11 in a forest): leaf_litter, short_grass,
+        // wildflowers, bushes - the world reports them with an EMPTY bounding box, i.e. not a floor. The
+        // dig read the litter as "the floor", found it in no cap list, and refused to shelter: "NOT
+        // digging - leaf_litter will not drop one without a tool". Clear the cover (bare-handed, instant)
+        // and read again; the floor is the first block below with a full box. Bounded to two covers.
+        if (below && !AIRISH(below.name) && below.boundingBox === 'empty' && !/water|lava/.test(below.name) && cover < 2 && canBreakNaturally(below)) {
+          cover++
+          dbg('shelter: ' + below.name + ' under my feet is ground cover, not a floor - clearing it to reach the ground')
+          try { await bot.dig(below) } catch (e) { dbg('shelter: cover dig failed (' + e.message + ')'); break }
+          await new Promise(r => setTimeout(r, 250))
+          i--; continue
+        }
         if (!holdsCap() && !willDropCap(below)) {
           dbg('shelter: NOT digging at ' + i + ' - no cap material in the pack and ' + (below ? below.name : 'the floor') + ' will not drop one without a tool; a pit i cannot lid is just a deeper hole')
           break
@@ -991,19 +1088,8 @@ async function digInForNight (bot, opts = {}) {
 // that rim as its hard stop; if the pack has no filler, the staircase cut is the fallback.
 // Returns true when the feet ended at or above the rim.
 // Does the pack hold a block the shelter would cap with - which is also the block a pillar climbs on.
-// A DARK HUT IS A MOB TRAP, NOT A SHELTER (2026-08-28 20:58, creeper INSIDE the hut). baseTorchAnchors
-// lights the exterior ring but the interior stays dark until it has coal for a torch - so a sealed,
-// unlit hut spawns mobs inside, and the home-within-a-walk rule was sending an un-geared bot into that
-// to be blown up. Prefer the hut only when it is LIT; otherwise the lit pit below is the safe choice.
-function hutInteriorLit (bot, hut) {
-  if (!hut || !bot) return false
-  try {
-    for (let dx = 1; dx <= 4; dx++) for (let dz = 1; dz <= 4; dz++) for (let dy = 1; dy <= 3; dy++) {
-      const b = bot.blockAt(new Vec3(hut.x + dx, hut.y + dy, hut.z + dz)); if (b && /torch|lantern/.test(b.name)) return true
-    }
-  } catch {}
-  return false
-}
+// (the interior-lit reader lives in provision-hut.hutInteriorLit - one definition for the shelter, the
+//  snapshot's baseLit and secureBase; the 2026-08-28 "dark hut -> pit" rule that read it here is gone)
 function holdsCapMaterial (bot) { return (bot.inventory ? bot.inventory.items() : []).some(i => CAP_RE.test(i.name)) }
 // How many blocks the pack could pillar with (the sealed-in test: one per level to the rim).
 function capMaterialCount (bot) { return (bot.inventory ? bot.inventory.items() : []).filter(i => CAP_RE.test(i.name)).reduce((n, i) => n + (i.count || 0), 0) }
@@ -1021,7 +1107,12 @@ async function breakOut (bot, opts = {}) {
   // and 90s of the morning went to standing in a pit. With no lid the deferral keeps nothing on -
   // it only keeps the body where no job can drive it. Open sky: the climb proceeds at any hour.
   const p0 = bot.entity.position.clone()
-  const lidNow = (() => { const f = p0.floored(); for (let k = 2; k <= 24; k++) { const b = bot.blockAt(f.offset(0, k, 0)); if (b && !AIRISH(b.name) && b.boundingBox === 'block') return true } return false })()
+  // A LID IS WITHIN REACH OF THE SHAFT, AND IT IS NOT A TREE (2026-08-29 23:26, live at spawn): the scan ran
+  // 24 blocks up and called acacia LEAVES at +9 "the lid" - the bot cut its real log lid at +2, climbed
+  // 64 -> 71 up its own shaft to "reach the lid at y73", cut the canopy, and came out at dusk. The same
+  // fact navigate.sealedIn states: a lid is within 8 above (a sealed bunker, or a shaft dug under a cap);
+  // anything higher is the world's, and a canopy is never a cap.
+  const lidNow = (() => { const f = p0.floored(); for (let k = 2; k <= 8; k++) { const b = bot.blockAt(f.offset(0, k, 0)); if (b && !AIRISH(b.name) && b.boundingBox === 'block' && !/_leaves$/.test(b.name)) return true } return false })()
   // ...AND NEVER WHEN THE POCKET IS A POOL (2026-08-28 16:17-16:21): a lidded pit that flooded held
   // the body in water all night - every rescue ("escapeToDryLand", the drown ladder) failed under
   // the lid and every caller that reached here was told the lid stays on. Water is the one thing
@@ -1050,11 +1141,13 @@ async function breakOut (bot, opts = {}) {
   // the first solid cell over the head (a lid), or null = open sky
   const lidAbove = (feet) => { for (let k = 2; k <= 24; k++) { const c = feet.offset(0, k, 0); if (solidAt(c)) return c } return null }
   // the lowest level at/above the feet with a side opening - where the body can step OUT
+  // (columnWall: a dead-end alcove is a wall here exactly as it is for sealedIn/shaftDepthHere - the
+  // two used to disagree and the bot stood in the disagreement all day)
   const openingY = (feet) => {
     for (let dy = 0; dy <= 12; dy++) {
       const y = feet.y + dy
       let walled = true
-      for (const [dx, dz] of SIDES4) { const b = bot.blockAt(new Vec3(feet.x + dx, y, feet.z + dz)); if (!b || AIRISH(b.name)) { walled = false; break } }
+      for (const [dx, dz] of SIDES4) { const b = bot.blockAt(new Vec3(feet.x + dx, y, feet.z + dz)); if (!b) { walled = false; break }; if (!columnWall(bot, feet, dx, y, dz)) { walled = false; break } }
       if (!walled) return y
     }
     return null
@@ -1115,5 +1208,5 @@ module.exports = {
   // literal exports its VALUE - a snapshot of `false` taken once, at require time. provision-recovery
   // destructured that snapshot and then owned a dead variable that could never change and could never
   // be cleared, while believing it held the live latch. Ask isSheltering(); clear releaseShelterLatch().
-  DEFEND_WHEN_HIT_ON, shaftDepthHere, capMaterialCount, isSheltering, releaseShelterLatch, shelterSite, SHELTER_FARM_R, shelterFarmConflict, inWaterNow, ensureAshore, findDiggableDryCell, scoutForWater, armorPieceCount, underArmored, lowHpCalm, shelterNeeded, nightStuck, nightRestWanted, sealShaft, digInForNight, breakOut, holdsCapMaterial, pickOpenSkyCell
+  DEFEND_WHEN_HIT_ON, shaftDepthHere, capMaterialCount, isSheltering, releaseShelterLatch, shelterSite, SHELTER_FARM_R, shelterFarmConflict, inWaterNow, ensureAshore, findDiggableDryCell, scoutForWater, armorPieceCount, underArmored, lowHpCalm, shelterNeeded, nightStuck, nightRestWanted, sealShaft, digInForNight, breakOut, holdsCapMaterial, pickOpenSkyCell, HOME_NIGHT_LEASH
 }

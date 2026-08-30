@@ -243,6 +243,22 @@ function canWildBreakType (name, diggableRe, structureRe) {
   return (diggableRe.test(name) && !structureRe.test(name)) || /_leaves$/.test(name) || SCAFFOLD_BREAK_RE.test(name)
 }
 
+// LEAVES ARE NOBODY'S BUILDING - the ONE dig rule for the non-wild profiles (2026-08-30). Inside the home
+// scope the wild profile is off, and a profile with canDig=false cannot cut a leaf: a bot standing in a
+// birch canopy at 202,69,-257 got "partial 0 move(s)" from every plan and the bed's sheep hunt burned all
+// its explore legs in seven seconds without moving. Every block that is not a leaf stays unbreakable, and
+// the canopy is priced so walking around still wins. Returns the canDig value it set, so the two profiles
+// movementparitytest compares can state it through the same call. No block table -> no digging (the old rule).
+function leavesOnlyDig (m, bot) {
+  try {
+    const md = require('minecraft-data')(bot.version)
+    m.blocksCantBreak = new Set(Object.values(md.blocksByName).filter(b => !/_leaves$/.test(b.name)).map(b => b.id))
+    m.canDig = true
+    m.digCost = 10
+  } catch { m.canDig = false }
+  return m.canDig
+}
+
 // XZ distance from a pos {x,z} (or Vec3) to an anchor {x,z}.
 function _dist (a, pos) { return Math.hypot(a.x - pos.x, a.z - pos.z) }
 // Is pos inside the buildZone box grown by `pad` on every XZ side? (buildZone = {x1,x2,z1,z2}.)
@@ -421,7 +437,7 @@ function findDryLandExit (feet, sampleName, opts = {}) {
 const PILLAR_ITEMS = ['dirt', 'grass_block', 'cobblestone', 'cobbled_deepslate', 'netherrack', 'stone', 'gravel', 'dirt_path', 'andesite', 'granite', 'diorite', 'tuff',
   'oak_planks', 'spruce_planks', 'birch_planks', 'jungle_planks', 'acacia_planks', 'dark_oak_planks', 'mangrove_planks', 'cherry_planks', 'bamboo_planks', 'crimson_planks', 'warped_planks']
 
-module.exports = { PILLAR_ITEMS,
+module.exports = { leavesOnlyDig, PILLAR_ITEMS,
   standable,
   digEscapeVerdict,
   escapeComplete,

@@ -870,7 +870,6 @@ def({
   tier: 'PROGRESS',
   why: 'establish the missing survival infra (spawn/armor/food-reserve/lit base), then upkeep',
   refuse: (ctx) => {
-    if (ctx.now < ctx.runner.maintainCooldownUntil) return 'cooling off after the last maintenance pass'
     // At night the pass is indoor-only, so being far from home makes it UNDISPATCHABLE, not
     // merely delayed - the chooser must see that or it keeps picking a job that cannot run
     // (measured 2026-07-29 14:44-14:49: `bootstrap spawn` picked 7x, dispatched 0x, silently).
@@ -886,8 +885,9 @@ def({
     // #117 HOME_IS_A_NEED: the chooser's bootstrap verdict is HANDED TO the executor, so
     // 'spawn'/'shelter' reach their producers instead of being computed, logged and dropped.
     const r = await provMaintain().maintenancePass(bot, { say: ctx.say, nightIndoorOnly: !!ctx.s.isNight, bootstrap: (ctx.pick && ctx.pick.bootstrap) || null })
-    const worked = !!(r && r.steps && r.steps.length && !/^bail/.test(r.reason || ''))
-    ctx.runner.maintainCooldownUntil = ctx.nowMs() + (worked ? 600000 : 300000) // 10 min after a real pass, 5 after a no-op/bail
+    // (no post-pass cooldown, 2026-08-29: the chooser's attempt memory is the condition gate - a pass
+    //  that achieved nothing here is not re-dispatched until the bot moves, the step changes or the
+    //  world does; a pass that DID something may run again as soon as a need says so)
     return r && r.steps && r.steps.length ? r.steps.join('+') : (r && r.reason) || 'nothing due'
   }
 })

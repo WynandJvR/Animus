@@ -84,9 +84,14 @@ t('they AGREE on every escape-critical capability (the 2026-08-26 crater bug)', 
   }
 })
 
-t('canDig stays FALSE in both - the anti-grief rule that actually matters is untouched', () => {
-  assert.strictEqual(setup.set.canDig, 'false', 'the bot must never chew through a build to make a path')
-  assert.strictEqual(travel.set.canDig, 'false')
+t('canDig comes from the ONE leaves-only rule in both - the anti-grief rule that actually matters is untouched', () => {
+  // (2026-08-30) canDig is no longer a literal: both profiles state it through nav-profile.leavesOnlyDig,
+  // which leaves every non-leaf block in blocksCantBreak. A build is never made of leaves.
+  const rule = "require('./nav-profile.js').leavesOnlyDig(m, bot)"
+  assert.strictEqual(setup.set.canDig, rule, 'setupMovements must take canDig from the one leaves-only rule')
+  assert.strictEqual(travel.set.canDig, rule, 'travelMovements must take canDig from the one leaves-only rule')
+  const np = fs.readFileSync(path.join(__dirname, 'nav-profile.js'), 'utf8')
+  assert.ok(np.indexOf('function leavesOnlyDig') >= 0 && np.indexOf("filter(b => !/_leaves$/.test(b.name))") >= 0, 'the rule keeps every non-leaf block unbreakable')
 })
 
 t('both can pillar, and BOTH have blocks to pillar with (allow1by1towers is inert without them)', () => {

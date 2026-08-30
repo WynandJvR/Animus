@@ -20,6 +20,12 @@
 const { Vec3 } = require('vec3')
 const { goals, Movements } = require('mineflayer-pathfinder')
 const mining = require('./mining.js')       // PURE depth model + branch geometry
+// UNDERGROUND AND UN-ARMOURED IS NIGHT (2026-08-30 00:04 + 01:24, live: two gearup deaths in open caves
+// 25b from the hut, zombie+creeper together, hp 20 -> 0 before the 6b bail fired). The naked retreat band
+// used to exist only in branchMine's branch loop; the descent, the tunnel and every other dig loop asked
+// mineDanger, which bailed at 6b for everyone. ONE number, read by mineDanger for every loop.
+const NAKED_RETREAT_DIST = parseInt(process.env.ARMOR_BOOTSTRAP_RETREAT_DIST || '10', 10)
+function retreatBand (bot) { let naked = true; try { naked = provShelter().underArmored(bot) } catch {}; return naked ? NAKED_RETREAT_DIST : 6 }
 const provFood = () => require('./provision-food.js') // LAZY: provision-food.js top-requires this module, so an eager import here would be a real cycle
 const provShelter = () => require('./provision-shelter.js') // LAZY: provision-shelter.js top-requires this module, so an eager import here would be a real cycle
 const navigate = require('./navigate.js')
@@ -122,7 +128,8 @@ async function digStaircaseUp (bot, targetY, opts = {}) {
     if (tool && (!bot.heldItem || bot.heldItem.name !== tool.name)) await bot.equip(tool, 'hand').catch(() => {})
     if (bot.canDigBlock && !bot.canDigBlock(b)) return false
     // ESCAPE COMMITMENT (#111): every cell the escape opens is a debt we own - see pillarUpTo.
-    try { await bot.dig(b); scaffold.oweShaft(p, b.name); return true } catch { return false }
+    const t0 = Date.now()
+    try { await bot.dig(b); scaffold.oweShaft(p, b.name); if (Date.now() - t0 > 5000) dbg('  staircase: dug ' + b.name + ' at ' + p.toString() + ' in ' + Math.round((Date.now() - t0) / 1000) + 's (held ' + ((bot.heldItem && bot.heldItem.name) || 'nothing') + ')'); return true } catch (e) { dbg('  staircase: dig of ' + b.name + ' at ' + p.toString() + ' failed after ' + Math.round((Date.now() - t0) / 1000) + 's (' + (e && e.message) + ')'); return false }
   }
   const surfaceY = Number.isFinite(opts.surfaceY) ? opts.surfaceY : null
   const startY = Math.floor(bot.entity.position.y)
@@ -240,6 +247,12 @@ async function digStaircaseUp (bot, targetY, opts = {}) {
         try { if (under && !AIRISH(under.name)) { await bot.placeBlock(under, new Vec3(0, 1, 0)); scaffold.add(sFloor, 'staircase') } } catch {}
       }
     }
+    // NEVER STEP ONTO A TREAD THAT IS NOT THERE (2026-08-29 23:46, live in a cave at y49): the tread was
+    // air, the pack had no filler left (one plank went into the previous tread), the place above was
+    // skipped - and the step below walked the body into the open cell and down a hole, y49 -> y43,
+    // hp 14 -> 10, at dusk. A step needs a floor; without one this pass is a miss, not a walk.
+    const fbNow = bot.blockAt(sFloor)
+    if (!fbNow || AIRISH(fbNow.name) || fbNow.boundingBox !== 'block') { dbg('  staircase: no solid tread at ' + sFloor.toString() + ' (' + ((fbNow && fbNow.name) || 'unloaded') + ') and nothing to lay one with - not stepping into air (stuck ' + (stuck + 1) + ')'); stuck++; continue }
     if (!(await digIf(sFeet)) || !(await digIf(sHead))) { dbg('  staircase: step cells not opened at ' + sFeet.toString() + ' (stuck ' + (stuck + 1) + ')'); stuck++; continue }
     // CHEAP ADJACENT STEP UP onto the just-cleared tread (forward + a jump pulse); fall through
     // to today's exact per-step goto if it doesn't arrive. The stuck-counter below is unchanged.
@@ -291,6 +304,24 @@ function climbMovements (bot) {
 // that. opts.surfaceY carries the same number down to the primitives so they can ASSERT it.
 // The stop condition is feet.y >= targetY EXACTLY: no slack, no overshoot into open air.
 async function climbToSurface (bot, targetY, opts = {}) {
+  // A CLIMB IS AN ATTEMPT WITH A DEADLINE (2026-08-29, live x3): a climb logged one or two staircase passes
+  // and then nothing for minutes, from a crater at spawn and from a cave at y49 - the leg above it waited,
+  // the nav latch stayed up, the tick was gated. Every primitive under this is bounded, so the silence is
+  // a chain of slow bounded steps (bare-handed stone is 7.5s a cell; a pass is two cells, a place, a
+  // step). A caller cannot tell "slow" from "hung" and neither should have to: the call is bounded here,
+  // ONCE, for every caller (the sunken rung, walkStaged's roof climb-out, the mine exit). A cut leaves the
+  // stairs it dug in the world, so the next call resumes from higher up - progress survives the cut.
+  const deadlineMs = Number.isFinite(opts.deadlineMs) ? opts.deadlineMs : 60000
+  const startedAt = Date.now()
+  let cut = false
+  const cutter = new Promise(resolve => setTimeout(() => { cut = true; resolve('cut') }, deadlineMs))
+  const y0 = bot.entity ? bot.entity.position.floored() : null
+  const r = await Promise.race([climbToSurfaceInner(bot, targetY, { ...opts, isStopped: () => cut || (opts.isStopped ? opts.isStopped() : false) }).then(() => 'done'), cutter])
+  if (r === 'cut') dbg('  climb: CUT after ' + Math.round((Date.now() - startedAt) / 1000) + 's with the body at ' + (bot.entity ? bot.entity.position.floored() : '?') + ' (started ' + y0 + ', target y' + targetY + ') - the stairs stay; the next call resumes from here')
+  return r
+}
+
+async function climbToSurfaceInner (bot, targetY, opts = {}) {
   const isStopped = opts.isStopped || (() => false)
   const surfaceY = Number.isFinite(opts.surfaceY) ? opts.surfaceY : targetY
   const prev = bot.pathfinder && bot.pathfinder.movements
@@ -752,7 +783,7 @@ async function branchMine (bot, item, count, opts = {}) {
     bootsIron: parseInt(process.env.ARMOR_BOOTSTRAP_IRON || '4', 10),
     ymin: parseInt(process.env.ARMOR_BOOTSTRAP_YMIN || '45', 10),
     ymax: parseInt(process.env.ARMOR_BOOTSTRAP_YMAX || '58', 10),
-    retreatDist: parseInt(process.env.ARMOR_BOOTSTRAP_RETREAT_DIST || '10', 10)
+    retreatDist: NAKED_RETREAT_DIST // one definition with mineDanger's band
   }
   const bootNow = () => mining.armorBootstrapMining(provShelter().armorPieceCount(bot), countItem(bot, 'raw_iron'), bootCfg)
   const boot0 = bootNow()
@@ -874,7 +905,12 @@ async function branchMine (bot, item, count, opts = {}) {
       // already at a worthwhile iron depth (e.g. y28) - STOP relocating and MINE HERE instead
       // of chasing y16 through cave-riddled ground and returning empty. The hit cave is an
       // opportunity: it exposes ore and the branch loop's wall-bycatch works it.
-      if (goodEnough()) { dbg('  branchMine: descent stopped at y=' + Math.floor(bot.entity.position.y) + ' (' + r.reason + ') - a workable iron depth, mining HERE not chasing y' + targetY); break }
+      // ...BUT NOT NAKED AT THE MOUTH OF A CAVE (2026-08-30). "The hit cave is an opportunity" was written for
+      // an armoured bot; a naked one that stops at the cave it just broke into and mines there is the
+      // 00:04/01:24 death exactly. Naked + the descent stopped on a void/cave -> relocate (the hop below).
+      const caveMouth = bootNow().active && /void|cave/i.test(r.reason || '')
+      if (goodEnough() && !caveMouth) { dbg('  branchMine: descent stopped at y=' + Math.floor(bot.entity.position.y) + ' (' + r.reason + ') - a workable iron depth, mining HERE not chasing y' + targetY); break }
+      if (goodEnough() && caveMouth) dbg('  branchMine: descent stopped at y=' + Math.floor(bot.entity.position.y) + ' on a cave (' + r.reason + ') and i am un-armoured - not mining at a cave mouth; relocating the entrance')
       // still too shallow: relocate the entrance (sidestep) and retry a fresh staircase.
       dbg('  branchMine: descent blocked (' + r.reason + ') and still shallow (y=' + Math.floor(bot.entity.position.y) + ') - relocating the entrance')
       const p = bot.entity.position; const [sx, sz] = mining.DIRS[(reloc + 1) % 4]
@@ -1051,7 +1087,7 @@ function mineDanger (bot) {
     if (flooding) pf.clearFlood()
   } catch {}
   if (flooding) { dbg('  mineDanger: the cells i just dug came back WATER - this tunnel is flooding, breaking out'); return true }
-  return nearHostile(bot, 6) || (bot.health ?? 20) < 12 || (process.env.LAVA_SAFE !== '0' && !!(bot.entity && (bot.entity.isInLava || bot.entity.onFire)))
+  return nearHostile(bot, retreatBand(bot)) || (bot.health ?? 20) < 12 || (process.env.LAVA_SAFE !== '0' && !!(bot.entity && (bot.entity.isInLava || bot.entity.onFire)))
 }
 
 module.exports = {

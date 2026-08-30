@@ -26,6 +26,7 @@ const maintain = require('./maintain.js')   // PURE buffer floors
 const provCore = require('./provision-core.js')
 const { countItem, isNight, AIRISH, SHELTER_HOSTILE } = provCore
 const worldMemory = require('./world-memory.js')
+const _sightingAt = {} // species -> last rememberSpot write (a write throttle, not a cooldown on any decision)
 const { loadWorldMem, recallInfra, knownBed, isSpawnSuspect, gearupState, bedUnobtainable, hutVerifiedNow } = worldMemory
 const provHut = require('./provision-hut.js')
 const { hutAnchor } = provHut
@@ -154,7 +155,20 @@ function survivalState (bot, opts = {}) {
   // (arbiter.jobSurvivalNeed: at food 7..13 with an empty pack and bank and nothing to hunt, food is a
   // chore the build outranks, not a crisis). Counted, not judged; an unloaded entity list reads 0.
   let animalsNear = 0
-  try { if (me) for (const e of Object.values(bot.entities || {})) { if (e && e.position && e.type === 'animal' && e.position.distanceTo(me) <= 32) animalsNear++ } } catch { animalsNear = 0 }
+  try {
+    if (me) {
+      for (const e of Object.values(bot.entities || {})) {
+        if (!(e && e.position && e.type === 'animal' && e.position.distanceTo(me) <= 32)) continue
+        animalsNear++
+        // A PLAYER REMEMBERS WHERE THE SHEEP WERE (2026-08-30). The wool hunt roamed blind from the hut for
+        // three days while sheep stood 60b from world spawn, seen every respawn. Every animal in sight is
+        // written to the resource map under 'mob:<name>' (the same rememberSpot the timber gather trusts;
+        // it merges within 24b and keeps the 20 best). Once a minute per species, so this read stays cheap.
+        const nm = String(e.name || '').toLowerCase()
+        if (nm && Date.now() - (_sightingAt[nm] || 0) > 60000) { _sightingAt[nm] = Date.now(); try { worldMemory.rememberSpot('mob:' + nm, e.position) } catch {} }
+      }
+    }
+  } catch { animalsNear = 0 }
   let drowning = false
   try { const h = me && bot.blockAt(me.floored().offset(0, 1, 0)); drowning = !!(h && /water|seagrass|kelp|bubble_column/.test(h.name)) } catch {}
   // The world-memory-backed flags each get their OWN guard: before, one of them throwing took the
@@ -523,15 +537,13 @@ async function schedulerState (bot) {
     // read "no bed obtainable" and the spawn bootstrap stayed suppressed, sending it to grind armour
     // instead of making the bed. A bed is only unobtainable if the latch holds AND none is craftable
     // from what is held NOW: a bed item, or >=3 of one wool colour + >=3 planks.
+    // (the arithmetic is provision-hut.bedCraftableFrom - ONE definition, shared with the night
+    //  bed-craft in nightRest, so "craftable" can never mean two things)
     s.bedUnobtainable = bedUnobtainable() && !(() => {
       try {
-        const items = bot.inventory ? bot.inventory.items() : []
-        if (items.some(i => /_bed$/.test(i.name))) return true
-        // planks OR logs (1 log = 4 planks): a bed is 3 wool of one colour + 3 planks, and the bot
-        // usually carries LOGS not planks, so counting only planks read 'unobtainable' with logs in hand.
-        const wool = {}; let planks = 0
-        for (const i of items) { if (/_wool$/.test(i.name)) wool[i.name] = (wool[i.name] || 0) + i.count; if (/_planks$/.test(i.name)) planks += i.count; if (/_log$/.test(i.name)) planks += i.count * 4 }
-        return planks >= 3 && Object.values(wool).some(n => n >= 3)
+        const counts = {}
+        for (const i of (bot.inventory ? bot.inventory.items() : [])) counts[i.name] = (counts[i.name] || 0) + i.count
+        return provHut.bedCraftableFrom(counts)
       } catch { return false }
     })()
   } catch { s.bedKnown = false; s.bedDist = null; s.spawnSuspect = false; s.spawnAnchored = false; s.bedUnobtainable = false }
@@ -571,7 +583,12 @@ async function schedulerState (bot) {
     if (!hut) s.baseLit = null
     else {
       const bl = loadWorldMem().baseLight
-      s.baseLit = !!(bl && bl.hut && bl.hut.x === hut.x && bl.hut.z === hut.z && (bl.torched || []).length > 0)
+      const ringLit = !!(bl && bl.hut && bl.hut.x === hut.x && bl.hut.z === hut.z && (bl.torched || []).length > 0)
+      // ...AND THE ROOM (2026-08-29): a lit ring around a dark bedroom is not a lit base - the mob
+      // that matters spawns INSIDE. hutInteriorLit is tri-state; an unreadable interior (chunk not
+      // loaded) neither adds nor removes a need (#10), so only a read FALSE marks the base unlit.
+      const roomLit = provHut.hutInteriorLit(bot, hut)
+      s.baseLit = ringLit && roomLit !== false
     }
   } catch { s.baseLit = null }
   // (timeOfDay was read here. It is read in journeyFacts now, alongside homeDist and folded in

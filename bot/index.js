@@ -61,7 +61,7 @@ const RESILIENT_ON = SCHED_ON && process.env.RESILIENT_RECOVERY !== '0' // #41: 
 // Live brain settings the dashboard can change on the fly; brain-llm.js polls
 // GET /brain each tick and switches model / goal / on-off without a restart.
 const brainSettings = {
-  model: process.env.LLM_MODEL || 'qwen3:14b',
+  model: process.env.LLM_MODEL || 'gemma4:12b',
   goal: process.env.GOAL || 'Stay near players, help when asked, and behave like a normal survival player.',
   enabled: true
 }
@@ -221,6 +221,32 @@ const bot = mineflayer.createBot({
   disableChatSigning: true
 })
 
+// ONLY THE BRAIN SPEAKS (2026-08-29, operator rule). Every autonomous status/progress/error line -
+// "setting up a wheat farm by the water", "build done: 40/40 placed", "provisioning error: ..." -
+// is code narration emitted via a bare bot.chat(), NOT the persona. The operator wants the LLM
+// brain to be the only voice in chat, so the raw sender is captured here and bot.chat is replaced
+// by a policy:
+//   - PASS server slash-commands (/give, /tp, /fill, /setblock - operator-invoked, functional, not
+//     chatter). The autonomous brain can never reach these (CHEAT_CMDS gate), so this only ever
+//     lets an OPERATOR's admin command through.
+//   - Deliberate speech (the `say` command: brain persona + operator !say) calls bot._rawChat
+//     directly, so it bypasses this mute and is heard.
+//   - DROP every other bare bot.chat(), recording it to the flight recorder so no diagnostic is
+//     lost - it just stops reaching public chat.
+// BOT_CHATTER=1 restores the old always-chat behavior byte-for-byte.
+// bot.chat is injected by a mineflayer plugin and does NOT exist synchronously after createBot()
+// (reading it here threw "Cannot read properties of undefined"). Defer the wrap to 'login', by
+// which point the chat plugin is installed. Guarded so it wraps exactly once.
+bot.once('login', () => {
+  if (typeof bot.chat !== 'function' || bot._rawChat) return
+  bot._rawChat = bot.chat.bind(bot)
+  bot.chat = (msg) => {
+    const s = String(msg)
+    if (s.startsWith('/') || process.env.BOT_CHATTER === '1') return bot._rawChat(s)
+    note(`(chat muted) ${s.slice(0, 200)}`) // narration goes to the log, not to chat - only the brain speaks
+  }
+})
+
 let connected = false // live connection state - the ONLY honest source for /health (see bot.on('end'))
 body.install(bot) // hooks physicsTick + the four events that can switch mineflayer's simulation off (body.js)
 
@@ -232,7 +258,12 @@ body.install(bot) // hooks physicsTick + the four events that can switch minefla
 const holdPremiseOK = kind => {
   if (kind !== 'sheltered') return true
   try { if (bot.isSleeping) return true } catch {}
-  try { if (provRecovery.isResting && provRecovery.isResting()) return true } catch {}
+  // (isResting() no longer vouches here, 2026-08-29 23:27 live: it is the LATCH of the very job whose
+  //  stillness is being judged. nightShelter hung inside a bunker re-entry goto - a sunken staircase
+  //  whose bot.dig never resolved - in the OPEN, in a crater at world spawn, at night; isResting() was
+  //  true, so the premise held, the watchdog stood down, gatingDispatch muted the tick, and nothing in
+  //  the process could act until the 600s lease. A premise is a fact about the WORLD: asleep, inside
+  //  own walls, or under a sealed lid near the surface - the reads below. A label is not a premise.)
   try { if (provHut.insideOwnStructure && provHut.insideOwnStructure(bot)) return true } catch {}
   // A SEALED NIGHT PIT is a ceiling a few blocks under the SURFACE - the 2026-07-29 case this
   // whole mechanism exists for (digInForNight caps a shallow hole and sets no latch, so nothing
@@ -595,7 +626,6 @@ let autoRecoverTries = 0 // consecutive auto death-drop recovery attempts (cappe
 const runner = {
   graveCooldownUntil: 0, // a grave we just failed to open/reach - verdict-classed, not blanket
   hpCooldownUntil: 0, // after a heal attempt: give regeneration a window
-  maintainCooldownUntil: 0 // 10 min after a real pass, 5 after a no-op/bail
   // `ladderBlock` and `noOp` LIVED HERE, and both are deleted (structural review D3 / §3.6).
   // They were two latches keyed on the same fingerprint - scheduler.recoverySignature - saying
   // the same true sentence ("re-running a plan whose inputs have not changed cannot produce a
@@ -1097,7 +1127,9 @@ const TICK_GATES = [
   ['escaping', () => !!(commands.isEscaping && commands.isEscaping()), 'commands.releaseBodyClaims'],
   ['nav-recovering', () => !!navigate.isRecovering(), 'navigate.releaseNavLatches'],
   ['nav-unstick', () => !!navigate.isUnsticking(), 'navigate.releaseNavLatches'],
-  ['sleeping', () => !!bot.isSleeping, 'engine-state']
+  // GROUNDED (2026-08-30, #10): the engine flag alone is not evidence - a stale isSleeping would mute the
+  // chooser forever with no line written. A sleeping body is standing in a bed.
+  ['sleeping', () => !!bot.isSleeping && (() => { try { const p = bot.entity.position.floored(); for (const dy of [0, -1]) { const b = bot.blockAt(p.offset(0, dy, 0)); if (b && /_bed$/.test(b.name)) return true } } catch {} return false })(), 'engine-state']
 ]
 if (SCHED_ON) {
   const GRAVE_NEAR_LADDER = Number(process.env.GRAVE_NEAR_LADDER || 32)
@@ -1472,13 +1504,21 @@ if (SCHED_ON) {
     }
     return { job: c.job, cls: c.cls, reason: c.reason, preempt: !!c.preempt, bootstrap: c.bootstrap }
   }
+  // EVERY EARLY RETURN NAMES ITSELF (2026-08-30 03:17-03:27, live: ten minutes with no (core)/(sched) line,
+  // the liveness stamp fresh, the pick 149s stale - "an early-return guard AFTER the stamp mutes the chooser
+  // silently"). One line per distinct reason per TICK_STALE_MS (#7, #8).
+  let schedEarlyKey = ''; let schedEarlyAt = 0
+  const noteEarlyReturn = (why) => { const now = Date.now(); if (why === schedEarlyKey && now - schedEarlyAt < TICK_STALE_MS) return; schedEarlyKey = why; schedEarlyAt = now; note('(sched) tick returned early: ' + why) }
   const tick = async () => {
     const myGen = tickGen // S7 tick-liveness: capture this chain's generation; the finally only reschedules if still current
     schedLastTickAt = Date.now() // S7: liveness stamp - the watchdog re-arms the chain if this goes >90s stale
     try {
       // 1. GUARDS (cheap; mirror the crisis reflexes). NOT gated on arbiter.maneuverActive() - a
       //    survival preempt must be able to interrupt a nav leg (same as FOOD_CRISIS today).
-      if (!bot.entity || gatingDispatch()) return // see gatingDispatch: a PROGRESS-tier dispatch (the build) no longer mutes the chooser for hours
+      if (!bot.entity) { noteEarlyReturn('no body entity'); return }
+      const gd = gatingDispatch() // see gatingDispatch: a PROGRESS-tier dispatch (the build) no longer mutes the chooser for hours
+      if (gd) { noteEarlyReturn('gated by the dispatch slot: ' + (gd.jobKey || gd.name || '?') + ' (a SURVIVE-tier job holds the body)'); return }
+      schedEarlyKey = ''
       // FARM_EXPAND's passive river-crossing note: O(1), self-throttled to <=1/60s, never
       // navigates. It rode the FOOD_SUPPLY timer purely because that timer existed; when that
       // timer was deleted (S5) this was the one line in it that still had a job to do.
@@ -1586,7 +1626,7 @@ if (SCHED_ON) {
         // asking `dispatchBusy()` here would have deleted the opportunistic pass outright. The
         // preempt arm below still proves the build owns the body (oppOwner === 'job') and still
         // waits for it to unwind before touching anything, so nothing double-drives.
-        if (gatingDispatch() || Date.now() < runner.maintainCooldownUntil) return
+        if (gatingDispatch()) return
         const checkupDue = Date.now() - schedOppLastWindowAt >= Number(process.env.OPP_CHECKUP_MS || 1800000)
         const elig = scheduler.oppMaintain(s, { checkupDue })
         if (!elig.ok) return
@@ -1617,16 +1657,15 @@ if (SCHED_ON) {
             // stocked and R2 had nothing to withdraw. FOOD_SURVIVAL=0 -> foodNeedPending is false
             // -> the 300s cooldown byte-for-byte.
             const foodNeedPending = process.env.FOOD_SURVIVAL !== '0' && (() => { try { return maintain.needs(s).some(n => n.key === 'packFood' || n.key === 'bankFood') } catch { return false } })()
-            const abandonCd = foodNeedPending ? Number(process.env.OPP_CRISIS_RETRY_MS || 60000) : 300000
             // bounded unwind wait: the aborted build settles at its next isStopped poll
             // (a mid-smelt unwind took ~33s live - commands.js resumeBuild); bail on crisis.
             const unwindBy = Date.now() + Number(process.env.OPP_UNWIND_MS || 90000)
             while ((commands.isBusy && commands.isBusy()) && Date.now() < unwindBy) {
               let crisis = null; try { crisis = provision.survivalNeed(bot, { foodThreshold: foodSec.busyPreemptFood() }) } catch {}
-              if (crisis) { runner.maintainCooldownUntil = Date.now() + abandonCd; return 'window abandoned - crisis (' + crisis.need + ') during unwind' + (foodNeedPending ? ' (food need pending - 60s retry)' : '') }
+              if (crisis) { return 'window abandoned - crisis (' + crisis.need + ') during unwind' + (foodNeedPending ? ' (food need pending - 60s retry)' : '') }
               await new Promise(r => setTimeout(r, 500))
             }
-            if (commands.isBusy && commands.isBusy()) { runner.maintainCooldownUntil = Date.now() + abandonCd; return 'window abandoned - build did not unwind in time' + (foodNeedPending ? ' (food need pending - 60s retry)' : '') }
+            if (commands.isBusy && commands.isBusy()) { return 'window abandoned - build did not unwind in time' + (foodNeedPending ? ' (food need pending - 60s retry)' : '') }
           }
           const windowEnd = Date.now() + Number(process.env.OPP_WINDOW_MS || 300000)
           const night = !!(provCore.isNight && provCore.isNight(bot))
@@ -1634,8 +1673,11 @@ if (SCHED_ON) {
             say: schedSay, nightIndoorOnly: night, opportunistic: true,
             isStopped: () => Date.now() > windowEnd
           })
-          const worked = !!(r && r.steps && r.steps.length && !/^bail/.test(r.reason || ''))
-          runner.maintainCooldownUntil = Date.now() + (worked ? 600000 : Number(process.env.OPP_NOOP_COOLDOWN_MS || 1800000))
+          // (the 10/30-minute post-pass cooldown is GONE, 2026-08-29: a bot at world spawn with the bed
+          //  plan half-done was told "cooling off after the last maintenance pass" for 30 minutes of
+          //  daylight after one survival bail. The chooser's attempt memory - "already tried this
+          //  here and it achieved nothing; moving, changing step or the world changing re-arms it" -
+          //  is the CONDITION this timer was standing in for, and it already governs this job.)
           schedOppLastWindowAt = Date.now()
           return 'opp window: ' + (r && r.steps && r.steps.length ? r.steps.join('+') : (r && r.reason) || 'nothing due')
         }).catch(e => { try { note('(sched) runJob(maintenancePass) leaked an error: ' + e.message) } catch {} })
@@ -2501,11 +2543,16 @@ if (process.env.AUTO_DEFEND !== '0') {
         }
       }
       let target = null; let best = 4 // only fight what's right next to us
+      // AN UNARMOURED BOT DOES NOT SWING AT AN ENDERMAN (2026-08-30 01:05, live, 5b from its own door at dusk):
+      // three auto-defend swings aggro'd a 40-hp mob that teleports and hits for 7; the wooden sword needed
+      // eight. A player looks away and walks indoors. Armoured, the fight is winnable and stays allowed.
+      const nakedNow = (() => { try { return provShelter.underArmored(bot) } catch { return true } })()
       for (const e of Object.values(bot.entities || {})) {
         if (!e || !e.position || e === bot.entity) continue
         if (e.type !== 'mob' && e.type !== 'hostile') continue // never players / animals / objects
         const name = e.name || ''
         if (!HOSTILE_RE.test(name) || NO_AUTO_MELEE.test(name)) continue
+        if (nakedNow && /enderman/i.test(name)) continue
         const d = e.position.distanceTo(me); if (d < best) { best = d; target = e }
       }
       // ROD_SUPPLY (M1): a spider we just fought in self-defense drops STRING - the one string
@@ -2957,9 +3004,13 @@ const server = http.createServer((req, res) => {
       const drop = gateSay(line, true) || gateImpactful(line) // brain: gated chat + repeat-guard
       if (drop) { note(`(cmd) ${line}${rz} -> skipped (${drop})`); return send(res, 200, `skipped: ${drop}`) }
       noteManualLook(line)
-      // S6: an incoming progress/survival command STOPS a running maintenance pass (the pass
-      // unwinds at its next poll; the incoming job takes the body). perception/chat never do.
-      if (provMaintain.isMaintaining && provMaintain.isMaintaining() && cls !== 'perception' && cls !== 'chat') provMaintain.stopMaintenance()
+      // S6: an incoming command STOPS a running maintenance pass ONLY when the gate let it PREEMPT
+      // (a crisis-grade survival command). 2026-08-29: this used to fire for ANY non-chat command,
+      // while the gate did not even count the pass as a body holder - so a brain `armorup` at full
+      // health killed the bed bootstrap every minute all day. Now 'maintain' is a body-hold latch in
+      // gate.js: a plain progress command is refused on the pass's behalf, and a survival command
+      // reaches here only as a PREEMPT verdict, which is the one case the pass must yield.
+      if (verdict && verdict.preempt && provMaintain.isMaintaining && provMaintain.isMaintaining()) provMaintain.stopMaintenance()
       try {
         const result = await commands.handle(bot, line, { source: fromSupervisor ? 'supervisor' : 'brain' })
         // A non-perception command is the brain's response to any waiting player,

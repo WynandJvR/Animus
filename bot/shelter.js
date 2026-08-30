@@ -129,9 +129,20 @@ function bedHoldMs (kind) {
 // wander and the distance the shelter code will walk home can never drift apart again (#4).
 const SHELTER_TOD = 12200
 const BED_TREK_RANGE = 32
+// "NIGHT" FOR A NAKED BOT IS THE SHELTER'S DEADLINE, NOT MIDNIGHT. isNight is tick 13000 (the world's
+// sensor); the naked bot's shelter fires at SHELTER_TOD, and the 800-tick seam between them is exactly
+// when it should already be indoors. This is the ONE definition: scheduler.nakedNight delegates here and
+// the arbiter's naked-night needs read it too - on 2026-08-30 the arbiter (isNight) and the shelter
+// (SHELTER_TOD) disagreed for 40s every dusk, and a corpse run set out in that window. Unmeasured
+// clock -> the isNight sensor alone (#10).
+function nakedNight (s) {
+  const x = s || {}
+  const tod = typeof x.timeOfDay === 'number' ? ((x.timeOfDay % 24000) + 24000) % 24000 : null
+  return !!x.isNight || (tod != null && tod >= SHELTER_TOD && tod < 23500)
+}
 
 module.exports = {
   AIRISH, shelterDiggable, feetCellDry, rankByDistance, alcoveSafe, farmConflict,
   sleepFailKind, bedHoldMs, BED_HOLD_MS, BED_HOLD_MONSTER_MS, BED_HOLD_FELLSHORT_MS,
-  SHELTER_TOD, BED_TREK_RANGE
+  SHELTER_TOD, BED_TREK_RANGE, nakedNight
 }

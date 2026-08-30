@@ -206,7 +206,9 @@ function jobSurvivalNeed (state, opts = {}) {
   // floor above is the daylight-safe catch that trips even with nothing else nearby.
   const hpLow = opts.hpLow != null ? opts.hpLow : 10
   const endangered = (s.isNight && !s.nightStuck) || (s.threatDist != null && s.threatDist <= 16) || (s.creeperDist != null && s.creeperDist <= 16)
-  if (s.hp != null && s.hp <= hpLow && endangered) return { tier: PRIORITY.SURVIVE, need: 'heal', reason: 'hp ' + s.hp + ' <= ' + hpLow + ' while ' + (s.isNight ? 'night' : 'threatened') }
+  // `via` names the need whose HOLD answers this one: a hurt bot heals by sitting still where it is safe,
+  // so the night shelter (or a famine hold indoors) IS the treatment - see holdAdmissible.
+  if (s.hp != null && s.hp <= hpLow && endangered) return { tier: PRIORITY.SURVIVE, need: 'heal', reason: 'hp ' + s.hp + ' <= ' + hpLow + ' while ' + (s.isNight ? 'night' : 'threatened'), via: 'shelter' }
   // HUNGER (SURVIVE): a progress job must not run while genuinely hungry (it mined starving)
   // AT NIGHT, HOME BEFORE HUNGER (2026-08-28 19:20). Food 6 ranked the food need above the night-shelter
   // need, secureFood became crisis-grade, and a naked bot foraged in the dark with its own registered
@@ -230,6 +232,10 @@ function jobSurvivalNeed (state, opts = {}) {
   // never comes (live: doDaylightCycle off, timeOfDay pinned) hiding is not a survivable
   // resolution - the bot must re-arm to get safe - so don't let "shelter" block progress
   // (gearup) forever. nightStuck is set once the night has demonstrably stopped ending.
+  // (isNight, tick 13000, ON PURPOSE: this is the CRISIS tier. The dusk head-start (SHELTER_TOD, shelter.js
+  // nakedNight) belongs to the scored chooser - "dusk approaching, heading home" - and to every outbound
+  // gate (scheduler.outboundBlocked/journeyAdmissible); making dusk a crisis here turned a walk home into
+  // the ladder's dig-in-where-you-stand.)
   if (s.isNight && s.underArmored && !s.nightStuck) return { tier: PRIORITY.SURVIVE, need: 'shelter', reason: 'night + under-armored' }
   return null
 }
@@ -264,6 +270,11 @@ function needRank (need) { const i = NEED_ORDER.indexOf(need || ''); return i < 
 // { ok, reason } - ok:false means the hold MAY NOT suppress anything.
 function holdAdmissible (crisis, holdNeed) {
   if (!crisis || crisis.tier < PRIORITY.SURVIVE) return { ok: true, reason: 'no crisis' }
+  // A HOLD THAT IS THE CRISIS'S OWN REMEDY IS NOT VOIDED BY IT (2026-08-29 23:49, live): "heal (hp 10 <= 10
+  // while night) outranks the shelter hold" let the brain's `goto camp` break the sealed night shelter
+  // and sprint a 10-hp naked bot 300b into the dark with a zombie on it. Regeneration needs stillness
+  // and safety; the shelter hold is how hp 10 at night becomes hp 20. The need says which hold treats it.
+  if (crisis.via && holdNeed && crisis.via === holdNeed) return { ok: true, reason: 'the ' + holdNeed + ' hold is the treatment for ' + crisis.need + ' (' + crisis.reason + ')' }
   const cr = needRank(crisis.need)
   const hr = needRank(holdNeed)
   if (cr < hr) return { ok: false, reason: `${crisis.need} (${crisis.reason}) outranks ${holdNeed ? 'the ' + holdNeed + ' hold' : 'peacetime work'}` }

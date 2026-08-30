@@ -64,7 +64,8 @@ function snap (over) {
 t('(#117) a FED, BEDLESS bot beds before it armors - "spawn" outranks "armor"', () => {
   assert.strictEqual(S.bootstrapNeed(snap()), 'spawn')
   // and the moment the anchor is real, armor is next in line (the order, not a muzzle)
-  assert.strictEqual(S.bootstrapNeed(snap({ spawnAnchored: true, bedKnown: true })), 'armor')
+  // (2026-08-29) an anchored naked bot is FREE - armour gates the build only while a death is expensive
+  assert.strictEqual(S.bootstrapNeed(snap({ spawnAnchored: true, bedKnown: true })), null)
 })
 
 t('(#117) a STARVING bedless bot still eats first - the anchor may never mask a food crisis', () => {
@@ -78,8 +79,11 @@ t('(#117) a STARVING bedless bot still eats first - the anchor may never mask a 
 t('(#117) a hut ON THE BOOKS that does not verify -> "shelter", ranked just after "armor"', () => {
   const armored = { spawnAnchored: true, bedKnown: true, armorPieces: 4 }
   assert.strictEqual(S.bootstrapNeed(snap({ ...armored, hutExists: true, hutVerified: false })), 'shelter')
-  // armor still wins over shelter (a naked bot in a broken hut arms itself first)
-  assert.strictEqual(S.bootstrapNeed(snap({ spawnAnchored: true, bedKnown: true, armorPieces: 0, hutExists: true, hutVerified: false })), 'armor')
+  // SAFE_BASE_FIRST (2026-08-29): a naked bot that HAS a home secures it (verify/repair the hut)
+  // BEFORE the naked iron grind - the iron excursion is a deadlock while unarmoured (gearup aborts
+  // "un-armoured at night is what keeps killing me"), so the free LOCAL safety comes first. A
+  // HOMELESS naked bot still arms first (no shelter/base clause is true - see the homeless test).
+  assert.strictEqual(S.bootstrapNeed(snap({ spawnAnchored: true, bedKnown: true, armorPieces: 0, hutExists: true, hutVerified: false })), 'shelter')
   // a hut the bot has SEEN this life is not a need
   assert.strictEqual(S.bootstrapNeed(snap({ ...armored, hutExists: true, hutVerified: true, homeReachable: true, homeDist: 5, baseLit: true })), null)
 })
@@ -88,8 +92,10 @@ t('(#117) the #103 muzzle is gone: a HOMELESS bot bootstraps something, never nu
   // This is the exact snapshot #103 returned null for: homeReachable false, no hut, no homeDist.
   const homeless = snap({ homeReachable: false, homeDist: null, hutExists: false })
   assert.strictEqual(S.bootstrapNeed(homeless), 'spawn', 'homeless => the need IS home (spawn), not nothing')
-  // ...and with an anchor already down it falls through to armor rather than to null.
-  assert.strictEqual(S.bootstrapNeed(snap({ ...homeless, spawnAnchored: true, bedKnown: true })), 'armor')
+  // ...and with an anchor already down (2026-08-29): the anchor makes a death cheap, so armour is no
+  // longer a gate on the build - the verdict is null (the castle's own gather runs; maintenance arms
+  // from banked iron). Homeless + no anchor still bootstraps spawn; a homeless anchored naked bot is free.
+  assert.strictEqual(S.bootstrapNeed(snap({ ...homeless, spawnAnchored: true, bedKnown: true })), null)
 })
 
 t('(#117) UNMEASURED IS NOT UNMET: a snapshot that never measured home invents no need', () => {
@@ -114,7 +120,7 @@ t('(BOOTSTRAP_PRIORITY=0) the whole tier is still off byte-for-byte, home verdic
 t("(#117 anti-loop) 'spawn' steps aside when the acquire plan is EXHAUSTED this life", () => {
   // No sheep, no wool, no bank bed: acquireBed exhausts and ensureSpawnBed records it. The verdict
   // must yield to armor so the bot gets on with its life - and this is a CONDITION, not a cooldown.
-  assert.strictEqual(S.bootstrapNeed(snap({ bedUnobtainable: true })), 'armor')
+  assert.strictEqual(S.bootstrapNeed(snap({ bedUnobtainable: true })), 'armor') // no anchor -> armour still gates
   assert.strictEqual(S.bootstrapNeed(snap({ bedUnobtainable: true, armorPieces: 4, hutExists: true, hutVerified: false })), 'shelter')
   // it only ever gates the ACQUIRE rung: a bed that EXISTS and is suspect is still re-anchored.
   assert.strictEqual(S.bootstrapNeed(snap({ bedUnobtainable: true, bedKnown: true, spawnSuspect: true })), 'spawn')
@@ -124,7 +130,7 @@ t("(#117 anti-loop) a standing UNCONFIRMED bed re-asserts only when the world ca
   const standing = { bedKnown: true, spawnAnchored: false, spawnSuspect: false }
   // Daylight: ensureSpawnBed has literally nothing to do but say "at nightfall". Firing here would
   // spin maintenancePass every tick and starve armor/base - so the verdict waits ON THE CONDITION.
-  assert.strictEqual(S.bootstrapNeed(snap({ ...standing, sleepableNow: false })), 'armor')
+  assert.strictEqual(S.bootstrapNeed(snap({ ...standing, sleepableNow: false })), 'armor') // unconfirmed anchor -> armour still gates
   // Night (or thunder): a sleep can be granted, so the anchor is fixable NOW.
   assert.strictEqual(S.bootstrapNeed(snap({ ...standing, sleepableNow: true })), 'spawn')
 })
@@ -233,8 +239,11 @@ t('(#117 pin) the #103 homeless=>null return is DELETED from the tree, not merel
   assert(!/homeReachable\s*&&\s*!\(s\.hutExists/.test(body), 'the homeless guard clause is still present')
 })
 
-t('(#117 pin) the verdict ORDER is in the source: food > spawn > armor > shelter > base', () => {
+t('(#117 pin / SAFE_BASE_FIRST) the verdict ORDER is in the source: food > spawn > shelter > base > armor', () => {
   const body = bodyOf(srcOf('scheduler.js'), 'function bootstrapNeed (snapshot) {')
+  // first occurrence of each verdict - the SAFE_BASE_FIRST branch comes first in source, so these
+  // pin the DEFAULT order. (The legacy armor-before-base order lives in the second set of returns,
+  // reached only under SAFE_BASE_FIRST=0.)
   const at = re => { const m = re.exec(body); assert(m, 'not found in bootstrapNeed: ' + re); return m.index }
   const food = at(/return 'food'/)
   const spawn = at(/return 'spawn'/)
@@ -242,9 +251,9 @@ t('(#117 pin) the verdict ORDER is in the source: food > spawn > armor > shelter
   const shelter = at(/return 'shelter'/)
   const base = at(/return 'base'/)
   assert(food < spawn, 'the food crisis must outrank the spawn anchor')
-  assert(spawn < armor, 'a fed bot beds BEFORE it armors - this is the whole slice')
-  assert(armor < shelter, 'shelter ranks just after armor')
-  assert(shelter < base, 'a lit base is the last of the home rungs')
+  assert(spawn < shelter, 'a fed bot beds BEFORE it secures/arms')
+  assert(shelter < base, 'verify the hut before lighting it')
+  assert(base < armor, 'SAFE_BASE_FIRST: secure the home base (verify+light, from banked coal) BEFORE the naked iron grind')
 })
 
 t('(#117 pin) no time-based hold anywhere in the new decision path', () => {

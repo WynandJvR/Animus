@@ -138,7 +138,11 @@ t('(#65/#74) bootstrapNeed: FOOD RESERVE outranks ARMOR (naked + empty bank -> f
   // #108: this used to assert the opposite under FOOD_RESERVE_FIRST=0. That second order is deleted;
   // the reserve is the enabler (a degraded window cannot climb to hp14 for the armor grind without it).
   assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: true, bankFoodPts: 0, baseLit: false })), 'food')
-  assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: true, bankFoodPts: STOCKED, baseLit: false })), 'armor', 'reserve stocked -> armor is next')
+  // baseLit:true isolates the food-vs-armor relationship this test is about: SAFE_BASE_FIRST
+  // (2026-08-29) now ranks an UNLIT base ahead of the naked iron grind, so with base unlit this
+  // would (correctly) return 'base' - see homefirsttest's order pin. With the base already lit,
+  // the next need after a stocked food reserve for a naked home bot is armor.
+  assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 0, homeReachable: true, bankFoodPts: STOCKED, baseLit: true })), 'armor', 'reserve stocked + base lit -> armor is next')
 }))
 t('(#65) bootstrapNeed: FOOD outranks BASE (armored, empty bank, base unlit -> food first)', () => withBootstrap(() => {
   assert.strictEqual(S.bootstrapNeed(snap({ hp: 20, food: 20, armorPieces: 4, homeReachable: true, bankFoodPts: 0, baseLit: false })), 'food')
@@ -948,9 +952,12 @@ t('(#41 P0.2) preemptCrisisGrade: recoverFromDegraded is crisis-grade at deathsR
 
 t('(#41 P0.4) admissibleUnderLatch: recovery-class cmds pass under the latch, else defer to admissible', () => withResilient(() => {
   // a survival cmd with NO vitals need + NO grave: HELD today, ALLOWED under the latch.
-  const noNeed = snap({ hp: 20, food: 20, armorPieces: 4, graves: [] })
+  // packFoodPts: 4 - the command must be one that CAN ACT (commandCanAct, 2026-08-29): an `eat` with
+  // an empty pack is refused up front, latch or no latch, and never preempts anything.
+  const noNeed = snap({ hp: 20, food: 20, armorPieces: 4, graves: [], packFoodPts: 4 })
   assert.strictEqual(S.admissible('survival', noNeed).allow, false, 'today: no need -> held')
   assert.strictEqual(S.admissibleUnderLatch('survival', 'eat', noNeed, true).allow, true, 'latch: survival cmd owns the body')
+  assert.strictEqual(S.admissibleUnderLatch('survival', 'eat', snap({ hp: 20, food: 20, armorPieces: 4, graves: [], packFoodPts: 0 }), true).allow, false, 'latch: an eat with nothing to eat cannot own the body')
   // a progress-class recovery MOVE (goto home) passes under the latch.
   assert.strictEqual(S.admissibleUnderLatch('progress', 'goto home', noNeed, true).allow, true, 'latch: goto home is a recovery move')
   assert.strictEqual(S.isRecoveryMove('recover'), true)
@@ -960,6 +967,30 @@ t('(#41 P0.4) admissibleUnderLatch: recovery-class cmds pass under the latch, el
   const old = process.env.RESILIENT_RECOVERY; process.env.RESILIENT_RECOVERY = '0'
   try { assert.strictEqual(S.admissibleUnderLatch('survival', 'eat', noNeed, true).allow, false, 'flag off -> today') }
   finally { if (old == null) delete process.env.RESILIENT_RECOVERY; else process.env.RESILIENT_RECOVERY = old }
+}))
+
+t('(2026-08-29) commandCanAct: a survival command whose producer is barred is refused BEFORE it can preempt', () => withResilient(() => {
+  // the tape: armorup x40/hour from a naked bot at night, 344b from home - gearup aborts every one in 5ms
+  const nakedNight = snap({ hp: 20, food: 20, armorPieces: 0, underArmored: true, isNight: true, homeDist: 344, deathsRecent: 3, deathsAway: 3, graves: [], timeOfDay: 15000 })
+  const c = S.commandCanAct('armorup', nakedNight)
+  assert.strictEqual(c.ok, false, 'naked at night: armorup cannot act')
+  assert.ok(/armorup cannot act now/.test(c.why), 'the refusal names the verb: ' + c.why)
+  assert.strictEqual(S.admissibleUnderLatch('survival', 'armorup', nakedNight, true).allow, false, 'under the latch it is still refused (no preempt)')
+  assert.strictEqual(S.admissible('survival', nakedNight, 'armorup').allow, false, 'without the latch too')
+  // by day, at home, fit: the excursion is admissible and the command may act
+  const dayHome = snap({ hp: 20, food: 20, armorPieces: 0, underArmored: true, isNight: false, homeDist: 5, deathsRecent: 0, graves: [], timeOfDay: 1000 })
+  assert.strictEqual(S.commandCanAct('armorup', dayHome).ok, true, 'fit by day at home -> may act')
+  // wear with nothing to wear / eat with nothing to eat / sleep with no bed
+  assert.strictEqual(S.commandCanAct('wear', snap({ packArmorPieces: 0 })).ok, false, 'wear: nothing to wear')
+  assert.strictEqual(S.commandCanAct('wear', snap({ packArmorPieces: 2 })).ok, true, 'wear: armour in the pack')
+  assert.strictEqual(S.commandCanAct('eat', snap({ packFoodPts: 0 })).ok, false, 'eat: nothing edible')
+  assert.strictEqual(S.commandCanAct('sleep', snap({ bedKnown: false })).ok, false, 'sleep: no bed')
+  assert.strictEqual(S.commandCanAct('sleep', snap({ bedKnown: true, sleepableNow: true })).ok, true, 'sleep: bed + night')
+  // recover: a grave 300b off for a naked bot at night is the crossing that kills - refused; 10b by day - allowed
+  assert.strictEqual(S.commandCanAct('recover', snap({ armorPieces: 0, underArmored: true, isNight: true, graves: [grave(300)] })).ok, false, 'recover: 300b at night naked')
+  assert.strictEqual(S.commandCanAct('recover', snap({ armorPieces: 0, underArmored: true, isNight: false, graves: [grave(10)] })).ok, true, 'recover: 10b by day')
+  // unknown verbs are never gated here (the busy-gate and the producer decide)
+  assert.strictEqual(S.commandCanAct('goto home', snap({})).ok, true, 'goto: not gated here')
 }))
 
 t('(#79) isDegraded: a naked bot with only an OUT-OF-BAND grave is NOT compound-degraded (flag on); raw-count under flag=0', () => {

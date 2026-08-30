@@ -1,6 +1,6 @@
 # Animus launcher - starts the BOT (connects per bot/config.json) and the BRAIN
-# (qwen3.5:4b via Ollama) in two windows. Edit bot/config.json once for your
-# server, make sure Ollama has qwen3.5:4b, then run this. See RUN.md.
+# (gemma4:12b via Ollama) in two windows. Edit bot/config.json once for your
+# server, make sure Ollama has gemma4:12b, then run this. See RUN.md.
 
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
@@ -18,7 +18,7 @@ if (-not (Test-Path (Join-Path $botDir 'node_modules'))) {
   Push-Location $botDir; npm install; Pop-Location
 }
 # Ollama + model check (non-fatal - warn only)
-$model = 'qwen3.5:4b'
+$model = 'gemma4:12b'
 try {
   $list = (& ollama list) 2>$null
   if ($list -notmatch [regex]::Escape($model)) {

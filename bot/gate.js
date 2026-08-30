@@ -71,7 +71,14 @@ const BODY_HOLD_LATCHES = [
   ['busy building', 'job'],
   ['night-resting', 'shelter'],
   ['securing food', 'foodRun'],
-  ['recovering-degraded', 'ladder']
+  ['recovering-degraded', 'ladder'],
+  // THE MAINTENANCE PASS HOLDS THE BODY TOO (2026-08-29, live all day): the bed bootstrap runs INSIDE
+  // maintenancePass, whose latch is 'maintain' - and it was not in this list, so to every brain
+  // command the body read IDLE, the command passed, and index.js's S6 rule then STOPPED the pass for
+  // it ("an incoming progress/survival command stops a running maintenance pass"). The brain issues
+  // `armorup` every minute; the bed plan never got past its first gather. Same claim registry, same
+  // stalled-lease void as the other four - a pass that is not advancing does not get to refuse.
+  ['maintaining', 'maintain']
 ]
 const BODY_HOLD_PRINCIPALS = BODY_HOLD_LATCHES.map(([, key]) => key)
 // The label shapes the sweep exercises, DERIVED from the table above. Re-typing a label here

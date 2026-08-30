@@ -68,10 +68,19 @@ function graveUrgencyRank (tier) { return tier === 'critical' ? 2 : (tier === 'u
 // outranks a richer SAFE one ONLY when GRAVE_URGENT is on (a rich safe grave can wait; a poor dying
 // one can't). Falls back to today's value-first, then newest. <0 => a sorts first. GRAVE_URGENT=0
 // (or no despawn clock) -> byte-equivalent to today's sort.
-function graveCompare (a, b, now) {
+// ...AND, GIVEN WHERE THE BODY IS, THE SAME SCORE THE CHOOSER USES (2026-08-30). The scheduler ranks
+// its snapshot rows by graveScore (net value over distance) and picked "near grave 2b"; this ranker
+// was value-only, so the handler it dispatched walked toward a richer grave 164b away at dusk. One
+// ranker: urgency first (a despawning grave does not keep), then net value per block of trek.
+function graveCompare (a, b, now, pos) {
   if (process.env.GRAVE_URGENT !== '0') {
     const ru = graveUrgencyRank(graveUrgency(b, now).tier) - graveUrgencyRank(graveUrgency(a, now).tier)
     if (ru) return ru
+  }
+  if (pos && Number.isFinite(pos.x) && Number.isFinite(pos.z)) {
+    const sc = g => graveScore({ value: graveValue(g), salvage: g.salvage, dist: Math.hypot(g.x - pos.x, g.z - pos.z) })
+    const ds = sc(b) - sc(a)
+    if (ds) return ds
   }
   return (graveValue(b) - graveValue(a)) || ((b.at || 0) - (a.at || 0))
 }
