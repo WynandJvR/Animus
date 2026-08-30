@@ -613,9 +613,7 @@ async function schedulerState (bot) {
         if (d <= 1.3 || d > 8 || (dropDist != null && d >= dropDist)) continue
         // NEVER dive for drops: items sunk in water lured the idle bot to the river bottom and it
         // drowned reclaiming its own death-drops (test server, verified by the server log).
-        const at = bot.blockAt(e.position.floored())
-        const above = bot.blockAt(e.position.floored().offset(0, 1, 0))
-        if ((at && /water/.test(at.name)) || (above && /water/.test(above.name))) continue
+        if (provCore.dropBlocked(bot, e)) continue // the one rule: water above/at/below, or a recorded death spot
         dropDist = d
       }
     }

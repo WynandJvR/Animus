@@ -31,7 +31,7 @@ const { loadWorldMem, saveWorldMem, rememberInfra, recallInfra, recallInfraVerif
 const provHut = require('./provision-hut.js')
 const { hutAnchor, hasSolidCeiling } = provHut
 const provFarm = require('./provision-farm.js')
-const { hasStandingFarm, tendWheatFarm, ensureWheatFarm, WHEAT_FARM_TARGET } = provFarm
+const { hasStandingFarm, tendWheatFarm, ensureWheatFarm, WHEAT_FARM_TARGET, farmSurfaceUnsafe } = provFarm
 const provShelter = require('./provision-shelter.js') // inWaterNow: don't fish from inside the pond
 const { inWaterNow } = provShelter
 const provBank = require('./provision-bank.js')
@@ -672,7 +672,11 @@ async function ensureFoodSupply (bot, opts = {}) {
       // tend returning true no longer blocks expansion - re-admit an under-target, un-maxed farm.
       const wf = loadWorldMem().wheatFarm
       const under = wf && (wf.cells || []).length > 0 && (wf.cells || []).length < WHEAT_FARM_TARGET && !wf.maxed
-      if (!tended || under) {
+      // A FULL FARM ON UNSAFE GROUND STILL GOES BACK TO THE SITER (2026-08-30 19:55, live: the 34-cell pond farm
+      // was "full", so ensureWheatFarm - where the surface survey and the re-site live - never ran, and the
+      // bot drowned in it an hour after the survey shipped). The survey is the condition, not the cell count.
+      const unsafe = !!(wf && !wf.dry && (wf.cells || []).length > 0 && !isStopped() && farmSurfaceUnsafe(bot, wf))
+      if (!tended || under || unsafe) {
         try { await ensureWheatFarm(bot, anchor, { isStopped, say }) } catch (e) { dbg('  foodSupply: expand failed (' + e.message + ')') }
       }
       return { ok: true, reason: 'wheat farm stands - tended it' }

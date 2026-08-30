@@ -25,9 +25,18 @@ const { dbg, setDebugSink } = require('./debug-sink.js').makeDebug('[build]') //
 const RESUME_FILE = process.env.RESUME_FILE || path.join(__dirname, 'resume-job.json') // env-overridable (test isolation)
 const RESUME_HOLD_MS = parseInt(process.env.RESUME_HOLD_MS || '900000', 10) // pause hold before autonomy resumes (15min)
 
-function persistResume (name, at) {
-  try { fs.writeFileSync(RESUME_FILE, JSON.stringify({ name, at: { x: at.x, y: at.y, z: at.z }, savedAt: new Date().toISOString() })) } catch (e) { dbg('persistResume FAILED: ' + e.message) }
+// THE SAVED BUILD CARRIES ITS FOOTPRINT (2026-08-30 20:33, live: the flat farm plot was sited at 244..249,-257..-252
+// - on the castle's own site at 244,68,-261 - because the build zone exists only while a build is RUNNING and the
+// resume record held nothing but a centre). `box` is the same avoid-box autoBuild sets as the live build zone.
+function persistResume (name, at, box) {
+  try {
+    const prev = (() => { try { return JSON.parse(fs.readFileSync(RESUME_FILE, 'utf8')) } catch { return null } })()
+    const keep = box || (prev && prev.name === name && prev.box) || undefined
+    fs.writeFileSync(RESUME_FILE, JSON.stringify({ name, at: { x: at.x, y: at.y, z: at.z }, box: keep, savedAt: new Date().toISOString() }))
+  } catch (e) { dbg('persistResume FAILED: ' + e.message) }
 }
+// The footprint every SITER asks (farm plot, shelter pit, mine entrance): the saved build's box, or null.
+function savedBuildBox () { const s = persistedResume(); return (s && s.box && Number.isFinite(s.box.x1)) ? s.box : null }
 
 function clearPersistedResume () { try { fs.unlinkSync(RESUME_FILE) } catch {} }
 
@@ -67,4 +76,4 @@ function finishDisposition (r) {
   return 'clear'                           // placed everything it set out to place
 }
 
-module.exports = { setDebugSink, persistResume, clearPersistedResume, persistedResume, markResumePaused, resumeHoldRemaining, finishDisposition, RESUME_FILE, RESUME_HOLD_MS }
+module.exports = { setDebugSink, persistResume, savedBuildBox, clearPersistedResume, persistedResume, markResumePaused, resumeHoldRemaining, finishDisposition, RESUME_FILE, RESUME_HOLD_MS }

@@ -31,6 +31,7 @@ const { loadWorldMem, saveWorldMem, listInfra, rememberInfra, forgetInfra, recal
   rememberSpot, clearSearched } = worldMemory
 const provHut = require('./provision-hut.js')
 const { hutAnchor, ownHutAt, hasSolidCeiling } = provHut
+const hutModelDims = () => { try { return require('./hut-model.js').DIMS } catch { return { w: 6, h: 5, l: 6 } } }
 
 // The provisioning layer, resolved at CALL time (see the note above).
 const P = () => require('./provision.js')
@@ -49,10 +50,16 @@ const WHEAT_FARM_TARGET = Number(process.env.WHEAT_FARM_TARGET || (process.env.F
 function farmFootprintHas (pos) {
   if (!pos || process.env.FARM_EXCLUDE_YFIX === '0') return false
   try {
-    const wf = loadWorldMem().wheatFarm
+    const m = loadWorldMem()
+    const wf = m.wheatFarm
+    const x = Math.floor(pos.x); const y = Math.floor(pos.y); const z = Math.floor(pos.z)
+    // the flat plot's rectangle + walkway is footprint too (nothing digs a pit in the walkway), and so is a
+    // plot still being leveled
+    if (wf && wf.plot && farm.rectHasCell(wf.plot, wf.plotY, x, y, z)) return true
+    if (m.dryPlot && m.dryPlot.rect && farm.rectHasCell(m.dryPlot.rect, m.dryPlot.baseY, x, y, z)) return true
     const cells = wf && wf.cells
     if (!cells || !cells.length) return false
-    return farm.footprintHasCell(cells, Math.floor(pos.x), Math.floor(pos.y), Math.floor(pos.z))
+    return farm.footprintHasCell(cells, x, y, z)
   } catch { return false }
 }
 
@@ -340,9 +347,11 @@ async function levelPlotCell (bot, cx, baseY, cz, { isStopped = () => false } = 
     const b = bot.blockAt(new Vec3(cx, y, cz)); const a = bot.blockAt(new Vec3(cx, y + 1, cz))
     if (b && b.boundingBox === 'block' && a && (AIRISH(a.name) || REPLACEABLE.test(a.name))) { ground = b; break }
   }
-  if (!ground) return false
+  // EVERY FAILED CELL SAYS WHY (2026-08-30 20:50, live: "leveled 0/2 of 20" and nothing else) - #7
+  const fail = (why) => { dbg('  level cell ' + cx + ',' + cz + ' -> ' + why + ' (target y' + baseY + ', me ' + bot.entity.position.floored() + ')'); return false }
+  if (!ground) return fail('no ground within y' + (baseY - 2) + '..' + (baseY + 3) + ' (' + [3, 2, 1, 0, -1, -2].map(d => { const b = bot.blockAt(new Vec3(cx, baseY + d, cz)); return (b ? b.name : '?') }).join('/') + ')')
   if (ground.position.y === baseY && AIRISH((bot.blockAt(ground.position.offset(0, 1, 0)) || { name: 'air' }).name)) return true // already flat
-  if (bot.entity.position.distanceTo(ground.position) > 4) { try { await gotoWithTimeout(bot, new goals.GoalNear(cx, ground.position.y, cz, 3), 8000) } catch { return false } }
+  if (bot.entity.position.distanceTo(ground.position) > 4) { try { await gotoWithTimeout(bot, new goals.GoalNear(cx, ground.position.y, cz, 3), 8000) } catch (e) { return fail('could not get within reach of ' + ground.name + ' at y' + ground.position.y + ' (' + (e && e.message) + ')') } }
   for (let dy = 1; dy <= 2; dy++) { // soft cover off first
     const v = bot.blockAt(ground.position.offset(0, dy, 0))
     if (v && !AIRISH(v.name) && /grass|fern|flower|dead_bush|snow|vine/.test(v.name)) { try { await bot.dig(v) } catch {} }
@@ -361,7 +370,7 @@ async function levelPlotCell (bot, cx, baseY, cz, { isStopped = () => false } = 
   if (ground.position.y < baseY) { // fill the dip ALL the way up with dirt (operator: "flat ground floor with dirt")
     let fills = 4
     while (ground.position.y < baseY && fills-- > 0 && !isStopped()) {
-      if (!await placeAt(bot, ground.position.offset(0, 1, 0), /^(dirt|coarse_dirt|grass_block)$/)) break
+      if (!await placeAt(bot, ground.position.offset(0, 1, 0), /^(dirt|coarse_dirt|grass_block)$/)) { dbg('  level cell ' + cx + ',' + cz + ': fill did not place at y' + (ground.position.y + 1) + ' (' + (placeAt.lastFail || 'no reason') + ', dirt ' + countItem(bot, 'dirt') + ', me ' + bot.entity.position.floored() + ')'); break }
       const nb = bot.blockAt(ground.position.offset(0, 1, 0))
       if (!nb || nb.boundingBox !== 'block') break
       ground = nb
@@ -383,124 +392,187 @@ async function levelPlotCell (bot, cx, baseY, cz, { isStopped = () => false } = 
   return true
 }
 
-// #87 DRY_HOME_FARM: establish/expand a hut-adjacent DRY farmland plot (no water, no bucket, no iron -
-// crops grow on dry farmland at ~half speed, and a PLANTED cell never reverts to dirt). Sited 6-14b off
-// the hut anchor, clear of the apron, on NATURAL flat grass/dirt only (anti-grief; tillableBank keeps it
-// to grass/dirt/coarse/rooted so we never dig/place inside the structure). Registered in the SAME
-// wheatFarm schema with `dry:true`, so tendWheatFarm/collect/exclusions all just work on it. Called ONLY
-// from ensureWheatFarm under the flag (flag off -> never invoked -> today byte-for-byte). No hydration/
-// water-within-4 gate exists to skip: the only water requirement is ensureWheatFarm's own `!waters.length`
-// defer, which this path is injected BEFORE. Returns true when the plot stands (established/expanded),
-// false to defer to the caller's fallback.
+// ==== THE NEAT FLAT FARM (2026-08-30, operator: "a neat flat area so it is safe and easy to harvest/plant") ==
+// The old dry plot scattered cells over a 6-14b annulus and leveled only the cells it meant to plant, on a
+// per-pass budget it never finished; the pond farm before it sat on a crater lip (135 fall-in rescues and 5
+// drownings in one day). A farm is now a RECTANGLE (PLOT_W x PLOT_L) at ONE height with a ONE-BLOCK WALKWAY
+// around it, and the rectangle+walkway is ONE surface (farm.plotSurfaceVerdict): every plot cell at baseY,
+// every walkway cell within a step, no water and no drop in it. It is surveyed from the world, leveled until
+// the survey passes (resumable across passes - the plot is remembered in world memory), and only THEN planted.
+const PLOT_W = Number(process.env.FARM_PLOT_W || 6)
+const PLOT_L = Number(process.env.FARM_PLOT_L || 6)
+
+// The ground of one column: the first full block below passable air, scanning aroundY+span..aroundY-span;
+// water anywhere in that column (or as the ground) marks the sample wet. Unreadable -> groundY null (#10).
+// The TRUE surface of one column, within +-`deep` of aroundY: the first full block (top-down) with a passable
+// cell above it. A column that is solid through the whole window is a HILL (its surface is above the window);
+// one that is open through the whole window is a CHASM. Both get an honest marker one past the window so the
+// verdict prices them as work/drops rather than mislabeling them - live 21:00 a stone hillside read as
+// "no ground within y59..64" because the first cut only ever scanned DOWN for the truth. Water or lava seen
+// anywhere in the walk marks the sample wet. Unreadable (unloaded chunk) is unknown, never a guess (#10).
+function groundAt (bot, x, z, aroundY, span = 3, deep = 8) {
+  let water = false
+  const passableAbove = (a) => AIRISH(a.name) || REPLACEABLE.test(a.name) || a.name === 'wheat'
+  for (let y = aroundY + deep; y >= aroundY - deep; y--) {
+    const b = bot.blockAt(new Vec3(x, y, z)); const a = bot.blockAt(new Vec3(x, y + 1, z))
+    if (!b || !a) return { groundY: null, water } // can't see the column - no verdict on it
+    if (/water|lava/.test(b.name) || /water|lava/.test(a.name)) water = true
+    if (b.boundingBox === 'block' && passableAbove(a)) return { groundY: y, water }
+  }
+  const top = bot.blockAt(new Vec3(x, aroundY + deep, z))
+  return { groundY: (top && top.boundingBox === 'block') ? aroundY + deep + 1 : aroundY - deep - 1, water } // a hill above the window, or a chasm below it
+}
+function surveyPlot (bot, rect, aroundY, margin = 1) {
+  return farm.rectCells(rect, margin).map(c => { const g = groundAt(bot, c.x, c.z, aroundY); return { x: c.x, z: c.z, groundY: g.groundY, water: g.water } })
+}
+// Is a STANDING farm's surface unsafe by the same survey? Its rectangle is the bounding box of its crop cells,
+// its ground is one below the crops. Unknown cells are not a verdict (unmeasured is not unmet).
+function farmSurfaceUnsafe (bot, wf) {
+  try {
+    const cells = (wf && wf.cells) || []
+    if (!cells.length) return false
+    const xs = cells.map(c => c.x); const zs = cells.map(c => c.z); const ys = cells.map(c => c.y).sort((a, b) => a - b)
+    const rect = { x1: Math.min(...xs), z1: Math.min(...zs), x2: Math.max(...xs), z2: Math.max(...zs) }
+    const baseY = ys[Math.floor(ys.length / 2)] - 1
+    const v = farm.plotSurfaceVerdict(surveyPlot(bot, rect, baseY), baseY, rect)
+    // every verdict is written, including "could not read it" - a silent false is how a survey that never
+    // ran and a survey that passed become indistinguishable in the tape (#7)
+    if (v.unknown > 0) { dbg('  farm survey: the standing farm ' + rect.x1 + '..' + rect.x2 + ',' + rect.z1 + '..' + rect.z2 + ' has ' + v.unknown + '/' + v.cells + ' unreadable column(s) from ' + bot.entity.position.floored() + ' - no verdict this pass'); return false }
+    if (v.ok) dbg('  farm survey: the standing farm ' + rect.x1 + '..' + rect.x2 + ',' + rect.z1 + '..' + rect.z2 + ' at y' + baseY + ' is one safe surface (' + v.cells + ' cells)')
+    if (!v.ok) dbg('  farm survey: the standing farm ' + rect.x1 + '..' + rect.x2 + ',' + rect.z1 + '..' + rect.z2 + ' at y' + baseY + ' is NOT one safe surface - water ' + v.water + ', drops ' + v.drops + ', dips ' + v.dips + ', bumps ' + v.bumps + ', walkway off ' + v.off + ' (' + v.cells + ' cells)')
+    return !v.ok
+  } catch { return false }
+}
+// Pick the rectangle near the hut that costs the least earth to make flat: anchors are stepped over the
+// annulus NEAR_MIN..NEAR_MAX off the hut box, the rectangle+walkway must clear the apron/avoid box and the
+// structure, baseY is the plot's median ground within 2 of the home floor, water or unreadable disqualifies.
+function choosePlotSite (bot, hut, { avoid = null, nearMin = 6, nearMax = 14 } = {}) {
+  const floorY = hut.y
+  const hw = hutModelDims().w; const hl = hutModelDims().l
+  const apron = { x1: hut.x - 2, z1: hut.z - 2, x2: hut.x + hw + 1, z2: hut.z + hl + 1 } // == onHutApron box
+  const overlapsApron = (r) => !(r.x2 + 1 < apron.x1 || r.x1 - 1 > apron.x2 || r.z2 + 1 < apron.z1 || r.z1 - 1 > apron.z2)
+  const cx0 = hut.x + hw / 2; const cz0 = hut.z + hl / 2
+  const keepOut = (() => { try { return P().buildKeepOut() } catch { return null } })() // the saved/live build footprint
+  let best = null; let tried = 0; let reads = 0
+  for (let ax = hut.x - nearMax - PLOT_W; ax <= hut.x + hw + nearMax; ax += 2) {
+    for (let az = hut.z - nearMax - PLOT_L; az <= hut.z + hl + nearMax; az += 2) {
+      const rect = farm.plotRect({ x: ax, z: az }, PLOT_W, PLOT_L)
+      const rcx = (rect.x1 + rect.x2) / 2; const rcz = (rect.z1 + rect.z2) / 2
+      const dist = Math.hypot(rcx - cx0, rcz - cz0)
+      if (dist < nearMin + Math.max(PLOT_W, PLOT_L) / 2 || dist > nearMax + Math.max(PLOT_W, PLOT_L) / 2) continue
+      if (overlapsApron(rect)) continue
+      if (avoid && farm.rectCells(rect, 1).some(c => inAvoidBox(avoid, c.x, c.z))) continue
+      if (keepOut && farm.rectCells(rect, 1).some(c => inAvoidBox(keepOut, c.x, c.z))) continue // never on the castle's site
+      if (farm.rectCells(rect, 1).some(c => ownHutAt({ x: c.x, y: floorY, z: c.z }))) continue
+      tried++
+      const samples = surveyPlot(bot, rect, floorY); reads += samples.length
+      const baseY = farm.plotBaseY(samples, rect, floorY, 2)
+      if (baseY == null) continue
+      const v = farm.plotSurfaceVerdict(samples, baseY, rect)
+      const sc = farm.scorePlotSite(v, dist)
+      if (sc == null) continue
+      if (!best || sc < best.score) best = { rect, baseY, verdict: v, score: sc, dist }
+    }
+  }
+  dbg('  wheat farm [plot]: surveyed ' + tried + ' rectangle(s) (' + reads + ' column reads) ' + (best ? '-> best ' + best.rect.x1 + '..' + best.rect.x2 + ',' + best.rect.z1 + '..' + best.rect.z2 + ' at y' + best.baseY + ' (' + best.verdict.work + ' block(s) of earth to move, ' + Math.round(best.dist) + 'b from the hut)' : '-> none is water-free and readable within 2 of the floor'))
+  return best
+}
+// Level the rectangle + walkway until the survey passes; bounded per pass (time/stop), resumable (the next
+// pass re-surveys). Fill comes from the pack, then the bank, then the ground (a player digs dirt).
+async function levelPlot (bot, rect, baseY, { isStopped = () => false, say = () => {}, hut = null } = {}) {
+  const LM = Number(process.env.FARM_LEVEL_MS || 90000)
+  const t0 = Date.now()
+  const samples = surveyPlot(bot, rect, baseY)
+  const todo = samples.filter(s => !s.water && s.groundY != null && (farm.inRect(rect, s.x, s.z, 0) ? s.groundY !== baseY : Math.abs(s.groundY - baseY) > 1))
+  const need = todo.reduce((n, s) => n + Math.max(0, (farm.inRect(rect, s.x, s.z, 0) ? baseY : baseY - 1) - s.groundY), 0)
+  if (need > 0 && countItem(bot, 'dirt') < Math.min(need, 32) && !isStopped()) {
+    try { await require('./resources.js').withdrawItems(bot, 'dirt', Math.min(need, 64), { near: hut || bot.entity.position, maxDist: 48 }) } catch {}
+    if (countItem(bot, 'dirt') < Math.min(need, 16) && !isStopped()) { try { await P().runGather(bot, 'dirt', Math.min(need, 32), { isStopped, restoreMovements: () => {}, home: { x: rect.x1, z: rect.z1 } }) } catch (e) { dbg('  wheat farm [plot]: dirt gather failed (' + e.message + ')') } }
+  }
+  const me = bot.entity.position
+  todo.sort((a, b) => Math.hypot(a.x - me.x, a.z - me.z) - Math.hypot(b.x - me.x, b.z - me.z))
+  let leveled = 0; let tried = 0
+  for (const c of todo) {
+    if (isStopped() || Date.now() - t0 > LM) break
+    tried++
+    const target = farm.inRect(rect, c.x, c.z, 0) ? baseY : (c.groundY > baseY ? baseY + 1 : baseY - 1) // the walkway only needs to be within a step
+    // levelPlotCell moves at most a 2-deep dip / 3-high bump per call (its own reach); a deeper hole is taken
+    // in steps toward the target - the crater cells the first pass "could not level" were 3+ deep.
+    let g = c.groundY; let ok = false
+    for (let step = 0; step < 4 && !isStopped(); step++) {
+      const sub = g < target ? Math.min(target, g + 2) : Math.max(target, g - 3)
+      try { ok = await levelPlotCell(bot, c.x, sub, c.z, { isStopped }) } catch { ok = false }
+      const now = groundAt(bot, c.x, c.z, sub).groundY
+      if (!ok || now == null || now === g) break
+      g = now
+      if (g === target) break
+    }
+    if (ok && g === target) leveled++
+  }
+  const v = farm.plotSurfaceVerdict(surveyPlot(bot, rect, baseY), baseY, rect)
+  dbg('  wheat farm [plot]: leveled ' + leveled + '/' + tried + ' of ' + todo.length + ' cell(s) needing work (' + Math.round((Date.now() - t0) / 1000) + 's, dirt ' + countItem(bot, 'dirt') + ') -> ' + (v.ok ? 'ONE FLAT SURFACE' : 'still ' + (v.dips + v.bumps + v.drops + v.off) + ' off' + (v.unknown ? ', ' + v.unknown + ' unreadable' : '') + (v.water ? ', ' + v.water + ' wet' : '')))
+  return v
+}
+
 async function ensureDryHomeFarm (bot, home, hut, { isStopped = () => false, say = () => {}, avoid = null, expand = false } = {}) {
   if (!hut) return false
-  // #96b: clear the stale watchdog stop-latch for the WHOLE establishment, not just the hoe block -
-  // the seed withdraw/grass-gather step was still being 6ms-killed by a latch armed at dispatch
-  // (live 10:50: hoe crafted, then 'no seeds (bank + grass empty)' with 4 seeds in the bank).
   if (process.env.DRY_FARM_CLEARSTOP !== '0') { try { S().clearSurvStop() } catch {} }
   const m = loadWorldMem()
   const NEAR_MIN = Number(process.env.DRY_FARM_NEAR_MIN || 6)
   const NEAR_MAX = Number(process.env.DRY_FARM_NEAR_MAX || 14)
-  const FLAT_SITE = process.env.FARM_FLAT_SITE !== '0'
-  const FLAT_MIN = Number(process.env.FARM_FLAT_MIN || 0.6)
-  const MIN_TILLABLE = Number(process.env.FARM_MIN_TILLABLE || 6)
-  const DIST_WEIGHT = Number(process.env.FARM_DIST_WEIGHT || 0.75)
-  const LEVEL = process.env.FARM_LEVEL !== '0'
   const TORCH = process.env.FARM_TORCH !== '0'
-  const floorY = hut.y // the hut infra y is the floor level - crops sit level with the home floor
-  const cx = hut.x + 2; const cz = hut.z + 2 // hut centre (6x6): the plot anchor + tend/collect centre
+  const floorY = hut.y
   const existingLen = (expand && m.wheatFarm && m.wheatFarm.cells && m.wheatFarm.cells.length) || 0
-  const onApron = (x, z) => x >= hut.x - 2 && x <= hut.x + 6 && z >= hut.z - 2 && z <= hut.z + 6 // == onHutApron box
-  // annulus 6-14b off the hut corner, off the apron, on NATURAL tillable ground (grass/dirt) with a
-  // replaceable/air cell above - NO water-adjacency requirement (dry mode). tillableBank keeps it to
-  // grass/dirt/coarse/rooted so tillCell takes directly (no sand/dirt-swap) and we never touch the hut.
-  const scanDry = () => {
-    const out = []; const seen = new Set()
-    for (let dx = -NEAR_MAX; dx <= NEAR_MAX; dx++) for (let dz = -NEAR_MAX; dz <= NEAR_MAX; dz++) {
-      const dist = Math.hypot(dx, dz)
-      if (dist < NEAR_MIN || dist > NEAR_MAX) continue
-      const gx = hut.x + dx; const gz = hut.z + dz; const k = gx + ',' + gz
-      if (seen.has(k) || onApron(gx, gz) || inAvoidBox(avoid, gx, gz)) continue
-      seen.add(k)
-      let ground = null
-      for (let y = floorY + 3; y >= floorY - 3; y--) {
-        const b = bot.blockAt(new Vec3(gx, y, gz)); const a = bot.blockAt(new Vec3(gx, y + 1, gz))
-        if (b && b.boundingBox === 'block' && a && (AIRISH(a.name) || REPLACEABLE.test(a.name))) { ground = b; break }
-      }
-      if (!ground || !farm.tillableBank(ground.name)) continue
-      if (ownHutAt(ground.position)) continue // never the hut structure itself (anti-grief). #115: ownHutAt (pure geometry over ALL records, verified or not) - an EXCLUSION must fail protective, so an unverified hut row still bans farming through it. insideOwnStructure is the verified CLAIM and fails closed the other way.
-      // #87c: 'flat' = LEVELABLE (within 1 of the floor) - the leveling pass below flattens +-1 cells,
-      // so demanding y===floorY exactly rejected a perfectly workable gentle slope (live 07:30: 369
-      // tillable, flat 0.22 -> deferred; the hut sits on a mild hill).
-      out.push({ x: gx, z: gz, y: ground.position.y, flat: Math.abs(ground.position.y - floorY) <= 1, block: ground })
-    }
-    return out
+  // THE PLOT: an expanding dry farm keeps its rectangle; otherwise the remembered in-progress one; otherwise pick.
+  let plot = (expand && m.wheatFarm && m.wheatFarm.plot) ? { rect: m.wheatFarm.plot, baseY: m.wheatFarm.plotY } : (m.dryPlot && m.dryPlot.rect ? m.dryPlot : null)
+  // a remembered plot that sits on the build's footprint (chosen before the footprint was known) is dropped
+  if (plot && !expand) { const ko = (() => { try { return P().buildKeepOut() } catch { return null } })(); if (ko && farm.rectCells(plot.rect, 1).some(c => inAvoidBox(ko, c.x, c.z))) { dbg('  wheat farm [plot]: the remembered plot ' + plot.rect.x1 + '..' + plot.rect.x2 + ',' + plot.rect.z1 + '..' + plot.rect.z2 + ' is on the build site - forgetting it'); delete m.dryPlot; saveWorldMem(); plot = null } }
+  if (!plot) {
+    const pick = choosePlotSite(bot, hut, { avoid, nearMin: NEAR_MIN, nearMax: NEAR_MAX })
+    if (!pick) { dbg('  wheat farm [plot]: no rectangle off the hut reads as a water-free, level-able site - deferring'); return existingLen > 0 }
+    plot = { rect: pick.rect, baseY: pick.baseY, at: Date.now() }
+    m.dryPlot = plot; saveWorldMem()
+    say('laying out a ' + PLOT_W + 'x' + PLOT_L + ' wheat plot by the hut - one flat level with a walkway round it')
   }
-  let cands = scanDry()
-  const tillable = cands.length
-  const flatFrac = tillable ? cands.filter(c => c.flat).length / tillable : 0
-  // fresh establish gates on the SAME flat-site scorer as the water path (only water-adjacency dropped):
-  // a rough/obstructed annulus is rejected so the caller can fall back to the legacy path. Expansion
-  // skips the gate (the plot already stands) and just adds whatever flat cells remain.
-  if (!expand) {
-    // #87c: dry mode gets its OWN flat threshold (default 0.35, DRY_FLAT_MIN) - 'flat' already means
-    // levelable (+-1) and the bounded leveling pass handles the rest; the water path's 0.6 stays.
-    const DRY_FLAT_MIN = Number(process.env.DRY_FLAT_MIN || 0.35)
-    const sc = farm.scoreFarmSite({ tillable, flatFrac, distHome: 0, target: WHEAT_FARM_TARGET }, { distWeight: DIST_WEIGHT, minTillable: MIN_TILLABLE, minFlatFrac: FLAT_SITE ? DRY_FLAT_MIN : 0 })
-    if (!sc.acceptable) { dbg('  wheat farm [dry]: annulus ' + NEAR_MIN + '-' + NEAR_MAX + 'b off the hut not acceptable (tillable ' + tillable + ', flat ' + flatFrac.toFixed(2) + ') - deferring to fallback'); return false }
+  const cx = Math.round((plot.rect.x1 + plot.rect.x2) / 2); const cz = Math.round((plot.rect.z1 + plot.rect.z2) / 2)
+  let verdict = farm.plotSurfaceVerdict(surveyPlot(bot, plot.rect, plot.baseY), plot.baseY, plot.rect)
+  if (verdict.unknown > 0 && Math.hypot(bot.entity.position.x - cx, bot.entity.position.z - cz) > 12) { try { await S().walkStaged(bot, cx, cz, { isStopped, range: 6, timeoutMs: 60000 }) } catch {} ; verdict = farm.plotSurfaceVerdict(surveyPlot(bot, plot.rect, plot.baseY), plot.baseY, plot.rect) }
+  if (!verdict.ok) {
+    if (verdict.water > 0) { dbg('  wheat farm [plot]: the remembered plot has water in it now (' + verdict.water + ' cell(s)) - forgetting it, picking again next pass'); delete m.dryPlot; saveWorldMem(); return existingLen > 0 }
+    if (verdict.unknown > 0) { dbg('  wheat farm [plot]: ' + verdict.unknown + ' plot cell(s) unreadable from here - not deciding on them'); return existingLen > 0 }
+    say(existingLen ? 'flattening the rest of the wheat plot' : 'flattening the wheat plot to one level before planting')
+    verdict = await levelPlot(bot, plot.rect, plot.baseY, { isStopped, say, hut })
+    if (!verdict.ok) return existingLen > 0 || !!m.dryPlot // the plot stands and is being worked; planting waits for a flat surface
   }
-  const ownedCols = new Set(((m.wheatFarm && m.wheatFarm.cells) || []).map(c => c.x + ',' + c.z))
-  cands = farm.orderBankCandidates(cands.filter(c => !ownedCols.has(c.x + ',' + c.z)), { x: cx, z: cz }) // grow contiguously outward from the hut
-  if (!cands.length) { dbg('  wheat farm [dry]: no un-owned flat cells left off the hut'); return existingLen > 0 }
-  // 1) a hoe - acquired via the resource model exactly as the water path (withdraw > craft > gather wood)
+  // FLAT. Tools and seeds, then plant the rectangle.
   let hoe = (bot.inventory ? bot.inventory.items() : []).find(i => /_hoe$/.test(i.name))
   if (!hoe) {
     try {
       const res = require('./resources.js')
-      // #96: the dry establish IS the survival plan - but it is usually dispatched from a ladder
-      // rung whose watchdog stop-latch is still armed, so runPlan's tasks skipped in ~6ms and the
-      // hoe chain NEVER ran (live: every ladder-context attempt, day or night). Clear the stale
-      // latch at this deliberate fresh dispatch; the watchdog re-arms if we genuinely stall.
-      if (process.env.DRY_FARM_CLEARSTOP !== '0') { try { S().clearSurvStop() } catch {} }
-      // #88: the chest cache goes stale-blind when the post-stash read fails (standing-on-chest) -
-      // a stale-empty cache made reconcile plan a multi-minute wood gather for a hoe/planks the bank
-      // held. Force a fresh bank read before planning; best-effort (cache still used if it fails).
-      try { const cell = provBank().resolveBankCell(bot); if (cell) await res.readChest(bot, cell) } catch (e2) { dbg('  wheat farm [dry]: bank re-read failed (' + e2.message + ') - planning from cache') }
+      try { const cell = provBank().resolveBankCell(bot); if (cell) await res.readChest(bot, cell) } catch (e2) { dbg('  wheat farm [plot]: bank re-read failed (' + e2.message + ') - planning from cache') }
       const rec = await res.reconcile(bot, { wooden_hoe: 1 }, { near: hut, maxAgeMs: 0, planOpts: { primaryWood: P().detectWood(bot) || 'oak' } })
-      dbg('  wheat farm [dry]: acquiring a wooden hoe (' + (rec.plan.tasks.map(t => `${t.type}:${t.item || t.output}`).join(' > ') || (rec.withdraws.length ? 'from bank' : 'from hand')) + ')')
+      dbg('  wheat farm [plot]: acquiring a wooden hoe (' + (rec.plan.tasks.map(t => `${t.type}:${t.item || t.output}`).join(' > ') || (rec.withdraws.length ? 'from bank' : 'from hand')) + ')')
       if (rec.withdraws.length || rec.plan.tasks.length) await res.runReconciled(bot, rec, { isStopped, say, home: hut })
-    } catch (e) { dbg('  wheat farm [dry]: hoe acquisition failed (' + e.message + ')') }
+    } catch (e) { dbg('  wheat farm [plot]: hoe acquisition failed (' + e.message + ')') }
     hoe = (bot.inventory ? bot.inventory.items() : []).find(i => /_hoe$/.test(i.name))
-    if (!hoe) { dbg('  wheat farm [dry]: still no hoe - deferred'); return existingLen > 0 }
+    if (!hoe) { dbg('  wheat farm [plot]: still no hoe - deferred'); return existingLen > 0 || !!m.dryPlot }
   }
-  // 2) seeds - bank-first then grass, same as the water path
+  const ownedCols = new Set((expand ? ((m.wheatFarm && m.wheatFarm.cells) || []) : []).map(c => c.x + ',' + c.z))
+  const cands = farm.rectCells(plot.rect, 0).filter(c => !ownedCols.has(c.x + ',' + c.z))
+    .map(c => ({ x: c.x, z: c.z, y: plot.baseY, block: bot.blockAt(new Vec3(c.x, plot.baseY, c.z)) }))
+    .filter(c => c.block && farm.tillableBank(c.block.name))
   const seedCount = () => countItem(bot, 'wheat_seeds')
-  const seedWant = process.env.FARM_SEED_TOPUP === '0' ? 3 : Math.max(3, Math.min(12, WHEAT_FARM_TARGET - existingLen))
+  const seedWant = Math.max(3, Math.min(12, cands.length))
   if (seedCount() < seedWant) {
     try { await S().walkStaged(bot, cx, cz, { isStopped, range: 6, timeoutMs: 60000 }) } catch {}
     await gatherSeedsNear(bot, seedWant, { isStopped, near: hut, say })
-    if (seedCount() < 1) { dbg('  wheat farm [dry]: no seeds (bank + grass empty) - deferred'); return existingLen > 0 }
+    if (seedCount() < 1) { dbg('  wheat farm [plot]: no seeds (bank + grass empty) - deferred'); return existingLen > 0 || !!m.dryPlot }
   }
-  say(expand ? 'expanding the home wheat plot - dry farmland, no commute' : 'planting a wheat plot right by the hut - dry farmland, no more food runs')
-  // 3) level the target cells to the hut floor Y (one baseY) so tills take + the plot is tidy - the
-  // orchard/water-farm levelPlotCell primitive, bounded. FARM_LEVEL=0 keeps today's no-level behavior.
-  const baseY = floorY
-  if (LEVEL && !isStopped()) {
-    if (countItem(bot, 'dirt') < 12 && !isStopped()) { try { await P().runGather(bot, 'dirt', 24, { isStopped, restoreMovements: () => {}, home: { x: cx, z: cz }, avoid }) } catch (e) { dbg('  wheat farm [dry]: dirt stock-up failed (' + e.message + ')') } }
-    const LB = Number(process.env.FARM_LEVEL_BUDGET || 48); const LM = Number(process.env.FARM_LEVEL_MS || 60000)
-    const t0 = Date.now(); let leveled = 0; let tried = 0
-    for (const c of cands.slice(0, 12)) {
-      if (isStopped() || tried >= LB || Date.now() - t0 > LM) break
-      tried++
-      try { if (await levelPlotCell(bot, c.x, baseY, c.z, { isStopped })) leveled++ } catch {}
-    }
-    dbg('  wheat farm [dry]: leveled ' + leveled + '/' + tried + ' cell(s) to baseY ' + baseY)
-    cands = farm.orderBankCandidates(scanDry().filter(c => !ownedCols.has(c.x + ',' + c.z)), { x: cx, z: cz }) // re-read the now-flat ground
-  }
-  // 4) till + plant (block-verified, exactly like the water path minus the sand/dirt-swap - we
-  // restricted to tillableBank ground). No hydration gate: dry farmland grows crops just fine.
+  if (!cands.length) { dbg('  wheat farm [plot]: every rectangle cell is planted' + (expand ? '' : ' or untillable')); return existingLen > 0 }
+  const me0 = bot.entity.position
+  const ordered = farm.orderCellsNearest(cands.map(c => ({ x: c.x, y: c.y, z: c.z, block: c.block })), me0)
   let planted = 0; let attempted = 0; const plantedCells = []
-  for (const cell of cands.slice(0, 12).map(c => c.block)) {
+  for (const cell of ordered.slice(0, 12).map(c => c.block)) {
     if (isStopped() || seedCount() < 1) break
     attempted++
     try {
@@ -508,56 +580,46 @@ async function ensureDryHomeFarm (bot, home, hut, { isStopped = () => false, say
       const veg = bot.blockAt(cell.position.offset(0, 1, 0))
       if (veg && !AIRISH(veg.name)) { try { await bot.dig(veg) } catch {} }
       const tr = await tillCell(bot, cell)
-      if (tr === 'nohoe') { dbg('  wheat farm [dry]: hoe vanished mid-pass - aborting'); break }
-      if (tr !== 'farmland') { dbg('  wheat farm [dry]: till did not take at ' + cell.position.toString() + ' (' + tr + ', got ' + ((bot.blockAt(cell.position) || {}).name || '?') + ')'); continue }
+      if (tr === 'nohoe') { dbg('  wheat farm [plot]: hoe vanished mid-pass - aborting'); break }
+      if (tr !== 'farmland') { dbg('  wheat farm [plot]: till did not take at ' + cell.position.toString() + ' (' + tr + ', got ' + ((bot.blockAt(cell.position) || {}).name || '?') + ')'); continue }
       const tilled = bot.blockAt(cell.position)
       const seeds = (bot.inventory ? bot.inventory.items() : []).find(i => i.name === 'wheat_seeds')
       if (!seeds) break
       await bot.equip(seeds, 'hand')
       const cropPos = cell.position.offset(0, 1, 0)
-      try { await bot.placeBlock(tilled, new Vec3(0, 1, 0)) } catch (e) { dbg('  wheat farm [dry]: seed place threw (' + e.message + ')') }
+      try { await bot.placeBlock(tilled, new Vec3(0, 1, 0)) } catch (e) { dbg('  wheat farm [plot]: seed place threw (' + e.message + ')') }
       await new Promise(r => setTimeout(r, 200))
       const crop = bot.blockAt(cropPos)
       if (crop && crop.name === 'wheat') { planted++; plantedCells.push({ x: cropPos.x, y: cropPos.y, z: cropPos.z }); await boneMealBlock(bot, cropPos, 2) }
-      else dbg('  wheat farm [dry]: seed did NOT take at ' + cropPos.x + ',' + cropPos.y + ',' + cropPos.z + ' (got ' + ((crop && crop.name) || '?') + ')')
-    } catch (e) { dbg('  wheat farm [dry]: cell failed (' + e.message + ')') }
+      else dbg('  wheat farm [plot]: seed did NOT take at ' + cropPos.x + ',' + cropPos.y + ',' + cropPos.z + ' (got ' + ((crop && crop.name) || '?') + ')')
+    } catch (e) { dbg('  wheat farm [plot]: cell failed (' + e.message + ')') }
   }
-  // 5) merge with the standing dry plot (expansion) + persist under the SAME schema + dry:true. On a
-  // fresh establish this SUPERSEDES a far water farm (its record is dropped here; its pond stays in the
-  // infra registry via rememberInfra for a future bucket-hydration upgrade). Only overwrite on success,
-  // so a failed pass never strands the bot farm-less.
   const prior = expand ? ((m.wheatFarm && m.wheatFarm.cells) || []) : []
   const byKey = new Map()
   for (const c of prior) byKey.set(c.x + ',' + c.y + ',' + c.z, { x: c.x, y: c.y, z: c.z })
   for (const c of plantedCells) byKey.set(c.x + ',' + c.y + ',' + c.z, c)
   const merged = [...byKey.values()]
-  if (!merged.length) { dbg('  wheat farm [dry]: could not plant any cell (none verified as wheat) - leaving any existing farm intact'); return false }
+  if (!merged.length) { dbg('  wheat farm [plot]: could not plant any cell (none verified as wheat) - leaving any existing farm intact'); return !!m.dryPlot }
   const eligibleRemaining = Math.max(0, cands.length - attempted)
   const maxed = farm.expansionMaxed({ expand: true, planted, eligibleRemaining, cells: merged.length, target: WHEAT_FARM_TARGET })
-  const prevHealth = expand && m.wheatFarm ? m.wheatFarm.cellHealth : undefined // carry the tend cell-health ledger across an expansion
-  m.wheatFarm = { x: cx, y: baseY, z: cz, cells: merged, at: Date.now(), maxed, dry: true }
+  const prevHealth = expand && m.wheatFarm ? m.wheatFarm.cellHealth : undefined
+  if (!expand && m.wheatFarm && m.wheatFarm.cells && m.wheatFarm.cells.length && !m.wheatFarm.dry) {
+    // THE OLD FARM IS RETIRED, NOT FORGOTTEN: its record moves aside (the crater/pond plot stops being tended
+    // and stops being walked to); the exclusion zones follow the new plot.
+    m.wheatFarmOld = Object.assign({}, m.wheatFarm, { retiredAt: Date.now(), why: 'surface unsafe - replaced by the flat plot at ' + cx + ',' + cz })
+    dbg('  wheat farm [plot]: retired the old ' + m.wheatFarm.cells.length + '-cell farm at ' + m.wheatFarm.x + ',' + m.wheatFarm.z + ' - the flat plot at ' + cx + ',' + cz + ' replaces it')
+    say('moving the wheat off that crater - the new flat plot by the hut replaces it')
+  }
+  m.wheatFarm = { x: cx, y: plot.baseY, z: cz, cells: merged, at: Date.now(), maxed, dry: true, plot: plot.rect, plotY: plot.baseY }
   if (prevHealth) m.wheatFarm.cellHealth = prevHealth
+  delete m.dryPlot
   saveWorldMem()
-  dbg('  wheat farm [dry]: ' + planted + ' new cell(s), ' + merged.length + ' total at the hut (' + cx + ',' + cz + ')' + (maxed ? ' [site maxed - ' + eligibleRemaining + ' eligible left]' : ''))
-  if (planted) say(`home wheat plot ${expand ? 'expanded' : 'planted'} (${merged.length} cells) by the hut - dry farmland, bread without the commute`)
-  if (TORCH) { try { await placeFarmTorches(bot, merged, { isStopped }) } catch (e) { dbg('  wheat farm [dry]: torch pass failed (' + e.message + ')') } }
+  dbg('  wheat farm [plot]: ' + planted + ' new cell(s), ' + merged.length + '/' + farm.rectCells(plot.rect, 0).length + ' of the rectangle planted at the hut (' + cx + ',' + cz + ', y' + plot.baseY + ')' + (maxed ? ' [site maxed - ' + eligibleRemaining + ' eligible left]' : ''))
+  if (planted) say(`flat wheat plot ${expand ? 'expanded' : 'planted'} (${merged.length} cells) by the hut`)
+  if (TORCH) { try { await placeFarmTorches(bot, merged, { isStopped }) } catch (e) { dbg('  wheat farm [plot]: torch pass failed (' + e.message + ')') } }
   return true
 }
 
-// ==== #118 FARM_SITED_FROM_HOME - Root F (§3.6) ==========================================
-// Siting the farm used to be answered by "nearest remembered water to MY FEET, within 300b",
-// fed into a ladder where remembering ANYTHING short-circuited looking. Two functions replace it:
-// surveyWaterSite establishes a water column's farmable properties WHERE THE OBSERVATION IS, and
-// chooseFarmSite compares every option - remembered and freshly discovered - anchored on HOME.
-
-// THE water-record qualifier. Item 10: these properties used to be established 150 seconds of
-// walking LATER, on arrival, by an `if (!openWater) forgetInfra(); continue` purge loop, while
-// the write side stored a bare x/y/z - so the y that would have unmasked cave water at y48 was
-// stored and never consulted. Qualification happens at WRITE time now; the arrival check demotes
-// to a cheap assertion that CORRECTS the record instead of blindly erasing it.
-// Bounded + read-only (one sky column, two rings of bank cells) - a siting-time call, never
-// per-tick (body-first). UNKNOWN is honest per Root A: an unloaded column returns openSky:null,
-// never true, so an unreadable pond is unverified rather than accidentally good.
 function surveyWaterSite (bot, pos) {
   const readCell = (c) => { try { return require('./pathfix.js').readCell(bot, c) } catch { return { known: false, block: null } } }
   const X = Math.floor(pos.x); const Y = Math.floor(pos.y); const Z = Math.floor(pos.z)
@@ -690,8 +752,10 @@ async function ensureWheatFarm (bot, home, { isStopped = () => false, say = () =
   const hutA = hutAnchor()
   const standingNearHut = !!(m.wheatFarm && m.wheatFarm.cells && m.wheatFarm.cells.length > 0 && hutA &&
     Math.hypot(m.wheatFarm.x - hutA.x, m.wheatFarm.z - hutA.z) <= DRY_FARM_NEAR)
+  // a standing NON-dry farm near the hut is kept only while its surface survey passes (farmSurfaceUnsafe)
+  const standingUnsafe = DRY_HOME_FARM && standingNearHut && !(m.wheatFarm && m.wheatFarm.dry) && farmSurfaceUnsafe(bot, m.wheatFarm)
   const dryMode = DRY_HOME_FARM
-    ? farm.dryHomeFarmMode({ flag: true, hutExists: !!hutA, standingNearHut, farmIsDry: !!(m.wheatFarm && m.wheatFarm.dry), cells: existingLen, target: WHEAT_FARM_TARGET, maxed: !!(m.wheatFarm && m.wheatFarm.maxed) })
+    ? farm.dryHomeFarmMode({ flag: true, hutExists: !!hutA, standingNearHut, farmIsDry: !!(m.wheatFarm && m.wheatFarm.dry), cells: existingLen, target: WHEAT_FARM_TARGET, maxed: !!(m.wheatFarm && m.wheatFarm.maxed), standingUnsafe })
     : 'off'
   // ...but a far, maxed/at-target water farm must NOT early-return when dry mode wants to SUPERSEDE it
   // (dryMode 'establish' means no standing farm is near the hut, so the far one may be replaced).
@@ -1544,6 +1608,7 @@ async function plantGrove (bot, home, logItem, { isStopped = () => false, say = 
 }
 
 module.exports = {
+  farmSurfaceUnsafe, surveyPlot,
   setDebugSink,
   surveyWaterSite, chooseFarmSite, // #118 FARM_SITED_FROM_HOME (Root F)
   WHEAT_FARM_TARGET, farmFootprintHas, farmSupportHas, cropExclusionStep, cropPlaceExclusion, inAvoidBox, boneMealBlock, withdrawSeedsFromBank, gatherSeedsNear, placeFarmTorches, ensureWheatFarm, replantCropCell, tendWheatFarm, hasStandingFarm, saplingFor, saplingCount, plantSaplingNear, boneMealSapling, fishSaplings, plantGrove

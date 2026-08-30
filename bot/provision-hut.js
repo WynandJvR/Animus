@@ -437,8 +437,11 @@ async function healHomeCrater (bot, at, opts = {}) {
         }
         if (!ok && bot.entity.position.distanceTo(tv.offset(0.5, 0.5, 0.5)) > 4.6) continue
       }
-      let ok = await placeAt(bot, tv, DIRTLIKE) // cheap filler first (save planks)
-      if (!ok) ok = await placeAt(bot, tv, ANYFILL)
+      // EARTH ONLY (2026-08-30, operator: "floating wooden blocks"): the plank fallback bridged the door crater with
+      // planks one block above its floor - a floating wooden shelf a player would never leave. No filler aboard ->
+      // fetch dirt from the bank (it holds a hundred) instead of reaching for planks.
+      if (!(bot.inventory ? bot.inventory.items() : []).some(i => DIRTLIKE.test(i.name))) { try { await require('./resources.js').withdrawItems(bot, 'dirt', 32, { near: at, maxDist: 48 }) } catch {} }
+      const ok = await placeAt(bot, tv, DIRTLIKE)
       if (ok) { filled++; targets.splice(i, 1); i--; progress = true }
     }
   }
@@ -608,8 +611,7 @@ async function underpinHutFloor (bot, at, opts = {}) {
         if (!reached) continue
       }
       if (occupied(t)) continue // we moved; a mob may have wandered in
-      let ok = await placeAt(bot, v, DIRTLIKE)   // cheap filler first (save planks for the fabric)
-      if (!ok) ok = await placeAt(bot, v, ANYFILL)
+      const ok = await placeAt(bot, v, DIRTLIKE) // earth only - the filler is acquired above; planks are fabric, not fill (2026-08-30)
       if (ok) { filled++; targets.splice(i, 1); i--; progress = true }
     }
   }
@@ -1650,6 +1652,22 @@ async function repairHutStructure (bot, hut, opts = {}) {
 // Walk to REMEMBERED ones (up to 3 nearest) and verify each still stands; forget the dead.
 // Trying only the single nearest made one stale entry cause a brand-new placement while a
 // perfectly good chest stood 9 blocks further (live: three chests at one site).
+// A STATION YOU CANNOT STAND DRY BESIDE IS NOT A STATION (2026-08-30 19:53, live): the old pond farm left four
+// crafting tables in the crater at y60-62; ensureTable walked to the NEAREST table and the bot stood in the
+// water at hp 9 with the drown ladder revoking every rung. Usable = at least one of the four side cells is
+// standable (passable feet+head, solid floor) and dry. One world read per side; unreadable -> not usable.
+function stationUsable (bot, pos) {
+  try {
+    const wet = b => !!b && /water|lava|kelp|seagrass|bubble_column/.test(b.name)
+    const passable = b => !!b && (AIRISH(b.name) || (b.boundingBox === 'empty' && !wet(b)))
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const feet = bot.blockAt(new Vec3(pos.x + dx, pos.y, pos.z + dz)); const head = bot.blockAt(new Vec3(pos.x + dx, pos.y + 1, pos.z + dz)); const floor = bot.blockAt(new Vec3(pos.x + dx, pos.y - 1, pos.z + dz))
+      if (!feet || !head || !floor) continue
+      if (passable(feet) && passable(head) && floor.boundingBox === 'block' && !wet(feet) && !wet(head) && !wet(floor)) return true
+    }
+  } catch {}
+  return false
+}
 async function recallAndReach (bot, kind, blockId, maxDist, reach) {
   for (let attempt = 0; attempt < 3; attempt++) {
     const known = recallInfra(kind, bot.entity.position, maxDist)
@@ -1658,6 +1676,7 @@ async function recallAndReach (bot, kind, blockId, maxDist, reach) {
     await S().walkStaged(bot, known.x, known.z, { range: 10, timeoutMs: 60000 })
     const blk = bot.blockAt(new Vec3(known.x, known.y, known.z))
     if (!blk || blk.type !== blockId) { dbg('  remembered ' + kind + ' is gone - forgetting it'); forgetInfra(kind, known); continue }
+    if (!stationUsable(bot, blk.position)) { dbg('  remembered ' + kind + ' at ' + known.x + ',' + known.y + ',' + known.z + ' has no dry cell to stand on (in water / a pit) - forgetting it'); forgetInfra(kind, known); continue }
     if (await reach(blk)) return blk
     return null // it stands but we can't reach it - placing fresh beats looping
   }
@@ -2358,7 +2377,7 @@ async function worldTidy (bot, opts = {}) {
 module.exports = {
   setDebugSink, insideHutBox,
   containerHeadroomAt, ownBedCellAt, hutDoorway, doorwayReservationAt,
-  insideHutBox, ownHutAt, ownInfraSupportAt, underOwnFloorAt, underpinHutFloor, onHutApron, insideOwnStructure, hasSolidCeiling, isUnderground, hutAnchor, ensureHomeShelter, stepOffApron, ensureHutApron, clearDoorApproach, healHomeCrater, ensureHutBed, relocateBedInto, bedInPack, bedCandidates, bedCraftableFrom, acquireBed, hutInteriorLit, placeBedNear, bedFootprint, bedUsable, assertSpawnOn, ensureBedSite, upgradeBedPlacement, freeInteriorCell, stationInHut, stationSlot, reconcileInfra, cleanupHutInterior, repairHutStructure, ensureHutInteriorLit, recallAndReach, maintainHut, maintainHome,
+  stationUsable, insideHutBox, ownHutAt, ownInfraSupportAt, underOwnFloorAt, underpinHutFloor, onHutApron, insideOwnStructure, hasSolidCeiling, isUnderground, hutAnchor, ensureHomeShelter, stepOffApron, ensureHutApron, clearDoorApproach, healHomeCrater, ensureHutBed, relocateBedInto, bedInPack, bedCandidates, bedCraftableFrom, acquireBed, hutInteriorLit, placeBedNear, bedFootprint, bedUsable, assertSpawnOn, ensureBedSite, upgradeBedPlacement, freeInteriorCell, stationInHut, stationSlot, reconcileInfra, cleanupHutInterior, repairHutStructure, ensureHutInteriorLit, recallAndReach, maintainHut, maintainHome,
   secureBase, secureBaseGate: hutModel.secureBaseGate,
   sealHomeDescents, sealDescentsGate: hutModel.sealDescentsGate,
   worldTidy, litterSignature: hutModel.litterSignature

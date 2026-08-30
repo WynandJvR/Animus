@@ -90,6 +90,21 @@ function gotoWithTimeout (bot, goal, ms) {
 // Walk onto nearby dropped items so they're picked up. Waits for drops to settle,
 // then sweeps the nearest item repeatedly (walk ONTO it - range 0). More persistent
 // than before because scattered drops on jagged terrain were being left behind.
+// A DROP IN THE WATER, OR ON A DEATH SPOT, IS LEFT (2026-08-30 20:20, live: the brain's `collect` walked the bot
+// into the pond after its own death-drops floating at the cell it had drowned in 25 minutes earlier - the
+// second drowning at that cell in half an hour). Three pickers had three rules (the sweep skipped water only
+// with a hostile near, the command and the reflex had none). This is the one: the item's cell, the cell above
+// and the cell below are not fluid, and no recorded death hazard covers it. Returns the reason or null.
+function dropBlocked (bot, e) {
+  try {
+    const p = e && e.position ? e.position.floored() : null
+    if (!p) return 'no position'
+    for (const dy of [1, 0, -1]) { const b = bot.blockAt(p.offset(0, dy, 0)); if (b && /water|lava|kelp|seagrass|bubble_column/.test(b.name)) return 'in the water' }
+    const h = require('./world-memory.js').hazardAt(p)
+    if (h) return 'on a recorded death spot (' + (h.cause || 'death') + ')'
+  } catch {}
+  return null
+}
 async function collectDrops (bot, radius = 10, { patience = 1 } = {}) {
   await new Promise(r => setTimeout(r, 250)) // let freshly-broken drops settle/land
   let empties = 0
@@ -104,8 +119,8 @@ async function collectDrops (bot, radius = 10, { patience = 1 } = {}) {
       // this sweep walks in after it, and the Drowned living there finishes the bot. A player lets
       // a floating wheat go when something is in the water with it.
       try {
-        const cell = bot.blockAt(e.position)
-        if (cell && /water/.test(cell.name) && nearHostile(bot, 16)) { unreachable.add(e.id); dbg('  collect: leaving a drop in the water at ' + e.position.floored() + ' - a hostile is within 16b, not wading in'); continue }
+        const why = dropBlocked(bot, e)
+        if (why) { unreachable.add(e.id); dbg('  collect: leaving the drop at ' + e.position.floored() + ' - ' + why); continue }
       } catch {}
       const d = e.position.distanceTo(bot.entity.position)
       if (d < best) { best = d; target = e }
@@ -353,6 +368,7 @@ function placeBlocked (bot, cell, itemName) {
 }
 
 module.exports = {
+  dropBlocked,
   setDebugSink,
   AIRISH, REPLACEABLE, SHELTER_HOSTILE, STRUCTURE_RE, DIGGABLE_NATURAL, canBreakNaturally, digBlocked,
   NON_SEALING_RE, placeBlocked,

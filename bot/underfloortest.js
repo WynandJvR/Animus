@@ -217,8 +217,10 @@ t('underpin only PLACES - it consults no dig-permission rule, because there is n
   assert.ok(!/bot\.dig|digBlocked|canBreakNaturally/.test(fn),
     'filling is placing, not digging: it cannot interact with the digBlocked own-infra carve-out and so ' +
     'cannot re-create the 2026-08-01 entombment from the protection side')
-  assert.ok(/placeAt\(bot, v, DIRTLIKE\)/.test(fn) && /placeAt\(bot, v, ANYFILL\)/.test(fn),
-    'every placement goes through placeAt -> bot.placeBlock -> pathfix verifiedPlace/placedOK')
+  // (2026-08-30: EARTH ONLY - the ANYFILL plank fallback is gone; planks are fabric, not fill, and the filler is
+  // acquired (withdraw > craft > gather) before the fill runs)
+  assert.ok(/placeAt\(bot, v, DIRTLIKE\)/.test(fn) && !/placeAt\(bot, v, ANYFILL\)/.test(fn),
+    'every placement goes through placeAt -> bot.placeBlock -> pathfix verifiedPlace/placedOK, and fills with earth only')
   assert.ok(/DIMS\.w \* hutModel\.DIMS\.l/.test(fn), 'the per-pass cap is one slab\'s worth, derived from the model, not invented')
   assert.ok(!/process\.env/.test(fn), 'ROOT G adds NO new env flag')
 })

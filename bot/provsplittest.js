@@ -93,7 +93,7 @@ function ok (cond, label) { eq(!!cond, true, label) }
 // here - `git log -L92,92:provsplittest.js` replays every past adjustment and its reasoning.
 {
   const pub = Object.keys(provision).filter(k => k !== '__siblings')
-  eq(pub.length, 68, 'facade: provision.js still exports exactly 68 public names')
+  eq(pub.length, 69, 'facade: provision.js still exports exactly 69 public names (68 + buildKeepOut, 2026-08-30)')
 
   const moved = [
     [worldMemory, ['listInfra', 'rememberInfra', 'forgetInfra', 'recordWedge', 'listWedges', 'ownInfraAnchors',

@@ -1023,6 +1023,7 @@ async function collectNearbyDrops (bot, { radius = 8, max = 6, deadlineMs = 1200
     let target = null; let best = radius
     for (const e of Object.values(bot.entities || {})) {
       if (!e || !e.position || e.name !== 'item') continue
+      if (provCore().dropBlocked(bot, e)) continue // water / death spot: not for a sweep either
       const d = e.position.distanceTo(bot.entity.position)
       if (d < best) { best = d; target = e }
     }
@@ -1493,7 +1494,10 @@ async function handleInner (bot, line, opts = {}) {
         const me = bot.entity.position; const dist = Math.hypot(d.x - me.x, d.z - me.z)
         const refusal = journeyRefusal(bot, dist)
         if (refusal) { dbg('recover: the grave at ' + d.x + ',' + d.y + ',' + d.z + ' (' + Math.round(dist) + 'b) waits - ' + refusal); return 'my stuff at ' + d.x + ',' + d.z + ' waits - ' + refusal }
-      }
+        // EVERY RECOVER SAYS WHAT IT IS ABOUT TO DO (2026-08-30 20:07-20:13, live: three R1 dispatches in a row
+        // read as "hung promise" with not one line between "executing" and the watchdog's revoke)
+        dbg('recover: going for the grave at ' + d.x + ',' + d.y + ',' + d.z + ' (' + Math.round(dist) + 'b, ' + (dist > 80 ? 'staged trek' : 'direct approach') + ') from ' + me.floored())
+      } else if (!d) dbg('recover: no worthwhile reachable grave on the ledger')
       if (!d) {
         const burned = grave.ledger().find(x => !x.retrieved && x.dangerous)
         if (burned) { burned.retrieved = true; persistDeath(); return `i died in lava/fire at ${burned.x},${burned.y},${burned.z} - my stuff burned up, not walking back into that` }
@@ -1538,7 +1542,9 @@ async function handleInner (bot, line, opts = {}) {
       // The approach, no longer swallowed. graves end up in pits/caves, so the full ladder still
       // runs - but its failure is now a REPORTED failure, not a silent one.
       let approachErr = null
+      const tApproach = Date.now()
       try { await gotoTimedDA(bot, graveGoal, 20000) } catch (e) { approachErr = e && e.message ? e.message : String(e) }
+      dbg('recover: approach ' + (approachErr ? 'FAILED (' + approachErr + ')' : 'done') + ' after ' + Math.round((Date.now() - tApproach) / 1000) + 's at ' + bot.entity.position.floored())
       if (!pathfix.sameEpoch(e0)) { if (travelled) endActivity(false, 'died on the way'); return `i died on the way back to my grave at ${d.x},${d.y},${d.z} - starting over` }
       if (!pathfix.arrivedOK(bot, graveGoal)) {
         const p = bot.entity.position
@@ -1947,14 +1953,16 @@ async function handleInner (bot, line, opts = {}) {
     case 'collect':
     case 'pickup': {
       // walk onto the nearest dropped item to pick it up (auto-collected on contact)
-      let target = null; let best = 32
+      let target = null; let best = 32; let left = null
       for (const e of Object.values(bot.entities || {})) {
         if (!e || !e.position) continue
         if (e.name !== 'item') continue // real drops only (the 'item' entity type, not item_frames)
+        const why = provCore().dropBlocked(bot, e) // one rule with the sweep and the reflex (water / death spot)
+        if (why) { left = why; continue }
         const d = e.position.distanceTo(bot.entity.position)
         if (d < best) { best = d; target = e }
       }
-      if (!target) return 'no dropped items nearby'
+      if (!target) return left ? 'the only drops near me are ' + left + ' - leaving them' : 'no dropped items nearby'
       try { await gotoTimed(bot, new goals.GoalNear(target.position.x, target.position.y, target.position.z, 0), 15000) } catch (e) { return `couldn't reach item: ${e.message}` }
       return 'went to pick up nearby items'
     }
@@ -2393,7 +2401,7 @@ async function handleInner (bot, line, opts = {}) {
       building = true; claimStamp('building'); buildAbort = false; buildInterrupted = false; resumeDeaths = 0
       beginActivity('autobuild', loadedSchem.name)
       resumeJob = { schem: loadedSchem.schem, at } // remembered so a death can't lose the build
-      persistResume(loadedSchem.name, at) // ...and on DISK so a process restart can't either
+      persistResume(loadedSchem.name, at, buildBoxOf(loadedSchem.schem, at)) // ...and on DISK (with its footprint) so a process restart can't either
       autoBuild(bot, loadedSchem.schem, at, {
         say: throttledSay(bot),
         isStopped: () => buildAbort,
@@ -2428,8 +2436,9 @@ async function handleInner (bot, line, opts = {}) {
       // resume flow (gear up, travel back with retries, re-provision, finish).
       const saved = persistedResume()
       if (!saved) return 'no saved build to resume'
-      if (saved.pausedAt) persistResume(saved.name, saved.at) // explicit resume clears the pause hold
+      if (saved.pausedAt) persistResume(saved.name, saved.at, saved.box) // explicit resume clears the pause hold (keeps the footprint it already has)
       try { loadedSchem = { schem: await schematic.loadFile(saved.name, bot.version), name: saved.name } } catch (e) { return `couldn't reload schematic "${saved.name}": ${e.message}` }
+      if (!saved.box) persistResume(saved.name, saved.at, buildBoxOf(loadedSchem.schem, saved.at)) // an old record learns its footprint
       resumeJob = { schem: loadedSchem.schem, at: new Vec3(saved.at.x, saved.at.y, saved.at.z) }
       resumeDeaths = 0; buildAbort = false; buildInterrupted = false
       // Chat defensively: this runs DETACHED (after the command already returned), so an
@@ -2951,6 +2960,9 @@ function snapToGround (bot, schem, at) {
 // gather/craft/smelt the materials in BATCHES - depositing each finished batch so the
 // 36-slot pack never overflows on a 2000+ block build - then build, pulling materials
 // back out of the chest on demand. Long-running; chats progress. Returns build result.
+// The build's footprint + a 6-block skirt: the live build zone while building, and the saved build's `box` on
+// disk for every siter that runs while the build is NOT running (the farm plot went onto the castle site).
+function buildBoxOf (schem, at) { const st = schem.start(); const en = schem.end(); return { x1: at.x + st.x - 6, z1: at.z + st.z - 6, x2: at.x + en.x + 6, z2: at.z + en.z + 6 } }
 async function autoBuild (bot, schem, at, opts = {}) {
   const say = opts.say || (() => {})
   const isStopped = opts.isStopped || (() => false)
@@ -2959,7 +2971,7 @@ async function autoBuild (bot, schem, at, opts = {}) {
   const bom = schematic.billOfMaterials(schem).counts
   // Keep-out box for the TREE FARM: footprint + canopy margin. Threaded into every
   // gather so replants/groves never put a future tree inside (or leaning over) the build.
-  const avoid = (() => { const st = schem.start(); const en = schem.end(); return { x1: at.x + st.x - 6, z1: at.z + st.z - 6, x2: at.x + en.x + 6, z2: at.z + en.z + 6 } })()
+  const avoid = buildBoxOf(schem, at)
   provision.setBuildZone(avoid) // shelters must dig OUTSIDE this while the build is active (cleared by the callers' settle handlers)
   if (!telemetry.checklistInfo()) checklistBegin(JOB_STEPS) // resume pre-begins (its 'travel to site' step is already done)
   checklistStep('survey the site')
@@ -3695,7 +3707,7 @@ function markBuildInterrupted () {
 let _liveHold = null
 function setHoldInfo (h) { _liveHold = h || null }
 
-function setResumeJob (pt) { if (loadedSchem && pt) { resumeJob = { schem: loadedSchem.schem, at: new Vec3(pt.x, pt.y, pt.z) }; resumeDeaths = 0; persistResume(loadedSchem.name, pt) } }
+function setResumeJob (pt) { if (loadedSchem && pt) { resumeJob = { schem: loadedSchem.schem, at: new Vec3(pt.x, pt.y, pt.z) }; resumeDeaths = 0; persistResume(loadedSchem.name, pt, buildBoxOf(loadedSchem.schem, pt)) } }
 
 // DISK-PERSISTED resume: the in-memory resumeJob dies with the process (restart/crash/
 // reboot), which lost the castle job twice live. Save {schematic name, origin} so a
@@ -3729,6 +3741,7 @@ async function resumeBuild (bot) {
       try {
         loadedSchem = { schem: await schematic.loadFile(saved.name, bot.version), name: saved.name }
         resumeJob = { schem: loadedSchem.schem, at: new Vec3(saved.at.x, saved.at.y, saved.at.z) }
+        if (!saved.box) persistResume(saved.name, saved.at, buildBoxOf(loadedSchem.schem, saved.at)) // an old record learns its footprint on load
         dbg('resume: armed "' + saved.name + '" from disk at ' + saved.at.x + ',' + saved.at.y + ',' + saved.at.z)
       } catch (e) {
         // A saved job whose schematic will not load is a real, world-shaped failure of this

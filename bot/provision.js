@@ -1501,6 +1501,8 @@ async function runGather (bot, item, count, opts = {}) {
 let buildZone = null
 function setBuildZone (box) { buildZone = box || null; worldMemory.setBuildZone(box); provShelter.setBuildZone(box) } // mirror into world-memory: ownInfraAnchors reads it
 function inBuildZone (x, z) { return !!buildZone && x >= buildZone.x1 && x <= buildZone.x2 && z >= buildZone.z1 && z <= buildZone.z2 }
+// The build's footprint whether or not a build is running: the live zone first, else the saved build's box.
+function buildKeepOut () { if (buildZone) return buildZone; try { return require('./resume-store.js').savedBuildBox() } catch { return null } }
 
 // Emergency night bunker for a NAKED bot: dig 2 down into solid ground, seal the opening with
 // a block, and wait out the danger (until day AND no hostile near), then climb back out. A
@@ -2866,10 +2868,18 @@ async function ensureTable (bot, opts = {}) {
     // through a closed door, so the nav's door pre-flight crosses first. Tight at-base budgets.
     try { await navigate.navigateTo(bot, new goals.GoalNear(t.position.x, t.position.y, t.position.z, 2), { timeoutMs: 15000, deadlineMs: 35000, climb: false, rescue: 'light', label: 'table-reach' }); return true } catch (e) { dbg('  ensureTable: cannot reach table at', t.position.toString(), '-', e.message); return false }
   }
-  let table = bot.findBlock({ matching: tableId, maxDistance: 16 }) // `let`: the place path below reassigns it
+  // the nearest table a player can stand DRY beside (provHut.stationUsable) - the pond crater's tables are not
+  const nearestUsable = (maxDistance) => {
+    const me = bot.entity.position
+    const found = (bot.findBlocks({ matching: tableId, maxDistance, count: 8 }) || []).map(p => bot.blockAt(p)).filter(Boolean)
+    const usable = found.filter(b => provHut.stationUsable(bot, b.position)).sort((a, b) => a.position.distanceTo(me) - b.position.distanceTo(me))
+    if (found.length && !usable.length) dbg('  ensureTable: ' + found.length + ' table(s) within ' + maxDistance + 'b but none has a dry cell to stand on - not walking into the water for them')
+    return usable[0] || null
+  }
+  let table = nearestUsable(16) // `let`: the place path below reassigns it
   if (table && await reach(table)) { rememberInfra('table', table.position); return table }
   if (!table) { // none close - check further out (the plan's table from before the roam)
-    const far = bot.findBlock({ matching: tableId, maxDistance: 48 })
+    const far = nearestUsable(48)
     if (far && await reach(far)) { rememberInfra('table', far.position); return far }
   }
   // Beyond loaded chunks: a table we REMEMBER placing may be a short walk away - reuse it
@@ -2986,7 +2996,12 @@ async function runCraft (bot, item, count, needsTable, opts = {}) {
   // of nowhere (operator complaint). If this table is OURS (infra registry) and we're
   // far from the home anchor, break it and pocket it - next field craft places it from
   // the pack. The home-area table stays put (it's the workshop).
-  if (table && opts.home && Math.hypot(table.position.x - opts.home.x, table.position.z - opts.home.z) > 64) {
+  // ONE TABLE AT HOME, THE REST IN THE PACK (2026-08-30, operator: "why does it use crafting tables as
+  // scaffold?"). The pack-up rule was "farther than 64b from home", so every table placed at the farm 20b out
+  // stayed - four of them ended up in the pond crater, and ensureTable kept walking to the nearest one. The rule
+  // is now the structure's: a table inside the bot's own walls is the station; any other table it just used
+  // is picked up, like a player carries theirs.
+  if (table && !provHut.insideOwnStructure(bot, table.position)) {
     const ours = recallInfra('table', table.position, 3)
     if (ours) {
       try {
@@ -3678,7 +3693,7 @@ const KEEP_WHEN_ALL = /_pickaxe$|_axe$|_shovel$|_sword$|_hoe$|^shears$|_helmet$|
 // (furnishHut DELETED in #110 - zero callers, and it carried three destroy-before-create paths)
 
 
-module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, HUNT_SOURCES, planProvision, smeltFuelPlan, fuelBankWithdrawAmount, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, detectWood, KEEP_ON_BOT, manualHopFromWater, breachWaterPocket, breachDryPocket, escapeUpColumn, toolForBlock, insideOwnStructure, ownHutAt, inBuildZone, deadlockResetDue, deadlockResetState, rememberBed, knownBed, setSpawnSuspect, isSpawnSuspect, markBedUnusable, bedHeld, gearupState, gearupResult, gearupShouldArmBackoff, proactiveGearupGate, ironGrindMinedReal, resetIronGrindMined, countFurnacesNear, dumpJunk, listInfra, rememberInfra, forgetInfra, noteWaterCrossing, noteFurnaceHoldings, survivalState, survivalNeed, mayDoProgress, schedulerState, setBuildZone, setDebugSink, rememberRoute, recallRoute, planTrekRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
+module.exports = { GATHER_SOURCES, GATHER_TOOL, SMELT_MAP, STRIP_MAP, HUNT_SOURCES, planProvision, smeltFuelPlan, fuelBankWithdrawAmount, runGather, runCraft, runSmelt, runStrip, runPlan, ensureTable, ensureFurnace, detectWood, KEEP_ON_BOT, manualHopFromWater, breachWaterPocket, breachDryPocket, escapeUpColumn, toolForBlock, insideOwnStructure, ownHutAt, buildKeepOut, inBuildZone, deadlockResetDue, deadlockResetState, rememberBed, knownBed, setSpawnSuspect, isSpawnSuspect, markBedUnusable, bedHeld, gearupState, gearupResult, gearupShouldArmBackoff, proactiveGearupGate, ironGrindMinedReal, resetIronGrindMined, countFurnacesNear, dumpJunk, listInfra, rememberInfra, forgetInfra, noteWaterCrossing, noteFurnaceHoldings, survivalState, survivalNeed, mayDoProgress, schedulerState, setBuildZone, setDebugSink, rememberRoute, recallRoute, planTrekRoute, dementRoute, recordWedge, listWedges, ownInfraAnchors,
   hazardStepExclusion, waterStepExclusion, deathSpotExclusion, markHazardTraversal, setOperatorRouting, deepWaterUnderfoot, 
   activeJobInfo, stopSurvivalJob, trekMovements, 
   

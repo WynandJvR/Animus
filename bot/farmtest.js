@@ -278,6 +278,39 @@ eq(F.barrenStep(undefined, 'other'), { strikes: 1, skip: false }, 'undefined pri
   eq(F.dryHomeFarmMode({}), 'off', 'dry: defaults (no hut) -> off')
 }
 
+// ---- NEAT FLAT FARM (2026-08-30): rectangle + walkway = one surface, or it is not a farm ----------
+{
+  const rect = F.plotRect({ x: 10, z: 20 }, 3, 2) // x10-12, z20-21
+  eq(F.rectCells(rect, 0).length, 6, 'plot: 3x2 rect has 6 plot cells')
+  eq(F.rectCells(rect, 1).length, 20, 'plot: 3x2 rect + 1 walkway = 5x4 = 20 cells')
+  eq(F.rectCells(rect, 1).filter(c => c.plot).length, 6, 'plot: walkway cells are flagged plot:false')
+  const flat = F.rectCells(rect, 1).map(c => ({ x: c.x, z: c.z, groundY: 64, water: false }))
+  const v0 = F.plotSurfaceVerdict(flat, 64, rect)
+  eq(v0.ok, true, 'plot: a flat rect+walkway at baseY is ok')
+  eq(v0.work, 0, 'plot: no work on a flat surface')
+  const dip = flat.map(s => (s.x === 11 && s.z === 20) ? { ...s, groundY: 62 } : s)
+  const v1 = F.plotSurfaceVerdict(dip, 64, rect)
+  eq(v1.ok, false, 'plot: a 2-deep dip in the plot fails')
+  eq(v1.dips, 1, 'plot: ...counted as a dip'); eq(v1.work, 2, 'plot: ...two blocks of fill')
+  const step = flat.map(s => (s.x === 9 && s.z === 19) ? { ...s, groundY: 65 } : s)
+  eq(F.plotSurfaceVerdict(step, 64, rect).ok, true, 'plot: a one-step-up walkway cell is walkable -> ok')
+  const hole = flat.map(s => (s.x === 9 && s.z === 19) ? { ...s, groundY: 62 } : s)
+  const v2 = F.plotSurfaceVerdict(hole, 64, rect)
+  eq(v2.ok, false, 'plot: a 2-deep hole in the walkway is a drop -> fails'); eq(v2.drops, 1, 'plot: ...counted as a drop')
+  const wet = flat.map(s => (s.x === 13 && s.z === 21) ? { ...s, water: true } : s)
+  const v3 = F.plotSurfaceVerdict(wet, 64, rect)
+  eq(v3.ok, false, 'plot: water beside the plot fails'); eq(F.scorePlotSite(v3, 5), null, 'plot: ...and the site is disqualified')
+  const unk = flat.map(s => (s.x === 10 && s.z === 20) ? { ...s, groundY: null } : s)
+  eq(F.plotSurfaceVerdict(unk, 64, rect).unknown, 1, 'plot: an unreadable cell is unknown, not flat (#10)')
+  eq(F.plotBaseY(flat, rect, 64), 64, 'plot: baseY is the median plot ground')
+  eq(F.plotBaseY(flat.map(s => ({ ...s, groundY: 60 })), rect, 64), null, 'plot: a plot 4 below home grade is too far from the door')
+  eq(F.scorePlotSite(v1, 10) > F.scorePlotSite(v0, 10), true, 'plot: more earth to move scores worse')
+  eq(F.rectHasCell(rect, 64, 9, 64, 19), true, 'plot: the walkway is part of the protected footprint')
+  eq(F.rectHasCell(rect, 64, 8, 64, 19), false, 'plot: two blocks out is not')
+  eq(F.dryHomeFarmMode({ flag: true, hutExists: true, standingNearHut: true, farmIsDry: false, cells: 21, target: 33, maxed: false, standingUnsafe: true }), 'establish', 'dry: a near water farm whose surface FAILS the survey is re-sited')
+  eq(F.dryHomeFarmMode({ flag: true, hutExists: true, standingNearHut: true, farmIsDry: false, cells: 21, target: 33, maxed: false, standingUnsafe: false }), 'off', 'dry: ...a safe one is kept')
+}
+
 // ---- FIX 10 (audit 2026-07-29): enough flat CELLS, not a flat RATIO ----------------------
 // Live: "annulus off the hut not acceptable (tillable 197, flat 0.01) - deferring to fallback" x25,
 // after which the fallback sited a 2-cell farm. The ratio gate punishes a site for being BIG.

@@ -287,12 +287,66 @@ function seedBankWithdrawAmount (bankSeeds, packSeeds, want) {
 // the caller's, so a 60b water farm still reads as "none near"); 'expand' when the standing near-hut
 // farm IS a dry plot still under target and not maxed; 'off' otherwise (incl. flag off -> today
 // byte-for-byte, and a genuine near-hut water farm we must NOT disturb). PURE, no bot / no I/O.
-function dryHomeFarmMode ({ flag = true, hutExists = false, standingNearHut = false, farmIsDry = false, cells = 0, target = 33, maxed = false } = {}) {
+function dryHomeFarmMode ({ flag = true, hutExists = false, standingNearHut = false, farmIsDry = false, cells = 0, target = 33, maxed = false, standingUnsafe = false } = {}) {
   if (!flag || !hutExists) return 'off'
   if (!standingNearHut) return 'establish'
+  // A STANDING FARM WHOSE GROUND FAILS THE SURFACE SURVEY IS NOT A FARM TO KEEP (2026-08-30): the pond-lip
+  // plot at 217,-244 had 135 fall-in rescues and 5 drownings in one day. "Near the hut" used to protect it
+  // from the dry re-site unconditionally; a measured-unsafe surface now re-sites it.
+  if (!farmIsDry && standingUnsafe) return 'establish'
   if (farmIsDry && cells < target && !maxed) return 'expand'
   return 'off'
 }
+
+// ==== A NEAT FLAT FARM (2026-08-30, operator: "a neat flat area so it is safe and easy to harvest/plant") ==
+// The plot is a RECTANGLE at ONE height with a ONE-BLOCK WALKWAY around it, and the whole of that is one
+// surface: every plot cell exactly at baseY, every walkway cell within one step of it, no water and no drop
+// anywhere in it. It is surveyed from the world, leveled until the survey passes, and only then planted.
+// PURE: the survey samples come from the caller; nothing here reads the world.
+function plotRect (anchor, w, l) { return { x1: anchor.x, z1: anchor.z, x2: anchor.x + w - 1, z2: anchor.z + l - 1 } }
+function inRect (rect, x, z, margin = 0) { return !!rect && x >= rect.x1 - margin && x <= rect.x2 + margin && z >= rect.z1 - margin && z <= rect.z2 + margin }
+function rectCells (rect, margin = 0) {
+  const out = []
+  if (!rect) return out
+  for (let x = rect.x1 - margin; x <= rect.x2 + margin; x++) for (let z = rect.z1 - margin; z <= rect.z2 + margin; z++) out.push({ x, z, plot: inRect(rect, x, z, 0) })
+  return out
+}
+// samples: [{ x, z, groundY|null, water: bool }] for rect + margin. Returns the verdict and the work left.
+function plotSurfaceVerdict (samples, baseY, rect) {
+  const v = { ok: false, unknown: 0, water: 0, dips: 0, bumps: 0, drops: 0, off: 0, work: 0, cells: 0 }
+  for (const s of (samples || [])) {
+    v.cells++
+    const plot = inRect(rect, s.x, s.z, 0)
+    if (s.water) { v.water++; continue }
+    if (s.groundY == null) { v.unknown++; continue }
+    const dy = s.groundY - baseY
+    if (plot) {
+      if (dy < 0) { v.dips++; v.work += -dy } else if (dy > 0) { v.bumps++; v.work += dy }
+    } else {
+      // the walkway: one step up or down is walkable; deeper is a drop the body falls into
+      if (dy < -1) { v.drops++; v.work += -dy - 1 } else if (dy > 1) { v.off++; v.work += dy - 1 }
+    }
+  }
+  v.ok = v.water === 0 && v.unknown === 0 && v.dips === 0 && v.bumps === 0 && v.drops === 0 && v.off === 0
+  return v
+}
+// The base height of a candidate plot: the median ground height of its plot cells (least earth to move),
+// or null when the plot cannot be read. `near` (the hut floor) bounds how far the plot may sit from home
+// grade so the walk from the door stays a walk.
+function plotBaseY (samples, rect, near, maxOff = 2) {
+  const ys = (samples || []).filter(s => inRect(rect, s.x, s.z, 0) && s.groundY != null && !s.water).map(s => s.groundY).sort((a, b) => a - b)
+  if (!ys.length) return null
+  const med = ys[Math.floor(ys.length / 2)]
+  if (near != null && Math.abs(med - near) > maxOff) return null
+  return med
+}
+// Lower is better: the earth to move, plus distance from the hut; water or an unreadable cell disqualifies.
+function scorePlotSite (verdict, distHut) {
+  if (!verdict || verdict.water > 0 || verdict.unknown > 0) return null
+  return verdict.work + 0.5 * (distHut || 0)
+}
+// Footprint protection for the walkway (the cells themselves are covered by footprintHasCell).
+function rectHasCell (rect, baseY, x, y, z, margin = 1) { return !!rect && baseY != null && inRect(rect, x, z, margin) && Math.abs(y - baseY) <= 1 }
 
 // #59 §B FARM_HARVEST_FIRST (PURE): on a food crisis, harvest the STANDING farm before establishing a
 // new plot at the nearest (often stale) water. Returns 'harvest-standing' when a farm already stands
@@ -303,4 +357,4 @@ function foodCrisisFarmAction ({ hasStandingFarm = false, food = 20, harvestFirs
   return 'establish'
 }
 
-module.exports = { bankUsable, BANK_DYS, cropCellState, cellHealthStep, plotShouldUnlatch, matureForHarvest, farmlandReady, tillableBank, expansionMaxed, barrenStep, orderBankCandidates, orderCellsNearest, scoreFarmSite, farmSiteQualified, rankFarmSites, shouldResite, plotCollectRadius, footprintHasCell, seedBankWithdrawAmount, foodCrisisFarmAction, dryHomeFarmMode }
+module.exports = { plotRect, inRect, rectCells, plotSurfaceVerdict, plotBaseY, scorePlotSite, rectHasCell, bankUsable, BANK_DYS, cropCellState, cellHealthStep, plotShouldUnlatch, matureForHarvest, farmlandReady, tillableBank, expansionMaxed, barrenStep, orderBankCandidates, orderCellsNearest, scoreFarmSite, farmSiteQualified, rankFarmSites, shouldResite, plotCollectRadius, footprintHasCell, seedBankWithdrawAmount, foodCrisisFarmAction, dryHomeFarmMode }
