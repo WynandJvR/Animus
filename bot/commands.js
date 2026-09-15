@@ -2324,6 +2324,38 @@ async function handleInner (bot, line, opts = {}) {
       return `gathered ${r.gathered}/${count} ${item} (${r.reason})` + (gHome && gHome.arrived ? ' - came home before dark' : '')
     }
 
+    case 'obtain': {
+      // Get N of ANY item from whatever the bot has: the resource model's full chain
+      // (withdraw from the bank > craft from holdings > gather/smelt the true shortfall, tools
+      // included). The single-item door onto the same planner the build's BOM uses.
+      const item = a[0]
+      const mcData = require('minecraft-data')(bot.version)
+      if (!item || !mcData.itemsByName[item]) return 'usage: obtain <item> [count]'
+      const count = Math.max(1, parseInt(a[1] || '1', 10) || 1)
+      const have0 = provCore().inventoryCounts(bot)[item] || 0
+      if (have0 >= count) return `already holding ${have0} ${item}`
+      buildAbort = false
+      beginActivity('obtain', `${count}x ${item}`)
+      const p = blockPos(bot)
+      let rec
+      try { rec = await resources.reconcile(bot, { [item]: count }, { near: p, planOpts: { furnacesNearby: provision.countFurnacesNear(bot) } }) } catch (e) { endActivity(false, e.message); return `couldn't plan ${item}: ${e.message}` }
+      const unob = Object.keys(rec.plan.unobtainable || {})
+      const steps = rec.withdraws.map(w => `withdraw ${w.count} ${w.item}`).concat(rec.plan.tasks.map(t => `${t.type}:${t.item || t.output}x${t.count || (t.crafts * t.perCraft) || ''}`))
+      dbg('obtain ' + count + 'x ' + item + ' -> ' + (steps.join(', ') || '(empty plan)') + (unob.length ? ' | unobtainable: ' + unob.join(',') : ''))
+      if (unob.length) { endActivity(false, 'unobtainable ' + unob.join(',')); return `can't obtain ${item}: no way to get ${unob.join(', ')}` }
+      // A plan that only withdraws/crafts/smelts goes nowhere: only the body dying stops it. A plan
+      // that GATHERS sets out, so the excursion rules (night, leash, spiral) govern it.
+      const roams = rec.plan.tasks.some(t => t.type === 'gather' || t.type === 'hunt')
+      const bodyStop = makeBodyGoneStop(bot)
+      const stop = (roams && opts.source !== 'operator') ? makeExcursionStop(bot, 'obtain') : Object.assign(() => bodyStop(), { verdict: () => null })
+      let results = []
+      try { results = await resources.runReconciled(bot, rec, { say: m => dbg('obtain: ' + m), isStopped: stop, restoreMovements: () => setupMovements(bot), near: p, homeY: p.y }) } catch (e) { dbg('obtain ' + item + ' threw: ' + e.message) }
+      const have = provCore().inventoryCounts(bot)[item] || 0
+      const bad = results.filter(r => !r.ok)
+      endActivity(have >= count, `${have}/${count} ${item}`)
+      return `obtain ${item}: holding ${have}/${count}` + (bad.length ? ` - failed steps: ${bad.map(r => `${r.task.type} ${r.task.item || r.task.output}: ${r.note}`).join('; ')}`.slice(0, 400) : '') + (stop.verdict() ? ` (stopped: ${stop.verdict().why})` : '')
+    }
+
     case 'provision': {
       // Plan (and run) acquiring the loaded schematic's ENTIRE bill of materials
       // from nothing: gather -> craft tools/basics -> mine -> smelt -> strip ->

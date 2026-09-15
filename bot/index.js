@@ -58,6 +58,13 @@ const WATCHDOG_ON = SCHED_ON && process.env.WATCHDOG !== '0' // S7: the in-proce
 const OPP_ON = MAINTAIN_ON && process.env.OPPORTUNISTIC_MAINTAIN !== '0' // opportunistic at-hut maintenance during the build era; OPPORTUNISTIC_MAINTAIN=0 restores S6 byte-for-byte
 const RESILIENT_ON = SCHED_ON && process.env.RESILIENT_RECOVERY !== '0' // #41: invert build-vs-recovery priority after a death (postDeathRecovery latch + bank re-arm). RESILIENT_RECOVERY=0 restores today byte-for-byte (deathsRecent>=2 preempt gate, un-suppressed respawn ladder, no latch)
 
+// DIRECTOR MODE: an external director (the operator's console, or Claude acting as the brain) owns
+// every NON-survival decision. The chooser still runs and still dispatches survival-class picks
+// (shelter, flee, food/hp crisis, graves, the recovery ladder); maintenance/progress/build picks are
+// left to the director, which drives the body through /op/cmd. Persisted in director-mode.json so a
+// restart keeps whoever was steering.
+const DIRECTOR_FILE = path.join(__dirname, 'director-mode.json')
+let directorMode = (() => { try { return !!JSON.parse(fs.readFileSync(DIRECTOR_FILE, 'utf8')).on } catch { return process.env.DIRECTOR === '1' } })()
 // Live brain settings the dashboard can change on the fly; brain-llm.js polls
 // GET /brain each tick and switches model / goal / on-off without a restart.
 const brainSettings = {
@@ -1576,6 +1583,11 @@ if (SCHED_ON) {
       //   build/resume/brain/maintain/idle TAIL - the core only owns the survival + bootstrap-vs-build
       //   choice, not the progress plumbing. DYNAMIC_CORE!=1 -> today's pickJob path, byte-for-byte.
       const pick = process.env.DYNAMIC_CORE === '1' ? coreAdapter(s) : scheduler.pickJob(s)
+      if (directorMode && !(pick && pick.cls === 'survival')) {
+        const dk = 'director:' + (pick ? pick.job : 'idle')
+        if (schedLastLog !== dk) { schedLastLog = dk; note('(sched) director mode - left to the director: ' + (pick ? pick.job + ' (' + pick.reason + ')' : 'idle')) }
+        return
+      }
       // 3. OBSERVABILITY: log on CHANGE (not every tick). Dispatches/outcomes always log (rare).
       const nearest = (s.graves || []).filter(g => g && !g.dangerous && g.value > 0 && g.dist != null).sort((a, b) => a.dist - b.dist)[0]
       const key = pick ? (pick.job + '|' + pick.preempt) : 'idle'
@@ -2935,6 +2947,11 @@ const server = http.createServer((req, res) => {
         survival: SCHED_ON ? (cls === 'survival')
           : (process.env.S1_HOTFIX !== '0' && /^(recover|getstuff|eat|wear|armorup|sleep)/i.test(trimmedLine))
       }
+      // DIRECTOR MODE: the director owns the body's agenda; the brain keeps its voice and its eyes.
+      if (directorMode && !proposal.readOnly && !fromSupervisor) {
+        note(`(cmd) ${line}${rz} -> not run (director mode: the brain may talk and look, the director drives)`)
+        return send(res, 200, 'director mode - the director drives the body; you may talk (say) and look')
+      }
       const verdict = await cmdGate.decide(proposal, {
         cheatsAllowed: () => process.env.BRAIN_ALLOW_CHEATS === '1',
         persistedResume: () => (commands.persistedResume ? commands.persistedResume() : null),
@@ -3034,6 +3051,19 @@ const server = http.createServer((req, res) => {
   // launcher for weeks. Deleting the route is the retirement (#1: remove, don't wrap).
   // /state, /cmd, /log, /pov, /brain and /health are the API the GUI actually uses.
   // Live brain settings (model / goal / on-off) for the dashboard + the brain.
+  if (req.url === '/director') {
+    if (req.method === 'GET') return send(res, 200, { on: directorMode })
+    let data = ''
+    req.on('data', d => { data += d })
+    req.on('end', () => {
+      try { directorMode = !!JSON.parse(data).on } catch { return send(res, 400, 'bad json') }
+      try { fs.writeFileSync(DIRECTOR_FILE, JSON.stringify({ on: directorMode }) + '\n') } catch {}
+      schedLastLog = ''
+      note('(director) mode -> ' + (directorMode ? 'ON: non-survival decisions belong to the director' : 'OFF: the chooser owns every decision'))
+      send(res, 200, { on: directorMode })
+    })
+    return
+  }
   if (req.method === 'GET' && req.url === '/brain') {
     return send(res, 200, { settings: brainSettings, models: ollamaModels })
   }
@@ -3106,6 +3136,18 @@ const server = http.createServer((req, res) => {
       let line = data
       try { const j = JSON.parse(data); if (j && typeof j.command === 'string') line = j.command } catch {}
       noteManualLook(line)
+      // ONE DRIVER AT A TIME: in director mode survival jobs still dispatch on their own, so an
+      // action command that lands while one holds the body would steer the same body as it (live
+      // 2026-09-14: a homecoming walk and an `obtain` gather fought over one body into a pond).
+      // The director waits for survival to finish; `stop` stays available to take the body back.
+      if (directorMode && !/^(stop|state|scan|find|block|entities|inventory|look|say|waypoints|help)\b/i.test(String(line).trim())) {
+        const gd = gatingDispatch()
+        if (gd) {
+          const why = 'busy: survival job ' + (gd.jobKey || gd.name || '?') + ' holds the body - retry when it finishes'
+          note(`(ui-cmd) ${line} -> ${why}`)
+          return send(res, 200, why)
+        }
+      }
       try {
         const result = await commands.handle(bot, line, { source: 'operator' })
         clearPendingChat()

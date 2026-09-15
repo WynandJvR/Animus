@@ -34,6 +34,8 @@ using System.Web.Script.Serialization;
 
 class Animus : Form
 {
+    static bool shotMode = false;   // --shot: render and exit, never touch the bot
+    bool autostart = false;         // --start: press Start once the panel is up
     static string Root = AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\');
     static string BotDir  { get { return Path.Combine(Root, "bot"); } }
     static string CfgPath { get { return Path.Combine(BotDir, "config.json"); } }
@@ -43,14 +45,16 @@ class Animus : Form
 
     // ---- spacing scale (4.1) - every offset in layout code comes from here -----
     const int S1 = 4, S2 = 8, S3 = 12, S4 = 16, S6 = 24;
-    const int LabelW  = 96;   // fixed label column (4.4)
-    const int RowH    = 22;   // info row pitch
+    const int LabelW  = 88;   // fixed label column (4.4)
+    const int RowH    = 24;   // info row pitch
     const int InputH  = 32;
-    const int BtnPrim = 36, BtnSec = 32, BtnChip = 26;
-    const int MinCW   = 980, MinCH = 720;
-    const int HeaderH = 64, FooterH = 24;
-    const int PovH    = 224;  // POV canvas height (16:9 image letterboxed inside)
-    const int MinActH = 200;
+    const int BtnPrim = 34, BtnSec = 30, BtnChip = 26;
+    const int MinCW   = 980, MinCH = 700;
+    const int RailH   = 56;   // top rail: wordmark, target, dots, run controls
+    const int StripH  = 34;   // state strip: firing-subsystem chip + goal line
+    const int FooterH = 22;
+    const int MinActH = 140;
+    const int CardHeadH = 34; // card title band - body starts here
 
     // ---- type scale (4.2) - the only fonts in the file ------------------------
     static Font FTitle  = new Font("Segoe UI Semibold", 16f);
@@ -64,13 +68,17 @@ class Animus : Form
     static Font FSmallB = new Font("Segoe UI", 8f, FontStyle.Bold);
 
     // ---- palette (4.5) --------------------------------------------------------
-    static Color Bg     = Color.FromArgb(0x16, 0x16, 0x1C);
-    static Color Card   = Color.FromArgb(0x22, 0x22, 0x2C);
-    static Color Input  = Color.FromArgb(0x2C, 0x2C, 0x38);
-    static Color Txt    = Color.FromArgb(0xE6, 0xE6, 0xEC);
-    static Color Muted  = Color.FromArgb(0x93, 0x93, 0xA0);
+    static Color Bg     = Color.FromArgb(0x11, 0x11, 0x16);
+    static Color Card   = Color.FromArgb(0x1A, 0x1A, 0x22);
+    static Color Border = Color.FromArgb(0x2A, 0x2A, 0x36);
+    static Color Rail   = Color.FromArgb(0x16, 0x16, 0x1E);
+    static Color Input  = Color.FromArgb(0x24, 0x24, 0x2F);
+    static Color Txt    = Color.FromArgb(0xE8, 0xE8, 0xEE);
+    static Color Muted  = Color.FromArgb(0x8A, 0x8A, 0x99);
+    static Color Faint  = Color.FromArgb(0x62, 0x62, 0x70);
     static Color Accent = Color.FromArgb(0x6C, 0x5C, 0xE7);
     static Color AccentHi = Color.FromArgb(0x7D, 0x6D, 0xF0);
+    static Color Accent2 = Color.FromArgb(0x9E, 0x92, 0xF5);  // accent on a dark fill (chips, counts)
     static Color Ghost  = Color.FromArgb(0x33, 0x33, 0x40);
     static Color GhostHi = Color.FromArgb(0x3E, 0x3E, 0x4D);
     static Color Danger = Color.FromArgb(0xB5, 0x45, 0x45);
@@ -86,17 +94,22 @@ class Animus : Form
 
     // ---- controls -------------------------------------------------------------
     Panel rootScroll;
-    Panel cServer, cBrain, cSchem, cLive, cPov, cAct;
+    Panel cServer, cBrain, cSchem, cLive, cPov, cAct, cInv;
     Label title, lblTarget, lblOllama, lblBot, lblBrain, lblStatus, lblGoal, chip;
+    Button btnSetup;
+    Panel railBar, cState;
+    Canvas invCanvas;
+    List<string> invItems = new List<string>();
+    bool setupOpen = false;
     TextBox tbHost, tbPort, tbUser, tbVer, tbOps, tbCmd, tbGoal;
     TextBox tbAliases, tbBedrock, tbFloodgate, tbCtlHost, tbCtlPort;
     Label lbHost, lbPort, lbVer, lbUser, lbAuth, lbOps, lbAliases, lbBed, lbPre, lbApiH, lbApiP;
-    Label lbModel, lbBrainGoal, lbInvHead;
+    Label lbModel, lbBrainGoal, lbSchemHint;
     Button btnSave, btnSaveRe, btnRefresh, btnUse, btnApplyGoal, btnAddSchem, btnOpenSchem;
     Button btnStart, btnStop, btnSend;
     ComboBox cbModel, cbSchem;
     Button btnOffline, btnMs, btnBrainOn;
-    Label lvName, lvPos, lvBiome, lvTime, lvThreat, lvPlayers, lvHp, lvFood, lvInv, lvActivity;
+    Label lvName, lvPos, lvBiome, lvTime, lvThreat, lvPlayers, lvHp, lvFood, lvActivity;
     Label lkPos, lkBiome, lkTime, lkThreat, lkPlayers, lkActivity, lkHp, lkFood;
     Panel hpTrack, foodTrack, hpFill, foodFill;
     TextBox liveLog;
@@ -109,13 +122,14 @@ class Animus : Form
     string brainGoal = "";
     string goalText = "Goal: —";
     string chipText = "OFFLINE";
-    int overlayRight = 0;
 
     System.Windows.Forms.Timer statusTimer, liveTimer, povTimer;
     JavaScriptSerializer json = new JavaScriptSerializer();
     volatile bool livePolling = false;   // one in-flight live poll at a time
     volatile bool povBusy = false;
     volatile bool botUp = false;
+    volatile bool statusPolling = false; // one in-flight status scan at a time
+    Process botProc, brainProc;          // headless children this panel owns
     volatile int stateFails = 0;         // consecutive /state failures (offline after 3)
     int liveTick = 0;
     string lastLogText = "";             // /log delta tracking
@@ -147,6 +161,12 @@ class Animus : Form
         Application.EnableVisualStyles();
         if (a.Length >= 2 && a[0] == "--shot")
         {
+            // A SCREENSHOT MUST NOT STOP THE BOT (2026-08-31). --shot builds the real
+            // form and closes it, and OnFormClosing's rule is "closing the panel stops
+            // the bot" - so taking a picture of the panel killed the live bot and its
+            // brain. The rule stays; this path opts out of it, because a --shot process
+            // never OWNED the bot.
+            shotMode = true;
             try
             {
                 Animus f = new Animus();
@@ -158,6 +178,7 @@ class Animus : Form
                     Match m = Regex.Match(a[2], "^(\\d+)x(\\d+)$");
                     if (m.Success) f.ClientSize = new Size(int.Parse(m.Groups[1].Value), int.Parse(m.Groups[2].Value));
                 }
+                if (Array.IndexOf(a, "setup") >= 0) f.ShowSetup(true);
                 f.Show();
                 for (int i = 0; i < 30; i++) { Application.DoEvents(); Thread.Sleep(120); } // long enough for a live poll to land
                 Bitmap b = new Bitmap(f.Width, f.Height);
@@ -168,11 +189,17 @@ class Animus : Form
             catch (Exception ex) { File.WriteAllText(a[1] + ".err", ex.ToString()); }
             return;
         }
-        Application.Run(new Animus());
+        // --start: open the panel AND press Start. The panel is the thing that owns the
+        // bot, so "restart the bot" must never mean "run node behind the panel's back".
+        bool autostart = Array.IndexOf(a, "--start") >= 0;
+        Application.Run(new Animus(autostart));
     }
 
-    Animus()
+    Animus() : this(false) { }
+
+    Animus(bool autostart)
     {
+        this.autostart = autostart;
         // Hand-placed layout: disable font/DPI auto-scaling so the exact pixel
         // coordinates are honored on scaled displays (125%/150%) instead of being
         // reflowed into an overlapping mess. Relayout() does all the arithmetic.
@@ -189,24 +216,28 @@ class Animus : Form
         MinimumSize = Size;
         ClientSize = new Size(1120, 940);
 
+        // Three fixed bands: a rail that never scrolls (identity + run controls), the
+        // scrolling body, and a one-line status strip. The rail lives on the FORM, not
+        // inside the scroller, so Start/Stop can never be scrolled off the screen.
         rootScroll = new Panel();
-        rootScroll.Dock = DockStyle.Fill;
         rootScroll.AutoScroll = true;
         rootScroll.BackColor = Bg;
         Controls.Add(rootScroll);
         DarkScroll(rootScroll);
 
-        BuildHeader();
+        BuildRail();
+        BuildStateStrip();
         BuildServerCard();
         BuildBrainCard();
         BuildSchemCard();
-        BuildLifecycle();
         BuildLiveCard();
         BuildPovCard();
+        BuildInvCard();
         BuildActivityCard();
         BuildFooter();
 
         rootScroll.Resize += delegate { Relayout(); };
+        ShowSetup(false);
         Relayout();
         laidOut = true;
 
@@ -232,29 +263,61 @@ class Animus : Form
         povTimer.Interval = 300;
         povTimer.Tick += delegate { if (!povBusy) { povBusy = true; RunBg(PollPov); } };
         povTimer.Start();
+
+        // Shown, not BeginInvoke: in the constructor the form has no window handle yet,
+        // and BeginInvoke on a handle-less control throws before the panel ever appears.
+        if (autostart) Shown += delegate { btnStart.PerformClick(); };
     }
 
     // =========================================================================
     // CONSTRUCTION
     // =========================================================================
-    void BuildHeader()
+    // ---- the rail: who am I, is it up, and the two buttons that matter --------
+    void BuildRail()
     {
-        title = Lbl(rootScroll, "ANIMUS", FTitle, Txt);
-        lblTarget = Lbl(rootScroll, "", FLabel, Muted);
+        railBar = new Panel();
+        railBar.BackColor = Rail;
+        Controls.Add(railBar);
+        railBar.BringToFront();
+        railBar.Paint += delegate(object s, PaintEventArgs e) {
+            using (Pen p = new Pen(Border))
+                e.Graphics.DrawLine(p, 0, railBar.Height - 1, railBar.Width, railBar.Height - 1);
+        };
+
+        title = Lbl(railBar, "ANIMUS", FTitle, Txt);
+        lblTarget = Lbl(railBar, "", FSmall, Faint);
+        lblTarget.AutoEllipsis = true;
 
         lblOllama = MakeStatus("Ollama");
         lblBot    = MakeStatus("Bot");
         lblBrain  = MakeStatus("Brain");
 
-        lblGoal = Lbl(rootScroll, goalText, FValue, Txt);
-        lblGoal.TextAlign = ContentAlignment.MiddleRight;
-        lblGoal.AutoEllipsis = true;
+        btnSetup = MakeBtn(railBar, "Setup", BtnPrim, Ghost, GhostHi, Txt, FBodyB, 8,
+                           delegate { ShowSetup(!setupOpen); });
+        tips.SetToolTip(btnSetup, "Server, brain model and schematics — everything you set once.");
 
-        chip = Lbl(rootScroll, chipText, FSmallB, Muted);
+        btnStart = Primary(railBar, "Start Bot + Brain", Accent, AccentHi, delegate {
+            SetStop("Stop", Danger); // reset the stop button when (re)starting
+            string m = cbModel.Text.Trim(); RunBg(delegate { StartBot(); StartBrain(m); });
+        });
+        tips.SetToolTip(btnStart, "Bot + brain run headless — their output lands in the activity log below. "
+                                + "This panel owns them: closing it stops the bot.");
+        btnStop = Primary(railBar, "Stop", Danger, DangerHi, delegate { RunBg(StopAll); });
+    }
+
+    // ---- state strip: the one line that answers "what is it doing right now" --
+    void BuildStateStrip()
+    {
+        cState = MakeCard();
+        chip = Lbl(cState, chipText, FSmallB, Muted);
         chip.TextAlign = ContentAlignment.MiddleCenter;
-        chip.BackColor = Mix(Bg, Muted, 0.25);
-        chip.Height = 22;
-        Round(chip, 8);
+        chip.BackColor = Mix(Card, Muted, 0.22);
+        chip.Height = 24;
+        Round(chip, 9);
+
+        lblGoal = Lbl(cState, goalText, FBody, Txt);
+        lblGoal.TextAlign = ContentAlignment.MiddleLeft;
+        lblGoal.AutoEllipsis = true;
     }
 
     void BuildServerCard()
@@ -314,27 +377,18 @@ class Animus : Form
     void BuildSchemCard()
     {
         cSchem = MakeCard();
-        AddHeader(cSchem, "SCHEMATICS  ·  BUILD IN-GAME WITH !SCHEMATIC");
+        AddHeader(cSchem, "SCHEMATICS");
         cbSchem = MakeCombo(cSchem);
         cbSchem.DropDownStyle = ComboBoxStyle.DropDownList;
         btnAddSchem = Secondary(cSchem, "Add file…", delegate { AddSchem(); });
         btnOpenSchem = Secondary(cSchem, "Open folder", delegate { OpenSchemFolder(); });
-    }
-
-    void BuildLifecycle()
-    {
-        btnStart = Primary(rootScroll, "Start Bot + Brain", Accent, AccentHi, delegate {
-            SetStop("Stop", Danger); // reset the stop button when (re)starting
-            string m = cbModel.Text.Trim(); RunBg(delegate { StartBot(); StartBrain(m); });
-        });
-        tips.SetToolTip(btnStart, "Bot + brain run headless. This panel owns them: closing it stops the bot.");
-        btnStop = Primary(rootScroll, "Stop", Danger, DangerHi, delegate { RunBg(StopAll); });
+        lbSchemHint = FieldLabel(cSchem, "Build one in-game with  !schematic <name>");
     }
 
     void BuildLiveCard()
     {
         cLive = MakeCard();
-        AddHeader(cLive, "LIVE");
+        AddHeader(cLive, "STATUS");
         lvName = Lbl(cLive, "bot offline — press Start", FValue, Muted);
         lvName.AutoEllipsis = true;
         lkHp = FieldLabel(cLive, "Health");
@@ -349,8 +403,56 @@ class Animus : Form
         lkThreat = FieldLabel(cLive, "Threat");    lvThreat = ValueLabel(cLive);
         lkPlayers = FieldLabel(cLive, "Players near"); lvPlayers = ValueLabel(cLive);
         lkActivity = FieldLabel(cLive, "Doing");   lvActivity = ValueLabel(cLive);
-        lbInvHead = FieldLabel(cLive, "Inventory");
-        lvInv = Lbl(cLive, "—", FSmall, Txt);
+    }
+
+    // Inventory used to be a 400-character run-on sentence squeezed under the vitals.
+    // Same data, drawn as wrapped pills: countable at a glance, and it grows into the
+    // slack instead of being truncated at "…".
+    void BuildInvCard()
+    {
+        cInv = MakeCard();
+        AddHeader(cInv, "INVENTORY");
+        invCanvas = new Canvas();
+        invCanvas.BackColor = Card;
+        cInv.Controls.Add(invCanvas);
+        invCanvas.Paint += InvPaint;
+    }
+
+    void InvPaint(object sender, PaintEventArgs e)
+    {
+        Graphics g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        if (invItems.Count == 0)
+        {
+            TextRenderer.DrawText(g, botUp ? "empty" : "—", FSmall, invCanvas.ClientRectangle, Faint,
+                TextFormatFlags.Left | TextFormatFlags.Top);
+            return;
+        }
+        int x = 0, y = 0, lineH = 24, w = invCanvas.ClientSize.Width;
+        foreach (string raw in invItems)
+        {
+            string name = raw, count = "";
+            Match m = Regex.Match(raw, @"^(.*?)\s*[x×]\s*(\d+)$");
+            if (m.Success) { name = m.Groups[1].Value; count = m.Groups[2].Value; }
+            name = name.Replace('_', ' ');
+            int nw = TextRenderer.MeasureText(g, name, FSmall).Width;
+            int cw = count.Length > 0 ? TextRenderer.MeasureText(g, count, FSmallB).Width + S2 : 0;
+            int pw = nw + cw + 2 * S2 + S1;
+            if (x > 0 && x + pw > w) { x = 0; y += lineH + S1; }
+            if (y + lineH > invCanvas.ClientSize.Height) break;   // silently clip; tooltip has all of it
+            Rectangle r = new Rectangle(x, y, pw, lineH);
+            using (GraphicsPath p = RoundPath(new Rectangle(r.X, r.Y, r.Width - 1, r.Height - 1), 8))
+            {
+                using (SolidBrush b = new SolidBrush(Input)) g.FillPath(b, p);
+                using (Pen pen = new Pen(Border)) g.DrawPath(pen, p);
+            }
+            TextRenderer.DrawText(g, name, FSmall, new Rectangle(r.X + S2, r.Y, nw + 2, lineH), Txt,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+            if (count.Length > 0)
+                TextRenderer.DrawText(g, count, FSmallB, new Rectangle(r.X + S2 + nw + S2, r.Y, cw, lineH), Accent2,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+            x += pw + S1 + 2;
+        }
     }
 
     void BuildPovCard()
@@ -367,17 +469,19 @@ class Animus : Form
     void BuildActivityCard()
     {
         cAct = MakeCard();
-        AddHeader(cAct, "ACTIVITY + COMMANDS");
+        AddHeader(cAct, "ACTIVITY");
         liveLog = new TextBox();
         liveLog.Multiline = true; liveLog.ReadOnly = true; liveLog.ScrollBars = ScrollBars.Vertical;
         liveLog.BorderStyle = BorderStyle.None;
-        liveLog.BackColor = LogBg; liveLog.ForeColor = Color.Gainsboro;
+        // Flat on the card, not a sunken black box inside it: one less border for the eye
+        // to parse, and the log is the thing you read most.
+        liveLog.BackColor = Card; liveLog.ForeColor = Color.FromArgb(0xBF, 0xBF, 0xCC);
         liveLog.Font = FMono;
         cAct.Controls.Add(liveLog);
         DarkScroll(liveLog);
 
         tbCmd = MakeInput(cAct, "");
-        SetPlaceholder(tbCmd, "command…   e.g. come · follow Steve · gather oak_log 10 · autobuild here");
+        SetPlaceholder(tbCmd, "type a command…  come · follow Steve · gather oak_log 10 · autobuild here");
         tbCmd.KeyDown += CmdKeyDown;
         btnSend = Primary(cAct, "Send", Accent, AccentHi, delegate { SendCmd(); });
 
@@ -393,14 +497,32 @@ class Animus : Form
 
     void BuildFooter()
     {
-        lblStatus = Lbl(rootScroll, "", FSmall, Muted);
+        // On the FORM, not in the scroller. It is positioned in form coordinates, and a
+        // child sitting below the scroller's own client area is exactly how you conjure a
+        // permanent scrollbar out of a page that already fits.
+        lblStatus = Lbl(this, "", FSmall, Muted);
         lblStatus.AutoEllipsis = true;
         lblStatus.TextAlign = ContentAlignment.MiddleLeft;
     }
-
     // =========================================================================
     // LAYOUT - the single source of truth for every coordinate (4.3)
+    //
+    // TWO VIEWS, ONE WINDOW (2026-08-31). DASHBOARD is what you watch: the POV and the
+    // activity log down the left, vitals and inventory down the right. SETUP is the
+    // material you touch once - server, brain model, schematics - and it takes the whole
+    // body when you ask for it. The old panel showed both at all times, which is why
+    // twelve config fields owned half the screen in every session forever after the one
+    // in which they were filled in. Operator: "it looks very messy".
     // =========================================================================
+    void ShowSetup(bool on)
+    {
+        setupOpen = on;
+        cServer.Visible = on; cBrain.Visible = on; cSchem.Visible = on;
+        cLive.Visible = !on; cPov.Visible = !on; cInv.Visible = !on; cAct.Visible = !on;
+        if (btnSetup != null) btnSetup.Text = on ? "Close setup" : "Setup";
+        Relayout();
+    }
+
     void Relayout()
     {
         if (rootScroll == null || inLayout) return;
@@ -408,217 +530,262 @@ class Animus : Form
         rootScroll.SuspendLayout();
         try
         {
+            int W = ClientSize.Width, H = ClientSize.Height;
+            railBar.SetBounds(0, 0, W, RailH);
+            rootScroll.SetBounds(0, RailH, W, Math.Max(120, H - RailH - FooterH - S2));
+            lblStatus.SetBounds(S6, H - FooterH - S1, Math.Max(120, W - 2 * S6), FooterH);
+            LayRail(W);
+
             // Grid width follows the scroll VIEWPORT (which already excludes the vertical
             // scrollbar), floored just under the 980 minimum client so a vertical scrollbar
             // never provokes a horizontal one.
             int floorW = MinCW - SystemInformation.VerticalScrollBarWidth;
             int CW = Math.Max(rootScroll.ClientSize.Width, floorW) - 2 * S6;
-            int colW = (CW - 11 * S4) / 12;
-            int LW = 5 * colW + 4 * S4;
-            int RW = CW - S4 - LW;
-            int X0 = S6, X1 = S6 + LW + S4;
+            int X0 = S6, viewH = rootScroll.ClientSize.Height;
 
-            // ---- header band -------------------------------------------------
-            title.SetBounds(X0, 14, 200, 30);
-            int ovW = 360, ovX = X0 + CW - ovW;
-            lblGoal.SetBounds(ovX, S2, ovW, 20);
-            overlayRight = ovX + ovW;
-            PlaceChip();
+            // The state strip belongs to BOTH views: "what is it doing right now" is never
+            // something you should have to switch away from setup to read.
+            cState.SetBounds(X0, S3, CW, 40);
+            LayState(CW);
+            int top = S3 + 40 + S3;
 
-            bool compact = ClientSize.Width < 1100;
-            int dotW = compact ? 22 : 84;
-            int dotsX = ovX - S6 - 3 * dotW;
-            if (dotsX < X0 + 300) { compact = true; dotW = 22; dotsX = ovX - S6 - 3 * dotW; }
-            PlaceDot(lblOllama, "Ollama", dotsX, dotW, compact);
-            PlaceDot(lblBot, "Bot", dotsX + dotW, dotW, compact);
-            PlaceDot(lblBrain, "Brain", dotsX + 2 * dotW, dotW, compact);
-            lblTarget.SetBounds(X0 + 2, 44, Math.Max(120, dotsX - X0 - S4), 16);
-
-            // ---- left column heights ------------------------------------------
-            int serverH = LayServer(LW - 2 * S4) + S4;
-            int brainH  = LayBrain(LW - 2 * S4) + S4;
-            int schemH  = LaySchem(LW - 2 * S4) + S4;
-            int liveH   = LayLive(RW - 2 * S4) + S4;
-            int povCardH = 40 + PovH + S4;
-
-            int y = HeaderH;
-            cServer.SetBounds(X0, y, LW, serverH); y += serverH + S4;
-            cBrain.SetBounds(X0, y, LW, brainH);   y += brainH + S4;
-            cSchem.SetBounds(X0, y, LW, schemH);   y += schemH + S4;
-            int stopW = 140;
-            btnStart.SetBounds(X0, y, LW - S4 - stopW, BtnPrim);
-            btnStop.SetBounds(X0 + LW - stopW, y, stopW, BtnPrim);
-            int leftBottom = y + BtnPrim;
-
-            // ---- right column ---------------------------------------------------
-            int ry = HeaderH;
-            cLive.SetBounds(X1, ry, RW, liveH); ry += liveH + S4;
-            cPov.SetBounds(X1, ry, RW, povCardH);
-            pov.SetBounds(S4, 40, RW - 2 * S4, PovH);
-            ry += povCardH + S4;
-
-            // the activity card is the one vertical slack absorber
-            int viewH = Math.Max(rootScroll.ClientSize.Height, MinCH);
-            int contentBottom = viewH - S4 - FooterH - S4;
-            int actH = Math.Max(MinActH, contentBottom - ry);
-            cAct.SetBounds(X1, ry, RW, actH);
-            LayAct(RW - 2 * S4, actH);
-            int rightBottom = ry + actH;
-
-            // ---- footer + virtual size -------------------------------------------
-            int bodyBottom = Math.Max(leftBottom, rightBottom);
-            int totalH = Math.Max(viewH, bodyBottom + S4 + FooterH + S4);
-            lblStatus.SetBounds(X0, totalH - S4 - FooterH, CW, FooterH);
-            rootScroll.AutoScrollMinSize = new Size(0, totalH);   // vertical scroll only
+            int bottom = setupOpen ? LaySetup(X0, top, CW, viewH) : LayDash(X0, top, CW, viewH);
+            // Zero, not viewH: asking for a virtual height EQUAL to the viewport is what
+            // put a permanent, useless vertical scrollbar down the side of a page that fits.
+            int need = bottom + S3;
+            rootScroll.AutoScrollMinSize = new Size(0, need > viewH ? need : 0);
         }
         finally { rootScroll.ResumeLayout(); inLayout = false; }
     }
 
+    void LayRail(int W)
+    {
+        title.SetBounds(S6, 13, 118, 30);
+        int y = (RailH - BtnPrim) / 2;
+        int x = W - S6;
+        x -= 88;        btnStop.SetBounds(x, y, 88, BtnPrim);
+        x -= S2 + 168;  btnStart.SetBounds(x, y, 168, BtnPrim);
+        x -= S3 + 104;  btnSetup.SetBounds(x, y, 104, BtnPrim);
+
+        // The three dots collapse to bare dots before they would collide with the
+        // target line; the tooltip keeps naming them either way.
+        bool compact = x - (S6 + 130) < 3 * 78 + S6;
+        int dw = compact ? 26 : 78;
+        int dx = x - S4 - 3 * dw;
+        PlaceDot(lblOllama, "Ollama", dx, dw, compact);
+        PlaceDot(lblBot, "Bot", dx + dw, dw, compact);
+        PlaceDot(lblBrain, "Brain", dx + 2 * dw, dw, compact);
+
+        int tx = S6 + 126;
+        lblTarget.SetBounds(tx, 22, Math.Max(60, dx - S4 - tx), 16);
+    }
+
+    void LayState(int inner)
+    {
+        PlaceChip();
+        int gx = chip.Right + S3;
+        lblGoal.SetBounds(gx, 8, Math.Max(60, inner - gx - S3), 24);
+    }
+
+    // ---- dashboard -----------------------------------------------------------
+    int LayDash(int X0, int top, int CW, int viewH)
+    {
+        int RW = Math.Min(420, Math.Max(300, CW * 36 / 100));
+        int LW = CW - S4 - RW;
+        int X1 = X0 + LW + S4;
+        int floor = Math.Max(viewH - S3, top + 430);   // both columns end on this line
+
+        // LEFT: the picture, then the log. The POV canvas is sized 16:9 FROM the column
+        // width, so a frame fills it edge to edge - the old fixed 224 px box letterboxed
+        // every frame between two black bars.
+        int availW = LW - 2 * S3;
+        int povH = Math.Max(150, Math.Min(360, availW * 9 / 16));
+        // When the height cap bites, NARROW the canvas to match instead of leaving a
+        // 16:9 frame pillarboxed between two black bars inside an over-wide box.
+        int povW = Math.Min(availW, povH * 16 / 9);
+        int povCardH = CardHeadH + povH + S3;
+        cPov.SetBounds(X0, top, LW, povCardH);
+        pov.SetBounds(S3 + (availW - povW) / 2, CardHeadH, povW, povH);
+
+        int actY = top + povCardH + S4;
+        int actH = Math.Max(MinActH + 74, floor - actY);
+        cAct.SetBounds(X0, actY, LW, actH);
+        LayAct(LW - 2 * S3, actH);
+
+        // RIGHT: vitals (fixed height) then inventory, which absorbs the slack.
+        int liveH = LayLive(RW - 2 * S3) + S3;
+        cLive.SetBounds(X1, top, RW, liveH);
+        int invY = top + liveH + S4;
+        int invH = Math.Max(96, floor - invY);
+        cInv.SetBounds(X1, invY, RW, invH);
+        invCanvas.SetBounds(S3, CardHeadH, RW - 2 * S3, Math.Max(20, invH - CardHeadH - S3));
+
+        return Math.Max(actY + actH, invY + invH);
+    }
+
+    // ---- setup ---------------------------------------------------------------
+    int LaySetup(int X0, int top, int CW, int viewH)
+    {
+        bool two = CW >= 820;
+        int LW = two ? (CW - S4) * 58 / 100 : CW;
+        int X1 = two ? X0 + LW + S4 : X0;
+        int RW = two ? CW - S4 - LW : CW;
+
+        int sh = LayServer(LW - 2 * S3) + S3;
+        cServer.SetBounds(X0, top, LW, sh);
+        int y = two ? top : top + sh + S4;
+        int bh = LayBrain(RW - 2 * S3) + S3;
+        cBrain.SetBounds(X1, y, RW, bh); y += bh + S4;
+        int ch = LaySchem(RW - 2 * S3) + S3;
+        cSchem.SetBounds(X1, y, RW, ch);
+        return Math.Max(top + sh, y + ch);
+    }
+
     void PlaceDot(Label l, string name, int x, int w, bool compact)
     {
-        l.SetBounds(x, 26, w, 20);
-        l.Text = compact ? "●" : "● " + name;
+        Dot d = l as Dot;
+        if (d != null) d.Caption = compact ? "" : name;
+        l.SetBounds(x, (RailH - 20) / 2, w, 20);
         tips.SetToolTip(l, name);
+        l.Invalidate();
     }
 
     void PlaceChip()
     {
-        int w = TextRenderer.MeasureText(chip.Text, FSmallB).Width + 20;
-        if (w < 76) w = 76;
-        chip.SetBounds(overlayRight - w, 32, w, 22);
+        int w = TextRenderer.MeasureText(chip.Text, FSmallB).Width + 22;
+        if (w < 84) w = 84;
+        chip.SetBounds(S3, 8, w, 24);
     }
 
     // ---- per-card layouts (return the y of the last control's bottom) ---------
+    const int FieldRow = 56;   // label (15) + gap + input (32) + breathing room
+
     int LayServer(int inner)
     {
-        int y = 40;
-        lbHost.SetBounds(S4, y, inner, 15);
-        PlaceInput(tbHost, S4, y + 18, inner);
-        y += 62;
+        int y = CardHeadH;
+        lbHost.SetBounds(S3, y, inner, 15);
+        PlaceInput(tbHost, S3, y + 18, inner);
+        y += FieldRow;
 
         int w3 = (inner - 2 * S2) / 3;
-        lbPort.SetBounds(S4, y, w3, 15); PlaceInput(tbPort, S4, y + 18, w3);
-        lbVer.SetBounds(S4 + w3 + S2, y, w3, 15); PlaceInput(tbVer, S4 + w3 + S2, y + 18, w3);
-        lbUser.SetBounds(S4 + 2 * (w3 + S2), y, inner - 2 * (w3 + S2), 15);
-        PlaceInput(tbUser, S4 + 2 * (w3 + S2), y + 18, inner - 2 * (w3 + S2));
-        y += 62;
+        lbPort.SetBounds(S3, y, w3, 15); PlaceInput(tbPort, S3, y + 18, w3);
+        lbVer.SetBounds(S3 + w3 + S2, y, w3, 15); PlaceInput(tbVer, S3 + w3 + S2, y + 18, w3);
+        lbUser.SetBounds(S3 + 2 * (w3 + S2), y, inner - 2 * (w3 + S2), 15);
+        PlaceInput(tbUser, S3 + 2 * (w3 + S2), y + 18, inner - 2 * (w3 + S2));
+        y += FieldRow;
 
-        lbAuth.SetBounds(S4, y, 168, 15);
-        btnOffline.SetBounds(S4, y + 18, 76, BtnSec);
-        btnMs.SetBounds(S4 + 76 + S2, y + 18, 84, BtnSec);
-        int opsX = S4 + 168 + S3;
-        lbOps.SetBounds(opsX, y, inner - 168 - S3, 15);
-        PlaceInput(tbOps, opsX, y + 18, inner - 168 - S3);
-        y += 62;
+        lbAuth.SetBounds(S3, y, 172, 15);
+        btnOffline.SetBounds(S3, y + 18, 78, BtnSec);
+        btnMs.SetBounds(S3 + 78 + S2, y + 18, 88, BtnSec);
+        int opsX = S3 + 174 + S3;
+        lbOps.SetBounds(opsX, y, Math.Max(60, inner - 174 - S3), 15);
+        PlaceInput(tbOps, opsX, y + 18, Math.Max(60, inner - 174 - S3));
+        y += FieldRow;
 
-        lbAliases.SetBounds(S4, y, inner, 15);
-        PlaceInput(tbAliases, S4, y + 18, inner);
-        y += 62;
+        lbAliases.SetBounds(S3, y, inner, 15);
+        PlaceInput(tbAliases, S3, y + 18, inner);
+        y += FieldRow;
 
         int w4 = (inner - 3 * S2) / 4;
-        lbBed.SetBounds(S4, y, w4, 15); PlaceInput(tbBedrock, S4, y + 18, w4);
-        lbPre.SetBounds(S4 + w4 + S2, y, w4, 15); PlaceInput(tbFloodgate, S4 + w4 + S2, y + 18, w4);
-        lbApiH.SetBounds(S4 + 2 * (w4 + S2), y, w4, 15); PlaceInput(tbCtlHost, S4 + 2 * (w4 + S2), y + 18, w4);
-        int lastX = S4 + 3 * (w4 + S2), lastW = inner - 3 * (w4 + S2);
+        lbBed.SetBounds(S3, y, w4, 15); PlaceInput(tbBedrock, S3, y + 18, w4);
+        lbPre.SetBounds(S3 + w4 + S2, y, w4, 15); PlaceInput(tbFloodgate, S3 + w4 + S2, y + 18, w4);
+        lbApiH.SetBounds(S3 + 2 * (w4 + S2), y, w4, 15); PlaceInput(tbCtlHost, S3 + 2 * (w4 + S2), y + 18, w4);
+        int lastX = S3 + 3 * (w4 + S2), lastW = inner - 3 * (w4 + S2);
         lbApiP.SetBounds(lastX, y, lastW, 15); PlaceInput(tbCtlPort, lastX, y + 18, lastW);
-        y += 62;
+        y += FieldRow;
 
-        int saveW = 96, reW = 152;
-        btnSave.SetBounds(S4 + inner - reW - S2 - saveW, y + 2, saveW, BtnSec);
-        btnSaveRe.SetBounds(S4 + inner - reW, y, reW, BtnPrim);
+        int saveW = 96, reW = 158;
+        btnSave.SetBounds(S3 + inner - reW - S2 - saveW, y + 2, saveW, BtnSec);
+        btnSaveRe.SetBounds(S3 + inner - reW, y, reW, BtnPrim);
         return y + BtnPrim;
     }
 
     int LayBrain(int inner)
     {
-        int y = 40;
-        lbModel.SetBounds(S4, y, inner, 15);
+        int y = CardHeadH;
+        lbModel.SetBounds(S3, y, inner, 15);
         int bw1 = 80, bw2 = 96;
-        int cw = inner - bw1 - bw2 - 2 * S2;
-        PlaceCombo(cbModel, S4, y + 18, cw);
-        btnRefresh.SetBounds(S4 + cw + S2, y + 18, bw1, BtnSec);
-        btnUse.SetBounds(S4 + cw + S2 + bw1 + S2, y + 18, bw2, BtnSec);
-        y += 62;
+        int cw = Math.Max(80, inner - bw1 - bw2 - 2 * S2);
+        PlaceCombo(cbModel, S3, y + 18, cw);
+        btnRefresh.SetBounds(S3 + cw + S2, y + 18, bw1, BtnSec);
+        btnUse.SetBounds(S3 + cw + S2 + bw1 + S2, y + 18, bw2, BtnSec);
+        y += FieldRow;
 
-        lbBrainGoal.SetBounds(S4, y, inner, 15);
-        PlaceInput(tbGoal, S4, y + 18, inner);
-        y += 62;
+        lbBrainGoal.SetBounds(S3, y, inner, 15);
+        PlaceInput(tbGoal, S3, y + 18, inner);
+        y += FieldRow;
 
-        btnBrainOn.SetBounds(S4, y, 96, BtnSec);
-        btnApplyGoal.SetBounds(S4 + inner - 96, y, 96, BtnSec);
+        btnBrainOn.SetBounds(S3, y, 100, BtnSec);
+        btnApplyGoal.SetBounds(S3 + inner - 100, y, 100, BtnSec);
         return y + BtnSec;
     }
 
     int LaySchem(int inner)
     {
-        int y = 40;
+        int y = CardHeadH;
         int bw1 = 88, bw2 = 100;
-        int cw = inner - bw1 - bw2 - 2 * S2;
-        PlaceCombo(cbSchem, S4, y, cw);
-        btnAddSchem.SetBounds(S4 + cw + S2, y, bw1, BtnSec);
-        btnOpenSchem.SetBounds(S4 + cw + S2 + bw1 + S2, y, bw2, BtnSec);
-        return y + BtnSec;
+        int cw = Math.Max(80, inner - bw1 - bw2 - 2 * S2);
+        PlaceCombo(cbSchem, S3, y, cw);
+        btnAddSchem.SetBounds(S3 + cw + S2, y, bw1, BtnSec);
+        btnOpenSchem.SetBounds(S3 + cw + S2 + bw1 + S2, y, bw2, BtnSec);
+        lbSchemHint.SetBounds(S3, y + BtnSec + S2, inner, 15);
+        return y + BtnSec + S2 + 15;
     }
 
     int LayLive(int inner)
     {
-        int y = 40;
-        lvName.SetBounds(S4, y, inner, 20);
-        y = 66;
-        lkHp.SetBounds(S4, y, LabelW, 15);
-        lvHp.SetBounds(S4 + inner - 96, y, 96, 15);
-        hpTrack.SetBounds(S4, y + 18, inner, 8);
-        y = 98;
-        lkFood.SetBounds(S4, y, LabelW, 15);
-        lvFood.SetBounds(S4 + inner - 96, y, 96, 15);
-        foodTrack.SetBounds(S4, y + 18, inner, 8);
+        int y = CardHeadH;
+        lvName.SetBounds(S3, y, inner, 20);
+        y += 28;
 
-        int half = (inner - S4) / 2;
-        int vx = LabelW + S2;
-        y = 132;
-        Row(lkPos, lvPos, S4, y, half);
-        Row(lkTime, lvTime, S4 + half + S4, y, inner - half - S4);
-        y += RowH;
-        Row(lkBiome, lvBiome, S4, y, half);
-        Row(lkThreat, lvThreat, S4 + half + S4, y, inner - half - S4);
-        y += RowH;
-        Row(lkPlayers, lvPlayers, S4, y, inner);
-        y += RowH;
-        Row(lkActivity, lvActivity, S4, y, inner);
-        y += RowH + S2;
+        lkHp.SetBounds(S3, y, LabelW, 15);
+        lvHp.SetBounds(S3 + inner - 96, y, 96, 15);
+        hpTrack.SetBounds(S3, y + 18, inner, 8);
+        y += 34;
+        lkFood.SetBounds(S3, y, LabelW, 15);
+        lvFood.SetBounds(S3 + inner - 96, y, 96, 15);
+        foodTrack.SetBounds(S3, y + 18, inner, 8);
+        y += 38;
 
-        lbInvHead.SetBounds(S4, y, LabelW, 15);
-        lvInv.SetBounds(S4 + vx, y - 2, inner - vx, 45);
-        return y + 45;
+        int half = (inner - S3) / 2;
+        Row(lkPos, lvPos, S3, y, half);
+        Row(lkTime, lvTime, S3 + half + S3, y, inner - half - S3);
+        y += RowH;
+        Row(lkBiome, lvBiome, S3, y, half);
+        Row(lkThreat, lvThreat, S3 + half + S3, y, inner - half - S3);
+        y += RowH;
+        Row(lkPlayers, lvPlayers, S3, y, inner);
+        y += RowH;
+        Row(lkActivity, lvActivity, S3, y, inner);
+        return y + RowH;
     }
 
     void Row(Label k, Label v, int x, int y, int w)
     {
-        k.SetBounds(x, y, LabelW, 15);
-        v.SetBounds(x + LabelW + S2, y - 1, Math.Max(40, w - LabelW - S2), 17);
+        k.SetBounds(x, y + 2, LabelW, 15);
+        v.SetBounds(x + LabelW + S2, y, Math.Max(40, w - LabelW - S2), 18);
     }
 
     void LayAct(int inner, int cardH)
     {
-        int quickY = cardH - S4 - BtnChip;
-        int cmdY = quickY - S2 - InputH;
-        int logH = Math.Max(48, cmdY - S2 - 40);
-        liveLog.SetBounds(S4, 40, inner, logH);
+        int quickY = cardH - S3 - BtnChip;
+        int cmdY = quickY - S3 - InputH;
+        int logH = Math.Max(48, cmdY - S3 - CardHeadH);
+        liveLog.SetBounds(S3, CardHeadH, inner, logH);
         int sendW = 84;
-        PlaceInput(tbCmd, S4, cmdY, inner - S2 - sendW);
-        btnSend.SetBounds(S4 + inner - sendW, cmdY - 2, sendW, BtnPrim);
-        int qx = S4;
+        PlaceInput(tbCmd, S3, cmdY, inner - S2 - sendW);
+        btnSend.SetBounds(S3 + inner - sendW, cmdY - 1, sendW, BtnPrim);
+        int qx = S3;
         for (int i = 0; i < quickBtns.Count; i++)
         {
             Button b = quickBtns[i];
             int w = TextRenderer.MeasureText(b.Text, FSmallB).Width + 2 * S3;
             w = ((w + 3) / 4) * 4;
-            if (w < 76) w = 76;
+            if (w < 70) w = 70;
             b.SetBounds(qx, quickY, w, BtnChip);
             qx += w + S2;
         }
     }
-
     // =========================================================================
     // FACTORIES
     // =========================================================================
@@ -632,19 +799,61 @@ class Animus : Form
         return l;
     }
 
+    // A card is PAINTED, not region-clipped (which is what the old Round() did). Clipping
+    // gives you a rounded silhouette but no edge: every card was the same flat grey slab
+    // as its neighbour, so the eye had nothing to group by. A filled rounded path plus a
+    // one-pixel border reads as a surface, and the parent background shows through the
+    // corners properly instead of being cut out of the control's own region.
     Panel MakeCard()
     {
         Panel p = new Panel();
-        p.BackColor = Card;
+        p.BackColor = Bg;
         p.SetBounds(0, 0, 200, 100);
-        rootScroll.Controls.Add(p); Round(p, 12);
+        p.Paint += CardPaint;
+        p.Resize += delegate { p.Invalidate(); };
+        rootScroll.Controls.Add(p);
         return p;
     }
 
+    static void CardPaint(object s, PaintEventArgs e)
+    {
+        Control c = (Control)s;
+        if (c.Width < 4 || c.Height < 4) return;
+        Graphics g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using (GraphicsPath p = RoundPath(new Rectangle(0, 0, c.Width - 1, c.Height - 1), 12))
+        {
+            using (SolidBrush b = new SolidBrush(Card)) g.FillPath(b, p);
+            using (Pen pen = new Pen(Border)) g.DrawPath(pen, p);
+        }
+        // hairline under the title band - the only rule in the whole panel, and it is
+        // what makes a card's heading read as a heading instead of another value.
+        if (c.Height > CardHeadH + 8)
+            using (Pen pen = new Pen(Border))
+                g.DrawLine(pen, S3, CardHeadH - S2, c.Width - S3, CardHeadH - S2);
+    }
+
+    static GraphicsPath RoundPath(Rectangle r, int rad)
+    {
+        GraphicsPath p = new GraphicsPath();
+        if (rad * 2 > r.Width) rad = Math.Max(1, r.Width / 2);
+        if (rad * 2 > r.Height) rad = Math.Max(1, r.Height / 2);
+        int d = rad * 2;
+        p.AddArc(r.X, r.Y, d, d, 180, 90);
+        p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+        p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+        p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+        p.CloseFigure();
+        return p;
+    }
+
+    // Section headings are MUTED, not accent-purple. Accent is reserved for the things
+    // you can act on (primary buttons, an on toggle, an item count) - when every heading
+    // shouts in the accent colour, nothing does.
     void AddHeader(Control parent, string text)
     {
-        Label l = Lbl(parent, text.ToUpperInvariant(), FHeader, Accent);
-        l.SetBounds(S4, S3, 460, 16);
+        Label l = Lbl(parent, text.ToUpperInvariant(), FHeader, Muted);
+        l.SetBounds(S3, 10, 460, 16);
     }
 
     Label FieldLabel(Control parent, string text)
@@ -684,14 +893,30 @@ class Animus : Form
     TextBox MakeInput(Control parent, string val)
     {
         Panel wrap = new Panel();
-        wrap.SetBounds(0, 0, 100, InputH); wrap.BackColor = Input;
-        parent.Controls.Add(wrap); Round(wrap, 8);
+        wrap.SetBounds(0, 0, 100, InputH);
+        wrap.BackColor = Card;               // the card shows through the rounded corners
+        wrap.Paint += InputPaint;
+        wrap.Resize += delegate { wrap.Invalidate(); };
+        parent.Controls.Add(wrap);
         TextBox tb = new TextBox();
         tb.BorderStyle = BorderStyle.None; tb.BackColor = Input; tb.ForeColor = Txt;
         tb.Font = FBody; tb.Text = val == null ? "" : val;
         tb.SetBounds(S3, S2, 80, 20);
         wrap.Controls.Add(tb);
         return tb;
+    }
+
+    static void InputPaint(object s, PaintEventArgs e)
+    {
+        Control c = (Control)s;
+        if (c.Width < 4 || c.Height < 4) return;
+        Graphics g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using (GraphicsPath p = RoundPath(new Rectangle(0, 0, c.Width - 1, c.Height - 1), 8))
+        {
+            using (SolidBrush b = new SolidBrush(Input)) g.FillPath(b, p);
+            using (Pen pen = new Pen(Border)) g.DrawPath(pen, p);
+        }
     }
 
     static void PlaceInput(TextBox tb, int x, int y, int w)
@@ -786,11 +1011,41 @@ class Animus : Form
         b.FlatAppearance.MouseOverBackColor = on ? AccentHi : GhostHi;
     }
 
+    // A green "● Ollama" in one flat colour is a word that happens to start with a dot.
+    // Painting the dot separately lets the DOT carry the state and the WORD stay legible.
+    class Dot : Label
+    {
+        public bool Up;
+        public string Caption = "";
+        public Dot()
+        {
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint |
+                     ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+            BackColor = Rail;
+        }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            using (SolidBrush bg = new SolidBrush(Rail)) g.FillRectangle(bg, ClientRectangle);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            int d = 8, cy = (Height - d) / 2;
+            Color c = Up ? Green : Faint;
+            if (Up)  // a soft halo so "up" reads instantly in peripheral vision
+                using (SolidBrush h = new SolidBrush(Color.FromArgb(60, c)))
+                    g.FillEllipse(h, -3, cy - 3, d + 6, d + 6);
+            using (SolidBrush b = new SolidBrush(c)) g.FillEllipse(b, 0, cy, d, d);
+            if (Caption.Length > 0)
+                TextRenderer.DrawText(g, Caption, Font, new Rectangle(d + 7, 0, Width - d - 7, Height),
+                    Up ? Txt : Faint, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+        }
+    }
+
     Label MakeStatus(string name)
     {
-        Label l = Lbl(rootScroll, "● " + name, FBody, Muted);
-        l.TextAlign = ContentAlignment.MiddleLeft;
-        return l;
+        Dot d = new Dot();
+        d.Caption = name; d.Font = FSmall; d.SetBounds(0, 0, 78, 20);
+        railBar.Controls.Add(d);
+        return d;
     }
 
     static Color Mix(Color a, Color b, double t)
@@ -972,17 +1227,11 @@ class Animus : Form
             }
             lvActivity.ForeColor = act == null ? Muted : Txt;
             System.Collections.IList inv = st.ContainsKey("inventory") ? st["inventory"] as System.Collections.IList : null;
-            if (inv != null && inv.Count > 0)
-            {
-                string[] items = new string[inv.Count];
-                for (int i = 0; i < inv.Count; i++) items[i] = "" + inv[i];
-                string t = string.Join("  ·  ", items);
-                string full = t.Length > 1000 ? t.Substring(0, 1000) + "…" : t;
-                if (t.Length > 400) t = t.Substring(0, 399) + "…";
-                lvInv.Text = t;
-                tips.SetToolTip(lvInv, full);
-            }
-            else { lvInv.Text = "empty"; tips.SetToolTip(lvInv, "empty"); }
+            invItems.Clear();
+            if (inv != null) foreach (object it in inv) invItems.Add("" + it);
+            tips.SetToolTip(invCanvas, invItems.Count == 0 ? "empty"
+                : string.Join("\r\n", invItems.ToArray()));
+            invCanvas.Invalidate();
 
             UpdateOverlay(st);
         }
@@ -1073,9 +1322,13 @@ class Animus : Form
         chipText = text;
         chip.Text = text;
         chip.ForeColor = c;
-        chip.BackColor = Mix(Bg, c, 0.25);
+        chip.BackColor = Mix(Card, c, 0.22);
         tips.SetToolTip(chip, text);
         PlaceChip();
+        // The chip is as wide as its text, so the goal line has to move with it -
+        // laying the goal out once at start-up left "BUILD WAITING" printing straight
+        // through it.
+        if (cState != null && cState.Width > 0) LayState(cState.Width);
     }
 
     static string S(Dictionary<string, object> d, string k)
@@ -1566,21 +1819,70 @@ class Animus : Form
     // ---- status + log ------------------------------------------------------
     void RefreshTarget()
     {
-        lblTarget.Text = "bot → " + Cfg("host", "?") + ":" + Cfg("port", "?") +
-                         "   auth=" + Cfg("auth", "?") + "   version=" + Cfg("version", "?");
+        lblTarget.Text = Cfg("username", "?") + "  ·  " + Cfg("host", "?") + ":" + Cfg("port", "?") +
+                         "  ·  " + Cfg("version", "?") + "  ·  " + Cfg("auth", "?");
         tips.SetToolTip(lblTarget, lblTarget.Text);
     }
 
+    // Off the UI thread, always. This used to run a 300 ms TCP connect and TWO full
+    // process enumerations inside a 2 s UI timer - a guaranteed periodic hitch in a
+    // panel whose whole job is to feel live.
     void RefreshStatus()
     {
-        SetDot(lblOllama, PortOpen(11434));
-        SetDot(lblBot, botUp || IsRunning("Animus BOT"));
-        SetDot(lblBrain, IsRunning("Animus BRAIN"));
+        if (statusPolling) return;
+        statusPolling = true;
+        RunBg(delegate {
+            try
+            {
+                bool oll = PortOpen(11434);
+                bool bot = ProcAlive(botProc), brain = ProcAlive(brainProc);
+                // Only pay for the WMI sweep when a handle can't answer (bot started
+                // outside this panel, or run.js re-execed itself).
+                if (!bot || !brain)
+                {
+                    bool wBot, wBrain;
+                    ScanChildren(out wBot, out wBrain);
+                    bot = bot || wBot; brain = brain || wBrain;
+                }
+                bot = bot || botUp;
+                bool fOll = oll, fBot = bot, fBrain = brain;
+                try { BeginInvoke((MethodInvoker)delegate {
+                    SetDot(lblOllama, fOll); SetDot(lblBot, fBot); SetDot(lblBrain, fBrain);
+                }); } catch { }
+            }
+            finally { statusPolling = false; }
+        });
+    }
+
+    static bool ProcAlive(Process p) { try { return p != null && !p.HasExited; } catch { return false; } }
+
+    // One WMI sweep, both answers: two NodePidsMatching() calls would pay for the
+    // (not cheap) process enumeration twice on every status tick.
+    void ScanChildren(out bool bot, out bool brain)
+    {
+        bot = false; brain = false;
+        try
+        {
+            using (ManagementObjectSearcher q = new ManagementObjectSearcher(
+                "SELECT CommandLine FROM Win32_Process WHERE Name = 'node.exe'"))
+                foreach (ManagementObject o in q.Get())
+                {
+                    string cl = null;
+                    try { cl = o["CommandLine"] as string; } catch { }
+                    if (string.IsNullOrEmpty(cl)) continue;
+                    if (cl.IndexOf("run.js", StringComparison.OrdinalIgnoreCase) >= 0) bot = true;
+                    else if (cl.IndexOf("brain-llm.js", StringComparison.OrdinalIgnoreCase) >= 0) brain = true;
+                }
+        }
+        catch { }
     }
 
     void SetDot(Label l, bool up)
     {
-        l.ForeColor = up ? Green : Muted;
+        Dot d = l as Dot;
+        if (d == null || d.Up == up) return;
+        d.Up = up;
+        d.Invalidate();
     }
 
     void Log(string msg)
@@ -1588,6 +1890,20 @@ class Animus : Form
         if (lblStatus.InvokeRequired) { lblStatus.BeginInvoke((MethodInvoker)delegate { Log(msg); }); return; }
         lblStatus.Text = msg;              // single-line status strip; hover for the full text
         tips.SetToolTip(lblStatus, msg);   // the live activity box carries the history
+    }
+
+    // Push one line into the activity box. The panel's own events (start/stop) and the
+    // children's console output share the log with the bot's /log feed, so there is one
+    // place to look when something goes wrong - not a console window behind the panel.
+    void AppendLog(string line)
+    {
+        if (liveLog == null) return;
+        if (liveLog.InvokeRequired) { try { liveLog.BeginInvoke((MethodInvoker)delegate { AppendLog(line); }); } catch { } return; }
+        bool nearBottom = liveLog.SelectionStart >= liveLog.TextLength - 5 || liveLog.TextLength == 0;
+        liveLog.AppendText(line.Replace("\n", " ") + "\r\n");
+        if (liveLog.TextLength > 60000)
+        { liveLog.Text = liveLog.Text.Substring(liveLog.TextLength - 40000); liveLog.SelectionStart = liveLog.TextLength; }
+        if (nearBottom) { liveLog.SelectionStart = liveLog.TextLength; liveLog.ScrollToCaret(); }
     }
 
     static void RunBg(ThreadStart work)
@@ -1752,21 +2068,23 @@ class Animus : Form
     // ---- launch actions ----------------------------------------------------
     void StartBot()
     {
-        if (IsRunning("Animus BOT")) { Log("Bot already running."); return; }
+        if (NodeAlive("run.js")) { Log("Bot already running."); return; }
         if (!OnPath("node")) { Log("ERROR: 'node' is not on your PATH. Install Node.js and retry."); return; }
         if (!Directory.Exists(Path.Combine(BotDir, "node_modules")))
         { Log("Installing bot dependencies (first run)…"); RunSync("cmd.exe", "/c npm install", BotDir); }
         string auth = Cfg("auth", "?");
         Log("Starting bot → " + Cfg("host", "?") + ":" + Cfg("port", "?") + " (auth=" + auth + ")…");
-        if (auth == "microsoft") Log("First run: a microsoft.com/link CODE appears in the BOT window - open it to log in.");
-        SpawnWindow("Set-Location '" + BotDir + "'; $host.UI.RawUI.WindowTitle='Animus BOT'; node run.js");
+        AppendLog("[gui] starting bot → " + Cfg("host", "?") + ":" + Cfg("port", "?") + " (auth=" + auth + ")");
+        if (auth == "microsoft") AppendLog("[gui] first run signs in with a microsoft.com/link code — it appears here.");
+        try { botProc = SpawnNode("bot", "run.js", null); }
+        catch (Exception e) { Log("Could not start the bot: " + e.Message); return; }
         if (WaitPort(int.Parse(ControlPort), 300)) Log("Bot up — live panel is on.");
-        else Log("Bot didn't come up on :" + ControlPort + " — check the 'Animus BOT' window (host/port/version/login).");
+        else Log("Bot didn't come up on :" + ControlPort + " — read the [bot] lines in the activity log.");
     }
 
     void StartBrain(string model)
     {
-        if (IsRunning("Animus BRAIN")) { Log("Brain already running."); return; }
+        if (NodeAlive("brain-llm.js")) { Log("Brain already running."); return; }
         if (model == null || model.Trim().Length == 0) model = LoadModel();
         model = model.Trim();
         EnsureOllama();
@@ -1774,12 +2092,15 @@ class Animus : Form
         if (list != null && list.IndexOf(model, StringComparison.OrdinalIgnoreCase) < 0)
         { Log(model + " isn't pulled yet — pulling it first…"); UseModel(model); }
         Log("Starting brain (" + model + ")…");
-        string cmd =
-            "Set-Location '" + BotDir + "'; $host.UI.RawUI.WindowTitle='Animus BRAIN'; " +
-            "$env:LLM_URL='http://127.0.0.1:11434/api/chat'; $env:OLLAMA_NATIVE='1'; " +
-            "$env:LLM_MODEL='" + model + "'; $env:BOT_URL='" + ApiBase + "'; " +
-            "$env:GOAL='" + Goal + "'; node brain-llm.js";
-        SpawnWindow(cmd);
+        AppendLog("[gui] starting brain (" + model + ")");
+        Dictionary<string, string> env = new Dictionary<string, string>();
+        env["LLM_URL"] = "http://127.0.0.1:11434/api/chat";
+        env["OLLAMA_NATIVE"] = "1";
+        env["LLM_MODEL"] = model;
+        env["BOT_URL"] = ApiBase;
+        env["GOAL"] = Goal;
+        try { brainProc = SpawnNode("brain", "brain-llm.js", env); }
+        catch (Exception e) { Log("Could not start the brain: " + e.Message); }
     }
 
     // ---- schematics --------------------------------------------------------
@@ -1916,10 +2237,12 @@ class Animus : Form
             }
             Thread.Sleep(300);
         }
-        // Legacy: also close any visible Animus BOT/BRAIN console windows.
+        // Legacy: close any visible Animus BOT/BRAIN console window left over from a
+        // start made by an older build of this panel (they are headless children now).
         string[] titles = { "Animus BOT", "Animus BRAIN" };
         foreach (Process p in Process.GetProcesses())
         { try { if (Array.IndexOf(titles, p.MainWindowTitle) >= 0) { p.Kill(); killed++; } } catch { } }
+        botProc = null; brainProc = null;
 
         // Release the GPU as part of stopping, not 28 minutes later.
         UnloadOllamaModels();
@@ -1959,7 +2282,7 @@ class Animus : Form
     bool closeStopDone = false;
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        if (!closeStopDone)
+        if (!closeStopDone && !shotMode)
         {
             closeStopDone = true;
             // Pollers first, so nothing races the kill or repaints a dead bot as live.
@@ -2003,18 +2326,134 @@ class Animus : Form
     }
 
     // ---- low-level helpers -------------------------------------------------
-    static void SpawnWindow(string psCommand)
+    // HEADLESS BY DESIGN (2026-08-31). Start used to shell out to
+    //   powershell -NoExit -Command "... node run.js"
+    // with UseShellExecute=true, which is precisely a request for a visible console
+    // window - two of them, BOT and BRAIN, every single start. They existed for one
+    // real reason (the microsoft.com/link device code is printed to stdout on first
+    // login) and one accidental one (IsRunning() identified the processes by their
+    // console TITLE). Both are handled here instead: stdout/stderr are piped into the
+    // activity log, the device code is lifted out and pushed at the operator, and
+    // liveness comes from the command line via WMI, which is what StopAll already used.
+    Process SpawnNode(string tag, string script, Dictionary<string, string> env)
     {
-        ProcessStartInfo psi = new ProcessStartInfo("powershell", "-NoExit -Command \"" + psCommand + "\"");
-        psi.UseShellExecute = true;
-        Process.Start(psi);
+        ProcessStartInfo psi = new ProcessStartInfo("node", script);
+        psi.WorkingDirectory = BotDir;
+        psi.UseShellExecute = false;
+        psi.CreateNoWindow = true;
+        psi.RedirectStandardOutput = true;
+        psi.RedirectStandardError = true;
+        psi.StandardOutputEncoding = Encoding.UTF8;
+        psi.StandardErrorEncoding = Encoding.UTF8;
+        if (env != null)
+            foreach (KeyValuePair<string, string> kv in env) psi.EnvironmentVariables[kv.Key] = kv.Value;
+        Process p = new Process();
+        p.StartInfo = psi;
+        p.EnableRaisingEvents = true;
+        p.OutputDataReceived += delegate(object s, DataReceivedEventArgs e) { ChildLine(tag, e.Data); };
+        p.ErrorDataReceived += delegate(object s, DataReceivedEventArgs e) { ChildLine(tag, e.Data); };
+        p.Start();
+        AdoptChild(p);
+        p.BeginOutputReadLine();
+        p.BeginErrorReadLine();
+        return p;
     }
 
-    static bool IsRunning(string title)
+    // One line of a child's console output. The bot's own /log endpoint carries the
+    // in-game narrative; this carries the things that happen BEFORE the control port
+    // is up (login, version mismatch, crash stacks) - the exact content the console
+    // windows used to show, now in the panel that is already open.
+    static readonly Regex DeviceCodeRx = new Regex(@"code\s+([A-Z0-9]{6,10})\b", RegexOptions.IgnoreCase);
+    void ChildLine(string tag, string line)
     {
-        foreach (Process p in Process.GetProcesses())
-        { try { if (p.MainWindowTitle == title) return true; } catch { } }
-        return false;
+        if (line == null) return;
+        string t = line.TrimEnd();
+        if (t.Length == 0) return;
+        if (t.Length > 400) t = t.Substring(0, 399) + "…";
+        AppendLog("[" + tag + "] " + t);
+        if (t.IndexOf("microsoft.com/link", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            Match m = DeviceCodeRx.Match(t);
+            string code = m.Success ? m.Groups[1].Value.ToUpperInvariant() : null;
+            BeginInvoke((MethodInvoker)delegate {
+                if (code != null)
+                {
+                    try { Clipboard.SetText(code); } catch { }
+                    Log("SIGN IN: open microsoft.com/link and enter " + code + " (copied to clipboard).");
+                    AppendLog("[login] code " + code + " copied to the clipboard — open https://microsoft.com/link");
+                }
+                else Log("SIGN IN required — see the [bot] line in the activity log.");
+                try { Process.Start(new ProcessStartInfo("https://www.microsoft.com/link") { UseShellExecute = true }); } catch { }
+            });
+        }
+    }
+
+    // Is a node process running THIS script? Command-line identity, not a window title:
+    // a headless child has no title, and a title could always be faked or go stale.
+    bool NodeAlive(string script) { return NodePidsMatching(script).Count > 0; }
+
+    // ---- the panel owns the body, at the OS level ----------------------------
+    // OnFormClosing's rule ("closing the panel stops the bot") only covers a GRACEFUL
+    // close. Kill the panel from Task Manager, or crash it, and the old build left the
+    // bot running on a live server with nobody watching - the exact failure that rule
+    // was written for. A Job Object with KILL_ON_JOB_CLOSE closes that hole in the OS
+    // rather than in our code: when this process ends, however it ends, its children end.
+    // (run.js's own index.js child inherits job membership, so the supervisor cannot
+    // outlive the panel either.)
+    const int JobObjectExtendedLimitInformation = 9;
+    const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000;
+    static IntPtr jobHandle = IntPtr.Zero;
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    static extern IntPtr CreateJobObject(IntPtr attrs, string name);
+    [DllImport("kernel32.dll")]
+    static extern bool SetInformationJobObject(IntPtr job, int infoClass, IntPtr info, uint len);
+    [DllImport("kernel32.dll")]
+    static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct JOBOBJECT_BASIC_LIMIT_INFORMATION
+    {
+        public long PerProcessUserTimeLimit, PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize, MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass, SchedulingClass;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    struct IO_COUNTERS
+    { public ulong Read, Write, Other, ReadX, WriteX, OtherX; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+    {
+        public JOBOBJECT_BASIC_LIMIT_INFORMATION Basic;
+        public IO_COUNTERS Io;
+        public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed;
+    }
+
+    static void AdoptChild(Process p)
+    {
+        try
+        {
+            if (jobHandle == IntPtr.Zero)
+            {
+                jobHandle = CreateJobObject(IntPtr.Zero, null);
+                if (jobHandle == IntPtr.Zero) return;
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION info = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+                info.Basic.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                int len = Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION));
+                IntPtr mem = Marshal.AllocHGlobal(len);
+                try
+                {
+                    Marshal.StructureToPtr(info, mem, false);
+                    SetInformationJobObject(jobHandle, JobObjectExtendedLimitInformation, mem, (uint)len);
+                }
+                finally { Marshal.FreeHGlobal(mem); }
+            }
+            AssignProcessToJobObject(jobHandle, p.Handle);
+        }
+        catch { }   // best effort: a bot that starts unadopted still beats one that never starts
     }
 
     static bool PortOpen(int port)
@@ -2052,13 +2491,21 @@ class Animus : Form
         catch { return false; }
     }
 
-    static void RunSync(string file, string args, string workDir)
+    // Also headless: `npm install` and `ollama pull` used to flash up their own console.
+    // Their output is the only progress the operator gets, so it goes to the activity log.
+    void RunSync(string file, string args, string workDir)
     {
         try
         {
             ProcessStartInfo psi = new ProcessStartInfo(file, args);
-            psi.UseShellExecute = false; psi.WorkingDirectory = workDir;
-            Process p = Process.Start(psi); p.WaitForExit();
+            psi.UseShellExecute = false; psi.CreateNoWindow = true; psi.WorkingDirectory = workDir;
+            psi.RedirectStandardOutput = true; psi.RedirectStandardError = true;
+            Process p = new Process();
+            p.StartInfo = psi;
+            p.OutputDataReceived += delegate(object s, DataReceivedEventArgs e) { ChildLine("setup", e.Data); };
+            p.ErrorDataReceived += delegate(object s, DataReceivedEventArgs e) { ChildLine("setup", e.Data); };
+            p.Start(); p.BeginOutputReadLine(); p.BeginErrorReadLine();
+            p.WaitForExit();
         }
         catch { }
     }

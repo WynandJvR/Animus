@@ -75,3 +75,7 @@ state-archive-oldbase/
 # hand/tool-made state snapshots (same live-world coordinates as the runtime state above)
 state-backup-*/
 state-archive-*/
+bot/director-mode.json
+bot/runtime.json
+bot2/memory.json
+bot2/paused.flag
