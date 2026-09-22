@@ -106,6 +106,21 @@ function make (bot, director) {
         for (const b of build.unskippedObstructions(bot)) { if (world.LEAF_RE.test(b.name)) continue; t[b.name] = (t[b.name] || 0) + 1; if (ex.length < 30) ex.push(`${b.name}@${b.position.x},${b.position.y},${b.position.z}`) }
         return JSON.stringify({ tally: t, ex })
       }
+      case 'missing': {
+        // missing - every unfinished cell of the build (what is there now), and filler/scaffold blocks
+        // standing in or round the footprint that are not part of it
+        const j = build.getJob()
+        if (!j) return 'no build job'
+        const miss = j.cells.filter(c => build.cellDone(bot, c) !== true).map(c => { const b = world.at(bot, c.x, c.y, c.z); let p = ''; try { p = b ? JSON.stringify(b.getProperties()) : '' } catch {} ; return `${c.x},${c.y},${c.z} want ${c.name}${c.props && Object.keys(c.props).length ? JSON.stringify(c.props) : ''} have ${b ? b.name + p : 'unloaded'}` })
+        const extra = []
+        const bx = j.box
+        for (let y = bx.y1; y <= bx.y2 + 3; y++) for (let z = bx.z1 - 4; z <= bx.z2 + 4; z++) for (let x = bx.x1 - 4; x <= bx.x2 + 4; x++) {
+          if (j.index.has(build.key({ x, y, z }))) continue
+          const b = world.at(bot, x, y, z)
+          if (b && /^(dirt|andesite|diorite|granite|tuff|cobbled_deepslate|netherrack|coarse_dirt|cobblestone)$/.test(b.name) && y > bx.y1) extra.push(`${b.name}@${x},${y},${z}`)
+        }
+        return JSON.stringify({ missing: miss.length, cells: miss.slice(0, 60), strayFiller: extra.length, stray: extra.slice(0, 80) })
+      }
       case 'buildstatus': { const st = build.getJob() ? build.status(bot) : null; return st ? JSON.stringify(st) : 'no build job' }
       case 'mine': return exclusive('mine', async () => { const ok = await mining.mineFor(bot, 'cobblestone', inv.count(bot, 'cobblestone') + num(0, 64)); return `mine: ${ok ? 'ok' : 'stopped'} (cobble ${inv.count(bot, 'cobblestone')})` })
       case 'deposit': return exclusive('deposit', async () => { const ok = await base.depositHaul(bot); return `deposit: ${ok}` })
