@@ -36,6 +36,11 @@ function install (bot) {
       else if (p.y < -60) cause = 'void'
     } catch {}
     const d = { x: p.x, y: p.y, z: p.z, t: Date.now(), items, valuable, cause, retrieved: items === 0 }
+    // killed on the way back for a grave: that grave is a trap, however far along the way it happened (a grave at
+    // y-14 in a cave killed the bot twice, the second time 30 blocks short of it, 2026-09-23)
+    const going = mem.get().recovering
+    // (and the grave this death leaves is in the same trap: going back for THAT one took the bot down the ravine again)
+    if (going && Date.now() - going.at < 10 * 60000) { d.abandoned = true; mem.update(m => { const x = (m.deaths || []).find(q => q.t === going.t); if (x) { x.abandoned = true; log('grave', `died going back for the grave at ${x.x},${x.y},${x.z} - leaving it, and this one`) } m.recovering = null }) }
     mem.update(m => { m.deaths.push(d); if (m.deaths.length > 30) m.deaths.shift() })
     mem.bump('deaths')
     log('death', `died at ${move.fmt(p)} (${cause}) carrying ${items} items${valuable.length ? ': ' + valuable.slice(0, 6).join(',') : ''}`)
@@ -56,7 +61,7 @@ function bestGrave (bot) {
   const deaths = mem.get().deaths || []
   // died again near a grave while going back for it: that spot is a trap - leave it
   // (or two deaths in the same place within the hour, whichever grave is newer - both are the same trap)
-  const trapped = d => deaths.some(o => o !== d && world.dist3(o, d) < 16 && (o.t > d.t || Math.abs(o.t - d.t) < 60 * 60000))
+  const trapped = d => deaths.some(o => o !== d && world.dist3(o, d) < 24 && (o.t > d.t || Math.abs(o.t - d.t) < 60 * 60000))
   // a drowning underground (a flooded tunnel) is not a place to swim back into
   const home = mem.get().home
   const floodedTunnel = d => d.cause === 'water' && home && d.y < home.y - 10
@@ -69,9 +74,13 @@ function mark (d, field) {
   mem.update(m => { const x = m.deaths.find(q => q.t === d.t); if (x) x[field] = true })
 }
 
-async function recover (bot, d, { shouldStop } = {}) {
+async function recover (bot, d, opts = {}) {
+  try { return await recoverInner(bot, d, opts) } finally { if (bot.health > 0) mem.set('recovering', null) }
+}
+async function recoverInner (bot, d, { shouldStop } = {}) {
   if (!d) return false
   log('grave', `going back for my stuff at ${move.fmt(d)} (${d.items} items)`)
+  mem.set('recovering', { t: d.t, at: Date.now() })
   const r = await move.travel(bot, d, { range: 2, shouldStop, label: 'to grave' })
   if (!r.ok && world.dist3(bot.entity.position, d) > 6) {
     mem.update(m => { const x = m.deaths.find(q => q.t === d.t); if (x) x.tries = (x.tries || 0) + 1; if (x && x.tries >= 3) x.abandoned = true })

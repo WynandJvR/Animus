@@ -171,6 +171,18 @@ async function mine (bot, itemName, g, n, ctx = {}) {
   let emptyScans = 0
   const t0 = Date.now()
   const refused = new Set() // blocks that would not dig this call: never the same one twice
+  // THE rule for a block worth going to - the scan here, the far look and the explore's "found some" test all use it.
+  // With the explore on a looser rule (any sand in sight: the waterline, buried) every leg ended at once on sand this
+  // scan refuses, and "no reachable sand around" left the glass panes - and the house - waiting (2026-09-23).
+  const takeable = b => outOfZones(b) && world.hasAirNeighbour(bot, b.position) &&
+        (!/^(dirt|grass_block|sand|gravel)$/.test(b.name) || (world.isAirish(world.at(bot, b.position.x, b.position.y + 1, b.position.z)) && !world.lavaNear(bot, b.position, 2))) &&
+        // (sand, gravel and clay live beside water: for them the rule is dry standing ground, not dry neighbours)
+        // (no block with water beside or over it - sand included: a sand pit dug under the water line at the river filled
+        //  with falling water and the bot drowned in it, 2026-09-23; clay has its own skill)
+        // (refined: water beside it at its own level is only the shore - taking the beach's top layer leaves a puddle;
+        //  water over it or beside it a level up is what pours into the hole. The strict rule left no sand on any beach)
+        !world.waterNear(bot, b.position, 1, 1, 1) && !world.isWaterBlock(world.at(bot, b.position.x, b.position.y + 1, b.position.z)) &&
+        (!world.waterNear(bot, b.position, 1, 0, 0) || /^(sand|gravel|red_sand)$/.test(b.name)) && !world.lavaNear(bot, b.position, 1) && standableNear(bot, b.position)
   while (inv.count(bot, itemName) < target) {
     await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
     if (ctx.shouldStop && ctx.shouldStop()) return false
@@ -187,19 +199,14 @@ async function mine (bot, itemName, g, n, ctx = {}) {
       // (loose ground blocks only with their top open to the sky-side air - the surface, not the bottom of a pit -
       //  and no lava within 2: a pit dug toward a lava pocket killed the bot. Judged by the block, never by our
       //  own height: standing on the castle wall the old rule rejected every dirt block on the ground)
-      filter: b => outOfZones(b) && world.hasAirNeighbour(bot, b.position) && Math.abs(b.position.y - me.y) < 20 &&
-        (!/^(dirt|grass_block|sand|gravel)$/.test(b.name) || (world.isAirish(world.at(bot, b.position.x, b.position.y + 1, b.position.z)) && !world.lavaNear(bot, b.position, 2))) &&
-        // (sand, gravel and clay live beside water: for them the rule is dry standing ground, not dry neighbours)
-        // (no block with water beside or over it - sand included: a sand pit dug under the water line at the river filled
-        //  with falling water and the bot drowned in it, 2026-09-23; clay has its own skill)
-        !world.waterNear(bot, b.position, 1, 0, 1) && !world.lavaNear(bot, b.position, 1) && standableNear(bot, b.position)
+      filter: b => takeable(b) && Math.abs(b.position.y - me.y) < 20
     })
     if (!cands.length) {
       log('gather', `no exposed ${itemName} within reach of standable ground nearby`)
       if (itemName === 'cobblestone' || g.ore) return mining().mineFor(bot, itemName, target, ctx)
       // some further out (explore stops as soon as any is in sight, the scan above only looks 40 blocks):
       // walk over to the nearest and look again from there
-      const far = world.findBlocks(bot, g.blocks, { maxDistance: 128, count: 12, filter: b => outOfZones(b) && world.hasAirNeighbour(bot, b.position) })
+      const far = world.findBlocks(bot, g.blocks, { maxDistance: 128, count: 12, filter: b => takeable(b) })
         .sort((a, b) => world.dist3(a.position, me) - world.dist3(b.position, me))[0]
       if (far && world.dist3(far.position, me) > 30 && emptyScans < 3) {
         emptyScans++
@@ -208,7 +215,10 @@ async function mine (bot, itemName, g, n, ctx = {}) {
         continue
       }
       if (++emptyScans > 4) { log('gather', `no reachable ${itemName} around`); return false }
-      await explore(bot, b => g.blocks.test(b.name), { shouldStop: ctx.shouldStop, label: itemName })
+      // sand and gravel lie where water meets land (beaches, river banks): a player walks to the shore to look, not in
+      // rings - 150 blocks of forest round the Nordic site had none, the rings never reached the coast (2026-09-23)
+      if (/^(sand|gravel)$/.test(itemName) && await toShore(bot, itemName, ctx)) continue
+      await explore(bot, b => g.blocks.test(b.name), { shouldStop: ctx.shouldStop, label: itemName, accept: b => takeable(b) })
       continue
     }
     emptyScans = 0
@@ -248,6 +258,28 @@ async function pickPlants (bot, re, itemName, n, ctx = {}) {
     if (await act.dig(bot, b.position, { timeoutMs: 15000 })) await act.collectDrops(bot, { radius: 4, maxMs: 4000 })
     if (inv.count(bot, itemName) <= before) skip.add(b.position.toString())
   }
+  return true
+}
+
+// Walk to surface water not looked at yet for `kind` (open sky over it, near the home's height): the shore is where
+// sand and gravel show. Remembered per kind so each trip looks somewhere new. False when there is no such water.
+async function toShore (bot, kind, ctx = {}) {
+  const home = mem.get().home || bot.entity.position
+  const key = 'shoreScouted_' + kind
+  const seen = mem.get()[key] || []
+  let next = 0
+  const water = world.findBlocks(bot, /^water$/, { maxDistance: 128, count: 40, filter: b => {
+    if (b.position.y < home.y - 30 || (++next & 3)) return false // cheap first: height, and every 4th hit only
+    return world.isAirish(world.at(bot, b.position.x, b.position.y + 1, b.position.z)) && world.openSky(bot, b.position) && outOfZones(b) && !seen.some(q => world.dist2(q, b.position) < 40)
+  } }).filter(b => world.dist2(b.position, bot.entity.position) > 24)
+  // nothing new in view (a coast 160 blocks off is out of the loaded chunks from home): go back to the shore looked at
+  // longest ago - what it holds may be takeable now (the dig rule changed, a day's growth, other light)
+  let w = water.length ? water[0].position : null
+  if (!w && seen.length) { w = seen[0]; mem.update(m => { m[key] = (m[key] || []).slice(1) }) }
+  if (!w) return false
+  mem.update(m => { m[key] = (m[key] || []).concat([{ x: w.x, y: w.y, z: w.z }]).slice(-30) })
+  log('gather', `no ${kind} in sight - heading to the water's edge at ${move.fmt(w)} to look`)
+  await move.travel(bot, w, { range: 6, shouldStop: ctx.shouldStop, label: 'to the shore', maxMs: 3 * 60000 })
   return true
 }
 

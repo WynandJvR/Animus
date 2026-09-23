@@ -18,6 +18,7 @@ const KIT_KEEP = {
 function keepCount (bot, item) {
   if (/_(pickaxe|axe|shovel|sword|hoe|helmet|chestplate|leggings|boots)$/.test(item.name)) return Infinity
   if (/_bed$/.test(item.name)) return 1
+  if (/_boat$/.test(item.name)) return 1 // (the kit's boat: the water here needs one)
   if (KIT_KEEP[item.name] != null) return KIT_KEEP[item.name]
   return 0
 }

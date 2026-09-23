@@ -327,12 +327,33 @@ function fleeHeading (t) {
   return best
 }
 
+// TREADING WATER. A player in deep water holds jump whenever nothing else is steering - let go and the body sinks.
+// The pathfinder holds it only while it has a path: every replan, every gap between legs and walks (clearControlStates)
+// left the body still in the water, and the head went under for 2s+ at a time mid-ocean - the air reflex took the body
+// again and again (2026-09-23). Not a reflex (nothing is preempted): while the body is afloat, unsteered, not diving,
+// jump is held; it is let go as the body leaves the water.
+let treading = false
+function tread () {
+  const p = bot.entity.position
+  const afloat = !bot.vehicle && !bot.entity.onGround && (world.feetInWater(bot) || world.isWaterBlock(world.at(bot, p.x, p.y - 0.3, p.z))) &&
+    !world.isSolid(world.at(bot, p.x, p.y - 1, p.z))
+  const steered = bot.pathfinder && bot.pathfinder.isMoving && bot.pathfinder.isMoving()
+  if (afloat && !active && !dive && !steered) {
+    if (!treading || !bot.getControlState || !bot.getControlState('jump')) bot.setControlState('jump', true)
+    treading = true
+  } else if (treading) {
+    treading = false
+    if (!active && !steered) bot.setControlState('jump', false)
+  }
+}
+
 function tick () {
   if (!bot || !bot.entity || bot.health <= 0) return
   const now = Date.now()
   trackAir(now) // (always: an async reflex or a disabled loop still spends air)
   if (!enabled || busy) return
   const me = bot.entity.position
+  tread()
 
   // 1. AIR
   const underFor = submergedSince ? now - submergedSince : 0
@@ -347,6 +368,15 @@ function tick () {
       const under = world.at(bot, me.x, me.y - 0.2, me.z)
       if (bot.entity.onGround && under && world.isSolid(under)) { floatSince = 0; return clearActive() }
       if (!floatSince) floatSince = now
+      // open water - no bank within a few strokes to climb onto: the emergency ended when the head came out. Holding
+      // the body afloat here for the full 60s froze an ocean crossing (55 blocks in ten minutes, night fell mid-sea,
+      // 2026-09-23); the walk that was interrupted swims on (or boats), and tread() keeps the head up meanwhile.
+      const shore = findAir(true)
+      if (!shore || Math.abs(shore.x - Math.floor(me.x)) + Math.abs(shore.z - Math.floor(me.z)) > 4) {
+        bot.setControlState('jump', true); bot.setControlState('forward', false)
+        if (now - floatSince > 1000) { floatSince = 0; return clearActive() }
+        return
+      }
       // floating for 3s without making land: the bank is too high to climb from the water (a pond
       // with 2-high sides drowned the bot at 4 hp) - cut a step into it
       if (now - floatSince > 3000 && !busy) {
@@ -355,8 +385,7 @@ function tick () {
         return
       }
       if (now - active.since > 60000) { floatSince = 0; return clearActive() }
-      const t = findAir(true)
-      if (t) steerTo(t, { jump: true }); else { bot.setControlState('jump', true); bot.setControlState('forward', false) }
+      steerTo(shore, { jump: true })
       return
     }
     setActive('air', `under ${Math.round(underFor / 100) / 10}s air ${Math.round(airMs / 100) / 10}s`)
@@ -529,7 +558,8 @@ function tick () {
 
   // 5. EAT - when hungry and nothing is attacking
   const hungry = bot.food <= 14 || (bot.food < 20 && hp < 14)
-  if (hungry && !hs.some(h => h.d < 8) && now - lastEatFail > 10000 && !world.feetInWater(bot)) {
+  // (not while swimming - a bite lets go of the stroke - but a boat is a seat: eat in it)
+  if (hungry && !hs.some(h => h.d < 8) && now - lastEatFail > 10000 && (!world.feetInWater(bot) || bot.vehicle)) {
     if (inv.foodItems(bot, { desperate: bot.food <= 6 }).length) { doEat(); return }
   }
 }

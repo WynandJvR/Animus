@@ -485,19 +485,41 @@ async function surface (bot, { shouldStop } = {}) {
   return r.ok || !isUnderground(bot)
 }
 
+// A crossing that got us somewhere clears the boat's record; a failed one - or a "crossing" of a few blocks, which is
+// land and water taking turns at one spot (launch, bump, land, launch...) - counts against it. Three and travel swims.
+function boatScore (r, fails) {
+  if (r.why === 'no boat') return 3
+  if (!r.ok || (r.travelled || 0) < 8) return fails + 1
+  return 0
+}
+
 // Long distance: legs of ~40 blocks toward the target so A* never searches unloaded space.
-// A failed leg bends left/right before giving up.
+// A failed leg bends left/right before giving up. Open water on the line is crossed by boat (boat.js).
 async function travel (bot, target, opts = {}) {
-  const { range = 3, shouldStop, label = 'travel', maxMs = 15 * 60000 } = opts
+  const { range = 3, shouldStop: stop0, label = 'travel', maxMs = 15 * 60000 } = opts
+  const boat = require('./boat')
+  // A stop asked for over open water waits for land: the night rule stopped a walk mid-ocean and the bot trod
+  // water "staying put" until it drowned (2026-09-23). Only the operator's stop (control) ends a trip afloat.
+  const shouldStop = stop0 ? () => stop0() && !bot.vehicle && !boat.swimming(bot) : null
   const t0 = Date.now()
   const cancelled = control.token()
   let legFails = 0
   let surfaceTries = 0
   let lastLog = 0
+  let boatFails = 0
   while (Date.now() - t0 < maxMs) {
     if (!bot.entity) return { ok: false, why: 'no body' }
     if (cancelled()) return { ok: false, why: 'stopped' }
     if (shouldStop && shouldStop()) return { ok: false, why: 'stopped' }
+    // afloat in a boat (a crossing broken off, or a restart put us back in it): carry on by boat - or, when the
+    // boat keeps failing out here, get out and swim
+    if (boat.inBoat(bot)) {
+      if (boatFails >= 3) { log('move', `${label}: the boat keeps failing here - getting out to swim`); await boat.leave(bot); continue }
+      const r = await boat.cross(bot, target, { range, shouldStop })
+      if (r.why === 'stopped') return { ok: false, why: 'stopped' }
+      boatFails = boatScore(r, boatFails)
+      continue
+    }
     const me = bot.entity.position
     const dxz = world.dist2(me, target)
     // in our own mine: walk out the way we came (tunnel and stairs) rather than pillar up through rock -
@@ -516,7 +538,20 @@ async function travel (bot, target, opts = {}) {
     if (Date.now() - lastLog > 30000) { lastLog = Date.now(); log('move', `${label}: ${Math.round(dxz)}b to ${fmt(target)} from ${fmt(me)}`) }
     // long walks happen on the surface, never as a tunnel through rock
     if (dxz > 48 && surfaceTries < 3 && isUnderground(bot) && !(target.y < me.y - 4)) { surfaceTries++; await surface(bot, { shouldStop }); continue }
-    const step = Math.min(40, dxz)
+    let step = Math.min(40, dxz)
+    // open water on the line ahead: at its edge, cross by boat; before it, walk only as far as the shore
+    // (a leg aimed into the sea swam out to its end). No boat to be had / launches failing: swim, as before.
+    if (legFails === 0 && boatFails < 3 && !boat.busy()) {
+      const plan = boat.decideLeg(boat.scanLine(bot, me, target), { swimming: boat.swimming(bot), step })
+      if (plan.mode === 'boat') {
+        log('move', `${label}: open water ahead (${plan.run}b+ from ${plan.waterAt}b out) - crossing by boat`)
+        const r = await boat.cross(bot, target, { range, shouldStop })
+        if (r.why === 'stopped') return { ok: false, why: 'stopped' }
+        boatFails = boatScore(r, boatFails)
+        continue
+      }
+      if (plan.toShore) step = plan.legLen
+    }
     const ang = Math.atan2(target.z - me.z, target.x - me.x) + (legFails === 0 ? 0 : (legFails % 2 ? 1 : -1) * 0.6 * Math.ceil(legFails / 2))
     const lx = Math.round(me.x + Math.cos(ang) * step)
     const lz = Math.round(me.z + Math.sin(ang) * step)

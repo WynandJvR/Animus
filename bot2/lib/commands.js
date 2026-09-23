@@ -160,6 +160,40 @@ function make (bot, director) {
         }
         return JSON.stringify({ rows, tally })
       }
+      case 'boattest': return exclusive('boattest', async () => {
+        // boattest x z - launch a boat toward x,z, sit 2s, then try to get out while tracing the server's answers
+        const boat = require('./boat')
+        const tr = []; const t0 = Date.now(); const T = () => Date.now() - t0
+        const onP = (p, meta) => { if (/set_passengers|attach_entity|position|vehicle_move|entity_destroy|remove_entities|dismount|player_rotation/.test(meta.name)) tr.push(`${T()} IN ${meta.name} ${JSON.stringify(p).slice(0, 110)}`) }
+        const w0 = bot._client.write.bind(bot._client)
+        bot._client.write = (n, p) => { if (/player_input|use_entity|interact|vehicle_move|steer_boat|entity_action|player_command/.test(n)) tr.push(`${T()} OUT ${n} ${JSON.stringify(p).slice(0, 110)}`); return w0(n, p) }
+        bot._client.on('packet', onP)
+        let res = ''
+        try {
+          if (!inv.items(bot).some(i => /_boat$/.test(i.name))) res = 'no boat in the pack'
+          else {
+            const r = await boat.launch(bot, { x: num(0), y: bot.entity.position.y, z: num(1) })
+            res = 'launch ' + (r ? 'ok' : 'failed') + ' vehicle=' + (bot.vehicle && bot.vehicle.name)
+            await move.sleep(2000)
+            const ok = await boat.dismount(bot, null)
+            res += ' | dismount ' + ok + ' vehicle=' + (bot.vehicle && bot.vehicle.name)
+          }
+        } catch (e) { res += ' threw ' + e.message } finally { bot._client.write = w0; bot._client.removeListener('packet', onP) }
+        log('boattest', res); for (const l of tr.filter(l => !/vehicle_move/.test(l)).slice(0, 40)) log('boattest', l); log('boattest', `vehicle_move packets: ${tr.filter(l => /vehicle_move/.test(l)).length}`)
+        return JSON.stringify({ res, trace: tr.filter(l => !/vehicle_move/.test(l)).slice(0, 40), vmoves: tr.filter(l => /vehicle_move/.test(l)).length })
+      })
+      case 'boatout': {
+        // boatout - get out of the boat we sit in, tracing what the server says (no exclusive: the director is paused)
+        const tr = []; const t0 = Date.now(); const T = () => Date.now() - t0
+        const onP = (p, meta) => { if (/^(set_passengers|attach_entity|position|vehicle_move|entity_destroy|remove_entities)$/.test(meta.name)) tr.push(`${T()} IN ${meta.name} ${JSON.stringify(p).slice(0, 120)}`) }
+        const w0 = bot._client.write.bind(bot._client)
+        bot._client.write = (n, p) => { if (!/^(position|position_look|look|flying|keep_alive)$/.test(n)) tr.push(`${T()} OUT ${n} ${JSON.stringify(p).slice(0, 120)}`); return w0(n, p) }
+        bot._client.on('packet', onP)
+        let ok = null
+        try { ok = await require('./boat').dismount(bot, null) } catch (e) { ok = 'threw ' + e.message } finally { bot._client.write = w0; bot._client.removeListener('packet', onP) }
+        for (const l of tr.slice(0, 40)) log('boattest', l)
+        return `dismount=${ok} vehicle=${bot.vehicle ? bot.vehicle.name : 'none'} | ` + tr.slice(0, 30).join(' || ')
+      }
       case 'blocks': {
         // blocks x1 y1 z1 x2 y2 z2 - every non-air block in a small box, with its state
         const [x1, y1, z1, x2, y2, z2] = [0, 1, 2, 3, 4, 5].map(i => num(i))

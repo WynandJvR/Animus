@@ -26,6 +26,7 @@ const hut = require('./hut')
 const lights = require('./lights')
 const mats = require('./materials')
 const clay = require('./clay')
+const boat = require('./boat')
 
 // Hunt an animal that is right here when the pack is low on food - a player does not walk past a
 // cow with nothing to eat. Bounded to animals within 20 blocks and ~25 seconds.
@@ -156,6 +157,9 @@ function missingKit () {
   if (inv.toolTier(bot, 'pickaxe') < 2) out.push('stone_pickaxe')
   if (inv.toolTier(bot, 'axe') < 2) out.push('stone_axe')
   if (inv.toolTier(bot, 'sword') < 2) out.push('stone_sword')
+  // a boat, once the land here has been found to need one (stood at the water with none, and swam: drowned killed it
+  // swimming to the sand on an islet, 2026-09-23) - made at home with the tools, carried like them
+  if (mem.get().wantBoat && !inv.items(bot).some(i => /_boat$/.test(i.name))) out.push(craft.preferredWood(bot, 5) + '_boat')
   return out
 }
 
@@ -308,6 +312,9 @@ function decide () {
     const mineHere = m && (!home || world.dist2(m.entrance, home) <= 96)
     if (mineHere && inv.bestTool(bot, 'pickaxe', 4) && (packFood >= 10 || bot.food >= 16) && world.dist2(m.cursor, bot.entity.position) < 150 && !cooling('nightMine')) return { name: 'nightMine', why: 'night - working the mine underground' }
     if (underground() && inv.bestTool(bot, 'pickaxe', 4) && !cooling('nightMine')) return { name: 'nightMine', why: 'night and already underground' }
+    // afloat at night (a walk that ended in the sea): no bunker is dug in water and "staying put" there is treading
+    // water until something drowns us - make for land (by boat when it is far)
+    if ((boat.swimming(bot) || boat.inBoat(bot)) && !cooling('ashore')) return { name: 'ashore', why: 'night and afloat - making for land' }
     if (!cooling('bunker')) return { name: 'bunker', why: 'night, no bed in reach - digging in' }
     return { name: 'idle', why: 'night and no shelter worked - staying put, reflexes on guard' }
   }
@@ -650,7 +657,15 @@ const TASKS = {
     return made > 0
   },
   async castle () { return castleWork() },
-  async idle () { await move.sleep(5000); return true }
+  async idle () { await move.sleep(5000); return true },
+  async ashore () {
+    // the nearest ground in sight; none loaded: on toward the site (or home) - the crossing lands on the way there
+    const j = build.getJob()
+    const land = boat.nearestLand(bot, 48) || (j && j.origin) || mem.get().home
+    if (!land) return false
+    const r = await move.travel(bot, land, { range: 2, shouldStop: () => taskCancelled() || (!boat.swimming(bot) && !boat.inBoat(bot)), label: 'ashore' })
+    return r.ok || (!boat.swimming(bot) && !boat.inBoat(bot))
+  }
 }
 
 // ---- the castle ---------------------------------------------------------------------------

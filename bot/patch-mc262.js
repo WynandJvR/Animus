@@ -47,7 +47,11 @@ const EDITS = [
   // craft loop thought it held, and sticks landed as planks: no table recipe ever completed. Track it per window.
   ['mineflayer/lib/plugins/inventory.js', 'const listener = packet => { stateId = packet.stateId }', 'const listener = packet => { stateId = packet.stateId; stateIds[packet.windowId] = packet.stateId } // 26.2 per-window stateId'],
   ['mineflayer/lib/plugins/inventory.js', '  let stateId = -1\n', '  let stateId = -1\n  const stateIds = {}\n'],
-  ['mineflayer/lib/plugins/inventory.js', '        windowId: window.id,\n        stateId,\n        slot,', '        windowId: window.id,\n        stateId: stateIds[window.id] ?? stateId,\n        slot,']
+  ['mineflayer/lib/plugins/inventory.js', '        windowId: window.id,\n        stateId,\n        slot,', '        windowId: window.id,\n        stateId: stateIds[window.id] ?? stateId,\n        slot,'],
+  // a modern server says "you got out" as the vehicle's passenger list WITHOUT us (set_passengers boat []); mineflayer
+  // only knew the old "vehicle -1" form, kept bot.vehicle set, and the bot "drove" a boat it had left, 15 minutes at
+  // sea until a drowned killed it (2026-09-23, traced with bot2 `boatout`)
+  ['mineflayer/lib/plugins/entities.js', "        bot.vehicle = bot.entities[entityId]\n        bot.emit('mount')\n      }\n    }\n", "        bot.vehicle = bot.entities[entityId]\n        bot.emit('mount')\n      }\n    } else if (bot.vehicle && bot.vehicle.id === entityId) { const v = bot.vehicle; bot.vehicle = null; bot.emit('dismount', v) } // 26.2 dismount\n"]
 ]
 function patchGates () {
   for (const [f, from, to] of EDITS) {

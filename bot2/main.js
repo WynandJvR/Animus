@@ -46,6 +46,9 @@ try { body.setNoteSink && body.setNoteSink(m => log('body', m)); body.install(bo
 let pinnedSince = 0
 setInterval(() => {
   try {
+    // in a boat the physics is off by design (mineflayer stops it on mount; lib/boat.js drives the boat): no
+    // physicsTick there is not paralysis, and body.js's "re-arm" (a dismount) would tip us out mid-crossing
+    if (bot.vehicle && require('./lib/boat').inBoat(bot)) return
     body.check(bot)
     const pinned = body.pinned && body.pinned()
     if (!pinned) { pinnedSince = 0; return }

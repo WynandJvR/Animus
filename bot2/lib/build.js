@@ -78,7 +78,9 @@ function facingOfYaw (yaw) {
 // blocks whose facing is the direction the PLAYER looks when placing (vanilla getHorizontalDirection)
 const LOOK_FACING_RE = /_stairs$|_door$/
 // hung on the side of the block behind them: facing = the clicked face's normal (support = cell - facing)
-const SIDE_ATTACHED_RE = /wall_torch$|^ladder$|_wall_sign$|_wall_banner$|_wall_hanging_sign$/
+// (trapdoors too: clicking a block's side gives the trapdoor that side's facing - with the nearest neighbour clicked
+//  instead, 24 Nordic shutters came out facing east/west, taken out and back for ever, 2026-09-23)
+const SIDE_ATTACHED_RE = /wall_torch$|^ladder$|_wall_sign$|_wall_banner$|_wall_hanging_sign$|_trapdoor$/
 // stand on the block below
 const BELOW_ATTACHED_RE = /^(torch|soul_torch|redstone_torch|copper_torch|flower_pot|rail|powered_rail|detector_rail|activator_rail|redstone_wire|repeater|comparator)$|_carpet$|_pressure_plate$|^potted_|_sapling$|_door$/
 
@@ -86,7 +88,7 @@ function wantOf (c) {
   if (c.want !== undefined) return c.want
   if (!c.props) return null
   const w = {}
-  for (const k of KEY_PROPS) if (c.props[k] != null) w[k] = String(c.props[k])
+  for (const k of KEY_PROPS.concat(/_trapdoor$|_fence_gate$/.test(c.name) ? ['open'] : [])) if (c.props[k] != null) w[k] = String(c.props[k])
   return Object.keys(w).length ? w : null
 }
 function nameOk (c, n) { return n === c.name || !!(c.alt && c.alt.test(n)) }
@@ -140,7 +142,7 @@ function plansFor (c) {
   const w = wantOf(c) || {}
   const yaw = LOOK_FACING_RE.test(c.name) && w.facing ? yawOf(w.facing) : null
   const withYaw = p => (yaw != null ? Object.assign(p, { yaw }) : p)
-  if (c.attach && c.sup) return [withYaw({ off: [c.sup.x - c.x, c.sup.y - c.y, c.sup.z - c.z] })]
+  if (c.attach && c.sup) return [withYaw(Object.assign({ off: [c.sup.x - c.x, c.sup.y - c.y, c.sup.z - c.z] }, /_trapdoor$/.test(c.name) && w.half ? { cy: w.half === 'top' ? 0.75 : 0.25 } : {}))]
   if (w.axis && !axisRelaxed(c) && failsOf(c) < 3) {
     if (w.axis === 'x') return [{ off: [1, 0, 0] }, { off: [-1, 0, 0] }]
     if (w.axis === 'z') return [{ off: [0, 0, 1] }, { off: [0, 0, -1] }]
@@ -157,10 +159,11 @@ function predict (c, plan, playerYaw) {
   const out = {}
   const w = wantOf(c) || {}
   const clickY = face[1] === 1 ? 1 : face[1] === -1 ? 0 : (plan.cy != null ? plan.cy : 0.5)
-  if (/_stairs$|_slab$/.test(c.name)) {
+  if (/_stairs$|_slab$|_trapdoor$/.test(c.name)) {
     const top = face[1] === -1 || (face[1] === 0 && clickY > 0.5)
-    if (/_stairs$/.test(c.name)) out.half = top ? 'top' : 'bottom'; else out.type = top ? 'top' : 'bottom'
+    if (/_slab$/.test(c.name)) out.type = top ? 'top' : 'bottom'; else out.half = top ? 'top' : 'bottom'
   }
+  if (w.open != null) out.open = w.open // (opened by hand after the placing - placeCell)
   const yaw = plan.yaw != null ? plan.yaw : playerYaw
   if (LOOK_FACING_RE.test(c.name) && yaw != null) out.facing = facingOfYaw(yaw)
   if (SIDE_ATTACHED_RE.test(c.name)) out.facing = Object.keys(DIRS).find(k => DIRS[k].every((v, i) => v === face[i]))
@@ -532,6 +535,10 @@ async function placeCell (bot, c, j = job) {
   const ok = await act.place(bot, c, item.name, { plans: usable.length ? usable : plans, accept: b => nameOk(c, b.name), allowZones: ['build', 'base'], sneak: !c.doorLower && !/_door$/.test(item.name), tall: !!c.doorLower })
   if (!ok) return false
   surveyCache = null
+  if (cellDone(bot, c) !== true && c.want && c.want.open != null) {
+    const b0 = bot.blockAt(pos); let open = null; try { open = String(b0.getProperties().open) } catch {}
+    if (open != null && open !== c.want.open) { try { await bot.activateBlock(b0); await act.sleep(300) } catch {} }
+  }
   if (cellDone(bot, c) === true) return true
   // placed, but not what the blueprint shows: out again (our own cell), and the failure counts
   const b = bot.blockAt(pos)
