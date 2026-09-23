@@ -162,8 +162,9 @@ function foodPoints (bot) {
 function rawFoodCount (bot) { let n = 0; for (const it of items(bot)) if (COOKED_OF[it.name]) n += it.count; return n }
 
 // Items not worth a slot. Kept conservative: never tosses anything a build/tool chain uses.
-// (sticks, sand, saplings, string, seeds are NOT junk: tools, glass, replanting, beds, farms use them)
-const JUNK = /^(raw_copper|raw_gold|redstone|lapis_lazuli|rotten_flesh|poisonous_potato|spider_eye|pufferfish|tropical_fish|dead_bush|short_grass|tall_grass|fern|leaf_litter|beetroot_seeds|pumpkin_seeds|melon_seeds|feather|bone|arrow|gunpowder|flint|egg|lily_pad|kelp|seagrass|glow_lichen|vine|pointed_dripstone|dripstone_block|moss_carpet|moss_block|azalea|flowering_azalea|.*_tulip|poppy|dandelion|cornflower|azure_bluet|oxeye_daisy|allium|blue_orchid|pink_petals|wildflowers|firefly_bush|bush|calcite|red_sand|clay_ball|mud|podzol|mycelium|deepslate|ink_sac|leather_horse_armor|saddle|name_tag|golden_horse_armor|iron_horse_armor|lead)$/
+// (sticks, sand, saplings, string, seeds are NOT junk: tools, glass, replanting, beds, farms use them; nor are
+//  clay balls, poppies and red tulips - bricks and red dye for a build: a full pack tossed a clay haul)
+const JUNK = /^(raw_copper|raw_gold|redstone|lapis_lazuli|rotten_flesh|poisonous_potato|spider_eye|pufferfish|tropical_fish|dead_bush|short_grass|tall_grass|fern|leaf_litter|beetroot_seeds|pumpkin_seeds|melon_seeds|feather|bone|arrow|gunpowder|flint|egg|lily_pad|kelp|seagrass|glow_lichen|vine|pointed_dripstone|dripstone_block|moss_carpet|moss_block|azalea|flowering_azalea|orange_tulip|white_tulip|pink_tulip|dandelion|cornflower|azure_bluet|oxeye_daisy|allium|blue_orchid|pink_petals|wildflowers|firefly_bush|bush|calcite|red_sand|mud|podzol|mycelium|deepslate|ink_sac|leather_horse_armor|saddle|name_tag|golden_horse_armor|iron_horse_armor|lead)$/
 
 module.exports = {
   TIERS, TIER_RANK, GOOD_FOOD, RAW_FOOD, COOKED_OF, JUNK, ARMOR_SLOTS,

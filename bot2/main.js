@@ -39,7 +39,20 @@ bot.loadPlugin(pathfinder)
 
 const body = require(path.join(BOT_DIR, 'body.js'))
 try { body.setNoteSink && body.setNoteSink(m => log('body', m)); body.install(bot) } catch (e) { log('boot', 'body.install failed: ' + e.message) }
-setInterval(() => { try { body.check(bot) } catch {} }, 1000).unref()
+// PINNED for good: the server moves us back every tick (body.pinned) because the client's copy of the world there
+// is wrong - 2026-09-23 a glass pane connected to its new log neighbour round the bot's hitbox and the server
+// corrected it 0.06b a tick for ten minutes; every walk out failed, a relog (fresh chunks) walked out in seconds.
+// A player relogs: after 30s of unbroken pinning we do too (the supervisor restarts the process).
+let pinnedSince = 0
+setInterval(() => {
+  try {
+    body.check(bot)
+    const pinned = body.pinned && body.pinned()
+    if (!pinned) { pinnedSince = 0; return }
+    if (!pinnedSince) pinnedSince = Date.now()
+    if (Date.now() - pinnedSince > 30000) { log('body', `pinned by the server for ${Math.round((Date.now() - pinnedSince) / 1000)}s at ${bot.entity && bot.entity.position.floored()} - relogging to fetch the world fresh`); pinnedSince = 0; bot.quit('pinned - relog') }
+  } catch {}
+}, 1000).unref()
 
 const reflex = require('./lib/reflex')
 const move = require('./lib/move')

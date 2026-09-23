@@ -26,15 +26,18 @@ function noteResource (kind, pos) {
 function forgetResource (kind, pos) {
   mem.update(m => { if (m.resources && m.resources[kind]) m.resources[kind] = m.resources[kind].filter(p => world.dist2(p, pos) >= 24) })
 }
-function knownResource (kind, from) {
+// maxFromHome: how far from home a remembered spot still counts (clay can lie 300 blocks out - trees do not)
+function knownResource (kind, from, { maxFromHome = 200 } = {}) {
   const home = mem.get().home
-  const list = ((mem.get().resources || {})[kind] || []).filter(p => !home || world.dist2(p, home) < 200)
+  const list = ((mem.get().resources || {})[kind] || []).filter(p => !home || world.dist2(p, home) < maxFromHome)
   if (!list.length) return null
   const me = from || home || { x: 0, z: 0 }
   return list.slice().sort((a, b) => world.dist2(a, me) - world.dist2(b, me))[0]
 }
 
-function outOfZones (b) { return !move.inZone(b.position, 2) }
+// Not in a protected zone - and not in the ground under one either: stone under the basilica was picked, refused by
+// the dig, and picked again every 20s for minutes (2026-09-23). A zone's columns are off limits to the depth.
+function outOfZones (b) { return !move.inZone(b.position, 2) && !move.inZone({ x: b.position.x, y: b.position.y + 12, z: b.position.z }, 1) }
 
 // ---- trees ------------------------------------------------------------------------------
 function trunkBase (bot, b) {
@@ -138,7 +141,7 @@ async function fellTree (bot, basePos, re) {
 
 // Jump and place a filler block under our feet.
 async function towerUp (bot) {
-  const filler = inv.items(bot).find(i => /^(dirt|cobblestone|andesite|diorite|granite|tuff|cobbled_deepslate|netherrack)$/.test(i.name))
+  const filler = inv.items(bot).find(i => /^(dirt|cobblestone|andesite|diorite|tuff|cobbled_deepslate|netherrack)$/.test(i.name))
   if (!filler) return false
   const y0 = Math.floor(bot.entity.position.y)
   const above = world.at(bot, bot.entity.position.x, y0 + 2, bot.entity.position.z)
@@ -167,6 +170,7 @@ async function mine (bot, itemName, g, n, ctx = {}) {
   }
   let emptyScans = 0
   const t0 = Date.now()
+  const refused = new Set() // blocks that would not dig this call: never the same one twice
   while (inv.count(bot, itemName) < target) {
     await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
     if (ctx.shouldStop && ctx.shouldStop()) return false
@@ -186,7 +190,9 @@ async function mine (bot, itemName, g, n, ctx = {}) {
       filter: b => outOfZones(b) && world.hasAirNeighbour(bot, b.position) && Math.abs(b.position.y - me.y) < 20 &&
         (!/^(dirt|grass_block|sand|gravel)$/.test(b.name) || (world.isAirish(world.at(bot, b.position.x, b.position.y + 1, b.position.z)) && !world.lavaNear(bot, b.position, 2))) &&
         // (sand, gravel and clay live beside water: for them the rule is dry standing ground, not dry neighbours)
-        (!world.waterNear(bot, b.position, 1, 0, 1) || /^(sand|gravel|clay)$/.test(b.name)) && !world.lavaNear(bot, b.position, 1) && standableNear(bot, b.position)
+        // (no block with water beside or over it - sand included: a sand pit dug under the water line at the river filled
+        //  with falling water and the bot drowned in it, 2026-09-23; clay has its own skill)
+        !world.waterNear(bot, b.position, 1, 0, 1) && !world.lavaNear(bot, b.position, 1) && standableNear(bot, b.position)
     })
     if (!cands.length) {
       log('gather', `no exposed ${itemName} within reach of standable ground nearby`)
@@ -206,12 +212,41 @@ async function mine (bot, itemName, g, n, ctx = {}) {
       continue
     }
     emptyScans = 0
-    const b = cands[0]
+    const b = cands.find(c => !refused.has(`${c.position.x},${c.position.y},${c.position.z}`))
+    if (!b) { log('gather', `every ${itemName} in reach refused to dig`); return false }
     noteResource(itemName, b.position)
     if (!inv.canHarvest(bot, b)) { log('gather', `can't harvest ${b.name} with my tools`); return false }
     const ok = await act.dig(bot, b.position, { timeoutMs: 20000 })
     if (ok) await act.collectDrops(bot, { radius: 5, maxMs: 5000 })
-    else log('gather', `couldn't dig ${b.name} at ${move.fmt(b.position)}`)
+    else { refused.add(`${b.position.x},${b.position.y},${b.position.z}`); log('gather', `couldn't dig ${b.name} at ${move.fmt(b.position)}`) }
+  }
+  return true
+}
+
+// Flowers and the like: walk up, break, pick up. `itemName` is what the plant drops (counted in the pack; a
+// RegExp when any of several will do - poppy, red tulip or rose bush for red dye).
+async function pickPlants (bot, re, itemName, n, ctx = {}) {
+  const label = typeof itemName === 'string' ? itemName : 'red flowers'
+  const target = inv.count(bot, itemName) + n
+  let empty = 0
+  const skip = new Set()
+  while (inv.count(bot, itemName) < target) {
+    await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
+    if (ctx.shouldStop && ctx.shouldStop()) return false
+    await reflex.waitClear()
+    const b = world.findBlocks(bot, re, { maxDistance: 48, count: 24, filter: x => outOfZones(x) && !skip.has(x.position.toString()) && !world.isWaterBlock(x) })[0]
+    if (!b) {
+      if (++empty > 3) { log('gather', `no ${label} to pick around here`); return false }
+      const known = knownResource(label, bot.entity.position)
+      if (known && empty === 1 && world.dist2(known, bot.entity.position) > 40) await move.travel(bot, known, { range: 8, shouldStop: ctx.shouldStop, label: 'to ' + label })
+      else await explore(bot, x => re.test(x.name), { shouldStop: ctx.shouldStop, label, legs: 2, accept: outOfZones })
+      continue
+    }
+    empty = 0
+    noteResource(label, b.position)
+    const before = inv.count(bot, itemName)
+    if (await act.dig(bot, b.position, { timeoutMs: 15000 })) await act.collectDrops(bot, { radius: 4, maxMs: 4000 })
+    if (inv.count(bot, itemName) <= before) skip.add(b.position.toString())
   }
   return true
 }
@@ -224,18 +259,21 @@ function standableNear (bot, p) {
 }
 
 // Walk outward in a widening square from home (or here) until a matching block shows up.
-async function explore (bot, match, { shouldStop, label = 'resources', legs = 4, accept = null } = {}) {
+async function explore (bot, match, { shouldStop, label = 'resources', legs = 4, accept = null, rings = null } = {}) {
   const home = mem.get().home || bot.entity.position
   mem.update(m => { m.exploreStep = (m.exploreStep || 0) + 1 })
   const step = mem.get().exploreStep
   // stay within ~150b of home (far trips cost more than they find) - animals in a hunted-out area are
-  // the exception: they never respawn, so the search has to go wider
-  const radius = 48 + 32 * (step % (label === 'animals' ? 7 : 4))
+  // the exception: they never respawn, so the search has to go wider; so is clay (rings: 9, out to ~300b)
+  const radius = 48 + 32 * (step % (rings || (label === 'animals' ? 7 : 4)))
   const ang = step * 2.4
   const dest = { x: Math.round(home.x + Math.cos(ang) * radius), y: Math.round(bot.entity.position.y), z: Math.round(home.z + Math.sin(ang) * radius) }
   log('gather', `exploring for ${label} toward ${move.fmt(dest)} (radius ${radius})`)
   const t0 = Date.now()
-  const stop = () => (shouldStop && shouldStop()) || Date.now() - t0 > 3 * 60000 || !!findMatching(bot, match, accept)
+  // (the scan at most every 2s: the walk polls stop() constantly, and a findBlocks a poll starved the event loop)
+  let scannedAt = 0; let seen = null
+  const sighted = () => { if (Date.now() - scannedAt > 2000) { scannedAt = Date.now(); seen = findMatching(bot, match, accept) } return seen }
+  const stop = () => (shouldStop && shouldStop()) || Date.now() - t0 > 3 * 60000 || !!sighted()
   for (let i = 0; i < legs; i++) {
     const found = findMatching(bot, match, accept)
     if (found) return found
@@ -254,4 +292,4 @@ function findMatching (bot, match, accept) {
   return null
 }
 
-module.exports = { chop, mine, explore, towerUp, noteResource, knownResource, fellTree }
+module.exports = { chop, mine, explore, towerUp, noteResource, forgetResource, knownResource, fellTree, pickPlants }

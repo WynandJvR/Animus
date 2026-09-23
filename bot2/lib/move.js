@@ -66,6 +66,13 @@ function utilitySpotOK (p, { temporary = false } = {}) {
 // Finished blocks of our own builds (hut, castle) are never broken by ANY walk. build.js registers.
 let protector = null
 function setProtector (fn) { protector = fn }
+// Is this block a finished cell of one of our builds? `purpose` 'walk' (the planner) or 'dig' (act.dig - the
+// one dig primitive asks this for every dig, so no caller can forget it). A throw is "not protected": a
+// broken protector must not freeze every walk.
+function isProtected (block, purpose = 'walk') {
+  if (!protector || !block || !block.position) return false
+  try { return !!protector(block, purpose) } catch { return false }
+}
 
 // Inside the safehouse walls (interior cells only)?
 function insideHut (p) {
@@ -77,12 +84,17 @@ function insideHut (p) {
 
 let cantBreakIds = null
 let scaffoldIds = null
-function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint = true } = {}) {
+let doorIds = null
+//   dryHead: a node with the head under water is forbidden, not merely costly (the step weight passes the planner's
+//            100 cut-off). On by default: at weight 40 the walk home from a clay bank still took the line under the
+//            river, the air reflex took the body, and at night the bot drowned there (2026-09-22). A walk that must
+//            dive says so (false) - none does today.
+function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint = true, dryHead = true } = {}) {
   const md = world.data(bot)
   const m = new Movements(bot)
   if (!cantBreakIds) {
     cantBreakIds = new Set(Object.values(md.blocksByName).filter(b => !world.NATURAL_RE.test(b.name)).map(b => b.id))
-    scaffoldIds = ['dirt', 'andesite', 'diorite', 'granite', 'tuff', 'cobbled_deepslate', 'netherrack', 'coarse_dirt', 'rooted_dirt']
+    scaffoldIds = ['dirt', 'andesite', 'diorite', 'tuff', 'cobbled_deepslate', 'netherrack', 'coarse_dirt', 'rooted_dirt']
       .map(n => md.itemsByName[n]).filter(Boolean).map(i => i.id)
   }
   m.canDig = dig
@@ -103,21 +115,42 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
   for (const n of ['magma_block', 'powder_snow', 'sweet_berry_bush', 'cactus', 'campfire', 'soul_campfire', 'wither_rose', 'pointed_dripstone', 'fire', 'soul_fire']) {
     const b = md.blocksByName[n]; if (b) m.blocksToAvoid.add(b.id)
   }
+  // DOORS are a way through. mineflayer-pathfinder opens fence gates only; a door is solid to it, open or shut, so
+  // no plan ever went through one: the church's inside could not be reached at all and its nave scaffold stood for
+  // days (2026-09-23). Planned as passable (a small toll so a door is used when it is the way); at the door the walk
+  // stalls on the closed leaf and the stall recovery crosses it by hand (crossDoor), as a player opens a door.
+  if (!doorIds) doorIds = new Set(Object.values(md.blocksByName).filter(b => /_door$/.test(b.name) && !/iron_door/.test(b.name)).map(b => b.id))
+  const getBlock0 = m.getBlock.bind(m)
+  m.getBlock = (pos, dx, dy, dz) => {
+    const b = getBlock0(pos, dx, dy, dz)
+    if (b && doorIds.has(b.type)) { b.safe = true; b.physical = false; b.replaceable = false; b.height = pos.y + dy }
+    return b
+  }
+  m.exclusionAreasStep.push(block => (block && doorIds.has(block.type)) ? 4 : 0)
   const allowed = new Set(allowZones)
   // (blocks in unloaded chunks reach these callbacks without a position: a throw here aborts A*)
   m.exclusionAreasBreak.push(block => { if (!block || !block.position) return 0; const z = inZone(block.position); return (z && !allowed.has(z.label)) ? 100 : 0 })
-  m.exclusionAreasBreak.push(block => (block && block.position && protector && protector(block)) ? 100 : 0)
+  m.exclusionAreasBreak.push(block => isProtected(block, 'walk') ? 100 : 0)
   m.exclusionAreasPlace.push(block => {
     if (!block || !block.position) return 0
     const z = inZone(block.position); if (z && !allowed.has(z.label)) return 100
     return world.isWaterBlock(block) ? 100 : 0 // never build causeways into water
   })
-  // Swimming along a surface is fine; a path node with the HEAD under water is how bots drown.
+  // Swimming along a surface is fine (the feet in the top water cell, the head in air); a path node with the HEAD
+  // under water is how bots drown.
   m.exclusionAreasStep.push(block => {
     if (!block || !block.position) return 0
     const p = block.position
     const head = bot.blockAt(p.offset(0, 1, 0))
-    return (head && world.isWaterBlock(head)) ? 40 : 0
+    return (head && world.isWaterBlock(head)) ? (dryHead ? 101 : 40) : 0
+  })
+  // A player walks round a field: stepping down onto farmland tramples it back to dirt. The plot sat a block below
+  // the path from the safehouse to the furnaces and every trip undid the planting - "4/20 cells planted (1 just
+  // now)" every two minutes for an hour (2026-09-23).
+  m.exclusionAreasStep.push(block => {
+    if (!block || !block.position) return 0
+    const below = bot.blockAt(block.position.offset(0, -1, 0))
+    return (below && below.name === 'farmland') || /^(wheat|carrots|potatoes|beetroots)$/.test(block.name) ? 25 : 0
   })
   return m
 }
@@ -133,6 +166,19 @@ function goalDistance (bot, goal) {
 }
 
 // Drive one goal until reached / stuck / interrupted / timeout. Never trusts an empty path.
+// A closed wooden door the body is up against (within ~1 block of its centre, feet or head level).
+function closedDoorAt (bot) {
+  const p = bot.entity.position
+  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) for (const dy of [0, 1]) {
+    if (!dx && !dz) continue
+    const b = world.at(bot, p.x + dx, p.y + dy, p.z + dz)
+    if (!b || !/_door$/.test(b.name) || /iron_door/.test(b.name)) continue
+    let open = false; try { const o = b.getProperties().open; open = o === true || o === 'true' } catch {}
+    if (open) continue
+    if (Math.hypot(b.position.x + 0.5 - p.x, b.position.z + 0.5 - p.z) <= 1.15) return b
+  }
+  return null
+}
 function runGoal (bot, goal, { timeoutMs, stuckMs, movements }) {
   const cancelled = control.token()
   return new Promise(resolve => {
@@ -158,8 +204,11 @@ function runGoal (bot, goal, { timeoutMs, stuckMs, movements }) {
       } else if (r.path.length) noPaths = 0
     }
     const onDeath = () => finish(false, 'died')
+    let doorAt = 0
     const timer = setInterval(() => {
       if (!bot.entity) return finish(false, 'died')
+      // walking into a closed door (the plan goes through doors now): open it, as a player does
+      if (Date.now() - doorAt > 1200) { const dd = closedDoorAt(bot); if (dd) { doorAt = Date.now(); bot.activateBlock(dd).catch(() => {}) } }
       if (goal.isEnd(bot.entity.position.floored())) return finish(true, 'reached')
       if (cancelled()) return finish(false, 'stopped')
       if (reflexActive()) return finish(false, 'interrupted')
@@ -249,6 +298,10 @@ async function crossDoor (bot, goal) {
     const goalIn = gp && goal.y != null ? insideHut({ x: goal.x, y: goal.y, z: goal.z }) : false
     if (meIn) exit = inA ? sideB : sideA
     else if (goalIn) exit = inA ? sideA : sideB
+    // outside with the goal outside too: the hut is not on the way. (The "side toward the goal" of a west door
+    // with the goal to the east is the INSIDE step: every stall beside the hut crossed in, the next walk crossed
+    // out again - in/out for 90s on each trip east, 2026-09-22)
+    else return false
   }
   if (distTo(exit, me) < 0.8) return false // already through: this stall is not about the door
   // not standing on the near-side step yet (coming at the hut from its side): walk to that step first
@@ -303,7 +356,7 @@ function noteWalk (label, goal) {
   }
 }
 async function goTo (bot, goal, opts = {}) {
-  const { timeoutMs = 60000, stuckMs = 10000, dig = true, place = true, allowZones = [], label = 'go', shouldStop } = opts
+  const { timeoutMs = 60000, stuckMs = 10000, dig = true, place = true, allowZones = [], label = 'go', shouldStop, dryHead = true } = opts
   noteWalk(label, goal)
   // the safehouse has one way in: a walk between inside and outside goes through the door first (the planner
   // never routes through it, and a walk to the chest from outside the back wall timed out for 46s a go)
@@ -319,12 +372,12 @@ async function goTo (bot, goal, opts = {}) {
     }
   } catch (e) { log('move', 'door routing threw: ' + e.message) }
   const t0 = Date.now()
-  const r = await goToInner(bot, goal, opts, { timeoutMs, stuckMs, dig, place, allowZones, label, shouldStop })
+  const r = await goToInner(bot, goal, opts, { timeoutMs, stuckMs, dig, place, allowZones, label, shouldStop, dryHead })
   const took = Date.now() - t0
   if (took > 30000) log('move', `${label}: ${r.ok ? 'arrived' : r.why} after ${Math.round(took / 1000)}s at ${fmt(bot.entity && bot.entity.position)}`)
   return r
 }
-async function goToInner (bot, goal, opts, { timeoutMs, stuckMs, dig, place, allowZones, label, shouldStop }) {
+async function goToInner (bot, goal, opts, { timeoutMs, stuckMs, dig, place, allowZones, label, shouldStop, dryHead }) {
   const deadline = Date.now() + timeoutMs
   const cancelled = control.token()
   let fails = 0
@@ -340,7 +393,7 @@ async function goToInner (bot, goal, opts, { timeoutMs, stuckMs, dig, place, all
     // (finished build blocks stay unbreakable - the protector guards them in every zone)
     const here = inZone(bot.entity.position.floored())
     const zonesOk = here && !allowZones.includes(here.label) ? allowZones.concat([here.label]) : allowZones
-    const r = await runGoal(bot, goal, { timeoutMs: Math.max(2000, deadline - Date.now()), stuckMs, movements: movementsFor(bot, { dig, place, allowZones: zonesOk }) })
+    const r = await runGoal(bot, goal, { timeoutMs: Math.max(2000, deadline - Date.now()), stuckMs, movements: movementsFor(bot, { dig, place, allowZones: zonesOk, dryHead }) })
     if (r.ok) return r
     if (r.why === 'died') return r
     if (r.why === 'interrupted') { if (++interrupts > 20) return { ok: false, why: 'interrupted too often' }; continue }
@@ -481,4 +534,4 @@ async function travel (bot, target, opts = {}) {
   return { ok: false, why: 'timeout' }
 }
 
-module.exports = { crossDoor, goals, bindReflex, bindBot, setZone, inZone, zones, utilitySpotOK, insideHut, setProtector, surface, isUnderground, surfaceYHere, movementsFor, goTo, goNear, travel, stopMoving, runGoal, sleep, fmt, waitReflex }
+module.exports = { crossDoor, goals, bindReflex, bindBot, setZone, inZone, zones, utilitySpotOK, insideHut, setProtector, isProtected, surface, isUnderground, surfaceYHere, movementsFor, goTo, goNear, travel, stopMoving, runGoal, sleep, fmt, waitReflex }

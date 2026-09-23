@@ -94,7 +94,7 @@ async function openCell (bot, p) {
 }
 
 // Block to fill a hole with: stone the castle has no use for first, cobblestone (castle material) last.
-const FILLER_ORDER = ['andesite', 'diorite', 'granite', 'tuff', 'cobbled_deepslate', 'netherrack', 'dirt', 'cobblestone']
+const FILLER_ORDER = ['andesite', 'diorite', 'tuff', 'cobbled_deepslate', 'netherrack', 'dirt', 'cobblestone']
 function fillerItem (bot) {
   for (const n of FILLER_ORDER) { const it = inv.items(bot).find(i => i.name === n); if (it) return it }
   return null
@@ -138,13 +138,14 @@ async function stepInto (bot, p) {
 }
 
 // Take ores visible from the tunnel (within reach, exposed to the tunnel air).
+let alsoWant = null // a stone kind the build wants (granite): taken from the walls like an ore while mining for it
 async function takeWallOres (bot) {
   const me = world.feetPos(bot)
   let took = 0
   for (let dx = -3; dx <= 3; dx++) for (let dy = -1; dy <= 3; dy++) for (let dz = -3; dz <= 3; dz++) {
     const p = { x: me.x + dx, y: me.y + dy, z: me.z + dz }
     const b = world.at(bot, p.x, p.y, p.z)
-    if (!b || !WANT_ORES.test(b.name)) continue
+    if (!b || !(WANT_ORES.test(b.name) || (alsoWant && alsoWant.test(b.name)))) continue
     if (!world.hasAirNeighbour(bot, p)) continue
     if (!inv.canHarvest(bot, b)) continue
     if (fluidAround(bot, p)) continue
@@ -240,6 +241,7 @@ function abandonMine (m) {
 }
 
 async function mineFor (bot, itemName, target, ctx = {}) {
+  alsoWant = /^(granite|diorite|andesite|tuff)$/.test(itemName) ? new RegExp('^' + itemName + '$') : null
   let m = mem.get().mine
   const home = mem.get().home
   // a mine belongs near home; one dug before home existed (or far from it) is left behind

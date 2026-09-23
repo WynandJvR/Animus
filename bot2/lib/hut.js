@@ -230,7 +230,7 @@ async function buildHut (bot, { shouldStop } = {}) {
         const ab = world.at(bot, above.x, above.y, above.z)
         if (ab && !world.isAirish(ab)) {
           log('hut', `opening the floor at ${move.fmt(above)} to fill the hollow under it`)
-          await act.dig(bot, above, { force: true, allowZones: ['base', 'build'] })
+          await act.dig(bot, above, { force: true, own: true, allowZones: ['base', 'build'] }) // (our own finished floor: `own` past the build guard)
           fails.set(key(c), 0)
           fails.set(key(above), 0)
         }

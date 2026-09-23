@@ -24,6 +24,8 @@ const control = require('./control')
 const farm = require('./farm')
 const hut = require('./hut')
 const lights = require('./lights')
+const mats = require('./materials')
+const clay = require('./clay')
 
 // Hunt an animal that is right here when the pack is low on food - a player does not walk past a
 // cow with nothing to eat. Bounded to animals within 20 blocks and ~25 seconds.
@@ -231,6 +233,13 @@ function baseZone () {
   const h = mem.get().home
   if (!h) return
   move.setZone('base', { x1: h.x - 5, y1: h.y - 3, z1: h.z - 5, x2: h.x + 5, y2: h.y + 6, z2: h.z + 5 })
+  // the field is ours too: dirt for scaffold was dug out of it - cells gone to air, others buried, "0 just now"
+  // planted for an hour (2026-09-23). Gathering keeps out of zones; the farm's own digs pass allowZones farm.
+  const f = mem.get().farm
+  if (f && f.cells && f.cells.length) {
+    const xs = f.cells.map(c => c.x); const ys = f.cells.map(c => c.y); const zs = f.cells.map(c => c.z)
+    move.setZone('farm', { x1: Math.min(...xs), y1: Math.min(...ys) - 1, z1: Math.min(...zs), x2: Math.max(...xs), y2: Math.max(...ys) + 2, z2: Math.max(...zs) })
+  } else move.setZone('farm', null)
 }
 
 // ---- the decision -------------------------------------------------------------------------
@@ -382,7 +391,8 @@ function decide () {
 
   // 9. the build
   // (with its own backoff: a castle step failing in 30ms was retried 26 times in a second)
-  if (mem.get().build && build.getJob() && !mem.get().buildDone && !cooling('castle')) {
+  // (derived from the world, never a latch: a finished build that loses blocks - a creeper - is work again)
+  if (mem.get().build && build.getJob() && build.needsWork(bot) && !cooling('castle')) {
     return { name: 'castle', why: 'working on ' + mem.get().build.name }
   }
   return { name: 'idle', why: 'nothing to do' }
@@ -495,7 +505,7 @@ const TASKS = {
     return food.stockFood(bot, { targetPoints: 48, ctx: { shouldStop: dayStop } })
   },
   async cook () { await food.cookAll(bot, { shouldStop: dayStop }); return inv.rawFoodCount(bot) < 3 },
-  async farm () { return farm.establish(bot, { shouldStop: dayStop }) },
+  async farm () { const ok = await farm.establish(bot, { shouldStop: dayStop }); baseZone(); return ok },
   async hut () { return hut.buildHut(bot, { shouldStop: homewardStop }) },
   async deposit () { return base.depositAll(bot) },
   async furnish () {
@@ -644,129 +654,99 @@ const TASKS = {
 }
 
 // ---- the castle ---------------------------------------------------------------------------
-const BULK_SOURCE = {
-  stone_bricks: ['stone', 4], // 4 stone -> 4 bricks
-  oak_planks: ['oak_log', 4],
-  spruce_planks: ['spruce_log', 4],
-  glass: ['sand', 1],
-  stone: ['cobblestone', 1]
-}
+// Materials go through ONE pipeline (materials.js): the recipe graph says how each item is made, plan() nets
+// it against the stock, and the director executes the plan here - the crafts for the builder's window, a
+// smelt queue for the whole build, and one raw material gathered at a time (window first, then the long pole).
+// (the castle-only table of stone bricks, oak/spruce planks and glass it replaces could not make a brick)
+const FURNACES = 6 // one furnace is ~4 hours of a castle's smelting; six keep ahead of the gathering
+const WINDOW_LAYERS = 4 // the layers above the lowest unfinished one the builder works in (build.nextNeeds)
 
 function stock (name) { return inv.count(bot, name) + base.bankCount(name) }
-// a castle wood cell takes any wood of its kind (the operator's choice): stock/withdraw by class
-function woodNamesHeld (cls) {
-  const re = cls === 'log' ? build.LOG_ANY : build.PLANKS_ANY
-  return [...new Set(Object.keys(inv.counts(bot)).concat(Object.keys(base.bankCounts())))].filter(n => re.test(n))
-}
-function stockOf (name) {
-  const cls = build.woodClass(name)
-  return cls ? woodNamesHeld(cls).reduce((t, n) => t + stock(n), 0) : stock(name)
-}
-async function withdrawOf (name, want) {
-  const cls = build.woodClass(name)
-  if (!cls) return base.bankCount(name) > 0 ? base.withdraw(bot, name, Math.min(want, base.bankCount(name))) : 0
-  let got = 0
-  for (const n of woodNamesHeld(cls).sort((a, b) => (b === name) - (a === name) || base.bankCount(b) - base.bankCount(a))) {
-    if (got >= want) break
-    if (base.bankCount(n) > 0) got += await base.withdraw(bot, n, Math.min(want - got, base.bankCount(n)))
-  }
-  return got
-}
-function countOf (name) { const cls = build.woodClass(name); return cls ? woodNamesHeld(cls).reduce((t, n) => t + inv.count(bot, n), 0) : inv.count(bot, name) }
+// a build cell takes whatever may stand in for its item (any wood of the form, dirt for grass): by pool
+function stockOf (name) { return mats.stock(bot, name) }
+async function withdrawOf (name, want) { return mats.withdrawPool(bot, name, want) }
+function countOf (name) { return mats.held(bot, name) }
+function windowNeeds () { return typeof build.nextNeeds === 'function' ? build.nextNeeds(bot, WINDOW_LAYERS) : {} }
 // the nearest natural wood growing around here (what the castle's wood cells will be made of)
 function nearestWood () {
   const t = world.findBlocks(bot, build.LOG_ANY, { maxDistance: 64, count: 8, filter: b => !move.inZone(b.position, 2) && !move.insideHut(b.position) })[0]
   return t ? t.name.replace('_log', '') : craft.preferredWood(bot, 1)
 }
 
+// Smelt `n` of `input` in the background: into the pack from the chest, fuel the coal/charcoal/spare wood
+// covers (never a walk to the trees from here - a fuel shortfall is gathered like any raw), loaded across the
+// home furnaces and collected on a later pass (waiting at the furnace cost minutes a batch).
+async function loadSmelt (input, n) {
+  const room = Math.max(0, inv.freeSlots(bot) - 3) * 64
+  if (inv.count(bot, input) < n) await base.withdraw(bot, input, Math.min(n - inv.count(bot, input), room)).catch(() => 0)
+  const k = Math.min(n, inv.count(bot, input))
+  if (k <= 0) return 0
+  if (!await smelt.pickFuel(bot, k, { noGather: true })) { log('dir', `no fuel on hand for ${k} ${input} - it waits in the chest`); return 0 }
+  return smelt.loadFurnaces(bot, input, k)
+}
+
+// At home between building and gathering: the furnaces emptied, refuelled and fed from the chest, and the
+// crafts made. The SMELT QUEUE is the whole build's (clay->brick, cobble->stone->smooth stone, stone bricks->
+// cracked, sand->glass: what the chest holds goes in, the window's first); the CRAFTS are the window's only,
+// with the whole recipe yield - never all the bricks turned into stairs.
 async function processAtHome () {
-  // collect finished smelting, turn stone into bricks, keep the furnaces fed with cobble
   const home = mem.get().home
   const st = build.status(bot)
   if (!st) return
   await smelt.collectFurnaces(bot)
   await smelt.refuelFurnaces(bot)
-  const bricksNeeded = st.need.stone_bricks || 0
-  // fuel for the stone: charcoal made in the background from spare logs (one log smelts eight; the brick line
-  // was stalling on fuel with cobble waiting in the chest)
-  if (bricksNeeded > 0 && stock('coal') + stock('charcoal') < 32) {
+  const winNeeds = windowNeeds()
+  const win = mats.planFor(bot, winNeeds)
+  let tot = mats.planFor(bot, st.need)
+  if (tot.unknown.length) log('dir', `no route known for ${tot.unknown.join(', ')} - gathering them as they are`)
+  // furnaces for the volume, counted around HOME (counted around the bot at the site it found too few and
+  // built six more)
+  if (tot.smeltTotal > 0) {
+    const furns = home ? world.findBlocks(bot, /^furnace$/, { maxDistance: 16, count: 32, point: new Vec3(home.x, home.y, home.z) }) : smelt.furnacesNear(bot, 32)
+    for (let i = furns.length; i < FURNACES && stock('cobblestone') >= 8; i++) {
+      if (inv.count(bot, 'cobblestone') < 8) await base.withdraw(bot, 'cobblestone', 8)
+      if (!await smelt.placeFurnace(bot)) break
+    }
+  }
+  // fuel for the queue: charcoal from logs beyond the ones the next layers build with (one log smelts eight;
+  // the brick line stalled on fuel with cobble waiting in the chest)
+  if (tot.raw.fuel > 0 && stock('coal') + stock('charcoal') < 32) {
     const spareLogs = Math.floor(smelt.woodSurplus(bot) / 4)
-    const logName = woodNamesHeld('log').filter(n => stock(n) > 0).sort((a, b) => stock(b) - stock(a))[0]
+    const logName = Object.keys(Object.assign({}, inv.counts(bot), base.bankCounts())).filter(n => mats.LOG_ANY.test(n) && stock(n) > 0).sort((a, b) => stock(b) - stock(a))[0]
     if (logName && spareLogs >= 4) {
       const n = Math.min(32, spareLogs, stock(logName))
       if (inv.count(bot, logName) < n) await base.withdraw(bot, logName, n - inv.count(bot, logName))
       const loaded = await smelt.loadFurnaces(bot, logName, Math.min(n, inv.count(bot, logName)))
-      if (loaded) log('dir', `burning ${loaded} ${logName} into charcoal for the stone`)
+      if (loaded) log('dir', `burning ${loaded} ${logName} into charcoal for the smelting`)
     }
   }
-  if (bricksNeeded > 0) {
-    const stone = stock('stone')
-    const bricksHave = stock('stone_bricks')
-    const toMake = Math.min(bricksNeeded - bricksHave, stone)
-    if (toMake >= 4) {
-      if (inv.count(bot, 'stone') < toMake) await base.withdraw(bot, 'stone', toMake - inv.count(bot, 'stone'))
-      const n = Math.floor(inv.count(bot, 'stone') / 4) * 4
-      if (n >= 4) await craft.ensure(bot, 'stone_bricks', inv.count(bot, 'stone_bricks') + n, { noWithdraw: true })
-    }
-    // feed the furnaces: cobble beyond what the castle itself needs becomes stone
-    const stoneShort = bricksNeeded - stock('stone_bricks') - stock('stone')
-    const cobbleSpare = stock('cobblestone') - (st.need.cobblestone || 0) - 16
-    const load = Math.min(stoneShort, cobbleSpare)
-    // a row of six furnaces while bricks are still wanted: one furnace is 3.6 hours of stone for this castle
-    {
-      // counted around HOME (counted around the bot at the castle site it found too few and built six more)
-      const furns = home ? world.findBlocks(bot, /^furnace$/, { maxDistance: 16, count: 32, point: new Vec3(home.x, home.y, home.z) }) : smelt.furnacesNear(bot, 32)
-      for (let i = furns.length; i < 6 && stock('cobblestone') >= 8; i++) {
-        if (inv.count(bot, 'cobblestone') < 8) await base.withdraw(bot, 'cobblestone', 8)
-        if (!await smelt.placeFurnace(bot)) break
-      }
-    }
-    if (load > 0) {
-      if (inv.count(bot, 'cobblestone') < load) await base.withdraw(bot, 'cobblestone', Math.min(load, 64 * 6) - inv.count(bot, 'cobblestone'))
-      const fuelNeed = Math.min(load, inv.count(bot, 'cobblestone'))
-      await smelt.pickFuel(bot, fuelNeed)
-      await smelt.loadFurnaces(bot, 'cobblestone', Math.min(load, inv.count(bot, 'cobblestone')))
-    }
+  // the crafts that feed a furnace (stone -> stone bricks, to crack) are the queue's, the whole build's
+  const feed = tot.crafts.filter(c => mats.SMELT_INPUTS.has(c.item))
+  if (feed.length) { await mats.makeCrafts(bot, feed, { keep: win.top, shouldStop: dayStop }); tot = mats.planFor(bot, st.need) }
+  // the queue: what the window waits on first; an input the window also places itself (cobblestone) goes in
+  // only beyond the window's own share
+  const winOut = new Set(win.smelts.map(s => s.output))
+  for (const s of tot.smelts.slice().sort((a, b) => winOut.has(b.output) - winOut.has(a.output))) {
+    if (dayStop()) break
+    const n = Math.min(s.n, stock(s.input) - (win.top[s.input] || 0), 64 * FURNACES)
+    if (n < 1) continue
+    const k = await loadSmelt(s.input, n)
+    if (k) log('dir', `smelting ${k} ${s.input} -> ${s.output} (${s.n} more ${s.output} wanted for the ${st.name})`)
   }
-  // glass the same way: banked sand into the furnaces, collected on a later pass (waiting at the furnace for
-  // it cost minutes, then the castle turn "failed" and the bot stood idle through its cooldown)
-  {
-    const glassShort = (st.need.glass || 0) - stock('glass') - smelt.inFlight('glass')
-    const sand = Math.min(glassShort, stock('sand'))
-    if (sand > 0) {
-      if (inv.count(bot, 'sand') < sand) await base.withdraw(bot, 'sand', sand - inv.count(bot, 'sand'))
-      const k = Math.min(sand, inv.count(bot, 'sand'))
-      if (k > 0 && await smelt.pickFuel(bot, k)) await smelt.loadFurnaces(bot, 'sand', k)
-    }
+  // the window's crafts, ingredients first (planks before stairs, bricks before brick stairs)
+  const win2 = mats.planFor(bot, winNeeds)
+  if (win2.crafts.length) {
+    const made = await mats.makeCrafts(bot, win2.crafts, { keep: win2.top, shouldStop: dayStop })
+    if (made) log('dir', `${made} crafts for the next layers (planned ${win2.crafts.map(c => c.crafts + 'x ' + c.item).join(', ')})`)
   }
-  // planks from logs (only what the castle still needs). Logs are held back only for the log cells of the
-  // next few layers - reserving every log the whole castle will ever need meant no planks were ever made
-  const j = build.getJob()
-  const lowest = j.cells.filter(c => build.cellDone(bot, c) !== true)
-  const minY = lowest.length ? Math.min(...lowest.map(c => c.y)) : 0
-  const logsSoon = lowest.filter(c => c.y <= minY + 3 && build.woodClass(c.name) === 'log').length
-  // planks for the castle's plank cells from any logs beyond the log cells coming up (local wood)
-  {
-    const planksNeed = Object.entries(st.need).filter(([n]) => build.woodClass(n) === 'planks').reduce((t, [, v]) => t + v, 0) - stockOf('oak_planks')
-    const logsSpare = stockOf('oak_log') - logsSoon
-    const crafts = Math.min(Math.ceil(planksNeed / 4), logsSpare)
-    if (crafts > 0) {
-      let left = crafts
-      for (const n of woodNamesHeld('log').sort((x, y) => stock(y) - stock(x))) {
-        if (left <= 0) break
-        if (inv.count(bot, n) < Math.min(left, stock(n))) await base.withdraw(bot, n, Math.min(left, stock(n)) - inv.count(bot, n))
-        const k = Math.min(left, inv.count(bot, n))
-        if (k > 0 && await craft.plankUp(bot, n, k)) left -= k
-      }
-    }
-  }
-
 }
 
 async function castleWork () {
   const j = build.getJob()
   const st = build.status(bot)
-  if (st.done >= st.total) { log('dir', `castle complete: ${st.done}/${st.total}`); await build.clearSite(bot, { finishing: true, shouldStop: dayStop }); await build.removeScaffold(bot); await build.ensureScaffold(bot, 32).catch(() => {}); await build.finishSite(bot, { shouldStop: dayStop }); mem.update(m => { m.buildDone = true }); return true }
+  // every block stands: the finishing round (scaffold down, holes filled). No latch - build.needsWork asks the
+  // world again next time; nothing changed = a failure, so the chooser backs off (leftovers rest till tomorrow)
+  if (st.done >= st.total) return build.finish(bot, { shouldStop: dayStop })
   const home = mem.get().home
   if (world.dist2(bot.entity.position, j.origin) > 64) {
     const r = await move.travel(bot, home || j.origin, { range: 4, shouldStop: homewardStop, label: 'to site' })
@@ -787,11 +767,10 @@ async function castleWork () {
     // nothing clearable right now: get on with materials meanwhile
   }
   await processAtHome()
-  const next = {}
-  // the same window the builder works in (it builds up to 3 layers past a missing material, so the bricks for
-  // those layers must come out of the chest too - with glass short, nothing was withdrawn and nothing built)
-  for (const c of lowest) if (c.y <= minY + 4) next[c.name] = (next[c.name] || 0) + 1
-  // withdraw what we have for it
+  // the same window the builder works in (it builds past a missing material, so the bricks for those layers
+  // must come out of the chest too - with glass short, nothing was withdrawn and nothing built)
+  const next = windowNeeds()
+  // withdraw what we have for it (anything that stands in: birch stairs for jungle stairs)
   let carrying = 0
   for (const [name, n] of Object.entries(next)) {
     const want = Math.min(n, 64 * 4) - countOf(name)
@@ -806,54 +785,67 @@ async function castleWork () {
     blockedOn = r.blockedOn
     if (r.placed > 0 && !r.blockedOn) return true
   }
-  // gather: the material the builder is blocked on first, else the scarcest of the next stretch
-  // what's cooking in the furnaces is on its way - go after the next shortage meanwhile
-  const deficits = Object.entries(next).map(([name, n]) => ({ name, short: n - stockOf(name) - smelt.inFlight(name) })).filter(d => d.short > 0)
-  if (!deficits.length) return true
-  deficits.sort((a, b) => (b.name === blockedOn) - (a.name === blockedOn) || b.short - a.short)
-  // a mine trip needs a working day ahead of it: close to dusk, gather something near home instead (a walk
-  // to the mine face that arrived as dusk fell was a minute and a half for nothing)
+  // gather ONE raw material. The window's own shortfall first (the one the builder is blocked on at its head);
+  // a supplied window - or one only waiting on the furnaces - spends the daylight on the long pole of the whole
+  // build (clay, for a brick build: its trips start as soon as nothing nearer blocks the builder)
+  const win = mats.planFor(bot, next)
+  const tot = mats.planFor(bot, build.status(bot).need)
+  const chain = blockedOn ? Object.keys(mats.getPlanner(bot).plan({ [blockedOn]: 1 }).raw) : []
+  const blockedRaw = chain.find(r => r !== 'fuel' && win.raw[r] > 0) || chain.find(r => win.raw[r] > 0) || null
+  // a trip needs a working day ahead of it: close to dusk only what is gathered round home (a walk to the mine
+  // face that arrived as dusk fell was a minute and a half for nothing; a clay bank is further still)
   const nearDusk = world.ticksUntilNight(bot) < 2400
-  const isMining = n => /^(stone_bricks|stone|cobblestone)$/.test(n)
-  const d = nearDusk ? deficits.find(x => !isMining(x.name)) : deficits[0]
-  if (!d) { log('dir', 'dusk is close - no mine trip now'); return false }
-  log('dir', `castle needs ${d.short} more ${d.name} for the next layers (stock ${stockOf(d.name)})`)
-  const ok = await gatherFor(d.name, d.short)
+  const feasible = r => {
+    if (r === 'clay_ball') return !clay.exhausted() && clay.tripFits(bot)
+    if (nearDusk && /^(cobblestone|granite|raw_iron|wool|red_flower)$/.test(r)) return false
+    return true
+  }
+  // an input already in the chest that only lacks fuel (66 clay balls "waiting in the chest" while the bot went
+  // for more clay, 2026-09-23): the fire is the bottleneck, not the input
+  const fuelBound = (win.raw.fuel || tot.raw.fuel || 0) > 0 && win.smelts.concat(tot.smelts).some(sm => sm.input && sm.input !== '#log' && mats.stock(bot, sm.input) > 0)
+  const pick = mats.pickRaw(fuelBound && !win.raw.fuel ? Object.assign({ fuel: tot.raw.fuel }, win.raw) : win.raw, tot.raw, { blockedRaw: fuelBound ? 'fuel' : blockedRaw, feasible })
+  if (!pick) {
+    const waiting = win.smelts.length ? `the furnaces (${win.smelts.map(s => s.n + ' ' + s.output).join(', ')})` : 'nothing'
+    if (Object.keys(tot.raw).length) log('dir', `nothing to gather now (${Object.keys(tot.raw).map(r => tot.raw[r] + ' ' + r).join(', ')} still short, none fits the hour${clay.exhausted() ? '; no clay in range' : ''}) - waiting on ${waiting}`)
+    return nearDusk ? false : !!win.smelts.length
+  }
+  log('dir', `${st.name} needs ${pick.short} more ${pick.raw} - ${pick.why}${pick.raw === blockedRaw ? ` (the builder waits on ${blockedOn})` : ''}; still short in all: ${Object.keys(tot.raw).map(r => tot.raw[r] + ' ' + r).join(', ')}`)
+  const ok = await gatherFor(pick.raw, pick.short)
   if (inv.freeSlots(bot) < 8 || ok) await base.depositHaul(bot, { shouldStop: dayStop })
   return ok
 }
 
-async function gatherFor (name, short) {
+// One trip for one RAW material of the plan (materials.js names them): the batch a trip is worth.
+async function gatherFor (raw, short) {
   const batch = Math.min(short, 128)
-  switch (name) {
-    case 'stone_bricks':
-    case 'stone': {
-      // no fuel and no spare wood to make it from: logs first (trees are a short walk, the mine is not)
-      if (stock('coal') + stock('charcoal') < 8 && smelt.woodSurplus(bot) < 32) {
-        const w = nearestWood() + '_log'
-        log('dir', 'no fuel for the stone - cutting logs for charcoal first')
-        await craft.ensure(bot, w, inv.count(bot, w) + 24, { shouldStop: dayStop, noWithdraw: true })
-        return true
-      }
-      // cobble now; the furnaces make it stone in the background
-      const r = await mining.mineFor(bot, 'cobblestone', inv.count(bot, 'cobblestone') + Math.min(256, batch + 32), { shouldStop: dayStop })
-      return r
+  const ctx = { shouldStop: dayStop }
+  switch (raw) {
+    // clay: a big batch - the walk to the water costs more than the digging (up to 64 blocks, 256 balls)
+    case 'clay_ball': return clay.gather(bot, Math.min(short, 256), ctx)
+    // cobble; the furnaces make stone of it in the background
+    case 'cobblestone': return mining.mineFor(bot, 'cobblestone', inv.count(bot, 'cobblestone') + Math.min(256, batch + 32), ctx)
+    case 'log': {
+      // whatever wood grows nearest (every wood cell and wooden form takes local wood)
+      const w = nearestWood() + '_log'
+      return craft.ensure(bot, w, inv.count(bot, w) + Math.min(batch, 64), Object.assign({ noWithdraw: true }, ctx))
     }
-    case 'cobblestone': return mining.mineFor(bot, 'cobblestone', inv.count(bot, 'cobblestone') + batch, { shouldStop: dayStop })
+    case 'fuel': {
+      // coal turns up in the mine; the sure fuel is charcoal from logs beyond the build's (processAtHome burns
+      // them): trees are a short walk, a coal seam is not
+      const w = nearestWood() + '_log'
+      log('dir', `short of ${short} fuel for the furnaces - cutting logs for charcoal`)
+      const before = inv.count(bot, w)
+      const ok = await craft.ensure(bot, w, before + Math.min(32, Math.max(8, short)), Object.assign({ noWithdraw: true }, ctx))
+      const cut = inv.count(bot, w) - before
+      // these logs are the fuel: straight into the furnaces as charcoal (never into the build's wood pool)
+      if (cut >= 2) { const r = await base.goHome(bot, { shouldStop: dayStop }); if (r.ok) return (await smelt.burnForCharcoal(bot, w, cut)) > 0 }
+      return ok
+    }
+    case 'wool': return food.woolFor(bot, Math.min(short, 16), ctx)
+    case 'red_flower': return gather.pickPlants(bot, /^(poppy|red_tulip|rose_bush)$/, /^(poppy|red_tulip|rose_bush)$/, Math.min(short, 16), ctx)
     default:
-      if (build.woodClass(name)) {
-        // whatever wood grows nearest (the castle's oak/spruce cells take local wood)
-        const w = nearestWood() + '_log'
-        const logs = build.woodClass(name) === 'log' ? Math.min(batch, 64) : Math.min(Math.ceil(batch / 4), 64)
-        return craft.ensure(bot, w, inv.count(bot, w) + logs, { shouldStop: dayStop, noWithdraw: true })
-      }
-      return craft.ensure(bot, name, inv.count(bot, name) + Math.min(batch, 64), { shouldStop: dayStop })
-    case 'glass': {
-      // sand is the gathering; the furnaces turn it into glass in the background (processAtHome)
-      const sandShort = Math.min(batch, 48) - stock('sand')
-      if (sandShort <= 0) { await processAtHome(); return smelt.inFlight('glass') > 0 }
-      return craft.ensure(bot, 'sand', inv.count(bot, 'sand') + sandShort, { shouldStop: dayStop })
-    }
+      // sand, dirt, gravel, raw iron: the generic route (surface digging, the mine)
+      return craft.ensure(bot, raw, inv.count(bot, raw) + Math.min(batch, 64), ctx)
   }
 }
 

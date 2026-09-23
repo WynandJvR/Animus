@@ -40,7 +40,14 @@ const EDITS = [
   ['prismarine-chunk/src/index.js', "26.1: require('./pc/1.18/chunk')\n", "26.1: require('./pc/1.18/chunk'),\n    26.2: require('./pc/1.18/chunk')\n"],
   ['prismarine-physics/lib/features.json', /"26\.1"\]/g, '"26.1", "26.2"]'],
   ['mineflayer/lib/version.js', "'26.1']", "'26.1', '26.2']"],
-  ['minecraft-protocol/src/version.js', "'26.1']", "'26.1', '26.2']"]
+  ['minecraft-protocol/src/version.js', "'26.1']", "'26.1', '26.2']"],
+  // mineflayer keeps ONE stateId, the last one seen on any window. A 26.2 server keeps sending player-
+  // inventory (window 0) slot updates while a crafting table is open, so every table click went out with
+  // window 0's stateId, the server answered each with a full resync, the resync reset the cursor the
+  // craft loop thought it held, and sticks landed as planks: no table recipe ever completed. Track it per window.
+  ['mineflayer/lib/plugins/inventory.js', 'const listener = packet => { stateId = packet.stateId }', 'const listener = packet => { stateId = packet.stateId; stateIds[packet.windowId] = packet.stateId } // 26.2 per-window stateId'],
+  ['mineflayer/lib/plugins/inventory.js', '  let stateId = -1\n', '  let stateId = -1\n  const stateIds = {}\n'],
+  ['mineflayer/lib/plugins/inventory.js', '        windowId: window.id,\n        stateId,\n        slot,', '        windowId: window.id,\n        stateId: stateIds[window.id] ?? stateId,\n        slot,']
 ]
 function patchGates () {
   for (const [f, from, to] of EDITS) {
@@ -48,7 +55,7 @@ function patchGates () {
     if (!copies.length) throw new Error('[mc262] not installed: ' + f)
     for (const p of copies) {
       const s = fs.readFileSync(p, 'utf8')
-      if (s.includes('26.2')) continue
+      if (s.includes(to)) continue
       const t = s.replace(from, to)
       if (t === s) throw new Error('[mc262] pattern not found in ' + p)
       fs.writeFileSync(p, t)

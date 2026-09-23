@@ -111,19 +111,105 @@ function make (bot, director) {
         // standing in or round the footprint that are not part of it
         const j = build.getJob()
         if (!j) return 'no build job'
-        const miss = j.cells.filter(c => build.cellDone(bot, c) !== true).map(c => { const b = world.at(bot, c.x, c.y, c.z); let p = ''; try { p = b ? JSON.stringify(b.getProperties()) : '' } catch {} ; return `${c.x},${c.y},${c.z} want ${c.name}${c.props && Object.keys(c.props).length ? JSON.stringify(c.props) : ''} have ${b ? b.name + p : 'unloaded'}` })
-        const extra = []
-        const bx = j.box
-        for (let y = bx.y1; y <= bx.y2 + 3; y++) for (let z = bx.z1 - 4; z <= bx.z2 + 4; z++) for (let x = bx.x1 - 4; x <= bx.x2 + 4; x++) {
-          if (j.index.has(build.key({ x, y, z }))) continue
-          const b = world.at(bot, x, y, z)
-          if (b && /^(dirt|andesite|diorite|granite|tuff|cobbled_deepslate|netherrack|coarse_dirt|cobblestone)$/.test(b.name) && y > bx.y1) extra.push(`${b.name}@${x},${y},${z}`)
-        }
-        return JSON.stringify({ missing: miss.length, cells: miss.slice(0, 60), strayFiller: extra.length, stray: extra.slice(0, 80) })
+        // (the state compared is only what makes the look: facing/half/type/axis/hanging - build.wantOf)
+        const miss = j.cells.filter(c => build.cellDone(bot, c) !== true).map(c => { const b = world.at(bot, c.x, c.y, c.z); let p = ''; try { const bp = b ? b.getProperties() : {}; p = build.KEY_PROPS.filter(k => bp[k] != null).map(k => `${k}=${bp[k]}`).join(',') } catch {} ; const w = build.wantOf(c); return `${c.x},${c.y},${c.z} want ${c.name}${w ? JSON.stringify(w) : ''} have ${b ? b.name + (p ? '[' + p + ']' : '') : 'unloaded'}` })
+        const s = build.survey(bot, 0, { full: true })
+        return JSON.stringify({ missing: miss.length, cells: miss.slice(0, 60), snapshot: s.snapshot, strayFiller: s.scaffold.length, stray: s.scaffold.slice(0, 80).map(p => `${p.name}@${p.x},${p.y},${p.z}`), holes: s.holes.length, complete: build.complete(bot) })
       }
+      // scaffold - what the bot left standing round the build: the diff against the site snapshot (blocks where
+      // the site was open that are filler or crafted, not cells of the build), and the holes left in the ground
+      case 'scaffold': {
+        if (!build.getJob()) return 'no build job'
+        const s = build.survey(bot, 0, { full: true })
+        if (!s.snapshot) return 'no site snapshot yet - see "snapshot"'
+        const t = {}; for (const p of s.scaffold) t[p.name] = (t[p.name] || 0) + 1
+        return JSON.stringify({ scaffold: s.scaffold.length, tally: t, blocks: s.scaffold.slice(0, 120).map(p => `${p.name}@${p.x},${p.y},${p.z} (was ${p.was})`), holes: s.holes.length, holeList: s.holes.slice(0, 40).map(p => `${p.x},${p.y},${p.z} (was ${p.was})`) })
+      }
+      case 'snapshot': { const i = build.snapshotInfo(bot); return i ? JSON.stringify(i) : 'no build job' }
+      case 'crafttrace': return exclusive('crafttrace', async () => {
+        // crafttrace <item> - craft one and record the window traffic (clicks out, slot updates in)
+        const md = world.data(bot)
+        const nm = id => (md.items[id] || {}).name || id
+        const trace = []
+        const t0 = Date.now()
+        const T = () => Date.now() - t0
+        const w0 = bot._client.write.bind(bot._client)
+        bot._client.write = (name, p) => { if (/window_click|close_window|place_recipe|craft_recipe/.test(name)) trace.push(`${T()} OUT ${name} slot=${p.slot} btn=${p.mouseButton} mode=${p.mode} state=${p.stateId} cursor=${p.cursorItem ? nm(p.cursorItem.itemId) + 'x' + p.cursorItem.itemCount : '-'} changed=${(p.changedSlots || []).map(c => c.location + ':' + (c.item ? nm(c.item.itemId) + 'x' + c.item.itemCount : '-')).join(',')}`); return w0(name, p) }
+        const onPacket = (p, meta) => {
+          if (meta.name === 'set_slot' && p.windowId !== 0 || (meta.name === 'set_slot' && p.slot <= 9)) trace.push(`${T()} IN set_slot w=${p.windowId} slot=${p.slot} state=${p.stateId} ${p.item && p.item.itemCount ? nm(p.item.itemId) + 'x' + p.item.itemCount : '-'}`)
+          else if (meta.name === 'window_items') trace.push(`${T()} IN window_items w=${p.windowId} state=${p.stateId} grid=${(p.items || []).slice(0, 10).map(i => i && i.itemCount ? nm(i.itemId) + 'x' + i.itemCount : '-').join(',')}`)
+          else if (/cursor|open_window|close_window|recipe/.test(meta.name)) trace.push(`${T()} IN ${meta.name} ${JSON.stringify(p).slice(0, 120)}`)
+        }
+        bot._client.on('packet', onPacket)
+        let res
+        try { res = await craft.craftItem(bot, a[0], 1, {}) } catch (e) { res = 'threw ' + e.message } finally { bot._client.write = w0; bot._client.removeListener('packet', onPacket) }
+        return JSON.stringify({ res, have: inv.count(bot, a[0]), trace: trace.slice(0, 80) })
+      })
+      case 'heights': {
+        // heights x1 z1 x2 z2 [step] - top solid (non-leaf, non-plant) block per column, as rows of y-values (last two digits)
+        const [x1, z1, x2, z2] = [0, 1, 2, 3].map(i => num(i)); const step = num(4, 1)
+        const rows = []; const tally = {}
+        for (let z = Math.min(z1, z2); z <= Math.max(z1, z2); z += step) {
+          let r = ''
+          for (let x = Math.min(x1, x2); x <= Math.max(x1, x2); x += step) {
+            let y = null
+            for (let yy = 110; yy > 40; yy--) { const b = world.at(bot, x, yy, z); if (!b) break; if (world.isSolid(b) && !world.LEAF_RE.test(b.name) && !world.LOG_RE.test(b.name)) { y = yy; tally[b.name] = (tally[b.name] || 0) + 1; break } if (world.isWaterBlock(b)) { y = -yy; break } }
+            r += y == null ? ' ..' : y < 0 ? ' ~' + String(-y % 100).padStart(2, '0') : ' ' + String(y % 100).padStart(2, '0')
+          }
+          rows.push(`${z}:${r}`)
+        }
+        return JSON.stringify({ rows, tally })
+      }
+      case 'blocks': {
+        // blocks x1 y1 z1 x2 y2 z2 - every non-air block in a small box, with its state
+        const [x1, y1, z1, x2, y2, z2] = [0, 1, 2, 3, 4, 5].map(i => num(i))
+        const out = []
+        for (let y = Math.min(y1, y2); y <= Math.max(y1, y2); y++) for (let z = Math.min(z1, z2); z <= Math.max(z1, z2); z++) for (let x = Math.min(x1, x2); x <= Math.max(x1, x2); x++) {
+          const b = world.at(bot, x, y, z)
+          if (!b || b.name === 'air') continue
+          let p = ''; try { const pr = b.getProperties(); p = Object.keys(pr).length ? JSON.stringify(pr) : '' } catch {}
+          out.push(`${x},${y},${z} ${b.name}${p}`)
+          if (out.length >= 120) break
+        }
+        return out.join(' | ')
+      }
+      case 'around': {
+        // around [r] - a map of the cells round the bot at feet and head level (and the floor): one char per block
+        const r = num(0, 4)
+        const me = world.feetPos(bot)
+        const ch = b => !b ? '?' : world.isAirish(b) ? '.' : world.isWaterBlock(b) ? '~' : /_door$/.test(b.name) ? 'D' : /_stairs$/.test(b.name) ? 's' : /_slab$/.test(b.name) ? '_' : /fence|wall$/.test(b.name) ? 'f' : /_log$/.test(b.name) ? 'L' : /_planks$/.test(b.name) ? 'p' : /carpet/.test(b.name) ? 'r' : /torch|lantern/.test(b.name) ? 't' : /leaves/.test(b.name) ? '*' : /^(dirt|grass_block)$/.test(b.name) ? 'd' : '#'
+        const out = {}
+        for (const [label, dy] of [['floor', -1], ['feet', 0], ['head', 1], ['above', 2]]) {
+          const rows = []
+          for (let z = me.z - r; z <= me.z + r; z++) { let s = ''; for (let x = me.x - r; x <= me.x + r; x++) s += (x === me.x && z === me.z && dy >= 0 && dy <= 1) ? '@' : ch(world.at(bot, x, me.y + dy, z)); rows.push(`${z}: ${s}`) }
+          out[label] = rows
+        }
+        return JSON.stringify({ me: move.fmt(me), x0: me.x - r, out })
+      }
+      case 'tablewin': return exclusive('tablewin', async () => {
+        // tablewin - open a crafting table and report what the server sent (window type id, slot count)
+        const t = await craft.getTable(bot, {})
+        if (!t) return 'no table'
+        if (!require('./act').reach(bot, t.position, 4)) await move.goTo(bot, new goals.GoalNear(t.position.x, t.position.y, t.position.z, 2), { timeoutMs: 15000, label: 'to table' })
+        const got = {}
+        const onOpen = p => { got.open = { windowId: p.windowId, inventoryType: p.inventoryType, title: JSON.stringify(p.windowTitle).slice(0, 80) } }
+        const onItems = p => { if (!got.items) got.items = { windowId: p.windowId, n: (p.items || []).length } }
+        bot._client.on('open_window', onOpen); bot._client.on('window_items', onItems)
+        try {
+          const w = await bot.openBlock(bot.blockAt(t.position))
+          await move.sleep(600)
+          got.window = { type: w.type, slots: w.slots.length, inventoryStart: w.inventoryStart, craftingResultSlot: w.craftingResultSlot, id: w.id }
+          bot.closeWindow(w)
+        } catch (e) { got.error = e.message } finally { bot._client.removeListener('open_window', onOpen); bot._client.removeListener('window_items', onItems) }
+        const pw = require('prismarine-windows')(bot.version)
+        got.known = Object.entries(pw.windows || {}).filter(([, v]) => v.type >= 6 && v.type <= 14).map(([k, v]) => k + '=' + v.type).join(' ')
+        return JSON.stringify(got)
+      })
       case 'buildstatus': { const st = build.getJob() ? build.status(bot) : null; return st ? JSON.stringify(st) : 'no build job' }
       case 'mine': return exclusive('mine', async () => { const ok = await mining.mineFor(bot, 'cobblestone', inv.count(bot, 'cobblestone') + num(0, 64)); return `mine: ${ok ? 'ok' : 'stopped'} (cobble ${inv.count(bot, 'cobblestone')})` })
       case 'deposit': return exclusive('deposit', async () => { const ok = await base.depositHaul(bot); return `deposit: ${ok}` })
+      // bankall - everything into the chests, tools and kit included (a fresh start with an empty pack)
+      case 'bankall': return exclusive('bankall', async () => { const ok = await base.depositAll(bot, { keep: () => 0 }); return `bankall: ${ok} (left: ${Object.entries(inv.counts(bot)).map(([k, v]) => k + ' x' + v).join(', ') || 'nothing'})` })
       case 'food': return exclusive('food', async () => { const ok = await food.stockFood(bot, { targetPoints: num(0, 40) }); return `food: ${ok} (${inv.foodPoints(bot)} pts)` })
       case 'fish': return exclusive('fish', async () => { const ok = await food.fishFor(bot, num(0, 4)); await food.cookAll(bot); return `fish: ${ok} (pack food ${inv.foodPoints(bot)} pts)` })
       case 'bed': return exclusive('bed', async () => { const ok = (await shelter.obtainBed(bot)) && (await shelter.placeBed(bot, mem.get().home)); return `bed: ${ok}` })

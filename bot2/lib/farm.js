@@ -158,6 +158,13 @@ function widen (bot) {
 async function establish (bot, ctx = {}) {
   let f = farm()
   if (f && !farmIsHome(bot)) { log('farm', 'the old farm plot is far from home - siting a new one'); mem.set('farm', null); f = null }
+  // a cell whose soil is gone (dug for dirt) or buried is no field any more: drop it; too few left, site a new plot
+  // (a remembered plot of holes and buried cells planted "0 just now" for an hour, 2026-09-23)
+  if (f) {
+    const live = f.cells.filter(c => { const b = world.at(bot, c.x, c.y, c.z); const up = world.at(bot, c.x, c.y + 1, c.z); return !b || !up || (/^(grass_block|dirt|farmland)$/.test(b.name) && (world.isAirish(up) || /^(wheat|carrots|potatoes|beetroots)$/.test(up.name))) })
+    if (live.length < f.cells.length) { log('farm', `${f.cells.length - live.length} farm cells lost their soil - dropped`); f.cells = live; mem.set('farm', f) }
+    if (live.length < 8) { log('farm', 'too little of the field left - siting a new one'); mem.set('farm', null); f = null }
+  }
   if (!f) {
     const plot = findPlot(bot)
     if (!plot) { log('farm', 'no water with tillable ground near home - no farm here yet'); return false }
@@ -179,6 +186,11 @@ async function establish (bot, ctx = {}) {
     if (!b || !up) continue
     if (up.name === 'wheat') { planted++; continue }
     if (world.isWaterBlock(up)) continue // water over the cell washes seeds straight off
+    // a hoe tills only under open AIR: leaf litter, grass or a flower on the cell has an empty hitbox (so it reads as
+    // "airish") but blocks the tilling - 16 of 20 cells under leaf litter stayed grass for an hour (2026-09-23)
+    if (/^(grass_block|dirt)$/.test(b.name) && up.name !== 'air' && world.isAirish(up)) {
+      await require('./act').dig(bot, up.position, { timeoutMs: 5000, allowZones: ['farm'] }).catch(() => false)
+    }
     if (/^(grass_block|dirt)$/.test(b.name) && world.isAirish(up)) {
       // a wooden hoe tills ~60 cells: a big plot wears one out part way
       if (!inv.items(bot).some(i => /_hoe$/.test(i.name))) await craft().ensure(bot, 'wooden_hoe', 1, ctx).catch(() => false)

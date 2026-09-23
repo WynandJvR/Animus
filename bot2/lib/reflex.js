@@ -1,7 +1,8 @@
 'use strict'
 // SURVIVAL REFLEXES - a 200ms loop that owns the body whenever the body is in danger. While a
 // reflex is active every skill pauses (move.goTo aborts and waits; skills call waitClear()).
-// Order: air > lava/fire > creeper > melee/ranged threat > low-hp retreat > eat.
+// Order: air > lava/fire > creeper > melee/ranged threat > low-hp retreat > eat. A skill may hold a bounded DIVE
+// (startDive/endDive): the one declared exception to the air reflex.
 const { goals } = require('mineflayer-pathfinder')
 const world = require('./world')
 const inv = require('./inventory')
@@ -24,6 +25,43 @@ let fleeTarget = null
 let diedAt = 0
 let lastLogKey = ''
 
+// OUR air clock. bot.oxygenLevel is not trusted: on this server it was seen stuck at 5 on dry land. A player has
+// 300 ticks (15s) of air; under water it runs down a tick a tick, in air it comes back four a tick.
+const AIR_MS = 15000
+let airMs = AIR_MS
+let airAt = 0
+function trackAir (now) {
+  const under = world.headInWater(bot)
+  if (under) { if (!submergedSince) submergedSince = now } else submergedSince = 0
+  const dt = airAt ? now - airAt : 0; airAt = now
+  airMs = under ? Math.max(0, airMs - dt) : Math.min(AIR_MS, airMs + 4 * dt)
+}
+
+// A DIVE: a skill's declared, bounded exception to the air reflex (clay.js goes down to dig a river bed). While
+// it holds, a head under water is not an emergency - until the underwater time passes its budget (never past
+// DIVE_HARD_MS), the air left runs under a reserve, the body is hurt, a hostile (a drowned) comes within 8, or
+// another reflex takes the body. Then the dive is BROKEN for good and the air reflex surfaces us as it always
+// does. Every other reflex keeps its priority; the skill ends the dive itself (endDive) once its head is out.
+const DIVE_HARD_MS = 11000
+const AIR_RESERVE_MS = 4000
+let dive = null // { maxMs, hp, broken }
+function startDive (maxMs = DIVE_HARD_MS) { dive = { maxMs: Math.min(maxMs, DIVE_HARD_MS), hp: bot.health, broken: null } }
+function endDive () { const d = dive; dive = null; return d ? d.broken : null }
+function diveBroken () { return dive ? dive.broken : null }
+function diveHolds (now) {
+  if (!dive || dive.broken) return false
+  const under = submergedSince ? now - submergedSince : 0
+  if (bot.health > dive.hp) dive.hp = bot.health // (regeneration raises the mark; only a loss counts)
+  const h = hostiles(8)[0]
+  const why = under >= dive.maxMs ? `under ${Math.round(under / 100) / 10}s` : submergedSince && airMs < AIR_RESERVE_MS ? `air low (${Math.round(airMs / 100) / 10}s left)`
+    : bot.health <= dive.hp - 1 ? `hurt (hp ${Math.round(bot.health)})` : h ? `${h.e.name} ${h.d.toFixed(1)}b` : active && active.kind !== 'air' ? `${active.kind} reflex` : null
+  if (!why) return true
+  dive.broken = why
+  log('reflex', `dive broken: ${why} - surfacing`)
+  try { if (bot.targetDigBlock) bot.stopDigging() } catch {} // (the body is ours now: no dig left running under water)
+  return false
+}
+
 function setActive (kind, detail) {
   if (!active || active.kind !== kind) {
     active = { kind, since: Date.now(), detail }
@@ -36,6 +74,7 @@ function shieldUp () { if (!blocking) { try { bot.activateItem(true); blocking =
 function shieldDown () { if (blocking) { try { bot.deactivateItem() } catch {} blocking = false } }
 function clearActive () {
   shieldDown()
+  riseY = null
   if (active) {
     log('reflex', `${active.kind} done after ${Math.round((Date.now() - active.since) / 100) / 10}s (hp ${Math.round(bot.health)})`)
     active = null; lastLogKey = ''
@@ -97,8 +136,10 @@ async function doEat () {
   } catch (e) { lastEatFail = Date.now(); return false } finally { busy = false; clearActive() }
 }
 
-// Nearest cell reachable by swimming whose head space is air (a place to breathe), or dry land.
-function findAir () {
+// Nearest cell reachable by swimming whose head space is air (a place to breathe), or dry land. With `landOnly`,
+// dry land only: once the head is out, the cell we float in is always the nearest air - steering to it held the
+// bot in place in a river for 12 minutes (2026-09-22) - so the way out is toward land, a step up at most preferred.
+function findAir (landOnly = false) {
   const me = bot.entity.position.floored()
   let best = null; let bestD = Infinity
   for (let dx = -8; dx <= 8; dx++) for (let dz = -8; dz <= 8; dz++) for (let dy = -2; dy <= 6; dy++) {
@@ -109,7 +150,8 @@ function findAir () {
     if (!(world.isAirish(feet) || world.isWaterBlock(feet))) continue
     const below = world.at(bot, x, y - 1, z)
     const land = below && world.isSolid(below) && world.isAirish(feet)
-    const d = Math.abs(dx) + Math.abs(dz) + Math.abs(dy) * 0.5 - (land ? 2 : 0)
+    if (landOnly && !land) continue
+    const d = Math.abs(dx) + Math.abs(dz) + Math.abs(dy) * 0.5 - (land ? 2 : 0) + (landOnly && dy > 1 ? 3 * (dy - 1) : 0)
     if (d < bestD) { bestD = d; best = { x, y, z, land } }
   }
   return best
@@ -128,12 +170,13 @@ async function wallOff (e) {
     const b = world.at(bot, p.x, p.y, p.z)
     const f = filler()
     if (!f || !b || !world.isAirish(b)) continue
-    try { if (await act.place(bot, p, f.name, { sneak: false, faceHint: [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]] })) n++ } catch {}
+    try { if (await act.place(bot, p, f.name, { sneak: false, fromReflex: true, faceHint: [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]] })) n++ } catch {}
   }
   if (n) log('reflex', `walled off the ${e.name} (${n} block${n > 1 ? 's' : ''})`)
 }
 
 let floatSince = 0
+let riseY = null; let riseAt = 0 // the air reflex: where the body was when it last made headway upward
 // Out of water over a bank too high to jump: dig the bank's lower blocks so there is a one-block step,
 // or fill the water cell beside us to stand on.
 async function climbOut () {
@@ -148,7 +191,8 @@ async function climbOut () {
       for (const c of [c1, c2]) {
         if (world.isAirish(c)) continue
         if (!world.NATURAL_RE.test(c.name) || world.isWaterBlock(c) || world.isLavaBlock(c)) return false
-        try { await inv.equipFor(bot, c); await bot.lookAt(c.position.offset(0.5, 0.5, 0.5), true); await bot.dig(c, true) } catch { return false }
+        // (through act.digBlock: a finished build block is never cut into, reflex or not)
+        if (!await act.digBlock(bot, c)) return false
       }
       const t0 = Date.now()
       while (Date.now() - t0 < 2500) {
@@ -162,22 +206,37 @@ async function climbOut () {
     return false
   }
   // the bank nearest to where land is
-  const t = findAir()
+  const t = findAir(true)
   const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]]
   if (t) dirs.sort((a, b) => Math.hypot(p.x + a[0] - t.x, p.z + a[1] - t.z) - Math.hypot(p.x + b[0] - t.x, p.z + b[1] - t.z))
   for (const [dx, dz] of dirs) {
     if (await tryCol(p.x + dx, p.z + dz)) { log('reflex', `cut a step into the bank at ${p.x + dx},${p.z + dz} and climbed out`); return true }
   }
-  // no diggable bank: stand on a block placed in the water beside us
+  // no diggable bank: stand on a block placed in the water beside us - only where the cell has a face to click
+  // (open water all round has none: every direction answered "nothing solid to place against"), and then step onto
+  // it (the block alone left the bot floating beside it for four more minutes)
   const filler = inv.items(bot).find(i => /^(dirt|cobblestone|andesite|diorite|granite|tuff|cobbled_deepslate|netherrack|stone)$/.test(i.name))
-  if (filler) {
-    for (const [dx, dz] of dirs) {
-      const c = world.at(bot, p.x + dx, p.y, p.z + dz)
-      if (c && world.isWaterBlock(c)) {
-        try { await act.place(bot, { x: p.x + dx, y: p.y, z: p.z + dz }, filler.name, { sneak: false }) } catch {}
-        if (world.isSolid(world.at(bot, p.x + dx, p.y, p.z + dz))) { log('reflex', 'placed a block in the water to climb out'); return true }
-      }
+  if (!filler) return false
+  const faced = c => [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]].some(([ox, oy, oz]) => world.isSolid(world.at(bot, c.x + ox, c.y + oy, c.z + oz)))
+  for (const [dx, dz] of dirs) {
+    const c = { x: p.x + dx, y: p.y, z: p.z + dz }
+    const b = world.at(bot, c.x, c.y, c.z)
+    if (!b || !world.isWaterBlock(b) || !faced(c) || !world.isAirish(world.at(bot, c.x, c.y + 1, c.z)) || !world.isAirish(world.at(bot, c.x, c.y + 2, c.z))) continue
+    bot.clearControlStates() // (the tick's steering still held: the click must not drift)
+    // (a body left still in deep water sinks - and while this runs the tick is not watching the air: give up at once
+    //  if the head goes under, the tick takes it from there)
+    if (world.headInWater(bot)) return false
+    try { await act.place(bot, c, filler.name, { sneak: false, fromReflex: true, timeoutMs: 3000 }) } catch {}
+    if (!world.isSolid(world.at(bot, c.x, c.y, c.z))) continue
+    log('reflex', `placed a block in the water at ${c.x},${c.y},${c.z} to climb out`)
+    const t0 = Date.now()
+    while (Date.now() - t0 < 2500) {
+      steerTo({ x: c.x, y: c.y + 1, z: c.z }, { jump: true })
+      await new Promise(r => setTimeout(r, 100))
+      if (!world.feetInWater(bot) && bot.entity.onGround) break
     }
+    bot.clearControlStates()
+    return !world.feetInWater(bot)
   }
   return false
 }
@@ -196,6 +255,10 @@ function canDigInHere () {
     const b = world.at(bot, p.x, p.y - dy, p.z)
     if (!b || world.isWaterBlock(b) || world.isLavaBlock(b)) return false
     if (dy <= 3 && (!world.isSolid(b) || !world.NATURAL_RE.test(b.name) || b.hardness < 0 || b.hardness > 3)) return false
+    // never into a finished build: a castle floor of cobblestone is "natural" to the regex above, and the
+    // dig-in went through the finished castle wall (2026-09, 275,71,-253). Ask here, before choosing to dig
+    // in at all - act.digBlock refuses the block anyway, which would leave us in a half-dug hole.
+    if (dy <= 3 && require('./move').isProtected(b, 'dig')) return false
   }
   return !world.waterNear(bot, { x: p.x, y: p.y - 2, z: p.z }, 1, -1, 1) && !world.lavaNear(bot, { x: p.x, y: p.y - 2, z: p.z }, 1)
 }
@@ -209,7 +272,8 @@ async function digIn () {
   for (const dy of [1, 2, 3]) {
     const b = world.at(bot, p0.x, p0.y - dy, p0.z)
     if (!b || world.isAirish(b)) continue
-    try { await inv.equipFor(bot, b); await bot.dig(b, true) } catch {}
+    // (through act.digBlock: it refuses a finished build block - canDigInHere already chose ground without one)
+    await require('./act').digBlock(bot, b)
     const t0 = Date.now()
     while (Date.now() - t0 < 1500 && Math.floor(bot.entity.position.y) > p0.y - dy) {
       const pp = bot.entity.position
@@ -222,7 +286,7 @@ async function digIn () {
   // plug the hole above our head with whatever block we carry (the dirt we just dug)
   const top = { x: p0.x, y: Math.floor(bot.entity.position.y) + 2, z: p0.z }
   const filler = inv.items(bot).find(i => /^(dirt|cobblestone|andesite|diorite|granite|tuff|cobbled_deepslate|netherrack|sand|gravel|grass_block|coarse_dirt|stone)$/.test(i.name))
-  if (filler) { try { await require('./act').place(bot, top, filler.name, { faceHint: [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]] }) } catch {} }
+  if (filler) { try { await require('./act').place(bot, top, filler.name, { fromReflex: true, faceHint: [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]] }) } catch {} }
   log('reflex', `dug in at ${p0.x},${p0.y - 3},${p0.z}${filler ? '' : ' (nothing to plug the hole with)'}`)
 }
 
@@ -264,20 +328,24 @@ function fleeHeading (t) {
 }
 
 function tick () {
-  if (!enabled || !bot || !bot.entity || bot.health <= 0) return
-  if (busy) return
+  if (!bot || !bot.entity || bot.health <= 0) return
   const now = Date.now()
+  trackAir(now) // (always: an async reflex or a disabled loop still spends air)
+  if (!enabled || busy) return
   const me = bot.entity.position
 
   // 1. AIR
-  if (world.headInWater(bot)) { if (!submergedSince) submergedSince = now } else submergedSince = 0
   const underFor = submergedSince ? now - submergedSince : 0
-  const oxy = typeof bot.oxygenLevel === 'number' ? bot.oxygenLevel : 20
-  if (underFor > 2000 || (submergedSince && oxy < 14) || (active && active.kind === 'air')) {
+  const diving = dive ? diveHolds(now) : false
+  const broken = !!(dive && dive.broken && submergedSince)
+  // (short of air = our own clock under 70% of a breath; bot.oxygenLevel stuck at 5 fired this the instant the
+  //  head dipped - a bob while swimming at the surface was an emergency)
+  if (!diving && (underFor > 2000 || broken || (submergedSince && airMs < AIR_MS * 0.7) || (active && active.kind === 'air'))) {
     if (!submergedSince && active && active.kind === 'air') {
-      // head is out: finish on land or a stable surface
-      const feetWet = world.feetInWater(bot)
-      if (!feetWet && bot.entity.onGround) { floatSince = 0; return clearActive() }
+      // head is out: finish standing on something - dry land, or a solid floor under shallow water (a clay pier one
+      // below the surface, a river's shelf): the head is out and the body can't sink. Only floating is unfinished.
+      const under = world.at(bot, me.x, me.y - 0.2, me.z)
+      if (bot.entity.onGround && under && world.isSolid(under)) { floatSince = 0; return clearActive() }
       if (!floatSince) floatSince = now
       // floating for 3s without making land: the bank is too high to climb from the water (a pond
       // with 2-high sides drowned the bot at 4 hp) - cut a step into it
@@ -287,19 +355,28 @@ function tick () {
         return
       }
       if (now - active.since > 60000) { floatSince = 0; return clearActive() }
-      const t = findAir()
-      if (t && t.land) steerTo(t, { jump: true }); else { bot.setControlState('jump', true); bot.setControlState('forward', false) }
+      const t = findAir(true)
+      if (t) steerTo(t, { jump: true }); else { bot.setControlState('jump', true); bot.setControlState('forward', false) }
       return
     }
-    setActive('air', `under ${Math.round(underFor / 100) / 10}s oxy ${oxy}`)
+    setActive('air', `under ${Math.round(underFor / 100) / 10}s air ${Math.round(airMs / 100) / 10}s`)
     try { bot.pathfinder.setGoal(null) } catch {}
-    const above = world.at(bot, me.x, me.y + 2, me.z)
-    if (above && (world.isWaterBlock(above) || world.isAirish(above))) {
-      // straight up is open
+    // straight up to open air (water then air within 6)? Then only UP: steering toward the nearest air cell - the air
+    // over the bank - pressed the bot into the bank under water; it drifted sideways and down and drowned in 30s with
+    // open water overhead (2026-09-23). Sideways only when something blocks the way up.
+    let open = false
+    for (let dy = 2; dy <= 7; dy++) { const b = world.at(bot, me.x, me.y + dy, me.z); if (!b || (!world.isWaterBlock(b) && !world.isAirish(b))) break; if (world.isAirish(b)) { open = true; break } }
+    // ...unless UP makes no headway: falling water in a one-wide pit (dug for sand under the water line) pushes a
+    // swimmer down, and jumping in place drowned the bot a step from dry sand (2026-09-23). After 1.5s without
+    // rising, climb out sideways to land.
+    if (riseY == null || me.y > riseY + 0.25) { riseY = me.y; riseAt = now }
+    const stalled = now - riseAt > 1500
+    const land = open && stalled ? findAir(true) : null
+    if (open && !land) {
       bot.setControlState('jump', true)
-      const t = findAir()
-      if (t && Math.abs(t.x - Math.floor(me.x)) + Math.abs(t.z - Math.floor(me.z)) <= 3) steerTo(t, { jump: true })
-      else bot.setControlState('forward', false)
+      for (const k of ['forward', 'back', 'left', 'right', 'sneak']) bot.setControlState(k, false)
+    } else if (land) {
+      steerTo(land, { jump: true })
     } else {
       const t = findAir()
       if (t) steerTo(t, { jump: true }); else { bot.setControlState('jump', true); bot.setControlState('back', true) }
@@ -466,7 +543,7 @@ function install (b) {
     const hs = hostiles(8)
     lastHurtBy = hs.length ? hs[0].e : null
   })
-  bot.on('death', () => { active = null; busy = false; blocking = false; floatSince = 0; submergedSince = 0; fleeTarget = null; diedAt = Date.now() })
+  bot.on('death', () => { active = null; busy = false; blocking = false; floatSince = 0; submergedSince = 0; airMs = AIR_MS; if (dive) dive.broken = 'died'; fleeTarget = null; diedAt = Date.now() })
   // respawned into the dark: dig in on the spot before anything finds us
   bot.on('spawn', () => {
     if (!diedAt || Date.now() - diedAt > 15000) return
@@ -497,4 +574,8 @@ async function waitClear (maxMs = 120000) {
 }
 function setEnabled (on) { enabled = !!on; if (!on) clearActive() }
 
-module.exports = { install, active: isActive, info, nearestThreat, hostiles, waitClear, setEnabled, HOSTILE }
+// The skill's view of the air clock: time with the head under (since the last breath) and the air left.
+function underMs () { return submergedSince ? Date.now() - submergedSince : 0 }
+function airLeftMs () { return airMs }
+
+module.exports = { install, active: isActive, info, nearestThreat, hostiles, waitClear, setEnabled, findAir, HOSTILE, startDive, endDive, diveBroken, underMs, airLeftMs, AIR_MS, DIVE_HARD_MS }

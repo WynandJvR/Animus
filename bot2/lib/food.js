@@ -18,7 +18,7 @@ const FOOD_ANIMALS = /^(cow|mooshroom|pig|sheep|chicken|rabbit)$/
 
 function animals (bot, re, maxDist = 48) {
   const me = bot.entity.position
-  return Object.values(bot.entities).filter(e => e && e.name && re.test(e.name) && e.position && e.position.distanceTo(me) <= maxDist && !isBaby(e))
+  return Object.values(bot.entities).filter(e => e && e.name && re.test(e.name) && e.position && e.position.distanceTo(me) <= maxDist && !isBaby(e) && !(Date.now() - (unreachable.get(e.id) || 0) < 3 * 60000))
     .sort((a, b) => a.position.distanceTo(me) - b.position.distanceTo(me))
 }
 function isBaby (e) {
@@ -50,13 +50,21 @@ function noteMob (e) {
   })
 }
 
+// Animals we could not get to (another bank, behind a wall): skipped by animals() for a while. The chase drove the
+// pathfinder itself, and from inside the safehouse the planner never routes through the door - 2026-09-22 the bot
+// stood in the hut a whole morning "chasing" the same sheep, 30s at a time, with nothing logged.
+const unreachable = new Map() // entity id -> when
 async function killAnimal (bot, e, { maxMs = 30000 } = {}) {
   const t0 = Date.now()
+  if (move.insideHut(bot.entity.position.floored())) await move.crossDoor(bot, new goals.GoalNear(e.position.x, e.position.y, e.position.z, 2)).catch(() => {})
   await inv.equipWeapon(bot)
   let lastHit = 0
+  let best = Infinity; let bestAt = Date.now()
   while (e.isValid && Date.now() - t0 < maxMs) {
-    if (reflex.active()) { await reflex.waitClear(); continue }
+    if (reflex.active()) { await reflex.waitClear(); bestAt = Date.now(); continue }
     const d = e.position.distanceTo(bot.entity.position)
+    // no closer in 10s: it can't be reached from here - leave it
+    if (d < best - 0.5) { best = d; bestAt = Date.now() } else if (d > 3.3 && Date.now() - bestAt > 10000) { unreachable.set(e.id, Date.now()); log('food', `can't reach the ${e.name} ${Math.round(d)}b away - leaving it`); break }
     if (d > 3) {
       bot.pathfinder.setMovements(move.movementsFor(bot, { dig: false, place: false }))
       bot.pathfinder.setGoal(new goals.GoalFollow(e, 1.5), true)
@@ -108,6 +116,75 @@ async function huntFor (bot, itemName, n, ctx = {}) {
     }
     empty = 0
     // wool: shearing would be kinder but needs iron; a kill gives 1 wool
+    await killAnimal(bot, pick)
+  }
+  return true
+}
+
+// ---- wool ----------------------------------------------------------------------------------------
+// A sheep's "wool" byte: low nibble the colour, 0x10 set once shorn (until it eats grass again). Read by
+// name from the registry's metadata keys - the index moves between versions.
+const WOOL_RE = /_wool$/
+function sheepWool (bot, e) {
+  try {
+    const keys = world.data(bot).entitiesByName.sheep.metadataKeys || []
+    const i = keys.indexOf('wool')
+    const v = i >= 0 && e.metadata ? e.metadata[i] : null
+    return typeof v === 'number' ? { sheared: (v & 0x10) !== 0, colour: v & 0x0f } : null
+  } catch { return null }
+}
+const shornTried = new Map() // sheep entity id -> shearing it gave nothing (its byte said woolly: it is not)
+
+// Get `n` more wool (any colour: it is dyed for the build). Shears when we have them (1-3 wool a sheep, and the
+// sheep grows it back); without, a kill gives one. Shears are made only from iron nobody else is waiting on.
+async function woolFor (bot, n, ctx = {}) {
+  const woolCount = () => inv.count(bot, WOOL_RE)
+  const target = woolCount() + n
+  if (!inv.has(bot, 'shears') && base().bankCount('shears') > 0) await base().withdraw(bot, 'shears', 1).catch(() => 0)
+  // a real surplus of iron (armour and tools come first - the iron task spends it on those)
+  if (!inv.has(bot, 'shears') && inv.count(bot, 'iron_ingot') + base().bankCount('iron_ingot') >= 12) {
+    await craft().ensure(bot, 'shears', 1, Object.assign({}, ctx, { depth: (ctx.depth || 0) + 1 })).catch(() => false)
+  }
+  const t0 = Date.now()
+  let empty = 0
+  while (woolCount() < target) {
+    await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
+    if (ctx.shouldStop && ctx.shouldStop()) return false
+    if (Date.now() - t0 > 10 * 60000) return false
+    await reflex.waitClear()
+    const shears = inv.items(bot).find(i => i.name === 'shears')
+    const list = animals(bot, /^sheep$/, 48)
+    for (const e of list) noteMob(e)
+    const woolly = e => { const w = sheepWool(bot, e); return !shornTried.has(e.id) && !(w && w.sheared) }
+    const pick = shears ? (list.find(woolly) || list[0]) : list[0]
+    if (!pick) {
+      if (++empty > 4) { log('food', 'no sheep for wool nearby'); return false }
+      const anchor = mem.get().home || bot.entity.position
+      const known = (mem.get().mobs || {}).sheep ? mem.get().mobs.sheep.filter(p => world.dist2(p, anchor) < 200).sort((a, b) => world.dist2(a, bot.entity.position) - world.dist2(b, bot.entity.position))[0] : null
+      const fit = bot.health >= 12 && world.phase(bot) === 'day'
+      if (!fit) { log('food', `no sheep in sight and not fit to go looking (hp ${Math.round(bot.health)})`); return false }
+      if (known && empty === 1 && world.dist2(known, bot.entity.position) > 40) await move.travel(bot, known, { range: 10, shouldStop: ctx.shouldStop, label: 'to sheep' })
+      else await gather().explore(bot, () => false, { shouldStop: () => (ctx.shouldStop && ctx.shouldStop()) || animals(bot, /^sheep$/, 48).length > 0, label: 'animals', legs: 2 })
+      continue
+    }
+    empty = 0
+    if (shears && woolly(pick)) {
+      const before = woolCount()
+      const r = await move.goTo(bot, new goals.GoalFollow(pick, 2), { timeoutMs: 20000, stuckMs: 6000, dig: false, place: false, label: 'to sheep' })
+      if (!r.ok && pick.position.distanceTo(bot.entity.position) > 3) { shornTried.set(pick.id, Date.now()); continue }
+      try {
+        await bot.equip(shears, 'hand')
+        await bot.lookAt(pick.position.offset(0, 0.8, 0), true)
+        bot.activateEntity(pick)
+      } catch {}
+      await move.sleep(600)
+      await act.collectDrops(bot, { radius: 6, maxMs: 5000 })
+      if (woolCount() <= before) shornTried.set(pick.id, Date.now())
+      else log('food', `sheared a sheep: +${woolCount() - before} wool`)
+      continue
+    }
+    // no shears (or every sheep here is shorn and we still have none to spare): a kill gives one
+    if (shears) { log('food', 'every sheep in sight is shorn'); return woolCount() > target - n }
     await killAnimal(bot, pick)
   }
   return true
@@ -287,4 +364,4 @@ async function cookAll (bot, ctx = {}) {
   }
 }
 
-module.exports = { huntFor, stockFood, cookAll, animals, killAnimal, huntable, fishFor, harvestCrops, FOOD_ANIMALS }
+module.exports = { huntFor, woolFor, sheepWool, stockFood, cookAll, animals, killAnimal, huntable, fishFor, harvestCrops, FOOD_ANIMALS }

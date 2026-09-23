@@ -94,21 +94,31 @@ function buildNeeds (bot) {
   try { const st = require('./build').status(bot); return new Set(st ? Object.keys(st.need).filter(k => st.need[k] > 0) : []) } catch { return new Set() }
 }
 
-async function pickFuel (bot, itemsToSmelt, { allowWood = true, noCharcoal = false } = {}) {
+// THE rule for what may burn. pickFuel promises fuel and putFuel loads it: with two rules they disagreed (pickFuel
+// counted the build's oak planks, putFuel refused them) and raw meat sat in a cold furnace while the bot went hungry,
+// 2026-09-22. Coal always; wood out of the build's surplus - unless the smelt is FOOD: a meal outranks a plank.
+function fuelOK (bot, name, { survival = false } = {}) {
+  if (name === 'coal' || name === 'charcoal') return true
+  if (!/_(planks|log|stem)$/.test(name) || /^stripped_/.test(name)) return false
+  if (survival) return true
+  const needed = buildNeeds(bot)
+  return woodSurplus(bot) > 0 && !needed.has(name) && !needed.has(name.replace(/_(log|planks)$/, '_log')) && !needed.has(name.replace(/_(log|planks)$/, '_planks'))
+}
+
+// noGather: the background smelt queue - fuel from the bank and the build's surplus wood only, never a walk to
+// the trees or a wait on a charcoal batch (what it cannot cover, it does not load)
+async function pickFuel (bot, itemsToSmelt, { allowWood = true, noCharcoal = false, noGather = false, survival = false } = {}) {
   const need = Math.ceil(itemsToSmelt)
   let coal = inv.count(bot, 'coal') + inv.count(bot, 'charcoal')
   if (coal * 8 >= need) return true
   // bulk (a castle's worth of stone): no waiting on a charcoal batch - coal from the bank, then wood the
   // build does not need, as planks (charcoal-first stalled the whole brick pipeline behind one furnace)
-  if (need > 24 && allowWood) {
+  if ((need > 24 || noGather) && allowWood) {
     const b = base()
     if (b.bankCount('coal') + b.bankCount('charcoal') > 0) { await b.withdraw(bot, 'coal', Math.ceil(need / 8)).catch(() => 0); await b.withdraw(bot, 'charcoal', Math.ceil(need / 8)).catch(() => 0) }
     coal = inv.count(bot, 'coal') + inv.count(bot, 'charcoal')
     if (coal * 8 >= need) return true
-    const needed = buildNeeds(bot)
-    const surplus = woodSurplus(bot)
-    // wood burns only out of the castle's surplus
-    const woodOk = n => surplus > 0 && !needed.has(n) && !needed.has(n.replace(/_(log|planks)$/, '_log')) && !needed.has(n.replace(/_(log|planks)$/, '_planks'))
+    const woodOk = n => fuelOK(bot, n, { survival })
     const plankHeld = () => inv.items(bot).filter(i => /_planks$/.test(i.name) && woodOk(i.name)).reduce((t, i) => t + i.count, 0)
     const short = () => need - coal * 8 - plankHeld() * 1.5
     const bank = b.bankCounts()
@@ -124,6 +134,7 @@ async function pickFuel (bot, itemsToSmelt, { allowWood = true, noCharcoal = fal
     if (short() <= 0) return true
     if (coal * 8 + plankHeld() * 1.5 > 0) return true // some fuel: smelt what it covers
   }
+  if (noGather) return false
   // a big batch: coal from the bank, else turn logs into charcoal first (a log burnt as planks
   // smelts 6 items; the same log as charcoal smelts 8 and a stack of it fits one slot)
   if (need > 24 && !noCharcoal) {
@@ -142,11 +153,11 @@ async function pickFuel (bot, itemsToSmelt, { allowWood = true, noCharcoal = fal
   }
   // planks burn 1.5 items each
   if (allowWood) {
-    const plankItems = inv.items(bot).filter(i => /_planks$/.test(i.name)).reduce((s, i) => s + i.count, 0)
+    const plankItems = inv.items(bot).filter(i => /_planks$/.test(i.name) && fuelOK(bot, i.name, { survival })).reduce((s, i) => s + i.count, 0)
     if (coal * 8 + plankItems * 1.5 >= need) return true
-    const logs = craft().logCount(bot)
+    const logs = inv.items(bot).filter(i => craft().isLogName(i.name) && fuelOK(bot, i.name, { survival })).reduce((s, i) => s + i.count, 0)
     if (coal * 8 + (plankItems + logs * 4) * 1.5 >= need && logs > 0) {
-      const w = inv.items(bot).find(i => craft().isLogName(i.name))
+      const w = inv.items(bot).find(i => craft().isLogName(i.name) && fuelOK(bot, i.name, { survival }))
       if (w) await craft().ensure(bot, craft().plankOfLog(w.name), Math.min(64, plankItems + Math.ceil((need - coal * 8) / 1.5)), { noWithdraw: true })
       return true
     }
@@ -161,14 +172,12 @@ async function pickFuel (bot, itemsToSmelt, { allowWood = true, noCharcoal = fal
   return false
 }
 
-async function putFuel (bot, furnace, itemsToSmelt) {
+async function putFuel (bot, furnace, itemsToSmelt, { survival = false } = {}) {
   let remaining = itemsToSmelt
   const cur = furnace.fuelItem()
   if (cur) remaining -= cur.count * fuelValue(cur.name)
   if (remaining <= 0) return true
-  const needed = buildNeeds(bot)
-  const spare = woodSurplus(bot)
-  const order = ['coal', 'charcoal'].concat(spare > 0 ? inv.items(bot).filter(i => /_planks$/.test(i.name) && !needed.has(i.name)).map(i => i.name) : [])
+  const order = ['coal', 'charcoal'].concat(inv.items(bot).filter(i => /_planks$/.test(i.name) && fuelOK(bot, i.name, { survival })).map(i => i.name))
   for (const n of [...new Set(order)]) {
     // one stack at a time, looked up fresh each time (a remembered item object went stale after the withdraws:
     // "Can't find birch_planks in slots", "reading 'type' of null")
@@ -203,7 +212,8 @@ async function smeltItem (bot, output, count, ctx = {}) {
   if (inv.count(bot, input) < count) {
     if (!await craft().ensure(bot, input, count, ctx)) return false
   }
-  if (!await pickFuel(bot, count, { noCharcoal: output === 'charcoal' })) { log('smelt', `no fuel for ${count} ${output}`); return false }
+  const survival = Object.values(inv.COOKED_OF).includes(output) // cooking a meal may burn the build's wood
+  if (!await pickFuel(bot, count, { noCharcoal: output === 'charcoal', survival })) { log('smelt', `no fuel for ${count} ${output}`); return false }
   const nFurn = Math.max(1, Math.min(4, Math.ceil(count / 16)))
   let furns = furnacesNear(bot, 48)
   // furnaces live at home: away from it, walk back rather than leave a trail of furnaces across the map
@@ -233,7 +243,7 @@ async function smeltItem (bot, output, count, ctx = {}) {
       if (f.outputItem()) await f.takeOutput().catch(() => {})
       const inItem = f.inputItem()
       if (inItem && inItem.name !== input) { f.close(); continue }
-      await putFuel(bot, f, left)
+      if (!await putFuel(bot, f, left, { survival }) && !f.fuelItem()) { log('smelt', `no fuel that may burn for ${output}`); continue }
       const it = inv.items(bot).find(i => i.name === input)
       if (it) { await f.putInput(it.type, null, Math.min(left, it.count)); loaded += Math.min(left, it.count) }
     } catch (e) { log('smelt', `loading furnace failed: ${e.message}`) } finally { try { f.close() } catch {} }
@@ -264,7 +274,7 @@ async function smeltItem (bot, output, count, ctx = {}) {
 }
 
 // Background smelting for bulk jobs: load every furnace at home with `input`, return at once.
-async function loadFurnaces (bot, input, maxItems) {
+async function loadFurnaces (bot, input, maxItems, { anyWood = false } = {}) {
   const home = mem.get().home
   let furns = home ? world.findBlocks(bot, /^furnace$/, { maxDistance: 16, count: 24, point: new Vec3(home.x, home.y, home.z) }) : furnacesNear(bot, 32)
   // the furnace inside the safehouse stays free for charcoal (torches) and cooking when there are others
@@ -286,7 +296,7 @@ async function loadFurnaces (bot, input, maxItems) {
       const room = 64 - (cur ? cur.count : 0)
       const k = Math.min(room, have, maxItems - loaded)
       if (k <= 0) continue
-      const fuelled = await putFuel(bot, f, k + (cur ? cur.count : 0))
+      const fuelled = await putFuel(bot, f, k + (cur ? cur.count : 0), { survival: anyWood })
       if (!fuelled && !f.fuelItem()) continue
       const it = inv.items(bot).find(i => i.name === input)
       await f.putInput(it.type, null, k)
@@ -302,18 +312,39 @@ async function loadFurnaces (bot, input, maxItems) {
   return loaded
 }
 const inFlightLoads = []
-const SMELTS_TO = { sand: 'glass', red_sand: 'glass', cobblestone: 'stone', raw_iron: 'iron_ingot' }
+
+// Charcoal from logs cut FOR fuel. They were gathered to burn, so the build's wood reservation does not apply:
+// counted against it, 32 fresh logs were "the next layers' wood", nothing was ever spare, and 66 clay balls waited
+// in the chest for a fire that never came (2026-09-23). One log in seven, as planks, lights the rest (a log's planks
+// smelt 6); the charcoal then keeps the kiln going. Loaded in the background like any bulk smelt.
+async function burnForCharcoal (bot, logName, n) {
+  const k = Math.min(n, inv.count(bot, logName))
+  if (k < 2) return 0
+  const lighters = Math.max(1, Math.ceil(k / 7))
+  if (!(inv.count(bot, 'coal') + inv.count(bot, 'charcoal'))) await craft().plankUp(bot, logName, lighters).catch(() => false)
+  const loaded = await loadFurnaces(bot, logName, inv.count(bot, logName), { anyWood: true })
+  if (loaded) log('smelt', `burning ${loaded} ${logName} into charcoal (cut for fuel)`)
+  return loaded
+}
+// what an input comes out of the furnace as: the one smelting table (craft.SMELT, output -> input) read backwards
+// (a second hand-kept table here knew four inputs, so bricks and cracked bricks never counted as cooking)
+function smeltsTo (input) {
+  if (input === 'red_sand') return 'glass'
+  if (craft().isLogName(input)) return 'charcoal'
+  for (const [out, inp] of Object.entries(craft().SMELT)) if (inp === input) return out
+  return null
+}
 // items of `output` still cooking in the home furnaces (from loads this session, until they should be done)
 function inFlight (output) {
   const now = Date.now()
   for (let i = inFlightLoads.length - 1; i >= 0; i--) if (inFlightLoads[i].until < now) inFlightLoads.splice(i, 1)
-  return inFlightLoads.filter(l => SMELTS_TO[l.input] === output).reduce((t, l) => t + l.n, 0)
+  return inFlightLoads.filter(l => smeltsTo(l.input) === output).reduce((t, l) => t + l.n, 0)
 }
 // collected output is stock now, no longer in flight
 function landed (output, n) {
   for (const l of inFlightLoads) {
     if (n <= 0) break
-    if (SMELTS_TO[l.input] !== output) continue
+    if (smeltsTo(l.input) !== output) continue
     const k = Math.min(n, l.n); l.n -= k; n -= k
   }
   for (let i = inFlightLoads.length - 1; i >= 0; i--) if (inFlightLoads[i].n <= 0) inFlightLoads.splice(i, 1)
@@ -334,8 +365,9 @@ async function refuelFurnaces (bot) {
       if (f.outputItem()) await f.takeOutput().catch(() => {})
       const input = f.inputItem()
       if (input && !f.fuelItem()) {
-        if (!await pickFuel(bot, input.count)) { log('smelt', 'no fuel for the cold furnaces'); break }
-        if (await putFuel(bot, f, input.count)) fed++
+        const survival = !!inv.COOKED_OF[input.name] // raw food waiting in a cold furnace is a meal, not the build's
+        if (!await pickFuel(bot, input.count, { survival })) { log('smelt', 'no fuel for the cold furnaces'); break }
+        if (await putFuel(bot, f, input.count, { survival })) fed++
       }
     } catch (e) { log('smelt', `refuel failed: ${e.message}`) } finally { try { f.close() } catch {} }
   }
@@ -357,4 +389,4 @@ async function collectFurnaces (bot) {
   return got
 }
 
-module.exports = { inFlight, woodSurplus, smeltItem, loadFurnaces, collectFurnaces, refuelFurnaces, placeFurnace, furnacesNear, pickFuel, fuelValue, buildNeeds }
+module.exports = { burnForCharcoal, inFlight, smeltsTo, woodSurplus, smeltItem, loadFurnaces, collectFurnaces, refuelFurnaces, placeFurnace, furnacesNear, pickFuel, fuelValue, buildNeeds }
