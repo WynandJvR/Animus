@@ -75,6 +75,15 @@ async function dig (bot, pos, { force = false, own = false, allowZones = [], tim
       const r = await move.goTo(bot, goal, { timeoutMs: 20000, allowZones, label: 'reach ' + b.name })
       if (!r.ok && !reach(bot, pos, 5)) return false
     }
+    // never the block we stand on over a drop that hurts: the builder dug the "wrong" block out of a plaza cell with the
+    // bot standing on it, over the slope, and it fell 21 blocks (2026-09-24). Step off first; nowhere to step, no dig.
+    if (holdsUsUp(bot, pos) && fallBelow(bot, pos) > world.SAFE_DROP) {
+      const off = stepOff(bot, pos)
+      if (!off) { log('act', `won't dig ${b.name} at ${move.fmt(pos)} - I stand on it over a ${fallBelow(bot, pos)}-block drop`); return false }
+      await move.goTo(bot, new goals.GoalBlock(off.x, off.y, off.z), { timeoutMs: 8000, dig: false, place: false, label: 'off the block' })
+      if (holdsUsUp(bot, pos)) return false
+      continue
+    }
     const td = Date.now()
     await inv.equipFor(bot, b)
     try {
@@ -88,6 +97,42 @@ async function dig (bot, pos, { force = false, own = false, allowZones = [], tim
     if (!after || after.name !== b.name) return true
   }
   return false
+}
+
+// Would a block at `pos` leave the cell we stand in with no way out - every side shut at the feet or the head? (only a
+// block beside us, at feet or head height, can do that; a way up needs blocks to climb on, so it doesn't count)
+function sealsUsIn (bot, pos) {
+  const f = bot.entity.position.floored()
+  const beside = Math.abs(pos.x - f.x) + Math.abs(pos.z - f.z) === 1 && (pos.y === f.y || pos.y === f.y + 1)
+  if (!beside) return false
+  const shut = (x, y, z) => (x === pos.x && y === pos.y && z === pos.z) || world.isSolid(world.at(bot, x, y, z))
+  return [[1, 0], [-1, 0], [0, 1], [0, -1]].every(([dx, dz]) => shut(f.x + dx, f.y, f.z + dz) || shut(f.x + dx, f.y + 1, f.z + dz))
+}
+
+// Is `pos` the only thing under our feet? (the cells the hitbox rests on, one below the feet)
+function holdsUsUp (bot, pos) {
+  const p = bot.entity.position; const fy = Math.floor(p.y - 0.01) // (the block the feet rest on: a full block or a slab's cell)
+  if (pos.y !== fy) return false
+  const under = []
+  for (const x of [Math.floor(p.x - 0.3), Math.floor(p.x + 0.3)]) for (const z of [Math.floor(p.z - 0.3), Math.floor(p.z + 0.3)]) {
+    if (!under.some(c => c.x === x && c.z === z)) under.push({ x, z })
+  }
+  if (!under.some(c => c.x === pos.x && c.z === pos.z)) return false
+  return !under.some(c => !(c.x === pos.x && c.z === pos.z) && world.isSolid(world.at(bot, c.x, fy, c.z)))
+}
+// How far we would fall with `pos` gone: the air under it down to the next floor.
+function fallBelow (bot, pos) {
+  let k = 1
+  for (; k <= 64; k++) { const b = world.at(bot, pos.x, pos.y - k, pos.z); if (!b || world.isLavaBlock(b)) return Infinity; if (world.isWaterBlock(b)) return 0; if (b.boundingBox === 'block') break }
+  return k
+}
+// A neighbouring cell to stand on that is not over `pos`.
+function stepOff (bot, pos) {
+  const fy = pos.y + 1
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+    for (const dy of [0, 1, -1]) { const x = pos.x + dx; const y = fy + dy; const z = pos.z + dz; if (world.standable(bot, x, y, z)) return { x, y, z } }
+  }
+  return null
 }
 
 // Blocks never clicked as the thing to place against: clicking them opens/uses them, or (carpet, pot,
@@ -143,7 +188,7 @@ async function centre (bot) {
 //             until its action returns, so waiting for the reflex to clear - or walking, which waits the same way -
 //             is waiting on ourselves: each such place hung 120s (the bot floated in a river for 8 minutes,
 //             2026-09-22). Implies noWalk.
-async function place (bot, pos, itemName, { faceHint = null, plans = null, accept = null, allowZones = [], timeoutMs = 20000, sneak = true, tall = false, noWalk = false, fromReflex = false } = {}) {
+async function place (bot, pos, itemName, { faceHint = null, plans = null, accept = null, allowZones = [], timeoutMs = 20000, sneak = true, tall = false, noWalk = false, fromReflex = false, keepExit = false } = {}) {
   if (fromReflex) noWalk = true
   const target = new Vec3(pos.x, pos.y, pos.z)
   const placed = accept || (b => b.name === itemName)
@@ -180,6 +225,15 @@ async function place (bot, pos, itemName, { faceHint = null, plans = null, accep
       await move.goTo(bot, new goals.GoalInvert(grows.length ? new goals.GoalNear(pos.x, pos.y, pos.z, 1.8) : new goals.GoalBlock(pos.x, pos.y, pos.z)), { timeoutMs: 5000, dig: false, place: false })
       if (clash()) await centre(bot)
       if (clash()) { log('act', `place ${itemName} at ${move.fmt(pos)}: I stand where it (or a pane/fence beside it) would be`); return false }
+    }
+    // the builder (keepExit): never the block that shuts the last way out of the cell we stand in - it filled a
+    // cathedral wall round its own feet and the bot stood walled into a one-wide shaft, sky four blocks up and nothing
+    // to climb on, for twenty minutes (2026-09-25). The bunker, the wall-in, the mine's seal mean to shut us in.
+    if (keepExit && sealsUsIn(bot, pos)) {
+      if (noWalk) return false
+      const f = bot.entity.position.floored()
+      await move.goTo(bot, new goals.GoalInvert(new goals.GoalNear(f.x, f.y, f.z, 1)), { timeoutMs: 6000, dig: false, place: false, label: 'out of the pocket' })
+      if (sealsUsIn(bot, pos)) { log('act', `place ${itemName} at ${move.fmt(pos)}: it would wall me in - left for later`); return false }
     }
     if (!reach(bot, pos, 4.4)) {
       if (noWalk) return false
@@ -253,4 +307,4 @@ async function collectDrops (bot, { radius = 8, maxMs = 15000 } = {}) {
   return picked
 }
 
-module.exports = { dig, digBlock, place, collectDrops, droppedItems, reach, inBody, sleep, ticks, PLANT_RE, NO_REF_RE }
+module.exports = { sealsUsIn, holdsUsUp, fallBelow, stepOff, dig, digBlock, place, collectDrops, droppedItems, reach, inBody, sleep, ticks, PLANT_RE, NO_REF_RE }

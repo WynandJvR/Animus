@@ -38,6 +38,10 @@ function knownResource (kind, from, { maxFromHome = 200 } = {}) {
 // Not in a protected zone - and not in the ground under one either: stone under the basilica was picked, refused by
 // the dig, and picked again every 20s for minutes (2026-09-23). A zone's columns are off limits to the depth.
 function outOfZones (b) { return !move.inZone(b.position, 2) && !move.inZone({ x: b.position.x, y: b.position.y + 12, z: b.position.z }, 1) }
+// A tree the orchard grew: ours to cut (and replant). Every other zone keeps the axe out; the orchard's zone kept it out
+// of its own trees too - "chop oak_log: no trees found" beside three grown ones, two sticks never made (2026-09-24).
+function orchardTree (b) { const z = move.inZone(b.position, 0); return !!z && z.label === 'orchard' && !move.inZone(b.position, 2, ['orchard']) }
+function treeOK (b) { return outOfZones(b) || orchardTree(b) }
 
 // ---- trees ------------------------------------------------------------------------------
 function trunkBase (bot, b) {
@@ -72,7 +76,7 @@ async function chop (bot, re, n, ctx = {}) {
     if (Date.now() - t0 > 20 * 60000) { log('gather', `chop ${itemName}: 20 min budget spent`); return false }
     await reflex.waitClear()
     if (inv.freeSlots(bot) <= 1) await base().makeRoom(bot, 3)
-    const logs = world.findBlocks(bot, re, { maxDistance: 64, count: 40, filter: b => outOfZones(b) })
+    const logs = world.findBlocks(bot, re, { maxDistance: 64, count: 40, filter: b => treeOK(b) })
     let trunk = null
     for (const b of logs) {
       const bp = trunkBase(bot, b)
@@ -81,6 +85,21 @@ async function chop (bot, re, n, ctx = {}) {
       trunk = bp; break
     }
     if (!trunk) {
+      // everything in sight before remembered spots or walking rings: the client holds every chunk the server sent
+      // (~10 chunks round us), as a player sees them. A forest 150 blocks west of home was in view the whole time the
+      // 64-block search said "no trees found" and the operator had to point it out (2026-09-24).
+      if (emptyScans === 0) {
+        const seen = (await world.scanBlocks(bot, re, { maxDistance: world.sightReach(bot), count: 40, filter: b => treeOK(b) && isNaturalTree(bot, trunkBase(bot, b)) }))
+          .sort((a, b) => world.dist3(a.position, bot.entity.position) - world.dist3(b.position, bot.entity.position))[0]
+        if (seen && world.dist2(seen.position, bot.entity.position) > 20) {
+          noteResource(itemName, seen.position)
+          log('gather', `no ${itemName} close by - the nearest in sight is at ${move.fmt(seen.position)} (${Math.round(world.dist2(seen.position, bot.entity.position))}b)`)
+          emptyScans++
+          const r = await move.travel(bot, seen.position, { range: 8, shouldStop: ctx.shouldStop, label: 'to trees' })
+          if (r.ok) emptyScans = 0
+          continue
+        }
+      }
       if (++emptyScans > 4) { log('gather', `chop ${itemName}: no trees found after exploring`); return false }
       const known = knownResource(itemName, bot.entity.position)
       if (known && world.dist2(known, bot.entity.position) > 40 && emptyScans === 1) {
@@ -94,13 +113,15 @@ async function chop (bot, re, n, ctx = {}) {
     }
     emptyScans = 0
     noteResource(itemName, trunk)
-    const got = await fellTree(bot, trunk, re)
+    const got = await fellTree(bot, trunk, re, { leaves: !!ctx.leaves, allowZones: move.inZone(trunk, 0) ? ['orchard'] : [] })
     if (!got) await move.sleep(300)
   }
   return true
 }
 
-async function fellTree (bot, basePos, re) {
+// opts.leaves: clear the tree's own leaves too (they drop the saplings the orchard grows from; wild leaves left to decay
+// drop them after we have gone). opts.allowZones: the orchard's trees stand in its zone.
+async function fellTree (bot, basePos, re, { leaves = false, allowZones = [] } = {}) {
   const before = inv.count(bot, b => re.test(b))
   // stand next to the trunk
   const r = await move.goTo(bot, new goals.GoalNear(basePos.x, basePos.y, basePos.z, 2), { timeoutMs: 40000, label: 'to tree' })
@@ -124,7 +145,16 @@ async function fellTree (bot, basePos, re) {
         if (!await towerUp(bot)) break
       }
     }
-    await act.dig(bot, p, { timeoutMs: 15000 })
+    await act.dig(bot, p, { timeoutMs: 15000, allowZones })
+  }
+  if (leaves && column.length) {
+    // the crown within reach, from where we stand: natural leaves only (persistent ones are someone's build)
+    const top = column[column.length - 1]
+    const lv = world.findBlocks(bot, world.LEAF_RE, { maxDistance: 4.5, count: 80, point: bot.entity.position.offset(0, 1.6, 0),
+      filter: b => { try { return !b.getProperties().persistent && world.dist3(b.position, top) <= 4 } catch { return false } } })
+    let n = 0
+    for (const b of lv) { if (act.reach(bot, b.position, 4.5) && await act.dig(bot, b.position, { timeoutMs: 3000, noWalk: true, allowZones })) n++ }
+    if (n) log('gather', `cleared ${n} leaves for saplings`)
   }
   // come back down if we climbed
   await act.collectDrops(bot, { radius: 7, maxMs: 10000 })
@@ -132,7 +162,7 @@ async function fellTree (bot, basePos, re) {
   const sap = inv.items(bot).find(i => i.name.endsWith('_sapling') && basePos && i.name.startsWith(String(re).replace(/^\/\^|_log\$\/$/g, '')))
   if (sap) {
     const soil = bot.blockAt(basePos.offset(0, -1, 0)); const cell = bot.blockAt(basePos)
-    if (soil && /^(dirt|grass_block|podzol|coarse_dirt|rooted_dirt)$/.test(soil.name) && cell && world.isAirish(cell)) await act.place(bot, basePos, sap.name, { faceHint: [[0, -1, 0]] })
+    if (soil && /^(dirt|grass_block|podzol|coarse_dirt|rooted_dirt)$/.test(soil.name) && cell && world.isAirish(cell)) await act.place(bot, basePos, sap.name, { faceHint: [[0, -1, 0]], allowZones })
   }
   const got = inv.count(bot, b => re.test(b)) - before
   if (got > 0) log('gather', `felled a tree at ${move.fmt(basePos)}: +${got} logs`)
@@ -161,6 +191,62 @@ async function towerUp (bot) {
 }
 
 // ---- surface blocks and exposed ores ------------------------------------------------------
+// THE rule for a block worth going to - the scan here, the far look, the explore's "found some" test and the survey
+// all use it. With the explore on a looser rule (any sand in sight: the waterline, buried) every leg ended at once on
+// sand this scan refuses, and "no reachable sand around" left the glass panes - and the house - waiting (2026-09-23).
+// THE HOME GROUNDS: the safehouse, its furnace bank (rings out to 12 from the room) and the farm by it - the surface
+// there is the base, not a quarry. The nearest dirt to a bot at home is its own yard: scaffold dirt and the farm's own
+// hole-filling were dug from beside the farm until a pit 12 x 10 and 7 deep lay against the plot, the terrace and the
+// furnace bank gone into it (2026-09-24). Underground (a mine under the yard) is not the surface.
+function onGrounds (p) {
+  const home = mem.get().home
+  if (!home || p.y < home.y - 6) return false
+  const hp = mem.get().hutPlan
+  const i = hp && hp.interior ? hp.interior : { x1: home.x - 2, x2: home.x + 2, z1: home.z - 2, z2: home.z + 2 }
+  const R = 2 * require('./hut').BANK_RINGS + 1 // the furnace bank's last ring and a step past it
+  if (p.x >= i.x1 - R && p.x <= i.x2 + R && p.z >= i.z1 - R && p.z <= i.z2 + R) return true
+  const f = mem.get().farm
+  const a = f && require('./farm').area ? require('./farm').area(f) : null
+  return !!a && p.x >= a.x1 - 2 && p.x <= a.x2 + 2 && p.z >= a.z1 - 2 && p.z <= a.z2 + 2
+}
+
+function takeable (bot, b) {
+  return outOfZones(b) && !onGrounds(b.position) && world.hasAirNeighbour(bot, b.position) &&
+    (!/^(dirt|grass_block|sand|gravel)$/.test(b.name) || (world.isAirish(world.at(bot, b.position.x, b.position.y + 1, b.position.z)) && !world.lavaNear(bot, b.position, 2))) &&
+    // (sand, gravel and clay live beside water: for them the rule is dry standing ground, not dry neighbours)
+    // (no block with water beside or over it - sand included: a sand pit dug under the water line at the river filled
+    //  with falling water and the bot drowned in it, 2026-09-23; clay has its own skill)
+    // (refined: water beside it at its own level is only the shore - taking the beach's top layer leaves a puddle;
+    //  water over it or beside it a level up is what pours into the hole. The strict rule left no sand on any beach)
+    !world.waterNear(bot, b.position, 1, 1, 1) && !world.isWaterBlock(world.at(bot, b.position.x, b.position.y + 1, b.position.z)) &&
+    (!world.waterNear(bot, b.position, 1, 0, 0) || /^(sand|gravel|red_sand)$/.test(b.name)) && !world.lavaNear(bot, b.position, 1) && standableNear(bot, b.position)
+}
+
+// What a player notices on the way: sand, gravel and clay in view, remembered where it can be taken (the gather's own
+// rules), so a later need walks straight there instead of searching. 150 blocks of forest round the Nordic site had
+// no sand while the trek there had passed beaches (2026-09-23). Called after each travel leg; runs in the background,
+// in slices, one survey at a time.
+const SURVEY = [
+  { kind: 'sand', re: /^sand$/, ok: (bot, b) => takeable(bot, b) },
+  { kind: 'gravel', re: /^gravel$/, ok: (bot, b) => takeable(bot, b) },
+  { kind: 'clay', re: /^clay$/, ok: (bot, b) => require('./clay').claySought(bot, b.position) },
+  // woods, by species (noted under the log's own name): a forest 150 blocks past the site was never looked at while
+  // the searches round home found nothing (2026-09-24)
+  { kind: null, re: /^(oak|spruce|birch|jungle|acacia|cherry|dark_oak|mangrove|pale_oak)_log$/, ok: (bot, b) => treeOK(b) && isNaturalTree(bot, trunkBase(bot, b)) }
+]
+let surveying = false
+function survey (bot) {
+  if (surveying || !bot.entity) return
+  surveying = true
+  const run = async () => {
+    for (const s of SURVEY) {
+      const b = (await world.scanBlocks(bot, s.re, { maxDistance: 48, count: 1, filter: x => s.ok(bot, x) }))[0]
+      if (b) noteResource(s.kind || b.name, b.position)
+    }
+  }
+  run().catch(() => {}).finally(() => { surveying = false })
+}
+
 async function mine (bot, itemName, g, n, ctx = {}) {
   const target = inv.count(bot, itemName) + n
   // big stone/ore orders go underground
@@ -171,18 +257,8 @@ async function mine (bot, itemName, g, n, ctx = {}) {
   let emptyScans = 0
   const t0 = Date.now()
   const refused = new Set() // blocks that would not dig this call: never the same one twice
-  // THE rule for a block worth going to - the scan here, the far look and the explore's "found some" test all use it.
-  // With the explore on a looser rule (any sand in sight: the waterline, buried) every leg ended at once on sand this
-  // scan refuses, and "no reachable sand around" left the glass panes - and the house - waiting (2026-09-23).
-  const takeable = b => outOfZones(b) && world.hasAirNeighbour(bot, b.position) &&
-        (!/^(dirt|grass_block|sand|gravel)$/.test(b.name) || (world.isAirish(world.at(bot, b.position.x, b.position.y + 1, b.position.z)) && !world.lavaNear(bot, b.position, 2))) &&
-        // (sand, gravel and clay live beside water: for them the rule is dry standing ground, not dry neighbours)
-        // (no block with water beside or over it - sand included: a sand pit dug under the water line at the river filled
-        //  with falling water and the bot drowned in it, 2026-09-23; clay has its own skill)
-        // (refined: water beside it at its own level is only the shore - taking the beach's top layer leaves a puddle;
-        //  water over it or beside it a level up is what pours into the hole. The strict rule left no sand on any beach)
-        !world.waterNear(bot, b.position, 1, 1, 1) && !world.isWaterBlock(world.at(bot, b.position.x, b.position.y + 1, b.position.z)) &&
-        (!world.waterNear(bot, b.position, 1, 0, 0) || /^(sand|gravel|red_sand)$/.test(b.name)) && !world.lavaNear(bot, b.position, 1) && standableNear(bot, b.position)
+  const triedKnown = new Set() // remembered spots walked to this call
+  let atKnown = null // the remembered spot we just walked to: nothing takeable there now means forget it
   while (inv.count(bot, itemName) < target) {
     await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
     if (ctx.shouldStop && ctx.shouldStop()) return false
@@ -190,7 +266,7 @@ async function mine (bot, itemName, g, n, ctx = {}) {
     await reflex.waitClear()
     if (inv.freeSlots(bot) <= 1) await base().makeRoom(bot, 3)
     const me = bot.entity.position
-    const cands = world.findBlocks(bot, g.blocks, {
+    const cands = await world.scanBlocks(bot, g.blocks, {
       maxDistance: 40,
       // loose ground is mostly buried: the nearest 30 dirt blocks were all underground and the surface never
       // came up - look at more of them
@@ -199,14 +275,15 @@ async function mine (bot, itemName, g, n, ctx = {}) {
       // (loose ground blocks only with their top open to the sky-side air - the surface, not the bottom of a pit -
       //  and no lava within 2: a pit dug toward a lava pocket killed the bot. Judged by the block, never by our
       //  own height: standing on the castle wall the old rule rejected every dirt block on the ground)
-      filter: b => takeable(b) && Math.abs(b.position.y - me.y) < 20
+      filter: b => takeable(bot, b) && Math.abs(b.position.y - me.y) < 20
     })
     if (!cands.length) {
       log('gather', `no exposed ${itemName} within reach of standable ground nearby`)
+      if (atKnown) { forgetResource(itemName, atKnown); log('gather', `the ${itemName} remembered at ${move.fmt(atKnown)} is gone - forgotten`); atKnown = null }
       if (itemName === 'cobblestone' || g.ore) return mining().mineFor(bot, itemName, target, ctx)
       // some further out (explore stops as soon as any is in sight, the scan above only looks 40 blocks):
       // walk over to the nearest and look again from there
-      const far = world.findBlocks(bot, g.blocks, { maxDistance: 128, count: 12, filter: b => takeable(b) })
+      const far = (await world.scanBlocks(bot, g.blocks, { maxDistance: 128, count: 12, filter: b => takeable(bot, b) }))
         .sort((a, b) => world.dist3(a.position, me) - world.dist3(b.position, me))[0]
       if (far && world.dist3(far.position, me) > 30 && emptyScans < 3) {
         emptyScans++
@@ -214,14 +291,24 @@ async function mine (bot, itemName, g, n, ctx = {}) {
         await move.travel(bot, far.position, { range: 6, shouldStop: ctx.shouldStop, label: 'to ' + itemName })
         continue
       }
+      // some seen before (dug here, or noticed on a walk): go back to it
+      const known = knownResource(itemName, me)
+      if (known && !triedKnown.has(`${known.x},${known.z}`)) {
+        triedKnown.add(`${known.x},${known.z}`)
+        log('gather', `${itemName} remembered at ${move.fmt(known)} (${Math.round(world.dist2(known, me))}b) - going there`)
+        await move.travel(bot, known, { range: 6, shouldStop: ctx.shouldStop, label: 'to ' + itemName })
+        atKnown = known
+        continue
+      }
       if (++emptyScans > 4) { log('gather', `no reachable ${itemName} around`); return false }
       // sand and gravel lie where water meets land (beaches, river banks): a player walks to the shore to look, not in
       // rings - 150 blocks of forest round the Nordic site had none, the rings never reached the coast (2026-09-23)
       if (/^(sand|gravel)$/.test(itemName) && await toShore(bot, itemName, ctx)) continue
-      await explore(bot, b => g.blocks.test(b.name), { shouldStop: ctx.shouldStop, label: itemName, accept: b => takeable(b) })
+      await explore(bot, b => g.blocks.test(b.name), { shouldStop: ctx.shouldStop, label: itemName, accept: b => takeable(bot, b) })
       continue
     }
     emptyScans = 0
+    atKnown = null
     const b = cands.find(c => !refused.has(`${c.position.x},${c.position.y},${c.position.z}`))
     if (!b) { log('gather', `every ${itemName} in reach refused to dig`); return false }
     noteResource(itemName, b.position)
@@ -268,10 +355,10 @@ async function toShore (bot, kind, ctx = {}) {
   const key = 'shoreScouted_' + kind
   const seen = mem.get()[key] || []
   let next = 0
-  const water = world.findBlocks(bot, /^water$/, { maxDistance: 128, count: 40, filter: b => {
+  const water = (await world.scanBlocks(bot, /^water$/, { maxDistance: 128, count: 40, filter: b => {
     if (b.position.y < home.y - 30 || (++next & 3)) return false // cheap first: height, and every 4th hit only
     return world.isAirish(world.at(bot, b.position.x, b.position.y + 1, b.position.z)) && world.openSky(bot, b.position) && outOfZones(b) && !seen.some(q => world.dist2(q, b.position) < 40)
-  } }).filter(b => world.dist2(b.position, bot.entity.position) > 24)
+  } })).filter(b => world.dist2(b.position, bot.entity.position) > 24)
   // nothing new in view (a coast 160 blocks off is out of the loaded chunks from home): go back to the shore looked at
   // longest ago - what it holds may be takeable now (the dig rule changed, a day's growth, other light)
   let w = water.length ? water[0].position : null
@@ -302,26 +389,33 @@ async function explore (bot, match, { shouldStop, label = 'resources', legs = 4,
   const dest = { x: Math.round(home.x + Math.cos(ang) * radius), y: Math.round(bot.entity.position.y), z: Math.round(home.z + Math.sin(ang) * radius) }
   log('gather', `exploring for ${label} toward ${move.fmt(dest)} (radius ${radius})`)
   const t0 = Date.now()
-  // (the scan at most every 2s: the walk polls stop() constantly, and a findBlocks a poll starved the event loop)
-  let scannedAt = 0; let seen = null
-  const sighted = () => { if (Date.now() - scannedAt > 2000) { scannedAt = Date.now(); seen = findMatching(bot, match, accept) } return seen }
+  // (the walk polls stop() constantly: the look-around runs in the background, one at a time, at most every 2s, and
+  //  stop() reads what the last one saw)
+  let scannedAt = 0; let seen = null; let scanning = false
+  const sighted = () => {
+    if (!scanning && Date.now() - scannedAt > 2000) {
+      scanning = true
+      findMatching(bot, match, accept).then(r => { seen = r }, () => {}).finally(() => { scanning = false; scannedAt = Date.now() })
+    }
+    return seen
+  }
   const stop = () => (shouldStop && shouldStop()) || Date.now() - t0 > 3 * 60000 || !!sighted()
   for (let i = 0; i < legs; i++) {
-    const found = findMatching(bot, match, accept)
+    const found = await findMatching(bot, match, accept)
     if (found) return found
     const r = await move.travel(bot, dest, { range: 10, shouldStop: stop, label: 'explore', maxMs: 90000 })
     if (r.ok || r.why === 'stopped') break
   }
   return findMatching(bot, match, accept)
 }
-function findMatching (bot, match, accept) {
-  const ids = Object.values(world.data(bot).blocksByName).filter(b => match({ name: b.name })).map(b => b.id)
-  if (!ids.length) return null
-  if (!accept) return bot.findBlock({ matching: ids, maxDistance: 64 }) || null
+async function findMatching (bot, match, accept) {
+  const names = Object.values(world.data(bot).blocksByName).filter(b => match({ name: b.name })).map(b => b.name)
+  if (!names.length) return null
+  const found = await world.scanBlocks(bot, new RegExp('^(' + names.join('|') + ')$'), { maxDistance: 64, count: accept ? 24 : 1 })
+  if (!accept) return found[0] || null
   // only what the caller would actually take (the castle's own oak logs "found" a tree and ended every search)
-  const ps = bot.findBlocks({ matching: ids, maxDistance: 64, count: 24 })
-  for (const p of ps) { const b = bot.blockAt(p); if (b && accept(b)) return b }
+  for (const b of found) if (accept(b)) return b
   return null
 }
 
-module.exports = { chop, mine, explore, towerUp, noteResource, forgetResource, knownResource, fellTree, pickPlants }
+module.exports = { onGrounds, treeOK, chop, mine, explore, towerUp, noteResource, forgetResource, knownResource, fellTree, pickPlants, survey, takeable }

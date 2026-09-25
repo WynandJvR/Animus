@@ -159,6 +159,37 @@ function utilitySpots (bot) {
   ring.sort((a, b) => b.back - a.back)
   return out.concat(ring.filter(free).map(c => ({ x: c.x, y: c.y, z: c.z })))
 }
+// THE FURNACE BANK: rings further out round the safehouse (every other ring, so a walkway runs between them), for as
+// many furnaces as the build's smelting calls for. The first ring and the room stay the furniture's (chests, table,
+// bed); the doorway's side keeps a 3-wide lane out. Ring k sits 2k cells out from the room. Returns the free spots,
+// nearest ring first, at least `n` of them when the ground allows (rings are added until then).
+const BANK_RINGS = 6 // the furnace bank's rings: ring k sits 2k out from the room (smelt.homeFurnaces, gather.onGrounds read it)
+function furnaceSpots (bot, n) {
+  const hp = mem.get().hutPlan
+  if (!hp) return []
+  const y = hp.home.y
+  const { x1, z1, x2, z2 } = hp.interior
+  const d = hp.door
+  // the door's wall: the lane runs straight out from it
+  const side = d.x < x1 ? 'W' : d.x > x2 ? 'E' : d.z < z1 ? 'N' : 'S'
+  const inLane = (x, z) => (side === 'W' && x < x1 && Math.abs(z - d.z) <= 1) || (side === 'E' && x > x2 && Math.abs(z - d.z) <= 1) ||
+    (side === 'N' && z < z1 && Math.abs(x - d.x) <= 1) || (side === 'S' && z > z2 && Math.abs(x - d.x) <= 1)
+  const free = c => { const b = world.at(bot, c.x, c.y, c.z); const f = world.at(bot, c.x, c.y - 1, c.z); return b && world.isAirish(b) && f && world.isSolid(f) && !/(chest|furnace|crafting_table|_bed|barrel)$/.test(f.name) }
+  const out = []
+  // (out to the reach of the loaded ground round home: a ring past that is only unknown cells)
+  for (let k = 2; k <= BANK_RINGS && out.length < n; k++) {
+    const o = 2 * k
+    const X1 = x1 - o; const X2 = x2 + o; const Z1 = z1 - o; const Z2 = z2 + o
+    for (let x = X1; x <= X2; x++) for (let z = Z1; z <= Z2; z++) {
+      if (!(x === X1 || x === X2 || z === Z1 || z === Z2)) continue
+      if ((x === X1 || x === X2) && (z === Z1 || z === Z2)) continue // corners open, to walk from ring to ring
+      if (inLane(x, z)) continue
+      const c = { x, y, z }
+      if (free(c)) out.push(c)
+    }
+  }
+  return out
+}
 function rememberBedSide (side) { mem.update(m => { if (m.hutPlan) m.hutPlan.bedSide = side }) }
 
 function getPlan (bot) {
@@ -490,4 +521,4 @@ async function restoreGround (bot, x1, z1, x2, z2, groundY) {
 
 function resetPlan () { plan = null; build.registerJob('hut', null) }
 
-module.exports = { restoreGround, enterHut, buildHut, status, complete, shellComplete, getPlan, collidesWithBuild, relocate, resetPlan, layout, rememberBedSide, sealDoor, unsealDoor, utilitySpots, doorFacingWrong, rehangDoor }
+module.exports = { restoreGround, enterHut, buildHut, status, complete, shellComplete, getPlan, collidesWithBuild, relocate, resetPlan, layout, rememberBedSide, sealDoor, unsealDoor, utilitySpots, furnaceSpots, BANK_RINGS, doorFacingWrong, rehangDoor }

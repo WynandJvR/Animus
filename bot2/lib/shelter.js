@@ -194,7 +194,7 @@ async function encloseHere (bot, { shouldStop } = {}) {
   for (const c of cells) {
     const b = world.at(bot, c.x, c.y, c.z)
     if (b && world.isSolid(b)) { placed++; continue }
-    const f = inv.items(bot).find(i => /^(dirt|cobblestone|andesite|diorite|granite|tuff|cobbled_deepslate|netherrack|sand|gravel|.*_planks|.*_log)$/.test(i.name))
+    const f = inv.shelterBlock(bot, { wood: true })
     if (!f) break
     if (await act.place(bot, c, f.name, { allowZones: ['base', 'build'] })) placed++
   }
@@ -217,7 +217,7 @@ async function bunker (bot, { shouldStop } = {}) {
   if (enclosedHere(bot)) {
     const cap = { x: me.x, y: me.y + 2, z: me.z }
     const c = world.at(bot, cap.x, cap.y, cap.z)
-    const filler = inv.items(bot).find(i => /^(dirt|cobblestone|andesite|diorite|granite|tuff|cobbled_deepslate|netherrack)$/.test(i.name))
+    const filler = inv.shelterBlock(bot)
     if (c && !world.isSolid(c) && filler) {
       const ok = await act.place(bot, cap, filler.name, { faceHint: [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]] })
       // a cap cell with nothing beside it (a shallow pit in open ground): go one deeper and plug the
@@ -226,7 +226,7 @@ async function bunker (bot, { shouldStop } = {}) {
       if (!ok && below && below2 && world.isSolid(below) && world.isSolid(below2) && world.NATURAL_RE.test(below.name) && !world.lavaNear(bot, { x: me.x, y: me.y - 1, z: me.z }, 1) && !world.waterNear(bot, { x: me.x, y: me.y - 1, z: me.z }, 1, -1, 1)) {
         if (await act.dig(bot, { x: me.x, y: me.y - 1, z: me.z }, { timeoutMs: 10000 })) {
           await move.sleep(600)
-          const f2 = inv.items(bot).find(i => /^(dirt|cobblestone|andesite|diorite|granite|tuff|cobbled_deepslate|netherrack)$/.test(i.name))
+          const f2 = inv.shelterBlock(bot)
           if (f2) await act.place(bot, { x: me.x, y: me.y + 1, z: me.z }, f2.name, { faceHint: [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]] })
         }
       }
@@ -280,7 +280,7 @@ async function bunker (bot, { shouldStop } = {}) {
   }
   if (Math.floor(bot.entity.position.y) > spot.y - 3) log('shelter', `didn't drop into the pit (at y${Math.floor(bot.entity.position.y)})`)
   // in the pit; walls are the natural sides. Cap the top.
-  const filler = inv.items(bot).find(i => /^(dirt|cobblestone|andesite|diorite|granite|tuff|cobbled_deepslate|netherrack|sand|gravel)$/.test(i.name))
+  const filler = inv.shelterBlock(bot)
   const pit = world.feetPos(bot)
   const cap = { x: pit.x, y: pit.y + 2, z: pit.z }
   if (filler) {
@@ -291,7 +291,7 @@ async function bunker (bot, { shouldStop } = {}) {
   // seal any side opening at feet/head level
   for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) for (const dy of [0, 1]) {
     const c = world.at(bot, pit.x + dx, pit.y + dy, pit.z + dz)
-    const f = inv.items(bot).find(i => /^(dirt|cobblestone|andesite|diorite|granite|tuff|cobbled_deepslate)$/.test(i.name))
+    const f = inv.shelterBlock(bot)
     if (c && !world.isSolid(c) && f) await act.place(bot, { x: pit.x + dx, y: pit.y + dy, z: pit.z + dz }, f.name).catch(() => {})
   }
   mem.update(m => { m.bunker = { x: pit.x, y: pit.y, z: pit.z } })
@@ -307,7 +307,7 @@ async function bunker (bot, { shouldStop } = {}) {
   if (out.ok && Math.floor(bot.entity.position.y) >= pit.y + 3) {
     for (const dy of [0, 1, 2]) {
       const p = { x: pit.x, y: pit.y + dy, z: pit.z }
-      const f = inv.items(bot).find(i => /^(dirt|cobblestone|andesite|diorite|granite|tuff|cobbled_deepslate)$/.test(i.name))
+      const f = inv.shelterBlock(bot)
       const c = world.at(bot, p.x, p.y, p.z)
       if (f && c && world.isAirish(c)) await act.place(bot, p, f.name).catch(() => {})
     }

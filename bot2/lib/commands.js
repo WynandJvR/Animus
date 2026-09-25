@@ -146,15 +146,18 @@ function make (bot, director) {
         return JSON.stringify({ res, have: inv.count(bot, a[0]), trace: trace.slice(0, 80) })
       })
       case 'heights': {
-        // heights x1 z1 x2 z2 [step] - top solid (non-leaf, non-plant) block per column, as rows of y-values (last two digits)
+        // heights x1 z1 x2 z2 [step] - top solid (non-leaf, non-plant) block per column, as rows of full y-values (~ = water)
+        // (it scanned y110 down and printed two digits: a y116-119 plateau read "10" = 110 and a build's base looked 9
+        //  blocks in the air, 2026-09-24)
         const [x1, z1, x2, z2] = [0, 1, 2, 3].map(i => num(i)); const step = num(4, 1)
         const rows = []; const tally = {}
         for (let z = Math.min(z1, z2); z <= Math.max(z1, z2); z += step) {
           let r = ''
           for (let x = Math.min(x1, x2); x <= Math.max(x1, x2); x += step) {
             let y = null
-            for (let yy = 110; yy > 40; yy--) { const b = world.at(bot, x, yy, z); if (!b) break; if (world.isSolid(b) && !world.LEAF_RE.test(b.name) && !world.LOG_RE.test(b.name)) { y = yy; tally[b.name] = (tally[b.name] || 0) + 1; break } if (world.isWaterBlock(b)) { y = -yy; break } }
-            r += y == null ? ' ..' : y < 0 ? ' ~' + String(-y % 100).padStart(2, '0') : ' ' + String(y % 100).padStart(2, '0')
+            const top = Math.min(bot.game.minY + bot.game.height - 1, Math.floor(bot.entity.position.y) + 96)
+            for (let yy = top; yy > bot.game.minY; yy--) { const b = world.at(bot, x, yy, z); if (!b) break; if (world.isSolid(b) && !world.LEAF_RE.test(b.name) && !world.LOG_RE.test(b.name)) { y = yy; tally[b.name] = (tally[b.name] || 0) + 1; break } if (world.isWaterBlock(b)) { y = -yy; break } }
+            r += y == null ? '   ..' : y < 0 ? '  ~' + String(-y).padStart(3) : ' ' + String(y).padStart(4)
           }
           rows.push(`${z}:${r}`)
         }
@@ -287,6 +290,13 @@ function make (bot, director) {
         if (pick) { try { await bot.equip(pick, 'hand'); eq = 'equip ok -> held ' + (bot.heldItem && bot.heldItem.name) } catch (e) { eq = 'equip FAILED: ' + e.message } }
         return out.join(' | ') + ' || ' + eq + ' || window=' + (bot.currentWindow ? bot.currentWindow.type : 'none')
       }
+      case 'note': {
+        // note <kind> <x> <y> <z> - remember a resource there (an operator's hint: "lots of oak at ..."); kind as the bot
+        // names it: oak_log, sand, clay, gravel...
+        if (!a[0] || a.length < 4) return 'usage: note <kind> <x> <y> <z>'
+        require('./gather').noteResource(a[0], { x: num(1), y: num(2), z: num(3) })
+        return `noted ${a[0]} at ${num(1)},${num(2)},${num(3)}`
+      }
       case 'findb': {
         // findb <regex> [dist] - positions and states of matching blocks
         const re = new RegExp(a[0] || '^stone$')
@@ -297,7 +307,8 @@ function make (bot, director) {
         // bench <regex> [dist] [count] - time one findBlocks scan on the live process
         const re = new RegExp(a[0] || '^stone$')
         const t0 = Date.now()
-        const r = world.findBlocks(bot, re, { maxDistance: num(1, 32), count: num(2, 10) })
+        // (a 4th arg "f": a filter that refuses everything - the worst case of a filtered search)
+        const r = world.findBlocks(bot, re, { maxDistance: num(1, 32), count: num(2, 10), filter: a[3] === 'f' ? () => false : undefined })
         const t1 = Date.now()
         const ids = world.blockIds(bot, re)
         const raw = bot.findBlocks({ matching: ids, maxDistance: num(1, 32), count: num(2, 10) })

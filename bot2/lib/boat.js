@@ -370,11 +370,15 @@ async function pickUp (bot, e) {
     await sleep(350)
   }
   if (bot.entities[e.id]) { log('move', `boat: couldn't break the boat at ${fmt(last)} - left it`); return false }
-  // the boat item floats where the boat was: walk over it (a step or two into the shallows at most)
-  for (let k = 0; k < 20 && inv.count(bot, n => BOAT_ITEM_RE.test(n)) <= had; k++) {
-    const drop = act.droppedItems(bot, 6).sort((a, b) => a.position.distanceTo(last) - b.position.distanceTo(last))[0]
-    if (drop && drop.position.distanceTo(last) < 3 && k % 5 === 0) await move.goTo(bot, new goals.GoalNear(drop.position.x, drop.position.y, drop.position.z, 0.5), { timeoutMs: 6000, stuckMs: 3000, dig: false, place: false, label: 'pickup' })
-    await sleep(250)
+  // the boat item floats where the boat was and DRIFTS (twice on 2026-09-24 it floated off while the walk aimed at the
+  // spot the boat had been): follow the boat item itself, wherever it has got to, for a few tries
+  const boatDrop = () => act.droppedItems(bot, 10).filter(d => { try { return BOAT_ITEM_RE.test(d.getDroppedItem().name) } catch { return false } })
+    .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0]
+  for (let k = 0; k < 6 && inv.count(bot, n => BOAT_ITEM_RE.test(n)) <= had; k++) {
+    const drop = boatDrop()
+    if (!drop) { await sleep(400); continue }
+    await move.goTo(bot, new goals.GoalNear(drop.position.x, drop.position.y, drop.position.z, 0.5), { timeoutMs: 6000, stuckMs: 3000, dig: false, place: false, label: 'pickup' })
+    await sleep(300)
   }
   const ok = inv.count(bot, n => BOAT_ITEM_RE.test(n)) > had
   log('move', ok ? 'boat: picked the boat back up' : `boat: broke the boat but didn't get it back (at ${fmt(last)})`)

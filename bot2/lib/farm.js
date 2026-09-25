@@ -14,6 +14,7 @@ const { log } = require('./log')
 const craft = () => require('./craft')
 
 const PLOT_TARGET = 24
+const OWN = ['farm'] // (the farm's own zone is its own ground: other zones still keep it out)
 
 function farm () { return mem.get().farm || null }
 // Is the saved farm next to the current home? (a move leaves the old plot behind)
@@ -47,7 +48,7 @@ function findPlot (bot) {
       const p = { x: w.position.x + dx, y: w.position.y, z: w.position.z + dz }
       const b = world.at(bot, p.x, p.y, p.z); const up = world.at(bot, p.x, p.y + 1, p.z)
       if (!b || !up || !/^(grass_block|dirt)$/.test(b.name) || !world.isAirish(up)) continue
-      if (move.inZone(p, 1) || nearHut(p) || !move.utilitySpotOK({ x: p.x, y: p.y + 1, z: p.z })) continue
+      if (move.inZone(p, 1, OWN) || nearHut(p) || !move.utilitySpotOK({ x: p.x, y: p.y + 1, z: p.z }, { except: OWN })) continue
       cells.push(p)
     }
     if (cells.length >= 8 && (!best || cells.length > best.cells.length || (cells.length === best.cells.length && world.dist2(w.position, home) < world.dist2(best.water, home)))) best = { water: w.position, cells }
@@ -72,7 +73,7 @@ function dryPlot (bot, home) {
         const b = world.at(bot, x, gy, z); const up = world.at(bot, x, gy + 1, z)
         if (!b || !up || !/^(grass_block|dirt)$/.test(b.name) || !world.isAirish(up)) continue
         const p = { x, y: gy, z }
-        if (move.inZone(p, 1) || nearHut(p) || !move.utilitySpotOK({ x, y: gy + 1, z })) continue
+        if (move.inZone(p, 1, OWN) || nearHut(p) || !move.utilitySpotOK({ x, y: gy + 1, z }, { except: OWN })) continue
         cells.push(p)
       }
       if (cells.length >= 16 && (!best || cells.length > best.cells.length)) best = { water: null, cells }
@@ -132,8 +133,8 @@ function fullPlot (bot, f) {
       if (!b || !up) continue
       if (!/^(grass_block|dirt|farmland)$/.test(b.name)) continue
       if (!(world.isAirish(up) || up.name === 'wheat') || /torch/.test(up.name)) continue
-      if (move.inZone(p, 1) || nearHut(p)) continue
-      if (up.name !== 'wheat' && !move.utilitySpotOK({ x: p.x, y: p.y + 1, z: p.z })) continue
+      if (move.inZone(p, 1, OWN) || nearHut(p)) continue
+      if (up.name !== 'wheat' && !move.utilitySpotOK({ x: p.x, y: p.y + 1, z: p.z }, { except: OWN })) continue
       out.push(p)
       break
     }
@@ -233,7 +234,7 @@ async function hydrate (bot, ctx = {}) {
     }
     // still water: a source block (level 0) that is not in a zone
     const home = mem.get().home
-    const srcs = world.findBlocks(bot, /^water$/, { maxDistance: 96, count: 40, point: home ? new Vec3(home.x, home.y, home.z) : undefined, filter: b => { try { return Number(b.getProperties().level) === 0 && !move.inZone(b.position) } catch { return false } } })
+    const srcs = (await world.scanBlocks(bot, /^water$/, { maxDistance: 96, count: 40, point: home ? new Vec3(home.x, home.y, home.z) : undefined, filter: b => { try { return Number(b.getProperties().level) === 0 && !move.inZone(b.position) } catch { return false } } }))
       .filter(b => { const up = world.at(bot, b.position.x, b.position.y + 1, b.position.z); return up && world.isAirish(up) })
     // fill it from dry land at the edge - never by wading in (that pond has drowned the bot once)
     let src = null; let land = null
@@ -374,24 +375,43 @@ async function fixWater (bot, ctx = {}) {
 // A farm you can walk: every soil cell at the water's level, nothing standing on the crop layer but crops,
 // and a flat walkway ring round the plot. (The first plot mixed two soil levels and collected stray scaffold,
 // a log and flowers - the operator asked for it clean and flat.)
-function farmArea (f) {
+// The ground a watered farm owns: every cell its water hydrates (vanilla: 4 blocks round the source), from the soil
+// layer up through the crops. The zone the rest of the bot keeps out of (director.baseZone) - null for a dry plot.
+const HYDRATE = 4
+function area (f) {
+  if (!f || !f.water) return null
   const w = f.water
+  return { x1: w.x - HYDRATE, z1: w.z - HYDRATE, x2: w.x + HYDRATE, z2: w.z + HYDRATE, y1: w.y - 1, y2: w.y + 2 }
+}
+// The columns levelling works on: the farm's ground only - a plot cell, farmland, or a hole at the soil level (a
+// dropped cell to win back). Not the natural rise round it: levelled flat to the water, the terrace up to the
+// safehouse (2 higher) became a cliff, every walk home stood a dirt step on it and every levelling took it away again
+// (10, 5, 2, 1, 2, 1 fixes in two minutes, round and round - 2026-09-24).
+function farmArea (f, bot) {
+  const w = f.water
+  const cells = new Set((f.cells || []).map(c => `${c.x},${c.z}`))
+  const farmGround = (x, z) => {
+    if (cells.has(`${x},${z}`)) return true
+    if (!bot) return false
+    const g = world.at(bot, x, w.y, z)
+    return !!g && (g.name === 'farmland' || (!world.isSolid(g) && !world.isWaterBlock(g)))
+  }
   return {
     x1: w.x - 5, z1: w.z - 5, x2: w.x + 5, z2: w.z + 5, groundY: w.y, height: 2,
     keep: b => /^(wheat|torch|wall_torch)$/.test(b.name) || (b.position.x === w.x && b.position.z === w.z),
-    skip: (x, z) => (x === w.x && z === w.z) || nearHut({ x, y: w.y, z }) || !!move.inZone({ x, y: w.y, z }, 1)
+    skip: (x, z) => (x === w.x && z === w.z) || nearHut({ x, y: w.y, z }) || !!move.inZone({ x, y: w.y, z }, 1, OWN) || !farmGround(x, z)
   }
 }
 function levelWork (bot) {
   const f = farm()
   if (!f || !f.water) return []
-  return require('./ground').work(bot, farmArea(f))
+  return require('./ground').work(bot, farmArea(f, bot))
 }
 function farmLevel (bot) { return levelWork(bot).length === 0 }
 async function level (bot, ctx = {}) {
   const f = farm()
   if (!f || !f.water) return false
-  const done = await require('./ground').prepare(bot, farmArea(f), { shouldStop: ctx.shouldStop, label: 'levelling the farm' })
+  const done = await require('./ground').prepare(bot, farmArea(f, bot), { shouldStop: ctx.shouldStop, label: 'levelling the farm' })
   // one level now: rebuild the cell list from it
   f.cells = fullPlot(bot, f)
   mem.set('farm', f)
@@ -459,4 +479,4 @@ async function harvest (bot, ctx = {}) {
   return got > 0
 }
 
-module.exports = { farm, farmIsHome, farmHome, establish, harvest, ripeCount, unplantedCount, findPlot, canHydrate, hydrate, waterNeedsFixing, fixWater, widen, fullPlot, farmLevel, level, levelWork }
+module.exports = { area, farm, farmIsHome, farmHome, establish, harvest, ripeCount, unplantedCount, findPlot, canHydrate, hydrate, waterNeedsFixing, fixWater, widen, fullPlot, farmLevel, level, levelWork }

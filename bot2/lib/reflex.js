@@ -15,6 +15,7 @@ const NEVER_MELEE = new Set(['creeper', 'ghast', 'warden', 'wither', 'elder_guar
 let bot = null
 let active = null // {kind, since, detail}
 let busy = false // an async reflex action is running
+let dressFailed = null // the better-armour key a wear attempt left unchanged (cleared when the inventory changes)
 let submergedSince = 0
 let lastAttackAt = 0
 let lastHurtAt = 0
@@ -113,6 +114,18 @@ function canSee (e) {
   } catch { return true }
 }
 
+// THE HURT LINE: the hp at which one more exchange can kill - two hits of this difficulty's zombie (vanilla 2 / 3 / 4.5
+// on easy / normal / hard, the common melee; unknown difficulty counts as hard), after the worn armour's cut (vanilla:
+// max(points/5, points - damage/2) out of 25). Unarmoured on hard that is 9, in full iron 4.4. The reflex breaks
+// off a fight at it; the director ends a trip outside at it and heals (director.tooHurt). One number for both.
+function hurtLine () {
+  const hit = { peaceful: 0, easy: 2, normal: 3, hard: 4.5 }[bot && bot.game && bot.game.difficulty]
+  const dmg = hit == null ? 4.5 : hit
+  const pts = inv.armorPoints(bot)
+  const cut = Math.min(20, Math.max(pts / 5, pts - dmg / 2)) / 25
+  return 2 * dmg * (1 - cut)
+}
+
 function attackCooldownMs () {
   const h = bot.heldItem ? bot.heldItem.name : ''
   if (h.endsWith('_sword')) return 650
@@ -139,10 +152,11 @@ async function doEat () {
 // Nearest cell reachable by swimming whose head space is air (a place to breathe), or dry land. With `landOnly`,
 // dry land only: once the head is out, the cell we float in is always the nearest air - steering to it held the
 // bot in place in a river for 12 minutes (2026-09-22) - so the way out is toward land, a step up at most preferred.
-function findAir (landOnly = false) {
+function findAir (landOnly = false, { aside = false } = {}) {
   const me = bot.entity.position.floored()
   let best = null; let bestD = Infinity
   for (let dx = -8; dx <= 8; dx++) for (let dz = -8; dz <= 8; dz++) for (let dy = -2; dy <= 6; dy++) {
+    if (aside && Math.abs(dx) + Math.abs(dz) < 2) continue // (a way round what is over us: not our own column or the next)
     const x = me.x + dx; const y = me.y + dy; const z = me.z + dz
     const feet = world.at(bot, x, y, z); const head = world.at(bot, x, y + 1, z)
     if (!feet || !head) continue
@@ -162,7 +176,7 @@ async function wallOff (e) {
   const me = bot.entity.position.floored()
   const dx = e.position.x - (me.x + 0.5); const dz = e.position.z - (me.z + 0.5)
   const step = Math.abs(dx) >= Math.abs(dz) ? { x: Math.sign(dx), z: 0 } : { x: 0, z: Math.sign(dz) }
-  const filler = () => inv.items(bot).find(i => /^(cobblestone|andesite|diorite|granite|tuff|cobbled_deepslate|dirt|netherrack|stone)$/.test(i.name))
+  const filler = () => inv.shelterBlock(bot)
   const act = require('./act')
   let n = 0
   for (const dy of [0, 1]) {
@@ -215,7 +229,7 @@ async function climbOut () {
   // no diggable bank: stand on a block placed in the water beside us - only where the cell has a face to click
   // (open water all round has none: every direction answered "nothing solid to place against"), and then step onto
   // it (the block alone left the bot floating beside it for four more minutes)
-  const filler = inv.items(bot).find(i => /^(dirt|cobblestone|andesite|diorite|granite|tuff|cobbled_deepslate|netherrack|stone)$/.test(i.name))
+  const filler = inv.shelterBlock(bot) // (sand placed in water sinks to the bed: nothing to stand on)
   if (!filler) return false
   const faced = c => [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]].some(([ox, oy, oz]) => world.isSolid(world.at(bot, c.x + ox, c.y + oy, c.z + oz)))
   for (const [dx, dz] of dirs) {
@@ -251,6 +265,10 @@ function enclosed () {
 }
 function canDigInHere () {
   const p = bot.entity.position.floored()
+  // not in our own ground: at home the safehouse IS the shelter. A dig-in on the door step at night (unarmed after a
+  // respawn, a skeleton about) fought the director's walk to the door seven times in a minute, and the pit it left
+  // was a 5-block drop in front of the door the edge guard rightly refused - two deaths outside it (2026-09-24)
+  if (require('./move').inZone(p, 1)) return false
   for (const dy of [1, 2, 3, 4]) {
     const b = world.at(bot, p.x, p.y - dy, p.z)
     if (!b || world.isWaterBlock(b) || world.isLavaBlock(b)) return false
@@ -285,7 +303,7 @@ async function digIn () {
   }
   // plug the hole above our head with whatever block we carry (the dirt we just dug)
   const top = { x: p0.x, y: Math.floor(bot.entity.position.y) + 2, z: p0.z }
-  const filler = inv.items(bot).find(i => /^(dirt|cobblestone|andesite|diorite|granite|tuff|cobbled_deepslate|netherrack|sand|gravel|grass_block|coarse_dirt|stone)$/.test(i.name))
+  const filler = inv.shelterBlock(bot)
   if (filler) { try { await require('./act').place(bot, top, filler.name, { fromReflex: true, faceHint: [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]] }) } catch {} }
   log('reflex', `dug in at ${p0.x},${p0.y - 3},${p0.z}${filler ? '' : ' (nothing to plug the hole with)'}`)
 }
@@ -347,6 +365,72 @@ function tread () {
   }
 }
 
+// THE EDGE. The body never walks toward a drop that hurts - whoever drives (the pathfinder's own maxDropDown is the same
+// SAFE_DROP, so it never plans one; this catches its overshoots too). Two deaths on 2026-09-23 (y16 -> y-14 in a cave, y78 -> y55 into a ravine) began
+// mid creeper-flee: the flee steers by hand, and with no open heading it held 'back' without looking. A veto on the
+// keys, not a steering rule: whatever pressed forward/back (a reflex, a door crossing, a skill's nudge), the step is
+// judged against the ground it leads onto, every physics tick, and cut - with sneak held to brake the momentum (the
+// physics stops a sneaking body at an edge) - before the body goes over.
+let edgeHeld = null // { x, z, drop } while the guard is braking
+function edgeGuard () {
+  if (!bot.entity || bot.vehicle || bot.health <= 0) return
+  // (the pathfinder too: every step it plans drops SAFE_DROP at most, so a bigger drop ahead of it is an overshoot - it
+  //  walked the bot off the unrailed edge of the Notre-Dame plaza, 21 blocks, 2026-09-24. Cut, and it replans.)
+  const steered = bot.pathfinder && bot.pathfinder.isMoving && bot.pathfinder.isMoving()
+  const c = bot.controlState || {}
+  const p = bot.entity.position
+  const v = bot.entity.velocity
+  const dir = c.forward ? 1 : c.back ? -1 : 0
+  const speed = Math.hypot(v.x, v.z)
+  if (world.feetInWater(bot) || !bot.entity.onGround || (!dir && speed < 0.05)) { release(); return }
+  // where the body is headed: the keys it holds, else the way it is sliding
+  let hx, hz
+  if (dir) { hx = -Math.sin(bot.entity.yaw) * dir; hz = -Math.cos(bot.entity.yaw) * dir } else { hx = v.x / speed; hz = v.z / speed }
+  // far enough ahead to cover this tick's motion and the slide after the keys let go (~3 ticks of it)
+  const reach = 0.45 + Math.max(speed, 0.15) * 3
+  const y = Math.floor(p.y + 0.01)
+  const here = world.dropAt(bot, p.x, y, p.z)
+  if (steered) {
+    // The pathfinder only overshoots: cut when, a few ticks on at this speed, NO part of the hitbox would still rest on
+    // ground and the fall there hurts. A probe along the heading clipped the corner of a stairwell beside a diagonal
+    // path and stopped the walk home ten times in a night (the bed 21 blocks off, the bot left in the open); looking a
+    // stride ahead past a ledge it stepped down onto cut a sound way down 111 times (2026-09-25).
+    // (one tick on: three ticks ahead ran past a one-block ledge the planner was stepping onto to turn - the bot stood
+    //  trapped in a pocket of the cathedral wall for ten minutes, 2026-09-25. The sneak brake holds a real overshoot at
+    //  the lip; a tick at sprint is ~0.28 of a block)
+    const t = 1; const nx = p.x + v.x * t; const nz = p.z + v.z * t
+    const hull = (cx, cz) => Math.min(...[[-0.3, -0.3], [0.3, -0.3], [-0.3, 0.3], [0.3, 0.3]].map(([dx, dz]) => world.dropAt(bot, Math.floor(cx + dx), y, Math.floor(cz + dz))))
+    // supported now (some corner over ground), and a tick on nothing under the hitbox but a fall that hurts
+    const least = hull(nx, nz)
+    if (least > world.SAFE_DROP && hull(p.x, p.z) <= world.SAFE_DROP) {
+      for (const k of ['forward', 'back', 'sprint', 'jump']) if (c[k]) bot.setControlState(k, false)
+      bot.setControlState('sneak', true)
+      const cell = { x: Math.floor(nx), z: Math.floor(nz), drop: least }
+      if (!edgeHeld || edgeHeld.x !== cell.x || edgeHeld.z !== cell.z) log('reflex', `edge: stopped short of a ${least === Infinity ? 'bottomless' : least + '-block'} drop at ${cell.x},${y},${cell.z} (the pathfinder ran on)`)
+      edgeHeld = cell
+      return
+    }
+    release()
+    return
+  }
+  for (const r of [0.45, reach]) {
+    const x = p.x + hx * r; const z = p.z + hz * r
+    if (Math.floor(x) === Math.floor(p.x) && Math.floor(z) === Math.floor(p.z)) continue
+    const drop = world.dropAt(bot, x, y, z)
+    // (a column no deeper than the one we stand over is no new edge - a ledge walked along is not a cliff stepped off)
+    if (drop <= world.SAFE_DROP || drop <= here) continue
+    for (const k of ['forward', 'back', 'sprint', 'jump']) if (c[k]) bot.setControlState(k, false)
+    bot.setControlState('sneak', true)
+    const cell = { x: Math.floor(x), z: Math.floor(z), drop }
+    if (!edgeHeld || edgeHeld.x !== cell.x || edgeHeld.z !== cell.z) log('reflex', `edge: stopped short of a ${drop === Infinity ? 'bottomless' : drop + '-block'} drop at ${cell.x},${y},${cell.z}${active ? ' (' + active.kind + ')' : ''}`)
+    edgeHeld = cell
+    return
+  }
+  release()
+}
+function release () { if (edgeHeld) { edgeHeld = null; try { bot.setControlState('sneak', false) } catch {} } }
+function edgeAhead () { return edgeHeld }
+
 function tick () {
   if (!bot || !bot.entity || bot.health <= 0) return
   const now = Date.now()
@@ -401,7 +485,12 @@ function tick () {
     if (riseY == null || me.y > riseY + 0.25) { riseY = me.y; riseAt = now }
     const stalled = now - riseAt > 1500
     const land = open && stalled ? findAir(true) : null
-    if (open && !land) {
+    // ...and with no land in reach, an entity over the column (our own boat: a paused bot floating under it drowned
+    // jumping into its hull, 2026-09-23) is swum round: open air a couple of strokes to the side
+    const aside = open && stalled && !land ? findAir(false, { aside: true }) : null
+    if (aside) {
+      steerTo(aside, { jump: true })
+    } else if (open && !land) {
       bot.setControlState('jump', true)
       for (const k of ['forward', 'back', 'left', 'right', 'sneak']) bot.setControlState(k, false)
     } else if (land) {
@@ -489,8 +578,8 @@ function tick () {
   }
   // bare fists do 1 damage against 20 hp: without a weapon, back off (and let the shelter logic dig
   // in) unless it is a weak mob we can finish or we have nowhere to go
-  // without armour a zombie on hard takes 4-5 hp a hit: break off at 10, not at 6 (two hits from death)
-  const weak = hp <= (armor >= 2 ? 6 : 10) || (!armed && !(target && /^(silverfish|endermite)$/.test(target.name)))
+  // (the hurt line: two hits from death - without armour a zombie on hard takes 4.5 a hit)
+  const weak = hp <= hurtLine() || (!armed && !(target && /^(silverfish|endermite)$/.test(target.name)))
   // at night, unable to fight: running across open ground in the dark gets you surrounded - dig
   // straight down on the spot and plug the hole (a player's respawn-at-night move)
   const nightThreat = !armed && world.phase(bot) !== 'day' ? hs.find(h => h.d < 16 && h.e.name !== 'creeper') : null
@@ -557,21 +646,35 @@ function tick () {
   }
 
   // 5. EAT - when hungry and nothing is attacking
-  const hungry = bot.food <= 14 || (bot.food < 20 && hp < 14)
+  // (hurt: eat up to the food bar regeneration needs - below it the hp never comes back)
+  const hungry = bot.food <= 14 || (hp < 20 && bot.food < inv.REGEN_FOOD)
   // (not while swimming - a bite lets go of the stroke - but a boat is a seat: eat in it)
   if (hungry && !hs.some(h => h.d < 8) && now - lastEatFail > 10000 && (!world.feetInWater(bot) || bot.vehicle)) {
     if (inv.foodItems(bot, { desperate: bot.food <= 6 }).length) { doEat(); return }
+  }
+
+  // 6. DRESS - armour in the pack better than what is worn goes on, whoever put it there (a grave, a chest, a pickup).
+  // Wearing used to follow only a craft or a grave recovery: an iron helmet rode in the pack while skeletons shot the
+  // bare-headed bot dead four times in an hour (2026-09-25). (Not with a window open; a piece the server refused
+  // waits for the inventory to change.)
+  if (!bot.currentWindow && !hs.some(h => h.d < 8)) {
+    const k = inv.betterArmorInPack(bot)
+    if (k && k !== dressFailed) {
+      busy = true
+      inv.wearBestArmor(bot).then(() => { if (inv.betterArmorInPack(bot) === k) dressFailed = k }).catch(() => { dressFailed = k }).finally(() => { busy = false })
+    }
   }
 }
 
 function install (b) {
   bot = b
-  bot.on('entityHurt', (e) => {
+  bot.inventory.on('updateSlot', () => { dressFailed = null })
+  bot.on('entityHurt', (e, source) => {
     if (e !== bot.entity) return
     lastHurtAt = Date.now()
-    // attribute to the nearest hostile facing us
-    const hs = hostiles(8)
-    lastHurtBy = hs.length ? hs[0].e : null
+    // the server names who hurt us (damage_event's source entity - the skeleton, not its arrow); none for a fall,
+    // drowning, a cactus. (It used to be the nearest hostile: a fall beside a zombie was "hit by the zombie".)
+    lastHurtBy = source && source !== bot.entity ? source : null
   })
   bot.on('death', () => { active = null; busy = false; blocking = false; floatSince = 0; submergedSince = 0; airMs = AIR_MS; if (dive) dive.broken = 'died'; fleeTarget = null; diedAt = Date.now() })
   // respawned into the dark: dig in on the spot before anything finds us
@@ -589,10 +692,12 @@ function install (b) {
     }, 1500)
   })
   setInterval(() => { try { tick() } catch (e) { log('reflex', 'tick error: ' + e.message) } }, 200)
+  bot.on('physicsTick', () => { try { edgeGuard() } catch (e) { log('reflex', 'edge guard error: ' + e.message) } })
 }
 
 function isActive () { return active ? active.kind : null }
 function info () { return active ? { kind: active.kind, detail: active.detail, forSec: Math.round((Date.now() - active.since) / 1000) } : null }
+function lastHurt () { return lastHurtAt ? { at: lastHurtAt, by: lastHurtBy ? lastHurtBy.name || lastHurtBy.type : null } : null }
 function nearestThreat () {
   if (!bot || !bot.entity) return null
   const h = hostiles(16)[0]
@@ -608,4 +713,4 @@ function setEnabled (on) { enabled = !!on; if (!on) clearActive() }
 function underMs () { return submergedSince ? Date.now() - submergedSince : 0 }
 function airLeftMs () { return airMs }
 
-module.exports = { install, active: isActive, info, nearestThreat, hostiles, waitClear, setEnabled, findAir, HOSTILE, startDive, endDive, diveBroken, underMs, airLeftMs, AIR_MS, DIVE_HARD_MS }
+module.exports = { install, active: isActive, info, nearestThreat, lastHurt, hurtLine, edgeAhead, hostiles, waitClear, setEnabled, findAir, HOSTILE, startDive, endDive, diveBroken, underMs, airLeftMs, AIR_MS, DIVE_HARD_MS }

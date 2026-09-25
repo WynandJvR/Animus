@@ -118,10 +118,10 @@ function findDeposit (bot) {
 }
 
 // Ticks to walk home from here (a little over walking pace, for the detours).
-function walkTicks (bot) { const h = home(); return h ? world.dist2(bot.entity.position, h) / 4.3 * 20 * 1.4 : 0 }
+function walkTicks (bot) { const h = home(); return h ? world.walkTicks(bot.entity.position, h) : 0 }
 // Stop digging when the daylight left is only the walk home and a margin: the director wants the bot home
 // before dusk, and a clay bank far from home is no place to meet the night.
-function mustTurnBack (bot) { return world.phase(bot) !== 'day' || world.ticksUntilNight(bot) < walkTicks(bot) + 1800 }
+function mustTurnBack (bot) { return world.phase(bot) !== 'day' || world.ticksUntilNight(bot) < walkTicks(bot) + world.HOME_MARGIN }
 // Worth setting out now? There and back plus a few minutes at the water, with daylight to spare.
 function tripFits (bot) {
   const h = home() || bot.entity.position
@@ -519,7 +519,7 @@ async function scout (bot, stop) {
   const scouted = mem.get().clayScouted || []
   const fresh = p => !scouted.some(s => world.dist2(s, p) < 48)
   // (surface water only - see underSky; and a smaller scan: 128 blocks x 200 hits over a sea stalled the event loop 10s)
-  const water = world.findBlocks(bot, /^water$/, { maxDistance: 96, count: 60, filter: b => nearSurface(b.position) && world.isAirish(world.at(bot, b.position.x, b.position.y + 1, b.position.z)) && world.openSky(bot, b.position) && inRange(b.position) && outOfZones(b.position) && fresh(b.position) })
+  const water = (await world.scanBlocks(bot, /^water$/, { maxDistance: 96, count: 60, filter: b => nearSurface(b.position) && world.isAirish(world.at(bot, b.position.x, b.position.y + 1, b.position.z)) && world.openSky(bot, b.position) && inRange(b.position) && outOfZones(b.position) && fresh(b.position) }))
     .filter(b => world.dist2(b.position, bot.entity.position) > 48) // water close by is already in view
   const noteScouted = () => { const p = world.feetPos(bot); mem.update(m => { m.clayScouted = (m.clayScouted || []).concat([{ x: p.x, y: p.y, z: p.z }]).slice(-60) }) }
   if (water.length) {
@@ -573,4 +573,4 @@ async function gather (bot, n, ctx = {}) {
   return got > 0
 }
 
-module.exports = { gather, tripFits, exhausted, diggable, standFor, _digDeposit: digDeposit, _dive: dive, pickupCell, floatCell, breathStand, pickUp, digsFrom, diveColumn, diveSpot, bodyUnfit, onBed, mustTurnBack }
+module.exports = { gather, claySought, tripFits, exhausted, diggable, standFor, _digDeposit: digDeposit, _dive: dive, pickupCell, floatCell, breathStand, pickUp, digsFrom, diveColumn, diveSpot, bodyUnfit, onBed, mustTurnBack }

@@ -43,7 +43,10 @@ try { body.setNoteSink && body.setNoteSink(m => log('body', m)); body.install(bo
 // is wrong - 2026-09-23 a glass pane connected to its new log neighbour round the bot's hitbox and the server
 // corrected it 0.06b a tick for ten minutes; every walk out failed, a relog (fresh chunks) walked out in seconds.
 // A player relogs: after 30s of unbroken pinning we do too (the supervisor restarts the process).
+// (the server's corrections come in bursts ~3s apart: a pin is over only after 5s with none - reset on the first free
+//  second, the 30s clock never ran out and a bot in its night bunker was held for 30 minutes, 2026-09-24)
 let pinnedSince = 0
+let freeSince = 0
 setInterval(() => {
   try {
     // in a boat the physics is off by design (mineflayer stops it on mount; lib/boat.js drives the boat): no
@@ -51,7 +54,12 @@ setInterval(() => {
     if (bot.vehicle && require('./lib/boat').inBoat(bot)) return
     body.check(bot)
     const pinned = body.pinned && body.pinned()
-    if (!pinned) { pinnedSince = 0; return }
+    if (!pinned) {
+      if (!freeSince) freeSince = Date.now()
+      if (Date.now() - freeSince > 5000) pinnedSince = 0
+      return
+    }
+    freeSince = 0
     if (!pinnedSince) pinnedSince = Date.now()
     if (Date.now() - pinnedSince > 30000) { log('body', `pinned by the server for ${Math.round((Date.now() - pinnedSince) / 1000)}s at ${bot.entity && bot.entity.position.floored()} - relogging to fetch the world fresh`); pinnedSince = 0; bot.quit('pinned - relog') }
   } catch {}
@@ -79,6 +87,30 @@ const chat = {
 
 let commands = null
 let started = false
+
+// THE SUPPORT GUARD: no dig - whoever asks, the builder, the pathfinder breaking its way, a reflex - takes out the block
+// holding the bot up over a fall that hurts. act.dig's own check held, and the bot still fell 31 blocks twice off the
+// floating north end of the Notre-Dame plaza with the dirt under its feet dug (2026-09-24): the one place every dig
+// passes through is bot.dig. The last dig (where, and who asked) is kept for the death log.
+let lastDig = null
+function installSupportGuard () {
+  const act = require('./lib/act')
+  const world = require('./lib/world')
+  const orig = bot.dig.bind(bot)
+  bot.dig = async (block, ...rest) => {
+    const caller = (new Error().stack || '').split('\n').slice(2, 5).map(s => s.trim().replace(/^at /, '').replace(/\(.*[\\/]/, '(')).join(' <- ')
+    if (block && block.position && bot.entity && act.holdsUsUp(bot, block.position)) {
+      const fall = act.fallBelow(bot, block.position)
+      if (fall > world.SAFE_DROP) {
+        log('act', `refused to dig ${block.name} at ${move.fmt(block.position)}: it holds me up over a ${fall}-block drop (asked by ${caller})`)
+        throw new Error('support guard: that block holds me up over a drop')
+      }
+    }
+    lastDig = { at: Date.now(), name: block && block.name, pos: block && block.position && move.fmt(block.position), caller }
+    return orig(block, ...rest)
+  }
+  bot.on('death', () => { if (lastDig && Date.now() - lastDig.at < 15000) log('death', `last dig ${Math.round((Date.now() - lastDig.at) / 100) / 10}s before: ${lastDig.name} at ${lastDig.pos} (asked by ${lastDig.caller})`) })
+}
 
 function installDigGuard () {
   // mineflayer's digTime assumes enchants is an array; 1.21 tools break it
@@ -137,6 +169,7 @@ function installCraftResultWait () {
 
 bot.once('spawn', async () => {
   installDigGuard()
+  installSupportGuard()
   // (installCraftResultWait is NOT installed: on 2x2 inventory crafts the server answers before
   // mineflayer listens, so waiting swallowed the update and every stick craft timed out. Crafts are
   // verified against the inventory in craft.js instead.)

@@ -125,6 +125,31 @@ async function equipShield (bot) {
   try { await bot.equip(it, 'off-hand'); return offhandShield(bot) } catch { return false }
 }
 function armorPieces (bot) { return Object.values(wornArmor(bot)).filter(Boolean).length }
+// Vanilla defence points of a worn piece, by material and slot.
+const ARMOR_POINTS = { leather: [1, 3, 2, 1], golden: [2, 5, 3, 1], chainmail: [2, 5, 4, 1], iron: [2, 6, 5, 2], diamond: [3, 8, 6, 3], netherite: [3, 8, 6, 3], turtle: [2, 0, 0, 0] }
+function armorPoints (bot) {
+  let n = 0
+  const w = wornArmor(bot)
+  for (const [i, slot] of ['head', 'torso', 'legs', 'feet'].entries()) { const it = w[slot]; const t = it && ARMOR_POINTS[it.name.split('_')[0]]; if (t) n += t[i] }
+  return n
+}
+// Natural regeneration needs a food bar of at least this (vanilla); below it a hurt body stays hurt.
+const REGEN_FOOD = 18
+// THE block to wall, cap or plug ourselves in with: natural, solid - and never one that falls. A night bunker near the
+// beach was capped with the sand the bot was carrying; the cap dropped onto its head and it suffocated in its own
+// hole (2026-09-23). (Wood only where the caller allows it: planks are the build's.)
+const SHELTER_RE = /^(dirt|coarse_dirt|grass_block|cobblestone|andesite|diorite|granite|tuff|cobbled_deepslate|netherrack|stone)$/
+function shelterBlock (bot, { wood = false } = {}) { return items(bot).find(i => SHELTER_RE.test(i.name) || (wood && /_(planks|log)$/.test(i.name))) || null }
+// the pack's armour pieces that outrank what their slot wears, as one key ('' = none)
+function betterArmorInPack (bot) {
+  const worn = wornArmor(bot)
+  const out = []
+  for (const [slot, suffix] of Object.entries(ARMOR_SLOTS)) {
+    const cur = worn[slot]; const curRank = cur ? (ARMOR_RANK[cur.name.split('_')[0]] || 0) : -1
+    for (const i of items(bot)) if ((i.name.endsWith('_' + suffix) || (slot === 'head' && i.name === 'turtle_helmet')) && (ARMOR_RANK[i.name.split('_')[0]] || 0) > curRank) { out.push(i.name); break }
+  }
+  return out.join(',')
+}
 async function wearBestArmor (bot) {
   let changed = 0
   const worn = wornArmor(bot)
@@ -169,5 +194,5 @@ const JUNK = /^(raw_copper|raw_gold|redstone|lapis_lazuli|rotten_flesh|poisonous
 module.exports = {
   TIERS, TIER_RANK, GOOD_FOOD, RAW_FOOD, COOKED_OF, JUNK, ARMOR_SLOTS,
   items, count, has, counts, freeSlots, tierOf, durabilityLeft, bestTool, toolTier, toolKindFor, equipFor, canHarvest,
-  bestWeapon, equipWeapon, wornArmor, armorPieces, wearBestArmor, offhandShield, hasShield, equipShield, foodItems, foodPoints, rawFoodCount
+  bestWeapon, equipWeapon, wornArmor, armorPieces, armorPoints, REGEN_FOOD, shelterBlock, betterArmorInPack, wearBestArmor, offhandShield, hasShield, equipShield, foodItems, foodPoints, rawFoodCount
 }

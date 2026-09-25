@@ -16,13 +16,17 @@ function reflexActive () { return reflexRef ? reflexRef.active() : null }
 // Zones the bot must never dig/place in unless the caller says so (its own base, a build site).
 // Each: {x1,y1,z1,x2,y2,z2,label}
 const zones = []
-function setZone (label, box) {
-  const i = zones.findIndex(z => z.label === label)
-  if (i >= 0) zones.splice(i, 1)
-  if (box) zones.push(Object.assign({ label }, box))
+function setZone (label, box) { setZones(label, box ? [box] : []) }
+// Several boxes under one label (the orchard: a small box round each tree - one box round trees scattered on every
+// side of home covered the base, the farm and the furnaces: nothing near home could be dug, levelled or placed)
+function setZones (label, boxes) {
+  for (let i = zones.length - 1; i >= 0; i--) if (zones[i].label === label) zones.splice(i, 1)
+  for (const box of boxes) zones.push(Object.assign({ label }, box))
 }
-function inZone (p, pad = 0) {
+// (except: zone labels to look through - a zone's owner asking about its own ground)
+function inZone (p, pad = 0, except = null) {
   for (const z of zones) {
+    if (except && except.includes(z.label)) continue
     if (p.x >= z.x1 - pad && p.x <= z.x2 + pad && p.y >= (z.y1 == null ? -999 : z.y1 - pad) && p.y <= (z.y2 == null ? 999 : z.y2 + pad) && p.z >= z.z1 - pad && p.z <= z.z2 + pad) return z
   }
   return null
@@ -30,11 +34,11 @@ function inZone (p, pad = 0) {
 
 // May a utility block (table/furnace/chest/bed) go here? Not in a protected zone and not in the
 // mine's walkway (a furnace on the staircase once sealed the mine face).
-function utilitySpotOK (p, { temporary = false } = {}) {
+function utilitySpotOK (p, { temporary = false, except = null } = {}) {
   // furniture stands on the floor, never on other furniture (a furnace on a chest seals the chest shut)
   const below = botRef ? world.at(botRef, p.x, p.y - 1, p.z) : null
   if (below && /(chest|furnace|crafting_table|_bed|barrel|smoker|blast_furnace|anvil|enchanting_table)$/.test(below.name)) return false
-  const z = inZone(p)
+  const z = inZone(p, 0, except)
   if (z && z.label !== 'base') return false // the base is exactly where tables/furnaces/chests belong
   // never block the safehouse doorway (furniture on the step inside the door locks us out)
   const plan = require('./memory').get().hutPlan
@@ -103,10 +107,14 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
   m.placeCost = 2
   m.allow1by1towers = place
   m.scafoldingBlocks = place ? scaffoldIds.slice() : []
+  // scaffold short (under half the builder's 32 in reserve): cobblestone will do to tower or bridge out (the build's stone, but a player
+  // walled into a one-wide shaft of its own cathedral wall with 137 cobble and one dirt climbs out on the cobble - the bot
+  // stood there twenty minutes, 2026-09-25; stray cobble is scaffold to the teardown)
+  if (place && bot.inventory.items().filter(i => scaffoldIds.includes(i.type)).reduce((a, i) => a + i.count, 0) < 16) { const cb = md.itemsByName.cobblestone; if (cb) m.scafoldingBlocks.push(cb.id) }
   m.allowParkour = false
   // walking costs no hunger, sprinting ~1 food point per 40 m: only sprint on a full belly
   m.allowSprinting = sprint === 'always' || (sprint && bot.food >= 18)
-  m.maxDropDown = 3
+  m.maxDropDown = world.SAFE_DROP
   m.infiniteLiquidDropdownDistance = false
   m.liquidCost = 3
   m.canOpenDoors = true
@@ -377,7 +385,15 @@ async function goTo (bot, goal, opts = {}) {
   if (took > 30000) log('move', `${label}: ${r.ok ? 'arrived' : r.why} after ${Math.round(took / 1000)}s at ${fmt(bot.entity && bot.entity.position)}`)
   return r
 }
-async function goToInner (bot, goal, opts, { timeoutMs, stuckMs, dig, place, allowZones, label, shouldStop, dryHead }) {
+async function goToInner (bot, goal, opts, a) {
+  const start = bot.entity ? bot.entity.position.clone() : null
+  const r = await goToInner2(bot, goal, opts, a)
+  // a walk that ended where it began, stuck or out of time: a give-up from this cell (the pit under the farm held the
+  // bot through walks that all ran out their time - "timeout" never counted, and it stood there another hour)
+  if (!r.ok && start && bot.entity && /stuck|timeout|noPath/.test(r.why) && bot.entity.position.distanceTo(start) < 2 && stuckHereAgain(bot)) await escapeUp(bot)
+  return r
+}
+async function goToInner2 (bot, goal, opts, { timeoutMs, stuckMs, dig, place, allowZones, label, shouldStop, dryHead }) {
   const deadline = Date.now() + timeoutMs
   const cancelled = control.token()
   let fails = 0
@@ -401,13 +417,75 @@ async function goToInner (bot, goal, opts, { timeoutMs, stuckMs, dig, place, all
     fails++
     // a stall next to a door is a door the planner would not open: cross it by hand
     if (await crossDoor(bot, goal).catch(e => { log('move', `door crossing threw: ${e.message}`); return false })) { fails = 0; continue }
-    if (fails >= 3) { log('move', `${label}: gave up (${r.why} x${fails}) at ${fmt(bot.entity.position)}`); return r }
+    if (fails >= 3) {
+      log('move', `${label}: gave up (${r.why} x${fails}) at ${fmt(bot.entity.position)}`)
+      return r
+    }
     await jiggle(bot)
   }
   return { ok: false, why: 'timeout' }
 }
 
 function fmt (p) { return p ? `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}` : '?' }
+
+// STUCK IN ONE PLACE: every walk giving up from the same cell, task after task. A hole under the farm, flowing water at
+// the feet and the soil for a ceiling, held the bot for forty minutes - no walk could plan the way out and each gave
+// up and the next task tried again (2026-09-25). The second give-up in five minutes from the same cell: climb straight
+// out, the way a player does - dig what is over the head (never a finished build block: act.dig guards those) and
+// tower up on whatever filler the pack holds, until there is open sky over us.
+const giveUps = new Map() // cell -> [times]
+async function stepUpSide (bot) {
+  const act = require('./act')
+  const f = bot.entity.position.floored()
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    const x = f.x + dx; const z = f.z + dz
+    const step = world.at(bot, x, f.y, z)
+    if (!step || !world.isSolid(step)) continue
+    const c1 = world.at(bot, x, f.y + 1, z); const c2 = world.at(bot, x, f.y + 2, z)
+    if (!c1 || !c2) continue
+    let ok = true
+    for (const c of [c2, c1]) {
+      if (world.isAirish(c)) continue
+      if (world.isWaterBlock(c) || world.isLavaBlock(c) || !world.NATURAL_RE.test(c.name)) { ok = false; break }
+      if (!await act.dig(bot, c.position, { allowZones: ['farm', 'base', 'orchard'], timeoutMs: 8000, noWalk: true })) { ok = false; break }
+    }
+    if (!ok) continue
+    const t0 = Date.now()
+    while (Date.now() - t0 < 2500 && Math.floor(bot.entity.position.y) <= f.y) {
+      await bot.look(Math.atan2(-(x + 0.5 - bot.entity.position.x), -(z + 0.5 - bot.entity.position.z)), 0, true).catch(() => {})
+      bot.setControlState('forward', true); bot.setControlState('jump', true)
+      await sleep(100)
+    }
+    bot.setControlState('forward', false); bot.setControlState('jump', false)
+    if (Math.floor(bot.entity.position.y) > f.y) return true
+  }
+  return false
+}
+function stuckHereAgain (bot) {
+  const k = fmt(bot.entity.position); const now = Date.now()
+  const t = (giveUps.get(k) || []).filter(x => now - x < 5 * 60000); t.push(now); giveUps.set(k, t)
+  return t.length >= 2
+}
+async function escapeUp (bot) {
+  const act = require('./act'); const gather = require('./gather')
+  const f0 = bot.entity.position.floored()
+  log('move', `stuck at ${fmt(f0)} walk after walk - climbing straight out`)
+  for (let i = 0; i < 16; i++) {
+    const f = bot.entity.position.floored()
+    if (bot.entity.onGround && !world.feetInWater(bot) && world.openSky(bot, { x: f.x, y: f.y, z: f.z })) break
+    for (const dy of [2, 1]) {
+      const b = world.at(bot, f.x, f.y + dy, f.z)
+      if (b && !world.isAirish(b) && !world.isWaterBlock(b) && !await act.dig(bot, b.position, { allowZones: ['farm', 'base', 'orchard', 'build'], timeoutMs: 8000, noWalk: true })) { log('move', `climbing out: can't clear ${b.name} over my head at ${fmt(b.position)}`); return false }
+    }
+    if (await gather.towerUp(bot)) continue
+    // no towering here (in water a jump never clears a block; or nothing to place): a step cut into the side - the two
+    // cells over a solid side block cleared, and up onto it
+    if (!await stepUpSide(bot)) { log('move', `climbing out: no way up from ${fmt(bot.entity.position)} (no tower, no side to cut a step in)`); return false }
+  }
+  giveUps.delete(fmt(f0))
+  log('move', `climbed out: from ${fmt(f0)} to ${fmt(bot.entity.position)}`)
+  return true
+}
 
 async function goNear (bot, pos, range = 2, opts = {}) {
   return goTo(bot, new goals.GoalNear(pos.x, pos.y, pos.z, range), opts)
@@ -560,6 +638,8 @@ async function travel (bot, target, opts = {}) {
     const gy = world.groundY(bot, lx, lz, Math.floor(me.y) + 30)
     const legGoal = (gy != null && !world.isWaterBlock(world.at(bot, lx, gy, lz))) ? new goals.GoalNear(lx, gy + 1, lz, 4) : new goals.GoalNearXZ(lx, lz, 4)
     const r = await goTo(bot, legGoal, { timeoutMs: 45000, stuckMs: 10000, label: label + ' leg', shouldStop })
+    // (new ground in view: note the sand, gravel and clay along the way - in the background)
+    try { require('./gather').survey(bot) } catch {}
     if (r.ok) { legFails = 0; continue }
     if (r.why === 'died' || r.why === 'stopped') return r
     const moved = world.dist2(bot.entity.position, me)
@@ -569,4 +649,4 @@ async function travel (bot, target, opts = {}) {
   return { ok: false, why: 'timeout' }
 }
 
-module.exports = { crossDoor, goals, bindReflex, bindBot, setZone, inZone, zones, utilitySpotOK, insideHut, setProtector, isProtected, surface, isUnderground, surfaceYHere, movementsFor, goTo, goNear, travel, stopMoving, runGoal, sleep, fmt, waitReflex }
+module.exports = { crossDoor, goals, bindReflex, bindBot, setZone, setZones, inZone, zones, utilitySpotOK, insideHut, setProtector, isProtected, surface, isUnderground, surfaceYHere, movementsFor, goTo, goNear, travel, stopMoving, runGoal, sleep, fmt, waitReflex }

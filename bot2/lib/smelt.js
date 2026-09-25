@@ -22,15 +22,27 @@ function fuelValue (name) {
   return 0
 }
 
-function inputFor (bot, output) {
+function inputFor (bot, output, count = 1) {
   const src = craft().SMELT[output]
   if (src !== '#log') return src
-  const w = craft().preferredWood(bot)
+  // any log burns to charcoal: the wood we hold (or bank) ENOUGH of for the batch, else the nearest tree's - one acacia
+  // log in the pack sent the bot exploring 144 blocks out for three more acacia logs past oak and spruce (2026-09-24)
+  const w = craft().preferredWood(bot, count * 4)
   return w + '_log'
 }
 
 function furnacesNear (bot, maxDist = 32) {
-  return world.findBlocks(bot, /^furnace$/, { maxDistance: maxDist, count: 12 })
+  return world.findBlocks(bot, /^furnace$/, { maxDistance: maxDist, count: 64 })
+}
+// THE home furnaces: every furnace round home out to the furnace bank's last ring (hut.furnaceSpots: ring k is 2k out
+// from the room, six rings). One definition - three lookups with three radii and counts (16/24, 16/32, 48/12) left
+// furnaces the loader never saw.
+function homeFurnaces (bot) {
+  const home = mem.get().home
+  if (!home) return furnacesNear(bot, 32)
+  const hp = mem.get().hutPlan
+  const half = hp ? Math.max(hp.interior.x2 - hp.interior.x1, hp.interior.z2 - hp.interior.z1) / 2 + 1 : 3
+  return world.findBlocks(bot, /^furnace$/, { maxDistance: Math.ceil((half + 2 * require('./hut').BANK_RINGS) * Math.SQRT2) + 1, count: 256, point: new Vec3(home.x, home.y, home.z) })
 }
 
 async function placeFurnace (bot) {
@@ -39,7 +51,10 @@ async function placeFurnace (bot) {
   // at home: the hut's utility spots (side-wall slots, then a row along the outside walls)
   const home = mem.get().home
   if (home && world.dist3(me, home) < 24) {
-    for (const s of require('./hut').utilitySpots(bot).slice(0, 6)) {
+    // the furnace bank round the safehouse first (as many as the build's smelting wants); the room and its first
+    // ring are the chests' and the table's
+    const hut = require('./hut')
+    for (const s of hut.furnaceSpots(bot, 6).slice(0, 6).concat(hut.utilitySpots(bot).slice(0, 6))) {
       if (!move.utilitySpotOK(s)) continue
       if (await act.place(bot, s, 'furnace', { allowZones: ['base'] })) {
         mem.addUnique('furnaces', s)
@@ -196,6 +211,25 @@ async function putFuel (bot, furnace, itemsToSmelt, { survival = false } = {}) {
   return remaining <= 0
 }
 
+// THE FURNACE LEDGER: which furnaces hold something of ours (loaded, or found with an input or an output). Collecting
+// and refuelling visit those - and any showing lit - never every furnace: with the bank grown to 35 furnaces each visit
+// home opened all 35 to find them empty, 26 minutes of walks in two and a half hours (2026-09-24). No ledger yet (the
+// first visit after it came in): every furnace once, to fill it.
+function fkey (p) { return `${p.x},${p.y},${p.z}` }
+function markFurnace (p, what) { mem.update(m => { m.furnaceUse = m.furnaceUse || {}; if (what) m.furnaceUse[fkey(p)] = what; else delete m.furnaceUse[fkey(p)] }) }
+function note (fb, f) {
+  let inp = null; let out = null
+  try { inp = f.inputItem(); out = f.outputItem() } catch {}
+  markFurnace(fb.position, inp || out ? { input: inp ? inp.name : null, output: out ? out.name : null, at: Date.now() } : null)
+}
+function busyFurnaces (bot) {
+  const all = homeFurnaces(bot)
+  const use = mem.get().furnaceUse
+  if (!use) return all
+  const lit = b => { try { return !!b.getProperties().lit } catch { return false } }
+  return all.filter(b => use[fkey(b.position)] || lit(b))
+}
+
 async function openAt (bot, block) {
   if (!act.reach(bot, block.position, 4)) {
     const r = await move.goTo(bot, new goals.GoalNear(block.position.x, block.position.y, block.position.z, 2), { timeoutMs: 30000, label: 'to furnace' })
@@ -206,7 +240,7 @@ async function openAt (bot, block) {
 
 // Smelt `count` of `output` and wait for it. Uses up to `maxFurnaces` furnaces in parallel.
 async function smeltItem (bot, output, count, ctx = {}) {
-  const input = inputFor(bot, output)
+  const input = inputFor(bot, output, count)
   if (!input) return false
   const target = inv.count(bot, output) + count
   if (inv.count(bot, input) < count) {
@@ -245,7 +279,7 @@ async function smeltItem (bot, output, count, ctx = {}) {
       if (inItem && inItem.name !== input) { f.close(); continue }
       if (!await putFuel(bot, f, left, { survival }) && !f.fuelItem()) { log('smelt', `no fuel that may burn for ${output}`); continue }
       const it = inv.items(bot).find(i => i.name === input)
-      if (it) { await f.putInput(it.type, null, Math.min(left, it.count)); loaded += Math.min(left, it.count) }
+      if (it) { await f.putInput(it.type, null, Math.min(left, it.count)); loaded += Math.min(left, it.count); markFurnace(fb.position, { input, at: Date.now() }) }
     } catch (e) { log('smelt', `loading furnace failed: ${e.message}`) } finally { try { f.close() } catch {} }
   }
   if (!loaded) {
@@ -276,7 +310,7 @@ async function smeltItem (bot, output, count, ctx = {}) {
 // Background smelting for bulk jobs: load every furnace at home with `input`, return at once.
 async function loadFurnaces (bot, input, maxItems, { anyWood = false } = {}) {
   const home = mem.get().home
-  let furns = home ? world.findBlocks(bot, /^furnace$/, { maxDistance: 16, count: 24, point: new Vec3(home.x, home.y, home.z) }) : furnacesNear(bot, 32)
+  let furns = homeFurnaces(bot)
   // the furnace inside the safehouse stays free for charcoal (torches) and cooking when there are others
   if (furns.length >= 3) furns = furns.filter(f => !move.insideHut(f.position))
   let loaded = 0
@@ -300,6 +334,7 @@ async function loadFurnaces (bot, input, maxItems, { anyWood = false } = {}) {
       if (!fuelled && !f.fuelItem()) continue
       const it = inv.items(bot).find(i => i.name === input)
       await f.putInput(it.type, null, k)
+      markFurnace(fb.position, { input, at: Date.now() })
       loaded += k
     } catch (e) { log('smelt', `load failed: ${e.message}`) } finally { try { f.close() } catch {} }
   }
@@ -355,7 +390,7 @@ async function refuelFurnaces (bot) {
   const home = mem.get().home
   if (!home) return 0
   let fed = 0
-  for (const fb of world.findBlocks(bot, /^furnace$/, { maxDistance: 16, count: 24, point: new Vec3(home.x, home.y, home.z) })) {
+  for (const fb of busyFurnaces(bot)) {
     let lit = false
     try { lit = !!fb.getProperties().lit } catch {}
     if (lit) continue
@@ -377,16 +412,18 @@ async function refuelFurnaces (bot) {
 
 async function collectFurnaces (bot) {
   const home = mem.get().home
-  const furns = furnacesNear(bot, 32).filter(f => !home || world.dist3(f.position, home) < 48)
+  const furns = home ? busyFurnaces(bot) : furnacesNear(bot, 32)
+  const first = !mem.get().furnaceUse
+  if (first) mem.set('furnaceUse', {})
   let got = 0
   for (const fb of furns) {
     const f = await openAt(bot, fb)
     if (!f) continue
-    try { const o = f.outputItem(); if (o) { await f.takeOutput(); got += o.count; landed(o.name, o.count) } } catch {} finally { try { f.close() } catch {} }
+    try { const o = f.outputItem(); if (o) { await f.takeOutput(); got += o.count; landed(o.name, o.count) } note(fb, f) } catch {} finally { try { f.close() } catch {} }
     if (inv.freeSlots(bot) <= 1) break
   }
   if (got) log('smelt', `collected ${got} items from the furnaces`)
   return got
 }
 
-module.exports = { burnForCharcoal, inFlight, smeltsTo, woodSurplus, smeltItem, loadFurnaces, collectFurnaces, refuelFurnaces, placeFurnace, furnacesNear, pickFuel, fuelValue, buildNeeds }
+module.exports = { burnForCharcoal, inFlight, smeltsTo, woodSurplus, smeltItem, loadFurnaces, collectFurnaces, refuelFurnaces, placeFurnace, furnacesNear, homeFurnaces, pickFuel, fuelValue, buildNeeds }

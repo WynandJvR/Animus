@@ -274,7 +274,7 @@ async function harvestCrops (bot, ctx = {}) {
   const ripe = world.findBlocks(bot, /^(wheat|carrots|potatoes|beetroots)$/, { maxDistance: 96, count: 40, point: new (require('vec3').Vec3)(home.x, home.y, home.z) })
     .filter(b => { try { const p = b.getProperties(); return Number(p.age) >= (b.name === 'beetroots' ? 3 : 7) } catch { return false } })
     // not where we have drowned before: a couple of wheat is not worth that pond again
-    .filter(b => !(mem.get().deaths || []).some(d => d.cause === 'water' && world.dist3(d, b.position) < 20))
+    .filter(b => !(mem.get().deaths || []).some(d => (d.place === 'water' || d.cause === 'water' || d.cause === 'drown') && world.dist3(d, b.position) < 20))
   if (!ripe.length) return 0
   log('food', `harvesting ${ripe.length} ripe crops`)
   let got = 0

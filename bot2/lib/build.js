@@ -532,7 +532,7 @@ async function placeCell (bot, c, j = job) {
     const r = await goSite(bot, new goals.GoalPlaceBlock(pos, bot.world, { range: 4, faces: usable.map(p => new Vec3(p.off[0], p.off[1], p.off[2])), LOS: true }), 'place')
     if (!r.ok && !act.reach(bot, pos, 4.8)) return false
   }
-  const ok = await act.place(bot, c, item.name, { plans: usable.length ? usable : plans, accept: b => nameOk(c, b.name), allowZones: ['build', 'base'], sneak: !c.doorLower && !/_door$/.test(item.name), tall: !!c.doorLower })
+  const ok = await act.place(bot, c, item.name, { plans: usable.length ? usable : plans, accept: b => nameOk(c, b.name), allowZones: ['build', 'base'], sneak: !c.doorLower && !/_door$/.test(item.name), tall: !!c.doorLower, keepExit: true })
   if (!ok) return false
   surveyCache = null
   if (cellDone(bot, c) !== true && c.want && c.want.open != null) {
@@ -563,7 +563,9 @@ async function buildStep (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     if (shouldStop && shouldStop()) break
     await reflex.waitClear()
     const todo = job.cells.filter(c => !c.doorUpper && cellDone(bot, c) !== true && (failed.get(key(c)) || 0) < 3)
-    if (!todo.length) return { placed, blockedOn: null, done: cellsDone(bot) }
+    // (nothing left to try but cells still missing: every one of them failed - stalled, the caller decides what
+    //  might be in their way)
+    if (!todo.length) { const done = cellsDone(bot); return { placed, blockedOn: null, done, stalled: !done } }
     // the band: attached cells and door tops never hold it down (a lantern under a roof slab waits for the
     // roof; the walls below it must not wait for the lantern)
     const lowestAll = lowestStructural(todo)

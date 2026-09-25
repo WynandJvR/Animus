@@ -16,7 +16,9 @@ const base = () => require('./base')
 const craft = () => require('./craft')
 
 const LEG_LEN = 40
-const SHIFT = 3
+// the tunnel is 3 wide (openTunnelCell): a leg shifts 4 over, a wall of one between it and the last - shifted 3, the new
+// leg ran against the old one and "walled up 3 cave openings" every step: our own tunnel, a third of the cobble put back
+const SHIFT = 4
 const WANT_ORES = /^(coal_ore|deepslate_coal_ore|iron_ore|deepslate_iron_ore|diamond_ore|deepslate_diamond_ore)$/ // what the bot uses: fuel/torches, iron gear, diamonds (copper/gold/redstone/lapis only filled the pack)
 const DIRS = [{ x: 1, z: 0 }, { x: 0, z: 1 }, { x: -1, z: 0 }, { x: 0, z: -1 }]
 
@@ -59,24 +61,49 @@ function chooseEntrance (bot) {
       if (gy == null) continue
       const y = gy + 1
       if (!world.standable(bot, x, y, z)) continue
-      if (move.inZone({ x, y, z }, 6) || underZone({ x, z })) continue
+      // (nor on the home grounds: a stairwell by the farm was a hole in the yard, on the walk home, dug at night)
+      if (move.inZone({ x, y, z }, 6) || underZone({ x, z }) || require('./gather').onGrounds({ x, y, z })) continue
       if (world.waterNear(bot, { x, y, z }, 4, -3, 1) || world.lavaNear(bot, { x, y: y - 2, z }, 3)) continue
       if ((mem.get().badMines || []).some(bm => world.dist2(bm, { x, z }) < 12)) continue
       const away = Math.abs(x - home.x) > Math.abs(z - home.z) ? { x: Math.sign(x - home.x) || 1, z: 0 } : { x: 0, z: Math.sign(z - home.z) || 1 }
+      // every open direction, the one whose covered stairs reach deepest (on a mountain top none reaches y16: the
+      // tunnel runs inside the mountain at the depth the cover allows - stone is stone for cobble)
+      let bestDir = null
       for (const dir of [away, { x: away.z, z: away.x }, { x: -away.z, z: -away.x }]) {
         if (pathBad({ x, z }, dir)) continue
-        found.push({ x, y, z, dir })
-        break
+        const lv = coveredLevel(bot, { x, y, z }, dir, levelFor(y))
+        if (lv != null && (!bestDir || lv < bestDir.level)) bestDir = { dir, level: lv }
       }
+      if (bestDir) found.push({ x, y, z, dir: bestDir.dir, level: bestDir.level })
     }
     if (found.length) {
       const p = found[0]
-      return { entrance: { x: p.x, y: p.y, z: p.z }, dir: p.dir, cursor: { x: p.x, y: p.y, z: p.z }, level: Math.max(12, Math.min(p.y - 20, 16)), stairsDone: false, leg: 0, legPos: 0, blocks: 0 }
+      if (p.level > levelFor(p.y)) log('mine', `the stairs stay under cover only to y${p.level} here (a hillside) - tunnelling there`)
+      return { entrance: { x: p.x, y: p.y, z: p.z }, dir: p.dir, cursor: { x: p.x, y: p.y, z: p.z }, level: p.level, stairsDone: false, leg: 0, legPos: 0, blocks: 0 }
     }
   }
   return null
 }
 function saveMine (m) { mem.set('mine', m) }
+function levelFor (y) { return Math.max(12, Math.min(y - 20, 16)) }
+// Does a staircase from p heading dir stay under the ground all the way down to `level`? The stairs drop one a step; on
+// a mountain the slope drops faster, and a staircase heading downhill came out of the hillside into open air at y86-103
+// - "the stairs are blocked, far above the working depth" - four new mines in twelve minutes (2026-09-24). Each step
+// past the first few needs the surface over it above the stair's own head room; unloaded ground is unknown (no).
+// Returns the deepest level the stairs reach under cover (at most `level`), or null when they are out in the open
+// before they are 8 below the entrance (no mine worth the name: a tunnel needs rock over it).
+function coveredLevel (bot, p, dir, level) {
+  let deepest = null
+  for (let k = 4; k <= p.y - level; k++) {
+    const x = p.x + dir.x * k; const z = p.z + dir.z * k
+    const gy = world.groundY(bot, x, z, p.y + 8)
+    if (gy == null || gy < p.y - k + 3) break
+    deepest = p.y - k
+  }
+  // (the tunnel legs run level from there: its own run needs cover too - a few steps back up keeps it inside)
+  if (deepest == null || p.y - deepest < 8) return null
+  return Math.min(p.y - 8, deepest + 4)
+}
 
 async function openCell (bot, p) {
   for (let i = 0; i < 8; i++) {
@@ -230,6 +257,13 @@ function minePath (m) {
   if (m.cursor) pts.push(m.cursor)
   return pts
 }
+// Are we in our own mine - on its staircase or at its face?
+function inOwnMine (bot) {
+  const m = mem.get().mine
+  if (!m || !m.entrance || !bot.entity) return false
+  const me = bot.entity.position
+  return minePath(m).some(p => world.dist2(p, me) < 8 && Math.abs(p.y - me.y) < 6)
+}
 function diedInMine (m) {
   // horizontal distance, a wide berth and a long memory: deaths 20 blocks straight below the tunnel (a ravine
   // under it) did not count in 3D and the bot fell into the same ravine again and again
@@ -270,8 +304,10 @@ async function mineFor (bot, itemName, target, ctx = {}) {
   await provisionForMine(bot)
   // get to the working face
   if (world.dist3(bot.entity.position, m.cursor) > 3) {
-    const far = world.dist2(bot.entity.position, m.cursor) > 40
-    if (far) await move.travel(bot, m.entrance, { range: 3, shouldStop: ctx.shouldStop, label: 'to mine' })
+    // the way down is the mine's own - entrance, stairs, tunnel - unless we are already in it. Judged by distance on
+    // the map alone, standing 40 blocks over the face counted as "near" and the planner took a way down through a cave
+    // lake at night; Drowned killed the bot in it (2026-09-24).
+    if (!inOwnMine(bot) && world.dist3(bot.entity.position, m.entrance) > 3) await move.travel(bot, m.entrance, { range: 3, shouldStop: ctx.shouldStop, label: 'to mine' })
     const r = await move.goTo(bot, new goals.GoalBlock(m.cursor.x, m.cursor.y, m.cursor.z), { timeoutMs: 120000, stuckMs: 15000, label: 'to mine face' })
     if (!r.ok) {
       log('mine', `can't reach the mine face at ${move.fmt(m.cursor)} (${r.why}) - starting a new mine`)
@@ -326,9 +362,14 @@ async function mineFor (bot, itemName, target, ctx = {}) {
     if (!ok) {
       if (++fails >= 3) {
         if (++turns > 4) { log('mine', `boxed in at ${move.fmt(m.cursor)} - abandoning this mine`); abandonMine(m); return false }
-        // stairs blocked well above the working depth: a tunnel just under the surface (under the castle,
-        // the hut) is no mine - start another
-        if (!m.stairsDone && m.cursor.y > m.level + 12) { log('mine', `the stairs are blocked at y${m.cursor.y}, far above the working depth - abandoning this mine`); abandonMine(m); return false }
+        // stairs blocked (water, lava, a cave) well above the working depth: still under the rock, this is a depth like
+        // any for cobble - tunnel here and keep the stairs already dug. On a cave-riddled mountain five new staircases
+        // in an hour ended "blocked, far above the working depth" (2026-09-24). Only a staircase still near the surface
+        // (under the castle, the hut) is no mine.
+        if (!m.stairsDone && m.cursor.y > m.level + 12) {
+          if (m.entrance.y - m.cursor.y < 8) { log('mine', `the stairs are blocked at y${m.cursor.y}, just under the surface - abandoning this mine`); abandonMine(m); return false }
+          log('mine', `the stairs are blocked at y${m.cursor.y} - tunnelling at this depth`)
+        }
         // hazard ahead: turn this leg
         log('mine', `blocked at ${move.fmt(m.cursor)} - turning`)
         m.dir = { x: -m.dir.z, z: m.dir.x }
@@ -368,12 +409,15 @@ async function sealBehind (bot, m) {
 async function plugOpenings (bot, cells, along) {
   const filler = () => fillerItem(bot)
   const side = { x: -along.z, z: along.x }
-  const top = cells.reduce((a, c) => (c.y > a.y ? c : a), cells[0])
+  // the outside of the face only: a side neighbour that is not itself one of the new cells, and the cell over each
+  // column's top (with a three-wide face the cells beside the middle column are tunnel, not cave)
+  const isCell = p => cells.some(o => o.x === p.x && o.y === p.y && o.z === p.z)
   const holes = []
   for (const c of cells) {
-    for (const k of [1, -1]) holes.push({ x: c.x + side.x * k, y: c.y, z: c.z + side.z * k })
+    for (const k of [1, -1]) { const h = { x: c.x + side.x * k, y: c.y, z: c.z + side.z * k }; if (!isCell(h)) holes.push(h) }
+    const up = { x: c.x, y: c.y + 1, z: c.z }
+    if (!isCell(up)) holes.push(up)
   }
-  holes.push({ x: top.x, y: top.y + 1, z: top.z })
   let n = 0
   for (const h of holes) {
     const b = world.at(bot, h.x, h.y, h.z)
@@ -462,22 +506,45 @@ async function tunnelStep (bot, m) {
 
 async function openTunnelCell (bot, from, q) {
   if (underZone(q)) return false // never under the castle or the base
-  // three high: 3 cobble a step for the same walk and checks as 2 (stone for the castle is the bottleneck)
-  const cells = [{ x: q.x, y: q.y + 2, z: q.z }, { x: q.x, y: q.y + 1, z: q.z }, q]
-  for (const cell of cells) {
-    const f = fluidAround(bot, cell, p => (p.x === from.x && p.z === from.z) || cells.some(o => o.x === p.x && o.y === p.y && o.z === p.z))
+  // rock over the tunnel: the surface at least two above its three-high roof. A level tunnel on a hillside ran out
+  // into the open slope and walled up the "cave openings" - the sky - with cobble and torches: a cut across the hill
+  // that looked like a building (2026-09-24). Open ground ahead is a blocked step: the leg turns back into the hill.
+  const gy = world.groundY(bot, q.x, q.z, q.y + 48)
+  if (gy == null || gy < q.y + 4) return false
+  // three high AND three wide: 9 cobble a step for the same walk and checks as 3. The step's fixed work (stepping in,
+  // checking for water, walling up cave openings, the floor, the wall ores, a torch) was ~5s against ~1.8s of digging,
+  // 0.45 cobble a second for a 33,000-cobble build (2026-09-24). The middle column is the tunnel; the side columns are
+  // taken when they can be (fluid beside one or a block that won't come out skips that column, never the step).
+  const along = { x: q.x - from.x, z: q.z - from.z }
+  const side = { x: -along.z, z: along.x }
+  const column = k => [2, 1, 0].map(dy => ({ x: q.x + side.x * k, y: q.y + dy, z: q.z + side.z * k }))
+  const mid = column(0)
+  const sides = [column(1), column(-1)].filter(col => !underZone(col[0]))
+  // (open already: the column we stand in and the face we dug last step)
+  const behind = p => [-1, 0, 1].some(k => p.x === from.x + side.x * k && p.z === from.z + side.z * k)
+  const inFace = p => mid.concat(...sides).some(o => o.x === p.x && o.y === p.y && o.z === p.z)
+  for (const cell of mid) {
+    const f = fluidAround(bot, cell, p => behind(p) || inFace(p))
     if (f) { log('mine', `${f} beside the tunnel at ${move.fmt(cell)}`); return false }
   }
-  for (const cell of cells) if (!await openCell(bot, cell)) return false
+  for (const cell of mid) if (!await openCell(bot, cell)) return false
+  const opened = mid.slice()
+  for (const col of sides) {
+    if (col.some(cell => fluidAround(bot, cell, p => behind(p) || inFace(p)))) continue
+    let ok = true
+    for (const cell of col) if (!await openCell(bot, cell)) { ok = false; break }
+    if (ok) opened.push(...col)
+  }
+  const cells = opened
   if (!await plugWater(bot, cells)) return false
   await plugOpenings(bot, cells, { x: q.x - from.x, z: q.z - from.z })
   if (!await ensureFloor(bot, q)) return false
   if (!await stepInto(bot, q)) return false
   const m = mem.get().mine
-  if (m) { m.cursor = { x: q.x, y: q.y, z: q.z }; m.blocks = (m.blocks || 0) + 1 }
+  if (m) { m.cursor = { x: q.x, y: q.y, z: q.z }; m.blocks = (m.blocks || 0) + cells.length }
   await takeWallOres(bot)
   if (m) await maybeTorch(bot, m)
   return true
 }
 
-module.exports = { mineFor, chooseEntrance, takeWallOres }
+module.exports = { mineFor, chooseEntrance, takeWallOres, inOwnMine }

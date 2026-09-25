@@ -62,9 +62,12 @@ async function tableNear (bot, maxDist = 24) {
   return t || null
 }
 
+// A table this far off is used (walked to); further, one is made here. One number for the ingredient loop's "will a
+// table be made?" and getTable's "is there one?".
+const TABLE_WALK = 48
 async function getTable (bot, ctx) {
   // an existing table within a short walk beats placing one (and a tunnel has no room for one)
-  let t = await tableNear(bot, 48)
+  let t = await tableNear(bot, TABLE_WALK)
   if (t) return t
   if (!inv.has(bot, 'crafting_table')) {
     const ok = await ensure(bot, 'crafting_table', 1, ctx)
@@ -247,8 +250,13 @@ function preferredWood (bot, needPlanks = 1) {
   for (const w of WOODS) { const n = (c[w + '_planks'] || 0) + (c[w + '_log'] || 0) * 4 + (bank[w + '_planks'] || 0) + (bank[w + '_log'] || 0) * 4; if (n > bnB) { bnB = n; bestB = w } }
   if (bestB && bnB >= needPlanks) return bestB
   // not enough held: the wood that grows nearest (natural trees, outside protected zones)
-  const t = world.findBlocks(bot, /^(oak|spruce|birch|jungle|acacia|dark_oak|mangrove|cherry|pale_oak)_log$/, { maxDistance: 64, count: 8, filter: b => !move.inZone(b.position, 2) })[0]
+  const t = world.findBlocks(bot, /^(oak|spruce|birch|jungle|acacia|dark_oak|mangrove|cherry|pale_oak)_log$/, { maxDistance: 64, count: 8, filter: b => require('./gather').treeOK(b) })[0] // (the orchard's trees count as wood that grows here)
   if (t) return t.name.replace('_log', '')
+  // none in sight: the nearest forest we remember (seen on a walk, felled before, or pointed out by the operator)
+  const g = require('./gather')
+  let near = null
+  for (const w of WOODS) { const k = g.knownResource(w + '_log', bot.entity.position); if (k && (!near || world.dist2(k, bot.entity.position) < world.dist2(near.p, bot.entity.position))) near = { w, p: k } }
+  if (near) return near.w
   return best || 'oak'
 }
 
@@ -261,13 +269,15 @@ async function craftItem (bot, name, n, ctx) {
   const perCraft = r.result.count || 1
   const crafts = Math.ceil(n / perCraft)
   const need = recipeIngredients(r)
-  // a 3x3 recipe needs the table FIRST - making the table after the ingredients spends their planks
-  if (recipeNeedsTable(r) && !(await tableNear(bot, 24)) && !inv.has(bot, 'crafting_table')) {
-    if (!await ensure(bot, 'crafting_table', 1, ctx)) return false
-  }
   // resolve "any planks" variants to the wood we hold. Repeated until every ingredient is present at
   // once: making one ingredient can eat another (sticks are crafted FROM the pickaxe's planks).
   for (let pass = 0; pass < 3; pass++) {
+    // a 3x3 recipe needs the table FIRST - making the table after the ingredients spends their planks. Asked on every
+    // pass, from where we stand now: getting an ingredient can walk us away from the table we meant to use (the
+    // chest's planks came from a tree 60 blocks from home; the table made there ate 4 of the 8, 2026-09-24)
+    if (recipeNeedsTable(r) && !(await tableNear(bot, TABLE_WALK)) && !inv.has(bot, 'crafting_table')) {
+      if (!await ensure(bot, 'crafting_table', 1, ctx)) return false
+    }
     let short = false
     for (const [id, per] of Object.entries(need)) {
       let ing = md.items[id].name
@@ -279,7 +289,14 @@ async function craftItem (bot, name, n, ctx) {
       }
       if (inv.count(bot, ing) < per * crafts) {
         short = true
-        if (!await ensure(bot, ing, total, ctx)) { log('craft', `can't get ${total} ${ing} for ${name}`); return false }
+        if (!await ensure(bot, ing, total, ctx)) {
+          // a wood that doesn't grow here (chosen for a log or two in the pack): any planks do, so the wood that does
+          // grow here - "chop acacia_log: no trees found" with oaks all round, two sticks never made (2026-09-24)
+          const alt = /_planks$/.test(ing) && world.findBlocks(bot, /_log$/, { maxDistance: 64, count: 4, filter: b => require('./gather').treeOK(b) })[0]
+          const ing2 = alt ? alt.name.replace(/_log$/, '_planks') : null
+          const takes = ing2 && ing2 !== ing && md.recipes[item.id].some(rr => Object.keys(recipeIngredients(rr)).some(k => md.items[k].name === ing2))
+          if (!takes || !await ensure(bot, ing2, total, ctx)) { log('craft', `can't get ${total} ${ing} for ${name}`); return false }
+        }
       }
     }
     if (!short) break
