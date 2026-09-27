@@ -111,7 +111,13 @@ async function openChest (bot, p) {
     chestCache()[key(p)] = { items, free: slots - w.containerItems().length, t: Date.now() }
     mem.save()
     return w
-  } catch (e) { unreachable.set(key(p), Date.now()); log('base', `couldn't open chest at ${move.fmt(p)}: ${e.message} - skipping it for a while`); return null }
+  } catch (e) {
+    unreachable.set(key(p), Date.now())
+    // (why it would not open, for the next one: where we stood, how far, and whether a window was still up)
+    const me = bot.entity.position
+    log('base', `couldn't open chest at ${move.fmt(p)}: ${e.message} - skipping it for a while (from ${move.fmt(me.floored())}, ${world.dist3(me, { x: p.x + 0.5, y: p.y + 0.5, z: p.z + 0.5 }).toFixed(1)}b, window ${bot.currentWindow ? bot.currentWindow.type || 'open' : 'none'})`)
+    return null
+  }
 }
 function refreshCache (w, p) {
   const items = {}
@@ -214,16 +220,25 @@ async function depositItem (bot, name, n = 1) {
 
 async function depositAll (bot, { keep = keepCount } = {}) {
   const want = () => inv.items(bot).filter(i => i.count > 0 && inv.count(bot, i.name) > keep(bot, i))
-  let rounds = 0
+  let rounds = 0; const skipped = new Set()
   while (want().length && rounds++ < 6) {
-    let target = knownChests(bot).find(p => { const c = chestCache()[key(p)]; return !c || c.free > 2 })
+    let target = knownChests(bot).find(p => !skipped.has(key(p)) && (() => { const c = chestCache()[key(p)]; return !c || c.free > 2 })())
+    // (a new chest only when every chest here was read FULL: one that merely would not open is no reason - a new chest a
+    //  deposit, all through a spell of timeouts, is a yard of chests; the deposit waits instead - audit 2026-09-28)
+    if ((!target || world.dist3(target, bot.entity.position) > 48) && skipped.size) {
+      log('base', `the chest${skipped.size > 1 ? 's' : ''} at ${[...skipped].join(' / ')} won't open - the deposit waits (${want().reduce((n, i) => n + i.count, 0)} items)`)
+      return false
+    }
     if (!target || world.dist3(target, bot.entity.position) > 48) {
       const placed = await placeChest(bot)
       if (!placed) { log('base', 'no chest with room and could not place one'); return false }
       target = placed
     }
     const w = await openChest(bot, target)
-    if (!w) { mem.removePos('chests', target); continue }
+    // (a chest that would not open this time is skipped this round, never forgotten: a 20s open timeout erased the chest
+    //  holding the castle's stone from the list, its contents from the bank, and the build waited on stock it had -
+    //  2026-09-28. openChest itself forgets one that is really gone)
+    if (!w) { skipped.add(key(target)); continue }
     try {
       for (const it of want()) {
         const total = inv.count(bot, it.name)
