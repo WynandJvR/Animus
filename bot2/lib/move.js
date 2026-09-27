@@ -10,7 +10,9 @@ const control = require('./control')
 let reflexRef = null // set by main: { active(): string|null }
 function bindReflex (r) { reflexRef = r }
 let botRef = null
-function bindBot (b) { botRef = b }
+// (a replan - the planner's own digs and places changed the ground - drops every movements' drop memo: audit #24)
+let pathGen = 0
+function bindBot (b) { botRef = b; try { b.on('path_reset', () => { pathGen++ }) } catch {} }
 function reflexActive () { return reflexRef ? reflexRef.active() : null }
 
 // Zones the bot must never dig/place in unless the caller says so (its own base, a build site).
@@ -22,6 +24,21 @@ function setZone (label, box) { setZones(label, box ? [box] : []) }
 function setZones (label, boxes) {
   for (let i = zones.length - 1; i >= 0; i--) if (zones[i].label === label) zones.splice(i, 1)
   for (const box of boxes) zones.push(Object.assign({ label }, box))
+}
+// The ground a build stands on: its footprint +8 in x/z, at any depth up to its top. No dig path goes through it but the
+// builder's own (allowZones 'build') - an ore trip tunnelled under the castle's edge, stuck 98s and came up through the
+// plaza, and a zone that starts at the build's floor never saw it (2026-09-27; the audit: one rule, not per caller)
+function underBuild (p) {
+  let j = null; try { j = require('./build').getJob() } catch {}
+  if (!j || !j.box || !p) return false
+  // (BELOW its floor - above it the build zone itself rules - and never another zone's ground: the safehouse and the farm
+  //  stand within 8 of this castle's edge, and their own work must go on)
+  if (!(p.x >= j.box.x1 - 8 && p.x <= j.box.x2 + 8 && p.z >= j.box.z1 - 8 && p.z <= j.box.z2 + 8 && p.y < j.box.y1)) return false
+  const z = inZone(p, 1); return !z || z.label === 'build'
+}
+// A zone right overhead (its footprint, up to 48 below its floor): a hole there is a way up through it
+function underZone (p, pad = 0) {
+  return zones.find(z => z.y1 != null && p.y < z.y1 - pad && p.y >= z.y1 - 48 && p.x >= z.x1 - pad && p.x <= z.x2 + pad && p.z >= z.z1 - pad && p.z <= z.z2 + pad) || null
 }
 // (except: zone labels to look through - a zone's owner asking about its own ground)
 function inZone (p, pad = 0, except = null) {
@@ -94,6 +111,9 @@ let doorIds = null
 //            river, the air reflex took the body, and at night the bot drowned there (2026-09-22). A walk that must
 //            dive says so (false) - none does today.
 function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint = true, dryHead = true } = {}) {
+  // (the drop under a cell, once per plan: the step callbacks asked ~100 uncached blockAt per expanded node - audit #24)
+  const drops = new Map(); let dropGen = pathGen
+  const dropAt = (x, y, z, lim) => { if (dropGen !== pathGen || drops.size > 20000) { drops.clear(); dropGen = pathGen } const key = x + ',' + y + ',' + z + ',' + (lim || ''); let v = drops.get(key); if (v === undefined) { v = world.dropAt(bot, x, y, z, lim); drops.set(key, v) } return v }
   const md = world.data(bot)
   const m = new Movements(bot)
   if (!cantBreakIds) {
@@ -137,12 +157,25 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
   m.exclusionAreasStep.push(block => (block && doorIds.has(block.type)) ? 4 : 0)
   const allowed = new Set(allowZones)
   // (blocks in unloaded chunks reach these callbacks without a position: a throw here aborts A*)
-  m.exclusionAreasBreak.push(block => { if (!block || !block.position) return 0; const z = inZone(block.position); return (z && !allowed.has(z.label)) ? 100 : 0 })
+  // (the farm never needs the planner's stepping stones or tunnels: the farm tasks' own walks paved the crops with
+  //  dirt and cobble to cross them - a stepping stone cost 2 against 25 a step on farmland - and the levelling took
+  //  them away again, 3-7 fixes a minute, 2026-09-26. Placing and digging there is refused for every walk.)
+  m.exclusionAreasBreak.push(block => { if (!block || !block.position) return 0; const z = inZone(block.position); return z && z.label === 'farm' ? 101 : (z && !allowed.has(z.label)) ? 100 : 0 })
   m.exclusionAreasBreak.push(block => isProtected(block, 'walk') ? 100 : 0)
+  m.exclusionAreasBreak.push(block => (block && block.position && !allowed.has('build') && underBuild(block.position)) ? 100 : 0) // (under the build: the builder's own digs only)
+  // never a stepping stone on a chest's lid: it shuts the chest (audit R6, 2026-09-27)
+  const lids = new Set((require('./memory').get().chests || []).map(c => `${c.x},${c.y + 1},${c.z}`))
+  m.exclusionAreasPlace.push(block => (block && block.position && lids.has(`${block.position.x},${block.position.y},${block.position.z}`)) ? 100 : 0)
   m.exclusionAreasPlace.push(block => {
     if (!block || !block.position) return 0
-    const z = inZone(block.position); if (z && !allowed.has(z.label)) return 100
-    return world.isWaterBlock(block) ? 100 : 0 // never build causeways into water
+    const z = inZone(block.position); if (z && z.label === 'farm') return 101; if (z && !allowed.has(z.label)) return 100
+    if (world.isWaterBlock(block)) return 100 // never build causeways into water
+    // never a block with a fall under it that hurts: a player does not lay a one-wide bridge out into the air to reach
+    // ground below a cliff. The planner, held to SAFE_DROP steps down, bridged 31 blocks north off the plaza at y124,
+    // 60 over the valley, toward sand at y62 - and the bot fell off its end placing the next block (2026-09-25).
+    // (A tower's block goes under our own feet, on ground; a gap a step wide has its floor within reach.)
+    const p = block.position
+    return dropAt(p.x, p.y, p.z) > world.SAFE_DROP ? 101 : 0
   })
   // Swimming along a surface is fine (the feet in the top water cell, the head in air); a path node with the HEAD
   // under water is how bots drown.
@@ -151,6 +184,27 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
     const p = block.position
     const head = bot.blockAt(p.offset(0, 1, 0))
     return (head && world.isWaterBlock(head)) ? (dryHead ? 101 : 40) : 0
+  })
+  // A player keeps off a one-wide way over a drop: a step with a fall that hurts on two sides or more (a wall top, a
+  // bridge, a ridge) costs heavily - a way round is taken when there is one. The bot walked home along its own sky
+  // bridge 60 over the valley and stepped off its end, 58 blocks (2026-09-25). (Costly, not refused: the builder
+  // still works from its own wall tops when nothing else reaches.)
+  m.exclusionAreasStep.push(block => {
+    if (!block || !block.position) return 0
+    const p = block.position
+    let sides = 0
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) if (dropAt(p.x + dx, p.y, p.z + dz, world.SAFE_DROP + 1) > world.SAFE_DROP) sides++
+    return sides >= 2 ? 30 : 0
+  })
+  // Never under the build: inside its footprint below its base the plaza overhangs the mountainside, a dark hollow
+  // full of mobs - walks to the site routed through it, and a creeper there took the iron set with it (the blast
+  // destroys what it drops), after a zombie and a skeleton there the night before (2026-09-27).
+  m.exclusionAreasStep.push(block => {
+    if (!block || !block.position) return 0
+    let j = null; try { j = require('./build').getJob() } catch {}
+    if (!j || !j.box) return 0
+    const p = block.position; const b = j.box
+    return (p.x >= b.x1 && p.x <= b.x2 && p.z >= b.z1 && p.z <= b.z2 && p.y < b.y1) ? 60 : 0
   })
   // A player walks round a field: stepping down onto farmland tramples it back to dirt. The plot sat a block below
   // the path from the safehouse to the furnaces and every trip undid the planting - "4/20 cells planted (1 just
@@ -407,7 +461,11 @@ async function goToInner2 (bot, goal, opts, { timeoutMs, stuckMs, dig, place, al
     // you may always work your way out of where you stand: inside the castle walls a walk to the furnace
     // could not scaffold over them (the build zone was off limits) and timed out for minutes
     // (finished build blocks stay unbreakable - the protector guards them in every zone)
-    const here = inZone(bot.entity.position.floored())
+    // (and a zone right overhead: in a shaft under the castle's footprint, the way out runs up through the zone's first
+    //  layers - forbidden, the bot went up and down its night hole for 10 minutes, 2026-09-27)
+    const fp = bot.entity.position.floored()
+    // (only when roofed in: under the footprint in the open - a mine far below, the yard - unlocks nothing; audit #42)
+    const here = inZone(fp) || (!world.openSky(bot, fp) && underZone(fp)) || null
     const zonesOk = here && !allowZones.includes(here.label) ? allowZones.concat([here.label]) : allowZones
     const r = await runGoal(bot, goal, { timeoutMs: Math.max(2000, deadline - Date.now()), stuckMs, movements: movementsFor(bot, { dig, place, allowZones: zonesOk, dryHead }) })
     if (r.ok) return r
@@ -466,9 +524,30 @@ function stuckHereAgain (bot) {
   const t = (giveUps.get(k) || []).filter(x => now - x < 5 * 60000); t.push(now); giveUps.set(k, t)
   return t.length >= 2
 }
+let escaping = false // (its own walks give up too: never re-entered)
 async function escapeUp (bot) {
+  if (escaping) return false
+  escaping = true
+  try { return await escapeUpInner(bot) } finally { escaping = false }
+}
+async function escapeUpInner (bot) {
   const act = require('./act'); const gather = require('./gather')
   const f0 = bot.entity.position.floored()
+  // on open ground under the sky there is nothing to climb out of: step to a free cell beside us and let the next walk
+  // plan from there. Every walk from one spot on the cliff under the cathedral's north edge gave up for 20 minutes;
+  // one step down the slope and the same walk went straight through (2026-09-26).
+  if (bot.entity.onGround && !world.feetInWater(bot) && world.openSky(bot, { x: f0.x, y: f0.y, z: f0.z })) {
+    const cells = []
+    for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) for (const dy of [0, -1, 1, -2]) {
+      if (!dx && !dz) continue
+      const x = f0.x + dx; const y = f0.y + dy; const z = f0.z + dz
+      if (world.standable(bot, x, y, z) && world.dropAt(bot, x, y, z) === 0) cells.push({ x, y, z, d: Math.abs(dx) + Math.abs(dz) + Math.abs(dy) })
+    }
+    for (const c of cells.sort((a, b) => a.d - b.d).slice(0, 4)) {
+      const r = await goTo(bot, new goals.GoalBlock(c.x, c.y, c.z), { timeoutMs: 8000, stuckMs: 4000, dig: false, place: false, label: 'step aside' })
+      if (r.ok) { giveUps.delete(fmt(f0)); log('move', `stuck at ${fmt(f0)} - stepped aside to ${fmt(c)}`); return true }
+    }
+  }
   log('move', `stuck at ${fmt(f0)} walk after walk - climbing straight out`)
   for (let i = 0; i < 16; i++) {
     const f = bot.entity.position.floored()
@@ -565,6 +644,12 @@ async function surface (bot, { shouldStop } = {}) {
 
 // A crossing that got us somewhere clears the boat's record; a failed one - or a "crossing" of a few blocks, which is
 // land and water taking turns at one spot (launch, bump, land, launch...) - counts against it. Three and travel swims.
+const SWIM_MAX = 40 // (blocks of open water swum without a boat: a river, not a sea)
+const SWIM_LAST_RESORT = 120 // (stranded with no way to a boat: the most open water swum rather than stay for ever)
+// refusals at the same spot (within 8 blocks), counted: three in a row with no tree near is "stranded"
+let stranded = { at: null, n: 0 }
+function noteStranded (bot) { const p = bot.entity.position; if (stranded.at && world.dist2(stranded.at, p) < 8) stranded.n++; else stranded = { at: p.clone(), n: 1 } }
+function strandedAt (bot) { return stranded.at && world.dist2(stranded.at, bot.entity.position) < 8 ? stranded.n : 0 }
 function boatScore (r, fails) {
   if (r.why === 'no boat') return 3
   if (!r.ok || (r.travelled || 0) < 8) return fails + 1
@@ -574,7 +659,10 @@ function boatScore (r, fails) {
 // Long distance: legs of ~40 blocks toward the target so A* never searches unloaded space.
 // A failed leg bends left/right before giving up. Open water on the line is crossed by boat (boat.js).
 async function travel (bot, target, opts = {}) {
-  const { range = 3, shouldStop: stop0, label = 'travel', maxMs = 15 * 60000 } = opts
+  // (anyY: a place on the map, not a block - the ground there at whatever height it is. An explore leg aimed at its own
+  //  start height over a valley 50 lower; the planner towered up out of the valley toward it and the bot fell 28
+  //  blocks off the pillar, 2026-09-26)
+  const { range = 3, shouldStop: stop0, label = 'travel', maxMs = 15 * 60000, anyY = false } = opts
   const boat = require('./boat')
   // A stop asked for over open water waits for land: the night rule stopped a walk mid-ocean and the bot trod
   // water "staying put" until it drowned (2026-09-23). Only the operator's stop (control) ends a trip afloat.
@@ -610,29 +698,66 @@ async function travel (bot, target, opts = {}) {
     }
     if (dxz <= Math.max(range, 24)) {
       if (target.y - me.y > 4 && isUnderground(bot) && surfaceTries < 3) { surfaceTries++; await surface(bot, { shouldStop }); continue }
-      const r = await goTo(bot, new goals.GoalNear(target.x, target.y, target.z, range), { timeoutMs: 60000, label, shouldStop })
+      const r = await goTo(bot, anyY ? new goals.GoalNearXZ(target.x, target.z, range) : new goals.GoalNear(target.x, target.y, target.z, range), { timeoutMs: 60000, label, shouldStop })
       return r
     }
     if (Date.now() - lastLog > 30000) { lastLog = Date.now(); log('move', `${label}: ${Math.round(dxz)}b to ${fmt(target)} from ${fmt(me)}`) }
     // long walks happen on the surface, never as a tunnel through rock
     if (dxz > 48 && surfaceTries < 3 && isUnderground(bot) && !(target.y < me.y - 4)) { surfaceTries++; await surface(bot, { shouldStop }); continue }
     let step = Math.min(40, dxz)
-    // open water on the line ahead: at its edge, cross by boat; before it, walk only as far as the shore
-    // (a leg aimed into the sea swam out to its end). No boat to be had / launches failing: swim, as before.
-    if (legFails === 0 && boatFails < 3 && !boat.busy()) {
-      const plan = boat.decideLeg(boat.scanLine(bot, me, target), { swimming: boat.swimming(bot), step })
-      if (plan.mode === 'boat') {
+    // open water on the line ahead: at its edge, cross by boat; before it, walk only as far as the shore (a leg aimed into
+    // the sea swam out to its end). No boat that works: a short stretch is swum, a long one is not started.
+    // the leg's own heading (a failed leg bends it): the water on THAT line is what this leg would swim - judged every
+    // leg, not only on a straight one (a bent 40-block leg aimed out over the sea, swam, and the "no boat" guard never ran
+    // because by then the bot was swimming; audit R2, 2026-09-27)
+    const ang = Math.atan2(target.z - me.z, target.x - me.x) + (legFails === 0 ? 0 : (legFails % 2 ? 1 : -1) * 0.6 * Math.ceil(legFails / 2))
+    let strandedSwim = false
+    {
+      const along = { x: me.x + Math.cos(ang) * dxz, y: me.y, z: me.z + Math.sin(ang) * dxz }
+      const kinds = boat.scanLine(bot, me, along)
+      const plan = boat.decideLeg(kinds, { swimming: boat.swimming(bot), step })
+      // (while a boat is being made - a walk to the trees inside ensureBoat - only the launch waits: the swim refusal and
+      //  the walk to the shore still hold; audit #4)
+      if (plan.mode === 'boat' && boatFails < 3 && !boat.busy()) {
         log('move', `${label}: open water ahead (${plan.run}b+ from ${plan.waterAt}b out) - crossing by boat`)
         const r = await boat.cross(bot, target, { range, shouldStop })
         if (r.why === 'stopped') return { ok: false, why: 'stopped' }
         boatFails = boatScore(r, boatFails)
         continue
       }
-      if (plan.toShore) step = plan.legLen
+      // no boat (or none that launches) and more water on this heading than a swim: never start swimming it from land -
+      // the walk ends here and says why; with no boat the kit wants one (wantBoat) and the tools task makes it (audit #31, R3)
+      // (the refusal is not for ever: on a treeless islet no boat can ever be made, and "not swimming it" came back each
+      //  leg - the third refusal here in a row, with no tree in sight, swims after all, up to SWIM_LAST_RESORT; audit R3)
+      // ...only to a far shore SEEN on the line (the water run ends in land inside the scan, no unloaded column in it), in
+      // daylight with the crossing's time left, above the hurt line and fed - never into sea of unknown width at night
+      // (the scan stops at 64, so a length cap alone capped nothing; audit A)
+      const w0 = plan.waterAt ? plan.waterAt - 1 : -1; const run = w0 < 0 ? '' : kinds.slice(w0).split('l')[0] // (the run decideLeg judged: one rule)
+      const shoreSeen = w0 >= 0 && kinds.indexOf('l', w0) > w0 && !run.includes('?')
+      const fit = world.phase(bot) === 'day' && world.ticksUntilNight(bot) > run.length * 20 + 1200 && bot.health > (reflexRef && reflexRef.hurtLine ? reflexRef.hurtLine() : 9) && bot.food > 6
+      const stranded = plan.mode === 'boat' && boatFails >= 3 && shoreSeen && fit && strandedAt(bot) >= 2 && !world.findBlocks(bot, /_log$/, { maxDistance: 32, count: 1 }).length
+      strandedSwim = stranded
+      if (stranded) log('move', `${label}: no boat and no tree to make one here - swimming the ${plan.run}b+ to the far shore as the last resort`)
+      if (!stranded && plan.mode === 'boat' && boatFails >= 3 && plan.run > SWIM_MAX && !boat.swimming(bot)) {
+        noteStranded(bot)
+        const noBoat = !boat.boatItem(bot) // (boat.js's one rule: a bamboo raft is a boat too - audit #7)
+        log('move', `${label}: ${plan.run}b+ of open water on this heading and ${noBoat ? 'no boat' : 'the boat keeps failing to launch here'} - not swimming it`)
+        if (noBoat) require('./memory').set('wantBoat', true)
+        return { ok: false, why: noBoat ? 'no boat for open water' : 'boat launches failing' }
+      }
+      if (plan.toShore) step = plan.legLen // (walk only as far as the shore either way)
     }
-    const ang = Math.atan2(target.z - me.z, target.x - me.x) + (legFails === 0 ? 0 : (legFails % 2 ? 1 : -1) * 0.6 * Math.ceil(legFails / 2))
-    const lx = Math.round(me.x + Math.cos(ang) * step)
-    const lz = Math.round(me.z + Math.sin(ang) * step)
+    let lx = Math.round(me.x + Math.cos(ang) * step)
+    let lz = Math.round(me.z + Math.sin(ang) * step)
+    // from land a leg never ENDS in water: the end is drawn back along the heading to the last land (the backstop under
+    // decideLeg - a leg end over the sea is a swim goal; audit B1)
+    if (!boat.swimming(bot) && !bot.vehicle && !strandedSwim) { // (the last-resort swim is the one leg that ends in water: B)
+      for (let k = Math.round(step); k >= 2; k--) {
+        const x = Math.round(me.x + Math.cos(ang) * k); const z = Math.round(me.z + Math.sin(ang) * k)
+        const g0 = world.groundY(bot, x, z, Math.floor(me.y) + 30)
+        if (g0 == null || !world.isWaterBlock(world.at(bot, x, g0, z))) { lx = x; lz = z; break }
+      }
+    }
     // aim at the SURFACE of the leg point when we can see it: an x/z-only goal lets the planner route
     // through caves and come up under the destination
     const gy = world.groundY(bot, lx, lz, Math.floor(me.y) + 30)
@@ -640,13 +765,17 @@ async function travel (bot, target, opts = {}) {
     const r = await goTo(bot, legGoal, { timeoutMs: 45000, stuckMs: 10000, label: label + ' leg', shouldStop })
     // (new ground in view: note the sand, gravel and clay along the way - in the background)
     try { require('./gather').survey(bot) } catch {}
-    if (r.ok) { legFails = 0; continue }
-    if (r.why === 'died' || r.why === 'stopped') return r
     const moved = world.dist2(bot.entity.position, me)
+    // (a leg that "arrived" without moving is no progress: at a shore the leg shrank to the water's edge 3 blocks off,
+    //  already inside its goal - "arrived" twelve times a minute, legFails never rose, no swim or other heading was
+    //  tried, and the loop starved the process into a restart, 2026-09-26)
+    if (r.ok && moved >= 2) { legFails = 0; stranded = { at: null, n: 0 }; continue } // (a leg that got somewhere: not stranded)
+    if (r.ok) { if (++legFails >= 6) { log('move', `${label}: no headway ${Math.round(dxz)}b short at ${fmt(bot.entity.position)}`); return { ok: false, why: 'stuck: no headway' } } continue }
+    if (r.why === 'died' || r.why === 'stopped') return r
     if (moved > 8) { legFails = 0; continue } // partial progress is progress
     if (++legFails >= 6) { log('move', `${label}: stuck ${Math.round(dxz)}b short at ${fmt(bot.entity.position)} (${r.why})`); return { ok: false, why: 'stuck: ' + r.why } }
   }
   return { ok: false, why: 'timeout' }
 }
 
-module.exports = { crossDoor, goals, bindReflex, bindBot, setZone, setZones, inZone, zones, utilitySpotOK, insideHut, setProtector, isProtected, surface, isUnderground, surfaceYHere, movementsFor, goTo, goNear, travel, stopMoving, runGoal, sleep, fmt, waitReflex }
+module.exports = { underBuild, underZone, crossDoor, goals, bindReflex, bindBot, setZone, setZones, inZone, zones, utilitySpotOK, insideHut, setProtector, isProtected, surface, isUnderground, surfaceYHere, movementsFor, goTo, goNear, travel, stopMoving, runGoal, sleep, fmt, waitReflex }

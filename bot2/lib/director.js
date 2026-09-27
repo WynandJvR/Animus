@@ -26,6 +26,7 @@ const hut = require('./hut')
 const lights = require('./lights')
 const mats = require('./materials')
 const clay = require('./clay')
+const forage = require('./forage')
 const boat = require('./boat')
 const orchard = require('./orchard')
 
@@ -53,25 +54,46 @@ const failures = {} // task -> {n, at} consecutive failures (a failed task yield
 
 function nightSoon () { return world.phase(bot) !== 'day' }
 // Regeneration is on the cards: the food bar is there, or we carry food to put it there (the reflex eats when hurt).
-function canHeal () { return bot.food >= inv.REGEN_FOOD || inv.foodItems(bot).length > 0 }
+// A mob on the surface - at or over the top ground of its column (leaves and logs are not ground): what can walk to
+// the door or shoot at it. One in the caves under the mountain is not: cave skeletons 17-24 blocks off kept the bot
+// in the safehouse a whole morning, in daylight, the build standing still (2026-09-26).
+const onSurface = e => reflex.onSurface(e) // (one rule: reflex.js - the door seal asks the same question)
+const BREAD_WANTED = 32
+function breadStock () { return inv.count(bot, 'bread') + base.bankCount('bread') + Math.floor((inv.count(bot, 'wheat') + base.bankCount('wheat')) / 3) }
+function canHeal () { return bot.food >= inv.REGEN_FOOD || inv.foodItems(bot, { hurt: true }).length > 0 }
 // At the reflex's hurt line with a way to heal: whatever we are out doing ends here (two deaths on 2026-09-23 began
 // with a trip started or carried on at hp 9-13, unarmoured, into a skeleton)
 function tooHurt () { return bot.health <= reflex.hurtLine() && canHeal() }
 // Home by dark: a day trip ends while the daylight left still covers the walk home (and the climb out of the mine) - the
 // dusk stop alone ended mining trips 100 blocks out and 100 down at dusk and the walk home was in the dark: two skeleton
 // deaths on the way in a night (2026-09-25). The same rule as clay's turn-back (world.walkTicks + HOME_MARGIN).
+const DAYLIGHT_TICKS = 12000 // (tod 0..12000: the working day)
 function homeByDark () {
   const h = mem.get().home
   if (!h || !bot.entity || world.phase(bot) !== 'day') return false
-  return world.ticksUntilNight(bot) < world.walkTicks(bot.entity.position, h) + world.HOME_MARGIN
+  const walk = world.walkTicks(bot.entity.position, h)
+  // further out than half a day's walk is no day trip: the night is spent out whatever we do, the bunker covers it.
+  // Respawned 2200 blocks out, every task stopped the moment it began - no tools, no food - and the bot walked the
+  // whole way unarmed at half health into a river of drowned (2026-09-27)
+  if (walk > DAYLIGHT_TICKS / 2) return false
+  return world.ticksUntilNight(bot) < walk + world.HOME_MARGIN
 }
 let taskCancelled = () => false
 function dayStop () { return taskCancelled() || nightSoon() || tooHurt() || homeByDark() }
 // heading home: keep walking through dusk; only real night (mobs) stops a trip that is still long
-function homewardStop () { return taskCancelled() || (world.isNight(bot) && (!mem.get().home || world.dist2(bot.entity.position, mem.get().home) > 48)) }
+// (and at the hurt line, when food would mend it or might be found: at hp 4 the trek walked on into a river and drowned,
+//  2026-09-27 - the director heals or finds food first)
+function hutNearlyUp () { const s = hut.status(bot); return !!s && s.done >= s.total * 0.9 }
+function homewardStop () { return taskCancelled() || (world.isNight(bot) && (!mem.get().home || world.dist2(bot.entity.position, mem.get().home) > 48)) || tooHurt() } // (tooHurt: the one hurt rule - at hp 4 the trek walked on into a river and drowned, 2026-09-27)
+// Deep under the ground HERE - eight blocks of rock over the head, as a mine or a cave is. Measured against home's height
+// it called any roofed hole 2000 blocks from home at sea level "underground": the night's bunker (two deep) became a
+// night mine, and the bot walked out into a creeper and three zombies in two minutes (2026-09-27).
 function underground () {
   const p = world.feetPos(bot)
-  return !world.openSky(bot, p) && p.y < (mem.get().home ? mem.get().home.y - 6 : 50)
+  if (world.openSky(bot, p)) return false
+  let rock = 0
+  for (let y = p.y + 2; y <= p.y + 40 && rock < 8; y++) { const b = world.at(bot, p.x, y, p.z); if (!b) return false; if (world.isSolid(b)) rock++ }
+  return rock >= 8
 }
 
 function note (name, ok) {
@@ -171,9 +193,18 @@ function missingKit () {
   if (inv.toolTier(bot, 'pickaxe') < 2) out.push('stone_pickaxe')
   if (inv.toolTier(bot, 'axe') < 2) out.push('stone_axe')
   if (inv.toolTier(bot, 'sword') < 2) out.push('stone_sword')
+  // a crafting table rides in the pack: a pickaxe worn out at y78 with 251 cobblestone and 21 sticks in the pack could not
+  // be replaced - no wood down there for a table - and the bot dug 10 blocks up by hand, 7.5s each (2026-09-27)
+  if (!inv.has(bot, 'crafting_table')) out.push('crafting_table')
   // a boat, once the land here has been found to need one (stood at the water with none, and swam: drowned killed it
   // swimming to the sand on an islet, 2026-09-23) - made at home with the tools, carried like them
-  if (mem.get().wantBoat && !inv.items(bot).some(i => /_boat$/.test(i.name))) out.push(craft.preferredWood(bot, 5) + '_boat')
+  if (mem.get().wantBoat && !require('./boat').boatItem(bot)) out.push(craft.preferredWood(bot, 5) + '_boat')
+  // the bow and its arrows, when the chest holds them: shooters are shot back, not walked into (two bows and fifteen
+  // arrows sat in the chest while a pillager patrol camped the safehouse, 2026-09-25)
+  // (only within the chest's reach: far out, "missing" a bow at home beat the walk home ten times over, audit #23)
+  const bankNear = mem.get().home && bot.entity && world.dist2(bot.entity.position, mem.get().home) <= 64
+  if (bankNear && !inv.has(bot, 'bow') && base.bankCount('bow') > 0) out.push('bow')
+  if (bankNear && inv.count(bot, 'arrow') < 16 && base.bankCount('arrow') > 0) out.push('arrow')
   return out
 }
 
@@ -185,7 +216,8 @@ function ironWanted () {
   if (!inv.hasShield(bot)) out.push('shield')
   // a dry farm grows a fraction of the wheat: the bucket that waters it comes before armour
   const f = farm.farm()
-  if (f && !f.water && !inv.has(bot, 'bucket') && !inv.has(bot, 'water_bucket') && base.bankCount('bucket') === 0) out.push('bucket')
+  // (and a farm whose water is lost: without a bucket it can't be put back - the plot dried to grass, 2026-09-26)
+  if (f && (!f.water || farm.waterNeedsFixing(bot)) && !inv.has(bot, 'bucket') && !inv.has(bot, 'water_bucket') && base.bankCount('bucket') === 0 && base.bankCount('water_bucket') === 0) out.push('bucket')
   if (rank(w.torso) < 4) out.push('iron_chestplate')
   if (rank(w.legs) < 4) out.push('iron_leggings')
   if (rank(w.head) < 4) out.push('iron_helmet')
@@ -196,7 +228,9 @@ function ironWanted () {
 }
 const IRON_COST = { shield: 1, bucket: 3, iron_chestplate: 8, iron_leggings: 7, iron_helmet: 5, iron_boots: 4, iron_pickaxe: 3, iron_sword: 2 }
 // the pieces that stand between the body and a mob (a trip is made for these; tools and the bucket wait for iron)
-const ARMOUR_GEAR = new Set(['shield', 'iron_chestplate', 'iron_leggings', 'iron_helmet', 'iron_boots'])
+const ORE_METHOD = 'vein'
+const ARMOUR_GEAR = new Set(['shield', 'bucket', 'iron_chestplate', 'iron_leggings', 'iron_helmet', 'iron_boots'])
+function ironStock () { return inv.count(bot, 'iron_ingot') + base.bankCount('iron_ingot') + inv.count(bot, 'raw_iron') + base.bankCount('raw_iron') }
 function gearIronShort () {
   const need = ironWanted().filter(n => ARMOUR_GEAR.has(n)).reduce((a, n) => a + IRON_COST[n], 0)
   const have = inv.count(bot, 'iron_ingot') + base.bankCount('iron_ingot') + inv.count(bot, 'raw_iron') + base.bankCount('raw_iron')
@@ -295,14 +329,18 @@ function decide () {
   //    Every task below walks outside; at dawn the skeletons are not burning yet (three deaths at the
   //    doorstep in one morning: grave run, harvest, grave run)
   // (at the surface around us - a zombie in a cave under home is not at the door)
-  const around = reflex.hostiles(20).filter(h => h.e.name !== 'bat' && Math.abs(h.e.position.y - bot.entity.position.y) < 6)
+  const around = reflex.hostiles(20).filter(h => h.e.name !== 'bat' && Math.abs(h.e.position.y - bot.entity.position.y) < 6 && onSurface(h.e))
   const dim = world.phase(bot) !== 'day' || world.tod(bot) >= 23000 || world.tod(bot) < 1500
-  if (around.length && home && dHome < 48 && hut.shellComplete(bot) && (dim || bot.health <= reflex.hurtLine()) && !cooling('hideout')) {
+  // (by day too when shooters stand round home and the body can't take their arrows - no shield, little armour: a
+  //  pillager patrol and two skeletons shot the bot four times in two minutes, each respawn walking back out to the
+  //  grave, the farm, the tool chest, 2026-09-25)
+  const outgunned = around.some(h => reflex.RANGED.has(h.e.name)) && !inv.offhandShield(bot) && inv.armorPoints(bot) < 8 && !reflex.bowReady()
+  if (around.length && home && dHome < 48 && hut.shellComplete(bot) && (dim || outgunned || bot.health <= reflex.hurtLine()) && !cooling('hideout')) {
     return { name: 'hideout', why: `${around.length} hostile${around.length > 1 ? 's' : ''} around home (${around.slice(0, 3).map(h => h.e.name).join(', ')}) - waiting inside` }
   }
   // evening: be home before dusk, not at it - a 100-block walk begun at dusk arrives in the dark (a zombie
   // met the bot at its own door at hp 10)
-  if (home && world.phase(bot) === 'day' && world.tod(bot) >= 10500 && world.tod(bot) < 12000 && dHome > 32 && hut.shellComplete(bot) && !cooling('goHome')) {
+  if (home && world.phase(bot) === 'day' && world.tod(bot) >= 10500 && world.tod(bot) < 12000 && dHome > 32 && hut.shellComplete(bot) && !tooHurt() && !cooling('goHome')) {
     return { name: 'goHome', why: `evening - home is ${Math.round(dHome)}b away, back before dark` }
   }
   // a grave right here (died in the safehouse, or beside it): pick it up whatever the hour - it
@@ -333,7 +371,7 @@ function decide () {
     if (dusk) {
       const j = build.getJob()
       if (!home && j && world.dist2(bot.entity.position, j.origin) < 220 && world.dist2(bot.entity.position, j.origin) > 40 && !cooling('setHome')) return { name: 'setHome', why: `dusk - the build site is ${Math.round(world.dist2(bot.entity.position, j.origin))}b away, getting there before dark` }
-      if (home && dHome > 24 && dHome < 220 && !cooling('goHome')) return { name: 'goHome', why: `dusk - home is ${Math.round(dHome)}b away` }
+      if (home && dHome > 24 && dHome < 220 && !tooHurt() && !cooling('goHome')) return { name: 'goHome', why: `dusk - home is ${Math.round(dHome)}b away` }
     }
     const m = mem.get().mine
     const mineHere = m && (!home || world.dist2(m.entrance, home) <= 96)
@@ -375,12 +413,17 @@ function decide () {
   // 4. basic tools
   const kit = missingKit()
   if (kit.length && !cooling('tools')) return { name: 'tools', why: 'missing ' + kit.join(', ') }
+  // a bed to CARRY first (shelter first still holds: it goes down in the safehouse once the shell stands; till then it is
+  // slept in where the night finds us - sleepHere). Without one every death respawned 2200 blocks away at world spawn,
+  // three treks back in a day (2026-09-27)
+  if (!bed && !shelter.hasBedItem(bot) && world.phase(bot) === 'day' && bedObtainable() && !cooling('bed')) return { name: 'bed', why: 'no bed - getting one to carry (spawn is where i sleep)' }
 
   // 5. home
   if (!home) return { name: 'setHome', why: 'no home yet' }
+  if (dHome < 160 && hut.siteGone(bot) && !cooling('abandonHome')) return { name: 'abandonHome', why: `the ground under the home at ${move.fmt(home)} is gone - choosing a new home` }
   // (in our own mine is at work, not astray: a staircase from y113 to y16 runs ~100 blocks out, and the face 116 blocks
   //  from home sent the bot home every time a mining task returned - a pickaxe worn out, a batch done - 2026-09-24)
-  if (dHome > 96 && !mining.inOwnMine(bot) && !cooling('goHome')) return { name: 'goHome', why: `${Math.round(dHome)}b from home` }
+  if (dHome > 96 && !mining.inOwnMine(bot) && !tooHurt() && !cooling('goHome')) return { name: 'goHome', why: `${Math.round(dHome)}b from home` }
 
   // 5b. at home with a haul in the pack: put it in the chest (a player empties their pockets at home)
   if (dHome < 24 && (mem.get().chests || []).length && haulSize() >= 64 && !cooling('deposit')) return { name: 'deposit', why: `home with ${haulSize()} items to store` }
@@ -398,7 +441,9 @@ function decide () {
     const o = orchard.orchard()
     if (dHome < 64 && world.phase(bot) === 'day' && saps > 0 && (orchard.empty(bot).length > 0 || (o ? o.spots.length : 0) < demandTrees) && !cooling('plant')) return { name: 'plant', why: `${saps} saplings for the orchard (${o ? o.spots.length : 0} spots, ${demandTrees} trees wanted)` }
   }
-  if (farm.farm() && dHome < 64 && farm.ripeCount(bot) >= 8 && !cooling('harvest')) return { name: 'harvest', why: `${farm.ripeCount(bot)} wheat ripe` }
+  // (the harvest when the bread runs low, not every morning: the crop keeps on the stalk, and harvesting and
+  //  replanting 71 cells took two minutes of every ten-minute day with 31 bread in the pack, 2026-09-26)
+  if (farm.farm() && dHome < 64 && farm.ripeCount(bot) >= 8 && breadStock() < BREAD_WANTED && !cooling('harvest')) return { name: 'harvest', why: `${farm.ripeCount(bot)} wheat ripe` }
 
   // 7. base infrastructure - SHELTER FIRST: nothing of value (bed, bank) sits in the open, so the
   //    safehouse goes up before the bed and the chest go down inside it
@@ -422,9 +467,11 @@ function decide () {
     if (!farm.farm() && !cooling('farm')) return { name: 'farm', why: 'no farm - bread does not run out like animals do' }
     // a farm to walk: one soil level, nothing but crops on it (the operator asked for it clean and flat)
     if (farm.farm() && farm.farmIsHome(bot) && farm.farm().water && !farm.waterNeedsFixing(bot) && world.phase(bot) === 'day' && !farm.farmLevel(bot) && !cooling('levelFarm')) return { name: 'levelFarm', why: `the farm is uneven or cluttered (${farm.levelWork(bot).length} fixes)` }
+    // the yard round the safehouse: holes filled, stray blocks down (a pit by the door stood for days)
+    if (world.phase(bot) === 'day' && hut.complete(bot) && !cooling('levelYard')) { const n = hut.yardWork(bot).length; if (n) return { name: 'levelYard', why: `the yard has ${n} holes or stray blocks` } }
     // a watered plot still at its starting size: widen it to everything the water reaches
     if (farm.farm() && farm.farmIsHome(bot) && farm.farm().water && farm.farm().cells.length < 60 && farm.farmLevel(bot) && farm.fullPlot(bot, farm.farm()).length > farm.farm().cells.length && inv.count(bot, 'wheat_seeds') + base.bankCount('wheat_seeds') >= 8 && !cooling('farm')) return { name: 'farm', why: `the farm is ${farm.farm().cells.length} cells - widening it to all the water reaches` }
-    if (farm.farm() && farm.farmIsHome(bot) && !farm.waterNeedsFixing(bot) && inv.count(bot, 'wheat_seeds') + base.bankCount('wheat_seeds') >= 4 && farm.unplantedCount(bot) > 0 && !cooling('farm')) return { name: 'farm', why: `${farm.unplantedCount(bot)} farm cells unplanted and ${inv.count(bot, 'wheat_seeds')} seeds in hand` }
+    if (farm.farm() && farm.farmIsHome(bot) && !farm.waterNeedsFixing(bot) && inv.count(bot, 'wheat_seeds') + base.bankCount('wheat_seeds') >= 4 && (farm.unplantedCount(bot) >= 8 || (farm.unplantedCount(bot) > 0 && breadStock() < BREAD_WANTED)) && !cooling('farm')) return { name: 'farm', why: `${farm.unplantedCount(bot)} farm cells unplanted and ${inv.count(bot, 'wheat_seeds')} seeds in hand` }
   }
 
   // 8. iron gear when the iron is on hand
@@ -439,12 +486,23 @@ function decide () {
   // came as the build's own share, turned up whenever its layers got to it. Unarmoured and shieldless, the bot lost
   // four skeleton trades in an hour building (2026-09-25). The shield and armour's iron before the build's blocks.
   const gearShort = gearIronShort()
-  if (gearShort > 0 && world.phase(bot) === 'day' && world.ticksUntilNight(bot) > 2400 && !cooling('ironTrip')) return { name: 'ironTrip', why: `${gearShort} iron short for ${wanted.filter(n => ARMOUR_GEAR.has(n)).join(', ')} - mining for it` }
+  // (a trip that came back with no iron is not made again until iron turns up some other way - the build's own cobble
+  //  tunnel takes the ore in its walls: then there is iron to be found. A timed backoff let dry trips win every
+  //  morning, four hours without a block placed; clearing it on any placement still spent a trip a day, 2026-09-25)
+  const dry = mem.get().ironTripDry
+  // (a dry trip under another way of mining says nothing about this one: tunnelling to known veins since 2026-09-26)
+  // (the mark clears on iron GAINED since: a death or a craft that spent iron lowers the baseline, else the old count was
+  //  never reached again and no trip ever went - audit #41)
+  if (dry && dry !== true && dry.method === ORE_METHOD && ironStock() < dry.stock) mem.set('ironTripDry', Object.assign({}, dry, { stock: ironStock() }))
+  if (dry && (dry === true || dry.method !== ORE_METHOD || ironStock() > mem.get().ironTripDry.stock)) mem.set('ironTripDry', null)
+  if (gearShort > 0 && !mem.get().ironTripDry && world.phase(bot) === 'day' && world.ticksUntilNight(bot) > 2400 && !cooling('ironTrip')) return { name: 'ironTrip', why: `${gearShort} iron short for ${wanted.filter(n => ARMOUR_GEAR.has(n)).join(', ')} - mining for it` }
 
   // 9. the build
   // (with its own backoff: a castle step failing in 30ms was retried 26 times in a second)
   // (derived from the world, never a latch: a finished build that loses blocks - a creeper - is work again)
-  if (mem.get().build && build.getJob() && build.needsWork(bot) && !cooling('castle')) {
+  // (not in the day's last minutes: a round that can only be cut short at once spun - castle, placed 0, deposit, castle
+  //  - every three seconds at dusk once a dusk-cut round stopped counting as a failure, 2026-09-27)
+  if (mem.get().build && build.getJob() && build.needsWork(bot) && !nightSoon() && !homeByDark() && !cooling('castle')) {
     return { name: 'castle', why: 'working on ' + mem.get().build.name }
   }
   return { name: 'idle', why: 'nothing to do' }
@@ -521,17 +579,40 @@ const TASKS = {
     const t0 = Date.now()
     if (!await hut.enterHut(bot, { shouldStop: () => taskCancelled() })) return false
     await hut.sealDoor(bot).catch(() => false)
+    // the bow off the chest in here: with it the camp outside is shot at, not waited out (pillagers never burn - a
+    // patrol camped the door, 2026-09-25)
+    if (!reflex.bowReady() && base.bankCount('bow') > 0 && base.bankCount('arrow') > 0) {
+      if (!inv.has(bot, 'bow')) await base.withdraw(bot, 'bow', 1).catch(() => 0)
+      await base.withdraw(bot, 'arrow', 64).catch(() => 0)
+      // out only to shoot what can be shot: daylight, a shooter on the surface at our height, and above the hurt line - the
+      // door was opened for 'dim' at night with mobs round it, and the log said "going out to shoot" (audit #21)
+      if (reflex.bowReady()) {
+        const dim = world.phase(bot) !== 'day' || world.tod(bot) >= 23000 || world.tod(bot) < 1500
+        const shooters = reflex.hostiles(20).filter(h => reflex.RANGED.has(h.e.name) && Math.abs(h.e.position.y - bot.entity.position.y) < 6 && onSurface(h.e))
+        if (!dim && shooters.length && bot.health > reflex.hurtLine()) { log('dir', `took the bow and ${inv.count(bot, 'arrow')} arrows - going out to shoot ${shooters.length} shooter(s)`); await hut.unsealDoor(bot).catch(() => false); return true }
+        log('dir', `took the bow and ${inv.count(bot, 'arrow')} arrows - staying in (${dim ? 'dim' : !shooters.length ? 'no shooter on the surface' : 'hp ' + Math.round(bot.health)})`)
+      }
+    }
+    // hurt with nothing to eat: the chests are in here (cooked first, then the raw meats that do no harm)
+    if (bot.health < 20 && bot.food < inv.REGEN_FOOD && !inv.foodItems(bot, { hurt: true }).length) {
+      const bank = base.bankCounts()
+      for (const n of ['bread', 'cooked_beef', 'cooked_porkchop', 'cooked_mutton', 'baked_potato', 'cooked_chicken', 'cooked_salmon', 'cooked_cod'].concat(inv.SAFE_RAW)) {
+        if ((bank[n] || 0) > 0) { await base.withdraw(bot, n, Math.min(8, bank[n])).catch(() => 0); if (inv.foodItems(bot, { hurt: true }).length) break }
+      }
+    }
     log('dir', `waiting inside while mobs are about (hp ${Math.round(bot.health)})`)
     while (!taskCancelled() && Date.now() - t0 < 4 * 60000) {
-      const left = reflex.hostiles(20).filter(h => h.e.name !== 'bat' && Math.abs(h.e.position.y - bot.entity.position.y) < 6)
+      const left = reflex.hostiles(20).filter(h => h.e.name !== 'bat' && Math.abs(h.e.position.y - bot.entity.position.y) < 6 && onSurface(h.e))
       const dim = world.phase(bot) !== 'day' || world.tod(bot) >= 23000 || world.tod(bot) < 1500
-      if (!left.length || (!dim && bot.health > 10)) break
+      const outgunned = left.some(h => reflex.RANGED.has(h.e.name)) && !inv.offhandShield(bot) && inv.armorPoints(bot) < 8 && !reflex.bowReady()
+      if (!left.length || (!dim && !outgunned && bot.health > reflex.hurtLine())) break // (the hurt line, as entry and heal use: R11)
       // a bed right here: sleeping skips the rest of the night (the server refuses while monsters are
       // close - keep trying, walled in they drift off)
       const bedB = shelter.bedBlock(bot)
       if (bedB && world.isNight(bot) && world.dist3(bedB.position, bot.entity.position) < 4 && !bot.isSleeping) {
         try { await bot.sleep(bedB); log('dir', 'asleep in the safehouse'); while (bot.isSleeping && !world.isDay(bot)) await move.sleep(2000) } catch {}
       }
+      await hut.sealDoor(bot).catch(() => false) // (sealed once the door is clear - the first try may have met a mob at it)
       await move.sleep(5000)
     }
     return true
@@ -587,7 +668,9 @@ const TASKS = {
   },
   async cook () { await food.cookAll(bot, { shouldStop: dayStop }); return inv.rawFoodCount(bot) < 3 },
   async farm () { const ok = await farm.establish(bot, { shouldStop: dayStop }); baseZone(); return ok },
-  async hut () { return hut.buildHut(bot, { shouldStop: homewardStop }) },
+  // (not through the night from a bare start: the hut's own shelter is the reason to work on at dusk - at 56/149, no walls,
+  //  the task walked the night after birch for torch sticks and a creeper killed it, 2026-09-27; nearly done, it finishes)
+  async hut () { return hut.buildHut(bot, { shouldStop: () => homewardStop() || (world.phase(bot) === 'night' && !hutNearlyUp()) }) },
   async deposit () { return base.depositAll(bot) },
   async furnish () {
     const home = mem.get().home
@@ -643,7 +726,7 @@ const TASKS = {
           }
           if (await act.place(bot, c, what, { allowZones: ['base'] })) {
             done = true; placed++
-            if (what === 'chest') mem.addUnique('chests', c)
+            if (what === 'chest') { mem.addUnique('chests', c); base.notePlacedChest(c) }
             if (what === 'furnace') mem.addUnique('furnaces', c)
             if (what === 'crafting_table') mem.addUnique('tables', c)
             log('dir', `put the ${what} in the safehouse at ${move.fmt(c)}`)
@@ -667,6 +750,7 @@ const TASKS = {
   async lightBase () { return lights.lightBase(bot, { shouldStop: dayStop }) },
   async hydrate () { return farm.hydrate(bot, { shouldStop: dayStop }) },
   async levelFarm () { return farm.level(bot, { shouldStop: dayStop }) },
+  async levelYard () { return (await hut.levelYard(bot, { shouldStop: dayStop })) > 0 },
   async fixWater () { return farm.fixWater(bot, { shouldStop: dayStop }) },
   async harvest () { return farm.harvest(bot, { shouldStop: dayStop }) },
   async plant () {
@@ -675,10 +759,21 @@ const TASKS = {
   },
   async tools () {
     for (const t of missingKit()) {
+      // (the bow and arrows come out of the chest: nothing here makes them)
+      if (t === 'bow' || t === 'arrow') { const got = await base.withdraw(bot, t, t === 'bow' ? 1 : 64).catch(() => 0); if (!got) { log('dir', `couldn't take the ${t} from the chest`); return false } continue }
       // a worn-out tool still counts as "held": ask for one more than we have
       const ok = await craft.ensure(bot, t, inv.count(bot, t) + 1, { shouldStop: dayStop })
       if (!ok) { log('dir', `couldn't make ${t}`); return false }
     }
+    return true
+  },
+  // the home's ground is gone (hut.siteGone): everything remembered there went with it - chests, furnaces, bed, farm,
+  // the mine's stairs. Forgotten; setHome sites a new one (by the build) and the base is built again from the pack.
+  async abandonHome () {
+    const h = mem.get().home
+    log('dir', `abandoning the home at ${move.fmt(h)}: its ground is gone`)
+    mem.update(m => { m.home = null; m.bed = null; m.hutPlan = null; m.hut = null; m.chests = []; m.chestContents = {}; m.furnaces = []; m.tables = []; m.farm = null; m.orchard = null; m.mine = null; m.bunker = null })
+    try { hut.resetPlan() } catch {}
     return true
   },
   async setHome () {
@@ -709,6 +804,7 @@ const TASKS = {
       const ok = await shelter.obtainBed(bot, { shouldStop: dayStop })
       if (!ok) return false
     }
+    if (!hut.shellComplete(bot)) return true // (carried until the safehouse stands - shelter first)
     await base.goHome(bot, { shouldStop: homewardStop })
     // in the room's bed spot (the old free-spot placement put it in the walkway, where tidying
     // picked it straight back up)
@@ -741,6 +837,10 @@ const TASKS = {
     await gatherFor('raw_iron', short)
     const got = inv.count(bot, 'raw_iron') - before
     if (got > 0) log('dir', `ironTrip: dug ${got} raw iron for the gear`)
+    // (a trip cut short - dusk, danger, a stop - found nothing because it looked at nothing: it marks no dryness. At dusk
+    //  the trip was stopped with 0/28 before a block was dug and "no more trips" shut iron off for good, 2026-09-27)
+    else if (dayStop() || taskCancelled()) log('dir', 'ironTrip: cut short before any iron - trying again another day')
+    else { mem.set('ironTripDry', { stock: ironStock(), method: ORE_METHOD }); log('dir', 'ironTrip: no iron this trip - no more trips until iron turns up in the build mining') }
     return got > 0
   },
   async castle () { return castleWork() },
@@ -876,6 +976,12 @@ async function castleWork () {
     const r = await move.travel(bot, home || j.origin, { range: 4, shouldStop: homewardStop, label: 'to site' })
     if (!r.ok) return false
   }
+  // HOME JOBS FIRST, while at home: the furnaces, the crafts, the window's blocks out of the chest, scaffold - then one
+  // walk to the site. Clearing the site first sent the bot there for one leaf, home again for the furnaces and chests,
+  // and back: two 60-block crossings and three minutes of every ten-minute day before a block went in (2026-09-26).
+  await processAtHome()
+  for (const [name, n] of Object.entries(windowNeeds())) { const want = Math.min(n, 64 * 4) - countOf(name); if (want > 0) await withdrawOf(name, want) }
+  await build.ensureScaffold(bot, 32)
   // what does the next stretch of building need?
   const lowest = j.cells.filter(c => build.cellDone(bot, c) !== true)
   const minY = Math.min(...lowest.map(c => c.y))
@@ -887,10 +993,38 @@ async function castleWork () {
   if (obs > 0) {
     await build.ensureScaffold(bot, 32)
     const n = await build.clearSite(bot, { shouldStop: dayStop, maxBlocks: 200, maxY: bandTop })
-    if (n > 0) { if (inv.freeSlots(bot) < 10) await base.depositAll(bot); return true }
+    // (cleared: on to the building in the same round - ending it here sent the next round home for its home jobs)
     // nothing clearable right now: get on with materials meanwhile
   }
-  await processAtHome()
+  // the build's own blocks laid where no cell wants them (the planner's stepping stones): taken back up
+  {
+    const strays = await build.strayBuildBlocks(bot)
+    if (strays.length) {
+      let n = 0
+      for (const s of strays.slice(0, 30)) { if (dayStop()) break; if (await act.dig(bot, s, { force: true, allowZones: ['build', 'base'], timeoutMs: 30000 })) n++ }
+      await act.collectDrops(bot, { radius: 8, maxMs: 5000 })
+      log('dir', `took up ${n} of ${strays.length} build blocks standing where no cell wants them (${strays.slice(0, 6).map(s => s.name + '@' + s.x + ',' + s.y + ',' + s.z).join(' ')})`)
+      if (n) return true
+    }
+  }
+  // THE BOTTLENECK FIRST: the last step found the lowest layers waiting on a material (glass: its sand) - fetch it now,
+  // while the day is young, before another step on the scattered cells the wait leaves. Built first, the sand trip was
+  // judged at the day's end, never fit the daylight left, and 2 fuel was fetched instead - every day, 50 glass cells
+  // holding the whole cathedral (2026-09-26).
+  // (kept in memory: a module variable was wiped by every reload, and the morning's first round started blank)
+  if (mem.get().buildWaiting) {
+    const want = mem.get().buildWaiting; mem.set('buildWaiting', null)
+    const win0 = mats.planFor(bot, windowNeeds())
+    const chain0 = Object.keys(mats.getPlanner(bot).plan({ [want]: 1 }).raw)
+    const raw0 = chain0.find(r => r !== 'fuel' && win0.raw[r] > 0) || chain0.find(r => win0.raw[r] > 0)
+    const fits = r => r !== 'clay_ball' && r !== 'sand' ? world.ticksUntilNight(bot) > 2400 : (r === 'sand' ? !clay.exhausted('sand') && clay.tripFits(bot, 'sand') : !clay.exhausted() && clay.tripFits(bot))
+    if (raw0 && fits(raw0)) {
+      log('dir', `the build waits on ${want} - ${win0.raw[raw0]} ${raw0} first, while the day is young`)
+      const ok0 = await gatherFor(raw0, win0.raw[raw0])
+      if (inv.freeSlots(bot) < 8 || ok0) await base.depositHaul(bot, { shouldStop: dayStop })
+      if (ok0) return true
+    }
+  }
   // the same window the builder works in (it builds past a missing material, so the bricks for those layers
   // must come out of the chest too - with glass short, nothing was withdrawn and nothing built)
   const next = windowNeeds()
@@ -902,11 +1036,18 @@ async function castleWork () {
     carrying += countOf(name)
   }
   let blockedOn = null
+  // (starved of stone: straight to the mine, not a build step over the few cells in hand - eight minutes placed one
+  //  block 58 away while the next layers were 1900 cobblestone short, and the mine got the last three, 2026-09-27)
+  const winShort = mats.planFor(bot, next).raw.cobblestone || 0
+  if (winShort > 512 && countOf('cobblestone') < 64) { log('dir', `${winShort} cobblestone short with ${countOf('cobblestone')} in hand - mining first`); carrying = 0 }
   if (carrying > 0) {
     await build.ensureScaffold(bot, 32)
     const r = await build.buildStep(bot, { shouldStop: dayStop, maxMs: 8 * 60000 })
     log('dir', `build step: placed ${r.placed}${r.blockedOn ? ', waiting on ' + r.blockedOn : ''}`)
     blockedOn = r.blockedOn
+    // (infill - glass, bars, lanterns - waited on while the structure still rises is no morning's errand: the sand
+    //  for 50 windows took every morning's best hours while 30k blocks of wall could go up; it comes last)
+    mem.set('buildWaiting', r.blockedOn && !build.infillItem(r.blockedOn) ? r.blockedOn : null)
     if (r.placed > 0 && !r.blockedOn) return true
     // every cell still missing has failed, with the blocks in hand: our own scaffold may be what is in the way. Two
     // wall torches in a room whose floor was full of scaffold (a 1-high gap left under the ceiling, nowhere to stand)
@@ -922,29 +1063,40 @@ async function castleWork () {
   // build (clay, for a brick build: its trips start as soon as nothing nearer blocks the builder)
   const win = mats.planFor(bot, next)
   const tot = mats.planFor(bot, build.status(bot).need)
-  const chain = blockedOn ? Object.keys(mats.getPlanner(bot).plan({ [blockedOn]: 1 }).raw) : []
+  // (infill - glass - named as the wait never steers the gathering while the structure's own blocks are short: with no
+  //  cobblestone left at all the builder "waited on glass" and every trip went looking for sand, 2026-09-27)
+  const steer = blockedOn && build.infillItem(blockedOn) && Object.keys(mats.planFor(bot, windowNeeds()).raw).some(r => r === 'cobblestone') ? null : blockedOn
+  const chain = steer ? Object.keys(mats.getPlanner(bot).plan({ [steer]: 1 }).raw) : []
   const blockedRaw = chain.find(r => r !== 'fuel' && win.raw[r] > 0) || chain.find(r => win.raw[r] > 0) || null
   // a trip needs a working day ahead of it: close to dusk only what is gathered round home (a walk to the mine
   // face that arrived as dusk fell was a minute and a half for nothing; a clay bank is further still)
   const nearDusk = world.ticksUntilNight(bot) < 2400
   const feasible = r => {
+    if (!mats.hasRoute(r)) return false // (no skill for it yet: its cells wait, never a trip)
     if (r === 'clay_ball') return !clay.exhausted() && clay.tripFits(bot)
+    if (r === 'sand') return !clay.exhausted('sand') && clay.tripFits(bot, 'sand')
     if (nearDusk && /^(cobblestone|granite|raw_iron|wool|red_flower)$/.test(r)) return false
     return true
   }
   // an input already in the chest that only lacks fuel (66 clay balls "waiting in the chest" while the bot went
   // for more clay, 2026-09-23): the fire is the bottleneck, not the input
-  const fuelBound = (win.raw.fuel || tot.raw.fuel || 0) > 0 && win.smelts.concat(tot.smelts).some(sm => sm.input && sm.input !== '#log' && mats.stock(bot, sm.input) > 0)
+  // (only when what the builder waits on is smelted - or it waits on nothing: blocked on plain cobblestone, "fuel
+  //  first" sent every day to cut logs for charcoal while the walls stood still for want of stone, 2026-09-26)
+  const fuelBound = (!blockedOn || chain.includes('fuel')) && (win.raw.fuel || tot.raw.fuel || 0) > 0 && win.smelts.concat(tot.smelts).some(sm => sm.input && sm.input !== '#log' && mats.stock(bot, sm.input) > 0)
   const pick = mats.pickRaw(fuelBound && !win.raw.fuel ? Object.assign({ fuel: tot.raw.fuel }, win.raw) : win.raw, tot.raw, { blockedRaw: fuelBound ? 'fuel' : blockedRaw, feasible })
   if (!pick) {
+    buildFocus = { at: Date.now(), gathering: null, builderWaitsOn: blockedOn || null, waitingOnFurnaces: win.smelts.map(s => s.n + ' ' + s.output), shortInAll: Object.fromEntries(Object.entries(tot.raw).sort((a, b) => b[1] - a[1]).slice(0, 8)) }
     const waiting = win.smelts.length ? `the furnaces (${win.smelts.map(s => s.n + ' ' + s.output).join(', ')})` : 'nothing'
     if (Object.keys(tot.raw).length) log('dir', `nothing to gather now (${Object.keys(tot.raw).map(r => tot.raw[r] + ' ' + r).join(', ')} still short, none fits the hour${clay.exhausted() ? '; no clay in range' : ''}) - waiting on ${waiting}`)
     return nearDusk ? false : !!win.smelts.length
   }
   log('dir', `${st.name} needs ${pick.short} more ${pick.raw} - ${pick.why}${pick.raw === blockedRaw ? ` (the builder waits on ${blockedOn})` : ''}; still short in all: ${Object.keys(tot.raw).map(r => tot.raw[r] + ' ' + r).join(', ')}`)
+  buildFocus = { at: Date.now(), gathering: pick.raw, short: pick.short, why: pick.why, builderWaitsOn: blockedOn || null, shortInAll: Object.fromEntries(Object.entries(tot.raw).sort((a, b) => b[1] - a[1]).slice(0, 8)) }
   const ok = await gatherFor(pick.raw, pick.short)
   if (inv.freeSlots(bot) < 8 || ok) await base.depositHaul(bot, { shouldStop: dayStop })
-  return ok
+  // (a round the dusk cut short is no failure: counted as one, the backoff held the next morning's castle round
+  //  minutes - "castle did not succeed (4 in a row)" after a step that placed 24, 2026-09-27)
+  return ok || (dayStop() && !taskCancelled())
 }
 
 // One trip for one RAW material of the plan (materials.js names them): the batch a trip is worth.
@@ -954,6 +1106,9 @@ async function gatherFor (raw, short) {
   switch (raw) {
     // clay: a big batch - the walk to the water costs more than the digging (up to 64 blocks, 256 balls)
     case 'clay_ball': return clay.gather(bot, Math.min(short, 256), ctx)
+    // sand: nearly all of it lies on the sea and lake beds here - the clay skill's wading and diving takes it (the
+    // dry-land gather brought 5-23 a trip toward 2300 glass, 2026-09-25); a pack-full batch, the walk is long
+    case 'sand': return clay.gather(bot, batch, ctx, 'sand')
     // cobble; the furnaces make stone of it in the background
     case 'cobblestone': return mining.mineFor(bot, 'cobblestone', inv.count(bot, 'cobblestone') + batch, ctx)
     case 'log': {
@@ -986,8 +1141,23 @@ async function gatherFor (raw, short) {
     case 'wool': return food.woolFor(bot, Math.min(short, 16), ctx)
     case 'red_flower': return gather.pickPlants(bot, /^(poppy|red_tulip|rose_bush)$/, /^(poppy|red_tulip|rose_bush)$/, Math.min(short, 16), ctx)
     default:
+      // forage skills: one gatherer each; a source searched out round home is marked (its cells wait, another is used)
+      if (forage.handles(raw)) return forage.gather(bot, raw, batch, ctx)
       // sand, dirt, gravel, raw iron: the generic route (surface digging, the mine)
-      return craft.ensure(bot, raw, inv.count(bot, raw) + batch, ctx)
+      {
+        const before = inv.count(bot, raw)
+        const t0 = Date.now()
+        const ok = await craft.ensure(bot, raw, before + batch, ctx)
+        // a species log (exact wood) that no trip finds is searched out round this home like any forage source: its cells
+        // wait instead of a daily trip for dark oak that does not grow here (audit #14) - but only a real search counts: a
+        // trip cut short by dusk, danger or a full pack is not "none here" (R7, 2026-09-27)
+        if (mats.LOG_ANY.test(raw) && !taskCancelled()) {
+          const o = gather.lastChopOutcome()
+          const searched = !!o && o.item === raw && o.at >= t0 && o.outcome === 'none-found'
+          forage.noteTrip(raw, inv.count(bot, raw) - before, searched ? 'no trees of it found' : `cut short (${o && o.at >= t0 ? o.outcome : 'no chop ran'})`, { searched })
+        }
+        return ok
+      }
   }
 }
 
@@ -1000,13 +1170,14 @@ async function loop () {
       try { await opportunisticHunt() } catch (e) { log('dir', 'hunt threw: ' + e.message) }
       const d = decide()
       const k = d.name + '|' + d.why
-      if (k !== lastDecisionKey) { lastDecisionKey = k; log('dir', `-> ${d.name}: ${d.why}`) }
+      if (k !== lastDecisionKey) { lastDecisionKey = k; log('dir', `-> ${d.name}: ${d.why}`); recentDecisions.push({ at: Date.now(), name: d.name, why: d.why }); if (recentDecisions.length > 8) recentDecisions.shift() }
       current = { name: d.name, why: d.why, since: Date.now() }
       const fn = TASKS[d.name]
       let ok = false
       taskCancelled = control.token()
       running = true
       try { ok = await fn() } catch (e) { log('dir', `${d.name} threw: ${e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : e.message}`) }
+      if (!taskCancelled()) { try { await craft.packUpTables(bot) } catch {} } // (the task's field tables, once it is over - never after an operator stop, audit #40)
       running = false
       if (taskCancelled()) { current = null; continue }
       // A task that "succeeds" instantly while the same decision keeps coming back did nothing: a
@@ -1026,12 +1197,33 @@ async function loop () {
   }
 }
 
+// what the bot has been doing lately, for whoever asks (the brain answers "what are you up to" from it)
+const recentDecisions = []
+// the build's material picture as last judged - what the brain says when asked how the build is going
+let buildFocus = null
+// (in players' words: the planner's node names - log, fuel, clay_ball, red_flower - parroted in chat read like a bot; the audit)
+const SAY_NAME = { log: 'logs (any wood)', planks: 'planks (any wood)', fuel: 'coal or charcoal', clay_ball: 'clay', red_flower: 'red flowers', wool: 'wool', wood_slab: 'wooden slabs', stripped_log: 'stripped logs' }
+const sayName = n => SAY_NAME[n] || String(n).replace(/!$/, '').replace(/^(\w+)_flower$/, '$1 flowers').replace(/_/g, ' ')
+const sayCounts = o => o ? Object.fromEntries(Object.entries(o).map(([k, v]) => [sayName(k), v])) : o
+function focus () {
+  if (!buildFocus) return null
+  const f = Object.assign({ judgedMinutesAgo: Math.round((Date.now() - buildFocus.at) / 60000) }, buildFocus)
+  if (f.gathering) f.gathering = sayName(f.gathering)
+  f.shortInAll = sayCounts(f.shortInAll)
+  return f
+}
+function recent () { const now = Date.now(); return recentDecisions.map(r => `${Math.round((now - r.at) / 60000)}m ago: ${r.name} - ${r.why}`) }
 async function start (b) {
   bot = b
+  // the planner exists from the start: until the first plan, unsourced() answered "sourced" for everything (audit #36)
+  try { mats.getPlanner(bot) } catch {}
+  // respawned inside the safehouse: the door shut before anything else (a door left open under a patrol was a window
+  // for their arrows at every respawn, 2026-09-26)
+  bot.on('spawn', () => { setTimeout(() => { try { if (bot.entity && move.insideHut(world.feetPos(bot))) hut.shutDoor(bot).catch(() => {}) } catch {} }, 1500) })
   baseZone()
   orchard.setZone()
   const bj = mem.get().build
-  if (bj) { try { await build.setJob(bot, bj.name, bj.origin) } catch (e) { log('dir', `couldn't load build ${bj.name}: ${e.message}`) } }
+  if (bj) { try { await build.setJob(bot, bj.name, bj.origin, { exactWood: bj.exactWood === true }) } catch (e) { log('dir', `couldn't load build ${bj.name}: ${e.message}`) } } // (jobs saved before the wood rule: any wood, as they were built)
   loop()
 }
 
@@ -1040,4 +1232,4 @@ function setPaused (p) { const was = paused; paused = !!p; if (paused) { control
 async function waitIdle (maxMs = 30000) { const t0 = Date.now(); while (running && Date.now() - t0 < maxMs) await move.sleep(200) }
 function forceTask (name) { if (!TASKS[name]) return false; override = name; control.abort(); return true }
 
-module.exports = { start, info, setPaused, forceTask, decide, TASKS, waitIdle, isPaused: () => paused }
+module.exports = { focus, recent, start, info, setPaused, forceTask, decide, TASKS, waitIdle, isPaused: () => paused }

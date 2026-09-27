@@ -42,6 +42,18 @@ function swimming (bot) {
   const p = bot.entity.position
   return world.feetInWater(bot) && !world.isSolid(world.at(bot, p.x, p.y - 1, p.z))
 }
+// on land: feet out of the water and ground under them (within a jump's height). `!onGround` is also every jump on dry
+// land - read as "afloat", it sent the bot on a walk to the beach it stood on (audit, 2026-09-27)
+function onLand (bot) {
+  if (bot.vehicle || world.feetInWater(bot)) return false
+  const p = bot.entity.position
+  for (let dy = 0; dy <= 2; dy++) {
+    const b = world.at(bot, p.x, p.y - 0.01 - dy, p.z)
+    if (!b || world.isWaterBlock(b) || world.isLavaBlock(b)) return false
+    if (world.isSolid(b)) return true
+  }
+  return false
+}
 function inBoat (bot) { return !!(bot.vehicle && BOAT_ENTITY_RE.test(bot.vehicle.name || '')) }
 
 // ---- reading the way ahead -------------------------------------------------------------------
@@ -67,11 +79,21 @@ function scanLine (bot, from, to, maxDist = SCAN) {
 //   walk - no open water on the line
 // Unloaded columns past the water's edge count as more water (an ocean runs on into chunks we do not have).
 function decideLeg (kinds, { swimming = false, step = 40 } = {}) {
-  const i = kinds.indexOf('w')
-  if (i < 0) return { mode: 'walk', legLen: step }
-  let run = 0; for (let k = i; k < kinds.length && kinds[k] !== 'l'; k++) run++
-  if (run < OPEN_WATER) return { mode: 'walk', legLen: step, waterAt: i + 1, run }
-  if (swimming || i + 1 <= LAUNCH_NEAR) return { mode: 'boat', waterAt: i + 1, run }
+  // the FIRST run long enough to be a crossing decides, wherever it lies on the line - a creek before the sea
+  // ("lll www llllllll wwwwwwww...") read as a 3-block puddle, the 40-block leg ended out over the sea and the bot swam
+  // it (audit B1, 2026-09-27); shorter runs before it are walked or swum
+  const first = kinds.indexOf('w')
+  if (first < 0) return { mode: 'walk', legLen: step }
+  let i = -1; let run = 0; let firstRun = 0
+  for (let k = first; k < kinds.length;) {
+    if (kinds[k] !== 'w') { k++; continue }
+    let j = k; while (j < kinds.length && kinds[j] !== 'l') j++
+    if (k === first) firstRun = j - k
+    if (j - k >= OPEN_WATER) { i = k; run = j - k; break }
+    k = j
+  }
+  if (i < 0) return { mode: 'walk', legLen: step, waterAt: first + 1, run: firstRun }
+  if ((swimming && i === first && first === 0) || i + 1 <= LAUNCH_NEAR) return { mode: 'boat', waterAt: i + 1, run }
   return { mode: 'walk', legLen: Math.max(2, Math.min(step, i - 1)), waterAt: i + 1, run, toShore: true }
 }
 
@@ -137,6 +159,7 @@ function nearestLand (bot, radius = 48) {
       const x = Math.floor(me.x) + dx; const z = Math.floor(me.z) + dz
       const gy = world.groundY(bot, x, z, refY)
       if (gy == null || !world.standable(bot, x, gy + 1, z)) continue
+      const fl = world.at(bot, x, gy, z); if (!fl || world.isWaterBlock(fl)) continue // (the water's own surface is no land)
       const d = Math.hypot(dx, dz)
       if (d < bd) { bd = d; best = { x, y: gy + 1, z } }
     }
@@ -190,8 +213,14 @@ function heading (bot, pos, wy, target) {
 function boatItem (bot) { return inv.items(bot).find(i => BOAT_ITEM_RE.test(i.name)) || null }
 async function ensureBoat (bot, { shouldStop } = {}) {
   if (boatItem(bot)) return true
-  // a boat takes a crafting table, and a table takes ground: in the water there is no making one
-  if (swimming(bot) || !bot.entity.onGround) return false
+  // a boat takes a crafting table, and a table takes ground: in the water there is no making one - so step back onto the
+  // beach first (in the shallows at the shore it gave up at once and swam 500 blocks of open sea, 2026-09-27)
+  if (!onLand(bot)) {
+    const land = nearestLand(bot, 8)
+    if (!land) { log('move', 'boat: afloat with no land within 8 to make one on'); return false }
+    await require('./move').goTo(bot, new goals.GoalBlock(land.x, land.y, land.z), { timeoutMs: 15000, stuckMs: 5000, dig: false, place: false, label: 'onto the beach', shouldStop })
+    if (!onLand(bot)) { log('move', `boat: couldn't get onto the beach at ${fmt(land)}`); return false }
+  }
   const craft = require('./craft')
   const w = craft.preferredWood(bot, 5)
   const name = world.data(bot).itemsByName[w + '_boat'] ? w + '_boat' : 'oak_boat'
@@ -220,10 +249,15 @@ async function mount (bot, e) {
     if (!e.isValid && !bot.entities[e.id]) return false
     const d = bot.entity.position.distanceTo(e.position)
     if (d > 2.8) await require('./move').goTo(bot, new goals.GoalNear(e.position.x, e.position.y, e.position.z, 1), { timeoutMs: 8000, stuckMs: 4000, dig: false, place: false, label: 'to the boat' })
-    try { bot.setControlState('sneak', false) } catch {}
-    await bot.lookAt(e.position.offset(0, 0.3, 0), true).catch(() => {})
-    try { bot.mount(e) } catch {}
-    for (let k = 0; k < 20 && bot.vehicle !== e; k++) await sleep(100)
+    // (no crouch from the click until we are seated: seated, sneak is the dismount key, and until bot.vehicle is set
+    //  the edge guard's ledge crouch pressed it again at a launch from a bank - a declared hold, 2026-09-27)
+    const letGo = require('./reflex').holdNoSneak()
+    try {
+      try { bot.setControlState('sneak', false) } catch {}
+      await bot.lookAt(e.position.offset(0, 0.3, 0), true).catch(() => {})
+      try { bot.mount(e) } catch {}
+      for (let k = 0; k < 20 && bot.vehicle !== e; k++) await sleep(100)
+    } finally { letGo() }
   }
   return bot.vehicle === e
 }
@@ -422,4 +456,4 @@ async function leave (bot) {
   return ok
 }
 
-module.exports = { scanLine, decideLeg, bigLandAhead, chooseLaunch, landingCell, nearestLand, boxClear, heading, ensureBoat, launch, drive, dismount, pickUp, cross, leave, swimming, inBoat, driving, busy, OPEN_WATER, LAUNCH_NEAR }
+module.exports = { boatItem, scanLine, decideLeg, bigLandAhead, chooseLaunch, landingCell, nearestLand, boxClear, heading, ensureBoat, launch, drive, dismount, pickUp, cross, leave, swimming, inBoat, driving, busy, OPEN_WATER, LAUNCH_NEAR }

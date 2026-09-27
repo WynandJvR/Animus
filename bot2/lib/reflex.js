@@ -64,6 +64,7 @@ function diveHolds (now) {
 }
 
 function setActive (kind, detail) {
+  if (kind !== 'shoot') endDraw(kind) // (the body is another reflex's now: the string goes)
   if (!active || active.kind !== kind) {
     active = { kind, since: Date.now(), detail }
     const key = kind + ':' + (detail || '')
@@ -74,6 +75,7 @@ let blocking = false
 function shieldUp () { if (!blocking) { try { bot.activateItem(true); blocking = true } catch {} } }
 function shieldDown () { if (blocking) { try { bot.deactivateItem() } catch {} blocking = false } }
 function clearActive () {
+  endDraw('released')
   shieldDown()
   riseY = null
   if (active) {
@@ -97,9 +99,21 @@ function hostiles (maxDist = 24) {
   return out
 }
 
-function canSee (e) {
+// A mob on the surface - at or over the top ground of its column (leaves and logs are not ground): what can walk to the
+// door or shoot at it. One in the caves under the mountain is not: cave skeletons 17-24 blocks off kept the bot in the
+// safehouse a whole morning, in daylight, the build standing still (2026-09-26). (Here, beside hostiles(), so the
+// director's hideout and the safehouse door's seal ask the same question.)
+function onSurface (e) {
   try {
-    const eye = bot.entity.position.offset(0, 1.62, 0)
+    const p = e.position.floored()
+    const g = world.groundY(bot, p.x, p.z, p.y + 24)
+    return g == null || p.y >= g
+  } catch { return true }
+}
+// Line of sight to e from `eye` (default our own eyes): no full block on the way.
+function canSee (e, eye = null) {
+  try {
+    eye = eye || bot.entity.position.offset(0, 1.62, 0)
     const tgt = e.position.offset(0, (e.height || 1.6) * 0.8, 0)
     const dir = tgt.minus(eye)
     const len = dir.norm()
@@ -126,6 +140,96 @@ function hurtLine () {
   return 2 * dmg * (1 - cut)
 }
 
+// CAN WE AFFORD THE CHARGE: the arrows taken on the way in and while the fight lasts, from every shooter in sight -
+// the charged one's mostly on the shield when there is one - must leave us above the hurt line. "A shield or two armour
+// pieces" charged a pillager patrol 9-14b off: one on the shield, the others shooting from the side, 20 -> 8 hp in six
+// seconds and dead at the safehouse door (2026-09-25).
+const SHOOTER_DPS = { skeleton: 2.2, stray: 2.2, bogged: 2.2, pillager: 2, witch: 2, blaze: 3, breeze: 2, ghast: 2 }
+const MOB_HP = { skeleton: 20, stray: 20, bogged: 16, pillager: 24, witch: 26, blaze: 20, breeze: 30, ghast: 10 }
+// `hs`: every hostile in range, the never-melee ones too - a ghast's fireballs land on the way in as well as a
+// skeleton's arrows; handed the melee list, the ghast was never counted and a charge under it read as free (2026-09-27)
+function chargeAffordable (shooter, hs, hp) {
+  const shooters = hs.filter(h => RANGED.has(h.e.name) && h.d < 16 && canSee(h.e))
+  const w = inv.bestWeapon(bot)
+  const dmg = w ? (/_axe$/.test(w.name) ? 7 : 5) : 1
+  const cd = w ? (/_axe$/.test(w.name) ? 1050 : 650) : 400
+  const secs = Math.max(0, shooter.d - 3) / 4.5 + (MOB_HP[shooter.e.name] || 20) / (dmg * 1000 / cd)
+  const shield = inv.offhandShield(bot)
+  // (the charged one by ENTITY: compared as list elements, the fight's own re-check - a fresh {e, d} - never matched,
+  //  so the pick said charge and the fight said flee, every tick, shield up at hp 12-16 under a skeleton, 2026-09-27)
+  const dps = shooters.reduce((a, h) => a + (SHOOTER_DPS[h.e.name] || 2) * (shield && h.e === shooter.e ? 0.2 : 1), 0)
+  const pts = inv.armorPoints(bot)
+  return hp - secs * dps * (1 - Math.min(20, pts) / 25) > hurtLine()
+}
+
+// THE BOW. A shooter at range was fought only by walking into its arrows with a stone sword (or not at all: hide, flee)
+// while two bows and fifteen arrows sat in the chest - and a pillager patrol that never burns camped the safehouse
+// (2026-09-25). A player shoots back: full draw (1s), the aim solved for the arrow's own flight - 3 blocks a tick,
+// 1% drag a tick, 0.05 gravity - on where the target will be when it lands.
+const ARROW_RE = /^(arrow|spectral_arrow|tipped_arrow)$/
+function bowReady () { const its = bot.inventory.items(); return its.some(i => i.name === 'bow') && its.some(i => ARROW_RE.test(i.name)) }
+// pitch (radians, up +) that puts a full-draw arrow at horizontal distance h and height dy; and its flight time in ticks
+function bowPitch (h, dy) {
+  const fly = th => {
+    let x = 0; let y = 0; let vx = 3 * Math.cos(th); let vy = 3 * Math.sin(th)
+    for (let t = 1; t <= 100; t++) { x += vx; y += vy; vx *= 0.99; vy = vy * 0.99 - 0.05; if (x >= h) return { y, t } }
+    return { y: -Infinity, t: 100 }
+  }
+  let lo = -0.9; let hi = 0.8
+  for (let i = 0; i < 24; i++) { const mid = (lo + hi) / 2; if (fly(mid).y < dy) lo = mid; else hi = mid }
+  return { pitch: (lo + hi) / 2, t: fly((lo + hi) / 2).t }
+}
+function aimBow (e) {
+  const eye = bot.entity.position.offset(0, 1.62, 0)
+  let tgt = e.position.offset(0, (e.height || 1.8) * 0.6, 0)
+  const v = e.velocity || { x: 0, z: 0 }
+  for (let k = 0; k < 2; k++) {
+    const h = Math.hypot(tgt.x - eye.x, tgt.z - eye.z)
+    const { t } = bowPitch(h, tgt.y - eye.y)
+    tgt = e.position.offset((v.x || 0) * t, (e.height || 1.8) * 0.6, (v.z || 0) * t)
+  }
+  const dx = tgt.x - eye.x; const dz = tgt.z - eye.z
+  const { pitch } = bowPitch(Math.hypot(dx, dz), tgt.y - eye.y)
+  return bot.look(Math.atan2(-dx, -dz), pitch, true).catch(() => {})
+}
+let shots = 0
+// THE DRAW is not `busy`: a busy tick returns before the air clock's reflex, the tread and every threat - a draw from
+// the water sank the bot (clearControlStates let go of the swim stroke) and a zombie walking up from behind was
+// ignored for the whole second (2026-09-27). While it holds, the tick runs on: any other reflex that takes the body
+// (setActive) lets the string go at once, and so does a melee mob within 3 or the ground going from under us.
+let draw = null // { e, abort } while the bow is drawn
+function canDraw () { return !!bot.entity && bot.entity.onGround && !bot.vehicle && !world.feetInWater(bot) }
+function endDraw (why) { if (draw && !draw.abort) { draw.abort = why; try { bot.deactivateItem() } catch {} } }
+async function shootAt (e) {
+  const bow = bot.inventory.items().find(i => i.name === 'bow')
+  if (!bow) return false
+  const d = draw = { e, abort: null }
+  try {
+    try { if (!bot.heldItem || bot.heldItem.name !== 'bow') await bot.equip(bow, 'hand') } catch { return false }
+    if (d.abort) return false
+    shieldDown()
+    try { bot.pathfinder.setGoal(null) } catch {}
+    for (const k of ['forward', 'back', 'left', 'right', 'sprint', 'jump']) bot.setControlState(k, false) // (sneak stays the edge guard's)
+    bot.activateItem()
+    const t0 = Date.now()
+    // hold the draw, the aim kept on it; let go of it early if it came close (the sword then), went, or anything that
+    // hits in melee is within 3 of us, whichever side
+    while (Date.now() - t0 < 1100) {
+      if (d.abort) return false
+      if (!e.isValid || bot.health <= 0 || !canDraw() || e.position.distanceTo(bot.entity.position) < 3.5 ||
+        hostiles(3).some(h => !NEVER_MELEE.has(h.e.name))) { endDraw('broke off'); return false }
+      await aimBow(e)
+      await new Promise(r => setTimeout(r, 50))
+    }
+    if (d.abort) return false
+    await aimBow(e)
+    if (d.abort) return false
+    bot.deactivateItem()
+    shots++
+    return true
+  } finally { if (draw === d) draw = null }
+}
+
 function attackCooldownMs () {
   const h = bot.heldItem ? bot.heldItem.name : ''
   if (h.endsWith('_sword')) return 650
@@ -134,7 +238,7 @@ function attackCooldownMs () {
 }
 
 async function doEat () {
-  const food = inv.foodItems(bot, { desperate: bot.food <= 6 })[0]
+  const food = inv.foodItems(bot, { desperate: bot.food <= 6, hurt: bot.health < 20 })[0]
   if (!food) return false
   busy = true
   setActive('eat', food.name)
@@ -323,6 +427,9 @@ function steerTo (p, { jump = true, sprint = false } = {}) {
 function fleeHeading (t) {
   const me = bot.entity.position
   const away = Math.atan2(me.z - t.position.z, me.x - t.position.x)
+  // afloat: no dry step within three blocks mid-river, and "back" drifted the bot in place while drowned hit it to death
+  // (2026-09-27) - swim for the nearest bank that is not toward the threat
+  if (world.feetInWater(bot) && !bot.vehicle) return shoreHeading(me, away)
   let best = null
   for (let i = 0; i < 16; i++) {
     const a = i * Math.PI / 8
@@ -343,6 +450,37 @@ function fleeHeading (t) {
     if (!best || diff < best.diff) best = { x: cell.x, y: cell.y, z: cell.z, jump, diff }
   }
   return best
+}
+// The bank: rings outward from the body, the first ring with dry ground on it wins (the nearest bank is the way out), the
+// most direct cell of that ring first; lava is asked of the winner only. The answer holds until the body has swum ~2
+// blocks or the threat has swung round - the whole 25x25x4 box, with a 27-block lava probe per standable cell, ran every
+// 200ms of a swim-flee (2026-09-27).
+let shoreMemo = null // { x, z, away, res }
+function shoreHeading (me, away) {
+  if (shoreMemo && Math.hypot(me.x - shoreMemo.x, me.z - shoreMemo.z) < 2 &&
+    Math.abs(((away - shoreMemo.away) + 3 * Math.PI) % (2 * Math.PI) - Math.PI) < Math.PI / 4) return shoreMemo.res
+  const fx = Math.floor(me.x); const fz = Math.floor(me.z); const fy = Math.floor(me.y)
+  let res = null
+  for (let r = 2; r <= 12 && !res; r++) {
+    const ring = []
+    for (let dx = -r; dx <= r; dx++) for (let dz = -r; dz <= r; dz++) {
+      if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue
+      const d = Math.hypot(dx, dz); if (d > 12) continue
+      const diff = Math.abs(((Math.atan2(dz, dx) - away) + 3 * Math.PI) % (2 * Math.PI) - Math.PI)
+      if (diff > Math.PI * 0.7) continue // (sideways is fine; back past the drowned is not)
+      for (const dy of [0, 1, 2, -1]) {
+        const x = fx + dx; const y = fy + dy; const z = fz + dz
+        if (!world.standable(bot, x, y, z)) continue
+        const floor = world.at(bot, x, y - 1, z)
+        if (floor && !world.isWaterBlock(floor)) ring.push({ x, y, z, jump: true, diff, cost: d + diff * 3 })
+        break
+      }
+    }
+    ring.sort((a, b) => a.cost - b.cost)
+    res = ring.find(c => !world.lavaNear(bot, { x: c.x, y: c.y, z: c.z }, 1)) || null
+  }
+  shoreMemo = { x: me.x, z: me.z, away, res }
+  return res
 }
 
 // TREADING WATER. A player in deep water holds jump whenever nothing else is steering - let go and the body sinks.
@@ -372,8 +510,166 @@ function tread () {
 // judged against the ground it leads onto, every physics tick, and cut - with sneak held to brake the momentum (the
 // physics stops a sneaking body at an edge) - before the body goes over.
 let edgeHeld = null // { x, z, drop } while the guard is braking
+let jumpHeld = null // the last jump let go of near a drop (its log line once)
+// A JUMP carries the body a block or more through the air, and nothing steers it there: a jump on the plaza's lip
+// (the next node level with us, nothing to climb) sailed off the south cliff, 51 blocks; a climb-out's jump beside a
+// drop another 20 (2026-09-25). A jump that isn't a climb onto a block ahead is refused when there is a drop that hurts
+// within its reach - checked as jump is PRESSED, whoever presses it (the planner's keys are set inside the physics
+// tick, but a tower, a swim float or a flee steer press it between ticks, and the jump went off before any check).
+function jumpHurts (c) {
+  if (!bot.entity || !bot.entity.onGround || bot.vehicle || world.feetInWater(bot)) return null
+  const p = bot.entity.position; const v = bot.entity.velocity
+  // the planner stepping up onto the block beside us is a climb, whatever the slope round it: judged by the velocity's
+  // heading, every step up a hillside with a drop somewhere near was refused - the builder could not climb the slope
+  // under the nave to its y127 cells, 2 hours of "no jump toward a 4-block drop", 2026-09-26. (Its node straight
+  // overhead is a tower: that one still answers to the drop under our corners.)
+  const n = lastPath && lastPath[0]
+  if (n && bot.pathfinder && bot.pathfinder.isMoving && bot.pathfinder.isMoving()) {
+    const fy = Math.floor(p.y + 0.01); const nx = Math.floor(n.x); const nz = Math.floor(n.z)
+    const side = Math.abs(nx - Math.floor(p.x)) + Math.abs(nz - Math.floor(p.z))
+    if (n.y > fy && side >= 1 && side <= 2 && world.isSolid(world.at(bot, nx, Math.floor(n.y) - 1, nz))) return null
+  }
+  const speed = Math.hypot(v.x, v.z)
+  const dir = c.forward ? 1 : c.back ? -1 : 0
+  let jx, jz
+  if (speed > 0.03) { jx = v.x / speed; jz = v.z / speed } else if (dir) { jx = -Math.sin(bot.entity.yaw) * dir; jz = -Math.cos(bot.entity.yaw) * dir }
+  if (jx == null) {
+    // a standing jump comes down where it went up - unless we stand half over a drop already: the planner towered at
+    // a wall top's lip, drifted a few hundredths a tick and fell 43 blocks (2026-09-26). Any corner of the hitbox over
+    // a fall that hurts: no jump.
+    const fy0 = Math.floor(p.y + 0.01)
+    // (a tower on our own block, centred on it, is how a scaffold pillar climbs - 1 wide, every corner over air: refusing
+    //  those left the builder short of every cell over y125 for an evening, 2026-09-26. The fall came off-centre, half
+    //  over a ledge.)
+    const cx = p.x - Math.floor(p.x) - 0.5; const cz = p.z - Math.floor(p.z) - 0.5
+    // (0.4: the walk to a pillar's foot stops up to 0.35 off the centre - 0.25 refused every tower from there)
+    if (Math.abs(cx) < 0.4 && Math.abs(cz) < 0.4 && world.isSolid(world.at(bot, Math.floor(p.x), fy0 - 1, Math.floor(p.z)))) return null
+    const over = [[-0.3, -0.3], [0.3, -0.3], [-0.3, 0.3], [0.3, 0.3]].map(([dx, dz]) => world.dropAt(bot, p.x + dx, fy0, p.z + dz)).find(d => d > world.SAFE_DROP)
+    return over == null ? null : { x: Math.floor(p.x), y: fy0, z: Math.floor(p.z), drop: over }
+  }
+  const fy = Math.floor(p.y + 0.01)
+  const ax = Math.floor(p.x + jx * 0.8); const az = Math.floor(p.z + jz * 0.8)
+  const climb = world.isSolid(world.at(bot, ax, fy, az)) && !world.isSolid(world.at(bot, ax, fy + 1, az)) && !world.isSolid(world.at(bot, ax, fy + 2, az))
+  if (climb) return null
+  const drop = [0.8, 1.6, 2.4].map(r => world.dropAt(bot, p.x + jx * r, fy, p.z + jz * r)).find(d => d > world.SAFE_DROP)
+  return drop == null ? null : { x: Math.floor(p.x + jx * 1.6), y: fy, z: Math.floor(p.z + jz * 1.6), drop }
+}
+function noteJump (cell, who) {
+  if (!cell.x && cell.x !== 0) return
+  if (!jumpHeld || jumpHeld.x !== cell.x || jumpHeld.z !== cell.z || Date.now() - jumpHeld.at > 5000) log('reflex', `edge: no jump toward a ${cell.drop === Infinity ? 'bottomless' : cell.drop + '-block'} drop at ${cell.x},${cell.y},${cell.z}${who ? ' (' + who + ')' : ''}`)
+  jumpHeld = Object.assign({}, cell, { at: Date.now() })
+}
+let origSet = (k, v) => bot.setControlState(k, v)
+// THE PLANNER'S STEPPING STONES ARE SCAFFOLD. mineflayer-pathfinder equips a scaffold block, then places what is in
+// the hand - and the builder, equipping glass for its next window meanwhile, had the planner lay glass: 15 glass, 4
+// slabs and 2 stairs stood round the cathedral walls as stepping stones, the build's own blocks (2026-09-26). Every
+// place the planner asks for goes with a scaffold block in hand (re-equipped if something swapped it), or not at all.
+const PLANNER_SCAFFOLD = /^(dirt|coarse_dirt|rooted_dirt|andesite|diorite|granite|tuff|cobbled_deepslate|netherrack|cobblestone)$/
+function installPlaceGuard () {
+  if (typeof bot.placeBlock !== 'function') return
+  const orig = bot.placeBlock.bind(bot)
+  bot.placeBlock = async (ref, face, ...rest) => {
+    const caller = new Error().stack
+    if (/mineflayer-pathfinder/.test(caller)) {
+      const held = bot.heldItem
+      if (!held || !PLANNER_SCAFFOLD.test(held.name)) {
+        const s = bot.inventory.items().find(i => PLANNER_SCAFFOLD.test(i.name))
+        if (!s) throw new Error('place guard: no scaffold block for the planner')
+        await bot.equip(s, 'hand')
+        log('act', `place guard: the planner held ${held ? held.name : 'nothing'} - placing ${s.name} instead`)
+      }
+    }
+    return orig(ref, face, ...rest)
+  }
+}
+function jumpGuard () {
+  const set = bot.setControlState.bind(bot)
+  origSet = set
+  bot.setControlState = (k, v) => {
+    if (k === 'jump' && v) {
+      const h = jumpHurts(Object.assign({}, bot.controlState || {}, { jump: true }))
+      // (who pressed it: the caller's frame, for the log)
+      if (h) { noteJump(h, (new Error().stack.split(/\r?\n/)[2] || '').trim().replace(/^at /, '').split(' ')[0]); return set('jump', false) }
+    }
+    // anyone else's sneak - pressed or let go - is theirs from now on: a skill that pressed it over the ledge crouch (a
+    // place from the edge) had it let go under it the tick the ledge was no longer wanted (2026-09-27). The guard
+    // releases only a press still its own; it presses again next tick if it still wants one.
+    if (k === 'sneak') guardSneak = false
+    return set(k, v)
+  }
+}
+let takeoff = null; let wasGround = true; let fell = null; let lastPath = null
+// the pathfinder's next step as planned (where to, what it meant to break and place to get there)
+function plannedStep () {
+  if (!lastPath || !lastPath.length || !bot.entity) return ''
+  const n = lastPath[0]
+  const b = x => x.map(q => `${q.x},${q.y},${q.z}`).join(' ')
+  return ` next node ${n.x},${n.y},${n.z}${n.toBreak && n.toBreak.length ? ' break ' + b(n.toBreak) : ''}${n.toPlace && n.toPlace.length ? ' place ' + b(n.toPlace) : ''}${n.parkour ? ' parkour' : ''}`
+}
+function noteTakeoff () {
+  if (!bot.entity) return
+  const g = bot.entity.onGround
+  // landed: a fall that hurts keeps its takeoff (the death's own bounce is a takeoff too, and overwrote it)
+  if (!wasGround && g && takeoff && takeoff.y - bot.entity.position.y > world.SAFE_DROP) fell = Object.assign({}, takeoff, { fall: Math.round(takeoff.y - bot.entity.position.y) })
+  if (wasGround && !g) {
+    const p = bot.entity.position; const v = bot.entity.velocity; const c = bot.controlState || {}
+    const fy = Math.floor(p.y + 0.01)
+    takeoff = { at: Date.now(), y: p.y, step: plannedStep(), pos: `${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)}`, fy, drop: world.dropAt(bot, p.x, fy, p.z), v: `${v.x.toFixed(2)},${v.y.toFixed(2)},${v.z.toFixed(2)}`, keys: Object.keys(c).filter(k => c[k]).join('+'), steered: !!(bot.pathfinder && bot.pathfinder.isMoving && bot.pathfinder.isMoving()), active: active && active.kind, hurt: lastHurtAt && Date.now() - lastHurtAt < 2000 ? Date.now() - lastHurtAt : 0 }
+  }
+  wasGround = g
+}
+// LEDGE CROUCH: on a block with a fall that hurts beside it, crouch - as a player walks a wall top. The planner walked the
+// cathedral's 1-wide wall tops at y126 and slid off the lip, 31 blocks (the fourth such fall, gear lost with the
+// grave, 2026-09-27); crouched, the body stops at the edge. Slower along the ledges; nothing else is touched.
+// ...except on the planner's own way down: the physics refuses a sneaking body every move into a column with nothing
+// within a step under it - a planned step down too - so a builder stepping off a wall top onto its scaffold, or a walk
+// down a hillside past a cliff, was clipped every tick until the move timed out (2026-09-27). The planner's next node
+// below our floor, no further down than SAFE_DROP, is a descent it chose: no crouch while it takes it (the brake in
+// edgeGuard still catches an overshoot past it).
+function plannedDescent (fy) {
+  const n = lastPath && lastPath[0]
+  if (!n || !bot.pathfinder || !bot.pathfinder.isMoving || !bot.pathfinder.isMoving()) return false
+  const down = fy - Math.floor(n.y)
+  return down >= 1 && down <= world.SAFE_DROP
+}
+function ledgeWanted () {
+  const e = bot.entity
+  if (!e || bot.vehicle || !e.onGround || world.feetInWater(bot)) return false
+  const p = e.position; const fy = Math.floor(p.y + 0.01)
+  if (plannedDescent(fy)) return false
+  for (const [dx, dz] of [[0.8, 0], [-0.8, 0], [0, 0.8], [0, -0.8]]) if (world.dropAt(bot, p.x + dx, fy, p.z + dz, world.SAFE_DROP + 1) > world.SAFE_DROP) return true
+  return false
+}
+// ONE OWNER OF SNEAK among the guards: the edge brake and the ledge crouch each pressed and let go of it on their own,
+// the brake's release undoing the crouch every tick it ran. Both are asked each physics tick and sneak is set once from
+// the answer; only a press of ours is ever let go (a skill's own sneak - a place from the edge - stays its own).
+let guardSneak = false
+// NO CROUCH WHILE WE CLICK - a declared hold. A right-click sent sneaking is a different click (a placing beside, no
+// use): act.useOn/pour/fill/place(sneak:false) each let go of sneak themselves, and the ledge crouch pressed it again
+// during their look + two ticks - shears on a pumpkin/nest and a composter's layer came to "+0" at any ledge, and a
+// chest on a wall top never paired (2026-09-27). The boat's mount the same: seated, sneak is the dismount key, and
+// until bot.vehicle is set the guard's on-ground branch pressed it again. The clicker DECLARES the hold (a token,
+// counted: nested holds compose); while any is held the guard's want is false. (The brake still cuts the keys; only
+// its crouch waits - a click is made standing still.)
+let noSneakHolds = 0
+function holdNoSneak () {
+  noSneakHolds++
+  if (bot) setGuardSneak(false)
+  let done = false
+  return () => { if (!done) { done = true; noSneakHolds-- } }
+}
+function setGuardSneak (want) {
+  if (noSneakHolds > 0) want = false
+  const held = !!(bot.controlState && bot.controlState.sneak)
+  if (want) { if (!held) { origSet('sneak', true); guardSneak = true } } else if (guardSneak) { guardSneak = false; if (held) origSet('sneak', false) }
+}
 function edgeGuard () {
-  if (!bot.entity || bot.vehicle || bot.health <= 0) return
+  if (!bot.entity || bot.vehicle || bot.health <= 0) { edgeHeld = null; setGuardSneak(false); return }
+  const braking = edgeBrake()
+  setGuardSneak(braking || ledgeWanted())
+}
+// the brake: true when it cut the keys this tick (sneak held to stop the momentum at the lip)
+function edgeBrake () {
   // (the pathfinder too: every step it plans drops SAFE_DROP at most, so a bigger drop ahead of it is an overshoot - it
   //  walked the bot off the unrailed edge of the Notre-Dame plaza, 21 blocks, 2026-09-24. Cut, and it replans.)
   const steered = bot.pathfinder && bot.pathfinder.isMoving && bot.pathfinder.isMoving()
@@ -382,7 +678,9 @@ function edgeGuard () {
   const v = bot.entity.velocity
   const dir = c.forward ? 1 : c.back ? -1 : 0
   const speed = Math.hypot(v.x, v.z)
-  if (world.feetInWater(bot) || !bot.entity.onGround || (!dir && speed < 0.05)) { release(); return }
+  // a jump held when this tick's keys were set by the planner (anything else is caught as it is pressed: jumpGuard)
+  if (c.jump && jumpHurts(c)) { origSet('jump', false); noteJump(jumpHurts(c) || {}, steered ? 'pathfinder' : active && active.kind) }
+  if (world.feetInWater(bot) || !bot.entity.onGround || (!dir && speed < 0.05)) { release(); return false }
   // where the body is headed: the keys it holds, else the way it is sliding
   let hx, hz
   if (dir) { hx = -Math.sin(bot.entity.yaw) * dir; hz = -Math.cos(bot.entity.yaw) * dir } else { hx = v.x / speed; hz = v.z / speed }
@@ -404,14 +702,13 @@ function edgeGuard () {
     const least = hull(nx, nz)
     if (least > world.SAFE_DROP && hull(p.x, p.z) <= world.SAFE_DROP) {
       for (const k of ['forward', 'back', 'sprint', 'jump']) if (c[k]) bot.setControlState(k, false)
-      bot.setControlState('sneak', true)
       const cell = { x: Math.floor(nx), z: Math.floor(nz), drop: least }
       if (!edgeHeld || edgeHeld.x !== cell.x || edgeHeld.z !== cell.z) log('reflex', `edge: stopped short of a ${least === Infinity ? 'bottomless' : least + '-block'} drop at ${cell.x},${y},${cell.z} (the pathfinder ran on)`)
       edgeHeld = cell
-      return
+      return true
     }
     release()
-    return
+    return false
   }
   for (const r of [0.45, reach]) {
     const x = p.x + hx * r; const z = p.z + hz * r
@@ -420,15 +717,15 @@ function edgeGuard () {
     // (a column no deeper than the one we stand over is no new edge - a ledge walked along is not a cliff stepped off)
     if (drop <= world.SAFE_DROP || drop <= here) continue
     for (const k of ['forward', 'back', 'sprint', 'jump']) if (c[k]) bot.setControlState(k, false)
-    bot.setControlState('sneak', true)
     const cell = { x: Math.floor(x), z: Math.floor(z), drop }
     if (!edgeHeld || edgeHeld.x !== cell.x || edgeHeld.z !== cell.z) log('reflex', `edge: stopped short of a ${drop === Infinity ? 'bottomless' : drop + '-block'} drop at ${cell.x},${y},${cell.z}${active ? ' (' + active.kind + ')' : ''}`)
     edgeHeld = cell
-    return
+    return true
   }
   release()
+  return false
 }
-function release () { if (edgeHeld) { edgeHeld = null; try { bot.setControlState('sneak', false) } catch {} } }
+function release () { edgeHeld = null } // (the sneak itself: setGuardSneak)
 function edgeAhead () { return edgeHeld }
 
 function tick () {
@@ -477,8 +774,11 @@ function tick () {
     // straight up to open air (water then air within 6)? Then only UP: steering toward the nearest air cell - the air
     // over the bank - pressed the bot into the bank under water; it drifted sideways and down and drowned in 30s with
     // open water overhead (2026-09-23). Sideways only when something blocks the way up.
+    // (water a swimmer rises through: liquid, kelp, seagrass - not a waterlogged stair or slab, which holds water and
+    //  a head all the same: read as "water", a waterlogged roof counted as open sky, 2026-09-27)
+    const swimThrough = b => world.isWaterBlock(b) && b.boundingBox === 'empty'
     let open = false
-    for (let dy = 2; dy <= 7; dy++) { const b = world.at(bot, me.x, me.y + dy, me.z); if (!b || (!world.isWaterBlock(b) && !world.isAirish(b))) break; if (world.isAirish(b)) { open = true; break } }
+    for (let dy = 2; dy <= 7; dy++) { const b = world.at(bot, me.x, me.y + dy, me.z); if (!b || (!swimThrough(b) && !world.isAirish(b))) break; if (world.isAirish(b)) { open = true; break } }
     // ...unless UP makes no headway: falling water in a one-wide pit (dug for sand under the water line) pushes a
     // swimmer down, and jumping in place drowned the bot a step from dry sand (2026-09-23). After 1.5s without
     // rising, climb out sideways to land.
@@ -560,7 +860,21 @@ function tick () {
   let target = close ? close.e : (hurtByMelee || null)
   // charge a shooter only with a shield or armour to take the arrows, or when it is already close - an
   // unarmoured run at a skeleton 11b away lost 9 hp before the first swing, and the next one killed the bot
-  if (!target && shooter && armed && hp >= 12 && (inv.offhandShield(bot) || armor >= 2 || shooter.d < 5)) target = shooter.e
+  // (with a bow ready, anything past 5 blocks is shot, not charged)
+  // (above the hurt line - the same line `weak` below flees at: a fixed hp 12 beside it picked fights the flee rule
+  //  then broke off, and never moved with the armour worn)
+  if (!target && shooter && armed && hp > hurtLine() && (shooter.d < 5 || (!bowReady() && chargeAffordable(shooter, hs, hp)))) target = shooter.e
+  // nothing to hit in reach and a bow in the pack: shoot what shoots us (out to 24, in sight), and a creeper before it
+  // walks up - standing on the ground only (a draw afloat lets the body sink; the flee swims for the bank instead)
+  if (!target && draw) return // (the draw in hand holds the body; anything above took it with setActive)
+  if (!target && bowReady() && hp > hurtLine() && canDraw()) {
+    const mark = hs.find(h => (RANGED.has(h.e.name) || h.e.name === 'creeper') && h.d >= 4 && h.d < 24 && canSee(h.e))
+    if (mark) {
+      setActive('shoot', `${mark.e.name} ${mark.d.toFixed(1)}b`)
+      shootAt(mark.e).catch(() => false).finally(() => { if (active && active.kind === 'shoot') clearActive() })
+      return
+    }
+  }
   if (!target && shooter && recentlyHurt) {
     // being shot and not going to fight it: out of its line of sight
     fleeTarget = shooter.e
@@ -606,8 +920,10 @@ function tick () {
   if (target && target.isValid) {
     const d = target.position.distanceTo(me)
     const why = target === (close && close.e) ? 'close' : target === hurtByMelee ? 'hit me' : 'shooter'
-    // whatever picked it: never chase a shooter across open ground without a shield or armour
-    if (RANGED.has(target.name) && d > 5 && !inv.offhandShield(bot) && armor < 2) {
+    // whatever picked it: never chase a shooter across open ground the arrows on the way in would make a losing trade
+    // (the charge rule's own reckoning - "no shield and under two pieces" contradicted it: the bot picked the fight and
+    // fled it on the same tick, flee/fight every half second under a pillager patrol, 2026-09-25)
+    if (RANGED.has(target.name) && d > 5 && !chargeAffordable({ e: target, d }, hs, hp)) {
       fleeTarget = target
       setActive('flee', `cover from ${target.name} ${d.toFixed(1)}b (${why})`)
       shieldDown()
@@ -633,9 +949,13 @@ function tick () {
     return
   }
   if (active && (active.kind === 'fight' || active.kind === 'flee')) {
-    // hold the fight a moment after the last target vanishes, then release
-    if (!hs.some(h => h.d < 8)) return clearActive()
-    if (active.kind === 'flee' && (!fleeTarget || !fleeTarget.isValid || fleeTarget.position.distanceTo(me) > 14)) return clearActive()
+    // hold the fight a moment after the last target vanishes, then release - except a flee from a shooter that still sees
+    // us within its range: nothing within 8 is the point of that flee, not its end (the cover flee was cleared the tick
+    // after it began and re-armed the tick after that, every 200ms; audit B3)
+    const coverFlee = active.kind === 'flee' && fleeTarget && fleeTarget.isValid && RANGED.has(fleeTarget.name) && fleeTarget.position.distanceTo(me) < 24 && canSee(fleeTarget)
+    if (!coverFlee && !hs.some(h => h.d < 8)) return clearActive()
+    // (a shooter still in sight is not escaped by distance - the cover flee runs until the sight is lost: B3)
+    if (active.kind === 'flee' && (!fleeTarget || !fleeTarget.isValid || (fleeTarget.position.distanceTo(me) > 14 && !(RANGED.has(fleeTarget.name) && fleeTarget.position.distanceTo(me) < 24 && canSee(fleeTarget))))) return clearActive()
     if (active.kind === 'fight') return clearActive()
     // a shooter that can't see us any more is escaped
     if (fleeTarget && RANGED.has(fleeTarget.name) && !canSee(fleeTarget)) return clearActive()
@@ -649,8 +969,26 @@ function tick () {
   // (hurt: eat up to the food bar regeneration needs - below it the hp never comes back)
   const hungry = bot.food <= 14 || (hp < 20 && bot.food < inv.REGEN_FOOD)
   // (not while swimming - a bite lets go of the stroke - but a boat is a seat: eat in it)
-  if (hungry && !hs.some(h => h.d < 8) && now - lastEatFail > 10000 && (!world.feetInWater(bot) || bot.vehicle)) {
-    if (inv.foodItems(bot, { desperate: bot.food <= 6 }).length) { doEat(); return }
+  // (and not in a shooter's sight: standing 1.6s to eat in the open, the bot took a skeleton's arrows bite after bite,
+  //  17 -> 3 hp in 25s at the site, 2026-09-27 - out of its sight first, then eat)
+  // ...unless it cannot be got away from - hunger at the sprint line (starving comes next) or no way out of the shooter's
+  //  sight (fleeHeading has nowhere): eating is then the better of two bad trades (the audit: never a veto to starve by)
+  // (worked out only when a meal is due - the sight ray and the flee scan every 200ms whenever a shooter was in view cost
+  //  the body for nothing; audit B3)
+  if (hungry && !hs.some(h => h.d < 8) && now - lastEatFail > 10000 && (!world.feetInWater(bot) || bot.vehicle) && inv.foodItems(bot, { desperate: bot.food <= 6, hurt: bot.health < 20 }).length) {
+    const eatShooter = hs.find(h => RANGED.has(h.e.name) && h.d < 24 && canSee(h.e))
+    const cover = eatShooter && bot.food > 6 ? fleeHeading(eatShooter.e) : null
+    // in its sight with a way out: get out of sight FIRST (the cover flee - it ends when the sight is lost, and then this
+    // eats); the veto alone left the bot standing in the open at hp 3, neither eating nor moving (audit B3)
+    if (cover && !bot.vehicle) {
+      fleeTarget = eatShooter.e
+      setActive('flee', `cover from ${eatShooter.e.name} ${eatShooter.d.toFixed(1)}b to eat`)
+      shieldDown()
+      try { bot.pathfinder.setGoal(null) } catch {}
+      bot.setControlState('back', false); steerTo(cover, { jump: cover.jump, sprint: bot.food > 6 })
+      return
+    }
+    doEat(); return
   }
 
   // 6. DRESS - armour in the pack better than what is worn goes on, whoever put it there (a grave, a chest, a pickup).
@@ -668,7 +1006,7 @@ function tick () {
 
 function install (b) {
   bot = b
-  bot.inventory.on('updateSlot', () => { dressFailed = null })
+  if (bot.inventory && bot.inventory.on) bot.inventory.on('updateSlot', () => { dressFailed = null })
   bot.on('entityHurt', (e, source) => {
     if (e !== bot.entity) return
     lastHurtAt = Date.now()
@@ -692,7 +1030,18 @@ function install (b) {
     }, 1500)
   })
   setInterval(() => { try { tick() } catch (e) { log('reflex', 'tick error: ' + e.message) } }, 200)
-  bot.on('physicsTick', () => { try { edgeGuard() } catch (e) { log('reflex', 'edge guard error: ' + e.message) } })
+  jumpGuard()
+  installPlaceGuard()
+  bot.on('path_update', r => { lastPath = r && r.path })
+  bot.on('goal_reached', () => { lastPath = null })
+  bot.on('physicsTick', () => { try { noteTakeoff(); edgeGuard() } catch (e) { log('reflex', 'edge guard error: ' + e.message) } })
+  // a fall's death names what took the body off the ground (the trail is 1/s: it can't - a fall off the cathedral's
+  // north edge left no edge-guard line and no way to tell who was steering, 2026-09-25)
+  bot.on('death', () => {
+    const t = fell && Date.now() - fell.at < 10000 ? fell : takeoff
+    if (!t || Date.now() - t.at > 10000) return
+    log('death', `left the ground ${((Date.now() - t.at) / 1000).toFixed(1)}s before at ${t.pos}${t.fall ? ' (fell ' + t.fall + ')' : ''} (floor y${t.fy}, drop there ${t.drop}) v=${t.v} keys=${t.keys || '-'} ${t.steered ? 'pathfinder steering' : 'no pathfinder'}${t.step}${t.active ? ', reflex ' + t.active : ''}${t.hurt ? ', hurt ' + t.hurt + 'ms before' : ''}`)
+  })
 }
 
 function isActive () { return active ? active.kind : null }
@@ -713,4 +1062,4 @@ function setEnabled (on) { enabled = !!on; if (!on) clearActive() }
 function underMs () { return submergedSince ? Date.now() - submergedSince : 0 }
 function airLeftMs () { return airMs }
 
-module.exports = { install, active: isActive, info, nearestThreat, lastHurt, hurtLine, edgeAhead, hostiles, waitClear, setEnabled, findAir, HOSTILE, startDive, endDive, diveBroken, underMs, airLeftMs, AIR_MS, DIVE_HARD_MS }
+module.exports = { install, holdNoSneak, active: isActive, info, nearestThreat, lastHurt, hurtLine, edgeAhead, hostiles, onSurface, canSee, NEVER_MELEE, waitClear, setEnabled, findAir, HOSTILE, RANGED, bowReady, startDive, endDive, diveBroken, underMs, airLeftMs, AIR_MS, DIVE_HARD_MS }
