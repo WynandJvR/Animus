@@ -179,7 +179,18 @@ function install (bot) {
           const line = trace.map(e => '+' + (e.t - t0) + 'ms ' + e.d + e.n + (e.id != null ? '#' + e.id : '') + (e.x != null ? '@' + e.x.toFixed(2) + ',' + e.y.toFixed(2) + ',' + e.z.toFixed(2) : '') + (e.f ? '/' + e.f : '') + (e.g != null ? (e.g ? '/g' : '/air') : '')).join(' ')
           note('PACKET TRACE while pinned (< from server, > to server; ack = teleport_confirm): ' + line)
         }
-        note('PINNED by the server: ' + recent + ' position syncs in 2s (ids ' + idsTxt + '), last one moved me ' + d.toFixed(3) + 'b to ' + f(to) + ' (client had ' + f(e) + ') flags=' + JSON.stringify(rel) + ' yaw=' + (typeof p.yaw === 'number' ? p.yaw.toFixed(1) : '?') + ' pitch=' + (typeof p.pitch === 'number' ? p.pitch.toFixed(1) : '?') + ' - the server refuses every move from here')
+        // what the CLIENT believes is round the body (feet level and the floor, 3x3): the server sees something else there -
+        // the pins on shore leaves and wall tops kept recurring with nothing in the log to say what (2026-09-27)
+        let around = ''
+        try {
+          const cx = Math.floor(e.x); const cy = Math.floor(e.y); const cz = Math.floor(e.z); const seen = {}
+          for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+            const b = bot.blockAt(new (require('vec3').Vec3)(cx + dx, cy + dy, cz + dz))
+            if (b && b.name !== 'air') (seen[b.name + '/' + b.stateId] = seen[b.name + '/' + b.stateId] || []).push(dx + ',' + dy + ',' + dz)
+          }
+          around = ' around (client, dx,dy,dz): ' + Object.entries(seen).map(([k, v]) => k + '@' + v.join(' ')).join(' | ')
+        } catch {}
+        note('PINNED by the server: ' + recent + ' position syncs in 2s (ids ' + idsTxt + '), last one moved me ' + d.toFixed(3) + 'b to ' + f(to) + ' (client had ' + f(e) + ') flags=' + JSON.stringify(rel) + ' yaw=' + (typeof p.yaw === 'number' ? p.yaw.toFixed(1) : '?') + ' pitch=' + (typeof p.pitch === 'number' ? p.pitch.toFixed(1) : '?') + ' - the server refuses every move from here' + around)
       }
       while (corrections.length && now - corrections[0].t > 10000) corrections.shift()
       if (d < 0.5) return

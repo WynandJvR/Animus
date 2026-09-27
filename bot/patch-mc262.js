@@ -51,7 +51,19 @@ const EDITS = [
   // a modern server says "you got out" as the vehicle's passenger list WITHOUT us (set_passengers boat []); mineflayer
   // only knew the old "vehicle -1" form, kept bot.vehicle set, and the bot "drove" a boat it had left, 15 minutes at
   // sea until a drowned killed it (2026-09-23, traced with bot2 `boatout`)
-  ['mineflayer/lib/plugins/entities.js', "        bot.vehicle = bot.entities[entityId]\n        bot.emit('mount')\n      }\n    }\n", "        bot.vehicle = bot.entities[entityId]\n        bot.emit('mount')\n      }\n    } else if (bot.vehicle && bot.vehicle.id === entityId) { const v = bot.vehicle; bot.vehicle = null; bot.emit('dismount', v) } // 26.2 dismount\n"]
+  ['mineflayer/lib/plugins/entities.js', "        bot.vehicle = bot.entities[entityId]\n        bot.emit('mount')\n      }\n    }\n", "        bot.vehicle = bot.entities[entityId]\n        bot.emit('mount')\n      }\n    } else if (bot.vehicle && bot.vehicle.id === entityId) { const v = bot.vehicle; bot.vehicle = null; bot.emit('dismount', v) } // 26.2 dismount\n"],
+  // (not 26.2-specific) a .schem's int properties were read as the number itself, not its place in the value list: a
+  // list that starts at 1 came out one higher - acacia leaves distance=7 read as cherry leaves, 4 candles as a white
+  // candle (the castle schematic, 2026-09-27)
+  // a registry entry that arrives WITHOUT data (the entry form allows it; minecraft-protocol itself sends packs:[], so
+  // this is a guard, not the cause of the empty biome - that was prismarine-block's static lookup, below): the merge threw
+  // on the missing element - the static biome of the same name stands in
+  ['prismarine-registry/lib/pc/transforms.js', "    const equivalent = staticData.biomesByName[name]\n    return Object.assign(biome.element, {", "    const equivalent = staticData.biomesByName[name]\n    if (!biome.element) biome.element = {} // known-pack entry: no data sent, the static biome stands in\n    return Object.assign(biome.element, {"],
+  // ...and the blocks looked their biome up in the STATIC data of the version (its ids are not the server's: id 29 read ""),
+  // through a table captured at load that the server's registry later replaces - the live registry, read at lookup time
+  ['prismarine-block/index.js', "  return provider(registry, { Biome: require('prismarine-biome')(version), version })", "  return provider(registry, { Biome: require('prismarine-biome')(registry), version }) // the live registry: the server's biome ids"],
+  ['prismarine-biome/index.js', "  const biomes = registry.biomes\n  return function Biome (id) {\n    return biomes?.[id] || { ...emptyBiome, id }", "  return function Biome (id) {\n    return registry.biomes?.[id] || { ...emptyBiome, id } // (read now: the server's registry replaces the table after load)"],
+  ['prismarine-schematic/lib/states.js', "  if (value === 'true') return 0\n", "  if (state.values && state.values.includes(value)) return state.values.indexOf(value) // int lists start at 1\n  if (value === 'true') return 0\n"]
 ]
 function patchGates () {
   for (const [f, from, to] of EDITS) {
