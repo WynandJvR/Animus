@@ -115,7 +115,8 @@ class Animus : Form
     Label lbHost, lbPort, lbVer, lbUser, lbAuth, lbOps, lbAliases, lbBed, lbPre, lbApiH, lbApiP;
     Label lbModel, lbBrainGoal, lbSchemHint, capNow, capGoal;
     Button btnSave, btnSaveRe, btnRefresh, btnUse, btnApplyGoal, btnAddSchem, btnOpenSchem;
-    Button btnStart, btnStop, btnSend;
+    Button btnStart, btnStop, btnSend, btnBuild;
+    Dictionary<string, object> lastState;   // latest /state (UI thread) - the build dialog reads pos/home/job
     Picker cbModel, cbSchem;
     Button btnOffline, btnMs, btnBrainOn;
     Label lvName, lvPos, lvBiome, lvTime, lvThreat, lvPlayers, lvHp, lvFood, lvActivity;
@@ -197,15 +198,25 @@ class Animus : Form
                 if (Array.IndexOf(a, "setup") >= 0) f.ShowSetup(true);
                 f.Show();
                 for (int i = 0; i < 30; i++) { Application.DoEvents(); Thread.Sleep(120); } // long enough for a live poll to land
-                Bitmap b = new Bitmap(f.Width, f.Height);
+                // "build": picture the build dialog instead of the panel
+                Form shot = f;
+                if (Array.IndexOf(a, "build") >= 0)
+                {
+                    shot = f.MakeBuildDialog();
+                    shot.StartPosition = FormStartPosition.Manual;
+                    shot.Location = new Point(-4000, -4000);
+                    shot.Show(f);
+                    for (int i = 0; i < 5; i++) { Application.DoEvents(); Thread.Sleep(100); }
+                }
+                Bitmap b = new Bitmap(shot.Width, shot.Height);
                 if (onScreen)
                     using (Graphics g = Graphics.FromImage(b))
                     {
                         IntPtr hdc = g.GetHdc();
-                        try { PrintWindow(f.Handle, hdc, 2 /* PW_RENDERFULLCONTENT */); }
+                        try { PrintWindow(shot.Handle, hdc, 2 /* PW_RENDERFULLCONTENT */); }
                         finally { g.ReleaseHdc(hdc); }
                     }
-                else f.DrawToBitmap(b, new Rectangle(0, 0, b.Width, b.Height));
+                else shot.DrawToBitmap(b, new Rectangle(0, 0, b.Width, b.Height));
                 b.Save(a[1]);
                 f.Close();
             }
@@ -326,6 +337,9 @@ class Animus : Form
 
         btnSetup = MakeBtn(railBar, "Setup", BtnPrim, Ghost, GhostHi, Txt, FBodyB, 8,
                            delegate { ShowSetup(!setupOpen); });
+        btnBuild = MakeBtn(railBar, "Build", BtnPrim, Ghost, GhostHi, Txt, FBodyB, 8, delegate { ShowBuildDialog(); });
+        ((FlatBtn)btnBuild).Glyph = "\uE90F";
+        tips.SetToolTip(btnBuild, "Send the bot to build a blueprint somewhere: pick it, set the spot, go.");
         ((FlatBtn)btnSetup).Glyph = "\uE713";
         tips.SetToolTip(btnSetup, "Server, brain model and schematics — everything you set once.");
 
@@ -491,7 +505,7 @@ class Animus : Form
         btnOpenSchem = Secondary(cSchem, "Open folder", delegate { OpenSchemFolder(); });
         ((FlatBtn)btnAddSchem).Glyph = "\uE710";
         ((FlatBtn)btnOpenSchem).Glyph = "\uE8B7";
-        lbSchemHint = FieldLabel(cSchem, "Build one in-game with  !schematic <name>");
+        lbSchemHint = FieldLabel(cSchem, "To build one, use the Build button in the top bar.");
     }
 
     void BuildLiveCard()
@@ -690,6 +704,7 @@ class Animus : Form
         x -= 96;        btnStop.SetBounds(x, y, 96, BtnPrim);
         x -= S2 + 104;  btnStart.SetBounds(x, y, 104, BtnPrim);
         x -= S4 + 124;  btnSetup.SetBounds(x, y, 124, BtnPrim);
+        x -= S2 + 100;  btnBuild.SetBounds(x, y, 100, BtnPrim);
 
         // The three dots collapse to bare dots before they would collide with the
         // target line; the tooltip keeps naming them either way.
@@ -1553,10 +1568,18 @@ class Animus : Form
             System.Collections.IList inv = st.ContainsKey("inventory") ? st["inventory"] as System.Collections.IList : null;
             invItems.Clear();
             if (inv != null) foreach (object it in inv) invItems.Add("" + it);
+            // /state lists items in SLOT order, which changes every time the bot picks
+            // something up or swaps a tool into its hand - the pills kept reshuffling.
+            // Stable order instead: tools/gear first, then everything alphabetically.
+            invItems.Sort(delegate(string x, string y) {
+                int gx = InvGear.IsMatch(x) ? 0 : 1, gy = InvGear.IsMatch(y) ? 0 : 1;
+                return gx != gy ? gx - gy : string.CompareOrdinal(x, y);
+            });
             tips.SetToolTip(invCanvas, invItems.Count == 0 ? "empty"
                 : string.Join("\r\n", invItems.ToArray()));
             invCanvas.Invalidate();
 
+            lastState = st;
             UpdateOverlay(st);
         }
         if (logTxt != null && logTxt != lastLogText)
@@ -2139,6 +2162,34 @@ class Animus : Form
         catch { return null; }
     }
 
+    // For slow operator commands (a "build" parses the whole blueprint before it answers):
+    // a long timeout, and an HTTP error's BODY is returned ("HTTP 500: error: …") instead
+    // of null, so the caller can show the bot's actual reason. null = no answer at all.
+    static string WebPostSlow(string url, string body, int timeoutMs)
+    {
+        try
+        {
+            using (QuickClient c = new QuickClient(timeoutMs))
+            {
+                c.Encoding = Encoding.UTF8;
+                return c.UploadString(url, body);
+            }
+        }
+        catch (WebException ex)
+        {
+            HttpWebResponse hr = ex.Response as HttpWebResponse;
+            if (hr == null) return null;
+            try
+            {
+                using (StreamReader rd = new StreamReader(hr.GetResponseStream(), Encoding.UTF8))
+                    return "HTTP " + (int)hr.StatusCode + ": " + rd.ReadToEnd();
+            }
+            catch { return "HTTP " + (int)hr.StatusCode; }
+            finally { hr.Close(); }
+        }
+        catch { return null; }
+    }
+
     static string WebPost(string url, string body)
     {
         try
@@ -2247,6 +2298,7 @@ class Animus : Form
     static readonly Regex LogTagRx = new Regex(@"^\[([\w\-\.]+)\]\s*(.*)$");
     static readonly Regex LogWarnRx = new Regex(@"\b(error|fail(ed|s)?|died|death|killed|crash|exception|stuck|refus\w*|can't|cannot|lost)\b", RegexOptions.IgnoreCase);
     static readonly Regex LogGoodRx = new Regex(@"\b(arrived|done|complete[d]?|built|placed|crafted|saved|connected|spawned|success)\b", RegexOptions.IgnoreCase);
+    static readonly Regex InvGear = new Regex(@"(sword|pickaxe|_axe|shovel|_hoe|bow\b|crossbow|trident|shield|helmet|chestplate|leggings|boots|boat|bucket|shears|flint_and_steel|fishing_rod|elytra|mace|spyglass|compass|clock|totem_of_undying|brush|carrot_on_a_stick|lead\b)");
     const int LogMaxLine = 260;
     const int LogTagW = 9;   // fits "blueprint"; longer tags are cut so messages stay aligned
 
@@ -2575,23 +2627,50 @@ class Animus : Form
         env["LLM_MODEL"] = model;
         env["BOT_URL"] = ApiBase;
         env["GOAL"] = Goal;
-        try { brainProc = SpawnNode("brain", "brain-llm.js", env); }
-        catch (Exception e) { Log("Could not start the brain: " + e.Message); }
+        Process p;
+        try { p = brainProc = SpawnNode("brain", "brain-llm.js", env); }
+        catch (Exception e) { Log("Could not start the brain: " + e.Message); return; }
+        // Close the loop: "Starting brain…" used to stay in the footer for the whole
+        // session even with the Brain light green. Report the outcome once it's known -
+        // unless Stop (or a restart) replaced this process meanwhile: then that owns the footer.
+        Thread.Sleep(3000);
+        if (brainProc != p) return;
+        try
+        {
+            int port;
+            bool botOk = int.TryParse(ControlPort, out port) && PortOpen(port);
+            if (p.HasExited) Log("Brain exited right after starting — read the [brain] lines in the activity log.");
+            else if (!botOk) Log("Brain started (" + model + ") — but the bot isn't up on :" + ControlPort + ", see the [bot] lines.");
+            else Log("Brain started (" + model + ").");
+        }
+        catch { }
     }
 
     // ---- schematics --------------------------------------------------------
     static string SchemDir { get { return Path.Combine(BotDir, "schematics"); } }
 
-    void RefreshSchem()
+    // Blueprint names the bot can load (name without extension - blueprint.js resolves it).
+    static List<string> SchemNames()
     {
-        cbSchem.Items.Clear();
+        List<string> names = new List<string>();
         try
         {
             if (Directory.Exists(SchemDir))
                 foreach (string f in Directory.GetFiles(SchemDir)) if (Regex.IsMatch(f, @"\.(schem|litematic|nbt)$", RegexOptions.IgnoreCase)) // every format bot2/lib/blueprint.js reads
-                    cbSchem.Items.Add(Path.GetFileNameWithoutExtension(f));
+                {
+                    string n = Path.GetFileNameWithoutExtension(f);
+                    if (!names.Contains(n)) names.Add(n);   // (names with spaces are refused at Start)
+                }
         }
         catch { }
+        names.Sort(StringComparer.OrdinalIgnoreCase);
+        return names;
+    }
+
+    void RefreshSchem()
+    {
+        cbSchem.Items.Clear();
+        cbSchem.Items.AddRange(SchemNames());
         if (cbSchem.Items.Count > 0) cbSchem.SelectedIndex = 0;
         else cbSchem.Text = "(none yet — add one)";
     }
@@ -2612,10 +2691,185 @@ class Animus : Form
                 string dest = Path.Combine(SchemDir, Path.GetFileName(src));
                 File.Copy(src, dest, true); n++;
             }
-            Log("Added " + n + " schematic(s). Build in-game: !schematic load <name>, then !schematic build here");
+            Log("Added " + n + " schematic(s) — use Build (top bar) to send the bot to build one.");
             RefreshSchem();
         }
         catch (Exception e) { Log("Could not add schematic: " + e.Message); }
+    }
+
+    // ---- build dialog: blueprint -> where -> wood -> go ---------------------
+    // Drives the bot's own "build <name> <x> <y> <z> [anywood]" command. Coordinates are
+    // the CENTRE of the footprint (operator rule; the bot converts), Y is the base layer.
+    void ShowBuildDialog()
+    {
+        using (Form d = MakeBuildDialog()) d.ShowDialog(this);
+    }
+
+    Form MakeBuildDialog()
+    {
+        Form d = new Form();
+        d.Text = "Start a build";
+        d.AutoScaleMode = AutoScaleMode.None;
+        d.FormBorderStyle = FormBorderStyle.FixedDialog;
+        d.MaximizeBox = false; d.MinimizeBox = false; d.ShowInTaskbar = false;
+        d.StartPosition = FormStartPosition.CenterParent;
+        d.BackColor = Card; d.Font = FBody; d.Icon = Icon;
+        d.ClientSize = new Size(520, 480);
+        d.HandleCreated += delegate { try { int on = 1; DwmSetWindowAttribute(d.Handle, 20, ref on, 4); } catch { } };
+        int X = S6, W = d.ClientSize.Width - 2 * S6, y = S4;
+
+        Lbl(d, "Send the bot to build", FTitle, Txt).SetBounds(X, y, W, 26); y += 28;
+        Lbl(d, "It gathers every material itself, then builds in survival.", FSmall, Muted).SetBounds(X, y, W, 16); y += 30;
+
+        // 1 - blueprint
+        Lbl(d, "1   BLUEPRINT", FCap, Accent2).SetBounds(X, y, W, 14); y += 18;
+        Picker pk = MakePicker(d, false);
+        pk.Items.AddRange(SchemNames());
+        pk.Text = cbSchem.Items.Contains(cbSchem.Text) ? cbSchem.Text : (pk.Items.Count > 0 ? pk.Items[0] : "(none yet — add one)");
+        PlacePicker(pk, X, y, W - 110 - S2);
+        Button add = MakeBtn(d, "Add file…", BtnSec, Ghost, GhostHi, Txt, FBodyB, 8, delegate {
+            AddSchem();
+            pk.Items.Clear(); pk.Items.AddRange(SchemNames());
+            if (pk.Items.Count > 0 && !pk.Items.Contains(pk.Text)) pk.Text = pk.Items[pk.Items.Count - 1];
+        });
+        ((FlatBtn)add).Glyph = "\uE710";
+        add.SetBounds(X + W - 110, y + 1, 110, BtnSec);
+        y += InputH + S6;
+
+        // 2 - where
+        Lbl(d, "2   WHERE", FCap, Accent2).SetBounds(X, y, W, 14); y += 18;
+        Lbl(d, "Centre of the build.  Y = the level its bottom layer sits on.", FSmall, Muted).SetBounds(X, y, W, 16); y += 20;
+        int cw = (W - 2 * S2) / 3;
+        string[] axes = { "X", "Y", "Z" };
+        TextBox[] tc = new TextBox[3];
+        bool[] corner = { false };
+        Button bCorner = null;   // created below; typing/pasting fresh coords means "centre" again
+        for (int i = 0; i < 3; i++)
+        {
+            Label al = Lbl(d, axes[i], FSmallB, Faint);
+            al.SetBounds(X + i * (cw + S2), y, 20, 15);
+            tc[i] = MakeInput(d, "");
+            PlaceInput(tc[i], X + i * (cw + S2), y + 17, cw);
+        }
+        // pasting "x y z" (or "x, y, z" / an F3 line) into any box fills all three
+        for (int i = 0; i < 3; i++)
+            tc[i].TextChanged += delegate(object s, EventArgs e) {
+                MatchCollection ms = Regex.Matches(((TextBox)s).Text, @"-?\d{1,8}(?:\.\d+)?");
+                if (ms.Count != 3) return;
+                corner[0] = false; if (bCorner != null) StyleToggle(bCorner, false);
+                for (int k = 0; k < 3; k++) tc[k].Text = ((int)Math.Floor(double.Parse(ms[k].Value, System.Globalization.CultureInfo.InvariantCulture))).ToString();
+            };
+        // start from where the bot is - usually "build it right here"
+        Dictionary<string, object> here = Obj(lastState, "pos");
+        if (here != null)
+        {
+            tc[0].Text = ((int)Math.Floor(D(here, "x"))).ToString();
+            tc[1].Text = ((int)Math.Floor(D(here, "y"))).ToString();
+            tc[2].Text = ((int)Math.Floor(D(here, "z"))).ToString();
+        }
+        y += 17 + InputH + S2;
+        Button useBot = MakeBtn(d, "Where the bot stands", BtnChip, Ghost, GhostHi, Muted, FSmallB, BtnChip / 2, delegate {
+            Dictionary<string, object> pos = Obj(lastState, "pos");
+            if (pos == null) { Log("Bot position unknown — is the bot running?"); return; }
+            tc[0].Text = ((int)Math.Floor(D(pos, "x"))).ToString();
+            tc[1].Text = ((int)Math.Floor(D(pos, "y"))).ToString();
+            tc[2].Text = ((int)Math.Floor(D(pos, "z"))).ToString();
+            corner[0] = false; StyleToggle(bCorner, false);   // the bot's spot is a centre
+        });
+        useBot.SetBounds(X, y, 150, BtnChip);
+        Dictionary<string, object> job = Obj(lastState, "savedBuild");
+        Dictionary<string, object> jobAt = Obj(job, "at");
+        Button useJob = null;
+        if (jobAt != null)
+        {
+            // the saved job's origin is its CORNER; the dialog speaks centres, so leave it
+            // to the bot: the button just says where the current site is.
+            useJob = MakeBtn(d, "Current site (corner)", BtnChip, Ghost, GhostHi, Muted, FSmallB, BtnChip / 2, delegate {
+                tc[0].Text = S(jobAt, "x"); tc[1].Text = S(jobAt, "y"); tc[2].Text = S(jobAt, "z");
+            });
+            useJob.SetBounds(X + 150 + S2, y, 160, BtnChip);
+            tips.SetToolTip(useJob, "The current build's corner - tick \"these are the corner\" below if you use it.");
+        }
+        y += BtnChip + S3;
+        bCorner = MakeToggle(d, "These are the corner, not the centre");
+        bCorner.Font = FSmallB; bCorner.Height = BtnChip;
+        bCorner.SetBounds(X, y, 250, BtnChip);
+        StyleToggle(bCorner, false);
+        bCorner.Click += delegate { corner[0] = !corner[0]; StyleToggle(bCorner, corner[0]); };
+        if (useJob != null) useJob.Click += delegate { corner[0] = true; StyleToggle(bCorner, true); };
+        y += BtnChip + S6;
+
+        // 3 - wood
+        Lbl(d, "3   WOOD", FCap, Accent2).SetBounds(X, y, W, 14); y += 18;
+        bool[] anyWood = { false };
+        Button wExact = MakeToggle(d, "Blueprint's wood");
+        Button wAny = MakeToggle(d, "Any wood nearby");
+        wExact.SetBounds(X, y, 150, BtnSec); wAny.SetBounds(X + 150 + S2, y, 150, BtnSec);
+        EventHandler paintWood = delegate { StyleToggle(wExact, !anyWood[0]); StyleToggle(wAny, anyWood[0]); };
+        wExact.Click += delegate { anyWood[0] = false; paintWood(null, null); };
+        wAny.Click += delegate { anyWood[0] = true; paintWood(null, null); };
+        paintWood(null, null);
+        tips.SetToolTip(wAny, "Any local wood species stands in for the blueprint's (faster, looks different).");
+        y += BtnSec + S4;
+
+        // replace warning + result line
+        Label note = Lbl(d, "", FSmall, Amber);
+        note.SetBounds(X, y, W, 34);
+        if (job != null)
+        {
+            Dictionary<string, object> bp = Obj(lastState, "buildProgress");
+            bool finished = bp != null && D(bp, "total") > 0 && D(bp, "done") >= D(bp, "total");
+            note.Text = finished ? "The last build (" + S(job, "name") + ") is finished — this starts a new one."
+                : "This replaces the current build: " + S(job, "name") +
+                  (bp != null ? "  (" + S(bp, "done") + " / " + S(bp, "total") + " placed)" : "") + ".";
+        }
+
+        Button cancel = MakeBtn(d, "Cancel", BtnPrim, Ghost, GhostHi, Txt, FBodyB, 8, delegate { d.Close(); });
+        Button go = MakeBtn(d, "Start build", BtnPrim, Accent, AccentHi, Color.White, FBodyB, 10, null);
+        ((FlatBtn)go).Glyph = "\uE768";
+        y += 34 + S3;
+        int by = y;
+        d.ClientSize = new Size(d.ClientSize.Width, by + BtnPrim + S6);   // height follows the content
+        go.SetBounds(X + W - 140, by, 140, BtnPrim);
+        cancel.SetBounds(X + W - 140 - S2 - 96, by, 96, BtnPrim);
+        d.CancelButton = cancel;
+        // Once "build" is on the wire the bot WILL replace the job, so the dialog can't be
+        // cancelled mid-flight: it would look cancelled while the castle job is gone.
+        bool[] sending = { false };
+        d.FormClosing += delegate(object s, FormClosingEventArgs e) { if (sending[0] && e.CloseReason == CloseReason.UserClosing) e.Cancel = true; };
+        go.Click += delegate {
+            string name = pk.Text.Trim();
+            if (!pk.Items.Contains(name)) { note.ForeColor = Red; note.Text = "Pick a blueprint first (or add one)."; return; }
+            if (Regex.IsMatch(name, @"\s")) { note.ForeColor = Red; note.Text = "The bot can't take names with spaces — rename the file (e.g. my_house) and pick it again."; return; }
+            int[] v = new int[3];
+            for (int i = 0; i < 3; i++)
+                if (!int.TryParse(tc[i].Text.Trim(), out v[i])) { note.ForeColor = Red; note.Text = "Enter whole-number X, Y and Z (or use the bot's spot)."; tc[i].Focus(); return; }
+            if (!botUp) { note.ForeColor = Red; note.Text = "The bot is offline — press Start first."; return; }
+            string cmd = "build " + name + " " + v[0] + " " + v[1] + " " + v[2] + (corner[0] ? " corner" : "") + (anyWood[0] ? " anywood" : "");
+            sending[0] = true; go.Enabled = false; cancel.Enabled = false;
+            note.ForeColor = Muted; note.Text = "Sending… the bot reads the whole blueprint first, big ones take a while.";
+            RunBg(delegate {
+                string r = WebPostSlow(ApiBase + "/op/cmd", cmd, 120000);
+                bool ok = r != null && r.StartsWith("build job set");
+                string why = r == null ? "The bot didn't answer within 2 minutes — check the activity log before retrying."
+                                       : Regex.Replace(r.Split('\n')[0], @"^HTTP 500: (error: )?", "");
+                // the footer records the outcome no matter what happened to the dialog
+                Log(ok ? "Build started: " + name + " at " + v[0] + " " + v[1] + " " + v[2] + (corner[0] ? " (corner)." : " (centre).")
+                       : "Build not started: " + why);
+                try
+                {
+                    d.BeginInvoke((MethodInvoker)delegate {
+                        if (d.IsDisposed) return;
+                        sending[0] = false;
+                        if (ok) { d.Close(); return; }
+                        go.Enabled = true; cancel.Enabled = true;
+                        note.ForeColor = Red; note.Text = why;
+                    });
+                }
+                catch { }
+            });
+        };
+        return d;
     }
 
     void OpenSchemFolder()
