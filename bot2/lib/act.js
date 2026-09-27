@@ -38,25 +38,30 @@ async function digBlock (bot, b, { own = false } = {}) {
 
 // Dig one block (walking into reach if needed). Refuses crafted blocks unless `force`, and finished build
 // cells unless `own`. Returns true when the cell is verifiably no longer that block.
+// Why dig would refuse a block (null: it would not) - the ONE list, asked by dig itself and by anything that queues digs
+// ahead (the groundwork: a job it can never do loops for ever - audit #9, 2026-09-27)
+function digRefusal (bot, b, { force = false, own = false, allowZones = [] } = {}) {
+  if (!own && move.isProtected(b, 'dig')) return 'a finished cell of the build' // (pure: a scan asking must not log per cell)
+  if (!force && !world.NATURAL_RE.test(b.name)) return `crafted ${b.name}`
+  const z = move.inZone(b.position)
+  if (z && !allowZones.includes(z.label) && !force) return `inside ${z.label}`
+  if (b.hardness == null || b.hardness < 0) return 'unbreakable'
+  // never open a block that holds back lava onto us - below too, and one further down: a dug block over lava is a hole we
+  // drop into (the bot dug dirt for scaffold over a lava pocket at the castle and burned to death with its new iron gear)
+  if (world.holdsBackLava(bot, b.position)) return 'lava beside or under it'
+  return null
+}
 async function dig (bot, pos, { force = false, own = false, allowZones = [], timeoutMs = 30000, noWalk = false, reachMax = 4.3 } = {}) {
   let b = world.at(bot, pos.x, pos.y, pos.z)
   // "done" means the cell holds nothing breakable. Grass/flowers have no collision box but they ARE
   // blocks: treating them as air made a seed-gathering loop spin on resolved promises and starve the
   // event loop for minutes (keep-alive timeout, 2026-09-14).
-  const nothing = x => !x || /^(air|cave_air|void_air)$/.test(x.name) || world.isWaterBlock(x) || world.isLavaBlock(x)
+  // (liquid only: a waterlogged block - a sea pickle, a wet stair - IS a block; read as water, a wild pickle was "dug"
+  //  without a swing, the route died and every reef sighting reopened it, 2026-09-27)
+  const nothing = x => !x || /^(air|cave_air|void_air)$/.test(x.name) || world.isLiquidWater(x) || world.isLavaBlock(x)
   if (nothing(b)) return true
-  if (guarded(bot, b, own)) return false
-  if (!force && !world.NATURAL_RE.test(b.name)) { log('act', `refused to dig crafted ${b.name} at ${move.fmt(pos)}`); return false }
-  const z = move.inZone(b.position)
-  if (z && !allowZones.includes(z.label) && !force) { log('act', `refused to dig ${b.name} inside ${z.label}`); return false }
-  if (b.hardness == null || b.hardness < 0) return false // bedrock etc
-  // never open a block that holds back lava/water onto us
-  // (below too, and one further down: a dug block over lava is a hole we drop into - the bot dug dirt for
-  //  scaffold over a lava pocket at the castle and burned to death with its new iron gear)
-  for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 0, -1], [0, -1, 0], [0, -2, 0]]) {
-    const nb = world.at(bot, pos.x + dx, pos.y + dy, pos.z + dz)
-    if (nb && world.isLavaBlock(nb)) { log('act', `won't dig ${b.name} at ${move.fmt(pos)} - lava beside or under it`); return false }
-  }
+  if (guarded(bot, b, own)) return false // (logs, rate-limited per cell)
+  { const why = digRefusal(bot, b, { force, own, allowZones }); if (why) { if (why !== 'unbreakable') log('act', `won't dig ${b.name} at ${move.fmt(pos)} - ${why}`); return false } }
   const t0 = Date.now()
   const cancelled = control.token()
   while (Date.now() - t0 < timeoutMs) {
@@ -135,9 +140,20 @@ function stepOff (bot, pos) {
   return null
 }
 
-// Blocks never clicked as the thing to place against: clicking them opens/uses them, or (carpet, pot,
-// lantern, ladder) they are no face to build on
-const NO_REF_RE = /chest|furnace|crafting_table|_bed|_door|_trapdoor|_fence_gate|barrel|shulker|_carpet$|^flower_pot$|^potted_|lantern$|^ladder$|_button$|^lever$/
+// Blocks never clicked as the thing to place against: clicking them opens/uses them (a note block retunes, a lectern
+// opens, a composter takes the item) - except by an attached thing that has no other face, SNEAKING (a candle on a fence
+// gate, a pot on a trapdoor: vanilla places instead of using when the player sneaks) -
+const USE_REF_RE = /chest|furnace|crafting_table|_bed$|_door$|_trapdoor$|_fence_gate$|^barrel$|shulker_box$|^note_block$|^jukebox$|^composter$|^lectern$|^loom$|^smoker$|^grindstone$|^stonecutter$|anvil$|^enchanting_table$|cauldron$|^hopper$|^dispenser$|^dropper$|^beehive$|^bee_nest$|^bell$|^crafter$|^cartography_table$|^smithing_table$|^fletching_table$|campfire$|_sign$|^cake$|candle_cake$/
+// - or they are no face to build on (carpet, pot, lantern, ladder, button, candle)
+// (a lantern anchored: `lantern$` also matched jack_o_lantern and sea_lantern - full cubes - and no face of either was
+//  ever clicked; the castle's 41 jack o'lantern cells had nothing to build against, 2026-09-27. The same rule as
+//  build.js's LANTERN_RE - keep the two in step; a sea lantern is a full block too)
+const NO_FACE_RE = new RegExp('_carpet$|^flower_pot$|^potted_|' + world.LANTERN_RE.source + '|^ladder$|_button$|^lever$|candle$|^sea_pickle$') // (lanterns: world.LANTERN_RE)
+const NO_REF_RE = new RegExp(USE_REF_RE.source + '|' + NO_FACE_RE.source)
+function refUsable (nb, sneaking = false) { return !!nb && world.isSolid(nb) && !NO_FACE_RE.test(nb.name) && (sneaking || !USE_REF_RE.test(nb.name)) }
+// What a placing takes the place of (vanilla canBeReplaced): grass tufts, ferns, vines, a single snow layer. A flower is
+// NOT one - the server keeps it and the placing fails.
+const REPLACEABLE_RE = /^(short_grass|tall_grass|fern|large_fern|dead_bush|vine|glow_lichen|seagrass|tall_seagrass|leaf_litter|short_dry_grass|tall_dry_grass|bush|hanging_roots|snow)$/
 const PLANT_RE = /^(short_grass|tall_grass|fern|large_fern|snow|dead_bush|leaf_litter|vine|seagrass|short_dry_grass|tall_dry_grass|bush|firefly_bush|wildflowers|pink_petals|dandelion|poppy|.*_tulip|cornflower|azure_bluet|oxeye_daisy)$/
 
 // Wait n physics ticks: a look set with force goes to the server on the next tick, and the server takes the
@@ -183,20 +199,27 @@ async function centre (bot) {
 //   accept:   block => bool - what counts as placed (default: the item's own block name; a torch item
 //             becomes a wall_torch, a birch plank stands in for oak). The caller verifies the block STATE.
 //   tall:     the thing is two blocks high (a door): never with our body in the cell above either.
+//   twin:     [dx,dy,dz] the second cell the thing fills (a door's top [0,1,0], a bed's head): never our body in it.
+//   useRefs:  (sneaking) a block that is used when clicked may be clicked - an attached thing's only face.
+//   plan.pitch: the pitch to click with (a barrel facing up is placed looking down, a floor button looking down).
 //   noWalk:   place from where we stand or not at all (a walk at a river's edge may go under the water)
 //   fromReflex: the caller IS a reflex (climbing out of water, walling off a shooter). The reflex holds the body
 //             until its action returns, so waiting for the reflex to clear - or walking, which waits the same way -
 //             is waiting on ourselves: each such place hung 120s (the bot floated in a river for 8 minutes,
 //             2026-09-22). Implies noWalk.
-async function place (bot, pos, itemName, { faceHint = null, plans = null, accept = null, allowZones = [], timeoutMs = 20000, sneak = true, tall = false, noWalk = false, fromReflex = false, keepExit = false } = {}) {
+async function place (bot, pos, itemName, { faceHint = null, plans = null, accept = null, allowZones = [], timeoutMs = 20000, sneak = true, tall = false, twin = null, useRefs = false, noWalk = false, fromReflex = false, keepExit = false } = {}) {
   if (fromReflex) noWalk = true
+  if (tall && !twin) twin = [0, 1, 0]
   const target = new Vec3(pos.x, pos.y, pos.z)
   const placed = accept || (b => b.name === itemName)
   const cur = bot.blockAt(target)
   if (cur && placed(cur)) return true
-  if (cur && !world.isAirish(cur) && !world.isWaterBlock(cur) && !PLANT_RE.test(cur.name)) return false
+  if (cur && !world.isAirish(cur) && !world.isLiquidWater(cur) && !PLANT_RE.test(cur.name) && !REPLACEABLE_RE.test(cur.name)) return false
   const item = inv.items(bot).find(i => i.name === itemName)
   if (!item) return false
+  // a torch in the cell takes no block (the server keeps the torch): off with it first. The mine's floor fill tried its
+  // own tunnel torch every few seconds for an hour - "the block is still torch", no cobble mined, 2026-09-27
+  if (cur && /(^|_)torch$/.test(cur.name) && reach(bot, target, 4.5)) { await digBlock(bot, cur).catch(() => false) }
   const list = plans || (faceHint || [[0, -1, 0], [0, 1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]]).map(off => ({ off }))
   const t0 = Date.now()
   const cancelled = control.token()
@@ -210,7 +233,7 @@ async function place (bot, pos, itemName, { faceHint = null, plans = null, accep
     for (const p of list) {
       const [dx, dy, dz] = p.off
       const nb = bot.blockAt(target.offset(dx, dy, dz))
-      if (nb && world.isSolid(nb) && !NO_REF_RE.test(nb.name)) { ref = nb; face = new Vec3(-dx, -dy, -dz); plan = p; break }
+      if (refUsable(nb, useRefs && sneak)) { ref = nb; face = new Vec3(-dx, -dy, -dz); plan = p; break }
     }
     if (!ref) { log('act', `place ${itemName} at ${move.fmt(pos)}: nothing solid to place against`); return false }
     // don't place into our own body - the hitbox, not the cell our feet are counted in: a player at x=527.1 is
@@ -219,7 +242,8 @@ async function place (bot, pos, itemName, { faceHint = null, plans = null, accep
     // cell toward it - a pane connected to its new log round the bot and the server pinned it there 10 minutes
     // (2026-09-23). Stand clear of those cells too.
     const grows = [[1, 0], [-1, 0], [0, 1], [0, -1]].map(([dx, dz]) => target.offset(dx, 0, dz)).filter(q => { const b = bot.blockAt(q); return b && CONNECTS_RE.test(b.name) })
-    const clash = () => inBody(bot, pos, tall) || grows.some(q => inBody(bot, q))
+    const second = twin && target.offset(twin[0], twin[1], twin[2])
+    const clash = () => inBody(bot, pos) || (second && inBody(bot, second)) || grows.some(q => inBody(bot, q))
     if (clash()) {
       if (noWalk) return false
       await move.goTo(bot, new goals.GoalInvert(grows.length ? new goals.GoalNear(pos.x, pos.y, pos.z, 1.8) : new goals.GoalBlock(pos.x, pos.y, pos.z)), { timeoutMs: 5000, dig: false, place: false })
@@ -240,25 +264,29 @@ async function place (bot, pos, itemName, { faceHint = null, plans = null, accep
       const r = await move.goTo(bot, new goals.GoalNear(pos.x, pos.y, pos.z, 3), { timeoutMs: 20000, allowZones, label: 'reach to place' })
       if (!r.ok && !reach(bot, pos, 4.8)) return false
     }
+    // sneak:false is a promise the click goes out standing: held against the ledge crouch (reflex.holdNoSneak) - a chest
+    // placed on a wall top went out sneaking and never paired with its twin (2026-09-27)
+    const letGo = sneak ? () => {} : reflex.holdNoSneak()
     try {
       const held = inv.items(bot).find(i => i.name === itemName)
       if (!held) return false
       await bot.equip(held, 'hand')
-      if (sneak) bot.setControlState('sneak', true)
-      if (plan.yaw != null || plan.cy != null) {
+      // (and a crouch some other holder pressed is let go too - the hold only stops the guard's own: audit #8)
+      bot.setControlState('sneak', !!sneak)
+      if (plan.yaw != null || plan.cy != null || plan.pitch != null) {
         // the cursor: the centre of the clicked face, or `cy` up a side face
         const delta = new Vec3(0.5 + face.x * 0.5, plan.cy != null && face.y === 0 ? plan.cy : 0.5 + face.y * 0.5, 0.5 + face.z * 0.5)
         const eye = bot.entity.position.offset(0, bot.entity.eyeHeight || 1.62, 0)
         const d = ref.position.plus(delta).minus(eye)
         const yaw = plan.yaw != null ? plan.yaw : Math.atan2(-d.x, -d.z)
-        await bot.look(yaw, Math.atan2(d.y, Math.hypot(d.x, d.z)), true)
+        await bot.look(yaw, plan.pitch != null ? plan.pitch : Math.atan2(d.y, Math.hypot(d.x, d.z)), true)
         await ticks(bot, 2)
         await bot._placeBlockWithOptions(ref, face, { forceLook: 'ignore', delta, swingArm: 'right' })
       } else await bot.placeBlock(ref, face)
     } catch (e) {
       // placeBlock often times out waiting for the update even when it landed
       lastErr = e.message
-    } finally { if (sneak) bot.setControlState('sneak', false) }
+    } finally { if (sneak) bot.setControlState('sneak', false); letGo() }
     for (let w = 0; w < 6; w++) {
       await sleep(150)
       const after = bot.blockAt(target)
@@ -267,6 +295,154 @@ async function place (bot, pos, itemName, { faceHint = null, plans = null, accep
     tries++
   }
   log('act', `place ${itemName} at ${move.fmt(pos)} failed after ${tries} tries${lastErr ? ': ' + lastErr : ''}`)
+  return false
+}
+
+// Use `itemName` on the block at `pos` - a plant into a flower pot, a water bucket into a cauldron, one more candle onto
+// candles (the server's use-item-on-block). Never sneaking: a sneaking use is a plain placing beside it. `accept` says
+// when the block there has taken it. Verified by re-read.
+// `face` 'up' or 'down': the face clicked (a top slab takes its second half on its underside).
+// itemName null: the block itself is used, whatever is in hand (a full composter emptied of its bone meal).
+// The one right-click on a block for every caller: a raw activateBlock while the edge guard held sneak was a sneaking
+// click - shears on a pumpkin or a nest and a composter's layer came to "+0" (2026-09-27).
+async function useOn (bot, pos, itemName, { accept, face = 'up', allowZones = [], timeoutMs = 15000, noWalk = false } = {}) {
+  const target = new Vec3(pos.x, pos.y, pos.z)
+  const t0 = Date.now()
+  const cancelled = control.token()
+  let lastErr = null; let tries = 0
+  while (Date.now() - t0 < timeoutMs && tries < 3) {
+    await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
+    if (cancelled()) return false
+    await reflex.waitClear()
+    const b = bot.blockAt(target)
+    if (!b) return false
+    if (accept(b)) return true
+    if (!reach(bot, pos, 4.4)) {
+      if (noWalk) { log('act', `use ${itemName || '(hand)'} on the block at ${move.fmt(pos)}: out of reach (and not to walk)`); return false }
+      const r = await move.goTo(bot, new goals.GoalNear(pos.x, pos.y, pos.z, 3), { timeoutMs: 20000, allowZones, label: 'reach to use' })
+      if (!r.ok && !reach(bot, pos, 4.8)) { log('act', `use ${itemName || '(hand)'} on the block at ${move.fmt(pos)}: could not get within reach (${r.why})`); return false }
+    }
+    const held = itemName ? inv.items(bot).find(i => i.name === itemName) : null
+    if (itemName && !held) { log('act', `use ${itemName} on the block at ${move.fmt(pos)}: none in the pack`); return false }
+    // (the hold: the ledge crouch presses sneak again otherwise, between this let-go and the click - reflex.holdNoSneak)
+    const letGo = reflex.holdNoSneak()
+    try {
+      if (held) await bot.equip(held, 'hand')
+      bot.setControlState('sneak', false)
+      const up = face !== 'down'
+      await bot.lookAt(target.offset(0.5, up ? 1 : 0, 0.5), true)
+      await ticks(bot, 2)
+      await bot.activateBlock(b, new Vec3(0, up ? 1 : -1, 0), new Vec3(0.5, up ? 1 : 0, 0.5))
+    } catch (e) { lastErr = e.message } finally { letGo() }
+    for (let w = 0; w < 6; w++) {
+      await sleep(150)
+      const after = bot.blockAt(target)
+      if (after && accept(after)) return true
+    }
+    tries++
+  }
+  log('act', `use ${itemName || '(hand)'} on the block at ${move.fmt(pos)} failed after ${tries} tries${lastErr ? ': ' + lastErr : ''}`)
+  return false
+}
+
+// Pour a bucket (`itemName`: water_bucket, lava_bucket) into the empty cell `pos`: a bucket is no block item - the
+// server casts its own ray from the player's look and fills the cell in front of the face it hits (vanilla
+// BucketItem.use), so the look goes to the centre of a solid neighbour's face toward the cell and the item is used.
+// `plans` as place(); `accept` block => bool. Verified by re-read.
+// The eye must be on the cell's side of that face: from behind it the ray meets another face first and the water lands
+// somewhere else - inside the build, on the crops (2026-09-27). A face we stand behind is no plan.
+async function pour (bot, pos, itemName, { plans, accept, allowZones = [], timeoutMs = 15000, noWalk = false } = {}) {
+  const target = new Vec3(pos.x, pos.y, pos.z)
+  const t0 = Date.now()
+  const cancelled = control.token()
+  let tries = 0
+  const refs = () => (plans || []).map(p => {
+    const nb = bot.blockAt(target.offset(p.off[0], p.off[1], p.off[2]))
+    return refUsable(nb) ? { ref: nb, face: new Vec3(-p.off[0], -p.off[1], -p.off[2]) } : null
+  }).filter(Boolean)
+  const faceCentre = ({ ref, face }) => ref.position.offset(0.5 + face.x * 0.5, 0.5 + face.y * 0.5, 0.5 + face.z * 0.5)
+  // the eye past the face's plane, on the cell's side
+  const faced = r => {
+    const eye = bot.entity.position.offset(0, bot.entity.eyeHeight || 1.62, 0)
+    const c = faceCentre(r)
+    return (eye.x - c.x) * r.face.x + (eye.y - c.y) * r.face.y + (eye.z - c.z) * r.face.z > 0.05
+  }
+  while (Date.now() - t0 < timeoutMs && tries < 3) {
+    await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
+    if (cancelled()) return false
+    await reflex.waitClear()
+    const cur = bot.blockAt(target)
+    if (cur && accept(cur)) return true
+    if (!inv.items(bot).some(i => i.name === itemName)) { log('act', `pour ${itemName} at ${move.fmt(pos)}: no ${itemName} in the pack - the bucket is empty`); return false }
+    if (!refs().length) { log('act', `pour ${itemName} at ${move.fmt(pos)}: nothing solid to pour against`); return false }
+    if (!reach(bot, pos, 4.4)) {
+      if (noWalk) return false
+      const r = await move.goTo(bot, new goals.GoalNear(pos.x, pos.y, pos.z, 3), { timeoutMs: 20000, allowZones, label: 'reach to pour' })
+      if (!r.ok && !reach(bot, pos, 4.8)) return false
+    }
+    // (never from inside the cell: the ray starts in it)
+    if (inBody(bot, pos)) { log('act', `pour ${itemName} at ${move.fmt(pos)}: I stand in the cell`); return false }
+    const pick = refs().find(faced)
+    if (!pick) { log('act', `pour ${itemName} at ${move.fmt(pos)}: I stand behind every face it could be poured against`); return false }
+    const held = inv.items(bot).find(i => i.name === itemName)
+    if (!held) { log('act', `pour ${itemName} at ${move.fmt(pos)}: the bucket is empty`); return false }
+    const letGo = reflex.holdNoSneak() // (no crouch during the use: reflex.holdNoSneak)
+    try {
+      await bot.equip(held, 'hand')
+      bot.setControlState('sneak', false)
+      await bot.lookAt(faceCentre(pick), true)
+      await ticks(bot, 2)
+      bot.activateItem()
+      await sleep(100)
+      bot.deactivateItem()
+    } catch {} finally { letGo() }
+    for (let w = 0; w < 6; w++) {
+      await sleep(150)
+      const after = bot.blockAt(target)
+      if (after && accept(after)) return true
+    }
+    tries++
+  }
+  log('act', `pour ${itemName} at ${move.fmt(pos)} failed after ${tries} tries`)
+  return false
+}
+
+// Fill an empty bucket at the still water `pos` (a source: vanilla's empty bucket takes SOURCE fluid only), looking at
+// the water's surface. True when the pack holds one more water bucket than before - the one fill every gatherer uses
+// (the forager's own right-click never checked it had filled, 2026-09-27).
+async function fill (bot, pos, { allowZones = [], timeoutMs = 12000, noWalk = false } = {}) {
+  const target = new Vec3(pos.x, pos.y, pos.z)
+  const t0 = Date.now()
+  const cancelled = control.token()
+  let tries = 0
+  const still = w => { try { return !!w && w.name === 'water' && Number((w.getProperties() || {}).level || 0) === 0 } catch { return false } }
+  while (Date.now() - t0 < timeoutMs && tries < 3) {
+    await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
+    if (cancelled()) return false
+    await reflex.waitClear()
+    if (!still(bot.blockAt(target))) { log('act', `fill a bucket at ${move.fmt(pos)}: no still water there`); return false }
+    const empty = inv.items(bot).find(i => i.name === 'bucket')
+    if (!empty) { log('act', `fill a bucket at ${move.fmt(pos)}: no empty bucket in the pack`); return false }
+    if (!reach(bot, pos, 4.4)) {
+      if (noWalk) return false
+      const r = await move.goTo(bot, new goals.GoalNear(pos.x, pos.y + 1, pos.z, 2), { timeoutMs: 20000, allowZones, label: 'reach the water' })
+      if (!r.ok && !reach(bot, pos, 4.8)) return false
+    }
+    const had = inv.count(bot, 'water_bucket')
+    const letGo = reflex.holdNoSneak() // (no crouch during the use: reflex.holdNoSneak)
+    try {
+      await bot.equip(empty, 'hand')
+      bot.setControlState('sneak', false)
+      await bot.lookAt(target.offset(0.5, 0.85, 0.5), true)
+      await ticks(bot, 2)
+      bot.activateItem()
+      await sleep(100)
+      bot.deactivateItem()
+    } catch {} finally { letGo() }
+    for (let k = 0; k < 6; k++) { await sleep(150); if (inv.count(bot, 'water_bucket') > had) return true }
+    tries++
+  }
+  log('act', `fill a bucket at ${move.fmt(pos)} failed after ${tries} tries`)
   return false
 }
 
@@ -307,4 +483,4 @@ async function collectDrops (bot, { radius = 8, maxMs = 15000 } = {}) {
   return picked
 }
 
-module.exports = { sealsUsIn, holdsUsUp, fallBelow, stepOff, dig, digBlock, place, collectDrops, droppedItems, reach, inBody, sleep, ticks, PLANT_RE, NO_REF_RE }
+module.exports = { digRefusal, sealsUsIn, holdsUsUp, fallBelow, stepOff, dig, digBlock, place, useOn, pour, fill, collectDrops, droppedItems, reach, inBody, sleep, ticks, refUsable, PLANT_RE, NO_REF_RE, USE_REF_RE, NO_FACE_RE, REPLACEABLE_RE }
