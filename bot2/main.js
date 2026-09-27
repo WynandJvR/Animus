@@ -265,8 +265,12 @@ bot.on('end', r => { log('conn', 'disconnected: ' + r + ' - exiting so the super
   try { wrap(require('./lib/craft'), 'craft', ['chooseRecipe', 'ensure']) } catch {}
   try { wrap(require('./lib/world'), 'world', ['scanBlocks', 'findBlocks']) } catch {}
 })()
+// ...and when a stall runs past 1.5s, the stack it is caught in (stallwatch: a worker pauses us in the debugger)
+let stallBeat = () => {}
+try { stallBeat = require('./lib/stallwatch').start(1500, st => log('lag', `stalled in: ${st.join(' < ')}`)) } catch (e) { log('lag', 'stallwatch off: ' + e.message) }
 let lagLast = Date.now()
 setInterval(() => {
+  stallBeat()
   const now = Date.now(); const lag = now - lagLast - 500
   if (lag > 2000) log('lag', `event loop stalled ${Math.round(lag / 100) / 10}s (director task: ${JSON.stringify(director.info())})`)
   lagLast = now
