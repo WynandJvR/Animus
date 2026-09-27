@@ -123,7 +123,13 @@ function refreshCache (w, p) {
 
 // Withdraw up to n of an item from the base chests - only when a chest is known to hold it (or
 // has never been read) and the base is close enough to be worth the walk.
+// THE SPARE SET stays in the chest: one of each kit tool is the respawn's re-arm (director spareKit), taken only when the
+// pack holds none of it. Withdrawn by anything else - the mine wanting a third pickaxe - it was made again every round,
+// a pickaxe out and a pickaxe in, four times in an hour (2026-09-27)
+const BANK_RESERVE = { stone_pickaxe: 1, stone_axe: 1, stone_sword: 1 }
 async function withdraw (bot, name, n, { maxWalk = 64 } = {}) {
+  if (n <= 0) return 0
+  if (BANK_RESERVE[name] && inv.count(bot, name) > 0) n = Math.min(n, Math.max(0, bankCount(name) - BANK_RESERVE[name]))
   if (n <= 0) return 0
   let got = 0
   for (const p of knownChests(bot)) {
