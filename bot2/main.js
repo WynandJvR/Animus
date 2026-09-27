@@ -243,6 +243,28 @@ bot.on('error', e => log('conn', 'error: ' + e.message))
 bot.on('end', r => { log('conn', 'disconnected: ' + r + ' - exiting so the supervisor restarts us'); setTimeout(() => process.exit(0), 1000) })
 
 // event-loop lag: a stall here is a disconnect waiting to happen (keep-alives stop) - make it loud
+// ...and say WHAT stalled it: the heavy synchronous calls, timed (an async one up to its first await - the part that
+// holds the loop). Two 4.5s stalls in castle work named nothing but the task (2026-09-27)
+;(function timeHeavy () {
+  if (global.__timeHeavyOn) return; global.__timeHeavyOn = true // (once: a reload never wraps twice)
+  const wrap = (mod, label, names, extra) => {
+    for (const n of names) {
+      const f = mod[n]; if (typeof f !== 'function') continue
+      mod[n] = function (...a) { const t = Date.now(); try { return f.apply(this, a) } finally { const d = Date.now() - t; if (d > 300) log('lag', `slow ${label}.${n}: ${d}ms synchronous${extra ? extra() : ''}`) } }
+    }
+  }
+  // the whole memory file is stringified and written synchronously on every change: its size says why it is slow
+  try { const mem = require('./lib/memory'); wrap(mem, 'memory', ['set', 'update', 'save'], () => { try { return ` (memory ${Math.round(JSON.stringify(mem.get()).length / 1024)} KB)` } catch { return '' } }) } catch {}
+  try { wrap(require('./lib/act'), 'act', ['place', 'dig']) } catch {}
+  try { wrap(require('./lib/move'), 'move', ['movementsFor']) } catch {}
+  // a major GC pause looks like a stall too: event-driven, free while nothing collects
+  try { const { PerformanceObserver } = require('perf_hooks'); new PerformanceObserver(l => { for (const e of l.getEntries()) if (e.duration > 200) log('lag', `GC pause ${Math.round(e.duration)}ms (kind ${e.detail ? e.detail.kind : e.kind})`) }).observe({ entryTypes: ['gc'] }) } catch {}
+  try { wrap(require('./lib/build'), 'build', ['status', 'nextNeeds', 'obstructions', 'strayBuildBlocks', 'cellsDone', 'buildStep', 'clearSite', 'removeScaffold', 'setJob']) } catch {}
+  try { wrap(require('./lib/materials'), 'materials', ['planFor', 'wantedSet', 'makeCrafts', 'unsourced']) } catch {}
+  try { wrap(require('./lib/hut'), 'hut', ['status', 'shellComplete', 'buildHut']) } catch {}
+  try { wrap(require('./lib/craft'), 'craft', ['chooseRecipe', 'ensure']) } catch {}
+  try { wrap(require('./lib/world'), 'world', ['scanBlocks', 'findBlocks']) } catch {}
+})()
 let lagLast = Date.now()
 setInterval(() => {
   const now = Date.now(); const lag = now - lagLast - 500
