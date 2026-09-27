@@ -405,11 +405,16 @@ const recentWalks = new Map()
 function noteWalk (label, goal) {
   if (label === 'mine step' || label === 'to tree') return // one per block of tunnel / per tree felled: many a minute is the job
   const now = Date.now()
-  const k = label
+  // (a loop is the same walk to the SAME place again and again: keyed by label alone, thirteen walks to thirteen farm
+  //  cells - the job - read as "looping", and the regression counts could not tell work from a stuck task; 2026-09-27)
+  let at = ''
+  try { at = goal.x != null ? `${Math.floor(goal.x)},${Math.floor(goal.y)},${Math.floor(goal.z)}` : (goal.pos ? fmt(goal.pos) : '') } catch {}
+  const k = label + '@' + at
   const r = recentWalks.get(k) || { n: 0, since: now, warned: 0 }
   if (now - r.since > 60000) { r.n = 0; r.since = now }
   r.n++
   recentWalks.set(k, r)
+  if (recentWalks.size > 300) for (const [kk, rr] of recentWalks) if (now - rr.since > 60000) recentWalks.delete(kk) // (a key per place: old ones go)
   if (r.n > 6 && now - r.warned > 60000) {
     r.warned = now
     let where = ''
