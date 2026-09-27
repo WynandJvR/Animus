@@ -103,8 +103,10 @@ async function huntFor (bot, itemName, n, ctx = {}) {
       const reach = bot.food <= 10 ? 260 : 160 // real hunger justifies a longer walk
       const known = kinds.flatMap(k => mem.get().mobs[k]).filter(p => world.dist2(p, anchor) < reach)
         .sort((a, b) => world.dist2(a, bot.entity.position) - world.dist2(b, bot.entity.position))[0]
-      // walking off after a herd or exploring: fit, armed, daylight left - or not at all
-      const fit = bot.health >= 12 && !!inv.bestWeapon(bot) && world.phase(bot) === 'day' && world.tod(bot) < 9000
+      // walking off after a herd or exploring: fit, armed, daylight left - or not at all. Fit = above the reflex's own hurt
+      // line, not a fixed 12: health only comes back on a full belly, and at hp 10 / food 13 the food that would heal it was
+      // never looked for - the bot walked on hungry and hurt until drowned killed it (2026-09-27)
+      const fit = bot.health > reflex.hurtLine() && !!inv.bestWeapon(bot) && world.phase(bot) === 'day' && world.tod(bot) < 9000
       if (!fit) { log('food', `no ${re} in sight and not fit to go looking (hp ${Math.round(bot.health)})`); return false }
       if (known && empty === 1 && world.dist2(known, bot.entity.position) > 40) {
         log('food', `heading to where i saw animals at ${move.fmt(known)}`)
@@ -342,7 +344,7 @@ async function stockFood (bot, { targetPoints = 40, ctx = {} } = {}) {
     if (canFish) await fishFor(bot, Math.min(want, 8), ctx).catch(e => log('food', 'fishing threw: ' + e.message))
     // roaming far for animals is a trip into the unknown: only fit, armed, with daylight left (at hp 4
     // with no sword it walked 400 blocks out at dusk)
-    const fit = bot.health >= 12 && !!inv.bestWeapon(bot) && world.phase(bot) === 'day' && world.tod(bot) < 9000
+    const fit = bot.health > reflex.hurtLine() && !!inv.bestWeapon(bot) && world.phase(bot) === 'day' && world.tod(bot) < 9000
     // a roam that found nothing an hour ago will find nothing now (animals here do not come back): a whole
     // day went on 300 blocks of empty exploring - the farm is the food
     const huntedOut = Date.now() - (mem.get().lastHuntEmpty || 0) < 60 * 60000

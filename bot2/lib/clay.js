@@ -9,6 +9,9 @@
 // (a surface swim has the feet in the top water cell, the head out). The pier causeway this replaced cost a day
 // for four balls (2026-09-22: the planner would not step between submerged pier blocks; the balls floated off).
 // One trip is a big batch (the walk costs more than the digging): up to ~64 blocks, 256 balls.
+// SAND too (2026-09-25): round the Notre-Dame site ~4000 sand blocks lie in sight - all but a dozen on the sea and lake
+// beds, y44-61 - and the dry-land gather brought 5-23 a trip toward 2300 glass. The same skill takes a bed material
+// by KIND: the block, the item it drops and how many, and its own memory of deposits dug out and ground scouted.
 const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
 const world = require('./world')
@@ -23,7 +26,12 @@ const gatherLib = () => require('./gather')
 const craft = () => require('./craft')
 const base = () => require('./base')
 
-const CLAY_RE = /^clay$/
+const KINDS = {
+  clay: { name: 'clay', re: /^clay$/, item: 'clay_ball', dropRe: /^clay_ball$/, per: 4, unit: 'balls' },
+  sand: { name: 'sand', re: /^sand$/, item: 'sand', dropRe: /^sand$/, per: 1, unit: 'sand' }
+}
+let K = KINDS.clay // the kind this trip gathers (one trip at a time; gather() sets it)
+function withKind (kind, fn) { const prev = K; K = KINDS[kind] || KINDS.clay; try { return fn() } finally { K = prev } }
 const SEARCH_RADIUS = 320 // from home: past that a trip is most of a day
 const REACH = 4.3 // eye to block centre: act.dig's own reach (depth-2 clay one block off the bank is 4.24)
 const MAX_DIVE_DEPTH = 4 // water over the bed: deeper, the way down and up eats the breath
@@ -31,7 +39,7 @@ const DIVE_MS = 8000 // back at the surface by 8s of the 15s of air (the reflex'
 const AIR_FULL_MS = 14000 // a dive starts on a full breath (a quick surface does not refill the air)
 const EXHAUSTED_AFTER = 18 // scouting legs without a single diggable clay block: nothing within range
 
-function balls (bot) { return inv.count(bot, 'clay_ball') }
+function balls (bot) { return inv.count(bot, K.item) }
 function home () { return mem.get().home }
 function key (p) { return `${p.x},${p.y},${p.z}` }
 
@@ -83,8 +91,8 @@ function standFor (bot, p) {
 }
 
 // Deposits dug out (or left with only clay no head-in-air cell reaches): not counted again.
-function spent () { return mem.get().claySpent || [] }
-function markSpent (p) { mem.update(m => { m.claySpent = (m.claySpent || []).concat([{ x: p.x, y: p.y, z: p.z }]).slice(-40) }); gatherLib().forgetResource('clay', p) }
+function spent () { return mem.get()[K.name + 'Spent'] || [] }
+function markSpent (p) { const k = K.name + 'Spent'; mem.update(m => { m[k] = (m[k] || []).concat([{ x: p.x, y: p.y, z: p.z }]).slice(-40) }); gatherLib().forgetResource(K.name, p) }
 function nearSpent (p) { return spent().some(s => world.dist3(s, p) < 12) }
 function inRange (p) { const h = home(); return !h || world.dist2(p, h) <= SEARCH_RADIUS }
 
@@ -92,7 +100,9 @@ function inRange (p) { const h = home(); return !h || world.dist2(p, h) <= SEARC
 // Clay (and the water it lies under) that is under the open sky - a river, a lake, a beach. Water in a cave
 // has air over it too: 2026-09-22 the scout walked to "water" at y33, y-2 and y-28 in a cave system and the bot
 // died to zombies at y29. The height test first: it is the cheap one, and it runs on every water block in range.
-function nearSurface (p) { const h = home(); return !h || p.y >= h.y - 20 }
+// (the floor is the sea bed's, not home's level less 20: on a mountain home at y116 that ruled out every lake and
+//  sea bed in sight - the open-sky test is what keeps the caves out)
+function nearSurface (p) { const h = home(); return !h || p.y >= Math.min(h.y - 20, 40) }
 function underSky (bot, p) {
   let y = p.y + 1
   for (let i = 0; i < 6; i++, y++) { const b = world.at(bot, p.x, y, p.z); if (!b || !world.isWaterBlock(b)) break }
@@ -104,16 +114,22 @@ function underSky (bot, p) {
 // the explore stopped at clay of a deposit already dug out (the scan skips those), the scan saw nothing, and the bot
 // explored again every 8s with a findBlocks each tick until the event loop starved and the supervisor killed the
 // process - it came back up in the river and drowned (2026-09-23).
-function claySought (bot, p, { sky = true } = {}) {
-  return nearSurface(p) && outOfZones(p) && inRange(p) && !nearSpent(p) && (!sky || underSky(bot, p)) && diggable(bot, p)
+// (the cheap tests first: a sand bed is thousands of blocks, nearly all buried - diggable rules those out in a few reads)
+function sought (bot, p, { sky = true, minY = -Infinity } = {}) {
+  return p.y >= minY && nearSurface(p) && diggable(bot, p) && outOfZones(p) && inRange(p) && !nearSpent(p) && (!sky || underSky(bot, p))
 }
+function claySought (bot, p, opts) { return withKind('clay', () => sought(bot, p, opts)) }
+// (sky:false - clay under other clay at a deposit being dug - stays within a few blocks under that deposit: the same bed,
+//  never the cave under the lake - audit #29, 2026-09-27)
 function visibleClay (bot, maxDistance = 128, point, { sky = true } = {}) {
-  return world.findBlocks(bot, CLAY_RE, { maxDistance, count: 48, point: point ? new Vec3(point.x, point.y, point.z) : undefined, filter: b => claySought(bot, b.position, { sky }) })
+  const from = point || bot.entity.position
+  const minY = sky ? -Infinity : Math.floor(from.y) - 4
+  return world.findBlocks(bot, K.re, { maxDistance, count: 48, point: point ? new Vec3(point.x, point.y, point.z) : undefined, filter: b => sought(bot, b.position, { sky, minY }) })
 }
 function findDeposit (bot) {
   const seen = visibleClay(bot)[0]
   if (seen) return seen.position
-  const known = gatherLib().knownResource('clay', bot.entity.position, { maxFromHome: SEARCH_RADIUS })
+  const known = gatherLib().knownResource(K.name, bot.entity.position, { maxFromHome: SEARCH_RADIUS })
   return known && !nearSpent(known) ? known : null
 }
 
@@ -123,16 +139,16 @@ function walkTicks (bot) { const h = home(); return h ? world.walkTicks(bot.enti
 // before dusk, and a clay bank far from home is no place to meet the night.
 function mustTurnBack (bot) { return world.phase(bot) !== 'day' || world.ticksUntilNight(bot) < walkTicks(bot) + world.HOME_MARGIN }
 // Worth setting out now? There and back plus a few minutes at the water, with daylight to spare.
-function tripFits (bot) {
+function tripFits (bot, kind = 'clay') {
   const h = home() || bot.entity.position
-  const dep = gatherLib().knownResource('clay', h, { maxFromHome: SEARCH_RADIUS })
+  const dep = gatherLib().knownResource(kind, h, { maxFromHome: SEARCH_RADIUS })
   const d = dep ? world.dist2(dep, h) : 160
   // (and a body fit to dive: most clay here lies 2-3 deep, and a walk out to find the dive refused is a trip wasted)
   return world.phase(bot) === 'day' && world.ticksUntilNight(bot) > 2 * (d / 4.3 * 20 * 1.4) + 3600 && bot.health >= 14 && bot.food >= 6
 }
 // The whole reach round home was walked and no clay seen: bricks cannot be made here. Kept per home (a new
 // home is new ground); only the operator can decide what stands in for bricks.
-function exhausted () { const s = mem.get().claySearch; const h = home(); return !!(s && s.exhausted && h && world.dist2(s.home, h) < 16) }
+function exhausted (kind = K.name) { const s = mem.get()[kind + 'Search']; const h = home(); return !!(s && s.exhausted && h && world.dist2(s.home, h) < 16) }
 
 async function ensureShovel (bot, ctx) {
   if (inv.bestTool(bot, 'shovel', 4)) return true
@@ -210,7 +226,7 @@ function pickupCell (bot, pos) {
 // A dug block's balls start on the river bottom and float up (about a block a second): wait for the ones round
 // it to reach the surface - beside our stand they are handed over there and then, before the current takes them.
 async function settle (bot, p) {
-  const re = /^clay_ball$/
+  const re = K.dropRe
   const t0 = Date.now()
   const here = () => dropsNear(bot, re).filter(e => world.dist3(e.position, { x: p.x + 0.5, y: p.y + 0.5, z: p.z + 0.5 }) < 5)
   // (a moment for the drop to exist at all: the server spawns it with the block's break)
@@ -224,7 +240,7 @@ async function settle (bot, p) {
 // reaches is waited on while the current still carries it; once it lies still out of reach it is lost (the
 // balls-per-block lines count it). Returns the count left in the water.
 async function pickUp (bot, stop, sess) {
-  const re = /^clay_ball$/
+  const re = K.dropRe
   const t0 = Date.now()
   while (!stop() && Date.now() - t0 < 6000 && dropsNear(bot, re).some(e => rising(bot, e))) await idle(bot, 250)
   const tries = new Map()
@@ -245,7 +261,7 @@ async function pickUp (bot, stop, sess) {
       continue
     }
     tries.set(go.d.id, (tries.get(go.d.id) || 0) + 1)
-    if (!await stepTo(bot, go.c, stop, 'clay pickup', sess)) continue
+    if (!await stepTo(bot, go.c, stop, K.name + ' pickup', sess)) continue
     // (handed over on the server's next ticks once we stand beside it)
     const t1 = Date.now()
     while (go.d.isValid && Date.now() - t1 < 1200) await idle(bot, 100)
@@ -300,7 +316,7 @@ function diveSpot (bot, cands, sess) {
     const feet = { x, y: col.f + 1, z }
     const targets = cands.filter(q => digsFrom(feet, q) && opens(q))
     if (!targets.length) continue
-    spots.push({ col, targets, score: targets.length * 100 - Math.hypot(x + 0.5 - me.x, z + 0.5 - me.z) - (CLAY_RE.test(col.bed) ? 50 : 0) })
+    spots.push({ col, targets, score: targets.length * 100 - Math.hypot(x + 0.5 - me.x, z + 0.5 - me.z) - (K.re.test(col.bed) ? 50 : 0) })
   }
   return spots.sort((a, b) => b.score - a.score).find(s => columnClear(bot, s.col)) || null
 }
@@ -337,7 +353,7 @@ function steerOver (bot, col, jump) {
 async function dive (bot, plan, sess, stop) {
   const { col } = plan
   const res = { dug: 0, clean: false, end: null, broken: null, unfit: false, underMs: 0, balls: 0 }
-  if (!await stepTo(bot, { x: col.x, y: col.s, z: col.z, float: true }, stop, 'over the clay', sess)) { res.end = 'could not swim there'; return res }
+  if (!await stepTo(bot, { x: col.x, y: col.s, z: col.z, float: true }, stop, 'over the ' + K.name, sess)) { res.end = 'could not swim there'; return res }
   const first = world.at(bot, plan.targets[0].x, plan.targets[0].y, plan.targets[0].z)
   if (first) await inv.equipFor(bot, first).catch(() => {}) // (the shovel in hand up here: the air is for digging)
   // afloat over the spot until the breath is full (a quick surface does not refill it) and we are over the column
@@ -404,13 +420,13 @@ async function dive (bot, plan, sess, stop) {
   const where = `${col.x},${col.f + 1},${col.z}`
   sess.badDives = res.clean ? 0 : sess.badDives + 1
   if (!res.clean) {
-    log('clay', `dive at ${where} did not surface cleanly (${res.broken || 'head still under'}; dug ${res.dug}, stopped digging: ${res.end}) - ${sess.badDives} in a row`)
+    log(K.name, `dive at ${where} did not surface cleanly (${res.broken || 'head still under'}; dug ${res.dug}, stopped digging: ${res.end}) - ${sess.badDives} in a row`)
     await breathe(bot)
     return res
   }
   const afloat = await pickUp(bot, stop, sess)
   res.balls = balls(bot) - before
-  log('clay', `dive at ${where} (${col.depth} deep): dug ${res.dug} clay in ${(res.underMs / 1000).toFixed(1)}s under (${res.end}) -> +${res.balls} balls${res.dug ? ` (${(res.balls / res.dug).toFixed(1)} a block)` : ''}${afloat ? `, ${afloat} afloat out of reach` : ''}`)
+  log(K.name, `dive at ${where} (${col.depth} deep): dug ${res.dug} ${K.name} in ${(res.underMs / 1000).toFixed(1)}s under (${res.end}) -> +${res.balls} ${K.unit}${res.dug ? ` (${(res.balls / res.dug).toFixed(1)} a block)` : ''}${afloat ? `, ${afloat} afloat out of reach` : ''}`)
   return res
 }
 
@@ -424,7 +440,7 @@ async function digDeposit (bot, center, target, stop) {
   const sess = { noGo: new Set(), badCols: new Set(), badDives: 0 }
   try { return await digDepositInner(bot, center, target, stop, ashore, sess) } finally {
     await breathe(bot).catch(() => false)
-    if (ashore && !await stepTo(bot, ashore, () => false, 'up the bank').catch(() => false)) log('clay', `couldn't get back up the bank to ${move.fmt(ashore)} - at ${move.fmt(bot.entity.position)}`)
+    if (ashore && !await stepTo(bot, ashore, () => false, 'up the bank').catch(() => false)) log(K.name, `couldn't get back up the bank to ${move.fmt(ashore)} - at ${move.fmt(bot.entity.position)}`)
   }
 }
 // The nearest dry standing cell (feet and head in air) round us - the bank we walked in on.
@@ -456,7 +472,7 @@ async function digDepositInner (bot, center, target, stop, ashore, sess) {
   const misses = new Map() // block -> failed tries (a walk the reflex interrupted is no verdict: two strikes)
   const strike = p => { const k = key(p); misses.set(k, (misses.get(k) || 0) + 1); if (misses.get(k) >= 2) bad.add(k) }
   const start = balls(bot); let digs = 0; let dives = 0; let stopped = false; let unfit = null
-  log('clay', `${visibleClay(bot, 20, center, { sky: false }).length} diggable clay block(s) in sight round ${move.fmt(center)}`)
+  log(K.name, `${visibleClay(bot, 20, center, { sky: false }).length} diggable ${K.name} block(s) in sight round ${move.fmt(center)}`)
   while (balls(bot) < target) {
     await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
     if (stop()) { stopped = true; break }
@@ -472,7 +488,7 @@ async function digDepositInner (bot, center, target, stop, ashore, sess) {
       if (s && !sess.noGo.has(key(s))) { pick = b; stand = s; break }
     }
     if (pick) {
-      if (!await stepTo(bot, stand, stop, 'to the clay', sess)) { strike(pick.position); continue }
+      if (!await stepTo(bot, stand, stop, 'to the ' + K.name, sess)) { strike(pick.position); continue }
       // everything diggable within reach from this spot (a disc is two or three stands' worth), never our own column
       const feet = world.feetPos(bot)
       const reachable = visibleClay(bot, 6, undefined, { sky: false }).filter(b => digsFrom(feet, b.position) && !wayBack(bot, feet, ashore, b.position))
@@ -503,11 +519,11 @@ async function digDepositInner (bot, center, target, stop, ashore, sess) {
   const got = balls(bot) - start
   const left = visibleClay(bot, 20, center, { sky: false })
   const unreached = left.filter(b => bad.has(key(b.position))).length
-  // four balls a block: what the current took is the difference
-  if (digs) log('clay', `dug ${digs} clay at ${move.fmt(center)}${dives ? ` (${dives} dive(s))` : ''} -> ${got} balls (${(got / digs).toFixed(1)} a block; ${Math.max(0, digs * 4 - got)} lost to the water, ${afloat} of them seen afloat out of reach) - holding ${balls(bot)}; ${left.length} left in sight, ${unreached} out of reach`)
+  // (four balls a block of clay, one sand: what the current took is the difference)
+  if (digs) log(K.name, `dug ${digs} ${K.name} at ${move.fmt(center)}${dives ? ` (${dives} dive(s))` : ''} -> ${got} ${K.unit} (${(got / digs).toFixed(1)} a block; ${Math.max(0, digs * K.per - got)} lost to the water, ${afloat} of them seen afloat out of reach) - holding ${balls(bot)}; ${left.length} left in sight, ${unreached} out of reach`)
   if (stopped || stop()) return 'stopped'
   if (balls(bot) >= target) return 'done'
-  if (unfit) { log('clay', `not diving now: ${unfit} - the deep clay at ${move.fmt(center)} waits`); return 'unfit' }
+  if (unfit) { log(K.name, `not diving now: ${unfit} - the deep ${K.name} at ${move.fmt(center)} waits`); return 'unfit' }
   if (left.some(b => (misses.get(key(b.position)) || 0) >= 2)) return 'stuck'
   return 'spent'
 }
@@ -516,61 +532,121 @@ async function digDepositInner (bot, center, target, stop, ashore, sess) {
 // rings, out to ~300 blocks. The client only knows loaded chunks: finding more means walking.
 async function scout (bot, stop) {
   const h = home() || bot.entity.position
-  const scouted = mem.get().clayScouted || []
+  const scouted = mem.get()[K.name + 'Scouted'] || []
   const fresh = p => !scouted.some(s => world.dist2(s, p) < 48)
   // (surface water only - see underSky; and a smaller scan: 128 blocks x 200 hits over a sea stalled the event loop 10s)
   const water = (await world.scanBlocks(bot, /^water$/, { maxDistance: 96, count: 60, filter: b => nearSurface(b.position) && world.isAirish(world.at(bot, b.position.x, b.position.y + 1, b.position.z)) && world.openSky(bot, b.position) && inRange(b.position) && outOfZones(b.position) && fresh(b.position) }))
     .filter(b => world.dist2(b.position, bot.entity.position) > 48) // water close by is already in view
-  const noteScouted = () => { const p = world.feetPos(bot); mem.update(m => { m.clayScouted = (m.clayScouted || []).concat([{ x: p.x, y: p.y, z: p.z }]).slice(-60) }) }
+  const noteScouted = () => { const p = world.feetPos(bot); const k = K.name + 'Scouted'; mem.update(m => { m[k] = (m[k] || []).concat([{ x: p.x, y: p.y, z: p.z }]).slice(-60) }) }
   if (water.length) {
     const w = water[0].position
-    log('clay', `no clay in sight - heading to the water at ${move.fmt(w)} to look`)
-    await move.travel(bot, w, { range: 8, shouldStop: () => stop() || visibleClay(bot, 64).length > 0, label: 'to water for clay' })
+    log(K.name, `no ${K.name} in sight - heading to the water at ${move.fmt(w)} to look`)
+    await move.travel(bot, w, { range: 8, shouldStop: () => stop() || visibleClay(bot, 64).length > 0, label: 'to water for ' + K.name })
   } else {
-    await gatherLib().explore(bot, b => CLAY_RE.test(b.name), { shouldStop: stop, label: 'clay', rings: 9, accept: b => claySought(bot, b.position) })
+    await gatherLib().explore(bot, b => K.re.test(b.name), { shouldStop: stop, label: K.name, rings: 9, accept: b => sought(bot, b.position) })
   }
   noteScouted()
   const found = visibleClay(bot).length > 0
   if (!found) {
+    const sk = K.name + 'Search'
     mem.update(m => {
-      const s = m.claySearch && m.claySearch.home && world.dist2(m.claySearch.home, h) < 16 ? m.claySearch : { home: { x: h.x, y: h.y, z: h.z }, legs: 0 }
+      const s = m[sk] && m[sk].home && world.dist2(m[sk].home, h) < 16 ? m[sk] : { home: { x: h.x, y: h.y, z: h.z }, legs: 0 }
       s.legs++
       if (s.legs >= EXHAUSTED_AFTER) s.exhausted = true
-      m.claySearch = s
+      m[sk] = s
     })
-    if (exhausted()) log('clay', `NO CLAY within ${SEARCH_RADIUS} blocks of home after ${mem.get().claySearch.legs} scouting legs - bricks, brick slabs/stairs and flower pots cannot be made here; the operator must choose what stands in for them`)
-  } else mem.update(m => { if (m.claySearch) m.claySearch.legs = 0 })
+    if (exhausted()) log(K.name, `NO ${K.name.toUpperCase()} within ${SEARCH_RADIUS} blocks of home after ${mem.get()[sk].legs} scouting legs - what needs it cannot be made here; the operator must choose what stands in for it`)
+  } else mem.update(m => { if (m[K.name + 'Search']) m[K.name + 'Search'].legs = 0 })
   return found
 }
 
-// Get `n` more clay balls: find a deposit (in sight, remembered, or scouted for), walk there, dig from the bank
-// and dive for the rest.
-async function gather (bot, n, ctx = {}) {
+// Get `n` more of the kind's item (clay balls, sand): find a deposit (in sight, remembered, or scouted for), walk there,
+// dig from the bank and dive for the rest.
+async function gather (bot, n, ctx = {}, kind = 'clay') {
+  const prev = K; K = KINDS[kind] || KINDS.clay
+  try { return await gatherInner(bot, n, ctx) } finally { K = prev }
+}
+// Dry sand: its top open to the sky, no water beside or over it, out of the zones - a beach, a desert, a dune.
+// (gather's own takeable rule - lava, footing, water over or beside - plus the open sky: one rule for loose ground; the
+//  copy here had drifted from it, audit #28)
+function drySought (bot, p) {
+  const b = world.at(bot, p.x, p.y, p.z)
+  return !!b && inRange(p) && gatherLib().takeable(bot, b) && !world.waterNear(bot, p, 1, 0, 1) && world.openSky(bot, { x: p.x, y: p.y, z: p.z })
+}
+function dryExhausted () { const s = mem.get().sandDrySearch; const h = home(); return !!(s && s.exhausted && h && world.dist2(s.home, h) < 16) }
+async function drySand (bot, target, stop) {
+  const g = gatherLib()
+  const refused = new Set(); const k = p => `${p.x},${p.y},${p.z}`
+  // (a column dug once this trip is done: each pass bared the next layer and took that too - a crater; audit #28)
+  const dugCols = new Set(); const col = p => `${p.x},${p.z}`
+  for (let legs = 0; balls(bot) < target && !stop();) {
+    await reflex.waitClear()
+    if (inv.freeSlots(bot) <= 1) { await base().tossJunk(bot); if (inv.freeSlots(bot) <= 1) return }
+    const seen = world.findBlocks(bot, K.re, { maxDistance: 64, count: 24, filter: b => !refused.has(k(b.position)) && !dugCols.has(col(b.position)) && drySought(bot, b.position) })
+    if (seen.length) {
+      const me = bot.entity.position
+      const b = seen.sort((x, y) => x.position.distanceTo(me) - y.position.distanceTo(me))[0]
+      g.noteResource('sand_dry', b.position)
+      if (b.position.distanceTo(me) > 12) { const r = await move.travel(bot, b.position, { range: 3, shouldStop: stop, label: 'to dry sand' }); if (!r.ok && b.position.distanceTo(bot.entity.position) > 6) { refused.add(k(b.position)); continue } }
+      // everything dry within reach here, top down
+      let dug = 0
+      // (the top layer and the one under it: digging on down cratered the beach, audit #28)
+      for (const t of world.findBlocks(bot, K.re, { maxDistance: 5, count: 40, filter: x => x.position.y >= b.position.y - 1 && !dugCols.has(col(x.position)) && drySought(bot, x.position) }).sort((a, c) => c.position.y - a.position.y)) {
+        if (stop() || balls(bot) >= target || inv.freeSlots(bot) <= 1) break
+        if (await act.dig(bot, t.position, { timeoutMs: 8000 })) { dug++; dugCols.add(col(t.position)) } else refused.add(k(t.position))
+      }
+      if (!dug) refused.add(k(b.position))
+      await act.collectDrops(bot, { radius: 6, maxMs: 4000 })
+      continue
+    }
+    const known = g.knownResource('sand_dry', bot.entity.position, { maxFromHome: SEARCH_RADIUS })
+    if (known && world.dist3(known, bot.entity.position) > 24) { log('sand', `dry sand remembered at ${move.fmt(known)} - going there`); const r = await move.travel(bot, known, { range: 6, shouldStop: stop, label: 'to dry sand' }); if (!r.ok) g.forgetResource('sand_dry', known); continue }
+    if (known) g.forgetResource('sand_dry', known)
+    // none in sight nor remembered: explore outward for it (the widening rings, out to ~300 blocks)
+    const found = await g.explore(bot, b => K.re.test(b.name), { shouldStop: stop, label: 'dry sand', rings: 9, accept: b => drySought(bot, b.position) })
+    if (found) { mem.update(m => { if (m.sandDrySearch) m.sandDrySearch.legs = 0 }); continue }
+    const h = home() || bot.entity.position
+    mem.update(m => {
+      const s = m.sandDrySearch && m.sandDrySearch.home && world.dist2(m.sandDrySearch.home, h) < 16 ? m.sandDrySearch : { home: { x: h.x, y: h.y, z: h.z }, legs: 0 }
+      s.legs++; if (s.legs >= 9) s.exhausted = true
+      m.sandDrySearch = s
+    })
+    if (dryExhausted()) { log('sand', 'no dry sand within reach of home - diving for it'); return }
+    if (++legs >= 3) return
+  }
+}
+async function gatherInner (bot, n, ctx) {
   const start = balls(bot); const target = start + n
-  if (exhausted()) { log('clay', `no clay within ${SEARCH_RADIUS} blocks of home (searched) - not looking again for this home`); return false }
-  if (!await ensureShovel(bot, ctx)) { log('clay', 'no shovel and could not make one'); return false }
+  if (exhausted()) { log(K.name, `no ${K.name} within ${SEARCH_RADIUS} blocks of home (searched) - not looking again for this home`); return false }
+  if (!await ensureShovel(bot, ctx)) { log(K.name, 'no shovel and could not make one'); return false }
   // room for the haul before the walk (the builder's window may be sitting in the pack): empty it at home
   const slots = Math.ceil(n / 64) + 3
   if (inv.freeSlots(bot) < slots && base().distHome(bot) < 32) await base().depositAll(bot).catch(() => false)
   const stop = () => (ctx.shouldStop && ctx.shouldStop()) || mustTurnBack(bot)
+  // SAND ON DRY LAND FIRST: a dive fits one dig in a breath and the current carries half of it off (16 dives, 6 sand,
+  // 2026-09-26); a beach or a desert gives a block every half second. Only when no dry sand is found out to the
+  // search radius do the dives start.
+  if (K.name === 'sand') { await drySand(bot, target, stop); if (balls(bot) >= target || stop() || !dryExhausted()) { log(K.name, `sand trip: +${balls(bot) - start} sand (${balls(bot)} held)`); return balls(bot) > start } }
   for (let round = 0; round < 8 && balls(bot) < target; round++) {
     if (stop()) break
     await reflex.waitClear()
     const dep = findDeposit(bot)
     if (!dep) { if (!await scout(bot, stop) && exhausted()) break; continue }
     if (world.dist2(bot.entity.position, dep) > 12) {
-      log('clay', `clay at ${move.fmt(dep)} (${Math.round(world.dist2(dep, home() || bot.entity.position))}b from home) - going to dig ${target - balls(bot)} balls`)
-      const r = await move.travel(bot, dep, { range: 6, shouldStop: stop, label: 'to clay' })
+      log(K.name, `${K.name} at ${move.fmt(dep)} (${Math.round(world.dist2(dep, home() || bot.entity.position))}b from home) - going to dig ${target - balls(bot)} ${K.unit}`)
+      const r = await move.travel(bot, dep, { range: 6, shouldStop: stop, label: 'to ' + K.name })
       if (!r.ok && world.dist2(bot.entity.position, dep) > 16) { if (r.why !== 'stopped') markSpent(dep); continue }
     }
-    gatherLib().noteResource('clay', dep)
+    gatherLib().noteResource(K.name, dep)
     const why = await digDeposit(bot, dep, target, stop)
-    if (why === 'spent') { log('clay', `the clay at ${move.fmt(dep)} is dug out, or none left that a stand or a dive reaches`); markSpent(dep) }
+    if (why === 'spent') { log(K.name, `the ${K.name} at ${move.fmt(dep)} is dug out, or none left that a stand or a dive reaches`); markSpent(dep) }
     else if (why === 'unfit' || why === 'stuck') break // (not spent: another hour, or another day, reaches it)
   }
   const got = balls(bot) - start
-  log('clay', `clay trip: +${got} balls (${balls(bot)} held)${stop() && got < n ? ' - heading home before dark' : ''}`)
+  log(K.name, `${K.name} trip: +${got} ${K.unit} (${balls(bot)} held)${stop() && got < n ? ' - heading home before dark' : ''}`)
   return got > 0
 }
 
-module.exports = { gather, claySought, tripFits, exhausted, diggable, standFor, _digDeposit: digDeposit, _dive: dive, pickupCell, floatCell, breathStand, pickUp, digsFrom, diveColumn, diveSpot, bodyUnfit, onBed, mustTurnBack }
+async function digDepositKind (bot, center, target, stop, kind = 'clay') { const prev = K; K = KINDS[kind] || KINDS.clay; try { return await digDeposit(bot, center, target, stop) } finally { K = prev } }
+
+module.exports = { gather, claySought, tripFits, exhausted, diggable, standFor, _digDeposit: digDepositKind, _dive: dive, pickupCell, floatCell, breathStand, pickUp, digsFrom, diveColumn, diveSpot, bodyUnfit, onBed, mustTurnBack }

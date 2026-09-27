@@ -65,8 +65,18 @@ function install (bot) {
     }
   })
   bot.on('death', () => {
-    const p = lastPos || (bot.entity ? bot.entity.position.floored() : null)
+    let p = lastPos || (bot.entity ? bot.entity.position.floored() : null)
     if (!p) return
+    // a death in the air (a fall: the server killed the body on landing before our physics got it there) lies on
+    // the ground under it - a grave "at y87" 17 blocks over its items was walked to, never reached, and given up on
+    // while the bot stood beside it (2026-09-25)
+    try {
+      const b = world.at(bot, p.x, p.y - 1, p.z)
+      if (b && !world.isSolid(b) && !world.isWaterBlock(b) && !world.isLavaBlock(b)) {
+        const gy = world.groundY(bot, p.x, p.z, p.y - 1)
+        if (gy != null) p = { x: p.x, y: gy + 1, z: p.z }
+      }
+    } catch {}
     const items = lastInventory.reduce((s, i) => s + i.count, 0)
     const valuable = lastInventory.filter(i => /_(pickaxe|sword|axe|helmet|chestplate|leggings|boots)$|iron|diamond|_bed$/.test(i.name)).map(i => i.name)
     let place = null

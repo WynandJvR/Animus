@@ -13,18 +13,35 @@ const FALLING_RE = /^(sand|red_sand|gravel|suspicious_sand|suspicious_gravel|.*c
 const LOG_RE = /_(log|stem)$/
 const LEAF_RE = /_leaves$/
 // Natural terrain the bot may dig anywhere outside protected zones. Crafted blocks are never here.
-const NATURAL_RE = /^(dirt|coarse_dirt|rooted_dirt|grass_block|podzol|mycelium|mud|clay|gravel|sand|red_sand|sandstone|red_sandstone|stone|cobblestone|mossy_cobblestone|deepslate|cobbled_deepslate|tuff|calcite|granite|diorite|andesite|dripstone_block|snow|snow_block|ice|packed_ice|netherrack|soul_sand|soul_soil|basalt|blackstone|terracotta|[a-z_]*_terracotta|.*_ore|raw_[a-z]*_block|amethyst_block|budding_amethyst|moss_block|short_grass|tall_grass|fern|large_fern|dead_bush|leaf_litter|.*_leaves|.*_log|.*_wood|mangrove_roots|muddy_mangrove_roots|obsidian|smooth_basalt|glow_lichen|vine|hanging_roots|big_dripleaf|small_dripleaf|pointed_dripstone|sculk|sculk_vein|infested_.*|dandelion|poppy|.*_tulip|azure_bluet|oxeye_daisy|cornflower|lily_of_the_valley|allium|blue_orchid|sunflower|lilac|rose_bush|peony|pink_petals|brown_mushroom|red_mushroom|sweet_berry_bush|pumpkin|melon|bamboo|sugar_cane|cactus|seagrass|kelp|kelp_plant|firefly_bush|bush|cactus_flower|short_dry_grass|tall_dry_grass|wildflowers)$/
+// Not obsidian (a nether portal's frame reads as it; the bot's own quenched obsidian is dug by its ledger, forage.js) and
+// not a stripped log or wood (a player's axe work - wild trees are never stripped): any unforced dig - levelling, a
+// clearing, the mine's cell, the pathfinder - could take a portal frame or a player's wall (audit R8, 2026-09-27).
+// Kept, judged: cobblestone/mossy (the bot's own scaffold and filler and the mine's teardown rely on it; dungeons are
+// natural), snow_block/packed_ice/terracotta (generated on peaks, icebergs, badlands), pumpkin/melon (wild patches).
+// ONE rule each (the audit found three hand-kept copies of the lantern test and two furniture lists that had drifted):
+// a lantern of any metal - never a jack o'lantern or a sea lantern (full blocks); and the bot's furniture and lights,
+// never scaffold, never dug in passing
+const LANTERN_RE = /^(?!jack_o_|sea_)(\w+_)?lantern$/
+const FURNITURE_RE = new RegExp('(chest|furnace|crafting_table|_door|_bed|barrel|torch|smoker|anvil|blast_furnace|loom|lectern|composter)$|' + LANTERN_RE.source)
+const NATURAL_RE = /^(dirt|coarse_dirt|rooted_dirt|grass_block|podzol|mycelium|mud|clay|gravel|sand|red_sand|sandstone|red_sandstone|stone|cobblestone|mossy_cobblestone|deepslate|cobbled_deepslate|tuff|calcite|granite|diorite|andesite|dripstone_block|snow|snow_block|ice|packed_ice|netherrack|soul_sand|soul_soil|basalt|blackstone|terracotta|[a-z_]*_terracotta|.*_ore|raw_[a-z]*_block|amethyst_block|budding_amethyst|moss_block|short_grass|tall_grass|fern|large_fern|dead_bush|leaf_litter|.*_leaves|(?!stripped_)[a-z_]*_log|(?!stripped_)[a-z_]*_wood|mangrove_roots|muddy_mangrove_roots|smooth_basalt|glow_lichen|vine|hanging_roots|big_dripleaf|small_dripleaf|pointed_dripstone|sculk|sculk_vein|infested_.*|dandelion|poppy|.*_tulip|azure_bluet|oxeye_daisy|cornflower|lily_of_the_valley|allium|blue_orchid|sunflower|lilac|rose_bush|peony|pink_petals|brown_mushroom|red_mushroom|sweet_berry_bush|pumpkin|melon|bamboo|sugar_cane|cactus|seagrass|kelp|kelp_plant|firefly_bush|bush|cactus_flower|short_dry_grass|tall_dry_grass|wildflowers)$/
 
 function v (x, y, z) { return new Vec3(x, y, z) }
 function at (bot, x, y, z) { return bot.blockAt(v(Math.floor(x), Math.floor(y), Math.floor(z))) }
 function name (bot, x, y, z) { const b = at(bot, x, y, z); return b ? b.name : null }
 
-function isWaterBlock (b) {
+// Three questions about water, kept apart (2026-09-27: one predicate for all three made a wild sea pickle - always
+// waterlogged - read as "water": the picker filtered it out and act.dig called it dug, so the route died and every reef
+// sighting reopened it - a livelock):
+//   isLiquidWater - the cell is water and nothing else: nothing there to dig, pick or build against
+//   holdsWater    - a block with water in it (waterlogged stairs, a sea pickle, mangrove leaves): a block, AND water
+//   isWaterBlock  - water is in the cell, either way: what the body feels (swimming, a fall broken, a hole that floods)
+const LIQUID_WATER_RE = /^(water|flowing_water|bubble_column)$/
+function isLiquidWater (b) { return !!b && LIQUID_WATER_RE.test(b.name) }
+function holdsWater (b) {
   if (!b) return false
-  if (WATER_RE.test(b.name)) return true
-  try { const p = b.getProperties(); if (p && p.waterlogged === true) return true } catch {}
-  return false
+  try { const p = b.getProperties(); return !!(p && (p.waterlogged === true || p.waterlogged === 'true')) } catch { return false }
 }
+function isWaterBlock (b) { return !!b && (WATER_RE.test(b.name) || holdsWater(b)) }
 function isLavaBlock (b) { return !!b && LAVA_RE.test(b.name) }
 function isSolid (b) { return !!b && b.boundingBox === 'block' && !isWaterBlock(b) && !isLavaBlock(b) }
 function isAirish (b) { return !!b && b.boundingBox === 'empty' && !isWaterBlock(b) && !isLavaBlock(b) }
@@ -85,6 +102,14 @@ function walkTicks (a, b) { return (dist2(a, b) + Math.abs(a.y - b.y)) / 4.3 * 2
 const HOME_MARGIN = 1800
 function canSleepNow (bot) { const t = tod(bot); return (t >= 12542 && t < 23460) || bot.thunderState > 0 }
 
+// Would opening the cell at pos let lava in, or drop us into it? Lava on any side or over it, or under it one or two
+// down. THE rule act.dig refuses by; every planner that queues a dig asks it first, so it never queues one act.dig will
+// refuse forever (the farm levelling's lava-side cells, the obsidian ledger's cells over a deep pool - audit, 2026-09-27).
+const LAVA_HOLD = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 0, -1], [0, -1, 0], [0, -2, 0]]
+function holdsBackLava (bot, pos) {
+  for (const [dx, dy, dz] of LAVA_HOLD) if (isLavaBlock(at(bot, pos.x + dx, pos.y + dy, pos.z + dz))) return true
+  return false
+}
 // Is any lava within r blocks (a cube) of pos?
 function lavaNear (bot, pos, r = 2) {
   for (let dx = -r; dx <= r; dx++) for (let dy = -r; dy <= r; dy++) for (let dz = -r; dz <= r; dz++) {
@@ -257,6 +282,20 @@ async function scanBlocks (bot, re, opts = {}) {
   }
 }
 
+// Does the block show to open air under the sky (a cliff face, a cave mouth - not the dark of a cave)? Air beside or
+// over it with nothing solid above that air for 20 blocks. (Not the light level: this client's sky light reads 0 even
+// for ore at the surface beside home.)
+function skyLitFace (bot, p) {
+  for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 0, -1]]) {
+    const x = p.x + dx; const y0 = p.y + dy; const z = p.z + dz
+    const b = at(bot, x, y0, z)
+    if (!b || !isAirish(b)) continue
+    let open = true
+    for (let y = y0 + 1; y <= y0 + 20 && open; y++) { const c = at(bot, x, y, z); if (c && c.boundingBox === 'block') open = false }
+    if (open) return true
+  }
+  return false
+}
 function hasAirNeighbour (bot, p) {
   for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
     const b = at(bot, p.x + dx, p.y + dy, p.z + dz)
@@ -265,9 +304,9 @@ function hasAirNeighbour (bot, p) {
   return false
 }
 
-module.exports = { walkTicks, HOME_MARGIN, SAFE_DROP, dropAt,
-  data, v, at, name, isWaterBlock, isLavaBlock, isSolid, isAirish, standable, feetPos, eyeBlock,
-  headInWater, feetInWater, inLava, tod, phase, isNight, isDay, ticksUntilNight, canSleepNow, lavaNear, waterNear,
-  groundY, openSky, dist2, dist3, blockIds, findBlocks, scanBlocks, stateIds, sectionMay, sightReach, hasAirNeighbour,
+module.exports = { LANTERN_RE, FURNITURE_RE, walkTicks, HOME_MARGIN, SAFE_DROP, dropAt,
+  data, v, at, name, isWaterBlock, isLiquidWater, holdsWater, isLavaBlock, isSolid, isAirish, standable, feetPos, eyeBlock,
+  headInWater, feetInWater, inLava, tod, phase, isNight, isDay, ticksUntilNight, canSleepNow, lavaNear, holdsBackLava, waterNear,
+  groundY, openSky, dist2, dist3, blockIds, findBlocks, scanBlocks, stateIds, sectionMay, sightReach, hasAirNeighbour, skyLitFace,
   WATER_RE, LAVA_RE, LOG_RE, LEAF_RE, NATURAL_RE, FALLING_RE, DANGER_FLOOR_RE
 }

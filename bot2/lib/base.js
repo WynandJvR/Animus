@@ -13,7 +13,9 @@ const craft = () => require('./craft')
 
 // What stays in the pack when the haul goes into the chests.
 const KIT_KEEP = {
-  torch: 32, crafting_table: 1, stick: 8, coal: 8, charcoal: 8, dirt: 24, bread: 32, cooked_beef: 32, cooked_porkchop: 32, cooked_mutton: 32, cooked_chicken: 32, cooked_cod: 16, cooked_salmon: 16, baked_potato: 16, apple: 16, golden_carrot: 32, white_bed: 1, shield: 1
+  torch: 32, crafting_table: 1, stick: 8, coal: 8, charcoal: 8, dirt: 24, bread: 32, cooked_beef: 32, cooked_porkchop: 32, cooked_mutton: 32, cooked_chicken: 32, cooked_cod: 16, cooked_salmon: 16, baked_potato: 16, apple: 16, golden_carrot: 32, white_bed: 1, shield: 1,
+  // (the bow and its arrows are kit: deposited, the next round's tool check took them out again, every round)
+  bow: 1, arrow: 64
 }
 function keepCount (bot, item) {
   if (/_(pickaxe|axe|shovel|sword|hoe|helmet|chestplate|leggings|boots)$/.test(item.name)) return Infinity
@@ -61,6 +63,18 @@ function bankCounts () {
   return out
 }
 
+// A chest of ours: one we put down (mem.chestsPlaced - placeChest's spots may lie past the base's box: utilitySpotOK
+// takes any unzoned cell), or one standing in the base's zone (the hut's room). A chest merely near home - every one
+// within 10 is "known" for withdrawing - may be a player's.
+function notePlacedChest (p) { mem.update(m => { const l = m.chestsPlaced = m.chestsPlaced || []; if (!l.some(q => q.x === p.x && q.y === p.y && q.z === p.z)) l.push({ x: p.x, y: p.y, z: p.z }); if (l.length > 64) l.splice(0, l.length - 64) }) }
+function ourChest (p) {
+  if ((mem.get().chestsPlaced || []).some(q => q.x === p.x && q.y === p.y && q.z === p.z)) return true
+  const z = move.inZone(p, 0); return !!z && z.label === 'base'
+}
+// Does this block shut a chest's lid? A full, occluding cube only (a chest opens under glass, slabs, stairs, leaves,
+// torches...). Transparent full cubes (glass, leaves, ice) still let it open.
+const SEE_THROUGH_RE = /(glass|_leaves|^ice$|^frosted_ice$|^barrier$|^spawner$|^slime_block$|^honey_block$)/
+function shutsLid (b) { return !!b && world.isSolid(b) && !SEE_THROUGH_RE.test(b.name) && !/(chest|_bed|_slab|_stairs|furnace|crafting_table)$/.test(b.name) }
 const unreachable = new Map() // chest key -> time a walk to it failed
 async function openChest (bot, p) {
   const b = bot.blockAt(new Vec3(p.x, p.y, p.z))
@@ -75,7 +89,20 @@ async function openChest (bot, p) {
     const r = await move.goTo(bot, new goals.GoalNear(p.x, p.y, p.z, 2), { timeoutMs: 45000, label: 'to chest', allowZones: ['base'] })
     if (!r.ok) { unreachable.set(key(p), Date.now()); log('base', `can't reach the chest at ${move.fmt(p)} (${r.why}) - skipping it for a while`); return null }
   }
+  { const bad = unreachable.get(key(p)); if (bad && Date.now() - bad < 5 * 60000) return null }
   unreachable.delete(key(p))
+  // a chest with a full block on its lid won't open (a planner's stepping-stone of dirt: the deposit tried that chest
+  // every 20 seconds for half an hour, 2026-09-27) - the block comes off first; a chest that still won't open is
+  // skipped a while like one out of reach. Never forced (a forced dig took whatever sat there - a player's block on a
+  // player's chest, since every chest near home is "known"; audit R6, 2026-09-27): only a chest of ours (in the base's
+  // zone), only a block that really shuts a lid (a full, occluding cube - glass, slabs, stairs, leaves never do), and a
+  // barrel never (it opens with anything on it). The stepping-stone itself is the planner's to stop (move.js).
+  const lid = world.at(bot, p.x, p.y + 1, p.z)
+  const cb = bot.blockAt(new Vec3(p.x, p.y, p.z))
+  if (cb && /chest$/.test(cb.name) && ourChest(p) && shutsLid(lid)) {
+    if (world.NATURAL_RE.test(lid.name) && await act.dig(bot, { x: p.x, y: p.y + 1, z: p.z }, { allowZones: ['base', 'build'], timeoutMs: 8000 })) log('base', `took the ${lid.name} off the lid of the chest at ${move.fmt(p)}`)
+    else log('base', `the ${lid.name} on the lid of the chest at ${move.fmt(p)} stays (${world.NATURAL_RE.test(lid.name) ? 'the dig failed' : 'a crafted block is never dug for this'}) - the chest will not open until it is moved`)
+  }
   try {
     const w = await bot.openContainer(bot.blockAt(new Vec3(p.x, p.y, p.z)))
     const items = {}
@@ -84,7 +111,7 @@ async function openChest (bot, p) {
     chestCache()[key(p)] = { items, free: slots - w.containerItems().length, t: Date.now() }
     mem.save()
     return w
-  } catch (e) { log('base', `couldn't open chest at ${move.fmt(p)}: ${e.message}`); return null }
+  } catch (e) { unreachable.set(key(p), Date.now()); log('base', `couldn't open chest at ${move.fmt(p)}: ${e.message} - skipping it for a while`); return null }
 }
 function refreshCache (w, p) {
   const items = {}
@@ -149,6 +176,7 @@ async function placeChest (bot) {
     if (adj) continue
     if (await act.place(bot, s, 'chest', { allowZones: ['base'] })) {
       mem.addUnique('chests', s)
+      notePlacedChest(s)
       log('base', `placed a chest at ${move.fmt(s)}`)
       return s
     }
@@ -217,9 +245,12 @@ async function depositHaul (bot, opts = {}) {
 
 async function tossJunk (bot) {
   let tossed = 0
+  let want = null // (worked out once, only if a junk stack turns up)
   for (const it of inv.items(bot)) {
     let k = 0
-    if (inv.JUNK.test(it.name)) k = it.count
+    // never what a build still wants (the list holds flowers, vines, bone - the forage trips' own takings), nor the kit
+    // (arrows and feathers are in the list, and the kit keeps 64 arrows: the next makeRoom tossed them, audit #7)
+    if (inv.JUNK.test(it.name) && keepCount(bot, it) === 0 && !(want || (want = require('./materials').wantedSet(bot)))(it.name)) k = it.count
     else if (it.name === 'dirt' && inv.count(bot, 'dirt') > 64) k = Math.min(it.count, inv.count(bot, 'dirt') - 64)
     else if (it.name === 'gravel' && inv.count(bot, 'gravel') > 16) k = it.count
     if (k > 0) { try { await bot.toss(it.type, null, k); tossed += k } catch {} }
@@ -236,4 +267,4 @@ async function makeRoom (bot, slots = 3) {
   return false
 }
 
-module.exports = { home, setHome, distHome, withdraw, depositItem, depositAll, depositHaul, goHome, tossJunk, makeRoom, bankCount, bankCounts, knownChests, placeChest, openChest, keepCount }
+module.exports = { home, setHome, distHome, withdraw, depositItem, depositAll, depositHaul, goHome, tossJunk, makeRoom, bankCount, bankCounts, knownChests, placeChest, notePlacedChest, ourChest, openChest, keepCount }

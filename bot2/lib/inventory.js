@@ -167,8 +167,12 @@ async function wearBestArmor (bot) {
   return changed
 }
 
-function foodItems (bot, { desperate = false } = {}) {
-  const list = desperate ? GOOD_FOOD.concat(DESPERATE_FOOD) : GOOD_FOOD
+// (hurt: the raw meats that do no harm - beef, pork, mutton, fish - are food too; a hurt body heals only on a full food
+//  bar, and hp 9 sat seventeen minutes in the safehouse with 24 raw meats in the chest beside it, 2026-09-25. Raw
+//  chicken and rotten flesh poison: only when starving.)
+const SAFE_RAW = ['beef', 'porkchop', 'mutton', 'rabbit', 'cod', 'salmon']
+function foodItems (bot, { desperate = false, hurt = false } = {}) {
+  const list = desperate ? GOOD_FOOD.concat(DESPERATE_FOOD) : hurt ? GOOD_FOOD.concat(SAFE_RAW) : GOOD_FOOD
   const inv = items(bot)
   const out = []
   for (const n of list) { const it = inv.find(i => i.name === n); if (it) out.push(it) }
@@ -191,7 +195,7 @@ function rawFoodCount (bot) { let n = 0; for (const it of items(bot)) if (COOKED
 //  clay balls, poppies and red tulips - bricks and red dye for a build: a full pack tossed a clay haul)
 const JUNK = /^(raw_copper|raw_gold|redstone|lapis_lazuli|rotten_flesh|poisonous_potato|spider_eye|pufferfish|tropical_fish|dead_bush|short_grass|tall_grass|fern|leaf_litter|beetroot_seeds|pumpkin_seeds|melon_seeds|feather|bone|arrow|gunpowder|flint|egg|lily_pad|kelp|seagrass|glow_lichen|vine|pointed_dripstone|dripstone_block|moss_carpet|moss_block|azalea|flowering_azalea|orange_tulip|white_tulip|pink_tulip|dandelion|cornflower|azure_bluet|oxeye_daisy|allium|blue_orchid|pink_petals|wildflowers|firefly_bush|bush|calcite|red_sand|mud|podzol|mycelium|deepslate|ink_sac|leather_horse_armor|saddle|name_tag|golden_horse_armor|iron_horse_armor|lead)$/
 
-module.exports = {
+module.exports = { SAFE_RAW,
   TIERS, TIER_RANK, GOOD_FOOD, RAW_FOOD, COOKED_OF, JUNK, ARMOR_SLOTS,
   items, count, has, counts, freeSlots, tierOf, durabilityLeft, bestTool, toolTier, toolKindFor, equipFor, canHarvest,
   bestWeapon, equipWeapon, wornArmor, armorPieces, armorPoints, REGEN_FOOD, shelterBlock, betterArmorInPack, wearBestArmor, offhandShield, hasShield, equipShield, foodItems, foodPoints, rawFoodCount

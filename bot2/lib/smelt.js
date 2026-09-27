@@ -217,17 +217,22 @@ async function putFuel (bot, furnace, itemsToSmelt, { survival = false } = {}) {
 // first visit after it came in): every furnace once, to fill it.
 function fkey (p) { return `${p.x},${p.y},${p.z}` }
 function markFurnace (p, what) { mem.update(m => { m.furnaceUse = m.furnaceUse || {}; if (what) m.furnaceUse[fkey(p)] = what; else delete m.furnaceUse[fkey(p)] }) }
-function note (fb, f) {
-  let inp = null; let out = null
-  try { inp = f.inputItem(); out = f.outputItem() } catch {}
-  markFurnace(fb.position, inp || out ? { input: inp ? inp.name : null, output: out ? out.name : null, at: Date.now() } : null)
+// Is the furnace burning? The block state may come as a boolean or as the string 'true'/'false': `!!'false'` read every
+// cold furnace as lit - never refuelled, never skipped as stalled (audit #26, 2026-09-27). Read like world.holdsWater.
+function isLit (b) { try { const v = b.getProperties().lit; return v === true || v === 'true' } catch { return false } }
+function note (fb, f, bot) {
+  let inp = null; let out = null; let fuel = null
+  try { inp = f.inputItem(); out = f.outputItem(); fuel = f.fuelItem() } catch {}
+  // (fuel = coal in the slot OR the fire still burning: the last coal leaves the slot empty while it smelts on - taken for
+  //  "stalled", that furnace was skipped and its ingots never collected; audit #26)
+  const lit = isLit(bot ? bot.blockAt(fb.position) : fb)
+  markFurnace(fb.position, inp || out ? { input: inp ? inp.name : null, output: out ? out.name : null, fuel: !!fuel || lit, at: Date.now() } : null)
 }
 function busyFurnaces (bot) {
   const all = homeFurnaces(bot)
   const use = mem.get().furnaceUse
   if (!use) return all
-  const lit = b => { try { return !!b.getProperties().lit } catch { return false } }
-  return all.filter(b => use[fkey(b.position)] || lit(b))
+  return all.filter(b => use[fkey(b.position)] || isLit(b))
 }
 
 async function openAt (bot, block) {
@@ -263,8 +268,7 @@ async function smeltItem (bot, output, count, ctx = {}) {
   }
   if (!furns.length) return false
   // idle (unlit) furnaces first: a lit one is busy with another batch
-  const lit = f => { try { return f.getProperties().lit ? 1 : 0 } catch { return 0 } }
-  furns.sort((a, b) => lit(a) - lit(b) || (move.insideHut(b.position) ? 1 : 0) - (move.insideHut(a.position) ? 1 : 0))
+  furns.sort((a, b) => isLit(a) - isLit(b) || (move.insideHut(b.position) ? 1 : 0) - (move.insideHut(a.position) ? 1 : 0))
   furns = furns.slice(0, nFurn)
   const per = Math.ceil(count / furns.length)
   let loaded = 0
@@ -280,7 +284,7 @@ async function smeltItem (bot, output, count, ctx = {}) {
       if (!await putFuel(bot, f, left, { survival }) && !f.fuelItem()) { log('smelt', `no fuel that may burn for ${output}`); continue }
       const it = inv.items(bot).find(i => i.name === input)
       if (it) { await f.putInput(it.type, null, Math.min(left, it.count)); loaded += Math.min(left, it.count); markFurnace(fb.position, { input, at: Date.now() }) }
-    } catch (e) { log('smelt', `loading furnace failed: ${e.message}`) } finally { try { f.close() } catch {} }
+    } catch (e) { log('smelt', `loading furnace failed: ${e.message}`) } finally { try { note(fb, f, bot) } catch {} try { f.close() } catch {} }
   }
   if (!loaded) {
     // every furnace is busy with something else (the stone batch): one more furnace, not a stall
@@ -301,7 +305,8 @@ async function smeltItem (bot, output, count, ctx = {}) {
     for (const fb of furns) {
       const f = await openAt(bot, fb)
       if (!f) continue
-      try { if (f.outputItem()) await f.takeOutput() } catch {} finally { try { f.close() } catch {} }
+      // (noted like every other open: the wait's takes left the ledger saying "output waiting" - audit #26, 2026-09-27)
+      try { if (f.outputItem()) await f.takeOutput() } catch {} finally { try { note(fb, f, bot) } catch {} try { f.close() } catch {} }
     }
   }
   return inv.count(bot, output) >= target
@@ -336,7 +341,7 @@ async function loadFurnaces (bot, input, maxItems, { anyWood = false } = {}) {
       await f.putInput(it.type, null, k)
       markFurnace(fb.position, { input, at: Date.now() })
       loaded += k
-    } catch (e) { log('smelt', `load failed: ${e.message}`) } finally { try { f.close() } catch {} }
+    } catch (e) { log('smelt', `load failed: ${e.message}`) } finally { try { note(fb, f, bot) } catch {} try { f.close() } catch {} }
   }
   if (loaded) {
     log('smelt', `loaded ${loaded} ${input} into the furnaces`)
@@ -390,10 +395,10 @@ async function refuelFurnaces (bot) {
   const home = mem.get().home
   if (!home) return 0
   let fed = 0
+  // (no fuel anywhere: no walk round the cold furnaces to find that out again)
+  if (!inv.items(bot).some(i => fuelValue(i.name) > 0) && !Object.entries(require('./base').bankCounts()).some(([n, c]) => c > 0 && fuelValue(n) > 0)) return 0
   for (const fb of busyFurnaces(bot)) {
-    let lit = false
-    try { lit = !!fb.getProperties().lit } catch {}
-    if (lit) continue
+    if (isLit(fb)) continue
     const f = await openAt(bot, fb)
     if (!f) continue
     try {
@@ -404,7 +409,7 @@ async function refuelFurnaces (bot) {
         if (!await pickFuel(bot, input.count, { survival })) { log('smelt', 'no fuel for the cold furnaces'); break }
         if (await putFuel(bot, f, input.count, { survival })) fed++
       }
-    } catch (e) { log('smelt', `refuel failed: ${e.message}`) } finally { try { f.close() } catch {} }
+    } catch (e) { log('smelt', `refuel failed: ${e.message}`) } finally { try { note(fb, f, bot) } catch {} try { f.close() } catch {} }
   }
   if (fed) log('smelt', `refuelled ${fed} cold furnace${fed > 1 ? 's' : ''}`)
   return fed
@@ -416,10 +421,16 @@ async function collectFurnaces (bot) {
   const first = !mem.get().furnaceUse
   if (first) mem.set('furnaceUse', {})
   let got = 0
+  // (a cold furnace last seen with input, no output and no fuel has made nothing since: not walked to - seven stalled
+  //  furnaces were opened every round, three minutes of every ten-minute day, 2026-09-27)
+  const use = mem.get().furnaceUse || {}
+  const stalled = fb => { if (isLit(fb)) return false; const u = use[fkey(fb.position)]; return !!(u && u.input && !u.output && u.fuel === false) }
   for (const fb of furns) {
+    if (stalled(fb)) continue
     const f = await openAt(bot, fb)
     if (!f) continue
-    try { const o = f.outputItem(); if (o) { await f.takeOutput(); got += o.count; landed(o.name, o.count) } note(fb, f) } catch {} finally { try { f.close() } catch {} }
+    // (the ledger noted in finally: a takeOutput that threw skipped it, and the furnace kept its stale entry)
+    try { const o = f.outputItem(); if (o) { await f.takeOutput(); got += o.count; landed(o.name, o.count) } } catch {} finally { try { note(fb, f, bot) } catch {} try { f.close() } catch {} }
     if (inv.freeSlots(bot) <= 1) break
   }
   if (got) log('smelt', `collected ${got} items from the furnaces`)

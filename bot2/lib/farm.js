@@ -234,31 +234,24 @@ async function hydrate (bot, ctx = {}) {
     }
     // still water: a source block (level 0) that is not in a zone
     const home = mem.get().home
-    const srcs = (await world.scanBlocks(bot, /^water$/, { maxDistance: 96, count: 40, point: home ? new Vec3(home.x, home.y, home.z) : undefined, filter: b => { try { return Number(b.getProperties().level) === 0 && !move.inZone(b.position) } catch { return false } } }))
-      .filter(b => { const up = world.at(bot, b.position.x, b.position.y + 1, b.position.z); return up && world.isAirish(up) })
+    // (the edge test IN the search, and out to all in sight: 40 sources within 96 of a mountain home were cave water
+    //  with no dry edge - the lake and the sea 110+ blocks off were never reached, and the farm dried out, 2026-09-26)
+    const edgeOf = w => {
+      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) for (const dy of [1, 0]) {
+        const x = w.position.x + dx; const y = w.position.y + dy; const z = w.position.z + dz
+        if (world.standable(bot, x, y, z) && !world.isWaterBlock(world.at(bot, x, y - 1, z)) && !move.inZone({ x, y, z })) return { x, y, z }
+      }
+      return null
+    }
+    const srcs = await world.scanBlocks(bot, /^water$/, { maxDistance: world.sightReach(bot), count: 12, point: home ? new Vec3(home.x, home.y, home.z) : undefined, filter: b => { try { if (Number(b.getProperties().level) !== 0 || move.inZone(b.position)) return false; const up = world.at(bot, b.position.x, b.position.y + 1, b.position.z); return !!up && world.isAirish(up) && world.openSky(bot, b.position) && !!edgeOf(b) } catch { return false } } })
     // fill it from dry land at the edge - never by wading in (that pond has drowned the bot once)
     let src = null; let land = null
-    for (const w of srcs) {
-      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-        for (const dy of [1, 0]) {
-          const x = w.position.x + dx; const y = w.position.y + dy; const z = w.position.z + dz
-          if (world.standable(bot, x, y, z) && !world.isWaterBlock(world.at(bot, x, y - 1, z))) { src = w; land = { x, y, z }; break }
-        }
-        if (src) break
-      }
-      if (src) break
-    }
+    for (const w of srcs) { const e = edgeOf(w); if (e) { src = w; land = e; break } }
     if (!src) { log('farm', 'no still water with dry ground beside it to fill a bucket from'); return false }
     const r = await move.travel(bot, land, { range: 1, shouldStop: ctx.shouldStop, label: 'to water edge' })
     if (!r.ok && world.dist3(bot.entity.position, land) > 1.5) return false
-    try {
-      await bot.equip(inv.items(bot).find(i => i.name === 'bucket'), 'hand')
-      await bot.lookAt(new Vec3(src.position.x + 0.5, src.position.y + 0.8, src.position.z + 0.5), true)
-      bot.activateItem()
-      await move.sleep(600)
-      bot.deactivateItem()
-    } catch (e) { log('farm', 'filling the bucket failed: ' + e.message) }
-    if (!inv.has(bot, 'water_bucket')) { log('farm', 'the bucket did not fill'); return false }
+    // (act.fill: the one bucket fill, verified by the pack - reach is 4.4, so from the edge without wading)
+    if (!await act.fill(bot, src.position, { noWalk: true })) { log('farm', `the bucket did not fill at ${move.fmt(src.position)}`); return false }
   }
   // the plot's middle cell
   const cx = f.cells.reduce((s, c) => s + c.x, 0) / f.cells.length; const cz = f.cells.reduce((s, c) => s + c.z, 0) / f.cells.length
@@ -267,11 +260,11 @@ async function hydrate (bot, ctx = {}) {
   if (!r2.ok && world.dist3(bot.entity.position, mid) > 5) return false
   // take out the crop and the soil at the middle cell, pour the water into the hole
   const crop = world.at(bot, mid.x, mid.y + 1, mid.z)
-  if (crop && !world.isAirish(crop) && !world.isWaterBlock(crop)) await act.dig(bot, { x: mid.x, y: mid.y + 1, z: mid.z }, { force: true, timeoutMs: 6000 })
+  if (crop && !world.isAirish(crop) && !world.isLiquidWater(crop)) await act.dig(bot, { x: mid.x, y: mid.y + 1, z: mid.z }, { force: true, timeoutMs: 6000 })
   const soil = world.at(bot, mid.x, mid.y, mid.z)
-  if (soil && !world.isAirish(soil) && !world.isWaterBlock(soil)) await act.dig(bot, mid, { force: true, timeoutMs: 8000 })
+  if (soil && !world.isAirish(soil) && !world.isLiquidWater(soil)) await act.dig(bot, mid, { force: true, timeoutMs: 8000 })
   const hole = world.at(bot, mid.x, mid.y, mid.z)
-  if (!hole || !(world.isAirish(hole) || world.isWaterBlock(hole))) { log('farm', 'could not open the middle of the plot for water'); return false }
+  if (!hole || !(world.isAirish(hole) || world.isLiquidWater(hole))) { log('farm', 'could not open the middle of the plot for water'); return false }
   if (!await pourInto(bot, mid, f)) { log('farm', 'the water would not sit in the middle of the plot'); return false }
   f.water = { x: mid.x, y: mid.y, z: mid.z }
   f.cells = f.cells.filter(c => !(c.x === mid.x && c.z === mid.z))
@@ -383,23 +376,27 @@ function area (f) {
   const w = f.water
   return { x1: w.x - HYDRATE, z1: w.z - HYDRATE, x2: w.x + HYDRATE, z2: w.z + HYDRATE, y1: w.y - 1, y2: w.y + 2 }
 }
-// The columns levelling works on: the farm's ground only - a plot cell, farmland, or a hole at the soil level (a
-// dropped cell to win back). Not the natural rise round it: levelled flat to the water, the terrace up to the
-// safehouse (2 higher) became a cliff, every walk home stood a dirt step on it and every levelling took it away again
-// (10, 5, 2, 1, 2, 1 fixes in two minutes, round and round - 2026-09-24).
+// The ground levelling works on: the WHOLE square the water hydrates, flat at the water's level - every hump and stray
+// block on it taken down (up to 6 high: grass humps stood to y118 over y114 soil), every hole and pit filled, and
+// cobblestone or stone in the soil layer swapped for dirt. Levelling only the columns already at soil level (to stop
+// the churn with the terrace up to the safehouse) left the plot as scattered cells among humps, stones and a pit - 35
+// wheat in a 9x9 of lumps, "1-9 fixes" every few minutes for a day (2026-09-25). Nothing OUTSIDE the square is
+// touched (the terrace was the churn: levelled flat, it became a cliff every walk home put a step on); inside it, walks
+// neither dig nor place (the farm zone), so the square stays as levelled.
+const SOIL_RE = /^(dirt|grass_block|farmland|coarse_dirt|rooted_dirt)$/
 function farmArea (f, bot) {
   const w = f.water
-  const cells = new Set((f.cells || []).map(c => `${c.x},${c.z}`))
-  const farmGround = (x, z) => {
-    if (cells.has(`${x},${z}`)) return true
-    if (!bot) return false
-    const g = world.at(bot, x, w.y, z)
-    return !!g && (g.name === 'farmland' || (!world.isSolid(g) && !world.isWaterBlock(g)))
-  }
   return {
-    x1: w.x - 5, z1: w.z - 5, x2: w.x + 5, z2: w.z + 5, groundY: w.y, height: 2,
-    keep: b => /^(wheat|torch|wall_torch)$/.test(b.name) || (b.position.x === w.x && b.position.z === w.z),
-    skip: (x, z) => (x === w.x && z === w.z) || nearHut({ x, y: w.y, z }) || !!move.inZone({ x, y: w.y, z }, 1, OWN) || !farmGround(x, z)
+    x1: w.x - HYDRATE, z1: w.z - HYDRATE, x2: w.x + HYDRATE, z2: w.z + HYDRATE, groundY: w.y, height: 6, soil: SOIL_RE,
+    // (the square lies in the farm's zone and, at its east edge, the base's: the digs go there and nowhere else - and
+    //  only into natural ground (ground.js): a forced dig took a smoker, fences and signs, 2026-09-27). ground.work asks
+    //  every cell's zone itself (the skip below judged the water's level only, while the clearing reached six up - a
+    //  higher zone's cells were jobs act.dig refused forever and farmLevel never read true, audit R9 2026-09-27)
+    allowZones: ['farm', 'base'],
+    // (the water column keeps its source and one lid over it - a stack of three had grown there)
+    keep: b => /^(wheat|torch|wall_torch)$/.test(b.name) || (b.position.x === w.x && b.position.z === w.z && b.position.y <= w.y + 1),
+    // (the base's square overlaps the farm's east edge: the farm levels its own square there too)
+    skip: (x, z) => nearHut({ x, y: w.y, z }) || !!move.inZone({ x, y: w.y, z }, 1, OWN.concat(['base']))
   }
 }
 function levelWork (bot) {

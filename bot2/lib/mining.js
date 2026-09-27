@@ -44,14 +44,16 @@ function pathBad (p, dir) {
   for (let k = 0; k <= 70; k += 4) {
     const q = { x: p.x + dir.x * k, z: p.z + dir.z * k }
     if (deaths.some(d => world.dist2(d, q) < 24)) return true
-    if (underZone(q)) return true
+    if (underOwnZone(q)) return true
   }
   return false
 }
-function chooseEntrance (bot) {
+function chooseEntrance (bot, oreLv = null) {
   const home = mem.get().home || world.feetPos(bot)
+  const levelFor = y => oreLv != null ? Math.min(oreLv, y - 8) : levelOf(y)
   // rings out to 64 blocks, every stair direction: the nearest spot whose staircase stays clear of known death
   // sites and protected builds (one direction from a 10-30 ring left "no safe spot" in cave country)
+  let bestOre = null
   for (let r = 10; r <= 64; r += 6) {
     const found = []
     for (let a = 0; a < 16; a++) {
@@ -62,7 +64,7 @@ function chooseEntrance (bot) {
       const y = gy + 1
       if (!world.standable(bot, x, y, z)) continue
       // (nor on the home grounds: a stairwell by the farm was a hole in the yard, on the walk home, dug at night)
-      if (move.inZone({ x, y, z }, 6) || underZone({ x, z }) || require('./gather').onGrounds({ x, y, z })) continue
+      if (move.inZone({ x, y, z }, 6) || underOwnZone({ x, z }) || require('./gather').onGrounds({ x, y, z })) continue
       if (world.waterNear(bot, { x, y, z }, 4, -3, 1) || world.lavaNear(bot, { x, y: y - 2, z }, 3)) continue
       if ((mem.get().badMines || []).some(bm => world.dist2(bm, { x, z }) < 12)) continue
       const away = Math.abs(x - home.x) > Math.abs(z - home.z) ? { x: Math.sign(x - home.x) || 1, z: 0 } : { x: 0, z: Math.sign(z - home.z) || 1 }
@@ -76,6 +78,15 @@ function chooseEntrance (bot) {
       }
       if (bestDir) found.push({ x, y, z, dir: bestDir.dir, level: bestDir.level })
     }
+    // (for an ore: the spot whose tunnel works nearest the ore's band - out to the next ring when this one has none
+    //  within 6; the nearest spot otherwise)
+    if (oreLv != null && !found.length && bestOre && r + 6 > 64) found.push(bestOre)
+    if (oreLv != null && found.length) {
+      found.sort((a, b) => Math.abs(a.level - oreLv) - Math.abs(b.level - oreLv))
+      if (!bestOre || Math.abs(found[0].level - oreLv) < Math.abs(bestOre.level - oreLv)) bestOre = found[0]
+      if (Math.abs(bestOre.level - oreLv) > 6 && r + 6 <= 64) continue
+      found.unshift(bestOre)
+    }
     if (found.length) {
       const p = found[0]
       if (p.level > levelFor(p.y)) log('mine', `the stairs stay under cover only to y${p.level} here (a hillside) - tunnelling there`)
@@ -85,7 +96,26 @@ function chooseEntrance (bot) {
   return null
 }
 function saveMine (m) { mem.set('mine', m) }
-function levelFor (y) { return Math.max(12, Math.min(y - 20, 16)) }
+function levelOf (y) { return Math.max(12, Math.min(y - 20, 16)) }
+// WHERE AN ORE IS: the tunnel's level for an ore trip - the 5-high band (the tunnel and the walls in reach of it) with
+// the most of that ore in the rock round home. The mine always went to y12-16: on a mountain the iron is in the
+// mountain, and a 110-block tunnel at y20 turned up none while veins sat in the rock 10 blocks from the door (2026-09-25).
+// Only rock at least 8 under home's level (a tunnel under cover); null when no band holds enough to be worth a trip.
+async function oreLevel (bot, itemName) {
+  const g = craft().GATHER[itemName]
+  const home = mem.get().home
+  if (!g || !g.ore || !home) return null
+  const ores = await world.scanBlocks(bot, g.blocks, { maxDistance: 64, count: 1500, point: home })
+  const at = new Map()
+  for (const b of ores) if (b.position.y <= home.y - 8) at.set(b.position.y, (at.get(b.position.y) || 0) + 1)
+  let best = null
+  for (const y of at.keys()) {
+    let n = 0
+    for (let dy = -1; dy <= 3; dy++) n += at.get(y + dy) || 0
+    if (n >= 6 && (!best || n > best.n)) best = { y: y + 1, n }
+  }
+  return best
+}
 // Does a staircase from p heading dir stay under the ground all the way down to `level`? The stairs drop one a step; on
 // a mountain the slope drops faster, and a staircase heading downhill came out of the hillside into open air at y86-103
 // - "the stairs are blocked, far above the working depth" - four new mines in twelve minutes (2026-09-24). Each step
@@ -231,7 +261,11 @@ async function provisionForMine (bot) {
   try { await provisionInner(bot) } finally { provisioning = false }
 }
 async function provisionInner (bot) {
-  if (inv.count(bot, 'stick') < 4) await craft().ensure(bot, 'stick', 4).catch(() => {})
+  // sticks for every pickaxe the trip can wear out: a stone pick is ~131 blocks, and the pack's free room is the most a
+  // trip digs. Four sticks were two picks: at the y20 face both wore out and the third could not be made (no wood
+  // underground) - the bot climbed out digging stone by hand (2026-09-25).
+  const sticks = Math.min(64, 2 * Math.ceil(inv.freeSlots(bot) * 64 / 131) + 2)
+  if (inv.count(bot, 'stick') < sticks) await craft().ensure(bot, 'stick', sticks).catch(() => {})
   if (!inv.has(bot, 'crafting_table')) await craft().ensure(bot, 'crafting_table', 1).catch(() => {})
   // a spare pickaxe: one wearing out mid-tunnel ends the trip (stone picks last ~130 blocks)
   const picks = inv.items(bot).filter(i => /_pickaxe$/.test(i.name) && inv.tierOf(i.name) >= 2)
@@ -274,6 +308,54 @@ function abandonMine (m) {
   mem.update(mm => { mm.badMines = (mm.badMines || []).concat([{ x: m.entrance.x, y: m.entrance.y, z: m.entrance.z }]).slice(-12); mm.mine = null })
 }
 
+// KNOWN ORE. Iron here is plentiful - 488 blocks within 64 of home, 4000+ within 128 - but a tenth of a percent of
+// the rock: a blind 3x3 tunnel met a vein every few hundred blocks, and ore "in sight" (showing to daylit air) was 1
+// block in 4000. The client sees every block through the stone: the bot tunnels straight to the nearest ore in solid
+// rock, digs it and the rest of its vein as each block bares the next (operator 2026-09-26: efficiency over a
+// player's blindness). Never an ore under the home grounds, never a tunnel begun from them (the mine's stairs first), never
+// into a zone, never beside water or lava; the tunnel goes through solid rock, and a dark cave is only crossed where it
+// happens to open one.
+const underBuild = p => move.underBuild(p) // (move.js: the one rule for the ground under the build)
+async function takeKnownOre (bot, itemName, target, ctx = {}) {
+  const g = craft().GATHER[itemName]
+  const home = mem.get().home || world.feetPos(bot)
+  const gather = require('./gather')
+  const refused = new Set()
+  const k = p => `${p.x},${p.y},${p.z}`
+  const t0 = Date.now()
+  const start = inv.count(bot, itemName)
+  let veins = 0
+  // never a tunnel mouth in the yard or under the build: near home the trip STARTS only from inside our own mine (the
+  // stairs take us down first; audit #27). Judged once, at the start - checked every turn, the first ore's tunnel led away
+  // from the mine's recorded path and the trip ended after one vein, 13 iron in 40 minutes (2026-09-27)
+  if (((mem.get().home && world.dist2(bot.entity.position, mem.get().home) < 48) || underBuild(world.feetPos(bot))) && !inOwnMine(bot)) { log('mine', 'known ore: not tunnelling from round home or the build - the mine first'); return false }
+  while (inv.count(bot, itemName) < target) {
+    if ((ctx.shouldStop && ctx.shouldStop()) || Date.now() - t0 > 20 * 60000) break
+    await reflex.waitClear()
+    // mid-trip, out under the sky round home or the build (a vein that broke into the yard): stop - the trip goes on
+    // underground only
+    if (world.openSky(bot, world.feetPos(bot)) && (gather.onGrounds(bot.entity.position) || underBuild(world.feetPos(bot)))) { log('mine', 'known ore: out under the sky round home - ending the ore trip'); break }
+    if (!inv.bestTool(bot, 'pickaxe', 4) && !await ensurePick(bot)) break
+    if (inv.freeSlots(bot) <= 2) await base().tossJunk(bot)
+    const ores = await world.scanBlocks(bot, g.blocks, { maxDistance: 64, count: 60, point: home, filter: b => !refused.has(k(b.position)) && inv.canHarvest(bot, b) && !fluidAround(bot, b.position) && !move.inZone(b.position, 2) && !gather.onGrounds(b.position) && !underBuild(b.position) })
+    if (!ores.length) break
+    const me = bot.entity.position
+    const o = ores.sort((x, y) => world.dist3(x.position, me) - world.dist3(y.position, me))[0]
+    // through the rock to it (the planner digs its own tunnel), then the block and its vein
+    if (!act.reach(bot, o.position, 4.3)) {
+      const r = await move.goTo(bot, new goals.GoalLookAtBlock(o.position, bot.world, { reach: 4 }), { timeoutMs: 120000, stuckMs: 15000, label: 'to the ore', shouldStop: ctx.shouldStop })
+      if (!r.ok && !act.reach(bot, o.position, 4.5)) { refused.add(k(o.position)); continue }
+    }
+    if (!await act.dig(bot, o.position, { timeoutMs: 20000, noWalk: true })) { refused.add(k(o.position)); continue }
+    veins++
+    for (let i = 0; i < 6 && await takeWallOres(bot); i++) {}
+    await act.collectDrops(bot, { radius: 5, maxMs: 6000 })
+  }
+  const got = inv.count(bot, itemName) - start
+  if (got || veins) log('mine', `tunnelled to ${veins} ${itemName} ore vein(s): +${got} (${inv.count(bot, itemName)}/${target})`)
+  return inv.count(bot, itemName) >= target
+}
+
 async function mineFor (bot, itemName, target, ctx = {}) {
   alsoWant = /^(granite|diorite|andesite|tuff)$/.test(itemName) ? new RegExp('^' + itemName + '$') : null
   let m = mem.get().mine
@@ -284,8 +366,13 @@ async function mineFor (bot, itemName, target, ctx = {}) {
   // a mine we died in lately has something living in it (a cave broke into it): leave it for good
   if (m && diedInMine(m)) { log('mine', `died in the mine at ${move.fmt(m.entrance)} lately - abandoning it for a new one`); abandonMine(m); m = null }
   // a "mine" working just under the surface is a trench under whatever stands there
-  if (m && m.stairsDone && home && m.level > home.y - 20) { log('mine', `the mine at ${move.fmt(m.entrance)} works at y${m.level}, too near the surface - abandoning it`); abandonMine(m); m = null }
-  if (!m && !world.openSky(bot, world.feetPos(bot)) && bot.entity.position.y < ((home && home.y) || 64) - 8) {
+  if (m && m.stairsDone && home && m.level > home.y - 20 && !m.ore) { log('mine', `the mine at ${move.fmt(m.entrance)} works at y${m.level}, too near the surface - abandoning it`); abandonMine(m); m = null }
+  // an ore trip works where that ore is: a mine at another level is left (not a bad mine - cobble comes from it as well)
+  const ore = await oreLevel(bot, itemName).catch(() => null)
+  // (a mine already made for this band keeps it: the best entrance may not reach it - y86 ground over y91 iron made a
+  //  y78 mine, and every trip after called it the wrong level and made the same mine again)
+  if (ore && m && Math.abs(m.level - ore.y) > 6 && !(m.oreY != null && Math.abs(m.oreY - ore.y) <= 6)) { log('mine', `${itemName} lies at y${ore.y} (${ore.n} in sight of the rock) - the mine at y${m.level} is the wrong level; a new one`); mem.set('mine', null); m = null }
+  if (!m && !ore && !world.openSky(bot, world.feetPos(bot)) && bot.entity.position.y < ((home && home.y) || 64) - 8) {
     // already underground: tunnel from right here
     const me = world.feetPos(bot)
     let dir = DIRS[0]
@@ -295,13 +382,16 @@ async function mineFor (bot, itemName, target, ctx = {}) {
     log('mine', `tunnelling from where i stand (${move.fmt(me)}) heading ${dir.x},${dir.z}`)
   }
   if (!m) {
-    m = chooseEntrance(bot)
+    m = chooseEntrance(bot, ore && ore.y)
     if (!m) { log('mine', 'no safe spot for a mine entrance near home'); return false }
+    if (ore) { m.ore = itemName; m.oreY = ore.y }
     m.stairsDir = { x: m.dir.x, z: m.dir.z }
     saveMine(m)
     log('mine', `new mine at ${move.fmt(m.entrance)} heading ${m.dir.x},${m.dir.z} to y${m.level}`)
   }
   await provisionForMine(bot)
+  // an ore showing in a cave wall or a cliff first - and the vein behind it, each block dug bares the next
+  if (craft().GATHER[itemName] && craft().GATHER[itemName].ore && await takeKnownOre(bot, itemName, target, ctx)) return true
   // get to the working face
   if (world.dist3(bot.entity.position, m.cursor) > 3) {
     // the way down is the mine's own - entrance, stairs, tunnel - unless we are already in it. Judged by distance on
@@ -316,6 +406,8 @@ async function mineFor (bot, itemName, target, ctx = {}) {
       return false
     }
   }
+  // down in the mine now: the known ore from here (from round home it waited for the stairs - #27)
+  if (craft().GATHER[itemName] && craft().GATHER[itemName].ore && inOwnMine(bot) && await takeKnownOre(bot, itemName, target, ctx)) return true
   log('mine', `mining for ${itemName} (${inv.count(bot, itemName)}/${target}) at ${move.fmt(m.cursor)}`)
   if (ctx.seal) await sealBehind(bot, m)
   let lastSave = Date.now()
@@ -454,15 +546,18 @@ async function plugWater (bot, cells) {
 }
 
 // Under the footprint of a protected zone (the castle, the base)? Mines never dig there, at any depth.
-function underZone (p) {
-  return move.zones.some(z => p.x >= z.x1 - 2 && p.x <= z.x2 + 2 && p.z >= z.z1 - 2 && p.z <= z.z2 + 2)
+// (and the ground under the build, the one rule of move.underBuild - its footprint +8: the mine's own stairs and face kept
+//  only +2 off it, a cursor could tunnel inside the margin under the castle; the audit, 2026-09-27. A column with no y is
+//  judged below the build's floor, where the mine always is)
+function underOwnZone (p) {
+  return move.zones.some(z => p.x >= z.x1 - 2 && p.x <= z.x2 + 2 && p.z >= z.z1 - 2 && p.z <= z.z2 + 2) || move.underBuild({ x: p.x, y: p.y != null ? p.y : -64, z: p.z })
 }
 
 async function stairStep (bot, m) {
   const c = m.cursor
   if (c.y <= m.level) { m.stairsDone = true; m.legPos = 0; log('mine', `stairs reached y${c.y} - tunnelling`); return true }
   const q = { x: c.x + m.dir.x, y: c.y - 1, z: c.z + m.dir.z }
-  if (underZone(q)) { log('mine', `the stairs would run under a protected build at ${move.fmt(q)}`); return false }
+  if (underOwnZone(q)) { log('mine', `the stairs would run under a protected build at ${move.fmt(q)}`); return false }
   const cells = [{ x: q.x, y: q.y + 2, z: q.z }, { x: q.x, y: q.y + 1, z: q.z }, q]
   for (const cell of cells) {
     const f = fluidAround(bot, cell, p => cells.some(o => o.x === p.x && o.y === p.y && o.z === p.z) || (p.x === c.x && p.z === c.z))
@@ -505,7 +600,7 @@ async function tunnelStep (bot, m) {
 }
 
 async function openTunnelCell (bot, from, q) {
-  if (underZone(q)) return false // never under the castle or the base
+  if (underOwnZone(q)) return false // never under the castle or the base
   // rock over the tunnel: the surface at least two above its three-high roof. A level tunnel on a hillside ran out
   // into the open slope and walled up the "cave openings" - the sky - with cobble and torches: a cut across the hill
   // that looked like a building (2026-09-24). Open ground ahead is a blocked step: the leg turns back into the hill.
@@ -519,7 +614,7 @@ async function openTunnelCell (bot, from, q) {
   const side = { x: -along.z, z: along.x }
   const column = k => [2, 1, 0].map(dy => ({ x: q.x + side.x * k, y: q.y + dy, z: q.z + side.z * k }))
   const mid = column(0)
-  const sides = [column(1), column(-1)].filter(col => !underZone(col[0]))
+  const sides = [column(1), column(-1)].filter(col => !underOwnZone(col[0]))
   // (open already: the column we stand in and the face we dug last step)
   const behind = p => [-1, 0, 1].some(k => p.x === from.x + side.x * k && p.z === from.z + side.z * k)
   const inFace = p => mid.concat(...sides).some(o => o.x === p.x && o.y === p.y && o.z === p.z)
@@ -547,4 +642,4 @@ async function openTunnelCell (bot, from, q) {
   return true
 }
 
-module.exports = { mineFor, chooseEntrance, takeWallOres, inOwnMine }
+module.exports = { mineFor, chooseEntrance, takeWallOres, inOwnMine, oreLevel }

@@ -27,15 +27,32 @@ function bedBlock (bot) {
   return null
 }
 
+// THE BED LEDGER: the cells of every bed we laid (mem.bedsPlaced) - what makes a standing bed ours. A cell loaded and no
+// bed any more is dropped from it.
+function noteBedPlaced (p) { mem.update(m => { const l = m.bedsPlaced = m.bedsPlaced || []; if (!l.some(q => q.x === p.x && q.y === p.y && q.z === p.z)) l.push({ x: p.x, y: p.y, z: p.z }); if (l.length > 16) l.splice(0, l.length - 16) }) }
+// (the bed we sleep in, and a cell of the ledger: every bed we lay goes through here)
+function layBed (p) { mem.set('bed', p); noteBedPlaced(p) }
+function ourBeds (bot) {
+  const m = mem.get()
+  const cells = (m.bedsPlaced || []).concat(m.bed ? [m.bed] : [])
+  const out = []; const gone = []
+  for (const p of cells) {
+    const b = bot.blockAt(new Vec3(p.x, p.y, p.z))
+    if (b && BED_RE.test(b.name)) { if (!out.some(o => o.position.equals(b.position))) out.push(b) } else if (b) gone.push(p)
+  }
+  if (gone.length) mem.update(m2 => { m2.bedsPlaced = (m2.bedsPlaced || []).filter(q => !gone.some(g => g.x === q.x && g.y === q.y && g.z === q.z)) })
+  return out
+}
 function hasBedItem (bot) { return inv.items(bot).some(i => BED_RE.test(i.name)) }
 
 // Craft a bed from 3 same-colour wool + planks (wool is hunted from sheep).
 async function obtainBed (bot, ctx = {}) {
   if (hasBedItem(bot)) return true
-  // a bed of ours still standing somewhere near home (left behind by a move): pick it up
+  // a bed of ours still standing somewhere near home (left behind by a move): pick it up. OURS - one we laid (the
+  // ledger) or the one we sleep in: "any bed within 48 of home outside the hut" was a player's or a villager's too
+  // (audit R19, 2026-09-27)
   const home = mem.get().home
-  const stray = world.findBlocks(bot, BED_RE, { maxDistance: 48, count: 4, point: home ? new Vec3(home.x, home.y, home.z) : undefined })
-    .filter(b => !move.insideHut(b.position))[0]
+  const stray = ourBeds(bot).filter(b => !move.insideHut(b.position))[0]
   if (stray) {
     log('shelter', `picking up the bed standing at ${move.fmt(stray.position)}`)
     await act.dig(bot, stray.position, { force: true, allowZones: ['base', 'build'] })
@@ -86,20 +103,31 @@ async function placeBed (bot, near) {
   for (const s of spots.slice(0, 6)) {
     const r = await move.goTo(bot, new goals.GoalNear(s.x, s.y, s.z, 2), { timeoutMs: 20000, label: 'to bed spot', allowZones: ['base'] })
     if (!r.ok) continue
+    const before = bedCellsNear(bot, s); const packBefore = packBeds(bot)
     if (await act.place(bot, s, item.name, { faceHint: [[0, -1, 0]], allowZones: ['base'], sneak: false })) {
-      mem.set('bed', { x: s.x, y: s.y, z: s.z })
+      layBed({ x: s.x, y: s.y, z: s.z })
       log('shelter', `placed my bed at ${move.fmt(s)}`)
       return true
     }
-    // a bed occupies two cells: the placed block may be the foot or head; search around
-    const found = world.findBlocks(bot, BED_RE, { maxDistance: 3, count: 1, point: new Vec3(s.x, s.y, s.z) })[0]
-    if (found) { mem.set('bed', { x: found.position.x, y: found.position.y, z: found.position.z }); log('shelter', `placed my bed at ${move.fmt(found.position)}`); return true }
+    // a bed occupies two cells: the placed block may be the foot or head - but only a bed that was NOT there before and
+    // left our pack is ours
+    const found = newBedNear(bot, s, before, packBefore)
+    if (found) { layBed({ x: found.position.x, y: found.position.y, z: found.position.z }); log('shelter', `placed my bed at ${move.fmt(found.position)}`); return true }
   }
   return false
 }
 
 // The bed in its layout spot: stand on `stand`, click the floor under `foot` - the bed's head goes
 // the way the player faces, so it lies foot->head along the back wall.
+// The beds standing within 3 of p, as keys - a "before" to tell OUR new bed from one that was already there (a villager's,
+// a player's): the fallback claimed any bed near a failed place as "my bed" and the morning dug it (audit B2, 2026-09-27)
+function bedCellsNear (bot, p) { return new Set(world.findBlocks(bot, BED_RE, { maxDistance: 3, count: 8, point: new Vec3(p.x, p.y, p.z) }).map(b => `${b.position.x},${b.position.y},${b.position.z}`)) }
+function packBeds (bot) { return inv.items(bot).filter(i => BED_RE.test(i.name)).reduce((n, i) => n + i.count, 0) }
+function newBedNear (bot, p, before, packBefore) {
+  if (packBeds(bot) >= packBefore) return null // (none left the pack: whatever bed stands there is not ours)
+  return world.findBlocks(bot, BED_RE, { maxDistance: 3, count: 8, point: new Vec3(p.x, p.y, p.z) }).find(b => !before.has(`${b.position.x},${b.position.y},${b.position.z}`)) || null
+}
+
 async function placeBedAt (bot, { foot, head, stand }) {
   const item = inv.items(bot).find(i => BED_RE.test(i.name))
   if (!item) return false
@@ -107,16 +135,17 @@ async function placeBedAt (bot, { foot, head, stand }) {
   if (!r.ok) { log('shelter', `couldn't stand at ${move.fmt(stand)} to lay the bed`); return false }
   bot.clearControlStates()
   await bot.lookAt(new Vec3(foot.x + 0.5, foot.y, foot.z + 0.5), true).catch(() => {})
+  const before = bedCellsNear(bot, foot); const packBefore = packBeds(bot)
   await act.place(bot, foot, item.name, { faceHint: [[0, -1, 0]], allowZones: ['base'], sneak: false })
   await move.sleep(300)
   const f = world.at(bot, foot.x, foot.y, foot.z); const h = world.at(bot, head.x, head.y, head.z)
   if (f && BED_RE.test(f.name) && h && BED_RE.test(h.name)) {
-    mem.set('bed', { x: foot.x, y: foot.y, z: foot.z })
+    layBed({ x: foot.x, y: foot.y, z: foot.z })
     log('shelter', `laid the bed along the back wall at ${move.fmt(foot)}`)
     return true
   }
   // landed the wrong way round: pick it up again rather than leave it across the room
-  const stray = world.findBlocks(bot, BED_RE, { maxDistance: 3, count: 1, point: new Vec3(foot.x, foot.y, foot.z) })[0]
+  const stray = newBedNear(bot, foot, before, packBefore)
   if (stray) { await act.dig(bot, stray.position, { force: true, allowZones: ['base'] }); await act.collectDrops(bot, { radius: 4, maxMs: 3000 }) }
   log('shelter', 'the bed did not lie along the back wall - picked it up')
   return false
@@ -249,7 +278,8 @@ async function bunker (bot, { shouldStop } = {}) {
       const b1 = world.at(bot, x, y - 1, z); const b2 = world.at(bot, x, y - 2, z); const b3 = world.at(bot, x, y - 3, z); const b4 = world.at(bot, x, y - 4, z)
       if (!b1 || !b2 || !b3 || !b4 || !world.isSolid(b1) || !world.isSolid(b2) || !world.isSolid(b3) || !world.isSolid(b4)) continue
       if (!world.NATURAL_RE.test(b1.name) || !world.NATURAL_RE.test(b2.name) || !world.NATURAL_RE.test(b3.name) || /gravel|sand/.test(b1.name)) continue
-      if (move.inZone({ x, y, z }, 1)) continue
+      // (nor under one: a night's hole under the castle's floor was a shaft the bot could not climb out of, 2026-09-27)
+      if (move.inZone({ x, y, z }, 1) || move.underZone({ x, y, z }, 1)) continue
       spot = { x, y, z }
     }
   }

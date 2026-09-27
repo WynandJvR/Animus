@@ -205,6 +205,19 @@ function status (bot) {
   return { done, total: p.cells.length }
 }
 
+// The ground the home stood on is gone: the safehouse's floor and foundation, all loaded, hold hardly a solid block, and
+// nothing is under the door step - the world was cut away round it (the operator wiped the chunks: the bot came home to a
+// door step 18 blocks up in the air and began rebuilding the hut there, 2026-09-27). Not a hut to finish - a home to leave.
+function siteGone (bot) {
+  const p = getPlan(bot); const home = mem.get().home
+  if (!p || !home) return false
+  const under = p.cells.filter(c => c.floor || c.foundation)
+  let known = 0; let solid = 0
+  for (const c of under) { const b = world.at(bot, c.x, c.y, c.z); if (!b) continue; known++; if (world.isSolid(b)) solid++ }
+  const step = world.at(bot, home.x, home.y - 1, home.z)
+  return under.length > 0 && known >= under.length * 0.8 && solid < known * 0.3 && !!step && !world.isSolid(step)
+}
+
 function complete (bot) { const s = status(bot); return !!s && s.done >= s.total }
 // walls, roof, floor and door in place (it shelters) - tidying the room is not needed for that
 function shellComplete (bot) {
@@ -371,6 +384,31 @@ async function setDoor (bot, d, open) {
 // Night: the door stays hung; the step outside it is blocked (feet and head) from inside through the open
 // door, then the door is shut. A zombie at the door meets stone. (Taking the door down every night and
 // hanging it again every morning left it facing the wrong way, hung it on the step, or not at all.)
+// The door shut, if it stands open (at a respawn inside: a door left open is a window for arrows).
+async function shutDoor (bot) {
+  const pl = mem.get().hutPlan
+  if (!pl || !pl.door) return false
+  const d = { x: pl.door.x, y: pl.home.y, z: pl.door.z }
+  if (doorOpen(bot, d)) { await setDoor(bot, d, false); log('hut', 'shut the door') }
+  return !doorOpen(bot, d)
+}
+// Hostiles that make opening the door a mistake: on the surface within 6 of our level, and either a walker within 8 of
+// the step (it reaches the doorway before the step is blocked) or a shooter within 16 with a line on the step.
+const DOOR_WALK_REACH = 8
+function doorThreats (bot, out) {
+  const reflex = require('./reflex')
+  const step = new Vec3(out.x + 0.5, out.y + 1.5, out.z + 0.5)
+  return reflex.hostiles(24).filter(h => {
+    const p = h.e.position
+    if (Math.abs(p.y - out.y) >= 6 || !reflex.onSurface(h.e)) return false
+    const d = p.distanceTo(step)
+    if (!reflex.RANGED.has(h.e.name)) return d < DOOR_WALK_REACH
+    return d < 16 && reflex.canSee(h.e, step)
+  })
+}
+// The threat set the last "left unsealed" line named: the hideout reseals every 5s, and the same zombie by the door wrote
+// the same line up to 48 times a night (audit R12, 2026-09-27) - logged again only when the set changes.
+let lastDoorThreats = ''
 async function sealDoor (bot) {
   const pl = mem.get().hutPlan
   if (!pl || !pl.door) return false
@@ -381,6 +419,23 @@ async function sealDoor (bot) {
   if (lo && SEAL_RE.test(lo.name) && hi && SEAL_RE.test(hi.name)) { await setDoor(bot, d, false); return true }
   const door = world.at(bot, d.x, d.y, d.z)
   if (!door || !/_door$/.test(door.name)) return false // no door hung: nothing to seal behind (the hut task hangs it)
+  // a mob that could use the open door: never open it to one - shut is enough (pillagers and skeletons don't open
+  // doors, arrows don't pass one). Sealing the step opened the door under a pillager patrol; shot mid-seal, the door
+  // stayed open and every respawn beside it was shot again - 120 deaths in 46 minutes (2026-09-26). But "any hostile
+  // within 16" held the seal back almost every time it was wanted - the hideout is chosen BECAUSE mobs are about - and
+  // counted cave mobs and ones behind the hill (on hard a zombie breaks the wooden door, 2026-09-27). A threat to the
+  // open door is one on the surface near our level that can walk to the step in the second it stands open, or that
+  // shoots and sees the step.
+  const threat = doorThreats(bot, out)
+  // (logged on a change in the set only: the same threats, the same line every 5s)
+  const threatKey = threat.map(h => h.e.id).sort((x, y) => x - y).join(',')
+  const changed = threatKey !== lastDoorThreats
+  lastDoorThreats = threatKey
+  if (threat.length) {
+    await setDoor(bot, d, false)
+    if (changed) log('hut', `door step left unsealed: ${threat.slice(0, 3).map(h => `${h.e.name} ${h.d.toFixed(1)}b`).join(', ')} near the door - shut it instead`)
+    return !doorOpen(bot, d)
+  }
   const have = inv.items(bot).filter(i => SEAL_RE.test(i.name)).reduce((n, i) => n + i.count, 0)
   if (have < 2) await require('./base').withdraw(bot, 'cobblestone', 2).catch(() => 0)
   const filler = () => inv.items(bot).find(i => SEAL_RE.test(i.name))
@@ -513,6 +568,26 @@ async function enterHut (bot, { shouldStop } = {}) {
   return crossed || move.insideHut(world.feetPos(bot))
 }
 
+// THE YARD: the base's square round home (the hut and the farm's square aside) kept level at the yard's ground - holes
+// filled, stray blocks taken down; furniture, torches, trees stay. Only the hut's first groundwork ever levelled it: a pit
+// 3 deep by the door (dug for scaffold dirt) stayed for days, held the bot 40 minutes one morning and sat in the middle
+// of the farm's east edge (2026-09-25).
+function yardArea () {
+  const h = mem.get().home; const pl = mem.get().hutPlan
+  if (!h || !pl || !pl.interior) return null
+  const f = mem.get().farm; const fa = f ? require('./farm').area(f) : null
+  const i = pl.interior
+  return {
+    x1: h.x - 5, z1: h.z - 5, x2: h.x + 5, z2: h.z + 5, groundY: h.y - 1, height: 3,
+    keep: b => world.LOG_RE.test(b.name) || world.LEAF_RE.test(b.name) || /(ladder|_sapling)$/.test(b.name),
+    // (and the door's outer step: the night seal is blocked there on purpose - levelled away, the hideout sealed it
+    //  again, the leveller took it again, six rounds in ten minutes at dawn, 2026-09-27)
+    skip: (x, z) => (x >= i.x1 - 1 && x <= i.x2 + 1 && z >= i.z1 - 1 && z <= i.z2 + 1) || !!(fa && x >= fa.x1 && x <= fa.x2 && z >= fa.z1 && z <= fa.z2) || (pl.door && (() => { const o = outerStep(pl); return o.x === x && o.z === z })())
+  }
+}
+function yardWork (bot) { const a = yardArea(); return a ? require('./ground').work(bot, a) : [] }
+async function levelYard (bot, { shouldStop } = {}) { const a = yardArea(); return a ? require('./ground').prepare(bot, a, { shouldStop, label: 'levelling the yard' }) : 0 }
+
 // Clear leftover blocks standing on ground level y and fill holes AT ground level with dirt, in a box.
 async function restoreGround (bot, x1, z1, x2, z2, groundY) {
   // the shared groundwork (ground.js); trees and leaves around the area stay
@@ -521,4 +596,4 @@ async function restoreGround (bot, x1, z1, x2, z2, groundY) {
 
 function resetPlan () { plan = null; build.registerJob('hut', null) }
 
-module.exports = { restoreGround, enterHut, buildHut, status, complete, shellComplete, getPlan, collidesWithBuild, relocate, resetPlan, layout, rememberBedSide, sealDoor, unsealDoor, utilitySpots, furnaceSpots, BANK_RINGS, doorFacingWrong, rehangDoor }
+module.exports = { siteGone, shutDoor, restoreGround, yardWork, levelYard, enterHut, buildHut, status, complete, shellComplete, getPlan, collidesWithBuild, relocate, resetPlan, layout, rememberBedSide, sealDoor, unsealDoor, utilitySpots, furnaceSpots, BANK_RINGS, doorFacingWrong, rehangDoor }

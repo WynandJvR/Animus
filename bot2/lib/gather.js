@@ -16,11 +16,23 @@ const mining = () => require('./mining')
 const base = () => require('./base')
 
 // Remember where resources were seen, so a later trip goes straight there.
-function noteResource (kind, pos) {
+function noteResource (kind, pos) { noteResources([[kind, pos]]) }
+// Several sightings in ONE memory write: each mem.update writes the whole memory file synchronously, and a survey noting
+// its twenty sightings one by one did that twenty times a leg, on the event loop (audit, 2026-09-27).
+function noteResources (notes) {
+  if (!notes.length) return
   mem.update(m => {
     m.resources = m.resources || {}
-    const list = m.resources[kind] || (m.resources[kind] = [])
-    if (!list.some(p => world.dist2(p, pos) < 24)) { list.push({ x: pos.x, y: pos.y, z: pos.z, t: Date.now() }); if (list.length > 12) list.shift() }
+    for (const [kind, pos] of notes) {
+      const list = m.resources[kind] || (m.resources[kind] = [])
+      // (full: the spot furthest from home goes, not the oldest - a 2000-block trek's sightings pushed every tree near home
+      //  out of the list, 2026-09-27)
+      if (!list.some(p => world.dist2(p, pos) < 24)) {
+        list.push({ x: pos.x, y: pos.y, z: pos.z, t: Date.now() })
+        const home = m.home
+        if (list.length > 12) { let far = 0; if (home) list.forEach((p, i) => { if (world.dist2(p, home) > world.dist2(list[far], home)) far = i }); list.splice(far, 1) }
+      }
+    }
   })
 }
 function forgetResource (kind, pos) {
@@ -65,15 +77,28 @@ function isNaturalTree (bot, basePos) {
   return false
 }
 
+// A wild tree's log, one the axe may take: out of every zone but the orchard's, on a natural trunk. THE rule the chop,
+// the survey and forage's sighting of a searched-out species all judge by.
+function wildTree (bot, b) { return treeOK(b) && isNaturalTree(bot, trunkBase(bot, b)) }
+
+// How the last chop ended, for a caller that must tell "searched and none found" from "cut short" (forage.noteTrip: only
+// a real search counts a species as searched out - audit R7, 2026-09-27). outcome: 'done' | 'none-found' (explored, no
+// tree) | 'stopped' (shouldStop) | 'budget' (the 20 minutes spent - trees there, not got to). at: when it ended.
+let lastChop = null
+function lastChopOutcome () { return lastChop }
 async function chop (bot, re, n, ctx = {}) {
   const itemName = String(re).replace(/^\/\^|\$\/$/g, '')
+  const end = (outcome, r) => { lastChop = { item: itemName, outcome, at: Date.now() }; return r }
   const target = inv.count(bot, itemName) + n
   let emptyScans = 0
   const t0 = Date.now()
+  // trunks this trip could not get to: not walked at again (a trunk over a 10-block drop at the plaza's corner was
+  // walked at every 33s for 20 minutes, 2026-09-26)
+  const unreachable = new Set(); const tk = p => `${p.x},${p.y},${p.z}`
   while (inv.count(bot, itemName) < target) {
     await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
-    if (ctx.shouldStop && ctx.shouldStop()) return false
-    if (Date.now() - t0 > 20 * 60000) { log('gather', `chop ${itemName}: 20 min budget spent`); return false }
+    if (ctx.shouldStop && ctx.shouldStop()) return end('stopped', false)
+    if (Date.now() - t0 > 20 * 60000) { log('gather', `chop ${itemName}: 20 min budget spent`); return end('budget', false) }
     await reflex.waitClear()
     if (inv.freeSlots(bot) <= 1) await base().makeRoom(bot, 3)
     const logs = world.findBlocks(bot, re, { maxDistance: 64, count: 40, filter: b => treeOK(b) })
@@ -81,7 +106,7 @@ async function chop (bot, re, n, ctx = {}) {
     for (const b of logs) {
       const bp = trunkBase(bot, b)
       if (Math.abs(bp.y - bot.entity.position.y) > 12) continue
-      if (!isNaturalTree(bot, bp)) continue
+      if (!isNaturalTree(bot, bp) || unreachable.has(tk(bp))) continue
       trunk = bp; break
     }
     if (!trunk) {
@@ -89,7 +114,7 @@ async function chop (bot, re, n, ctx = {}) {
       // (~10 chunks round us), as a player sees them. A forest 150 blocks west of home was in view the whole time the
       // 64-block search said "no trees found" and the operator had to point it out (2026-09-24).
       if (emptyScans === 0) {
-        const seen = (await world.scanBlocks(bot, re, { maxDistance: world.sightReach(bot), count: 40, filter: b => treeOK(b) && isNaturalTree(bot, trunkBase(bot, b)) }))
+        const seen = (await world.scanBlocks(bot, re, { maxDistance: world.sightReach(bot), count: 40, filter: b => wildTree(bot, b) }))
           .sort((a, b) => world.dist3(a.position, bot.entity.position) - world.dist3(b.position, bot.entity.position))[0]
         if (seen && world.dist2(seen.position, bot.entity.position) > 20) {
           noteResource(itemName, seen.position)
@@ -100,7 +125,7 @@ async function chop (bot, re, n, ctx = {}) {
           continue
         }
       }
-      if (++emptyScans > 4) { log('gather', `chop ${itemName}: no trees found after exploring`); return false }
+      if (++emptyScans > 4) { log('gather', `chop ${itemName}: no trees found after exploring`); return end('none-found', false) }
       const known = knownResource(itemName, bot.entity.position)
       if (known && world.dist2(known, bot.entity.position) > 40 && emptyScans === 1) {
         log('gather', `no ${itemName} here - heading to where i saw some at ${move.fmt(known)}`)
@@ -113,18 +138,18 @@ async function chop (bot, re, n, ctx = {}) {
     }
     emptyScans = 0
     noteResource(itemName, trunk)
-    const got = await fellTree(bot, trunk, re, { leaves: !!ctx.leaves, allowZones: move.inZone(trunk, 0) ? ['orchard'] : [] })
-    if (!got) await move.sleep(300)
+    const got = await fellTree(bot, trunk, re, { leaves: !!ctx.leaves, allowZones: move.inZone(trunk, 0) ? ['orchard'] : [], shouldStop: ctx.shouldStop })
+    if (!got) { unreachable.add(tk(trunk)); await move.sleep(300) }
   }
-  return true
+  return end('done', true)
 }
 
 // opts.leaves: clear the tree's own leaves too (they drop the saplings the orchard grows from; wild leaves left to decay
 // drop them after we have gone). opts.allowZones: the orchard's trees stand in its zone.
-async function fellTree (bot, basePos, re, { leaves = false, allowZones = [] } = {}) {
+async function fellTree (bot, basePos, re, { leaves = false, allowZones = [], shouldStop } = {}) {
   const before = inv.count(bot, b => re.test(b))
   // stand next to the trunk
-  const r = await move.goTo(bot, new goals.GoalNear(basePos.x, basePos.y, basePos.z, 2), { timeoutMs: 40000, label: 'to tree' })
+  const r = await move.goTo(bot, new goals.GoalNear(basePos.x, basePos.y, basePos.z, 2), { timeoutMs: 40000, label: 'to tree', shouldStop })
   if (!r.ok) return false
   // the column, bottom up; then neighbouring trunks (2x2 trees)
   const column = []
@@ -232,17 +257,37 @@ const SURVEY = [
   { kind: 'clay', re: /^clay$/, ok: (bot, b) => require('./clay').claySought(bot, b.position) },
   // woods, by species (noted under the log's own name): a forest 150 blocks past the site was never looked at while
   // the searches round home found nothing (2026-09-24)
-  { kind: null, re: /^(oak|spruce|birch|jungle|acacia|cherry|dark_oak|mangrove|pale_oak)_log$/, ok: (bot, b) => treeOK(b) && isNaturalTree(bot, trunkBase(bot, b)) }
+  { kind: null, re: /^(oak|spruce|birch|jungle|acacia|cherry|dark_oak|mangrove|pale_oak)_log$/, names: 9, ok: (bot, b) => wildTree(bot, b) }
 ]
 let surveying = false
 function survey (bot) {
   if (surveying || !bot.entity) return
   surveying = true
   const run = async () => {
+    const notes = []
     for (const s of SURVEY) {
-      const b = (await world.scanBlocks(bot, s.re, { maxDistance: 48, count: 1, filter: x => s.ok(bot, x) }))[0]
-      if (b) noteResource(s.kind || b.name, b.position)
+      // the nearest of EACH kind the pattern covers (woods by species): one hit a scan noted only whichever tree stood
+      // nearest - a whole trek past spruce and dark oak put neither on record (2026-09-27). Judged in the scan, and only a
+      // block NEARER than the best of its name so far (the nearest 60 logs of a one-species forest hid every other species
+      // behind it, each judged a natural tree first - audit, 2026-09-27). "The first of a name in section order" was not the
+      // nearest (audit R16, 2026-09-27): the nearest per name is read off the scan's distance order.
+      const me = bot.entity.position.floored()
+      const best = new Map()
+      const d2 = p => (p.x - me.x) ** 2 + (p.y - me.y) ** 2 + (p.z - me.z) ** 2
+      const nearer = x => { const d = d2(x.position); if (best.has(x.name) && d >= best.get(x.name)) return false; if (!s.ok(bot, x)) return false; best.set(x.name, d); return true }
+      const hits = await world.scanBlocks(bot, s.re, { maxDistance: 48, count: 16 * (s.names || 1), filter: nearer })
+      const had = new Set()
+      for (const b of hits) if (!had.has(b.name)) { had.add(b.name); notes.push([s.kind || b.name, b.position]) }
     }
+    // a source searched out round home (forage: acacia leaves, a bee nest full of honey, still water by a shore) seen on
+    // the way opens again - the survey looks for exactly those, so it costs nothing while nothing is searched out
+    const f = require('./forage'); const w = f.watch()
+    f.sightMobs(bot)
+    if (w) {
+      const hits = await world.scanBlocks(bot, w.re, { maxDistance: 48, count: 8, filter: x => outOfZones(x) && w.sighted(bot, x).length > 0 })
+      for (const b of hits) { notes.push([b.name, b.position]); f.seen(w.sighted(bot, b)) }
+    }
+    noteResources(notes)
   }
   run().catch(() => {}).finally(() => { surveying = false })
 }
@@ -322,8 +367,13 @@ async function mine (bot, itemName, g, n, ctx = {}) {
 
 // Flowers and the like: walk up, break, pick up. `itemName` is what the plant drops (counted in the pack; a
 // RegExp when any of several will do - poppy, red tulip or rose bush for red dye).
+// ctx.filter(b): which of the plants to take (a ripe cocoa pod, a cactus's top segment); ctx.force: a plant the dig's
+// natural list lacks (cocoa, sea pickles, azaleas) - still never in a zone (outOfZones) nor a finished build cell (act.dig)
 async function pickPlants (bot, re, itemName, n, ctx = {}) {
-  const label = typeof itemName === 'string' ? itemName : 'red flowers'
+  const label = typeof itemName === 'string' ? itemName : ctx.label || (re.source.replace(/^\^\(?|\)?\$$/g, '').split('|')[0] + ' and the like')
+  // (the red flowers' spots were stored as 'red flowers' before the label came from the pattern: still read, 2026-09-27)
+  const legacy = typeof itemName !== 'string' && re.test('poppy') ? 'red flowers' : null
+  const take = ctx.filter || (() => true)
   const target = inv.count(bot, itemName) + n
   let empty = 0
   const skip = new Set()
@@ -331,18 +381,20 @@ async function pickPlants (bot, re, itemName, n, ctx = {}) {
     await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
     if (ctx.shouldStop && ctx.shouldStop()) return false
     await reflex.waitClear()
-    const b = world.findBlocks(bot, re, { maxDistance: 48, count: 24, filter: x => outOfZones(x) && !skip.has(x.position.toString()) && !world.isWaterBlock(x) })[0]
+    // (liquid water only: a waterlogged plant is a plant - every wild sea pickle is waterlogged, and the old test hid them
+    //  all, 2026-09-27)
+    const b = world.findBlocks(bot, re, { maxDistance: 48, count: 24, filter: x => outOfZones(x) && !skip.has(x.position.toString()) && !world.isLiquidWater(x) && take(x) })[0]
     if (!b) {
       if (++empty > 3) { log('gather', `no ${label} to pick around here`); return false }
-      const known = knownResource(label, bot.entity.position)
+      const known = knownResource(label, bot.entity.position) || (legacy && knownResource(legacy, bot.entity.position))
       if (known && empty === 1 && world.dist2(known, bot.entity.position) > 40) await move.travel(bot, known, { range: 8, shouldStop: ctx.shouldStop, label: 'to ' + label })
-      else await explore(bot, x => re.test(x.name), { shouldStop: ctx.shouldStop, label, legs: 2, accept: outOfZones })
+      else await explore(bot, x => re.test(x.name), { shouldStop: ctx.shouldStop, label, legs: 2, accept: x => outOfZones(x) && take(x) })
       continue
     }
     empty = 0
     noteResource(label, b.position)
     const before = inv.count(bot, itemName)
-    if (await act.dig(bot, b.position, { timeoutMs: 15000 })) await act.collectDrops(bot, { radius: 4, maxMs: 4000 })
+    if (await act.dig(bot, b.position, { timeoutMs: 15000, force: !!ctx.force })) await act.collectDrops(bot, { radius: 4, maxMs: 4000 })
     if (inv.count(bot, itemName) <= before) skip.add(b.position.toString())
   }
   return true
@@ -403,7 +455,7 @@ async function explore (bot, match, { shouldStop, label = 'resources', legs = 4,
   for (let i = 0; i < legs; i++) {
     const found = await findMatching(bot, match, accept)
     if (found) return found
-    const r = await move.travel(bot, dest, { range: 10, shouldStop: stop, label: 'explore', maxMs: 90000 })
+    const r = await move.travel(bot, dest, { range: 10, shouldStop: stop, label: 'explore', maxMs: 90000, anyY: true })
     if (r.ok || r.why === 'stopped') break
   }
   return findMatching(bot, match, accept)
@@ -418,4 +470,4 @@ async function findMatching (bot, match, accept) {
   return null
 }
 
-module.exports = { onGrounds, treeOK, chop, mine, explore, towerUp, noteResource, forgetResource, knownResource, fellTree, pickPlants, survey, takeable }
+module.exports = { onGrounds, treeOK, wildTree, lastChopOutcome, outOfZones, chop, mine, explore, towerUp, noteResource, noteResources, forgetResource, knownResource, fellTree, pickPlants, survey, takeable }
