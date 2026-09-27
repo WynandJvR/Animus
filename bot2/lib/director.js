@@ -340,7 +340,9 @@ function decide () {
   }
   // evening: be home before dusk, not at it - a 100-block walk begun at dusk arrives in the dark (a zombie
   // met the bot at its own door at hp 10)
-  if (home && world.phase(bot) === 'day' && world.tod(bot) >= 10500 && world.tod(bot) < 12000 && dHome > 32 && hut.shellComplete(bot) && !tooHurt() && !cooling('goHome')) {
+  // (never on an expedition out: the nights are camped - walked home each evening, it never got past a day's walk out;
+  //  audit 2026-09-28)
+  if (home && world.phase(bot) === 'day' && world.tod(bot) >= 10500 && world.tod(bot) < 12000 && dHome > 32 && hut.shellComplete(bot) && !tooHurt() && !(expedition() && expedition().phase === 'out') && !cooling('goHome')) {
     return { name: 'goHome', why: `evening - home is ${Math.round(dHome)}b away, back before dark` }
   }
   // a grave right here (died in the safehouse, or beside it): pick it up whatever the hour - it
@@ -423,7 +425,8 @@ function decide () {
   if (dHome < 160 && hut.siteGone(bot) && !cooling('abandonHome')) return { name: 'abandonHome', why: `the ground under the home at ${move.fmt(home)} is gone - choosing a new home` }
   // (in our own mine is at work, not astray: a staircase from y113 to y16 runs ~100 blocks out, and the face 116 blocks
   //  from home sent the bot home every time a mining task returned - a pickaxe worn out, a batch done - 2026-09-24)
-  if (dHome > 96 && !mining.inOwnMine(bot) && !tooHurt() && !cooling('goHome')) return { name: 'goHome', why: `${Math.round(dHome)}b from home` }
+  { const e = expedition(); if (e && world.phase(bot) === 'day' && !tooHurt() && !cooling('expedition')) return { name: 'expedition', why: e.phase === 'back' ? `back from the ${e.raw} expedition (${e.why}) - ${Math.round(dHome)}b to home` : `on an expedition for ${e.raw}${e.to ? ' toward the ' + e.to.biome : ''} - night ${e.nights + 1} of ${MAX_NIGHTS} at most` } }
+  if (dHome > 96 && !expedition() && !mining.inOwnMine(bot) && !tooHurt() && !cooling('goHome')) return { name: 'goHome', why: `${Math.round(dHome)}b from home` }
 
   // 5b. at home with a haul in the pack: put it in the chest (a player empties their pockets at home)
   if (dHome < 24 && (mem.get().chests || []).length && haulSize() >= 64 && !cooling('deposit')) return { name: 'deposit', why: `home with ${haulSize()} items to store` }
@@ -843,6 +846,30 @@ const TASKS = {
     else { mem.set('ironTripDry', { stock: ironStock(), method: ORE_METHOD }); log('dir', 'ironTrip: no iron this trip - no more trips until iron turns up in the build mining') }
     return got > 0
   },
+  async expedition () {
+    const e = expedition(); if (!e) return false
+    const stop = () => taskCancelled() || nightSoon() || tooHurt()
+    if (e.phase === 'back') {
+      const r = await base.goHome(bot, { shouldStop: stop })
+      if (r.ok && base.distHome(bot) < 24) { mem.set('expedition', null); log('dir', `expedition for ${e.raw}: home with ${inv.count(bot, e.raw)} ${e.raw}`) }
+      return r.ok
+    }
+    if (!e.packed && base.distHome(bot) < 64) {
+      if (inv.count(bot, 'cobblestone') < COBBLE_OUT) await base.withdraw(bot, 'cobblestone', COBBLE_OUT - inv.count(bot, 'cobblestone')).catch(() => 0)
+      e.packed = true; mem.set('expedition', e)
+    }
+    if (inv.foodPoints(bot) < FOOD_BACK) { endExpedition(`food down to ${inv.foodPoints(bot)} pts`); return true }
+    const before = inv.count(bot, e.raw)
+    const room = tripRoom()
+    if (room < 64) { endExpedition('the pack is full'); return true }
+    await gather.chop(bot, new RegExp(`^${e.raw}$`), room, { shouldStop: stop, leaves: true, expedition: true })
+    const o = gather.lastChopOutcome()
+    const got = inv.count(bot, e.raw) - before
+    if (got > 0) forage.noteTrip(e.raw, got, 'expedition')
+    if (tripRoom() < 64) endExpedition('the pack is full')
+    else if (o && o.outcome === 'none-found' && got <= 0) { e.dry++; mem.set('expedition', e); if (e.dry >= 2) { forage.noteTrip(e.raw, 0, 'none found on the expedition', { searched: true }); endExpedition('no more of it to be found') } }
+    return got > 0 || (o && (o.outcome === 'lead' || o.outcome === 'stopped'))
+  },
   async castle () { return castleWork() },
   async idle () { await move.sleep(5000); return true },
   async ashore () {
@@ -1124,6 +1151,53 @@ function watchNights () {
   const t = world.tod(bot); const night = world.isNight(bot)
   for (const m of notToday.values()) { if (night || (m.tod != null && t < m.tod)) m.sawNight = true; m.tod = t }
 }
+// AN EXPEDITION: a wood whose country lies beyond any day's round trip (even one started at dawn) is fetched the way a
+// player would - out for days, the nights camped (the carried bed, else dug in: the night rules do that wherever we
+// are), leads followed from wherever the bot stands, a pack of logs and the saplings for the orchard at home carried
+// back. Without it the frontier passed 600b and the castle's 535 spruce logs could never be reached (2026-09-28).
+// Only fed, whole and armed; home again on a full pack, a searched-out country, a death, or MAX_NIGHTS out.
+const DAWN_TICKS = 12900 // (the most daylight a day holds: ticksUntilNight at sunrise)
+const MAX_NIGHTS = 3
+// (three nights and the walk back is days of a working body - and a taiga is thin on animals: a full pack of food out,
+//  and home when it runs low rather than a forage trip 900b from the farm - audit 2026-09-28)
+const FOOD_OUT = 50; const FOOD_BACK = 10
+// (an axe a stack of logs: 535 of spruce wear out four stone axes - cobblestone in the pack, and the kit's table and the
+//  tools rule make the next one out there, never a wooden one of the planks - audit 2026-09-28)
+const COBBLE_OUT = 6
+async function startExpedition (raw, land) {
+  // packed from the bank while home is a short walk (the castle loop asks from the site): the food first - the pack's
+  // own food only ever rises to the food rule's line, so a gate on it alone waited every day for ever - and the
+  // cobblestone for the axes (audit 2026-09-28)
+  let packed = false
+  if (base.distHome(bot) < 64) {
+    for (const name of inv.GOOD_FOOD) {
+      if (inv.foodPoints(bot) >= FOOD_OUT) break
+      if (base.bankCount(name) > 0) await base.withdraw(bot, name, Math.min(16, base.bankCount(name))).catch(() => 0)
+    }
+    if (inv.count(bot, 'cobblestone') < COBBLE_OUT) await base.withdraw(bot, 'cobblestone', COBBLE_OUT - inv.count(bot, 'cobblestone')).catch(() => 0)
+    packed = true
+  }
+  const food = inv.foodPoints(bot)
+  if (food < FOOD_OUT || bot.health < 16 || !inv.bestWeapon(bot) || !inv.bestTool(bot, 'axe', 1)) { log('dir', `${raw}: its country is past a day's walk - an expedition waits on ${food < FOOD_OUT ? 'food (' + food + ' pts packed' + (packed ? ', the bank included' : ' (the bank not reached from here)') + ', ' + FOOD_OUT + ' wanted - cooking and the farm make the rest)' : bot.health < 16 ? 'health' : 'a weapon and an axe'}`); return false }
+  mem.set('expedition', { raw, to: land ? { x: land.x, z: land.z, biome: land.biome } : null, phase: 'out', at: Date.now(), nights: 0, tod: world.tod(bot), dry: 0, packed })
+  log('dir', `${raw}: its country is past a day's walk - setting out on an expedition${land ? ' toward the ' + land.biome : ''} (${food} food pts, nights camped on the way)`)
+  return true
+}
+function expedition () { return mem.get().expedition || null }
+function endExpedition (why) { const e = expedition(); if (!e) return; if (e.phase !== 'back') { e.phase = 'back'; e.why = why; mem.set('expedition', e); log('dir', `expedition for ${e.raw}: ${why} - heading home`) } }
+// (nights out: the same phase edge as notToday - night seen, or the clock wrapping past dawn in a bed)
+function watchExpedition () {
+  const e = expedition(); if (!e) return
+  const t = world.tod(bot)
+  if (e.tod != null && t < e.tod) {
+    e.nights++; mem.set('expedition', Object.assign(e, { tod: t }))
+    log('dir', `expedition for ${e.raw}: dawn after night ${e.nights} - ${inv.count(bot, e.raw)} ${e.raw} in the pack, ${inv.foodPoints(bot)} food pts, ${Math.round(base.distHome(bot))}b from home`)
+    if (e.phase === 'out' && e.nights >= MAX_NIGHTS) endExpedition(`${e.nights} nights out`)
+  } else e.tod = t
+  // (died out there: respawned at home - not walked straight back out; the graves and the next dawn decide)
+  const d = (mem.get().deaths || []).slice(-1)[0]
+  if (d && d.t > e.at) { mem.set('expedition', null); log('dir', `expedition for ${e.raw}: died on it - called off`) }
+}
 async function gatherFor (raw, short) {
   const put = notToday.get(raw)
   if (put) { if (!put.sawNight || world.isNight(bot)) return false; notToday.delete(raw); log('dir', `${raw}: a new day - the trip is open again`) }
@@ -1180,7 +1254,9 @@ async function gatherFor (raw, short) {
         if (mats.LOG_ANY.test(raw) && !taskCancelled()) {
           const o = gather.lastChopOutcome()
           const searched = !!o && o.item === raw && o.at >= t0 && o.outcome === 'none-found'
-          if (o && o.item === raw && o.at >= t0 && o.outcome === 'too-far') { notToday.set(raw, { sawNight: false, tod: world.tod(bot) }); log('dir', `${raw}: not today - too far for the daylight left`) }
+          if (o && o.item === raw && o.at >= t0 && o.outcome === 'too-far') {
+            if (o.trip > DAWN_TICKS && await startExpedition(raw, o.land)) { /* (logged there) */ } else { notToday.set(raw, { sawNight: false, tod: world.tod(bot) }); log('dir', `${raw}: not today - too far for the daylight left`) }
+          }
           forage.noteTrip(raw, inv.count(bot, raw) - before, searched ? 'no trees of it found' : `cut short (${o && o.at >= t0 ? o.outcome : 'no chop ran'})`, { searched })
         }
         return ok
@@ -1195,7 +1271,7 @@ async function loop () {
       if (!bot.entity || bot.health <= 0 || paused) { current = null; await move.sleep(1000); continue }
       await reflex.waitClear()
       try { await opportunisticHunt() } catch (e) { log('dir', 'hunt threw: ' + e.message) }
-      watchNights()
+      watchNights(); watchExpedition()
       const d = decide()
       const k = d.name + '|' + d.why
       if (k !== lastDecisionKey) { lastDecisionKey = k; log('dir', `-> ${d.name}: ${d.why}`); recentDecisions.push({ at: Date.now(), name: d.name, why: d.why }); if (recentDecisions.length > 8) recentDecisions.shift() }

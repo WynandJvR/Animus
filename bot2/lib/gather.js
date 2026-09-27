@@ -88,7 +88,7 @@ let lastChop = null
 function lastChopOutcome () { return lastChop }
 async function chop (bot, re, n, ctx = {}) {
   const itemName = String(re).replace(/^\/\^|\$\/$/g, '')
-  const end = (outcome, r) => { lastChop = { item: itemName, outcome, at: Date.now() }; return r }
+  const end = (outcome, r, extra) => { lastChop = Object.assign({ item: itemName, outcome, at: Date.now() }, extra); return r }
   const target = inv.count(bot, itemName) + n
   let emptyScans = 0
   const t0 = Date.now()
@@ -130,6 +130,13 @@ async function chop (bot, re, n, ctx = {}) {
       // (a species from a country of its own: the trees found there count however far out - the next trip goes straight to them)
       const known = knownResource(itemName, bot.entity.position, SPECIES_BIOMES[itemName.replace(/_log$/, '')] ? { maxFromHome: 2000 } : undefined)
       if (known && world.dist2(known, bot.entity.position) > 40 && emptyScans === 1) {
+        // (trees of a far country found on an expedition are remembered 2000b out: the same day's-trip rule as the land -
+        //  too far today, and past a dawn start the next expedition goes to them)
+        if (!ctx.expedition && SPECIES_BIOMES[itemName.replace(/_log$/, '')]) {
+          const me = bot.entity.position; const home = mem.get().home || me
+          const trip = world.walkTicks(me, known) + world.walkTicks(known, home) + CHOP_TICKS + world.HOME_MARGIN
+          if (trip > world.ticksUntilNight(bot)) { log('gather', `the ${itemName} i know of is ${Math.round(world.dist2(known, me))}b off - too far to go and come back today`); return end('too-far', false, { land: { x: known.x, z: known.z, biome: 'known trees' }, trip }) }
+        }
         log('gather', `no ${itemName} here - heading to where i saw some at ${move.fmt(known)}`)
         const r = await move.travel(bot, known, { range: 8, shouldStop: ctx.shouldStop, label: 'to trees' })
         if (!r.ok) forgetResource(itemName, known)
@@ -146,7 +153,8 @@ async function chop (bot, re, n, ctx = {}) {
           const me = bot.entity.position; const home = mem.get().home || me
           const at = { x: land.x, y: me.y, z: land.z }
           const trip = world.walkTicks(me, at) + world.walkTicks(at, home) + CHOP_TICKS + world.HOME_MARGIN
-          if (trip > world.ticksUntilNight(bot)) { log('gather', `${land.lead ? 'the way to ' + itemName + ' country leads to' : itemName + ' grows in'} the ${land.biome} ${Math.round(land.d)}b off - too far to go and come back today`); return end('too-far', false) }
+          // (an expedition - days out, the nights camped - has no day to fit: it goes on from wherever it stands)
+          if (!ctx.expedition && trip > world.ticksUntilNight(bot)) { log('gather', `${land.lead ? 'the way to ' + itemName + ' country leads to' : itemName + ' grows in'} the ${land.biome} ${Math.round(land.d)}b off - too far to go and come back today`); return end('too-far', false, { land: { x: land.x, z: land.z, biome: land.biome, lead: !!land.lead }, trip }) }
           log('gather', land.lead ? `no ${itemName} country on record - heading for the ${land.biome} ${Math.round(land.d)}b off, the land nearest its climate` : `no ${itemName} round here - heading for the ${land.biome} ${Math.round(land.d)}b off, where it grows`)
           const r = await move.travel(bot, { x: land.x, y: Math.floor(me.y), z: land.z }, { range: 16, shouldStop: ctx.shouldStop, label: 'to the ' + land.biome, anyY: true })
           // (a route that failed today - no boat, a stuck path - says nothing of the land: only arriving and seeing none of
@@ -158,6 +166,9 @@ async function chop (bot, re, n, ctx = {}) {
             const trees = await world.scanBlocks(bot, re, { maxDistance: world.sightReach(bot), count: 8, filter: b => wildTree(bot, b) })
             if (!trees.length) { log('gather', `the ${land.biome} here has no ${itemName} in sight - forgetting it`); forgetLand(land) } else noteResource(itemName, trees[0].position)
           }
+        } else if (ctx.expedition) {
+          // (out on an expedition: rings round a home days away are no search - none here, and the expedition decides)
+          return end('none-found', false)
         } else {
           // (a species with a country of its own and none of it on record: the rings go wider, like clay's)
           await explore(bot, b => re.test(b.name), { shouldStop: ctx.shouldStop, label: itemName, rings: SPECIES_BIOMES[itemName.replace(/_log$/, '')] ? 9 : null, accept: b => outOfZones(b) && isNaturalTree(bot, trunkBase(bot, b)) })
