@@ -22,10 +22,18 @@ function make (bot, director) {
   const smelt = require('./smelt')
 
   let running = null
-  let lastSaidAt = 0
-  let lastPlayerChatAt = 0
-  const recentSaid = []
-  bot.on('chat', (from) => { if (from !== bot.username) lastPlayerChatAt = Date.now() })
+  // who is talking to the bot: the chat gate's own record (a message that named it, held for an answer) - ANY player
+  // chat used to count, and two players talking among themselves unlocked the brain's quips for 2 minutes (the audit)
+  const chatGate = require('path').join(__dirname, '..', '..', 'bot', 'chat-gate.js')
+  function coordLeak (msg) {
+    if (/-?\d{1,7}[\s,xyzXYZ:=/~]+-?\d{1,4}[\s,xyzXYZ:=/~]+-?\d{1,7}/.test(msg)) return true
+    // (the graves - the deaths' spots - above all: "come get my stuff at..." is what a death invites; the farm and chests too)
+    const m = mem.get(); const j = build.getJob(); const pts = [m.home, m.bed, m.mine && m.mine.entrance, m.mine && m.mine.cursor, j && j.origin, bot.entity && bot.entity.position].concat((m.deaths || []).slice(-6), m.farm && m.farm.water ? [m.farm.water] : [], (m.chests || []).slice(0, 4))
+    const secrets = []; for (const p of pts) if (p && p.x != null) { secrets.push(Math.abs(Math.floor(p.x)), Math.abs(Math.floor(p.z))) }
+    // ("2,286" is one number)
+    const nums = (msg.replace(/(\d),(\d{3})\b/g, '$1$2').match(/-?\d+/g) || []).map(n => Math.abs(parseInt(n, 10))).filter(n => n >= 100)
+    return nums.some(n => secrets.some(sv => Math.abs(n - sv) <= 64))
+  }
   async function exclusive (label, fn) {
     if (running) return `busy with ${running}`
     running = label
@@ -46,13 +54,23 @@ function make (bot, director) {
       case 'say': {
         const msg = a.join(' ').replace(/^\/+/, '').trim()
         if (!msg) return 'nothing to say'
+        // the brain's lines through the old runtime's own chat gate: one reply per message addressed to the bot, near-
+        // duplicates refused, a short cooldown, and unprompted quips rare and never while working - four rephrasings of
+        // "whatever, i'm doing the work" answered one "digital stfu" in 7s through the exact-match check alone (2026-09-27)
+        // never a base's coordinates in public: an x y z triple is said only while nobody but the operator is on (the
+        // operator's rule, 2026-09-27 - any player can ask the brain now, and a posted base is how bases get griefed)
+        // never where the base is, in public: judged by the VALUES, not a format - an x/z pair, "-1234/64/-5678", "1234 west
+        // 553 north" all name the base. Any number near a secret x or z (home, bed, mine, the build, where we stand) is
+        // refused while anyone but the operator is on; a full triple too (spawn-side bases). The operator's rule and the
+        // audit, 2026-09-27 - any player can ask the brain now, and a posted base is how bases get griefed.
+        if (source !== 'operator' && coordLeak(msg)) {
+          const opNames = (require(require('path').join(__dirname, '..', '..', 'bot', 'config.json')).operators || []).map(o => String(o).toLowerCase())
+          const others = Object.keys(bot.players || {}).filter(n => n !== bot.username && !opNames.includes(n.toLowerCase()))
+          if (others.length) return 'skipped - where the base is is not said while other players are on'
+        }
         if (source !== 'operator') {
-          const now = Date.now()
-          const addressed = now - lastPlayerChatAt < 120000
-          if (recentSaid.includes(msg.toLowerCase())) return 'skipped - said that already'
-          if (!addressed && now - lastSaidAt < 5 * 60000) return 'skipped - nobody is talking to me, keep it rare'
-          lastSaidAt = now
-          recentSaid.push(msg.toLowerCase()); if (recentSaid.length > 20) recentSaid.shift()
+          const drop = require(chatGate).gateSay('say ' + msg, true, { isBusy: () => !!director.info() && director.info().name !== 'idle' })
+          if (drop) return 'skipped - ' + drop
         }
         bot.chat(msg.slice(0, 250)); return 'said'
       }
@@ -75,15 +93,35 @@ function make (bot, director) {
         const p = a.length >= 3 ? { x: num(0), y: num(1), z: num(2) } : world.feetPos(bot)
         base.setHome(p); return `home set ${move.fmt(p)}`
       }
+      case 'unmark': { // unmark <flag> - clear a remembered verdict the bot reached wrongly (a dusk-cut trip marked iron "dry")
+        const OK = ['ironTripDry', 'buildWaiting', 'wantBoat']
+        if (!OK.includes(a[0])) return `usage: unmark ${OK.join('|')}`
+        mem.set(a[0], null); return `${a[0]} cleared`
+      }
+      case 'biome': { // biome - why /state.biome reads "": the registry's biome table and the raw id under our feet
+        const p = bot.entity.position.floored()
+        const b = bot.blockAt(p)
+        const reg = bot.registry
+        let raw = null; try { const col = bot.world.getColumnAt(p); raw = col && col.getBiome ? col.getBiome(new Vec3(p.x & 15, p.y, p.z & 15)) : null } catch (e) { raw = 'err ' + e.message }
+        return JSON.stringify({ biomesKnown: reg.biomes ? Object.keys(reg.biomes).length : null, byName: reg.biomesByName ? Object.keys(reg.biomesByName).length : null, rawId: raw, blockBiome: b && b.biome ? { id: b.biome.id, name: b.biome.name } : null, sample: reg.biomesArray ? reg.biomesArray.slice(0, 3).map(x => x && (x.name + '#' + x.id)) : null })
+      }
+      case 'wood': { // wood exact|any - the current job's wood rule, switched live
+        const j = build.getJob()
+        if (!j || !/^(exact|any)$/.test(a[0] || '')) return `usage: wood exact|any (now ${build.exactWood() ? 'exact' : 'any'})`
+        await build.setJob(bot, j.name, j.origin, { exactWood: a[0] === 'exact' })
+        require('./materials').resetPlanner()
+        return `wood: ${a[0]} for ${j.name}`
+      }
       case 'build': {
         const name = a[0]
-        if (!name || a.length < 4) return 'usage: build <schematic> <x> <y> <z> [corner]   (coords are the CENTRE unless "corner")'
+        if (!name || a.length < 4) return 'usage: build <schematic> <x> <y> <z> [corner] [anywood]   (coords are the CENTRE unless "corner"; wood is the blueprint species unless "anywood")'
         let origin = { x: num(1), y: num(2), z: num(3) }
         const corner = a.includes('corner')
         const s = await build.loadSchematic(name, bot.version)
         if (!corner) { const en = s.end(); const st = s.start(); origin = { x: origin.x - Math.floor((en.x - st.x) / 2), y: origin.y, z: origin.z - Math.floor((en.z - st.z) / 2) } }
-        await build.setJob(bot, name, origin)
-        return `build job set: ${name} origin ${move.fmt(origin)}`
+        // the blueprint's own wood species unless "anywood" (then any local wood stands in for any)
+        await build.setJob(bot, name, origin, { exactWood: !a.includes('anywood') })
+        return `build job set: ${name} origin ${move.fmt(origin)}${a.includes('anywood') ? ' (any local wood)' : ' (exact wood species)'}`
       }
       case 'door': return exclusive('door', async () => { const g = new goals.GoalBlock(num(0), num(1), num(2)); const ok = await move.crossDoor(bot, g).catch(e => 'threw ' + e.stack); return `crossDoor: ${ok} now at ${move.fmt(bot.entity.position)}` })
       case 'furnaces': return exclusive('furnaces', async () => {
@@ -297,6 +335,42 @@ function make (bot, director) {
         require('./gather').noteResource(a[0], { x: num(1), y: num(2), z: num(3) })
         return `noted ${a[0]} at ${num(1)},${num(2)},${num(3)}`
       }
+      case 'orelevel': return (async () => {
+        // orelevel [item] - where the mine would work for an ore, and the ore counted per level round home
+        const item = a[0] || 'raw_iron'
+        const g = require('./craft').GATHER[item]
+        if (!g) return 'no such ore item'
+        const ores = await world.scanBlocks(bot, g.blocks, { maxDistance: num(1, 64), count: 4000, point: mem.get().home })
+        const at = {}; for (const b of ores) at[b.position.y] = (at[b.position.y] || 0) + 1
+        const open = ores.filter(b => world.hasAirNeighbour(bot, b.position))
+        const lit = open.filter(b => world.skyLitFace(bot, b.position))
+        return `${ores.length} found (${open.length} showing to air, ${lit.length} in daylight, nearest ${open.slice(0, 8).map(b => b.position.x + ',' + b.position.y + ',' + b.position.z).join(' ')}); pick ${JSON.stringify(await mining.oreLevel(bot, item))}; by y ${Object.keys(at).sort((x, y) => y - x).map(y => y + ':' + at[y]).join(' ')}`
+      })()
+      case 'tower': return exclusive('tower', async () => {
+        // tower <n> - jump-place up n blocks where we stand (the builder's pillar), reporting each step
+        const out = []
+        for (let i = 0; i < num(0, 3); i++) {
+          const y0 = bot.entity.position.y; const held = bot.heldItem ? bot.heldItem.name : '-'
+          const ok = await require('./gather').towerUp(bot)
+          out.push(`${ok ? 'up' : 'FAIL'} ${y0.toFixed(2)}->${bot.entity.position.y.toFixed(2)} held ${held}->${bot.heldItem ? bot.heldItem.name : '-'} sneak ${!!(bot.controlState && bot.controlState.sneak)}`)
+          if (!ok) break
+        }
+        return out.join(' | ')
+      })
+      case 'obstr': {
+        // obstr - what the site clearing would take down, by block name, with a few positions
+        const o = build.unskippedObstructions(bot, {})
+        const by = {}; for (const b of o) { const k = b.name; (by[k] = by[k] || []).push(`${b.position.x},${b.position.y},${b.position.z}`) }
+        return `${o.length}: ` + Object.entries(by).sort((a, b) => b[1].length - a[1].length).map(([k, v]) => `${k} x${v.length} (${v.slice(0, 4).join(' ')})`).join('; ')
+      }
+      case 'stray': return (async () => {
+        // stray <regex> [dist] - blocks of that kind in the world that are NOT a build cell wanting that block
+        const re = new RegExp(a[0] || '^glass$')
+        const j = build.getJob()
+        const found = await world.scanBlocks(bot, re, { maxDistance: num(1, 160), count: 5000 })
+        const out = found.filter(b => { const c = j && j.index.get(`${b.position.x},${b.position.y},${b.position.z}`); return !c || !re.test(c.name) })
+        return `${found.length} found, ${found.length - out.length} in build cells that want them, ${out.length} stray: ${out.slice(0, 40).map(b => `${b.position.x},${b.position.y},${b.position.z}`).join(' ')}`
+      })()
       case 'findb': {
         // findb <regex> [dist] - positions and states of matching blocks
         const re = new RegExp(a[0] || '^stone$')

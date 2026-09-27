@@ -15,12 +15,42 @@ function send (res, code, body) {
 }
 
 function start ({ bot, port, host, director, commands, brainSettings, pov, chat }) {
-  const state = () => {
+  // (reqUrl: only the BRAIN's poll - /state?brain=1 - spends a held message's delivery budget; the GUI's polls must not)
+  // THE STATUS CACHE: the castle's status is a pass over every cell (14k here, 42k on the cathedral) and the hut's 149 -
+  // worked out on every /state call, and the panel polls it every second or two: the body's event loop paid for it
+  // whether anyone read it or not (the audit, 2026-09-27). Recomputed only when a block changed in the build or round
+  // home (blockUpdate there moves `worldGen`), and stamped with its age.
+  let worldGen = 1; let cache = { key: null }
+  bot.on('blockUpdate', (o, n) => {
+    const q = (n && n.position) || (o && o.position); if (!q) return
+    const j = require('./build').getJob(); const h = mem.get().home
+    if ((j && j.box && q.x >= j.box.x1 - 2 && q.x <= j.box.x2 + 2 && q.z >= j.box.z1 - 2 && q.z <= j.box.z2 + 2) || (h && Math.abs(q.x - h.x) <= 16 && Math.abs(q.z - h.z) <= 16)) worldGen++
+  })
+  // (cells unknown till their chunk loads - but only a chunk over the build or home counts: every chunk of a trek bumped
+  //  it, several a second, and the full pass was back on every poll; audit D)
+  bot.on('chunkColumnLoad', (c) => {
+    if (!c) return
+    const j = require('./build').getJob(); const h = mem.get().home
+    const over = (x1, z1, x2, z2) => c.x <= x2 && c.x + 15 >= x1 && c.z <= z2 && c.z + 15 >= z1
+    if ((j && j.box && over(j.box.x1 - 2, j.box.z1 - 2, j.box.x2 + 2, j.box.z2 + 2)) || (h && over(h.x - 16, h.z - 16, h.x + 16, h.z + 16))) worldGen++
+  })
+  const statuses = () => {
+    const b = require('./build'); const hut = require('./hut')
+    const j = b.getJob(); const h = mem.get().home
+    const key = `${worldGen}|${j ? j.name + '@' + j.origin.x + ',' + j.origin.z : ''}|${h ? h.x + ',' + h.z : ''}` // (a new job or home is a new count)
+    if (cache.key === key) return cache
+    let st = null; let hs = null; let shell = false
+    try { st = b.getJob() ? b.status(bot) : null } catch {}
+    try { hs = hut.status(bot); shell = hs ? hut.shellComplete(bot) : false } catch {}
+    cache = { key, at: Date.now(), st, hs, shell }
+    return cache
+  }
+  const state = (reqUrl = '') => {
     if (!bot.entity) return { name: bot.username, connected: false }
     const p = bot.entity.position
     const worn = inv.wornArmor(bot)
-    const b = require('./build')
-    const st = b.getJob() ? b.status(bot) : null
+    const sc = statuses()
+    const st = sc.st
     const act = director.info()
     const rf = reflex.info()
     return {
@@ -49,7 +79,39 @@ function start ({ bot, port, host, director, commands, brainSettings, pov, chat 
       goal: bot.pathfinder && bot.pathfinder.goal ? bot.pathfinder.goal.constructor.name : null,
       hazards: { underground: !world.openSky(bot, p.floored()), onFire: false, inLava: world.inLava(bot), inWater: world.feetInWater(bot), drowning: world.headInWater(bot), onGround: bot.entity.onGround },
       savedBuild: mem.get().build ? { name: mem.get().build.name, at: mem.get().build.origin, held: false } : null,
-      buildProgress: st ? { phase: 'castle', have: st.done, need: st.total, done: st.done, total: st.total } : null,
+      // what the build is and what it waits on - the brain answered "how's the build" with "starting on the wood" while the
+      // real want was 1100 cobblestone (2026-09-27): the numbers it may quote, straight from the builder and the director
+      buildProgress: st ? {
+        name: st.name, blocksPlaced: st.done, blocksTotal: st.total, done: st.done, total: st.total, // (done/total: the panel's Build dialog reads them) percent: Math.round(1000 * st.done / Math.max(1, st.total)) / 10,
+        topStillNeeded: Object.fromEntries(Object.entries(st.need || {}).sort((x, y) => y[1] - x[1]).slice(0, 8).map(([k, v]) => [k.replace(/_/g, ' '), v])),
+        materials: director.focus ? director.focus() : null
+      } : null,
+      // where it is, in words the players use (distance to home and to the build site)
+      whereAmI: (() => {
+        const h = mem.get().home; const j = require('./build').getJob()
+        const dh = h ? Math.round(world.dist2(p, h)) : null
+        const site = j && j.box ? { x: (j.box.x1 + j.box.x2) / 2, z: (j.box.z1 + j.box.z2) / 2 } : null
+        const ds = site ? Math.round(Math.hypot(p.x - site.x, p.z - site.z)) : null
+        return { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z), blocksFromHome: dh, blocksFromBuildSite: ds, atHome: dh != null && dh < 12, atBuildSite: ds != null && ds < 30 }
+      })(),
+      // the base as it stands - what the brain answers "have you built your hut" from (with only the castle in its state it
+      // answered every question about the base with the castle, 2026-09-27)
+      base: (() => {
+        try {
+          const hs = sc.hs; const m = mem.get()
+          const bedHeld = require('./inventory').items(bot).some(i => /_bed$/.test(i.name))
+          // (where the bed is, and whether that is home: a field bed slept in on a trip is not "at home" - the audit)
+          const bedAt = m.bed ? `placed at ${m.bed.x},${m.bed.y},${m.bed.z} (${m.home && world.dist2(m.bed, m.home) < 16 ? 'at home' : 'away from home'})` : null
+          return {
+            countedSecondsAgo: Math.round((Date.now() - sc.at) / 1000), // (as of the last block change: not a live count)
+            hut: hs ? { blocksDone: hs.done, blocksTotal: hs.total, walledAndRoofed: sc.shell, complete: hs.done >= hs.total } : 'no hut planned (no home yet)',
+            bed: bedAt || (bedHeld ? 'carried, not placed yet' : 'none'),
+            chests: (m.chests || []).length, furnaces: (m.furnaces || []).length,
+            farm: m.farm ? 'planted' : 'none', mine: m.mine ? { level: m.mine.level, blocksDug: m.mine.blocks } : 'none'
+          }
+        } catch { return null }
+      })(),
+      recent: director.recent ? director.recent() : [],
       checklist: null,
       progress: { stalled: false },
       stuck: null,
@@ -60,7 +122,7 @@ function start ({ bot, port, host, director, commands, brainSettings, pov, chat 
       deaths: (mem.get().stats || {}).deaths || 0,
       paused: director.isPaused(),
       waypoints: [],
-      unanswered: chat ? chat.pending() : []
+      unanswered: chat ? chat.pending(/[?&]brain=1(?:&|$)/.test(reqUrl || '')) : []
     }
   }
 
@@ -68,7 +130,7 @@ function start ({ bot, port, host, director, commands, brainSettings, pov, chat 
     const url = req.url || ''
     if (req.method === 'OPTIONS') return send(res, 204, '')
     if (req.method === 'GET' && url === '/health') return send(res, 200, { ok: true, spawned: !!bot.entity, connected: !!bot.entity, runtime: 'bot2' })
-    if (req.method === 'GET' && (url === '/state' || url.startsWith('/state?'))) { try { return send(res, 200, state()) } catch (e) { return send(res, 500, 'error: ' + e.message) } }
+    if (req.method === 'GET' && (url === '/state' || url.startsWith('/state?'))) { try { return send(res, 200, state(url)) } catch (e) { return send(res, 500, 'error: ' + e.message) } }
     if (req.method === 'GET' && url === '/log') return send(res, 200, tail(40).join('\n'))
     if (req.method === 'GET' && url === '/chat') return send(res, 200, chat ? chat.tail().join('\n') : '')
     if (req.method === 'GET' && url === '/brain') return send(res, 200, { settings: brainSettings, models: [brainSettings.model] })
@@ -103,7 +165,10 @@ function start ({ bot, port, host, director, commands, brainSettings, pov, chat 
         if (url === '/cmd') {
           // the brain may talk and look; the director drives the body
           if (!/^(say|state|inventory|look|scan|entities)\b/i.test(line)) return send(res, 200, 'the director drives the body - you can say things')
-          try { const out = await commands.handle(line, { source: 'brain' }); return send(res, 200, out) } catch (e) { return send(res, 500, 'error: ' + e.message) }
+          try {
+            const out = await commands.handle(line, { source: 'brain' }) // (a reply marks its message answered in the chat gate)
+            return send(res, 200, out)
+          } catch (e) { return send(res, 500, 'error: ' + e.message) }
         }
         return send(res, 404, 'not found')
       })

@@ -31,7 +31,11 @@ const auth = process.env.MC_AUTH || cfg.auth || 'offline'
 const version = process.env.MC_VERSION || cfg.version || '1.21.11'
 const controlPort = parseInt(process.env.CONTROL_PORT || cfg.controlPort || 3001, 10)
 const controlHost = process.env.CONTROL_HOST || cfg.controlHost || '127.0.0.1'
-const operators = (cfg.operators || []).map(s => s.toLowerCase())
+// Names compared EXACTLY (lowercase): the operator's Bedrock account comes through Geyser/Floodgate as ".Digital3093" and is
+// listed as such in config.json - stripping the prefix instead let any Bedrock player whose gamertag matched the Java
+// name be the operator ('!' commands included), since a Java name cannot hold a '.' (the audit, 2026-09-27)
+const opName = s => String(s || '').toLowerCase()
+const operators = (cfg.operators || []).map(opName)
 
 log('boot', `bot2 connecting to ${host}:${port} as ${username} (${auth}, ${version})`)
 const bot = mineflayer.createBot({ host, port, username, auth, version, disableChatSigning: true, checkTimeoutInterval: 60000 })
@@ -79,9 +83,20 @@ let pov = null
 try { pov = require(path.join(BOT_DIR, 'pov.js')) } catch {}
 
 // chat: operators can use "!" commands; everything is logged
+// CONVERSATION (the old runtime's own pieces, dropped in the bot2 rewrite - its "pending" was a stub returning [], so the
+// brain never saw a word a player said and only ever spoke unprompted, 2026-09-27): a message that names the bot (or an
+// alias) is held for the brain for a few of its turns; its say (or any answer) marks it answered.
+const access = require(path.join(BOT_DIR, 'access.js'))
+const chatGate = require(path.join(BOT_DIR, 'chat-gate.js'))
+// (the operator is always heard only when nobody else is on: with other players about, "im not talking to you" and
+//  "when are we doing the ender dragon" - talk meant for them - each got a reply; the operator's call, 2026-09-27)
+// (the whole tab list, deliberately - any player online anywhere is "someone else about", not a distance test)
+const aloneWith = who => Object.keys(bot.players || {}).filter(n => n !== bot.username && n !== who).length === 0
+let lastBotChatAt = 0 // (when the bot last spoke in chat: a reply to it within a minute is part of the conversation)
 const chatLog = []
 const chat = {
-  pending: () => [],
+  pending: (brainPoll) => { const p = chatGate.pendingChat(); if (brainPoll) p.forEach(c => { c.deliveries++ }); return p.map(c => ({ from: c.from, text: c.text })) },
+  answered: () => chatGate.clearPendingChat(),
   tail: () => chatLog.slice(-40)
 }
 
@@ -194,7 +209,17 @@ bot.once('spawn', async () => {
 bot.on('respawn', () => log('boot', 'respawned'))
 bot.on('spawn', () => { if (started) log('boot', `spawn at ${bot.entity ? move.fmt(bot.entity.position) : '?'} hp ${bot.health}`) })
 bot.on('death', () => { move.stopMoving(bot); try { require('./lib/control').abort() } catch {} }) // a death ends the task it interrupted (a mine task walked the respawn straight back to the mine face)
-bot.on('health', () => { if (bot.health <= 6) log('vital', `hp ${Math.round(bot.health)} food ${bot.food}`) })
+// a big hit says what it was: the trek lost 14 hp above y100 with nothing in the log to say how (2026-09-27)
+let lastHp = null
+bot.on('health', () => {
+  const drop = lastHp == null ? 0 : lastHp - bot.health; lastHp = bot.health
+  if (drop >= 4 && bot.entity) {
+    const me = bot.entity.position
+    const foe = Object.values(bot.entities).filter(e => e !== bot.entity && e.position && (e.type === 'hostile' || /zombie|skeleton|creeper|spider|drowned|husk|stray|witch|pillager/.test(e.name || ''))).map(e => ({ n: e.name, d: e.position.distanceTo(me) })).sort((a, b) => a.d - b.d)[0]
+    log('vital', `hit for ${drop.toFixed(1)} -> hp ${Math.round(bot.health)} at ${Math.floor(me.x)},${Math.floor(me.y)},${Math.floor(me.z)}: onGround ${bot.entity.onGround}, vy ${bot.entity.velocity.y.toFixed(2)}, in water ${!!bot.entity.isInWater}, nearest hostile ${foe ? foe.n + ' ' + foe.d.toFixed(1) + 'b' : 'none'}`)
+  }
+  if (bot.health <= 6) log('vital', `hp ${Math.round(bot.health)} food ${bot.food}`)
+})
 
 bot.on('messagestr', (msg, position) => {
   if (position === 'game_info') return
@@ -202,8 +227,12 @@ bot.on('messagestr', (msg, position) => {
   try { fs.appendFileSync(path.join(__dirname, '..', 'logs', 'bot2-chat.log'), `[${new Date().toISOString()}] ${msg}\n`) } catch {}
 })
 bot.on('chat', async (from, message) => {
-  if (!commands || from === bot.username) return
-  if (!operators.includes(String(from).toLowerCase())) return
+  if (from === bot.username) { lastBotChatAt = Date.now(); return }
+  if (!commands) return
+  // heard: a message that names the bot; any word from the operator; and a reply within a minute of the bot's own
+  // (a conversation carries on without the name every line - "why aren't you answering" was dropped, the audit)
+  if (!/^!/.test(message) && (access.isAddressed(message, bot.username, cfg) || (operators.includes(opName(from)) && aloneWith(from)) || (Date.now() - lastBotChatAt < 60000 && from === chatGate.gazeState().player && Date.now() - chatGate.gazeState().at < 5 * 60000))) chatGate.recordChat(from, message) // (the continuation is the player it was talking WITH - not two others chatting after a bot line)
+  if (!operators.includes(opName(from))) return
   if (!/^!/.test(message)) return
   const out = await commands.handle(message.slice(1), { source: 'operator' }).catch(e => 'error: ' + e.message)
   bot.chat(String(out).slice(0, 200))

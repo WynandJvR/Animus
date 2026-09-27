@@ -5,7 +5,9 @@ const fs = require('fs')
 const path = require('path')
 
 const LOG_DIR = path.join(__dirname, '..', '..', 'logs')
-const LOG_FILE = path.join(LOG_DIR, 'bot2-events.log')
+// (an offline test loads these modules too: BOT2_LOG_FILE sends its lines elsewhere - a test's "NO white_flower" lines
+//  landed in the live log at 20:25 on 2026-09-27 and read like the bot's own)
+const LOG_FILE = process.env.BOT2_LOG_FILE || path.join(LOG_DIR, 'bot2-events.log')
 const MAX_BYTES = 8 * 1024 * 1024
 const ring = []
 
