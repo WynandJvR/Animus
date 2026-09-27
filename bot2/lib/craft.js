@@ -23,6 +23,9 @@ const GATHER = {
   cobblestone: { blocks: /^(stone|cobblestone)$/, tool: 'pickaxe', tier: 1 },
   // granite in veins through the stone: the mine's tunnels cut through it and take what shows in the walls
   granite: { blocks: /^granite$/, tool: 'pickaxe', tier: 1, ore: true },
+  andesite: { blocks: /^andesite$/, tool: 'pickaxe', tier: 1, ore: true },
+  diorite: { blocks: /^diorite$/, tool: 'pickaxe', tier: 1, ore: true },
+  tuff: { blocks: /^tuff$/, tool: 'pickaxe', tier: 1, ore: true },
   cobbled_deepslate: { blocks: /^(deepslate|cobbled_deepslate)$/, tool: 'pickaxe', tier: 1 },
   coal: { blocks: /^(coal_ore|deepslate_coal_ore)$/, tool: 'pickaxe', tier: 1, ore: true },
   raw_iron: { blocks: /^(iron_ore|deepslate_iron_ore)$/, tool: 'pickaxe', tier: 2, ore: true },
@@ -42,14 +45,29 @@ const GATHER = {
   rose_bush: { blocks: /^rose_bush$/, tool: null, tier: 0, plant: true },
   flint: { blocks: /^gravel$/, tool: 'shovel', tier: 0 },
   sugar_cane: { blocks: /^sugar_cane$/, tool: null, tier: 0 },
-  apple: { blocks: /^(oak_leaves|dark_oak_leaves)$/, tool: null, tier: 0 }
+  apple: { blocks: /^(oak_leaves|dark_oak_leaves)$/, tool: null, tier: 0 },
+  // picked where they grow (forage.js keeps the trips and the searched-out memory; every other dye flower is read off
+  // the recipe graph there). filter(bot, b): which of them to take. force: a plant act.dig's natural list lacks.
+  pumpkin: { blocks: /^pumpkin$/, tool: 'axe', tier: 0, plant: true },
+  // a cactus from the top down: a segment broken under another drops that one onto the cactus beside it, which burns it
+  cactus: { blocks: /^cactus$/, tool: null, tier: 0, plant: true, filter: (bot, b) => { const up = bot.blockAt(b.position.offset(0, 1, 0)); return !up || up.name !== 'cactus' } },
+  // bamboo from the foot: the whole stalk comes down with it
+  bamboo: { blocks: /^bamboo$/, tool: null, tier: 0, plant: true, filter: (bot, b) => { const dn = bot.blockAt(b.position.offset(0, -1, 0)); return !dn || dn.name !== 'bamboo' } },
+  // a ripe pod (age 2) gives three beans, a green one one
+  cocoa_beans: { blocks: /^cocoa$/, block: 'cocoa', tool: 'axe', tier: 0, plant: true, force: true, filter: (bot, b) => { try { return Number(b.getProperties().age) >= 2 } catch { return false } } },
+  // warm shallows only: a pickle within a step of the surface (never a dive for decoration)
+  sea_pickle: { blocks: /^sea_pickle$/, tool: null, tier: 0, plant: true, force: true, filter: (bot, b) => { const up = bot.blockAt(b.position.offset(0, 2, 0)); return !!up && !/water/.test(up.name) } },
+  red_mushroom: { blocks: /^red_mushroom$/, tool: null, tier: 0, plant: true },
+  brown_mushroom: { blocks: /^brown_mushroom$/, tool: null, tier: 0, plant: true },
+  azalea: { blocks: /^azalea$/, tool: null, tier: 0, plant: true, force: true },
+  flowering_azalea: { blocks: /^flowering_azalea$/, tool: null, tier: 0, plant: true, force: true }
 }
 for (const w of WOODS) GATHER[w + '_log'] = { blocks: new RegExp('^' + w + '_log$'), tool: 'axe', tier: 0, log: true }
 GATHER.crimson_stem = { blocks: /^crimson_stem$/, tool: 'axe', tier: 0, log: true }
 GATHER.warped_stem = { blocks: /^warped_stem$/, tool: 'axe', tier: 0, log: true }
 
-const SMELT = { stone: 'cobblestone', glass: 'sand', iron_ingot: 'raw_iron', copper_ingot: 'raw_copper', gold_ingot: 'raw_gold', smooth_stone: 'stone', brick: 'clay_ball', cracked_stone_bricks: 'stone_bricks', charcoal: '#log', cooked_beef: 'beef', cooked_porkchop: 'porkchop', cooked_mutton: 'mutton', cooked_chicken: 'chicken', cooked_rabbit: 'rabbit', cooked_cod: 'cod', cooked_salmon: 'salmon', baked_potato: 'potato' }
-const HUNT = { leather: /^(cow|mooshroom)$/, beef: /^(cow|mooshroom)$/, porkchop: /^pig$/, mutton: /^sheep$/, chicken: /^chicken$/, rabbit: /^rabbit$/, feather: /^chicken$/, string: /^(spider|cave_spider)$/ }
+const SMELT = { stone: 'cobblestone', glass: 'sand', iron_ingot: 'raw_iron', copper_ingot: 'raw_copper', gold_ingot: 'raw_gold', smooth_stone: 'stone', brick: 'clay_ball', cracked_stone_bricks: 'stone_bricks', charcoal: '#log', cooked_beef: 'beef', cooked_porkchop: 'porkchop', cooked_mutton: 'mutton', cooked_chicken: 'chicken', cooked_rabbit: 'rabbit', cooked_cod: 'cod', cooked_salmon: 'salmon', baked_potato: 'potato', green_dye: 'cactus', lime_dye: 'sea_pickle', terracotta: 'clay' }
+const HUNT = { leather: /^(cow|mooshroom)$/, beef: /^(cow|mooshroom)$/, porkchop: /^pig$/, mutton: /^sheep$/, chicken: /^chicken$/, rabbit: /^rabbit$/, feather: /^chicken$/, string: /^(spider|cave_spider)$/, ink_sac: /^squid$/ }
 for (const c of ['white', 'orange', 'magenta', 'light_blue', 'yellow', 'lime', 'pink', 'gray', 'light_gray', 'cyan', 'purple', 'blue', 'brown', 'green', 'red', 'black']) HUNT[c + '_wool'] = /^sheep$/
 
 function isLogName (n) { return /_(log|stem)$/.test(n) && !/^stripped_/.test(n) }
@@ -94,12 +112,52 @@ async function getTable (bot, ctx) {
       return t
     }
   }
+  // no open cell beside us (a night's dug-in hole is two cells, both ours): make one, as a player does - dig out the
+  // quickest block beside us, on something solid, and put the table in the gap (at dawn the tools failed "nowhere to
+  // place a crafting table here" and the bot walked off to dig stone bare-handed, 7.5s a block, 2026-09-27)
+  const carve = []
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    for (const dy of [0, 1]) {
+      const p = { x: me.x + dx, y: me.y + dy, z: me.z + dz }
+      const b = world.at(bot, p.x, p.y, p.z); const below = world.at(bot, p.x, p.y - 1, p.z)
+      if (!b || world.isAirish(b) || !below || !world.isSolid(below) || !world.isSolid(b)) continue
+      if (!move.utilitySpotOK(p, { temporary: !home || world.dist3(p, home) > 12 })) continue
+      if (world.waterNear(bot, p, 1)) continue // (a wall of a sealed hole with water behind it: the gap floods it - audit #16)
+      const ms = bot.digTime(b)
+      if (Number.isFinite(ms) && ms < 4000) carve.push({ p, ms })
+    }
+  }
+  carve.sort((a, b) => a.ms - b.ms)
+  // (a carved table stays where it is: packing it up would open the wall again - at night, the hole's own wall)
+  for (const { p } of carve.slice(0, 3)) {
+    if (!await act.dig(bot, new Vec3(p.x, p.y, p.z)).catch(() => false)) continue
+    if (await act.place(bot, p, 'crafting_table')) {
+      t = bot.blockAt(new Vec3(p.x, p.y, p.z))
+      log('craft', `placed a crafting table at ${move.fmt(p)} (dug a gap for it)`)
+      return t
+    }
+    // the table would not go in: the gap is closed again (never a hole left in a shelter's wall) - with the drop picked up
+    // first, and any block a wall takes (stone drops cobblestone, grass dirt: guessing from the dug block left it open; #16)
+    await act.collectDrops(bot, { radius: 3, maxMs: 1500 }).catch(() => {})
+    const fill = inv.shelterBlock ? inv.shelterBlock(bot) : null
+    if (!fill || !await act.place(bot, p, fill.name || fill).catch(() => false)) log('craft', `the gap dug for a table at ${move.fmt(p)} is left OPEN - ${fill ? 'the block would not go back in' : 'nothing in the pack to close it with'}`)
+  }
   log('craft', 'nowhere to place a crafting table here')
   return null
 }
 
-// Pick up a table we placed away from home (saves 4 planks, leaves no litter).
+// Pick up the tables we placed away from home (saves 4 planks, leaves no litter) - once the task that wanted them is
+// over, not after each craft: the dawn's pickaxe, axe and sword put down and picked up three tables in 20s (2026-09-27)
 const placedTables = new Set() // tables this runtime put down for a craft (the ones it may pick up)
+async function packUpTables (bot) {
+  for (const k of [...placedTables]) {
+    const [x, y, z] = k.split(',').map(Number)
+    const t = bot.blockAt(new Vec3(x, y, z))
+    if (!t || t.name !== 'crafting_table') { placedTables.delete(k); continue }
+    if (world.dist3(t.position, bot.entity.position) > 8) continue // (walked off: it stays, a player's litter)
+    await packUpTable(bot, t)
+  }
+}
 async function packUpTable (bot, t) {
   const home = mem.get().home
   if (!t || !placedTables.has(`${t.position.x},${t.position.y},${t.position.z}`)) return
@@ -123,39 +181,61 @@ function recipeNeedsTable (r) {
 }
 
 // Choose the recipe variant we are closest to affording (wood variants: prefer the wood we hold).
-function chooseRecipe (bot, itemName) {
+// The recipe whose whole order costs least: what the n items need, less what the pack holds (planks count their logs),
+// rare ingredients dear. Scored per ingredient held it picked bamboo sticks for 7 bamboo in the pack - and then 30 sticks
+// for the mine's torches meant 60 bamboo and an exploring trip, where 16 planks of any tree would do (2026-09-27).
+const RECOLOUR_RE = /(_bed|_wool|_carpet|_banner|_candle|_shulker_box|_concrete_powder|_terracotta|_stained_glass|_stained_glass_pane|_harness)$/
+const RARE_ING = /^(bamboo|cobbled_deepslate|blackstone|crimson_planks|warped_planks|bamboo_planks|bamboo_block|pale_oak_planks|mangrove_planks|cherry_planks)$/
+function chooseRecipe (bot, itemName, n = 1, stack = null) {
   const md = world.data(bot)
   const item = md.itemsByName[itemName]
   if (!item) return null
   const rs = md.recipes[item.id]
   if (!rs || !rs.length) return null
   const have = inv.counts(bot)
-  let best = null; let bestScore = -Infinity
+  // A short ingredient costs what the planner says getting one costs (materials: raw seconds a unit, crafts and smelts on
+  // top) - a bed short is a bed's wool and planks, not "1"; a log of a wood that does not grow here is unobtainable. With
+  // no planner (offline), the old hand rules: rare woods dear, a re-colouring (a bed of another bed) the last resort -
+  // "brown bed of a black bed" asked for a black bed of a blue bed round and round with 4 brown wool in the pack, 2026-09-27.
+  let planCost = null
+  try { const m = require('./materials'); const pl = m.getPlanner(bot); planCost = nm0 => { const c = pl.cost(m.nodeOf(nm0)); return Number.isFinite(c) ? Math.max(1, c) : 1e6 } } catch {}
+  const fam = nm0 => (nm0.match(RECOLOUR_RE) || [])[0]
+  let pw = null; try { pw = preferredWoodHeld(bot) } catch {}
+  const unitCost = nm0 => {
+    if (nm0 !== itemName && fam(nm0) && fam(nm0) === fam(itemName)) return 1e4 // (a re-colouring: never the way to a first one)
+    // (every plank ties as "planks": the wood in hand first, explicitly - RARE_ING was dead with a planner; the audit)
+    if (planCost) return planCost(nm0) + (/_planks$/.test(nm0) && pw && nm0 !== pw + '_planks' ? 0.01 : 0)
+    if (/_log$/.test(nm0) && !GATHER[nm0]) return 50
+    return RARE_ING.test(nm0) ? 20 : 1
+  }
+  let best = null; let bestCost = Infinity
   for (const r of rs) {
-    const need = recipeIngredients(r)
-    let score = 0
-    for (const [id, n] of Object.entries(need)) {
+    // (never a recipe of something already being made up the chain: that is the cycle, not a route)
+    if (stack && Object.keys(recipeIngredients(r)).some(id => md.items[id] && md.items[id].name !== itemName && stack.has(md.items[id].name))) continue
+    const crafts = Math.ceil(n / ((r.result && r.result.count) || 1))
+    let cost = 0
+    for (const [id, per] of Object.entries(recipeIngredients(r))) {
       const nm = md.items[id] ? md.items[id].name : null
-      if (!nm) { score -= 100; continue }
-      const h = have[nm] || 0
-      score += Math.min(h, n) * 10 - n
-      // planks from a log we hold count as nearly-held
-      if (/_planks$/.test(nm)) score += Math.min(n, (have[nm.replace('_planks', '_log')] || 0) * 4) * 5
-      if (/_log$/.test(nm) && !GATHER[nm]) score -= 50
-      // common over rare variants unless we already hold the rare one
-      if (!h && /^(cobbled_deepslate|blackstone|crimson_planks|warped_planks|bamboo_planks|bamboo_block|pale_oak_planks|mangrove_planks|cherry_planks)$/.test(nm)) score -= 40
+      if (!nm) { cost += 1e6; continue }
+      let h = have[nm] || 0
+      if (/_planks$/.test(nm)) h += (have[nm.replace('_planks', '_log')] || 0) * 4
+      const short = Math.max(0, per * crafts - h)
+      cost += (short ? short * unitCost(nm) : 0) + per * crafts * 0.01 // (ties: the smaller order)
     }
-    if (score > bestScore) { bestScore = score; best = r }
+    if (cost < bestCost) { bestCost = cost; best = r }
   }
   return best
 }
 
 // ---- ensure -------------------------------------------------------------------------------
 // ctx: { depth, shouldStop, reason, noWithdraw }
+// ctx.stack: the items being made further up this chain - a recipe cycle (a brown bed of a black bed of a blue bed..., a
+// storage block of its ingots of the block) is refused at once instead of running to "too deep" (audit, 2026-09-27)
 async function ensure (bot, name, count, ctx = {}) {
   const depth = ctx.depth || 0
   if (depth > 12) { log('craft', `ensure ${name}: too deep`); return false }
-  const c2 = Object.assign({}, ctx, { depth: depth + 1 })
+  if (ctx.stack && ctx.stack.has(name)) { log('craft', `ensure ${name}: already being made further up this chain (a recipe cycle) - not again`); return false }
+  const c2 = Object.assign({}, ctx, { depth: depth + 1, stack: new Set([...(ctx.stack || []), name]) })
   let tries = 0
   while (inv.count(bot, name) < count) {
     await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
@@ -194,7 +274,7 @@ async function gatherItem (bot, name, n, ctx) {
   }
   if (g.log) return gather().chop(bot, g.blocks, n, ctx)
   if (g.clay) return require('./clay').gather(bot, n, ctx)
-  if (g.plant) return gather().pickPlants(bot, g.blocks, name, n, ctx)
+  if (g.plant) return gather().pickPlants(bot, g.blocks, name, n, Object.assign({}, ctx, { filter: g.filter ? b => g.filter(bot, b) : null, force: !!g.force }))
   return gather().mine(bot, name, g, n, ctx)
 }
 
@@ -239,6 +319,8 @@ async function plankUp (bot, logName, crafts) {
 
 // Which plank type to use when a recipe accepts any: the one we can make from held logs, else
 // the nearest tree's.
+// the wood held most of (planks + logs), no search - a tie-break, not a trip
+function preferredWoodHeld (bot) { const c = inv.counts(bot); let best = null; let bn = 0; for (const w of WOODS) { const n = (c[w + '_planks'] || 0) + (c[w + '_log'] || 0) * 4; if (n > bn) { bn = n; best = w } } return best }
 function preferredWood (bot, needPlanks = 1) {
   const c = inv.counts(bot)
   let best = null; let bn = 0
@@ -249,6 +331,10 @@ function preferredWood (bot, needPlanks = 1) {
   let bestB = null; let bnB = 0
   for (const w of WOODS) { const n = (c[w + '_planks'] || 0) + (c[w + '_log'] || 0) * 4 + (bank[w + '_planks'] || 0) + (bank[w + '_log'] || 0) * 4; if (n > bnB) { bnB = n; bestB = w } }
   if (bestB && bnB >= needPlanks) return bestB
+  // not quite enough: top up the wood already in hand when it grows in sight or where we saw it - 12 birch planks held,
+  // 14 wanted, and the bot dug down through the mountain after a jungle tree below the site (2026-09-27)
+  const g0 = require('./gather')
+  if (best && (world.findBlocks(bot, new RegExp('^' + best + '_log$'), { maxDistance: 64, count: 1, filter: b => g0.treeOK(b) })[0] || g0.knownResource(best + '_log', bot.entity.position))) return best
   // not enough held: the wood that grows nearest (natural trees, outside protected zones)
   const t = world.findBlocks(bot, /^(oak|spruce|birch|jungle|acacia|dark_oak|mangrove|cherry|pale_oak)_log$/, { maxDistance: 64, count: 8, filter: b => require('./gather').treeOK(b) })[0] // (the orchard's trees count as wood that grows here)
   if (t) return t.name.replace('_log', '')
@@ -264,7 +350,7 @@ async function craftItem (bot, name, n, ctx) {
   const md = world.data(bot)
   const item = md.itemsByName[name]
   if (!item) { log('craft', `unknown item ${name}`); return false }
-  const r = chooseRecipe(bot, name)
+  const r = chooseRecipe(bot, name, n, ctx && ctx.stack)
   if (!r) { log('craft', `no recipe and no source for ${name}`); return false }
   const perCraft = r.result.count || 1
   const crafts = Math.ceil(n / perCraft)
@@ -348,7 +434,6 @@ async function craftItem (bot, name, n, ctx) {
   const made = inv.count(bot, name) - before
   if (made > 0) log('craft', `crafted ${made} ${name}`)
   else { log('craft', `craft ${name}: the server did not hand over the result - picking up anything that fell`); await act.collectDrops(bot, { radius: 4, maxMs: 3000 }) }
-  if (table) await packUpTable(bot, table)
   return inv.count(bot, name) > before
 }
 
@@ -410,8 +495,7 @@ async function craftTimes (bot, name, crafts, { shouldStop } = {}) {
   for (let k = 0; k < 10 && inv.count(bot, name) < before + i * perCraft; k++) await move.sleep(150)
   const made = inv.count(bot, name) - before
   if (made > 0) log('craft', `crafted ${made} ${name} (${Math.ceil(made / perCraft)} craft${made > perCraft ? 's' : ''})`)
-  if (table) await packUpTable(bot, table)
   return Math.round(made / perCraft)
 }
 
-module.exports = { ensure, craftItem, craftTimes, plankUp, getTable, chooseRecipe, GATHER, SMELT, HUNT, WOODS, isLogName, logCount, plankOfLog, preferredWood }
+module.exports = { packUpTables, ensure, craftItem, craftTimes, plankUp, getTable, chooseRecipe, GATHER, SMELT, HUNT, WOODS, isLogName, logCount, plankOfLog, preferredWood }
