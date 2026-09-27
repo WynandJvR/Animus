@@ -1,4 +1,4 @@
-process.env.BOT2_LOG_FILE = 'C:/Users/wynan/AppData/Local/Temp/claude/C--mc-bot-lab/9671a8b2-a592-49be-bae9-509e44ba1444/scratchpad/test-events.log'
+process.env.BOT2_LOG_FILE = process.env.BOT2_LOG_FILE || require('path').join(__dirname, 'test-events.log') // (never the live log)
 // B3: a skeleton 18 blocks off that sees us, hungry (food 12), no melee near: the cover flee must PERSIST (not flip each
 // tick), and once the sight is lost the bot eats.
 const { Vec3 } = require('vec3')

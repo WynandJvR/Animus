@@ -82,3 +82,8 @@ bot2/memory.*.json
 bot2/paused.flag
 bot2/site-*.json
 bot/.mc262-data/
+
+# local test output
+tools/session-scripts/test-events.log
+# local test server config (holds the RCON password)
+testserver/server.properties

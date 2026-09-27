@@ -1,4 +1,4 @@
-process.env.BOT2_LOG_FILE = 'C:/Users/wynan/AppData/Local/Temp/claude/C--mc-bot-lab/9671a8b2-a592-49be-bae9-509e44ba1444/scratchpad/test-events.log'
+process.env.BOT2_LOG_FILE = process.env.BOT2_LOG_FILE || require('path').join(__dirname, 'test-events.log') // (never the live log)
 // the coordinate rule: while a non-operator is on, no line that names where the base is (by value, any format)
 const LIB = 'C:/mc-bot-lab/bot2/lib/'
 const mem = require(LIB + 'memory.js'); const M = { home: { x: -1234, y: 119, z: -5678 }, bed: { x: -1234, y: 119, z: -5677 } }

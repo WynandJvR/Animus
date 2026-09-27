@@ -41,7 +41,7 @@ const bot = {
   pathfinder: { setGoal () {}, setMovements () {} }, targetDigBlock: null, stopDigging () { digAbort = true },
   digTime: () => 1150 // stone shovel, eyes in water, on the ground (main.js installDigGuard)
 }
-require('C:/Users/wynan/AppData/Local/Temp/claude/C--mc-bot-lab/0518859d-60e0-4d4c-a3d1-8458eac1a78f/scratchpad/fakechunks.js')(bot, { minY: 48, height: 32, md }); const unusedFindBlocks = ({ matching, useExtraInfo, maxDistance, count, point }) => {
+require('./fakechunks.js')(bot, { minY: 48, height: 32, md }); const unusedFindBlocks = ({ matching, useExtraInfo, maxDistance, count, point }) => {
   const me = point || bot.entity.position; const out = []
   const ms = new Set(Array.isArray(matching) ? matching : [matching])
   for (let x = Math.floor(me.x - maxDistance); x <= me.x + maxDistance; x++) for (let z = Math.floor(me.z - maxDistance); z <= me.z + maxDistance; z++) for (let y = 55; y <= 66; y++) {
