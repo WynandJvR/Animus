@@ -884,6 +884,18 @@ function stock (name) { return inv.count(bot, name) + base.bankCount(name) }
 // a build cell takes whatever may stand in for its item (any wood of the form, dirt for grass): by pool
 function stockOf (name) { return mats.stock(bot, name) }
 async function withdrawOf (name, want) { return mats.withdrawPool(bot, name, want) }
+// The window's blocks out of the chest while two slots stay free (the pickups on the way): a stack of every kind first -
+// the one-offs (a button, a flower) often anchor the band's lowest cells, and four stacks of stone taken first left no
+// room for them (audit 2026-09-27) - then the big kinds topped up to four stacks
+async function withdrawWindow (needs) {
+  for (const cap of [64, 64 * 4]) {
+    for (const [name, n] of Object.entries(needs)) {
+      if (inv.freeSlots(bot) < 2) return
+      const want = Math.min(n, cap) - countOf(name)
+      if (want > 0) await withdrawOf(name, want)
+    }
+  }
+}
 function countOf (name) { return mats.held(bot, name) }
 function windowNeeds () { return typeof build.nextNeeds === 'function' ? build.nextNeeds(bot, WINDOW_LAYERS) : {} }
 // the nearest natural wood growing around here (what the castle's wood cells will be made of)
@@ -980,8 +992,11 @@ async function castleWork () {
   // walk to the site. Clearing the site first sent the bot there for one leaf, home again for the furnaces and chests,
   // and back: two 60-block crossings and three minutes of every ten-minute day before a block went in (2026-09-26).
   await processAtHome()
-  for (const [name, n] of Object.entries(windowNeeds())) { const want = Math.min(n, 64 * 4) - countOf(name); if (want > 0) await withdrawOf(name, want) }
+  // the scaffold first, then the window's blocks while two slots stay free: the other way round the window filled every
+  // slot, the filler's withdraw failed "inventory full", and the cells over a drop at the site went unplaced for want
+  // of a block to stand on (2026-09-27) - and each withdraw into a full pack was still a walk to a chest
   await build.ensureScaffold(bot, 32)
+  await withdrawWindow(windowNeeds())
   // what does the next stretch of building need?
   const lowest = j.cells.filter(c => build.cellDone(bot, c) !== true)
   const minY = Math.min(...lowest.map(c => c.y))
@@ -1029,19 +1044,16 @@ async function castleWork () {
   // must come out of the chest too - with glass short, nothing was withdrawn and nothing built)
   const next = windowNeeds()
   // withdraw what we have for it (anything that stands in: birch stairs for jungle stairs)
+  await build.ensureScaffold(bot, 32)
+  await withdrawWindow(next)
   let carrying = 0
-  for (const [name, n] of Object.entries(next)) {
-    const want = Math.min(n, 64 * 4) - countOf(name)
-    if (want > 0) carrying += await withdrawOf(name, want)
-    carrying += countOf(name)
-  }
+  for (const name of Object.keys(next)) carrying += countOf(name)
   let blockedOn = null
   // (starved of stone: straight to the mine, not a build step over the few cells in hand - eight minutes placed one
   //  block 58 away while the next layers were 1900 cobblestone short, and the mine got the last three, 2026-09-27)
   const winShort = mats.planFor(bot, next).raw.cobblestone || 0
   if (winShort > 512 && countOf('cobblestone') < 64) { log('dir', `${winShort} cobblestone short with ${countOf('cobblestone')} in hand - mining first`); carrying = 0 }
   if (carrying > 0) {
-    await build.ensureScaffold(bot, 32)
     const r = await build.buildStep(bot, { shouldStop: dayStop, maxMs: 8 * 60000 })
     log('dir', `build step: placed ${r.placed}${r.blockedOn ? ', waiting on ' + r.blockedOn : ''}`)
     blockedOn = r.blockedOn
