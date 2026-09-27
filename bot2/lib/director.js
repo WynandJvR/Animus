@@ -1112,7 +1112,21 @@ async function castleWork () {
 }
 
 // One trip for one RAW material of the plan (materials.js names them): the batch a trip is worth.
+// A trip too far for what is left of today waits for the next dawn: without the mark the director asked again at once,
+// the chop answered "too far" at once, and the castle loop spun through it twice a second (2026-09-28)
+// (cleared on a phase edge - a night seen, then day - never on a size: a mark set just after dawn, the likeliest one,
+//  could never see more daylight left than that and stayed put till a restart - audit 2026-09-28)
+const notToday = new Map() // raw -> { sawNight }
+// (a night slept through passes inside the sleep task, often from dusk before the loop ever sees "night": the clock
+//  wrapping back past dawn counts as one too - audit 2026-09-28)
+function watchNights () {
+  if (!notToday.size) return
+  const t = world.tod(bot); const night = world.isNight(bot)
+  for (const m of notToday.values()) { if (night || (m.tod != null && t < m.tod)) m.sawNight = true; m.tod = t }
+}
 async function gatherFor (raw, short) {
+  const put = notToday.get(raw)
+  if (put) { if (!put.sawNight || world.isNight(bot)) return false; notToday.delete(raw); log('dir', `${raw}: a new day - the trip is open again`) }
   const batch = Math.min(short, tripRoom())
   const ctx = { shouldStop: dayStop }
   switch (raw) {
@@ -1166,6 +1180,7 @@ async function gatherFor (raw, short) {
         if (mats.LOG_ANY.test(raw) && !taskCancelled()) {
           const o = gather.lastChopOutcome()
           const searched = !!o && o.item === raw && o.at >= t0 && o.outcome === 'none-found'
+          if (o && o.item === raw && o.at >= t0 && o.outcome === 'too-far') { notToday.set(raw, { sawNight: false, tod: world.tod(bot) }); log('dir', `${raw}: not today - too far for the daylight left`) }
           forage.noteTrip(raw, inv.count(bot, raw) - before, searched ? 'no trees of it found' : `cut short (${o && o.at >= t0 ? o.outcome : 'no chop ran'})`, { searched })
         }
         return ok
@@ -1180,6 +1195,7 @@ async function loop () {
       if (!bot.entity || bot.health <= 0 || paused) { current = null; await move.sleep(1000); continue }
       await reflex.waitClear()
       try { await opportunisticHunt() } catch (e) { log('dir', 'hunt threw: ' + e.message) }
+      watchNights()
       const d = decide()
       const k = d.name + '|' + d.why
       if (k !== lastDecisionKey) { lastDecisionKey = k; log('dir', `-> ${d.name}: ${d.why}`); recentDecisions.push({ at: Date.now(), name: d.name, why: d.why }); if (recentDecisions.length > 8) recentDecisions.shift() }
