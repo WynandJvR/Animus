@@ -35,5 +35,5 @@ else
   echo "bot ready."
 fi
 
-echo "lab up. drive it with:  ./ctl.sh state   |   ./ctl.sh cmd \"house oak_planks 9 7 5\""
+echo "lab up. look at it with:  curl -s http://127.0.0.1:3001/state"
 free -h | awk 'NR==1||/Mem/'

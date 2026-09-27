@@ -2,7 +2,7 @@
 // The "body" - BEDROCK edition. A drop-in alternative to index.js that connects
 // to a Bedrock endpoint (e.g. a Java server fronted by Geyser/Floodgate) instead
 // of the Java protocol, while exposing the EXACT SAME local control API and
-// command surface. The brain (brain-llm.js) and the human (ctl.sh) talk to it
+// command surface. The brain (brain-llm.js) and the human (the control API) talk to it
 // identically - they cannot tell which body is running.
 //
 //   GET  /health          -> { ok, spawned }

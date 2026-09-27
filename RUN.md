@@ -29,20 +29,15 @@ One-time setup, then it's a double-click every time.
 
 ## Every time - just launch it
 
-- **Double-click `launch.bat`** (in the project root).
+- **Double-click `Animus.exe`** (in the project root), or run `Animus.exe --start` to open the panel and start
+  straight away.
 
-That opens two windows and your **dashboard** in the browser:
-- **Animus BOT** - connects to your server. **On the very first run** it prints a `microsoft.com/link` code - open that link in a browser and enter the code to log the bot's account in. (It caches after that, so you only do it once.)
-- **Animus BRAIN** - the gemma4:12b brain that drives it.
-- **Dashboard** at **http://127.0.0.1:3001** - live status, inventory, chat/activity, a command box, and a **brain switcher** (see below).
+The Animus panel starts and owns both processes:
+- **the bot** - connects to your server. **On the very first run** it prints a `microsoft.com/link` code - open that
+  link in a browser and enter the code to log the bot's account in (it caches after that).
+- **the brain** - the local model that talks and advises.
 
-To stop: close either window.
-
-## The dashboard (http://127.0.0.1:3001)
-
-Open in any browser (the launcher opens it for you). It shows the bot's live health/food/position/inventory/nearby players, a scrolling activity log, and:
-- A **command box** - type any command (full operator power, no restrictions), e.g. `come`, `gather oak_log 10`, `schematic build here`. Quick-action buttons for common ones.
-- A **Brain** panel - pick a different **model** from the dropdown (any model you've `ollama pull`ed), edit the **goal**, or toggle the brain **on/off** - all live, no restart. The brain picks up the change on its next tick.
+To stop: press Stop in the panel (closing the panel stops both).
 
 ## Driving it in-game
 

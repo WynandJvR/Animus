@@ -77,8 +77,7 @@ animus/
 │   ├── scaffold.js  pathfix.js  buildorder.js  hut-model.js
 │   └── memory.js  explore.js  orient.js  pov.js  cycle-detect.js  loghistory.js
 ├── start-lab.sh       bring the whole lab up (test server + bot)
-├── stop-lab.sh        tear it down and free the RAM
-└── ctl.sh             shell helper to send commands to the bot
+└── stop-lab.sh        tear it down and free the RAM
 ```
 
 Modules ending in `test.js` are offline unit tests - run any of them with
@@ -89,7 +88,7 @@ is deliberately split out from the executors so it can be tested without a serve
 
 - **Node.js 18+** (for the bot).
 - **bash** environment for the helper scripts - Linux, macOS, WSL, or Git Bash on
-  Windows. `ctl.sh` also uses `curl` and `python3`.
+  Windows. Driving the bot from a shell uses `curl`.
 - **A Paper 1.21.11 server jar** for the local test server (not bundled - see below).
 - *Optional, for the local-model brain:* [Ollama](https://ollama.com) or
   [llama.cpp](https://github.com/ggerganov/llama.cpp), plus a GPU with enough VRAM
@@ -113,10 +112,9 @@ cd ..
 cd bot && node index.js               # leave running in its own terminal
 cd ..
 
-# 5) drive it
-./ctl.sh state
-./ctl.sh cmd "house oak_planks 9 7 5"
-./ctl.sh cmd "tower stone 12 3"
+# 5) drive it (the bot's local control API)
+curl -s http://127.0.0.1:3001/state
+curl -s -X POST http://127.0.0.1:3001/op/cmd -H 'Content-Type: application/json' -d '{"command":"status"}'
 ```
 
 In-game you can also type `!house oak_planks` etc. in chat (operators only - see
@@ -131,20 +129,19 @@ to copy from a local source:
 
 ```bash
 ./start-lab.sh     # bring the lab up
-./ctl.sh state     # drive it
+curl -s http://127.0.0.1:3001/state   # look at it
 ./stop-lab.sh      # tear it down and release the RAM
 ```
 
-### `ctl.sh` commands
+### Driving the bot
+
+The bot serves a control API on `127.0.0.1:3001`:
 
 ```bash
-./ctl.sh state              # full world/self state as JSON
-./ctl.sh log                # recent bot log
-./ctl.sh health             # liveness check
-./ctl.sh cmd "<command>"    # send any command (see the capability list in NOTES.md)
+curl -s http://127.0.0.1:3001/state                       # full world/self state as JSON
+curl -s http://127.0.0.1:3001/health                      # liveness check
+curl -s -X POST http://127.0.0.1:3001/op/cmd -H 'Content-Type: application/json'      -d '{"command":"help"}'                               # operator commands (status, build, pause, ...)
 ```
-
-Override the target with `BOT_URL` (default `http://127.0.0.1:3001`).
 
 ## Local-model brain (autonomous, offline)
 
@@ -211,7 +208,7 @@ Players interact with the bot two ways, on **both** bodies:
 `bot/index-bedrock.js` is an alternative **body** that connects over the
 **Bedrock** protocol (e.g. a Java server fronted by Geyser/Floodgate) instead of
 Java. It exposes the *same* control API (`:3001`) and command names, so the brain
-and `ctl.sh` work against it unchanged - only the body differs.
+and the control API work against it unchanged - only the body differs.
 
 ```bash
 # offline (no account) - for a Bedrock/Floodgate server in offline mode

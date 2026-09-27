@@ -5,7 +5,7 @@
 // brain-decisions.jsonl. Split out from index.js so the mapping + rotation are unit-
 // testable offline (statehistorytest.js) with no bot, no server, no pathfinder.
 //
-// CLI:  node loghistory.js [sinceMs]   -> prints matching lines (used by `ctl.sh history`)
+// CLI:  node loghistory.js [sinceMs]   -> prints matching lines (was used by the old ctl.sh helper)
 
 const fs = require('fs')
 const path = require('path')
