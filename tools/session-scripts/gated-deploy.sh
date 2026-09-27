@@ -4,7 +4,7 @@
 S=$(cd "$(dirname "$0")" && pwd); lim=${1:-1800}; end=$((SECONDS+lim))
 while [ $SECONDS -lt $end ]; do
   st=$(curl -s -m 5 http://127.0.0.1:3001/state)
-  ok=$(node -e "try{const j=JSON.parse(process.argv[1]);const h=j.home;const d=h?Math.hypot(j.pos.x-h.x,j.pos.z-h.z):99;const t=j.timeOfDay;const night=t>=12542&&t<23460;const threat=j.threat&&(j.threat.dist==null||j.threat.dist<16);const reflex=!!j.maneuver;console.log((!j.hazards.underground||d<8)&&!j.hazards.inWater&&d<20&&j.health>=14&&!night&&!threat&&!reflex&&!j.paused?'yes':'no')}catch(e){console.log('no')}" "$st")
+  ok=$(node -e "try{const j=JSON.parse(process.argv[1]);const h=j.home;const d=h?Math.hypot(j.pos.x-h.x,j.pos.z-h.z):99;const t=j.timeOfDay;const night=!(t>=1500&&t<11400);const threat=j.threat&&(j.threat.dist==null||j.threat.dist<16);const reflex=!!j.maneuver;console.log((!j.hazards.underground||d<8)&&!j.hazards.inWater&&d<20&&j.health>=14&&!night&&!threat&&!reflex&&!j.paused?'yes':'no')}catch(e){console.log('no')}" "$st")
   if [ "$ok" = yes ]; then
     cd /c/mc-bot-lab/bot2; for f in main.js lib/*.js; do node --no-lazy --check "$f" || { echo "SYNTAX FAIL $f"; exit 1; }; done
     PREV=$(ls -d $S/rollback/candidate-* 2>/dev/null | tail -1)
