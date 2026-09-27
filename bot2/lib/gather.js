@@ -95,6 +95,7 @@ async function chop (bot, re, n, ctx = {}) {
   // trunks this trip could not get to: not walked at again (a trunk over a 10-block drop at the plaza's corner was
   // walked at every 33s for 20 minutes, 2026-09-26)
   const unreachable = new Set(); const tk = p => `${p.x},${p.y},${p.z}`
+  const landTried = new Set()
   while (inv.count(bot, itemName) < target) {
     await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
     if (ctx.shouldStop && ctx.shouldStop()) return end('stopped', false)
@@ -126,13 +127,41 @@ async function chop (bot, re, n, ctx = {}) {
         }
       }
       if (++emptyScans > 4) { log('gather', `chop ${itemName}: no trees found after exploring`); return end('none-found', false) }
-      const known = knownResource(itemName, bot.entity.position)
+      // (a species from a country of its own: the trees found there count however far out - the next trip goes straight to them)
+      const known = knownResource(itemName, bot.entity.position, SPECIES_BIOMES[itemName.replace(/_log$/, '')] ? { maxFromHome: 2000 } : undefined)
       if (known && world.dist2(known, bot.entity.position) > 40 && emptyScans === 1) {
         log('gather', `no ${itemName} here - heading to where i saw some at ${move.fmt(known)}`)
         const r = await move.travel(bot, known, { range: 8, shouldStop: ctx.shouldStop, label: 'to trees' })
         if (!r.ok) forgetResource(itemName, known)
       } else {
-        await explore(bot, b => re.test(b.name), { shouldStop: ctx.shouldStop, label: itemName, accept: b => outOfZones(b) && isNaturalTree(bot, trunkBase(bot, b)) })
+        let land = !known && emptyScans <= 2 ? speciesLand(itemName, bot.entity.position) : null
+        const lead = !land && !known && emptyScans <= 2 ? climateLead(bot, itemName, bot.entity.position) : null
+        if (lead && lead.d > 48) land = Object.assign(lead, { lead: true })
+        if (land && landTried.has(tk(land))) land = null // (once a trip: a route that failed is not walked twice)
+        if (land && land.d > 48) {
+          landTried.add(tk(land))
+          // there, some chopping and home again before dark - the one rule every day trip keeps (director.homeByDark). Too
+          // far today is no "none here": not a searched trip (R7), and no rings round home instead - they cost the same
+          // afternoon for nothing; the morning goes (audit 2026-09-27)
+          const me = bot.entity.position; const home = mem.get().home || me
+          const at = { x: land.x, y: me.y, z: land.z }
+          const trip = world.walkTicks(me, at) + world.walkTicks(at, home) + CHOP_TICKS + world.HOME_MARGIN
+          if (trip > world.ticksUntilNight(bot)) { log('gather', `${land.lead ? 'the way to ' + itemName + ' country leads to' : itemName + ' grows in'} the ${land.biome} ${Math.round(land.d)}b off - too far to go and come back today`); return end('too-far', false) }
+          log('gather', land.lead ? `no ${itemName} country on record - heading for the ${land.biome} ${Math.round(land.d)}b off, the land nearest its climate` : `no ${itemName} round here - heading for the ${land.biome} ${Math.round(land.d)}b off, where it grows`)
+          const r = await move.travel(bot, { x: land.x, y: Math.floor(me.y), z: land.z }, { range: 16, shouldStop: ctx.shouldStop, label: 'to the ' + land.biome, anyY: true })
+          // (a route that failed today - no boat, a stuck path - says nothing of the land: only arriving and seeing none of
+          //  it there proves the sample wrong - a snowy plain with no trees)
+          // (a lead walked: the view from there, now - its country in sight goes on to it, the next check; none, and this trip
+          //  ends: not "none here" (R7) while leads remain, the next trip starts from the next lead)
+          if (r.ok && land.lead) { walkedLead(land); try { biomesAt = null; noteBiomes(bot) } catch {} if (!speciesLand(itemName, bot.entity.position)) return end('lead', false) }
+          else if (r.ok) {
+            const trees = await world.scanBlocks(bot, re, { maxDistance: world.sightReach(bot), count: 8, filter: b => wildTree(bot, b) })
+            if (!trees.length) { log('gather', `the ${land.biome} here has no ${itemName} in sight - forgetting it`); forgetLand(land) } else noteResource(itemName, trees[0].position)
+          }
+        } else {
+          // (a species with a country of its own and none of it on record: the rings go wider, like clay's)
+          await explore(bot, b => re.test(b.name), { shouldStop: ctx.shouldStop, label: itemName, rings: SPECIES_BIOMES[itemName.replace(/_log$/, '')] ? 9 : null, accept: b => outOfZones(b) && isNaturalTree(bot, trunkBase(bot, b)) })
+        }
       }
       continue
     }
@@ -251,6 +280,125 @@ function takeable (bot, b) {
 // rules), so a later need walks straight there instead of searching. 150 blocks of forest round the Nordic site had
 // no sand while the trek there had passed beaches (2026-09-23). Called after each travel leg; runs in the background,
 // in slices, one survey at a time.
+// ---- the lie of the land: which biomes lie where ----------------------------------------------------------
+// A wood the build needs exactly grows only in its own country: no ring round a savanna home ever finds spruce, and a
+// castle waited on 535 spruce logs with none on record (2026-09-27). The survey notes the biomes of the chunks in view as
+// it walks - the client holds them, as a player sees the land change - and a chop with none of its species in sight or
+// memory heads for the nearest country it grows in.
+const SPECIES_BIOMES = {
+  spruce: /^(taiga|snowy_taiga|old_growth_pine_taiga|old_growth_spruce_taiga|grove|windswept_forest|windswept_hills|snowy_plains)$/,
+  birch: /^(birch_forest|old_growth_birch_forest|forest|meadow)$/,
+  jungle: /^(jungle|sparse_jungle|bamboo_jungle)$/,
+  acacia: /^(savanna|savanna_plateau|windswept_savanna)$/,
+  dark_oak: /^dark_forest$/,
+  cherry: /^cherry_grove$/,
+  mangrove: /^mangrove_swamp$/,
+  pale_oak: /^pale_garden$/
+}
+const CHOP_TICKS = 2400 // (two minutes at the trees: a trip's worth)
+const BIOME_SPOTS = 8 // per biome: the nearest to home kept
+let biomesAt = null
+function noteBiomes (bot) {
+  const me = bot.entity.position
+  if (me.y < 55 || (biomesAt && world.dist2(biomesAt, me) < 48)) return // (underground: cave biomes; unmoved: nothing new)
+  biomesAt = { x: me.x, z: me.z }
+  const reg = bot.registry; const R = Math.min(world.sightReach(bot) || 96, 192)
+  const seen = []
+  for (let dx = -R; dx <= R; dx += 32) {
+    for (let dz = -R; dz <= R; dz += 32) {
+      const x = Math.floor(me.x) + dx; const z = Math.floor(me.z) + dz
+      if (!bot.world.getColumnAt(new Vec3(x, 0, z))) continue // (not loaded: getBiome answers 0, a real biome's id)
+      // (at the ground, where the trees are: at the bot's height a hill's column is rock, and 3D biomes there are caves)
+      const gy = world.groundY(bot, x, z, Math.floor(me.y) + 48)
+      if (gy == null) continue
+      const p = new Vec3(x, gy + 1, z)
+      const b = reg.biomes && reg.biomes[bot.world.getBiome(p)]
+      if (b && b.name) seen.push([b.name.replace(/^minecraft:/, ''), p])
+    }
+  }
+  const has = mem.get().biomes || {}; const home = mem.get().home
+  // (new to the list, and one a full list would keep - else it goes straight out again, and the whole memory file is
+  //  written on the event loop for nothing, every leg of a long walk)
+  const keeps = (list, p) => list.length < BIOME_SPOTS || spreadEvict(list.concat([p]), home) !== list.length
+  const fresh = seen.filter(([n, p]) => { const list = has[n] || []; return !list.some(q => world.dist2(q, p) < 96) && keeps(list, p) })
+  if (!fresh.length) return
+  const before = new Set(Object.keys(has).filter(n => has[n].length)) // (names, now: `has` IS the list the update grows)
+  const added = new Set()
+  mem.update(m => {
+    m.biomes = m.biomes || {}
+    for (const [n, p] of fresh) {
+      const list = m.biomes[n] || (m.biomes[n] = [])
+      if (list.some(q => world.dist2(q, p) < 96)) continue
+      list.push({ x: p.x, z: p.z }); added.add(n)
+      if (list.length > BIOME_SPOTS) list.splice(spreadEvict(list, m.home), 1)
+    }
+  })
+  const novel = [...added].filter(n => !before.has(n))
+  if (novel.length) log('gather', `new country in view: ${novel.join(', ')}`)
+}
+// A full biome list keeps a SPREAD, not the nearest: the spot nearest home stays (speciesLand walks to it), and the one
+// crowding its neighbours closest goes - the list holding only the nearest eight refused every sighting further out, and
+// the climate leads (which walk to the frontier) could never step past a few hundred blocks (audit 2026-09-28)
+function spreadEvict (list, home) {
+  let keep = -1
+  if (home) list.forEach((q, i) => { if (keep < 0 || world.dist2(q, home) < world.dist2(list[keep], home)) keep = i })
+  let worst = -1; let worstD = Infinity
+  list.forEach((q, i) => {
+    if (i === keep) return
+    let nn = Infinity; list.forEach((r, j) => { if (j !== i) nn = Math.min(nn, world.dist2(q, r)) })
+    if (nn < worstD || (nn === worstD && i > worst)) { worst = i; worstD = nn }
+  })
+  return worst
+}
+// The nearest remembered land a species grows in, from `from` (null: none known, or the species grows anywhere - oak)
+function speciesLand (itemName, from) {
+  const re = SPECIES_BIOMES[String(itemName).replace(/_(log|wood)$/, '')]
+  if (!re) return null
+  let best = null
+  for (const [n, list] of Object.entries(mem.get().biomes || {})) {
+    if (!re.test(n)) continue
+    for (const q of list) { const d = world.dist2(q, from); if (!best || d < best.d) best = { x: q.x, z: q.z, biome: n, d } }
+  }
+  return best
+}
+// None of its country on record: the land nearest its CLIMATE. The world lays biomes out by temperature - taiga borders
+// the cool forests, not a jungle - so the coolest land seen is the way towards spruce, and a trip there sees 160b further
+// on; each one a step down the gradient till the country itself is in view. Water's biomes (rivers, shores, the sea)
+// carry no climate of their own; a spot once walked to is not a lead again (2026-09-28: the home is jungle and savanna
+// for 430b round, the one cool land a birch forest 410b west)
+// (peaks and slopes neither: bare rock and snow, a climb not a walk - frozen peaks would outrank every forest by
+//  temperature and send the bot up a cliff; audit 2026-09-28)
+const NO_CLIMATE = /river|ocean|beach|shore|swamp|peaks|slopes/
+function climateLead (bot, itemName, from) {
+  const re = SPECIES_BIOMES[String(itemName).replace(/_(log|wood)$/, '')]
+  const byName = (bot.registry && bot.registry.biomesByName) || {}
+  const temp = n => { const b = byName[n] || byName['minecraft:' + n]; return b && typeof b.temperature === 'number' ? b.temperature : null }
+  if (!re) return null
+  const own = Object.keys(byName).map(n => n.replace(/^minecraft:/, '')).filter(n => re.test(n)).map(temp).filter(t => t != null)
+  if (!own.length) return null
+  const target = own.reduce((a, b) => a + b, 0) / own.length
+  const walked = mem.get().climateLeads || []
+  // (ties - every spot of one forest scores alike - go to the frontier, furthest from home: the nearest won a random walk
+  //  among equals, not a descent; and one inside what the survey already sees opens nothing new - audit 2026-09-28)
+  const home = mem.get().home || from; const seen = Math.min(world.sightReach(bot) || 96, 192)
+  let best = null
+  for (const [n, list] of Object.entries(mem.get().biomes || {})) {
+    const t = temp(n); if (t == null || NO_CLIMATE.test(n)) continue
+    const score = Math.abs(t - target)
+    for (const q of list) {
+      if (walked.some(w => world.dist2(w, q) < 96)) continue
+      const d = world.dist2(q, from); if (d < seen) continue
+      const out = world.dist2(q, home)
+      if (!best || score < best.score - 1e-9 || (Math.abs(score - best.score) < 1e-9 && out > best.out)) best = { x: q.x, z: q.z, biome: n, d, out, score }
+    }
+  }
+  return best
+}
+function walkedLead (spot) { mem.update(m => { (m.climateLeads = m.climateLeads || []).push({ x: spot.x, z: spot.z }); if (m.climateLeads.length > 32) m.climateLeads.shift() }) }
+function forgetLand (spot) {
+  mem.update(m => { for (const list of Object.values(m.biomes || {})) { const i = list.findIndex(q => q.x === spot.x && q.z === spot.z); if (i >= 0) list.splice(i, 1) } })
+}
+
 const SURVEY = [
   { kind: 'sand', re: /^sand$/, ok: (bot, b) => takeable(bot, b) },
   { kind: 'gravel', re: /^gravel$/, ok: (bot, b) => takeable(bot, b) },
@@ -264,6 +412,7 @@ function survey (bot) {
   if (surveying || !bot.entity) return
   surveying = true
   const run = async () => {
+    try { noteBiomes(bot) } catch {}
     const notes = []
     for (const s of SURVEY) {
       // the nearest of EACH kind the pattern covers (woods by species): one hit a scan noted only whichever tree stood
@@ -470,4 +619,4 @@ async function findMatching (bot, match, accept) {
   return null
 }
 
-module.exports = { onGrounds, treeOK, wildTree, lastChopOutcome, outOfZones, chop, mine, explore, towerUp, noteResource, noteResources, forgetResource, knownResource, fellTree, pickPlants, survey, takeable }
+module.exports = { noteBiomes, speciesLand, climateLead, SPECIES_BIOMES, onGrounds, treeOK, wildTree, lastChopOutcome, outOfZones, chop, mine, explore, towerUp, noteResource, noteResources, forgetResource, knownResource, fellTree, pickPlants, survey, takeable }
