@@ -109,7 +109,7 @@ function cooling (name) {
 }
 
 const TOOL_KIT = ['stone_pickaxe', 'stone_axe', 'stone_sword']
-const SPARE_KIT = TOOL_KIT
+const SPARE_KIT = base.SPARE_KIT // (base.js: the one definition - the bank reserves exactly these)
 
 // Furniture we are carrying that belongs in the safehouse (none placed of that kind at home yet).
 // Furniture stacked on furniture inside the safehouse (a furnace on the chest seals the chest).

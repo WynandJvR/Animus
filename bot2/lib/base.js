@@ -126,7 +126,9 @@ function refreshCache (w, p) {
 // THE SPARE SET stays in the chest: one of each kit tool is the respawn's re-arm (director spareKit), taken only when the
 // pack holds none of it. Withdrawn by anything else - the mine wanting a third pickaxe - it was made again every round,
 // a pickaxe out and a pickaxe in, four times in an hour (2026-09-27)
-const BANK_RESERVE = { stone_pickaxe: 1, stone_axe: 1, stone_sword: 1 }
+// (the ONE definition of the spare set: director's spareKit makes it, the bank keeps it)
+const SPARE_KIT = ['stone_pickaxe', 'stone_axe', 'stone_sword']
+const BANK_RESERVE = Object.fromEntries(SPARE_KIT.map(t => [t, 1]))
 async function withdraw (bot, name, n, { maxWalk = 64 } = {}) {
   if (n <= 0) return 0
   if (BANK_RESERVE[name] && inv.count(bot, name) > 0) n = Math.min(n, Math.max(0, bankCount(name) - BANK_RESERVE[name]))
@@ -273,4 +275,4 @@ async function makeRoom (bot, slots = 3) {
   return false
 }
 
-module.exports = { home, setHome, distHome, withdraw, depositItem, depositAll, depositHaul, goHome, tossJunk, makeRoom, bankCount, bankCounts, knownChests, placeChest, notePlacedChest, ourChest, openChest, keepCount }
+module.exports = { SPARE_KIT, home, setHome, distHome, withdraw, depositItem, depositAll, depositHaul, goHome, tossJunk, makeRoom, bankCount, bankCounts, knownChests, placeChest, notePlacedChest, ourChest, openChest, keepCount }
