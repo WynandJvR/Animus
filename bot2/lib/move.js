@@ -402,13 +402,20 @@ async function crossDoor (bot, goal) {
 // the same walk asked for again and again is a loop somewhere above us: say so (a bot pacing a
 // tunnel for minutes logged nothing at all)
 const recentWalks = new Map()
+const labelWalks = new Map() // label -> walks this minute and their distinct targets (the coarse net)
 function noteWalk (label, goal) {
   if (label === 'mine step' || label === 'to tree') return // one per block of tunnel / per tree felled: many a minute is the job
   const now = Date.now()
   // (a loop is the same walk to the SAME place again and again: keyed by label alone, thirteen walks to thirteen farm
   //  cells - the job - read as "looping", and the regression counts could not tell work from a stuck task; 2026-09-27)
   let at = ''
-  try { at = goal.x != null ? `${Math.floor(goal.x)},${Math.floor(goal.y)},${Math.floor(goal.z)}` : (goal.pos ? fmt(goal.pos) : '') } catch {}
+  try { at = goal.x != null ? `${Math.floor(goal.x)},${goal.y != null ? Math.floor(goal.y) : '-'},${Math.floor(goal.z)}` : (goal.pos ? fmt(goal.pos) : '') } catch {}
+  // (and a coarse net per label: a livelock that picks a NEW place each time - the next refused ore, the next chest that
+  //  will not open, a leg bent each try - never repeats a target; 30+ walks a minute says so, with how many distinct)
+  const c = labelWalks.get(label) || { n: 0, since: now, warned: 0, at: new Set() }
+  if (now - c.since > 60000) { c.n = 0; c.since = now; c.at = new Set() }
+  c.n++; c.at.add(at); labelWalks.set(label, c)
+  if (c.n > 30 && now - c.warned > 60000) { c.warned = now; log('move', `busy or looping: "${label}" walked ${c.n} times in a minute to ${c.at.size} distinct places`) }
   const k = label + '@' + at
   const r = recentWalks.get(k) || { n: 0, since: now, warned: 0 }
   if (now - r.since > 60000) { r.n = 0; r.since = now }
