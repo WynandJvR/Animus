@@ -1,0 +1,31 @@
+#!/bin/bash
+# watchdog.sh: runs until an ALARM condition appears (or 60 min pass: HEARTBEAT), then prints why and exits.
+# Always restart it after handling the alarm. Conditions are read from the live log + op console every 60s.
+L=/c/mc-bot-lab/logs/bot2-events.log
+op () { curl -s -m 10 -X POST http://127.0.0.1:3001/op/cmd -H 'Content-Type: application/json' -d "{\"command\":\"$1\"}"; }
+done_now () { op buildstatus | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log(JSON.parse(s).done)}catch{console.log(-1)}})"; }
+since () { date -d "-$1 min" +%Y-%m-%dT%H:%M; }
+recent () { awk -v t="[$(since $1)" 'substr($0,1,17) >= t' $L; }
+start=$(date +%s); last_done=$(done_now); last_change=$(date +%s)
+while true; do
+  sleep 60
+  now=$(date +%s)
+  # the bot process itself
+  st=$(op status); for i in 1 2 3; do [ -n "$st" ] && break; sleep 10; st=$(op status); done; if [ -z "$st" ]; then echo "ALARM: op console not answering for 30s (bot down?)"; exit 0; fi
+  d=$(recent 10 | grep -ac "(death) died")
+  [ "$d" -ge 3 ] && { echo "ALARM: $d deaths in 10 min"; recent 10 | grep -a "(death) died" | cut -c2-200 | tail -5; exit 0; }
+  f=$(recent 15 | grep -aoE "\(dir\) [a-zA-Z]+ did not succeed \(([4-9]|[1-9][0-9]+) in a row\)" | tail -1)
+  [ -n "$f" ] && { echo "ALARM: repeated failure: $f"; recent 15 | grep -a "did not succeed" | cut -c2-160 | tail -5; exit 0; }
+  c=$(recent 10 | grep -aoE "\(dir\) -> [a-zA-Z]+" | sort | uniq -c | sort -rn | awk '$1>=6 && $3 ~ /level|fix|farm|tidy|hideout|grave/ {print; exit}')
+  [ -n "$c" ] && { echo "ALARM: churn: $c in 10 min"; exit 0; }
+  h=$(recent 10 | grep -ac "(dir) -> hideout")
+  tod=$(curl -s -m 5 http://127.0.0.1:3001/state | grep -o '"timeOfDay":[0-9]*' | cut -d: -f2); day=$([ -n "$tod" ] && [ "$tod" -ge 1000 ] && [ "$tod" -le 11500 ] && echo 1)
+  h5=$(recent 5 | grep -ac "(dir) -> hideout")
+  [ "$h" -ge 3 ] && [ "$h5" -ge 1 ] && [ -n "$day" ] && { echo "ALARM: hiding $h times in 10 min"; recent 20 | grep -a "(dir) -> hideout" | cut -c2-160 | tail -3; exit 0; }
+  t=$(echo "$st" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const j=JSON.parse(s);console.log((j.task&&j.task.name)+' '+(j.task&&j.task.forSec))}catch{}})")
+  set -- $t; [ -n "$2" ] && [ "$2" != "null" ] && [ "$2" -gt 1200 ] && [ "$1" != "sleep" ] && { echo "ALARM: task $1 running ${2}s"; exit 0; }
+  cur=$(done_now); if [ "$cur" != "$last_done" ]; then last_done=$cur; last_change=$now; fi
+  tod=$(echo "$st" | grep -o '"tod":[0-9]*' | cut -d: -f2)
+  if [ $((now - last_change)) -gt 1800 ]; then echo "ALARM: build stuck at $cur for $(( (now-last_change)/60 )) min"; exit 0; fi
+  if [ $((now - start)) -gt 3600 ]; then echo "HEARTBEAT: 60 min, build $cur, deaths/60m $(recent 60 | grep -ac '(death) died')"; exit 0; fi
+done
