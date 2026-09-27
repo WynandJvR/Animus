@@ -9,7 +9,18 @@ if (-not $csc) { Write-Host 'No csc.exe found (.NET Framework missing).' -Foregr
 Get-Process Animus -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Milliseconds 300
 
-& $csc.FullName /nologo /target:winexe /platform:anycpu `
+# App icon: tools/make-icon.cs renders animus.ico (same mark as the panel's top rail).
+$ico = "$PSScriptRoot\animus.ico"
+$icoSrc = "$PSScriptRoot\tools\make-icon.cs"
+if ((Test-Path $icoSrc) -and (-not (Test-Path $ico) -or (Get-Item $icoSrc).LastWriteTime -gt (Get-Item $ico).LastWriteTime)) {
+  $mk = "$env:TEMP\animus-make-icon.exe"
+  & $csc.FullName /nologo /reference:System.Drawing.dll /out:$mk $icoSrc
+  if ($LASTEXITCODE -eq 0) { & $mk $ico }
+}
+# /win32icon = the exe's shell icon; /resource = the same file for the window's crisp small icon
+$iconArg = @(); if (Test-Path $ico) { $iconArg = @("/win32icon:$ico", "/resource:$ico,animus.ico") }
+
+& $csc.FullName /nologo /target:winexe /platform:anycpu @iconArg `
   /reference:System.Windows.Forms.dll /reference:System.Drawing.dll `
   /reference:System.Web.Extensions.dll /reference:System.Management.dll `
   /out:"$PSScriptRoot\Animus.exe" "$PSScriptRoot\animus.cs"

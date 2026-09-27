@@ -10,7 +10,9 @@
 // grid (AutoScaleMode.None stays - exact pixels on 125%/150% displays). Everything
 // lives in a Dock=Fill AutoScroll host so the window is freely resizable and scrolls
 // instead of clipping below the 980x720 minimum client size.
-// Spacing scale: 4/8/12/16/24. Type scale: FTitle/FHeader/FBody/FLabel/FValue/FMono/FSmall.
+// Spacing scale: 4/8/12/16/24. Type scale: FTitle/FHeader/FBody/FLabel/FValue/FMono/FSmall
+// + FLog/FGoal/FCap; glyphs come from Segoe MDL2 Assets (FIconS). All controls are
+// owner-painted (FlatBtn, Bar, Pill, Picker, Dot) for anti-aliased rounded corners.
 // Button tiers: Primary h=36, Secondary h=32, Chip h=26.
 //
 // Compiled to Animus.exe by build-exe.ps1 (uses the .NET Framework compiler that
@@ -51,14 +53,18 @@ class Animus : Form
     const int BtnPrim = 34, BtnSec = 30, BtnChip = 26;
     const int MinCW   = 980, MinCH = 700;
     const int RailH   = 56;   // top rail: wordmark, target, dots, run controls
-    const int StripH  = 34;   // state strip: firing-subsystem chip + goal line
+    const int StateH  = 62;   // state strip: DOING NOW pill | GOAL line
     const int FooterH = 22;
     const int MinActH = 140;
     const int CardHeadH = 34; // card title band - body starts here
 
     // ---- type scale (4.2) - the only fonts in the file ------------------------
-    static Font FTitle  = new Font("Segoe UI Semibold", 16f);
-    static Font FHeader = new Font("Segoe UI", 8.5f, FontStyle.Bold);
+    static Font FTitle  = new Font("Segoe UI Semibold", 13f);
+    static Font FHeader = new Font("Segoe UI Semibold", 9.25f);
+    static Font FIconS  = new Font("Segoe MDL2 Assets", 8.5f);
+    static Font FLog    = new Font("Segoe UI", 9f);
+    static Font FGoal   = new Font("Segoe UI", 10.5f);
+    static Font FCap    = new Font("Segoe UI Semibold", 7.5f);
     static Font FBody   = new Font("Segoe UI", 9.75f);
     static Font FBodyB  = new Font("Segoe UI", 9.75f, FontStyle.Bold);
     static Font FLabel  = new Font("Segoe UI", 8.25f);
@@ -68,22 +74,25 @@ class Animus : Form
     static Font FSmallB = new Font("Segoe UI", 8f, FontStyle.Bold);
 
     // ---- palette (4.5) --------------------------------------------------------
-    static Color Bg     = Color.FromArgb(0x11, 0x11, 0x16);
-    static Color Card   = Color.FromArgb(0x1A, 0x1A, 0x22);
-    static Color Border = Color.FromArgb(0x2A, 0x2A, 0x36);
-    static Color Rail   = Color.FromArgb(0x16, 0x16, 0x1E);
-    static Color Input  = Color.FromArgb(0x24, 0x24, 0x2F);
-    static Color Txt    = Color.FromArgb(0xE8, 0xE8, 0xEE);
-    static Color Muted  = Color.FromArgb(0x8A, 0x8A, 0x99);
-    static Color Faint  = Color.FromArgb(0x62, 0x62, 0x70);
-    static Color Accent = Color.FromArgb(0x6C, 0x5C, 0xE7);
-    static Color AccentHi = Color.FromArgb(0x7D, 0x6D, 0xF0);
-    static Color Accent2 = Color.FromArgb(0x9E, 0x92, 0xF5);  // accent on a dark fill (chips, counts)
-    static Color Ghost  = Color.FromArgb(0x33, 0x33, 0x40);
-    static Color GhostHi = Color.FromArgb(0x3E, 0x3E, 0x4D);
-    static Color Danger = Color.FromArgb(0xB5, 0x45, 0x45);
-    static Color DangerHi = Color.FromArgb(0xC9, 0x50, 0x50);
-    static Color Green  = Color.FromArgb(0x40, 0xC0, 0x57);
+    static Color Bg     = Color.FromArgb(0x0E, 0x10, 0x14);
+    static Color Card   = Color.FromArgb(0x17, 0x19, 0x20);
+    static Color Border = Color.FromArgb(0x25, 0x28, 0x32);
+    static Color Rail   = Color.FromArgb(0x13, 0x15, 0x1B);
+    static Color Input  = Color.FromArgb(0x1F, 0x22, 0x2B);
+    static Color Tile   = Color.FromArgb(0x1C, 0x1F, 0x27);   // stat tiles inside a card
+    static Color Txt    = Color.FromArgb(0xE6, 0xE8, 0xEE);
+    static Color Muted  = Color.FromArgb(0x8C, 0x91, 0xA1);
+    static Color Faint  = Color.FromArgb(0x5E, 0x63, 0x73);
+    static Color Accent = Color.FromArgb(0x70, 0x60, 0xEE);
+    static Color AccentHi = Color.FromArgb(0x82, 0x73, 0xF5);
+    static Color Accent2 = Color.FromArgb(0xA3, 0x98, 0xF7);  // accent on a dark fill (chips, counts)
+    static Color Ghost  = Color.FromArgb(0x26, 0x29, 0x33);
+    static Color GhostHi = Color.FromArgb(0x31, 0x35, 0x41);
+    static Color Danger = Color.FromArgb(0xC4, 0x46, 0x4E);
+    static Color DangerHi = Color.FromArgb(0xD6, 0x55, 0x5D);
+    static Color Green  = Color.FromArgb(0x3F, 0xC2, 0x6B);
+    static Color Blue   = Color.FromArgb(0x5A, 0xA9, 0xE6);
+    static Color Teal   = Color.FromArgb(0x4C, 0xC9, 0xB0);
     // POV staleness chip (GUI-POV-V3 §4) — exact colours from the design table.
     static Color PovLive  = Color.FromArgb(110, 199, 132);
     static Color PovWarn  = Color.FromArgb(224, 177, 88);
@@ -104,15 +113,18 @@ class Animus : Form
     TextBox tbHost, tbPort, tbUser, tbVer, tbOps, tbCmd, tbGoal;
     TextBox tbAliases, tbBedrock, tbFloodgate, tbCtlHost, tbCtlPort;
     Label lbHost, lbPort, lbVer, lbUser, lbAuth, lbOps, lbAliases, lbBed, lbPre, lbApiH, lbApiP;
-    Label lbModel, lbBrainGoal, lbSchemHint;
+    Label lbModel, lbBrainGoal, lbSchemHint, capNow, capGoal;
     Button btnSave, btnSaveRe, btnRefresh, btnUse, btnApplyGoal, btnAddSchem, btnOpenSchem;
     Button btnStart, btnStop, btnSend;
-    ComboBox cbModel, cbSchem;
+    Picker cbModel, cbSchem;
     Button btnOffline, btnMs, btnBrainOn;
     Label lvName, lvPos, lvBiome, lvTime, lvThreat, lvPlayers, lvHp, lvFood, lvActivity;
     Label lkPos, lkBiome, lkTime, lkThreat, lkPlayers, lkActivity, lkHp, lkFood;
-    Panel hpTrack, foodTrack, hpFill, foodFill;
-    TextBox liveLog;
+    Bar hpFill, foodFill;
+    Label lkHpIcon, lkFoodIcon;
+    RichTextBox liveLog;
+    List<Rectangle> liveTiles = new List<Rectangle>();   // painted behind the status tiles
+    Rectangle dotPill;                                  // painted behind the three rail dots
     Canvas pov;
     List<Button> quickBtns = new List<Button>();
     ToolTip tips = new ToolTip();
@@ -120,7 +132,7 @@ class Animus : Form
     string authValue = "offline";
     bool brainEnabled = true;
     string brainGoal = "";
-    string goalText = "Goal: —";
+    string goalText = "—";
     string chipText = "OFFLINE";
 
     System.Windows.Forms.Timer statusTimer, liveTimer, povTimer;
@@ -132,7 +144,8 @@ class Animus : Form
     Process botProc, brainProc;          // headless children this panel owns
     volatile int stateFails = 0;         // consecutive /state failures (offline after 3)
     int liveTick = 0;
-    string lastLogText = "";             // /log delta tracking
+    string lastLogText = "";             // /log delta tracking (whole last response)
+    string lastLogLine = null;           // last rendered /log line (ms-stamped, so unique)
     List<string> cmdHistory = new List<string>();
     int histPos = -1;
 
@@ -171,6 +184,9 @@ class Animus : Form
             {
                 Animus f = new Animus();
                 f.StartPosition = FormStartPosition.Manual;
+                // "screen": render via PrintWindow - DrawToBitmap cannot render a
+                // RichTextBox's text, so the activity log only shows up this way.
+                bool onScreen = Array.IndexOf(a, "screen") >= 0;
                 f.Location = new Point(-4000, -4000); // off-screen so children realize + paint
                 f.ShowInTaskbar = false;
                 if (a.Length >= 3)
@@ -182,7 +198,14 @@ class Animus : Form
                 f.Show();
                 for (int i = 0; i < 30; i++) { Application.DoEvents(); Thread.Sleep(120); } // long enough for a live poll to land
                 Bitmap b = new Bitmap(f.Width, f.Height);
-                f.DrawToBitmap(b, new Rectangle(0, 0, b.Width, b.Height));
+                if (onScreen)
+                    using (Graphics g = Graphics.FromImage(b))
+                    {
+                        IntPtr hdc = g.GetHdc();
+                        try { PrintWindow(f.Handle, hdc, 2 /* PW_RENDERFULLCONTENT */); }
+                        finally { g.ReleaseHdc(hdc); }
+                    }
+                else f.DrawToBitmap(b, new Rectangle(0, 0, b.Width, b.Height));
                 b.Save(a[1]);
                 f.Close();
             }
@@ -205,6 +228,15 @@ class Animus : Form
         // reflowed into an overlapping mess. Relayout() does all the arithmetic.
         AutoScaleMode = AutoScaleMode.None;
         Text = "Animus";
+        // animus.ico is embedded as a resource (build-exe.ps1 /resource) so each size
+        // picks its own frame; ExtractAssociatedIcon only yields a blurry 32px one.
+        try
+        {
+            using (Stream st = typeof(Animus).Assembly.GetManifestResourceStream("animus.ico"))
+                if (st != null) Icon = new Icon(st);   // all frames: WinForms picks 16 and 32 itself
+                else Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+        }
+        catch { }
         FormBorderStyle = FormBorderStyle.Sizable;
         MaximizeBox = true;
         BackColor = Bg;
@@ -266,6 +298,9 @@ class Animus : Form
 
         // Shown, not BeginInvoke: in the constructor the form has no window handle yet,
         // and BeginInvoke on a handle-less control throws before the panel ever appears.
+        // WinForms focuses the first tab stop on show, which selects all of its text - with
+        // setup open that painted the host field solid blue. Nothing is focused until clicked.
+        Shown += delegate { ActiveControl = null; tbHost.SelectionLength = 0; };
         if (autostart) Shown += delegate { btnStart.PerformClick(); };
     }
 
@@ -279,13 +314,10 @@ class Animus : Form
         railBar.BackColor = Rail;
         Controls.Add(railBar);
         railBar.BringToFront();
-        railBar.Paint += delegate(object s, PaintEventArgs e) {
-            using (Pen p = new Pen(Border))
-                e.Graphics.DrawLine(p, 0, railBar.Height - 1, railBar.Width, railBar.Height - 1);
-        };
+        railBar.Paint += RailPaint;
 
-        title = Lbl(railBar, "ANIMUS", FTitle, Txt);
-        lblTarget = Lbl(railBar, "", FSmall, Faint);
+        title = Lbl(railBar, "Animus", FTitle, Txt);
+        lblTarget = Lbl(railBar, "", FSmall, Muted);
         lblTarget.AutoEllipsis = true;
 
         lblOllama = MakeStatus("Ollama");
@@ -294,28 +326,103 @@ class Animus : Form
 
         btnSetup = MakeBtn(railBar, "Setup", BtnPrim, Ghost, GhostHi, Txt, FBodyB, 8,
                            delegate { ShowSetup(!setupOpen); });
+        ((FlatBtn)btnSetup).Glyph = "\uE713";
         tips.SetToolTip(btnSetup, "Server, brain model and schematics — everything you set once.");
 
-        btnStart = Primary(railBar, "Start Bot + Brain", Accent, AccentHi, delegate {
+        btnStart = Primary(railBar, "Start", Accent, AccentHi, delegate {
             SetStop("Stop", Danger); // reset the stop button when (re)starting
             string m = cbModel.Text.Trim(); RunBg(delegate { StartBot(); StartBrain(m); });
         });
         tips.SetToolTip(btnStart, "Bot + brain run headless — their output lands in the activity log below. "
                                 + "This panel owns them: closing it stops the bot.");
         btnStop = Primary(railBar, "Stop", Danger, DangerHi, delegate { RunBg(StopAll); });
+        ((FlatBtn)btnStart).Glyph = "\uE768";
+        ((FlatBtn)btnStop).Glyph = "\uE71A";
+        tips.SetToolTip(btnStop, "Stop the bot and the brain.");
+        UpdateRunButtons();
+    }
+
+    // Only ONE of Start/Stop is the loud button: the one that changes the current state.
+    // The other stays clickable but quiet, so "is it running?" is answered by colour alone.
+    bool runShownUp = false, runShownInit = false;
+    void UpdateRunButtons()
+    {
+        if (btnStart == null || btnStop == null) return;
+        bool up = botUp;
+        // A bot that came up without our Start button (reconnect, external launch) must not
+        // wear a stale "Stopped"; a FAILED stop is resolved once the bot is actually down.
+        if (up && btnStop.Text == "Stopped") { btnStop.Text = "Stop"; runShownInit = false; }
+        if (!up && btnStop.Text == "Stop FAILED") { btnStop.Text = "Stop"; runShownInit = false; }
+        if (runShownInit && up == runShownUp) return;
+        runShownInit = true; runShownUp = up;
+        StyleBtn(btnStart, up ? Ghost : Accent, up ? GhostHi : AccentHi, up ? Muted : Color.White);
+        if (btnStop.Text == "Stop" || btnStop.Text == "Stopped")
+            StyleBtn(btnStop, up ? Danger : Ghost, up ? DangerHi : GhostHi, up ? Color.White : Muted);
+    }
+
+    static void StyleBtn(Button b, Color bg, Color hi, Color fg)
+    {
+        b.BackColor = bg; b.FlatAppearance.MouseOverBackColor = hi; b.ForeColor = fg;
+        b.Invalidate();
+    }
+
+    void RailPaint(object s, PaintEventArgs e)
+    {
+        Graphics g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using (Pen p = new Pen(Border))
+            g.DrawLine(p, 0, railBar.Height - 1, railBar.Width, railBar.Height - 1);
+        DrawLogo(g, new Rectangle(S6, (RailH - 32) / 2, 32, 32));
+        if (dotPill.Width > 0)
+            using (GraphicsPath gp = RoundPath(dotPill, dotPill.Height / 2))
+            {
+                using (SolidBrush b = new SolidBrush(Card)) g.FillPath(b, gp);
+                using (Pen pen = new Pen(Border)) g.DrawPath(pen, gp);
+            }
+    }
+
+    // The mark: an indigo rounded tile with a stylised block-and-eye. Shared by the
+    // rail and the window icon so the taskbar and the panel look like one product.
+    static void DrawLogo(Graphics g, Rectangle r)
+    {
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using (GraphicsPath gp = RoundPath(r, Math.Max(3, r.Width * 7 / 32)))
+        using (LinearGradientBrush lb = new LinearGradientBrush(r, Color.FromArgb(0x8B, 0x7B, 0xFF),
+                                                              Color.FromArgb(0x4E, 0x3C, 0xD0), 45f))
+            g.FillPath(lb, gp);
+        float u = r.Width / 32f;
+        // isometric cube outline
+        PointF c = new PointF(r.X + 16 * u, r.Y + 16.5f * u);
+        // same geometry as tools/make-icon.cs - keep the two in step
+        PointF top = new PointF(c.X, c.Y - 10 * u), bot = new PointF(c.X, c.Y + 10 * u);
+        PointF lt = new PointF(c.X - 9 * u, c.Y - 5 * u), rt = new PointF(c.X + 9 * u, c.Y - 5 * u);
+        PointF lb2 = new PointF(c.X - 9 * u, c.Y + 5 * u), rb = new PointF(c.X + 9 * u, c.Y + 5 * u);
+        using (SolidBrush face = new SolidBrush(Color.FromArgb(80, 255, 255, 255)))
+            g.FillPolygon(face, new PointF[] { top, rt, c, lt });
+        using (Pen pen = new Pen(Color.White, Math.Max(1.2f, 2.2f * u)))
+        {
+            pen.LineJoin = LineJoin.Round;
+            g.DrawPolygon(pen, new PointF[] { top, rt, rb, bot, lb2, lt });
+            g.DrawLine(pen, lt, c); g.DrawLine(pen, rt, c); g.DrawLine(pen, c, bot);
+        }
     }
 
     // ---- state strip: the one line that answers "what is it doing right now" --
     void BuildStateStrip()
     {
         cState = MakeCard();
-        chip = Lbl(cState, chipText, FSmallB, Muted);
-        chip.TextAlign = ContentAlignment.MiddleCenter;
-        chip.BackColor = Mix(Card, Muted, 0.22);
-        chip.Height = 24;
-        Round(chip, 9);
+        cState.Paint += delegate(object s, PaintEventArgs e) {
+            // hairline between the NOW and GOAL columns
+            int x = chip.Right + S6 - S1;
+            using (Pen p = new Pen(Border)) e.Graphics.DrawLine(p, x, 12, x, cState.Height - 12);
+        };
+        capNow = Lbl(cState, "DOING NOW", FCap, Faint);
+        capGoal = Lbl(cState, "GOAL", FCap, Faint);
+        chip = new Pill();
+        chip.Text = chipText; chip.Font = FSmallB; chip.ForeColor = Muted;
+        cState.Controls.Add(chip);
 
-        lblGoal = Lbl(cState, goalText, FBody, Txt);
+        lblGoal = Lbl(cState, goalText, FGoal, Txt);
         lblGoal.TextAlign = ContentAlignment.MiddleLeft;
         lblGoal.AutoEllipsis = true;
     }
@@ -323,7 +430,7 @@ class Animus : Form
     void BuildServerCard()
     {
         cServer = MakeCard();
-        AddHeader(cServer, "SERVER CONNECTION");
+        AddHeader(cServer, "Server connection", "\uE774");
         lbHost = FieldLabel(cServer, "Server host / IP");
         tbHost = MakeInput(cServer, Cfg("host", "127.0.0.1"));
         lbPort = FieldLabel(cServer, "Port");
@@ -333,8 +440,8 @@ class Animus : Form
         lbUser = FieldLabel(cServer, "Bot username");
         tbUser = MakeInput(cServer, Cfg("username", "Claudebot"));
         lbAuth = FieldLabel(cServer, "Auth");
-        btnOffline = MakeToggle(cServer, "offline");
-        btnMs = MakeToggle(cServer, "microsoft");
+        btnOffline = MakeToggle(cServer, "Offline");
+        btnMs = MakeToggle(cServer, "Microsoft");
         btnOffline.Click += delegate { SelectAuth("offline"); };
         btnMs.Click += delegate { SelectAuth("microsoft"); };
         SelectAuth(Cfg("auth", "offline"));
@@ -352,23 +459,24 @@ class Animus : Form
         tbCtlPort = MakeInput(cServer, Cfg("controlPort", "3001"));
         btnSave   = Secondary(cServer, "Save", delegate { SaveConnection(false); });
         btnSaveRe = Primary(cServer, "Save + Reconnect", Accent, AccentHi, delegate { SaveConnection(true); });
+        ((FlatBtn)btnSaveRe).Glyph = "\uE72C";
     }
 
     void BuildBrainCard()
     {
         cBrain = MakeCard();
-        AddHeader(cBrain, "BRAIN");
+        AddHeader(cBrain, "Brain", "\uE82F");
         lbModel = FieldLabel(cBrain, "Model (Ollama)");
-        cbModel = MakeCombo(cBrain);
-        cbModel.DropDownStyle = ComboBoxStyle.DropDown;
+        cbModel = MakePicker(cBrain, true);
         cbModel.Text = LoadModel();
         btnRefresh = Secondary(cBrain, "Refresh", delegate { RunBg(RefreshModels); });
+        ((FlatBtn)btnRefresh).Glyph = "\uE72C";
         btnUse = Secondary(cBrain, "Use / Pull", delegate {
             string m = cbModel.Text.Trim(); RunBg(delegate { UseModel(m); });
         });
         lbBrainGoal = FieldLabel(cBrain, "Goal — what it does when idle (applies live)");
         tbGoal = MakeInput(cBrain, Goal);
-        btnBrainOn = MakeToggle(cBrain, "brain on");
+        btnBrainOn = MakeToggle(cBrain, "Brain on");
         btnBrainOn.Click += delegate { brainEnabled = !brainEnabled; StyleToggle(btnBrainOn, brainEnabled); RunBg(ApplyBrain); };
         StyleToggle(btnBrainOn, brainEnabled);
         btnApplyGoal = Secondary(cBrain, "Apply goal", delegate { RunBg(ApplyBrain); });
@@ -377,32 +485,42 @@ class Animus : Form
     void BuildSchemCard()
     {
         cSchem = MakeCard();
-        AddHeader(cSchem, "SCHEMATICS");
-        cbSchem = MakeCombo(cSchem);
-        cbSchem.DropDownStyle = ComboBoxStyle.DropDownList;
+        AddHeader(cSchem, "Schematics", "\uE80A");
+        cbSchem = MakePicker(cSchem, false);
         btnAddSchem = Secondary(cSchem, "Add file…", delegate { AddSchem(); });
         btnOpenSchem = Secondary(cSchem, "Open folder", delegate { OpenSchemFolder(); });
+        ((FlatBtn)btnAddSchem).Glyph = "\uE710";
+        ((FlatBtn)btnOpenSchem).Glyph = "\uE8B7";
         lbSchemHint = FieldLabel(cSchem, "Build one in-game with  !schematic <name>");
     }
 
     void BuildLiveCard()
     {
         cLive = MakeCard();
-        AddHeader(cLive, "STATUS");
-        lvName = Lbl(cLive, "bot offline — press Start", FValue, Muted);
+        AddHeader(cLive, "Status", "\uE9D9");
+        cLive.Paint += delegate(object s, PaintEventArgs e) {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            foreach (Rectangle r in liveTiles)
+                using (GraphicsPath gp = RoundPath(r, 8))
+                using (SolidBrush b = new SolidBrush(Tile)) g.FillPath(b, gp);
+        };
+        lvName = Lbl(cLive, "Bot offline — press Start", FBodyB, Muted);
         lvName.AutoEllipsis = true;
-        lkHp = FieldLabel(cLive, "Health");
+        lkHpIcon = Lbl(cLive, "\uEB52", FIconS, Color.FromArgb(0xF0, 0x5A, 0x6E));   // HeartFill
+        lkHp = Lbl(cLive, "Health", FLabel, Muted);
         lvHp = ValueLabel(cLive); lvHp.TextAlign = ContentAlignment.MiddleRight;
-        hpFill = MakeBar(cLive, out hpTrack);
-        lkFood = FieldLabel(cLive, "Food");
+        hpFill = MakeBar(cLive);
+        lkFoodIcon = Lbl(cLive, "\U0001F356", new Font("Segoe UI Symbol", 9f), Amber);   // meat on the bone
+        lkFood = Lbl(cLive, "Food", FLabel, Muted);
         lvFood = ValueLabel(cLive); lvFood.TextAlign = ContentAlignment.MiddleRight;
-        foodFill = MakeBar(cLive, out foodTrack);
-        lkPos = FieldLabel(cLive, "Position");     lvPos = ValueLabel(cLive);
-        lkTime = FieldLabel(cLive, "Time");        lvTime = ValueLabel(cLive);
-        lkBiome = FieldLabel(cLive, "Biome");      lvBiome = ValueLabel(cLive);
-        lkThreat = FieldLabel(cLive, "Threat");    lvThreat = ValueLabel(cLive);
-        lkPlayers = FieldLabel(cLive, "Players near"); lvPlayers = ValueLabel(cLive);
-        lkActivity = FieldLabel(cLive, "Doing");   lvActivity = ValueLabel(cLive);
+        foodFill = MakeBar(cLive);
+        lkPos = TileCap(cLive, "POSITION");     lvPos = ValueLabel(cLive);
+        lkTime = TileCap(cLive, "TIME");        lvTime = ValueLabel(cLive);
+        lkBiome = TileCap(cLive, "BIOME");      lvBiome = ValueLabel(cLive);
+        lkThreat = TileCap(cLive, "THREAT");    lvThreat = ValueLabel(cLive);
+        lkPlayers = TileCap(cLive, "PLAYERS NEARBY"); lvPlayers = ValueLabel(cLive);
+        lkActivity = TileCap(cLive, "ACTIVITY");   lvActivity = ValueLabel(cLive);
     }
 
     // Inventory used to be a 400-character run-on sentence squeezed under the vitals.
@@ -411,7 +529,7 @@ class Animus : Form
     void BuildInvCard()
     {
         cInv = MakeCard();
-        AddHeader(cInv, "INVENTORY");
+        AddHeader(cInv, "Inventory", "\uE7B8");
         invCanvas = new Canvas();
         invCanvas.BackColor = Card;
         cInv.Controls.Add(invCanvas);
@@ -458,7 +576,7 @@ class Animus : Form
     void BuildPovCard()
     {
         cPov = MakeCard();
-        AddHeader(cPov, "BOT POV");
+        AddHeader(cPov, "Bot view", "\uE722");
         pov = new Canvas();
         pov.BackColor = LogBg;
         cPov.Controls.Add(pov);
@@ -469,28 +587,31 @@ class Animus : Form
     void BuildActivityCard()
     {
         cAct = MakeCard();
-        AddHeader(cAct, "ACTIVITY");
-        liveLog = new TextBox();
-        liveLog.Multiline = true; liveLog.ReadOnly = true; liveLog.ScrollBars = ScrollBars.Vertical;
-        liveLog.BorderStyle = BorderStyle.None;
+        AddHeader(cAct, "Activity", "\uE81C");
+        liveLog = new RichTextBox();
+        liveLog.ReadOnly = true; liveLog.ScrollBars = RichTextBoxScrollBars.Vertical;
+        liveLog.BorderStyle = BorderStyle.None; liveLog.DetectUrls = false; liveLog.WordWrap = true;
+        liveLog.HideSelection = false;
         // Flat on the card, not a sunken black box inside it: one less border for the eye
         // to parse, and the log is the thing you read most.
         liveLog.BackColor = Card; liveLog.ForeColor = Color.FromArgb(0xBF, 0xBF, 0xCC);
-        liveLog.Font = FMono;
+        liveLog.Font = FLog;
         cAct.Controls.Add(liveLog);
         DarkScroll(liveLog);
 
         tbCmd = MakeInput(cAct, "");
-        SetPlaceholder(tbCmd, "type a command…  come · follow Steve · gather oak_log 10 · autobuild here");
+        SetPlaceholder(tbCmd, "Tell the bot what to do…   e.g. come · follow Steve · gather oak_log 10");
         tbCmd.KeyDown += CmdKeyDown;
         btnSend = Primary(cAct, "Send", Accent, AccentHi, delegate { SendCmd(); });
+        ((FlatBtn)btnSend).Glyph = "\uE724";
 
         // quick actions - one click for the commands you use every session
         string[] quick = { "come", "stop", "follow", "state", "inventory", "eat", "sleep" };
         for (int i = 0; i < quick.Length; i++)
         {
             string q = quick[i];
-            Button b = MakeBtn(cAct, q, BtnChip, Ghost, GhostHi, Muted, FSmallB, 8, delegate { SendQuick(q); });
+            Button b = MakeBtn(cAct, q, BtnChip, Ghost, GhostHi, Muted, FSmallB, BtnChip / 2, delegate { SendQuick(q); });
+            tips.SetToolTip(b, "Send  " + q);
             quickBtns.Add(b);
         }
     }
@@ -500,7 +621,7 @@ class Animus : Form
         // On the FORM, not in the scroller. It is positioned in form coordinates, and a
         // child sitting below the scroller's own client area is exactly how you conjure a
         // permanent scrollbar out of a page that already fits.
-        lblStatus = Lbl(this, "", FSmall, Muted);
+        lblStatus = Lbl(this, "", FSmall, Faint);
         lblStatus.AutoEllipsis = true;
         lblStatus.TextAlign = ContentAlignment.MiddleLeft;
     }
@@ -520,6 +641,8 @@ class Animus : Form
         cServer.Visible = on; cBrain.Visible = on; cSchem.Visible = on;
         cLive.Visible = !on; cPov.Visible = !on; cInv.Visible = !on; cAct.Visible = !on;
         if (btnSetup != null) btnSetup.Text = on ? "Close setup" : "Setup";
+        // don't open setup with the host field focused and its text selected (blue)
+        if (on) { ActiveControl = null; tbHost.SelectionLength = 0; }
         Relayout();
     }
 
@@ -545,9 +668,9 @@ class Animus : Form
 
             // The state strip belongs to BOTH views: "what is it doing right now" is never
             // something you should have to switch away from setup to read.
-            cState.SetBounds(X0, S3, CW, 40);
+            cState.SetBounds(X0, S4, CW, StateH);
             LayState(CW);
-            int top = S3 + 40 + S3;
+            int top = S4 + StateH + S4;
 
             int bottom = setupOpen ? LaySetup(X0, top, CW, viewH) : LayDash(X0, top, CW, viewH);
             // Zero, not viewH: asking for a virtual height EQUAL to the viewport is what
@@ -560,31 +683,38 @@ class Animus : Form
 
     void LayRail(int W)
     {
-        title.SetBounds(S6, 13, 118, 30);
+        int tx = S6 + 32 + S3;
+        title.SetBounds(tx, 8, 160, 24);
         int y = (RailH - BtnPrim) / 2;
         int x = W - S6;
-        x -= 88;        btnStop.SetBounds(x, y, 88, BtnPrim);
-        x -= S2 + 168;  btnStart.SetBounds(x, y, 168, BtnPrim);
-        x -= S3 + 104;  btnSetup.SetBounds(x, y, 104, BtnPrim);
+        x -= 96;        btnStop.SetBounds(x, y, 96, BtnPrim);
+        x -= S2 + 104;  btnStart.SetBounds(x, y, 104, BtnPrim);
+        x -= S4 + 124;  btnSetup.SetBounds(x, y, 124, BtnPrim);
 
         // The three dots collapse to bare dots before they would collide with the
         // target line; the tooltip keeps naming them either way.
-        bool compact = x - (S6 + 130) < 3 * 78 + S6;
-        int dw = compact ? 26 : 78;
-        int dx = x - S4 - 3 * dw;
+        bool compact = x - (tx + 160) < 3 * 74 + 2 * S6;
+        int dw = compact ? 22 : 74;
+        int pillW = 3 * dw + 2 * S3 - (compact ? 0 : S2);
+        int px = x - S4 - pillW;
+        dotPill = new Rectangle(px, (RailH - 30) / 2, pillW, 30);
+        int dx = px + S3;
         PlaceDot(lblOllama, "Ollama", dx, dw, compact);
         PlaceDot(lblBot, "Bot", dx + dw, dw, compact);
         PlaceDot(lblBrain, "Brain", dx + 2 * dw, dw, compact);
+        railBar.Invalidate();
 
-        int tx = S6 + 126;
-        lblTarget.SetBounds(tx, 22, Math.Max(60, dx - S4 - tx), 16);
+        lblTarget.SetBounds(tx, 31, Math.Max(60, px - S4 - tx), 16);
     }
 
     void LayState(int inner)
     {
         PlaceChip();
-        int gx = chip.Right + S3;
-        lblGoal.SetBounds(gx, 8, Math.Max(60, inner - gx - S3), 24);
+        capNow.SetBounds(S4, 10, Math.Max(80, chip.Width), 14);
+        int gx = chip.Right + 2 * S6 - S1;
+        capGoal.SetBounds(gx, 10, 120, 14);
+        lblGoal.SetBounds(gx, 26, Math.Max(60, inner - gx - S4), 26);
+        cState.Invalidate();
     }
 
     // ---- dashboard -----------------------------------------------------------
@@ -645,16 +775,16 @@ class Animus : Form
     {
         Dot d = l as Dot;
         if (d != null) d.Caption = compact ? "" : name;
-        l.SetBounds(x, (RailH - 20) / 2, w, 20);
+        l.SetBounds(x, (RailH - 20) / 2, w - (compact ? 0 : S1), 20);
         tips.SetToolTip(l, name);
         l.Invalidate();
     }
 
     void PlaceChip()
     {
-        int w = TextRenderer.MeasureText(chip.Text, FSmallB).Width + 22;
-        if (w < 84) w = 84;
-        chip.SetBounds(S3, 8, w, 24);
+        int w = TextRenderer.MeasureText(chip.Text, FSmallB).Width + 30;
+        if (w < 96) w = 96;
+        chip.SetBounds(S4, 28, w, 24);
     }
 
     // ---- per-card layouts (return the y of the last control's bottom) ---------
@@ -675,8 +805,8 @@ class Animus : Form
         y += FieldRow;
 
         lbAuth.SetBounds(S3, y, 172, 15);
-        btnOffline.SetBounds(S3, y + 18, 78, BtnSec);
-        btnMs.SetBounds(S3 + 78 + S2, y + 18, 88, BtnSec);
+        btnOffline.SetBounds(S3, y + 19, 78, BtnSec);
+        btnMs.SetBounds(S3 + 78 + S2, y + 19, 88, BtnSec);
         int opsX = S3 + 174 + S3;
         lbOps.SetBounds(opsX, y, Math.Max(60, inner - 174 - S3), 15);
         PlaceInput(tbOps, opsX, y + 18, Math.Max(60, inner - 174 - S3));
@@ -704,11 +834,11 @@ class Animus : Form
     {
         int y = CardHeadH;
         lbModel.SetBounds(S3, y, inner, 15);
-        int bw1 = 80, bw2 = 96;
+        int bw1 = 96, bw2 = 100;
         int cw = Math.Max(80, inner - bw1 - bw2 - 2 * S2);
-        PlaceCombo(cbModel, S3, y + 18, cw);
-        btnRefresh.SetBounds(S3 + cw + S2, y + 18, bw1, BtnSec);
-        btnUse.SetBounds(S3 + cw + S2 + bw1 + S2, y + 18, bw2, BtnSec);
+        PlacePicker(cbModel, S3, y + 18, cw);
+        btnRefresh.SetBounds(S3 + cw + S2, y + 19, bw1, BtnSec);
+        btnUse.SetBounds(S3 + cw + S2 + bw1 + S2, y + 19, bw2, BtnSec);
         y += FieldRow;
 
         lbBrainGoal.SetBounds(S3, y, inner, 15);
@@ -723,47 +853,55 @@ class Animus : Form
     int LaySchem(int inner)
     {
         int y = CardHeadH;
-        int bw1 = 88, bw2 = 100;
+        int bw1 = 100, bw2 = 120;
         int cw = Math.Max(80, inner - bw1 - bw2 - 2 * S2);
-        PlaceCombo(cbSchem, S3, y, cw);
-        btnAddSchem.SetBounds(S3 + cw + S2, y, bw1, BtnSec);
-        btnOpenSchem.SetBounds(S3 + cw + S2 + bw1 + S2, y, bw2, BtnSec);
+        PlacePicker(cbSchem, S3, y, cw);
+        btnAddSchem.SetBounds(S3 + cw + S2, y + 1, bw1, BtnSec);
+        btnOpenSchem.SetBounds(S3 + cw + S2 + bw1 + S2, y + 1, bw2, BtnSec);
         lbSchemHint.SetBounds(S3, y + BtnSec + S2, inner, 15);
         return y + BtnSec + S2 + 15;
     }
 
     int LayLive(int inner)
     {
-        int y = CardHeadH;
+        int y = CardHeadH + 2;
         lvName.SetBounds(S3, y, inner, 20);
-        y += 28;
+        y += 30;
 
-        lkHp.SetBounds(S3, y, LabelW, 15);
-        lvHp.SetBounds(S3 + inner - 96, y, 96, 15);
-        hpTrack.SetBounds(S3, y + 18, inner, 8);
-        y += 34;
-        lkFood.SetBounds(S3, y, LabelW, 15);
-        lvFood.SetBounds(S3 + inner - 96, y, 96, 15);
-        foodTrack.SetBounds(S3, y + 18, inner, 8);
-        y += 38;
+        VitalRow(lkHpIcon, lkHp, lvHp, hpFill, y, inner);
+        y += 36;
+        VitalRow(lkFoodIcon, lkFood, lvFood, foodFill, y, inner);
+        y += 40;
 
-        int half = (inner - S3) / 2;
-        Row(lkPos, lvPos, S3, y, half);
-        Row(lkTime, lvTime, S3 + half + S3, y, inner - half - S3);
-        y += RowH;
-        Row(lkBiome, lvBiome, S3, y, half);
-        Row(lkThreat, lvThreat, S3 + half + S3, y, inner - half - S3);
-        y += RowH;
-        Row(lkPlayers, lvPlayers, S3, y, inner);
-        y += RowH;
-        Row(lkActivity, lvActivity, S3, y, inner);
-        return y + RowH;
+        liveTiles.Clear();
+        int half = (inner - S2) / 2;
+        TileAt(lkPos, lvPos, S3, y, half);
+        TileAt(lkTime, lvTime, S3 + half + S2, y, inner - half - S2);
+        y += TileH + S2;
+        TileAt(lkBiome, lvBiome, S3, y, half);
+        TileAt(lkThreat, lvThreat, S3 + half + S2, y, inner - half - S2);
+        y += TileH + S2;
+        TileAt(lkPlayers, lvPlayers, S3, y, inner);
+        y += TileH + S2;
+        TileAt(lkActivity, lvActivity, S3, y, inner);
+        cLive.Invalidate();
+        return y + TileH;
     }
 
-    void Row(Label k, Label v, int x, int y, int w)
+    const int TileH = 46;
+    void TileAt(Label k, Label v, int x, int y, int w)
     {
-        k.SetBounds(x, y + 2, LabelW, 15);
-        v.SetBounds(x + LabelW + S2, y, Math.Max(40, w - LabelW - S2), 18);
+        liveTiles.Add(new Rectangle(x, y, w, TileH));
+        k.SetBounds(x + S3, y + 7, w - 2 * S3, 14);
+        v.SetBounds(x + S3, y + 21, Math.Max(40, w - 2 * S3), 19);
+    }
+
+    void VitalRow(Label icon, Label k, Label v, Bar bar, int y, int inner)
+    {
+        icon.SetBounds(S3, y, 18, 16);
+        k.SetBounds(S3 + 20, y, 80, 16);
+        v.SetBounds(S3 + inner - 96, y, 96, 16);
+        bar.SetBounds(S3, y + 21, inner, 8);
     }
 
     void LayAct(int inner, int cardH)
@@ -772,7 +910,7 @@ class Animus : Form
         int cmdY = quickY - S3 - InputH;
         int logH = Math.Max(48, cmdY - S3 - CardHeadH);
         liveLog.SetBounds(S3, CardHeadH, inner, logH);
-        int sendW = 84;
+        int sendW = 92;
         PlaceInput(tbCmd, S3, cmdY, inner - S2 - sendW);
         btnSend.SetBounds(S3 + inner - sendW, cmdY - 1, sendW, BtnPrim);
         int qx = S3;
@@ -828,8 +966,8 @@ class Animus : Form
         }
         // hairline under the title band - the only rule in the whole panel, and it is
         // what makes a card's heading read as a heading instead of another value.
-        if (c.Height > CardHeadH + 8)
-            using (Pen pen = new Pen(Border))
+        if (c.Height > CardHeadH + 8 && c.Height > StateH)
+            using (Pen pen = new Pen(Mix(Card, Border, 0.7)))
                 g.DrawLine(pen, S3, CardHeadH - S2, c.Width - S3, CardHeadH - S2);
     }
 
@@ -850,10 +988,18 @@ class Animus : Form
     // Section headings are MUTED, not accent-purple. Accent is reserved for the things
     // you can act on (primary buttons, an on toggle, an item count) - when every heading
     // shouts in the accent colour, nothing does.
-    void AddHeader(Control parent, string text)
+    void AddHeader(Control parent, string text, string glyph)
     {
-        Label l = Lbl(parent, text.ToUpperInvariant(), FHeader, Muted);
-        l.SetBounds(S3, 10, 460, 16);
+        Label ic = Lbl(parent, glyph, FIconS, Accent2);
+        ic.SetBounds(S3, 10, 18, 16);
+        ic.TextAlign = ContentAlignment.MiddleLeft;
+        Label l = Lbl(parent, text, FHeader, Txt);
+        l.SetBounds(S3 + 20, 8, 400, 18);
+    }
+
+    Label TileCap(Control parent, string text)
+    {
+        return Lbl(parent, text, FCap, Faint);
     }
 
     Label FieldLabel(Control parent, string text)
@@ -871,23 +1017,76 @@ class Animus : Form
         return l;
     }
 
-    Panel MakeBar(Control parent, out Panel track)
+    Bar MakeBar(Control parent)
     {
-        track = new Panel();
-        track.SetBounds(0, 0, 100, 8); track.BackColor = Input;
-        parent.Controls.Add(track); Round(track, 4);
-        Panel fill = new Panel();
-        fill.SetBounds(0, 0, 0, 8); fill.BackColor = Green;
-        track.Controls.Add(fill);
-        return fill;
+        Bar b = new Bar();
+        b.SetBounds(0, 0, 100, 8);
+        parent.Controls.Add(b);
+        return b;
     }
 
-    void SetBar(Panel fill, double v, double max)
+    void SetBar(Bar bar, double v, double max)
     {
-        fill.Height = fill.Parent.Height;
-        int w = (int)Math.Round(Math.Max(0, Math.Min(1, v / max)) * fill.Parent.Width);
-        fill.Width = w;
-        fill.BackColor = v > max * 0.6 ? Green : v > max * 0.3 ? Amber : Red;
+        double f = max <= 0 ? 0 : Math.Max(0, Math.Min(1, v / max));
+        Color c = v > max * 0.6 ? Green : v > max * 0.3 ? Amber : Red;
+        if (Math.Abs(f - bar.Frac) < 0.001 && bar.Fill == c) return;
+        bar.Frac = f; bar.Fill = c;
+        bar.Invalidate();
+    }
+
+    // Anti-aliased capsule bar. The old nested-panel bar was clipped by a Region, which
+    // has no anti-aliasing - the ends came out as stair-steps.
+    class Bar : Control
+    {
+        public double Frac;
+        public Color Fill = Green;
+        public Bar()
+        {
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint |
+                     ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+        }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            using (SolidBrush bg = new SolidBrush(Card)) g.FillRectangle(bg, ClientRectangle);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            Rectangle r = new Rectangle(0, 0, Width - 1, Height - 1);
+            using (GraphicsPath p = RoundPath(r, Height / 2))
+            using (SolidBrush t = new SolidBrush(Input)) g.FillPath(t, p);
+            int w = (int)Math.Round(Frac * (Width - 1));
+            if (w >= Height)
+                using (GraphicsPath p = RoundPath(new Rectangle(0, 0, w, Height - 1), Height / 2))
+                using (SolidBrush fb = new SolidBrush(Fill)) g.FillPath(fb, p);
+            else if (w > 0)
+                using (SolidBrush fb = new SolidBrush(Fill)) g.FillEllipse(fb, 0, 0, Height - 1, Height - 1);
+        }
+    }
+
+    // Rounded status pill (the DOING NOW chip): tinted fill, coloured dot, coloured text.
+    class Pill : Label
+    {
+        public Pill()
+        {
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint |
+                     ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+            AutoSize = false;
+        }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            using (SolidBrush bg = new SolidBrush(Card)) g.FillRectangle(bg, ClientRectangle);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            Color c = ForeColor;
+            using (GraphicsPath p = RoundPath(new Rectangle(0, 0, Width - 1, Height - 1), (Height - 1) / 2))
+            {
+                using (SolidBrush b = new SolidBrush(Mix(Card, c, 0.16))) g.FillPath(b, p);
+                using (Pen pen = new Pen(Mix(Card, c, 0.35))) g.DrawPath(pen, p);
+            }
+            int d = 7, cy = (Height - d) / 2;
+            using (SolidBrush b = new SolidBrush(c)) g.FillEllipse(b, 11, cy, d, d);
+            TextRenderer.DrawText(g, Text, Font, new Rectangle(23, 0, Width - 30, Height), c,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        }
     }
 
     TextBox MakeInput(Control parent, string val)
@@ -937,48 +1136,174 @@ class Animus : Form
         tb.LostFocus += delegate { if (tb.Text.Length == 0) { tb.Text = hint; tb.ForeColor = Muted; showing[0] = true; } };
     }
 
-    ComboBox MakeCombo(Control parent)
+    // The native ComboBox cannot be themed: it kept a white 1px frame and a light-grey
+    // arrow block on the dark card. A Picker is the same rounded input as every other
+    // field, plus a chevron that opens a dark menu of the choices. Editable pickers
+    // (model) accept typed names; read-only ones (schematic) are pick-only.
+    Picker MakePicker(Control parent, bool editable)
     {
-        ComboBox c = new ComboBox();
-        c.SetBounds(0, 0, 100, 26); c.FlatStyle = FlatStyle.Flat;
-        c.BackColor = Input; c.ForeColor = Txt; c.Font = FBody;
-        c.DrawMode = DrawMode.OwnerDrawFixed; c.ItemHeight = 22;
-        c.DrawItem += ComboDraw;
-        parent.Controls.Add(c);
-        return c;
+        Picker pk = new Picker(editable);
+        parent.Controls.Add(pk);
+        return pk;
     }
 
-    static void PlaceCombo(ComboBox c, int x, int y, int w)
+    static void PlacePicker(Picker p, int x, int y, int w)
     {
         if (w < 60) w = 60;
-        c.SetBounds(x, y + (InputH - c.Height) / 2, w, c.Height);
+        p.SetBounds(x, y, w, InputH);
+        p.tb.SetBounds(S3, S2, w - 2 * S3 - 22, 20);
     }
 
-    void ComboDraw(object s, DrawItemEventArgs e)
+    class Picker : Panel
     {
-        ComboBox cb = (ComboBox)s;
-        bool sel = (e.State & DrawItemState.Selected) != 0;
-        using (SolidBrush b = new SolidBrush(sel ? Accent : Input)) e.Graphics.FillRectangle(b, e.Bounds);
-        if (e.Index >= 0)
+        public TextBox tb = new TextBox();
+        public List<string> Items = new List<string>();
+        bool hot;
+        public Picker(bool editable)
         {
-            string t = cb.Items[e.Index].ToString();
-            TextRenderer.DrawText(e.Graphics, t, cb.Font, e.Bounds, Txt,
-                TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint |
+                     ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+            BackColor = Card; Cursor = Cursors.Hand;
+            tb.BorderStyle = BorderStyle.None; tb.BackColor = Input; tb.ForeColor = Txt; tb.Font = FBody;
+            tb.ReadOnly = !editable;
+            if (!editable) { tb.Cursor = Cursors.Hand; tb.Click += delegate { Open(); }; tb.TabStop = false; }
+            Controls.Add(tb);
+            Click += delegate { Open(); };
+            tb.KeyDown += delegate(object s, KeyEventArgs e) {
+                if (e.KeyCode == Keys.F4 || (e.Alt && e.KeyCode == Keys.Down)) { e.Handled = true; Open(); }
+            };
+            MouseEnter += delegate { SetHot(); };
+            MouseLeave += delegate { SetHot(); };
+            tb.MouseEnter += delegate { SetHot(); };
+            tb.MouseLeave += delegate { SetHot(); };
         }
+        // hover = pointer anywhere over the picker, including its child TextBox
+        void SetHot()
+        {
+            bool h = ClientRectangle.Contains(PointToClient(Cursor.Position));
+            if (h != hot) { hot = h; Invalidate(); }
+        }
+        public override string Text { get { return tb.Text; } set { tb.Text = value; } }
+        public new bool Focused { get { return tb.Focused; } }
+        public int SelectedIndex
+        {
+            get { return Items.IndexOf(tb.Text); }
+            set { if (value >= 0 && value < Items.Count) tb.Text = Items[value]; }
+        }
+        void Open()
+        {
+            ContextMenuStrip m = new ContextMenuStrip();
+            m.Renderer = new ToolStripProfessionalRenderer(new DarkMenuColors());
+            m.ShowImageMargin = false; m.Font = FBody; m.BackColor = Input;
+            if (Items.Count == 0)
+            {
+                ToolStripMenuItem none = new ToolStripMenuItem("(nothing to pick)");
+                none.Enabled = false; m.Items.Add(none);
+            }
+            foreach (string it in Items)
+            {
+                string v = it;
+                ToolStripMenuItem mi = new ToolStripMenuItem(v);
+                mi.ForeColor = v == tb.Text ? Accent2 : Txt;
+                mi.Click += delegate { tb.Text = v; };
+                m.Items.Add(mi);
+            }
+            m.MinimumSize = new Size(Width, 0);
+            m.Closed += delegate { BeginInvoke((MethodInvoker)m.Dispose); };
+            m.Show(this, new Point(0, Height + 2));
+        }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            using (SolidBrush s = new SolidBrush(Card)) g.FillRectangle(s, ClientRectangle);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (GraphicsPath p = RoundPath(new Rectangle(0, 0, Width - 1, Height - 1), 8))
+            {
+                using (SolidBrush b = new SolidBrush(Input)) g.FillPath(b, p);
+                using (Pen pen = new Pen(hot ? Mix(Border, Muted, 0.35) : Border)) g.DrawPath(pen, p);
+            }
+            TextRenderer.DrawText(g, "\uE70D", FIconS, new Rectangle(Width - 30, 0, 22, Height), Muted,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+        }
+    }
+
+    class DarkMenuColors : ProfessionalColorTable
+    {
+        public override Color MenuItemSelected { get { return GhostHi; } }
+        public override Color MenuItemBorder { get { return GhostHi; } }
+        public override Color MenuBorder { get { return Border; } }
+        public override Color ToolStripDropDownBackground { get { return Input; } }
+        public override Color ImageMarginGradientBegin { get { return Input; } }
+        public override Color ImageMarginGradientMiddle { get { return Input; } }
+        public override Color ImageMarginGradientEnd { get { return Input; } }
+        public override Color SeparatorDark { get { return Border; } }
     }
 
     Button MakeBtn(Control parent, string text, int h, Color bg, Color hi, Color fg, Font f, int radius, EventHandler onClick)
     {
-        Button b = new Button();
+        FlatBtn b = new FlatBtn();
         b.Text = text; b.SetBounds(0, 0, 76, h);
         b.FlatStyle = FlatStyle.Flat; b.FlatAppearance.BorderSize = 0;
         b.BackColor = bg; b.ForeColor = fg; b.Cursor = Cursors.Hand;
-        b.Font = f;
+        b.Font = f; b.Radius = radius;
+        b.Surface = parent == railBar ? Rail : Card;
         b.FlatAppearance.MouseOverBackColor = hi;
         b.Click += onClick;
-        Round(b, radius);
         parent.Controls.Add(b);
         return b;
+    }
+
+    // Fully owner-painted button: anti-aliased rounded fill (Region clipping gave jagged
+    // corners), hover + pressed states, and an optional Segoe MDL2 glyph before the text.
+    class FlatBtn : Button
+    {
+        public int Radius = 8;
+        public Color Surface = Card;
+        public string Glyph = "";
+        bool hover, down;
+        public FlatBtn()
+        {
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint |
+                     ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+        }
+        protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hover = false; down = false; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnMouseDown(MouseEventArgs e) { down = true; Invalidate(); base.OnMouseDown(e); }
+        protected override void OnMouseUp(MouseEventArgs e) { down = false; Invalidate(); base.OnMouseUp(e); }
+        protected override bool ShowFocusCues { get { return false; } }
+        protected override void OnEnabledChanged(EventArgs e) { hover = down = false; Invalidate(); base.OnEnabledChanged(e); }
+        protected override void OnVisibleChanged(EventArgs e) { hover = down = false; base.OnVisibleChanged(e); }
+        protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
+        protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            using (SolidBrush s = new SolidBrush(Surface)) g.FillRectangle(s, ClientRectangle);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            Color fill = hover ? FlatAppearance.MouseOverBackColor : BackColor;
+            if (down) fill = Mix(fill, Color.Black, 0.12);
+            if (!Enabled) fill = Mix(fill, Surface, 0.5);
+            using (GraphicsPath p = RoundPath(new Rectangle(0, 0, Width - 1, Height - 1), Radius))
+            {
+                using (SolidBrush b = new SolidBrush(fill)) g.FillPath(b, p);
+                if (Focused && ShowKeyboardCues)   // keyboard focus must be visible
+                    using (Pen pen = new Pen(Accent2)) g.DrawPath(pen, p);
+            }
+            Color fg = Enabled ? ForeColor : Faint;
+            if (Glyph.Length == 0)
+            {
+                TextRenderer.DrawText(g, Text, Font, ClientRectangle, fg,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+                return;
+            }
+            Size ts = TextRenderer.MeasureText(g, Text, Font, Size.Empty, TextFormatFlags.NoPadding);
+            int gw = 16, gap = 7, total = gw + gap + ts.Width;
+            int x = Math.Max(6, (Width - total) / 2);
+            TextRenderer.DrawText(g, Glyph, FIconS, new Rectangle(x, 0, gw, Height), fg,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(g, Text, Font, new Rectangle(x + gw + gap, 0, Width - x - gw - gap, Height), fg,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis);
+        }
     }
 
     Button Primary(Control parent, string text, Color bg, Color hi, EventHandler onClick)
@@ -989,12 +1314,7 @@ class Animus : Form
 
     Button MakeToggle(Control parent, string text)
     {
-        Button b = new Button();
-        b.Text = text; b.SetBounds(0, 0, 76, BtnSec);
-        b.FlatStyle = FlatStyle.Flat; b.FlatAppearance.BorderSize = 0; b.Cursor = Cursors.Hand;
-        b.Font = FBodyB;
-        Round(b, 8); parent.Controls.Add(b);
-        return b;
+        return MakeBtn(parent, text, BtnSec, Ghost, GhostHi, Muted, FBodyB, 8, delegate { });
     }
 
     void SelectAuth(string v)
@@ -1009,6 +1329,7 @@ class Animus : Form
         b.BackColor = on ? Accent : Ghost;
         b.ForeColor = on ? Color.White : Muted;
         b.FlatAppearance.MouseOverBackColor = on ? AccentHi : GhostHi;
+        b.Invalidate();
     }
 
     // A green "● Ollama" in one flat colour is a word that happens to start with a dot.
@@ -1021,12 +1342,12 @@ class Animus : Form
         {
             SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint |
                      ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
-            BackColor = Rail;
+            BackColor = Card;
         }
         protected override void OnPaint(PaintEventArgs e)
         {
             Graphics g = e.Graphics;
-            using (SolidBrush bg = new SolidBrush(Rail)) g.FillRectangle(bg, ClientRectangle);
+            using (SolidBrush bg = new SolidBrush(Card)) g.FillRectangle(bg, ClientRectangle);
             g.SmoothingMode = SmoothingMode.AntiAlias;
             int d = 8, cy = (Height - d) / 2;
             Color c = Up ? Green : Faint;
@@ -1127,8 +1448,9 @@ class Animus : Form
             if (!botUp)
             {
                 BeginInvoke((MethodInvoker)delegate {
-                    lvName.Text = "bot offline — press Start";
+                    lvName.Text = "Bot offline — press Start";
                     lvName.ForeColor = Muted;
+                    UpdateRunButtons();
                     SetChip("OFFLINE", Muted);
                     lblGoal.ForeColor = Muted;
                 });
@@ -1181,15 +1503,17 @@ class Animus : Form
         }
         if (st != null)
         {
-            lvName.Text = S(st, "name") + "  ·  " + S(st, "dimension") + "  ·  " + S(st, "gameMode");
+            lvName.Text = S(st, "name") + "   ·   " + S(st, "dimension") + "   ·   " + S(st, "gameMode");
             lvName.ForeColor = Txt;
+            UpdateRunButtons();
             double hp = D(st, "health"), food = D(st, "food");
             lvHp.Text = (hp % 1 == 0 ? hp.ToString("0") : hp.ToString("0.#")) + " / 20";
             lvFood.Text = food.ToString("0") + " / 20";
             SetBar(hpFill, hp, 20); SetBar(foodFill, food, 20);
             Dictionary<string, object> pos = Obj(st, "pos");
             SetVal(lvPos, pos == null ? "—" : ((int)D(pos, "x")) + ", " + ((int)D(pos, "y")) + ", " + ((int)D(pos, "z")));
-            SetVal(lvBiome, S(st, "biome"));
+            string biome = S(st, "biome");
+            SetVal(lvBiome, biome.Length == 0 ? "—" : biome.Replace('_', ' '));
             bool day = B(st, "isDay");
             bool rain = B(st, "isRaining");
             SetVal(lvTime, (day ? "day" : "night") + (rain ? " · raining" : ""));
@@ -1238,14 +1562,27 @@ class Animus : Form
         if (logTxt != null && logTxt != lastLogText)
         {
             // append only the new tail so the box doesn't jump while you're reading
-            string add = logTxt.StartsWith(lastLogText) && lastLogText.Length > 0
-                ? logTxt.Substring(lastLogText.Length) : logTxt;
+            // /log is a SLIDING window (tail of a ring), so a prefix test fails as soon as
+            // the window shifts and the whole tail was re-appended every poll. Dedupe by the
+            // last rendered line instead: render only what comes after its LAST occurrence;
+            // if it fell out of the window (gap, bot restart), render all after a separator.
             lastLogText = logTxt;
-            bool nearBottom = liveLog.SelectionStart >= liveLog.TextLength - 5 || liveLog.TextLength == 0;
-            liveLog.AppendText(add.TrimStart('\n').Replace("\n", "\r\n") + "\r\n");
-            if (liveLog.TextLength > 60000) // keep the box bounded
-            { liveLog.Text = liveLog.Text.Substring(liveLog.TextLength - 40000); liveLog.SelectionStart = liveLog.TextLength; }
-            if (nearBottom) { liveLog.SelectionStart = liveLog.TextLength; liveLog.ScrollToCaret(); }
+            List<string> lines = new List<string>();
+            foreach (string l in logTxt.Split('\n')) { string t = l.TrimEnd('\r'); if (t.Trim().Length > 0) lines.Add(t); }
+            int from = 0;
+            bool gap = false;
+            if (lastLogLine != null)
+            {
+                int at = lines.LastIndexOf(lastLogLine);
+                if (at >= 0) from = at + 1; else gap = true;
+            }
+            if (from < lines.Count)
+            {
+                List<string> add = lines.GetRange(from, lines.Count - from);
+                if (gap && liveLog.TextLength > 0) add.Insert(0, "\u0001gap");
+                lastLogLine = lines[lines.Count - 1];
+                WriteLog(add.ToArray());
+            }
         }
     }
 
@@ -1273,7 +1610,7 @@ class Animus : Form
             goalText = "Goal: " + S(checklist, "step") + "  (" + S(checklist, "n") + "/" + S(checklist, "of") + ")";
         else if (brainGoal.Length > 0) goalText = "Goal: " + brainGoal;
         else goalText = "Goal: —";
-        lblGoal.Text = goalText;
+        lblGoal.Text = goalText.StartsWith("Goal: ") ? goalText.Substring(6) : goalText;
         lblGoal.ForeColor = Txt;
         tips.SetToolTip(lblGoal, goalText);
 
@@ -1322,7 +1659,6 @@ class Animus : Form
         chipText = text;
         chip.Text = text;
         chip.ForeColor = c;
-        chip.BackColor = Mix(Card, c, 0.22);
         tips.SetToolTip(chip, text);
         PlaceChip();
         // The chip is as wide as its text, so the goal line has to move with it -
@@ -1899,11 +2235,151 @@ class Animus : Form
     {
         if (liveLog == null) return;
         if (liveLog.InvokeRequired) { try { liveLog.BeginInvoke((MethodInvoker)delegate { AppendLog(line); }); } catch { } return; }
-        bool nearBottom = liveLog.SelectionStart >= liveLog.TextLength - 5 || liveLog.TextLength == 0;
-        liveLog.AppendText(line.Replace("\n", " ") + "\r\n");
-        if (liveLog.TextLength > 60000)
-        { liveLog.Text = liveLog.Text.Substring(liveLog.TextLength - 40000); liveLog.SelectionStart = liveLog.TextLength; }
-        if (nearBottom) { liveLog.SelectionStart = liveLog.TextLength; liveLog.ScrollToCaret(); }
+        WriteLog(new string[] { line.Replace("\n", " ") });
+    }
+
+    // ---- activity log rendering ----------------------------------------------
+    // The raw feed is "[2026-09-27T18:22:44.044+02:00] (body) (body) message…" - a wall
+    // of ISO stamps and repeated tags. Rendered as: short time (faint) · tag (coloured
+    // per subsystem) · message, with over-long diagnostic lines cut (the full text stays
+    // in the bot's log files). Warnings/errors are tinted so they stand out.
+    static readonly Regex LogIsoRx = new Regex(@"^\[(\d{4}-\d\d-\d\dT(\d\d:\d\d:\d\d)[^\]]*)\]\s*((?:\([\w\-\.]+\)\s*)*)(.*)$");
+    static readonly Regex LogTagRx = new Regex(@"^\[([\w\-\.]+)\]\s*(.*)$");
+    static readonly Regex LogWarnRx = new Regex(@"\b(error|fail(ed|s)?|died|death|killed|crash|exception|stuck|refus\w*|can't|cannot|lost)\b", RegexOptions.IgnoreCase);
+    static readonly Regex LogGoodRx = new Regex(@"\b(arrived|done|complete[d]?|built|placed|crafted|saved|connected|spawned|success)\b", RegexOptions.IgnoreCase);
+    const int LogMaxLine = 260;
+    const int LogTagW = 9;   // fits "blueprint"; longer tags are cut so messages stay aligned
+
+    static Color TagColor(string tag)
+    {
+        switch (tag)
+        {
+            case "move": case "nav": case "path": return Blue;
+            case "build": case "blueprint": case "schem": return Accent2;
+            case "brain": case "llm": case "chat": case "say": return Teal;
+            case "combat": case "threat": case "death": case "grave": case "graves": return Red;
+            case "food": case "farm": case "gather": case "mine": case "mining": case "craft": case "smelt": return Amber;
+            case "gui": case "login": return Green;
+            default: return Muted;
+        }
+    }
+
+    [DllImport("user32.dll")] static extern bool PrintWindow(IntPtr hwnd, IntPtr hdc, uint flags);
+    [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, ref Point p);
+    [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, IntPtr l);
+    const int EM_GETSCROLLPOS = 0x04DD, EM_SETSCROLLPOS = 0x04DE, WM_SETREDRAW = 0x000B;
+
+    void WriteLog(string[] lines)
+    {
+        if (liveLog == null) return;
+        // Follow the tail only when the reader is already at the bottom; otherwise keep
+        // their scroll position exactly where it is while lines arrive.
+        bool atBottom = true;
+        if (liveLog.IsHandleCreated && liveLog.TextLength > 0)
+        {
+            int lastVisible = liveLog.GetCharIndexFromPosition(new Point(2, liveLog.ClientSize.Height - 2));
+            atBottom = liveLog.GetLineFromCharIndex(lastVisible) >= liveLog.GetLineFromCharIndex(liveLog.TextLength) - 1;
+        }
+        Point scroll = Point.Empty;
+        int selStart = liveLog.SelectionStart, selLen = liveLog.SelectionLength;
+        if (liveLog.IsHandleCreated)
+        {
+            SendMessage(liveLog.Handle, EM_GETSCROLLPOS, IntPtr.Zero, ref scroll);
+            SendMessage(liveLog.Handle, WM_SETREDRAW, IntPtr.Zero, IntPtr.Zero);
+        }
+        try
+        {
+            liveLog.ReadOnly = false;
+            foreach (string raw0 in lines)
+            {
+                string raw = raw0.TrimEnd('\r', ' ');
+                if (raw.Length == 0) continue;
+                if (raw == "\u0001gap")
+                {
+                    if (liveLog.TextLength > 0) Put("\n", FLog, Txt);
+                    liveLog.SelectionIndent = 0; liveLog.SelectionHangingIndent = 0;
+                    Put("        ···  log resumed", FSmall, Faint);
+                    continue;
+                }
+                string time = "", tag = "", msg = raw;
+                Match m = LogIsoRx.Match(raw);
+                if (m.Success)
+                {
+                    time = m.Groups[2].Value;
+                    Match t = Regex.Match(m.Groups[3].Value, @"\(([\w\-\.]+)\)");
+                    if (t.Success) tag = t.Groups[1].Value;
+                    msg = m.Groups[4].Value;
+                }
+                else
+                {
+                    Match t = LogTagRx.Match(raw);
+                    if (t.Success) { tag = t.Groups[1].Value; msg = t.Groups[2].Value; }
+                    time = DateTime.Now.ToString("HH:mm:ss");
+                    // a child's console line may itself carry the bot's stamped format
+                    Match inner = LogIsoRx.Match(msg);
+                    if (inner.Success)
+                    {
+                        time = inner.Groups[2].Value;
+                        Match t2 = Regex.Match(inner.Groups[3].Value, @"\(([\w\-\.]+)\)");
+                        if (t2.Success) tag = t2.Groups[1].Value;
+                        msg = inner.Groups[4].Value;
+                    }
+                }
+                if (!m.Success && tag.Length == 0 && raw0.StartsWith(" ")) time = "";   // continuation line
+                if (msg.Length > LogMaxLine) msg = msg.Substring(0, LogMaxLine - 1) + "…";
+                Color mc = LogWarnRx.IsMatch(msg) ? Amber : LogGoodRx.IsMatch(msg) ? Mix(Txt, Green, 0.35) : Color.FromArgb(0xC8, 0xCB, 0xD6);
+
+                if (liveLog.TextLength > 0) Put("\n", FLog, Txt);
+                // wrapped continuation lines hang under the message, not under the time
+                liveLog.Select(liveLog.TextLength, 0);
+                liveLog.SelectionIndent = 0;
+                liveLog.SelectionHangingIndent = LogHang();
+                Put((time.Length > 0 ? time : "        ") + "  ", FMono, Faint);
+                Put(tag.PadRight(LogTagW).Substring(0, LogTagW) + "  ", FMono, TagColor(tag.ToLowerInvariant()));
+                Put(msg, FLog, mc);
+            }
+            // keep the box bounded: drop the oldest third - but only while following the
+            // tail, so a reader scrolled up never has the text yanked out from under them
+            if (liveLog.TextLength > 80000 && atBottom && selLen == 0)
+            {
+                int cut = liveLog.GetFirstCharIndexFromLine(liveLog.GetLineFromCharIndex(liveLog.TextLength / 3) + 1);
+                if (cut > 0) { liveLog.Select(0, cut); liveLog.SelectedText = ""; }
+            }
+        }
+        finally
+        {
+            liveLog.ReadOnly = true;
+            if (liveLog.IsHandleCreated)
+            {
+                if (atBottom && selLen == 0) { liveLog.Select(liveLog.TextLength, 0); liveLog.ScrollToCaret(); }
+                else
+                {
+                    // the reader is reading or has text selected: give both back untouched
+                    if (selStart + selLen <= liveLog.TextLength) liveLog.Select(selStart, selLen);
+                    SendMessage(liveLog.Handle, EM_SETSCROLLPOS, IntPtr.Zero, ref scroll);
+                }
+                SendMessage(liveLog.Handle, WM_SETREDRAW, (IntPtr)1, IntPtr.Zero);
+                liveLog.Invalidate();
+            }
+        }
+    }
+
+    int logHang = -1;
+    int LogHang()
+    {
+        if (logHang < 0)
+            using (Graphics g = liveLog.CreateGraphics())
+                logHang = TextRenderer.MeasureText(g, "00:00:00  " + "".PadRight(LogTagW) + "  ", FMono,
+                                                   Size.Empty, TextFormatFlags.NoPadding).Width;
+        return logHang;
+    }
+
+    void Put(string text, Font f, Color c)
+    {
+        liveLog.Select(liveLog.TextLength, 0);
+        liveLog.SelectionFont = f;
+        liveLog.SelectionColor = c;
+        liveLog.SelectedText = text;
     }
 
     static void RunBg(ThreadStart work)
@@ -1998,14 +2474,14 @@ class Animus : Form
         string list = RunCapture("ollama", "list");
         if (list == null) { Log("Could not reach Ollama to list models."); return; }
         List<string> names = ParseModelNames(list);
-        string current = cbModel.Text;
         cbModel.BeginInvoke((MethodInvoker)delegate {
+            string current = cbModel.Text;
             cbModel.Items.Clear();
             foreach (string n in names) cbModel.Items.Add(n);
             if (current != null && current.Trim().Length > 0) cbModel.Text = current;
             else if (names.Count > 0) cbModel.Text = names[0];
         });
-        Log(names.Count == 0 ? "No models installed — type a name and hit Use / Pull." : ("Models: " + string.Join(", ", names.ToArray())));
+        Log(names.Count == 0 ? "No models installed — type a name and hit Use / Pull." : (names.Count + " Ollama models available."));
     }
 
     void UseModel(string m)
@@ -2112,7 +2588,7 @@ class Animus : Form
         try
         {
             if (Directory.Exists(SchemDir))
-                foreach (string f in Directory.GetFiles(SchemDir, "*.schem"))
+                foreach (string f in Directory.GetFiles(SchemDir)) if (Regex.IsMatch(f, @"\.(schem|litematic|nbt)$", RegexOptions.IgnoreCase)) // every format bot2/lib/blueprint.js reads
                     cbSchem.Items.Add(Path.GetFileNameWithoutExtension(f));
         }
         catch { }
@@ -2258,18 +2734,18 @@ class Animus : Form
         {
             Log("STOP FAILED - killed " + killed + ", but " + survivors.Count +
                 " node process(es) remain" + (stillUp ? " and :3001 still answers" : "") + ".");
-            SetStop("Stop FAILED", Danger);
             botUp = stillUp;
             stateFails = stillUp ? 0 : 3;
+            SetStop("Stop FAILED", Danger);
             return;
         }
 
         Log(killed > 0
             ? ("Stopped. Killed " + killed + " process(es); :3001 is closed.")
             : "Nothing was running (:3001 already closed).");
-        SetStop("Stopped", Ghost);
         botUp = false;
         stateFails = 3;   // an explicit stop is known-dead: no grace window
+        SetStop("Stopped", Ghost);
     }
 
     // ---- the panel and the body are ONE thing ------------------------------
@@ -2322,7 +2798,11 @@ class Animus : Form
     void SetStop(string text, Color bg)
     {
         if (btnStop.InvokeRequired) { btnStop.BeginInvoke((MethodInvoker)delegate { SetStop(text, bg); }); return; }
-        btnStop.Text = text; btnStop.BackColor = bg;
+        btnStop.Text = text;
+        // "Stop FAILED" keeps its alarm colour; plain Stop/Stopped hand the styling back
+        // to UpdateRunButtons so the emphasis always matches whether the bot is up.
+        if (text == "Stop" || text == "Stopped") { runShownInit = false; UpdateRunButtons(); }
+        else StyleBtn(btnStop, bg, Mix(bg, Color.White, 0.1), Color.White);
     }
 
     // ---- low-level helpers -------------------------------------------------
