@@ -112,11 +112,16 @@ function note (name, ok) {
 // never held here; the castle's step does its home work first and minds its own stop.)
 const DAY_TASKS = new Set(['farm', 'harvest', 'hydrate', 'levelFarm', 'levelYard', 'fixWater', 'lightBase', 'plant', 'spareKit', 'fillShaft', 'cook', 'ironTrip'])
 const lateSaid = new Map()
-function cooling (name) {
+// held(name): may decide() offer it now? Not while backing off from failures (cooling), nor a day chore once its stop holds.
+// (cooling keeps its one meaning - "it failed recently": the recover rule reads cooling('food') as that evidence; audit)
+function held (name) {
   if (DAY_TASKS.has(name) && dayStop()) {
     if (Date.now() - (lateSaid.get(name) || 0) > 10 * 60000) { lateSaid.set(name, Date.now()); log('dir', `late in the day - ${name} waits for the morning`) }
     return true
   }
+  return cooling(name)
+}
+function cooling (name) {
   const f = failures[name]
   if (!f) return false
   return Date.now() - f.at < Math.min(15 * 60000, 30000 * Math.pow(2, Math.min(f.n - 1, 5)))
@@ -349,54 +354,54 @@ function decide () {
   //  pillager patrol and two skeletons shot the bot four times in two minutes, each respawn walking back out to the
   //  grave, the farm, the tool chest, 2026-09-25)
   const outgunned = around.some(h => reflex.RANGED.has(h.e.name)) && !inv.offhandShield(bot) && inv.armorPoints(bot) < 8 && !reflex.bowReady()
-  if (around.length && home && dHome < 48 && hut.shellComplete(bot) && (dim || outgunned || bot.health <= reflex.hurtLine()) && !cooling('hideout')) {
+  if (around.length && home && dHome < 48 && hut.shellComplete(bot) && (dim || outgunned || bot.health <= reflex.hurtLine()) && !held('hideout')) {
     return { name: 'hideout', why: `${around.length} hostile${around.length > 1 ? 's' : ''} around home (${around.slice(0, 3).map(h => h.e.name).join(', ')}) - waiting inside` }
   }
   // evening: be home before dusk, not at it - a 100-block walk begun at dusk arrives in the dark (a zombie
   // met the bot at its own door at hp 10)
   // (never on an expedition out: the nights are camped - walked home each evening, it never got past a day's walk out;
   //  audit 2026-09-28)
-  if (home && world.phase(bot) === 'day' && world.tod(bot) >= 10500 && world.tod(bot) < 12000 && dHome > 32 && hut.shellComplete(bot) && !tooHurt() && !(expedition() && expedition().phase === 'out') && !cooling('goHome')) {
+  if (home && world.phase(bot) === 'day' && world.tod(bot) >= 10500 && world.tod(bot) < 12000 && dHome > 32 && hut.shellComplete(bot) && !tooHurt() && !(expedition() && expedition().phase === 'out') && !held('goHome')) {
     return { name: 'goHome', why: `evening - home is ${Math.round(dHome)}b away, back before dark` }
   }
   // a grave right here (died in the safehouse, or beside it): pick it up whatever the hour - it
   // despawns, and it is a few steps - but not into the mob that put it there
   {
     const g0 = graves.bestGrave(bot)
-    if (g0 && world.dist3(g0, bot.entity.position) < 10 && !around.some(h => h.d < 16) && !cooling('grave')) return { name: 'grave', why: `my grave is ${Math.round(world.dist3(g0, bot.entity.position))}b away - ${g0.items} items` }
+    if (g0 && world.dist3(g0, bot.entity.position) < 10 && !around.some(h => h.d < 16) && !held('grave')) return { name: 'grave', why: `my grave is ${Math.round(world.dist3(g0, bot.entity.position))}b away - ${g0.items} items` }
   }
 
   // 1. night
   if (night || dusk) {
     // at dusk walk to the bed from anywhere near; once it is dark only if the bed is a few steps away
     // (a night walk home from the mine ended in a skeleton fight and a death 12 blocks from the bed)
-    if (bed && world.dist2(bed, bot.entity.position) < (dusk ? 200 : 32) && !cooling('sleep')) return { name: 'sleep', why: `${night ? 'night' : 'dusk'} - my bed is ${Math.round(world.dist2(bed, bot.entity.position))}b away` }
+    if (bed && world.dist2(bed, bot.entity.position) < (dusk ? 200 : 32) && !held('sleep')) return { name: 'sleep', why: `${night ? 'night' : 'dusk'} - my bed is ${Math.round(world.dist2(bed, bot.entity.position))}b away` }
     // a working mine next to home turns the night into mining time: go down at dusk (a short walk)
     {
       const mm = mem.get().mine
       const mineReady = mm && mm.entrance && home && world.dist2(mm.entrance, home) < 48 && inv.bestTool(bot, 'pickaxe', 8) && (packFood >= 10 || bot.food >= 18)
-      if (mineReady && (dusk || !move.insideHut(world.feetPos(bot))) && world.dist2(bot.entity.position, mm.entrance) < 64 && !cooling('nightMine')) return { name: 'nightMine', why: `${night ? 'night' : 'dusk'} - mining through the night in the mine next to home` }
+      if (mineReady && (dusk || !move.insideHut(world.feetPos(bot))) && world.dist2(bot.entity.position, mm.entrance) < 64 && !held('nightMine')) return { name: 'nightMine', why: `${night ? 'night' : 'dusk'} - mining through the night in the mine next to home` }
     }
     // inside the safehouse with furniture in the pack: set it up (the bed means sleeping, not waiting)
-    if (move.insideHut(world.feetPos(bot)) && furnishingInPack().length && !cooling('furnish')) return { name: 'furnish', why: `night in the safehouse - putting ${furnishingInPack().join(', ')} down` }
+    if (move.insideHut(world.feetPos(bot)) && furnishingInPack().length && !held('furnish')) return { name: 'furnish', why: `night in the safehouse - putting ${furnishingInPack().join(', ')} down` }
     // no bed placed but the safehouse stands: spend the night inside it
-    if (home && dHome < 160 && hut.shellComplete(bot) && !shelter.hasBedItem(bot) && !cooling('hutNight')) return { name: 'hutNight', why: `${night ? 'night' : 'dusk'} - sheltering in the safehouse` }
+    if (home && dHome < 160 && hut.shellComplete(bot) && !shelter.hasBedItem(bot) && !held('hutNight')) return { name: 'hutNight', why: `${night ? 'night' : 'dusk'} - sheltering in the safehouse` }
     // carrying a bed (travelling, moving house): put it down and sleep - it skips the night
-    if (shelter.hasBedItem(bot) && !cooling('sleepHere')) return { name: 'sleepHere', why: `${night ? 'night' : 'dusk'} - sleeping in the bed i carry` }
+    if (shelter.hasBedItem(bot) && !held('sleepHere')) return { name: 'sleepHere', why: `${night ? 'night' : 'dusk'} - sleeping in the bed i carry` }
     // dusk and home (or the site that will be home) is within a short walk: get there, dig in there
     if (dusk) {
       const j = build.getJob()
-      if (!home && j && world.dist2(bot.entity.position, j.origin) < 220 && world.dist2(bot.entity.position, j.origin) > 40 && !cooling('setHome')) return { name: 'setHome', why: `dusk - the build site is ${Math.round(world.dist2(bot.entity.position, j.origin))}b away, getting there before dark` }
-      if (home && dHome > 24 && dHome < 220 && !tooHurt() && !cooling('goHome')) return { name: 'goHome', why: `dusk - home is ${Math.round(dHome)}b away` }
+      if (!home && j && world.dist2(bot.entity.position, j.origin) < 220 && world.dist2(bot.entity.position, j.origin) > 40 && !held('setHome')) return { name: 'setHome', why: `dusk - the build site is ${Math.round(world.dist2(bot.entity.position, j.origin))}b away, getting there before dark` }
+      if (home && dHome > 24 && dHome < 220 && !tooHurt() && !held('goHome')) return { name: 'goHome', why: `dusk - home is ${Math.round(dHome)}b away` }
     }
     const m = mem.get().mine
     const mineHere = m && (!home || world.dist2(m.entrance, home) <= 96)
-    if (mineHere && inv.bestTool(bot, 'pickaxe', 4) && (packFood >= 10 || bot.food >= 16) && world.dist2(m.cursor, bot.entity.position) < 150 && !cooling('nightMine')) return { name: 'nightMine', why: 'night - working the mine underground' }
-    if (underground() && inv.bestTool(bot, 'pickaxe', 4) && !cooling('nightMine')) return { name: 'nightMine', why: 'night and already underground' }
+    if (mineHere && inv.bestTool(bot, 'pickaxe', 4) && (packFood >= 10 || bot.food >= 16) && world.dist2(m.cursor, bot.entity.position) < 150 && !held('nightMine')) return { name: 'nightMine', why: 'night - working the mine underground' }
+    if (underground() && inv.bestTool(bot, 'pickaxe', 4) && !held('nightMine')) return { name: 'nightMine', why: 'night and already underground' }
     // afloat at night (a walk that ended in the sea): no bunker is dug in water and "staying put" there is treading
     // water until something drowns us - make for land (by boat when it is far)
-    if ((boat.swimming(bot) || boat.inBoat(bot)) && !cooling('ashore')) return { name: 'ashore', why: 'night and afloat - making for land' }
-    if (!cooling('bunker')) return { name: 'bunker', why: 'night, no bed in reach - digging in' }
+    if ((boat.swimming(bot) || boat.inBoat(bot)) && !held('ashore')) return { name: 'ashore', why: 'night and afloat - making for land' }
+    if (!held('bunker')) return { name: 'bunker', why: 'night, no bed in reach - digging in' }
     return { name: 'idle', why: 'night and no shelter worked - staying put, reflexes on guard' }
   }
 
@@ -405,40 +410,40 @@ function decide () {
   //     reached the hurt line stops and heals (home, when it is near).
   // (and out on an expedition, whole before going on: healed to just past the hurt line, it walked on at hp 7 with a
   //  pillager shooting, 700b from home - 2026-09-28)
-  if (bot.health < 20 && canHeal() && (dHome < 24 || tooHurt() || (expedition() && bot.health < EXPEDITION_HP)) && !cooling('heal')) return { name: 'heal', why: `hp ${Math.round(bot.health)}${tooHurt() ? ' (at the hurt line ' + Math.round(reflex.hurtLine() * 10) / 10 + ')' : ''} - healing before going on` }
+  if (bot.health < 20 && canHeal() && (dHome < 24 || tooHurt() || (expedition() && bot.health < EXPEDITION_HP)) && !held('heal')) return { name: 'heal', why: `hp ${Math.round(bot.health)}${tooHurt() ? ' (at the hurt line ' + Math.round(reflex.hurtLine() * 10) / 10 + ')' : ''} - healing before going on` }
 
   // 2. graves worth going back for
   const g = graves.bestGrave(bot)
   // going back for a grave empty-handed walks into whatever killed us: re-arm first (tools come next)
-  if (g && !cooling('grave') && (inv.bestWeapon(bot) || world.dist3(g, bot.entity.position) < 10)) return { name: 'grave', why: `grave ${Math.round(world.dist2(g, bot.entity.position))}b away with ${g.items} items` }
+  if (g && !held('grave') && (inv.bestWeapon(bot) || world.dist3(g, bot.entity.position) < 10)) return { name: 'grave', why: `grave ${Math.round(world.dist2(g, bot.entity.position))}b away with ${g.items} items` }
 
   // 2b. carrying the base's furniture while standing at a finished safehouse: seconds of work that
   //     anchor spawn (a bed) and store the haul - before anything that is not an emergency
-  if (home && dHome < 48 && bot.food > 8 && hut.shellComplete(bot) && furnishingInPack().length && !cooling('furnish')) return { name: 'furnish', why: `putting ${furnishingInPack().join(', ')} in the safehouse` }
+  if (home && dHome < 48 && bot.food > 8 && hut.shellComplete(bot) && furnishingInPack().length && !held('furnish')) return { name: 'furnish', why: `putting ${furnishingInPack().join(', ')} in the safehouse` }
 
   // 2c. seeds and no farm at this home: plant first (a minute of work; the food that never runs out)
-  if (home && dHome < 64 && bot.food > 6 && (farm.farm() === null || !farm.farmIsHome(bot)) && (inv.count(bot, 'wheat_seeds') + base.bankCount('wheat_seeds')) >= 4 && !cooling('farm')) return { name: 'farm', why: 'seeds on hand and no farm at this home - planting before anything else' }
+  if (home && dHome < 64 && bot.food > 6 && (farm.farm() === null || !farm.farmIsHome(bot)) && (inv.count(bot, 'wheat_seeds') + base.bankCount('wheat_seeds')) >= 4 && !held('farm')) return { name: 'farm', why: 'seeds on hand and no farm at this home - planting before anything else' }
 
   // 3. hunger with nothing to eat (a full belly and an empty pack is not an emergency - animals met
   //    along the way top the pack up, and the farm feeds us long-term)
-  if (packFood < 6 && bot.food <= 10 && !cooling('food')) return { name: 'food', why: `hungry (food ${bot.food}, pack ${packFood} pts)` }
+  if (packFood < 6 && bot.food <= 10 && !held('food')) return { name: 'food', why: `hungry (food ${bot.food}, pack ${packFood} pts)` }
   // health only comes back on a full belly (hunger >= 18): hurt + not full = food is the medicine
-  if (bot.health < 12 && bot.food < inv.REGEN_FOOD && packFood < 6 && !cooling('food')) return { name: 'food', why: `hurt (hp ${Math.round(bot.health)}) and hunger ${bot.food} - need food to heal` }
+  if (bot.health < 12 && bot.food < inv.REGEN_FOOD && packFood < 6 && !held('food')) return { name: 'food', why: `hurt (hp ${Math.round(bot.health)}) and hunger ${bot.food} - need food to heal` }
   // badly hurt, nothing to eat and the food search came back empty: don't wander about at 4 hp - wait
   // it out walled into the safehouse, stepping out only for crops as they ripen
-  if (bot.health <= 8 && bot.food < inv.REGEN_FOOD && packFood < 6 && cooling('food') && home && dHome < 220 && hut.shellComplete(bot) && !cooling('recover')) return { name: 'recover', why: `hp ${Math.round(bot.health)}, no food to be had - resting in the safehouse until crops ripen` }
+  if (bot.health <= 8 && bot.food < inv.REGEN_FOOD && packFood < 6 && cooling('food') && home && dHome < 220 && hut.shellComplete(bot) && !held('recover')) return { name: 'recover', why: `hp ${Math.round(bot.health)}, no food to be had - resting in the safehouse until crops ripen` }
 
   // 4. basic tools
   const kit = missingKit()
-  if (kit.length && !cooling('tools')) return { name: 'tools', why: 'missing ' + kit.join(', ') }
+  if (kit.length && !held('tools')) return { name: 'tools', why: 'missing ' + kit.join(', ') }
   // a bed to CARRY first (shelter first still holds: it goes down in the safehouse once the shell stands; till then it is
   // slept in where the night finds us - sleepHere). Without one every death respawned 2200 blocks away at world spawn,
   // three treks back in a day (2026-09-27)
-  if (!bed && !shelter.hasBedItem(bot) && world.phase(bot) === 'day' && bedObtainable() && !cooling('bed')) return { name: 'bed', why: 'no bed - getting one to carry (spawn is where i sleep)' }
+  if (!bed && !shelter.hasBedItem(bot) && world.phase(bot) === 'day' && bedObtainable() && !held('bed')) return { name: 'bed', why: 'no bed - getting one to carry (spawn is where i sleep)' }
 
   // 5. home
   if (!home) return { name: 'setHome', why: 'no home yet' }
-  if (dHome < 160 && hut.siteGone(bot) && !cooling('abandonHome')) return { name: 'abandonHome', why: `the ground under the home at ${move.fmt(home)} is gone - choosing a new home` }
+  if (dHome < 160 && hut.siteGone(bot) && !held('abandonHome')) return { name: 'abandonHome', why: `the ground under the home at ${move.fmt(home)} is gone - choosing a new home` }
   // (in our own mine is at work, not astray: a staircase from y113 to y16 runs ~100 blocks out, and the face 116 blocks
   //  from home sent the bot home every time a mining task returned - a pickaxe worn out, a batch done - 2026-09-24)
   // (dawn out there: the night's mobs are not burning yet - home's hideout rule keeps the bot walled in till full light,
@@ -450,67 +455,67 @@ function decide () {
     const me = world.feetPos(bot); const roof = world.at(bot, me.x, me.y + 2, me.z)
     const dugIn = shelter.enclosedHere(bot) && !!roof && world.isSolid(roof)
     if (dugIn) return { name: 'idle', why: `dawn at camp with ${around.length} hostile${around.length > 1 ? 's' : ''} about (${around.slice(0, 3).map(h => h.e.name).join(', ')}) - staying dug in till full light` }
-    if (!cooling('bunker')) return { name: 'bunker', why: `dawn in the open with ${around.length} hostile${around.length > 1 ? 's' : ''} about - digging in till full light` }
+    if (!held('bunker')) return { name: 'bunker', why: `dawn in the open with ${around.length} hostile${around.length > 1 ? 's' : ''} about - digging in till full light` }
   }
-  { const e = expedition(); if (e && world.phase(bot) === 'day' && !tooHurt() && (bot.health >= EXPEDITION_HP || !canHeal()) && !cooling('expedition')) return { name: 'expedition', why: e.phase === 'back' ? `back from the ${e.raw} expedition (${e.why}) - ${Math.round(dHome)}b to home` : `on an expedition for ${e.raw}${e.to ? ' toward the ' + e.to.biome : ''} - night ${e.nights + 1} of ${MAX_NIGHTS} at most` } }
-  if (dHome > 96 && !expedition() && !mining.inOwnMine(bot) && !tooHurt() && !cooling('goHome')) return { name: 'goHome', why: `${Math.round(dHome)}b from home` }
+  { const e = expedition(); if (e && world.phase(bot) === 'day' && !tooHurt() && (bot.health >= EXPEDITION_HP || !canHeal()) && !held('expedition')) return { name: 'expedition', why: e.phase === 'back' ? `back from the ${e.raw} expedition (${e.why}) - ${Math.round(dHome)}b to home` : `on an expedition for ${e.raw}${e.to ? ' toward the ' + e.to.biome : ''} - night ${e.nights + 1} of ${MAX_NIGHTS} at most` } }
+  if (dHome > 96 && !expedition() && !mining.inOwnMine(bot) && !tooHurt() && !held('goHome')) return { name: 'goHome', why: `${Math.round(dHome)}b from home` }
 
   // 5b. at home with a haul in the pack: put it in the chest (a player empties their pockets at home)
-  if (dHome < 24 && (mem.get().chests || []).length && haulSize() >= 64 && !cooling('deposit')) return { name: 'deposit', why: `home with ${haulSize()} items to store` }
+  if (dHome < 24 && (mem.get().chests || []).length && haulSize() >= 64 && !held('deposit')) return { name: 'deposit', why: `home with ${haulSize()} items to store` }
 
   // 5c. plant first (a minute of work, renewable food), then top up the food buffer while it is easy -
   //     starving first and searching second killed the bot twice
-  if (dHome < 64 && (farm.farm() === null || !farm.farmIsHome(bot)) && (inv.count(bot, 'wheat_seeds') + base.bankCount('wheat_seeds')) >= 4 && !cooling('farm')) return { name: 'farm', why: 'seeds in hand and no farm at this home' }
-  if (packFood < 12 && bot.food <= 12 && !cooling('food')) return { name: 'food', why: `food buffer low (pack ${packFood} pts, hunger ${bot.food})` }
+  if (dHome < 64 && (farm.farm() === null || !farm.farmIsHome(bot)) && (inv.count(bot, 'wheat_seeds') + base.bankCount('wheat_seeds')) >= 4 && !held('farm')) return { name: 'farm', why: 'seeds in hand and no farm at this home' }
+  if (packFood < 12 && bot.food <= 12 && !held('food')) return { name: 'food', why: `food buffer low (pack ${packFood} pts, hunger ${bot.food})` }
 
   // 6. food: cook what we carry; harvest a ripe farm
-  if (inv.rawFoodCount(bot) >= 3 && dHome < 64 && !cooling('cook')) return { name: 'cook', why: `${inv.rawFoodCount(bot)} raw food to cook` }
+  if (inv.rawFoodCount(bot) >= 3 && dHome < 64 && !held('cook')) return { name: 'cook', why: `${inv.rawFoodCount(bot)} raw food to cook` }
   // saplings on hand and room for them in the orchard (empty spots, or fewer trees than the build still needs)
   {
     const saps = orchard.saplingCount(bot) + Object.entries(base.bankCounts()).filter(([n]) => orchard.SAPLING_RE.test(n)).reduce((a, [, c]) => a + c, 0)
     const o = orchard.orchard()
-    if (dHome < 64 && world.phase(bot) === 'day' && saps > 0 && (orchard.empty(bot).length > 0 || (o ? o.spots.length : 0) < demandTrees) && !cooling('plant')) return { name: 'plant', why: `${saps} saplings for the orchard (${o ? o.spots.length : 0} spots, ${demandTrees} trees wanted)` }
+    if (dHome < 64 && world.phase(bot) === 'day' && saps > 0 && (orchard.empty(bot).length > 0 || (o ? o.spots.length : 0) < demandTrees) && !held('plant')) return { name: 'plant', why: `${saps} saplings for the orchard (${o ? o.spots.length : 0} spots, ${demandTrees} trees wanted)` }
   }
   // (the harvest when the bread runs low, not every morning: the crop keeps on the stalk, and harvesting and
   //  replanting 71 cells took two minutes of every ten-minute day with 31 bread in the pack, 2026-09-26)
-  if (farm.farm() && dHome < 64 && farm.ripeCount(bot) >= 8 && breadStock() < BREAD_WANTED && !cooling('harvest')) return { name: 'harvest', why: `${farm.ripeCount(bot)} wheat ripe` }
+  if (farm.farm() && dHome < 64 && farm.ripeCount(bot) >= 8 && breadStock() < BREAD_WANTED && !held('harvest')) return { name: 'harvest', why: `${farm.ripeCount(bot)} wheat ripe` }
 
   // 7. base infrastructure - SHELTER FIRST: nothing of value (bed, bank) sits in the open, so the
   //    safehouse goes up before the bed and the chest go down inside it
   if (dHome < 64) {
-    if (hut.collidesWithBuild(bot) && !cooling('relocate')) return { name: 'relocate', why: 'the safehouse stands on the build footprint - moving house' }
-    if (!hut.complete(bot) && !cooling('hut')) { const s = hut.status(bot); return { name: 'hut', why: `the safehouse is ${s ? s.done + '/' + s.total : 'not started'}` } }
-    if (hut.shellComplete(bot) && furnishingInPack().length && !cooling('furnish')) return { name: 'furnish', why: `putting ${furnishingInPack().join(', ')} in the safehouse` }
-    if (!(mem.get().chests || []).length && !cooling('chest')) return { name: 'chest', why: 'no storage at home' }
-    if (farm.farm() && farm.farmHome && !farm.farmIsHome(bot) && inv.count(bot, 'wheat_seeds') + base.bankCount('wheat_seeds') >= 4 && !cooling('farm')) return { name: 'farm', why: 'the farm belongs to the old home - planting one here' }
-    if (!bed && bedObtainable() && !cooling('bed')) return { name: 'bed', why: 'no bed - spawn is not anchored at home' }
+    if (hut.collidesWithBuild(bot) && !held('relocate')) return { name: 'relocate', why: 'the safehouse stands on the build footprint - moving house' }
+    if (!hut.complete(bot) && !held('hut')) { const s = hut.status(bot); return { name: 'hut', why: `the safehouse is ${s ? s.done + '/' + s.total : 'not started'}` } }
+    if (hut.shellComplete(bot) && furnishingInPack().length && !held('furnish')) return { name: 'furnish', why: `putting ${furnishingInPack().join(', ')} in the safehouse` }
+    if (!(mem.get().chests || []).length && !held('chest')) return { name: 'chest', why: 'no storage at home' }
+    if (farm.farm() && farm.farmHome && !farm.farmIsHome(bot) && inv.count(bot, 'wheat_seeds') + base.bankCount('wheat_seeds') >= 4 && !held('farm')) return { name: 'farm', why: 'the farm belongs to the old home - planting one here' }
+    if (!bed && bedObtainable() && !held('bed')) return { name: 'bed', why: 'no bed - spawn is not anchored at home' }
     // a spare stone kit in the chest: a death respawns us beside it instead of sending us 100 blocks for logs
-    if (dHome < 32 && SPARE_KIT.some(t => base.bankCount(t) < 1) && stock('cobblestone') >= 10 && !cooling('spareKit')) return { name: 'spareKit', why: 'no spare tools in the chest - making a set' }
+    if (dHome < 32 && SPARE_KIT.some(t => base.bankCount(t) < 1) && stock('cobblestone') >= 10 && !held('spareKit')) return { name: 'spareKit', why: 'no spare tools in the chest - making a set' }
     // light the ground around home: no mobs spawning at the door means nights asleep, not on guard
-    if (dHome < 32 && world.phase(bot) === 'day' && world.tod(bot) < 10000 && !cooling('lightBase') && (inv.count(bot, 'torch') + base.bankCount('torch') >= 4 || inv.count(bot, 'coal') + base.bankCount('coal') + inv.count(bot, 'charcoal') >= 1)) {
+    if (dHome < 32 && world.phase(bot) === 'day' && world.tod(bot) < 10000 && !held('lightBase') && (inv.count(bot, 'torch') + base.bankCount('torch') >= 4 || inv.count(bot, 'coal') + base.bankCount('coal') + inv.count(bot, 'charcoal') >= 1)) {
       const dark = lights.darkSpots(bot).length
       if (dark >= 3) return { name: 'lightBase', why: `${dark} dark spots around home where mobs spawn` }
     }
     // a dry farm starves us: water it as soon as there is iron for a bucket
-    if (farm.farmIsHome(bot) && farm.canHydrate(bot) && !cooling('hydrate')) return { name: 'hydrate', why: 'the farm is dry - bringing water to it' }
-    if (farm.farmIsHome(bot) && farm.waterNeedsFixing(bot) && !cooling('fixWater')) return { name: 'fixWater', why: 'water is running over the crops - putting it back in its hole' }
-    if (!farm.farm() && !cooling('farm')) return { name: 'farm', why: 'no farm - bread does not run out like animals do' }
+    if (farm.farmIsHome(bot) && farm.canHydrate(bot) && !held('hydrate')) return { name: 'hydrate', why: 'the farm is dry - bringing water to it' }
+    if (farm.farmIsHome(bot) && farm.waterNeedsFixing(bot) && !held('fixWater')) return { name: 'fixWater', why: 'water is running over the crops - putting it back in its hole' }
+    if (!farm.farm() && !held('farm')) return { name: 'farm', why: 'no farm - bread does not run out like animals do' }
     // a farm to walk: one soil level, nothing but crops on it (the operator asked for it clean and flat)
-    if (farm.farm() && farm.farmIsHome(bot) && farm.farm().water && !farm.waterNeedsFixing(bot) && world.phase(bot) === 'day' && !farm.farmLevel(bot) && !cooling('levelFarm')) return { name: 'levelFarm', why: `the farm is uneven or cluttered (${farm.levelWork(bot).length} fixes)` }
+    if (farm.farm() && farm.farmIsHome(bot) && farm.farm().water && !farm.waterNeedsFixing(bot) && world.phase(bot) === 'day' && !farm.farmLevel(bot) && !held('levelFarm')) return { name: 'levelFarm', why: `the farm is uneven or cluttered (${farm.levelWork(bot).length} fixes)` }
     // the yard round the safehouse: holes filled, stray blocks down (a pit by the door stood for days)
     // (a stray shaft on the grounds that someone fell into: capped flush, before anything else here - see reflex's fall line)
-    if (world.phase(bot) === 'day' && (mem.get().shaftsToFill || []).length && !cooling('fillShaft')) return { name: 'fillShaft', why: `${mem.get().shaftsToFill.length} hole${mem.get().shaftsToFill.length > 1 ? 's' : ''} on the grounds that I fell into - capping ${mem.get().shaftsToFill.length > 1 ? 'them' : 'it'}` }
-    if (world.phase(bot) === 'day' && hut.complete(bot) && !cooling('levelYard')) { const n = hut.yardWork(bot).length; if (n) return { name: 'levelYard', why: `the yard has ${n} holes or stray blocks` } }
+    if (world.phase(bot) === 'day' && (mem.get().shaftsToFill || []).length && !held('fillShaft')) return { name: 'fillShaft', why: `${mem.get().shaftsToFill.length} hole${mem.get().shaftsToFill.length > 1 ? 's' : ''} on the grounds that I fell into - capping ${mem.get().shaftsToFill.length > 1 ? 'them' : 'it'}` }
+    if (world.phase(bot) === 'day' && hut.complete(bot) && !held('levelYard')) { const n = hut.yardWork(bot).length; if (n) return { name: 'levelYard', why: `the yard has ${n} holes or stray blocks` } }
     // a watered plot still at its starting size: widen it to everything the water reaches
-    if (farm.farm() && farm.farmIsHome(bot) && farm.farm().water && farm.farm().cells.length < 60 && farm.farmLevel(bot) && farm.fullPlot(bot, farm.farm()).length > farm.farm().cells.length && inv.count(bot, 'wheat_seeds') + base.bankCount('wheat_seeds') >= 8 && !cooling('farm')) return { name: 'farm', why: `the farm is ${farm.farm().cells.length} cells - widening it to all the water reaches` }
-    if (farm.farm() && farm.farmIsHome(bot) && !farm.waterNeedsFixing(bot) && inv.count(bot, 'wheat_seeds') + base.bankCount('wheat_seeds') >= 4 && (farm.unplantedCount(bot) >= 8 || (farm.unplantedCount(bot) > 0 && breadStock() < BREAD_WANTED)) && !cooling('farm')) return { name: 'farm', why: `${farm.unplantedCount(bot)} farm cells unplanted and ${inv.count(bot, 'wheat_seeds')} seeds in hand` }
+    if (farm.farm() && farm.farmIsHome(bot) && farm.farm().water && farm.farm().cells.length < 60 && farm.farmLevel(bot) && farm.fullPlot(bot, farm.farm()).length > farm.farm().cells.length && inv.count(bot, 'wheat_seeds') + base.bankCount('wheat_seeds') >= 8 && !held('farm')) return { name: 'farm', why: `the farm is ${farm.farm().cells.length} cells - widening it to all the water reaches` }
+    if (farm.farm() && farm.farmIsHome(bot) && !farm.waterNeedsFixing(bot) && inv.count(bot, 'wheat_seeds') + base.bankCount('wheat_seeds') >= 4 && (farm.unplantedCount(bot) >= 8 || (farm.unplantedCount(bot) > 0 && breadStock() < BREAD_WANTED)) && !held('farm')) return { name: 'farm', why: `${farm.unplantedCount(bot)} farm cells unplanted and ${inv.count(bot, 'wheat_seeds')} seeds in hand` }
   }
 
   // 8. iron gear when the iron is on hand
   const iron = inv.count(bot, 'iron_ingot') + base.bankCount('iron_ingot')
   const raw = inv.count(bot, 'raw_iron') + base.bankCount('raw_iron')
   const wanted = ironWanted()
-  if (wanted.length && !cooling('iron')) {
+  if (wanted.length && !held('iron')) {
     const cheapest = wanted.map(n => IRON_COST[n]).sort((a, b) => a - b)[0]
     if (iron + raw >= cheapest) return { name: 'iron', why: `${iron} ingots + ${raw} raw iron - making ${wanted[0]}` }
   }
@@ -527,14 +532,14 @@ function decide () {
   //  never reached again and no trip ever went - audit #41)
   if (dry && dry !== true && dry.method === ORE_METHOD && ironStock() < dry.stock) mem.set('ironTripDry', Object.assign({}, dry, { stock: ironStock() }))
   if (dry && (dry === true || dry.method !== ORE_METHOD || ironStock() > mem.get().ironTripDry.stock)) mem.set('ironTripDry', null)
-  if (gearShort > 0 && !mem.get().ironTripDry && world.phase(bot) === 'day' && world.ticksUntilNight(bot) > 2400 && !cooling('ironTrip')) return { name: 'ironTrip', why: `${gearShort} iron short for ${wanted.filter(n => ARMOUR_GEAR.has(n)).join(', ')} - mining for it` }
+  if (gearShort > 0 && !mem.get().ironTripDry && world.phase(bot) === 'day' && world.ticksUntilNight(bot) > 2400 && !held('ironTrip')) return { name: 'ironTrip', why: `${gearShort} iron short for ${wanted.filter(n => ARMOUR_GEAR.has(n)).join(', ')} - mining for it` }
 
   // 9. the build
   // (with its own backoff: a castle step failing in 30ms was retried 26 times in a second)
   // (derived from the world, never a latch: a finished build that loses blocks - a creeper - is work again)
   // (not in the day's last minutes: a round that can only be cut short at once spun - castle, placed 0, deposit, castle
   //  - every three seconds at dusk once a dusk-cut round stopped counting as a failure, 2026-09-27)
-  if (mem.get().build && build.getJob() && build.needsWork(bot) && !nightSoon() && !homeByDark() && !cooling('castle')) {
+  if (mem.get().build && build.getJob() && build.needsWork(bot) && !nightSoon() && !homeByDark() && !held('castle')) {
     return { name: 'castle', why: 'working on ' + mem.get().build.name }
   }
   return { name: 'idle', why: 'nothing to do' }
