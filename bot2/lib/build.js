@@ -947,6 +947,8 @@ async function placeCell (bot, c, j = job) {
     if (t && !world.isAirish(t) && !world.isLiquidWater(t) && !act.REPLACEABLE_RE.test(t.name)) { if (!await timed('dig', act.dig(bot, t.position, own))) return why(`could not clear the ${t.name} out of its second cell`) }
   }
   // Within reach of the cell, by the site walker: `faces` the faces to see, or none (a step onto a block that stands).
+  // (where the miss was from: the body's cell and its height against the cell - down the slope or up to it; audit)
+  const whereFrom = () => { const me = world.feetPos(bot); return ` - from ${me.x},${me.y},${me.z}, ${me.y - c.y >= 0 ? '+' : ''}${me.y - c.y} to the cell, ${world.dist3(me, c).toFixed(1)}b off` }
   const getInReach = async (faces) => {
     // A CELL HIGH OVER ITS FLOOR: pillar up from the floor beside it first. Left to find its own way, the planner climbed
     // onto the rose window's one-wide ring 8 over the plaza and stuck there, cell after cell (2026-09-27).
@@ -963,8 +965,8 @@ async function placeCell (bot, c, j = job) {
     // (any cell above our feet: standing on a wall top at y125, the y128 cells were "3 above" and never pillared to)
     if (!r.ok && !act.reach(bot, pos, 4.8) && c.y > bot.entity.position.y && !pillared) {
       const up = await pillarTo(bot, c)
-      if (!up && !act.reach(bot, pos, 4.8)) return why(`could not get within reach (${r.why}; no pillar up to it)`)
-    } else if (!r.ok && !act.reach(bot, pos, 4.8)) return why(`could not get within reach (${r.why})`)
+      if (!up && !act.reach(bot, pos, 4.8)) return why(`could not get within reach (${r.why}; no pillar up to it)${whereFrom()}`)
+    } else if (!r.ok && !act.reach(bot, pos, 4.8)) return why(`could not get within reach (${r.why})${whereFrom()}`)
     return true
   }
   if (!step) {
