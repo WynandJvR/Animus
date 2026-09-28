@@ -168,7 +168,13 @@ async function chop (bot, re, n, ctx = {}) {
             if (!trees.length) { log('gather', `the ${land.biome} here has no ${itemName} in sight - forgetting it`); forgetLand(land) } else noteResource(itemName, trees[0].position)
           }
         } else if (ctx.expedition) {
-          // (out on an expedition: rings round a home days away are no search - none here, and the expedition decides)
+          // (out on an expedition: rings round a home days away are no search - none here, and the expedition decides.
+          //  None in sight here means the spots remembered in sight are spent: forgotten, so the next trip searches for new
+          //  country instead of walking back to a cleared grove - the second dark oak trip went back to the first one's,
+          //  2026-09-29)
+          const me0 = bot.entity.position; const far = world.sightReach(bot)
+          mem.update(m => { if (m.resources && m.resources[itemName]) m.resources[itemName] = m.resources[itemName].filter(p => world.dist2(p, me0) > far) })
+          log('gather', `no ${itemName} in sight here - the spots remembered round here are spent, forgotten`)
           return end('none-found', false)
         } else {
           // (a species with a country of its own and none of it on record: the rings go wider, like clay's)
