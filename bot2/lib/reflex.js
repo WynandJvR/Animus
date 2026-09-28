@@ -192,7 +192,8 @@ const SHOOTER_DPS = { skeleton: 2.2, stray: 2.2, bogged: 2.2, pillager: 2.5, wit
 const MOB_HP = { skeleton: 20, stray: 20, bogged: 16, pillager: 24, witch: 40, blaze: 20, breeze: 30, ghast: 10 }
 // (a witch's harm and poison are MAGIC: armour takes nothing off them. At dps 2, armour-discounted, iron armour made a
 //  witch at 5.4b worth charging: hp 15 -> 1 in 11s, and the night's second death followed, 2026-09-28. 3.5 a second -
-//  harming 6 a splash, poison on top - and 40 hp for the heals it drinks; audit)
+//  harming 6 a splash, poison on top - and 40 hp for the heals it drinks. A shield blocks none of it: the splash
+//  shatters on it and the effect lands all the same; audit)
 const MAGIC = new Set(['witch'])
 // `hs`: every hostile in range, the never-melee ones too - a ghast's fireballs land on the way in as well as a
 // skeleton's arrows; handed the melee list, the ghast was never counted and a charge under it read as free (2026-09-27)
@@ -216,7 +217,7 @@ function chargeAffordable (shooter, hs, hp) {
   // (the charged one by ENTITY: compared as list elements, the fight's own re-check - a fresh {e, d} - never matched,
   //  so the pick said charge and the fight said flee, every tick, shield up at hp 12-16 under a skeleton, 2026-09-27)
   const pts = inv.armorPoints(bot)
-  const dps = shooters.reduce((a, h) => a + (SHOOTER_DPS[h.e.name] || 2) * (shield && h.e === shooter.e ? 0.2 : 1) * (MAGIC.has(h.e.name) ? 1 : 1 - Math.min(20, pts) / 25), 0)
+  const dps = shooters.reduce((a, h) => a + (SHOOTER_DPS[h.e.name] || 2) * (MAGIC.has(h.e.name) ? 1 : (shield && h.e === shooter.e ? 0.2 : 1) * (1 - Math.min(20, pts) / 25)), 0)
   return hp - secs * dps > hurtLine()
 }
 
