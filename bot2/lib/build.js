@@ -715,7 +715,7 @@ async function viaDoor (bot, goal, movements) {
     if (!near) continue
     // (the bot's everyday walker, with its own recoveries: the site runGoal got "stuck" in the canopy every time)
     const r0 = await move.travel(bot, near, { range: 1, label: 'to the door', maxMs: 90000 })
-    if (!r0.ok) { log('build', `couldn't get to the ${d.name.replace('_door', '')} door at ${move.fmt(d)} (${r0.why})`); if (move.isVerdict(r0)) return null; continue }
+    if (!r0.ok) { log('build', `couldn't get to the ${d.name.replace('_door', '')} door at ${move.fmt(d)} (${r0.why})`); if (/timeout|stuck/.test(r0.why || '')) return null; continue } // (a long walk that failed ends it; a quick noPath tries the next door - audit)
     if (!await move.crossDoor(bot, goal).catch(() => false)) return null // (at the door and could not cross: the next door is no better bet)
     log('build', `went through the ${d.name.replace('_door', '')} door at ${move.fmt(d)} toward ${move.fmt(gp)}`)
     return move.runGoal(bot, goal, { timeoutMs: 30000, stuckMs: 8000, movements })
