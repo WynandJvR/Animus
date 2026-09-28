@@ -24,6 +24,13 @@ while true; do
   [ "$h" -ge 3 ] && [ "$h5" -ge 1 ] && [ -n "$day" ] && { echo "ALARM: hiding $h times in 10 min"; recent 20 | grep -a "(dir) -> hideout" | cut -c2-160 | tail -3; exit 0; }
   t=$(echo "$st" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const j=JSON.parse(s);console.log((j.task&&j.task.name)+' '+(j.task&&j.task.forSec))}catch{}})")
   set -- $t; [ -n "$2" ] && [ "$2" != "null" ] && [ "$2" -gt 1200 ] && [ "$1" != "sleep" ] && [ "$1" != "expedition" ] && { echo "ALARM: task $1 running ${2}s"; exit 0; }
+  # (a silent loop: one line - timestamps off, coordinates kept - 40+ times in 10 min. The strip loop (637 dead clicks) and
+  #  the mine's corridor ping-pong (240 "turning") ran for hours under every other alarm, 2026-09-28)
+  sp=$(recent 10 | cut -c32- | grep -av "(op) \|(body)" | sort | uniq -c | sort -rn | awk '$1>=40 {print; exit}')
+  [ -n "$sp" ] && { echo "ALARM: log loop: $sp"; exit 0; }
+  # (handwork stopped because its click did nothing - /state buildProgress.stoppedWork - for over 10 min)
+  sw=$(curl -s -m 5 http://127.0.0.1:3001/state | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const w=(JSON.parse(s).buildProgress||{}).stoppedWork||[];console.log(w.map(x=>x.work).join(','))}catch{}})")
+  if [ -n "$sw" ]; then [ -z "$sw_since" ] && sw_since=$now; [ $((now - sw_since)) -gt 600 ] && { echo "ALARM: handwork stopped >10 min: $sw"; exit 0; }; else sw_since=; fi
   cur=$(done_now); if [ "$cur" != "$last_done" ]; then last_done=$cur; last_change=$now; fi
   # (away on an expedition the castle waits by design - its wood is what the trip fetches: not "stuck")
   exp=$(node -e 'try{console.log(require("C:/mc-bot-lab/bot2/memory.json").expedition?1:0)}catch{console.log(0)}'); [ "$exp" = 1 ] && last_change=$now
