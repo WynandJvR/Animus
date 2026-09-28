@@ -132,7 +132,10 @@ function pending (bot, from, radius = RADIUS) {
   const tops = new Map()
   for (const q of ledger.values()) { const kk = q.x + ',' + q.z; if (!tops.has(kk) || tops.get(kk) < q.y) tops.set(kk, q.y) }
   const seen = new Map()
-  const visible = q => { const kk = q.x + ',' + q.z; if (!seen.has(kk)) seen.set(kk, world.openSky(bot, { x: q.x, y: tops.get(kk), z: q.z })); return seen.get(kk) }
+  // (and not deep under the base's level, sky or no sky: a pit or a ravine 8+ below home is seen from nowhere that matters
+  //  and is the ground of the day's falls and deaths; audit)
+  const floorY = mem.get().home ? mem.get().home.y - 8 : -Infinity
+  const visible = q => { const kk = q.x + ',' + q.z; if (!seen.has(kk)) seen.set(kk, tops.get(kk) >= floorY && world.openSky(bot, { x: q.x, y: tops.get(kk), z: q.z })); return seen.get(kk) }
   for (const q of ledger.values()) {
     if (from && world.dist3(q, from) > radius) continue
     if (!visible(q)) continue
