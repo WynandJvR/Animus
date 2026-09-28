@@ -477,7 +477,10 @@ function wanted (bot, name) { return wantedSet(bot)(name) }
 // a plan against the live stock (pack + chests + what is cooking)
 function planFor (bot, needs) {
   const inFlight = n => n === 'fuel' ? L.smelt.inFlight('charcoal') : L.smelt.inFlight(n)
-  return getPlanner(bot).plan(needs, { stock: n => stock(bot, n), inFlight })
+  // (fuel is counted in coals - eight smelts each; a lava bucket, pack or bank, is a hundred smelts: twelve coals. Only
+  //  the planner's count - never the 'fuel' class itself, or a torch would be crafted of a lava bucket; 2026-09-28)
+  const lava = () => L.inv.count(bot, 'lava_bucket') + ((L.base.bankCounts() || {}).lava_bucket || 0)
+  return getPlanner(bot).plan(needs, { stock: n => stock(bot, n) + (n === 'fuel' ? lava() * 12 : 0), inFlight })
 }
 
 // The species to craft a wooden form in: the wood we hold the most of (any wood stands in).

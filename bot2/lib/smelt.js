@@ -13,7 +13,12 @@ const { log } = require('./log')
 const craft = () => require('./craft')
 const base = () => require('./base')
 
-const FUEL = [['coal', 8], ['charcoal', 8], ['coal_block', 80], ['blaze_rod', 12], ['dried_kelp_block', 20]]
+// (a lava bucket: a hundred smelts, and vanilla leaves the EMPTY BUCKET in the fuel slot when it is burnt - no fuel,
+//  and it blocks the slot: clearBucket takes it back out at every open that feeds or collects, 2026-09-28)
+const FUEL = [['coal', 8], ['charcoal', 8], ['coal_block', 80], ['blaze_rod', 12], ['dried_kelp_block', 20], ['lava_bucket', 100]]
+// One lava bucket goes only into a furnace with this much queued: the fire burns on with no input and a bucket under
+// a small batch is most of it thrown away. The loader fills a furnace to a stack when it is lava's (loadFurnaces).
+const LAVA_MIN = 32
 function fuelValue (name) {
   for (const [n, v] of FUEL) if (n === name) return v
   if (/_planks$/.test(name)) return 1.5
@@ -146,17 +151,23 @@ async function pickFuel (bot, itemsToSmelt, { allowWood = true, noCharcoal = fal
   const need = Math.ceil(itemsToSmelt)
   const burnable = fuelRule(bot, { survival })
   let coal = inv.count(bot, 'coal') + inv.count(bot, 'charcoal')
-  if (coal * 8 >= need) return true
+  // lava counts only for a batch big enough for putFuel to use it on (LAVA_MIN): promised for less, putFuel would not
+  // load it and the furnace would stand cold behind a "yes"
+  const lava = () => need >= LAVA_MIN ? inv.count(bot, 'lava_bucket') * 100 : 0
+  if (coal * 8 + lava() >= need) return true
   // bulk (a castle's worth of stone): no waiting on a charcoal batch - coal from the bank, then wood the
   // build does not need, as planks (charcoal-first stalled the whole brick pipeline behind one furnace)
   if ((need > 24 || noGather) && allowWood) {
     const b = base()
+    // (the bank's lava buckets first for a big batch: one is a hundred smelts)
+    if (need >= LAVA_MIN && b.bankCount('lava_bucket') > 0) { const k = Math.ceil((need - coal * 8 - lava()) / 100); if (k > 0) await b.withdraw(bot, 'lava_bucket', k).catch(() => 0) }
+    if (coal * 8 + lava() >= need) return true
     if (b.bankCount('coal') + b.bankCount('charcoal') > 0) { await b.withdraw(bot, 'coal', Math.ceil(need / 8)).catch(() => 0); await b.withdraw(bot, 'charcoal', Math.ceil(need / 8)).catch(() => 0) }
     coal = inv.count(bot, 'coal') + inv.count(bot, 'charcoal')
-    if (coal * 8 >= need) return true
+    if (coal * 8 + lava() >= need) return true
     const woodOk = burnable
     const plankHeld = () => inv.items(bot).filter(i => /_planks$/.test(i.name) && woodOk(i.name)).reduce((t, i) => t + i.count, 0)
-    const short = () => need - coal * 8 - plankHeld() * 1.5
+    const short = () => need - coal * 8 - lava() - plankHeld() * 1.5
     const bank = b.bankCounts()
     for (const [n, c] of Object.entries(bank)) { if (short() <= 0) break; if (/_planks$/.test(n) && woodOk(n) && c > 0) await b.withdraw(bot, n, Math.min(c, Math.ceil(short() / 1.5))).catch(() => 0) }
     for (const [n, c] of Object.entries(bank)) { if (short() <= 0) break; if (craft().isLogName(n) && woodOk(n) && c > 0) await b.withdraw(bot, n, Math.min(c, Math.ceil(short() / 6))).catch(() => 0) }
@@ -168,7 +179,7 @@ async function pickFuel (bot, itemsToSmelt, { allowWood = true, noCharcoal = fal
       if (k > 0) await craft().plankUp(bot, it.name, k).catch(() => false)
     }
     if (short() <= 0) return true
-    if (coal * 8 + plankHeld() * 1.5 > 0) return true // some fuel: smelt what it covers
+    if (coal * 8 + lava() + plankHeld() * 1.5 > 0) return true // some fuel: smelt what it covers
   }
   if (noGather) return false
   // a big batch: coal from the bank, else turn logs into charcoal first (a log burnt as planks
@@ -208,11 +219,28 @@ async function pickFuel (bot, itemsToSmelt, { allowWood = true, noCharcoal = fal
   return false
 }
 
+// The empty bucket a burnt lava bucket leaves in the fuel slot, back into the pack: no fuel, and while it sits there
+// nothing else goes in (putFuel's "a different fuel in the slot" stop) - the furnace stands cold with input and "fuel".
+// mineflayer's furnace.takeFuel moves the fuel slot's stack into the pack (bot.putAway); a full pack throws, and the
+// bucket waits for the next open. True when one came out.
+async function clearBucket (bot, furnace) {
+  let f = null
+  try { f = furnace.fuelItem() } catch {}
+  if (!f || f.name !== 'bucket') return false
+  try { await furnace.takeFuel(); return true } catch (e) { log('smelt', `could not take the empty bucket out of the fuel slot: ${e.message}`); return false }
+}
 async function putFuel (bot, furnace, itemsToSmelt, { survival = false } = {}) {
+  await clearBucket(bot, furnace)
   let remaining = itemsToSmelt
   const cur = furnace.fuelItem()
   if (cur) remaining -= cur.count * fuelValue(cur.name)
   if (remaining <= 0) return true
+  // lava first for a big batch: one bucket (it does not stack), into an empty slot only
+  if (!cur && remaining >= LAVA_MIN) {
+    const lb = inv.items(bot).find(i => i.name === 'lava_bucket')
+    if (lb) { try { await furnace.putFuel(lb.type, null, 1); remaining -= fuelValue('lava_bucket') } catch (e) { log('smelt', `putFuel lava_bucket failed: ${e.message}`) } }
+    if (remaining <= 0) return true
+  }
   const burnable = fuelRule(bot, { survival })
   const order = ['coal', 'charcoal'].concat(inv.items(bot).filter(i => /_planks$/.test(i.name) && burnable(i.name)).map(i => i.name))
   for (const n of [...new Set(order)]) {
@@ -248,7 +276,9 @@ function note (fb, f, bot) {
   // (fuel = coal in the slot OR the fire still burning: the last coal leaves the slot empty while it smelts on - taken for
   //  "stalled", that furnace was skipped and its ingots never collected; audit #26)
   const lit = isLit(bot ? bot.blockAt(fb.position) : fb)
-  markFurnace(fb.position, inp || out ? { input: inp ? inp.name : null, output: out ? out.name : null, fuel: !!fuel || lit, at: Date.now() } : null)
+  // (an empty bucket left by a burnt lava bucket is no fuel: counted as fuel, a cold furnace behind it never read stalled)
+  const fuelled = !!fuel && fuelValue(fuel.name) > 0
+  markFurnace(fb.position, inp || out ? { input: inp ? inp.name : null, output: out ? out.name : null, fuel: fuelled || lit, at: Date.now() } : null)
 }
 function busyFurnaces (bot) {
   const all = homeFurnaces(bot)
@@ -347,16 +377,20 @@ async function loadFurnaces (bot, input, maxItems, { anyWood = false } = {}) {
   // spread evenly: filling each furnace to 64 in turn put 130 cobble in two furnaces while twelve sat idle
   // (10 seconds an item per furnace - even spread is the whole speed-up)
   const perFurnace = Math.max(8, Math.ceil(Math.min(maxItems, inv.count(bot, input)) / Math.max(1, furns.length)))
+  // (a furnace fed a lava bucket takes a full stack: a hundred smelts under the even spread's 17 was a bucket burnt for
+  //  17 - LAVA_MIN; so while lava is held, a furnace with its fuel slot free is filled to 64 and burns it, 2026-09-28)
+  const lavaHeld = () => inv.count(bot, 'lava_bucket') > 0
   for (const fb of furns) {
     if (loaded >= maxItems) break
-    const have = Math.min(inv.count(bot, input), perFurnace)
-    if (!have) break
+    if (!inv.count(bot, input)) break
     const f = await openAt(bot, fb)
     if (!f) continue
     try {
       if (f.outputItem()) await f.takeOutput().catch(() => {})
+      await clearBucket(bot, f)
       const cur = f.inputItem()
       if (cur && cur.name !== input) continue
+      const have = Math.min(inv.count(bot, input), lavaHeld() && !f.fuelItem() ? 64 : perFurnace)
       const room = 64 - (cur ? cur.count : 0)
       const k = Math.min(room, have, maxItems - loaded)
       if (k <= 0) continue
@@ -431,6 +465,7 @@ async function refuelFurnaces (bot) {
     if (!f) continue
     try {
       if (f.outputItem()) await f.takeOutput().catch(() => {})
+      await clearBucket(bot, f)
       const input = f.inputItem()
       if (input && !f.fuelItem()) {
         const survival = !!inv.COOKED_OF[input.name] // raw food waiting in a cold furnace is a meal, not the build's
@@ -448,7 +483,7 @@ async function collectFurnaces (bot) {
   const furns = home ? busyFurnaces(bot) : furnacesNear(bot, 32)
   const first = !mem.get().furnaceUse
   if (first) mem.set('furnaceUse', {})
-  let got = 0
+  let got = 0; let buckets = 0
   // (a cold furnace last seen with input, no output and no fuel has made nothing since: not walked to - seven stalled
   //  furnaces were opened every round, three minutes of every ten-minute day, 2026-09-27)
   const use = mem.get().furnaceUse || {}
@@ -458,11 +493,13 @@ async function collectFurnaces (bot) {
     const f = await openAt(bot, fb)
     if (!f) continue
     // (the ledger noted in finally: a takeOutput that threw skipped it, and the furnace kept its stale entry)
-    try { const o = f.outputItem(); if (o) { await f.takeOutput(); got += o.count; landed(o.name, o.count) } } catch {} finally { try { note(fb, f, bot) } catch {} try { f.close() } catch {} }
+    // (and the empty bucket a burnt lava bucket left in the fuel slot - it blocks the slot, and it is the next lava trip's)
+    try { const o = f.outputItem(); if (o) { await f.takeOutput(); got += o.count; landed(o.name, o.count) } if (await clearBucket(bot, f)) buckets++ } catch {} finally { try { note(fb, f, bot) } catch {} try { f.close() } catch {} }
     if (inv.freeSlots(bot) <= 1) break
   }
   if (got) log('smelt', `collected ${got} items from the furnaces`)
+  if (buckets) log('smelt', `took ${buckets} empty bucket${buckets > 1 ? 's' : ''} back out of the fuel slots`)
   return got
 }
 
-module.exports = { burnForCharcoal, inFlight, smeltsTo, woodSurplus, smeltItem, loadFurnaces, collectFurnaces, refuelFurnaces, placeFurnace, furnacesNear, homeFurnaces, pickFuel, fuelValue, buildNeeds }
+module.exports = { burnForCharcoal, inFlight, smeltsTo, woodSurplus, smeltItem, loadFurnaces, collectFurnaces, refuelFurnaces, placeFurnace, furnacesNear, homeFurnaces, pickFuel, putFuel, fuelValue, clearBucket, LAVA_MIN, buildNeeds }
