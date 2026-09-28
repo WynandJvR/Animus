@@ -34,13 +34,24 @@ function make (bot, director) {
     const nums = (msg.replace(/(\d),(\d{3})\b/g, '$1$2').match(/-?\d+/g) || []).map(n => Math.abs(parseInt(n, 10))).filter(n => n >= 100)
     return nums.some(n => secrets.some(sv => Math.abs(n - sv) <= 64))
   }
+  // (an operator command has a deadline: a `collect` walking to drops in a hole held the lock over two minutes and every
+  //  command after it answered "busy" - the operator locked out. At the deadline: every running action told to stop, the
+  //  body still, the lock let go; audit 2026-09-28)
+  const OP_DEADLINE_MS = { collect: 60000, tower: 90000, dig: 30000 }
   async function exclusive (label, fn) {
     if (running) return `busy with ${running}`
     running = label
     const wasPaused = director.isPaused()
     director.setPaused(true)
     await director.waitIdle()
-    try { return await fn() } finally { running = null; if (!wasPaused) director.setPaused(false) }
+    const ms = OP_DEADLINE_MS[label] || 180000
+    let timer = null
+    const dl = new Promise(resolve => { timer = setTimeout(() => resolve({ timedOut: true }), ms) })
+    try {
+      const r = await Promise.race([fn(), dl])
+      if (r && r.timedOut) { require('./control').abort(); move.stopMoving(bot); return `${label} timed out after ${Math.round(ms / 1000)}s - stopped` }
+      return r
+    } finally { clearTimeout(timer); running = null; if (!wasPaused) director.setPaused(false) }
   }
 
   async function handle (line, { source = 'operator' } = {}) {
