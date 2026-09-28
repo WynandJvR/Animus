@@ -135,6 +135,7 @@ function coveredLevel (bot, p, dir, level) {
   return Math.min(p.y - 8, deepest + 4)
 }
 
+let broken = 0 // blocks the tunnel has broken - the mine loop's one sign of progress (a step through open cells breaks none)
 async function openCell (bot, p) {
   for (let i = 0; i < 8; i++) {
     const b = world.at(bot, p.x, p.y, p.z)
@@ -145,6 +146,7 @@ async function openCell (bot, p) {
     if (!world.NATURAL_RE.test(b.name) && !/_planks$|rail|fence|cobweb/.test(b.name)) return false // don't dig through structures
     const ok = await act.dig(bot, p, { force: true, timeoutMs: 12000 })
     if (!ok) return false
+    broken++
     await move.sleep(world.FALLING_RE.test(b.name) ? 700 : 60)
   }
   return world.isAirish(world.at(bot, p.x, p.y, p.z))
@@ -416,9 +418,11 @@ async function mineFor (bot, itemName, target, ctx = {}) {
   if (ctx.seal) await sealBehind(bot, m)
   let lastSave = Date.now()
   let fails = 0
-  let turns = 0
-  const packed = () => inv.items(bot).reduce((a, i) => a + i.count, 0)
-  let packAtTurn = packed() // (what the pack held at the last turn: any rock since - a drop picked up late too - forgives)
+  // THE TURN: blocked ahead, left of the heading, then right - never back, the corridor we came down is spent by
+  // definition - and both sides blocked is boxed in. Only a step that BROKE rock forgives: a step back through the
+  // corridor already dug "succeeds" too, and with both turns at a leg's end blocked the loop ran the same 13 cells back
+  // and forth, forgiving itself each run, 8 minutes and more with no stone (2026-09-28)
+  let turnFrom = null; let turnSide = 0
   let spinAt = Date.now(); let spins = 0
   while (inv.count(bot, itemName) < target) {
     await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
@@ -456,13 +460,11 @@ async function mineFor (bot, itemName, target, ctx = {}) {
       const back = await move.goTo(bot, new goals.GoalBlock(m.cursor.x, m.cursor.y, m.cursor.z), { timeoutMs: 30000, stuckMs: 8000, label: 'back to mine face' })
       if (!back.ok) { log('mine', `lost the mine face at ${move.fmt(m.cursor)} (${back.why}) - abandoning this mine`); abandonMine(m); return false }
     }
-    // (progress is new rock in the pack, not a step: a step back through the corridor already dug "succeeds" too, and
-    //  with both turns at a leg's end blocked, the loop ran the same 13 cells back and forth - each run forgiving the
-    //  turns - for 8 minutes and more with no stone, 2026-09-28)
+    const b0 = broken
     const ok = m.stairsDone ? await tunnelStep(bot, m) : await stairStep(bot, m)
     if (!ok) {
       if (++fails >= 3) {
-        if (++turns > 4) { log('mine', `boxed in at ${move.fmt(m.cursor)} - abandoning this mine`); abandonMine(m); return false }
+        if (turnSide >= 2) { log('mine', `boxed in at ${move.fmt(m.cursor)} - ahead, left and right all blocked - abandoning this mine`); abandonMine(m); return false }
         // stairs blocked (water, lava, a cave) well above the working depth: still under the rock, this is a depth like
         // any for cobble - tunnel here and keep the stairs already dug. On a cave-riddled mountain five new staircases
         // in an hour ended "blocked, far above the working depth" (2026-09-24). Only a staircase still near the surface
@@ -473,13 +475,12 @@ async function mineFor (bot, itemName, target, ctx = {}) {
         }
         // hazard ahead: turn this leg
         log('mine', `blocked at ${move.fmt(m.cursor)} - turning`)
-        m.dir = { x: -m.dir.z, z: m.dir.x }
+        if (!turnFrom) { turnFrom = { x: m.dir.x, z: m.dir.z }; turnSide = 1; m.dir = { x: -turnFrom.z, z: turnFrom.x } } else { turnSide = 2; m.dir = { x: turnFrom.z, z: -turnFrom.x } }
         m.legPos = 0
         fails = 0
-        packAtTurn = packed()
         if (!m.stairsDone) { m.stairsDone = true; m.level = m.cursor.y }
       }
-    } else { fails = 0; if (packed() > packAtTurn) turns = 0 }
+    } else { fails = 0; if (broken > b0) { turnFrom = null; turnSide = 0 } }
     if (Date.now() - lastSave > 15000) { saveMine(m); lastSave = Date.now() }
   }
   saveMine(m)
