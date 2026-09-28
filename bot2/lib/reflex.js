@@ -663,10 +663,22 @@ function jumpHurts (c) {
     const side = Math.abs(nx - Math.floor(p.x)) + Math.abs(nz - Math.floor(p.z))
     if (n.y > fy && side >= 1 && side <= 2 && world.isSolid(world.at(bot, nx, Math.floor(n.y) - 1, nz))) return null
   }
+  // THE HEADINGS A JUMP GOES: the held keys summed in the body's own frame - forward and back along the look, left and
+  // right across it (a strafe was never read: a random strafe and a jump at the castle rim fell 5 blocks twice, 2026-09-28)
+  // - and the way the body is already sliding. A jump that hurts along either is refused.
   const speed = Math.hypot(v.x, v.z)
-  const dir = c.forward ? 1 : c.back ? -1 : 0
+  const fx = -Math.sin(bot.entity.yaw); const fz = -Math.cos(bot.entity.yaw)
+  let kx = 0; let kz = 0
+  if (c.forward) { kx += fx; kz += fz }
+  if (c.back) { kx -= fx; kz -= fz }
+  if (c.left) { kx += fz; kz -= fx }
+  if (c.right) { kx -= fz; kz += fx }
+  const heads = []
+  const kl = Math.hypot(kx, kz)
+  if (kl > 0.01) heads.push([kx / kl, kz / kl])
+  if (speed > 0.03) heads.push([v.x / speed, v.z / speed])
   let jx, jz
-  if (speed > 0.03) { jx = v.x / speed; jz = v.z / speed } else if (dir) { jx = -Math.sin(bot.entity.yaw) * dir; jz = -Math.cos(bot.entity.yaw) * dir }
+  if (heads.length) { [jx, jz] = heads[0] }
   if (jx == null) {
     // a standing jump comes down where it went up - unless we stand half over a drop already: the planner towered at
     // a wall top's lip, drifted a few hundredths a tick and fell 43 blocks (2026-09-26). Any corner of the hitbox over
@@ -682,11 +694,14 @@ function jumpHurts (c) {
     return over == null ? null : { x: Math.floor(p.x), y: fy0, z: Math.floor(p.z), drop: over }
   }
   const fy = Math.floor(p.y + 0.01)
-  const ax = Math.floor(p.x + jx * 0.8); const az = Math.floor(p.z + jz * 0.8)
-  const climb = world.isSolid(world.at(bot, ax, fy, az)) && !world.isSolid(world.at(bot, ax, fy + 1, az)) && !world.isSolid(world.at(bot, ax, fy + 2, az))
-  if (climb) return null
-  const drop = [0.8, 1.6, 2.4].map(r => world.dropAt(bot, p.x + jx * r, fy, p.z + jz * r)).find(d => d > world.SAFE_DROP)
-  return drop == null ? null : { x: Math.floor(p.x + jx * 1.6), y: fy, z: Math.floor(p.z + jz * 1.6), drop }
+  for (const [hx, hz] of heads) {
+    const ax = Math.floor(p.x + hx * 0.8); const az = Math.floor(p.z + hz * 0.8)
+    const climb = world.isSolid(world.at(bot, ax, fy, az)) && !world.isSolid(world.at(bot, ax, fy + 1, az)) && !world.isSolid(world.at(bot, ax, fy + 2, az))
+    if (climb) continue
+    const drop = [0.8, 1.6, 2.4].map(r => world.dropAt(bot, p.x + hx * r, fy, p.z + hz * r)).find(d => d > world.SAFE_DROP)
+    if (drop != null) return { x: Math.floor(p.x + hx * 1.6), y: fy, z: Math.floor(p.z + hz * 1.6), drop }
+  }
+  return null
 }
 let lastJumpCut = null // (who pressed a jump the guard let go of - the physics may already have jumped: the fall line's witness)
 function noteJump (cell, who) {
@@ -1377,4 +1392,4 @@ function setEnabled (on) { enabled = !!on; if (!on) clearActive() }
 function underMs () { return submergedSince ? Date.now() - submergedSince : 0 }
 function airLeftMs () { return airMs }
 
-module.exports = { plannerPlacedSince, findAirReachable, _bindForTest: b => { bot = b }, _leafWayOff: (...a) => leafWayOff(...a), _leafFooting: () => leafFooting, edgeStops, install, holdNoSneak, active: isActive, info, nearestThreat, lastHurt, hurtLine, edgeAhead, hostiles, onSurface, canSee, NEVER_MELEE, waitClear, setEnabled, findAir, HOSTILE, RANGED, bowReady, startDive, endDive, diveBroken, underMs, airLeftMs, AIR_MS, DIVE_HARD_MS }
+module.exports = { plannerPlacedSince, findAirReachable, _bindForTest: b => { bot = b }, _leafWayOff: (...a) => leafWayOff(...a), _jumpHurts: c => jumpHurts(c), _leafFooting: () => leafFooting, edgeStops, install, holdNoSneak, active: isActive, info, nearestThreat, lastHurt, hurtLine, edgeAhead, hostiles, onSurface, canSee, NEVER_MELEE, waitClear, setEnabled, findAir, HOSTILE, RANGED, bowReady, startDive, endDive, diveBroken, underMs, airLeftMs, AIR_MS, DIVE_HARD_MS }
