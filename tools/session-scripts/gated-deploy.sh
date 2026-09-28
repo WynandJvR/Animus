@@ -14,7 +14,7 @@ fp () { cat /c/mc-bot-lab/bot2/main.js /c/mc-bot-lab/bot2/lib/*.js | md5sum | cu
 FP0=$(fp); echo "code fingerprint $FP0 ($(git -C /c/mc-bot-lab rev-parse --short HEAD))"
 while [ $SECONDS -lt $end ]; do
   st=$(curl -s -m 5 http://127.0.0.1:3001/state)
-  ok=$(node -e "try{const j=JSON.parse(process.argv[1]);const h=j.home;const d=h?Math.hypot(j.pos.x-h.x,j.pos.z-h.z):99;const t=j.timeOfDay;const night=!(t>=1500&&t<11400);const threat=j.threat&&(j.threat.dist==null||j.threat.dist<16);const reflex=!!j.maneuver;const stuck=process.argv[3]==='1';const near=process.argv[4]==='1';console.log((stuck||!j.hazards.underground||d<8)&&!j.hazards.inWater&&(stuck||d<20||(near&&d<64))&&j.health>=14&&!night&&!threat&&!reflex&&(!j.paused||process.argv[2]==='1')?'yes':'no')}catch(e){console.log('no')}" "$st" "$PAUSEDOK" "$STUCKOK" "$NEAROK")
+  ok=$(node -e "try{const j=JSON.parse(process.argv[1]);const h=j.home;const d=h?Math.hypot(j.pos.x-h.x,j.pos.z-h.z):99;const t=j.timeOfDay;const night=!(t>=1500&&t<11400);const threat=j.threat&&(j.threat.dist==null||j.threat.dist<16);const reflex=!!j.maneuver;const stuck=process.argv[3]==='1';const near=process.argv[4]==='1';console.log((stuck||!j.hazards.underground||d<8)&&!j.hazards.inWater&&(stuck||d<20||(near&&d<64&&j.hazards.onGround&&!j.hazards.lip))&&j.health>=14&&!night&&!threat&&!reflex&&(!j.paused||process.argv[2]==='1')?'yes':'no')}catch(e){console.log('no')}" "$st" "$PAUSEDOK" "$STUCKOK" "$NEAROK")
   if [ "$ok" = yes ]; then
     [ "$(fp)" = "$FP0" ] || { echo "REFUSED: bot2 changed while the gate was shut - what is on disk now is not what this deploy was started for"; exit 3; }
     cd /c/mc-bot-lab/bot2; for f in main.js lib/*.js; do node --no-lazy --check "$f" || { echo "SYNTAX FAIL $f"; exit 1; }; done

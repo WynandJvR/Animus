@@ -77,7 +77,10 @@ function start ({ bot, port, host, director, commands, brainSettings, pov, chat 
       maneuver: rf ? { label: rf.kind, tier: 'SURVIVE' } : null,
       hold: null,
       goal: bot.pathfinder && bot.pathfinder.goal ? bot.pathfinder.goal.constructor.name : null,
-      hazards: { underground: !world.openSky(bot, p.floored()), onFire: false, inLava: world.inLava(bot), inWater: world.feetInWater(bot), drowning: world.headInWater(bot), onGround: bot.entity.onGround },
+      hazards: { underground: !world.openSky(bot, p.floored()), onFire: false, inLava: world.inLava(bot), inWater: world.feetInWater(bot), drowning: world.headInWater(bot), onGround: bot.entity.onGround,
+        // (a drop that hurts beside the feet: the deploy gate's lip test - a reconnect's resync on a wall top or the rim
+        //  slope can put the body over it; audit 2026-09-28)
+        lip: (() => { const fy = Math.floor(p.y + 0.01); return [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => world.dropAt(bot, Math.floor(p.x) + dx + 0.5, fy, Math.floor(p.z) + dz + 0.5) > world.SAFE_DROP) })() },
       savedBuild: mem.get().build ? { name: mem.get().build.name, at: mem.get().build.origin, held: false } : null,
       // what the build is and what it waits on - the brain answered "how's the build" with "starting on the wood" while the
       // real want was 1100 cobblestone (2026-09-27): the numbers it may quote, straight from the builder and the director
