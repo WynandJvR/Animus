@@ -543,8 +543,8 @@ const SURVEY = [
   { kind: null, re: /^(oak|spruce|birch|jungle|acacia|cherry|dark_oak|mangrove|pale_oak)_log$/, names: 9, ok: (bot, b) => wildTree(bot, b) },
   // lava a bucket can be filled at safely, seen on any trip: the fuel trip only looked when it had a bucket in hand, so a
   // pool passed on the way to clay or iron was never on record (2026-09-28). The forager's own tests - a still source, a
-  // safe stand beside it
-  { kind: 'lava_pool', re: /^lava$/, ok: (bot, b) => { const f = require('./forage'); return f.lavaSource(bot, b) && f.lavaStands(bot, b).length > 0 } }
+  // safe stand beside it; the sky column first, one read that turns a cave lake away before the stand tests (audit)
+  { kind: 'lava_pool', re: /^lava$/, ok: (bot, b) => { const f = require('./forage'); return world.openSky(bot, { x: b.position.x, y: b.position.y + 1, z: b.position.z }) && f.lavaSource(bot, b) && f.lavaStands(bot, b).length > 0 } }
 ]
 let surveying = false
 function survey (bot) {
