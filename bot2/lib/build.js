@@ -991,7 +991,9 @@ async function placeCell (bot, c, j = job) {
       if (st) await goSite(bot, new goals.GoalBlock(st.x, st.y, st.z), 'place')
       // (from its outside stand or not at all: the planner's own way to a rim cell led from the castle floor into the hollow
       //  under it, walled in by then - fifteen minutes "stuck" under the build, 2026-09-28. It rests; the outside is tried again)
-      if (!act.reach(bot, pos, 4.3)) return why(st ? 'its outside stand was not reached' : 'no stand outside the build to place it from')
+      // (an outside stand that was not reached: the next try goes from inside the hollow if one is safe - the same outside
+      //  stand was chosen and missed every step, and the inside pass never ran, 2026-09-29)
+      if (!act.reach(bot, pos, 4.3)) { if (st) c.noOutside = true; return why(st ? 'its outside stand was not reached' : 'no stand outside the build to place it from') }
     }
     if (!act.reach(bot, pos, 4.3)) {
       const foot = feetFor(bot, c).find(f => !footBad(f))
@@ -1511,6 +1513,7 @@ function foundationStand (bot, c) {
   if (c.name === 'torch') return torchStand(bot, c)
   const me = bot.entity.position; let best = null; let bd = Infinity
   for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) for (let dy = -4; dy <= 2; dy++) {
+    if (c.noOutside) break // (its outside stand was missed: the inside pass below)
     if (!dx && !dz) continue
     const p = { x: c.x + dx, y: c.y + dy, z: c.z + dz }
     if (job.index.has(`${p.x},${job.box.y1},${p.z}`)) continue // (under the base: inside)
@@ -1531,9 +1534,9 @@ function foundationStand (bot, c) {
   // (the hollow is DARK and closed: a spawner. Never in with a hostile down there - every one the world holds, seen or not -
   //  and an unlit region only by day at full health; a lit one - a foundation torch within 12 - is the one to prefer; audit)
   const hostileIn = Object.values(bot.entities).some(e => e && e.position && reflex.HOSTILE.has(e.name) && e.position.y <= job.box.y1 + 1 && world.dist3(e.position, c) < 12)
-  if (hostileIn) return null
+  if (hostileIn) { c.noOutside = false; return null }
   const lit = job.cells.some(q => q.foundation && q.name === 'torch' && world.dist3(q, c) <= 12 && cellDone(bot, q) === true)
-  if (!lit && !(world.phase(bot) === 'day' && bot.health >= 20)) return null
+  if (!lit && !(world.phase(bot) === "day" && bot.health >= 20)) { c.noOutside = false; return null }
   // FROM INSIDE THE HOLLOW when no outside stand will do - the rim's trench stands sat behind drops the walk would not take,
   // and 75 rim cells waited for days while the bot fell off the edge they would close (2026-09-29). Safe by wallsMeIn's own
   // rule, asked from the stand: with this cell in, a walk from there must still find a way out (audit route 2)
@@ -1548,6 +1551,7 @@ function foundationStand (bot, c) {
     if (d < bd) { bd = d; best = p }
   }
   if (best) log('build', `${c.name} at ${move.fmt(c)}: no stand outside - from inside the hollow at ${move.fmt(best)} (a way out stays)`)
+  else if (c.noOutside) c.noOutside = false // (no safe inside stand either: the outside one again next time)
   return best
 }
 function sealedIn (bot, c) { return [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]].every(([dx, dy, dz]) => world.isSolid(world.at(bot, c.x + dx, c.y + dy, c.z + dz))) }
