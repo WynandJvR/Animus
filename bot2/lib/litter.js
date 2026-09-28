@@ -77,7 +77,13 @@ function capsADrop (bot, p) { return act.fallBelow(bot, p) > world.SAFE_DROP }
 
 // the build's own ground (its zone, its cells) is the build's ledger's and snapshot's - never litter's (an orchard's area
 // widened by 3 reaches into the castle's north edge)
-function ours (x, y, z) { const zn = move.inZone({ x, y, z }); return (zn && zn.label === 'build') || require('./build').isOpenCell({ x, y, z }) }
+// (and everything under the build's footprint at any depth: its foundation is below the build zone's floor, its cells are
+//  the job's only once the builder has laid them out after a boot - 42 of the ledger's blocks stood there, y112-117)
+function ours (x, y, z) {
+  const zn = move.inZone({ x, y, z }); if ((zn && zn.label === 'build') || require('./build').isOpenCell({ x, y, z })) return true
+  const j = require('./build').getJob(); const b = j && j.box
+  return !!b && x >= b.x1 - 1 && x <= b.x2 + 1 && z >= b.z1 - 1 && z <= b.z2 + 1 && y <= b.y2 + 3
+}
 
 // The orchards' ground, spot clusters and all between - not the spots' own boxes: a pillar on a spot is why the orchard
 // dropped that spot, so it stood outside every box left (four columns of 3-5 missed by the first seed, 2026-09-28).
@@ -119,7 +125,7 @@ function pending (bot, from, radius = RADIUS) {
   for (const q of ledger.values()) {
     if (from && world.dist3(q, from) > radius) continue
     const b = world.at(bot, q.x, q.y, q.z)
-    if (b && b.name === q.name && (q.tries || 0) < TRIES) out.push(q)
+    if (b && b.name === q.name && (q.tries || 0) < TRIES && !ours(q.x, q.y, q.z)) out.push(q)
   }
   return out
 }
