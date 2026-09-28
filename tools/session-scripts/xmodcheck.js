@@ -28,6 +28,18 @@ for (const f of files) {
   // TOP-LEVEL only (column 0): const x = require('./mod')  |  const x = () => require('./mod') - a function's own
   // `const b = ...` is a local, and so is every other short name that shadows one
   for (const m of raw.matchAll(/^(?:const|let)\s+(\w+)\s*=\s*(\(\)\s*=>\s*)?require\('\.\/([\w-]+)'\)/gm)) alias[m[1]] = { mod: m[3], lazy: !!m[2] }
+  // ...and a function's own `const x = require('./mod')` - when EVERY declaration of that name in the file is that same
+  // require (a name also bound to anything else is a shadow, and skipped). The reserved-wood fix used
+  // `const m = require('./materials')` inside a function and the check never saw it (audit 2026-09-28)
+  // (the require must END the statement: `const hp = require('./memory').get().hutPlan` binds hp to a plan, not the module)
+  for (const m of raw.matchAll(/^[ \t]+(?:const|let)\s+(\w+)\s*=\s*require\('\.\/([\w-]+)'\)(?=\s*(?:;|$|\/\/))/gm)) {
+    const [, a, mod] = m
+    if (alias[a]) continue
+    // (every binding form: declarations, parameters in parens, a bare arrow parameter `m =>`, a for-of's loop variable)
+    const decls = [...raw.matchAll(new RegExp(`(?:const|let|var|function)\\s+${a}\\b|[(,]\\s*${a}\\s*[,)=]|\\b${a}\\s*=>|for\\s*\\(\\s*(?:const|let)\\s+${a}\\b`, 'g'))].length
+    const same = [...raw.matchAll(new RegExp(`(?:const|let)\\s+${a}\\s*=\\s*require\\('\\./${mod}'\\)`, 'g'))].length
+    if (a.length > 1 && decls === same) alias[a] = { mod, lazy: false } // (one-letter names: shadowed everywhere)
+  }
   for (const [a, { mod, lazy }] of Object.entries(alias)) {
     const ex = load(mod); if (!ex) continue
     const re = lazy ? new RegExp(`\\b${a}\\(\\)\\.(\\w+)`, 'g') : new RegExp(`(?<![\\w.])${a}\\.(\\w+)`, 'g')
