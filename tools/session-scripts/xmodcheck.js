@@ -27,7 +27,8 @@ for (const f of files) {
   const alias = {}
   // TOP-LEVEL only (column 0): const x = require('./mod')  |  const x = () => require('./mod') - a function's own
   // `const b = ...` is a local, and so is every other short name that shadows one
-  for (const m of raw.matchAll(/^(?:const|let)\s+(\w+)\s*=\s*(\(\)\s*=>\s*)?require\('\.\/([\w-]+)'\)/gm)) alias[m[1]] = { mod: m[3], lazy: !!m[2] }
+  // (the require must END the statement here too: `const f = () => require('./build').FILLER_ITEMS` returns a regex, not the module)
+  for (const m of raw.matchAll(/^(?:const|let)\s+(\w+)\s*=\s*(\(\)\s*=>\s*)?require\('\.\/([\w-]+)'\)(?=\s*(?:;|$|\/\/))/gm)) alias[m[1]] = { mod: m[3], lazy: !!m[2] }
   // ...and a function's own `const x = require('./mod')` - when EVERY declaration of that name in the file is that same
   // require (a name also bound to anything else is a shadow, and skipped). The reserved-wood fix used
   // `const m = require('./materials')` inside a function and the check never saw it (audit 2026-09-28)
