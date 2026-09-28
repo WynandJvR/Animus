@@ -581,7 +581,17 @@ async function goToInner2 (bot, goal, opts, { timeoutMs, stuckMs, dig, place, al
     // a stall next to a door is a door the planner would not open: cross it by hand
     if (await crossDoor(bot, goal).catch(e => { log('move', `door crossing threw: ${e.message}`); return false })) { fails = 0; continue }
     if (fails >= 3) {
-      log('move', `${label}: gave up (${r.why} x${fails}) at ${fmt(bot.entity.position)}`)
+      // (what the body was holding when it gave up - the goal, the planner, the keys, the reflex: sealed in the hollow, every
+      //  walk "stuck x3" for five minutes and one pause/resume later the same walk went straight out; something was stale,
+      //  and the lines said nothing of it, 2026-09-28)
+      let why2 = ''
+      try {
+        const g = bot.pathfinder.goal; const cs = bot.controlState || {}
+        const keys = Object.keys(cs).filter(k => cs[k]).join('+') || 'none'
+        const rf = require('./reflex').info()
+        why2 = ` [goal ${g ? g.constructor.name + (g.x != null ? ' ' + g.x + ',' + g.y + ',' + g.z : '') : 'none'}, moving ${bot.pathfinder.isMoving()}, keys ${keys}, reflex ${rf ? rf.kind + ' ' + rf.forSec + 's' : 'none'}, onGround ${bot.entity.onGround}]`
+      } catch {}
+      log('move', `${label}: gave up (${r.why} x${fails}) at ${fmt(bot.entity.position)}${why2}`)
       return r
     }
     await jiggle(bot)
