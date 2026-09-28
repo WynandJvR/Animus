@@ -93,6 +93,13 @@ function make (bot, director) {
         const p = a.length >= 3 ? { x: num(0), y: num(1), z: num(2) } : world.feetPos(bot)
         base.setHome(p); return `home set ${move.fmt(p)}`
       }
+      case 'dig': { // dig x y z [own] - the operator's hand: dig one block from where the body stands (a body wedged under a
+        // closed trapdoor in a one-high space, pinned by the server and back in the same cell after every relog, 2026-09-28)
+        const [x, y, z] = [0, 1, 2].map(i => num(i))
+        if (![x, y, z].every(Number.isFinite)) return 'dig x y z [own]'
+        const own = a[3] === 'own'
+        return exclusive('dig', async () => { const b = world.at(bot, x, y, z); const ok = b ? await require('./act').digBlock(bot, b, { own }) : false; return `dig ${b ? b.name : '?'} at ${x},${y},${z}: ${ok ? 'done' : 'refused or failed'}` })
+      }
       case 'fillhole': { // fillhole x y z - queue a hole on the grounds to be capped at that level (director fillShaft)
         const [x, y, z] = [0, 1, 2].map(i => num(i))
         if (![x, y, z].every(Number.isFinite)) return 'fillhole x y z'
