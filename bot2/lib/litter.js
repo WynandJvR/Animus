@@ -18,6 +18,7 @@ const RADIUS = 96 // (the ledger's reach round home - and the tidy's)
 // count): six 30s walks in a row to the same west-orchard blocks, and the tidy came back for them every run, the castle
 // idle 40 minutes (2026-09-28)
 const TRIES = 2
+const COLUMNS_A_RUN = 12
 const k = p => `${p.x},${p.y},${p.z}`
 const ledger = new Map((mem.get().litter || []).map(q => [k(q), q]))
 let savedAt = 0; let dirty = false
@@ -144,7 +145,8 @@ async function tidy (bot, { from, radius = RADIUS, shouldStop } = {}) {
   listen(bot)
   let removed = 0; let left = 0
   const done = new Set()
-  for (let guard = 0; guard < 60; guard++) {
+  // (a run is a batch of COLUMNS, not the whole backlog: a 116-column seed would eat whole days - the rest next gap)
+  for (let guard = 0; guard < COLUMNS_A_RUN; guard++) {
     if (shouldStop && shouldStop()) break
     const me = bot.entity.position
     const todo = pending(bot, from || me, radius).filter(q => !done.has(`${q.x},${q.z}`))
@@ -160,7 +162,8 @@ async function tidy (bot, { from, radius = RADIUS, shouldStop } = {}) {
     const stand = standBeside(bot, low)
     const r = await move.goTo(bot, stand ? new goals.GoalBlock(stand.x, stand.y, stand.z) : new goals.GoalNear(low.x, low.y, low.z, 2), { timeoutMs: 30000, place: false, allowZones: ['orchard', 'base', 'farm'], label: 'to litter' })
     const miss = () => { for (const q of col) q.tries = (q.tries || 0) + 1; dirty = true }
-    if (!r.ok && !act.reach(bot, low, 4.5)) { left += col.length; miss(); continue }
+    // (only a verdict counts against a column: a walk cut by dusk, a creeper or the operator says nothing of it - audit)
+    if (!r.ok && !act.reach(bot, low, 4.5)) { left += col.length; if (move.isVerdict(r)) miss(); continue }
     const leftBefore = left
     const pts = infraPoints()
     for (const q of col) {

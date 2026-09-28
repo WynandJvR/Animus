@@ -479,12 +479,6 @@ function decide () {
     const o = orchard.orchard()
     if (dHome < 64 && world.phase(bot) === 'day' && saps > 0 && (orchard.empty(bot).length > 0 || (o ? o.spots.length : 0) < demandTrees) && !held('plant')) return { name: 'plant', why: `${saps} saplings for the orchard (${o ? o.spots.length : 0} spots, ${demandTrees} trees wanted)` }
   }
-  // our own pillars and stepping stones left standing round home (a batch: one walk takes down many - LITTER_BATCH)
-  if (dHome < 64 && world.phase(bot) === 'day' && !held('tidy')) {
-    if (!litterSeeded && orchard.orchard()) { litterSeeded = true; litter.seed(bot) }
-    const n = litter.pending(bot, mem.get().home, 96).length
-    if (n >= LITTER_BATCH) return { name: 'tidy', why: `${n} blocks of ours left standing round home (pillars, stepping stones)` }
-  }
   // (the harvest when the bread runs low, not every morning: the crop keeps on the stalk, and harvesting and
   //  replanting 71 cells took two minutes of every ten-minute day with 31 bread in the pack, 2026-09-26)
   if (farm.farm() && dHome < 64 && farm.ripeCount(bot) >= 8 && breadStock() < BREAD_WANTED && !held('harvest')) return { name: 'harvest', why: `${farm.ripeCount(bot)} wheat ripe` }
@@ -550,6 +544,14 @@ function decide () {
   //  - every three seconds at dusk once a dusk-cut round stopped counting as a failure, 2026-09-27)
   if (mem.get().build && build.getJob() && build.needsWork(bot) && !nightSoon() && !homeByDark() && !held('castle')) {
     return { name: 'castle', why: 'working on ' + mem.get().build.name }
+  }
+  // 10. our own pillars and stepping stones left standing round home (a batch: one walk takes down many - LITTER_BATCH) -
+  //  in the castle's gaps only (held, waiting, the day's end): tidying ahead of it took 40 minutes of a morning, the
+  //  castle idle (single goal: the build; audit 2026-09-28)
+  if (dHome < 64 && world.phase(bot) === 'day' && !held('tidy')) {
+    if (!litterSeeded && orchard.orchard()) { litterSeeded = true; litter.seed(bot) }
+    const n = litter.pending(bot, mem.get().home, 96).length
+    if (n >= LITTER_BATCH) return { name: 'tidy', why: `${n} blocks of ours left standing round home (pillars, stepping stones)` }
   }
   return { name: 'idle', why: 'nothing to do' }
 }
