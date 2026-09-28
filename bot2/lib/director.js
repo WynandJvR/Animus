@@ -1518,7 +1518,10 @@ async function gatherForInner (raw, short) {
           const o = gather.lastChopOutcome()
           const searched = !!o && o.item === raw && o.at >= t0 && o.outcome === 'none-found'
           if (o && o.item === raw && o.at >= t0 && o.outcome === 'too-far') {
-            if (o.trip > DAWN_TICKS && await startExpedition(raw, o.land)) { /* (logged there) */ } else { notToday.set(raw, { sawNight: false, tod: world.tod(bot) }); log('dir', `${raw}: not today - too far for the daylight left`) }
+            // (past the daylight left - the day's round trip, or a whole day's - it sets out anyway while a real stretch of the day
+            //  is left, and camps where the night finds it: waited for a dawn start, the 424b dark oak trip was "not today" every
+            //  afternoon and the castle stood on it (the operator, 2026-09-28))
+            if ((o.trip > DAWN_TICKS || world.ticksUntilNight(bot) > 2400) && await startExpedition(raw, o.land)) { /* (logged there) */ } else { notToday.set(raw, { sawNight: false, tod: world.tod(bot) }); log('dir', `${raw}: not today - too far for the daylight left`) }
           }
           forage.noteTrip(raw, inv.count(bot, raw) - before, searched ? 'no trees of it found' : `cut short (${o && o.at >= t0 ? o.outcome : 'no chop ran'})`, { searched })
         }
