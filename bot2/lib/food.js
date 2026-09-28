@@ -149,6 +149,7 @@ async function woolFor (bot, n, ctx = {}) {
   }
   const t0 = Date.now()
   let empty = 0
+  let wentTo = null // (the remembered flock walked to this trip - forgotten if it is not there)
   while (woolCount() < target) {
     await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
     if (ctx.shouldStop && ctx.shouldStop()) return false
@@ -160,12 +161,19 @@ async function woolFor (bot, n, ctx = {}) {
     const woolly = e => { const w = sheepWool(bot, e); return !shornTried.has(e.id) && !(w && w.sheared) }
     const pick = shears ? (list.find(woolly) || list[0]) : list[0]
     if (!pick) {
+      // (a remembered flock that is not there when we arrive is forgotten: four wool trips walked to the same spot - inside
+      //  the castle's ground by then - found nothing, and went again, 2026-09-28)
+      if (wentTo && world.dist2(wentTo, bot.entity.position) < 16) {
+        mem.update(m => { if (m.mobs && m.mobs.sheep) m.mobs.sheep = m.mobs.sheep.filter(q => world.dist2(q, wentTo) >= 32) })
+        log('food', `no sheep where they were seen at ${wentTo.x},${wentTo.z} - forgotten`)
+        wentTo = null
+      }
       if (++empty > 4) { log('food', 'no sheep for wool nearby'); return false }
       const anchor = mem.get().home || bot.entity.position
       const known = (mem.get().mobs || {}).sheep ? mem.get().mobs.sheep.filter(p => world.dist2(p, anchor) < 200).sort((a, b) => world.dist2(a, bot.entity.position) - world.dist2(b, bot.entity.position))[0] : null
       const fit = bot.health >= 12 && world.phase(bot) === 'day'
       if (!fit) { log('food', `no sheep in sight and not fit to go looking (hp ${Math.round(bot.health)})`); return false }
-      if (known && empty === 1 && world.dist2(known, bot.entity.position) > 40) await move.travel(bot, known, { range: 10, shouldStop: ctx.shouldStop, label: 'to sheep' })
+      if (known && empty === 1 && world.dist2(known, bot.entity.position) > 40) { wentTo = known; await move.travel(bot, known, { range: 10, shouldStop: ctx.shouldStop, label: 'to sheep' }) }
       else await gather().explore(bot, () => false, { shouldStop: () => (ctx.shouldStop && ctx.shouldStop()) || animals(bot, /^sheep$/, 48).length > 0, label: 'animals', legs: 2 })
       continue
     }
