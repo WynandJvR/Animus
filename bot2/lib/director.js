@@ -1313,8 +1313,19 @@ async function gatherFor (raw, short) {
       return craft.ensure(bot, w, inv.count(bot, w) + batch, Object.assign({ noWithdraw: true, leaves: orchard.wantSaplings(bot, demandTrees) > 0 }, ctx))
     }
     case 'fuel': {
-      // coal turns up in the mine; the sure fuel is charcoal from logs beyond the build's (processAtHome burns
-      // them): trees are a short walk, a coal seam is not
+      // COAL FIRST: the orchard is the build's own species (never burnt), the other trees round home are cut out - 65
+      // "cutting logs for charcoal" in two days and not one log into the furnaces since the morning, the clay and the
+      // cobble waiting in the chest (2026-09-28). A coal seam at the mine's depth is 8 smelts an ore, and the trip brings
+      // the build's cobble back with it. Charcoal from logs stays the way when no coal comes.
+      {
+        const c0 = inv.count(bot, 'coal')
+        const want = Math.min(Math.ceil(short / 8), Math.max(8, Math.floor(tripRoom() / 2)))
+        log('dir', `short of ${short} fuel for the furnaces - mining ${want} coal`)
+        await mining.mineFor(bot, 'coal', c0 + want, ctx).catch(() => false)
+        const got = inv.count(bot, 'coal') - c0
+        log('dir', `the coal trip brought ${got} coal`)
+        if (got > 0) return true
+      }
       log('dir', `short of ${short} fuel for the furnaces - cutting logs for charcoal`)
       // the orchard's grown trees first: they burn as well as any
       const fromOrchard = await orchard.harvest(bot, { logs: Math.ceil(short * 8 / 7), demandTrees, shouldStop: dayStop })
