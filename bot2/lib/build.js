@@ -1083,6 +1083,7 @@ async function buildStep (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
   let waiting = null
   let waitingHolds = false // (the item named holds the band up - not a detached one, named only because nothing else is missing)
   const badStands = new Set() // (stands whose walk failed this step: clusterStand passes them by)
+  const holdBack = new Set() // (cells that would wall the body in from where it stands: later this step, or the next - wallsMeIn)
   // (where a step's time goes: choosing the cell, walking to and placing it - measured, not guessed)
   const prof = { tries: 0, ms: 0, okMs: 0, dist: 0, pick: 0 }; let tpick = Date.now()
   placeProf.reach = 0; placeProf.dig = 0
@@ -1165,7 +1166,7 @@ async function buildStep (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     // placed out of order was nothing but failures)
     const clickable = c => plansFor(c).some(p => refOk(bot, c, p))
     const supportable = c => !c.attach && !c.twin && plansFor(c).some(p => !job.index.has(key({ x: c.x + p.off[0], y: c.y + p.off[1], z: c.z + p.off[2] })))
-    const ready = doable.filter(c => clickable(c) || supportable(c))
+    const ready = doable.filter(c => !holdBack.has(key(c)) && (clickable(c) || supportable(c)))
     if (!ready.length) { profLog(); if (!placed) log('build', `nothing ready: lowest y${lowestAll}, ${doable.length} doable (${doable.slice(0, 5).map(c => c.name + '@' + c.x + ',' + c.y + ',' + c.z).join(' ')}) none clickable or supportable, waiting on ${waiting}`); return { placed, blockedOn: waiting, blockedHolds: waitingHolds, done: false } }
     // everything within reach of where we stand first, then the nearest - a layer down counts one block, not four:
     // the walk between cells is most of a block's six seconds, and "lower first" sent the bot back and forth across the
@@ -1191,6 +1192,7 @@ async function buildStep (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       }
     }
     if (skipTry) { failed.set(key(c), (failed.get(key(c)) || 0) + 1); saveCellFails(); prof.tries++; prof.ms += Date.now() - tp; prof.dist += d0; tpick = Date.now(); continue }
+    if (wallsMeIn(bot, c)) { holdBack.add(key(c)); log('build', `${c.name} at ${move.fmt(c)} would wall me in from ${move.fmt(world.feetPos(bot))} - later`); tpick = Date.now(); continue }
     const ok = await placeCell(bot, c)
     prof.tries++; prof.ms += Date.now() - tp; prof.dist += d0; if (ok) prof.okMs += Date.now() - tp
     tpick = Date.now()
@@ -1362,6 +1364,43 @@ function ensureFoundation (bot) {
   statusGen++
   // (headed by what is LEFT - the number status reports: the cells added count our supports standing in them as well)
   if (add.length || cols.length) log('build', `foundation: ${add.filter(p => !world.isSolid(world.at(bot, p.x, p.y, p.z))).length} blocks left of ${add.length}${standing.length ? ` (${standing.length} of them our supports already standing)` : ''} - a wall under the rim of the base where it stands over a drop (${new Set(add.map(p => p.x + ',' + p.z)).size} of ${cols.length} columns over the drop) - laid first${torches.length ? `, ${torches.length} torch${torches.length > 1 ? 'es' : ''} in the hollow under the floor` : ''}`)
+  return true
+}
+// NEVER WALL MYSELF IN: a cell placed while the body stands inside the footprint must leave it a way out - a walk (steps
+// up of one, drops of SAFE_DROP at most, the cell counted solid) to a column outside the footprint, or to open sky over a
+// cell that is not the build's own (a tower may rise there). Walled in at floor level at dusk, the bed out of reach, the
+// night ladder sent the bot on a 43b walk in the dark and it died (2026-09-28); sealed in the hollow under the floor it
+// stood 5 minutes. A region bigger than 300 cells is no trap. True: this cell would seal us in - it waits.
+function wallsMeIn (bot, c) {
+  if (!job) return false
+  const b0 = job.box; const f = world.feetPos(bot)
+  const inBox = p => p.x >= b0.x1 && p.x <= b0.x2 && p.z >= b0.z1 && p.z <= b0.z2
+  if (!inBox(f)) return false
+  const isC = (x, y, z) => x === c.x && y === c.y && z === c.z
+  const air = (x, y, z) => { if (isC(x, y, z)) return false; const b = world.at(bot, x, y, z); return !!b && world.isAirish(b) }
+  const st = (x, y, z) => {
+    if (!air(x, y, z) || !air(x, y + 1, z)) return false
+    if (isC(x, y - 1, z)) return true
+    return world.standable(bot, x, y, z)
+  }
+  const seen = new Set([key(f)]); const q = [{ x: f.x, y: f.y, z: f.z }]
+  while (q.length) {
+    if (seen.size > 300) return false
+    const p = q.shift()
+    if (!inBox(p)) return false
+    if (!job.index.has(key(p)) && world.openSky(bot, p) && !isC(p.x, p.y, p.z)) { let clear = true; for (let y = p.y + 2; y < p.y + 22; y++) if (isC(p.x, y, p.z)) clear = false; if (clear) return false }
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const x = p.x + dx; const z = p.z + dz
+      for (let dy = 1; dy >= -world.SAFE_DROP; dy--) {
+        const y = p.y + dy
+        if (dy === 1 && !air(p.x, p.y + 2, p.z)) continue // (a step up wants the head room to jump)
+        if (dy < 0) { let open = true; for (let yy = y + 2; yy <= p.y + 1; yy++) if (!air(x, yy, z)) open = false; if (!open) break } // (a drop wants its column open)
+        if (!st(x, y, z)) continue
+        const k = key({ x, y, z }); if (!seen.has(k)) { seen.add(k); q.push({ x, y, z }) }
+        break
+      }
+    }
+  }
   return true
 }
 // A foundation cell sealed in under the base already built is dropped, not rested: it is no part of the blueprint, nothing
