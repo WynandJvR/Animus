@@ -155,6 +155,24 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
     return b
   }
   m.exclusionAreasStep.push(block => (block && doorIds.has(block.type)) ? 4 : 0)
+  // (a step whose FLOOR is a natural leaf: a tree's crown is no ground - felled, it rots from under the feet; the orchard's
+  //  canopy walks ended in falls and a 40s tug between the leaf reflex and the planner, 2026-09-28. Over the crowns only
+  //  when there is no way along the ground)
+  // (memoised with the drops - one floor read per cell a plan; the properties only for a leaf)
+  const leafFloor = new Map(); let leafGen = pathGen
+  m.exclusionAreasStep.push(block => {
+    if (!block || !block.position) return 0
+    if (leafGen !== pathGen || leafFloor.size > 20000) { leafFloor.clear(); leafGen = pathGen }
+    const key = block.position.x + ',' + block.position.y + ',' + block.position.z
+    let v = leafFloor.get(key)
+    if (v === undefined) {
+      const f = world.at(bot, block.position.x, block.position.y - 1, block.position.z)
+      v = 0
+      if (f && /_leaves$/.test(f.name)) { let pr = {}; try { pr = f.getProperties() || {} } catch {} if (pr.persistent === false || pr.persistent === 'false') v = 25 }
+      leafFloor.set(key, v)
+    }
+    return v
+  })
   // (a step into water with no air over it within two - a roofed pocket, a flooded cave: the planner stepped the bot
   //  down into one 170 blocks out and it drowned under a stone roof, 2026-09-28. Swimming at the surface costs nothing
   //  more; a way through a sealed pocket only when there is no other)
