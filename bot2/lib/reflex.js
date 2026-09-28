@@ -926,6 +926,27 @@ function tick () {
     } else if (active && active.kind === 'powder') return clearActive()
   }
 
+  // 2c. A DOOMED FLOOR: natural leaves at distance 7 - no log left within reach, they decay. Stood on the crown of a tree
+  //  it had just felled, the leaf under the bot rotted away and it fell 7 blocks (2026-09-28). Off onto ground that holds.
+  {
+    const fx = Math.floor(me.x); const fy = Math.floor(me.y - 0.01); const fz = Math.floor(me.z)
+    const floor = bot.entity.onGround ? world.at(bot, fx, fy, fz) : null
+    const doomed = b => { if (!b || !/_leaves$/.test(b.name)) return false; let pr = {}; try { pr = b.getProperties() || {} } catch {} return (pr.persistent === false || pr.persistent === 'false') && Number(pr.distance) >= 7 }
+    if (doomed(floor) && require('./act').fallBelow(bot, { x: fx, y: fy, z: fz }) > world.SAFE_DROP) {
+      let best = null; let bd = Infinity
+      for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) for (let dy = -1; dy <= 1; dy++) {
+        const x = fx + dx; const y = fy + 1 + dy; const z = fz + dz
+        if (!world.standable(bot, x, y, z) || doomed(world.at(bot, x, y - 1, z))) continue
+        const d = Math.abs(dx) + Math.abs(dz) + Math.abs(dy)
+        if (d < bd) { bd = d; best = { x, y, z } }
+      }
+      if (!active || active.kind !== 'floor') { setActive('floor', 'off a decaying leaf'); log('reflex', `standing on decaying leaves at ${fx},${fy},${fz} over a ${require('./act').fallBelow(bot, { x: fx, y: fy, z: fz })}-block drop - ${best ? 'stepping off to ' + best.x + ',' + best.y + ',' + best.z : 'nowhere firm within 3'}`) }
+      try { bot.pathfinder.setGoal(null) } catch {}
+      if (best) steerTo(best, { jump: best.y > fy + 1 }); else for (const k of ['forward', 'back', 'left', 'right', 'jump']) bot.setControlState(k, false)
+      return
+    } else if (active && active.kind === 'floor') return clearActive()
+  }
+
   const hs = hostiles(24)
   const hp = bot.health
   const armed = !!inv.bestWeapon(bot)
