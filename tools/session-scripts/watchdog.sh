@@ -28,6 +28,9 @@ while true; do
   #  the mine's corridor ping-pong (240 "turning") ran for hours under every other alarm, 2026-09-28)
   sp=$(recent 10 | cut -c32- | grep -av "(op) \|(body)" | sort | uniq -c | sort -rn | awk '$1>=40 {print; exit}')
   [ -n "$sp" ] && { echo "ALARM: log loop: $sp"; exit 0; }
+  # (the same kind of line at different cells - "blocked at X", "won't place at Y": numbers normalised, 60+ in 10 min)
+  sk=$(recent 10 | cut -c32- | grep -av "(op) \|(body)" | sed -E 's/-?[0-9]+(\.[0-9]+)?/#/g' | sort | uniq -c | sort -rn | awk '$1>=60 {print; exit}')
+  [ -n "$sk" ] && { echo "ALARM: log loop (any cell): $sk"; exit 0; }
   # (handwork stopped because its click did nothing - /state buildProgress.stoppedWork - for over 10 min)
   sw=$(curl -s -m 5 http://127.0.0.1:3001/state | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const w=(JSON.parse(s).buildProgress||{}).stoppedWork||[];console.log(w.map(x=>x.work).join(','))}catch{}})")
   if [ -n "$sw" ]; then [ -z "$sw_since" ] && sw_since=$now; [ $((now - sw_since)) -gt 600 ] && { echo "ALARM: handwork stopped >10 min: $sw"; exit 0; }; else sw_since=; fi
