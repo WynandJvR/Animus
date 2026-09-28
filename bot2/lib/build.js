@@ -1316,7 +1316,8 @@ function ensureFoundation (bot) {
   }
   job.foundation = { cells: add.length, torches: torches.length }
   statusGen++
-  if (add.length || cols.length) log('build', `foundation: ${add.length} blocks${standing.length ? ` (${standing.length} of them our supports already standing)` : ''} - a wall under the rim of the base where it stands over a drop (${new Set(add.map(p => p.x + ',' + p.z)).size} of ${cols.length} columns over the drop) - laid first${torches.length ? `, ${torches.length} torch${torches.length > 1 ? 'es' : ''} in the hollow under the floor` : ''}`)
+  // (headed by what is LEFT - the number status reports: the cells added count our supports standing in them as well)
+  if (add.length || cols.length) log('build', `foundation: ${add.filter(p => !world.isSolid(world.at(bot, p.x, p.y, p.z))).length} blocks left of ${add.length}${standing.length ? ` (${standing.length} of them our supports already standing)` : ''} - a wall under the rim of the base where it stands over a drop (${new Set(add.map(p => p.x + ',' + p.z)).size} of ${cols.length} columns over the drop) - laid first${torches.length ? `, ${torches.length} torch${torches.length > 1 ? 'es' : ''} in the hollow under the floor` : ''}`)
   return true
 }
 // A foundation cell sealed in under the base already built is dropped, not rested: it is no part of the blueprint, nothing
