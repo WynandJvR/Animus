@@ -1111,7 +1111,9 @@ async function castleWork () {
     const fits = r => r !== 'clay_ball' && r !== 'sand' ? world.ticksUntilNight(bot) > 2400 : (r === 'sand' ? !clay.exhausted('sand') && clay.tripFits(bot, 'sand') : !clay.exhausted() && clay.tripFits(bot))
     if (raw0 && fits(raw0)) {
       log('dir', `the build waits on ${want} - ${win0.raw[raw0]} ${raw0} first, while the day is young`)
-      const ok0 = await gatherFor(raw0, win0.raw[raw0])
+      // (a packful - see the round's gather below: the whole build's shortfall, from the cached castle status)
+      let whole = 0; try { const cs = build.cachedStatus(bot); whole = cs ? (mats.planFor(bot, cs.need).raw[raw0] || 0) : 0 } catch {}
+      const ok0 = await gatherFor(raw0, Math.max(win0.raw[raw0], Math.min(whole, tripRoom())))
       if (inv.freeSlots(bot) < 8 || ok0) await base.depositHaul(bot, { shouldStop: dayStop })
       if (ok0) return true
     }
@@ -1180,7 +1182,10 @@ async function castleWork () {
   }
   log('dir', `${st.name} needs ${pick.short} more ${pick.raw} - ${pick.why}${pick.raw === blockedRaw ? ` (the builder waits on ${blockedOn})` : ''}; still short in all: ${Object.keys(tot.raw).map(r => tot.raw[r] + ' ' + r).join(', ')}`)
   buildFocus = { at: Date.now(), gathering: pick.raw, short: pick.short, why: pick.why, builderWaitsOn: blockedOn || null, shortInAll: Object.fromEntries(Object.entries(tot.raw).sort((a, b) => b[1] - a[1]).slice(0, 8)) }
-  const ok = await gatherFor(pick.raw, pick.short)
+  // (a PACKFUL, not the next few layers: gathering the window's want, building it, and going back out for the next
+  //  window's was most of the castle's time - 26 of 119 minutes placing, the rest fetching in small trips, 2026-09-28.
+  //  The whole build's shortfall, up to the room in the pack; the day's stop still ends the trip in time)
+  const ok = await gatherFor(pick.raw, Math.max(pick.short, Math.min(tot.raw[pick.raw] || 0, tripRoom())))
   if (inv.freeSlots(bot) < 8 || ok) await base.depositHaul(bot, { shouldStop: dayStop })
   // (a round the dusk cut short is no failure: counted as one, the backoff held the next morning's castle round
   //  minutes - "castle did not succeed (4 in a row)" after a step that placed 24, 2026-09-27)
