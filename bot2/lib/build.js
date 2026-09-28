@@ -900,6 +900,9 @@ async function descendPillar (bot) {
     if (!ours(under)) break
     // (a pillar block standing in a cell of the build that wants just that is the build now - never dug)
     { const bc = job && job.index.get(key(under)); if (bc && !bc.clear && cellDone(bot, bc) === true) break }
+    // (nor one a finished attached cell hangs on - a torch or lantern put on the pillar's side when it was the only
+    //  neighbour; audit)
+    if (job && job.cells.some(q => q.sup && q.sup.x === under.x && q.sup.y === under.y && q.sup.z === under.z && cellDone(bot, q) === true)) break
     if (!await act.dig(bot, new Vec3(under.x, under.y, under.z), { force: true, own: true, noWalk: true, allowZones: ['build', 'base'], timeoutMs: 6000 }).catch(() => false)) break
     const t0 = Date.now(); while (!bot.entity.onGround && Date.now() - t0 < 1500) await act.sleep(50)
     myPillar = myPillar.filter(p => !(p.x === under.x && p.y === under.y && p.z === under.z))
