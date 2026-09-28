@@ -112,18 +112,25 @@ function buildNeeds (bot) {
 // THE rule for what may burn. pickFuel promises fuel and putFuel loads it: with two rules they disagreed (pickFuel
 // counted the build's oak planks, putFuel refused them) and raw meat sat in a cold furnace while the bot went hungry,
 // 2026-09-22. Coal always; wood out of the build's surplus - unless the smelt is FOOD: a meal outranks a plank.
-function fuelOK (bot, name, { survival = false } = {}) {
-  if (name === 'coal' || name === 'charcoal') return true
-  if (!/_(planks|log|stem)$/.test(name) || /^stripped_/.test(name)) return false
-  if (survival) return true
-  const needed = buildNeeds(bot)
-  return woodSurplus(bot) > 0 && !needed.has(name) && !needed.has(name.replace(/_(log|planks)$/, '_log')) && !needed.has(name.replace(/_(log|planks)$/, '_planks'))
+// ...built once per fuel decision: the surplus and the build's needs read the whole castle (13888 cells), and asked per
+// item, per plank count, per loop turn they held the event loop 5.3s mid-castle (the stall watch named it: fuelOK <
+// woodSurplus < cellDone, 2026-09-28). Read once when the first wood is judged, then answered from that.
+function fuelRule (bot, { survival = false } = {}) {
+  let surplus, needed
+  return name => {
+    if (name === 'coal' || name === 'charcoal') return true
+    if (!/_(planks|log|stem)$/.test(name) || /^stripped_/.test(name)) return false
+    if (survival) return true
+    if (surplus === undefined) { surplus = woodSurplus(bot); needed = buildNeeds(bot) }
+    return surplus > 0 && !needed.has(name) && !needed.has(name.replace(/_(log|planks)$/, '_log')) && !needed.has(name.replace(/_(log|planks)$/, '_planks'))
+  }
 }
 
 // noGather: the background smelt queue - fuel from the bank and the build's surplus wood only, never a walk to
 // the trees or a wait on a charcoal batch (what it cannot cover, it does not load)
 async function pickFuel (bot, itemsToSmelt, { allowWood = true, noCharcoal = false, noGather = false, survival = false } = {}) {
   const need = Math.ceil(itemsToSmelt)
+  const burnable = fuelRule(bot, { survival })
   let coal = inv.count(bot, 'coal') + inv.count(bot, 'charcoal')
   if (coal * 8 >= need) return true
   // bulk (a castle's worth of stone): no waiting on a charcoal batch - coal from the bank, then wood the
@@ -133,7 +140,7 @@ async function pickFuel (bot, itemsToSmelt, { allowWood = true, noCharcoal = fal
     if (b.bankCount('coal') + b.bankCount('charcoal') > 0) { await b.withdraw(bot, 'coal', Math.ceil(need / 8)).catch(() => 0); await b.withdraw(bot, 'charcoal', Math.ceil(need / 8)).catch(() => 0) }
     coal = inv.count(bot, 'coal') + inv.count(bot, 'charcoal')
     if (coal * 8 >= need) return true
-    const woodOk = n => fuelOK(bot, n, { survival })
+    const woodOk = burnable
     const plankHeld = () => inv.items(bot).filter(i => /_planks$/.test(i.name) && woodOk(i.name)).reduce((t, i) => t + i.count, 0)
     const short = () => need - coal * 8 - plankHeld() * 1.5
     const bank = b.bankCounts()
@@ -168,11 +175,11 @@ async function pickFuel (bot, itemsToSmelt, { allowWood = true, noCharcoal = fal
   }
   // planks burn 1.5 items each
   if (allowWood) {
-    const plankItems = inv.items(bot).filter(i => /_planks$/.test(i.name) && fuelOK(bot, i.name, { survival })).reduce((s, i) => s + i.count, 0)
+    const plankItems = inv.items(bot).filter(i => /_planks$/.test(i.name) && burnable(i.name)).reduce((s, i) => s + i.count, 0)
     if (coal * 8 + plankItems * 1.5 >= need) return true
-    const logs = inv.items(bot).filter(i => craft().isLogName(i.name) && fuelOK(bot, i.name, { survival })).reduce((s, i) => s + i.count, 0)
+    const logs = inv.items(bot).filter(i => craft().isLogName(i.name) && burnable(i.name)).reduce((s, i) => s + i.count, 0)
     if (coal * 8 + (plankItems + logs * 4) * 1.5 >= need && logs > 0) {
-      const w = inv.items(bot).find(i => craft().isLogName(i.name) && fuelOK(bot, i.name, { survival }))
+      const w = inv.items(bot).find(i => craft().isLogName(i.name) && burnable(i.name))
       if (w) await craft().ensure(bot, craft().plankOfLog(w.name), Math.min(64, plankItems + Math.ceil((need - coal * 8) / 1.5)), { noWithdraw: true })
       return true
     }
@@ -192,7 +199,8 @@ async function putFuel (bot, furnace, itemsToSmelt, { survival = false } = {}) {
   const cur = furnace.fuelItem()
   if (cur) remaining -= cur.count * fuelValue(cur.name)
   if (remaining <= 0) return true
-  const order = ['coal', 'charcoal'].concat(inv.items(bot).filter(i => /_planks$/.test(i.name) && fuelOK(bot, i.name, { survival })).map(i => i.name))
+  const burnable = fuelRule(bot, { survival })
+  const order = ['coal', 'charcoal'].concat(inv.items(bot).filter(i => /_planks$/.test(i.name) && burnable(i.name)).map(i => i.name))
   for (const n of [...new Set(order)]) {
     // one stack at a time, looked up fresh each time (a remembered item object went stale after the withdraws:
     // "Can't find birch_planks in slots", "reading 'type' of null")
