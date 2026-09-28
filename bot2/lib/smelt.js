@@ -494,7 +494,7 @@ async function collectFurnaces (bot) {
   // (worth the walk: a furnace still smelting with under 8 made since it was last seen waits for the next round - 10s an
   //  item from the ledger's own counts. 48 furnaces opened every round for a few items each: 30-63s of every castle round,
   //  2026-09-28)
-  const worth = fb => { const u = use[fkey(fb.position)]; if (!u || u.inN == null || !u.inN) return true; return (u.outN || 0) + Math.min(u.inN, Math.floor((Date.now() - u.at) / 10000)) >= 8 }
+  const worth = fb => { const u = use[fkey(fb.position)]; if (!u || u.inN == null || !u.inN) return true; const made = Math.floor((Date.now() - u.at) / 10000); return made >= u.inN || (u.outN || 0) + made >= 8 } // (all its input done: always)
   for (const fb of furns) {
     if (stalled(fb) || !worth(fb)) continue
     const f = await openAt(bot, fb)
