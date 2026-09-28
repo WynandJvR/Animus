@@ -19,18 +19,31 @@ let busySince = 0; let busySaid = false // (how long it has been running - said 
 // EVERY REFLEX ACTION HAS A DEADLINE: an action that never ends holds `busy` and every row waits on it - cornered by a
 // pillager, the wall-off's two placings had no time limit and the bot stood 12s under fire, "flee" and no key, and died
 // (2026-09-28). The action may run on; the rows go on at its deadline. (`kind`: its row, let go at the deadline too.)
+// ...and at its deadline the action is STOPPED, not left running under the rows it held off (two intents on one body - the
+// one-runner rule): `act` is started here as act(gen), long ones ask busyAborted(gen) between their steps, and `stop`
+// ends what is under way (the dig, the bite, the planner's goal); audit 2026-09-28.
 let busyGen = 0
-function runBusy (label, p, ms, kind = null) {
+const abortedGens = new Set()
+function busyAborted (g) { return abortedGens.has(g) }
+function runBusy (label, act, ms, kind = null, stop = null) {
   const my = ++busyGen
   busy = true
   let timer = null
+  const p = typeof act === 'function' ? Promise.resolve().then(() => act(my)) : act
   const dl = new Promise(resolve => { timer = setTimeout(() => resolve('deadline'), ms) })
   return Promise.race([Promise.resolve(p).then(() => 'done', () => 'done'), dl]).then(res => {
     clearTimeout(timer)
-    if (res === 'deadline') { log('reflex', `busy ${label} ran out after ${ms}ms - the rows go on`); if (kind && active && active.kind === kind) clearActive() }
+    if (res === 'deadline') {
+      abortedGens.add(my); if (abortedGens.size > 64) abortedGens.delete(abortedGens.values().next().value)
+      try { if (stop) stop() } catch {}
+      log('reflex', `busy ${label} ran out after ${ms}ms - stopped, the rows go on`)
+      if (kind && active && active.kind === kind) clearActive()
+    }
     if (busyGen === my) busy = false
   })
 }
+const stopDig = () => { try { bot.stopDigging() } catch {} }
+const stopWalk = () => { try { bot.pathfinder.setGoal(null) } catch {} bot.clearControlStates() }
 let dressFailed = null // the better-armour key a wear attempt left unchanged (cleared when the inventory changes)
 let submergedSince = 0
 let lastAttackAt = 0
@@ -172,6 +185,7 @@ const MOB_HP = { skeleton: 20, stray: 20, bogged: 16, pillager: 24, witch: 26, b
 // `hs`: every hostile in range, the never-melee ones too - a ghast's fireballs land on the way in as well as a
 // skeleton's arrows; handed the melee list, the ghast was never counted and a charge under it read as free (2026-09-27)
 function chargeAffordable (shooter, hs, hp) {
+  for (const id of fledFrom.keys()) if (!bot.entities[id]) fledFrom.delete(id) // (gone from the world: gone from the list)
   { const f = fledFrom.get(shooter.e.id); if (f != null && hp < f) return false }
   const shooters = hs.filter(h => RANGED.has(h.e.name) && h.d < 16 && canSee(h.e))
   const w = inv.bestWeapon(bot)
@@ -267,7 +281,7 @@ async function doEat () {
   setActive('eat', food.name)
   let ok = false
   // (bot.consume has no limit of its own: 3s is a bite and a half)
-  await runBusy('eat', (async () => {
+  await runBusy('eat', () => (async () => {
     const before = bot.food
     await bot.equip(food, 'hand')
     await bot.consume()
@@ -275,7 +289,7 @@ async function doEat () {
     // a consume that resolves without the hunger bar moving is a refused bite: back off, don't spin
     if (bot.food <= before) lastEatFail = Date.now()
     ok = true
-  })().catch(() => { lastEatFail = Date.now() }), 3000, 'eat')
+  })().catch(() => { lastEatFail = Date.now() }), 3000, 'eat', () => { try { bot.deactivateItem() } catch {} })
   if (!ok) lastEatFail = Date.now()
   if (active && active.kind === 'eat') clearActive()
   return ok
@@ -331,7 +345,7 @@ function findAirReachable (maxNodes = 400) {
 }
 
 // Block the line of fire: the cells beside us toward the shooter, feet and head height.
-async function wallOff (e) {
+async function wallOff (e, g = 0) {
   const me = bot.entity.position.floored()
   const dx = e.position.x - (me.x + 0.5); const dz = e.position.z - (me.z + 0.5)
   const step = Math.abs(dx) >= Math.abs(dz) ? { x: Math.sign(dx), z: 0 } : { x: 0, z: Math.sign(dz) }
@@ -339,6 +353,7 @@ async function wallOff (e) {
   const act = require('./act')
   let n = 0
   for (const dy of [0, 1]) {
+    if (busyAborted(g)) return false // (its deadline passed: stopped - runBusy)
     const p = { x: me.x + step.x, y: me.y + dy, z: me.z + step.z }
     const b = world.at(bot, p.x, p.y, p.z)
     const f = filler()
@@ -352,16 +367,18 @@ let floatSince = 0
 let riseY = null; let riseAt = 0 // the air reflex: where the body was when it last made headway upward
 // Out of water over a bank too high to jump: dig the bank's lower blocks so there is a one-block step,
 // or fill the water cell beside us to stand on.
-async function climbOut () {
+async function climbOut (g = 0) {
   const p = bot.entity.position.floored()
   const act = require('./act')
   const tryCol = async (x, z) => {
     for (const base of [p.y, p.y - 1]) {
+      if (busyAborted(g)) return false // (its deadline passed: stopped - runBusy)
       const floor = world.at(bot, x, base, z); const c1 = world.at(bot, x, base + 1, z); const c2 = world.at(bot, x, base + 2, z)
       if (!floor || !c1 || !c2 || !world.isSolid(floor)) continue
       if (base + 1 > p.y + 1) continue
       // clear the two cells a body needs on top of that floor
       for (const c of [c1, c2]) {
+        if (busyAborted(g)) return false // (its deadline passed: stopped - runBusy)
         if (world.isAirish(c)) continue
         if (!world.NATURAL_RE.test(c.name) || world.isWaterBlock(c) || world.isLavaBlock(c)) return false
         // (through act.digBlock: a finished build block is never cut into, reflex or not)
@@ -369,6 +386,7 @@ async function climbOut () {
       }
       const t0 = Date.now()
       while (Date.now() - t0 < 2500) {
+        if (busyAborted(g)) return false // (its deadline passed: stopped - runBusy)
         steerTo({ x, y: base + 1, z }, { jump: true })
         await new Promise(r => setTimeout(r, 100))
         if (!world.feetInWater(bot) && bot.entity.onGround) break
@@ -383,6 +401,7 @@ async function climbOut () {
   const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]]
   if (t) dirs.sort((a, b) => Math.hypot(p.x + a[0] - t.x, p.z + a[1] - t.z) - Math.hypot(p.x + b[0] - t.x, p.z + b[1] - t.z))
   for (const [dx, dz] of dirs) {
+    if (busyAborted(g)) return false // (its deadline passed: stopped - runBusy)
     if (await tryCol(p.x + dx, p.z + dz)) { log('reflex', `cut a step into the bank at ${p.x + dx},${p.z + dz} and climbed out`); return true }
   }
   // no diggable bank: stand on a block placed in the water beside us - only where the cell has a face to click
@@ -392,6 +411,7 @@ async function climbOut () {
   if (!filler) return false
   const faced = c => [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]].some(([ox, oy, oz]) => world.isSolid(world.at(bot, c.x + ox, c.y + oy, c.z + oz)))
   for (const [dx, dz] of dirs) {
+    if (busyAborted(g)) return false // (its deadline passed: stopped - runBusy)
     const c = { x: p.x + dx, y: p.y, z: p.z + dz }
     const b = world.at(bot, c.x, c.y, c.z)
     if (!b || !world.isWaterBlock(b) || !faced(c) || !world.isAirish(world.at(bot, c.x, c.y + 1, c.z)) || !world.isAirish(world.at(bot, c.x, c.y + 2, c.z))) continue
@@ -404,6 +424,7 @@ async function climbOut () {
     log('reflex', `placed a block in the water at ${c.x},${c.y},${c.z} to climb out`)
     const t0 = Date.now()
     while (Date.now() - t0 < 2500) {
+      if (busyAborted(g)) return false // (its deadline passed: stopped - runBusy)
       steerTo({ x: c.x, y: c.y + 1, z: c.z }, { jump: true })
       await new Promise(r => setTimeout(r, 100))
       if (!world.feetInWater(bot) && bot.entity.onGround) break
@@ -439,7 +460,7 @@ function canDigInHere () {
   }
   return !world.waterNear(bot, { x: p.x, y: p.y - 2, z: p.z }, 1, -1, 1) && !world.lavaNear(bot, { x: p.x, y: p.y - 2, z: p.z }, 1)
 }
-async function digIn () {
+async function digIn (g = 0) {
   try { bot.pathfinder.setGoal(null) } catch {}
   bot.clearControlStates()
   const p0 = bot.entity.position.floored()
@@ -447,12 +468,14 @@ async function digIn () {
   await bot.look(bot.entity.yaw, -Math.PI / 2, true).catch(() => {})
   // three deep, so the plug goes in the ground layer with ground around it to place against
   for (const dy of [1, 2, 3]) {
+    if (busyAborted(g)) return false // (its deadline passed: stopped - runBusy)
     const b = world.at(bot, p0.x, p0.y - dy, p0.z)
     if (!b || world.isAirish(b)) continue
     // (through act.digBlock: it refuses a finished build block - canDigInHere already chose ground without one)
     await require('./act').digBlock(bot, b)
     const t0 = Date.now()
     while (Date.now() - t0 < 1500 && Math.floor(bot.entity.position.y) > p0.y - dy) {
+      if (busyAborted(g)) return false // (its deadline passed: stopped - runBusy)
       const pp = bot.entity.position
       bot.setControlState('forward', Math.hypot(pp.x - (p0.x + 0.5), pp.z - (p0.z + 0.5)) > 0.2)
       await bot.look(Math.atan2(-((p0.x + 0.5) - pp.x), -((p0.z + 0.5) - pp.z)), -Math.PI / 2, true).catch(() => {})
@@ -924,7 +947,7 @@ function tick () {
       // floating for 3s without making land: the bank is too high to climb from the water (a pond
       // with 2-high sides drowned the bot at 4 hp) - cut a step into it
       if (now - floatSince > 3000 && !busy) {
-        runBusy('climb out', climbOut(), 15000).then(() => { floatSince = now })
+        runBusy('climb out', g => climbOut(g), 15000, null, stopWalk).then(() => { floatSince = now })
         return
       }
       if (now - active.since > 60000) { floatSince = 0; return clearActive() }
@@ -993,7 +1016,7 @@ function tick () {
         // (standing, not floating: a dig off the ground under water is 25x slow - a stone roof from a float outlasts a
         //  breath; let go of jump and the body settles on the pocket's floor, 5x)
         for (const k of ['jump', 'forward', 'back', 'left', 'right']) bot.setControlState(k, false)
-        runBusy('dig to air', require('./act').digBlock(bot, roof).catch(() => false), 12000).then(() => { riseAt = Date.now() })
+        runBusy('dig to air', () => require('./act').digBlock(bot, roof).catch(() => false), 12000, null, stopDig).then(() => { riseAt = Date.now() })
         return
       }
     }
@@ -1044,7 +1067,7 @@ function tick () {
     if (cells.length) {
       if (!active || active.kind !== 'powder') { setActive('powder', 'breaking out of powder snow'); log('reflex', `in powder snow at ${Math.floor(me.x)},${Math.floor(me.y)},${Math.floor(me.z)} (hp ${Math.round(bot.health)}) - breaking out`) }
       try { bot.pathfinder.setGoal(null) } catch {}
-      runBusy('powder snow', (async () => { for (const b of cells.sort((p, q) => q.position.y - p.position.y)) await require('./act').digBlock(bot, b).catch(() => false) })(), 8000)
+      runBusy('powder snow', async g => { for (const b of cells.sort((p, q) => q.position.y - p.position.y)) { if (busyAborted(g)) break; await require('./act').digBlock(bot, b).catch(() => false) } }, 8000, null, stopDig)
       return
     } else if (active && active.kind === 'powder') return clearActive()
   }
@@ -1100,7 +1123,7 @@ function tick () {
       for (const k of ['forward', 'back', 'left', 'right', 'jump']) bot.setControlState(k, false)
       if (best || (way && way.run)) {
         if (!active || active.kind !== 'floor') setActive('floor', 'off a decaying leaf')
-        if (best) steerTo(best, { jump: best.y > fy + 1 }); else runBusy('off the leaves', way.run().catch(() => false), 6000)
+        if (best) steerTo(best, { jump: best.y > fy + 1 }); else runBusy('off the leaves', () => way.run().catch(() => false), 6000, null, stopDig)
         return
       }
       // A HOLD - waiting on the hp, or stranded - is no reason to starve or be shot: the tick goes on PINNED. Eating
@@ -1179,7 +1202,7 @@ function tick () {
     else if (!busy) {
       // nowhere to run (a tunnel): put a wall between us - a skeleton down a straight corridor shot the bot
       // from 13 blocks while "cover" had no side to step to
-      runBusy('wall off', wallOff(shooter.e), 3500, 'flee')
+      runBusy('wall off', g => wallOff(shooter.e, g), 3500, 'flee')
     }
     return
   }
@@ -1196,7 +1219,7 @@ function tick () {
   if (((target && weak) || nightThreat) && world.phase(bot) !== 'day' && nearest >= 6 && !inHut && !enclosed() && canDigInHere()) {
     const t = target || nightThreat.e
     setActive('dig-in', `${t.name} ${t.position.distanceTo(me).toFixed(1)}b, can't fight`)
-    runBusy('dig in', digIn(), 30000).then(() => { if (active && active.kind === 'dig-in') clearActive() })
+    runBusy('dig in', g => digIn(g), 30000, null, () => { stopDig(); stopWalk() }).then(() => { if (active && active.kind === 'dig-in') clearActive() })
     return
   }
   if (target && weak && hs.filter(h => h.d < 10).length) {
@@ -1225,7 +1248,7 @@ function tick () {
       return
     }
     setActive('fight', `${target.name} ${d.toFixed(1)}b (${why})`)
-    if (armed && (!bot.heldItem || !/_(sword|axe)$/.test(bot.heldItem.name))) { runBusy('equip a weapon', inv.equipWeapon(bot), 1500); return }
+    if (armed && (!bot.heldItem || !/_(sword|axe)$/.test(bot.heldItem.name))) { runBusy('equip a weapon', () => inv.equipWeapon(bot), 1500); return }
     if (d > 2.8 && !pinned) {
       bot.pathfinder.setMovements(require('./move').movementsFor(bot, { dig: false, place: false }))
       bot.pathfinder.setGoal(new goals.GoalFollow(target, 1.5), true)
@@ -1290,7 +1313,7 @@ function tick () {
   if (!bot.currentWindow && !hs.some(h => h.d < 8)) {
     const k = inv.betterArmorInPack(bot)
     if (k && k !== dressFailed) {
-      runBusy('dress', inv.wearBestArmor(bot).then(() => { if (inv.betterArmorInPack(bot) === k) dressFailed = k }).catch(() => { dressFailed = k }), 5000)
+      runBusy('dress', () => inv.wearBestArmor(bot).then(() => { if (inv.betterArmorInPack(bot) === k) dressFailed = k }).catch(() => { dressFailed = k }), 5000)
     }
   }
 }
@@ -1317,7 +1340,7 @@ function install (b) {
         // respawning at our bed means respawning in the safehouse: that IS the shelter - no hole in its floor
         if (!bot.entity || busy || world.phase(bot) === 'day' || enclosed() || require('./move').insideHut(bot.entity.position.floored()) || !canDigInHere()) return
         setActive('dig-in', 'respawned at night')
-        runBusy('dig in', digIn(), 30000).then(() => { if (active && active.kind === 'dig-in') clearActive() })
+        runBusy('dig in', g => digIn(g), 30000, null, () => { stopDig(); stopWalk() }).then(() => { if (active && active.kind === 'dig-in') clearActive() })
       } catch {}
     }, 1500)
   })
