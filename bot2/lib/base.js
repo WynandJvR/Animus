@@ -283,7 +283,7 @@ async function depositAll (bot, { keep = keepCount } = {}) {
       if (!placed) { log('base', 'no chest with room and could not place one'); return false }
       target = placed
     }
-    const before = {}; let asked = 0
+    const before = {}; let asked = 0; const askedBy = {}
     for (const it of inv.items(bot)) before[it.name] = (before[it.name] || 0) + it.count
     const w = await openChest(bot, target)
     // (a chest that would not open this time is skipped this round, never forgotten: a 20s open timeout erased the chest
@@ -297,14 +297,16 @@ async function depositAll (bot, { keep = keepCount } = {}) {
       for (const it of firsts.values()) {
         const k = inv.count(bot, it.name) - Math.min(inv.count(bot, it.name), keep(bot, it))
         if (k <= 0) continue
-        try { await w.deposit(it.type, null, k); asked += k } catch (e) { if (!depErr) depErr = `${it.name} x${k}: ${e.message}`; if (/full/i.test(e.message)) break }
+        try { await w.deposit(it.type, null, k); asked += k; askedBy[it.name] = (askedBy[it.name] || 0) + k } catch (e) { if (!depErr) depErr = `${it.name} x${k}: ${e.message}`; if (/full/i.test(e.message)) break }
       }
       refreshCache(w, target)
     } finally { try { w.close() } catch {} }
     // (what left the pack, counted after the close and the resync - see withdraw)
     await settle(bot)
-    let moved = 0; for (const [name, c] of Object.entries(before)) moved += Math.max(0, c - inv.count(bot, name))
-    checkMoves(target, asked, moved, 'depositing the haul')
+    let moved = 0; const off = []
+    for (const [name, c] of Object.entries(before)) { const m = Math.max(0, c - inv.count(bot, name)); moved += m; if (m !== (askedBy[name] || 0)) off.push(`${name} ${askedBy[name] || 0}->${m}`) }
+    // (which items did not move as asked - an overshoot, or a pack change of its own on the walk to the chest)
+    checkMoves(target, asked, moved, 'depositing the haul' + (off.length ? ` [${off.slice(0, 6).join(', ')}]` : ''))
     // (a round that put nothing in is no round to repeat: every deposit threw, one item moved each time, and the loop and
     //  the director's retries went round 72 times in 8s, each writing memory - 2026-09-28. Say why and stop.)
     // (a chest that FILLED is no failure: it is full - marked so, and the next round takes another or places one; only a
