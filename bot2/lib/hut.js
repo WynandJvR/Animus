@@ -474,7 +474,9 @@ async function unsealDoor (bot) {
   const out = outerStep(pl)
   let did = false
   // (the step's two cells by name, and every cell the seal recorded - whatever stands there now, a door never)
-  const recorded = ((mem.get().doorSeal || {}).cells || []).filter(c => { const b = world.at(bot, c.x, c.y, c.z); return b && !world.isAirish(b) && !/_door$/.test(b.name) })
+  // (never furniture or a protected block that took the cell since - a chest, a bed, a torch on the step: the record
+  //  restores the walkway, it never takes what came there by right; audit 2026-09-28)
+  const recorded = ((mem.get().doorSeal || {}).cells || []).filter(c => { const b = world.at(bot, c.x, c.y, c.z); return b && !world.isAirish(b) && !world.FURNITURE_RE.test(b.name) && !move.isProtected(b, 'dig') })
   const stepBlocked = recorded.length || [out.y, out.y + 1].some(y => { const c = world.at(bot, out.x, y, out.z); return c && STEP_CLEAR_RE.test(c.name) })
   if (stepBlocked) {
     log('hut', 'clearing the blocked door step')
