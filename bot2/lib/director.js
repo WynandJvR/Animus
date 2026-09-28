@@ -220,7 +220,9 @@ function missingKit () {
   if (!inv.has(bot, 'crafting_table')) out.push('crafting_table')
   // a stack of filler: the tower out of a pit, the planner's step up, the wall against a shooter - all of them survival, and
   // nothing put it back once the foundation and the scaffold had spent it: trapped in a shaft with none, 2026-09-28; audit
-  if (inv.items(bot).filter(i => build.FILLER_ITEMS.test(i.name)).reduce((n, i) => n + i.count, 0) < 16) out.push('filler')
+  // (at home only - before the bot goes out: at the site the builder keeps its own stock of the same filler, and a kit rule
+  //  firing mid-castle walked it home for a top-up; audit)
+  if (base.distHome(bot) < 24 && inv.items(bot).filter(i => build.FILLER_ITEMS.test(i.name)).reduce((n, i) => n + i.count, 0) < 16) out.push('filler')
   // a boat, once the land here has been found to need one (stood at the water with none, and swam: drowned killed it
   // swimming to the sand on an islet, 2026-09-23) - made at home with the tools, carried like them
   if (mem.get().wantBoat && !require('./boat').boatItem(bot)) out.push(craft.preferredWood(bot, 5) + '_boat')
@@ -837,9 +839,10 @@ const TASKS = {
     for (const t of missingKit()) {
       // (the bow and arrows come out of the chest: nothing here makes them)
       if (t === 'filler') {
-        for (const n of ['cobblestone', 'dirt']) { const have = inv.items(bot).filter(i => build.FILLER_ITEMS.test(i.name)).reduce((k, i) => k + i.count, 0); if (have >= 24) break; if (base.bankCount(n) > 0) await base.withdraw(bot, n, 24 - have).catch(() => 0) }
-        const have = inv.items(bot).filter(i => build.FILLER_ITEMS.test(i.name)).reduce((k, i) => k + i.count, 0)
-        if (have < 16 && !await craft.ensure(bot, 'dirt', inv.count(bot, 'dirt') + (16 - have), { noWithdraw: true, shouldStop: dayStop }).catch(() => false)) { log('dir', 'no filler to be had for the kit'); return false }
+        // (the ONE filler getter - the scaffold's: the bank, then cobble from the mine, surface dirt last; a kit's own dirt dig
+        //  was the chain that walked the bot 104 blocks out to drown, 03:54 - it must not drift from the scaffold's; audit)
+        await build.ensureScaffold(bot, 24, { shouldStop: dayStop }).catch(() => false)
+        if (inv.items(bot).filter(i => build.FILLER_ITEMS.test(i.name)).reduce((k, i) => k + i.count, 0) < 16) { log('dir', 'no filler to be had for the kit'); return false }
         continue
       }
       if (t === 'bow' || t === 'arrow') { const got = await base.withdraw(bot, t, t === 'bow' ? 1 : 64).catch(() => 0); if (!got) { log('dir', `couldn't take the ${t} from the chest`); return false } continue }
