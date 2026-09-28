@@ -1343,13 +1343,25 @@ async function gatherFor (raw, short) {
         // (exposed to the SKY: air beside it that sees the sky - a cave wall's coal has air beside it too, and the walk there
         //  is a day walk into the dark; audit)
         const skyFace = b => [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 0, -1]].some(([dx, dy, dz]) => { const q = { x: b.position.x + dx, y: b.position.y + dy, z: b.position.z + dz }; const a = world.at(bot, q.x, q.y, q.z); return a && world.isAirish(a) && world.openSky(bot, q) })
-        const seen = home ? await world.scanBlocks(bot, /^(coal_ore|deepslate_coal_ore)$/, { maxDistance: 96, count: 200, point: home, filter: b => world.dist2(b.position, home) > 48 && !move.inZone(b.position, 2) && !gather.onGrounds(b.position) && skyFace(b) }).catch(() => []) : []
-        const me = bot.entity.position
-        const o = seen.sort((a, b) => world.dist3(a.position, me) - world.dist3(b.position, me))[0]
+        // (outcrop after outcrop while the day holds and the count is short: one vein gave 5 of 17 and the trip went home,
+        //  2026-09-28. Each a fresh sky-face pick past the ones worked, the trip's work kept local to each; four at most)
+        const worked = []
+        let tried = 0
+        const pick = async () => {
+          const seen = home ? await world.scanBlocks(bot, /^(coal_ore|deepslate_coal_ore)$/, { maxDistance: 96, count: 200, point: home, filter: b => world.dist2(b.position, home) > 48 && !move.inZone(b.position, 2) && !gather.onGrounds(b.position) && skyFace(b) && !worked.some(w => world.dist3(w, b.position) <= 8) }).catch(() => []) : []
+          const me = bot.entity.position
+          return seen.sort((a, b) => world.dist3(a.position, me) - world.dist3(b.position, me))[0]
+        }
+        let o = await pick()
         if (o) {
-          log('dir', `short of ${short} fuel for the furnaces - ${want} coal from the outcrop at ${move.fmt(o.position)}`)
-          const r = await move.travel(bot, o.position, { range: 3, shouldStop: dayStop, label: 'to the coal' })
-          if (r.ok) await mining.takeKnownOre(bot, 'coal', c0 + want, Object.assign({}, ctx, { near: { point: o.position, radius: 8 }, oreFilter: b => world.dist3(b.position, o.position) <= 3 || skyFace(b) })).catch(() => false)
+          while (o && tried < 4 && inv.count(bot, 'coal') - c0 < want && world.ticksUntilNight(bot) > 2400 && !dayStop()) {
+            tried++
+            log('dir', `short of ${short} fuel for the furnaces - ${want - (inv.count(bot, 'coal') - c0)} coal from the outcrop at ${move.fmt(o.position)}`)
+            worked.push(o.position)
+            const r = await move.travel(bot, o.position, { range: 3, shouldStop: dayStop, label: 'to the coal' })
+            if (r.ok) await mining.takeKnownOre(bot, 'coal', c0 + want, Object.assign({}, ctx, { near: { point: o.position, radius: 8 }, oreFilter: b => world.dist3(b.position, o.position) <= 3 || skyFace(b) })).catch(() => false)
+            o = await pick()
+          }
         } else {
           log('dir', `short of ${short} fuel for the furnaces - no coal in sight past the grounds, the mine's walls for ${want}`)
           await mining.mineFor(bot, 'coal', c0 + want, ctx).catch(() => false)
