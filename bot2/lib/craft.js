@@ -498,4 +498,21 @@ async function craftTimes (bot, name, crafts, { shouldStop } = {}) {
   return Math.round(made / perCraft)
 }
 
-module.exports = { packUpTables, ensure, craftItem, craftTimes, plankUp, getTable, chooseRecipe, GATHER, SMELT, HUNT, WOODS, isLogName, logCount, plankOfLog, preferredWood }
+// A tool of a kind that still works (minUses left), else the best the pack can make of it - iron (three ingots packed),
+// stone, wood. ONE rule for every task that wears a tool mid-way: the mine's pickaxe, a chop's axe (a 20-minute chop
+// went on by hand at 15s a log, 1400b out with cobble and a table in the pack; 2026-09-28). The worn one still counts
+// as "have 1": one more than we hold is asked, and only a usable tool afterwards is success (asking for 1 "succeeded"
+// at once and span the mine loop). The chest only when home is near.
+async function keepTool (bot, kind, { minUses = 4, noWithdraw = null, shouldStop } = {}) {
+  if (inv.bestTool(bot, kind, minUses)) return true
+  // (iron only where the tier is the point - the pickaxe, for the ore: three ingots on an axe are a third of a
+  //  chestplate, and iron is what runs short. The build plan's wanted set can't answer "spare": the armour's iron is
+  //  not in it; audit 2026-09-28)
+  const want = kind === 'pickaxe' && inv.count(bot, 'iron_ingot') >= 3 ? `iron_${kind}` : inv.count(bot, 'cobblestone') >= 3 ? `stone_${kind}` : `wooden_${kind}`
+  const nw = noWithdraw != null ? noWithdraw : base().distHome(bot) > 64
+  await ensure(bot, want, inv.count(bot, want) + 1, { noWithdraw: nw, shouldStop }).catch(() => false)
+  const ok = !!inv.bestTool(bot, kind, minUses)
+  log('craft', ok ? `the ${kind} wore out - made a ${want}` : `the ${kind} wore out and no ${want} could be made${nw ? ' from the pack' : ''}`)
+  return ok
+}
+module.exports = { keepTool, packUpTables, ensure, craftItem, craftTimes, plankUp, getTable, chooseRecipe, GATHER, SMELT, HUNT, WOODS, isLogName, logCount, plankOfLog, preferredWood }

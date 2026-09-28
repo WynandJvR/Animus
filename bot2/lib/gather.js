@@ -96,6 +96,7 @@ async function chop (bot, re, n, ctx = {}) {
   // walked at every 33s for 20 minutes, 2026-09-26)
   const unreachable = new Set(); const tk = p => `${p.x},${p.y},${p.z}`
   const landTried = new Set()
+  let axeFailed = false
   while (inv.count(bot, itemName) < target) {
     await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
     if (ctx.shouldStop && ctx.shouldStop()) return end('stopped', false)
@@ -178,6 +179,9 @@ async function chop (bot, re, n, ctx = {}) {
     }
     emptyScans = 0
     noteResource(itemName, trunk)
+    // (the axe worn out mid-chop: a new one from the pack before the next tree - the tools rule runs only between tasks;
+    //  craft.keepTool. Latched only on a failed make: a stone axe is 131 logs and an expedition's chop fells more)
+    if (!axeFailed && !inv.bestTool(bot, 'axe', 1) && !await require('./craft').keepTool(bot, 'axe', { minUses: 1, shouldStop: ctx.shouldStop })) axeFailed = true
     const got = await fellTree(bot, trunk, re, { leaves: !!ctx.leaves, allowZones: move.inZone(trunk, 0) ? ['orchard'] : [], shouldStop: ctx.shouldStop })
     if (!got) { unreachable.add(tk(trunk)); await move.sleep(300) }
   }
@@ -379,7 +383,7 @@ function speciesLand (itemName, from) {
 // for 430b round, the one cool land a birch forest 410b west)
 // (peaks and slopes neither: bare rock and snow, a climb not a walk - frozen peaks would outrank every forest by
 //  temperature and send the bot up a cliff; audit 2026-09-28)
-const NO_CLIMATE = /river|ocean|beach|shore|swamp|peaks|slopes/
+const NO_CLIMATE = /river|ocean|beach|shore|swamp|peaks|slopes|caves|deep_dark/ // (caves: a cave mouth in the sample - lush caves would outrank the birch forests; 2026-09-28)
 function climateLead (bot, itemName, from) {
   const re = SPECIES_BIOMES[String(itemName).replace(/_(log|wood)$/, '')]
   const byName = (bot.registry && bot.registry.biomesByName) || {}

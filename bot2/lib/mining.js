@@ -240,16 +240,7 @@ function mineShouldPause (bot, ctx) {
   return null
 }
 
-async function ensurePick (bot) {
-  if (inv.bestTool(bot, 'pickaxe', 4)) return true
-  const cob = inv.count(bot, 'cobblestone')
-  const want = inv.count(bot, 'iron_ingot') >= 3 ? 'iron_pickaxe' : (cob >= 3 ? 'stone_pickaxe' : 'wooden_pickaxe')
-  log('mine', `pickaxe worn out - making a ${want}`)
-  // the worn one still counts as "have 1": ask for one more than we hold, and only a usable pickaxe
-  // afterwards counts as success (asking for 1 "succeeded" instantly and span the mine loop)
-  await craft().ensure(bot, want, inv.count(bot, want) + 1, { noWithdraw: false }).catch(() => false)
-  return !!inv.bestTool(bot, 'pickaxe', 4)
-}
+async function ensurePick (bot) { return craft().keepTool(bot, 'pickaxe', { noWithdraw: false }) } // (craft.keepTool: the one rule)
 
 // Keep enough in the pack for the mine: a spare pickaxe's worth of sticks and a table.
 let provisioning = false
