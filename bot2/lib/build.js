@@ -1208,9 +1208,9 @@ function ensureSnapshot (bot) {
 }
 // THE FOUNDATION: the base layer stood over a drop - the castle's south and west edges over a slope 5-9 blocks down -
 // and every cell there was a pillar climbed, stuck at its foot, or a fall (2026-09-28). A player lays a foundation on a
-// slope first: under each cell of the base layer, the air, water or plants down to the ground become cells of the job
-// (a filler block each), so the band fills them bottom-up before the walls over them rise, and every block after is
-// placed standing on solid ground. Only under the BASE layer - a blueprint's own overhang higher up is not propped - and
+// slope first: under the RIM of the base layer, the air, water or plants down to the ground become cells of the job
+// (a filler block each) - a retaining wall, not a solid box - so the band lays it bottom-up before the walls over it rise,
+// and the floor inside is placed from solid footing. Only under the BASE layer - a blueprint's own overhang higher up is not propped - and
 // no deeper than FOUNDATION_MAX (a ravine keeps its pillars); a column with lava in it is left. Taken once the chunks
 // are here, from the ground as it stands (anything solid ends the column: a block of ours there is kept as foundation).
 const FOUNDATION_MAX = 16
@@ -1221,6 +1221,7 @@ function ensureFoundation (bot) {
   const y1 = job.box.y1
   // (a support of ours in a column is air to the scan: the teardown takes it, and the fill must not end on it - audit)
   const ledger = new Set((mem.get().scaffold || []).map(key))
+  const cols = []
   for (const c of job.cells) {
     if (c.y !== y1 || c.clear) continue
     const col = []
@@ -1233,7 +1234,16 @@ function ensureFoundation (bot) {
       if (y1 - y > FOUNDATION_MAX) { ok = false; break }
       col.push(y)
     }
-    if (ok) for (const y of col) add.push({ x: c.x, y, z: c.z })
+    if (ok && col.length) cols.push({ x: c.x, z: c.z, ys: col })
+  }
+  // THE EDGE ONLY: a one-wide wall down the rim - a column of the base with a side on anything that is not the base
+  // (the outside, a courtyard) - not the whole box under it. The floor inside goes in clicked against the rim and its own
+  // neighbours as any cell does; the hollow under it is closed in. A solid fill was 1,000-1,900 blocks of mining for the
+  // same footing (the operator, 2026-09-28)
+  const base = k2 => job.index.has(`${k2.x},${y1},${k2.z}`) && !job.index.get(`${k2.x},${y1},${k2.z}`).clear
+  for (const q of cols) {
+    if (![[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => !base({ x: q.x + dx, z: q.z + dz }))) continue
+    for (const y of q.ys) add.push({ x: q.x, y, z: q.z })
   }
   for (const p of add) {
     const cell = { x: p.x, y: p.y, z: p.z, name: 'cobblestone', props: {}, foundation: true, want: null, item: 'cobblestone', alt: FOUNDATION_BLOCKS, prefer: ['cobblestone', 'dirt'], itemAlt: FILLER_ITEMS }
@@ -1241,7 +1251,7 @@ function ensureFoundation (bot) {
   }
   job.foundation = { cells: add.length }
   statusGen++
-  if (add.length) log('build', `foundation: ${add.length} blocks under the base layer where it stands over a drop (${new Set(add.map(p => p.x + ',' + p.z)).size} columns) - laid first`)
+  if (add.length || cols.length) log('build', `foundation: ${add.length} blocks - a wall under the rim of the base where it stands over a drop (${new Set(add.map(p => p.x + ',' + p.z)).size} of ${cols.length} columns over the drop) - laid first`)
   return true
 }
 // A foundation cell that can't go in is dropped, not rested: it is no part of the blueprint - sealed in under the base
