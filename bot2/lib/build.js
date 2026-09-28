@@ -888,6 +888,26 @@ function footFor (bot, c) { return feetFor(bot, c)[0] || null }
 // three feet per cell, each tried twice, eight seconds a try, a dozen cells - a whole day, 2026-09-27)
 const badFeet = new Map()
 const footBad = f => { const t = badFeet.get(key(f)); return !!t && Date.now() - t < 30 * 60000 }
+// THE LADDER DOWN WHEN DONE WITH: the pillar pillarTo raised to reach a high cell comes down from on top - dig the block
+// under the feet, drop one, again - before the builder walks to a cell the pillar top does not reach, and at the step's
+// end. Left standing till the whole build was done, 391 blocks of pillars stood round the castle for days: the operator
+// asked what they were, and they blocked the stands the rim's foundation needed (2026-09-28).
+let myPillar = []
+async function descendPillar (bot) {
+  const ours = q => myPillar.some(p => p.x === q.x && p.y === q.y && p.z === q.z)
+  for (let guard = 0; guard < 20 && myPillar.length; guard++) {
+    const me = bot.entity.position; const under = { x: Math.floor(me.x), y: Math.floor(me.y - 0.01), z: Math.floor(me.z) }
+    if (!ours(under)) break
+    // (a pillar block standing in a cell of the build that wants just that is the build now - never dug)
+    { const bc = job && job.index.get(key(under)); if (bc && !bc.clear && cellDone(bot, bc) === true) break }
+    if (!await act.dig(bot, new Vec3(under.x, under.y, under.z), { force: true, own: true, noWalk: true, allowZones: ['build', 'base'], timeoutMs: 6000 }).catch(() => false)) break
+    const t0 = Date.now(); while (!bot.entity.onGround && Date.now() - t0 < 1500) await act.sleep(50)
+    myPillar = myPillar.filter(p => !(p.x === under.x && p.y === under.y && p.z === under.z))
+  }
+  // (what could not come down - walked off it, a block that would not dig - is the site's scaffold still: the site diff
+  //  and the finish take it; forgotten here so no later walk digs under someone else's feet)
+  myPillar = []
+}
 async function pillarTo (bot, c, first) {
   const feet = feetFor(bot, c).filter(f => !footBad(f)).slice(0, 3)
   if (first && !feet.some(f => f.x === first.x && f.z === first.z)) feet.unshift(first)
@@ -907,7 +927,7 @@ async function pillarTo (bot, c, first) {
     bot.clearControlStates()
     await act.sleep(100)
     for (let i = 0; i < 16 && Math.floor(bot.entity.position.y) < c.y - 1; i++) {
-      if (!await require('./gather').towerUp(bot, { allowZones: ['build', 'base'], builder: true })) break
+      if (!await require('./gather').towerUp(bot, { allowZones: ['build', 'base'], builder: true, onPlaced: q => myPillar.push(q) })) break
     }
     if (act.reach(bot, new Vec3(c.x, c.y, c.z), 4.8)) return true
     log('build', `pillar for ${c.name} at ${move.fmt(c)}: towered from ${move.fmt(f)} to y${Math.floor(bot.entity.position.y)}, still out of reach`)
@@ -1066,7 +1086,10 @@ let cellFailsSaved = 0
 function saveCellFails () { if (Date.now() - cellFailsSaved < 5000) return; cellFailsSaved = Date.now(); const o = {}; for (const [k, v] of cellFails) { if (job && !job.index.has(k)) { cellFails.delete(k); continue } o[k] = v } mem.set('cellFails', o) }
 function failsOf (c) { const f = cellFails.get(key(c)); return f ? f.n : 0 }
 let stepStop = null // (the running build step's stop - a pillar's scaffold top-up inside it keeps the step's day)
-async function buildStep (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
+async function buildStep (bot, opts = {}) {
+  try { return await buildStepInner(bot, opts) } finally { if (myPillar.length) await descendPillar(bot).catch(() => {}) }
+}
+async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
   stepStop = shouldStop || null
   const t0 = Date.now()
   let placed = 0
@@ -1181,6 +1204,8 @@ async function buildStep (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     // a step - 9.3s a block, the next cell 6-9 blocks off (2026-09-28)
     // (a stand whose walk failed is not tried again this step; and when that walk ran out of time, the cell rests without its
     //  own try - the same ground defeats both, 8s + 14s for one cell; a quick no-path falls through to it; audit)
+    // (on our pillar and the next cell out of its reach: down first - the next walk starts from the ground)
+    if (myPillar.length && !inReach(c)) await descendPillar(bot)
     let skipTry = false
     if (!c.foundation && !inReach(c) && ready.length > 2) {
       const st = clusterStand(bot, c, ready, badStands)
