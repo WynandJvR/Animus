@@ -666,9 +666,15 @@ async function escapeUpInner (bot) {
       // (a finished cell of OUR build over the head is ours to take and put back: sealed in the hollow under the castle's
       //  floor, every walk out failed and the climb refused the slab over the head - 5 minutes stuck, freed only by the
       //  operator's hand, 2026-09-28. The builder sees the cell undone and places it again)
+      // (only in the hollow UNDER the build - feet inside its footprint, below its base - and never a block that holds up
+      //  an attached cell of it: a lantern hung from a slab would drop; audit 2026-09-28)
       const j = require('./build').getJob()
-      const ours = !!(b && j && j.index && j.index.has(`${b.position.x},${b.position.y},${b.position.z}`))
-      if (ours) log('move', `climbing out: taking our own ${b.name} over my head at ${fmt(b.position)} - the builder puts it back`)
+      const bx = j && j.box
+      const under = !!(bx && f.x >= bx.x1 && f.x <= bx.x2 && f.z >= bx.z1 && f.z <= bx.z2 && f.y < bx.y1)
+      const bk = b ? `${b.position.x},${b.position.y},${b.position.z}` : ''
+      const holdsUp = !!(b && j && j.cells.some(c => c.sup && `${c.sup.x},${c.sup.y},${c.sup.z}` === bk))
+      const ours = !!(b && under && !holdsUp && j.index && j.index.has(bk))
+      if (ours) log('move', `climbing out: taking our own ${b.name} over my head at ${bk} - the builder puts it back`)
       if (b && !world.isAirish(b) && !world.isWaterBlock(b) && !await act.dig(bot, b.position, { own: ours, force: ours, allowZones: ['farm', 'base', 'orchard', 'build'], timeoutMs: 8000, noWalk: true })) { log('move', `climbing out: can't clear ${b.name} over my head at ${fmt(b.position)}`); return false }
     }
     if (await gather.towerUp(bot, { allowZones: ['*'] })) continue // (an escape: any zone, never a build cell)
