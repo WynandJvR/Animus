@@ -11,7 +11,7 @@ S=$(cd "$(dirname "$0")" && pwd); lim=${1:-1800}; end=$((SECONDS+lim)); PAUSEDOK
 #  Held for "within 20" the fixes for a 117s-a-try door loop waited behind the gate while the bot worked the site, 2026-09-28)
 # (the code is fingerprinted NOW: a reconnect loads bot2 from disk, so an edit saved while the gate is shut would ship
 #  unaudited - it nearly did twice on 2026-09-28. Changed when the gate opens = refused; start the deploy again)
-fp () { cat /c/mc-bot-lab/bot2/main.js /c/mc-bot-lab/bot2/lib/*.js | md5sum | cut -d' ' -f1; }
+fp () { cat /c/mc-bot-lab/bot2/*.js /c/mc-bot-lab/bot2/lib/*.js | md5sum | cut -d' ' -f1; }
 FP0=$(fp); echo "code fingerprint $FP0 ($(git -C /c/mc-bot-lab rev-parse --short HEAD))"
 while [ $SECONDS -lt $end ]; do
   st=$(curl -s -m 5 http://127.0.0.1:3001/state)
@@ -21,7 +21,7 @@ while [ $SECONDS -lt $end ]; do
     cd /c/mc-bot-lab/bot2; for f in main.js lib/*.js; do node --no-lazy --check "$f" || { echo "SYNTAX FAIL $f"; exit 1; }; done
     NODE_PATH=/c/mc-bot-lab/bot2/node_modules node /c/mc-bot-lab/tools/session-scripts/xmodcheck.js /c/mc-bot-lab/bot2 > /dev/null || { echo "CROSS-MODULE NAME MISSING - run tools/session-scripts/xmodcheck.js"; exit 1; }
     PREV=$(ls -d $S/rollback/candidate-* 2>/dev/null | tail -1)
-    N=$S/rollback/candidate-$(date +%H%M); mkdir -p $N; cp -r lib main.js $N/; cp config.json $N/
+    N=$S/rollback/candidate-$(date +%H%M); mkdir -p $N; cp -r lib *.js command.gbnf config.json package.json $N/ 2>/dev/null; mkdir -p $N/schematics; cp schematics/hut.schem $N/schematics/ 2>/dev/null
     # (the last three snapshots only - each is a whole copy of bot2: thirteen in a day were 439 files, 13MB)
     ls -d $S/rollback/candidate-* 2>/dev/null | head -n -3 | xargs -r rm -rf
     echo "$(date +%Y-%m-%dT%H:%M) prev=$PREV new=$N" > $S/last-deploy.txt # (rollback target = prev: the snapshot is of the NEW code)
