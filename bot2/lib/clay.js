@@ -444,6 +444,30 @@ async function dive (bot, plan, sess, stop) {
       if (under() + digMs + riseMs > DIVE_MS) { res.end = 'breath'; break }
       if (await act.digBlock(bot, t)) res.dug++; else skip.add(key(t.position))
     }
+    // GATHER: the balls lie on the bed in the cells just dug - they do not float up (12 of 12 left down there, "its cell
+    // air, over it water", 2026-09-28). Walked over one at a time, each step only while the air left covers it and the
+    // way up, never with a mob within 6 (a drowned); inside the dive, so the air reflex knows it is meant; audit
+    if (!broke() && !stop()) {
+      const STEP_MS = 1200
+      for (let n = 0; n < 12; n++) {
+        if (broke() || stop() || reflex.hostiles(6).some(h => h.e.name !== 'bat')) break
+        if (under() + STEP_MS + riseMs + 500 > DIVE_MS) break
+        const me = bot.entity.position
+        const d = dropsNear(bot, K.dropRe, 3).filter(e => Math.abs(e.position.y - me.y) < 1.5).sort((a, b) => a.position.distanceTo(me) - b.position.distanceTo(me))[0]
+        if (!d) break
+        const t0 = Date.now()
+        while (d.isValid && Date.now() - t0 < STEP_MS && !broke()) {
+          const p = bot.entity.position
+          await bot.look(Math.atan2(-(d.position.x - p.x), -(d.position.z - p.z)), 0, true)
+          bot.setControlState('jump', false)
+          bot.setControlState('forward', Math.hypot(d.position.x - p.x, d.position.z - p.z) > 0.3)
+          await move.sleep(50)
+        }
+        bot.setControlState('forward', false)
+        if (d.isValid) break // (not taken in its step: the rest are no nearer)
+        res.gathered = (res.gathered || 0) + 1
+      }
+    }
     // UP: straight up - the column is open to the sky. The reflex's hard limit bounds this: past it the dive breaks
     // and the air reflex has the body.
     if (!broke()) {
@@ -464,7 +488,7 @@ async function dive (bot, plan, sess, stop) {
   }
   const afloat = await pickUp(bot, stop, sess)
   res.balls = balls(bot) - before
-  log(K.name, `dive at ${where} (${col.depth} deep): dug ${res.dug} ${K.name} in ${(res.underMs / 1000).toFixed(1)}s under (${res.end}) -> +${res.balls} ${K.unit}${res.dug ? ` (${(res.balls / res.dug).toFixed(1)} a block)` : ''}${afloat ? `, ${afloat} afloat out of reach` : ''}`)
+  log(K.name, `dive at ${where} (${col.depth} deep): dug ${res.dug} ${K.name} in ${(res.underMs / 1000).toFixed(1)}s under (${res.end}) -> +${res.balls} ${K.unit}${res.dug ? ` (${(res.balls / res.dug).toFixed(1)} a block)` : ''}${res.gathered ? `, ${res.gathered} taken off the bed` : ''}${afloat ? `, ${afloat} afloat out of reach` : ''}`)
   return res
 }
 
