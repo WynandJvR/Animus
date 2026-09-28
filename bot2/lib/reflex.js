@@ -192,7 +192,15 @@ const SHOOTER_DPS = { skeleton: 2.2, stray: 2.2, bogged: 2.2, pillager: 2.5, wit
 const MOB_HP = { skeleton: 20, stray: 20, bogged: 16, pillager: 24, witch: 26, blaze: 20, breeze: 30, ghast: 10 }
 // `hs`: every hostile in range, the never-melee ones too - a ghast's fireballs land on the way in as well as a
 // skeleton's arrows; handed the melee list, the ghast was never counted and a charge under it read as free (2026-09-27)
+// A TRIP THAT IS NOT WORTH A DEATH: the director marks an optional gathering trip cautious - a charge then wants hp 18
+// and nothing else hostile in sight; the answer otherwise is cover. Coal was never worth the 250 items scattered in a
+// valley under a skeleton, 2026-09-28; audit
+let cautious = false
+function setCautious (on) { cautious = !!on }
 function chargeAffordable (shooter, hs, hp) {
+  // (never with a creeper about: a charge walks into the fuse - a blast was 6.4 of the last death's 20; audit)
+  if (hs.some(h => h.e.name === 'creeper' && h.d < 12 && canSee(h.e))) return false
+  if (cautious && (hp < 18 || hs.some(h => h.e !== shooter.e && h.d < 24 && canSee(h.e)))) return false
   for (const id of fledFrom.keys()) if (!bot.entities[id]) fledFrom.delete(id) // (gone from the world: gone from the list)
   { const f = fledFrom.get(shooter.e.id); if (f != null && hp < f) return false }
   const shooters = hs.filter(h => RANGED.has(h.e.name) && h.d < 16 && canSee(h.e))
@@ -1401,4 +1409,4 @@ function setEnabled (on) { enabled = !!on; if (!on) clearActive() }
 function underMs () { return submergedSince ? Date.now() - submergedSince : 0 }
 function airLeftMs () { return airMs }
 
-module.exports = { plannerPlacedSince, findAirReachable, _bindForTest: b => { bot = b }, _leafWayOff: (...a) => leafWayOff(...a), _jumpHurts: c => jumpHurts(c), _leafFooting: () => leafFooting, edgeStops, install, holdNoSneak, active: isActive, info, nearestThreat, lastHurt, hurtLine, edgeAhead, hostiles, onSurface, canSee, NEVER_MELEE, waitClear, setEnabled, findAir, HOSTILE, RANGED, bowReady, startDive, endDive, diveBroken, underMs, airLeftMs, AIR_MS, DIVE_HARD_MS }
+module.exports = { setCautious, plannerPlacedSince, findAirReachable, _bindForTest: b => { bot = b }, _leafWayOff: (...a) => leafWayOff(...a), _jumpHurts: c => jumpHurts(c), _leafFooting: () => leafFooting, edgeStops, install, holdNoSneak, active: isActive, info, nearestThreat, lastHurt, hurtLine, edgeAhead, hostiles, onSurface, canSee, NEVER_MELEE, waitClear, setEnabled, findAir, HOSTILE, RANGED, bowReady, startDive, endDive, diveBroken, underMs, airLeftMs, AIR_MS, DIVE_HARD_MS }
