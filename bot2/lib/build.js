@@ -1219,7 +1219,15 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
         if (r && !r.ok) { badStands.add(key(st)); if (/timeout|stuck/.test(r.why || '')) skipTry = true }
       }
     }
-    if (skipTry) { failed.set(key(c), (failed.get(key(c)) || 0) + 1); saveCellFails(); prof.tries++; prof.ms += Date.now() - tp; prof.dist += d0; tpick = Date.now(); continue }
+    if (skipTry) {
+      failed.set(key(c), (failed.get(key(c)) || 0) + 1); saveCellFails(); prof.tries++; prof.ms += Date.now() - tp; prof.dist += d0; tpick = Date.now()
+      // (the stand's walk ran out: the cells round it lie behind the same ground - the walled garden's 18 tries were all
+      //  this branch, one door crossing each, silent; they wait for the next step)
+      let n = 0
+      for (const q of ready) if (q !== c && Math.abs(q.x - c.x) <= 3 && Math.abs(q.z - c.z) <= 3 && Math.abs(q.y - c.y) <= 1 && !holdBack.has(key(q))) { holdBack.add(key(q)); n++ }
+      log('build', `${c.name} at ${move.fmt(c)}: its stand could not be reached${n ? ` - ${n} cells round it wait for the next step` : ''}`)
+      continue
+    }
     if (wallsMeIn(bot, c)) { holdBack.add(key(c)); log('build', `${c.name} at ${move.fmt(c)} would wall me in from ${move.fmt(world.feetPos(bot))} - later`); tpick = Date.now(); continue }
     const ok = await placeCell(bot, c)
     prof.tries++; prof.ms += Date.now() - tp; prof.dist += d0; if (ok) prof.okMs += Date.now() - tp
