@@ -699,7 +699,9 @@ function plannedDescent (fy) {
   const down = fy - Math.floor(n.y)
   return down >= 1 && down <= world.SAFE_DROP
 }
+let lipActive = false // (the lip row's word to the one sneak owner: crouch while the centre is over the drop)
 function ledgeWanted () {
+  if (lipActive) return true
   const e = bot.entity
   if (!e || bot.vehicle || !e.onGround || world.feetInWater(bot)) return false
   const p = e.position; const fy = Math.floor(p.y + 0.01)
@@ -957,6 +959,29 @@ function tick () {
       ;(async () => { for (const b of cells.sort((p, q) => q.position.y - p.position.y)) await require('./act').digBlock(bot, b).catch(() => false) })().finally(() => { busy = false })
       return
     } else if (active && active.kind === 'powder') return clearActive()
+  }
+
+  // 2b'. ON THE LIP: on the ground with the centre over a drop that kills - held up by a corner of the hitbox only. The
+  //  edge brake stops the walk AT the lip, not back from it: a creeper chase braked eight times on a 23-block cliff's edge,
+  //  the flee ended, a drift of 0.03 a tick took the corner away and the bot fell to its death with 60 items (2026-09-28).
+  //  Back onto ground under the middle - before any fight or flee (a creeper may miss; that fall does not)
+  {
+    const fx = Math.floor(me.x); const fy = Math.floor(me.y - 0.01) + 1; const fz = Math.floor(me.z)
+    if (bot.entity.onGround && !world.feetInWater(bot) && !bot.vehicle && world.dropAt(bot, me.x, fy, me.z) > world.SAFE_DROP) {
+      let best = null; let bd = Infinity
+      for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
+        const x = fx + dx; const z = fz + dz
+        if (!world.standable(bot, x, fy, z) || world.dropAt(bot, x + 0.5, fy, z + 0.5) > 0) continue
+        const d = Math.hypot(x + 0.5 - me.x, z + 0.5 - me.z)
+        if (d < bd) { bd = d; best = { x, y: fy, z } }
+      }
+      if (!active || active.kind !== 'lip') { setActive('lip', 'centre over a drop'); log('reflex', `on the lip at ${fx},${fy},${fz} over a ${world.dropAt(bot, me.x, fy, me.z)}-block drop - ${best ? 'back onto ' + best.x + ',' + best.y + ',' + best.z : 'nothing firm within 2, crouched still'}`) }
+      try { bot.pathfinder.setGoal(null) } catch {}
+      // (the crouch is the edge guard's - one owner of sneak: lipActive feeds its ledgeWanted; this row only steers)
+      lipActive = true
+      if (best) steerTo(best, { jump: false }); else for (const k of ['forward', 'back', 'left', 'right', 'jump', 'sprint']) bot.setControlState(k, false)
+      return
+    } else { lipActive = false; if (active && active.kind === 'lip') return clearActive() }
   }
 
   // 2c. A DOOMED FLOOR: natural leaves at distance 7 - no log left within reach, they decay. Stood on the crown of a tree

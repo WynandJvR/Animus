@@ -853,6 +853,7 @@ let lastPlaceFail = ''
 // (where a try's time goes, for the step profile: the walk into reach (with its pillars), the digs clearing the cell - the
 //  rest is the place itself; 22% of castle time went to placing at ~2s a block, 2026-09-28 - measured, not guessed)
 const placeProf = { reach: 0, dig: 0 }
+const sealSaid = new Set() // (cells covered for want of a route: said once)
 const timed = async (k, p) => { const t = Date.now(); try { return await p } finally { placeProf[k] += Date.now() - t } }
 async function placeCell (bot, c, j = job) {
   const why = w => { lastPlaceFail = w; return false }
@@ -1035,6 +1036,27 @@ async function buildStep (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     let doable = minY <= lowestAll + 3 ? structural.filter(c => c.y <= minY + 1) : []
     // a door goes in once its floor stands (and its own two cells are ours to clear)
     doable = doable.filter(c => !c.twin || supportThere(bot, c)).concat(attached)
+    // NEVER SEAL AN EMPTY CELL: a block placed straight over a cell still waiting for its own (coal not yet had), when that
+    // cell has no other open side, closes the last way to it - the plank floor went in over the base layer's coal blocks
+    // and campfires, and they failed "could not get within reach" every step after (2026-09-28). Covered only once it is
+    // filled, or while it keeps an open side (a window in a wall does: inside and out)
+    const sealsBelow = c => {
+      const b = job.index.get(key({ x: c.x, y: c.y - 1, z: c.z }))
+      if (!b || b.clear || cellDone(bot, b) === true) return false
+      // (never a deadlock: a cell with no route to its item, or one that has already rested once, is covered - else a whole
+      //  floor waits for ever on a hay block no trip can bring; audit 2026-09-28)
+      if (cellUnsourced(b)) { if (!sealSaid.has(key(b))) { sealSaid.add(key(b)); log('build', `covering ${b.name} at ${move.fmt(b)} - no route for it`) } return false }
+      if (failsOf(b) >= 1) return false
+      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const x = b.x + dx; const z = b.z + dz
+        const nb = job.index.get(key({ x, y: b.y, z }))
+        if (nb && !nb.clear) continue // (a cell of the build: it will be solid)
+        const w = world.at(bot, x, b.y, z)
+        if (w && !world.isSolid(w)) return false // (an open side stays: reachable from there)
+      }
+      return true
+    }
+    doable = doable.filter(c => !sealsBelow(c))
     waiting = missingItem()
     if (!doable.length) { profLog(); if (!placed) log('build', `nothing doable: lowest structural y${lowestAll}, ${todo.length} todo, ${structural.length} structural in hand (min y${minY}), ${attached.length} attached ready, waiting on ${waiting}`); return { placed, blockedOn: waiting, done: false } }
     const me = bot.entity.position
