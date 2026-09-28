@@ -210,6 +210,16 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
     if (v === undefined) { v = j.index.has(`${p.x},${b0.y1},${p.z}`) ? 40 : 0; hollow.set(k, v) }
     return v
   })
+  // (a cell a fall began from - and its sides, at its height: dear, not refused; the list is reflex.js's fall record)
+  let fallCells = null; let fallGen = -1
+  m.exclusionAreasStep.push(block => {
+    if (!block || !block.position) return 0
+    if (fallGen !== pathGen) {
+      fallGen = pathGen; fallCells = new Set()
+      for (const q of (require('./memory').get().fallHazards || [])) { if (Date.now() - q.at > 30 * 60000) continue; for (const [dx, dz] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) fallCells.add(`${q.x + dx},${q.y},${q.z + dz}`) }
+    }
+    return fallCells.size && fallCells.has(`${block.position.x},${block.position.y},${block.position.z}`) ? 60 : 0
+  })
   // (a step into water with no air over it within two - a roofed pocket, a flooded cave: the planner stepped the bot
   //  down into one 170 blocks out and it drowned under a stone roof, 2026-09-28. Swimming at the surface costs nothing
   //  more; a way through a sealed pocket only when there is no other)
