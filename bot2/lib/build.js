@@ -823,7 +823,7 @@ async function pillarTo (bot, c, first) {
   for (const f of feet.slice(0, 3)) {
     // (the site walker: it goes in through the build's doors - the nave is walled round)
     const r = await goSite(bot, new goals.GoalBlock(f.x, f.y, f.z), 'to the foot of a pillar')
-    if (!r.ok) { badFeet.set(key(f), Date.now()); log('build', `pillar for ${c.name} at ${move.fmt(c)}: couldn't reach its foot ${move.fmt(f)} (${r.why})`); continue }
+    if (!r.ok) { if (move.isVerdict(r)) badFeet.set(key(f), Date.now()); log('build', `pillar for ${c.name} at ${move.fmt(c)}: couldn't reach its foot ${move.fmt(f)} (${r.why})`); continue }
     await ensureScaffold(bot, 16, { shouldStop: stepStop })
     // (the planner let go of first: its goal left standing, it set the controls every tick and the tower's jump never
     //  held - "towered to y120" 24 times in an hour on the nave floor, where the same tower rose in the yard, 2026-09-27)

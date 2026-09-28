@@ -534,6 +534,10 @@ async function goToInner2 (bot, goal, opts, { timeoutMs, stuckMs, dig, place, al
   return { ok: false, why: 'timeout' }
 }
 
+// THE rule for a failed walk: a verdict on the way (forget the place, mark it unreachable) - or only busy? An interruption
+// is the reflex taking the body, a stop is the caller's, a death is a death: none of them says anything about the place.
+// One fight near a known tree erased it from memory (audit 2026-09-28); every store that forgets on a failed walk asks here.
+function isVerdict (r) { return !!r && !r.ok && !/interrupt|stopped|died/.test(r.why || '') }
 function fmt (p) { return p ? `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}` : '?' }
 
 // STUCK IN ONE PLACE: every walk giving up from the same cell, task after task. A hole under the farm, flowing water at
@@ -838,4 +842,4 @@ async function travel (bot, target, opts = {}) {
   return { ok: false, why: 'timeout' }
 }
 
-module.exports = { underBuild, underZone, crossDoor, goals, bindReflex, bindBot, setZone, setZones, inZone, zones, utilitySpotOK, insideHut, setProtector, isProtected, surface, isUnderground, surfaceYHere, movementsFor, goTo, goNear, travel, stopMoving, runGoal, sleep, fmt, waitReflex }
+module.exports = { isVerdict, underBuild, underZone, crossDoor, goals, bindReflex, bindBot, setZone, setZones, inZone, zones, utilitySpotOK, insideHut, setProtector, isProtected, surface, isUnderground, surfaceYHere, movementsFor, goTo, goNear, travel, stopMoving, runGoal, sleep, fmt, waitReflex }

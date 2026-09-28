@@ -106,7 +106,7 @@ async function openChest (bot, p) {
     const bad = unreachable.get(key(p))
     if (bad && Date.now() - bad < 5 * 60000) return null
     const r = await move.goTo(bot, new goals.GoalNear(p.x, p.y, p.z, 2), { timeoutMs: 45000, label: 'to chest', allowZones: ['base'] })
-    if (!r.ok) { unreachable.set(key(p), Date.now()); log('base', `can't reach the chest at ${move.fmt(p)} (${r.why}) - skipping it for a while`); return null }
+    if (!r.ok) { if (move.isVerdict(r)) unreachable.set(key(p), Date.now()); log('base', `can't reach the chest at ${move.fmt(p)} (${r.why}) - skipping it for a while`); return null }
   }
   { const bad = unreachable.get(key(p)); if (bad && Date.now() - bad < 5 * 60000) return null }
   unreachable.delete(key(p))

@@ -400,7 +400,7 @@ async function pickUp (bot, e) {
       const r = await move.goTo(bot, new goals.GoalNear(e.position.x, e.position.y, e.position.z, 2), { timeoutMs: 6000, stuckMs: 3000, dig: false, place: false, label: 'to the boat' })
       // (again only if something changed - the boat drifted, or we got somewhere: a boat left behind is cheap, a 12s
       //  loop at a shore is not; audit 2026-09-28)
-      if (!r.ok && !/interrupt|stopped/.test(r.why || '') && e.position.distanceTo(bp) < 0.5 && bot.entity.position.distanceTo(mp) < 1) { log('boat', `the boat at ${Math.floor(e.position.x)},${Math.floor(e.position.z)} can't be reached (${r.why}) - left`); break }
+      if (move.isVerdict(r) && e.position.distanceTo(bp) < 0.5 && bot.entity.position.distanceTo(mp) < 1) { log('boat', `the boat at ${Math.floor(e.position.x)},${Math.floor(e.position.z)} can't be reached (${r.why}) - left`); break }
       continue
     }
     await bot.lookAt(e.position.offset(0, 0.3, 0), true).catch(() => {})

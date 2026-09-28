@@ -600,7 +600,7 @@ async function drySand (bot, target, stop) {
       continue
     }
     const known = g.knownResource('sand_dry', bot.entity.position, { maxFromHome: SEARCH_RADIUS })
-    if (known && world.dist3(known, bot.entity.position) > 24) { log('sand', `dry sand remembered at ${move.fmt(known)} - going there`); const r = await move.travel(bot, known, { range: 6, shouldStop: stop, label: 'to dry sand' }); if (!r.ok) g.forgetResource('sand_dry', known); continue }
+    if (known && world.dist3(known, bot.entity.position) > 24) { log('sand', `dry sand remembered at ${move.fmt(known)} - going there`); const r = await move.travel(bot, known, { range: 6, shouldStop: stop, label: 'to dry sand' }); if (move.isVerdict(r)) g.forgetResource('sand_dry', known); continue }
     if (known) g.forgetResource('sand_dry', known)
     // none in sight nor remembered: explore outward for it (the widening rings, out to ~300 blocks)
     const found = await g.explore(bot, b => K.re.test(b.name), { shouldStop: stop, label: 'dry sand', rings: 9, accept: b => drySought(bot, b.position) })

@@ -140,7 +140,7 @@ async function chop (bot, re, n, ctx = {}) {
         }
         log('gather', `no ${itemName} here - heading to where i saw some at ${move.fmt(known)}`)
         const r = await move.travel(bot, known, { range: 8, shouldStop: ctx.shouldStop, label: 'to trees' })
-        if (!r.ok && !/interrupt|stopped/.test(r.why || '')) forgetResource(itemName, known) // (busy or stopped says nothing of the trees)
+        if (move.isVerdict(r)) forgetResource(itemName, known) // (busy or stopped says nothing of the trees)
       } else {
         let land = !known && emptyScans <= 2 ? speciesLand(itemName, bot.entity.position) : null
         const lead = !land && !known && emptyScans <= 2 ? climateLead(bot, itemName, bot.entity.position) : null
