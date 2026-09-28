@@ -1419,9 +1419,9 @@ function ensureFoundation (bot) {
 // cell that is not the build's own (a tower may rise there). Walled in at floor level at dusk, the bed out of reach, the
 // night ladder sent the bot on a 43b walk in the dark and it died (2026-09-28); sealed in the hollow under the floor it
 // stood 5 minutes. A region bigger than 300 cells is no trap. True: this cell would seal us in - it waits.
-function wallsMeIn (bot, c) {
+function wallsMeIn (bot, c, from = null) {
   if (!job) return false
-  const b0 = job.box; const f = world.feetPos(bot)
+  const b0 = job.box; const f = from ? { x: from.x, y: from.y, z: from.z } : world.feetPos(bot)
   const inBox = p => p.x >= b0.x1 && p.x <= b0.x2 && p.z >= b0.z1 && p.z <= b0.z2
   if (!inBox(f)) return false
   const isC = (x, y, z) => x === c.x && y === c.y && z === c.z
@@ -1527,6 +1527,21 @@ function foundationStand (bot, c) {
     const d = world.dist3(p, me)
     if (d < bd) { bd = d; best = p }
   }
+  if (best) return best
+  // FROM INSIDE THE HOLLOW when no outside stand will do - the rim's trench stands sat behind drops the walk would not take,
+  // and 75 rim cells waited for days while the bot fell off the edge they would close (2026-09-29). Safe by wallsMeIn's own
+  // rule, asked from the stand: with this cell in, a walk from there must still find a way out (audit route 2)
+  for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) for (let dy = -3; dy <= 1; dy++) {
+    if (!dx && !dz) continue
+    const p = { x: c.x + dx, y: c.y + dy, z: c.z + dz }
+    if (!job.index.has(`${p.x},${job.box.y1},${p.z}`)) continue // (inside: under the base only)
+    if (job.index.has(key(p)) || job.index.has(key({ x: p.x, y: p.y + 1, z: p.z })) || !world.standable(bot, p.x, p.y, p.z)) continue
+    if (world.dist3({ x: p.x + 0.5, y: p.y + 1.6, z: p.z + 0.5 }, { x: c.x + 0.5, y: c.y + 0.5, z: c.z + 0.5 }) > 4.2) continue
+    if (wallsMeIn(bot, c, p)) continue
+    const d = world.dist3(p, me)
+    if (d < bd) { bd = d; best = p }
+  }
+  if (best) log('build', `${c.name} at ${move.fmt(c)}: no stand outside - from inside the hollow at ${move.fmt(best)} (a way out stays)`)
   return best
 }
 function sealedIn (bot, c) { return [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]].every(([dx, dy, dz]) => world.isSolid(world.at(bot, c.x + dx, c.y + dy, c.z + dz))) }
