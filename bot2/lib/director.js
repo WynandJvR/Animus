@@ -1348,6 +1348,22 @@ async function gatherForInner (raw, short) {
       return craft.ensure(bot, w, inv.count(bot, w) + batch, Object.assign({ noWithdraw: true, leaves: orchard.wantSaplings(bot, demandTrees) > 0 }, ctx))
     }
     case 'fuel': {
+      // LAVA BEFORE COAL: a lava bucket is a hundred smelts, a coal eight - and the coal trips brought five a go while the
+      // castle's bricks and stone waited (2026-09-28). Only with an empty bucket to hand (pack, bank, or made of three
+      // ingots already smelted - no iron trip for it) and a pool known or in sight that is safe to fill from (the rules
+      // are forage.lavaStands'); the buckets asked for are what the shortfall needs, a hundred smelts each. Filled, they
+      // go home and into the cold furnaces at once (refuelFurnaces - putFuel takes a lava bucket for a big batch); the
+      // rest wait as fuel the loader draws on. None filled: the coal below, as before.
+      if (forage.bucketsAvailable(bot) > 0 && await forage.lavaKnown(bot)) {
+        const want = Math.max(1, Math.min(Math.ceil(short * 8 / 100), forage.bucketsAvailable(bot)))
+        log('dir', `short of ${short} fuel for the furnaces - ${want} lava bucket${want > 1 ? 's' : ''} first (a hundred smelts each)`)
+        const got = await forage.lavaFuel(bot, want, ctx).catch(e => { log('dir', `the lava trip threw: ${e.message}`); return 0 })
+        if (got > 0) {
+          const r = await base.goHome(bot, { shouldStop: dayStop })
+          if (r.ok) await smelt.refuelFurnaces(bot).catch(() => 0)
+          return true
+        }
+      }
       // COAL FIRST: the orchard is the build's own species (never burnt), the other trees round home are cut out - 65
       // "cutting logs for charcoal" in two days and not one log into the furnaces since the morning, the clay and the
       // cobble waiting in the chest (2026-09-28). A coal seam at the mine's depth is 8 smelts an ore, and the trip brings
