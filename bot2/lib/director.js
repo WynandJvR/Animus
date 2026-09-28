@@ -423,7 +423,10 @@ function decide () {
   // 2. graves worth going back for
   const g = graves.bestGrave(bot)
   // going back for a grave empty-handed walks into whatever killed us: re-arm first (tools come next)
-  if (g && !held('grave') && (inv.bestWeapon(bot) || world.dist3(g, bot.entity.position) < 10)) return { name: 'grave', why: `grave ${Math.round(world.dist2(g, bot.entity.position))}b away with ${g.items} items` }
+  // (not back into what killed us: a shooter covering the grave or a creeper at it is still there - the second walk into the
+  //  skeleton valley fell 13 blocks and fought at hp 11, 2026-09-28; the grave waits for the ground to clear; audit)
+  const graveCovered = g0 => Object.values(bot.entities).some(e => e && e.position && ((reflex.RANGED.has(e.name) && e.position.distanceTo(g0) < 20) || (e.name === 'creeper' && e.position.distanceTo(g0) < 12)))
+  if (g && !held('grave') && (inv.bestWeapon(bot) || world.dist3(g, bot.entity.position) < 10) && !graveCovered(g)) return { name: 'grave', why: `grave ${Math.round(world.dist2(g, bot.entity.position))}b away with ${g.items} items` }
 
   // 2b. carrying the base's furniture while standing at a finished safehouse: seconds of work that
   //     anchor spawn (a bed) and store the haul - before anything that is not an emergency
