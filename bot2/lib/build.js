@@ -1232,7 +1232,17 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     if (ok) { for (const [k, f] of cellFails) { const [x, y, z] = k.split(',').map(Number); if (f.at && !f.woke && c.y <= y && y - c.y <= 2 && Math.abs(x - c.x) <= 2 && Math.abs(z - c.z) <= 2) { f.at = 0; f.woke = true } } }
     if (ok) { placed++; if (cellFails.delete(key(c))) saveCellFails(); if (placed % 25 === 0) { const st = status(bot); log('build', `${st.done}/${st.total} placed`) } } else if (c.foundation && c.name === 'torch' && !world.isAirish(world.at(bot, c.x, job.box.y1, c.z))) dropFoundation(bot, c, 'the floor over it is laid - no way to it from above') // (a hollow's torch goes in from above or not at all)
     else if (c.foundation && sealedIn(bot, c)) dropFoundation(bot, c, 'sealed in') // (a reach miss rests like any cell: a rim cell faces the outside ground - the miss is the stand's, not the cell's, and dropped it is a hole in the wall; audit 2026-09-28)
-    else { failed.set(key(c), (failed.get(key(c)) || 0) + 1); saveCellFails(); if (failed.get(key(c)) === 1) log('build', `${c.name} at ${move.fmt(c)} won't place (${lastPlaceFail || 'unlogged'}) - leaving it for later`) }
+    else {
+      failed.set(key(c), (failed.get(key(c)) || 0) + 1); saveCellFails(); if (failed.get(key(c)) === 1) log('build', `${c.name} at ${move.fmt(c)} won't place (${lastPlaceFail || 'unlogged'}) - leaving it for later`)
+      // (a REACH miss is the ground's, not the cell's: the cells round it - 3 across, a layer up or down - lie behind the same
+      //  wall. Tried one by one, a walled garden's 18 cells took 18 walks through a door into a dead-end vestibule, 18s each,
+      //  0 placed in a 323s step (2026-09-28). They wait for the next step; the step goes elsewhere)
+      if (/within reach|stand was not reached|stuck|timeout/.test(lastPlaceFail)) {
+        let n = 0
+        for (const q of ready) if (q !== c && Math.abs(q.x - c.x) <= 3 && Math.abs(q.z - c.z) <= 3 && Math.abs(q.y - c.y) <= 1 && !holdBack.has(key(q))) { holdBack.add(key(q)); n++ }
+        if (n) log('build', `${n} cells round ${move.fmt(c)} wait for the next step - the same ground stopped the walk`)
+      }
+    }
   }
   profLog()
   return { placed, blockedOn: waiting, blockedHolds: waitingHolds, done: false }
