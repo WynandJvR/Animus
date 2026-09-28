@@ -208,6 +208,13 @@ function chooseRecipe (bot, itemName, n = 1, stack = null) {
     if (/_log$/.test(nm0) && !GATHER[nm0]) return 50
     return RARE_ING.test(nm0) ? 20 : 1
   }
+  // THE BUILD'S OWN WOOD: in exact wood, a species the build places (spruce, for a spruce castle) is spent only on that
+  // species' own forms - a chest or a stick takes any planks, and the tie-break went to the wood held most: the 146
+  // spruce logs one expedition fetched became 33 chests and 288 sticks, and the castle was 535 logs short again
+  // (2026-09-28). Priced out while any other wood will do; still the way when nothing else can.
+  let reserved = null
+  try { reserved = require('./materials').reservedSpecies(bot, itemName); if (!reserved.size) reserved = null } catch {}
+  const reservedWood = nm0 => { if (!reserved || !/_(planks|log)$/.test(nm0)) return false; try { return reserved.has(require('./materials').speciesOf(nm0)) } catch { return false } }
   let best = null; let bestCost = Infinity
   for (const r of rs) {
     // (never a recipe of something already being made up the chain: that is the cycle, not a route)
@@ -221,6 +228,7 @@ function chooseRecipe (bot, itemName, n = 1, stack = null) {
       if (/_planks$/.test(nm)) h += (have[nm.replace('_planks', '_log')] || 0) * 4
       const short = Math.max(0, per * crafts - h)
       cost += (short ? short * unitCost(nm) : 0) + per * crafts * 0.01 // (ties: the smaller order)
+      if (reservedWood(nm)) cost += per * crafts * 1e3 // (the build's own wood, held or not)
     }
     if (cost < bestCost) { bestCost = cost; best = r }
   }

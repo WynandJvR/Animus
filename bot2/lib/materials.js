@@ -25,6 +25,18 @@ const LOG_TAG = /^(stripped_)?\w+_(log|wood|stem|hyphae)$/
 const SPECIES_OF = new RegExp(`^(?:stripped_)?(${WOODS.join('|')})_`)
 function speciesOf (n) { const m = SPECIES_OF.exec(n || ''); return m ? m[1] : null }
 function exactWood () { try { return !!L.build.exactWood() } catch { return false } }
+// The species the build places itself in exact wood (spruce, for a spruce castle), less `except`'s own: any-wood crafts
+// (planks of the "planks" class, chests, sticks) keep off them while another wood will do - an expedition's 146 spruce
+// logs became 33 chests and 288 sticks (2026-09-28). Empty when the wood rule is "any".
+function reservedSpecies (bot, except = null) {
+  if (!exactWood()) return new Set()
+  try {
+    const st = L.build.status(bot)
+    const out = new Set(Object.keys((st && st.need) || {}).filter(k => st.need[k] > 0).map(speciesOf).filter(Boolean))
+    const own = speciesOf(except); if (own) out.delete(own)
+    return out
+  } catch { return new Set() }
+}
 function ingClass (name, result) {
   if (exactWood() && speciesOf(result) && speciesOf(name) === speciesOf(result)) return name
   // (a log-family result - stripped wood, bark - is made of that exact log, not any)
@@ -504,7 +516,11 @@ async function craftNode (bot, node, n, per, { shouldStop, keep = {} } = {}) {
   const craft = L.craft; const inv = L.inv
   let done = 0
   if (node === 'planks') {
-    for (const it of inv.items(bot).filter(i => LOG_ANY.test(i.name)).sort((a, b) => b.count - a.count)) {
+    // (the class: of a wood the build does not place itself first - its own species last, only if nothing else is held)
+    const res = reservedSpecies(bot)
+    const mine = i => res.has(speciesOf(i.name)) ? 1 : 0
+    for (const it of inv.items(bot).filter(i => LOG_ANY.test(i.name)).sort((a, b) => mine(a) - mine(b) || b.count - a.count)) {
+      if (mine(it) && inv.items(bot).some(i => LOG_ANY.test(i.name) && !mine(i))) continue
       if (done >= n) break
       const k = Math.min(n - done, inv.count(bot, it.name))
       const before = inv.count(bot, craft.plankOfLog(it.name))
@@ -568,7 +584,7 @@ function pickRaw (winRaw, totRaw, { blockedRaw = null, feasible = () => true } =
   return null
 }
 
-module.exports = {
+module.exports = { reservedSpecies,
   makePlanner, nodeOf, PREFER, RAW_COST, SMELT_INPUTS, CLASSES, WOODS, LOG_ANY, PLANKS_ANY, WOOL_TO_DYE, FUEL_ANY, RED_FLOWER, WOOD_FORM,
   accepts, poolRe, hasRoute, unsourced, held, banked, stock, withdrawPool, planFor, getPlanner, formFor, makeCrafts, craftNode, pickRaw,
   resetPlanner, exactWood, speciesOf, wanted, wantedSet, rawCost, copperAlt, copperBase, woodFamilyAlt, flowerClassOf, DYE_PLANTS, COMPOSTABLE, COMPOST_PER_MEAL, STRIPPED_LOG, COLOURS
