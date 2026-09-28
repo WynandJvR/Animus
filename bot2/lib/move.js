@@ -124,7 +124,10 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
   m.canDig = dig
   m.blocksCantBreak = new Set([...m.blocksCantBreak, ...cantBreakIds])
   m.digCost = 2
-  m.placeCost = 2
+  // (a stepping stone's price is its whole life: the place, and the walk back one day to dig it out - never collected by the
+  //  walk that laid it. At 2 - two steps - the planner laid one to save a couple of steps, and 106 single stones stood
+  //  round home by evening, litter on every slope the operator walked, 2026-09-28. A player walks round)
+  m.placeCost = 10
   m.allow1by1towers = place
   m.scafoldingBlocks = place ? scaffoldIds.slice() : []
   // scaffold short (under half the builder's 32 in reserve): cobblestone will do to tower or bridge out (the build's stone, but a player
