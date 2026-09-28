@@ -7,6 +7,7 @@ while [ $SECONDS -lt $end ]; do
   ok=$(node -e "try{const j=JSON.parse(process.argv[1]);const h=j.home;const d=h?Math.hypot(j.pos.x-h.x,j.pos.z-h.z):99;const t=j.timeOfDay;const night=!(t>=1500&&t<11400);const threat=j.threat&&(j.threat.dist==null||j.threat.dist<16);const reflex=!!j.maneuver;console.log((!j.hazards.underground||d<8)&&!j.hazards.inWater&&d<20&&j.health>=14&&!night&&!threat&&!reflex&&!j.paused?'yes':'no')}catch(e){console.log('no')}" "$st")
   if [ "$ok" = yes ]; then
     cd /c/mc-bot-lab/bot2; for f in main.js lib/*.js; do node --no-lazy --check "$f" || { echo "SYNTAX FAIL $f"; exit 1; }; done
+    NODE_PATH=/c/mc-bot-lab/bot/node_modules node /c/mc-bot-lab/tools/session-scripts/xmodcheck.js /c/mc-bot-lab/bot2 > /dev/null || { echo "CROSS-MODULE NAME MISSING - run tools/session-scripts/xmodcheck.js"; exit 1; }
     PREV=$(ls -d $S/rollback/candidate-* 2>/dev/null | tail -1)
     N=$S/rollback/candidate-$(date +%H%M); mkdir -p $N; cp -r lib main.js $N/; cp ../bot/config.json $N/
     echo "$(date +%Y-%m-%dT%H:%M) prev=$PREV new=$N" > $S/last-deploy.txt # (rollback target = prev: the snapshot is of the NEW code)

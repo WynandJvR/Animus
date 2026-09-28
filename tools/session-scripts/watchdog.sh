@@ -23,8 +23,10 @@ while true; do
   h5=$(recent 5 | grep -ac "(dir) -> hideout")
   [ "$h" -ge 3 ] && [ "$h5" -ge 1 ] && [ -n "$day" ] && { echo "ALARM: hiding $h times in 10 min"; recent 20 | grep -a "(dir) -> hideout" | cut -c2-160 | tail -3; exit 0; }
   t=$(echo "$st" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const j=JSON.parse(s);console.log((j.task&&j.task.name)+' '+(j.task&&j.task.forSec))}catch{}})")
-  set -- $t; [ -n "$2" ] && [ "$2" != "null" ] && [ "$2" -gt 1200 ] && [ "$1" != "sleep" ] && { echo "ALARM: task $1 running ${2}s"; exit 0; }
+  set -- $t; [ -n "$2" ] && [ "$2" != "null" ] && [ "$2" -gt 1200 ] && [ "$1" != "sleep" ] && [ "$1" != "expedition" ] && { echo "ALARM: task $1 running ${2}s"; exit 0; }
   cur=$(done_now); if [ "$cur" != "$last_done" ]; then last_done=$cur; last_change=$now; fi
+  # (away on an expedition the castle waits by design - its wood is what the trip fetches: not "stuck")
+  exp=$(node -e 'try{console.log(require("C:/mc-bot-lab/bot2/memory.json").expedition?1:0)}catch{console.log(0)}'); [ "$exp" = 1 ] && last_change=$now
   tod=$(echo "$st" | grep -o '"tod":[0-9]*' | cut -d: -f2)
   if [ $((now - last_change)) -gt 1800 ]; then echo "ALARM: build stuck at $cur for $(( (now-last_change)/60 )) min"; exit 0; fi
   if [ $((now - start)) -gt 3600 ]; then echo "HEARTBEAT: 60 min, build $cur, deaths/60m $(recent 60 | grep -ac '(death) died')"; exit 0; fi
