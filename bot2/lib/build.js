@@ -847,9 +847,13 @@ async function placeSupport (bot, sp, j) {
 // Can this plan be clicked now (a solid, clickable block where it says)?
 // (an attached thing may click a block that does something when clicked - sneaking: a candle on a fence gate, a pot on a
 //  trapdoor have no other face)
+// (a face of a block that is USED when clicked - a chest, a furnace, a door - is a face to place against whenever the click
+//  goes out sneaking, as a player sneak-clicks it: every cell but a door and a chest's pair. Only attached cells had it:
+//  31 floor trapdoors beside the castle's chests were "none clickable" for days, the band held at y119, 2026-09-29)
+function sneaksFor (c) { return !/_door$/.test(c.name) && !pairs(c) }
 function refOk (bot, c, p) {
   const nb = world.at(bot, c.x + p.off[0], c.y + p.off[1], c.z + p.off[2])
-  return act.refUsable(nb, !!c.attach)
+  return act.refUsable(nb, !!c.attach || sneaksFor(c))
 }
 function stateOf (b) { try { const p = b.getProperties(); const s = KEY_PROPS.filter(k => p[k] != null).map(k => `${k}=${p[k]}`).join(','); return b.name + (s ? `[${s}]` : '') } catch { return b.name } }
 
@@ -1045,7 +1049,7 @@ async function placeCell (bot, c, j = job) {
     //  chest of a pair is placed standing up: a sneaking placement never pairs)
     const ok = c.pour
       ? await act.pour(bot, c, item.name, Object.assign(opts, { accept: b => nameOk(c, b.name) && String(propsOf(b).level) === '0' }))
-      : await act.place(bot, c, item.name, Object.assign(opts, { accept: b => partOk(c, b.name), sneak: !/_door$/.test(item.name) && !pairs(c), twin: c.twin || null, useRefs: !!c.attach }))
+      : await act.place(bot, c, item.name, Object.assign(opts, { accept: b => partOk(c, b.name), sneak: !/_door$/.test(item.name) && !pairs(c), twin: c.twin || null, useRefs: !!c.attach || (!/_door$/.test(item.name) && !pairs(c)) }))
     if (!ok) return why(c.pour ? 'the pour itself failed' : 'the place itself failed')
     surveyCache = null
   } else if (!await timed('reach', getInReach(null))) return false
