@@ -1350,7 +1350,9 @@ async function startExpedition (raw, land) {
     packed = true
   }
   const food = inv.foodPoints(bot)
-  if (food < FOOD_OUT || bot.health < 16 || !inv.bestWeapon(bot) || !inv.bestTool(bot, 'axe', 1)) { log('dir', `${raw}: its country is past a day's walk - an expedition waits on ${food < FOOD_OUT ? 'food (' + food + ' pts packed' + (packed ? ', the bank included' : ' (the bank not reached from here)') + ', ' + FOOD_OUT + ' wanted - cooking and the farm make the rest)' : bot.health < 16 ? 'health' : 'a weapon and an axe'}`); return false }
+  // (and armour - 8 points - or a shield worn: out for nights on a naked body after the day's deaths is a grave far out; audit)
+  const guarded = inv.armorPoints(bot) >= 8 || inv.offhandShield(bot)
+  if (food < FOOD_OUT || bot.health < 16 || !inv.bestWeapon(bot) || !inv.bestTool(bot, 'axe', 1) || !guarded) { log('dir', `${raw}: its country is past a day's walk - an expedition waits on ${food < FOOD_OUT ? 'food (' + food + ' pts packed' + (packed ? ', the bank included' : ' (the bank not reached from here)') + ', ' + FOOD_OUT + ' wanted - cooking and the farm make the rest)' : bot.health < 16 ? 'health' : !guarded ? 'armour (8 points) or a shield - the iron gear first' : 'a weapon and an axe'}`); return false }
   mem.set('expedition', { raw, to: land ? { x: land.x, z: land.z, biome: land.biome } : null, phase: 'out', at: Date.now(), nights: 0, tod: world.tod(bot), dry: 0, packed })
   log('dir', `${raw}: its country is past a day's walk - setting out on an expedition${land ? ' toward the ' + land.biome : ''} (${food} food pts, nights camped on the way)`)
   return true
