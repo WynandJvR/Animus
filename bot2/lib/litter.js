@@ -13,6 +13,7 @@ const mem = require('./memory')
 const { log } = require('./log')
 
 const MAX = 400
+const RADIUS = 96 // (the ledger's reach round home - and the tidy's)
 const k = p => `${p.x},${p.y},${p.z}`
 const ledger = new Map((mem.get().litter || []).map(q => [k(q), q]))
 let savedAt = 0; let dirty = false
@@ -38,23 +39,45 @@ function note (bot, p) {
   if (!b || !filler().test(b.name)) return
   const z = move.inZone(p)
   if ((z && z.label === 'build') || require('./build').isOpenCell(p)) return
+  // (round home only: a far trip's bridges are never walked back to - noted, they would push home's out of the ledger)
+  const home = mem.get().home
+  if (!home || world.dist3(p, home) > RADIUS) return
   ledger.set(k(p), { x: p.x, y: p.y, z: p.z, name: b.name, at: Date.now() })
   if (ledger.size > MAX) ledger.delete(ledger.keys().next().value)
   dirty = true; save()
+}
+
+// Cobble of ours placed ON PURPOSE, never litter: a light's post (a torch or lantern on or beside it), a water's edge or
+// lid (the farm's, a spring's), and anything within 1 of the infrastructure memory knows (audit 2026-09-28).
+const SIX = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]
+function infraPoints () {
+  const m = mem.get(); const pts = []
+  for (const p of [m.home, m.bed, m.spawnSetAt, m.mine && m.mine.entrance, m.farm && m.farm.water]) if (p) pts.push(p)
+  for (const l of [m.chests, m.furnaces, m.tables, m.farm && m.farm.cells]) if (Array.isArray(l)) pts.push(...l)
+  return pts
+}
+function kept (bot, p, pts = infraPoints()) {
+  for (const [dx, dy, dz] of SIX) {
+    const b = world.at(bot, p.x + dx, p.y + dy, p.z + dz)
+    if (b && (/torch|lantern/.test(b.name) || world.isWaterBlock(b))) return true
+  }
+  const hut = mem.get().hut
+  if (hut && hut.box && p.x >= hut.box.x1 - 1 && p.x <= hut.box.x2 + 1 && p.z >= hut.box.z1 - 1 && p.z <= hut.box.z2 + 1 && p.y >= hut.box.y1 - 1 && p.y <= hut.box.y2 + 1) return true
+  return pts.some(q => Math.abs(q.x - p.x) <= 1 && Math.abs(q.y - p.y) <= 1 && Math.abs(q.z - p.z) <= 1)
 }
 
 // What was put down before the ledger: in an orchard (the only place a pillar of ours stands on a spot), cobblestone
 // out in the open - it never lies on the surface there by itself - with nothing but air, leaves or more of it above.
 function seed (bot) {
   listen(bot)
-  let n = 0
+  let n = 0; const pts = infraPoints()
   for (const zb of move.zones.filter(z => z.label === 'orchard')) {
     for (let x = zb.x1; x <= zb.x2; x++) for (let z = zb.z1; z <= zb.z2; z++) for (let y = zb.y1; y <= zb.y2; y++) {
       const b = world.at(bot, x, y, z)
       if (!b || b.name !== 'cobblestone' || ledger.has(k({ x, y, z }))) continue
       const up = world.at(bot, x, y + 1, z)
       const open = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => { const s = world.at(bot, x + dx, y, z + dz); return s && world.isAirish(s) })
-      if (!open || !up || !(world.isAirish(up) || world.LEAF_RE.test(up.name) || up.name === 'cobblestone')) continue
+      if (!open || !up || !(world.isAirish(up) || world.LEAF_RE.test(up.name) || up.name === 'cobblestone') || kept(bot, { x, y, z }, pts)) continue
       ledger.set(k({ x, y, z }), { x, y, z, name: b.name, at: Date.now(), seeded: true }); n++
     }
   }
@@ -63,7 +86,7 @@ function seed (bot) {
 }
 
 // The ledger's blocks still standing within `radius` of `from`.
-function pending (bot, from, radius = 96) {
+function pending (bot, from, radius = RADIUS) {
   const out = []
   for (const q of ledger.values()) {
     if (from && world.dist3(q, from) > radius) continue
@@ -75,7 +98,7 @@ function pending (bot, from, radius = 96) {
 
 // Take them down: the nearest column first, top-down, from the ground beside it (the highest a stand reaches). A block
 // out of reach from the ground stays in the ledger and is said.
-async function tidy (bot, { from, radius = 96, shouldStop } = {}) {
+async function tidy (bot, { from, radius = RADIUS, shouldStop } = {}) {
   listen(bot)
   let removed = 0; let left = 0
   const done = new Set()
