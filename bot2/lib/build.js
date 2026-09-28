@@ -1271,13 +1271,29 @@ function ensureFoundation (bot) {
   // neighbours as any cell does; the hollow under it is closed in. A solid fill was 1,000-1,900 blocks of mining for the
   // same footing (the operator, 2026-09-28)
   const base = k2 => job.index.has(`${k2.x},${y1},${k2.z}`) && !job.index.get(`${k2.x},${y1},${k2.z}`).clear
+  // (the OUTSIDE only: the columns off the base that the open ground round the build reaches - a flood from the ring round
+  //  the box through every column that is not the base. A courtyard walled in by the base is not outside: its rim cells
+  //  could only be reached through the castle's doors and failed every try, 17 of 29 in a step, 2026-09-28)
+  const bx = job.box; const outside = new Set(); const q0 = []
+  for (let x = bx.x1 - 1; x <= bx.x2 + 1; x++) for (const z of [bx.z1 - 1, bx.z2 + 1]) q0.push({ x, z })
+  for (let z = bx.z1; z <= bx.z2; z++) for (const x of [bx.x1 - 1, bx.x2 + 1]) q0.push({ x, z })
+  for (const q of q0) outside.add(`${q.x},${q.z}`)
+  while (q0.length) {
+    const q = q0.pop()
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const n = { x: q.x + dx, z: q.z + dz }; const k = `${n.x},${n.z}`
+      if (n.x < bx.x1 || n.x > bx.x2 || n.z < bx.z1 || n.z > bx.z2 || outside.has(k) || base(n)) continue
+      outside.add(k); q0.push(n)
+    }
+  }
+  const outer = k2 => outside.has(`${k2.x},${k2.z}`)
   // THE HOLLOW LIT: the floor over it goes in row by row for hours, and until the last cell it is a dark room under the
   // work - monsters spawn at block light 0 by day as by night (since 1.18). A torch on its ground every 8 blocks, placed
   // while it is still open (an attached cell: in as soon as a torch is in hand and its ground stands; audit 2026-09-28)
   const torches = []
   const inner = new Map()
   for (const q of cols) {
-    if (![[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => !base({ x: q.x + dx, z: q.z + dz }))) { inner.set(`${q.x},${q.z}`, q); continue }
+    if (![[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => outer({ x: q.x + dx, z: q.z + dz }))) { inner.set(`${q.x},${q.z}`, q); continue }
     for (const y of q.ys) add.push({ x: q.x, y, z: q.z })
   }
   // (every hollow region lit: the 8-grid's cells in it, or - a strip the grid misses, a tower's, the west edge's - its
