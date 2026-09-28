@@ -155,6 +155,15 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
     return b
   }
   m.exclusionAreasStep.push(block => (block && doorIds.has(block.type)) ? 4 : 0)
+  // (a step into water with no air over it within two - a roofed pocket, a flooded cave: the planner stepped the bot
+  //  down into one 170 blocks out and it drowned under a stone roof, 2026-09-28. Swimming at the surface costs nothing
+  //  more; a way through a sealed pocket only when there is no other)
+  m.exclusionAreasStep.push(block => {
+    if (!block || !block.position || !world.isWaterBlock(block)) return 0
+    const p = block.position
+    for (let dy = 1; dy <= 2; dy++) { const b = world.at(bot, p.x, p.y + dy, p.z); if (!b || world.isAirish(b)) return 0 }
+    return 40
+  })
   const allowed = new Set(allowZones)
   // (blocks in unloaded chunks reach these callbacks without a position: a throw here aborts A*)
   // (the farm never needs the planner's stepping stones or tunnels: the farm tasks' own walks paved the crops with

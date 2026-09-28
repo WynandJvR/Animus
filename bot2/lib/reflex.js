@@ -275,6 +275,33 @@ function findAir (landOnly = false, { aside = false } = {}) {
   return best
 }
 
+// Air the body can SWIM to: a flood through water and air cells only, from where we are - findAir scored air behind
+// solid rock as "nearest", and steering at it pressed the bot into a wall under water for twenty seconds, drowned
+// (audit 2026-09-28). The nearest cell by strokes with air for the head (land preferred); null when none is reachable.
+function findAirReachable (maxNodes = 400) {
+  const me = bot.entity.position.floored()
+  const k = (x, y, z) => `${x},${y},${z}`
+  const pass = b => !!b && (world.isAirish(b) || (world.isWaterBlock(b) && b.boundingBox === 'empty'))
+  const seen = new Set([k(me.x, me.y, me.z)]); const q = [{ x: me.x, y: me.y, z: me.z, d: 0 }]
+  let best = null
+  while (q.length && seen.size < maxNodes) {
+    const c = q.shift()
+    if (best && c.d > best.d + 2) break
+    const feet = world.at(bot, c.x, c.y, c.z); const head = world.at(bot, c.x, c.y + 1, c.z)
+    if (feet && head && world.isAirish(head) && (world.isAirish(feet) || world.isWaterBlock(feet))) {
+      const below = world.at(bot, c.x, c.y - 1, c.z); const land = !!below && world.isSolid(below) && world.isAirish(feet)
+      if (!best || (land && !best.land) || (land === best.land && c.d < best.d)) best = { x: c.x, y: c.y, z: c.z, land, d: c.d }
+    }
+    for (const [dx, dy, dz] of [[0, 1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, -1, 0]]) {
+      const x = c.x + dx; const y = c.y + dy; const z = c.z + dz; const key = k(x, y, z)
+      if (seen.has(key) || Math.abs(x - me.x) > 8 || Math.abs(z - me.z) > 8 || y < me.y - 3 || y > me.y + 8) continue
+      seen.add(key)
+      if (pass(world.at(bot, x, y, z))) q.push({ x, y, z, d: c.d + 1 })
+    }
+  }
+  return best
+}
+
 // Block the line of fire: the cells beside us toward the shooter, feet and head height.
 async function wallOff (e) {
   const me = bot.entity.position.floored()
@@ -801,7 +828,8 @@ function tick () {
     // ROOFED OVER: no way up and no rising - dig the roof. Steering at the nearest air cell (past solid rock) and jumping
     // held the body in one cell for twenty seconds: the pathfinder stepped it down into a water pocket under a stone
     // roof 170 blocks from home, and it drowned with 390 items (2026-09-28). A player breaks the block over their head.
-    if (!open && stalled && !busy) {
+    const reach = !open ? findAirReachable() : null
+    if (!open && stalled && !busy && !reach) {
       let roof = null
       for (let dy = 2; dy <= 4; dy++) { const b = world.at(bot, me.x, me.y + dy, me.z); if (!b) break; if (swimThrough(b) || world.isAirish(b)) continue; roof = b; break }
       // (never a roof whose dig kills: a falling block drops the column above into the head cell through the water, and a
@@ -828,7 +856,8 @@ function tick () {
     } else if (land) {
       steerTo(land, { jump: true })
     } else {
-      const t = findAir()
+      // (roofed over: swim to air that can be reached, never at air behind rock)
+      const t = reach || (open ? findAir() : null)
       if (t) steerTo(t, { jump: true }); else { bot.setControlState('jump', true); bot.setControlState('back', true) }
     }
     return
@@ -1117,4 +1146,4 @@ function setEnabled (on) { enabled = !!on; if (!on) clearActive() }
 function underMs () { return submergedSince ? Date.now() - submergedSince : 0 }
 function airLeftMs () { return airMs }
 
-module.exports = { edgeStops, install, holdNoSneak, active: isActive, info, nearestThreat, lastHurt, hurtLine, edgeAhead, hostiles, onSurface, canSee, NEVER_MELEE, waitClear, setEnabled, findAir, HOSTILE, RANGED, bowReady, startDive, endDive, diveBroken, underMs, airLeftMs, AIR_MS, DIVE_HARD_MS }
+module.exports = { findAirReachable, _bindForTest: b => { bot = b }, edgeStops, install, holdNoSneak, active: isActive, info, nearestThreat, lastHurt, hurtLine, edgeAhead, hostiles, onSurface, canSee, NEVER_MELEE, waitClear, setEnabled, findAir, HOSTILE, RANGED, bowReady, startDive, endDive, diveBroken, underMs, airLeftMs, AIR_MS, DIVE_HARD_MS }
