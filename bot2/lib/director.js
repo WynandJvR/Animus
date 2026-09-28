@@ -1377,6 +1377,12 @@ async function gatherFor (raw, short) {
             if (r.ok) await mining.takeKnownOre(bot, 'coal', c0 + want, Object.assign({}, ctx, { near: { point: o.position, radius: 8 }, oreFilter: b => world.dist3(b.position, o.position) <= 3 || skyFace(b) })).catch(() => false)
             o = await pick()
           }
+          // (the outcrops round home spent and the count still short: the mine's walls for the rest while the day holds - one
+          //  hillside gave 5 of 11 and the trip went to logs, 2026-09-28)
+          if (inv.count(bot, 'coal') - c0 < want && world.ticksUntilNight(bot) > 2400 && !dayStop()) {
+            log('dir', `the outcrops round home are worked - the mine's walls for ${want - (inv.count(bot, 'coal') - c0)} more coal`)
+            await mining.mineFor(bot, 'coal', c0 + want, ctx).catch(() => false)
+          }
         } else {
           log('dir', `short of ${short} fuel for the furnaces - no coal in sight past the grounds, the mine's walls for ${want}`)
           await mining.mineFor(bot, 'coal', c0 + want, ctx).catch(() => false)
