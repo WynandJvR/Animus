@@ -488,6 +488,11 @@ function decide () {
   if (dHome < 64 && (farm.farm() === null || !farm.farmIsHome(bot)) && (inv.count(bot, 'wheat_seeds') + base.bankCount('wheat_seeds')) >= 4 && !held('farm')) return { name: 'farm', why: 'seeds in hand and no farm at this home' }
   if (packFood < 12 && bot.food <= 12 && !held('food')) return { name: 'food', why: `food buffer low (pack ${packFood} pts, hunger ${bot.food})` }
 
+  // FIRST THING IN THE DAY: a far trip refused for want of daylight goes before the day's rounds - asked at the end of a
+  //  castle round, the dark oak trip came each day with 2300 ticks left and was "not today" three days running, the castle
+  //  standing on it (2026-09-28). An expedition from here: it camps where the night finds it
+  { const ft = mem.get().farTrip
+    if (ft && world.phase(bot) === 'day' && world.ticksUntilNight(bot) > 2400 && !expedition() && !held('farTrip')) return { name: 'farTrip', why: `${ft.raw} - the far trip, first thing in the day` } }
   // 6. food: cook what we carry; harvest a ripe farm
   if (inv.rawFoodCount(bot) >= 3 && dHome < 64 && !held('cook')) return { name: 'cook', why: `${inv.rawFoodCount(bot)} raw food to cook` }
   // saplings on hand and room for them in the orchard (empty spots, or fewer trees than the build still needs)
@@ -865,6 +870,7 @@ const TASKS = {
     }
     return done > 0
   },
+  async farTrip () { const ft = mem.get().farTrip; mem.set('farTrip', null); return ft ? startExpedition(ft.raw, ft.land) : false },
   async siteTidy () { return (await build.siteScaffoldTeardown(bot, { shouldStop: dayStop })) > 0 },
   async tidy () { return (await litter.tidy(bot, { from: mem.get().home, radius: 96, shouldStop: dayStop })) > 0 },
   async levelYard () { return (await hut.levelYard(bot, { shouldStop: dayStop })) > 0 },
@@ -1524,7 +1530,7 @@ async function gatherForInner (raw, short) {
             // (past the daylight left - the day's round trip, or a whole day's - it sets out anyway while a real stretch of the day
             //  is left, and camps where the night finds it: waited for a dawn start, the 424b dark oak trip was "not today" every
             //  afternoon and the castle stood on it (the operator, 2026-09-28))
-            if ((o.trip > DAWN_TICKS || world.ticksUntilNight(bot) > 2400) && await startExpedition(raw, o.land)) { /* (logged there) */ } else { notToday.set(raw, { sawNight: false, tod: world.tod(bot) }); log('dir', `${raw}: not today - too far for the daylight left`) }
+            if ((o.trip > DAWN_TICKS || world.ticksUntilNight(bot) > 2400) && await startExpedition(raw, o.land)) { /* (logged there) */ } else { notToday.set(raw, { sawNight: false, tod: world.tod(bot) }); mem.set('farTrip', { raw, land: o.land || null }); log('dir', `${raw}: not today - too far for the daylight left - first thing tomorrow`) }
           }
           forage.noteTrip(raw, inv.count(bot, raw) - before, searched ? 'no trees of it found' : `cut short (${o && o.at >= t0 ? o.outcome : 'no chop ran'})`, { searched })
         }
