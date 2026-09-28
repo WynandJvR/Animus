@@ -148,6 +148,28 @@ function standBeside (bot, low) {
   return best
 }
 
+// A pillar of our own up to a block above the reach (at most 10), and back down from on top after (climbDown). Its blocks
+// are litter like any tower's (towerUp notes them): a pillar the teardown missed is the next run's work, never lost.
+let climbed = []
+async function climbTo (bot, q, shouldStop) {
+  const gather = require('./gather')
+  for (let i = 0; i < 10 && !act.reach(bot, q, 4.5) && bot.entity.position.y < q.y; i++) {
+    if (shouldStop && shouldStop()) break
+    if (!await gather.towerUp(bot, { allowZones: ['orchard', 'base', 'farm'], onPlaced: c => climbed.push(c) })) break
+  }
+}
+async function climbDown (bot) {
+  const ours = c => climbed.some(p => p.x === c.x && p.y === c.y && p.z === c.z)
+  for (let guard = 0; guard < 12 && climbed.length; guard++) {
+    const me = bot.entity.position; const under = { x: Math.floor(me.x), y: Math.floor(me.y - 0.01), z: Math.floor(me.z) }
+    if (!ours(under)) break
+    if (!await act.dig(bot, new Vec3(under.x, under.y, under.z), { noWalk: true, timeoutMs: 6000, allowZones: ['orchard', 'base', 'farm'] }).catch(() => false)) break
+    const t0 = Date.now(); while (!bot.entity.onGround && Date.now() - t0 < 1500) await new Promise(r => setTimeout(r, 50))
+    climbed = climbed.filter(p => !(p.x === under.x && p.y === under.y && p.z === under.z))
+  }
+  climbed = []
+}
+
 // Take them down: the nearest column first, top-down, from the ground beside it (the highest a stand reaches). A block
 // out of reach from the ground stays in the ledger and is said.
 async function tidy (bot, { from, radius = RADIUS, shouldStop } = {}) {
@@ -181,9 +203,14 @@ async function tidy (bot, { from, radius = RADIUS, shouldStop } = {}) {
       if (!await require('./craft').keepTool(bot, 'pickaxe', { shouldStop })) { log('litter', 'no pickaxe - the tidy waits for one'); save(true); return removed }
       // (a stepping stone can become a light's post or a water's edge after it was noted: asked again at the dig, and let go)
       if (kept(bot, q, pts) || capsADrop(bot, q)) { ledger.delete(k(q)); dirty = true; continue }
+      // (above the reach from the ground - a stand of ours left on a tree's crown, 8 up: up to it the way a player does, a
+      //  pillar of our own beside it, then that pillar down from on top. From the ground only, such blocks stood for good -
+      //  the cobble on the spruce tops the operator asked about, 2026-09-28)
+      if (!act.reach(bot, q, 4.5) && q.y > bot.entity.position.y) await climbTo(bot, q, shouldStop)
       if (!act.reach(bot, q, 4.5)) { left++; continue }
       if (await act.dig(bot, new Vec3(q.x, q.y, q.z), { noWalk: true, timeoutMs: 8000, allowZones: ['orchard', 'base', 'farm'] }).catch(() => false)) removed++; else left++
     }
+    await climbDown(bot)
     if (left > leftBefore) miss()
     await act.collectDrops(bot, { radius: 5, maxMs: 3000 }).catch(() => {})
   }
