@@ -251,7 +251,17 @@ async function pickUp (bot, stop, sess) {
     await breathe(bot)
     const me = bot.entity.position
     const ds = dropsNear(bot, re).filter(e => (tries.get(e.id) || 0) < 2 && !rising(bot, e)).sort((a, b) => a.position.distanceTo(me) - b.position.distanceTo(me))
-    if (!ds.length) break
+    if (!ds.length) {
+      // (why the pickup ends with balls left: all "rising" - under water still, or the client's copy of where they are gone
+      //  stale - or tried twice. 12 of 12 lost at 13:59 and no swim ever tried, 2026-09-28: said once, with where they are)
+      const left = dropsNear(bot, re)
+      if (left.length && !swimSaid) {
+        swimSaid = true
+        const d0 = left.sort((a, b) => a.position.distanceTo(me) - b.position.distanceTo(me))[0]
+        log(K.name, `pickup ends with ${left.length} ball(s) left: ${left.filter(e => rising(bot, e)).length} read as under water (nearest at y${d0.position.y.toFixed(2)}, its cell ${(world.at(bot, d0.position.x, d0.position.y, d0.position.z) || {}).name}, over it ${(world.at(bot, d0.position.x, d0.position.y + 1, d0.position.z) || {}).name}; moved ${d0.velocity ? Math.hypot(d0.velocity.x, d0.velocity.y, d0.velocity.z).toFixed(3) : '?'} b/t), ${left.filter(e => (tries.get(e.id) || 0) >= 2).length} tried twice`)
+      }
+      break
+    }
     let go = null
     for (const d of ds) { const c = pickupCell(bot, d.position); if (c) { go = { d, c }; break } }
     if (!go) {
