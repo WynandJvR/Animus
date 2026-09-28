@@ -259,6 +259,7 @@ async function towerUp (bot) {
   // edge): jumped from 0.3 off a column's edge beside a pit, the place went to the column the body had drifted over -
   // air - and it came down ten blocks, hp 20 -> 12, felling an orchard tree (2026-09-28)
   const x0 = Math.floor(bot.entity.position.x); const z0 = Math.floor(bot.entity.position.z)
+  try { bot.pathfinder.setGoal(null) } catch {} // (the tower owns the body now: a planner's left-over goal kept the body moving)
   const off = () => Math.hypot(bot.entity.position.x - (x0 + 0.5), bot.entity.position.z - (z0 + 0.5))
   try {
     await bot.equip(filler, 'hand')
@@ -278,6 +279,9 @@ async function towerUp (bot) {
     // (still before the jump - the real protection: 0.04 a tick across is ~0.3 of a block by the apex, over a column's
     //  edge from a start 0.2 off; settled, a straight-up jump comes down where it left - audit 2026-09-28)
     for (let k = 0; k < 10 && Math.hypot(bot.entity.velocity.x, bot.entity.velocity.z) >= 0.01; k++) await bot.waitForTicks(1)
+    // (still moving after the wait: no jump at all - the wait running out and jumping anyway drifted it into the same pit
+    //  a second time, 2026-09-28 04:51)
+    if (Math.hypot(bot.entity.velocity.x, bot.entity.velocity.z) >= 0.01) return false
     await bot.look(bot.entity.yaw, -Math.PI / 2, true)
     bot.setControlState('jump', true)
     const t0 = Date.now()
