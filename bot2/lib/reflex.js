@@ -666,7 +666,8 @@ function installPlaceGuard () {
       // (every block the planner puts down, remembered: its own stepping stones up a tree were never taken away - two
       //  cobblestone posts where the orchard's saplings stood, 2026-09-28. A caller takes back what its walk raised)
       const r = await orig(ref, face, ...rest)
-      try { const p = ref.position.plus(face); plannerPlaced.push({ x: p.x, y: p.y, z: p.z, at: Date.now() }); if (plannerPlaced.length > 200) plannerPlaced.shift() } catch {}
+      // (and into the one litter ledger, outside the build: taken down by the tidy task whoever forgets it - litter.js)
+      try { const p = ref.position.plus(face); plannerPlaced.push({ x: p.x, y: p.y, z: p.z, at: Date.now() }); if (plannerPlaced.length > 200) plannerPlaced.shift(); require('./litter').note(bot, p) } catch {}
       return r
     }
     return orig(ref, face, ...rest)

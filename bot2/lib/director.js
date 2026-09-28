@@ -29,6 +29,9 @@ const clay = require('./clay')
 const forage = require('./forage')
 const boat = require('./boat')
 const orchard = require('./orchard')
+const litter = require('./litter')
+let litterSeeded = false // (the pillars from before the ledger: looked for once a run, once the orchard's zone is set)
+const LITTER_BATCH = 8
 
 // Hunt an animal that is right here when the pack is low on food - a player does not walk past a
 // cow with nothing to eat. Bounded to animals within 20 blocks and ~25 seconds.
@@ -110,7 +113,7 @@ function note (name, ok) {
 // succeed" four times over, the watchdog's alarm, a backoff for nothing (late in the day, 25-64 from home; audit
 // 2026-09-28). One gate: a day chore whose stop holds waits, said once. (Survival - food, graves, tools, the bed - is
 // never held here; the castle's step does its home work first and minds its own stop.)
-const DAY_TASKS = new Set(['farm', 'harvest', 'hydrate', 'levelFarm', 'levelYard', 'fixWater', 'lightBase', 'plant', 'spareKit', 'fillShaft', 'cook', 'ironTrip'])
+const DAY_TASKS = new Set(['farm', 'harvest', 'hydrate', 'levelFarm', 'levelYard', 'fixWater', 'lightBase', 'plant', 'spareKit', 'fillShaft', 'cook', 'ironTrip', 'tidy'])
 const lateSaid = new Map()
 // held(name): may decide() offer it now? Not while backing off from failures (cooling), nor a day chore once its stop holds.
 // (cooling keeps its one meaning - "it failed recently": the recover rule reads cooling('food') as that evidence; audit)
@@ -476,6 +479,12 @@ function decide () {
     const o = orchard.orchard()
     if (dHome < 64 && world.phase(bot) === 'day' && saps > 0 && (orchard.empty(bot).length > 0 || (o ? o.spots.length : 0) < demandTrees) && !held('plant')) return { name: 'plant', why: `${saps} saplings for the orchard (${o ? o.spots.length : 0} spots, ${demandTrees} trees wanted)` }
   }
+  // our own pillars and stepping stones left standing round home (a batch: one walk takes down many - LITTER_BATCH)
+  if (dHome < 64 && world.phase(bot) === 'day' && !held('tidy')) {
+    if (!litterSeeded && orchard.orchard()) { litterSeeded = true; litter.seed(bot) }
+    const n = litter.pending(bot, mem.get().home, 96).length
+    if (n >= LITTER_BATCH) return { name: 'tidy', why: `${n} blocks of ours left standing round home (pillars, stepping stones)` }
+  }
   // (the harvest when the bread runs low, not every morning: the crop keeps on the stalk, and harvesting and
   //  replanting 71 cells took two minutes of every ten-minute day with 31 bread in the pack, 2026-09-26)
   if (farm.farm() && dHome < 64 && farm.ripeCount(bot) >= 8 && breadStock() < BREAD_WANTED && !held('harvest')) return { name: 'harvest', why: `${farm.ripeCount(bot)} wheat ripe` }
@@ -799,6 +808,7 @@ const TASKS = {
     }
     return done > 0
   },
+  async tidy () { return (await litter.tidy(bot, { from: mem.get().home, radius: 96, shouldStop: dayStop })) > 0 },
   async levelYard () { return (await hut.levelYard(bot, { shouldStop: dayStop })) > 0 },
   async fixWater () { return farm.fixWater(bot, { shouldStop: dayStop }) },
   async harvest () { return farm.harvest(bot, { shouldStop: dayStop }) },

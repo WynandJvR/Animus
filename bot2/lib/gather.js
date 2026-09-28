@@ -325,7 +325,8 @@ async function towerUp (bot, { allowZones = [], onPlaced = null, builder = false
     if (!builder && cellB && move.isProtected(cellB, 'fill')) { log('gather', `no tower at ${x0},${y0},${z0} - a cell of the build`); await move.sleep(300); return false }
     if (zn && !allowZones.includes('*') && !allowZones.includes(zn.label)) { log('gather', `no tower at ${x0},${y0},${z0} - inside the ${zn.label}`); await move.sleep(300); return false }
     if (below) await bot.placeBlock(below, new Vec3(0, 1, 0)).catch(() => {})
-    { const nb = world.at(bot, x0, y0, z0); if (nb && world.isSolid(nb)) { lastPillar = { x: x0, y: y0, z: z0 }; if (onPlaced) onPlaced(lastPillar) } }
+    // (every tower block but the builder's is litter until it comes down: the one ledger - litter.js)
+    { const nb = world.at(bot, x0, y0, z0); if (nb && world.isSolid(nb)) { lastPillar = { x: x0, y: y0, z: z0 }; if (onPlaced) onPlaced(lastPillar); if (!builder) require('./litter').note(bot, lastPillar) } }
     await move.sleep(300)
     return Math.floor(bot.entity.position.y) >= y0 + 1
   } catch { bot.setControlState('jump', false); bot.setControlState('forward', false); bot.setControlState('sneak', false); return false }
