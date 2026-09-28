@@ -593,16 +593,23 @@ function cachedStatus (bot) {
 }
 function status (bot) {
   if (!job) return null
-  let done = 0; let unknown = 0
+  let done = 0; let unknown = 0; let total = 0
   const md = world.data(bot)
   const need = {}
+  // (the foundation is no part of the blueprint: out of total/done - the watchdog's blocks an hour, the brain's "how
+  //  far", the percent - and said on its own; its cobblestone is in the need all the same)
+  const fd = { placed: 0, left: 0 }
   for (const c of job.cells) {
     const d = cellDone(bot, c)
+    if (c.foundation) { if (d === true) fd.placed++; else { fd.left++; needsOf(bot, c, md, (it, n) => { need[it] = (need[it] || 0) + n }) } continue }
+    total++
     if (d === true) { done++; continue }
     if (d === null) unknown++
     needsOf(bot, c, md, (it, n) => { need[it] = (need[it] || 0) + n })
   }
-  return { name: job.name, total: job.cells.length, done, unknown, need }
+  const out = { name: job.name, total, done, unknown, need }
+  if (job.foundation && (fd.placed || fd.left)) out.foundation = Object.assign(fd, { dropped: job.foundation.dropped || 0 })
+  return out
 }
 // Items for the cells from the lowest unfinished layer up to `layers` above it (the window the builder
 // works in), plus attached cells whose support already stands. Same keying as status().need.
@@ -1140,7 +1147,8 @@ async function buildStep (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     //  rest: a row laid beside a truly unreachable cell would wake it at every block, a 16s failure each; the next failure
     //  writes a fresh record, and the flag with it; audit 2026-09-28)
     if (ok) { for (const [k, f] of cellFails) { const [x, y, z] = k.split(',').map(Number); if (f.at && !f.woke && c.y <= y && y - c.y <= 2 && Math.abs(x - c.x) <= 2 && Math.abs(z - c.z) <= 2) { f.at = 0; f.woke = true } } }
-    if (ok) { placed++; if (cellFails.delete(key(c))) saveCellFails(); if (placed % 25 === 0) { const st = status(bot); log('build', `${st.done}/${st.total} placed`) } } else { failed.set(key(c), (failed.get(key(c)) || 0) + 1); saveCellFails(); if (failed.get(key(c)) === 1) log('build', `${c.name} at ${move.fmt(c)} won't place (${lastPlaceFail || 'unlogged'}) - leaving it for later`) }
+    if (ok) { placed++; if (cellFails.delete(key(c))) saveCellFails(); if (placed % 25 === 0) { const st = status(bot); log('build', `${st.done}/${st.total} placed`) } } else if (c.foundation && (failed.get(key(c)) >= 1 || sealedIn(bot, c))) dropFoundation(bot, c, sealedIn(bot, c) ? 'sealed in' : `failed twice (${lastPlaceFail || 'unlogged'})`)
+    else { failed.set(key(c), (failed.get(key(c)) || 0) + 1); saveCellFails(); if (failed.get(key(c)) === 1) log('build', `${c.name} at ${move.fmt(c)} won't place (${lastPlaceFail || 'unlogged'}) - leaving it for later`) }
   }
   profLog()
   return { placed, blockedOn: waiting, done: false }
@@ -1211,6 +1219,8 @@ function ensureFoundation (bot) {
   if (!job || job.foundation) return true
   const add = []
   const y1 = job.box.y1
+  // (a support of ours in a column is air to the scan: the teardown takes it, and the fill must not end on it - audit)
+  const ledger = new Set((mem.get().scaffold || []).map(key))
   for (const c of job.cells) {
     if (c.y !== y1 || c.clear) continue
     const col = []
@@ -1219,7 +1229,7 @@ function ensureFoundation (bot) {
       const k = kindAt(bot, c.x, y, c.z)
       if (!k) return false // (a column not loaded: taken whole or not at all)
       if (/^lava$/.test(k.name)) { ok = false; break }
-      if (k.boundingBox === 'block' && !world.LEAF_RE.test(k.name)) break
+      if (k.boundingBox === 'block' && !world.LEAF_RE.test(k.name) && !ledger.has(`${c.x},${y},${c.z}`)) break
       if (y1 - y > FOUNDATION_MAX) { ok = false; break }
       col.push(y)
     }
@@ -1234,6 +1244,15 @@ function ensureFoundation (bot) {
   if (add.length) log('build', `foundation: ${add.length} blocks under the base layer where it stands over a drop (${new Set(add.map(p => p.x + ',' + p.z)).size} columns) - laid first`)
   return true
 }
+// A foundation cell that can't go in is dropped, not rested: it is no part of the blueprint - sealed in under the base
+// already built, or failed twice - and a hole in a fill holds nothing up (a rest would retry it for ever, and the build
+// could never read done; audit 2026-09-28)
+function dropFoundation (bot, c, why) {
+  job.cells = job.cells.filter(q => q !== c); job.index.delete(key(c)); cellFails.delete(key(c)); statusGen++
+  if (job.foundation) job.foundation.dropped = (job.foundation.dropped || 0) + 1
+  log('build', `foundation cell at ${move.fmt(c)} dropped - ${why}`)
+}
+function sealedIn (bot, c) { return [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]].every(([dx, dy, dz]) => world.isSolid(world.at(bot, c.x + dx, c.y + dy, c.z + dz))) }
 function snapName (x, y, z) {
   if (!site) return undefined
   const r = site.region
