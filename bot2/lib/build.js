@@ -1044,7 +1044,7 @@ async function buildStep (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
   stepStop = shouldStop || null
   const t0 = Date.now()
   let placed = 0
-  if (!ensureSnapshot(bot)) return { placed, blockedOn: null, done: false }
+  if (!ensureSnapshot(bot) || !ensureFoundation(bot)) return { placed, blockedOn: null, done: false }
   // (a cell that keeps failing is tried again ever more rarely - 5 min after its third miss, then 10, 20... up to 2h -
   //  never forgotten: the same window glass cells took three tries each, every step, minutes of every day, 2026-09-26)
   const failed = { get: k => { const f = cellFails.get(k); return f ? f.n : 0 }, set: (k, n) => cellFails.set(k, { n, at: Date.now() }) }
@@ -1196,6 +1196,42 @@ function ensureSnapshot (bot) {
   site = { name: job.name, origin: job.origin, region: r, palette, layers, at: new Date().toISOString() }
   try { fs.writeFileSync(siteFile(job), JSON.stringify(site)) } catch (e) { log('build', `couldn't write the site snapshot: ${e.message}`) }
   log('build', `site snapshot taken: ${(r.x2 - r.x1 + 1) * (r.y2 - r.y1 + 1) * (r.z2 - r.z1 + 1)} blocks, ${palette.length} kinds -> ${path.basename(siteFile(job))}`)
+  return true
+}
+// THE FOUNDATION: the base layer stood over a drop - the castle's south and west edges over a slope 5-9 blocks down -
+// and every cell there was a pillar climbed, stuck at its foot, or a fall (2026-09-28). A player lays a foundation on a
+// slope first: under each cell of the base layer, the air, water or plants down to the ground become cells of the job
+// (a filler block each), so the band fills them bottom-up before the walls over them rise, and every block after is
+// placed standing on solid ground. Only under the BASE layer - a blueprint's own overhang higher up is not propped - and
+// no deeper than FOUNDATION_MAX (a ravine keeps its pillars); a column with lava in it is left. Taken once the chunks
+// are here, from the ground as it stands (anything solid ends the column: a block of ours there is kept as foundation).
+const FOUNDATION_MAX = 16
+const FOUNDATION_BLOCKS = /^(cobblestone|dirt|coarse_dirt|andesite|diorite|granite|tuff|cobbled_deepslate|netherrack|stone|deepslate)$/
+function ensureFoundation (bot) {
+  if (!job || job.foundation) return true
+  const add = []
+  const y1 = job.box.y1
+  for (const c of job.cells) {
+    if (c.y !== y1 || c.clear) continue
+    const col = []
+    let ok = true
+    for (let y = y1 - 1; ; y--) {
+      const k = kindAt(bot, c.x, y, c.z)
+      if (!k) return false // (a column not loaded: taken whole or not at all)
+      if (/^lava$/.test(k.name)) { ok = false; break }
+      if (k.boundingBox === 'block' && !world.LEAF_RE.test(k.name)) break
+      if (y1 - y > FOUNDATION_MAX) { ok = false; break }
+      col.push(y)
+    }
+    if (ok) for (const y of col) add.push({ x: c.x, y, z: c.z })
+  }
+  for (const p of add) {
+    const cell = { x: p.x, y: p.y, z: p.z, name: 'cobblestone', props: {}, foundation: true, want: null, item: 'cobblestone', alt: FOUNDATION_BLOCKS, prefer: ['cobblestone', 'dirt'], itemAlt: FILLER_ITEMS }
+    job.cells.push(cell); job.index.set(key(cell), cell)
+  }
+  job.foundation = { cells: add.length }
+  statusGen++
+  if (add.length) log('build', `foundation: ${add.length} blocks under the base layer where it stands over a drop (${new Set(add.map(p => p.x + ',' + p.z)).size} columns) - laid first`)
   return true
 }
 function snapName (x, y, z) {
