@@ -826,7 +826,10 @@ async function travel (bot, target, opts = {}) {
     // in our own mine: walk out the way we came (tunnel and stairs) rather than pillar up through rock -
     // without a pickaxe that is 7.5s a block
     const mine = require('./memory').get().mine
-    if (surfaceTries === 0 && isUnderground(bot) && mine && mine.entrance && mine.cursor && world.dist3(me, mine.cursor) < 90 && world.dist3(me, mine.entrance) > 4 && !(target.y < me.y - 4)) {
+    // (IN it - on the mine's own path: 90 of the cursor counted an ore dug 50 across and 40 below as "in the mine", and the walk
+    //  to the entrance tunnelled across and pillared the entrance column 40 high where the climb straight up was shorter,
+    //  2026-09-28)
+    if (surfaceTries === 0 && isUnderground(bot) && mine && mine.entrance && mine.cursor && require('./mining').inOwnMine(bot) && world.dist3(me, mine.entrance) > 4 && !(target.y < me.y - 4)) {
       surfaceTries++
       const out = await goTo(bot, new goals.GoalBlock(mine.entrance.x, mine.entrance.y, mine.entrance.z), { timeoutMs: 120000, stuckMs: 15000, label: 'out of the mine', shouldStop })
       if (out.ok) continue
