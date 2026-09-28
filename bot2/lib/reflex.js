@@ -451,9 +451,18 @@ function steerTo (p, { jump = true, sprint = false } = {}) {
 // The best open heading away from a threat: of 16 directions within 100 degrees of straight away,
 // the most direct one whose next 3 cells are walkable ground (a step up or a drop of <=2, no water or
 // lava). Returns a target cell 3 blocks out.
+// (memoised: the flee's continuation asks every tick - the pick holds until the body has moved a block or the threat's
+//  bearing has turned 30 degrees, as shoreHeading's does; audit 2026-09-28)
+let fleeMemo = null
 function fleeHeading (t) {
   const me = bot.entity.position
   const away = Math.atan2(me.z - t.position.z, me.x - t.position.x)
+  if (fleeMemo && fleeMemo.at.distanceTo(me) < 1 && Math.abs(((away - fleeMemo.away) + 3 * Math.PI) % (2 * Math.PI) - Math.PI) < Math.PI / 6) return fleeMemo.best
+  const pick = fleeHeadingPick(t, me, away)
+  fleeMemo = { at: me.clone(), away, best: pick }
+  return pick
+}
+function fleeHeadingPick (t, me, away) {
   // afloat: no dry step within three blocks mid-river, and "back" drifted the bot in place while drowned hit it to death
   // (2026-09-27) - swim for the nearest bank that is not toward the threat
   if (world.feetInWater(bot) && !bot.vehicle) return shoreHeading(me, away)
@@ -474,6 +483,22 @@ function fleeHeading (t) {
       cell = { x, y, z }
     }
     if (!ok || !cell) continue
+    // SWEPT, not stepped: whole-block samples on a diagonal, or from a body near a cell's edge, skip the void corner the
+    // line crosses between them - every flee round of a creeper chase steered onto a 23-block cliff's lip and the brake
+    // caught it there, until it did not (2026-09-28). Every half block along the way, the hitbox's width either side
+    // (each drop from the floor just walked - carried along the line: from the start's height a walkable slope read as
+    //  one big drop and every downhill heading was refused; a real cliff still is - audit 2026-09-28)
+    let swept = true; let yRun = Math.floor(me.y)
+    const px = -Math.sin(a) * 0.3; const pz = Math.cos(a) * 0.3
+    for (let d = 0.5; d <= 3 && swept; d += 0.5) {
+      const cx = me.x + Math.cos(a) * d; const cz = me.z + Math.sin(a) * d
+      for (const k of [0, 1, -1]) if (world.dropAt(bot, cx + px * k, yRun, cz + pz * k) > world.SAFE_DROP) { swept = false; break }
+      if (!swept) break
+      // (the floor under the line here: down the slope, or a step up onto it)
+      const feet = world.at(bot, cx, yRun, cz)
+      if (feet && world.isSolid(feet)) yRun++; else yRun -= world.dropAt(bot, cx, yRun, cz)
+    }
+    if (!swept) continue
     if (!best || diff < best.diff) best = { x: cell.x, y: cell.y, z: cell.z, jump, diff }
   }
   return best
