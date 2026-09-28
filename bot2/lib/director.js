@@ -1190,7 +1190,7 @@ async function castleWork () {
     // (and only an item that holds the band: one with none in stock is named when nothing else is missing, and its trip
     //  first thing in the day - 31 fuel for one coal block - was the day's building time, 2026-09-28)
     mem.set('buildWaiting', r.blockedOn && r.blockedHolds && !build.infillItem(r.blockedOn) ? r.blockedOn : null)
-    if (r.placed > 0 && !r.blockedOn) return true
+    if (r.placed > 0 && !blockedOn) return true
     // every cell still missing has failed, with the blocks in hand: our own scaffold may be what is in the way. Two
     // wall torches in a room whose floor was full of scaffold (a 1-high gap left under the ceiling, nowhere to stand)
     // waited on a teardown that waited on them - 718/720 for good (2026-09-24). Take the scaffold down now.
