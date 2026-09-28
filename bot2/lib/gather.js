@@ -388,7 +388,7 @@ async function towerUp (bot, { allowZones = [], onPlaced = null, builder = false
     //  settle before the server's update lands - the ledger lost 3 of 9 orchard pillar blocks, and nothing took them
     //  down: the trunk cells filled with cobblestone and the spots were dropped, 2026-09-28)
     const up = Math.floor(bot.entity.position.y) >= y0 + 1
-    { const nb = world.at(bot, x0, y0, z0); if (up || (nb && world.isSolid(nb))) { lastPillar = { x: x0, y: y0, z: z0 }; if (onPlaced) onPlaced(lastPillar); if (!builder) require('./litter').note(bot, lastPillar) } }
+    { const nb = world.at(bot, x0, y0, z0); if (up || (nb && world.isSolid(nb))) { lastPillar = { x: x0, y: y0, z: z0 }; if (onPlaced) onPlaced(lastPillar); if (!builder) require('./litter').note(bot, lastPillar, filler.name) } }
     return up
   } catch { bot.setControlState('jump', false); bot.setControlState('forward', false); bot.setControlState('sneak', false); return false }
 }

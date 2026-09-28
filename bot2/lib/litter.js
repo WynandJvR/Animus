@@ -38,15 +38,18 @@ function listen (bot) {
 }
 
 // A block of ours put down to stand on, outside the build (the build's ledger and snapshot take its own).
-function note (bot, p) {
+// (placed: the item the placer held - its own word for the block, when the server's update has not landed yet: a
+//  tower's body stood on the block while the client still read air, and the re-read refused it, audit 2026-09-28)
+function note (bot, p, placed = null) {
   listen(bot)
   const b = world.at(bot, p.x, p.y, p.z)
-  if (!b || !filler().test(b.name)) return
+  const name = b && filler().test(b.name) ? b.name : placed && filler().test(placed) && (!b || world.isAirish(b)) ? placed : null
+  if (!name) return
   if (ours(p.x, p.y, p.z)) return
   // (round home only: a far trip's bridges are never walked back to - noted, they would push home's out of the ledger)
   const home = mem.get().home
   if (!home || world.dist3(p, home) > RADIUS) return
-  ledger.set(k(p), { x: p.x, y: p.y, z: p.z, name: b.name, at: Date.now() })
+  ledger.set(k(p), { x: p.x, y: p.y, z: p.z, name, at: Date.now() })
   if (ledger.size > MAX) ledger.delete(ledger.keys().next().value)
   dirty = true; save()
 }
