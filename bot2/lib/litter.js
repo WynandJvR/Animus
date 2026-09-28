@@ -65,6 +65,11 @@ function kept (bot, p, pts = infraPoints()) {
   return pts.some(q => Math.abs(q.x - p.x) <= 1 && Math.abs(q.y - p.y) <= 1 && Math.abs(q.z - p.z) <= 1)
 }
 
+// A block with a drop under it that hurts is a lid - a hole's cap, a shaft's plug - not a pillar: a pillar's blocks stand
+// on the next of them or on the ground. Taken out, the lid is a hole to fall down (the widened seed found 219, 69 of
+// them lone blocks, 2026-09-28)
+function capsADrop (bot, p) { return act.fallBelow(bot, p) > world.SAFE_DROP }
+
 // the build's own ground (its zone, its cells) is the build's ledger's and snapshot's - never litter's (an orchard's area
 // widened by 3 reaches into the castle's north edge)
 function ours (x, y, z) { const zn = move.inZone({ x, y, z }); return (zn && zn.label === 'build') || require('./build').isOpenCell({ x, y, z }) }
@@ -95,7 +100,7 @@ function seed (bot) {
       if (!b || b.name !== 'cobblestone' || ledger.has(k({ x, y, z }))) continue
       const up = world.at(bot, x, y + 1, z)
       const open = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => { const s = world.at(bot, x + dx, y, z + dz); return s && world.isAirish(s) })
-      if (!open || !up || !(world.isAirish(up) || world.LEAF_RE.test(up.name) || up.name === 'cobblestone') || kept(bot, { x, y, z }, pts) || ours(x, y, z)) continue
+      if (!open || !up || !(world.isAirish(up) || world.LEAF_RE.test(up.name) || up.name === 'cobblestone') || kept(bot, { x, y, z }, pts) || ours(x, y, z) || capsADrop(bot, { x, y, z })) continue
       ledger.set(k({ x, y, z }), { x, y, z, name: b.name, at: Date.now(), seeded: true }); n++
     }
   }
@@ -130,12 +135,13 @@ async function tidy (bot, { from, radius = RADIUS, shouldStop } = {}) {
     done.add(`${t.x},${t.z}`)
     const col = todo.filter(q => q.x === t.x && q.z === t.z).sort((a, b) => b.y - a.y)
     const low = col[col.length - 1]
-    const r = await move.goTo(bot, new goals.GoalNear(low.x, low.y, low.z, 2), { timeoutMs: 30000, allowZones: ['orchard', 'base', 'farm'], label: 'to litter' })
+    // (no stepping stones of its own on the way: each one was litter for the next run - 19 pending became 26 taken down)
+    const r = await move.goTo(bot, new goals.GoalNear(low.x, low.y, low.z, 2), { timeoutMs: 30000, place: false, allowZones: ['orchard', 'base', 'farm'], label: 'to litter' })
     if (!r.ok && !act.reach(bot, low, 4.5)) { left += col.length; continue }
     const pts = infraPoints()
     for (const q of col) {
       // (a stepping stone can become a light's post or a water's edge after it was noted: asked again at the dig, and let go)
-      if (kept(bot, q, pts)) { ledger.delete(k(q)); dirty = true; continue }
+      if (kept(bot, q, pts) || capsADrop(bot, q)) { ledger.delete(k(q)); dirty = true; continue }
       if (!act.reach(bot, q, 4.5)) { left++; continue }
       if (await act.dig(bot, new Vec3(q.x, q.y, q.z), { noWalk: true, timeoutMs: 8000, allowZones: ['orchard', 'base', 'farm'] }).catch(() => false)) removed++; else left++
     }
