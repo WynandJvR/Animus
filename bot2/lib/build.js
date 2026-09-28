@@ -23,11 +23,17 @@ const { log } = require('./log')
 
 const base = () => require('./base')
 
+// FOUR LISTS, four questions - never "unify" them (audit 2026-09-28):
+//  SCAFFOLD_RE: is a block standing in the world plausibly scaffold (a scan's guess - no cobblestone: the castle has cobble cells)
+//  FILLER_ITEMS: what may we PLACE as a support or pillar (cobblestone yes; granite no - a build course)
+//  LEDGER_RE: a spot we recorded placing filler at - still ours to take away (both of the above)
+//  STRAY_RE: what counts as leftover round the site after the build (plugs too)
 const SCAFFOLD_RE = /^(dirt|andesite|diorite|granite|tuff|cobbled_deepslate|netherrack|coarse_dirt)$/
 // (granite is not filler: the basilica's brick course is polished granite, and scaffold spends it by the stack)
 // (cobblestone too: "no filler for a temporary support" with 250 of it in the pack, 2026-09-27; what is left of it in
 //  the footprint comes down with the site clearing)
 const FILLER_ITEMS = /^(dirt|andesite|diorite|tuff|cobbled_deepslate|netherrack|coarse_dirt|cobblestone)$/
+const LEDGER_RE = new RegExp(SCAFFOLD_RE.source.slice(0, -2) + '|cobblestone)$') // (a ledger spot of ours: cobble supports come down too)
 // what the bot leaves standing about: placeSupport/pathfinder filler (+rooted_dirt, the planner's list), and
 // the reflexes' plugs (cobblestone, stone, sand, gravel)
 const STRAY_RE = /^(dirt|coarse_dirt|rooted_dirt|cobblestone|andesite|diorite|granite|tuff|cobbled_deepslate|netherrack|stone|sand|gravel)$/
@@ -1208,7 +1214,7 @@ async function removeScaffold (bot, { shouldStop, maxPasses = 4 } = {}) {
     // no snapshot (a job set before snapshots): the remembered placements and filler in the footprint
     for (const p of (mem.get().scaffold || []).slice()) {
       const b = world.at(bot, p.x, p.y, p.z)
-      if (b && SCAFFOLD_RE.test(b.name) && !job.index.has(key(p)) && await act.dig(bot, p, { force: true, allowZones: ['build', 'base'] })) removed++
+      if (b && LEDGER_RE.test(b.name) && !job.index.has(key(p)) && await act.dig(bot, p, { force: true, allowZones: ['build', 'base'] })) removed++ // (the ledger: cobble supports we placed too)
     }
     mem.update(m => { m.scaffold = [] })
     if (removed) log('build', `removed ${removed} scaffold blocks (no site snapshot - remembered ones only)`)
@@ -1258,7 +1264,7 @@ async function removeScaffold (bot, { shouldStop, maxPasses = 4 } = {}) {
     if (!got) break
   }
   // the hint list only ever shrinks to what is still standing
-  mem.update(m => { m.scaffold = (m.scaffold || []).filter(p => { const b = world.at(bot, p.x, p.y, p.z); return !b || (!world.isAirish(b) && SCAFFOLD_RE.test(b.name)) }) })
+  mem.update(m => { m.scaffold = (m.scaffold || []).filter(p => { const b = world.at(bot, p.x, p.y, p.z); return !b || (!world.isAirish(b) && LEDGER_RE.test(b.name)) }) }) // (keeps cobble supports on the ledger)
   surveyCache = null
   const left = scaffoldList(bot)
   if (removed) log('build', `removed ${removed} scaffold blocks`)
