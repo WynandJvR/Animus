@@ -1149,7 +1149,7 @@ async function castleWork () {
   try { return await castleWorkInner() } finally {
     phase('end')
     const tot = Date.now() - roundPh.t0; const d1 = (build.cachedStatus(bot) || {}).done
-    if (tot > 5000) log('dir', `castle round: ${Math.round(tot / 1000)}s, placed ${d1 != null && d0 != null ? d1 - d0 : '?'} - ${Object.entries(roundPh.acc).filter(([, v]) => v >= 500).sort((a, b) => b[1] - a[1]).map(([k, v]) => k + ' ' + Math.round(v / 1000) + 's').join(', ')}`)
+    if (tot > 5000) log('dir', `castle round: ${Math.round(tot / 1000)}s, placed ${roundPh.placed != null ? roundPh.placed : d1 != null && d0 != null ? d1 - d0 : '?'} - ${Object.entries(roundPh.acc).filter(([, v]) => v >= 500).sort((a, b) => b[1] - a[1]).map(([k, v]) => k + ' ' + Math.round(v / 1000) + 's').join(', ')}`)
     roundPh = null
   }
 }
@@ -1247,6 +1247,7 @@ async function castleWorkInner () {
     phase('build step')
     const r = await build.buildStep(bot, { shouldStop: dayStop, maxMs: 8 * 60000 })
     phase('after step')
+    if (roundPh) roundPh.placed = (roundPh.placed || 0) + (r.placed || 0) // (the step's own count: the cached status lags)
     log('dir', `build step: placed ${r.placed}${r.blockedOn ? ', waiting on ' + r.blockedOn : ''}`)
     blockedOn = r.blockedHolds ? r.blockedOn : null // (what the round steers by: only what holds the band)
     // (infill - glass, bars, lanterns - waited on while the structure still rises is no morning's errand: the sand
