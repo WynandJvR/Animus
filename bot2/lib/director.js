@@ -389,7 +389,9 @@ function decide () {
   // 1b. hurt: heal before going anywhere. At home a player tops up before heading out (regeneration: a point every
   //     4s on a full bar - a minute in the safehouse, not a trip at hp 13 into a skeleton); away, a trip that has
   //     reached the hurt line stops and heals (home, when it is near).
-  if (bot.health < 20 && canHeal() && (dHome < 24 || tooHurt()) && !cooling('heal')) return { name: 'heal', why: `hp ${Math.round(bot.health)}${tooHurt() ? ' (at the hurt line ' + Math.round(reflex.hurtLine() * 10) / 10 + ')' : ''} - healing before going on` }
+  // (and out on an expedition, whole before going on: healed to just past the hurt line, it walked on at hp 7 with a
+  //  pillager shooting, 700b from home - 2026-09-28)
+  if (bot.health < 20 && canHeal() && (dHome < 24 || tooHurt() || (expedition() && bot.health < EXPEDITION_HP)) && !cooling('heal')) return { name: 'heal', why: `hp ${Math.round(bot.health)}${tooHurt() ? ' (at the hurt line ' + Math.round(reflex.hurtLine() * 10) / 10 + ')' : ''} - healing before going on` }
 
   // 2. graves worth going back for
   const g = graves.bestGrave(bot)
@@ -425,7 +427,18 @@ function decide () {
   if (dHome < 160 && hut.siteGone(bot) && !cooling('abandonHome')) return { name: 'abandonHome', why: `the ground under the home at ${move.fmt(home)} is gone - choosing a new home` }
   // (in our own mine is at work, not astray: a staircase from y113 to y16 runs ~100 blocks out, and the face 116 blocks
   //  from home sent the bot home every time a mining task returned - a pickaxe worn out, a batch done - 2026-09-24)
-  { const e = expedition(); if (e && world.phase(bot) === 'day' && !tooHurt() && !cooling('expedition')) return { name: 'expedition', why: e.phase === 'back' ? `back from the ${e.raw} expedition (${e.why}) - ${Math.round(dHome)}b to home` : `on an expedition for ${e.raw}${e.to ? ' toward the ' + e.to.biome : ''} - night ${e.nights + 1} of ${MAX_NIGHTS} at most` } }
+  // (dawn out there: the night's mobs are not burning yet - home's hideout rule keeps the bot walled in till full light,
+  //  and 700b out it dug out of the bunker at the first day tick into whatever stood round the hole: the same wait -
+  //  audit 2026-09-28)
+  // (only when really dug in - walled round and roofed; caught in the open, it digs in now: idling at the rim under a
+  //  "dug in" label would be a lie - audit 2026-09-28)
+  if (expedition() && dim && around.length) {
+    const me = world.feetPos(bot); const roof = world.at(bot, me.x, me.y + 2, me.z)
+    const dugIn = shelter.enclosedHere(bot) && !!roof && world.isSolid(roof)
+    if (dugIn) return { name: 'idle', why: `dawn at camp with ${around.length} hostile${around.length > 1 ? 's' : ''} about (${around.slice(0, 3).map(h => h.e.name).join(', ')}) - staying dug in till full light` }
+    if (!cooling('bunker')) return { name: 'bunker', why: `dawn in the open with ${around.length} hostile${around.length > 1 ? 's' : ''} about - digging in till full light` }
+  }
+  { const e = expedition(); if (e && world.phase(bot) === 'day' && !tooHurt() && (bot.health >= EXPEDITION_HP || !canHeal()) && !cooling('expedition')) return { name: 'expedition', why: e.phase === 'back' ? `back from the ${e.raw} expedition (${e.why}) - ${Math.round(dHome)}b to home` : `on an expedition for ${e.raw}${e.to ? ' toward the ' + e.to.biome : ''} - night ${e.nights + 1} of ${MAX_NIGHTS} at most` } }
   if (dHome > 96 && !expedition() && !mining.inOwnMine(bot) && !tooHurt() && !cooling('goHome')) return { name: 'goHome', why: `${Math.round(dHome)}b from home` }
 
   // 5b. at home with a haul in the pack: put it in the chest (a player empties their pockets at home)
@@ -1161,10 +1174,12 @@ const MAX_NIGHTS = 3
 // (three nights and the walk back is days of a working body - and a taiga is thin on animals: a full pack of food out,
 //  and home when it runs low rather than a forage trip 900b from the farm - audit 2026-09-28)
 const FOOD_OUT = 50; const FOOD_BACK = 10
+const EXPEDITION_HP = 14 // (out there the walk goes on only this whole: no help, no grave run, the next mob unseen)
 // (an axe a stack of logs: 535 of spruce wear out four stone axes - cobblestone in the pack, and the kit's table and the
 //  tools rule make the next one out there, never a wooden one of the planks - audit 2026-09-28)
 const COBBLE_OUT = 6
 async function startExpedition (raw, land) {
+  if (expedition()) return true // (one at a time: the castle loop's second ask found it already set out)
   // packed from the bank while home is a short walk (the castle loop asks from the site): the food first - the pack's
   // own food only ever rises to the food rule's line, so a gate on it alone waited every day for ever - and the
   // cobblestone for the axes (audit 2026-09-28)
@@ -1192,8 +1207,16 @@ function watchExpedition () {
   if (e.tod != null && t < e.tod) {
     e.nights++; mem.set('expedition', Object.assign(e, { tod: t }))
     log('dir', `expedition for ${e.raw}: dawn after night ${e.nights} - ${inv.count(bot, e.raw)} ${e.raw} in the pack, ${inv.foodPoints(bot)} food pts, ${Math.round(base.distHome(bot))}b from home`)
-    if (e.phase === 'out' && e.nights >= MAX_NIGHTS) endExpedition(`${e.nights} nights out`)
+    // (the nights are for finding it: its country found at the end - a grove sighted on the third evening, 1300b out -
+    //  gets one more day to fill the pack, not a turn for home empty-handed with the trees in view; 2026-09-28)
+    if (e.phase === 'out' && e.nights >= MAX_NIGHTS) {
+      const land = gather.speciesLand(e.raw, bot.entity.position)
+      if (land && land.d < 300 && !e.extended && inv.foodPoints(bot) >= FOOD_OUT / 2) { e.extended = true; mem.set('expedition', e); log('dir', `expedition for ${e.raw}: ${e.nights} nights out, but its country (the ${land.biome}) is ${Math.round(land.d)}b off - one more day to fill the pack`) } else endExpedition(`${e.nights} nights out`)
+    }
   } else e.tod = t
+  // (nearly died out there - down to the hurt line: a player 600b from home in pillager country goes home, healed first,
+  //  not on to the next lead into the same danger - audit 2026-09-28)
+  if (e.phase === 'out' && bot.health > 0 && bot.health <= reflex.hurtLine()) endExpedition(`nearly died - hp ${Math.round(bot.health)}`)
   // (died out there: respawned at home - not walked straight back out; the graves and the next dawn decide)
   const d = (mem.get().deaths || []).slice(-1)[0]
   if (d && d.t > e.at) { mem.set('expedition', null); log('dir', `expedition for ${e.raw}: died on it - called off`) }

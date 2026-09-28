@@ -345,4 +345,4 @@ async function bunker (bot, { shouldStop } = {}) {
   return true
 }
 
-module.exports = { bedBlock, hasBedItem, obtainBed, placeBed, placeBedAt, sleepInBed, bunker, morning, waitForDay }
+module.exports = { enclosedHere, bedBlock, hasBedItem, obtainBed, placeBed, placeBedAt, sleepInBed, bunker, morning, waitForDay }

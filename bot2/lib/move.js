@@ -775,7 +775,9 @@ async function travel (bot, target, opts = {}) {
     // through caves and come up under the destination
     const gy = world.groundY(bot, lx, lz, Math.floor(me.y) + 30)
     const legGoal = (gy != null && !world.isWaterBlock(world.at(bot, lx, gy, lz))) ? new goals.GoalNear(lx, gy + 1, lz, 4) : new goals.GoalNearXZ(lx, lz, 4)
+    const edges0 = reflexRef && reflexRef.edgeStops ? reflexRef.edgeStops() : 0
     const r = await goTo(bot, legGoal, { timeoutMs: 45000, stuckMs: 10000, label: label + ' leg', shouldStop })
+    const edged = !!(reflexRef && reflexRef.edgeStops) && reflexRef.edgeStops() > edges0
     // (new ground in view: note the sand, gravel and clay along the way - in the background)
     try { require('./gather').survey(bot) } catch {}
     const moved = world.dist2(bot.entity.position, me)
@@ -785,6 +787,14 @@ async function travel (bot, target, opts = {}) {
     if (r.ok && moved >= 2) { legFails = 0; stranded = { at: null, n: 0 }; continue } // (a leg that got somewhere: not stranded)
     if (r.ok) { if (++legFails >= 6) { log('move', `${label}: no headway ${Math.round(dxz)}b short at ${fmt(bot.entity.position)}`); return { ok: false, why: 'stuck: no headway' } } continue }
     if (r.why === 'died' || r.why === 'stopped') return r
+    // (a leg that failed against a drop the edge guard refused: the ground says not this way - bend the heading, even
+    //  after progress. "Partial progress" reset the count and the next leg went at the same cliff; the bot fell 17
+    //  blocks 1.2s into it, 2026-09-28)
+    if (edged) {
+      if (++legFails >= 6) { log('move', `${label}: stuck ${Math.round(dxz)}b short at ${fmt(bot.entity.position)} (drops every way)`); return { ok: false, why: 'stuck: drops' } }
+      log('move', `${label}: the way on ends at a drop - bending the heading`)
+      continue
+    }
     if (moved > 8) { legFails = 0; continue } // partial progress is progress
     if (++legFails >= 6) { log('move', `${label}: stuck ${Math.round(dxz)}b short at ${fmt(bot.entity.position)} (${r.why})`); return { ok: false, why: 'stuck: ' + r.why } }
   }

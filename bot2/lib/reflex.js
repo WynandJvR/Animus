@@ -610,11 +610,17 @@ function noteTakeoff () {
   if (!bot.entity) return
   const g = bot.entity.onGround
   // landed: a fall that hurts keeps its takeoff (the death's own bounce is a takeoff too, and overwrote it)
-  if (!wasGround && g && takeoff && takeoff.y - bot.entity.position.y > world.SAFE_DROP) fell = Object.assign({}, takeoff, { fall: Math.round(takeoff.y - bot.entity.position.y) })
+  if (!wasGround && g && takeoff && takeoff.y - bot.entity.position.y > world.SAFE_DROP) {
+    fell = Object.assign({}, takeoff, { fall: Math.round(takeoff.y - bot.entity.position.y) })
+    // (a fall that hurts and did not kill left no trace of what walked us off - a 17-block drop the edge guard had just
+    //  refused, hp 20 -> 6, 2026-09-28: the takeoff, said on landing)
+    const t = fell
+    log('vital', `fell ${t.fall} blocks from ${t.pos} (floor y${t.fy}, drop there ${t.drop}) v=${t.v} (${t.hs} b/t across) keys=${t.keys || '-'} ${t.steered ? 'pathfinder steering' : 'no pathfinder'}${t.step}${t.active ? ', reflex ' + t.active : ''}${t.hurt ? ', hurt ' + t.hurt + 'ms before' : ''}`)
+  }
   if (wasGround && !g) {
     const p = bot.entity.position; const v = bot.entity.velocity; const c = bot.controlState || {}
     const fy = Math.floor(p.y + 0.01)
-    takeoff = { at: Date.now(), y: p.y, step: plannedStep(), pos: `${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)}`, fy, drop: world.dropAt(bot, p.x, fy, p.z), v: `${v.x.toFixed(2)},${v.y.toFixed(2)},${v.z.toFixed(2)}`, keys: Object.keys(c).filter(k => c[k]).join('+'), steered: !!(bot.pathfinder && bot.pathfinder.isMoving && bot.pathfinder.isMoving()), active: active && active.kind, hurt: lastHurtAt && Date.now() - lastHurtAt < 2000 ? Date.now() - lastHurtAt : 0 }
+    takeoff = { at: Date.now(), y: p.y, hs: Math.hypot(v.x, v.z).toFixed(2), step: plannedStep(), pos: `${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)}`, fy, drop: world.dropAt(bot, p.x, fy, p.z), v: `${v.x.toFixed(2)},${v.y.toFixed(2)},${v.z.toFixed(2)}`, keys: Object.keys(c).filter(k => c[k]).join('+'), steered: !!(bot.pathfinder && bot.pathfinder.isMoving && bot.pathfinder.isMoving()), active: active && active.kind, hurt: lastHurtAt && Date.now() - lastHurtAt < 2000 ? Date.now() - lastHurtAt : 0 }
   }
   wasGround = g
 }
@@ -703,7 +709,7 @@ function edgeBrake () {
     if (least > world.SAFE_DROP && hull(p.x, p.z) <= world.SAFE_DROP) {
       for (const k of ['forward', 'back', 'sprint', 'jump']) if (c[k]) bot.setControlState(k, false)
       const cell = { x: Math.floor(nx), z: Math.floor(nz), drop: least }
-      if (!edgeHeld || edgeHeld.x !== cell.x || edgeHeld.z !== cell.z) log('reflex', `edge: stopped short of a ${least === Infinity ? 'bottomless' : least + '-block'} drop at ${cell.x},${y},${cell.z} (the pathfinder ran on)`)
+      if (!edgeHeld || edgeHeld.x !== cell.x || edgeHeld.z !== cell.z) { edgeStopCount++; log('reflex', `edge: stopped short of a ${least === Infinity ? 'bottomless' : least + '-block'} drop at ${cell.x},${y},${cell.z} (the pathfinder ran on)`) }
       edgeHeld = cell
       return true
     }
@@ -718,7 +724,7 @@ function edgeBrake () {
     if (drop <= world.SAFE_DROP || drop <= here) continue
     for (const k of ['forward', 'back', 'sprint', 'jump']) if (c[k]) bot.setControlState(k, false)
     const cell = { x: Math.floor(x), z: Math.floor(z), drop }
-    if (!edgeHeld || edgeHeld.x !== cell.x || edgeHeld.z !== cell.z) log('reflex', `edge: stopped short of a ${drop === Infinity ? 'bottomless' : drop + '-block'} drop at ${cell.x},${y},${cell.z}${active ? ' (' + active.kind + ')' : ''}`)
+    if (!edgeHeld || edgeHeld.x !== cell.x || edgeHeld.z !== cell.z) { edgeStopCount++; log('reflex', `edge: stopped short of a ${drop === Infinity ? 'bottomless' : drop + '-block'} drop at ${cell.x},${y},${cell.z}${active ? ' (' + active.kind + ')' : ''}`) }
     edgeHeld = cell
     return true
   }
@@ -726,6 +732,9 @@ function edgeBrake () {
   return false
 }
 function release () { edgeHeld = null } // (the sneak itself: setGuardSneak)
+// (a count of edge stops, for the walker: a leg that ends against a drop is the ground saying "not this way")
+let edgeStopCount = 0
+function edgeStops () { return edgeStopCount }
 function edgeAhead () { return edgeHeld }
 
 function tick () {
@@ -816,6 +825,29 @@ function tick () {
     if (best) steerTo(best, { jump: true, sprint: true }); else { bot.setControlState('jump', true); bot.setControlState('back', true) }
     return
   } else if (active && active.kind === 'lava') return clearActive()
+
+  // 2b. POWDER SNOW: no collision box - a grove's snow patch the bot sinks into, freezing (a slowdown, then 1 hp every 2s)
+  //  and hard to jump out of. The planner avoids it, the walk can still slip in (a drop, a shove). Out: the powder at
+  //  feet and head is broken - it breaks at once by hand and drops nothing - and the body settles on the ground under it
+  //  and walks on (2026-09-28, before the first expedition into a grove)
+  {
+    // (every column the 0.6-wide hitbox overlaps - a body straddling into the next cell freezes too; audit 2026-09-28)
+    const cells = []; const seen = new Set()
+    for (const [ox, oz] of [[-0.3, -0.3], [0.3, -0.3], [-0.3, 0.3], [0.3, 0.3]]) {
+      for (const dy of [0, 1]) {
+        const x = Math.floor(me.x + ox); const y = Math.floor(me.y + dy); const z = Math.floor(me.z + oz); const k = `${x},${y},${z}`
+        if (seen.has(k)) continue; seen.add(k)
+        const b = world.at(bot, x, y, z); if (b && b.name === 'powder_snow') cells.push(b)
+      }
+    }
+    if (cells.length) {
+      if (!active || active.kind !== 'powder') { setActive('powder', 'breaking out of powder snow'); log('reflex', `in powder snow at ${Math.floor(me.x)},${Math.floor(me.y)},${Math.floor(me.z)} (hp ${Math.round(bot.health)}) - breaking out`) }
+      try { bot.pathfinder.setGoal(null) } catch {}
+      busy = true
+      ;(async () => { for (const b of cells.sort((p, q) => q.position.y - p.position.y)) await require('./act').digBlock(bot, b).catch(() => false) })().finally(() => { busy = false })
+      return
+    } else if (active && active.kind === 'powder') return clearActive()
+  }
 
   const hs = hostiles(24)
   const hp = bot.health
@@ -1062,4 +1094,4 @@ function setEnabled (on) { enabled = !!on; if (!on) clearActive() }
 function underMs () { return submergedSince ? Date.now() - submergedSince : 0 }
 function airLeftMs () { return airMs }
 
-module.exports = { install, holdNoSneak, active: isActive, info, nearestThreat, lastHurt, hurtLine, edgeAhead, hostiles, onSurface, canSee, NEVER_MELEE, waitClear, setEnabled, findAir, HOSTILE, RANGED, bowReady, startDive, endDive, diveBroken, underMs, airLeftMs, AIR_MS, DIVE_HARD_MS }
+module.exports = { edgeStops, install, holdNoSneak, active: isActive, info, nearestThreat, lastHurt, hurtLine, edgeAhead, hostiles, onSurface, canSee, NEVER_MELEE, waitClear, setEnabled, findAir, HOSTILE, RANGED, bowReady, startDive, endDive, diveBroken, underMs, airLeftMs, AIR_MS, DIVE_HARD_MS }
