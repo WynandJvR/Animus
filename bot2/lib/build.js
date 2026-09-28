@@ -538,7 +538,10 @@ function detachedItems (todo, bot) {
 function lowestStructural (todo, bot, det = bot ? detachedItems(todo, bot) : null) {
   let m = Infinity
   for (const c of todo) {
-    if (c.attach || c.follows || infillCell(c) || (cellFails.get(key(c)) || {}).n >= 1 || c.y >= m) continue
+    // (a foundation cell anchors nothing: the rim's cells on the trench are slow and many rest, and anchored they held the
+    //  whole castle to its lowest layers - 3 blocks an hour, the builder placing one and "waiting", 2026-09-28. They go in
+    //  whenever they can - the doable set takes them outside the band - from their stands outside)
+    if (c.attach || c.follows || c.foundation || infillCell(c) || (cellFails.get(key(c)) || {}).n >= 1 || c.y >= m) continue
     // (and a falling block over a cell still waiting - powder over a brick gap - can't go in either: it anchoring would pin
     //  the band a layer up instead of at the gap; audit 2026-09-28)
     if (det && (det.has(stepItem(bot, c)) || fallsIn(bot, c, stepItem(bot, c)))) continue
@@ -1106,13 +1109,16 @@ async function buildStep (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     }
     // the lowest two layers of what we HAVE the blocks for: 24 missing glass panes in a wall no longer hold up
     // every brick above them (the windows go in when the glass comes)
-    const structural = todo.filter(c => !c.attach && has(c) && !det.has(stepItem(bot, c)) && !fallsIn(bot, c, stepItem(bot, c)))
+    const structural = todo.filter(c => !c.attach && !c.foundation && has(c) && !det.has(stepItem(bot, c)) && !fallsIn(bot, c, stepItem(bot, c)))
+    const footing = todo.filter(c => c.foundation && !c.attach && has(c)) // (the foundation: outside the band, lowest first)
     const attached = todo.filter(c => c.attach && has(c) && supportThere(bot, c))
     const minY = structural.length ? Math.min(...structural.map(c => c.y)) : Infinity
     // no more than 3 layers above the lowest unfinished cell: walls rise together, nothing floats far up
     let doable = minY <= lowestAll + 3 ? structural.filter(c => c.y <= minY + 1) : []
     // a door goes in once its floor stands (and its own two cells are ours to clear)
     doable = doable.filter(c => !c.twin || supportThere(bot, c)).concat(attached)
+    // (the foundation's cells whose column below them is laid already: the wall rises bottom-up, never a block in the air)
+    doable = doable.concat(footing.filter(c => { const b = world.at(bot, c.x, c.y - 1, c.z); return b && world.isSolid(b) }))
     // NEVER SEAL AN EMPTY CELL: a block placed straight over a cell still waiting for its own (coal not yet had), when that
     // cell has no other open side, closes the last way to it - the plank floor went in over the base layer's coal blocks
     // and campfires, and they failed "could not get within reach" every step after (2026-09-28). Covered only once it is
