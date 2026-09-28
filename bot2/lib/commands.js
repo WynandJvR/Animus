@@ -174,9 +174,11 @@ function make (bot, director) {
         const j = build.getJob()
         if (!j) return 'no build job'
         // (the state compared is only what makes the look: facing/half/type/axis/hanging - build.wantOf)
-        const miss = j.cells.filter(c => build.cellDone(bot, c) !== true).map(c => { const b = world.at(bot, c.x, c.y, c.z); let p = ''; try { const bp = b ? b.getProperties() : {}; p = build.KEY_PROPS.filter(k => bp[k] != null).map(k => `${k}=${bp[k]}`).join(',') } catch {} ; const w = build.wantOf(c); return `${c.x},${c.y},${c.z} want ${c.name}${w ? JSON.stringify(w) : ''} have ${b ? b.name + (p ? '[' + p + ']' : '') : 'unloaded'}` })
+        // (missing y1 y2 - only those layers, 400 listed: the first 60 of 11,000 said nothing of the layers above)
+        const y1 = a.length >= 2 ? num(0) : -Infinity; const y2 = a.length >= 2 ? num(1) : Infinity; const lim = a.length >= 2 ? 400 : 60
+        const miss = j.cells.filter(c => c.y >= y1 && c.y <= y2 && build.cellDone(bot, c) !== true).map(c => { const b = world.at(bot, c.x, c.y, c.z); let p = ''; try { const bp = b ? b.getProperties() : {}; p = build.KEY_PROPS.filter(k => bp[k] != null).map(k => `${k}=${bp[k]}`).join(',') } catch {} ; const w = build.wantOf(c); return `${c.x},${c.y},${c.z} want ${c.name}${w ? JSON.stringify(w) : ''} have ${b ? b.name + (p ? '[' + p + ']' : '') : 'unloaded'}` })
         const s = build.survey(bot, 0, { full: true })
-        return JSON.stringify({ missing: miss.length, cells: miss.slice(0, 60), snapshot: s.snapshot, strayFiller: s.scaffold.length, stray: s.scaffold.slice(0, 80).map(p => `${p.name}@${p.x},${p.y},${p.z}`), holes: s.holes.length, complete: build.complete(bot) })
+        return JSON.stringify({ missing: miss.length, cells: miss.slice(0, lim), snapshot: s.snapshot, strayFiller: s.scaffold.length, stray: s.scaffold.slice(0, 80).map(p => `${p.name}@${p.x},${p.y},${p.z}`), holes: s.holes.length, complete: build.complete(bot) })
       }
       // scaffold - what the bot left standing round the build: the diff against the site snapshot (blocks where
       // the site was open that are filler or crafted, not cells of the build), and the holes left in the ground

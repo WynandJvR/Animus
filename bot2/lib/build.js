@@ -1147,7 +1147,12 @@ async function buildStep (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     }
     doable = doable.filter(c => !sealsBelow(c))
     waiting = missingItem()
-    if (!doable.length) { profLog(); if (!placed) log('build', `nothing doable: lowest structural y${lowestAll}, ${todo.length} todo, ${structural.length} structural in hand (min y${minY}), ${attached.length} attached ready, waiting on ${waiting}`); return { placed, blockedOn: waiting, done: false } }
+    if (!doable.length) {
+      // (the band as it ended the step - which layer anchors it, and by which cell: a step that ends "waiting on X" after
+      //  a few blocks said nothing of what held the band down, 2026-09-28)
+      const anchor = todo.find(c => !c.attach && !c.follows && !c.foundation && !infillCell(c) && !((cellFails.get(key(c)) || {}).n >= 1) && c.y === lowestAll && !det.has(stepItem(bot, c)) && !fallsIn(bot, c, stepItem(bot, c)))
+      if (placed) log('build', `step ended: band anchored at y${lowestAll}${anchor ? ' by ' + stepItem(bot, anchor) + '@' + anchor.x + ',' + anchor.y + ',' + anchor.z + (has(anchor) ? ' (in hand)' : ' (not in hand)') : ''}, ${structural.length} structural in hand (min y${minY}), ${todo.length} todo`)
+      profLog(); if (!placed) log('build', `nothing doable: lowest structural y${lowestAll}, ${todo.length} todo, ${structural.length} structural in hand (min y${minY}), ${attached.length} attached ready, waiting on ${waiting}`); return { placed, blockedOn: waiting, done: false } }
     const me = bot.entity.position
     // cells that can be clicked right now first; one whose every face is another unbuilt cell of this
     // build waits for its neighbours (trying it costs ~20s of failed placing, and a wall of x-axis logs
