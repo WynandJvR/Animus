@@ -341,6 +341,14 @@ function plansFor (c) {
     return [first].concat(FACE_FREE_RE.test(c.name) ? ALL_FACES.filter(o => !o.every((v, i) => v === first.off[i])).map(off => withYaw({ off })) : [])
   }
   if (CLICKED_FACING_RE.test(c.name) && DIRS[w.facing]) return [withYaw({ off: DIRS[w.facing].map(v => -v) })]
+  // a grindstone hangs on nothing, but its state comes from the face clicked all the same: vanilla puts the clicked face's
+  // opposite FIRST among the looking directions (BlockPlaceContext), so a side face gave a wall grindstone whatever
+  // the pitch - "came out face=wall" three times, the stone dug out and crafted again each time (2026-09-28)
+  if (FACE_ATTACHED_RE.test(c.name) && !c.attach && w.face) {
+    if (w.face === 'floor') return [withYaw({ off: [0, -1, 0] })]
+    if (w.face === 'ceiling') return [withYaw({ off: [0, 1, 0] })]
+    return DIRS[w.facing] ? [withYaw({ off: DIRS[w.facing].map(v => -v) })] : []
+  }
   if (c.name === 'hopper' && DIRS[w.facing]) return w.facing === 'down' ? [{ off: [0, -1, 0] }, { off: [0, 1, 0] }] : [{ off: DIRS[w.facing].slice() }]
   if (w.axis && !axisRelaxed(c) && failsOf(c) < 3) {
     if (w.axis === 'x') return [{ off: [1, 0, 0] }, { off: [-1, 0, 0] }]
@@ -379,8 +387,11 @@ function predict (c, plan, playerYaw, playerPitch) {
   if (n === 'hopper') out.facing = face[1] ? 'down' : OPP[faceDir]
   if (TRAPDOOR_RE.test(n)) out.facing = face[1] ? (look ? OPP[look] : undefined) : faceDir
   if (SIDE_ATTACHED_RE.test(n)) out.facing = WALL_LOOK_RE.test(n) ? (look6 && !DIRS[look6][1] ? OPP[look6] : undefined) : faceDir
-  if (FACE_ATTACHED_RE.test(n) && look6) {
-    if (DIRS[look6][1]) { out.face = look6 === 'up' ? 'ceiling' : 'floor'; out.facing = look } else { out.face = 'wall'; out.facing = OPP[look6] }
+  // (the clicked face's opposite is the first looking direction - BlockPlaceContext - and every face-attached thing
+  //  survives on what was clicked, so it decides: the look gives only a floor/ceiling one's facing)
+  if (FACE_ATTACHED_RE.test(n)) {
+    const first = OPP[faceDir]
+    if (DIRS[first][1]) { out.face = first === 'up' ? 'ceiling' : 'floor'; if (look) out.facing = look } else { out.face = 'wall'; out.facing = faceDir }
   }
   if (w.rotation != null && yaw != null) out.rotation = rotationOfYaw(yaw)
   if (LANTERN_RE.test(n)) out.hanging = pitch != null ? String(pitch > 0) : (face[1] === -1 ? 'true' : 'false')
@@ -963,7 +974,11 @@ async function placeCell (bot, c, j = job) {
   }
   if (cellDone(bot, c) !== true && c.want && c.want.open != null) {
     const b0 = bot.blockAt(pos); let open = null; try { open = String(b0.getProperties().open) } catch {}
-    if (open != null && open !== c.want.open) { try { await bot.activateBlock(b0); await act.sleep(300) } catch {} }
+    // (through useOn: a raw activateBlock under the ledge crouch was a sneaking click that opened nothing - trapdoors
+    //  left shut, taken out and placed again, 2026-09-28. A gate turns to the opener's look when opened from its
+    //  front, so it is opened looking the way it faces)
+    const gate = /_fence_gate$/.test(c.name) && DIRS[c.want.facing] && !DIRS[c.want.facing][1]
+    if (open != null && open !== c.want.open) await act.useOn(bot, pos, null, { accept: b => String(propsOf(b).open) === c.want.open, allowZones: ['build', 'base'], yaw: gate ? yawOf(c.want.facing) : null })
   }
   if (cellDone(bot, c) === true) return true
   // placed, but not what the blueprint shows: out again (our own cell), and the failure counts

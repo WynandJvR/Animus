@@ -319,7 +319,7 @@ async function place (bot, pos, itemName, { faceHint = null, plans = null, accep
 // itemName null: the block itself is used, whatever is in hand (a full composter emptied of its bone meal).
 // The one right-click on a block for every caller: a raw activateBlock while the edge guard held sneak was a sneaking
 // click - shears on a pumpkin or a nest and a composter's layer came to "+0" (2026-09-27).
-async function useOn (bot, pos, itemName, { accept, face = 'up', allowZones = [], timeoutMs = 15000, noWalk = false } = {}) {
+async function useOn (bot, pos, itemName, { accept, face = 'up', allowZones = [], timeoutMs = 15000, noWalk = false, yaw = null } = {}) {
   const target = new Vec3(pos.x, pos.y, pos.z)
   const t0 = Date.now()
   const cancelled = control.token()
@@ -344,7 +344,9 @@ async function useOn (bot, pos, itemName, { accept, face = 'up', allowZones = []
       if (held) await bot.equip(held, 'hand')
       bot.setControlState('sneak', false)
       const up = face !== 'down'
-      await bot.lookAt(target.offset(0.5, up ? 1 : 0, 0.5), true)
+      // (`yaw`: the look the use takes its direction from - a fence gate opened turns to it - else straight at the face)
+      const aim = target.offset(0.5, up ? 1 : 0, 0.5)
+      if (yaw != null) { const e = bot.entity.position.offset(0, bot.entity.eyeHeight || 1.62, 0); const d = aim.minus(e); await bot.look(yaw, Math.atan2(d.y, Math.hypot(d.x, d.z)), true) } else await bot.lookAt(aim, true)
       await ticks(bot, 2)
       await bot.activateBlock(b, new Vec3(0, up ? 1 : -1, 0), new Vec3(0.5, up ? 1 : 0, 0.5))
     } catch (e) { lastErr = e.message } finally { letGo() }
