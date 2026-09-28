@@ -717,6 +717,9 @@ move.setProtector((block, purpose) => {
   for (const j of allJobs()) {
     const c = j.index.get(key(block.position))
     if (!c || c.clear) continue
+    // (a FILL never goes into a cell of the build, placed or not: the fill's target is air, and "finished" was never the
+    //  question - dirt in a cell still waiting for its block is a block in the castle's way; audit 2026-09-28)
+    if (purpose === 'fill') return true
     if (purpose === 'dig' && c.door && j !== job) continue
     if (partOk(c, block.name)) return true
   }
