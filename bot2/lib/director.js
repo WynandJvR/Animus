@@ -484,6 +484,8 @@ function decide () {
     // a farm to walk: one soil level, nothing but crops on it (the operator asked for it clean and flat)
     if (farm.farm() && farm.farmIsHome(bot) && farm.farm().water && !farm.waterNeedsFixing(bot) && world.phase(bot) === 'day' && !farm.farmLevel(bot) && !cooling('levelFarm')) return { name: 'levelFarm', why: `the farm is uneven or cluttered (${farm.levelWork(bot).length} fixes)` }
     // the yard round the safehouse: holes filled, stray blocks down (a pit by the door stood for days)
+    // (a stray shaft on the grounds that someone fell into: capped flush, before anything else here - see reflex's fall line)
+    if (world.phase(bot) === 'day' && (mem.get().shaftsToFill || []).length && !cooling('fillShaft')) return { name: 'fillShaft', why: `${mem.get().shaftsToFill.length} hole${mem.get().shaftsToFill.length > 1 ? 's' : ''} on the grounds that I fell into - capping ${mem.get().shaftsToFill.length > 1 ? 'them' : 'it'}` }
     if (world.phase(bot) === 'day' && hut.complete(bot) && !cooling('levelYard')) { const n = hut.yardWork(bot).length; if (n) return { name: 'levelYard', why: `the yard has ${n} holes or stray blocks` } }
     // a watered plot still at its starting size: widen it to everything the water reaches
     if (farm.farm() && farm.farmIsHome(bot) && farm.farm().water && farm.farm().cells.length < 60 && farm.farmLevel(bot) && farm.fullPlot(bot, farm.farm()).length > farm.farm().cells.length && inv.count(bot, 'wheat_seeds') + base.bankCount('wheat_seeds') >= 8 && !cooling('farm')) return { name: 'farm', why: `the farm is ${farm.farm().cells.length} cells - widening it to all the water reaches` }
@@ -766,6 +768,18 @@ const TASKS = {
   async lightBase () { return lights.lightBase(bot, { shouldStop: dayStop }) },
   async hydrate () { return farm.hydrate(bot, { shouldStop: dayStop }) },
   async levelFarm () { return farm.level(bot, { shouldStop: dayStop }) },
+  async fillShaft () {
+    const l = (mem.get().shaftsToFill || []).slice()
+    let done = 0
+    for (const c of l) {
+      if (dayStop()) break
+      // (the cap: the cell at ground level and the one under it, flush with the ground round it - never a clear)
+      await require('./ground').prepare(bot, { x1: c.x, x2: c.x, z1: c.z, z2: c.z, groundY: c.y, height: 0, allowZones: ['base', 'orchard', 'farm'] }, { shouldStop: dayStop, label: 'hole cap' }).catch(() => 0)
+      const top = world.at(bot, c.x, c.y, c.z)
+      if (top && world.isSolid(top)) { done++; mem.update(m => { m.shaftsToFill = (m.shaftsToFill || []).filter(q => !(q.x === c.x && q.z === c.z)) }); log('dir', `capped the hole at ${c.x},${c.y},${c.z}`) }
+    }
+    return done > 0
+  },
   async levelYard () { return (await hut.levelYard(bot, { shouldStop: dayStop })) > 0 },
   async fixWater () { return farm.fixWater(bot, { shouldStop: dayStop }) },
   async harvest () { return farm.harvest(bot, { shouldStop: dayStop }) },

@@ -627,6 +627,7 @@ function jumpGuard () {
 }
 let takeoff = null; let wasGround = true; let fell = null; let lastPath = null
 let roofDug = null // (the roof block the air reflex last dug - its log line once a block)
+let lastServerVel = 0 // (when the server last set our velocity - knockback, a push: the fall line's witness)
 // the pathfinder's next step as planned (where to, what it meant to break and place to get there)
 function plannedStep () {
   if (!lastPath || !lastPath.length || !bot.entity) return ''
@@ -634,8 +635,10 @@ function plannedStep () {
   const b = x => x.map(q => `${q.x},${q.y},${q.z}`).join(' ')
   return ` next node ${n.x},${n.y},${n.z}${n.toBreak && n.toBreak.length ? ' break ' + b(n.toBreak) : ''}${n.toPlace && n.toPlace.length ? ' place ' + b(n.toPlace) : ''}${n.parkour ? ' parkour' : ''}`
 }
+const recentKeys = [] // (the keys held over the last 3 ticks: a press let go on the takeoff tick itself read "-")
 function noteTakeoff () {
   if (!bot.entity) return
+  { const c0 = bot.controlState || {}; recentKeys.push(Object.keys(c0).filter(k => c0[k])); if (recentKeys.length > 3) recentKeys.shift() }
   const g = bot.entity.onGround
   // landed: a fall that hurts keeps its takeoff (the death's own bounce is a takeoff too, and overwrote it)
   if (!wasGround && g && takeoff && takeoff.y - bot.entity.position.y > world.SAFE_DROP) {
@@ -643,12 +646,35 @@ function noteTakeoff () {
     // (a fall that hurts and did not kill left no trace of what walked us off - a 17-block drop the edge guard had just
     //  refused, hp 20 -> 6, 2026-09-28: the takeoff, said on landing)
     const t = fell
-    if (t.fall > world.SAFE_DROP) log('vital', `fell ${t.fall} blocks from ${t.pos} (floor y${t.fy}, drop there ${t.drop}) v=${t.v} (${t.hs} b/t across) keys=${t.keys || '-'} ${t.steered ? 'pathfinder steering' : 'no pathfinder'}${t.step}${t.active ? ', reflex ' + t.active : ''}${t.hurt ? ', hurt ' + t.hurt + 'ms before' : ''}`)
+    // (a fall that hurt, on the home grounds: the column is a hole there to fill - two falls into one stray shaft by the
+    //  orchard in an hour; a player fills it after the first. The director's fillShaft caps it flush; audit 2026-09-28)
+    try {
+      const lp = bot.entity.position
+      const lx = Math.floor(lp.x); const lz = Math.floor(lp.z); const ly = Math.floor(lp.y)
+      if (t.fall > world.SAFE_DROP && require('./gather').onGrounds({ x: lx, y: t.fy, z: lz })) {
+        // (a SHAFT only - walled round: at least two levels between the landing and the floor it left with 3+ of the 4
+        //  sides solid (a pit up to 2 wide). Off a ledge into open ground is an edge: a cap there is a dirt stub in the
+        //  air over our own base; audit 2026-09-28)
+        let walled = 0
+        for (let y = ly + 1; y < t.fy; y++) { const n = [[1, 0], [-1, 0], [0, 1], [0, -1]].filter(([dx, dz]) => world.isSolid(world.at(bot, lx + dx, y, lz + dz))).length; if (n >= 3) walled++ }
+        const mine = (require('./memory').get().mine || {}).entrance
+        const nearMine = mine && Math.abs(mine.x - lx) <= 2 && Math.abs(mine.z - lz) <= 2 // (never our own stairwell: the mine's mouth)
+        const cellB = world.at(bot, lx, t.fy - 1, lz)
+        const guarded = cellB && require('./move').isProtected(cellB, 'fill')
+        if (walled >= 2 && !nearMine && !guarded) {
+          const cell = { x: lx, y: t.fy - 1, z: lz }
+          require('./memory').update(m => { const l = m.shaftsToFill = m.shaftsToFill || []; if (!l.some(q => q.x === cell.x && q.z === cell.z)) { l.push(cell); if (l.length > 8) l.shift() } })
+          log('vital', `the hole at ${lx},${t.fy - 1},${lz} is a shaft on the grounds - it will be capped`)
+        } else log('vital', `fell ${nearMine ? 'into the mouth of the mine' : guarded ? 'onto protected ground' : 'off an edge, not into a shaft'} at ${lx},${ly},${lz} - nothing to fill`)
+      }
+    } catch {}
+    if (t.fall > world.SAFE_DROP) log('vital', `fell ${t.fall} blocks from ${t.pos} (floor y${t.fy}, drop there ${t.drop}) v=${t.v} (${t.hs} b/t across${t.near ? ', beside ' + t.near : ''}${t.vel != null && t.vel < 2000 ? ', pushed by the server ' + t.vel + 'ms before' : ''}) keys=${t.keys || '-'} ${t.steered ? 'pathfinder steering' : 'no pathfinder'}${t.step}${t.active ? ', reflex ' + t.active : ''}${t.hurt ? ', hurt ' + t.hurt + 'ms before' : ''}`)
   }
   if (wasGround && !g) {
     const p = bot.entity.position; const v = bot.entity.velocity; const c = bot.controlState || {}
     const fy = Math.floor(p.y + 0.01)
-    takeoff = { at: Date.now(), y: p.y, hs: Math.hypot(v.x, v.z).toFixed(2), step: plannedStep(), pos: `${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)}`, fy, drop: world.dropAt(bot, p.x, fy, p.z), v: `${v.x.toFixed(2)},${v.y.toFixed(2)},${v.z.toFixed(2)}`, keys: Object.keys(c).filter(k => c[k]).join('+'), steered: !!(bot.pathfinder && bot.pathfinder.isMoving && bot.pathfinder.isMoving()), active: active && active.kind, hurt: lastHurtAt && Date.now() - lastHurtAt < 2000 ? Date.now() - lastHurtAt : 0 }
+    const near = Object.values(bot.entities).filter(e => e && e !== bot.entity && e.position && e.position.distanceTo(p) < 1.5).map(e => e.name || e.type)
+    takeoff = { at: Date.now(), y: p.y, hs: Math.hypot(v.x, v.z).toFixed(2), near: near.join('+'), vel: lastServerVel ? Date.now() - lastServerVel : null, step: plannedStep(), pos: `${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)}`, fy, drop: world.dropAt(bot, p.x, fy, p.z), v: `${v.x.toFixed(2)},${v.y.toFixed(2)},${v.z.toFixed(2)}`, keys: [...new Set(recentKeys.flat().concat(Object.keys(c).filter(k => c[k])))].join('+'), steered: !!(bot.pathfinder && bot.pathfinder.isMoving && bot.pathfinder.isMoving()), active: active && active.kind, hurt: lastHurtAt && Date.now() - lastHurtAt < 2000 ? Date.now() - lastHurtAt : 0 }
   }
   wasGround = g
 }
@@ -1136,6 +1162,8 @@ function tick () {
 
 function install (b) {
   bot = b
+  // (the server setting our velocity - knockback, an explosion, a push: noted for the fall line)
+  try { bot._client.on('entity_velocity', p => { if (bot.entity && p && p.entityId === bot.entity.id) lastServerVel = Date.now() }) } catch {}
   if (bot.inventory && bot.inventory.on) bot.inventory.on('updateSlot', () => { dressFailed = null })
   bot.on('entityHurt', (e, source) => {
     if (e !== bot.entity) return

@@ -93,6 +93,12 @@ function make (bot, director) {
         const p = a.length >= 3 ? { x: num(0), y: num(1), z: num(2) } : world.feetPos(bot)
         base.setHome(p); return `home set ${move.fmt(p)}`
       }
+      case 'fillhole': { // fillhole x y z - queue a hole on the grounds to be capped at that level (director fillShaft)
+        const [x, y, z] = [0, 1, 2].map(i => num(i))
+        if (![x, y, z].every(Number.isFinite)) return 'fillhole x y z'
+        mem.update(m => { const l = m.shaftsToFill = m.shaftsToFill || []; if (!l.some(q => q.x === x && q.z === z)) l.push({ x, y, z }) })
+        return `queued the hole at ${x},${y},${z} to be capped`
+      }
       case 'unmark': { // unmark <flag> - clear a remembered verdict the bot reached wrongly (a dusk-cut trip marked iron "dry")
         const OK = ['ironTripDry', 'buildWaiting', 'wantBoat']
         if (!OK.includes(a[0])) return `usage: unmark ${OK.join('|')}`
