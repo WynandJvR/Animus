@@ -823,7 +823,10 @@ async function pillarTo (bot, c, first) {
   for (const f of feet.slice(0, 3)) {
     // (the site walker: it goes in through the build's doors - the nave is walled round)
     const r = await goSite(bot, new goals.GoalBlock(f.x, f.y, f.z), 'to the foot of a pillar')
-    if (!r.ok) { if (move.isVerdict(r)) badFeet.set(key(f), Date.now()); log('build', `pillar for ${c.name} at ${move.fmt(c)}: couldn't reach its foot ${move.fmt(f)} (${r.why})`); continue }
+    // (one foot that could not be reached is the verdict for the rest: they lie in the same ground - three stuck walks of 8s
+    //  a cell, the south wall's high cells cost 24-32s each and more than half the step's time, 2026-09-28. The cell is
+    //  left for a later step from somewhere else)
+    if (!r.ok) { if (move.isVerdict(r)) badFeet.set(key(f), Date.now()); log('build', `pillar for ${c.name} at ${move.fmt(c)}: couldn't reach its foot ${move.fmt(f)} (${r.why})`); if (/stuck|noPath/.test(r.why || '')) break; continue }
     await ensureScaffold(bot, 16, { shouldStop: stepStop })
     // (the planner let go of first: its goal left standing, it set the controls every tick and the tower's jump never
     //  held - "towered to y120" 24 times in an hour on the nave floor, where the same tower rose in the yard, 2026-09-27)
