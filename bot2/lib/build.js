@@ -1225,33 +1225,45 @@ function ensureFoundation (bot) {
   for (const c of job.cells) {
     if (c.y !== y1 || c.clear) continue
     const col = []
-    let ok = true
+    let ok = true; let lastKind = null // (the bottom cell's kind: a torch goes on dry ground only)
     for (let y = y1 - 1; ; y--) {
       const k = kindAt(bot, c.x, y, c.z)
       if (!k) return false // (a column not loaded: taken whole or not at all)
       if (/^lava$/.test(k.name)) { ok = false; break }
       if (k.boundingBox === 'block' && !world.LEAF_RE.test(k.name) && !ledger.has(`${c.x},${y},${c.z}`)) break
       if (y1 - y > FOUNDATION_MAX) { ok = false; break }
-      col.push(y)
+      col.push(y); lastKind = k
     }
-    if (ok && col.length) cols.push({ x: c.x, z: c.z, ys: col })
+    if (ok && col.length) cols.push({ x: c.x, z: c.z, ys: col, dry: !/^(water|bubble_column)$/.test(lastKind.name) })
   }
   // THE EDGE ONLY: a one-wide wall down the rim - a column of the base with a side on anything that is not the base
   // (the outside, a courtyard) - not the whole box under it. The floor inside goes in clicked against the rim and its own
   // neighbours as any cell does; the hollow under it is closed in. A solid fill was 1,000-1,900 blocks of mining for the
   // same footing (the operator, 2026-09-28)
   const base = k2 => job.index.has(`${k2.x},${y1},${k2.z}`) && !job.index.get(`${k2.x},${y1},${k2.z}`).clear
+  // THE HOLLOW LIT: the floor over it goes in row by row for hours, and until the last cell it is a dark room under the
+  // work - monsters spawn at block light 0 by day as by night (since 1.18). A torch on its ground every 8 blocks, placed
+  // while it is still open (an attached cell: in as soon as a torch is in hand and its ground stands; audit 2026-09-28)
+  const torches = []
   for (const q of cols) {
-    if (![[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => !base({ x: q.x + dx, z: q.z + dz }))) continue
+    if (![[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => !base({ x: q.x + dx, z: q.z + dz }))) {
+      if (q.dry && (q.x - job.box.x1) % 8 === 4 && (q.z - job.box.z1) % 8 === 4) torches.push({ x: q.x, y: q.ys[q.ys.length - 1], z: q.z })
+      continue
+    }
     for (const y of q.ys) add.push({ x: q.x, y, z: q.z })
   }
   for (const p of add) {
     const cell = { x: p.x, y: p.y, z: p.z, name: 'cobblestone', props: {}, foundation: true, want: null, item: 'cobblestone', alt: FOUNDATION_BLOCKS, prefer: ['cobblestone', 'dirt'], itemAlt: FILLER_ITEMS }
     job.cells.push(cell); job.index.set(key(cell), cell)
   }
-  job.foundation = { cells: add.length }
+  const md = world.data(bot)
+  for (const p of torches) {
+    const cell = Object.assign(describe({ x: p.x, y: p.y, z: p.z, name: 'torch', props: {} }, md), { foundation: true }) // (stands on the ground under it)
+    job.cells.push(cell); job.index.set(key(cell), cell)
+  }
+  job.foundation = { cells: add.length, torches: torches.length }
   statusGen++
-  if (add.length || cols.length) log('build', `foundation: ${add.length} blocks - a wall under the rim of the base where it stands over a drop (${new Set(add.map(p => p.x + ',' + p.z)).size} of ${cols.length} columns over the drop) - laid first`)
+  if (add.length || cols.length) log('build', `foundation: ${add.length} blocks - a wall under the rim of the base where it stands over a drop (${new Set(add.map(p => p.x + ',' + p.z)).size} of ${cols.length} columns over the drop) - laid first${torches.length ? `, ${torches.length} torch${torches.length > 1 ? 'es' : ''} in the hollow under the floor` : ''}`)
   return true
 }
 // A foundation cell that can't go in is dropped, not rested: it is no part of the blueprint - sealed in under the base
