@@ -12,7 +12,7 @@ const fs = require('fs')
 const path = require('path')
 const zlib = require('zlib')
 
-const DIRS = [path.join(__dirname, '..', 'schematics'), path.join(__dirname, '..', '..', 'bot', 'schematics')]
+const DIRS = [path.join(__dirname, '..', 'schematics')]
 const EXTS = ['.schem', '.litematic', '.nbt', '.schematic']
 
 // ---- policy --------------------------------------------------------------------------------------------

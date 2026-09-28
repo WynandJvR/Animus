@@ -6,11 +6,8 @@
 const fs = require('fs')
 const path = require('path')
 
-const BOT_DIR = path.join(__dirname, '..', 'bot')
-// share the old runtime's installed packages
-module.paths.unshift(path.join(BOT_DIR, 'node_modules'))
-process.env.NODE_PATH = [path.join(BOT_DIR, 'node_modules'), process.env.NODE_PATH || ''].join(path.delimiter)
-require('module').Module._initPaths()
+// (one folder: the body, the chat gate, the config and the packages live beside main.js - the old runtime's bot/ is gone)
+const BOT_DIR = __dirname
 
 const { log } = require('./lib/log')
 process.on('uncaughtException', e => { log('crash', 'uncaught: ' + (e.stack || e.message)); })

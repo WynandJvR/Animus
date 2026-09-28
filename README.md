@@ -18,7 +18,7 @@ side can be swapped or driven by hand.
 
 ```
             ┌─────────────┐       HTTP control API        ┌──────────────┐
- brain ───► │  index.js   │ ◄──── POST /cmd, GET /state ──│  Claude (curl)│
+ brain ───► │   main.js   │ ◄──── POST /cmd, GET /state ──│  Claude (curl)│
             │  (the body) │                                │  or you       │
             │  Mineflayer │ ◄──── same API ───────────────│  brain-llm.js │
             └─────┬───────┘                                │  (local model)│
@@ -28,61 +28,35 @@ side can be swapped or driven by hand.
             └─────────────┘
 ```
 
-Under the body sit several subsystems that keep the bot alive and productive
-without the brain micromanaging it. Roughly in priority order:
+The body runs three layers:
 
-| Subsystem | What it owns |
+| Layer | What it owns |
 |---|---|
-| **Survival scheduler** | Picks the current job (survive ▸ preserve ▸ progress ▸ idle) and decides whether an incoming command may interrupt it. Pure decision core + a tick that dispatches it. |
-| **Reflexes** | Fast, always-on responses the brain never sees: eat, flee/defend, drown escape, night shelter, auto-torch, stuck recovery. |
-| **Navigation** | One entry point for all movement, with a recovery ladder for when pathfinding wedges (nudge, detour, dig-out, waypoint replay). |
-| **Provisioning** | Turns a bill of materials into gather ▸ craft ▸ smelt work and executes it — mining, farming, hunting, fishing, banking. |
-| **Resource model** | Single source of truth for what the bot holds, in pack *and* in its chests. Provisioning asks it before gathering anything. |
-| **World memory** | Persistent map of the bot's own structures, resource sites, routes, and hazards, so it doesn't re-learn the world every session. |
-| **Building** | Places real blocks from inventory, one at a time, like a survival player — including from `.schem` schematics. |
+| **Reflexes** (`lib/reflex.js`, every tick) | Survival: eat, fight or flee, air and drowning, edges and falls, digging in. They own the body whenever it is in danger. |
+| **Director** (`lib/director.js`) | One task at a time, chosen from the live world: night, graves, gear, food, the farm, supply trips and expeditions, the build. |
+| **Skills** (`lib/*.js`) | Walking, digging and placing, crafting, gathering, mining, smelting, farming, shelter, the base, and building from a blueprint. |
 
 The bot builds **physically in survival**: it acquires its own materials and
 places every block by hand. No `/give`, no creative spawn, no `/fill` for
-structures. That constraint is the point — see [NOTES.md](NOTES.md).
+structures.
 
 ## Layout
 
 ```
 animus/
-├── testserver/        isolated Paper 1.21.11 test server (localhost, offline-mode, :25599)
-│   ├── start.sh       small heap, no pre-touch - won't disturb a live server
-│   └── server.properties
-├── bot/
-│   ├── index.js           the body: Mineflayer, reflexes, scheduler tick, HTTP API (:3001)
-│   ├── index-bedrock.js   alternative body over the Bedrock protocol (Geyser/Floodgate)
-│   ├── commands.js        command dispatch + action layer
-│   ├── brain-llm.js       optional local-model driver (llama.cpp / Ollama)
-│   ├── command.gbnf       llama.cpp grammar - forces valid JSON commands
-│   ├── access.js          operator allowlist + "is this addressed to me?" logic
-│   ├── config.example.json  copy to config.json (gitignored - holds your server address)
-│   │
-│   ├── scheduler.js       which job runs now; may a command interrupt it
-│   ├── arbiter.js         survive-over-progress authority
-│   ├── planner.js         state-driven goal re-planning
-│   ├── supervise.js       watchdog / liveness
-│   │
-│   ├── navigate.js        THE navigation entry point + recovery ladder
-│   ├── nav-leg.js  nav-profile.js  route-mem.js  pocket-escape.js  los.js
-│   │
-│   ├── provision.js       gather/craft/smelt executor (mining, farming, banking)
-│   ├── resources.js       single source of truth for pack + chest holdings
-│   ├── mining.js  farm.js  food.js  shelter.js  maintain.js  restock.js
-│   │
-│   ├── schematic.js       physical survival building from .schem files
-│   ├── scaffold.js  pathfix.js  buildorder.js  hut-model.js
-│   └── memory.js  explore.js  orient.js  pov.js  cycle-detect.js  loghistory.js
-├── start-lab.sh       bring the whole lab up (test server + bot)
-└── stop-lab.sh        tear it down and free the RAM
+├── Animus.exe / animus.cs   the Windows panel: settings, start/stop, live view (build with build-exe.ps1)
+├── bot2/                    the bot
+│   ├── run.js               supervisor - keeps main.js running (Animus starts this)
+│   ├── main.js              the body: Mineflayer, the reflexes and director, HTTP API (:3001)
+│   ├── brain-llm.js         the local-model brain (llama.cpp / Ollama); command.gbnf is its grammar
+│   ├── body.js  access.js  chat-gate.js  pov.js  collision-margin.js  supervise.js ...
+│   ├── lib/                 reflexes, director and skills
+│   ├── schematics/          blueprints to build (.schem / .litematic / .nbt)
+│   ├── patch-mc262.js       Minecraft 26.2 data for the protocol libraries (re-run after npm install)
+│   └── config.example.json  copy to config.json (gitignored - holds your server address)
+├── testserver/              isolated Paper test server (localhost, offline-mode, :25599)
+└── tools/                   deploy and monitoring scripts
 ```
-
-Modules ending in `test.js` are offline unit tests - run any of them with
-`node bot/<name>test.js`. Most pure logic (planning, geometry, decision cores)
-is deliberately split out from the executors so it can be tested without a server.
 
 ## Requirements
 
@@ -94,44 +68,26 @@ is deliberately split out from the executors so it can be tested without a serve
   [llama.cpp](https://github.com/ggerganov/llama.cpp), plus a GPU with enough VRAM
   (~16 GB runs a 14B model well - see [NOTES.md](NOTES.md)).
 
-## Quickstart (local test server)
+## Quickstart
+
+On Windows, run **Animus.exe**: set the server and account on the left, press Start.
+It installs the dependencies on first run and starts the bot and the brain.
+
+By hand:
 
 ```bash
-# 1) install the bot's dependencies
-cd bot && npm install && cd ..
+# 1) install the bot's dependencies (then the 26.2 data patch)
+cd bot2 && npm install && node patch-mc262.js && cd ..
 
-# 2) get a Paper jar for the test server
-#    Download a Paper 1.21.11 build from https://papermc.io/downloads/paper
-#    and save it as:  testserver/paper-1.21.11-69.jar
+# 2) copy the example config and point it at your server
+cp bot2/config.example.json bot2/config.json
 
-# 3) start the isolated test server (offline-mode, 127.0.0.1:25599)
-cd testserver && ./start.sh           # leave running in its own terminal; back to root when done
-cd ..
-
-# 4) start the bot (joins as "Claudebot")
-cd bot && node index.js               # leave running in its own terminal
-cd ..
-
-# 5) drive it (the bot's local control API)
-curl -s http://127.0.0.1:3001/state
-curl -s -X POST http://127.0.0.1:3001/op/cmd -H 'Content-Type: application/json' -d '{"command":"status"}'
+# 3) start the bot (the supervisor keeps it running)
+cd bot2 && node run.js
 ```
 
-In-game you can also type `!house oak_planks` etc. in chat (operators only - see
-[In-game players & access](#in-game-players--access)).
-
-### One-command lab
-
-`start-lab.sh` does steps 3-4 for you (starts the test server, waits for it, then
-starts the bot, both backgrounded with logs in `logs/`). If the Paper jar is
-missing it tells you where to get one, or set `PAPER_JAR_SRC=/path/to/paper.jar`
-to copy from a local source:
-
-```bash
-./start-lab.sh     # bring the lab up
-curl -s http://127.0.0.1:3001/state   # look at it
-./stop-lab.sh      # tear it down and release the RAM
-```
+For the local test server, download a Paper jar from https://papermc.io/downloads/paper
+into `testserver/` and start it with `testserver/start.sh` first.
 
 ### Driving the bot
 
@@ -163,8 +119,8 @@ cd bot && \
 Or with llama.cpp, using the bundled grammar to force valid JSON commands:
 
 ```bash
-./llama-server -m your-model-Q4_K_M.gguf --port 8080 --grammar-file bot/command.gbnf
-cd bot && LLM_URL=http://127.0.0.1:8080/v1/chat/completions \
+./llama-server -m your-model-Q4_K_M.gguf --port 8080 --grammar-file bot2/command.gbnf
+cd bot2 && LLM_URL=http://127.0.0.1:8080/v1/chat/completions \
   GOAL="follow the player and build a small house" node brain-llm.js
 ```
 
@@ -183,14 +139,14 @@ cd bot && LLM_URL=http://127.0.0.1:8080/v1/chat/completions \
 
 ## In-game players & access
 
-Players interact with the bot two ways, on **both** bodies:
+Players interact with the bot two ways:
 
 - **Commands** - type `!<command>` in chat (`!house oak_planks`, `!come`,
   `!follow Steve`, `!tower stone 12`, `!stop`). These run only for **allowlisted
   operators**:
 
   ```json
-  // bot/config.json
+  // bot2/config.json
   "operators": ["Steve", "Alex"],   // usernames allowed to run !commands
   "floodgatePrefix": "."            // stripped before matching Bedrock names
   ```
@@ -203,52 +159,10 @@ Players interact with the bot two ways, on **both** bodies:
   in-character with `say`. Requires the brain + a local model running. Replies use
   real chat (no op needed).
 
-## Bedrock body (Geyser/Floodgate servers)
-
-`bot/index-bedrock.js` is an alternative **body** that connects over the
-**Bedrock** protocol (e.g. a Java server fronted by Geyser/Floodgate) instead of
-Java. It exposes the *same* control API (`:3001`) and command names, so the brain
-and the control API work against it unchanged - only the body differs.
-
-```bash
-# offline (no account) - for a Bedrock/Floodgate server in offline mode
-cd bot && MC_HOST=your-server.example.com MC_PORT=19132 node index-bedrock.js
-
-# with a real Microsoft account (prints a device-code link on first run)
-cd bot && MC_HOST=your-server.example.com MC_AUTH=microsoft node index-bedrock.js
-```
-
-Env: `MC_HOST`, `MC_PORT` (default 19132/UDP), `MC_USERNAME`, `MC_AUTH`
-(`offline`|`microsoft`), `BEDROCK_VERSION` (pin if auto-negotiation fails).
-
-**What works vs. what doesn't** - `bedrock-protocol` is low-level (no Mineflayer
-world model or pathfinder), so this body is deliberately honest:
-
-| Capability | Bedrock body |
-|---|---|
-| build / admin (`wall`/`tower`/`house`/`fill`/`setblock`/`give`/`gamemode`/`say`) | ✅ full - sent as server commands |
-| movement (`goto`/`come`/`follow`/`stop`) | ✅ teleport-based (`/tp`), not physical |
-| self + nearby players/entities (`state`/`entities`) | ✅ tracked from packets |
-| block perception (`scan`/`find`/`block`) | ❌ no world model - returns a clear note instead of looping the brain |
-
-For full perception + physical pathfinding, use the Java body (`index.js`); on a
-dual Java+Bedrock server the bot can run on Java while you play on Bedrock.
-
 ## Running against a live (online-mode) server
 
-The included test server is offline-mode so the bot needs no paid account. To run
-against a real online-mode server you need a Microsoft-authenticated account that
-is **op** on that server (for build/admin commands):
-
-```bash
-cd bot && MC_HOST=your-server.example.com MC_PORT=25565 MC_AUTH=microsoft \
-  MC_VERSION=1.21.11 node index.js
-```
-
-First run prints a `microsoft.com/link` device code to sign in. `index.js` reads
-`MC_HOST` / `MC_PORT` / `MC_USERNAME` / `MC_AUTH` / `MC_VERSION` (`auto` =
-autodetect; pin the version if the server disables status pings). See
-[NOTES.md §3](NOTES.md) for gotchas (e.g. don't point it at a web-map port).
+Set `auth` to `microsoft` in `bot2/config.json` (or in Animus) with an account the
+server accepts. The first run prints a `microsoft.com/link` device code to sign in.
 
 ## Notes
 
@@ -256,8 +170,8 @@ autodetect; pin the version if the server disables status pings). See
   places each block by hand from its inventory. `/fill` and `/setblock` remain only
   behind the legacy `wall`/`tower`/`house`/`clear` operator commands, not on the
   build path.
-- [NOTES.md](NOTES.md) has the full capability list, behavior-tuning lessons,
-  anti-grief rules, and the hardware/model findings.
+- [NOTES.md](NOTES.md) is the development history of the first runtime (retired) -
+  the model and hardware findings in it still hold.
 
 ## License
 

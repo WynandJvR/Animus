@@ -19,9 +19,9 @@ while [ $SECONDS -lt $end ]; do
   if [ "$ok" = yes ]; then
     [ "$(fp)" = "$FP0" ] || { echo "REFUSED: bot2 changed while the gate was shut - what is on disk now is not what this deploy was started for"; exit 3; }
     cd /c/mc-bot-lab/bot2; for f in main.js lib/*.js; do node --no-lazy --check "$f" || { echo "SYNTAX FAIL $f"; exit 1; }; done
-    NODE_PATH=/c/mc-bot-lab/bot/node_modules node /c/mc-bot-lab/tools/session-scripts/xmodcheck.js /c/mc-bot-lab/bot2 > /dev/null || { echo "CROSS-MODULE NAME MISSING - run tools/session-scripts/xmodcheck.js"; exit 1; }
+    NODE_PATH=/c/mc-bot-lab/bot2/node_modules node /c/mc-bot-lab/tools/session-scripts/xmodcheck.js /c/mc-bot-lab/bot2 > /dev/null || { echo "CROSS-MODULE NAME MISSING - run tools/session-scripts/xmodcheck.js"; exit 1; }
     PREV=$(ls -d $S/rollback/candidate-* 2>/dev/null | tail -1)
-    N=$S/rollback/candidate-$(date +%H%M); mkdir -p $N; cp -r lib main.js $N/; cp ../bot/config.json $N/
+    N=$S/rollback/candidate-$(date +%H%M); mkdir -p $N; cp -r lib main.js $N/; cp config.json $N/
     # (the last three snapshots only - each is a whole copy of bot2: thirteen in a day were 439 files, 13MB)
     ls -d $S/rollback/candidate-* 2>/dev/null | head -n -3 | xargs -r rm -rf
     echo "$(date +%Y-%m-%dT%H:%M) prev=$PREV new=$N" > $S/last-deploy.txt # (rollback target = prev: the snapshot is of the NEW code)

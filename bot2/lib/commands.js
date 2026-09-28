@@ -24,7 +24,7 @@ function make (bot, director) {
   let running = null
   // who is talking to the bot: the chat gate's own record (a message that named it, held for an answer) - ANY player
   // chat used to count, and two players talking among themselves unlocked the brain's quips for 2 minutes (the audit)
-  const chatGate = require('path').join(__dirname, '..', '..', 'bot', 'chat-gate.js')
+  const chatGate = require('path').join(__dirname, '..', 'chat-gate.js')
   function coordLeak (msg) {
     if (/-?\d{1,7}[\s,xyzXYZ:=/~]+-?\d{1,4}[\s,xyzXYZ:=/~]+-?\d{1,7}/.test(msg)) return true
     // (the graves - the deaths' spots - above all: "come get my stuff at..." is what a death invites; the farm and chests too)
@@ -75,7 +75,7 @@ function make (bot, director) {
         // refused while anyone but the operator is on; a full triple too (spawn-side bases). The operator's rule and the
         // audit, 2026-09-27 - any player can ask the brain now, and a posted base is how bases get griefed.
         if (source !== 'operator' && coordLeak(msg)) {
-          const opNames = (require(require('path').join(__dirname, '..', '..', 'bot', 'config.json')).operators || []).map(o => String(o).toLowerCase())
+          const opNames = (require(require('path').join(__dirname, '..', 'config.json')).operators || []).map(o => String(o).toLowerCase())
           const others = Object.keys(bot.players || {}).filter(n => n !== bot.username && !opNames.includes(n.toLowerCase()))
           if (others.length) return 'skipped - where the base is is not said while other players are on'
         }

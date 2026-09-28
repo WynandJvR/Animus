@@ -39,10 +39,8 @@ function start () {
   // supervisor-kill restart (else kill -> restart -> grace-ends -> kill would loop at
   // grace-speed).
   st = Object.assign(supervise.freshState(Date.now()), { lastKillAt: st.lastKillAt })
-  // RUNTIME SELECTION: bot/runtime.json {"entry": "../bot2/main.js"} runs the lean runtime; absent
-  // (or unreadable) keeps the original index.js.
-  let entry = path.join(__dirname, 'index.js')
-  try { const rt = JSON.parse(require('fs').readFileSync(path.join(__dirname, 'runtime.json'), 'utf8')); if (rt && rt.entry) entry = path.resolve(__dirname, rt.entry) } catch {}
+  // the runtime: main.js beside this supervisor (the old index.js runtime and its runtime.json switch are gone)
+  const entry = path.join(__dirname, 'main.js')
   child = spawn(process.execPath, [entry], {
     stdio: 'inherit', // pass through console - incl. the microsoft.com/link device code
     env: process.env

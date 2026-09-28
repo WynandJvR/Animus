@@ -1,4 +1,4 @@
-const NM = 'C:/mc-bot-lab/bot/node_modules/'
+const NM = 'C:/mc-bot-lab/bot2/node_modules/'
 const fs = require('fs'); const { Schematic } = require(NM + 'prismarine-schematic')
 const md = require(NM + 'minecraft-data')('26.2')
 const mats = require('C:/mc-bot-lab/bot2/lib/materials.js')

@@ -10,7 +10,7 @@ One-time setup, then it's a double-click every time.
    ```
    And make sure Ollama is running (it usually runs in the background on Windows).
 
-2. **Point the bot at your server** - edit `bot/config.json`:
+2. **Point the bot at your server** - edit `bot2/config.json`:
    ```json
    {
      "host": "your-server-address.com",   // your server's IP or hostname
@@ -52,5 +52,5 @@ To stop: press Stop in the panel (closing the panel stops both).
 
 - **Bot window closes / never spawns:** wrong host/port/version, or the Microsoft login wasn't finished. Check the BOT window text.
 - **Brain does nothing / errors:** Ollama isn't running, or `gemma4:12b` isn't pulled (`ollama pull gemma4:12b`).
-- **"not an operator":** add your exact in-game name to `operators` in `bot/config.json`.
+- **"not an operator":** add your exact in-game name to `operators` in `bot2/config.json`.
 - Prefer the terminal? You can still run the two pieces by hand - see `NOTES.md` §2 (brain env) and §3 (live-server launch).

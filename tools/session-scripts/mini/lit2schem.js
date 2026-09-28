@@ -1,7 +1,7 @@
 // litematic -> Sponge .schem (MC 26.2) with the operator's substitutions (2026-09-27):
 // nether/End-sourced blocks -> overworld look-alikes, mob heads dropped, everything else kept.
 //   node lit2schem.js <in.litematic> <out.schem>
-const NM = 'C:/mc-bot-lab/bot/node_modules/'
+const NM = 'C:/mc-bot-lab/bot2/node_modules/'
 const fs = require('fs')
 const { Vec3 } = require(NM + 'vec3')
 const { Schematic } = require(NM + 'prismarine-schematic')

@@ -1,11 +1,10 @@
 # Node
-bot/node_modules/
+bot2/node_modules/
 
 # Runtime/personal bot memory (saved waypoints) - not source
-bot/memory.json
 
 # Downloaded/cached schematic files - runtime data, not source
-bot/schematics/
+bot2/schematics/
 
 # Bundled Node runtime (downloaded per-machine, not source)
 node/
@@ -41,28 +40,20 @@ testserver/.console_history
 logs/
 # compact rolling state time-series + supervisor heartbeat (runtime telemetry - live coords)
 logs/state-history.jsonl*
-bot/heartbeat.json
+bot2/heartbeat.json
 *.pid
 
 # generated brain decision log (run data - player names/chat/coords)
-bot/brain-decisions.jsonl
+bot2/brain-decisions.jsonl*
 brain-decisions*.jsonl
 *.exe
 
 # build/death resume state (runtime - contains live-world coordinates)
-bot/resume-job.json
-bot/last-death.json
 
 # real connection config (holds the live server address) - copy config.example.json
-bot/config.json
-bot/world-memory.json
+bot2/config.json
 # hand/tool-made snapshots of the above (bak-<label>-<hhmmss>) - same live coords, same exclusion
-bot/*.bak-*
-bot/body-episodes.jsonl
-bot/chest-cache.json
-bot/.*-tmp.js
-bot/scaffold-trail.json
-bot/scaffold-registry.json
+bot2/*.bak-*
 
 # design/planning docs - kept locally, not in git
 /design-docs/
@@ -75,13 +66,11 @@ state-archive-oldbase/
 # hand/tool-made state snapshots (same live-world coordinates as the runtime state above)
 state-backup-*/
 state-archive-*/
-bot/director-mode.json
-bot/runtime.json
 bot2/memory.json
 bot2/memory.*.json
 bot2/paused.flag
 bot2/site-*.json
-bot/.mc262-data/
+bot2/.mc262-data/
 
 # local test output
 tools/session-scripts/test-events.log

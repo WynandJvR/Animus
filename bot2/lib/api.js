@@ -144,7 +144,7 @@ function start ({ bot, port, host, director, commands, brainSettings, pov, chat 
     if (req.method === 'GET' && url === '/director') return send(res, 200, { on: true, runtime: 'bot2', task: director.info(), paused: director.isPaused() })
     if (req.method === 'GET' && url === '/config') {
       let saved = {}
-      try { saved = JSON.parse(require('fs').readFileSync(require('path').join(__dirname, '..', '..', 'bot', 'config.json'), 'utf8')) } catch {}
+      try { saved = JSON.parse(require('fs').readFileSync(require('path').join(__dirname, '..', 'config.json'), 'utf8')) } catch {}
       return send(res, 200, Object.assign({}, saved, { connected: !!bot.entity }))
     }
     if (req.method === 'POST') {

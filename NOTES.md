@@ -1,3 +1,5 @@
+> **History.** These notes describe the first runtime (`bot/`, `index.js`), retired and removed on 2026-09-28. The bot is now `bot2/` (see the README). The model, hardware and server findings below still hold; file names and module paths do not.
+
 # Animus - Findings & Operating Notes
 
 Hard-won notes from getting the AI bot running well on this machine + the live server.

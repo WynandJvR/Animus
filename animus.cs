@@ -1,5 +1,5 @@
 ﻿// Animus control panel - a single native Windows GUI app (WinForms, dark theme).
-// Left column: point the bot at YOUR server (writes bot/config.json), pick/pull the
+// Left column: point the bot at YOUR server (writes bot2/config.json), pick/pull the
 // Ollama brain model, manage schematics, start/stop everything. Right column: the
 // LIVE panel (health/food/position/threat, inventory), a live BOT POV view rendered
 // from the bot's /pov raycast frames, and the activity log + command console.
@@ -39,7 +39,7 @@ class Animus : Form
     static bool shotMode = false;   // --shot: render and exit, never touch the bot
     bool autostart = false;         // --start: press Start once the panel is up
     static string Root = AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\');
-    static string BotDir  { get { return Path.Combine(Root, "bot"); } }
+    static string BotDir  { get { return Path.Combine(Root, "bot2"); } } // (the one runtime folder: bot/ - the old runtime - is gone)
     static string CfgPath { get { return Path.Combine(BotDir, "config.json"); } }
     static string ModelFile { get { return Path.Combine(Root, "animus-model.txt"); } }
     const string DefaultModel = "qwen3:14b";
