@@ -52,7 +52,7 @@ const SIX = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]
 function infraPoints () {
   const m = mem.get(); const pts = []
   for (const p of [m.home, m.bed, m.spawnSetAt, m.mine && m.mine.entrance, m.farm && m.farm.water]) if (p) pts.push(p)
-  for (const l of [m.chests, m.furnaces, m.tables, m.farm && m.farm.cells]) if (Array.isArray(l)) pts.push(...l)
+  for (const l of [m.chests, m.furnaces, m.tables, m.farm && m.farm.cells, m.caps]) if (Array.isArray(l)) pts.push(...l) // (caps: the hole lids fillShaft laid - their top and the block under both within 1)
   return pts
 }
 function kept (bot, p, pts = infraPoints()) {
@@ -119,6 +119,21 @@ function pending (bot, from, radius = RADIUS) {
   return out
 }
 
+// A cell to stand in beside a column, at its foot's level (a step up or down at most), off every column of ours, no drop
+// beside it that hurts - the nearest to where the body is.
+function standBeside (bot, low) {
+  const me = bot.entity.position; let best = null; let bd = Infinity
+  for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) for (const dy of [0, -1, 1]) {
+    if (!dx && !dz) continue
+    const x = low.x + dx; const y = low.y + dy; const z = low.z + dz
+    if (!world.standable(bot, x, y, z) || ledger.has(k({ x, y: y - 1, z }))) continue
+    if ([[1, 0], [-1, 0], [0, 1], [0, -1]].some(([ax, az]) => world.dropAt(bot, x + ax + 0.5, y, z + az + 0.5) > world.SAFE_DROP)) continue
+    const d = world.dist3({ x, y, z }, me)
+    if (d < bd) { bd = d; best = { x, y, z } }
+  }
+  return best
+}
+
 // Take them down: the nearest column first, top-down, from the ground beside it (the highest a stand reaches). A block
 // out of reach from the ground stays in the ledger and is said.
 async function tidy (bot, { from, radius = RADIUS, shouldStop } = {}) {
@@ -136,7 +151,10 @@ async function tidy (bot, { from, radius = RADIUS, shouldStop } = {}) {
     const col = todo.filter(q => q.x === t.x && q.z === t.z).sort((a, b) => b.y - a.y)
     const low = col[col.length - 1]
     // (no stepping stones of its own on the way: each one was litter for the next run - 19 pending became 26 taken down)
-    const r = await move.goTo(bot, new goals.GoalNear(low.x, low.y, low.z, 2), { timeoutMs: 30000, place: false, allowZones: ['orchard', 'base', 'farm'], label: 'to litter' })
+    // (a stand on the column's own ground, beside it: GoalNear let the planner stop on the ledge above it, a 4-block drop at
+    //  the lip, and the bot slipped off twice digging from there - audit 2026-09-28. None such: near it, as before)
+    const stand = standBeside(bot, low)
+    const r = await move.goTo(bot, stand ? new goals.GoalBlock(stand.x, stand.y, stand.z) : new goals.GoalNear(low.x, low.y, low.z, 2), { timeoutMs: 30000, place: false, allowZones: ['orchard', 'base', 'farm'], label: 'to litter' })
     if (!r.ok && !act.reach(bot, low, 4.5)) { left += col.length; continue }
     const pts = infraPoints()
     for (const q of col) {

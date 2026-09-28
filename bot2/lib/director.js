@@ -804,7 +804,9 @@ const TASKS = {
       // (the cap: the cell at ground level and the one under it, flush with the ground round it - never a clear)
       await require('./ground').prepare(bot, { x1: c.x, x2: c.x, z1: c.z, z2: c.z, groundY: c.y, height: 0, allowZones: ['base', 'orchard', 'farm'] }, { shouldStop: dayStop, label: 'hole cap' }).catch(() => 0)
       const top = world.at(bot, c.x, c.y, c.z)
-      if (top && world.isSolid(top)) { done++; mem.update(m => { m.shaftsToFill = (m.shaftsToFill || []).filter(q => !(q.x === c.x && q.z === c.z)) }); log('dir', `capped the hole at ${c.x},${c.y},${c.z}`) }
+      // (the cap remembered: a lid is ours on purpose, never litter - its top block stands on the lower one and passes for a
+      //  pillar's; litter.kept asks this list, audit 2026-09-28)
+      if (top && world.isSolid(top)) { done++; mem.update(m => { m.shaftsToFill = (m.shaftsToFill || []).filter(q => !(q.x === c.x && q.z === c.z)); m.caps = (m.caps || []).concat([{ x: c.x, y: c.y, z: c.z }]).slice(-200) }); log('dir', `capped the hole at ${c.x},${c.y},${c.z}`) }
     }
     return done > 0
   },
@@ -1284,8 +1286,11 @@ async function gatherFor (raw, short) {
   // store", 2026-09-28). At home, the haul goes in first: the same line as the deposit's own (haulSize >= 64)
   if (base.distHome(bot) < 24 && (mem.get().chests || []).length && haulSize() >= 64) {
     const before = inv.freeSlots(bot)
-    // (never the trip's own footing: a stack of cobble stays for the planner's steps and a tower out of a pit - audit)
-    await base.depositAll(bot, { keep: (b, i) => i.name === 'cobblestone' ? Math.max(base.keepCount(b, i), build.SCAFFOLD_WANT) : base.keepCount(b, i) }).catch(() => false)
+    // (never the trip's own footing: filler stays for the planner's steps and a tower out of a pit - audit)
+    // (SCAFFOLD_WANT of ANY filler, the most plentiful first: with no cobble but a stack of andesite, the andesite stays)
+    const fill = {}; let need = build.SCAFFOLD_WANT
+    for (const [n, c] of Object.entries(inv.counts(bot)).filter(([n]) => build.FILLER_ITEMS.test(n)).sort((a, b) => b[1] - a[1])) { const t = Math.min(c, need); if (t > 0) { fill[n] = t; need -= t } }
+    await base.depositAll(bot, { keep: (b, i) => Math.max(base.keepCount(b, i), fill[i.name] || 0) }).catch(() => false)
     log('dir', `emptied the pack for the ${raw} trip: ${before} -> ${inv.freeSlots(bot)} free slots`)
   }
   const batch = Math.min(short, tripRoom())
