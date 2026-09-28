@@ -413,6 +413,7 @@ async function craftItem (bot, name, n, ctx) {
     const r1 = bot.recipesFor(item.id, null, 1, table)[0]
     if (!r1) break
     try {
+      if (table) await require('./act').settleAfterClose(bot) // (bot.craft opens the table itself: a craft right after a chest sweep timed out like an open, 2026-09-28)
       await bot.craft(r1, 1, table)
       await move.sleep(120)
     } catch (e) {
@@ -479,6 +480,7 @@ async function craftTimes (bot, name, crafts, { shouldStop } = {}) {
     const r1 = bot.recipesFor(item.id, null, 1, table)[0] || dyedRecipe(bot, name, table)
     if (!r1) break
     try {
+      if (table) await require('./act').settleAfterClose(bot) // (bot.craft opens the table itself: a craft right after a chest sweep timed out like an open, 2026-09-28)
       await bot.craft(r1, 1, table)
       await move.sleep(120)
     } catch (e) {

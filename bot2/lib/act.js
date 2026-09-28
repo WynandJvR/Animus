@@ -16,9 +16,12 @@ const sleep = ms => new Promise(r => setTimeout(r, ms))
 // There is no ack for a close to wait on, so the condition is the next thing observable - two server ticks since the
 // close event. It costs nothing unless a close was that recent. THE one way to open a chest or a furnace.
 let lastClose = 0; const watching = new WeakSet()
-async function openSettled (bot, block, how = 'openContainer') {
+async function settleAfterClose (bot) {
   if (!watching.has(bot)) { watching.add(bot); bot.on('windowClose', () => { lastClose = Date.now() }) }
   if (Date.now() - lastClose < 100) await bot.waitForTicks(2)
+}
+async function openSettled (bot, block, how = 'openContainer') {
+  await settleAfterClose(bot)
   return bot[how](block)
 }
 
@@ -494,4 +497,4 @@ async function collectDrops (bot, { radius = 8, maxMs = 15000 } = {}) {
   return picked
 }
 
-module.exports = { openSettled, digRefusal, sealsUsIn, holdsUsUp, fallBelow, stepOff, dig, digBlock, place, useOn, pour, fill, collectDrops, droppedItems, reach, inBody, sleep, ticks, refUsable, PLANT_RE, NO_REF_RE, USE_REF_RE, NO_FACE_RE, REPLACEABLE_RE }
+module.exports = { settleAfterClose, openSettled, digRefusal, sealsUsIn, holdsUsUp, fallBelow, stepOff, dig, digBlock, place, useOn, pour, fill, collectDrops, droppedItems, reach, inBody, sleep, ticks, refUsable, PLANT_RE, NO_REF_RE, USE_REF_RE, NO_FACE_RE, REPLACEABLE_RE }

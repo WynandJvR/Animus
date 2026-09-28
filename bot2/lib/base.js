@@ -149,10 +149,12 @@ async function settle (bot) { try { await bot.waitForTicks(2) } catch {} }
 const movesSaid = new Map()
 function checkMoves (p, asked, moved, what) {
   if (asked === moved) return
-  delete chestCache()[key(p)]
+  // (said, not acted on: the chest's reading came from the window as it closed and stands; dropping it on every
+  //  mismatch - a deposit that ran a stack past its count, a chest that filled mid-deposit - hid half the bank (53
+  //  kinds -> 26) until each chest was opened again, and "short" sent the bot gathering what it had; 2026-09-28)
   const k = key(p); if (Date.now() - (movesSaid.get(k) || 0) < 60000) return
   movesSaid.set(k, Date.now())
-  log('base', `${what} at ${move.fmt(p)}: asked ${asked}, the pack moved ${moved} - the chest will be read again`)
+  log('base', `${what} at ${move.fmt(p)}: asked ${asked}, the pack moved ${moved}`)
 }
 function refreshCache (w, p) {
   const items = {}
