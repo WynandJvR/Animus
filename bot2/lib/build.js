@@ -1646,12 +1646,12 @@ async function siteScaffoldTeardown (bot, { shouldStop } = {}) {
   const r = site.region
   const extra = (mem.get().scaffold || []).filter(p => p.y < r.y1 && p.x >= r.x1 && p.x <= r.x2 && p.z >= r.z1 && p.z <= r.z2)
   const before = scaffoldList(bot).length + extra.length
-  const n = await removeScaffold(bot, { shouldStop, maxPasses: 1, keep, extra })
+  const n = await removeScaffold(bot, { shouldStop, maxPasses: 1, keep, extra, climb: false })
   if (n) { const gone = new Set(extra.filter(p => { const b = world.at(bot, p.x, p.y, p.z); return !b || !LEDGER_RE.test(b.name) }).map(key)); if (gone.size) mem.update(m => { m.scaffold = (m.scaffold || []).filter(q => !gone.has(key(q))) }) }
   log('build', `site scaffold: ${n} taken down, ${Math.max(0, before - n)} left (from the band y${bandY} up, holding a finished cell, or out of reach)`)
   return n
 }
-async function removeScaffold (bot, { shouldStop, maxPasses = 4, keep = null, extra = [] } = {}) {
+async function removeScaffold (bot, { shouldStop, maxPasses = 4, keep = null, extra = [], climb = true } = {}) {
   if (!job) return 0
   let removed = 0
   const dig = (p, noWalk = false) => act.dig(bot, p, { force: true, allowZones: ['build', 'base'], timeoutMs: 10000, noWalk, reachMax: noWalk ? 5 : 4.3 })
@@ -1697,6 +1697,9 @@ async function removeScaffold (bot, { shouldStop, maxPasses = 4, keep = null, ex
         // a short walk first; then the pillar from the ground beside it; the church door only for what is inside
         let r = await goSite(bot, new goals.GoalNear(p.x, p.y, p.z, 3), 'scaffold', { doors: false })
         if (!r.ok && !act.reach(bot, p, 4.8)) {
+          // (climb:false - the daily teardown: no pillar to take a pillar down; a block out of reach from the ground is
+          //  build.finish's. Pillaring for leftovers took 1037s of a day; audit)
+          if (!climb) { failLeftover(bot, p); continue }
           if (await reachByPillar(bot, p, { shouldStop })) { removed++; got++; continue }
           r = (await viaDoor(bot, new goals.GoalNear(p.x, p.y, p.z, 3), siteMovements(bot, { dig: 'noGround' }))) || r
         }
