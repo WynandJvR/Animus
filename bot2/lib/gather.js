@@ -216,6 +216,16 @@ async function fellTree (bot, basePos, re, { leaves = false, allowZones = [], sh
     }
     await act.dig(bot, p, { timeoutMs: 15000, allowZones })
   }
+  // (the trunk gone, its whole crown is borrowed footing - every natural leaf of it decays within seconds: stood on it,
+  //  the bot fell 7 blocks when one rotted away, 2026-09-28. Down to the stump, on real ground, before anything else)
+  {
+    const me = bot.entity.position; const fl = world.at(bot, me.x, Math.floor(me.y - 0.01), me.z)
+    let natural = false; try { const pr = fl && /_leaves$/.test(fl.name) ? fl.getProperties() : null; natural = !!pr && (pr.persistent === false || pr.persistent === 'false') } catch {}
+    if (natural) {
+      log('gather', 'standing on the crown of the felled tree - down to the stump first')
+      await move.goTo(bot, new goals.GoalNear(basePos.x, basePos.y, basePos.z, 1), { timeoutMs: 12000, place: false, label: 'off the crown' })
+    }
+  }
   if (leaves && column.length) {
     // the crown within reach, from where we stand: natural leaves only (persistent ones are someone's build)
     const top = column[column.length - 1]
