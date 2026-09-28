@@ -177,12 +177,9 @@ async function harvest (bot, { logs = Infinity, demandTrees = 0, shouldStop } = 
     if (!b || !world.LOG_RE.test(b.name)) continue
     const re = new RegExp('^' + b.name + '$')
     const before = inv.count(bot, n => world.LOG_RE.test(n))
-    // (a mega tree is four trunks: each column felled - fellTree takes the one it is given)
-    for (const c of cellsOf(t)) {
-      const cb = world.at(bot, c.x, c.y, c.z)
-      if (!cb || !re.test(cb.name) || (shouldStop && shouldStop())) continue
-      await gather.fellTree(bot, new Vec3(c.x, c.y, c.z), re, { leaves: wantSaplings(bot, demandTrees) > 0, allowZones: ['orchard'] })
-    }
+    // (a mega tree is four trunks, felled from inside - gather.fellMega; a single one as ever)
+    if (t.quad) await gather.fellMega(bot, t, re, { allowZones: ['orchard'], shouldStop })
+    else await gather.fellTree(bot, new Vec3(t.x, t.y, t.z), re, { leaves: wantSaplings(bot, demandTrees) > 0, allowZones: ['orchard'] })
     got += inv.count(bot, n => world.LOG_RE.test(n)) - before
   }
   if (got) {

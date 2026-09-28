@@ -190,6 +190,53 @@ async function chop (bot, re, n, ctx = {}) {
 
 // opts.leaves: clear the tree's own leaves too (they drop the saplings the orchard grows from; wild leaves left to decay
 // drop them after we have gone). opts.allowZones: the orchard's trees stand in its zone.
+// A MEGA TREE (a 2x2 trunk) felled the way a player does, from INSIDE it: up one column - the log over the head dug, a
+// filler under the feet (towerUp) - to the top, walled in on three sides by the other trunks the whole way; then down,
+// each level's three neighbour logs taken before the filler under the feet is dug and the body drops one. One pillar,
+// taken away on the way down, never a drop beside the body deeper than a step. Four 30-high pillars beside the trunk was
+// the other way, and a 30-block fall at the top of each (audit 2026-09-28). `corner` is the square's low corner.
+async function fellMega (bot, corner, re, { allowZones = [], shouldStop } = {}) {
+  const zones = allowZones.concat(['orchard'])
+  const before = inv.count(bot, b => re.test(b))
+  const cols = [[0, 0], [1, 0], [0, 1], [1, 1]].map(([dx, dz]) => ({ x: corner.x + dx, z: corner.z + dz }))
+  const isLog = (x, y, z) => { const b = world.at(bot, x, y, z); return !!b && re.test(b.name) }
+  const dig = p => act.dig(bot, new Vec3(p.x, p.y, p.z), { timeoutMs: 12000, noWalk: true, allowZones: zones }).catch(() => false)
+  const y0 = corner.y
+  // in: the corner column's two lowest logs out, and step into it
+  const r = await move.goTo(bot, new goals.GoalNear(corner.x, y0, corner.z, 2), { timeoutMs: 40000, label: 'to tree', shouldStop })
+  if (!r.ok) return false
+  for (const dy of [1, 0]) if (isLog(corner.x, y0 + dy, corner.z)) await dig({ x: corner.x, y: y0 + dy, z: corner.z })
+  await move.goTo(bot, new goals.GoalBlock(corner.x, y0, corner.z), { timeoutMs: 8000, place: false, label: 'into the trunk' })
+  if (Math.floor(bot.entity.position.x) !== corner.x || Math.floor(bot.entity.position.z) !== corner.z) { log('gather', `could not step into the trunk at ${move.fmt(corner)}`); return false }
+  const pillar = []
+  // UP: while the column goes on over the head
+  for (let guard = 0; guard < 40; guard++) {
+    if (shouldStop && shouldStop()) break
+    const fy = Math.floor(bot.entity.position.y + 0.01)
+    if (!isLog(corner.x, fy + 2, corner.z)) break
+    if (!await dig({ x: corner.x, y: fy + 2, z: corner.z })) break
+    if (!await towerUp(bot, { allowZones: zones, onPlaced: c => pillar.push(c) })) break
+  }
+  // DOWN: each level's neighbour logs (feet and head height), then our own filler under the feet
+  const ours = c => pillar.some(q => q.x === c.x && q.y === c.y && q.z === c.z)
+  for (let guard = 0; guard < 40; guard++) {
+    const fy = Math.floor(bot.entity.position.y + 0.01)
+    for (const dy of [2, 1, 0]) for (const c of cols) if (!(c.x === corner.x && c.z === corner.z) && isLog(c.x, fy + dy, c.z) && act.reach(bot, { x: c.x, y: fy + dy, z: c.z }, 4.5)) await dig({ x: c.x, y: fy + dy, z: c.z })
+    const under = { x: Math.floor(bot.entity.position.x), y: fy - 1, z: Math.floor(bot.entity.position.z) }
+    if (!ours(under)) break
+    if (!await dig(under)) break
+    const t0 = Date.now(); while (!bot.entity.onGround && Date.now() - t0 < 1500) await move.sleep(50)
+    pillar.splice(pillar.findIndex(q => q.x === under.x && q.y === under.y && q.z === under.z), 1)
+  }
+  // the ground level last (the neighbours' stumps), then what fell
+  for (const dy of [1, 0]) for (const c of cols) if (isLog(c.x, y0 + dy, c.z) && act.reach(bot, { x: c.x, y: y0 + dy, z: c.z }, 4.5)) await dig({ x: c.x, y: y0 + dy, z: c.z })
+  await act.collectDrops(bot, { radius: 8, maxMs: 5000 }).catch(() => {})
+  const got = inv.count(bot, b => re.test(b)) - before
+  const left = cols.reduce((n, c) => { let k = 0; for (let y = y0; y < y0 + 36; y++) if (isLog(c.x, y, c.z)) k++; return n + k }, 0)
+  log('gather', `felled a mega tree at ${move.fmt(corner)} from inside: +${got} logs${left ? `, ${left} left standing` : ''}${pillar.length ? `, ${pillar.length} pillar block(s) left` : ''}`)
+  return got > 0
+}
+
 async function fellTree (bot, basePos, re, { leaves = false, allowZones = [], shouldStop } = {}) {
   const before = inv.count(bot, b => re.test(b))
   const pillar = [] // (the blocks towered up to reach the top logs: taken down again after)
@@ -707,4 +754,4 @@ async function findMatching (bot, match, accept) {
   return null
 }
 
-module.exports = { noteBiomes, speciesLand, climateLead, SPECIES_BIOMES, onGrounds, treeOK, wildTree, lastChopOutcome, outOfZones, chop, mine, explore, towerUp, noteResource, noteResources, forgetResource, knownResource, fellTree, pickPlants, survey, takeable }
+module.exports = { fellMega, noteBiomes, speciesLand, climateLead, SPECIES_BIOMES, onGrounds, treeOK, wildTree, lastChopOutcome, outOfZones, chop, mine, explore, towerUp, noteResource, noteResources, forgetResource, knownResource, fellTree, pickPlants, survey, takeable }
