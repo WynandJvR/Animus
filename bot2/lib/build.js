@@ -1330,7 +1330,11 @@ function ensureFoundation (bot) {
     }
     // (a torch only where a mob could stand: 2 high at least - a 1-high gap under the floor spawns nothing, and its torch
     //  could neither be reached nor kept: "left unlit - could not dig the cobblestone in the cell", 2026-09-28)
-    const dry = region.filter(q => q.dry && q.ys.length >= 2)
+    // (and only where the floor over it is still open: a hollow's torch goes in from above or not at all, and the drop that
+    //  said so came only after a 20-40s walk to each - every job load, so every restart brought the same 4-5 back, 2026-09-28)
+    const open = q => world.isAirish(world.at(bot, q.x, y1, q.z))
+    const dry = region.filter(q => q.dry && q.ys.length >= 2 && open(q))
+    if (!dry.length && region.some(q => q.dry && q.ys.length >= 2)) { log('build', `hollow of ${region.length} columns under the floor near ${region[0].x},${region[0].z} left unlit - the floor over it is laid`); continue }
     let pick = dry.filter(q => (q.x - job.box.x1) % 8 === 4 && (q.z - job.box.z1) % 8 === 4)
     if (!pick.length && dry.length) {
       const cx = region.reduce((a, q) => a + q.x, 0) / region.length; const cz = region.reduce((a, q) => a + q.z, 0) / region.length
