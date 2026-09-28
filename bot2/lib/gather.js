@@ -199,7 +199,7 @@ async function fellTree (bot, basePos, re, { leaves = false, allowZones = [], sh
   if (!r.ok) return false
   // the column, bottom up; then neighbouring trunks (2x2 trees)
   const column = []
-  for (let dy = 0; dy < 24; dy++) {
+  for (let dy = 0; dy < 36; dy++) { // (a mega spruce's trunk runs past 24)
     const b = bot.blockAt(basePos.offset(0, dy, 0))
     if (!b || !re.test(b.name)) { if (dy > 0) break; else continue }
     column.push(b.position)

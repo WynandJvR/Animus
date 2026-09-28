@@ -20,6 +20,13 @@ const SAPLING_RE = /^(oak|spruce|birch|jungle|acacia|cherry)_sapling$/ // (dark 
 const SOIL_RE = /^(grass_block|dirt|podzol|coarse_dirt|rooted_dirt|moss_block)$/
 const GROW_ROOM = 7 // air a sapling needs over it to grow (vanilla: the trunk plus the crown)
 const SPACING = 3 // one trunk every third cell: the crowns touch, the trunks stay walkable between
+// A MEGA SPRUCE: four spruce saplings in a 2x2 grow one tree of 30-60 logs against 6-10 for a single - the build's own
+// wood, 700 logs short at 65 an hour from single trees (2026-09-28; audit). A quad spot is the square's low corner;
+// quads on their own wider grid, with the crown and the height a mega tree takes.
+const QUAD_SPACING = 6
+const QUAD_ROOM = 14
+const QUAD = [[0, 0], [1, 0], [0, 1], [1, 1]]
+const cellsOf = s => s.quad ? QUAD.map(([dx, dz]) => ({ x: s.x + dx, y: s.y, z: s.z + dz })) : [s]
 
 function orchard () { return mem.get().orchard || null }
 // Nothing in the cell - a sapling included: it has no collision box, so "airish" took a planted spot for an empty one
@@ -27,32 +34,36 @@ function orchard () { return mem.get().orchard || null }
 function free (b) { return !!b && world.isAirish(b) && !SAPLING_RE.test(b.name) && !world.LOG_RE.test(b.name) }
 // One small box per tree: its trunk cell and the ring round it, soil to crown (never one box round them all - spread
 // round home, that box took in the base, the farm and the furnaces, 2026-09-24)
-function boxOf (s) { return { x1: s.x - 1, x2: s.x + 1, z1: s.z - 1, z2: s.z + 1, y1: s.y - 1, y2: s.y + GROW_ROOM + 2 } }
+function boxOf (s) { return s.quad ? { x1: s.x - 2, x2: s.x + 3, z1: s.z - 2, z2: s.z + 3, y1: s.y - 1, y2: s.y + QUAD_ROOM + 2 } : { x1: s.x - 1, x2: s.x + 1, z1: s.z - 1, z2: s.z + 1, y1: s.y - 1, y2: s.y + GROW_ROOM + 2 } }
 function setZone () { const o = orchard(); move.setZones('orchard', o ? o.spots.map(boxOf) : []) }
 
 // A cell a sapling can go in and grow: soil under, air (or a sapling / our own trunk) in it, open sky and room above.
-function spotOK (bot, p) {
+function spotOK (bot, p, room = GROW_ROOM) {
+  if (p.quad) return cellsOf(p).every(c => spotOK(bot, c, QUAD_ROOM))
   const soil = world.at(bot, p.x, p.y - 1, p.z)
   if (!soil || !SOIL_RE.test(soil.name)) return false
-  for (let dy = 0; dy <= GROW_ROOM; dy++) {
+  for (let dy = 0; dy <= room; dy++) {
     const b = world.at(bot, p.x, p.y + dy, p.z)
     if (!b) return false
     if (dy === 0 && (SAPLING_RE.test(b.name) || world.LOG_RE.test(b.name))) continue
     if (!world.isAirish(b) && !(dy > 0 && world.LEAF_RE.test(b.name))) return false
   }
-  return world.openSky(bot, { x: p.x, y: p.y + GROW_ROOM, z: p.z })
+  return world.openSky(bot, { x: p.x, y: p.y + room, z: p.z })
 }
 
 // New spots: the grid cells in rings out from home (16..48), nearest first, outside every protected zone and clear of
 // the safehouse; `n` of them at most.
-function newSpots (bot, n) {
+function newSpots (bot, n, { quad = false } = {}) {
   const home = mem.get().home
   if (!home || n <= 0) return []
   const have = (orchard() || { spots: [] }).spots
   const taken = new Set(have.map(s => `${s.x},${s.z}`))
+  // (a quad keeps clear of every spot round it: its crown is wide)
+  const near = c => have.some(s => { const r = s.quad || quad ? 5 : 1; return Math.abs(s.x - c.x) < r && Math.abs(s.z - c.z) < r })
   // the grid (every SPACING-th cell from home), 16..48 out, nearest first
+  const step = quad ? QUAD_SPACING : SPACING
   const cells = []
-  for (let dx = -48; dx <= 48; dx += SPACING) for (let dz = -48; dz <= 48; dz += SPACING) {
+  for (let dx = -48; dx <= 48; dx += step) for (let dz = -48; dz <= 48; dz += step) {
     const r = Math.max(Math.abs(dx), Math.abs(dz))
     if (r < 16) continue
     cells.push({ x: home.x + dx, z: home.z + dz, d: Math.hypot(dx, dz) })
@@ -61,10 +72,11 @@ function newSpots (bot, n) {
   const out = []
   for (const c of cells) {
     if (out.length >= n) break
-    if (taken.has(`${c.x},${c.z}`)) continue
+    if (taken.has(`${c.x},${c.z}`) || near(c)) continue
     const gy = world.groundY(bot, c.x, c.z, home.y + 12)
     if (gy == null || Math.abs(gy + 1 - home.y) > 8) continue // (a short walk from home, not down a cliff)
-    const p = { x: c.x, y: gy + 1, z: c.z }
+    const p = quad ? { x: c.x, y: gy + 1, z: c.z, quad: true } : { x: c.x, y: gy + 1, z: c.z }
+    if (quad && QUAD.some(([dx, dz]) => world.groundY(bot, c.x + dx, c.z + dz, home.y + 12) !== gy)) continue // (a level square)
     // (clear of every other zone; the orchard's own trees are its grid neighbours, 3 apart - taken is the check there)
     if (move.inZone(p, 2, ['orchard']) || !spotOK(bot, p)) continue
     out.push(p)
@@ -81,7 +93,7 @@ function grown (bot) {
 function empty (bot) {
   const o = orchard()
   if (!o) return []
-  return o.spots.filter(s => { const b = world.at(bot, s.x, s.y, s.z); return free(b) && spotOK(bot, s) })
+  return o.spots.filter(s => cellsOf(s).every(c => free(world.at(bot, c.x, c.y, c.z))) && spotOK(bot, s))
 }
 function saplings (bot) { return inv.items(bot).filter(i => SAPLING_RE.test(i.name)) }
 function saplingCount (bot) { return saplings(bot).reduce((a, i) => a + i.count, 0) }
@@ -105,10 +117,10 @@ function pruneDead (bot) {
   const o = orchard()
   if (!o) return
   for (const s of o.spots.slice()) {
-    const b = world.at(bot, s.x, s.y, s.z)
-    if (!b) continue // (unloaded: unknown, kept)
-    if (SAPLING_RE.test(b.name) || world.LOG_RE.test(b.name)) continue
-    if (!spotOK(bot, s)) dropSpot(s, `${b.name} there now`)
+    const bs = cellsOf(s).map(c => world.at(bot, c.x, c.y, c.z))
+    if (bs.some(b => !b)) continue // (unloaded: unknown, kept)
+    if (bs.some(b => SAPLING_RE.test(b.name) || world.LOG_RE.test(b.name))) continue // (growing, or a trunk still there)
+    if (!spotOK(bot, s)) { const bad = bs.find(b => !free(b)); dropSpot(s, `${bad ? bad.name : 'no room'} there now`) }
   }
 }
 
@@ -117,23 +129,33 @@ async function plant (bot, { demandTrees = 0, shouldStop } = {}) {
   if (!o) { o = { spots: [] }; mem.set('orchard', o) }
   pruneDead(bot)
   const fill = empty(bot)
-  const more = Math.max(0, Math.min(saplingCount(bot) - fill.length, demandTrees - o.spots.length))
+  const spruce = () => inv.count(bot, 'spruce_sapling')
+  // (spruce goes in fours - one mega tree - while four are in the pack for each square; the rest as single trees)
+  const fillQuads = fill.filter(q => q.quad).length
+  const quadsWanted = Math.max(0, Math.min(Math.floor(Math.max(0, spruce() - 4 * fillQuads) / 4), demandTrees - o.spots.length))
+  const freshQuads = newSpots(bot, quadsWanted, { quad: true })
+  if (freshQuads.length) { mem.update(m => { m.orchard.spots = m.orchard.spots.concat(freshQuads) }); setZone() }
+  const singles = saplingCount(bot) - 4 * (fillQuads + freshQuads.length) - fill.filter(q => !q.quad).length
+  const more = Math.max(0, Math.min(singles, demandTrees - orchard().spots.length))
   const fresh = newSpots(bot, more)
   if (fresh.length) { mem.update(m => { m.orchard.spots = m.orchard.spots.concat(fresh) }); setZone() }
   let planted = 0
-  for (const s of fill.concat(fresh)) {
+  for (const s of fill.concat(freshQuads, fresh)) {
     if (shouldStop && shouldStop()) break
     await reflex.waitClear()
-    const sap = saplings(bot)[0]
-    if (!sap) break
-    const b = world.at(bot, s.x, s.y, s.z)
-    if (!free(b)) continue
-    if (!await act.place(bot, s, sap.name, { faceHint: [[0, -1, 0]], allowZones: ['orchard'] })) continue
-    // it must stay there: a sapling that pops off at once came back as "planted" eleven times in 2s (2026-09-24)
-    await new Promise(r => setTimeout(r, 300))
-    const now = world.at(bot, s.x, s.y, s.z)
-    if (now && SAPLING_RE.test(now.name)) planted++
-    else dropSpot(s, `the sapling did not stay (${now ? now.name : '?'} there)`)
+    if (s.quad && spruce() < 4) continue // (a square only whole)
+    for (const c of cellsOf(s)) {
+      const sap = s.quad ? inv.items(bot).find(i => i.name === 'spruce_sapling') : saplings(bot)[0]
+      if (!sap) break
+      const b = world.at(bot, c.x, c.y, c.z)
+      if (!free(b)) continue
+      if (!await act.place(bot, c, sap.name, { faceHint: [[0, -1, 0]], allowZones: ['orchard'] })) continue
+      // it must stay there: a sapling that pops off at once came back as "planted" eleven times in 2s (2026-09-24)
+      await new Promise(r => setTimeout(r, 300))
+      const now = world.at(bot, c.x, c.y, c.z)
+      if (now && SAPLING_RE.test(now.name)) planted++
+      else { dropSpot(s, `the sapling did not stay (${now ? now.name : '?'} there)`); break }
+    }
   }
   setZone()
   if (planted) log('orchard', `planted ${planted} sapling${planted > 1 ? 's' : ''} (${orchard().spots.length} spots, ${grown(bot).length} grown)`)
@@ -155,7 +177,12 @@ async function harvest (bot, { logs = Infinity, demandTrees = 0, shouldStop } = 
     if (!b || !world.LOG_RE.test(b.name)) continue
     const re = new RegExp('^' + b.name + '$')
     const before = inv.count(bot, n => world.LOG_RE.test(n))
-    await gather.fellTree(bot, new Vec3(t.x, t.y, t.z), re, { leaves: wantSaplings(bot, demandTrees) > 0, allowZones: ['orchard'] })
+    // (a mega tree is four trunks: each column felled - fellTree takes the one it is given)
+    for (const c of cellsOf(t)) {
+      const cb = world.at(bot, c.x, c.y, c.z)
+      if (!cb || !re.test(cb.name) || (shouldStop && shouldStop())) continue
+      await gather.fellTree(bot, new Vec3(c.x, c.y, c.z), re, { leaves: wantSaplings(bot, demandTrees) > 0, allowZones: ['orchard'] })
+    }
     got += inv.count(bot, n => world.LOG_RE.test(n)) - before
   }
   if (got) {
