@@ -446,13 +446,17 @@ async function sealDoor (bot) {
   const filler = () => inv.items(bot).find(i => SEAL_RE.test(i.name) && i.name !== 'dirt') || inv.items(bot).find(i => i.name === 'dirt')
   if (!filler()) { log('hut', 'nothing to block the door step with'); return false }
   await setDoor(bot, d, true)
+  const sealed = []
   for (const y of [out.y, out.y + 1]) {
     const c = world.at(bot, out.x, y, out.z)
     if (!c || SEAL_RE.test(c.name) || !world.isAirish(c)) continue
     const f = filler()
     if (!f) break
-    await act.place(bot, { x: out.x, y, z: out.z }, f.name, { allowZones: ['base', 'build'], sneak: false, faceHint: [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]] })
+    if (await act.place(bot, { x: out.x, y, z: out.z }, f.name, { allowZones: ['base', 'build'], sneak: false, faceHint: [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]] })) sealed.push({ x: out.x, y, z: out.z })
   }
+  // (the cells it filled, remembered: the morning takes out exactly those, whatever they have become - grass on a dirt
+  //  seal passed the name check for a whole day; audit 2026-09-28)
+  if (sealed.length) mem.update(m => { m.doorSeal = { cells: ((m.doorSeal && m.doorSeal.cells) || []).concat(sealed), at: Date.now() } })
   await setDoor(bot, d, false)
   const lo2 = world.at(bot, out.x, out.y, out.z); const hi2 = world.at(bot, out.x, out.y + 1, out.z)
   const ok = !!(lo2 && SEAL_RE.test(lo2.name) && hi2 && SEAL_RE.test(hi2.name))
@@ -469,14 +473,15 @@ async function unsealDoor (bot) {
   if (world.dist3(world.feetPos(bot), d) > 5) return false
   const out = outerStep(pl)
   let did = false
-  const stepBlocked = [out.y, out.y + 1].some(y => { const c = world.at(bot, out.x, y, out.z); return c && STEP_CLEAR_RE.test(c.name) })
+  // (the step's two cells by name, and every cell the seal recorded - whatever stands there now, a door never)
+  const recorded = ((mem.get().doorSeal || {}).cells || []).filter(c => { const b = world.at(bot, c.x, c.y, c.z); return b && !world.isAirish(b) && !/_door$/.test(b.name) })
+  const stepBlocked = recorded.length || [out.y, out.y + 1].some(y => { const c = world.at(bot, out.x, y, out.z); return c && STEP_CLEAR_RE.test(c.name) })
   if (stepBlocked) {
     log('hut', 'clearing the blocked door step')
     if (move.insideHut(world.feetPos(bot))) await setDoor(bot, d, true)
-    for (const y of [out.y + 1, out.y]) {
-      const c = world.at(bot, out.x, y, out.z)
-      if (c && STEP_CLEAR_RE.test(c.name)) await act.dig(bot, { x: out.x, y, z: out.z }, { force: true, allowZones: ['base', 'build'], timeoutMs: 8000 })
-    }
+    const cells = recorded.concat([out.y + 1, out.y].map(y => ({ x: out.x, y, z: out.z })).filter(c => { const b = world.at(bot, c.x, c.y, c.z); return b && STEP_CLEAR_RE.test(b.name) })).sort((a, b) => b.y - a.y)
+    for (const c of cells) await act.dig(bot, c, { force: true, allowZones: ['base', 'build'], timeoutMs: 8000 })
+    if (cells.every(c => { const b = world.at(bot, c.x, c.y, c.z); return !b || world.isAirish(b) })) mem.update(m => { m.doorSeal = null })
     await act.collectDrops(bot, { radius: 3, maxMs: 1500 })
     did = true
   }
