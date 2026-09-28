@@ -821,7 +821,7 @@ async function pillarTo (bot, c, first) {
     // (the site walker: it goes in through the build's doors - the nave is walled round)
     const r = await goSite(bot, new goals.GoalBlock(f.x, f.y, f.z), 'to the foot of a pillar')
     if (!r.ok) { badFeet.set(key(f), Date.now()); log('build', `pillar for ${c.name} at ${move.fmt(c)}: couldn't reach its foot ${move.fmt(f)} (${r.why})`); continue }
-    await ensureScaffold(bot, 16)
+    await ensureScaffold(bot, 16, { shouldStop: stepStop })
     // (the planner let go of first: its goal left standing, it set the controls every tick and the tower's jump never
     //  held - "towered to y120" 24 times in an hour on the nave floor, where the same tower rose in the yard, 2026-09-27)
     try { bot.pathfinder.setGoal(null) } catch {}
@@ -965,7 +965,9 @@ let cellFailsSaved = 0
 // (only cells of the job are kept: a cell finished by any other way - a restart, a hand - is dropped at the next save; audit #38)
 function saveCellFails () { if (Date.now() - cellFailsSaved < 5000) return; cellFailsSaved = Date.now(); const o = {}; for (const [k, v] of cellFails) { if (job && !job.index.has(k)) { cellFails.delete(k); continue } o[k] = v } mem.set('cellFails', o) }
 function failsOf (c) { const f = cellFails.get(key(c)); return f ? f.n : 0 }
+let stepStop = null // (the running build step's stop - a pillar's scaffold top-up inside it keeps the step's day)
 async function buildStep (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
+  stepStop = shouldStop || null
   const t0 = Date.now()
   let placed = 0
   if (!ensureSnapshot(bot)) return { placed, blockedOn: null, done: false }
@@ -1269,7 +1271,7 @@ async function reachByPillar (bot, p, { shouldStop } = {}) {
     const r = await move.travel(bot, c, { range: 0, label: 'under the scaffold', maxMs: 90000 })
     const f = bot.entity.position.floored()
     if (!r.ok && !(f.x === c.x && f.z === c.z && f.y === c.y)) continue
-    if (!inv.items(bot).some(i => FILLER_ITEMS.test(i.name))) await ensureScaffold(bot, 16).catch(() => {})
+    if (!inv.items(bot).some(i => FILLER_ITEMS.test(i.name))) await ensureScaffold(bot, 16, { shouldStop }).catch(() => {})
     const base = bot.entity.position.floored().y
     for (let i = 0; i < 9 && !act.reach(bot, p, 4.3); i++) { if (!await require('./gather').towerUp(bot)) break }
     let gone = act.reach(bot, p, 5) && await act.dig(bot, p, { force: true, allowZones: ['build', 'base'], timeoutMs: 10000, noWalk: true, reachMax: 5 })
@@ -1402,7 +1404,7 @@ async function finish (bot, { shouldStop } = {}) {
   // what matters first: stray blocks, then our scaffold down, then the ground; the leftover canopy leaves last (a
   // day of leaf-clearing walks left the scaffold standing, 2026-09-23 - and leaves are taken without towering)
   let did = await clearSite(bot, { finishing: true, shouldStop, leaves: false })
-  if (s0.scaffold.length || s0.holes.length) await ensureScaffold(bot, 32).catch(() => {})
+  if (s0.scaffold.length || s0.holes.length) await ensureScaffold(bot, 32, { shouldStop }).catch(() => {})
   // the ground first - a minute's work, and behind the day-long teardown it never got a turn before dusk
   did += await finishSite(bot, { shouldStop })
   did += await removeScaffold(bot, { shouldStop })
@@ -1420,7 +1422,7 @@ function snapshotInfo (bot) {
 }
 
 // Filler blocks to stand on while building high (the planner towers with them).
-async function ensureScaffold (bot, n = 32) {
+async function ensureScaffold (bot, n = 32, { shouldStop } = {}) { // (shouldStop: the caller's day - a top-up is never a night descent)
   // cobblestone counts: the pack carries hundreds for the walls and the planner towers on it. Asking for dirt first sent
   // the bot to dig grass at the foot of the west cliff it could not reach, twenty seconds a block for ten minutes, with
   // 250 cobblestone in the pack (2026-09-27). Dirt is dug only when there is no cobblestone either.
@@ -1439,9 +1441,9 @@ async function ensureScaffold (bot, n = 32) {
   if (filler() < n / 2) {
     const short = n - filler()
     log('build', `getting ${short} cobblestone from the mine to scaffold with`)
-    await require('./craft').ensure(bot, 'cobblestone', inv.count(bot, 'cobblestone') + Math.max(short, 32), { noWithdraw: true }).catch(() => false)
+    await require('./craft').ensure(bot, 'cobblestone', inv.count(bot, 'cobblestone') + Math.max(short, 32), { noWithdraw: true, shouldStop }).catch(() => false)
   }
-  if (filler() < n / 2) { log('build', `getting ${n - filler()} dirt to scaffold with`); await require('./craft').ensure(bot, 'dirt', inv.count(bot, 'dirt') + (n - filler()), { noWithdraw: true }).catch(() => false) }
+  if (filler() < n / 2) { log('build', `getting ${n - filler()} dirt to scaffold with`); await require('./craft').ensure(bot, 'dirt', inv.count(bot, 'dirt') + (n - filler()), { noWithdraw: true, shouldStop }).catch(() => false) }
   return true
 }
 

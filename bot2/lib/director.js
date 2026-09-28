@@ -1035,7 +1035,7 @@ async function castleWork () {
   // the scaffold first, then the window's blocks while two slots stay free: the other way round the window filled every
   // slot, the filler's withdraw failed "inventory full", and the cells over a drop at the site went unplaced for want
   // of a block to stand on (2026-09-27) - and each withdraw into a full pack was still a walk to a chest
-  await build.ensureScaffold(bot, 32)
+  await build.ensureScaffold(bot, 32, { shouldStop: dayStop })
   await withdrawWindow(windowNeeds())
   // what does the next stretch of building need?
   const lowest = j.cells.filter(c => build.cellDone(bot, c) !== true)
@@ -1046,7 +1046,7 @@ async function castleWork () {
   const bandTop = minY + 4
   const obs = build.unskippedObstructions(bot, { maxY: bandTop }).filter(b => !world.LEAF_RE.test(b.name) || j.index.has(build.key(b.position))).length
   if (obs > 0) {
-    await build.ensureScaffold(bot, 32)
+    await build.ensureScaffold(bot, 32, { shouldStop: dayStop })
     const n = await build.clearSite(bot, { shouldStop: dayStop, maxBlocks: 200, maxY: bandTop })
     // (cleared: on to the building in the same round - ending it here sent the next round home for its home jobs)
     // nothing clearable right now: get on with materials meanwhile
@@ -1084,7 +1084,7 @@ async function castleWork () {
   // must come out of the chest too - with glass short, nothing was withdrawn and nothing built)
   const next = windowNeeds()
   // withdraw what we have for it (anything that stands in: birch stairs for jungle stairs)
-  await build.ensureScaffold(bot, 32)
+  await build.ensureScaffold(bot, 32, { shouldStop: dayStop })
   await withdrawWindow(next)
   let carrying = 0
   for (const name of Object.keys(next)) carrying += countOf(name)
