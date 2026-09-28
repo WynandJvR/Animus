@@ -663,7 +663,13 @@ async function escapeUpInner (bot) {
     if (bot.entity.onGround && !world.feetInWater(bot) && world.openSky(bot, { x: f.x, y: f.y, z: f.z })) break
     for (const dy of [2, 1]) {
       const b = world.at(bot, f.x, f.y + dy, f.z)
-      if (b && !world.isAirish(b) && !world.isWaterBlock(b) && !await act.dig(bot, b.position, { allowZones: ['farm', 'base', 'orchard', 'build'], timeoutMs: 8000, noWalk: true })) { log('move', `climbing out: can't clear ${b.name} over my head at ${fmt(b.position)}`); return false }
+      // (a finished cell of OUR build over the head is ours to take and put back: sealed in the hollow under the castle's
+      //  floor, every walk out failed and the climb refused the slab over the head - 5 minutes stuck, freed only by the
+      //  operator's hand, 2026-09-28. The builder sees the cell undone and places it again)
+      const j = require('./build').getJob()
+      const ours = !!(b && j && j.index && j.index.has(`${b.position.x},${b.position.y},${b.position.z}`))
+      if (ours) log('move', `climbing out: taking our own ${b.name} over my head at ${fmt(b.position)} - the builder puts it back`)
+      if (b && !world.isAirish(b) && !world.isWaterBlock(b) && !await act.dig(bot, b.position, { own: ours, force: ours, allowZones: ['farm', 'base', 'orchard', 'build'], timeoutMs: 8000, noWalk: true })) { log('move', `climbing out: can't clear ${b.name} over my head at ${fmt(b.position)}`); return false }
     }
     if (await gather.towerUp(bot, { allowZones: ['*'] })) continue // (an escape: any zone, never a build cell)
     // no towering here (in water a jump never clears a block; or nothing to place): a step cut into the side - the two
