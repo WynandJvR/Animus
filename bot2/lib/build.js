@@ -1442,7 +1442,8 @@ function snapshotInfo (bot) {
 }
 
 // Filler blocks to stand on while building high (the planner towers with them).
-async function ensureScaffold (bot, n = 32, { shouldStop } = {}) { // (shouldStop: the caller's day - a top-up is never a night descent)
+const SCAFFOLD_WANT = 32 // (THE scaffold stock a build step starts with - the smelt queue keeps cobblestone back to this)
+async function ensureScaffold (bot, n = SCAFFOLD_WANT, { shouldStop } = {}) { // (shouldStop: the caller's day - a top-up is never a night descent)
   // cobblestone counts: the pack carries hundreds for the walls and the planner towers on it. Asking for dirt first sent
   // the bot to dig grass at the foot of the west cliff it could not reach, twenty seconds a block for ten minutes, with
   // 250 cobblestone in the pack (2026-09-27). Dirt is dug only when there is no cobblestone either.
@@ -1467,7 +1468,7 @@ async function ensureScaffold (bot, n = 32, { shouldStop } = {}) { // (shouldSto
   return true
 }
 
-module.exports = { cachedStatus, exactWood, isOpenCell, INFILL_RE, infillItem, unsourced, strayBuildBlocks,
+module.exports = { SCAFFOLD_WANT, cachedStatus, exactWood, isOpenCell, INFILL_RE, infillItem, unsourced, strayBuildBlocks,
   finishSite, woodClass, woodForm, acceptsFor, itemOf, LOG_ANY, PLANKS_ANY, ensureScaffold, unskippedObstructions, setJob, getJob, status, nextNeeds,
   buildStep, clearSite, obstructions, removeScaffold, loadSchematic, cellDone, cellsDone, inBox, placeCell, registerJob, key,
   complete, needsWork, finish, survey, scaffoldList, holesList, ensureSnapshot, snapshotInfo, snapName,

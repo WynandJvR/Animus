@@ -1042,7 +1042,8 @@ async function processAtHome () {
     if (dayStop()) break
     // (and a scaffold's worth of cobblestone kept back: the furnaces took the last of it for stone, and the build step went
     //  straight to the mine for 31 to stand on - a mine trip a round, 2026-09-28)
-    const keepBack = s.input === 'cobblestone' ? SCAFFOLD_KEEP : 0
+    // (one number with the builder's: what the other filler held or banked does not already cover)
+    const keepBack = s.input === 'cobblestone' ? Math.max(0, build.SCAFFOLD_WANT - ['andesite', 'diorite', 'tuff', 'dirt', 'cobbled_deepslate'].reduce((t, n0) => t + stock(n0), 0)) : 0
     const n = Math.min(s.n, stock(s.input) - (win.top[s.input] || 0) - keepBack, 64 * Math.max(1, smelt.homeFurnaces(bot).length))
     if (n < 1) continue
     const k = await loadSmelt(s.input, n)
@@ -1074,7 +1075,7 @@ async function castleWork () {
   // the scaffold first, then the window's blocks while two slots stay free: the other way round the window filled every
   // slot, the filler's withdraw failed "inventory full", and the cells over a drop at the site went unplaced for want
   // of a block to stand on (2026-09-27) - and each withdraw into a full pack was still a walk to a chest
-  await build.ensureScaffold(bot, 32, { shouldStop: dayStop })
+  await build.ensureScaffold(bot, build.SCAFFOLD_WANT, { shouldStop: dayStop })
   await withdrawWindow(windowNeeds())
   // what does the next stretch of building need?
   const lowest = j.cells.filter(c => build.cellDone(bot, c) !== true)
@@ -1085,7 +1086,7 @@ async function castleWork () {
   const bandTop = minY + 4
   const obs = build.unskippedObstructions(bot, { maxY: bandTop }).filter(b => !world.LEAF_RE.test(b.name) || j.index.has(build.key(b.position))).length
   if (obs > 0) {
-    await build.ensureScaffold(bot, 32, { shouldStop: dayStop })
+    await build.ensureScaffold(bot, build.SCAFFOLD_WANT, { shouldStop: dayStop })
     const n = await build.clearSite(bot, { shouldStop: dayStop, maxBlocks: 200, maxY: bandTop })
     // (cleared: on to the building in the same round - ending it here sent the next round home for its home jobs)
     // nothing clearable right now: get on with materials meanwhile
@@ -1125,7 +1126,7 @@ async function castleWork () {
   // must come out of the chest too - with glass short, nothing was withdrawn and nothing built)
   const next = windowNeeds()
   // withdraw what we have for it (anything that stands in: birch stairs for jungle stairs)
-  await build.ensureScaffold(bot, 32, { shouldStop: dayStop })
+  await build.ensureScaffold(bot, build.SCAFFOLD_WANT, { shouldStop: dayStop })
   await withdrawWindow(next)
   let carrying = 0
   for (const name of Object.keys(next)) carrying += countOf(name)
@@ -1213,7 +1214,6 @@ function watchNights () {
 // are), leads followed from wherever the bot stands, a pack of logs and the saplings for the orchard at home carried
 // back. Without it the frontier passed 600b and the castle's 535 spruce logs could never be reached (2026-09-28).
 // Only fed, whole and armed; home again on a full pack, a searched-out country, a death, or MAX_NIGHTS out.
-const SCAFFOLD_KEEP = 48 // (cobblestone the smelting leaves for the builder's stepping stones: ensureScaffold asks 32)
 const DAWN_TICKS = 12900 // (the most daylight a day holds: ticksUntilNight at sunrise)
 const MAX_NIGHTS = 3
 // (three nights and the walk back is days of a working body - and a taiga is thin on animals: a full pack of food out,
