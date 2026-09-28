@@ -1483,7 +1483,7 @@ async function loop () {
       const scope = control.begin() // (the task's scope: an abort cancels everything it still begins - control.js)
       taskCancelled = scope.cancelled
       running = true
-      try { ok = await fn() } catch (e) { log('dir', `${d.name} threw: ${e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : e.message}`) } finally { scope.end() }
+      try { ok = await scope.run(fn) } catch (e) { log('dir', `${d.name} threw: ${e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : e.message}`) }
       if (!taskCancelled()) { try { await craft.packUpTables(bot) } catch {} } // (the task's field tables, once it is over - never after an operator stop, audit #40)
       running = false
       if (taskCancelled()) { current = null; continue }
