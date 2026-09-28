@@ -439,6 +439,29 @@ async function digIn () {
   log('reflex', `dug in at ${p0.x},${p0.y - 3},${p0.z}${filler ? '' : ' (nothing to plug the hole with)'}`)
 }
 
+// The way off a doomed leaf with nothing firm within 3 - it rots, and the fall comes anyway: held 58s over a 5-block drop
+// at "nowhere firm within 3" until it did (2026-09-28). A drop the hp takes onto ground that holds - the leaf dug out
+// from under us, straight down (the edge guards brake a walk or a jump off a ledge, not this); else a block of our own
+// beside the leaf, clicked on its side (dirt does not rot), for the tick to step onto; else null - stranded.
+let leafDigFailed = null
+function leafWayOff (leaf, fx, fy, fz) {
+  const act = require('./act')
+  const k = act.fallBelow(bot, { x: fx, y: fy, z: fz })
+  const land = Number.isFinite(k) && k > 0 ? world.at(bot, fx, fy - k, fz) : null
+  const key = `${fx},${fy},${fz}`
+  if (land && leafDigFailed !== key && !/_leaves$/.test(land.name) && bot.health - Math.max(0, k - 3) > hurtLine()) {
+    // (a dig that fails is not tried again on this leaf: the block beside it next, never the same dig every tick)
+    return { why: `a ${k}-block drop onto ${land.name} I can take - digging the leaf out`, run: () => act.digBlock(bot, leaf).then(ok => { if (!ok) leafDigFailed = key; return ok }) }
+  }
+  const filler = inv.shelterBlock(bot)
+  if (!filler) return null
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    const c = { x: fx + dx, y: fy, z: fz + dz }
+    if (![0, 1, 2].every(dy => world.isAirish(world.at(bot, c.x, c.y + dy, c.z))) || require('./move').inZone(c)) continue
+    return { why: `a ${filler.name || filler} put beside it at ${c.x},${c.y},${c.z} to stand on`, run: () => act.place(bot, c, filler.name || filler, { sneak: false, fromReflex: true, timeoutMs: 3000, faceHint: [[-dx, 0, -dz]] }) }
+  }
+  return null
+}
 function steerTo (p, { jump = true, sprint = false } = {}) {
   const me = bot.entity.position
   const yaw = Math.atan2(-(p.x + 0.5 - me.x), -(p.z + 0.5 - me.z))
@@ -1025,9 +1048,12 @@ function tick () {
         const d = Math.abs(dx) + Math.abs(dz) + Math.abs(dy)
         if (d < bd) { bd = d; best = { x, y, z } }
       }
-      if (!active || active.kind !== 'floor') { setActive('floor', 'off a decaying leaf'); log('reflex', `standing on decaying leaves at ${fx},${fy},${fz} over a ${require('./act').fallBelow(bot, { x: fx, y: fy, z: fz })}-block drop - ${best ? 'stepping off to ' + best.x + ',' + best.y + ',' + best.z : 'nowhere firm within 3'}`) }
+      const way = best ? null : leafWayOff(floor, fx, fy, fz)
+      if (!active || active.kind !== 'floor') { setActive('floor', 'off a decaying leaf'); log('reflex', `standing on decaying leaves at ${fx},${fy},${fz} over a ${require('./act').fallBelow(bot, { x: fx, y: fy, z: fz })}-block drop - ${best ? 'stepping off to ' + best.x + ',' + best.y + ',' + best.z : way ? way.why : 'stranded: nowhere firm within 3, no drop I would take, no block to stand on'}`) }
       try { bot.pathfinder.setGoal(null) } catch {}
-      if (best) steerTo(best, { jump: best.y > fy + 1 }); else for (const k of ['forward', 'back', 'left', 'right', 'jump']) bot.setControlState(k, false)
+      for (const k of ['forward', 'back', 'left', 'right', 'jump']) bot.setControlState(k, false)
+      if (best) steerTo(best, { jump: best.y > fy + 1 })
+      else if (way) { busy = true; way.run().catch(() => false).finally(() => { busy = false }) }
       return
     } else if (active && active.kind === 'floor') return clearActive()
   }
@@ -1279,4 +1305,4 @@ function setEnabled (on) { enabled = !!on; if (!on) clearActive() }
 function underMs () { return submergedSince ? Date.now() - submergedSince : 0 }
 function airLeftMs () { return airMs }
 
-module.exports = { plannerPlacedSince, findAirReachable, _bindForTest: b => { bot = b }, edgeStops, install, holdNoSneak, active: isActive, info, nearestThreat, lastHurt, hurtLine, edgeAhead, hostiles, onSurface, canSee, NEVER_MELEE, waitClear, setEnabled, findAir, HOSTILE, RANGED, bowReady, startDive, endDive, diveBroken, underMs, airLeftMs, AIR_MS, DIVE_HARD_MS }
+module.exports = { plannerPlacedSince, findAirReachable, _bindForTest: b => { bot = b }, _leafWayOff: (...a) => leafWayOff(...a), edgeStops, install, holdNoSneak, active: isActive, info, nearestThreat, lastHurt, hurtLine, edgeAhead, hostiles, onSurface, canSee, NEVER_MELEE, waitClear, setEnabled, findAir, HOSTILE, RANGED, bowReady, startDive, endDive, diveBroken, underMs, airLeftMs, AIR_MS, DIVE_HARD_MS }
