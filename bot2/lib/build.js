@@ -1081,6 +1081,7 @@ async function buildStep (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
   // scattered cobblestone in seven minutes counted as progress while 50 glass cells held every layer above them, and
   // the glass's sand and fuel were only fetched when a step placed nothing - at dusk, too late (2026-09-26)
   let waiting = null
+  let waitingHolds = false // (the item named holds the band up - not a detached one, named only because nothing else is missing)
   const badStands = new Set() // (stands whose walk failed this step: clusterStand passes them by)
   // (where a step's time goes: choosing the cell, walking to and placing it - measured, not guessed)
   const prof = { tries: 0, ms: 0, okMs: 0, dist: 0, pick: 0 }; let tpick = Date.now()
@@ -1151,12 +1152,13 @@ async function buildStep (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     }
     doable = doable.filter(c => !sealsBelow(c))
     waiting = missingItem()
+    waitingHolds = !!waiting && !det.has(waiting)
     if (!doable.length) {
       // (the band as it ended the step - which layer anchors it, and by which cell: a step that ends "waiting on X" after
       //  a few blocks said nothing of what held the band down, 2026-09-28)
       const anchor = todo.find(c => !c.attach && !c.follows && !c.foundation && !infillCell(c) && !((cellFails.get(key(c)) || {}).n >= 1) && c.y === lowestAll && !det.has(stepItem(bot, c)) && !fallsIn(bot, c, stepItem(bot, c)))
       if (placed) log('build', `step ended: band anchored at y${lowestAll}${anchor ? ' by ' + stepItem(bot, anchor) + '@' + anchor.x + ',' + anchor.y + ',' + anchor.z + (has(anchor) ? ' (in hand)' : ' (not in hand)') : ''}, ${structural.length} structural in hand (min y${minY}), ${todo.length} todo`)
-      profLog(); if (!placed) log('build', `nothing doable: lowest structural y${lowestAll}, ${todo.length} todo, ${structural.length} structural in hand (min y${minY}), ${attached.length} attached ready, waiting on ${waiting}`); return { placed, blockedOn: waiting, done: false } }
+      profLog(); if (!placed) log('build', `nothing doable: lowest structural y${lowestAll}, ${todo.length} todo, ${structural.length} structural in hand (min y${minY}), ${attached.length} attached ready, waiting on ${waiting}`); return { placed, blockedOn: waiting, blockedHolds: waitingHolds, done: false } }
     const me = bot.entity.position
     // cells that can be clicked right now first; one whose every face is another unbuilt cell of this
     // build waits for its neighbours (trying it costs ~20s of failed placing, and a wall of x-axis logs
@@ -1164,7 +1166,7 @@ async function buildStep (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     const clickable = c => plansFor(c).some(p => refOk(bot, c, p))
     const supportable = c => !c.attach && !c.twin && plansFor(c).some(p => !job.index.has(key({ x: c.x + p.off[0], y: c.y + p.off[1], z: c.z + p.off[2] })))
     const ready = doable.filter(c => clickable(c) || supportable(c))
-    if (!ready.length) { profLog(); if (!placed) log('build', `nothing ready: lowest y${lowestAll}, ${doable.length} doable (${doable.slice(0, 5).map(c => c.name + '@' + c.x + ',' + c.y + ',' + c.z).join(' ')}) none clickable or supportable, waiting on ${waiting}`); return { placed, blockedOn: waiting, done: false } }
+    if (!ready.length) { profLog(); if (!placed) log('build', `nothing ready: lowest y${lowestAll}, ${doable.length} doable (${doable.slice(0, 5).map(c => c.name + '@' + c.x + ',' + c.y + ',' + c.z).join(' ')}) none clickable or supportable, waiting on ${waiting}`); return { placed, blockedOn: waiting, blockedHolds: waitingHolds, done: false } }
     // everything within reach of where we stand first, then the nearest - a layer down counts one block, not four:
     // the walk between cells is most of a block's six seconds, and "lower first" sent the bot back and forth across the
     // 50x140 site between two layers (2026-09-27)
@@ -1203,7 +1205,7 @@ async function buildStep (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     else { failed.set(key(c), (failed.get(key(c)) || 0) + 1); saveCellFails(); if (failed.get(key(c)) === 1) log('build', `${c.name} at ${move.fmt(c)} won't place (${lastPlaceFail || 'unlogged'}) - leaving it for later`) }
   }
   profLog()
-  return { placed, blockedOn: waiting, done: false }
+  return { placed, blockedOn: waiting, blockedHolds: waitingHolds, done: false }
 }
 
 // ---- the site as it was: snapshot, scaffold, holes -------------------------------------------------

@@ -1184,10 +1184,12 @@ async function castleWork () {
   if (carrying > 0) {
     const r = await build.buildStep(bot, { shouldStop: dayStop, maxMs: 8 * 60000 })
     log('dir', `build step: placed ${r.placed}${r.blockedOn ? ', waiting on ' + r.blockedOn : ''}`)
-    blockedOn = r.blockedOn
+    blockedOn = r.blockedHolds ? r.blockedOn : null // (what the round steers by: only what holds the band)
     // (infill - glass, bars, lanterns - waited on while the structure still rises is no morning's errand: the sand
     //  for 50 windows took every morning's best hours while 30k blocks of wall could go up; it comes last)
-    mem.set('buildWaiting', r.blockedOn && !build.infillItem(r.blockedOn) ? r.blockedOn : null)
+    // (and only an item that holds the band: one with none in stock is named when nothing else is missing, and its trip
+    //  first thing in the day - 31 fuel for one coal block - was the day's building time, 2026-09-28)
+    mem.set('buildWaiting', r.blockedOn && r.blockedHolds && !build.infillItem(r.blockedOn) ? r.blockedOn : null)
     if (r.placed > 0 && !r.blockedOn) return true
     // every cell still missing has failed, with the blocks in hand: our own scaffold may be what is in the way. Two
     // wall torches in a room whose floor was full of scaffold (a 1-high gap left under the ceiling, nowhere to stand)
