@@ -84,6 +84,10 @@ function homeByDark () {
   //  1800 ticks at the farm's own edge, and every chore chosen then stopped the moment it began - the farm, the yard,
   //  four times over, 2026-09-28. The dusk stop ends them when the evening comes)
   if (world.dist3(bot.entity.position, h) < 24) return false
+  // (a short walk - the build site next door - needs no margin cut from the day: the dusk rule walks the bot to its bed from
+  //  anywhere within 200. The margin's 1800 ticks are for the long ways home, a mine's climb: at the site 47b off they
+  //  ended the castle's day 105s early, of a 600s working day, 2026-09-28)
+  if (world.dist3(bot.entity.position, h) < 64) return false
   return world.ticksUntilNight(bot) < walk + world.HOME_MARGIN
 }
 let taskCancelled = () => false
@@ -558,13 +562,13 @@ function decide () {
   // (a debt cap on our own litter: in the castle's gaps only, it never came - the castle always has work - and 211 pillars
   //  and stepping stones stood round home by the evening, cobble towers on the treetops the operator asked about,
   //  2026-09-28. Past LITTER_CAP it goes before the castle: one walk takes down dozens)
-  // (twice a day at most ahead of the castle: from 211 pending, a run of 12 columns at a time would take most of a day - the
+  // (once a day at most ahead of the castle - twice took 623s of a 25-minute day, the castle 248s, 2026-09-28: from 211 pending, a run of 12 columns at a time would take most of a day - the
   //  backlog drains over days, the stepping stones' price stops it growing; audit)
   // (a new day the way watchNights reads one - a night seen, or the clock wrapped past dawn in a bed - never bot.time.day)
   // (kept in memory: a module variable was reset by every restart, and a deploy day ran the tidy ahead three times)
   const tidyFirst = mem.get().tidyFirst || { tod: null, n: 0 }
   { const t = world.tod(bot); if ((world.isNight(bot) || (tidyFirst.tod != null && t < tidyFirst.tod)) && tidyFirst.n) { tidyFirst.n = 0; mem.set('tidyFirst', tidyFirst) } tidyFirst.tod = t }
-  if (tidyFirst.n < 2 && dHome < 64 && world.phase(bot) === 'day' && !nightSoon() && !held('tidy')) {
+  if (tidyFirst.n < 1 && dHome < 64 && world.phase(bot) === 'day' && !nightSoon() && !held('tidy')) {
     const n = litter.pending(bot, mem.get().home, 96).length
     if (n >= LITTER_CAP) { tidyFirst.n++; mem.set('tidyFirst', tidyFirst) }
     if (n >= LITTER_CAP) return { name: 'tidy', why: `${n} blocks of ours left standing round home (pillars, stepping stones) - past ${LITTER_CAP}, before the castle` }
