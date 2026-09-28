@@ -599,6 +599,7 @@ function jumpGuard () {
   }
 }
 let takeoff = null; let wasGround = true; let fell = null; let lastPath = null
+let roofDug = null // (the roof block the air reflex last dug - its log line once a block)
 // the pathfinder's next step as planned (where to, what it meant to break and place to get there)
 function plannedStep () {
   if (!lastPath || !lastPath.length || !bot.entity) return ''
@@ -797,6 +798,28 @@ function tick () {
     // ...and with no land in reach, an entity over the column (our own boat: a paused bot floating under it drowned
     // jumping into its hull, 2026-09-23) is swum round: open air a couple of strokes to the side
     const aside = open && stalled && !land ? findAir(false, { aside: true }) : null
+    // ROOFED OVER: no way up and no rising - dig the roof. Steering at the nearest air cell (past solid rock) and jumping
+    // held the body in one cell for twenty seconds: the pathfinder stepped it down into a water pocket under a stone
+    // roof 170 blocks from home, and it drowned with 390 items (2026-09-28). A player breaks the block over their head.
+    if (!open && stalled && !busy) {
+      let roof = null
+      for (let dy = 2; dy <= 4; dy++) { const b = world.at(bot, me.x, me.y + dy, me.z); if (!b) break; if (swimThrough(b) || world.isAirish(b)) continue; roof = b; break }
+      // (never a roof whose dig kills: a falling block drops the column above into the head cell through the water, and a
+      //  roof holding back lava pours it in - act.dig's own lava rule; audit 2026-09-28)
+      const falls = roof && /(^|_)(gravel|sand|concrete_powder)$|^suspicious_/.test(roof.name)
+      const lava = roof && world.holdsBackLava(bot, roof.position)
+      if (roof && (falls || lava) && (!roofDug || roofDug.x !== roof.position.x || roofDug.y !== roof.position.y || roofDug.z !== roof.position.z)) { roofDug = roof.position; log('reflex', `air: roofed over by ${roof.name} but ${falls ? 'it would fall in on me' : 'lava beyond'} - not digging`) }
+      if (roof && !falls && !lava && roof.diggable !== false && !/^(bedrock|obsidian|crying_obsidian|reinforced_deepslate)$/.test(roof.name)) {
+        if (!roofDug || roofDug.x !== roof.position.x || roofDug.y !== roof.position.y || roofDug.z !== roof.position.z) log('reflex', `air: roofed over by ${roof.name} at ${roof.position.x},${roof.position.y},${roof.position.z} under water - digging up (air ${Math.round(airMs / 100) / 10}s)`)
+        roofDug = roof.position
+        busy = true
+        // (standing, not floating: a dig off the ground under water is 25x slow - a stone roof from a float outlasts a
+        //  breath; let go of jump and the body settles on the pocket's floor, 5x)
+        for (const k of ['jump', 'forward', 'back', 'left', 'right']) bot.setControlState(k, false)
+        require('./act').digBlock(bot, roof).catch(() => false).finally(() => { busy = false; riseAt = Date.now() })
+        return
+      }
+    }
     if (aside) {
       steerTo(aside, { jump: true })
     } else if (open && !land) {

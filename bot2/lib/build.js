@@ -1432,6 +1432,15 @@ async function ensureScaffold (bot, n = 32) {
     if (have >= n) return true
     if (base.bankCount(name) > 0) await base.withdraw(bot, name, n - have).catch(() => 0)
   }
+  // (none banked: cobblestone from the mine at home first - the castle burns it as stone anyway, and the mine is a
+  //  known walk; the surface dirt round home is protected ground, so "27 dirt" explored 104 blocks out, and the
+  //  pathfinder stepped the bot into a roofed water pocket there - drowned with 390 items, 2026-09-28. Dirt only
+  //  when the mine gave nothing.)
+  if (filler() < n / 2) {
+    const short = n - filler()
+    log('build', `getting ${short} cobblestone from the mine to scaffold with`)
+    await require('./craft').ensure(bot, 'cobblestone', inv.count(bot, 'cobblestone') + Math.max(short, 32), { noWithdraw: true }).catch(() => false)
+  }
   if (filler() < n / 2) { log('build', `getting ${n - filler()} dirt to scaffold with`); await require('./craft').ensure(bot, 'dirt', inv.count(bot, 'dirt') + (n - filler()), { noWithdraw: true }).catch(() => false) }
   return true
 }
