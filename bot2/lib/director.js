@@ -32,6 +32,7 @@ const orchard = require('./orchard')
 const litter = require('./litter')
 let litterSeeded = false // (the pillars from before the ledger: looked for once a run, once the orchard's zone is set)
 const LITTER_BATCH = 8
+const LITTER_CAP = 48 // (our own blocks standing round home past which the tidy goes before the castle)
 
 // Hunt an animal that is right here when the pack is low on food - a player does not walk past a
 // cow with nothing to eat. Bounded to animals within 20 blocks and ~25 seconds.
@@ -554,6 +555,13 @@ function decide () {
   // (derived from the world, never a latch: a finished build that loses blocks - a creeper - is work again)
   // (not in the day's last minutes: a round that can only be cut short at once spun - castle, placed 0, deposit, castle
   //  - every three seconds at dusk once a dusk-cut round stopped counting as a failure, 2026-09-27)
+  // (a debt cap on our own litter: in the castle's gaps only, it never came - the castle always has work - and 211 pillars
+  //  and stepping stones stood round home by the evening, cobble towers on the treetops the operator asked about,
+  //  2026-09-28. Past LITTER_CAP it goes before the castle: one walk takes down dozens)
+  if (dHome < 64 && world.phase(bot) === 'day' && !nightSoon() && !held('tidy')) {
+    const n = litter.pending(bot, mem.get().home, 96).length
+    if (n >= LITTER_CAP) return { name: 'tidy', why: `${n} blocks of ours left standing round home (pillars, stepping stones) - past ${LITTER_CAP}, before the castle` }
+  }
   if (mem.get().build && build.getJob() && build.needsWork(bot) && !nightSoon() && !homeByDark() && !held('castle')) {
     return { name: 'castle', why: 'working on ' + mem.get().build.name }
   }
