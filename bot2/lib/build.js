@@ -1100,7 +1100,9 @@ async function buildStep (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     const lowestAll = lowestStructural(todo, bot, det)
     const items = inv.items(bot)
     // (a cell half-way - an empty pot - waits on its next step's item, the plant)
-    const has = c => (stepOf(c, world.at(bot, c.x, c.y, c.z)) === 'then' ? items.some(i => i.name === c.then) : !!pickItem(bot, c, items))
+    // (a two-step cell is ready only with both steps' items in hand: the pot went in without its flower, the step "failed"
+    //  and rested, and a second walk came later for the plant - 5 of a step's 16 misses, 2026-09-28)
+    const has = c => (stepOf(c, world.at(bot, c.x, c.y, c.z)) === 'then' ? items.some(i => i.name === c.then) : !!pickItem(bot, c, items) && (!c.then || items.some(i => i.name === c.then)))
     // what the band is really held up by: a structural cell of the lowest layers first. A carpet or a pot holds
     // nothing up - reported first, the director chased unreachable sheep for "red_carpet" while two granite stairs
     // and twelve panes (sand) were what kept the walls from rising (2026-09-23)
