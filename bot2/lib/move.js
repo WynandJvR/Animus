@@ -492,6 +492,7 @@ async function goToInner2 (bot, goal, opts, { timeoutMs, stuckMs, dig, place, al
   const cancelled = control.token()
   let fails = 0
   let interrupts = 0
+  let instant = 0
   while (Date.now() < deadline) {
     // (a turn for the event loop every round: a plan that fails at once - 'interrupted' back to back, a goal with no way -
     //  went round on resolved promises and held the loop 10.9s picking up a boat; the stall watch named this loop, 2026-09-28)
@@ -510,10 +511,16 @@ async function goToInner2 (bot, goal, opts, { timeoutMs, stuckMs, dig, place, al
     // (only when roofed in: under the footprint in the open - a mine far below, the yard - unlocks nothing; audit #42)
     const here = inZone(fp) || (!world.openSky(bot, fp) && underZone(fp)) || null
     const zonesOk = here && !allowZones.includes(here.label) ? allowZones.concat([here.label]) : allowZones
+    const tRun = Date.now(); const pRun = bot.entity.position.clone()
     const r = await runGoal(bot, goal, { timeoutMs: Math.max(2000, deadline - Date.now()), stuckMs, movements: movementsFor(bot, { dig, place, allowZones: zonesOk, dryHead }) })
     if (r.ok) return r
+    // (a plan that failed at once, going nowhere, three times over from here: a verdict, not bad luck - said, not cycled
+    //  to the deadline; audit 2026-09-28)
+    // (an interruption is the reflex taking the body - a fight, the edge brake - never a verdict on the way: counted here
+    //  one fight by a known tree read "noPath" and the tree was forgotten; audit 2026-09-28)
+    if (r.why !== 'interrupted' && Date.now() - tRun < 120 && bot.entity.position.distanceTo(pRun) < 0.1) { if (++instant >= 3) return { ok: false, why: r.why || 'noPath' } } else if (r.why !== 'interrupted') instant = 0
     if (r.why === 'died') return r
-    if (r.why === 'interrupted') { if (++interrupts > 20) return { ok: false, why: 'interrupted too often' }; await bot.waitForTicks(1).catch(() => {}); continue } // (a tick: the reflex that interrupted gets its turn)
+    if (r.why === 'interrupted') { if (++interrupts > 20) return { ok: false, why: 'interrupted' }; await waitReflex(bot); continue } // (the body is busy: wait for the reflex, then go on - "interrupted", never "blocked")
     if (r.why === 'timeout') return r
     fails++
     // a stall next to a door is a door the planner would not open: cross it by hand
