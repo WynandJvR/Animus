@@ -1061,8 +1061,10 @@ async function processAtHome () {
   const home = mem.get().home
   const st = build.cachedStatus(bot)
   if (!st) return
+  phase('home: furnaces collect+refuel')
   await smelt.collectFurnaces(bot)
   await smelt.refuelFurnaces(bot)
+  phase('home: planning')
   const winNeeds = windowNeeds()
   const win = mats.planFor(bot, winNeeds)
   let tot = mats.planFor(bot, st.need)
@@ -1070,6 +1072,7 @@ async function processAtHome () {
   if (tot.unknown.length) log('dir', `no route known for ${tot.unknown.join(', ')} - gathering them as they are`)
   // furnaces for the volume, counted around HOME (counted around the bot at the site it found too few and
   // built six more)
+  phase('home: furnace building')
   if (tot.smeltTotal > 0) {
     const furns = smelt.homeFurnaces(bot)
     const want = furnaceTarget(tot)
@@ -1083,6 +1086,7 @@ async function processAtHome () {
   }
   // fuel for the queue: charcoal from logs beyond the ones the next layers build with (one log smelts eight;
   // the brick line stalled on fuel with cobble waiting in the chest)
+  phase('home: charcoal')
   if (tot.raw.fuel > 0 && stock('coal') + stock('charcoal') < 32) {
     const spareLogs = Math.floor(smelt.woodSurplus(bot) / 4)
     // (never the build's own species: the most-stocked log was the orchard's spruce, and 31 of it went into the furnaces)
@@ -1095,10 +1099,12 @@ async function processAtHome () {
     }
   }
   // the crafts that feed a furnace (stone -> stone bricks, to crack) are the queue's, the whole build's
+  phase('home: feed crafts')
   const feed = tot.crafts.filter(c => mats.SMELT_INPUTS.has(c.item))
   if (feed.length) { await mats.makeCrafts(bot, feed, { keep: win.top, shouldStop: dayStop }); tot = mats.planFor(bot, st.need) }
   // the queue: what the window waits on first; an input the window also places itself (cobblestone) goes in
   // only beyond the window's own share
+  phase('home: smelt queue')
   const winOut = new Set(win.smelts.map(s => s.output))
   for (const s of tot.smelts.slice().sort((a, b) => winOut.has(b.output) - winOut.has(a.output))) {
     if (dayStop()) break
@@ -1112,6 +1118,7 @@ async function processAtHome () {
     if (k) log('dir', `smelting ${k} ${s.input} -> ${s.output} (${s.n} more ${s.output} wanted for the ${st.name})`)
   }
   // the window's crafts, ingredients first (planks before stairs, bricks before brick stairs)
+  phase('home: window crafts')
   const win2 = mats.planFor(bot, winNeeds)
   if (win2.crafts.length) {
     const made = await mats.makeCrafts(bot, win2.crafts, { keep: win2.top, shouldStop: dayStop })
