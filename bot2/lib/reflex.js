@@ -1386,6 +1386,17 @@ function install (b) {
   jumpGuard()
   installPlaceGuard()
   bot.on('path_update', r => { lastPath = r && r.path; lastPathStatus = r && r.status })
+  // (a TRIPWIRE: lava appearing beside us within moments of a lava bucket in the hand is a placing some path let through -
+  //  named at once, loudly; the lava fuel only ever scoops; audit 2026-09-28)
+  let lavaHeldAt = 0
+  bot.on('heldItemChanged', it => { if (it && it.name === 'lava_bucket') lavaHeldAt = Date.now() })
+  bot.on('blockUpdate', (o, n) => {
+    if (!n || n.name !== 'lava' || !bot.entity || (o && o.name === 'lava')) return
+    const held = bot.heldItem && bot.heldItem.name === 'lava_bucket'
+    if (!held && Date.now() - lavaHeldAt > 1500) return
+    if (n.position.distanceTo(bot.entity.position) > 3.5) return
+    log('vital', `LAVA appeared at ${n.position.x},${n.position.y},${n.position.z} beside me with a lava bucket in hand${active ? ' (reflex ' + active.kind + ')' : ''} - a placing that must never happen`)
+  })
   bot.on('goal_reached', () => { lastPath = null })
   bot.on('physicsTick', () => { try { noteTakeoff(); edgeGuard() } catch (e) { log('reflex', 'edge guard error: ' + e.message) } })
   // a fall's death names what took the body off the ground (the trail is 1/s: it can't - a fall off the cathedral's
