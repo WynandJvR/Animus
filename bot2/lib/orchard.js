@@ -16,7 +16,15 @@ const mem = require('./memory')
 const reflex = require('./reflex')
 const { log } = require('./log')
 
-const SAPLING_RE = /^(oak|spruce|birch|jungle|acacia|cherry)_sapling$/ // (dark oak needs four in a square: never alone)
+const SAPLING_RE = /^(oak|spruce|birch|jungle|acacia|cherry)_sapling$/ // (the singles: dark oak needs four in a square, never alone)
+// (any sapling, as a block standing in a spot or an item in the bank - dark oak's squares grow like spruce's: without it
+//  a planted dark oak square read as a dead spot)
+const ANY_SAP_RE = /^(oak|spruce|birch|jungle|acacia|cherry|dark_oak)_sapling$/
+// THE SQUARES' SPECIES: four saplings of one in a 2x2 - dark oak (it grows no other way) before spruce (a single will do
+// for it). A dark oak plot at home turns a 420-block walk each way into a few steps, renewable (audit 2026-09-29)
+const QUAD_SAPS = ['dark_oak_sapling', 'spruce_sapling']
+function quadSap (bot) { return QUAD_SAPS.find(n => inv.count(bot, n) >= 4) || null }
+function quadCount (bot) { return Math.max(...QUAD_SAPS.map(n => inv.count(bot, n))) }
 const SOIL_RE = /^(grass_block|dirt|podzol|coarse_dirt|rooted_dirt|moss_block)$/
 const GROW_ROOM = 7 // air a sapling needs over it to grow (vanilla: the trunk plus the crown)
 const SPACING = 3 // one trunk every third cell: the crowns touch, the trunks stay walkable between
@@ -31,7 +39,7 @@ const cellsOf = s => s.quad ? QUAD.map(([dx, dz]) => ({ x: s.x + dx, y: s.y, z: 
 function orchard () { return mem.get().orchard || null }
 // Nothing in the cell - a sapling included: it has no collision box, so "airish" took a planted spot for an empty one
 // and the bot spent 15 minutes planting oak on top of birch saplings (2026-09-24)
-function free (b) { return !!b && world.isAirish(b) && !SAPLING_RE.test(b.name) && !world.LOG_RE.test(b.name) }
+function free (b) { return !!b && world.isAirish(b) && !ANY_SAP_RE.test(b.name) && !world.LOG_RE.test(b.name) }
 // One small box per tree: its trunk cell and the ring round it, soil to crown (never one box round them all - spread
 // round home, that box took in the base, the farm and the furnaces, 2026-09-24)
 function boxOf (s) { return s.quad ? { x1: s.x - 2, x2: s.x + 3, z1: s.z - 2, z2: s.z + 3, y1: s.y - 1, y2: s.y + QUAD_ROOM + 2 } : { x1: s.x - 1, x2: s.x + 1, z1: s.z - 1, z2: s.z + 1, y1: s.y - 1, y2: s.y + GROW_ROOM + 2 } }
@@ -45,7 +53,7 @@ function spotOK (bot, p, room = GROW_ROOM) {
   for (let dy = 0; dy <= room; dy++) {
     const b = world.at(bot, p.x, p.y + dy, p.z)
     if (!b) return false
-    if (dy === 0 && (SAPLING_RE.test(b.name) || world.LOG_RE.test(b.name))) continue
+    if (dy === 0 && (ANY_SAP_RE.test(b.name) || world.LOG_RE.test(b.name))) continue
     if (!world.isAirish(b) && !(dy > 0 && world.LEAF_RE.test(b.name))) return false
   }
   return world.openSky(bot, { x: p.x, y: p.y + room, z: p.z })
@@ -133,7 +141,7 @@ function pruneDead (bot) {
   for (const s of o.spots.slice()) {
     const bs = cellsOf(s).map(c => world.at(bot, c.x, c.y, c.z))
     if (bs.some(b => !b)) continue // (unloaded: unknown, kept)
-    if (bs.some(b => SAPLING_RE.test(b.name) || world.LOG_RE.test(b.name))) continue // (growing, or a trunk still there)
+    if (bs.some(b => ANY_SAP_RE.test(b.name) || world.LOG_RE.test(b.name))) continue // (growing, or a trunk still there)
     if (!spotOK(bot, s)) { const bad = bs.find(b => !free(b)); dropSpot(s, `${bad ? bad.name : 'no room'} there now`) }
   }
 }
@@ -143,13 +151,13 @@ async function plant (bot, { demandTrees = 0, shouldStop } = {}) {
   if (!o) { o = { spots: [] }; mem.set('orchard', o) }
   pruneDead(bot)
   const fill = empty(bot)
-  const spruce = () => inv.count(bot, 'spruce_sapling')
+  const spruce = () => quadCount(bot) // (the squares' saplings: dark oak or spruce - quadSap)
   // (spruce goes in fours - one mega tree - while four are in the pack for each square; the rest as single trees)
   const fillQuads = fill.filter(q => q.quad).length
   const quadsWanted = Math.max(0, Math.min(Math.floor(Math.max(0, spruce() - 4 * fillQuads) / 4), demandTrees - o.spots.length))
   const freshQuads = newSpots(bot, quadsWanted, { quad: true })
   if (freshQuads.length) { mem.update(m => { m.orchard.spots = m.orchard.spots.concat(freshQuads) }); setZone() }
-  const singles = saplingCount(bot) - 4 * (fillQuads + freshQuads.length) - fill.filter(q => !q.quad).length
+  const singles = saplingCount(bot) - (quadSap(bot) === 'spruce_sapling' ? 4 * (fillQuads + freshQuads.length) : 0) - fill.filter(q => !q.quad).length // (spruce kept back for its squares; dark oak is never a single)
   const more = Math.max(0, Math.min(singles, demandTrees - orchard().spots.length))
   const fresh = newSpots(bot, more)
   if (fresh.length) { mem.update(m => { m.orchard.spots = m.orchard.spots.concat(fresh) }); setZone() }
@@ -157,9 +165,10 @@ async function plant (bot, { demandTrees = 0, shouldStop } = {}) {
   for (const s of fill.concat(freshQuads, fresh)) {
     if (shouldStop && shouldStop()) break
     await reflex.waitClear()
-    if (s.quad && spruce() < 4) continue // (a square only whole)
+    const qs = s.quad ? quadSap(bot) : null // (one species a square)
+    if (s.quad && !qs) continue // (a square only whole)
     for (const c of cellsOf(s)) {
-      const sap = s.quad ? inv.items(bot).find(i => i.name === 'spruce_sapling') : saplings(bot)[0]
+      const sap = s.quad ? inv.items(bot).find(i => i.name === qs) : saplings(bot)[0]
       if (!sap) break
       const b = world.at(bot, c.x, c.y, c.z)
       if (!free(b)) continue
@@ -167,7 +176,7 @@ async function plant (bot, { demandTrees = 0, shouldStop } = {}) {
       // it must stay there: a sapling that pops off at once came back as "planted" eleven times in 2s (2026-09-24)
       await new Promise(r => setTimeout(r, 300))
       const now = world.at(bot, c.x, c.y, c.z)
-      if (now && SAPLING_RE.test(now.name)) planted++
+      if (now && ANY_SAP_RE.test(now.name)) planted++
       else { dropSpot(s, `the sapling did not stay (${now ? now.name : '?'} there)`); break }
     }
   }
@@ -208,4 +217,4 @@ async function harvest (bot, { logs = Infinity, demandTrees = 0, shouldStop } = 
 
 function info (bot) { const o = orchard(); return o ? { spots: o.spots.length, grown: grown(bot).length, empty: empty(bot).length } : null }
 
-module.exports = { plantable, orchard, setZone, plant, harvest, grown, empty, wantSaplings, saplingCount, newSpots, spotOK, info, SAPLING_RE }
+module.exports = { ANY_SAP_RE, quadSap, plantable, orchard, setZone, plant, harvest, grown, empty, wantSaplings, saplingCount, newSpots, spotOK, info, SAPLING_RE }

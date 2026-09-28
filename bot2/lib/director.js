@@ -497,8 +497,8 @@ function decide () {
   if (inv.rawFoodCount(bot) >= 3 && dHome < 64 && !held('cook')) return { name: 'cook', why: `${inv.rawFoodCount(bot)} raw food to cook` }
   // saplings on hand and room for them in the orchard (empty spots, or fewer trees than the build still needs)
   {
-    const saps = orchard.saplingCount(bot) + Object.entries(base.bankCounts()).filter(([n]) => orchard.SAPLING_RE.test(n)).reduce((a, [, c]) => a + c, 0)
-    const spruceSaps = inv.count(bot, 'spruce_sapling') + base.bankCount('spruce_sapling')
+    const saps = orchard.saplingCount(bot) + inv.count(bot, 'dark_oak_sapling') + Object.entries(base.bankCounts()).filter(([n]) => orchard.ANY_SAP_RE.test(n)).reduce((a, [, c]) => a + c, 0)
+    const spruceSaps = Math.max(...['spruce_sapling', 'dark_oak_sapling'].map(n => inv.count(bot, n) + base.bankCount(n))) // (the squares' saplings)
     const o = orchard.orchard()
     if (dHome < 64 && world.phase(bot) === 'day' && saps > 0 && orchard.plantable(bot, spruceSaps, saps, demandTrees) && !held('plant')) return { name: 'plant', why: `${saps} saplings for the orchard (${o ? o.spots.length : 0} spots, ${demandTrees} trees wanted)` }
   }
@@ -877,7 +877,7 @@ const TASKS = {
   async fixWater () { return farm.fixWater(bot, { shouldStop: dayStop }) },
   async harvest () { return farm.harvest(bot, { shouldStop: dayStop }) },
   async plant () {
-    for (const [n, c] of Object.entries(base.bankCounts())) if (orchard.SAPLING_RE.test(n) && c > 0) await base.withdraw(bot, n, c).catch(() => 0)
+    for (const [n, c] of Object.entries(base.bankCounts())) if (orchard.ANY_SAP_RE.test(n) && c > 0) await base.withdraw(bot, n, c).catch(() => 0)
     return (await orchard.plant(bot, { demandTrees, shouldStop: dayStop })) > 0
   },
   async tools () {
@@ -993,6 +993,15 @@ const TASKS = {
     const o = gather.lastChopOutcome()
     const got = inv.count(bot, e.raw) - before
     if (got > 0) forage.noteTrip(e.raw, got, 'expedition')
+    // (a dark oak felled: its crowns decay over the next half minute, a sapling in twenty leaves - a player waits and picks
+    //  them up. Home they plant a square in the orchard, and dark oak grows a few steps from the build instead of a 420-block
+    //  walk away. The first two trips brought 92 logs and not one sapling, 2026-09-29)
+    if (got > 0 && /^dark_oak_log$/.test(e.raw) && inv.count(bot, 'dark_oak_sapling') < 8) {
+      const s0 = inv.count(bot, 'dark_oak_sapling')
+      for (let i = 0; i < 3 && !stop(); i++) { await move.sleep(8000); await act.collectDrops(bot, { radius: 12, maxMs: 8000 }).catch(() => {}) }
+      const s1 = inv.count(bot, 'dark_oak_sapling')
+      log('dir', `expedition: waited on the crowns - ${s1 - s0} dark oak sapling${s1 - s0 === 1 ? '' : 's'} picked up (${s1} in the pack)`)
+    }
     if (tripRoom() < 64) endExpedition('the pack is full')
     else if (o && o.outcome === 'none-found' && got <= 0) { e.dry++; mem.set('expedition', e); if (e.dry >= 2) { forage.noteTrip(e.raw, 0, 'none found on the expedition', { searched: true }); endExpedition('no more of it to be found') } }
     return got > 0 || (o && (o.outcome === 'lead' || o.outcome === 'stopped'))
