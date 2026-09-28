@@ -1358,7 +1358,10 @@ async function gatherFor (raw, short) {
             tried++
             log('dir', `short of ${short} fuel for the furnaces - ${want - (inv.count(bot, 'coal') - c0)} coal from the outcrop at ${move.fmt(o.position)}`)
             worked.push(o.position)
-            const r = await move.travel(bot, o.position, { range: 3, shouldStop: dayStop, label: 'to the coal' })
+            // (to the open air in front of the rock face, not the ore block: aimed at the block at y96, the walk dug down under
+            //  the castle toward it, 2026-09-28 - the cell that sees the sky is reached over the ground)
+            const face = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 0, -1]].map(([dx, dy, dz]) => ({ x: o.position.x + dx, y: o.position.y + dy, z: o.position.z + dz })).find(q => { const a = world.at(bot, q.x, q.y, q.z); return a && world.isAirish(a) && world.openSky(bot, q) }) || o.position
+            const r = await move.travel(bot, face, { range: 2, shouldStop: dayStop, label: 'to the coal' })
             if (r.ok) await mining.takeKnownOre(bot, 'coal', c0 + want, Object.assign({}, ctx, { near: { point: o.position, radius: 8 }, oreFilter: b => world.dist3(b.position, o.position) <= 3 || skyFace(b) })).catch(() => false)
             o = await pick()
           }
