@@ -426,17 +426,23 @@ async function pour (bot, pos, itemName, { plans, accept, allowZones = [], timeo
 // Fill an empty bucket at the still water `pos` (a source: vanilla's empty bucket takes SOURCE fluid only), looking at
 // the water's surface. True when the pack holds one more water bucket than before - the one fill every gatherer uses
 // (the forager's own right-click never checked it had filled, 2026-09-27).
-async function fill (bot, pos, { allowZones = [], timeoutMs = 12000, noWalk = false } = {}) {
+// `liquid`: 'water' (the default) or 'lava' - a lava source fills the same way and the pack must show a lava bucket
+// (the furnaces' fuel: one bucket smelts a hundred, 2026-09-28). The walk here is water's only: lava is never walked up
+// to by this - its gatherer stands the bot on its own chosen ground first and passes noWalk.
+async function fill (bot, pos, { allowZones = [], timeoutMs = 12000, noWalk = false, liquid = 'water' } = {}) {
+  if (liquid !== 'water' && liquid !== 'lava') throw new Error(`fill: no bucket of ${liquid}`)
+  const full = liquid + '_bucket'
+  if (liquid === 'lava') noWalk = true
   const target = new Vec3(pos.x, pos.y, pos.z)
   const t0 = Date.now()
   const cancelled = control.token()
   let tries = 0
-  const still = w => { try { return !!w && w.name === 'water' && Number((w.getProperties() || {}).level || 0) === 0 } catch { return false } }
+  const still = w => { try { return !!w && w.name === liquid && Number((w.getProperties() || {}).level || 0) === 0 } catch { return false } }
   while (Date.now() - t0 < timeoutMs && tries < 3) {
     await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
     if (cancelled()) return false
     await reflex.waitClear()
-    if (!still(bot.blockAt(target))) { log('act', `fill a bucket at ${move.fmt(pos)}: no still water there`); return false }
+    if (!still(bot.blockAt(target))) { log('act', `fill a bucket at ${move.fmt(pos)}: no still ${liquid} there`); return false }
     const empty = inv.items(bot).find(i => i.name === 'bucket')
     if (!empty) { log('act', `fill a bucket at ${move.fmt(pos)}: no empty bucket in the pack`); return false }
     if (!reach(bot, pos, 4.4)) {
@@ -444,7 +450,7 @@ async function fill (bot, pos, { allowZones = [], timeoutMs = 12000, noWalk = fa
       const r = await move.goTo(bot, new goals.GoalNear(pos.x, pos.y + 1, pos.z, 2), { timeoutMs: 20000, allowZones, label: 'reach the water' })
       if (!r.ok && !reach(bot, pos, 4.8)) return false
     }
-    const had = inv.count(bot, 'water_bucket')
+    const had = inv.count(bot, full)
     const letGo = reflex.holdNoSneak() // (no crouch during the use: reflex.holdNoSneak)
     try {
       await bot.equip(empty, 'hand')
@@ -455,7 +461,7 @@ async function fill (bot, pos, { allowZones = [], timeoutMs = 12000, noWalk = fa
       await sleep(100)
       bot.deactivateItem()
     } catch {} finally { letGo() }
-    for (let k = 0; k < 6; k++) { await sleep(150); if (inv.count(bot, 'water_bucket') > had) return true }
+    for (let k = 0; k < 6; k++) { await sleep(150); if (inv.count(bot, full) > had) return true }
     tries++
   }
   log('act', `fill a bucket at ${move.fmt(pos)} failed after ${tries} tries`)
