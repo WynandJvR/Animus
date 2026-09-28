@@ -1342,7 +1342,7 @@ function ensureFoundation (bot) {
     const cell = Object.assign(describe({ x: p.x, y: p.y, z: p.z, name: 'torch', props: {} }, md), { foundation: true }) // (stands on the ground under it)
     job.cells.push(cell); job.index.set(key(cell), cell)
   }
-  job.foundation = { cells: add.length, torches: torches.length }
+  job.foundation = { cells: add.length, torches: torches.length, outside } // (the flood's open ground: where a rim cell's stand may be)
   statusGen++
   // (headed by what is LEFT - the number status reports: the cells added count our supports standing in them as well)
   if (add.length || cols.length) log('build', `foundation: ${add.filter(p => !world.isSolid(world.at(bot, p.x, p.y, p.z))).length} blocks left of ${add.length}${standing.length ? ` (${standing.length} of them our supports already standing)` : ''} - a wall under the rim of the base where it stands over a drop (${new Set(add.map(p => p.x + ',' + p.z)).size} of ${cols.length} columns over the drop) - laid first${torches.length ? `, ${torches.length} torch${torches.length > 1 ? 'es' : ''} in the hollow under the floor` : ''}`)
@@ -1391,9 +1391,12 @@ function foundationStand (bot, c) {
     if (!dx && !dz) continue
     const p = { x: c.x + dx, y: c.y + dy, z: c.z + dz }
     if (job.index.has(`${p.x},${job.box.y1},${p.z}`)) continue // (under the base: inside)
-    // (outside the build's box too: a courtyard is off the base but walled in - its stands were reached through the castle's
-    //  own doors, 17s a try and three "couldn't reach the step" in three minutes, 2026-09-28)
-    if (p.x >= job.box.x1 && p.x <= job.box.x2 && p.z >= job.box.z1 && p.z <= job.box.z2) continue
+    // (on the OPEN ground round the build - the rim's own flood from the ring round the box: a courtyard walled in by the
+    //  base is not in it (its stands went through the castle's doors, 17s a try, 2026-09-28), but the ground outside that
+    //  reaches in under the rim is - "outside the box" left 21 rim cells a step with no stand at all)
+    const open = job.foundation && job.foundation.outside
+    const inBox = p.x >= job.box.x1 && p.x <= job.box.x2 && p.z >= job.box.z1 && p.z <= job.box.z2
+    if (inBox && !(open && open.has(`${p.x},${p.z}`))) continue
     if (job.index.has(key(p)) || job.index.has(key({ x: p.x, y: p.y + 1, z: p.z })) || !world.standable(bot, p.x, p.y, p.z)) continue
     // (never on a lip: a trench's outer edge or a ledge of the slope beside a drop that hurts - audit, the falls' posture)
     if ([[1, 0], [-1, 0], [0, 1], [0, -1]].some(([ax, az]) => world.dropAt(bot, p.x + ax + 0.5, p.y, p.z + az + 0.5) > world.SAFE_DROP)) continue
