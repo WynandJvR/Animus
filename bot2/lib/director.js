@@ -484,8 +484,9 @@ function decide () {
   // saplings on hand and room for them in the orchard (empty spots, or fewer trees than the build still needs)
   {
     const saps = orchard.saplingCount(bot) + Object.entries(base.bankCounts()).filter(([n]) => orchard.SAPLING_RE.test(n)).reduce((a, [, c]) => a + c, 0)
+    const spruceSaps = inv.count(bot, 'spruce_sapling') + base.bankCount('spruce_sapling')
     const o = orchard.orchard()
-    if (dHome < 64 && world.phase(bot) === 'day' && saps > 0 && (orchard.empty(bot).length > 0 || (o ? o.spots.length : 0) < demandTrees) && !held('plant')) return { name: 'plant', why: `${saps} saplings for the orchard (${o ? o.spots.length : 0} spots, ${demandTrees} trees wanted)` }
+    if (dHome < 64 && world.phase(bot) === 'day' && saps > 0 && orchard.plantable(bot, spruceSaps, saps, demandTrees) && !held('plant')) return { name: 'plant', why: `${saps} saplings for the orchard (${o ? o.spots.length : 0} spots, ${demandTrees} trees wanted)` }
   }
   // (the harvest when the bread runs low, not every morning: the crop keeps on the stalk, and harvesting and
   //  replanting 71 cells took two minutes of every ten-minute day with 31 bread in the pack, 2026-09-26)

@@ -106,6 +106,20 @@ function wantSaplings (bot, demandTrees) {
   return Math.max(0, room - saplingCount(bot))
 }
 
+// Whether plant() would put a sapling in the ground with `spruceN` spruce and `totalN` saplings of all kinds to hand -
+// the director's trigger and the planter's plan one rule. Spruce goes in whole squares of four: with three and an empty
+// square the planter rightly plants nothing, and a trigger on "any sapling, any empty spot" picked plant again and again
+// for nothing (4 in a row, 2026-09-28).
+function plantable (bot, spruceN, totalN, demandTrees) {
+  const o = orchard(); const spots = o ? o.spots.length : 0
+  const fill = empty(bot); const fq = fill.filter(q => q.quad).length; const fs = fill.length - fq
+  if (fs > 0 && totalN > 0) return true // (an empty single spot takes any sapling)
+  if (fq > 0 && spruceN >= 4) return true // (an empty square, whole)
+  const freshQuads = Math.max(0, Math.min(Math.floor(Math.max(0, spruceN - 4 * fq) / 4), demandTrees - spots))
+  if (freshQuads > 0) return true
+  return totalN - 4 * (fq + freshQuads) - fs > 0 && spots + freshQuads < demandTrees // (new single spots)
+}
+
 // Plant the saplings in the pack: empty spots first, then new spots up to the demand.
 // A spot is dead when its cell holds something a sapling can't grow through (a dirt pillar went up on one, grass took
 // another, 2026-09-24): dropped, so fresh spots take its place.
@@ -194,4 +208,4 @@ async function harvest (bot, { logs = Infinity, demandTrees = 0, shouldStop } = 
 
 function info (bot) { const o = orchard(); return o ? { spots: o.spots.length, grown: grown(bot).length, empty: empty(bot).length } : null }
 
-module.exports = { orchard, setZone, plant, harvest, grown, empty, wantSaplings, saplingCount, newSpots, spotOK, info, SAPLING_RE }
+module.exports = { plantable, orchard, setZone, plant, harvest, grown, empty, wantSaplings, saplingCount, newSpots, spotOK, info, SAPLING_RE }
