@@ -33,7 +33,7 @@ const SCAFFOLD_RE = /^(dirt|andesite|diorite|granite|tuff|cobbled_deepslate|neth
 // (cobblestone too: "no filler for a temporary support" with 250 of it in the pack, 2026-09-27; what is left of it in
 //  the footprint comes down with the site clearing)
 const FILLER_ITEMS = /^(dirt|andesite|diorite|tuff|cobbled_deepslate|netherrack|coarse_dirt|cobblestone)$/
-const LEDGER_RE = new RegExp(SCAFFOLD_RE.source.slice(0, -2) + '|cobblestone)$') // (a ledger spot of ours: cobble supports come down too)
+const LEDGER_RE = new RegExp('^(?:' + FILLER_ITEMS.source.slice(1, -1) + '|' + SCAFFOLD_RE.source.slice(1, -1) + ')$') // (what we place, plus the old scan's kinds: follows FILLER_ITEMS)
 // what the bot leaves standing about: placeSupport/pathfinder filler (+rooted_dirt, the planner's list), and
 // the reflexes' plugs (cobblestone, stone, sand, gravel)
 const STRAY_RE = /^(dirt|coarse_dirt|rooted_dirt|cobblestone|andesite|diorite|granite|tuff|cobbled_deepslate|netherrack|stone|sand|gravel)$/
