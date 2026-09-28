@@ -1110,7 +1110,8 @@ async function buildStep (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       const low = todo.filter(c => !c.attach && !c.follows && !cellUnsourced(c) && c.y <= lowestAll + 1).find(c => !has(c))
       // (then infill waiting on its material - glass: the sand trips are still wanted, only the layers don't wait)
       const m = low || todo.filter(c => c.attach && !cellUnsourced(c) && supportThere(bot, c)).find(c => !has(c)) || todo.filter(c => infillCell(c) && !cellUnsourced(c) && c.y <= lowestAll + 1).find(c => !has(c)) || todo.filter(c => infillCell(c) && !cellUnsourced(c)).sort((a, b) => a.y - b.y).find(c => !has(c))
-      return m ? stepItem(bot, m) : null
+      // (the item really missing: a pot in hand and its flower not is waiting on the flower - named for the director; audit)
+      return m ? (stepOf(m, world.at(bot, m.x, m.y, m.z)) !== 'then' && m.then && pickItem(bot, m, items) ? m.then : stepItem(bot, m)) : null
     }
     // the lowest two layers of what we HAVE the blocks for: 24 missing glass panes in a wall no longer hold up
     // every brick above them (the windows go in when the glass comes)
