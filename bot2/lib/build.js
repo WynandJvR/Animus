@@ -839,6 +839,10 @@ async function pillarTo (bot, c, first) {
   return false
 }
 let lastPlaceFail = ''
+// (where a try's time goes, for the step profile: the walk into reach (with its pillars), the digs clearing the cell - the
+//  rest is the place itself; 22% of castle time went to placing at ~2s a block, 2026-09-28 - measured, not guessed)
+const placeProf = { reach: 0, dig: 0 }
+const timed = async (k, p) => { const t = Date.now(); try { return await p } finally { placeProf[k] += Date.now() - t } }
 async function placeCell (bot, c, j = job) {
   const why = w => { lastPlaceFail = w; return false }
   lastPlaceFail = ''
@@ -863,14 +867,14 @@ async function placeCell (bot, c, j = job) {
   // round (our own cell: the one dig allowed past the finished-block guard), a flower where another goes (a flower is
   // no grass tuft: the server keeps it, and the place "failed" for ever)
   if (!step && !world.isAirish(cur) && !world.isLiquidWater(cur) && !act.REPLACEABLE_RE.test(cur.name)) {
-    if (!await act.dig(bot, pos, own)) return why(`could not dig the ${cur.name} in the cell`)
+    if (!await timed('dig', act.dig(bot, pos, own))) return why(`could not dig the ${cur.name} in the cell`)
     cur = bot.blockAt(pos)
   }
   // a two-block block needs its second cell clear (a scaffold block or a leaf in a door's top, a bed's head)
   const twin = c.twin && { x: c.x + c.twin[0], y: c.y + c.twin[1], z: c.z + c.twin[2] }
   if (twin && !step) {
     const t = world.at(bot, twin.x, twin.y, twin.z)
-    if (t && !world.isAirish(t) && !world.isLiquidWater(t) && !act.REPLACEABLE_RE.test(t.name)) { if (!await act.dig(bot, t.position, own)) return why(`could not clear the ${t.name} out of its second cell`) }
+    if (t && !world.isAirish(t) && !world.isLiquidWater(t) && !act.REPLACEABLE_RE.test(t.name)) { if (!await timed('dig', act.dig(bot, t.position, own))) return why(`could not clear the ${t.name} out of its second cell`) }
   }
   // Within reach of the cell, by the site walker: `faces` the faces to see, or none (a step onto a block that stands).
   const getInReach = async (faces) => {
@@ -921,7 +925,7 @@ async function placeCell (bot, c, j = job) {
     const item = pickItem(bot, c)
     if (!item) return why('no block for it in hand')
     const usable = plans.filter(p => refOk(bot, c, p))
-    if (!await getInReach(usable.map(p => new Vec3(p.off[0], p.off[1], p.off[2])))) return false
+    if (!await timed('reach', getInReach(usable.map(p => new Vec3(p.off[0], p.off[1], p.off[2]))))) return false
     const opts = { plans: usable.length ? usable : plans, allowZones: ['build', 'base'], keepExit: true }
     // (a liquid source is poured from its bucket; everything else placed - a pot or a cauldron is its first step. A
     //  chest of a pair is placed standing up: a sneaking placement never pairs)
@@ -930,7 +934,7 @@ async function placeCell (bot, c, j = job) {
       : await act.place(bot, c, item.name, Object.assign(opts, { accept: b => partOk(c, b.name), sneak: !/_door$/.test(item.name) && !pairs(c), twin: c.twin || null, useRefs: !!c.attach }))
     if (!ok) return why(c.pour ? 'the pour itself failed' : 'the place itself failed')
     surveyCache = null
-  } else if (!await getInReach(null)) return false
+  } else if (!await timed('reach', getInReach(null))) return false
   // THE STEPS AFTER THE FIRST PLACING: the plant into its pot, the bucket into its cauldron, one more candle/pickle/layer
   // onto what stands - each the item used on the block in the cell (vanilla useItemOn)
   for (let i = 0; i < 9 && cellDone(bot, c) !== true; i++) {
@@ -986,7 +990,8 @@ async function buildStep (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
   let waiting = null
   // (where a step's time goes: choosing the cell, walking to and placing it - measured, not guessed)
   const prof = { tries: 0, ms: 0, okMs: 0, dist: 0, pick: 0 }; let tpick = Date.now()
-  const profLog = () => { if (prof.tries) log('build', `step profile: ${placed}/${prof.tries} placed, ${Math.round(prof.ms / prof.tries)}ms a try (${placed ? Math.round(prof.okMs / placed) : 0}ms a placed block), ${(prof.dist / prof.tries).toFixed(1)} blocks off on average, ${Math.round(prof.pick / Math.max(1, prof.tries))}ms choosing each`) }
+  placeProf.reach = 0; placeProf.dig = 0
+  const profLog = () => { if (prof.tries) log('build', `step profile: ${placed}/${prof.tries} placed, ${Math.round(prof.ms / prof.tries)}ms a try (${placed ? Math.round(prof.okMs / placed) : 0}ms a placed block), ${(prof.dist / prof.tries).toFixed(1)} blocks off on average, ${Math.round(prof.pick / Math.max(1, prof.tries))}ms choosing each; a try: ${Math.round(placeProf.reach / prof.tries)}ms getting in reach, ${Math.round(placeProf.dig / prof.tries)}ms clearing, ${Math.round((prof.ms - placeProf.reach - placeProf.dig) / prof.tries)}ms placing`) }
   while (Date.now() - t0 < maxMs) {
     await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
     if (shouldStop && shouldStop()) break
