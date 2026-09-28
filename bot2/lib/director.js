@@ -1043,7 +1043,7 @@ async function processAtHome () {
     // (and a scaffold's worth of cobblestone kept back: the furnaces took the last of it for stone, and the build step went
     //  straight to the mine for 31 to stand on - a mine trip a round, 2026-09-28)
     // (one number with the builder's: what the other filler held or banked does not already cover)
-    const keepBack = s.input === 'cobblestone' ? Math.max(0, build.SCAFFOLD_WANT - ['andesite', 'diorite', 'tuff', 'dirt', 'cobbled_deepslate'].reduce((t, n0) => t + stock(n0), 0)) : 0
+    const keepBack = s.input === 'cobblestone' ? Math.max(0, build.SCAFFOLD_WANT - Object.keys(Object.assign({}, inv.counts(bot), base.bankCounts())).filter(n0 => n0 !== 'cobblestone' && build.FILLER_ITEMS.test(n0)).reduce((t, n0) => t + stock(n0), 0)) : 0
     const n = Math.min(s.n, stock(s.input) - (win.top[s.input] || 0) - keepBack, 64 * Math.max(1, smelt.homeFurnaces(bot).length))
     if (n < 1) continue
     const k = await loadSmelt(s.input, n)

@@ -247,7 +247,7 @@ async function fellTree (bot, basePos, re, { leaves = false, allowZones = [], sh
   let left = 0
   for (const c of pillar.sort((a, b) => b.y - a.y)) {
     const b = world.at(bot, c.x, c.y, c.z)
-    if (!b || !world.isSolid(b) || !/^(dirt|cobblestone|andesite|diorite|tuff|cobbled_deepslate|netherrack)$/.test(b.name)) continue
+    if (!b || !world.isSolid(b) || !require('./build').FILLER_ITEMS.test(b.name)) continue // (THE scaffold list: build.FILLER_ITEMS)
     if (!act.reach(bot, c, 4.5) || !await act.dig(bot, c, { timeoutMs: 6000, noWalk: true, allowZones: allowZones.concat(['orchard']) }).catch(() => false)) left++
   }
   if (left) log('gather', `${left} pillar block${left > 1 ? 's' : ''} left at ${pillar[0].x},${pillar[0].z} - out of reach`)
@@ -279,7 +279,7 @@ async function fellTree (bot, basePos, re, { leaves = false, allowZones = [], sh
 // the pillar it raised, to take it down again (the chop digs its own; an orchard kept its dirt pillars for ever).
 let lastPillar = null
 async function towerUp (bot, { allowZones = [], onPlaced = null, builder = false } = {}) {
-  const filler = inv.items(bot).find(i => /^(dirt|cobblestone|andesite|diorite|tuff|cobbled_deepslate|netherrack)$/.test(i.name))
+  const filler = inv.items(bot).find(i => require('./build').FILLER_ITEMS.test(i.name)) // (THE scaffold list)
   if (!filler) return false
   const y0 = Math.floor(bot.entity.position.y)
   const above = world.at(bot, bot.entity.position.x, y0 + 2, bot.entity.position.z)
