@@ -33,7 +33,7 @@ function isReservedWood (bot, name, except = null) { const sp = speciesOf(name);
 function reservedSpecies (bot, except = null) {
   if (!exactWood()) return new Set()
   try {
-    const st = L.build.status(bot)
+    const st = L.build.cachedStatus ? L.build.cachedStatus(bot) : L.build.status(bot) // (cached: asked per recipe choice)
     const out = new Set(Object.keys((st && st.need) || {}).filter(k => st.need[k] > 0).map(speciesOf).filter(Boolean))
     const own = speciesOf(except); if (own) out.delete(own)
     return out
@@ -467,7 +467,7 @@ function unsourced (item) {
 // Fails closed: when the plan cannot be made, everything counts as wanted (a throw tossed build material before).
 function wantedSet (bot) {
   try {
-    const st = L.build.status(bot)
+    const st = L.build.cachedStatus ? L.build.cachedStatus(bot) : L.build.status(bot)
     if (!st || !st.need) return () => false
     const tests = Object.keys(planFor(bot, st.need).demand).map(node => matches(node))
     return name => tests.some(t => t(name))

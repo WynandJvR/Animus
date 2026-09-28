@@ -516,6 +516,24 @@ function needsOf (bot, c, md, add) {
 
 // Remaining work, from the world. Counts unknown (unloaded) cells as remaining. `need` is ITEMS still to
 // place, keyed by the blueprint's own item (wall_torch -> torch, grass -> dirt, a door once).
+// THE CASTLE STATUS, CACHED: a pass over every cell (14k here), recomputed only when a block changes in the build's box
+// or a chunk over it loads - read by the api's /state and by every "what does the build place" question (the reserved
+// wood asked it per recipe choice, a whole pass each time: the fuel stall's shape again; audit 2026-09-28). A caller that
+// must see this tick's world (the builder itself) calls status().
+let statusGen = 1; let statusCache = { key: null }; const statusWatched = new WeakSet()
+function watchStatus (bot) {
+  if (statusWatched.has(bot)) return; statusWatched.add(bot)
+  const inBox = (x, z) => job && job.box && x >= job.box.x1 - 2 && x <= job.box.x2 + 2 && z >= job.box.z1 - 2 && z <= job.box.z2 + 2
+  bot.on('blockUpdate', (o, n) => { const q = (n && n.position) || (o && o.position); if (q && inBox(q.x, q.z)) statusGen++ })
+  bot.on('chunkColumnLoad', c => { if (c && job && job.box && c.x <= job.box.x2 + 2 && c.x + 15 >= job.box.x1 - 2 && c.z <= job.box.z2 + 2 && c.z + 15 >= job.box.z1 - 2) statusGen++ })
+}
+function cachedStatus (bot) {
+  if (!job) return null
+  watchStatus(bot)
+  const key = `${statusGen}|${job.name}@${job.origin.x},${job.origin.z}`
+  if (statusCache.key !== key) statusCache = { key, st: status(bot), at: Date.now() }
+  return statusCache.st
+}
 function status (bot) {
   if (!job) return null
   let done = 0; let unknown = 0
@@ -1418,7 +1436,7 @@ async function ensureScaffold (bot, n = 32) {
   return true
 }
 
-module.exports = { exactWood, isOpenCell, INFILL_RE, infillItem, unsourced, strayBuildBlocks,
+module.exports = { cachedStatus, exactWood, isOpenCell, INFILL_RE, infillItem, unsourced, strayBuildBlocks,
   finishSite, woodClass, woodForm, acceptsFor, itemOf, LOG_ANY, PLANKS_ANY, ensureScaffold, unskippedObstructions, setJob, getJob, status, nextNeeds,
   buildStep, clearSite, obstructions, removeScaffold, loadSchematic, cellDone, cellsDone, inBox, placeCell, registerJob, key,
   complete, needsWork, finish, survey, scaffoldList, holesList, ensureSnapshot, snapshotInfo, snapName,

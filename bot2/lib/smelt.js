@@ -106,7 +106,7 @@ function woodSurplus (bot) {
 }
 // Materials the current build still needs (never burnt as fuel: the castle's oak planks are not firewood).
 function buildNeeds (bot) {
-  try { const st = require('./build').status(bot); return new Set(st ? Object.keys(st.need).filter(k => st.need[k] > 0) : []) } catch { return new Set() }
+  try { const st = require('./build').cachedStatus(bot); return new Set(st ? Object.keys(st.need).filter(k => st.need[k] > 0) : []) } catch { return new Set() }
 }
 
 // THE rule for what may burn. pickFuel promises fuel and putFuel loads it: with two rules they disagreed (pickFuel
@@ -116,14 +116,24 @@ function buildNeeds (bot) {
 // item, per plank count, per loop turn they held the event loop 5.3s mid-castle (the stall watch named it: fuelOK <
 // woodSurplus < cellDone, 2026-09-28). Read once when the first wood is judged, then answered from that.
 function fuelRule (bot, { survival = false } = {}) {
-  let surplus, needed, reserved
+  let surplus, needed, reserved, other
+  // (any fuel that is not the build's own wood, in the pack or the bank)
+  const otherFuel = () => {
+    if (other !== undefined) return other
+    const counts = Object.assign({}, base().bankCounts()); for (const [n, v] of Object.entries(inv.counts(bot))) counts[n] = (counts[n] || 0) + v
+    const sp = n => require('./materials').speciesOf(n)
+    other = Object.entries(counts).some(([n, v]) => v > 0 && (n === 'coal' || n === 'charcoal' || (/_(planks|log|stem)$/.test(n) && !/^stripped_/.test(n) && !reserved.has(sp(n)))))
+    return other
+  }
   return name => {
     if (name === 'coal' || name === 'charcoal') return true
     if (!/_(planks|log|stem)$/.test(name) || /^stripped_/.test(name)) return false
     // (the build's own species is never firewood, a meal or not: the build needs spruce SLABS by name, so "needed" never
     //  named the spruce planks and logs, and an expedition's haul was the next furnace sweep's fuel - audit 2026-09-28)
     if (reserved === undefined) { try { reserved = require('./materials').reservedSpecies(bot) } catch { reserved = new Set() } }
-    if (reserved.has(require('./materials').speciesOf(name))) return false
+    // (...but a meal outranks a plank: a survival smelt burns the build's wood when nothing else will burn - coal or
+    //  other wood, pack or bank; audit 2026-09-28)
+    if (reserved.has(require('./materials').speciesOf(name))) { if (!survival || otherFuel()) return false }
     if (survival) return true
     if (surplus === undefined) { surplus = woodSurplus(bot); needed = buildNeeds(bot) }
     return surplus > 0 && !needed.has(name) && !needed.has(name.replace(/_(log|planks)$/, '_log')) && !needed.has(name.replace(/_(log|planks)$/, '_planks'))

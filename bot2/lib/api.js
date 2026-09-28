@@ -40,7 +40,7 @@ function start ({ bot, port, host, director, commands, brainSettings, pov, chat 
     const key = `${worldGen}|${j ? j.name + '@' + j.origin.x + ',' + j.origin.z : ''}|${h ? h.x + ',' + h.z : ''}` // (a new job or home is a new count)
     if (cache.key === key) return cache
     let st = null; let hs = null; let shell = false
-    try { st = b.getJob() ? b.status(bot) : null } catch {}
+    try { st = b.getJob() ? b.cachedStatus(bot) : null } catch {} // (build's own cache: one castle pass for everyone)
     try { hs = hut.status(bot); shell = hs ? hut.shellComplete(bot) : false } catch {}
     cache = { key, at: Date.now(), st, hs, shell }
     return cache
