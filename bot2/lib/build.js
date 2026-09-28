@@ -1312,6 +1312,9 @@ function foundationStand (bot, c) {
     if (!dx && !dz) continue
     const p = { x: c.x + dx, y: c.y + dy, z: c.z + dz }
     if (job.index.has(`${p.x},${job.box.y1},${p.z}`)) continue // (under the base: inside)
+    // (outside the build's box too: a courtyard is off the base but walled in - its stands were reached through the castle's
+    //  own doors, 17s a try and three "couldn't reach the step" in three minutes, 2026-09-28)
+    if (p.x >= job.box.x1 && p.x <= job.box.x2 && p.z >= job.box.z1 && p.z <= job.box.z2) continue
     if (job.index.has(key(p)) || job.index.has(key({ x: p.x, y: p.y + 1, z: p.z })) || !world.standable(bot, p.x, p.y, p.z)) continue
     // (never on a lip: a trench's outer edge or a ledge of the slope beside a drop that hurts - audit, the falls' posture)
     if ([[1, 0], [-1, 0], [0, 1], [0, -1]].some(([ax, az]) => world.dropAt(bot, p.x + ax + 0.5, p.y, p.z + az + 0.5) > world.SAFE_DROP)) continue
