@@ -1323,7 +1323,7 @@ async function gatherFor (raw, short) {
         log('dir', `short of ${short} fuel for the furnaces - mining ${want} coal`)
         await mining.mineFor(bot, 'coal', c0 + want, ctx).catch(() => false)
         const got = inv.count(bot, 'coal') - c0
-        log('dir', `the coal trip brought ${got} coal`)
+        log('dir', `the coal trip brought ${got} of ${want} coal${got < want ? " - the rest as charcoal from logs" : ""}`)
         if (got > 0) return true
       }
       log('dir', `short of ${short} fuel for the furnaces - cutting logs for charcoal`)
