@@ -305,6 +305,10 @@ async function depositAll (bot, { keep = keepCount } = {}) {
     checkMoves(target, asked, moved, 'depositing the haul')
     // (a round that put nothing in is no round to repeat: every deposit threw, one item moved each time, and the loop and
     //  the director's retries went round 72 times in 8s, each writing memory - 2026-09-28. Say why and stop.)
+    // (a chest that FILLED is no failure: it is full - marked so, and the next round takes another or places one; only a
+    //  round that put nothing in for any other reason stops. The first cut stopped on "destination full" too, and a
+    //  home whose two chests had filled never got a third, 2026-09-28)
+    if (depErr && /full/i.test(depErr)) { const c = chestCache()[key(target)] || { items: {}, t: Date.now() }; c.free = 0; chestCache()[key(target)] = c; depErr = null; continue }
     if (asked === 0) { log('base', `depositing at ${move.fmt(target)} put nothing in${depErr ? ' (' + depErr + ')' : ''} - stopping`); return false }
   }
   log('base', `deposited the haul (bank now ${Object.keys(bankCounts()).length} kinds)`)
