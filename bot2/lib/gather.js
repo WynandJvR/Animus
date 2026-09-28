@@ -540,7 +540,11 @@ const SURVEY = [
   { kind: 'clay', re: /^clay$/, ok: (bot, b) => require('./clay').claySought(bot, b.position) },
   // woods, by species (noted under the log's own name): a forest 150 blocks past the site was never looked at while
   // the searches round home found nothing (2026-09-24)
-  { kind: null, re: /^(oak|spruce|birch|jungle|acacia|cherry|dark_oak|mangrove|pale_oak)_log$/, names: 9, ok: (bot, b) => wildTree(bot, b) }
+  { kind: null, re: /^(oak|spruce|birch|jungle|acacia|cherry|dark_oak|mangrove|pale_oak)_log$/, names: 9, ok: (bot, b) => wildTree(bot, b) },
+  // lava a bucket can be filled at safely, seen on any trip: the fuel trip only looked when it had a bucket in hand, so a
+  // pool passed on the way to clay or iron was never on record (2026-09-28). The forager's own tests - a still source, a
+  // safe stand beside it
+  { kind: 'lava_pool', re: /^lava$/, ok: (bot, b) => { const f = require('./forage'); return f.lavaSource(bot, b) && f.lavaStands(bot, b).length > 0 } }
 ]
 let surveying = false
 function survey (bot) {

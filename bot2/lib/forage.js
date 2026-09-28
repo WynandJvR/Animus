@@ -533,6 +533,9 @@ async function emptyBuckets (bot, want, ctx = {}) {
   if (!inv.has(bot, 'bucket') && inv.count(bot, 'iron_ingot') + base().bankCount('iron_ingot') >= 3) await craft().ensure(bot, 'bucket', 1, Object.assign({}, ctx, { noWithdraw: false })).catch(() => false)
   return Math.min(want, inv.count(bot, 'bucket'))
 }
+// (how far from home a remembered pool is still a fuel trip: a hundred smelts a bucket is worth a longer walk than
+//  coal's five - the pools round this home lie about 200 out; 2026-09-28)
+const LAVA_FROM_HOME = 240
 // Could a lava trip go now: an empty bucket held, banked or makeable from smelted iron (no walk, no scan).
 function bucketsAvailable (bot) {
   const n = inv.count(bot, 'bucket') + base().bankCount('bucket')
@@ -540,7 +543,7 @@ function bucketsAvailable (bot) {
 }
 // A pool in sight now, or one remembered from before (gather's resource memory, near home).
 async function lavaKnown (bot) {
-  if (gather().knownResource('lava_pool', bot.entity.position, { maxFromHome: 160 })) return true
+  if (gather().knownResource('lava_pool', bot.entity.position, { maxFromHome: LAVA_FROM_HOME })) return true
   const s = (await lavaSites(bot))[0]
   if (s) gather().noteResource('lava_pool', s.lava)
   return !!s
@@ -565,7 +568,7 @@ async function lavaFuel (bot, buckets, ctx = {}) {
     const sites = await lavaSites(bot, skip)
     if (!sites.length) {
       // none in sight: the pool remembered, once (the walk bounded by the trip's own deadline)
-      const known = !travelled && gather().knownResource('lava_pool', bot.entity.position, { maxFromHome: 160 })
+      const known = !travelled && gather().knownResource('lava_pool', bot.entity.position, { maxFromHome: LAVA_FROM_HOME })
       if (known && world.dist2(known, bot.entity.position) > 24) {
         travelled = true
         await move.travel(bot, known, { range: 8, shouldStop: ctx.shouldStop, label: 'to the lava pool', maxMs: Math.max(5000, deadline - Date.now() - 60000) })
@@ -775,4 +778,4 @@ async function process (bot, by, node, n, opts = {}) {
   try { return await work(bot, node, n, opts) } catch (e) { log('forage', `${by} ${node} threw: ${e.message}`); return 0 }
 }
 
-module.exports = { lavaFuel, lavaSites, lavaStands, lavaKnown, bucketsAvailable, handles, spec, gather: gatherRaw, process, exhausted, exhaustedKinds, generation, seen, watch, sightMobs, noteTrip, strip, carve, harden, compost, shearBlock, ensureShears, benchSpot, shoreAt, SEARCH_TRIPS }
+module.exports = { lavaFuel, lavaSites, lavaSource, lavaStands, lavaKnown, bucketsAvailable, handles, spec, gather: gatherRaw, process, exhausted, exhaustedKinds, generation, seen, watch, sightMobs, noteTrip, strip, carve, harden, compost, shearBlock, ensureShears, benchSpot, shoreAt, SEARCH_TRIPS }
