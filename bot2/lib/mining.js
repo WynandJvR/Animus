@@ -317,6 +317,7 @@ async function takeKnownOre (bot, itemName, target, ctx = {}) {
   const k = p => `${p.x},${p.y},${p.z}`
   const t0 = Date.now()
   const start = inv.count(bot, itemName)
+  const mouth = world.feetPos(bot) // (the stand the trip began from: where it walks back to)
   let veins = 0
   // never a tunnel mouth in the yard or under the build: near home the trip STARTS only from inside our own mine (the
   // stairs take us down first; audit #27). Judged once, at the start - checked every turn, the first ore's tunnel led away
@@ -348,6 +349,13 @@ async function takeKnownOre (bot, itemName, target, ctx = {}) {
   }
   const got = inv.count(bot, itemName) - start
   if (got || veins) log('mine', `tunnelled to ${veins} ${itemName} ore vein(s): +${got} (${inv.count(bot, itemName)}/${target})`)
+  // BACK THE WAY IT CAME: the tunnel is open behind us to the stand the trip began from (the mine's own path, near home) -
+  // walked, nothing dug or placed. Left where the last vein ended, the way out climbed straight up there, or tunnelled to
+  // the entrance and pillared it 40 high (2026-09-28). Failing that, the surfacing rules as before; audit
+  if (veins && world.dist3(bot.entity.position, mouth) > 4 && !(ctx.shouldStop && ctx.shouldStop())) {
+    const r = await move.goTo(bot, new goals.GoalBlock(mouth.x, mouth.y, mouth.z), { timeoutMs: 90000, stuckMs: 12000, dig: false, place: false, label: 'back along the ore tunnel', shouldStop: ctx.shouldStop })
+    if (!r.ok) log('mine', `could not walk back along the ore tunnel to ${move.fmt(mouth)} (${r.why}) - surfacing from here`)
+  }
   return inv.count(bot, itemName) >= target
 }
 
