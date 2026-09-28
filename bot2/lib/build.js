@@ -1598,17 +1598,19 @@ function failLeftover (bot, p) { const l = leftovers.get(key(p)); const d = toda
 // block a day; what is left is logged with coordinates.
 // THE SITE'S OLD SCAFFOLD, DAILY: pillars left from before the builder took its own down (391 round the castle on
 // 2026-09-28, the rim bank's among them - raised, it put the foundation's stand behind a drop the bot could not take).
-// Only outside the band being built (its access may be in use again), never a block a finished attached cell hangs on;
-// below the band first - those are the ones in the way. One pass, the day's stop.
+// Only below the band being built (the band only rises: that scaffold is never wanted again), never a block a finished
+// attached cell hangs on. One pass, the day's stop.
 async function siteScaffoldTeardown (bot, { shouldStop } = {}) {
   if (!job || !site) return 0
   let bandY = Infinity
   for (const c of job.cells) if (!c.attach && !c.follows && !c.foundation && c.y < bandY && cellDone(bot, c) !== true) bandY = c.y
   const sups = new Set(job.cells.filter(q => q.sup && cellDone(bot, q) === true).map(q => key(q.sup)))
-  const keep = p => (p.y >= bandY - 2 && p.y <= bandY + 5) || sups.has(key(p))
+  // (below the band only: it never needs its scaffold again, and that is what raises banks and blocks stands - above it
+  //  the same columns would be pillared again within the week; those are build.finish's; audit)
+  const keep = p => p.y >= bandY - 2 || sups.has(key(p))
   const before = scaffoldList(bot).length
   const n = await removeScaffold(bot, { shouldStop, maxPasses: 1, keep })
-  log('build', `site scaffold: ${n} taken down, ${Math.max(0, before - n)} left (in the band y${bandY}-${bandY + 5} or holding a finished cell, or out of reach)`)
+  log('build', `site scaffold: ${n} taken down, ${Math.max(0, before - n)} left (from the band y${bandY} up, holding a finished cell, or out of reach)`)
   return n
 }
 async function removeScaffold (bot, { shouldStop, maxPasses = 4, keep = null } = {}) {
