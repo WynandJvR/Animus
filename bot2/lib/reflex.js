@@ -16,6 +16,21 @@ let bot = null
 let active = null // {kind, since, detail}
 let busy = false // an async reflex action is running
 let busySince = 0; let busySaid = false // (how long it has been running - said once past 3s)
+// EVERY REFLEX ACTION HAS A DEADLINE: an action that never ends holds `busy` and every row waits on it - cornered by a
+// pillager, the wall-off's two placings had no time limit and the bot stood 12s under fire, "flee" and no key, and died
+// (2026-09-28). The action may run on; the rows go on at its deadline. (`kind`: its row, let go at the deadline too.)
+let busyGen = 0
+function runBusy (label, p, ms, kind = null) {
+  const my = ++busyGen
+  busy = true
+  let timer = null
+  const dl = new Promise(resolve => { timer = setTimeout(() => resolve('deadline'), ms) })
+  return Promise.race([Promise.resolve(p).then(() => 'done', () => 'done'), dl]).then(res => {
+    clearTimeout(timer)
+    if (res === 'deadline') { log('reflex', `busy ${label} ran out after ${ms}ms - the rows go on`); if (kind && active && active.kind === kind) clearActive() }
+    if (busyGen === my) busy = false
+  })
+}
 let dressFailed = null // the better-armour key a wear attempt left unchanged (cleared when the inventory changes)
 let submergedSince = 0
 let lastAttackAt = 0
@@ -64,8 +79,15 @@ function diveHolds (now) {
   return false
 }
 
+// NO FIGHT PICKED AGAIN THAT WAS JUST LOST: a flee straight out of a fight with that mob marks the hp the fight began at;
+// no charge at it until the hp is back over that. Fight at 20, flee at 10, eat, fight again at 10, flee, fight at 5 -
+// the pillager's death spiral (2026-09-28; audit)
+const fledFrom = new Map() // entity id -> hp the lost fight began at
+let fightStartHp = null
 function setActive (kind, detail) {
   if (kind !== 'shoot') endDraw(kind) // (the body is another reflex's now: the string goes)
+  if (kind === 'fight' && (!active || active.kind !== 'fight')) fightStartHp = bot.health
+  if (kind === 'flee' && active && active.kind === 'fight' && fleeTarget && fightStartHp != null) fledFrom.set(fleeTarget.id, Math.max(fledFrom.get(fleeTarget.id) || 0, fightStartHp))
   if (!active || active.kind !== kind) {
     active = { kind, since: Date.now(), detail }
     const key = kind + ':' + (detail || '')
@@ -145,11 +167,12 @@ function hurtLine () {
 // the charged one's mostly on the shield when there is one - must leave us above the hurt line. "A shield or two armour
 // pieces" charged a pillager patrol 9-14b off: one on the shield, the others shooting from the side, 20 -> 8 hp in six
 // seconds and dead at the safehouse door (2026-09-25).
-const SHOOTER_DPS = { skeleton: 2.2, stray: 2.2, bogged: 2.2, pillager: 2, witch: 2, blaze: 3, breeze: 2, ghast: 2 }
+const SHOOTER_DPS = { skeleton: 2.2, stray: 2.2, bogged: 2.2, pillager: 2.5, witch: 2, blaze: 3, breeze: 2, ghast: 2 } // (pillager: a crossbow bolt is 4-5 hp every 1.5-2.5s - it took 20 hp in 55s; audit 2026-09-28)
 const MOB_HP = { skeleton: 20, stray: 20, bogged: 16, pillager: 24, witch: 26, blaze: 20, breeze: 30, ghast: 10 }
 // `hs`: every hostile in range, the never-melee ones too - a ghast's fireballs land on the way in as well as a
 // skeleton's arrows; handed the melee list, the ghast was never counted and a charge under it read as free (2026-09-27)
 function chargeAffordable (shooter, hs, hp) {
+  { const f = fledFrom.get(shooter.e.id); if (f != null && hp < f) return false }
   const shooters = hs.filter(h => RANGED.has(h.e.name) && h.d < 16 && canSee(h.e))
   const w = inv.bestWeapon(bot)
   const dmg = w ? (/_axe$/.test(w.name) ? 7 : 5) : 1
@@ -241,17 +264,21 @@ function attackCooldownMs () {
 async function doEat () {
   const food = inv.foodItems(bot, { desperate: bot.food <= 6, hurt: bot.health < 20 })[0]
   if (!food) return false
-  busy = true
   setActive('eat', food.name)
-  try {
+  let ok = false
+  // (bot.consume has no limit of its own: 3s is a bite and a half)
+  await runBusy('eat', (async () => {
     const before = bot.food
     await bot.equip(food, 'hand')
     await bot.consume()
     log('reflex', `ate ${food.name} -> food ${bot.food}`)
     // a consume that resolves without the hunger bar moving is a refused bite: back off, don't spin
     if (bot.food <= before) lastEatFail = Date.now()
-    return true
-  } catch (e) { lastEatFail = Date.now(); return false } finally { busy = false; clearActive() }
+    ok = true
+  })().catch(() => { lastEatFail = Date.now() }), 3000, 'eat')
+  if (!ok) lastEatFail = Date.now()
+  if (active && active.kind === 'eat') clearActive()
+  return ok
 }
 
 // Nearest cell reachable by swimming whose head space is air (a place to breathe), or dry land. With `landOnly`,
@@ -316,7 +343,7 @@ async function wallOff (e) {
     const b = world.at(bot, p.x, p.y, p.z)
     const f = filler()
     if (!f || !b || !world.isAirish(b)) continue
-    try { if (await act.place(bot, p, f.name, { sneak: false, fromReflex: true, faceHint: [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]] })) n++ } catch {}
+    try { if (await act.place(bot, p, f.name, { sneak: false, fromReflex: true, timeoutMs: 1500, faceHint: [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]] })) n++ } catch {} // (1.5s a block: cover placed under fire, not a wait; audit)
   }
   if (n) log('reflex', `walled off the ${e.name} (${n} block${n > 1 ? 's' : ''})`)
 }
@@ -897,8 +924,7 @@ function tick () {
       // floating for 3s without making land: the bank is too high to climb from the water (a pond
       // with 2-high sides drowned the bot at 4 hp) - cut a step into it
       if (now - floatSince > 3000 && !busy) {
-        busy = true
-        climbOut().finally(() => { busy = false; floatSince = now })
+        runBusy('climb out', climbOut(), 15000).then(() => { floatSince = now })
         return
       }
       if (now - active.since > 60000) { floatSince = 0; return clearActive() }
@@ -964,11 +990,10 @@ function tick () {
       if (roof && !falls && !lava && roof.diggable !== false && !/^(bedrock|obsidian|crying_obsidian|reinforced_deepslate)$/.test(roof.name)) {
         if (!roofDug || roofDug.x !== roof.position.x || roofDug.y !== roof.position.y || roofDug.z !== roof.position.z) log('reflex', sideways ? `air: walled in - digging SIDEWAYS through ${roof.name} at ${roof.position.x},${roof.position.y},${roof.position.z} toward air (${side.n} solid vs ${up === 99 ? 'no way' : up} up; air ${Math.round(airMs / 100) / 10}s)` : `air: roofed over - digging UP through ${roof.name} at ${roof.position.x},${roof.position.y},${roof.position.z} (${up === 99 ? '?' : up} solid to air; air ${Math.round(airMs / 100) / 10}s)`)
         roofDug = roof.position
-        busy = true
         // (standing, not floating: a dig off the ground under water is 25x slow - a stone roof from a float outlasts a
         //  breath; let go of jump and the body settles on the pocket's floor, 5x)
         for (const k of ['jump', 'forward', 'back', 'left', 'right']) bot.setControlState(k, false)
-        require('./act').digBlock(bot, roof).catch(() => false).finally(() => { busy = false; riseAt = Date.now() })
+        runBusy('dig to air', require('./act').digBlock(bot, roof).catch(() => false), 12000).then(() => { riseAt = Date.now() })
         return
       }
     }
@@ -1019,8 +1044,7 @@ function tick () {
     if (cells.length) {
       if (!active || active.kind !== 'powder') { setActive('powder', 'breaking out of powder snow'); log('reflex', `in powder snow at ${Math.floor(me.x)},${Math.floor(me.y)},${Math.floor(me.z)} (hp ${Math.round(bot.health)}) - breaking out`) }
       try { bot.pathfinder.setGoal(null) } catch {}
-      busy = true
-      ;(async () => { for (const b of cells.sort((p, q) => q.position.y - p.position.y)) await require('./act').digBlock(bot, b).catch(() => false) })().finally(() => { busy = false })
+      runBusy('powder snow', (async () => { for (const b of cells.sort((p, q) => q.position.y - p.position.y)) await require('./act').digBlock(bot, b).catch(() => false) })(), 8000)
       return
     } else if (active && active.kind === 'powder') return clearActive()
   }
@@ -1076,7 +1100,7 @@ function tick () {
       for (const k of ['forward', 'back', 'left', 'right', 'jump']) bot.setControlState(k, false)
       if (best || (way && way.run)) {
         if (!active || active.kind !== 'floor') setActive('floor', 'off a decaying leaf')
-        if (best) steerTo(best, { jump: best.y > fy + 1 }); else { busy = true; way.run().catch(() => false).finally(() => { busy = false }) }
+        if (best) steerTo(best, { jump: best.y > fy + 1 }); else runBusy('off the leaves', way.run().catch(() => false), 6000)
         return
       }
       // A HOLD - waiting on the hp, or stranded - is no reason to starve or be shot: the tick goes on PINNED. Eating
@@ -1155,8 +1179,7 @@ function tick () {
     else if (!busy) {
       // nowhere to run (a tunnel): put a wall between us - a skeleton down a straight corridor shot the bot
       // from 13 blocks while "cover" had no side to step to
-      busy = true
-      wallOff(shooter.e).finally(() => { busy = false })
+      runBusy('wall off', wallOff(shooter.e), 3500, 'flee')
     }
     return
   }
@@ -1171,10 +1194,9 @@ function tick () {
   const nearest = hs.length ? hs[0].d : Infinity
   const inHut = require('./move').insideHut(bot.entity.position.floored())
   if (((target && weak) || nightThreat) && world.phase(bot) !== 'day' && nearest >= 6 && !inHut && !enclosed() && canDigInHere()) {
-    busy = true
     const t = target || nightThreat.e
     setActive('dig-in', `${t.name} ${t.position.distanceTo(me).toFixed(1)}b, can't fight`)
-    digIn().finally(() => { busy = false; clearActive() })
+    runBusy('dig in', digIn(), 30000).then(() => { if (active && active.kind === 'dig-in') clearActive() })
     return
   }
   if (target && weak && hs.filter(h => h.d < 10).length) {
@@ -1203,7 +1225,7 @@ function tick () {
       return
     }
     setActive('fight', `${target.name} ${d.toFixed(1)}b (${why})`)
-    if (armed && (!bot.heldItem || !/_(sword|axe)$/.test(bot.heldItem.name))) { busy = true; inv.equipWeapon(bot).finally(() => { busy = false }); return }
+    if (armed && (!bot.heldItem || !/_(sword|axe)$/.test(bot.heldItem.name))) { runBusy('equip a weapon', inv.equipWeapon(bot), 1500); return }
     if (d > 2.8 && !pinned) {
       bot.pathfinder.setMovements(require('./move').movementsFor(bot, { dig: false, place: false }))
       bot.pathfinder.setGoal(new goals.GoalFollow(target, 1.5), true)
@@ -1268,8 +1290,7 @@ function tick () {
   if (!bot.currentWindow && !hs.some(h => h.d < 8)) {
     const k = inv.betterArmorInPack(bot)
     if (k && k !== dressFailed) {
-      busy = true
-      inv.wearBestArmor(bot).then(() => { if (inv.betterArmorInPack(bot) === k) dressFailed = k }).catch(() => { dressFailed = k }).finally(() => { busy = false })
+      runBusy('dress', inv.wearBestArmor(bot).then(() => { if (inv.betterArmorInPack(bot) === k) dressFailed = k }).catch(() => { dressFailed = k }), 5000)
     }
   }
 }
@@ -1295,9 +1316,8 @@ function install (b) {
       try {
         // respawning at our bed means respawning in the safehouse: that IS the shelter - no hole in its floor
         if (!bot.entity || busy || world.phase(bot) === 'day' || enclosed() || require('./move').insideHut(bot.entity.position.floored()) || !canDigInHere()) return
-        busy = true
         setActive('dig-in', 'respawned at night')
-        digIn().finally(() => { busy = false; clearActive() })
+        runBusy('dig in', digIn(), 30000).then(() => { if (active && active.kind === 'dig-in') clearActive() })
       } catch {}
     }, 1500)
   })
