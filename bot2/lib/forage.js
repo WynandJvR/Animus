@@ -616,7 +616,16 @@ function benchSpot (bot) {
   return spots.sort((a, b) => a.d - b.d)[0] || null
 }
 // Place the input, use the tool on it, take it back up - n times at one spot. The inventory says what came of it.
+// A click that changed nothing twice running on a fresh block is the click itself not working here (2026-09-28: an
+// axe under a worn shield, 634 clicks over seven hours) - the run stops, and the same work under the same conditions
+// (tool, off-hand) is not tried again; any change of them (another tool, the off-hand emptied, a restart) opens it.
+const deadWork = new Map() // label -> conditions key
+function workKey (bot, t) { const o = bot.inventory && bot.inventory.slots[45]; return (t ? t.name : '-') + '|' + (o ? o.name : '-') }
 async function workBlocks (bot, { input, tool, becomes, out, n, shouldStop, label }) {
+  const t0 = await tool()
+  if (deadWork.has(label) && deadWork.get(label) === workKey(bot, t0)) return 0
+  deadWork.delete(label)
+  let dead = 0
   const spot = benchSpot(bot)
   if (!spot) { log('forage', `${label}: no open ground by me to work on`); return 0 }
   const zone = move.inZone(spot, 0)
@@ -635,7 +644,11 @@ async function workBlocks (bot, { input, tool, becomes, out, n, shouldStop, labe
     if (t) ok = await act.useOn(bot, spot, t.name, { accept: b => becomes.test(b.name), noWalk: true, timeoutMs: 4000 })
     // taken back up either way: our own block never stays standing in the yard
     if (!await act.dig(bot, spot, { force: true, noWalk: true, allowZones: zone ? [zone.label] : [] })) { log('forage', `${label}: could not take the block back up at ${move.fmt(spot)}`); break }
-    if (!ok) { log('forage', `${label}: the ${it.name} did not change`); i-- ; if (!t) break }
+    if (!ok) {
+      log('forage', `${label}: the ${it.name} did not change`); i--
+      if (!t) break
+      if (++dead >= 2) { deadWork.set(label, workKey(bot, t)); log('forage', `${label}: ${dead} clicks running changed nothing - the ${t.name} does not work here; not tried again until the tool or the off-hand changes`); break }
+    } else dead = 0
   }
   await act.collectDrops(bot, { radius: 4, maxMs: 4000 })
   const made = inv.count(bot, out) - before
