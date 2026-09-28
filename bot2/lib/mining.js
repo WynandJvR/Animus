@@ -417,6 +417,8 @@ async function mineFor (bot, itemName, target, ctx = {}) {
   let lastSave = Date.now()
   let fails = 0
   let turns = 0
+  const packed = () => inv.items(bot).reduce((a, i) => a + i.count, 0)
+  let packAtTurn = packed() // (what the pack held at the last turn: any rock since - a drop picked up late too - forgives)
   let spinAt = Date.now(); let spins = 0
   while (inv.count(bot, itemName) < target) {
     await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
@@ -454,6 +456,9 @@ async function mineFor (bot, itemName, target, ctx = {}) {
       const back = await move.goTo(bot, new goals.GoalBlock(m.cursor.x, m.cursor.y, m.cursor.z), { timeoutMs: 30000, stuckMs: 8000, label: 'back to mine face' })
       if (!back.ok) { log('mine', `lost the mine face at ${move.fmt(m.cursor)} (${back.why}) - abandoning this mine`); abandonMine(m); return false }
     }
+    // (progress is new rock in the pack, not a step: a step back through the corridor already dug "succeeds" too, and
+    //  with both turns at a leg's end blocked, the loop ran the same 13 cells back and forth - each run forgiving the
+    //  turns - for 8 minutes and more with no stone, 2026-09-28)
     const ok = m.stairsDone ? await tunnelStep(bot, m) : await stairStep(bot, m)
     if (!ok) {
       if (++fails >= 3) {
@@ -471,9 +476,10 @@ async function mineFor (bot, itemName, target, ctx = {}) {
         m.dir = { x: -m.dir.z, z: m.dir.x }
         m.legPos = 0
         fails = 0
+        packAtTurn = packed()
         if (!m.stairsDone) { m.stairsDone = true; m.level = m.cursor.y }
       }
-    } else { fails = 0; turns = 0 }
+    } else { fails = 0; if (packed() > packAtTurn) turns = 0 }
     if (Date.now() - lastSave > 15000) { saveMine(m); lastSave = Date.now() }
   }
   saveMine(m)
