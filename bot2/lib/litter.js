@@ -125,8 +125,11 @@ function seed (bot) {
 // The ledger's blocks still standing within `radius` of `from`.
 function pending (bot, from, radius = RADIUS) {
   const out = []
+  const mine = mem.get().mine
   for (const q of ledger.values()) {
     if (from && world.dist3(q, from) > radius) continue
+    // (under our own mine's entrance - its shaft: the mine's, out of sight and out of reach from the surface; gather.inMineShaft)
+    if (mine && mine.entrance && q.y < mine.entrance.y - 1 && world.dist2(q, mine.entrance) < 3) continue
     const b = world.at(bot, q.x, q.y, q.z)
     if (b && b.name === q.name && (q.tries || 0) < TRIES && !ours(q.x, q.y, q.z)) out.push(q)
   }

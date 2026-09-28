@@ -334,6 +334,13 @@ async function fellTree (bot, basePos, re, { leaves = false, allowZones = [], sh
 // allowZones: the zones the pillar may stand in; builder: only the builder's own pillars may put a block in a cell of
 // the build (placed or not) - an escape may climb out inside the build's zone, never into its cells (audit 2026-09-28). onPlaced(cell): the caller's ledger of
 // the pillar it raised, to take it down again (the chop digs its own; an orchard kept its dirt pillars for ever).
+// (a tower in our own mine, under its entrance - climbing out of the shaft - is the mine's, not litter: out of sight, dug back
+//  through on the next way down; noted, a 40-high column in the shaft filled the tidy's count and nothing could reach it,
+//  2026-09-28)
+function inMineShaft (bot, p) {
+  const m = mem.get().mine
+  return !!(m && m.entrance && p.y < m.entrance.y - 1 && require('./mining').inOwnMine(bot))
+}
 let lastPillar = null
 async function towerUp (bot, { allowZones = [], onPlaced = null, builder = false } = {}) {
   const filler = inv.items(bot).find(i => require('./build').FILLER_ITEMS.test(i.name)) // (THE scaffold list)
@@ -388,7 +395,7 @@ async function towerUp (bot, { allowZones = [], onPlaced = null, builder = false
     //  settle before the server's update lands - the ledger lost 3 of 9 orchard pillar blocks, and nothing took them
     //  down: the trunk cells filled with cobblestone and the spots were dropped, 2026-09-28)
     const up = Math.floor(bot.entity.position.y) >= y0 + 1
-    { const nb = world.at(bot, x0, y0, z0); if (up || (nb && world.isSolid(nb))) { lastPillar = { x: x0, y: y0, z: z0 }; if (onPlaced) onPlaced(lastPillar); if (!builder) require('./litter').note(bot, lastPillar, filler.name) } }
+    { const nb = world.at(bot, x0, y0, z0); if (up || (nb && world.isSolid(nb))) { lastPillar = { x: x0, y: y0, z: z0 }; if (onPlaced) onPlaced(lastPillar); if (!builder && !inMineShaft(bot, lastPillar)) require('./litter').note(bot, lastPillar, filler.name) } }
     return up
   } catch { bot.setControlState('jump', false); bot.setControlState('forward', false); bot.setControlState('sneak', false); return false }
 }
