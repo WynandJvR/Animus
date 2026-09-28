@@ -1245,12 +1245,29 @@ function ensureFoundation (bot) {
   // work - monsters spawn at block light 0 by day as by night (since 1.18). A torch on its ground every 8 blocks, placed
   // while it is still open (an attached cell: in as soon as a torch is in hand and its ground stands; audit 2026-09-28)
   const torches = []
+  const inner = new Map()
   for (const q of cols) {
-    if (![[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => !base({ x: q.x + dx, z: q.z + dz }))) {
-      if (q.dry && (q.x - job.box.x1) % 8 === 4 && (q.z - job.box.z1) % 8 === 4) torches.push({ x: q.x, y: q.ys[q.ys.length - 1], z: q.z })
-      continue
-    }
+    if (![[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => !base({ x: q.x + dx, z: q.z + dz }))) { inner.set(`${q.x},${q.z}`, q); continue }
     for (const y of q.ys) add.push({ x: q.x, y, z: q.z })
+  }
+  // (every hollow region lit: the 8-grid's cells in it, or - a strip the grid misses, a tower's, the west edge's - its
+  //  shallowest dry column, the one a walk down reaches most easily, nearest its middle; audit 2026-09-28)
+  const seen = new Set()
+  for (const [k0, q0] of inner) {
+    if (seen.has(k0)) continue
+    const region = []; const stack = [q0]; seen.add(k0)
+    while (stack.length) {
+      const q = stack.pop(); region.push(q)
+      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const kk = `${q.x + dx},${q.z + dz}`; if (inner.has(kk) && !seen.has(kk)) { seen.add(kk); stack.push(inner.get(kk)) } }
+    }
+    const dry = region.filter(q => q.dry)
+    let pick = dry.filter(q => (q.x - job.box.x1) % 8 === 4 && (q.z - job.box.z1) % 8 === 4)
+    if (!pick.length && dry.length) {
+      const cx = region.reduce((a, q) => a + q.x, 0) / region.length; const cz = region.reduce((a, q) => a + q.z, 0) / region.length
+      pick = [dry.sort((a, b) => (a.ys.length - b.ys.length) || (Math.hypot(a.x - cx, a.z - cz) - Math.hypot(b.x - cx, b.z - cz)))[0]]
+    }
+    if (!dry.length) log('build', `hollow of ${region.length} columns under the floor near ${region[0].x},${region[0].z} is all water - left unlit`)
+    for (const q of pick) torches.push({ x: q.x, y: q.ys[q.ys.length - 1], z: q.z })
   }
   for (const p of add) {
     const cell = { x: p.x, y: p.y, z: p.z, name: 'cobblestone', props: {}, foundation: true, want: null, item: 'cobblestone', alt: FOUNDATION_BLOCKS, prefer: ['cobblestone', 'dirt'], itemAlt: FILLER_ITEMS }
@@ -1272,7 +1289,8 @@ function ensureFoundation (bot) {
 function dropFoundation (bot, c, why) {
   job.cells = job.cells.filter(q => q !== c); job.index.delete(key(c)); cellFails.delete(key(c)); statusGen++
   if (job.foundation) job.foundation.dropped = (job.foundation.dropped || 0) + 1
-  log('build', `foundation cell at ${move.fmt(c)} dropped - ${why}`)
+  // (a torch dropped is a hollow left dark under the work - said as such, never lost in the foundation's own drops)
+  log('build', c.name === 'torch' ? `hollow at ${move.fmt(c)} left unlit - ${why}` : `foundation cell at ${move.fmt(c)} dropped - ${why}`)
 }
 function sealedIn (bot, c) { return [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]].every(([dx, dy, dz]) => world.isSolid(world.at(bot, c.x + dx, c.y + dy, c.z + dz))) }
 function snapName (x, y, z) {
