@@ -37,7 +37,10 @@ function flushSync () {
   if (timer) { clearTimeout(timer); timer = null }
   if (!dirty || !mem) return
   dirty = false
-  try { fs.writeFileSync(FILE + '.tmp', JSON.stringify(mem, null, 1)); fs.renameSync(FILE + '.tmp', FILE) } catch {}
+  // (its own tmp name - an async write may be mid-flight to '.tmp' at exit - and a second try: a rename onto the file can
+  //  fail EPERM on Windows while another process has it open; audit)
+  const tmp = FILE + '.exit.tmp'; const body = JSON.stringify(mem, null, 1)
+  for (let i = 0; i < 2; i++) { try { fs.writeFileSync(tmp, body); fs.renameSync(tmp, FILE); return } catch {} }
 }
 async function flush () {
   timer = null
