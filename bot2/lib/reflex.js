@@ -615,7 +615,7 @@ function noteTakeoff () {
     // (a fall that hurts and did not kill left no trace of what walked us off - a 17-block drop the edge guard had just
     //  refused, hp 20 -> 6, 2026-09-28: the takeoff, said on landing)
     const t = fell
-    log('vital', `fell ${t.fall} blocks from ${t.pos} (floor y${t.fy}, drop there ${t.drop}) v=${t.v} (${t.hs} b/t across) keys=${t.keys || '-'} ${t.steered ? 'pathfinder steering' : 'no pathfinder'}${t.step}${t.active ? ', reflex ' + t.active : ''}${t.hurt ? ', hurt ' + t.hurt + 'ms before' : ''}`)
+    if (t.fall > world.SAFE_DROP) log('vital', `fell ${t.fall} blocks from ${t.pos} (floor y${t.fy}, drop there ${t.drop}) v=${t.v} (${t.hs} b/t across) keys=${t.keys || '-'} ${t.steered ? 'pathfinder steering' : 'no pathfinder'}${t.step}${t.active ? ', reflex ' + t.active : ''}${t.hurt ? ', hurt ' + t.hurt + 'ms before' : ''}`)
   }
   if (wasGround && !g) {
     const p = bot.entity.position; const v = bot.entity.velocity; const c = bot.controlState || {}
