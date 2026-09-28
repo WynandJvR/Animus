@@ -468,7 +468,9 @@ function leafWayOff (leaf, fx, fy, fz, ours = false) {
   }
   return null
 }
+let pinned = false // this tick holds the body where it is (row 2c's hold): no row steers it
 function steerTo (p, { jump = true, sprint = false } = {}) {
+  if (pinned) { for (const k of ['forward', 'back', 'left', 'right', 'jump', 'sprint']) bot.setControlState(k, false); return }
   const me = bot.entity.position
   const yaw = Math.atan2(-(p.x + 0.5 - me.x), -(p.z + 0.5 - me.z))
   bot.look(yaw, 0, true).catch(() => {})
@@ -861,6 +863,7 @@ function tick () {
   const now = Date.now()
   trackAir(now) // (always: an async reflex or a disabled loop still spends air)
   if (!enabled || busy) return
+  pinned = false
   const me = bot.entity.position
   tread()
 
@@ -1060,16 +1063,23 @@ function tick () {
         if (d < bd) { bd = d; best = { x, y, z } }
       }
       const way = best ? null : leafWayOff(floor, fx, fy, fz, ours)
-      if (!active || active.kind !== 'floor') { setActive('floor', 'off a decaying leaf'); log('reflex', `standing on ${ours ? 'my footing in the crown' : 'decaying leaves'} at ${fx},${fy},${fz} over a ${require('./act').fallBelow(bot, { x: fx, y: fy, z: fz })}-block drop - ${best ? 'stepping off to ' + best.x + ',' + best.y + ',' + best.z : way ? way.why : 'stranded: nowhere firm within 3, no drop I would take, no block to stand on'}`) }
-      // (and a way that changes under it - onto the footing, the hp come back for the drop - is said once too)
-      else if (way && way.why !== leafWhy) log('reflex', `${ours ? 'on my footing in the crown' : 'on decaying leaves'} at ${fx},${fy},${fz} - ${way.why}`)
-      leafWhy = way ? way.why : null
+      const why = best ? `stepping off to ${best.x},${best.y},${best.z}` : way ? way.why : 'stranded: nowhere firm within 3, no drop I would take, no block to stand on'
+      // (said when it changes - onto the footing, the hp come back for the drop - not each time a fight row takes over)
+      if (why !== leafWhy) log('reflex', `standing on ${ours ? 'my footing in the crown' : 'decaying leaves'} at ${fx},${fy},${fz} over a ${require('./act').fallBelow(bot, { x: fx, y: fy, z: fz })}-block drop - ${why}`)
+      leafWhy = why
       try { bot.pathfinder.setGoal(null) } catch {}
       for (const k of ['forward', 'back', 'left', 'right', 'jump']) bot.setControlState(k, false)
-      if (best) steerTo(best, { jump: best.y > fy + 1 })
-      else if (way && way.run) { busy = true; way.run().catch(() => false).finally(() => { busy = false }) }
-      return
-    } else if (active && active.kind === 'floor') return clearActive()
+      if (best || (way && way.run)) {
+        if (!active || active.kind !== 'floor') setActive('floor', 'off a decaying leaf')
+        if (best) steerTo(best, { jump: best.y > fy + 1 }); else { busy = true; way.run().catch(() => false).finally(() => { busy = false }) }
+        return
+      }
+      // A HOLD - waiting on the hp, or stranded - is no reason to starve or be shot: the tick goes on PINNED. Eating
+      // (the regen the drop waits on) and fighting run, but nothing moves the body - steerTo and the fight's follow
+      // stand still, and no flee: a flee off a crown footing is the fall (audit 2026-09-28)
+      pinned = true
+      if (!active) setActive('floor', 'held on a crown')
+    } else { leafWhy = null; if (active && active.kind === 'floor') return clearActive() }
   }
 
   const hs = hostiles(24)
@@ -1101,7 +1111,7 @@ function tick () {
     }
     const h = fleeHeading(t)
     if (h) { bot.setControlState('back', false); steerTo(h, { jump: h.jump, sprint: bot.food > 6 }) }
-    else { bot.setControlState('forward', false); bot.setControlState('back', true); bot.setControlState('sprint', false) }
+    else { bot.setControlState('forward', false); bot.setControlState('back', !pinned); bot.setControlState('sprint', false) }
     return
   } else if (active && active.kind === 'creeper') return clearActive()
 
@@ -1169,7 +1179,7 @@ function tick () {
     try { bot.pathfinder.setGoal(null) } catch {}
     const h = fleeHeading(target)
     if (h) { bot.setControlState('back', false); steerTo(h, { jump: h.jump, sprint: bot.food > 6 }) }
-    else { bot.setControlState('forward', false); bot.setControlState('back', true) }
+    else { bot.setControlState('forward', false); bot.setControlState('back', !pinned) }
     return
   }
   if (target && target.isValid) {
@@ -1189,7 +1199,7 @@ function tick () {
     }
     setActive('fight', `${target.name} ${d.toFixed(1)}b (${why})`)
     if (armed && (!bot.heldItem || !/_(sword|axe)$/.test(bot.heldItem.name))) { busy = true; inv.equipWeapon(bot).finally(() => { busy = false }); return }
-    if (d > 2.8) {
+    if (d > 2.8 && !pinned) {
       bot.pathfinder.setMovements(require('./move').movementsFor(bot, { dig: false, place: false }))
       bot.pathfinder.setGoal(new goals.GoalFollow(target, 1.5), true)
     } else {
@@ -1232,7 +1242,7 @@ function tick () {
   //  the body for nothing; audit B3)
   if (hungry && !hs.some(h => h.d < 8) && now - lastEatFail > 10000 && (!world.feetInWater(bot) || bot.vehicle) && inv.foodItems(bot, { desperate: bot.food <= 6, hurt: bot.health < 20 }).length) {
     const eatShooter = hs.find(h => RANGED.has(h.e.name) && h.d < 24 && canSee(h.e))
-    const cover = eatShooter && bot.food > 6 ? fleeHeading(eatShooter.e) : null
+    const cover = eatShooter && bot.food > 6 && !pinned ? fleeHeading(eatShooter.e) : null
     // in its sight with a way out: get out of sight FIRST (the cover flee - it ends when the sight is lost, and then this
     // eats); the veto alone left the bot standing in the open at hp 3, neither eating nor moving (audit B3)
     if (cover && !bot.vehicle) {
