@@ -13,7 +13,7 @@ const craft = () => require('./craft')
 
 // What stays in the pack when the haul goes into the chests.
 const KIT_KEEP = {
-  torch: 32, crafting_table: 1, stick: 8, coal: 8, charcoal: 8, dirt: 24, bread: 32, cooked_beef: 32, cooked_porkchop: 32, cooked_mutton: 32, cooked_chicken: 32, cooked_cod: 16, cooked_salmon: 16, baked_potato: 16, apple: 16, golden_carrot: 32, white_bed: 1, shield: 1,
+  torch: 32, crafting_table: 1, stick: 8, coal: 8, charcoal: 8, dirt: 24, cobblestone: 16, bread: 32, cooked_beef: 32, cooked_porkchop: 32, cooked_mutton: 32, cooked_chicken: 32, cooked_cod: 16, cooked_salmon: 16, baked_potato: 16, apple: 16, golden_carrot: 32, white_bed: 1, shield: 1,
   // (the bow and its arrows are kit: deposited, the next round's tool check took them out again, every round)
   bow: 1, arrow: 64
 }
