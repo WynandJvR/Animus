@@ -773,7 +773,7 @@ function jumpGuard () {
     return set(k, v)
   }
 }
-let takeoff = null; let wasGround = true; let fell = null; let lastPath = null
+let takeoff = null; let wasGround = true; let fell = null; let lastPath = null; let lastPathStatus = null
 let roofDug = null // (the roof block the air reflex last dug - its log line once a block)
 let lastServerVel = 0 // (when the server last set our velocity - knockback, a push: the fall line's witness)
 // the pathfinder's next step as planned (where to, what it meant to break and place to get there)
@@ -781,7 +781,9 @@ function plannedStep () {
   if (!lastPath || !lastPath.length || !bot.entity) return ''
   const n = lastPath[0]
   const b = x => x.map(q => `${q.x},${q.y},${q.z}`).join(' ')
-  return ` next node ${n.x},${n.y},${n.z}${n.toBreak && n.toBreak.length ? ' break ' + b(n.toBreak) : ''}${n.toPlace && n.toPlace.length ? ' place ' + b(n.toPlace) : ''}${n.parkour ? ' parkour' : ''}`
+  // (the path's size and status too: a node 12 below was planned twice on the grave run - a stale crater, or a partial
+  //  path's last node at the goal; this line tells them apart; audit 2026-09-28)
+  return ` next node ${n.x},${n.y},${n.z}${n.toBreak && n.toBreak.length ? ' break ' + b(n.toBreak) : ''}${n.toPlace && n.toPlace.length ? ' place ' + b(n.toPlace) : ''}${n.parkour ? ' parkour' : ''} (path ${lastPath.length} node${lastPath.length > 1 ? 's' : ''}, ${lastPathStatus || '?'})`
 }
 const recentKeys = [] // (the keys held over the last 3 ticks: a press let go on the takeoff tick itself read "-")
 function noteTakeoff () {
@@ -1379,7 +1381,7 @@ function install (b) {
   setInterval(() => { try { tick() } catch (e) { log('reflex', 'tick error: ' + e.message) } }, 200)
   jumpGuard()
   installPlaceGuard()
-  bot.on('path_update', r => { lastPath = r && r.path })
+  bot.on('path_update', r => { lastPath = r && r.path; lastPathStatus = r && r.status })
   bot.on('goal_reached', () => { lastPath = null })
   bot.on('physicsTick', () => { try { noteTakeoff(); edgeGuard() } catch (e) { log('reflex', 'edge guard error: ' + e.message) } })
   // a fall's death names what took the body off the ground (the trail is 1/s: it can't - a fall off the cathedral's
