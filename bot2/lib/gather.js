@@ -245,18 +245,42 @@ async function towerUp (bot) {
   const y0 = Math.floor(bot.entity.position.y)
   const above = world.at(bot, bot.entity.position.x, y0 + 2, bot.entity.position.z)
   if (!above || !world.isAirish(above)) return false
+  // THE COLUMN we stand on, taken before the jump, and the body centred on it first, crouched (a crouch never walks off an
+  // edge): jumped from 0.3 off a column's edge beside a pit, the place went to the column the body had drifted over -
+  // air - and it came down ten blocks, hp 20 -> 12, felling an orchard tree (2026-09-28)
+  const x0 = Math.floor(bot.entity.position.x); const z0 = Math.floor(bot.entity.position.z)
+  const off = () => Math.hypot(bot.entity.position.x - (x0 + 0.5), bot.entity.position.z - (z0 + 0.5))
   try {
     await bot.equip(filler, 'hand')
+    if (off() > 0.2) {
+      bot.setControlState('sneak', true)
+      const t1 = Date.now()
+      while (off() > 0.2 && Date.now() - t1 < 1500) {
+        const p = bot.entity.position
+        await bot.look(Math.atan2(-((x0 + 0.5) - p.x), -((z0 + 0.5) - p.z)), 0, true)
+        // (a nudge that eases off near the centre: held on to 0.2 it overshot and left the body moving for the jump)
+        bot.setControlState('forward', off() >= 0.25)
+        await move.sleep(50)
+      }
+      bot.setControlState('forward', false); bot.setControlState('sneak', false)
+      if (off() > 0.3 || Math.floor(bot.entity.position.x) !== x0 || Math.floor(bot.entity.position.z) !== z0) return false // (could not centre: no jump)
+    }
+    // (still before the jump - the real protection: 0.04 a tick across is ~0.3 of a block by the apex, over a column's
+    //  edge from a start 0.2 off; settled, a straight-up jump comes down where it left - audit 2026-09-28)
+    for (let k = 0; k < 10 && Math.hypot(bot.entity.velocity.x, bot.entity.velocity.z) >= 0.01; k++) await bot.waitForTicks(1)
     await bot.look(bot.entity.yaw, -Math.PI / 2, true)
     bot.setControlState('jump', true)
     const t0 = Date.now()
     while (bot.entity.position.y < y0 + 1.05 && Date.now() - t0 < 800) await move.sleep(30)
     bot.setControlState('jump', false)
-    const below = bot.blockAt(new Vec3(Math.floor(bot.entity.position.x), y0 - 1, Math.floor(bot.entity.position.z)))
+    // (drifted off the column mid-jump: no place onto a column it is not over - a backstop only: a body whose centre is
+    //  past the edge comes down in the next column whatever we do; the settle above is what keeps it over its own)
+    if (Math.floor(bot.entity.position.x) !== x0 || Math.floor(bot.entity.position.z) !== z0) { await move.sleep(300); return false }
+    const below = bot.blockAt(new Vec3(x0, y0 - 1, z0))
     if (below) await bot.placeBlock(below, new Vec3(0, 1, 0)).catch(() => {})
     await move.sleep(300)
     return Math.floor(bot.entity.position.y) >= y0 + 1
-  } catch { bot.setControlState('jump', false); return false }
+  } catch { bot.setControlState('jump', false); bot.setControlState('forward', false); bot.setControlState('sneak', false); return false }
 }
 
 // ---- surface blocks and exposed ores ------------------------------------------------------
