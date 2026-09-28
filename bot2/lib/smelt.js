@@ -281,7 +281,7 @@ function note (fb, f, bot) {
   const lit = isLit(bot ? bot.blockAt(fb.position) : fb)
   // (an empty bucket left by a burnt lava bucket is no fuel: counted as fuel, a cold furnace behind it never read stalled)
   const fuelled = !!fuel && fuelValue(fuel.name) > 0
-  markFurnace(fb.position, inp || out ? { input: inp ? inp.name : null, output: out ? out.name : null, fuel: fuelled || lit, at: Date.now() } : null)
+  markFurnace(fb.position, inp || out ? { input: inp ? inp.name : null, output: out ? out.name : null, inN: inp ? inp.count : 0, outN: out ? out.count : 0, fuel: fuelled || lit, at: Date.now() } : null)
 }
 function busyFurnaces (bot) {
   const all = homeFurnaces(bot)
@@ -491,8 +491,12 @@ async function collectFurnaces (bot) {
   //  furnaces were opened every round, three minutes of every ten-minute day, 2026-09-27)
   const use = mem.get().furnaceUse || {}
   const stalled = fb => { if (isLit(fb)) return false; const u = use[fkey(fb.position)]; return !!(u && u.input && !u.output && u.fuel === false) }
+  // (worth the walk: a furnace still smelting with under 8 made since it was last seen waits for the next round - 10s an
+  //  item from the ledger's own counts. 48 furnaces opened every round for a few items each: 30-63s of every castle round,
+  //  2026-09-28)
+  const worth = fb => { const u = use[fkey(fb.position)]; if (!u || u.inN == null || !u.inN) return true; return (u.outN || 0) + Math.min(u.inN, Math.floor((Date.now() - u.at) / 10000)) >= 8 }
   for (const fb of furns) {
-    if (stalled(fb)) continue
+    if (stalled(fb) || !worth(fb)) continue
     const f = await openAt(bot, fb)
     if (!f) continue
     // (the ledger noted in finally: a takeOutput that threw skipped it, and the furnace kept its stale entry)
