@@ -216,7 +216,7 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
     if (!block || !block.position) return 0
     if (fallGen !== pathGen) {
       fallGen = pathGen; fallCells = new Set()
-      for (const q of (require('./memory').get().fallHazards || [])) { if (Date.now() - q.at > 30 * 60000) continue; for (const [dx, dz] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) fallCells.add(`${q.x + dx},${q.y},${q.z + dz}`) }
+      for (const q of (require('./memory').get().fallHazards || [])) { if (Date.now() - q.at > 24 * 3600000) continue; for (const [dx, dz] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) fallCells.add(`${q.x + dx},${q.y},${q.z + dz}`) }
     }
     return fallCells.size && fallCells.has(`${block.position.x},${block.position.y},${block.position.z}`) ? 60 : 0
   })

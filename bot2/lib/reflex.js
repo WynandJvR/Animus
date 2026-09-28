@@ -773,7 +773,7 @@ function jumpGuard () {
     return set(k, v)
   }
 }
-const FALL_HAZARD_MS = 30 * 60000 // (a fall's takeoff cell, avoided this long)
+const FALL_HAZARD_MS = 24 * 3600000 // (a fall's takeoff cell, avoided a day: the next trip comes back the same way - only a cost; audit)
 let takeoff = null; let wasGround = true; let fell = null; let lastPath = null; let lastPathStatus = null
 let roofDug = null // (the roof block the air reflex last dug - its log line once a block)
 let lastServerVel = 0 // (when the server last set our velocity - knockback, a push: the fall line's witness)
