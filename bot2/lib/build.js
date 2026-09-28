@@ -1620,8 +1620,13 @@ function failLeftover (bot, p) { const l = leftovers.get(key(p)); const d = toda
 // 2026-09-28, the rim bank's among them - raised, it put the foundation's stand behind a drop the bot could not take).
 // Only below the band being built (the band only rises: that scaffold is never wanted again), never a block a finished
 // attached cell hangs on. One pass, the day's stop.
+// (a cap: 4 minutes a day - the first run took 1037s, pillaring up to high leftovers, while the castle waited; the rest
+//  comes down on the days after, and build.finish takes what is left)
+const SITE_TIDY_MS = 4 * 60000
 async function siteScaffoldTeardown (bot, { shouldStop } = {}) {
   if (!job || !site) return 0
+  const t0 = Date.now(); const stop0 = shouldStop
+  shouldStop = () => (stop0 && stop0()) || Date.now() - t0 > SITE_TIDY_MS
   let bandY = Infinity
   for (const c of job.cells) if (!c.attach && !c.follows && !c.foundation && c.y < bandY && cellDone(bot, c) !== true) bandY = c.y
   const sups = new Set(job.cells.filter(q => q.sup && cellDone(bot, q) === true).map(q => key(q.sup)))
