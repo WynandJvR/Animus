@@ -87,7 +87,10 @@ function start ({ bot, port, host, director, commands, brainSettings, pov, chat 
       buildProgress: st ? {
         name: st.name, blocksPlaced: st.done, blocksTotal: st.total, done: st.done, total: st.total, // (done/total: the panel's Build dialog reads them) percent: Math.round(1000 * st.done / Math.max(1, st.total)) / 10,
         topStillNeeded: Object.fromEntries(Object.entries(st.need || {}).sort((x, y) => y[1] - x[1]).slice(0, 8).map(([k, v]) => [k.replace(/_/g, ' '), v])),
-        materials: director.focus ? director.focus() : null
+        materials: director.focus ? director.focus() : null,
+        // handwork that stopped because its click did nothing (forage deadWork) - 234 cells waited seven hours on a silent
+        // strip loop, and nothing here said so (audit 2026-09-28)
+        stoppedWork: (() => { try { return require('./forage').stoppedWork() } catch { return [] } })()
       } : null,
       // where it is, in words the players use (distance to home and to the build site)
       whereAmI: (() => {

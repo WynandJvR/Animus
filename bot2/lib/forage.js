@@ -620,6 +620,7 @@ function benchSpot (bot) {
 // axe under a worn shield, 634 clicks over seven hours) - the run stops, and the same work under the same conditions
 // (tool, off-hand) is not tried again; any change of them (another tool, the off-hand emptied, a restart) opens it.
 const deadWork = new Map() // label -> conditions key
+function stoppedWork () { return [...deadWork.entries()].map(([label, key]) => ({ work: label, stoppedWith: key })) }
 function workKey (bot, t) { const o = bot.inventory && bot.inventory.slots[45]; return (t ? t.name : '-') + '|' + (o ? o.name : '-') }
 async function workBlocks (bot, { input, tool, becomes, out, n, shouldStop, label }) {
   const t0 = await tool()
@@ -791,4 +792,4 @@ async function process (bot, by, node, n, opts = {}) {
   try { return await work(bot, node, n, opts) } catch (e) { log('forage', `${by} ${node} threw: ${e.message}`); return 0 }
 }
 
-module.exports = { lavaFuel, lavaSites, lavaSource, lavaStands, lavaKnown, bucketsAvailable, handles, spec, gather: gatherRaw, process, exhausted, exhaustedKinds, generation, seen, watch, sightMobs, noteTrip, strip, carve, harden, compost, shearBlock, ensureShears, benchSpot, shoreAt, SEARCH_TRIPS }
+module.exports = { stoppedWork, lavaFuel, lavaSites, lavaSource, lavaStands, lavaKnown, bucketsAvailable, handles, spec, gather: gatherRaw, process, exhausted, exhaustedKinds, generation, seen, watch, sightMobs, noteTrip, strip, carve, harden, compost, shearBlock, ensureShears, benchSpot, shoreAt, SEARCH_TRIPS }
