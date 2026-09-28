@@ -114,7 +114,10 @@ async function tidy (bot, { from, radius = RADIUS, shouldStop } = {}) {
     const low = col[col.length - 1]
     const r = await move.goTo(bot, new goals.GoalNear(low.x, low.y, low.z, 2), { timeoutMs: 30000, allowZones: ['orchard', 'base', 'farm'], label: 'to litter' })
     if (!r.ok && !act.reach(bot, low, 4.5)) { left += col.length; continue }
+    const pts = infraPoints()
     for (const q of col) {
+      // (a stepping stone can become a light's post or a water's edge after it was noted: asked again at the dig, and let go)
+      if (kept(bot, q, pts)) { ledger.delete(k(q)); dirty = true; continue }
       if (!act.reach(bot, q, 4.5)) { left++; continue }
       if (await act.dig(bot, new Vec3(q.x, q.y, q.z), { noWalk: true, timeoutMs: 8000, allowZones: ['orchard', 'base', 'farm'] }).catch(() => false)) removed++; else left++
     }
