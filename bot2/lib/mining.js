@@ -328,7 +328,9 @@ async function takeKnownOre (bot, itemName, target, ctx = {}) {
     if (world.openSky(bot, world.feetPos(bot)) && (gather.onGrounds(bot.entity.position) || underBuild(world.feetPos(bot)))) { log('mine', 'known ore: out under the sky round home - ending the ore trip'); break }
     if (!inv.bestTool(bot, 'pickaxe', 4) && !await ensurePick(bot)) break
     if (inv.freeSlots(bot) <= 2) await base().tossJunk(bot)
-    const ores = await world.scanBlocks(bot, g.blocks, { maxDistance: 64, count: 60, point: home, filter: b => !refused.has(k(b.position)) && inv.canHarvest(bot, b) && !fluidAround(bot, b.position) && !move.inZone(b.position, 2) && !gather.onGrounds(b.position) && !underBuild(b.position) })
+    // (ctx.near {point, radius}, ctx.oreFilter: a trip started at one outcrop works that outcrop - its vein and the rock-face
+    //  coal round it - never the next-nearest ore anywhere in 64, a 40-block dig down from a hillside; audit 2026-09-28)
+    const ores = await world.scanBlocks(bot, g.blocks, { maxDistance: ctx.near ? ctx.near.radius : 64, count: 60, point: ctx.near ? ctx.near.point : home, filter: b => !refused.has(k(b.position)) && inv.canHarvest(bot, b) && !fluidAround(bot, b.position) && !move.inZone(b.position, 2) && !gather.onGrounds(b.position) && !underBuild(b.position) && (!ctx.oreFilter || ctx.oreFilter(b)) })
     if (!ores.length) break
     const me = bot.entity.position
     const o = ores.sort((x, y) => world.dist3(x.position, me) - world.dist3(y.position, me))[0]
@@ -359,7 +361,10 @@ async function mineFor (bot, itemName, target, ctx = {}) {
   // a "mine" working just under the surface is a trench under whatever stands there
   if (m && m.stairsDone && home && m.level > home.y - 20 && !m.ore) { log('mine', `the mine at ${move.fmt(m.entrance)} works at y${m.level}, too near the surface - abandoning it`); abandonMine(m); m = null }
   // an ore trip works where that ore is: a mine at another level is left (not a bad mine - cobble comes from it as well)
-  const ore = await oreLevel(bot, itemName).catch(() => null)
+  // (coal is everywhere under the ground: the mine at hand is worked for it - its walls give it, with the cobble - never
+  //  left for a new one at coal's richest band: the first coal trip threw the y39 cobble mine away for a hillside at y100
+  //  and every cobble trip after would dig new stairs back down, 2026-09-28)
+  const ore = itemName === 'coal' && m ? null : await oreLevel(bot, itemName).catch(() => null)
   // (a mine already made for this band keeps it: the best entrance may not reach it - y86 ground over y91 iron made a
   //  y78 mine, and every trip after called it the wrong level and made the same mine again)
   if (ore && m && Math.abs(m.level - ore.y) > 6 && !(m.oreY != null && Math.abs(m.oreY - ore.y) <= 6)) { log('mine', `${itemName} lies at y${ore.y} (${ore.n} in sight of the rock) - the mine at y${m.level} is the wrong level; a new one`); mem.set('mine', null); m = null }
@@ -641,4 +646,4 @@ async function openTunnelCell (bot, from, q) {
   return true
 }
 
-module.exports = { mineFor, chooseEntrance, takeWallOres, inOwnMine, oreLevel }
+module.exports = { mineFor, chooseEntrance, takeWallOres, takeKnownOre, inOwnMine, oreLevel }

@@ -615,10 +615,20 @@ const TASKS = {
     return ok
   },
   async nightMine () {
+    // (the night's digging goes to the fuel first when the furnaces wait on it - coal from the mine's walls, with its
+    //  cobble - then to the cobble: the day's coal trip was cut short at dusk every time, 2026-09-28)
+    const stop = () => taskCancelled() || world.isDay(bot)
     const st = build.cachedStatus(bot)
-    const want = st && st.need.stone_bricks ? 'cobblestone' : 'cobblestone'
+    const fuelShort = st && (mats.planFor(bot, st.need).raw.fuel || 0) > 0 && inv.count(bot, 'coal') + inv.count(bot, 'charcoal') + base.bankCount('coal') + base.bankCount('charcoal') < 32
+    if (fuelShort) {
+      const c0 = inv.count(bot, 'coal')
+      await mining.mineFor(bot, 'coal', c0 + 32, { seal: true, shouldStop: stop }).catch(() => false)
+      log('dir', `the night's coal: +${inv.count(bot, 'coal') - c0}`)
+      if (stop()) return inv.count(bot, 'coal') > c0
+    }
+    const want = 'cobblestone'
     const target = inv.count(bot, want) + 256
-    return mining.mineFor(bot, want, target, { seal: true, shouldStop: () => taskCancelled() || world.isDay(bot) })
+    return mining.mineFor(bot, want, target, { seal: true, shouldStop: stop })
   },
   async bunker () {
     return shelter.bunker(bot, { shouldStop: () => taskCancelled() })
@@ -1317,11 +1327,27 @@ async function gatherFor (raw, short) {
       // "cutting logs for charcoal" in two days and not one log into the furnaces since the morning, the clay and the
       // cobble waiting in the chest (2026-09-28). A coal seam at the mine's depth is 8 smelts an ore, and the trip brings
       // the build's cobble back with it. Charcoal from logs stays the way when no coal comes.
-      {
+      // (by DAY from the outcrops - coal peaks near y96, and the hills round home show it in the rock face: 268 in sight at
+      //  y~100 while the y39 mine's walls give it thinly; a walk out past the grounds, then the vein. Started only with the
+      //  day to finish it: the first trip began at dusk and came home with 0 of 8; audit 2026-09-28)
+      if (world.ticksUntilNight(bot) > 2400) {
         const c0 = inv.count(bot, 'coal')
         const want = Math.min(Math.ceil(short / 8), Math.max(8, Math.floor(tripRoom() / 2)))
-        log('dir', `short of ${short} fuel for the furnaces - mining ${want} coal`)
-        await mining.mineFor(bot, 'coal', c0 + want, ctx).catch(() => false)
+        const home = mem.get().home
+        // (exposed to the SKY: air beside it that sees the sky - a cave wall's coal has air beside it too, and the walk there
+        //  is a day walk into the dark; audit)
+        const skyFace = b => [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 0, -1]].some(([dx, dy, dz]) => { const q = { x: b.position.x + dx, y: b.position.y + dy, z: b.position.z + dz }; const a = world.at(bot, q.x, q.y, q.z); return a && world.isAirish(a) && world.openSky(bot, q) })
+        const seen = home ? await world.scanBlocks(bot, /^(coal_ore|deepslate_coal_ore)$/, { maxDistance: 96, count: 200, point: home, filter: b => world.dist2(b.position, home) > 48 && !move.inZone(b.position, 2) && !gather.onGrounds(b.position) && skyFace(b) }).catch(() => []) : []
+        const me = bot.entity.position
+        const o = seen.sort((a, b) => world.dist3(a.position, me) - world.dist3(b.position, me))[0]
+        if (o) {
+          log('dir', `short of ${short} fuel for the furnaces - ${want} coal from the outcrop at ${move.fmt(o.position)}`)
+          const r = await move.travel(bot, o.position, { range: 3, shouldStop: dayStop, label: 'to the coal' })
+          if (r.ok) await mining.takeKnownOre(bot, 'coal', c0 + want, Object.assign({}, ctx, { near: { point: o.position, radius: 8 }, oreFilter: b => world.dist3(b.position, o.position) <= 3 || skyFace(b) })).catch(() => false)
+        } else {
+          log('dir', `short of ${short} fuel for the furnaces - no coal in sight past the grounds, the mine's walls for ${want}`)
+          await mining.mineFor(bot, 'coal', c0 + want, ctx).catch(() => false)
+        }
         const got = inv.count(bot, 'coal') - c0
         log('dir', `the coal trip brought ${got} of ${want} coal${got < want ? " - the rest as charcoal from logs" : ""}`)
         if (got > 0) return true
