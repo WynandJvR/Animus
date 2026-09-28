@@ -76,6 +76,10 @@ function homeByDark () {
   // Respawned 2200 blocks out, every task stopped the moment it began - no tools, no food - and the bot walked the
   // whole way unarmed at half health into a river of drowned (2026-09-27)
   if (walk > DAYLIGHT_TICKS / 2) return false
+  // (already home - a few steps off - there is no walk to be caught out on: the margin for the way home cut the day's last
+  //  1800 ticks at the farm's own edge, and every chore chosen then stopped the moment it began - the farm, the yard,
+  //  four times over, 2026-09-28. The dusk stop ends them when the evening comes)
+  if (world.dist3(bot.entity.position, h) < 24) return false
   return world.ticksUntilNight(bot) < walk + world.HOME_MARGIN
 }
 let taskCancelled = () => false
