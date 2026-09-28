@@ -1528,6 +1528,12 @@ function foundationStand (bot, c) {
     if (d < bd) { bd = d; best = p }
   }
   if (best) return best
+  // (the hollow is DARK and closed: a spawner. Never in with a hostile down there - every one the world holds, seen or not -
+  //  and an unlit region only by day at full health; a lit one - a foundation torch within 12 - is the one to prefer; audit)
+  const hostileIn = Object.values(bot.entities).some(e => e && e.position && reflex.HOSTILE.has(e.name) && e.position.y <= job.box.y1 + 1 && world.dist3(e.position, c) < 12)
+  if (hostileIn) return null
+  const lit = job.cells.some(q => q.foundation && q.name === 'torch' && world.dist3(q, c) <= 12 && cellDone(bot, q) === true)
+  if (!lit && !(world.phase(bot) === 'day' && bot.health >= 20)) return null
   // FROM INSIDE THE HOLLOW when no outside stand will do - the rim's trench stands sat behind drops the walk would not take,
   // and 75 rim cells waited for days while the bot fell off the edge they would close (2026-09-29). Safe by wallsMeIn's own
   // rule, asked from the stand: with this cell in, a walk from there must still find a way out (audit route 2)
