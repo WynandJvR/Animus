@@ -1040,7 +1040,10 @@ async function processAtHome () {
   const winOut = new Set(win.smelts.map(s => s.output))
   for (const s of tot.smelts.slice().sort((a, b) => winOut.has(b.output) - winOut.has(a.output))) {
     if (dayStop()) break
-    const n = Math.min(s.n, stock(s.input) - (win.top[s.input] || 0), 64 * Math.max(1, smelt.homeFurnaces(bot).length))
+    // (and a scaffold's worth of cobblestone kept back: the furnaces took the last of it for stone, and the build step went
+    //  straight to the mine for 31 to stand on - a mine trip a round, 2026-09-28)
+    const keepBack = s.input === 'cobblestone' ? SCAFFOLD_KEEP : 0
+    const n = Math.min(s.n, stock(s.input) - (win.top[s.input] || 0) - keepBack, 64 * Math.max(1, smelt.homeFurnaces(bot).length))
     if (n < 1) continue
     const k = await loadSmelt(s.input, n)
     if (k) log('dir', `smelting ${k} ${s.input} -> ${s.output} (${s.n} more ${s.output} wanted for the ${st.name})`)
@@ -1210,6 +1213,7 @@ function watchNights () {
 // are), leads followed from wherever the bot stands, a pack of logs and the saplings for the orchard at home carried
 // back. Without it the frontier passed 600b and the castle's 535 spruce logs could never be reached (2026-09-28).
 // Only fed, whole and armed; home again on a full pack, a searched-out country, a death, or MAX_NIGHTS out.
+const SCAFFOLD_KEEP = 48 // (cobblestone the smelting leaves for the builder's stepping stones: ensureScaffold asks 32)
 const DAWN_TICKS = 12900 // (the most daylight a day holds: ticksUntilNight at sunrise)
 const MAX_NIGHTS = 3
 // (three nights and the walk back is days of a working body - and a taiga is thin on animals: a full pack of food out,
