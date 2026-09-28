@@ -343,16 +343,20 @@ async function useOn (bot, pos, itemName, { accept, face = 'up', allowZones = []
     if (!itemName && bot.heldItem && /_bucket$/.test(bot.heldItem.name)) await bot.unequip('hand').catch(() => {})
     // (the hold: the ledge crouch presses sneak again otherwise, between this let-go and the click - reflex.holdNoSneak)
     const letGo = reflex.holdNoSneak()
+    // (an axe with a shield worn: the server reads an unsneaking axe click as the shield's raise and strips nothing -
+    //  vanilla AxeItem's blocking-intent rule; 634 dead clicks 2026-09-28. A player shift-clicks, and so do we. Only the
+    //  axe: a sneaking click skips the block's own use, which is what shears on a pumpkin and a composter's layer are)
+    const secondary = !!itemName && /_axe$/.test(itemName) && inv.offhandShield(bot)
     try {
       if (held) await bot.equip(held, 'hand')
-      bot.setControlState('sneak', false)
+      bot.setControlState('sneak', secondary)
       const up = face !== 'down'
       // (`yaw`: the look the use takes its direction from - a fence gate opened turns to it - else straight at the face)
       const aim = target.offset(0.5, up ? 1 : 0, 0.5)
       if (yaw != null) { const e = bot.entity.position.offset(0, bot.entity.eyeHeight || 1.62, 0); const d = aim.minus(e); await bot.look(yaw, Math.atan2(d.y, Math.hypot(d.x, d.z)), true) } else await bot.lookAt(aim, true)
       await ticks(bot, 2)
       await bot.activateBlock(b, new Vec3(0, up ? 1 : -1, 0), new Vec3(0.5, up ? 1 : 0, 0.5))
-    } catch (e) { lastErr = e.message } finally { letGo() }
+    } catch (e) { lastErr = e.message } finally { if (secondary) bot.setControlState('sneak', false); letGo() }
     for (let w = 0; w < 6; w++) {
       await sleep(150)
       const after = bot.blockAt(target)
