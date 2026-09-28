@@ -1279,6 +1279,14 @@ function watchExpedition () {
 async function gatherFor (raw, short) {
   const put = notToday.get(raw)
   if (put) { if (!put.sawNight || world.isNight(bot)) return false; notToday.delete(raw); log('dir', `${raw}: a new day - the trip is open again`) }
+  // AN EMPTY PACK FOR THE TRIP: a trip is sized by the room in the pack, and the pack left home with what the builder
+  // had drawn out and the last trips brought - 300-400 items stored only after the walk back ("home with 405 items to
+  // store", 2026-09-28). At home, the haul goes in first: the same line as the deposit's own (haulSize >= 64)
+  if (base.distHome(bot) < 24 && (mem.get().chests || []).length && haulSize() >= 64) {
+    const before = inv.freeSlots(bot)
+    await base.depositAll(bot).catch(() => false)
+    log('dir', `emptied the pack for the ${raw} trip: ${before} -> ${inv.freeSlots(bot)} free slots`)
+  }
   const batch = Math.min(short, tripRoom())
   const ctx = { shouldStop: dayStop }
   switch (raw) {
