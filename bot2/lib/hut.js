@@ -23,6 +23,10 @@ const FOUNDATION_ALT = /^(dirt|grass_block|coarse_dirt|rooted_dirt|podzol|mud|cl
 let plan = null
 // the doorway holds the door by day and a block at night (zombies break wooden doors on hard)
 const SEAL_RE = /^(cobblestone|andesite|diorite|granite|tuff|cobbled_deepslate|stone|dirt|mossy_cobblestone)$/
+// ...and what a dirt seal becomes by morning: grass spreads onto it. The step outside the door is walkway at feet level,
+// air by nature - a grass_block there is our own dirt grown over, and the clear passed it by: every walk out through the
+// door "did not get through" (57 today) and 26 walks to the furnaces timed out, 2026-09-28
+const STEP_CLEAR_RE = /^(cobblestone|andesite|diorite|granite|tuff|cobbled_deepslate|stone|dirt|mossy_cobblestone|grass_block|podzol|mycelium|coarse_dirt|rooted_dirt|dirt_path)$/
 const DOOR_OR_SEAL = /_door$|^(cobblestone|andesite|diorite|granite|tuff|cobbled_deepslate|stone|dirt|mossy_cobblestone)$/
 
 function key (p) { return `${p.x},${p.y},${p.z}` }
@@ -438,7 +442,8 @@ async function sealDoor (bot) {
   }
   const have = inv.items(bot).filter(i => SEAL_RE.test(i.name)).reduce((n, i) => n + i.count, 0)
   if (have < 2) await require('./base').withdraw(bot, 'cobblestone', 2).catch(() => 0)
-  const filler = () => inv.items(bot).find(i => SEAL_RE.test(i.name))
+  // (stone before dirt: a dirt seal grows grass overnight)
+  const filler = () => inv.items(bot).find(i => SEAL_RE.test(i.name) && i.name !== 'dirt') || inv.items(bot).find(i => i.name === 'dirt')
   if (!filler()) { log('hut', 'nothing to block the door step with'); return false }
   await setDoor(bot, d, true)
   for (const y of [out.y, out.y + 1]) {
@@ -464,13 +469,13 @@ async function unsealDoor (bot) {
   if (world.dist3(world.feetPos(bot), d) > 5) return false
   const out = outerStep(pl)
   let did = false
-  const stepBlocked = [out.y, out.y + 1].some(y => { const c = world.at(bot, out.x, y, out.z); return c && SEAL_RE.test(c.name) })
+  const stepBlocked = [out.y, out.y + 1].some(y => { const c = world.at(bot, out.x, y, out.z); return c && STEP_CLEAR_RE.test(c.name) })
   if (stepBlocked) {
     log('hut', 'clearing the blocked door step')
     if (move.insideHut(world.feetPos(bot))) await setDoor(bot, d, true)
     for (const y of [out.y + 1, out.y]) {
       const c = world.at(bot, out.x, y, out.z)
-      if (c && SEAL_RE.test(c.name)) await act.dig(bot, { x: out.x, y, z: out.z }, { force: true, allowZones: ['base', 'build'], timeoutMs: 8000 })
+      if (c && STEP_CLEAR_RE.test(c.name)) await act.dig(bot, { x: out.x, y, z: out.z }, { force: true, allowZones: ['base', 'build'], timeoutMs: 8000 })
     }
     await act.collectDrops(bot, { radius: 3, maxMs: 1500 })
     did = true
