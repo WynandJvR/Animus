@@ -290,14 +290,24 @@ async function fellTree (bot, basePos, re, { leaves = false, allowZones = [], sh
       await move.goTo(bot, new goals.GoalNear(basePos.x, basePos.y, basePos.z, 1), { timeoutMs: 12000, place: false, label: 'off the crown' })
     }
   }
-  // (what is left of it - the bot walked off before it came down: the blocks in reach from here, the rest said)
-  let left = 0
-  for (const c of pillar.sort((a, b) => b.y - a.y)) {
-    const b = world.at(bot, c.x, c.y, c.z)
-    if (!b || !world.isSolid(b) || !require('./build').FILLER_ITEMS.test(b.name)) continue // (THE scaffold list: build.FILLER_ITEMS)
-    if (!act.reach(bot, c, 4.5) || !await act.dig(bot, c, { timeoutMs: 6000, noWalk: true, allowZones: allowZones.concat(['orchard']) }).catch(() => false)) left++
+  // (what is left of it - the bot walked off before it came down (a log's dig walks it onto the crown), or the ledger
+  //  missed a block. THE TRUNK COLUMN IS OURS: it held this tree's logs a minute ago, so any filler standing in it now
+  //  is our pillar whatever the ledger says - swept from the ground beside the stump, top down. Left standing, the
+  //  bottom block filled the trunk cell and the orchard dropped the spot: 7 spots on 2026-09-28)
+  const FILL = require('./build').FILLER_ITEMS // (THE scaffold list)
+  const topY = column.length ? column[column.length - 1].y : basePos.y
+  const sweep = pillar.slice()
+  for (let y = basePos.y; y <= topY; y++) if (!sweep.some(c => c.x === basePos.x && c.y === y && c.z === basePos.z)) sweep.push({ x: basePos.x, y, z: basePos.z })
+  const standing = () => sweep.filter(c => { const b = world.at(bot, c.x, c.y, c.z); return b && world.isSolid(b) && FILL.test(b.name) }).sort((a, b) => b.y - a.y)
+  let left = standing()
+  if (left.length && left.some(c => !act.reach(bot, c, 4.5))) {
+    await move.goTo(bot, new goals.GoalNear(basePos.x, basePos.y, basePos.z, 2), { timeoutMs: 15000, place: false, allowZones: allowZones.concat(['orchard']), label: 'to the pillar' })
   }
-  if (left) log('gather', `${left} pillar block${left > 1 ? 's' : ''} left at ${pillar[0].x},${pillar[0].z} - out of reach`)
+  for (const c of left) {
+    if (act.reach(bot, c, 4.5)) await act.dig(bot, c, { timeoutMs: 6000, noWalk: true, allowZones: allowZones.concat(['orchard']) }).catch(() => false)
+  }
+  left = standing()
+  if (left.length) log('gather', `${left.length} pillar block${left.length > 1 ? 's' : ''} left at ${left[0].x},${left[0].z} (y${left[left.length - 1].y}-${left[0].y}) - out of reach from the ground`)
   if (leaves && column.length) {
     // the crown within reach, from where we stand: natural leaves only (persistent ones are someone's build)
     const top = column[column.length - 1]
@@ -372,10 +382,14 @@ async function towerUp (bot, { allowZones = [], onPlaced = null, builder = false
     if (!builder && cellB && move.isProtected(cellB, 'fill')) { log('gather', `no tower at ${x0},${y0},${z0} - a cell of the build`); await move.sleep(300); return false }
     if (zn && !allowZones.includes('*') && !allowZones.includes(zn.label)) { log('gather', `no tower at ${x0},${y0},${z0} - inside the ${zn.label}`); await move.sleep(300); return false }
     if (below) await bot.placeBlock(below, new Vec3(0, 1, 0)).catch(() => {})
-    // (every tower block but the builder's is litter until it comes down: the one ledger - litter.js)
-    { const nb = world.at(bot, x0, y0, z0); if (nb && world.isSolid(nb)) { lastPillar = { x: x0, y: y0, z: z0 }; if (onPlaced) onPlaced(lastPillar); if (!builder) require('./litter').note(bot, lastPillar) } }
     await move.sleep(300)
-    return Math.floor(bot.entity.position.y) >= y0 + 1
+    // (every tower block but the builder's is litter until it comes down: the one ledger - litter.js. Read AFTER the
+    //  settle, and a body standing a block up counts as the block's word: read straight after placeBlock - which can
+    //  settle before the server's update lands - the ledger lost 3 of 9 orchard pillar blocks, and nothing took them
+    //  down: the trunk cells filled with cobblestone and the spots were dropped, 2026-09-28)
+    const up = Math.floor(bot.entity.position.y) >= y0 + 1
+    { const nb = world.at(bot, x0, y0, z0); if (up || (nb && world.isSolid(nb))) { lastPillar = { x: x0, y: y0, z: z0 }; if (onPlaced) onPlaced(lastPillar); if (!builder) require('./litter').note(bot, lastPillar) } }
+    return up
   } catch { bot.setControlState('jump', false); bot.setControlState('forward', false); bot.setControlState('sneak', false); return false }
 }
 
