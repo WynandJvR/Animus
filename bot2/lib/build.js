@@ -440,6 +440,7 @@ async function setJob (bot, name, origin, { exactWood: exact = true } = {}) {
   if (!prev || prev.name !== name || !prev.origin || prev.origin.x !== origin.x || prev.origin.y !== origin.y || prev.origin.z !== origin.z) {
     cellFails.clear(); mem.update(m => { m.cellFails = {}; m.axisRelaxed = [] }); statusGen++
   }
+  detached.clear() // (the stockless verdicts are the old job's: this one's own stock decides them afresh)
   const md = world.data(bot)
   const st = s.start(); const en = s.end()
   const cells = []
@@ -538,7 +539,9 @@ function lowestStructural (todo, bot, det = bot ? detachedItems(todo, bot) : nul
   let m = Infinity
   for (const c of todo) {
     if (c.attach || c.follows || infillCell(c) || (cellFails.get(key(c)) || {}).n >= 1 || c.y >= m) continue
-    if (det && det.has(stepItem(bot, c))) continue
+    // (and a falling block over a cell still waiting - powder over a brick gap - can't go in either: it anchoring would pin
+    //  the band a layer up instead of at the gap; audit 2026-09-28)
+    if (det && (det.has(stepItem(bot, c)) || fallsIn(bot, c, stepItem(bot, c)))) continue
     m = c.y
   }
   return m
