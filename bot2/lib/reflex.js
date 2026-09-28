@@ -605,10 +605,17 @@ function installPlaceGuard () {
         await bot.equip(s, 'hand')
         log('act', `place guard: the planner held ${held ? held.name : 'nothing'} - placing ${s.name} instead`)
       }
+      // (every block the planner puts down, remembered: its own stepping stones up a tree were never taken away - two
+      //  cobblestone posts where the orchard's saplings stood, 2026-09-28. A caller takes back what its walk raised)
+      const r = await orig(ref, face, ...rest)
+      try { const p = ref.position.plus(face); plannerPlaced.push({ x: p.x, y: p.y, z: p.z, at: Date.now() }); if (plannerPlaced.length > 200) plannerPlaced.shift() } catch {}
+      return r
     }
     return orig(ref, face, ...rest)
   }
 }
+const plannerPlaced = []
+function plannerPlacedSince (t) { return plannerPlaced.filter(q => q.at >= t) }
 function jumpGuard () {
   const set = bot.setControlState.bind(bot)
   origSet = set
@@ -1220,4 +1227,4 @@ function setEnabled (on) { enabled = !!on; if (!on) clearActive() }
 function underMs () { return submergedSince ? Date.now() - submergedSince : 0 }
 function airLeftMs () { return airMs }
 
-module.exports = { findAirReachable, _bindForTest: b => { bot = b }, edgeStops, install, holdNoSneak, active: isActive, info, nearestThreat, lastHurt, hurtLine, edgeAhead, hostiles, onSurface, canSee, NEVER_MELEE, waitClear, setEnabled, findAir, HOSTILE, RANGED, bowReady, startDive, endDive, diveBroken, underMs, airLeftMs, AIR_MS, DIVE_HARD_MS }
+module.exports = { plannerPlacedSince, findAirReachable, _bindForTest: b => { bot = b }, edgeStops, install, holdNoSneak, active: isActive, info, nearestThreat, lastHurt, hurtLine, edgeAhead, hostiles, onSurface, canSee, NEVER_MELEE, waitClear, setEnabled, findAir, HOSTILE, RANGED, bowReady, startDive, endDive, diveBroken, underMs, airLeftMs, AIR_MS, DIVE_HARD_MS }

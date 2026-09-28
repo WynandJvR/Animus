@@ -336,6 +336,9 @@ async function smeltItem (bot, output, count, ctx = {}) {
 
 // Background smelting for bulk jobs: load every furnace at home with `input`, return at once.
 async function loadFurnaces (bot, input, maxItems, { anyWood = false } = {}) {
+  // (the one door every log goes through to become charcoal: never the build's own species - a stripped or spruce log
+  //  smelted is a castle cell short; 31 spruce logs went in this way, 2026-09-28)
+  try { if (/_(log|wood)$/.test(input) && require('./materials').isReservedWood(bot, input)) { log('smelt', `not smelting ${input} - the build's own wood`); return 0 } } catch {}
   const home = mem.get().home
   let furns = homeFurnaces(bot)
   // the furnace inside the safehouse stays free for charcoal (torches) and cooking when there are others
@@ -380,6 +383,9 @@ const inFlightLoads = []
 // in the chest for a fire that never came (2026-09-23). One log in seven, as planks, lights the rest (a log's planks
 // smelt 6); the charcoal then keeps the kiln going. Loaded in the background like any bulk smelt.
 async function burnForCharcoal (bot, logName, n) {
+  // (never the build's own wood: the fuel task harvested the orchard - spruce now - and burnt 31 spruce logs into charcoal
+  //  while the castle waited on spruce slabs, 2026-09-28. The one rule at the one burner)
+  try { if (require('./materials').isReservedWood(bot, logName)) { log('smelt', `not burning ${n} ${logName} - the build's own wood`); return 0 } } catch {}
   const k = Math.min(n, inv.count(bot, logName))
   if (k < 2) return 0
   const lighters = Math.max(1, Math.ceil(k / 7))

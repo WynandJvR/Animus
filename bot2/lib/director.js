@@ -954,7 +954,9 @@ function countOf (name) { return mats.held(bot, name) }
 function windowNeeds () { return typeof build.nextNeeds === 'function' ? build.nextNeeds(bot, WINDOW_LAYERS) : {} }
 // the nearest natural wood growing around here (what the castle's wood cells will be made of)
 function nearestWood () {
-  const t = world.findBlocks(bot, build.LOG_ANY, { maxDistance: 64, count: 8, filter: b => !move.inZone(b.position, 2) && !move.insideHut(b.position) })[0]
+  // (not the build's own species - wood for fuel is any other tree; preferredWood keeps the same rule)
+  const res = mats.reservedSpecies(bot)
+  const t = world.findBlocks(bot, build.LOG_ANY, { maxDistance: 64, count: 8, filter: b => !move.inZone(b.position, 2) && !move.insideHut(b.position) && !res.has(b.name.replace('_log', '')) })[0]
   return t ? t.name.replace('_log', '') : craft.preferredWood(bot, 1)
 }
 
@@ -1002,7 +1004,8 @@ async function processAtHome () {
   // the brick line stalled on fuel with cobble waiting in the chest)
   if (tot.raw.fuel > 0 && stock('coal') + stock('charcoal') < 32) {
     const spareLogs = Math.floor(smelt.woodSurplus(bot) / 4)
-    const logName = Object.keys(Object.assign({}, inv.counts(bot), base.bankCounts())).filter(n => mats.LOG_ANY.test(n) && stock(n) > 0).sort((a, b) => stock(b) - stock(a))[0]
+    // (never the build's own species: the most-stocked log was the orchard's spruce, and 31 of it went into the furnaces)
+    const logName = Object.keys(Object.assign({}, inv.counts(bot), base.bankCounts())).filter(n => mats.LOG_ANY.test(n) && stock(n) > 0 && !mats.isReservedWood(bot, n)).sort((a, b) => stock(b) - stock(a))[0]
     if (logName && spareLogs >= 4) {
       const n = Math.min(32, spareLogs, stock(logName))
       if (inv.count(bot, logName) < n) await base.withdraw(bot, logName, n - inv.count(bot, logName))

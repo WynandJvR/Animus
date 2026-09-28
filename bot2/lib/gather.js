@@ -193,6 +193,7 @@ async function chop (bot, re, n, ctx = {}) {
 async function fellTree (bot, basePos, re, { leaves = false, allowZones = [], shouldStop } = {}) {
   const before = inv.count(bot, b => re.test(b))
   const pillar = [] // (the blocks towered up to reach the top logs: taken down again after)
+  const tFell = Date.now() // (and the planner's own stepping stones round this trunk from now on: reflex.plannerPlacedSince)
   // stand next to the trunk
   const r = await move.goTo(bot, new goals.GoalNear(basePos.x, basePos.y, basePos.z, 2), { timeoutMs: 40000, label: 'to tree', shouldStop })
   if (!r.ok) return false
@@ -220,6 +221,8 @@ async function fellTree (bot, basePos, re, { leaves = false, allowZones = [], sh
   // THE PILLAR DOWN FROM ON TOP, straight after the last log - a player's way: stand on it, dig the block under the feet,
   // drop one onto the next, to the ground. From the stump a 10-high pillar top is out of reach, and the walk to reach it
   // towered a second pillar beside it (audit 2026-09-28). Only while the cell under the feet is ours.
+  // (the planner's stepping stones round this trunk count as ours too - a walk to a high log raised them)
+  for (const q of reflex.plannerPlacedSince(tFell)) if (Math.abs(q.x - basePos.x) <= 2 && Math.abs(q.z - basePos.z) <= 2 && !pillar.some(c => c.x === q.x && c.y === q.y && c.z === q.z)) pillar.push({ x: q.x, y: q.y, z: q.z })
   {
     const ours = c => pillar.some(q => q.x === c.x && q.y === c.y && q.z === c.z)
     for (let guard = 0; guard < 40 && pillar.length; guard++) {
