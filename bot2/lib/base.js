@@ -144,9 +144,14 @@ async function openChest (bot, p) {
 async function settle (bot) { try { await bot.waitForTicks(2) } catch {} }
 // A window whose moves the pack does not bear out was showing stale contents: its reading of the chest is dropped, and
 // the next open reads the chest afresh (audit 2026-09-28: the bank counted what was asked, the pack disagreed)
+// (no save of its own - the next regular write carries the dropped reading: a save per mismatch turned a timing bug into
+//  72 whole-file writes in 8s - and a line per chest a minute at most, enough to see drift; audit 2026-09-28)
+const movesSaid = new Map()
 function checkMoves (p, asked, moved, what) {
   if (asked === moved) return
-  delete chestCache()[key(p)]; mem.save()
+  delete chestCache()[key(p)]
+  const k = key(p); if (Date.now() - (movesSaid.get(k) || 0) < 60000) return
+  movesSaid.set(k, Date.now())
   log('base', `${what} at ${move.fmt(p)}: asked ${asked}, the pack moved ${moved} - the chest will be read again`)
 }
 function refreshCache (w, p) {
