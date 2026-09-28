@@ -1052,7 +1052,10 @@ async function buildStep (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     tpick = Date.now()
     // (a block placed is a new foothold: the resting cells round it wake - a wall top built is how the south wall's high
     //  cells get their stand; the clock was the only waker. Their count stays, only the rest ends; audit 2026-09-28)
-    if (ok) { for (const [k, f] of cellFails) { const [x, y, z] = k.split(',').map(Number); if (f.at && Math.abs(x - c.x) <= 2 && Math.abs(y - c.y) <= 2 && Math.abs(z - c.z) <= 2) f.at = 0 } }
+    // (bounded: only a block that could be a stand or a support for it - at or below it, beside it within 2 - and once a
+    //  rest: a row laid beside a truly unreachable cell would wake it at every block, a 16s failure each; the next failure
+    //  writes a fresh record, and the flag with it; audit 2026-09-28)
+    if (ok) { for (const [k, f] of cellFails) { const [x, y, z] = k.split(',').map(Number); if (f.at && !f.woke && c.y <= y && y - c.y <= 2 && Math.abs(x - c.x) <= 2 && Math.abs(z - c.z) <= 2) { f.at = 0; f.woke = true } } }
     if (ok) { placed++; if (cellFails.delete(key(c))) saveCellFails(); if (placed % 25 === 0) { const st = status(bot); log('build', `${st.done}/${st.total} placed`) } } else { failed.set(key(c), (failed.get(key(c)) || 0) + 1); saveCellFails(); if (failed.get(key(c)) === 1) log('build', `${c.name} at ${move.fmt(c)} won't place (${lastPlaceFail || 'unlogged'}) - leaving it for later`) }
   }
   profLog()
