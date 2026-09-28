@@ -188,8 +188,12 @@ function hurtLine () {
 // the charged one's mostly on the shield when there is one - must leave us above the hurt line. "A shield or two armour
 // pieces" charged a pillager patrol 9-14b off: one on the shield, the others shooting from the side, 20 -> 8 hp in six
 // seconds and dead at the safehouse door (2026-09-25).
-const SHOOTER_DPS = { skeleton: 2.2, stray: 2.2, bogged: 2.2, pillager: 2.5, witch: 2, blaze: 3, breeze: 2, ghast: 2 } // (pillager: a crossbow bolt is 4-5 hp every 1.5-2.5s - it took 20 hp in 55s; audit 2026-09-28)
-const MOB_HP = { skeleton: 20, stray: 20, bogged: 16, pillager: 24, witch: 26, blaze: 20, breeze: 30, ghast: 10 }
+const SHOOTER_DPS = { skeleton: 2.2, stray: 2.2, bogged: 2.2, pillager: 2.5, witch: 3.5, blaze: 3, breeze: 2, ghast: 2 } // (pillager: a crossbow bolt is 4-5 hp every 1.5-2.5s - it took 20 hp in 55s; audit 2026-09-28)
+const MOB_HP = { skeleton: 20, stray: 20, bogged: 16, pillager: 24, witch: 40, blaze: 20, breeze: 30, ghast: 10 }
+// (a witch's harm and poison are MAGIC: armour takes nothing off them. At dps 2, armour-discounted, iron armour made a
+//  witch at 5.4b worth charging: hp 15 -> 1 in 11s, and the night's second death followed, 2026-09-28. 3.5 a second -
+//  harming 6 a splash, poison on top - and 40 hp for the heals it drinks; audit)
+const MAGIC = new Set(['witch'])
 // `hs`: every hostile in range, the never-melee ones too - a ghast's fireballs land on the way in as well as a
 // skeleton's arrows; handed the melee list, the ghast was never counted and a charge under it read as free (2026-09-27)
 // A TRIP THAT IS NOT WORTH A DEATH: the director marks an optional gathering trip cautious - a charge then wants hp 18
@@ -211,9 +215,9 @@ function chargeAffordable (shooter, hs, hp) {
   const shield = inv.offhandShield(bot)
   // (the charged one by ENTITY: compared as list elements, the fight's own re-check - a fresh {e, d} - never matched,
   //  so the pick said charge and the fight said flee, every tick, shield up at hp 12-16 under a skeleton, 2026-09-27)
-  const dps = shooters.reduce((a, h) => a + (SHOOTER_DPS[h.e.name] || 2) * (shield && h.e === shooter.e ? 0.2 : 1), 0)
   const pts = inv.armorPoints(bot)
-  return hp - secs * dps * (1 - Math.min(20, pts) / 25) > hurtLine()
+  const dps = shooters.reduce((a, h) => a + (SHOOTER_DPS[h.e.name] || 2) * (shield && h.e === shooter.e ? 0.2 : 1) * (MAGIC.has(h.e.name) ? 1 : 1 - Math.min(20, pts) / 25), 0)
+  return hp - secs * dps > hurtLine()
 }
 
 // THE BOW. A shooter at range was fought only by walking into its arrows with a stone sword (or not at all: hide, flee)
