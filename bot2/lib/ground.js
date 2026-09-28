@@ -83,7 +83,8 @@ async function prepare (bot, area, { shouldStop, label = 'ground' } = {}) {
     if (filler() && await act.place(bot, j, filler().name, { allowZones: zones, sneak: false })) done++
   }
   await act.collectDrops(bot, { radius: 8, maxMs: 5000 })
-  if (done) log('ground', `${label}: ${done} of ${jobs.length} fixes done (${jobs.slice(0, 8).map(j => `${j.kind} ${j.x},${j.y},${j.z}${j.was ? ' ' + j.was : ''}`).join('; ')})`)
+  // (none done says why too: a yard 'levelled' four times over in a millisecond each, saying nothing, 2026-09-28)
+  log('ground', `${label}: ${done} of ${jobs.length} fixes done (${jobs.slice(0, 8).map(j => `${j.kind} ${j.x},${j.y},${j.z}${j.was ? ' ' + j.was : ''}${!done ? ' zone ' + ((move.inZone(j) || {}).label || '-') : ''}`).join('; ')})${!done ? ' - zones allowed: ' + zones.join(',') + ', dirt ' + inv.count(bot, 'dirt') : ''}`)
   return done
 }
 
