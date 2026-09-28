@@ -155,16 +155,20 @@ async function reachTable (bot, ctx) {
   if (!table) return null
   if (act.reach(bot, table.position, 4)) return table
   const g = await move.goTo(bot, new goals.GoalNear(table.position.x, table.position.y, table.position.z, 2), { timeoutMs: 30000, label: 'to table' })
-  if (g.ok) return bot.blockAt(table.position)
+  if (g.ok) { const t = bot.blockAt(table.position); return t && t.name === 'crafting_table' ? t : null }
   if (!move.isVerdict(g)) return null
   log('craft', `no way to the table at ${move.fmt(table.position)} - putting one down here`)
   table = await getTable(bot, ctx, { placeHere: true })
+  // (a stopgap: packed up with the task's other tables even beside home, where the home table stands - a carved one is
+  //  not in placedTables and stays in its wall)
+  if (table && placedTables.has(`${table.position.x},${table.position.y},${table.position.z}`)) stopgapTables.add(`${table.position.x},${table.position.y},${table.position.z}`)
   return table && act.reach(bot, table.position, 4) ? table : null
 }
 
 // Pick up the tables we placed away from home (saves 4 planks, leaves no litter) - once the task that wanted them is
 // over, not after each craft: the dawn's pickaxe, axe and sword put down and picked up three tables in 20s (2026-09-27)
 const placedTables = new Set() // tables this runtime put down for a craft (the ones it may pick up)
+const stopgapTables = new Set() // ...of them, the ones put down because the table there had no way to it (never kept)
 async function packUpTables (bot) {
   for (const k of [...placedTables]) {
     const [x, y, z] = k.split(',').map(Number)
@@ -176,9 +180,10 @@ async function packUpTables (bot) {
 }
 async function packUpTable (bot, t) {
   const home = mem.get().home
-  if (!t || !placedTables.has(`${t.position.x},${t.position.y},${t.position.z}`)) return
-  if ((home && world.dist3(t.position, home) < 12) || move.insideHut(t.position)) return
-  placedTables.delete(`${t.position.x},${t.position.y},${t.position.z}`)
+  const key = t && `${t.position.x},${t.position.y},${t.position.z}`
+  if (!t || !placedTables.has(key)) return
+  if (!stopgapTables.has(key) && ((home && world.dist3(t.position, home) < 12) || move.insideHut(t.position))) return
+  placedTables.delete(key); stopgapTables.delete(key)
   if (mem.get().tables.some(p => p.x === t.position.x && p.y === t.position.y && p.z === t.position.z)) return
   await act.dig(bot, t.position, { force: true })
   await act.collectDrops(bot, { radius: 5, maxMs: 4000 })
