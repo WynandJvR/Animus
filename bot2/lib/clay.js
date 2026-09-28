@@ -254,6 +254,27 @@ async function pickUp (bot, stop, sess) {
     let go = null
     for (const d of ds) { const c = pickupCell(bot, d.position); if (c) { go = { d, c }; break } }
     if (!go) {
+      // (afloat over deep water - no cell to stand for it: SWIM to it, as a player does. Half of every dive's balls were
+      //  "afloat out of reach" and left for the current, 12-28 a dive, 2026-09-28. At the surface, head up, one ball at
+      //  a time, within 10 blocks and 5s; the session's own walk back to the shore stays the way out)
+      // (at the surface only - air over its cell: under ice, a lily mat or an overhang the head-out swim does not hold)
+      const f = ds.find(d => d.position.distanceTo(me) < 10 && world.isWaterBlock(world.at(bot, d.position.x, d.position.y, d.position.z)) && world.isAirish(world.at(bot, d.position.x, d.position.y + 1, d.position.z)))
+      if (f && world.phase(bot) === 'day') {
+        tries.set(f.id, (tries.get(f.id) || 0) + 1)
+        const ts = Date.now()
+        try {
+          const rf = require('./reflex')
+          // (never against a mob - a drowned in the water above all - nor against the reflex: it has the body, the swim ends)
+          while (!stop() && f.isValid && Date.now() - ts < 5000 && f.position.distanceTo(bot.entity.position) > 0.8 && !rf.active() && !rf.hostiles(8).some(h => h.e.name !== 'bat')) {
+            const p = bot.entity.position
+            await bot.look(Math.atan2(-(f.position.x - p.x), -(f.position.z - p.z)), 0, true)
+            bot.setControlState('forward', true); bot.setControlState('jump', true) // (jump: the head stays out)
+            await idle(bot, 100)
+          }
+        } finally { bot.setControlState('forward', false); bot.setControlState('jump', false) }
+        if (!f.isValid) log(K.name, 'swam to a ball afloat and took it')
+        continue
+      }
       const drifting = ds.some(d => { const q = seen.get(d.id); return !q || q.distanceTo(d.position) > 0.2 })
       seen = new Map(ds.map(d => [d.id, d.position.clone()]))
       if (!drifting) break
