@@ -421,7 +421,7 @@ async function setJob (bot, name, origin, { exactWood: exact = true } = {}) {
   // the cathedral's ground inherited its rest counts and relaxed log axes by coordinate (audit #9, 2026-09-27)
   const prev = mem.get().build
   if (!prev || prev.name !== name || !prev.origin || prev.origin.x !== origin.x || prev.origin.y !== origin.y || prev.origin.z !== origin.z) {
-    cellFails.clear(); mem.update(m => { m.cellFails = {}; m.axisRelaxed = [] })
+    cellFails.clear(); mem.update(m => { m.cellFails = {}; m.axisRelaxed = [] }); statusGen++
   }
   const md = world.data(bot)
   const st = s.start(); const en = s.end()
@@ -463,7 +463,7 @@ function cellDone (bot, c) {
 // Logs that could not be placed with the blueprint's axis (no block on that side to click, too high for a
 // support pillar from the ground) go in with whatever axis works - remembered, so they count as done.
 function axisRelaxed (c) { return ((mem.get().axisRelaxed || []).includes(key(c))) }
-function relaxAxis (c) { mem.update(m => { m.axisRelaxed = m.axisRelaxed || []; if (!m.axisRelaxed.includes(key(c))) m.axisRelaxed.push(key(c)) }) }
+function relaxAxis (c) { mem.update(m => { m.axisRelaxed = m.axisRelaxed || []; if (!m.axisRelaxed.includes(key(c))) m.axisRelaxed.push(key(c)) }); statusGen++ } // (a relaxed cell is judged anew: the cached status too)
 
 // The block a cell hangs on / stands on is there (and, when that is a cell of the build, finished - a torch
 // on the filler a wrong cell holds pops off when the builder replaces it).
@@ -530,7 +530,7 @@ function watchStatus (bot) {
 function cachedStatus (bot) {
   if (!job) return null
   watchStatus(bot)
-  const key = `${statusGen}|${job.name}@${job.origin.x},${job.origin.z}`
+  const key = `${statusGen}|${job.name}@${job.origin.x},${job.origin.z}|${exactWood() ? 'exact' : 'any'}` // (the wood rule decides a wood cell's item)
   if (statusCache.key !== key) statusCache = { key, st: status(bot), at: Date.now() }
   return statusCache.st
 }
