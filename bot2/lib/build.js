@@ -705,14 +705,18 @@ async function viaDoor (bot, goal, movements) {
   const doors = job.cells.filter(c => /_door$/.test(c.name) && !c.follows && c.props && /^(north|south|east|west)$/.test(c.props.facing) && cellDone(bot, c) === true)
     // the ground-floor entrances first (the way in a player takes), then the upper doors
     .sort((a, b) => ((a.y > job.box.y1 + 1) - (b.y > job.box.y1 + 1)) || (world.dist3(me, a) + world.dist3(a, gp)) - (world.dist3(me, b) + world.dist3(b, gp)))
+  // (a fallback after a walk has already failed, so it is bounded: a door whose step on our side is no place to stand is
+  //  not walked to, and the first door the walk cannot reach ends it - 3 doors x 90s after every failed walk, 23
+  //  "couldn't reach the step" in a day, 2026-09-28; audit)
   for (const d of doors.slice(0, 3)) {
     const alongZ = d.props.facing === 'north' || d.props.facing === 'south'
     const sides = alongZ ? [{ x: d.x, y: d.y, z: d.z - 1 }, { x: d.x, y: d.y, z: d.z + 1 }] : [{ x: d.x - 1, y: d.y, z: d.z }, { x: d.x + 1, y: d.y, z: d.z }]
-    const near = sides.sort((a, b) => world.dist3(me, a) - world.dist3(me, b))[0]
+    const near = sides.filter(q => world.standable(bot, q.x, q.y, q.z)).sort((a, b) => world.dist3(me, a) - world.dist3(me, b))[0]
+    if (!near) continue
     // (the bot's everyday walker, with its own recoveries: the site runGoal got "stuck" in the canopy every time)
     const r0 = await move.travel(bot, near, { range: 1, label: 'to the door', maxMs: 90000 })
-    if (!r0.ok) { log('build', `couldn't get to the ${d.name.replace('_door', '')} door at ${move.fmt(d)} (${r0.why})`); continue }
-    if (!await move.crossDoor(bot, goal).catch(() => false)) continue
+    if (!r0.ok) { log('build', `couldn't get to the ${d.name.replace('_door', '')} door at ${move.fmt(d)} (${r0.why})`); if (move.isVerdict(r0)) return null; continue }
+    if (!await move.crossDoor(bot, goal).catch(() => false)) return null // (at the door and could not cross: the next door is no better bet)
     log('build', `went through the ${d.name.replace('_door', '')} door at ${move.fmt(d)} toward ${move.fmt(gp)}`)
     return move.runGoal(bot, goal, { timeoutMs: 30000, stuckMs: 8000, movements })
   }
