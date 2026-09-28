@@ -613,7 +613,7 @@ const TASKS = {
     return ok
   },
   async nightMine () {
-    const st = build.status(bot)
+    const st = build.cachedStatus(bot)
     const want = st && st.need.stone_bricks ? 'cobblestone' : 'cobblestone'
     const target = inv.count(bot, want) + 256
     return mining.mineFor(bot, want, target, { seal: true, shouldStop: () => taskCancelled() || world.isDay(bot) })
@@ -1007,7 +1007,7 @@ async function loadSmelt (input, n) {
 // with the whole recipe yield - never all the bricks turned into stairs.
 async function processAtHome () {
   const home = mem.get().home
-  const st = build.status(bot)
+  const st = build.cachedStatus(bot)
   if (!st) return
   await smelt.collectFurnaces(bot)
   await smelt.refuelFurnaces(bot)
@@ -1069,7 +1069,7 @@ async function processAtHome () {
 
 async function castleWork () {
   const j = build.getJob()
-  const st = build.status(bot)
+  const st = build.cachedStatus(bot)
   // every block stands: the finishing round (scaffold down, holes filled). No latch - build.needsWork asks the
   // world again next time; nothing changed = a failure, so the chooser backs off (leftovers rest till tomorrow)
   if (st.done >= st.total) return build.finish(bot, { shouldStop: dayStop })
@@ -1166,7 +1166,7 @@ async function castleWork () {
   // a supplied window - or one only waiting on the furnaces - spends the daylight on the long pole of the whole
   // build (clay, for a brick build: its trips start as soon as nothing nearer blocks the builder)
   const win = mats.planFor(bot, next)
-  const tot = mats.planFor(bot, build.status(bot).need)
+  const tot = mats.planFor(bot, build.cachedStatus(bot).need)
   // (infill - glass - named as the wait never steers the gathering while the structure's own blocks are short: with no
   //  cobblestone left at all the builder "waited on glass" and every trip went looking for sand, 2026-09-27)
   const steer = blockedOn && build.infillItem(blockedOn) && Object.keys(mats.planFor(bot, windowNeeds()).raw).some(r => r === 'cobblestone') ? null : blockedOn

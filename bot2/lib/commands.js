@@ -76,7 +76,7 @@ function make (bot, director) {
       }
       case 'status': case 'state': {
         const d = director.info()
-        const st = build.getJob() ? build.status(bot) : null
+        const st = build.getJob() ? build.cachedStatus(bot) : null
         const p = bot.entity ? bot.entity.position : null
         return JSON.stringify({ pos: p && move.fmt(p), hp: bot.health, food: bot.food, task: d, paused: director.isPaused(), home: mem.get().home, bed: mem.get().bed, build: st && { done: st.done, total: st.total, need: st.need }, packFood: inv.foodPoints(bot) })
       }
@@ -286,7 +286,7 @@ function make (bot, director) {
         got.known = Object.entries(pw.windows || {}).filter(([, v]) => v.type >= 6 && v.type <= 14).map(([k, v]) => k + '=' + v.type).join(' ')
         return JSON.stringify(got)
       })
-      case 'buildstatus': { const st = build.getJob() ? build.status(bot) : null; return st ? JSON.stringify(st) : 'no build job' }
+      case 'buildstatus': { const st = build.getJob() ? build.cachedStatus(bot) : null; return st ? JSON.stringify(st) : 'no build job' }
       case 'mine': return exclusive('mine', async () => { const ok = await mining.mineFor(bot, 'cobblestone', inv.count(bot, 'cobblestone') + num(0, 64)); return `mine: ${ok ? 'ok' : 'stopped'} (cobble ${inv.count(bot, 'cobblestone')})` })
       case 'deposit': return exclusive('deposit', async () => { const ok = await base.depositHaul(bot); return `deposit: ${ok}` })
       // bankall - everything into the chests, tools and kit included (a fresh start with an empty pack)
