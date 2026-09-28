@@ -663,7 +663,7 @@ function inBox (p, pad = 0) { const b = job.box; return p.x >= b.x1 - pad && p.x
 const GROUND_RE = /^(dirt|coarse_dirt|rooted_dirt|grass_block|podzol|mycelium|mud|clay|gravel|sand|red_sand|sandstone|stone|granite|diorite|andesite|tuff|deepslate|calcite|dripstone_block|moss_block)$/
 function siteMovements (bot, { place = true, dig = true } = {}) {
   // finished blocks of every build are protected by move's registered protector (one rule, all walks)
-  const m = move.movementsFor(bot, { dig: !!dig, place, allowZones: ['build', 'base'] })
+  const m = move.movementsFor(bot, { dig: !!dig, place, allowZones: ['build', 'base'], placeCost: 3 }) // (the site's scaffold is ledgered and torn down: a step placed here is no litter)
   // dig 'noGround' (a finished site): leaves and the like may still be cut (with no digging at all the bot was
   // trapped in the canopy beside the transept), but never the earth and rock the building stands on
   if (dig === 'noGround') { const md = world.data(bot); for (const b of Object.values(md.blocksByName)) if (GROUND_RE.test(b.name)) m.blocksCantBreak.add(b.id) }

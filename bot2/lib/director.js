@@ -32,6 +32,7 @@ const orchard = require('./orchard')
 const litter = require('./litter')
 let litterSeeded = false // (the pillars from before the ledger: looked for once a run, once the orchard's zone is set)
 const LITTER_BATCH = 8
+const tidyFirst = { day: -1, n: 0 } // (the day's tidy runs ahead of the castle)
 const LITTER_CAP = 48 // (our own blocks standing round home past which the tidy goes before the castle)
 
 // Hunt an animal that is right here when the pack is low on food - a player does not walk past a
@@ -558,8 +559,13 @@ function decide () {
   // (a debt cap on our own litter: in the castle's gaps only, it never came - the castle always has work - and 211 pillars
   //  and stepping stones stood round home by the evening, cobble towers on the treetops the operator asked about,
   //  2026-09-28. Past LITTER_CAP it goes before the castle: one walk takes down dozens)
-  if (dHome < 64 && world.phase(bot) === 'day' && !nightSoon() && !held('tidy')) {
+  // (twice a day at most ahead of the castle: from 211 pending, a run of 12 columns at a time would take most of a day - the
+  //  backlog drains over days, the stepping stones' price stops it growing; audit)
+  const dayNo = bot.time && bot.time.day != null ? bot.time.day : 0
+  if (tidyFirst.day !== dayNo) { tidyFirst.day = dayNo; tidyFirst.n = 0 }
+  if (tidyFirst.n < 2 && dHome < 64 && world.phase(bot) === 'day' && !nightSoon() && !held('tidy')) {
     const n = litter.pending(bot, mem.get().home, 96).length
+    if (n >= LITTER_CAP) tidyFirst.n++
     if (n >= LITTER_CAP) return { name: 'tidy', why: `${n} blocks of ours left standing round home (pillars, stepping stones) - past ${LITTER_CAP}, before the castle` }
   }
   if (mem.get().build && build.getJob() && build.needsWork(bot) && !nightSoon() && !homeByDark() && !held('castle')) {

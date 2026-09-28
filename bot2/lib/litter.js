@@ -148,12 +148,14 @@ function standBeside (bot, low) {
   return best
 }
 
-// A pillar of our own up to a block above the reach (at most 10), and back down from on top after (climbDown). Its blocks
+// A pillar of our own up to a block above the reach (at most 4), and back down from on top after (climbDown). Its blocks
 // are litter like any tower's (towerUp notes them): a pillar the teardown missed is the next run's work, never lost.
 let climbed = []
 async function climbTo (bot, q, shouldStop) {
   const gather = require('./gather')
-  for (let i = 0; i < 10 && !act.reach(bot, q, 4.5) && bot.entity.position.y < q.y; i++) {
+  // (4 at most: a block higher on a canopy stands on no spot, no path, no farm - a taller tower costs more than it; said as
+  //  left, audit 2026-09-28)
+  for (let i = 0; i < 4 && !act.reach(bot, q, 4.5) && bot.entity.position.y < q.y; i++) {
     if (shouldStop && shouldStop()) break
     if (!await gather.towerUp(bot, { allowZones: ['orchard', 'base', 'farm'], onPlaced: c => climbed.push(c) })) break
   }

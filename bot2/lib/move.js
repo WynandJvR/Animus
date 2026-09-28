@@ -110,7 +110,7 @@ let doorIds = null
 //            100 cut-off). On by default: at weight 40 the walk home from a clay bank still took the line under the
 //            river, the air reflex took the body, and at night the bot drowned there (2026-09-22). A walk that must
 //            dive says so (false) - none does today.
-function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint = true, dryHead = true } = {}) {
+function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint = true, dryHead = true, placeCost = 10 } = {}) {
   // (the drop under a cell, once per plan: the step callbacks asked ~100 uncached blockAt per expanded node - audit #24)
   const drops = new Map(); let dropGen = pathGen
   const dropAt = (x, y, z, lim) => { if (dropGen !== pathGen || drops.size > 20000) { drops.clear(); dropGen = pathGen } const key = x + ',' + y + ',' + z + ',' + (lim || ''); let v = drops.get(key); if (v === undefined) { v = world.dropAt(bot, x, y, z, lim); drops.set(key, v) } return v }
@@ -126,8 +126,9 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
   m.digCost = 2
   // (a stepping stone's price is its whole life: the place, and the walk back one day to dig it out - never collected by the
   //  walk that laid it. At 2 - two steps - the planner laid one to save a couple of steps, and 106 single stones stood
-  //  round home by evening, litter on every slope the operator walked, 2026-09-28. A player walks round)
-  m.placeCost = 10
+  //  round home by evening, litter on every slope the operator walked, 2026-09-28. A player walks round. The builder's site
+  //  walks pass their own, lower: their scaffold is tracked and taken down - audit)
+  m.placeCost = placeCost
   m.allow1by1towers = place
   m.scafoldingBlocks = place ? scaffoldIds.slice() : []
   // scaffold short (under half the builder's 32 in reserve): cobblestone will do to tower or bridge out (the build's stone, but a player
