@@ -997,10 +997,18 @@ const TASKS = {
     //  them up. Home they plant a square in the orchard, and dark oak grows a few steps from the build instead of a 420-block
     //  walk away. The first two trips brought 92 logs and not one sapling, 2026-09-29)
     if (got > 0 && /^dark_oak_log$/.test(e.raw) && inv.count(bot, 'dark_oak_sapling') < 8) {
+      // (the crown BROKEN, not waited on: decay runs on random ticks - minutes a crown - and a leaf broken by hand drops a
+      //  sapling as often as one that decays. Every natural dark oak leaf in reach, then the drops, then one short pass for
+      //  what still falls; audit)
       const s0 = inv.count(bot, 'dark_oak_sapling')
-      for (let i = 0; i < 3 && !stop(); i++) { await move.sleep(8000); await act.collectDrops(bot, { radius: 12, maxMs: 8000 }).catch(() => {}) }
+      const lv = world.findBlocks(bot, /^dark_oak_leaves$/, { maxDistance: 4.5, count: 100, point: bot.entity.position.offset(0, 1.6, 0),
+        filter: b => { try { const pr = b.getProperties(); return pr.persistent === false || pr.persistent === 'false' } catch { return false } } })
+      let broke = 0
+      for (const b of lv) { if (stop()) break; if (act.reach(bot, b.position, 4.5) && await act.dig(bot, b.position, { timeoutMs: 3000, noWalk: true }).catch(() => false)) broke++ }
+      await act.collectDrops(bot, { radius: 10, maxMs: 8000 }).catch(() => {})
+      if (!stop()) { await move.sleep(5000); await act.collectDrops(bot, { radius: 10, maxMs: 5000 }).catch(() => {}) }
       const s1 = inv.count(bot, 'dark_oak_sapling')
-      log('dir', `expedition: waited on the crowns - ${s1 - s0} dark oak sapling${s1 - s0 === 1 ? '' : 's'} picked up (${s1} in the pack)`)
+      log('dir', `expedition: broke ${broke} dark oak leaves - ${s1 - s0} sapling${s1 - s0 === 1 ? '' : 's'} picked up (${s1} in the pack)`)
     }
     if (tripRoom() < 64) endExpedition('the pack is full')
     else if (o && o.outcome === 'none-found' && got <= 0) { e.dry++; mem.set('expedition', e); if (e.dry >= 2) { forage.noteTrip(e.raw, 0, 'none found on the expedition', { searched: true }); endExpedition('no more of it to be found') } }
