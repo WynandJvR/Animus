@@ -17,6 +17,7 @@ const food = () => require('./food')
 const base = () => require('./base')
 
 const WOODS = ['oak', 'spruce', 'birch', 'jungle', 'acacia', 'dark_oak', 'mangrove', 'cherry', 'pale_oak']
+const WOODS_ALL = WOODS // (pickWood filters its own copy)
 
 // Items with a direct world source. tier: minimum pickaxe tier (1 wood, 2 stone, 3 iron).
 const GATHER = {
@@ -329,8 +330,20 @@ async function plankUp (bot, logName, crafts) {
 // the nearest tree's.
 // the wood held most of (planks + logs), no search - a tie-break, not a trip
 function preferredWoodHeld (bot) { const c = inv.counts(bot); let best = null; let bn = 0; for (const w of WOODS) { const n = (c[w + '_planks'] || 0) + (c[w + '_log'] || 0) * 4; if (n > bn) { bn = n; best = w } } return best }
+// (the build's own species last: a boat or a table of spruce planks right after an expedition spent its haul - a species
+//  the build places is taken only when no other wood is held, banked, in sight or remembered; audit 2026-09-28)
 function preferredWood (bot, needPlanks = 1) {
+  let res = new Set(); try { res = require('./materials').reservedSpecies(bot) } catch {}
+  const w = pickWood(bot, needPlanks, res)
+  if (w) return w
+  // nothing else anywhere: the reserved wood in hand before a walk to find oak (the last resort)
   const c = inv.counts(bot)
+  for (const sp of res) if ((c[sp + '_planks'] || 0) + (c[sp + '_log'] || 0) * 4 >= needPlanks) return sp
+  return 'oak'
+}
+function pickWood (bot, needPlanks, avoid) {
+  const c = inv.counts(bot)
+  const WOODS = WOODS_ALL.filter(w => !avoid.has(w))
   let best = null; let bn = 0
   for (const w of WOODS) { const n = (c[w + '_planks'] || 0) + (c[w + '_log'] || 0) * 4; if (n > bn) { bn = n; best = w } }
   if (best && bn >= needPlanks) return best
@@ -344,14 +357,14 @@ function preferredWood (bot, needPlanks = 1) {
   const g0 = require('./gather')
   if (best && (world.findBlocks(bot, new RegExp('^' + best + '_log$'), { maxDistance: 64, count: 1, filter: b => g0.treeOK(b) })[0] || g0.knownResource(best + '_log', bot.entity.position))) return best
   // not enough held: the wood that grows nearest (natural trees, outside protected zones)
-  const t = world.findBlocks(bot, /^(oak|spruce|birch|jungle|acacia|dark_oak|mangrove|cherry|pale_oak)_log$/, { maxDistance: 64, count: 8, filter: b => require('./gather').treeOK(b) })[0] // (the orchard's trees count as wood that grows here)
+  const t = world.findBlocks(bot, /^(oak|spruce|birch|jungle|acacia|dark_oak|mangrove|cherry|pale_oak)_log$/, { maxDistance: 64, count: 8, filter: b => !avoid.has(b.name.replace('_log', '')) && require('./gather').treeOK(b) })[0] // (the orchard's trees count as wood that grows here)
   if (t) return t.name.replace('_log', '')
   // none in sight: the nearest forest we remember (seen on a walk, felled before, or pointed out by the operator)
   const g = require('./gather')
   let near = null
   for (const w of WOODS) { const k = g.knownResource(w + '_log', bot.entity.position); if (k && (!near || world.dist2(k, bot.entity.position) < world.dist2(near.p, bot.entity.position))) near = { w, p: k } }
   if (near) return near.w
-  return best || 'oak'
+  return best || null // (the caller's last resort decides)
 }
 
 async function craftItem (bot, name, n, ctx) {

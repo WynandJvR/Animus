@@ -28,6 +28,8 @@ function exactWood () { try { return !!L.build.exactWood() } catch { return fals
 // The species the build places itself in exact wood (spruce, for a spruce castle), less `except`'s own: any-wood crafts
 // (planks of the "planks" class, chests, sticks) keep off them while another wood will do - an expedition's 146 spruce
 // logs became 33 chests and 288 sticks (2026-09-28). Empty when the wood rule is "any".
+// ...and the one question every spender of wood asks of an item (planks, logs, stripped logs of a reserved species)
+function isReservedWood (bot, name, except = null) { const sp = speciesOf(name); return !!sp && /_(planks|log|wood)$/.test(name) && reservedSpecies(bot, except).has(sp) }
 function reservedSpecies (bot, except = null) {
   if (!exactWood()) return new Set()
   try {
@@ -584,7 +586,7 @@ function pickRaw (winRaw, totRaw, { blockedRaw = null, feasible = () => true } =
   return null
 }
 
-module.exports = { reservedSpecies,
+module.exports = { reservedSpecies, isReservedWood,
   makePlanner, nodeOf, PREFER, RAW_COST, SMELT_INPUTS, CLASSES, WOODS, LOG_ANY, PLANKS_ANY, WOOL_TO_DYE, FUEL_ANY, RED_FLOWER, WOOD_FORM,
   accepts, poolRe, hasRoute, unsourced, held, banked, stock, withdrawPool, planFor, getPlanner, formFor, makeCrafts, craftNode, pickRaw,
   resetPlanner, exactWood, speciesOf, wanted, wantedSet, rawCost, copperAlt, copperBase, woodFamilyAlt, flowerClassOf, DYE_PLANTS, COMPOSTABLE, COMPOST_PER_MEAL, STRIPPED_LOG, COLOURS

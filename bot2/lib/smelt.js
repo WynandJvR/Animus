@@ -116,10 +116,14 @@ function buildNeeds (bot) {
 // item, per plank count, per loop turn they held the event loop 5.3s mid-castle (the stall watch named it: fuelOK <
 // woodSurplus < cellDone, 2026-09-28). Read once when the first wood is judged, then answered from that.
 function fuelRule (bot, { survival = false } = {}) {
-  let surplus, needed
+  let surplus, needed, reserved
   return name => {
     if (name === 'coal' || name === 'charcoal') return true
     if (!/_(planks|log|stem)$/.test(name) || /^stripped_/.test(name)) return false
+    // (the build's own species is never firewood, a meal or not: the build needs spruce SLABS by name, so "needed" never
+    //  named the spruce planks and logs, and an expedition's haul was the next furnace sweep's fuel - audit 2026-09-28)
+    if (reserved === undefined) { try { reserved = require('./materials').reservedSpecies(bot) } catch { reserved = new Set() } }
+    if (reserved.has(require('./materials').speciesOf(name))) return false
     if (survival) return true
     if (surplus === undefined) { surplus = woodSurplus(bot); needed = buildNeeds(bot) }
     return surplus > 0 && !needed.has(name) && !needed.has(name.replace(/_(log|planks)$/, '_log')) && !needed.has(name.replace(/_(log|planks)$/, '_planks'))
