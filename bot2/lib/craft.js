@@ -84,9 +84,9 @@ async function tableNear (bot, maxDist = 24) {
 // A table this far off is used (walked to); further, one is made here. One number for the ingredient loop's "will a
 // table be made?" and getTable's "is there one?".
 const TABLE_WALK = 48
-async function getTable (bot, ctx) {
+async function getTable (bot, ctx, { placeHere = false } = {}) {
   // an existing table within a short walk beats placing one (and a tunnel has no room for one)
-  let t = await tableNear(bot, TABLE_WALK)
+  let t = placeHere ? null : await tableNear(bot, TABLE_WALK)
   if (t) return t
   if (!inv.has(bot, 'crafting_table')) {
     const ok = await ensure(bot, 'crafting_table', 1, ctx)
@@ -145,6 +145,21 @@ async function getTable (bot, ctx) {
   }
   log('craft', 'nowhere to place a crafting table here')
   return null
+}
+
+// A table within arm's reach, or null. The nearest table is walked to; when that walk fails (48 blocks is a straight
+// line - from a pit the table above had no route, the shovel was never made and the bricks starved, 2026-09-28) one is
+// put down here instead, as a player does.
+async function reachTable (bot, ctx) {
+  let table = await getTable(bot, ctx)
+  if (!table) return null
+  if (act.reach(bot, table.position, 4)) return table
+  const g = await move.goTo(bot, new goals.GoalNear(table.position.x, table.position.y, table.position.z, 2), { timeoutMs: 30000, label: 'to table' })
+  if (g.ok) return bot.blockAt(table.position)
+  if (!move.isVerdict(g)) return null
+  log('craft', `no way to the table at ${move.fmt(table.position)} - putting one down here`)
+  table = await getTable(bot, ctx, { placeHere: true })
+  return table && act.reach(bot, table.position, 4) ? table : null
 }
 
 // Pick up the tables we placed away from home (saves 4 planks, leaves no litter) - once the task that wanted them is
@@ -410,13 +425,8 @@ async function craftItem (bot, name, n, ctx) {
   }
   let table = null
   if (recipeNeedsTable(r)) {
-    table = await getTable(bot, ctx)
+    table = await reachTable(bot, ctx)
     if (!table) return false
-    if (!act.reach(bot, table.position, 4)) {
-      const g = await move.goTo(bot, new goals.GoalNear(table.position.x, table.position.y, table.position.z, 2), { timeoutMs: 30000, label: 'to table' })
-      if (!g.ok) return false
-      table = bot.blockAt(table.position)
-    }
   }
   const real = bot.recipesFor(item.id, null, 1, table)[0]
   if (!real) { log('craft', `recipe for ${name} not craftable with what I hold`); return false }
@@ -485,13 +495,8 @@ async function craftTimes (bot, name, crafts, { shouldStop } = {}) {
   if (!any) { log('craft', `can't craft ${name} from what i hold`); return 0 }
   let table = null
   if (any.requiresTable) {
-    table = await getTable(bot, { noWithdraw: true, shouldStop })
+    table = await reachTable(bot, { noWithdraw: true, shouldStop })
     if (!table) return 0
-    if (!act.reach(bot, table.position, 4)) {
-      const g = await move.goTo(bot, new goals.GoalNear(table.position.x, table.position.y, table.position.z, 2), { timeoutMs: 30000, label: 'to table' })
-      if (!g.ok) return 0
-      table = bot.blockAt(table.position)
-    }
   }
   const perCraft = (any.result && any.result.count) || 1
   const before = inv.count(bot, name)
