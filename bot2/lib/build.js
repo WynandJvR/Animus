@@ -1107,9 +1107,13 @@ async function buildStep (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     // nothing up - reported first, the director chased unreachable sheep for "red_carpet" while two granite stairs
     // and twelve panes (sand) were what kept the walls from rising (2026-09-23)
     const missingItem = () => {
-      const low = todo.filter(c => !c.attach && !c.follows && !cellUnsourced(c) && c.y <= lowestAll + 1).find(c => !has(c))
+      // (an item with none in stock is DETACHED - the band rises past it, by the builder's own rule - so it holds nothing up
+      //  and is no bottleneck: named first, the director spent the young day on 15 note blocks' chain - redstone, an iron
+      //  pickaxe, the iron's fuel - while the walls waited on nothing of it, 2026-09-28. Named last, once nothing else is)
+      const lowAll = todo.filter(c => !c.attach && !c.follows && !cellUnsourced(c) && c.y <= lowestAll + 1)
+      const low = lowAll.find(c => !has(c) && !det.has(stepItem(bot, c)))
       // (then infill waiting on its material - glass: the sand trips are still wanted, only the layers don't wait)
-      const m = low || todo.filter(c => c.attach && !cellUnsourced(c) && supportThere(bot, c)).find(c => !has(c)) || todo.filter(c => infillCell(c) && !cellUnsourced(c) && c.y <= lowestAll + 1).find(c => !has(c)) || todo.filter(c => infillCell(c) && !cellUnsourced(c)).sort((a, b) => a.y - b.y).find(c => !has(c))
+      const m = low || todo.filter(c => c.attach && !cellUnsourced(c) && supportThere(bot, c)).find(c => !has(c)) || todo.filter(c => infillCell(c) && !cellUnsourced(c) && c.y <= lowestAll + 1).find(c => !has(c)) || todo.filter(c => infillCell(c) && !cellUnsourced(c)).sort((a, b) => a.y - b.y).find(c => !has(c)) || lowAll.find(c => !has(c))
       // (the item really missing: a pot in hand and its flower not is waiting on the flower - named for the director; audit)
       return m ? (stepOf(m, world.at(bot, m.x, m.y, m.z)) !== 'then' && m.then && pickItem(bot, m, items) ? m.then : stepItem(bot, m)) : null
     }
