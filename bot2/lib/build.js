@@ -1189,7 +1189,8 @@ async function buildStep (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     //  rest: a row laid beside a truly unreachable cell would wake it at every block, a 16s failure each; the next failure
     //  writes a fresh record, and the flag with it; audit 2026-09-28)
     if (ok) { for (const [k, f] of cellFails) { const [x, y, z] = k.split(',').map(Number); if (f.at && !f.woke && c.y <= y && y - c.y <= 2 && Math.abs(x - c.x) <= 2 && Math.abs(z - c.z) <= 2) { f.at = 0; f.woke = true } } }
-    if (ok) { placed++; if (cellFails.delete(key(c))) saveCellFails(); if (placed % 25 === 0) { const st = status(bot); log('build', `${st.done}/${st.total} placed`) } } else if (c.foundation && sealedIn(bot, c)) dropFoundation(bot, c, 'sealed in') // (a reach miss rests like any cell: a rim cell faces the outside ground - the miss is the stand's, not the cell's, and dropped it is a hole in the wall; audit 2026-09-28)
+    if (ok) { placed++; if (cellFails.delete(key(c))) saveCellFails(); if (placed % 25 === 0) { const st = status(bot); log('build', `${st.done}/${st.total} placed`) } } else if (c.foundation && c.name === 'torch' && !world.isAirish(world.at(bot, c.x, job.box.y1, c.z))) dropFoundation(bot, c, 'the floor over it is laid - no way to it from above') // (a hollow's torch goes in from above or not at all)
+    else if (c.foundation && sealedIn(bot, c)) dropFoundation(bot, c, 'sealed in') // (a reach miss rests like any cell: a rim cell faces the outside ground - the miss is the stand's, not the cell's, and dropped it is a hole in the wall; audit 2026-09-28)
     else { failed.set(key(c), (failed.get(key(c)) || 0) + 1); saveCellFails(); if (failed.get(key(c)) === 1) log('build', `${c.name} at ${move.fmt(c)} won't place (${lastPlaceFail || 'unlogged'}) - leaving it for later`) }
   }
   profLog()
@@ -1382,10 +1383,30 @@ function clusterStand (bot, c, ready, bad = new Set()) {
   return best
 }
 
+// A hollow's torch goes in FROM ABOVE, through the floor not built over it yet: a stand on the base floor already laid, the
+// torch's cell within reach below - the hollow never entered (its stands inside were the trap; audit 2026-09-28). The floor
+// cell over the torch open is the sight line; once it is built the torch has no way in and is dropped (placeCell).
+function torchStand (bot, c) {
+  const y1 = job.box.y1
+  if (!world.isAirish(world.at(bot, c.x, y1, c.z))) return null
+  const me = bot.entity.position; let best = null; let bd = Infinity
+  for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) {
+    const p = { x: c.x + dx, y: y1 + 1, z: c.z + dz }
+    if (!world.isSolid(world.at(bot, p.x, y1, p.z)) || !world.standable(bot, p.x, p.y, p.z)) continue
+    if (job.index.has(key(p)) && cellDone(bot, job.index.get(key(p))) !== true) continue // (a cell still to build: not a stand)
+    if ([[1, 0], [-1, 0], [0, 1], [0, -1]].some(([ax, az]) => world.dropAt(bot, p.x + ax + 0.5, p.y, p.z + az + 0.5) > world.SAFE_DROP && !(p.x + ax === c.x && p.z + az === c.z))) continue
+    if (world.dist3({ x: p.x + 0.5, y: p.y + 1.62, z: p.z + 0.5 }, { x: c.x + 0.5, y: c.y + 0.5, z: c.z + 0.5 }) > 4.4) continue
+    const d = world.dist3(p, me)
+    if (d < bd) { bd = d; best = p }
+  }
+  return best
+}
+
 // Where to stand for a foundation cell: OUTSIDE the footprint (no cell of the base over the column - never in the hollow
 // the rim closes), feet within 2 across of it, four below to two above, clear to stand in, never a cell of the job,
 // within reach of the cell; the nearest to the body.
 function foundationStand (bot, c) {
+  if (c.name === 'torch') return torchStand(bot, c)
   const me = bot.entity.position; let best = null; let bd = Infinity
   for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) for (let dy = -4; dy <= 2; dy++) {
     if (!dx && !dz) continue
