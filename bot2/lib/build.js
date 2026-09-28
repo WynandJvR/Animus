@@ -1313,6 +1313,8 @@ function foundationStand (bot, c) {
     const p = { x: c.x + dx, y: c.y + dy, z: c.z + dz }
     if (job.index.has(`${p.x},${job.box.y1},${p.z}`)) continue // (under the base: inside)
     if (job.index.has(key(p)) || job.index.has(key({ x: p.x, y: p.y + 1, z: p.z })) || !world.standable(bot, p.x, p.y, p.z)) continue
+    // (never on a lip: a trench's outer edge or a ledge of the slope beside a drop that hurts - audit, the falls' posture)
+    if ([[1, 0], [-1, 0], [0, 1], [0, -1]].some(([ax, az]) => world.dropAt(bot, p.x + ax + 0.5, p.y, p.z + az + 0.5) > world.SAFE_DROP)) continue
     if (world.dist3({ x: p.x + 0.5, y: p.y + 1.6, z: p.z + 0.5 }, { x: c.x + 0.5, y: c.y + 0.5, z: c.z + 0.5 }) > 4.2) continue
     const d = world.dist3(p, me)
     if (d < bd) { bd = d; best = p }
