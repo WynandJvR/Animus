@@ -493,6 +493,9 @@ async function goToInner2 (bot, goal, opts, { timeoutMs, stuckMs, dig, place, al
   let fails = 0
   let interrupts = 0
   while (Date.now() < deadline) {
+    // (a turn for the event loop every round: a plan that fails at once - 'interrupted' back to back, a goal with no way -
+    //  went round on resolved promises and held the loop 10.9s picking up a boat; the stall watch named this loop, 2026-09-28)
+    await new Promise(resolve => setImmediate(resolve))
     if (!bot.entity) return { ok: false, why: 'no body' }
     if (cancelled()) return { ok: false, why: 'stopped' }
     if (goal.isEnd(bot.entity.position.floored())) return { ok: true, why: 'reached' }
@@ -510,7 +513,7 @@ async function goToInner2 (bot, goal, opts, { timeoutMs, stuckMs, dig, place, al
     const r = await runGoal(bot, goal, { timeoutMs: Math.max(2000, deadline - Date.now()), stuckMs, movements: movementsFor(bot, { dig, place, allowZones: zonesOk, dryHead }) })
     if (r.ok) return r
     if (r.why === 'died') return r
-    if (r.why === 'interrupted') { if (++interrupts > 20) return { ok: false, why: 'interrupted too often' }; continue }
+    if (r.why === 'interrupted') { if (++interrupts > 20) return { ok: false, why: 'interrupted too often' }; await bot.waitForTicks(1).catch(() => {}); continue } // (a tick: the reflex that interrupted gets its turn)
     if (r.why === 'timeout') return r
     fails++
     // a stall next to a door is a door the planner would not open: cross it by hand
