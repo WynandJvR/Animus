@@ -15,6 +15,7 @@ const NEVER_MELEE = new Set(['creeper', 'ghast', 'warden', 'wither', 'elder_guar
 let bot = null
 let active = null // {kind, since, detail}
 let busy = false // an async reflex action is running
+let busySince = 0; let busySaid = false // (how long it has been running - said once past 3s)
 let dressFailed = null // the better-armour key a wear attempt left unchanged (cleared when the inventory changes)
 let submergedSince = 0
 let lastAttackAt = 0
@@ -863,6 +864,9 @@ function tick () {
   if (!bot || !bot.entity || bot.health <= 0) return
   const now = Date.now()
   trackAir(now) // (always: an async reflex or a disabled loop still spends air)
+  // (a reflex action that never ends freezes every row - no flee, no eat, no fight: said once past 3s, with what it was.
+  //  At 13:20 the bot stood 12s in one cell under a pillager, "flee" active and no key pressed, and died, 2026-09-28)
+  if (busy) { if (!busySince) busySince = now; if (now - busySince > 3000 && !busySaid) { busySaid = true; log('reflex', `busy for ${((now - busySince) / 1000).toFixed(1)}s in ${active ? active.kind : 'no row'} (hp ${Math.round(bot.health)}) - every row waits on it`) } } else { busySince = 0; busySaid = false }
   if (!enabled || busy) return
   pinned = false
   const me = bot.entity.position
