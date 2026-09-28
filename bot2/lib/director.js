@@ -106,7 +106,17 @@ function note (name, ok) {
 }
 // A task that just failed steps aside until the world changes (time passing is the change here:
 // position, daylight, inventory differ after other work). Backoff grows with repeated failure.
+// THE DAY'S CHORES run under dayStop: offered while that stop already holds, each began and refused at once - "did not
+// succeed" four times over, the watchdog's alarm, a backoff for nothing (late in the day, 25-64 from home; audit
+// 2026-09-28). One gate: a day chore whose stop holds waits, said once. (Survival - food, graves, tools, the bed - is
+// never held here; the castle's step does its home work first and minds its own stop.)
+const DAY_TASKS = new Set(['farm', 'harvest', 'hydrate', 'levelFarm', 'levelYard', 'fixWater', 'lightBase', 'plant', 'spareKit', 'fillShaft', 'cook', 'ironTrip'])
+const lateSaid = new Map()
 function cooling (name) {
+  if (DAY_TASKS.has(name) && dayStop()) {
+    if (Date.now() - (lateSaid.get(name) || 0) > 10 * 60000) { lateSaid.set(name, Date.now()); log('dir', `late in the day - ${name} waits for the morning`) }
+    return true
+  }
   const f = failures[name]
   if (!f) return false
   return Date.now() - f.at < Math.min(15 * 60000, 30000 * Math.pow(2, Math.min(f.n - 1, 5)))
