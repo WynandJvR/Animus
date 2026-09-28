@@ -820,13 +820,15 @@ const footBad = f => { const t = badFeet.get(key(f)); return !!t && Date.now() -
 async function pillarTo (bot, c, first) {
   const feet = feetFor(bot, c).filter(f => !footBad(f)).slice(0, 3)
   if (first && !feet.some(f => f.x === first.x && f.z === first.z)) feet.unshift(first)
+  const stuckAt = [] // (feet that could not be reached this time: the others near them lie in the same ground)
   for (const f of feet.slice(0, 3)) {
+    if (stuckAt.some(q => Math.abs(q.x - f.x) <= 3 && Math.abs(q.z - f.z) <= 3)) continue
     // (the site walker: it goes in through the build's doors - the nave is walled round)
     const r = await goSite(bot, new goals.GoalBlock(f.x, f.y, f.z), 'to the foot of a pillar')
-    // (one foot that could not be reached is the verdict for the rest: they lie in the same ground - three stuck walks of 8s
-    //  a cell, the south wall's high cells cost 24-32s each and more than half the step's time, 2026-09-28. The cell is
-    //  left for a later step from somewhere else)
-    if (!r.ok) { if (move.isVerdict(r)) badFeet.set(key(f), Date.now()); log('build', `pillar for ${c.name} at ${move.fmt(c)}: couldn't reach its foot ${move.fmt(f)} (${r.why})`); if (/stuck|noPath/.test(r.why || '')) break; continue }
+    // (a foot that could not be reached rules out the feet NEAR it - same ground - never the rest: a wall cell has feet on
+    //  both sides, and the inside one on the wall walk is the one that works. Three stuck walks of 8s in one patch cost
+    //  the south wall's high cells 24-32s each, more than half the step; audit 2026-09-28)
+    if (!r.ok) { if (move.isVerdict(r)) badFeet.set(key(f), Date.now()); log('build', `pillar for ${c.name} at ${move.fmt(c)}: couldn't reach its foot ${move.fmt(f)} (${r.why})`); if (/stuck|noPath/.test(r.why || '')) stuckAt.push(f); continue }
     await ensureScaffold(bot, 16, { shouldStop: stepStop })
     // (the planner let go of first: its goal left standing, it set the controls every tick and the tower's jump never
     //  held - "towered to y120" 24 times in an hour on the nave floor, where the same tower rose in the yard, 2026-09-27)
