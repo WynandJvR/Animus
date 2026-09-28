@@ -383,12 +383,15 @@ function decide () {
   if (night || dusk) {
     // at dusk walk to the bed from anywhere near; once it is dark only if the bed is a few steps away
     // (a night walk home from the mine ended in a skeleton fight and a death 12 blocks from the bed)
+    // (ONE night walk limit, for the bed and the mine alike: a 43b walk to the mine in the dark - the bed unreachable, the
+    //  builder's walls round it - met two creepers, a witch and a skeleton, and died with an iron pickaxe, 2026-09-28)
+    const nightWalk = dusk ? Infinity : 32
     if (bed && world.dist2(bed, bot.entity.position) < (dusk ? 200 : 32) && !held('sleep')) return { name: 'sleep', why: `${night ? 'night' : 'dusk'} - my bed is ${Math.round(world.dist2(bed, bot.entity.position))}b away` }
     // a working mine next to home turns the night into mining time: go down at dusk (a short walk)
     {
       const mm = mem.get().mine
       const mineReady = mm && mm.entrance && home && world.dist2(mm.entrance, home) < 48 && inv.bestTool(bot, 'pickaxe', 8) && (packFood >= 10 || bot.food >= 18)
-      if (mineReady && (dusk || !move.insideHut(world.feetPos(bot))) && world.dist2(bot.entity.position, mm.entrance) < 64 && !held('nightMine')) return { name: 'nightMine', why: `${night ? 'night' : 'dusk'} - mining through the night in the mine next to home` }
+      if (mineReady && (dusk || !move.insideHut(world.feetPos(bot))) && world.dist2(bot.entity.position, mm.entrance) < Math.min(64, nightWalk) && !held('nightMine')) return { name: 'nightMine', why: `${night ? 'night' : 'dusk'} - mining through the night in the mine next to home` }
     }
     // inside the safehouse with furniture in the pack: set it up (the bed means sleeping, not waiting)
     if (move.insideHut(world.feetPos(bot)) && furnishingInPack().length && !held('furnish')) return { name: 'furnish', why: `night in the safehouse - putting ${furnishingInPack().join(', ')} down` }
@@ -404,7 +407,7 @@ function decide () {
     }
     const m = mem.get().mine
     const mineHere = m && (!home || world.dist2(m.entrance, home) <= 96)
-    if (mineHere && inv.bestTool(bot, 'pickaxe', 4) && (packFood >= 10 || bot.food >= 16) && world.dist2(m.cursor, bot.entity.position) < 150 && !held('nightMine')) return { name: 'nightMine', why: 'night - working the mine underground' }
+    if (mineHere && inv.bestTool(bot, 'pickaxe', 4) && (packFood >= 10 || bot.food >= 16) && world.dist2(m.cursor, bot.entity.position) < 150 && (dusk || underground() || world.dist2(m.entrance, bot.entity.position) < nightWalk) && !held('nightMine')) return { name: 'nightMine', why: 'night - working the mine underground' }
     if (underground() && inv.bestTool(bot, 'pickaxe', 4) && !held('nightMine')) return { name: 'nightMine', why: 'night and already underground' }
     // afloat at night (a walk that ended in the sea): no bunker is dug in water and "staying put" there is treading
     // water until something drowns us - make for land (by boat when it is far)
