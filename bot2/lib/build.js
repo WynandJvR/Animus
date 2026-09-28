@@ -676,14 +676,16 @@ function underTheBuild (bot) {
   for (let y = f.y + 2; y <= Math.min(b.y1 + 1, f.y + 12); y++) { const c = job.index.get(key({ x: f.x, y, z: f.z })); if (c && cellDone(bot, c) === true) return true }
   return false
 }
-async function goSite (bot, goal, label, { place = true, dig = (job && job.cells.every(c => cellDone(bot, c) === true)) ? 'noGround' : true, doors = true } = {}) {
+async function goSite (bot, goal, label, { place = true, dig = (job && job.cells.every(c => cellDone(bot, c) === true)) ? 'noGround' : true, doors = true, under = false } = {}) {
   // move.goTo builds its own Movements; for site work use pathfinder directly through runGoal
   // leaving the safehouse first: the planner never routes through its door
   if (move.insideHut(bot.entity.position.floored())) await move.crossDoor(bot, goal).catch(e => log('build', `door crossing threw: ${e.message}`))
   // UNDER THE BUILD: the plaza overhangs the mountainside, and the bot, come up the slope from a grave run or a flee,
   // stood in the hollow under the finished floor at y112 trying to reach cells above it - the floor between, every
   // walk "stuck", a day of cells written off (2026-09-26). Out onto open ground first, then the site from the top.
-  if (job && underTheBuild(bot)) {
+  // (not for work UNDER the floor: a foundation cell is below the base by definition, reached from the hollow - sent home
+  //  from there each time, the rim cost 9s a try getting in reach and half its tries, 2026-09-28)
+  if (job && !under && underTheBuild(bot)) {
     const h = mem.get().home
     log('build', `under the build's floor at ${move.fmt(bot.entity.position)} - out onto open ground first`)
     await move.travel(bot, h || { x: job.origin.x - 8, y: job.origin.y, z: job.origin.z - 8 }, { range: 6, label: 'out from under the build' }).catch(() => null)
@@ -953,13 +955,19 @@ async function placeCell (bot, c, j = job) {
     // A CELL HIGH OVER ITS FLOOR: pillar up from the floor beside it first. Left to find its own way, the planner climbed
     // onto the rose window's one-wide ring 8 over the plaza and stuck there, cell after cell (2026-09-27).
     let pillared = false
+    // A FOUNDATION CELL: a stand beside it first - the hollow's floor behind the rim, a step off - not a sight line across
+    // the trench outside: from a pillar 5 off across a 3-wide gap every south rim cell was "stuck" (2026-09-28)
+    if (c.foundation && !act.reach(bot, pos, 4.3)) {
+      const st = foundationStand(bot, c)
+      if (st) await goSite(bot, new goals.GoalBlock(st.x, st.y, st.z), 'place', { under: true })
+    }
     if (!act.reach(bot, pos, 4.3)) {
       const foot = feetFor(bot, c).find(f => !footBad(f))
       if (foot && c.y - foot.y >= 3) { pillared = true; await pillarTo(bot, c, foot) }
     }
     if (act.reach(bot, pos, 4.3)) return true
     const goal = faces ? new goals.GoalPlaceBlock(pos, bot.world, { range: 4, faces, LOS: true }) : new goals.GoalLookAtBlock(pos, bot.world, { reach: 4 })
-    const r = await goSite(bot, goal, 'place')
+    const r = await goSite(bot, goal, 'place', { under: c.y < job.box.y1 })
     // (a cell high over us: the planner won't tower toward a "see this face" goal - it never found one for the nave's
     //  y127 pillar tops, an evening of "stuck" - but it towers to a place to STAND: up beside the cell, then place)
     // (any cell above our feet: standing on a wall top at y125, the y128 cells were "3 above" and never pillared to)
@@ -1295,6 +1303,20 @@ function dropFoundation (bot, c, why) {
   if (job.foundation) job.foundation.dropped = (job.foundation.dropped || 0) + 1
   // (a torch dropped is a hollow left dark under the work - said as such, never lost in the foundation's own drops)
   log('build', c.name === 'torch' ? `hollow at ${move.fmt(c)} left unlit - ${why}` : `foundation cell at ${move.fmt(c)} dropped - ${why}`)
+}
+// Where to stand for a foundation cell: feet within 2 across of it, one below to two above, clear to stand in, never a
+// cell of the job (the rim's own column, the base over it); the nearest to the body.
+function foundationStand (bot, c) {
+  const me = bot.entity.position; let best = null; let bd = Infinity
+  for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) for (let dy = -1; dy <= 2; dy++) {
+    if (!dx && !dz) continue
+    const p = { x: c.x + dx, y: c.y + dy, z: c.z + dz }
+    if (job.index.has(key(p)) || job.index.has(key({ x: p.x, y: p.y + 1, z: p.z })) || !world.standable(bot, p.x, p.y, p.z)) continue
+    if (world.dist3({ x: p.x + 0.5, y: p.y + 1.6, z: p.z + 0.5 }, { x: c.x + 0.5, y: c.y + 0.5, z: c.z + 0.5 }) > 4.2) continue
+    const d = world.dist3(p, me)
+    if (d < bd) { bd = d; best = p }
+  }
+  return best
 }
 function sealedIn (bot, c) { return [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]].every(([dx, dy, dz]) => world.isSolid(world.at(bot, c.x + dx, c.y + dy, c.z + dz))) }
 function snapName (x, y, z) {
