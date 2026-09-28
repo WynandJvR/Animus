@@ -1629,10 +1629,11 @@ async function siteScaffoldTeardown (bot, { shouldStop } = {}) {
   //  the same columns would be pillared again within the week; those are build.finish's; audit)
   // (from the band's lowest layer up is the builder's; everything under it is done with - the rim bank's top at y117 was
   //  kept at "band - 2" and stayed in the foundation's way, 2026-09-28)
-  // (but a STEP up onto the floor stays: a block just under the band with room over it and, beside it, a floor one higher
+  // (but a STEP up onto the floor stays: a block just under the base (box.y1 - the floor, for good; not the band, which
+  //  rises) with room over it and, beside it, a floor one higher
   //  to step onto - the only way up that side for the walks, which no longer lay steps cheaply; audit)
   const air = (x, y, z) => { const b = world.at(bot, x, y, z); return !!b && world.isAirish(b) }
-  const isStep = p => p.y === bandY - 1 && air(p.x, p.y + 1, p.z) && air(p.x, p.y + 2, p.z) &&
+  const isStep = p => p.y === job.box.y1 - 1 && air(p.x, p.y + 1, p.z) && air(p.x, p.y + 2, p.z) &&
     [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => world.standable(bot, p.x + dx, p.y + 2, p.z + dz))
   const keep = p => p.y >= bandY || sups.has(key(p)) || isStep(p)
   // (and our ledger's blocks under the snapshot's region - it starts 2 under the base: the rim bank's columns at y112-116
