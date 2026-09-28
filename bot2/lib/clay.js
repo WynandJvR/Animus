@@ -244,6 +244,7 @@ async function pickUp (bot, stop, sess) {
   const t0 = Date.now()
   while (!stop() && Date.now() - t0 < 6000 && dropsNear(bot, re).some(e => rising(bot, e))) await idle(bot, 250)
   const tries = new Map()
+  let swimSaid = false
   let seen = new Map() // id -> where it was at the last look
   while (!stop() && Date.now() - t0 < 30000) {
     await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
@@ -259,11 +260,17 @@ async function pickUp (bot, stop, sess) {
       //  a time, within 10 blocks and 5s; the session's own walk back to the shore stays the way out)
       // (at the surface only - air over its cell: under ice, a lily mat or an overhang the head-out swim does not hold)
       const f = ds.find(d => d.position.distanceTo(me) < 10 && world.isWaterBlock(world.at(bot, d.position.x, d.position.y, d.position.z)) && world.isAirish(world.at(bot, d.position.x, d.position.y + 1, d.position.z)))
+      // (why no swim, said once a pickup - the swim was built at 07:40 and has never fired: 28 of 72 lost at 11:26, 2026-09-28)
+      if (!swimSaid) {
+        swimSaid = true
+        const rf = require('./reflex'); const d0 = ds[0]; const c0 = world.at(bot, d0.position.x, d0.position.y, d0.position.z); const a0 = world.at(bot, d0.position.x, d0.position.y + 1, d0.position.z)
+        log(K.name, `swim check, nearest ball ${d0.position.distanceTo(me).toFixed(1)}b at y${d0.position.y.toFixed(2)}: its cell ${c0 ? c0.name : '?'}, over it ${a0 ? a0.name : '?'}, ${f ? 'swimmable' : 'not swimmable'}; phase ${world.phase(bot)}, reflex ${rf.active() ? 'ACTIVE' : 'idle'}, hostiles ${rf.hostiles(8).filter(h => h.e.name !== 'bat').map(h => h.e.name).join(',') || 'none'}`)
+      }
       if (f && world.phase(bot) === 'day') {
         tries.set(f.id, (tries.get(f.id) || 0) + 1)
         const ts = Date.now()
+        const rf = require('./reflex')
         try {
-          const rf = require('./reflex')
           // (never against a mob - a drowned in the water above all - nor against the reflex: it has the body, the swim ends)
           while (!stop() && f.isValid && Date.now() - ts < 5000 && f.position.distanceTo(bot.entity.position) > 0.8 && !rf.active() && !rf.hostiles(8).some(h => h.e.name !== 'bat')) {
             const p = bot.entity.position
@@ -272,7 +279,7 @@ async function pickUp (bot, stop, sess) {
             await idle(bot, 100)
           }
         } finally { bot.setControlState('forward', false); bot.setControlState('jump', false) }
-        if (!f.isValid) log(K.name, 'swam to a ball afloat and took it')
+        if (!f.isValid) log(K.name, 'swam to a ball afloat and took it'); else log(K.name, `swim to a ball ended without it (${rf.active() ? 'the reflex took the body' : rf.hostiles(8).some(h => h.e.name !== 'bat') ? 'a mob' : Date.now() - ts >= 5000 ? '5s up' : 'stopped'})`)
         continue
       }
       const drifting = ds.some(d => { const q = seen.get(d.id); return !q || q.distanceTo(d.position) > 0.2 })
