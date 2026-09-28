@@ -195,6 +195,21 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
     }
     return v
   })
+  // (a step UNDER THE CASTLE'S FLOOR - the hollow a column with a base cell over it: the rim and the floor wall it in as
+  //  they rise, and the planner walked in through a gap still open, then spent fifteen minutes "stuck" getting out,
+  //  2026-09-28. A cost, not a refusal: the way out is still a way; audit)
+  const hollow = new Map(); let hollowGen = pathGen
+  m.exclusionAreasStep.push(block => {
+    if (!block || !block.position) return 0
+    let j = null; try { j = require('./build').getJob() } catch {}
+    const b0 = j && j.box; const p = block.position
+    if (!b0 || p.y >= b0.y1 || p.x < b0.x1 || p.x > b0.x2 || p.z < b0.z1 || p.z > b0.z2) return 0
+    if (hollowGen !== pathGen || hollow.size > 20000) { hollow.clear(); hollowGen = pathGen }
+    const k = p.x + ',' + p.z
+    let v = hollow.get(k)
+    if (v === undefined) { v = j.index.has(`${p.x},${b0.y1},${p.z}`) ? 40 : 0; hollow.set(k, v) }
+    return v
+  })
   // (a step into water with no air over it within two - a roofed pocket, a flooded cave: the planner stepped the bot
   //  down into one 170 blocks out and it drowned under a stone roof, 2026-09-28. Swimming at the surface costs nothing
   //  more; a way through a sealed pocket only when there is no other)
