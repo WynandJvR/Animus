@@ -1305,6 +1305,10 @@ function ensureFoundation (bot) {
     const cell = { x: p.x, y: p.y, z: p.z, name: 'cobblestone', props: {}, foundation: true, want: null, item: 'cobblestone', alt: FOUNDATION_BLOCKS, prefer: ['cobblestone', 'dirt'], itemAlt: FILLER_ITEMS }
     job.cells.push(cell); job.index.set(key(cell), cell)
   }
+  // (a support of ours standing in a foundation cell does the foundation's work now: off the scaffold ledger, so no teardown
+  //  takes it; and said - the count of cells standing already, which the scan read through as air; audit 2026-09-28)
+  const standing = add.filter(p => ledger.has(key(p)) && world.isSolid(world.at(bot, p.x, p.y, p.z)))
+  if (standing.length) { const sk = new Set(standing.map(key)); mem.update(m => { m.scaffold = (m.scaffold || []).filter(q => !sk.has(key(q))) }) }
   const md = world.data(bot)
   for (const p of torches) {
     const cell = Object.assign(describe({ x: p.x, y: p.y, z: p.z, name: 'torch', props: {} }, md), { foundation: true }) // (stands on the ground under it)
@@ -1312,7 +1316,7 @@ function ensureFoundation (bot) {
   }
   job.foundation = { cells: add.length, torches: torches.length }
   statusGen++
-  if (add.length || cols.length) log('build', `foundation: ${add.length} blocks - a wall under the rim of the base where it stands over a drop (${new Set(add.map(p => p.x + ',' + p.z)).size} of ${cols.length} columns over the drop) - laid first${torches.length ? `, ${torches.length} torch${torches.length > 1 ? 'es' : ''} in the hollow under the floor` : ''}`)
+  if (add.length || cols.length) log('build', `foundation: ${add.length} blocks${standing.length ? ` (${standing.length} of them our supports already standing)` : ''} - a wall under the rim of the base where it stands over a drop (${new Set(add.map(p => p.x + ',' + p.z)).size} of ${cols.length} columns over the drop) - laid first${torches.length ? `, ${torches.length} torch${torches.length > 1 ? 'es' : ''} in the hollow under the floor` : ''}`)
   return true
 }
 // A foundation cell sealed in under the base already built is dropped, not rested: it is no part of the blueprint, nothing
