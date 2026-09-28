@@ -328,7 +328,9 @@ function makePlanner (md, { accepts = () => null, sourceable = () => true, gener
     const re = accepts(name)
     return re && re.test(b) ? b : name
   }
-  function plan (needs, { stock = () => 0, inFlight = () => 0 } = {}) {
+  // (fuelCredit: fuel in coals that only a SMELT may take - lava buckets: never a torch's coal; audit 2026-09-28)
+  function plan (needs, { stock = () => 0, inFlight = () => 0, fuelCredit = 0 } = {}) {
+    let smeltFuel = 0
     fresh()
     const demand = {}; const top = {}
     for (const [n, c] of Object.entries(needs || {})) {
@@ -355,7 +357,7 @@ function makePlanner (md, { accepts = () => null, sourceable = () => true, gener
     // sites: the places the plan's handwork needs the world to have (water to set concrete)
     const out = { crafts: [], smelts: [], raw: {}, demand: {}, top, smeltTotal: 0, unknown: [], sites: [] }
     for (const node of order) {
-      const want = node === 'fuel' ? Math.ceil(demand[node] || 0) : (demand[node] || 0)
+      const want = node === 'fuel' ? Math.ceil(Math.max(0, (demand[node] || 0) - Math.min(fuelCredit, smeltFuel))) : (demand[node] || 0)
       if (!(want > 0)) continue
       out.demand[node] = want
       const short = want - take(node, want)
@@ -366,6 +368,7 @@ function makePlanner (md, { accepts = () => null, sourceable = () => true, gener
         out.smeltTotal += short
         demand[r.smelt] = (demand[r.smelt] || 0) + short
         demand.fuel = (demand.fuel || 0) + short / 8 // one coal smelts eight
+        smeltFuel += short / 8
       } else if (r.craft) {
         const crafts = Math.ceil(short / r.yield)
         out.crafts.push({ item: node, crafts, yield: r.yield, per: r.craft, spare: crafts * r.yield - short, by: r.by || null })
@@ -480,7 +483,7 @@ function planFor (bot, needs) {
   // (fuel is counted in coals - eight smelts each; a lava bucket, pack or bank, is a hundred smelts: twelve coals. Only
   //  the planner's count - never the 'fuel' class itself, or a torch would be crafted of a lava bucket; 2026-09-28)
   const lava = () => L.inv.count(bot, 'lava_bucket') + ((L.base.bankCounts() || {}).lava_bucket || 0)
-  return getPlanner(bot).plan(needs, { stock: n => stock(bot, n) + (n === 'fuel' ? lava() * 12 : 0), inFlight })
+  return getPlanner(bot).plan(needs, { stock: n => stock(bot, n), inFlight, fuelCredit: lava() * 12 })
 }
 
 // The species to craft a wooden form in: the wood we hold the most of (any wood stands in).

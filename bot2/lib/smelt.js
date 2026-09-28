@@ -227,6 +227,9 @@ async function clearBucket (bot, furnace) {
   let f = null
   try { f = furnace.fuelItem() } catch {}
   if (!f || f.name !== 'bucket') return false
+  // (room first: with a full pack the take throws and the bucket sits on in the slot, the furnace stalled for good; audit)
+  if (inv.freeSlots(bot) < 1 && !inv.items(bot).some(i => i.name === 'bucket' && i.count < 16)) await base().tossJunk(bot).catch(() => 0)
+  if (inv.freeSlots(bot) < 1 && !inv.items(bot).some(i => i.name === 'bucket' && i.count < 16)) { log('smelt', 'no room in the pack for the empty bucket in a fuel slot - that furnace waits'); return false }
   try { await furnace.takeFuel(); return true } catch (e) { log('smelt', `could not take the empty bucket out of the fuel slot: ${e.message}`); return false }
 }
 async function putFuel (bot, furnace, itemsToSmelt, { survival = false } = {}) {

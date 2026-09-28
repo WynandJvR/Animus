@@ -338,6 +338,9 @@ async function useOn (bot, pos, itemName, { accept, face = 'up', allowZones = []
     }
     const held = itemName ? inv.items(bot).find(i => i.name === itemName) : null
     if (itemName && !held) { log('act', `use ${itemName} on the block at ${move.fmt(pos)}: none in the pack`); return false }
+    // (a use with no item is the block's own - never with a full bucket in the hand: a lava bucket held turns the click
+    //  into a placing; audit 2026-09-28)
+    if (!itemName && bot.heldItem && /_bucket$/.test(bot.heldItem.name)) await bot.unequip('hand').catch(() => {})
     // (the hold: the ledge crouch presses sneak again otherwise, between this let-go and the click - reflex.holdNoSneak)
     const letGo = reflex.holdNoSneak()
     try {

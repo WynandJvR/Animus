@@ -580,13 +580,15 @@ async function lavaFuel (bot, buckets, ctx = {}) {
     gather().noteResource('lava_pool', s.lava)
     const f = world.feetPos(bot)
     if (f.x !== s.stand.x || f.y !== s.stand.y || f.z !== s.stand.z) {
-      const g = await move.goTo(bot, new goals.GoalBlock(s.stand.x, s.stand.y, s.stand.z), { timeoutMs: Math.max(3000, Math.min(40000, deadline - Date.now())), shouldStop: ctx.shouldStop, label: 'beside the lava' })
+      const g = await move.goTo(bot, new goals.GoalBlock(s.stand.x, s.stand.y, s.stand.z), { timeoutMs: Math.max(3000, Math.min(40000, deadline - Date.now())), shouldStop: ctx.shouldStop, dig: false, place: false, label: 'beside the lava' }) // (no dig, no bridge near a lava pool: a planner step there can open a flow or set the body over it - a pool on open ground is walked to, or skipped; audit)
       if (!g.ok) { if (!stopped(ctx)) lavaUnreached.add(key(s.lava)); log('forage', `lava for the furnaces: could not reach the stand at ${move.fmt(s.stand)} (${g.why})`); continue }
     }
     // (the ground re-read on arrival: the walk may have changed it, or lava come near the stand since the scan)
     if (world.lavaNear(bot, world.feetPos(bot), 1) || !still(world.at(bot, s.lava.x, s.lava.y, s.lava.z))) { log('forage', `lava for the furnaces: the source at ${move.fmt(s.lava)} is no longer safe to fill from`); continue }
     const before = inv.count(bot, 'lava_bucket')
     const ok = await act.fill(bot, s.lava, { liquid: 'lava', noWalk: true })
+    // (the lava bucket out of the hand at once: held, any click on a plain face places it - audit)
+    if (ok) { const t = inv.bestTool(bot, 'pickaxe', 1) || inv.bestWeapon(bot) || inv.items(bot).find(i => !/bucket$/.test(i.name)); if (t) await bot.equip(t, 'hand').catch(() => {}); else await bot.unequip('hand').catch(() => {}) }
     if (ok && inv.count(bot, 'lava_bucket') > before) log('forage', `filled a lava bucket at ${move.fmt(s.lava)} (${got()} of ${n})`)
     else log('forage', `lava for the furnaces: the bucket did not fill at ${move.fmt(s.lava)}`)
   }
