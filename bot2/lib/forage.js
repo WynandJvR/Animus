@@ -479,6 +479,121 @@ async function fillBucket (bot, ctx) {
   return act.fill(bot, w.position, { noWalk: true })
 }
 
+// ---- lava for the furnaces ----------------------------------------------------------------------------------
+// A lava bucket burns for a hundred smelts - a coal for eight - and the coal trips brought five a go while the castle's
+// bricks and stone sat cold in the chest (2026-09-28). An empty bucket is filled at a still lava SOURCE and carried home
+// to the furnaces (smelt.putFuel takes it; the empty bucket comes back out of the fuel slot). Nothing here ever pours
+// or places lava: the only use of the bucket is the fill.
+// WHERE TO FILL FROM, the obsidian quench's rules: a solid RIM beside the source at the lava's own level, two air cells
+// over the rim (the look at the lava passes over it), and the stand one further out - on the rim's level, never on the
+// rim itself and never lower than the lava's surface (a stand below the surface is a stand the lava can run down to).
+// The stand is standable, has no lava within one, and sees the sky (no walk into a cave for fuel - the obsidian trip's
+// lesson, R5). None of the source, the rim or the stand in a zone, under a zone, or under the build: the pool under
+// the base or the castle is never touched (taking its source can open a flow nobody is watching).
+// Pure over world.at (no walking, no awaits): the offline test drives it with a fake world.
+const LAVA_DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1]]
+function offLimits (p) { return !!(move.inZone(p, 2) || move.underZone(p, 2) || move.underBuild(p)) }
+function lavaSource (bot, b) {
+  if (!b || !still(b)) return false
+  const p = b.position
+  return !offLimits(p) && world.isAirish(world.at(bot, p.x, p.y + 1, p.z))
+}
+function lavaStands (bot, L) {
+  const out = []
+  for (const [dx, dz] of LAVA_DIRS) {
+    const rim = { x: L.x + dx, y: L.y, z: L.z + dz }
+    if (!world.isSolid(world.at(bot, rim.x, rim.y, rim.z))) continue
+    if (![1, 2].every(dy => world.isAirish(world.at(bot, rim.x, rim.y + dy, rim.z)))) continue
+    const stand = { x: rim.x + dx, y: L.y + 1, z: rim.z + dz }
+    if (!world.standable(bot, stand.x, stand.y, stand.z) || world.lavaNear(bot, stand, 1) || !world.openSky(bot, stand)) continue
+    if (offLimits(rim) || offLimits(stand)) continue
+    out.push({ rim, stand })
+  }
+  return out
+}
+// Sources whose stand the walk could not reach: not tried again this run (else every fuel decision re-walked at them
+// and spent its four minutes before the coal).
+const lavaUnreached = new Set()
+// Every fill site in sight: { lava, rim, stand, sky }, the open-sky pools first, then the nearest stand.
+async function lavaSites (bot, skip = new Set()) {
+  const me = bot.entity.position
+  const found = await world.scanBlocks(bot, /^lava$/, { maxDistance: world.sightReach(bot), count: 60, filter: b => !skip.has(key(b.position)) && !lavaUnreached.has(key(b.position)) && lavaSource(bot, b) }).catch(() => [])
+  const out = []
+  for (const b of found) {
+    const L = { x: b.position.x, y: b.position.y, z: b.position.z }
+    const sky = world.openSky(bot, L)
+    for (const s of lavaStands(bot, L)) out.push(Object.assign({ lava: L, sky }, s))
+  }
+  return out.sort((a, b) => (b.sky - a.sky) || world.dist3(a.stand, me) - world.dist3(b.stand, me))
+}
+// Empty buckets in the pack, up to `want`: the bank's first, else ONE made from iron already smelted (three ingots, pack
+// or bank) - never an iron trip for it; the fuel trip is not worth one.
+async function emptyBuckets (bot, want, ctx = {}) {
+  if (inv.count(bot, 'bucket') < want && base().bankCount('bucket') > 0) await base().withdraw(bot, 'bucket', want - inv.count(bot, 'bucket')).catch(() => 0)
+  if (!inv.has(bot, 'bucket') && inv.count(bot, 'iron_ingot') + base().bankCount('iron_ingot') >= 3) await craft().ensure(bot, 'bucket', 1, Object.assign({}, ctx, { noWithdraw: false })).catch(() => false)
+  return Math.min(want, inv.count(bot, 'bucket'))
+}
+// Could a lava trip go now: an empty bucket held, banked or makeable from smelted iron (no walk, no scan).
+function bucketsAvailable (bot) {
+  const n = inv.count(bot, 'bucket') + base().bankCount('bucket')
+  return n > 0 ? n : (inv.count(bot, 'iron_ingot') + base().bankCount('iron_ingot') >= 3 ? 1 : 0)
+}
+// A pool in sight now, or one remembered from before (gather's resource memory, near home).
+async function lavaKnown (bot) {
+  if (gather().knownResource('lava_pool', bot.entity.position, { maxFromHome: 160 })) return true
+  const s = (await lavaSites(bot))[0]
+  if (s) gather().noteResource('lava_pool', s.lava)
+  return !!s
+}
+// Fill up to `buckets` empty buckets with lava. Returns the lava buckets gained. One deadline on the whole trip (the
+// quench's four minutes); each walk to a stand bounded by it; each fill verified by the lava bucket in the pack.
+async function lavaFuel (bot, buckets, ctx = {}) {
+  const had = inv.count(bot, 'lava_bucket')
+  const got = () => inv.count(bot, 'lava_bucket') - had
+  const n = await emptyBuckets(bot, Math.max(1, buckets), ctx)
+  if (!n) { log('forage', 'lava for the furnaces: no empty bucket and none to be made (three iron ingots)'); return 0 }
+  const deadline = Date.now() + 4 * 60000
+  const skip = new Set()
+  let travelled = false
+  let why = null
+  while (got() < n) {
+    await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
+    if (stopped(ctx)) { why = 'stopped'; break }
+    if (deadline - Date.now() < 5000) { why = '4 minutes spent'; break }
+    if (!inv.has(bot, 'bucket')) { why = 'no empty bucket left'; break }
+    await reflex.waitClear()
+    const sites = await lavaSites(bot, skip)
+    if (!sites.length) {
+      // none in sight: the pool remembered, once (the walk bounded by the trip's own deadline)
+      const known = !travelled && gather().knownResource('lava_pool', bot.entity.position, { maxFromHome: 160 })
+      if (known && world.dist2(known, bot.entity.position) > 24) {
+        travelled = true
+        await move.travel(bot, known, { range: 8, shouldStop: ctx.shouldStop, label: 'to the lava pool', maxMs: Math.max(5000, deadline - Date.now() - 60000) })
+        continue
+      }
+      if (known && !got()) gather().forgetResource('lava_pool', known)
+      why = 'no still lava in sight with safe ground to fill from'
+      break
+    }
+    const s = sites[0]
+    skip.add(key(s.lava)) // (one try a source: filled it is gone, refused it is not tried again this trip)
+    gather().noteResource('lava_pool', s.lava)
+    const f = world.feetPos(bot)
+    if (f.x !== s.stand.x || f.y !== s.stand.y || f.z !== s.stand.z) {
+      const g = await move.goTo(bot, new goals.GoalBlock(s.stand.x, s.stand.y, s.stand.z), { timeoutMs: Math.max(3000, Math.min(40000, deadline - Date.now())), shouldStop: ctx.shouldStop, label: 'beside the lava' })
+      if (!g.ok) { if (!stopped(ctx)) lavaUnreached.add(key(s.lava)); log('forage', `lava for the furnaces: could not reach the stand at ${move.fmt(s.stand)} (${g.why})`); continue }
+    }
+    // (the ground re-read on arrival: the walk may have changed it, or lava come near the stand since the scan)
+    if (world.lavaNear(bot, world.feetPos(bot), 1) || !still(world.at(bot, s.lava.x, s.lava.y, s.lava.z))) { log('forage', `lava for the furnaces: the source at ${move.fmt(s.lava)} is no longer safe to fill from`); continue }
+    const before = inv.count(bot, 'lava_bucket')
+    const ok = await act.fill(bot, s.lava, { liquid: 'lava', noWalk: true })
+    if (ok && inv.count(bot, 'lava_bucket') > before) log('forage', `filled a lava bucket at ${move.fmt(s.lava)} (${got()} of ${n})`)
+    else log('forage', `lava for the furnaces: the bucket did not fill at ${move.fmt(s.lava)}`)
+  }
+  log('forage', `lava for the furnaces: ${got()} of ${n} bucket(s) filled${why && got() < n ? ' - ' + why : ''}`)
+  return Math.max(0, got())
+}
+
 // ---- handwork on a placed block -----------------------------------------------------------------------------
 // A cell by us to work a block in: open, on solid ground, not ours to keep clear (the door step, the bed, the
 // mine's stairs - move.utilitySpotOK), in reach from where we stand.
@@ -658,4 +773,4 @@ async function process (bot, by, node, n, opts = {}) {
   try { return await work(bot, node, n, opts) } catch (e) { log('forage', `${by} ${node} threw: ${e.message}`); return 0 }
 }
 
-module.exports = { handles, spec, gather: gatherRaw, process, exhausted, exhaustedKinds, generation, seen, watch, sightMobs, noteTrip, strip, carve, harden, compost, shearBlock, ensureShears, benchSpot, shoreAt, SEARCH_TRIPS }
+module.exports = { lavaFuel, lavaSites, lavaStands, lavaKnown, bucketsAvailable, handles, spec, gather: gatherRaw, process, exhausted, exhaustedKinds, generation, seen, watch, sightMobs, noteTrip, strip, carve, harden, compost, shearBlock, ensureShears, benchSpot, shoreAt, SEARCH_TRIPS }
