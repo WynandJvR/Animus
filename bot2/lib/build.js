@@ -1312,7 +1312,8 @@ async function finishSite (bot, { shouldStop } = {}) {
     const fixed = await require('./ground').prepare(bot, {
       x1: bx.x1 - 4, z1: bx.z1 - 4, x2: bx.x2 + 4, z2: bx.z2 + 4, groundY: gy, height: bx.y2 + 3 - gy,
       keep: b => !SCAFFOLD_RE.test(b.name),
-      skip: (x, z) => (x >= bx.x1 && x <= bx.x2 && z >= bx.z1 && z <= bx.z2) || (move.inZone({ x, y: gy, z }) || {}).label === 'base'
+      skip: (x, z) => (x >= bx.x1 && x <= bx.x2 && z >= bx.z1 && z <= bx.z2) || (move.inZone({ x, y: gy, z }) || {}).label === 'base',
+      allowZones: ['base', 'build'] // (the site's own ring: the build zone is its ground)
     }, { shouldStop, label: `finishing round the ${job.name}` })
     log('build', `finished the ground round the ${job.name}: ${fixed} blocks tidied`)
     return fixed

@@ -23,7 +23,8 @@ const reflex = require('./reflex')
 const { log } = require('./log')
 
 const FURNITURE = world.FURNITURE_RE // (world.js: the one list)
-const DEFAULT_ZONES = ['base', 'build']
+const DEFAULT_ZONES = ['base'] // (the build's cells only when a caller says so - the site's own finishing; a yard or hut
+//  fill defaulting into 'build' could put dirt in a castle cell still waiting for its block; audit 2026-09-28)
 
 // May the groundwork take this block? act.dig's own refusals, asked before a job is queued: natural terrain, outside
 // every zone but this ground's own, and holding back no lava.
