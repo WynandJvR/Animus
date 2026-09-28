@@ -357,7 +357,7 @@ function make (bot, director) {
         const out = []
         for (let i = 0; i < num(0, 3); i++) {
           const y0 = bot.entity.position.y; const held = bot.heldItem ? bot.heldItem.name : '-'
-          const ok = await require('./gather').towerUp(bot)
+          const ok = await require('./gather').towerUp(bot, { allowZones: ['*'] })
           out.push(`${ok ? 'up' : 'FAIL'} ${y0.toFixed(2)}->${bot.entity.position.y.toFixed(2)} held ${held}->${bot.heldItem ? bot.heldItem.name : '-'} sneak ${!!(bot.controlState && bot.controlState.sneak)}`)
           if (!ok) break
         }

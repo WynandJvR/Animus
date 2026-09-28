@@ -192,6 +192,7 @@ async function chop (bot, re, n, ctx = {}) {
 // drop them after we have gone). opts.allowZones: the orchard's trees stand in its zone.
 async function fellTree (bot, basePos, re, { leaves = false, allowZones = [], shouldStop } = {}) {
   const before = inv.count(bot, b => re.test(b))
+  const pillar = [] // (the blocks towered up to reach the top logs: taken down again after)
   // stand next to the trunk
   const r = await move.goTo(bot, new goals.GoalNear(basePos.x, basePos.y, basePos.z, 2), { timeoutMs: 40000, label: 'to tree', shouldStop })
   if (!r.ok) return false
@@ -211,10 +212,23 @@ async function fellTree (bot, basePos, re, { leaves = false, allowZones = [], sh
       }
       if (p.y - bot.entity.position.y > 5.2) {
         // tower one block under ourselves to reach
-        if (!await towerUp(bot)) break
+        if (!await towerUp(bot, { allowZones: allowZones.concat(['orchard']), onPlaced: c => pillar.push(c) })) break
       }
     }
     await act.dig(bot, p, { timeoutMs: 15000, allowZones })
+  }
+  // THE PILLAR DOWN FROM ON TOP, straight after the last log - a player's way: stand on it, dig the block under the feet,
+  // drop one onto the next, to the ground. From the stump a 10-high pillar top is out of reach, and the walk to reach it
+  // towered a second pillar beside it (audit 2026-09-28). Only while the cell under the feet is ours.
+  {
+    const ours = c => pillar.some(q => q.x === c.x && q.y === c.y && q.z === c.z)
+    for (let guard = 0; guard < 40 && pillar.length; guard++) {
+      const me = bot.entity.position; const under = { x: Math.floor(me.x), y: Math.floor(me.y - 0.01), z: Math.floor(me.z) }
+      if (!ours(under)) break
+      if (!await act.dig(bot, under, { timeoutMs: 6000, noWalk: true, allowZones: allowZones.concat(['orchard']) }).catch(() => false)) break
+      const t0 = Date.now(); while (!bot.entity.onGround && Date.now() - t0 < 1500) await move.sleep(50)
+      pillar.splice(pillar.findIndex(q => q.x === under.x && q.y === under.y && q.z === under.z), 1)
+    }
   }
   // (the trunk gone, its whole crown is borrowed footing - every natural leaf of it decays within seconds: stood on it,
   //  the bot fell 7 blocks when one rotted away, 2026-09-28. Down to the stump, on real ground, before anything else)
@@ -226,6 +240,14 @@ async function fellTree (bot, basePos, re, { leaves = false, allowZones = [], sh
       await move.goTo(bot, new goals.GoalNear(basePos.x, basePos.y, basePos.z, 1), { timeoutMs: 12000, place: false, label: 'off the crown' })
     }
   }
+  // (what is left of it - the bot walked off before it came down: the blocks in reach from here, the rest said)
+  let left = 0
+  for (const c of pillar.sort((a, b) => b.y - a.y)) {
+    const b = world.at(bot, c.x, c.y, c.z)
+    if (!b || !world.isSolid(b) || !/^(dirt|cobblestone|andesite|diorite|tuff|cobbled_deepslate|netherrack)$/.test(b.name)) continue
+    if (!act.reach(bot, c, 4.5) || !await act.dig(bot, c, { timeoutMs: 6000, noWalk: true, allowZones: allowZones.concat(['orchard']) }).catch(() => false)) left++
+  }
+  if (left) log('gather', `${left} pillar block${left > 1 ? 's' : ''} left at ${pillar[0].x},${pillar[0].z} - out of reach`)
   if (leaves && column.length) {
     // the crown within reach, from where we stand: natural leaves only (persistent ones are someone's build)
     const top = column[column.length - 1]
@@ -249,7 +271,11 @@ async function fellTree (bot, basePos, re, { leaves = false, allowZones = [], sh
 }
 
 // Jump and place a filler block under our feet.
-async function towerUp (bot) {
+// allowZones: the zones the pillar may stand in; builder: only the builder's own pillars may put a block in a cell of
+// the build (placed or not) - an escape may climb out inside the build's zone, never into its cells (audit 2026-09-28). onPlaced(cell): the caller's ledger of
+// the pillar it raised, to take it down again (the chop digs its own; an orchard kept its dirt pillars for ever).
+let lastPillar = null
+async function towerUp (bot, { allowZones = [], onPlaced = null, builder = false } = {}) {
   const filler = inv.items(bot).find(i => /^(dirt|cobblestone|andesite|diorite|tuff|cobbled_deepslate|netherrack)$/.test(i.name))
   if (!filler) return false
   const y0 = Math.floor(bot.entity.position.y)
@@ -291,7 +317,12 @@ async function towerUp (bot) {
     //  past the edge comes down in the next column whatever we do; the settle above is what keeps it over its own)
     if (Math.floor(bot.entity.position.x) !== x0 || Math.floor(bot.entity.position.z) !== z0) { await move.sleep(300); return false }
     const below = bot.blockAt(new Vec3(x0, y0 - 1, z0))
+    // (the cell the block goes into - the column's own, at y0)
+    const cellB = world.at(bot, x0, y0, z0); const zn = move.inZone({ x: x0, y: y0, z: z0 })
+    if (!builder && cellB && move.isProtected(cellB, 'fill')) { log('gather', `no tower at ${x0},${y0},${z0} - a cell of the build`); await move.sleep(300); return false }
+    if (zn && !allowZones.includes('*') && !allowZones.includes(zn.label)) { log('gather', `no tower at ${x0},${y0},${z0} - inside the ${zn.label}`); await move.sleep(300); return false }
     if (below) await bot.placeBlock(below, new Vec3(0, 1, 0)).catch(() => {})
+    { const nb = world.at(bot, x0, y0, z0); if (nb && world.isSolid(nb)) { lastPillar = { x: x0, y: y0, z: z0 }; if (onPlaced) onPlaced(lastPillar) } }
     await move.sleep(300)
     return Math.floor(bot.entity.position.y) >= y0 + 1
   } catch { bot.setControlState('jump', false); bot.setControlState('forward', false); bot.setControlState('sneak', false); return false }

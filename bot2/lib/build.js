@@ -831,7 +831,7 @@ async function pillarTo (bot, c, first) {
     bot.clearControlStates()
     await act.sleep(100)
     for (let i = 0; i < 16 && Math.floor(bot.entity.position.y) < c.y - 1; i++) {
-      if (!await require('./gather').towerUp(bot)) break
+      if (!await require('./gather').towerUp(bot, { allowZones: ['build', 'base'], builder: true })) break
     }
     if (act.reach(bot, new Vec3(c.x, c.y, c.z), 4.8)) return true
     log('build', `pillar for ${c.name} at ${move.fmt(c)}: towered from ${move.fmt(f)} to y${Math.floor(bot.entity.position.y)}, still out of reach`)
@@ -1276,7 +1276,7 @@ async function reachByPillar (bot, p, { shouldStop } = {}) {
     if (!r.ok && !(f.x === c.x && f.z === c.z && f.y === c.y)) continue
     if (!inv.items(bot).some(i => FILLER_ITEMS.test(i.name))) await ensureScaffold(bot, 16, { shouldStop }).catch(() => {})
     const base = bot.entity.position.floored().y
-    for (let i = 0; i < 9 && !act.reach(bot, p, 4.3); i++) { if (!await require('./gather').towerUp(bot)) break }
+    for (let i = 0; i < 9 && !act.reach(bot, p, 4.3); i++) { if (!await require('./gather').towerUp(bot, { allowZones: ['build', 'base'], builder: true })) break }
     let gone = act.reach(bot, p, 5) && await act.dig(bot, p, { force: true, allowZones: ['build', 'base'], timeoutMs: 10000, noWalk: true, reachMax: 5 })
     // down again: our own pillar, dug from the top
     for (let i = 0; i < 12 && bot.entity.position.floored().y > base; i++) {

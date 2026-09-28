@@ -578,7 +578,7 @@ async function escapeUpInner (bot) {
       const b = world.at(bot, f.x, f.y + dy, f.z)
       if (b && !world.isAirish(b) && !world.isWaterBlock(b) && !await act.dig(bot, b.position, { allowZones: ['farm', 'base', 'orchard', 'build'], timeoutMs: 8000, noWalk: true })) { log('move', `climbing out: can't clear ${b.name} over my head at ${fmt(b.position)}`); return false }
     }
-    if (await gather.towerUp(bot)) continue
+    if (await gather.towerUp(bot, { allowZones: ['*'] })) continue // (an escape: any zone, never a build cell)
     // no towering here (in water a jump never clears a block; or nothing to place): a step cut into the side - the two
     // cells over a solid side block cleared, and up onto it
     if (!await stepUpSide(bot)) { log('move', `climbing out: no way up from ${fmt(bot.entity.position)} (no tower, no side to cut a step in)`); return false }
@@ -657,7 +657,7 @@ async function surface (bot, { shouldStop } = {}) {
     if (blocked) break
     const filler = inv.items(bot).find(it => /^(dirt|cobblestone|andesite|diorite|granite|tuff|cobbled_deepslate|netherrack|stone)$/.test(it.name))
     if (!filler) break
-    if (!await require('./gather').towerUp(bot)) break
+    if (!await require('./gather').towerUp(bot, { allowZones: ['*'] })) break
   }
   if (!isUnderground(bot)) { log('move', `surfaced at y${Math.floor(bot.entity.position.y)} (climbed ${Math.floor(bot.entity.position.y) - y0})`); return true }
   const r = await goTo(bot, new goals.GoalY(surfaceYHere(bot) || s), { timeoutMs: 60000, stuckMs: 12000, label: 'surface', shouldStop })
