@@ -126,8 +126,16 @@ function seed (bot) {
 function pending (bot, from, radius = RADIUS) {
   const out = []
   const mine = mem.get().mine
+  // (litter is what is SEEN: a column of ours with rock over its top is underground - a cave's climb-out, an old mine's
+  //  shaft - out of sight and no one's eyesore, and the tidy walked down to y84 in a cave for it and was killed there by a
+  //  zombie in the dark, 2026-09-28. Judged by the column's top block: under the sky, or not the tidy's)
+  const tops = new Map()
+  for (const q of ledger.values()) { const kk = q.x + ',' + q.z; if (!tops.has(kk) || tops.get(kk) < q.y) tops.set(kk, q.y) }
+  const seen = new Map()
+  const visible = q => { const kk = q.x + ',' + q.z; if (!seen.has(kk)) seen.set(kk, world.openSky(bot, { x: q.x, y: tops.get(kk), z: q.z })); return seen.get(kk) }
   for (const q of ledger.values()) {
     if (from && world.dist3(q, from) > radius) continue
+    if (!visible(q)) continue
     // (under our own mine's entrance - its shaft: the mine's, out of sight and out of reach from the surface; gather.inMineShaft)
     if (mine && mine.entrance && q.y < mine.entrance.y - 1 && world.dist2(q, mine.entrance) < 3) continue
     const b = world.at(bot, q.x, q.y, q.z)
