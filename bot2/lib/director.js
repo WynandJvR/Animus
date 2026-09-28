@@ -1309,6 +1309,10 @@ function watchExpedition () {
   if (d && d.t > e.at) { mem.set('expedition', null); log('dir', `expedition for ${e.raw}: died on it - called off`) }
 }
 async function gatherFor (raw, short) {
+  reflex.setCautious(true) // (an optional trip does not fight: cover over a charge - reflex.setCautious)
+  try { return await gatherForInner(raw, short) } finally { reflex.setCautious(false) }
+}
+async function gatherForInner (raw, short) {
   const put = notToday.get(raw)
   if (put) { if (!put.sawNight || world.isNight(bot)) return false; notToday.delete(raw); log('dir', `${raw}: a new day - the trip is open again`) }
   // AN EMPTY PACK FOR THE TRIP: a trip is sized by the room in the pack, and the pack left home with what the builder
@@ -1359,8 +1363,11 @@ async function gatherFor (raw, short) {
         //  2026-09-28. Each a fresh sky-face pick past the ones worked, the trip's work kept local to each; four at most)
         const worked = []
         let tried = 0
+        // (a site a shooter covers, or a creeper walks, is no coal site: the valley under the outcrop had both, and the bot
+        //  died there with 250 items, 2026-09-28; audit)
+        const unsafe = pos => Object.values(bot.entities).some(e => e && e.position && ((reflex.RANGED.has(e.name) && e.position.distanceTo(pos) < 20) || (e.name === 'creeper' && e.position.distanceTo(pos) < 12)))
         const pick = async () => {
-          const seen = home ? await world.scanBlocks(bot, /^(coal_ore|deepslate_coal_ore)$/, { maxDistance: 96, count: 200, point: home, filter: b => world.dist2(b.position, home) > 48 && !move.inZone(b.position, 2) && !gather.onGrounds(b.position) && skyFace(b) && !worked.some(w => world.dist3(w, b.position) <= 8) }).catch(() => []) : []
+          const seen = home ? await world.scanBlocks(bot, /^(coal_ore|deepslate_coal_ore)$/, { maxDistance: 96, count: 200, point: home, filter: b => world.dist2(b.position, home) > 48 && !move.inZone(b.position, 2) && !gather.onGrounds(b.position) && skyFace(b) && !worked.some(w => world.dist3(w, b.position) <= 8) && !unsafe(b.position) }).catch(() => []) : []
           const me = bot.entity.position
           return seen.sort((a, b) => world.dist3(a.position, me) - world.dist3(b.position, me))[0]
         }
