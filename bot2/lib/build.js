@@ -1262,13 +1262,15 @@ function ensureFoundation (bot) {
       const q = stack.pop(); region.push(q)
       for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const kk = `${q.x + dx},${q.z + dz}`; if (inner.has(kk) && !seen.has(kk)) { seen.add(kk); stack.push(inner.get(kk)) } }
     }
-    const dry = region.filter(q => q.dry)
+    // (a torch only where a mob could stand: 2 high at least - a 1-high gap under the floor spawns nothing, and its torch
+    //  could neither be reached nor kept: "left unlit - could not dig the cobblestone in the cell", 2026-09-28)
+    const dry = region.filter(q => q.dry && q.ys.length >= 2)
     let pick = dry.filter(q => (q.x - job.box.x1) % 8 === 4 && (q.z - job.box.z1) % 8 === 4)
     if (!pick.length && dry.length) {
       const cx = region.reduce((a, q) => a + q.x, 0) / region.length; const cz = region.reduce((a, q) => a + q.z, 0) / region.length
       pick = [dry.sort((a, b) => (a.ys.length - b.ys.length) || (Math.hypot(a.x - cx, a.z - cz) - Math.hypot(b.x - cx, b.z - cz)))[0]]
     }
-    if (!dry.length) log('build', `hollow of ${region.length} columns under the floor near ${region[0].x},${region[0].z} is all water - left unlit`)
+    if (!dry.length && region.some(q => q.ys.length >= 2)) log('build', `hollow of ${region.length} columns under the floor near ${region[0].x},${region[0].z} is all water - left unlit`)
     for (const q of pick) torches.push({ x: q.x, y: q.ys[q.ys.length - 1], z: q.z })
   }
   for (const p of add) {
