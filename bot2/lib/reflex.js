@@ -444,21 +444,27 @@ async function digIn () {
 // from under us, straight down (the edge guards brake a walk or a jump off a ledge, not this); else a block of our own
 // beside the leaf, clicked on its side (dirt does not rot), for the tick to step onto; else null - stranded.
 let leafDigFailed = null
-function leafWayOff (leaf, fx, fy, fz) {
+let leafWhy = null // the way off last said (said again only when it changes)
+let leafFooting = null // the block put beside a rotting leaf to stand on - dug out from under us once the drop is taken
+function leafWayOff (leaf, fx, fy, fz, ours = false) {
   const act = require('./act')
   const k = act.fallBelow(bot, { x: fx, y: fy, z: fz })
   const land = Number.isFinite(k) && k > 0 ? world.at(bot, fx, fy - k, fz) : null
   const key = `${fx},${fy},${fz}`
-  if (land && leafDigFailed !== key && !/_leaves$/.test(land.name) && bot.health - Math.max(0, k - 3) > hurtLine()) {
+  const takes = bot.health - Math.max(0, k - 3) > hurtLine()
+  if (land && leafDigFailed !== key && !/_leaves$/.test(land.name) && takes) {
     // (a dig that fails is not tried again on this leaf: the block beside it next, never the same dig every tick)
-    return { why: `a ${k}-block drop onto ${land.name} I can take - digging the leaf out`, run: () => act.digBlock(bot, leaf).then(ok => { if (!ok) leafDigFailed = key; return ok }) }
+    return { why: `a ${k}-block drop onto ${land.name} I can take - digging ${ours ? 'my footing' : 'the leaf'} out`, run: () => act.digBlock(bot, leaf, { own: ours }).then(ok => { if (!ok) leafDigFailed = key; else if (ours) leafFooting = null; return ok }) }
   }
+  // (on our footing the drop only waits on the hp - eating and regen bring it; the rot no longer does)
+  // (a drop more than full health takes never passes: said as stranded - a staircase down is for when one is seen)
+  if (ours) return land && !/_leaves$/.test(land.name) && leafDigFailed !== key ? { why: 20 - Math.max(0, k - 3) > hurtLine() ? `waiting on my footing in the crown for the hp to take the ${k}-block drop` : `stranded on my footing in the crown - a ${k}-block drop is more than full health takes`, run: null } : null
   const filler = inv.shelterBlock(bot)
   if (!filler) return null
   for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
     const c = { x: fx + dx, y: fy, z: fz + dz }
     if (![0, 1, 2].every(dy => world.isAirish(world.at(bot, c.x, c.y + dy, c.z))) || require('./move').inZone(c)) continue
-    return { why: `a ${filler.name || filler} put beside it at ${c.x},${c.y},${c.z} to stand on`, run: () => act.place(bot, c, filler.name || filler, { sneak: false, fromReflex: true, timeoutMs: 3000, faceHint: [[-dx, 0, -dz]] }) }
+    return { why: `a ${filler.name || filler} put beside it at ${c.x},${c.y},${c.z} to stand on`, run: () => act.place(bot, c, filler.name || filler, { sneak: false, fromReflex: true, timeoutMs: 3000, faceHint: [[-dx, 0, -dz]] }).then(ok => { if (ok) leafFooting = c; return ok }) }
   }
   return null
 }
@@ -1040,20 +1046,28 @@ function tick () {
     const fx = Math.floor(me.x); const fy = Math.floor(me.y - 0.01); const fz = Math.floor(me.z)
     const floor = bot.entity.onGround ? world.at(bot, fx, fy, fz) : null
     const doomed = b => { if (!b || !/_leaves$/.test(b.name)) return false; let pr = {}; try { pr = b.getProperties() || {} } catch {} return (pr.persistent === false || pr.persistent === 'false') && Number(pr.distance) >= 7 }
-    if (doomed(floor) && require('./act').fallBelow(bot, { x: fx, y: fy, z: fz }) > world.SAFE_DROP) {
+    // (our own footing put in the crown - leafWayOff - is no way down either: a block over the same drop, and the
+    //  pathfinder has no move down it; stood on it, the row goes on until the drop is taken - audit 2026-09-28)
+    const isFooting = (x, y, z) => !!leafFooting && leafFooting.x === x && leafFooting.y === y && leafFooting.z === z
+    if (leafFooting && !isFooting(fx, fy, fz) && !world.isSolid(world.at(bot, leafFooting.x, leafFooting.y, leafFooting.z))) leafFooting = null
+    const ours = !!floor && isFooting(fx, fy, fz)
+    if ((ours || doomed(floor)) && require('./act').fallBelow(bot, { x: fx, y: fy, z: fz }) > world.SAFE_DROP) {
       let best = null; let bd = Infinity
       for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) for (let dy = -1; dy <= 1; dy++) {
         const x = fx + dx; const y = fy + 1 + dy; const z = fz + dz
-        if (!world.standable(bot, x, y, z) || doomed(world.at(bot, x, y - 1, z))) continue
+        if (!world.standable(bot, x, y, z) || doomed(world.at(bot, x, y - 1, z)) || (ours && isFooting(x, y - 1, z))) continue
         const d = Math.abs(dx) + Math.abs(dz) + Math.abs(dy)
         if (d < bd) { bd = d; best = { x, y, z } }
       }
-      const way = best ? null : leafWayOff(floor, fx, fy, fz)
-      if (!active || active.kind !== 'floor') { setActive('floor', 'off a decaying leaf'); log('reflex', `standing on decaying leaves at ${fx},${fy},${fz} over a ${require('./act').fallBelow(bot, { x: fx, y: fy, z: fz })}-block drop - ${best ? 'stepping off to ' + best.x + ',' + best.y + ',' + best.z : way ? way.why : 'stranded: nowhere firm within 3, no drop I would take, no block to stand on'}`) }
+      const way = best ? null : leafWayOff(floor, fx, fy, fz, ours)
+      if (!active || active.kind !== 'floor') { setActive('floor', 'off a decaying leaf'); log('reflex', `standing on ${ours ? 'my footing in the crown' : 'decaying leaves'} at ${fx},${fy},${fz} over a ${require('./act').fallBelow(bot, { x: fx, y: fy, z: fz })}-block drop - ${best ? 'stepping off to ' + best.x + ',' + best.y + ',' + best.z : way ? way.why : 'stranded: nowhere firm within 3, no drop I would take, no block to stand on'}`) }
+      // (and a way that changes under it - onto the footing, the hp come back for the drop - is said once too)
+      else if (way && way.why !== leafWhy) log('reflex', `${ours ? 'on my footing in the crown' : 'on decaying leaves'} at ${fx},${fy},${fz} - ${way.why}`)
+      leafWhy = way ? way.why : null
       try { bot.pathfinder.setGoal(null) } catch {}
       for (const k of ['forward', 'back', 'left', 'right', 'jump']) bot.setControlState(k, false)
       if (best) steerTo(best, { jump: best.y > fy + 1 })
-      else if (way) { busy = true; way.run().catch(() => false).finally(() => { busy = false }) }
+      else if (way && way.run) { busy = true; way.run().catch(() => false).finally(() => { busy = false }) }
       return
     } else if (active && active.kind === 'floor') return clearActive()
   }
@@ -1305,4 +1319,4 @@ function setEnabled (on) { enabled = !!on; if (!on) clearActive() }
 function underMs () { return submergedSince ? Date.now() - submergedSince : 0 }
 function airLeftMs () { return airMs }
 
-module.exports = { plannerPlacedSince, findAirReachable, _bindForTest: b => { bot = b }, _leafWayOff: (...a) => leafWayOff(...a), edgeStops, install, holdNoSneak, active: isActive, info, nearestThreat, lastHurt, hurtLine, edgeAhead, hostiles, onSurface, canSee, NEVER_MELEE, waitClear, setEnabled, findAir, HOSTILE, RANGED, bowReady, startDive, endDive, diveBroken, underMs, airLeftMs, AIR_MS, DIVE_HARD_MS }
+module.exports = { plannerPlacedSince, findAirReachable, _bindForTest: b => { bot = b }, _leafWayOff: (...a) => leafWayOff(...a), _leafFooting: () => leafFooting, edgeStops, install, holdNoSneak, active: isActive, info, nearestThreat, lastHurt, hurtLine, edgeAhead, hostiles, onSurface, canSee, NEVER_MELEE, waitClear, setEnabled, findAir, HOSTILE, RANGED, bowReady, startDive, endDive, diveBroken, underMs, airLeftMs, AIR_MS, DIVE_HARD_MS }
