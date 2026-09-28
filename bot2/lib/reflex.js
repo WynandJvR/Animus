@@ -457,9 +457,9 @@ let fleeMemo = null
 function fleeHeading (t) {
   const me = bot.entity.position
   const away = Math.atan2(me.z - t.position.z, me.x - t.position.x)
-  if (fleeMemo && fleeMemo.at.distanceTo(me) < 1 && Math.abs(((away - fleeMemo.away) + 3 * Math.PI) % (2 * Math.PI) - Math.PI) < Math.PI / 6) return fleeMemo.best
+  if (fleeMemo && fleeMemo.id === t.id && fleeMemo.at.distanceTo(me) < 1 && Math.abs(((away - fleeMemo.away) + 3 * Math.PI) % (2 * Math.PI) - Math.PI) < Math.PI / 6) return fleeMemo.best
   const pick = fleeHeadingPick(t, me, away)
-  fleeMemo = { at: me.clone(), away, best: pick }
+  fleeMemo = { id: t.id, at: me.clone(), away, best: pick } // (a different mob is a different pick)
   return pick
 }
 function fleeHeadingPick (t, me, away) {
@@ -606,7 +606,9 @@ function jumpHurts (c) {
   const drop = [0.8, 1.6, 2.4].map(r => world.dropAt(bot, p.x + jx * r, fy, p.z + jz * r)).find(d => d > world.SAFE_DROP)
   return drop == null ? null : { x: Math.floor(p.x + jx * 1.6), y: fy, z: Math.floor(p.z + jz * 1.6), drop }
 }
+let lastJumpCut = null // (who pressed a jump the guard let go of - the physics may already have jumped: the fall line's witness)
 function noteJump (cell, who) {
+  lastJumpCut = { at: Date.now(), who: who || '?' }
   if (!cell.x && cell.x !== 0) return
   if (!jumpHeld || jumpHeld.x !== cell.x || jumpHeld.z !== cell.z || Date.now() - jumpHeld.at > 5000) log('reflex', `edge: no jump toward a ${cell.drop === Infinity ? 'bottomless' : cell.drop + '-block'} drop at ${cell.x},${cell.y},${cell.z}${who ? ' (' + who + ')' : ''}`)
   jumpHeld = Object.assign({}, cell, { at: Date.now() })
@@ -700,13 +702,13 @@ function noteTakeoff () {
         } else log('vital', `fell ${nearMine ? 'into the mouth of the mine' : guarded ? 'onto protected ground' : 'off an edge, not into a shaft'} at ${lx},${ly},${lz} - nothing to fill`)
       }
     } catch {}
-    if (t.fall > world.SAFE_DROP) log('vital', `fell ${t.fall} blocks from ${t.pos} (floor y${t.fy}, drop there ${t.drop}) v=${t.v} (${t.hs} b/t across${t.near ? ', beside ' + t.near : ''}${t.vel != null && t.vel < 2000 ? ', pushed by the server ' + t.vel + 'ms before' : ''}) keys=${t.keys || '-'} ${t.steered ? 'pathfinder steering' : 'no pathfinder'}${t.step}${t.active ? ', reflex ' + t.active : ''}${t.hurt ? ', hurt ' + t.hurt + 'ms before' : ''}`)
+    if (t.fall > world.SAFE_DROP) log('vital', `fell ${t.fall} blocks from ${t.pos} (floor y${t.fy}, drop there ${t.drop}) v=${t.v} (${t.hs} b/t across${t.near ? ', beside ' + t.near : ''}${t.vel != null && t.vel < 2000 ? ', pushed by the server ' + t.vel + 'ms before' : ''}${t.cut ? ', a jump by ' + t.cut + ' cut just before' : ''}) keys=${t.keys || '-'} ${t.steered ? 'pathfinder steering' : 'no pathfinder'}${t.step}${t.active ? ', reflex ' + t.active : ''}${t.hurt ? ', hurt ' + t.hurt + 'ms before' : ''}`)
   }
   if (wasGround && !g) {
     const p = bot.entity.position; const v = bot.entity.velocity; const c = bot.controlState || {}
     const fy = Math.floor(p.y + 0.01)
     const near = Object.values(bot.entities).filter(e => e && e !== bot.entity && e.position && e.position.distanceTo(p) < 1.5).map(e => e.name || e.type)
-    takeoff = { at: Date.now(), y: p.y, hs: Math.hypot(v.x, v.z).toFixed(2), near: near.join('+'), vel: lastServerVel ? Date.now() - lastServerVel : null, step: plannedStep(), pos: `${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)}`, fy, drop: world.dropAt(bot, p.x, fy, p.z), v: `${v.x.toFixed(2)},${v.y.toFixed(2)},${v.z.toFixed(2)}`, keys: [...new Set(recentKeys.flat().concat(Object.keys(c).filter(k => c[k])))].join('+'), steered: !!(bot.pathfinder && bot.pathfinder.isMoving && bot.pathfinder.isMoving()), active: active && active.kind, hurt: lastHurtAt && Date.now() - lastHurtAt < 2000 ? Date.now() - lastHurtAt : 0 }
+    takeoff = { at: Date.now(), y: p.y, hs: Math.hypot(v.x, v.z).toFixed(2), near: near.join('+'), vel: lastServerVel ? Date.now() - lastServerVel : null, cut: lastJumpCut && Date.now() - lastJumpCut.at < 500 ? lastJumpCut.who : null, step: plannedStep(), pos: `${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)}`, fy, drop: world.dropAt(bot, p.x, fy, p.z), v: `${v.x.toFixed(2)},${v.y.toFixed(2)},${v.z.toFixed(2)}`, keys: [...new Set(recentKeys.flat().concat(Object.keys(c).filter(k => c[k])))].join('+'), steered: !!(bot.pathfinder && bot.pathfinder.isMoving && bot.pathfinder.isMoving()), active: active && active.kind, hurt: lastHurtAt && Date.now() - lastHurtAt < 2000 ? Date.now() - lastHurtAt : 0 }
   }
   wasGround = g
 }
