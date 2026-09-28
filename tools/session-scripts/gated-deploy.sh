@@ -19,6 +19,8 @@ while [ $SECONDS -lt $end ]; do
     NODE_PATH=/c/mc-bot-lab/bot/node_modules node /c/mc-bot-lab/tools/session-scripts/xmodcheck.js /c/mc-bot-lab/bot2 > /dev/null || { echo "CROSS-MODULE NAME MISSING - run tools/session-scripts/xmodcheck.js"; exit 1; }
     PREV=$(ls -d $S/rollback/candidate-* 2>/dev/null | tail -1)
     N=$S/rollback/candidate-$(date +%H%M); mkdir -p $N; cp -r lib main.js $N/; cp ../bot/config.json $N/
+    # (the last three snapshots only - each is a whole copy of bot2: thirteen in a day were 439 files, 13MB)
+    ls -d $S/rollback/candidate-* 2>/dev/null | head -n -3 | xargs -r rm -rf
     echo "$(date +%Y-%m-%dT%H:%M) prev=$PREV new=$N" > $S/last-deploy.txt # (rollback target = prev: the snapshot is of the NEW code)
     curl -s -m 5 -X POST -H "Content-Type: application/json" -d '{"reconnect":true}' http://127.0.0.1:3001/config; echo " deployed: $(cat $S/last-deploy.txt)"; exit 0
   fi

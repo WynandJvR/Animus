@@ -87,3 +87,7 @@ bot/.mc262-data/
 tools/session-scripts/test-events.log
 # local test server config (holds the RCON password)
 testserver/server.properties
+
+# Deploy tooling output (rollback snapshots of bot2 code and the last-deploy stamp) - local only, never source
+tools/session-scripts/rollback/
+tools/session-scripts/last-deploy.txt
