@@ -1210,13 +1210,15 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     // (on our pillar and the next cell out of its reach: down first - the next walk starts from the ground)
     if (myPillar.length && !inReach(c)) await descendPillar(bot)
     let skipTry = false
-    if (!c.foundation && !inReach(c) && ready.length > 2) {
+    // (c.ownWay: a cell whose cluster stand's walk ran out goes its own way next time - placeCell's look-at walk, which may
+    //  find a wall top; the same unreachable stand was chosen again every step and the look-at walk never ran; audit)
+    if (!c.foundation && !c.ownWay && !inReach(c) && ready.length > 2) {
       const st = clusterStand(bot, c, ready, badStands)
       if (st && st.n >= 3) {
         const tw = Date.now()
         const r = await goSite(bot, new goals.GoalBlock(st.x, st.y, st.z), 'place').catch(() => null)
         placeProf.reach += Date.now() - tw
-        if (r && !r.ok) { badStands.add(key(st)); if (/timeout|stuck/.test(r.why || '')) skipTry = true }
+        if (r && !r.ok) { badStands.add(key(st)); if (/timeout|stuck/.test(r.why || '')) { skipTry = true; c.ownWay = true } }
       }
     }
     if (skipTry) {
