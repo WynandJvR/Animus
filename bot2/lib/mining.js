@@ -392,8 +392,14 @@ async function mineFor (bot, itemName, target, ctx = {}) {
     const r = await move.goTo(bot, new goals.GoalBlock(m.cursor.x, m.cursor.y, m.cursor.z), { timeoutMs: 120000, stuckMs: 15000, label: 'to mine face' })
     // (busy or stopped on the way is no verdict on the mine - a fight in the stairwell abandoned a whole mine for a new one)
     if (!r.ok && !move.isVerdict(r)) return false
+    // (a real verdict once - a flooded step, a gravel fall - is no reason to throw away stairs, cursor and ore history:
+    //  three trips that could not reach the face, then a new mine; reaching it clears the count - audit 2026-09-28)
     if (!r.ok) {
-      log('mine', `can't reach the mine face at ${move.fmt(m.cursor)} (${r.why}) - starting a new mine`)
+      m.faceFails = (m.faceFails || 0) + 1; saveMine(m)
+      if (m.faceFails < 3) { log('mine', `can't reach the mine face at ${move.fmt(m.cursor)} (${r.why}) - ${m.faceFails} of 3 before a new mine`); return false }
+    } else if (m.faceFails) { m.faceFails = 0; saveMine(m) }
+    if (!r.ok) {
+      log('mine', `can't reach the mine face at ${move.fmt(m.cursor)} (${r.why}) - three trips now; starting a new mine`)
       abandonMine(m)
       mem.set('mine', null)
       return false
