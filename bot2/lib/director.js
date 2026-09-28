@@ -1284,7 +1284,8 @@ async function gatherFor (raw, short) {
   // store", 2026-09-28). At home, the haul goes in first: the same line as the deposit's own (haulSize >= 64)
   if (base.distHome(bot) < 24 && (mem.get().chests || []).length && haulSize() >= 64) {
     const before = inv.freeSlots(bot)
-    await base.depositAll(bot).catch(() => false)
+    // (never the trip's own footing: a stack of cobble stays for the planner's steps and a tower out of a pit - audit)
+    await base.depositAll(bot, { keep: (b, i) => i.name === 'cobblestone' ? Math.max(base.keepCount(b, i), build.SCAFFOLD_WANT) : base.keepCount(b, i) }).catch(() => false)
     log('dir', `emptied the pack for the ${raw} trip: ${before} -> ${inv.freeSlots(bot)} free slots`)
   }
   const batch = Math.min(short, tripRoom())
