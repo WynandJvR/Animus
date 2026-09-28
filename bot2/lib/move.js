@@ -173,6 +173,28 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
     }
     return v
   })
+  // (a cell a 1.8 body does not fit: a closed BOTTOM trapdoor as the head cell over open feet, or a closed TOP trapdoor as
+  //  the feet cell over a floor - 1.19 and 0.81 high. The planner walks trapdoors as passable and wedged the bot under a
+  //  castle one, pinned by the server, back in the same cell after every relog, 2026-09-28. Refused, never opened: a
+  //  castle cell's open state is the builder's)
+  const tdMemo = new Map(); let tdGen = pathGen
+  m.exclusionAreasStep.push(block => {
+    if (!block || !block.position || !/_trapdoor$/.test(block.name || '')) return 0
+    if (tdGen !== pathGen || tdMemo.size > 20000) { tdMemo.clear(); tdGen = pathGen }
+    const p = block.position; const k = p.x + ',' + p.y + ',' + p.z
+    let v = tdMemo.get(k)
+    if (v === undefined) {
+      let pr = {}; try { const tb = world.at(bot, p.x, p.y, p.z); pr = (tb && tb.getProperties()) || {} } catch {}
+      v = 0
+      if (String(pr.open) === 'false') {
+        const below = world.at(bot, p.x, p.y - 1, p.z); const solidBelow = !!below && world.isSolid(below)
+        if (pr.half === 'bottom' && !solidBelow) v = 100 // (a head cell: the feet under it are open)
+        if (pr.half === 'top' && solidBelow) v = 100 // (a feet cell: its floor under it)
+      }
+      tdMemo.set(k, v)
+    }
+    return v
+  })
   // (a step into water with no air over it within two - a roofed pocket, a flooded cave: the planner stepped the bot
   //  down into one 170 blocks out and it drowned under a stone roof, 2026-09-28. Swimming at the surface costs nothing
   //  more; a way through a sealed pocket only when there is no other)
