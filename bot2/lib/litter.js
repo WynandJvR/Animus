@@ -14,6 +14,10 @@ const { log } = require('./log')
 
 const MAX = 400
 const RADIUS = 96 // (the ledger's reach round home - and the tidy's)
+// A column the tidy could not reach, or reached and could not take, twice is given up on (kept in the ledger, out of the
+// count): six 30s walks in a row to the same west-orchard blocks, and the tidy came back for them every run, the castle
+// idle 40 minutes (2026-09-28)
+const TRIES = 2
 const k = p => `${p.x},${p.y},${p.z}`
 const ledger = new Map((mem.get().litter || []).map(q => [k(q), q]))
 let savedAt = 0; let dirty = false
@@ -114,7 +118,7 @@ function pending (bot, from, radius = RADIUS) {
   for (const q of ledger.values()) {
     if (from && world.dist3(q, from) > radius) continue
     const b = world.at(bot, q.x, q.y, q.z)
-    if (b && b.name === q.name) out.push(q)
+    if (b && b.name === q.name && (q.tries || 0) < TRIES) out.push(q)
   }
   return out
 }
@@ -155,7 +159,9 @@ async function tidy (bot, { from, radius = RADIUS, shouldStop } = {}) {
     //  the lip, and the bot slipped off twice digging from there - audit 2026-09-28. None such: near it, as before)
     const stand = standBeside(bot, low)
     const r = await move.goTo(bot, stand ? new goals.GoalBlock(stand.x, stand.y, stand.z) : new goals.GoalNear(low.x, low.y, low.z, 2), { timeoutMs: 30000, place: false, allowZones: ['orchard', 'base', 'farm'], label: 'to litter' })
-    if (!r.ok && !act.reach(bot, low, 4.5)) { left += col.length; continue }
+    const miss = () => { for (const q of col) q.tries = (q.tries || 0) + 1; dirty = true }
+    if (!r.ok && !act.reach(bot, low, 4.5)) { left += col.length; miss(); continue }
+    const leftBefore = left
     const pts = infraPoints()
     for (const q of col) {
       // (a pickaxe in hand for every block, the one rule - craft.keepTool: with it worn out mid-tidy, cobble went by hand,
@@ -166,9 +172,12 @@ async function tidy (bot, { from, radius = RADIUS, shouldStop } = {}) {
       if (!act.reach(bot, q, 4.5)) { left++; continue }
       if (await act.dig(bot, new Vec3(q.x, q.y, q.z), { noWalk: true, timeoutMs: 8000, allowZones: ['orchard', 'base', 'farm'] }).catch(() => false)) removed++; else left++
     }
+    if (left > leftBefore) miss()
     await act.collectDrops(bot, { radius: 5, maxMs: 3000 }).catch(() => {})
   }
   save(true)
+  const gaveUp = [...ledger.values()].filter(q => (q.tries || 0) >= TRIES).length
+  if (gaveUp) log('litter', `${gaveUp} block${gaveUp > 1 ? 's' : ''} of ours given up on (out of reach twice)`)
   if (removed || left) log('litter', `took down ${removed} block${removed === 1 ? '' : 's'} of ours${left ? `, ${left} left (out of reach from the ground)` : ''}`)
   return removed
 }
