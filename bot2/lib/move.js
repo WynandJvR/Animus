@@ -344,9 +344,17 @@ async function waitReflex (bot, maxMs = 60000) {
 function sleep (ms) { return new Promise(r => setTimeout(r, ms)) }
 
 // Get out of a spot the planner keeps failing from: step back, jump, or tower one block.
+// (only a way that is not over a drop: a random key and a jump at the castle's south rim - a strafe, which neither the jump
+//  guard's heading nor the edge brake reads, and a brake that lets go in the air - fell 5 blocks twice, 2026-09-28. The
+//  keys are the body's own frame: forward along the look, left and right across it. No safe way, no jiggle)
 async function jiggle (bot) {
-  const dirs = ['back', 'left', 'right', 'forward']
-  const d = dirs[Math.floor(Math.random() * dirs.length)]
+  const e = bot.entity; const p = e.position
+  const fx = -Math.sin(e.yaw); const fz = -Math.cos(e.yaw)
+  const vec = { forward: [fx, fz], back: [-fx, -fz], left: [fz, -fx], right: [-fz, fx] }
+  const y = Math.floor(p.y + 0.01)
+  const safe = Object.keys(vec).filter(k => [0.8, 1.6].every(r => world.dropAt(bot, p.x + vec[k][0] * r, y, p.z + vec[k][1] * r) <= world.SAFE_DROP))
+  if (!safe.length) { log('move', `stuck at ${fmt(p)} - no way to jiggle that is not over a drop`); await sleep(500); return }
+  const d = safe[Math.floor(Math.random() * safe.length)]
   bot.setControlState(d, true); bot.setControlState('jump', true)
   await sleep(700)
   bot.clearControlStates()
