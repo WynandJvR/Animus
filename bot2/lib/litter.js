@@ -37,8 +37,7 @@ function note (bot, p) {
   listen(bot)
   const b = world.at(bot, p.x, p.y, p.z)
   if (!b || !filler().test(b.name)) return
-  const z = move.inZone(p)
-  if ((z && z.label === 'build') || require('./build').isOpenCell(p)) return
+  if (ours(p.x, p.y, p.z)) return
   // (round home only: a far trip's bridges are never walked back to - noted, they would push home's out of the ledger)
   const home = mem.get().home
   if (!home || world.dist3(p, home) > RADIUS) return
@@ -66,18 +65,37 @@ function kept (bot, p, pts = infraPoints()) {
   return pts.some(q => Math.abs(q.x - p.x) <= 1 && Math.abs(q.y - p.y) <= 1 && Math.abs(q.z - p.z) <= 1)
 }
 
+// the build's own ground (its zone, its cells) is the build's ledger's and snapshot's - never litter's (an orchard's area
+// widened by 3 reaches into the castle's north edge)
+function ours (x, y, z) { const zn = move.inZone({ x, y, z }); return (zn && zn.label === 'build') || require('./build').isOpenCell({ x, y, z }) }
+
+// The orchards' ground, spot clusters and all between - not the spots' own boxes: a pillar on a spot is why the orchard
+// dropped that spot, so it stood outside every box left (four columns of 3-5 missed by the first seed, 2026-09-28).
+// Clusters of spots 6 apart or less, each box widened by 3 (the two orchards apart: home between them is never swept).
+function orchardAreas () {
+  const spots = ((mem.get().orchard || {}).spots || []).slice()
+  const boxes = []
+  while (spots.length) {
+    const c = [spots.pop()]
+    for (let i = 0; i < c.length; i++) for (let j = spots.length - 1; j >= 0; j--) if (Math.abs(spots[j].x - c[i].x) <= 6 && Math.abs(spots[j].z - c[i].z) <= 6) c.push(spots.splice(j, 1)[0])
+    const xs = c.map(q => q.x); const ys = c.map(q => q.y); const zs = c.map(q => q.z)
+    boxes.push({ x1: Math.min(...xs) - 3, x2: Math.max(...xs) + 3, z1: Math.min(...zs) - 3, z2: Math.max(...zs) + 3, y1: Math.min(...ys) - 2, y2: Math.max(...ys) + 14 })
+  }
+  return boxes
+}
+
 // What was put down before the ledger: in an orchard (the only place a pillar of ours stands on a spot), cobblestone
 // out in the open - it never lies on the surface there by itself - with nothing but air, leaves or more of it above.
 function seed (bot) {
   listen(bot)
   let n = 0; const pts = infraPoints()
-  for (const zb of move.zones.filter(z => z.label === 'orchard')) {
+  for (const zb of orchardAreas()) {
     for (let x = zb.x1; x <= zb.x2; x++) for (let z = zb.z1; z <= zb.z2; z++) for (let y = zb.y1; y <= zb.y2; y++) {
       const b = world.at(bot, x, y, z)
       if (!b || b.name !== 'cobblestone' || ledger.has(k({ x, y, z }))) continue
       const up = world.at(bot, x, y + 1, z)
       const open = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => { const s = world.at(bot, x + dx, y, z + dz); return s && world.isAirish(s) })
-      if (!open || !up || !(world.isAirish(up) || world.LEAF_RE.test(up.name) || up.name === 'cobblestone') || kept(bot, { x, y, z }, pts)) continue
+      if (!open || !up || !(world.isAirish(up) || world.LEAF_RE.test(up.name) || up.name === 'cobblestone') || kept(bot, { x, y, z }, pts) || ours(x, y, z)) continue
       ledger.set(k({ x, y, z }), { x, y, z, name: b.name, at: Date.now(), seeded: true }); n++
     }
   }
