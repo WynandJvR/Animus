@@ -1135,7 +1135,11 @@ async function castleWork () {
     const want = mem.get().buildWaiting; mem.set('buildWaiting', null)
     const win0 = mats.planFor(bot, windowNeeds())
     const chain0 = Object.keys(mats.getPlanner(bot).plan({ [want]: 1 }).raw)
-    const raw0 = chain0.find(r => r !== 'fuel' && win0.raw[r] > 0) || chain0.find(r => win0.raw[r] > 0)
+    // (fuel first when the furnaces have none: the chain's other raw is often in the chest already, waiting on it - 92 clay
+    //  balls sat there while every morning went to more clay, and the fuel trip came at dusk, too late for a coal seam,
+    //  2026-09-28)
+    const noFuel = inv.count(bot, 'coal') + inv.count(bot, 'charcoal') + base.bankCount('coal') + base.bankCount('charcoal') < 8
+    const raw0 = (noFuel && chain0.includes('fuel') && win0.raw.fuel > 0 ? 'fuel' : null) || chain0.find(r => r !== 'fuel' && win0.raw[r] > 0) || chain0.find(r => win0.raw[r] > 0)
     const fits = r => r !== 'clay_ball' && r !== 'sand' ? world.ticksUntilNight(bot) > 2400 : (r === 'sand' ? !clay.exhausted('sand') && clay.tripFits(bot, 'sand') : !clay.exhausted() && clay.tripFits(bot))
     if (raw0 && fits(raw0)) {
       log('dir', `the build waits on ${want} - ${win0.raw[raw0]} ${raw0} first, while the day is young`)
