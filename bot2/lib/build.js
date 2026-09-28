@@ -1075,6 +1075,7 @@ async function buildStep (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
   // scattered cobblestone in seven minutes counted as progress while 50 glass cells held every layer above them, and
   // the glass's sand and fuel were only fetched when a step placed nothing - at dusk, too late (2026-09-26)
   let waiting = null
+  const badStands = new Set() // (stands whose walk failed this step: clusterStand passes them by)
   // (where a step's time goes: choosing the cell, walking to and placing it - measured, not guessed)
   const prof = { tries: 0, ms: 0, okMs: 0, dist: 0, pick: 0 }; let tpick = Date.now()
   placeProf.reach = 0; placeProf.dig = 0
@@ -1151,6 +1152,22 @@ async function buildStep (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     const c = ready[0]
     const tp = Date.now(); const d0 = world.dist3(c, bot.entity.position)
     prof.pick += tp - tpick
+    // ONE STAND, MANY CELLS: out of reach of the chosen cell, the walk goes to the stand beside it that reaches the most
+    // ready cells, and the in-reach-first order places them all before the next walk. Cell by cell, the walks were 80% of
+    // a step - 9.3s a block, the next cell 6-9 blocks off (2026-09-28)
+    // (a stand whose walk failed is not tried again this step; and when that walk ran out of time, the cell rests without its
+    //  own try - the same ground defeats both, 8s + 14s for one cell; a quick no-path falls through to it; audit)
+    let skipTry = false
+    if (!c.foundation && !inReach(c) && ready.length > 2) {
+      const st = clusterStand(bot, c, ready, badStands)
+      if (st && st.n >= 3) {
+        const tw = Date.now()
+        const r = await goSite(bot, new goals.GoalBlock(st.x, st.y, st.z), 'place').catch(() => null)
+        placeProf.reach += Date.now() - tw
+        if (r && !r.ok) { badStands.add(key(st)); if (/timeout|stuck/.test(r.why || '')) skipTry = true }
+      }
+    }
+    if (skipTry) { failed.set(key(c), (failed.get(key(c)) || 0) + 1); saveCellFails(); prof.tries++; prof.ms += Date.now() - tp; prof.dist += d0; tpick = Date.now(); continue }
     const ok = await placeCell(bot, c)
     prof.tries++; prof.ms += Date.now() - tp; prof.dist += d0; if (ok) prof.okMs += Date.now() - tp
     tpick = Date.now()
@@ -1307,6 +1324,31 @@ function dropFoundation (bot, c, why) {
   // (a torch dropped is a hollow left dark under the work - said as such, never lost in the foundation's own drops)
   log('build', c.name === 'torch' ? `hollow at ${move.fmt(c)} left unlit - ${why}` : `foundation cell at ${move.fmt(c)} dropped - ${why}`)
 }
+// The stand beside `c` (feet within 3 across, two below to one above) from which the most ready cells are in reach: clear
+// to stand in, no cell of the job at its feet or head, never on a lip, and `c` itself in reach. {x,y,z,n} or null.
+const EYE = 1.62; const REACH = 4.2
+function clusterStand (bot, c, ready, bad = new Set()) {
+  const near = ready.filter(q => Math.abs(q.x - c.x) <= 8 && Math.abs(q.z - c.z) <= 8 && Math.abs(q.y - c.y) <= 6)
+  // (a cell counts for a stand only if it has a face to click on the stand's side - within 4.2 through a wall is no reach:
+  //  each cell's usable faces, once; audit 2026-09-28)
+  const normals = new Map(near.map(q => [q, plansFor(q).filter(pl => refOk(bot, q, pl)).map(pl => pl.off.map(v => -v))]))
+  const faces = (p, q) => (normals.get(q) || []).some(nv => (p.x - q.x) * nv[0] + (p.y + 1 - q.y) * nv[1] + (p.z - q.z) * nv[2] > 0)
+  const me = bot.entity.position
+  const within = (p, q) => { const dx = q.x + 0.5 - (p.x + 0.5); const dy = q.y + 0.5 - (p.y + EYE); const dz = q.z + 0.5 - (p.z + 0.5); return dx * dx + dy * dy + dz * dz <= REACH * REACH }
+  let best = null
+  for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) for (let dy = -2; dy <= 1; dy++) {
+    const p = { x: c.x + dx, y: c.y + dy, z: c.z + dz }
+    if (bad.has(key(p)) || !within(p, c) || job.index.has(key(p)) || job.index.has(key({ x: p.x, y: p.y + 1, z: p.z })) || !world.standable(bot, p.x, p.y, p.z)) continue
+    // (never under the build: a stand below the base inside the box is the hollow - the eviction sends the bot home from it)
+    if (p.y < job.box.y1 && p.x >= job.box.x1 && p.x <= job.box.x2 && p.z >= job.box.z1 && p.z <= job.box.z2) continue
+    if ([[1, 0], [-1, 0], [0, 1], [0, -1]].some(([ax, az]) => world.dropAt(bot, p.x + ax + 0.5, p.y, p.z + az + 0.5) > world.SAFE_DROP)) continue
+    let n = 0; for (const q of near) if (within(p, q) && faces(p, q)) n++
+    const d = world.dist3(p, me)
+    if (!best || n > best.n || (n === best.n && d < best.d)) best = { x: p.x, y: p.y, z: p.z, n, d }
+  }
+  return best
+}
+
 // Where to stand for a foundation cell: OUTSIDE the footprint (no cell of the base over the column - never in the hollow
 // the rim closes), feet within 2 across of it, four below to two above, clear to stand in, never a cell of the job,
 // within reach of the cell; the nearest to the body.
