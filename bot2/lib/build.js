@@ -966,6 +966,9 @@ async function placeCell (bot, c, j = job) {
     if (c.foundation && !act.reach(bot, pos, 4.3)) {
       const st = foundationStand(bot, c)
       if (st) await goSite(bot, new goals.GoalBlock(st.x, st.y, st.z), 'place')
+      // (from its outside stand or not at all: the planner's own way to a rim cell led from the castle floor into the hollow
+      //  under it, walled in by then - fifteen minutes "stuck" under the build, 2026-09-28. It rests; the outside is tried again)
+      if (!act.reach(bot, pos, 4.3)) return why(st ? 'its outside stand was not reached' : 'no stand outside the build to place it from')
     }
     if (!act.reach(bot, pos, 4.3)) {
       const foot = feetFor(bot, c).find(f => !footBad(f))
