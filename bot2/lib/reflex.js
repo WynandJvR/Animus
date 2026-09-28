@@ -96,9 +96,16 @@ function diveHolds (now) {
 // no charge at it until the hp is back over that. Fight at 20, flee at 10, eat, fight again at 10, flee, fight at 5 -
 // the pillager's death spiral (2026-09-28; audit)
 const fledFrom = new Map() // entity id -> hp the lost fight began at
-let fightStartHp = null
+let fightStartHp = null; let fightTargetId = null
+// (a fight is LOST when it ends - however it ends - more than 4 hp down: "fight done" when the pillager stepped out of
+//  sight left no mark, and the bot charged it again at hp 11, 2026-09-28)
+const LOST_FIGHT_HP = 4
+function noteFightEnd () {
+  if (fightTargetId != null && fightStartHp != null && bot.health < fightStartHp - LOST_FIGHT_HP) fledFrom.set(fightTargetId, Math.max(fledFrom.get(fightTargetId) || 0, fightStartHp))
+}
 function setActive (kind, detail) {
   if (kind !== 'shoot') endDraw(kind) // (the body is another reflex's now: the string goes)
+  if (active && active.kind === 'fight' && kind !== 'fight') noteFightEnd()
   if (kind === 'fight' && (!active || active.kind !== 'fight')) fightStartHp = bot.health
   if (kind === 'flee' && active && active.kind === 'fight' && fleeTarget && fightStartHp != null) fledFrom.set(fleeTarget.id, Math.max(fledFrom.get(fleeTarget.id) || 0, fightStartHp))
   if (!active || active.kind !== kind) {
@@ -114,6 +121,7 @@ function clearActive () {
   endDraw('released')
   shieldDown()
   riseY = null
+  if (active && active.kind === 'fight') noteFightEnd()
   if (active) {
     log('reflex', `${active.kind} done after ${Math.round((Date.now() - active.since) / 100) / 10}s (hp ${Math.round(bot.health)})`)
     active = null; lastLogKey = ''
@@ -1262,6 +1270,7 @@ function tick () {
       if (h) { bot.setControlState('back', false); steerTo(h, { jump: h.jump, sprint: bot.food > 6 }) }
       return
     }
+    if (!active || active.kind !== 'fight') fightTargetId = target.id
     setActive('fight', `${target.name} ${d.toFixed(1)}b (${why})`)
     if (armed && (!bot.heldItem || !/_(sword|axe)$/.test(bot.heldItem.name))) { runBusy('equip a weapon', () => inv.equipWeapon(bot), 1500); return }
     if (d > 2.8 && !pinned) {
