@@ -28,9 +28,30 @@ function load () {
   return mem
 }
 
-function save () {
+// THE WRITE, BATCHED: a change marks the file dirty and one write goes out a second later, off the body's loop. Written
+// synchronously on every change, a build step's withdrawals - each chest's contents a change - wrote the 55 KB file seven
+// times in five seconds at 400-700ms each, the body frozen 3s (2026-09-28). A crash loses a second of memory at most; an
+// exit writes it at once (flushSync).
+let dirty = false; let timer = null; let writing = false
+function flushSync () {
+  if (timer) { clearTimeout(timer); timer = null }
+  if (!dirty || !mem) return
+  dirty = false
   try { fs.writeFileSync(FILE + '.tmp', JSON.stringify(mem, null, 1)); fs.renameSync(FILE + '.tmp', FILE) } catch {}
 }
+async function flush () {
+  timer = null
+  if (!dirty || !mem) return
+  if (writing) { timer = setTimeout(flush, 250); return } // (one write at a time: the next once this lands)
+  dirty = false; writing = true
+  try { await fs.promises.writeFile(FILE + '.tmp', JSON.stringify(mem, null, 1)); await fs.promises.rename(FILE + '.tmp', FILE) } catch { dirty = true } finally { writing = false }
+  if (dirty && !timer) timer = setTimeout(flush, 1000)
+}
+function save () {
+  dirty = true
+  if (!timer) timer = setTimeout(flush, 1000)
+}
+process.on('exit', flushSync)
 
 function get () { return load() }
 function set (key, value) { load()[key] = value; save(); return value }
@@ -50,4 +71,4 @@ function removePos (key, pos) {
 }
 function bump (stat, by = 1) { const m = load(); m.stats[stat] = (m.stats[stat] || 0) + by; save() }
 
-module.exports = { get, set, update, save, addUnique, removePos, bump, FILE }
+module.exports = { get, set, update, save, flushSync, addUnique, removePos, bump, FILE }
