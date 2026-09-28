@@ -1119,7 +1119,21 @@ async function processAtHome () {
   }
 }
 
+// WHERE A CASTLE ROUND'S TIME GOES, by phase (one line a round): 248s of castle in a day placed one block, and nothing said
+// whether it went to the home jobs, the withdraws, the site clearing or the step's walks (2026-09-28)
+let roundPh = null
+function phase (name) { if (!roundPh) return; const now = Date.now(); roundPh.acc[roundPh.cur] = (roundPh.acc[roundPh.cur] || 0) + now - roundPh.at; roundPh.cur = name; roundPh.at = now }
 async function castleWork () {
+  roundPh = { acc: {}, cur: 'start', at: Date.now(), t0: Date.now() }
+  const d0 = (build.cachedStatus(bot) || {}).done
+  try { return await castleWorkInner() } finally {
+    phase('end')
+    const tot = Date.now() - roundPh.t0; const d1 = (build.cachedStatus(bot) || {}).done
+    if (tot > 5000) log('dir', `castle round: ${Math.round(tot / 1000)}s, placed ${d1 != null && d0 != null ? d1 - d0 : '?'} - ${Object.entries(roundPh.acc).filter(([, v]) => v >= 500).sort((a, b) => b[1] - a[1]).map(([k, v]) => k + ' ' + Math.round(v / 1000) + 's').join(', ')}`)
+    roundPh = null
+  }
+}
+async function castleWorkInner () {
   const j = build.getJob()
   const st = build.cachedStatus(bot)
   // every block stands: the finishing round (scaffold down, holes filled). No latch - build.needsWork asks the
@@ -1133,7 +1147,9 @@ async function castleWork () {
   // HOME JOBS FIRST, while at home: the furnaces, the crafts, the window's blocks out of the chest, scaffold - then one
   // walk to the site. Clearing the site first sent the bot there for one leaf, home again for the furnaces and chests,
   // and back: two 60-block crossings and three minutes of every ten-minute day before a block went in (2026-09-26).
+  phase('home jobs')
   await processAtHome()
+  phase('scaffold+withdraw')
   // the scaffold first, then the window's blocks while two slots stay free: the other way round the window filled every
   // slot, the filler's withdraw failed "inventory full", and the cells over a drop at the site went unplaced for want
   // of a block to stand on (2026-09-27) - and each withdraw into a full pack was still a walk to a chest
@@ -1145,6 +1161,7 @@ async function castleWork () {
   // site prep for the band being built only (next 3 layers + headroom): the rest of the footprint
   // is cleared as the walls rise, from the walls - never a whole day on a canopy 12 blocks up.
   // Leaves don't block building unless they sit in a cell; walking cuts through them.
+  phase('site clearing')
   const bandTop = minY + 4
   const obs = build.unskippedObstructions(bot, { maxY: bandTop }).filter(b => !world.LEAF_RE.test(b.name) || j.index.has(build.key(b.position))).length
   if (obs > 0) {
@@ -1154,6 +1171,7 @@ async function castleWork () {
     // nothing clearable right now: get on with materials meanwhile
   }
   // the build's own blocks laid where no cell wants them (the planner's stepping stones): taken back up
+  phase('strays')
   {
     const strays = await build.strayBuildBlocks(bot)
     if (strays.length) {
@@ -1169,6 +1187,7 @@ async function castleWork () {
   // judged at the day's end, never fit the daylight left, and 2 fuel was fetched instead - every day, 50 glass cells
   // holding the whole cathedral (2026-09-26).
   // (kept in memory: a module variable was wiped by every reload, and the morning's first round started blank)
+  phase('bottleneck trip')
   if (mem.get().buildWaiting) {
     const want = mem.get().buildWaiting; mem.set('buildWaiting', null)
     const win0 = mats.planFor(bot, windowNeeds())
@@ -1192,6 +1211,7 @@ async function castleWork () {
   }
   // the same window the builder works in (it builds past a missing material, so the bricks for those layers
   // must come out of the chest too - with glass short, nothing was withdrawn and nothing built)
+  phase('window')
   const next = windowNeeds()
   // withdraw what we have for it (anything that stands in: birch stairs for jungle stairs)
   await build.ensureScaffold(bot, build.SCAFFOLD_WANT, { shouldStop: dayStop })
@@ -1204,7 +1224,9 @@ async function castleWork () {
   const winShort = mats.planFor(bot, next).raw.cobblestone || 0
   if (winShort > 512 && countOf('cobblestone') < 64) { log('dir', `${winShort} cobblestone short with ${countOf('cobblestone')} in hand - mining first`); carrying = 0 }
   if (carrying > 0) {
+    phase('build step')
     const r = await build.buildStep(bot, { shouldStop: dayStop, maxMs: 8 * 60000 })
+    phase('after step')
     log('dir', `build step: placed ${r.placed}${r.blockedOn ? ', waiting on ' + r.blockedOn : ''}`)
     blockedOn = r.blockedHolds ? r.blockedOn : null // (what the round steers by: only what holds the band)
     // (infill - glass, bars, lanterns - waited on while the structure still rises is no morning's errand: the sand
