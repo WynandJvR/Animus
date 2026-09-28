@@ -140,6 +140,9 @@ async function tidy (bot, { from, radius = RADIUS, shouldStop } = {}) {
     if (!r.ok && !act.reach(bot, low, 4.5)) { left += col.length; continue }
     const pts = infraPoints()
     for (const q of col) {
+      // (a pickaxe in hand for every block, the one rule - craft.keepTool: with it worn out mid-tidy, cobble went by hand,
+      //  10-50s a block and nothing dropped, 2026-09-28. None to be had: the tidy stops, the tools come first)
+      if (!await require('./craft').keepTool(bot, 'pickaxe', { shouldStop })) { log('litter', 'no pickaxe - the tidy waits for one'); save(true); return removed }
       // (a stepping stone can become a light's post or a water's edge after it was noted: asked again at the dig, and let go)
       if (kept(bot, q, pts) || capsADrop(bot, q)) { ledger.delete(k(q)); dirty = true; continue }
       if (!act.reach(bot, q, 4.5)) { left++; continue }
