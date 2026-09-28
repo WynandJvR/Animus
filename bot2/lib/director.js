@@ -32,6 +32,7 @@ const orchard = require('./orchard')
 const litter = require('./litter')
 let litterSeeded = false // (the pillars from before the ledger: looked for once a run, once the orchard's zone is set)
 const LITTER_BATCH = 8
+let siteTidyAsked = 0 // (when the site's scaffold was last counted for the day's teardown)
 const LITTER_CAP = 48 // (our own blocks standing round home past which the tidy goes before the castle)
 
 // Hunt an animal that is right here when the pack is low on food - a player does not walk past a
@@ -118,7 +119,7 @@ function note (name, ok) {
 // succeed" four times over, the watchdog's alarm, a backoff for nothing (late in the day, 25-64 from home; audit
 // 2026-09-28). One gate: a day chore whose stop holds waits, said once. (Survival - food, graves, tools, the bed - is
 // never held here; the castle's step does its home work first and minds its own stop.)
-const DAY_TASKS = new Set(['farm', 'harvest', 'hydrate', 'levelFarm', 'levelYard', 'fixWater', 'lightBase', 'plant', 'spareKit', 'fillShaft', 'cook', 'ironTrip', 'tidy'])
+const DAY_TASKS = new Set(['farm', 'harvest', 'hydrate', 'levelFarm', 'levelYard', 'fixWater', 'lightBase', 'plant', 'spareKit', 'fillShaft', 'cook', 'ironTrip', 'tidy', 'siteTidy'])
 const lateSaid = new Map()
 // held(name): may decide() offer it now? Not while backing off from failures (cooling), nor a day chore once its stop holds.
 // (cooling keeps its one meaning - "it failed recently": the recover rule reads cooling('food') as that evidence; audit)
@@ -573,6 +574,17 @@ function decide () {
     if (n >= LITTER_CAP) { tidyFirst.n++; mem.set('tidyFirst', tidyFirst) }
     if (n >= LITTER_CAP) return { name: 'tidy', why: `${n} blocks of ours left standing round home (pillars, stepping stones) - past ${LITTER_CAP}, before the castle` }
   }
+  // (the site's old scaffold, once a day ahead of the castle - build.siteScaffoldTeardown; the same day as the tidy's)
+  if (dHome < 64 && world.phase(bot) === 'day' && !nightSoon() && !held('siteTidy') && build.getJob()) {
+    const sd = mem.get().siteTidy || { tod: null, done: false }
+    const t = world.tod(bot); if ((world.isNight(bot) || (sd.tod != null && t < sd.tod)) && sd.done) { sd.done = false; mem.set('siteTidy', sd) } sd.tod = t
+    // (the site diff is a pass over the box: asked every 5 minutes at most, never every decision - body first)
+    if (!sd.done && Date.now() - siteTidyAsked > 300000) {
+      siteTidyAsked = Date.now()
+      const n = build.scaffoldList(bot).length
+      if (n >= 20) { sd.done = true; mem.set('siteTidy', sd); return { name: 'siteTidy', why: `${n} scaffold blocks standing round the site - the day's teardown, before the castle` } }
+    }
+  }
   if (mem.get().build && build.getJob() && build.needsWork(bot) && !nightSoon() && !homeByDark() && !held('castle')) {
     return { name: 'castle', why: 'working on ' + mem.get().build.name }
   }
@@ -853,6 +865,7 @@ const TASKS = {
     }
     return done > 0
   },
+  async siteTidy () { return (await build.siteScaffoldTeardown(bot, { shouldStop: dayStop })) > 0 },
   async tidy () { return (await litter.tidy(bot, { from: mem.get().home, radius: 96, shouldStop: dayStop })) > 0 },
   async levelYard () { return (await hut.levelYard(bot, { shouldStop: dayStop })) > 0 },
   async fixWater () { return farm.fixWater(bot, { shouldStop: dayStop }) },

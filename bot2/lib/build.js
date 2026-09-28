@@ -1596,7 +1596,22 @@ function failLeftover (bot, p) { const l = leftovers.get(key(p)); const d = toda
 // tower (its tower is new scaffold, found by the next pass); standing on a pillar, the pillar is dug from
 // under our own feet a block at a time (how a player takes one down). Bounded: 4 passes, 3 tries per
 // block a day; what is left is logged with coordinates.
-async function removeScaffold (bot, { shouldStop, maxPasses = 4 } = {}) {
+// THE SITE'S OLD SCAFFOLD, DAILY: pillars left from before the builder took its own down (391 round the castle on
+// 2026-09-28, the rim bank's among them - raised, it put the foundation's stand behind a drop the bot could not take).
+// Only outside the band being built (its access may be in use again), never a block a finished attached cell hangs on;
+// below the band first - those are the ones in the way. One pass, the day's stop.
+async function siteScaffoldTeardown (bot, { shouldStop } = {}) {
+  if (!job || !site) return 0
+  let bandY = Infinity
+  for (const c of job.cells) if (!c.attach && !c.follows && !c.foundation && c.y < bandY && cellDone(bot, c) !== true) bandY = c.y
+  const sups = new Set(job.cells.filter(q => q.sup && cellDone(bot, q) === true).map(q => key(q.sup)))
+  const keep = p => (p.y >= bandY - 2 && p.y <= bandY + 5) || sups.has(key(p))
+  const before = scaffoldList(bot).length
+  const n = await removeScaffold(bot, { shouldStop, maxPasses: 1, keep })
+  log('build', `site scaffold: ${n} taken down, ${Math.max(0, before - n)} left (in the band y${bandY}-${bandY + 5} or holding a finished cell, or out of reach)`)
+  return n
+}
+async function removeScaffold (bot, { shouldStop, maxPasses = 4, keep = null } = {}) {
   if (!job) return 0
   let removed = 0
   const dig = (p, noWalk = false) => act.dig(bot, p, { force: true, allowZones: ['build', 'base'], timeoutMs: 10000, noWalk, reachMax: noWalk ? 5 : 4.3 })
@@ -1612,7 +1627,7 @@ async function removeScaffold (bot, { shouldStop, maxPasses = 4 } = {}) {
   }
   const isScaf = p => isStray(bot, p.x, p.y, p.z)
   for (let pass = 0; pass < maxPasses; pass++) {
-    const list = scaffoldList(bot).filter(p => !resting(bot, p))
+    const list = scaffoldList(bot).filter(p => !resting(bot, p) && !(keep && keep(p)))
     if (!list.length) break
     const me0 = bot.entity.position
     // nearest first (top-down within a column): highest-first sent the bot towering up the outside of the transept
@@ -1633,7 +1648,7 @@ async function removeScaffold (bot, { shouldStop, maxPasses = 4 } = {}) {
         continue
       }
       const p = queue.shift()
-      if (!isScaf(p) || resting(bot, p)) continue
+      if (!isScaf(p) || resting(bot, p) || (keep && keep(p))) continue
       if (!act.reach(bot, p, 4.3)) {
         // (near enough, not look-at: the look-at raycast through pews and pillars "stuck" at 5-6b; the server checks distance)
         // a short walk first; then the pillar from the ground beside it; the church door only for what is inside
@@ -1866,7 +1881,7 @@ async function ensureScaffold (bot, n = SCAFFOLD_WANT, { shouldStop } = {}) { //
 
 module.exports = { FILLER_ITEMS, SCAFFOLD_WANT, cachedStatus, exactWood, isOpenCell, INFILL_RE, infillItem, unsourced, strayBuildBlocks,
   finishSite, woodClass, woodForm, acceptsFor, itemOf, LOG_ANY, PLANKS_ANY, ensureScaffold, unskippedObstructions, setJob, getJob, status, nextNeeds,
-  buildStep, clearSite, obstructions, removeScaffold, loadSchematic, cellDone, cellsDone, inBox, placeCell, registerJob, key,
+  buildStep, clearSite, obstructions, removeScaffold, siteScaffoldTeardown, loadSchematic, cellDone, cellsDone, inBox, placeCell, registerJob, key,
   complete, needsWork, finish, survey, scaffoldList, holesList, ensureSnapshot, snapshotInfo, snapName,
   // pure helpers (offline checks)
   describe, plansFor, predict, yawOf, facingOfYaw, wantOf, nameOk, partOk, itemForBlock, thenItem, stepOf, stepItem, needsOf, propsOf, KEY_PROPS, COUNT_PROPS
