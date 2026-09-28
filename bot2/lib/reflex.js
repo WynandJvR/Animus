@@ -830,15 +830,40 @@ function tick () {
     // roof 170 blocks from home, and it drowned with 390 items (2026-09-28). A player breaks the block over their head.
     const reach = !open ? findAirReachable() : null
     if (!open && stalled && !busy && !reach) {
+      // WHICH WAY: up, or sideways toward the nearest air (behind the rock) - the fewer solid cells between. A 3-thick
+      // ceiling under a lake against one block of stone into an air-filled cave is a breath lived or not (audit)
+      const solidsUp = () => { let n = 0; for (let dy = 2; dy <= 6; dy++) { const b = world.at(bot, me.x, me.y + dy, me.z); if (!b) return 99; if (world.isAirish(b)) return n; if (!swimThrough(b)) n++ } return 99 }
+      const side = (() => {
+        const t = findAir(false); if (!t) return null
+        const dx = t.x - Math.floor(me.x); const dz = t.z - Math.floor(me.z)
+        if (Math.abs(t.y - Math.floor(me.y)) > 1) return null
+        const sx = Math.abs(dx) >= Math.abs(dz) ? Math.sign(dx) : 0; const sz = sx ? 0 : Math.sign(dz)
+        // (a way through is two cells high - head and feet; a step counts as solid while either is, and the head's goes first)
+        let n = 0; let first = null
+        for (let i = 1; i <= 5; i++) {
+          const x = Math.floor(me.x) + sx * i; const z = Math.floor(me.z) + sz * i
+          const hb = world.at(bot, x, Math.floor(me.y) + 1, z); const fb = world.at(bot, x, Math.floor(me.y), z)
+          if (!hb || !fb) return null
+          const open2 = [hb, fb].every(c => world.isAirish(c) || swimThrough(c))
+          if (open2 && world.isAirish(hb)) return first ? { n, first } : null
+          if (!open2) { n++; if (!first) first = !(world.isAirish(hb) || swimThrough(hb)) ? hb : fb }
+        }
+        return null
+      })()
+      const up = solidsUp()
       let roof = null
-      for (let dy = 2; dy <= 4; dy++) { const b = world.at(bot, me.x, me.y + dy, me.z); if (!b) break; if (swimThrough(b) || world.isAirish(b)) continue; roof = b; break }
+      const sideways = !!(side && side.n < up)
+      if (sideways) roof = side.first
+      else for (let dy = 2; dy <= 4; dy++) { const b = world.at(bot, me.x, me.y + dy, me.z); if (!b) break; if (swimThrough(b) || world.isAirish(b)) continue; roof = b; break }
       // (never a roof whose dig kills: a falling block drops the column above into the head cell through the water, and a
       //  roof holding back lava pours it in - act.dig's own lava rule; audit 2026-09-28)
-      const falls = roof && /(^|_)(gravel|sand|concrete_powder)$|^suspicious_/.test(roof.name)
+      const FALLS = /(^|_)(gravel|sand|concrete_powder)$|^suspicious_/
+      // (a side dig: the block resting on the dug cell falls into the opening too - our head cell, head dug first)
+      const falls = roof && (FALLS.test(roof.name) || (sideways && FALLS.test((world.at(bot, roof.position.x, roof.position.y + 1, roof.position.z) || {}).name || '')))
       const lava = roof && world.holdsBackLava(bot, roof.position)
       if (roof && (falls || lava) && (!roofDug || roofDug.x !== roof.position.x || roofDug.y !== roof.position.y || roofDug.z !== roof.position.z)) { roofDug = roof.position; log('reflex', `air: roofed over by ${roof.name} but ${falls ? 'it would fall in on me' : 'lava beyond'} - not digging`) }
       if (roof && !falls && !lava && roof.diggable !== false && !/^(bedrock|obsidian|crying_obsidian|reinforced_deepslate)$/.test(roof.name)) {
-        if (!roofDug || roofDug.x !== roof.position.x || roofDug.y !== roof.position.y || roofDug.z !== roof.position.z) log('reflex', `air: roofed over by ${roof.name} at ${roof.position.x},${roof.position.y},${roof.position.z} under water - digging up (air ${Math.round(airMs / 100) / 10}s)`)
+        if (!roofDug || roofDug.x !== roof.position.x || roofDug.y !== roof.position.y || roofDug.z !== roof.position.z) log('reflex', sideways ? `air: walled in - digging SIDEWAYS through ${roof.name} at ${roof.position.x},${roof.position.y},${roof.position.z} toward air (${side.n} solid vs ${up === 99 ? 'no way' : up} up; air ${Math.round(airMs / 100) / 10}s)` : `air: roofed over - digging UP through ${roof.name} at ${roof.position.x},${roof.position.y},${roof.position.z} (${up === 99 ? '?' : up} solid to air; air ${Math.round(airMs / 100) / 10}s)`)
         roofDug = roof.position
         busy = true
         // (standing, not floating: a dig off the ground under water is 25x slow - a stone roof from a float outlasts a
