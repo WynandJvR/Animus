@@ -1627,13 +1627,20 @@ async function siteScaffoldTeardown (bot, { shouldStop } = {}) {
   const sups = new Set(job.cells.filter(q => q.sup && cellDone(bot, q) === true).map(q => key(q.sup)))
   // (below the band only: it never needs its scaffold again, and that is what raises banks and blocks stands - above it
   //  the same columns would be pillared again within the week; those are build.finish's; audit)
-  const keep = p => p.y >= bandY - 2 || sups.has(key(p))
-  const before = scaffoldList(bot).length
-  const n = await removeScaffold(bot, { shouldStop, maxPasses: 1, keep })
+  // (from the band's lowest layer up is the builder's; everything under it is done with - the rim bank's top at y117 was
+  //  kept at "band - 2" and stayed in the foundation's way, 2026-09-28)
+  const keep = p => p.y >= bandY || sups.has(key(p))
+  // (and our ledger's blocks under the snapshot's region - it starts 2 under the base: the rim bank's columns at y112-116
+  //  were never in the site diff, so never taken; audit)
+  const r = site.region
+  const extra = (mem.get().scaffold || []).filter(p => p.y < r.y1 && p.x >= r.x1 && p.x <= r.x2 && p.z >= r.z1 && p.z <= r.z2)
+  const before = scaffoldList(bot).length + extra.length
+  const n = await removeScaffold(bot, { shouldStop, maxPasses: 1, keep, extra })
+  if (n) { const gone = new Set(extra.filter(p => { const b = world.at(bot, p.x, p.y, p.z); return !b || !LEDGER_RE.test(b.name) }).map(key)); if (gone.size) mem.update(m => { m.scaffold = (m.scaffold || []).filter(q => !gone.has(key(q))) }) }
   log('build', `site scaffold: ${n} taken down, ${Math.max(0, before - n)} left (from the band y${bandY} up, holding a finished cell, or out of reach)`)
   return n
 }
-async function removeScaffold (bot, { shouldStop, maxPasses = 4, keep = null } = {}) {
+async function removeScaffold (bot, { shouldStop, maxPasses = 4, keep = null, extra = [] } = {}) {
   if (!job) return 0
   let removed = 0
   const dig = (p, noWalk = false) => act.dig(bot, p, { force: true, allowZones: ['build', 'base'], timeoutMs: 10000, noWalk, reachMax: noWalk ? 5 : 4.3 })
@@ -1647,9 +1654,12 @@ async function removeScaffold (bot, { shouldStop, maxPasses = 4, keep = null } =
     if (removed) log('build', `removed ${removed} scaffold blocks (no site snapshot - remembered ones only)`)
     return removed
   }
-  const isScaf = p => isStray(bot, p.x, p.y, p.z)
+  // (extra: ledger cells outside the snapshot's region - under it, where the site diff cannot see - still our filler)
+  const extraSet = new Set(extra.map(key))
+  const isExtra = p => { if (!extraSet.has(key(p)) || job.index.has(key(p))) return false; const b = world.at(bot, p.x, p.y, p.z); return !!b && LEDGER_RE.test(b.name) }
+  const isScaf = p => isStray(bot, p.x, p.y, p.z) || isExtra(p)
   for (let pass = 0; pass < maxPasses; pass++) {
-    const list = scaffoldList(bot).filter(p => !resting(bot, p) && !(keep && keep(p)))
+    const list = scaffoldList(bot).concat(extra.filter(isExtra)).filter(p => !resting(bot, p) && !(keep && keep(p)))
     if (!list.length) break
     const me0 = bot.entity.position
     // nearest first (top-down within a column): highest-first sent the bot towering up the outside of the transept
