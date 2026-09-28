@@ -240,7 +240,7 @@ async function openAt (bot, block) {
     const r = await move.goTo(bot, new goals.GoalNear(block.position.x, block.position.y, block.position.z, 2), { timeoutMs: 30000, label: 'to furnace' })
     if (!r.ok) return null
   }
-  try { return await bot.openFurnace(bot.blockAt(block.position)) } catch (e) { log('smelt', `can't open furnace: ${e.message}`); return null }
+  try { return await act.openSettled(bot, bot.blockAt(block.position), 'openFurnace') } catch (e) { log('smelt', `can't open furnace: ${e.message}`); return null }
 }
 
 // Smelt `count` of `output` and wait for it. Uses up to `maxFurnaces` furnaces in parallel.

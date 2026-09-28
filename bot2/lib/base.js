@@ -76,6 +76,25 @@ function ourChest (p) {
 const SEE_THROUGH_RE = /(glass|_leaves|^ice$|^frosted_ice$|^barrier$|^spawner$|^slime_block$|^honey_block$)/
 function shutsLid (b) { return !!b && world.isSolid(b) && !SEE_THROUGH_RE.test(b.name) && !/(chest|_bed|_slab|_stairs|furnace|crafting_table)$/.test(b.name) }
 const unreachable = new Map() // chest key -> time a walk to it failed
+let lastWindowAt = 0 // (when our last chest window closed - the open-timeout diagnostic)
+// What can keep a lid shut, for the open-timeout line: the block over it, anything sitting on it (a cat on a chest keeps it
+// shut and the server says nothing), and for a double chest the other half's lid too
+function lidReport (bot, p) {
+  const out = []
+  try {
+    const b = bot.blockAt(new Vec3(p.x, p.y, p.z)); const pr = b && b.getProperties ? b.getProperties() : {}
+    out.push(`above ${(world.at(bot, p.x, p.y + 1, p.z) || {}).name}`, `type ${pr.type || '?'}`)
+    const on = Object.values(bot.entities).filter(e => e && e !== bot.entity && e.position && Math.abs(e.position.x - (p.x + 0.5)) < 1 && Math.abs(e.position.z - (p.z + 0.5)) < 1 && e.position.y >= p.y + 0.5 && e.position.y < p.y + 2).map(e => e.name || e.type)
+    out.push(`on top ${on.length ? on.join('+') : 'nothing'}`)
+    if (pr.type && pr.type !== 'single') {
+      // (the other half: left/right of the facing)
+      const f = { north: [0, -1], south: [0, 1], west: [-1, 0], east: [1, 0] }[pr.facing] || [0, 0]
+      const side = pr.type === 'left' ? [-f[1], f[0]] : [f[1], -f[0]]
+      out.push(`other half above ${(world.at(bot, p.x + side[0], p.y + 1, p.z + side[1]) || {}).name}`)
+    }
+  } catch (e) { out.push('lid ? ' + e.message) }
+  return out.join(', ')
+}
 async function openChest (bot, p) {
   const b = bot.blockAt(new Vec3(p.x, p.y, p.z))
   if (!b || !/chest|barrel/.test(b.name)) {
@@ -104,7 +123,8 @@ async function openChest (bot, p) {
     else log('base', `the ${lid.name} on the lid of the chest at ${move.fmt(p)} stays (${world.NATURAL_RE.test(lid.name) ? 'the dig failed' : 'a crafted block is never dug for this'}) - the chest will not open until it is moved`)
   }
   try {
-    const w = await bot.openContainer(bot.blockAt(new Vec3(p.x, p.y, p.z)))
+    const w = await act.openSettled(bot, bot.blockAt(new Vec3(p.x, p.y, p.z)))
+    w.once('close', () => { lastWindowAt = Date.now() })
     const items = {}
     for (const it of w.containerItems()) items[it.name] = (items[it.name] || 0) + it.count
     const slots = w.inventoryStart != null ? w.inventoryStart : 27
@@ -115,9 +135,19 @@ async function openChest (bot, p) {
     unreachable.set(key(p), Date.now())
     // (why it would not open, for the next one: where we stood, how far, and whether a window was still up)
     const me = bot.entity.position
-    log('base', `couldn't open chest at ${move.fmt(p)}: ${e.message} - skipping it for a while (from ${move.fmt(me.floored())}, ${world.dist3(me, { x: p.x + 0.5, y: p.y + 0.5, z: p.z + 0.5 }).toFixed(1)}b, window ${bot.currentWindow ? bot.currentWindow.type || 'open' : 'none'})`)
+    log('base', `couldn't open chest at ${move.fmt(p)}: ${e.message} - skipping it for a while (from ${move.fmt(me.floored())}, ${world.dist3(me, { x: p.x + 0.5, y: p.y + 0.5, z: p.z + 0.5 }).toFixed(1)}b, window ${bot.currentWindow ? bot.currentWindow.type || 'open' : 'none'}, sneak ${!!(bot.controlState && bot.controlState.sneak)}, holding ${bot.heldItem ? bot.heldItem.name : 'nothing'}, since the last window ${lastWindowAt ? Date.now() - lastWindowAt - 20000 : '?'}ms, ${lidReport(bot, p)})`)
     return null
   }
+}
+// The pack as the server has it: two ticks after a window shuts its inventory packets have landed (read at once, it
+// swung by whole stacks and every deposit looked like a mismatch)
+async function settle (bot) { try { await bot.waitForTicks(2) } catch {} }
+// A window whose moves the pack does not bear out was showing stale contents: its reading of the chest is dropped, and
+// the next open reads the chest afresh (audit 2026-09-28: the bank counted what was asked, the pack disagreed)
+function checkMoves (p, asked, moved, what) {
+  if (asked === moved) return
+  delete chestCache()[key(p)]; mem.save()
+  log('base', `${what} at ${move.fmt(p)}: asked ${asked}, the pack moved ${moved} - the chest will be read again`)
 }
 function refreshCache (w, p) {
   const items = {}
@@ -139,6 +169,9 @@ async function withdraw (bot, name, n, { maxWalk = 64 } = {}) {
   if (n <= 0) return 0
   if (BANK_RESERVE[name] && inv.count(bot, name) > 0) n = Math.min(n, Math.max(0, bankCount(name) - BANK_RESERVE[name]))
   if (n <= 0) return 0
+  // (what arrived in the pack, never what was asked of the window: a window opened on stale contents said "took 64"
+  //  whatever the pack got - audit 2026-09-28)
+  const start = inv.count(bot, name)
   let got = 0
   for (const p of knownChests(bot)) {
     if (world.dist3(p, bot.entity.position) > maxWalk) continue
@@ -146,19 +179,24 @@ async function withdraw (bot, name, n, { maxWalk = 64 } = {}) {
     if (c && !(c.items && c.items[name])) continue
     const w = await openChest(bot, p)
     if (!w) continue
+    const had = got; let k = 0
     try {
       const have = w.containerItems().filter(i => i.name === name).reduce((s, i) => s + i.count, 0)
-      const k = Math.min(have, n - got)
+      k = Math.min(have, n - got)
       if (k > 0) {
         const t = w.containerItems().find(i => i.name === name)
         await w.withdraw(t.type, null, k)
-        got += k
       }
       refreshCache(w, p)
     } catch (e) { log('base', `withdraw ${name} failed: ${e.message}`) } finally { try { w.close() } catch {} }
+    // (counted after the close AND the server's resync: read the instant the window shut, the pack swung by whole stacks
+    //  - "asked 3, the pack moved 150" - until the inventory packets two ticks on; 2026-09-28)
+    await settle(bot)
+    got = inv.count(bot, name) - start
+    checkMoves(p, k, got - had, `withdrawing ${name}`)
     if (got >= n) break
   }
-  if (got) log('base', `took ${got} ${name} from the chests`)
+  if (got > 0) log('base', `took ${got} ${name} from the chests`)
   return got
 }
 
@@ -208,19 +246,23 @@ async function depositItem (bot, name, n = 1) {
     if (c && c.free <= 0) continue
     const w = await openChest(bot, p)
     if (!w) continue
-    let put = 0
+    let asked = 0; const before = inv.count(bot, name)
     try {
-      for (const it of items) { if (put >= n) break; await w.deposit(it.type, it.metadata, Math.min(it.count, n - put)); put += Math.min(it.count, n - put) }
+      for (const it of items) { if (asked >= n) break; const k = Math.min(it.count, n - asked); await w.deposit(it.type, it.metadata, k); asked += k }
       refreshCache(w, p)
     } catch (e) { log('base', `depositing ${name} failed: ${e.message}`) } finally { try { w.close() } catch {} }
-    if (put) { log('base', `put ${put} ${name} in the chest as a spare`); return put }
+    // (what left the pack, counted after the close and the resync - see withdraw)
+    await settle(bot)
+    const put = before - inv.count(bot, name)
+    checkMoves(p, asked, put, `depositing ${name}`)
+    if (put > 0) { log('base', `put ${put} ${name} in the chest as a spare`); return put }
   }
   return 0
 }
 
 async function depositAll (bot, { keep = keepCount } = {}) {
   const want = () => inv.items(bot).filter(i => i.count > 0 && inv.count(bot, i.name) > keep(bot, i))
-  let rounds = 0; const skipped = new Set()
+  let rounds = 0; const skipped = new Set(); let depErr = null
   while (want().length && rounds++ < 6) {
     let target = knownChests(bot).find(p => !skipped.has(key(p)) && (() => { const c = chestCache()[key(p)]; return !c || c.free > 2 })())
     // (a new chest only when every chest here was read FULL: one that merely would not open is no reason - a new chest a
@@ -234,20 +276,31 @@ async function depositAll (bot, { keep = keepCount } = {}) {
       if (!placed) { log('base', 'no chest with room and could not place one'); return false }
       target = placed
     }
+    const before = {}; let asked = 0
+    for (const it of inv.items(bot)) before[it.name] = (before[it.name] || 0) + it.count
     const w = await openChest(bot, target)
     // (a chest that would not open this time is skipped this round, never forgotten: a 20s open timeout erased the chest
     //  holding the castle's stone from the list, its contents from the bank, and the build waited on stock it had -
     //  2026-09-28. openChest itself forgets one that is really gone)
     if (!w) { skipped.add(key(target)); continue }
     try {
-      for (const it of want()) {
-        const total = inv.count(bot, it.name)
-        const k = Math.min(it.count, total - Math.min(total, keep(bot, it)))
+      // (by NAME, the excess over the keep once - deposit by type spans the stacks: per stack, each read the same stale
+      //  total and two stacks of torches went in below the kit's keep, to be taken out again - audit 2026-09-28)
+      const firsts = new Map(); for (const it of want()) if (!firsts.has(it.name)) firsts.set(it.name, it)
+      for (const it of firsts.values()) {
+        const k = inv.count(bot, it.name) - Math.min(inv.count(bot, it.name), keep(bot, it))
         if (k <= 0) continue
-        try { await w.deposit(it.type, null, k) } catch (e) { if (/full/i.test(e.message)) break }
+        try { await w.deposit(it.type, null, k); asked += k } catch (e) { if (!depErr) depErr = `${it.name} x${k}: ${e.message}`; if (/full/i.test(e.message)) break }
       }
       refreshCache(w, target)
     } finally { try { w.close() } catch {} }
+    // (what left the pack, counted after the close and the resync - see withdraw)
+    await settle(bot)
+    let moved = 0; for (const [name, c] of Object.entries(before)) moved += Math.max(0, c - inv.count(bot, name))
+    checkMoves(target, asked, moved, 'depositing the haul')
+    // (a round that put nothing in is no round to repeat: every deposit threw, one item moved each time, and the loop and
+    //  the director's retries went round 72 times in 8s, each writing memory - 2026-09-28. Say why and stop.)
+    if (asked === 0) { log('base', `depositing at ${move.fmt(target)} put nothing in${depErr ? ' (' + depErr + ')' : ''} - stopping`); return false }
   }
   log('base', `deposited the haul (bank now ${Object.keys(bankCounts()).length} kinds)`)
   return true

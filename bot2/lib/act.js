@@ -11,6 +11,17 @@ const control = require('./control')
 
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 
+// A container opened a few ms after we closed one never opens: the server sends no window and the open times out 20s
+// later (every chest-open failure of 2026-09-27/28: "5ms since the last window", reach, lid, sneak and cats ruled out).
+// There is no ack for a close to wait on, so the condition is the next thing observable - two server ticks since the
+// close event. It costs nothing unless a close was that recent. THE one way to open a chest or a furnace.
+let lastClose = 0; const watching = new WeakSet()
+async function openSettled (bot, block, how = 'openContainer') {
+  if (!watching.has(bot)) { watching.add(bot); bot.on('windowClose', () => { lastClose = Date.now() }) }
+  if (Date.now() - lastClose < 100) await bot.waitForTicks(2)
+  return bot[how](block)
+}
+
 function reach (bot, pos, r = 4.3) {
   const eye = bot.entity.position.offset(0, 1.62, 0)
   return eye.distanceTo(new Vec3(pos.x + 0.5, pos.y + 0.5, pos.z + 0.5)) <= r
@@ -483,4 +494,4 @@ async function collectDrops (bot, { radius = 8, maxMs = 15000 } = {}) {
   return picked
 }
 
-module.exports = { digRefusal, sealsUsIn, holdsUsUp, fallBelow, stepOff, dig, digBlock, place, useOn, pour, fill, collectDrops, droppedItems, reach, inBody, sleep, ticks, refUsable, PLANT_RE, NO_REF_RE, USE_REF_RE, NO_FACE_RE, REPLACEABLE_RE }
+module.exports = { openSettled, digRefusal, sealsUsIn, holdsUsUp, fallBelow, stepOff, dig, digBlock, place, useOn, pour, fill, collectDrops, droppedItems, reach, inBody, sleep, ticks, refUsable, PLANT_RE, NO_REF_RE, USE_REF_RE, NO_FACE_RE, REPLACEABLE_RE }

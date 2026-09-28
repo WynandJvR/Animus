@@ -691,7 +691,7 @@ const TASKS = {
       if (/furnace$/.test(b.name)) {
         // a furnace spills its input, fuel and output when broken: take them out first
         try {
-          const f = await bot.openFurnace(bot.blockAt(new Vec3(pos.x, pos.y, pos.z)))
+          const f = await act.openSettled(bot, bot.blockAt(new Vec3(pos.x, pos.y, pos.z)), 'openFurnace')
           try { if (f.outputItem()) await f.takeOutput() } catch {}
           try { if (f.inputItem()) await f.takeInput() } catch {}
           try { if (f.fuelItem()) await f.takeFuel() } catch {}

@@ -130,7 +130,7 @@ function make (bot, director) {
         for (const fb of world.findBlocks(bot, /^furnace$/, { maxDistance: 16, count: 20, point: new Vec3(home.x, home.y, home.z) })) {
           try {
             if (!require('./act').reach(bot, fb.position, 4)) await move.goTo(bot, new goals.GoalNear(fb.position.x, fb.position.y, fb.position.z, 2), { timeoutMs: 15000, label: 'to furnace' })
-            const f = await bot.openFurnace(bot.blockAt(fb.position))
+            const f = await require('./act').openSettled(bot, bot.blockAt(fb.position), 'openFurnace')
             const n = it => it ? `${it.name}x${it.count}` : '-'
             out.push(`${move.fmt(fb.position)} in=${n(f.inputItem())} fuel=${n(f.fuelItem())} out=${n(f.outputItem())}`)
             f.close()
