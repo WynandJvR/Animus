@@ -510,9 +510,20 @@ function infillCell (c) { return INFILL_RE.test(c.name) || cellUnsourced(c) }
 // (and a cell that has failed at all does not hold the layers either: eight pillar tops at y127 the planner could
 //  not reach held the whole cathedral for hours, 2026-09-27 - after its FIRST miss now (n >= 1): the walls rise past it and it is tried again later,
 //  from the new structure beside them)
-function lowestStructural (todo) {
+// The layer the builder's band rises from - and the director's "next layers" window: ONE anchor for both.
+// A cell whose item is nowhere - not in the pack, not in the bank - holds nothing down: its trip is wanted all the same
+// (nextNeeds counts every cell below the window), but the walls rise past it and it goes in when the item comes. Forty
+// bricks of the base layer, the clay a day away, kept a 13,888-block castle to its lowest four layers - 14 blocks in an
+// hour, "waiting on bricks" every step (2026-09-28). The moment any of it is had, the cell anchors again.
+function lowestStructural (todo, bot) {
+  const have = bot ? Object.assign({}, base().bankCounts()) : null
+  if (have) for (const [n, k] of Object.entries(inv.counts(bot))) have[n] = (have[n] || 0) + k
   let m = Infinity
-  for (const c of todo) if (!c.attach && !c.follows && !infillCell(c) && !((cellFails.get(key(c)) || {}).n >= 1) && c.y < m) m = c.y
+  for (const c of todo) {
+    if (c.attach || c.follows || infillCell(c) || (cellFails.get(key(c)) || {}).n >= 1 || c.y >= m) continue
+    if (have && !(have[stepItem(bot, c)] > 0)) continue
+    m = c.y
+  }
   return m
 }
 
@@ -570,7 +581,7 @@ function nextNeeds (bot, layers = 4) {
   if (!job) return {}
   const md = world.data(bot)
   const todo = job.cells.filter(c => !c.follows && cellDone(bot, c) !== true)
-  const minY = lowestStructural(todo)
+  const minY = lowestStructural(todo, bot)
   const out = {}
   for (const c of todo) {
     if (c.attach ? !(c.y <= minY + layers || supportThere(bot, c)) : c.y > minY + layers) continue
@@ -1029,7 +1040,7 @@ async function buildStep (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     if (!todo.length) { const done = cellsDone(bot); return { placed, blockedOn: null, done, stalled: !done } }
     // the band: attached cells and door tops never hold it down (a lantern under a roof slab waits for the
     // roof; the walls below it must not wait for the lantern)
-    const lowestAll = lowestStructural(todo)
+    const lowestAll = lowestStructural(todo, bot)
     const items = inv.items(bot)
     // (a cell half-way - an empty pot - waits on its next step's item, the plant)
     const has = c => (stepOf(c, world.at(bot, c.x, c.y, c.z)) === 'then' ? items.some(i => i.name === c.then) : !!pickItem(bot, c, items))
