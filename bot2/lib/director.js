@@ -1138,13 +1138,10 @@ async function castleWork () {
     // (fuel first when the furnaces have none: the chain's other raw is often in the chest already, waiting on it - 92 clay
     //  balls sat there while every morning went to more clay, and the fuel trip came at dusk, too late for a coal seam,
     //  2026-09-28)
-    // (the test is the bottleneck itself: the fuel in stock can't smelt the inputs already waiting - 8 a coal; audit)
-    const held = n => inv.count(bot, n) + base.bankCount(n)
-    // (inputs that are only ever smelted - cobblestone is building stock as much as stone's input, and the bank's hundreds
-    //  of it would send every morning for fuel)
-    const waitingInputs = held('clay_ball') + held('sand') + held('raw_iron') + held('raw_copper')
-    const noFuel = (held('coal') + held('charcoal')) * 8 < waitingInputs
-    const raw0 = (noFuel && chain0.includes('fuel') && win0.raw.fuel > 0 ? 'fuel' : null) || chain0.find(r => r !== 'fuel' && win0.raw[r] > 0) || chain0.find(r => win0.raw[r] > 0)
+    // (the test is the bottleneck itself - the planner's own: the window's smelts, stone from its cobble and bricks from
+    //  its clay among them, less the coal and charcoal held and in the furnaces. One number, not a hand count; audit)
+    const noFuel = (win0.raw.fuel || 0) > 0
+    const raw0 = (noFuel && chain0.includes('fuel') ? 'fuel' : null) || chain0.find(r => r !== 'fuel' && win0.raw[r] > 0) || chain0.find(r => win0.raw[r] > 0)
     const fits = r => r !== 'clay_ball' && r !== 'sand' ? world.ticksUntilNight(bot) > 2400 : (r === 'sand' ? !clay.exhausted('sand') && clay.tripFits(bot, 'sand') : !clay.exhausted() && clay.tripFits(bot))
     if (raw0 && fits(raw0)) {
       log('dir', `the build waits on ${want} - ${win0.raw[raw0]} ${raw0} first, while the day is young`)
