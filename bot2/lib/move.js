@@ -207,8 +207,12 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
   //  they rise, and the planner walked in through a gap still open, then spent fifteen minutes "stuck" getting out,
   //  2026-09-28. A cost, not a refusal: the way out is still a way; audit)
   const hollow = new Map(); let hollowGen = pathGen
+  // (a walk that STARTS under the floor pays neither hollow cost: every way out is made of such steps, and at 40+60 a step
+  //  the search spent its budget and handed back a partial path whose next node was the bot's own cell - "moving false,
+  //  keys none", walk after walk in the south-west hollow, 2026-09-29. The costs keep walks from going IN)
+  const startUnder = (() => { try { const j = require('./build').getJob(); const b = j && j.box; const f = bot.entity.position.floored(); return !!b && f.y < b.y1 && f.x >= b.x1 && f.x <= b.x2 && f.z >= b.z1 && f.z <= b.z2 } catch { return false } })()
   m.exclusionAreasStep.push(block => {
-    if (!block || !block.position) return 0
+    if (!block || !block.position || startUnder) return 0
     let j = null; try { j = require('./build').getJob() } catch {}
     const b0 = j && j.box; const p = block.position
     if (!b0 || p.y >= b0.y1 || p.x < b0.x1 || p.x > b0.x2 || p.z < b0.z1 || p.z > b0.z2) return 0
@@ -291,7 +295,7 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
   // full of mobs - walks to the site routed through it, and a creeper there took the iron set with it (the blast
   // destroys what it drops), after a zombie and a skeleton there the night before (2026-09-27).
   m.exclusionAreasStep.push(block => {
-    if (!block || !block.position) return 0
+    if (!block || !block.position || startUnder) return 0
     let j = null; try { j = require('./build').getJob() } catch {}
     if (!j || !j.box) return 0
     const p = block.position; const b = j.box
