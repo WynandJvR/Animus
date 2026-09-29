@@ -455,13 +455,15 @@ async function quench (bot, ctx) {
   log('forage', triedPools ? `${triedPools} lava pool(s) in sight but no rim of them worked (standing room, an open way to the rim, or the walk)` : 'no lava pool in sight to quench (still, shallow lava under the open sky, a solid rim with room to stand back)')
   return false
 }
-// Water buckets: the empty buckets held, filled. One bucket is carried (a player refills one, never crafts seven): made
-// when there is none, and the pour empties it back for the next fill.
+// Water buckets: the empty buckets held, filled. A few are carried, not one and not seven: with the only still water
+// down in the mine a trip is ~5 minutes, and one bucket a trip was six trips for the castle's six water cells, 2026-09-29.
+// Up to three (the bank's first, then made - 3 iron each, kept for good: the pour empties them back for the next trip).
+const FILL_BUCKETS = 3
 async function fillTrip (bot, n, ctx = {}) {
-  if (!inv.has(bot, 'bucket')) {
-    if (base().bankCount('bucket') > 0) await base().withdraw(bot, 'bucket', 1).catch(() => 0)
-    if (!inv.has(bot, 'bucket') && !await craft().ensure(bot, 'bucket', 1, Object.assign({}, ctx, { noWithdraw: false })).catch(() => false)) { log('forage', 'no bucket and none to be made (three iron ingots)'); return 'blocked' }
-  }
+  const want = Math.max(1, Math.min(n, FILL_BUCKETS))
+  if (inv.count(bot, 'bucket') < want && base().bankCount('bucket') > 0) await base().withdraw(bot, 'bucket', want - inv.count(bot, 'bucket')).catch(() => 0)
+  if (inv.count(bot, 'bucket') < want) await craft().ensure(bot, 'bucket', want, Object.assign({}, ctx, { noWithdraw: false })).catch(() => false)
+  if (!inv.has(bot, 'bucket')) { log('forage', 'no bucket and none to be made (three iron ingots)'); return 'blocked' }
   let filled = 0
   while (filled < n && inv.has(bot, 'bucket')) {
     if (stopped(ctx) || !await fillBucket(bot, ctx)) break
