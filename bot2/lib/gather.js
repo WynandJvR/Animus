@@ -87,6 +87,7 @@ function wildTree (bot, b) { return treeOK(b) && isNaturalTree(bot, trunkBase(bo
 let lastChop = null
 function lastChopOutcome () { return lastChop }
 async function chop (bot, re, n, ctx = {}) {
+  await new Promise(r => setImmediate(r)) // (a yield first: a craft chain looping back here never spins the body's event loop again; audit 2026-09-29)
   const itemName = String(re).replace(/^\/\^|\$\/$/g, '')
   const end = (outcome, r, extra) => { lastChop = Object.assign({ item: itemName, outcome, at: Date.now() }, extra); return r }
   const target = inv.count(bot, itemName) + n
@@ -187,7 +188,7 @@ async function chop (bot, re, n, ctx = {}) {
     noteResource(itemName, trunk)
     // (the axe worn out mid-chop: a new one from the pack before the next tree - the tools rule runs only between tasks;
     //  craft.keepTool. Latched only on a failed make: a stone axe is 131 logs and an expedition's chop fells more)
-    if (!axeFailed && !inv.bestTool(bot, 'axe', 1) && !await require('./craft').keepTool(bot, 'axe', { minUses: 1, shouldStop: ctx.shouldStop })) axeFailed = true
+    if (!axeFailed && !inv.bestTool(bot, 'axe', 1) && !await require('./craft').keepTool(bot, 'axe', { minUses: 1, shouldStop: ctx.shouldStop, stack: ctx.stack })) axeFailed = true
     const got = await fellTree(bot, trunk, re, { leaves: !!ctx.leaves, allowZones: move.inZone(trunk, 0) ? ['orchard'] : [], shouldStop: ctx.shouldStop })
     if (!got) { unreachable.add(tk(trunk)); await move.sleep(300) }
   }

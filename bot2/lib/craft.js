@@ -540,19 +540,19 @@ async function craftTimes (bot, name, crafts, { shouldStop } = {}) {
 //  the planks for a log, the log's chop for an axe again: a loop with no wait in it, 66 lines in seconds and the body
 //  starved, 2026-09-29. Nested, it says no: the chop goes on by hand - a log is punched)
 const makingTool = new Set()
-async function keepTool (bot, kind, { minUses = 4, noWithdraw = null, shouldStop } = {}) {
+async function keepTool (bot, kind, { minUses = 4, noWithdraw = null, shouldStop, stack = null } = {}) {
   if (inv.bestTool(bot, kind, minUses)) return true
   if (makingTool.has(kind)) return false
   makingTool.add(kind)
-  try { return await keepToolInner(bot, kind, { minUses, noWithdraw, shouldStop }) } finally { makingTool.delete(kind) }
+  try { return await keepToolInner(bot, kind, { minUses, noWithdraw, shouldStop, stack }) } finally { makingTool.delete(kind) }
 }
-async function keepToolInner (bot, kind, { minUses, noWithdraw, shouldStop }) {
+async function keepToolInner (bot, kind, { minUses, noWithdraw, shouldStop, stack }) {
   // (iron only where the tier is the point - the pickaxe, for the ore: three ingots on an axe are a third of a
   //  chestplate, and iron is what runs short. The build plan's wanted set can't answer "spare": the armour's iron is
   //  not in it; audit 2026-09-28)
   const want = kind === 'pickaxe' && inv.count(bot, 'iron_ingot') >= 3 ? `iron_${kind}` : inv.count(bot, 'cobblestone') >= 3 ? `stone_${kind}` : `wooden_${kind}`
   const nw = noWithdraw != null ? noWithdraw : base().distHome(bot) > 64
-  await ensure(bot, want, inv.count(bot, want) + 1, { noWithdraw: nw, shouldStop }).catch(() => false)
+  await ensure(bot, want, inv.count(bot, want) + 1, { noWithdraw: nw, shouldStop, stack }).catch(() => false) // (the chain's own stack: a cycle back to this tool is refused by ensure's one rule; audit)
   const ok = !!inv.bestTool(bot, kind, minUses)
   log('craft', ok ? `the ${kind} wore out - made a ${want}` : `the ${kind} wore out and no ${want} could be made${nw ? ' from the pack' : ''}`)
   return ok
