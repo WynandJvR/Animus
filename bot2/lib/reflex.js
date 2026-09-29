@@ -1189,7 +1189,9 @@ function tick () {
   // a creeper lights its fuse within 3 blocks and gives up beyond 7: keep out of that ring, no further - running
   // until 16 let one creeper drag the bot 60 blocks across the map, a flee every few seconds
   const creeper = hs.find(h => h.e.name === 'creeper' && h.d < 5 && (canSee(h.e) || h.d < 3))
-  const stillRunning = active && active.kind === 'creeper' && fleeTarget && fleeTarget.isValid && fleeTarget.position.distanceTo(me) < 9 && now - active.since < 30000
+  // (still running only from a creeper that threatens NOW - seen, or within its blast reach: one behind rock round a bend
+  //  held the body 16s, every other row locked out, while a zombie beside the bot took it down, 2026-09-29; audit)
+  const stillRunning = active && active.kind === 'creeper' && fleeTarget && fleeTarget.isValid && fleeTarget.position.distanceTo(me) < 9 && now - active.since < 30000 && (canSee(fleeTarget) || fleeTarget.position.distanceTo(me) < 4.5)
   if (creeper || stillRunning) {
     const t = creeper ? creeper.e : fleeTarget
     fleeTarget = t

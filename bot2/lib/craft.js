@@ -536,8 +536,17 @@ async function craftTimes (bot, name, crafts, { shouldStop } = {}) {
 // went on by hand at 15s a log, 1400b out with cobble and a table in the pack; 2026-09-28). The worn one still counts
 // as "have 1": one more than we hold is asked, and only a usable tool afterwards is success (asking for 1 "succeeded"
 // at once and span the mine loop). The chest only when home is near.
+// (never re-entered for the same kind: with no tools at all - after a death - the chop asked for an axe, the axe for planks,
+//  the planks for a log, the log's chop for an axe again: a loop with no wait in it, 66 lines in seconds and the body
+//  starved, 2026-09-29. Nested, it says no: the chop goes on by hand - a log is punched)
+const makingTool = new Set()
 async function keepTool (bot, kind, { minUses = 4, noWithdraw = null, shouldStop } = {}) {
   if (inv.bestTool(bot, kind, minUses)) return true
+  if (makingTool.has(kind)) return false
+  makingTool.add(kind)
+  try { return await keepToolInner(bot, kind, { minUses, noWithdraw, shouldStop }) } finally { makingTool.delete(kind) }
+}
+async function keepToolInner (bot, kind, { minUses, noWithdraw, shouldStop }) {
   // (iron only where the tier is the point - the pickaxe, for the ore: three ingots on an axe are a third of a
   //  chestplate, and iron is what runs short. The build plan's wanted set can't answer "spare": the armour's iron is
   //  not in it; audit 2026-09-28)
