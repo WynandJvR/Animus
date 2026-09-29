@@ -539,6 +539,7 @@ async function plugOpenings (bot, cells, along) {
     if (await act.place(bot, h, f.name, { sneak: false }).catch(() => false)) n++
   }
   if (n) log('mine', `walled up ${n} cave opening${n > 1 ? 's' : ''} beside the tunnel`)
+  lastPlugs = n
   return n
 }
 
@@ -595,25 +596,34 @@ async function stairStep (bot, m) {
   return true
 }
 
+// CAVE-RIDDLED ROCK: a leg that walls up openings step after step puts back most of what it digs - 2-3 cobble a step
+// against 2-3 mined, a 256-cobble trip netted almost nothing by dusk, 2026-09-29. A running count of the walling; past
+// its mark the leg ends and the next one shifts three times as far, out of the cave's reach
+let lastPlugs = 0
+const CAVE_MARK = 4
 async function tunnelStep (bot, m) {
   const c = m.cursor
+  if (m.legPos > 0 && (m.caveRun || 0) >= CAVE_MARK && m.legPos < LEG_LEN) { log('mine', `the leg runs through caves (walling ~${Math.round(m.caveRun * 0.3)} a step) - ending it and shifting clear`); m.legPos = LEG_LEN; m.farShift = true }
   if (m.legPos >= LEG_LEN) {
     // shift sideways and come back the other way (serpentine keeps the mine compact). The sideways
     // direction is fixed for the whole mine: derived from the flipping heading it alternated, and every leg
     // after the second ran back through an already-dug corridor - no new stone at all
     if (!m.shiftDir) m.shiftDir = { x: -m.dir.z, z: m.dir.x }
     const side = m.shiftDir
-    for (let i = 0; i < SHIFT; i++) {
+    const shift = m.farShift ? SHIFT * 3 : SHIFT
+    for (let i = 0; i < shift; i++) {
       const q = { x: m.cursor.x + side.x, y: m.cursor.y, z: m.cursor.z + side.z }
       if (!await openTunnelCell(bot, m.cursor, q)) return false
     }
     m.dir = { x: -m.dir.x, z: -m.dir.z }
-    m.legPos = 0
+    m.legPos = 0; m.farShift = false; m.caveRun = 0
     m.leg++
     return true
   }
   const q = { x: c.x + m.dir.x, y: c.y, z: c.z + m.dir.z }
+  lastPlugs = 0
   if (!await openTunnelCell(bot, c, q)) return false
+  m.caveRun = (m.caveRun || 0) * 0.7 + lastPlugs // (a running sum: steady walling of ~1.2 a step reaches the mark)
   m.legPos++
   return true
 }
