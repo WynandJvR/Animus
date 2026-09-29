@@ -1268,6 +1268,8 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     // (bounded: only a block that could be a stand or a support for it - at or below it, beside it within 2 - and once a
     //  rest: a row laid beside a truly unreachable cell would wake it at every block, a 16s failure each; the next failure
     //  writes a fresh record, and the flag with it; audit 2026-09-28)
+    // (and the daily teardown's resting blocks round it: a new stand, the ground changed - their rest ends; audit)
+    if (ok && tdMiss.size) { let w = 0; for (const k of [...tdMiss.keys()]) { const [x, y, z] = k.split(',').map(Number); if (Math.abs(x - c.x) <= 2 && Math.abs(y - c.y) <= 2 && Math.abs(z - c.z) <= 2) { tdMiss.delete(k); w++ } } if (w) { const o = {}; for (const [k, v] of tdMiss) o[k] = v; mem.set('teardownMiss2', o) } }
     if (ok) { for (const [k, f] of cellFails) { const [x, y, z] = k.split(',').map(Number); if (f.at && !f.woke && c.y <= y && y - c.y <= 2 && Math.abs(x - c.x) <= 2 && Math.abs(z - c.z) <= 2) { f.at = 0; f.woke = true } } }
     if (ok) { placed++; if (cellFails.delete(key(c))) saveCellFails(); if (placed % 25 === 0) { const st = status(bot); log('build', `${st.done}/${st.total} placed`) } } else if (c.foundation && c.name === 'torch' && !world.isAirish(world.at(bot, c.x, job.box.y1, c.z))) dropFoundation(bot, c, 'the floor over it is laid - no way to it from above') // (a hollow's torch goes in from above or not at all)
     else if (c.foundation && sealedIn(bot, c)) dropFoundation(bot, c, 'sealed in') // (a reach miss rests like any cell: a rim cell faces the outside ground - the miss is the stand's, not the cell's, and dropped it is a hole in the wall; audit 2026-09-28)
@@ -1701,14 +1703,24 @@ function holesList (bot) {
 // Leftovers that failed three times today rest until tomorrow (a Minecraft day): the site is not declared
 // finished with them - the director comes back for them the next day.
 const leftovers = new Map() // key -> { n, day }
-function today (bot) { return (bot.time && typeof bot.time.day === 'number') ? bot.time.day : Math.floor(Date.now() / 1200000) }
+// THE DAY, counted the way watchNights and the tidy gates read one - a night seen and then day, or the clock wrapped back
+// (a night slept through) - never bot.time.day; kept in memory so a restart keeps the count (audit 2026-09-29)
+let dayTod = null
+function today (bot) {
+  const d = mem.get().dayNo || { n: 0, night: false }
+  const t = world.tod(bot); const night = world.isNight(bot)
+  const next = !night && (d.night || (dayTod != null && t < dayTod))
+  dayTod = t
+  if (next || d.night !== night) mem.set('dayNo', { n: d.n + (next ? 1 : 0), night })
+  return d.n + (next ? 1 : 0)
+}
 function resting (bot, p) { const l = leftovers.get(key(p)); return !!l && l.n >= 3 && l.day === today(bot) }
 // THE DAILY TEARDOWN'S MISSES, across days: its leftovers rest after 3 tries in a day, and it runs once a day, one pass -
 // a block out of reach never rested, and every day walked to the same ones, 30s each, until its 4 minutes ran out: 7
 // taken of 108 counted, 2026-09-29. A miss rests 1, 2, 4, 8... days (the build moves on; a stand may open)
-const tdMiss = new Map(Object.entries(mem.get().teardownMiss || {})) // key -> { n, day }
+const tdMiss = new Map(Object.entries(mem.get().teardownMiss2 || {})) // key -> { n, day }
 function tdResting (bot, p) { const m = tdMiss.get(key(p)); return !!m && today(bot) - m.day < Math.pow(2, Math.min(m.n, 6) - 1) }
-function tdMissed (bot, p) { const m = tdMiss.get(key(p)); tdMiss.set(key(p), { n: m ? m.n + 1 : 1, day: today(bot) }); const o = {}; for (const [k, v] of tdMiss) o[k] = v; mem.set('teardownMiss', o) }
+function tdMissed (bot, p) { const m = tdMiss.get(key(p)); tdMiss.set(key(p), { n: m ? m.n + 1 : 1, day: today(bot) }); const o = {}; for (const [k, v] of tdMiss) o[k] = v; mem.set('teardownMiss2', o) }
 function failLeftover (bot, p) { const l = leftovers.get(key(p)); const d = today(bot); leftovers.set(key(p), { n: l && l.day === d ? l.n + 1 : 1, day: d }) }
 
 // Take down every scaffold block, top-down. A block out of reach is walked to with the planner allowed to
