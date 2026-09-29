@@ -146,6 +146,7 @@ function sheepWool (bot, e) {
     return typeof v === 'number' ? { sheared: (v & 0x10) !== 0, colour: v & 0x0f } : null
   } catch { return null }
 }
+let shearsFailDay = null // (the day a shears make failed: day.js)
 const shornTried = new Map() // sheep entity id -> shearing it gave nothing (its byte said woolly: it is not)
 
 // Get `n` more wool (any colour: it is dyed for the build). Shears when we have them (1-3 wool a sheep, and the
@@ -157,8 +158,11 @@ async function woolFor (bot, n, ctx = {}) {
   // a real surplus of iron (armour and tools come first - the iron task spends it on those); or wool wanted by the
   // dozen, worth a dig for two ingots: a kill a wool emptied the flocks round home and the trip explored 176 blocks out
   // for the castle's 33 purple wool, no iron banked at all (2026-09-29)
-  if (!inv.has(bot, 'shears') && (inv.count(bot, 'iron_ingot') + base().bankCount('iron_ingot') >= 12 || n >= 8)) {
-    await craft().ensure(bot, 'shears', 1, Object.assign({}, ctx, { depth: (ctx.depth || 0) + 1 })).catch(() => false)
+  // (a make that failed - no iron in reach, no pick for it - is not tried again until tomorrow: every wool leg paid the whole
+  //  attempt again before the kill; a make cut short by a stop found nothing because it looked at nothing, and stays open; audit)
+  if (!inv.has(bot, 'shears') && shearsFailDay !== require('./day').dayNo(bot) && (inv.count(bot, 'iron_ingot') + base().bankCount('iron_ingot') >= 12 || n >= 8)) {
+    const ok = await craft().ensure(bot, 'shears', 1, Object.assign({}, ctx, { depth: (ctx.depth || 0) + 1 })).catch(() => false)
+    if (!ok && !inv.has(bot, 'shears') && !(ctx.shouldStop && ctx.shouldStop())) { shearsFailDay = require('./day').dayNo(bot); log('food', 'no shears to be made today - wool by the kill until tomorrow') }
   }
   // THE PEN FIRST: its sheep grow their wool back, and it is by home (pen.js). The open range after - never the pen's
   // flock killed: animals() leaves penned sheep out
