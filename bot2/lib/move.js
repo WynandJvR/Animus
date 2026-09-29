@@ -295,11 +295,12 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
   // full of mobs - walks to the site routed through it, and a creeper there took the iron set with it (the blast
   // destroys what it drops), after a zombie and a skeleton there the night before (2026-09-27).
   m.exclusionAreasStep.push(block => {
-    if (!block || !block.position || startUnder) return 0
+    if (!block || !block.position) return 0
     let j = null; try { j = require('./build').getJob() } catch {}
     if (!j || !j.box) return 0
     const p = block.position; const b = j.box
-    return (p.x >= b.x1 && p.x <= b.x2 && p.z >= b.z1 && p.z <= b.z2 && p.y < b.y1) ? 60 : 0
+    // (from inside: a small toll, not none - "out soon" stays the preference and the search budget is not blown; audit)
+    return (p.x >= b.x1 && p.x <= b.x2 && p.z >= b.z1 && p.z <= b.z2 && p.y < b.y1) ? (startUnder ? 3 : 60) : 0
   })
   // A player walks round a field: stepping down onto farmland tramples it back to dirt. The plot sat a block below
   // the path from the safehouse to the furnaces and every trip undid the planting - "4/20 cells planted (1 just
