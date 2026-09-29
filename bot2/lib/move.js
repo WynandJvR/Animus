@@ -685,7 +685,11 @@ async function escapeUpInner (bot) {
       const holdsUp = (x, y, z) => j.cells.some(q => q.sup && q.sup.x === x && q.sup.y === y && q.sup.z === z && build.cellDone(bot, q) === true)
       const air = (x, y, z) => { const b = world.at(bot, x, y, z); return !!b && world.isAirish(b) }
       // (a cell of the pair: air already, or a cell of our build that holds nothing up)
-      const ours = (x, y, z) => { const b = world.at(bot, x, y, z); return !!b && (world.isAirish(b) || (!!cellAt(x, y, z) && !holdsUp(x, y, z) && !world.isLavaBlock(b) && !world.isWaterBlock(b))) }
+      // (or, under the floor, the earth round the pocket: the slope's dirt and stone the ordinary dig takes anyway - a
+      //  player digs out of a hole through the ground, not only through the build; never with sand or gravel over it,
+      //  which falls into the tunnel; audit 2026-09-29)
+      const earth = (x, y, z, b) => !cellAt(x, y, z) && !act.digRefusal(bot, b, { allowZones: ['build', 'base'] }) && !/sand$|gravel|concrete_powder/.test((world.at(bot, x, y + 1, z) || {}).name || '')
+      const ours = (x, y, z) => { const b = world.at(bot, x, y, z); return !!b && (world.isAirish(b) || (!!cellAt(x, y, z) && !holdsUp(x, y, z) && !world.isLavaBlock(b) && !world.isWaterBlock(b)) || earth(x, y, z, b)) }
       // (safe ground past the wall: room for the body and a drop a fall does not hurt - the castle's outer walls stand over
       //  a 6-9 block drop, and air past them is a lip, not a way out; audit)
       const safe = (x, y, z) => air(x, y, z) && air(x, y + 1, z) && world.dropAt(bot, x, y, z) <= world.SAFE_DROP
@@ -703,7 +707,7 @@ async function escapeUpInner (bot) {
           if (!ours(p0.x, p0.y, p0.z) || !ours(p0.x, p0.y + 1, p0.z)) break
           for (const dy of [1, 0]) {
             const b = world.at(bot, p0.x, p0.y + dy, p0.z)
-            if (b && !world.isAirish(b)) { log('move', `enclosed: taking our own ${b.name} at ${fmt({ x: p0.x, y: p0.y + dy, z: p0.z })}`); await act.dig(bot, { x: p0.x, y: p0.y + dy, z: p0.z }, { own: true, force: true, noWalk: true, allowZones: ['build', 'base'], timeoutMs: 8000 }).catch(() => false) }
+            if (b && !world.isAirish(b)) { log('move', `enclosed: taking our own ${b.name} at ${fmt({ x: p0.x, y: p0.y + dy, z: p0.z })}`); const mine = !!cellAt(p0.x, p0.y + dy, p0.z); await act.dig(bot, { x: p0.x, y: p0.y + dy, z: p0.z }, { own: mine, force: mine, noWalk: true, allowZones: ['build', 'base'], timeoutMs: 8000 }).catch(() => false) }
           }
           await act.collectDrops(bot, { radius: 4, maxMs: 3000 }).catch(() => {}) // (a door dug comes back whole: the builder re-places it)
           if (!safe(p0.x, p0.y, p0.z)) { log('move', `enclosed: the cell opened at ${fmt(p0)} stands over a drop - not stepping in`); break } // (room, and a drop a fall does not hurt)
