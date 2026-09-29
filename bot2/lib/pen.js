@@ -358,6 +358,7 @@ async function stockInner (bot, { shouldStop } = {}, ctx = {}) {
     if (!wild.length) {
       mem.update(m => { if (m.mobs && m.mobs.sheep) m.mobs.sheep = m.mobs.sheep.filter(q => world.dist2(q, known) >= 32) })
       log('pen', `no sheep where they were seen at ${known.x},${known.z} - forgotten`)
+      ctx.far = false // (a stale memory is no failed lead: the next remembered flock may still be walked today; audit)
       return false
     }
   }
