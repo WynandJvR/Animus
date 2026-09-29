@@ -65,29 +65,33 @@ function innerStep (p) { return { x: p.gate.x - p.dir.x, y: p.box.y, z: p.gate.z
 
 // ---- the site ------------------------------------------------------------------------------------
 // The paddock centred on (cx,cz), or null. Pure over the world: every block read through world.at.
+// (why a centre was refused, tallied by chooseSite for its "no site" line: the first live try found none and said nothing
+//  of why, 2026-09-29)
+const siteWhy = {}
+const no = w => { siteWhy[w] = (siteWhy[w] || 0) + 1; return null }
 function siteAt (bot, cx, cz, home) {
   const cols = []
   for (let dx = -HALF - 1; dx <= HALF + 1; dx++) for (let dz = -HALF - 1; dz <= HALF + 1; dz++) {
     const x = cx + dx; const z = cz + dz
     const gy = world.groundY(bot, x, z, home.y + 12)
-    if (gy == null) return null
+    if (gy == null) return no('unloaded')
     const g = world.at(bot, x, gy, z)
     // (natural solid ground - water's surface is no ground, nor sand that falls from under a fence)
-    if (!g || !world.isSolid(g) || !world.NATURAL_RE.test(g.name) || world.FALLING_RE.test(g.name) || world.LEAF_RE.test(g.name)) return null
+    if (!g || !world.isSolid(g) || !world.NATURAL_RE.test(g.name) || world.FALLING_RE.test(g.name) || world.LEAF_RE.test(g.name)) return no('ground not natural solid')
     // (feet and head clear: air, or a tuft or flower the groundwork takes - never a bush, a boulder, a trunk)
-    for (let dy = 1; dy <= 2; dy++) { const b = world.at(bot, x, gy + dy, z); if (!b || !(world.isAirish(b) || act.PLANT_RE.test(b.name))) return null }
+    for (let dy = 1; dy <= 2; dy++) { const b = world.at(bot, x, gy + dy, z); if (!b || !(world.isAirish(b) || act.PLANT_RE.test(b.name))) return no('something standing on it') }
     cols.push({ x, z, gy, g, inner: Math.abs(dx) <= HALF && Math.abs(dz) <= HALF })
   }
   // one level: the most common; a column one off it is levelled (dug down or filled), a few at most
   const n = {}; for (const c of cols) n[c.gy] = (n[c.gy] || 0) + 1
   const level = Number(Object.keys(n).sort((a, b) => n[b] - n[a])[0])
-  if (cols.some(c => Math.abs(c.gy - level) > 1) || cols.filter(c => c.gy !== level).length > OFF_LEVEL) return null
+  if (cols.some(c => Math.abs(c.gy - level) > 1) || cols.filter(c => c.gy !== level).length > OFF_LEVEL) return no('not level')
   // grass inside: a sheep grows its wool back by eating it
-  if (cols.filter(c => c.inner && c.gy === level && c.g.name === 'grass_block').length < 15) return null
+  if (cols.filter(c => c.inner && c.gy === level && c.g.name === 'grass_block').length < 15) return no('too little grass')
   const y = level + 1
-  if (Math.abs(y - home.y) > 6) return null
-  for (const [dx, dz] of [[0, 0], [-HALF, -HALF], [HALF, -HALF], [-HALF, HALF], [HALF, HALF]]) if (!world.openSky(bot, { x: cx + dx, y, z: cz + dz })) return null
-  if (world.lavaNear(bot, { x: cx, y: level, z: cz }, 5) || world.waterNear(bot, { x: cx, y: level, z: cz }, 4, -1, 1)) return null
+  if (Math.abs(y - home.y) > 6) return no('not at home height')
+  for (const [dx, dz] of [[0, 0], [-HALF, -HALF], [HALF, -HALF], [-HALF, HALF], [HALF, HALF]]) if (!world.openSky(bot, { x: cx + dx, y, z: cz + dz })) return no('no open sky')
+  if (world.lavaNear(bot, { x: cx, y: level, z: cz }, 5) || world.waterNear(bot, { x: cx, y: level, z: cz }, 4, -1, 1)) return no('water or lava near')
   // clear of every zone, the door apron, the mine's way (utilitySpotOK), the safehouse, the build's ground
   let job = null; try { job = require('./build').getJob() } catch {}
   const jb = job && job.box
@@ -95,7 +99,7 @@ function siteAt (bot, cx, cz, home) {
   const near = (b, pad, x, z) => !!b && x >= b.x1 - pad && x <= b.x2 + pad && z >= b.z1 - pad && z <= b.z2 + pad
   for (const c of cols) {
     const p = { x: c.x, y, z: c.z }
-    if (move.inZone(p, 1, ['pen']) || !move.utilitySpotOK(p, { except: ['pen'] }) || near(jb, BUILD_MARGIN, c.x, c.z) || near(hb, 3, c.x, c.z)) return null
+    if (move.inZone(p, 1, ['pen']) || !move.utilitySpotOK(p, { except: ['pen'] }) || near(jb, BUILD_MARGIN, c.x, c.z) || near(hb, 3, c.x, c.z)) return no(near(jb, BUILD_MARGIN, c.x, c.z) ? 'the build' : 'a zone, the hut or its apron')
   }
   // the gate on the side facing home, and ground to stand on in front of it
   const hx = home.x - cx; const hz = home.z - cz
@@ -103,7 +107,7 @@ function siteAt (bot, cx, cz, home) {
   const gate = { x: cx + dir.x * (HALF + 1), y, z: cz + dir.z * (HALF + 1) }
   const out = { x: gate.x + dir.x, y, z: gate.z + dir.z }
   const og = world.groundY(bot, out.x, out.z, home.y + 12)
-  if (og == null || Math.abs(og + 1 - y) > 1 || !world.isSolid(world.at(bot, out.x, og, out.z)) || move.inZone({ x: out.x, y: og + 1, z: out.z }, 0, ['pen'])) return null
+  if (og == null || Math.abs(og + 1 - y) > 1 || !world.isSolid(world.at(bot, out.x, og, out.z)) || move.inZone({ x: out.x, y: og + 1, z: out.z }, 0, ['pen'])) return no('no ground before the gate')
   return { box: { x1: cx - HALF, z1: cz - HALF, x2: cx + HALF, z2: cz + HALF, y }, gate, dir }
 }
 
@@ -118,6 +122,7 @@ async function chooseSite (bot) {
     if (d >= SITE_MIN && d <= SITE_MAX) cands.push({ x: home.x + dx, z: home.z + dz, d })
   }
   cands.sort((a, b) => a.d - b.d)
+  for (const k of Object.keys(siteWhy)) delete siteWhy[k]
   for (let i = 0; i < cands.length; i++) {
     if (i % 8 === 0) await new Promise(r => setImmediate(r))
     const s = siteAt(bot, cands[i].x, cands[i].z, home)
@@ -244,7 +249,7 @@ async function build (bot, { shouldStop } = {}) {
   let p = pen()
   if (!p) {
     const s = await chooseSite(bot)
-    if (!s) { log('pen', `no site for a sheep pen ${SITE_MIN}-${SITE_MAX} blocks from home (flat grass, open sky, clear of the zones and the build)`); return false }
+    if (!s) { log('pen', `no site for a sheep pen ${SITE_MIN}-${SITE_MAX} blocks from home - ${Object.entries(siteWhy).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} x${v}`).join(', ')}`); return false }
     s.wood = craft().preferredWood(bot, 44)
     mem.set('pen', s); p = s
     log('pen', `a sheep pen at ${move.fmt(centreOf(p))}, the gate at ${move.fmt(p.gate)} (${p.wood} fence)`)
