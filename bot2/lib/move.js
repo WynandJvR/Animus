@@ -779,7 +779,12 @@ async function escapeUpInner (bot) {
     const inFoot = j && f0.x >= j.box.x1 && f0.x <= j.box.x2 && f0.z >= j.box.z1 && f0.z <= j.box.z2
     // (below the floor too: a hollow the foundation rim closed all round has no way out for the walk to the exit or the
     //  climb to find - the rim is opened like any wall, toward safe ground past it; audit 2026-09-29)
-    if (inFoot && !build.wayOut(bot, { x: NaN, y: NaN, z: NaN }, null, false)) {
+    // (or PROVEN by the walks themselves: three give-ups on this one spot in five minutes. The search reads a way out the
+    //  walk cannot take - a one-high gap between two built layers, cells of the layer between out of stock: the bot walked
+    //  into it at the one open column and 'gave up (stuck x3)' eleven times, the search still finding "a way", 2026-09-29.
+    //  The physics decides; audit)
+    const proven = (giveUps.get(fmt(bot.entity.position)) || []).filter(x => Date.now() - x < 5 * 60000).length >= 3
+    if (inFoot && (proven || !build.wayOut(bot, { x: NaN, y: NaN, z: NaN }, null, false))) {
       // (a door beside the bot is "a way" to wayOut, but crossDoor goes through a door only along its facing, from a step in
       //  front or behind: from its side - a one-cell pocket next to a double door - it never got through, and the log said
       //  "no way out" beside a door, 2026-09-29; audit)
