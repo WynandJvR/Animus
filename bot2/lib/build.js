@@ -604,8 +604,12 @@ function pocketHook (bot) {
   pocketHookBot = bot
   bot.on('blockUpdate', (o, n) => { const b = n || o; if (!b || !b.position || !job) return; const p = b.position; const bx = job.box; if (p.x < bx.x1 - 2 || p.x > bx.x2 + 2 || p.z < bx.z1 - 2 || p.z > bx.z2 + 2) return; if (pocketDirty.length < 5000) pocketDirty.push({ x: p.x, y: p.y, z: p.z }); else pocketCache.clear() })
 }
-function pocketInvalidate () {
+let pocketSig = null
+function pocketInvalidate (bot) {
   if (pocketJob !== job) { pocketCache.clear(); pocketJob = job }
+  // (the hole SET changes with no block changing: an item arriving, going out of stock, a coverMiss clearing, the day
+  //  rolling - a kept verdict would hold a closer for a hole nothing waits on any more; audit)
+  { const td = today(bot); const sig = [...detached].sort().join(',') + '|' + [...coverMiss].filter(([, d]) => d === td).map(([k]) => k).sort().join(','); if (sig !== pocketSig) { pocketCache.clear(); pocketSig = sig } }
   if (!pocketDirty.length) return
   const entries = new Set(pocketCache.values())
   for (const e of entries) {
@@ -651,7 +655,7 @@ function refreshHoldsInner (todo, bot) {
   //  member with open sky (its cap is air, and the air over it), or a side exit outside the build with head room. One
   //  the build can never close - no cell of it there - counts as always open. One closable opening left: the cell that
   //  would close it is held. None: already sealed - the escape's case. Two or more: one placement a pass closes one)
-  pocketHook(bot); pocketInvalidate()
+  pocketHook(bot); pocketInvalidate(bot)
   const applied = new Set()
   const apply = e => { if (applied.has(e)) return; applied.add(e); for (const k of e.holds) holdAround.add(k); for (const k of e.faces) holeFaces.add(k) }
   const seenP = new Set()

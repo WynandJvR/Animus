@@ -667,6 +667,13 @@ async function goToInner (bot, goal, opts, a) {
   // (only a walk that LEFT: the escape's own step aside arrives too - a clear there was the same loop again; and a walk
   //  that ends beside its start proves nothing; audit)
   if (r.ok && start && giveUps.length && !escaping && bot.entity && bot.entity.position.distanceTo(start) > GIVEUP_NEAR + 1) clearGiveUps(start.floored())
+  // (and a remembered trap a walk just LEFT is no trap: forgotten - a false one, recorded before the search read trapdoors
+  //  as edges, lay on the inner doorway's path, 50 a step and legs pushed round it for a day; audit)
+  if (r.ok && start && !escaping && bot.entity && bot.entity.position.distanceTo(start) > GIVEUP_NEAR + 1) {
+    const s0 = start.floored(); const mm = require('./memory'); const l = mm.get().trapCells || []
+    const near = t => Math.abs(t.x - s0.x) <= GIVEUP_NEAR && Math.abs(t.y - s0.y) <= GIVEUP_NEAR && Math.abs(t.z - s0.z) <= GIVEUP_NEAR
+    if (l.some(near)) { mm.update(m => { m.trapCells = (m.trapCells || []).filter(t => !near(t)) }); log('move', `walked out of the trap remembered round ${fmt(s0)} - forgotten`) }
+  }
   return r
 }
 async function goToInner2 (bot, goal, opts, { timeoutMs, stuckMs, dig, place, allowZones, label, shouldStop, dryHead }) {
