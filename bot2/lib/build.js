@@ -1427,35 +1427,44 @@ function ensureFoundation (bot) {
 // stood 5 minutes. A region bigger than 300 cells is no trap. True: this cell would seal us in - it waits.
 function wallsMeIn (bot, c, from = null) {
   if (!job) return false
+  // (only a cell that CLOSES the way out seals us: sealed with it and open without it. Sealed either way - a room already
+  //  closed - it is no reason to hold that cell back)
+  return !wayOut(bot, c, from, true) && wayOut(bot, c, from, false)
+}
+// A walk from `from` (the feet) reaches a way out of the footprint - a column outside it, or open sky over a cell not the
+// build's own - with the cell counted solid (withC) or not. Outside the footprint: out already.
+function wayOut (bot, c, from = null, withC = true) {
+  if (!job) return true
   const b0 = job.box; const f = from ? { x: from.x, y: from.y, z: from.z } : world.feetPos(bot)
   const inBox = p => p.x >= b0.x1 && p.x <= b0.x2 && p.z >= b0.z1 && p.z <= b0.z2
-  if (!inBox(f)) return false
-  const isC = (x, y, z) => x === c.x && y === c.y && z === c.z
-  const air = (x, y, z) => { if (isC(x, y, z)) return false; const b = world.at(bot, x, y, z); return !!b && world.isAirish(b) }
-  const st = (x, y, z) => {
-    if (!air(x, y, z) || !air(x, y + 1, z)) return false
-    if (isC(x, y - 1, z)) return true
-    return world.standable(bot, x, y, z)
-  }
-  const seen = new Set([key(f)]); const q = [{ x: f.x, y: f.y, z: f.z }]
-  while (q.length) {
-    if (seen.size > 300) return false
-    const p = q.shift()
-    if (!inBox(p)) return false
-    if (!job.index.has(key(p)) && world.openSky(bot, p) && !isC(p.x, p.y, p.z)) { let clear = true; for (let y = p.y + 2; y < p.y + 22; y++) if (isC(p.x, y, p.z)) clear = false; if (clear) return false }
-    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-      const x = p.x + dx; const z = p.z + dz
-      for (let dy = 1; dy >= -world.SAFE_DROP; dy--) {
-        const y = p.y + dy
-        if (dy === 1 && !air(p.x, p.y + 2, p.z)) continue // (a step up wants the head room to jump)
-        if (dy < 0) { let open = true; for (let yy = y + 2; yy <= p.y + 1; yy++) if (!air(x, yy, z)) open = false; if (!open) break } // (a drop wants its column open)
-        if (!st(x, y, z)) continue
-        const k = key({ x, y, z }); if (!seen.has(k)) { seen.add(k); q.push({ x, y, z }) }
-        break
+  if (!inBox(f)) return true
+  // (a door or a fence gate is a way through - the bot crosses them; counted solid, a room behind a door read as sealed and
+  //  every cell placed from inside it was held back, 2026-09-29)
+  const passable = b => world.isAirish(b) || (/_door$|_fence_gate$/.test(b.name) && !/^iron_door$/.test(b.name))
+  {
+    const isC = (x, y, z) => withC && x === c.x && y === c.y && z === c.z
+    const air = (x, y, z) => { if (isC(x, y, z)) return false; const b = world.at(bot, x, y, z); return !!b && passable(b) }
+    const st = (x, y, z) => { if (!air(x, y, z) || !air(x, y + 1, z)) return false; if (isC(x, y - 1, z)) return true; return world.standable(bot, x, y, z) }
+    const seen = new Set([key(f)]); const q = [{ x: f.x, y: f.y, z: f.z }]
+    while (q.length) {
+      if (seen.size > 300) return true // (a region this big is no trap)
+      const p = q.shift()
+      if (!inBox(p)) return true
+      if (!job.index.has(key(p)) && world.openSky(bot, p) && !isC(p.x, p.y, p.z)) { let clear = true; for (let y = p.y + 2; y < p.y + 22; y++) if (isC(p.x, y, p.z)) clear = false; if (clear) return true }
+      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const x = p.x + dx; const z = p.z + dz
+        for (let dy = 1; dy >= -world.SAFE_DROP; dy--) {
+          const y = p.y + dy
+          if (dy === 1 && !air(p.x, p.y + 2, p.z)) continue // (a step up wants the head room to jump)
+          if (dy < 0) { let open = true; for (let yy = y + 2; yy <= p.y + 1; yy++) if (!air(x, yy, z)) open = false; if (!open) break } // (a drop wants its column open)
+          if (!st(x, y, z)) continue
+          const k = key({ x, y, z }); if (!seen.has(k)) { seen.add(k); q.push({ x, y, z }) }
+          break
+        }
       }
     }
+    return false
   }
-  return true
 }
 // A foundation cell sealed in under the base already built is dropped, not rested: it is no part of the blueprint, nothing
 // can reach it again, and a rest would retry it for ever (the build could never read done; audit 2026-09-28). A cell
@@ -1550,7 +1559,7 @@ function foundationStand (bot, c) {
     if (!job.index.has(`${p.x},${job.box.y1},${p.z}`)) continue // (inside: under the base only)
     if (job.index.has(key(p)) || job.index.has(key({ x: p.x, y: p.y + 1, z: p.z })) || !world.standable(bot, p.x, p.y, p.z)) continue
     if (world.dist3({ x: p.x + 0.5, y: p.y + 1.6, z: p.z + 0.5 }, { x: c.x + 0.5, y: c.y + 0.5, z: c.z + 0.5 }) > 4.2) continue
-    if (wallsMeIn(bot, c, p)) continue
+    if (!wayOut(bot, c, p, true)) continue // (from there, with the cell in, a way out must stay)
     const d = world.dist3(p, me)
     if (d < bd) { bd = d; best = p }
   }
