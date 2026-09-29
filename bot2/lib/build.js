@@ -666,7 +666,7 @@ function siteMovements (bot, { place = true, dig = true } = {}) {
   // (never sprinting on the site: a sprint-jump up onto a one-wide wall top carried the body over its far edge - six falls of
   //  4-6 blocks off the walls in a morning, each a jump at y121-123 with the drop on the outer side, 2026-09-29. The walks
   //  here are a few dozen blocks; a player walks a wall top)
-  const m = move.movementsFor(bot, { dig: !!dig, place, allowZones: ['build', 'base'], placeCost: 3, sprint: false, edgeCost: 6 }) // (the site's scaffold is ledgered and torn down: a step placed here is no litter)
+  const m = move.movementsFor(bot, { dig: !!dig, place, allowZones: ['build', 'base'], placeCost: 12, sprint: false, edgeCost: 6 }) // (the site's scaffold is ledgered and torn down: a step placed here is no litter - but no bargain either: at 3 the walks laid 21 blocks in a step, the builder's supports then had no filler (5 misses), and each such block is ~15s of teardown later against ~0.45s a step walked round; 12 = a detour of a dozen steps, 2026-09-29)
   // dig 'noGround' (a finished site): leaves and the like may still be cut (with no digging at all the bot was
   // trapped in the canopy beside the transept), but never the earth and rock the building stands on
   if (dig === 'noGround') { const md = world.data(bot); for (const b of Object.values(md.blocksByName)) if (GROUND_RE.test(b.name)) m.blocksCantBreak.add(b.id) }
