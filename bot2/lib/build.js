@@ -1383,7 +1383,13 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     const structural = todo.filter(c => !c.attach && !c.foundation && has(c) && !det.has(stepItem(bot, c)) && !fallsIn(bot, c, stepItem(bot, c)))
     const footing = todo.filter(c => c.foundation && !c.attach && has(c)) // (the foundation: outside the band, lowest first)
     const attached = todo.filter(c => c.attach && has(c) && supportThere(bot, c))
-    const minY = structural.length ? Math.min(...structural.map(c => c.y)) : Infinity
+    // (the window's floor from the cells that can be TRIED: one kept out by another - a shared miss (the cell under it waits),
+    //  a hole's last face, a column over a waiting hole - pinned the window at y120 for a few leaves and walls, and the
+    //  4,868 blocks in hand for y122 and up were never offered: steps of 1-10 blocks, 2026-09-29; audit. They stay in the
+    //  window - below its floor - and go in when their blocker does)
+    const tryable = c => { const f = cellFails.get(key(c)); if (f && f.n >= 1 && f.shared) return false; if (holdAround.has(key(c))) return false; const w = waitCols.get(c.x + ',' + c.z); return !(w != null && c.y > w) }
+    let minY = Infinity; for (const c of structural) if (c.y < minY && tryable(c)) minY = c.y
+    if (minY === Infinity && structural.length) minY = Math.min(...structural.map(c => c.y)) // (none tryable: as before)
     // no more than 3 layers above the lowest unfinished cell: walls rise together, nothing floats far up
     let doable = minY <= lowestAll + 3 ? structural.filter(c => c.y <= minY + 1) : []
     // a door goes in once its floor stands (and its own two cells are ours to clear)
