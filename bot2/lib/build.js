@@ -1234,6 +1234,10 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       // (never a deadlock: a cell with no route to its item, or one that has already rested once, is covered - else a whole
       //  floor waits for ever on a hay block no trip can bring; audit 2026-09-28)
       if (cellUnsourced(b)) { if (!sealSaid.has(key(b))) { sealSaid.add(key(b)); log('build', `covering ${b.name} at ${move.fmt(b)} - no route for it`) } return false }
+      // (and one whose item is out of stock - detached: the band's cells in hand waited on the decorative cells under them,
+      //  one anchor freed a step, 4,156 blocks in hand and nothing doable, 2026-09-29. Covered; on the swap list for when
+      //  the item comes - the endgame reopens it from above)
+      if (det.has(stepItem(bot, b))) { noteToSwap(b, (world.at(bot, b.x, b.y, b.z) || {}).name || 'air'); return false }
       if (failsOf(b) >= 1 && !(cellFails.get(key(b)) || {}).shared) return false // (its OWN miss only: a patch's shared rest proves nothing about it, and covered it is sealed in and dropped - a hole in the wall; audit)
       for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
         const x = b.x + dx; const z = b.z + dz
