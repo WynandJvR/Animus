@@ -524,16 +524,23 @@ const craftMemo = new Map() // item -> { at, ok }: craftable from stock, judged 
 // A WAIT WITH NOTHING TO WAIT FOR: an anchor NOT in hand at a step's end, though the plan says the stock covers it - nothing
 // to gather, the round's crafts made none. No trip will ever bring it (the planner sees no shortfall), so the band would
 // hold for good: one purple wool cell held the castle from noon to dusk, the planner counting brown wool as purple
-// (2026-09-29). Whatever the disagreement, the item goes as a detached one for the rest of the day - the band rises past
-// it, its cell waits - and says so. (item -> the day)
+// (2026-09-29). Whatever the disagreement, it anchors no band for the rest of the day - the rest of the build goes on -
+// but it is NOT detached: detached cells are covered over and left to the endgame's swap, and a cell the plan merely
+// miscounted is never buried for that (operator: "i dont want this to ruin a build"). Its own column waits over it
+// (sealsBelow), open, for the item. (item -> the day)
 const coverMiss = new Map()
 function noteCoverMiss (bot, anchor, holding) {
-  if (!anchor || holding) return
+  if (!anchor) return
   const it = stepItem(bot, anchor)
-  const m = craftMemo.get(it)
-  if (!m || !m.ok || coverMiss.get(it) === today(bot)) return
+  if (holding) { coverMiss.delete(it); return } // (in hand: the disagreement is over)
+  if (coverMiss.get(it) === today(bot)) return
+  // (the STOCK alone covers it: a batch still in a furnace is a wait with something to wait for - bricks smelting would
+  //  have gone detached for the day, the band walking down and up with each batch; audit)
+  let ok = false
+  try { const r = require('./materials').planFor(bot, { [it]: 1 }, { noInFlight: true }); ok = !Object.keys(r.raw || {}).some(x => r.raw[x] > 0) && !(r.unknown || []).length } catch {}
+  if (!ok) return
   coverMiss.set(it, today(bot))
-  log('build', `${it} anchors the band at ${move.fmt(anchor)} and none is to hand, though the plan finds the stock covers it - nothing to fetch, nothing made: building past it today`)
+  log('build', `${it} anchors the band at ${move.fmt(anchor)} and none is to hand, though the plan finds the stock covers it - nothing to fetch, nothing made: building past it today, its cell kept open`)
 }
 // THE SWAP LIST: a cell covered while it holds the wrong block (the terrain's grass in a leaf or coarse-dirt cell) - the
 // endgame's worklist, swapped from a side if one is open, else through the reopen (audit 2026-09-29). Once each.
@@ -561,7 +568,8 @@ function detachedItems (todo, bot) {
   }
   for (const it of Object.keys(low)) {
     const k = have[it] || 0
-    if (k <= 0 && (coverMiss.get(it) === today(bot) || !craftable(it))) detached.add(it)
+    if (k > 0) coverMiss.delete(it) // (it turned up: a hold on "none, and the plan thinks otherwise", never a day's ban; audit)
+    if (k <= 0 && !craftable(it)) detached.add(it)
     else if (k <= 0) detached.delete(it)
     else if (detached.has(it) && k >= Math.min(low[it].n, 64)) detached.delete(it)
   }
@@ -577,6 +585,7 @@ function detachedItems (todo, bot) {
 //  the band a layer up instead of at the gap; audit 2026-09-28)
 function anchorable (bot, c, det) {
   if (c.attach || c.follows || c.foundation || infillCell(c) || (cellFails.get(key(c)) || {}).n >= 1) return false
+  if (coverMiss.get(stepItem(bot, c)) === today(bot)) return false // (a wait with nothing to wait for: it holds no band - coverMiss)
   return !(det && (det.has(stepItem(bot, c)) || fallsIn(bot, c, stepItem(bot, c))))
 }
 function lowestStructural (todo, bot, det = bot ? detachedItems(todo, bot) : null) {

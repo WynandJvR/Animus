@@ -481,8 +481,10 @@ function wantedSet (bot) {
 }
 function wanted (bot, name) { return wantedSet(bot)(name) }
 // a plan against the live stock (pack + chests + what is cooking)
-function planFor (bot, needs) {
-  const inFlight = n => n === 'fuel' ? L.smelt.inFlight('charcoal') : L.smelt.inFlight(n)
+// (`noInFlight`: the stock alone - nothing credited for what sits in a furnace; the builder's "the plan says covered and none
+//  came" verdict, which a batch of bricks still smelting is not; audit)
+function planFor (bot, needs, { noInFlight = false } = {}) {
+  const inFlight = noInFlight ? () => 0 : n => n === 'fuel' ? L.smelt.inFlight('charcoal') : L.smelt.inFlight(n)
   // (fuel is counted in coals - eight smelts each; a lava bucket, pack or bank, is a hundred smelts: twelve coals. Only
   //  the planner's count - never the 'fuel' class itself, or a torch would be crafted of a lava bucket; 2026-09-28)
   const lava = () => L.inv.count(bot, 'lava_bucket') + ((L.base.bankCounts() || {}).lava_bucket || 0)
