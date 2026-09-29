@@ -284,6 +284,13 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
     if (v === undefined) { const gy = world.groundY(bot, p.x, p.z, b0.y1); v = (j.index.has(`${p.x},${b0.y1},${p.z}`) || (gy != null && gy <= b0.y1 - 3)) ? 40 : 0; hollow.set(k, v) }
     return v
   })
+  // (a remembered trap's cells: dear, not refused - a walk that starts inside one can still leave; noteTrap)
+  let trapSet = null; let trapGen = -1
+  m.exclusionAreasStep.push(block => {
+    if (!block || !block.position) return 0
+    if (trapGen !== pathGen) { trapGen = pathGen; trapSet = new Set(); for (const t of (require('./memory').get().trapCells || [])) if (Date.now() - t.at < TRAP_MS) trapSet.add(`${t.x},${t.y},${t.z}`) }
+    return trapSet.size && trapSet.has(`${block.position.x},${block.position.y},${block.position.z}`) ? 50 : 0
+  })
   // (a cell a fall began from - and its sides, at its height: dear, not refused; the list is reflex.js's fall record)
   let fallCells = null; let fallGen = -1
   m.exclusionAreasStep.push(block => {
@@ -741,6 +748,17 @@ function fmt (p) { return p ? `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floo
 const giveUps = [] // [{ x, y, z, t }]
 const GIVEUP_NEAR = 2
 function giveUpsNear (p, now = Date.now()) { return giveUps.filter(g => now - g.t < 5 * 60000 && Math.abs(g.x - p.x) <= GIVEUP_NEAR && Math.abs(g.y - p.y) <= GIVEUP_NEAR && Math.abs(g.z - p.z) <= GIVEUP_NEAR).length }
+// A TRAP REMEMBERED: where an escape had to break out or climb out, the give-ups round it are a pocket - a day's hazard,
+// dear to walk through and never a leg's point (a player stuck in a crawlspace walks round it next time; audit)
+const TRAP_MS = 24 * 3600000
+let legSaid = null
+function noteTrap (p) {
+  const cells = giveUps.filter(g => Math.abs(g.x - p.x) <= GIVEUP_NEAR && Math.abs(g.y - p.y) <= GIVEUP_NEAR && Math.abs(g.z - p.z) <= GIVEUP_NEAR).map(g => ({ x: g.x, y: g.y, z: g.z }))
+  cells.push({ x: p.x, y: p.y, z: p.z })
+  const now = Date.now()
+  require('./memory').update(m => { const l = (m.trapCells || []).filter(t => now - t.at < TRAP_MS); for (const c of cells) if (!l.some(t => t.x === c.x && t.y === c.y && t.z === c.z)) l.push(Object.assign(c, { at: now })); m.trapCells = l.slice(-200) })
+  log('move', `a trap remembered at ${fmt(p)} (${cells.length} cells) - walked round for a day`)
+}
 function clearGiveUps (p) { for (let i = giveUps.length - 1; i >= 0; i--) { const g = giveUps[i]; if (Math.abs(g.x - p.x) <= GIVEUP_NEAR && Math.abs(g.y - p.y) <= GIVEUP_NEAR && Math.abs(g.z - p.z) <= GIVEUP_NEAR) giveUps.splice(i, 1) } }
 async function stepUpSide (bot) {
   const act = require('./act')
@@ -846,7 +864,7 @@ async function escapeUpInner (bot) {
           at = bot.entity.position.floored()
           if (build.wayOut(bot, { x: NaN, y: NaN, z: NaN }, null, false)) { log('move', `enclosed: a way out from ${fmt(at)}`); break }
         }
-        clearGiveUps(f0)
+        noteTrap(f0); clearGiveUps(f0)
         return true
       }
       log('move', `enclosed by the build at ${fmt(f0)} - no wall beside me to open (supports or no open ground past it)`)
@@ -910,7 +928,7 @@ async function escapeUpInner (bot) {
     // cells over a solid side block cleared, and up onto it
     if (!await stepUpSide(bot)) { log('move', `climbing out: no way up from ${fmt(bot.entity.position)} (no tower, no side to cut a step in)`); return false }
   }
-  clearGiveUps(f0)
+  noteTrap(f0); clearGiveUps(f0)
   log('move', `climbed out: from ${fmt(f0)} to ${fmt(bot.entity.position)}`)
   return true
 }
@@ -1007,6 +1025,34 @@ function boatScore (r, fails) {
 
 // Long distance: legs of ~40 blocks toward the target so A* never searches unloaded space.
 // A failed leg bends left/right before giving up. Open water on the line is crossed by boat (boat.js).
+// A LEG'S POINT, never inside the build nor a remembered trap - a player walks round his own building site: a castle
+// going up is rooms, crawlspaces and floors half laid, and a leg point on a straight line through it was a coin toss;
+// one landed in a one-high crawlspace, the bot broke out and the next leg walked it straight back in, 2026-09-29 (audit).
+// Unless the target itself is inside: from outside, the corner of the box (2 out) that makes the way round shortest;
+// from inside, the first point outside along the heading - the planner walks the last stretch. Pure (offline tests).
+function legPoint (me, lx, lz, target, box, traps = []) {
+  const inBox = (x, z, pad) => !!box && x >= box.x1 - pad && x <= box.x2 + pad && z >= box.z1 - pad && z <= box.z2 + pad
+  const trapAt = (x, z) => traps.some(t => Math.abs(t.x - x) <= 2 && Math.abs(t.z - z) <= 2)
+  const targetIn = inBox(target.x, target.z, 1)
+  if ((targetIn || !inBox(lx, lz, 1)) && !trapAt(lx, lz)) return { x: lx, z: lz, moved: null }
+  if (!targetIn && box && inBox(me.x, me.z, 1)) {
+    // (inside: out first, along the heading to the target)
+    const ang = Math.atan2(target.z - me.z, target.x - me.x)
+    for (let k = 1; k < 200; k++) { const x = Math.round(me.x + Math.cos(ang) * k); const z = Math.round(me.z + Math.sin(ang) * k); if (!inBox(x, z, 2) && !trapAt(x, z)) return { x, z, moved: 'out of the build' } }
+  }
+  if (!targetIn && box) {
+    const d = (a, b) => Math.hypot(a.x - b.x, a.z - b.z)
+    const cs = [[box.x1 - 3, box.z1 - 3], [box.x1 - 3, box.z2 + 3], [box.x2 + 3, box.z1 - 3], [box.x2 + 3, box.z2 + 3]].map(([x, z]) => ({ x, z })).filter(c => !trapAt(c.x, c.z))
+    // (a corner we stand at already is no leg: the next one toward the target)
+    const far = cs.filter(c => d(me, c) > 4)
+    const best = (far.length ? far : cs).sort((a, b) => (d(me, a) + d(a, target)) - (d(me, b) + d(b, target)))[0]
+    if (best) return { x: best.x, z: best.z, moved: 'round the build' }
+  }
+  // (a trap outside any build: the leg drawn back along the line to the last point clear of it)
+  const ang = Math.atan2(lz - me.z, lx - me.x); const n = Math.hypot(lx - me.x, lz - me.z)
+  for (let k = Math.floor(n); k >= 2; k--) { const x = Math.round(me.x + Math.cos(ang) * k); const z = Math.round(me.z + Math.sin(ang) * k); if (!trapAt(x, z)) return { x, z, moved: 'short of a trap' } }
+  return { x: lx, z: lz, moved: null }
+}
 async function travel (bot, target, opts = {}) {
   // (anyY: a place on the map, not a block - the ground there at whatever height it is. An explore leg aimed at its own
   //  start height over a valley 50 lower; the planner towered up out of the valley toward it and the bot fell 28
@@ -1110,6 +1156,11 @@ async function travel (bot, target, opts = {}) {
         if (g0 == null || !world.isWaterBlock(world.at(bot, x, g0, z))) { lx = x; lz = z; break }
       }
     }
+    // (never inside the build or a remembered trap: legPoint)
+    { let box = null; try { const j = require('./build').getJob(); box = j && j.box } catch {}
+      const traps = (require('./memory').get().trapCells || []).filter(t => Date.now() - t.at < TRAP_MS)
+      const lp = legPoint(me, lx, lz, target, box, traps)
+      if (lp.moved) { if (legSaid !== lp.moved + lp.x + lp.z) { legSaid = lp.moved + lp.x + lp.z; log('move', `${label}: the leg goes ${lp.moved} - to ${lp.x},${lp.z}`) } lx = lp.x; lz = lp.z } }
     // aim at the SURFACE of the leg point when we can see it: an x/z-only goal lets the planner route
     // through caves and come up under the destination
     const gy = world.groundY(bot, lx, lz, Math.floor(me.y) + 30)
@@ -1147,4 +1198,4 @@ async function travel (bot, target, opts = {}) {
   return { ok: false, why: 'timeout' }
 }
 
-module.exports = { escapeUp, isVerdict, underBuild, underZone, crossDoor, goals, bindReflex, bindBot, setZone, setZones, inZone, zones, utilitySpotOK, insideHut, setProtector, isProtected, surface, isUnderground, surfaceYHere, movementsFor, goTo, goNear, travel, stopMoving, runGoal, sleep, fmt, waitReflex }
+module.exports = { legPoint, escapeUp, isVerdict, underBuild, underZone, crossDoor, goals, bindReflex, bindBot, setZone, setZones, inZone, zones, utilitySpotOK, insideHut, setProtector, isProtected, surface, isUnderground, surfaceYHere, movementsFor, goTo, goNear, travel, stopMoving, runGoal, sleep, fmt, waitReflex }
