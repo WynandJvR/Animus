@@ -104,7 +104,8 @@ function closesRoom (w, c, { box, jobUnbuilt, work, standsOf }) {
     //  doorway at placement; audit)
     const r = region(w, box, s, { memo, isC, cap: 1500 })
     if (r.out) continue
-    // (only a cell within a stand's reach of the room can have every stand in it: the room's bounds, 3 out; audit)
+    // (only a cell within a stand's reach of the room can have every stand in it: the room's bounds, 3 out; audit) - exact
+    //  for build.js standsOf's window (dx, dz -3..3, dy -2..1 round the cell): WIDEN THIS WITH IT if that window grows
     let x1 = Infinity; let x2 = -Infinity; let y1 = Infinity; let y2 = -Infinity; let z1 = Infinity; let z2 = -Infinity
     for (const k of r.cells) { const [x, y, z] = k.split(',').map(Number); if (x < x1) x1 = x; if (x > x2) x2 = x; if (y < y1) y1 = y; if (y > y2) y2 = y; if (z < z1) z1 = z; if (z > z2) z2 = z }
     for (const q of work) {
