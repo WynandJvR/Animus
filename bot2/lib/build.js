@@ -1631,6 +1631,10 @@ function foundationStand (bot, c) {
   //  and an unlit region only by day at full health; a lit one - a foundation torch within 12 - is the one to prefer; audit)
   const hostileIn = Object.values(bot.entities).some(e => e && e.position && reflex.HOSTILE.has(e.name) && e.position.y <= job.box.y1 + 1 && world.dist3(e.position, c) < 12)
   if (hostileIn) { c.noOutside = false; return null }
+  // (from the hollow only when already IN it: sent in from the floor above - through the castle's doors, down its holes -
+  //  the walk failed round after round, the bot ended stuck under the floor every other step, 2026-09-29. The holes are
+  //  being filled; the hollow is the rim's inside, not a way to it)
+  { const f = world.feetPos(bot); if (!(f.y < job.box.y1 && f.x >= job.box.x1 && f.x <= job.box.x2 && f.z >= job.box.z1 && f.z <= job.box.z2)) { c.noOutside = false; return null } }
   const lit = job.cells.some(q => q.foundation && q.name === 'torch' && world.dist3(q, c) <= 12 && cellDone(bot, q) === true)
   if (!lit && !(world.phase(bot) === "day" && bot.health >= 20)) { c.noOutside = false; return null }
   // FROM INSIDE THE HOLLOW when no outside stand will do - the rim's trench stands sat behind drops the walk would not take,
