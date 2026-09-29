@@ -1703,6 +1703,12 @@ function holesList (bot) {
 const leftovers = new Map() // key -> { n, day }
 function today (bot) { return (bot.time && typeof bot.time.day === 'number') ? bot.time.day : Math.floor(Date.now() / 1200000) }
 function resting (bot, p) { const l = leftovers.get(key(p)); return !!l && l.n >= 3 && l.day === today(bot) }
+// THE DAILY TEARDOWN'S MISSES, across days: its leftovers rest after 3 tries in a day, and it runs once a day, one pass -
+// a block out of reach never rested, and every day walked to the same ones, 30s each, until its 4 minutes ran out: 7
+// taken of 108 counted, 2026-09-29. A miss rests 1, 2, 4, 8... days (the build moves on; a stand may open)
+const tdMiss = new Map(Object.entries(mem.get().teardownMiss || {})) // key -> { n, day }
+function tdResting (bot, p) { const m = tdMiss.get(key(p)); return !!m && today(bot) - m.day < Math.pow(2, Math.min(m.n, 6) - 1) }
+function tdMissed (bot, p) { const m = tdMiss.get(key(p)); tdMiss.set(key(p), { n: m ? m.n + 1 : 1, day: today(bot) }); const o = {}; for (const [k, v] of tdMiss) o[k] = v; mem.set('teardownMiss', o) }
 function failLeftover (bot, p) { const l = leftovers.get(key(p)); const d = today(bot); leftovers.set(key(p), { n: l && l.day === d ? l.n + 1 : 1, day: d }) }
 
 // Take down every scaffold block, top-down. A block out of reach is walked to with the planner allowed to
@@ -1743,7 +1749,7 @@ function siteTeardownPlan (bot) {
 }
 function siteScaffoldTakeable (bot) {
   const pl = siteTeardownPlan(bot); if (!pl) return 0
-  return scaffoldList(bot).filter(p => !pl.keep(p) && !resting(bot, p)).length + pl.extra.filter(p => { const b = world.at(bot, p.x, p.y, p.z); return !!b && LEDGER_RE.test(b.name) && !resting(bot, p) }).length
+  return scaffoldList(bot).filter(p => !pl.keep(p) && !resting(bot, p) && !tdResting(bot, p)).length + pl.extra.filter(p => { const b = world.at(bot, p.x, p.y, p.z); return !!b && LEDGER_RE.test(b.name) && !resting(bot, p) && !tdResting(bot, p) }).length
 }
 async function siteScaffoldTeardown (bot, { shouldStop } = {}) {
   const pl = siteTeardownPlan(bot); if (!pl) return 0
@@ -1774,8 +1780,10 @@ async function removeScaffold (bot, { shouldStop, maxPasses = 4, keep = null, ex
   const extraSet = new Set(extra.map(key))
   const isExtra = p => { if (!extraSet.has(key(p)) || job.index.has(key(p))) return false; const b = world.at(bot, p.x, p.y, p.z); return !!b && LEDGER_RE.test(b.name) }
   const isScaf = p => isStray(bot, p.x, p.y, p.z) || isExtra(p)
+  const miss = p => { failLeftover(bot, p); if (!climb) tdMissed(bot, p) } // (the daily teardown's miss rests across days)
+  const rests = p => resting(bot, p) || (!climb && tdResting(bot, p))
   for (let pass = 0; pass < maxPasses; pass++) {
-    const list = scaffoldList(bot).concat(extra.filter(isExtra)).filter(p => !resting(bot, p) && !(keep && keep(p)))
+    const list = scaffoldList(bot).concat(extra.filter(isExtra)).filter(p => !rests(p) && !(keep && keep(p)))
     if (!list.length) break
     const me0 = bot.entity.position
     // nearest first (top-down within a column): highest-first sent the bot towering up the outside of the transept
@@ -1791,12 +1799,12 @@ async function removeScaffold (bot, { shouldStop, maxPasses = 4, keep = null, ex
       // standing on scaffold: that block first, from under our own feet (a drop of one)
       const feet = bot.entity.position.floored()
       const under = { x: feet.x, y: feet.y - 1, z: feet.z }
-      if (bot.entity.onGround && isScaf(under) && !resting(bot, under) && safeDrop(bot, under)) {
-        if (await dig(under, true)) { removed++; got++; await landed(bot) } else failLeftover(bot, under)
+      if (bot.entity.onGround && isScaf(under) && !rests(under) && safeDrop(bot, under)) {
+        if (await dig(under, true)) { removed++; got++; await landed(bot) } else miss(under)
         continue
       }
       const p = queue.shift()
-      if (!isScaf(p) || resting(bot, p) || (keep && keep(p))) continue
+      if (!isScaf(p) || rests(p) || (keep && keep(p))) continue
       if (!act.reach(bot, p, 4.3)) {
         // (near enough, not look-at: the look-at raycast through pews and pillars "stuck" at 5-6b; the server checks distance)
         // a short walk first; then the pillar from the ground beside it; the church door only for what is inside
@@ -1804,16 +1812,16 @@ async function removeScaffold (bot, { shouldStop, maxPasses = 4, keep = null, ex
         if (!r.ok && !act.reach(bot, p, 4.8)) {
           // (climb:false - the daily teardown: no pillar to take a pillar down; a block out of reach from the ground is
           //  build.finish's. Pillaring for leftovers took 1037s of a day; audit)
-          if (!climb) { failLeftover(bot, p); continue }
+          if (!climb) { miss(p); continue }
           if (await reachByPillar(bot, p, { shouldStop })) { removed++; got++; continue }
           r = (await viaDoor(bot, new goals.GoalNear(p.x, p.y, p.z, 3), siteMovements(bot, { dig: 'noGround' }))) || r
         }
         if (!r.ok && !act.reach(bot, p, 4.8)) {
-          log('build', `scaffold ${move.fmt(p)}: couldn't get within reach (${r.why}, ${world.dist3(bot.entity.position, p).toFixed(1)}b off, from ${move.fmt(bot.entity.position)})`); failLeftover(bot, p); continue
+          log('build', `scaffold ${move.fmt(p)}: couldn't get within reach (${r.why}, ${world.dist3(bot.entity.position, p).toFixed(1)}b off, from ${move.fmt(bot.entity.position)})`); miss(p); continue
         }
       }
       // within a player's reach after the walk: dig from here (act.dig's stricter 4.3 walked again, 20s a block)
-      if (await dig(p, act.reach(bot, p, 5))) { removed++; got++ } else { log('build', `scaffold ${move.fmt(p)}: the dig failed (${world.dist3(bot.entity.position, p).toFixed(1)}b off)`); failLeftover(bot, p) }
+      if (await dig(p, act.reach(bot, p, 5))) { removed++; got++ } else { log('build', `scaffold ${move.fmt(p)}: the dig failed (${world.dist3(bot.entity.position, p).toFixed(1)}b off)`); miss(p) }
       if (inv.freeSlots(bot) <= 1) await base().tossJunk(bot)
     }
     await act.collectDrops(bot, { radius: 10, maxMs: 8000 })
