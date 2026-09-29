@@ -227,7 +227,9 @@ async function placeChestInner (bot) {
   //  deposit said "no chest with room and could not place one", the pack full on every trip, 2026-09-29)
   const freeCells = () => {
     const out = []
-    for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) for (const dy of [0, -1, 1]) {
+    // (out to 8, nearest first: within 3 every cell held a chest or stood beside one by the castle's second night - "no chest
+    //  with room and could not place one" with a chest in the pack, the trips leaving with 4 free slots, 2026-09-30)
+    for (let dx = -8; dx <= 8; dx++) for (let dz = -8; dz <= 8; dz++) for (const dy of [0, -1, 1]) {
       const p = { x: me.x + dx, y: me.y + dy, z: me.z + dz }
       if (Math.abs(dx) + Math.abs(dz) < 2) continue
       const c = world.at(bot, p.x, p.y, p.z); const b = world.at(bot, p.x, p.y - 1, p.z); const up = world.at(bot, p.x, p.y + 1, p.z)
@@ -240,10 +242,10 @@ async function placeChestInner (bot) {
   }
   const hutSpots = h && mem.get().hutPlan ? require('./hut').utilitySpots(bot).filter(p => move.utilitySpotOK(p)) : []
   for (const spots of [hutSpots, freeCells()]) {
-    for (const s of spots.slice(0, 8)) {
-      let adj = false
-      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const nb = world.at(bot, s.x + dx, s.y, s.z + dz); if (nb && /chest/.test(nb.name)) adj = true }
-      if (adj) continue
+    // (a spot beside a chest is none - filtered before the eight tries, never inside them: a yard of chests filled the
+    //  nearest eight with such spots and the wider search behind them was never reached)
+    const besideChest = s => [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => { const nb = world.at(bot, s.x + dx, s.y, s.z + dz); return !!nb && /chest/.test(nb.name) })
+    for (const s of spots.filter(q => !besideChest(q)).slice(0, 8)) {
       if (await act.place(bot, s, 'chest', { allowZones: ['base'] })) {
         mem.addUnique('chests', s)
         notePlacedChest(s)
