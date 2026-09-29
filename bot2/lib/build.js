@@ -1516,7 +1516,17 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
         const tw = Date.now()
         const r = await goSite(bot, new goals.GoalBlock(st.x, st.y, st.z), 'place').catch(() => null)
         placeProf.reach += Date.now() - tw
-        if (r && !r.ok) { badStands.add(key(st)); if (/timeout|stuck/.test(r.why || '')) { skipTry = true; c.ownWay = true } }
+        if (r && !r.ok) {
+          badStands.add(key(st)); if (/timeout|stuck/.test(r.why || '')) { skipTry = true; c.ownWay = true }
+          // (the stand itself, for the next root: what stands at it, and whether a hold keeps it - a waiting hole, its column,
+          //  a hole's last face, a remembered trap; audit)
+          try {
+            const nm = (dy) => { const b = world.at(bot, st.x, st.y + dy, st.z); return b ? b.name : '?' }
+            const w = waitCols.get(st.x + ',' + st.z); const traps = mem.get().trapCells || []
+            const flags = [holdAround.has(key(st)) ? 'a held face' : '', w != null && st.y > w ? 'over a waiting hole (y' + w + ')' : '', job.index.has(key(st)) ? 'a cell of the build' : '', traps.some(t => Math.abs(t.x - st.x) <= 1 && Math.abs(t.y - st.y) <= 1 && Math.abs(t.z - st.z) <= 1) ? 'by a remembered trap' : ''].filter(Boolean)
+            log('build', `the cluster stand ${move.fmt(st)} for ${c.name} at ${move.fmt(c)} not reached (${r.why}) - feet ${nm(0)}, head ${nm(1)}, floor ${nm(-1)}${flags.length ? '; ' + flags.join(', ') : ''}; from ${move.fmt(world.feetPos(bot))}`)
+          } catch {}
+        }
       }
     }
     if (skipTry) {
