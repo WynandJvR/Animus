@@ -1745,15 +1745,7 @@ function holesList (bot) {
 const leftovers = new Map() // key -> { n, day }
 // THE DAY, counted the way watchNights and the tidy gates read one - a night seen and then day, or the clock wrapped back
 // (a night slept through) - never bot.time.day; kept in memory so a restart keeps the count (audit 2026-09-29)
-let dayTod = null
-function today (bot) {
-  const d = mem.get().dayNo || { n: 0, night: false }
-  const t = world.tod(bot); const night = world.isNight(bot)
-  const next = !night && (d.night || (dayTod != null && t < dayTod))
-  dayTod = t
-  if (next || d.night !== night) mem.set('dayNo', { n: d.n + (next ? 1 : 0), night })
-  return d.n + (next ? 1 : 0)
-}
+function today (bot) { return require('./day').dayNo(bot) } // (THE day - day.js)
 function resting (bot, p) { const l = leftovers.get(key(p)); return !!l && l.n >= 3 && l.day === today(bot) }
 // THE DAILY TEARDOWN'S MISSES, across days: its leftovers rest after 3 tries in a day, and it runs once a day, one pass -
 // a block out of reach never rested, and every day walked to the same ones, 30s each, until its 4 minutes ran out: 7
