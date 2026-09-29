@@ -1153,10 +1153,10 @@ async function placeCell (bot, c, j = job) {
   // another cell - never placed on their own
   if (c.follows) return cellDone(bot, c) === true
   let cur = bot.blockAt(pos)
-  if (!cur) return false
+  if (!cur) return why('its cell is not loaded')
   if (cellDone(bot, c)) return true
   // attached things wait for what they hang on (not a failure - buildStep doesn't pick them until then)
-  if (c.attach && !supportThere(bot, c)) return false
+  if (c.attach && !supportThere(bot, c)) return why('what it hangs on is not there yet')
   // HALF-WAY: the pot stands empty, two of three candles stand - the next step goes onto what is there, never a dig
   const step = stepOf(c, cur)
   // whatever else is in our cell that isn't the finished block comes out - a wrong block, the right one the wrong way
@@ -1282,7 +1282,7 @@ async function placeCell (bot, c, j = job) {
   log('build', `${c.name} at ${move.fmt(c)} came out ${b ? stateOf(b) : '?'} (want ${JSON.stringify(c.want || wantOf(c))}) - taking it out again`)
   // (poured water is no block to dig out)
   if (!c.pour) await act.dig(bot, pos, own)
-  return false
+  return why('came out in the wrong state - taken out again') // (was "unlogged": 430s of the evening's misses; audit)
 }
 
 // Place as much as the pack allows. Returns {placed, blockedOn: item|null, done}.
