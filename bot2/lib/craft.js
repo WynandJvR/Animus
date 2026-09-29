@@ -21,7 +21,9 @@ const WOODS_ALL = WOODS // (pickWood filters its own copy)
 
 // Items with a direct world source. tier: minimum pickaxe tier (1 wood, 2 stone, 3 iron).
 const GATHER = {
-  cobblestone: { blocks: /^(stone|cobblestone)$/, tool: 'pickaxe', tier: 1 },
+  // (natural stone only - it drops the cobblestone: a cobblestone block standing is a wall someone put there, a player's
+  //  or our own filler (the tidy's), never a find; audit 2026-09-30)
+  cobblestone: { blocks: /^stone$/, tool: 'pickaxe', tier: 1 },
   // granite in veins through the stone: the mine's tunnels cut through it and take what shows in the walls
   granite: { blocks: /^granite$/, tool: 'pickaxe', tier: 1, ore: true },
   andesite: { blocks: /^andesite$/, tool: 'pickaxe', tier: 1, ore: true },
