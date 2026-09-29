@@ -1223,7 +1223,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     const clickable = c => plansFor(c).some(p => refOk(bot, c, p))
     const supportable = c => !c.attach && !c.twin && plansFor(c).some(p => !job.index.has(key({ x: c.x + p.off[0], y: c.y + p.off[1], z: c.z + p.off[2] })))
     const ready = doable.filter(c => !holdBack.has(key(c)) && (clickable(c) || supportable(c)))
-    if (!ready.length) { profLog(); if (!placed) log('build', `nothing ready: lowest y${lowestAll}, ${doable.length} doable (${doable.slice(0, 5).map(c => c.name + '@' + c.x + ',' + c.y + ',' + c.z).join(' ')}) none clickable or supportable, waiting on ${waiting}`); return { placed, blockedOn: waiting, blockedHolds: waitingHolds, done: false } }
+    if (!ready.length) { profLog(); log('build', `${placed ? `step ended after ${placed} placed - ` : ''}nothing ready: lowest y${lowestAll}, ${doable.length} doable (${doable.slice(0, 5).map(c => c.name + '@' + c.x + ',' + c.y + ',' + c.z).join(' ')}) none clickable or supportable (${doable.filter(c => holdBack.has(key(c))).length} held back this step), waiting on ${waiting}`); return { placed, blockedOn: waiting, blockedHolds: waitingHolds, done: false } }
     // everything within reach of where we stand first, then the nearest - a layer down counts one block, not four:
     // the walk between cells is most of a block's six seconds, and "lower first" sent the bot back and forth across the
     // 50x140 site between two layers (2026-09-27)
