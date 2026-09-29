@@ -462,7 +462,10 @@ const FILL_BUCKETS = 3
 async function fillTrip (bot, n, ctx = {}) {
   const want = Math.max(1, Math.min(n, FILL_BUCKETS))
   if (inv.count(bot, 'bucket') < want && base().bankCount('bucket') > 0) await base().withdraw(bot, 'bucket', want - inv.count(bot, 'bucket')).catch(() => 0)
-  if (inv.count(bot, 'bucket') < want) await craft().ensure(bot, 'bucket', want, Object.assign({}, ctx, { noWithdraw: false })).catch(() => false)
+  // (the first is made whatever it takes; the spares only of ingots already held - never the iron the kit's shield or the
+  //  armour is waiting on, and no mining for a convenience; audit)
+  if (!inv.has(bot, 'bucket')) await craft().ensure(bot, 'bucket', 1, Object.assign({}, ctx, { noWithdraw: false })).catch(() => false)
+  while (inv.count(bot, 'bucket') < want && inv.count(bot, 'iron_ingot') >= 3) { if (!await craft().ensure(bot, 'bucket', inv.count(bot, 'bucket') + 1, Object.assign({}, ctx, { noWithdraw: true })).catch(() => false)) break }
   if (!inv.has(bot, 'bucket')) { log('forage', 'no bucket and none to be made (three iron ingots)'); return 'blocked' }
   let filled = 0
   while (filled < n && inv.has(bot, 'bucket')) {
@@ -472,7 +475,7 @@ async function fillTrip (bot, n, ctx = {}) {
   return filled > 0
 }
 async function fillBucket (bot, ctx) {
-  const w = (await world.scanBlocks(bot, /^water$/, { maxDistance: world.sightReach(bot), count: 20, filter: b => Number(props(b).level || 0) === 0 && gather().outOfZones(b) && world.isAirish(world.at(bot, b.position.x, b.position.y + 1, b.position.z)) }))
+  const w = (await world.scanBlocks(bot, /^water$/, { maxDistance: world.sightReach(bot), count: 20, filter: b => Number(props(b).level || 0) === 0 && gather().outOfZones(b) && world.isAirish(world.at(bot, b.position.x, b.position.y + 1, b.position.z)) && world.openSky(bot, { x: b.position.x, y: b.position.y + 1, z: b.position.z }) })) // (open sky only: the flooded shaft in the mine meant a 17-19 block dive and a swim up enclosed water - the geometry of the 03:54 drowning; audit)
     .sort((a, b) => world.dist3(a.position, bot.entity.position) - world.dist3(b.position, bot.entity.position))[0]
   if (!w) { log('forage', 'no still water in sight to fill a bucket at'); return false }
   const g = await move.goTo(bot, new goals.GoalNear(w.position.x, w.position.y + 1, w.position.z, 2), { timeoutMs: 40000, label: 'to water' })
