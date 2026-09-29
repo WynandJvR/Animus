@@ -1194,7 +1194,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       // (never a deadlock: a cell with no route to its item, or one that has already rested once, is covered - else a whole
       //  floor waits for ever on a hay block no trip can bring; audit 2026-09-28)
       if (cellUnsourced(b)) { if (!sealSaid.has(key(b))) { sealSaid.add(key(b)); log('build', `covering ${b.name} at ${move.fmt(b)} - no route for it`) } return false }
-      if (failsOf(b) >= 1) return false
+      if (failsOf(b) >= 1 && !(cellFails.get(key(b)) || {}).shared) return false // (its OWN miss only: a patch's shared rest proves nothing about it, and covered it is sealed in and dropped - a hole in the wall; audit)
       for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
         const x = b.x + dx; const z = b.z + dz
         const nb = job.index.get(key({ x, y: b.y, z }))
