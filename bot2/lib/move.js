@@ -720,7 +720,12 @@ async function escapeUpInner (bot) {
   log('move', `stuck at ${fmt(f0)} walk after walk - climbing straight out`)
   for (let i = 0; i < 16; i++) {
     const f = bot.entity.position.floored()
-    if (bot.entity.onGround && !world.feetInWater(bot) && world.openSky(bot, { x: f.x, y: f.y, z: f.z })) break
+    // (open sky is out - but not in a pit INSIDE the build's footprint below its floor: the unbuilt corner of the castle, a
+    //  6-deep hole walled round by the walls above it, read "climbed out" without a block climbed, and every walk from its
+    //  bottom failed, 2026-09-29. There, up to the floor's level first, then the walk)
+    const jb = require('./build').getJob(); const bb = jb && jb.box
+    const pit = !!bb && f.x >= bb.x1 && f.x <= bb.x2 && f.z >= bb.z1 && f.z <= bb.z2 && f.y < bb.y1
+    if (bot.entity.onGround && !world.feetInWater(bot) && world.openSky(bot, { x: f.x, y: f.y, z: f.z }) && !pit) break
     for (const dy of [2, 1]) {
       const b = world.at(bot, f.x, f.y + dy, f.z)
       // (a finished cell of OUR build over the head is ours to take and put back: sealed in the hollow under the castle's
