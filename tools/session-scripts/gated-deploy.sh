@@ -20,10 +20,10 @@ while [ $SECONDS -lt $end ]; do
     [ "$(fp)" = "$FP0" ] || { echo "REFUSED: bot2 changed while the gate was shut - what is on disk now is not what this deploy was started for"; exit 3; }
     cd /c/mc-bot-lab/bot2; for f in main.js lib/*.js; do node --no-lazy --check "$f" || { echo "SYNTAX FAIL $f"; exit 1; }; done
     NODE_PATH=/c/mc-bot-lab/bot2/node_modules node /c/mc-bot-lab/tools/session-scripts/xmodcheck.js /c/mc-bot-lab/bot2 > /dev/null || { echo "CROSS-MODULE NAME MISSING - run tools/session-scripts/xmodcheck.js"; exit 1; }
-    PREV=$(ls -d $S/rollback/candidate-* 2>/dev/null | tail -1)
+    PREV=$(ls -dt $S/rollback/candidate-* 2>/dev/null | head -1)
     N=$S/rollback/candidate-$(date +%H%M); mkdir -p $N; cp -r lib *.js command.gbnf config.json package.json $N/ 2>/dev/null; mkdir -p $N/schematics; cp schematics/hut.schem $N/schematics/ 2>/dev/null
     # (the last three snapshots only - each is a whole copy of bot2: thirteen in a day were 439 files, 13MB)
-    ls -d $S/rollback/candidate-* 2>/dev/null | head -n -3 | xargs -r rm -rf
+    ls -dt $S/rollback/candidate-* 2>/dev/null | tail -n +4 | xargs -r rm -rf
     echo "$(date +%Y-%m-%dT%H:%M) prev=$PREV new=$N" > $S/last-deploy.txt # (rollback target = prev: the snapshot is of the NEW code)
     curl -s -m 5 -X POST -H "Content-Type: application/json" -d '{"reconnect":true}' http://127.0.0.1:3001/config; echo " deployed: $(cat $S/last-deploy.txt)"; exit 0
   fi
