@@ -50,7 +50,9 @@ function note (bot, p, placed = null) {
   const home = mem.get().home
   if (!home || world.dist3(p, home) > RADIUS) return
   ledger.set(k(p), { x: p.x, y: p.y, z: p.z, name, at: Date.now() })
-  if (ledger.size > MAX) ledger.delete(ledger.keys().next().value)
+  // (full: the oldest deep one goes first - a mine's or a cave's climb-out 8+ under home is never the tidy's (pending), and
+  //  they were 85% of a full ledger, 2026-09-29: dropped oldest-first, the surface's stairs would have gone next)
+  if (ledger.size > MAX) { const floorY = home.y - 8; let drop = null; for (const [kk, q] of ledger) if (q.y < floorY) { drop = kk; break } ledger.delete(drop || ledger.keys().next().value) }
   dirty = true; save()
 }
 
@@ -76,7 +78,14 @@ function kept (bot, p, pts = infraPoints()) {
 // A block with a drop under it that hurts is a lid - a hole's cap, a shaft's plug - not a pillar: a pillar's blocks stand
 // on the next of them or on the ground. Taken out, the lid is a hole to fall down (the widened seed found 219, 69 of
 // them lone blocks, 2026-09-28)
-function capsADrop (bot, p) { return act.fallBelow(bot, p) > world.SAFE_DROP }
+// (set IN the ground, that is: ground beside it at its level. A block of ours standing in the air - a stair a tower left
+//  when a reflex stepped the body off it, a crown's stand - has a drop under it too, and read as a lid it left the
+//  ledger unsaid: three-block stairs 4-6 up stood by the orchard and home for good, "why are there still random
+//  cobblestone pillars", 2026-09-29. Taking such a block out opens no fall the air beside it has not already)
+function capsADrop (bot, p) {
+  if (act.fallBelow(bot, p) <= world.SAFE_DROP) return false
+  return [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => { const q = { x: p.x + dx, y: p.y, z: p.z + dz }; const b = world.at(bot, q.x, q.y, q.z); return !!b && b.boundingBox === 'block' && !world.LEAF_RE.test(b.name) && !ledger.has(k(q)) })
+}
 
 // the build's own ground (its zone, its cells) is the build's ledger's and snapshot's - never litter's (an orchard's area
 // widened by 3 reaches into the castle's north edge)
@@ -218,7 +227,8 @@ async function tidy (bot, { from, radius = RADIUS, shouldStop } = {}) {
       //  10-50s a block and nothing dropped, 2026-09-28. None to be had: the tidy stops, the tools come first)
       if (!await require('./craft').keepTool(bot, 'pickaxe', { shouldStop })) { log('litter', 'no pickaxe - the tidy waits for one'); save(); return removed }
       // (a stepping stone can become a light's post or a water's edge after it was noted: asked again at the dig, and let go)
-      if (kept(bot, q, pts) || capsADrop(bot, q)) { ledger.delete(k(q)); dirty = true; continue }
+      { const why = kept(bot, q, pts) ? 'a light post, a water edge or infrastructure' : capsADrop(bot, q) ? 'a lid - taken out it opens a drop' : null
+        if (why) { log('litter', `${q.name} at ${k(q)} let go: ${why}`); ledger.delete(k(q)); dirty = true; continue } }
       // (above the reach from the ground - a stand of ours left on a tree's crown, 8 up: up to it the way a player does, a
       //  pillar of our own beside it, then that pillar down from on top. From the ground only, such blocks stood for good -
       //  the cobble on the spruce tops the operator asked about, 2026-09-28)
@@ -237,4 +247,4 @@ async function tidy (bot, { from, radius = RADIUS, shouldStop } = {}) {
   return removed
 }
 
-module.exports = { note, seed, pending, tidy, size: () => ledger.size }
+module.exports = { note, seed, pending, tidy, capsADrop, size: () => ledger.size }
