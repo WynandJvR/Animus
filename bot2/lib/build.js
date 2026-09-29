@@ -1002,7 +1002,13 @@ async function placeCell (bot, c, j = job) {
     // (2026-09-28). Never from the hollow inside: its last rim cell would wall the bot in under the floor (audit)
     if (c.foundation && !act.reach(bot, pos, 4.3)) {
       const st = foundationStand(bot, c)
-      if (st) await goSite(bot, new goals.GoalBlock(st.x, st.y, st.z), 'place')
+      // (an OUTSIDE stand is walked to from the outside: never through the castle's doors - the rim's trench lies below the
+      //  floor, and the door fallback crossed the south-west rooms toward it, 40s a cell, 8 cells a step, 2026-09-29. Far
+      //  or round the build, the long walk's legs; once down there, the in-reach cells round it go in before it leaves)
+      if (st) {
+        const r1 = await goSite(bot, new goals.GoalBlock(st.x, st.y, st.z), 'place', { doors: false }).catch(() => null)
+        if ((!r1 || !r1.ok) && !act.reach(bot, pos, 4.3) && !c.hole) await move.travel(bot, st, { range: 0, label: 'to the rim from outside', maxMs: 90000 }).catch(() => null)
+      }
       // (from its outside stand or not at all: the planner's own way to a rim cell led from the castle floor into the hollow
       //  under it, walled in by then - fifteen minutes "stuck" under the build, 2026-09-28. It rests; the outside is tried again)
       // (an outside stand that was not reached: the next try goes from inside the hollow if one is safe - the same outside
