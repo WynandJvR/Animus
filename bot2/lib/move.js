@@ -60,6 +60,13 @@ function utilitySpotOK (p, { temporary = false, except = null } = {}) {
   // never block the safehouse doorway (furniture on the step inside the door locks us out)
   const plan = require('./memory').get().hutPlan
   if (plan && plan.door && Math.abs(p.x - plan.door.x) + Math.abs(p.z - plan.door.z) <= 1 && Math.abs(p.y - plan.home.y) <= 1) return false
+  // (nor the 3x3 round the OUTSIDE door step - furnish's own "crowding the way in" rule: a chest placed there by the deposit
+  //  was picked up by furnish at once, placed again, picked up - every few seconds, 2026-09-29. One rule for both)
+  if (plan && plan.door && plan.interior && Math.abs(p.y - plan.home.y) <= 1) {
+    const axisX = plan.door.x < plan.interior.x1 || plan.door.x > plan.interior.x2
+    const o = axisX ? { x: plan.door.x < plan.interior.x1 ? plan.door.x - 1 : plan.door.x + 1, z: plan.door.z } : { x: plan.door.x, z: plan.door.z < plan.interior.z1 ? plan.door.z - 1 : plan.door.z + 1 }
+    if (Math.abs(p.x - o.x) <= 1 && Math.abs(p.z - o.z) <= 1) return false
+  }
   // nor the room's walkway or the bed's cells (a furnace landed mid-walkway, the table before it)
   if (plan && botRef && Math.abs(p.y - plan.home.y) <= 1) {
     const lay = require('./hut').layout(botRef)
