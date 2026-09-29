@@ -1137,6 +1137,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
   // scattered cobblestone in seven minutes counted as progress while 50 glass cells held every layer above them, and
   // the glass's sand and fuel were only fetched when a step placed nothing - at dusk, too late (2026-09-26)
   let waiting = null
+  let waitingCell = null
   let waitingHolds = false // (the item named holds the band up - not a detached one, named only because nothing else is missing)
   const badStands = new Set() // (stands whose walk failed this step: clusterStand passes them by)
   const holdBack = new Set() // (cells that would wall the body in from where it stands: later this step, or the next - wallsMeIn)
@@ -1156,6 +1157,9 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     // roof; the walls below it must not wait for the lantern)
     const det = detachedItems(todo, bot)
     const lowestAll = lowestStructural(todo, bot, det)
+    // (what ANCHORS the band: the one definition - the step's end lines name it, and an item "holds" only when its cell is
+    //  one: a trapdoor - infill - was said to hold the castle for two hours while a lightning rod did; audit 2026-09-29)
+    const anchors = c => !c.attach && !c.follows && !c.foundation && !infillCell(c) && !((cellFails.get(key(c)) || {}).n >= 1) && c.y === lowestAll && !det.has(stepItem(bot, c)) && !fallsIn(bot, c, stepItem(bot, c))
     const items = inv.items(bot)
     // (a cell half-way - an empty pot - waits on its next step's item, the plant)
     // (a two-step cell is ready only with both steps' items in hand: the pot went in without its flower, the step "failed"
@@ -1169,10 +1173,11 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       //  and is no bottleneck: named first, the director spent the young day on 15 note blocks' chain - redstone, an iron
       //  pickaxe, the iron's fuel - while the walls waited on nothing of it, 2026-09-28. Named last, once nothing else is)
       const lowAll = todo.filter(c => !c.attach && !c.follows && !cellUnsourced(c) && c.y <= lowestAll + 1)
-      const low = lowAll.find(c => !has(c) && !det.has(stepItem(bot, c)))
+      const low = lowAll.find(c => !has(c) && anchors(c)) || lowAll.find(c => !has(c) && !det.has(stepItem(bot, c))) // (the anchor's own missing item first)
       // (then infill waiting on its material - glass: the sand trips are still wanted, only the layers don't wait)
       const m = low || todo.filter(c => c.attach && !cellUnsourced(c) && supportThere(bot, c)).find(c => !has(c)) || todo.filter(c => infillCell(c) && !cellUnsourced(c) && c.y <= lowestAll + 1).find(c => !has(c)) || todo.filter(c => infillCell(c) && !cellUnsourced(c)).sort((a, b) => a.y - b.y).find(c => !has(c)) || lowAll.find(c => !has(c))
       // (the item really missing: a pot in hand and its flower not is waiting on the flower - named for the director; audit)
+      waitingCell = m || null
       return m ? (stepOf(m, world.at(bot, m.x, m.y, m.z)) !== 'then' && m.then && pickItem(bot, m, items) ? m.then : stepItem(bot, m)) : null
     }
     // the lowest two layers of what we HAVE the blocks for: 24 missing glass panes in a wall no longer hold up
@@ -1212,11 +1217,11 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     //  castle's one base water cell sits over a hole the foundation fills first; audit 2026-09-29)
     doable = doable.filter(c => { if (!c.pour) return true; const b = world.at(bot, c.x, c.y - 1, c.z); return !!b && !world.isAirish(b) }) // (anything but air under it: ground, a slab, the pool's own water below)
     waiting = missingItem()
-    waitingHolds = !!waiting && !det.has(waiting)
+    waitingHolds = !!waiting && !!waitingCell && anchors(waitingCell)
     if (!doable.length) {
       // (the band as it ended the step - which layer anchors it, and by which cell: a step that ends "waiting on X" after
       //  a few blocks said nothing of what held the band down, 2026-09-28)
-      const anchor = todo.find(c => !c.attach && !c.follows && !c.foundation && !infillCell(c) && !((cellFails.get(key(c)) || {}).n >= 1) && c.y === lowestAll && !det.has(stepItem(bot, c)) && !fallsIn(bot, c, stepItem(bot, c)))
+      const anchor = todo.find(anchors)
       if (placed) log('build', `step ended: band anchored at y${lowestAll}${anchor ? ' by ' + stepItem(bot, anchor) + '@' + anchor.x + ',' + anchor.y + ',' + anchor.z + (has(anchor) ? ' (in hand)' : ' (not in hand)') : ''}, ${structural.length} structural in hand (min y${minY}), ${todo.length} todo`)
       profLog(); if (!placed) log('build', `nothing doable: lowest structural y${lowestAll}, ${todo.length} todo, ${structural.length} structural in hand (min y${minY}), ${attached.length} attached ready, ${waitingHolds ? 'waiting on ' + waiting : (waiting ? waiting + ' missing (detached - holding nothing)' : 'waiting on nothing')}`); return { placed, blockedOn: waiting, blockedHolds: waitingHolds, done: false } }
     const me = bot.entity.position
@@ -1229,7 +1234,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     if (!ready.length) {
       // (and what anchors the band there - the lowest cell that holds the layers: the step's end is its reach, not the
       //  item a trapdoor waits on, 2026-09-29)
-      const anchor = todo.find(c => !c.attach && !c.follows && !c.foundation && !infillCell(c) && !((cellFails.get(key(c)) || {}).n >= 1) && c.y === lowestAll && !det.has(stepItem(bot, c)) && !fallsIn(bot, c, stepItem(bot, c)))
+      const anchor = todo.find(anchors)
       const anc = anchor ? `, band anchored by ${stepItem(bot, anchor)}@${anchor.x},${anchor.y},${anchor.z}${has(anchor) ? ' (in hand)' : ' (not in hand)'}${holdBack.has(key(anchor)) ? ' (held back)' : ''}` : ''
       // (a cell that can never be readied - nothing to click, nothing to prop it on - is never tried, so it never fails,
       //  and a cell that never fails anchors the band for ever: a down-facing lightning rod whose only click face is the
