@@ -138,6 +138,21 @@ function start ({ bot, port, host, director, commands, brainSettings, pov, chat 
     if (req.method === 'GET' && url === '/health') return send(res, 200, { ok: true, spawned: !!bot.entity, connected: !!bot.entity, runtime: 'bot2' })
     if (req.method === 'GET' && (url === '/state' || url.startsWith('/state?'))) { try { return send(res, 200, state(url)) } catch (e) { return send(res, 500, 'error: ' + e.message) } }
     if (req.method === 'GET' && url === '/log') return send(res, 200, tail(40).join('\n'))
+    // (the blocks as they stand round a point - read-only, for diagnosis: the blueprint is what should be there, this is what
+    //  is. r at most 3, the non-air blocks with their states; 2026-09-29)
+    if (req.method === 'GET' && url.startsWith('/blocks?')) {
+      try {
+        const q = new URLSearchParams(url.slice(8)); const x0 = Math.floor(+q.get('x')); const y0 = Math.floor(+q.get('y')); const z0 = Math.floor(+q.get('z')); const r = Math.min(3, Math.max(0, Math.floor(+(q.get('r') || 1))))
+        if (![x0, y0, z0].every(Number.isFinite)) return send(res, 400, 'x, y, z wanted')
+        const out = []
+        for (let y = y0 - r; y <= y0 + r; y++) for (let z = z0 - r; z <= z0 + r; z++) for (let x = x0 - r; x <= x0 + r; x++) {
+          const b = world.at(bot, x, y, z); if (!b || b.name === 'air' || b.name === 'cave_air') continue
+          let props = {}; try { props = b.getProperties() || {} } catch {}
+          out.push({ x, y, z, name: b.name, props })
+        }
+        return send(res, 200, out)
+      } catch (e) { return send(res, 500, 'error: ' + e.message) }
+    }
     if (req.method === 'GET' && url === '/chat') return send(res, 200, chat ? chat.tail().join('\n') : '')
     if (req.method === 'GET' && url === '/brain') return send(res, 200, { settings: brainSettings, models: [brainSettings.model] })
     if (req.method === 'GET' && url === '/pov') { if (!bot.entity || !pov) return send(res, 503, { ok: false }); return pov.requestFrame(bot, f => send(res, 200, f)) }
