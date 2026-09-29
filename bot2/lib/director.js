@@ -258,9 +258,13 @@ function ironWanted () {
   if (rank(w.feet) < 4) out.push('iron_boots')
   if (inv.toolTier(bot, 'pickaxe') < 3) out.push('iron_pickaxe')
   if (inv.toolTier(bot, 'sword') < 3) out.push('iron_sword')
+  // shears last, after the body's gear: two ingots, and wool is shorn (1-3 a sheep, grown back) not killed for (1, and the
+  // flock gone) - the castle's wool trips killed the sheep round home and explored 176 blocks out for more, 2026-09-29.
+  // Never a reason for an ore trip (not ARMOUR_GEAR); leaves cut with them too
+  if (!inv.has(bot, 'shears') && base.bankCount('shears') === 0) out.push('shears')
   return out
 }
-const IRON_COST = { shield: 1, bucket: 3, iron_chestplate: 8, iron_leggings: 7, iron_helmet: 5, iron_boots: 4, iron_pickaxe: 3, iron_sword: 2 }
+const IRON_COST = { shield: 1, bucket: 3, iron_chestplate: 8, iron_leggings: 7, iron_helmet: 5, iron_boots: 4, iron_pickaxe: 3, iron_sword: 2, shears: 2 }
 // the pieces that stand between the body and a mob (a trip is made for these; tools and the bucket wait for iron)
 const ORE_METHOD = 'vein'
 const ARMOUR_GEAR = new Set(['shield', 'bucket', 'iron_chestplate', 'iron_leggings', 'iron_helmet', 'iron_boots'])
