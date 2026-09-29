@@ -35,6 +35,9 @@ while true; do
   # a gate the path opens refusing its click at one spot, 5+ times in 2 min: the stuck retry (move.js path_use_error)
   pu=$(recent 2 | grep -aoE "path_use_error at [-0-9]+,[-0-9]+,[-0-9]+" | sort | uniq -c | sort -rn | awk '$1>=5 {print; exit}')
   [ -n "$pu" ] && { echo "ALARM: stuck gate retry: $pu"; exit 0; }
+  # walks giving up at ONE spot, 5+ in 10 min: trapped (a room, a crawlspace, a pit) - the escape should have fired
+  gs=$(recent 10 | grep -aoE "gave up \(stuck x3\) at -?[0-9]+,-?[0-9]+,-?[0-9]+" | sort | uniq -c | sort -rn | awk '$1>=5 {print; exit}')
+  [ -n "$gs" ] && { echo "ALARM: trapped - $gs"; exit 0; }
   pe=$(recent 10 | grep -ac "path_error #\|(crash) uncaught")
   [ "$pe" -ge 1 ] && { echo "ALARM: $pe path_error/crash lines in 10 min"; recent 10 | grep -a "path_error #\|(crash) uncaught" | cut -c2-200 | tail -3; exit 0; }
   # (handwork stopped because its click did nothing - /state buildProgress.stoppedWork - for over 10 min)

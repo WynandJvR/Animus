@@ -624,18 +624,23 @@ function detachedItems (todo, bot) {
   for (const h of holes) {
     if (seenP.has(key(h))) continue
     const comp = []; const q = [h]; seenP.add(key(h))
-    const opens = new Map() // opening -> the job cell that would close it, or null (never closable)
+    const opens = new Map() // opening -> { cells: the build's cells that would close it, faces: fills' cells to refuse }
+    const unbuilt = pos => { const c = job && job.index.get(key(pos)); return c && !c.clear && cellDone(bot, c) !== true ? c : null }
     while (q.length && comp.length < 64) {
       const p = q.shift(); comp.push(p)
-      if (world.openSky(bot, { x: p.x, y: p.y, z: p.z })) { const up = job && job.index.get(key({ x: p.x, y: p.y + 1, z: p.z })); opens.set('sky' + key(p), up && !up.clear && cellDone(bot, up) !== true ? up : null) }
+      // (a sky opening is closed by ANY block in its column, not only the cap: the next storey's floor over a held cap sealed
+      //  it all the same - every unbuilt cell of the build up the column is a closer; audit)
+      if (world.openSky(bot, { x: p.x, y: p.y, z: p.z })) { const cells = []; for (let y = p.y + 1; y <= (job ? job.box.y2 : p.y + 1); y++) { const u = unbuilt({ x: p.x, y, z: p.z }); if (u) cells.push(u) } opens.set('sky' + key(p), { cells, faces: [] }) }
       for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
         const n = { x: p.x + dx, y: p.y, z: p.z + dz }; const k = key(n)
         if (!openAt(n.x, n.y, n.z)) continue
         const jc = job && job.index.get(k)
         if (!jc || jc.clear) {
           if (!openAt(n.x, n.y + 1, n.z)) continue // (a one-high slit is no way in or out)
-          const hc = job && job.index.get(key({ x: n.x, y: n.y + 1, z: n.z })) // (the exit's head cell: placed, it is one-high)
-          opens.set('side' + k, hc && !hc.clear && cellDone(bot, hc) !== true ? hc : null)
+          // (closed by the exit's head cell placed - one-high then - or by a fill into the exit itself: planner filler, a tower,
+          //  a support; the protector's holeFaces refuse those; audit)
+          const hc = unbuilt({ x: n.x, y: n.y + 1, z: n.z })
+          opens.set('side' + k, { cells: hc ? [hc] : [], faces: [n, { x: n.x, y: n.y + 1, z: n.z }] })
           continue
         }
         if (cellDone(bot, jc) === true || seenP.has(k)) continue
@@ -644,7 +649,8 @@ function detachedItems (todo, bot) {
     }
     if (comp.length >= 64 || opens.size !== 1) continue // (big: no pocket; none: sealed already; two or more: safe a pass)
     const only = [...opens.values()][0]
-    if (only) holdAround.add(key(only)) // (the last way in or out: never the one that closes it)
+    for (const c of only.cells) holdAround.add(key(c)) // (the last way in or out: never the one that closes it)
+    for (const f of only.faces) holeFaces.add(key(f))
   }
   return detached
 }
