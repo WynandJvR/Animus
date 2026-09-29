@@ -1286,10 +1286,10 @@ async function castleWorkInner () {
   // the same window the builder works in (it builds past a missing material, so the bricks for those layers
   // must come out of the chest too - with glass short, nothing was withdrawn and nothing built)
   phase('window')
-  const next = windowNeeds()
+  const nextLow = {}; const next = build.nextNeeds(bot, WINDOW_LAYERS, nextLow)
   // withdraw what we have for it (anything that stands in: birch stairs for jungle stairs)
   await build.ensureScaffold(bot, build.SCAFFOLD_WANT, { shouldStop: dayStop })
-  await withdrawWindow(next)
+  await withdrawWindow(next, nextLow)
   let carrying = 0
   for (const name of Object.keys(next)) carrying += countOf(name)
   let blockedOn = null
