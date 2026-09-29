@@ -89,10 +89,10 @@ function siteAt (bot, cx, cz, home) {
   // one level: the cheapest to level to (blocks dug and filled), none more than LEVEL_MAX off it, within the budget
   const cost = l => cols.reduce((a, c) => a + Math.abs(c.gy - l), 0)
   const levels = [...new Set(cols.map(c => c.gy))].filter(l => cols.every(c => Math.abs(c.gy - l) <= LEVEL_MAX))
-  if (!levels.length) return no('not level')
+  if (!levels.length) { const ys = cols.map(c => c.gy); return no(`not level (${Math.max(...ys) - Math.min(...ys)} high between the lowest and the highest)`) }
   const level = levels.sort((a, b) => cost(a) - cost(b))[0]
   const work = cost(level)
-  if (work > LEVEL_BUDGET) return no('not level')
+  if (work > LEVEL_BUDGET) return no(`not level (${work > 48 ? 'over 48' : work > 32 ? '33-48' : '25-32'} blocks of groundwork)`)
   // grass inside: a sheep grows its wool back by eating it
   if (cols.filter(c => c.inner && c.g.name === 'grass_block').length < 15) return no('too little grass')
   const y = level + 1
