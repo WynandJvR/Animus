@@ -1334,6 +1334,13 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
   let waitingCell = null
   let waitingHolds = false // (the item named holds the band up - not a detached one, named only because nothing else is missing)
   const badStands = new Set() // (stands whose walk failed this step: clusterStand passes them by)
+  // (where the bot can walk this step - reachFrom, once, lazily; stale when one of our own blocks lands in it (a corridor
+  //  cut). A PREFERENCE, not a filter: the stand walks may dig and place, and reach more than the walk-only model; audit)
+  let reach; let reachSaid = false
+  const reachSet = () => {
+    if (reach === undefined) { reach = reachFrom(bot, world.feetPos(bot)); if (!reach && !reachSaid) { reachSaid = true; log('build', `the region I can walk from ${move.fmt(world.feetPos(bot))} is over 2000 cells - stands chosen as before this step`) } }
+    return reach
+  }
   const holdBack = new Set() // (cells that would wall the body in from where it stands: later this step, or the next - wallsMeIn)
   // (where a step's time goes: choosing the cell, walking to and placing it - measured, not guessed)
   const prof = { tries: 0, ms: 0, okMs: 0, dist: 0, pick: 0, why: {} }; let tpick = Date.now()
@@ -1511,7 +1518,8 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     // (c.ownWay: a cell whose cluster stand's walk ran out goes its own way next time - placeCell's look-at walk, which may
     //  find a wall top; the same unreachable stand was chosen again every step and the look-at walk never ran; audit)
     if (!c.foundation && !c.ownWay && !inReach(c) && ready.length > 2) {
-      const st = clusterStand(bot, c, ready, badStands)
+      const st = clusterStand(bot, c, ready, badStands, reachSet())
+      if (st && st.out) log('build', `the stand ${move.fmt(st)} for ${c.name} at ${move.fmt(c)} is outside where I can walk (${reach ? reach.size : '?'} cells round ${move.fmt(world.feetPos(bot))}) - no stand inside it: tried as a last resort`)
       if (st && st.n >= 3) {
         const tw = Date.now()
         const r = await goSite(bot, new goals.GoalBlock(st.x, st.y, st.z), 'place').catch(() => null)
@@ -1550,7 +1558,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     if (ok && tdMiss.size) { let w = 0; for (const k of [...tdMiss.keys()]) { const [x, y, z] = k.split(',').map(Number); if (Math.abs(x - c.x) <= 2 && Math.abs(y - c.y) <= 2 && Math.abs(z - c.z) <= 2) { tdMiss.delete(k); w++ } } if (w) { const o = {}; for (const [k, v] of tdMiss) o[k] = v; mem.set('teardownMiss2', o) } }
     if (ok) { for (const [k, f] of cellFails) { const [x, y, z] = k.split(',').map(Number); if (f.at && !f.woke && c.y <= y && y - c.y <= 2 && Math.abs(x - c.x) <= 2 && Math.abs(z - c.z) <= 2) { f.at = 0; f.woke = true } } }
     if (ok && (mem.get().toSwap || {})[key(c)]) mem.update(m => { delete m.toSwap[key(c)] }) // (swapped: off the list - it says what is left; audit)
-    if (ok) { placed++; if (cellFails.delete(key(c))) saveCellFails(); if (placed % 25 === 0) { const st = status(bot); log('build', `${st.done}/${st.total} placed`) } } else if (c.foundation && c.name === 'torch' && !world.isAirish(world.at(bot, c.x, job.box.y1, c.z))) dropFoundation(bot, c, 'the floor over it is laid - no way to it from above') // (a hollow's torch goes in from above or not at all)
+    if (ok) { placed++; if (reach && reach.has(key(c))) reach = undefined; if (cellFails.delete(key(c))) saveCellFails(); if (placed % 25 === 0) { const st = status(bot); log('build', `${st.done}/${st.total} placed`) } } else if (c.foundation && c.name === 'torch' && !world.isAirish(world.at(bot, c.x, job.box.y1, c.z))) dropFoundation(bot, c, 'the floor over it is laid - no way to it from above') // (a hollow's torch goes in from above or not at all)
     else if (c.foundation && sealedIn(bot, c)) dropFoundation(bot, c, 'sealed in') // (a reach miss rests like any cell: a rim cell faces the outside ground - the miss is the stand's, not the cell's, and dropped it is a hole in the wall; audit 2026-09-28)
     else {
       failed.set(key(c), (failed.get(key(c)) || 0) + 1); saveCellFails(); if (failed.get(key(c)) === 1) log('build', `${c.name} at ${move.fmt(c)} won't place (${lastPlaceFail || 'unlogged'}) - leaving it for later`)
@@ -1781,6 +1789,55 @@ function doorPanel (door) {
   return !open ? OPP[f] : (pr.hinge === 'right' ? CW[f] : CCW[f])
 }
 function edgeOf (dx, dz) { return dx === 1 ? 'east' : dx === -1 ? 'west' : dz === 1 ? 'south' : 'north' }
+// THE WALK'S STEP MODEL - one copy for the way-out search and the stand's reach: what a body standing at p may step to next
+// (walk only: no dig, no place). isC: a cell taken as solid (wayOut's candidate block).
+// (a door or a fence gate is a way through - the bot crosses them; counted solid, a room behind a door read as sealed and
+//  every cell placed from inside it was held back, 2026-09-29)
+// (and an OPEN trapdoor - an edge, not a wall: the planner's rule (move.js panel edges). Counted solid, the room behind the
+//  castle's inner trapdoors read as sealed and the escape dug out a trapdoor of the build, 2026-09-29)
+function walkModel (bot, isC = () => false) {
+  const passable = b => world.isAirish(b) || world.isOpenTrapdoor(b) || (/_door$|_fence_gate$/.test(b.name) && !/^iron_door$/.test(b.name))
+  const air = (x, y, z) => { if (isC(x, y, z)) return false; const b = world.at(bot, x, y, z); return !!b && passable(b) }
+  // (a door cell is stood in on its floor - world.standable wants airish feet, a door is not - and it is entered or left
+  //  through any edge but the one its panel stands on: closed, the edge opposite its facing; open, swung to the hinge's
+  //  side. "Passable every way" read a one-cell pocket beside an open door as a way out, and the search that could not
+  //  step into a door at all read the room as sealed - the physics decides, 2026-09-29; audit)
+  const st = (x, y, z) => { if (!air(x, y, z) || !air(x, y + 1, z)) return false; if (isC(x, y - 1, z)) return true; const fb = world.at(bot, x, y, z); if (fb && (/_door$/.test(fb.name) || world.isOpenTrapdoor(fb))) { const fl = world.at(bot, x, y - 1, z); return !!fl && world.isSolid(fl) && !world.isOpenTrapdoor(fl) } return world.standable(bot, x, y, z) }
+  // (an open door's or trapdoor's plate by world.plateEdge - the planner's own model, one copy; a CLOSED door by its own
+  //  panel here, which the planner leaves to crossDoor) - at the body's feet or head: a step across it is no step
+  const panelOf = b => { if (!b) return null; const v = world.plateEdge(b); if (v) return edgeOf(v[0], v[1]); if (/_door$/.test(b.name)) return doorPanel(b); return null }
+  const edgeShut = (x, y, z, dx, dz) => [world.at(bot, x, y, z), world.at(bot, x, y + 1, z)].some(b => panelOf(b) === edgeOf(dx, dz))
+  const next = p => {
+    const out = []
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const x = p.x + dx; const z = p.z + dz
+      if (edgeShut(p.x, p.y, p.z, dx, dz)) continue // (out of a door's or trapdoor's cell through its plate: no)
+      if (edgeShut(x, p.y, z, -dx, -dz)) continue // (into one through its plate: no)
+      for (let dy = 1; dy >= -world.SAFE_DROP; dy--) {
+        const y = p.y + dy
+        if (dy === 1 && !air(p.x, p.y + 2, p.z)) continue // (a step up wants the head room to jump)
+        if (dy < 0) { let open = true; for (let yy = y + 2; yy <= p.y + 1; yy++) if (!air(x, yy, z)) open = false; if (!open) break } // (a drop wants its column open)
+        if (!st(x, y, z)) continue
+        out.push({ x, y, z }); break
+      }
+    }
+    return out
+  }
+  return { air, st, next }
+}
+// Where the bot can WALK from f - the stand's reach (a stand no walk gets to is no stand: 0 of 6 placed, three stands in
+// another of the castle's compartments, 155s, 2026-09-29; audit). A Set of cell keys, or null over the cap - unknown, never
+// "only these" (a truncated set would shelve good stands at random)
+function reachFrom (bot, f, cap = 2000) {
+  const W = walkModel(bot)
+  const seen = new Set([key(f)]); const q = [{ x: f.x, y: f.y, z: f.z }]
+  while (q.length) {
+    if (seen.size > cap) return null
+    const p = q.shift()
+    for (const n of W.next(p)) { const k = key(n); if (!seen.has(k)) { seen.add(k); q.push(n) } }
+  }
+  return seen
+}
 let lastExit = null
 function wayOutPoint (bot, from = null) { lastExit = null; return wayOut(bot, { x: NaN, y: NaN, z: NaN }, from, false) ? lastExit : null }
 function wayOut (bot, c, from = null, withC = true) {
@@ -1788,50 +1845,20 @@ function wayOut (bot, c, from = null, withC = true) {
   const b0 = job.box; const f = from ? { x: from.x, y: from.y, z: from.z } : world.feetPos(bot)
   const inBox = p => p.x >= b0.x1 && p.x <= b0.x2 && p.z >= b0.z1 && p.z <= b0.z2
   if (!inBox(f)) return true
-  // (a door or a fence gate is a way through - the bot crosses them; counted solid, a room behind a door read as sealed and
-  //  every cell placed from inside it was held back, 2026-09-29)
-  // (and an OPEN trapdoor - an edge, not a wall: the planner's rule (move.js panel edges). Counted solid, the room behind the
-  //  castle's inner trapdoors read as sealed and the escape dug out a trapdoor of the build, 2026-09-29)
-  const passable = b => world.isAirish(b) || world.isOpenTrapdoor(b) || (/_door$|_fence_gate$/.test(b.name) && !/^iron_door$/.test(b.name))
-  {
-    const isC = (x, y, z) => withC && x === c.x && y === c.y && z === c.z
-    const air = (x, y, z) => { if (isC(x, y, z)) return false; const b = world.at(bot, x, y, z); return !!b && passable(b) }
-    // (a door cell is stood in on its floor - world.standable wants airish feet, a door is not - and it is entered or left
-    //  through any edge but the one its panel stands on: closed, the edge opposite its facing; open, swung to the hinge's
-    //  side. "Passable every way" read a one-cell pocket beside an open door as a way out, and the search that could not
-    //  step into a door at all read the room as sealed - the physics decides, 2026-09-29; audit)
-    const st = (x, y, z) => { if (!air(x, y, z) || !air(x, y + 1, z)) return false; if (isC(x, y - 1, z)) return true; const fb = world.at(bot, x, y, z); if (fb && (/_door$/.test(fb.name) || world.isOpenTrapdoor(fb))) { const fl = world.at(bot, x, y - 1, z); return !!fl && world.isSolid(fl) && !world.isOpenTrapdoor(fl) } return world.standable(bot, x, y, z) }
-    // (the plate's edge of a door or an open trapdoor - a trapdoor's opposite its facing, as a closed door's - at the body's
-    //  feet or head: a step across it is no step)
-    // (an open door's or trapdoor's plate by world.plateEdge - the planner's own model, one copy; a CLOSED door by its own
-    //  panel here, which the planner leaves to crossDoor)
-    const panelOf = b => { if (!b) return null; const v = world.plateEdge(b); if (v) return edgeOf(v[0], v[1]); if (/_door$/.test(b.name)) return doorPanel(b); return null }
-    const edgeShut = (x, y, z, dx, dz) => [world.at(bot, x, y, z), world.at(bot, x, y + 1, z)].some(b => panelOf(b) === edgeOf(dx, dz))
-    const seen = new Set([key(f)]); const q = [{ x: f.x, y: f.y, z: f.z }]
-    while (q.length) {
-      if (seen.size > 300) return true // (a region this big is no trap)
-      const p = q.shift()
-      if (!inBox(p)) { lastExit = p; return true }
-      // (open sky is out only where a tower may rise: below the floor a column with a cell of the build over it is the
-      //  climb's "no tower - a cell of the build", and read as a way out it kept the wall-opening escape from running -
-      //  the south rim's trench, walk and climb failing in turn, 2026-09-29)
-      if (!job.index.has(key(p)) && world.openSky(bot, p) && !isC(p.x, p.y, p.z)) { let clear = true; for (let y = p.y + 2; y < p.y + 22; y++) if (isC(p.x, y, p.z)) clear = false; for (let y = p.y + 1; y <= b0.y2; y++) { const q = job.index.get(`${p.x},${y},${p.z}`); if (q && !q.clear && !(q.foundation && q.name === 'cobblestone')) clear = false } /* (a filler foundation cell a tower may rise through: the protector's rule) (at ANY height, not only under the floor: a sky column through the layer's unbuilt cells read as an exit the tower may never take - the crawlspace at -2269,121,-583 was "a way out" to the search through eleven give-ups, 2026-09-29; audit) */ if (clear) { lastExit = p; return true } }
-      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-        const x = p.x + dx; const z = p.z + dz
-        if (edgeShut(p.x, p.y, p.z, dx, dz)) continue // (out of a door's or trapdoor's cell through its plate: no)
-        if (edgeShut(x, p.y, z, -dx, -dz)) continue // (into one through its plate: no)
-        for (let dy = 1; dy >= -world.SAFE_DROP; dy--) {
-          const y = p.y + dy
-          if (dy === 1 && !air(p.x, p.y + 2, p.z)) continue // (a step up wants the head room to jump)
-          if (dy < 0) { let open = true; for (let yy = y + 2; yy <= p.y + 1; yy++) if (!air(x, yy, z)) open = false; if (!open) break } // (a drop wants its column open)
-          if (!st(x, y, z)) continue
-          const k = key({ x, y, z }); if (!seen.has(k)) { seen.add(k); q.push({ x, y, z }) }
-          break
-        }
-      }
-    }
-    return false
+  const isC = (x, y, z) => withC && x === c.x && y === c.y && z === c.z
+  const W = walkModel(bot, isC)
+  const seen = new Set([key(f)]); const q = [{ x: f.x, y: f.y, z: f.z }]
+  while (q.length) {
+    if (seen.size > 300) return true // (a region this big is no trap)
+    const p = q.shift()
+    if (!inBox(p)) { lastExit = p; return true }
+    // (open sky is out only where a tower may rise: below the floor a column with a cell of the build over it is the
+    //  climb's "no tower - a cell of the build", and read as a way out it kept the wall-opening escape from running -
+    //  the south rim's trench, walk and climb failing in turn, 2026-09-29)
+    if (!job.index.has(key(p)) && world.openSky(bot, p) && !isC(p.x, p.y, p.z)) { let clear = true; for (let y = p.y + 2; y < p.y + 22; y++) if (isC(p.x, y, p.z)) clear = false; for (let y = p.y + 1; y <= b0.y2; y++) { const q = job.index.get(`${p.x},${y},${p.z}`); if (q && !q.clear && !(q.foundation && q.name === 'cobblestone')) clear = false } /* (a filler foundation cell a tower may rise through: the protector's rule) (at ANY height, not only under the floor: a sky column through the layer's unbuilt cells read as an exit the tower may never take - the crawlspace at -2269,121,-583 was "a way out" to the search through eleven give-ups, 2026-09-29; audit) */ if (clear) { lastExit = p; return true } }
+    for (const n of W.next(p)) { const k = key(n); if (!seen.has(k)) { seen.add(k); q.push(n) } }
   }
+  return false
 }
 // A foundation cell sealed in under the base already built is dropped, not rested: it is no part of the blueprint, nothing
 // can reach it again, and a rest would retry it for ever (the build could never read done; audit 2026-09-28). A cell
@@ -1847,7 +1874,7 @@ function dropFoundation (bot, c, why) {
 // The stand beside `c` (feet within 3 across, two below to one above) from which the most ready cells are in reach: clear
 // to stand in, no cell of the job at its feet or head, never on a lip, and `c` itself in reach. {x,y,z,n} or null.
 const EYE = 1.62; const REACH = 4.2
-function clusterStand (bot, c, ready, bad = new Set()) {
+function clusterStand (bot, c, ready, bad = new Set(), reach = null) {
   const near = ready.filter(q => Math.abs(q.x - c.x) <= 8 && Math.abs(q.z - c.z) <= 8 && Math.abs(q.y - c.y) <= 6)
   // (a cell counts for a stand only if it has a face to click on the stand's side - within 4.2 through a wall is no reach:
   //  each cell's usable faces, once; audit 2026-09-28)
@@ -1864,8 +1891,12 @@ function clusterStand (bot, c, ready, bad = new Set()) {
     if ([[1, 0], [-1, 0], [0, 1], [0, -1]].some(([ax, az]) => world.dropAt(bot, p.x + ax + 0.5, p.y, p.z + az + 0.5) > world.SAFE_DROP)) continue
     let n = 0; for (const q of near) if (within(p, q) && faces(p, q)) n++
     const d = world.dist3(p, me)
-    if (!best || n > best.n || (n === best.n && d < best.d)) best = { x: p.x, y: p.y, z: p.z, n, d }
+    // (a stand the bot can walk to first, whatever it serves: an unreachable one is tried only when no other stands; reach
+    //  null = unknown, no preference)
+    const inR = !reach || reach.has(key(p)) ? 1 : 0
+    if (!best || inR > best.inR || (inR === best.inR && (n > best.n || (n === best.n && d < best.d)))) best = { x: p.x, y: p.y, z: p.z, n, d, inR }
   }
+  if (best && reach && !best.inR) best.out = true
   return best
 }
 
