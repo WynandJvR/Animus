@@ -156,9 +156,10 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
   m.getBlock = (pos, dx, dy, dz) => {
     const b = getBlock0(pos, dx, dy, dz)
     if (b && doorIds.has(b.type)) { b.safe = true; b.physical = false; b.replaceable = false; b.height = pos.y + dy }
-    // (an OPEN trapdoor is no floor and no wall: a plate on its edge - planned on as ground, the walk stepped into the
-    //  hole it hangs in, 2026-09-29. A way through, as the body finds it)
-    else if (b && b.physical && world.isOpenTrapdoor(b)) { b.safe = true; b.physical = false; b.replaceable = false; b.height = pos.y + dy }
+    // (an OPEN trapdoor is no floor: a plate on its edge - planned on as ground, the walk stepped into the hole it hangs
+    //  in, 2026-09-29. Nor a passage: the plate stops the body, and planned as one the walk stood 2 minutes against the
+    //  castle's trapdoor rail, 2026-09-29. Neither - not stood on, not walked through, no landing)
+    else if (b && b.physical && world.isOpenTrapdoor(b)) { b.safe = false; b.physical = false; b.replaceable = false; b.height = pos.y + dy }
     return b
   }
   m.exclusionAreasStep.push(block => (block && doorIds.has(block.type)) ? 4 : 0)
