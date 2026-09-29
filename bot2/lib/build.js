@@ -1494,7 +1494,10 @@ function wayOut (bot, c, from = null, withC = true) {
       if (seen.size > 300) return true // (a region this big is no trap)
       const p = q.shift()
       if (!inBox(p)) { lastExit = p; return true }
-      if (!job.index.has(key(p)) && world.openSky(bot, p) && !isC(p.x, p.y, p.z)) { let clear = true; for (let y = p.y + 2; y < p.y + 22; y++) if (isC(p.x, y, p.z)) clear = false; if (clear) { lastExit = p; return true } }
+      // (open sky is out only where a tower may rise: below the floor a column with a cell of the build over it is the
+      //  climb's "no tower - a cell of the build", and read as a way out it kept the wall-opening escape from running -
+      //  the south rim's trench, walk and climb failing in turn, 2026-09-29)
+      if (!job.index.has(key(p)) && world.openSky(bot, p) && !isC(p.x, p.y, p.z)) { let clear = true; for (let y = p.y + 2; y < p.y + 22; y++) if (isC(p.x, y, p.z)) clear = false; if (p.y < b0.y1) for (let y = p.y + 1; y <= b0.y1 + 1; y++) if (job.index.has(`${p.x},${y},${p.z}`)) clear = false; if (clear) { lastExit = p; return true } }
       for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
         const x = p.x + dx; const z = p.z + dz
         for (let dy = 1; dy >= -world.SAFE_DROP; dy--) {
