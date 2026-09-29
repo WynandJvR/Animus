@@ -1444,7 +1444,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
         if (n >= 200) break
         if (!anchors(a) || !has(a) || dk.has(key(a)) || holdBack.has(key(a))) continue
         const r = holdAround.has(key(a)) ? 'the last face of a hole' : sealsBelow(a) ? 'the cell under it waits' : a.pour ? 'a pour over air' : 'not ready (no face or support yet)'
-        cellFails.set(key(a), { n: failed.get(key(a)) + 1, at: Date.now(), shared: true }); n++
+        { const prev = cellFails.get(key(a)); cellFails.set(key(a), { n: failed.get(key(a)) + 1, at: Date.now(), shared: prev ? !!prev.shared : true }) } n++ // (a real own fail is never downgraded by a shared miss; audit)
         if (!why[r]) why[r] = { n: 0, first: a }; why[r].n++
       }
       if (n) { saveCellFails(); log('build', `${n} cell${n > 1 ? 's' : ''} anchoring the band never doable - shared misses, the band rises past: ${Object.entries(why).map(([r, e]) => `${r} x${e.n} (${e.first.name} at ${move.fmt(e.first)})`).join(', ')}`) }
