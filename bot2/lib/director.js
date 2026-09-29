@@ -160,9 +160,8 @@ function misplacedFurniture () {
     }
   }
   // utility blocks crowding the outside door step (the way in)
-  if (p.door) {
-    const axisX = p.door.x < p.interior.x1 || p.door.x > p.interior.x2
-    const out1 = axisX ? { x: p.door.x < p.interior.x1 ? p.door.x - 1 : p.door.x + 1, z: p.door.z } : { x: p.door.x, z: p.door.z < p.interior.z1 ? p.door.z - 1 : p.door.z + 1 }
+  const out1 = hut.doorApronStep(p) // (the door apron: hut.js's one rule, the placer's too)
+  if (out1) {
     for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) for (const dy of [-1, 0, 1]) {
       const b = world.at(bot, out1.x + dx, p.home.y + dy, out1.z + dz)
       if (b && /(chest|furnace|crafting_table|barrel)$/.test(b.name) && !(Math.abs(dx) + Math.abs(dz) === 0 && dy === -1)) out.push(b.position)

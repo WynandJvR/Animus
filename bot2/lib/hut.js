@@ -608,4 +608,16 @@ async function restoreGround (bot, x1, z1, x2, z2, groundY) {
 
 function resetPlan () { plan = null; build.registerJob('hut', null) }
 
-module.exports = { siteGone, shutDoor, restoreGround, yardWork, levelYard, enterHut, buildHut, status, complete, shellComplete, getPlan, collidesWithBuild, relocate, resetPlan, layout, rememberBedSide, sealDoor, unsealDoor, utilitySpots, furnaceSpots, BANK_RINGS, doorFacingWrong, rehangDoor }
+// THE DOOR APRON: the 3x3 round the step OUTSIDE the safehouse door, at home's level +-1 - no utility block ever stands
+// there. One rule for the placer (move.utilitySpotOK) and the remover (the director's misplacedFurniture): two copies of
+// it disagreed and a chest was placed and picked up every few seconds, 2026-09-29; audit. The outside step, or null.
+function doorApronStep (plan = mem.get().hutPlan) {
+  if (!plan || !plan.door || !plan.interior) return null
+  const axisX = plan.door.x < plan.interior.x1 || plan.door.x > plan.interior.x2
+  return axisX ? { x: plan.door.x < plan.interior.x1 ? plan.door.x - 1 : plan.door.x + 1, z: plan.door.z } : { x: plan.door.x, z: plan.door.z < plan.interior.z1 ? plan.door.z - 1 : plan.door.z + 1 }
+}
+function inDoorApron (p, plan = mem.get().hutPlan) {
+  const o = doorApronStep(plan)
+  return !!o && Math.abs(p.x - o.x) <= 1 && Math.abs(p.z - o.z) <= 1 && Math.abs(p.y - plan.home.y) <= 1
+}
+module.exports = { doorApronStep, inDoorApron, siteGone, shutDoor, restoreGround, yardWork, levelYard, enterHut, buildHut, status, complete, shellComplete, getPlan, collidesWithBuild, relocate, resetPlan, layout, rememberBedSide, sealDoor, unsealDoor, utilitySpots, furnaceSpots, BANK_RINGS, doorFacingWrong, rehangDoor }
