@@ -35,6 +35,9 @@ while true; do
   sw=$(curl -s -m 5 http://127.0.0.1:3001/state | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const w=(JSON.parse(s).buildProgress||{}).stoppedWork||[];console.log(w.map(x=>x.work).join(','))}catch{}})")
   if [ -n "$sw" ]; then [ -z "$sw_since" ] && sw_since=$now; [ $((now - sw_since)) -gt 600 ] && { echo "ALARM: handwork stopped >10 min: $sw"; exit 0; }; else sw_since=; fi
   cur=$(done_now); if [ "$cur" != "$last_done" ]; then last_done=$cur; last_change=$now; fi
+  # (progress is any block placed, not only the blueprint's count: the foundation under the rim is not in the total, and
+  #  168 of its blocks in 2.5h read as "stuck", 2026-09-29)
+  recent 30 | grep -aq "build step: placed [1-9]" && last_change=$now
   # (away on an expedition the castle waits by design - its wood is what the trip fetches: not "stuck")
   exp=$(node -e 'try{console.log(require("C:/mc-bot-lab/bot2/memory.json").expedition?1:0)}catch{console.log(0)}'); [ "$exp" = 1 ] && last_change=$now
   tod=$(echo "$st" | grep -o '"tod":[0-9]*' | cut -d: -f2)
