@@ -656,6 +656,39 @@ async function escapeUp (bot) {
 async function escapeUpInner (bot) {
   const act = require('./act'); const gather = require('./gather')
   const f0 = bot.entity.position.floored()
+  // ENCLOSED BY THE BUILD at its floor or above - PROVEN, not guessed: no walk out of here even with every door taken as a
+  // way through (build.wayOut). The climb-out takes our own blocks only in the hollow under the floor, a tower may not rise
+  // in a build cell, and a room the builder closed round the bot left it walking for ever - at dusk, and the night walk
+  // that followed killed it (2026-09-28 19:20). A player breaks out through the wall and puts the block back: a door's
+  // lower half first (it comes back whole), else two wall cells that hold nothing up, toward open ground (audit)
+  {
+    const build = require('./build'); const j = build.getJob()
+    const inFoot = j && f0.x >= j.box.x1 && f0.x <= j.box.x2 && f0.z >= j.box.z1 && f0.z <= j.box.z2
+    if (inFoot && f0.y >= j.box.y1 && !build.wayOut(bot, { x: NaN, y: NaN, z: NaN }, null, false)) {
+      log('move', `enclosed by the build at ${fmt(f0)} - no way out; opening our own wall beside me, the builder puts it back`)
+      const cellAt = (x, y, z) => j.index.get(`${x},${y},${z}`)
+      const holdsUp = (x, y, z) => j.cells.some(q => q.sup && q.sup.x === x && q.sup.y === y && q.sup.z === z && build.cellDone(bot, q) === true)
+      const sides = [[1, 0], [-1, 0], [0, 1], [0, -1]].map(([dx, dz]) => {
+        const cells = [0, 1].map(dy => ({ x: f0.x + dx, y: f0.y + dy, z: f0.z + dz }))
+        const blocks = cells.map(p => world.at(bot, p.x, p.y, p.z))
+        const door = blocks.some(b => b && /_door$/.test(b.name) && !/^iron_door$/.test(b.name))
+        const beyond = world.at(bot, f0.x + 2 * dx, f0.y, f0.z + 2 * dz); const beyondHead = world.at(bot, f0.x + 2 * dx, f0.y + 1, f0.z + 2 * dz)
+        const open = !!beyond && !!beyondHead && world.isAirish(beyond) && world.isAirish(beyondHead)
+        const ok = cells.every((p, i) => !blocks[i] || world.isAirish(blocks[i]) || (cellAt(p.x, p.y, p.z) && !holdsUp(p.x, p.y, p.z)))
+        return { dx, dz, cells, blocks, door, open, ok }
+      }).filter(sd => sd.ok && (sd.door || sd.open)).sort((a, b) => (b.door - a.door) || (b.open - a.open))
+      const sd = sides[0]
+      if (sd) {
+        for (let i = 1; i >= 0; i--) {
+          const b = sd.blocks[i]; const p = sd.cells[i]
+          if (b && !world.isAirish(b)) { log('move', `enclosed: taking our own ${b.name} at ${fmt(p)}`); await act.dig(bot, p, { own: true, force: true, noWalk: true, allowZones: ['build', 'base'], timeoutMs: 8000 }).catch(() => false) }
+        }
+        giveUps.delete(fmt(f0))
+        return true
+      }
+      log('move', `enclosed by the build at ${fmt(f0)} - no wall beside me to open (supports or no open ground past it)`)
+    }
+  }
   // on open ground under the sky there is nothing to climb out of: step to a free cell beside us and let the next walk
   // plan from there. Every walk from one spot on the cliff under the cathedral's north edge gave up for 20 minutes;
   // one step down the slope and the same walk went straight through (2026-09-26).
