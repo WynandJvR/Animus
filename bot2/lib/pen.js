@@ -35,7 +35,9 @@ const BUILD_MARGIN = 10 // (past the build's own ring: underBuild's +8, the site
 // high at most (ground.prepare clears two over the floor and fills a hole two deep). "Six columns a block off, none two"
 // found no site in the hills round home: 269 centres "not level" of 600, 2026-09-29
 const LEVEL_MAX = 2
-const LEVEL_BUDGET = 24 // blocks moved, the ring's columns with the paddock's
+// (48: round home the 7x7s within two of level took 25-48 blocks - 21 of them - and every other centre was 5-20 high
+//  from its lowest column to its highest, or trees; at 24, no site at all, 2026-09-29. A few minutes of spade work)
+const LEVEL_BUDGET = 48 // blocks moved, the ring's columns with the paddock's
 const STOCK_MIN = 2
 const CAP = 8
 const LOVE_MS = 5 * 60000 // vanilla: a sheep bred (or fed into love) takes no more wheat for 6000 ticks
