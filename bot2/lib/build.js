@@ -1336,9 +1336,9 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
   const badStands = new Set() // (stands whose walk failed this step: clusterStand passes them by)
   // (where the bot can walk this step - reachFrom, once, lazily; stale when one of our own blocks lands in it (a corridor
   //  cut). A PREFERENCE, not a filter: the stand walks may dig and place, and reach more than the walk-only model; audit)
-  let reach; let reachSaid = false
+  let reach; let reachSaid = false; let reachMs = 0; let reachN = 0; let reachRuns = 0
   const reachSet = () => {
-    if (reach === undefined) { reach = reachFrom(bot, world.feetPos(bot)); if (!reach && !reachSaid) { reachSaid = true; log('build', `the region I can walk from ${move.fmt(world.feetPos(bot))} is over 2000 cells - stands chosen as before this step`) } }
+    if (reach === undefined) { const tr = Date.now(); reach = reachFrom(bot, world.feetPos(bot)); reachMs += Date.now() - tr; reachRuns++; reachN = reach ? reach.size : -1; if (!reach && !reachSaid) { reachSaid = true; log('build', `the region I can walk from ${move.fmt(world.feetPos(bot))} is over 2000 cells - stands chosen as before this step`) } }
     return reach
   }
   const holdBack = new Set() // (cells that would wall the body in from where it stands: later this step, or the next - wallsMeIn)
@@ -1348,7 +1348,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
   //  class the step's time goes to, the numbers stripped; audit 2026-09-29)
   const missed = (why, ms) => { const k = String(why || 'unlogged').replace(/\s*[-(].*$/, '').replace(/-?\d+/g, '#').slice(0, 40) || 'unlogged'; const e = prof.why[k] || (prof.why[k] = { n: 0, ms: 0 }); e.n++; e.ms += ms }
   placeProf.reach = 0; placeProf.dig = 0
-  const profLog = () => { if (prof.tries) log('build', `step profile: ${placed}/${prof.tries} placed, ${Math.round(prof.ms / prof.tries)}ms a try (${placed ? Math.round(prof.okMs / placed) : 0}ms a placed block), ${(prof.dist / prof.tries).toFixed(1)} blocks off on average, ${Math.round(prof.pick / Math.max(1, prof.tries))}ms choosing each (holds ${holdsPasses ? Math.round(holdsMs / holdsPasses) : 0}ms a pass); a try: ${Math.round(placeProf.reach / prof.tries)}ms getting in reach, ${Math.round(placeProf.dig / prof.tries)}ms clearing, ${Math.round((prof.ms - placeProf.reach - placeProf.dig) / prof.tries)}ms placing; ${Math.round((prof.ms - prof.okMs) / 1000)}s of ${Math.round(prof.ms / 1000)}s on the ${prof.tries - placed} misses${Object.keys(prof.why).length ? ' (' + Object.entries(prof.why).sort((a, b) => b[1].ms - a[1].ms).slice(0, 4).map(([k, e]) => `${k} x${e.n} ${Math.round(e.ms / 1000)}s`).join(', ') + ')' : ''}; the walks laid ${reflex.plannerPlacedSince(t0).filter(q => q.x >= job.box.x1 - 3 && q.x <= job.box.x2 + 3 && q.z >= job.box.z1 - 3 && q.z <= job.box.z2 + 3).length} blocks on the site, the builder ${supportsLaid - supports0} supports, ${pillarLaid - pl0} pillar blocks up, ${pillarDug - pd0} taken back down`) } // (where the site's scaffold comes from - ~1 a castle block, 2026-09-29)
+  const profLog = () => { if (prof.tries) log('build', `step profile: ${placed}/${prof.tries} placed, ${Math.round(prof.ms / prof.tries)}ms a try (${placed ? Math.round(prof.okMs / placed) : 0}ms a placed block), ${(prof.dist / prof.tries).toFixed(1)} blocks off on average, ${Math.round(prof.pick / Math.max(1, prof.tries))}ms choosing each (holds ${holdsPasses ? Math.round(holdsMs / holdsPasses) : 0}ms a pass${reachRuns ? `, reach ${reachN < 0 ? 'over 2000' : reachN} cells in ${Math.round(reachMs / reachRuns)}ms` : ''}); a try: ${Math.round(placeProf.reach / prof.tries)}ms getting in reach, ${Math.round(placeProf.dig / prof.tries)}ms clearing, ${Math.round((prof.ms - placeProf.reach - placeProf.dig) / prof.tries)}ms placing; ${Math.round((prof.ms - prof.okMs) / 1000)}s of ${Math.round(prof.ms / 1000)}s on the ${prof.tries - placed} misses${Object.keys(prof.why).length ? ' (' + Object.entries(prof.why).sort((a, b) => b[1].ms - a[1].ms).slice(0, 4).map(([k, e]) => `${k} x${e.n} ${Math.round(e.ms / 1000)}s`).join(', ') + ')' : ''}; the walks laid ${reflex.plannerPlacedSince(t0).filter(q => q.x >= job.box.x1 - 3 && q.x <= job.box.x2 + 3 && q.z >= job.box.z1 - 3 && q.z <= job.box.z2 + 3).length} blocks on the site, the builder ${supportsLaid - supports0} supports, ${pillarLaid - pl0} pillar blocks up, ${pillarDug - pd0} taken back down`) } // (where the site's scaffold comes from - ~1 a castle block, 2026-09-29)
   while (Date.now() - t0 < maxMs) {
     await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
     if (shouldStop && shouldStop()) break
@@ -1830,10 +1830,10 @@ function walkModel (bot, isC = () => false) {
 // "only these" (a truncated set would shelve good stands at random)
 function reachFrom (bot, f, cap = 2000) {
   const W = walkModel(bot)
-  const seen = new Set([key(f)]); const q = [{ x: f.x, y: f.y, z: f.z }]
-  while (q.length) {
+  const seen = new Set([key(f)]); const q = [{ x: f.x, y: f.y, z: f.z }]; let i = 0 // (an index, never shift(): O(1) a pop)
+  while (i < q.length) {
     if (seen.size > cap) return null
-    const p = q.shift()
+    const p = q[i++]
     for (const n of W.next(p)) { const k = key(n); if (!seen.has(k)) { seen.add(k); q.push(n) } }
   }
   return seen
