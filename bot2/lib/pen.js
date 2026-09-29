@@ -30,6 +30,10 @@ const food = () => require('./food')
 const HALF = 2 // the paddock: centre +-2 (5x5); the ring one further out
 const SITE_MIN = 12
 const SITE_MAX = 30
+// (then further out, only when the near ring has none: round home the only ground near level was the castle's own apron,
+//  inside its margin - 22 centres - and the rest 5-20 high across the 7x7, 2026-09-29. A pen 60 off is a walk on the wool
+//  trips, not a loss)
+const SITE_FAR = 64
 const BUILD_MARGIN = 10 // (past the build's own ring: underBuild's +8, the site region's +6)
 // THE GROUNDWORK'S BUDGET: a player levels the handiest patch - blocks dug off the mounds and dirt put in the dips, two
 // high at most (ground.prepare clears two over the floor and fills a hole two deep). "Six columns a block off, none two"
@@ -123,15 +127,18 @@ function siteAt (bot, cx, cz, home) {
 // The nearest paddock in the ring round home (12..30 out), or null. A step of 2 between centres; the scan yields between
 // candidates (body first).
 async function chooseSite (bot) {
+  for (const k of Object.keys(siteWhy)) delete siteWhy[k]
+  return (await siteIn(bot, SITE_MIN, SITE_MAX, 2)) || siteIn(bot, SITE_MAX, SITE_FAR, 3)
+}
+async function siteIn (bot, rMin, rMax, stepXZ) {
   const home = mem.get().home
   if (!home) return null
   const cands = []
-  for (let dx = -SITE_MAX; dx <= SITE_MAX; dx += 2) for (let dz = -SITE_MAX; dz <= SITE_MAX; dz += 2) {
+  for (let dx = -rMax; dx <= rMax; dx += stepXZ) for (let dz = -rMax; dz <= rMax; dz += stepXZ) {
     const d = Math.hypot(dx, dz)
-    if (d >= SITE_MIN && d <= SITE_MAX) cands.push({ x: home.x + dx, z: home.z + dz, d })
+    if (d >= rMin && d <= rMax) cands.push({ x: home.x + dx, z: home.z + dz, d })
   }
   cands.sort((a, b) => a.d - b.d)
-  for (const k of Object.keys(siteWhy)) delete siteWhy[k]
   // (the handiest: the least groundwork, a block of it worth two blocks of walk - not the first that passes)
   let best = null
   for (let i = 0; i < cands.length; i++) {
@@ -261,7 +268,7 @@ async function build (bot, { shouldStop } = {}) {
   let p = pen()
   if (!p) {
     const s = await chooseSite(bot)
-    if (!s) { log('pen', `no site for a sheep pen ${SITE_MIN}-${SITE_MAX} blocks from home - ${Object.entries(siteWhy).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} x${v}`).join(', ')}`); return false }
+    if (!s) { log('pen', `no site for a sheep pen ${SITE_MIN}-${SITE_FAR} blocks from home - ${Object.entries(siteWhy).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} x${v}`).join(', ')}`); return false }
     s.wood = craft().preferredWood(bot, 44)
     mem.set('pen', s); p = s
     log('pen', `a sheep pen at ${move.fmt(centreOf(p))}, the gate at ${move.fmt(p.gate)} (${p.wood} fence)`)
