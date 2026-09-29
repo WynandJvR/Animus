@@ -535,17 +535,21 @@ function detachedItems (todo, bot) {
   for (const it of [...detached]) if (!low[it]) detached.delete(it) // (none of it left to place)
   return detached
 }
+// A cell the band may anchor on: THE one predicate - lowestStructural's minimum, the step's anchor and whether a waited-on
+// item holds the band all read it (audit 2026-09-29: three spelled-out copies)
+// (a foundation cell anchors nothing: the rim's cells on the trench are slow and many rest, and anchored they held the
+//  whole castle to its lowest layers - 3 blocks an hour, the builder placing one and "waiting", 2026-09-28. They go in
+//  whenever they can - the doable set takes them outside the band - from their stands outside)
+// (and a falling block over a cell still waiting - powder over a brick gap - can't go in either: it anchoring would pin
+//  the band a layer up instead of at the gap; audit 2026-09-28)
+function anchorable (bot, c, det) {
+  if (c.attach || c.follows || c.foundation || infillCell(c) || (cellFails.get(key(c)) || {}).n >= 1) return false
+  return !(det && (det.has(stepItem(bot, c)) || fallsIn(bot, c, stepItem(bot, c))))
+}
 function lowestStructural (todo, bot, det = bot ? detachedItems(todo, bot) : null) {
   let m = Infinity
   for (const c of todo) {
-    // (a foundation cell anchors nothing: the rim's cells on the trench are slow and many rest, and anchored they held the
-    //  whole castle to its lowest layers - 3 blocks an hour, the builder placing one and "waiting", 2026-09-28. They go in
-    //  whenever they can - the doable set takes them outside the band - from their stands outside)
-    if (c.attach || c.follows || c.foundation || infillCell(c) || (cellFails.get(key(c)) || {}).n >= 1 || c.y >= m) continue
-    // (and a falling block over a cell still waiting - powder over a brick gap - can't go in either: it anchoring would pin
-    //  the band a layer up instead of at the gap; audit 2026-09-28)
-    if (det && (det.has(stepItem(bot, c)) || fallsIn(bot, c, stepItem(bot, c)))) continue
-    m = c.y
+    if (c.y < m && anchorable(bot, c, det)) m = c.y
   }
   return m
 }
@@ -1169,7 +1173,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     const lowestAll = lowestStructural(todo, bot, det)
     // (what ANCHORS the band: the one definition - the step's end lines name it, and an item "holds" only when its cell is
     //  one: a trapdoor - infill - was said to hold the castle for two hours while a lightning rod did; audit 2026-09-29)
-    const anchors = c => !c.attach && !c.follows && !c.foundation && !infillCell(c) && !((cellFails.get(key(c)) || {}).n >= 1) && c.y === lowestAll && !det.has(stepItem(bot, c)) && !fallsIn(bot, c, stepItem(bot, c))
+    const anchors = c => c.y === lowestAll && anchorable(bot, c, det)
     const items = inv.items(bot)
     // (a cell half-way - an empty pot - waits on its next step's item, the plant)
     // (a two-step cell is ready only with both steps' items in hand: the pot went in without its flower, the step "failed"
