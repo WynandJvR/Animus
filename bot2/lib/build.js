@@ -1218,6 +1218,10 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     const sealsBelow = c => {
       const b = job.index.get(key({ x: c.x, y: c.y - 1, z: c.z }))
       if (!b || b.clear || cellDone(bot, b) === true) return false
+      // (a cell FULL of ground - the base layer's leaves, flower and coarse-dirt cells with the terrain's grass still in them -
+      //  is no hole: covered, nothing is sealed in. Held for the cell's own item, every stair over the base layer anchored
+      //  the band one step at a time, 2026-09-29)
+      { const wb = world.at(bot, b.x, b.y, b.z); if (wb && world.isSolid(wb)) return false }
       // (never a deadlock: a cell with no route to its item, or one that has already rested once, is covered - else a whole
       //  floor waits for ever on a hay block no trip can bring; audit 2026-09-28)
       if (cellUnsourced(b)) { if (!sealSaid.has(key(b))) { sealSaid.add(key(b)); log('build', `covering ${b.name} at ${move.fmt(b)} - no route for it`) } return false }
