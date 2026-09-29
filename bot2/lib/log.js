@@ -30,16 +30,18 @@ function rotate () {
 
 // (buffered: one append every 200ms, not a synchronous write a line - a loop's 10,000 lines were 10,000 blocking writes
 //  on the body's event loop, 2026-09-29; audit. Flushed synchronously on exit, so a crash's last lines are kept)
-let writes = 0
-let buf = []; let timer = null; let flushing = false
+// (rotation only between appends - inside the flush, never with one in flight; the batch in flight is kept until its
+//  write lands, so an exit mid-write writes it again: a duplicate beats a gap in a death's last lines; audit)
+let writes = 0; let rotateDue = false
+let buf = []; let timer = null; let inFlight = null
 function flush () {
   timer = null
-  if (!buf.length || flushing) return
-  const chunk = buf.join(''); buf = []
-  flushing = true
-  fs.appendFile(LOG_FILE, chunk, () => { flushing = false; if (buf.length && !timer) timer = setTimeout(flush, 200) })
+  if (!buf.length || inFlight) return
+  if (rotateDue) { rotateDue = false; rotate() }
+  inFlight = buf.join(''); buf = []
+  fs.appendFile(LOG_FILE, inFlight, () => { inFlight = null; if (buf.length && !timer) timer = setTimeout(flush, 200) })
 }
-function flushSync () { if (!buf.length) return; try { fs.appendFileSync(LOG_FILE, buf.join('')) } catch {} buf = [] }
+function flushSync () { const all = (inFlight || '') + buf.join(''); inFlight = null; buf = []; if (!all) return; try { fs.appendFileSync(LOG_FILE, all) } catch {} }
 process.on('exit', flushSync)
 function log (tag, ...parts) {
   const msg = parts.map(p => (typeof p === 'string' ? p : JSON.stringify(p))).join(' ')
@@ -47,7 +49,7 @@ function log (tag, ...parts) {
   ring.push(line)
   if (ring.length > 400) ring.shift()
   try {
-    if (++writes % 500 === 0) rotate()
+    if (++writes % 500 === 0) rotateDue = true
     buf.push(line + '\n')
     if (!timer) timer = setTimeout(flush, 200)
   } catch {}
