@@ -451,6 +451,18 @@ async function crossDoor (bot, goal) {
   // (a side's step where a body stands - the door's level, else one up or one down: a room whose floor is not laid yet has
   //  its ground a block higher than the doorway, and the "step in front" at the door's level was solid grass - the walk
   //  to it failed every time, the night spent at that door, 2026-09-29)
+  // (and FIRST: natural ground standing in a cell of the build at the doorway's level - the room's carpet cell full of
+  //  grass - is an obstruction the builder clears anyway: dug, the doorway is level. A jump up a block under the door's
+  //  lintel does not clear it; the step up stays for a floor the design raises; audit)
+  const obstruction = (x, y, z) => {
+    const b = world.at(bot, x, y, z); if (!b || !world.isSolid(b) || !world.NATURAL_RE.test(b.name)) return false
+    const bj = require('./build'); const j = bj.getJob(); const c = j && j.index.get(`${x},${y},${z}`)
+    return !!c && !c.clear && !bj.partOk(c, b.name)
+  }
+  const act = require('./act')
+  for (const [x, z] of axisX ? [[d.x - 1, d.z], [d.x + 1, d.z]] : [[d.x, d.z - 1], [d.x, d.z + 1]]) {
+    for (const dy of [1, 0]) if (obstruction(x, d.y + dy, z)) { log('move', `the doorway at ${fmt(d)}: ${world.at(bot, x, d.y + dy, z).name} stands in a cell of the build at ${x},${d.y + dy},${z} - clearing it`); await act.dig(bot, { x, y: d.y + dy, z }, { allowZones: ['build', 'base'], timeoutMs: 8000 }).catch(() => false) }
+  }
   const stepAt = (x, z) => { for (const dy of [0, 1, -1]) if (world.standable(bot, x, d.y + dy, z)) return { x, y: d.y + dy, z }; return { x, y: d.y, z } }
   const sideA = axisX ? stepAt(d.x - 1, d.z) : stepAt(d.x, d.z - 1)
   const sideB = axisX ? stepAt(d.x + 1, d.z) : stepAt(d.x, d.z + 1)
