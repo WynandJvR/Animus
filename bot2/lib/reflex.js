@@ -809,7 +809,11 @@ function noteTakeoff () {
     try {
       const lp = bot.entity.position
       const lx = Math.floor(lp.x); const lz = Math.floor(lp.z); const ly = Math.floor(lp.y)
-      if (t.fall > world.SAFE_DROP && require('./gather').onGrounds({ x: lx, y: t.fy, z: lz })) {
+      // (the grounds, or anywhere the daily walks go - within 48 of home at home's level: an 11-deep hole by the orchard,
+      //  outside the "grounds" (hut, bank, farm), dropped the bot 8 hp and was never capped, 2026-09-29)
+      const hm = require('./memory').get().home
+      const walked = !!hm && Math.hypot(lx - hm.x, lz - hm.z) <= 48 && t.fy >= hm.y - 8
+      if (t.fall > world.SAFE_DROP && (walked || require('./gather').onGrounds({ x: lx, y: t.fy, z: lz }))) {
         // (a SHAFT only - walled round: at least two levels between the landing and the floor it left with 3+ of the 4
         //  sides solid (a pit up to 2 wide). Off a ledge into open ground is an edge: a cap there is a dirt stub in the
         //  air over our own base; audit 2026-09-28)
