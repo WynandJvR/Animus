@@ -556,7 +556,9 @@ async function goToInner (bot, goal, opts, a) {
   const r = await goToInner2(bot, goal, opts, a)
   // a walk that ended where it began, stuck or out of time: a give-up from this cell (the pit under the farm held the
   // bot through walks that all ran out their time - "timeout" never counted, and it stood there another hour)
-  if (!r.ok && start && bot.entity && /stuck|timeout|noPath/.test(r.why) && bot.entity.position.distanceTo(start) < 2 && stuckHereAgain(bot)) await escapeUp(bot)
+  // (below a build's floor inside its footprint ONE such walk is enough: the hollow's give-ups drift a cell each - -607,
+  //  -606, -605 - the same-cell count never reached two, and the bot missed its bed and dug in under the castle, 2026-09-29)
+  if (!r.ok && start && bot.entity && /stuck|timeout|noPath/.test(r.why) && bot.entity.position.distanceTo(start) < 2 && (stuckHereAgain(bot) || underBuildFloor(bot))) await escapeUp(bot)
   return r
 }
 async function goToInner2 (bot, goal, opts, { timeoutMs, stuckMs, dig, place, allowZones, label, shouldStop, dryHead }) {
@@ -658,6 +660,10 @@ async function stepUpSide (bot) {
     if (Math.floor(bot.entity.position.y) > f.y) return true
   }
   return false
+}
+function underBuildFloor (bot) {
+  const jb = require('./build').getJob(); const bb = jb && jb.box; const p = bot.entity.position.floored()
+  return !!bb && p.x >= bb.x1 && p.x <= bb.x2 && p.z >= bb.z1 && p.z <= bb.z2 && p.y < bb.y1
 }
 function stuckHereAgain (bot) {
   const k = fmt(bot.entity.position); const now = Date.now()
