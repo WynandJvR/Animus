@@ -1205,6 +1205,9 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       return true
     }
     doable = doable.filter(c => !sealsBelow(c))
+    // (a liquid waits for the ground under it: water poured over the hollow's open column runs down and floods it - the
+    //  castle's one base water cell sits over a hole the foundation fills first; audit 2026-09-29)
+    doable = doable.filter(c => { if (!c.pour) return true; const b = world.at(bot, c.x, c.y - 1, c.z); return !!b && !world.isAirish(b) }) // (anything but air under it: ground, a slab, the pool's own water below)
     waiting = missingItem()
     waitingHolds = !!waiting && !det.has(waiting)
     if (!doable.length) {
@@ -1575,7 +1578,7 @@ function foundationStand (bot, c) {
       const d = world.dist3(p, me)
       if (d < bd) { bd = d; best = p }
     }
-    return best
+    if (best) return best // (a deep column's lower cells are out of reach from the room: the passes below, from the hollow; audit)
   }
   for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) for (let dy = -4; dy <= 2; dy++) {
     if (c.noOutside) break // (its outside stand was missed: the inside pass below)
