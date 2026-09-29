@@ -114,6 +114,8 @@ async function oreLevel (bot, itemName) {
     for (let dy = -1; dy <= 3; dy++) n += at.get(y + dy) || 0
     if (n >= 6 && (!best || n > best.n)) best = { y: y + 1, n }
   }
+  // (none in the scan's 64 - deepslate 112 under a hilltop home: where we saw it ourselves, under home's depth, is its level)
+  if (!best) { const kn = require('./gather').knownResource(itemName, home, { maxFromHome: 96, filter: p => p.y <= home.y - 8 }); if (kn) best = { y: kn.y + 1, n: 1 } }
   return best
 }
 // Does a staircase from p heading dir stay under the ground all the way down to `level`? The stairs drop one a step; on

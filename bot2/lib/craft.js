@@ -27,7 +27,10 @@ const GATHER = {
   andesite: { blocks: /^andesite$/, tool: 'pickaxe', tier: 1, ore: true },
   diorite: { blocks: /^diorite$/, tool: 'pickaxe', tier: 1, ore: true },
   tuff: { blocks: /^tuff$/, tool: 'pickaxe', tier: 1, ore: true },
-  cobbled_deepslate: { blocks: /^(deepslate|cobbled_deepslate)$/, tool: 'pickaxe', tier: 1 },
+  // (deepslate lies deep - under y8 here: the mine's stairs go down to it. Gathered as a surface block, a remembered one
+  //  112 below home was walked to - the planner dug a shaft straight down, the pick wore out at y28 and the bot fell 20
+  //  down its own shaft climbing out; dead, 146 items, 2026-09-29)
+  cobbled_deepslate: { blocks: /^(deepslate|cobbled_deepslate)$/, tool: 'pickaxe', tier: 1, ore: true },
   coal: { blocks: /^(coal_ore|deepslate_coal_ore)$/, tool: 'pickaxe', tier: 1, ore: true },
   raw_iron: { blocks: /^(iron_ore|deepslate_iron_ore)$/, tool: 'pickaxe', tier: 2, ore: true },
   raw_copper: { blocks: /^(copper_ore|deepslate_copper_ore)$/, tool: 'pickaxe', tier: 2, ore: true },

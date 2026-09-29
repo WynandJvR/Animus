@@ -39,9 +39,9 @@ function forgetResource (kind, pos) {
   mem.update(m => { if (m.resources && m.resources[kind]) m.resources[kind] = m.resources[kind].filter(p => world.dist2(p, pos) >= 24) })
 }
 // maxFromHome: how far from home a remembered spot still counts (clay can lie 300 blocks out - trees do not)
-function knownResource (kind, from, { maxFromHome = 200 } = {}) {
+function knownResource (kind, from, { maxFromHome = 200, filter = null } = {}) {
   const home = mem.get().home
-  const list = ((mem.get().resources || {})[kind] || []).filter(p => !home || world.dist2(p, home) < maxFromHome)
+  const list = ((mem.get().resources || {})[kind] || []).filter(p => (!home || world.dist2(p, home) < maxFromHome) && (!filter || filter(p)))
   if (!list.length) return null
   const me = from || home || { x: 0, z: 0 }
   return list.slice().sort((a, b) => world.dist2(a, me) - world.dist2(b, me))[0]
@@ -645,9 +645,13 @@ async function mine (bot, itemName, g, n, ctx = {}) {
       log('gather', `no exposed ${itemName} within reach of standable ground nearby`)
       if (atKnown) { forgetResource(itemName, atKnown); log('gather', `the ${itemName} remembered at ${move.fmt(atKnown)} is gone - forgotten`); atKnown = null }
       if (itemName === 'cobblestone' || g.ore) return mining().mineFor(bot, itemName, target, ctx)
+      // (the far and the remembered ones on the near scan's own level rule: 20 above or below at most. Deeper is under the
+      //  ground - a walk to it is the planner's shaft straight down (see craft.GATHER's deepslate); a pickaxe's block there
+      //  is the mine's, anything else is left)
+      const level = p => Math.abs(p.y - me.y) < 20
       // some further out (explore stops as soon as any is in sight, the scan above only looks 40 blocks):
       // walk over to the nearest and look again from there
-      const far = (await world.scanBlocks(bot, g.blocks, { maxDistance: 128, count: 12, filter: b => takeable(bot, b) }))
+      const far = (await world.scanBlocks(bot, g.blocks, { maxDistance: 128, count: 12, filter: b => takeable(bot, b) && level(b.position) }))
         .sort((a, b) => world.dist3(a.position, me) - world.dist3(b.position, me))[0]
       if (far && world.dist3(far.position, me) > 30 && emptyScans < 3) {
         emptyScans++
@@ -656,7 +660,8 @@ async function mine (bot, itemName, g, n, ctx = {}) {
         continue
       }
       // some seen before (dug here, or noticed on a walk): go back to it
-      const known = knownResource(itemName, me)
+      const known = knownResource(itemName, me, { filter: level })
+      if (!known && g.tool === 'pickaxe') { const deep = knownResource(itemName, me); if (deep) { log('gather', `${itemName} known only underground (${move.fmt(deep)}) - the mine's way down, never a shaft`); return mining().mineFor(bot, itemName, target, ctx) } }
       if (known && !triedKnown.has(`${known.x},${known.z}`)) {
         triedKnown.add(`${known.x},${known.z}`)
         log('gather', `${itemName} remembered at ${move.fmt(known)} (${Math.round(world.dist2(known, me))}b) - going there`)
