@@ -1081,8 +1081,13 @@ async function withdrawOf (name, want) { return mats.withdrawPool(bot, name, wan
 // the one-offs (a button, a flower) often anchor the band's lowest cells, and four stacks of stone taken first left no
 // room for them (audit 2026-09-27) - then the big kinds topped up to four stacks
 async function withdrawWindow (needs) {
+  // (the item the band waits on first: taken in the window's own order, the pack filled with trapdoors, signs, stairs and
+  //  a grindstone before it came to stone_bricks - the band "waited on stone_bricks" for an hour with 875 in the chest,
+  //  2026-09-30)
+  const first = mem.get().buildWaiting
+  const order = Object.entries(needs).sort((a, b) => (b[0] === first) - (a[0] === first))
   for (const cap of [64, 64 * 4]) {
-    for (const [name, n] of Object.entries(needs)) {
+    for (const [name, n] of order) {
       if (inv.freeSlots(bot) < 2) return
       const want = Math.min(n, cap) - countOf(name)
       if (want > 0) await withdrawOf(name, want)
