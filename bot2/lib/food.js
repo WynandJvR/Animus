@@ -13,16 +13,27 @@ const craft = () => require('./craft')
 const smelt = () => require('./smelt')
 const base = () => require('./base')
 const gather = () => require('./gather')
+const pen = () => require('./pen')
 
 const FOOD_ANIMALS = /^(cow|mooshroom|pig|sheep|chicken|rabbit)$/
 
+// The animals out in the open: never a penned one - the sheep pen's flock is not game, nor a flock to walk to (a hunt for
+// mutton or a wool kill would empty the pen the wool grows in; pen.js, 2026-09-29)
 function animals (bot, re, maxDist = 48) {
   const me = bot.entity.position
-  return Object.values(bot.entities).filter(e => e && e.name && re.test(e.name) && e.position && e.position.distanceTo(me) <= maxDist && !isBaby(e) && !(Date.now() - (unreachable.get(e.id) || 0) < 3 * 60000))
+  return Object.values(bot.entities).filter(e => e && e.name && re.test(e.name) && e.position && e.position.distanceTo(me) <= maxDist && !isBaby(bot, e) && !pen().inPen(e.position) && !(Date.now() - (unreachable.get(e.id) || 0) < 3 * 60000))
     .sort((a, b) => a.position.distanceTo(me) - b.position.distanceTo(me))
 }
-function isBaby (e) {
-  try { const md = e.metadata || []; return md.some(v => v === true) && (e.height || 1) < 0.8 } catch { return false }
+// A baby: the ageable "baby" flag, read by name from the registry's metadata keys as the wool byte is (the index moves
+// between versions). The old guess - any true flag and a body under 0.8 high - never held for a sheep (1.3 high in the
+// registry, lamb or ewe); it stays the fallback where the registry has no key.
+function isBaby (bot, e) {
+  try {
+    const keys = (world.data(bot).entitiesByName[e.name] || {}).metadataKeys || []
+    const i = keys.indexOf('baby')
+    if (i >= 0 && e.metadata && typeof e.metadata[i] === 'boolean') return e.metadata[i]
+    const md = e.metadata || []; return md.some(v => v === true) && (e.height || 1) < 0.8
+  } catch { return false }
 }
 
 // Sustainability: when only one or two of a kind are around, leave one to breed - unless food is
@@ -153,6 +164,10 @@ async function woolFor (bot, n, ctx = {}) {
     const ok = await craft().ensure(bot, 'shears', 1, Object.assign({}, ctx, { depth: (ctx.depth || 0) + 1 })).catch(() => false)
     if (!ok && !inv.has(bot, 'shears') && !(ctx.shouldStop && ctx.shouldStop())) { shearsFailDay = require('./day').dayNo(bot); log('food', 'no shears to be made today - wool by the kill until tomorrow') }
   }
+  // THE PEN FIRST: its sheep grow their wool back, and it is by home (pen.js). The open range after - never the pen's
+  // flock killed: animals() leaves penned sheep out
+  if (inv.has(bot, 'shears') && pen().hasWool(bot) && !(ctx.shouldStop && ctx.shouldStop())) await pen().shear(bot, { shouldStop: ctx.shouldStop }).catch(e => log('food', 'shearing the pen threw: ' + e.message))
+  if (woolCount() >= target) return true
   const t0 = Date.now()
   let empty = 0
   let wentTo = null // (the remembered flock walked to this trip - forgotten if it is not there)
@@ -380,4 +395,4 @@ async function cookAll (bot, ctx = {}) {
   }
 }
 
-module.exports = { huntFor, woolFor, sheepWool, stockFood, cookAll, animals, killAnimal, huntable, fishFor, harvestCrops, FOOD_ANIMALS }
+module.exports = { huntFor, woolFor, sheepWool, isBaby, stockFood, cookAll, animals, killAnimal, huntable, fishFor, harvestCrops, FOOD_ANIMALS }

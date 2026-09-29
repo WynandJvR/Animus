@@ -320,6 +320,10 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
     // (from inside: a small toll, not none - "out soon" stays the preference and the search budget is not blown; audit)
     return (p.x >= b.x1 && p.x <= b.x2 && p.z >= b.z1 && p.z <= b.z2 && p.y < b.y1) ? (startUnder ? 3 : 60) : 0
   })
+  // A player walks round a paddock: a walk through the sheep pen opens its gate on the way (the planner opens fence gates)
+  // and never shuts it - the flock walks out. Dear, not refused: from inside, the way out is still a way (the pen's own
+  // walks pass allowZones 'pen'; a walk that starts inside has the zone allowed by goTo)
+  m.exclusionAreasStep.push(block => { if (!block || !block.position || allowed.has('pen')) return 0; const z = inZone(block.position); return z && z.label === 'pen' ? 50 : 0 })
   // A player walks round a field: stepping down onto farmland tramples it back to dirt. The plot sat a block below
   // the path from the safehouse to the furnaces and every trip undid the planting - "4/20 cells planted (1 just
   // now)" every two minutes for an hour (2026-09-23).

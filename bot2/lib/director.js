@@ -30,6 +30,7 @@ const clay = require('./clay')
 const forage = require('./forage')
 const boat = require('./boat')
 const orchard = require('./orchard')
+const pen = require('./pen')
 const litter = require('./litter')
 let litterSeeded = false // (the pillars from before the ledger: looked for once a run, once the orchard's zone is set)
 const LITTER_BATCH = 8
@@ -121,7 +122,7 @@ function note (name, ok) {
 // succeed" four times over, the watchdog's alarm, a backoff for nothing (late in the day, 25-64 from home; audit
 // 2026-09-28). One gate: a day chore whose stop holds waits, said once. (Survival - food, graves, tools, the bed - is
 // never held here; the castle's step does its home work first and minds its own stop.)
-const DAY_TASKS = new Set(['farm', 'harvest', 'hydrate', 'levelFarm', 'levelYard', 'fixWater', 'lightBase', 'plant', 'spareKit', 'fillShaft', 'cook', 'ironTrip', 'tidy', 'siteTidy'])
+const DAY_TASKS = new Set(['farm', 'harvest', 'hydrate', 'levelFarm', 'levelYard', 'fixWater', 'lightBase', 'plant', 'pen', 'spareKit', 'fillShaft', 'cook', 'ironTrip', 'tidy', 'siteTidy'])
 const lateSaid = new Map()
 // held(name): may decide() offer it now? Not while backing off from failures (cooling), nor a day chore once its stop holds.
 // (cooling keeps its one meaning - "it failed recently": the recover rule reads cooling('food') as that evidence; audit)
@@ -507,6 +508,8 @@ function decide () {
     const o = orchard.orchard()
     if (dHome < 64 && world.phase(bot) === 'day' && saps > 0 && orchard.plantable(bot, spruceSaps, saps, demandTrees) && !held('plant')) return { name: 'plant', why: `${saps} saplings for the orchard (${o ? o.spots.length : 0} spots, ${demandTrees} trees wanted)` }
   }
+  // the sheep pen: built while the build wants wool, then stocked and bred (pen.work: the one rule for this and the task)
+  if (dHome < 64 && world.phase(bot) === 'day' && !held('pen')) { const w = pen.work(bot, penArgs()); if (w) return { name: 'pen', why: w.why } }
   // (the harvest when the bread runs low, not every morning: the crop keeps on the stalk, and harvesting and
   //  replanting 71 cells took two minutes of every ten-minute day with 31 bread in the pack, 2026-09-26)
   if (farm.farm() && dHome < 64 && farm.ripeCount(bot) >= 8 && breadStock() < BREAD_WANTED && !held('harvest')) return { name: 'harvest', why: `${farm.ripeCount(bot)} wheat ripe` }
@@ -883,6 +886,7 @@ const TASKS = {
   async levelYard () { return (await hut.levelYard(bot, { shouldStop: dayStop })) > 0 },
   async fixWater () { return farm.fixWater(bot, { shouldStop: dayStop }) },
   async harvest () { return farm.harvest(bot, { shouldStop: dayStop }) },
+  async pen () { const w = pen.work(bot, penArgs()); return w ? pen.run(bot, w.kind, { shouldStop: dayStop }) : true },
   async plant () {
     for (const [n, c] of Object.entries(base.bankCounts())) if (orchard.ANY_SAP_RE.test(n) && c > 0) await base.withdraw(bot, n, c).catch(() => 0)
     return (await orchard.plant(bot, { demandTrees, shouldStop: dayStop })) > 0
@@ -909,7 +913,8 @@ const TASKS = {
   async abandonHome () {
     const h = mem.get().home
     log('dir', `abandoning the home at ${move.fmt(h)}: its ground is gone`)
-    mem.update(m => { m.home = null; m.bed = null; m.hutPlan = null; m.hut = null; m.chests = []; m.chestContents = {}; m.furnaces = []; m.tables = []; m.farm = null; m.orchard = null; m.mine = null; m.bunker = null })
+    mem.update(m => { m.home = null; m.bed = null; m.hutPlan = null; m.hut = null; m.chests = []; m.chestContents = {}; m.furnaces = []; m.tables = []; m.farm = null; m.orchard = null; m.pen = null; m.mine = null; m.bunker = null })
+    pen.setZone() // (the old pen's ground is no zone any more)
     try { hut.resetPlan() } catch {}
     return true
   },
@@ -1051,6 +1056,14 @@ function tripRoom () { return Math.max(1, inv.freeSlots(bot) - 2) * 64 }
 // orchard's own harvests have given, 5 - the wild oaks round Notre-Dame - until it has any). Updated whenever the
 // materials plan is made at home; the orchard grows to it and no further.
 let demandTrees = 0
+// Wool the build still needs (its plan's raw wool), with demandTrees: the sheep pen is built for it.
+let demandWool = 0
+// The pen's arguments: the wool wanted, and the wheat it may have - pack and bank, bread's share (three loaves) kept back
+// while the bread is short
+function penArgs () {
+  const wheat = inv.count(bot, 'wheat') + base.bankCount('wheat')
+  return { woolWanted: demandWool, wheat: Math.max(0, wheat - (breadStock() < BREAD_WANTED ? 9 : 0)) }
+}
 function treesFor (tot) {
   const logs = (tot.raw.log || 0) + Math.ceil((tot.raw.fuel || 0) * 8 / 7)
   const per = (mem.get().orchard && mem.get().orchard.perTree) || 5
@@ -1112,6 +1125,7 @@ async function processAtHome () {
   const win = mats.planFor(bot, winNeeds)
   let tot = mats.planFor(bot, st.need)
   demandTrees = treesFor(tot)
+  demandWool = tot.raw.wool || 0
   if (tot.unknown.length) log('dir', `no route known for ${tot.unknown.join(', ')} - gathering them as they are`)
   // furnaces for the volume, counted around HOME (counted around the bot at the site it found too few and
   // built six more)
@@ -1626,6 +1640,7 @@ async function start (b) {
   bot.on('spawn', () => { setTimeout(() => { try { if (bot.entity && move.insideHut(world.feetPos(bot))) hut.shutDoor(bot).catch(() => {}) } catch {} }, 1500) })
   baseZone()
   orchard.setZone()
+  pen.setZone()
   const bj = mem.get().build
   if (bj) { try { await build.setJob(bot, bj.name, bj.origin, { exactWood: bj.exactWood === true }) } catch (e) { log('dir', `couldn't load build ${bj.name}: ${e.message}`) } } // (jobs saved before the wood rule: any wood, as they were built)
   loop()
