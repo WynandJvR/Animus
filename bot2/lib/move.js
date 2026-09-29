@@ -957,6 +957,17 @@ function surfaceYHere (bot) {
   }
   return null
 }
+// How much natural rock stands over a place (a count past 4 = buried, the mine's), 0 when open, null when its column is
+// not all loaded (unknown yet). Pure over world.at (movedeeptest).
+function buried (bot, p) {
+  const x = Math.floor(p.x); const z = Math.floor(p.z); let n = 0
+  for (let y = Math.floor(p.y) + 2; y < Math.floor(p.y) + 90 && y < 320; y++) {
+    const b = world.at(bot, x, y, z)
+    if (!b) return null
+    if (b.boundingBox === 'block' && world.NATURAL_RE.test(b.name) && !world.LEAF_RE.test(b.name) && !world.LOG_RE.test(b.name)) n++
+  }
+  return n > 4 ? n : 0
+}
 // A roof of planks (a hut) or leaves is not being underground: it takes 3+ natural rock/earth
 // blocks overhead.
 function isUnderground (bot) {
@@ -1027,11 +1038,18 @@ async function surface (bot, { shouldStop } = {}) {
     // (never a tower beside an open drop: the next step off its top is the fall - see the shaft below)
     for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
       const q = { x: p.x + dx, y: p.y, z: p.z + dz }
-      if (world.isAirish(world.at(bot, q.x, q.y, q.z)) && world.dropAt(bot, q.x + 0.5, q.y, q.z + 0.5) > world.SAFE_DROP) await act.place(bot, q, filler.name, { noWalk: true, allowZones: ['*'] }).catch(() => false)
+      const qb = world.at(bot, q.x, q.y, q.z)
+      // (never in a zone - the build's cells, a hole's last face, the base - nor a protected block: placeSupport's rule; audit)
+      if (!qb || !world.isAirish(qb) || inZone(q, 1) || isProtected(qb, 'fill') || world.dropAt(bot, q.x + 0.5, q.y, q.z + 0.5) <= world.SAFE_DROP) continue
+      if (await act.place(bot, q, filler.name, { noWalk: true, allowZones: ['*'] }).catch(() => false)) require('./litter').note(bot, q, filler.name)
     }
     if (!await require('./gather').towerUp(bot, { allowZones: ['*'] })) break
   }
   if (!isUnderground(bot)) { log('move', `surfaced at y${Math.floor(bot.entity.position.y)} (climbed ${Math.floor(bot.entity.position.y) - y0})`); return true }
+  // (a stair dug up through the rock first - rock both sides, no open column top to step off; a tower only if that fails. The
+  //  planner's own tower beside a shaft was the fatal step, 2026-09-29; audit)
+  const r0 = await goTo(bot, new goals.GoalY(surfaceYHere(bot) || s), { timeoutMs: 60000, stuckMs: 12000, label: 'surface by a stair', shouldStop, dig: true, place: false })
+  if (r0.ok || !isUnderground(bot)) return true
   const r = await goTo(bot, new goals.GoalY(surfaceYHere(bot) || s), { timeoutMs: 60000, stuckMs: 12000, label: 'surface', shouldStop })
   return r.ok || !isUnderground(bot)
 }
@@ -1085,15 +1103,6 @@ async function travel (bot, target, opts = {}) {
   //  start height over a valley 50 lower; the planner towered up out of the valley toward it and the bot fell 28
   //  blocks off the pillar, 2026-09-26)
   const { range = 3, shouldStop: stop0, label = 'travel', maxMs = 15 * 60000, anyY = false, underground = false } = opts
-  // A PLACE DEEP UNDER THE GROUND is no walk: more than 20 below where we stand and below home's own depth, the planner's
-  // way there is a shaft dug straight down - a remembered deepslate 112 under home ("9b" away, counted flat) was walked
-  // to, the pick wore out at y28 and the bot fell 20 down its own shaft climbing out, dead (2026-09-29; audit). The mine's
-  // stairs go down; the few walks that must go there say so (underground: a grave, the operator's goto, the mine's own)
-  if (!underground && !anyY && bot.entity && target && target.y != null) {
-    const home = require('./memory').get().home
-    const floor = Math.min(bot.entity.position.y - 20, home ? home.y - 8 : Infinity)
-    if (target.y < floor) { log('move', `${label}: ${fmt(target)} is deep under the ground (${Math.floor(bot.entity.position.y - target.y)} below) - a mine's way down, never a shaft`); return { ok: false, why: 'underground - a mine way down, never a shaft' } }
-  }
   const boat = require('./boat')
   // A stop asked for over open water waits for land: the night rule stopped a walk mid-ocean and the bot trod
   // water "staying put" until it drowned (2026-09-23). Only the operator's stop (control) ends a trip afloat.
@@ -1104,8 +1113,18 @@ async function travel (bot, target, opts = {}) {
   let surfaceTries = 0
   let lastLog = 0
   let boatFails = 0
+  let buriedSaid = false
   while (Date.now() - t0 < maxMs) {
     if (!bot.entity) return { ok: false, why: 'no body' }
+    // A PLACE INSIDE THE ROCK is no walk: the planner's way there is a shaft dug straight down - a remembered deepslate
+    // 112 under home ("9b" away, counted flat) was walked to, the pick wore out at y28 and the bot fell 20 down its own
+    // shaft climbing out, dead (2026-09-29). Judged by the target's column, not its height - a river bank 56 under a
+    // hilltop home is open sky, a walk (audit). Asked every leg: known once its column is loaded. The mine's stairs go
+    // down; the walks that must go there say so (underground: a grave, the operator's goto, the mine's own)
+    if (!underground && !anyY && target && target.y != null && !buriedSaid) {
+      const bd = buried(bot, target)
+      if (bd) { buriedSaid = true; log('move', `${label}: ${fmt(target)} is inside the rock (${bd} blocks of it overhead) - a mine's way down, never a shaft`); return { ok: false, why: 'underground - a mine way down, never a shaft' } }
+    }
     if (cancelled()) return { ok: false, why: 'stopped' }
     if (shouldStop && shouldStop()) return { ok: false, why: 'stopped' }
     // afloat in a boat (a crossing broken off, or a restart put us back in it): carry on by boat - or, when the
@@ -1234,4 +1253,4 @@ async function travel (bot, target, opts = {}) {
   return { ok: false, why: 'timeout' }
 }
 
-module.exports = { legPoint, escapeUp, isVerdict, underBuild, underZone, crossDoor, goals, bindReflex, bindBot, setZone, setZones, inZone, zones, utilitySpotOK, insideHut, setProtector, isProtected, surface, isUnderground, surfaceYHere, movementsFor, goTo, goNear, travel, stopMoving, runGoal, sleep, fmt, waitReflex }
+module.exports = { buried, legPoint, escapeUp, isVerdict, underBuild, underZone, crossDoor, goals, bindReflex, bindBot, setZone, setZones, inZone, zones, utilitySpotOK, insideHut, setProtector, isProtected, surface, isUnderground, surfaceYHere, movementsFor, goTo, goNear, travel, stopMoving, runGoal, sleep, fmt, waitReflex }
