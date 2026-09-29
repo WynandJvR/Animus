@@ -32,6 +32,7 @@ const orchard = require('./orchard')
 const litter = require('./litter')
 let litterSeeded = false // (the pillars from before the ledger: looked for once a run, once the orchard's zone is set)
 const LITTER_BATCH = 8
+let steerSaid = null // (the wait-without-raw line, once per item)
 let siteTidyAsked = 0 // (when the site's scaffold was last counted for the day's teardown)
 const LITTER_CAP = 48 // (our own blocks standing round home past which the tidy goes before the castle)
 
@@ -1300,6 +1301,9 @@ async function castleWorkInner () {
   const steer = blockedOn && build.infillItem(blockedOn) && Object.keys(mats.planFor(bot, windowNeeds()).raw).some(r => r === 'cobblestone') ? null : blockedOn
   const chain = steer ? Object.keys(mats.getPlanner(bot).plan({ [steer]: 1 }).raw) : []
   const blockedRaw = chain.find(r => r !== 'fuel' && win.raw[r] > 0) || chain.find(r => win.raw[r] > 0) || null
+  // (the builder waits on an item whose raw the next layers' shortfall does not hold: said, with both sides - the band
+  //  waited on oak_trapdoor for two hours while the rounds gathered leather and wool, 2026-09-29)
+  if (steer && !blockedRaw && steerSaid !== steer) { steerSaid = steer; log('dir', `the builder waits on ${steer} (its raw: ${chain.join(', ') || 'none - in stock or craftable from stock'}), but the next layers' shortfall has none of it: ${Object.keys(win.raw).map(r => win.raw[r] + ' ' + r).join(', ') || 'nothing'}`) }
   // a trip needs a working day ahead of it: close to dusk only what is gathered round home (a walk to the mine
   // face that arrived as dusk fell was a minute and a half for nothing; a clay bank is further still)
   const nearDusk = world.ticksUntilNight(bot) < 2400
