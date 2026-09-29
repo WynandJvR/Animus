@@ -388,13 +388,14 @@ async function loop () {
       // last good settings rather than snapping back to env defaults.
       if (Date.now() - lastSettingsAt > SETTINGS_POLL_MS) {
         const s = await getBrainSettings()
-        if (s !== null) cachedSettings = s
-        lastSettingsAt = Date.now()
+        if (s !== null) { cachedSettings = s; lastSettingsAt = Date.now() } // (a failed read retries next idle poll)
       }
       const settings = cachedSettings
       const model = (settings && settings.model) || LLM_MODEL
       const goal = (settings && settings.goal) || GOAL
-      const enabled = !settings || settings.enabled !== false
+      // FAIL CLOSED: no settings read yet (the bot mid-restart, the API slow) is PAUSED, never on - read as "on", every
+      // deploy called the model while the operator had paused the brain and it came back onto the GPU, 2026-09-29 (audit)
+      const enabled = !!settings && settings.enabled !== false
       if (model !== lastModel) { console.log(`[brain] model switched -> ${model}`); lastModel = model }
       if (!enabled) { // paused from the UI - idle, keep chat/reflexes alive on the body
         if (!pausedLogged) { console.log('[brain] paused via dashboard - holding'); pausedLogged = true }
