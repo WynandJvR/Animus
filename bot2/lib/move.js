@@ -695,7 +695,11 @@ async function escapeUpInner (bot) {
     // (below the floor too: a hollow the foundation rim closed all round has no way out for the walk to the exit or the
     //  climb to find - the rim is opened like any wall, toward safe ground past it; audit 2026-09-29)
     if (inFoot && !build.wayOut(bot, { x: NaN, y: NaN, z: NaN }, null, false)) {
-      log('move', `enclosed by the build at ${fmt(f0)} - no way out; opening our own wall beside me, the builder puts it back`)
+      // (a door beside the bot is "a way" to wayOut, but crossDoor goes through a door only along its facing, from a step in
+      //  front or behind: from its side - a one-cell pocket next to a double door - it never got through, and the log said
+      //  "no way out" beside a door, 2026-09-29; audit)
+      const doorBeside = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => { const b = world.at(bot, f0.x + dx, f0.y, f0.z + dz); return !!b && /_door$/.test(b.name) })
+      log('move', `enclosed by the build at ${fmt(f0)} - ${doorBeside ? 'the door beside me did not let me through' : 'no way out'}; opening our own wall beside me, the builder puts it back`)
       const cellAt = (x, y, z) => j.index.get(`${x},${y},${z}`)
       const holdsUp = (x, y, z) => j.cells.some(q => q.sup && q.sup.x === x && q.sup.y === y && q.sup.z === z && build.cellDone(bot, q) === true)
       const air = (x, y, z) => { const b = world.at(bot, x, y, z); return !!b && world.isAirish(b) }

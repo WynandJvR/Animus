@@ -1532,6 +1532,15 @@ function wallsMeIn (bot, c, from = null) {
 // build's own - with the cell counted solid (withC) or not. Outside the footprint: out already.
 // wayOutPoint: where the walk found its way out - a cell outside the footprint, or the cell under open sky a tower rises
 // from (the planner never plans that tower: escapeUp walks here first and climbs; audit 2026-09-29)
+// The edge of a door's cell its panel stands on - closed: opposite its facing; open: turned to the hinge's side (vanilla's
+// DoorBlock shapes). The lower half carries facing, hinge and open.
+function doorPanel (door) {
+  let pr = {}; try { pr = door.getProperties() || {} } catch {}
+  const f = pr.facing; if (!OPP[f]) return null
+  const open = pr.open === true || pr.open === 'true'
+  return !open ? OPP[f] : (pr.hinge === 'right' ? CW[f] : CCW[f])
+}
+function edgeOf (dx, dz) { return dx === 1 ? 'east' : dx === -1 ? 'west' : dz === 1 ? 'south' : 'north' }
 let lastExit = null
 function wayOutPoint (bot, from = null) { lastExit = null; return wayOut(bot, { x: NaN, y: NaN, z: NaN }, from, false) ? lastExit : null }
 function wayOut (bot, c, from = null, withC = true) {
@@ -1545,7 +1554,12 @@ function wayOut (bot, c, from = null, withC = true) {
   {
     const isC = (x, y, z) => withC && x === c.x && y === c.y && z === c.z
     const air = (x, y, z) => { if (isC(x, y, z)) return false; const b = world.at(bot, x, y, z); return !!b && passable(b) }
-    const st = (x, y, z) => { if (!air(x, y, z) || !air(x, y + 1, z)) return false; if (isC(x, y - 1, z)) return true; return world.standable(bot, x, y, z) }
+    // (a door cell is stood in on its floor - world.standable wants airish feet, a door is not - and it is entered or left
+    //  through any edge but the one its panel stands on: closed, the edge opposite its facing; open, swung to the hinge's
+    //  side. "Passable every way" read a one-cell pocket beside an open door as a way out, and the search that could not
+    //  step into a door at all read the room as sealed - the physics decides, 2026-09-29; audit)
+    const st = (x, y, z) => { if (!air(x, y, z) || !air(x, y + 1, z)) return false; if (isC(x, y - 1, z)) return true; const fb = world.at(bot, x, y, z); if (fb && /_door$/.test(fb.name)) { const fl = world.at(bot, x, y - 1, z); return !!fl && world.isSolid(fl) } return world.standable(bot, x, y, z) }
+    const panelBlocks = (door, dx, dz) => { const e = doorPanel(door); return !!e && e === edgeOf(dx, dz) } // (the edge of the door's cell toward dx,dz)
     const seen = new Set([key(f)]); const q = [{ x: f.x, y: f.y, z: f.z }]
     while (q.length) {
       if (seen.size > 300) return true // (a region this big is no trap)
@@ -1555,8 +1569,11 @@ function wayOut (bot, c, from = null, withC = true) {
       //  climb's "no tower - a cell of the build", and read as a way out it kept the wall-opening escape from running -
       //  the south rim's trench, walk and climb failing in turn, 2026-09-29)
       if (!job.index.has(key(p)) && world.openSky(bot, p) && !isC(p.x, p.y, p.z)) { let clear = true; for (let y = p.y + 2; y < p.y + 22; y++) if (isC(p.x, y, p.z)) clear = false; if (p.y < b0.y1) for (let y = p.y + 1; y <= b0.y1 + 1; y++) { const q = job.index.get(`${p.x},${y},${p.z}`); if (q && !(q.foundation && q.name === 'cobblestone')) clear = false } /* (a filler foundation cell a tower may rise through: the protector's rule) */ if (clear) { lastExit = p; return true } }
+      const here = world.at(bot, p.x, p.y, p.z); const hereDoor = here && /_door$/.test(here.name) ? here : null
       for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
         const x = p.x + dx; const z = p.z + dz
+        if (hereDoor && panelBlocks(hereDoor, dx, dz)) continue // (out of a door cell through its panel: no)
+        { const nb = world.at(bot, x, p.y, z); if (nb && /_door$/.test(nb.name) && panelBlocks(nb, -dx, -dz)) continue } // (into one through its panel: no)
         for (let dy = 1; dy >= -world.SAFE_DROP; dy--) {
           const y = p.y + dy
           if (dy === 1 && !air(p.x, p.y + 2, p.z)) continue // (a step up wants the head room to jump)
