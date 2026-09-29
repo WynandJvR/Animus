@@ -1231,6 +1231,12 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       //  item a trapdoor waits on, 2026-09-29)
       const anchor = todo.find(c => !c.attach && !c.follows && !c.foundation && !infillCell(c) && !((cellFails.get(key(c)) || {}).n >= 1) && c.y === lowestAll && !det.has(stepItem(bot, c)) && !fallsIn(bot, c, stepItem(bot, c)))
       const anc = anchor ? `, band anchored by ${stepItem(bot, anchor)}@${anchor.x},${anchor.y},${anchor.z}${has(anchor) ? ' (in hand)' : ' (not in hand)'}${holdBack.has(key(anchor)) ? ' (held back)' : ''}` : ''
+      // (a cell that can never be readied - nothing to click, nothing to prop it on - is never tried, so it never fails,
+      //  and a cell that never fails anchors the band for ever: a down-facing lightning rod whose only click face is the
+      //  candle that stands on it held the castle at y120 for two hours, 2026-09-29. Unready at the step's end is a miss:
+      //  it rests like any, the band rises past it, a block placed beside it wakes it)
+      for (const c of doable) if (!holdBack.has(key(c))) failed.set(key(c), (failed.get(key(c)) || 0) + 1)
+      if (doable.length) saveCellFails()
       profLog(); log('build', `${placed ? `step ended after ${placed} placed - ` : ''}nothing ready${anc}: lowest y${lowestAll}, ${doable.length} doable (${doable.slice(0, 5).map(c => c.name + '@' + c.x + ',' + c.y + ',' + c.z).join(' ')}) none clickable or supportable (${doable.filter(c => holdBack.has(key(c))).length} held back this step), ${waitingHolds ? 'waiting on ' + waiting : (waiting ? waiting + ' missing (detached - holding nothing)' : 'waiting on nothing')}`); return { placed, blockedOn: waiting, blockedHolds: waitingHolds, done: false } }
     // everything within reach of where we stand first, then the nearest - a layer down counts one block, not four:
     // the walk between cells is most of a block's six seconds, and "lower first" sent the bot back and forth across the
