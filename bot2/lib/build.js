@@ -530,6 +530,11 @@ const craftMemo = new Map() // item -> { at, ok }: craftable from stock, judged 
 // (sealsBelow), open, for the item. (item -> the day)
 const coverMiss = new Map()
 const waitCols = new Map() // (x,z -> lowest open waiting hole: detachedItems)
+// NEVER THE LAST FACE: a cell whose placing would close a waiting hole's last open face - from ANY side, not only above
+// (sealsBelow guarded the cell over a hole; the wall beside it closed it a side at a time: 46 holes "placeable from
+// beside while it lasts", 2026-09-29; audit). Held, and anchoring no band. (cell keys: detachedItems)
+const holdAround = new Set()
+const FACES = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]
 function noteCoverMiss (bot, anchor, holding) {
   if (!anchor) return
   const it = stepItem(bot, anchor)
@@ -579,12 +584,18 @@ function detachedItems (todo, bot) {
   // THE WAITING COLUMNS: x,z -> the lowest hole kept open for its item (out of stock, or the wait above) with nothing placed
   // over it yet. Every cell above it in that column anchors no band - it cannot go in until the hole does (one step-end
   // miss a level was the old drip); one lookup a cell in anchorable (audit)
-  waitCols.clear()
+  waitCols.clear(); holdAround.clear()
   const td = today(bot)
+  const openAt = (x, y, z) => { const w = world.at(bot, x, y, z); return !!w && !world.isSolid(w) }
   for (const c of todo) {
     if (c.clear || c.attach) continue
     const it = stepItem(bot, c)
     if (!detached.has(it) && coverMiss.get(it) !== td) continue
+    // (the hole's faces open now; the one that would close the last is held - placed later, when the hole is filled)
+    if (cellDone(bot, c) !== true) {
+      const open = FACES.map(([dx, dy, dz]) => ({ x: c.x + dx, y: c.y + dy, z: c.z + dz })).filter(f => openAt(f.x, f.y, f.z))
+      if (open.length === 1) { const f = open[0]; const fc = job && job.index.get(key(f)); if (fc && !fc.clear) holdAround.add(key(f)) }
+    }
     const up = job && job.index.get(key({ x: c.x, y: c.y + 1, z: c.z }))
     if (up && cellDone(bot, up) === true) continue // (covered already: the column is not waiting on it)
     const k = c.x + ',' + c.z; const w = waitCols.get(k)
@@ -605,6 +616,7 @@ function anchorable (bot, c, det) {
   // (nor a cell standing on a hole kept open for its item - out of stock, or the wait above: it cannot go in until that
   //  does, and freed one step-end miss at a time, a layer of them was "4,156 in hand, nothing doable"; 2026-09-29)
   { const w = waitCols.get(c.x + ',' + c.z); if (w != null && c.y > w) return false } // (the column over a waiting hole: detachedItems)
+  if (holdAround.has(key(c))) return false // (it would close a waiting hole's last face: holdAround)
   return !(det && (det.has(stepItem(bot, c)) || fallsIn(bot, c, stepItem(bot, c))))
 }
 function lowestStructural (todo, bot, det = bot ? detachedItems(todo, bot) : null) {
@@ -1308,7 +1320,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       }
       return true
     }
-    doable = doable.filter(c => !sealsBelow(c))
+    doable = doable.filter(c => !sealsBelow(c) && !holdAround.has(key(c)))
     // (a liquid waits for the ground under it: water poured over the hollow's open column runs down and floods it - the
     //  castle's one base water cell sits over a hole the foundation fills first; audit 2026-09-29)
     doable = doable.filter(c => { if (!c.pour) return true; const b = world.at(bot, c.x, c.y - 1, c.z); return !!b && !world.isAirish(b) }) // (anything but air under it: ground, a slab, the pool's own water below)
