@@ -1111,12 +1111,11 @@ async function placeCell (bot, c, j = job) {
 //  of every build step spent re-learning the same eight unreachable pillar tops, 2026-09-27)
 let supportsLaid = 0; let pillarLaid = 0; let pillarDug = 0 // (the builder's own supports, pillar blocks up and down - the step profile)
 const cellFails = new Map(Object.entries((mem.get().cellFails) || {})) // key -> {n, at}
-let cellFailsSaved = 0
 // (only cells of the job are kept: a cell finished by any other way - a restart, a hand - is dropped at the next save; audit #38)
-// (throttled, never dropped: a save inside the 5s window was lost, and the step-end misses written right after a try's
-//  never reached memory - the restart that followed brought the never-ready oak log back to anchor the band, 2026-09-29)
-let cellFailsTimer = null
-function saveCellFails () { const wait = 5000 - (Date.now() - cellFailsSaved); if (wait > 0) { if (!cellFailsTimer) cellFailsTimer = setTimeout(() => { cellFailsTimer = null; saveCellFails() }, wait); return } cellFailsSaved = Date.now(); const o = {}; for (const [k, v] of cellFails) { if (job && !job.index.has(k)) { cellFails.delete(k); continue } o[k] = v } mem.set('cellFails', o) }
+// (no throttle of its own: memory.save coalesces a burst into one write since 5ca11ef, and the old 5s throttle DROPPED the
+//  last write of a burst - the step-end misses never reached memory and a restart brought a never-ready log back to
+//  anchor the band, 2026-09-29; audit)
+function saveCellFails () { const o = {}; for (const [k, v] of cellFails) { if (job && !job.index.has(k)) { cellFails.delete(k); continue } o[k] = v } mem.set('cellFails', o) }
 // A reach miss is the GROUND's: the cells round it (3 across, a layer up or down) share the missed cell's rest, count and
 // all. Held back for one step only, each round tried the next cell of the same patch - the south-west hollow's foundation
 // took 7 walks of 46s for 1 block, round after round (2026-09-29). A block placed beside them still wakes them.

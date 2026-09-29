@@ -21,8 +21,8 @@ const TRIES = 2
 const COLUMNS_A_RUN = 12
 const k = p => `${p.x},${p.y},${p.z}`
 const ledger = new Map((mem.get().litter || []).map(q => [k(q), q]))
-let savedAt = 0; let dirty = false
-function save (now = false) { if (!dirty || (!now && Date.now() - savedAt < 30000)) return; savedAt = Date.now(); dirty = false; mem.set('litter', [...ledger.values()]) }
+let dirty = false
+function save () { if (!dirty) return; dirty = false; mem.set('litter', [...ledger.values()]) } // (memory.save coalesces the writes; a throttle here dropped the last of a burst - audit 2026-09-29)
 const filler = () => require('./build').FILLER_ITEMS // (THE scaffold list)
 
 // the ledger forgets a block the moment it is no longer there - dug by the chop's own teardown, by us, by anyone
@@ -118,7 +118,7 @@ function seed (bot) {
       ledger.set(k({ x, y, z }), { x, y, z, name: b.name, at: Date.now(), seeded: true }); n++
     }
   }
-  if (n) { dirty = true; save(true); log('litter', `found ${n} cobblestone of ours standing in the orchard`) }
+  if (n) { dirty = true; save(); log('litter', `found ${n} cobblestone of ours standing in the orchard`) }
   return n
 }
 
@@ -216,7 +216,7 @@ async function tidy (bot, { from, radius = RADIUS, shouldStop } = {}) {
     for (const q of col) {
       // (a pickaxe in hand for every block, the one rule - craft.keepTool: with it worn out mid-tidy, cobble went by hand,
       //  10-50s a block and nothing dropped, 2026-09-28. None to be had: the tidy stops, the tools come first)
-      if (!await require('./craft').keepTool(bot, 'pickaxe', { shouldStop })) { log('litter', 'no pickaxe - the tidy waits for one'); save(true); return removed }
+      if (!await require('./craft').keepTool(bot, 'pickaxe', { shouldStop })) { log('litter', 'no pickaxe - the tidy waits for one'); save(); return removed }
       // (a stepping stone can become a light's post or a water's edge after it was noted: asked again at the dig, and let go)
       if (kept(bot, q, pts) || capsADrop(bot, q)) { ledger.delete(k(q)); dirty = true; continue }
       // (above the reach from the ground - a stand of ours left on a tree's crown, 8 up: up to it the way a player does, a
@@ -230,7 +230,7 @@ async function tidy (bot, { from, radius = RADIUS, shouldStop } = {}) {
     if (left > leftBefore) miss()
     await act.collectDrops(bot, { radius: 5, maxMs: 3000 }).catch(() => {})
   }
-  save(true)
+  save()
   const gaveUp = [...ledger.values()].filter(q => (q.tries || 0) >= TRIES).length
   if (gaveUp) log('litter', `${gaveUp} block${gaveUp > 1 ? 's' : ''} of ours given up on (out of reach twice)`)
   if (removed || left) log('litter', `took down ${removed} block${removed === 1 ? '' : 's'} of ours${left ? `, ${left} left (out of reach from the ground)` : ''}`)
