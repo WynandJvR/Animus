@@ -31,7 +31,11 @@ const HALF = 2 // the paddock: centre +-2 (5x5); the ring one further out
 const SITE_MIN = 12
 const SITE_MAX = 30
 const BUILD_MARGIN = 10 // (past the build's own ring: underBuild's +8, the site region's +6)
-const OFF_LEVEL = 6 // columns a block off the paddock's level that the groundwork may level; more is no site
+// THE GROUNDWORK'S BUDGET: a player levels the handiest patch - blocks dug off the mounds and dirt put in the dips, two
+// high at most (ground.prepare clears two over the floor and fills a hole two deep). "Six columns a block off, none two"
+// found no site in the hills round home: 269 centres "not level" of 600, 2026-09-29
+const LEVEL_MAX = 2
+const LEVEL_BUDGET = 24 // blocks moved, the ring's columns with the paddock's
 const STOCK_MIN = 2
 const CAP = 8
 const LOVE_MS = 5 * 60000 // vanilla: a sheep bred (or fed into love) takes no more wheat for 6000 ticks
@@ -82,12 +86,15 @@ function siteAt (bot, cx, cz, home) {
     for (let dy = 1; dy <= 2; dy++) { const b = world.at(bot, x, gy + dy, z); if (!b || !(world.isAirish(b) || act.PLANT_RE.test(b.name))) return no('something standing on it') }
     cols.push({ x, z, gy, g, inner: Math.abs(dx) <= HALF && Math.abs(dz) <= HALF })
   }
-  // one level: the most common; a column one off it is levelled (dug down or filled), a few at most
-  const n = {}; for (const c of cols) n[c.gy] = (n[c.gy] || 0) + 1
-  const level = Number(Object.keys(n).sort((a, b) => n[b] - n[a])[0])
-  if (cols.some(c => Math.abs(c.gy - level) > 1) || cols.filter(c => c.gy !== level).length > OFF_LEVEL) return no('not level')
+  // one level: the cheapest to level to (blocks dug and filled), none more than LEVEL_MAX off it, within the budget
+  const cost = l => cols.reduce((a, c) => a + Math.abs(c.gy - l), 0)
+  const levels = [...new Set(cols.map(c => c.gy))].filter(l => cols.every(c => Math.abs(c.gy - l) <= LEVEL_MAX))
+  if (!levels.length) return no('not level')
+  const level = levels.sort((a, b) => cost(a) - cost(b))[0]
+  const work = cost(level)
+  if (work > LEVEL_BUDGET) return no('not level')
   // grass inside: a sheep grows its wool back by eating it
-  if (cols.filter(c => c.inner && c.gy === level && c.g.name === 'grass_block').length < 15) return no('too little grass')
+  if (cols.filter(c => c.inner && c.g.name === 'grass_block').length < 15) return no('too little grass')
   const y = level + 1
   if (Math.abs(y - home.y) > 6) return no('not at home height')
   for (const [dx, dz] of [[0, 0], [-HALF, -HALF], [HALF, -HALF], [-HALF, HALF], [HALF, HALF]]) if (!world.openSky(bot, { x: cx + dx, y, z: cz + dz })) return no('no open sky')
@@ -108,7 +115,7 @@ function siteAt (bot, cx, cz, home) {
   const out = { x: gate.x + dir.x, y, z: gate.z + dir.z }
   const og = world.groundY(bot, out.x, out.z, home.y + 12)
   if (og == null || Math.abs(og + 1 - y) > 1 || !world.isSolid(world.at(bot, out.x, og, out.z)) || move.inZone({ x: out.x, y: og + 1, z: out.z }, 0, ['pen'])) return no('no ground before the gate')
-  return { box: { x1: cx - HALF, z1: cz - HALF, x2: cx + HALF, z2: cz + HALF, y }, gate, dir }
+  return { box: { x1: cx - HALF, z1: cz - HALF, x2: cx + HALF, z2: cz + HALF, y }, gate, dir, work }
 }
 
 // The nearest paddock in the ring round home (12..30 out), or null. A step of 2 between centres; the scan yields between
@@ -123,11 +130,14 @@ async function chooseSite (bot) {
   }
   cands.sort((a, b) => a.d - b.d)
   for (const k of Object.keys(siteWhy)) delete siteWhy[k]
+  // (the handiest: the least groundwork, a block of it worth two blocks of walk - not the first that passes)
+  let best = null
   for (let i = 0; i < cands.length; i++) {
     if (i % 8 === 0) await new Promise(r => setImmediate(r))
     const s = siteAt(bot, cands[i].x, cands[i].z, home)
-    if (s) return s
+    if (s && (!best || s.work * 2 + cands[i].d < best.score)) best = { s, score: s.work * 2 + cands[i].d }
   }
+  if (best) { const { work, ...site } = best.s; log('pen', `sheep pen site at ${site.box.x1},${site.box.z1} - ${work} blocks of groundwork`); return site }
   return null
 }
 
