@@ -534,6 +534,7 @@ const waitCols = new Map() // (x,z -> lowest open waiting hole: detachedItems)
 // (sealsBelow guarded the cell over a hole; the wall beside it closed it a side at a time: 46 holes "placeable from
 // beside while it lasts", 2026-09-29; audit). Held, and anchoring no band. (cell keys: detachedItems)
 const holdAround = new Set()
+const compartmentSaid = new Set() // (cells said once to wait on a closed compartment: the step's skip)
 // (sound only with ONE placement between rebuilds - the step loop's pass places one cell (placeCell) and every pass begins
 //  with detachedItems. A pass that placed several would have to rebuild this inside its own loop; audit)
 // ...and a hole's last open face that is NO cell of the build - terrain air at the site's edge, a courtyard gap: the
@@ -1513,6 +1514,18 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     let skipTry = false
     // (c.ownWay: a cell whose cluster stand's walk ran out goes its own way next time - placeCell's look-at walk, which may
     //  find a wall top; the same unreachable stand was chosen again every step and the look-at walk never ran; audit)
+    // A CELL WHOSE EVERY STAND IS IN A CLOSED COMPARTMENT I AM NOT IN waits - never tried: as a last resort those walks
+    // failed every time, 8 of 8 on 2026-09-29, 30-60s each, and the look-at walk after them failed the same way ("could
+    // not get within reach"); misses were 57% of the evening's build-step time. It goes in once the compartment opens
+    // (its door or gap is built) or the bot is inside it. A cell with no stand at all goes on as before (the tower)
+    if (!c.foundation && !inReach(c)) {
+      const probe = clusterStand(bot, c, ready, badStands, reachOf)
+      if (probe && probe.out) {
+        holdBack.add(key(c))
+        if (!compartmentSaid.has(key(c))) { compartmentSaid.add(key(c)); log('build', `${c.name} at ${move.fmt(c)}: every stand for it is in a closed compartment of the build I am not in - it waits for a way in`) }
+        tpick = Date.now(); continue
+      }
+    }
     if (!c.foundation && !c.ownWay && !inReach(c) && ready.length > 2) {
       const st = clusterStand(bot, c, ready, badStands, reachOf)
       if (st && st.out) log('build', `the stand ${move.fmt(st)} for ${c.name} at ${move.fmt(c)} is in a closed compartment of the build I am not in (from ${move.fmt(world.feetPos(bot))}) - no other stand: tried as a last resort`)
