@@ -2079,8 +2079,13 @@ async function ensureScaffold (bot, n = SCAFFOLD_WANT, { shouldStop } = {}) { //
     //  and walked the haul home and back - 1.5 minutes a round, 2026-09-29. The kit comes out again right after this)
     const home = mem.get().home
     if (inv.freeSlots(bot) <= 4 && home && world.dist3(bot.entity.position, home) < 24) { log('build', `pack nearly full (${inv.freeSlots(bot)} free) - depositing before the mine trip for scaffold`); await base.depositHaul(bot, { shouldStop }).catch(() => false) }
-    log('build', `getting ${short} cobblestone from the mine to scaffold with`)
-    await require('./craft').ensure(bot, 'cobblestone', inv.count(bot, 'cobblestone') + Math.max(short, 32), { noWithdraw: true, shouldStop }).catch(() => false)
+    // (a trip's worth, not a round's: the foundation's cells are cobblestone too and took each 32 the step it came, so every
+    //  round walked to the mine again - 1-3 minutes a round, 2026-09-29. What the foundation still wants rides along, two
+    //  stacks at most)
+    const fnd = job ? job.cells.filter(q => q.foundation && q.name === 'cobblestone' && cellDone(bot, q) !== true).length : 0
+    const ask = Math.max(short, 32, Math.min(128, short + fnd))
+    log('build', `getting ${ask} cobblestone from the mine to scaffold with${fnd ? ` (and ${fnd} foundation cells)` : ''}`)
+    await require('./craft').ensure(bot, 'cobblestone', inv.count(bot, 'cobblestone') + ask, { noWithdraw: true, shouldStop }).catch(() => false)
   }
   if (filler() < n / 2) { log('build', `getting ${n - filler()} dirt to scaffold with`); await require('./craft').ensure(bot, 'dirt', inv.count(bot, 'dirt') + (n - filler()), { noWithdraw: true, shouldStop }).catch(() => false) }
   return true
