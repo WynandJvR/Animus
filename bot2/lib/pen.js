@@ -217,7 +217,12 @@ async function setGate (bot, open) {
   return act.useOn(bot, p.gate, null, { accept: ok, timeoutMs: 8000 })
 }
 // (the column, not the block: a step a block off the paddock's level is still the step)
-const walk = (bot, c, label, timeoutMs = 20000) => move.goTo(bot, new goals.GoalXZ(c.x, c.z), { timeoutMs, stuckMs: 6000, dig: false, place: false, allowZones: ['pen'], label })
+// (from afar - the pen may stand 30-64 out, home the far side of it - the long walk's legs first, then the step: a 20s walk
+//  from 100 blocks off failed every time; audit 2026-09-29)
+const walk = async (bot, c, label, timeoutMs = 20000, shouldStop) => {
+  if (world.dist2(bot.entity.position, c) > 24) await move.travel(bot, { x: c.x, y: c.y, z: c.z }, { range: 3, label, maxMs: 180000, shouldStop }).catch(() => null)
+  return move.goTo(bot, new goals.GoalXZ(c.x, c.z), { timeoutMs, stuckMs: 6000, dig: false, place: false, allowZones: ['pen'], label, shouldStop })
+}
 // In through the gate, shut behind us. False (and the gate shut) when the way in failed.
 async function enter (bot) {
   const p = pen()
@@ -423,7 +428,7 @@ async function shear (bot, { shouldStop } = {}) {
   if (!p || !inv.has(bot, 'shears')) return 0
   const wool = () => inv.count(bot, /_wool$/)
   const w0 = wool()
-  if (!sheepIn(bot, p)) await move.goTo(bot, new goals.GoalNear(p.gate.x, p.gate.y, p.gate.z, 3), { timeoutMs: 60000, dig: false, place: false, shouldStop, label: 'to the sheep pen' })
+  if (!sheepIn(bot, p)) await walk(bot, outerStep(p), 'to the sheep pen', 20000, shouldStop)
   if (!woolly(bot, sheepIn(bot, p)).length) { observe(bot); return 0 }
   if (!await enter(bot)) { log('pen', 'could not get into the pen to shear'); return 0 }
   const tried = new Set() // (one try a sheep: one the shears did not take stays skipped this visit)
