@@ -153,7 +153,9 @@ async function openCell (bot, p) {
 }
 
 // Block to fill a hole with: stone the castle has no use for first, cobblestone (castle material) last.
-const FILLER_ORDER = ['andesite', 'diorite', 'tuff', 'cobbled_deepslate', 'netherrack', 'dirt', 'cobblestone']
+// (least-needed first: the walls and floors spent andesite - the castle wants ~1,000 - and the cobble the trip was for;
+//  cobblestone is the scaffold's, the foundation's and the stone's, andesite the castle's own; audit 2026-09-29)
+const FILLER_ORDER = ['netherrack', 'tuff', 'cobbled_deepslate', 'dirt', 'diorite', 'cobblestone', 'andesite']
 function fillerItem (bot) {
   for (const n of FILLER_ORDER) { const it = inv.items(bot).find(i => i.name === n); if (it) return it }
   return null
