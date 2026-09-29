@@ -2066,6 +2066,10 @@ async function ensureScaffold (bot, n = SCAFFOLD_WANT, { shouldStop } = {}) { //
   //  when the mine gave nothing.)
   if (filler() < n / 2) {
     const short = n - filler()
+    // (room in the pack first, at the chests beside home: last round's kit filled it, the mine said "pack full" at 0 of 32
+    //  and walked the haul home and back - 1.5 minutes a round, 2026-09-29. The kit comes out again right after this)
+    const home = mem.get().home
+    if (inv.freeSlots(bot) <= 4 && home && world.dist3(bot.entity.position, home) < 24) { log('build', `pack nearly full (${inv.freeSlots(bot)} free) - depositing before the mine trip for scaffold`); await base.depositHaul(bot, { shouldStop }).catch(() => false) }
     log('build', `getting ${short} cobblestone from the mine to scaffold with`)
     await require('./craft').ensure(bot, 'cobblestone', inv.count(bot, 'cobblestone') + Math.max(short, 32), { noWithdraw: true, shouldStop }).catch(() => false)
   }
