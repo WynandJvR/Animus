@@ -206,6 +206,10 @@ function work (bot, { woolWanted = 0, wheat = 0 } = {}) {
   if (gateOpen(bot, p) && !inPen(bot.entity.position, p)) return { kind: 'gate', why: 'the sheep pen gate stands open' }
   const seen = observe(bot) || { n: 0 }
   if (seen.n < STOCK_MIN && wheat >= 1 && wildKnown(bot)) return { kind: 'stock', why: `${seen.n} sheep in the pen - leading more in with wheat` }
+  // THE PEN SHORN BY ITS OWN TASK: woolFor's pen-first call is reached only through the wool trip, and a trip that found no
+  // wild sheep is put off for the day - the pen's regrown wool would wait for tomorrow (audit). Out of sight, its last
+  // count and the regrowth: a shorn sheep grows it back grazing, most within a few minutes
+  if (woolWanted > 0 && (inv.has(bot, 'shears') || base().bankCount('shears') > 0) && woolReady(bot, p)) return { kind: 'shear', why: 'the penned sheep have wool - shearing' }
   const list = sheepIn(bot, p)
   const b = list ? breedable(bot, list).length : 0
   if (list && b >= 2 && list.length < CAP && wheat >= 2 && (woolWanted > 0 || list.length < 4)) return { kind: 'breed', why: `${b} sheep in the pen ready to breed (${list.length} of ${CAP})` }
@@ -439,6 +443,13 @@ async function breed (bot, { shouldStop } = {}) {
 // (a lamb has no wool to shear - vanilla's readyForShearing)
 function woolly (bot, list) { return (list || []).filter(e => { const w = food().sheepWool(bot, e); return !!w && !w.sheared && !food().isBaby(bot, e) }) }
 // Would a trip to the pen find wool? Seen from here, or the last count seen.
+const REGROW_MS = 3 * 60000
+function woolReady (bot, p = pen()) {
+  const list = sheepIn(bot, p)
+  if (list) return woolly(bot, list).length > 0
+  const s = p && p.seen
+  return !!s && s.adults > 0 && (s.woolly > 0 || Date.now() - (s.at || 0) > REGROW_MS)
+}
 function hasWool (bot) {
   const p = pen(); if (!p) return false
   const list = sheepIn(bot, p)
@@ -487,6 +498,12 @@ async function run (bot, kind, opts = {}) {
   if (kind === 'stock') return stock(bot, opts)
   if (kind === 'gate') return shutGate(bot)
   if (kind === 'breed') return breed(bot, opts)
+  if (kind === 'shear') {
+    if (!inv.has(bot, 'shears')) await base().withdraw(bot, 'shears', 1).catch(() => 0)
+    const got = await shear(bot, opts)
+    observe(bot); if (!got) mem.update(m => { if (m.pen && m.pen.seen) m.pen.seen.at = Date.now() }) // (none to take: the regrowth clock starts again)
+    return got > 0
+  }
   return false
 }
 
