@@ -1058,6 +1058,7 @@ function tripRoom () { return Math.max(1, inv.freeSlots(bot) - 2) * 64 }
 let demandTrees = 0
 // Wool the build still needs (its plan's raw wool), with demandTrees: the sheep pen is built for it.
 let demandWool = 0
+const cellCost = new Map() // item -> { raws, c }: one cell's raw cost by its recipe (stock-free) - pickRaw's order
 // The pen's arguments: the wool wanted, and the wheat it may have - pack and bank, bread's share (three loaves) kept back
 // while the bread is short
 function penArgs () {
@@ -1339,15 +1340,20 @@ async function castleWorkInner () {
   const fuelBound = (!blockedOn || chain.includes('fuel')) && (win.raw.fuel || tot.raw.fuel || 0) > 0 && win.smelts.concat(tot.smelts).some(sm => sm.input && sm.input !== '#log' && mats.stock(bot, sm.input) > 0)
   // (the cost of ONE cell for each item of the next layers not covered by stock, per raw the cheapest: pickRaw's order after
   //  the band's own bottleneck - cheapest cells first, the bookshelves' long chain last; a plan an item, yielded between)
+  // (priced by the RECIPE, never the pantry: planned against the stock, a raw the chest half covers - 10 of 47 cobblestone -
+  //  priced nothing and sorted LAST, behind the chains with nothing banked; audit. A cell's cost is the job's constant:
+  //  memoized an item)
   const perCell = {}
-  { let i = 0; for (const item of Object.keys(next)) {
-    if (++i % 10 === 0) await new Promise(r => setImmediate(r))
-    let r; try { r = mats.planFor(bot, { [item]: 1 }) } catch { continue }
-    const raws = Object.entries(r.raw || {}).filter(([, v]) => v > 0)
-    if (!raws.length) continue
-    const c = raws.reduce((a, [k, v]) => a + v * mats.rawCost(k), 0)
-    for (const [k] of raws) perCell[k] = Math.min(perCell[k] != null ? perCell[k] : Infinity, c)
-  } }
+  for (const item of Object.keys(next)) {
+    let m = cellCost.get(item)
+    if (!m) {
+      let r = null; try { r = mats.getPlanner(bot).plan({ [item]: 1 }) } catch {}
+      const raws = Object.entries((r && r.raw) || {}).filter(([, v]) => v > 0)
+      m = { raws: raws.map(([k]) => k), c: raws.reduce((a, [k, v]) => a + v * mats.rawCost(k), 0) }
+      cellCost.set(item, m)
+    }
+    for (const k of m.raws) perCell[k] = Math.min(perCell[k] != null ? perCell[k] : Infinity, m.c)
+  }
   const pick = mats.pickRaw(fuelBound && !win.raw.fuel ? Object.assign({ fuel: tot.raw.fuel }, win.raw) : win.raw, tot.raw, { blockedRaw: fuelBound ? 'fuel' : blockedRaw, feasible, perCell })
   if (!pick) {
     buildFocus = { at: Date.now(), gathering: null, builderWaitsOn: blockedOn || null, waitingOnFurnaces: win.smelts.map(s => s.n + ' ' + s.output), shortInAll: Object.fromEntries(Object.entries(tot.raw).sort((a, b) => b[1] - a[1]).slice(0, 8)) }
@@ -1444,7 +1450,7 @@ async function gatherFor (raw, short) {
   reflex.setCautious(true) // (an optional trip does not fight: cover over a charge - reflex.setCautious)
   let ok = false
   // (pack and bank: the trip's own start empties the pack into the chests)
-  const re = raw === 'wool' ? /_wool$/ : new RegExp(`^${raw}$`)
+  const re = new RegExp(`^${raw}$`)
   const got = () => inv.count(bot, re) + Object.entries(base.bankCounts()).filter(([n]) => re.test(n)).reduce((a, [, c]) => a + c, 0)
   const had = got()
   try { ok = await gatherForInner(raw, short); return ok } finally {
