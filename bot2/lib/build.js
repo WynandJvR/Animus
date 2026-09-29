@@ -552,7 +552,10 @@ function noteCoverMiss (bot, anchor, holding) {
   try { const r = require('./materials').planFor(bot, { [it]: 1 }, { noInFlight: true }); ok = !Object.keys(r.raw || {}).some(x => r.raw[x] > 0) && !(r.unknown || []).length } catch {}
   if (!ok) return
   coverMiss.set(it, today(bot))
-  log('build', `${it} anchors the band at ${move.fmt(anchor)} and none is to hand, though the plan finds the stock covers it - nothing to fetch, nothing made: building past it today, its cell kept open`)
+  // (the plan for it ALONE: its ingredients may be the window's for other cells - a contention, not a miscount - and the
+  //  band goes on either way; a band then holds only on a real raw shortfall. Its column and faces stay open, and the
+  //  builder's wait still steers the trip; audit)
+  log('build', `${it} anchors the band at ${move.fmt(anchor)} and none is to hand; the stock covers it alone, but the window's crafts made none (its ingredients are wanted elsewhere, or the plan disagrees) - building past it today, its cell kept open`)
 }
 // THE SWAP LIST: a cell covered while it holds the wrong block (the terrain's grass in a leaf or coarse-dirt cell) - the
 // endgame's worklist, swapped from a side if one is open, else through the reopen (audit 2026-09-29). Once each.
