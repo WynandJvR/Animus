@@ -448,8 +448,12 @@ async function crossDoor (bot, goal) {
   // in decides (a door hung again after the night faced along the wall, and the "exit" was the wall itself)
   let axisX = facing === 'east' || facing === 'west'
   if (hp && hp.door && hp.interior && d.x === hp.door.x && d.z === hp.door.z) axisX = hp.door.x < hp.interior.x1 || hp.door.x > hp.interior.x2
-  const sideA = axisX ? { x: d.x - 1, y: d.y, z: d.z } : { x: d.x, y: d.y, z: d.z - 1 }
-  const sideB = axisX ? { x: d.x + 1, y: d.y, z: d.z } : { x: d.x, y: d.y, z: d.z + 1 }
+  // (a side's step where a body stands - the door's level, else one up or one down: a room whose floor is not laid yet has
+  //  its ground a block higher than the doorway, and the "step in front" at the door's level was solid grass - the walk
+  //  to it failed every time, the night spent at that door, 2026-09-29)
+  const stepAt = (x, z) => { for (const dy of [0, 1, -1]) if (world.standable(bot, x, d.y + dy, z)) return { x, y: d.y + dy, z }; return { x, y: d.y, z } }
+  const sideA = axisX ? stepAt(d.x - 1, d.z) : stepAt(d.x, d.z - 1)
+  const sideB = axisX ? stepAt(d.x + 1, d.z) : stepAt(d.x, d.z + 1)
   const gp = goal && goal.x != null ? { x: goal.x, z: goal.z } : null
   const distTo = (s, p) => Math.hypot(s.x + 0.5 - p.x, s.z + 0.5 - p.z)
   // the exit is the side toward the goal; without a goal, the side away from us
@@ -491,9 +495,10 @@ async function crossDoor (bot, goal) {
       if (Math.hypot(p.x - tx, p.z - tz) < 0.3) break
       await bot.look(Math.atan2(-(tx - p.x), -(tz - p.z)), 0, true).catch(() => {})
       bot.setControlState('forward', true)
+      bot.setControlState('jump', t.y != null && t.y > Math.floor(p.y + 0.01)) // (a step up on the far side: the unfinished room's ground)
       await sleep(50)
     }
-    bot.setControlState('forward', false)
+    bot.setControlState('forward', false); bot.setControlState('jump', false)
   }
   const passed = Math.hypot(bot.entity.position.x - (exit.x + 0.5), bot.entity.position.z - (exit.z + 0.5)) < 0.9
   if (passed && isOpen()) { try { await bot.activateBlock(world.at(bot, d.x, d.y, d.z)) } catch {} } // close it behind us
