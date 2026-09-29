@@ -534,6 +534,7 @@ function noteCoverMiss (bot, anchor, holding) {
   const it = stepItem(bot, anchor)
   if (holding) { coverMiss.delete(it); return } // (in hand: the disagreement is over)
   if (coverMiss.get(it) === today(bot)) return
+  if (inv.count(bot, it) + base().bankCount(it) > 0) return // (some held: the supply's wait, as before - the clear's own k; audit)
   // (the STOCK alone covers it: a batch still in a furnace is a wait with something to wait for - bricks smelting would
   //  have gone detached for the day, the band walking down and up with each batch; audit)
   let ok = false
@@ -1257,6 +1258,10 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     // cell has no other open side, closes the last way to it - the plank floor went in over the base layer's coal blocks
     // and campfires, and they failed "could not get within reach" every step after (2026-09-28). Covered only once it is
     // filled, or while it keeps an open side (a window in a wall does: inside and out)
+    // (an anchor's miss whose only reason is the cell UNDER it waiting is not its own: shared, so the band still rises past it
+    //  but nothing is placed over it - counted as its own, the cell above it sealed it in, and the waiting cell under both;
+    //  audit 2026-09-29)
+    const anchorMiss = c => { const n = failed.get(key(c)) + 1; if (sealsBelow(c)) cellFails.set(key(c), { n, at: Date.now(), shared: true }); else failed.set(key(c), n) }
     const sealsBelow = c => {
       const b = job.index.get(key({ x: c.x, y: c.y - 1, z: c.z }))
       if (!b || b.clear || cellDone(bot, b) === true) return false
@@ -1271,7 +1276,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       //  one anchor freed a step, 4,156 blocks in hand and nothing doable, 2026-09-29. Covered; on the swap list for when
       //  the item comes - the endgame reopens it from above)
       if (det.has(stepItem(bot, b))) { noteToSwap(b, (world.at(bot, b.x, b.y, b.z) || {}).name || 'air'); return false }
-      if (failsOf(b) >= 1 && !(cellFails.get(key(b)) || {}).shared) return false // (its OWN miss only: a patch's shared rest proves nothing about it, and covered it is sealed in and dropped - a hole in the wall; audit)
+      if (failsOf(b) >= 1 && !(cellFails.get(key(b)) || {}).shared) { noteToSwap(b, (world.at(bot, b.x, b.y, b.z) || {}).name || 'air'); return false } // (covered, never forgotten: the endgame's worklist; audit) // (its OWN miss only: a patch's shared rest proves nothing about it, and covered it is sealed in and dropped - a hole in the wall; audit)
       for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
         const x = b.x + dx; const z = b.z + dz
         const nb = job.index.get(key({ x, y: b.y, z }))
@@ -1294,7 +1299,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       noteCoverMiss(bot, anchor, anchor && has(anchor))
       // (an anchor IN HAND but never doable - the cell under it waits - is a miss here too; one NOT in hand is the supply's
       //  wait, which steers the gathering, and is left to hold; audit)
-      if (anchor && has(anchor) && !holdBack.has(key(anchor))) { failed.set(key(anchor), (failed.get(key(anchor)) || 0) + 1); saveCellFails(); log('build', `${anchor.name} at ${move.fmt(anchor)} anchors the band but is never doable (the cell under it waits) - a miss: the band rises past it`) }
+      if (anchor && has(anchor) && !holdBack.has(key(anchor))) { anchorMiss(anchor); saveCellFails(); log('build', `${anchor.name} at ${move.fmt(anchor)} anchors the band but is never doable (the cell under it waits) - a miss: the band rises past it`) }
       if (placed) log('build', `step ended: band anchored at y${lowestAll}${anchor ? ' by ' + stepItem(bot, anchor) + '@' + anchor.x + ',' + anchor.y + ',' + anchor.z + (has(anchor) ? ' (in hand)' : ' (not in hand)') : ''}, ${structural.length} structural in hand (min y${minY}), ${todo.length} todo`)
       profLog(); if (!placed) log('build', `nothing doable: lowest structural y${lowestAll}, ${todo.length} todo, ${structural.length} structural in hand (min y${minY}), ${attached.length} attached ready, ${waitingHolds ? 'waiting on ' + waiting : (waiting ? waiting + ' missing (detached - holding nothing)' : 'waiting on nothing')}`); return { placed, blockedOn: waiting, blockedHolds: waitingHolds, done: false } }
     const me = bot.entity.position
@@ -1317,7 +1322,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       for (const c of doable) if (!holdBack.has(key(c))) failed.set(key(c), (failed.get(key(c)) || 0) + 1)
       // (and the ANCHOR itself when it was never even doable - kept out by the cell under it: a stair over a coarse-dirt
       //  cell of grass, coarse dirt out of stock, anchored the band while nothing was ever tried; audit)
-      if (anchor && has(anchor) && !doable.includes(anchor) && !holdBack.has(key(anchor))) { failed.set(key(anchor), (failed.get(key(anchor)) || 0) + 1); log('build', `${anchor.name} at ${move.fmt(anchor)} anchors the band but is never doable (the cell under it waits) - a miss: the band rises past it`) }
+      if (anchor && has(anchor) && !doable.includes(anchor) && !holdBack.has(key(anchor))) { anchorMiss(anchor); log('build', `${anchor.name} at ${move.fmt(anchor)} anchors the band but is never doable (the cell under it waits) - a miss: the band rises past it`) }
       // (and a log's axis relaxes on these misses too: that rule lived in the try, and a log never tried - a z-axis oak log
       //  between two unplaced z-axis logs - anchored the band round after round, 2026-09-29)
       for (const c of doable) if (c.want && c.want.axis && !axisRelaxed(c) && failsOf(c) >= 3 && !(cellFails.get(key(c)) || {}).shared) { relaxAxis(c); log('build', `${c.name} at ${move.fmt(c)} goes in with any axis (never ready with its own)`) }
