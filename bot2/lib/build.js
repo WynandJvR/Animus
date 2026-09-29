@@ -1395,7 +1395,9 @@ function ensureSnapshot (bot) {
 // no deeper than FOUNDATION_MAX (a ravine keeps its pillars); a column with lava in it is left. Taken once the chunks
 // are here, from the ground as it stands (anything solid ends the column: a block of ours there is kept as foundation).
 const FOUNDATION_MAX = 16
-const FOUNDATION_BLOCKS = /^(cobblestone|dirt|coarse_dirt|andesite|diorite|granite|tuff|cobbled_deepslate|netherrack|stone|deepslate)$/
+// (and the dirt family as it weathers: a foundation cell filled with dirt grows grass in the light - still the fill, and read
+//  as "not done" the builder tried to dig its own block out, three misses a step; 2026-09-29, audit)
+const FOUNDATION_BLOCKS = /^(cobblestone|dirt|coarse_dirt|grass_block|rooted_dirt|podzol|mycelium|andesite|diorite|granite|tuff|cobbled_deepslate|netherrack|stone|deepslate)$/
 function ensureFoundation (bot) {
   if (!job || job.foundation) return true
   const add = []
