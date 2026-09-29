@@ -100,9 +100,15 @@ function closesRoom (w, c, { box, jobUnbuilt, work, standsOf }) {
   const isC = (x, y, z) => x === c.x && y === c.y && z === c.z
   const memo = new Map()
   for (const s of [{ x: f.x + axis[0], y: f.y, z: f.z + axis[1] }, { x: f.x - axis[0], y: f.y, z: f.z - axis[1] }]) {
-    const r = region(w, box, s, { memo, isC })
+    // (its own cap: a hall of more than 300 walkable cells read as open, its doorway closable on it - this runs only for a
+    //  doorway at placement; audit)
+    const r = region(w, box, s, { memo, isC, cap: 1500 })
     if (r.out) continue
+    // (only a cell within a stand's reach of the room can have every stand in it: the room's bounds, 3 out; audit)
+    let x1 = Infinity; let x2 = -Infinity; let y1 = Infinity; let y2 = -Infinity; let z1 = Infinity; let z2 = -Infinity
+    for (const k of r.cells) { const [x, y, z] = k.split(',').map(Number); if (x < x1) x1 = x; if (x > x2) x2 = x; if (y < y1) y1 = y; if (y > y2) y2 = y; if (z < z1) z1 = z; if (z > z2) z2 = z }
     for (const q of work) {
+      if (q.x < x1 - 3 || q.x > x2 + 3 || q.z < z1 - 3 || q.z > z2 + 3 || q.y < y1 - 1 || q.y > y2 + 2) continue
       if (q.x === c.x && q.y === c.y && q.z === c.z) continue
       // (a stand ON c, or with its head in c, is no stand once c is placed - the doorway's own cell read as "a stand outside")
       const stands = standsOf(q).filter(p => !isC(p.x, p.y, p.z) && !isC(p.x, p.y + 1, p.z))
