@@ -587,6 +587,9 @@ function detachedItems (todo, bot) {
 function anchorable (bot, c, det) {
   if (c.attach || c.follows || c.foundation || infillCell(c) || (cellFails.get(key(c)) || {}).n >= 1) return false
   if (coverMiss.get(stepItem(bot, c)) === today(bot)) return false // (a wait with nothing to wait for: it holds no band - coverMiss)
+  // (nor a cell standing on a hole kept open for its item - out of stock, or the wait above: it cannot go in until that
+  //  does, and freed one step-end miss at a time, a layer of them was "4,156 in hand, nothing doable"; 2026-09-29)
+  if (job) { const b = job.index.get(key({ x: c.x, y: c.y - 1, z: c.z })); if (b && !b.clear) { const bi = stepItem(bot, b); if (((det && det.has(bi)) || coverMiss.get(bi) === today(bot)) && cellDone(bot, b) !== true) return false } } // (the cheap test first: this runs for every cell of the todo)
   return !(det && (det.has(stepItem(bot, c)) || fallsIn(bot, c, stepItem(bot, c))))
 }
 function lowestStructural (todo, bot, det = bot ? detachedItems(todo, bot) : null) {
@@ -1275,7 +1278,11 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       // (and one whose item is out of stock - detached: the band's cells in hand waited on the decorative cells under them,
       //  one anchor freed a step, 4,156 blocks in hand and nothing doable, 2026-09-29. Covered; on the swap list for when
       //  the item comes - the endgame reopens it from above)
-      if (det.has(stepItem(bot, b))) { noteToSwap(b, (world.at(bot, b.x, b.y, b.z) || {}).name || 'air'); return false }
+      // (NO LONGER COVERED: an out-of-stock item is coming - covered, its hole was buried for an endgame reopen nobody built;
+      //  55 cells on the swap list by 2026-09-29, 50 of them holes. Kept open, the column over it waits, and the band rises
+      //  past it all the same: the anchor over it takes a shared miss (anchorMiss). Operator: "i dont want this to ruin a
+      //  build". A solid wrong block is caught above; an item with no route at all is covered as before)
+      if (det.has(stepItem(bot, b)) && !sealSaid.has('det:' + key(b))) { sealSaid.add('det:' + key(b)); log('build', `keeping ${b.name} at ${move.fmt(b)} open - out of stock; the column over it waits`) }
       if (failsOf(b) >= 1 && !(cellFails.get(key(b)) || {}).shared) { noteToSwap(b, (world.at(bot, b.x, b.y, b.z) || {}).name || 'air'); return false } // (covered, never forgotten: the endgame's worklist; audit) // (its OWN miss only: a patch's shared rest proves nothing about it, and covered it is sealed in and dropped - a hole in the wall; audit)
       for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
         const x = b.x + dx; const z = b.z + dz
