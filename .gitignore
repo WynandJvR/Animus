@@ -80,3 +80,4 @@ testserver/server.properties
 # Deploy tooling output (rollback snapshots of bot2 code and the last-deploy stamp) - local only, never source
 tools/session-scripts/rollback/
 tools/session-scripts/last-deploy.txt
+tools/session-scripts/lint/node_modules/

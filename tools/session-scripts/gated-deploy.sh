@@ -19,6 +19,8 @@ while [ $SECONDS -lt $end ]; do
   if [ "$ok" = yes ]; then
     [ "$(fp)" = "$FP0" ] || { echo "REFUSED: bot2 changed while the gate was shut - what is on disk now is not what this deploy was started for"; exit 3; }
     cd /c/mc-bot-lab/bot2; for f in main.js lib/*.js; do node --no-lazy --check "$f" || { echo "SYNTAX FAIL $f"; exit 1; }; done
+    # (and no undeclared name: a renamed variable throws only when its branch runs - node --check cannot see it; tools lint/)
+    $S/lint/node_modules/.bin/eslint -c $S/lint/eslint.config.js --no-warn-ignored *.js lib/*.js || { echo "NO-UNDEF FAIL - see above"; exit 1; }
     NODE_PATH=/c/mc-bot-lab/bot2/node_modules node /c/mc-bot-lab/tools/session-scripts/xmodcheck.js /c/mc-bot-lab/bot2 > /dev/null || { echo "CROSS-MODULE NAME MISSING - run tools/session-scripts/xmodcheck.js"; exit 1; }
     PREV=$(ls -dt $S/rollback/candidate-* 2>/dev/null | head -1)
     N=$S/rollback/candidate-$(date +%m%d-%H%M%S); mkdir -p $N; cp -r lib *.js command.gbnf config.json package.json $N/ 2>/dev/null; mkdir -p $N/schematics; cp schematics/hut.schem $N/schematics/ 2>/dev/null
