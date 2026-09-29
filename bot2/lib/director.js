@@ -586,8 +586,10 @@ function decide () {
     // (the site diff is a pass over the box: asked every 5 minutes at most, never every decision - body first)
     if (!sd.done && Date.now() - siteTidyAsked > 300000) {
       siteTidyAsked = Date.now()
-      const n = build.scaffoldList(bot).length
-      if (n >= 20) { sd.done = true; mem.set('siteTidy', sd); return { name: 'siteTidy', why: `${n} scaffold blocks standing round the site - the day's teardown, before the castle` } }
+      // (what the teardown would TAKE, not all that stands: the builder's own from the band up are kept, and counted they
+      //  fired the teardown every game day - 4 minutes for ~25 blocks, 2026-09-29)
+      const n = build.siteScaffoldTakeable(bot)
+      if (n >= 20) { sd.done = true; mem.set('siteTidy', sd); return { name: 'siteTidy', why: `${n} scaffold blocks of ours to take down round the site - the day's teardown, before the castle` } }
     }
   }
   if (mem.get().build && build.getJob() && build.needsWork(bot) && !nightSoon() && !homeByDark() && !held('castle')) {

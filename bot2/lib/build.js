@@ -1684,10 +1684,11 @@ function failLeftover (bot, p) { const l = leftovers.get(key(p)); const d = toda
 // (a cap: 4 minutes a day - the first run took 1037s, pillaring up to high leftovers, while the castle waited; the rest
 //  comes down on the days after, and build.finish takes what is left)
 const SITE_TIDY_MS = 4 * 60000
-async function siteScaffoldTeardown (bot, { shouldStop } = {}) {
-  if (!job || !site) return 0
-  const t0 = Date.now(); const stop0 = shouldStop
-  shouldStop = () => (stop0 && stop0()) || Date.now() - t0 > SITE_TIDY_MS
+// What the day's teardown may take: under the band, holding nothing, not a step - and our ledger's blocks under the site's
+// region. One reading for the teardown and for the director's count: it counted every block standing (the builder's own,
+// from the band up, too), so the teardown ran every game day - 4 minutes for ~25 blocks, 2026-09-29
+function siteTeardownPlan (bot) {
+  if (!job || !site) return null
   let bandY = Infinity
   for (const c of job.cells) if (!c.attach && !c.follows && !c.foundation && c.y < bandY && cellDone(bot, c) !== true) bandY = c.y
   const sups = new Set(job.cells.filter(q => q.sup && cellDone(bot, q) === true).map(q => key(q.sup)))
@@ -1706,6 +1707,17 @@ async function siteScaffoldTeardown (bot, { shouldStop } = {}) {
   //  were never in the site diff, so never taken; audit)
   const r = site.region
   const extra = (mem.get().scaffold || []).filter(p => p.y < r.y1 && p.x >= r.x1 && p.x <= r.x2 && p.z >= r.z1 && p.z <= r.z2)
+  return { keep, extra, bandY }
+}
+function siteScaffoldTakeable (bot) {
+  const pl = siteTeardownPlan(bot); if (!pl) return 0
+  return scaffoldList(bot).filter(p => !pl.keep(p) && !resting(bot, p)).length + pl.extra.filter(p => { const b = world.at(bot, p.x, p.y, p.z); return !!b && LEDGER_RE.test(b.name) && !resting(bot, p) }).length
+}
+async function siteScaffoldTeardown (bot, { shouldStop } = {}) {
+  const pl = siteTeardownPlan(bot); if (!pl) return 0
+  const { keep, extra, bandY } = pl
+  const t0 = Date.now(); const stop0 = shouldStop
+  shouldStop = () => (stop0 && stop0()) || Date.now() - t0 > SITE_TIDY_MS
   const before = scaffoldList(bot).length + extra.length
   const n = await removeScaffold(bot, { shouldStop, maxPasses: 1, keep, extra, climb: false })
   if (n) { const gone = new Set(extra.filter(p => { const b = world.at(bot, p.x, p.y, p.z); return !b || !LEDGER_RE.test(b.name) }).map(key)); if (gone.size) mem.update(m => { m.scaffold = (m.scaffold || []).filter(q => !gone.has(key(q))) }) }
@@ -1986,7 +1998,7 @@ async function ensureScaffold (bot, n = SCAFFOLD_WANT, { shouldStop } = {}) { //
   return true
 }
 
-module.exports = { wayOut, wayOutPoint, FILLER_ITEMS, SCAFFOLD_WANT, cachedStatus, exactWood, isOpenCell, INFILL_RE, infillItem, unsourced, strayBuildBlocks,
+module.exports = { siteScaffoldTakeable, wayOut, wayOutPoint, FILLER_ITEMS, SCAFFOLD_WANT, cachedStatus, exactWood, isOpenCell, INFILL_RE, infillItem, unsourced, strayBuildBlocks,
   finishSite, woodClass, woodForm, acceptsFor, itemOf, LOG_ANY, PLANKS_ANY, ensureScaffold, unskippedObstructions, setJob, getJob, status, nextNeeds,
   buildStep, clearSite, obstructions, removeScaffold, siteScaffoldTeardown, loadSchematic, cellDone, cellsDone, inBox, placeCell, registerJob, key,
   complete, needsWork, finish, survey, scaffoldList, holesList, ensureSnapshot, snapshotInfo, snapName,
