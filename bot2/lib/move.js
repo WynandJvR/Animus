@@ -171,9 +171,11 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
     const b = getBlock0(pos, dx, dy, dz)
     if (b && doorIds.has(b.type)) { b.safe = true; b.physical = false; b.replaceable = false; b.height = pos.y + dy }
     // (an OPEN trapdoor is no floor: a plate on its edge - planned on as ground, the walk stepped into the hole it hangs
-    //  in, 2026-09-29. Nor a passage: the plate stops the body, and planned as one the walk stood 2 minutes against the
-    //  castle's trapdoor rail, 2026-09-29. Neither - not stood on, not walked through, no landing)
-    else if (b && b.physical && world.isOpenTrapdoor(b)) { b.safe = false; b.physical = false; b.replaceable = false; b.height = pos.y + dy }
+    //  in, 2026-09-29. It is an EDGE, not a wall: the cell itself is room for the body - the plate stops only a step
+    //  ACROSS it (panelEdges below, on the neighbours). Refused whole, the castle's double door whose two oak trapdoors
+    //  stand open just inside was a dead end: 17 walks "to the door" stuck in an hour, 2026-09-29. Walked through whole,
+    //  the walk stood against the trapdoor rail - the edge rule is what both lacked)
+    else if (b && b.physical && world.isOpenTrapdoor(b)) { b.safe = true; b.physical = false; b.replaceable = false; b.height = pos.y + dy }
     return b
   }
   m.exclusionAreasStep.push(block => (block && doorIds.has(block.type)) ? 4 : 0)
@@ -187,6 +189,34 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
     if (v === undefined) { v = world.dropAt(bot, x + 0.5, y, z + 0.5) > world.SAFE_DROP; diagDrop.set(k, v) }
     return v
   }
+  // PANEL EDGES: an open trapdoor's plate stands on ONE edge of its cell (the side opposite its facing - vanilla's open
+  //  boxes); a step across that edge is refused, every other step through the cell stands. At the body's heights of
+  //  both ends; a jump or a drop checks the whole span; a diagonal, all four edges it sweeps (memoised a plan)
+  const PANEL_EDGE = { north: [0, 1], south: [0, -1], west: [1, 0], east: [-1, 0] }
+  const panelMemo = new Map(); let panelGen = pathGen
+  const panelAt = (x, y, z) => {
+    if (panelGen !== pathGen || panelMemo.size > 20000) { panelMemo.clear(); panelGen = pathGen }
+    const k = x + ',' + y + ',' + z; let v = panelMemo.get(k)
+    if (v === undefined) { v = null; const b = world.at(bot, x, y, z); if (b && world.isOpenTrapdoor(b)) { try { v = PANEL_EDGE[b.getProperties().facing] || null } catch {} } panelMemo.set(k, v) }
+    return v
+  }
+  const edgeShut = (x, z, dx, dz, y0, y1) => {
+    for (let y = y0; y <= y1; y++) {
+      const a = panelAt(x, y, z); if (a && a[0] === dx && a[1] === dz) return true
+      const c = panelAt(x + dx, y, z + dz); if (c && c[0] === -dx && c[1] === -dz) return true
+    }
+    return false
+  }
+  const nb0 = m.getNeighbors.bind(m)
+  m.getNeighbors = node => nb0(node).filter(mv => {
+    const sx = Math.sign(mv.x - node.x); const sz = Math.sign(mv.z - node.z)
+    if (!sx && !sz) return true
+    const y0 = Math.min(node.y, mv.y); const y1 = Math.max(node.y, mv.y) + 1
+    if (sx && sz) return !(edgeShut(node.x, node.z, sx, 0, y0, y1) || edgeShut(node.x, node.z, 0, sz, y0, y1) || edgeShut(node.x + sx, node.z, 0, sz, y0, y1) || edgeShut(node.x, node.z + sz, sx, 0, y0, y1))
+    const n = Math.abs(mv.x - node.x) + Math.abs(mv.z - node.z)
+    for (let i = 0; i < n; i++) if (edgeShut(node.x + sx * i, node.z + sz * i, sx, sz, y0, y1)) return false
+    return true
+  })
   const diag0 = m.getMoveDiagonal.bind(m)
   m.getMoveDiagonal = (node, dir, neighbors) => {
     if (hurtsAt(node.x, node.y, node.z + dir.z) || hurtsAt(node.x + dir.x, node.y, node.z)) return
