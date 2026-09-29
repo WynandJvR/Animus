@@ -1320,6 +1320,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
   stepStop = shouldStop || null
   const t0 = Date.now(); const supports0 = supportsLaid; const pl0 = pillarLaid; const pd0 = pillarDug
   holdsMs = 0; holdsPasses = 0 // (this step's own)
+  const compWait = new Set() // (cells this step held for a closed compartment: the profile says how many - growing, a room closed on its own work)
   let placed = 0
   if (!ensureSnapshot(bot) || !ensureFoundation(bot)) return { placed, blockedOn: null, done: false }
   // (a cell that keeps failing is tried again ever more rarely - 5 min after its third miss, then 10, 20... up to 2h -
@@ -1345,7 +1346,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
   //  class the step's time goes to, the numbers stripped; audit 2026-09-29)
   const missed = (why, ms) => { const k = String(why || 'unlogged').replace(/\s*[-(].*$/, '').replace(/-?\d+/g, '#').slice(0, 40) || 'unlogged'; const e = prof.why[k] || (prof.why[k] = { n: 0, ms: 0 }); e.n++; e.ms += ms }
   placeProf.reach = 0; placeProf.dig = 0
-  const profLog = () => { if (prof.tries) log('build', `step profile: ${placed}/${prof.tries} placed, ${Math.round(prof.ms / prof.tries)}ms a try (${placed ? Math.round(prof.okMs / placed) : 0}ms a placed block), ${(prof.dist / prof.tries).toFixed(1)} blocks off on average, ${Math.round(prof.pick / Math.max(1, prof.tries))}ms choosing each (holds ${holdsPasses ? Math.round(holdsMs / holdsPasses) : 0}ms a pass${regionMs ? `, stand regions ${regionMs}ms` : ''}); a try: ${Math.round(placeProf.reach / prof.tries)}ms getting in reach, ${Math.round(placeProf.dig / prof.tries)}ms clearing, ${Math.round((prof.ms - placeProf.reach - placeProf.dig) / prof.tries)}ms placing; ${Math.round((prof.ms - prof.okMs) / 1000)}s of ${Math.round(prof.ms / 1000)}s on the ${prof.tries - placed} misses${Object.keys(prof.why).length ? ' (' + Object.entries(prof.why).sort((a, b) => b[1].ms - a[1].ms).slice(0, 4).map(([k, e]) => `${k} x${e.n} ${Math.round(e.ms / 1000)}s`).join(', ') + ')' : ''}; the walks laid ${reflex.plannerPlacedSince(t0).filter(q => q.x >= job.box.x1 - 3 && q.x <= job.box.x2 + 3 && q.z >= job.box.z1 - 3 && q.z <= job.box.z2 + 3).length} blocks on the site, the builder ${supportsLaid - supports0} supports, ${pillarLaid - pl0} pillar blocks up, ${pillarDug - pd0} taken back down`) } // (where the site's scaffold comes from - ~1 a castle block, 2026-09-29)
+  const profLog = () => { if (prof.tries) log('build', `step profile: ${placed}/${prof.tries} placed, ${Math.round(prof.ms / prof.tries)}ms a try (${placed ? Math.round(prof.okMs / placed) : 0}ms a placed block), ${(prof.dist / prof.tries).toFixed(1)} blocks off on average, ${Math.round(prof.pick / Math.max(1, prof.tries))}ms choosing each (holds ${holdsPasses ? Math.round(holdsMs / holdsPasses) : 0}ms a pass${compWait.size ? `, ${compWait.size} cells wait for a way in` : ''}${regionMs ? `, stand regions ${regionMs}ms` : ''}); a try: ${Math.round(placeProf.reach / prof.tries)}ms getting in reach, ${Math.round(placeProf.dig / prof.tries)}ms clearing, ${Math.round((prof.ms - placeProf.reach - placeProf.dig) / prof.tries)}ms placing; ${Math.round((prof.ms - prof.okMs) / 1000)}s of ${Math.round(prof.ms / 1000)}s on the ${prof.tries - placed} misses${Object.keys(prof.why).length ? ' (' + Object.entries(prof.why).sort((a, b) => b[1].ms - a[1].ms).slice(0, 4).map(([k, e]) => `${k} x${e.n} ${Math.round(e.ms / 1000)}s`).join(', ') + ')' : ''}; the walks laid ${reflex.plannerPlacedSince(t0).filter(q => q.x >= job.box.x1 - 3 && q.x <= job.box.x2 + 3 && q.z >= job.box.z1 - 3 && q.z <= job.box.z2 + 3).length} blocks on the site, the builder ${supportsLaid - supports0} supports, ${pillarLaid - pl0} pillar blocks up, ${pillarDug - pd0} taken back down`) } // (where the site's scaffold comes from - ~1 a castle block, 2026-09-29)
   while (Date.now() - t0 < maxMs) {
     await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
     if (shouldStop && shouldStop()) break
@@ -1521,7 +1522,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     if (!c.foundation && !inReach(c)) {
       const probe = clusterStand(bot, c, ready, badStands, reachOf)
       if (probe && probe.out) {
-        holdBack.add(key(c))
+        holdBack.add(key(c)); compWait.add(key(c))
         if (!compartmentSaid.has(key(c))) { compartmentSaid.add(key(c)); log('build', `${c.name} at ${move.fmt(c)}: every stand for it is in a closed compartment of the build I am not in - it waits for a way in`) }
         tpick = Date.now(); continue
       }
