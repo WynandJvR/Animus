@@ -1273,7 +1273,7 @@ async function castleWorkInner () {
     const r = await build.buildStep(bot, { shouldStop: dayStop, maxMs: 8 * 60000 })
     phase('after step')
     if (roundPh) roundPh.placed = (roundPh.placed || 0) + (r.placed || 0) // (the step's own count: the cached status lags)
-    log('dir', `build step: placed ${r.placed}${r.blockedOn ? ', waiting on ' + r.blockedOn : ''}`)
+    log('dir', `build step: placed ${r.placed}${r.blockedOn ? (r.blockedHolds ? ', waiting on ' + r.blockedOn : `, ${r.blockedOn} missing (detached - holding nothing)`) : ''}`) // (a wait nobody is in is not named as one: "waiting on oak_trapdoor" for two hours held nothing, 2026-09-29; audit)
     blockedOn = r.blockedHolds ? r.blockedOn : null // (what the round steers by: only what holds the band)
     // (infill - glass, bars, lanterns - waited on while the structure still rises is no morning's errand: the sand
     //  for 50 windows took every morning's best hours while 30k blocks of wall could go up; it comes last)

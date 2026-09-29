@@ -1215,7 +1215,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       //  a few blocks said nothing of what held the band down, 2026-09-28)
       const anchor = todo.find(c => !c.attach && !c.follows && !c.foundation && !infillCell(c) && !((cellFails.get(key(c)) || {}).n >= 1) && c.y === lowestAll && !det.has(stepItem(bot, c)) && !fallsIn(bot, c, stepItem(bot, c)))
       if (placed) log('build', `step ended: band anchored at y${lowestAll}${anchor ? ' by ' + stepItem(bot, anchor) + '@' + anchor.x + ',' + anchor.y + ',' + anchor.z + (has(anchor) ? ' (in hand)' : ' (not in hand)') : ''}, ${structural.length} structural in hand (min y${minY}), ${todo.length} todo`)
-      profLog(); if (!placed) log('build', `nothing doable: lowest structural y${lowestAll}, ${todo.length} todo, ${structural.length} structural in hand (min y${minY}), ${attached.length} attached ready, waiting on ${waiting}`); return { placed, blockedOn: waiting, blockedHolds: waitingHolds, done: false } }
+      profLog(); if (!placed) log('build', `nothing doable: lowest structural y${lowestAll}, ${todo.length} todo, ${structural.length} structural in hand (min y${minY}), ${attached.length} attached ready, ${waitingHolds ? 'waiting on ' + waiting : (waiting ? waiting + ' missing (detached - holding nothing)' : 'waiting on nothing')}`); return { placed, blockedOn: waiting, blockedHolds: waitingHolds, done: false } }
     const me = bot.entity.position
     // cells that can be clicked right now first; one whose every face is another unbuilt cell of this
     // build waits for its neighbours (trying it costs ~20s of failed placing, and a wall of x-axis logs
@@ -1223,7 +1223,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     const clickable = c => plansFor(c).some(p => refOk(bot, c, p))
     const supportable = c => !c.attach && !c.twin && plansFor(c).some(p => !job.index.has(key({ x: c.x + p.off[0], y: c.y + p.off[1], z: c.z + p.off[2] })))
     const ready = doable.filter(c => !holdBack.has(key(c)) && (clickable(c) || supportable(c)))
-    if (!ready.length) { profLog(); log('build', `${placed ? `step ended after ${placed} placed - ` : ''}nothing ready: lowest y${lowestAll}, ${doable.length} doable (${doable.slice(0, 5).map(c => c.name + '@' + c.x + ',' + c.y + ',' + c.z).join(' ')}) none clickable or supportable (${doable.filter(c => holdBack.has(key(c))).length} held back this step), waiting on ${waiting}`); return { placed, blockedOn: waiting, blockedHolds: waitingHolds, done: false } }
+    if (!ready.length) { profLog(); log('build', `${placed ? `step ended after ${placed} placed - ` : ''}nothing ready: lowest y${lowestAll}, ${doable.length} doable (${doable.slice(0, 5).map(c => c.name + '@' + c.x + ',' + c.y + ',' + c.z).join(' ')}) none clickable or supportable (${doable.filter(c => holdBack.has(key(c))).length} held back this step), ${waitingHolds ? 'waiting on ' + waiting : (waiting ? waiting + ' missing (detached - holding nothing)' : 'waiting on nothing')}`); return { placed, blockedOn: waiting, blockedHolds: waitingHolds, done: false } }
     // everything within reach of where we stand first, then the nearest - a layer down counts one block, not four:
     // the walk between cells is most of a block's six seconds, and "lower first" sent the bot back and forth across the
     // 50x140 site between two layers (2026-09-27)
