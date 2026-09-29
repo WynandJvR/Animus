@@ -164,6 +164,9 @@ function standBeside (bot, low) {
     if (!dx && !dz) continue
     const x = low.x + dx; const y = low.y + dy; const z = low.z + dz
     if (!world.standable(bot, x, y, z) || ledger.has(k({ x, y: y - 1, z }))) continue
+    // (on ground, never on a crown's leaves: stood there, the leaf row stepped the body off onto the canopy, and the tower
+    //  went up from each new spot - a three-block stair in the air by home, 2026-09-29)
+    { const fb = world.at(bot, x, y - 1, z); if (!fb || world.LEAF_RE.test(fb.name)) continue }
     if ([[1, 0], [-1, 0], [0, 1], [0, -1]].some(([ax, az]) => world.dropAt(bot, x + ax + 0.5, y, z + az + 0.5) > world.SAFE_DROP)) continue
     const d = world.dist3({ x, y, z }, me)
     if (d < bd) { bd = d; best = { x, y, z } }
@@ -180,6 +183,10 @@ async function climbTo (bot, q, shouldStop) {
   //  left, audit 2026-09-28)
   for (let i = 0; i < 4 && !act.reach(bot, q, 4.5) && bot.entity.position.y < q.y; i++) {
     if (shouldStop && shouldStop()) break
+    // (one pillar, straight: each step from the top of the last - a body moved off it (a reflex, a push) began a new pillar
+    //  beside the old one each time, a stair in the air; stopped there, what it raised comes down with climbDown)
+    const top = climbed[climbed.length - 1]; const me = bot.entity.position
+    if (top && (Math.floor(me.x) !== top.x || Math.floor(me.z) !== top.z || Math.floor(me.y - 0.01) !== top.y)) { log('litter', `the climb stopped: moved off its pillar at ${k(top)}`); break }
     if (!await gather.towerUp(bot, { allowZones: ['orchard', 'base', 'farm'], onPlaced: c => climbed.push(c) })) break
   }
 }
@@ -234,6 +241,13 @@ async function tidy (bot, { from, radius = RADIUS, shouldStop } = {}) {
       //  the cobble on the spruce tops the operator asked about, 2026-09-28)
       if (!act.reach(bot, q, 4.5) && q.y > bot.entity.position.y) await climbTo(bot, q, shouldStop)
       if (!act.reach(bot, q, 4.5)) { left++; continue }
+      // (a block in the air - a stair, a crown's stand, a walk's BRIDGE over a gully - only from a floor that is not litter:
+      //  real ground, or this run's own tower (climbDown takes it). Stood on the bridge's span, the far blocks dug first
+      //  would leave the body on what remains over the drop, its way back gone - audit 2026-09-29)
+      if (act.fallBelow(bot, q) > world.SAFE_DROP) {
+        const me2 = bot.entity.position; const fl = { x: Math.floor(me2.x), y: Math.floor(me2.y - 0.01), z: Math.floor(me2.z) }
+        if (ledger.has(k(fl)) && !climbed.some(c => c.x === fl.x && c.y === fl.y && c.z === fl.z)) { log('litter', `${q.name} at ${k(q)} left this run: in the air, and the stand is on litter of ours (${k(fl)})`); left++; continue }
+      }
       if (await act.dig(bot, new Vec3(q.x, q.y, q.z), { noWalk: true, timeoutMs: 8000, allowZones: ['orchard', 'base', 'farm'] }).catch(() => false)) removed++; else left++
     }
     await climbDown(bot)
