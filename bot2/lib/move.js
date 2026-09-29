@@ -163,6 +163,21 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
     return b
   }
   m.exclusionAreasStep.push(block => (block && doorIds.has(block.type)) ? 4 : 0)
+  // (never a DIAGONAL step past a drop that hurts: the body's 0.6 hitbox sweeps the corner cell of a diagonal, and a
+  //  shaft there takes it - 11 blocks, 8 hp by the orchard, a diagonal 0.7s after the lip reflex let go, 2026-09-29.
+  //  Either cell it passes between with a hurting drop under it: no diagonal; the two straight steps remain; audit)
+  const diagDrop = new Map(); let diagGen = pathGen
+  const hurtsAt = (x, y, z) => {
+    if (diagGen !== pathGen || diagDrop.size > 20000) { diagDrop.clear(); diagGen = pathGen }
+    const k = x + ',' + y + ',' + z; let v = diagDrop.get(k)
+    if (v === undefined) { v = world.dropAt(bot, x + 0.5, y, z + 0.5) > world.SAFE_DROP; diagDrop.set(k, v) }
+    return v
+  }
+  const diag0 = m.getMoveDiagonal.bind(m)
+  m.getMoveDiagonal = (node, dir, neighbors) => {
+    if (hurtsAt(node.x, node.y, node.z + dir.z) || hurtsAt(node.x + dir.x, node.y, node.z)) return
+    return diag0(node, dir, neighbors)
+  }
   // (a step whose FLOOR is a natural leaf: a tree's crown is no ground - felled, it rots from under the feet; the orchard's
   //  canopy walks ended in falls and a 40s tug between the leaf reflex and the planner, 2026-09-28. Over the crowns only
   //  when there is no way along the ground)
