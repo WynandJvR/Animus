@@ -1482,6 +1482,18 @@ function ensureFoundation (bot) {
     if (!dry.length && region.some(q => q.ys.length >= 2)) log('build', `hollow of ${region.length} columns under the floor near ${region[0].x},${region[0].z} is all water - left unlit`)
     for (const q of pick) torches.push({ x: q.x, y: q.ys[q.ys.length - 1], z: q.z })
   }
+  // THE FOUNDATION REMEMBERED: its cells as first worked out, kept with the job - on every boot the scan re-read the world,
+  //  and each mistake it made was a misreading of its own past work (supports read as air, laid rim read as ground and torn
+  //  down after a restart, counts jumping 44 -> 100, 2026-09-29). The scan now only ADDS columns (a new drop), the saved
+  //  cells come back as they were, and a cell dropped for good leaves the list (dropFoundation); audit
+  const saved = (mem.get().foundationCells || {})[fndKey()] || []
+  { const have = new Set(add.map(key).concat(torches.map(key)))
+    for (const q of saved) {
+      const k = key(q); if (have.has(k) || job.index.has(k)) continue
+      if (q.t === 't') torches.push({ x: q.x, y: q.y, z: q.z }); else add.push({ x: q.x, y: q.y, z: q.z, hole: !!q.h, soil: q.t === 'd' })
+      have.add(k)
+    } }
+  mem.update(m => { m.foundationCells = m.foundationCells || {}; m.foundationCells[fndKey()] = add.map(p => ({ x: p.x, y: p.y, z: p.z, t: p.soil ? 'd' : 'c', h: p.hole ? 1 : 0 })).concat(torches.map(p => ({ x: p.x, y: p.y, z: p.z, t: 't' }))) })
   for (const p of add) {
     const cell = { x: p.x, y: p.y, z: p.z, name: 'cobblestone', props: {}, foundation: true, hole: !!p.hole, want: null, item: 'cobblestone', alt: FOUNDATION_BLOCKS, prefer: ['cobblestone', 'dirt'], itemAlt: FILLER_ITEMS }
     if (p.soil) Object.assign(cell, { name: 'dirt', item: 'dirt', alt: /^(dirt|grass_block|coarse_dirt|rooted_dirt)$/, prefer: ['dirt'], itemAlt: /^dirt$/ })
@@ -1558,8 +1570,10 @@ function wayOut (bot, c, from = null, withC = true) {
 // A foundation cell sealed in under the base already built is dropped, not rested: it is no part of the blueprint, nothing
 // can reach it again, and a rest would retry it for ever (the build could never read done; audit 2026-09-28). A cell
 // merely out of reach rests like any other.
+function fndKey () { return `${job.name}@${job.origin.x},${job.origin.y},${job.origin.z}` } // (a job's name and where it stands)
 function dropFoundation (bot, c, why) {
   job.cells = job.cells.filter(q => q !== c); job.index.delete(key(c)); cellFails.delete(key(c)); statusGen++
+  mem.update(m => { const l = m.foundationCells && m.foundationCells[fndKey()]; if (l) m.foundationCells[fndKey()] = l.filter(q => !(q.x === c.x && q.y === c.y && q.z === c.z)) }) // (dropped for good: off the remembered list)
   if (job.foundation) job.foundation.dropped = (job.foundation.dropped || 0) + 1
   // (a torch dropped is a hollow left dark under the work - said as such, never lost in the foundation's own drops)
   log('build', c.name === 'torch' ? `hollow at ${move.fmt(c)} left unlit - ${why}` : `foundation cell at ${move.fmt(c)} dropped - ${why}`)
