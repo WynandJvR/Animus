@@ -919,7 +919,7 @@ async function descendPillar (bot) {
     if (job && job.cells.some(q => q.sup && q.sup.x === under.x && q.sup.y === under.y && q.sup.z === under.z && cellDone(bot, q) === true)) break
     if (!await act.dig(bot, new Vec3(under.x, under.y, under.z), { force: true, own: true, noWalk: true, allowZones: ['build', 'base'], timeoutMs: 6000 }).catch(() => false)) break
     const t0 = Date.now(); while (!bot.entity.onGround && Date.now() - t0 < 1500) await act.sleep(50)
-    myPillar = myPillar.filter(p => !(p.x === under.x && p.y === under.y && p.z === under.z))
+    myPillar = myPillar.filter(p => !(p.x === under.x && p.y === under.y && p.z === under.z)); pillarDug++
   }
   // (what could not come down - walked off it, a block that would not dig - is the site's scaffold still: the site diff
   //  and the finish take it; forgotten here so no later walk digs under someone else's feet)
@@ -944,7 +944,7 @@ async function pillarTo (bot, c, first) {
     bot.clearControlStates()
     await act.sleep(100)
     for (let i = 0; i < 16 && Math.floor(bot.entity.position.y) < c.y - 1; i++) {
-      if (!await require('./gather').towerUp(bot, { allowZones: ['build', 'base'], builder: true, onPlaced: q => myPillar.push(q) })) break
+      if (!await require('./gather').towerUp(bot, { allowZones: ['build', 'base'], builder: true, onPlaced: q => { myPillar.push(q); pillarLaid++ } })) break
     }
     if (act.reach(bot, new Vec3(c.x, c.y, c.z), 4.8)) return true
     log('build', `pillar for ${c.name} at ${move.fmt(c)}: towered from ${move.fmt(f)} to y${Math.floor(bot.entity.position.y)}, still out of reach`)
@@ -1099,7 +1099,7 @@ async function placeCell (bot, c, j = job) {
 // unplaceable cell every call)
 // (kept in memory across reloads: a reload forgot every hard cell and each came back to fail three more times, minutes
 //  of every build step spent re-learning the same eight unreachable pillar tops, 2026-09-27)
-let supportsLaid = 0 // (the builder's own supports and pillar blocks, counted for the step profile)
+let supportsLaid = 0; let pillarLaid = 0; let pillarDug = 0 // (the builder's own supports, pillar blocks up and down - the step profile)
 const cellFails = new Map(Object.entries((mem.get().cellFails) || {})) // key -> {n, at}
 let cellFailsSaved = 0
 // (only cells of the job are kept: a cell finished by any other way - a restart, a hand - is dropped at the next save; audit #38)
@@ -1125,7 +1125,7 @@ async function buildStep (bot, opts = {}) {
 }
 async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
   stepStop = shouldStop || null
-  const t0 = Date.now(); const supports0 = supportsLaid
+  const t0 = Date.now(); const supports0 = supportsLaid; const pl0 = pillarLaid; const pd0 = pillarDug
   let placed = 0
   if (!ensureSnapshot(bot) || !ensureFoundation(bot)) return { placed, blockedOn: null, done: false }
   // (a cell that keeps failing is tried again ever more rarely - 5 min after its third miss, then 10, 20... up to 2h -
@@ -1145,7 +1145,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
   // (where a step's time goes: choosing the cell, walking to and placing it - measured, not guessed)
   const prof = { tries: 0, ms: 0, okMs: 0, dist: 0, pick: 0 }; let tpick = Date.now()
   placeProf.reach = 0; placeProf.dig = 0
-  const profLog = () => { if (prof.tries) log('build', `step profile: ${placed}/${prof.tries} placed, ${Math.round(prof.ms / prof.tries)}ms a try (${placed ? Math.round(prof.okMs / placed) : 0}ms a placed block), ${(prof.dist / prof.tries).toFixed(1)} blocks off on average, ${Math.round(prof.pick / Math.max(1, prof.tries))}ms choosing each; a try: ${Math.round(placeProf.reach / prof.tries)}ms getting in reach, ${Math.round(placeProf.dig / prof.tries)}ms clearing, ${Math.round((prof.ms - placeProf.reach - placeProf.dig) / prof.tries)}ms placing; the walks laid ${reflex.plannerPlacedSince(t0).filter(q => q.x >= job.box.x1 - 3 && q.x <= job.box.x2 + 3 && q.z >= job.box.z1 - 3 && q.z <= job.box.z2 + 3).length} blocks on the site, the builder ${supportsLaid - supports0} supports and pillar blocks`) } // (where the site's scaffold comes from - ~1 a castle block, 2026-09-29)
+  const profLog = () => { if (prof.tries) log('build', `step profile: ${placed}/${prof.tries} placed, ${Math.round(prof.ms / prof.tries)}ms a try (${placed ? Math.round(prof.okMs / placed) : 0}ms a placed block), ${(prof.dist / prof.tries).toFixed(1)} blocks off on average, ${Math.round(prof.pick / Math.max(1, prof.tries))}ms choosing each; a try: ${Math.round(placeProf.reach / prof.tries)}ms getting in reach, ${Math.round(placeProf.dig / prof.tries)}ms clearing, ${Math.round((prof.ms - placeProf.reach - placeProf.dig) / prof.tries)}ms placing; the walks laid ${reflex.plannerPlacedSince(t0).filter(q => q.x >= job.box.x1 - 3 && q.x <= job.box.x2 + 3 && q.z >= job.box.z1 - 3 && q.z <= job.box.z2 + 3).length} blocks on the site, the builder ${supportsLaid - supports0} supports, ${pillarLaid - pl0} pillar blocks up, ${pillarDug - pd0} taken back down`) } // (where the site's scaffold comes from - ~1 a castle block, 2026-09-29)
   while (Date.now() - t0 < maxMs) {
     await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
     if (shouldStop && shouldStop()) break
