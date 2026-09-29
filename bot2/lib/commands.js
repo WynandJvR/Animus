@@ -416,6 +416,17 @@ function make (bot, director) {
       }
       case 'entities': {
         const me = bot.entity.position
+        // (`entities meta`: each animal's metadata by the registry's key names - baby, age_locked, wool - against the raw
+        //  indices, so a key list off by one on the patched data shows before a filter reads it; audit 2026-09-29)
+        if (a[0] === 'meta') {
+          const d = require('./world').data(bot)
+          return Object.values(bot.entities).filter(e => e !== bot.entity && e.position && e.position.distanceTo(me) < 48 && e.type !== 'player' && d.entitiesByName[e.name]).map(e => {
+            const keys = d.entitiesByName[e.name].metadataKeys || []
+            const md = e.metadata || []
+            const named = ['mob_flags', 'baby', 'age_locked', 'wool'].map(k => { const i = keys.indexOf(k); return i >= 0 ? `${k}[${i}]=${JSON.stringify(md[i])}` : null }).filter(Boolean).join(' ')
+            return `${e.name}@${Math.round(e.position.distanceTo(me))} ${named} raw=${JSON.stringify(md.slice(14, 20))}`
+          }).join('\n')
+        }
         return Object.values(bot.entities).filter(e => e !== bot.entity && e.position && e.position.distanceTo(me) < 32).map(e => `${e.name}@${Math.round(e.position.distanceTo(me))}`).join(', ')
       }
       case 'look': case 'scan': return 'ok'
