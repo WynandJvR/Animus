@@ -648,7 +648,16 @@ async function goToInner (bot, goal, opts, a) {
   // bot through walks that all ran out their time - "timeout" never counted, and it stood there another hour)
   // (below a build's floor inside its footprint ONE such walk is enough: the hollow's give-ups drift a cell each - -607,
   //  -606, -605 - the same-cell count never reached two, and the bot missed its bed and dug in under the castle, 2026-09-29)
-  if (!r.ok && start && bot.entity && /stuck|timeout|noPath/.test(r.why) && bot.entity.position.distanceTo(start) < 2 && (stuckHereAgain(bot) || underBuildFloor(bot))) await escapeUp(bot)
+  // (every give-up is recorded where it happened - the count by place is the evidence: "ended where it began" (< 2) missed
+  //  the pocket's shuffle, a leg from -584 giving up at -582 by exactly 2, and the third give-up never reached the escape,
+  //  2026-09-29. Below the floor, one is enough only where the walk began)
+  if (!r.ok && start && bot.entity && /stuck|timeout|noPath/.test(r.why)) {
+    const again = stuckHereAgain(bot)
+    if (again || (underBuildFloor(bot) && bot.entity.position.distanceTo(start) < 2)) await escapeUp(bot)
+  }
+  // (a walk that ARRIVED from here proves the spot no trap: its give-ups go - left on the books, the next ordinary give-up
+  //  near a door the bot walked out of fine counted a trap and broke our wall; audit)
+  if (r.ok && start && giveUps.length) clearGiveUps(start.floored())
   return r
 }
 async function goToInner2 (bot, goal, opts, { timeoutMs, stuckMs, dig, place, allowZones, label, shouldStop, dryHead }) {
