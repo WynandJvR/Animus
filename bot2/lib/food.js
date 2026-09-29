@@ -143,8 +143,10 @@ async function woolFor (bot, n, ctx = {}) {
   const woolCount = () => inv.count(bot, WOOL_RE)
   const target = woolCount() + n
   if (!inv.has(bot, 'shears') && base().bankCount('shears') > 0) await base().withdraw(bot, 'shears', 1).catch(() => 0)
-  // a real surplus of iron (armour and tools come first - the iron task spends it on those)
-  if (!inv.has(bot, 'shears') && inv.count(bot, 'iron_ingot') + base().bankCount('iron_ingot') >= 12) {
+  // a real surplus of iron (armour and tools come first - the iron task spends it on those); or wool wanted by the
+  // dozen, worth a dig for two ingots: a kill a wool emptied the flocks round home and the trip explored 176 blocks out
+  // for the castle's 33 purple wool, no iron banked at all (2026-09-29)
+  if (!inv.has(bot, 'shears') && (inv.count(bot, 'iron_ingot') + base().bankCount('iron_ingot') >= 12 || n >= 8)) {
     await craft().ensure(bot, 'shears', 1, Object.assign({}, ctx, { depth: (ctx.depth || 0) + 1 })).catch(() => false)
   }
   const t0 = Date.now()
