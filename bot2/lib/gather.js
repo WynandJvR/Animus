@@ -572,7 +572,10 @@ const SURVEY = [
   // lava a bucket can be filled at safely, seen on any trip: the fuel trip only looked when it had a bucket in hand, so a
   // pool passed on the way to clay or iron was never on record (2026-09-28). The forager's own tests - a still source, a
   // safe stand beside it; the sky column first, one read that turns a cave lake away before the stand tests (audit)
-  { kind: 'lava_pool', re: /^lava$/, ok: (bot, b) => { const f = require('./forage'); return world.openSky(bot, { x: b.position.x, y: b.position.y + 1, z: b.position.z }) && f.lavaSource(bot, b) && f.lavaStands(bot, b).length > 0 } }
+  { kind: 'lava_pool', re: /^lava$/, ok: (bot, b) => { const f = require('./forage'); return world.openSky(bot, { x: b.position.x, y: b.position.y + 1, z: b.position.z }) && f.lavaSource(bot, b) && f.lavaStands(bot, b).length > 0 } },
+  // open water a bucket is filled at - still, under the sky, out of every zone (never the farm's): lakes and rivers noted
+  // in passing, so a fill from the mine's mouth has somewhere to go (audit 2026-09-29)
+  { kind: 'open_water', re: /^water$/, ok: (bot, b) => { let lv = 0; try { lv = Number(b.getProperties().level || 0) } catch {} return lv === 0 && outOfZones(b) && world.isAirish(world.at(bot, b.position.x, b.position.y + 1, b.position.z)) && world.openSky(bot, { x: b.position.x, y: b.position.y + 1, z: b.position.z }) } }
 ]
 let surveying = false
 function survey (bot) {
