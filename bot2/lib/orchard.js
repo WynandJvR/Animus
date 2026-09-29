@@ -189,6 +189,10 @@ async function plant (bot, { demandTrees = 0, shouldStop } = {}) {
 async function harvest (bot, { logs = Infinity, demandTrees = 0, shouldStop, species = null } = {}) {
   const trees = grown(bot)
   if (!trees.length) return 0
+  // (a species' trip with none of its trees grown: back at once - the walk out to plant is the planting rung's, not a trip's)
+  if (species && !trees.some(t => { const b = world.at(bot, t.x, t.y, t.z); return b && b.name === species })) return 0
+  // (a species' trip counts only its own logs: pickups can take up other wood lying in the orchard)
+  const cnt = () => species ? inv.count(bot, species) : inv.count(bot, n => world.LOG_RE.test(n))
   const gather = require('./gather')
   const me = bot.entity.position
   trees.sort((a, b) => world.dist3(a, me) - world.dist3(b, me))
@@ -200,11 +204,11 @@ async function harvest (bot, { logs = Infinity, demandTrees = 0, shouldStop, spe
     if (!b || !world.LOG_RE.test(b.name)) continue
     if (species && b.name !== species) continue // (a species' trip: its own trees only - an exact-wood build)
     const re = new RegExp('^' + b.name + '$')
-    const before = inv.count(bot, n => world.LOG_RE.test(n))
+    const before = cnt()
     // (a mega tree is four trunks, felled from inside - gather.fellMega; a single one as ever)
     if (t.quad) await gather.fellMega(bot, t, re, { allowZones: ['orchard'], shouldStop })
     else await gather.fellTree(bot, new Vec3(t.x, t.y, t.z), re, { leaves: wantSaplings(bot, demandTrees) > 0, allowZones: ['orchard'] })
-    got += inv.count(bot, n => world.LOG_RE.test(n)) - before
+    got += cnt() - before
   }
   if (got) {
     const cut = trees.filter(t => { const b = world.at(bot, t.x, t.y, t.z); return !b || !world.LOG_RE.test(b.name) }).length || 1
