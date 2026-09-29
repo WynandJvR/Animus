@@ -657,7 +657,9 @@ async function goToInner (bot, goal, opts, a) {
   }
   // (a walk that ARRIVED from here proves the spot no trap: its give-ups go - left on the books, the next ordinary give-up
   //  near a door the bot walked out of fine counted a trap and broke our wall; audit)
-  if (r.ok && start && giveUps.length) clearGiveUps(start.floored())
+  // (only a walk that LEFT: the escape's own step aside arrives too - a clear there was the same loop again; and a walk
+  //  that ends beside its start proves nothing; audit)
+  if (r.ok && start && giveUps.length && !escaping && bot.entity && bot.entity.position.distanceTo(start) > GIVEUP_NEAR + 1) clearGiveUps(start.floored())
   return r
 }
 async function goToInner2 (bot, goal, opts, { timeoutMs, stuckMs, dig, place, allowZones, label, shouldStop, dryHead }) {
