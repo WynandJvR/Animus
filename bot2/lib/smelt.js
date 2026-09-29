@@ -292,6 +292,9 @@ function busyFurnaces (bot) {
 
 async function openAt (bot, block) {
   if (!act.reach(bot, block.position, 4)) {
+    // (from far off - the mine's mouth, 50b - the long walk first: a 30s walk timed out and the bucket's iron was never
+    //  smelted, the chain called "none to be made", 2026-09-29)
+    if (world.dist3(bot.entity.position, block.position) > 24) await move.travel(bot, block.position, { range: 3, label: 'to the furnaces', maxMs: 120000 }).catch(() => null)
     const r = await move.goTo(bot, new goals.GoalNear(block.position.x, block.position.y, block.position.z, 2), { timeoutMs: 30000, label: 'to furnace' })
     if (!r.ok) return null
   }
