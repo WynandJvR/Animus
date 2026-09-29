@@ -534,6 +534,11 @@ const waitCols = new Map() // (x,z -> lowest open waiting hole: detachedItems)
 // (sealsBelow guarded the cell over a hole; the wall beside it closed it a side at a time: 46 holes "placeable from
 // beside while it lasts", 2026-09-29; audit). Held, and anchoring no band. (cell keys: detachedItems)
 const holdAround = new Set()
+// (sound only with ONE placement between rebuilds - the step loop's pass places one cell (placeCell) and every pass begins
+//  with detachedItems. A pass that placed several would have to rebuild this inside its own loop; audit)
+// ...and a hole's last open face that is NO cell of the build - terrain air at the site's edge, a courtyard gap: the
+// protector refuses a fill there (planner filler, a tower block, a support), the same burial by another hand (audit)
+const holeFaces = new Set()
 const FACES = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]
 function noteCoverMiss (bot, anchor, holding) {
   if (!anchor) return
@@ -584,7 +589,7 @@ function detachedItems (todo, bot) {
   // THE WAITING COLUMNS: x,z -> the lowest hole kept open for its item (out of stock, or the wait above) with nothing placed
   // over it yet. Every cell above it in that column anchors no band - it cannot go in until the hole does (one step-end
   // miss a level was the old drip); one lookup a cell in anchorable (audit)
-  waitCols.clear(); holdAround.clear()
+  waitCols.clear(); holdAround.clear(); holeFaces.clear()
   const td = today(bot)
   const openAt = (x, y, z) => { const w = world.at(bot, x, y, z); return !!w && !world.isSolid(w) }
   for (const c of todo) {
@@ -594,7 +599,7 @@ function detachedItems (todo, bot) {
     // (the hole's faces open now; the one that would close the last is held - placed later, when the hole is filled)
     if (cellDone(bot, c) !== true) {
       const open = FACES.map(([dx, dy, dz]) => ({ x: c.x + dx, y: c.y + dy, z: c.z + dz })).filter(f => openAt(f.x, f.y, f.z))
-      if (open.length === 1) { const f = open[0]; const fc = job && job.index.get(key(f)); if (fc && !fc.clear) holdAround.add(key(f)) }
+      if (open.length === 1) { const f = open[0]; const fc = job && job.index.get(key(f)); if (fc && !fc.clear) holdAround.add(key(f)); else holeFaces.add(key(f)) }
     }
     const up = job && job.index.get(key({ x: c.x, y: c.y + 1, z: c.z }))
     if (up && cellDone(bot, up) === true) continue // (covered already: the column is not waiting on it)
@@ -869,6 +874,7 @@ function allJobs () { const out = [...extraJobs.values()]; if (job) out.push(job
 // any dig (act.dig asks this). One exception for digs: the safehouse's door cell is opened and sealed
 // every day (its seal block, a rehung door) - it stays protected from walks only.
 move.setProtector((block, purpose) => {
+  if (purpose === 'fill' && holeFaces.has(key(block.position))) return true // (a waiting hole's last open face: holeFaces)
   for (const j of allJobs()) {
     const c = j.index.get(key(block.position))
     if (!c || c.clear) continue
