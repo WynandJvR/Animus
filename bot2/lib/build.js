@@ -909,6 +909,10 @@ async function placeSupport (bot, sp, j) {
   const fillerName = () => { const f = inv.items(bot).find(i => FILLER_ITEMS.test(i.name)); return f && f.name }
   if (!fillerName()) return false
   const record = p => { supportsLaid++; mem.update(m => { m.scaffold = m.scaffold || []; m.scaffold.push({ x: p.x, y: p.y, z: p.z }) }) }
+  // (a support is a fill: never into a cell of the build nor a waiting hole's last open face - the protector's one
+  //  question; act.place does not ask it, it places the build's own cells; audit)
+  const refused = p => { const b = world.at(bot, p.x, p.y, p.z); return !!b && move.isProtected(b, 'fill') }
+  if (refused(sp)) return false
   // 1) straight on: any solid neighbour of the support cell will do (usually the wall we are building)
   const hasNeighbour = ALL_FACES.some(([dx, dy, dz]) => { const nb = world.at(bot, sp.x + dx, sp.y + dy, sp.z + dz); return nb && world.isSolid(nb) })
   if (hasNeighbour) {
@@ -926,6 +930,7 @@ async function placeSupport (bot, sp, j) {
     column.unshift({ x: sp.x, y, z: sp.z })
   }
   if (!grounded) return false
+  if (column.some(refused)) return false // (all or none: never half a pillar)
   for (const p of column) {
     const cur = world.at(bot, p.x, p.y, p.z)
     if (cur && world.isSolid(cur)) continue
