@@ -290,11 +290,11 @@ function busyFurnaces (bot) {
   return all.filter(b => use[fkey(b.position)] || isLit(b))
 }
 
-async function openAt (bot, block) {
+async function openAt (bot, block, { shouldStop } = {}) {
   if (!act.reach(bot, block.position, 4)) {
     // (from far off - the mine's mouth, 50b - the long walk first: a 30s walk timed out and the bucket's iron was never
     //  smelted, the chain called "none to be made", 2026-09-29)
-    if (world.dist3(bot.entity.position, block.position) > 24) await move.travel(bot, block.position, { range: 3, label: 'to the furnaces', maxMs: 120000 }).catch(() => null)
+    if (world.dist3(bot.entity.position, block.position) > 24) await move.travel(bot, block.position, { range: 3, label: 'to the furnaces', maxMs: 120000, shouldStop }).catch(() => null)
     const r = await move.goTo(bot, new goals.GoalNear(block.position.x, block.position.y, block.position.z, 2), { timeoutMs: 30000, label: 'to furnace' })
     if (!r.ok) return null
   }
@@ -333,7 +333,7 @@ async function smeltItem (bot, output, count, ctx = {}) {
   for (const fb of furns) {
     const left = Math.min(per, count - loaded, inv.count(bot, input))
     if (left <= 0) break
-    const f = await openAt(bot, fb)
+    const f = await openAt(bot, fb, ctx)
     if (!f) continue
     try {
       if (f.outputItem()) await f.takeOutput().catch(() => {})
@@ -361,7 +361,7 @@ async function smeltItem (bot, output, count, ctx = {}) {
     await move.sleep(Math.min(10000, Math.max(3000, maxWait / 10)))
     if (ctx.shouldStop && ctx.shouldStop()) break
     for (const fb of furns) {
-      const f = await openAt(bot, fb)
+      const f = await openAt(bot, fb, ctx)
       if (!f) continue
       // (noted like every other open: the wait's takes left the ledger saying "output waiting" - audit #26, 2026-09-27)
       try { if (f.outputItem()) await f.takeOutput() } catch {} finally { try { note(fb, f, bot) } catch {} try { f.close() } catch {} }
