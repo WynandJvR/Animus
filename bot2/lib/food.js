@@ -137,7 +137,8 @@ async function huntFor (bot, itemName, n, ctx = {}) {
 // ---- wool ----------------------------------------------------------------------------------------
 // A sheep's "wool" byte: low nibble the colour, 0x10 set once shorn (until it eats grass again). Read by
 // name from the registry's metadata keys - the index moves between versions.
-const WOOL_RE = /_wool$/
+// (the byte's colour index, vanilla order)
+const WOOL_COLOURS = ['white', 'orange', 'magenta', 'light_blue', 'yellow', 'lime', 'pink', 'gray', 'light_gray', 'cyan', 'purple', 'blue', 'brown', 'green', 'red', 'black']
 function sheepWool (bot, e) {
   try {
     const keys = world.data(bot).entitiesByName.sheep.metadataKeys || []
@@ -149,10 +150,12 @@ function sheepWool (bot, e) {
 let shearsFailDay = null // (the day a shears make failed: day.js)
 const shornTried = new Map() // sheep entity id -> shearing it gave nothing (its byte said woolly: it is not)
 
-// Get `n` more wool (any colour: it is dyed for the build). Shears when we have them (1-3 wool a sheep, and the
+// Get `n` more wool of `colour` (white: the rest are dyed from it). Shears when we have them (1-3 wool a sheep, and the
 // sheep grows it back); without, a kill gives one. Shears are made only from iron nobody else is waiting on.
-async function woolFor (bot, n, ctx = {}) {
-  const woolCount = () => inv.count(bot, WOOL_RE)
+// (`colour`: the wool asked for, counted exactly - a brown sheep's wool is a bonus, never the white a trip was sent for:
+//  counted as any, the trip returned "done" with white still short and the dry-day rule read it as found; audit)
+async function woolFor (bot, n, ctx = {}, colour = 'white') {
+  const woolCount = () => inv.count(bot, colour + '_wool')
   const target = woolCount() + n
   if (!inv.has(bot, 'shears') && base().bankCount('shears') > 0) await base().withdraw(bot, 'shears', 1).catch(() => 0)
   // a real surplus of iron (armour and tools come first - the iron task spends it on those); or wool wanted by the
@@ -180,7 +183,8 @@ async function woolFor (bot, n, ctx = {}) {
     const list = animals(bot, /^sheep$/, 48)
     for (const e of list) noteMob(e)
     const woolly = e => { const w = sheepWool(bot, e); return !shornTried.has(e.id) && !(w && w.sheared) }
-    const pick = shears ? (list.find(woolly) || list[0]) : list[0]
+    const ofColour = e => { const w = sheepWool(bot, e); return !!w && WOOL_COLOURS[w.colour] === colour }
+    const pick = shears ? (list.find(e => woolly(e) && ofColour(e)) || list.find(woolly) || list[0]) : (list.find(ofColour) || list[0])
     if (!pick) {
       // (a remembered flock that is not there when we arrive is forgotten: four wool trips walked to the same spot - inside
       //  the castle's ground by then - found nothing, and went again, 2026-09-28)

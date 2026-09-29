@@ -488,18 +488,12 @@ async function craftItem (bot, name, n, ctx) {
   return inv.count(bot, name) > before
 }
 
-// A dyed wool: its dye (ensured - the flowers, the mixes), and any OTHER wool - the pack's, the chests', a sheep's last.
+// A dyed wool: its dye (ensured - the flowers, the mixes) and WHITE wool, as a player dyes it - never another colour: the
+// build wants those as themselves (a cyan wool dyed purple is a cyan cell short again, and a dye spent twice; audit)
 async function dyeWool (bot, name, n, ctx) {
   const dye = name.replace(/_wool$/, '_dye')
-  const other = () => inv.items(bot).filter(i => /_wool$/.test(i.name) && i.name !== name).reduce((a, i) => a + i.count, 0)
-  if (other() < n) {
-    for (const [k, c] of Object.entries(base().bankCounts()).filter(([k, c]) => /_wool$/.test(k) && k !== name && c > 0).sort((a, b) => b[1] - a[1])) {
-      if (other() >= n) break
-      await base().withdraw(bot, k, Math.min(c, n - other())).catch(() => 0)
-    }
-  }
-  if (other() < n && !await food().woolFor(bot, n - other(), ctx)) { if (!other()) return false }
-  const m = Math.min(n, other())
+  if (!await ensure(bot, 'white_wool', n, ctx)) { if (!inv.count(bot, 'white_wool')) return false }
+  const m = Math.min(n, inv.count(bot, 'white_wool'))
   if (!await ensure(bot, dye, m, ctx)) return false
   return (await craftTimes(bot, name, Math.min(m, inv.count(bot, dye)), ctx)) > 0
 }
@@ -511,7 +505,7 @@ function dyedRecipe (bot, name, table) {
   if (!m) return null
   const md = world.data(bot)
   const dye = inv.items(bot).find(i => i.name === m[1] + '_dye')
-  const wool = inv.items(bot).find(i => /_wool$/.test(i.name) && i.name !== name)
+  const wool = inv.items(bot).find(i => i.name === 'white_wool') // (white only: dyeWool)
   const out = md.itemsByName[name]
   if (!dye || !wool || !out) return null
   const { Recipe } = require('prismarine-recipe')(bot.registry)
@@ -526,7 +520,10 @@ async function craftTimes (bot, name, crafts, { shouldStop } = {}) {
   const md = world.data(bot)
   const item = md.itemsByName[name]
   if (!item || crafts <= 0) return 0
-  const any = bot.recipesFor(item.id, null, 1, true)[0] || dyedRecipe(bot, name, true)
+  // (a dyed wool only ever from white: the data's recipe names the tag's one member it lists, and would dye a held black
+  //  wool - a colour the build wants as itself; dyeWool)
+  const dyed = /_wool$/.test(name) && name !== 'white_wool'
+  const any = dyed ? dyedRecipe(bot, name, true) : (bot.recipesFor(item.id, null, 1, true)[0] || dyedRecipe(bot, name, true))
   if (!any) { log('craft', `can't craft ${name} from what i hold`); return 0 }
   let table = null
   if (any.requiresTable) {
@@ -538,7 +535,7 @@ async function craftTimes (bot, name, crafts, { shouldStop } = {}) {
   let i = 0
   for (; i < crafts; i++) {
     if (shouldStop && shouldStop()) break
-    const r1 = bot.recipesFor(item.id, null, 1, table)[0] || dyedRecipe(bot, name, table)
+    const r1 = dyed ? dyedRecipe(bot, name, table) : (bot.recipesFor(item.id, null, 1, table)[0] || dyedRecipe(bot, name, table))
     if (!r1) break
     try {
       if (table) await require('./act').settleAfterClose(bot) // (bot.craft opens the table itself: a craft right after a chest sweep timed out like an open, 2026-09-28)
