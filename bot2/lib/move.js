@@ -466,6 +466,9 @@ async function crossDoor (bot, goal) {
   const stepAt = (x, z) => { for (const dy of [0, 1, -1]) if (world.standable(bot, x, d.y + dy, z)) return { x, y: d.y + dy, z }; return { x, y: d.y, z } }
   const sideA = axisX ? stepAt(d.x - 1, d.z) : stepAt(d.x, d.z - 1)
   const sideB = axisX ? stepAt(d.x + 1, d.z) : stepAt(d.x, d.z + 1)
+  // (a door with no place to stand on one side - a castle door opening onto a rail of open trapdoors on edge - leads
+  //  nowhere: 40s a try walking to a step that is not there, 2026-09-29. Not this door; the stall looks elsewhere)
+  { const noStep = [sideA, sideB].find(p => !world.standable(bot, p.x, p.y, p.z)); if (noStep) { log('move', `the door at ${fmt(d)} has nowhere to stand on its side at ${fmt(noStep)} - not through this one`); return false } }
   const gp = goal && goal.x != null ? { x: goal.x, z: goal.z } : null
   const distTo = (s, p) => Math.hypot(s.x + 0.5 - p.x, s.z + 0.5 - p.z)
   // the exit is the side toward the goal; without a goal, the side away from us
