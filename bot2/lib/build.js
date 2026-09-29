@@ -1331,6 +1331,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     // (and the daily teardown's resting blocks round it: a new stand, the ground changed - their rest ends; audit)
     if (ok && tdMiss.size) { let w = 0; for (const k of [...tdMiss.keys()]) { const [x, y, z] = k.split(',').map(Number); if (Math.abs(x - c.x) <= 2 && Math.abs(y - c.y) <= 2 && Math.abs(z - c.z) <= 2) { tdMiss.delete(k); w++ } } if (w) { const o = {}; for (const [k, v] of tdMiss) o[k] = v; mem.set('teardownMiss2', o) } }
     if (ok) { for (const [k, f] of cellFails) { const [x, y, z] = k.split(',').map(Number); if (f.at && !f.woke && c.y <= y && y - c.y <= 2 && Math.abs(x - c.x) <= 2 && Math.abs(z - c.z) <= 2) { f.at = 0; f.woke = true } } }
+    if (ok && (mem.get().toSwap || {})[key(c)]) mem.update(m => { delete m.toSwap[key(c)] }) // (swapped: off the list - it says what is left; audit)
     if (ok) { placed++; if (cellFails.delete(key(c))) saveCellFails(); if (placed % 25 === 0) { const st = status(bot); log('build', `${st.done}/${st.total} placed`) } } else if (c.foundation && c.name === 'torch' && !world.isAirish(world.at(bot, c.x, job.box.y1, c.z))) dropFoundation(bot, c, 'the floor over it is laid - no way to it from above') // (a hollow's torch goes in from above or not at all)
     else if (c.foundation && sealedIn(bot, c)) dropFoundation(bot, c, 'sealed in') // (a reach miss rests like any cell: a rim cell faces the outside ground - the miss is the stand's, not the cell's, and dropped it is a hole in the wall; audit 2026-09-28)
     else {
