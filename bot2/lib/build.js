@@ -1391,10 +1391,25 @@ function ensureFoundation (bot) {
   // while it is still open (an attached cell: in as soon as a torch is in hand and its ground stands; audit 2026-09-28)
   const torches = []
   const inner = new Map()
-  for (const q of cols) {
-    if (![[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => outer({ x: q.x + dx, z: q.z + dz }))) { inner.set(`${q.x},${q.z}`, q); continue }
-    for (const y of q.ys) add.push({ x: q.x, y, z: q.z })
+  // (and a base cell that is NO FLOOR - a wall sign, a torch, an open trapdoor: its column is filled like the rim's, or the
+  //  floor has a hole into the hollow. The lectern room's sign square dropped the bot into the hollow three times in a
+  //  morning, the ladder beside it the only way back up, 2026-09-29)
+  const md0 = world.data(bot)
+  const noFloor = q => {
+    const c = job.index.get(`${q.x},${y1},${q.z}`); if (!c) return false
+    if (/_trapdoor$/.test(c.name) && c.props && String(c.props.open) === 'true') return true
+    const d = md0.blocksByName[c.name]; return !!d && d.boundingBox === 'empty'
   }
+  let holes = 0
+  for (const q of cols) {
+    const rim = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => outer({ x: q.x + dx, z: q.z + dz }))
+    if (!rim && !noFloor(q)) { inner.set(`${q.x},${q.z}`, q); continue }
+    if (!rim) holes++
+    // (under a plant the top of the fill is dirt: a tulip or a rose bush stands on nothing else)
+    const top = job.index.get(`${q.x},${y1},${q.z}`); const soil = !rim && !!top && (act.PLANT_RE.test(top.name) || /(rose_bush|lilac|peony|sunflower|orchid|allium|lily_of_the_valley|sapling)$/.test(top.name))
+    for (const y of q.ys) add.push({ x: q.x, y, z: q.z, hole: !rim, soil: soil && y === y1 - 1 })
+  }
+  if (holes) log('build', `foundation: ${holes} column${holes > 1 ? 's' : ''} under a base cell that is no floor (a sign, a torch, an open trapdoor) filled - no hole into the hollow`)
   // (every hollow region lit: the 8-grid's cells in it, or - a strip the grid misses, a tower's, the west edge's - its
   //  shallowest dry column, the one a walk down reaches most easily, nearest its middle; audit 2026-09-28)
   const seen = new Set()
@@ -1421,7 +1436,8 @@ function ensureFoundation (bot) {
     for (const q of pick) torches.push({ x: q.x, y: q.ys[q.ys.length - 1], z: q.z })
   }
   for (const p of add) {
-    const cell = { x: p.x, y: p.y, z: p.z, name: 'cobblestone', props: {}, foundation: true, want: null, item: 'cobblestone', alt: FOUNDATION_BLOCKS, prefer: ['cobblestone', 'dirt'], itemAlt: FILLER_ITEMS }
+    const cell = { x: p.x, y: p.y, z: p.z, name: 'cobblestone', props: {}, foundation: true, hole: !!p.hole, want: null, item: 'cobblestone', alt: FOUNDATION_BLOCKS, prefer: ['cobblestone', 'dirt'], itemAlt: FILLER_ITEMS }
+    if (p.soil) Object.assign(cell, { name: 'dirt', item: 'dirt', alt: /^(dirt|grass_block|coarse_dirt|rooted_dirt)$/, prefer: ['dirt'], itemAlt: /^dirt$/ })
     job.cells.push(cell); job.index.set(key(cell), cell)
   }
   // (a support of ours standing in a foundation cell does the foundation's work now: off the scaffold ledger, so no teardown
@@ -1548,6 +1564,19 @@ function torchStand (bot, c) {
 function foundationStand (bot, c) {
   if (c.name === 'torch') return torchStand(bot, c)
   const me = bot.entity.position; let best = null; let bd = Infinity
+  // (a HOLE in the floor - the column under a sign, a torch, an open trapdoor: filled from the room beside it, placed down
+  //  into it. One wide, it walls nothing in)
+  if (c.hole) {
+    for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) for (let dy = -1; dy <= 3; dy++) {
+      if (!dx && !dz) continue
+      const p = { x: c.x + dx, y: c.y + dy, z: c.z + dz }
+      if (!world.standable(bot, p.x, p.y, p.z)) continue
+      if (world.dist3({ x: p.x + 0.5, y: p.y + 1.6, z: p.z + 0.5 }, { x: c.x + 0.5, y: c.y + 0.5, z: c.z + 0.5 }) > 4.2) continue
+      const d = world.dist3(p, me)
+      if (d < bd) { bd = d; best = p }
+    }
+    return best
+  }
   for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) for (let dy = -4; dy <= 2; dy++) {
     if (c.noOutside) break // (its outside stand was missed: the inside pass below)
     if (!dx && !dz) continue
