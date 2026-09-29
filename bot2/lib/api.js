@@ -171,7 +171,7 @@ function start ({ bot, port, host, director, commands, brainSettings, pov, chat 
         if (url === '/brain') {
           if (j.model != null) brainSettings.model = String(j.model)
           if (j.goal != null) brainSettings.goal = String(j.goal)
-          if (j.enabled != null) brainSettings.enabled = !!j.enabled
+          if (j.enabled != null) { brainSettings.enabled = !!j.enabled; mem.set('brainEnabled', brainSettings.enabled) } // (kept across restarts: main.js)
           return send(res, 200, brainSettings)
         }
         if (url === '/config') {

@@ -75,7 +75,9 @@ const world = require('./lib/world')
 move.bindReflex(reflex)
 move.bindBot(bot)
 
-const brainSettings = { model: process.env.LLM_MODEL || 'gemma4:12b', goal: 'Build the castle and stay alive.', enabled: true }
+// (the brain's on/off is the operator's and outlives a restart - kept in memory.json: paused from the panel, every deploy
+//  switched it back on, 2026-09-29)
+const brainSettings = { model: process.env.LLM_MODEL || 'gemma4:12b', goal: 'Build the castle and stay alive.', enabled: mem.get().brainEnabled !== false }
 let pov = null
 try { pov = require(path.join(BOT_DIR, 'pov.js')) } catch {}
 
