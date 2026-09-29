@@ -1216,6 +1216,9 @@ function tick () {
       return
     }
     if (h) { bot.setControlState('back', false); steerTo(h, { jump: h.jump, sprint: bot.food > 6 }) }
+    // (nowhere to run - a dead-end tunnel - and it is past knockback reach: a wall between us, as the shooter's cover
+    //  does; standing there backing into rock was the wait before the death of 2026-09-29; audit)
+    else if (d >= 3.2 && !busy) runBusy('wall off', g => wallOff(t, g), 3500, 'creeper')
     else { bot.setControlState('forward', false); bot.setControlState('back', !pinned); bot.setControlState('sprint', false) }
     return
   } else if (active && active.kind === 'creeper') return clearActive()
