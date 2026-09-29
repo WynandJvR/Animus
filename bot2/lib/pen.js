@@ -190,6 +190,7 @@ function wildKnown (bot) {
   // (a remembered flock only with the daylight to lead it home - a condition, not a failure: without it the task ran and
   //  refused, "did not succeed" every pass; audit rule)
   const p = pen()
+  if (leadFailDay === require('./day').dayNo(bot)) return false
   return ((mem.get().mobs || {}).sheep || []).some(q => world.dist2(q, home) < LURE_REACH && (!p || world.ticksUntilNight(bot) >= leadTicks(world.dist2(q, centreOf(p)))))
 }
 
@@ -330,7 +331,17 @@ async function build (bot, { shouldStop } = {}) {
 // The lead in legs: the path to the gate planned (half a second's search at most - the body's loop waits on it; a partial
 // path is walked and planned on from its end), walked a few nodes at a time; after each leg the followers are
 // waited for (within 4), a sheep more than 14 behind is let go. None left following: the lead is over.
-async function stock (bot, { shouldStop } = {}) {
+// ONE LONG LEAD A DAY: a lead from a remembered flock (out of sight) that failed - a river, the laggards dropped, a fight -
+// is not walked again today: each is ~10 minutes of the day away from the build, and the failure cooling was all that
+// stood between it and the next (day.js, as the shears; audit)
+let leadFailDay = null
+async function stock (bot, opts = {}) {
+  const ctx = { far: false }
+  const ok = await stockInner(bot, opts, ctx)
+  if (!ok && ctx.far && !(opts.shouldStop && opts.shouldStop())) { leadFailDay = require('./day').dayNo(bot); log('pen', 'the long lead failed - no more long leads today') }
+  return ok
+}
+async function stockInner (bot, { shouldStop } = {}, ctx = {}) {
   const p = pen()
   if (!await wheatInHand(bot, 1)) { log('pen', 'no wheat to lead sheep with'); return false }
   const stop = () => !!(shouldStop && shouldStop())
@@ -341,6 +352,7 @@ async function stock (bot, { shouldStop } = {}) {
     if (!known) { log('pen', 'no sheep in sight or remembered near home to lead in'); return false }
     const far = world.dist2(known, centreOf(p))
     if (world.ticksUntilNight(bot) < leadTicks(far)) { log('pen', `the nearest flock is ${Math.round(far)} blocks from the pen - not enough daylight left to lead it home today`); return false }
+    ctx.far = true
     await move.travel(bot, known, { range: 8, shouldStop, label: 'to sheep' })
     wild = food().animals(bot, /^sheep$/, 48)
     if (!wild.length) {
