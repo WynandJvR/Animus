@@ -537,6 +537,10 @@ const waitCols = new Map() // (x,z -> lowest open waiting hole: detachedItems)
 const holdAround = new Set()
 const doorwaySaid = new Set() // (doorways said once to be kept open: the room rule's line)
 const compartmentSaid = new Set() // (cells said once to wait on a closed compartment: the step's skip)
+// (and the cells the last probe found waiting on one, across steps: they are no floor for the window. Tryable to the floor,
+//  nine of them at y120 held it there all evening, the band never came up to the y123 stone_bricks it waited on - "nothing
+//  ready", 875 in the chest, 2026-09-30. They stay in the doable set below the floor and are probed again each step)
+const compHeld = new Set()
 // (sound only with ONE placement between rebuilds - the step loop's pass places one cell (placeCell) and every pass begins
 //  with detachedItems. A pass that placed several would have to rebuild this inside its own loop; audit)
 // ...and a hole's last open face that is NO cell of the build - terrain air at the site's edge, a courtyard gap: the
@@ -1395,7 +1399,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     //  a hole's last face, a column over a waiting hole - pinned the window at y120 for a few leaves and walls, and the
     //  4,868 blocks in hand for y122 and up were never offered: steps of 1-10 blocks, 2026-09-29; audit. They stay in the
     //  window - below its floor - and go in when their blocker does)
-    const tryable = c => { const f = cellFails.get(key(c)); if (f && f.n >= 1 && f.shared) return false; if (holdAround.has(key(c))) return false; const w = waitCols.get(c.x + ',' + c.z); return !(w != null && c.y > w) }
+    const tryable = c => { const f = cellFails.get(key(c)); if (f && f.n >= 1 && f.shared) return false; if (holdAround.has(key(c)) || compHeld.has(key(c))) return false; const w = waitCols.get(c.x + ',' + c.z); return !(w != null && c.y > w) }
     let minY = Infinity; for (const c of structural) if (c.y < minY && tryable(c)) minY = c.y
     if (minY === Infinity && structural.length) minY = Math.min(...structural.map(c => c.y)) // (none tryable: as before)
     // no more than 3 layers above the lowest unfinished cell: walls rise together, nothing floats far up
@@ -1524,8 +1528,9 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     // (its door or gap is built) or the bot is inside it. A cell with no stand at all goes on as before (the tower)
     if (!c.foundation && !inReach(c)) {
       const probe = clusterStand(bot, c, ready, badStands, reachOf)
+      if (probe && !probe.out) compHeld.delete(key(c))
       if (probe && probe.out) {
-        holdBack.add(key(c)); compWait.add(key(c))
+        holdBack.add(key(c)); compWait.add(key(c)); compHeld.add(key(c))
         if (!compartmentSaid.has(key(c))) { compartmentSaid.add(key(c)); log('build', `${c.name} at ${move.fmt(c)}: every stand for it is in a closed compartment of the build I am not in - it waits for a way in`) }
         tpick = Date.now(); continue
       }
