@@ -1204,6 +1204,15 @@ function tick () {
       return
     }
     const h = fleeHeading(t)
+    // (a mob that can be fought, at our side while we run - it is the one hurting us NOW: with no way to run or the
+    //  creeper not yet close, a swing at it (the knockback clears the way too). The flee held the body in a dead-end
+    //  tunnel while a zombie took 20 hp, iron armour and all, 2026-09-29)
+    const biter = hs.find(o => o.e !== t && !NEVER_MELEE.has(o.e.name) && o.d < 3.2 && canSee(o.e))
+    if (biter && inv.bestWeapon(bot) && now - lastAttackAt > 500 && (!h || d > 4)) {
+      bot.lookAt(biter.e.position.offset(0, biter.e.height ? biter.e.height * 0.8 : 1.2, 0), true).catch(() => {})
+      bot.attack(biter.e); lastAttackAt = now
+      return
+    }
     if (h) { bot.setControlState('back', false); steerTo(h, { jump: h.jump, sprint: bot.food > 6 }) }
     else { bot.setControlState('forward', false); bot.setControlState('back', !pinned); bot.setControlState('sprint', false) }
     return
