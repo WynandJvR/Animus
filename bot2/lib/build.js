@@ -1024,7 +1024,7 @@ async function placeCell (bot, c, j = job) {
   }
   if (!step) {
     // after three failures with its own axis, a log takes any face
-    if (c.want && c.want.axis && !axisRelaxed(c) && failsOf(c) >= 3) { relaxAxis(c); log('build', `${c.name} at ${move.fmt(c)} goes in with any axis (nothing to place it against on its own side)`) }
+    if (c.want && c.want.axis && !axisRelaxed(c) && failsOf(c) >= 3 && !(cellFails.get(key(c)) || {}).shared) { relaxAxis(c); log('build', `${c.name} at ${move.fmt(c)} goes in with any axis (nothing to place it against on its own side)`) }
     const plans = plansFor(c)
     if (!plans.length) return why('no face to place it against in its plan')
     // is there something to click?
@@ -1100,6 +1100,20 @@ const cellFails = new Map(Object.entries((mem.get().cellFails) || {})) // key ->
 let cellFailsSaved = 0
 // (only cells of the job are kept: a cell finished by any other way - a restart, a hand - is dropped at the next save; audit #38)
 function saveCellFails () { if (Date.now() - cellFailsSaved < 5000) return; cellFailsSaved = Date.now(); const o = {}; for (const [k, v] of cellFails) { if (job && !job.index.has(k)) { cellFails.delete(k); continue } o[k] = v } mem.set('cellFails', o) }
+// A reach miss is the GROUND's: the cells round it (3 across, a layer up or down) share the missed cell's rest, count and
+// all. Held back for one step only, each round tried the next cell of the same patch - the south-west hollow's foundation
+// took 7 walks of 46s for 1 block, round after round (2026-09-29). A block placed beside them still wakes them.
+function restRound (c, ready) {
+  const f = cellFails.get(key(c)); let n = 0
+  for (const q of ready) {
+    if (q === c || Math.abs(q.x - c.x) > 3 || Math.abs(q.z - c.z) > 3 || Math.abs(q.y - c.y) > 1) continue
+    holdBack.add(key(q)); n++
+    const g = cellFails.get(key(q))
+    if (f && (!g || g.n < f.n)) cellFails.set(key(q), { n: f.n, at: f.at, shared: true }) // (shared: no count of its own - a log's axis stays)
+  }
+  if (n) saveCellFails()
+  return n
+}
 function failsOf (c) { const f = cellFails.get(key(c)); return f ? f.n : 0 }
 let stepStop = null // (the running build step's stop - a pillar's scaffold top-up inside it keeps the step's day)
 async function buildStep (bot, opts = {}) {
@@ -1238,9 +1252,8 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       failed.set(key(c), (failed.get(key(c)) || 0) + 1); saveCellFails(); prof.tries++; prof.ms += Date.now() - tp; prof.dist += d0; tpick = Date.now()
       // (the stand's walk ran out: the cells round it lie behind the same ground - the walled garden's 18 tries were all
       //  this branch, one door crossing each, silent; they wait for the next step)
-      let n = 0
-      for (const q of ready) if (q !== c && Math.abs(q.x - c.x) <= 3 && Math.abs(q.z - c.z) <= 3 && Math.abs(q.y - c.y) <= 1 && !holdBack.has(key(q))) { holdBack.add(key(q)); n++ }
-      log('build', `${c.name} at ${move.fmt(c)}: its stand could not be reached${n ? ` - ${n} cells round it wait for the next step` : ''}`)
+      const n = restRound(c, ready)
+      log('build', `${c.name} at ${move.fmt(c)}: its stand could not be reached${n ? ` - ${n} cells round it rest with it` : ''}`)
       continue
     }
     if (wallsMeIn(bot, c)) { holdBack.add(key(c)); log('build', `${c.name} at ${move.fmt(c)} would wall me in from ${move.fmt(world.feetPos(bot))} - later`); tpick = Date.now(); continue }
@@ -1261,9 +1274,8 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       //  wall. Tried one by one, a walled garden's 18 cells took 18 walks through a door into a dead-end vestibule, 18s each,
       //  0 placed in a 323s step (2026-09-28). They wait for the next step; the step goes elsewhere)
       if (/within reach|stand was not reached|stuck|timeout/.test(lastPlaceFail)) {
-        let n = 0
-        for (const q of ready) if (q !== c && Math.abs(q.x - c.x) <= 3 && Math.abs(q.z - c.z) <= 3 && Math.abs(q.y - c.y) <= 1 && !holdBack.has(key(q))) { holdBack.add(key(q)); n++ }
-        if (n) log('build', `${n} cells round ${move.fmt(c)} wait for the next step - the same ground stopped the walk`)
+        const n = restRound(c, ready)
+        if (n) log('build', `${n} cells round ${move.fmt(c)} rest with it - the same ground stopped the walk`)
       }
     }
   }
