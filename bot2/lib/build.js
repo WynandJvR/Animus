@@ -692,7 +692,11 @@ async function goSite (bot, goal, label, { place = true, dig = (job && job.cells
   if (job && underTheBuild(bot)) {
     const h = mem.get().home
     log('build', `under the build's floor at ${move.fmt(bot.entity.position)} - out onto open ground first`)
-    await move.travel(bot, h || { x: job.origin.x - 8, y: job.origin.y, z: job.origin.z - 8 }, { range: 6, label: 'out from under the build' }).catch(() => null)
+    const out = await move.travel(bot, h || { x: job.origin.x - 8, y: job.origin.y, z: job.origin.z - 8 }, { range: 6, label: 'out from under the build' }).catch(() => null)
+    // (no walk out - the rim closed round the hollow as its foundation went in: the climb straight up, which takes our own
+    //  floor block over the head and the builder puts it back. Leg after leg "stuck" from a cell a step off the last one
+    //  never tripped the same-cell climb, 2026-09-29)
+    if ((!out || !out.ok) && underTheBuild(bot)) { log('build', `no walk out from under the build - climbing out`); await move.escapeUp(bot).catch(() => false) }
   }
   const r = await move.runGoal(bot, goal, { timeoutMs: 30000, stuckMs: 8000, movements: siteMovements(bot, { place, dig }) })
   if (!r.ok && r.why === 'interrupted') { await reflex.waitClear(); return move.runGoal(bot, goal, { timeoutMs: 30000, stuckMs: 8000, movements: siteMovements(bot, { place, dig }) }) }
