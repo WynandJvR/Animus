@@ -668,20 +668,33 @@ async function escapeUpInner (bot) {
       log('move', `enclosed by the build at ${fmt(f0)} - no way out; opening our own wall beside me, the builder puts it back`)
       const cellAt = (x, y, z) => j.index.get(`${x},${y},${z}`)
       const holdsUp = (x, y, z) => j.cells.some(q => q.sup && q.sup.x === x && q.sup.y === y && q.sup.z === z && build.cellDone(bot, q) === true)
+      const air = (x, y, z) => { const b = world.at(bot, x, y, z); return !!b && world.isAirish(b) }
+      // (a cell of the pair: air already, or a cell of our build that holds nothing up)
+      const ours = (x, y, z) => { const b = world.at(bot, x, y, z); return !!b && (world.isAirish(b) || (!!cellAt(x, y, z) && !holdsUp(x, y, z) && !world.isLavaBlock(b) && !world.isWaterBlock(b))) }
+      // (safe ground past the wall: room for the body and a drop a fall does not hurt - the castle's outer walls stand over
+      //  a 6-9 block drop, and air past them is a lip, not a way out; audit)
+      const safe = (x, y, z) => air(x, y, z) && air(x, y + 1, z) && world.dropAt(bot, x, y, z) <= world.SAFE_DROP
       const sides = [[1, 0], [-1, 0], [0, 1], [0, -1]].map(([dx, dz]) => {
-        const cells = [0, 1].map(dy => ({ x: f0.x + dx, y: f0.y + dy, z: f0.z + dz }))
-        const blocks = cells.map(p => world.at(bot, p.x, p.y, p.z))
-        const door = blocks.some(b => b && /_door$/.test(b.name) && !/^iron_door$/.test(b.name))
-        const beyond = world.at(bot, f0.x + 2 * dx, f0.y, f0.z + 2 * dz); const beyondHead = world.at(bot, f0.x + 2 * dx, f0.y + 1, f0.z + 2 * dz)
-        const open = !!beyond && !!beyondHead && world.isAirish(beyond) && world.isAirish(beyondHead)
-        const ok = cells.every((p, i) => !blocks[i] || world.isAirish(blocks[i]) || (cellAt(p.x, p.y, p.z) && !holdsUp(p.x, p.y, p.z)))
-        return { dx, dz, cells, blocks, door, open, ok }
-      }).filter(sd => sd.ok && (sd.door || sd.open)).sort((a, b) => (b.door - a.door) || (b.open - a.open))
+        const door = [0, 1].some(dy => { const b = world.at(bot, f0.x + dx, f0.y + dy, f0.z + dz); return b && /_door$/.test(b.name) })
+        return { dx, dz, door, ok: ours(f0.x + dx, f0.y, f0.z + dz) && ours(f0.x + dx, f0.y + 1, f0.z + dz), beyond: safe(f0.x + 2 * dx, f0.y, f0.z + 2 * dz) }
+      }).filter(sd => sd.ok).sort((a, b) => (b.door - a.door) || (b.beyond - a.beyond))
       const sd = sides[0]
       if (sd) {
-        for (let i = 1; i >= 0; i--) {
-          const b = sd.blocks[i]; const p = sd.cells[i]
-          if (b && !world.isAirish(b)) { log('move', `enclosed: taking our own ${b.name} at ${fmt(p)}`); await act.dig(bot, p, { own: true, force: true, noWalk: true, allowZones: ['build', 'base'], timeoutMs: 8000 }).catch(() => false) }
+        // (a bounded tunnel along that side: a pair at a time - feet and head - stepping in and asking again after each;
+        //  three at most, so a thick wall is got through and nothing longer is ever bored through the build; audit)
+        let at = { x: f0.x, y: f0.y, z: f0.z }
+        for (let n = 0; n < 3; n++) {
+          const p0 = { x: at.x + sd.dx, y: at.y, z: at.z + sd.dz }
+          if (!ours(p0.x, p0.y, p0.z) || !ours(p0.x, p0.y + 1, p0.z)) break
+          for (const dy of [1, 0]) {
+            const b = world.at(bot, p0.x, p0.y + dy, p0.z)
+            if (b && !world.isAirish(b)) { log('move', `enclosed: taking our own ${b.name} at ${fmt({ x: p0.x, y: p0.y + dy, z: p0.z })}`); await act.dig(bot, { x: p0.x, y: p0.y + dy, z: p0.z }, { own: true, force: true, noWalk: true, allowZones: ['build', 'base'], timeoutMs: 8000 }).catch(() => false) }
+          }
+          await act.collectDrops(bot, { radius: 4, maxMs: 3000 }).catch(() => {}) // (a door dug comes back whole: the builder re-places it)
+          if (!safe(p0.x, p0.y, p0.z)) { log('move', `enclosed: the cell opened at ${fmt(p0)} stands over a drop - not stepping in`); break } // (room, and a drop a fall does not hurt)
+          await goTo(bot, new goals.GoalBlock(p0.x, p0.y, p0.z), { timeoutMs: 6000, stuckMs: 3000, dig: false, place: false, label: 'out through our wall' }).catch(() => null)
+          at = bot.entity.position.floored()
+          if (build.wayOut(bot, { x: NaN, y: NaN, z: NaN }, null, false)) { log('move', `enclosed: a way out from ${fmt(at)}`); break }
         }
         giveUps.delete(fmt(f0))
         return true
