@@ -529,6 +529,7 @@ const craftMemo = new Map() // item -> { at, ok }: craftable from stock, judged 
 // miscounted is never buried for that (operator: "i dont want this to ruin a build"). Its own column waits over it
 // (sealsBelow), open, for the item. (item -> the day)
 const coverMiss = new Map()
+const waitCols = new Map() // (x,z -> lowest open waiting hole: detachedItems)
 function noteCoverMiss (bot, anchor, holding) {
   if (!anchor) return
   const it = stepItem(bot, anchor)
@@ -575,6 +576,20 @@ function detachedItems (todo, bot) {
     else if (detached.has(it) && k >= Math.min(low[it].n, 64)) detached.delete(it)
   }
   for (const it of [...detached]) if (!low[it]) detached.delete(it) // (none of it left to place)
+  // THE WAITING COLUMNS: x,z -> the lowest hole kept open for its item (out of stock, or the wait above) with nothing placed
+  // over it yet. Every cell above it in that column anchors no band - it cannot go in until the hole does (one step-end
+  // miss a level was the old drip); one lookup a cell in anchorable (audit)
+  waitCols.clear()
+  const td = today(bot)
+  for (const c of todo) {
+    if (c.clear || c.attach) continue
+    const it = stepItem(bot, c)
+    if (!detached.has(it) && coverMiss.get(it) !== td) continue
+    const up = job && job.index.get(key({ x: c.x, y: c.y + 1, z: c.z }))
+    if (up && cellDone(bot, up) === true) continue // (covered already: the column is not waiting on it)
+    const k = c.x + ',' + c.z; const w = waitCols.get(k)
+    if (w == null || c.y < w) waitCols.set(k, c.y)
+  }
   return detached
 }
 // A cell the band may anchor on: THE one predicate - lowestStructural's minimum, the step's anchor and whether a waited-on
@@ -589,7 +604,7 @@ function anchorable (bot, c, det) {
   if (coverMiss.get(stepItem(bot, c)) === today(bot)) return false // (a wait with nothing to wait for: it holds no band - coverMiss)
   // (nor a cell standing on a hole kept open for its item - out of stock, or the wait above: it cannot go in until that
   //  does, and freed one step-end miss at a time, a layer of them was "4,156 in hand, nothing doable"; 2026-09-29)
-  if (job) { const b = job.index.get(key({ x: c.x, y: c.y - 1, z: c.z })); if (b && !b.clear) { const bi = stepItem(bot, b); if (((det && det.has(bi)) || coverMiss.get(bi) === today(bot)) && cellDone(bot, b) !== true) return false } } // (the cheap test first: this runs for every cell of the todo)
+  { const w = waitCols.get(c.x + ',' + c.z); if (w != null && c.y > w) return false } // (the column over a waiting hole: detachedItems)
   return !(det && (det.has(stepItem(bot, c)) || fallsIn(bot, c, stepItem(bot, c))))
 }
 function lowestStructural (todo, bot, det = bot ? detachedItems(todo, bot) : null) {
@@ -1274,7 +1289,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       { const wb = world.at(bot, b.x, b.y, b.z); if (wb && world.isSolid(wb)) { noteToSwap(b, wb.name); return false } }
       // (never a deadlock: a cell with no route to its item, or one that has already rested once, is covered - else a whole
       //  floor waits for ever on a hay block no trip can bring; audit 2026-09-28)
-      if (cellUnsourced(b)) { if (!sealSaid.has(key(b))) { sealSaid.add(key(b)); log('build', `covering ${b.name} at ${move.fmt(b)} - no route for it`) } return false }
+      if (cellUnsourced(b)) { if (!sealSaid.has(key(b))) { sealSaid.add(key(b)); log('build', `covering ${b.name} at ${move.fmt(b)} - no route for it`) } noteToSwap(b, 'air'); return false } // (covered AND listed: a route may appear - one reopen for all; audit)
       // (and one whose item is out of stock - detached: the band's cells in hand waited on the decorative cells under them,
       //  one anchor freed a step, 4,156 blocks in hand and nothing doable, 2026-09-29. Covered; on the swap list for when
       //  the item comes - the endgame reopens it from above)
