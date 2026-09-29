@@ -1432,6 +1432,15 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     doable = doable.filter(c => { if (!c.pour) return true; const b = world.at(bot, c.x, c.y - 1, c.z); return !!b && !world.isAirish(b) }) // (anything but air under it: ground, a slab, the pool's own water below)
     waiting = missingItem()
     waitingHolds = !!waiting && !!waitingCell && anchors(waitingCell)
+    // (EVERY anchor in hand that is never doable - the cell under it waits - takes its miss at the step's end, not only the
+    //  first: one a step, the band rose one cell a step - "andesite_wall ... anchors the band but is never doable" ending
+    //  step after step with 4,480 in hand, 2026-09-29; audit. Shared where the cell under it waits: nothing seals it)
+    const missAnchors = () => {
+      const dk = new Set(doable.map(key)); let n = 0; let first = null
+      for (const a of todo) { if (n >= 200) break; if (anchors(a) && has(a) && !dk.has(key(a)) && !holdBack.has(key(a))) { anchorMiss(a); if (!first) first = a; n++ } }
+      if (n) { saveCellFails(); log('build', `${n} cell${n > 1 ? 's' : ''} anchoring the band ${n > 1 ? 'are' : 'is'} never doable (the cell under ${n > 1 ? 'each' : 'it'} waits) - misses: the band rises past ${n > 1 ? 'them' : 'it'} (${first.name} at ${move.fmt(first)} first)`) }
+      return n
+    }
     if (!doable.length) {
       // (the band as it ended the step - which layer anchors it, and by which cell: a step that ends "waiting on X" after
       //  a few blocks said nothing of what held the band down, 2026-09-28)
@@ -1439,7 +1448,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       noteCoverMiss(bot, anchor, anchor && has(anchor))
       // (an anchor IN HAND but never doable - the cell under it waits - is a miss here too; one NOT in hand is the supply's
       //  wait, which steers the gathering, and is left to hold; audit)
-      if (anchor && has(anchor) && !holdBack.has(key(anchor))) { anchorMiss(anchor); saveCellFails(); log('build', `${anchor.name} at ${move.fmt(anchor)} anchors the band but is never doable (the cell under it waits) - a miss: the band rises past it`) }
+      missAnchors()
       if (placed) log('build', `step ended: band anchored at y${lowestAll}${anchor ? ' by ' + stepItem(bot, anchor) + '@' + anchor.x + ',' + anchor.y + ',' + anchor.z + (has(anchor) ? ' (in hand)' : ' (not in hand)') : ''}, ${structural.length} structural in hand (min y${minY}), ${todo.length} todo`)
       profLog(); if (!placed) log('build', `nothing doable: lowest structural y${lowestAll}, ${todo.length} todo, ${structural.length} structural in hand (min y${minY}), ${attached.length} attached ready, ${waitingHolds ? 'waiting on ' + waiting : (waiting ? waiting + ' missing (detached - holding nothing)' : 'waiting on nothing')}`); return { placed, blockedOn: waiting, blockedHolds: waitingHolds, done: false } }
     const me = bot.entity.position
@@ -1462,7 +1471,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       for (const c of doable) if (!holdBack.has(key(c))) failed.set(key(c), (failed.get(key(c)) || 0) + 1)
       // (and the ANCHOR itself when it was never even doable - kept out by the cell under it: a stair over a coarse-dirt
       //  cell of grass, coarse dirt out of stock, anchored the band while nothing was ever tried; audit)
-      if (anchor && has(anchor) && !doable.includes(anchor) && !holdBack.has(key(anchor))) { anchorMiss(anchor); log('build', `${anchor.name} at ${move.fmt(anchor)} anchors the band but is never doable (the cell under it waits) - a miss: the band rises past it`) }
+      missAnchors()
       // (and a log's axis relaxes on these misses too: that rule lived in the try, and a log never tried - a z-axis oak log
       //  between two unplaced z-axis logs - anchored the band round after round, 2026-09-29)
       for (const c of doable) if (c.want && c.want.axis && !axisRelaxed(c) && failsOf(c) >= 3 && !(cellFails.get(key(c)) || {}).shared) { relaxAxis(c); log('build', `${c.name} at ${move.fmt(c)} goes in with any axis (never ready with its own)`) }
