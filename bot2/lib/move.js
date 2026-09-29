@@ -742,7 +742,7 @@ async function escapeUpInner (bot) {
       const bk = b ? `${b.position.x},${b.position.y},${b.position.z}` : ''
       const holdsUp = !!(b && j && j.cells.some(c => c.sup && `${c.sup.x},${c.sup.y},${c.sup.z}` === bk))
       const ours = !!(b && under && !holdsUp && j.index && j.index.has(bk))
-      if (ours) log('move', `climbing out: taking our own ${b.name} over my head at ${bk} - the builder puts it back`)
+      if (ours && !world.isAirish(b)) log('move', `climbing out: taking our own ${b.name} over my head at ${bk} - the builder puts it back`)
       if (b && !world.isAirish(b) && !world.isWaterBlock(b) && !await act.dig(bot, b.position, { own: ours, force: ours, allowZones: ['farm', 'base', 'orchard', 'build'], timeoutMs: 8000, noWalk: true })) { log('move', `climbing out: can't clear ${b.name} over my head at ${fmt(b.position)}`); return false }
     }
     if (await gather.towerUp(bot, { allowZones: ['*'] })) continue // (an escape: any zone, never a build cell)
