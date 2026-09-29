@@ -1436,9 +1436,18 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     //  first: one a step, the band rose one cell a step - "andesite_wall ... anchors the band but is never doable" ending
     //  step after step with 4,480 in hand, 2026-09-29; audit. Shared where the cell under it waits: nothing seals it)
     const missAnchors = () => {
-      const dk = new Set(doable.map(key)); let n = 0; let first = null
-      for (const a of todo) { if (n >= 200) break; if (anchors(a) && has(a) && !dk.has(key(a)) && !holdBack.has(key(a))) { anchorMiss(a); if (!first) first = a; n++ } }
-      if (n) { saveCellFails(); log('build', `${n} cell${n > 1 ? 's' : ''} anchoring the band ${n > 1 ? 'are' : 'is'} never doable (the cell under ${n > 1 ? 'each' : 'it'} waits) - misses: the band rises past ${n > 1 ? 'them' : 'it'} (${first.name} at ${move.fmt(first)} first)`) }
+      // (ALWAYS shared: an anchor never doable was never TRIED - kept out by the cell under it, a hole's last face, a pour, or
+      //  no face yet (a neighbour not placed). An own miss is the licence to cover a cell - earned only by placeCell's
+      //  refusals; a burst of them over untried cells would be a burial by the hundred; audit)
+      const dk = new Set(doable.map(key)); let n = 0; const why = {}
+      for (const a of todo) {
+        if (n >= 200) break
+        if (!anchors(a) || !has(a) || dk.has(key(a)) || holdBack.has(key(a))) continue
+        const r = holdAround.has(key(a)) ? 'the last face of a hole' : sealsBelow(a) ? 'the cell under it waits' : a.pour ? 'a pour over air' : 'not ready (no face or support yet)'
+        cellFails.set(key(a), { n: failed.get(key(a)) + 1, at: Date.now(), shared: true }); n++
+        if (!why[r]) why[r] = { n: 0, first: a }; why[r].n++
+      }
+      if (n) { saveCellFails(); log('build', `${n} cell${n > 1 ? 's' : ''} anchoring the band never doable - shared misses, the band rises past: ${Object.entries(why).map(([r, e]) => `${r} x${e.n} (${e.first.name} at ${move.fmt(e.first)})`).join(', ')}`) }
       return n
     }
     if (!doable.length) {
