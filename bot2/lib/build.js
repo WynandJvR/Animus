@@ -1440,6 +1440,10 @@ function wallsMeIn (bot, c, from = null) {
 }
 // A walk from `from` (the feet) reaches a way out of the footprint - a column outside it, or open sky over a cell not the
 // build's own - with the cell counted solid (withC) or not. Outside the footprint: out already.
+// wayOutPoint: where the walk found its way out - a cell outside the footprint, or the cell under open sky a tower rises
+// from (the planner never plans that tower: escapeUp walks here first and climbs; audit 2026-09-29)
+let lastExit = null
+function wayOutPoint (bot, from = null) { lastExit = null; return wayOut(bot, { x: NaN, y: NaN, z: NaN }, from, false) ? lastExit : null }
 function wayOut (bot, c, from = null, withC = true) {
   if (!job) return true
   const b0 = job.box; const f = from ? { x: from.x, y: from.y, z: from.z } : world.feetPos(bot)
@@ -1456,8 +1460,8 @@ function wayOut (bot, c, from = null, withC = true) {
     while (q.length) {
       if (seen.size > 300) return true // (a region this big is no trap)
       const p = q.shift()
-      if (!inBox(p)) return true
-      if (!job.index.has(key(p)) && world.openSky(bot, p) && !isC(p.x, p.y, p.z)) { let clear = true; for (let y = p.y + 2; y < p.y + 22; y++) if (isC(p.x, y, p.z)) clear = false; if (clear) return true }
+      if (!inBox(p)) { lastExit = p; return true }
+      if (!job.index.has(key(p)) && world.openSky(bot, p) && !isC(p.x, p.y, p.z)) { let clear = true; for (let y = p.y + 2; y < p.y + 22; y++) if (isC(p.x, y, p.z)) clear = false; if (clear) { lastExit = p; return true } }
       for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
         const x = p.x + dx; const z = p.z + dz
         for (let dy = 1; dy >= -world.SAFE_DROP; dy--) {
@@ -1970,7 +1974,7 @@ async function ensureScaffold (bot, n = SCAFFOLD_WANT, { shouldStop } = {}) { //
   return true
 }
 
-module.exports = { wayOut, FILLER_ITEMS, SCAFFOLD_WANT, cachedStatus, exactWood, isOpenCell, INFILL_RE, infillItem, unsourced, strayBuildBlocks,
+module.exports = { wayOut, wayOutPoint, FILLER_ITEMS, SCAFFOLD_WANT, cachedStatus, exactWood, isOpenCell, INFILL_RE, infillItem, unsourced, strayBuildBlocks,
   finishSite, woodClass, woodForm, acceptsFor, itemOf, LOG_ANY, PLANKS_ANY, ensureScaffold, unskippedObstructions, setJob, getJob, status, nextNeeds,
   buildStep, clearSite, obstructions, removeScaffold, siteScaffoldTeardown, loadSchematic, cellDone, cellsDone, inBox, placeCell, registerJob, key,
   complete, needsWork, finish, survey, scaffoldList, holesList, ensureSnapshot, snapshotInfo, snapName,

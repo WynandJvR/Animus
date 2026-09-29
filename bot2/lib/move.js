@@ -730,6 +730,19 @@ async function escapeUpInner (bot) {
       if (r.ok) { giveUps.delete(fmt(f0)); log('move', `stuck at ${fmt(f0)} - stepped aside to ${fmt(c)}`); return true }
     }
   }
+  // (below the build's floor inside its footprint: to the way out first - a column outside, or the open-sky cell a tower
+  //  rises from - then the climb. Climbing where it stood, under a floor or in a foundation cell it may not tower in, ended
+  //  "no way up" in the closed south-west pocket, 2026-09-29; audit)
+  {
+    const build = require('./build'); const jb = build.getJob(); const bb = jb && jb.box
+    if (bb && f0.x >= bb.x1 && f0.x <= bb.x2 && f0.z >= bb.z1 && f0.z <= bb.z2 && f0.y < bb.y1) {
+      const ex = build.wayOutPoint(bot)
+      if (ex && (ex.x !== f0.x || ex.z !== f0.z)) {
+        log('move', `below the build's floor at ${fmt(f0)} - to the way out at ${fmt(ex)} first`)
+        await goTo(bot, new goals.GoalBlock(ex.x, ex.y, ex.z), { timeoutMs: 20000, stuckMs: 6000, dig: false, place: false, label: 'to the way out' }).catch(() => null)
+      }
+    }
+  }
   log('move', `stuck at ${fmt(f0)} walk after walk - climbing straight out`)
   for (let i = 0; i < 16; i++) {
     const f = bot.entity.position.floored()
