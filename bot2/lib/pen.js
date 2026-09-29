@@ -14,6 +14,7 @@
 // Counted only from close by (SEE): farther off the server may not send the penned sheep, and an unseen pen is not an
 // empty one - the last count seen is kept in memory (pen.seen).
 const { goals } = require('mineflayer-pathfinder')
+const { Vec3 } = require('vec3')
 const world = require('./world')
 const inv = require('./inventory')
 const move = require('./move')
@@ -169,6 +170,8 @@ function work (bot, { woolWanted = 0, wheat = 0 } = {}) {
   if (!p) return woolWanted > 0 && wheat >= STOCK_MIN ? { kind: 'build', why: `${woolWanted} wool wanted and no sheep pen - building one by home` } : null
   const gap = missing(bot, p)
   if (gap.length) return { kind: 'build', why: `the sheep pen's fence has ${gap.length} gap${gap.length > 1 ? 's' : ''}` }
+  // an open gate, whoever opened it: shut before the flock walks out (audit)
+  if (gateOpen(bot, p) && !inPen(bot.entity.position, p)) return { kind: 'gate', why: 'the sheep pen gate stands open' }
   const seen = observe(bot) || { n: 0 }
   if (seen.n < STOCK_MIN && wheat >= 1 && wildKnown(bot)) return { kind: 'stock', why: `${seen.n} sheep in the pen - leading more in with wheat` }
   const list = sheepIn(bot, p)
@@ -178,6 +181,12 @@ function work (bot, { woolWanted = 0, wheat = 0 } = {}) {
 }
 
 // ---- the gate ------------------------------------------------------------------------------------
+// The gate's state as the world has it (null: not loaded or not a gate)
+function gateOpen (bot, p = pen()) {
+  const b = p && world.at(bot, p.gate.x, p.gate.y, p.gate.z)
+  if (!b || !GATE_RE.test(b.name)) return null
+  try { return String(b.getProperties().open) === 'true' } catch { return null }
+}
 async function setGate (bot, open) {
   const p = pen()
   const ok = b => GATE_RE.test(b.name) && (() => { try { return String(b.getProperties().open) === String(open) } catch { return false } })()
@@ -200,12 +209,24 @@ async function enter (bot) {
 async function leave (bot) {
   const p = pen()
   if (bot.heldItem && bot.heldItem.name === 'wheat') await bot.unequip('hand').catch(() => {})
-  if (!inPen(bot.entity.position, p)) return true
+  // (outside already - a lead that failed before the bot was in, a stop on the way: the gate it opened is shut all the
+  //  same; left open, the flock walked out after it; audit)
+  if (!inPen(bot.entity.position, p)) { if (gateOpen(bot, p)) await shutGate(bot); return true }
   await walk(bot, innerStep(p), 'to the pen gate', 10000)
   await setGate(bot, true)
   const r = await walk(bot, outerStep(p), 'out of the pen', 8000)
   await setGate(bot, false)
   return r.ok
+}
+// Shut an open gate from whichever side we are on - whoever opened it: our own walk (the planner opens fence gates and
+// never shuts them), a failed lead, a player. One rule, work()'s first rung (audit)
+async function shutGate (bot) {
+  const p = pen()
+  if (!gateOpen(bot, p)) return true
+  if (!act.reach(bot, new Vec3(p.gate.x, p.gate.y, p.gate.z), 4.3)) await walk(bot, inPen(bot.entity.position, p) ? innerStep(p) : outerStep(p), 'to the open pen gate', 20000)
+  const ok = await setGate(bot, false)
+  if (ok) log('pen', 'shut the pen gate')
+  return ok
 }
 async function haveWheat (bot, n) {
   if (inv.count(bot, 'wheat') < n) await base().withdraw(bot, 'wheat', Math.max(n, Math.min(16, n + 4)) - inv.count(bot, 'wheat')).catch(() => 0)
@@ -308,11 +329,12 @@ async function stock (bot, { shouldStop } = {}) {
   while (world.dist2(bot.entity.position, out) > 1.5 && Date.now() < deadline && !stop()) {
     await reflex.waitClear()
     if (!followers.size) break
-    let path = []
-    try { const r = bot.pathfinder.getPathTo(move.movementsFor(bot, { dig: false, place: false }), new goals.GoalNear(out.x, out.y, out.z, 1), 500); path = (r && r.path) || [] } catch {}
-    const node = path.length ? path[Math.min(path.length - 1, 5)] : out
+    // (a leg: 6 blocks along the line to the gate, planned by goTo as any walk is - a synchronous path search here held the
+    //  event loop up to 500ms a leg, the reflexes with it, out in the open; audit - body first)
+    const me = bot.entity.position; const dx = out.x + 0.5 - me.x; const dz = out.z + 0.5 - me.z; const d = Math.hypot(dx, dz)
+    const node = d <= 6 ? out : { x: Math.floor(me.x + dx * 6 / d), z: Math.floor(me.z + dz * 6 / d) }
     await wheatInHand(bot, 1)
-    const r = await move.goTo(bot, new goals.GoalNear(node.x, node.y, node.z, 1), { timeoutMs: 10000, stuckMs: 5000, dig: false, place: false, label: 'leading sheep' })
+    const r = await move.goTo(bot, new goals.GoalNearXZ(node.x, node.z, 1), { timeoutMs: 10000, stuckMs: 5000, dig: false, place: false, label: 'leading sheep' })
     if (!r.ok && ++legs > 6) break
     await waitUp(4, 8000)
   }
@@ -412,6 +434,7 @@ async function shear (bot, { shouldStop } = {}) {
 async function run (bot, kind, opts = {}) {
   if (kind === 'build') return build(bot, opts)
   if (kind === 'stock') return stock(bot, opts)
+  if (kind === 'gate') return shutGate(bot)
   if (kind === 'breed') return breed(bot, opts)
   return false
 }
