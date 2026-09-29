@@ -32,6 +32,9 @@ while true; do
   sk=$(recent 10 | cut -c32- | grep -av "(op) \|(body)\|(vital)" | sed -E 's/-?[0-9]+(\.[0-9]+)?/#/g' | sort | uniq -c | sort -rn | awk '$1>=60 {print; exit}')
   [ -n "$sk" ] && { echo "ALARM: log loop (any cell): $sk"; exit 0; }
   # a throw in the pathfinder's tick (caught: one path reset - patch-mc262.js) or an uncaught crash: the body's faults
+  # a gate the path opens refusing its click at one spot, 5+ times in 2 min: the stuck retry (move.js path_use_error)
+  pu=$(recent 2 | grep -aoE "path_use_error at [-0-9]+,[-0-9]+,[-0-9]+" | sort | uniq -c | sort -rn | awk '$1>=5 {print; exit}')
+  [ -n "$pu" ] && { echo "ALARM: stuck gate retry: $pu"; exit 0; }
   pe=$(recent 10 | grep -ac "path_error #\|(crash) uncaught")
   [ "$pe" -ge 1 ] && { echo "ALARM: $pe path_error/crash lines in 10 min"; recent 10 | grep -a "path_error #\|(crash) uncaught" | cut -c2-200 | tail -3; exit 0; }
   # (handwork stopped because its click did nothing - /state buildProgress.stoppedWork - for over 10 min)

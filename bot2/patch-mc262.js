@@ -72,6 +72,9 @@ const EDITS = [
   // ...and ANY throw in the pathfinder's tick costs a path reset, never the reflexes: it is a physicsTick listener attached
   // before bot2's, and a listener that throws ends the emit - the edge guard, the creeper hold, air, fight and eat never
   // ran for the two minutes above (audit). bot2 counts 'path_error' (move.js)
+  // (a gate or door the path opens refused the click: upstream said it only on the console - retried every tick, the body
+  //  stopped, unseen. bot2 logs 'path_use_error' and the watchdog alarms on a streak at one spot; audit)
+  ['mineflayer-pathfinder/index.js', "          console.error(err)\n", "          bot.emit('path_use_error', { pos: placingBlock ? { x: placingBlock.x, y: placingBlock.y, z: placingBlock.z } : null, err })\n"],
   ['mineflayer-pathfinder/index.js', "  function monitorMovement () {\n", "  function monitorMovement () { try { monitorMovement0() } catch (e) { try { resetPath('path_error') } catch {} bot.emit('path_error', e) } } // (bot2: a throw is one reset)\n  function monitorMovement0 () {\n"]
 ]
 function patchGates () {

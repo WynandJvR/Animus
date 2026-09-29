@@ -19,6 +19,10 @@ function bindBot (b) {
   botRef = b
   try { b.on('path_reset', () => { pathGen++ }) } catch {}
   try { b.on('path_error', e => { pathErrors++; if (Date.now() - pathErrSaid > 10000) { pathErrSaid = Date.now(); require('./log').log('move', `path_error #${pathErrors}: ${e && e.message} ${((e && e.stack) || '').split(/\r?\n/)[1] || ''} - the path was reset`) } }) } catch {}
+  // (a gate or door on the path refused its click - innocent once; a streak at one spot is the stuck retry the watchdog
+  //  alarms on: "path_use_error at x,y,z")
+  let useSaid = 0
+  try { b.on('path_use_error', ({ pos, err } = {}) => { if (Date.now() - useSaid > 5000) { useSaid = Date.now(); const bk = pos && b.blockAt && b.blockAt(new (require('vec3').Vec3)(pos.x, pos.y, pos.z)); require('./log').log('move', `path_use_error at ${pos ? pos.x + ',' + pos.y + ',' + pos.z : '?'} (${bk ? bk.name : '?'}): ${err && err.message}`) } }) } catch {}
 }
 function reflexActive () { return reflexRef ? reflexRef.active() : null }
 
