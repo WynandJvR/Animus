@@ -110,7 +110,7 @@ let doorIds = null
 //            100 cut-off). On by default: at weight 40 the walk home from a clay bank still took the line under the
 //            river, the air reflex took the body, and at night the bot drowned there (2026-09-22). A walk that must
 //            dive says so (false) - none does today.
-function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint = true, dryHead = true, placeCost = 10 } = {}) {
+function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint = true, dryHead = true, placeCost = 10, edgeCost = 0 } = {}) {
   // (the drop under a cell, once per plan: the step callbacks asked ~100 uncached blockAt per expanded node - audit #24)
   const drops = new Map(); let dropGen = pathGen
   const dropAt = (x, y, z, lim) => { if (dropGen !== pathGen || drops.size > 20000) { drops.clear(); dropGen = pathGen } const key = x + ',' + y + ',' + z + ',' + (lim || ''); let v = drops.get(key); if (v === undefined) { v = world.dropAt(bot, x, y, z, lim); drops.set(key, v) } return v }
@@ -275,7 +275,9 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
     const p = block.position
     let sides = 0
     for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) if (dropAt(p.x + dx, p.y, p.z + dz, world.SAFE_DROP + 1) > world.SAFE_DROP) sides++
-    return sides >= 2 ? 30 : 0
+    // (edgeCost: a drop that hurts on ONE side - a wall top's outer face - a little dearer on the site's walks, so a top with
+    //  a safe side is stood on from it; a preference, never a refusal; audit 2026-09-29)
+    return sides >= 2 ? 30 : sides === 1 ? edgeCost : 0
   })
   // Never under the build: inside its footprint below its base the plaza overhangs the mountainside, a dark hollow
   // full of mobs - walks to the site routed through it, and a creeper there took the iron set with it (the blast
