@@ -587,10 +587,16 @@ async function craftNode (bot, node, n, per, { shouldStop, keep = {} } = {}) {
 // The raw shortfall to go after next. The window's own shortfall first (what the builder is blocked on at the
 // head of it); when the window is supplied - or only waiting on the furnaces - the raw with the largest
 // remaining cost (shortfall x seconds per unit) for the whole build: the long pole gets the spare daylight.
-function pickRaw (winRaw, totRaw, { blockedRaw = null, feasible = () => true } = {}) {
+// (`perCell`: raw -> the cheapest cost of ONE cell of the window's that needs it. After the band's own bottleneck, the next
+//  layers' raws go cheapest-cell first - many blocks for a little gathering - and the long chains last: the bookshelves'
+//  books (sugar cane, leather: ~30 a cell) waited behind nothing, the "longest pole" sending the day after the cows
+//  while a wall's stone was a trip away. Gathering is one trip at a time: the total is the same, the blocks come sooner,
+//  and a chain that proves impossible is found with the rest built; operator 2026-09-29)
+function pickRaw (winRaw, totRaw, { blockedRaw = null, feasible = () => true, perCell = null } = {}) {
   const cost = r => (totRaw[r] || winRaw[r] || 0) * rawCost(r)
-  const cands = (list, first) => Object.keys(list).filter(r => list[r] > 0 && feasible(r)).sort((a, b) => (first ? (b === first) - (a === first) : 0) || cost(b) - cost(a))
-  const w = cands(winRaw, blockedRaw)
+  const per = r => (perCell && perCell[r] != null ? perCell[r] : Infinity)
+  const cands = (list, first, byCell) => Object.keys(list).filter(r => list[r] > 0 && feasible(r)).sort((a, b) => (first ? (b === first) - (a === first) : 0) || (byCell ? per(a) - per(b) : 0) || cost(b) - cost(a))
+  const w = cands(winRaw, blockedRaw, true)
   if (w.length) return { raw: w[0], short: winRaw[w[0]], why: 'the next layers' }
   const t = cands(totRaw)
   if (t.length) return { raw: t[0], short: totRaw[t[0]], why: 'look-ahead (the longest pole of the whole build)' }

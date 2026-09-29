@@ -1125,7 +1125,7 @@ async function processAtHome () {
   const win = mats.planFor(bot, winNeeds)
   let tot = mats.planFor(bot, st.need)
   demandTrees = treesFor(tot)
-  demandWool = tot.raw.wool || 0
+  demandWool = tot.raw.white_wool || 0 // (the sheep's white: every coloured wool is dyed from it - materials PREFER)
   if (tot.unknown.length) log('dir', `no route known for ${tot.unknown.join(', ')} - gathering them as they are`)
   // furnaces for the volume, counted around HOME (counted around the bot at the site it found too few and
   // built six more)
@@ -1337,7 +1337,18 @@ async function castleWorkInner () {
   // (only when what the builder waits on is smelted - or it waits on nothing: blocked on plain cobblestone, "fuel
   //  first" sent every day to cut logs for charcoal while the walls stood still for want of stone, 2026-09-26)
   const fuelBound = (!blockedOn || chain.includes('fuel')) && (win.raw.fuel || tot.raw.fuel || 0) > 0 && win.smelts.concat(tot.smelts).some(sm => sm.input && sm.input !== '#log' && mats.stock(bot, sm.input) > 0)
-  const pick = mats.pickRaw(fuelBound && !win.raw.fuel ? Object.assign({ fuel: tot.raw.fuel }, win.raw) : win.raw, tot.raw, { blockedRaw: fuelBound ? 'fuel' : blockedRaw, feasible })
+  // (the cost of ONE cell for each item of the next layers not covered by stock, per raw the cheapest: pickRaw's order after
+  //  the band's own bottleneck - cheapest cells first, the bookshelves' long chain last; a plan an item, yielded between)
+  const perCell = {}
+  { let i = 0; for (const item of Object.keys(next)) {
+    if (++i % 10 === 0) await new Promise(r => setImmediate(r))
+    let r; try { r = mats.planFor(bot, { [item]: 1 }) } catch { continue }
+    const raws = Object.entries(r.raw || {}).filter(([, v]) => v > 0)
+    if (!raws.length) continue
+    const c = raws.reduce((a, [k, v]) => a + v * mats.rawCost(k), 0)
+    for (const [k] of raws) perCell[k] = Math.min(perCell[k] != null ? perCell[k] : Infinity, c)
+  } }
+  const pick = mats.pickRaw(fuelBound && !win.raw.fuel ? Object.assign({ fuel: tot.raw.fuel }, win.raw) : win.raw, tot.raw, { blockedRaw: fuelBound ? 'fuel' : blockedRaw, feasible, perCell })
   if (!pick) {
     buildFocus = { at: Date.now(), gathering: null, builderWaitsOn: blockedOn || null, waitingOnFurnaces: win.smelts.map(s => s.n + ' ' + s.output), shortInAll: Object.fromEntries(Object.entries(tot.raw).sort((a, b) => b[1] - a[1]).slice(0, 8)) }
     const waiting = win.smelts.length ? `the furnaces (${win.smelts.map(s => s.n + ' ' + s.output).join(', ')})` : 'nothing'
