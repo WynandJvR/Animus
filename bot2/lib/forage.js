@@ -475,9 +475,17 @@ async function fillTrip (bot, n, ctx = {}) {
   return filled > 0
 }
 async function fillBucket (bot, ctx) {
-  const w = (await world.scanBlocks(bot, /^water$/, { maxDistance: world.sightReach(bot), count: 20, filter: b => Number(props(b).level || 0) === 0 && gather().outOfZones(b) && world.isAirish(world.at(bot, b.position.x, b.position.y + 1, b.position.z)) && world.openSky(bot, { x: b.position.x, y: b.position.y + 1, z: b.position.z }) })) // (open sky only: the flooded shaft in the mine meant a 17-19 block dive and a swim up enclosed water - the geometry of the 03:54 drowning; audit)
+  const scan = async () => (await world.scanBlocks(bot, /^water$/, { maxDistance: world.sightReach(bot), count: 20, filter: b => Number(props(b).level || 0) === 0 && gather().outOfZones(b) && world.isAirish(world.at(bot, b.position.x, b.position.y + 1, b.position.z)) && world.openSky(bot, { x: b.position.x, y: b.position.y + 1, z: b.position.z }) })) // (open sky only: the flooded shaft in the mine meant a 17-19 block dive and a swim up enclosed water - the geometry of the 03:54 drowning; audit)
     .sort((a, b) => world.dist3(a.position, bot.entity.position) - world.dist3(b.position, bot.entity.position))[0]
+  let w = await scan()
+  // (none in sight - the trip began at the mine's mouth: the nearest REMEMBERED open water, then look again - the lava's and
+  //  the trees' way; the band waited on water_bucket for want of it; audit)
+  if (!w) {
+    const k = gather().knownResource('open_water', bot.entity.position)
+    if (k) { log('forage', `no open water in sight - to the one I know at ${move.fmt(k)}`); await move.travel(bot, k, { range: 6, label: 'to open water', maxMs: 120000, shouldStop: ctx.shouldStop }).catch(() => null); w = await scan() }
+  }
   if (!w) { log('forage', 'no still water in sight to fill a bucket at'); return false }
+  gather().noteResource('open_water', w.position)
   const g = await move.goTo(bot, new goals.GoalNear(w.position.x, w.position.y + 1, w.position.z, 2), { timeoutMs: 40000, label: 'to water' })
   if (!g.ok && !act.reach(bot, w.position, 4)) return false
   // (act.fill: the one bucket fill, true only when the pack holds the water)
@@ -698,7 +706,7 @@ async function harden (bot, node, n, { shouldStop } = {}) {
   const found = (await world.scanBlocks(bot, /^water$/, { maxDistance: world.sightReach(bot), count: 60, filter: b => !!shoreAt(bot, b) }))
     .sort((a, b) => world.dist3(a.position, h) - world.dist3(b.position, h))[0]
   if (!found) { noteTrip('water', 0, 'no still shallow water by a shore in sight', { searched: true }); return 0 }
-  noteTrip('water', 1)
+  noteTrip('water', 1); gather().noteResource('open_water', found.position) // (a shore's water is open water: remembered for the bucket fills)
   const w = shoreAt(bot, found)
   const cell = w.water
   if (world.dist3(bot.entity.position, cell) > 5) {
