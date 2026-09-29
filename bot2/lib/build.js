@@ -593,6 +593,7 @@ function detachedItems (todo, bot) {
   // over it yet. Every cell above it in that column anchors no band - it cannot go in until the hole does (one step-end
   // miss a level was the old drip); one lookup a cell in anchorable (audit)
   waitCols.clear(); holdAround.clear(); holeFaces.clear()
+  const holes = []
   const td = today(bot)
   const openAt = (x, y, z) => { const w = world.at(bot, x, y, z); return !!w && !world.isSolid(w) }
   for (const c of todo) {
@@ -601,6 +602,7 @@ function detachedItems (todo, bot) {
     if (!detached.has(it) && coverMiss.get(it) !== td) continue
     // (the hole's faces open now; the one that would close the last is held - placed later, when the hole is filled)
     if (cellDone(bot, c) !== true) {
+      holes.push(c)
       const open = FACES.map(([dx, dy, dz]) => ({ x: c.x + dx, y: c.y + dy, z: c.z + dz })).filter(f => openAt(f.x, f.y, f.z))
       if (open.length === 1) { const f = open[0]; const fc = job && job.index.get(key(f)); if (fc && !fc.clear) holdAround.add(key(f)); else holeFaces.add(key(f)) }
     }
@@ -608,6 +610,41 @@ function detachedItems (todo, bot) {
     if (up && cellDone(bot, up) === true) continue // (covered already: the column is not waiting on it)
     const k = c.x + ',' + c.z; const w = waitCols.get(k)
     if (w == null || c.y < w) waitCols.set(k, c.y)
+  }
+  // NO POCKETS: a hole's "open face" must be a way OUT, not the next unbuilt cell of the same layer. The connected air of
+  // the waiting holes and the unbuilt cells round them, in their layer, is open only where it meets air outside the build
+  // with head room, or sky; a pocket's cells above are held - capped, the layer between two built ones was a one-high
+  // void, and the bot walked in at its one open column and gave up eleven times (2026-09-29; audit). Bounded, once a pass
+  // (openings COUNTED, as holdAround counts faces: a yes/no "out" stayed true while the build capped the pocket's columns
+  //  one a pass, and read false only once the last was capped - too late; audit. An opening is 2-high for the body: a
+  //  member with open sky (its cap is air, and the air over it), or a side exit outside the build with head room. One
+  //  the build can never close - no cell of it there - counts as always open. One closable opening left: the cell that
+  //  would close it is held. None: already sealed - the escape's case. Two or more: one placement a pass closes one)
+  const seenP = new Set()
+  for (const h of holes) {
+    if (seenP.has(key(h))) continue
+    const comp = []; const q = [h]; seenP.add(key(h))
+    const opens = new Map() // opening -> the job cell that would close it, or null (never closable)
+    while (q.length && comp.length < 64) {
+      const p = q.shift(); comp.push(p)
+      if (world.openSky(bot, { x: p.x, y: p.y, z: p.z })) { const up = job && job.index.get(key({ x: p.x, y: p.y + 1, z: p.z })); opens.set('sky' + key(p), up && !up.clear && cellDone(bot, up) !== true ? up : null) }
+      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const n = { x: p.x + dx, y: p.y, z: p.z + dz }; const k = key(n)
+        if (!openAt(n.x, n.y, n.z)) continue
+        const jc = job && job.index.get(k)
+        if (!jc || jc.clear) {
+          if (!openAt(n.x, n.y + 1, n.z)) continue // (a one-high slit is no way in or out)
+          const hc = job && job.index.get(key({ x: n.x, y: n.y + 1, z: n.z })) // (the exit's head cell: placed, it is one-high)
+          opens.set('side' + k, hc && !hc.clear && cellDone(bot, hc) !== true ? hc : null)
+          continue
+        }
+        if (cellDone(bot, jc) === true || seenP.has(k)) continue
+        seenP.add(k); q.push(jc)
+      }
+    }
+    if (comp.length >= 64 || opens.size !== 1) continue // (big: no pocket; none: sealed already; two or more: safe a pass)
+    const only = [...opens.values()][0]
+    if (only) holdAround.add(key(only)) // (the last way in or out: never the one that closes it)
   }
   return detached
 }
