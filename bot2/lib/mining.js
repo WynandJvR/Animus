@@ -407,7 +407,7 @@ async function mineFor (bot, itemName, target, ctx = {}) {
     // the way down is the mine's own - entrance, stairs, tunnel - unless we are already in it. Judged by distance on
     // the map alone, standing 40 blocks over the face counted as "near" and the planner took a way down through a cave
     // lake at night; Drowned killed the bot in it (2026-09-24).
-    if (!inOwnMine(bot) && world.dist3(bot.entity.position, m.entrance) > 3) await move.travel(bot, m.entrance, { range: 3, shouldStop: ctx.shouldStop, label: 'to mine' })
+    if (!inOwnMine(bot) && world.dist3(bot.entity.position, m.entrance) > 3) await move.travel(bot, m.entrance, { range: 3, shouldStop: ctx.shouldStop, label: 'to mine', underground: true })
     const r = await move.goTo(bot, new goals.GoalBlock(m.cursor.x, m.cursor.y, m.cursor.z), { timeoutMs: 120000, stuckMs: 15000, label: 'to mine face' })
     // (busy or stopped on the way is no verdict on the mine - a fight in the stairwell abandoned a whole mine for a new one)
     if (!r.ok && !move.isVerdict(r)) return false

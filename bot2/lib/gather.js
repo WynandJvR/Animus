@@ -44,7 +44,9 @@ function knownResource (kind, from, { maxFromHome = 200, filter = null } = {}) {
   const list = ((mem.get().resources || {})[kind] || []).filter(p => (!home || world.dist2(p, home) < maxFromHome) && (!filter || filter(p)))
   if (!list.length) return null
   const me = from || home || { x: 0, z: 0 }
-  return list.slice().sort((a, b) => world.dist2(a, me) - world.dist2(b, me))[0]
+  // (counted in three dimensions when we know our height: flat, a deepslate 112 under home read as "9b" away - audit)
+  const d = me.y != null ? (p => world.dist3(p, me)) : (p => world.dist2(p, me))
+  return list.slice().sort((a, b) => d(a) - d(b))[0]
 }
 
 // Not in a protected zone - and not in the ground under one either: stone under the basilica was picked, refused by

@@ -98,7 +98,7 @@ function make (bot, director) {
       case 'stop': director.setPaused(true); move.stopMoving(bot); setFlag(true); return 'stopped (paused) - "resume" to continue'
       case 'task': { director.setPaused(false); return director.forceTask(a[0]) ? `next task: ${a[0]}` : 'unknown task: ' + Object.keys(director.TASKS).join(', ') }
       case 'ensure': case 'obtain': return exclusive('ensure', async () => { const ok = await craft.ensure(bot, a[0], num(1, 1)); return `ensure ${a[0]}: ${ok ? 'ok' : 'failed'} (holding ${inv.count(bot, a[0])})` })
-      case 'goto': return exclusive('goto', async () => { const r = await move.travel(bot, { x: num(0), y: num(1), z: num(2) }, { range: 2 }); return `goto: ${r.ok ? 'arrived' : r.why}` })
+      case 'goto': return exclusive('goto', async () => { const r = await move.travel(bot, { x: num(0), y: num(1), z: num(2) }, { range: 2, underground: true }); return `goto: ${r.ok ? 'arrived' : r.why}` })
       case 'home': return exclusive('home', async () => { const r = await base.goHome(bot); return `home: ${r.ok ? 'arrived' : r.why}` })
       case 'sethome': {
         const p = a.length >= 3 ? { x: num(0), y: num(1), z: num(2) } : world.feetPos(bot)

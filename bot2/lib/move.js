@@ -991,6 +991,17 @@ async function surface (bot, { shouldStop } = {}) {
       await goTo(bot, new goals.GoalNearXZ(best.x, best.z, 0), { timeoutMs: 60000, stuckMs: 12000, label: 'out from under', shouldStop })
     }
   }
+  // (at the foot of a shaft - our own, dug down - but beside it: into it first. A tower beside a shaft rises with the
+  //  shaft's drop open next to it; at y45 the planner stepped off the tower's top into it and the bot fell 20, dead,
+  //  2026-09-29 (audit). In the shaft, rock stands on every side of the tower)
+  {
+    const f = bot.entity.position.floored()
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const x = f.x + dx; const z = f.z + dz
+      let open = 0; for (let y = f.y; y < f.y + 6; y++) { if (world.isAirish(world.at(bot, x, y, z))) open++; else break }
+      if (open >= 6 && world.standable(bot, x, f.y, z)) { log('move', `a shaft beside me at ${x},${z} - climbing out inside it`); await goTo(bot, new goals.GoalBlock(x, f.y, z), { timeoutMs: 8000, stuckMs: 4000, label: 'into the shaft', shouldStop, place: false, dig: false }).catch(() => null); break }
+    }
+  }
   // straight up is the fastest way out of rock: dig the two cells above, jump, place under us
   const act = require('./act')
   const inv = require('./inventory')
@@ -1013,6 +1024,11 @@ async function surface (bot, { shouldStop } = {}) {
     if (blocked) break
     const filler = inv.items(bot).find(it => /^(dirt|cobblestone|andesite|diorite|granite|tuff|cobbled_deepslate|netherrack|stone)$/.test(it.name))
     if (!filler) break
+    // (never a tower beside an open drop: the next step off its top is the fall - see the shaft below)
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const q = { x: p.x + dx, y: p.y, z: p.z + dz }
+      if (world.isAirish(world.at(bot, q.x, q.y, q.z)) && world.dropAt(bot, q.x + 0.5, q.y, q.z + 0.5) > world.SAFE_DROP) await act.place(bot, q, filler.name, { noWalk: true, allowZones: ['*'] }).catch(() => false)
+    }
     if (!await require('./gather').towerUp(bot, { allowZones: ['*'] })) break
   }
   if (!isUnderground(bot)) { log('move', `surfaced at y${Math.floor(bot.entity.position.y)} (climbed ${Math.floor(bot.entity.position.y) - y0})`); return true }
@@ -1068,7 +1084,16 @@ async function travel (bot, target, opts = {}) {
   // (anyY: a place on the map, not a block - the ground there at whatever height it is. An explore leg aimed at its own
   //  start height over a valley 50 lower; the planner towered up out of the valley toward it and the bot fell 28
   //  blocks off the pillar, 2026-09-26)
-  const { range = 3, shouldStop: stop0, label = 'travel', maxMs = 15 * 60000, anyY = false } = opts
+  const { range = 3, shouldStop: stop0, label = 'travel', maxMs = 15 * 60000, anyY = false, underground = false } = opts
+  // A PLACE DEEP UNDER THE GROUND is no walk: more than 20 below where we stand and below home's own depth, the planner's
+  // way there is a shaft dug straight down - a remembered deepslate 112 under home ("9b" away, counted flat) was walked
+  // to, the pick wore out at y28 and the bot fell 20 down its own shaft climbing out, dead (2026-09-29; audit). The mine's
+  // stairs go down; the few walks that must go there say so (underground: a grave, the operator's goto, the mine's own)
+  if (!underground && !anyY && bot.entity && target && target.y != null) {
+    const home = require('./memory').get().home
+    const floor = Math.min(bot.entity.position.y - 20, home ? home.y - 8 : Infinity)
+    if (target.y < floor) { log('move', `${label}: ${fmt(target)} is deep under the ground (${Math.floor(bot.entity.position.y - target.y)} below) - a mine's way down, never a shaft`); return { ok: false, why: 'underground - a mine way down, never a shaft' } }
+  }
   const boat = require('./boat')
   // A stop asked for over open water waits for land: the night rule stopped a walk mid-ocean and the bot trod
   // water "staying put" until it drowned (2026-09-23). Only the operator's stop (control) ends a trip afloat.
