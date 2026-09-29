@@ -414,6 +414,12 @@ function make (bot, director) {
         const raw = bot.findBlocks({ matching: ids, maxDistance: num(1, 32), count: num(2, 10) })
         return `findBlocks ${re} d=${num(1, 32)}: ${r.length} in ${t1 - t0}ms (world wrapper); raw ${raw.length} in ${Date.now() - t1}ms; ids=${ids.length}`
       }
+      // (`plan <item> [n]`: what the planner would take for it from the stock we hold - raw still to fetch, crafts, unknowns;
+      //  the builder's "craftable from stock" is this, and purple_wool read craftable with no wool anywhere, 2026-09-29)
+      case 'plan': {
+        const r = require('./materials').planFor(bot, { [a[0]]: num(1, 1) })
+        return JSON.stringify({ raw: r.raw, unknown: r.unknown, crafts: r.crafts || r.steps || undefined }).slice(0, 1500)
+      }
       case 'entities': {
         const me = bot.entity.position
         // (`entities meta`: each animal's metadata by the registry's key names - baby, age_locked, wool - against the raw
