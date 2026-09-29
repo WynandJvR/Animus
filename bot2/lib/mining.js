@@ -115,7 +115,10 @@ async function oreLevel (bot, itemName) {
     if (n >= 6 && (!best || n > best.n)) best = { y: y + 1, n }
   }
   // (none in the scan's 64 - deepslate 112 under a hilltop home: where we saw it ourselves, under home's depth, is its level)
-  if (!best) { const kn = require('./gather').knownResource(itemName, home, { maxFromHome: 96, filter: p => p.y <= home.y - 8 }); if (kn) best = { y: kn.y + 1, n: 1 } }
+  // (a remembered spot we can see now must still hold the item's own block - noted before a kind was narrowed, or dug
+  //  since, it is no find)
+  const still = p => { const b = world.at(bot, p.x, p.y, p.z); return !b || g.blocks.test(b.name) }
+  if (!best) { const kn = require('./gather').knownResource(itemName, home, { maxFromHome: 96, filter: p => p.y <= home.y - 8 && still(p) }); if (kn) best = { y: kn.y + 1, n: 1 } }
   return best
 }
 // Does a staircase from p heading dir stay under the ground all the way down to `level`? The stairs drop one a step; on

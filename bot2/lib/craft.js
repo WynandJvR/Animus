@@ -30,7 +30,10 @@ const GATHER = {
   // (deepslate lies deep - under y8 here: the mine's stairs go down to it. Gathered as a surface block, a remembered one
   //  112 below home was walked to - the planner dug a shaft straight down, the pick wore out at y28 and the bot fell 20
   //  down its own shaft climbing out; dead, 146 items, 2026-09-29)
-  cobbled_deepslate: { blocks: /^(deepslate|cobbled_deepslate)$/, tool: 'pickaxe', tier: 1, ore: true },
+  // (the natural block only: cobbled deepslate standing anywhere was put there - our own filler, a player's wall. Counted
+  //  as a find, a filler block of ours at y111 by home became "deepslate lies at y112" and a mine went down beside home
+  //  to y98 for it, 2026-09-30)
+  cobbled_deepslate: { blocks: /^deepslate$/, tool: 'pickaxe', tier: 1, ore: true },
   coal: { blocks: /^(coal_ore|deepslate_coal_ore)$/, tool: 'pickaxe', tier: 1, ore: true },
   raw_iron: { blocks: /^(iron_ore|deepslate_iron_ore)$/, tool: 'pickaxe', tier: 2, ore: true },
   raw_copper: { blocks: /^(copper_ore|deepslate_copper_ore)$/, tool: 'pickaxe', tier: 2, ore: true },
