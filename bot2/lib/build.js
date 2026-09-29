@@ -594,6 +594,26 @@ function detachedItems (todo, bot) {
 // THE HOLDS round the waiting holes - the columns over them, the last faces, the pockets' last openings: once a build
 // pass (buildStepInner), never in nextNeeds - folded into detachedItems it ran on every call, a second and more of the
 // body's event loop a placement (lag: "slow build.nextNeeds 1064ms", "stalled in detachedItems", 2026-09-29; audit)
+// THE POCKETS' VERDICTS KEPT between passes: a placement changes only the components within a block of it, and every pass
+// re-searching them all was 250ms of the body's loop before each placement (2026-09-29; audit). A verdict goes when a
+// block changes near one of its cells, or anywhere up one of its sky columns - the world's own blockUpdate says so
+const pocketCache = new Map() // hole key -> { members, skyCols: Map 'x,z' -> lowest y, holds: [keys], faces: [keys] }
+let pocketJob = null; let pocketDirty = []; let pocketHookBot = null
+function pocketHook (bot) {
+  if (pocketHookBot === bot) return
+  pocketHookBot = bot
+  bot.on('blockUpdate', (o, n) => { const b = n || o; if (!b || !b.position || !job) return; const p = b.position; const bx = job.box; if (p.x < bx.x1 - 2 || p.x > bx.x2 + 2 || p.z < bx.z1 - 2 || p.z > bx.z2 + 2) return; if (pocketDirty.length < 5000) pocketDirty.push({ x: p.x, y: p.y, z: p.z }); else pocketCache.clear() })
+}
+function pocketInvalidate () {
+  if (pocketJob !== job) { pocketCache.clear(); pocketJob = job }
+  if (!pocketDirty.length) return
+  const entries = new Set(pocketCache.values())
+  for (const e of entries) {
+    const hit = pocketDirty.some(d => e.skyCols.has(d.x + ',' + d.z) && d.y > e.skyCols.get(d.x + ',' + d.z)) || e.members.some(m => pocketDirty.some(d => Math.abs(d.x - m.x) <= 1 && Math.abs(d.y - m.y) <= 1 && Math.abs(d.z - m.z) <= 1))
+    if (hit) for (const [k, v] of pocketCache) if (v === e) pocketCache.delete(k)
+  }
+  pocketDirty = []
+}
 let holdsMs = 0; let holdsPasses = 0 // (its own time, for the step profile: body first - it runs before every placement)
 function refreshHolds (todo, bot) {
   const t0h = Date.now()
@@ -631,9 +651,13 @@ function refreshHoldsInner (todo, bot) {
   //  member with open sky (its cap is air, and the air over it), or a side exit outside the build with head room. One
   //  the build can never close - no cell of it there - counts as always open. One closable opening left: the cell that
   //  would close it is held. None: already sealed - the escape's case. Two or more: one placement a pass closes one)
+  pocketHook(bot); pocketInvalidate()
+  const applied = new Set()
+  const apply = e => { if (applied.has(e)) return; applied.add(e); for (const k of e.holds) holdAround.add(k); for (const k of e.faces) holeFaces.add(k) }
   const seenP = new Set()
   const skyMemo = new Map(); const skyAt = p => { const k = key(p); let v = skyMemo.get(k); if (v === undefined) { v = world.openSky(bot, p); skyMemo.set(k, v) } return v }
   for (const h of holes) {
+    { const e = pocketCache.get(key(h)); if (e) { apply(e); continue } }
     if (seenP.has(key(h))) continue
     const comp = []; const q = [h]; seenP.add(key(h))
     const opens = new Map() // opening -> { cells: the build's cells that would close it, faces: fills' cells to refuse }
@@ -659,10 +683,17 @@ function refreshHoldsInner (todo, bot) {
         seenP.add(k); q.push(jc)
       }
     }
-    if (comp.length >= 64 || opens.size !== 1) continue // (big: no pocket; none: sealed already; two or more: safe a pass)
-    const only = [...opens.values()][0]
-    for (const c of only.cells) holdAround.add(key(c)) // (the last way in or out: never the one that closes it)
-    for (const f of only.faces) holeFaces.add(key(f))
+    // (the verdict, kept: what it holds - nothing when big, sealed or safe - and what would change it: its cells and the
+    //  sky columns over them)
+    const e = { members: comp.map(p => ({ x: p.x, y: p.y, z: p.z })), skyCols: new Map(), holds: [], faces: [] }
+    for (const p of comp) { const ck = p.x + ',' + p.z; if (!e.skyCols.has(ck) || p.y < e.skyCols.get(ck)) e.skyCols.set(ck, p.y) }
+    if (comp.length < 64 && opens.size === 1) { // (big: no pocket; none: sealed already; two or more: safe a pass)
+      const only = [...opens.values()][0]
+      for (const c of only.cells) e.holds.push(key(c)) // (the last way in or out: never the one that closes it)
+      for (const f of only.faces) { e.faces.push(key(f)); e.members.push({ x: f.x, y: f.y, z: f.z }) }
+    }
+    for (const p of comp) pocketCache.set(key(p), e)
+    apply(e)
   }
 }
 
@@ -1721,7 +1752,9 @@ function wayOut (bot, c, from = null, withC = true) {
   if (!inBox(f)) return true
   // (a door or a fence gate is a way through - the bot crosses them; counted solid, a room behind a door read as sealed and
   //  every cell placed from inside it was held back, 2026-09-29)
-  const passable = b => world.isAirish(b) || (/_door$|_fence_gate$/.test(b.name) && !/^iron_door$/.test(b.name))
+  // (and an OPEN trapdoor - an edge, not a wall: the planner's rule (move.js panel edges). Counted solid, the room behind the
+  //  castle's inner trapdoors read as sealed and the escape dug out a trapdoor of the build, 2026-09-29)
+  const passable = b => world.isAirish(b) || world.isOpenTrapdoor(b) || (/_door$|_fence_gate$/.test(b.name) && !/^iron_door$/.test(b.name))
   {
     const isC = (x, y, z) => withC && x === c.x && y === c.y && z === c.z
     const air = (x, y, z) => { if (isC(x, y, z)) return false; const b = world.at(bot, x, y, z); return !!b && passable(b) }
@@ -1729,8 +1762,11 @@ function wayOut (bot, c, from = null, withC = true) {
     //  through any edge but the one its panel stands on: closed, the edge opposite its facing; open, swung to the hinge's
     //  side. "Passable every way" read a one-cell pocket beside an open door as a way out, and the search that could not
     //  step into a door at all read the room as sealed - the physics decides, 2026-09-29; audit)
-    const st = (x, y, z) => { if (!air(x, y, z) || !air(x, y + 1, z)) return false; if (isC(x, y - 1, z)) return true; const fb = world.at(bot, x, y, z); if (fb && /_door$/.test(fb.name)) { const fl = world.at(bot, x, y - 1, z); return !!fl && world.isSolid(fl) } return world.standable(bot, x, y, z) }
-    const panelBlocks = (door, dx, dz) => { const e = doorPanel(door); return !!e && e === edgeOf(dx, dz) } // (the edge of the door's cell toward dx,dz)
+    const st = (x, y, z) => { if (!air(x, y, z) || !air(x, y + 1, z)) return false; if (isC(x, y - 1, z)) return true; const fb = world.at(bot, x, y, z); if (fb && (/_door$/.test(fb.name) || world.isOpenTrapdoor(fb))) { const fl = world.at(bot, x, y - 1, z); return !!fl && world.isSolid(fl) && !world.isOpenTrapdoor(fl) } return world.standable(bot, x, y, z) }
+    // (the plate's edge of a door or an open trapdoor - a trapdoor's opposite its facing, as a closed door's - at the body's
+    //  feet or head: a step across it is no step)
+    const panelOf = b => { if (!b) return null; if (/_door$/.test(b.name)) return doorPanel(b); if (world.isOpenTrapdoor(b)) { let f = null; try { f = b.getProperties().facing } catch {} return OPP[f] || null } return null }
+    const edgeShut = (x, y, z, dx, dz) => [world.at(bot, x, y, z), world.at(bot, x, y + 1, z)].some(b => panelOf(b) === edgeOf(dx, dz))
     const seen = new Set([key(f)]); const q = [{ x: f.x, y: f.y, z: f.z }]
     while (q.length) {
       if (seen.size > 300) return true // (a region this big is no trap)
@@ -1740,11 +1776,10 @@ function wayOut (bot, c, from = null, withC = true) {
       //  climb's "no tower - a cell of the build", and read as a way out it kept the wall-opening escape from running -
       //  the south rim's trench, walk and climb failing in turn, 2026-09-29)
       if (!job.index.has(key(p)) && world.openSky(bot, p) && !isC(p.x, p.y, p.z)) { let clear = true; for (let y = p.y + 2; y < p.y + 22; y++) if (isC(p.x, y, p.z)) clear = false; for (let y = p.y + 1; y <= b0.y2; y++) { const q = job.index.get(`${p.x},${y},${p.z}`); if (q && !q.clear && !(q.foundation && q.name === 'cobblestone')) clear = false } /* (a filler foundation cell a tower may rise through: the protector's rule) (at ANY height, not only under the floor: a sky column through the layer's unbuilt cells read as an exit the tower may never take - the crawlspace at -2269,121,-583 was "a way out" to the search through eleven give-ups, 2026-09-29; audit) */ if (clear) { lastExit = p; return true } }
-      const here = world.at(bot, p.x, p.y, p.z); const hereDoor = here && /_door$/.test(here.name) ? here : null
       for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
         const x = p.x + dx; const z = p.z + dz
-        if (hereDoor && panelBlocks(hereDoor, dx, dz)) continue // (out of a door cell through its panel: no)
-        { const nb = world.at(bot, x, p.y, z); if (nb && /_door$/.test(nb.name) && panelBlocks(nb, -dx, -dz)) continue } // (into one through its panel: no)
+        if (edgeShut(p.x, p.y, p.z, dx, dz)) continue // (out of a door's or trapdoor's cell through its plate: no)
+        if (edgeShut(x, p.y, z, -dx, -dz)) continue // (into one through its plate: no)
         for (let dy = 1; dy >= -world.SAFE_DROP; dy--) {
           const y = p.y + dy
           if (dy === 1 && !air(p.x, p.y + 2, p.z)) continue // (a step up wants the head room to jump)
