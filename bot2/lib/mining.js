@@ -246,7 +246,10 @@ function mineShouldPause (bot, ctx) {
   return null
 }
 
-async function ensurePick (bot) { return craft().keepTool(bot, 'pickaxe', { noWithdraw: false }) } // (craft.keepTool: the one rule)
+// (craft.keepTool: the one rule. The table it put down for the pick comes back into the pack at once: the mine moves on,
+//  and a table left in the tunnel at y37 was "missing" from the tools two minutes later - the rung that makes one pulled
+//  the bot out of the mine up 100 blocks of stairs for it, 2026-09-29. The task's end sweep only takes tables within 8)
+async function ensurePick (bot) { const ok = await craft().keepTool(bot, 'pickaxe', { noWithdraw: false }); await craft().packUpTables(bot).catch(() => {}); return ok }
 
 // Keep enough in the pack for the mine: a spare pickaxe's worth of sticks and a table.
 let provisioning = false
