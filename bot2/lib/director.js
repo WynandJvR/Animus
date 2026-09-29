@@ -1425,9 +1425,22 @@ function watchExpedition () {
   const d = (mem.get().deaths || []).slice(-1)[0]
   if (d && d.t > e.at) { mem.set('expedition', null); log('dir', `expedition for ${e.raw}: died on it - called off`) }
 }
+// AN ANIMAL TRIP THAT FOUND NONE is not made again today: animals round home never respawn, and a wool trip that found no
+// sheep 144-240 out went again every round - five minutes each, nothing placed, all afternoon (2026-09-29). A trip cut
+// short by a stop found nothing because it looked at nothing, and stays open. Open again the next day (notToday, day.js)
+const ANIMAL_RAW = /^(wool|leather|feather)$/
 async function gatherFor (raw, short) {
   reflex.setCautious(true) // (an optional trip does not fight: cover over a charge - reflex.setCautious)
-  try { return await gatherForInner(raw, short) } finally { reflex.setCautious(false) }
+  let ok = false
+  // (pack and bank: the trip's own start empties the pack into the chests)
+  const re = raw === 'wool' ? /_wool$/ : new RegExp(`^${raw}$`)
+  const got = () => inv.count(bot, re) + Object.entries(base.bankCounts()).filter(([n]) => re.test(n)).reduce((a, [, c]) => a + c, 0)
+  const had = got()
+  try { ok = await gatherForInner(raw, short); return ok } finally {
+    reflex.setCautious(false)
+    // (none at all: a trip that got some fell short, and found where they are)
+    if (!ok && got() <= had && ANIMAL_RAW.test(raw) && !notToday.has(raw) && !dayStop()) { notToday.set(raw, { day: day.dayNo(bot) }); log('dir', `${raw}: the trip found none - not again today`) }
+  }
 }
 async function gatherForInner (raw, short) {
   const put = notToday.get(raw)
