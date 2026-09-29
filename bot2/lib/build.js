@@ -520,6 +520,15 @@ function infillCell (c) { return INFILL_RE.test(c.name) || cellUnsourced(c) }
 // cells in hand - until its stock covers its lowest layers' cells (a stack at most). Re-anchored by the first four bricks
 // out of a furnace, the band would walk down for four, run dry and jump back up every batch (audit 2026-09-28).
 const detached = new Set()
+// THE SWAP LIST: a cell covered while it holds the wrong block (the terrain's grass in a leaf or coarse-dirt cell) - the
+// endgame's worklist, swapped from a side if one is open, else through the reopen (audit 2026-09-29). Once each.
+const toSwapSaid = new Set()
+function noteToSwap (c, has) {
+  const k = key(c); if (toSwapSaid.has(k)) return; toSwapSaid.add(k)
+  if (((mem.get().toSwap || {})[k])) return
+  mem.update(m => { m.toSwap = m.toSwap || {}; m.toSwap[k] = { want: c.name, has } })
+  log('build', `${c.name} at ${move.fmt(c)} holds ${has} and is covered over - on the swap list for the end (${Object.keys(mem.get().toSwap || {}).length} there)`)
+}
 function detachedItems (todo, bot) {
   const have = Object.assign({}, base().bankCounts())
   for (const [n, k] of Object.entries(inv.counts(bot))) have[n] = (have[n] || 0) + k
@@ -1221,7 +1230,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       // (a cell FULL of ground - the base layer's leaves, flower and coarse-dirt cells with the terrain's grass still in them -
       //  is no hole: covered, nothing is sealed in. Held for the cell's own item, every stair over the base layer anchored
       //  the band one step at a time, 2026-09-29)
-      { const wb = world.at(bot, b.x, b.y, b.z); if (wb && world.isSolid(wb)) return false }
+      { const wb = world.at(bot, b.x, b.y, b.z); if (wb && world.isSolid(wb)) { noteToSwap(b, wb.name); return false } }
       // (never a deadlock: a cell with no route to its item, or one that has already rested once, is covered - else a whole
       //  floor waits for ever on a hay block no trip can bring; audit 2026-09-28)
       if (cellUnsourced(b)) { if (!sealSaid.has(key(b))) { sealSaid.add(key(b)); log('build', `covering ${b.name} at ${move.fmt(b)} - no route for it`) } return false }
