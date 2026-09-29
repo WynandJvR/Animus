@@ -1334,8 +1334,6 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
   let waitingCell = null
   let waitingHolds = false // (the item named holds the band up - not a detached one, named only because nothing else is missing)
   const badStands = new Set() // (stands whose walk failed this step: clusterStand passes them by)
-  // (where the bot can walk this step - reachFrom, once, lazily; stale when one of our own blocks lands in it (a corridor
-  //  cut). A PREFERENCE, not a filter: the stand walks may dig and place, and reach more than the walk-only model; audit)
   // (the stands' regions this step - standRegion's memo; stale when one of our blocks lands: a corridor cut)
   let regionMemo = new Map(); let regionMs = 0
   const reachOf = p => { const t = Date.now(); const me = standRegion(bot, world.feetPos(bot), regionMemo); const r = standRegion(bot, p, regionMemo); regionMs += Date.now() - t; return r.out || r === me }
@@ -1838,7 +1836,8 @@ function standRegion (bot, p, memo) {
     if (seen.size > 300) { r.out = true; break } // (a region this big is no compartment)
     const c = q[i++]
     if (!inBox(c)) { r.out = true; break }
-    if (!job.index.has(key(c)) && world.openSky(bot, c)) { let clear = true; for (let y = c.y + 1; y <= b0.y2; y++) { const j = job.index.get(`${c.x},${y},${c.z}`); if (j && !j.clear && !(j.foundation && j.name === 'cobblestone')) { clear = false; break } } if (clear) { r.out = true; break } }
+    // (NO sky exit here: in wayOut a sky column means the bot can LEAVE by towering up; a stand asks whether it can get IN,
+    //  and over a roofless compartment's wall means a drop the walk refuses - it stays a compartment; audit)
     for (const n of W.next(c)) { const k = key(n); if (!seen.has(k)) { seen.add(k); q.push(n) } }
   }
   for (const k of seen) memo.set(k, r)
