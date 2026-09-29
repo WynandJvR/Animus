@@ -1803,7 +1803,9 @@ function wayOut (bot, c, from = null, withC = true) {
     const st = (x, y, z) => { if (!air(x, y, z) || !air(x, y + 1, z)) return false; if (isC(x, y - 1, z)) return true; const fb = world.at(bot, x, y, z); if (fb && (/_door$/.test(fb.name) || world.isOpenTrapdoor(fb))) { const fl = world.at(bot, x, y - 1, z); return !!fl && world.isSolid(fl) && !world.isOpenTrapdoor(fl) } return world.standable(bot, x, y, z) }
     // (the plate's edge of a door or an open trapdoor - a trapdoor's opposite its facing, as a closed door's - at the body's
     //  feet or head: a step across it is no step)
-    const panelOf = b => { if (!b) return null; if (/_door$/.test(b.name)) return doorPanel(b); if (world.isOpenTrapdoor(b)) { let f = null; try { f = b.getProperties().facing } catch {} return OPP[f] || null } return null }
+    // (an open door's or trapdoor's plate by world.plateEdge - the planner's own model, one copy; a CLOSED door by its own
+    //  panel here, which the planner leaves to crossDoor)
+    const panelOf = b => { if (!b) return null; const v = world.plateEdge(b); if (v) return edgeOf(v[0], v[1]); if (/_door$/.test(b.name)) return doorPanel(b); return null }
     const edgeShut = (x, y, z, dx, dz) => [world.at(bot, x, y, z), world.at(bot, x, y + 1, z)].some(b => panelOf(b) === edgeOf(dx, dz))
     const seen = new Set([key(f)]); const q = [{ x: f.x, y: f.y, z: f.z }]
     while (q.length) {

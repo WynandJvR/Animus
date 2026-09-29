@@ -189,15 +189,16 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
     if (v === undefined) { v = world.dropAt(bot, x + 0.5, y, z + 0.5) > world.SAFE_DROP; diagDrop.set(k, v) }
     return v
   }
-  // PANEL EDGES: an open trapdoor's plate stands on ONE edge of its cell (the side opposite its facing - vanilla's open
-  //  boxes); a step across that edge is refused, every other step through the cell stands. At the body's heights of
-  //  both ends; a jump or a drop checks the whole span; a diagonal, all four edges it sweeps (memoised a plan)
-  const PANEL_EDGE = { north: [0, 1], south: [0, -1], west: [1, 0], east: [-1, 0] }
+  // PANEL EDGES: an open trapdoor's plate, an open door's, stands on ONE edge of its cell (world.plateEdge - the one model
+  //  the way-out search reads too); a step across that edge is refused, every other step through the cell stands. At the
+  //  body's heights of both ends; a jump or a drop checks the whole span; a diagonal, all four edges it sweeps (memoised a
+  //  plan). (An open door was air here and an edge to the search: the planner walked into a pocket past a door's plate
+  //  and the escape dug out of it, 2026-09-29)
   const panelMemo = new Map(); let panelGen = pathGen
   const panelAt = (x, y, z) => {
     if (panelGen !== pathGen || panelMemo.size > 20000) { panelMemo.clear(); panelGen = pathGen }
     const k = x + ',' + y + ',' + z; let v = panelMemo.get(k)
-    if (v === undefined) { v = null; const b = world.at(bot, x, y, z); if (b && world.isOpenTrapdoor(b)) { try { v = PANEL_EDGE[b.getProperties().facing] || null } catch {} } panelMemo.set(k, v) }
+    if (v === undefined) { v = world.plateEdge(world.at(bot, x, y, z)); panelMemo.set(k, v) }
     return v
   }
   const edgeShut = (x, z, dx, dz, y0, y1) => {

@@ -18,3 +18,10 @@ printf "%-28s %8s %8s\n" metric before after
 for k in "(death) died" "did not succeed" "something is looping" "busy or looping" "stuck after" "PINNED" " threw" "(lag)" "won't place" "gave up"; do
   printf "%-28s %8s %8s\n" "$k" "$(win $b0 $t | count "$k")" "$(win $t $a1 | count "$k")"
 done
+# the body's own time and the build's pace, not only failures: a 115ms -> 900ms "choosing each" ran an hour unseen after a
+# deploy that no failure counter caught (2026-09-29). Averages over the step profiles in each window ('-' = none)
+avg () { grep -aoE "$1" | grep -oE '[0-9.]+' | awk '{s+=$1;n++} END{if(n) printf "%.0f", s/n; else printf "-"}'; }
+printf "%-28s %8s %8s\n" "choosing each (ms)" "$(win $b0 $t | avg '[0-9]+ms choosing each')" "$(win $t $a1 | avg '[0-9]+ms choosing each')"
+printf "%-28s %8s %8s\n" "a placed block (ms)" "$(win $b0 $t | avg '[0-9]+ms a placed block')" "$(win $t $a1 | avg '[0-9]+ms a placed block')"
+printf "%-28s %8s %8s\n" "blocks off on average" "$(win $b0 $t | avg '[0-9.]+ blocks off on average')" "$(win $t $a1 | avg '[0-9.]+ blocks off on average')"
+printf "%-28s %8s %8s\n" "placed (castle rounds)" "$(win $b0 $t | grep -a 'castle round:' | grep -oE 'placed [0-9]+' | awk '{s+=$2} END{print s+0}')" "$(win $t $a1 | grep -a 'castle round:' | grep -oE 'placed [0-9]+' | awk '{s+=$2} END{print s+0}')"

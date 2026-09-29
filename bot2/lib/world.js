@@ -50,6 +50,22 @@ function isOpenTrapdoor (b) {
   if (!b || !/_trapdoor$/.test(b.name)) return false
   try { const p = b.getProperties(); return !!(p && (p.open === true || p.open === 'true')) } catch { return false }
 }
+// THE PLATE'S EDGE - ONE model for every walker: the planner's steps (move.js) and the way-out search (build.js wayOut).
+// An open trapdoor's plate stands on the edge opposite its facing (vanilla's open boxes); an OPEN door's is swung to its
+// hinge's side (right: clockwise of its facing, left: counter-clockwise). [dx, dz] of that edge, or null. A closed door is
+// no edge here - whoever crosses it opens it (crossDoor). Two copies of the trapdoor rule drifted apart and an open door
+// was an edge to one and air to the other: the escape dug the castle's own blocks four times at one doorway, 2026-09-29
+const EDGE_VEC = { north: [0, -1], south: [0, 1], east: [1, 0], west: [-1, 0] }
+const OPP_F = { north: 'south', south: 'north', east: 'west', west: 'east' }
+const CW_F = { north: 'east', east: 'south', south: 'west', west: 'north' }
+const CCW_F = { east: 'north', south: 'east', west: 'south', north: 'west' }
+function plateEdge (b) {
+  if (!b || !/_(trap)?door$/.test(b.name)) return null
+  let p = {}; try { p = b.getProperties() || {} } catch { return null }
+  if (!(p.open === true || p.open === 'true')) return null
+  if (/_trapdoor$/.test(b.name)) return EDGE_VEC[OPP_F[p.facing]] || null
+  return EDGE_VEC[(p.hinge === 'right' ? CW_F : CCW_F)[p.facing]] || null
+}
 function isAirish (b) { return !!b && b.boundingBox === 'empty' && !isWaterBlock(b) && !isLavaBlock(b) }
 
 // A fall of more than this many blocks hurts (vanilla: damage = distance - 3). The pathfinder's maxDropDown and the
@@ -310,7 +326,7 @@ function hasAirNeighbour (bot, p) {
   return false
 }
 
-module.exports = { isOpenTrapdoor, LANTERN_RE, FURNITURE_RE, walkTicks, HOME_MARGIN, SAFE_DROP, dropAt,
+module.exports = { isOpenTrapdoor, plateEdge, LANTERN_RE, FURNITURE_RE, walkTicks, HOME_MARGIN, SAFE_DROP, dropAt,
   data, v, at, name, isWaterBlock, isLiquidWater, holdsWater, isLavaBlock, isSolid, isAirish, standable, feetPos, eyeBlock,
   headInWater, feetInWater, inLava, tod, phase, isNight, isDay, ticksUntilNight, canSleepNow, lavaNear, holdsBackLava, waterNear,
   groundY, openSky, dist2, dist3, blockIds, findBlocks, scanBlocks, stateIds, sectionMay, sightReach, hasAirNeighbour, skyLitFace,
