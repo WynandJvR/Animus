@@ -669,7 +669,7 @@ async function escapeUp (bot) {
 async function escapeUpInner (bot) {
   const act = require('./act'); const gather = require('./gather')
   const f0 = bot.entity.position.floored()
-  // ENCLOSED BY THE BUILD at its floor or above - PROVEN, not guessed: no walk out of here even with every door taken as a
+  // ENCLOSED BY THE BUILD - PROVEN, not guessed: no walk out of here even with every door taken as a
   // way through (build.wayOut). The climb-out takes our own blocks only in the hollow under the floor, a tower may not rise
   // in a build cell, and a room the builder closed round the bot left it walking for ever - at dusk, and the night walk
   // that followed killed it (2026-09-28 19:20). A player breaks out through the wall and puts the block back: a door's
@@ -677,7 +677,9 @@ async function escapeUpInner (bot) {
   {
     const build = require('./build'); const j = build.getJob()
     const inFoot = j && f0.x >= j.box.x1 && f0.x <= j.box.x2 && f0.z >= j.box.z1 && f0.z <= j.box.z2
-    if (inFoot && f0.y >= j.box.y1 && !build.wayOut(bot, { x: NaN, y: NaN, z: NaN }, null, false)) {
+    // (below the floor too: a hollow the foundation rim closed all round has no way out for the walk to the exit or the
+    //  climb to find - the rim is opened like any wall, toward safe ground past it; audit 2026-09-29)
+    if (inFoot && !build.wayOut(bot, { x: NaN, y: NaN, z: NaN }, null, false)) {
       log('move', `enclosed by the build at ${fmt(f0)} - no way out; opening our own wall beside me, the builder puts it back`)
       const cellAt = (x, y, z) => j.index.get(`${x},${y},${z}`)
       const holdsUp = (x, y, z) => j.cells.some(q => q.sup && q.sup.x === x && q.sup.y === y && q.sup.z === z && build.cellDone(bot, q) === true)
