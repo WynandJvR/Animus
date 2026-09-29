@@ -1084,8 +1084,12 @@ async function withdrawWindow (needs) {
   // (the item the band waits on first: taken in the window's own order, the pack filled with trapdoors, signs, stairs and
   //  a grindstone before it came to stone_bricks - the band "waited on stone_bricks" for an hour with 875 in the chest,
   //  2026-09-30)
+  // (and the rest in band order - each item by the lowest layer it goes in, the most first on a tie: lanterns and a
+  //  grindstone for the upper floors come last, never the next layer's stone; audit)
   const first = mem.get().buildWaiting
-  const order = Object.entries(needs).sort((a, b) => (b[0] === first) - (a[0] === first))
+  const lowY = {}; build.nextNeeds(bot, WINDOW_LAYERS, lowY)
+  const y = it => lowY[it] != null ? lowY[it] : Infinity
+  const order = Object.entries(needs).sort((a, b) => ((b[0] === first) - (a[0] === first)) || (y(a[0]) - y(b[0])) || (b[1] - a[1]))
   for (const cap of [64, 64 * 4]) {
     for (const [name, n] of order) {
       if (inv.freeSlots(bot) < 2) return

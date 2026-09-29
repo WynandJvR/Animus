@@ -794,7 +794,7 @@ function status (bot) {
 }
 // Items for the cells from the lowest unfinished layer up to `layers` above it (the window the builder
 // works in), plus attached cells whose support already stands. Same keying as status().need.
-function nextNeeds (bot, layers = 4) {
+function nextNeeds (bot, layers = 4, lowY = null) {
   if (!job) return {}
   const md = world.data(bot)
   const todo = job.cells.filter(c => !c.follows && cellDone(bot, c) !== true)
@@ -802,7 +802,7 @@ function nextNeeds (bot, layers = 4) {
   const out = {}
   for (const c of todo) {
     if (c.attach ? !(c.y <= minY + layers || supportThere(bot, c)) : c.y > minY + layers) continue
-    needsOf(bot, c, md, (it, n) => { out[it] = (out[it] || 0) + n })
+    needsOf(bot, c, md, (it, n) => { out[it] = (out[it] || 0) + n; if (lowY && !(lowY[it] <= c.y)) lowY[it] = c.y })
   }
   return out
 }
