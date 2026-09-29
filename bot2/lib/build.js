@@ -1490,10 +1490,10 @@ function ensureFoundation (bot) {
   { const have = new Set(add.map(key).concat(torches.map(key)))
     for (const q of saved) {
       const k = key(q); if (have.has(k) || job.index.has(k)) continue
-      if (q.t === 't') torches.push({ x: q.x, y: q.y, z: q.z }); else add.push({ x: q.x, y: q.y, z: q.z, hole: !!q.h, soil: q.t === 'd' })
+      if (q.t === 't') { if (world.isAirish(world.at(bot, q.x, y1, q.z))) torches.push({ x: q.x, y: q.y, z: q.z }); else continue } else add.push({ x: q.x, y: q.y, z: q.z, hole: !!q.h, soil: q.t === 'd' }) // (a torch only while the floor over it is still open - as the scan's own rule; audit)
       have.add(k)
     } }
-  mem.update(m => { m.foundationCells = m.foundationCells || {}; m.foundationCells[fndKey()] = add.map(p => ({ x: p.x, y: p.y, z: p.z, t: p.soil ? 'd' : 'c', h: p.hole ? 1 : 0 })).concat(torches.map(p => ({ x: p.x, y: p.y, z: p.z, t: 't' }))) })
+  mem.update(m => { m.foundationCells = { [fndKey()]: (m.foundationCells || {})[fndKey()] }; m.foundationCells[fndKey()] = add.map(p => ({ x: p.x, y: p.y, z: p.z, t: p.soil ? 'd' : 'c', h: p.hole ? 1 : 0 })).concat(torches.map(p => ({ x: p.x, y: p.y, z: p.z, t: 't' }))) })
   for (const p of add) {
     const cell = { x: p.x, y: p.y, z: p.z, name: 'cobblestone', props: {}, foundation: true, hole: !!p.hole, want: null, item: 'cobblestone', alt: FOUNDATION_BLOCKS, prefer: ['cobblestone', 'dirt'], itemAlt: FILLER_ITEMS }
     if (p.soil) Object.assign(cell, { name: 'dirt', item: 'dirt', alt: /^(dirt|grass_block|coarse_dirt|rooted_dirt)$/, prefer: ['dirt'], itemAlt: /^dirt$/ })
