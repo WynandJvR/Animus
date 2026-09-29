@@ -1103,7 +1103,7 @@ function saveCellFails () { if (Date.now() - cellFailsSaved < 5000) return; cell
 // A reach miss is the GROUND's: the cells round it (3 across, a layer up or down) share the missed cell's rest, count and
 // all. Held back for one step only, each round tried the next cell of the same patch - the south-west hollow's foundation
 // took 7 walks of 46s for 1 block, round after round (2026-09-29). A block placed beside them still wakes them.
-function restRound (c, ready) {
+function restRound (c, ready, holdBack) {
   const f = cellFails.get(key(c)); let n = 0
   for (const q of ready) {
     if (q === c || Math.abs(q.x - c.x) > 3 || Math.abs(q.z - c.z) > 3 || Math.abs(q.y - c.y) > 1) continue
@@ -1252,7 +1252,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       failed.set(key(c), (failed.get(key(c)) || 0) + 1); saveCellFails(); prof.tries++; prof.ms += Date.now() - tp; prof.dist += d0; tpick = Date.now()
       // (the stand's walk ran out: the cells round it lie behind the same ground - the walled garden's 18 tries were all
       //  this branch, one door crossing each, silent; they wait for the next step)
-      const n = restRound(c, ready)
+      const n = restRound(c, ready, holdBack)
       log('build', `${c.name} at ${move.fmt(c)}: its stand could not be reached${n ? ` - ${n} cells round it rest with it` : ''}`)
       continue
     }
@@ -1274,7 +1274,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       //  wall. Tried one by one, a walled garden's 18 cells took 18 walks through a door into a dead-end vestibule, 18s each,
       //  0 placed in a 323s step (2026-09-28). They wait for the next step; the step goes elsewhere)
       if (/within reach|stand was not reached|stuck|timeout/.test(lastPlaceFail)) {
-        const n = restRound(c, ready)
+        const n = restRound(c, ready, holdBack)
         if (n) log('build', `${n} cells round ${move.fmt(c)} rest with it - the same ground stopped the walk`)
       }
     }
