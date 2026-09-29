@@ -213,11 +213,12 @@ async function placeChest (bot) {
   // making the chest may have taken us to a tree: storage goes AT home
   if (h && world.dist2(bot.entity.position, h) > 6) await move.travel(bot, h, { range: 2, label: 'home with the chest' })
   const me = world.feetPos(bot)
-  let spots = []
   // at home: the hut's neat utility spots (side-wall slots, then the row outside) - the old free-cell
   // search skipped the placement rules inside the base zone and stacked a chest on the bed
-  if (h && mem.get().hutPlan) spots = require('./hut').utilitySpots(bot).filter(p => move.utilitySpotOK(p))
-  if (!spots.length) {
+  // (and when every one of those is taken, the free cells round home after them: the slots all held chests and every
+  //  deposit said "no chest with room and could not place one", the pack full on every trip, 2026-09-29)
+  const freeCells = () => {
+    const out = []
     for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) for (const dy of [0, -1, 1]) {
       const p = { x: me.x + dx, y: me.y + dy, z: me.z + dz }
       if (Math.abs(dx) + Math.abs(dz) < 2) continue
@@ -225,19 +226,22 @@ async function placeChest (bot) {
       if (!c || !world.isAirish(c) || !b || !world.isSolid(b) || !up || !world.isAirish(up)) continue
       if (move.inZone(p) && move.inZone(p).label !== 'base') continue
       if (!move.utilitySpotOK(p)) continue
-      spots.push(Object.assign(p, { d: Math.abs(dx) + Math.abs(dz) + (h ? world.dist3(p, h) * 0.1 : 0) }))
+      out.push(Object.assign(p, { d: Math.abs(dx) + Math.abs(dz) + (h ? world.dist3(p, h) * 0.1 : 0) }))
     }
-    spots.sort((a, b) => a.d - b.d)
+    return out.sort((a, b) => a.d - b.d)
   }
-  for (const s of spots.slice(0, 8)) {
-    let adj = false
-    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const nb = world.at(bot, s.x + dx, s.y, s.z + dz); if (nb && /chest/.test(nb.name)) adj = true }
-    if (adj) continue
-    if (await act.place(bot, s, 'chest', { allowZones: ['base'] })) {
-      mem.addUnique('chests', s)
-      notePlacedChest(s)
-      log('base', `placed a chest at ${move.fmt(s)}`)
-      return s
+  const hutSpots = h && mem.get().hutPlan ? require('./hut').utilitySpots(bot).filter(p => move.utilitySpotOK(p)) : []
+  for (const spots of [hutSpots, freeCells()]) {
+    for (const s of spots.slice(0, 8)) {
+      let adj = false
+      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const nb = world.at(bot, s.x + dx, s.y, s.z + dz); if (nb && /chest/.test(nb.name)) adj = true }
+      if (adj) continue
+      if (await act.place(bot, s, 'chest', { allowZones: ['base'] })) {
+        mem.addUnique('chests', s)
+        notePlacedChest(s)
+        log('base', `placed a chest at ${move.fmt(s)}`)
+        return s
+      }
     }
   }
   return null
