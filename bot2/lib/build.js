@@ -1402,7 +1402,11 @@ function ensureFoundation (bot) {
       const k = kindAt(bot, c.x, y, c.z)
       if (!k) return false // (a column not loaded: taken whole or not at all)
       if (/^lava$/.test(k.name)) { ok = false; break }
-      if (k.boundingBox === 'block' && !world.LEAF_RE.test(k.name) && !ledger.has(`${c.x},${y},${c.z}`)) break
+      // (a solid block where the site's snapshot had open air is ours - the foundation laid on an earlier day: the scan ran
+      //  through it as its own column, else the laid rim read as ground, left the job, and the teardown took it down as
+      //  stray scaffold after every restart - 44 cells left became 100, 2026-09-29)
+      const laid = !!site && FOUNDATION_BLOCKS.test(k.name) && (() => { const was = snapName(c.x, y, c.z); return was !== k.name && wasOpen(bot, was) })()
+      if (k.boundingBox === 'block' && !world.LEAF_RE.test(k.name) && !ledger.has(`${c.x},${y},${c.z}`) && !laid) break
       if (y1 - y > FOUNDATION_MAX) { ok = false; break }
       col.push(y); lastKind = k
     }
@@ -1776,6 +1780,9 @@ const SITE_TIDY_MS = 4 * 60000
 // from the band up, too), so the teardown ran every game day - 4 minutes for ~25 blocks, 2026-09-29
 function siteTeardownPlan (bot) {
   if (!job || !site) return null
+  // (the foundation's cells first: they are worked out by the first build step, and the day's teardown ran before it after
+  //  every restart - the rim's laid cobble read as stray scaffold and came down, 44 cells left became 100, 2026-09-29)
+  if (!ensureFoundation(bot)) return null
   let bandY = Infinity
   for (const c of job.cells) if (!c.attach && !c.follows && !c.foundation && c.y < bandY && cellDone(bot, c) !== true) bandY = c.y
   const sups = new Set(job.cells.filter(q => q.sup && cellDone(bot, q) === true).map(q => key(q.sup)))
@@ -1813,6 +1820,7 @@ async function siteScaffoldTeardown (bot, { shouldStop } = {}) {
 }
 async function removeScaffold (bot, { shouldStop, maxPasses = 4, keep = null, extra = [], climb = true } = {}) {
   if (!job) return 0
+  if (!ensureFoundation(bot)) return 0 // (the foundation's cells known first - else its laid cobble reads as scaffold)
   let removed = 0
   const dig = (p, noWalk = false) => act.dig(bot, p, { force: true, allowZones: ['build', 'base'], timeoutMs: 10000, noWalk, reachMax: noWalk ? 5 : 4.3 })
   if (!site) {
