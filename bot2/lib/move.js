@@ -670,9 +670,11 @@ async function goToInner (bot, goal, opts, a) {
   // (and a remembered trap a walk just LEFT is no trap: forgotten - a false one, recorded before the search read trapdoors
   //  as edges, lay on the inner doorway's path, 50 a step and legs pushed round it for a day; audit)
   if (r.ok && start && !escaping && bot.entity && bot.entity.position.distanceTo(start) > GIVEUP_NEAR + 1) {
+    // (only a walk that began IN it - the start on one of its cells, a step aside allowed: one that began BESIDE it and went
+    //  on is the walk the trap's cost steers, and forgot a real one never entered; that trap's own cells only; audit)
     const s0 = start.floored(); const mm = require('./memory'); const l = mm.get().trapCells || []
-    const near = t => Math.abs(t.x - s0.x) <= GIVEUP_NEAR && Math.abs(t.y - s0.y) <= GIVEUP_NEAR && Math.abs(t.z - s0.z) <= GIVEUP_NEAR
-    if (l.some(near)) { mm.update(m => { m.trapCells = (m.trapCells || []).filter(t => !near(t)) }); log('move', `walked out of the trap remembered round ${fmt(s0)} - forgotten`) }
+    const batches = new Set(l.filter(t => Math.abs(t.x - s0.x) <= 1 && Math.abs(t.y - s0.y) <= 1 && Math.abs(t.z - s0.z) <= 1).map(t => t.batch != null ? t.batch : 'x' + t.x + ',' + t.y + ',' + t.z))
+    if (batches.size) { mm.update(m => { m.trapCells = (m.trapCells || []).filter(t => !batches.has(t.batch != null ? t.batch : 'x' + t.x + ',' + t.y + ',' + t.z)) }); log('move', `walked out of the trap remembered at ${fmt(s0)} - forgotten`) }
   }
   return r
 }
@@ -763,8 +765,8 @@ let legSaid = null
 function noteTrap (bot, p) {
   const cells = giveUps.filter(g => Math.abs(g.x - p.x) <= GIVEUP_NEAR && Math.abs(g.y - p.y) <= GIVEUP_NEAR && Math.abs(g.z - p.z) <= GIVEUP_NEAR).map(g => ({ x: g.x, y: g.y, z: g.z }))
   cells.push({ x: p.x, y: p.y, z: p.z })
-  const day = require('./day').dayNo(bot)
-  require('./memory').update(m => { const l = (m.trapCells || []).filter(t => t.day != null && trapLive(bot, t)); for (const c of cells) if (!l.some(t => t.x === c.x && t.y === c.y && t.z === c.z)) l.push(Object.assign(c, { day })); m.trapCells = l.slice(-200) })
+  const day = require('./day').dayNo(bot); const batch = Date.now() // (the trap's cells together: forgotten together)
+  require('./memory').update(m => { const l = (m.trapCells || []).filter(t => t.day != null && trapLive(bot, t)); for (const c of cells) if (!l.some(t => t.x === c.x && t.y === c.y && t.z === c.z)) l.push(Object.assign(c, { day, batch })); m.trapCells = l.slice(-200) })
   log('move', `a trap remembered at ${fmt(p)} (${cells.length} cells) - walked round for a day`)
 }
 function clearGiveUps (p) { for (let i = giveUps.length - 1; i >= 0; i--) { const g = giveUps[i]; if (Math.abs(g.x - p.x) <= GIVEUP_NEAR && Math.abs(g.y - p.y) <= GIVEUP_NEAR && Math.abs(g.z - p.z) <= GIVEUP_NEAR) giveUps.splice(i, 1) } }
