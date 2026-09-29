@@ -63,7 +63,12 @@ const EDITS = [
   // through a table captured at load that the server's registry later replaces - the live registry, read at lookup time
   ['prismarine-block/index.js', "  return provider(registry, { Biome: require('prismarine-biome')(version), version })", "  return provider(registry, { Biome: require('prismarine-biome')(registry), version }) // the live registry: the server's biome ids"],
   ['prismarine-biome/index.js', "  const biomes = registry.biomes\n  return function Biome (id) {\n    return biomes?.[id] || { ...emptyBiome, id }", "  return function Biome (id) {\n    return registry.biomes?.[id] || { ...emptyBiome, id } // (read now: the server's registry replaces the table after load)"],
-  ['prismarine-schematic/lib/states.js', "  if (value === 'true') return 0\n", "  if (state.values && state.values.includes(value)) return state.values.indexOf(value) // int lists start at 1\n  if (value === 'true') return 0\n"]
+  ['prismarine-schematic/lib/states.js', "  if (value === 'true') return 0\n", "  if (state.values && state.values.includes(value)) return state.values.indexOf(value) // int lists start at 1\n  if (value === 'true') return 0\n"],
+  // pathfinder: a gate/door opened on the way (useOne) shifts the next "place" off the list - undefined when it was the
+  // last - and left `placing` set: every physics tick after read placingBlock.y and threw, 20 a second, the body frozen
+  // (2026-09-29, the sheep pen's gate). Placing ends when there is nothing left to place.
+  ['mineflayer-pathfinder/index.js', "          lockUseBlock.release()\n          placingBlock = nextPoint.toPlace.shift()\n", "          lockUseBlock.release()\n          placingBlock = nextPoint.toPlace.shift()\n          if (!placingBlock) placing = false // (the last one: nothing left to place)\n"],
+  ['mineflayer-pathfinder/index.js', "      const block = stateMovements.getScaffoldingItem()\n", "      if (!placingBlock) { placing = false; return } // (nothing to place: never read .y of nothing)\n      const block = stateMovements.getScaffoldingItem()\n"]
 ]
 function patchGates () {
   for (const [f, from, to] of EDITS) {
