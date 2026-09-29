@@ -594,7 +594,12 @@ function detachedItems (todo, bot) {
 // THE HOLDS round the waiting holes - the columns over them, the last faces, the pockets' last openings: once a build
 // pass (buildStepInner), never in nextNeeds - folded into detachedItems it ran on every call, a second and more of the
 // body's event loop a placement (lag: "slow build.nextNeeds 1064ms", "stalled in detachedItems", 2026-09-29; audit)
+let holdsMs = 0; let holdsPasses = 0 // (its own time, for the step profile: body first - it runs before every placement)
 function refreshHolds (todo, bot) {
+  const t0h = Date.now()
+  try { refreshHoldsInner(todo, bot) } finally { holdsMs += Date.now() - t0h; holdsPasses++ }
+}
+function refreshHoldsInner (todo, bot) {
   // THE WAITING COLUMNS: x,z -> the lowest hole kept open for its item (out of stock, or the wait above) with nothing placed
   // over it yet. Every cell above it in that column anchors no band - it cannot go in until the hole does (one step-end
   // miss a level was the old drip); one lookup a cell in anchorable (audit)
@@ -1278,6 +1283,7 @@ async function buildStep (bot, opts = {}) {
 async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
   stepStop = shouldStop || null
   const t0 = Date.now(); const supports0 = supportsLaid; const pl0 = pillarLaid; const pd0 = pillarDug
+  holdsMs = 0; holdsPasses = 0 // (this step's own)
   let placed = 0
   if (!ensureSnapshot(bot) || !ensureFoundation(bot)) return { placed, blockedOn: null, done: false }
   // (a cell that keeps failing is tried again ever more rarely - 5 min after its third miss, then 10, 20... up to 2h -
@@ -1300,7 +1306,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
   //  class the step's time goes to, the numbers stripped; audit 2026-09-29)
   const missed = (why, ms) => { const k = String(why || 'unlogged').replace(/\s*[-(].*$/, '').replace(/-?\d+/g, '#').slice(0, 40) || 'unlogged'; const e = prof.why[k] || (prof.why[k] = { n: 0, ms: 0 }); e.n++; e.ms += ms }
   placeProf.reach = 0; placeProf.dig = 0
-  const profLog = () => { if (prof.tries) log('build', `step profile: ${placed}/${prof.tries} placed, ${Math.round(prof.ms / prof.tries)}ms a try (${placed ? Math.round(prof.okMs / placed) : 0}ms a placed block), ${(prof.dist / prof.tries).toFixed(1)} blocks off on average, ${Math.round(prof.pick / Math.max(1, prof.tries))}ms choosing each; a try: ${Math.round(placeProf.reach / prof.tries)}ms getting in reach, ${Math.round(placeProf.dig / prof.tries)}ms clearing, ${Math.round((prof.ms - placeProf.reach - placeProf.dig) / prof.tries)}ms placing; ${Math.round((prof.ms - prof.okMs) / 1000)}s of ${Math.round(prof.ms / 1000)}s on the ${prof.tries - placed} misses${Object.keys(prof.why).length ? ' (' + Object.entries(prof.why).sort((a, b) => b[1].ms - a[1].ms).slice(0, 4).map(([k, e]) => `${k} x${e.n} ${Math.round(e.ms / 1000)}s`).join(', ') + ')' : ''}; the walks laid ${reflex.plannerPlacedSince(t0).filter(q => q.x >= job.box.x1 - 3 && q.x <= job.box.x2 + 3 && q.z >= job.box.z1 - 3 && q.z <= job.box.z2 + 3).length} blocks on the site, the builder ${supportsLaid - supports0} supports, ${pillarLaid - pl0} pillar blocks up, ${pillarDug - pd0} taken back down`) } // (where the site's scaffold comes from - ~1 a castle block, 2026-09-29)
+  const profLog = () => { if (prof.tries) log('build', `step profile: ${placed}/${prof.tries} placed, ${Math.round(prof.ms / prof.tries)}ms a try (${placed ? Math.round(prof.okMs / placed) : 0}ms a placed block), ${(prof.dist / prof.tries).toFixed(1)} blocks off on average, ${Math.round(prof.pick / Math.max(1, prof.tries))}ms choosing each (holds ${holdsPasses ? Math.round(holdsMs / holdsPasses) : 0}ms a pass); a try: ${Math.round(placeProf.reach / prof.tries)}ms getting in reach, ${Math.round(placeProf.dig / prof.tries)}ms clearing, ${Math.round((prof.ms - placeProf.reach - placeProf.dig) / prof.tries)}ms placing; ${Math.round((prof.ms - prof.okMs) / 1000)}s of ${Math.round(prof.ms / 1000)}s on the ${prof.tries - placed} misses${Object.keys(prof.why).length ? ' (' + Object.entries(prof.why).sort((a, b) => b[1].ms - a[1].ms).slice(0, 4).map(([k, e]) => `${k} x${e.n} ${Math.round(e.ms / 1000)}s`).join(', ') + ')' : ''}; the walks laid ${reflex.plannerPlacedSince(t0).filter(q => q.x >= job.box.x1 - 3 && q.x <= job.box.x2 + 3 && q.z >= job.box.z1 - 3 && q.z <= job.box.z2 + 3).length} blocks on the site, the builder ${supportsLaid - supports0} supports, ${pillarLaid - pl0} pillar blocks up, ${pillarDug - pd0} taken back down`) } // (where the site's scaffold comes from - ~1 a castle block, 2026-09-29)
   while (Date.now() - t0 < maxMs) {
     await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
     if (shouldStop && shouldStop()) break
