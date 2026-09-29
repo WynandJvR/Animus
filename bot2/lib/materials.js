@@ -11,8 +11,11 @@ const LOG_ANY = new RegExp(`^(${WOODS.join('|')})_log$`)
 const PLANKS_ANY = /^(oak|spruce|birch|jungle|acacia|dark_oak|mangrove|cherry|pale_oak|bamboo|crimson|warped)_planks$/
 // the wooden forms a build cell may take in any local wood (the operator's choice)
 const WOOD_FORM = new RegExp(`^(${WOODS.join('|')})_(stairs|slab|fence|fence_gate|door|trapdoor|pressure_plate|button|sign)$`)
-// wool to dye red: any colour but red itself (red wool IS the product, counted on its own)
-const WOOL_TO_DYE = /^(white|orange|magenta|light_blue|yellow|lime|pink|gray|light_gray|cyan|purple|blue|brown|green|black)_wool$/
+// WOOL TO DYE: any colour - the dye's ingredient ('wool', a class), never a stand-in for a coloured cell. Each colour is its
+// own item: white is the sheep's (raw), every other one its dye and a wool (PREFER, below). Mapped to the class, brown
+// wool in the chest counted as purple: the plan asked for no dye, the builder would not place brown in a purple cell, and
+// one purple cell held the castle's band a day (2026-09-29)
+const WOOL_TO_DYE = /^(white|orange|magenta|light_blue|yellow|lime|pink|gray|light_gray|cyan|purple|blue|brown|green|red|black)_wool$/
 const FUEL_ANY = /^(coal|charcoal)$/
 const RED_FLOWER = /^(poppy|red_tulip|rose_bush|beetroot)$/
 
@@ -86,7 +89,6 @@ function nodeOf (name) {
   if (LOG_ANY.test(name)) return 'log'
   if (STRIPPED_LOG.test(name)) return 'stripped_log'
   if (PLANKS_ANY.test(name)) return 'planks'
-  if (WOOL_TO_DYE.test(name)) return 'wool'
   if (FUEL_ANY.test(name)) return 'fuel'
   if (RED_FLOWER.test(name)) return 'red_flower'
   return name
@@ -111,7 +113,8 @@ const PREFER = {
   dirt: { raw: true },
   gravel: { raw: true },
   log: { raw: true },
-  wool: { raw: true }, // sheep: shorn, or killed without shears (food.woolFor)
+  wool: { raw: true }, // sheep: shorn, or killed without shears (food.woolFor) - any colour, to be dyed
+  white_wool: { raw: true }, // (the sheep's own colour: the same trip)
   red_flower: { raw: true }, // poppy / red tulip / rose bush / beetroot
   raw_iron: { raw: true },
   fuel: { raw: true }, // coal from the mine, charcoal from spare logs
@@ -135,15 +138,17 @@ const PREFER = {
   stick: { craft: { planks: 2 }, yield: 4 },
   torch: { craft: { fuel: 1, stick: 1 }, yield: 4 },
   // (the dyes: readDyes, from the graph)
-  // red wool is dyed, then made carpet: 1 dye per wool, 2 wool -> 3 carpet (dyeing the carpets instead costs a
-  // dye per carpet)
-  red_wool: { craft: { red_dye: 1, wool: 1 }, yield: 1 },
-  red_carpet: { craft: { red_wool: 2 }, yield: 3 }
 }
 const COLOURS = ['white', 'orange', 'magenta', 'light_blue', 'yellow', 'lime', 'pink', 'gray', 'light_gray', 'cyan', 'purple', 'blue', 'brown', 'green', 'red', 'black']
 // concrete: the powder set by water - placed at a water's edge and mined back up (forage.harden), the way a player does
 // it at the pond: never water poured over a build
 for (const c of COLOURS) PREFER[c + '_concrete'] = { craft: { [c + '_concrete_powder']: 1 }, yield: 1, by: 'harden', site: 'water' }
+// the coloured wools: dyed, then made carpet - 1 dye per wool, 2 wool -> 3 carpet (dyeing carpets instead costs a dye a
+// carpet; the graph's dye recipe names one member of the wool tag - "black_wool" - never the class)
+for (const c of COLOURS) {
+  if (c !== 'white') PREFER[c + '_wool'] = { craft: { [c + '_dye']: 1, wool: 1 }, yield: 1 }
+  PREFER[c + '_carpet'] = { craft: { [c + '_wool']: 2 }, yield: 3 }
+}
 
 // ALTERNATIVE ROUTES, the cheapest sourceable one taken (route()): the dyes (readDyes) and bone meal - three bone meal
 // from a bone (a skeleton's, when one turns up), else the composter, which grass anywhere feeds.
@@ -208,7 +213,7 @@ const SMELT_INPUTS = new Set(Object.values(PREFER).filter(r => r.smelt).map(r =>
 // another, and how route() picks between sources. Clay is the long pole of a brick build: far water, and a trip per
 // ~250 balls. A biome's own things cost the walk to that biome (blue orchids: swamps; cocoa: jungles).
 const RAW_COST = {
-  clay_ball: 2.5, log: 3, cobblestone: 1, granite: 4, andesite: 4, diorite: 4, tuff: 4, cobbled_deepslate: 2, sand: 1, dirt: 0.5, gravel: 1, fuel: 3, wool: 25, red_flower: 8, raw_iron: 20, raw_copper: 10, leather: 30,
+  clay_ball: 2.5, log: 3, cobblestone: 1, granite: 4, andesite: 4, diorite: 4, tuff: 4, cobbled_deepslate: 2, sand: 1, dirt: 0.5, gravel: 1, fuel: 3, wool: 25, white_wool: 25, red_flower: 8, raw_iron: 20, raw_copper: 10, leather: 30,
   string: 20, sugar_cane: 3, lapis_lazuli: 15, diamond: 120, raw_gold: 30, ink_sac: 25, cocoa_beans: 12, cactus: 12, sea_pickle: 30, pumpkin: 15,
   bamboo: 3, vine: 5, snowball: 2, moss_block: 40, honeycomb: 60, obsidian: 90, short_grass: 1.5, fern: 3, compostable: 1.5,
   beetroot: 20, dead_bush: 6, red_mushroom: 10, brown_mushroom: 10, azalea: 30, flowering_azalea: 30, water_bucket: 8
@@ -443,7 +448,7 @@ function getPlanner (bot) {
 // forage.js adds the rest (plants and dye flowers, shears work, honey, snow, obsidian...) and the places handwork needs
 // (water for concrete). A source searched for round this home and not found (forage.exhausted) has no route until a
 // sighting or a new home says otherwise - its cells wait, and another source of the same thing is taken (route()).
-const OWN_TRIPS = new Set(['clay_ball', 'sand', 'cobblestone', 'log', 'fuel', 'wool', 'red_flower'])
+const OWN_TRIPS = new Set(['clay_ball', 'sand', 'cobblestone', 'log', 'fuel', 'wool', 'white_wool', 'red_flower'])
 function hasRoute (raw) {
   const c = L.craft; const f = L.forage
   if (f.exhausted(raw)) return false

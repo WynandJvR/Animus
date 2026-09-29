@@ -1428,7 +1428,7 @@ function watchExpedition () {
 // AN ANIMAL TRIP THAT FOUND NONE is not made again today: animals round home never respawn, and a wool trip that found no
 // sheep 144-240 out went again every round - five minutes each, nothing placed, all afternoon (2026-09-29). A trip cut
 // short by a stop found nothing because it looked at nothing, and stays open. Open again the next day (notToday, day.js)
-const ANIMAL_RAW = /^(wool|leather|feather)$/
+const ANIMAL_RAW = /^(wool|white_wool|leather|feather)$/
 async function gatherFor (raw, short) {
   reflex.setCautious(true) // (an optional trip does not fight: cover over a charge - reflex.setCautious)
   let ok = false
@@ -1561,7 +1561,7 @@ async function gatherForInner (raw, short) {
       if (cut >= 2) { const r = await base.goHome(bot, { shouldStop: dayStop }); if (r.ok) return (await smelt.burnForCharcoal(bot, w, cut)) > 0 }
       return ok
     }
-    case 'wool': return food.woolFor(bot, Math.min(short, 16), ctx)
+    case 'wool': case 'white_wool': return food.woolFor(bot, Math.min(short, 16), ctx)
     case 'red_flower': return gather.pickPlants(bot, /^(poppy|red_tulip|rose_bush)$/, /^(poppy|red_tulip|rose_bush)$/, Math.min(short, 16), ctx)
     default:
       // forage skills: one gatherer each; a source searched out round home is marked (its cells wait, another is used)

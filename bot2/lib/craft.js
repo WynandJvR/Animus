@@ -69,7 +69,10 @@ GATHER.warped_stem = { blocks: /^warped_stem$/, tool: 'axe', tier: 0, log: true 
 
 const SMELT = { stone: 'cobblestone', glass: 'sand', iron_ingot: 'raw_iron', copper_ingot: 'raw_copper', gold_ingot: 'raw_gold', smooth_stone: 'stone', brick: 'clay_ball', cracked_stone_bricks: 'stone_bricks', charcoal: '#log', cooked_beef: 'beef', cooked_porkchop: 'porkchop', cooked_mutton: 'mutton', cooked_chicken: 'chicken', cooked_rabbit: 'rabbit', cooked_cod: 'cod', cooked_salmon: 'salmon', baked_potato: 'potato', green_dye: 'cactus', lime_dye: 'sea_pickle', terracotta: 'clay' }
 const HUNT = { leather: /^(cow|mooshroom)$/, beef: /^(cow|mooshroom)$/, porkchop: /^pig$/, mutton: /^sheep$/, chicken: /^chicken$/, rabbit: /^rabbit$/, feather: /^chicken$/, string: /^(spider|cave_spider)$/, ink_sac: /^squid$/ }
-for (const c of ['white', 'orange', 'magenta', 'light_blue', 'yellow', 'lime', 'pink', 'gray', 'light_gray', 'cyan', 'purple', 'blue', 'brown', 'green', 'red', 'black']) HUNT[c + '_wool'] = /^sheep$/
+// (white only: the sheep's own colour. Every other wool is DYED - dyeWool - from any wool held: hunted for, purple wool sent
+//  the bot for sheep with 11 brown wool in the chest, and the recipe route asked for the one tag member the data lists,
+//  black wool, 2026-09-29)
+HUNT.white_wool = /^sheep$/
 
 function isLogName (n) { return /_(log|stem)$/.test(n) && !/^stripped_/.test(n) }
 function logCount (bot) { return inv.count(bot, isLogName) }
@@ -293,6 +296,7 @@ async function ensureInner (bot, name, count, ctx, depth, chain) {
     else if (GATHER[name] && !craftableCheaper(bot, name)) ok = await gatherItem(bot, name, short, c2)
     else if (SMELT[name]) ok = await smelt().smeltItem(bot, name, short, c2)
     // wool: shorn when there are shears (any colour counts - it is dyed), killed for otherwise
+    else if (/_wool$/.test(name) && name !== 'white_wool') ok = await dyeWool(bot, name, short, c2)
     else if (HUNT[name]) ok = /_wool$/.test(name) ? await food().woolFor(bot, short, c2) : await food().huntFor(bot, name, short, c2)
     else ok = await craftItem(bot, name, short, c2)
     if (!ok) return inv.count(bot, name) >= count
@@ -482,6 +486,22 @@ async function craftItem (bot, name, n, ctx) {
   if (made > 0) log('craft', `crafted ${made} ${name}`)
   else { log('craft', `craft ${name}: the server did not hand over the result - picking up anything that fell`); await act.collectDrops(bot, { radius: 4, maxMs: 3000 }) }
   return inv.count(bot, name) > before
+}
+
+// A dyed wool: its dye (ensured - the flowers, the mixes), and any OTHER wool - the pack's, the chests', a sheep's last.
+async function dyeWool (bot, name, n, ctx) {
+  const dye = name.replace(/_wool$/, '_dye')
+  const other = () => inv.items(bot).filter(i => /_wool$/.test(i.name) && i.name !== name).reduce((a, i) => a + i.count, 0)
+  if (other() < n) {
+    for (const [k, c] of Object.entries(base().bankCounts()).filter(([k, c]) => /_wool$/.test(k) && k !== name && c > 0).sort((a, b) => b[1] - a[1])) {
+      if (other() >= n) break
+      await base().withdraw(bot, k, Math.min(c, n - other())).catch(() => 0)
+    }
+  }
+  if (other() < n && !await food().woolFor(bot, n - other(), ctx)) { if (!other()) return false }
+  const m = Math.min(n, other())
+  if (!await ensure(bot, dye, m, ctx)) return false
+  return (await craftTimes(bot, name, Math.min(m, inv.count(bot, dye)), ctx)) > 0
 }
 
 // A dyed wool from any other wool: the recipe data lists one member of the wool tag (black_wool), so
