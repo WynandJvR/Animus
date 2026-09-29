@@ -1336,11 +1336,9 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
   const badStands = new Set() // (stands whose walk failed this step: clusterStand passes them by)
   // (where the bot can walk this step - reachFrom, once, lazily; stale when one of our own blocks lands in it (a corridor
   //  cut). A PREFERENCE, not a filter: the stand walks may dig and place, and reach more than the walk-only model; audit)
-  let reach; let reachSaid = false; let reachMs = 0; let reachN = 0; let reachRuns = 0
-  const reachSet = () => {
-    if (reach === undefined) { const tr = Date.now(); reach = reachFrom(bot, world.feetPos(bot)); reachMs += Date.now() - tr; reachRuns++; reachN = reach ? reach.size : -1; if (!reach && !reachSaid) { reachSaid = true; log('build', `the region I can walk from ${move.fmt(world.feetPos(bot))} is over 2000 cells - stands chosen as before this step`) } }
-    return reach
-  }
+  // (the stands' regions this step - standRegion's memo; stale when one of our blocks lands: a corridor cut)
+  let regionMemo = new Map(); let regionMs = 0
+  const reachOf = p => { const t = Date.now(); const me = standRegion(bot, world.feetPos(bot), regionMemo); const r = standRegion(bot, p, regionMemo); regionMs += Date.now() - t; return r.out || r === me }
   const holdBack = new Set() // (cells that would wall the body in from where it stands: later this step, or the next - wallsMeIn)
   // (where a step's time goes: choosing the cell, walking to and placing it - measured, not guessed)
   const prof = { tries: 0, ms: 0, okMs: 0, dist: 0, pick: 0, why: {} }; let tpick = Date.now()
@@ -1348,7 +1346,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
   //  class the step's time goes to, the numbers stripped; audit 2026-09-29)
   const missed = (why, ms) => { const k = String(why || 'unlogged').replace(/\s*[-(].*$/, '').replace(/-?\d+/g, '#').slice(0, 40) || 'unlogged'; const e = prof.why[k] || (prof.why[k] = { n: 0, ms: 0 }); e.n++; e.ms += ms }
   placeProf.reach = 0; placeProf.dig = 0
-  const profLog = () => { if (prof.tries) log('build', `step profile: ${placed}/${prof.tries} placed, ${Math.round(prof.ms / prof.tries)}ms a try (${placed ? Math.round(prof.okMs / placed) : 0}ms a placed block), ${(prof.dist / prof.tries).toFixed(1)} blocks off on average, ${Math.round(prof.pick / Math.max(1, prof.tries))}ms choosing each (holds ${holdsPasses ? Math.round(holdsMs / holdsPasses) : 0}ms a pass${reachRuns ? `, reach ${reachN < 0 ? 'over 2000' : reachN} cells in ${Math.round(reachMs / reachRuns)}ms` : ''}); a try: ${Math.round(placeProf.reach / prof.tries)}ms getting in reach, ${Math.round(placeProf.dig / prof.tries)}ms clearing, ${Math.round((prof.ms - placeProf.reach - placeProf.dig) / prof.tries)}ms placing; ${Math.round((prof.ms - prof.okMs) / 1000)}s of ${Math.round(prof.ms / 1000)}s on the ${prof.tries - placed} misses${Object.keys(prof.why).length ? ' (' + Object.entries(prof.why).sort((a, b) => b[1].ms - a[1].ms).slice(0, 4).map(([k, e]) => `${k} x${e.n} ${Math.round(e.ms / 1000)}s`).join(', ') + ')' : ''}; the walks laid ${reflex.plannerPlacedSince(t0).filter(q => q.x >= job.box.x1 - 3 && q.x <= job.box.x2 + 3 && q.z >= job.box.z1 - 3 && q.z <= job.box.z2 + 3).length} blocks on the site, the builder ${supportsLaid - supports0} supports, ${pillarLaid - pl0} pillar blocks up, ${pillarDug - pd0} taken back down`) } // (where the site's scaffold comes from - ~1 a castle block, 2026-09-29)
+  const profLog = () => { if (prof.tries) log('build', `step profile: ${placed}/${prof.tries} placed, ${Math.round(prof.ms / prof.tries)}ms a try (${placed ? Math.round(prof.okMs / placed) : 0}ms a placed block), ${(prof.dist / prof.tries).toFixed(1)} blocks off on average, ${Math.round(prof.pick / Math.max(1, prof.tries))}ms choosing each (holds ${holdsPasses ? Math.round(holdsMs / holdsPasses) : 0}ms a pass${regionMs ? `, stand regions ${regionMs}ms` : ''}); a try: ${Math.round(placeProf.reach / prof.tries)}ms getting in reach, ${Math.round(placeProf.dig / prof.tries)}ms clearing, ${Math.round((prof.ms - placeProf.reach - placeProf.dig) / prof.tries)}ms placing; ${Math.round((prof.ms - prof.okMs) / 1000)}s of ${Math.round(prof.ms / 1000)}s on the ${prof.tries - placed} misses${Object.keys(prof.why).length ? ' (' + Object.entries(prof.why).sort((a, b) => b[1].ms - a[1].ms).slice(0, 4).map(([k, e]) => `${k} x${e.n} ${Math.round(e.ms / 1000)}s`).join(', ') + ')' : ''}; the walks laid ${reflex.plannerPlacedSince(t0).filter(q => q.x >= job.box.x1 - 3 && q.x <= job.box.x2 + 3 && q.z >= job.box.z1 - 3 && q.z <= job.box.z2 + 3).length} blocks on the site, the builder ${supportsLaid - supports0} supports, ${pillarLaid - pl0} pillar blocks up, ${pillarDug - pd0} taken back down`) } // (where the site's scaffold comes from - ~1 a castle block, 2026-09-29)
   while (Date.now() - t0 < maxMs) {
     await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
     if (shouldStop && shouldStop()) break
@@ -1518,8 +1516,8 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     // (c.ownWay: a cell whose cluster stand's walk ran out goes its own way next time - placeCell's look-at walk, which may
     //  find a wall top; the same unreachable stand was chosen again every step and the look-at walk never ran; audit)
     if (!c.foundation && !c.ownWay && !inReach(c) && ready.length > 2) {
-      const st = clusterStand(bot, c, ready, badStands, reachSet())
-      if (st && st.out) log('build', `the stand ${move.fmt(st)} for ${c.name} at ${move.fmt(c)} is outside where I can walk (${reach ? reach.size : '?'} cells round ${move.fmt(world.feetPos(bot))}) - no stand inside it: tried as a last resort`)
+      const st = clusterStand(bot, c, ready, badStands, reachOf)
+      if (st && st.out) log('build', `the stand ${move.fmt(st)} for ${c.name} at ${move.fmt(c)} is in a closed compartment of the build I am not in (from ${move.fmt(world.feetPos(bot))}) - no other stand: tried as a last resort`)
       if (st && st.n >= 3) {
         const tw = Date.now()
         const r = await goSite(bot, new goals.GoalBlock(st.x, st.y, st.z), 'place').catch(() => null)
@@ -1558,7 +1556,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     if (ok && tdMiss.size) { let w = 0; for (const k of [...tdMiss.keys()]) { const [x, y, z] = k.split(',').map(Number); if (Math.abs(x - c.x) <= 2 && Math.abs(y - c.y) <= 2 && Math.abs(z - c.z) <= 2) { tdMiss.delete(k); w++ } } if (w) { const o = {}; for (const [k, v] of tdMiss) o[k] = v; mem.set('teardownMiss2', o) } }
     if (ok) { for (const [k, f] of cellFails) { const [x, y, z] = k.split(',').map(Number); if (f.at && !f.woke && c.y <= y && y - c.y <= 2 && Math.abs(x - c.x) <= 2 && Math.abs(z - c.z) <= 2) { f.at = 0; f.woke = true } } }
     if (ok && (mem.get().toSwap || {})[key(c)]) mem.update(m => { delete m.toSwap[key(c)] }) // (swapped: off the list - it says what is left; audit)
-    if (ok) { placed++; if (reach && reach.has(key(c))) reach = undefined; if (cellFails.delete(key(c))) saveCellFails(); if (placed % 25 === 0) { const st = status(bot); log('build', `${st.done}/${st.total} placed`) } } else if (c.foundation && c.name === 'torch' && !world.isAirish(world.at(bot, c.x, job.box.y1, c.z))) dropFoundation(bot, c, 'the floor over it is laid - no way to it from above') // (a hollow's torch goes in from above or not at all)
+    if (ok) { placed++; if (regionMemo.size) regionMemo = new Map(); if (cellFails.delete(key(c))) saveCellFails(); if (placed % 25 === 0) { const st = status(bot); log('build', `${st.done}/${st.total} placed`) } } else if (c.foundation && c.name === 'torch' && !world.isAirish(world.at(bot, c.x, job.box.y1, c.z))) dropFoundation(bot, c, 'the floor over it is laid - no way to it from above') // (a hollow's torch goes in from above or not at all)
     else if (c.foundation && sealedIn(bot, c)) dropFoundation(bot, c, 'sealed in') // (a reach miss rests like any cell: a rim cell faces the outside ground - the miss is the stand's, not the cell's, and dropped it is a hole in the wall; audit 2026-09-28)
     else {
       failed.set(key(c), (failed.get(key(c)) || 0) + 1); saveCellFails(); if (failed.get(key(c)) === 1) log('build', `${c.name} at ${move.fmt(c)} won't place (${lastPlaceFail || 'unlogged'}) - leaving it for later`)
@@ -1825,18 +1823,26 @@ function walkModel (bot, isC = () => false) {
   }
   return { air, st, next }
 }
-// Where the bot can WALK from f - the stand's reach (a stand no walk gets to is no stand: 0 of 6 placed, three stands in
-// another of the castle's compartments, 155s, 2026-09-29; audit). A Set of cell keys, or null over the cap - unknown, never
-// "only these" (a truncated set would shelve good stands at random)
-function reachFrom (bot, f, cap = 2000) {
+// A STAND'S REGION: whether the walk-only region round a cell gets out of the build (the box's edge, or a sky column a
+// tower may climb) - the same search as wayOut, from the stand. A stand whose region is closed off inside the build is in
+// one of its compartments: reachable only from inside it (a stand no walk gets to is no stand: 0 of 6 placed, three stands
+// in the castle's closed compartments, 155s, 2026-09-29; audit). A search from the BOT ran over the whole outdoors (over
+// 2000 cells, 233ms, no answer) - a region is small, and its verdict is every one of its cells' (memo: key -> region)
+function standRegion (bot, p, memo) {
+  const k0 = key(p); const hit = memo.get(k0); if (hit) return hit
+  const b0 = job.box; const inBox = q => q.x >= b0.x1 && q.x <= b0.x2 && q.z >= b0.z1 && q.z <= b0.z2
   const W = walkModel(bot)
-  const seen = new Set([key(f)]); const q = [{ x: f.x, y: f.y, z: f.z }]; let i = 0 // (an index, never shift(): O(1) a pop)
+  const r = { out: false }
+  const seen = new Set([k0]); const q = [{ x: p.x, y: p.y, z: p.z }]; let i = 0
   while (i < q.length) {
-    if (seen.size > cap) return null
-    const p = q[i++]
-    for (const n of W.next(p)) { const k = key(n); if (!seen.has(k)) { seen.add(k); q.push(n) } }
+    if (seen.size > 300) { r.out = true; break } // (a region this big is no compartment)
+    const c = q[i++]
+    if (!inBox(c)) { r.out = true; break }
+    if (!job.index.has(key(c)) && world.openSky(bot, c)) { let clear = true; for (let y = c.y + 1; y <= b0.y2; y++) { const j = job.index.get(`${c.x},${y},${c.z}`); if (j && !j.clear && !(j.foundation && j.name === 'cobblestone')) { clear = false; break } } if (clear) { r.out = true; break } }
+    for (const n of W.next(c)) { const k = key(n); if (!seen.has(k)) { seen.add(k); q.push(n) } }
   }
-  return seen
+  for (const k of seen) memo.set(k, r)
+  return r
 }
 let lastExit = null
 function wayOutPoint (bot, from = null) { lastExit = null; return wayOut(bot, { x: NaN, y: NaN, z: NaN }, from, false) ? lastExit : null }
@@ -1874,7 +1880,7 @@ function dropFoundation (bot, c, why) {
 // The stand beside `c` (feet within 3 across, two below to one above) from which the most ready cells are in reach: clear
 // to stand in, no cell of the job at its feet or head, never on a lip, and `c` itself in reach. {x,y,z,n} or null.
 const EYE = 1.62; const REACH = 4.2
-function clusterStand (bot, c, ready, bad = new Set(), reach = null) {
+function clusterStand (bot, c, ready, bad = new Set(), reachOf = null) {
   const near = ready.filter(q => Math.abs(q.x - c.x) <= 8 && Math.abs(q.z - c.z) <= 8 && Math.abs(q.y - c.y) <= 6)
   // (a cell counts for a stand only if it has a face to click on the stand's side - within 4.2 through a wall is no reach:
   //  each cell's usable faces, once; audit 2026-09-28)
@@ -1893,10 +1899,10 @@ function clusterStand (bot, c, ready, bad = new Set(), reach = null) {
     const d = world.dist3(p, me)
     // (a stand the bot can walk to first, whatever it serves: an unreachable one is tried only when no other stands; reach
     //  null = unknown, no preference)
-    const inR = !reach || reach.has(key(p)) ? 1 : 0
+    const inR = !reachOf || reachOf(p) ? 1 : 0
     if (!best || inR > best.inR || (inR === best.inR && (n > best.n || (n === best.n && d < best.d)))) best = { x: p.x, y: p.y, z: p.z, n, d, inR }
   }
-  if (best && reach && !best.inR) best.out = true
+  if (best && reachOf && !best.inR) best.out = true
   return best
 }
 
