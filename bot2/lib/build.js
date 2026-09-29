@@ -13,6 +13,7 @@ const fs = require('fs')
 const path = require('path')
 const { Vec3 } = require('vec3')
 const { goals } = require('mineflayer-pathfinder')
+const rooms = require('./rooms')
 const world = require('./world')
 const inv = require('./inventory')
 const move = require('./move')
@@ -534,6 +535,7 @@ const waitCols = new Map() // (x,z -> lowest open waiting hole: detachedItems)
 // (sealsBelow guarded the cell over a hole; the wall beside it closed it a side at a time: 46 holes "placeable from
 // beside while it lasts", 2026-09-29; audit). Held, and anchoring no band. (cell keys: detachedItems)
 const holdAround = new Set()
+const doorwaySaid = new Set() // (doorways said once to be kept open: the room rule's line)
 const compartmentSaid = new Set() // (cells said once to wait on a closed compartment: the step's skip)
 // (sound only with ONE placement between rebuilds - the step loop's pass places one cell (placeCell) and every pass begins
 //  with detachedItems. A pass that placed several would have to rebuild this inside its own loop; audit)
@@ -1555,6 +1557,20 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       log('build', `${c.name} at ${move.fmt(c)}: its stand could not be reached${n ? ` - ${n} cells round it rest with it` : ''}`)
       continue
     }
+    // THE DOORWAY STAYS OPEN until the room behind it is done - a player leaves the gap until the room's inside is built:
+    // closed on its own interior, a room's cells waited for good (0 of 6, stands in compartments the builder had shut,
+    // 2026-09-29; audit). rooms.closesRoom: a doorway's foot or lintel, never a door; a side's walk region closed with a
+    // cell of the build placeable only from within. Held this step with a SHARED miss (never tried - no licence to cover)
+    if (!c.attach) {
+      const jobUnbuilt = (x, y, z) => { const q = job.index.get(`${x},${y},${z}`); return !!q && !q.clear && cellDone(bot, q) !== true }
+      const work = todo.filter(q => !q.clear && Math.abs(q.x - c.x) <= 12 && Math.abs(q.z - c.z) <= 12 && Math.abs(q.y - c.y) <= 4)
+      const held = rooms.closesRoom(roomWorld(bot), c, { box: job.box, jobUnbuilt, work, standsOf: q => standsOf(bot, q) })
+      if (held) {
+        holdBack.add(key(c)); { const prev = cellFails.get(key(c)); cellFails.set(key(c), { n: failed.get(key(c)) + 1, at: Date.now(), shared: prev ? !!prev.shared : true }) }
+        if (!doorwaySaid.has(key(c))) { doorwaySaid.add(key(c)); log('build', `keeping the doorway at ${move.fmt(c)} open (${c.name} waits) - the room behind it still has ${held.cell.name} at ${move.fmt(held.cell)} to place, from inside only`) }
+        tpick = Date.now(); continue
+      }
+    }
     if (wallsMeIn(bot, c)) { holdBack.add(key(c)); log('build', `${c.name} at ${move.fmt(c)} would wall me in from ${move.fmt(world.feetPos(bot))} - later`); tpick = Date.now(); continue }
     const ok = await placeCell(bot, c)
     prof.tries++; prof.ms += Date.now() - tp; prof.dist += d0; if (ok) prof.okMs += Date.now() - tp; else missed(lastPlaceFail, Date.now() - tp)
@@ -1792,49 +1808,19 @@ function wallsMeIn (bot, c, from = null) {
 // from (the planner never plans that tower: escapeUp walks here first and climbs; audit 2026-09-29)
 // The edge of a door's cell its panel stands on - closed: opposite its facing; open: turned to the hinge's side (vanilla's
 // DoorBlock shapes). The lower half carries facing, hinge and open.
-function doorPanel (door) {
-  let pr = {}; try { pr = door.getProperties() || {} } catch {}
-  const f = pr.facing; if (!OPP[f]) return null
-  const open = pr.open === true || pr.open === 'true'
-  return !open ? OPP[f] : (pr.hinge === 'right' ? CW[f] : CCW[f])
-}
-function edgeOf (dx, dz) { return dx === 1 ? 'east' : dx === -1 ? 'west' : dz === 1 ? 'south' : 'north' }
+// (the door panel and the edge names live in rooms.js with the step model - one copy)
+function doorPanel (door) { return rooms.doorPanel(door) }
+function edgeOf (dx, dz) { return rooms.edgeOf(dx, dz) }
 // THE WALK'S STEP MODEL - one copy for the way-out search and the stand's reach: what a body standing at p may step to next
 // (walk only: no dig, no place). isC: a cell taken as solid (wayOut's candidate block).
 // (a door or a fence gate is a way through - the bot crosses them; counted solid, a room behind a door read as sealed and
 //  every cell placed from inside it was held back, 2026-09-29)
 // (and an OPEN trapdoor - an edge, not a wall: the planner's rule (move.js panel edges). Counted solid, the room behind the
 //  castle's inner trapdoors read as sealed and the escape dug out a trapdoor of the build, 2026-09-29)
-function walkModel (bot, isC = () => false) {
-  const passable = b => world.isAirish(b) || world.isOpenTrapdoor(b) || (/_door$|_fence_gate$/.test(b.name) && !/^iron_door$/.test(b.name))
-  const air = (x, y, z) => { if (isC(x, y, z)) return false; const b = world.at(bot, x, y, z); return !!b && passable(b) }
-  // (a door cell is stood in on its floor - world.standable wants airish feet, a door is not - and it is entered or left
-  //  through any edge but the one its panel stands on: closed, the edge opposite its facing; open, swung to the hinge's
-  //  side. "Passable every way" read a one-cell pocket beside an open door as a way out, and the search that could not
-  //  step into a door at all read the room as sealed - the physics decides, 2026-09-29; audit)
-  const st = (x, y, z) => { if (!air(x, y, z) || !air(x, y + 1, z)) return false; if (isC(x, y - 1, z)) return true; const fb = world.at(bot, x, y, z); if (fb && (/_door$/.test(fb.name) || world.isOpenTrapdoor(fb))) { const fl = world.at(bot, x, y - 1, z); return !!fl && world.isSolid(fl) && !world.isOpenTrapdoor(fl) } return world.standable(bot, x, y, z) }
-  // (an open door's or trapdoor's plate by world.plateEdge - the planner's own model, one copy; a CLOSED door by its own
-  //  panel here, which the planner leaves to crossDoor) - at the body's feet or head: a step across it is no step
-  const panelOf = b => { if (!b) return null; const v = world.plateEdge(b); if (v) return edgeOf(v[0], v[1]); if (/_door$/.test(b.name)) return doorPanel(b); return null }
-  const edgeShut = (x, y, z, dx, dz) => [world.at(bot, x, y, z), world.at(bot, x, y + 1, z)].some(b => panelOf(b) === edgeOf(dx, dz))
-  const next = p => {
-    const out = []
-    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-      const x = p.x + dx; const z = p.z + dz
-      if (edgeShut(p.x, p.y, p.z, dx, dz)) continue // (out of a door's or trapdoor's cell through its plate: no)
-      if (edgeShut(x, p.y, z, -dx, -dz)) continue // (into one through its plate: no)
-      for (let dy = 1; dy >= -world.SAFE_DROP; dy--) {
-        const y = p.y + dy
-        if (dy === 1 && !air(p.x, p.y + 2, p.z)) continue // (a step up wants the head room to jump)
-        if (dy < 0) { let open = true; for (let yy = y + 2; yy <= p.y + 1; yy++) if (!air(x, yy, z)) open = false; if (!open) break } // (a drop wants its column open)
-        if (!st(x, y, z)) continue
-        out.push({ x, y, z }); break
-      }
-    }
-    return out
-  }
-  return { air, st, next }
-}
+// THE WALK'S STEP MODEL - rooms.js, the one copy (the way-out search, the stands' regions, the room rule), over the
+// live world
+function roomWorld (bot) { return { at: (x, y, z) => world.at(bot, x, y, z), isAirish: world.isAirish, isOpenTrapdoor: world.isOpenTrapdoor, isSolid: world.isSolid, standable: (x, y, z) => world.standable(bot, x, y, z), plateEdge: world.plateEdge, SAFE_DROP: world.SAFE_DROP } }
+function walkModel (bot, isC = () => false) { return rooms.walkModel(roomWorld(bot), isC) }
 // A STAND'S REGION: whether the walk-only region round a cell gets out of the build (the box's edge, or a sky column a
 // tower may climb) - the same search as wayOut, from the stand. A stand whose region is closed off inside the build is in
 // one of its compartments: reachable only from inside it (a stand no walk gets to is no stand: 0 of 6 placed, three stands
@@ -1893,6 +1879,18 @@ function dropFoundation (bot, c, why) {
 // The stand beside `c` (feet within 3 across, two below to one above) from which the most ready cells are in reach: clear
 // to stand in, no cell of the job at its feet or head, never on a lip, and `c` itself in reach. {x,y,z,n} or null.
 const EYE = 1.62; const REACH = 4.2
+// Every cell a body could stand at to place c - clusterStand's own candidates (standable, within reach, no cell of the build
+// at the feet or head): the room rule asks whether all of them lie inside a room
+function standsOf (bot, c) {
+  const within = (p, q) => { const dx = q.x + 0.5 - (p.x + 0.5); const dy = q.y + 0.5 - (p.y + EYE); const dz = q.z + 0.5 - (p.z + 0.5); return dx * dx + dy * dy + dz * dz <= REACH * REACH }
+  const out = []
+  for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) for (let dy = -2; dy <= 1; dy++) {
+    const p = { x: c.x + dx, y: c.y + dy, z: c.z + dz }
+    if (!within(p, c) || job.index.has(key(p)) || job.index.has(key({ x: p.x, y: p.y + 1, z: p.z })) || !world.standable(bot, p.x, p.y, p.z)) continue
+    out.push(p)
+  }
+  return out
+}
 function clusterStand (bot, c, ready, bad = new Set(), reachOf = null) {
   const near = ready.filter(q => Math.abs(q.x - c.x) <= 8 && Math.abs(q.z - c.z) <= 8 && Math.abs(q.y - c.y) <= 6)
   // (a cell counts for a stand only if it has a face to click on the stand's side - within 4.2 through a wall is no reach:
