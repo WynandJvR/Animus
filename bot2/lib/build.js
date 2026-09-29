@@ -696,7 +696,7 @@ async function goSite (bot, goal, label, { place = true, dig = (job && job.cells
     // (no walk out - the rim closed round the hollow as its foundation went in: the climb straight up, which takes our own
     //  floor block over the head and the builder puts it back. Leg after leg "stuck" from a cell a step off the last one
     //  never tripped the same-cell climb, 2026-09-29)
-    if ((!out || !out.ok) && underTheBuild(bot)) { log('build', `no walk out from under the build - climbing out`); await move.escapeUp(bot).catch(() => false) }
+    void out // (a leg failed below the floor climbs out inside move.travel itself - one rule for every walk; audit)
   }
   const r = await move.runGoal(bot, goal, { timeoutMs: 30000, stuckMs: 8000, movements: siteMovements(bot, { place, dig }) })
   if (!r.ok && r.why === 'interrupted') { await reflex.waitClear(); return move.runGoal(bot, goal, { timeoutMs: 30000, stuckMs: 8000, movements: siteMovements(bot, { place, dig }) }) }

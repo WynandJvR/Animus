@@ -985,6 +985,13 @@ async function travel (bot, target, opts = {}) {
       continue
     }
     if (moved > 8) { legFails = 0; continue } // partial progress is progress
+    // (a leg failed from inside a build's footprint below its floor - the hollow, a pit: the planner never plans the tower
+    //  out, and leg after leg from cells a step apart never trips the same-cell climb; circled three minutes under the
+    //  castle, 2026-09-29. The climb straight out, then the legs go on; audit)
+    if (isVerdict(r)) {
+      const jb = require('./build').getJob(); const bb = jb && jb.box; const fp = bot.entity.position.floored()
+      if (bb && fp.x >= bb.x1 && fp.x <= bb.x2 && fp.z >= bb.z1 && fp.z <= bb.z2 && fp.y < bb.y1) { log('move', `${label}: no walk out from below the build's floor - climbing out`); await escapeUp(bot).catch(() => false) } // (and the failed leg still counts: six and the walk ends)
+    }
     if (++legFails >= 6) { log('move', `${label}: stuck ${Math.round(dxz)}b short at ${fmt(bot.entity.position)} (${r.why})`); return { ok: false, why: 'stuck: ' + r.why } }
   }
   return { ok: false, why: 'timeout' }
