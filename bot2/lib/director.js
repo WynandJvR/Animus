@@ -1059,6 +1059,7 @@ let demandTrees = 0
 // Wool the build still needs (its plan's raw wool), with demandTrees: the sheep pen is built for it.
 let demandWool = 0
 const cellCost = new Map() // item -> { raws, c }: one cell's raw cost by its recipe (stock-free) - pickRaw's order
+let cellCostPlanner = null // (the planner the memo was priced by: a new one - reset, new routes, new home - clears it; audit)
 // The pen's arguments: the wool wanted, and the wheat it may have - pack and bank, bread's share (three loaves) kept back
 // while the bread is short
 function penArgs () {
@@ -1344,6 +1345,7 @@ async function castleWorkInner () {
   //  priced nothing and sorted LAST, behind the chains with nothing banked; audit. A cell's cost is the job's constant:
   //  memoized an item)
   const perCell = {}
+  { const pl = mats.getPlanner(bot); if (pl !== cellCostPlanner) { cellCost.clear(); cellCostPlanner = pl } }
   for (const item of Object.keys(next)) {
     let m = cellCost.get(item)
     if (!m) {
