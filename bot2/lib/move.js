@@ -211,7 +211,10 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
     if (hollowGen !== pathGen || hollow.size > 20000) { hollow.clear(); hollowGen = pathGen }
     const k = p.x + ',' + p.z
     let v = hollow.get(k)
-    if (v === undefined) { v = j.index.has(`${p.x},${b0.y1},${p.z}`) ? 40 : 0; hollow.set(k, v) }
+    // (and a PIT inside the footprint with no floor cell over it - ground 3 or more under the floor's level: a hollow whose
+    //  lid is not built, or never will be. The unbuilt corner's walks went down into one and every walk out failed,
+    //  2026-09-29; audit)
+    if (v === undefined) { const gy = world.groundY(bot, p.x, p.z, b0.y1); v = (j.index.has(`${p.x},${b0.y1},${p.z}`) || (gy != null && gy <= b0.y1 - 3)) ? 40 : 0; hollow.set(k, v) }
     return v
   })
   // (a cell a fall began from - and its sides, at its height: dear, not refused; the list is reflex.js's fall record)
