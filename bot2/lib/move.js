@@ -723,7 +723,14 @@ function fmt (p) { return p ? `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floo
 // up and the next task tried again (2026-09-25). The second give-up in five minutes from the same cell: climb straight
 // out, the way a player does - dig what is over the head (never a finished build block: act.dig guards those) and
 // tower up on whatever filler the pack holds, until there is open sky over us.
-const giveUps = new Map() // cell -> [times]
+// (give-ups by PLACE, not by cell: a trapped bot steps aside a block after each, and keyed by its exact cell the count
+//  spread over three cells and never reached two - nor did a step aside ever mean out: it wiped the count, give up,
+//  step aside, give up, eleven times in a one-high crawlspace, 2026-09-29. Counted within 2 blocks over 5 minutes;
+//  cleared only by a real way out - through our wall, or climbed out)
+const giveUps = [] // [{ x, y, z, t }]
+const GIVEUP_NEAR = 2
+function giveUpsNear (p, now = Date.now()) { return giveUps.filter(g => now - g.t < 5 * 60000 && Math.abs(g.x - p.x) <= GIVEUP_NEAR && Math.abs(g.y - p.y) <= GIVEUP_NEAR && Math.abs(g.z - p.z) <= GIVEUP_NEAR).length }
+function clearGiveUps (p) { for (let i = giveUps.length - 1; i >= 0; i--) { const g = giveUps[i]; if (Math.abs(g.x - p.x) <= GIVEUP_NEAR && Math.abs(g.y - p.y) <= GIVEUP_NEAR && Math.abs(g.z - p.z) <= GIVEUP_NEAR) giveUps.splice(i, 1) } }
 async function stepUpSide (bot) {
   const act = require('./act')
   const f = bot.entity.position.floored()
@@ -756,9 +763,10 @@ function underBuildFloor (bot) {
   return !!bb && p.x >= bb.x1 && p.x <= bb.x2 && p.z >= bb.z1 && p.z <= bb.z2 && p.y < bb.y1
 }
 function stuckHereAgain (bot) {
-  const k = fmt(bot.entity.position); const now = Date.now()
-  const t = (giveUps.get(k) || []).filter(x => now - x < 5 * 60000); t.push(now); giveUps.set(k, t)
-  return t.length >= 2
+  const p = bot.entity.position.floored(); const now = Date.now()
+  for (let i = giveUps.length - 1; i >= 0; i--) if (now - giveUps[i].t >= 5 * 60000) giveUps.splice(i, 1)
+  giveUps.push({ x: p.x, y: p.y, z: p.z, t: now })
+  return giveUpsNear(p, now) >= 2
 }
 let escaping = false // (its own walks give up too: never re-entered)
 async function escapeUp (bot) {
@@ -783,7 +791,7 @@ async function escapeUpInner (bot) {
     //  walk cannot take - a one-high gap between two built layers, cells of the layer between out of stock: the bot walked
     //  into it at the one open column and 'gave up (stuck x3)' eleven times, the search still finding "a way", 2026-09-29.
     //  The physics decides; audit)
-    const proven = (giveUps.get(fmt(bot.entity.position)) || []).filter(x => Date.now() - x < 5 * 60000).length >= 3
+    const proven = giveUpsNear(bot.entity.position.floored()) >= 3
     const searchOut = inFoot && build.wayOut(bot, { x: NaN, y: NaN, z: NaN }, null, false)
     // (the proof over-ruled the search: what it thought the way was - the search is fixed there, the proof stays; audit)
     if (inFoot && proven && searchOut) { const ex = build.wayOutPoint(bot); log('move', `stuck three times here though the way-out search finds an exit at ${ex ? fmt(ex) : '?'} - the walks prove it wrong: breaking out`) }
@@ -827,7 +835,7 @@ async function escapeUpInner (bot) {
           at = bot.entity.position.floored()
           if (build.wayOut(bot, { x: NaN, y: NaN, z: NaN }, null, false)) { log('move', `enclosed: a way out from ${fmt(at)}`); break }
         }
-        giveUps.delete(fmt(f0))
+        clearGiveUps(f0)
         return true
       }
       log('move', `enclosed by the build at ${fmt(f0)} - no wall beside me to open (supports or no open ground past it)`)
@@ -845,7 +853,7 @@ async function escapeUpInner (bot) {
     }
     for (const c of cells.sort((a, b) => a.d - b.d).slice(0, 4)) {
       const r = await goTo(bot, new goals.GoalBlock(c.x, c.y, c.z), { timeoutMs: 8000, stuckMs: 4000, dig: false, place: false, label: 'step aside' })
-      if (r.ok) { giveUps.delete(fmt(f0)); log('move', `stuck at ${fmt(f0)} - stepped aside to ${fmt(c)}`); return true }
+      if (r.ok) { log('move', `stuck at ${fmt(f0)} - stepped aside to ${fmt(c)}`); return true } // (a step aside is not out: the count stands)
     }
   }
   // (below the build's floor inside its footprint: to the way out first - a column outside, or the open-sky cell a tower
@@ -891,7 +899,7 @@ async function escapeUpInner (bot) {
     // cells over a solid side block cleared, and up onto it
     if (!await stepUpSide(bot)) { log('move', `climbing out: no way up from ${fmt(bot.entity.position)} (no tower, no side to cut a step in)`); return false }
   }
-  giveUps.delete(fmt(f0))
+  clearGiveUps(f0)
   log('move', `climbed out: from ${fmt(f0)} to ${fmt(bot.entity.position)}`)
   return true
 }
