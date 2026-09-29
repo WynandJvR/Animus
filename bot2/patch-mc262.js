@@ -68,7 +68,11 @@ const EDITS = [
   // last - and left `placing` set: every physics tick after read placingBlock.y and threw, 20 a second, the body frozen
   // (2026-09-29, the sheep pen's gate). Placing ends when there is nothing left to place.
   ['mineflayer-pathfinder/index.js', "          lockUseBlock.release()\n          placingBlock = nextPoint.toPlace.shift()\n", "          lockUseBlock.release()\n          placingBlock = nextPoint.toPlace.shift()\n          if (!placingBlock) placing = false // (the last one: nothing left to place)\n"],
-  ['mineflayer-pathfinder/index.js', "      const block = stateMovements.getScaffoldingItem()\n", "      if (!placingBlock) { placing = false; return } // (nothing to place: never read .y of nothing)\n      const block = stateMovements.getScaffoldingItem()\n"]
+  ['mineflayer-pathfinder/index.js', "      const block = stateMovements.getScaffoldingItem()\n", "      if (!placingBlock) { placing = false; return } // (nothing to place: never read .y of nothing)\n      const block = stateMovements.getScaffoldingItem()\n"],
+  // ...and ANY throw in the pathfinder's tick costs a path reset, never the reflexes: it is a physicsTick listener attached
+  // before bot2's, and a listener that throws ends the emit - the edge guard, the creeper hold, air, fight and eat never
+  // ran for the two minutes above (audit). bot2 counts 'path_error' (move.js)
+  ['mineflayer-pathfinder/index.js', "  function monitorMovement () {\n", "  function monitorMovement () { try { monitorMovement0() } catch (e) { try { resetPath('path_error') } catch {} bot.emit('path_error', e) } } // (bot2: a throw is one reset)\n  function monitorMovement0 () {\n"]
 ]
 function patchGates () {
   for (const [f, from, to] of EDITS) {

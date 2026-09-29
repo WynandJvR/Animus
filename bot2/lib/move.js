@@ -12,7 +12,14 @@ function bindReflex (r) { reflexRef = r }
 let botRef = null
 // (a replan - the planner's own digs and places changed the ground - drops every movements' drop memo: audit #24)
 let pathGen = 0
-function bindBot (b) { botRef = b; try { b.on('path_reset', () => { pathGen++ }) } catch {} }
+// (a throw inside the pathfinder's tick - caught by the patched wrapper, one path reset: counted, and said at most every
+//  10s with its first stack line - the watchdog alarms on "path_error"; patch-mc262.js)
+let pathErrors = 0; let pathErrSaid = 0
+function bindBot (b) {
+  botRef = b
+  try { b.on('path_reset', () => { pathGen++ }) } catch {}
+  try { b.on('path_error', e => { pathErrors++; if (Date.now() - pathErrSaid > 10000) { pathErrSaid = Date.now(); require('./log').log('move', `path_error #${pathErrors}: ${e && e.message} ${((e && e.stack) || '').split(/\r?\n/)[1] || ''} - the path was reset`) } }) } catch {}
+}
 function reflexActive () { return reflexRef ? reflexRef.active() : null }
 
 // Zones the bot must never dig/place in unless the caller says so (its own base, a build site).
