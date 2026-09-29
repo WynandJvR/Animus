@@ -1241,6 +1241,9 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       // (the band as it ended the step - which layer anchors it, and by which cell: a step that ends "waiting on X" after
       //  a few blocks said nothing of what held the band down, 2026-09-28)
       const anchor = todo.find(anchors)
+      // (an anchor IN HAND but never doable - the cell under it waits - is a miss here too; one NOT in hand is the supply's
+      //  wait, which steers the gathering, and is left to hold; audit)
+      if (anchor && has(anchor) && !holdBack.has(key(anchor))) { failed.set(key(anchor), (failed.get(key(anchor)) || 0) + 1); saveCellFails(); log('build', `${anchor.name} at ${move.fmt(anchor)} anchors the band but is never doable (the cell under it waits) - a miss: the band rises past it`) }
       if (placed) log('build', `step ended: band anchored at y${lowestAll}${anchor ? ' by ' + stepItem(bot, anchor) + '@' + anchor.x + ',' + anchor.y + ',' + anchor.z + (has(anchor) ? ' (in hand)' : ' (not in hand)') : ''}, ${structural.length} structural in hand (min y${minY}), ${todo.length} todo`)
       profLog(); if (!placed) log('build', `nothing doable: lowest structural y${lowestAll}, ${todo.length} todo, ${structural.length} structural in hand (min y${minY}), ${attached.length} attached ready, ${waitingHolds ? 'waiting on ' + waiting : (waiting ? waiting + ' missing (detached - holding nothing)' : 'waiting on nothing')}`); return { placed, blockedOn: waiting, blockedHolds: waitingHolds, done: false } }
     const me = bot.entity.position
@@ -1260,6 +1263,9 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       //  candle that stands on it held the castle at y120 for two hours, 2026-09-29. Unready at the step's end is a miss:
       //  it rests like any, the band rises past it, a block placed beside it wakes it)
       for (const c of doable) if (!holdBack.has(key(c))) failed.set(key(c), (failed.get(key(c)) || 0) + 1)
+      // (and the ANCHOR itself when it was never even doable - kept out by the cell under it: a stair over a coarse-dirt
+      //  cell of grass, coarse dirt out of stock, anchored the band while nothing was ever tried; audit)
+      if (anchor && has(anchor) && !doable.includes(anchor) && !holdBack.has(key(anchor))) { failed.set(key(anchor), (failed.get(key(anchor)) || 0) + 1); log('build', `${anchor.name} at ${move.fmt(anchor)} anchors the band but is never doable (the cell under it waits) - a miss: the band rises past it`) }
       // (and a log's axis relaxes on these misses too: that rule lived in the try, and a log never tried - a z-axis oak log
       //  between two unplaced z-axis logs - anchored the band round after round, 2026-09-29)
       for (const c of doable) if (c.want && c.want.axis && !axisRelaxed(c) && failsOf(c) >= 3 && !(cellFails.get(key(c)) || {}).shared) { relaxAxis(c); log('build', `${c.name} at ${move.fmt(c)} goes in with any axis (never ready with its own)`) }
