@@ -797,7 +797,10 @@ move.setProtector((block, purpose) => {
     if (!c || c.clear) continue
     // (a FILL never goes into a cell of the build, placed or not: the fill's target is air, and "finished" was never the
     //  question - dirt in a cell still waiting for its block is a block in the castle's way; audit 2026-09-28)
-    if (purpose === 'fill') return true
+    // (but a FOUNDATION cell of filler - the rim wall, a hole's column - takes a filler block as its own: a tower up it is
+    //  the fill itself. Refused, the climb out of a hole column under an open trapdoor found "no tower - a cell of the
+    //  build" and the bot sat in the hollow, 2026-09-29. Not a soil top under a plant: that one wants dirt only)
+    if (purpose === 'fill') { if (c.foundation && c.name === 'cobblestone') continue; return true }
     if (purpose === 'dig' && c.door && j !== job) continue
     if (partOk(c, block.name)) return true
   }
@@ -1502,7 +1505,7 @@ function wayOut (bot, c, from = null, withC = true) {
       // (open sky is out only where a tower may rise: below the floor a column with a cell of the build over it is the
       //  climb's "no tower - a cell of the build", and read as a way out it kept the wall-opening escape from running -
       //  the south rim's trench, walk and climb failing in turn, 2026-09-29)
-      if (!job.index.has(key(p)) && world.openSky(bot, p) && !isC(p.x, p.y, p.z)) { let clear = true; for (let y = p.y + 2; y < p.y + 22; y++) if (isC(p.x, y, p.z)) clear = false; if (p.y < b0.y1) for (let y = p.y + 1; y <= b0.y1 + 1; y++) if (job.index.has(`${p.x},${y},${p.z}`)) clear = false; if (clear) { lastExit = p; return true } }
+      if (!job.index.has(key(p)) && world.openSky(bot, p) && !isC(p.x, p.y, p.z)) { let clear = true; for (let y = p.y + 2; y < p.y + 22; y++) if (isC(p.x, y, p.z)) clear = false; if (p.y < b0.y1) for (let y = p.y + 1; y <= b0.y1 + 1; y++) { const q = job.index.get(`${p.x},${y},${p.z}`); if (q && !(q.foundation && q.name === 'cobblestone')) clear = false } /* (a filler foundation cell a tower may rise through: the protector's rule) */ if (clear) { lastExit = p; return true } }
       for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
         const x = p.x + dx; const z = p.z + dz
         for (let dy = 1; dy >= -world.SAFE_DROP; dy--) {
