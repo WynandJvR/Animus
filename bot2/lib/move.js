@@ -247,6 +247,10 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
   // never a stepping stone on a chest's lid: it shuts the chest (audit R6, 2026-09-27)
   const lids = new Set((require('./memory').get().chests || []).map(c => `${c.x},${c.y + 1},${c.z}`))
   m.exclusionAreasPlace.push(block => (block && block.position && lids.has(`${block.position.x},${block.position.y},${block.position.z}`)) ? 100 : 0)
+  // (never a stepping stone in a cell of the build, placed or not - the protector's 'fill' rule, the one the towers ask: the
+  //  planner laid cobble into the castle's unbuilt cells, and a site clearing spent 176s taking 14 of them back out,
+  //  2026-09-29)
+  m.exclusionAreasPlace.push(block => isProtected(block, 'fill') ? 100 : 0)
   m.exclusionAreasPlace.push(block => {
     if (!block || !block.position) return 0
     const z = inZone(block.position); if (z && z.label === 'farm') return 101; if (z && !allowed.has(z.label)) return 100
