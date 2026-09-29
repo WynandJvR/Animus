@@ -207,7 +207,15 @@ async function withdraw (bot, name, n, { maxWalk = 64 } = {}) {
   return got
 }
 
+// (never re-entered: a full pack made the chest's own log gather deposit, the deposit wanted a new chest, the chest's craft
+//  gathered a log... - 2,829 lines in ten minutes, a loop with no wait in it, 2026-09-29. Nested, it says no)
+let placingChest = false
 async function placeChest (bot) {
+  if (placingChest) return null
+  placingChest = true
+  try { await new Promise(r => setImmediate(r)); return await placeChestInner(bot) } finally { placingChest = false }
+}
+async function placeChestInner (bot) {
   const h = home()
   if (!inv.has(bot, 'chest')) { if (!await craft().ensure(bot, 'chest', 1, { noWithdraw: true })) return null }
   // making the chest may have taken us to a tree: storage goes AT home
