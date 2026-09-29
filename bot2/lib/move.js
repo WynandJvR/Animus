@@ -784,7 +784,10 @@ async function escapeUpInner (bot) {
     //  into it at the one open column and 'gave up (stuck x3)' eleven times, the search still finding "a way", 2026-09-29.
     //  The physics decides; audit)
     const proven = (giveUps.get(fmt(bot.entity.position)) || []).filter(x => Date.now() - x < 5 * 60000).length >= 3
-    if (inFoot && (proven || !build.wayOut(bot, { x: NaN, y: NaN, z: NaN }, null, false))) {
+    const searchOut = inFoot && build.wayOut(bot, { x: NaN, y: NaN, z: NaN }, null, false)
+    // (the proof over-ruled the search: what it thought the way was - the search is fixed there, the proof stays; audit)
+    if (inFoot && proven && searchOut) { const ex = build.wayOutPoint(bot); log('move', `stuck three times here though the way-out search finds an exit at ${ex ? fmt(ex) : '?'} - the walks prove it wrong: breaking out`) }
+    if (inFoot && (proven || !searchOut)) {
       // (a door beside the bot is "a way" to wayOut, but crossDoor goes through a door only along its facing, from a step in
       //  front or behind: from its side - a one-cell pocket next to a double door - it never got through, and the log said
       //  "no way out" beside a door, 2026-09-29; audit)
