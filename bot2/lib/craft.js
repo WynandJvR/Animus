@@ -260,11 +260,21 @@ function chooseRecipe (bot, itemName, n = 1, stack = null) {
 // ctx: { depth, shouldStop, reason, noWithdraw }
 // ctx.stack: the items being made further up this chain - a recipe cycle (a brown bed of a black bed of a blue bed..., a
 // storage block of its ingots of the block) is refused at once instead of running to "too deep" (audit, 2026-09-27)
+// THE CHAIN IN THE ASYNC CONTEXT: every ensure reached through ANY path - a chop's axe, a full pack's chest, a gather's
+// tool - sees the items being made above it, with no ctx to thread by hand: two loops of that shape in one day, each
+// through a caller that dropped ctx.stack (keepTool's axe, placeChest's chest), 2026-09-29; audit
+const chainStore = new (require('async_hooks').AsyncLocalStorage)()
 async function ensure (bot, name, count, ctx = {}) {
-  const depth = ctx.depth || 0
+  const outer = chainStore.getStore()
+  const depth = Math.max(ctx.depth || 0, outer ? outer.depth : 0)
   if (depth > 12) { log('craft', `ensure ${name}: too deep`); return false }
-  if (ctx.stack && ctx.stack.has(name)) { log('craft', `ensure ${name}: already being made further up this chain (a recipe cycle) - not again`); return false }
-  const c2 = Object.assign({}, ctx, { depth: depth + 1, stack: new Set([...(ctx.stack || []), name]) })
+  const stack = new Set([...(ctx.stack || []), ...(outer ? outer.stack : [])])
+  if (stack.has(name)) { log('craft', `ensure ${name}: already being made further up this chain (a recipe cycle) - not again`); return false }
+  const inner = { depth: depth + 1, stack: new Set([...stack, name]) }
+  return chainStore.run(inner, () => ensureInner(bot, name, count, ctx, depth, inner.stack))
+}
+async function ensureInner (bot, name, count, ctx, depth, chain) {
+  const c2 = Object.assign({}, ctx, { depth: depth + 1, stack: chain })
   let tries = 0
   while (inv.count(bot, name) < count) {
     await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises

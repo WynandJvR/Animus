@@ -28,7 +28,19 @@ function rotate () {
   } catch {}
 }
 
+// (buffered: one append every 200ms, not a synchronous write a line - a loop's 10,000 lines were 10,000 blocking writes
+//  on the body's event loop, 2026-09-29; audit. Flushed synchronously on exit, so a crash's last lines are kept)
 let writes = 0
+let buf = []; let timer = null; let flushing = false
+function flush () {
+  timer = null
+  if (!buf.length || flushing) return
+  const chunk = buf.join(''); buf = []
+  flushing = true
+  fs.appendFile(LOG_FILE, chunk, () => { flushing = false; if (buf.length && !timer) timer = setTimeout(flush, 200) })
+}
+function flushSync () { if (!buf.length) return; try { fs.appendFileSync(LOG_FILE, buf.join('')) } catch {} buf = [] }
+process.on('exit', flushSync)
 function log (tag, ...parts) {
   const msg = parts.map(p => (typeof p === 'string' ? p : JSON.stringify(p))).join(' ')
   const line = `[${stamp()}] (${tag}) ${msg}`
@@ -36,7 +48,8 @@ function log (tag, ...parts) {
   if (ring.length > 400) ring.shift()
   try {
     if (++writes % 500 === 0) rotate()
-    fs.appendFileSync(LOG_FILE, line + '\n')
+    buf.push(line + '\n')
+    if (!timer) timer = setTimeout(flush, 200)
   } catch {}
   if (process.env.BOT2_STDOUT) console.log(line)
   return line
@@ -46,4 +59,4 @@ function tail (n = 60) { return ring.slice(-n) }
 
 try { fs.mkdirSync(LOG_DIR, { recursive: true }) } catch {}
 
-module.exports = { log, tail, LOG_FILE }
+module.exports = { log, tail, LOG_FILE, flushSync }
