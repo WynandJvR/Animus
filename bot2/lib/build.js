@@ -589,6 +589,12 @@ function detachedItems (todo, bot) {
     else if (detached.has(it) && k >= Math.min(low[it].n, 64)) detached.delete(it)
   }
   for (const it of [...detached]) if (!low[it]) detached.delete(it) // (none of it left to place)
+  return detached
+}
+// THE HOLDS round the waiting holes - the columns over them, the last faces, the pockets' last openings: once a build
+// pass (buildStepInner), never in nextNeeds - folded into detachedItems it ran on every call, a second and more of the
+// body's event loop a placement (lag: "slow build.nextNeeds 1064ms", "stalled in detachedItems", 2026-09-29; audit)
+function refreshHolds (todo, bot) {
   // THE WAITING COLUMNS: x,z -> the lowest hole kept open for its item (out of stock, or the wait above) with nothing placed
   // over it yet. Every cell above it in that column anchors no band - it cannot go in until the hole does (one step-end
   // miss a level was the old drip); one lookup a cell in anchorable (audit)
@@ -621,16 +627,17 @@ function detachedItems (todo, bot) {
   //  the build can never close - no cell of it there - counts as always open. One closable opening left: the cell that
   //  would close it is held. None: already sealed - the escape's case. Two or more: one placement a pass closes one)
   const seenP = new Set()
+  const skyMemo = new Map(); const skyAt = p => { const k = key(p); let v = skyMemo.get(k); if (v === undefined) { v = world.openSky(bot, p); skyMemo.set(k, v) } return v }
   for (const h of holes) {
     if (seenP.has(key(h))) continue
     const comp = []; const q = [h]; seenP.add(key(h))
     const opens = new Map() // opening -> { cells: the build's cells that would close it, faces: fills' cells to refuse }
     const unbuilt = pos => { const c = job && job.index.get(key(pos)); return c && !c.clear && cellDone(bot, c) !== true ? c : null }
-    while (q.length && comp.length < 64) {
+    while (q.length && comp.length < 64 && opens.size < 2) { // (two openings: safe this pass - stop looking; the whole search is only for the LAST one)
       const p = q.shift(); comp.push(p)
       // (a sky opening is closed by ANY block in its column, not only the cap: the next storey's floor over a held cap sealed
       //  it all the same - every unbuilt cell of the build up the column is a closer; audit)
-      if (world.openSky(bot, { x: p.x, y: p.y, z: p.z })) { const cells = []; for (let y = p.y + 1; y <= (job ? job.box.y2 : p.y + 1); y++) { const u = unbuilt({ x: p.x, y, z: p.z }); if (u) cells.push(u) } opens.set('sky' + key(p), { cells, faces: [] }) }
+      if (skyAt(p)) { const cells = []; for (let y = p.y + 1; y <= (job ? job.box.y2 : p.y + 1); y++) { const u = unbuilt({ x: p.x, y, z: p.z }); if (u) cells.push(u) } opens.set('sky' + key(p), { cells, faces: [] }) }
       for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
         const n = { x: p.x + dx, y: p.y, z: p.z + dz }; const k = key(n)
         if (!openAt(n.x, n.y, n.z)) continue
@@ -652,8 +659,8 @@ function detachedItems (todo, bot) {
     for (const c of only.cells) holdAround.add(key(c)) // (the last way in or out: never the one that closes it)
     for (const f of only.faces) holeFaces.add(key(f))
   }
-  return detached
 }
+
 // A cell the band may anchor on: THE one predicate - lowestStructural's minimum, the step's anchor and whether a waited-on
 // item holds the band all read it (audit 2026-09-29: three spelled-out copies)
 // (a foundation cell anchors nothing: the rim's cells on the trench are slow and many rest, and anchored they held the
@@ -1305,6 +1312,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     // the band: attached cells and door tops never hold it down (a lantern under a roof slab waits for the
     // roof; the walls below it must not wait for the lantern)
     const det = detachedItems(todo, bot)
+    refreshHolds(todo, bot)
     const lowestAll = lowestStructural(todo, bot, det)
     // (what ANCHORS the band: the one definition - the step's end lines name it, and an item "holds" only when its cell is
     //  one: a trapdoor - infill - was said to hold the castle for two hours while a lightning rod did; audit 2026-09-29)
