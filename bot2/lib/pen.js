@@ -46,7 +46,11 @@ const STOCK_MIN = 2
 const CAP = 8
 const LOVE_MS = 5 * 60000 // vanilla: a sheep bred (or fed into love) takes no more wheat for 6000 ticks
 const SEE = 40
-const LURE_REACH = 96 // (a flock remembered farther from home than this is not led home: a 100-block lead at a sheep's pace)
+// (a flock remembered farther from home than this is not led home. 96 at first: the flocks round home were killed for wool
+//  before there were shears, and the nearest left were 238-277 out - the pen stood empty. Two led home once, then bred, is
+//  the one long walk a player makes; it starts only with the daylight for it: leadTicks)
+const LURE_REACH = 320
+const leadTicks = d => Math.round(d * 30) + 1200 // (a sheep's pace with the waits, ~1.5s a block, and the walk out)
 const FENCE_RE = /_fence$/
 const GATE_RE = /_fence_gate$/
 
@@ -183,7 +187,10 @@ function breedable (bot, list) { return (list || []).filter(e => !food().isBaby(
 function wildKnown (bot) {
   if (food().animals(bot, /^sheep$/, 48).length) return true
   const home = mem.get().home || bot.entity.position
-  return ((mem.get().mobs || {}).sheep || []).some(q => world.dist2(q, home) < LURE_REACH)
+  // (a remembered flock only with the daylight to lead it home - a condition, not a failure: without it the task ran and
+  //  refused, "did not succeed" every pass; audit rule)
+  const p = pen()
+  return ((mem.get().mobs || {}).sheep || []).some(q => world.dist2(q, home) < LURE_REACH && (!p || world.ticksUntilNight(bot) >= leadTicks(world.dist2(q, centreOf(p)))))
 }
 
 // ---- what the pen wants now ----------------------------------------------------------------------
@@ -332,6 +339,8 @@ async function stock (bot, { shouldStop } = {}) {
     const home = mem.get().home || bot.entity.position
     const known = ((mem.get().mobs || {}).sheep || []).filter(q => world.dist2(q, home) < LURE_REACH).sort((a, b) => world.dist2(a, bot.entity.position) - world.dist2(b, bot.entity.position))[0]
     if (!known) { log('pen', 'no sheep in sight or remembered near home to lead in'); return false }
+    const far = world.dist2(known, centreOf(p))
+    if (world.ticksUntilNight(bot) < leadTicks(far)) { log('pen', `the nearest flock is ${Math.round(far)} blocks from the pen - not enough daylight left to lead it home today`); return false }
     await move.travel(bot, known, { range: 8, shouldStop, label: 'to sheep' })
     wild = food().animals(bot, /^sheep$/, 48)
     if (!wild.length) {
@@ -353,7 +362,7 @@ async function stock (bot, { shouldStop } = {}) {
   const lag = () => { let far = 0; for (const [id, e] of followers) { const d = e.isValid === false ? Infinity : e.position.distanceTo(bot.entity.position); if (d > 14) followers.delete(id); else far = Math.max(far, d) } return far }
   const waitUp = async (within, ms) => { const t = Date.now(); while (Date.now() - t < ms && !stop()) { await wheatInHand(bot, 1); if (lag() <= within || !followers.size) return; await move.sleep(300) } }
   const out = outerStep(p)
-  const deadline = Date.now() + 4 * 60000
+  const deadline = Date.now() + Math.max(4 * 60000, world.dist2(bot.entity.position, out) * 1500) // (the lead's own length: a flock 250 out)
   let legs = 0
   while (world.dist2(bot.entity.position, out) > 1.5 && Date.now() < deadline && !stop()) {
     await reflex.waitClear()
