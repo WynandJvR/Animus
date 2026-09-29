@@ -2082,9 +2082,13 @@ async function ensureScaffold (bot, n = SCAFFOLD_WANT, { shouldStop } = {}) { //
     // (a trip's worth, not a round's: the foundation's cells are cobblestone too and took each 32 the step it came, so every
     //  round walked to the mine again - 1-3 minutes a round, 2026-09-29. What the foundation still wants rides along, two
     //  stacks at most)
+    // (and the whole build's cobblestone - stone is smelted cobble, the castle ~900 short: the mine walk is the fixed cost, so
+    //  a trip fills the pack; the smelt queue's keep-back holds the scaffold's and the foundation's share; audit)
     const fnd = job ? job.cells.filter(q => q.foundation && q.name === 'cobblestone' && cellDone(bot, q) !== true).length : 0
-    const ask = Math.max(short, 32, Math.min(128, short + fnd))
-    log('build', `getting ${ask} cobblestone from the mine to scaffold with${fnd ? ` (and ${fnd} foundation cells)` : ''}`)
+    let whole = 0; try { whole = (require('./materials').planFor(bot, cachedStatus(bot).need).raw || {}).cobblestone || 0 } catch {}
+    const room = Math.max(1, inv.freeSlots(bot) - 2) * 64
+    const ask = Math.max(short, 32, Math.min(room, 256, short + fnd + whole)) // (four stacks: ~10 minutes at the face, not the half-hour a full pack would hold the building up for)
+    log('build', `getting ${ask} cobblestone from the mine to scaffold with${fnd || whole ? ` (and ${fnd} foundation cells, ${whole} for the build's stone)` : ''}`)
     await require('./craft').ensure(bot, 'cobblestone', inv.count(bot, 'cobblestone') + ask, { noWithdraw: true, shouldStop }).catch(() => false)
   }
   if (filler() < n / 2) { log('build', `getting ${n - filler()} dirt to scaffold with`); await require('./craft').ensure(bot, 'dirt', inv.count(bot, 'dirt') + (n - filler()), { noWithdraw: true, shouldStop }).catch(() => false) }
