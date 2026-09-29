@@ -186,7 +186,7 @@ async function plant (bot, { demandTrees = 0, shouldStop } = {}) {
 }
 
 // Cut the grown trees (logs up to `logs`), leaves too while saplings are wanted, and replant each spot.
-async function harvest (bot, { logs = Infinity, demandTrees = 0, shouldStop } = {}) {
+async function harvest (bot, { logs = Infinity, demandTrees = 0, shouldStop, species = null } = {}) {
   const trees = grown(bot)
   if (!trees.length) return 0
   const gather = require('./gather')
@@ -198,6 +198,7 @@ async function harvest (bot, { logs = Infinity, demandTrees = 0, shouldStop } = 
     await reflex.waitClear()
     const b = world.at(bot, t.x, t.y, t.z)
     if (!b || !world.LOG_RE.test(b.name)) continue
+    if (species && b.name !== species) continue // (a species' trip: its own trees only - an exact-wood build)
     const re = new RegExp('^' + b.name + '$')
     const before = inv.count(bot, n => world.LOG_RE.test(n))
     // (a mega tree is four trunks, felled from inside - gather.fellMega; a single one as ever)

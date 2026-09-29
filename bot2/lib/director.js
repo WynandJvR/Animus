@@ -1583,6 +1583,10 @@ async function gatherForInner (raw, short) {
     case 'wool': case 'white_wool': return food.woolFor(bot, Math.min(short, 16), ctx)
     case 'red_flower': return gather.pickPlants(bot, /^(poppy|red_tulip|rose_bush)$/, /^(poppy|red_tulip|rose_bush)$/, Math.min(short, 16), ctx)
     default:
+      // A SPECIES' LOGS (an exact-wood build asks for spruce_log, not 'log'): the orchard's grown trees of THAT species first
+      // - a mega spruce is 30-60 logs twenty blocks from home. Routed straight to the wild chop, the spruce trip cut one
+      // tree and explored 176-208 blocks out past two grown mega spruces in the orchard, 2026-09-29
+      if (/_log$/.test(raw) && raw !== 'log') { const got = await orchard.harvest(bot, { logs: batch, demandTrees, species: raw, shouldStop: dayStop }); if (got >= Math.min(batch, 16)) return true }
       // forage skills: one gatherer each; a source searched out round home is marked (its cells wait, another is used)
       if (forage.handles(raw)) return forage.gather(bot, raw, batch, ctx)
       // sand, dirt, gravel, raw iron: the generic route (surface digging, the mine)
