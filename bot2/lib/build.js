@@ -521,6 +521,20 @@ function infillCell (c) { return INFILL_RE.test(c.name) || cellUnsourced(c) }
 // out of a furnace, the band would walk down for four, run dry and jump back up every batch (audit 2026-09-28).
 const detached = new Set()
 const craftMemo = new Map() // item -> { at, ok }: craftable from stock, judged a minute at a time
+// A WAIT WITH NOTHING TO WAIT FOR: an anchor NOT in hand at a step's end, though the plan says the stock covers it - nothing
+// to gather, the round's crafts made none. No trip will ever bring it (the planner sees no shortfall), so the band would
+// hold for good: one purple wool cell held the castle from noon to dusk, the planner counting brown wool as purple
+// (2026-09-29). Whatever the disagreement, the item goes as a detached one for the rest of the day - the band rises past
+// it, its cell waits - and says so. (item -> the day)
+const coverMiss = new Map()
+function noteCoverMiss (bot, anchor, holding) {
+  if (!anchor || holding) return
+  const it = stepItem(bot, anchor)
+  const m = craftMemo.get(it)
+  if (!m || !m.ok || coverMiss.get(it) === today(bot)) return
+  coverMiss.set(it, today(bot))
+  log('build', `${it} anchors the band at ${move.fmt(anchor)} and none is to hand, though the plan finds the stock covers it - nothing to fetch, nothing made: building past it today`)
+}
 // THE SWAP LIST: a cell covered while it holds the wrong block (the terrain's grass in a leaf or coarse-dirt cell) - the
 // endgame's worklist, swapped from a side if one is open, else through the reopen (audit 2026-09-29). Once each.
 const toSwapSaid = new Set()
@@ -547,7 +561,7 @@ function detachedItems (todo, bot) {
   }
   for (const it of Object.keys(low)) {
     const k = have[it] || 0
-    if (k <= 0 && !craftable(it)) detached.add(it)
+    if (k <= 0 && (coverMiss.get(it) === today(bot) || !craftable(it))) detached.add(it)
     else if (k <= 0) detached.delete(it)
     else if (detached.has(it) && k >= Math.min(low[it].n, 64)) detached.delete(it)
   }
@@ -1268,6 +1282,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       // (the band as it ended the step - which layer anchors it, and by which cell: a step that ends "waiting on X" after
       //  a few blocks said nothing of what held the band down, 2026-09-28)
       const anchor = todo.find(anchors)
+      noteCoverMiss(bot, anchor, anchor && has(anchor))
       // (an anchor IN HAND but never doable - the cell under it waits - is a miss here too; one NOT in hand is the supply's
       //  wait, which steers the gathering, and is left to hold; audit)
       if (anchor && has(anchor) && !holdBack.has(key(anchor))) { failed.set(key(anchor), (failed.get(key(anchor)) || 0) + 1); saveCellFails(); log('build', `${anchor.name} at ${move.fmt(anchor)} anchors the band but is never doable (the cell under it waits) - a miss: the band rises past it`) }
@@ -1284,6 +1299,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       // (and what anchors the band there - the lowest cell that holds the layers: the step's end is its reach, not the
       //  item a trapdoor waits on, 2026-09-29)
       const anchor = todo.find(anchors)
+      noteCoverMiss(bot, anchor, anchor && has(anchor))
       const anc = anchor ? `, band anchored by ${stepItem(bot, anchor)}@${anchor.x},${anchor.y},${anchor.z}${has(anchor) ? ' (in hand)' : ' (not in hand)'}${holdBack.has(key(anchor)) ? ' (held back)' : ''}` : ''
       // (a cell that can never be readied - nothing to click, nothing to prop it on - is never tried, so it never fails,
       //  and a cell that never fails anchors the band for ever: a down-facing lightning rod whose only click face is the
