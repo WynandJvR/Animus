@@ -598,7 +598,11 @@ async function goToInner2 (bot, goal, opts, { timeoutMs, stuckMs, dig, place, al
         const g = bot.pathfinder.goal; const cs = bot.controlState || {}
         const keys = Object.keys(cs).filter(k => cs[k]).join('+') || 'none'
         const rf = require('./reflex').info()
-        why2 = ` [goal ${g ? g.constructor.name + (g.x != null ? ' ' + g.x + ',' + g.y + ',' + g.z : '') : 'none'}, moving ${bot.pathfinder.isMoving()}, keys ${keys}, reflex ${rf ? rf.kind + ' ' + rf.forSec + 's' : 'none'}, onGround ${bot.entity.onGround}]`
+        // (and the step the planner meant next, with what stands at it - feet, head, floor: stuck walks at the castle's walls
+        //  said nothing of what the body could not do, 2026-09-29)
+        const rx = require('./reflex'); const n = rx.plannedNode && rx.plannedNode()
+        const at = n ? ['feet', 'head', 'floor'].map((w, i) => { const b = world.at(bot, Math.floor(n.x), Math.floor(n.y) + [0, 1, -1][i], Math.floor(n.z)); return w + ' ' + (b ? b.name : '?') }).join(', ') : ''
+        why2 = ` [goal ${g ? g.constructor.name + (g.x != null ? ' ' + g.x + ',' + g.y + ',' + g.z : '') : 'none'}, moving ${bot.pathfinder.isMoving()}, keys ${keys}, reflex ${rf ? rf.kind + ' ' + rf.forSec + 's' : 'none'}, onGround ${bot.entity.onGround}, sneak ${!!(bot.controlState && bot.controlState.sneak)};${rx.plannedStep ? rx.plannedStep() : ''}${at ? ' (' + at + ')' : ''}]`
       } catch {}
       log('move', `${label}: gave up (${r.why} x${fails}) at ${fmt(bot.entity.position)}${why2}`)
       return r
