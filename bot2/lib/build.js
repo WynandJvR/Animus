@@ -520,6 +520,7 @@ function infillCell (c) { return INFILL_RE.test(c.name) || cellUnsourced(c) }
 // cells in hand - until its stock covers its lowest layers' cells (a stack at most). Re-anchored by the first four bricks
 // out of a furnace, the band would walk down for four, run dry and jump back up every batch (audit 2026-09-28).
 const detached = new Set()
+const craftMemo = new Map() // item -> { at, ok }: craftable from stock, judged a minute at a time
 // THE SWAP LIST: a cell covered while it holds the wrong block (the terrain's grass in a leaf or coarse-dirt cell) - the
 // endgame's worklist, swapped from a side if one is open, else through the reopen (audit 2026-09-29). Once each.
 const toSwapSaid = new Set()
@@ -536,9 +537,18 @@ function detachedItems (todo, bot) {
   const band = todo.filter(c => !c.attach && !c.follows && !infillCell(c) && !((cellFails.get(key(c)) || {}).n >= 1)).map(c => [c, stepItem(bot, c)])
   for (const [c, it] of band) if (!low[it] || c.y < low[it].y) low[it] = { y: c.y, n: 0 }
   for (const [c, it] of band) if (c.y <= low[it].y + 1) low[it].n++
+  // (none in stock is detached only when it cannot be MADE from stock either: the bricks rule - a long clay-and-furnace
+  //  chain - applied to a trapdoor six planks away sealed over cells the window's crafts would fill; audit 2026-09-29.
+  //  The verdict kept a minute per item: this runs every placement of a step, a plan each would load the body)
+  const craftable = it => {
+    const c0 = craftMemo.get(it); if (c0 && Date.now() - c0.at < 60000) return c0.ok
+    let ok = false; try { const r = require('./materials').planFor(bot, { [it]: Math.max(1, low[it].n) }); ok = !Object.keys(r.raw || {}).some(x => r.raw[x] > 0) && !(r.unknown || []).length } catch {}
+    craftMemo.set(it, { at: Date.now(), ok }); return ok
+  }
   for (const it of Object.keys(low)) {
     const k = have[it] || 0
-    if (k <= 0) detached.add(it)
+    if (k <= 0 && !craftable(it)) detached.add(it)
+    else if (k <= 0) detached.delete(it)
     else if (detached.has(it) && k >= Math.min(low[it].n, 64)) detached.delete(it)
   }
   for (const it of [...detached]) if (!low[it]) detached.delete(it) // (none of it left to place)
