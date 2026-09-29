@@ -44,6 +44,12 @@ function holdsWater (b) {
 function isWaterBlock (b) { return !!b && (WATER_RE.test(b.name) || holdsWater(b)) }
 function isLavaBlock (b) { return !!b && LAVA_RE.test(b.name) }
 function isSolid (b) { return !!b && b.boundingBox === 'block' && !isWaterBlock(b) && !isLavaBlock(b) }
+// An OPEN trapdoor is a plate stood on its edge: the data gives every trapdoor a full block's box, so an open one in the
+// castle's floor read as ground - the edge reflex stepped back onto one and the bot fell 4 into the hollow (2026-09-29)
+function isOpenTrapdoor (b) {
+  if (!b || !/_trapdoor$/.test(b.name)) return false
+  try { const p = b.getProperties(); return !!(p && (p.open === true || p.open === 'true')) } catch { return false }
+}
 function isAirish (b) { return !!b && b.boundingBox === 'empty' && !isWaterBlock(b) && !isLavaBlock(b) }
 
 // A fall of more than this many blocks hurts (vanilla: damage = distance - 3). The pathfinder's maxDropDown and the
@@ -55,12 +61,12 @@ const SAFE_DROP = 3
 function dropAt (bot, x, y, z, max = 32) {
   const feet = at(bot, x, y, z)
   if (!feet) return Infinity
-  if (isSolid(feet) || isWaterBlock(feet)) return 0
+  if ((isSolid(feet) && !isOpenTrapdoor(feet)) || isWaterBlock(feet)) return 0
   for (let k = 0; k <= max; k++) {
     const b = at(bot, x, y - 1 - k, z)
     if (!b || isLavaBlock(b)) return Infinity
     if (isWaterBlock(b)) return 0 // (landing in water of any depth takes no fall damage)
-    if (b.boundingBox === 'block') return k
+    if (b.boundingBox === 'block' && !isOpenTrapdoor(b)) return k
   }
   return Infinity
 }
@@ -71,7 +77,7 @@ function standable (bot, x, y, z) {
   const feet = at(bot, x, y, z)
   const head = at(bot, x, y + 1, z)
   if (!floor || !feet || !head) return false
-  if (!isSolid(floor) || DANGER_FLOOR_RE.test(floor.name)) return false
+  if (!isSolid(floor) || isOpenTrapdoor(floor) || DANGER_FLOOR_RE.test(floor.name)) return false
   return isAirish(feet) && isAirish(head)
 }
 
@@ -304,7 +310,7 @@ function hasAirNeighbour (bot, p) {
   return false
 }
 
-module.exports = { LANTERN_RE, FURNITURE_RE, walkTicks, HOME_MARGIN, SAFE_DROP, dropAt,
+module.exports = { isOpenTrapdoor, LANTERN_RE, FURNITURE_RE, walkTicks, HOME_MARGIN, SAFE_DROP, dropAt,
   data, v, at, name, isWaterBlock, isLiquidWater, holdsWater, isLavaBlock, isSolid, isAirish, standable, feetPos, eyeBlock,
   headInWater, feetInWater, inLava, tod, phase, isNight, isDay, ticksUntilNight, canSleepNow, lavaNear, holdsBackLava, waterNear,
   groundY, openSky, dist2, dist3, blockIds, findBlocks, scanBlocks, stateIds, sectionMay, sightReach, hasAirNeighbour, skyLitFace,
