@@ -288,7 +288,7 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
   let trapSet = null; let trapGen = -1
   m.exclusionAreasStep.push(block => {
     if (!block || !block.position) return 0
-    if (trapGen !== pathGen) { trapGen = pathGen; trapSet = new Set(); for (const t of (require('./memory').get().trapCells || [])) if (Date.now() - t.at < TRAP_MS) trapSet.add(`${t.x},${t.y},${t.z}`) }
+    if (trapGen !== pathGen) { trapGen = pathGen; trapSet = new Set(); for (const t of (require('./memory').get().trapCells || [])) if (t.day != null && trapLive(bot, t)) trapSet.add(`${t.x},${t.y},${t.z}`) }
     return trapSet.size && trapSet.has(`${block.position.x},${block.position.y},${block.position.z}`) ? 50 : 0
   })
   // (a cell a fall began from - and its sides, at its height: dear, not refused; the list is reflex.js's fall record)
@@ -750,13 +750,14 @@ const GIVEUP_NEAR = 2
 function giveUpsNear (p, now = Date.now()) { return giveUps.filter(g => now - g.t < 5 * 60000 && Math.abs(g.x - p.x) <= GIVEUP_NEAR && Math.abs(g.y - p.y) <= GIVEUP_NEAR && Math.abs(g.z - p.z) <= GIVEUP_NEAR).length }
 // A TRAP REMEMBERED: where an escape had to break out or climb out, the give-ups round it are a pocket - a day's hazard,
 // dear to walk through and never a leg's point (a player stuck in a crawlspace walks round it next time; audit)
-const TRAP_MS = 24 * 3600000
+// (its life is the game's day - day.js, as every day rule: the rest of today and tomorrow; audit)
+const trapLive = (bot, t) => { try { return require('./day').dayNo(bot) - t.day <= 1 } catch { return false } }
 let legSaid = null
-function noteTrap (p) {
+function noteTrap (bot, p) {
   const cells = giveUps.filter(g => Math.abs(g.x - p.x) <= GIVEUP_NEAR && Math.abs(g.y - p.y) <= GIVEUP_NEAR && Math.abs(g.z - p.z) <= GIVEUP_NEAR).map(g => ({ x: g.x, y: g.y, z: g.z }))
   cells.push({ x: p.x, y: p.y, z: p.z })
-  const now = Date.now()
-  require('./memory').update(m => { const l = (m.trapCells || []).filter(t => now - t.at < TRAP_MS); for (const c of cells) if (!l.some(t => t.x === c.x && t.y === c.y && t.z === c.z)) l.push(Object.assign(c, { at: now })); m.trapCells = l.slice(-200) })
+  const day = require('./day').dayNo(bot)
+  require('./memory').update(m => { const l = (m.trapCells || []).filter(t => t.day != null && trapLive(bot, t)); for (const c of cells) if (!l.some(t => t.x === c.x && t.y === c.y && t.z === c.z)) l.push(Object.assign(c, { day })); m.trapCells = l.slice(-200) })
   log('move', `a trap remembered at ${fmt(p)} (${cells.length} cells) - walked round for a day`)
 }
 function clearGiveUps (p) { for (let i = giveUps.length - 1; i >= 0; i--) { const g = giveUps[i]; if (Math.abs(g.x - p.x) <= GIVEUP_NEAR && Math.abs(g.y - p.y) <= GIVEUP_NEAR && Math.abs(g.z - p.z) <= GIVEUP_NEAR) giveUps.splice(i, 1) } }
@@ -864,7 +865,7 @@ async function escapeUpInner (bot) {
           at = bot.entity.position.floored()
           if (build.wayOut(bot, { x: NaN, y: NaN, z: NaN }, null, false)) { log('move', `enclosed: a way out from ${fmt(at)}`); break }
         }
-        noteTrap(f0); clearGiveUps(f0)
+        noteTrap(bot, f0); clearGiveUps(f0)
         return true
       }
       log('move', `enclosed by the build at ${fmt(f0)} - no wall beside me to open (supports or no open ground past it)`)
@@ -928,7 +929,7 @@ async function escapeUpInner (bot) {
     // cells over a solid side block cleared, and up onto it
     if (!await stepUpSide(bot)) { log('move', `climbing out: no way up from ${fmt(bot.entity.position)} (no tower, no side to cut a step in)`); return false }
   }
-  noteTrap(f0); clearGiveUps(f0)
+  noteTrap(bot, f0); clearGiveUps(f0)
   log('move', `climbed out: from ${fmt(f0)} to ${fmt(bot.entity.position)}`)
   return true
 }
@@ -1158,7 +1159,7 @@ async function travel (bot, target, opts = {}) {
     }
     // (never inside the build or a remembered trap: legPoint)
     { let box = null; try { const j = require('./build').getJob(); box = j && j.box } catch {}
-      const traps = (require('./memory').get().trapCells || []).filter(t => Date.now() - t.at < TRAP_MS)
+      const traps = (require('./memory').get().trapCells || []).filter(t => t.day != null && trapLive(bot, t))
       const lp = legPoint(me, lx, lz, target, box, traps)
       if (lp.moved) { if (legSaid !== lp.moved + lp.x + lp.z) { legSaid = lp.moved + lp.x + lp.z; log('move', `${label}: the leg goes ${lp.moved} - to ${lp.x},${lp.z}`) } lx = lp.x; lz = lp.z } }
     // aim at the SURFACE of the leg point when we can see it: an x/z-only goal lets the planner route
