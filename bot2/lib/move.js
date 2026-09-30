@@ -827,6 +827,12 @@ async function escapeUpInner (bot) {
       log('move', `stuck on a pillar of ours at ${fmt(f0)} with a drop all round - digging down through it`)
       for (let guard = 0; guard < 24; guard++) {
         const u = onTop(); if (!u) break
+        // (the fall the dig makes: to the next solid under the block - a gap the tidy left lower in the column is a drop of
+        //  its height. Up there is safe; a fall is not. Nor onto lava or into water; audit)
+        const below = world.at(bot, u.x, u.y - 1, u.z)
+        if (act.fallBelow(bot, u) > world.SAFE_DROP || !below || world.isLavaBlock(below) || world.isWaterBlock(below)) { log('move', `a gap in our pillar below me at y${u.y - 1} - staying up`); break }
+        // (a seeded block here too: the body stands on it because the escape towered it - survival outranks inferred
+        //  ownership, the grief plan's escape net; audit)
         if (!await act.dig(bot, u, { force: true, noWalk: true, allowZones: ['*'], timeoutMs: 8000 }).catch(() => false)) break
         const t0 = Date.now(); while (!bot.entity.onGround && Date.now() - t0 < 1500) await sleep(50)
       }
@@ -935,7 +941,10 @@ async function escapeUpInner (bot) {
     //  bottom failed, 2026-09-29. There, up to the floor's level first, then the walk)
     const jb = require('./build').getJob(); const bb = jb && jb.box
     const pit = !!bb && f.x >= bb.x1 && f.x <= bb.x2 && f.z >= bb.z1 && f.z <= bb.z2 && f.y < bb.y1
-    if (bot.entity.onGround && !world.feetInWater(bot) && world.openSky(bot, { x: f.x, y: f.y, z: f.z }) && !pit) break
+    // (open = no roof but a tree's: leaves and logs overhead are shade, nothing to climb out of - read as a roof, the climb
+    //  towered 16 up through a canopy by the castle's west wall and stranded the bot on its top, 2026-09-30; audit)
+    const openAbove = q => { for (let y = q.y + 2; y < q.y + 22; y++) { const b = world.at(bot, q.x, y, q.z); if (b && b.boundingBox === 'block' && !world.LEAF_RE.test(b.name) && !world.LOG_RE.test(b.name)) return false } return true }
+    if (bot.entity.onGround && !world.feetInWater(bot) && openAbove(f) && !pit) break
     for (const dy of [2, 1]) {
       const b = world.at(bot, f.x, f.y + dy, f.z)
       // (a finished cell of OUR build over the head is ours to take and put back: sealed in the hollow under the castle's
