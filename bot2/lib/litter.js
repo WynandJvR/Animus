@@ -127,7 +127,8 @@ function seed (bot) {
       ledger.set(k({ x, y, z }), { x, y, z, name: b.name, at: Date.now(), seeded: true }); n++
     }
   }
-  if (n) { dirty = true; save(); log('litter', `found ${n} cobblestone of ours standing in the orchard`) }
+  // (each one said: an inferred owner - by shape and place, no record of the placing - must be findable if it is wrong; audit)
+  if (n) { dirty = true; save(); log('litter', `found ${n} cobblestone of ours standing in the orchard: ${[...ledger.values()].filter(q => q.seeded && Date.now() - q.at < 5000).map(q => k(q)).join(' ')}`) }
   return n
 }
 
