@@ -71,6 +71,13 @@ function plateEdge (b) {
   return EDGE_VEC[(p.hinge === 'right' ? CW_F : CCW_F)[p.facing]] || null
 }
 function isAirish (b) { return !!b && b.boundingBox === 'empty' && !isWaterBlock(b) && !isLavaBlock(b) }
+// A cell the BODY can stand in: air, or a climbable with a thin box (a ladder, vines) - the ladder's box sits against the
+// block it hangs on, so no plate edge is crossed there (plateEdge needs no entry). Stand tests only (standable, the room
+// model's passable) - never isAirish itself: holes, drops and the escape's air tests must still read a ladder as it is.
+// Read as solid, a castle ladder beside a door made the door's side "nowhere to stand": the pocket's one exit refused,
+// escape after escape out through the castle's own wall, 2026-09-30; audit
+const CLIMBABLE_RE = /^(ladder|vine|weeping_vines|weeping_vines_plant|twisting_vines|twisting_vines_plant|cave_vines|cave_vines_plant)$/
+function bodyPassable (b) { return isAirish(b) || (!!b && CLIMBABLE_RE.test(b.name)) }
 
 // A fall of more than this many blocks hurts (vanilla: damage = distance - 3). The pathfinder's maxDropDown and the
 // body's edge guard both read it: one number for "a drop the body may take".
@@ -98,7 +105,7 @@ function standable (bot, x, y, z) {
   const head = at(bot, x, y + 1, z)
   if (!floor || !feet || !head) return false
   if (!isSolid(floor) || isOpenTrapdoor(floor) || DANGER_FLOOR_RE.test(floor.name)) return false
-  return isAirish(feet) && isAirish(head)
+  return bodyPassable(feet) && bodyPassable(head)
 }
 
 function feetPos (bot) { return bot.entity.position.floored() }
@@ -334,5 +341,5 @@ module.exports = { isOpenTrapdoor, plateEdge, LANTERN_RE, FURNITURE_RE, walkTick
   data, v, at, name, isWaterBlock, isLiquidWater, holdsWater, isLavaBlock, isSolid, isAirish, standable, feetPos, eyeBlock,
   headInWater, feetInWater, inLava, tod, phase, isNight, isDay, ticksUntilNight, canSleepNow, lavaNear, holdsBackLava, waterNear,
   groundY, openSky, dist2, dist3, blockIds, findBlocks, scanBlocks, stateIds, sectionMay, sightReach, hasAirNeighbour, skyLitFace,
-  WATER_RE, LAVA_RE, LOG_RE, LEAF_RE, NATURAL_RE, FALLING_RE, DANGER_FLOOR_RE, HOT_RE, CONTACT_HURT_RE
+  bodyPassable, CLIMBABLE_RE, WATER_RE, LAVA_RE, LOG_RE, LEAF_RE, NATURAL_RE, FALLING_RE, DANGER_FLOOR_RE, HOT_RE, CONTACT_HURT_RE
 }

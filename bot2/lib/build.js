@@ -1827,7 +1827,7 @@ function edgeOf (dx, dz) { return rooms.edgeOf(dx, dz) }
 //  castle's inner trapdoors read as sealed and the escape dug out a trapdoor of the build, 2026-09-29)
 // THE WALK'S STEP MODEL - rooms.js, the one copy (the way-out search, the stands' regions, the room rule), over the
 // live world
-function roomWorld (bot) { return { at: (x, y, z) => world.at(bot, x, y, z), isAirish: world.isAirish, isOpenTrapdoor: world.isOpenTrapdoor, isSolid: world.isSolid, standable: (x, y, z) => world.standable(bot, x, y, z), plateEdge: world.plateEdge, SAFE_DROP: world.SAFE_DROP } }
+function roomWorld (bot) { return { at: (x, y, z) => world.at(bot, x, y, z), isAirish: world.isAirish, bodyPassable: world.bodyPassable, isOpenTrapdoor: world.isOpenTrapdoor, isSolid: world.isSolid, standable: (x, y, z) => world.standable(bot, x, y, z), plateEdge: world.plateEdge, SAFE_DROP: world.SAFE_DROP } }
 function walkModel (bot, isC = () => false) { return rooms.walkModel(roomWorld(bot), isC) }
 // A STAND'S REGION: whether the walk-only region round a cell gets out of the build (the box's edge, or a sky column a
 // tower may climb) - the same search as wayOut, from the stand. A stand whose region is closed off inside the build is in

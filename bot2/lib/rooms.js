@@ -23,7 +23,7 @@ function edgeOf (dx, dz) { return dx === 1 ? 'east' : dx === -1 ? 'west' : dz ==
 //  rule. Counted solid, the room behind the castle's inner trapdoors read as sealed, 2026-09-29) (a door cell is stood in
 //  on its floor and entered or left through any edge but its panel's - the physics decides; audit)
 function walkModel (w, isC = () => false) {
-  const passable = b => w.isAirish(b) || w.isOpenTrapdoor(b) || (/_door$|_fence_gate$/.test(b.name) && !/^iron_door$/.test(b.name))
+  const passable = b => (w.bodyPassable ? w.bodyPassable(b) : w.isAirish(b)) || w.isOpenTrapdoor(b) || (/_door$|_fence_gate$/.test(b.name) && !/^iron_door$/.test(b.name))
   const air = (x, y, z) => { if (isC(x, y, z)) return false; const b = w.at(x, y, z); return !!b && passable(b) }
   const st = (x, y, z) => { if (!air(x, y, z) || !air(x, y + 1, z)) return false; if (isC(x, y - 1, z)) return true; const fb = w.at(x, y, z); if (fb && (/_door$/.test(fb.name) || w.isOpenTrapdoor(fb))) { const fl = w.at(x, y - 1, z); return !!fl && w.isSolid(fl) && !w.isOpenTrapdoor(fl) } return w.standable(x, y, z) }
   // (an open door's or trapdoor's plate by plateEdge - the planner's own model; a CLOSED door by its panel here)
