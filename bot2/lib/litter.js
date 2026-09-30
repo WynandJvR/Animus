@@ -188,7 +188,7 @@ function standUnder (bot, low) {
     //  column, and stopped on it the search never saw the ground under it; audit)
     let gy = null
     for (let y = low.y - 1; y > low.y - 24; y--) {
-      const b = world.at(bot, x, y, z); if (!b) break
+      const b = world.at(bot, x, y, z); if (!b || world.isWaterBlock(b)) break // (no stand in or under water)
       if (!world.isSolid(b) || world.LEAF_RE.test(b.name) || world.LOG_RE.test(b.name) || ledger.has(k({ x, y, z }))) continue
       gy = y; break
     }
