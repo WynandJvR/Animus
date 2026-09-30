@@ -1468,6 +1468,10 @@ function watchExpedition () {
 // sheep 144-240 out went again every round - five minutes each, nothing placed, all afternoon (2026-09-29). A trip cut
 // short by a stop found nothing because it looked at nothing, and stays open. Open again the next day (notToday, day.js)
 const ANIMAL_RAW = /^(wool|white_wool|leather|feather)$/
+// (ANY raw whose trips bring back none, twice in a day: the same rest. Six deepslate trips down a mine whose stairs stop at
+//  y12, over deepslate's band, came back 0/17 every time - five minutes a round, all night, 2026-09-30. Once for an
+//  animal (they never respawn round home), twice for the rest (a vein can be missed once))
+const emptyTrips = new Map() // raw -> { day, n }
 async function gatherFor (raw, short) {
   reflex.setCautious(true) // (an optional trip does not fight: cover over a charge - reflex.setCautious)
   let ok = false
@@ -1478,7 +1482,11 @@ async function gatherFor (raw, short) {
   try { ok = await gatherForInner(raw, short); return ok } finally {
     reflex.setCautious(false)
     // (none at all: a trip that got some fell short, and found where they are)
-    if (!ok && got() <= had && ANIMAL_RAW.test(raw) && !notToday.has(raw) && !dayStop()) { notToday.set(raw, { day: day.dayNo(bot) }); log('dir', `${raw}: the trip found none - not again today`) }
+    if (!ok && got() <= had && !notToday.has(raw) && !dayStop()) {
+      const d = day.dayNo(bot); const e = emptyTrips.get(raw); const n = e && e.day === d ? e.n + 1 : 1
+      emptyTrips.set(raw, { day: d, n })
+      if (ANIMAL_RAW.test(raw) || n >= 2) { notToday.set(raw, { day: d }); log('dir', `${raw}: ${n > 1 ? n + ' trips' : 'the trip'} found none - not again today`) }
+    }
   }
 }
 async function gatherForInner (raw, short) {
