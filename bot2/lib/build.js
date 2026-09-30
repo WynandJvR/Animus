@@ -2037,11 +2037,9 @@ function othersWork (p) {
   const m = mem.get()
   const f = m.farm && m.farm.water
   if (f && Math.abs(p.x - f.x) <= 5 && Math.abs(p.z - f.z) <= 5 && p.y >= f.y - 1 && p.y <= f.y + 2) return true
-  const mine = m.mine
-  if (mine && mine.entrance) {
-    const a = mine.entrance; const b = mine.cursor || a
-    if (p.x >= Math.min(a.x, b.x) - 2 && p.x <= Math.max(a.x, b.x) + 2 && p.z >= Math.min(a.z, b.z) - 2 && p.z <= Math.max(a.z, b.z) + 2 && p.y >= Math.min(a.y, b.y) - 1 && p.y <= Math.max(a.y, b.y) + 3) return true
-  }
+  // (every level's stairs and face: mining.mineBox, the mine's one extent)
+  const bx = require('./mining').mineBox(m.mine)
+  if (bx && p.x >= bx.x1 - 2 && p.x <= bx.x2 + 2 && p.z >= bx.z1 - 2 && p.z <= bx.z2 + 2 && p.y >= bx.y1 - 1 && p.y <= bx.y2 + 3) return true
   return false
 }
 // Scaffold = in the region, not a cell of the build, not someone else's work, where the site was open, and

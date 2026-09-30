@@ -95,7 +95,125 @@ function chooseEntrance (bot, oreLv = null) {
   }
   return null
 }
-function saveMine (m) { mem.set('mine', m) }
+// THE MINE'S LEVELS. One record was one staircase: an ore trip at another depth threw it away and dug a new one from the
+// surface - andesite at y97, iron at y108, deepslate under y8: four new entrances round home in one night (2026-09-30).
+// Now the mine is one entrance and a chain of levels, each a flight down from the foot of the one before and its own
+// tunnel. mem.mine's top-level fields are the ACTIVE level's view (every reader - gather, move, build, director, litter,
+// reflex, commands, api - reads entrance/cursor/level as before); mem.mine.levels holds each level's own copy, and
+// setActive/saveMine are the one place they are synced.
+const LEVEL_FIELDS = ['stairTop', 'stairsEnd', 'stairsDir', 'dir', 'cursor', 'level', 'stairsDone', 'leg', 'legPos', 'shiftDir', 'blocks', 'oreY', 'faceFails', 'caveRun', 'farShift']
+const clone = v => v == null || typeof v !== 'object' ? v : JSON.parse(JSON.stringify(v))
+function copyFields (from, to) { for (const f of LEVEL_FIELDS) { if (from[f] === undefined) delete to[f]; else to[f] = clone(from[f]) } return to }
+// (a flight is straight: the stairs step one along and one down, and only a tunnel ever turns)
+function flightAt (top, d, y) { const k = top.y - y; return { x: top.x + d.x * k, y, z: top.z + d.z * k } }
+// an old one-staircase record becomes level 0 of its own chain (its foot, when its stairs are done, is where they end)
+function ensureLevels (m) {
+  if (!m || m.levels) return m
+  if (!m.stairTop) m.stairTop = clone(m.entrance)
+  if (m.stairsEnd === undefined) m.stairsEnd = m.stairsDone ? flightAt(m.stairTop, m.stairsDir || m.dir, m.level) : null
+  m.levels = [copyFields(m, {})]; m.active = 0
+  return m
+}
+// every level as it stands now - the active one as its view has it (pure: readers never change the record)
+function levelsOf (m) {
+  if (!m.levels) return ensureLevels(copyFields(m, { entrance: m.entrance })).levels
+  return m.levels.map((L, i) => i === m.active ? copyFields(m, {}) : L)
+}
+// the view back into its level, level i into the view
+function setActive (m, i) { ensureLevels(m); copyFields(m, m.levels[m.active]); copyFields(m.levels[i], m); m.active = i; return m }
+function saveMine (m) {
+  if (m) { ensureLevels(m); copyFields(m, m.levels[m.active]) }
+  mem.set('mine', m)
+  const s = mem.get().mine; const L = s && s.levels && s.levels[s.active]
+  if (s && (!L || JSON.stringify([s.cursor, s.level, s.blocks]) !== JSON.stringify([L.cursor, L.level, L.blocks]))) log('mine', `MINE VIEW MISMATCH: the view says ${JSON.stringify([s.cursor, s.level, s.blocks])}, level ${s.active} says ${JSON.stringify(L && [L.cursor, L.level, L.blocks])}`)
+}
+// A level's stair cells, top to foot: to its foot when done, else to the level it is dug for (cells still to come count).
+function flightCells (L) {
+  const top = L.stairTop; const d = L.stairsDir || L.dir
+  if (!top || !d) return []
+  const endY = L.stairsEnd ? L.stairsEnd.y : Math.min(L.level, L.cursor ? L.cursor.y : L.level)
+  const out = []
+  for (let y = top.y; y >= endY; y--) out.push(flightAt(top, d, y))
+  return out
+}
+// WHICH LEVEL for an ore at oreY: the level nearest it (its own band, or the band it was dug for - a y86 hillside over y91
+// iron made a y78 level); within 6 it is worked. Deeper than the chain's foot: a new flight down from it. Otherwise (above
+// every level, or between two by more than 6) the nearest level is worked - never a new entrance while a mine stands: its
+// tunnel still gives stone and whatever shows in its walls. No band (cobble, coal): the active level, unless it works in
+// the deepslate (under y8) and a level above it exists - cobble trips there came up with cobbled deepslate.
+const DEEPSLATE_Y = 8
+function chooseLevel (m, oreY) {
+  const Ls = levelsOf(m); const act = m.levels ? m.active : 0
+  if (oreY == null) {
+    if (Ls[act].level >= DEEPSLATE_Y) return { use: act }
+    const up = Ls.map((L, i) => i).filter(i => Ls[i].level >= DEEPSLATE_Y).sort((a, b) => Ls[a].level - Ls[b].level)
+    return { use: up.length ? up[0] : act }
+  }
+  const dist = L => Math.min(Math.abs(L.level - oreY), L.oreY != null ? Math.abs(L.oreY - oreY) : Infinity)
+  let best = 0
+  Ls.forEach((L, i) => { if (dist(L) < dist(Ls[best])) best = i })
+  if (dist(Ls[best]) <= 6) return { use: best }
+  const last = Ls.length - 1 // (the chain's foot: every new level descends from the last one made)
+  if (oreY < Math.min(...Ls.map(L => L.level))) return { descend: last, target: oreY, near: best }
+  return { use: best, apart: true }
+}
+// WHERE A NEW FLIGHT STARTS: one cell out from the foot of level `fromIdx`'s stairs, heading away from its tunnel's legs
+// (away from the side the legs shift to first, then back, then the shift side, then on). None of its first three cells may
+// lie under any level's stairs with less than two blocks of rock between the new cut's roof and the old stair's floor
+// (the flight is cut three high: a stair cell 0-5 above a new cell in its column): a flight dug under a flight takes the
+// floor out from under it. Nor the start of a level we gave up on (m.badLevels), nor under a protected build.
+function descentStart (m, fromIdx) {
+  const Ls = levelsOf(m); const F = Ls[fromIdx]
+  const foot = F.stairsEnd || F.cursor
+  const head = F.stairsDir || F.dir
+  const shift = F.shiftDir || { x: -head.z, z: head.x }
+  const stairs = Ls.flatMap(flightCells)
+  const bad = m.badLevels || []
+  const seen = new Set()
+  for (const dir of [{ x: -shift.x, z: -shift.z }, { x: -head.x, z: -head.z }, shift, head]) {
+    const dk = dir.x + ',' + dir.z
+    if (seen.has(dk)) continue
+    seen.add(dk)
+    const start = { x: foot.x + dir.x, y: foot.y, z: foot.z + dir.z }
+    const cells = [0, 1, 2].map(k => ({ x: start.x + dir.x * k, y: start.y - k, z: start.z + dir.z * k }))
+    if (cells.some(c => stairs.some(s => s.x === c.x && s.z === c.z && s.y - c.y >= 0 && s.y - c.y <= 5))) continue
+    if (bad.some(b => b.x === start.x && b.z === start.z && Math.abs(b.y - start.y) <= 1)) continue
+    if (cells.some(c => underOwnZone(c))) continue
+    return { start, dir: { x: dir.x, z: dir.z } }
+  }
+  return null
+}
+function descend (m, fromIdx, target, oreY) {
+  const s = descentStart(m, fromIdx)
+  if (!s || target > s.start.y - 4) return false
+  ensureLevels(m)
+  const fromY = levelsOf(m)[fromIdx].level
+  m.levels.push({ stairTop: clone(s.start), stairsEnd: null, stairsDir: clone(s.dir), dir: clone(s.dir), cursor: clone(s.start), level: target, stairsDone: false, legPos: 0, leg: 0, blocks: 0, oreY })
+  setActive(m, m.levels.length - 1)
+  log('mine', `a new level: stairs down from y${fromY} at ${move.fmt(s.start)} heading ${s.dir.x},${s.dir.z} to y${target} - no new entrance`)
+  return true
+}
+const saidApart = new Set()
+function pickLevel (m, ore, itemName) {
+  ensureLevels(m)
+  const c = chooseLevel(m, ore ? ore.y : null)
+  const from = m.active
+  if (c.descend != null && !descend(m, c.descend, c.target, ore.y)) { log('mine', `no way down from the level at y${levelsOf(m)[c.descend].level} clear of the stairs above - working the level at y${levelsOf(m)[c.near].level}`); c.use = c.near }
+  if (c.use != null && c.use !== m.active) setActive(m, c.use)
+  if (c.apart && !saidApart.has(itemName + ore.y)) { saidApart.add(itemName + ore.y); log('mine', `the ${itemName} band y${ore.y} is above or between the mine's levels - working level y${m.level}, no new entrance`) }
+  if (m.active !== from) { if (c.descend == null) log('mine', `${itemName}: working the mine's level at y${m.level}`); saveMine(m) }
+  return m
+}
+// The mine's extent, for what guards it (the build's scaffold rules, the table rule): the box over the entrance and every
+// level's stair top, stair foot and face. (Asked per cell by the build's scans: no copies, a plain loop.)
+function mineBox (m = mem.get().mine) {
+  if (!m || !m.entrance) return null
+  const b = { x1: m.entrance.x, y1: m.entrance.y, z1: m.entrance.z, x2: m.entrance.x, y2: m.entrance.y, z2: m.entrance.z }
+  const add = p => { if (!p) return; if (p.x < b.x1) b.x1 = p.x; if (p.x > b.x2) b.x2 = p.x; if (p.y < b.y1) b.y1 = p.y; if (p.y > b.y2) b.y2 = p.y; if (p.z < b.z1) b.z1 = p.z; if (p.z > b.z2) b.z2 = p.z }
+  add(m.stairTop); add(m.stairsEnd); add(m.cursor) // (the view: the active level as it stands)
+  for (const L of m.levels || []) { add(L.stairTop); add(L.stairsEnd); add(L.cursor) }
+  return b
+}
 function levelOf (y) { return Math.max(12, Math.min(y - 20, 16)) }
 // WHERE AN ORE IS: the tunnel's level for an ore trip - the 5-high band (the tunnel and the walls in reach of it) with
 // the most of that ore in the rock round home. The mine always went to y12-16: on a mountain the iron is in the
@@ -117,8 +235,10 @@ async function oreLevel (bot, itemName) {
   // (none in the scan's 64 - deepslate 112 under a hilltop home: where we saw it ourselves, under home's depth, is its level)
   // (a remembered spot we can see now must still hold the item's own block - noted before a kind was narrowed, or dug
   //  since, it is no find)
+  // (deepslate is solid rock only under y0: a remembered block at y5 is one in the stone's mixed band, and a level dug
+  //  there for it came up with cobblestone; 2026-09-30)
   const still = p => { const b = world.at(bot, p.x, p.y, p.z); return !b || g.blocks.test(b.name) }
-  if (!best) { const kn = require('./gather').knownResource(itemName, home, { maxFromHome: 96, filter: p => p.y <= home.y - 8 && still(p) }); if (kn) best = { y: kn.y + 1, n: 1 } }
+  if (!best) { const kn = require('./gather').knownResource(itemName, home, { maxFromHome: 96, filter: p => p.y <= home.y - 8 && still(p) }); if (kn) best = { y: (itemName === 'cobbled_deepslate' ? Math.min(kn.y, 0) : kn.y) + 1, n: 1 } }
   return best
 }
 // Does a staircase from p heading dir stay under the ground all the way down to `level`? The stairs drop one a step; on
@@ -286,12 +406,20 @@ async function provisionInner (bot) {
   if (inv.count(bot, 'torch') < 8 && (inv.count(bot, 'coal') + inv.count(bot, 'charcoal') >= 2 || craft().logCount(bot) >= 4)) await craft().ensure(bot, 'torch', 16).catch(() => {})
 }
 
+// The way in, as points every 2 steps, each tagged with its level (lv): level 0's stairs from the entrance, then for each
+// level down to the active one the step from its parent's foot to its top and its own stairs (to the face while they are
+// still being dug), then the face.
 function minePath (m) {
+  const Ls = levelsOf(m); const act = m.levels ? m.active : 0
   const pts = []
-  const drop = Math.max(0, m.entrance.y - m.level)
-  const d0 = m.stairsDir || m.dir
-  for (let k = 0; k <= drop; k += 2) pts.push({ x: m.entrance.x + d0.x * k, y: m.entrance.y - k, z: m.entrance.z + d0.z * k })
-  if (m.cursor) pts.push(m.cursor)
+  for (let i = 0; i <= act && i < Ls.length; i++) {
+    const L = Ls[i]; const d = L.stairsDir || L.dir; const top = L.stairTop || m.entrance
+    if (i > 0) { const pf = Ls[i - 1].stairsEnd || Ls[i - 1].cursor; if (pf) pts.push({ x: pf.x, y: pf.y, z: pf.z, lv: i }) }
+    const endY = L.stairsEnd ? L.stairsEnd.y : L.cursor ? L.cursor.y : L.level
+    for (let k = 0; k <= top.y - endY; k += 2) pts.push(Object.assign(flightAt(top, d, top.y - k), { lv: i }))
+    if (top.y - endY > 0 && (top.y - endY) % 2) pts.push(Object.assign(flightAt(top, d, endY), { lv: i }))
+  }
+  if (m.cursor) pts.push({ x: m.cursor.x, y: m.cursor.y, z: m.cursor.z, lv: act })
   return pts
 }
 // Are we in our own mine - on its staircase or at its face?
@@ -304,11 +432,26 @@ function inOwnMine (bot) {
 function diedInMine (m) {
   // horizontal distance, a wide berth and a long memory: deaths 20 blocks straight below the tunnel (a ravine
   // under it) did not count in 3D and the bot fell into the same ravine again and again
+  // (the level it happened on - the shallowest the death lies by: a death on level 0's stairs is the whole mine's, one in a
+  //  deeper level's tunnel that level's and the ones under it; -1 none)
   const recent = (mem.get().deaths || []).filter(d => Date.now() - d.t < 3 * 60 * 60000 && d.cause !== 'void')
-  return recent.some(d => minePath(m).some(p => world.dist2(p, d) < 16))
+  const hit = minePath(m).filter(p => recent.some(d => world.dist2(p, d) < 16)).map(p => p.lv)
+  return hit.length ? Math.min(...hit) : -1
 }
-function abandonMine (m) {
+// Give up on level i (the active one by default) and every level under it - their way in is its stairs - back to level 0;
+// level 0 is the whole mine: its entrance joins the bad mines, a new one is chosen. Returns what is left of the mine.
+function abandonMine (m, i = m && m.levels ? m.active : 0) {
+  if (i > 0 && m.levels && i < m.levels.length) {
+    const L = levelsOf(m)[i]
+    m.badLevels = (m.badLevels || []).concat([clone(L.stairTop)]).slice(-8)
+    m.levels.splice(i)
+    copyFields(m.levels[0], m); m.active = 0 // (the view was a dropped level's: not written back)
+    log('mine', `giving up the mine's level at y${L.level} (stairs from ${move.fmt(L.stairTop)}) - back to the level at y${m.level}`)
+    saveMine(m)
+    return m
+  }
   mem.update(mm => { mm.badMines = (mm.badMines || []).concat([{ x: m.entrance.x, y: m.entrance.y, z: m.entrance.z }]).slice(-12); mm.mine = null })
+  return null
 }
 
 // KNOWN ORE. Iron here is plentiful - 488 blocks within 64 of home, 4000+ within 128 - but a tenth of a percent of
@@ -369,6 +512,26 @@ async function takeKnownOre (bot, itemName, target, ctx = {}) {
   return inv.count(bot, itemName) >= target
 }
 
+// THE WAY DOWN: the entrance (unless we are in the mine already), then each level's stair top in turn down to the active
+// one - the mine's own stairs, never the planner's way through the rock to a face 80 below (a walk that says underground
+// is let into the rock: travel's guard stops only a shaft dug down from the surface). A level not yet begun has its first
+// cell in solid rock: fluid beside it gives the level up before a cell is opened. False: stopped, or the level given up.
+async function downTheMine (bot, m, ctx) {
+  if (!inOwnMine(bot) && world.dist3(bot.entity.position, m.entrance) > 3) await move.travel(bot, m.entrance, { range: 3, shouldStop: ctx.shouldStop, label: 'to mine', underground: true })
+  for (let i = 1; i <= (m.active || 0); i++) {
+    const t = i === m.active ? m.stairTop : m.levels[i].stairTop
+    if (Math.floor(bot.entity.position.y) < t.y) continue // (already below this flight's top: on it or under it)
+    if (ctx.shouldStop && ctx.shouldStop()) return false
+    if (i === m.active && !m.blocks) {
+      const f = fluidAround(bot, t) || fluidAround(bot, { x: t.x, y: t.y + 1, z: t.z })
+      if (f && f !== 'unknown') { log('mine', `${f} beside the new level's first step at ${move.fmt(t)}`); abandonMine(m); return false }
+    }
+    const r = await move.goTo(bot, new goals.GoalBlock(t.x, t.y, t.z), { timeoutMs: 60000, stuckMs: 12000, label: 'to mine face', shouldStop: ctx.shouldStop })
+    if (!r.ok) { log('mine', `couldn't reach the stairs down to level y${levelsOf(m)[i].level} at ${move.fmt(t)} (${r.why})`); break }
+  }
+  return true
+}
+
 async function mineFor (bot, itemName, target, ctx = {}) {
   alsoWant = /^(granite|diorite|andesite|tuff)$/.test(itemName) ? new RegExp('^' + itemName + '$') : null
   let m = mem.get().mine
@@ -377,17 +540,21 @@ async function mineFor (bot, itemName, target, ctx = {}) {
   if (m && home && world.dist2(m.entrance, home) > 96) { log('mine', `the old mine at ${move.fmt(m.entrance)} is far from home - starting one here`); m = null }
   if (m && !home && world.dist2(m.cursor, bot.entity.position) > 96) m = null
   // a mine we died in lately has something living in it (a cave broke into it): leave it for good
-  if (m && diedInMine(m)) { log('mine', `died in the mine at ${move.fmt(m.entrance)} lately - abandoning it for a new one`); abandonMine(m); m = null }
+  // (a death in a deeper level's tunnel is that level's: it goes, the levels over it stay)
+  ensureLevels(m)
+  const dl = m ? diedInMine(m) : -1
+  if (dl === 0) log('mine', `died in the mine at ${move.fmt(m.entrance)} lately - abandoning it for a new one`)
+  if (dl >= 0) m = abandonMine(m, dl)
   // a "mine" working just under the surface is a trench under whatever stands there
-  if (m && m.stairsDone && home && m.level > home.y - 20 && !m.ore) { log('mine', `the mine at ${move.fmt(m.entrance)} works at y${m.level}, too near the surface - abandoning it`); abandonMine(m); m = null }
-  // an ore trip works where that ore is: a mine at another level is left (not a bad mine - cobble comes from it as well)
+  if (m && m.stairsDone && home && m.level > home.y - 20 && !m.ore) { log('mine', `the mine at ${move.fmt(m.entrance)} works at y${m.level}, too near the surface - abandoning it`); m = abandonMine(m) }
+  // an ore trip works where that ore is: the mine's level nearest it, or a new level down from the deepest (pickLevel)
   // (coal is everywhere under the ground: the mine at hand is worked for it - its walls give it, with the cobble - never
   //  left for a new one at coal's richest band: the first coal trip threw the y39 cobble mine away for a hillside at y100
   //  and every cobble trip after would dig new stairs back down, 2026-09-28)
   const ore = itemName === 'coal' && m ? null : await oreLevel(bot, itemName).catch(() => null)
-  // (a mine already made for this band keeps it: the best entrance may not reach it - y86 ground over y91 iron made a
-  //  y78 mine, and every trip after called it the wrong level and made the same mine again)
-  if (ore && m && Math.abs(m.level - ore.y) > 6 && !(m.oreY != null && Math.abs(m.oreY - ore.y) <= 6)) { log('mine', `${itemName} lies at y${ore.y} (${ore.n} in sight of the rock) - the mine at y${m.level} is the wrong level; a new one`); mem.set('mine', null); m = null }
+  // (never a new mine for "the wrong level": the mine was thrown away for one and a new staircase dug from the surface -
+  //  four entrances round home in one night for andesite, iron and deepslate, 2026-09-30)
+  if (m) m = pickLevel(m, ore, itemName)
   if (!m && !ore && !world.openSky(bot, world.feetPos(bot)) && bot.entity.position.y < ((home && home.y) || 64) - 8) {
     // already underground: tunnel from right here
     const me = world.feetPos(bot)
@@ -413,7 +580,7 @@ async function mineFor (bot, itemName, target, ctx = {}) {
     // the way down is the mine's own - entrance, stairs, tunnel - unless we are already in it. Judged by distance on
     // the map alone, standing 40 blocks over the face counted as "near" and the planner took a way down through a cave
     // lake at night; Drowned killed the bot in it (2026-09-24).
-    if (!inOwnMine(bot) && world.dist3(bot.entity.position, m.entrance) > 3) await move.travel(bot, m.entrance, { range: 3, shouldStop: ctx.shouldStop, label: 'to mine', underground: true })
+    if (!await downTheMine(bot, m, ctx)) return false
     const r = await move.goTo(bot, new goals.GoalBlock(m.cursor.x, m.cursor.y, m.cursor.z), { timeoutMs: 120000, stuckMs: 15000, label: 'to mine face' })
     // (busy or stopped on the way is no verdict on the mine - a fight in the stairwell abandoned a whole mine for a new one)
     if (!r.ok && !move.isVerdict(r)) return false
@@ -424,9 +591,8 @@ async function mineFor (bot, itemName, target, ctx = {}) {
       if (m.faceFails < 3) { log('mine', `can't reach the mine face at ${move.fmt(m.cursor)} (${r.why}) - ${m.faceFails} of 3 before a new mine`); return false }
     } else if (m.faceFails) { m.faceFails = 0; saveMine(m) }
     if (!r.ok) {
-      log('mine', `can't reach the mine face at ${move.fmt(m.cursor)} (${r.why}) - three trips now; starting a new mine`)
+      log('mine', `can't reach the mine face at ${move.fmt(m.cursor)} (${r.why}) - three trips now; ${m.active ? 'giving up this level' : 'starting a new mine'}`)
       abandonMine(m)
-      mem.set('mine', null)
       return false
     }
   }
@@ -466,6 +632,7 @@ async function mineFor (bot, itemName, target, ctx = {}) {
         log('mine', 'pack full - taking the haul home')
         await base().depositHaul(bot, { shouldStop: ctx.shouldStop })
         await provisionForMine(bot)
+        if (!await downTheMine(bot, m, ctx)) return false
         const r = await move.goTo(bot, new goals.GoalBlock(m.cursor.x, m.cursor.y, m.cursor.z), { timeoutMs: 180000, stuckMs: 20000, label: 'back to mine face' })
         if (!r.ok) { log('mine', `couldn't get back to the face (${r.why})`); return false }
       }
@@ -488,7 +655,8 @@ async function mineFor (bot, itemName, target, ctx = {}) {
         // in an hour ended "blocked, far above the working depth" (2026-09-24). Only a staircase still near the surface
         // (under the castle, the hut) is no mine.
         if (!m.stairsDone && m.cursor.y > m.level + 12) {
-          if (m.entrance.y - m.cursor.y < 8) { log('mine', `the stairs are blocked at y${m.cursor.y}, just under the surface - abandoning this mine`); abandonMine(m); return false }
+          // (the ACTIVE level's stairs: a deeper level blocked within 8 of its top is dropped, not the mine)
+          if (m.stairTop.y - m.cursor.y < 8) { log('mine', `the stairs are blocked at y${m.cursor.y}, ${m.active ? 'just under the level above' : 'just under the surface'} - abandoning ${m.active ? 'this level' : 'this mine'}`); abandonMine(m); return false }
           log('mine', `the stairs are blocked at y${m.cursor.y} - tunnelling at this depth`)
         }
         // hazard ahead: turn this leg
@@ -496,7 +664,7 @@ async function mineFor (bot, itemName, target, ctx = {}) {
         if (!turnFrom) { turnFrom = { x: m.dir.x, z: m.dir.z }; turnSide = 1; m.dir = { x: -turnFrom.z, z: turnFrom.x } } else { turnSide = 2; m.dir = { x: turnFrom.z, z: -turnFrom.x } }
         m.legPos = 0
         fails = 0
-        if (!m.stairsDone) { m.stairsDone = true; m.level = m.cursor.y }
+        if (!m.stairsDone) { m.stairsDone = true; m.level = m.cursor.y; m.stairsEnd = { x: m.cursor.x, y: m.cursor.y, z: m.cursor.z } }
       }
     } else { fails = 0; if (broken > b0) { turnFrom = null; turnSide = 0 } }
     if (Date.now() - lastSave > 15000) { saveMine(m); lastSave = Date.now() }
@@ -585,7 +753,7 @@ function underOwnZone (p) {
 
 async function stairStep (bot, m) {
   const c = m.cursor
-  if (c.y <= m.level) { m.stairsDone = true; m.legPos = 0; log('mine', `stairs reached y${c.y} - tunnelling`); return true }
+  if (c.y <= m.level) { m.stairsDone = true; m.stairsEnd = { x: c.x, y: c.y, z: c.z }; m.legPos = 0; log('mine', `stairs reached y${c.y} - tunnelling`); return true }
   const q = { x: c.x + m.dir.x, y: c.y - 1, z: c.z + m.dir.z }
   if (underOwnZone(q)) { log('mine', `the stairs would run under a protected build at ${move.fmt(q)}`); return false }
   const cells = [{ x: q.x, y: q.y + 2, z: q.z }, { x: q.x, y: q.y + 1, z: q.z }, q]
@@ -623,7 +791,7 @@ async function tunnelStep (bot, m) {
     const shift = m.farShift ? SHIFT * 3 : SHIFT
     for (let i = 0; i < shift; i++) {
       const q = { x: m.cursor.x + side.x, y: m.cursor.y, z: m.cursor.z + side.z }
-      if (!await openTunnelCell(bot, m.cursor, q)) return false
+      if (!await openTunnelCell(bot, m, m.cursor, q)) return false
     }
     m.dir = { x: -m.dir.x, z: -m.dir.z }
     m.legPos = 0; m.farShift = false; m.caveRun = 0
@@ -632,13 +800,15 @@ async function tunnelStep (bot, m) {
   }
   const q = { x: c.x + m.dir.x, y: c.y, z: c.z + m.dir.z }
   lastPlugs = 0
-  if (!await openTunnelCell(bot, c, q)) return false
+  if (!await openTunnelCell(bot, m, c, q)) return false
   m.caveRun = (m.caveRun || 0) * 0.7 + lastPlugs // (a running sum: steady walling of ~1.2 a step reaches the mark)
   m.legPos++
   return true
 }
 
-async function openTunnelCell (bot, from, q) {
+// (m: the mine record the step works on - its cursor and count are written HERE, never through mem.get().mine: a second
+//  writer round saveMine, the record the loop holds and the one in memory could part; 2026-09-30)
+async function openTunnelCell (bot, m, from, q) {
   if (underOwnZone(q)) return false // never under the castle or the base
   // rock over the tunnel: the surface at least two above its three-high roof. A level tunnel on a hillside ran out
   // into the open slope and walled up the "cave openings" - the sky - with cobble and torches: a cut across the hill
@@ -674,11 +844,10 @@ async function openTunnelCell (bot, from, q) {
   await plugOpenings(bot, cells, { x: q.x - from.x, z: q.z - from.z })
   if (!await ensureFloor(bot, q)) return false
   if (!await stepInto(bot, q)) return false
-  const m = mem.get().mine
-  if (m) { m.cursor = { x: q.x, y: q.y, z: q.z }; m.blocks = (m.blocks || 0) + cells.length }
+  m.cursor = { x: q.x, y: q.y, z: q.z }; m.blocks = (m.blocks || 0) + cells.length
   await takeWallOres(bot)
-  if (m) await maybeTorch(bot, m)
+  await maybeTorch(bot, m)
   return true
 }
 
-module.exports = { mineFor, chooseEntrance, takeWallOres, takeKnownOre, inOwnMine, oreLevel }
+module.exports = { mineFor, chooseEntrance, takeWallOres, takeKnownOre, inOwnMine, oreLevel, mineBox, minePath, ensureLevels, levelsOf, setActive, saveMine, chooseLevel, pickLevel, descentStart, flightCells, abandonMine }

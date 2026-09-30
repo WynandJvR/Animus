@@ -87,12 +87,10 @@ function utilitySpotOK (p, { temporary = false, except = null } = {}) {
   //  every cell is "the mine path", and a worn-out pickaxe could not be replaced)
   if (m && !temporary) {
     for (const q of [m.cursor, m.entrance]) if (q && Math.abs(q.x - p.x) <= 2 && Math.abs(q.z - p.z) <= 2 && Math.abs(q.y - p.y) <= 3) return false
-    // anywhere along the staircase line between entrance and cursor
-    if (m.entrance && m.cursor) {
-      const minx = Math.min(m.entrance.x, m.cursor.x) - 1; const maxx = Math.max(m.entrance.x, m.cursor.x) + 1
-      const minz = Math.min(m.entrance.z, m.cursor.z) - 1; const maxz = Math.max(m.entrance.z, m.cursor.z) + 1
-      const miny = Math.min(m.entrance.y, m.cursor.y) - 1; const maxy = Math.max(m.entrance.y, m.cursor.y) + 2
-      if (p.x >= minx && p.x <= maxx && p.z >= minz && p.z <= maxz && p.y >= miny && p.y <= maxy) return false
+    // anywhere along the staircase line between entrance and cursor (every level's: mining.mineBox, the mine's one extent)
+    const bx = m.entrance && m.cursor && require('./mining').mineBox(m)
+    if (bx) {
+      if (p.x >= bx.x1 - 1 && p.x <= bx.x2 + 1 && p.z >= bx.z1 - 1 && p.z <= bx.z2 + 1 && p.y >= bx.y1 - 1 && p.y <= bx.y2 + 2) return false
     }
   }
   return true
