@@ -1209,12 +1209,12 @@ function tick () {
         const d = Math.abs(dx) + Math.abs(dz) + Math.abs(dy)
         if (d < bd) { bd = d; best = { x, y, z } }
       }
-      // (nothing firm within 2 at a safe drop: a FALL that costs a few hp beats the fire's one a second - a cell out to 3 with a
-      //  drop up to 6 (3 hp at most). Stood on the castle's campfire high on its walls with drops all round, the blind jump
-      //  landed back on it for 26s and the bot burned to death, 2026-09-30)
-      let fall = null
-      if (!best) {
-        let fd = Infinity
+      // (nothing firm within 2 at a safe drop - the way off in order of the damage it costs: a fall out to 3 with a drop of 3
+      //  at most (none); the fire itself broken - the body settles onto its floor, the builder puts it back (none); a longer
+      //  drop, 4-6, only when the fall damage (drop - 3) leaves 3 hp. Stood on the castle's campfire high on its walls with
+      //  drops all round, a blind jump landed back on it for 26s and the bot burned to death, 2026-09-30; audit)
+      const fallTo = maxDrop => {
+        let f = null; let fd = Infinity
         for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) {
           if (!dx && !dz) continue
           const x = fx + dx; const z = fz + dz
@@ -1222,20 +1222,24 @@ function tick () {
           if (!c || !c2 || !world.isAirish(c) || !world.isAirish(c2)) continue
           const drop = world.dropAt(bot, x + 0.5, fy, z + 0.5)
           const land = world.at(bot, x, fy - drop, z)
-          if (drop > 6 || !land || hot(land) || world.isLavaBlock(land)) continue
+          if (drop > maxDrop || !land || hot(land) || world.isLavaBlock(land)) continue
           const d = Math.abs(dx) + Math.abs(dz) + drop
-          if (d < fd) { fd = d; fall = { x, y: fy, z } }
+          if (d < fd) { fd = d; f = { x, y: fy, z, drop } }
         }
+        return f
       }
-      if (!active || active.kind !== 'hot') { setActive('hot', 'off a burning floor'); log('reflex', `standing on ${hot(here) ? here.name : under.name} at ${fx},${fy},${fz} - ${best ? 'off to ' + best.x + ',' + best.y + ',' + best.z : fall ? 'nothing firm within 2: dropping off to ' + fall.x + ',' + fall.z : 'nowhere to go: breaking the ' + (hot(here) ? here.name : under.name)}`) }
+      const hb = hot(here) ? here : under
+      const shortFall = best ? null : fallTo(world.SAFE_DROP)
+      const breakIt = !best && !shortFall && !!hb && hb.hardness != null && hb.hardness >= 0
+      const longFall = !best && !shortFall && !breakIt ? fallTo(Math.min(6, Math.floor(bot.health) - 3 + world.SAFE_DROP)) : null
+      const how = best ? 'off to ' + best.x + ',' + best.y + ',' + best.z : shortFall ? 'nothing firm within 2: a short drop off to ' + shortFall.x + ',' + shortFall.z : breakIt ? 'nothing firm within 2: breaking the ' + hb.name : longFall ? 'nothing firm within 2: a ' + longFall.drop + '-block drop off to ' + longFall.x + ',' + longFall.z : 'nowhere to go: jumping'
+      if (!active || active.kind !== 'hot') { setActive('hot', 'off a burning floor'); log('reflex', `standing on ${hb.name} at ${fx},${fy},${fz} - ${how}`) }
       try { bot.pathfinder.setGoal(null) } catch {}
       // (always a jump: off the campfire's lip, out of its box - steered flat, the body stood pinned on it)
-      if (best || fall) steerTo(best || fall, { jump: true })
-      else if (!busy) {
-        // (nowhere at all: the fire out from under us - the builder puts its cell back)
-        const hb = hot(here) ? here : under
-        runBusy('break the fire', () => require('./act').digBlock(bot, hb, { own: true }).catch(() => false), 4000, null, stopDig)
-      }
+      const to = best || shortFall || longFall
+      if (to) steerTo(to, { jump: true })
+      else if (breakIt) { if (!busy) runBusy('break the fire', () => require('./act').digBlock(bot, hb, { own: true }).catch(() => false), 4000, null, stopDig) }
+      else { bot.setControlState('jump', true); bot.setControlState('forward', true) }
       return
     } else if (active && active.kind === 'hot') return clearActive()
   }
