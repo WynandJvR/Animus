@@ -33,6 +33,9 @@ const orchard = require('./orchard')
 const pen = require('./pen')
 const litter = require('./litter')
 let litterSeeded = false // (the pillars from before the ledger: looked for once a run, once the orchard's zone is set)
+// (before EITHER tidy rung counts: called from the castle's-gap rung only, it never ran - the castle always has work, and
+//  the tidies came from the before-the-castle rung; the stairs the operator asked about stood on, forgotten, 2026-09-30)
+function seedLitter () { if (!litterSeeded && orchard.orchard()) { litterSeeded = true; litter.seed(bot) } }
 const LITTER_BATCH = 8
 let steerSaid = null // (the wait-without-raw line, once per item)
 let siteTidyAsked = 0 // (when the site's scaffold was last counted for the day's teardown)
@@ -583,6 +586,7 @@ function decide () {
   const tidyFirst = mem.get().tidyFirst || { day: null, n: 0 }
   { const d = day.dayNo(bot); if (tidyFirst.day !== d) { tidyFirst.day = d; tidyFirst.n = 0; mem.set('tidyFirst', tidyFirst) } } // (a new day: day.js)
   if (tidyFirst.n < 1 && dHome < 64 && world.phase(bot) === 'day' && !nightSoon() && !held('tidy')) {
+    seedLitter()
     const n = litter.pending(bot, mem.get().home, 96).length
     if (n >= LITTER_CAP) { tidyFirst.n++; mem.set('tidyFirst', tidyFirst) }
     if (n >= LITTER_CAP) return { name: 'tidy', why: `${n} blocks of ours left standing round home (pillars, stepping stones) - past ${LITTER_CAP}, before the castle` }
@@ -607,7 +611,7 @@ function decide () {
   //  in the castle's gaps only (held, waiting, the day's end): tidying ahead of it took 40 minutes of a morning, the
   //  castle idle (single goal: the build; audit 2026-09-28)
   if (dHome < 64 && world.phase(bot) === 'day' && !held('tidy')) {
-    if (!litterSeeded && orchard.orchard()) { litterSeeded = true; litter.seed(bot) }
+    seedLitter()
     const n = litter.pending(bot, mem.get().home, 96).length
     if (n >= LITTER_BATCH) return { name: 'tidy', why: `${n} blocks of ours left standing round home (pillars, stepping stones)` }
   }
