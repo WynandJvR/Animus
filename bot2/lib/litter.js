@@ -149,6 +149,10 @@ function pending (bot, from, radius = RADIUS) {
   for (const q of ledger.values()) {
     if (from && world.dist3(q, from) > radius) continue
     if (!visible(q)) continue
+    // (and the block itself as well as its column: the part of a pillar down a pit - 8+ under home's level - is out of
+    //  sight too. Taken bottom-up, the tidy walked down to the pit's floor for it - y69, y65, the cave walks that killed the
+    //  bot once, 2026-09-28 - and timed out; the part at the surface comes down from the surface)
+    if (q.y < floorY) continue
     // (under our own mine's entrance - its shaft: the mine's, out of sight and out of reach from the surface; gather.inMineShaft)
     if (mine && mine.entrance && q.y < mine.entrance.y - 1 && world.dist2(q, mine.entrance) < 3) continue
     const b = world.at(bot, q.x, q.y, q.z)
