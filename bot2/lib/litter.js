@@ -18,6 +18,12 @@ const RADIUS = 96 // (the ledger's reach round home - and the tidy's)
 // count): six 30s walks in a row to the same west-orchard blocks, and the tidy came back for them every run, the castle
 // idle 40 minutes (2026-09-28)
 const TRIES = 2
+// (the tries are a DAY's: given up for good, a column stayed given up after the tidy learnt to reach it (a ground stand
+//  beside a floating stair, 2026-09-30) - the operator's reported stair among them. Two tries a column a day, as the rest
+//  of the bot's rests go; a new day, another two)
+const today = bot => require('./day').dayNo(bot)
+const triesOf = (bot, q) => q.triedDay === today(bot) ? (q.tries || 0) : 0
+const addTry = (bot, q) => { const d = today(bot); q.tries = (q.triedDay === d ? (q.tries || 0) : 0) + 1; q.triedDay = d }
 const COLUMNS_A_RUN = 12
 const k = p => `${p.x},${p.y},${p.z}`
 const ledger = new Map((mem.get().litter || []).map(q => [k(q), q]))
@@ -156,7 +162,7 @@ function pending (bot, from, radius = RADIUS) {
     // (under our own mine's entrance - its shaft: the mine's, out of sight and out of reach from the surface; gather.inMineShaft)
     if (mine && mine.entrance && q.y < mine.entrance.y - 1 && world.dist2(q, mine.entrance) < 3) continue
     const b = world.at(bot, q.x, q.y, q.z)
-    if (b && b.name === q.name && (q.tries || 0) < TRIES && !ours(q.x, q.y, q.z)) out.push(q)
+    if (b && b.name === q.name && triesOf(bot, q) < TRIES && !ours(q.x, q.y, q.z)) out.push(q)
   }
   return out
 }
@@ -263,9 +269,9 @@ async function tidy (bot, { from, radius = RADIUS, shouldStop } = {}) {
     //  the lip, and the bot slipped off twice digging from there - audit 2026-09-28. None such: near it, as before)
     const stand = standBeside(bot, low) || standUnder(bot, low)
     // (no stand, and the column is in the air: "near it" is a hunt for a way into mid-air - left this run, said)
-    if (!stand && act.fallBelow(bot, low) > world.SAFE_DROP) { log('litter', `no ground within a climb of the column at ${k(low)} - left this run`); left += col.length; for (const q of col) q.tries = (q.tries || 0) + 1; dirty = true; continue }
+    if (!stand && act.fallBelow(bot, low) > world.SAFE_DROP) { log('litter', `no ground within a climb of the column at ${k(low)} - left this run`); left += col.length; for (const q of col) addTry(bot, q); dirty = true; continue }
     const r = await move.goTo(bot, stand ? new goals.GoalBlock(stand.x, stand.y, stand.z) : new goals.GoalNear(low.x, low.y, low.z, 2), { timeoutMs: 30000, place: false, allowZones: ['orchard', 'base', 'farm'], label: 'to litter' })
-    const miss = () => { for (const q of col) q.tries = (q.tries || 0) + 1; dirty = true }
+    const miss = () => { for (const q of col) addTry(bot, q); dirty = true }
     // (only a verdict counts against a column: a walk cut by dusk, a creeper or the operator says nothing of it - audit)
     if (!r.ok && !act.reach(bot, low, 4.5)) { left += col.length; if (move.isVerdict(r)) miss(); continue }
     const leftBefore = left
@@ -296,8 +302,8 @@ async function tidy (bot, { from, radius = RADIUS, shouldStop } = {}) {
     await act.collectDrops(bot, { radius: 5, maxMs: 3000 }).catch(() => {})
   }
   save()
-  const gaveUp = [...ledger.values()].filter(q => (q.tries || 0) >= TRIES).length
-  if (gaveUp) log('litter', `${gaveUp} block${gaveUp > 1 ? 's' : ''} of ours given up on (out of reach twice)`)
+  const gaveUp = [...ledger.values()].filter(q => triesOf(bot, q) >= TRIES).length
+  if (gaveUp) log('litter', `${gaveUp} block${gaveUp > 1 ? 's' : ''} of ours given up on for today (out of reach twice)`)
   if (removed || left) log('litter', `took down ${removed} block${removed === 1 ? '' : 's'} of ours${left ? `, ${left} left (out of reach from the ground)` : ''}`)
   return removed
 }
