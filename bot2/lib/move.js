@@ -547,9 +547,11 @@ async function crossDoor (bot, goal) {
   const obstruction = (x, y, z) => {
     const b = world.at(bot, x, y, z); if (!b || !world.isSolid(b) || !world.NATURAL_RE.test(b.name)) return false
     const bj = require('./build'); const j = bj.getJob(); const c = j && j.index.get(`${x},${y},${z}`)
-    // (and a cell the design leaves EMPTY inside the build's box - the site clearing's own work, done here when a doorway
-    //  waits on it: grass at the castle door's level, a stair over it, "nowhere to stand" every 11s, 2026-09-30)
-    if (!c) { const bx = j && j.box; return !!bx && x >= bx.x1 && x <= bx.x2 && z >= bx.z1 && z <= bx.z2 && y >= bx.y1 && y <= bx.y2 }
+    // (and at a door OF OUR BUILD, natural ground on its doorstep in a cell with no entry: the design put a door here, so
+    //  its steps must be clear - a door whose foot is level with the ground cannot be used otherwise. Never "no entry =
+    //  design air" in general: the site clearing leaves the box's bottom layer as terrain on purpose. Grass at the castle
+    //  door's level, a stair over it, "nowhere to stand" every 11s, 2026-09-30; audit)
+    if (!c) { const dc = j && j.index.get(`${d.x},${d.y},${d.z}`); const bx = j && j.box; return !!dc && !dc.clear && !!bx && x >= bx.x1 && x <= bx.x2 && z >= bx.z1 && z <= bx.z2 }
     return !c.clear && !bj.partOk(c, b.name)
   }
   const act = require('./act')
