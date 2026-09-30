@@ -693,7 +693,9 @@ async function goToInner (bot, goal, opts, a) {
     // (only a walk that began IN it - the start on one of its cells, a step aside allowed: one that began BESIDE it and went
     //  on is the walk the trap's cost steers, and forgot a real one never entered; that trap's own cells only; audit)
     const s0 = start.floored(); const mm = require('./memory'); const l = mm.get().trapCells || []
-    const batches = new Set(l.filter(t => Math.abs(t.x - s0.x) <= 1 && Math.abs(t.y - s0.y) <= 1 && Math.abs(t.z - s0.z) <= 1).map(t => t.batch != null ? t.batch : 'x' + t.x + ',' + t.y + ',' + t.z))
+    // (and not while a hole our escape opened out of it still stands open: the walk went out through it, not a real exit)
+    const openStill = t => (t.opened || []).some(o => world.isAirish(world.at(bot, o.x, o.y, o.z)))
+    const batches = new Set(l.filter(t => Math.abs(t.x - s0.x) <= 1 && Math.abs(t.y - s0.y) <= 1 && Math.abs(t.z - s0.z) <= 1 && !openStill(t)).map(t => t.batch != null ? t.batch : 'x' + t.x + ',' + t.y + ',' + t.z))
     if (batches.size) { mm.update(m => { m.trapCells = (m.trapCells || []).filter(t => !batches.has(t.batch != null ? t.batch : 'x' + t.x + ',' + t.y + ',' + t.z)) }); log('move', `walked out of the trap remembered at ${fmt(s0)} - forgotten`) }
   }
   return r
@@ -782,11 +784,15 @@ function giveUpsNear (p, now = Date.now()) { return giveUps.filter(g => now - g.
 // (its life is the game's day - day.js, as every day rule: the rest of today and tomorrow; audit)
 const trapLive = (bot, t) => { try { return require('./day').dayNo(bot) - t.day <= 1 } catch { return false } }
 let legSaid = null
+// (the cells an escape opened in our own wall, this escape: a walk out through them proves nothing of the trap - the
+//  builder closes them on its next pass and the pocket catches the bot again; 2026-09-30 audit)
+let escOpened = []
 function noteTrap (bot, p) {
+  const opened = escOpened.slice(); escOpened = []
   const cells = giveUps.filter(g => Math.abs(g.x - p.x) <= GIVEUP_NEAR && Math.abs(g.y - p.y) <= GIVEUP_NEAR && Math.abs(g.z - p.z) <= GIVEUP_NEAR).map(g => ({ x: g.x, y: g.y, z: g.z }))
   cells.push({ x: p.x, y: p.y, z: p.z })
   const day = require('./day').dayNo(bot); const batch = Date.now() // (the trap's cells together: forgotten together)
-  require('./memory').update(m => { const l = (m.trapCells || []).filter(t => t.day != null && trapLive(bot, t)); for (const c of cells) if (!l.some(t => t.x === c.x && t.y === c.y && t.z === c.z)) l.push(Object.assign(c, { day, batch })); m.trapCells = l.slice(-200) })
+  require('./memory').update(m => { const l = (m.trapCells || []).filter(t => t.day != null && trapLive(bot, t)); for (const c of cells) if (!l.some(t => t.x === c.x && t.y === c.y && t.z === c.z)) l.push(Object.assign(c, { day, batch }, opened.length ? { opened } : {})); m.trapCells = l.slice(-200) })
   log('move', `a trap remembered at ${fmt(p)} (${cells.length} cells) - walked round for a day`)
 }
 function clearGiveUps (p) { for (let i = giveUps.length - 1; i >= 0; i--) { const g = giveUps[i]; if (Math.abs(g.x - p.x) <= GIVEUP_NEAR && Math.abs(g.y - p.y) <= GIVEUP_NEAR && Math.abs(g.z - p.z) <= GIVEUP_NEAR) giveUps.splice(i, 1) } }
@@ -912,7 +918,7 @@ async function escapeUpInner (bot) {
           if (!ours(p0.x, p0.y, p0.z) || !ours(p0.x, p0.y + 1, p0.z)) break
           for (const dy of [1, 0]) {
             const b = world.at(bot, p0.x, p0.y + dy, p0.z)
-            if (b && !world.isAirish(b)) { log('move', `enclosed: taking our own ${b.name} at ${fmt({ x: p0.x, y: p0.y + dy, z: p0.z })}`); const mine = !!cellAt(p0.x, p0.y + dy, p0.z); await act.dig(bot, { x: p0.x, y: p0.y + dy, z: p0.z }, { own: mine, force: mine, noWalk: true, allowZones: ['build', 'base'], timeoutMs: 8000 }).catch(() => false) }
+            if (b && !world.isAirish(b)) { escOpened.push({ x: p0.x, y: p0.y + dy, z: p0.z }); log('move', `enclosed: taking our own ${b.name} at ${fmt({ x: p0.x, y: p0.y + dy, z: p0.z })}`); const mine = !!cellAt(p0.x, p0.y + dy, p0.z); await act.dig(bot, { x: p0.x, y: p0.y + dy, z: p0.z }, { own: mine, force: mine, noWalk: true, allowZones: ['build', 'base'], timeoutMs: 8000 }).catch(() => false) }
           }
           await act.collectDrops(bot, { radius: 4, maxMs: 3000 }).catch(() => {}) // (a door dug comes back whole: the builder re-places it)
           if (!safe(p0.x, p0.y, p0.z)) { log('move', `enclosed: the cell opened at ${fmt(p0)} stands over a drop - not stepping in`); break } // (room, and a drop a fall does not hurt)
