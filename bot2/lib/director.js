@@ -1472,6 +1472,9 @@ const ANIMAL_RAW = /^(wool|white_wool|leather|feather)$/
 //  y12, over deepslate's band, came back 0/17 every time - five minutes a round, all night, 2026-09-30. Once for an
 //  animal (they never respawn round home), twice for the rest (a vein can be missed once))
 const emptyTrips = new Map() // raw -> { day, n }
+// (the build's backbone takes four: an empty trip can be a failed walk, a full pack, a creeper's hold - two of those and
+//  the castle's main raw would be off for the day, a bigger stall than the one this stops; audit)
+const CORE_RAW = /(_log|^log|^cobblestone|^sand|^clay_ball|^fuel|^coal|^stone|^dirt|^gravel)$/
 async function gatherFor (raw, short) {
   reflex.setCautious(true) // (an optional trip does not fight: cover over a charge - reflex.setCautious)
   let ok = false
@@ -1485,7 +1488,7 @@ async function gatherFor (raw, short) {
     if (!ok && got() <= had && !notToday.has(raw) && !dayStop()) {
       const d = day.dayNo(bot); const e = emptyTrips.get(raw); const n = e && e.day === d ? e.n + 1 : 1
       emptyTrips.set(raw, { day: d, n })
-      if (ANIMAL_RAW.test(raw) || n >= 2) { notToday.set(raw, { day: d }); log('dir', `${raw}: ${n > 1 ? n + ' trips' : 'the trip'} found none - not again today`) }
+      if (ANIMAL_RAW.test(raw) || n >= (CORE_RAW.test(raw) ? 4 : 2)) { notToday.set(raw, { day: d }); log('dir', `${raw}: ${n > 1 ? n + ' trips' : 'the trip'} found none - not again today`) }
     }
   }
 }
