@@ -1400,7 +1400,13 @@ async function castleWorkInner () {
 // the chop answered "too far" at once, and the castle loop spun through it twice a second (2026-09-28)
 // (cleared on a phase edge - a night seen, then day - never on a size: a mark set just after dawn, the likeliest one,
 //  could never see more daylight left than that and stayed put till a restart - audit 2026-09-28)
-const notToday = new Map() // raw -> { day } (the day it was put off - open again on a later one: day.js)
+// (kept in memory.json: a restart - ten deploys in a night - wiped both, and the deepslate trips' count never reached two)
+function persistedMap (name) {
+  const m = new Map(Object.entries(mem.get()[name] || {}))
+  const save = () => mem.set(name, Object.fromEntries(m))
+  return { get: k => m.get(k), has: k => m.has(k), set: (k, v) => { m.set(k, v); save(); return v }, delete: k => { const r = m.delete(k); save(); return r } }
+}
+const notToday = persistedMap('notToday') // raw -> { day } (the day it was put off - open again on a later one: day.js)
 // (a night slept through passes inside the sleep task, often from dusk before the loop ever sees "night": the clock
 //  wrapping back past dawn counts as one too - audit 2026-09-28)
 function watchNights () { day.dayNo(bot) } // (THE day is read every tick - day.js - so no edge is missed between its readers)
@@ -1471,7 +1477,7 @@ const ANIMAL_RAW = /^(wool|white_wool|leather|feather)$/
 // (ANY raw whose trips bring back none, twice in a day: the same rest. Six deepslate trips down a mine whose stairs stop at
 //  y12, over deepslate's band, came back 0/17 every time - five minutes a round, all night, 2026-09-30. Once for an
 //  animal (they never respawn round home), twice for the rest (a vein can be missed once))
-const emptyTrips = new Map() // raw -> { day, n }
+const emptyTrips = persistedMap('emptyTrips') // raw -> { day, n }
 // (the build's backbone takes four: an empty trip can be a failed walk, a full pack, a creeper's hold - two of those and
 //  the castle's main raw would be off for the day, a bigger stall than the one this stops; audit)
 const CORE_RAW = /(_log|^log|^cobblestone|^sand|^clay_ball|^fuel|^coal|^stone|^dirt|^gravel)$/
