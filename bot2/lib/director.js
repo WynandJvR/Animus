@@ -1258,7 +1258,7 @@ async function castleWorkInner () {
     const strays = (await build.strayBuildBlocks(bot)).filter(p => { const m = strayMiss.get(sk(p)); return !m || m.day !== today || m.n < 2 })
     if (strays.length) {
       let n = 0
-      for (const s of strays.slice(0, 30)) { if (dayStop()) break; if (await act.dig(bot, s, { force: true, allowZones: ['build', 'base'], timeoutMs: 30000 })) n++; else { const m = strayMiss.get(sk(s)); strayMiss.set(sk(s), { n: m && m.day === today ? m.n + 1 : 1, day: today }) } }
+      for (const s of strays.slice(0, 30)) { if (dayStop()) break; if (await act.dig(bot, s, { force: true, allowZones: ['build', 'base'], timeoutMs: 30000 })) n++; else { log('dir', `stray ${s.name || 'block'} at ${sk(s)} would not come up: ${act.lastDigWhy() || 'unknown'}`); const m = strayMiss.get(sk(s)); strayMiss.set(sk(s), { n: m && m.day === today ? m.n + 1 : 1, day: today }) } }
       await act.collectDrops(bot, { radius: 8, maxMs: 5000 })
       log('dir', `took up ${n} of ${strays.length} build blocks standing where no cell wants them (${strays.slice(0, 6).map(s => s.name + '@' + s.x + ',' + s.y + ',' + s.z).join(' ')})`)
       if (n) return true

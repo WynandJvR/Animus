@@ -65,7 +65,10 @@ function digRefusal (bot, b, { force = false, own = false, allowZones = [] } = {
   if (world.holdsBackLava(bot, b.position)) return 'lava beside or under it'
   return null
 }
+// (why the last dig() returned false - said by the callers that retry: a stray build block failed eight rounds unsaid; audit)
+let lastDigWhy = null
 async function dig (bot, pos, { force = false, own = false, allowZones = [], timeoutMs = 30000, noWalk = false, reachMax = 4.3 } = {}) {
+  lastDigWhy = null
   let b = world.at(bot, pos.x, pos.y, pos.z)
   // "done" means the cell holds nothing breakable. Grass/flowers have no collision box but they ARE
   // blocks: treating them as air made a seed-gathering loop spin on resolved promises and starve the
@@ -74,33 +77,33 @@ async function dig (bot, pos, { force = false, own = false, allowZones = [], tim
   //  without a swing, the route died and every reef sighting reopened it, 2026-09-27)
   const nothing = x => !x || /^(air|cave_air|void_air)$/.test(x.name) || world.isLiquidWater(x) || world.isLavaBlock(x)
   if (nothing(b)) return true
-  if (guarded(bot, b, own)) return false // (logs, rate-limited per cell)
-  { const why = digRefusal(bot, b, { force, own, allowZones }); if (why) { if (why !== 'unbreakable') log('act', `won't dig ${b.name} at ${move.fmt(pos)} - ${why}`); return false } }
+  if (guarded(bot, b, own)) { lastDigWhy = 'a finished cell of the build'; return false } // (logs, rate-limited per cell)
+  { const why = digRefusal(bot, b, { force, own, allowZones }); if (why) { lastDigWhy = why; if (why !== 'unbreakable') log('act', `won't dig ${b.name} at ${move.fmt(pos)} - ${why}`); return false } }
   const t0 = Date.now()
   const cancelled = control.token()
   while (Date.now() - t0 < timeoutMs) {
     await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
-    if (cancelled()) return false
+    if (cancelled()) { lastDigWhy = 'stopped'; return false }
     await reflex.waitClear()
     b = world.at(bot, pos.x, pos.y, pos.z)
     if (nothing(b)) return true
-    if (guarded(bot, b, own)) return false // (the cell may have been finished while we waited)
+    if (guarded(bot, b, own)) { lastDigWhy = 'a finished cell of the build'; return false } // (the cell may have been finished while we waited)
     const tm = Date.now()
-    if (!reach(bot, pos, reachMax) && noWalk) return false
+    if (!reach(bot, pos, reachMax) && noWalk) { lastDigWhy = 'out of reach (no walk)'; return false }
     if (!reach(bot, pos, reachMax)) {
       // a block without a full hitbox (grass, flowers, crops) never satisfies the look-at raycast
       // goal - the walk ran its whole 20s timeout for every tuft of grass
       const goal = b.boundingBox === 'block' ? new goals.GoalLookAtBlock(b.position, bot.world, { reach: 4 }) : new goals.GoalNear(pos.x, pos.y, pos.z, 2)
       const r = await move.goTo(bot, goal, { timeoutMs: 20000, allowZones, label: 'reach ' + b.name })
-      if (!r.ok && !reach(bot, pos, 5)) return false
+      if (!r.ok && !reach(bot, pos, 5)) { lastDigWhy = `no way within reach (${r.why || 'walk failed'})`; return false }
     }
     // never the block we stand on over a drop that hurts: the builder dug the "wrong" block out of a plaza cell with the
     // bot standing on it, over the slope, and it fell 21 blocks (2026-09-24). Step off first; nowhere to step, no dig.
     if (holdsUsUp(bot, pos) && fallBelow(bot, pos) > world.SAFE_DROP) {
       const off = stepOff(bot, pos)
-      if (!off) { log('act', `won't dig ${b.name} at ${move.fmt(pos)} - I stand on it over a ${fallBelow(bot, pos)}-block drop`); return false }
+      if (!off) { lastDigWhy = 'I stand on it over a drop'; log('act', `won't dig ${b.name} at ${move.fmt(pos)} - I stand on it over a ${fallBelow(bot, pos)}-block drop`); return false }
       await move.goTo(bot, new goals.GoalBlock(off.x, off.y, off.z), { timeoutMs: 8000, dig: false, place: false, label: 'off the block' })
-      if (holdsUsUp(bot, pos)) return false
+      if (holdsUsUp(bot, pos)) { lastDigWhy = 'I stand on it'; return false }
       continue
     }
     const td = Date.now()
@@ -115,6 +118,7 @@ async function dig (bot, pos, { force = false, own = false, allowZones = [], tim
     if (Date.now() - tm > 6000) log('act', `slow dig ${b.name} at ${move.fmt(pos)}: walk ${td - tm}ms, dig ${Date.now() - td}ms (holding ${bot.heldItem ? bot.heldItem.name : 'nothing'})`)
     if (!after || after.name !== b.name) return true
   }
+  lastDigWhy = 'it would not break in time'
   return false
 }
 
@@ -512,4 +516,4 @@ async function collectDrops (bot, { radius = 8, maxMs = 15000 } = {}) {
   return picked
 }
 
-module.exports = { settleAfterClose, openSettled, digRefusal, sealsUsIn, holdsUsUp, fallBelow, stepOff, dig, digBlock, place, useOn, pour, fill, collectDrops, droppedItems, reach, inBody, sleep, ticks, refUsable, PLANT_RE, NO_REF_RE, USE_REF_RE, NO_FACE_RE, REPLACEABLE_RE }
+module.exports = { lastDigWhy: () => lastDigWhy, settleAfterClose, openSettled, digRefusal, sealsUsIn, holdsUsUp, fallBelow, stepOff, dig, digBlock, place, useOn, pour, fill, collectDrops, droppedItems, reach, inBody, sleep, ticks, refUsable, PLANT_RE, NO_REF_RE, USE_REF_RE, NO_FACE_RE, REPLACEABLE_RE }
