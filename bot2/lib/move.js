@@ -864,6 +864,7 @@ async function escapeUpInner (bot) {
         const t0 = Date.now(); while (!bot.entity.onGround && Date.now() - t0 < 1500) await sleep(50)
       }
       clearGiveUps(f0)
+      { const t0 = Date.now(); while (!bot.entity.onGround && Date.now() - t0 < 1500) await sleep(50) } // (said after landing)
       log('move', `came down our pillar: from ${fmt(f0)} to ${fmt(bot.entity.position)}`)
       return true
     }
