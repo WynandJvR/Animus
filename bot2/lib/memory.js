@@ -77,14 +77,14 @@ function bump (stat, by = 1) { const m = load(); m.stats[stat] = (m.stats[stat] 
 // A Map kept in memory.json - for the day-keyed rests (a trip put off today, a stray given up today): in memory only, a
 // restart - ten deploys in a night - wiped them all, and no day rule ever held (2026-09-30; audit). get/has/set/delete;
 // set and delete save (set() coalesces the writes)
-function persistedMap (name) {
-  const m = new Map(Object.entries(get()[name] || {}))
-  const keep = () => set(name, Object.fromEntries(m))
-  // (a Map's whole read side too - spread, entries, size: build's pocket signature spreads coverMiss, and without the
-  //  iterator every build step threw "coverMiss is not iterable" for the first rounds after the deploy, 2026-09-30)
-  return {
-    get: k => m.get(k), has: k => m.has(k), set: (k, v) => { m.set(k, v); keep(); return v }, delete: k => { const r = m.delete(k); if (r) keep(); return r },
-    [Symbol.iterator]: () => m[Symbol.iterator](), entries: () => m.entries(), keys: () => m.keys(), values: () => m.values(), forEach: f => m.forEach(f), get size () { return m.size }
-  }
+// (a real Map - every Map operation works by construction: a hand-listed look-alike lacked the spread, and build's pocket
+//  signature threw "coverMiss is not iterable" every step after the deploy, 2026-09-30; audit)
+class PersistedMap extends Map {
+  constructor (name) { super(Object.entries(get()[name] || {})); this.name = name; this.ready = true }
+  keep () { if (this.ready) set(this.name, Object.fromEntries(this)) }
+  set (k, v) { super.set(k, v); this.keep(); return this }
+  delete (k) { const r = super.delete(k); if (r) this.keep(); return r }
+  clear () { super.clear(); this.keep() }
 }
+function persistedMap (name) { return new PersistedMap(name) }
 module.exports = { get, set, update, save, flushSync, addUnique, removePos, bump, persistedMap, FILE }
