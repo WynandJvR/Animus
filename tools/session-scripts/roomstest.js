@@ -31,7 +31,7 @@ function makeWorld () {
 
 let ok = true; const check = (c, what) => { console.log(`${c ? 'PASS' : 'FAIL'} ${what}`); if (!c) ok = false }
 
-function scenario ({ work = true, doorName = null, backDoor = false }) {
+function scenario ({ work = true, doorName = null, doorOpen = null, backDoor = false }) {
   const { w, solid, k } = makeWorld()
   if (backDoor) { solid.delete(k(6, 65, 3)); solid.delete(k(6, 66, 3)) } // (a second way in, east wall)
   const box = { x1: -5, x2: 11, z1: -5, z2: 11 }
@@ -43,7 +43,7 @@ function scenario ({ work = true, doorName = null, backDoor = false }) {
   const standsOf = c => { const out = []; for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) for (let dy = -1; dy <= 0; dy++) { const p = { x: c.x + dx, y: c.y + dy, z: c.z + dz }; if (W.st(p.x, p.y, p.z) && Math.hypot(dx, dz) <= 4.2) out.push(p) } return out }
   const verdicts = []
   for (const c of gap) {
-    if (doorName && c.z === 4) c.name = doorName
+    if (doorName && c.z === 4) { c.name = doorName; if (doorOpen != null) c.want = { open: String(doorOpen) } }
     const work0 = work ? [q] : []
     const held = rooms.closesRoom(w, c, { box, jobUnbuilt, work: work0, standsOf })
     verdicts.push({ c, held: !!held })
@@ -62,6 +62,8 @@ function scenario ({ work = true, doorName = null, backDoor = false }) {
 }
 check(scenario({ work: false }).every(x => !x.held), 'no work inside: nothing held, the room closes')
 check(scenario({ work: true, doorName: 'oak_door' }).filter(x => x.c.z === 4).every(x => !x.held), 'a door in the last gap: never held')
+check(scenario({ work: true, doorName: 'spruce_trapdoor', doorOpen: true }).filter(x => x.c.z === 4).every(x => !x.held), 'an OPEN trapdoor in the last gap: never held')
+check(scenario({ work: true, doorName: 'spruce_trapdoor', doorOpen: false }).some(x => x.c.z === 4 && x.c.y === 65 && x.held), 'a CLOSED trapdoor in the last gap: held like a block')
 check(scenario({ work: true, backDoor: true }).every(x => !x.held), 'a second way in: nothing held')
 console.log(ok ? 'ALL PASS' : 'SOME FAILED')
 process.exit(ok ? 0 : 1)

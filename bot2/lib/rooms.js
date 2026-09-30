@@ -87,12 +87,15 @@ function doorwayAxis (w, jobUnbuilt, f) {
 // WOULD PLACING c CLOSE A ROOM WITH WORK STILL INSIDE? - a player leaves the doorway open until the room is done
 // (0 of 6 placed, stands in compartments the builder had closed on their own interior, 2026-09-29; audit):
 //   - only a doorway's cells: c itself as the doorway's foot, or c the head cell over one (a lintel closes it the same)
-//   - a door, a gate or a trapdoor never closes a room (the walk goes through it)
+//   - a door or a gate never closes a room (the walk goes through it); a trapdoor only when the cell wants it OPEN - a
+//     closed shutter seals a doorway like a block: the castle's low room was closed with a top-half trapdoor on its own
+//     interior, the bot inside, three escapes out through the walls, 2026-09-30; audit
 //   - with c solid, each side's walk region: closed (not out), holding a cell of the build still to place whose EVERY
 //     stand lies inside it (placeable only from within) - then c waits. A cell placeable from outside needs no doorway.
 // opts: { box, jobUnbuilt(x,y,z), work: [cells still to place, near], standsOf(q) -> [{x,y,z}] }
 function closesRoom (w, c, { box, jobUnbuilt, work, standsOf }) {
-  if (/_door$|_fence_gate$|_trapdoor$/.test(c.name || '')) return null
+  if (/_door$|_fence_gate$/.test(c.name || '')) return null
+  if (/_trapdoor$/.test(c.name || '') && ((c.want && String(c.want.open) === 'true') || (c.props && String(c.props.open) === 'true'))) return null
   let f = null; let axis = doorwayAxis(w, jobUnbuilt, c)
   if (axis) f = c
   else { const below = { x: c.x, y: c.y - 1, z: c.z }; axis = doorwayAxis(w, jobUnbuilt, below); if (axis) f = below }
