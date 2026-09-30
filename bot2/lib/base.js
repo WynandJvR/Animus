@@ -105,7 +105,10 @@ async function openChest (bot, p) {
     // a chest we just failed to reach is skipped a while (35s stuck walks, three per castle cycle)
     const bad = unreachable.get(key(p))
     if (bad && Date.now() - bad < 5 * 60000) return null
-    const r = await move.goTo(bot, new goals.GoalNear(p.x, p.y, p.z, 2), { timeoutMs: 45000, label: 'to chest', allowZones: ['base'] })
+    // (by travel - its legs go OUT of the build first: from inside the castle a bare planner walk to the chests timed out
+    //  45s at a time, five in a row in one build step (each chest skipped in turn, none of them the problem - where the bot
+    //  stood was), 2026-09-30)
+    const r = await move.travel(bot, p, { range: 2, label: 'to chest', maxMs: 90000 })
     if (!r.ok) { if (move.isVerdict(r)) unreachable.set(key(p), Date.now()); log('base', `can't reach the chest at ${move.fmt(p)} (${r.why}) - skipping it for a while`); return null }
   }
   { const bad = unreachable.get(key(p)); if (bad && Date.now() - bad < 5 * 60000) return null }
