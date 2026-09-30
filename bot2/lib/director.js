@@ -1267,7 +1267,10 @@ async function castleWorkInner () {
   // (kept in memory: a module variable was wiped by every reload, and the morning's first round started blank)
   phase('bottleneck trip')
   if (mem.get().buildWaiting) {
-    const want = mem.get().buildWaiting; mem.set('buildWaiting', null)
+    // (cleared only when a trip goes for it: cleared here with nothing short - the planks' logs in stock - the withdraw just
+    //  below never saw what the band waited on, filled the pack with trapdoors and signs, and the band waited on
+    //  dark_oak_planks with them in the chest, 2026-09-30)
+    const want = mem.get().buildWaiting
     const win0 = mats.planFor(bot, windowNeeds())
     const chain0 = Object.keys(mats.getPlanner(bot).plan({ [want]: 1 }).raw)
     // (fuel first when the furnaces have none: the chain's other raw is often in the chest already, waiting on it - 92 clay
@@ -1282,6 +1285,7 @@ async function castleWorkInner () {
       log('dir', `the build waits on ${want} - ${win0.raw[raw0]} ${raw0} first, while the day is young`)
       // (a packful - see the round's gather below: the whole build's shortfall, from the cached castle status)
       let whole = 0; try { const cs = build.cachedStatus(bot); whole = cs ? (mats.planFor(bot, cs.need).raw[raw0] || 0) : 0 } catch {}
+      mem.set('buildWaiting', null)
       const ok0 = await gatherFor(raw0, Math.max(win0.raw[raw0], Math.min(whole, tripRoom())))
       if (inv.freeSlots(bot) < 8 || ok0) await base.depositHaul(bot, { shouldStop: dayStop })
       if (ok0) return true
