@@ -524,7 +524,6 @@ async function takeKnownOre (bot, itemName, target, ctx = {}) {
 // it as a trip that could not reach the face) or 'gone' (the level given up).
 async function downTheMine (bot, m, ctx = {}) {
   if (!inOwnMine(bot) && world.dist3(bot.entity.position, m.entrance) > 3) await move.travel(bot, m.entrance, { range: 3, shouldStop: ctx.shouldStop, label: 'to mine', underground: true })
-  if (!m.active) return { ok: true }
   const Ls = levelsOf(m)
   const walk = { timeoutMs: 60000, stuckMs: 12000, dig: false, place: false, label: 'to mine face', shouldStop: ctx.shouldStop }
   for (let i = 1; i <= m.active; i++) {
@@ -547,6 +546,19 @@ async function downTheMine (bot, m, ctx = {}) {
         log('mine', `the stairs to y${Ls[i].level} are blocked at ${move.fmt(p)} (${r.why})`)
         return { ok: false, why: 'blocked' }
       }
+    }
+  }
+  // (and the active level's OWN flight to its foot, walked the same way: the face walk after this digs, and from a stair
+  //  top it would dig its own way down a blocked flight - 20-100 blocks on a deep level; from the foot it is the level's
+  //  floor, flat work. A flight not yet done is being cut by the stairs themselves; reviewer 2026-09-30)
+  const A = Ls[m.active || 0]
+  if (A && A.stairsDone && A.stairsEnd && Math.floor(bot.entity.position.y) > A.stairsEnd.y && world.dist3(world.feetPos(bot), A.stairsEnd) >= 0.5) {
+    if (ctx.shouldStop && ctx.shouldStop()) return { ok: false, why: 'stopped' }
+    const r = await move.goTo(bot, new goals.GoalBlock(A.stairsEnd.x, A.stairsEnd.y, A.stairsEnd.z), walk)
+    if (!r.ok) {
+      if (!move.isVerdict(r)) return { ok: false, why: r.why }
+      log('mine', `the stairs to y${A.level} are blocked on the way to their foot at ${move.fmt(A.stairsEnd)} (${r.why})`)
+      return { ok: false, why: 'blocked' }
     }
   }
   return { ok: true }
