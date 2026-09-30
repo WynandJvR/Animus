@@ -179,6 +179,17 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
     return b
   }
   m.exclusionAreasStep.push(block => (block && doorIds.has(block.type)) ? 4 : 0)
+  // (a step BESIDE a lit campfire, magma or fire at the feet: never on it (blocksToAvoid), but the body brushed onto the
+  //  castle's campfires from the cells beside them and burned twice, 2026-09-30. Walked round when there is a way round)
+  const hotNear = new Map(); let hotGen = pathGen
+  m.exclusionAreasStep.push(block => {
+    if (!block || !block.position) return 0
+    if (hotGen !== pathGen || hotNear.size > 20000) { hotNear.clear(); hotGen = pathGen }
+    const p = block.position; const key = p.x + ',' + p.y + ',' + p.z
+    let v = hotNear.get(key)
+    if (v === undefined) { v = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => { const b = world.at(bot, p.x + dx, p.y, p.z + dz); return !!b && world.HOT_RE.test(b.name) }) ? 30 : 0; hotNear.set(key, v) }
+    return v
+  })
   // (never a DIAGONAL step past a drop that hurts: the body's 0.6 hitbox sweeps the corner cell of a diagonal, and a
   //  shaft there takes it - 11 blocks, 8 hp by the orchard, a diagonal 0.7s after the lip reflex let go, 2026-09-29.
   //  Either cell it passes between with a hurting drop under it: no diagonal; the two straight steps remain; audit)

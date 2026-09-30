@@ -1197,12 +1197,18 @@ function tick () {
         if (!dx && !dz) continue
         const x = fx + dx; const y = fy + dy; const z = fz + dz
         if (!world.standable(bot, x, y, z) || hot(world.at(bot, x, y, z)) || world.dropAt(bot, x + 0.5, y, z + 0.5) > world.SAFE_DROP) continue
+        // (the way there at the body's OWN height too: stood on a campfire's top (y+0.44) the body passes at that level - a
+        //  cell a step down with a wall at the body's height was picked, steered into for 14s, and the bot burned on the
+        //  castle's second campfire, 2026-09-30)
+        { let blocked = false; for (let yy = Math.min(y, fy); yy <= fy + 2 && !blocked; yy++) { const c = world.at(bot, x, yy, z); if (c && c.boundingBox === 'block' && !(yy < y)) blocked = true } if (blocked) continue }
+        if (Math.abs(dx) + Math.abs(dz) > 1) { const a = world.at(bot, fx + dx, fy + 1, fz); const b2 = world.at(bot, fx, fy + 1, fz + dz); if ((a && a.boundingBox === 'block') || (b2 && b2.boundingBox === 'block')) continue } // (a diagonal needs its corners open at the head)
         const d = Math.abs(dx) + Math.abs(dz) + Math.abs(dy)
         if (d < bd) { bd = d; best = { x, y, z } }
       }
       if (!active || active.kind !== 'hot') { setActive('hot', 'off a burning floor'); log('reflex', `standing on ${hot(here) ? here.name : under.name} at ${fx},${fy},${fz} - ${best ? 'off to ' + best.x + ',' + best.y + ',' + best.z : 'nowhere firm within 2: jumping off it'}`) }
       try { bot.pathfinder.setGoal(null) } catch {}
-      if (best) steerTo(best, { jump: best.y > fy }); else { bot.setControlState('jump', true); bot.setControlState('forward', true) }
+      // (always a jump: off the campfire's lip, out of its box - steered flat, the body stood pinned on it)
+      if (best) steerTo(best, { jump: true }); else { bot.setControlState('jump', true); bot.setControlState('forward', true) }
       return
     } else if (active && active.kind === 'hot') return clearActive()
   }
