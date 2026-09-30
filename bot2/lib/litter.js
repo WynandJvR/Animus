@@ -199,6 +199,11 @@ function standUnder (bot, low) {
     if (gy == null) continue
     const y = gy + 1
     if (low.y - y > 8 || y > low.y + 1) continue // (the climb's reach: 4 of pillar, then 4.5)
+    // (at the surface: not under home's level less 8, and nothing over it but sky - leaves, logs and our own blocks aside
+    //  (the stair itself may stand over it). A pit's stepped wall is ground too, and the walk went down into it; audit)
+    const home = mem.get().home
+    if (home && y < home.y - 8) continue
+    { let roofed = false; for (let yy = y + 2; yy < y + 22 && !roofed; yy++) { const b = world.at(bot, x, yy, z); if (b && b.boundingBox === 'block' && !world.LEAF_RE.test(b.name) && !world.LOG_RE.test(b.name) && !ledger.has(k({ x, y: yy, z }))) roofed = true } if (roofed) continue }
     if (!world.standable(bot, x, y, z) || ledger.has(k({ x, y: y - 1, z }))) continue
     { const fb = world.at(bot, x, y - 1, z); if (!fb || world.LEAF_RE.test(fb.name) || world.isWaterBlock(fb)) continue }
     if ([[1, 0], [-1, 0], [0, 1], [0, -1]].some(([ax, az]) => world.dropAt(bot, x + ax + 0.5, y, z + az + 0.5) > world.SAFE_DROP)) continue
