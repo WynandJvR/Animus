@@ -184,7 +184,15 @@ function standUnder (bot, low) {
   for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
     if (!dx && !dz) continue
     const x = low.x + dx; const z = low.z + dz
-    const gy = world.groundY(bot, x, z, low.y - 1); if (gy == null) continue
+    // (the ground: down past air, leaves, logs AND our own blocks - a diagonal stair's next step stands in the neighbour
+    //  column, and stopped on it the search never saw the ground under it; audit)
+    let gy = null
+    for (let y = low.y - 1; y > low.y - 24; y--) {
+      const b = world.at(bot, x, y, z); if (!b) break
+      if (!world.isSolid(b) || world.LEAF_RE.test(b.name) || world.LOG_RE.test(b.name) || ledger.has(k({ x, y, z }))) continue
+      gy = y; break
+    }
+    if (gy == null) continue
     const y = gy + 1
     if (low.y - y > 8 || y > low.y + 1) continue // (the climb's reach: 4 of pillar, then 4.5)
     if (!world.standable(bot, x, y, z) || ledger.has(k({ x, y: y - 1, z }))) continue
