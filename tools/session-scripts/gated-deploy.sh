@@ -27,6 +27,9 @@ while [ $SECONDS -lt $end ]; do
     # (the last three snapshots only - each is a whole copy of bot2: thirteen in a day were 439 files, 13MB)
     ls -dt $S/rollback/candidate-* 2>/dev/null | tail -n +4 | xargs -r rm -rf
     echo "$(date +%Y-%m-%dT%H:%M) prev=$PREV new=$N" > $S/last-deploy.txt # (rollback target = prev: the snapshot is of the NEW code)
+    # (and once more right before the reconnect: the checks and the snapshot above take seconds, and an edit saved in them
+    #  shipped with its fingerprint unchecked - the reconnect loads bot2 from disk; 2026-09-30, audit)
+    [ "$(fp)" = "$FP0" ] || { echo "REFUSED: bot2 changed during the deploy's own checks - not restarting"; exit 3; }
     curl -s -m 5 -X POST -H "Content-Type: application/json" -d '{"reconnect":true}' http://127.0.0.1:3001/config; echo " deployed: $(cat $S/last-deploy.txt)"; exit 0
   fi
   sleep 15
