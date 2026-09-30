@@ -809,6 +809,7 @@ function stuckHereAgain (bot) {
   return giveUpsNear(p, now) >= 2
 }
 let escaping = false // (its own walks give up too: never re-entered)
+let openSaid = null // (the "not enclosed" line, once a spot)
 async function escapeUp (bot) {
   if (escaping) return false
   escaping = true
@@ -822,7 +823,8 @@ async function escapeUpInner (bot) {
   // walk gave up and each "climb out" climbed nothing ("from y129 to y129"), 2026-09-30. Our blocks by the ledger only
   {
     const litter = require('./litter')
-    const onTop = () => { const f = bot.entity.position.floored(); const u = { x: f.x, y: f.y - 1, z: f.z }; return bot.entity.onGround && world.openSky(bot, f) && litter.has(u) && [[1, 0], [-1, 0], [0, 1], [0, -1]].every(([dx, dz]) => world.dropAt(bot, f.x + dx + 0.5, f.y, f.z + dz + 0.5) > world.SAFE_DROP) ? u : null }
+    const onTop = () => { const f = bot.entity.position.floored(); const u = { x: f.x, y: f.y - 1, z: f.z }; return bot.entity.onGround && litter.has(u) && [[1, 0], [-1, 0], [0, 1], [0, -1]].every(([dx, dz]) => world.dropAt(bot, f.x + dx + 0.5, f.y, f.z + dz + 0.5) > world.SAFE_DROP) ? u : null }
+    // (no sky test: a canopy's leaves read as a roof, and the descent stopped after one block each escape; audit)
     if (onTop()) {
       log('move', `stuck on a pillar of ours at ${fmt(f0)} with a drop all round - digging down through it`)
       for (let guard = 0; guard < 24; guard++) {
@@ -934,6 +936,7 @@ async function escapeUpInner (bot) {
     }
   }
   log('move', `stuck at ${fmt(f0)} walk after walk - climbing straight out`)
+  let climbedAny = false
   for (let i = 0; i < 16; i++) {
     const f = bot.entity.position.floored()
     // (open sky is out - but not in a pit INSIDE the build's footprint below its floor: the unbuilt corner of the castle, a
@@ -945,6 +948,7 @@ async function escapeUpInner (bot) {
     //  towered 16 up through a canopy by the castle's west wall and stranded the bot on its top, 2026-09-30; audit)
     const openAbove = q => { for (let y = q.y + 2; y < q.y + 22; y++) { const b = world.at(bot, q.x, y, q.z); if (b && b.boundingBox === 'block' && !world.LEAF_RE.test(b.name) && !world.LOG_RE.test(b.name)) return false } return true }
     if (bot.entity.onGround && !world.feetInWater(bot) && openAbove(f) && !pit) break
+    climbedAny = true
     for (const dy of [2, 1]) {
       const b = world.at(bot, f.x, f.y + dy, f.z)
       // (a finished cell of OUR build over the head is ours to take and put back: sealed in the hollow under the castle's
@@ -966,6 +970,10 @@ async function escapeUpInner (bot) {
     // cells over a solid side block cleared, and up onto it
     if (!await stepUpSide(bot)) { log('move', `climbing out: no way up from ${fmt(bot.entity.position)} (no tower, no side to cut a step in)`); return false }
   }
+  // (nothing to climb out of - open above on the first pass: no "climbed out", no trap, the stuck evidence kept, so the
+  //  caller goes on to the surface's own remedies and the count still builds; "from y129 to y129" looped a trap and wiped
+  //  the give-ups every minute, 2026-09-30; audit)
+  if (!climbedAny) { if (openSaid !== fmt(f0)) { openSaid = fmt(f0); log('move', `stuck at ${fmt(f0)} but not enclosed - open above; no climb`) } return false }
   noteTrap(bot, f0); clearGiveUps(f0)
   log('move', `climbed out: from ${fmt(f0)} to ${fmt(bot.entity.position)}`)
   return true
