@@ -106,4 +106,40 @@ check('abandon level 1: level 0 left, active', [left && left.levels.length, left
 check('abandon level 1: its start remembered', left.badLevels, [P(60, 40, -1)])
 check('abandon level 0: no mine, entrance a bad mine', [mining.abandonMine(left), store.mine, store.badMines], [null, null, [P(0, 100, 0)]])
 
-console.log(fails ? `${fails} FAILED` : 'ALL PASS'); process.exit(fails ? 1 : 0)
+// 9. abandon a level: back to the deepest level left (i-1), not level 0
+const three = () => { const t = mining.ensureLevels(oldMine()); t.levels.push({ stairTop: P(60, 40, -1), stairsEnd: P(60, 30, -11), stairsDir: { x: 0, z: -1 }, dir: { x: 1, z: 0 }, cursor: P(70, 30, -11), level: 30, stairsDone: true, blocks: 99 }); t.levels.push({ stairTop: P(59, 30, -11), stairsEnd: null, stairsDir: { x: -1, z: 0 }, dir: { x: -1, z: 0 }, cursor: P(55, 26, -11), level: 10, stairsDone: false, blocks: 12 }); return t }
+m = three(); mining.setActive(m, 2); store = { mine: m, deaths: [] }
+mining.abandonMine(m)
+check('abandon level 2: back to level 1', [m.levels.length, m.active, m.level, m.cursor], [2, 1, 30, P(70, 30, -11)])
+
+// 10. the way down (downTheMine): a blocked flight is a blocked trip - every hop walked with no dig and no place, false,
+//     and not one block dug (the planner's shaft down to a stair top 60 below is the death this closes)
+const { Vec3 } = require('vec3')
+const move = require(path.join(dir, 'lib', 'move'))
+const act = require(path.join(dir, 'lib', 'act'))
+const world = require(path.join(dir, 'lib', 'world'))
+let digs = 0; const walks = []
+act.dig = async () => { digs++; return false }
+move.travel = async () => ({ ok: true })
+move.goTo = async (bot, goal, opts) => { walks.push(opts); return { ok: false, why: 'noPath' } }
+let lava = null
+world.at = (bot, x, y, z) => lava && x === lava.x && y === lava.y && z === lava.z ? { name: 'lava', boundingBox: 'empty' } : { name: 'stone', boundingBox: 'block', hardness: 1.5 }
+const botAt = p => ({ entity: { position: new Vec3(p.x + 0.5, p.y, p.z + 0.5) } })
+;(async () => {
+  m = three(); mining.setActive(m, 1); store = { mine: m, deaths: [] }
+  const r = await mining.downTheMine(botAt(P(0, 100, 0)), m, {})
+  check('blocked flight: false, blocked', [r.ok, r.why], [false, 'blocked'])
+  check('blocked flight: every walk dig:false place:false', walks.length > 0 && walks.every(o => o.dig === false && o.place === false), true)
+  check('blocked flight: nothing dug', digs, 0)
+  check('blocked flight: the level kept', [m.active, m.levels.length], [1, 3])
+  // a new level not begun, standing on the foot beside it, lava by its first cell: the level given up, nothing dug
+  m = three(); m.levels[2] = Object.assign(m.levels[2], { cursor: P(59, 30, -11), blocks: 0 }); mining.setActive(m, 2); store = { mine: m, deaths: [] }
+  lava = P(58, 30, -11); walks.length = 0
+  const r2 = await mining.downTheMine(botAt(P(60, 30, -11)), m, {})
+  check('new level, lava by its first cell: gone, back to level 1, nothing dug', [r2.why, m.active, m.levels.length, digs, walks.length], ['gone', 1, 2, 0, 0])
+  // not at the foot (the walk there failed): no first-step dig from wherever we stand
+  lava = null; m = three(); m.levels[2] = Object.assign(m.levels[2], { cursor: P(59, 30, -11), blocks: 0 }); mining.setActive(m, 2); store = { mine: m, deaths: [] }
+  const r3 = await mining.downTheMine(botAt(P(60, 45, -1)), m, {})
+  check('new level, the walk to the foot fails: blocked, nothing dug', [r3.ok, r3.why, digs], [false, 'blocked', 0])
+  console.log(fails ? `${fails} FAILED` : 'ALL PASS'); process.exit(fails ? 1 : 0)
+})()

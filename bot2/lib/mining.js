@@ -438,14 +438,17 @@ function diedInMine (m) {
   const hit = minePath(m).filter(p => recent.some(d => world.dist2(p, d) < 16)).map(p => p.lv)
   return hit.length ? Math.min(...hit) : -1
 }
-// Give up on level i (the active one by default) and every level under it - their way in is its stairs - back to level 0;
-// level 0 is the whole mine: its entrance joins the bad mines, a new one is chosen. Returns what is left of the mine.
+// Give up on level i (the active one by default) and every level under it - their way in is its stairs - back to the
+// deepest level left (i-1); level 0 is the whole mine: its entrance joins the bad mines, a new one is chosen. Returns what
+// is left of the mine.
 function abandonMine (m, i = m && m.levels ? m.active : 0) {
   if (i > 0 && m.levels && i < m.levels.length) {
     const L = levelsOf(m)[i]
     m.badLevels = (m.badLevels || []).concat([clone(L.stairTop)]).slice(-8)
+    // (a deeper level than the active one: the active level stays as it is; else the view was a dropped level's - not
+    //  written back)
     m.levels.splice(i)
-    copyFields(m.levels[0], m); m.active = 0 // (the view was a dropped level's: not written back)
+    if (m.active >= i) { copyFields(m.levels[i - 1], m); m.active = i - 1 }
     log('mine', `giving up the mine's level at y${L.level} (stairs from ${move.fmt(L.stairTop)}) - back to the level at y${m.level}`)
     saveMine(m)
     return m
@@ -512,24 +515,41 @@ async function takeKnownOre (bot, itemName, target, ctx = {}) {
   return inv.count(bot, itemName) >= target
 }
 
-// THE WAY DOWN: the entrance (unless we are in the mine already), then each level's stair top in turn down to the active
-// one - the mine's own stairs, never the planner's way through the rock to a face 80 below (a walk that says underground
-// is let into the rock: travel's guard stops only a shaft dug down from the surface). A level not yet begun has its first
-// cell in solid rock: fluid beside it gives the level up before a cell is opened. False: stopped, or the level given up.
-async function downTheMine (bot, m, ctx) {
+// THE WAY DOWN: the entrance (unless we are in the mine already), then down the chain - each level's foot and the next
+// level's stair top beside it - to the active one: the mine's own stairs, WALKED (nothing dug, nothing placed). A flight
+// blocked by fallen gravel, a stray block or water is a blocked way, never the planner's own way down: with digging
+// allowed a walk to a stair top 20-80 below is a shaft dug straight down it, the death this whole mine exists to avoid
+// (reviewer 2026-09-30). A level not yet begun has its first cell in solid rock: opened by the mine's own guarded step
+// (fluid, lava, floor), never the planner's. Returns { ok, why } - why 'stopped', 'blocked' (a verdict: the caller counts
+// it as a trip that could not reach the face) or 'gone' (the level given up).
+async function downTheMine (bot, m, ctx = {}) {
   if (!inOwnMine(bot) && world.dist3(bot.entity.position, m.entrance) > 3) await move.travel(bot, m.entrance, { range: 3, shouldStop: ctx.shouldStop, label: 'to mine', underground: true })
-  for (let i = 1; i <= (m.active || 0); i++) {
-    const t = i === m.active ? m.stairTop : m.levels[i].stairTop
-    if (Math.floor(bot.entity.position.y) < t.y) continue // (already below this flight's top: on it or under it)
-    if (ctx.shouldStop && ctx.shouldStop()) return false
-    if (i === m.active && !m.blocks) {
-      const f = fluidAround(bot, t) || fluidAround(bot, { x: t.x, y: t.y + 1, z: t.z })
-      if (f && f !== 'unknown') { log('mine', `${f} beside the new level's first step at ${move.fmt(t)}`); abandonMine(m); return false }
+  if (!m.active) return { ok: true }
+  const Ls = levelsOf(m)
+  const walk = { timeoutMs: 60000, stuckMs: 12000, dig: false, place: false, label: 'to mine face', shouldStop: ctx.shouldStop }
+  for (let i = 1; i <= m.active; i++) {
+    const P = Ls[i - 1]; const foot = P.stairsEnd || P.cursor; const t = Ls[i].stairTop
+    for (const [p, first] of [[foot, false], [t, i === m.active]]) {
+      if (Math.floor(bot.entity.position.y) < p.y) continue // (already below this point of the chain)
+      if (ctx.shouldStop && ctx.shouldStop()) return { ok: false, why: 'stopped' }
+      if (world.dist3(world.feetPos(bot), p) < 0.5) continue
+      const open = [0, 1].every(dy => { const b = world.at(bot, p.x, p.y + dy, p.z); return b && world.isAirish(b) })
+      if (first && !open) {
+        // (the new level's first step, from the foot beside it: the stairs' own dig)
+        const f = fluidAround(bot, t) || fluidAround(bot, { x: t.x, y: t.y + 1, z: t.z })
+        if (f && f !== 'unknown') { log('mine', `${f} beside the new level's first step at ${move.fmt(t)}`); abandonMine(m); return { ok: false, why: 'gone' } }
+        if (world.dist3(world.feetPos(bot), foot) >= 0.5 || !await digStep(bot, m, foot, t)) { log('mine', `the stairs to y${Ls[i].level} are blocked at ${move.fmt(t)} (the first step would not open)`); return { ok: false, why: 'blocked' } }
+        continue
+      }
+      const r = await move.goTo(bot, new goals.GoalBlock(p.x, p.y, p.z), walk)
+      if (!r.ok) {
+        if (!move.isVerdict(r)) return { ok: false, why: r.why }
+        log('mine', `the stairs to y${Ls[i].level} are blocked at ${move.fmt(p)} (${r.why})`)
+        return { ok: false, why: 'blocked' }
+      }
     }
-    const r = await move.goTo(bot, new goals.GoalBlock(t.x, t.y, t.z), { timeoutMs: 60000, stuckMs: 12000, label: 'to mine face', shouldStop: ctx.shouldStop })
-    if (!r.ok) { log('mine', `couldn't reach the stairs down to level y${levelsOf(m)[i].level} at ${move.fmt(t)} (${r.why})`); break }
   }
-  return true
+  return { ok: true }
 }
 
 async function mineFor (bot, itemName, target, ctx = {}) {
@@ -580,8 +600,11 @@ async function mineFor (bot, itemName, target, ctx = {}) {
     // the way down is the mine's own - entrance, stairs, tunnel - unless we are already in it. Judged by distance on
     // the map alone, standing 40 blocks over the face counted as "near" and the planner took a way down through a cave
     // lake at night; Drowned killed the bot in it (2026-09-24).
-    if (!await downTheMine(bot, m, ctx)) return false
-    const r = await move.goTo(bot, new goals.GoalBlock(m.cursor.x, m.cursor.y, m.cursor.z), { timeoutMs: 120000, stuckMs: 15000, label: 'to mine face' })
+    // (the stairs blocked on the way down is a trip that could not reach the face - counted below - and no face walk from
+    //  wherever the walk stopped: that walk digs)
+    const down = await downTheMine(bot, m, ctx)
+    if (down.why === 'gone') return false
+    const r = down.ok ? await move.goTo(bot, new goals.GoalBlock(m.cursor.x, m.cursor.y, m.cursor.z), { timeoutMs: 120000, stuckMs: 15000, label: 'to mine face' }) : down
     // (busy or stopped on the way is no verdict on the mine - a fight in the stairwell abandoned a whole mine for a new one)
     if (!r.ok && !move.isVerdict(r)) return false
     // (a real verdict once - a flooded step, a gravel fall - is no reason to throw away stairs, cursor and ore history:
@@ -632,7 +655,8 @@ async function mineFor (bot, itemName, target, ctx = {}) {
         log('mine', 'pack full - taking the haul home')
         await base().depositHaul(bot, { shouldStop: ctx.shouldStop })
         await provisionForMine(bot)
-        if (!await downTheMine(bot, m, ctx)) return false
+        const down = await downTheMine(bot, m, ctx)
+        if (!down.ok) { log('mine', `couldn't get back down to the face (${down.why})`); return false }
         const r = await move.goTo(bot, new goals.GoalBlock(m.cursor.x, m.cursor.y, m.cursor.z), { timeoutMs: 180000, stuckMs: 20000, label: 'back to mine face' })
         if (!r.ok) { log('mine', `couldn't get back to the face (${r.why})`); return false }
       }
@@ -751,10 +775,10 @@ function underOwnZone (p) {
   return move.zones.some(z => p.x >= z.x1 - 2 && p.x <= z.x2 + 2 && p.z >= z.z1 - 2 && p.z <= z.z2 + 2) || move.underBuild({ x: p.x, y: p.y != null ? p.y : -64, z: p.z })
 }
 
-async function stairStep (bot, m) {
-  const c = m.cursor
-  if (c.y <= m.level) { m.stairsDone = true; m.stairsEnd = { x: c.x, y: c.y, z: c.z }; m.legPos = 0; log('mine', `stairs reached y${c.y} - tunnelling`); return true }
-  const q = { x: c.x + m.dir.x, y: c.y - 1, z: c.z + m.dir.z }
+// ONE STAIR STEP from c into q (three high), the stairs' guarded dig: never under a build, never beside fluid, never onto
+// lava or water, the leaks plugged, the openings walled, a floor under it, then stepped into. (A new level's first cell
+// is one of these from the foot beside it - never the planner's dig; reviewer 2026-09-30)
+async function digStep (bot, m, c, q) {
   if (underOwnZone(q)) { log('mine', `the stairs would run under a protected build at ${move.fmt(q)}`); return false }
   const cells = [{ x: q.x, y: q.y + 2, z: q.z }, { x: q.x, y: q.y + 1, z: q.z }, q]
   for (const cell of cells) {
@@ -765,9 +789,15 @@ async function stairStep (bot, m) {
   if (!below || world.isLavaBlock(below) || world.isWaterBlock(below)) return false
   for (const cell of cells) if (!await openCell(bot, cell)) return false
   if (!await plugWater(bot, cells)) return false
-  await plugOpenings(bot, cells, m.dir)
+  await plugOpenings(bot, cells, { x: q.x - c.x, z: q.z - c.z })
   if (!await ensureFloor(bot, q)) return false
-  if (!await stepInto(bot, q)) return false
+  return stepInto(bot, q)
+}
+async function stairStep (bot, m) {
+  const c = m.cursor
+  if (c.y <= m.level) { m.stairsDone = true; m.stairsEnd = { x: c.x, y: c.y, z: c.z }; m.legPos = 0; log('mine', `stairs reached y${c.y} - tunnelling`); return true }
+  const q = { x: c.x + m.dir.x, y: c.y - 1, z: c.z + m.dir.z }
+  if (!await digStep(bot, m, c, q)) return false
   m.cursor = q; m.blocks++
   await takeWallOres(bot)
   await maybeTorch(bot, m)
@@ -850,4 +880,4 @@ async function openTunnelCell (bot, m, from, q) {
   return true
 }
 
-module.exports = { mineFor, chooseEntrance, takeWallOres, takeKnownOre, inOwnMine, oreLevel, mineBox, minePath, ensureLevels, levelsOf, setActive, saveMine, chooseLevel, pickLevel, descentStart, flightCells, abandonMine }
+module.exports = { mineFor, chooseEntrance, takeWallOres, takeKnownOre, inOwnMine, oreLevel, mineBox, minePath, ensureLevels, levelsOf, setActive, saveMine, chooseLevel, pickLevel, descentStart, flightCells, abandonMine, downTheMine }
