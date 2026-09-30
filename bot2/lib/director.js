@@ -1481,11 +1481,13 @@ async function gatherFor (raw, short) {
   // (pack and bank: the trip's own start empties the pack into the chests)
   const re = new RegExp(`^${raw}$`)
   const got = () => inv.count(bot, re) + Object.entries(base.bankCounts()).filter(([n]) => re.test(n)).reduce((a, [, c]) => a + c, 0)
-  const had = got()
+  const had = got(); const t0 = Date.now()
   try { ok = await gatherForInner(raw, short); return ok } finally {
     reflex.setCautious(false)
     // (none at all: a trip that got some fell short, and found where they are)
-    if (!ok && got() <= had && !notToday.has(raw) && !dayStop()) {
+    // (a trip the dusk cut short counts too once it had looked - two minutes and more: the deepslate trips mined 0/17 for
+    //  six minutes each and ended "stopped" at dusk, so none ever counted and the next day's round went again)
+    if (!ok && got() <= had && !notToday.has(raw) && (!dayStop() || Date.now() - t0 > 120000)) {
       const d = day.dayNo(bot); const e = emptyTrips.get(raw); const n = e && e.day === d ? e.n + 1 : 1
       emptyTrips.set(raw, { day: d, n })
       if (ANIMAL_RAW.test(raw) || n >= (CORE_RAW.test(raw) ? 4 : 2)) { notToday.set(raw, { day: d }); log('dir', `${raw}: ${n > 1 ? n + ' trips' : 'the trip'} found none - not again today`) }
