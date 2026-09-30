@@ -10,6 +10,8 @@ const { log } = require('./log')
 
 const HOSTILE = new Set(['zombie', 'husk', 'drowned', 'skeleton', 'stray', 'bogged', 'spider', 'cave_spider', 'creeper', 'witch', 'slime', 'magma_cube', 'silverfish', 'endermite', 'pillager', 'vindicator', 'evoker', 'ravager', 'vex', 'phantom', 'zombie_villager', 'piglin_brute', 'hoglin', 'zoglin', 'blaze', 'ghast', 'wither_skeleton', 'guardian', 'elder_guardian', 'breeze', 'creaking'])
 const RANGED = new Set(['skeleton', 'stray', 'bogged', 'pillager', 'witch', 'blaze', 'ghast', 'breeze'])
+let creeperTrail = [] // (the creeper row's body samples, the last ~1s: see its stalled/hurtByOther tests)
+let creeperSaid = { stall: false, hurt: false }
 const NEVER_MELEE = new Set(['creeper', 'ghast', 'warden', 'wither', 'elder_guardian', 'ravager'])
 
 let bot = null
@@ -1233,7 +1235,10 @@ function tick () {
     const t = creeper ? creeper.e : fleeTarget
     fleeTarget = t
     const d = t.position.distanceTo(me)
+    if (!active || active.kind !== 'creeper') { creeperTrail = []; creeperSaid = { stall: false, hurt: false } }
     setActive('creeper', `${d.toFixed(1)}b`)
+    // (the body over the last second while this row steers: a flee that goes nowhere, and hurt that is not the creeper's)
+    creeperTrail.push({ t: now, x: me.x, z: me.z, hp: bot.health }); creeperTrail = creeperTrail.filter(q => now - q.t <= 1200)
     shieldDown()
     try { bot.pathfinder.setGoal(null) } catch {}
     // too close to outrun the fuse: knock it back first (knockback pushes it out of blast range)
@@ -1242,12 +1247,20 @@ function tick () {
       bot.attack(t); lastAttackAt = now
       return
     }
-    const h = fleeHeading(t)
+    let h = fleeHeading(t)
+    // (A FLEE THAT DOES NOT MOVE IS NO FLEE: a heading on paper, the body pinned in one cell 9.6s while a zombie took it
+    //  from 20 to 5 - dead, 2026-09-30. Under 0.4 in the last second, no heading this tick: the branches below answer)
+    const old = creeperTrail[0]
+    const stalled = !!old && now - old.t >= 800 && Math.hypot(me.x - old.x, me.z - old.z) < 0.4
+    // (and HURT while the creeper is out of its reach is someone else's work - a creeper does not bite: answered first)
+    const hurtByOther = !!old && now - old.t >= 300 && bot.health < old.hp - 0.5 && d >= 3.2
     // (a mob that can be fought, at our side while we run - it is the one hurting us NOW: with no way to run or the
     //  creeper not yet close, a swing at it (the knockback clears the way too). The flee held the body in a dead-end
     //  tunnel while a zombie took 20 hp, iron armour and all, 2026-09-29)
     const biter = hs.find(o => o.e !== t && !NEVER_MELEE.has(o.e.name) && o.d < 3.2 && canSee(o.e))
-    if (biter && inv.bestWeapon(bot) && now - lastAttackAt > 500 && (!h || d > 4)) {
+    if (stalled && h) { h = null; if (!creeperSaid.stall) { creeperSaid.stall = true; log('reflex', `flee not moving - answering ${biter ? 'the ' + biter.e.name : 'from here'}`) } }
+    if (biter && hurtByOther && !creeperSaid.hurt) { creeperSaid.hurt = true; log('reflex', `hurt by the ${biter.e.name} while fleeing the creeper - answering it`) }
+    if (biter && inv.bestWeapon(bot) && now - lastAttackAt > 500 && (!h || d > 4 || hurtByOther)) {
       bot.lookAt(biter.e.position.offset(0, biter.e.height ? biter.e.height * 0.8 : 1.2, 0), true).catch(() => {})
       bot.attack(biter.e); lastAttackAt = now
       return
