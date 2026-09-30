@@ -1209,10 +1209,33 @@ function tick () {
         const d = Math.abs(dx) + Math.abs(dz) + Math.abs(dy)
         if (d < bd) { bd = d; best = { x, y, z } }
       }
-      if (!active || active.kind !== 'hot') { setActive('hot', 'off a burning floor'); log('reflex', `standing on ${hot(here) ? here.name : under.name} at ${fx},${fy},${fz} - ${best ? 'off to ' + best.x + ',' + best.y + ',' + best.z : 'nowhere firm within 2: jumping off it'}`) }
+      // (nothing firm within 2 at a safe drop: a FALL that costs a few hp beats the fire's one a second - a cell out to 3 with a
+      //  drop up to 6 (3 hp at most). Stood on the castle's campfire high on its walls with drops all round, the blind jump
+      //  landed back on it for 26s and the bot burned to death, 2026-09-30)
+      let fall = null
+      if (!best) {
+        let fd = Infinity
+        for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) {
+          if (!dx && !dz) continue
+          const x = fx + dx; const z = fz + dz
+          const c = world.at(bot, x, fy, z); const c2 = world.at(bot, x, fy + 1, z)
+          if (!c || !c2 || !world.isAirish(c) || !world.isAirish(c2)) continue
+          const drop = world.dropAt(bot, x + 0.5, fy, z + 0.5)
+          const land = world.at(bot, x, fy - drop, z)
+          if (drop > 6 || !land || hot(land) || world.isLavaBlock(land)) continue
+          const d = Math.abs(dx) + Math.abs(dz) + drop
+          if (d < fd) { fd = d; fall = { x, y: fy, z } }
+        }
+      }
+      if (!active || active.kind !== 'hot') { setActive('hot', 'off a burning floor'); log('reflex', `standing on ${hot(here) ? here.name : under.name} at ${fx},${fy},${fz} - ${best ? 'off to ' + best.x + ',' + best.y + ',' + best.z : fall ? 'nothing firm within 2: dropping off to ' + fall.x + ',' + fall.z : 'nowhere to go: breaking the ' + (hot(here) ? here.name : under.name)}`) }
       try { bot.pathfinder.setGoal(null) } catch {}
       // (always a jump: off the campfire's lip, out of its box - steered flat, the body stood pinned on it)
-      if (best) steerTo(best, { jump: true }); else { bot.setControlState('jump', true); bot.setControlState('forward', true) }
+      if (best || fall) steerTo(best || fall, { jump: true })
+      else if (!busy) {
+        // (nowhere at all: the fire out from under us - the builder puts its cell back)
+        const hb = hot(here) ? here : under
+        runBusy('break the fire', () => require('./act').digBlock(bot, hb, { own: true }).catch(() => false), 4000, null, stopDig)
+      }
       return
     } else if (active && active.kind === 'hot') return clearActive()
   }

@@ -225,10 +225,20 @@ async function centre (bot) {
 //             until its action returns, so waiting for the reflex to clear - or walking, which waits the same way -
 //             is waiting on ourselves: each such place hung 120s (the bot floated in a river for 8 minutes,
 //             2026-09-22). Implies noWalk.
+// (never a burning block into the body's own cells: a campfire is slab-high and goes in where we stand, the body lifted
+//  onto it - the builder placed the castle's campfire under its own feet high on the wall and the bot burned there,
+//  2026-09-30)
+function hotInOurCell (bot, pos, itemName) {
+  if (!world.HOT_RE.test(itemName)) return false
+  const p = bot.entity.position; const fx = Math.floor(p.x); const fz = Math.floor(p.z); const fy = Math.floor(p.y + 0.01)
+  const xs = [fx, Math.floor(p.x - 0.3), Math.floor(p.x + 0.3)]; const zs = [fz, Math.floor(p.z - 0.3), Math.floor(p.z + 0.3)]
+  return xs.includes(pos.x) && zs.includes(pos.z) && (pos.y === fy || pos.y === fy + 1 || pos.y === fy - 1)
+}
 async function place (bot, pos, itemName, { faceHint = null, plans = null, accept = null, allowZones = [], timeoutMs = 20000, sneak = true, tall = false, twin = null, useRefs = false, noWalk = false, fromReflex = false, keepExit = false } = {}) {
   if (fromReflex) noWalk = true
   if (tall && !twin) twin = [0, 1, 0]
   const target = new Vec3(pos.x, pos.y, pos.z)
+  if (hotInOurCell(bot, pos, itemName)) { log('act', `won't place ${itemName} at ${move.fmt(pos)} - it would burn under my own feet`); return false }
   const placed = accept || (b => b.name === itemName)
   const cur = bot.blockAt(target)
   if (cur && placed(cur)) return true
