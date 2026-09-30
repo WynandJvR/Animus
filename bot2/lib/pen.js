@@ -190,7 +190,7 @@ function wildKnown (bot) {
   // (a remembered flock only with the daylight to lead it home - a condition, not a failure: without it the task ran and
   //  refused, "did not succeed" every pass; audit rule)
   const p = pen()
-  if (leadFailDay === require('./day').dayNo(bot)) return false
+  if (mem.get().leadFailDay === require('./day').dayNo(bot)) return false
   return ((mem.get().mobs || {}).sheep || []).some(q => world.dist2(q, home) < LURE_REACH && (!p || world.ticksUntilNight(bot) >= leadTicks(world.dist2(q, centreOf(p)))))
 }
 
@@ -338,11 +338,11 @@ async function build (bot, { shouldStop } = {}) {
 // ONE LONG LEAD A DAY: a lead from a remembered flock (out of sight) that failed - a river, the laggards dropped, a fight -
 // is not walked again today: each is ~10 minutes of the day away from the build, and the failure cooling was all that
 // stood between it and the next (day.js, as the shears; audit)
-let leadFailDay = null
+// (leadFailDay: in memory.json - a restart wiped it; mem.persistedMap's reason)
 async function stock (bot, opts = {}) {
   const ctx = { far: false }
   const ok = await stockInner(bot, opts, ctx)
-  if (!ok && ctx.far && !(opts.shouldStop && opts.shouldStop())) { leadFailDay = require('./day').dayNo(bot); log('pen', 'the long lead failed - no more long leads today') }
+  if (!ok && ctx.far && !(opts.shouldStop && opts.shouldStop())) { mem.set('leadFailDay', require('./day').dayNo(bot)); log('pen', 'the long lead failed - no more long leads today') }
   return ok
 }
 async function stockInner (bot, { shouldStop } = {}, ctx = {}) {

@@ -74,4 +74,12 @@ function removePos (key, pos) {
 }
 function bump (stat, by = 1) { const m = load(); m.stats[stat] = (m.stats[stat] || 0) + by; save() }
 
-module.exports = { get, set, update, save, flushSync, addUnique, removePos, bump, FILE }
+// A Map kept in memory.json - for the day-keyed rests (a trip put off today, a stray given up today): in memory only, a
+// restart - ten deploys in a night - wiped them all, and no day rule ever held (2026-09-30; audit). get/has/set/delete;
+// set and delete save (set() coalesces the writes)
+function persistedMap (name) {
+  const m = new Map(Object.entries(get()[name] || {}))
+  const keep = () => set(name, Object.fromEntries(m))
+  return { get: k => m.get(k), has: k => m.has(k), set: (k, v) => { m.set(k, v); keep(); return v }, delete: k => { const r = m.delete(k); if (r) keep(); return r } }
+}
+module.exports = { get, set, update, save, flushSync, addUnique, removePos, bump, persistedMap, FILE }

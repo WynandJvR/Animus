@@ -529,7 +529,7 @@ const craftMemo = new Map() // item -> { at, ok }: craftable from stock, judged 
 // but it is NOT detached: detached cells are covered over and left to the endgame's swap, and a cell the plan merely
 // miscounted is never buried for that (operator: "i dont want this to ruin a build"). Its own column waits over it
 // (sealsBelow), open, for the item. (item -> the day)
-const coverMiss = new Map()
+const coverMiss = mem.persistedMap('coverMiss') // (item -> day: kept across restarts - mem.persistedMap)
 const waitCols = new Map() // (x,z -> lowest open waiting hole: detachedItems)
 // NEVER THE LAST FACE: a cell whose placing would close a waiting hole's last open face - from ANY side, not only above
 // (sealsBelow guarded the cell over a hole; the wall beside it closed it a side at a time: 46 holes "placeable from
