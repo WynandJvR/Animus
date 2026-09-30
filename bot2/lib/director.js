@@ -38,6 +38,7 @@ let litterSeeded = false // (the pillars from before the ledger: looked for once
 function seedLitter () { if (!litterSeeded && orchard.orchard()) { litterSeeded = true; litter.seed(bot) } }
 const LITTER_BATCH = 8
 let steerSaid = null // (the wait-without-raw line, once per item)
+const strayMiss = new Map() // (a stray build block that would not come up: key -> { n, day })
 let siteTidyAsked = 0 // (when the site's scaffold was last counted for the day's teardown)
 const LITTER_CAP = 48 // (our own blocks standing round home past which the tidy goes before the castle)
 
@@ -1251,10 +1252,13 @@ async function castleWorkInner () {
   // the build's own blocks laid where no cell wants them (the planner's stepping stones): taken back up
   phase('strays')
   {
-    const strays = await build.strayBuildBlocks(bot)
+    // (a stray that would not come up twice rests the day: one dark_oak_slab was tried and failed every round for an hour -
+    //  eight rounds, ~30s each - and taken at the ninth, 2026-09-30; the day's rest as the tidy's and the misses' go)
+    const today = day.dayNo(bot); const sk = p => p.x + ',' + p.y + ',' + p.z
+    const strays = (await build.strayBuildBlocks(bot)).filter(p => { const m = strayMiss.get(sk(p)); return !m || m.day !== today || m.n < 2 })
     if (strays.length) {
       let n = 0
-      for (const s of strays.slice(0, 30)) { if (dayStop()) break; if (await act.dig(bot, s, { force: true, allowZones: ['build', 'base'], timeoutMs: 30000 })) n++ }
+      for (const s of strays.slice(0, 30)) { if (dayStop()) break; if (await act.dig(bot, s, { force: true, allowZones: ['build', 'base'], timeoutMs: 30000 })) n++; else { const m = strayMiss.get(sk(s)); strayMiss.set(sk(s), { n: m && m.day === today ? m.n + 1 : 1, day: today }) } }
       await act.collectDrops(bot, { radius: 8, maxMs: 5000 })
       log('dir', `took up ${n} of ${strays.length} build blocks standing where no cell wants them (${strays.slice(0, 6).map(s => s.name + '@' + s.x + ',' + s.y + ',' + s.z).join(' ')})`)
       if (n) return true
