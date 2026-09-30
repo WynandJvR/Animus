@@ -1189,7 +1189,7 @@ function tick () {
   //  cell at once, whatever put it there
   {
     const fx = Math.floor(me.x); const fy = Math.floor(me.y + 0.01); const fz = Math.floor(me.z)
-    const hot = b => !!b && world.DANGER_FLOOR_RE.test(b.name) && !/^(sweet_berry_bush|powder_snow|pointed_dripstone|cactus)$/.test(b.name)
+    const hot = b => !!b && world.HOT_RE.test(b.name) // (world's one list - the diagonal step reads its twin)
     const here = world.at(bot, fx, fy, fz); const under = world.at(bot, fx, fy - 1, fz)
     if (!bot.vehicle && (hot(here) || (bot.entity.onGround && hot(under)))) {
       let best = null; let bd = Infinity

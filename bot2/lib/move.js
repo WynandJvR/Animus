@@ -219,8 +219,13 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
     return true
   })
   const diag0 = m.getMoveDiagonal.bind(m)
+  // (nor past a block that hurts to touch in either cell it sweeps, at the feet or the head: a lit campfire is slab-high -
+  //  the body clipped its corner on a diagonal between two of the castle's, stepped up onto it and burned to death,
+  //  2026-09-30; audit)
+  const touchHurts = (x, y, z) => [0, 1].some(dy => { const b = world.at(bot, x, y + dy, z); return !!b && world.CONTACT_HURT_RE.test(b.name) })
   m.getMoveDiagonal = (node, dir, neighbors) => {
     if (hurtsAt(node.x, node.y, node.z + dir.z) || hurtsAt(node.x + dir.x, node.y, node.z)) return
+    if (touchHurts(node.x, node.y, node.z + dir.z) || touchHurts(node.x + dir.x, node.y, node.z)) return
     return diag0(node, dir, neighbors)
   }
   // (a step whose FLOOR is a natural leaf: a tree's crown is no ground - felled, it rots from under the feet; the orchard's

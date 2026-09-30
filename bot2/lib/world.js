@@ -9,6 +9,10 @@ function data (bot) { if (!mcData) mcData = require('minecraft-data')(bot.versio
 const WATER_RE = /^(water|flowing_water|bubble_column|kelp|kelp_plant|seagrass|tall_seagrass)$/
 const LAVA_RE = /^(lava|flowing_lava)$/
 const DANGER_FLOOR_RE = /^(magma_block|campfire|soul_campfire|fire|soul_fire|sweet_berry_bush|cactus|powder_snow|pointed_dripstone|wither_rose)$/
+// (what burns stood on or in - the hot-floor reflex; and what hurts to brush against as well - the diagonal step's corners.
+//  One pair of lists for both: they must agree; 2026-09-30 audit)
+const HOT_RE = /^(campfire|soul_campfire|magma_block|fire|soul_fire|wither_rose)$/
+const CONTACT_HURT_RE = /^(campfire|soul_campfire|magma_block|fire|soul_fire|wither_rose|sweet_berry_bush|cactus)$/
 const FALLING_RE = /^(sand|red_sand|gravel|suspicious_sand|suspicious_gravel|.*concrete_powder)$/
 const LOG_RE = /_(log|stem)$/
 const LEAF_RE = /_leaves$/
@@ -330,5 +334,5 @@ module.exports = { isOpenTrapdoor, plateEdge, LANTERN_RE, FURNITURE_RE, walkTick
   data, v, at, name, isWaterBlock, isLiquidWater, holdsWater, isLavaBlock, isSolid, isAirish, standable, feetPos, eyeBlock,
   headInWater, feetInWater, inLava, tod, phase, isNight, isDay, ticksUntilNight, canSleepNow, lavaNear, holdsBackLava, waterNear,
   groundY, openSky, dist2, dist3, blockIds, findBlocks, scanBlocks, stateIds, sectionMay, sightReach, hasAirNeighbour, skyLitFace,
-  WATER_RE, LAVA_RE, LOG_RE, LEAF_RE, NATURAL_RE, FALLING_RE, DANGER_FLOOR_RE
+  WATER_RE, LAVA_RE, LOG_RE, LEAF_RE, NATURAL_RE, FALLING_RE, DANGER_FLOOR_RE, HOT_RE, CONTACT_HURT_RE
 }
