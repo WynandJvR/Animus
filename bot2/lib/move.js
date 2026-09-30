@@ -312,7 +312,8 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
     const k = `${block.position.x},${block.position.y},${block.position.z}`
     // (and a door the crossing just refused - nowhere to stand on a side: dear for ten minutes, the walk plans round it; the
     //  stall retried one every 11s, five times, 2026-09-30)
-    const rd = refusedDoors.get(k); if (rd && rd > Date.now()) return 50
+    const rd = refusedDoors.get(k)
+    if (rd) { if (rd.gen !== pathGen) { rd.gen = pathGen; rd.on = doorStillRefused(bot, rd) } if (rd.on) return 50; refusedDoors.delete(k) }
     return trapSet.size && trapSet.has(k) ? 50 : 0
   })
   // (a cell a fall began from - and its sides, at its height: dear, not refused; the list is reflex.js's fall record)
@@ -568,16 +569,20 @@ async function crossDoor (bot, goal) {
   //  panel - next() holds the edge rules; audit)
   const wm = require('./build').walkModel(bot)
   const dCell = { x: d.x, y: d.y, z: d.z }
-  const reachStand = p => wm.st(p.x, p.y, p.z) && wm.next(dCell).some(q => q.x === p.x && q.y === p.y && q.z === p.z)
+  const reachStand = p => wm.st(p.x, p.y, p.z) && wm.next(dCell).some(q => q.x === p.x && q.y === p.y && q.z === p.z) // (see stepAt)
   const standsAt = p => world.standable(bot, p.x, p.y, p.z) || reachStand(p)
-  const stepAt = (x, z) => { for (const dy of [0, 1, -1]) if (standsAt({ x, y: d.y + dy, z })) return { x, y: d.y + dy, z }; return { x, y: d.y, z } }
+  // (the side's step by the walk model's next() first - any drop it allows (to SAFE_DROP, column open): a room whose floor is
+  //  not laid yet is a drop into its hollow, and the fixed dy 0/+1/-1 refused a door the planner rightly routed through,
+  //  every 11s, 2026-09-30; audit)
+  const doorNext = wm.next(dCell)
+  const stepAt = (x, z) => { const q = doorNext.find(n => n.x === x && n.z === z); if (q) return q; for (const dy of [0, 1, -1]) if (standsAt({ x, y: d.y + dy, z })) return { x, y: d.y + dy, z }; return { x, y: d.y, z } }
   const sideA = axisX ? stepAt(d.x - 1, d.z) : stepAt(d.x, d.z - 1)
   const sideB = axisX ? stepAt(d.x + 1, d.z) : stepAt(d.x, d.z + 1)
   // (a door with no place to stand on one side - a castle door opening onto a rail of open trapdoors on edge - leads
   //  nowhere: 40s a try walking to a step that is not there, 2026-09-29. Not this door; the stall looks elsewhere)
   // (never the safehouse's own night seal - its step blocked on purpose, opened by unsealDoor above: exempt; audit)
   const sealed = p => ((require('./memory').get().doorSeal || {}).cells || []).some(c => c.x === p.x && c.z === p.z && (c.y === p.y || c.y === p.y + 1))
-  { const noStep = [sideA, sideB].find(p => !standsAt(p) && !sealed(p)); if (noStep) { for (const dy of [0, 1]) refusedDoors.set(`${d.x},${d.y + dy},${d.z}`, Date.now() + 600000); log('move', `the door at ${fmt(d)} has nowhere to stand on its side at ${fmt(noStep)} - not through this one`); return false } }
+  { const noStep = [sideA, sideB].find(p => !standsAt(p) && !sealed(p)); if (noStep) { for (const dy of [0, 1]) refusedDoors.set(`${d.x},${d.y + dy},${d.z}`, { door: { x: d.x, y: d.y, z: d.z }, side: { x: noStep.x, z: noStep.z } }); log('move', `the door at ${fmt(d)} has nowhere to stand on its side at ${fmt(noStep)} - not through this one`); return false } }
   const gp = goal && goal.x != null ? { x: goal.x, z: goal.z } : null
   const distTo = (s, p) => Math.hypot(s.x + 0.5 - p.x, s.z + 0.5 - p.z)
   // the exit is the side toward the goal; without a goal, the side away from us
@@ -799,7 +804,15 @@ function giveUpsNear (p, now = Date.now()) { return giveUps.filter(g => now - g.
 // A TRAP REMEMBERED: where an escape had to break out or climb out, the give-ups round it are a pocket - a day's hazard,
 // dear to walk through and never a leg's point (a player stuck in a crawlspace walks round it next time; audit)
 // (its life is the game's day - day.js, as every day rule: the rest of today and tomorrow; audit)
-const refusedDoors = new Map() // door cell key -> until (ms): crossDoor's refusals, a cost to the walk a while
+const refusedDoors = new Map() // door cell key -> { door, side }: crossDoor's refusals - a cost to the walk while the side still fails
+// (still failing = the walk model has no step from the door cell onto that side's column - re-read each plan, not a timer:
+//  the room's floor laid, the cost goes with the next plan; audit)
+function doorStillRefused (bot, e) {
+  const wm = require('./build').walkModel(bot)
+  if (wm.next(e.door).some(q => q.x === e.side.x && q.z === e.side.z)) return false
+  for (const dy of [0, 1, -1]) if (world.standable(bot, e.side.x, e.door.y + dy, e.side.z)) return false
+  return true
+}
 const trapLive = (bot, t) => { try { return require('./day').dayNo(bot) - t.day <= 1 } catch { return false } }
 let legSaid = null
 // (the cells an escape opened in our own wall, this escape: a walk out through them proves nothing of the trap - the
