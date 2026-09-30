@@ -1233,7 +1233,13 @@ function tick () {
       const breakIt = !best && !shortFall && !!hb && hb.hardness != null && hb.hardness >= 0
       const longFall = !best && !shortFall && !breakIt ? fallTo(Math.min(6, Math.floor(bot.health) - 3 + world.SAFE_DROP)) : null
       const how = best ? 'off to ' + best.x + ',' + best.y + ',' + best.z : shortFall ? 'nothing firm within 2: a short drop off to ' + shortFall.x + ',' + shortFall.z : breakIt ? 'nothing firm within 2: breaking the ' + hb.name : longFall ? 'nothing firm within 2: a ' + longFall.drop + '-block drop off to ' + longFall.x + ',' + longFall.z : 'nowhere to go: jumping'
-      if (!active || active.kind !== 'hot') { setActive('hot', 'off a burning floor'); log('reflex', `standing on ${hb.name} at ${fx},${fy},${fz} - ${how}`) }
+      // (and what put us there - the mover: the row before, the planner's goal and step, the body's speed, a hit just taken;
+      //  a campfire touch with no placement and no planned step onto it went unexplained, 2026-09-30; audit)
+      if (!active || active.kind !== 'hot') {
+        let mover = ''
+        try { const v = bot.entity.velocity; const st = plannedStep(); mover = ` [was: ${active ? active.kind : 'no reflex'}, planner ${bot.pathfinder && bot.pathfinder.goal ? 'goal set' : 'no goal'}${bot.pathfinder && bot.pathfinder.isMoving && bot.pathfinder.isMoving() ? ' moving' : ''}, step ${st ? JSON.stringify(st).slice(0, 80) : 'none'}, v ${v.x.toFixed(2)},${v.y.toFixed(2)},${v.z.toFixed(2)}${lastHurtAt && Date.now() - lastHurtAt < 1000 ? ', hit ' + (Date.now() - lastHurtAt) + 'ms before' : ''}]` } catch {}
+        setActive('hot', 'off a burning floor'); log('reflex', `standing on ${hb.name} at ${fx},${fy},${fz} - ${how}${mover}`)
+      }
       try { bot.pathfinder.setGoal(null) } catch {}
       // (always a jump: off the campfire's lip, out of its box - steered flat, the body stood pinned on it)
       const to = best || shortFall || longFall
