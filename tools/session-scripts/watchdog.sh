@@ -43,7 +43,10 @@ while true; do
   # (a code error thrown by a task - a deploy's regression, not the world: "castle threw: TypeError: coverMiss is not
   #  iterable" ran 7 minutes after the 06:55 deploy with the rounds placing nothing, 2026-09-30. Named with the last deploy:
   #  by the no-regression rule a rollback trigger - restore the snapshot, then fix; audit)
-  ce=$(recent 15 | grep -a -E "threw: (TypeError|ReferenceError|SyntaxError|RangeError)" | tail -1 | cut -c2-200)
+  # (only an error AFTER the last deploy says anything of it: the 07:02 error, fixed by the 07:04 deploy, alarmed at 07:16
+  #  and named the fix as the cause - ISO stamps compare as strings)
+  ld=$(cut -d' ' -f1 /c/mc-bot-lab/tools/session-scripts/last-deploy.txt 2>/dev/null)
+  ce=$(recent 15 | grep -a -E "threw: (TypeError|ReferenceError|SyntaxError|RangeError)" | awk -v ld="$ld" '{ t = substr($0, 2, 16); if (ld == "" || t >= ld) print }' | tail -1 | cut -c2-200)
   [ -n "$ce" ] && { echo "ALARM: CODE ERROR (rollback trigger) after deploy $(cut -d' ' -f1 /c/mc-bot-lab/tools/session-scripts/last-deploy.txt 2>/dev/null): $ce"; echo "  rollback: $(cat /c/mc-bot-lab/tools/session-scripts/last-deploy.txt 2>/dev/null)"; exit 0; }
   # (handwork stopped because its click did nothing - /state buildProgress.stoppedWork - for over 10 min)
   sw=$(curl -s -m 5 http://127.0.0.1:3001/state | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const w=(JSON.parse(s).buildProgress||{}).stoppedWork||[];console.log(w.map(x=>x.work).join(','))}catch{}})")
