@@ -175,6 +175,27 @@ function standBeside (bot, low) {
   return best
 }
 
+// A block of ours in the air (a stair a reflex left, a crown's stand): no stand at its own level, so the ground beside its
+// column - the climb (climbTo: a pillar up to 4, then the reach) goes from there. Asked for "near" the block itself, the
+// planner with no blocks to place hunted a way into mid-air for 30s a column - four columns timed out and one walk
+// wandered down a cave to y87, the reported stairs left standing, 2026-09-30.
+function standUnder (bot, low) {
+  const me = bot.entity.position; let best = null; let bd = Infinity
+  for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
+    if (!dx && !dz) continue
+    const x = low.x + dx; const z = low.z + dz
+    const gy = world.groundY(bot, x, z, low.y - 1); if (gy == null) continue
+    const y = gy + 1
+    if (low.y - y > 8 || y > low.y + 1) continue // (the climb's reach: 4 of pillar, then 4.5)
+    if (!world.standable(bot, x, y, z) || ledger.has(k({ x, y: y - 1, z }))) continue
+    { const fb = world.at(bot, x, y - 1, z); if (!fb || world.LEAF_RE.test(fb.name) || world.isWaterBlock(fb)) continue }
+    if ([[1, 0], [-1, 0], [0, 1], [0, -1]].some(([ax, az]) => world.dropAt(bot, x + ax + 0.5, y, z + az + 0.5) > world.SAFE_DROP)) continue
+    const d = world.dist3({ x, y, z }, me) + (low.y - y) // (the least climb, then the nearest)
+    if (d < bd) { bd = d; best = { x, y, z } }
+  }
+  return best
+}
+
 // A pillar of our own up to a block above the reach (at most 4), and back down from on top after (climbDown). Its blocks
 // are litter like any tower's (towerUp notes them): a pillar the teardown missed is the next run's work, never lost.
 let climbed = []
@@ -223,7 +244,9 @@ async function tidy (bot, { from, radius = RADIUS, shouldStop } = {}) {
     // (no stepping stones of its own on the way: each one was litter for the next run - 19 pending became 26 taken down)
     // (a stand on the column's own ground, beside it: GoalNear let the planner stop on the ledge above it, a 4-block drop at
     //  the lip, and the bot slipped off twice digging from there - audit 2026-09-28. None such: near it, as before)
-    const stand = standBeside(bot, low)
+    const stand = standBeside(bot, low) || standUnder(bot, low)
+    // (no stand, and the column is in the air: "near it" is a hunt for a way into mid-air - left this run, said)
+    if (!stand && act.fallBelow(bot, low) > world.SAFE_DROP) { log('litter', `no ground within a climb of the column at ${k(low)} - left this run`); left += col.length; for (const q of col) q.tries = (q.tries || 0) + 1; dirty = true; continue }
     const r = await move.goTo(bot, stand ? new goals.GoalBlock(stand.x, stand.y, stand.z) : new goals.GoalNear(low.x, low.y, low.z, 2), { timeoutMs: 30000, place: false, allowZones: ['orchard', 'base', 'farm'], label: 'to litter' })
     const miss = () => { for (const q of col) q.tries = (q.tries || 0) + 1; dirty = true }
     // (only a verdict counts against a column: a walk cut by dusk, a creeper or the operator says nothing of it - audit)
