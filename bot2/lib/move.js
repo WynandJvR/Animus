@@ -547,7 +547,10 @@ async function crossDoor (bot, goal) {
   const obstruction = (x, y, z) => {
     const b = world.at(bot, x, y, z); if (!b || !world.isSolid(b) || !world.NATURAL_RE.test(b.name)) return false
     const bj = require('./build'); const j = bj.getJob(); const c = j && j.index.get(`${x},${y},${z}`)
-    return !!c && !c.clear && !bj.partOk(c, b.name)
+    // (and a cell the design leaves EMPTY inside the build's box - the site clearing's own work, done here when a doorway
+    //  waits on it: grass at the castle door's level, a stair over it, "nowhere to stand" every 11s, 2026-09-30)
+    if (!c) { const bx = j && j.box; return !!bx && x >= bx.x1 && x <= bx.x2 && z >= bx.z1 && z <= bx.z2 && y >= bx.y1 && y <= bx.y2 }
+    return !c.clear && !bj.partOk(c, b.name)
   }
   const act = require('./act')
   for (const [x, z] of axisX ? [[d.x - 1, d.z], [d.x + 1, d.z]] : [[d.x, d.z - 1], [d.x, d.z + 1]]) {
