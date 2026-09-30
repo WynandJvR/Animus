@@ -553,14 +553,22 @@ async function crossDoor (bot, goal) {
   for (const [x, z] of axisX ? [[d.x - 1, d.z], [d.x + 1, d.z]] : [[d.x, d.z - 1], [d.x, d.z + 1]]) {
     for (const dy of [1, 0]) if (obstruction(x, d.y + dy, z)) { log('move', `the doorway at ${fmt(d)}: ${world.at(bot, x, d.y + dy, z).name} stands in a cell of the build at ${x},${d.y + dy},${z} - clearing it`); await act.dig(bot, { x, y: d.y + dy, z }, { allowZones: ['build', 'base'], timeoutMs: 8000 }).catch(() => false) }
   }
-  const stepAt = (x, z) => { for (const dy of [0, 1, -1]) if (world.standable(bot, x, d.y + dy, z)) return { x, y: d.y + dy, z }; return { x, y: d.y, z } }
+  // (a side stands by the walk's own model too - rooms.walkModel: a cell with an open trapdoor at the feet, its panel on
+  //  a far edge, is a stand the planner and the way-out search both use; read by standable alone, a castle door beside one
+  //  had "nowhere to stand" and was refused every walk, 2026-09-30. The step from the door cell into it must not cross a
+  //  panel - next() holds the edge rules; audit)
+  const wm = require('./build').walkModel(bot)
+  const dCell = { x: d.x, y: d.y, z: d.z }
+  const reachStand = p => wm.st(p.x, p.y, p.z) && wm.next(dCell).some(q => q.x === p.x && q.y === p.y && q.z === p.z)
+  const standsAt = p => world.standable(bot, p.x, p.y, p.z) || reachStand(p)
+  const stepAt = (x, z) => { for (const dy of [0, 1, -1]) if (standsAt({ x, y: d.y + dy, z })) return { x, y: d.y + dy, z }; return { x, y: d.y, z } }
   const sideA = axisX ? stepAt(d.x - 1, d.z) : stepAt(d.x, d.z - 1)
   const sideB = axisX ? stepAt(d.x + 1, d.z) : stepAt(d.x, d.z + 1)
   // (a door with no place to stand on one side - a castle door opening onto a rail of open trapdoors on edge - leads
   //  nowhere: 40s a try walking to a step that is not there, 2026-09-29. Not this door; the stall looks elsewhere)
   // (never the safehouse's own night seal - its step blocked on purpose, opened by unsealDoor above: exempt; audit)
   const sealed = p => ((require('./memory').get().doorSeal || {}).cells || []).some(c => c.x === p.x && c.z === p.z && (c.y === p.y || c.y === p.y + 1))
-  { const noStep = [sideA, sideB].find(p => !world.standable(bot, p.x, p.y, p.z) && !sealed(p)); if (noStep) { log('move', `the door at ${fmt(d)} has nowhere to stand on its side at ${fmt(noStep)} - not through this one`); return false } }
+  { const noStep = [sideA, sideB].find(p => !standsAt(p) && !sealed(p)); if (noStep) { log('move', `the door at ${fmt(d)} has nowhere to stand on its side at ${fmt(noStep)} - not through this one`); return false } }
   const gp = goal && goal.x != null ? { x: goal.x, z: goal.z } : null
   const distTo = (s, p) => Math.hypot(s.x + 0.5 - p.x, s.z + 0.5 - p.z)
   // the exit is the side toward the goal; without a goal, the side away from us

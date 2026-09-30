@@ -2444,7 +2444,7 @@ async function ensureScaffold (bot, n = SCAFFOLD_WANT, { shouldStop } = {}) { //
   return true
 }
 
-module.exports = { siteScaffoldTakeable, wayOut, wayOutPoint, FILLER_ITEMS, SCAFFOLD_WANT, cachedStatus, exactWood, isOpenCell, INFILL_RE, infillItem, unsourced, strayBuildBlocks,
+module.exports = { walkModel, siteScaffoldTakeable, wayOut, wayOutPoint, FILLER_ITEMS, SCAFFOLD_WANT, cachedStatus, exactWood, isOpenCell, INFILL_RE, infillItem, unsourced, strayBuildBlocks,
   finishSite, woodClass, woodForm, acceptsFor, itemOf, LOG_ANY, PLANKS_ANY, ensureScaffold, unskippedObstructions, setJob, getJob, status, nextNeeds,
   buildStep, clearSite, obstructions, removeScaffold, siteScaffoldTeardown, loadSchematic, cellDone, cellsDone, inBox, placeCell, registerJob, key,
   complete, needsWork, finish, survey, scaffoldList, holesList, ensureSnapshot, snapshotInfo, snapName,
