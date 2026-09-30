@@ -1182,6 +1182,31 @@ function tick () {
     } else { leafWhy = null; if (active && active.kind === 'floor') return clearActive() }
   }
 
+  // 2d. A FLOOR THAT BURNS: a lit campfire (the castle's own, lit as placed), magma, fire - in the feet's cell (a campfire is
+  //  a slab-high block: stood on, the feet are in its cell) or the one under it. The walk never plans a step onto one and a
+  //  stand never counts it as a floor, but the body got onto a castle campfire all the same and stood there burning for 15s,
+  //  hp 19 to 0, while the planner worked a partial path - dead with 302 items, 2026-09-30. Off it to the nearest firm
+  //  cell at once, whatever put it there
+  {
+    const fx = Math.floor(me.x); const fy = Math.floor(me.y + 0.01); const fz = Math.floor(me.z)
+    const hot = b => !!b && world.DANGER_FLOOR_RE.test(b.name) && !/^(sweet_berry_bush|powder_snow|pointed_dripstone|cactus)$/.test(b.name)
+    const here = world.at(bot, fx, fy, fz); const under = world.at(bot, fx, fy - 1, fz)
+    if (!bot.vehicle && (hot(here) || (bot.entity.onGround && hot(under)))) {
+      let best = null; let bd = Infinity
+      for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) for (const dy of [0, 1, -1]) {
+        if (!dx && !dz) continue
+        const x = fx + dx; const y = fy + dy; const z = fz + dz
+        if (!world.standable(bot, x, y, z) || hot(world.at(bot, x, y, z)) || world.dropAt(bot, x + 0.5, y, z + 0.5) > world.SAFE_DROP) continue
+        const d = Math.abs(dx) + Math.abs(dz) + Math.abs(dy)
+        if (d < bd) { bd = d; best = { x, y, z } }
+      }
+      if (!active || active.kind !== 'hot') { setActive('hot', 'off a burning floor'); log('reflex', `standing on ${hot(here) ? here.name : under.name} at ${fx},${fy},${fz} - ${best ? 'off to ' + best.x + ',' + best.y + ',' + best.z : 'nowhere firm within 2: jumping off it'}`) }
+      try { bot.pathfinder.setGoal(null) } catch {}
+      if (best) steerTo(best, { jump: best.y > fy }); else { bot.setControlState('jump', true); bot.setControlState('forward', true) }
+      return
+    } else if (active && active.kind === 'hot') return clearActive()
+  }
+
   const hs = hostiles(24)
   const hp = bot.health
   const armed = !!inv.bestWeapon(bot)
