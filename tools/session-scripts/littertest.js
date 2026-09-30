@@ -27,4 +27,7 @@ check('pillar block', litter.capsADrop(bot, { x: 0, y: 102, z: 0 }), false)
 // 4. a stand of ours in a crown: leaves beside it, 6 up - litter
 cells = new Map(); groundAt(100); cells.set(key(0, 106, 0), solid('cobblestone')); cells.set(key(1, 106, 0), solid('oak_leaves')); cells.set(key(-1, 106, 0), solid('oak_leaves'))
 check('stand in a crown', litter.capsADrop(bot, { x: 0, y: 106, z: 0 }), false)
+// 5. a block of ours floating beside a castle wall (stone_bricks at its level): no ground, not a lid
+cells = new Map(); groundAt(100); cells.set(key(0, 110, 0), solid('dirt')); cells.set(key(1, 110, 0), solid('stone_bricks'))
+check('stuck to a build wall', litter.capsADrop(bot, { x: 0, y: 110, z: 0 }), false)
 console.log(fails ? `${fails} FAILED` : 'ALL PASS'); process.exit(fails ? 1 : 0)
