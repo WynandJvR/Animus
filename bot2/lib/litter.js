@@ -293,4 +293,4 @@ async function tidy (bot, { from, radius = RADIUS, shouldStop } = {}) {
   return removed
 }
 
-module.exports = { note, seed, pending, tidy, capsADrop, size: () => ledger.size }
+module.exports = { note, seed, pending, tidy, capsADrop, has: p => ledger.has(k(p)), size: () => ledger.size }

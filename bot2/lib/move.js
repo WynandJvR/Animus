@@ -817,6 +817,24 @@ async function escapeUp (bot) {
 async function escapeUpInner (bot) {
   const act = require('./act'); const gather = require('./gather')
   const f0 = bot.entity.position.floored()
+  // ON A PILLAR OF OUR OWN IN THE OPEN - every side a drop: down through it, the way it went up. The climb only rises: a
+  // walk's escape towered 10 in the open by the castle's west wall, the bot stood on the top with a drop all round, every
+  // walk gave up and each "climb out" climbed nothing ("from y129 to y129"), 2026-09-30. Our blocks by the ledger only
+  {
+    const litter = require('./litter')
+    const onTop = () => { const f = bot.entity.position.floored(); const u = { x: f.x, y: f.y - 1, z: f.z }; return bot.entity.onGround && world.openSky(bot, f) && litter.has(u) && [[1, 0], [-1, 0], [0, 1], [0, -1]].every(([dx, dz]) => world.dropAt(bot, f.x + dx + 0.5, f.y, f.z + dz + 0.5) > world.SAFE_DROP) ? u : null }
+    if (onTop()) {
+      log('move', `stuck on a pillar of ours at ${fmt(f0)} with a drop all round - digging down through it`)
+      for (let guard = 0; guard < 24; guard++) {
+        const u = onTop(); if (!u) break
+        if (!await act.dig(bot, u, { force: true, noWalk: true, allowZones: ['*'], timeoutMs: 8000 }).catch(() => false)) break
+        const t0 = Date.now(); while (!bot.entity.onGround && Date.now() - t0 < 1500) await sleep(50)
+      }
+      clearGiveUps(f0)
+      log('move', `came down our pillar: from ${fmt(f0)} to ${fmt(bot.entity.position)}`)
+      return true
+    }
+  }
   // ENCLOSED BY THE BUILD - PROVEN, not guessed: no walk out of here even with every door taken as a
   // way through (build.wayOut). The climb-out takes our own blocks only in the hollow under the floor, a tower may not rise
   // in a build cell, and a room the builder closed round the bot left it walking for ever - at dusk, and the night walk
