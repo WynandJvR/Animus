@@ -40,6 +40,11 @@ while true; do
   [ -n "$gs" ] && { echo "ALARM: trapped - $gs"; exit 0; }
   pe=$(recent 10 | grep -ac "path_error #\|(crash) uncaught")
   [ "$pe" -ge 1 ] && { echo "ALARM: $pe path_error/crash lines in 10 min"; recent 10 | grep -a "path_error #\|(crash) uncaught" | cut -c2-200 | tail -3; exit 0; }
+  # (a code error thrown by a task - a deploy's regression, not the world: "castle threw: TypeError: coverMiss is not
+  #  iterable" ran 7 minutes after the 06:55 deploy with the rounds placing nothing, 2026-09-30. Named with the last deploy:
+  #  by the no-regression rule a rollback trigger - restore the snapshot, then fix; audit)
+  ce=$(recent 15 | grep -a -E "threw: (TypeError|ReferenceError|SyntaxError|RangeError)" | tail -1 | cut -c2-200)
+  [ -n "$ce" ] && { echo "ALARM: CODE ERROR (rollback trigger) after deploy $(cut -d' ' -f1 /c/mc-bot-lab/tools/session-scripts/last-deploy.txt 2>/dev/null): $ce"; echo "  rollback: $(cat /c/mc-bot-lab/tools/session-scripts/last-deploy.txt 2>/dev/null)"; exit 0; }
   # (handwork stopped because its click did nothing - /state buildProgress.stoppedWork - for over 10 min)
   sw=$(curl -s -m 5 http://127.0.0.1:3001/state | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const w=(JSON.parse(s).buildProgress||{}).stoppedWork||[];console.log(w.map(x=>x.work).join(','))}catch{}})")
   if [ -n "$sw" ]; then [ -z "$sw_since" ] && sw_since=$now; [ $((now - sw_since)) -gt 600 ] && { echo "ALARM: handwork stopped >10 min: $sw"; exit 0; }; else sw_since=; fi
