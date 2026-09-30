@@ -309,7 +309,11 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
   m.exclusionAreasStep.push(block => {
     if (!block || !block.position) return 0
     if (trapGen !== pathGen) { trapGen = pathGen; trapSet = new Set(); for (const t of (require('./memory').get().trapCells || [])) if (t.day != null && trapLive(bot, t)) trapSet.add(`${t.x},${t.y},${t.z}`) }
-    return trapSet.size && trapSet.has(`${block.position.x},${block.position.y},${block.position.z}`) ? 50 : 0
+    const k = `${block.position.x},${block.position.y},${block.position.z}`
+    // (and a door the crossing just refused - nowhere to stand on a side: dear for ten minutes, the walk plans round it; the
+    //  stall retried one every 11s, five times, 2026-09-30)
+    const rd = refusedDoors.get(k); if (rd && rd > Date.now()) return 50
+    return trapSet.size && trapSet.has(k) ? 50 : 0
   })
   // (a cell a fall began from - and its sides, at its height: dear, not refused; the list is reflex.js's fall record)
   let fallCells = null; let fallGen = -1
@@ -573,7 +577,7 @@ async function crossDoor (bot, goal) {
   //  nowhere: 40s a try walking to a step that is not there, 2026-09-29. Not this door; the stall looks elsewhere)
   // (never the safehouse's own night seal - its step blocked on purpose, opened by unsealDoor above: exempt; audit)
   const sealed = p => ((require('./memory').get().doorSeal || {}).cells || []).some(c => c.x === p.x && c.z === p.z && (c.y === p.y || c.y === p.y + 1))
-  { const noStep = [sideA, sideB].find(p => !standsAt(p) && !sealed(p)); if (noStep) { log('move', `the door at ${fmt(d)} has nowhere to stand on its side at ${fmt(noStep)} - not through this one`); return false } }
+  { const noStep = [sideA, sideB].find(p => !standsAt(p) && !sealed(p)); if (noStep) { for (const dy of [0, 1]) refusedDoors.set(`${d.x},${d.y + dy},${d.z}`, Date.now() + 600000); log('move', `the door at ${fmt(d)} has nowhere to stand on its side at ${fmt(noStep)} - not through this one`); return false } }
   const gp = goal && goal.x != null ? { x: goal.x, z: goal.z } : null
   const distTo = (s, p) => Math.hypot(s.x + 0.5 - p.x, s.z + 0.5 - p.z)
   // the exit is the side toward the goal; without a goal, the side away from us
@@ -795,6 +799,7 @@ function giveUpsNear (p, now = Date.now()) { return giveUps.filter(g => now - g.
 // A TRAP REMEMBERED: where an escape had to break out or climb out, the give-ups round it are a pocket - a day's hazard,
 // dear to walk through and never a leg's point (a player stuck in a crawlspace walks round it next time; audit)
 // (its life is the game's day - day.js, as every day rule: the rest of today and tomorrow; audit)
+const refusedDoors = new Map() // door cell key -> until (ms): crossDoor's refusals, a cost to the walk a while
 const trapLive = (bot, t) => { try { return require('./day').dayNo(bot) - t.day <= 1 } catch { return false } }
 let legSaid = null
 // (the cells an escape opened in our own wall, this escape: a walk out through them proves nothing of the trap - the
