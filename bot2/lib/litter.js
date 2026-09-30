@@ -89,9 +89,12 @@ function kept (bot, p, pts = infraPoints()) {
 //  when a reflex stepped the body off it, a crown's stand - has a drop under it too, and read as a lid it left the
 //  ledger unsaid: three-block stairs 4-6 up stood by the orchard and home for good, "why are there still random
 //  cobblestone pillars", 2026-09-29. Taking such a block out opens no fall the air beside it has not already)
+// (a cell of our own build is no ground either, whatever it is made of - the castle's cobble walls are where the escape
+//  pillars stand; a player's cobble wall still reads as ground, the block kept; audit)
+function buildCell (q) { try { const j = require('./build').getJob(); const c = j && j.index && j.index.get(q.x + ',' + q.y + ',' + q.z); return !!c && !c.clear } catch { return false } }
 function capsADrop (bot, p) {
   if (act.fallBelow(bot, p) <= world.SAFE_DROP) return false
-  return [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => { const q = { x: p.x + dx, y: p.y, z: p.z + dz }; const b = world.at(bot, q.x, q.y, q.z); return !!b && b.boundingBox === 'block' && world.NATURAL_RE.test(b.name) && !world.LEAF_RE.test(b.name) && !world.LOG_RE.test(b.name) && !ledger.has(k(q)) })
+  return [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => { const q = { x: p.x + dx, y: p.y, z: p.z + dz }; const b = world.at(bot, q.x, q.y, q.z); return !!b && b.boundingBox === 'block' && world.NATURAL_RE.test(b.name) && !world.LEAF_RE.test(b.name) && !world.LOG_RE.test(b.name) && !ledger.has(k(q)) && !buildCell(q) })
 }
 
 // the build's own ground (its zone, its cells) is the build's ledger's and snapshot's - never litter's (an orchard's area
