@@ -80,6 +80,11 @@ function bump (stat, by = 1) { const m = load(); m.stats[stat] = (m.stats[stat] 
 function persistedMap (name) {
   const m = new Map(Object.entries(get()[name] || {}))
   const keep = () => set(name, Object.fromEntries(m))
-  return { get: k => m.get(k), has: k => m.has(k), set: (k, v) => { m.set(k, v); keep(); return v }, delete: k => { const r = m.delete(k); if (r) keep(); return r } }
+  // (a Map's whole read side too - spread, entries, size: build's pocket signature spreads coverMiss, and without the
+  //  iterator every build step threw "coverMiss is not iterable" for the first rounds after the deploy, 2026-09-30)
+  return {
+    get: k => m.get(k), has: k => m.has(k), set: (k, v) => { m.set(k, v); keep(); return v }, delete: k => { const r = m.delete(k); if (r) keep(); return r },
+    [Symbol.iterator]: () => m[Symbol.iterator](), entries: () => m.entries(), keys: () => m.keys(), values: () => m.values(), forEach: f => m.forEach(f), get size () { return m.size }
+  }
 }
 module.exports = { get, set, update, save, flushSync, addUnique, removePos, bump, persistedMap, FILE }
