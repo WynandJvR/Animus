@@ -912,6 +912,9 @@ async function viaDoor (bot, goal, movements) {
       // ("not crossed" is also "already through": the walk to its step crossed the door itself, and the walk on from the
       //  far side was never tried - every "couldn't reach its foot (stuck)" 1ms after "door crossing done", 2026-10-02.
       //  The walk on is tried once; a door that would not open fails it the same as before)
+      // (only when we stand on the goal's side of it now - every other "not crossed" fails fast as before; audit)
+      const ax = alongZ ? 'z' : 'x'
+      if (Math.sign(bot.entity.position[ax] - (d[ax] + 0.5)) !== Math.sign(gp[ax] + 0.5 - (d[ax] + 0.5))) return null
       const r1 = await move.runGoal(bot, goal, { timeoutMs: 30000, stuckMs: 8000, movements })
       if (r1.ok) log('build', `through the ${d.name.replace('_door', '')} door at ${move.fmt(d)} on the walk to it - on toward ${move.fmt(gp)}`)
       return r1.ok ? r1 : null
