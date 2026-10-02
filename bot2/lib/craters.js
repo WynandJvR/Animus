@@ -17,7 +17,8 @@ function notOurs (q) {
   try { if (move.insideHut(q)) return true } catch {}
   const z = move.inZone(q, 1); return !!(z && /^(farm|pen|base)$/.test(z.label))
 }
-const NEAR = 128 // from home or the build: our ground
+const NEAR = 64 // from home (or 24 round the build): our ground - a blast in a hillside 84 blocks out walked the bot there to fill it
+// (2026-10-02); only blasts under the open sky: a cave's blast hole is no scar on the site
 const MAX = 400 // cells remembered
 
 function ourGround (p) {
@@ -33,6 +34,7 @@ function install (bot) {
   bot._client.on('explosion', p => {
     const c = p.center || (p.x != null ? { x: p.x, y: p.y, z: p.z } : null)
     if (!c || !ourGround(c)) return
+    try { if (!world.openSky(bot, { x: Math.floor(c.x), y: Math.floor(c.y) + 1, z: Math.floor(c.z) })) return } catch {}
     if (blast) finish()
     blast = { at: Date.now(), c, r: (p.radius || 3) + 1.5, cells: [] }
     setTimeout(finish, 1500)
