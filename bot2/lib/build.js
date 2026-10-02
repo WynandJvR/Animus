@@ -894,16 +894,20 @@ async function goSite (bot, goal, label, { place = true, dig = (job && job.cells
     const f0 = world.feetPos(bot)
     // (the search from HERE for the route; the set it replaces is kept when the new one says nothing - perched, shut in: audit)
     if (!reach || !reach.start || Math.abs(reach.start.x - f0.x) + Math.abs(reach.start.z - f0.z) > 1 || Math.abs(reach.start.y - f0.y) > 1 || Date.now() - reach.at > 30000) { const prev = reach; reach = null; await walkReach(bot); if (!reach) reach = prev }
-    const route = reachRoute(bot, tgt)
-    if (route && route.length > 6) {
-      // (legs end on PLAIN cells - a full floor, air at the feet and the head: never mid-ladder, in a doorway or an open
-      //  trapdoor - and a leg ends just past every door, one door a leg; audit)
+    // (a failed leg is re-planned FROM WHERE IT LEFT US - the search's own answer from here, twice at most - before the walker
+    //  takes the rest; and a climb gets its own short leg: the legs that failed climbed 3-5 a leg, 2026-10-03)
+    let said = ''; const tLegs = Date.now()
+    for (let attempt = 0; attempt < 3 && Date.now() - tLegs < 60000; attempt++) { // (a minute of legs at most)
+      if (attempt > 0) { const prev = reach; reach = null; await walkReach(bot); if (!reach) { reach = prev; break } }
+      const route = reachRoute(bot, tgt)
+      if (!route || route.length <= 2) break
       const plain = q => { const fl = world.at(bot, q.x, q.y - 1, q.z); const ft = world.at(bot, q.x, q.y, q.z); const hd = world.at(bot, q.x, q.y + 1, q.z); return !!fl && fl.boundingBox === 'block' && world.isSolid(fl) && !!ft && world.isAirish(ft) && !!hd && world.isAirish(hd) }
       const isDoorCell = q => { const b = world.at(bot, q.x, q.y, q.z); return !!b && /_door$|_fence_gate$/.test(b.name) }
       const stops = []; let last = 0
       for (let i = 1; i < route.length - 1; i++) {
         const afterDoor = isDoorCell(route[i - 1]) && plain(route[i])
-        if ((i - last >= 5 && plain(route[i])) || afterDoor) { stops.push(i); last = i }
+        const climbed = Math.abs(route[i].y - route[last].y) >= 2 && plain(route[i])
+        if ((i - last >= 5 && plain(route[i])) || afterDoor || climbed) { stops.push(i); last = i }
       }
       const mv = () => move.movementsFor(bot, { dig: false, place: false, sprint: false })
       let done = 0; let why = ''
@@ -913,9 +917,10 @@ async function goSite (bot, goal, label, { place = true, dig = (job && job.cells
         if (!r || !r.ok) { why = `${r ? r.why : 'no answer'} on the leg to ${move.fmt(w)} from ${move.fmt(world.feetPos(bot))}, ${world.dist3(w, bot.entity.position).toFixed(1)}b short`; break }
         done++
       }
-      if (done === stops.length) { const r = await move.goTo(bot, goal, { timeoutMs: 15000, stuckMs: 6000, label: 'site leg', movements: mv }); if (r && r.ok) { legSaid(`legs ${stops.length + 1}/${stops.length + 1} to ${move.fmt(tgt)} (${route.length} cells)`); return r } why = r ? r.why : 'no answer' }
-      legSaid(`legs ${done}/${stops.length + 1} to ${move.fmt(tgt)} (${route.length} cells) - handed to the walker (${why})`)
+      if (done === stops.length) { const r = await move.goTo(bot, goal, { timeoutMs: 15000, stuckMs: 6000, label: 'site leg', movements: mv }); if (r && r.ok) { legSaid(`legs ${stops.length + 1}/${stops.length + 1} to ${move.fmt(tgt)} (${route.length} cells${attempt ? ', re-planned ' + attempt + 'x' : ''})`); return r } why = r ? r.why : 'no answer' }
+      said = `legs ${done}/${stops.length + 1} to ${move.fmt(tgt)} (${route.length} cells, try ${attempt + 1}) - ${why}`
     }
+    if (said) legSaid(said + ' - handed to the walker')
   }
   // ONE WALKER: the site's walk goes through move.goTo with the site's own movements - its door crossing on a stall, its
   // waits for the reflexes, its give-up verdicts. The old runGoal + viaDoor fallback walked to a door chosen by distance
