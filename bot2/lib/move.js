@@ -1288,7 +1288,9 @@ async function travel (bot, target, opts = {}) {
     //  2026-09-28)
     if (surfaceTries === 0 && isUnderground(bot) && mine && mine.entrance && mine.cursor && require('./mining').inOwnMine(bot) && world.dist3(me, mine.entrance) > 4 && !(target.y < me.y - 4)) {
       surfaceTries++
-      const out = await goTo(bot, new goals.GoalBlock(mine.entrance.x, mine.entrance.y, mine.entrance.z), { timeoutMs: 120000, stuckMs: 15000, label: 'out of the mine', shouldStop })
+      // (the time the way out takes: a flight from y16 is 110+ stair cells - 120s fell short and the bot dug up through the
+      //  rock instead; audit 2026-10-02)
+      const out = await goTo(bot, new goals.GoalBlock(mine.entrance.x, mine.entrance.y, mine.entrance.z), { timeoutMs: Math.max(120000, Math.min(480000, world.dist3(me, mine.entrance) * 2500)), stuckMs: 15000, label: 'out of the mine', shouldStop })
       if (out.ok) continue
     }
     if (dxz <= Math.max(range, 24)) {

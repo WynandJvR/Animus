@@ -223,7 +223,14 @@ async function oreLevel (bot, itemName) {
   const g = craft().GATHER[itemName]
   const home = mem.get().home
   if (!g || !g.ore || !home) return null
-  const ores = await world.scanBlocks(bot, g.blocks, { maxDistance: 64, count: 1500, point: home })
+  // (the rock UNDER home at every depth: one sphere round home at y119 saw nothing under y55, so the only band it could find
+  //  was the thin one at y79-87 - worked dry three times while iron's own band lay deeper, 2026-10-02; audit. Spheres down
+  //  the column, the counts pick the band)
+  const ores = []; const seenK = new Set()
+  const floorY = (bot.game && bot.game.minY != null) ? bot.game.minY : -64
+  for (let y = home.y; y > floorY; y -= 48) {
+    for (const b of await world.scanBlocks(bot, g.blocks, { maxDistance: 64, count: 6000, point: new (require('vec3').Vec3)(home.x, y, home.z) })) { const k = b.position.x + ',' + b.position.y + ',' + b.position.z; if (!seenK.has(k)) { seenK.add(k); ores.push(b) } }
+  }
   const at = new Map()
   for (const b of ores) if (b.position.y <= home.y - 8) at.set(b.position.y, (at.get(b.position.y) || 0) + 1)
   let best = null
@@ -232,6 +239,8 @@ async function oreLevel (bot, itemName) {
     for (let dy = -1; dy <= 3; dy++) n += at.get(y + dy) || 0
     if (n >= 6 && (!best || n > best.n)) best = { y: y + 1, n }
   }
+  // (the bands as counted - the evidence for the level a trip goes to)
+  { const top = [...at.keys()].map(y => { let n = 0; for (let dy = -1; dy <= 3; dy++) n += at.get(y + dy) || 0; return { y: y + 1, n } }).sort((p, q) => q.n - p.n).filter((b, i, l) => l.findIndex(o => Math.abs(o.y - b.y) < 5) === i).slice(0, 3); if (top.length) log('mine', `${itemName} in the rock under home by band: ${top.map(b => 'y' + b.y + ' ' + b.n).join(', ')}`) }
   // (none in the scan's 64 - deepslate 112 under a hilltop home: where we saw it ourselves, under home's depth, is its level)
   // (a remembered spot we can see now must still hold the item's own block - noted before a kind was narrowed, or dug
   //  since, it is no find)
@@ -564,6 +573,10 @@ async function downTheMine (bot, m, ctx = {}) {
   return { ok: true }
 }
 
+// (rock tunnelled this trip: a trip that never reached its face is no verdict on the ore - audit)
+let tunnelled = 0
+function lastTripTunnelled () { return tunnelled }
+function resetTripTunnelled () { tunnelled = 0 } // (by the trip's owner - one trip may call mineFor more than once; audit)
 async function mineFor (bot, itemName, target, ctx = {}) {
   alsoWant = /^(granite|diorite|andesite|tuff)$/.test(itemName) ? new RegExp('^' + itemName + '$') : null
   let m = mem.get().mine
@@ -694,6 +707,7 @@ async function mineFor (bot, itemName, target, ctx = {}) {
           // (the ACTIVE level's stairs: a deeper level blocked within 8 of its top is dropped, not the mine)
           if (m.stairTop.y - m.cursor.y < 8) { log('mine', `the stairs are blocked at y${m.cursor.y}, ${m.active ? 'just under the level above' : 'just under the surface'} - abandoning ${m.active ? 'this level' : 'this mine'}`); abandonMine(m); return false }
           log('mine', `the stairs are blocked at y${m.cursor.y} - tunnelling at this depth`)
+          m.oreY = m.cursor.y // (the band this level works is the one it reached - never the one it was dug for: audit)
         }
         // hazard ahead: turn this leg
         log('mine', `blocked at ${move.fmt(m.cursor)} - turning`)
@@ -792,6 +806,7 @@ function underOwnZone (p) {
 // is one of these from the foot beside it - never the planner's dig; reviewer 2026-09-30)
 async function digStep (bot, m, c, q) {
   if (underOwnZone(q)) { log('mine', `the stairs would run under a protected build at ${move.fmt(q)}`); return false }
+  { const h = mem.get().home; if (h && Math.hypot(q.x - h.x, q.z - h.z) < 24) { log('mine', `the stairs would run under home's grounds at ${move.fmt(q)}`); return false } } // (the tunnels' own rule)
   const cells = [{ x: q.x, y: q.y + 2, z: q.z }, { x: q.x, y: q.y + 1, z: q.z }, q]
   for (const cell of cells) {
     const f = fluidAround(bot, cell, p => cells.some(o => o.x === p.x && o.y === p.y && o.z === p.z) || (p.x === c.x && p.z === c.z))
@@ -889,10 +904,10 @@ async function openTunnelCell (bot, m, from, q) {
   await plugOpenings(bot, cells, { x: q.x - from.x, z: q.z - from.z })
   if (!await ensureFloor(bot, q)) return false
   if (!await stepInto(bot, q)) return false
-  m.cursor = { x: q.x, y: q.y, z: q.z }; m.blocks = (m.blocks || 0) + cells.length
+  m.cursor = { x: q.x, y: q.y, z: q.z }; m.blocks = (m.blocks || 0) + cells.length; tunnelled += cells.length
   await takeWallOres(bot)
   await maybeTorch(bot, m)
   return true
 }
 
-module.exports = { mineFor, chooseEntrance, takeWallOres, takeKnownOre, inOwnMine, oreLevel, mineBox, minePath, ensureLevels, levelsOf, setActive, saveMine, chooseLevel, pickLevel, descentStart, flightCells, abandonMine, downTheMine }
+module.exports = { lastTripTunnelled, resetTripTunnelled, mineFor, chooseEntrance, takeWallOres, takeKnownOre, inOwnMine, oreLevel, mineBox, minePath, ensureLevels, levelsOf, setActive, saveMine, chooseLevel, pickLevel, descentStart, flightCells, abandonMine, downTheMine }

@@ -287,7 +287,7 @@ const IRON_COST = { shield: 1, bucket: 3, iron_chestplate: 8, iron_leggings: 7, 
 // (the way of mining a dry verdict was reached under - a new way, a new chance: 'levels' since the mine became a chain of
 //  levels at every ore's depth, 2026-09-30. Left at 'vein', a dry trip of 09-29 under the old single staircase blocked every
 //  iron trip for three days - no shears, 318 leaves waiting, no armour after a death, 2026-10-02)
-const ORE_METHOD = 'levels'
+const ORE_METHOD = 'depths' // ('depths': the ore found by spheres down the column under home, 2026-10-02)
 const ARMOUR_GEAR = new Set(['shield', 'bucket', 'iron_chestplate', 'iron_leggings', 'iron_helmet', 'iron_boots'])
 function ironStock () { return inv.count(bot, 'iron_ingot') + base.bankCount('iron_ingot') + inv.count(bot, 'raw_iron') + base.bankCount('raw_iron') }
 function gearIronShort () {
@@ -609,7 +609,9 @@ function decide () {
   //  never reached again and no trip ever went - audit #41)
   if (dry && dry !== true && dry.method === ORE_METHOD && ironStock() < dry.stock) mem.set('ironTripDry', Object.assign({}, dry, { stock: ironStock() }))
   if (dry && (dry === true || dry.method !== ORE_METHOD || ironStock() > mem.get().ironTripDry.stock)) mem.set('ironTripDry', null)
-  if (gearShort > 0 && !mem.get().ironTripDry && world.phase(bot) === 'day' && world.ticksUntilNight(bot) > 2400 && !held('ironTrip')) return { name: 'ironTrip', why: `${gearShort} iron short for ${wanted.filter(n => ARMOUR_GEAR.has(n)).join(', ')} - mining for it` }
+  // (the daylight for a deep trip: stairs down and the walk back up - two minutes' margin sent the bot up 95 blocks of rock in
+  //  the dark, 2026-10-02; audit)
+  if (gearShort > 0 && !mem.get().ironTripDry && world.phase(bot) === 'day' && world.ticksUntilNight(bot) > 6000 && !held('ironTrip')) return { name: 'ironTrip', why: `${gearShort} iron short for ${wanted.filter(n => ARMOUR_GEAR.has(n)).join(', ')} - mining for it` }
 
   // 9. the build
   // (with its own backoff: a castle step failing in 30ms was retried 26 times in a second)
@@ -1039,12 +1041,16 @@ const TASKS = {
     const short = gearIronShort()
     if (short <= 0) return true
     const before = inv.count(bot, 'raw_iron')
+    mining.resetTripTunnelled()
     await gatherFor('raw_iron', short)
     const got = inv.count(bot, 'raw_iron') - before
     if (got > 0) log('dir', `ironTrip: dug ${got} raw iron for the gear`)
     // (a trip cut short - dusk, danger, a stop - found nothing because it looked at nothing: it marks no dryness. At dusk
     //  the trip was stopped with 0/28 before a block was dug and "no more trips" shut iron off for good, 2026-09-27)
     else if (dayStop() || taskCancelled()) log('dir', 'ironTrip: cut short before any iron - trying again another day')
+    // (dry only after real tunnelling: a trip that never reached its face - blocked stairs, no pickaxe, a level given up - says
+    //  nothing of the ore; audit)
+    else if (mining.lastTripTunnelled() < 20) log('dir', `ironTrip: back with no iron after only ${mining.lastTripTunnelled()} blocks of tunnel - not a verdict on the ore`)
     else { mem.set('ironTripDry', { stock: ironStock(), method: ORE_METHOD }); log('dir', 'ironTrip: no iron this trip - no more trips until iron turns up in the build mining') }
     return got > 0
   },
