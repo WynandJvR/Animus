@@ -234,7 +234,10 @@ function chargeAffordable (shooter, hs, hp) {
   const now = Date.now(); const taken = hurtLog.filter(q => now - q.at < 5000).reduce((a, q) => a + q.d, 0) / 5
   // (the hit to spare is for the run IN: a shooter already in sword reach is no run - turning from a skeleton at 2.5b to take
   //  cover put its arrows in our back, 17 -> 11, while 2.6s of swings ended it, 2026-10-02)
-  return hp - secs * Math.max(dps, taken) > hurtLine() + (shooter.d < 3.5 ? 0 : 4)
+  // (and held out to 5 once fighting it: a skeleton steps back as it is closed on - a fixed 3.5 flipped fight and cover each
+  //  tick; audit)
+  const inReach = shooter.d < 3.5 || (!!active && active.kind === 'fight' && fightTargetId === shooter.e.id && shooter.d < 5)
+  return hp - secs * Math.max(dps, taken) > hurtLine() + (inReach ? 0 : 4)
 }
 const hurtLog = [] // { at, d }: hp lost, the last seconds (health events)
 
