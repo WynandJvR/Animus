@@ -715,7 +715,11 @@ function refreshHoldsInner (todo, bot) {
 //  whenever they can - the doable set takes them outside the band - from their stands outside)
 // (and a falling block over a cell still waiting - powder over a brick gap - can't go in either: it anchoring would pin
 //  the band a layer up instead of at the gap; audit 2026-09-28)
+// A ground cell of the build already full of natural ground (coarse dirt wanted, grass there): the swap list's, never band work
+const GROUND_CELL_RE = /^(coarse_dirt|dirt|grass_block|podzol|rooted_dirt|mud|mycelium)$/
+function groundHeldBy (bot, c) { if (!GROUND_CELL_RE.test(c.name)) return null; const b = world.at(bot, c.x, c.y, c.z); return b && b.name !== c.name && world.isSolid(b) && GROUND_CELL_RE.test(b.name) ? b.name : null }
 function anchorable (bot, c, det) {
+  if (bot && groundHeldBy(bot, c)) return false // (it anchors no band - the swap list's: groundHeldBy)
   if (c.attach || c.follows || c.foundation || infillCell(c) || (cellFails.get(key(c)) || {}).n >= 1) return false
   if (coverMiss.get(stepItem(bot, c)) === today(bot)) return false // (a wait with nothing to wait for: it holds no band - coverMiss)
   // (nor a cell standing on a hole kept open for its item - out of stock, or the wait above: it cannot go in until that
@@ -1425,7 +1429,10 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     }
     // the lowest two layers of what we HAVE the blocks for: 24 missing glass panes in a wall no longer hold up
     // every brick above them (the windows go in when the glass comes)
-    const structural = todo.filter(c => !c.attach && !c.foundation && has(c) && !det.has(stepItem(bot, c)) && !fallsIn(bot, c, stepItem(bot, c)))
+    // (a ground cell already full of ground - the courtyard's coarse dirt over the terrain's grass - is the swap list's, at the
+    //  end: walked for as band work it was half the misses of a step, 2026-10-02 analysis)
+    const groundHeld = c => { const b = groundHeldBy(bot, c); if (!b) return false; noteToSwap(c, b); return true }
+    const structural = todo.filter(c => !c.attach && !c.foundation && has(c) && !det.has(stepItem(bot, c)) && !fallsIn(bot, c, stepItem(bot, c)) && !groundHeld(c))
     const footing = todo.filter(c => c.foundation && !c.attach && has(c)) // (the foundation: outside the band, lowest first)
     const attached = todo.filter(c => c.attach && has(c) && supportThere(bot, c))
     // (the window's floor from the cells that can be TRIED: one kept out by another - a shared miss (the cell under it waits),

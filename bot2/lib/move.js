@@ -799,7 +799,11 @@ async function goToInner2 (bot, goal, opts, { timeoutMs, stuckMs, dig, place, al
     // a stall next to a door is a door the planner would not open: cross it by hand
     // (a crossing is progress ONCE: the same door crossed the same way again in one walk is the stall beyond it, not the door
     //  - "crossing done" every 12s for a minute at a castle door over a pit, the walk's fails reset each time, 2026-10-02)
-    if (await crossDoor(bot, goal).catch(e => { log('move', `door crossing threw: ${e.message}`); return false })) {
+    // (only a door ON the way: the planner's next steps go through it. Any door within three of a stall was crossed or walked
+    //  to - "couldn't reach the step in front of the door" 11 times an evening, 10-25s each inside a 30s site walk, at doors
+    //  the path never used; 2026-10-02 analysis)
+    const onRoute = (() => { try { const ps = (require('./reflex').plannedPath() || []).slice(0, 6); return ps.some(n => { const b = world.at(bot, Math.floor(n.x), Math.floor(n.y), Math.floor(n.z)); return !!b && /_door$/.test(b.name) }) } catch { return true } })()
+    if (onRoute && await crossDoor(bot, goal).catch(e => { log('move', `door crossing threw: ${e.message}`); return false })) {
       const n = (crossed.get(lastCross) || 0) + 1; crossed.set(lastCross, n)
       if (n === 1) { fails = 0; continue }
       if (n === 2) log('move', `${label}: through the door ${lastCross.split('>')[0]} the same way again - the stall is past it, not at it`)
