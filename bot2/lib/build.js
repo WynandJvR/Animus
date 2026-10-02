@@ -910,7 +910,7 @@ async function goSite (bot, goal, label, { place = true, dig = (job && job.cells
       for (const i of stops) {
         const w = route[i]
         const r = await move.goTo(bot, new goals.GoalBlock(w.x, w.y, w.z), { timeoutMs: 15000, stuckMs: 6000, label: 'site leg', movements: mv })
-        if (!r || !r.ok) { why = r ? r.why : 'no answer'; break }
+        if (!r || !r.ok) { why = `${r ? r.why : 'no answer'} on the leg to ${move.fmt(w)} from ${move.fmt(world.feetPos(bot))}, ${world.dist3(w, bot.entity.position).toFixed(1)}b short`; break }
         done++
       }
       if (done === stops.length) { const r = await move.goTo(bot, goal, { timeoutMs: 15000, stuckMs: 6000, label: 'site leg', movements: mv }); if (r && r.ok) { legSaid(`legs ${stops.length + 1}/${stops.length + 1} to ${move.fmt(tgt)} (${route.length} cells)`); return r } why = r ? r.why : 'no answer' }
