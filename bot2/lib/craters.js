@@ -70,6 +70,7 @@ function open (bot) {
     const b = world.at(bot, q.x, q.y, q.z)
     if (!b) return false // (not loaded: owed, but not a task from here; audit)
     if (!ourGround(q)) return false // (our ground by today's rule - cells recorded under a wider one are not walked to)
+    { const h = mem.get().home; if (h && q.y < h.y - 12) return false } // (a hole under the ground is no scar on it: a y55 cell 64 under home was walked for, 2026-10-02)
     if (gaveUp(q)) return false
     if (!world.isAirish(b) && !world.isLiquidWater(b)) return false
     if (j && j.index.has(k(q))) return false

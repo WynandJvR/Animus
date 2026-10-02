@@ -245,9 +245,10 @@ async function place (bot, pos, itemName, { faceHint = null, plans = null, accep
   const placed = accept || (b => b.name === itemName)
   const cur = bot.blockAt(target)
   if (cur && placed(cur)) return true
-  if (cur && !world.isAirish(cur) && !world.isLiquidWater(cur) && !PLANT_RE.test(cur.name) && !REPLACEABLE_RE.test(cur.name)) return false
+  // (every refusal says why: a yard hole failed four times running, "0 of 1 fixes done", the reason unsaid - 2026-10-02)
+  if (cur && !world.isAirish(cur) && !world.isLiquidWater(cur) && !PLANT_RE.test(cur.name) && !REPLACEABLE_RE.test(cur.name)) { log('act', `place ${itemName} at ${move.fmt(pos)}: ${cur.name} is there`); return false }
   const item = inv.items(bot).find(i => i.name === itemName)
-  if (!item) return false
+  if (!item) { log('act', `place ${itemName} at ${move.fmt(pos)}: none in the pack`); return false }
   // a torch in the cell takes no block (the server keeps the torch): off with it first. The mine's floor fill tried its
   // own tunnel torch every few seconds for an hour - "the block is still torch", no cobble mined, 2026-09-27
   if (cur && /(^|_)torch$/.test(cur.name) && reach(bot, target, 4.5)) { await digBlock(bot, cur).catch(() => false) }
@@ -293,7 +294,7 @@ async function place (bot, pos, itemName, { faceHint = null, plans = null, accep
     if (!reach(bot, pos, 4.4)) {
       if (noWalk) return false
       const r = await move.goTo(bot, new goals.GoalNear(pos.x, pos.y, pos.z, 3), { timeoutMs: 20000, allowZones, label: 'reach to place' })
-      if (!r.ok && !reach(bot, pos, 4.8)) return false
+      if (!r.ok && !reach(bot, pos, 4.8)) { log('act', `place ${itemName} at ${move.fmt(pos)}: could not get within reach (${r.why}) from ${move.fmt(bot.entity.position)}`); return false }
     }
     // sneak:false is a promise the click goes out standing: held against the ledge crouch (reflex.holdNoSneak) - a chest
     // placed on a wall top went out sneaking and never paired with its twin (2026-09-27)
