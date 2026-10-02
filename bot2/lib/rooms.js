@@ -29,7 +29,10 @@ function walkModel (w, isC = () => false, { opens = false } = {}) {
   const passable = b => (w.bodyPassable ? w.bodyPassable(b) : w.isAirish(b)) || w.isOpenTrapdoor(b) || (/_door$|_fence_gate$/.test(b.name) && !/^iron_door$/.test(b.name))
   const air = (x, y, z) => { if (isC(x, y, z)) return false; const b = w.at(x, y, z); return !!b && passable(b) }
   const climb = (x, y, z) => { if (isC(x, y, z)) return false; const b = w.at(x, y, z); return !!b && CLIMB_RE.test(b.name) }
-  const st = (x, y, z) => { if (!air(x, y, z) || !air(x, y + 1, z)) return false; if (isC(x, y - 1, z)) return true; const fb = w.at(x, y, z); if (fb && (/_door$/.test(fb.name) || w.isOpenTrapdoor(fb))) { const fl = w.at(x, y - 1, z); return !!fl && w.isSolid(fl) && !w.isOpenTrapdoor(fl) } return w.standable(x, y, z) }
+  // (never ON or IN a fire - a campfire, magma: the planner's blocksToAvoid; the castle's 150 campfires read as floor here and
+  //  a route over one was no route to the walker; audit 2026-10-03)
+  const hot = (x, y, z) => { const b = w.at(x, y, z); return !!b && /^(soul_)?campfire$|^magma_block$|(^|_)fire$/.test(b.name) }
+  const st = (x, y, z) => { if (hot(x, y - 1, z) || hot(x, y, z)) return false; if (!air(x, y, z) || !air(x, y + 1, z)) return false; if (isC(x, y - 1, z)) return true; const fb = w.at(x, y, z); if (fb && (/_door$/.test(fb.name) || w.isOpenTrapdoor(fb))) { const fl = w.at(x, y - 1, z); return !!fl && w.isSolid(fl) && !w.isOpenTrapdoor(fl) } return w.standable(x, y, z) }
   // (an open door's or trapdoor's plate by plateEdge - the planner's own model; a CLOSED door by its panel here)
   const panelOf = b => { if (!b) return null; if (opens && /_door$/.test(b.name) && !/^iron_door$/.test(b.name)) return null; const v = w.plateEdge(b); if (v) return edgeOf(v[0], v[1]); if (/_door$/.test(b.name)) return doorPanel(b); return null }
   const edgeShut = (x, y, z, dx, dz) => [w.at(x, y, z), w.at(x, y + 1, z)].some(b => panelOf(b) === edgeOf(dx, dz))

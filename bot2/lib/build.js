@@ -885,6 +885,38 @@ async function goSite (bot, goal, label, { place = true, dig = (job && job.cells
     //  never tripped the same-cell climb, 2026-09-29)
     void out // (a leg failed below the floor climbs out inside move.travel itself - one rule for every walk; audit)
   }
+  // THE ROUTE THE REACH SEARCH FOUND, walked in short legs (no dig, no place): "can I get there" and "how" one answer. The
+  // planner's own long walks to stands the search called reachable timed out at 30s with no door involved - 27s a try in
+  // reach, 2 of 13 placed, 2026-10-02 analysis. From where I stand (the search redone if it started elsewhere); a leg that
+  // fails hands the rest to the walker below
+  if (job && goal && goal.x != null && goal.constructor && goal.constructor.name === 'GoalBlock') {
+    const tgt = { x: goal.x, y: goal.y, z: goal.z }
+    const f0 = world.feetPos(bot)
+    // (the search from HERE for the route; the set it replaces is kept when the new one says nothing - perched, shut in: audit)
+    if (!reach || !reach.start || Math.abs(reach.start.x - f0.x) + Math.abs(reach.start.z - f0.z) > 1 || Math.abs(reach.start.y - f0.y) > 1 || Date.now() - reach.at > 30000) { const prev = reach; reach = null; await walkReach(bot); if (!reach) reach = prev }
+    const route = reachRoute(bot, tgt)
+    if (route && route.length > 6) {
+      // (legs end on PLAIN cells - a full floor, air at the feet and the head: never mid-ladder, in a doorway or an open
+      //  trapdoor - and a leg ends just past every door, one door a leg; audit)
+      const plain = q => { const fl = world.at(bot, q.x, q.y - 1, q.z); const ft = world.at(bot, q.x, q.y, q.z); const hd = world.at(bot, q.x, q.y + 1, q.z); return !!fl && fl.boundingBox === 'block' && world.isSolid(fl) && !!ft && world.isAirish(ft) && !!hd && world.isAirish(hd) }
+      const isDoorCell = q => { const b = world.at(bot, q.x, q.y, q.z); return !!b && /_door$|_fence_gate$/.test(b.name) }
+      const stops = []; let last = 0
+      for (let i = 1; i < route.length - 1; i++) {
+        const afterDoor = isDoorCell(route[i - 1]) && plain(route[i])
+        if ((i - last >= 5 && plain(route[i])) || afterDoor) { stops.push(i); last = i }
+      }
+      const mv = () => move.movementsFor(bot, { dig: false, place: false, sprint: false })
+      let done = 0; let why = ''
+      for (const i of stops) {
+        const w = route[i]
+        const r = await move.goTo(bot, new goals.GoalBlock(w.x, w.y, w.z), { timeoutMs: 15000, stuckMs: 6000, label: 'site leg', movements: mv })
+        if (!r || !r.ok) { why = r ? r.why : 'no answer'; break }
+        done++
+      }
+      if (done === stops.length) { const r = await move.goTo(bot, goal, { timeoutMs: 15000, stuckMs: 6000, label: 'site leg', movements: mv }); if (r && r.ok) { legSaid(`legs ${stops.length + 1}/${stops.length + 1} to ${move.fmt(tgt)} (${route.length} cells)`); return r } why = r ? r.why : 'no answer' }
+      legSaid(`legs ${done}/${stops.length + 1} to ${move.fmt(tgt)} (${route.length} cells) - handed to the walker (${why})`)
+    }
+  }
   // ONE WALKER: the site's walk goes through move.goTo with the site's own movements - its door crossing on a stall, its
   // waits for the reflexes, its give-up verdicts. The old runGoal + viaDoor fallback walked to a door chosen by distance
   // after every failure, whatever it was: 88 walks "to the door" in four days, 74 failed, 3227s; 58 of 83 crossings still
@@ -1094,13 +1126,14 @@ async function walkReach (bot) {
   //  as a set of one, every cell was held and nothing walked; audit)
   if (!inArea(start)) { reach = null; return null }
   const cells = new Set([key(start)]); const q = [start]; let i = 0; let capped = false
+  const parent = new Map() // (the way each cell was reached: the route to a stand is read back from it - reachRoute)
   const t0 = Date.now(); let slice = t0; let longest = 0
   while (i < q.length) {
     if (cells.size > REACH_CAP) { capped = true; break }
     if (Date.now() - slice > 8) { longest = Math.max(longest, Date.now() - slice); await new Promise(r => setImmediate(r)); slice = Date.now() }
     const c = q[i++]
     if (!inArea(c)) continue // (reached, not walked on from: the site's own ground is the question)
-    for (const n of W.next(c)) { const k = key(n); if (!cells.has(k)) { cells.add(k); q.push(n) } }
+    for (const n of W.next(c)) { const k = key(n); if (!cells.has(k)) { cells.add(k); parent.set(k, c); q.push(n) } }
   }
   // (SHUT IN - no cell of the set outside the build: every stand reads out of reach, no walk is made, and the walker's own
   //  escapes never run. Unknown, said once: the walks go and the escape gets its chance; audit)
@@ -1111,7 +1144,7 @@ async function walkReach (bot) {
     if (Date.now() - shutSaid > 60000) { shutSaid = Date.now(); log('build', `walk reach: shut in at ${move.fmt(f)} (${cells.size} cells, none outside the build) - stands unknown, the walks go`) }
     reach = null; return null
   }
-  reach = { job, at: Date.now(), cells, capped, ms: Date.now() - t0, longest, from: f }
+  reach = { job, at: Date.now(), cells, capped, ms: Date.now() - t0, longest, from: f, start, parent }
   if (Date.now() - reachLast > 120000) { reachLast = Date.now(); log('build', `walk reach: ${cells.size} cells from ${move.fmt(f)}${capped ? ' (capped - unknown past it)' : ''} in ${reach.ms}ms (longest slice ${longest}ms)`) }
   return reach
 }
@@ -1121,6 +1154,15 @@ function reachCurrent (bot) {
   if (!reach || reach.job !== job || Date.now() - reach.at > 30000 || !bot || !bot.entity) return false
   const f = world.feetPos(bot); return [0, -1, 1].some(dy => reach.cells.has(key({ x: f.x, y: f.y + dy, z: f.z })))
 }
+// THE ROUTE the search found to p, from its start: [start .. p], or null (not in the set, capped, stale)
+function reachRoute (bot, p) {
+  if (!reachCurrent(bot) || reach.capped || !reach.cells.has(key(p))) return null
+  const out = [{ x: p.x, y: p.y, z: p.z }]; let k = key(p); let guard = 0
+  while (k !== key(reach.start) && guard++ < 20000) { const c = reach.parent.get(k); if (!c) return null; out.push(c); k = key(c) }
+  return out.reverse()
+}
+let legLast = 0; let legN = 0
+function legSaid (s) { legN++; if (Date.now() - legLast > 30000) { legLast = Date.now(); log('build', `${s}${legN > 1 ? ` [${legN} walks since the last line]` : ''}`); legN = 0 } } // (one line in 30s: the evidence)
 function canWalkTo (bot, p) { return !reachCurrent(bot) || reach.capped || reach.cells.has(key(p)) }
 function footFor (bot, c) { return feetFor(bot, c)[0] || null }
 // Pillar feet the walk could not get to, skipped for half an hour by every cell (the south end's floor inside the facade:
