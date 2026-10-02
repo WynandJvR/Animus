@@ -200,6 +200,7 @@ bot.once('spawn', async () => {
   started = true
   reflex.install(bot)
   graves.install(bot)
+  try { require('./lib/craters').install(bot) } catch (e) { log('craters', 'install threw: ' + e.message) }
   commands = require('./lib/commands').make(bot, director)
   require('./lib/api').start({ bot, port: controlPort, host: controlHost, director, commands, brainSettings, pov, chat })
   // wait for chunks around us before deciding anything

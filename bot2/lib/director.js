@@ -127,7 +127,7 @@ function note (name, ok) {
 // succeed" four times over, the watchdog's alarm, a backoff for nothing (late in the day, 25-64 from home; audit
 // 2026-09-28). One gate: a day chore whose stop holds waits, said once. (Survival - food, graves, tools, the bed - is
 // never held here; the castle's step does its home work first and minds its own stop.)
-const DAY_TASKS = new Set(['farm', 'harvest', 'hydrate', 'levelFarm', 'levelYard', 'fixWater', 'lightBase', 'plant', 'pen', 'spareKit', 'fillShaft', 'cook', 'ironTrip', 'tidy', 'siteTidy'])
+const DAY_TASKS = new Set(['fillCraters', 'farm', 'harvest', 'hydrate', 'levelFarm', 'levelYard', 'fixWater', 'lightBase', 'plant', 'pen', 'spareKit', 'fillShaft', 'cook', 'ironTrip', 'tidy', 'siteTidy'])
 const lateSaid = new Map()
 // held(name): may decide() offer it now? Not while backing off from failures (cooling), nor a day chore once its stop holds.
 // (cooling keeps its one meaning - "it failed recently": the recover rule reads cooling('food') as that evidence; audit)
@@ -563,6 +563,8 @@ function decide () {
     if (farm.farm() && farm.farmIsHome(bot) && farm.farm().water && !farm.waterNeedsFixing(bot) && world.phase(bot) === 'day' && !farm.farmLevel(bot) && !held('levelFarm')) return { name: 'levelFarm', why: `the farm is uneven or cluttered (${farm.levelWork(bot).length} fixes)` }
     // the yard round the safehouse: holes filled, stray blocks down (a pit by the door stood for days)
     // (a stray shaft on the grounds that someone fell into: capped flush, before anything else here - see reflex's fall line)
+    // (a blast's hole on our ground: put back - craters.js)
+    if (world.phase(bot) === 'day' && dHome < 96 && !held('fillCraters')) { const n = require('./craters').open(bot).length; if (n) return { name: 'fillCraters', why: `${n} cells a blast took round home and the site - putting the ground back` } }
     if (world.phase(bot) === 'day' && (mem.get().shaftsToFill || []).length && !held('fillShaft')) return { name: 'fillShaft', why: `${mem.get().shaftsToFill.length} hole${mem.get().shaftsToFill.length > 1 ? 's' : ''} on the grounds that I fell into - capping ${mem.get().shaftsToFill.length > 1 ? 'them' : 'it'}` }
     if (world.phase(bot) === 'day' && hut.complete(bot) && !held('levelYard')) { const n = hut.yardWork(bot).length; if (n) return { name: 'levelYard', why: `the yard has ${n} holes or stray blocks` } }
     // a watered plot still at its starting size: widen it to everything the water reaches
@@ -1068,6 +1070,7 @@ const TASKS = {
   },
   async castle () { return castleWork() },
   async idle () { await move.sleep(5000); return true },
+  async fillCraters () { return (await require('./craters').fill(bot, { shouldStop: dayStop })) > 0 },
   async setSpawn () { return shelter.setSpawnAtBed(bot, { shouldStop: () => taskCancelled() }) },
   async leaveForeign () { return foreign.leave(bot, { shouldStop: () => taskCancelled() }) },
   async ashore () {
