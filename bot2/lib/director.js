@@ -1339,6 +1339,9 @@ async function castleWorkInner () {
   // holding the whole cathedral (2026-09-26).
   // (kept in memory: a module variable was wiped by every reload, and the morning's first round started blank)
   phase('bottleneck trip')
+  // (not when what the band waits on is in stock: 26 campfires sat in the chest while the round went off for 118 logs "first",
+  //  and the step that would have placed them never ran, 2026-10-02 analysis - the step withdraws it)
+  if (mem.get().buildWaiting && inv.count(bot, mem.get().buildWaiting) + base.bankCount(mem.get().buildWaiting) > 0) { log('dir', `the build waits on ${mem.get().buildWaiting} - in stock, the step takes it`); mem.set('buildWaiting', null) }
   if (mem.get().buildWaiting) {
     // (cleared only when a trip goes for it: cleared here with nothing short - the planks' logs in stock - the withdraw just
     //  below never saw what the band waited on, filled the pack with trapdoors and signs, and the band waited on

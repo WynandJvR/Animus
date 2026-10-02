@@ -890,7 +890,9 @@ async function goSite (bot, goal, label, { place = true, dig = (job && job.cells
 
 // Obstructions we could not reach twice are left for the end (scaffold cleanup reaches from the
 // finished walls) instead of stalling the whole site on a leaf 12 blocks up.
-const clearFails = new Map()
+// (kept across restarts: each restart wiped it and the same two leaves were walked for twelve times in an evening, 410s, none
+//  cleared, 2026-10-02 analysis)
+const clearFails = mem.persistedMap('clearFails')
 function skippedObstruction (b) { return (clearFails.get(key(b.position)) || 0) >= 2 }
 function unskippedObstructions (bot, opts) { return obstructions(bot, opts).filter(b => !skippedObstruction(b)) }
 
