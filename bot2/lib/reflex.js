@@ -232,7 +232,9 @@ function chargeAffordable (shooter, hs, hp) {
   const dps = shooters.reduce((a, h) => a + (SHOOTER_DPS[h.e.name] || 2) * (MAGIC.has(h.e.name) ? 1 : (shield && h.e === shooter.e ? 0.2 : 1) * (1 - Math.min(20, pts) / 25)), 0)
   // (and never thinner than the damage being taken NOW, and a whole hit to spare: a 0.03 margin charged a patrol, 2026-10-02)
   const now = Date.now(); const taken = hurtLog.filter(q => now - q.at < 5000).reduce((a, q) => a + q.d, 0) / 5
-  return hp - secs * Math.max(dps, taken) > hurtLine() + 4
+  // (the hit to spare is for the run IN: a shooter already in sword reach is no run - turning from a skeleton at 2.5b to take
+  //  cover put its arrows in our back, 17 -> 11, while 2.6s of swings ended it, 2026-10-02)
+  return hp - secs * Math.max(dps, taken) > hurtLine() + (shooter.d < 3.5 ? 0 : 4)
 }
 const hurtLog = [] // { at, d }: hp lost, the last seconds (health events)
 
