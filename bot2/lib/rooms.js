@@ -68,41 +68,6 @@ function region (w, box, p, { memo = new Map(), isC = () => false, cap = 300 } =
   return r
 }
 
-// THE WAY IN to p: the cells from which a walk STEPS INTO p (q with p among next(q) - a step up, level, or a drop of up to
-// SAFE_DROP), searched backward. out: a walker from outside the box (or past `cap` cells - unknown, taken as out) gets
-// to p; else closed, with its cells. A stand on an upper floor dropped through the stairwell to the ground and the forward
-// region read "out" - every such stand was walked to and failed, 39 of 83 cluster-stand misses (2026-10-02 analysis).
-// A closed verdict holds for every cell of the region (none reachable from outside, or p would be); an out verdict for p
-// alone. memo: key -> region (closed regions under every cell; out under p)
-function regionIn (w, box, p, { memo = new Map(), isC = () => false, cap = 1500 } = {}) {
-  const k0 = key(p); const hit = memo.get(k0); if (hit) return hit
-  const inBox = q => q.x >= box.x1 && q.x <= box.x2 && q.z >= box.z1 && q.z <= box.z2
-  const W = walkModel(w, isC)
-  const prev = c => {
-    const out = []
-    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-      for (let dy = -1; dy <= w.SAFE_DROP; dy++) {
-        const q = { x: c.x + dx, y: c.y + dy, z: c.z + dz }
-        if (!W.st(q.x, q.y, q.z)) continue
-        if (W.next(q).some(n => n.x === c.x && n.y === c.y && n.z === c.z)) out.push(q)
-      }
-    }
-    return out
-  }
-  const r = { out: false, cells: null }
-  const seen = new Set([k0]); const q = [{ x: p.x, y: p.y, z: p.z }]; let i = 0
-  while (i < q.length) {
-    if (seen.size > cap) { r.out = true; break }
-    const c = q[i++]
-    if (!inBox(c)) { r.out = true; break }
-    for (const n of prev(c)) { const k = key(n); if (!seen.has(k)) { seen.add(k); q.push(n) } }
-  }
-  if (r.out) { memo.set(k0, r); return r }
-  r.cells = seen
-  for (const k of seen) memo.set(k, r)
-  return r
-}
-
 // A DOORWAY FOOT: an empty cell with room for a head over it (air, or an unbuilt cell of the build), walkable on two
 // opposite sides and shut on the other two (a wall, or an unbuilt cell of the build - it will be one). The axis through it
 // [dx, dz], or null. jobUnbuilt(x,y,z): a cell of the build still to place.
@@ -157,4 +122,4 @@ function closesRoom (w, c, { box, jobUnbuilt, work, standsOf }) {
   return null
 }
 
-module.exports = { walkModel, region, regionIn, doorwayAxis, closesRoom, doorPanel, edgeOf, OPP, CW, CCW }
+module.exports = { walkModel, region, doorwayAxis, closesRoom, doorPanel, edgeOf, OPP, CW, CCW }

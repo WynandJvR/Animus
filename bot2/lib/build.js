@@ -1053,20 +1053,9 @@ function feetFor (bot, c) {
     if (!clear) continue
     // (on the floor or the ground, not up on a ledge of the build: the walk to a window ledge at y128 stuck every time)
     const raised = gy > job.box.y1 ? 25 : 0
-    // (and a foot no walk gets to - an upper floor with no way up yet: 24 pillar feet on floors nothing climbs to, each a
-    //  stuck walk, 2026-10-02 analysis - the way-in test the stands use)
-    if (!footReachable(bot, { x, y: gy + 1, z })) continue
     out.push({ x, y: gy + 1, z, d: Math.hypot(x + 0.5 - me.x, gy + 1 - me.y, z + 0.5 - me.z) + Math.hypot(dx, dz) + raised })
   }
   return out.sort((a, b) => a.d - b.d)
-}
-let footMemo = new Map(); let footMemoAt = 0
-function footReachable (bot, p) {
-  if (Date.now() - footMemoAt > 5000) { footMemo = new Map(); footMemoAt = Date.now() } // (one picture of the walls a few seconds long: they change as we build)
-  const r = standRegion(bot, p, footMemo)
-  if (r.out || !r.cells) return true
-  const f = world.feetPos(bot)
-  return [0, 1, -1].some(dy => r.cells.has(key({ x: f.x, y: f.y + dy, z: f.z })))
 }
 function footFor (bot, c) { return feetFor(bot, c)[0] || null }
 // Pillar feet the walk could not get to, skipped for half an hour by every cell (the south end's floor inside the facade:
@@ -1328,9 +1317,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
   const badStands = new Set() // (stands whose walk failed this step: clusterStand passes them by)
   // (the stands' regions this step - standRegion's memo; stale when one of our blocks lands: a corridor cut)
   let regionMemo = new Map(); let regionMs = 0
-  // (reachable: a way in from outside the build, or my own cell among the cells that walk into it - the WAY IN, never the way
-  //  out: rooms.regionIn)
-  const reachOf = p => { const t = Date.now(); const r = standRegion(bot, p, regionMemo); let ok = r.out; if (!ok && r.cells) { const f = world.feetPos(bot); ok = [0, 1, -1].some(dy => r.cells.has(key({ x: f.x, y: f.y + dy, z: f.z }))) } regionMs += Date.now() - t; return ok }
+  const reachOf = p => { const t = Date.now(); const me = standRegion(bot, world.feetPos(bot), regionMemo); const r = standRegion(bot, p, regionMemo); regionMs += Date.now() - t; return r.out || r === me }
   const holdBack = new Set() // (cells that would wall the body in from where it stands: later this step, or the next - wallsMeIn)
   // (where a step's time goes: choosing the cell, walking to and placing it - measured, not guessed)
   const prof = { tries: 0, ms: 0, okMs: 0, dist: 0, pick: 0, why: {} }; let tpick = Date.now()
@@ -1814,12 +1801,28 @@ function edgeOf (dx, dz) { return rooms.edgeOf(dx, dz) }
 // live world
 function roomWorld (bot) { return { at: (x, y, z) => world.at(bot, x, y, z), isAirish: world.isAirish, bodyPassable: world.bodyPassable, isOpenTrapdoor: world.isOpenTrapdoor, isSolid: world.isSolid, standable: (x, y, z) => world.standable(bot, x, y, z), plateEdge: world.plateEdge, SAFE_DROP: world.SAFE_DROP } }
 function walkModel (bot, isC = () => false) { return rooms.walkModel(roomWorld(bot), isC) }
-// A STAND'S REGION: whether a walk gets IN to it - from outside the build, or from where I stand (rooms.regionIn; it read the way out once - 
+// A STAND'S REGION: whether the walk-only region round a cell gets out of the build (the box's edge, or a sky column a
 // tower may climb) - the same search as wayOut, from the stand. A stand whose region is closed off inside the build is in
 // one of its compartments: reachable only from inside it (a stand no walk gets to is no stand: 0 of 6 placed, three stands
 // in the castle's closed compartments, 155s, 2026-09-29; audit). A search from the BOT ran over the whole outdoors (over
 // 2000 cells, 233ms, no answer) - a region is small, and its verdict is every one of its cells' (memo: key -> region)
-function standRegion (bot, p, memo) { return rooms.regionIn(roomWorld(bot), job.box, p, { memo }) } // (the way IN - rooms.regionIn)
+function standRegion (bot, p, memo) {
+  const k0 = key(p); const hit = memo.get(k0); if (hit) return hit
+  const b0 = job.box; const inBox = q => q.x >= b0.x1 && q.x <= b0.x2 && q.z >= b0.z1 && q.z <= b0.z2
+  const W = walkModel(bot)
+  const r = { out: false }
+  const seen = new Set([k0]); const q = [{ x: p.x, y: p.y, z: p.z }]; let i = 0
+  while (i < q.length) {
+    if (seen.size > 300) { r.out = true; break } // (a region this big is no compartment)
+    const c = q[i++]
+    if (!inBox(c)) { r.out = true; break }
+    // (NO sky exit here: in wayOut a sky column means the bot can LEAVE by towering up; a stand asks whether it can get IN,
+    //  and over a roofless compartment's wall means a drop the walk refuses - it stays a compartment; audit)
+    for (const n of W.next(c)) { const k = key(n); if (!seen.has(k)) { seen.add(k); q.push(n) } }
+  }
+  for (const k of seen) memo.set(k, r)
+  return r
+}
 let lastExit = null
 function wayOutPoint (bot, from = null) { lastExit = null; return wayOut(bot, { x: NaN, y: NaN, z: NaN }, from, false) ? lastExit : null }
 function wayOut (bot, c, from = null, withC = true) {
