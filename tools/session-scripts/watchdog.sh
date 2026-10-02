@@ -38,6 +38,10 @@ while true; do
   # walks giving up at ONE spot, 5+ in 10 min: trapped (a room, a crawlspace, a pit) - the escape should have fired
   gs=$(recent 10 | grep -aoE "gave up \(stuck x3\) at -?[0-9]+,-?[0-9]+,-?[0-9]+" | sort | uniq -c | sort -rn | awk '$1>=5 {print; exit}')
   [ -n "$gs" ] && { echo "ALARM: trapped - $gs"; exit 0; }
+  # (the event loop stalled 2s+ three times in 10 min: the body froze - a deploy's search on the loop, 5-9s each, 3 in 3 min
+  #  went unalarmed on 2026-10-02; body-first: a rollback trigger after a deploy)
+  lg=$(recent 10 | grep -aoE "event loop stalled [0-9.]+s" | awk '{ if ($4+0 >= 2) n++ } END { print n+0 }')
+  [ "$lg" -ge 3 ] && { echo "ALARM: event loop stalled 2s+ $lg times in 10 min (body-first) - last deploy $(tail -1 /c/mc-bot-lab/tools/session-scripts/last-deploy.txt 2>/dev/null | cut -d' ' -f1)"; recent 10 | grep -a "stalled in:" | tail -2 | cut -c2-220; exit 0; }
   pe=$(recent 10 | grep -ac "path_error #\|(crash) uncaught")
   [ "$pe" -ge 1 ] && { echo "ALARM: $pe path_error/crash lines in 10 min"; recent 10 | grep -a "path_error #\|(crash) uncaught" | cut -c2-200 | tail -3; exit 0; }
   # (a code error thrown by a task - a deploy's regression, not the world: "castle threw: TypeError: coverMiss is not
