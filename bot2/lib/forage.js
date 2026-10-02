@@ -180,8 +180,10 @@ async function gatherRaw (bot, raw, n, ctx = {}) {
 function shearsHeld (bot) { return inv.items(bot).find(i => i.name === 'shears' && inv.durabilityLeft(bot, i) > 2) || null }
 // shears: two iron ingots (the bank's first) - the one tool every job here but digging needs
 async function ensureShears (bot, ctx) {
-  if (shearsHeld(bot)) return true
+  if (shearsHeld(bot)) { if (mem.get().shearsWorn) mem.set('shearsWorn', false); return true }
   if (base().bankCount('shears') > 0) await base().withdraw(bot, 'shears', 1).catch(() => 0)
+  // (the bank's pair, out and spent: no shears at all to the iron plan - the director makes a pair; audit)
+  if (!shearsHeld(bot) && inv.has(bot, 'shears') && !mem.get().shearsWorn) { mem.set('shearsWorn', true); log('forage', 'the banked shears are worn out - a new pair wanted') }
   if (!shearsHeld(bot)) await craft().ensure(bot, 'shears', inv.count(bot, 'shears') + 1, Object.assign({}, ctx, { noWithdraw: false })).catch(() => false)
   if (!shearsHeld(bot)) { log('forage', 'no shears and none to be made (two iron ingots) - the shears work waits'); return false }
   return true
@@ -805,4 +807,4 @@ async function process (bot, by, node, n, opts = {}) {
   try { return await work(bot, node, n, opts) } catch (e) { log('forage', `${by} ${node} threw: ${e.message}`); return 0 }
 }
 
-module.exports = { stoppedWork, lavaFuel, lavaSites, lavaSource, lavaStands, lavaKnown, bucketsAvailable, handles, spec, gather: gatherRaw, process, exhausted, exhaustedKinds, generation, seen, watch, sightMobs, noteTrip, strip, carve, harden, compost, shearBlock, ensureShears, benchSpot, shoreAt, SEARCH_TRIPS }
+module.exports = { stoppedWork, lavaFuel, lavaSites, lavaSource, lavaStands, lavaKnown, bucketsAvailable, handles, spec, gather: gatherRaw, process, exhausted, exhaustedKinds, generation, seen, watch, sightMobs, noteTrip, strip, carve, harden, compost, shearBlock, ensureShears, shearsHeld, benchSpot, shoreAt, SEARCH_TRIPS }

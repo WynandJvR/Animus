@@ -1909,25 +1909,11 @@ function standsOf (bot, c) {
   const out = []
   for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) for (let dy = -2; dy <= 1; dy++) {
     const p = { x: c.x + dx, y: c.y + dy, z: c.z + dz }
-    if (!within(p, c) || !standCell(bot, p)) continue
+    if (!within(p, c) || job.index.has(key(p)) || job.index.has(key({ x: p.x, y: p.y + 1, z: p.z })) || !world.standable(bot, p.x, p.y, p.z)) continue
     out.push(p)
   }
   return out
 }
-// A CELL A BODY STANDS IN for a placement: no cell of the build at the feet or the head and standable ground - or a finished
-// LADDER rung of the build, a rung or the floor under it, room for the head (a rung, or air): a player climbs his ladder and
-// hangs the next rung from it (sneaking holds him on it). Only the floor counted, the ladders' top rungs - above reach from
-// the floor - waited on the upper floor they lead to, which nothing could reach (2026-10-02 analysis)
-function standCell (bot, p) {
-  const c0 = job.index.get(key(p)); const c1 = job.index.get(key({ x: p.x, y: p.y + 1, z: p.z }))
-  if (!c0 && !c1) return world.standable(bot, p.x, p.y, p.z)
-  const rung = q => !!q && q.name === 'ladder' && cellDone(bot, q) === true
-  if (!rung(c0)) return false
-  if (c1 ? !rung(c1) : !world.bodyPassable(world.at(bot, p.x, p.y + 1, p.z))) return false
-  const u = world.at(bot, p.x, p.y - 1, p.z)
-  return !!u && (u.name === 'ladder' || world.isSolid(u))
-}
-function onRung (p) { const c0 = job.index.get(key(p)); return !!c0 && c0.name === 'ladder' }
 function clusterStand (bot, c, ready, bad = new Set(), reachOf = null) {
   const near = ready.filter(q => Math.abs(q.x - c.x) <= 8 && Math.abs(q.z - c.z) <= 8 && Math.abs(q.y - c.y) <= 6)
   // (a cell counts for a stand only if it has a face to click on the stand's side - within 4.2 through a wall is no reach:
@@ -1939,10 +1925,10 @@ function clusterStand (bot, c, ready, bad = new Set(), reachOf = null) {
   let best = null
   for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) for (let dy = -2; dy <= 1; dy++) {
     const p = { x: c.x + dx, y: c.y + dy, z: c.z + dz }
-    if (bad.has(key(p)) || !within(p, c) || !standCell(bot, p)) continue
+    if (bad.has(key(p)) || !within(p, c) || job.index.has(key(p)) || job.index.has(key({ x: p.x, y: p.y + 1, z: p.z })) || !world.standable(bot, p.x, p.y, p.z)) continue
     // (never under the build: a stand below the base inside the box is the hollow - the eviction sends the bot home from it)
     if (p.y < job.box.y1 && p.x >= job.box.x1 && p.x <= job.box.x2 && p.z >= job.box.z1 && p.z <= job.box.z2) continue
-    if (!onRung(p) && [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([ax, az]) => world.dropAt(bot, p.x + ax + 0.5, p.y, p.z + az + 0.5) > world.SAFE_DROP)) continue // (the lip rule is the floor's: on a rung the ladder holds the body)
+    if ([[1, 0], [-1, 0], [0, 1], [0, -1]].some(([ax, az]) => world.dropAt(bot, p.x + ax + 0.5, p.y, p.z + az + 0.5) > world.SAFE_DROP)) continue
     let n = 0; for (const q of near) if (within(p, q) && faces(p, q)) n++
     const d = world.dist3(p, me)
     // (a stand the bot can walk to first, whatever it serves: an unreachable one is tried only when no other stands; reach
@@ -2003,9 +1989,9 @@ function foundationStand (bot, c) {
     const open = job.foundation && job.foundation.outside
     const inBox = p.x >= job.box.x1 && p.x <= job.box.x2 && p.z >= job.box.z1 && p.z <= job.box.z2
     if (inBox && !(open && open.has(`${p.x},${p.z}`))) continue
-    if (!standCell(bot, p)) continue
+    if (job.index.has(key(p)) || job.index.has(key({ x: p.x, y: p.y + 1, z: p.z })) || !world.standable(bot, p.x, p.y, p.z)) continue
     // (never on a lip: a trench's outer edge or a ledge of the slope beside a drop that hurts - audit, the falls' posture)
-    if (!onRung(p) && [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([ax, az]) => world.dropAt(bot, p.x + ax + 0.5, p.y, p.z + az + 0.5) > world.SAFE_DROP)) continue // (the lip rule is the floor's: on a rung the ladder holds the body)
+    if ([[1, 0], [-1, 0], [0, 1], [0, -1]].some(([ax, az]) => world.dropAt(bot, p.x + ax + 0.5, p.y, p.z + az + 0.5) > world.SAFE_DROP)) continue
     if (world.dist3({ x: p.x + 0.5, y: p.y + 1.6, z: p.z + 0.5 }, { x: c.x + 0.5, y: c.y + 0.5, z: c.z + 0.5 }) > 4.2) continue
     const d = world.dist3(p, me)
     if (d < bd) { bd = d; best = p }
@@ -2028,7 +2014,7 @@ function foundationStand (bot, c) {
     if (!dx && !dz) continue
     const p = { x: c.x + dx, y: c.y + dy, z: c.z + dz }
     if (!job.index.has(`${p.x},${job.box.y1},${p.z}`)) continue // (inside: under the base only)
-    if (!standCell(bot, p)) continue
+    if (job.index.has(key(p)) || job.index.has(key({ x: p.x, y: p.y + 1, z: p.z })) || !world.standable(bot, p.x, p.y, p.z)) continue
     if (world.dist3({ x: p.x + 0.5, y: p.y + 1.6, z: p.z + 0.5 }, { x: c.x + 0.5, y: c.y + 0.5, z: c.z + 0.5 }) > 4.2) continue
     if (!wayOut(bot, c, p, true)) continue // (from there, with the cell in, a way out must stay)
     const d = world.dist3(p, me)

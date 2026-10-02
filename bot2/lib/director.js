@@ -262,14 +262,16 @@ function ironWanted () {
   if (rank(w.legs) < 4) out.push('iron_leggings')
   if (rank(w.head) < 4) out.push('iron_helmet')
   if (rank(w.feet) < 4) out.push('iron_boots')
+  // shears after the body's gear and before the iron tools: two ingots, and wool is shorn (1-3 a sheep, grown back) not
+  // killed for (1, and the flock gone) - the castle's wool trips killed the sheep round home, 2026-09-29; and every leaf of a
+  // build is cut with them. A WORN pair is none (forage.ensureShears marks it): the bank's spent pair stood in for shears and
+  // none were ever made - 318 acacia leaves and the rest waiting, 2026-10-02
+  if (shearsWanted()) out.push('shears')
   if (inv.toolTier(bot, 'pickaxe') < 3) out.push('iron_pickaxe')
   if (inv.toolTier(bot, 'sword') < 3) out.push('iron_sword')
-  // shears last, after the body's gear: two ingots, and wool is shorn (1-3 a sheep, grown back) not killed for (1, and the
-  // flock gone) - the castle's wool trips killed the sheep round home and explored 176 blocks out for more, 2026-09-29.
-  // Never a reason for an ore trip (not ARMOUR_GEAR); leaves cut with them too
-  if (!inv.has(bot, 'shears') && base.bankCount('shears') === 0) out.push('shears')
   return out
 }
+function shearsWanted () { return !forage.shearsHeld(bot) && (base.bankCount('shears') === 0 || !!mem.get().shearsWorn) }
 const IRON_COST = { shield: 1, bucket: 3, iron_chestplate: 8, iron_leggings: 7, iron_helmet: 5, iron_boots: 4, iron_pickaxe: 3, iron_sword: 2, shears: 2 }
 // the pieces that stand between the body and a mob (a trip is made for these; tools and the bucket wait for iron)
 // (the way of mining a dry verdict was reached under - a new way, a new chance: 'levels' since the mine became a chain of
@@ -279,7 +281,8 @@ const ORE_METHOD = 'levels'
 const ARMOUR_GEAR = new Set(['shield', 'bucket', 'iron_chestplate', 'iron_leggings', 'iron_helmet', 'iron_boots'])
 function ironStock () { return inv.count(bot, 'iron_ingot') + base.bankCount('iron_ingot') + inv.count(bot, 'raw_iron') + base.bankCount('raw_iron') }
 function gearIronShort () {
-  const need = ironWanted().filter(n => ARMOUR_GEAR.has(n)).reduce((a, n) => a + IRON_COST[n], 0)
+  // (and the shears' two when they are wanted: the build's leaves wait on them, and no other trip brings iron - audit)
+  const need = ironWanted().filter(n => ARMOUR_GEAR.has(n) || n === 'shears').reduce((a, n) => a + IRON_COST[n], 0)
   const have = inv.count(bot, 'iron_ingot') + base.bankCount('iron_ingot') + inv.count(bot, 'raw_iron') + base.bankCount('raw_iron')
   return Math.max(0, need - have)
 }
