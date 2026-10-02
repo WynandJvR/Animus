@@ -21,7 +21,7 @@ const FOOD_ANIMALS = /^(cow|mooshroom|pig|sheep|chicken|rabbit)$/
 // mutton or a wool kill would empty the pen the wool grows in; pen.js, 2026-09-29)
 function animals (bot, re, maxDist = 48) {
   const me = bot.entity.position
-  return Object.values(bot.entities).filter(e => e && e.name && re.test(e.name) && e.position && e.position.distanceTo(me) <= maxDist && !isBaby(bot, e) && !pen().inPen(e.position) && !(Date.now() - (unreachable.get(e.id) || 0) < 3 * 60000))
+  return Object.values(bot.entities).filter(e => e && e.name && re.test(e.name) && e.position && e.position.distanceTo(me) <= maxDist && !isBaby(bot, e) && !pen().inPen(e.position) && !move.inForeign(e.position) && !(Date.now() - (unreachable.get(e.id) || 0) < 3 * 60000))
     .sort((a, b) => a.position.distanceTo(me) - b.position.distanceTo(me))
 }
 // A baby: the ageable "baby" flag, read by name from the registry's metadata keys as the wool byte is (the index moves
@@ -335,8 +335,22 @@ async function harvestCrops (bot, ctx = {}) {
 }
 
 // Get the pack to a comfortable food buffer: bank -> cook raw -> hunt+cook.
+const RAW_BANK = ['beef', 'porkchop', 'mutton', 'chicken', 'rabbit', 'cod', 'salmon', 'potato']
 async function stockFood (bot, { targetPoints = 40, ctx = {} } = {}) {
   if (inv.foodPoints(bot) >= targetPoints) return true
+  // 0) THE BANK FIRST, wherever we stand: food in the chests (cooked, wheat for bread, meat to cook) is home's - walked to
+  //    when home is in reach. 250 blocks out, the food task passed 92 banked wheat and 15 banked meat by and went fishing,
+  //    then hunting (2026-10-02). Withdraw > craft > gather, from where the bank is
+  {
+    const COOKED = ['cooked_beef', 'cooked_porkchop', 'cooked_mutton', 'bread', 'cooked_chicken', 'baked_potato', 'cooked_salmon', 'cooked_cod', 'golden_carrot', 'apple', 'carrot']
+    const banked = COOKED.reduce((s, n) => s + base().bankCount(n) * 5, 0) + Math.floor(base().bankCount('wheat') / 3) * 5 + RAW_BANK.reduce((s, n) => s + base().bankCount(n) * 5, 0)
+    const home = mem.get().home
+    const d = home ? world.dist2(home, bot.entity.position) : Infinity
+    if (banked >= 10 && d > 48 && d < 600) {
+      log('food', `${banked} food pts in the bank at home, ${Math.round(d)}b off - home for it first`)
+      await base().goHome(bot, { shouldStop: ctx.shouldStop }).catch(() => null)
+    }
+  }
   // 1) cooked food from the chests
   for (const n of ['cooked_beef', 'cooked_porkchop', 'cooked_mutton', 'bread', 'cooked_chicken', 'baked_potato', 'cooked_salmon', 'cooked_cod', 'golden_carrot', 'apple', 'carrot']) {
     if (inv.foodPoints(bot) >= targetPoints) return true
@@ -350,7 +364,11 @@ async function stockFood (bot, { targetPoints = 40, ctx = {} } = {}) {
     if (loaves > 0) await craft().ensure(bot, 'bread', inv.count(bot, 'bread') + loaves, { noWithdraw: true }).catch(() => false)
     if (inv.foodPoints(bot) >= targetPoints) return true
   }
-  // 2) cook what we carry
+  // 2) cook what we carry - and the bank's raw meat with it (the home furnaces stand beside it)
+  for (const n of RAW_BANK) {
+    if (inv.foodPoints(bot) + inv.rawFoodCount(bot) * 6 >= targetPoints) break
+    if (base().bankCount(n) > 0) await base().withdraw(bot, n, 16).catch(() => 0)
+  }
   if (inv.rawFoodCount(bot) > 0) await cookAll(bot, ctx)
   if (inv.foodPoints(bot) >= targetPoints) return true
   // 2b) ripe crops near home - no animals needed

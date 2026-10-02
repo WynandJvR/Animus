@@ -12,6 +12,13 @@ const HOSTILE = new Set(['zombie', 'husk', 'drowned', 'skeleton', 'stray', 'bogg
 const RANGED = new Set(['skeleton', 'stray', 'bogged', 'pillager', 'witch', 'blaze', 'ghast', 'breeze'])
 let creeperTrail = [] // (the creeper row's body samples, the last ~1s: see its stalled/hurtByOther tests)
 let creeperSaid = { stall: false, hurt: false }
+const CREEPER_FIGHT = true // (the stand-and-strike branch below - audited 2026-10-02)
+let creeperMode = null // 'fight' | 'run': said once per change in an encounter
+let creeperBackUntil = 0 // the step back after a strike
+let creeperFight = null // {id, closest, since}: the stand's progress (a stand-off is let go)
+let fightTarget = null // the creeper the physics-tick strike watches
+let fightAt = 0 // when the row last stood to it: the strike acts only on a stand the row holds NOW
+const creeperIgnore = new Map() // creeper id -> until: a stand-off let be
 const NEVER_MELEE = new Set(['creeper', 'ghast', 'warden', 'wither', 'elder_guardian', 'ravager'])
 
 let bot = null
@@ -559,6 +566,46 @@ function steerTo (p, { jump = true, sprint = false } = {}) {
 // (memoised: the flee's continuation asks every tick - the pick holds until the body has moved a block or the threat's
 //  bearing has turned 30 degrees, as shoreHeading's does; audit 2026-09-28)
 let fleeMemo = null
+// A creeper's fuse: lit (true), not (false), or unknown (null) - its swell_dir (1 while swelling) or ignited flag (flint),
+// read by name from the registry's metadata keys (the index moves between versions)
+function creeperFusing (e) {
+  try {
+    const keys = (world.data(bot).entitiesByName.creeper || {}).metadataKeys || []
+    const sw = e.metadata && e.metadata[keys.indexOf('swell_dir')]
+    const ig = e.metadata && e.metadata[keys.indexOf('is_ignited')]
+    if (ig === true) return true
+    // (the server sends a value only once it differs from the default: unsent is the default - not swelling; audit)
+    if (keys.indexOf('swell_dir') < 0) return null
+    return typeof sw === 'number' ? sw > 0 : false
+  } catch { return null }
+}
+function creeperPowered (e) {
+  try { const keys = (world.data(bot).entitiesByName.creeper || {}).metadataKeys || []; const i = keys.indexOf('is_powered'); return i < 0 ? true : e.metadata && e.metadata[i] === true } catch { return true } // (unknown: treated as charged - never fought)
+}
+// THE STRIKE, every physics tick while standing to a creeper: the window between its reach and ours is a few hundredths
+// of a block of its walk - at the 200ms tick it was a coin flip (audit). Eye to the nearest point of its hitbox within
+// 2.9 (ours is 3), a full swing, standing still - then straight back, facing it.
+function creeperStrike () {
+  const t = fightTarget
+  if (!CREEPER_FIGHT || !t || !t.isValid || creeperMode !== 'fight' || !bot.entity) return
+  const now = Date.now()
+  // (only while the creeper row holds the body this very moment - never under an air, lava or hot-floor row, a busy
+  //  action or a hold: a stale stand pressed `back` into them; audit)
+  if (now - fightAt > 400 || !active || active.kind !== 'creeper' || busy || pinned || !enabled) return
+  const held = bot.heldItem
+  if (!held || !/_(sword|axe)$/.test(held.name)) return
+  if (now - lastAttackAt < (/_axe$/.test(held.name) ? 1000 : 600)) return
+  if (creeperFusing(t) !== false) return
+  const eye = bot.entity.position.offset(0, 1.62, 0); const p = t.position
+  const cx = Math.max(p.x - 0.3, Math.min(eye.x, p.x + 0.3)); const cy = Math.max(p.y, Math.min(eye.y, p.y + 1.7)); const cz = Math.max(p.z - 0.3, Math.min(eye.z, p.z + 0.3))
+  if (Math.hypot(eye.x - cx, eye.y - cy, eye.z - cz) > 2.9) return
+  bot.lookAt(p.offset(0, 1.2, 0), true).catch(() => {})
+  bot.setControlState('forward', false); bot.setControlState('sprint', false)
+  bot.attack(t); lastAttackAt = now; creeperBackUntil = now + 500
+  bot.setControlState('back', !pinned)
+  // (a strike is progress: the stand-off clock starts again - knocked back, its next approach never beat its closest)
+  if (creeperFight) { creeperFight.closest = Infinity; creeperFight.since = now }
+}
 function fleeHeading (t) {
   const me = bot.entity.position
   const away = Math.atan2(me.z - t.position.z, me.x - t.position.x)
@@ -743,7 +790,17 @@ function installPlaceGuard () {
   if (typeof bot.placeBlock !== 'function') return
   const orig = bot.placeBlock.bind(bot)
   bot.placeBlock = async (ref, face, ...rest) => {
+    // (no block into someone else's place, whoever asks - the planner's stepping stones, a tower, a fill: foreign.js)
     const caller = new Error().stack
+    try {
+      const p = ref.position.plus(face)
+      if (require('./move').inForeign(p)) {
+        const fg = require('./foreign')
+        // (the planner's own scaffold, climbing out over their wall, is let through - and remembered; nothing else)
+        if (!(fg.climbingOut() && /mineflayer-pathfinder/.test(caller))) throw Object.assign(new Error("place guard: someone else's place"), { foreign: true })
+        fg.notePlaced({ x: p.x, y: p.y, z: p.z })
+      }
+    } catch (e) { if (e.foreign) throw e }
     if (/mineflayer-pathfinder/.test(caller)) {
       const held = bot.heldItem
       if (!held || !PLANNER_SCAFFOLD.test(held.name)) {
@@ -1055,6 +1112,9 @@ function tick () {
       const sideways = !!(side && side.n < up)
       if (sideways) roof = side.first
       else for (let dy = 2; dy <= 4; dy++) { const b = world.at(bot, me.x, me.y + dy, me.z); if (!b) break; if (swimThrough(b) || world.isAirish(b)) continue; roof = b; break }
+      // (no roof of someone else's place: the dig is refused, and chosen again every tick it kept the swim branches below
+      //  from ever running - the way up is swum, not dug; foreign.js, audit)
+      if (roof && require('./move').inForeign(roof.position)) roof = null
       // (never a roof whose dig kills: a falling block drops the column above into the head cell through the water, and a
       //  roof holding back lava pours it in - act.dig's own lava rule; audit 2026-09-28)
       const FALLS = /(^|_)(gravel|sand|concrete_powder)$|^suspicious_/
@@ -1230,7 +1290,8 @@ function tick () {
       }
       const hb = hot(here) ? here : under
       const shortFall = best ? null : fallTo(world.SAFE_DROP)
-      const breakIt = !best && !shortFall && !!hb && hb.hardness != null && hb.hardness >= 0
+      // (never their campfire: refused, it was chosen again every tick and the jump-off below never ran - foreign.js, audit)
+      const breakIt = !best && !shortFall && !!hb && hb.hardness != null && hb.hardness >= 0 && !require('./move').inForeign(hb.position)
       const longFall = !best && !shortFall && !breakIt ? fallTo(Math.min(6, Math.floor(bot.health) - 3 + world.SAFE_DROP)) : null
       const how = best ? 'off to ' + best.x + ',' + best.y + ',' + best.z : shortFall ? 'nothing firm within 2: a short drop off to ' + shortFall.x + ',' + shortFall.z : breakIt ? 'nothing firm within 2: breaking the ' + hb.name : longFall ? 'nothing firm within 2: a ' + longFall.drop + '-block drop off to ' + longFall.x + ',' + longFall.z : 'nowhere to go: jumping'
       // (and what put us there - the mover: the row before, the planner's goal and step, the body's speed, a hit just taken;
@@ -1262,7 +1323,7 @@ function tick () {
   //  froze a whole night of mining)
   // a creeper lights its fuse within 3 blocks and gives up beyond 7: keep out of that ring, no further - running
   // until 16 let one creeper drag the bot 60 blocks across the map, a flee every few seconds
-  const creeper = hs.find(h => h.e.name === 'creeper' && h.d < 5 && (canSee(h.e) || h.d < 3))
+  const creeper = hs.find(h => h.e.name === 'creeper' && h.d < 5 && (canSee(h.e) || h.d < 3) && !((creeperIgnore.get(h.e.id) || 0) > now && h.d >= 3.5))
   // (still running only from a creeper that threatens NOW - seen, or within its blast reach: one behind rock round a bend
   //  held the body 16s, every other row locked out, while a zombie beside the bot took it down, 2026-09-29; audit)
   const stillRunning = active && active.kind === 'creeper' && fleeTarget && fleeTarget.isValid && fleeTarget.position.distanceTo(me) < 9 && now - active.since < 30000 && (canSee(fleeTarget) || fleeTarget.position.distanceTo(me) < 4.5)
@@ -1270,12 +1331,40 @@ function tick () {
     const t = creeper ? creeper.e : fleeTarget
     fleeTarget = t
     const d = t.position.distanceTo(me)
-    if (!active || active.kind !== 'creeper') { creeperTrail = []; creeperSaid = { stall: false, hurt: false } }
+    if (!active || active.kind !== 'creeper') { creeperTrail = []; creeperSaid = { stall: false, hurt: false }; creeperMode = null }
     setActive('creeper', `${d.toFixed(1)}b`)
     // (the body over the last second while this row steers: a flee that goes nowhere, and hurt that is not the creeper's)
     creeperTrail.push({ t: now, x: me.x, z: me.z, hp: bot.health }); creeperTrail = creeperTrail.filter(q => now - q.t <= 1200)
     shieldDown()
     try { bot.pathfinder.setGoal(null) } catch {}
+    // FIGHT IT, DON'T DANCE WITH IT. A creeper chases out to 16 and lights only within 3: fled to 5-9 and let go, it came
+    // straight back - run, stop, run, a whole night of it at hp 8 until a zombie finished the bot (2026-10-02). A player
+    // with a blade stands, lets it walk in and strikes it at reach, before it is close enough to light; the sprint-hit
+    // knocks it back out, a step back, again - four stone-sword hits. Only a LIT fuse is run from (past 7 the fuse winds
+    // down: its own swell_dir says which); no blade, hurt, in water or with something else at us: the run below.
+    const fusing = creeperFusing(t)
+    const blade = inv.bestWeapon(bot)
+    // (nothing else at us: a mob at our side, a shooter in sight - a stand is a target for both; a hit taken lately is
+    //  someone else's work, the run below answers it; audit)
+    const company = hs.some(o => o.e !== t && canSee(o.e) && ((o.d < 8 && !NEVER_MELEE.has(o.e.name)) || (RANGED.has(o.e.name) && o.d < 16)))
+    // (life enough for a missed window: a blast at 3 is ~10-17 unarmoured; audit)
+    const hpNeed = inv.armorPoints(bot) >= 10 ? 12 : 16
+    if (CREEPER_FIGHT && blade && fusing === false && !creeperPowered(t) && canSee(t) && bot.health >= hpNeed && !company && now - lastHurtAt > 3000 && !world.feetInWater(bot) && !bot.vehicle) {
+      if (creeperMode !== 'fight' || !creeperFight || creeperFight.id !== t.id) { creeperMode = 'fight'; creeperFight = { id: t.id, closest: d, since: now }; log('reflex', `creeper ${d.toFixed(1)}b, fuse not lit - standing with the ${blade.name}, striking it as it comes into reach`) }
+      fightTarget = t; fightAt = now
+      if (!bot.heldItem || bot.heldItem.name !== blade.name) inv.equipWeapon(bot).catch(() => {}) // (in hand before it is in reach)
+      bot.lookAt(t.position.offset(0, 1.2, 0), true).catch(() => {})
+      // (a stand-off - no closer in 3s: across a gap, behind a fence, on a ledge - is let be for 20s, not stood over for ever)
+      if (d < creeperFight.closest - 0.3) { creeperFight.closest = d; creeperFight.since = now }
+      if (now - creeperFight.since > 3000 && now >= creeperBackUntil) { creeperIgnore.set(t.id, now + 20000); log('reflex', `creeper ${d.toFixed(1)}b not coming closer - letting it be`); fightTarget = null; creeperFight = null; return clearActive() }
+      // the step back after a strike: straight back, still facing it (forward on a flee heading turned the body to it)
+      if (now < creeperBackUntil) { bot.setControlState('forward', false); bot.setControlState('sprint', false); bot.setControlState('back', !pinned); return }
+      // standing: it walks into the blade - the strike itself is timed every physics tick (creeperStrike)
+      for (const k of ['forward', 'back', 'left', 'right', 'jump', 'sprint']) bot.setControlState(k, false)
+      return
+    }
+    fightTarget = null
+    if (fusing && creeperMode !== 'run') { creeperMode = 'run'; log('reflex', `creeper ${d.toFixed(1)}b, fuse LIT - backing out past its reach`) }
     // too close to outrun the fuse: knock it back first (knockback pushes it out of blast range)
     if (d < 3.2 && inv.bestWeapon(bot) && now - lastAttackAt > 500 && canSee(t)) {
       bot.lookAt(t.position.offset(0, 1.2, 0), true).catch(() => {})
@@ -1306,7 +1395,7 @@ function tick () {
     else if (d >= 3.2 && !busy) runBusy('wall off', g => wallOff(t, g), 3500, 'creeper')
     else { bot.setControlState('forward', false); bot.setControlState('back', !pinned); bot.setControlState('sprint', false) }
     return
-  } else if (active && active.kind === 'creeper') return clearActive()
+  } else if (active && active.kind === 'creeper') { fightTarget = null; creeperFight = null; return clearActive() }
 
   // 4. THREAT - fight what can be fought, flee what cannot
   const melee = hs.filter(h => !NEVER_MELEE.has(h.e.name))
@@ -1503,7 +1592,7 @@ function install (b) {
     log('vital', `LAVA appeared at ${n.position.x},${n.position.y},${n.position.z} beside me with a lava bucket in hand${active ? ' (reflex ' + active.kind + ')' : ''} - a placing that must never happen`)
   })
   bot.on('goal_reached', () => { lastPath = null })
-  bot.on('physicsTick', () => { try { noteTakeoff(); edgeGuard() } catch (e) { log('reflex', 'edge guard error: ' + e.message) } })
+  bot.on('physicsTick', () => { try { noteTakeoff(); creeperStrike(); edgeGuard() } catch (e) { log('reflex', 'edge guard error: ' + e.message) } })
   // a fall's death names what took the body off the ground (the trail is 1/s: it can't - a fall off the cathedral's
   // north edge left no edge-guard line and no way to tell who was steering, 2026-09-25)
   bot.on('death', () => {

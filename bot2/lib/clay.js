@@ -644,7 +644,7 @@ async function drySand (bot, target, stop) {
   for (let legs = 0; balls(bot) < target && !stop();) {
     await reflex.waitClear()
     if (inv.freeSlots(bot) <= 1) { await base().tossJunk(bot); if (inv.freeSlots(bot) <= 1) return }
-    const seen = world.findBlocks(bot, K.re, { maxDistance: 64, count: 24, filter: b => !refused.has(k(b.position)) && !dugCols.has(col(b.position)) && drySought(bot, b.position) })
+    const seen = world.findBlocks(bot, K.re, { maxDistance: 64, count: 24, filter: b => !refused.has(k(b.position)) && !move.inForeign(b.position) && !dugCols.has(col(b.position)) && drySought(bot, b.position) })
     if (seen.length) {
       const me = bot.entity.position
       const b = seen.sort((x, y) => x.position.distanceTo(me) - y.position.distanceTo(me))[0]

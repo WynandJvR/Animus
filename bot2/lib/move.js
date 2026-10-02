@@ -102,10 +102,17 @@ function setProtector (fn) { protector = fn }
 // Is this block a finished cell of one of our builds? `purpose` 'walk' (the planner) or 'dig' (act.dig - the
 // one dig primitive asks this for every dig, so no caller can forget it). A throw is "not protected": a
 // broken protector must not freeze every walk.
+// And every block of someone else's place (foreign.js): not one broken by a walk or a dig, whatever the caller's force.
 function isProtected (block, purpose = 'walk') {
-  if (!protector || !block || !block.position) return false
+  if (!block || !block.position) return false
+  // (a place of the planner's own blocks while climbing out over their wall - foreign.overTheWall - is the one exception)
+  if (inForeign(block.position)) return !(purpose === 'fill' && climbingOutOfForeign())
+  if (!protector) return false
   try { return !!protector(block, purpose) } catch { return false }
 }
+
+function inForeign (p) { try { return !!require('./foreign').covers(p) } catch { return false } }
+function climbingOutOfForeign () { try { return require('./foreign').climbingOut() } catch { return false } }
 
 // Inside the safehouse walls (interior cells only)?
 function insideHut (p) {
@@ -168,6 +175,9 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
   m.getBlock = (pos, dx, dy, dz) => {
     const b = getBlock0(pos, dx, dy, dz)
     if (b && doorIds.has(b.type)) { b.safe = true; b.physical = false; b.replaceable = false; b.height = pos.y + dy }
+    // (an IRON door standing OPEN - a plate holds it - is a way through while it stands open: the gate of a walled base;
+    //  shut, it stays a wall - no hand opens it; foreign.byTheirGate, audit)
+    else if (b && b.name === 'iron_door' && (() => { try { return b.getProperties().open === true } catch { return false } })()) { b.safe = true; b.physical = false; b.replaceable = false; b.height = pos.y + dy }
     // (an OPEN trapdoor is no floor: a plate on its edge - planned on as ground, the walk stepped into the hole it hangs
     //  in, 2026-09-29. It is an EDGE, not a wall: the cell itself is room for the body - the plate stops only a step
     //  ACROSS it (panelEdges below, on the neighbours). Refused whole, the castle's double door whose two oak trapdoors
@@ -630,8 +640,10 @@ async function crossDoor (bot, goal) {
   const passed = Math.hypot(bot.entity.position.x - (exit.x + 0.5), bot.entity.position.z - (exit.z + 0.5)) < 0.9
   if (passed && isOpen()) { try { await bot.activateBlock(world.at(bot, d.x, d.y, d.z)) } catch {} } // close it behind us
   log('move', `door crossing ${passed ? 'done' : 'did not get through'}`)
+  lastCross = passed ? `${d.x},${d.y},${d.z}>${exit.x},${exit.z}` : null
   return passed
 }
+let lastCross = null // the last crossing that got through: door > exit (goTo counts repeats - a crossing is progress once)
 
 // goTo(goal): the one way to walk somewhere nearby (<~100 blocks). Retries through reflex
 // interruptions and short stalls. Returns {ok, why}.
@@ -724,6 +736,7 @@ async function goToInner2 (bot, goal, opts, { timeoutMs, stuckMs, dig, place, al
   const deadline = Date.now() + timeoutMs
   const cancelled = control.token()
   let fails = 0
+  const crossed = new Map() // door crossings this walk (see the stall branch)
   let interrupts = 0
   let instant = 0
   while (Date.now() < deadline) {
@@ -757,7 +770,13 @@ async function goToInner2 (bot, goal, opts, { timeoutMs, stuckMs, dig, place, al
     if (r.why === 'timeout') return r
     fails++
     // a stall next to a door is a door the planner would not open: cross it by hand
-    if (await crossDoor(bot, goal).catch(e => { log('move', `door crossing threw: ${e.message}`); return false })) { fails = 0; continue }
+    // (a crossing is progress ONCE: the same door crossed the same way again in one walk is the stall beyond it, not the door
+    //  - "crossing done" every 12s for a minute at a castle door over a pit, the walk's fails reset each time, 2026-10-02)
+    if (await crossDoor(bot, goal).catch(e => { log('move', `door crossing threw: ${e.message}`); return false })) {
+      const n = (crossed.get(lastCross) || 0) + 1; crossed.set(lastCross, n)
+      if (n === 1) { fails = 0; continue }
+      if (n === 2) log('move', `${label}: through the door ${lastCross.split('>')[0]} the same way again - the stall is past it, not at it`)
+    }
     if (fails >= 3) {
       // (what the body was holding when it gave up - the goal, the planner, the keys, the reflex: sealed in the hollow, every
       //  walk "stuck x3" for five minutes and one pause/resume later the same walk went straight out; something was stale,
@@ -1343,4 +1362,4 @@ async function travel (bot, target, opts = {}) {
   return { ok: false, why: 'timeout' }
 }
 
-module.exports = { buried, legPoint, escapeUp, isVerdict, underBuild, underZone, crossDoor, goals, bindReflex, bindBot, setZone, setZones, inZone, zones, utilitySpotOK, insideHut, setProtector, isProtected, surface, isUnderground, surfaceYHere, movementsFor, goTo, goNear, travel, stopMoving, runGoal, sleep, fmt, waitReflex }
+module.exports = { buried, legPoint, escapeUp, isVerdict, underBuild, underZone, inForeign, crossDoor, goals, bindReflex, bindBot, setZone, setZones, inZone, zones, utilitySpotOK, insideHut, setProtector, isProtected, surface, isUnderground, surfaceYHere, movementsFor, goTo, goNear, travel, stopMoving, runGoal, sleep, fmt, waitReflex }

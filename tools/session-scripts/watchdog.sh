@@ -57,6 +57,8 @@ while true; do
   recent 30 | grep -aq "build step: placed [1-9]" && last_change=$now
   # (away on an expedition the castle waits by design - its wood is what the trip fetches: not "stuck")
   exp=$(node -e 'try{console.log(require("C:/mc-bot-lab/bot2/memory.json").expedition?1:0)}catch{console.log(0)}'); [ "$exp" = 1 ] && last_change=$now
+  # (and far from home - a respawn across the map walking back: the build's count cannot move from there, 2026-10-02)
+  far=$(echo "$st" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const j=JSON.parse(s);const [x,,z]=j.pos.split(',').map(Number);console.log(j.home&&Math.hypot(x-j.home.x,z-j.home.z)>200?1:0)}catch{console.log(0)}})"); [ "$far" = 1 ] && last_change=$now
   tod=$(echo "$st" | grep -o '"tod":[0-9]*' | cut -d: -f2)
   if [ $((now - last_change)) -gt 1800 ]; then echo "ALARM: build stuck at $cur for $(( (now-last_change)/60 )) min"; exit 0; fi
   if [ $((now - start)) -gt 3600 ]; then echo "HEARTBEAT: 60 min, build $cur, deaths/60m $(recent 60 | grep -ac '(death) died')"; exit 0; fi

@@ -35,9 +35,10 @@ function reach (bot, pos, r = 4.3) {
 // castle wall, 2026-09). `own` is the builder replacing a wrong block in its own cell - the only opt-out.
 const refusedAt = new Map() // pos key -> last log time (a caller retrying a protected block logs once a minute)
 function guarded (bot, b, own) {
-  if (own || !move.isProtected(b, 'dig')) return false
+  const foreign = move.inForeign(b.position) // (someone else's place: no `own` reaches into it - foreign.js)
+  if (!foreign && (own || !move.isProtected(b, 'dig'))) return false
   const k = `${b.position.x},${b.position.y},${b.position.z}`
-  if (Date.now() - (refusedAt.get(k) || 0) > 60000) { refusedAt.set(k, Date.now()); log('act', `won't dig ${b.name} at ${k} - a finished block of a build`) }
+  if (Date.now() - (refusedAt.get(k) || 0) > 60000) { refusedAt.set(k, Date.now()); log('act', `won't dig ${b.name} at ${k} - ${foreign ? "someone else's place" : 'a finished block of a build'}`) }
   return true
 }
 
@@ -55,6 +56,7 @@ async function digBlock (bot, b, { own = false } = {}) {
 // Why dig would refuse a block (null: it would not) - the ONE list, asked by dig itself and by anything that queues digs
 // ahead (the groundwork: a job it can never do loops for ever - audit #9, 2026-09-27)
 function digRefusal (bot, b, { force = false, own = false, allowZones = [] } = {}) {
+  if (move.inForeign(b.position)) return "someone else's place"
   if (!own && move.isProtected(b, 'dig')) return 'a finished cell of the build' // (pure: a scan asking must not log per cell)
   if (!force && !world.NATURAL_RE.test(b.name)) return `crafted ${b.name}`
   const z = move.inZone(b.position)
@@ -77,7 +79,7 @@ async function dig (bot, pos, { force = false, own = false, allowZones = [], tim
   //  without a swing, the route died and every reef sighting reopened it, 2026-09-27)
   const nothing = x => !x || /^(air|cave_air|void_air)$/.test(x.name) || world.isLiquidWater(x) || world.isLavaBlock(x)
   if (nothing(b)) return true
-  if (guarded(bot, b, own)) { lastDigWhy = 'a finished cell of the build'; return false } // (logs, rate-limited per cell)
+  if (guarded(bot, b, own)) { lastDigWhy = move.inForeign(b.position) ? "someone else's place" : 'a finished cell of the build'; return false } // (logs, rate-limited per cell)
   { const why = digRefusal(bot, b, { force, own, allowZones }); if (why) { lastDigWhy = why; if (why !== 'unbreakable') log('act', `won't dig ${b.name} at ${move.fmt(pos)} - ${why}`); return false } }
   const t0 = Date.now()
   const cancelled = control.token()
@@ -239,6 +241,7 @@ async function place (bot, pos, itemName, { faceHint = null, plans = null, accep
   if (tall && !twin) twin = [0, 1, 0]
   const target = new Vec3(pos.x, pos.y, pos.z)
   if (hotInOurCell(bot, pos, itemName)) { log('act', `won't place ${itemName} at ${move.fmt(pos)} - it would burn under my own feet`); return false }
+  if (move.inForeign(pos)) { log('act', `won't place ${itemName} at ${move.fmt(pos)} - someone else's place`); return false }
   const placed = accept || (b => b.name === itemName)
   const cur = bot.blockAt(target)
   if (cur && placed(cur)) return true
@@ -334,6 +337,7 @@ async function place (bot, pos, itemName, { faceHint = null, plans = null, accep
 // The one right-click on a block for every caller: a raw activateBlock while the edge guard held sneak was a sneaking
 // click - shears on a pumpkin or a nest and a composter's layer came to "+0" (2026-09-27).
 async function useOn (bot, pos, itemName, { accept, face = 'up', allowZones = [], timeoutMs = 15000, noWalk = false, yaw = null } = {}) {
+  if (move.inForeign(pos)) { log('act', `won't use ${itemName} on ${move.fmt(pos)} - someone else's place`); return false } // (their composter, their bee nest: foreign.js)
   const target = new Vec3(pos.x, pos.y, pos.z)
   const t0 = Date.now()
   const cancelled = control.token()
@@ -389,6 +393,7 @@ async function useOn (bot, pos, itemName, { accept, face = 'up', allowZones = []
 // The eye must be on the cell's side of that face: from behind it the ray meets another face first and the water lands
 // somewhere else - inside the build, on the crops (2026-09-27). A face we stand behind is no plan.
 async function pour (bot, pos, itemName, { plans, accept, allowZones = [], timeoutMs = 15000, noWalk = false } = {}) {
+  if (move.inForeign(pos)) { log('act', `won't pour ${itemName} at ${move.fmt(pos)} - someone else's place`); return false }
   const target = new Vec3(pos.x, pos.y, pos.z)
   const t0 = Date.now()
   const cancelled = control.token()
@@ -452,6 +457,7 @@ async function pour (bot, pos, itemName, { plans, accept, allowZones = [], timeo
 // to by this - its gatherer stands the bot on its own chosen ground first and passes noWalk.
 async function fill (bot, pos, { allowZones = [], timeoutMs = 12000, noWalk = false, liquid = 'water' } = {}) {
   if (liquid !== 'water' && liquid !== 'lava') throw new Error(`fill: no bucket of ${liquid}`)
+  if (move.inForeign(pos)) { log('act', `won't take the ${liquid} at ${move.fmt(pos)} - someone else's place`); return false }
   const full = liquid + '_bucket'
   if (liquid === 'lava') noWalk = true
   const target = new Vec3(pos.x, pos.y, pos.z)

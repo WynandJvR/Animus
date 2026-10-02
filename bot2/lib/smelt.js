@@ -37,7 +37,7 @@ function inputFor (bot, output, count = 1) {
 }
 
 function furnacesNear (bot, maxDist = 32) {
-  return world.findBlocks(bot, /^furnace$/, { maxDistance: maxDist, count: 64 })
+  return world.findBlocks(bot, /^furnace$/, { maxDistance: maxDist, count: 64, filter: b => !move.inForeign(b.position) }) // (never someone else's: its output is theirs - foreign.js)
 }
 // THE home furnaces: every furnace round home out to the furnace bank's last ring (hut.furnaceSpots: ring k is 2k out
 // from the room, six rings). One definition - three lookups with three radii and counts (16/24, 16/32, 48/12) left

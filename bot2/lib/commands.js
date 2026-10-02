@@ -99,6 +99,9 @@ function make (bot, director) {
       case 'task': { director.setPaused(false); return director.forceTask(a[0]) ? `next task: ${a[0]}` : 'unknown task: ' + Object.keys(director.TASKS).join(', ') }
       case 'ensure': case 'obtain': return exclusive('ensure', async () => { const ok = await craft.ensure(bot, a[0], num(1, 1)); return `ensure ${a[0]}: ${ok ? 'ok' : 'failed'} (holding ${inv.count(bot, a[0])})` })
       case 'goto': return exclusive('goto', async () => { const r = await move.travel(bot, { x: num(0), y: num(1), z: num(2) }, { range: 2, underground: true }); return `goto: ${r.ok ? 'arrived' : r.why}` })
+      // walk x z [range] - the operator's hands-off walk: no block broken, none placed (out of someone else's base)
+      // walk3 x y z [range] - the same to a block (a goal by x/z alone wanders the tunnels under it)
+      case 'walk': case 'walk3': return exclusive('walk', async () => { const r = await move.goTo(bot, cmd === 'walk3' ? new goals.GoalNear(num(0), num(1), num(2), num(3, 2)) : new goals.GoalNearXZ(num(0), num(1), num(2, 3)), { timeoutMs: 120000, stuckMs: 15000, dig: false, place: false, label: 'walk (no dig)' }); return `walk: ${r.ok ? 'arrived' : r.why} at ${move.fmt(bot.entity.position)}` })
       case 'home': return exclusive('home', async () => { const r = await base.goHome(bot); return `home: ${r.ok ? 'arrived' : r.why}` })
       case 'sethome': {
         const p = a.length >= 3 ? { x: num(0), y: num(1), z: num(2) } : world.feetPos(bot)
@@ -118,7 +121,7 @@ function make (bot, director) {
         return `queued the hole at ${x},${y},${z} to be capped`
       }
       case 'unmark': { // unmark <flag> - clear a remembered verdict the bot reached wrongly (a dusk-cut trip marked iron "dry")
-        const OK = ['ironTripDry', 'buildWaiting', 'wantBoat']
+        const OK = ['ironTripDry', 'buildWaiting', 'wantBoat', 'spawnSetAt'] // (spawnSetAt: the respawn moved before the bot could see it - another player slept on the account)
         if (!OK.includes(a[0])) return `usage: unmark ${OK.join('|')}`
         mem.set(a[0], null); return `${a[0]} cleared`
       }

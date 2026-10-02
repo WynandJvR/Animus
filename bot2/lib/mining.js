@@ -489,7 +489,7 @@ async function takeKnownOre (bot, itemName, target, ctx = {}) {
     if (inv.freeSlots(bot) <= 2) await base().tossJunk(bot)
     // (ctx.near {point, radius}, ctx.oreFilter: a trip started at one outcrop works that outcrop - its vein and the rock-face
     //  coal round it - never the next-nearest ore anywhere in 64, a 40-block dig down from a hillside; audit 2026-09-28)
-    const ores = await world.scanBlocks(bot, g.blocks, { maxDistance: ctx.near ? ctx.near.radius : 64, count: 60, point: ctx.near ? ctx.near.point : home, filter: b => !refused.has(k(b.position)) && inv.canHarvest(bot, b) && !fluidAround(bot, b.position) && !move.inZone(b.position, 2) && !gather.onGrounds(b.position) && !underBuild(b.position) && (!ctx.oreFilter || ctx.oreFilter(b)) })
+    const ores = await world.scanBlocks(bot, g.blocks, { maxDistance: ctx.near ? ctx.near.radius : 64, count: 60, point: ctx.near ? ctx.near.point : home, filter: b => !refused.has(k(b.position)) && !move.inForeign(b.position) && inv.canHarvest(bot, b) && !fluidAround(bot, b.position) && !move.inZone(b.position, 2) && !gather.onGrounds(b.position) && !underBuild(b.position) && (!ctx.oreFilter || ctx.oreFilter(b)) })
     if (!ores.length) break
     const me = bot.entity.position
     const o = ores.sort((x, y) => world.dist3(x.position, me) - world.dist3(y.position, me))[0]

@@ -32,6 +32,7 @@ const boat = require('./boat')
 const orchard = require('./orchard')
 const pen = require('./pen')
 const litter = require('./litter')
+const foreign = require('./foreign')
 let litterSeeded = false // (the pillars from before the ledger: looked for once a run, once the orchard's zone is set)
 // (before EITHER tidy rung counts: called from the castle's-gap rung only, it never ran - the castle always has work, and
 //  the tidies came from the before-the-castle rung; the stairs the operator asked about stood on, forgotten, 2026-09-30)
@@ -305,11 +306,14 @@ function chooseHome () {
     const cx = (box.x1 + box.x2) / 2; const cz = (box.z1 + box.z2) / 2
     const half = Math.max(box.x2 - box.x1, box.z2 - box.z1) / 2
     const cands = []
-    for (let r = half + 9; r <= half + 22; r += 2) {
+    // (someone else's place round the site: the ring widens past it rather than finding no home at all - audit)
+    let skipped = 0
+    for (let r = half + 9; r <= half + 22 || (!cands.length && skipped && r <= half + 120); r += 2) {
       for (let a = 0; a < 32; a++) {
         const x = Math.round(cx + Math.cos(a * Math.PI / 16) * r); const z = Math.round(cz + Math.sin(a * Math.PI / 16) * r)
         // the hut (home +-3) must stand at least 4 blocks clear of the footprint: home >= 8 outside it
         if (x >= box.x1 - 8 && x <= box.x2 + 8 && z >= box.z1 - 8 && z <= box.z2 + 8) continue
+        if (foreign.near({ x, z }, foreign.HOME_GROUNDS + foreign.PAD)) { skipped++; continue } // (never beside someone else's place: foreign.js)
         const s = siteScore(x, z, box.y1)
         if (s) cands.push(Object.assign(s, { score: s.flat * 2 - s.dy * 3 - (r - half) * 0.5 }))
       }
@@ -319,6 +323,8 @@ function chooseHome () {
     return null // site not loaded yet - go there first
   }
   const me = world.feetPos(bot)
+  // (a home beside someone else's place makes their base "home grounds" - and their chests ours: not here; audit)
+  if (foreign.near(me, foreign.HOME_GROUNDS + foreign.PAD)) { log('dir', `no home here - someone else's place is within ${foreign.HOME_GROUNDS} blocks`); return null }
   return siteScore(me.x, me.z, me.y) || me
 }
 
@@ -360,6 +366,13 @@ function decide () {
   const bed = mem.get().bed
 
   if (override) return { name: override, why: 'operator' }
+
+  // standing in someone else's place (a respawn at a bed of theirs, a walk that wandered in): out of it before anything
+  // else, on our legs alone - and with no such way out, nothing at all: every other task digs, fells or builds (foreign.js)
+  if (foreign.covers(world.feetPos(bot))) {
+    if (!held('leaveForeign')) return { name: 'leaveForeign', why: "inside someone else's place - walking out, nothing broken or placed" }
+    return { name: 'idle', why: "inside someone else's place and no way out that breaks nothing - waiting" }
+  }
 
   // a bed standing in the safehouse is our bed, whoever put it there
   if (!bed && mem.get().hutPlan) {
@@ -447,6 +460,13 @@ function decide () {
   const graveCovered = g0 => Object.values(bot.entities).some(e => e && e.position && ((reflex.RANGED.has(e.name) && e.position.distanceTo(g0) < 20) || (e.name === 'creeper' && e.position.distanceTo(g0) < 12)))
   if (g && !held('grave') && (inv.bestWeapon(bot) || world.dist3(g, bot.entity.position) < 10) && !graveCovered(g)) return { name: 'grave', why: `grave ${Math.round(world.dist2(g, bot.entity.position))}b away with ${g.items} items` }
 
+  // 2a. our bed is not our spawn (another player slept on the account; the bed was moved): used by day, at once - a death
+  //     sent the bot to someone else's base 1500 blocks from its grave while it waited for night (2026-10-02)
+  {
+    const b = mem.get().bed; const s = mem.get().spawnSetAt
+    if (b && !(s && s.x === b.x && s.y === b.y && s.z === b.z) && world.dist2(b, bot.entity.position) < 96 && !tooHurt() && !held('setSpawn')) return { name: 'setSpawn', why: 'my respawn point is not at my bed - setting it there' }
+  }
+
   // 2b. carrying the base's furniture while standing at a finished safehouse: seconds of work that
   //     anchor spawn (a bed) and store the haul - before anything that is not an emergency
   if (home && dHome < 48 && bot.food > 8 && hut.shellComplete(bot) && furnishingInPack().length && !held('furnish')) return { name: 'furnish', why: `putting ${furnishingInPack().join(', ')} in the safehouse` }
@@ -472,7 +492,8 @@ function decide () {
   if (!bed && !shelter.hasBedItem(bot) && world.phase(bot) === 'day' && bedObtainable() && !held('bed')) return { name: 'bed', why: 'no bed - getting one to carry (spawn is where i sleep)' }
 
   // 5. home
-  if (!home) return { name: 'setHome', why: 'no home yet' }
+  // (no home: setHome, or - while it cools after a failure - nothing; every task below assumes a home; audit)
+  if (!home) return held('setHome') ? { name: 'idle', why: 'no home yet - choosing one again shortly' } : { name: 'setHome', why: 'no home yet' }
   if (dHome < 160 && hut.siteGone(bot) && !held('abandonHome')) return { name: 'abandonHome', why: `the ground under the home at ${move.fmt(home)} is gone - choosing a new home` }
   // (in our own mine is at work, not astray: a staircase from y113 to y16 runs ~100 blocks out, and the face 116 blocks
   //  from home sent the bot home every time a mining task returned - a pickaxe worn out, a batch done - 2026-09-24)
@@ -930,7 +951,21 @@ const TASKS = {
       const r = await move.travel(bot, { x: j.origin.x - 8, y: j.origin.y, z: j.origin.z - 8 }, { range: 12, shouldStop: homewardStop, label: 'to build site' })
       if (!r.ok) return false
     }
-    const h = chooseHome()
+    let h = chooseHome()
+    // no build to go to and someone else's place too near to settle: walk away from it, out past its grounds, and look there
+    // (refused in place, the bot stood beside a village retrying for ever; audit)
+    const fb = !h && !j && foreign.near(world.feetPos(bot), foreign.HOME_GROUNDS + foreign.PAD)
+    if (fb) {
+      const me = bot.entity.position
+      const cx = (fb.x1 + fb.x2) / 2; const cz = (fb.z1 + fb.z2) / 2
+      const ang = Math.atan2(me.z - cz, me.x - cx)
+      const out = Math.max(fb.x2 - fb.x1, fb.z2 - fb.z1) / 2 + foreign.HOME_GROUNDS + foreign.PAD + 16
+      const to = { x: Math.round(cx + Math.cos(ang) * out), y: Math.floor(me.y), z: Math.round(cz + Math.sin(ang) * out) }
+      log('dir', `no home beside someone else's place - walking out past its grounds to ${to.x},${to.z}`)
+      const r = await move.travel(bot, to, { range: 8, anyY: true, shouldStop: homewardStop, label: 'away from their place' })
+      if (!r.ok) return false
+      h = chooseHome()
+    }
     if (!h) return false
     base.setHome(h)
     baseZone()
@@ -1033,6 +1068,8 @@ const TASKS = {
   },
   async castle () { return castleWork() },
   async idle () { await move.sleep(5000); return true },
+  async setSpawn () { return shelter.setSpawnAtBed(bot, { shouldStop: () => taskCancelled() }) },
+  async leaveForeign () { return foreign.leave(bot, { shouldStop: () => taskCancelled() }) },
   async ashore () {
     // the nearest ground in sight; none loaded: on toward the site (or home) - the crossing lands on the way there
     const j = build.getJob()
@@ -1652,6 +1689,7 @@ async function loop () {
   for (;;) {
     try {
       if (!bot.entity || bot.health <= 0 || paused) { current = null; await move.sleep(1000); continue }
+      if (!foreign.looked()) { await move.sleep(300); continue } // (a spawn: someone else's place round us known first - foreign.js)
       await reflex.waitClear()
       try { await opportunisticHunt() } catch (e) { log('dir', 'hunt threw: ' + e.message) }
       watchNights(); watchExpedition()
@@ -1712,7 +1750,10 @@ async function start (b) {
   orchard.setZone()
   pen.setZone()
   const bj = mem.get().build
-  if (bj) { try { await build.setJob(bot, bj.name, bj.origin, { exactWood: bj.exactWood === true }) } catch (e) { log('dir', `couldn't load build ${bj.name}: ${e.message}`) } } // (jobs saved before the wood rule: any wood, as they were built)
+  if (bj) { try { await build.setJob(bot, bj.name, bj.origin, { exactWood: bj.exactWood === true }) } catch (e) { log('dir', `couldn't load build ${bj.name}: ${e.message}`) } }
+  // someone else's place round us, known before the first decision - judged once our own build and zones are known (before
+  // them, the castle's far side read as someone else's; audit). Then on its own beat
+  try { foreign.start(bot); await foreign.scan() } catch (e) { log('foreign', 'start threw: ' + e.message) } // (jobs saved before the wood rule: any wood, as they were built)
   loop()
 }
 

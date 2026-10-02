@@ -184,6 +184,34 @@ async function sleepInBed (bot, { shouldStop } = {}) {
   return true
 }
 
+// THE SPAWN IS SET AT THE BED BY DAY TOO: a bed used in daylight answers "Respawn point set" - no night needed. The
+// spawn moved to another player's bed (the operator played the account) and the bot waited for a night it never reached
+// in time; a death sent it 1500 blocks from its grave, to their base (2026-10-02). Used, and the server's answer heard.
+async function setSpawnAtBed (bot, { shouldStop } = {}) {
+  let bed = bedBlock(bot)
+  if (!bed) return false
+  if (move.insideHut(bed.position) && !move.insideHut(world.feetPos(bot))) {
+    if (!await require('./hut').enterHut(bot, { shouldStop })) return false
+  }
+  const r = await move.goTo(bot, new goals.GoalNear(bed.position.x, bed.position.y, bed.position.z, 2), { timeoutMs: 90000, label: 'to bed', allowZones: ['base', 'build'] })
+  if (!r.ok) return false
+  bed = bedBlock(bot)
+  if (!bed) return false
+  await reflex.waitClear()
+  let heard = null
+  const onMsg = (m, pos) => { const s = String(m && m.toString ? m.toString() : m); if (/respawn point set|set_spawn/i.test(s) || /respawn point set/i.test(JSON.stringify(m && m.json || ''))) heard = s }
+  bot.on('message', onMsg)
+  try {
+    await bot.activateBlock(bed).catch(() => {})
+    for (let i = 0; i < 20 && !heard; i++) await move.sleep(100)
+  } finally { bot.removeListener('message', onMsg) }
+  if (bot.isSleeping) { try { await bot.wake() } catch {} }
+  if (!heard) { log('shelter', `used my bed at ${move.fmt(bed.position)} - no word of the respawn point from the server`); return false }
+  mem.update(m => { m.spawnSetAt = m.bed })
+  log('shelter', `respawn point set at my bed ${move.fmt(bed.position)}`)
+  return true
+}
+
 // Dig a 1x1 pit 2 deep where we stand (dry ground) and put a block over our head. Wait for day.
 function enclosedHere (bot) {
   const me = world.feetPos(bot)
@@ -345,4 +373,4 @@ async function bunker (bot, { shouldStop } = {}) {
   return true
 }
 
-module.exports = { enclosedHere, bedBlock, hasBedItem, obtainBed, placeBed, placeBedAt, sleepInBed, bunker, morning, waitForDay }
+module.exports = { setSpawnAtBed, enclosedHere, bedBlock, hasBedItem, obtainBed, placeBed, placeBedAt, sleepInBed, bunker, morning, waitForDay }

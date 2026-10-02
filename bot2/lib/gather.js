@@ -51,7 +51,11 @@ function knownResource (kind, from, { maxFromHome = 200, filter = null } = {}) {
 
 // Not in a protected zone - and not in the ground under one either: stone under the basilica was picked, refused by
 // the dig, and picked again every 20s for minutes (2026-09-23). A zone's columns are off limits to the depth.
-function outOfZones (b) { return !move.inZone(b.position, 2) && !move.inZone({ x: b.position.x, y: b.position.y + 12, z: b.position.z }, 1) }
+// (nor in someone else's place: the yard's oak at another player's base was felled, and a chop walked back in for it - foreign.js)
+function outOfZones (b) { return !move.inZone(b.position, 2) && !move.inZone({ x: b.position.x, y: b.position.y + 12, z: b.position.z }, 1) && !foreignColumn(b.position) }
+// (a tree is one thing: any of its trunk inside someone else's place keeps the whole tree out - the two logs under a
+//  place's floor were taken from a tree whose top it refused, 2026-10-02)
+function foreignColumn (p) { for (let dy = -2; dy <= 8; dy++) if (move.inForeign({ x: p.x, y: p.y + dy, z: p.z })) return true; return false }
 // A tree the orchard grew: ours to cut (and replant). Every other zone keeps the axe out; the orchard's zone kept it out
 // of its own trees too - "chop oak_log: no trees found" beside three grown ones, two sticks never made (2026-09-24).
 function orchardTree (b) { const z = move.inZone(b.position, 0); return !!z && z.label === 'orchard' && !move.inZone(b.position, 2, ['orchard']) }

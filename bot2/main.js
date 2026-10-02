@@ -120,6 +120,11 @@ function installSupportGuard () {
         throw new Error('support guard: that block holds me up over a drop')
       }
     }
+    // (and no block of someone else's place, whoever asks: foreign.js - the last door every dig passes)
+    if (block && block.position && move.inForeign(block.position)) {
+      log('act', `refused to dig ${block.name} at ${move.fmt(block.position)}: someone else's place (asked by ${caller})`)
+      throw new Error("foreign guard: someone else's place")
+    }
     lastDig = { at: Date.now(), name: block && block.name, pos: block && block.position && move.fmt(block.position), caller }
     return orig(block, ...rest)
   }
@@ -206,6 +211,18 @@ bot.once('spawn', async () => {
 })
 
 bot.on('respawn', () => log('boot', 'respawned'))
+// (where a death put us back says where the spawn IS: away from our bed, the bed is not our spawn - another player slept
+//  on the account, or the bed was broken; the director sets it again by day - shelter.setSpawnAtBed)
+let diedAt = 0
+bot.on('death', () => { diedAt = Date.now() })
+bot.on('spawn', () => {
+  if (!diedAt || Date.now() - diedAt > 30000 || !bot.entity) return
+  diedAt = 0
+  try {
+    const m = mem.get(); const p = bot.entity.position
+    if (m.bed && Math.hypot(p.x - m.bed.x, p.z - m.bed.z) > 6 && m.spawnSetAt) { log('boot', `respawned at ${move.fmt(p)}, not at my bed ${move.fmt(m.bed)} - my spawn is elsewhere; set again at the bed`); mem.set('spawnSetAt', null) }
+  } catch {}
+})
 bot.on('spawn', () => { if (started) log('boot', `spawn at ${bot.entity ? move.fmt(bot.entity.position) : '?'} hp ${bot.health}`) })
 bot.on('death', () => { move.stopMoving(bot); try { require('./lib/control').abort() } catch {} }) // a death ends the task it interrupted (a mine task walked the respawn straight back to the mine face)
 // a big hit says what it was: the trek lost 14 hp above y100 with nothing in the log to say how (2026-09-27)
