@@ -1097,6 +1097,9 @@ async function walkReach (bot) {
   }
   // (SHUT IN - no cell of the set outside the build: every stand reads out of reach, no walk is made, and the walker's own
   //  escapes never run. Unknown, said once: the walks go and the escape gets its chance; audit)
+  // (and PERCHED - a handful of cells: the top of a scaffold pillar on the rim, every side a drop; the site walk climbs down
+  //  on its own blocks, which a walk-only search cannot see - a set of one held 11 cells, 2026-10-02: unknown too)
+  if (!capped && cells.size < 50) { reach = null; return null }
   if (!capped && ![...cells].some(k => { const [x, , z] = k.split(',').map(Number); return x < b.x1 || x > b.x2 || z < b.z1 || z > b.z2 })) {
     if (Date.now() - shutSaid > 60000) { shutSaid = Date.now(); log('build', `walk reach: shut in at ${move.fmt(f)} (${cells.size} cells, none outside the build) - stands unknown, the walks go`) }
     reach = null; return null
