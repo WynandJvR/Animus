@@ -21,6 +21,9 @@ const SCORE = 4 // a place: two furnishings, or one and two lights...
 const PAD = 8 // ...and the ground round it out to here, below it as deep
 const ROOF = 12 // and above its top sign this far (a house's roof, the yard's trees - never a column to the sky over a cave)
 const HOME_GROUNDS = 64 // round home: our own work (a base being set up there is judged by the strict rules below)
+// (our own work further out - the mine's lamps, the orchard's - placed before the ledger kept them: ownAreas, taken once
+//  from the places that stood over them, 2026-10-02 - 34 refusals in its own tunnels and planting rows; audit)
+const ADOPT_R = 128
 const SCAN_R = 64
 const EVERY_MS = 8000
 const FAR = 512 // a place this far from home and from us is forgotten (seen again, found again)
@@ -53,6 +56,9 @@ function oursByRecord (p) {
   if (bb && p.x >= bb.x1 && p.x <= bb.x2 && p.z >= bb.z1 && p.z <= bb.z2) return true
   try { if (require('./move').inZone(p, 4)) return true } catch {}
   try { const b = require('./mining').mineBox(m.mine); if (b && p.x >= b.x1 - 4 && p.x <= b.x2 + 4 && p.z >= b.z1 - 4 && p.z <= b.z2 + 4 && p.y >= b.y1 - 4 && p.y <= b.y2 + 4) return true } catch {}
+  // (every sign we placed ourselves - a torch, a table, a chest, a door - wherever it stands: noteOwn)
+  if (ownSet().has(`${p.x},${p.y},${p.z}`)) return true
+  if ((m.ownAreas || []).some(a => p.x >= a.x1 && p.x <= a.x2 && p.z >= a.z1 && p.z <= a.z2 && p.y >= a.y1 && p.y <= a.y2)) return true
   const close = q => q && Math.abs(q.x - p.x) <= 3 && Math.abs(q.y - p.y) <= 3 && Math.abs(q.z - p.z) <= 3
   for (const k of ['tables', 'furnaces', 'chests']) if ((m[k] || []).some(close)) return true
   return !!(close(m.bed) || close(m.bunker))
@@ -67,6 +73,21 @@ function ours (p, known = boxes()) {
   return !known.some(b => inBox(p, b))
 }
 const inBox = (p, b) => p.x >= b.x1 && p.x <= b.x2 && p.z >= b.z1 && p.z <= b.z2 && p.y >= b.y1 && p.y <= b.y2
+
+// OUR OWN HAND, as it happens: a sign of a player's hand placed by us is ours wherever it stands (a field table, the mine's
+// torches, the lamps on the paths) - the ledger the rules above miss (audit; 2026-10-02)
+const OWN_MAX = 4000
+let ownCache = null; let ownCacheFrom = null
+function ownSet () { const l = mem.get().ownMarks || []; if (ownCacheFrom !== l || !ownCache || ownCache.size !== l.length) { ownCache = new Set(l); ownCacheFrom = l } return ownCache } // (a Set: ours() asks it for every sign a scan sees)
+function noteOwn (p, name) {
+  if (!p || !name || !MARK_RE.test(name)) return
+  const q = { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) }
+  if (oursByRecord(q)) return // (ours already - the build's own windows and doors would push the field's marks out; audit)
+  const k = `${q.x},${q.y},${q.z}`
+  if (ownSet().has(k)) return
+  const l = (mem.get().ownMarks || []).concat([k]).slice(-OWN_MAX)
+  mem.set('ownMarks', l)
+}
 
 // The signs in sight, grouped into places: [{x1..z2 (the box), sx1..sz2 (the signs' own extent), score, signs}]
 // (pure: offline tests)
@@ -156,6 +177,18 @@ function start (b) {
   bot = b
   if (timer) return
   // (records from before the signs' extent was kept: the extent read back off the box)
+  // (ONCE: the places standing over our own work from before the ledger - its signs within ADOPT_R of home - become our own
+  //  areas by their signs' extent, and the places go; after this the ledger says what is ours)
+  if (!mem.get().ownAreasTaken) {
+    const h = mem.get().home; const bs = boxes()
+    const mine = bs.filter(x => h && x.sx1 != null && Math.hypot((x.sx1 + x.sx2) / 2 - h.x, (x.sz1 + x.sz2) / 2 - h.z) <= ADOPT_R)
+    if (mine.length) {
+      mem.set('ownAreas', (mem.get().ownAreas || []).concat(mine.map(x => ({ x1: x.sx1 - 2, x2: x.sx2 + 2, y1: x.sy1 - 2, y2: x.sy2 + 2, z1: x.sz1 - 2, z2: x.sz2 + 2 }))))
+      mem.set('foreignBases', bs.filter(x => !mine.includes(x)))
+      log('foreign', `${mine.length} place(s) over my own work round home taken as my own areas (placed before the ledger)`)
+    }
+    mem.set('ownAreasTaken', true)
+  }
   const old = boxes()
   if (old.some(x => x.sx1 == null)) mem.set('foreignBases', old.map(x => x.sx1 != null ? x : Object.assign({}, x, { sx1: x.x1 + PAD, sx2: x.x2 - PAD, sz1: x.z1 + PAD, sz2: x.z2 - PAD, sy1: x.y1 + PAD, sy2: x.y1 + PAD, y2: x.y1 + PAD + ROOF })))
   const tick = async () => { await scan(); timer = setTimeout(tick, EVERY_MS) }
@@ -287,4 +320,4 @@ function notePlaced (pos) { if (placedHook) placedHook(pos) }
 // before the look - a far place was forgotten by distance, and the first task dug before the scan ran; 10s at most)
 function looked () { return doneFrom > spawnedAt || Date.now() - spawnedAt > 15000 }
 
-module.exports = { climbingOut, notePlaced, looked, start, scan, covers, near, ours, cluster, union, seenWhole, leave, MARK_RE, PAD, HOME_GROUNDS }
+module.exports = { noteOwn, climbingOut, notePlaced, looked, start, scan, covers, near, ours, cluster, union, seenWhole, leave, MARK_RE, PAD, HOME_GROUNDS }

@@ -321,7 +321,7 @@ async function place (bot, pos, itemName, { faceHint = null, plans = null, accep
     for (let w = 0; w < 6; w++) {
       await sleep(150)
       const after = bot.blockAt(target)
-      if (after && placed(after)) return true
+      if (after && placed(after)) { try { const fg = require('./foreign'); fg.noteOwn(target, after.name); if (twin) { const t2 = target.offset(twin[0], twin[1], twin[2]); const b2 = bot.blockAt(t2); if (b2) fg.noteOwn(t2, b2.name) } } catch {} return true } // (our own hand, both halves of a door or a bed - foreign.noteOwn)
     }
     tries++
   }
