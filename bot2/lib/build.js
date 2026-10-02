@@ -1079,7 +1079,10 @@ async function walkReach (bot) {
   rw.standable = (x, y, z) => { const k = x + ',' + y + ',' + z; let v = stM.get(k); if (v === undefined) { v = st0(x, y, z); stM.set(k, v) } return v }
   const W = rooms.walkModel(rw, () => false, { opens: true }); const b = job.box
   const inArea = q => q.x >= b.x1 - REACH_MARGIN && q.x <= b.x2 + REACH_MARGIN && q.z >= b.z1 - REACH_MARGIN && q.z <= b.z2 + REACH_MARGIN
-  const start = [0, -1, 1].map(dy => ({ x: f.x, y: f.y + dy, z: f.z })).find(q => W.st(q.x, q.y, q.z)) || { x: f.x, y: f.y, z: f.z }
+  const start = [0, -1, 1].map(dy => ({ x: f.x, y: f.y + dy, z: f.z })).find(q => W.st(q.x, q.y, q.z))
+  // (no cell the walk model stands in under me - a stair, a slab's edge, a ladder: no search from here; read as a set of
+  //  one, 20 cells were held at once, 2026-10-02)
+  if (!start) { reach = null; return null }
   // (standing outside the site's ground - at the chests by home: no question to ask from here, every stand is unknown; read
   //  as a set of one, every cell was held and nothing walked; audit)
   if (!inArea(start)) { reach = null; return null }
