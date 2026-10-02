@@ -272,7 +272,10 @@ function ironWanted () {
 }
 const IRON_COST = { shield: 1, bucket: 3, iron_chestplate: 8, iron_leggings: 7, iron_helmet: 5, iron_boots: 4, iron_pickaxe: 3, iron_sword: 2, shears: 2 }
 // the pieces that stand between the body and a mob (a trip is made for these; tools and the bucket wait for iron)
-const ORE_METHOD = 'vein'
+// (the way of mining a dry verdict was reached under - a new way, a new chance: 'levels' since the mine became a chain of
+//  levels at every ore's depth, 2026-09-30. Left at 'vein', a dry trip of 09-29 under the old single staircase blocked every
+//  iron trip for three days - no shears, 318 leaves waiting, no armour after a death, 2026-10-02)
+const ORE_METHOD = 'levels'
 const ARMOUR_GEAR = new Set(['shield', 'bucket', 'iron_chestplate', 'iron_leggings', 'iron_helmet', 'iron_boots'])
 function ironStock () { return inv.count(bot, 'iron_ingot') + base.bankCount('iron_ingot') + inv.count(bot, 'raw_iron') + base.bankCount('raw_iron') }
 function gearIronShort () {
