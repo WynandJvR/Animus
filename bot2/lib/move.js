@@ -448,6 +448,7 @@ function runGoal (bot, goal, { timeoutMs, stuckMs, movements }) {
     let bestAt = Date.now()
     let noPaths = 0
     const started = Date.now()
+    let visited = null // (the planner's search size on a noPath: small = we are shut in, large = the goal is out of reach)
     const finish = (ok, why) => {
       if (done) return
       done = true
@@ -456,7 +457,7 @@ function runGoal (bot, goal, { timeoutMs, stuckMs, movements }) {
       bot.removeListener('path_update', onPath)
       bot.removeListener('death', onDeath)
       if (!ok || why !== 'reached') stopMoving(bot)
-      resolve({ ok, why })
+      resolve(visited != null && why === 'noPath' ? { ok, why, visited } : { ok, why })
     }
     const onReached = () => { if (goal.isEnd(bot.entity.position.floored())) finish(true, 'reached') }
     // NO PATH IS A VERDICT: the search ran out of options. The planner hands back a path to its closest node all the same,
@@ -465,6 +466,7 @@ function runGoal (bot, goal, { timeoutMs, stuckMs, movements }) {
     // for the empty-path case it always handled
     const onPath = r => {
       if (r.status === 'noPath') {
+        visited = r.visitedNodes != null ? r.visitedNodes : null
         if (!goal.isEnd(bot.entity.position.floored()) && (r.path.length > 0 || ++noPaths >= 3)) finish(false, 'noPath')
       } else if (r.path.length) noPaths = 0
     }
@@ -704,6 +706,7 @@ async function goTo (bot, goal, opts = {}) {
   if (took > 30000) log('move', `${label}: ${r.ok ? 'arrived' : r.why} after ${Math.round(took / 1000)}s at ${fmt(bot.entity && bot.entity.position)}`)
   return r
 }
+const ENCLOSED_NODES = 400 // a search that visited more than this many cells was not shut in
 async function goToInner (bot, goal, opts, a) {
   const start = bot.entity ? bot.entity.position.clone() : null
   const r = await goToInner2(bot, goal, opts, a)
@@ -714,7 +717,11 @@ async function goToInner (bot, goal, opts, a) {
   // (every give-up is recorded where it happened - the count by place is the evidence: "ended where it began" (< 2) missed
   //  the pocket's shuffle, a leg from -584 giving up at -582 by exactly 2, and the third give-up never reached the escape,
   //  2026-09-29. Below the floor, one is enough only where the walk began)
-  if (!r.ok && start && bot.entity && /stuck|timeout|noPath/.test(r.why)) {
+  // (a noPath whose search went wide is a verdict on the GOAL, not on this place: unreachable cells tried from one spot in
+  //  the castle counted as give-ups here, and two of them would climb out or open our own wall; audit. A narrow search -
+  //  the planner shut in - still counts)
+  const goalOnly = r.why === 'noPath' && r.visited != null && r.visited > ENCLOSED_NODES
+  if (!r.ok && start && bot.entity && /stuck|timeout|noPath/.test(r.why) && !goalOnly) {
     const again = stuckHereAgain(bot)
     if (again || (underBuildFloor(bot) && bot.entity.position.distanceTo(start) < 2)) await escapeUp(bot)
   }
@@ -737,7 +744,10 @@ async function goToInner (bot, goal, opts, a) {
   return r
 }
 async function goToInner2 (bot, goal, opts, { timeoutMs, stuckMs, dig, place, allowZones, label, shouldStop, dryHead }) {
-  const deadline = Date.now() + timeoutMs
+  // (time the reflexes hold the body is not the walk's time: a fight past the deadline turned into a "timeout" verdict on
+  //  the goal - the deadline moves on by every wait; audit)
+  let deadline = Date.now() + timeoutMs
+  const waitR = async () => { const t = Date.now(); await waitReflex(bot); deadline += Date.now() - t }
   const cancelled = control.token()
   let fails = 0
   const crossed = new Map() // door crossings this walk (see the stall branch)
@@ -751,7 +761,7 @@ async function goToInner2 (bot, goal, opts, { timeoutMs, stuckMs, dig, place, al
     if (cancelled()) return { ok: false, why: 'stopped' }
     if (goal.isEnd(bot.entity.position.floored())) return { ok: true, why: 'reached' }
     if (shouldStop && shouldStop()) return { ok: false, why: 'stopped' }
-    await waitReflex(bot)
+    await waitR()
     // you may always work your way out of where you stand: inside the castle walls a walk to the furnace
     // could not scaffold over them (the build zone was off limits) and timed out for minutes
     // (finished build blocks stay unbreakable - the protector guards them in every zone)
@@ -769,9 +779,9 @@ async function goToInner2 (bot, goal, opts, { timeoutMs, stuckMs, dig, place, al
     //  to the deadline; audit 2026-09-28)
     // (an interruption is the reflex taking the body - a fight, the edge brake - never a verdict on the way: counted here
     //  one fight by a known tree read "noPath" and the tree was forgotten; audit 2026-09-28)
-    if (r.why !== 'interrupted' && Date.now() - tRun < 120 && bot.entity.position.distanceTo(pRun) < 0.1) { if (++instant >= 3) return { ok: false, why: r.why || 'noPath' } } else if (r.why !== 'interrupted') instant = 0
+    if (r.why !== 'interrupted' && Date.now() - tRun < 120 && bot.entity.position.distanceTo(pRun) < 0.1) { if (++instant >= 3) return Object.assign({}, r, { ok: false, why: r.why || 'noPath' }) } else if (r.why !== 'interrupted') instant = 0
     if (r.why === 'died') return r
-    if (r.why === 'interrupted') { if (++interrupts > 20) return { ok: false, why: 'interrupted' }; await waitReflex(bot); continue } // (the body is busy: wait for the reflex, then go on - "interrupted", never "blocked")
+    if (r.why === 'interrupted') { if (++interrupts > 20) return { ok: false, why: 'interrupted' }; await waitR(); continue } // (the body is busy: wait for the reflex, then go on - "interrupted", never "blocked")
     if (r.why === 'timeout') return r
     fails++
     // a stall next to a door is a door the planner would not open: cross it by hand
@@ -782,6 +792,9 @@ async function goToInner2 (bot, goal, opts, { timeoutMs, stuckMs, dig, place, al
       if (n === 1) { fails = 0; continue }
       if (n === 2) log('move', `${label}: through the door ${lastCross.split('>')[0]} the same way again - the stall is past it, not at it`)
     }
+    // (a wide noPath - the goal is out of reach, not we shut in - is the same search from the same place again: the walk
+    //  ends here once the door crossing had its chance; audit)
+    if (r.why === 'noPath' && r.visited != null && r.visited > ENCLOSED_NODES) return r
     if (fails >= 3) {
       // (what the body was holding when it gave up - the goal, the planner, the keys, the reflex: sealed in the hollow, every
       //  walk "stuck x3" for five minutes and one pause/resume later the same walk went straight out; something was stale,
@@ -1084,6 +1097,7 @@ function buried (bot, p) {
 }
 // A roof of planks (a hut) or leaves is not being underground: it takes 3+ natural rock/earth
 // blocks overhead.
+function buildCell (p) { try { const j = require('./build').getJob(); return !!(j && j.index.has(`${p.x},${p.y},${p.z}`)) } catch { return false } }
 function isUnderground (bot) {
   const me = bot.entity.position.floored()
   const s = surfaceYHere(bot)
@@ -1091,7 +1105,9 @@ function isUnderground (bot) {
   let rock = 0
   for (let y = me.y + 2; y < s; y++) {
     const b = world.at(bot, me.x, y, me.z)
-    if (b && b.boundingBox === 'block' && world.NATURAL_RE.test(b.name) && !world.LEAF_RE.test(b.name) && !world.LOG_RE.test(b.name)) rock++
+    // (never a cell of our build: the castle's stone floors over a ground-floor room are not rock - a walk up to the next floor
+    //  read "underground" and went to surface by digging out from under it; audit)
+    if (b && b.boundingBox === 'block' && world.NATURAL_RE.test(b.name) && !world.LEAF_RE.test(b.name) && !world.LOG_RE.test(b.name) && !buildCell(b.position)) rock++
   }
   return rock >= 3
 }
