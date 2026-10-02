@@ -272,14 +272,13 @@ function ironWanted () {
   // (and a farm whose water is lost: without a bucket it can't be put back - the plot dried to grass, 2026-09-26)
   if (f && (!f.water || farm.waterNeedsFixing(bot)) && !inv.has(bot, 'bucket') && !inv.has(bot, 'water_bucket') && base.bankCount('bucket') === 0 && base.bankCount('water_bucket') === 0) out.push('bucket')
   if (rank(w.torso) < 4) out.push('iron_chestplate')
-  if (rank(w.legs) < 4) out.push('iron_leggings')
   if (rank(w.head) < 4) out.push('iron_helmet')
-  if (rank(w.feet) < 4) out.push('iron_boots')
-  // shears after the body's gear and before the iron tools: two ingots, and wool is shorn (1-3 a sheep, grown back) not
-  // killed for (1, and the flock gone) - the castle's wool trips killed the sheep round home, 2026-09-29; and every leaf of a
-  // build is cut with them. A WORN pair is none (forage.ensureShears marks it): the bank's spent pair stood in for shears and
-  // none were ever made - 318 acacia leaves and the rest waiting, 2026-10-02
+  // (the shears' two ingots before the legs and the feet: shield, chest and head carry the fights; 319 leaf cells of the build
+  //  waited behind 13 more ingots of leggings and boots, 0 placed a round, 2026-10-02)
+  //  (shears: wool shorn, never the flock killed - 2026-09-29; a WORN banked pair is none - forage.ensureShears marks it)
   if (shearsWanted()) out.push('shears')
+  if (rank(w.legs) < 4) out.push('iron_leggings')
+  if (rank(w.feet) < 4) out.push('iron_boots')
   if (inv.toolTier(bot, 'pickaxe') < 3) out.push('iron_pickaxe')
   if (inv.toolTier(bot, 'sword') < 3) out.push('iron_sword')
   return out
