@@ -23,13 +23,15 @@ function edgeOf (dx, dz) { return dx === 1 ? 'east' : dx === -1 ? 'west' : dz ==
 //  every cell placed from inside it was held back, 2026-09-29) (and an OPEN trapdoor - an edge, not a wall: the planner's
 //  rule. Counted solid, the room behind the castle's inner trapdoors read as sealed, 2026-09-29) (a door cell is stood in
 //  on its floor and entered or left through any edge but its panel's - the physics decides; audit)
-function walkModel (w, isC = () => false) {
+// opens: a door is a way through whatever its state - the walker opens it (move.crossDoor, the planner's door rule); for the
+// question "can I get there", where a door shut behind me read as a wall and the castle beyond it as out of reach (audit)
+function walkModel (w, isC = () => false, { opens = false } = {}) {
   const passable = b => (w.bodyPassable ? w.bodyPassable(b) : w.isAirish(b)) || w.isOpenTrapdoor(b) || (/_door$|_fence_gate$/.test(b.name) && !/^iron_door$/.test(b.name))
   const air = (x, y, z) => { if (isC(x, y, z)) return false; const b = w.at(x, y, z); return !!b && passable(b) }
   const climb = (x, y, z) => { if (isC(x, y, z)) return false; const b = w.at(x, y, z); return !!b && CLIMB_RE.test(b.name) }
   const st = (x, y, z) => { if (!air(x, y, z) || !air(x, y + 1, z)) return false; if (isC(x, y - 1, z)) return true; const fb = w.at(x, y, z); if (fb && (/_door$/.test(fb.name) || w.isOpenTrapdoor(fb))) { const fl = w.at(x, y - 1, z); return !!fl && w.isSolid(fl) && !w.isOpenTrapdoor(fl) } return w.standable(x, y, z) }
   // (an open door's or trapdoor's plate by plateEdge - the planner's own model; a CLOSED door by its panel here)
-  const panelOf = b => { if (!b) return null; const v = w.plateEdge(b); if (v) return edgeOf(v[0], v[1]); if (/_door$/.test(b.name)) return doorPanel(b); return null }
+  const panelOf = b => { if (!b) return null; if (opens && /_door$/.test(b.name) && !/^iron_door$/.test(b.name)) return null; const v = w.plateEdge(b); if (v) return edgeOf(v[0], v[1]); if (/_door$/.test(b.name)) return doorPanel(b); return null }
   const edgeShut = (x, y, z, dx, dz) => [w.at(x, y, z), w.at(x, y + 1, z)].some(b => panelOf(b) === edgeOf(dx, dz))
   const next = p => {
     const out = []
