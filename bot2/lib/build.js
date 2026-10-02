@@ -722,6 +722,7 @@ function anchorable (bot, c, det) {
   //  does, and freed one step-end miss at a time, a layer of them was "4,156 in hand, nothing doable"; 2026-09-29)
   { const w = waitCols.get(c.x + ',' + c.z); if (w != null && c.y > w) return false } // (the column over a waiting hole: detachedItems)
   if (holdAround.has(key(c))) return false // (it would close a waiting hole's last face: holdAround)
+  if (compHeld.has(key(c))) return false // (held for a way in: it anchors no band - a held layer pinned the band with nothing doable; audit)
   return !(det && (det.has(stepItem(bot, c)) || fallsIn(bot, c, stepItem(bot, c))))
 }
 function lowestStructural (todo, bot, det = bot ? detachedItems(todo, bot) : null) {
@@ -1053,10 +1054,61 @@ function feetFor (bot, c) {
     if (!clear) continue
     // (on the floor or the ground, not up on a ledge of the build: the walk to a window ledge at y128 stuck every time)
     const raised = gy > job.box.y1 ? 25 : 0
+    // (and a foot no walk gets to - an upper floor nothing climbs to yet: 24 pillar feet so, each a stuck walk; walkReach)
+    if (!canWalkTo(bot, { x, y: gy + 1, z })) continue
     out.push({ x, y: gy + 1, z, d: Math.hypot(x + 0.5 - me.x, gy + 1 - me.y, z + 0.5 - me.z) + Math.hypot(dx, dz) + raised })
   }
   return out.sort((a, b) => a.d - b.d)
 }
+// THE CELLS I CAN WALK TO from where I stand (no dig, no place - the walk model, ladders climbed), over the site and a margin
+// round it: ONE search, sliced (the event loop back every 8ms - a search per candidate stand froze the body 5-9s at a time,
+// 2026-10-02), kept while I stand inside it and for 30s. A stand, a pillar's foot, is reachable when it is in the set - the
+// way IN from where I am, never the way out (a stand on an upper floor dropped through a stairwell and read "out": 39 of 83
+// cluster-stand misses; 24 pillar feet on floors nothing climbs to - 2026-10-02 analysis). Capped: unknown, as before
+let reach = null
+const REACH_MARGIN = 10; const REACH_CAP = 15000
+async function walkReach (bot) {
+  if (!job || !bot.entity) return null
+  const f = world.feetPos(bot)
+  const here = r => [0, -1, 1].some(dy => r.cells.has(key({ x: f.x, y: f.y + dy, z: f.z })))
+  if (reach && reach.job === job && Date.now() - reach.at < 30000 && here(reach)) return reach
+  // (every block read once a search: blockAt works out the light each call, and each cell is read from four sides)
+  const rw = roomWorld(bot); const atM = new Map(); const stM = new Map()
+  const at0 = rw.at; const st0 = rw.standable
+  rw.at = (x, y, z) => { const k = x + ',' + y + ',' + z; let v = atM.get(k); if (v === undefined) { v = at0(x, y, z) || null; atM.set(k, v) } return v }
+  rw.standable = (x, y, z) => { const k = x + ',' + y + ',' + z; let v = stM.get(k); if (v === undefined) { v = st0(x, y, z); stM.set(k, v) } return v }
+  const W = rooms.walkModel(rw); const b = job.box
+  const inArea = q => q.x >= b.x1 - REACH_MARGIN && q.x <= b.x2 + REACH_MARGIN && q.z >= b.z1 - REACH_MARGIN && q.z <= b.z2 + REACH_MARGIN
+  const start = [0, -1, 1].map(dy => ({ x: f.x, y: f.y + dy, z: f.z })).find(q => W.st(q.x, q.y, q.z)) || { x: f.x, y: f.y, z: f.z }
+  // (standing outside the site's ground - at the chests by home: no question to ask from here, every stand is unknown; read
+  //  as a set of one, every cell was held and nothing walked; audit)
+  if (!inArea(start)) { reach = null; return null }
+  const cells = new Set([key(start)]); const q = [start]; let i = 0; let capped = false
+  const t0 = Date.now(); let slice = t0; let longest = 0
+  while (i < q.length) {
+    if (cells.size > REACH_CAP) { capped = true; break }
+    if (Date.now() - slice > 8) { longest = Math.max(longest, Date.now() - slice); await new Promise(r => setImmediate(r)); slice = Date.now() }
+    const c = q[i++]
+    if (!inArea(c)) continue // (reached, not walked on from: the site's own ground is the question)
+    for (const n of W.next(c)) { const k = key(n); if (!cells.has(k)) { cells.add(k); q.push(n) } }
+  }
+  // (SHUT IN - no cell of the set outside the build: every stand reads out of reach, no walk is made, and the walker's own
+  //  escapes never run. Unknown, said once: the walks go and the escape gets its chance; audit)
+  if (!capped && ![...cells].some(k => { const [x, , z] = k.split(',').map(Number); return x < b.x1 || x > b.x2 || z < b.z1 || z > b.z2 })) {
+    if (Date.now() - shutSaid > 60000) { shutSaid = Date.now(); log('build', `walk reach: shut in at ${move.fmt(f)} (${cells.size} cells, none outside the build) - stands unknown, the walks go`) }
+    reach = null; return null
+  }
+  reach = { job, at: Date.now(), cells, capped, ms: Date.now() - t0, longest, from: f }
+  if (Date.now() - reachLast > 120000) { reachLast = Date.now(); log('build', `walk reach: ${cells.size} cells from ${move.fmt(f)}${capped ? ' (capped - unknown past it)' : ''} in ${reach.ms}ms (longest slice ${longest}ms)`) }
+  return reach
+}
+let reachLast = 0; let shutSaid = 0
+// (only a set that is current: this job, under 30s, and me still in it - from another place or step it is no answer; audit)
+function reachCurrent (bot) {
+  if (!reach || reach.job !== job || Date.now() - reach.at > 30000 || !bot || !bot.entity) return false
+  const f = world.feetPos(bot); return [0, -1, 1].some(dy => reach.cells.has(key({ x: f.x, y: f.y + dy, z: f.z })))
+}
+function canWalkTo (bot, p) { return !reachCurrent(bot) || reach.capped || reach.cells.has(key(p)) }
 function footFor (bot, c) { return feetFor(bot, c)[0] || null }
 // Pillar feet the walk could not get to, skipped for half an hour by every cell (the south end's floor inside the facade:
 // three feet per cell, each tried twice, eight seconds a try, a dozen cells - a whole day, 2026-09-27)
@@ -1317,7 +1369,8 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
   const badStands = new Set() // (stands whose walk failed this step: clusterStand passes them by)
   // (the stands' regions this step - standRegion's memo; stale when one of our blocks lands: a corridor cut)
   let regionMemo = new Map(); let regionMs = 0
-  const reachOf = p => { const t = Date.now(); const me = standRegion(bot, world.feetPos(bot), regionMemo); const r = standRegion(bot, p, regionMemo); regionMs += Date.now() - t; return r.out || r === me }
+  // (reachable: in the cells I can walk to - one sliced search a step, walkReach; a capped or missing one is "unknown")
+  const reachOf = p => canWalkTo(bot, p)
   const holdBack = new Set() // (cells that would wall the body in from where it stands: later this step, or the next - wallsMeIn)
   // (where a step's time goes: choosing the cell, walking to and placing it - measured, not guessed)
   const prof = { tries: 0, ms: 0, okMs: 0, dist: 0, pick: 0, why: {} }; let tpick = Date.now()
@@ -1499,6 +1552,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     // not get within reach"); misses were 57% of the evening's build-step time. It goes in once the compartment opens
     // (its door or gap is built) or the bot is inside it. A cell with no stand at all goes on as before (the tower)
     if (!c.foundation && !inReach(c)) {
+      await walkReach(bot) // (fresh for where I stand now - cheap when I am still in the last one)
       const probe = clusterStand(bot, c, ready, badStands, reachOf)
       if (probe && !probe.out) compHeld.delete(key(c))
       if (probe && probe.out) {
@@ -1806,23 +1860,6 @@ function walkModel (bot, isC = () => false) { return rooms.walkModel(roomWorld(b
 // one of its compartments: reachable only from inside it (a stand no walk gets to is no stand: 0 of 6 placed, three stands
 // in the castle's closed compartments, 155s, 2026-09-29; audit). A search from the BOT ran over the whole outdoors (over
 // 2000 cells, 233ms, no answer) - a region is small, and its verdict is every one of its cells' (memo: key -> region)
-function standRegion (bot, p, memo) {
-  const k0 = key(p); const hit = memo.get(k0); if (hit) return hit
-  const b0 = job.box; const inBox = q => q.x >= b0.x1 && q.x <= b0.x2 && q.z >= b0.z1 && q.z <= b0.z2
-  const W = walkModel(bot)
-  const r = { out: false }
-  const seen = new Set([k0]); const q = [{ x: p.x, y: p.y, z: p.z }]; let i = 0
-  while (i < q.length) {
-    if (seen.size > 300) { r.out = true; break } // (a region this big is no compartment)
-    const c = q[i++]
-    if (!inBox(c)) { r.out = true; break }
-    // (NO sky exit here: in wayOut a sky column means the bot can LEAVE by towering up; a stand asks whether it can get IN,
-    //  and over a roofless compartment's wall means a drop the walk refuses - it stays a compartment; audit)
-    for (const n of W.next(c)) { const k = key(n); if (!seen.has(k)) { seen.add(k); q.push(n) } }
-  }
-  for (const k of seen) memo.set(k, r)
-  return r
-}
 let lastExit = null
 function wayOutPoint (bot, from = null) { lastExit = null; return wayOut(bot, { x: NaN, y: NaN, z: NaN }, from, false) ? lastExit : null }
 function wayOut (bot, c, from = null, withC = true) {

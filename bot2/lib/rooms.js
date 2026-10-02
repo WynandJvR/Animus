@@ -7,6 +7,7 @@ const OPP = { north: 'south', south: 'north', east: 'west', west: 'east', up: 'd
 const CW = { north: 'east', east: 'south', south: 'west', west: 'north' }
 const CCW = { east: 'north', south: 'east', west: 'south', north: 'west' }
 const key = p => `${p.x},${p.y},${p.z}`
+const CLIMB_RE = /^ladder$/ // (what the planner climbs - mineflayer-pathfinder's climbables: the ladder alone; audit)
 
 // a door's panel edge: closed, the edge opposite its facing; open, swung to the hinge's side
 function doorPanel (door) {
@@ -25,6 +26,7 @@ function edgeOf (dx, dz) { return dx === 1 ? 'east' : dx === -1 ? 'west' : dz ==
 function walkModel (w, isC = () => false) {
   const passable = b => (w.bodyPassable ? w.bodyPassable(b) : w.isAirish(b)) || w.isOpenTrapdoor(b) || (/_door$|_fence_gate$/.test(b.name) && !/^iron_door$/.test(b.name))
   const air = (x, y, z) => { if (isC(x, y, z)) return false; const b = w.at(x, y, z); return !!b && passable(b) }
+  const climb = (x, y, z) => { if (isC(x, y, z)) return false; const b = w.at(x, y, z); return !!b && CLIMB_RE.test(b.name) }
   const st = (x, y, z) => { if (!air(x, y, z) || !air(x, y + 1, z)) return false; if (isC(x, y - 1, z)) return true; const fb = w.at(x, y, z); if (fb && (/_door$/.test(fb.name) || w.isOpenTrapdoor(fb))) { const fl = w.at(x, y - 1, z); return !!fl && w.isSolid(fl) && !w.isOpenTrapdoor(fl) } return w.standable(x, y, z) }
   // (an open door's or trapdoor's plate by plateEdge - the planner's own model; a CLOSED door by its panel here)
   const panelOf = b => { if (!b) return null; const v = w.plateEdge(b); if (v) return edgeOf(v[0], v[1]); if (/_door$/.test(b.name)) return doorPanel(b); return null }
@@ -43,6 +45,13 @@ function walkModel (w, isC = () => false) {
         out.push({ x, y, z }); break
       }
     }
+    // CLIMBING: a ladder column is gone up and down - the planner climbs it (mineflayer-pathfinder's climbables);
+    // without it every floor served by the castle's ladders read as shut off (audit 2026-10-02)
+    if (climb(p.x, p.y, p.z)) { // (a ladder at the feet - the planner's rule)
+      const y = p.y + 1
+      if ((climb(p.x, y, p.z) || air(p.x, y, p.z)) && (climb(p.x, y + 1, p.z) || air(p.x, y + 1, p.z))) out.push({ x: p.x, y, z: p.z })
+    }
+    if (climb(p.x, p.y - 1, p.z)) out.push({ x: p.x, y: p.y - 1, z: p.z })
     return out
   }
   return { air, st, next }
