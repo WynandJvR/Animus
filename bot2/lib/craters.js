@@ -69,6 +69,7 @@ function open (bot) {
   return (mem.get().craters || []).filter(q => {
     const b = world.at(bot, q.x, q.y, q.z)
     if (!b) return false // (not loaded: owed, but not a task from here; audit)
+    if (!ourGround(q)) return false // (our ground by today's rule - cells recorded under a wider one are not walked to)
     if (gaveUp(q)) return false
     if (!world.isAirish(b) && !world.isLiquidWater(b)) return false
     if (j && j.index.has(k(q))) return false
@@ -83,7 +84,7 @@ let botRef = null
 // forget what is filled (or the builder's / not ours any more); loaded cells only
 function prune (bot) {
   const j = (() => { try { return require('./build').getJob() } catch { return null } })()
-  const keep = (mem.get().craters || []).filter(q => { const b = world.at(bot, q.x, q.y, q.z); return !b || ((world.isAirish(b) || world.isLiquidWater(b)) && !(j && j.index.has(k(q))) && !move.inForeign(q)) })
+  const keep = (mem.get().craters || []).filter(q => { if (!ourGround(q)) return false; const b = world.at(bot, q.x, q.y, q.z); return !b || ((world.isAirish(b) || world.isLiquidWater(b)) && !(j && j.index.has(k(q))) && !move.inForeign(q)) })
   if (keep.length !== (mem.get().craters || []).length) mem.set('craters', keep)
   return keep
 }
