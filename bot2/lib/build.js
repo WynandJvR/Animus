@@ -908,7 +908,14 @@ async function viaDoor (bot, goal, movements) {
     // (the bot's everyday walker, with its own recoveries: the site runGoal got "stuck" in the canopy every time)
     const r0 = await move.travel(bot, near, { range: 1, label: 'to the door', maxMs: 90000 })
     if (!r0.ok) { log('build', `couldn't get to the ${d.name.replace('_door', '')} door at ${move.fmt(d)} (${r0.why})`); if (/timeout|stuck/.test(r0.why || '')) return null; continue } // (a long walk that failed ends it; a quick noPath tries the next door - audit)
-    if (!await move.crossDoor(bot, goal).catch(() => false)) return null // (at the door and could not cross: the next door is no better bet)
+    if (!await move.crossDoor(bot, goal).catch(() => false)) {
+      // ("not crossed" is also "already through": the walk to its step crossed the door itself, and the walk on from the
+      //  far side was never tried - every "couldn't reach its foot (stuck)" 1ms after "door crossing done", 2026-10-02.
+      //  The walk on is tried once; a door that would not open fails it the same as before)
+      const r1 = await move.runGoal(bot, goal, { timeoutMs: 30000, stuckMs: 8000, movements })
+      if (r1.ok) log('build', `through the ${d.name.replace('_door', '')} door at ${move.fmt(d)} on the walk to it - on toward ${move.fmt(gp)}`)
+      return r1.ok ? r1 : null
+    }
     log('build', `went through the ${d.name.replace('_door', '')} door at ${move.fmt(d)} toward ${move.fmt(gp)}`)
     return move.runGoal(bot, goal, { timeoutMs: 30000, stuckMs: 8000, movements })
   }
