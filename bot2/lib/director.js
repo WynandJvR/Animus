@@ -100,7 +100,10 @@ function homeByDark () {
   return world.ticksUntilNight(bot) < walk + world.HOME_MARGIN
 }
 let taskCancelled = () => false
-function dayStop () { return taskCancelled() || nightSoon() || tooHurt() || homeByDark() }
+// (at the hurt line a day trip stops whether or not food is at hand: tooHurt's "and can heal" let an iron trip walk on at hp 5
+//  with nothing to eat into the skeletons at the mine's mouth - dead, 2026-10-02. With no food, the director's food rule
+//  is the answer, never the trip)
+function dayStop () { return taskCancelled() || nightSoon() || bot.health <= reflex.hurtLine() || homeByDark() }
 // heading home: keep walking through dusk; only real night (mobs) stops a trip that is still long
 // (and at the hurt line, when food would mend it or might be found: at hp 4 the trek walked on into a river and drowned,
 //  2026-09-27 - the director heals or finds food first)
