@@ -1534,7 +1534,9 @@ function tick () {
     // 2026-10-02). Gone (dead, past 24, down a cave) is escaped; hungry, the eat row below has its turn (out of sight)
     if (active.kind === 'flee' && fleeTarget && RANGED.has(fleeTarget.name) && !canSee(fleeTarget)) {
       const about = fleeTarget.isValid && fleeTarget.position.distanceTo(me) < 24 && Math.abs(fleeTarget.position.y - me.y) < 6
-      if (!about || hungryNow()) return clearActive() // (the eat row's own hunger: one rule - audit)
+      // (hungry WITH something to eat: the eat row has its turn - hungry with nothing in the pack let go and took cover again
+      //  every 0.2s, hp 4 under a skeleton, 2026-10-02)
+      if (!about || (hungryNow() && inv.foodPoints(bot) > 0)) return clearActive() // (the eat row's own hunger: one rule - audit)
       for (const k of ['forward', 'back', 'left', 'right', 'sprint', 'jump']) bot.setControlState(k, false)
       return
     }
