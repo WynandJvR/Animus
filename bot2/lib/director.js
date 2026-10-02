@@ -248,6 +248,16 @@ function missingKit () {
   return out
 }
 
+// A GRAVE STILL COVERED by what killed us: a shooter in tracking range of it; a shooter's own grave for its first three minutes
+// (the patrol is still there - unseen from 80 blocks; the death record says who: d.by); a creeper at it; and by night any
+// grave not a few steps off. The second pillager death of 2026-10-02 was the walk back, at dusk, into the same patrol
+function coveredGrave (g0) {
+  if (!g0 || !bot.entity) return false
+  const steps = world.dist3(g0, bot.entity.position) < 10
+  if (!steps && g0.by && reflex.RANGED.has(g0.by) && Date.now() - (g0.t || 0) < 3 * 60000) return true
+  if (!steps && world.phase(bot) === 'night') return true
+  return Object.values(bot.entities).some(e => e && e.position && ((reflex.RANGED.has(e.name) && e.position.distanceTo(g0) < 20) || (e.name === 'creeper' && e.position.distanceTo(g0) < 12)))
+}
 function ironWanted () {
   const w = inv.wornArmor(bot)
   const out = []
@@ -463,7 +473,7 @@ function decide () {
   // going back for a grave empty-handed walks into whatever killed us: re-arm first (tools come next)
   // (not back into what killed us: a shooter covering the grave or a creeper at it is still there - the second walk into the
   //  skeleton valley fell 13 blocks and fought at hp 11, 2026-09-28; the grave waits for the ground to clear; audit)
-  const graveCovered = g0 => Object.values(bot.entities).some(e => e && e.position && ((reflex.RANGED.has(e.name) && e.position.distanceTo(g0) < 20) || (e.name === 'creeper' && e.position.distanceTo(g0) < 12)))
+  const graveCovered = g0 => coveredGrave(g0)
   if (g && !held('grave') && (inv.bestWeapon(bot) || world.dist3(g, bot.entity.position) < 10) && !graveCovered(g)) return { name: 'grave', why: `grave ${Math.round(world.dist2(g, bot.entity.position))}b away with ${g.items} items` }
 
   // 2a. our bed is not our spawn (another player slept on the account; the bed was moved): used by day, at once - a death
@@ -807,7 +817,9 @@ const TASKS = {
   async grave () {
     const g = graves.bestGrave(bot)
     const near = g && world.dist3(g, bot.entity.position) < 10
-    const ok = await graves.recover(bot, g, { shouldStop: near ? () => taskCancelled() : dayStop })
+    // (asked again all the way there: from 80 blocks the shooters round the grave were out of tracking range - the check
+    //  passed blind and the walk went back into the patrol, 2026-10-02; audit)
+    const ok = await graves.recover(bot, g, { shouldStop: near ? () => taskCancelled() : () => dayStop() || (!!g && coveredGrave(g)) })
     // a grave down in a cave: climb straight up before anything else sends us wandering through it (the next
     // task travelled 56 blocks through the cave from y-7 and died)
     if (move.isUnderground(bot)) await move.surface(bot).catch(() => false)
@@ -910,6 +922,9 @@ const TASKS = {
       const top = world.at(bot, c.x, c.y, c.z)
       // (the cap remembered: a lid is ours on purpose, never litter - its top block stands on the lower one and passes for a
       //  pillar's; litter.kept asks this list, audit 2026-09-28)
+      // (a cap that did not take, twice: off the list - a deep hole under the grounds is a cave walk every day, into what hurt
+      //  the bot there; audit 2026-10-02)
+      if (!(top && world.isSolid(top)) && !dayStop()) mem.update(m => { const q = (m.shaftsToFill || []).find(x => x.x === c.x && x.z === c.z); if (q) { q.tries = (q.tries || 0) + 1; if (q.tries >= 2) { m.shaftsToFill = m.shaftsToFill.filter(x => x !== q); log('dir', `the hole at ${c.x},${c.y},${c.z} would not take a cap twice - left`) } } })
       if (top && world.isSolid(top)) { done++; mem.update(m => { m.shaftsToFill = (m.shaftsToFill || []).filter(q => !(q.x === c.x && q.z === c.z)); m.caps = (m.caps || []).concat([{ x: c.x, y: c.y, z: c.z }]).slice(-200) }); log('dir', `capped the hole at ${c.x},${c.y},${c.z}`) }
     }
     return done > 0

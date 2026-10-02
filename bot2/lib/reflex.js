@@ -4,6 +4,7 @@
 // Order: air > lava/fire > creeper > melee/ranged threat > low-hp retreat > eat. A skill may hold a bounded DIVE
 // (startDive/endDive): the one declared exception to the air reflex.
 const { goals } = require('mineflayer-pathfinder')
+const { Vec3 } = require('vec3')
 const world = require('./world')
 const inv = require('./inventory')
 const { log } = require('./log')
@@ -217,7 +218,9 @@ function chargeAffordable (shooter, hs, hp) {
   if (cautious && (hp < 18 || hs.some(h => h.e !== shooter.e && h.d < 24 && canSee(h.e)))) return false
   for (const id of fledFrom.keys()) if (!bot.entities[id]) fledFrom.delete(id) // (gone from the world: gone from the list)
   { const f = fledFrom.get(shooter.e.id); if (f != null && hp < f) return false }
-  const shooters = hs.filter(h => RANGED.has(h.e.name) && h.d < 16 && canSee(h.e))
+  // (EVERY shooter about, in sight or not - a patrol's others shoot round the corner: the charge counted one and three
+  //  bolts landed 0.65-0.85s apart, 20 -> 8, 2026-10-02; audit)
+  const shooters = hs.filter(h => RANGED.has(h.e.name) && h.d < 24 && Math.abs(h.e.position.y - bot.entity.position.y) < 6) // (not a skeleton in the cave under us)
   const w = inv.bestWeapon(bot)
   const dmg = w ? (/_axe$/.test(w.name) ? 7 : 5) : 1
   const cd = w ? (/_axe$/.test(w.name) ? 1050 : 650) : 400
@@ -227,8 +230,11 @@ function chargeAffordable (shooter, hs, hp) {
   //  so the pick said charge and the fight said flee, every tick, shield up at hp 12-16 under a skeleton, 2026-09-27)
   const pts = inv.armorPoints(bot)
   const dps = shooters.reduce((a, h) => a + (SHOOTER_DPS[h.e.name] || 2) * (MAGIC.has(h.e.name) ? 1 : (shield && h.e === shooter.e ? 0.2 : 1) * (1 - Math.min(20, pts) / 25)), 0)
-  return hp - secs * dps > hurtLine()
+  // (and never thinner than the damage being taken NOW, and a whole hit to spare: a 0.03 margin charged a patrol, 2026-10-02)
+  const now = Date.now(); const taken = hurtLog.filter(q => now - q.at < 5000).reduce((a, q) => a + q.d, 0) / 5
+  return hp - secs * Math.max(dps, taken) > hurtLine() + 4
 }
+const hurtLog = [] // { at, d }: hp lost, the last seconds (health events)
 
 // THE BOW. A shooter at range was fought only by walking into its arrows with a stone sword (or not at all: hide, flee)
 // while two bows and fifteen arrows sat in the chest - and a pillager patrol that never burns camped the safehouse
@@ -606,6 +612,29 @@ function creeperStrike () {
   // (a strike is progress: the stand-off clock starts again - knocked back, its next approach never beat its closest)
   if (creeperFight) { creeperFight.closest = Infinity; creeperFight.since = now }
 }
+// TAKE COVER FROM A SHOOTER - the one answer for every flee from one (being shot, too weak, a charge not worth it): out of
+// its sight already, stay; else a step to a cell it cannot see; else a wall put up - once a cell, and only with a block to
+// put and room to put it; else away. Running straight off across the open slope took four bolts and the bot, twice, under
+// a pillager patrol (2026-10-02; audit)
+const wallTried = new Set()
+function hungryNow () { return bot.food <= 14 || (bot.health < 20 && bot.food < inv.REGEN_FOOD) }
+function takeCover (e, label) {
+  fleeTarget = e
+  setActive('flee', label)
+  shieldDown()
+  try { bot.pathfinder.setGoal(null) } catch {}
+  const still = () => { for (const k of ['forward', 'back', 'left', 'right', 'sprint', 'jump']) bot.setControlState(k, false) }
+  if (!canSee(e)) return still()
+  const h = fleeHeading(e)
+  if (h && h.hidden) { bot.setControlState('back', false); return steerTo(h, { jump: h.jump, sprint: bot.food > 6 }) }
+  const f = bot.entity.position.floored(); const ck = f.x + ',' + f.y + ',' + f.z
+  if (!busy && !wallTried.has(ck) && inv.shelterBlock(bot) && e.position.distanceTo(bot.entity.position) >= 3) {
+    wallTried.add(ck); if (wallTried.size > 64) wallTried.clear()
+    return runBusy('wall off', g => wallOff(e, g), 3500, 'flee')
+  }
+  if (h) { bot.setControlState('back', false); return steerTo(h, { jump: h.jump, sprint: bot.food > 6 }) }
+  still(); bot.setControlState('back', !pinned)
+}
 function fleeHeading (t) {
   const me = bot.entity.position
   const away = Math.atan2(me.z - t.position.z, me.x - t.position.x)
@@ -651,7 +680,11 @@ function fleeHeadingPick (t, me, away) {
       if (feet && world.isSolid(feet)) yRun++; else yRun -= world.dropAt(bot, cx, yRun, cz)
     }
     if (!swept) continue
-    if (!best || diff < best.diff) best = { x: cell.x, y: cell.y, z: cell.z, jump, diff }
+    // (from a SHOOTER: a cell out of its sight first - cover beats distance; audit 2026-10-02)
+    // (the body AND the head out of its sight: an overhang hides a head, not a chest; audit)
+    const sEye = t.position.offset(0, (t.height || 1.9) * 0.85, 0); const at = new Vec3(cell.x + 0.5, cell.y, cell.z + 0.5)
+    const hidden = RANGED.has(t.name) ? (!canSee({ position: at, height: 1.8 }, sEye) && !canSee({ position: at, height: 1.1 }, sEye)) : false
+    if (!best || (hidden && !best.hidden) || (hidden === best.hidden && diff < best.diff)) best = { x: cell.x, y: cell.y, z: cell.z, jump, diff, hidden }
   }
   return best
 }
@@ -872,7 +905,10 @@ function noteTakeoff () {
       // (the grounds, or anywhere the daily walks go - within 48 of home at home's level: an 11-deep hole by the orchard,
       //  outside the "grounds" (hut, bank, farm), dropped the bot 8 hp and was never capped, 2026-09-29)
       const hm = require('./memory').get().home
-      const walked = !!hm && Math.hypot(lx - hm.x, lz - hm.z) <= 48 && t.fy >= hm.y - 8
+      // (at ANY depth under home's grounds: our own pathfinder's shaft from a deepslate trip opened into a cave pocket at y96
+      //  and was never capped - a fall from y45 inside it was "not the grounds"; two days later a zombie knocked the bot down
+      //  it, 71 blocks, 2026-10-02; audit)
+      const walked = !!hm && Math.hypot(lx - hm.x, lz - hm.z) <= 48
       if (t.fall > world.SAFE_DROP && (walked || require('./gather').onGrounds({ x: lx, y: t.fy, z: lz }))) {
         // (a SHAFT only - walled round: at least two levels between the landing and the floor it left with 3+ of the 4
         //  sides solid (a pit up to 2 wide). Off a ledge into open ground is an edge: a cap there is a dirt stub in the
@@ -1411,7 +1447,7 @@ function tick () {
   // (with a bow ready, anything past 5 blocks is shot, not charged)
   // (above the hurt line - the same line `weak` below flees at: a fixed hp 12 beside it picked fights the flee rule
   //  then broke off, and never moved with the armour worn)
-  if (!target && shooter && armed && hp > hurtLine() && (shooter.d < 5 || (!bowReady() && chargeAffordable(shooter, hs, hp)))) target = shooter.e
+  if (!target && shooter && armed && hp > hurtLine() && ((!bowReady() || shooter.d < 4) && chargeAffordable(shooter, hs, hp))) target = shooter.e
   // nothing to hit in reach and a bow in the pack: shoot what shoots us (out to 24, in sight), and a creeper before it
   // walks up - standing on the ground only (a draw afloat lets the body sink; the flee swims for the bank instead)
   if (!target && draw) return // (the draw in hand holds the body; anything above took it with setActive)
@@ -1425,16 +1461,7 @@ function tick () {
   }
   if (!target && shooter && recentlyHurt) {
     // being shot and not going to fight it: out of its line of sight
-    fleeTarget = shooter.e
-    setActive('flee', `cover from ${shooter.e.name} ${shooter.d.toFixed(1)}b`)
-    try { bot.pathfinder.setGoal(null) } catch {}
-    const h = fleeHeading(shooter.e)
-    if (h) { bot.setControlState('back', false); steerTo(h, { jump: h.jump, sprint: bot.food > 6 }) }
-    else if (!busy) {
-      // nowhere to run (a tunnel): put a wall between us - a skeleton down a straight corridor shot the bot
-      // from 13 blocks while "cover" had no side to step to
-      runBusy('wall off', g => wallOff(shooter.e, g), 3500, 'flee')
-    }
+    takeCover(shooter.e, `cover from ${shooter.e.name} ${shooter.d.toFixed(1)}b`)
     return
   }
   // bare fists do 1 damage against 20 hp: without a weapon, back off (and let the shelter logic dig
@@ -1454,6 +1481,7 @@ function tick () {
     return
   }
   if (target && weak && hs.filter(h => h.d < 10).length) {
+    if (RANGED.has(target.name)) { takeCover(target, `hp ${Math.round(hp)} - cover from ${target.name}`); return }
     fleeTarget = target
     setActive('flee', `hp ${Math.round(hp)} - ${target.name}`)
     shieldDown()
@@ -1469,13 +1497,10 @@ function tick () {
     // whatever picked it: never chase a shooter across open ground the arrows on the way in would make a losing trade
     // (the charge rule's own reckoning - "no shield and under two pieces" contradicted it: the bot picked the fight and
     // fled it on the same tick, flee/fight every half second under a pillager patrol, 2026-09-25)
-    if (RANGED.has(target.name) && d > 5 && !chargeAffordable({ e: target, d }, hs, hp)) {
-      fleeTarget = target
-      setActive('flee', `cover from ${target.name} ${d.toFixed(1)}b (${why})`)
-      shieldDown()
-      try { bot.pathfinder.setGoal(null) } catch {}
-      const h = fleeHeading(target)
-      if (h) { bot.setControlState('back', false); steerTo(h, { jump: h.jump, sprint: bot.food > 6 }) }
+    // (at ANY distance, every tick, whatever picked it - under 5 blocks no row weighed the trade again and the fight ran to
+    //  the hurt line under a patrol, 2026-10-02; audit)
+    if (RANGED.has(target.name) && !chargeAffordable({ e: target, d }, hs, hp)) {
+      takeCover(target, `cover from ${target.name} ${d.toFixed(1)}b (${why})`)
       return
     }
     if (!active || active.kind !== 'fight') fightTargetId = target.id
@@ -1499,13 +1524,20 @@ function tick () {
     // hold the fight a moment after the last target vanishes, then release - except a flee from a shooter that still sees
     // us within its range: nothing within 8 is the point of that flee, not its end (the cover flee was cleared the tick
     // after it began and re-armed the tick after that, every 200ms; audit B3)
+    // A SHOOTER THAT CAN'T SEE US is not escaped while it is still about - out of its sight is the place to be: held there,
+    // still. Released, the director walked the bot back into its sight and the next bolt began it all again (audit
+    // 2026-10-02). Gone (dead, past 24, down a cave) is escaped; hungry, the eat row below has its turn (out of sight)
+    if (active.kind === 'flee' && fleeTarget && RANGED.has(fleeTarget.name) && !canSee(fleeTarget)) {
+      const about = fleeTarget.isValid && fleeTarget.position.distanceTo(me) < 24 && Math.abs(fleeTarget.position.y - me.y) < 6
+      if (!about || hungryNow()) return clearActive() // (the eat row's own hunger: one rule - audit)
+      for (const k of ['forward', 'back', 'left', 'right', 'sprint', 'jump']) bot.setControlState(k, false)
+      return
+    }
     const coverFlee = active.kind === 'flee' && fleeTarget && fleeTarget.isValid && RANGED.has(fleeTarget.name) && fleeTarget.position.distanceTo(me) < 24 && canSee(fleeTarget)
     if (!coverFlee && !hs.some(h => h.d < 8)) return clearActive()
     // (a shooter still in sight is not escaped by distance - the cover flee runs until the sight is lost: B3)
     if (active.kind === 'flee' && (!fleeTarget || !fleeTarget.isValid || (fleeTarget.position.distanceTo(me) > 14 && !(RANGED.has(fleeTarget.name) && fleeTarget.position.distanceTo(me) < 24 && canSee(fleeTarget))))) return clearActive()
     if (active.kind === 'fight') return clearActive()
-    // a shooter that can't see us any more is escaped
-    if (fleeTarget && RANGED.has(fleeTarget.name) && !canSee(fleeTarget)) return clearActive()
     // still running: keep steering (held controls alone would carry us off a cliff)
     const h = fleeHeading(fleeTarget)
     if (h) steerTo(h, { jump: h.jump, sprint: bot.food > 6 }); else return clearActive()
@@ -1514,7 +1546,7 @@ function tick () {
 
   // 5. EAT - when hungry and nothing is attacking
   // (hurt: eat up to the food bar regeneration needs - below it the hp never comes back)
-  const hungry = bot.food <= 14 || (hp < 20 && bot.food < inv.REGEN_FOOD)
+  const hungry = hungryNow()
   // (not while swimming - a bite lets go of the stroke - but a boat is a seat: eat in it)
   // (and not in a shooter's sight: standing 1.6s to eat in the open, the bot took a skeleton's arrows bite after bite,
   //  17 -> 3 hp in 25s at the site, 2026-09-27 - out of its sight first, then eat)
@@ -1555,6 +1587,7 @@ function install (b) {
   // (the server setting our velocity - knockback, an explosion, a push: noted for the fall line)
   try { bot._client.on('entity_velocity', p => { if (bot.entity && p && p.entityId === bot.entity.id) lastServerVel = Date.now() }) } catch {}
   if (bot.inventory && bot.inventory.on) bot.inventory.on('updateSlot', () => { dressFailed = null })
+  { let hp0 = bot.health; bot.on('health', () => { const d = (hp0 || 0) - (bot.health || 0); if (d > 0) { hurtLog.push({ at: Date.now(), d }); while (hurtLog.length > 20) hurtLog.shift() } hp0 = bot.health }) }
   bot.on('entityHurt', (e, source) => {
     if (e !== bot.entity) return
     lastHurtAt = Date.now()

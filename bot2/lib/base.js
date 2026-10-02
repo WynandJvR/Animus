@@ -182,7 +182,12 @@ async function withdraw (bot, name, n, { maxWalk = 64 } = {}) {
   // (what arrived in the pack, never what was asked of the window: a window opened on stale contents said "took 64"
   //  whatever the pack got - audit 2026-09-28)
   const start = inv.count(bot, name)
-  let got = 0
+  // (A FULL PACK takes nothing: no free slot and no stack of it with room - the junk out first, and with still no room, said
+  //  once and stopped. Each chest was opened in turn, "inventory is full" fifteen times over in 30s, and the trip after it
+  //  went mining with no room to pick up the cobble its next pickaxe needed, 2026-10-02)
+  const room = () => inv.freeSlots(bot) > 0 || inv.items(bot).some(i => i.name === name && i.count < (i.stackSize || 64))
+  if (!room()) { await tossJunk(bot).catch(() => {}); if (!room()) { log('base', `the pack is full - no ${name} taken`); return 0 } }
+  let got = 0; let full = false
   for (const p of knownChests(bot)) {
     if (world.dist3(p, bot.entity.position) > maxWalk) continue
     const c = chestCache()[key(p)]
@@ -198,13 +203,13 @@ async function withdraw (bot, name, n, { maxWalk = 64 } = {}) {
         await w.withdraw(t.type, null, k)
       }
       refreshCache(w, p)
-    } catch (e) { log('base', `withdraw ${name} failed: ${e.message}`) } finally { try { w.close() } catch {} }
+    } catch (e) { log('base', `withdraw ${name} failed: ${e.message}`); if (/inventory is full/i.test(e.message || '')) full = true } finally { try { w.close() } catch {} }
     // (counted after the close AND the server's resync: read the instant the window shut, the pack swung by whole stacks
     //  - "asked 3, the pack moved 150" - until the inventory packets two ticks on; 2026-09-28)
     await settle(bot)
     got = inv.count(bot, name) - start
     checkMoves(p, k, got - had, `withdrawing ${name}`)
-    if (got >= n) break
+    if (got >= n || full) break // (full: the next chest will not change that)
   }
   if (got > 0) log('base', `took ${got} ${name} from the chests`)
   return got

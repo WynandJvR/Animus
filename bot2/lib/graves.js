@@ -151,6 +151,8 @@ async function recoverInner (bot, d, { shouldStop } = {}) {
   log('grave', `going back for my stuff at ${move.fmt(d)} (${d.items} items)`)
   mem.set('recovering', { t: d.t, at: Date.now() })
   const r = await move.travel(bot, d, { range: 2, shouldStop, label: 'to grave', underground: true }) // (the way back down is the one we came)
+  // (a walk STOPPED - the grave still covered by its shooter, dusk - is no try: three such stops abandoned a 396-item grave; audit)
+  if (!r.ok && r.why === 'stopped' && world.dist3(bot.entity.position, d) > 6) return false
   if (!r.ok && world.dist3(bot.entity.position, d) > 6) {
     mem.update(m => { const x = m.deaths.find(q => q.t === d.t); if (x) x.tries = (x.tries || 0) + 1; if (x && x.tries >= 3) x.abandoned = true })
     return false

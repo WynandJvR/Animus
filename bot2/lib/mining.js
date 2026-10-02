@@ -852,6 +852,9 @@ async function tunnelStep (bot, m) {
 //  writer round saveMine, the record the loop holds and the one in memory could part; 2026-09-30)
 async function openTunnelCell (bot, m, from, q) {
   if (underOwnZone(q)) return false // never under the castle or the base
+  // (nor under home's grounds at any depth: the y79 legs turned and turned again until they ran 10 blocks from the bed, into
+  //  the rock round an old shaft - the night's climb out came up beside it and a zombie knocked the bot down it, 2026-10-02)
+  { const h = mem.get().home; if (h && Math.hypot(q.x - h.x, q.z - h.z) < 24) return false }
   // rock over the tunnel: the surface at least two above its three-high roof. A level tunnel on a hillside ran out
   // into the open slope and walled up the "cave openings" - the sky - with cobble and torches: a cut across the hill
   // that looked like a building (2026-09-24). Open ground ahead is a blocked step: the leg turns back into the hill.
