@@ -140,12 +140,17 @@ function clearActive () {
   }
 }
 
+const provoked = new Map() // enderman id -> when it last hit us
+let waterRun = null // { id, at, from }: the run to water from an enderman (one that does not move gives the water up)
+const waterGaveUp = new Set() // enderman ids whose water did not work out
 function hostiles (maxDist = 24) {
   const me = bot.entity.position
   const out = []
   for (const e of Object.values(bot.entities)) {
     if (!e || e === bot.entity || !e.position || !e.name) continue
-    if (!HOSTILE.has(e.name)) continue
+    // (and an enderman that has hit us lately: neutral until provoked, then the most dangerous thing about - left out, the
+    //  eat row ate beside it and no row but a hit's 3s answer saw it; 2026-10-03, audit)
+    if (!HOSTILE.has(e.name) && !(e.name === 'enderman' && Date.now() - (provoked.get(e.id) || 0) < 30000)) continue
     const d = e.position.distanceTo(me)
     if (d <= maxDist) out.push({ e, d })
   }
@@ -1479,6 +1484,30 @@ function tick () {
   // digging in takes seconds: never with a mob about to hit us, never through the safehouse floor
   const nearest = hs.length ? hs[0].d : Infinity
   const inHut = require('./move').insideHut(bot.entity.position.floored())
+  // AN ANGRY ENDERMAN is not out-run (it teleports beside us) nor out-fought with a stone blade (40 hp, 5-6 a hit on us) - it
+  // took the bot 14 -> 0 in 16s, 2026-10-03. A player steps into WATER (it burns there and teleports off), else digs a capped
+  // hole (three tall, it cannot reach in) with a pickaxe and a block to cap it, else fights. An iron blade at hp 18+ fights
+  const enderOn = target && target.name === 'enderman' && !(hp >= 18 && /^(iron|diamond|netherite)_(sword|axe)$/.test((inv.bestWeapon(bot) || {}).name || ''))
+  // (water it can REACH and that keeps it off: level with us (+-1), not our farm's or base's, two from any dry stand - from a
+  //  puddle's edge it hits us from the bank; and a run there that does not move gives the water up for this one; audit)
+  const enderNear = hs.find(h => h.e.name === 'enderman' && h.d < 8)
+  if (enderNear && world.feetInWater(bot)) { fleeTarget = enderNear.e; for (const k of ['forward', 'back', 'left', 'right', 'sprint']) bot.setControlState(k, false); setActive('flee', 'enderman - holding in the water'); return }
+  if (enderOn && !world.feetInWater(bot)) {
+    const mvd = waterRun && waterRun.id === target.id && now - waterRun.at > 1000 && bot.entity.position.distanceTo(waterRun.from) < 0.4
+    if (mvd) { waterGaveUp.add(target.id); waterRun = null }
+    const dryNear = q => [[1, 0], [-1, 0], [0, 1], [0, -1], [2, 0], [-2, 0], [0, 2], [0, -2], [1, 1], [-1, -1], [1, -1], [-1, 1]].some(([dx, dz]) => world.standable(bot, q.x + dx, q.y, q.z + dz) || world.standable(bot, q.x + dx, q.y + 1, q.z + dz))
+    const wet = waterGaveUp.has(target.id) ? null : world.findBlocks(bot, /^water$/, { maxDistance: 6, count: 16 }).find(b => Math.abs(b.position.y - Math.floor(me.y)) <= 1 && world.isAirish(world.at(bot, b.position.x, b.position.y + 1, b.position.z)) && !require('./move').inZone(b.position) && !dryNear(b.position))
+    if (wet) {
+      if (!waterRun || waterRun.id !== target.id || now - waterRun.at > 1000) waterRun = { id: target.id, at: now, from: bot.entity.position.clone() }
+      fleeTarget = target; setActive('flee', `enderman - into the water at ${wet.position.x},${wet.position.y},${wet.position.z}`); try { bot.pathfinder.setGoal(null) } catch {}; steerTo(wet.position, { jump: true, sprint: bot.food > 6 }); return
+    }
+    const pick = inv.bestTool(bot, 'pickaxe', 4); const cap = inv.shelterBlock(bot)
+    if (pick && cap && !busy && !inHut && !enclosed() && canDigInHere()) {
+      setActive('dig-in', `enderman ${target.position.distanceTo(me).toFixed(1)}b - no blade for it, a capped hole`)
+      runBusy('dig in', g => digIn(g), 30000, null, () => { stopDig(); stopWalk() }).then(() => { if (active && active.kind === 'dig-in') clearActive() })
+      return
+    }
+  }
   if (((target && weak) || nightThreat) && world.phase(bot) !== 'day' && nearest >= 6 && !inHut && !enclosed() && canDigInHere()) {
     const t = target || nightThreat.e
     setActive('dig-in', `${t.name} ${t.position.distanceTo(me).toFixed(1)}b, can't fight`)
@@ -1601,6 +1630,7 @@ function install (b) {
     // the server names who hurt us (damage_event's source entity - the skeleton, not its arrow); none for a fall,
     // drowning, a cactus. (It used to be the nearest hostile: a fall beside a zombie was "hit by the zombie".)
     lastHurtBy = source && source !== bot.entity ? source : null
+    if (lastHurtBy && lastHurtBy.name === 'enderman') { provoked.set(lastHurtBy.id, Date.now()); if (provoked.size > 20) provoked.clear() }
   })
   bot.on('diggingCompleted', b => { try { lastDig = { at: Date.now(), name: b.name, pos: `${b.position.x},${b.position.y},${b.position.z}` } } catch {} })
   bot.on('death', () => { active = null; busy = false; blocking = false; floatSince = 0; submergedSince = 0; airMs = AIR_MS; if (dive) dive.broken = 'died'; fleeTarget = null; diedAt = Date.now() })
