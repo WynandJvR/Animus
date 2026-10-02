@@ -914,7 +914,7 @@ async function goSite (bot, goal, label, { place = true, dig = (job && job.cells
       for (const i of stops) {
         const w = route[i]
         const r = await move.goTo(bot, new goals.GoalBlock(w.x, w.y, w.z), { timeoutMs: 15000, stuckMs: 6000, label: 'site leg', movements: mv })
-        if (!r || !r.ok) { why = `${r ? r.why : 'no answer'} on the leg to ${move.fmt(w)} from ${move.fmt(world.feetPos(bot))}, ${world.dist3(w, bot.entity.position).toFixed(1)}b short`; break }
+        if (!r || !r.ok) { badLegCells.set(key(w), Date.now()); if (badLegCells.size > 500) badLegCells.clear(); why = `${r ? r.why : 'no answer'} on the leg to ${move.fmt(w)} from ${move.fmt(world.feetPos(bot))}, ${world.dist3(w, bot.entity.position).toFixed(1)}b short`; break }
         done++
       }
       if (done === stops.length) { const r = await move.goTo(bot, goal, { timeoutMs: 15000, stuckMs: 6000, label: 'site leg', movements: mv }); if (r && r.ok) { legSaid(`legs ${stops.length + 1}/${stops.length + 1} to ${move.fmt(tgt)} (${route.length} cells${attempt ? ', re-planned ' + attempt + 'x' : ''})`); return r } why = r ? r.why : 'no answer' }
@@ -1110,6 +1110,7 @@ function feetFor (bot, c) {
 // way IN from where I am, never the way out (a stand on an upper floor dropped through a stairwell and read "out": 39 of 83
 // cluster-stand misses; 24 pillar feet on floors nothing climbs to - 2026-10-02 analysis). Capped: unknown, as before
 let reach = null
+const badLegCells = new Map() // cell key -> when a site leg to it failed: the walk model's mismatch with the body (walkReach routes round)
 const REACH_MARGIN = 10; const REACH_CAP = 15000
 async function walkReach (bot) {
   if (!job || !bot.entity) return null
@@ -1121,7 +1122,8 @@ async function walkReach (bot) {
   const at0 = rw.at; const st0 = rw.standable
   rw.at = (x, y, z) => { const k = x + ',' + y + ',' + z; let v = atM.get(k); if (v === undefined) { v = at0(x, y, z) || null; atM.set(k, v) } return v }
   rw.standable = (x, y, z) => { const k = x + ',' + y + ',' + z; let v = stM.get(k); if (v === undefined) { v = st0(x, y, z); stM.set(k, v) } return v }
-  const W = rooms.walkModel(rw, () => false, { opens: true }); const b = job.box
+  // (a cell a leg could not reach, lately: the model says walkable, the body did not get there - routed round for 10 min)
+  const W = rooms.walkModel(rw, (x, y, z) => { const t = badLegCells.get(x + ',' + y + ',' + z); return !!t && Date.now() - t < 600000 }, { opens: true }); const b = job.box
   const inArea = q => q.x >= b.x1 - REACH_MARGIN && q.x <= b.x2 + REACH_MARGIN && q.z >= b.z1 - REACH_MARGIN && q.z <= b.z2 + REACH_MARGIN
   const start = [0, -1, 1].map(dy => ({ x: f.x, y: f.y + dy, z: f.z })).find(q => W.st(q.x, q.y, q.z))
   // (no cell the walk model stands in under me - a stair, a slab's edge, a ladder: no search from here; read as a set of
