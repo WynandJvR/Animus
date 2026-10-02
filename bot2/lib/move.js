@@ -720,7 +720,16 @@ async function goToInner (bot, goal, opts, a) {
   // (a noPath whose search went wide is a verdict on the GOAL, not on this place: unreachable cells tried from one spot in
   //  the castle counted as give-ups here, and two of them would climb out or open our own wall; audit. A narrow search -
   //  the planner shut in - still counts)
-  const goalOnly = r.why === 'noPath' && r.visited != null && r.visited > ENCLOSED_NODES
+  // (but never inside the build's footprint with no way out by the walk model: a big closed hall holds more than 400 cells, and
+  //  the enclosed break-out was built for exactly that; audit)
+  let goalOnly = r.why === 'noPath' && r.visited != null && r.visited > ENCLOSED_NODES
+  if (goalOnly && bot.entity) {
+    try {
+      const bj = require('./build'); const j = bj.getJob(); const f0 = bot.entity.position.floored()
+      const inFoot = j && f0.x >= j.box.x1 && f0.x <= j.box.x2 && f0.z >= j.box.z1 && f0.z <= j.box.z2
+      if (inFoot && !bj.wayOut(bot, { x: NaN, y: NaN, z: NaN }, null, false)) goalOnly = false
+    } catch {}
+  }
   if (!r.ok && start && bot.entity && /stuck|timeout|noPath/.test(r.why) && !goalOnly) {
     const again = stuckHereAgain(bot)
     if (again || (underBuildFloor(bot) && bot.entity.position.distanceTo(start) < 2)) await escapeUp(bot)
@@ -746,8 +755,11 @@ async function goToInner (bot, goal, opts, a) {
 async function goToInner2 (bot, goal, opts, { timeoutMs, stuckMs, dig, place, allowZones, label, shouldStop, dryHead }) {
   // (time the reflexes hold the body is not the walk's time: a fight past the deadline turned into a "timeout" verdict on
   //  the goal - the deadline moves on by every wait; audit)
+  // (bounded: at most twice the walk's own time added - a reflex that held on through every wait made one 30s walk forty
+  //  minutes; audit)
   let deadline = Date.now() + timeoutMs
-  const waitR = async () => { const t = Date.now(); await waitReflex(bot); deadline += Date.now() - t }
+  let extraLeft = 2 * timeoutMs
+  const waitR = async () => { const t = Date.now(); await waitReflex(bot); const w = Math.min(Date.now() - t, extraLeft); extraLeft -= w; deadline += w }
   const cancelled = control.token()
   let fails = 0
   const crossed = new Map() // door crossings this walk (see the stall branch)
