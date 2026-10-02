@@ -176,7 +176,9 @@ function start ({ bot, port, host, director, commands, brainSettings, pov, chat 
         }
         if (url === '/config') {
           send(res, 200, { ok: true, reconnect: !!j.reconnect })
-          if (j.reconnect) setTimeout(() => { log('api', 'restart requested'); process.exit(0) }, 400)
+          // (where we stand as we go, and on what: a reconnect from beside the bed came back 63 blocks down in the mine under
+          //  home, the server's "safe" place, 2026-10-02 - the logout's own footing is the evidence for the next one)
+          if (j.reconnect) setTimeout(() => { let at = ''; try { const p = bot.entity.position; const w = require('./world'); const f = w.at(bot, Math.floor(p.x), Math.floor(p.y), Math.floor(p.z)); const u = w.at(bot, Math.floor(p.x), Math.floor(p.y - 0.01), Math.floor(p.z)); at = ` at ${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)} feet ${f ? f.name : '?'} under ${u ? u.name : '?'} onGround ${bot.entity.onGround} sleeping ${!!bot.isSleeping}` } catch {} log('api', 'restart requested' + at); process.exit(0) }, 400)
           return
         }
         const line = String(j.command || '').trim()
