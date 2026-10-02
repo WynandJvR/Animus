@@ -865,7 +865,6 @@ function underTheBuild (bot) {
   return false
 }
 async function goSite (bot, goal, label, { place = true, dig = (job && job.cells.every(c => cellDone(bot, c) === true)) ? 'noGround' : true, doors = true } = {}) {
-  // move.goTo builds its own Movements; for site work use pathfinder directly through runGoal
   // leaving the safehouse first: the planner never routes through its door
   if (move.insideHut(bot.entity.position.floored())) await move.crossDoor(bot, goal).catch(e => log('build', `door crossing threw: ${e.message}`))
   // UNDER THE BUILD: the plaza overhangs the mountainside, and the bot, come up the slope from a grave run or a flee,
@@ -880,49 +879,12 @@ async function goSite (bot, goal, label, { place = true, dig = (job && job.cells
     //  never tripped the same-cell climb, 2026-09-29)
     void out // (a leg failed below the floor climbs out inside move.travel itself - one rule for every walk; audit)
   }
-  const r = await move.runGoal(bot, goal, { timeoutMs: 30000, stuckMs: 8000, movements: siteMovements(bot, { place, dig }) })
-  if (!r.ok && r.why === 'interrupted') { await reflex.waitClear(); return move.runGoal(bot, goal, { timeoutMs: 30000, stuckMs: 8000, movements: siteMovements(bot, { place, dig }) }) }
-  if (doors && !r.ok && r.why !== 'died') { const d = await viaDoor(bot, goal, siteMovements(bot, { place, dig })); if (d) return d }
-  return r
-}
-
-// The planner never walks through a door (mineflayer-pathfinder opens fence gates only; a door is solid to it, open or
-// shut): the church's inside was unreachable, 45 scaffold blocks in the nave "stuck" day after day (2026-09-23). A
-// player goes round to the door: walk to its near step, cross it by hand (move.crossDoor), then walk on.
-async function viaDoor (bot, goal, movements) {
-  if (!job) return null
-  const gp = goal && goal.x != null ? { x: goal.x, y: goal.y, z: goal.z } : null
-  if (!gp) return null
-  const me = bot.entity.position
-  const doors = job.cells.filter(c => /_door$/.test(c.name) && !c.follows && c.props && /^(north|south|east|west)$/.test(c.props.facing) && cellDone(bot, c) === true)
-    // the ground-floor entrances first (the way in a player takes), then the upper doors
-    .sort((a, b) => ((a.y > job.box.y1 + 1) - (b.y > job.box.y1 + 1)) || (world.dist3(me, a) + world.dist3(a, gp)) - (world.dist3(me, b) + world.dist3(b, gp)))
-  // (a fallback after a walk has already failed, so it is bounded: a door whose step on our side is no place to stand is
-  //  not walked to, and the first door the walk cannot reach ends it - 3 doors x 90s after every failed walk, 23
-  //  "couldn't reach the step" in a day, 2026-09-28; audit)
-  for (const d of doors.slice(0, 3)) {
-    const alongZ = d.props.facing === 'north' || d.props.facing === 'south'
-    const sides = alongZ ? [{ x: d.x, y: d.y, z: d.z - 1 }, { x: d.x, y: d.y, z: d.z + 1 }] : [{ x: d.x - 1, y: d.y, z: d.z }, { x: d.x + 1, y: d.y, z: d.z }]
-    const near = sides.filter(q => world.standable(bot, q.x, q.y, q.z)).sort((a, b) => world.dist3(me, a) - world.dist3(me, b))[0]
-    if (!near) continue
-    // (the bot's everyday walker, with its own recoveries: the site runGoal got "stuck" in the canopy every time)
-    const r0 = await move.travel(bot, near, { range: 1, label: 'to the door', maxMs: 90000 })
-    if (!r0.ok) { log('build', `couldn't get to the ${d.name.replace('_door', '')} door at ${move.fmt(d)} (${r0.why})`); if (/timeout|stuck/.test(r0.why || '')) return null; continue } // (a long walk that failed ends it; a quick noPath tries the next door - audit)
-    if (!await move.crossDoor(bot, goal).catch(() => false)) {
-      // ("not crossed" is also "already through": the walk to its step crossed the door itself, and the walk on from the
-      //  far side was never tried - every "couldn't reach its foot (stuck)" 1ms after "door crossing done", 2026-10-02.
-      //  The walk on is tried once; a door that would not open fails it the same as before)
-      // (only when we stand on the goal's side of it now - every other "not crossed" fails fast as before; audit)
-      const ax = alongZ ? 'z' : 'x'
-      if (Math.sign(bot.entity.position[ax] - (d[ax] + 0.5)) !== Math.sign(gp[ax] + 0.5 - (d[ax] + 0.5))) return null
-      const r1 = await move.runGoal(bot, goal, { timeoutMs: 30000, stuckMs: 8000, movements })
-      if (r1.ok) log('build', `through the ${d.name.replace('_door', '')} door at ${move.fmt(d)} on the walk to it - on toward ${move.fmt(gp)}`)
-      return r1.ok ? r1 : null
-    }
-    log('build', `went through the ${d.name.replace('_door', '')} door at ${move.fmt(d)} toward ${move.fmt(gp)}`)
-    return move.runGoal(bot, goal, { timeoutMs: 30000, stuckMs: 8000, movements })
-  }
-  return null
+  // ONE WALKER: the site's walk goes through move.goTo with the site's own movements - its door crossing on a stall, its
+  // waits for the reflexes, its give-up verdicts. The old runGoal + viaDoor fallback walked to a door chosen by distance
+  // after every failure, whatever it was: 88 walks "to the door" in four days, 74 failed, 3227s; 58 of 83 crossings still
+  // missed the goal (2026-10-02 analysis). The planner routes through doors itself now (movementsFor)
+  void doors
+  return move.goTo(bot, goal, { timeoutMs: 30000, stuckMs: 8000, label: 'site ' + (label || ''), movements: () => siteMovements(bot, { place, dig }) })
 }
 
 // Obstructions we could not reach twice are left for the end (scaffold cleanup reaches from the
@@ -2215,7 +2177,6 @@ async function removeScaffold (bot, { shouldStop, maxPasses = 4, keep = null, ex
           //  build.finish's. Pillaring for leftovers took 1037s of a day; audit)
           if (!climb) { miss(p); continue }
           if (await reachByPillar(bot, p, { shouldStop })) { removed++; got++; continue }
-          r = (await viaDoor(bot, new goals.GoalNear(p.x, p.y, p.z, 3), siteMovements(bot, { dig: 'noGround' }))) || r
         }
         if (!r.ok && !act.reach(bot, p, 4.8)) {
           log('build', `scaffold ${move.fmt(p)}: couldn't get within reach (${r.why}, ${world.dist3(bot.entity.position, p).toFixed(1)}b off, from ${move.fmt(bot.entity.position)})`); miss(p); continue

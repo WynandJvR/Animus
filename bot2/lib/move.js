@@ -459,9 +459,13 @@ function runGoal (bot, goal, { timeoutMs, stuckMs, movements }) {
       resolve({ ok, why })
     }
     const onReached = () => { if (goal.isEnd(bot.entity.position.floored())) finish(true, 'reached') }
+    // NO PATH IS A VERDICT: the search ran out of options. The planner hands back a path to its closest node all the same,
+    // and walked, it ended "stuck" 8-30s later - 302 stuck, 0 noPath in four days of castle walks, every caller unable to
+    // tell "no way there" from "the body could not" (2026-10-02). Only a search cut short (partial) walks on; noPaths kept
+    // for the empty-path case it always handled
     const onPath = r => {
-      if (r.status === 'noPath' && r.path.length === 0) {
-        if (++noPaths >= 3 && !goal.isEnd(bot.entity.position.floored())) finish(false, 'noPath')
+      if (r.status === 'noPath') {
+        if (!goal.isEnd(bot.entity.position.floored()) && (r.path.length > 0 || ++noPaths >= 3)) finish(false, 'noPath')
       } else if (r.path.length) noPaths = 0
     }
     const onDeath = () => finish(false, 'died')
@@ -758,7 +762,8 @@ async function goToInner2 (bot, goal, opts, { timeoutMs, stuckMs, dig, place, al
     const here = inZone(fp) || (!world.openSky(bot, fp) && underZone(fp)) || null
     const zonesOk = here && !allowZones.includes(here.label) ? allowZones.concat([here.label]) : allowZones
     const tRun = Date.now(); const pRun = bot.entity.position.clone()
-    const r = await runGoal(bot, goal, { timeoutMs: Math.max(2000, deadline - Date.now()), stuckMs, movements: movementsFor(bot, { dig, place, allowZones: zonesOk, dryHead }) })
+    // (opts.movements: a walk with its own rules - the build site's - still gets every recovery here; build.goSite)
+    const r = await runGoal(bot, goal, { timeoutMs: Math.max(2000, deadline - Date.now()), stuckMs, movements: opts.movements ? opts.movements() : movementsFor(bot, { dig, place, allowZones: zonesOk, dryHead }) })
     if (r.ok) return r
     // (a plan that failed at once, going nowhere, three times over from here: a verdict, not bad luck - said, not cycled
     //  to the deadline; audit 2026-09-28)
