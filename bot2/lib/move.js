@@ -441,6 +441,7 @@ function closedDoorAt (bot) {
   return null
 }
 function runGoal (bot, goal, { timeoutMs, stuckMs, movements }) {
+  try { require('./reflex').resetPlannedPath() } catch {} // (this walk's own path only: a stale one read as "a door on the way"; audit)
   const cancelled = control.token()
   return new Promise(resolve => {
     let done = false
@@ -802,7 +803,8 @@ async function goToInner2 (bot, goal, opts, { timeoutMs, stuckMs, dig, place, al
     // (only a door ON the way: the planner's next steps go through it. Any door within three of a stall was crossed or walked
     //  to - "couldn't reach the step in front of the door" 11 times an evening, 10-25s each inside a 30s site walk, at doors
     //  the path never used; 2026-10-02 analysis)
-    const onRoute = (() => { try { const ps = (require('./reflex').plannedPath() || []).slice(0, 6); return ps.some(n => { const b = world.at(bot, Math.floor(n.x), Math.floor(n.y), Math.floor(n.z)); return !!b && /_door$/.test(b.name) }) } catch { return true } })()
+    // (and a stall IN the doorway - the door's node already passed - or at the safehouse's own door, inside to out: audit)
+    const onRoute = (() => { try { const isDoor = b => !!b && /_door$/.test(b.name) && !/iron_door/.test(b.name); const ps = (require('./reflex').plannedPath() || []).slice(0, 6); if (ps.some(n => isDoor(world.at(bot, Math.floor(n.x), Math.floor(n.y), Math.floor(n.z))))) return true; const f = bot.entity.position.floored(); for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) for (const dy of [0, 1]) if (isDoor(world.at(bot, f.x + dx, f.y + dy, f.z + dz))) return true; return !!(goal && goal.x != null && insideHut(f) !== insideHut({ x: goal.x, y: goal.y, z: goal.z })) } catch { return true } })()
     if (onRoute && await crossDoor(bot, goal).catch(e => { log('move', `door crossing threw: ${e.message}`); return false })) {
       const n = (crossed.get(lastCross) || 0) + 1; crossed.set(lastCross, n)
       if (n === 1) { fails = 0; continue }

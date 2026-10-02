@@ -811,6 +811,7 @@ function nextNeeds (bot, layers = 4, lowY = null) {
   const out = {}
   for (const c of todo) {
     if (c.attach ? !(c.y <= minY + layers || supportThere(bot, c)) : c.y > minY + layers) continue
+    if (groundHeldBy(bot, c)) continue // (the swap list's: no trip for its dirt while the band has other work; audit)
     needsOf(bot, c, md, (it, n) => { out[it] = (out[it] || 0) + n; if (lowY && !(lowY[it] <= c.y)) lowY[it] = c.y })
   }
   return out
@@ -1444,6 +1445,9 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     if (minY === Infinity && structural.length) minY = Math.min(...structural.map(c => c.y)) // (none tryable: as before)
     // no more than 3 layers above the lowest unfinished cell: walls rise together, nothing floats far up
     let doable = minY <= lowestAll + 3 ? structural.filter(c => c.y <= minY + 1) : []
+    // (the ground swaps once nothing else is ready: nothing else ever does them, and left out for good the build could never
+    //  read done; audit)
+    if (!doable.length) { const gh = todo.filter(c => !c.attach && has(c) && groundHeldBy(bot, c)); if (gh.length) { const y0 = Math.min(...gh.map(c => c.y)); doable = gh.filter(c => c.y <= y0 + 1) } }
     // a door goes in once its floor stands (and its own two cells are ours to clear)
     doable = doable.filter(c => !c.twin || supportThere(bot, c)).concat(attached)
     // (the foundation's cells whose column below them is laid already: the wall rises bottom-up, never a block in the air)
