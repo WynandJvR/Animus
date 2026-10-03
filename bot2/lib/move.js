@@ -459,8 +459,9 @@ function runGoal (bot, goal, { timeoutMs, stuckMs, movements }) {
     // (and WHY the planner threw its paths away: 107 good paths in 10s, keys none, at the pit by the mine - something resets
     //  each one before a step, 2026-10-03. The pathfinder names its reason)
     let resets = {}
+    let lastVisited = null; let lastMs = null; let statusSeen = {} // (the search itself: nodes and ms - a long way round the pit never found in 8s, 2026-10-03)
     const onReset = why => { resets[why] = (resets[why] || 0) + 1 }
-    const snapshot = () => { try { const cs = bot.controlState || {}; const g = bot.pathfinder.goal; return `planner: goal ${g ? 'set' : 'none'}, moving ${bot.pathfinder.isMoving()}, keys ${Object.keys(cs).filter(k => cs[k]).join('+') || 'none'}, ${replans} replans since the last progress, last ${lastStatus || '-'} ${lastLen} nodes, ${(goalDistance(bot, goal)).toFixed(1)} from the goal (best ${best.toFixed(1)}), resets ${JSON.stringify(resets)}` } catch { return '' } }
+    const snapshot = () => { try { const cs = bot.controlState || {}; const g = bot.pathfinder.goal; return `planner: goal ${g ? 'set' : 'none'}, moving ${bot.pathfinder.isMoving()}, keys ${Object.keys(cs).filter(k => cs[k]).join('+') || 'none'}, ${replans} replans since the last progress, last ${lastStatus || '-'} ${lastLen} nodes, ${(goalDistance(bot, goal)).toFixed(1)} from the goal (best ${best.toFixed(1)}), resets ${JSON.stringify(resets)}, search ${lastVisited} nodes ${lastMs}ms, statuses ${JSON.stringify(statusSeen)}` } catch { return '' } }
     const finish = (ok, why) => {
       if (done) return
       done = true
@@ -487,6 +488,7 @@ function runGoal (bot, goal, { timeoutMs, stuckMs, movements }) {
         else if (!r.path.length && !done) setTimeout(() => { if (!done && !arrived(bot, goal) && !cancelled() && !reflexActive() && bot.pathfinder.goal === goal) { try { bot.pathfinder.setGoal(goal) } catch {} } }, 400) // (only while the goal is still ours: a reflex's flight cleared it; audit)
       } else if (r.path.length) noPaths = 0
       replans++; lastStatus = r.status; lastLen = r.path.length
+      if (r.visitedNodes != null) { lastVisited = r.visitedNodes; lastMs = r.time != null ? Math.round(r.time) : null; statusSeen[r.status] = (statusSeen[r.status] || 0) + 1 }
     }
     const onDeath = () => finish(false, 'died')
     let doorAt = 0
@@ -499,7 +501,7 @@ function runGoal (bot, goal, { timeoutMs, stuckMs, movements }) {
       if (reflexActive()) return finish(false, 'interrupted')
       const d = goalDistance(bot, goal)
       const busy = bot.pathfinder.isMining() || bot.pathfinder.isBuilding()
-      if (d < best - 0.9 || busy) { if (d < best) best = d; bestAt = Date.now(); replans = 0; resets = {} }
+      if (d < best - 0.9 || busy) { if (d < best) best = d; bestAt = Date.now(); replans = 0; resets = {}; statusSeen = {} }
       if (Date.now() - bestAt > stuckMs) { snap = snapshot(); return finish(false, 'stuck') }
       if (Date.now() - started > timeoutMs) return finish(false, 'timeout')
     }, 250)
