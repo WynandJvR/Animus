@@ -589,10 +589,11 @@ function decide () {
     if (dHome < 64 && world.phase(bot) === 'day' && saps > 0 && orchard.plantable(bot, spruceSaps, saps, demandTrees) && !held('plant')) return { name: 'plant', why: `${saps} saplings for the orchard (${o ? o.spots.length : 0} spots, ${demandTrees} trees wanted)` }
   }
   // the sheep pen: built while the build wants wool, then stocked and bred (pen.work: the one rule for this and the task)
+  // (a gap in a stocked pen's fence is the gate's errand - the flock walks out; audit)
   // (ahead of the build only the pen's short jobs at home - a gate, the shearing, the breeding - or anything when the build's
   //  band itself waits on wool; the long ones, a flock led in from 180 blocks out, a new pen's fence wood, go in the build's
   //  gaps (9c): the hub's 23 carpets - decoration, holding nothing up - cost two mornings of sheep trips, 2026-10-03)
-  if (dHome < 64 && world.phase(bot) === 'day' && !held('pen')) { const w = pen.work(bot, penArgs()); if (w && (PEN_SHORT.has(w.kind) || woolHolds())) return { name: 'pen', why: w.why } }
+  if (dHome < 64 && world.phase(bot) === 'day' && !held('pen')) { const w = pen.work(bot, penArgs()); if (w && (PEN_SHORT.has(w.kind) || (w.kind === 'build' && pen.pen() && (pen.observe(bot) || { n: 0 }).n > 0) || woolHolds())) return { name: 'pen', why: w.why } }
   // (the harvest when the bread runs low, not every morning: the crop keeps on the stalk, and harvesting and
   //  replanting 71 cells took two minutes of every ten-minute day with 31 bread in the pack, 2026-09-26)
   if (farm.farm() && dHome < 64 && farm.ripeCount(bot) >= 8 && breadStock() < BREAD_WANTED && !held('harvest')) return { name: 'harvest', why: `${farm.ripeCount(bot)} wheat ripe` }
