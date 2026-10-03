@@ -103,6 +103,26 @@ function make (bot, director) {
       // walk3 x y z [range] - the same to a block (a goal by x/z alone wanders the tunnels under it)
       case 'walk': case 'walk3': return exclusive('walk', async () => { const r = await move.goTo(bot, cmd === 'walk3' ? new goals.GoalNear(num(0), num(1), num(2), num(3, 2)) : new goals.GoalNearXZ(num(0), num(1), num(2, 3)), { timeoutMs: 120000, stuckMs: 15000, dig: false, place: false, label: 'walk (no dig)' }); return `walk: ${r.ok ? 'arrived' : r.why} at ${move.fmt(bot.entity.position)}` })
       case 'home': return exclusive('home', async () => { const r = await base.goHome(bot); return `home: ${r.ok ? 'arrived' : r.why}` })
+      case 'movebase': { // movebase save <name> | movebase restore <name> | movebase list - a second base for a far build
+        // (every per-home record: the home-abandon list in director.js, and the bed's spawn - saved whole under a name and
+        //  cleared, so the director settles a new home by the current build; restored, the old base is home again)
+        const F = ['home', 'bed', 'hutPlan', 'hut', 'chests', 'chestContents', 'furnaces', 'tables', 'farm', 'orchard', 'pen', 'mine', 'bunker', 'spawnSetAt', 'shaftsToFill']
+        const EMPTY = { chests: [], chestContents: {}, furnaces: [], tables: [] }
+        const op = a[0]; const nm = a[1]
+        if (op === 'list') return JSON.stringify(Object.fromEntries(Object.entries(mem.get().bases || {}).map(([k, v]) => [k, v.home])))
+        if (!nm || !['save', 'restore'].includes(op)) return 'usage: movebase save <name> | movebase restore <name> | movebase list'
+        director.setPaused(true); move.stopMoving(bot)
+        if (op === 'save') {
+          const m = mem.get(); const rec = {}; for (const k of F) rec[k] = m[k] === undefined ? null : JSON.parse(JSON.stringify(m[k]))
+          mem.update(mm => { mm.bases = Object.assign({}, mm.bases, { [nm]: rec }); for (const k of F) mm[k] = EMPTY[k] !== undefined ? JSON.parse(JSON.stringify(EMPTY[k])) : null })
+          log('base', `base "${nm}" saved (home ${rec.home ? move.fmt(rec.home) : '-'}, ${(rec.chests || []).length} chests) and cleared - a new home by the build`)
+          return `saved base "${nm}" and cleared the home - paused; restart the bot (its zones are read at boot), then resume`
+        }
+        const rec = (mem.get().bases || {})[nm]; if (!rec) return `no saved base "${nm}"`
+        mem.update(mm => { for (const k of F) mm[k] = rec[k] === undefined ? (EMPTY[k] !== undefined ? EMPTY[k] : null) : rec[k]; delete mm.bases[nm] })
+        log('base', `base "${nm}" restored (home ${rec.home ? move.fmt(rec.home) : '-'})`)
+        return `restored base "${nm}" - paused; restart the bot, then resume`
+      }
       case 'sethome': {
         const p = a.length >= 3 ? { x: num(0), y: num(1), z: num(2) } : world.feetPos(bot)
         base.setHome(p); return `home set ${move.fmt(p)}`
