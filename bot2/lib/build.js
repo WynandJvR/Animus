@@ -431,6 +431,7 @@ async function loadSchematic (name, version) {
 }
 
 async function setJob (bot, name, origin, { exactWood: exact = true } = {}) {
+  missingAnchorItems = []
   // (loaded first: a load that throws leaves the running job and its wood rule as they were - audit #35)
   const s = await loadSchematic(name, bot.version)
   woodExact = exact !== false
@@ -1426,6 +1427,7 @@ async function buildStep (bot, opts = {}) {
 async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
   stepStop = shouldStop || null
   myPillar = [] // (a walk's tower from outside a step - the teardown's, the finish's - is no pillar of this one; audit)
+  missingAnchorItems = [] // (this step's own, or none: a step that ends another way leaves no stale list; audit)
   const t0 = Date.now(); const supports0 = supportsLaid; const pl0 = pillarLaid; const pd0 = pillarDug
   holdsMs = 0; holdsPasses = 0 // (this step's own)
   let roomMs = 0 // (the doorway checks' own time this step: the profile)
