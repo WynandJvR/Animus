@@ -305,6 +305,13 @@ function fillerItem (bot) {
   return null
 }
 
+// (a floor of gravel or sand that rests on nothing - followed down through a stack of them: gravel on gravel over air falls
+//  as one when a neighbour is dug; audit)
+function fallingOverNothing (bot, x, y, z) {
+  let b = world.at(bot, x, y, z); if (!b || !world.FALLING_RE.test(b.name)) return false
+  for (let k = 1; k < 8; k++) { b = world.at(bot, x, y - k, z); if (!b || !world.isSolid(b)) return true; if (!world.FALLING_RE.test(b.name)) return false }
+  return true
+}
 async function ensureFloor (bot, p) {
   let below = world.at(bot, p.x, p.y - 1, p.z)
   if (!below) return false
@@ -312,10 +319,9 @@ async function ensureFloor (bot, p) {
   //  a 12-deep cave dropped the bot 13 and the gravel came down on its head, suffocated at y9, 2026-10-03. Taken out, let
   //  fall, and stone put in its place)
   if (world.isSolid(below) && world.FALLING_RE.test(below.name)) {
-    const under = world.at(bot, p.x, p.y - 2, p.z)
-    if (!under || !world.isSolid(under)) {
+    if (fallingOverNothing(bot, p.x, p.y - 1, p.z)) {
       log('mine', `${below.name} over nothing at ${move.fmt({ x: p.x, y: p.y - 1, z: p.z })} - taking it out for a floor of stone`)
-      if (!await act.dig(bot, { x: p.x, y: p.y - 1, z: p.z }, { force: true, timeoutMs: 8000 }).catch(() => false)) return false
+      if (!await act.dig(bot, { x: p.x, y: p.y - 1, z: p.z }, { force: true, noWalk: true, timeoutMs: 8000 }).catch(() => false)) return false
       await move.sleep(700)
       below = world.at(bot, p.x, p.y - 1, p.z)
       if (!below) return false
@@ -842,6 +848,9 @@ function underOwnZone (p) {
 // lava or water, the leaks plugged, the openings walled, a floor under it, then stepped into. (A new level's first cell
 // is one of these from the foot beside it - never the planner's dig; reviewer 2026-09-30)
 async function digStep (bot, m, c, q) {
+  // (never a dig beside a floor of ours that rests on nothing: the step's own cell is level with the cursor's floor, and
+  //  taking it dropped the gravel under the bot into a 12-deep cave - 13 down and buried, 2026-10-03; the leg turns)
+  if (fallingOverNothing(bot, c.x, c.y - 1, c.z)) { log('mine', `my floor at ${move.fmt({ x: c.x, y: c.y - 1, z: c.z })} is ${world.at(bot, c.x, c.y - 1, c.z).name} over nothing - not digging beside it`); return false }
   if (underOwnZone(q)) { log('mine', `the stairs would run under a protected build at ${move.fmt(q)}`); return false }
   { const h = mem.get().home; if (h && Math.hypot(q.x - h.x, q.z - h.z) < 24) { log('mine', `the stairs would run under home's grounds at ${move.fmt(q)}`); return false } } // (the tunnels' own rule)
   const cells = [{ x: q.x, y: q.y + 2, z: q.z }, { x: q.x, y: q.y + 1, z: q.z }, q]
@@ -903,6 +912,7 @@ async function tunnelStep (bot, m) {
 // (m: the mine record the step works on - its cursor and count are written HERE, never through mem.get().mine: a second
 //  writer round saveMine, the record the loop holds and the one in memory could part; 2026-09-30)
 async function openTunnelCell (bot, m, from, q) {
+  if (fallingOverNothing(bot, from.x, from.y - 1, from.z)) { log('mine', `my floor at ${move.fmt({ x: from.x, y: from.y - 1, z: from.z })} is ${world.at(bot, from.x, from.y - 1, from.z).name} over nothing - not digging beside it`); return false } // (the stairs' rule; audit)
   if (underOwnZone(q)) return false // never under the castle or the base
   // (nor under home's grounds at any depth: the y79 legs turned and turned again until they ran 10 blocks from the bed, into
   //  the rock round an old shaft - the night's climb out came up beside it and a zombie knocked the bot down it, 2026-10-02)
