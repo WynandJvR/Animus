@@ -510,7 +510,11 @@ function decide () {
   // a bed to CARRY first (shelter first still holds: it goes down in the safehouse once the shell stands; till then it is
   // slept in where the night finds us - sleepHere). Without one every death respawned 2200 blocks away at world spawn,
   // three treks back in a day (2026-09-27)
-  if (!bed && !shelter.hasBedItem(bot) && world.phase(bot) === 'day' && bedObtainable() && !held('bed')) return { name: 'bed', why: 'no bed - getting one to carry (spawn is where i sleep)' }
+  // (only while a death would respawn far off: at a base by the world spawn it bought nothing ahead of the safehouse - two
+  //  five-minute sheep hunts with the shell at 52/149, 2026-10-03; the bed still comes once the shell stands, below.
+  //  0,0,0 is the client's default before the server says - unknown, so the bed first as before)
+  const sp = bot.spawnPoint; const spawnFar = !(sp && (sp.x || sp.y || sp.z)) || world.dist2(sp, home || bot.entity.position) > 128
+  if (!bed && !shelter.hasBedItem(bot) && spawnFar && world.phase(bot) === 'day' && bedObtainable() && !held('bed')) return { name: 'bed', why: 'no bed - getting one to carry (spawn is where i sleep)' }
 
   // 5. home
   // (no home: setHome, or - while it cools after a failure - nothing; every task below assumes a home; audit)
