@@ -932,7 +932,13 @@ async function goSite (bot, goal, label, { place = true, dig = (job && job.cells
   // after every failure, whatever it was: 88 walks "to the door" in four days, 74 failed, 3227s; 58 of 83 crossings still
   // missed the goal (2026-10-02 analysis). The planner routes through doors itself now (movementsFor)
   void doors
-  return move.goTo(bot, goal, { timeoutMs: 30000, stuckMs: 8000, label: 'site ' + (label || ''), movements: () => siteMovements(bot, { place, dig }) })
+  // (the walker's own towers are this step's pillar as much as pillarTo's: the step's descent takes the body back down
+  //  them. Forgotten, a walk that towered 7 up on the castle's rim and then failed left the bot on the top, a drop all
+  //  round, every walk after it stuck for 25 minutes, 2026-10-03 - the chop's own rule, gather.js tFell)
+  const tWalk = Date.now()
+  const r = await move.goTo(bot, goal, { timeoutMs: 30000, stuckMs: 8000, label: 'site ' + (label || ''), movements: () => siteMovements(bot, { place, dig }) })
+  for (const q of reflex.plannerPlacedSince(tWalk)) if (!(job && job.index.has(key(q))) && !myPillar.some(c => c.x === q.x && c.y === q.y && c.z === q.z)) myPillar.push({ x: q.x, y: q.y, z: q.z })
+  return r
 }
 
 // Obstructions we could not reach twice are left for the end (scaffold cleanup reaches from the
@@ -1196,6 +1202,9 @@ async function descendPillar (bot) {
     // (nor one a finished attached cell hangs on - a torch or lantern put on the pillar's side when it was the only
     //  neighbour; audit)
     if (job && job.cells.some(q => q.sup && q.sup.x === under.x && q.sup.y === under.y && q.sup.z === under.z && cellDone(bot, q) === true)) break
+    // (the fall the dig makes: the walker's blocks are a bridge as often as a stack - a gap under one is a drop of its
+    //  height; never onto lava or into water - the escape's own guard)
+    { const bl = world.at(bot, under.x, under.y - 1, under.z); if (act.fallBelow(bot, under) > world.SAFE_DROP || !bl || world.isLavaBlock(bl) || world.isWaterBlock(bl)) break }
     if (!await act.dig(bot, new Vec3(under.x, under.y, under.z), { force: true, own: true, noWalk: true, allowZones: ['build', 'base'], timeoutMs: 6000 }).catch(() => false)) break
     const t0 = Date.now(); while (!bot.entity.onGround && Date.now() - t0 < 1500) await act.sleep(50)
     myPillar = myPillar.filter(p => !(p.x === under.x && p.y === under.y && p.z === under.z)); pillarDug++
@@ -1415,6 +1424,7 @@ async function buildStep (bot, opts = {}) {
 }
 async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
   stepStop = shouldStop || null
+  myPillar = [] // (a walk's tower from outside a step - the teardown's, the finish's - is no pillar of this one; audit)
   const t0 = Date.now(); const supports0 = supportsLaid; const pl0 = pillarLaid; const pd0 = pillarDug
   holdsMs = 0; holdsPasses = 0 // (this step's own)
   let roomMs = 0 // (the doorway checks' own time this step: the profile)
