@@ -17,7 +17,8 @@ const EXTS = ['.schem', '.litematic', '.nbt', '.schematic']
 
 // ---- policy --------------------------------------------------------------------------------------------
 // skipped outright: trophies, technical blocks, and decoration that only a structure or a rare biome holds
-const DROP_RE = /(_head|_skull|_wall_head|_wall_skull)$|^(spawner|trial_spawner|vault|command_block|chain_command_block|repeating_command_block|barrier|structure_block|structure_void|jigsaw|light|bedrock|end_portal|end_portal_frame|end_gateway|nether_portal|reinforced_deepslate|dragon_egg|fire|soul_fire|moving_piston|piston_head|cobweb|spore_blossom|cave_vines|cave_vines_plant|frogspawn|brewing_stand|beacon|conduit|petrified_oak_slab|budding_amethyst|sculk_shrieker|test_block|test_instance_block)$/
+// (banners too: the operator's rule, 2026-10-03 - decoration nothing stands on, 6 wool each; a castle's 38 were half its wool)
+const DROP_RE = /(_head|_skull|_wall_head|_wall_skull|_banner)$|^(spawner|trial_spawner|vault|command_block|chain_command_block|repeating_command_block|barrier|structure_block|structure_void|jigsaw|light|bedrock|end_portal|end_portal_frame|end_gateway|nether_portal|reinforced_deepslate|dragon_egg|fire|soul_fire|moving_piston|piston_head|cobweb|spore_blossom|cave_vines|cave_vines_plant|frogspawn|brewing_stand|beacon|conduit|petrified_oak_slab|budding_amethyst|sculk_shrieker|test_block|test_instance_block)$/
 // look-alikes for blocks that are never obtainable (by name; shape kept by the family rules below)
 const LOOKALIKE = {
   netherrack: 'granite', glowstone: 'jack_o_lantern', shroomlight: 'jack_o_lantern', sea_lantern: 'jack_o_lantern',
