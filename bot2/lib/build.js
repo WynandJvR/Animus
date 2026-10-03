@@ -1524,6 +1524,10 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     if (minY === Infinity && structural.length) minY = Math.min(...structural.map(c => c.y)) // (none tryable: as before)
     // no more than 3 layers above the lowest unfinished cell: walls rise together, nothing floats far up
     let doable = minY <= lowestAll + 3 ? structural.filter(c => c.y <= minY + 1) : []
+    // (a thin window is the whole band's three layers: the lowest two with the blocks in hand held 1-5 cells - the rest waits
+    //  on wool, flowers, leaves - 20-35 blocks apart, 35s a placed block and 27 blocks an hour, while the same walls a layer
+    //  or two up stood ready in hand; 2026-10-03. Still never past the band's 3-layer cap: walls rise together)
+    if (doable.length < 16 && minY <= lowestAll + 3) { const wide = structural.filter(c => c.y <= lowestAll + 3 && tryable(c)); if (wide.length > doable.length) doable = wide }
     // (the ground swaps once nothing else is ready: nothing else ever does them, and left out for good the build could never
     //  read done; audit)
     if (!doable.length) { const gh = todo.filter(c => !c.attach && has(c) && groundHeldBy(bot, c)); if (gh.length) { const y0 = Math.min(...gh.map(c => c.y)); doable = gh.filter(c => c.y <= y0 + 1) } }
