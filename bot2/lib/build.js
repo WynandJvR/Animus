@@ -2520,11 +2520,25 @@ async function ensureScaffold (bot, n = SCAFFOLD_WANT, { shouldStop } = {}) { //
   const filler = () => inv.items(bot).filter(i => FILLER_ITEMS.test(i.name) || i.name === 'cobblestone').reduce((s, i) => s + i.count, 0)
   if (filler() >= n) return true
   const base = require('./base')
-  for (const name of ['andesite', 'diorite', 'tuff', 'dirt', 'cobbled_deepslate', 'cobblestone']) {
-    const have = filler()
-    if (have >= n) return true
-    if (base.bankCount(name) > 0) await base.withdraw(bot, name, n - have).catch(() => 0)
+  const KINDS = ['andesite', 'diorite', 'tuff', 'dirt', 'cobbled_deepslate', 'cobblestone']
+  const fromBank = async () => {
+    for (const name of KINDS) {
+      const have = filler()
+      if (have >= n) return
+      if (base.bankCount(name) > 0) await base.withdraw(bot, name, n - have).catch(() => 0)
+    }
   }
+  await fromBank()
+  if (filler() >= n) return true
+  // (the bank has it but the pack was full: room first, at the chests beside home, then the bank again - the full pack's
+  //  failed withdraw went straight on to the mine, 32 cobblestone dug at y15 at dusk with 3762 in the chest, 2026-10-03)
+  { const home = mem.get().home
+    if (filler() < n / 2 && KINDS.some(k => base.bankCount(k) > 0) && inv.freeSlots(bot) <= 4 && home && world.dist3(bot.entity.position, home) < 24) {
+      log('build', `pack nearly full (${inv.freeSlots(bot)} free) with scaffold in the chest - depositing, then the chest again`)
+      await base.depositHaul(bot, { shouldStop }).catch(() => {})
+      await fromBank()
+      if (filler() >= n / 2) return true
+    } }
   // (none banked: cobblestone from the mine at home first - the castle burns it as stone anyway, and the mine is a
   //  known walk; the surface dirt round home is protected ground, so "27 dirt" explored 104 blocks out, and the
   //  pathfinder stepped the bot into a roofed water pocket there - drowned with 390 items, 2026-09-28. Dirt only
