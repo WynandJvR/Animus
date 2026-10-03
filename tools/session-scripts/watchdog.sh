@@ -6,6 +6,9 @@ op () { curl -s -m 10 -X POST http://127.0.0.1:3001/op/cmd -H 'Content-Type: app
 done_now () { op buildstatus | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log(JSON.parse(s).done)}catch{console.log(-1)}})"; }
 since () { date -d "-$1 min" +%Y-%m-%dT%H:%M; }
 recent () { awk -v t="[$(since $1)" 'substr($0,1,17) >= t' $L; }
+# (the last N minutes, but nothing from before the last deploy: a loop the deploy fixed alarmed on its old lines for ten
+#  minutes after, 2026-10-03)
+recentSinceDeploy () { local t=$(since $1); local d=$(cut -c1-16 $(dirname "$0")/last-deploy.txt 2>/dev/null); [ -n "$d" ] && [[ "$d" > "$t" ]] && t=$d; awk -v t="[$t" 'substr($0,1,17) >= t' $L; }
 start=$(date +%s); last_done=$(done_now); last_change=$(date +%s)
 while true; do
   sleep 60
@@ -35,10 +38,10 @@ while true; do
   set -- $t; [ -n "$2" ] && [ "$2" != "null" ] && [ "$2" -gt 1200 ] && [ "$1" != "sleep" ] && [ "$1" != "expedition" ] && { echo "ALARM: task $1 running ${2}s"; exit 0; }
   # (a silent loop: one line - timestamps off, coordinates kept - 40+ times in 10 min. The strip loop (637 dead clicks) and
   #  the mine's corridor ping-pong (240 "turning") ran for hours under every other alarm, 2026-09-28)
-  sp=$(recent 10 | cut -c32- | grep -av "(op) \|(body)\|(vital)" | sort | uniq -c | sort -rn | awk '$1>=40 {print; exit}')
+  sp=$(recentSinceDeploy 10 | cut -c32- | grep -av "(op) \|(body)\|(vital)" | sort | uniq -c | sort -rn | awk '$1>=40 {print; exit}')
   [ -n "$sp" ] && { echo "ALARM: log loop: $sp"; exit 0; }
   # (the same kind of line at different cells - "blocked at X", "won't place at Y": numbers normalised, 60+ in 10 min)
-  sk=$(recent 10 | cut -c32- | grep -av "(op) \|(body)\|(vital)" | sed -E 's/-?[0-9]+(\.[0-9]+)?/#/g' | sort | uniq -c | sort -rn | awk '$1>=60 {print; exit}')
+  sk=$(recentSinceDeploy 10 | cut -c32- | grep -av "(op) \|(body)\|(vital)" | sed -E 's/-?[0-9]+(\.[0-9]+)?/#/g' | sort | uniq -c | sort -rn | awk '$1>=60 {print; exit}')
   [ -n "$sk" ] && { echo "ALARM: log loop (any cell): $sk"; exit 0; }
   # a throw in the pathfinder's tick (caught: one path reset - patch-mc262.js) or an uncaught crash: the body's faults
   # a gate the path opens refusing its click at one spot, 5+ times in 2 min: the stuck retry (move.js path_use_error)
