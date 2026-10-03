@@ -1267,16 +1267,18 @@ function tick () {
     const ours = !!floor && isFooting(fx, fy, fz)
     if ((ours || doomed(floor)) && require('./act').fallBelow(bot, { x: fx, y: fy, z: fz }) > world.SAFE_DROP) {
       let best = null; let bd = Infinity
+      const dropCol = new Map(); const colDrop = (cx, cz) => { const k = cx + ',' + cz; if (!dropCol.has(k)) dropCol.set(k, world.dropAt(bot, cx + 0.5, fy + 1, cz + 0.5)); return dropCol.get(k) }
+      const crossesDrop = (x, z) => { const n = Math.ceil(Math.hypot(x + 0.5 - me.x, z + 0.5 - me.z) / 0.1); for (let i = 1; i < n; i++) { const t = i / n; const cx = Math.floor(me.x + (x + 0.5 - me.x) * t); const cz = Math.floor(me.z + (z + 0.5 - me.z) * t); if (cx === fx && cz === fz) continue; if (colDrop(cx, cz) > world.SAFE_DROP) return true } return false }
       for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) for (let dy = -1; dy <= 1; dy++) {
         const x = fx + dx; const y = fy + 1 + dy; const z = fz + dz
         if (!world.standable(bot, x, y, z) || doomed(world.at(bot, x, y - 1, z)) || (ours && isFooting(x, y - 1, z))) continue
-        // (and only one the straight steer reaches without crossing a drop: the edge brake stops that steer at the lip, the
-        //  row steers again - 27 times in 26s on a felled crown beside a 5-block drop, 2026-10-03. Over the drop is no way)
-        { const n = Math.ceil(Math.hypot(x + 0.5 - me.x, z + 0.5 - me.z) / 0.4); let crosses = false
-          for (let i = 1; i < n && !crosses; i++) { const t = i / n; const px = me.x + (x + 0.5 - me.x) * t; const pz = me.z + (z + 0.5 - me.z) * t; if (Math.floor(px) === fx && Math.floor(pz) === fz) continue; if (world.dropAt(bot, px, fy + 1, pz) > world.SAFE_DROP && !world.standable(bot, Math.floor(px), fy + 1, Math.floor(pz))) crosses = true }
-          if (crosses) continue }
         const d = Math.abs(dx) + Math.abs(dz) + Math.abs(dy)
-        if (d < bd) { bd = d; best = { x, y, z } }
+        if (d >= bd) continue
+        // (and only one the straight steer reaches without crossing a drop: the edge brake stops that steer at the lip, the
+        //  row steers again - 27 times in 26s on a felled crown beside a 5-block drop, 2026-10-03. Sampled every 0.1 - a
+        //  diagonal clips a drop's corner in less than 0.4 - and each column's drop read once a tick; audit)
+        if (crossesDrop(x, z)) continue
+        bd = d; best = { x, y, z }
       }
       const way = best ? null : leafWayOff(floor, fx, fy, fz, ours)
       const why = best ? `stepping off to ${best.x},${best.y},${best.z}` : way ? way.why : 'stranded: nowhere firm within 3, no drop I would take, no block to stand on'
