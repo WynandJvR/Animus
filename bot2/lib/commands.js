@@ -150,6 +150,7 @@ function make (bot, director) {
         }
         return 'usage: movebase save <name> <schematic> <x> <y> <z> [corner] [anywood] | movebase restore <name> | movebase list'
       }
+      case 'withdraw': return exclusive('withdraw', async () => { const n = Math.max(1, Number(a[1]) || 64); const got = await base.withdraw(bot, a[0], n).catch(e => 'threw ' + e.message); return `withdraw ${a[0]}: took ${got}` }) // withdraw <item> [n] - out of the chests into the pack
       case 'sethome': {
         const p = a.length >= 3 ? { x: num(0), y: num(1), z: num(2) } : world.feetPos(bot)
         base.setHome(p); return `home set ${move.fmt(p)}`
