@@ -109,6 +109,16 @@ function standable (bot, x, y, z) {
 }
 
 function feetPos (bot) { return bot.entity.position.floored() }
+// THE CELL THE BODY STANDS IN, as the pathfinder reckons it (its start node, mineflayer-pathfinder index.js:84): on a
+// bottom slab, a stair, a path block the feet are inside the block's own cell - floored, one below the stand every plan
+// and every stand search names. Arrival judged on the floored cell never came: the legs ended "1.0b short" right under
+// their stand and the walks timed out with the body already there (24% of the failing stands had a slab or stair floor,
+// 2026-10-03 analysis)
+function standCell (bot) {
+  const p = bot.entity.position; const f = p.floored(); const b = at(bot, p.x, p.y, p.z)
+  if (b && p.y - f.y > 0.001 && bot.entity.onGround && b.boundingBox !== 'empty') f.y += 1
+  return f
+}
 function eyeBlock (bot) { const p = bot.entity.position; return at(bot, p.x, p.y + 1.62, p.z) }
 function headInWater (bot) { return isWaterBlock(eyeBlock(bot)) }
 function feetInWater (bot) { const p = bot.entity.position; return isWaterBlock(at(bot, p.x, p.y, p.z)) }
@@ -337,7 +347,7 @@ function hasAirNeighbour (bot, p) {
   return false
 }
 
-module.exports = { isOpenTrapdoor, plateEdge, LANTERN_RE, FURNITURE_RE, walkTicks, HOME_MARGIN, SAFE_DROP, dropAt,
+module.exports = { standCell, isOpenTrapdoor, plateEdge, LANTERN_RE, FURNITURE_RE, walkTicks, HOME_MARGIN, SAFE_DROP, dropAt,
   data, v, at, name, isWaterBlock, isLiquidWater, holdsWater, isLavaBlock, isSolid, isAirish, standable, feetPos, eyeBlock,
   headInWater, feetInWater, inLava, tod, phase, isNight, isDay, ticksUntilNight, canSleepNow, lavaNear, holdsBackLava, waterNear,
   groundY, openSky, dist2, dist3, blockIds, findBlocks, scanBlocks, stateIds, sectionMay, sightReach, hasAirNeighbour, skyLitFace,

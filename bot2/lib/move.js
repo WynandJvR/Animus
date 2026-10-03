@@ -460,7 +460,7 @@ function runGoal (bot, goal, { timeoutMs, stuckMs, movements }) {
       if (!ok || why !== 'reached') stopMoving(bot)
       resolve(visited != null && why === 'noPath' ? { ok, why, visited } : { ok, why })
     }
-    const onReached = () => { if (goal.isEnd(bot.entity.position.floored())) finish(true, 'reached') }
+    const onReached = () => { if (arrived(bot, goal)) finish(true, 'reached') }
     // NO PATH IS A VERDICT: the search ran out of options. The planner hands back a path to its closest node all the same,
     // and walked, it ended "stuck" 8-30s later - 302 stuck, 0 noPath in four days of castle walks, every caller unable to
     // tell "no way there" from "the body could not" (2026-10-02). Only a search cut short (partial) walks on; noPaths kept
@@ -468,7 +468,7 @@ function runGoal (bot, goal, { timeoutMs, stuckMs, movements }) {
     const onPath = r => {
       if (r.status === 'noPath') {
         visited = r.visitedNodes != null ? r.visitedNodes : null
-        if (!goal.isEnd(bot.entity.position.floored()) && (r.path.length > 0 || ++noPaths >= 3)) finish(false, 'noPath')
+        if (!arrived(bot, goal) && (r.path.length > 0 || ++noPaths >= 3)) finish(false, 'noPath')
       } else if (r.path.length) noPaths = 0
     }
     const onDeath = () => finish(false, 'died')
@@ -477,7 +477,7 @@ function runGoal (bot, goal, { timeoutMs, stuckMs, movements }) {
       if (!bot.entity) return finish(false, 'died')
       // walking into a closed door (the plan goes through doors now): open it, as a player does
       if (Date.now() - doorAt > 1200) { const dd = closedDoorAt(bot); if (dd) { doorAt = Date.now(); bot.activateBlock(dd).catch(() => {}) } }
-      if (goal.isEnd(bot.entity.position.floored())) return finish(true, 'reached')
+      if (arrived(bot, goal)) return finish(true, 'reached')
       if (cancelled()) return finish(false, 'stopped')
       if (reflexActive()) return finish(false, 'interrupted')
       const d = goalDistance(bot, goal)
@@ -499,6 +499,9 @@ async function waitReflex (bot, maxMs = 60000) {
   while (reflexActive() && Date.now() - t0 < maxMs) await sleep(250)
 }
 function sleep (ms) { return new Promise(r => setTimeout(r, ms)) }
+// (arrived: the floored cell or the cell stood in over a slab or stair - the pathfinder's own two (index.js:593): judged
+//  on the floored cell alone, a stand over a half block was never reached, 2026-10-03)
+function arrived (bot, goal) { return goal.isEnd(world.standCell(bot)) || goal.isEnd(bot.entity.position.floored()) }
 
 // Get out of a spot the planner keeps failing from: step back, jump, or tower one block.
 // (only a way that is not over a drop: a random key and a jump at the castle's south rim - a strafe, which neither the jump
@@ -772,7 +775,7 @@ async function goToInner2 (bot, goal, opts, { timeoutMs, stuckMs, dig, place, al
     await new Promise(resolve => setImmediate(resolve))
     if (!bot.entity) return { ok: false, why: 'no body' }
     if (cancelled()) return { ok: false, why: 'stopped' }
-    if (goal.isEnd(bot.entity.position.floored())) return { ok: true, why: 'reached' }
+    if (arrived(bot, goal)) return { ok: true, why: 'reached' }
     if (shouldStop && shouldStop()) return { ok: false, why: 'stopped' }
     await waitR()
     // you may always work your way out of where you stand: inside the castle walls a walk to the furnace
