@@ -1446,7 +1446,10 @@ async function castleWorkInner () {
   // (starved of stone: straight to the mine, not a build step over the few cells in hand - eight minutes placed one
   //  block 58 away while the next layers were 1900 cobblestone short, and the mine got the last three, 2026-09-27)
   const winShort = mats.planFor(bot, next).raw.cobblestone || 0
-  if (winShort > 512 && countOf('cobblestone') < 64) { log('dir', `${winShort} cobblestone short with ${countOf('cobblestone')} in hand - mining first`); carrying = 0 }
+  // (only when there is little to place: with 256 stone bricks, 192 planks and the stairs in hand for the spawn hub, two
+  //  whole days went to coal and cobble for the layers after them, 0 placed - 523s and 412s rounds, 2026-10-03. What is in
+  //  hand goes in first; the step's own wait then steers the gathering)
+  if (winShort > 512 && countOf('cobblestone') < 64 && carrying < 64) { log('dir', `${winShort} cobblestone short with ${countOf('cobblestone')} in hand and ${carrying} blocks for the next layers - mining first`); carrying = 0 }
   if (carrying > 0) {
     phase('build step')
     const r = await build.buildStep(bot, { shouldStop: dayStop, maxMs: 8 * 60000 })
