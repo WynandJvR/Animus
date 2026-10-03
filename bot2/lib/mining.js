@@ -473,7 +473,10 @@ function diedInMine (m) {
   // under it) did not count in 3D and the bot fell into the same ravine again and again
   // (the level it happened on - the shallowest the death lies by: a death on level 0's stairs is the whole mine's, one in a
   //  deeper level's tunnel that level's and the ones under it; -1 none)
-  const recent = (mem.get().deaths || []).filter(d => Date.now() - d.t < 3 * 60 * 60000 && d.cause !== 'void')
+  // (and only deaths since the mine was begun: one chosen beside an older death was given up on the next trip as "died in
+  //  the mine lately" - four new staircases in a morning, no iron, the castle waiting, 2026-10-03. The death keeps a site
+  //  from being chosen by chooseEntrance's own rules; it says nothing of a mine dug after it)
+  const recent = (mem.get().deaths || []).filter(d => Date.now() - d.t < 3 * 60 * 60000 && d.cause !== 'void' && d.t > (m.born || 0))
   const hit = minePath(m).filter(p => recent.some(d => world.dist2(p, d) < 16)).map(p => p.lv)
   return hit.length ? Math.min(...hit) : -1
 }
@@ -651,6 +654,7 @@ async function mineFor (bot, itemName, target, ctx = {}) {
     if (!m) { log('mine', 'no safe spot for a mine entrance near home'); return false }
     if (ore) { m.ore = itemName; m.oreY = ore.y }
     m.stairsDir = { x: m.dir.x, z: m.dir.z }
+    m.born = Date.now() // (deaths before it are no deaths in it - diedInMine)
     saveMine(m)
     log('mine', `new mine at ${move.fmt(m.entrance)} heading ${m.dir.x},${m.dir.z} to y${m.level}`)
   }
