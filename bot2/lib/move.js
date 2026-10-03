@@ -948,7 +948,7 @@ async function escapeUpInner (bot) {
         if (act.fallBelow(bot, u) > world.SAFE_DROP || !below || world.isLavaBlock(below) || world.isWaterBlock(below)) { log('move', `a gap in our pillar below me at y${u.y - 1} - staying up`); break }
         // (a seeded block here too: the body stands on it because the escape towered it - survival outranks inferred
         //  ownership, the grief plan's escape net; audit)
-        if (!await act.dig(bot, u, { force: true, noWalk: true, allowZones: ['*'], timeoutMs: 8000 }).catch(() => false)) break
+        if (!await act.dig(bot, u, { force: true, noWalk: true, allowZones: ['*'], timeoutMs: 8000 }).catch(() => false)) { log('move', `our pillar's ${fmt(u)} would not dig: ${act.lastDigWhy() || 'no reason given'}`); break } // (said: a descent that dug nothing read "came down" in place, 2026-10-03)
         const t0 = Date.now(); while (!bot.entity.onGround && Date.now() - t0 < 1500) await sleep(50)
       }
       clearGiveUps(f0)
