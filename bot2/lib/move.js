@@ -456,7 +456,11 @@ function runGoal (bot, goal, { timeoutMs, stuckMs, movements }) {
     // (the planner's own account of the stall, taken BEFORE the stop clears it: the give-up line read the body after
     //  stopMoving - "goal none, keys none" on every one of seven 40s stalls in an evening, nothing to go on, 2026-10-03)
     let replans = 0; let lastStatus = ''; let lastLen = 0; let snap = null
-    const snapshot = () => { try { const cs = bot.controlState || {}; const g = bot.pathfinder.goal; return `planner: goal ${g ? 'set' : 'none'}, moving ${bot.pathfinder.isMoving()}, keys ${Object.keys(cs).filter(k => cs[k]).join('+') || 'none'}, ${replans} replans since the last progress, last ${lastStatus || '-'} ${lastLen} nodes, ${(goalDistance(bot, goal)).toFixed(1)} from the goal (best ${best.toFixed(1)})` } catch { return '' } }
+    // (and WHY the planner threw its paths away: 107 good paths in 10s, keys none, at the pit by the mine - something resets
+    //  each one before a step, 2026-10-03. The pathfinder names its reason)
+    let resets = {}
+    const onReset = why => { resets[why] = (resets[why] || 0) + 1 }
+    const snapshot = () => { try { const cs = bot.controlState || {}; const g = bot.pathfinder.goal; return `planner: goal ${g ? 'set' : 'none'}, moving ${bot.pathfinder.isMoving()}, keys ${Object.keys(cs).filter(k => cs[k]).join('+') || 'none'}, ${replans} replans since the last progress, last ${lastStatus || '-'} ${lastLen} nodes, ${(goalDistance(bot, goal)).toFixed(1)} from the goal (best ${best.toFixed(1)}), resets ${JSON.stringify(resets)}` } catch { return '' } }
     const finish = (ok, why) => {
       if (done) return
       done = true
@@ -464,6 +468,7 @@ function runGoal (bot, goal, { timeoutMs, stuckMs, movements }) {
       bot.removeListener('goal_reached', onReached)
       bot.removeListener('path_update', onPath)
       bot.removeListener('death', onDeath)
+      bot.removeListener('path_reset', onReset)
       if (!ok || why !== 'reached') stopMoving(bot)
       resolve(visited != null && why === 'noPath' ? { ok, why, visited } : snap ? { ok, why, snap } : { ok, why })
     }
@@ -494,13 +499,14 @@ function runGoal (bot, goal, { timeoutMs, stuckMs, movements }) {
       if (reflexActive()) return finish(false, 'interrupted')
       const d = goalDistance(bot, goal)
       const busy = bot.pathfinder.isMining() || bot.pathfinder.isBuilding()
-      if (d < best - 0.9 || busy) { if (d < best) best = d; bestAt = Date.now(); replans = 0 }
+      if (d < best - 0.9 || busy) { if (d < best) best = d; bestAt = Date.now(); replans = 0; resets = {} }
       if (Date.now() - bestAt > stuckMs) { snap = snapshot(); return finish(false, 'stuck') }
       if (Date.now() - started > timeoutMs) return finish(false, 'timeout')
     }, 250)
     bot.on('goal_reached', onReached)
     bot.on('path_update', onPath)
     bot.on('death', onDeath)
+    bot.on('path_reset', onReset)
     bot.pathfinder.setMovements(movements)
     bot.pathfinder.setGoal(goal)
   })
