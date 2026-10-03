@@ -187,10 +187,19 @@ const STANDS_ON_RE = /(?<!jack_o_|sea_)lantern$|candles?$|^torch$|_torch$|_carpe
 // one conversion per file version: the build command read the castle twice on the body's event loop (for its centre,
 // then for the job) - 14-42k cells each time (2026-09-27, the GUI audit)
 const loaded = new Map() // file -> { key, s }
-async function load (name, version, { log = () => {} } = {}) {
+// THE OPERATOR'S CHOICES for a build (the panel's cost check: a block that costs the gathering hours - 23 anvils' 700 iron,
+// 140 lightning rods' 420 copper - skipped or swapped for a cheap one): { skip: [block], swap: { block: block } }, applied to
+// the block the bot would place (after the overworld look-alikes), the same as the banners' skip
+function normPrefs (prefs, md) {
+  const skip = new Set(((prefs && prefs.skip) || []).filter(n => typeof n === 'string'))
+  const swap = {}
+  for (const [a, b] of Object.entries((prefs && prefs.swap) || {})) if (typeof b === 'string' && md.blocksByName[b] && !NOTHING_RE.test(b) && a !== b) swap[a] = b
+  return { skip, swap }
+}
+async function load (name, version, { log = () => {}, prefs = null } = {}) {
   const file = findFile(name)
   if (!file) throw new Error('no blueprint ' + name + ' (' + EXTS.join(' ') + ')')
-  const ckey = version + ':' + fs.statSync(file).mtimeMs
+  const ckey = version + ':' + fs.statSync(file).mtimeMs + ':' + JSON.stringify(prefs || {})
   const hit = loaded.get(file)
   if (hit && hit.key === ckey) return hit.s
   const ext = path.extname(file)
@@ -202,16 +211,18 @@ async function load (name, version, { log = () => {} } = {}) {
   let planner = null
   try { planner = require('./materials').makePlanner(md) } catch {}
   const memo = new Map(); const stateOf = new Map()
+  const P = normPrefs(prefs, md)
   const palette = [Block.fromProperties('air', {}, 0).stateId]; const blocks = new Array(g.sx * g.sy * g.sz).fill(0)
-  const report = { substituted: {}, dropped: {}, blocks: 0, file }
+  const report = { substituted: {}, dropped: {}, chosen: {}, blocks: 0, file }
   for (let y = 0; y < g.sy; y++) {
     await new Promise(r => setImmediate(r)) // (a layer at a time: the body's ticks go on between them)
     for (let z = 0; z < g.sz; z++) for (let x = 0; x < g.sx; x++) {
     const c = g.at(x, y, z); if (!c) continue
     let to = resolve(c.name, md, planner, memo)
+    if (to && P.skip.has(to)) { report.chosen['skip ' + to] = (report.chosen['skip ' + to] || 0) + 1; to = null } else if (to && P.swap[to]) { const t = resolve(P.swap[to], md, planner, memo); const ck = to + '->' + (t || 'skip'); report.chosen[ck] = (report.chosen[ck] || 0) + 1; to = t } // (the target resolved like any block: a swap to bedrock or a spawner is never placed as typed; audit)
     // a skipped block that something stands on keeps a post in its place: the castle's lantern on a brewing stand could
     // never go in once the stand was skipped (2026-09-27)
-    if (!to) { const up = g.at(x, y + 1, z); if (up && STANDS_ON_RE.test(up.name) && resolve(up.name, md, planner, memo)) to = 'cobblestone_wall' }
+    if (!to) { const up = g.at(x, y + 1, z); const ur = up && STANDS_ON_RE.test(up.name) ? resolve(up.name, md, planner, memo) : null; if (ur && !P.skip.has(ur)) to = 'cobblestone_wall' } // (and not under a block the operator skipped too: a bare post; audit)
     if (!to) { report.dropped[c.name] = (report.dropped[c.name] || 0) + 1; continue }
     if (to !== c.name) { const k = c.name + '->' + to; report.substituted[k] = (report.substituted[k] || 0) + 1 }
     // a lantern standing in for something hung on a wall or ceiling (a bell) hangs from the block above when nothing is
@@ -239,7 +250,7 @@ async function load (name, version, { log = () => {} } = {}) {
   s.report = report
   loaded.set(file, { key: ckey, s })
   const n = o => Object.values(o).reduce((a, b) => a + b, 0)
-  log('blueprint', `${path.basename(file)}: ${report.blocks} blocks, ${n(report.substituted)} swapped for overworld look-alikes ${JSON.stringify(report.substituted)}, ${n(report.dropped)} skipped ${JSON.stringify(report.dropped)}`)
+  log('blueprint', `${path.basename(file)}: ${report.blocks} blocks, ${n(report.substituted)} swapped for overworld look-alikes ${JSON.stringify(report.substituted)}, ${n(report.chosen) ? `the operator's choices ${JSON.stringify(report.chosen)}, ` : ''}${n(report.dropped)} skipped ${JSON.stringify(report.dropped)}`)
   return s
 }
 

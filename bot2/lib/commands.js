@@ -144,7 +144,7 @@ function make (bot, director) {
             mm.spawnSetAt = null // (the server's spawn is the other base's bed now: set again at this bed - audit)
             delete mm.bases[nm]
           })
-          if (rec.build && rec.build.name && rec.build.origin) await build.setJob(bot, rec.build.name, rec.build.origin, { exactWood: rec.build.exactWood === true })
+          if (rec.build && rec.build.name && rec.build.origin) await build.setJob(bot, rec.build.name, rec.build.origin, { exactWood: rec.build.exactWood === true, prefs: rec.build.prefs || null })
           log('base', `base "${nm}" restored (home ${rec.home ? move.fmt(rec.home) : '-'}, build ${rec.build ? rec.build.name : '-'})${cur ? `; the base left saved as "${curName}"` : ''}`)
           return `restored base "${nm}"${cur ? ` (the current one saved as "${curName}")` : ''} - paused; restart the bot, then resume`
         }
@@ -187,16 +187,28 @@ function make (bot, director) {
         require('./materials').resetPlanner()
         return `wood: ${a[0]} for ${j.name}`
       }
+      // what a blueprint costs to gather, the dear blocks flagged (the panel's Build dialog asks this before it starts one)
+      case 'buildcost': {
+        if (!a[0]) return 'usage: buildcost <schematic>'
+        return JSON.stringify(await build.costReport(bot, a[0]))
+      }
       case 'build': {
         const name = a[0]
-        if (!name || a.length < 4) return 'usage: build <schematic> <x> <y> <z> [corner] [anywood]   (coords are the CENTRE unless "corner"; wood is the blueprint species unless "anywood")'
+        if (!name || a.length < 4) return 'usage: build <schematic> <x> <y> <z> [corner] [anywood] [skip=block,block] [swap=block>block,block>block]   (coords are the CENTRE unless "corner"; wood is the blueprint species unless "anywood"; skip/swap: the cost check\'s choices)'
         let origin = { x: num(1), y: num(2), z: num(3) }
         const corner = a.includes('corner')
-        const s = await build.loadSchematic(name, bot.version)
+        // the operator's choices from the cost check (block names, no spaces): skip=anvil,bell swap=lightning_rod>oak_fence
+        const prefs = { skip: [], swap: {} }
+        for (const w of a) {
+          if (/^skip=/.test(w)) prefs.skip.push(...w.slice(5).split(',').filter(Boolean))
+          if (/^swap=/.test(w)) for (const pr of w.slice(5).split(',')) { const [f, t] = pr.split('>'); if (f && t) prefs.swap[f] = t }
+        }
+        const chosen = prefs.skip.length || Object.keys(prefs.swap).length ? prefs : null
+        const s = await build.loadSchematic(name, bot.version, chosen)
         if (!corner) { const en = s.end(); const st = s.start(); origin = { x: origin.x - Math.floor((en.x - st.x) / 2), y: origin.y, z: origin.z - Math.floor((en.z - st.z) / 2) } }
         // the blueprint's own wood species unless "anywood" (then any local wood stands in for any)
-        await build.setJob(bot, name, origin, { exactWood: !a.includes('anywood') })
-        return `build job set: ${name} origin ${move.fmt(origin)}${a.includes('anywood') ? ' (any local wood)' : ' (exact wood species)'}`
+        await build.setJob(bot, name, origin, { exactWood: !a.includes('anywood'), prefs: chosen })
+        return `build job set: ${name} origin ${move.fmt(origin)}${a.includes('anywood') ? ' (any local wood)' : ' (exact wood species)'}${chosen ? ` (the choices applied: ${JSON.stringify((s.report && s.report.chosen) || {})})` : ''}`
       }
       case 'door': return exclusive('door', async () => { const g = new goals.GoalBlock(num(0), num(1), num(2)); const ok = await move.crossDoor(bot, g).catch(e => 'threw ' + e.stack); return `crossDoor: ${ok} now at ${move.fmt(bot.entity.position)}` })
       case 'furnaces': return exclusive('furnaces', async () => {

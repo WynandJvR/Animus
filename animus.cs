@@ -2812,6 +2812,81 @@ class Animus : Form
         tips.SetToolTip(wAny, "Any local wood species stands in for the blueprint's (faster, looks different).");
         y += BtnSec + S4;
 
+        // 4 - cost check: the blocks that cost the gathering hours (23 anvils were ~700 iron, 140 lightning rods 420 copper -
+        // found only once the bot began gathering), each kept, skipped or swapped for a cheap one before it starts
+        Lbl(d, "4   COST CHECK", FCap, Accent2).SetBounds(X, y, W, 14); y += 18;
+        Label costSum = Lbl(d, "See what the blueprint costs to gather; the dear blocks can be skipped or swapped.", FSmall, Muted);
+        costSum.SetBounds(X, y, W - 140 - S2, 32);
+        Button bCost = MakeBtn(d, "Check cost", BtnChip, Ghost, GhostHi, Muted, FSmallB, BtnChip / 2, null);
+        bCost.SetBounds(X + W - 140, y, 140, BtnChip);
+        y += 34;
+        Panel costRows = new Panel();
+        costRows.BackColor = Card; costRows.AutoScroll = true;
+        d.Controls.Add(costRows);
+        costRows.SetBounds(X, y, W, 112);
+        y += 112 + S3;
+        // one entry a flagged block: its name, the choice ("keep" / "skip" / "swap"), the swap's target
+        List<string> rowBlock = new List<string>(), rowChoice = new List<string>(), rowSwap = new List<string>();
+        string[] costFor = { null };   // the blueprint the choices belong to
+        bCost.Click += delegate {
+            string name = pk.Text.Trim();
+            if (!pk.Items.Contains(name)) { costSum.ForeColor = Red; costSum.Text = "Pick a blueprint first."; return; }
+            if (Regex.IsMatch(name, @"s")) { costSum.ForeColor = Red; costSum.Text = "The bot can't take names with spaces — rename the file (e.g. my_house)."; return; }
+            if (!botUp) { costSum.ForeColor = Red; costSum.Text = "The bot is offline — press Start first."; return; }
+            bCost.Enabled = false; costSum.ForeColor = Muted; costSum.Text = "Reading " + name + "… big blueprints take a while.";
+            RunBg(delegate {
+                string r = WebPostSlow(ApiBase + "/op/cmd", "buildcost " + name, 120000);
+                Dictionary<string, object> rep = null;
+                try { rep = new JavaScriptSerializer().DeserializeObject(r ?? "") as Dictionary<string, object>; } catch { }   // (its own: this is a pool thread)
+                try
+                {
+                    d.BeginInvoke((MethodInvoker)delegate {
+                        if (d.IsDisposed) return;
+                        bCost.Enabled = true;
+                        // (the old rows disposed, not just dropped: their tooltips and handles went with them)
+                        while (costRows.Controls.Count > 0) { Control old = costRows.Controls[0]; tips.SetToolTip(old, null); old.Dispose(); }
+                        rowBlock.Clear(); rowChoice.Clear(); rowSwap.Clear();
+                        if (rep == null) { costSum.ForeColor = Red; costSum.Text = r == null ? "The bot didn't answer." : Regex.Replace(r.Split('\n')[0], @"^HTTP 500: (error: )?", ""); costFor[0] = null; return; }
+                        costFor[0] = name;
+                        System.Collections.IEnumerable flagged = rep.ContainsKey("flagged") ? rep["flagged"] as System.Collections.IEnumerable : null;
+                        int i = 0;
+                        if (flagged != null)
+                            foreach (object o in flagged)
+                            {
+                                Dictionary<string, object> f = o as Dictionary<string, object>;
+                                if (f == null) continue;
+                                string block = S(f, "block"), sug = f.ContainsKey("suggest") && f["suggest"] != null ? "" + f["suggest"] : "";
+                                string swapTo = sug.StartsWith("swap:") ? sug.Substring(5) : "";
+                                int k = rowBlock.Count;
+                                rowBlock.Add(block); rowSwap.Add(swapTo);
+                                rowChoice.Add(sug == "skip" ? "skip" : swapTo != "" ? "swap" : "keep");   // the suggestion, preset
+                                Label l = Lbl(costRows, block.Replace('_', ' ') + "  ×" + S(f, "count") + "  —  " + S(f, "flag"), FSmall, Txt);
+                                int sb = SystemInformation.VerticalScrollBarWidth + 6;
+                                l.SetBounds(0, i * 28 + 4, W - 160 - sb, 18);
+                                tips.SetToolTip(l, block + ": " + S(f, "flag"));
+                                Button c = MakeBtn(costRows, "", BtnChip, Ghost, GhostHi, Txt, FSmallB, BtnChip / 2, null);
+                                c.SetBounds(W - 150 - sb, i * 28, 150, BtnChip);
+                                EventHandler paint = delegate {
+                                    c.Text = rowChoice[k] == "skip" ? "Skip" : rowChoice[k] == "swap" ? "Swap → " + rowSwap[k].Replace('_', ' ') : "Keep";
+                                    StyleToggle(c, rowChoice[k] != "keep");
+                                };
+                                c.Click += delegate {
+                                    rowChoice[k] = rowChoice[k] == "keep" ? "skip" : rowChoice[k] == "skip" && rowSwap[k] != "" ? "swap" : "keep";
+                                    paint(null, null);
+                                };
+                                paint(null, null);
+                                i++;
+                            }
+                        double hours = D(rep, "total") / 3600.0;
+                        costSum.ForeColor = i > 0 ? Amber : Muted;
+                        costSum.Text = "About " + hours.ToString("0.#") + " h of gathering for " + S(rep, "blocks") + " blocks. " +
+                            (i > 0 ? i + " dear block" + (i > 1 ? "s" : "") + " below — click to keep, skip or swap." : "Nothing out of proportion.");
+                    });
+                }
+                catch { }
+            });
+        };
+
         // replace warning + result line
         Label note = Lbl(d, "", FSmall, Amber);
         note.SetBounds(X, y, W, 34);
@@ -2846,6 +2921,18 @@ class Animus : Form
                 if (!int.TryParse(tc[i].Text.Trim(), out v[i])) { note.ForeColor = Red; note.Text = "Enter whole-number X, Y and Z (or use the bot's spot)."; tc[i].Focus(); return; }
             if (!botUp) { note.ForeColor = Red; note.Text = "The bot is offline — press Start first."; return; }
             string cmd = "build " + name + " " + v[0] + " " + v[1] + " " + v[2] + (corner[0] ? " corner" : "") + (anyWood[0] ? " anywood" : "");
+            // the cost check's choices - only for the blueprint they were made for
+            if (costFor[0] == name)
+            {
+                List<string> sk = new List<string>(), sw = new List<string>();
+                for (int i = 0; i < rowBlock.Count; i++)
+                {
+                    if (rowChoice[i] == "skip") sk.Add(rowBlock[i]);
+                    else if (rowChoice[i] == "swap" && rowSwap[i] != "") sw.Add(rowBlock[i] + ">" + rowSwap[i]);
+                }
+                if (sk.Count > 0) cmd += " skip=" + string.Join(",", sk.ToArray());
+                if (sw.Count > 0) cmd += " swap=" + string.Join(",", sw.ToArray());
+            }
             sending[0] = true; go.Enabled = false; cancel.Enabled = false;
             note.ForeColor = Muted; note.Text = "Sending… the bot reads the whole blueprint first, big ones take a while.";
             RunBg(delegate {

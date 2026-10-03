@@ -426,14 +426,18 @@ function stepItem (bot, c) { const b = world.at(bot, c.x, c.y, c.z); return step
 function pairs (c) { return /chest$/.test(c.name) && c.props && c.props.type != null && String(c.props.type) !== 'single' }
 
 // any blueprint format, with the never-obtainable blocks swapped or skipped (blueprint.js)
-async function loadSchematic (name, version) {
-  return require('./blueprint').load(name, version, { log })
+async function loadSchematic (name, version, prefs = null) {
+  return require('./blueprint').load(name, version, { log, prefs })
 }
 
-async function setJob (bot, name, origin, { exactWood: exact = true } = {}) {
+// prefs: the operator's skip/swap choices (blueprint.load) - given by a new build; otherwise the job's own, kept with it in
+// memory (a restart, the wood rule, a base moved and back keep them)
+async function setJob (bot, name, origin, { exactWood: exact = true, prefs } = {}) {
   missingAnchorItems = []
+  const kept = mem.get().build
+  const pr = prefs !== undefined ? (prefs || null) : (kept && kept.name === name && kept.prefs) || null
   // (loaded first: a load that throws leaves the running job and its wood rule as they were - audit #35)
-  const s = await loadSchematic(name, bot.version)
+  const s = await loadSchematic(name, bot.version, pr)
   woodExact = exact !== false
   try { require('./materials').resetPlanner() } catch {}
   // a different job (or the same one somewhere else) starts with no memory of the old one's hard cells: the castle on
@@ -457,7 +461,7 @@ async function setJob (bot, name, origin, { exactWood: exact = true } = {}) {
   const box = { x1: origin.x, y1: origin.y, z1: origin.z, x2: origin.x + en.x - st.x, y2: origin.y + en.y - st.y, z2: origin.z + en.z - st.z }
   job = { name, origin, cells, box, index: new Map(cells.map(c => [key(c), c])), exactWood: exact }
   surveyCache = null
-  mem.set('build', { name, origin, exactWood: woodExact })
+  mem.set('build', Object.assign({ name, origin, exactWood: woodExact }, pr ? { prefs: pr } : {}))
   move.setZone('build', { x1: box.x1 - 1, y1: box.y1 - 1, z1: box.z1 - 1, x2: box.x2 + 1, y2: box.y2 + 3, z2: box.z2 + 1 })
   log('build', `job "${name}" at ${move.fmt(origin)}: ${cells.length} blocks, box ${box.x1}..${box.x2} ${box.y1}..${box.y2} ${box.z1}..${box.z2}`)
   site = loadSite(job)
@@ -2575,7 +2579,55 @@ async function ensureScaffold (bot, n = SCAFFOLD_WANT, { shouldStop } = {}) { //
   return true
 }
 
-module.exports = { missingAnchors: () => missingAnchorItems.slice(), walkModel, strayAt, siteScaffoldTakeable, wayOut, wayOutPoint, FILLER_ITEMS, SCAFFOLD_WANT, cachedStatus, exactWood, isOpenCell, INFILL_RE, infillItem, unsourced, strayBuildBlocks,
+// WHAT A BLUEPRINT COSTS TO GATHER, by the block the bot would place: count, seconds a unit by the planner's own route, the
+// raw metal it takes - and the ones out of all proportion flagged, for the operator to keep, skip or swap before a build
+// starts (the hub's 23 anvils were ~700 raw iron and its lamp posts 420 raw copper, found only when the gathering began,
+// 2026-10-03). prefs: choices to price in (the panel's check asks with none)
+const COST_METALS = ['raw_iron', 'raw_copper', 'raw_gold', 'diamond', 'emerald', 'lapis_lazuli', 'redstone']
+const COST_HINT = { lightning_rod: 'oak_fence', end_rod: 'oak_fence', copper_block: 'stone_bricks', cut_copper: 'stone_bricks', cherry_leaves: 'oak_leaves', cherry_log: 'oak_log', azalea_leaves: 'oak_leaves', flowering_azalea_leaves: 'oak_leaves', mangrove_leaves: 'oak_leaves', iron_block: 'smooth_stone', gold_block: 'yellow_concrete', diamond_block: 'light_blue_concrete', emerald_block: 'lime_concrete' }
+const COST_DECOR_RE = /anvil|_head$|_skull$|_banner$|^(bell|lodestone|enchanting_table|jukebox|beacon|conduit|lectern|brewing_stand|cauldron|grindstone|smithing_table|cartography_table|fletching_table|loom|stonecutter|blast_furnace|smoker|composter|flower_pot|potted_.*|candle|.*_candle|chain|end_rod|lightning_rod)$/
+async function costReport (bot, name, prefs = null) {
+  const s = await loadSchematic(name, bot.version, prefs)
+  const md = world.data(bot)
+  const m = require('./materials'); const pl = m.getPlanner(bot)
+  const kinds = new Map()
+  const st = s.start(); const en = s.end()
+  for (let y = st.y; y <= en.y; y++) {
+    await new Promise(r => setImmediate(r)) // (a layer at a time: body first)
+    for (let z = st.z; z <= en.z; z++) for (let x = st.x; x <= en.x; x++) {
+      const b = s.getBlock(new Vec3(x, y, z)); if (!b || b.name === 'air') continue
+      const item = itemForBlock(b.name, b.getProperties(), md)
+      const e = kinds.get(b.name) || { block: b.name, count: 0, item: null }
+      if (item) { e.count++; e.item = item } // (a door's upper half, a bed's head: no item of their own)
+      kinds.set(b.name, e)
+    }
+  }
+  const rows = []
+  for (const e of kinds.values()) {
+    if (!e.count || !e.item) continue
+    let unit = Infinity; try { unit = pl.cost(m.nodeOf(e.item)) } catch {}
+    let raw = {}; try { raw = pl.plan({ [m.nodeOf(e.item)]: e.count }, { stock: () => 0, inFlight: () => 0 }).raw || {} } catch {}
+    const metal = {}; for (const k of COST_METALS) if (raw[k] >= 1) metal[k] = Math.ceil(raw[k])
+    rows.push({ block: e.block, item: e.item, count: e.count, unitSec: Number.isFinite(unit) ? Math.round(unit * 10) / 10 : null, totalSec: Number.isFinite(unit) ? Math.round(unit * e.count) : null, metal })
+  }
+  const total = rows.reduce((a, r) => a + (r.totalSec || 0), 0)
+  // the typical block's price (by count): a flag is a block far dearer than the build's own run of blocks
+  const units = rows.filter(r => r.unitSec != null).map(r => [r.unitSec, r.count]).sort((a, b) => a[0] - b[0])
+  let med = 0; { let acc = 0; const half = units.reduce((a, u) => a + u[1], 0) / 2; for (const [u, n] of units) { acc += n; if (acc >= half) { med = u; break } } }
+  for (const r of rows) {
+    const why = []
+    if (r.unitSec == null) why.push('no way to get it here')
+    for (const [k, n] of Object.entries(r.metal)) if (n >= 64) why.push(n + ' ' + k.replace(/^raw_/, ''))
+    const share = total ? (r.totalSec || 0) / total : 0
+    if (share >= 0.08 && r.unitSec != null && r.unitSec >= 5 * Math.max(1, med)) why.push(Math.round(share * 100) + '% of all the gathering')
+    r.share = Math.round(share * 1000) / 10
+    if (why.length) { r.flag = why.join(', '); r.suggest = COST_HINT[r.block] ? 'swap:' + COST_HINT[r.block] : COST_DECOR_RE.test(r.block) ? 'skip' : null }
+  }
+  rows.sort((a, b) => (b.totalSec == null) - (a.totalSec == null) || (b.totalSec || 0) - (a.totalSec || 0))
+  return { name, total, typicalUnitSec: med, kinds: rows.length, blocks: rows.reduce((a, r) => a + r.count, 0), flagged: rows.filter(r => r.flag), top: rows.slice(0, 12) }
+}
+
+module.exports = { costReport, missingAnchors: () => missingAnchorItems.slice(), walkModel, strayAt, siteScaffoldTakeable, wayOut, wayOutPoint, FILLER_ITEMS, SCAFFOLD_WANT, cachedStatus, exactWood, isOpenCell, INFILL_RE, infillItem, unsourced, strayBuildBlocks,
   finishSite, woodClass, woodForm, acceptsFor, itemOf, LOG_ANY, PLANKS_ANY, ensureScaffold, unskippedObstructions, setJob, getJob, status, nextNeeds,
   buildStep, clearSite, obstructions, removeScaffold, siteScaffoldTeardown, loadSchematic, cellDone, cellsDone, inBox, placeCell, registerJob, key,
   complete, needsWork, finish, survey, scaffoldList, holesList, ensureSnapshot, snapshotInfo, snapName,
