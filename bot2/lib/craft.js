@@ -463,6 +463,9 @@ async function craftItem (bot, name, n, ctx) {
   let afford = crafts
   for (const [id, per] of Object.entries(recipeIngredients(real))) { const nm = md.items[id] && md.items[id].name; if (nm) afford = Math.min(afford, Math.floor((have[nm] || 0) / per)) }
   const doCrafts = Math.max(1, afford)
+  // the result needs a slot (or a stack of its own with room): with none the server keeps it and the craft "fails" -
+  // a full pack at a new base with no chest made nothing at all, 2026-10-03
+  if (inv.freeSlots(bot) === 0 && !inv.items(bot).some(i => i.name === name && i.count < i.stackSize)) await base().makeRoom(bot, 1, { drop: true }).catch(() => {})
   const before = inv.count(bot, name)
   // one craft per call: a batched craft on Paper races the server's slot updates and the client's
   // view of the grid goes stale after the first result ("missing ingredient", results on the cursor
@@ -539,6 +542,7 @@ async function craftTimes (bot, name, crafts, { shouldStop } = {}) {
     if (!table) return 0
   }
   const perCraft = (any.result && any.result.count) || 1
+  if (inv.freeSlots(bot) === 0 && !inv.items(bot).some(i => i.name === name && i.count < i.stackSize)) await base().makeRoom(bot, 1, { drop: true }).catch(() => {}) // (as craftItem)
   const before = inv.count(bot, name)
   let i = 0
   for (; i < crafts; i++) {
