@@ -72,8 +72,16 @@ async function obtainBed (bot, ctx = {}) {
   }
   // (wool of one colour in the pack AND the chests - the ensure withdraws it: two light grey sheared from the pen sat in the
   //  chest while the bed went looking for white, 2026-10-03)
-  const c = Object.assign({}, inv.counts(bot)); for (const [n, k] of Object.entries(require('./base').bankCounts())) c[n] = (c[n] || 0) + k
-  const colour = Object.keys(c).find(n => /_wool$/.test(n) && c[n] >= 3)
+  const woolHeld = () => { const c = Object.assign({}, inv.counts(bot)); for (const [n, k] of Object.entries(require('./base').bankCounts())) c[n] = (c[n] || 0) + k; return Object.keys(c).find(n => /_wool$/.test(n) && c[n] >= 3) }
+  let colour = woolHeld()
+  // (our pen's sheep first, whatever their colour: the white search after it counts white only, and walked 200 blocks for a
+  //  flock with the pen's light grey making three at home; audit)
+  if (!colour) {
+    try {
+      const pen = require('./pen')
+      if ((inv.has(bot, 'shears') || require('./base').bankCount('shears') > 0) && pen.hasWool(bot)) { if (!inv.has(bot, 'shears')) await require('./base').withdraw(bot, 'shears', 1).catch(() => 0); await pen.shear(bot, { shouldStop: ctx.shouldStop }); colour = woolHeld() } // (shear wants them in the pack)
+    } catch (e) { log('shelter', 'shearing the pen for the bed threw: ' + e.message) }
+  }
   if (colour) return craft().ensure(bot, colour.replace('_wool', '_bed'), 1, ctx)
   // most sheep are white
   if (!await craft().ensure(bot, 'white_wool', 3, ctx)) return false

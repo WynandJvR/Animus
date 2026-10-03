@@ -222,7 +222,8 @@ const WOOL_SEARCH_MS = 4 * 60000
 function woolSearchDue () {
   // (not while a sheep stands in our pen: its wool grows back and the pen's shearing brings the bed's - the day's search
   //  went 208 blocks out with a sheep penned at home, 2026-10-03)
-  if (pen.pen() && (pen.observe(bot) || { n: 0 }).n > 0) return false
+  // (only a pen that can give it: with no shears it gives nothing, and the search off for good was no bed ever; audit)
+  if (pen.pen() && (inv.has(bot, 'shears') || base.bankCount('shears') > 0) && (pen.observe(bot) || { n: 0 }).n > 0) return false
   return !shelter.hasBedItem(bot) && mem.get().woolSearchDay !== day.dayNo(bot) && world.phase(bot) === 'day' && world.ticksUntilNight(bot) > 6000
 }
 function bedObtainable () {
