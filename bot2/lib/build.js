@@ -1240,6 +1240,12 @@ async function pillarTo (bot, c, first) {
     //  the south wall's high cells 24-32s each, more than half the step; audit 2026-09-28)
     if (!r.ok) { if (move.isVerdict(r)) badFeet.set(key(f), Date.now()); log('build', `pillar for ${c.name} at ${move.fmt(c)}: couldn't reach its foot ${move.fmt(f)} (${r.why})`); if (/stuck|noPath/.test(r.why || '')) stuckAt.push(f); continue }
     await ensureScaffold(bot, 16, { shouldStop: stepStop })
+    // (the top-up may have walked us to the chest or the mine: back to the foot first - the tower rose where the top-up left
+    //  the bot, at home, onto our own torch, 2026-10-03)
+    if (world.dist2(world.feetPos(bot), f) > 1 || Math.abs(world.feetPos(bot).y - f.y) > 1) {
+      const r2 = await goSite(bot, new goals.GoalBlock(f.x, f.y, f.z), 'back to the foot of a pillar')
+      if (!r2.ok) { log('build', `pillar for ${c.name} at ${move.fmt(c)}: not back at its foot ${move.fmt(f)} after the scaffold top-up (${r2.why})`); continue }
+    }
     // (the planner let go of first: its goal left standing, it set the controls every tick and the tower's jump never
     //  held - "towered to y120" 24 times in an hour on the nave floor, where the same tower rose in the yard, 2026-09-27)
     try { bot.pathfinder.setGoal(null) } catch {}
