@@ -1166,14 +1166,17 @@ async function withdrawWindow (needs, lowY = {}) {
   // ROOM FOR THE BAND'S OWN FIRST: a pack full of the window's upper-layer blocks (chests, grindstones, lightning rods,
   // doors - 31 kinds) took nothing, the "two slots free" rule returned at once, and the y125 band waited on dark oak stairs
   // with 182 in the chest, round after round (2026-10-03). Window blocks whose lowest layer is above the head of the order
-  // go back to the chest, the highest first, until it fits - never the kit, food or tools (they are not window needs)
+  // go back to the chest, the highest first, until it fits - only what is over the kit's keep and the scaffold stock (a
+  // castle's torches, dirt and cobblestone are window needs too, and the kit's light went first; audit), and only when the
+  // head is in the chest to take (else every round put the upper blocks back and took them out again; audit)
   const head = order.length ? order[0][0] : null
-  if (head && countOf(head) === 0 && inv.freeSlots(bot) < 2) {
+  if (head && countOf(head) === 0 && stockOf(head) > 0 && inv.freeSlots(bot) < 2) {
+    const keep = nm => Math.max(base.keepCount(bot, { name: nm }), build.FILLER_ITEMS.test(nm) ? build.SCAFFOLD_WANT : 0)
     const above = [...new Set(inv.items(bot).map(i => i.name))].filter(nm => nm !== head && needs[nm] != null && y(nm) > y(head)).sort((a, b) => y(b) - y(a))
     const back = []
     for (const nm of above) {
       if (inv.freeSlots(bot) >= 2) break
-      const k = inv.count(bot, nm)
+      const k = inv.count(bot, nm) - keep(nm)
       if (k > 0 && await base.depositItem(bot, nm, k).catch(() => 0)) back.push(nm)
     }
     log('dir', `no room for ${head} (the band's) - put back ${back.length ? back.join(', ') : 'nothing'} (window blocks for higher layers); ${inv.freeSlots(bot)} slots free`)
