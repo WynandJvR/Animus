@@ -174,6 +174,11 @@ function refUsable (nb, sneaking = false) { return !!nb && world.isSolid(nb) && 
 // What a placing takes the place of (vanilla canBeReplaced): grass tufts, ferns, vines, a single snow layer. A flower is
 // NOT one - the server keeps it and the placing fails.
 const REPLACEABLE_RE = /^(short_grass|tall_grass|fern|large_fern|dead_bush|vine|glow_lichen|seagrass|tall_seagrass|leaf_litter|short_dry_grass|tall_dry_grass|bush|hanging_roots|snow)$/
+// plants: they stand on soil (vanilla BushBlock mayPlaceOn: the dirt family; dry plants take sand and terracotta too)
+const SOIL_PLANT_RE = /^(short_grass|fern|tall_grass|large_fern|dandelion|poppy|blue_orchid|allium|azure_bluet|oxeye_daisy|cornflower|lily_of_the_valley|torchflower|sunflower|lilac|rose_bush|peony|pitcher_plant|sweet_berry_bush|pink_petals|wildflowers|bush|firefly_bush|open_eyeblossom|closed_eyeblossom|azalea|flowering_azalea|dead_bush|short_dry_grass|tall_dry_grass)$|_tulip$|_sapling$/
+// What the server keeps in a cell a block is placed into - a torch, a flower, a sapling, a mushroom (only a tuft,
+// REPLACEABLE_RE, gives way): off with it first, or every try "fails" ("the block is still dandelion" x4, 2026-10-03)
+const clearsFirst = n => /(^|_)torch$/.test(n) || ((SOIL_PLANT_RE.test(n) || PLANT_RE.test(n) || /_mushroom$|_fungus$/.test(n)) && !REPLACEABLE_RE.test(n))
 const PLANT_RE = /^(short_grass|tall_grass|fern|large_fern|snow|dead_bush|leaf_litter|vine|seagrass|short_dry_grass|tall_dry_grass|bush|firefly_bush|wildflowers|pink_petals|dandelion|poppy|.*_tulip|cornflower|azure_bluet|oxeye_daisy)$/
 
 // Wait n physics ticks: a look set with force goes to the server on the next tick, and the server takes the
@@ -251,9 +256,8 @@ async function place (bot, pos, itemName, { faceHint = null, plans = null, accep
   if (!item) { log('act', `place ${itemName} at ${move.fmt(pos)}: none in the pack`); return false }
   // a torch in the cell takes no block (the server keeps the torch): off with it first. The mine's floor fill tried its
   // own tunnel torch every few seconds for an hour - "the block is still torch", no cobble mined, 2026-09-27
-  // (and a flower: the server keeps a dandelion as it keeps a torch - only a tuft (REPLACEABLE_RE) gives way to the block;
-  //  a builder's support "failed after 4 tries: the block is still dandelion", 2026-10-03)
-  if (cur && (/(^|_)torch$/.test(cur.name) || (PLANT_RE.test(cur.name) && !REPLACEABLE_RE.test(cur.name))) && reach(bot, target, 4.5)) { await digBlock(bot, cur).catch(() => false) }
+  // (and a flower, a sapling: clearsFirst - here when in reach already, and again after the walk into reach below)
+  if (cur && clearsFirst(cur.name) && reach(bot, target, 4.5)) { await digBlock(bot, cur).catch(() => false) }
   const list = plans || (faceHint || [[0, -1, 0], [0, 1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]]).map(off => ({ off }))
   const t0 = Date.now()
   const cancelled = control.token()
@@ -298,6 +302,9 @@ async function place (bot, pos, itemName, { faceHint = null, plans = null, accep
       const r = await move.goTo(bot, new goals.GoalNear(pos.x, pos.y, pos.z, 3), { timeoutMs: 20000, allowZones, label: 'reach to place' })
       if (!r.ok && !reach(bot, pos, 4.8)) { log('act', `place ${itemName} at ${move.fmt(pos)}: could not get within reach (${r.why}) from ${move.fmt(bot.entity.position)}`); return false }
     }
+    // (the flower out of the cell, now in reach - the walk came after the first look: a support placed from 6 blocks off
+    //  never cleared its dandelion; audit R1)
+    { const now = bot.blockAt(target); if (now && clearsFirst(now.name) && reach(bot, target, 4.8)) await digBlock(bot, now).catch(() => false) }
     // sneak:false is a promise the click goes out standing: held against the ledge crouch (reflex.holdNoSneak) - a chest
     // placed on a wall top went out sneaking and never paired with its twin (2026-09-27)
     const letGo = sneak ? () => {} : reflex.holdNoSneak()
@@ -538,4 +545,4 @@ async function collectDrops (bot, { radius = 8, maxMs = 15000 } = {}) {
   return picked
 }
 
-module.exports = { lastDigWhy: () => lastDigWhy, settleAfterClose, openSettled, digRefusal, sealsUsIn, holdsUsUp, fallBelow, stepOff, dig, digBlock, place, useOn, pour, fill, collectDrops, droppedItems, reach, inBody, sleep, ticks, refUsable, PLANT_RE, NO_REF_RE, USE_REF_RE, NO_FACE_RE, REPLACEABLE_RE }
+module.exports = { SOIL_PLANT_RE, clearsFirst, lastDigWhy: () => lastDigWhy, settleAfterClose, openSettled, digRefusal, sealsUsIn, holdsUsUp, fallBelow, stepOff, dig, digBlock, place, useOn, pour, fill, collectDrops, droppedItems, reach, inBody, sleep, ticks, refUsable, PLANT_RE, NO_REF_RE, USE_REF_RE, NO_FACE_RE, REPLACEABLE_RE }

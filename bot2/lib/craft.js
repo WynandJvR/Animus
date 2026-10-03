@@ -247,6 +247,26 @@ function chooseRecipe (bot, itemName, n = 1, stack = null) {
   let reserved = null
   try { reserved = require('./materials').reservedSpecies(bot, itemName); if (!reserved.size) reserved = null } catch {}
   const reservedWood = nm0 => { if (!reserved || !/_(planks|log)$/.test(nm0)) return false; try { return reserved.has(require('./materials').speciesOf(nm0)) } catch { return false } }
+  // A WOOD THAT MUST BE FETCHED costs the walk, not the log: none in the pack or the chests is a trip - to a trunk in the
+  // grounds, or out of sight (a species priced at 3s a log beat 2 of the build's spruce planks at 1e3 each: a 143-block
+  // boat trip for 4 sticks, 2026-10-03). Once per ingredient, not per plank.
+  const tripMemo = {}
+  // (the chests must cover the WHOLE shortfall: one acacia plank banked read "no trip", and the second plank was the trip)
+  const woodTrip = (nm0, short) => {
+    if (!/_(planks|log)$/.test(nm0)) return 0
+    const mk = nm0 + ':' + short
+    if (mk in tripMemo) return tripMemo[mk]
+    const sp = nm0.replace(/_(planks|log)$/, '')
+    let t = 0
+    try {
+      const banked = /_log$/.test(nm0) ? base().bankCount(sp + '_log') : base().bankCount(sp + '_planks') + 4 * base().bankCount(sp + '_log')
+      if (banked < short) {
+        const near = world.findBlocks(bot, new RegExp('^' + sp + '_log$'), { maxDistance: 48, count: 1 })[0]
+        t = near ? world.dist3(near.position || near, bot.entity.position) / 2 : 120 // (there and back at a walk; out of sight, a trip's worth)
+      }
+    } catch {}
+    return (tripMemo[mk] = t)
+  }
   let best = null; let bestCost = Infinity
   for (const r of rs) {
     // (never a recipe of something already being made up the chain: that is the cycle, not a route)
@@ -262,8 +282,10 @@ function chooseRecipe (bot, itemName, n = 1, stack = null) {
       let h = have[nm] || 0
       if (/_planks$/.test(nm)) h += (have[nm.replace('_planks', '_log')] || 0) * 4
       const short = Math.max(0, per * crafts - h)
-      cost += (short ? short * unitCost(nm) : 0) + per * crafts * 0.01 // (ties: the smaller order)
-      if (reservedWood(nm)) cost += per * crafts * 1e3 // (the build's own wood, held or not)
+      cost += (short ? short * unitCost(nm) + woodTrip(nm, short) : 0) + per * crafts * 0.01 // (ties: the smaller order)
+      // (the build's own wood, held or not: spent here, it is fetched again for the build - three times a plank's price, so
+      //  a handful of sticks takes it before a trip, and a chest-maker's hundreds go to another wood; was 1e3 a plank)
+      if (reservedWood(nm)) cost += per * crafts * 3 * unitCost(nm)
     }
     if (cost < bestCost) { bestCost = cost; best = r }
   }

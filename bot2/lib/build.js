@@ -146,7 +146,7 @@ const FACE_FREE_RE = /_carpet$|_pressure_plate$|^flower_pot$|^potted_|rail$|^red
 // a carpet stands on anything that is not air (vanilla CarpetBlock)
 const ANY_SUPPORT_RE = /_carpet$/
 // plants: they stand on soil (vanilla BushBlock mayPlaceOn: the dirt family; dry plants take sand and terracotta too)
-const SOIL_PLANT_RE = /^(short_grass|fern|tall_grass|large_fern|dandelion|poppy|blue_orchid|allium|azure_bluet|oxeye_daisy|cornflower|lily_of_the_valley|torchflower|sunflower|lilac|rose_bush|peony|pitcher_plant|sweet_berry_bush|pink_petals|wildflowers|bush|firefly_bush|open_eyeblossom|closed_eyeblossom|azalea|flowering_azalea|dead_bush|short_dry_grass|tall_dry_grass)$|_tulip$|_sapling$/
+const SOIL_PLANT_RE = act.SOIL_PLANT_RE // (one list, act's: the place clears them out of a cell too)
 const SOIL_RE = /^(dirt|grass_block|podzol|coarse_dirt|mycelium|rooted_dirt|moss_block|pale_moss_block|mud|muddy_mangrove_roots|farmland)$/
 const DRY_SOIL_RE = /^(dirt|grass_block|podzol|coarse_dirt|mycelium|rooted_dirt|moss_block|pale_moss_block|mud|muddy_mangrove_roots|farmland|sand|red_sand|suspicious_sand|terracotta|[a-z_]+_terracotta)$/
 function soilFor (name) { return /^potted_/.test(name) || !SOIL_PLANT_RE.test(name) ? null : /^(dead_bush|short_dry_grass|tall_dry_grass)$/.test(name) ? DRY_SOIL_RE : SOIL_RE }
@@ -1084,7 +1084,19 @@ async function placeSupport (bot, sp, j) {
 function sneaksFor (c) { return !/_door$/.test(c.name) && !pairs(c) }
 function refOk (bot, c, p) {
   const nb = world.at(bot, c.x + p.off[0], c.y + p.off[1], c.z + p.off[2])
-  return act.refUsable(nb, !!c.attach || sneaksFor(c))
+  return act.refUsable(nb, !!c.attach || sneaksFor(c)) && !slabMerges(c, nb, p)
+}
+// A click that the server spends on the CLICKED slab: a slab of the same kind takes a second half when its open half is
+// clicked (vanilla SlabBlock.canBeReplaced: a bottom slab clicked on its top, or high on a side; a top slab on its
+// underside, or low) - the neighbour turned double and our own cell stayed air: the smooth stone slab at the stalls,
+// dug and "failed" for an hour, 2026-10-03 (audit)
+function slabMerges (c, nb, p) {
+  if (!nb || nb.name !== c.name || !/_slab$/.test(c.name)) return false
+  let t = null; try { t = nb.getProperties().type } catch {}
+  const side = p.off[1] === 0; const cy = p.cy != null ? p.cy : 0.5
+  if (t === 'bottom') return p.off[1] === -1 || (side && cy > 0.5)
+  if (t === 'top') return p.off[1] === 1 || (side && cy < 0.5)
+  return false
 }
 function stateOf (b) { try { const p = b.getProperties(); const s = KEY_PROPS.filter(k => p[k] != null).map(k => `${k}=${p[k]}`).join(','); return b.name + (s ? `[${s}]` : '') } catch { return b.name } }
 
@@ -1370,7 +1382,7 @@ async function placeCell (bot, c, j = job) {
     if (!item) return why('no block for it in hand')
     const usable = plans.filter(p => refOk(bot, c, p))
     if (!await timed('reach', getInReach(usable.map(p => new Vec3(p.off[0], p.off[1], p.off[2]))))) return false
-    const opts = { plans: usable.length ? usable : plans, allowZones: ['build', 'base'], keepExit: true }
+    const opts = { plans: usable.length ? usable : plans.filter(p => !slabMerges(c, world.at(bot, c.x + p.off[0], c.y + p.off[1], c.z + p.off[2]), p)), allowZones: ['build', 'base'], keepExit: true }
     // (a liquid source is poured from its bucket; everything else placed - a pot or a cauldron is its first step. A
     //  chest of a pair is placed standing up: a sneaking placement never pairs)
     const ok = c.pour
