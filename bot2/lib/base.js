@@ -382,17 +382,23 @@ async function makeRoom (bot, slots = 3) {
   return false
 }
 
-// A slot for a craft's result when there is nowhere to store anything: at a new base with no chest yet a pack full of
-// build stock could craft nothing - sticks "not handed over", no axe, logs cut by hand, and never the chest that would end
-// it (2026-10-03). A player drops a cheap stack: the blocks found everywhere again, ones no build wants first, then the
-// smallest; never one the recipe uses. Only with no chest known at all - with one, the craft's own failure path deposits.
-// No deposit and no walk here: the caller may be standing at its table (audit 2026-10-03).
+// A slot for a craft's result (craft.slotForResult; keep = the chain's ingredients, never stored or dropped). With a chest by
+// home: the surplus into it - with chests known a full pack crafted nothing and the bot built unarmoured (2026-10-03); the
+// caller walks back to its table. With no chest at all (a new base): a player drops a cheap stack - the blocks found
+// everywhere again, ones no build wants first, then the smallest. Far from home with chests: nothing (as before).
 const CHEAP_RE = /^(dirt|coarse_dirt|cobblestone|cobbled_deepslate|gravel|sand|andesite|diorite|granite|tuff|netherrack)$/
 async function roomToCraft (bot, keep = new Set()) {
   if (inv.freeSlots(bot) > 0) return true
   await tossJunk(bot)
   if (inv.freeSlots(bot) > 0) return true
-  if (knownChests(bot).length) return false
+  // (a chest by home: the surplus into it, never the recipe's own - with chests known a full pack crafted nothing: the iron
+  //  chestplate's 11 ingots sat in the pack, "the server did not hand over the result", and the bot built and died
+  //  unarmoured, 2026-10-03. The caller walks back to its table after: craft.slotForResult)
+  if (knownChests(bot).length) {
+    if (distHome(bot) >= 48) return false
+    await depositAll(bot, { keep: (b, it) => keep.has(it.name) ? Infinity : keepCount(b, it) }).catch(() => false)
+    return inv.freeSlots(bot) > 0
+  }
   const want = require('./materials').wantedSet(bot)
   const stacks = inv.items(bot).filter(i => CHEAP_RE.test(i.name) && !keep.has(i.name))
     .sort((x, y) => (want(x.name) ? 1 : 0) - (want(y.name) ? 1 : 0) || x.count - y.count)

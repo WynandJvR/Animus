@@ -412,13 +412,19 @@ function pickWood (bot, needPlanks, avoid) {
   return best || null // (the caller's last resort decides)
 }
 
-// a slot for the result when the pack is full (roomToCraft: only with nowhere to store), standing at the table so the
-// crafts follow before a dropped stack could be walked back over; the keep is every recipe's ingredients for the item -
-// the variant crafted may not be the one chosen (cobblestone or cobbled_deepslate), audit 2026-10-03
+// A slot for the result when the pack is full (base.roomToCraft: the surplus into a chest by home, or with none a cheap stack
+// dropped). The keep is every recipe's ingredients for this item AND for everything the ensure chain above it is making - a
+// shield's planks were crafted with the shield's and the chestplate's iron in the pack (audit 2026-10-03) - and the white
+// a dyed wool is made from (its recipe names another colour). The caller re-reaches its table if the deposit walked it off.
 async function slotForResult (bot, name, perCraft) {
   if (inv.freeSlots(bot) > 0 || inv.items(bot).some(i => i.name === name && i.count + perCraft <= i.stackSize)) return
-  const md = world.data(bot); const item = md.itemsByName[name]; const keep = new Set()
-  for (const rr of (item && md.recipes[item.id]) || []) for (const id of Object.keys(recipeIngredients(rr))) if (md.items[id]) keep.add(md.items[id].name)
+  const md = world.data(bot); const keep = new Set()
+  const chain = chainStore.getStore()
+  for (const nm of new Set([name, ...((chain && chain.stack) || [])])) {
+    const it = md.itemsByName[nm]
+    for (const rr of (it && md.recipes[it.id]) || []) for (const id of Object.keys(recipeIngredients(rr))) if (md.items[id]) keep.add(md.items[id].name)
+    if (/_wool$/.test(nm) && nm !== 'white_wool') keep.add('white_wool')
+  }
   await base().roomToCraft(bot, keep).catch(() => {})
 }
 
@@ -477,6 +483,7 @@ async function craftItem (bot, name, n, ctx) {
   for (const [id, per] of Object.entries(recipeIngredients(real))) { const nm = md.items[id] && md.items[id].name; if (nm) afford = Math.min(afford, Math.floor((have[nm] || 0) / per)) }
   const doCrafts = Math.max(1, afford)
   await slotForResult(bot, name, perCraft)
+  if (table && !act.reach(bot, table.position, 4)) { table = await reachTable(bot, ctx); if (!table) return false } // (by reach, not by the walk's length; audit)
   const before = inv.count(bot, name)
   // one craft per call: a batched craft on Paper races the server's slot updates and the client's
   // view of the grid goes stale after the first result ("missing ingredient", results on the cursor
@@ -554,6 +561,7 @@ async function craftTimes (bot, name, crafts, { shouldStop } = {}) {
   }
   const perCraft = (any.result && any.result.count) || 1
   await slotForResult(bot, name, perCraft)
+  if (table && !act.reach(bot, table.position, 4)) { table = await reachTable(bot, { noWithdraw: true, shouldStop }); if (!table) return 0 }
   const before = inv.count(bot, name)
   let i = 0
   for (; i < crafts; i++) {
