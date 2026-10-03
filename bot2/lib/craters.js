@@ -55,7 +55,7 @@ function install (bot) {
     if (!b || !b.cells.length) return
     const cur = mem.get().craters || []
     const have = new Set(cur.map(k))
-    const add = b.cells.filter(q => !have.has(k(q)))
+    const add = b.cells.filter(q => !have.has(k(q))).map(q => Object.assign(q, { at: b.at })) // (when: a fresh crater goes before the build - director)
     mem.set('craters', cur.concat(add).slice(-MAX))
     log('craters', `a blast at ${Math.round(b.c.x)},${Math.round(b.c.y)},${Math.round(b.c.z)} took ${b.cells.length} blocks (${summary(b.cells)}) - to be put back`)
   }
@@ -98,12 +98,14 @@ function filler (bot, was) {
   return its.find(i => pref.test(i.name)) || its.find(i => FILL_RE.test(i.name)) || null
 }
 
-async function fill (bot, { shouldStop } = {}) {
+const FRESH_MS = 30 * 60000 // (a blast's own crater, while it is a hole in the walks: put back before the build - director)
+const fresh = q => !!q.at && Date.now() - q.at < FRESH_MS
+async function fill (bot, { shouldStop, onlyFresh = false } = {}) {
   const act = require('./act')
   // (the cells the task was chosen for - open(), ONE rule: the fill took prune()'s, which kept a y55 cell 64 under home the
   //  task's own count left out; sorted bottom up it went there first, through a cave, and a creeper killed it, 2026-10-03)
   prune(bot)
-  const cells = open(bot)
+  const cells = open(bot).filter(q => !onlyFresh || fresh(q)) // (the fresh task fills the fresh holes only - the old scars wait for the build's gaps; audit)
   if (!cells.length) return 0
   const need = cells.length
   const have = bot.inventory.items().filter(i => FILL_RE.test(i.name)).reduce((s, i) => s + i.count, 0)
@@ -136,4 +138,4 @@ async function fill (bot, { shouldStop } = {}) {
 }
 const inv = () => require('./inventory')
 
-module.exports = { install, open, prune, fill }
+module.exports = { fresh, install, open, prune, fill }

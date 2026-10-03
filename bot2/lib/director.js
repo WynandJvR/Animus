@@ -158,7 +158,7 @@ function note (name, ok) {
 // succeed" four times over, the watchdog's alarm, a backoff for nothing (late in the day, 25-64 from home; audit
 // 2026-09-28). One gate: a day chore whose stop holds waits, said once. (Survival - food, graves, tools, the bed - is
 // never held here; the castle's step does its home work first and minds its own stop.)
-const DAY_TASKS = new Set(['fillCraters', 'farm', 'harvest', 'hydrate', 'levelFarm', 'levelYard', 'fixWater', 'lightBase', 'plant', 'pen', 'spareKit', 'fillShaft', 'cook', 'ironTrip', 'tidy', 'siteTidy'])
+const DAY_TASKS = new Set(['fillCraters', 'fillFreshCraters', 'farm', 'harvest', 'hydrate', 'levelFarm', 'levelYard', 'fixWater', 'lightBase', 'plant', 'pen', 'spareKit', 'fillShaft', 'cook', 'ironTrip', 'tidy', 'siteTidy'])
 const lateSaid = new Map()
 // held(name): may decide() offer it now? Not while backing off from failures (cooling), nor a day chore once its stop holds.
 // (cooling keeps its one meaning - "it failed recently": the recover rule reads cooling('food') as that evidence; audit)
@@ -733,6 +733,10 @@ function decide () {
       if (n >= 20) { sd.done = true; mem.set('siteTidy', sd); return { name: 'siteTidy', why: `${n} scaffold blocks of ours to take down round the site - the day's teardown, before the castle` } }
     }
   }
+  // A FRESH CRATER is put back before the build, while it is a hole in the walks: the operator, 2026-10-04 - holes about the
+  // place make the walking harder (a natural pit by the mine cost 40-80s a mine walk all evening). A blast's cells within
+  // the half hour; older scars wait for the build's gaps (9c below - a new base once spent its first hour on them)
+  if (world.phase(bot) === 'day' && dHome < 96 && !nightSoon() && !held('fillFreshCraters')) { const cr = require('./craters'); const n = cr.open(bot).filter(cr.fresh).length; if (n) return { name: 'fillFreshCraters', why: `${n} cells a blast just took round home and the site - put back before the build` } }
   if (mem.get().build && build.getJob() && build.needsWork(bot) && !nightSoon() && !homeByDark() && !held('castle')) {
     return { name: 'castle', why: 'working on ' + mem.get().build.name }
   }
@@ -1223,6 +1227,7 @@ const TASKS = {
   },
   async castle () { return castleWork() },
   async idle () { await move.sleep(5000); return true },
+  async fillFreshCraters () { return (await require('./craters').fill(bot, { shouldStop: dayStop, onlyFresh: true })) > 0 },
   async fillCraters () { return (await require('./craters').fill(bot, { shouldStop: dayStop })) > 0 },
   async setSpawn () { return shelter.setSpawnAtBed(bot, { shouldStop: () => taskCancelled() }) },
   async leaveForeign () { return foreign.leave(bot, { shouldStop: () => taskCancelled() }) },
