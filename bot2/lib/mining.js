@@ -534,7 +534,10 @@ async function takeKnownOre (bot, itemName, target, ctx = {}) {
 async function downTheMine (bot, m, ctx = {}) {
   if (!inOwnMine(bot) && world.dist3(bot.entity.position, m.entrance) > 3) await move.travel(bot, m.entrance, { range: 3, shouldStop: ctx.shouldStop, label: 'to mine', underground: true })
   const Ls = levelsOf(m)
-  const walk = { timeoutMs: 60000, stuckMs: 12000, dig: false, place: false, label: 'to mine face', shouldStop: ctx.shouldStop }
+  // (the time a walk gets is its length's: a flight from the entrance to y15 is ~95 down - near 200 cells of stairs - and
+  //  a flat 60s ran out at y70 every time, "blocked (timeout)" twice in a day on stairs that were open, one try from a new
+  //  mine, 2026-10-03. A real block is the stuck check's - 12s - never the length's)
+  const walkTo = p => { const q = bot.entity.position; const len = 2 * Math.abs(q.y - p.y) + Math.hypot(q.x - p.x, q.z - p.z); return { timeoutMs: Math.min(240000, Math.max(60000, len * 400)), stuckMs: 12000, dig: false, place: false, label: 'to mine face', shouldStop: ctx.shouldStop } }
   for (let i = 1; i <= m.active; i++) {
     const P = Ls[i - 1]; const foot = P.stairsEnd || P.cursor; const t = Ls[i].stairTop
     for (const [p, first] of [[foot, false], [t, i === m.active]]) {
@@ -549,7 +552,7 @@ async function downTheMine (bot, m, ctx = {}) {
         if (world.dist3(world.feetPos(bot), foot) >= 0.5 || !await digStep(bot, m, foot, t)) { log('mine', `the stairs to y${Ls[i].level} are blocked at ${move.fmt(t)} (the first step would not open)`); return { ok: false, why: 'blocked' } }
         continue
       }
-      const r = await move.goTo(bot, new goals.GoalBlock(p.x, p.y, p.z), walk)
+      const r = await move.goTo(bot, new goals.GoalBlock(p.x, p.y, p.z), walkTo(p))
       if (!r.ok) {
         if (!move.isVerdict(r)) return { ok: false, why: r.why }
         log('mine', `the stairs to y${Ls[i].level} are blocked at ${move.fmt(p)} (${r.why})`)
@@ -563,7 +566,7 @@ async function downTheMine (bot, m, ctx = {}) {
   const A = Ls[m.active || 0]
   if (A && A.stairsDone && A.stairsEnd && Math.floor(bot.entity.position.y) > A.stairsEnd.y && world.dist3(world.feetPos(bot), A.stairsEnd) >= 0.5) {
     if (ctx.shouldStop && ctx.shouldStop()) return { ok: false, why: 'stopped' }
-    const r = await move.goTo(bot, new goals.GoalBlock(A.stairsEnd.x, A.stairsEnd.y, A.stairsEnd.z), walk)
+    const r = await move.goTo(bot, new goals.GoalBlock(A.stairsEnd.x, A.stairsEnd.y, A.stairsEnd.z), walkTo(A.stairsEnd))
     if (!r.ok) {
       if (!move.isVerdict(r)) return { ok: false, why: r.why }
       log('mine', `the stairs to y${A.level} are blocked on the way to their foot at ${move.fmt(A.stairsEnd)} (${r.why})`)
