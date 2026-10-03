@@ -78,6 +78,15 @@ while true; do
   # (and far from home - a respawn across the map walking back: the build's count cannot move from there, 2026-10-02)
   far=$(echo "$st" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const j=JSON.parse(s);const [x,,z]=j.pos.split(',').map(Number);console.log(j.home&&Math.hypot(x-j.home.x,z-j.home.z)>200?1:0)}catch{console.log(0)}})"); [ "$far" = 1 ] && last_change=$now
   tod=$(echo "$st" | grep -o '"tod":[0-9]*' | cut -d: -f2)
+  # SLOW, not stuck: the build crawling under every other alarm (3-16s a block for an hour, the operator asked why,
+  # 2026-10-03). After 30 min of this run: the build's steps in the last 30 min (since the deploy) placed under 60, with 15+
+  # minutes of steps - the profile lines say where the time went. And a cell failing 4+ times in 30 min.
+  if [ $((now - start)) -gt 1800 ]; then
+    sl=$(recentSinceDeploy 30 | grep -a "(dir) castle round:" | sed -E 's/.*round: ([0-9]+)s, placed ([0-9]+).*/\1 \2/' | awk '{t+=$1; p+=$2} END{if (t >= 900 && p < 60) print p " placed in " int(t/60) " min of build rounds"}')
+    [ -n "$sl" ] && { echo "ALARM: slow build: $sl"; recentSinceDeploy 30 | grep -a "step profile" | tail -2 | cut -c2-400; exit 0; }
+    fc=$(recentSinceDeploy 30 | grep -aoE "\(build\) [a-z_]+ at -?[0-9]+,-?[0-9]+,-?[0-9]+ won't place" | sort | uniq -c | awk '$1 >= 4' | sort -rn | head -1)
+    [ -n "$fc" ] && { echo "ALARM: cell failing repeatedly: $fc"; exit 0; }
+  fi
   if [ $((now - last_change)) -gt 1800 ]; then echo "ALARM: build stuck at $cur for $(( (now-last_change)/60 )) min"; exit 0; fi
   if [ $((now - start)) -gt 3600 ]; then echo "HEARTBEAT: 60 min, build $cur, deaths/60m $(recent 60 | grep -ac '(death) died')"; exit 0; fi
 done
