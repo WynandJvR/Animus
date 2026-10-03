@@ -218,6 +218,26 @@ function recipeNeedsTable (r) {
 // for the mine's torches meant 60 bamboo and an exploring trip, where 16 planks of any tree would do (2026-09-27).
 const RECOLOUR_RE = /(_bed|_wool|_carpet|_banner|_candle|_shulker_box|_concrete_powder|_terracotta|_stained_glass|_stained_glass_pane|_harness)$/
 const RARE_ING = /^(bamboo|cobbled_deepslate|blackstone|crimson_planks|warped_planks|bamboo_planks|bamboo_block|pale_oak_planks|mangrove_planks|cherry_planks)$/
+// THE BUILD'S OWN WOOD SPENT since its last haul, by species (mem.reservedSpent: { [sp]: { spent, stock } }): small crafts
+// ride the build's bulk wood trip only up to RESERVED_RIDE planks in all - a chest at a time, a stick top-up a trip, each
+// small, were the 2026-09-28 leak (audit C1). A haul of that wood landing (pack+chests up by more than a ride) clears it.
+const RESERVED_RIDE = 16
+function woodStock (bot, sp) {
+  const c = inv.counts(bot); let n = (c[sp + '_planks'] || 0) + 4 * (c[sp + '_log'] || 0)
+  try { n += base().bankCount(sp + '_planks') + 4 * base().bankCount(sp + '_log') } catch {}
+  return n
+}
+function reservedSpent (bot, sp) {
+  const m = mem.get().reservedSpent || {}; const e = m[sp]
+  if (!e) return 0
+  const now = woodStock(bot, sp)
+  if (now > e.stock + RESERVED_RIDE) { mem.update(mm => { if (mm.reservedSpent) delete mm.reservedSpent[sp] }); return 0 } // (a haul landed)
+  return e.spent
+}
+function noteReservedSpent (bot, sp, planks) {
+  const stock = woodStock(bot, sp) - planks // (as it will stand after the craft)
+  mem.update(mm => { const m = mm.reservedSpent = mm.reservedSpent || {}; const e = m[sp] || { spent: 0, stock }; e.spent += planks; e.stock = Math.min(e.stock, stock); m[sp] = e })
+}
 function chooseRecipe (bot, itemName, n = 1, stack = null) {
   const md = world.data(bot)
   const item = md.itemsByName[itemName]
@@ -289,9 +309,14 @@ function chooseRecipe (bot, itemName, n = 1, stack = null) {
       //  tool: <=16 planks) rides the build's own wood trip - three times a plank's price; more than that is a trip of its
       //  own for the build, as dear as a walk to another wood - 146 spruce logs became 33 chests and 288 sticks, 2026-09-28;
       //  was 1e3 a plank, and 4 sticks went 143 blocks by boat for acacia, 2026-10-03; audit C1)
-      if (reservedWood(nm)) cost += per * crafts * 3 * unitCost(nm) + (per * crafts > 16 ? woodTrip(nm, Infinity) : 0)
+      if (reservedWood(nm)) cost += per * crafts * 3 * unitCost(nm) + (reservedSpent(bot, nm.replace(/_(planks|log)$/, '')) + per * crafts > RESERVED_RIDE ? woodTrip(nm, Infinity) : 0)
     }
     if (cost < bestCost) { bestCost = cost; best = r }
+  }
+  // (the build's wood this choice spends goes on the tally - the choice is the craft: craftItem makes what it chose)
+  if (best && reserved) {
+    const crafts = Math.ceil(n / ((best.result && best.result.count) || 1))
+    for (const [id, per] of Object.entries(recipeIngredients(best))) { const nm = md.items[id] && md.items[id].name; if (nm && reservedWood(nm)) noteReservedSpent(bot, nm.replace(/_(planks|log)$/, ''), per * crafts * (/_log$/.test(nm) ? 4 : 1)) }
   }
   return best
 }
