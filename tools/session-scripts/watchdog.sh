@@ -19,6 +19,9 @@ while true; do
   #  fill that took after a restart alarmed for 15 more minutes, 2026-10-02)
   tn=$(echo "$f" | awk '{print $2}'); lf=$(grep -a "(dir) $tn did not succeed" $L | tail -1 | cut -c2-24); ld=$(grep -a "(dir) -> $tn:" $L | tail -1 | cut -c2-24)
   recovered=0; if [ -n "$f" ] && [ -n "$ld" ] && [[ "$ld" > "$lf" ]]; then nxt=$(awk -v t="[$ld" 'substr($0,1,24) > t' $L | grep -a "(dir) " | head -3 | grep -ac "$tn did not succeed"); [ "$nxt" = 0 ] && [ "$(awk -v t="[$ld" 'substr($0,1,24) > t' $L | grep -ac "(dir) ")" -ge 1 ] && recovered=1; fi
+  # (a streak the task's latest failure has already broken - its count back under 4 - is over: the alarm read an old 4-in-a-row
+  #  while the newest said 1, 2026-10-03)
+  if [ -n "$f" ]; then ln=$(grep -a "(dir) $tn did not succeed" $L | tail -1 | grep -o '([0-9]* in a row)' | grep -o '[0-9]*'); [ -n "$ln" ] && [ "$ln" -lt 4 ] && recovered=1; fi
   # (a failure from before the last deploy is the old code's: the new code has not failed it yet - 2026-10-03)
   dep=$(cut -c1-16 $(dirname "$0")/last-deploy.txt 2>/dev/null); [ -n "$f" ] && [ -n "$dep" ] && [[ "$lf" < "$dep" ]] && recovered=1
   [ -n "$f" ] && [ "$recovered" = 0 ] && { echo "ALARM: repeated failure: $f"; recent 15 | grep -a "did not succeed" | cut -c2-160 | tail -5; exit 0; }
