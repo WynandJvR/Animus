@@ -241,6 +241,11 @@ function rearm (bot) {
   lastRearmAt = Date.now()
   rearms++
   if (bot.vehicle) {
+    // (a seat a sit plugin made - GSit's armor stand under stairs the builder clicked: the dismount packet did nothing, four
+    //  minutes stuck on a hub bench, 2026-10-03; such a seat is left by sneaking, as a player does)
+    if (/armor_stand/.test(bot.vehicle.name || '')) {
+      try { bot.setControlState('sneak', true); setTimeout(() => { try { bot.setControlState('sneak', false) } catch {} }, 600) } catch {}
+    }
     try { bot.dismount(); return 'dismount(' + (bot.vehicle.name || 'vehicle') + ')' } catch (e) { return 'dismount threw: ' + e.message }
   }
   try {
