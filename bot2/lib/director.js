@@ -397,6 +397,10 @@ function decide () {
   const home = mem.get().home
   const dHome = home ? world.dist2(bot.entity.position, home) : Infinity
   const packFood = inv.foodPoints(bot)
+  // FED ENOUGH FOR A NIGHT IN THE MINE: ONE bar for both mine rules (18 and 16). A night underground costs a few hunger
+  // points; with hunger 13-17 and an empty pack neither the food rule (hunger <= 12) nor the mine fired, and the hub's
+  // cobble waited out whole nights in the safehouse (2026-10-03). Above the food rule's own line, so the two never gap
+  const nightFed = () => packFood >= 10 || bot.food > 12
   const bed = mem.get().bed
 
   if (override) return { name: override, why: 'operator' }
@@ -453,7 +457,7 @@ function decide () {
     // a working mine next to home turns the night into mining time: go down at dusk (a short walk)
     {
       const mm = mem.get().mine
-      const mineReady = mm && mm.entrance && home && world.dist2(mm.entrance, home) < 48 && inv.bestTool(bot, 'pickaxe', 8) && (packFood >= 10 || bot.food >= 18)
+      const mineReady = mm && mm.entrance && home && world.dist2(mm.entrance, home) < 48 && inv.bestTool(bot, 'pickaxe', 8) && nightFed()
       if (mineReady && (dusk || !move.insideHut(world.feetPos(bot))) && world.dist2(bot.entity.position, mm.entrance) < Math.min(64, nightWalk) && !held('nightMine')) return { name: 'nightMine', why: `${night ? 'night' : 'dusk'} - mining through the night in the mine next to home` }
     }
     // inside the safehouse with furniture in the pack: set it up (the bed means sleeping, not waiting)
@@ -470,7 +474,7 @@ function decide () {
     }
     const m = mem.get().mine
     const mineHere = m && (!home || world.dist2(m.entrance, home) <= 96)
-    if (mineHere && inv.bestTool(bot, 'pickaxe', 4) && (packFood >= 10 || bot.food >= 16) && world.dist2(m.cursor, bot.entity.position) < 150 && (dusk || underground() || world.dist2(m.entrance, bot.entity.position) < nightWalk) && !held('nightMine')) return { name: 'nightMine', why: 'night - working the mine underground' }
+    if (mineHere && inv.bestTool(bot, 'pickaxe', 4) && nightFed() && world.dist2(m.cursor, bot.entity.position) < 150 && (dusk || underground() || world.dist2(m.entrance, bot.entity.position) < nightWalk) && !held('nightMine')) return { name: 'nightMine', why: 'night - working the mine underground' }
     if (underground() && inv.bestTool(bot, 'pickaxe', 4) && !held('nightMine')) return { name: 'nightMine', why: 'night and already underground' }
     // afloat at night (a walk that ended in the sea): no bunker is dug in water and "staying put" there is treading
     // water until something drowns us - make for land (by boat when it is far)
@@ -767,7 +771,7 @@ const TASKS = {
   async nightMine () {
     // (the night's digging goes to the fuel first when the furnaces wait on it - coal from the mine's walls, with its
     //  cobble - then to the cobble: the day's coal trip was cut short at dusk every time, 2026-09-28)
-    const stop = () => taskCancelled() || world.isDay(bot)
+    const stop = () => taskCancelled() || world.isDay(bot) || (bot.food <= 6 && !inv.foodItems(bot).length) // (starving with nothing to eat: out of the mine, not mining on into the night unable to heal)
     const st = build.cachedStatus(bot)
     const fuelShort = st && (mats.planFor(bot, st.need).raw.fuel || 0) > 0 && inv.count(bot, 'coal') + inv.count(bot, 'charcoal') + base.bankCount('coal') + base.bankCount('charcoal') < 32
     if (fuelShort) {
