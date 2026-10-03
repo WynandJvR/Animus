@@ -1235,7 +1235,7 @@ async function pillarTo (bot, c, first) {
       if (!await require('./gather').towerUp(bot, { allowZones: ['build', 'base'], builder: true, onPlaced: q => { myPillar.push(q); pillarLaid++ } })) break
     }
     if (act.reach(bot, new Vec3(c.x, c.y, c.z), 4.8)) return true
-    log('build', `pillar for ${c.name} at ${move.fmt(c)}: towered from ${move.fmt(f)} to y${Math.floor(bot.entity.position.y)}, still out of reach - at ${move.fmt(bot.entity.position)}, ${bot.entity.position.offset(0, 1.62, 0).distanceTo(new Vec3(c.x + 0.5, c.y + 0.5, c.z + 0.5)).toFixed(1)}b from the eye`)
+    log('build', `pillar for ${c.name} at ${move.fmt(c)}: towered from ${move.fmt(f)} to y${Math.floor(bot.entity.position.y)}, still out of reach (${require('./gather').towerWhy() || 'rose to the cell'}) - at ${move.fmt(bot.entity.position)}, ${bot.entity.position.offset(0, 1.62, 0).distanceTo(new Vec3(c.x + 0.5, c.y + 0.5, c.z + 0.5)).toFixed(1)}b from the eye`)
   }
   return false
 }

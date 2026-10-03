@@ -355,12 +355,14 @@ function inMineShaft (bot, p) {
   return !!(m && m.entrance && p.y < m.entrance.y - 1 && require('./mining').inOwnMine(bot))
 }
 let lastPillar = null
+let towerWhy = null // (why the last towerUp did not rise: the builder says it)
 async function towerUp (bot, { allowZones = [], onPlaced = null, builder = false } = {}) {
   const filler = inv.items(bot).find(i => require('./build').FILLER_ITEMS.test(i.name)) // (THE scaffold list)
-  if (!filler) return false
+  towerWhy = null
+  if (!filler) { towerWhy = 'no filler in the pack'; return false }
   const y0 = Math.floor(bot.entity.position.y)
   const above = world.at(bot, bot.entity.position.x, y0 + 2, bot.entity.position.z)
-  if (!above || !world.isAirish(above)) return false
+  if (!above || !world.isAirish(above)) { towerWhy = `no head room - ${above ? above.name : 'unloaded'} at y${y0 + 2}`; return false }
   // THE COLUMN we stand on, taken before the jump, and the body centred on it first, crouched (a crouch never walks off an
   // edge): jumped from 0.3 off a column's edge beside a pit, the place went to the column the body had drifted over -
   // air - and it came down ten blocks, hp 20 -> 12, felling an orchard tree (2026-09-28)
@@ -380,14 +382,14 @@ async function towerUp (bot, { allowZones = [], onPlaced = null, builder = false
         await move.sleep(50)
       }
       bot.setControlState('forward', false); bot.setControlState('sneak', false)
-      if (off() > 0.3 || Math.floor(bot.entity.position.x) !== x0 || Math.floor(bot.entity.position.z) !== z0) return false // (could not centre: no jump)
+      if (off() > 0.3 || Math.floor(bot.entity.position.x) !== x0 || Math.floor(bot.entity.position.z) !== z0) { towerWhy = 'could not centre on the column'; return false } // (could not centre: no jump)
     }
     // (still before the jump - the real protection: 0.04 a tick across is ~0.3 of a block by the apex, over a column's
     //  edge from a start 0.2 off; settled, a straight-up jump comes down where it left - audit 2026-09-28)
     for (let k = 0; k < 10 && Math.hypot(bot.entity.velocity.x, bot.entity.velocity.z) >= 0.01; k++) await bot.waitForTicks(1)
     // (still moving after the wait: no jump at all - the wait running out and jumping anyway drifted it into the same pit
     //  a second time, 2026-09-28 04:51)
-    if (Math.hypot(bot.entity.velocity.x, bot.entity.velocity.z) >= 0.01) return false
+    if (Math.hypot(bot.entity.velocity.x, bot.entity.velocity.z) >= 0.01) { towerWhy = 'still moving - no jump'; return false }
     await bot.look(bot.entity.yaw, -Math.PI / 2, true)
     bot.setControlState('jump', true)
     const t0 = Date.now()
@@ -395,7 +397,7 @@ async function towerUp (bot, { allowZones = [], onPlaced = null, builder = false
     bot.setControlState('jump', false)
     // (drifted off the column mid-jump: no place onto a column it is not over - a backstop only: a body whose centre is
     //  past the edge comes down in the next column whatever we do; the settle above is what keeps it over its own)
-    if (Math.floor(bot.entity.position.x) !== x0 || Math.floor(bot.entity.position.z) !== z0) { await move.sleep(300); return false }
+    if (Math.floor(bot.entity.position.x) !== x0 || Math.floor(bot.entity.position.z) !== z0) { towerWhy = 'drifted off the column in the jump'; await move.sleep(300); return false }
     const below = bot.blockAt(new Vec3(x0, y0 - 1, z0))
     // (the cell the block goes into - the column's own, at y0)
     const cellB = world.at(bot, x0, y0, z0); const zn = move.inZone({ x: x0, y: y0, z: z0 })
@@ -409,8 +411,9 @@ async function towerUp (bot, { allowZones = [], onPlaced = null, builder = false
     //  down: the trunk cells filled with cobblestone and the spots were dropped, 2026-09-28)
     const up = Math.floor(bot.entity.position.y) >= y0 + 1
     { const nb = world.at(bot, x0, y0, z0); if (up || (nb && world.isSolid(nb))) { lastPillar = { x: x0, y: y0, z: z0 }; if (onPlaced) onPlaced(lastPillar); if (!builder && !inMineShaft(bot, lastPillar)) require('./litter').note(bot, lastPillar, filler.name) } }
+    if (!up) towerWhy = `the block did not go in (under me ${below ? below.name : '?'} at y${y0 - 1}, cell y${y0} ${(world.at(bot, x0, y0, z0) || {}).name || '?'})`
     return up
-  } catch { bot.setControlState('jump', false); bot.setControlState('forward', false); bot.setControlState('sneak', false); return false }
+  } catch (e) { towerWhy = `threw: ${e && e.message}`; bot.setControlState('jump', false); bot.setControlState('forward', false); bot.setControlState('sneak', false); return false }
 }
 
 // ---- surface blocks and exposed ores ------------------------------------------------------
@@ -800,4 +803,4 @@ async function findMatching (bot, match, accept) {
   return null
 }
 
-module.exports = { fellMega, noteBiomes, speciesLand, climateLead, SPECIES_BIOMES, onGrounds, treeOK, wildTree, lastChopOutcome, outOfZones, chop, mine, explore, towerUp, noteResource, noteResources, forgetResource, knownResource, fellTree, pickPlants, survey, takeable }
+module.exports = { towerWhy: () => towerWhy, fellMega, noteBiomes, speciesLand, climateLead, SPECIES_BIOMES, onGrounds, treeOK, wildTree, lastChopOutcome, outOfZones, chop, mine, explore, towerUp, noteResource, noteResources, forgetResource, knownResource, fellTree, pickPlants, survey, takeable }
