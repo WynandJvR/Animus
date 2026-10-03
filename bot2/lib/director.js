@@ -1537,6 +1537,14 @@ async function castleWorkInner () {
   // (the builder waits on an item whose raw the next layers' shortfall does not hold: said, with both sides - the band
   //  waited on oak_trapdoor for two hours while the rounds gathered leather and wool, 2026-09-29)
   if (steer && !blockedRaw && steerSaid !== steer) { steerSaid = steer; log('dir', `the builder waits on ${steer} (its raw: ${chain.join(', ') || 'none - in stock or craftable from stock'}), but the next layers' shortfall has none of it: ${Object.keys(win.raw).map(r => win.raw[r] + ' ' + r).join(', ') || 'nothing'}`) }
+  // (the item the band waits on lies in the chests: out with it and back to the build - not a trip for the next thing on
+  //  the list. 63 dirt banked while the round went for gravel, 208s, into someone else's place, 2026-10-03)
+  if (steer && !blockedRaw && base.bankCount(steer) > 0) {
+    const n = Math.min(base.bankCount(steer), Math.max(16, (next[steer] || 0) - inv.count(bot, steer)))
+    const got = await base.withdraw(bot, steer, n).catch(() => 0)
+    log('dir', `the builder waits on ${steer} - ${got} taken out of the chests, back to the build`)
+    if (got > 0) return true
+  }
   // a trip needs a working day ahead of it: close to dusk only what is gathered round home (a walk to the mine
   // face that arrived as dusk fell was a minute and a half for nothing; a clay bank is further still)
   const nearDusk = world.ticksUntilNight(bot) < 2400
