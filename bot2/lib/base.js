@@ -354,6 +354,8 @@ async function depositHaul (bot, opts = {}) {
   return depositAll(bot)
 }
 
+// how many of an item the build still has to place (0 with no build)
+function buildNeed (bot, name) { try { const st = require('./build').cachedStatus(bot); return (st && st.need && st.need[name]) || 0 } catch { return 0 } }
 async function tossJunk (bot) {
   let tossed = 0
   let want = null // (worked out once, only if a junk stack turns up)
@@ -362,8 +364,10 @@ async function tossJunk (bot) {
     // never what a build still wants (the list holds flowers, vines, bone - the forage trips' own takings), nor the kit
     // (arrows and feathers are in the list, and the kit keeps 64 arrows: the next makeRoom tossed them, audit #7)
     if (inv.JUNK.test(it.name) && keepCount(bot, it) === 0 && !(want || (want = require('./materials').wantedSet(bot)))(it.name)) k = it.count
-    else if (it.name === 'dirt' && inv.count(bot, 'dirt') > 64) k = Math.min(it.count, inv.count(bot, 'dirt') - 64)
-    else if (it.name === 'gravel' && inv.count(bot, 'gravel') > 16) k = it.count
+    // (never below what the build still places of it: the hub's ground cells want dirt, and the clearing's dirt over 64 was
+    //  tossed, walked over, picked up and tossed again - 66 tosses in three minutes of building, 2026-10-03)
+    else if (it.name === 'dirt' && inv.count(bot, 'dirt') > Math.max(64, buildNeed(bot, 'dirt'))) k = Math.min(it.count, inv.count(bot, 'dirt') - Math.max(64, buildNeed(bot, 'dirt')))
+    else if (it.name === 'gravel' && inv.count(bot, 'gravel') > Math.max(16, buildNeed(bot, 'gravel'))) k = Math.min(it.count, inv.count(bot, 'gravel') - Math.max(16, buildNeed(bot, 'gravel')))
     if (k > 0) { try { await bot.toss(it.type, null, k); tossed += k } catch {} }
   }
   if (tossed) log('base', `tossed ${tossed} junk items`)
