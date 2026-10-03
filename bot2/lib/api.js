@@ -45,6 +45,28 @@ function start ({ bot, port, host, director, commands, brainSettings, pov, chat 
     cache = { key, at: Date.now(), st, hs, shell }
     return cache
   }
+  // the brain's goal: the operator's when one was set from the panel, else what the bot is actually doing - a fixed
+  // "Build the castle" had it calling the spawn hub "this trash castle" for the whole trip there (2026-10-03)
+  const derivedGoal = () => { const j = mem.get().build; return j && j.name ? `Build ${j.name.replace(/[-_]/g, ' ')} and stay alive.` : 'Stay alive and settle a home.' }
+  const settingsNow = () => {
+    return Object.assign({}, brainSettings, { goal: brainSettings.goal || derivedGoal() })
+  }
+  // one plain sentence of what it is doing and where it stands - asked "how many blocks until you get there" with
+  // blocksFromBuildSite 1177 in the state JSON, the model answered "digging out of a hole" (2026-10-03): the facts a
+  // player's question wants, said once in words instead of buried in the JSON
+  const statusLine = (o) => {
+    const bits = []
+    if (o.activity) bits.push(`doing: ${o.activity.name}${o.activity.detail ? ' (' + o.activity.detail + ')' : ''}`)
+    const w = o.whereAmI || {}; const bp = o.buildProgress
+    if (bp) bits.push(`build: ${bp.name}, ${bp.blocksPlaced} of ${bp.blocksTotal} blocks placed`)
+    if (w.blocksFromBuildSite != null) bits.push(w.atBuildSite ? 'at the build site' : `${w.blocksFromBuildSite} blocks from the build site`)
+    if (w.blocksFromHome != null) bits.push(w.atHome ? 'at home' : `${w.blocksFromHome} blocks from home`)
+    else bits.push('no home yet')
+    // (distances, never coordinates: told these are the facts for "where are you", it would post the base's x/y/z to
+    //  any stranger in public chat - audit 2026-10-03)
+    bits.push(o.isDay ? 'daytime' : 'night', `health ${o.health}/20, food ${o.food}/20`)
+    return bits.join('; ')
+  }
   const state = (reqUrl = '') => {
     if (!bot.entity) return { name: bot.username, connected: false }
     const p = bot.entity.position
@@ -136,7 +158,7 @@ function start ({ bot, port, host, director, commands, brainSettings, pov, chat 
     const url = req.url || ''
     if (req.method === 'OPTIONS') return send(res, 204, '')
     if (req.method === 'GET' && url === '/health') return send(res, 200, { ok: true, spawned: !!bot.entity, connected: !!bot.entity, runtime: 'bot2' })
-    if (req.method === 'GET' && (url === '/state' || url.startsWith('/state?'))) { try { return send(res, 200, state(url)) } catch (e) { return send(res, 500, 'error: ' + e.message) } }
+    if (req.method === 'GET' && (url === '/state' || url.startsWith('/state?'))) { try { const o = state(url); if (o.connected !== false) o.statusLine = statusLine(o); return send(res, 200, o) } catch (e) { return send(res, 500, 'error: ' + e.message) } }
     if (req.method === 'GET' && url === '/log') return send(res, 200, tail(40).join('\n'))
     // (the blocks as they stand round a point - read-only, for diagnosis: the blueprint is what should be there, this is what
     //  is. r at most 3, the non-air blocks with their states; 2026-09-29)
@@ -154,7 +176,7 @@ function start ({ bot, port, host, director, commands, brainSettings, pov, chat 
       } catch (e) { return send(res, 500, 'error: ' + e.message) }
     }
     if (req.method === 'GET' && url === '/chat') return send(res, 200, chat ? chat.tail().join('\n') : '')
-    if (req.method === 'GET' && url === '/brain') return send(res, 200, { settings: brainSettings, models: [brainSettings.model] })
+    if (req.method === 'GET' && url === '/brain') return send(res, 200, { settings: settingsNow(), models: [brainSettings.model] })
     if (req.method === 'GET' && url === '/pov') { if (!bot.entity || !pov) return send(res, 503, { ok: false }); return pov.requestFrame(bot, f => send(res, 200, f)) }
     if (req.method === 'GET' && url === '/director') return send(res, 200, { on: true, runtime: 'bot2', task: director.info(), paused: director.isPaused() })
     if (req.method === 'GET' && url === '/config') {
@@ -170,9 +192,11 @@ function start ({ bot, port, host, director, commands, brainSettings, pov, chat 
         try { j = JSON.parse(data) } catch { j = { command: data } }
         if (url === '/brain') {
           if (j.model != null) brainSettings.model = String(j.model)
-          if (j.goal != null) brainSettings.goal = String(j.goal)
+          // (the panel posts back whatever its goal box shows, the derived goal included: that, or an empty box, is no
+          //  operator goal - else the first brain toggle would freeze today's build in as the goal for good)
+          if (j.goal != null) { const g = String(j.goal).trim(); brainSettings.goal = g && g !== derivedGoal() ? g : null }
           if (j.enabled != null) { brainSettings.enabled = !!j.enabled; mem.set('brainEnabled', brainSettings.enabled) } // (kept across restarts: main.js)
-          return send(res, 200, brainSettings)
+          return send(res, 200, settingsNow())
         }
         if (url === '/config') {
           send(res, 200, { ok: true, reconnect: !!j.reconnect })

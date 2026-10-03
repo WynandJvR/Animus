@@ -310,7 +310,9 @@ async function decide (state, history, model = LLM_MODEL, goal = GOAL) {
   else if (hz.underground && state && state.stuck) bodyBits.push('BURIED underground and stuck - use travel toward your goal so the body digs up')
   const bodyLine = bodyBits.length ? `BODY REPORT: ${bodyBits.join(' | ')}\n` : ''
   const userContent = askLine
-    ? `${bodyLine}A PLAYER IS TALKING TO YOU RIGHT NOW - THIS IS YOUR #1 PRIORITY THIS TURN.\nMessage: ${askLine}\nWork out what they want in plain language and pick the ONE command that does it now ` +
+    ? `${bodyLine}A PLAYER IS TALKING TO YOU RIGHT NOW - THIS IS YOUR #1 PRIORITY THIS TURN.\nMessage: ${askLine}\n` +
+      (state && state.statusLine ? `YOUR SITUATION (the facts for any answer about where you are, what you are doing or how far you are - never invent others): ${state.statusLine}\n` : '') +
+      `Work out what they want in plain language and pick the ONE command that does it now ` +
       `(come/follow/goto/recover/turn/look/drop/equip/wear/armorup/eat/mine/break/collect/plant/place/craft/hunt/sleep/attack/defend/scan/find), or "say" to answer a question. Do not just keep following.\n` +
       `RECENT actions:\n${recent}\nSTATE: ${JSON.stringify(state)}\nRespond with one JSON command.`
     : `${bodyLine}GOAL: ${goal}\nRECENT actions (oldest first):\n${recent}\nSTATE: ${JSON.stringify(state)}\nPick the next command that makes progress (do not repeat the above). Respond with one JSON command.`
@@ -344,12 +346,13 @@ async function decide (state, history, model = LLM_MODEL, goal = GOAL) {
 
 async function loop () {
   console.log(`[brain] LLM=${LLM_URL} model=${LLM_MODEL} bot=${BOT_URL}`)
-  console.log(`[brain] goal: ${GOAL}`)
+  console.log(`[brain] goal: from the body's /brain (the current build), else ${GOAL}`)
   console.log(`[brain] pacing: as fast as decisions complete (floor ${TICK_MIN_MS}ms, error backoff up to ${TICK_MAX_MS}ms)`)
   let backoff = 0
   const history = [] // rolling short-term memory of recent actions
   let lastSig = null
   let lastDecideAt = 0
+  let lastBeatAct = null
   let lastCmd = '(none)'
   let idleLogged = false
   let pausedLogged = false
@@ -414,6 +417,14 @@ async function loop () {
       // /cmd path rejects the brain's movement anyway - so don't burn inferences
       // re-deciding. Hold cheaply; still answer a waiting player, and let the slow
       // heartbeat through so it can still drop an occasional in-character quip.
+      // A busy body still at the SAME activity as at the last decision has nothing new to say: a night in a bunker drew
+      // ~15 near-identical bed complaints, one inference each, almost all dropped by the chat gate (2026-10-03).
+      const actKey = state.activity ? state.activity.name + '|' + (state.activity.detail || '') : ''
+      if (state.busy && !waiting && !changed && heartbeat && actKey === lastBeatAct) {
+        lastDecideAt = Date.now(); lastSig = sig
+        await sleep(IDLE_POLL_MS)
+        continue
+      }
       if (state.busy && !waiting && !heartbeat) {
         if (!idleLogged) { console.log('[brain] body busy (build/provision) - holding'); idleLogged = true }
         lastSig = sig
@@ -428,6 +439,7 @@ async function loop () {
         await sleep(IDLE_POLL_MS)
         continue
       }
+      lastBeatAct = actKey
       const priorHistory = history.slice() // the recent-action context the model saw THIS tick
       const action = await decide(state, history, model, goal)
       const result = await runCommand(action.command, action.reason)
