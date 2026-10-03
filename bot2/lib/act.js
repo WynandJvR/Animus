@@ -251,7 +251,9 @@ async function place (bot, pos, itemName, { faceHint = null, plans = null, accep
   if (!item) { log('act', `place ${itemName} at ${move.fmt(pos)}: none in the pack`); return false }
   // a torch in the cell takes no block (the server keeps the torch): off with it first. The mine's floor fill tried its
   // own tunnel torch every few seconds for an hour - "the block is still torch", no cobble mined, 2026-09-27
-  if (cur && /(^|_)torch$/.test(cur.name) && reach(bot, target, 4.5)) { await digBlock(bot, cur).catch(() => false) }
+  // (and a flower: the server keeps a dandelion as it keeps a torch - only a tuft (REPLACEABLE_RE) gives way to the block;
+  //  a builder's support "failed after 4 tries: the block is still dandelion", 2026-10-03)
+  if (cur && (/(^|_)torch$/.test(cur.name) || (PLANT_RE.test(cur.name) && !REPLACEABLE_RE.test(cur.name))) && reach(bot, target, 4.5)) { await digBlock(bot, cur).catch(() => false) }
   const list = plans || (faceHint || [[0, -1, 0], [0, 1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]]).map(off => ({ off }))
   const t0 = Date.now()
   const cancelled = control.token()

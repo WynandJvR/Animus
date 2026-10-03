@@ -1288,7 +1288,7 @@ async function placeCell (bot, c, j = job) {
   // round (our own cell: the one dig allowed past the finished-block guard), a flower where another goes (a flower is
   // no grass tuft: the server keeps it, and the place "failed" for ever)
   if (!step && !world.isAirish(cur) && !world.isLiquidWater(cur) && !act.REPLACEABLE_RE.test(cur.name)) {
-    if (!await timed('dig', act.dig(bot, pos, own))) return why(`could not dig the ${cur.name} in the cell`)
+    if (!await timed('dig', act.dig(bot, pos, own))) return why(`could not dig the ${cur.name} in the cell${act.lastDigWhy() ? ': ' + act.lastDigWhy() : ''}`)
     cur = bot.blockAt(pos)
   }
   // a two-block block needs its second cell clear (a scaffold block or a leaf in a door's top, a bed's head)
