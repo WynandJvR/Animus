@@ -223,7 +223,8 @@ function fromGround (bot, p) {
 // (the logs above keep the crown from decaying while we work), then down our own pillar from the top and the drops picked
 // up. The trunk's logs come home too. Returns the leaves got, or -1 when the tree could not be got to.
 const LEAF_LOG = { azalea: 'oak', flowering_azalea: 'oak' } // (an azalea tree's trunk is oak)
-const logReFor = s => new RegExp('^' + (LEAF_LOG[s.drops.replace(/_leaves$/, '')] || s.drops.replace(/_leaves$/, '')) + '_log$')
+const logNameFor = s => (LEAF_LOG[s.drops.replace(/_leaves$/, '')] || s.drops.replace(/_leaves$/, '')) + '_log'
+const logReFor = s => new RegExp('^' + logNameFor(s) + '$')
 function crownLeaves (bot, top, re) {
   return world.findBlocks(bot, re, { maxDistance: 3.6, count: 80, point: top, filter: b => !persistent(b) }).length
 }
@@ -335,7 +336,10 @@ async function shearTrip (bot, s, n, ctx = {}) {
     if (!cands.length) {
       if (++empty > 3) { log('forage', `no ${label} to shear around here`); break }
       noCrown = false // (a walk to new ground: its trees looked at again)
-      const known = gather().knownResource(label, bot.entity.position)
+      // (leaves grow on the trees remembered: a leaf spot is noted only once sheared, and the trip with none noted round this
+      //  home explored across a lake and came back empty - "a trip for nothing" - with eight oaks remembered 80-130b off,
+      //  2026-10-03. The nearest remembered tree of the kind, then the explore)
+      const known = gather().knownResource(label, bot.entity.position) || (s.leaves ? gather().knownResource(logNameFor(s), bot.entity.position, { filter: p => !move.inZone(p, 2) }) : null) // (never the orchard's: the crown climb leaves zone trees alone; audit)
       if (known && known !== lastKnown && world.dist2(known, bot.entity.position) > 40) { lastKnown = known; await move.travel(bot, known, { range: 8, shouldStop: ctx.shouldStop, label: 'to ' + label }) } else await gather().explore(bot, x => s.blocks.test(x.name), { shouldStop: ctx.shouldStop, label, legs: 2, accept: b => ok(b) })
       continue
     }
