@@ -1270,6 +1270,11 @@ function tick () {
       for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) for (let dy = -1; dy <= 1; dy++) {
         const x = fx + dx; const y = fy + 1 + dy; const z = fz + dz
         if (!world.standable(bot, x, y, z) || doomed(world.at(bot, x, y - 1, z)) || (ours && isFooting(x, y - 1, z))) continue
+        // (and only one the straight steer reaches without crossing a drop: the edge brake stops that steer at the lip, the
+        //  row steers again - 27 times in 26s on a felled crown beside a 5-block drop, 2026-10-03. Over the drop is no way)
+        { const n = Math.ceil(Math.hypot(x + 0.5 - me.x, z + 0.5 - me.z) / 0.4); let crosses = false
+          for (let i = 1; i < n && !crosses; i++) { const t = i / n; const px = me.x + (x + 0.5 - me.x) * t; const pz = me.z + (z + 0.5 - me.z) * t; if (Math.floor(px) === fx && Math.floor(pz) === fz) continue; if (world.dropAt(bot, px, fy + 1, pz) > world.SAFE_DROP && !world.standable(bot, Math.floor(px), fy + 1, Math.floor(pz))) crosses = true }
+          if (crosses) continue }
         const d = Math.abs(dx) + Math.abs(dz) + Math.abs(dy)
         if (d < bd) { bd = d; best = { x, y, z } }
       }
