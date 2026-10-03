@@ -100,7 +100,10 @@ function filler (bot, was) {
 
 async function fill (bot, { shouldStop } = {}) {
   const act = require('./act')
-  const cells = prune(bot).filter(q => world.at(bot, q.x, q.y, q.z) && !gaveUp(q))
+  // (the cells the task was chosen for - open(), ONE rule: the fill took prune()'s, which kept a y55 cell 64 under home the
+  //  task's own count left out; sorted bottom up it went there first, through a cave, and a creeper killed it, 2026-10-03)
+  prune(bot)
+  const cells = open(bot)
   if (!cells.length) return 0
   const need = cells.length
   const have = bot.inventory.items().filter(i => FILL_RE.test(i.name)).reduce((s, i) => s + i.count, 0)
