@@ -179,7 +179,7 @@ async function gatherRaw (bot, raw, n, ctx = {}) {
 // ---- tools -------------------------------------------------------------------------------------------------
 function shearsHeld (bot) { return inv.items(bot).find(i => i.name === 'shears' && inv.durabilityLeft(bot, i) > 2) || null }
 // shears: two iron ingots (the bank's first) - the one tool every job here but digging needs
-async function ensureShears (bot, ctx) {
+async function ensureShears (bot, ctx, pairs = 1) {
   if (shearsHeld(bot)) { if (mem.get().shearsWorn) mem.set('shearsWorn', false); return true }
   // (a pair at a time until a good one: the chest holds the worn pairs too, and the first out was the worn one - audit 2026-10-03)
   for (let i = 0; i < 4 && !shearsHeld(bot) && base().bankCount('shears') > 0; i++) { if (!await base().withdraw(bot, 'shears', 1).catch(() => 0)) break }
@@ -188,7 +188,9 @@ async function ensureShears (bot, ctx) {
   for (const it of inv.items(bot).filter(i => i.name === 'shears' && inv.durabilityLeft(bot, i) <= 2)) await bot.tossStack(it).catch(() => {})
   // (the bank's pair, out and spent: no shears at all to the iron plan - the director makes a pair; audit)
   if (!shearsHeld(bot) && inv.has(bot, 'shears') && !mem.get().shearsWorn) { mem.set('shearsWorn', true); log('forage', 'the banked shears are worn out - a new pair wanted') }
-  if (!shearsHeld(bot)) await craft().ensure(bot, 'shears', inv.count(bot, 'shears') + 1, Object.assign({}, ctx, { noWithdraw: false })).catch(() => false)
+  if (!shearsHeld(bot)) await craft().ensure(bot, 'shears', inv.count(bot, 'shears') + pairs, Object.assign({}, ctx, { noWithdraw: false })).catch(() => false)
+  // (the pairs wanted are all-or-nothing to the craft: 2-5 ingots and a failed iron run made none - one pair, as before; audit)
+  if (!shearsHeld(bot) && pairs > 1) await craft().ensure(bot, 'shears', inv.count(bot, 'shears') + 1, Object.assign({}, ctx, { noWithdraw: false })).catch(() => false)
   if (!shearsHeld(bot)) { log('forage', 'no shears and none to be made (two iron ingots) - the shears work waits'); return false }
   return true
 }
@@ -330,7 +332,9 @@ async function shearTrip (bot, s, n, ctx = {}) {
     if (Date.now() - t0 > 15 * 60000) { log('forage', `shearing ${label}: 15 min budget spent`); break }
     await reflex.waitClear()
     if (inv.freeSlots(bot) <= 1) { await base().makeRoom(bot, 3); if (inv.freeSlots(bot) <= 1) return inv.count(bot, s.drops) >= target || 'cut' }
-    if (!shearsHeld(bot) && !await ensureShears(bot, ctx)) return inv.count(bot, s.drops) >= target || 'cut'
+    // (the pairs the trip's leaves wear out, in one iron run: a pair is ~238 cuts, and 2 ingots a run made a 3-minute detour
+    //  for every 160-240 leaves of a 1600-leaf shortfall, 2026-10-04; three at most)
+    if (!shearsHeld(bot) && !await ensureShears(bot, ctx, s.leaves ? Math.max(1, Math.min(3, Math.ceil((target - inv.count(bot, s.drops)) / 230))) : 1)) return inv.count(bot, s.drops) >= target || 'cut'
     if (s.leaves && !noCrown) {
       const tree = crownTree(bot, s, crownSkip)
       if (!tree) noCrown = true // (the scan is dear: once none, the ground's way for the rest of the trip; audit B5)
@@ -343,7 +347,10 @@ async function shearTrip (bot, s, n, ctx = {}) {
       // (leaves grow on the trees remembered: a leaf spot is noted only once sheared, and the trip with none noted round this
       //  home explored across a lake and came back empty - "a trip for nothing" - with eight oaks remembered 80-130b off,
       //  2026-10-03. The nearest remembered tree of the kind, then the explore)
-      const known = gather().knownResource(label, bot.entity.position) || (s.leaves ? gather().knownResource(logNameFor(s), bot.entity.position, { filter: p => !move.inZone(p, 2) }) : null) // (never the orchard's: the crown climb leaves zone trees alone; audit)
+      // (a lead past the ground just searched: the nearest spot noted - a few leaves sheared by the farm once, 7b off - sent the
+      //  trip exploring the other way, 93b south, with the forest it had worked a minute before 116b north, 2026-10-04)
+      const me0 = bot.entity.position; const away = p => world.dist2(p, me0) > 40
+      const known = gather().knownResource(label, me0, { filter: away }) || (s.leaves ? gather().knownResource(logNameFor(s), me0, { filter: p => away(p) && !move.inZone(p, 2) }) : null) // (never the orchard's: the crown climb leaves zone trees alone; audit)
       if (known && known !== lastKnown && world.dist2(known, bot.entity.position) > 40) { lastKnown = known; await move.travel(bot, known, { range: 8, shouldStop: ctx.shouldStop, label: 'to ' + label }) } else await gather().explore(bot, x => s.blocks.test(x.name), { shouldStop: ctx.shouldStop, label, legs: 2, accept: b => ok(b) })
       continue
     }
