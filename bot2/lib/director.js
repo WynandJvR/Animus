@@ -492,8 +492,12 @@ function decide () {
     const mineCan = !held('nightMine') && (mm0 ? !!(mm0.entrance && world.dist2(mm0.entrance, home) < 48 && world.dist2(bot.entity.position, mm0.entrance) < (dusk ? 64 : 32) && (dusk || !move.insideHut(world.feetPos(bot)))) : dusk) // (the rules below exactly: night needs the night walk and the open air, a new mine dusk; audit)
     // (dusk finds the bot at the site, 40-60 blocks out: "within 32 of home" never held, and the rule never fired; at night,
     //  from home only - the dark walk; audit 2026-10-03)
-    const mineTheNight = (dusk ? dHome < 96 : dHome < 16) && home && mineCan && build.getJob() && build.needsWork(bot) && nightFed() && inv.bestTool(bot, 'pickaxe', 8) && stoneShort()
-    if (bed && world.dist2(bed, bot.entity.position) < (dusk ? 200 : 32) && !mineTheNight && !held('sleep')) return { name: 'sleep', why: `${night ? 'night' : 'dusk'} - my bed is ${Math.round(world.dist2(bed, bot.entity.position))}b away` }
+    const mineTheNight = (dusk ? dHome < 96 : dHome < 16) && home && mineCan && build.getJob() && build.needsWork(bot) && nightFed() && inv.bestTool(bot, 'pickaxe', 8) && stoneShort() && !held('nightMine') // (a night mine just failed is no reason to refuse the bed; audit)
+    // (the night mine chosen at dusk and failed - its walk refused - keeps the dusk's walk to the bed a minute and a half: the
+    //  dusk is ~45s, the failure took 30, and night's 32-block limit left the bed 48b off - a bunker dug at the site and the
+    //  night waited out, ~9 minutes a bed would have skipped, 2026-10-04)
+    const mineFellThrough = !!failures.nightMine && Date.now() - failures.nightMine.at < 90000
+    if (bed && world.dist2(bed, bot.entity.position) < (dusk || mineFellThrough ? 200 : 32) && !mineTheNight && !held('sleep')) return { name: 'sleep', why: `${night ? 'night' : 'dusk'} - my bed is ${Math.round(world.dist2(bed, bot.entity.position))}b away` }
     // a working mine next to home turns the night into mining time: go down at dusk (a short walk)
     {
       const mm = mem.get().mine
