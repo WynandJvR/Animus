@@ -61,10 +61,21 @@ function oursByRecord (p) {
   if ((m.ownAreas || []).some(a => p.x >= a.x1 && p.x <= a.x2 && p.z >= a.z1 && p.z <= a.z2 && p.y >= a.y1 && p.y <= a.y2)) return true
   const close = q => q && Math.abs(q.x - p.x) <= 3 && Math.abs(q.y - p.y) <= 3 && Math.abs(q.z - p.z) <= 3
   for (const k of ['tables', 'furnaces', 'chests']) if ((m[k] || []).some(close)) return true
-  return !!(close(m.bed) || close(m.bunker))
+  if (close(m.bed) || close(m.bunker)) return true
+  // (and every base saved away by movebase - its build's box, its mine, its furniture and bed: cleared from the live records,
+  //  the castle's own doors, chests and bed read as someone else's place and were refused to us; audit 2026-10-03)
+  for (const r of Object.values(m.bases || {})) {
+    if (!r) continue
+    const b = r.box; if (b && p.x >= b.x1 - 8 && p.x <= b.x2 + 8 && p.z >= b.z1 - 8 && p.z <= b.z2 + 8) return true
+    try { const mb = require('./mining').mineBox(r.mine); if (mb && p.x >= mb.x1 - 4 && p.x <= mb.x2 + 4 && p.z >= mb.z1 - 4 && p.z <= mb.z2 + 4 && p.y >= mb.y1 - 4 && p.y <= mb.y2 + 4) return true } catch {}
+    for (const k of ['tables', 'furnaces', 'chests']) if ((r[k] || []).some(close)) return true
+    if (close(r.bed) || close(r.bunker)) return true
+  }
+  return false
 }
 function buildBox () { try { const j = require('./build').getJob(); const b = j && j.box; return b ? { x1: b.x1 - 8, x2: b.x2 + 8, z1: b.z1 - 8, z2: b.z2 + 8 } : null } catch { return null } }
-function homeGrounds (p) { const h = mem.get().home; return !!h && Math.hypot(p.x - h.x, p.z - h.z) <= HOME_GROUNDS }
+// (a saved base's grounds are home grounds too - under the same rule: never inside a place known to be someone else's)
+function homeGrounds (p) { const m = mem.get(); return [m.home, ...Object.values(m.bases || {}).map(r => r && r.home)].some(h => !!h && Math.hypot(p.x - h.x, p.z - h.z) <= HOME_GROUNDS) }
 // Ours: by record always; round home too - but never a sign inside a place already known to be someone else's (a home
 // set beside their base must not make their base ours; audit)
 function ours (p, known = boxes()) {

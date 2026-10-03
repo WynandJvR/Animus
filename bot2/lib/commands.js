@@ -103,25 +103,50 @@ function make (bot, director) {
       // walk3 x y z [range] - the same to a block (a goal by x/z alone wanders the tunnels under it)
       case 'walk': case 'walk3': return exclusive('walk', async () => { const r = await move.goTo(bot, cmd === 'walk3' ? new goals.GoalNear(num(0), num(1), num(2), num(3, 2)) : new goals.GoalNearXZ(num(0), num(1), num(2, 3)), { timeoutMs: 120000, stuckMs: 15000, dig: false, place: false, label: 'walk (no dig)' }); return `walk: ${r.ok ? 'arrived' : r.why} at ${move.fmt(bot.entity.position)}` })
       case 'home': return exclusive('home', async () => { const r = await base.goHome(bot); return `home: ${r.ok ? 'arrived' : r.why}` })
-      case 'movebase': { // movebase save <name> | movebase restore <name> | movebase list - a second base for a far build
-        // (every per-home record: the home-abandon list in director.js, and the bed's spawn - saved whole under a name and
-        //  cleared, so the director settles a new home by the current build; restored, the old base is home again)
+      case 'movebase': { // movebase save <name> <schematic> <x> <y> <z> [corner] [anywood] | movebase restore <name> | movebase list
+        // A SECOND BASE FOR A FAR BUILD: every per-home record (the home-abandon list in director.js, the bed's spawn) and the
+        // build job with its box saved whole under a name and cleared, the new far build set in the same step, so the director
+        // settles a new home beside it; restored, the old base and its build are home again. Saved bases stay OURS to the
+        // anti-grief guard (foreign.js) - their box, mine, furniture, bed and grounds (audit 2026-10-03)
         const F = ['home', 'bed', 'hutPlan', 'hut', 'chests', 'chestContents', 'furnaces', 'tables', 'farm', 'orchard', 'pen', 'mine', 'bunker', 'spawnSetAt', 'shaftsToFill']
         const EMPTY = { chests: [], chestContents: {}, furnaces: [], tables: [] }
+        const clone = v => v === undefined || v === null ? null : JSON.parse(JSON.stringify(v))
+        const snap = () => { const m = mem.get(); const rec = {}; for (const k of F) rec[k] = clone(m[k]); rec.build = clone(m.build); const j = build.getJob(); rec.box = j && j.box ? clone(j.box) : null; return rec }
         const op = a[0]; const nm = a[1]
-        if (op === 'list') return JSON.stringify(Object.fromEntries(Object.entries(mem.get().bases || {}).map(([k, v]) => [k, v.home])))
-        if (!nm || !['save', 'restore'].includes(op)) return 'usage: movebase save <name> | movebase restore <name> | movebase list'
-        director.setPaused(true); move.stopMoving(bot)
+        if (op === 'list') return JSON.stringify(Object.fromEntries(Object.entries(mem.get().bases || {}).map(([k, v]) => [k, { home: v.home, build: v.build && v.build.name }])))
         if (op === 'save') {
-          const m = mem.get(); const rec = {}; for (const k of F) rec[k] = m[k] === undefined ? null : JSON.parse(JSON.stringify(m[k]))
-          mem.update(mm => { mm.bases = Object.assign({}, mm.bases, { [nm]: rec }); for (const k of F) mm[k] = EMPTY[k] !== undefined ? JSON.parse(JSON.stringify(EMPTY[k])) : null })
-          log('base', `base "${nm}" saved (home ${rec.home ? move.fmt(rec.home) : '-'}, ${(rec.chests || []).length} chests) and cleared - a new home by the build`)
-          return `saved base "${nm}" and cleared the home - paused; restart the bot (its zones are read at boot), then resume`
+          if (!nm || a.length < 6) return 'usage: movebase save <name> <schematic> <x> <y> <z> [corner] [anywood]   (the new far build, coords the CENTRE)'
+          const schem = a[2]; let origin = { x: Number(a[3]), y: Number(a[4]), z: Number(a[5]) }
+          if (![origin.x, origin.y, origin.z].every(Number.isFinite)) return 'bad coordinates'
+          const s = await build.loadSchematic(schem, bot.version)
+          if (!a.includes('corner')) { const en = s.end(); const st = s.start(); origin = { x: origin.x - Math.floor((en.x - st.x) / 2), y: origin.y, z: origin.z - Math.floor((en.z - st.z) / 2) } }
+          // (only for a FAR build: one near the old home would settle beside it again - audit)
+          const h = mem.get().home
+          if (h && Math.hypot(origin.x - h.x, origin.z - h.z) < 256) return `the new build is ${Math.round(Math.hypot(origin.x - h.x, origin.z - h.z))} from home - movebase is for a build 256+ away; use build`
+          director.setPaused(true); move.stopMoving(bot)
+          const rec = snap()
+          mem.update(mm => { mm.bases = Object.assign({}, mm.bases, { [nm]: rec }); for (const k of F) mm[k] = EMPTY[k] !== undefined ? clone(EMPTY[k]) : null })
+          await build.setJob(bot, schem, origin, { exactWood: !a.includes('anywood') })
+          log('base', `base "${nm}" saved (home ${rec.home ? move.fmt(rec.home) : '-'}, ${(rec.chests || []).length} chests, build ${rec.build ? rec.build.name : '-'}) and cleared; new build ${schem} at ${move.fmt(origin)}`)
+          return `saved base "${nm}"; build set: ${schem} origin ${move.fmt(origin)} - paused; restart the bot (zones are read at boot), then resume`
         }
-        const rec = (mem.get().bases || {})[nm]; if (!rec) return `no saved base "${nm}"`
-        mem.update(mm => { for (const k of F) mm[k] = rec[k] === undefined ? (EMPTY[k] !== undefined ? EMPTY[k] : null) : rec[k]; delete mm.bases[nm] })
-        log('base', `base "${nm}" restored (home ${rec.home ? move.fmt(rec.home) : '-'})`)
-        return `restored base "${nm}" - paused; restart the bot, then resume`
+        if (op === 'restore') {
+          if (!nm) return 'usage: movebase restore <name>'
+          const rec = (mem.get().bases || {})[nm]; if (!rec) return `no saved base "${nm}"`
+          director.setPaused(true); move.stopMoving(bot)
+          // (the base we leave is saved first, never dropped: its chests and their contents - audit)
+          const cur = mem.get().home ? snap() : null; const curName = 'auto-' + ((mem.get().build && mem.get().build.name) || 'base')
+          mem.update(mm => {
+            if (cur) mm.bases = Object.assign({}, mm.bases, { [curName]: cur })
+            for (const k of F) mm[k] = rec[k] === undefined || rec[k] === null ? (EMPTY[k] !== undefined ? clone(EMPTY[k]) : null) : rec[k]
+            mm.spawnSetAt = null // (the server's spawn is the other base's bed now: set again at this bed - audit)
+            delete mm.bases[nm]
+          })
+          if (rec.build && rec.build.name && rec.build.origin) await build.setJob(bot, rec.build.name, rec.build.origin, { exactWood: rec.build.exactWood !== false })
+          log('base', `base "${nm}" restored (home ${rec.home ? move.fmt(rec.home) : '-'}, build ${rec.build ? rec.build.name : '-'})${cur ? `; the base left saved as "${curName}"` : ''}`)
+          return `restored base "${nm}"${cur ? ` (the current one saved as "${curName}")` : ''} - paused; restart the bot, then resume`
+        }
+        return 'usage: movebase save <name> <schematic> <x> <y> <z> [corner] [anywood] | movebase restore <name> | movebase list'
       }
       case 'sethome': {
         const p = a.length >= 3 ? { x: num(0), y: num(1), z: num(2) } : world.feetPos(bot)
