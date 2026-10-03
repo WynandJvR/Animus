@@ -1067,11 +1067,65 @@ async function escapeUpInner (bot) {
         const door = [0, 1].some(dy => { const b = world.at(bot, f0.x + dx, f0.y + dy, f0.z + dz); return b && /_door$/.test(b.name) })
         return { dx, dz, door, ok: ours(f0.x + dx, f0.y, f0.z + dz) && ours(f0.x + dx, f0.y + 1, f0.z + dz), beyond: safe(f0.x + 2 * dx, f0.y, f0.z + 2 * dz) }
       }).filter(sd => sd.ok).sort((a, b) => (b.door - a.door) || (b.beyond - a.beyond))
-      const sd = sides[0]
+      // A ROOM, NOT A POCKET: shut in a 140-cell room under the plaza, every side of the body was air - "ours or air" - and
+      // the tunnel ran three steps across the open floor, dug nothing, and the walks gave up again, a loop of 6 minutes,
+      // 2026-10-04. The room the body can walk (cells stood in, a step up or down), and its nearest WALL - a pair of cells
+      // ours to open, safe ground past it that is not the room itself: walked to, then opened as before
+      const kk = q => q.x + ',' + q.y + ',' + q.z
+      const room = new Map() // key -> dist
+      {
+        const q = [{ x: f0.x, y: f0.y, z: f0.z, d: 0 }]; room.set(kk(f0), 0)
+        while (q.length && room.size < 600) {
+          const c = q.shift()
+          for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            for (const dy of [0, 1, -1]) {
+              const n = { x: c.x + dx, y: c.y + dy, z: c.z + dz }
+              if (room.has(kk(n)) || Math.abs(n.x - f0.x) > 20 || Math.abs(n.z - f0.z) > 20 || !world.standable(bot, n.x, n.y, n.z)) continue
+              if (dy === 1 && !air(c.x, c.y + 2, c.z)) continue // (a step up wants head room over the cell left)
+              room.set(kk(n), c.d + 1); q.push(Object.assign(n, { d: c.d + 1 }))
+            }
+          }
+        }
+      }
+      let exit = null // { c, dx, dz, d }
+      for (const [key, d] of room) {
+        if (exit && d >= exit.d) continue
+        const [cx, cy, cz] = key.split(',').map(Number)
+        for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const wx = cx + dx; const wz = cz + dz; const bx = cx + 2 * dx; const bz = cz + 2 * dz
+          if (room.has(kk({ x: wx, y: cy, z: wz })) || (air(wx, cy, wz) && air(wx, cy + 1, wz))) continue // (not a wall)
+          if (!ours(wx, cy, wz) || !ours(wx, cy + 1, wz) || !safe(bx, cy, bz) || room.has(kk({ x: bx, y: cy, z: bz }))) continue
+          exit = { c: { x: cx, y: cy, z: cz }, dx, dz, d }; break
+        }
+      }
+      // (a door a few steps further beats a wall: it comes back whole and the builder re-places it - the old pick's order; audit)
+      if (exit) {
+        for (const [key, d] of room) {
+          if (d > exit.d + 4) continue
+          const [cx, cy, cz] = key.split(',').map(Number)
+          for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            const b = world.at(bot, cx + dx, cy, cz + dz)
+            if (!b || !/_door$/.test(b.name) || !ours(cx + dx, cy, cz + dz) || !ours(cx + dx, cy + 1, cz + dz) || !safe(cx + 2 * dx, cy, cz + 2 * dz) || room.has(kk({ x: cx + 2 * dx, y: cy, z: cz + 2 * dz }))) continue
+            if (!exit.door || d < exit.d) exit = { c: { x: cx, y: cy, z: cz }, dx, dz, d, door: true }
+          }
+        }
+      }
+      let sd = sides[0]
+      let start = { x: f0.x, y: f0.y, z: f0.z }
+      if (exit) {
+        if (exit.d > 0) {
+          log('move', `enclosed in a room of ${room.size} cells - its wall at ${fmt({ x: exit.c.x + exit.dx, y: exit.c.y, z: exit.c.z + exit.dz })} opens onto open ground: walking to it`)
+          await goTo(bot, new goals.GoalBlock(exit.c.x, exit.c.y, exit.c.z), { timeoutMs: 15000, stuckMs: 5000, dig: false, place: false, label: 'to the wall to open' }).catch(() => null)
+        }
+        const here = bot.entity.position.floored()
+        if (here.x === exit.c.x && here.y === exit.c.y && here.z === exit.c.z) { sd = { dx: exit.dx, dz: exit.dz }; start = here }
+        // (not there: never the air side - the same no-op tunnel and the same loop; the trap and give-up rules decide; audit)
+        else { log('move', `enclosed: couldn't reach the wall at ${fmt(exit.c)}`); sd = null }
+      }
       if (sd) {
         // (a bounded tunnel along that side: a pair at a time - feet and head - stepping in and asking again after each;
         //  three at most, so a thick wall is got through and nothing longer is ever bored through the build; audit)
-        let at = { x: f0.x, y: f0.y, z: f0.z }
+        let at = { x: start.x, y: start.y, z: start.z }
         for (let n = 0; n < 3; n++) {
           const p0 = { x: at.x + sd.dx, y: at.y, z: at.z + sd.dz }
           if (!ours(p0.x, p0.y, p0.z) || !ours(p0.x, p0.y + 1, p0.z)) break
