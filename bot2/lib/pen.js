@@ -199,7 +199,9 @@ function wildKnown (bot) {
 //   woolWanted: wool the build still needs; wheat: wheat to spare for the pen (pack + bank, bread's share kept back)
 function work (bot, { woolWanted = 0, wheat = 0 } = {}) {
   const p = pen()
-  if (!p) return woolWanted > 0 && wheat >= STOCK_MIN ? { kind: 'build', why: `${woolWanted} wool wanted and no sheep pen - building one by home` } : null
+  // (and only with a flock known to lead into it: no sheep within ~180 of the spawn hub, and the morning went on a pen's
+  //  fence wood 120 blocks out, 2026-10-03 - the stocking below asks the same, wildKnown)
+  if (!p) return woolWanted > 0 && wheat >= STOCK_MIN && wildKnown(bot) ? { kind: 'build', why: `${woolWanted} wool wanted and no sheep pen - building one by home` } : null
   const gap = missing(bot, p)
   if (gap.length) return { kind: 'build', why: `the sheep pen's fence has ${gap.length} gap${gap.length > 1 ? 's' : ''}` }
   // an open gate, whoever opened it: shut before the flock walks out (audit)
