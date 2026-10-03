@@ -1160,26 +1160,31 @@ async function withdrawWindow (needs, lowY = {}) {
   //  2026-09-30)
   // (and the rest in band order - each item by the lowest layer it goes in, the most first on a tie: lanterns and a
   //  grindstone for the upper floors come last, never the next layer's stone; audit)
-  const first = mem.get().buildWaiting
+  // (EVERY item the band's anchors miss goes first, the one named first of them: one named a round, the band anchored by two
+  //  - a birch fence gate and dark oak stairs - got one each round and the stairs never fitted, 2026-10-03)
+  const firsts = [...new Set([mem.get().buildWaiting, ...(typeof build.missingAnchors === 'function' ? build.missingAnchors() : [])].filter(nm => nm && needs[nm] != null))]
+  const rank = nm => { const i = firsts.indexOf(nm); return i < 0 ? Infinity : i }
   const y = it => lowY[it] != null ? lowY[it] : Infinity
-  const order = Object.entries(needs).sort((a, b) => ((b[0] === first) - (a[0] === first)) || (y(a[0]) - y(b[0])) || (b[1] - a[1]))
+  const order = Object.entries(needs).sort((a, b) => (rank(a[0]) - rank(b[0])) || (y(a[0]) - y(b[0])) || (b[1] - a[1]))
   // ROOM FOR THE BAND'S OWN FIRST: a pack full of the window's upper-layer blocks (chests, grindstones, lightning rods,
   // doors - 31 kinds) took nothing, the "two slots free" rule returned at once, and the y125 band waited on dark oak stairs
-  // with 182 in the chest, round after round (2026-10-03). Window blocks whose lowest layer is above the head of the order
-  // go back to the chest, the highest first, until it fits - only what is over the kit's keep and the scaffold stock (a
-  // castle's torches, dirt and cobblestone are window needs too, and the kit's light went first; audit), and only when the
-  // head is in the chest to take (else every round put the upper blocks back and took them out again; audit)
-  const head = order.length ? order[0][0] : null
-  if (head && countOf(head) === 0 && stockOf(head) > 0 && inv.freeSlots(bot) < 2) {
+  // with 182 in the chest, round after round (2026-10-03). Window blocks whose lowest layer is above the band's missing ones
+  // go back to the chest, the highest first, until they all fit - only what is over the kit's keep and the scaffold stock
+  // (a castle's torches, dirt and cobblestone are window needs too, and the kit's light went first; audit), and only for
+  // the ones in the chest to take (else every round put the upper blocks back and took them out again; audit)
+  const heads = firsts.filter(nm => countOf(nm) === 0 && stockOf(nm) > 0)
+  const room = Math.min(heads.length + 1, 6)
+  if (heads.length && inv.freeSlots(bot) < room) {
     const keep = nm => Math.max(base.keepCount(bot, { name: nm }), build.FILLER_ITEMS.test(nm) ? build.SCAFFOLD_WANT : 0)
-    const above = [...new Set(inv.items(bot).map(i => i.name))].filter(nm => nm !== head && needs[nm] != null && y(nm) > y(head)).sort((a, b) => y(b) - y(a))
+    const lowHead = Math.min(...heads.map(y))
+    const above = [...new Set(inv.items(bot).map(i => i.name))].filter(nm => !firsts.includes(nm) && needs[nm] != null && y(nm) > lowHead).sort((a, b) => y(b) - y(a))
     const back = []
     for (const nm of above) {
-      if (inv.freeSlots(bot) >= 2) break
+      if (inv.freeSlots(bot) >= room) break
       const k = inv.count(bot, nm) - keep(nm)
       if (k > 0 && await base.depositItem(bot, nm, k).catch(() => 0)) back.push(nm)
     }
-    log('dir', `no room for ${head} (the band's) - put back ${back.length ? back.join(', ') : 'nothing'} (window blocks for higher layers); ${inv.freeSlots(bot)} slots free`)
+    log('dir', `no room for ${heads.join(', ')} (the band's) - put back ${back.length ? back.join(', ') : 'nothing'} (window blocks for higher layers); ${inv.freeSlots(bot)} slots free`)
   }
   for (const cap of [64, 64 * 4]) {
     for (const [name, n] of order) {

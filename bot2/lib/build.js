@@ -1191,6 +1191,7 @@ const footBad = f => { const t = badFeet.get(key(f)); return !!t && Date.now() -
 // under the feet, drop one, again - before the builder walks to a cell the pillar top does not reach, and at the step's
 // end. Left standing till the whole build was done, 391 blocks of pillars stood round the castle for days: the operator
 // asked what they were, and they blocked the stands the rim's foundation needed (2026-09-28).
+let missingAnchorItems = [] // (the last step's anchors' missing items - missingItem; the director's window takes them first)
 let myPillar = []
 async function descendPillar (bot) {
   const ours = q => myPillar.some(p => p.x === q.x && p.y === q.y && p.z === q.z)
@@ -1486,6 +1487,10 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       //  pickaxe, the iron's fuel - while the walls waited on nothing of it, 2026-09-28. Named last, once nothing else is)
       const lowAll = todo.filter(c => !c.attach && !c.follows && !cellUnsourced(c) && c.y <= lowestAll + 1)
       const low = lowAll.find(c => !has(c) && anchors(c)) || lowAll.find(c => !has(c) && !det.has(stepItem(bot, c))) // (the anchor's own missing item first)
+      // (and EVERY anchor's missing item, for the window's withdraw: one named a round, the band anchored by two - a birch
+      //  fence gate and dark oak stairs - got one each round, and the stairs lost the pack's room to lower cells' blocks, the
+      //  band at y125 for an hour with 182 in the chest, 2026-10-03)
+      missingAnchorItems = [...new Set(lowAll.filter(c => !has(c) && anchors(c)).map(c => stepItem(bot, c)).filter(Boolean))]
       // (then infill waiting on its material - glass: the sand trips are still wanted, only the layers don't wait)
       const m = low || todo.filter(c => c.attach && !cellUnsourced(c) && supportThere(bot, c)).find(c => !has(c)) || todo.filter(c => infillCell(c) && !cellUnsourced(c) && c.y <= lowestAll + 1).find(c => !has(c)) || todo.filter(c => infillCell(c) && !cellUnsourced(c)).sort((a, b) => a.y - b.y).find(c => !has(c)) || lowAll.find(c => !has(c))
       // (the item really missing: a pot in hand and its flower not is waiting on the flower - named for the director; audit)
@@ -2540,7 +2545,7 @@ async function ensureScaffold (bot, n = SCAFFOLD_WANT, { shouldStop } = {}) { //
   return true
 }
 
-module.exports = { walkModel, strayAt, siteScaffoldTakeable, wayOut, wayOutPoint, FILLER_ITEMS, SCAFFOLD_WANT, cachedStatus, exactWood, isOpenCell, INFILL_RE, infillItem, unsourced, strayBuildBlocks,
+module.exports = { missingAnchors: () => missingAnchorItems.slice(), walkModel, strayAt, siteScaffoldTakeable, wayOut, wayOutPoint, FILLER_ITEMS, SCAFFOLD_WANT, cachedStatus, exactWood, isOpenCell, INFILL_RE, infillItem, unsourced, strayBuildBlocks,
   finishSite, woodClass, woodForm, acceptsFor, itemOf, LOG_ANY, PLANKS_ANY, ensureScaffold, unskippedObstructions, setJob, getJob, status, nextNeeds,
   buildStep, clearSite, obstructions, removeScaffold, siteScaffoldTeardown, loadSchematic, cellDone, cellsDone, inBox, placeCell, registerJob, key,
   complete, needsWork, finish, survey, scaffoldList, holesList, ensureSnapshot, snapshotInfo, snapName,
