@@ -45,6 +45,9 @@ function pathBad (p, dir) {
     const q = { x: p.x + dir.x * k, z: p.z + dir.z * k }
     if (deaths.some(d => world.dist2(d, q) < 24)) return true
     if (underOwnZone(q)) return true
+    // (nor through someone else's place, under it or into it: a tunnel at y15 ran into a player's lit strip mine 110 blocks
+    //  east, the guard refused every block round it and the mine was "boxed in" and given up, 2026-10-03)
+    if ((mem.get().foreignBases || []).some(b => q.x >= b.x1 - 8 && q.x <= b.x2 + 8 && q.z >= b.z1 - 8 && q.z <= b.z2 + 8)) return true
   }
   return false
 }
