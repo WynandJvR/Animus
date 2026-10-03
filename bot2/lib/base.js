@@ -370,29 +370,35 @@ async function tossJunk (bot) {
   return tossed
 }
 
-// blocks found everywhere again, the ones a player with a full pack drops first
-const CHEAP_RE = /^(dirt|coarse_dirt|cobblestone|cobbled_deepslate|gravel|sand|andesite|diorite|granite|tuff|netherrack)$/
-async function dropCheap (bot, slots) {
-  let dropped = 0; const what = []
-  const stacks = inv.items(bot).filter(i => CHEAP_RE.test(i.name)).sort((x, y) => x.count - y.count)
-  for (const it of stacks) {
-    if (inv.freeSlots(bot) >= slots) break
-    try { await bot.toss(it.type, null, it.count); dropped += it.count; what.push(`${it.name} x${it.count}`) } catch {}
-  }
-  if (dropped) log('base', `pack full with nowhere to put it - dropped ${what.join(', ')}`)
-  return dropped
-}
-
-// drop: as the last resort, drop the cheapest stacks - only for a craft (and so the first chest) that has no slot for its
-// result: at a new base with no chest yet a pack full of build stock could craft nothing, the chest it needed included -
-// sticks "not handed over", no axe, logs cut by hand (2026-10-03)
-async function makeRoom (bot, slots = 3, { drop = false } = {}) {
+async function makeRoom (bot, slots = 3) {
   if (inv.freeSlots(bot) >= slots) return true
   await tossJunk(bot)
   if (inv.freeSlots(bot) >= slots) return true
-  if (distHome(bot) < 48) { await depositAll(bot); if (inv.freeSlots(bot) >= slots) return true }
-  if (drop) await dropCheap(bot, slots)
-  return inv.freeSlots(bot) >= slots
+  if (distHome(bot) < 48) { await depositAll(bot); return inv.freeSlots(bot) >= slots }
+  return false
 }
 
-module.exports = { SPARE_KIT, home, setHome, distHome, withdraw, depositItem, depositAll, depositHaul, goHome, tossJunk, makeRoom, bankCount, bankCounts, knownChests, placeChest, notePlacedChest, ourChest, openChest, keepCount }
+// A slot for a craft's result when there is nowhere to store anything: at a new base with no chest yet a pack full of
+// build stock could craft nothing - sticks "not handed over", no axe, logs cut by hand, and never the chest that would end
+// it (2026-10-03). A player drops a cheap stack: the blocks found everywhere again, ones no build wants first, then the
+// smallest; never one the recipe uses. Only with no chest known at all - with one, the craft's own failure path deposits.
+// No deposit and no walk here: the caller may be standing at its table (audit 2026-10-03).
+const CHEAP_RE = /^(dirt|coarse_dirt|cobblestone|cobbled_deepslate|gravel|sand|andesite|diorite|granite|tuff|netherrack)$/
+async function roomToCraft (bot, keep = new Set()) {
+  if (inv.freeSlots(bot) > 0) return true
+  await tossJunk(bot)
+  if (inv.freeSlots(bot) > 0) return true
+  if (knownChests(bot).length) return false
+  const want = require('./materials').wantedSet(bot)
+  const stacks = inv.items(bot).filter(i => CHEAP_RE.test(i.name) && !keep.has(i.name))
+    .sort((x, y) => (want(x.name) ? 1 : 0) - (want(y.name) ? 1 : 0) || x.count - y.count)
+  for (const it of stacks) {
+    if (inv.freeSlots(bot) > 0) break
+    // (tossStack: that exact slot - toss(type, n) takes from the lowest slot of the type first, across stacks, and
+    //  "the smallest" freed nothing - audit 2026-10-03)
+    try { await bot.tossStack(it); log('base', `pack full with nowhere to store it - dropped ${it.name} x${it.count} to craft`) } catch {}
+  }
+  return inv.freeSlots(bot) > 0
+}
+
+module.exports = { SPARE_KIT, home, setHome, distHome, withdraw, depositItem, depositAll, depositHaul, goHome, tossJunk, makeRoom, roomToCraft, bankCount, bankCounts, knownChests, placeChest, notePlacedChest, ourChest, openChest, keepCount }
