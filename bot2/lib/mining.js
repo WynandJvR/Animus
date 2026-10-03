@@ -42,7 +42,9 @@ function fluidAround (bot, p, skip) {
 function pathBad (p, dir) {
   // (underground by home's own level, not a fixed y60: home at y119, the caves' deaths at y62-75 never counted and a site
   //  beside the skeleton's cave could be chosen once diedInMine stopped counting deaths before a mine; audit 2026-10-03)
-  const deaths = (mem.get().deaths || []).filter(d => d.cause !== 'void' && d.y < ((mem.get().home || {}).y ?? 64) - 8)
+  // (a day's deaths, not every one there ever was: thirty deaths over the weeks shut every route near home - the cave
+  //  that killed is a cave of the last day, and diedInMine's own memory is three hours; 2026-10-03)
+  const deaths = (mem.get().deaths || []).filter(d => d.cause !== 'void' && d.y < ((mem.get().home || {}).y ?? 64) - 8 && Date.now() - (d.t || 0) < 24 * 3600000)
   for (let k = 0; k <= 70; k += 4) {
     const q = { x: p.x + dir.x * k, z: p.z + dir.z * k }
     if (deaths.some(d => world.dist2(d, q) < 24)) return true
@@ -60,13 +62,16 @@ function badMinesNow (bot) {
   const deaths = (mem.get().deaths || []).filter(d => d && d.cause !== 'void' && d.x != null)
   return (mem.get().badMines || []).filter(bm => bm.danger || (bm.day != null ? dn != null && dn - bm.day < 3 : deaths.some(d => world.dist2(d, bm) < 16)))
 }
+const ENTRANCE_R = 96
 function chooseEntrance (bot, oreLv = null) {
   const home = mem.get().home || world.feetPos(bot)
   const levelFor = y => oreLv != null ? Math.min(oreLv, y - 8) : levelOf(y)
   // rings out to 64 blocks, every stair direction: the nearest spot whose staircase stays clear of known death
   // sites and protected builds (one direction from a 10-30 ring left "no safe spot" in cave country)
   let bestOre = null
-  for (let r = 10; r <= 64; r += 6) {
+  // (out to 96 when nothing nearer will do: deaths, given-up sites and someone else's places round home left "no safe spot"
+  //  within 64, and no iron at all, 2026-10-03)
+  for (let r = 10; r <= ENTRANCE_R; r += 6) {
     const found = []
     for (let a = 0; a < 16; a++) {
       const x = Math.round(home.x + Math.cos(a * Math.PI / 8) * r)
@@ -92,11 +97,11 @@ function chooseEntrance (bot, oreLv = null) {
     }
     // (for an ore: the spot whose tunnel works nearest the ore's band - out to the next ring when this one has none
     //  within 6; the nearest spot otherwise)
-    if (oreLv != null && !found.length && bestOre && r + 6 > 64) found.push(bestOre)
+    if (oreLv != null && !found.length && bestOre && r + 6 > ENTRANCE_R) found.push(bestOre)
     if (oreLv != null && found.length) {
       found.sort((a, b) => Math.abs(a.level - oreLv) - Math.abs(b.level - oreLv))
       if (!bestOre || Math.abs(found[0].level - oreLv) < Math.abs(bestOre.level - oreLv)) bestOre = found[0]
-      if (Math.abs(bestOre.level - oreLv) > 6 && r + 6 <= 64) continue
+      if (Math.abs(bestOre.level - oreLv) > 6 && r + 6 <= ENTRANCE_R) continue
       found.unshift(bestOre)
     }
     if (found.length) {
