@@ -1104,7 +1104,7 @@ function feetFor (bot, c) {
     const inFoot = x >= job.box.x1 && x <= job.box.x2 && z >= job.box.z1 && z <= job.box.z2
     if (inFoot && gy < job.box.y1 - 1) continue
     const g = world.at(bot, x, gy, z)
-    // (and never on a floor lower than a whole block - a bottom slab, a stair, a carpet: the jump from it peaks under the
+    // (and never on a floor lower than a whole block - a bottom slab, a carpet, farmland (a stair's top step is whole): the feet stand in its own cell and the tower aims there; the jump from a slab peaks under the
     //  top of the block the tower needs - feet at 119.5 reach 120.75, the block wants 121 - so the first block never goes in;
     //  "towered ... to y119 (cell y119 cobblestone_slab)", 2026-10-03)
     if (g && g.shapes && g.shapes.length && Math.max(...g.shapes.map(sh => sh[4])) < 0.99) continue
