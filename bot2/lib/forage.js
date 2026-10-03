@@ -351,7 +351,17 @@ async function shearTrip (bot, s, n, ctx = {}) {
       //  trip exploring the other way, 93b south, with the forest it had worked a minute before 116b north, 2026-10-04)
       const me0 = bot.entity.position; const away = p => world.dist2(p, me0) > 40
       const known = gather().knownResource(label, me0, { filter: away }) || (s.leaves ? gather().knownResource(logNameFor(s), me0, { filter: p => away(p) && !move.inZone(p, 2) }) : null) // (never the orchard's: the crown climb leaves zone trees alone; audit)
-      if (known && known !== lastKnown && world.dist2(known, bot.entity.position) > 40) { lastKnown = known; await move.travel(bot, known, { range: 8, shouldStop: ctx.shouldStop, label: 'to ' + label }) } else await gather().explore(bot, x => s.blocks.test(x.name), { shouldStop: ctx.shouldStop, label, legs: 2, accept: b => ok(b) })
+      if (known && known !== lastKnown && world.dist2(known, bot.entity.position) > 40) {
+        lastKnown = known
+        const r = await move.travel(bot, known, { range: 8, shouldStop: ctx.shouldStop, label: 'to ' + label })
+        // (THERE, and nothing: a spot that was - a few leaves sheared once by the farm - forgotten, or the next trip walks to it
+        //  again; two such near home sent a leaves trip back and forth between them for nothing, the forest 116b north,
+        //  2026-10-04. A tree spot the same: its tree is gone)
+        if (r && r.ok && !world.findBlocks(bot, s.blocks, { maxDistance: 16, count: 1, filter: ok }).length && !(s.leaves && crownTree(bot, s, crownSkip))) {
+          gather().forgetResource(label, known); if (s.leaves) gather().forgetResource(logNameFor(s), known)
+          log('forage', `nothing to shear at the ${label} spot ${move.fmt(known)} any more - forgotten`)
+        }
+      } else await gather().explore(bot, x => s.blocks.test(x.name), { shouldStop: ctx.shouldStop, label, legs: 2, accept: b => ok(b) })
       continue
     }
     empty = 0
