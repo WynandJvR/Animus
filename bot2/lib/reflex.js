@@ -634,10 +634,23 @@ function takeCover (e, label) {
   // instead, the capped hole the night and the enderman already use (pickaxe and a block in hand; never at home)
   {
     const now = Date.now(); const lost = hurtLog.filter(q => now - q.at < 8000).reduce((a, q) => a + q.d, 0)
-    if (lost >= 6 && !busy && inv.bestTool(bot, 'pickaxe', 4) && inv.shelterBlock(bot) && !require('./move').insideHut(bot.entity.position.floored()) && !enclosed() && canDigInHere()) {
+    // (a pocket that is one - its walls two and three down all solid, a side to cap against one down: a cave's hole open
+    //  sideways lets the arrows in and each try digs three deeper; and nothing that bites within 6 - the hole's 30s hold
+    //  blocks every row, the creeper's too; audit)
+    const p0 = bot.entity.position.floored(); const solidAt = (x, y, z) => { const b = world.at(bot, x, y, z); return !!b && world.isSolid(b) }
+    const sides = [[1, 0], [-1, 0], [0, 1], [0, -1]]
+    const pocket = [2, 3].every(dy => sides.every(([dx, dz]) => solidAt(p0.x + dx, p0.y - dy, p0.z + dz))) && sides.some(([dx, dz]) => solidAt(p0.x + dx, p0.y - 1, p0.z + dz))
+    const biter = hostiles(6).some(h => !RANGED.has(h.e.name))
+    if (lost >= 6 && !busy && pocket && !biter && inv.bestTool(bot, 'pickaxe', 4) && inv.shelterBlock(bot) && !require('./move').insideHut(bot.entity.position.floored()) && !enclosed() && canDigInHere()) {
       fleeTarget = e
       setActive('dig-in', `${e.name} - cover is not stopping it (${Math.round(lost)} hp in 8s): a capped hole`)
-      runBusy('dig in', g => digIn(g), 30000, null, () => { stopDig(); stopWalk() }).then(() => { if (active && active.kind === 'dig-in') clearActive() })
+      // (and held there while the shooter is about: let go at once, the director walked out through the cap into the
+      //  arrows and the next lap dug another hole - the flee's out-of-sight hold keeps it still till the shooter is gone; audit)
+      runBusy('dig in', g => digIn(g), 30000, null, () => { stopDig(); stopWalk() }).then(() => {
+        if (!active || active.kind !== 'dig-in') return
+        if (enclosed() && fleeTarget && fleeTarget.isValid && RANGED.has(fleeTarget.name)) setActive('flee', `dug in - holding till the ${fleeTarget.name} is gone`)
+        else clearActive()
+      })
       return
     }
   }
