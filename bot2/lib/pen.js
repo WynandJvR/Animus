@@ -184,14 +184,14 @@ function noteFed (id, now = Date.now()) { fedAt.set(id, now); for (const [k, t] 
 function breedable (bot, list) { return (list || []).filter(e => !food().isBaby(bot, e) && !inLove(e.id)) }
 
 // Sheep out in the open: in sight, or a flock remembered near home.
-function wildKnown (bot) {
+function wildKnown (bot, reach = LURE_REACH) {
   if (food().animals(bot, /^sheep$/, 48).length) return true
   const home = mem.get().home || bot.entity.position
   // (a remembered flock only with the daylight to lead it home - a condition, not a failure: without it the task ran and
   //  refused, "did not succeed" every pass; audit rule)
   const p = pen()
   if (mem.get().leadFailDay === require('./day').dayNo(bot)) return false
-  return ((mem.get().mobs || {}).sheep || []).some(q => world.dist2(q, home) < LURE_REACH && (!p || world.ticksUntilNight(bot) >= leadTicks(world.dist2(q, centreOf(p)))))
+  return ((mem.get().mobs || {}).sheep || []).some(q => world.dist2(q, home) < reach && (!p || world.ticksUntilNight(bot) >= leadTicks(world.dist2(q, centreOf(p)))))
 }
 
 // ---- what the pen wants now ----------------------------------------------------------------------
@@ -199,11 +199,13 @@ function wildKnown (bot) {
 //   woolWanted: wool the build still needs; wheat: wheat to spare for the pen (pack + bank, bread's share kept back)
 function work (bot, { woolWanted = 0, wheat = 0 } = {}) {
   const p = pen()
-  // (and only with a flock known to lead into it: no sheep within ~180 of the spawn hub, and the morning went on a pen's
-  //  fence wood 120 blocks out, 2026-10-03 - the stocking below asks the same, wildKnown)
-  if (!p) return woolWanted > 0 && wheat >= STOCK_MIN && wildKnown(bot) ? { kind: 'build', why: `${woolWanted} wool wanted and no sheep pen - building one by home` } : null
+  // (and only with a flock within the wool reach to lead into it - the morning went on a pen's fence wood 120 blocks out
+  //  with the nearest sheep ~190 off, 2026-10-03)
+  if (!p) return woolWanted > 0 && wheat >= STOCK_MIN && wildKnown(bot, food().WOOL_REACH) ? { kind: 'build', why: `${woolWanted} wool wanted and no sheep pen - building one by home` } : null
   const gap = missing(bot, p)
-  if (gap.length) return { kind: 'build', why: `the sheep pen's fence has ${gap.length} gap${gap.length > 1 ? 's' : ''}` }
+  // (an unfinished, empty pen is finished only on the same terms as one is begun: begun before the flock condition, the
+  //  hub's pen drove fence-wood trips with no sheep to put in it; audit 2026-10-03)
+  if (gap.length) return (woolWanted > 0 && wildKnown(bot, food().WOOL_REACH)) || (observe(bot) || { n: 0 }).n > 0 ? { kind: 'build', why: `the sheep pen's fence has ${gap.length} gap${gap.length > 1 ? 's' : ''}` } : null
   // an open gate, whoever opened it: shut before the flock walks out (audit)
   if (gateOpen(bot, p) && !inPen(bot.entity.position, p)) return { kind: 'gate', why: 'the sheep pen gate stands open' }
   const seen = observe(bot) || { n: 0 }

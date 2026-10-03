@@ -16,6 +16,9 @@ const gather = () => require('./gather')
 const pen = () => require('./pen')
 
 const FOOD_ANIMALS = /^(cow|mooshroom|pig|sheep|chicken|rabbit)$/
+// how far from home a remembered flock is worth the wool trip - ONE number for the wool search, the bed rule and a new pen
+// (the bed asked 160, the search went to 200: a flock seen at 188 was walked to by neither, 2026-10-03)
+const WOOL_REACH = 200
 
 // The animals out in the open: never a penned one - the sheep pen's flock is not game, nor a flock to walk to (a hunt for
 // mutton or a wool kill would empty the pen the wool grows in; pen.js, 2026-09-29)
@@ -248,7 +251,7 @@ async function woolFor (bot, n, ctx = {}, colour = 'white') {
       }
       if (++empty > (ctx.searchLegs || 4)) { log('food', 'no sheep for wool nearby'); return false } // (searchLegs: the day's capped bed search looks until its time runs out - five looks were a minute of its four, 2026-10-03)
       const anchor = mem.get().home || bot.entity.position
-      const known = (mem.get().mobs || {}).sheep ? mem.get().mobs.sheep.filter(p => world.dist2(p, anchor) < 200).sort((a, b) => world.dist2(a, bot.entity.position) - world.dist2(b, bot.entity.position))[0] : null
+      const known = (mem.get().mobs || {}).sheep ? mem.get().mobs.sheep.filter(p => world.dist2(p, anchor) < WOOL_REACH).sort((a, b) => world.dist2(a, bot.entity.position) - world.dist2(b, bot.entity.position))[0] : null
       const fit = bot.health >= 12 && world.phase(bot) === 'day'
       if (!fit) { log('food', `no sheep in sight and not fit to go looking (hp ${Math.round(bot.health)})`); return false }
       const woollyFar = e => { const w = sheepWool(bot, e); return !(w && w.sheared) && !list.includes(e) }
@@ -478,4 +481,4 @@ async function cookAll (bot, ctx = {}) {
   }
 }
 
-module.exports = { install, noteMob, huntFor, woolFor, sheepWool, isBaby, stockFood, cookAll, animals, killAnimal, huntable, fishFor, harvestCrops, FOOD_ANIMALS }
+module.exports = { WOOL_REACH, install, noteMob, huntFor, woolFor, sheepWool, isBaby, stockFood, cookAll, animals, killAnimal, huntable, fishFor, harvestCrops, FOOD_ANIMALS }

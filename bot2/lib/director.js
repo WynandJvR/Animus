@@ -225,7 +225,7 @@ function bedObtainable () {
   if (Object.keys(c).some(n => /_wool$/.test(n) && c[n] >= 3)) return true
   const home = mem.get().home
   if (world.findBlocks(bot, /_bed$/, { maxDistance: 48, count: 1, point: home ? new Vec3(home.x, home.y, home.z) : undefined }).length) return true
-  const sheep = ((mem.get().mobs || {}).sheep || []).filter(p => home && world.dist2(p, home) < 160) // the hunt's own reach
+  const sheep = ((mem.get().mobs || {}).sheep || []).filter(p => home && world.dist2(p, home) < food.WOOL_REACH) // the wool search's own reach (food.js)
   return sheep.length > 0 || food.animals(bot, /^sheep$/, 48).length > 0
 }
 
