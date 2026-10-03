@@ -453,6 +453,10 @@ function runGoal (bot, goal, { timeoutMs, stuckMs, movements }) {
     let noPaths = 0
     const started = Date.now()
     let visited = null // (the planner's search size on a noPath: small = we are shut in, large = the goal is out of reach)
+    // (the planner's own account of the stall, taken BEFORE the stop clears it: the give-up line read the body after
+    //  stopMoving - "goal none, keys none" on every one of seven 40s stalls in an evening, nothing to go on, 2026-10-03)
+    let replans = 0; let lastStatus = ''; let lastLen = 0; let snap = null
+    const snapshot = () => { try { const cs = bot.controlState || {}; const g = bot.pathfinder.goal; return `planner: goal ${g ? 'set' : 'none'}, moving ${bot.pathfinder.isMoving()}, keys ${Object.keys(cs).filter(k => cs[k]).join('+') || 'none'}, ${replans} replans since the last progress, last ${lastStatus || '-'} ${lastLen} nodes, ${(goalDistance(bot, goal)).toFixed(1)} from the goal (best ${best.toFixed(1)})` } catch { return '' } }
     const finish = (ok, why) => {
       if (done) return
       done = true
@@ -461,7 +465,7 @@ function runGoal (bot, goal, { timeoutMs, stuckMs, movements }) {
       bot.removeListener('path_update', onPath)
       bot.removeListener('death', onDeath)
       if (!ok || why !== 'reached') stopMoving(bot)
-      resolve(visited != null && why === 'noPath' ? { ok, why, visited } : { ok, why })
+      resolve(visited != null && why === 'noPath' ? { ok, why, visited } : snap ? { ok, why, snap } : { ok, why })
     }
     const onReached = () => { if (arrived(bot, goal)) finish(true, 'reached') }
     // NO PATH IS A VERDICT: the search ran out of options. The planner hands back a path to its closest node all the same,
@@ -473,6 +477,7 @@ function runGoal (bot, goal, { timeoutMs, stuckMs, movements }) {
         visited = r.visitedNodes != null ? r.visitedNodes : null
         if (!arrived(bot, goal) && (r.path.length > 0 || ++noPaths >= 3)) finish(false, 'noPath')
       } else if (r.path.length) noPaths = 0
+      replans++; lastStatus = r.status; lastLen = r.path.length
     }
     const onDeath = () => finish(false, 'died')
     let doorAt = 0
@@ -485,8 +490,8 @@ function runGoal (bot, goal, { timeoutMs, stuckMs, movements }) {
       if (reflexActive()) return finish(false, 'interrupted')
       const d = goalDistance(bot, goal)
       const busy = bot.pathfinder.isMining() || bot.pathfinder.isBuilding()
-      if (d < best - 0.9 || busy) { if (d < best) best = d; bestAt = Date.now() }
-      if (Date.now() - bestAt > stuckMs) return finish(false, 'stuck')
+      if (d < best - 0.9 || busy) { if (d < best) best = d; bestAt = Date.now(); replans = 0 }
+      if (Date.now() - bestAt > stuckMs) { snap = snapshot(); return finish(false, 'stuck') }
       if (Date.now() - started > timeoutMs) return finish(false, 'timeout')
     }, 250)
     bot.on('goal_reached', onReached)
@@ -836,7 +841,7 @@ async function goToInner2 (bot, goal, opts, { timeoutMs, stuckMs, dig, place, al
         const at = n ? ['feet', 'head', 'floor'].map((w, i) => { const b = world.at(bot, Math.floor(n.x), Math.floor(n.y) + [0, 1, -1][i], Math.floor(n.z)); return w + ' ' + (b ? b.name : '?') }).join(', ') : ''
         why2 = ` [goal ${g ? g.constructor.name + (g.x != null ? ' ' + g.x + ',' + g.y + ',' + g.z : '') : 'none'}, moving ${bot.pathfinder.isMoving()}, keys ${keys}, reflex ${rf ? rf.kind + ' ' + rf.forSec + 's' : 'none'}, onGround ${bot.entity.onGround}, sneak ${!!(bot.controlState && bot.controlState.sneak)};${rx.plannedStep ? rx.plannedStep() : ''}${at ? ' (' + at + ')' : ''}]`
       } catch {}
-      log('move', `${label}: gave up (${r.why} x${fails}) at ${fmt(bot.entity.position)}${why2}`)
+      log('move', `${label}: gave up (${r.why} x${fails}) at ${fmt(bot.entity.position)}${why2}${r.snap ? ' {' + r.snap + '}' : ''}`)
       return r
     }
     await jiggle(bot)
