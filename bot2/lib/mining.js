@@ -306,8 +306,22 @@ function fillerItem (bot) {
 }
 
 async function ensureFloor (bot, p) {
-  const below = world.at(bot, p.x, p.y - 1, p.z)
+  let below = world.at(bot, p.x, p.y - 1, p.z)
   if (!below) return false
+  // (gravel or sand with nothing under it is no floor: it falls the moment a neighbour is dug - a stair floor of gravel over
+  //  a 12-deep cave dropped the bot 13 and the gravel came down on its head, suffocated at y9, 2026-10-03. Taken out, let
+  //  fall, and stone put in its place)
+  if (world.isSolid(below) && world.FALLING_RE.test(below.name)) {
+    const under = world.at(bot, p.x, p.y - 2, p.z)
+    if (!under || !world.isSolid(under)) {
+      log('mine', `${below.name} over nothing at ${move.fmt({ x: p.x, y: p.y - 1, z: p.z })} - taking it out for a floor of stone`)
+      if (!await act.dig(bot, { x: p.x, y: p.y - 1, z: p.z }, { force: true, timeoutMs: 8000 }).catch(() => false)) return false
+      await move.sleep(700)
+      below = world.at(bot, p.x, p.y - 1, p.z)
+      if (!below) return false
+      if (world.FALLING_RE.test(below.name)) return false // (more fell in: the step is blocked, the leg turns)
+    }
+  }
   if (world.isSolid(below)) return true
   if (world.isLavaBlock(below)) return false
   const filler = fillerItem(bot)
