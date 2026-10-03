@@ -1720,13 +1720,7 @@ async function gatherForInner (raw, short) {
     // dry-land gather brought 5-23 a trip toward 2300 glass, 2026-09-25); a pack-full batch, the walk is long
     case 'sand': return clay.gather(bot, batch, ctx, 'sand')
     // cobble; the furnaces make stone of it in the background
-    // (the WHOLE build's cobble, a packful at most - not the next layers' share: the walk to the face and back costs more
-    //  than the digging, and trips of 27/132 and 7/344 left the spawn hub waiting on stone, the most common block there is,
-    //  2026-10-03)
-    case 'cobblestone': {
-      let whole = 0; try { const cs = build.cachedStatus(bot); whole = cs ? (mats.planFor(bot, cs.need).raw.cobblestone || 0) : 0 } catch {}
-      return mining.mineFor(bot, 'cobblestone', inv.count(bot, 'cobblestone') + Math.min(Math.max(short, whole), tripRoom()), ctx)
-    }
+    case 'cobblestone': return mining.mineFor(bot, 'cobblestone', inv.count(bot, 'cobblestone') + batch, ctx)
     case 'log': {
       // the orchard's grown trees first (a short walk, and the spot replanted); then wild wood
       if (await orchard.harvest(bot, { logs: batch, demandTrees, shouldStop: dayStop }) >= Math.min(batch, 16)) return true
