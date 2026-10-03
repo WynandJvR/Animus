@@ -107,6 +107,10 @@ let taskCancelled = () => false
 const EVENING = 10500
 // (a hostile about home on the surface, as the hideout reads it - bats aside: the evening's prep stops for it)
 function prepThreat () { return reflex.hostiles(16).some(h => h.e.name !== 'bat' && Math.abs(h.e.position.y - bot.entity.position.y) < 6) }
+// the pen's jobs done at home in a minute (pen.work kinds); the rest are trips
+const PEN_SHORT = new Set(['gate', 'shear', 'breed'])
+// the build's band itself waits on wool (or a carpet or bed made of it): the pen's trips are the build's then
+function woolHolds () { const w = mem.get().buildWaiting; return !!w && /_wool$|_carpet$|_bed$/.test(w) }
 function dayStop () { return taskCancelled() || nightSoon() || bot.health <= reflex.hurtLine() || homeByDark() }
 // heading home: keep walking through dusk; only real night (mobs) stops a trip that is still long
 // (and at the hurt line, when food would mend it or might be found: at hp 4 the trek walked on into a river and drowned,
@@ -585,7 +589,10 @@ function decide () {
     if (dHome < 64 && world.phase(bot) === 'day' && saps > 0 && orchard.plantable(bot, spruceSaps, saps, demandTrees) && !held('plant')) return { name: 'plant', why: `${saps} saplings for the orchard (${o ? o.spots.length : 0} spots, ${demandTrees} trees wanted)` }
   }
   // the sheep pen: built while the build wants wool, then stocked and bred (pen.work: the one rule for this and the task)
-  if (dHome < 64 && world.phase(bot) === 'day' && !held('pen')) { const w = pen.work(bot, penArgs()); if (w) return { name: 'pen', why: w.why } }
+  // (ahead of the build only the pen's short jobs at home - a gate, the shearing, the breeding - or anything when the build's
+  //  band itself waits on wool; the long ones, a flock led in from 180 blocks out, a new pen's fence wood, go in the build's
+  //  gaps (9c): the hub's 23 carpets - decoration, holding nothing up - cost two mornings of sheep trips, 2026-10-03)
+  if (dHome < 64 && world.phase(bot) === 'day' && !held('pen')) { const w = pen.work(bot, penArgs()); if (w && (PEN_SHORT.has(w.kind) || woolHolds())) return { name: 'pen', why: w.why } }
   // (the harvest when the bread runs low, not every morning: the crop keeps on the stalk, and harvesting and
   //  replanting 71 cells took two minutes of every ten-minute day with 31 bread in the pack, 2026-09-26)
   if (farm.farm() && dHome < 64 && farm.ripeCount(bot) >= 8 && breadStock() < BREAD_WANTED && !held('harvest')) return { name: 'harvest', why: `${farm.ripeCount(bot)} wheat ripe` }
@@ -694,6 +701,8 @@ function decide () {
   //  into is still capped first, above.)
   if (world.phase(bot) === 'day' && dHome < 96 && !nightSoon() && !held('fillCraters')) { const n = require('./craters').open(bot).length; if (n) return { name: 'fillCraters', why: `${n} cells a blast took round home and the site - putting the ground back` } }
   if (dHome < 64 && world.phase(bot) === 'day' && !nightSoon() && hut.complete(bot) && !held('levelYard')) { const n = hut.yardWork(bot).length; if (n) return { name: 'levelYard', why: `the yard has ${n} holes or stray blocks` } }
+  // (the pen's long jobs: see the pen rule above)
+  if (dHome < 64 && world.phase(bot) === 'day' && !nightSoon() && !held('pen')) { const w = pen.work(bot, penArgs()); if (w) return { name: 'pen', why: w.why + ' (the build has nothing ready)' } }
   // 10. our own pillars and stepping stones left standing round home (a batch: one walk takes down many - LITTER_BATCH) -
   //  in the castle's gaps only (held, waiting, the day's end): tidying ahead of it took 40 minutes of a morning, the
   //  castle idle (single goal: the build; audit 2026-09-28)
