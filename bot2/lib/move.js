@@ -416,6 +416,21 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
     const below = bot.blockAt(block.position.offset(0, -1, 0))
     return (below && below.name === 'farmland') || /^(wheat|carrots|potatoes|beetroots)$/.test(block.name) ? 25 : 0
   })
+  // ONE ANSWER A CELL, a search: the rules above are asked for every neighbour of every node, the same cell over and over -
+  // drops scanned down, zones, the build's cells - and the planner ran 620 nodes a second: the way round the pit by the mine
+  // (4958 nodes in its 8s) was never found, and every mine walk stood 40-80s at the spur pointing across it, 2026-10-03.
+  // Kept for one search, as the rules' own memos are (pathGen: a path reset starts it afresh); the cell's block type is in
+  // the key, so a cell that changes is asked anew
+  for (const k of ['exclusionStep', 'exclusionBreak', 'exclusionPlace']) {
+    const orig = m[k].bind(m); const memo = new Map(); let gen = pathGen
+    m[k] = block => {
+      if (!block || !block.position) return orig(block)
+      if (gen !== pathGen || memo.size > 50000) { memo.clear(); gen = pathGen }
+      const p = block.position; const key = p.x + ',' + p.y + ',' + p.z + ',' + (block.stateId != null ? block.stateId : block.type) // (the state: a trapdoor opened is the same type; audit)
+      let v = memo.get(key); if (v === undefined) { v = orig(block); memo.set(key, v) }
+      return v
+    }
+  }
   return m
 }
 
