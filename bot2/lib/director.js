@@ -1738,7 +1738,7 @@ async function gatherFor (raw, short) {
     // (none at all: a trip that got some fell short, and found where they are)
     // (a trip the dusk cut short counts too once it had looked - two minutes and more: the deepslate trips mined 0/17 for
     //  six minutes each and ended "stopped" at dusk, so none ever counted and the next day's round went again)
-    if (!ok && got() <= had && !notToday.has(raw) && (!dayStop() || Date.now() - t0 > 120000)) {
+    if (!ok && got() <= had && !notToday.has(raw) && (!dayStop() || Date.now() - t0 > 120000) && !forage.tripWasCut(raw, t0)) {
       const d = day.dayNo(bot); const e = emptyTrips.get(raw); const n = e && e.day === d ? e.n + 1 : 1
       emptyTrips.set(raw, { day: d, n })
       if (ANIMAL_RAW.test(raw) || n >= (CORE_RAW.test(raw) ? 4 : 2)) { notToday.set(raw, { day: d }); log('dir', `${raw}: ${n > 1 ? n + ' trips' : 'the trip'} found none - not again today`) }

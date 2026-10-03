@@ -82,6 +82,10 @@ function exhaustedKinds () { return Object.keys(mem.get().forage || {}).filter(e
 // dark oak round a forest of it (audit R7, 2026-09-27). Any gain opens the source again, however the trip ended.
 // opts.now: shut at once - the source is there but has nothing to give (nests not full): the survey opens it when one is
 // (a bare boolean for opts is `now`, the old call).
+// (the last trip that ended with no search made - blocked, stopped, or 'cut' (a full pack, only dead spots cleared): the
+//  director's own empty-trip count skips it, as noteTrip does; audit 2026-10-04)
+let lastCut = null
+function tripWasCut (raw, since) { return !!lastCut && lastCut.raw === raw && lastCut.at >= since }
 function noteTrip (raw, got, why, opts = {}) {
   if (typeof opts === 'boolean') opts = { now: opts, searched: true }
   const now = !!opts.now
@@ -170,7 +174,7 @@ async function gatherRaw (bot, raw, n, ctx = {}) {
   const got = count(bot) - before
   // a trip cut short (dusk, the operator) or held up by its tool is no search: only a finished, empty one counts
   // ('cut': the trip itself ended early - a full pack - and is no search either)
-  if (r === 'blocked' || (got <= 0 && (stopped(ctx) || r === 'cut'))) return false
+  if (r === 'blocked' || (got <= 0 && (stopped(ctx) || r === 'cut'))) { if (r === 'blocked' || r === 'cut') lastCut = { raw, at: Date.now() }; return false } // (no search: the director's empty-trip count leaves a blocked or cut one too - a day-stopped one it judges itself)
   noteTrip(raw, got, r === 'waiting' ? 'none ready to take yet' : null, { now: r === 'waiting', searched: true })
   if (got > 0) log('forage', `${raw}: +${got} this trip`)
   return got > 0
@@ -939,4 +943,4 @@ async function process (bot, by, node, n, opts = {}) {
   try { return await work(bot, node, n, opts) } catch (e) { log('forage', `${by} ${node} threw: ${e.message}`); return 0 }
 }
 
-module.exports = { stoppedWork, lavaFuel, lavaSites, lavaSource, lavaStands, lavaKnown, bucketsAvailable, handles, spec, gather: gatherRaw, process, exhausted, exhaustedKinds, generation, seen, watch, sightMobs, noteTrip, strip, carve, harden, compost, shearBlock, ensureShears, shearsHeld, benchSpot, shoreAt, SEARCH_TRIPS }
+module.exports = { tripWasCut, stoppedWork, lavaFuel, lavaSites, lavaSource, lavaStands, lavaKnown, bucketsAvailable, handles, spec, gather: gatherRaw, process, exhausted, exhaustedKinds, generation, seen, watch, sightMobs, noteTrip, strip, carve, harden, compost, shearBlock, ensureShears, shearsHeld, benchSpot, shoreAt, SEARCH_TRIPS }
