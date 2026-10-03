@@ -476,6 +476,10 @@ function runGoal (bot, goal, { timeoutMs, stuckMs, movements }) {
       if (r.status === 'noPath') {
         visited = r.visitedNodes != null ? r.visitedNodes : null
         if (!arrived(bot, goal) && (r.path.length > 0 || ++noPaths >= 3)) finish(false, 'noPath')
+        // (an EMPTY noPath is not asked again by the planner: it sat with the goal set, not moving, no further update, and the
+        //  walk waited out the stall clock - 10s a try, three tries a give-up, 40s a walk at the pit by the mine, 2026-10-03.
+        //  The three-empty-answers verdict above asks for itself: the same goal again, a moment on)
+        else if (!r.path.length && !done) setTimeout(() => { if (!done && !arrived(bot, goal) && !cancelled() && !reflexActive() && bot.pathfinder.goal === goal) { try { bot.pathfinder.setGoal(goal) } catch {} } }, 400) // (only while the goal is still ours: a reflex's flight cleared it; audit)
       } else if (r.path.length) noPaths = 0
       replans++; lastStatus = r.status; lastLen = r.path.length
     }
