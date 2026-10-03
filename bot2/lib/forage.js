@@ -321,10 +321,12 @@ async function shearTrip (bot, s, n, ctx = {}) {
   if (!await ensureShears(bot, ctx)) return 'blocked'
   const label = typeof s.drops === 'string' ? s.drops : 'grass'
   const target = inv.count(bot, s.drops) + n
+  const startCount = inv.count(bot, s.drops)
   const skip = new Set()
   const t0 = Date.now(); let empty = 0; let lastKnown = null
   const crownSkip = new Set() // (trees climbed, or that could not be got to: once a trip)
   let noCrown = false
+  let forgot = 0 // (dead spots forgotten this trip: each is the search making progress, not an empty look)
   const ok = b => gather().outOfZones(b) && !skip.has(key(b.position)) && !world.isWaterBlock(world.at(bot, b.position.x, b.position.y + 1, b.position.z)) && (!s.leaves || (!persistent(b) && fromGround(bot, b.position)))
   while (inv.count(bot, s.drops) < target) {
     await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
@@ -360,6 +362,9 @@ async function shearTrip (bot, s, n, ctx = {}) {
         if (r && r.ok && !world.findBlocks(bot, s.blocks, { maxDistance: 16, count: 1, filter: ok }).length && !(s.leaves && crownTree(bot, s, crownSkip))) {
           gather().forgetResource(label, known); if (s.leaves) gather().forgetResource(logNameFor(s), known)
           log('forage', `nothing to shear at the ${label} spot ${move.fmt(known)} any more - forgotten`)
+          // (not an empty look: counted as one, three dead spots ended the trip before the forest was tried and the trip
+          //  counted "for nothing" - two such and the leaves would be shut as searched out, 2026-10-04)
+          forgot++; empty--
         }
       } else await gather().explore(bot, x => s.blocks.test(x.name), { shouldStop: ctx.shouldStop, label, legs: 2, accept: b => ok(b) })
       continue
@@ -383,6 +388,8 @@ async function shearTrip (bot, s, n, ctx = {}) {
     if (!cut) skip.add(key(b0.position))
     await act.collectDrops(bot, { radius: 6, maxMs: 6000 })
   }
+  // (a trip that only cleared dead spots from memory found nothing because it looked at nothing new: no search - the next one starts from the real leads; 2026-10-04)
+  if (inv.count(bot, s.drops) < target && forgot > 0 && inv.count(bot, s.drops) <= startCount) return 'cut'
   return inv.count(bot, s.drops) >= target
 }
 
