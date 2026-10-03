@@ -12,6 +12,9 @@ function bindReflex (r) { reflexRef = r }
 let botRef = null
 // (a replan - the planner's own digs and places changed the ground - drops every movements' drop memo: audit #24)
 let pathGen = 0
+// (where a search's time goes - the planner ran ~1000 nodes a second after the exclusion memo; measured, not guessed: ms in
+//  the exclusion rules (memo misses) and in the getBlock override, and the calls - read by the stall snapshot)
+const searchProf = { exMs: 0, exCalls: 0, exMiss: 0, gbMs: 0, gbCalls: 0, reset () { this.exMs = 0; this.exCalls = 0; this.exMiss = 0; this.gbMs = 0; this.gbCalls = 0 } }
 // (a throw inside the pathfinder's tick - caught by the patched wrapper, one path reset: counted, and said at most every
 //  10s with its first stack line - the watchdog alarms on "path_error"; patch-mc262.js)
 let pathErrors = 0; let pathErrSaid = 0
@@ -173,7 +176,9 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
   if (!doorIds) doorIds = new Set(Object.values(md.blocksByName).filter(b => /_door$/.test(b.name) && !/iron_door/.test(b.name)).map(b => b.id))
   const getBlock0 = m.getBlock.bind(m)
   m.getBlock = (pos, dx, dy, dz) => {
+    const tg = performance.now(); searchProf.gbCalls++
     const b = getBlock0(pos, dx, dy, dz)
+    searchProf.gbMs += performance.now() - tg
     if (b && doorIds.has(b.type)) { b.safe = true; b.physical = false; b.replaceable = false; b.height = pos.y + dy }
     // (an IRON door standing OPEN - a plate holds it - is a way through while it stands open: the gate of a walled base;
     //  shut, it stays a wall - no hand opens it; foreign.byTheirGate, audit)
@@ -427,7 +432,8 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
       if (!block || !block.position) return orig(block)
       if (gen !== pathGen || memo.size > 50000) { memo.clear(); gen = pathGen }
       const p = block.position; const key = p.x + ',' + p.y + ',' + p.z + ',' + (block.stateId != null ? block.stateId : block.type) // (the state: a trapdoor opened is the same type; audit)
-      let v = memo.get(key); if (v === undefined) { v = orig(block); memo.set(key, v) }
+      searchProf.exCalls++
+      let v = memo.get(key); if (v === undefined) { const te = performance.now(); v = orig(block); searchProf.exMs += performance.now() - te; searchProf.exMiss++; memo.set(key, v) }
       return v
     }
   }
@@ -476,7 +482,7 @@ function runGoal (bot, goal, { timeoutMs, stuckMs, movements }) {
     let resets = {}
     let lastVisited = null; let lastMs = null; let statusSeen = {} // (the search itself: nodes and ms - a long way round the pit never found in 8s, 2026-10-03)
     const onReset = why => { resets[why] = (resets[why] || 0) + 1 }
-    const snapshot = () => { try { const cs = bot.controlState || {}; const g = bot.pathfinder.goal; const me = bot.entity.position; const n = (() => { try { return require('./reflex').plannedNode() } catch { return null } })(); return `planner: goal ${g ? 'set' : 'none'}, moving ${bot.pathfinder.isMoving()}, keys ${Object.keys(cs).filter(k => cs[k]).join('+') || 'none'} (sneak ${!!cs.sneak}), at ${me.x.toFixed(2)},${me.y.toFixed(2)},${me.z.toFixed(2)} next ${n ? n.x + ',' + n.y + ',' + n.z : '-'}, onGround ${bot.entity.onGround}, ${replans} replans since the last progress, last ${lastStatus || '-'} ${lastLen} nodes, ${(goalDistance(bot, goal)).toFixed(1)} from the goal (best ${best.toFixed(1)}), resets ${JSON.stringify(resets)}, search ${lastVisited} nodes ${lastMs}ms, statuses ${JSON.stringify(statusSeen)}` } catch { return '' } }
+    const snapshot = () => { try { const cs = bot.controlState || {}; const g = bot.pathfinder.goal; const me = bot.entity.position; const n = (() => { try { return require('./reflex').plannedNode() } catch { return null } })(); return `planner: goal ${g ? 'set' : 'none'}, moving ${bot.pathfinder.isMoving()}, keys ${Object.keys(cs).filter(k => cs[k]).join('+') || 'none'} (sneak ${!!cs.sneak}), at ${me.x.toFixed(2)},${me.y.toFixed(2)},${me.z.toFixed(2)} next ${n ? n.x + ',' + n.y + ',' + n.z : '-'}, onGround ${bot.entity.onGround}, ${replans} replans since the last progress, last ${lastStatus || '-'} ${lastLen} nodes, ${(goalDistance(bot, goal)).toFixed(1)} from the goal (best ${best.toFixed(1)}), resets ${JSON.stringify(resets)}, search ${lastVisited} nodes ${lastMs}ms, statuses ${JSON.stringify(statusSeen)}, prof exclusion ${Math.round(searchProf.exMs)}ms ${searchProf.exMiss}/${searchProf.exCalls} misses, getBlock ${Math.round(searchProf.gbMs)}ms x${searchProf.gbCalls}` } catch { return '' } }
     const finish = (ok, why) => {
       if (done) return
       done = true
@@ -524,6 +530,7 @@ function runGoal (bot, goal, { timeoutMs, stuckMs, movements }) {
     bot.on('path_update', onPath)
     bot.on('death', onDeath)
     bot.on('path_reset', onReset)
+    searchProf.reset()
     bot.pathfinder.setMovements(movements)
     bot.pathfinder.setGoal(goal)
   })
