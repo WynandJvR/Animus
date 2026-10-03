@@ -250,7 +250,10 @@ function chooseRecipe (bot, itemName, n = 1, stack = null) {
   let best = null; let bestCost = Infinity
   for (const r of rs) {
     // (never a recipe of something already being made up the chain: that is the cycle, not a route)
-    if (stack && Object.keys(recipeIngredients(r)).some(id => md.items[id] && md.items[id].name !== itemName && stack.has(md.items[id].name))) continue
+    // (only when that ingredient would have to be MADE: one already in the pack is no cycle - a stone pickaxe for a
+    //  cobblestone gather refused the 58 cobblestone held, went to y8 for deepslate, and climbed 55 blocks out by hand when
+    //  the old pick broke, 2026-10-03)
+    if (stack && Object.entries(recipeIngredients(r)).some(([id, per]) => { const nm = md.items[id] && md.items[id].name; return nm && nm !== itemName && stack.has(nm) && (have[nm] || 0) < per * Math.ceil(n / ((r.result && r.result.count) || 1)) })) continue
     const crafts = Math.ceil(n / ((r.result && r.result.count) || 1))
     let cost = 0
     for (const [id, per] of Object.entries(recipeIngredients(r))) {
