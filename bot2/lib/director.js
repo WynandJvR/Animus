@@ -1743,8 +1743,10 @@ async function gatherForInner (raw, short) {
   // store", 2026-09-28). At home, the haul goes in first: the same line as the deposit's own (haulSize >= 64)
   // (a cobble trip from the site: home first - the mine is by home - so the pack holds the haul, not the window's blocks:
   //  "pack full - taking the haul home" two minutes into a trip, the walk home and back, then dusk; audit 2026-10-03)
-  if (raw === 'cobblestone' && base.distHome(bot) >= 24 && (mem.get().chests || []).length && haulSize() >= 64) await base.goHome(bot, { shouldStop: dayStop }).catch(() => null)
-  if (base.distHome(bot) < 24 && (mem.get().chests || []).length && haulSize() >= 64) {
+  // (ANY trip, not only cobble: an oak_leaves trip set out from the site with the window's blocks in the pack - "the pack is
+  //  full - no oak_planks taken", the shears' sticks never made, a birch felled 79b out for nothing, 2026-10-03)
+  if (base.distHome(bot) >= 24 && (mem.get().chests || []).length && (haulSize() >= 64 || inv.freeSlots(bot) < 4)) await base.goHome(bot, { shouldStop: dayStop }).catch(() => null)
+  if (base.distHome(bot) < 24 && (mem.get().chests || []).length && (haulSize() >= 64 || inv.freeSlots(bot) < 4)) {
     const before = inv.freeSlots(bot)
     // (never the trip's own footing: filler stays for the planner's steps and a tower out of a pit - audit)
     // (SCAFFOLD_WANT of ANY filler, the most plentiful first: with no cobble but a stack of andesite, the andesite stays)
