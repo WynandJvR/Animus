@@ -212,6 +212,12 @@ function furnishingInPack () {
 
 // A bed is worth going for only when we can actually get one: carrying one, wool for one, a stray
 // bed nearby, or sheep known close to home. Otherwise the safehouse is the night shelter.
+// THE DAY'S SHEEP SEARCH: no bed and no flock known - once a game day, with the day well ahead, a capped look round
+// (WOOL_SEARCH_MS) on the search's own trail (gather.explore: new ground each time). A bed skips every night after it
+const WOOL_SEARCH_MS = 4 * 60000
+function woolSearchDue () {
+  return !shelter.hasBedItem(bot) && mem.get().woolSearchDay !== day.dayNo(bot) && world.phase(bot) === 'day' && world.ticksUntilNight(bot) > 6000
+}
 function bedObtainable () {
   if (shelter.hasBedItem(bot)) return true
   if (Object.values(bot.entities).some(e => { try { return e && e.name === 'item' && e.position && e.position.distanceTo(bot.entity.position) < 48 && /_bed$/.test(e.getDroppedItem().name) } catch { return false } })) return true
@@ -585,6 +591,9 @@ function decide () {
     if (!(mem.get().chests || []).length && !held('chest')) return { name: 'chest', why: 'no storage at home' }
     if (farm.farm() && farm.farmHome && !farm.farmIsHome(bot) && inv.count(bot, 'wheat_seeds') + base.bankCount('wheat_seeds') >= 4 && !held('farm')) return { name: 'farm', why: 'the farm belongs to the old home - planting one here' }
     if (!bed && bedObtainable() && !held('bed')) return { name: 'bed', why: 'no bed - spawn is not anchored at home' }
+    // no sheep known: one short search a day (woolSearchDue) - with no flock in memory the rule above never fired, and every
+    // night at the spawn hub was 7 of 20 minutes waited out in the safehouse, the build standing (2026-10-03)
+    if (!bed && !held('bed') && woolSearchDue()) return { name: 'bed', why: "no bed and no sheep known - the day's sheep search (a bed skips the night)" }
     // a spare stone kit in the chest: a death respawns us beside it instead of sending us 100 blocks for logs
     if (dHome < 32 && SPARE_KIT.some(t => base.bankCount(t) < 1) && stock('cobblestone') >= 10 && !held('spareKit')) return { name: 'spareKit', why: 'no spare tools in the chest - making a set' }
     // light the ground around home: no mobs spawning at the door means nights asleep, not on guard
@@ -1049,7 +1058,11 @@ const TASKS = {
   },
   async bed () {
     if (!shelter.hasBedItem(bot)) {
-      const ok = await shelter.obtainBed(bot, { shouldStop: dayStop })
+      // (the day's search, not a known flock: once today and capped - the rest of the day is the build's)
+      const search = !bedObtainable()
+      if (search) mem.set('woolSearchDay', day.dayNo(bot))
+      const t0 = Date.now()
+      const ok = await shelter.obtainBed(bot, { shouldStop: () => dayStop() || (search && Date.now() - t0 > WOOL_SEARCH_MS) })
       if (!ok) return false
     }
     if (!hut.shellComplete(bot)) return true // (carried until the safehouse stands - shelter first)
