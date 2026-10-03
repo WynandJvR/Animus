@@ -279,10 +279,20 @@ function chooseRecipe (bot, itemName, n = 1, stack = null) {
     return near ? world.dist3(near.position || near, bot.entity.position) / 2 : 120 // (there and back at a walk; out of sight, a trip's worth)
   }
   // (the chests must cover the WHOLE shortfall: one acacia plank banked read "no trip", and the second plank was the trip)
+  // (ANY gathered ingredient, not only wood: bamboo for sticks was priced as if in hand - the shears' iron trip wanted 14
+  //  sticks, chose bamboo with planks in the chest, and explored four minutes for none, 2026-10-03. The same rule: not held
+  //  or banked, it costs the walk to it)
+  const gatherTrip = (nm0, short) => {
+    const g = GATHER[nm0]; if (!g || !g.blocks) return 0
+    let banked = 0; try { banked = base().bankCount(nm0) } catch {}
+    if (banked >= short) return 0
+    const near = world.findBlocks(bot, g.blocks, { maxDistance: 48, count: 1 })[0]
+    return near ? world.dist3(near.position || near, bot.entity.position) / 2 : 120
+  }
   const woodTrip = (nm0, short) => {
-    if (!/_(planks|log)$/.test(nm0)) return 0
     const mk = nm0 + ':' + short
     if (mk in tripMemo) return tripMemo[mk]
+    if (!/_(planks|log)$/.test(nm0)) return (tripMemo[mk] = short === Infinity ? 0 : gatherTrip(nm0, short))
     const sp = nm0.replace(/_(planks|log)$/, '')
     let t = 0
     try {
