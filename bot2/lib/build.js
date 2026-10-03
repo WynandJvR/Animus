@@ -1722,6 +1722,10 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     // the mine) and the cell tried again, never a miss; none to be had ends the step on cobblestone. The hub's stairs each
     // wanted a support, the pack ran dry mid-step and 135 stairs "won't place" in ten minutes, each resting for later, 2026-10-03
     if (!ok && /no filler for a temporary support/.test(lastPlaceFail || '') && ++fillerTopUps <= 3) { // (three a step: filler in hand and still "no filler" is no pack's want - the miss counts as before)
+      // (down off our pillar first - the trip would walk off the tower and leave it standing; and late in the step the
+      //  fetch is the round's, not a step run past its clock; audit)
+      if (myPillar.length) await descendPillar(bot)
+      if (Date.now() - t0 > maxMs - 60000) { profLog(); return { placed, blockedOn: 'cobblestone', blockedHolds: true, done: false } }
       await ensureScaffold(bot, SCAFFOLD_WANT, { shouldStop }).catch(() => false)
       if (!inv.items(bot).some(i => FILLER_ITEMS.test(i.name))) { log('build', 'out of filler for the supports - the step ends to fetch it'); profLog(); return { placed, blockedOn: 'cobblestone', blockedHolds: true, done: false } }
       continue
