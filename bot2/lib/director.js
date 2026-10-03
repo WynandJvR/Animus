@@ -554,7 +554,7 @@ function decide () {
   // in a castle round they were its first minutes (135s, 0 placed, 2026-10-03); done at home in the day's last minutes they
   // take the place of the next round's own, and the furnaces smelt through the night. Below survival (food, graves, tools). Once a day, stopped by dusk, a hostile near, or a hurt
   // body at the next furnace (operator: never build at night; "it can mine and maybe do other stuff at night thats safe")
-  if (home && world.phase(bot) === 'day' && world.tod(bot) >= EVENING && dHome <= 32 && build.getJob() && build.needsWork(bot) && mem.get().eveningPrepDay !== day.dayNo(bot) && bot.health > reflex.hurtLine() && !prepThreat() && !held('eveningPrep')) return { name: 'eveningPrep', why: "evening at home - the build's smelting and crafts before dark" }
+  if (home && world.phase(bot) === 'day' && world.tod(bot) >= EVENING && world.tod(bot) < 12000 && dHome <= 32 && build.getJob() && build.needsWork(bot) && mem.get().eveningPrepDay !== day.dayNo(bot) && bot.health > reflex.hurtLine() && !prepThreat() && !held('eveningPrep')) return { name: 'eveningPrep', why: "evening at home - the build's smelting and crafts before dark" }
 
   // FIRST THING IN THE DAY: a far trip refused for want of daylight goes before the day's rounds - asked at the end of a
   //  castle round, the dark oak trip came each day with 2300 ticks left and was "not today" three days running, the castle
