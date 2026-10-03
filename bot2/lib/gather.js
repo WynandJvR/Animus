@@ -763,18 +763,59 @@ function standableNear (bot, p) {
   return false
 }
 
-// Walk outward in a widening square from home (or here) until a matching block shows up.
+// WHERE EACH SEARCH HAS LOOKED, by label: points along the walks, kept while what was seen there still holds - animals
+// wander back in, blocks stay put. The next leg goes to the nearest point of the rings round home not looked at lately,
+// from where we stand: a fixed spiral round home sent each leg back across the ground just searched (eleven legs, four
+// bed trips, not a sheep - 2026-10-03). COVER is under what a walk sees (blocks scanned to 64, animals in view further).
+// (animals: what a Paper/Spigot server shows of them - 48 by default; blocks: findMatching's scan reaches 64)
+const coverOf = label => label === 'animals' ? 48 : 64
+const trailFresh = label => label === 'animals' ? 40 * 60000 : 6 * 3600000
+function noteTrail (label, p) {
+  mem.update(m => {
+    const tr = m.exploreTrail = m.exploreTrail || {}
+    for (const k of Object.keys(tr)) { const l = tr[k]; if (!l.length || Date.now() - l[l.length - 1].t > trailFresh(k)) delete tr[k] } // (a search long done)
+    const l = (tr[label] = (tr[label] || []).filter(q => Date.now() - q.t < trailFresh(label)))
+    l.push({ x: Math.round(p.x), z: Math.round(p.z), t: Date.now() })
+    if (l.length > 300) l.splice(0, l.length - 300)
+  })
+}
+function nextSearchPoint (bot, home, label, ringCount) {
+  const me = bot.entity.position
+  const COVER = coverOf(label)
+  const trail = (((mem.get().exploreTrail || {})[label]) || []).filter(q => Date.now() - q.t < trailFresh(label))
+  let best = null; let bestScore = Infinity
+  for (let k = 0; k < ringCount; k++) {
+    const r = COVER + 32 * k // (the first ring just past what is in view from home)
+    const n = Math.max(8, Math.round(2 * Math.PI * r / COVER)) // (points about COVER apart round the ring)
+    for (let i = 0; i < n; i++) {
+      const a = 2 * Math.PI * i / n
+      const p = { x: home.x + Math.cos(a) * r, z: home.z + Math.sin(a) * r }
+      const d = Math.hypot(p.x - me.x, p.z - me.z)
+      if (d < COVER - 1 || trail.some(q => Math.hypot(q.x - p.x, q.z - p.z) < COVER - 1)) continue // (-1: a ring point exactly COVER off is new ground, not a rounding toss-up)
+      const score = d + 0.5 * r // (the nearest new ground, held toward home: the search grows outward, not off in a line)
+      if (score < bestScore) { bestScore = score; best = { x: Math.round(p.x), z: Math.round(p.z), r } }
+    }
+  }
+  return best
+}
+
+// Walk to the nearest ground this search has not looked at lately (rings round home, or here) until a match shows up.
 async function explore (bot, match, { shouldStop, label = 'resources', legs = 4, accept = null, rings = null } = {}) {
   const home = mem.get().home || bot.entity.position
   mem.update(m => { m.exploreStep = (m.exploreStep || 0) + 1 })
   const step = mem.get().exploreStep
   // stay within ~150b of home (far trips cost more than they find) - animals in a hunted-out area are
   // the exception: they never respawn, so the search has to go wider; so is clay (rings: 9, out to ~300b)
-  const radius = 48 + 32 * (step % (rings || (label === 'animals' ? 7 : 4)))
+  const ringCount = rings || (label === 'animals' ? 7 : 4)
+  noteTrail(label, bot.entity.position) // (here is looked at: the caller found nothing in sight)
+  const pt = nextSearchPoint(bot, home, label, ringCount)
+  // (every ring point looked at lately: the old spiral, which at least turns to a new heading each call)
+  const radius = pt ? pt.r : 48 + 32 * (step % ringCount)
   const ang = step * 2.4
-  const dest = { x: Math.round(home.x + Math.cos(ang) * radius), y: Math.round(bot.entity.position.y), z: Math.round(home.z + Math.sin(ang) * radius) }
-  log('gather', `exploring for ${label} toward ${move.fmt(dest)} (radius ${radius})`)
+  const dest = pt ? { x: pt.x, y: Math.round(bot.entity.position.y), z: pt.z } : { x: Math.round(home.x + Math.cos(ang) * radius), y: Math.round(bot.entity.position.y), z: Math.round(home.z + Math.sin(ang) * radius) }
+  log('gather', `exploring for ${label} toward ${move.fmt(dest)} (radius ${radius}${pt ? ', new ground' : ', all looked at lately'})`)
   const t0 = Date.now()
+  let lastNoted = bot.entity.position.clone()
   // (the walk polls stop() constantly: the look-around runs in the background, one at a time, at most every 2s, and
   //  stop() reads what the last one saw)
   let scannedAt = 0; let seen = null; let scanning = false
@@ -785,13 +826,22 @@ async function explore (bot, match, { shouldStop, label = 'resources', legs = 4,
     }
     return seen
   }
-  const stop = () => (shouldStop && shouldStop()) || Date.now() - t0 > 3 * 60000 || !!sighted()
+  const along = () => { // (the walk itself is the looking: a point every 24 blocks)
+    const p = bot.entity.position
+    if (Math.hypot(p.x - lastNoted.x, p.z - lastNoted.z) > 24) { lastNoted = p.clone(); noteTrail(label, p) }
+  }
+  const stop = () => { along(); return (shouldStop && shouldStop()) || Date.now() - t0 > 3 * 60000 || !!sighted() }
+  let last = null
   for (let i = 0; i < legs; i++) {
     const found = await findMatching(bot, match, accept)
     if (found) return found
-    const r = await move.travel(bot, dest, { range: 10, shouldStop: stop, label: 'explore', maxMs: 90000, anyY: true })
-    if (r.ok || r.why === 'stopped') break
+    last = await move.travel(bot, dest, { range: 10, shouldStop: stop, label: 'explore', maxMs: 90000, anyY: true })
+    if (last.ok || last.why === 'stopped') break
   }
+  // (the point aimed at counts as looked at, reached or not - one across water we cannot cross is not the next leg again -
+  //  unless the walk was cut short by a find or the caller: then only the ground walked counts; audit 2026-10-03)
+  const cutShort = last && last.why === 'stopped' && Date.now() - t0 <= 3 * 60000
+  if (!cutShort) noteTrail(label, dest)
   return findMatching(bot, match, accept)
 }
 async function findMatching (bot, match, accept) {

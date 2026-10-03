@@ -52,13 +52,40 @@ function huntable (bot, list, itemName) {
   })
 }
 
+// Where animals were seen, by kind - noted as they come into view whatever the bot is doing (install), not only on a hunt:
+// noted only while hunting, the 2300-block walk to the spawn hub passed every flock on the way and the bed's wool search
+// had nothing to go on but three old spots, 2026-10-03. Written only when it says something new (a new spot, or one
+// last confirmed 10+ minutes ago): the hunt loop noted every animal in sight on every pass, a memory save each time.
+const SIGHT_REFRESH = 10 * 60000
 function noteMob (e) {
+  if (!e || !e.position || !e.name) return
+  const p = e.position.floored()
+  if (pen().inPen(p) || move.inForeign(p)) return // (a penned flock is not game; another's farm is not ours to hunt)
+  const l = ((mem.get().mobs || {})[e.name]) || []
+  const near = l.find(q => world.dist2(q, p) < 32)
+  if (near && Date.now() - (near.t || 0) < SIGHT_REFRESH) return
   mem.update(m => {
     m.mobs = m.mobs || {}
-    const l = m.mobs[e.name] || (m.mobs[e.name] = [])
-    const p = e.position.floored()
-    if (!l.some(q => world.dist2(q, p) < 32)) { l.push({ x: p.x, y: p.y, z: p.z, t: Date.now() }); if (l.length > 8) l.shift() }
+    const k = m.mobs[e.name] || (m.mobs[e.name] = [])
+    const q = k.find(q => world.dist2(q, p) < 32)
+    if (q) Object.assign(q, { x: p.x, y: p.y, z: p.z, t: Date.now() })
+    else {
+      k.push({ x: p.x, y: p.y, z: p.z, t: Date.now() }); k.sort((a, b) => (a.t || 0) - (b.t || 0))
+      // (full: the spot farthest from home goes - a long trip's sightings are no use to a search held round home, and the
+      //  newest-16 rule let them push out the near ones; homeless, the oldest; audit 2026-10-03)
+      if (k.length > 16) { const h = m.home; const i = h ? k.reduce((bi, q, j) => world.dist2(q, h) > world.dist2(k[bi], h) ? j : bi, 0) : 0; k.splice(i, 1) }
+    }
   })
+}
+function install (bot) {
+  bot.on('entitySpawn', e => { try { if (e && e.name && FOOD_ANIMALS.test(e.name) && !isBaby(bot, e)) noteMob(e) } catch {} })
+}
+// The tracked range: animals the client is shown at all - out to here they count as found (a search stopped only for one
+// within 48 and walked past flocks in plain view)
+const VIEW = 128
+// a flock remembered at `spot`, walked to and not there: forgotten (kinds matching re)
+function forgetAt (re, spot) {
+  mem.update(m => { for (const k of Object.keys(m.mobs || {})) if (re.test(k)) m.mobs[k] = m.mobs[k].filter(q => world.dist2(q, spot) >= 32) })
 }
 
 // Animals we could not get to (another bank, behind a wall): skipped by animals() for a while. The chase drove the
@@ -92,11 +119,20 @@ async function killAnimal (bot, e, { maxMs = 30000 } = {}) {
   return dead
 }
 
+// Walk to an animal in view but past the hunt's reach; one we cannot get to is left alone a while (animals() skips it)
+async function toInSight (bot, e, ctx) {
+  log('food', `a ${e.name} in sight ${Math.round(e.position.distanceTo(bot.entity.position))}b off - going to it`)
+  const at = e.position.clone()
+  const r = await move.travel(bot, at, { range: 8, shouldStop: ctx.shouldStop, label: 'to the animals in sight', maxMs: 90000 })
+  if (!r.ok && !(ctx.shouldStop && ctx.shouldStop()) && (!e.isValid || e.position.distanceTo(bot.entity.position) > 40)) unreachable.set(e.id, Date.now())
+}
+
 // Kill animals until `n` more of `itemName` are in the pack.
 async function huntFor (bot, itemName, n, ctx = {}) {
   const re = craft().HUNT[itemName] || FOOD_ANIMALS
   const target = inv.count(bot, itemName) + n
   let empty = 0
+  let wentTo = null // (the remembered herd walked to - forgotten if it is not there)
   const t0 = Date.now()
   while (inv.count(bot, itemName) < target) {
     await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
@@ -107,6 +143,9 @@ async function huntFor (bot, itemName, n, ctx = {}) {
     for (const e of list) noteMob(e)
     const pick = huntable(bot, list, itemName)[0]
     if (!pick) {
+      // (forgotten only when none of the kind is there at all: a lone one spared by the last-two rule is still a herd)
+      if (wentTo && world.dist2(wentTo, bot.entity.position) < 16 && !list.length) { forgetAt(re, wentTo); log('food', `no animals where they were seen at ${wentTo.x},${wentTo.z} - forgotten`) }
+      wentTo = null
       if (++empty > 4) { log('food', `no ${re} to hunt nearby`); mem.set('lastHuntEmpty', Date.now()); return false }
       // a remembered herd is only worth the walk if it is near home (or near us when homeless)
       const anchor = mem.get().home || bot.entity.position
@@ -119,11 +158,22 @@ async function huntFor (bot, itemName, n, ctx = {}) {
       // never looked for - the bot walked on hungry and hurt until drowned killed it (2026-09-27)
       const fit = bot.health > reflex.hurtLine() && !!inv.bestWeapon(bot) && world.phase(bot) === 'day' && world.tod(bot) < 9000
       if (!fit) { log('food', `no ${re} in sight and not fit to go looking (hp ${Math.round(bot.health)})`); return false }
-      if (known && empty === 1 && world.dist2(known, bot.entity.position) > 40) {
+      // (in view past the hunt's reach: a kind the hunt may take from, at an animal not already in the near list - the
+      //  nearest "huntable" in view was the lone cow at 20 we already stood by, walked to five times while the herd at 100
+      //  waited; audit 2026-10-03. The kill itself still goes through huntable() on the near list, last-two rule and all)
+      const farGame = () => {
+        const inView = animals(bot, re, VIEW)
+        const game = new Set(huntable(bot, inView, itemName).map(e => e.name))
+        return inView.find(e => !list.includes(e) && game.has(e.name))
+      }
+      const far = farGame()
+      if (far) await toInSight(bot, far, ctx)
+      else if (known && empty === 1 && world.dist2(known, bot.entity.position) > 40) {
         log('food', `heading to where i saw animals at ${move.fmt(known)}`)
+        wentTo = { x: known.x, z: known.z }
         await move.travel(bot, known, { range: 10, shouldStop: ctx.shouldStop, label: 'to animals' })
       } else {
-        await gather().explore(bot, () => false, { shouldStop: () => (ctx.shouldStop && ctx.shouldStop()) || huntable(bot, animals(bot, re), itemName).length > 0, label: 'animals', legs: 2 })
+        await gather().explore(bot, () => false, { shouldStop: () => (ctx.shouldStop && ctx.shouldStop()) || !!farGame(), label: 'animals', legs: 2 })
       }
       continue
     }
@@ -174,6 +224,7 @@ async function woolFor (bot, n, ctx = {}, colour = 'white') {
   const t0 = Date.now()
   let empty = 0
   let wentTo = null // (the remembered flock walked to this trip - forgotten if it is not there)
+  let shornWalks = 0 // (walks past a shorn flock to a woolly sheep in view: bounded - empty resets on every pick)
   while (woolCount() < target) {
     await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
     if (ctx.shouldStop && ctx.shouldStop()) return false
@@ -184,11 +235,13 @@ async function woolFor (bot, n, ctx = {}, colour = 'white') {
     for (const e of list) noteMob(e)
     const woolly = e => { const w = sheepWool(bot, e); return !shornTried.has(e.id) && !(w && w.sheared) }
     const ofColour = e => { const w = sheepWool(bot, e); return !!w && WOOL_COLOURS[w.colour] === colour }
-    const pick = shears ? (list.find(e => woolly(e) && ofColour(e)) || list.find(woolly) || list[0]) : (list.find(ofColour) || list[0])
+    // (a shorn sheep killed gives no wool: without shears only the woolly ones count - one was picked as readily as any)
+    const unshorn = list.filter(e => { const w = sheepWool(bot, e); return !(w && w.sheared) })
+    const pick = shears ? (list.find(e => woolly(e) && ofColour(e)) || list.find(woolly) || list[0]) : (unshorn.find(ofColour) || unshorn[0])
     if (!pick) {
       // (a remembered flock that is not there when we arrive is forgotten: four wool trips walked to the same spot - inside
       //  the castle's ground by then - found nothing, and went again, 2026-09-28)
-      if (wentTo && world.dist2(wentTo, bot.entity.position) < 16) {
+      if (wentTo && world.dist2(wentTo, bot.entity.position) < 16 && !list.length) { // (no sheep there at all - a shorn one is still the flock)
         mem.update(m => { if (m.mobs && m.mobs.sheep) m.mobs.sheep = m.mobs.sheep.filter(q => world.dist2(q, wentTo) >= 32) })
         log('food', `no sheep where they were seen at ${wentTo.x},${wentTo.z} - forgotten`)
         wentTo = null
@@ -198,8 +251,11 @@ async function woolFor (bot, n, ctx = {}, colour = 'white') {
       const known = (mem.get().mobs || {}).sheep ? mem.get().mobs.sheep.filter(p => world.dist2(p, anchor) < 200).sort((a, b) => world.dist2(a, bot.entity.position) - world.dist2(b, bot.entity.position))[0] : null
       const fit = bot.health >= 12 && world.phase(bot) === 'day'
       if (!fit) { log('food', `no sheep in sight and not fit to go looking (hp ${Math.round(bot.health)})`); return false }
-      if (known && empty === 1 && world.dist2(known, bot.entity.position) > 40) { wentTo = known; await move.travel(bot, known, { range: 10, shouldStop: ctx.shouldStop, label: 'to sheep' }) }
-      else await gather().explore(bot, () => false, { shouldStop: () => (ctx.shouldStop && ctx.shouldStop()) || animals(bot, /^sheep$/, 48).length > 0, label: 'animals', legs: 2 })
+      const woollyFar = e => { const w = sheepWool(bot, e); return !(w && w.sheared) && !list.includes(e) }
+      const far = animals(bot, /^sheep$/, VIEW).find(woollyFar)
+      if (far) await toInSight(bot, far, ctx)
+      else if (known && empty === 1 && world.dist2(known, bot.entity.position) > 40) { wentTo = known; await move.travel(bot, known, { range: 10, shouldStop: ctx.shouldStop, label: 'to sheep' }) }
+      else await gather().explore(bot, () => false, { shouldStop: () => (ctx.shouldStop && ctx.shouldStop()) || animals(bot, /^sheep$/, VIEW).some(woollyFar), label: 'animals', legs: 2 })
       continue
     }
     empty = 0
@@ -219,7 +275,12 @@ async function woolFor (bot, n, ctx = {}, colour = 'white') {
       continue
     }
     // no shears (or every sheep here is shorn and we still have none to spare): a kill gives one
-    if (shears) { log('food', 'every sheep in sight is shorn'); return woolCount() > target - n }
+    if (shears) {
+      // (every sheep near is shorn: a woolly one in view further off is walked to before giving up)
+      const woollyFar = animals(bot, /^sheep$/, VIEW).find(e => !list.includes(e) && woolly(e))
+      if (woollyFar && ++shornWalks <= 4) { await toInSight(bot, woollyFar, ctx); continue }
+      log('food', 'every sheep in sight is shorn'); return woolCount() > target - n
+    }
     await killAnimal(bot, pick)
   }
   return true
@@ -417,4 +478,4 @@ async function cookAll (bot, ctx = {}) {
   }
 }
 
-module.exports = { huntFor, woolFor, sheepWool, isBaby, stockFood, cookAll, animals, killAnimal, huntable, fishFor, harvestCrops, FOOD_ANIMALS }
+module.exports = { install, noteMob, huntFor, woolFor, sheepWool, isBaby, stockFood, cookAll, animals, killAnimal, huntable, fishFor, harvestCrops, FOOD_ANIMALS }
