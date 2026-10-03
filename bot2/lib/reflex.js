@@ -1040,6 +1040,20 @@ function plannedClimb (fy) {
   const ax = Math.abs(nx - Math.floor(p.x)); const az = Math.abs(nz - Math.floor(p.z))
   return n.y > fy && (ax + az === 1 || (ax === 1 && az === 1)) && world.isSolid(world.at(bot, nx, Math.floor(n.y) - 1, nz))
 }
+// ...and LEVEL: the planner's next node on our floor's level, a cell over or the diagonal, solid under it, the straight line
+// to its centre over no drop that hurts. Crouched, the pathfinder's own simulation of that step stops at the pit's edge and
+// it lets go of every key with a good path in hand - "sneak true, keys none, success 19 nodes" beside the pit by the mine,
+// a 40s stall a mine walk, 2026-10-03. (The brake's overshoot cut still holds the lip: steered, it judges the hitbox)
+function plannedLevel (fy) {
+  const n = lastPath && lastPath[0]
+  if (!n || !bot.pathfinder || !bot.pathfinder.isMoving || !bot.pathfinder.isMoving()) return false
+  const p = bot.entity.position; const nx = Math.floor(n.x); const nz = Math.floor(n.z)
+  const ax = Math.abs(nx - Math.floor(p.x)); const az = Math.abs(nz - Math.floor(p.z))
+  if (Math.floor(n.y) !== fy || ax > 1 || az > 1 || !world.isSolid(world.at(bot, nx, fy - 1, nz))) return false
+  const tx = nx + 0.5; const tz = nz + 0.5; const len = Math.hypot(tx - p.x, tz - p.z); const steps = Math.max(1, Math.ceil(len / 0.1))
+  for (let i = 1; i <= steps; i++) { const t = i / steps; if (world.dropAt(bot, p.x + (tx - p.x) * t, fy, p.z + (tz - p.z) * t, world.SAFE_DROP + 1) > world.SAFE_DROP) return false }
+  return true
+}
 function plannedDescent (fy) {
   const n = lastPath && lastPath[0]
   if (!n || !bot.pathfinder || !bot.pathfinder.isMoving || !bot.pathfinder.isMoving()) return false
@@ -1052,9 +1066,11 @@ function ledgeWanted () {
   const e = bot.entity
   if (!e || bot.vehicle || !e.onGround || world.feetInWater(bot)) return false
   const p = e.position; const fy = Math.floor(p.y + 0.01)
-  if (plannedDescent(fy) || plannedClimb(fy)) return false
-  for (const [dx, dz] of [[0.8, 0], [-0.8, 0], [0, 0.8], [0, -0.8]]) if (world.dropAt(bot, p.x + dx, fy, p.z + dz, world.SAFE_DROP + 1) > world.SAFE_DROP) return true
-  return false
+  // (the drop first, the planner's exemptions only beside one: asked every physics tick of every walk; audit)
+  let near = false
+  for (const [dx, dz] of [[0.8, 0], [-0.8, 0], [0, 0.8], [0, -0.8]]) if (world.dropAt(bot, p.x + dx, fy, p.z + dz, world.SAFE_DROP + 1) > world.SAFE_DROP) { near = true; break }
+  if (!near) return false
+  return !(plannedDescent(fy) || plannedClimb(fy) || plannedLevel(fy))
 }
 // ONE OWNER OF SNEAK among the guards: the edge brake and the ledge crouch each pressed and let go of it on their own,
 // the brake's release undoing the crouch every tick it ran. Both are asked each physics tick and sneak is set once from
