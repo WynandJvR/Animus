@@ -111,6 +111,8 @@ function prepThreat () { return reflex.hostiles(16).some(h => h.e.name !== 'bat'
 const PEN_SHORT = new Set(['gate', 'shear', 'breed'])
 // the build's band itself waits on wool (or a carpet or bed made of it): the pen's trips are the build's then
 function woolHolds () { const w = mem.get().buildWaiting; return !!w && /_wool$|_carpet$|_bed$/.test(w) }
+// the next layers short of cobblestone (raw, through the planner: stone, smooth stone, bricks all come from it) - a stack
+function stoneShort () { try { return (mats.planFor(bot, windowNeeds()).raw.cobblestone || 0) >= 64 } catch { return false } }
 function dayStop () { return taskCancelled() || nightSoon() || bot.health <= reflex.hurtLine() || homeByDark() }
 // heading home: keep walking through dusk; only real night (mobs) stops a trip that is still long
 // (and at the hurt line, when food would mend it or might be found: at hp 4 the trek walked on into a river and drowned,
@@ -461,7 +463,11 @@ function decide () {
     // (ONE night walk limit, for the bed and the mine alike: a 43b walk to the mine in the dark - the bed unreachable, the
     //  builder's walls round it - met two creepers, a witch and a skeleton, and died with an iron pickaxe, 2026-09-28)
     const nightWalk = dusk ? Infinity : 32
-    if (bed && world.dist2(bed, bot.entity.position) < (dusk ? 200 : 32) && !held('sleep')) return { name: 'sleep', why: `${night ? 'night' : 'dusk'} - my bed is ${Math.round(world.dist2(bed, bot.entity.position))}b away` }
+    // (the night is free time for the mine when the build waits on stone: a bed skips it, and the mining then came out of
+    //  the building daylight - the hub at 2659 waiting on smooth stone with 9 cobblestone to smelt, 2026-10-03. Short of
+    //  stone for the next layers and a mine to work (or none yet: the dusk rule below starts one): mined, not slept)
+    const mineTheNight = dusk && home && dHome < 32 && build.getJob() && build.needsWork(bot) && nightFed() && inv.bestTool(bot, 'pickaxe', 8) && stoneShort()
+    if (bed && world.dist2(bed, bot.entity.position) < (dusk ? 200 : 32) && !mineTheNight && !held('sleep')) return { name: 'sleep', why: `${night ? 'night' : 'dusk'} - my bed is ${Math.round(world.dist2(bed, bot.entity.position))}b away` }
     // a working mine next to home turns the night into mining time: go down at dusk (a short walk)
     {
       const mm = mem.get().mine
