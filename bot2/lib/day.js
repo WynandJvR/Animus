@@ -15,4 +15,8 @@ function dayNo (bot) {
   if (next || d.night !== night) mem.set('dayNo', { n: d.n + (next ? 1 : 0), night })
   return d.n + (next ? 1 : 0)
 }
-module.exports = { dayNo }
+// (read on every time packet, not only between the director's tasks: a bunker begun at dusk held the loop all night, the
+//  next read came at 23300 - day, before the wrap - and the wrap fell inside the next long task; the night went uncounted
+//  and an expedition stayed out past its last night, 2026-10-03)
+function install (bot) { bot.on('time', () => { try { if (bot.entity) dayNo(bot) } catch {} }) }
+module.exports = { dayNo, install }
