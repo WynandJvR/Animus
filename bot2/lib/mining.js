@@ -48,8 +48,13 @@ function pathBad (p, dir) {
   }
   return false
 }
-// (the given-up sites that still count: danger for ever, the rest three days - an old record without a day is old)
-function badMinesNow (bot) { let dn = null; try { dn = require('./day').dayNo(bot) } catch {} return (mem.get().badMines || []).filter(bm => bm.danger || (bm.day != null && dn != null && dn - bm.day < 3)) }
+// (the given-up sites that still count: danger for ever, the rest three days - an old record without a day is old,
+//  unless a death lies within 16 of it: three of the twelve were mines it died in, recorded before danger was; audit)
+function badMinesNow (bot) {
+  let dn = null; try { dn = require('./day').dayNo(bot) } catch {}
+  const deaths = (mem.get().deaths || []).filter(d => d && d.cause !== 'void' && d.x != null)
+  return (mem.get().badMines || []).filter(bm => bm.danger || (bm.day != null ? dn != null && dn - bm.day < 3 : deaths.some(d => world.dist2(d, bm) < 16)))
+}
 function chooseEntrance (bot, oreLv = null) {
   const home = mem.get().home || world.feetPos(bot)
   const levelFor = y => oreLv != null ? Math.min(oreLv, y - 8) : levelOf(y)
@@ -467,7 +472,8 @@ function abandonMine (m, i = m && m.levels ? m.active : 0, danger = false) {
   // (with its day and whether it was danger - water, lava: a site given up for a walk's timeout is no worse a site in three
   //  days; kept for ever, twelve such round home left "no safe spot for a mine entrance" and no iron at all, 2026-10-03)
   const dn = (mem.get().dayNo || {}).n ?? null // (day.js's own count, kept in memory)
-  mem.update(mm => { mm.badMines = (mm.badMines || []).concat([{ x: m.entrance.x, y: m.entrance.y, z: m.entrance.z, day: dn, danger: !!danger }]).slice(-12); mm.mine = null })
+  // (every danger site kept, the rest the last twelve: a cap of twelve in all pushed out the deaths first; audit)
+  mem.update(mm => { const all = (mm.badMines || []).concat([{ x: m.entrance.x, y: m.entrance.y, z: m.entrance.z, day: dn, danger: !!danger }]); mm.badMines = [...all.filter(b => b.danger), ...all.filter(b => !b.danger).slice(-12)]; mm.mine = null })
   return null
 }
 
@@ -597,7 +603,7 @@ async function mineFor (bot, itemName, target, ctx = {}) {
   ensureLevels(m)
   const dl = m ? diedInMine(m) : -1
   if (dl === 0) log('mine', `died in the mine at ${move.fmt(m.entrance)} lately - abandoning it for a new one`)
-  if (dl >= 0) m = abandonMine(m, dl)
+  if (dl >= 0) m = abandonMine(m, dl, true) // (a death is danger: given up for good; audit)
   // a "mine" working just under the surface is a trench under whatever stands there
   if (m && m.stairsDone && home && m.level > home.y - 20 && !m.ore) { log('mine', `the mine at ${move.fmt(m.entrance)} works at y${m.level}, too near the surface - abandoning it`); m = abandonMine(m) }
   // an ore trip works where that ore is: the mine's level nearest it, or a new level down from the deepest (pickLevel)
