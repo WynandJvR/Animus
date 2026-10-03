@@ -808,12 +808,7 @@ function jumpHurts (c) {
   // heading, every step up a hillside with a drop somewhere near was refused - the builder could not climb the slope
   // under the nave to its y127 cells, 2 hours of "no jump toward a 4-block drop", 2026-09-26. (Its node straight
   // overhead is a tower: that one still answers to the drop under our corners.)
-  const n = lastPath && lastPath[0]
-  if (n && bot.pathfinder && bot.pathfinder.isMoving && bot.pathfinder.isMoving()) {
-    const fy = Math.floor(p.y + 0.01); const nx = Math.floor(n.x); const nz = Math.floor(n.z)
-    const side = Math.abs(nx - Math.floor(p.x)) + Math.abs(nz - Math.floor(p.z))
-    if (n.y > fy && side >= 1 && side <= 2 && world.isSolid(world.at(bot, nx, Math.floor(n.y) - 1, nz))) return null
-  }
+  if (plannedClimb(Math.floor(p.y + 0.01))) return null
   // THE HEADINGS A JUMP GOES: the held keys summed in the body's own frame - forward and back along the look, left and
   // right across it (a strafe was never read: a random strafe and a jump at the castle rim fell 5 blocks twice, 2026-09-28)
   // - and the way the body is already sliding. A jump that hurts along either is refused.
@@ -997,6 +992,17 @@ function noteTakeoff () {
 // down a hillside past a cliff, was clipped every tick until the move timed out (2026-09-27). The planner's next node
 // below our floor, no further down than SAFE_DROP, is a descent it chose: no crouch while it takes it (the brake in
 // edgeGuard still catches an overshoot past it).
+// ...and on its way UP: the planner's next node one up, a side step over (one or two cells), solid under it. Crouched, the
+// pathfinder's own simulation of the step up fails and it stands still - frozen beside a pit at 40,67,4 and 43,67,4, the
+// walk to the mine "stuck x3" again and again, 2026-10-03. ONE test with jumpHurts' climb exemption, so the two cannot drift
+function plannedClimb (fy) {
+  const n = lastPath && lastPath[0]
+  if (!n || !bot.pathfinder || !bot.pathfinder.isMoving || !bot.pathfinder.isMoving()) return false
+  const p = bot.entity.position; const nx = Math.floor(n.x); const nz = Math.floor(n.z)
+  // (the next cell or the diagonal one - never two over in a line, where the cell between could be the drop; audit)
+  const ax = Math.abs(nx - Math.floor(p.x)); const az = Math.abs(nz - Math.floor(p.z))
+  return n.y > fy && (ax + az === 1 || (ax === 1 && az === 1)) && world.isSolid(world.at(bot, nx, Math.floor(n.y) - 1, nz))
+}
 function plannedDescent (fy) {
   const n = lastPath && lastPath[0]
   if (!n || !bot.pathfinder || !bot.pathfinder.isMoving || !bot.pathfinder.isMoving()) return false
@@ -1009,7 +1015,7 @@ function ledgeWanted () {
   const e = bot.entity
   if (!e || bot.vehicle || !e.onGround || world.feetInWater(bot)) return false
   const p = e.position; const fy = Math.floor(p.y + 0.01)
-  if (plannedDescent(fy)) return false
+  if (plannedDescent(fy) || plannedClimb(fy)) return false
   for (const [dx, dz] of [[0.8, 0], [-0.8, 0], [0, 0.8], [0, -0.8]]) if (world.dropAt(bot, p.x + dx, fy, p.z + dz, world.SAFE_DROP + 1) > world.SAFE_DROP) return true
   return false
 }

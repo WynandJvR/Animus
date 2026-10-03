@@ -367,7 +367,10 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
     // 60 over the valley, toward sand at y62 - and the bot fell off its end placing the next block (2026-09-25).
     // (A tower's block goes under our own feet, on ground; a gap a step wide has its floor within reach.)
     const p = block.position
-    return dropAt(p.x, p.y, p.z) > world.SAFE_DROP ? 101 : 0
+    // (measured where the body stands to place it - the feet, one over the block - as the lip and edge guards measure: from
+    //  the block's own height a 4-block pit read 3, the planner bridged it, the lip reflex pulled the body back off the
+    //  edge, and the walk to the mine gave up "stuck x3" at the same pit a dozen times, 2026-10-03)
+    return dropAt(p.x, p.y + 1, p.z) > world.SAFE_DROP ? 101 : 0
   })
   // Swimming along a surface is fine (the feet in the top water cell, the head in air); a path node with the HEAD
   // under water is how bots drown.
