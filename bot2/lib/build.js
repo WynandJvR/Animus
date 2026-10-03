@@ -897,13 +897,15 @@ async function goSite (bot, goal, label, { place = true, dig = (job && job.cells
     // (a failed leg is re-planned FROM WHERE IT LEFT US - the search's own answer from here, twice at most - before the walker
     //  takes the rest; and a climb gets its own short leg: the legs that failed climbed 3-5 a leg, 2026-10-03)
     let said = ''; const tLegs = Date.now()
-    for (let attempt = 0; attempt < 3 && Date.now() - tLegs < 60000; attempt++) { // (a minute of legs at most)
+    for (let attempt = 0; attempt < 3 && Date.now() - tLegs < 90000; attempt++) { // (a minute and a half of legs at most - the long way round a courtyard)
       if (attempt > 0) { const prev = reach; reach = null; await walkReach(bot); if (!reach) { reach = prev; break } }
       const route = reachRoute(bot, tgt)
       if (!route || route.length <= 2) break
       // (only a route near the straight line: legs never dig or place, and round the whole castle to an upper floor - 118-158
       //  cells, 94s a try - lost to the walker's one scaffold step up, 2026-10-03)
-      if (route.length > Math.max(30, 3 * world.dist3(bot.entity.position, tgt))) { said = said || `the route to ${move.fmt(tgt)} runs ${route.length} cells round - the walker's way instead`; break }
+      // (only for a stand ABOVE us - the scaffold step's case; a walled-in courtyard at our level has the long way round as its
+      //  only way, and the walker's 30s ran out on it, 0 of 8, 2026-10-03)
+      if (tgt.y - Math.floor(bot.entity.position.y) >= 3 && route.length > Math.max(30, 3 * world.dist3(bot.entity.position, tgt))) { said = said || `the route to ${move.fmt(tgt)} runs ${route.length} cells round - the walker's way instead`; break }
       const plain = q => { const fl = world.at(bot, q.x, q.y - 1, q.z); const ft = world.at(bot, q.x, q.y, q.z); const hd = world.at(bot, q.x, q.y + 1, q.z); return !!fl && fl.boundingBox === 'block' && world.isSolid(fl) && !!ft && world.isAirish(ft) && !!hd && world.isAirish(hd) }
       const isDoorCell = q => { const b = world.at(bot, q.x, q.y, q.z); return !!b && /_door$|_fence_gate$/.test(b.name) }
       const stops = []; let last = 0
