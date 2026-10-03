@@ -556,6 +556,16 @@ async function takeKnownOre (bot, itemName, target, ctx = {}) {
     if (!ores.length) break
     const me = bot.entity.position
     const o = ores.sort((x, y) => world.dist3(x.position, me) - world.dist3(y.position, me))[0]
+    // (a pick that HARVESTS it, not any pick: the stone one worn out, the wooden one dug iron_ore 7.5s for nothing - "+0 (0/2)",
+    //  the shears never made and the leaves trip with them, 2026-10-03. One made if the pack has none; else the trip says so)
+    if (!inv.canHarvest(bot, o)) {
+      // (the ore's own tier: "a pickaxe" is satisfied by the wooden one, and nothing was made; audit)
+      const g = craft().GATHER[itemName] || {}
+      const want = (g.tier || 2) >= 3 ? 'iron_pickaxe' : 'stone_pickaxe'
+      await craft().ensure(bot, want, inv.count(bot, want) + 1, { noWithdraw: base().distHome(bot) > 64, shouldStop: ctx.shouldStop }).catch(() => false)
+      await craft().packUpTables(bot).catch(() => {})
+      if (!inv.canHarvest(bot, o)) { log('mine', `no pickaxe that takes ${o.name} - the ${itemName} trip ends here`); break }
+    }
     // through the rock to it (the planner digs its own tunnel), then the block and its vein
     if (!act.reach(bot, o.position, 4.3)) {
       const r = await move.goTo(bot, new goals.GoalLookAtBlock(o.position, bot.world, { reach: 4 }), { timeoutMs: 120000, stuckMs: 15000, label: 'to the ore', shouldStop: ctx.shouldStop })
