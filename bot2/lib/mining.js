@@ -732,8 +732,11 @@ async function mineFor (bot, itemName, target, ctx = {}) {
         saveMine(m)
         log('mine', 'pack full at night - waiting in the tunnel until morning')
         await sealBehind(bot, m)
-        while (!(ctx.shouldStop && ctx.shouldStop())) await move.sleep(3000)
-        return inv.count(bot, itemName) >= target
+        // (waits only while sealed - a ctx whose seal ends at dawn goes on: the haul home by day and back down, not a full
+        //  pack waiting in the tunnel all day; audit 2026-10-03. A plain seal: true waits for its stop as before)
+        while (ctx.seal && !(ctx.shouldStop && ctx.shouldStop())) await move.sleep(3000)
+        if (ctx.shouldStop && ctx.shouldStop()) return inv.count(bot, itemName) >= target
+        continue
       }
       if (inv.freeSlots(bot) <= 2) {
         saveMine(m)

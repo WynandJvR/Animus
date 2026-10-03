@@ -469,8 +469,10 @@ function decide () {
     // (only when a mine rule below can take the night - the existing mine near enough, or none so the dusk rule starts one;
     //  else the bed as before: skipped with no mine rule able to fire, the bot dug a bunker beside its own bed; audit)
     const mm0 = mem.get().mine
-    const mineCan = !held('nightMine') && (mm0 ? !!(mm0.entrance && world.dist2(mm0.entrance, home) < 48 && world.dist2(bot.entity.position, mm0.entrance) < 64) : true)
-    const mineTheNight = dusk && home && dHome < 32 && mineCan && build.getJob() && build.needsWork(bot) && nightFed() && inv.bestTool(bot, 'pickaxe', 8) && stoneShort()
+    const mineCan = !held('nightMine') && (mm0 ? !!(mm0.entrance && world.dist2(mm0.entrance, home) < 48 && world.dist2(bot.entity.position, mm0.entrance) < (dusk ? 64 : 32) && (dusk || !move.insideHut(world.feetPos(bot)))) : dusk) // (the rules below exactly: night needs the night walk and the open air, a new mine dusk; audit)
+    // (dusk finds the bot at the site, 40-60 blocks out: "within 32 of home" never held, and the rule never fired; at night,
+    //  from home only - the dark walk; audit 2026-10-03)
+    const mineTheNight = (dusk ? dHome < 96 : dHome < 16) && home && mineCan && build.getJob() && build.needsWork(bot) && nightFed() && inv.bestTool(bot, 'pickaxe', 8) && stoneShort()
     if (bed && world.dist2(bed, bot.entity.position) < (dusk ? 200 : 32) && !mineTheNight && !held('sleep')) return { name: 'sleep', why: `${night ? 'night' : 'dusk'} - my bed is ${Math.round(world.dist2(bed, bot.entity.position))}b away` }
     // a working mine next to home turns the night into mining time: go down at dusk (a short walk)
     {
@@ -480,7 +482,7 @@ function decide () {
       // NO MINE AT ALL (the last one abandoned - boxed in, blocked stairs): at dusk, at home, a new one - mining.mineFor sites it
       // (HOME_CLEAR..96 from home). Only an existing mine was ever worked at night, and after an abandon every night was
       // waited out in the safehouse with the build short of cobblestone (2026-10-03)
-      if (!mm && dusk && home && dHome < 32 && inv.bestTool(bot, 'pickaxe', 8) && nightFed() && !held('nightMine')) return { name: 'nightMine', why: 'dusk - no mine left, starting a new one next to home for the night' }
+      if (!mm && dusk && home && dHome < 96 && inv.bestTool(bot, 'pickaxe', 8) && nightFed() && !held('nightMine')) return { name: 'nightMine', why: 'dusk - no mine left, starting a new one next to home for the night' }
     }
     // inside the safehouse with furniture in the pack: set it up (the bed means sleeping, not waiting)
     if (move.insideHut(world.feetPos(bot)) && furnishingInPack().length && !held('furnish')) return { name: 'furnish', why: `night in the safehouse - putting ${furnishingInPack().join(', ')} down` }
@@ -801,18 +803,27 @@ const TASKS = {
   async nightMine () {
     // (the night's digging goes to the fuel first when the furnaces wait on it - coal from the mine's walls, with its
     //  cobble - then to the cobble: the day's coal trip was cut short at dusk every time, 2026-09-28)
-    const stop = () => taskCancelled() || world.isDay(bot) || (bot.food <= 6 && !inv.foodItems(bot).length) // (starving with nothing to eat: out of the mine, not mining on into the night unable to heal)
+    // (past dawn while the next layers are still stone-short: the night a sleeper skipped ended the trip 90s in - it carries
+    //  on as the day's cobble trip, home by dark; audit 2026-10-03)
+    // (one day at most: once into the day it ends by the evening, never on into the next night; audit)
+    const intoDay = stoneShort(); let sawDay = false
+    const stop = () => {
+      const d = world.isDay(bot); if (d) sawDay = true
+      return taskCancelled() || (bot.food <= 6 && !inv.foodItems(bot).length) || (d ? (!intoDay || homeByDark() || world.tod(bot) >= EVENING) : sawDay)
+    }
+    // (sealed in only by night: by day a full pack goes home and the trip comes back down - sealed, it waited out the day; audit)
+    const mctx = { get seal () { return !world.isDay(bot) }, shouldStop: stop } // (starving with nothing to eat: out of the mine, not mining on into the night unable to heal)
     const st = build.cachedStatus(bot)
     const fuelShort = st && (mats.planFor(bot, st.need).raw.fuel || 0) > 0 && inv.count(bot, 'coal') + inv.count(bot, 'charcoal') + base.bankCount('coal') + base.bankCount('charcoal') < 32
     if (fuelShort) {
       const c0 = inv.count(bot, 'coal')
-      await mining.mineFor(bot, 'coal', c0 + 32, { seal: true, shouldStop: stop }).catch(() => false)
+      await mining.mineFor(bot, 'coal', c0 + 32, mctx).catch(() => false)
       log('dir', `the night's coal: +${inv.count(bot, 'coal') - c0}`)
       if (stop()) return inv.count(bot, 'coal') > c0
     }
     const want = 'cobblestone'
     const target = inv.count(bot, want) + 256
-    return mining.mineFor(bot, want, target, { seal: true, shouldStop: stop })
+    return mining.mineFor(bot, want, target, mctx)
   },
   async bunker () {
     return shelter.bunker(bot, { shouldStop: () => taskCancelled() })
@@ -1358,24 +1369,30 @@ async function processAtHome (stop = dayStop) {
     }
   }
   // the crafts that feed a furnace (stone -> stone bricks, to crack) are the queue's, the whole build's
-  phase('home: feed crafts')
-  const feed = tot.crafts.filter(c => mats.SMELT_INPUTS.has(c.item))
-  if (feed.length) { await mats.makeCrafts(bot, feed, { keep: win.top, shouldStop: stop }); tot = mats.planFor(bot, st.need) }
-  // the queue: what the window waits on first; an input the window also places itself (cobblestone) goes in
-  // only beyond the window's own share
+  // the queue: what the BAND waits on first (its chain - smooth stone waits on stone waits on cobble), then the window's;
+  // an input the window also places itself (cobblestone) goes in only beyond the window's own share - except for the band's
+  // own chain. Before the feed crafts: they turned the stone the band's smooth_stone needed into stone bricks, and the
+  // smooth stone got 1-2 a visit for an hour, 2026-10-03 (audit)
   phase('home: smelt queue')
   const winOut = new Set(win.smelts.map(s => s.output))
-  for (const s of tot.smelts.slice().sort((a, b) => winOut.has(b.output) - winOut.has(a.output))) {
+  const waitOn = mem.get().buildWaiting
+  const bandChain = new Set(); if (waitOn) { try { for (const sm of mats.planFor(bot, { [waitOn]: 1 }).smelts) { bandChain.add(sm.output); bandChain.add(sm.input) } } catch {} bandChain.add(waitOn) }
+  const rank = sm => (bandChain.has(sm.output) ? 2 : 0) + (winOut.has(sm.output) ? 1 : 0)
+  for (const s of tot.smelts.slice().sort((a, b) => rank(b) - rank(a))) {
     if (stop()) break
     // (and a scaffold's worth of cobblestone kept back: the furnaces took the last of it for stone, and the build step went
     //  straight to the mine for 31 to stand on - a mine trip a round, 2026-09-28)
     // (one number with the builder's: what the other filler held or banked does not already cover)
     const keepBack = s.input === 'cobblestone' ? Math.max(0, build.SCAFFOLD_WANT - Object.keys(Object.assign({}, inv.counts(bot), base.bankCounts())).filter(n0 => n0 !== 'cobblestone' && build.FILLER_ITEMS.test(n0)).reduce((t, n0) => t + stock(n0), 0)) : 0
-    const n = Math.min(s.n, stock(s.input) - (win.top[s.input] || 0) - keepBack, 64 * Math.max(1, smelt.homeFurnaces(bot).length))
+    const n = Math.min(s.n, stock(s.input) - (s.output === waitOn ? 0 : (win.top[s.input] || 0)) - keepBack, 64 * Math.max(1, smelt.homeFurnaces(bot).length))
     if (n < 1) continue
     const k = await loadSmelt(s.input, n, stop)
     if (k) log('dir', `smelting ${k} ${s.input} -> ${s.output} (${s.n} more ${s.output} wanted for the ${st.name})`)
   }
+  // the crafts that feed a furnace (stone -> stone bricks, to crack) are the queue's, the whole build's - after it
+  phase('home: feed crafts')
+  const feed = tot.crafts.filter(c => mats.SMELT_INPUTS.has(c.item))
+  if (feed.length) { await mats.makeCrafts(bot, feed, { keep: win.top, shouldStop: stop }); tot = mats.planFor(bot, st.need) }
   // the window's crafts, ingredients first (planks before stairs, bricks before brick stairs)
   phase('home: window crafts')
   const win2 = mats.planFor(bot, winNeeds)
@@ -1702,6 +1719,9 @@ async function gatherForInner (raw, short) {
   // AN EMPTY PACK FOR THE TRIP: a trip is sized by the room in the pack, and the pack left home with what the builder
   // had drawn out and the last trips brought - 300-400 items stored only after the walk back ("home with 405 items to
   // store", 2026-09-28). At home, the haul goes in first: the same line as the deposit's own (haulSize >= 64)
+  // (a cobble trip from the site: home first - the mine is by home - so the pack holds the haul, not the window's blocks:
+  //  "pack full - taking the haul home" two minutes into a trip, the walk home and back, then dusk; audit 2026-10-03)
+  if (raw === 'cobblestone' && base.distHome(bot) >= 24 && (mem.get().chests || []).length && haulSize() >= 64) await base.goHome(bot, { shouldStop: dayStop }).catch(() => null)
   if (base.distHome(bot) < 24 && (mem.get().chests || []).length && haulSize() >= 64) {
     const before = inv.freeSlots(bot)
     // (never the trip's own footing: filler stays for the planner's steps and a tower out of a pit - audit)
@@ -1754,7 +1774,7 @@ async function gatherForInner (raw, short) {
       //  day to finish it: the first trip began at dusk and came home with 0 of 8; audit 2026-09-28)
       if (world.ticksUntilNight(bot) > 2400) {
         const c0 = inv.count(bot, 'coal')
-        const want = Math.min(Math.ceil(short / 8), Math.max(8, Math.floor(tripRoom() / 2)))
+        const want = Math.min(short, Math.max(8, Math.floor(tripRoom() / 2))) // (short is in COALS already - the planner adds 1/8 a smelt; /8 again fetched an eighth: 24 fuel rounds, 2026-10-03; audit)
         const home = mem.get().home
         // (exposed to the SKY: air beside it that sees the sky - a cave wall's coal has air beside it too, and the walk there
         //  is a day walk into the dark; audit)
