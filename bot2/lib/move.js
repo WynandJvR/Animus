@@ -1185,7 +1185,13 @@ async function escapeUpInner (bot) {
     // (open = no roof but a tree's: leaves and logs overhead are shade, nothing to climb out of - read as a roof, the climb
     //  towered 16 up through a canopy by the castle's west wall and stranded the bot on its top, 2026-09-30; audit)
     const openAbove = q => { for (let y = q.y + 2; y < q.y + 22; y++) { const b = world.at(bot, q.x, y, q.z); if (b && b.boundingBox === 'block' && !world.LEAF_RE.test(b.name) && !world.LOG_RE.test(b.name)) return false } return true }
-    if (bot.entity.onGround && !world.feetInWater(bot) && openAbove(f) && !pit) break
+    // (and a STEP OUT of it: open sky over a one-wide hole whose sides are a block too low to walk - a gap under the plaza's
+    //  floor, the way out a two-block climb - read "not enclosed, no climb" and every walk from it gave up for half an hour,
+    //  2026-10-04. Out = a cell beside stood in at our level, one up with head room over us, or a step down)
+    const stepOut = q => [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => world.standable(bot, q.x + dx, q.y, q.z + dz) || (world.standable(bot, q.x + dx, q.y + 1, q.z + dz) && world.isAirish(world.at(bot, q.x, q.y + 2, q.z))) || world.standable(bot, q.x + dx, q.y - 1, q.z + dz))
+    // (and a hole is a couple of blocks deep: past three up under open sky this is no hole - a low canopy all round read no
+    //  step out and would have climbed into the trees; audit)
+    if (bot.entity.onGround && !world.feetInWater(bot) && openAbove(f) && !pit && (stepOut(f) || f.y >= f0.y + 3)) break
     climbedAny = true
     for (const dy of [2, 1]) {
       const b = world.at(bot, f.x, f.y + dy, f.z)
