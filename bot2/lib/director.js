@@ -324,7 +324,9 @@ function ironWanted () {
   if (inv.toolTier(bot, 'sword') < 3) out.push('iron_sword')
   return out
 }
-function shearsWanted () { return !forage.shearsHeld(bot) && (base.bankCount('shears') === 0 || !!mem.get().shearsWorn) }
+// (a good pair in hand ends the worn verdict: latched when a worn pair came out of the chest, it cleared only on a shearing
+//  trip - every new pair was banked at the next deposit, and the iron plan made another, three pairs in 20 minutes, 2026-10-03)
+function shearsWanted () { if (forage.shearsHeld(bot)) { if (mem.get().shearsWorn) mem.set('shearsWorn', false); return false } return base.bankCount('shears') === 0 || !!mem.get().shearsWorn }
 const IRON_COST = { shield: 1, bucket: 3, iron_chestplate: 8, iron_leggings: 7, iron_helmet: 5, iron_boots: 4, iron_pickaxe: 3, iron_sword: 2, shears: 2 }
 // the pieces that stand between the body and a mob (a trip is made for these; tools and the bucket wait for iron)
 // (the way of mining a dry verdict was reached under - a new way, a new chance: 'levels' since the mine became a chain of
