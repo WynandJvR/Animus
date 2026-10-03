@@ -1443,6 +1443,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
   const t0 = Date.now(); const supports0 = supportsLaid; const pl0 = pillarLaid; const pd0 = pillarDug
   holdsMs = 0; holdsPasses = 0 // (this step's own)
   let roomMs = 0 // (the doorway checks' own time this step: the profile)
+  let fillerTopUps = 0 // (mid-step scaffold top-ups this step: bounded)
   const compWait = new Set() // (cells this step held for a closed compartment: the profile says how many - growing, a room closed on its own work)
   let placed = 0
   if (!ensureSnapshot(bot) || !ensureFoundation(bot)) return { placed, blockedOn: null, done: false }
@@ -1717,6 +1718,14 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     const ok = await placeCell(bot, c)
     prof.tries++; prof.ms += Date.now() - tp; prof.dist += d0; if (ok) prof.okMs += Date.now() - tp; else missed(lastPlaceFail, Date.now() - tp)
     tpick = Date.now()
+    // OUT OF FILLER FOR THE SUPPORTS is the pack's, not the cell's: topped up now (the scaffold's one getter - the chest, then
+    // the mine) and the cell tried again, never a miss; none to be had ends the step on cobblestone. The hub's stairs each
+    // wanted a support, the pack ran dry mid-step and 135 stairs "won't place" in ten minutes, each resting for later, 2026-10-03
+    if (!ok && /no filler for a temporary support/.test(lastPlaceFail || '') && ++fillerTopUps <= 3) { // (three a step: filler in hand and still "no filler" is no pack's want - the miss counts as before)
+      await ensureScaffold(bot, SCAFFOLD_WANT, { shouldStop }).catch(() => false)
+      if (!inv.items(bot).some(i => FILLER_ITEMS.test(i.name))) { log('build', 'out of filler for the supports - the step ends to fetch it'); profLog(); return { placed, blockedOn: 'cobblestone', blockedHolds: true, done: false } }
+      continue
+    }
     // (a block placed is a new foothold: the resting cells round it wake - a wall top built is how the south wall's high
     //  cells get their stand; the clock was the only waker. Their count stays, only the rest ends; audit 2026-09-28)
     // (bounded: only a block that could be a stand or a support for it - at or below it, beside it within 2 - and once a
