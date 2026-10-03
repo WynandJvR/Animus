@@ -292,9 +292,11 @@ const IRON_COST = { shield: 1, bucket: 3, iron_chestplate: 8, iron_leggings: 7, 
 const ORE_METHOD = 'depths' // ('depths': the ore found by spheres down the column under home, 2026-10-02)
 const ARMOUR_GEAR = new Set(['shield', 'bucket', 'iron_chestplate', 'iron_leggings', 'iron_helmet', 'iron_boots'])
 function ironStock () { return inv.count(bot, 'iron_ingot') + base.bankCount('iron_ingot') + inv.count(bot, 'raw_iron') + base.bankCount('raw_iron') }
-function gearIronShort () {
+// (core: the gear that carries the fights - shield, chest, head (and the bucket, the shears) - not the legs and the feet)
+const LOW_GEAR = new Set(['iron_leggings', 'iron_boots'])
+function gearIronShort (core = false) {
   // (and the shears' two when they are wanted: the build's leaves wait on them, and no other trip brings iron - audit)
-  const need = ironWanted().filter(n => ARMOUR_GEAR.has(n) || n === 'shears').reduce((a, n) => a + IRON_COST[n], 0)
+  const need = ironWanted().filter(n => (ARMOUR_GEAR.has(n) || n === 'shears') && !(core && LOW_GEAR.has(n))).reduce((a, n) => a + IRON_COST[n], 0)
   const have = inv.count(bot, 'iron_ingot') + base.bankCount('iron_ingot') + inv.count(bot, 'raw_iron') + base.bankCount('raw_iron')
   return Math.max(0, need - have)
 }
@@ -613,7 +615,10 @@ function decide () {
   if (dry && (dry === true || dry.method !== ORE_METHOD || ironStock() > mem.get().ironTripDry.stock)) mem.set('ironTripDry', null)
   // (the daylight for a deep trip: stairs down and the walk back up - two minutes' margin sent the bot up 95 blocks of rock in
   //  the dark, 2026-10-02; audit)
-  if (gearShort > 0 && !mem.get().ironTripDry && world.phase(bot) === 'day' && world.ticksUntilNight(bot) > 6000 && !held('ironTrip')) return { name: 'ironTrip', why: `${gearShort} iron short for ${wanted.filter(n => ARMOUR_GEAR.has(n)).join(', ')} - mining for it` }
+  // (ahead of the build only for the gear that carries the fights: the legs and the feet's 13 ingots took 46% of a morning
+  //  after a death, the castle 2%, 2026-10-03 - they go in the castle's gaps, below)
+  const ironTripOk = () => gearShort > 0 && !mem.get().ironTripDry && world.phase(bot) === 'day' && world.ticksUntilNight(bot) > 6000 && !held('ironTrip')
+  if (gearIronShort(true) > 0 && ironTripOk()) return { name: 'ironTrip', why: `${gearShort} iron short for ${wanted.filter(n => ARMOUR_GEAR.has(n)).join(', ')} - mining for it` }
 
   // 9. the build
   // (with its own backoff: a castle step failing in 30ms was retried 26 times in a second)
@@ -651,6 +656,8 @@ function decide () {
   if (mem.get().build && build.getJob() && build.needsWork(bot) && !nightSoon() && !homeByDark() && !held('castle')) {
     return { name: 'castle', why: 'working on ' + mem.get().build.name }
   }
+  // 9b. the rest of the iron gear - legs and feet - in the castle's gaps (held, waiting, between rounds)
+  if (ironTripOk()) return { name: 'ironTrip', why: `${gearShort} iron short for ${wanted.filter(n => ARMOUR_GEAR.has(n)).join(', ')} - mining for it (the castle has nothing for me now)` }
   // 10. our own pillars and stepping stones left standing round home (a batch: one walk takes down many - LITTER_BATCH) -
   //  in the castle's gaps only (held, waiting, the day's end): tidying ahead of it took 40 minutes of a morning, the
   //  castle idle (single goal: the build; audit 2026-09-28)
