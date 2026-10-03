@@ -63,6 +63,7 @@ function badMinesNow (bot) {
   return (mem.get().badMines || []).filter(bm => bm.danger || (bm.day != null ? dn != null && dn - bm.day < 3 : deaths.some(d => world.dist2(d, bm) < 16)))
 }
 const ENTRANCE_R = 96
+const ORE_TUNE_R = 64 // (the ore band's tuning never walks past this: a 90-block site over a 10-block one for a better level is no bargain; audit)
 function chooseEntrance (bot, oreLv = null) {
   const home = mem.get().home || world.feetPos(bot)
   const levelFor = y => oreLv != null ? Math.min(oreLv, y - 8) : levelOf(y)
@@ -97,11 +98,11 @@ function chooseEntrance (bot, oreLv = null) {
     }
     // (for an ore: the spot whose tunnel works nearest the ore's band - out to the next ring when this one has none
     //  within 6; the nearest spot otherwise)
-    if (oreLv != null && !found.length && bestOre && r + 6 > ENTRANCE_R) found.push(bestOre)
+    if (oreLv != null && !found.length && bestOre && r + 6 > ORE_TUNE_R) found.push(bestOre)
     if (oreLv != null && found.length) {
       found.sort((a, b) => Math.abs(a.level - oreLv) - Math.abs(b.level - oreLv))
       if (!bestOre || Math.abs(found[0].level - oreLv) < Math.abs(bestOre.level - oreLv)) bestOre = found[0]
-      if (Math.abs(bestOre.level - oreLv) > 6 && r + 6 <= ENTRANCE_R) continue
+      if (Math.abs(bestOre.level - oreLv) > 6 && r + 6 <= ORE_TUNE_R) continue
       found.unshift(bestOre)
     }
     if (found.length) {
@@ -663,7 +664,7 @@ async function mineFor (bot, itemName, target, ctx = {}) {
     m.stairsDir = { x: m.dir.x, z: m.dir.z }
     m.born = Date.now() // (deaths before it are no deaths in it - diedInMine)
     saveMine(m)
-    log('mine', `new mine at ${move.fmt(m.entrance)} heading ${m.dir.x},${m.dir.z} to y${m.level}`)
+    { const h = mem.get().home; log('mine', `new mine at ${move.fmt(m.entrance)} heading ${m.dir.x},${m.dir.z} to y${m.level}${h ? ` (${Math.round(Math.hypot(m.entrance.x - h.x, m.entrance.z - h.z))}b from home)` : ''}`) }
   }
   // (room before the walk, at home: a trip set out with a full pack reached the face, said "pack full - taking the haul
   //  home" at 0 of 11 and walked back - two 60-block crossings for nothing, 2026-10-03)
