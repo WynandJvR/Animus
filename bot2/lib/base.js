@@ -15,7 +15,10 @@ const craft = () => require('./craft')
 const KIT_KEEP = {
   torch: 32, crafting_table: 1, stick: 8, coal: 8, charcoal: 8, dirt: 24, cobblestone: 16, bread: 32, cooked_beef: 32, cooked_porkchop: 32, cooked_mutton: 32, cooked_chicken: 32, cooked_cod: 16, cooked_salmon: 16, baked_potato: 16, apple: 16, golden_carrot: 32, white_bed: 1, shield: 1,
   // (the bow and its arrows are kit: deposited, the next round's tool check took them out again, every round)
-  bow: 1, arrow: 64
+  bow: 1, arrow: 64,
+  // (and the shield: deposited at the castle base, it stayed there when the base moved, and the bot faced a pillager without it
+  //  and died, 2026-10-03)
+  shield: 1
 }
 function keepCount (bot, item) {
   if (/_(pickaxe|axe|shovel|sword|hoe|helmet|chestplate|leggings|boots)$/.test(item.name)) return Infinity
