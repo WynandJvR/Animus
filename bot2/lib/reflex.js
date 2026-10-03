@@ -629,6 +629,18 @@ function creeperStrike () {
 const wallTried = new Set()
 function hungryNow () { return bot.food <= 14 || (bot.health < 20 && bot.food < inv.REGEN_FOOD) }
 function takeCover (e, label) {
+  // COVER THAT IS NOT: still hit under it - a cave's skeleton shot round each 1-2 block wall, 20 -> 0 in 27s, eight walls
+  // and two meals, never more than cover (2026-10-03). Six hp lost in the last 8s under cover is the proof: sealed in
+  // instead, the capped hole the night and the enderman already use (pickaxe and a block in hand; never at home)
+  {
+    const now = Date.now(); const lost = hurtLog.filter(q => now - q.at < 8000).reduce((a, q) => a + q.d, 0)
+    if (lost >= 6 && !busy && inv.bestTool(bot, 'pickaxe', 4) && inv.shelterBlock(bot) && !require('./move').insideHut(bot.entity.position.floored()) && !enclosed() && canDigInHere()) {
+      fleeTarget = e
+      setActive('dig-in', `${e.name} - cover is not stopping it (${Math.round(lost)} hp in 8s): a capped hole`)
+      runBusy('dig in', g => digIn(g), 30000, null, () => { stopDig(); stopWalk() }).then(() => { if (active && active.kind === 'dig-in') clearActive() })
+      return
+    }
+  }
   fleeTarget = e
   setActive('flee', label)
   shieldDown()
