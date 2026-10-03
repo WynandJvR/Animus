@@ -220,9 +220,13 @@ function setCautious (on) { cautious = !!on }
 function chargeAffordable (shooter, hs, hp) {
   // (never with a creeper about: a charge walks into the fuse - a blast was 6.4 of the last death's 20; audit)
   if (hs.some(h => h.e.name === 'creeper' && h.d < 12 && canSee(h.e))) return false
-  if (cautious && (hp < 18 || hs.some(h => h.e !== shooter.e && h.d < 24 && canSee(h.e)))) return false
+  // (a shooter already in sword reach is no charge: the trip's caution and an earlier flight from it are for the run IN -
+  //  at 2.4b, hp 17, iron sword and chestplate, a gather trip's caution took cover from a skeleton, the edge of a drop held
+  //  the flight, and it shot the bot dead in 18s, 2026-10-03)
+  const reachNow = shooter.d < 3.5 || (!!active && active.kind === 'fight' && fightTargetId === shooter.e.id && shooter.d < 5)
+  if (!reachNow && cautious && (hp < 18 || hs.some(h => h.e !== shooter.e && h.d < 24 && canSee(h.e)))) return false
   for (const id of fledFrom.keys()) if (!bot.entities[id]) fledFrom.delete(id) // (gone from the world: gone from the list)
-  { const f = fledFrom.get(shooter.e.id); if (f != null && hp < f) return false }
+  { const f = fledFrom.get(shooter.e.id); if (!reachNow && f != null && hp < f) return false }
   // (EVERY shooter about, in sight or not - a patrol's others shoot round the corner: the charge counted one and three
   //  bolts landed 0.65-0.85s apart, 20 -> 8, 2026-10-02; audit)
   const shooters = hs.filter(h => RANGED.has(h.e.name) && h.d < 24 && Math.abs(h.e.position.y - bot.entity.position.y) < 6) // (not a skeleton in the cave under us)
@@ -241,8 +245,7 @@ function chargeAffordable (shooter, hs, hp) {
   //  cover put its arrows in our back, 17 -> 11, while 2.6s of swings ended it, 2026-10-02)
   // (and held out to 5 once fighting it: a skeleton steps back as it is closed on - a fixed 3.5 flipped fight and cover each
   //  tick; audit)
-  const inReach = shooter.d < 3.5 || (!!active && active.kind === 'fight' && fightTargetId === shooter.e.id && shooter.d < 5)
-  return hp - secs * Math.max(dps, taken) > hurtLine() + (inReach ? 0 : 4)
+  return hp - secs * Math.max(dps, taken) > hurtLine() + (reachNow ? 0 : 4)
 }
 const hurtLog = [] // { at, d }: hp lost, the last seconds (health events)
 
