@@ -1163,6 +1163,21 @@ async function withdrawWindow (needs, lowY = {}) {
   const first = mem.get().buildWaiting
   const y = it => lowY[it] != null ? lowY[it] : Infinity
   const order = Object.entries(needs).sort((a, b) => ((b[0] === first) - (a[0] === first)) || (y(a[0]) - y(b[0])) || (b[1] - a[1]))
+  // ROOM FOR THE BAND'S OWN FIRST: a pack full of the window's upper-layer blocks (chests, grindstones, lightning rods,
+  // doors - 31 kinds) took nothing, the "two slots free" rule returned at once, and the y125 band waited on dark oak stairs
+  // with 182 in the chest, round after round (2026-10-03). Window blocks whose lowest layer is above the head of the order
+  // go back to the chest, the highest first, until it fits - never the kit, food or tools (they are not window needs)
+  const head = order.length ? order[0][0] : null
+  if (head && countOf(head) === 0 && inv.freeSlots(bot) < 2) {
+    const above = [...new Set(inv.items(bot).map(i => i.name))].filter(nm => nm !== head && needs[nm] != null && y(nm) > y(head)).sort((a, b) => y(b) - y(a))
+    const back = []
+    for (const nm of above) {
+      if (inv.freeSlots(bot) >= 2) break
+      const k = inv.count(bot, nm)
+      if (k > 0 && await base.depositItem(bot, nm, k).catch(() => 0)) back.push(nm)
+    }
+    log('dir', `no room for ${head} (the band's) - put back ${back.length ? back.join(', ') : 'nothing'} (window blocks for higher layers); ${inv.freeSlots(bot)} slots free`)
+  }
   for (const cap of [64, 64 * 4]) {
     for (const [name, n] of order) {
       if (inv.freeSlots(bot) < 2) return
