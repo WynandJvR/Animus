@@ -151,7 +151,7 @@ function cooling (name) {
   return Date.now() - f.at < Math.min(15 * 60000, 30000 * Math.pow(2, Math.min(f.n - 1, 5)))
 }
 
-const TOOL_KIT = ['stone_pickaxe', 'stone_axe', 'stone_sword']
+const TOOL_KIT = ['stone_pickaxe', 'stone_axe', 'stone_sword', 'stone_shovel']
 const SPARE_KIT = base.SPARE_KIT // (base.js: the one definition - the bank reserves exactly these)
 
 // Furniture we are carrying that belongs in the safehouse (none placed of that kind at home yet).
@@ -235,6 +235,9 @@ function missingKit () {
   if (inv.toolTier(bot, 'pickaxe') < 2) out.push('stone_pickaxe')
   if (inv.toolTier(bot, 'axe') < 2) out.push('stone_axe')
   if (inv.toolTier(bot, 'sword') < 2) out.push('stone_sword')
+  // (a shovel: a build's ground cells are dug out of grass and dirt before the paving goes in - by hand that clearing was
+  //  593ms of every block's 1.3s on the spawn hub's first layers, 2026-10-03; a stone shovel is a cobblestone and two sticks)
+  if (inv.toolTier(bot, 'shovel') < 2) out.push('stone_shovel')
   // a crafting table rides in the pack: a pickaxe worn out at y78 with 251 cobblestone and 21 sticks in the pack could not
   // be replaced - no wood down there for a table - and the bot dug 10 blocks up by hand, 7.5s each (2026-09-27)
   if (!inv.has(bot, 'crafting_table')) out.push('crafting_table')
