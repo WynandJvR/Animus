@@ -48,6 +48,8 @@ function pathBad (p, dir) {
   }
   return false
 }
+// (the given-up sites that still count: danger for ever, the rest three days - an old record without a day is old)
+function badMinesNow (bot) { let dn = null; try { dn = require('./day').dayNo(bot) } catch {} return (mem.get().badMines || []).filter(bm => bm.danger || (bm.day != null && dn != null && dn - bm.day < 3)) }
 function chooseEntrance (bot, oreLv = null) {
   const home = mem.get().home || world.feetPos(bot)
   const levelFor = y => oreLv != null ? Math.min(oreLv, y - 8) : levelOf(y)
@@ -66,7 +68,7 @@ function chooseEntrance (bot, oreLv = null) {
       // (nor on the home grounds: a stairwell by the farm was a hole in the yard, on the walk home, dug at night)
       if (move.inZone({ x, y, z }, 6) || underOwnZone({ x, z }) || require('./gather').onGrounds({ x, y, z })) continue
       if (world.waterNear(bot, { x, y, z }, 4, -3, 1) || world.lavaNear(bot, { x, y: y - 2, z }, 3)) continue
-      if ((mem.get().badMines || []).some(bm => world.dist2(bm, { x, z }) < 12)) continue
+      if (badMinesNow(bot).some(bm => world.dist2(bm, { x, z }) < 12)) continue
       const away = Math.abs(x - home.x) > Math.abs(z - home.z) ? { x: Math.sign(x - home.x) || 1, z: 0 } : { x: 0, z: Math.sign(z - home.z) || 1 }
       // every open direction, the one whose covered stairs reach deepest (on a mountain top none reaches y16: the
       // tunnel runs inside the mountain at the depth the cover allows - stone is stone for cobble)
@@ -450,7 +452,7 @@ function diedInMine (m) {
 // Give up on level i (the active one by default) and every level under it - their way in is its stairs - back to the
 // deepest level left (i-1); level 0 is the whole mine: its entrance joins the bad mines, a new one is chosen. Returns what
 // is left of the mine.
-function abandonMine (m, i = m && m.levels ? m.active : 0) {
+function abandonMine (m, i = m && m.levels ? m.active : 0, danger = false) {
   if (i > 0 && m.levels && i < m.levels.length) {
     const L = levelsOf(m)[i]
     m.badLevels = (m.badLevels || []).concat([clone(L.stairTop)]).slice(-8)
@@ -462,7 +464,10 @@ function abandonMine (m, i = m && m.levels ? m.active : 0) {
     saveMine(m)
     return m
   }
-  mem.update(mm => { mm.badMines = (mm.badMines || []).concat([{ x: m.entrance.x, y: m.entrance.y, z: m.entrance.z }]).slice(-12); mm.mine = null })
+  // (with its day and whether it was danger - water, lava: a site given up for a walk's timeout is no worse a site in three
+  //  days; kept for ever, twelve such round home left "no safe spot for a mine entrance" and no iron at all, 2026-10-03)
+  const dn = (mem.get().dayNo || {}).n ?? null // (day.js's own count, kept in memory)
+  mem.update(mm => { mm.badMines = (mm.badMines || []).concat([{ x: m.entrance.x, y: m.entrance.y, z: m.entrance.z, day: dn, danger: !!danger }]).slice(-12); mm.mine = null })
   return null
 }
 
@@ -548,7 +553,7 @@ async function downTheMine (bot, m, ctx = {}) {
       if (first && !open) {
         // (the new level's first step, from the foot beside it: the stairs' own dig)
         const f = fluidAround(bot, t) || fluidAround(bot, { x: t.x, y: t.y + 1, z: t.z })
-        if (f && f !== 'unknown') { log('mine', `${f} beside the new level's first step at ${move.fmt(t)}`); abandonMine(m); return { ok: false, why: 'gone' } }
+        if (f && f !== 'unknown') { log('mine', `${f} beside the new level's first step at ${move.fmt(t)}`); abandonMine(m, undefined, true); return { ok: false, why: 'gone' } }
         if (world.dist3(world.feetPos(bot), foot) >= 0.5 || !await digStep(bot, m, foot, t)) { log('mine', `the stairs to y${Ls[i].level} are blocked at ${move.fmt(t)} (the first step would not open)`); return { ok: false, why: 'blocked' } }
         continue
       }
@@ -695,7 +700,9 @@ async function mineFor (bot, itemName, target, ctx = {}) {
     const here = world.feetPos(bot)
     if (Math.abs(here.x - m.cursor.x) + Math.abs(here.z - m.cursor.z) > 1 || Math.abs(here.y - m.cursor.y) > 1) {
       const back = await move.goTo(bot, new goals.GoalBlock(m.cursor.x, m.cursor.y, m.cursor.z), { timeoutMs: 30000, stuckMs: 8000, label: 'back to mine face' })
-      if (!back.ok) { log('mine', `lost the mine face at ${move.fmt(m.cursor)} (${back.why}) - abandoning this mine`); abandonMine(m); return false }
+      // (one lost walk back is a strike, the stairs' three - not the mine: a knock-back by a fight and one 30s walk threw away
+      //  a mine an hour old, 2026-10-03)
+      if (!back.ok) { m.faceFails = (m.faceFails || 0) + 1; saveMine(m); if (m.faceFails < 3) { log('mine', `lost the mine face at ${move.fmt(m.cursor)} (${back.why}) - ${m.faceFails} of 3 before a new mine`); return false } log('mine', `lost the mine face at ${move.fmt(m.cursor)} (${back.why}) - three times now, abandoning this mine`); abandonMine(m); return false }
     }
     const b0 = broken
     const ok = m.stairsDone ? await tunnelStep(bot, m) : await stairStep(bot, m)
