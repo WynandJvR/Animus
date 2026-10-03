@@ -302,7 +302,8 @@ async function place (bot, pos, itemName, { faceHint = null, plans = null, accep
     try {
       const held = inv.items(bot).find(i => i.name === itemName)
       if (!held) return false
-      await bot.equip(held, 'hand')
+      // (in hand already - the next block of a run of the same: no equip round trip; ~0.5s a block went to placing, 2026-10-03)
+      if (!bot.heldItem || bot.heldItem.name !== itemName) await bot.equip(held, 'hand')
       // (and a crouch some other holder pressed is let go too - the hold only stops the guard's own: audit #8)
       bot.setControlState('sneak', !!sneak)
       if (plan.yaw != null || plan.cy != null || plan.pitch != null) {
@@ -319,10 +320,12 @@ async function place (bot, pos, itemName, { faceHint = null, plans = null, accep
       // placeBlock often times out waiting for the update even when it landed
       lastErr = e.message
     } finally { if (sneak) bot.setControlState('sneak', false); letGo() }
-    for (let w = 0; w < 6; w++) {
-      await sleep(150)
+    // (read first, then wait: the place call has mostly seen the server's update already - a fixed 150ms before every look was
+    //  most of a block's placing time; a block that lands late is still caught by the later reads)
+    for (let w = 0; w < 7; w++) {
       const after = bot.blockAt(target)
       if (after && placed(after)) { try { const fg = require('./foreign'); fg.noteOwn(target, after.name); if (twin) { const t2 = target.offset(twin[0], twin[1], twin[2]); const b2 = bot.blockAt(t2); if (b2) fg.noteOwn(t2, b2.name) } } catch {} return true } // (our own hand, both halves of a door or a bed - foreign.noteOwn)
+      if (w < 6) await sleep(150)
     }
     tries++
   }
