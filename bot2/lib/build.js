@@ -2014,7 +2014,7 @@ function dropFoundation (bot, c, why) {
   // (a torch dropped is a hollow left dark under the work - said as such, never lost in the foundation's own drops)
   log('build', c.name === 'torch' ? `hollow at ${move.fmt(c)} left unlit - ${why}` : `foundation cell at ${move.fmt(c)} dropped - ${why}`)
 }
-// The stand beside `c` (feet within 3 across, two below to one above) from which the most ready cells are in reach: clear
+// The stand beside `c` (feet within 3 across, four below to one above - the reach rule drops what is too far; two below never saw the ground under the market stalls' eaves, 3-4 up, and they waited "in a closed compartment" for good, 2026-10-03) from which the most ready cells are in reach: clear
 // to stand in, no cell of the job at its feet or head, never on a lip, and `c` itself in reach. {x,y,z,n} or null.
 const EYE = 1.62; const REACH = 4.2
 // Every cell a body could stand at to place c - clusterStand's own candidates (standable, within reach, no cell of the build
@@ -2022,7 +2022,7 @@ const EYE = 1.62; const REACH = 4.2
 function standsOf (bot, c) {
   const within = (p, q) => { const dx = q.x + 0.5 - (p.x + 0.5); const dy = q.y + 0.5 - (p.y + EYE); const dz = q.z + 0.5 - (p.z + 0.5); return dx * dx + dy * dy + dz * dz <= REACH * REACH }
   const out = []
-  for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) for (let dy = -2; dy <= 1; dy++) {
+  for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) for (let dy = -4; dy <= 1; dy++) {
     const p = { x: c.x + dx, y: c.y + dy, z: c.z + dz }
     if (!within(p, c) || job.index.has(key(p)) || job.index.has(key({ x: p.x, y: p.y + 1, z: p.z })) || !world.standable(bot, p.x, p.y, p.z)) continue
     out.push(p)
@@ -2038,7 +2038,7 @@ function clusterStand (bot, c, ready, bad = new Set(), reachOf = null) {
   const me = bot.entity.position
   const within = (p, q) => { const dx = q.x + 0.5 - (p.x + 0.5); const dy = q.y + 0.5 - (p.y + EYE); const dz = q.z + 0.5 - (p.z + 0.5); return dx * dx + dy * dy + dz * dz <= REACH * REACH }
   let best = null
-  for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) for (let dy = -2; dy <= 1; dy++) {
+  for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) for (let dy = -4; dy <= 1; dy++) {
     const p = { x: c.x + dx, y: c.y + dy, z: c.z + dz }
     if (bad.has(key(p)) || !within(p, c) || job.index.has(key(p)) || job.index.has(key({ x: p.x, y: p.y + 1, z: p.z })) || !world.standable(bot, p.x, p.y, p.z)) continue
     // (never under the build: a stand below the base inside the box is the hollow - the eviction sends the bot home from it)
