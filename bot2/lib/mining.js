@@ -633,7 +633,7 @@ async function mineFor (bot, itemName, target, ctx = {}) {
   }
   // (room before the walk, at home: a trip set out with a full pack reached the face, said "pack full - taking the haul
   //  home" at 0 of 11 and walked back - two 60-block crossings for nothing, 2026-10-03)
-  { const h = mem.get().home; if (inv.freeSlots(bot) <= 4 && h && world.dist3(bot.entity.position, h) < 24) { log('mine', `pack nearly full (${inv.freeSlots(bot)} free) - the haul in the chest before the walk to the mine`); await base().depositHaul(bot, { shouldStop: ctx.shouldStop }).catch(() => {}) } }
+  { const h = mem.get().home; if (inv.freeSlots(bot) <= 4 && h && world.dist3(bot.entity.position, h) < 24) { log('mine', `pack nearly full (${inv.freeSlots(bot)} free) - the haul in the chest before the walk to the mine`); const B = base(); const g = await B.goHome(bot, { shouldStop: ctx.shouldStop }).catch(() => null); if (g && g.ok) await B.depositAll(bot, { keep: (b, i) => i.name === itemName ? Infinity : B.keepCount(b, i) }).catch(() => {}) } } // (what the trip digs stays in the pack: banked, a cobblestone trip dug its own count again; audit)
   await provisionForMine(bot)
   // an ore showing in a cave wall or a cliff first - and the vein behind it, each block dug bares the next
   if (craft().GATHER[itemName] && craft().GATHER[itemName].ore && await takeKnownOre(bot, itemName, target, ctx)) return true
