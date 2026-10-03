@@ -930,9 +930,13 @@ async function escapeUpInner (bot) {
   // ON A PILLAR OF OUR OWN IN THE OPEN - every side a drop: down through it, the way it went up. The climb only rises: a
   // walk's escape towered 10 in the open by the castle's west wall, the bot stood on the top with a drop all round, every
   // walk gave up and each "climb out" climbed nothing ("from y129 to y129"), 2026-09-30. Our blocks by the ledger only
+  // (or, round the build, the site's own snapshot diff: a walk's tower on the castle's rim is neither litter's (the rim is
+  //  the build's) nor a step's pillar - stood on it, y124 over a 6-drop all round, hutNight/bunker gave up for 10 minutes
+  //  at night, 2026-10-03)
   {
     const litter = require('./litter')
-    const onTop = () => { const f = bot.entity.position.floored(); const u = { x: f.x, y: f.y - 1, z: f.z }; return bot.entity.onGround && litter.has(u) && [[1, 0], [-1, 0], [0, 1], [0, -1]].every(([dx, dz]) => world.dropAt(bot, f.x + dx + 0.5, f.y, f.z + dz + 0.5) > world.SAFE_DROP) ? u : null }
+    const mine = u => litter.has(u) || require('./build').strayAt(bot, u)
+    const onTop = () => { const f = bot.entity.position.floored(); const u = { x: f.x, y: f.y - 1, z: f.z }; return bot.entity.onGround && mine(u) && [[1, 0], [-1, 0], [0, 1], [0, -1]].every(([dx, dz]) => world.dropAt(bot, f.x + dx + 0.5, f.y, f.z + dz + 0.5) > world.SAFE_DROP) ? u : null }
     // (no sky test: a canopy's leaves read as a roof, and the descent stopped after one block each escape; audit)
     if (onTop()) {
       log('move', `stuck on a pillar of ours at ${fmt(f0)} with a drop all round - digging down through it`)

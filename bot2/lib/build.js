@@ -2137,6 +2137,13 @@ function isStray (bot, x, y, z, k = kindAt(bot, x, y, z)) {
   const was = snapName(x, y, z)
   return was !== n && wasOpen(bot, was) && !othersWork(p)
 }
+// One cell of the site's stray scaffold (the snapshot diff, within its region): the escape's word for "ours" on the rim
+function strayAt (bot, p) {
+  if (!job || !site || !p) return false
+  const r = site.region
+  if (p.x < r.x1 || p.x > r.x2 || p.y < r.y1 || p.y > r.y2 || p.z < r.z1 || p.z > r.z2) return false
+  return isStray(bot, p.x, p.y, p.z)
+}
 function scaffoldList (bot) {
   if (!job || !site) return []
   const r = site.region; const out = []
@@ -2523,7 +2530,7 @@ async function ensureScaffold (bot, n = SCAFFOLD_WANT, { shouldStop } = {}) { //
   return true
 }
 
-module.exports = { walkModel, siteScaffoldTakeable, wayOut, wayOutPoint, FILLER_ITEMS, SCAFFOLD_WANT, cachedStatus, exactWood, isOpenCell, INFILL_RE, infillItem, unsourced, strayBuildBlocks,
+module.exports = { walkModel, strayAt, siteScaffoldTakeable, wayOut, wayOutPoint, FILLER_ITEMS, SCAFFOLD_WANT, cachedStatus, exactWood, isOpenCell, INFILL_RE, infillItem, unsourced, strayBuildBlocks,
   finishSite, woodClass, woodForm, acceptsFor, itemOf, LOG_ANY, PLANKS_ANY, ensureScaffold, unskippedObstructions, setJob, getJob, status, nextNeeds,
   buildStep, clearSite, obstructions, removeScaffold, siteScaffoldTeardown, loadSchematic, cellDone, cellsDone, inBox, placeCell, registerJob, key,
   complete, needsWork, finish, survey, scaffoldList, holesList, ensureSnapshot, snapshotInfo, snapName,
