@@ -547,6 +547,12 @@ async function digIn (g = 0) {
 let leafDigFailed = null
 let leafWhy = null // the way off last said (said again only when it changes)
 let leafFooting = null // the block put beside a rotting leaf to stand on - dug out from under us once the drop is taken
+// (the drop chosen: the column dug out from under us to take it - the lip row stands aside there while it is taken. Its
+//  "centre over a drop" steered the body back onto the rotting leaf as the footing broke, 41 times in two minutes, then
+//  stranded on the crown, 2026-10-03)
+let takingDrop = null // { x, y (the floor dug), z, until }
+let centring = null // { x, z }: the drop run centres the body inside this column (supported - the footing under it)
+const centreMiss = new Map() // key -> failed centrings: two, and the drop is not tried there again (leafDigFailed)
 function leafWayOff (leaf, fx, fy, fz, ours = false) {
   const act = require('./act')
   const k = act.fallBelow(bot, { x: fx, y: fy, z: fz })
@@ -555,7 +561,20 @@ function leafWayOff (leaf, fx, fy, fz, ours = false) {
   const takes = bot.health - Math.max(0, k - 3) > hurtLine()
   if (land && leafDigFailed !== key && !/_leaves$/.test(land.name) && takes) {
     // (a dig that fails is not tried again on this leaf: the block beside it next, never the same dig every tick)
-    return { why: `a ${k}-block drop onto ${land.name} I can take - digging ${ours ? 'my footing' : 'the leaf'} out`, run: () => act.digBlock(bot, leaf, { own: ours }).then(ok => { if (!ok) leafDigFailed = key; else if (ours) leafFooting = null; return ok }) }
+    return { why: `a ${k}-block drop onto ${land.name} I can take - digging ${ours ? 'my footing' : 'the leaf'} out`, run: async () => {
+      // (centred on the column first: a steer stops near a cell, not in it, and the hitbox's 0.3 still rested on the leaf
+      //  beside - the dug cell left the body hanging crouched on its corner; audit)
+      const off = () => Math.hypot(bot.entity.position.x - (fx + 0.5), bot.entity.position.z - (fz + 0.5))
+      const t1 = Date.now()
+      centring = { x: fx, z: fz }
+      try {
+        while (off() > 0.15 && Date.now() - t1 < 1500) { const p = bot.entity.position; await bot.look(Math.atan2(-((fx + 0.5) - p.x), -((fz + 0.5) - p.z)), 0, true).catch(() => {}); origSet('forward', off() >= 0.2); await new Promise(r => setTimeout(r, 50)) }
+      } finally { centring = null; origSet('forward', false) }
+      // (not centred: no dig - the next tick asks again; twice, and this drop is given up for the leaf row's other ways)
+      if (off() > 0.25) { if (centreMiss.size > 64) centreMiss.clear(); const n = (centreMiss.get(key) || 0) + 1; centreMiss.set(key, n); if (n >= 2) leafDigFailed = key; return false }
+      takingDrop = { x: fx, y: fy, z: fz, until: Date.now() + 3000 }
+      return act.digBlock(bot, leaf, { own: ours }).then(ok => { if (!ok) { leafDigFailed = key; takingDrop = null } else if (ours) leafFooting = null; return ok })
+    } }
   }
   // (on our footing the drop only waits on the hp - eating and regen bring it; the rot no longer does)
   // (a drop more than full health takes never passes: said as stranded - a staircase down is for when one is seen)
@@ -1107,6 +1126,9 @@ function edgeBrake () {
     release()
     return false
   }
+  // (the drop run centring the body inside its own supported column - the footing under it: the probe a stride ahead found
+  //  the drop past the footing and cut every nudge; audit)
+  if (centring && Math.floor(p.x) === centring.x && Math.floor(p.z) === centring.z && here <= world.SAFE_DROP) { release(); return false }
   for (const r of [0.45, reach]) {
     const x = p.x + hx * r; const z = p.z + hz * r
     if (Math.floor(x) === Math.floor(p.x) && Math.floor(z) === Math.floor(p.z)) continue
@@ -1299,7 +1321,8 @@ function tick () {
   //  Back onto ground under the middle - before any fight or flee (a creeper may miss; that fall does not)
   {
     const fx = Math.floor(me.x); const fy = Math.floor(me.y - 0.01) + 1; const fz = Math.floor(me.z)
-    if (bot.entity.onGround && !world.feetInWater(bot) && !bot.vehicle && world.dropAt(bot, me.x, fy, me.z) > world.SAFE_DROP) {
+    const dropChosen = !!takingDrop && Date.now() < takingDrop.until && takingDrop.x === fx && takingDrop.z === fz && fy === takingDrop.y + 1 // (the feet over the dug floor - never after the landing; audit)
+    if (bot.entity.onGround && !world.feetInWater(bot) && !bot.vehicle && !dropChosen && world.dropAt(bot, me.x, fy, me.z) > world.SAFE_DROP) {
       let best = null; let bd = Infinity
       for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
         const x = fx + dx; const z = fz + dz
