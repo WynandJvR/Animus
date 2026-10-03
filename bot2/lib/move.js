@@ -946,7 +946,11 @@ async function escapeUpInner (bot) {
     if (onTop()) {
       log('move', `stuck on a pillar of ours at ${fmt(f0)} with a drop all round - digging down through it`)
       for (let guard = 0; guard < 24; guard++) {
-        const u = onTop(); if (!u) break
+        // (the ground flag settles first: mineflayer reads onGround false a tick at a time while standing (the body's "ground
+        //  flag corrected" lines), and the descent read that as "not on the pillar" and came down nothing - "came down our
+        //  pillar: from X to X" three times, 2026-10-03)
+        { const t0 = Date.now(); while (!bot.entity.onGround && Date.now() - t0 < 600) await sleep(50) }
+        const u = onTop(); if (!u) { if (!guard) log('move', `our pillar at ${fmt(f0)}: not on its top after all (on the ground ${bot.entity.onGround})`); break }
         // (the fall the dig makes: to the next solid under the block - a gap the tidy left lower in the column is a drop of
         //  its height. Up there is safe; a fall is not. Nor onto lava or into water; audit)
         const below = world.at(bot, u.x, u.y - 1, u.z)

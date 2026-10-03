@@ -1114,9 +1114,13 @@ function feetFor (bot, c) {
     if (!clear) continue
     // (on the floor or the ground, not up on a ledge of the build: the walk to a window ledge at y128 stuck every time)
     const raised = gy > job.box.y1 ? 25 : 0
+    // (and below the build's floor, off its rim, last: the slope under the south rim - feet at y112-115 for a y125 cell -
+    //  is a drop the walker refuses and a climb back the walk model misjudges; three 30s walks a cell, the tower 11 high
+    //  if it ever got there, 2026-10-03. A foot at the floor's level wins when there is one)
+    const sunk = gy < job.box.y1 - 1 ? (job.box.y1 - 1 - gy) * 6 : 0
     // (and a foot no walk gets to - an upper floor nothing climbs to yet: 24 pillar feet so, each a stuck walk; walkReach)
     if (!canWalkTo(bot, { x, y: gy + 1, z })) continue
-    out.push({ x, y: gy + 1, z, d: Math.hypot(x + 0.5 - me.x, gy + 1 - me.y, z + 0.5 - me.z) + Math.hypot(dx, dz) + raised })
+    out.push({ x, y: gy + 1, z, d: Math.hypot(x + 0.5 - me.x, gy + 1 - me.y, z + 0.5 - me.z) + Math.hypot(dx, dz) + raised + sunk })
   }
   return out.sort((a, b) => a.d - b.d)
 }
