@@ -183,6 +183,9 @@ async function ensureShears (bot, ctx) {
   if (shearsHeld(bot)) { if (mem.get().shearsWorn) mem.set('shearsWorn', false); return true }
   // (a pair at a time until a good one: the chest holds the worn pairs too, and the first out was the worn one - audit 2026-10-03)
   for (let i = 0; i < 4 && !shearsHeld(bot) && base().bankCount('shears') > 0; i++) { if (!await base().withdraw(bot, 'shears', 1).catch(() => 0)) break }
+  // (a spent pair is thrown away as it comes out, as a player bins a worn tool: banked again, the worn pairs piled up ahead
+  //  of the good one and the four-pair reach stopped finding it; audit)
+  for (const it of inv.items(bot).filter(i => i.name === 'shears' && inv.durabilityLeft(bot, i) <= 2)) await bot.tossStack(it).catch(() => {})
   // (the bank's pair, out and spent: no shears at all to the iron plan - the director makes a pair; audit)
   if (!shearsHeld(bot) && inv.has(bot, 'shears') && !mem.get().shearsWorn) { mem.set('shearsWorn', true); log('forage', 'the banked shears are worn out - a new pair wanted') }
   if (!shearsHeld(bot)) await craft().ensure(bot, 'shears', inv.count(bot, 'shears') + 1, Object.assign({}, ctx, { noWithdraw: false })).catch(() => false)
