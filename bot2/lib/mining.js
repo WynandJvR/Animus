@@ -40,7 +40,9 @@ function fluidAround (bot, p, skip) {
 // Would a staircase from p heading dir run near a place that has killed us underground, or under a
 // protected build? (checked 70 blocks along the way)
 function pathBad (p, dir) {
-  const deaths = (mem.get().deaths || []).filter(d => d.cause !== 'void' && d.y < 60)
+  // (underground by home's own level, not a fixed y60: home at y119, the caves' deaths at y62-75 never counted and a site
+  //  beside the skeleton's cave could be chosen once diedInMine stopped counting deaths before a mine; audit 2026-10-03)
+  const deaths = (mem.get().deaths || []).filter(d => d.cause !== 'void' && d.y < ((mem.get().home || {}).y ?? 64) - 8)
   for (let k = 0; k <= 70; k += 4) {
     const q = { x: p.x + dir.x * k, z: p.z + dir.z * k }
     if (deaths.some(d => world.dist2(d, q) < 24)) return true
