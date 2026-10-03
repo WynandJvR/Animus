@@ -1527,7 +1527,9 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     // (a thin window is the whole band's three layers: the lowest two with the blocks in hand held 1-5 cells - the rest waits
     //  on wool, flowers, leaves - 20-35 blocks apart, 35s a placed block and 27 blocks an hour, while the same walls a layer
     //  or two up stood ready in hand; 2026-10-03. Still never past the band's 3-layer cap: walls rise together)
-    if (doable.length < 16 && minY <= lowestAll + 3) { const wide = structural.filter(c => c.y <= lowestAll + 3 && tryable(c)); if (wide.length > doable.length) doable = wide }
+    // (added to the window, never in place of it: the window keeps an anchor below its floor that waits on a blocker, and a
+    //  cell at lowestAll+4; replaced, the anchor was never offered and the band could stall; audit)
+    if (doable.length < 16 && minY <= lowestAll + 3) { const dk = new Set(doable.map(key)); for (const c of structural) if (c.y <= lowestAll + 3 && !dk.has(key(c)) && tryable(c)) doable.push(c) }
     // (the ground swaps once nothing else is ready: nothing else ever does them, and left out for good the build could never
     //  read done; audit)
     if (!doable.length) { const gh = todo.filter(c => !c.attach && has(c) && groundHeldBy(bot, c)); if (gh.length) { const y0 = Math.min(...gh.map(c => c.y)); doable = gh.filter(c => c.y <= y0 + 1) } }
