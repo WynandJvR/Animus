@@ -1104,6 +1104,10 @@ function feetFor (bot, c) {
     const inFoot = x >= job.box.x1 && x <= job.box.x2 && z >= job.box.z1 && z <= job.box.z2
     if (inFoot && gy < job.box.y1 - 1) continue
     const g = world.at(bot, x, gy, z)
+    // (and never on a floor lower than a whole block - a bottom slab, a stair, a carpet: the jump from it peaks under the
+    //  top of the block the tower needs - feet at 119.5 reach 120.75, the block wants 121 - so the first block never goes in;
+    //  "towered ... to y119 (cell y119 cobblestone_slab)", 2026-10-03)
+    if (g && g.shapes && g.shapes.length && Math.max(...g.shapes.map(sh => sh[4])) < 0.99) continue
     if (g && gy > job.box.y1 && !job.index.has(key({ x, y: gy, z })) && /^(dirt|cobblestone|andesite|diorite|tuff|coarse_dirt)$/.test(g.name)) continue
     let clear = true
     for (let y = gy + 1; y <= c.y + 1 && clear; y++) { const b = world.at(bot, x, y, z); if (!b || !world.isAirish(b) || job.index.has(key({ x, y, z }))) clear = false }

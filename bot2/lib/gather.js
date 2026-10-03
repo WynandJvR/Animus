@@ -403,7 +403,8 @@ async function towerUp (bot, { allowZones = [], onPlaced = null, builder = false
     const cellB = world.at(bot, x0, y0, z0); const zn = move.inZone({ x: x0, y: y0, z: z0 })
     if (!builder && cellB && move.isProtected(cellB, 'fill')) { log('gather', `no tower at ${x0},${y0},${z0} - a cell of the build`); await move.sleep(300); return false }
     if (zn && !allowZones.includes('*') && !allowZones.includes(zn.label)) { log('gather', `no tower at ${x0},${y0},${z0} - inside the ${zn.label}`); await move.sleep(300); return false }
-    if (below) await bot.placeBlock(below, new Vec3(0, 1, 0)).catch(() => {})
+    let placeErr = null
+    if (below) await bot.placeBlock(below, new Vec3(0, 1, 0)).catch(e => { placeErr = e && e.message })
     await move.sleep(300)
     // (every tower block but the builder's is litter until it comes down: the one ledger - litter.js. Read AFTER the
     //  settle, and a body standing a block up counts as the block's word: read straight after placeBlock - which can
@@ -411,7 +412,7 @@ async function towerUp (bot, { allowZones = [], onPlaced = null, builder = false
     //  down: the trunk cells filled with cobblestone and the spots were dropped, 2026-09-28)
     const up = Math.floor(bot.entity.position.y) >= y0 + 1
     { const nb = world.at(bot, x0, y0, z0); if (up || (nb && world.isSolid(nb))) { lastPillar = { x: x0, y: y0, z: z0 }; if (onPlaced) onPlaced(lastPillar); if (!builder && !inMineShaft(bot, lastPillar)) require('./litter').note(bot, lastPillar, filler.name) } }
-    if (!up) towerWhy = `the block did not go in (under me ${below ? below.name : '?'} at y${y0 - 1}, cell y${y0} ${(world.at(bot, x0, y0, z0) || {}).name || '?'})`
+    if (!up) towerWhy = `the block did not go in (under me ${below ? below.name : '?'} at y${y0 - 1}, cell y${y0} ${(world.at(bot, x0, y0, z0) || {}).name || '?'}${placeErr ? ', ' + placeErr : ''}; feet y${bot.entity.position.y.toFixed(2)})`
     return up
   } catch (e) { towerWhy = `threw: ${e && e.message}`; bot.setControlState('jump', false); bot.setControlState('forward', false); bot.setControlState('sneak', false); return false }
 }
