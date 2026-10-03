@@ -501,7 +501,9 @@ async function waitReflex (bot, maxMs = 60000) {
 function sleep (ms) { return new Promise(r => setTimeout(r, ms)) }
 // (arrived: the floored cell or the cell stood in over a slab or stair - the pathfinder's own two (index.js:593): judged
 //  on the floored cell alone, a stand over a half block was never reached, 2026-10-03)
-function arrived (bot, goal) { return goal.isEnd(world.standCell(bot)) || goal.isEnd(bot.entity.position.floored()) }
+// (never for a goal of being OUT of somewhere - GoalInvert: "out of the stand OR out of the floored cell" read a body on a
+//  carpet in the cell it must leave as out already, and the step aside before a place never walked; audit 2026-10-03)
+function arrived (bot, goal) { const f = bot.entity.position.floored(); return goal instanceof goals.GoalInvert ? goal.isEnd(f) : (goal.isEnd(world.standCell(bot)) || goal.isEnd(f)) }
 
 // Get out of a spot the planner keeps failing from: step back, jump, or tower one block.
 // (only a way that is not over a drop: a random key and a jump at the castle's south rim - a strafe, which neither the jump
