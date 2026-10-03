@@ -232,6 +232,9 @@ function reservedSpent (bot, sp) {
   if (!e) return 0
   const now = woodStock(bot, sp)
   if (now > e.stock + RESERVED_RIDE) { mem.update(mm => { if (mm.reservedSpent) delete mm.reservedSpent[sp] }); return 0 } // (a haul landed)
+  // (a low-water mark: the build itself burns the wood down, and the next haul is measured from the latest low, never from
+  //  the stock the tally began at - one haul rarely climbs back over that, and the tally never cleared; audit T1)
+  if (now < e.stock - 4) mem.update(mm => { const x = mm.reservedSpent && mm.reservedSpent[sp]; if (x) x.stock = now })
   return e.spent
 }
 function noteReservedSpent (bot, sp, planks) {
