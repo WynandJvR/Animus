@@ -659,7 +659,9 @@ function decide () {
   //  the dark, 2026-10-02; audit)
   // (ahead of the build only for the gear that carries the fights: the legs and the feet's 13 ingots took 46% of a morning
   //  after a death, the castle 2%, 2026-10-03 - they go in the castle's gaps, below)
-  const ironTripOk = () => gearShort > 0 && !mem.get().ironTripDry && world.phase(bot) === 'day' && world.ticksUntilNight(bot) > 6000 && !held('ironTrip')
+  // (not with a fresh grave of ours waiting - covered, it waits for the ground to clear, and a trip away from it outlives the
+  //  server's grave: 447 items and the armour the trip went to replace, nearly lost to an iron trip, 2026-10-03)
+  const ironTripOk = () => gearShort > 0 && !graves.bestGrave(bot) && !mem.get().ironTripDry && world.phase(bot) === 'day' && world.ticksUntilNight(bot) > 6000 && !held('ironTrip')
   if (gearIronShort(true) > 0 && ironTripOk()) { ironTripCore = true; return { name: 'ironTrip', why: `${gearIronShort(true)} iron short for ${wanted.filter(n => (ARMOUR_GEAR.has(n) || n === 'shears') && !LOW_GEAR.has(n)).join(', ')} - mining for it` } }
 
   // 9. the build
