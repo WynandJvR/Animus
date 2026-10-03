@@ -103,6 +103,10 @@ let taskCancelled = () => false
 // (at the hurt line a day trip stops whether or not food is at hand: tooHurt's "and can heal" let an iron trip walk on at hp 5
 //  with nothing to eat into the skeletons at the mine's mouth - dead, 2026-10-02. With no food, the director's food rule
 //  is the answer, never the trip)
+// the day's last stretch: the walk home starts here, and at home the build's prep (one number for both)
+const EVENING = 10500
+// (a hostile about home on the surface, as the hideout reads it - bats aside: the evening's prep stops for it)
+function prepThreat () { return reflex.hostiles(16).some(h => h.e.name !== 'bat' && Math.abs(h.e.position.y - bot.entity.position.y) < 6) }
 function dayStop () { return taskCancelled() || nightSoon() || bot.health <= reflex.hurtLine() || homeByDark() }
 // heading home: keep walking through dusk; only real night (mobs) stops a trip that is still long
 // (and at the hurt line, when food would mend it or might be found: at hp 4 the trek walked on into a river and drowned,
@@ -419,7 +423,7 @@ function decide () {
   // met the bot at its own door at hp 10)
   // (never on an expedition out: the nights are camped - walked home each evening, it never got past a day's walk out;
   //  audit 2026-09-28)
-  if (home && world.phase(bot) === 'day' && world.tod(bot) >= 10500 && world.tod(bot) < 12000 && dHome > 32 && hut.shellComplete(bot) && !tooHurt() && !(expedition() && expedition().phase === 'out') && !held('goHome')) {
+  if (home && world.phase(bot) === 'day' && world.tod(bot) >= EVENING && world.tod(bot) < 12000 && dHome > 32 && hut.shellComplete(bot) && !tooHurt() && !(expedition() && expedition().phase === 'out') && !held('goHome')) {
     return { name: 'goHome', why: `evening - home is ${Math.round(dHome)}b away, back before dark` }
   }
   // a grave right here (died in the safehouse, or beside it): pick it up whatever the hour - it
@@ -543,6 +547,11 @@ function decide () {
   //     starving first and searching second killed the bot twice
   if (dHome < 64 && (farm.farm() === null || !farm.farmIsHome(bot)) && (inv.count(bot, 'wheat_seeds') + base.bankCount('wheat_seeds')) >= 4 && !held('farm')) return { name: 'farm', why: 'seeds in hand and no farm at this home' }
   if (packFood < 12 && bot.food <= 12 && !held('food')) return { name: 'food', why: `food buffer low (pack ${packFood} pts, hunger ${bot.food})` }
+  // THE EVENING AT HOME, THE BUILD'S PREP: the furnaces collected and loaded, the charcoal, the crafts for the next layers -
+  // in a castle round they were its first minutes (135s, 0 placed, 2026-10-03); done at home in the day's last minutes they
+  // take the place of the next round's own, and the furnaces smelt through the night. Below survival (food, graves, tools). Once a day, stopped by dusk, a hostile near, or a hurt
+  // body at the next furnace (operator: never build at night; "it can mine and maybe do other stuff at night thats safe")
+  if (home && world.phase(bot) === 'day' && world.tod(bot) >= EVENING && dHome <= 32 && build.getJob() && build.needsWork(bot) && mem.get().eveningPrepDay !== day.dayNo(bot) && bot.health > reflex.hurtLine() && !prepThreat() && !held('eveningPrep')) return { name: 'eveningPrep', why: "evening at home - the build's smelting and crafts before dark" }
 
   // FIRST THING IN THE DAY: a far trip refused for want of daylight goes before the day's rounds - asked at the end of a
   //  castle round, the dark oak trip came each day with 2300 ticks left and was "not today" three days running, the castle
@@ -733,6 +742,15 @@ const TASKS = {
       mem.set('bed', before && world.at(bot, before.x, before.y, before.z) && /_bed$/.test(world.at(bot, before.x, before.y, before.z).name) ? before : null)
     }
     return ok
+  },
+  async eveningPrep () {
+    mem.set('eveningPrepDay', day.dayNo(bot)) // (once a day, done or cut short)
+    const t0 = Date.now()
+    const stop = () => taskCancelled() || world.phase(bot) !== 'day' || bot.health <= reflex.hurtLine() || prepThreat()
+    await processAtHome(stop)
+    const why = taskCancelled() ? 'cancelled' : world.phase(bot) !== 'day' ? 'dusk' : bot.health <= reflex.hurtLine() ? 'hurt' : prepThreat() ? 'a hostile near' : 'done'
+    log('dir', `evening prep: ${Math.round((Date.now() - t0) / 1000)}s (${why})`)
+    return true
   },
   async nightMine () {
     // (the night's digging goes to the fuel first when the furnaces wait on it - coal from the mine's walls, with its
@@ -1228,26 +1246,28 @@ function nearestWood () {
 // Smelt `n` of `input` in the background: into the pack from the chest, fuel the coal/charcoal/spare wood
 // covers (never a walk to the trees from here - a fuel shortfall is gathered like any raw), loaded across the
 // home furnaces and collected on a later pass (waiting at the furnace cost minutes a batch).
-async function loadSmelt (input, n) {
+async function loadSmelt (input, n, stop = null) {
   const room = Math.max(0, inv.freeSlots(bot) - 3) * 64
   if (inv.count(bot, input) < n) await base.withdraw(bot, input, Math.min(n - inv.count(bot, input), room)).catch(() => 0)
   const k = Math.min(n, inv.count(bot, input))
   if (k <= 0) return 0
   if (!await smelt.pickFuel(bot, k, { noGather: true })) { log('dir', `no fuel on hand for ${k} ${input} - it waits in the chest`); return 0 }
-  return smelt.loadFurnaces(bot, input, k)
+  return smelt.loadFurnaces(bot, input, k, { shouldStop: stop })
 }
 
 // At home between building and gathering: the furnaces emptied, refuelled and fed from the chest, and the
 // crafts made. The SMELT QUEUE is the whole build's (clay->brick, cobble->stone->smooth stone, stone bricks->
 // cracked, sand->glass: what the chest holds goes in, the window's first); the CRAFTS are the window's only,
 // with the whole recipe yield - never all the bricks turned into stairs.
-async function processAtHome () {
+async function processAtHome (stop = dayStop) {
   const home = mem.get().home
   const st = build.cachedStatus(bot)
   if (!st) return
   phase('home: furnaces collect+refuel')
-  await smelt.collectFurnaces(bot)
-  await smelt.refuelFurnaces(bot)
+  await smelt.collectFurnaces(bot, { shouldStop: stop })
+  if (stop()) return
+  await smelt.refuelFurnaces(bot, { shouldStop: stop })
+  if (stop()) return
   phase('home: planning')
   const winNeeds = windowNeeds()
   const win = mats.planFor(bot, winNeeds)
@@ -1258,6 +1278,7 @@ async function processAtHome () {
   // furnaces for the volume, counted around HOME (counted around the bot at the site it found too few and
   // built six more)
   phase('home: furnace building')
+  if (stop()) return
   if (tot.smeltTotal > 0) {
     const furns = smelt.homeFurnaces(bot)
     const want = furnaceTarget(tot)
@@ -1266,12 +1287,13 @@ async function processAtHome () {
     const need = 8 * Math.max(0, want - furns.length)
     if (need && inv.count(bot, 'cobblestone') < need) await base.withdraw(bot, 'cobblestone', need - inv.count(bot, 'cobblestone')).catch(() => 0)
     for (let i = furns.length; i < want && inv.count(bot, 'cobblestone') >= 8; i++) {
-      if (!await smelt.placeFurnace(bot)) break
+      if (stop() || !await smelt.placeFurnace(bot)) break
     }
   }
   // fuel for the queue: charcoal from logs beyond the ones the next layers build with (one log smelts eight;
   // the brick line stalled on fuel with cobble waiting in the chest)
   phase('home: charcoal')
+  if (stop()) return
   if (tot.raw.fuel > 0 && stock('coal') + stock('charcoal') < 32) {
     const spareLogs = Math.floor(smelt.woodSurplus(bot) / 4)
     // (never the build's own species: the most-stocked log was the orchard's spruce, and 31 of it went into the furnaces)
@@ -1279,34 +1301,34 @@ async function processAtHome () {
     if (logName && spareLogs >= 4) {
       const n = Math.min(32, spareLogs, stock(logName))
       if (inv.count(bot, logName) < n) await base.withdraw(bot, logName, n - inv.count(bot, logName))
-      const loaded = await smelt.loadFurnaces(bot, logName, Math.min(n, inv.count(bot, logName)))
+      const loaded = await smelt.loadFurnaces(bot, logName, Math.min(n, inv.count(bot, logName)), { shouldStop: stop })
       if (loaded) log('dir', `burning ${loaded} ${logName} into charcoal for the smelting`)
     }
   }
   // the crafts that feed a furnace (stone -> stone bricks, to crack) are the queue's, the whole build's
   phase('home: feed crafts')
   const feed = tot.crafts.filter(c => mats.SMELT_INPUTS.has(c.item))
-  if (feed.length) { await mats.makeCrafts(bot, feed, { keep: win.top, shouldStop: dayStop }); tot = mats.planFor(bot, st.need) }
+  if (feed.length) { await mats.makeCrafts(bot, feed, { keep: win.top, shouldStop: stop }); tot = mats.planFor(bot, st.need) }
   // the queue: what the window waits on first; an input the window also places itself (cobblestone) goes in
   // only beyond the window's own share
   phase('home: smelt queue')
   const winOut = new Set(win.smelts.map(s => s.output))
   for (const s of tot.smelts.slice().sort((a, b) => winOut.has(b.output) - winOut.has(a.output))) {
-    if (dayStop()) break
+    if (stop()) break
     // (and a scaffold's worth of cobblestone kept back: the furnaces took the last of it for stone, and the build step went
     //  straight to the mine for 31 to stand on - a mine trip a round, 2026-09-28)
     // (one number with the builder's: what the other filler held or banked does not already cover)
     const keepBack = s.input === 'cobblestone' ? Math.max(0, build.SCAFFOLD_WANT - Object.keys(Object.assign({}, inv.counts(bot), base.bankCounts())).filter(n0 => n0 !== 'cobblestone' && build.FILLER_ITEMS.test(n0)).reduce((t, n0) => t + stock(n0), 0)) : 0
     const n = Math.min(s.n, stock(s.input) - (win.top[s.input] || 0) - keepBack, 64 * Math.max(1, smelt.homeFurnaces(bot).length))
     if (n < 1) continue
-    const k = await loadSmelt(s.input, n)
+    const k = await loadSmelt(s.input, n, stop)
     if (k) log('dir', `smelting ${k} ${s.input} -> ${s.output} (${s.n} more ${s.output} wanted for the ${st.name})`)
   }
   // the window's crafts, ingredients first (planks before stairs, bricks before brick stairs)
   phase('home: window crafts')
   const win2 = mats.planFor(bot, winNeeds)
   if (win2.crafts.length) {
-    const made = await mats.makeCrafts(bot, win2.crafts, { keep: win2.top, shouldStop: dayStop })
+    const made = await mats.makeCrafts(bot, win2.crafts, { keep: win2.top, shouldStop: stop })
     if (made) log('dir', `${made} crafts for the next layers (planned ${win2.crafts.map(c => c.crafts + 'x ' + c.item).join(', ')})`)
   }
 }

@@ -371,7 +371,7 @@ async function smeltItem (bot, output, count, ctx = {}) {
 }
 
 // Background smelting for bulk jobs: load every furnace at home with `input`, return at once.
-async function loadFurnaces (bot, input, maxItems, { anyWood = false } = {}) {
+async function loadFurnaces (bot, input, maxItems, { anyWood = false, shouldStop = null } = {}) {
   // (the one door every log goes through to become charcoal: never the build's own species - a stripped or spruce log
   //  smelted is a castle cell short; 31 spruce logs went in this way, 2026-09-28)
   try { if (/_(log|wood)$/.test(input) && require('./materials').isReservedWood(bot, input)) { log('smelt', `not smelting ${input} - the build's own wood`); return 0 } } catch {}
@@ -389,6 +389,7 @@ async function loadFurnaces (bot, input, maxItems, { anyWood = false } = {}) {
   for (const fb of furns) {
     if (loaded >= maxItems) break
     if (!inv.count(bot, input)) break
+    if (shouldStop && shouldStop()) break // (a walk round 48 furnaces is minutes: the caller's stop is heard at each one)
     const f = await openAt(bot, fb)
     if (!f) continue
     try {
@@ -459,13 +460,14 @@ function landed (output, n) {
 }
 
 // Furnaces holding input with no fuel left (cold, their batch stalled): feed them.
-async function refuelFurnaces (bot) {
+async function refuelFurnaces (bot, { shouldStop = null } = {}) {
   const home = mem.get().home
   if (!home) return 0
   let fed = 0
   // (no fuel anywhere: no walk round the cold furnaces to find that out again)
   if (!inv.items(bot).some(i => fuelValue(i.name) > 0) && !Object.entries(require('./base').bankCounts()).some(([n, c]) => c > 0 && fuelValue(n) > 0)) return 0
   for (const fb of busyFurnaces(bot)) {
+    if (shouldStop && shouldStop()) break
     if (isLit(fb)) continue
     const f = await openAt(bot, fb)
     if (!f) continue
@@ -484,7 +486,7 @@ async function refuelFurnaces (bot) {
   return fed
 }
 
-async function collectFurnaces (bot) {
+async function collectFurnaces (bot, { shouldStop = null } = {}) {
   const home = mem.get().home
   const furns = home ? busyFurnaces(bot) : furnacesNear(bot, 32)
   const first = !mem.get().furnaceUse
@@ -499,6 +501,7 @@ async function collectFurnaces (bot) {
   //  2026-09-28)
   const worth = fb => { const u = use[fkey(fb.position)]; if (!u || u.inN == null || !u.inN) return true; const made = Math.floor((Date.now() - u.at) / 10000); return made >= u.inN || (u.outN || 0) + made >= 8 } // (all its input done: always)
   for (const fb of furns) {
+    if (shouldStop && shouldStop()) break
     if (stalled(fb) || !worth(fb)) continue
     const f = await openAt(bot, fb)
     if (!f) continue
