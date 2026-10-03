@@ -1230,22 +1230,21 @@ async function descendPillar (bot) {
 async function pillarTo (bot, c, first) {
   const feet = feetFor(bot, c).filter(f => !footBad(f)).slice(0, 3)
   if (first && !feet.some(f => f.x === first.x && f.z === first.z)) feet.unshift(first)
+  let tried = 0
   const stuckAt = [] // (feet that could not be reached this time: the others near them lie in the same ground)
   for (const f of feet.slice(0, 3)) {
     if (stuckAt.some(q => Math.abs(q.x - f.x) <= 3 && Math.abs(q.z - f.z) <= 3)) continue
+    // (the last foot's tower failed: down it before the walk to the next - left standing, descendPillar forgot it; audit)
+    if (tried++ && myPillar.length) await descendPillar(bot)
     // (the site walker: it goes in through the build's doors - the nave is walled round)
     const r = await goSite(bot, new goals.GoalBlock(f.x, f.y, f.z), 'to the foot of a pillar')
     // (a foot that could not be reached rules out the feet NEAR it - same ground - never the rest: a wall cell has feet on
     //  both sides, and the inside one on the wall walk is the one that works. Three stuck walks of 8s in one patch cost
     //  the south wall's high cells 24-32s each, more than half the step; audit 2026-09-28)
     if (!r.ok) { if (move.isVerdict(r)) badFeet.set(key(f), Date.now()); log('build', `pillar for ${c.name} at ${move.fmt(c)}: couldn't reach its foot ${move.fmt(f)} (${r.why})`); if (/stuck|noPath/.test(r.why || '')) stuckAt.push(f); continue }
-    await ensureScaffold(bot, 16, { shouldStop: stepStop })
-    // (the top-up may have walked us to the chest or the mine: back to the foot first - the tower rose where the top-up left
-    //  the bot, at home, onto our own torch, 2026-10-03)
-    if (world.dist2(world.feetPos(bot), f) > 1 || Math.abs(world.feetPos(bot).y - f.y) > 1) {
-      const r2 = await goSite(bot, new goals.GoalBlock(f.x, f.y, f.z), 'back to the foot of a pillar')
-      if (!r2.ok) { log('build', `pillar for ${c.name} at ${move.fmt(c)}: not back at its foot ${move.fmt(f)} after the scaffold top-up (${r2.why})`); continue }
-    }
+    const r2 = await topUpAt(bot, 16, f, () => goSite(bot, new goals.GoalBlock(f.x, f.y, f.z), 'back to the foot of a pillar'), { shouldStop: stepStop }, 1)
+    if (r2.why === 'stopped') return false
+    if (!r2.ok) { log('build', `pillar for ${c.name} at ${move.fmt(c)}: not back at its foot ${move.fmt(f)} after the scaffold top-up (${r2.why})`); continue }
     // (the planner let go of first: its goal left standing, it set the controls every tick and the tower's jump never
     //  held - "towered to y120" 24 times in an hour on the nave floor, where the same tower rose in the yard, 2026-09-27)
     try { bot.pathfinder.setGoal(null) } catch {}
@@ -2402,7 +2401,11 @@ async function reachByPillar (bot, p, { shouldStop } = {}) {
     const r = await move.travel(bot, c, { range: 0, label: 'under the scaffold', maxMs: 90000 })
     const f = bot.entity.position.floored()
     if (!r.ok && !(f.x === c.x && f.z === c.z && f.y === c.y)) continue
-    if (!inv.items(bot).some(i => FILLER_ITEMS.test(i.name))) await ensureScaffold(bot, 16, { shouldStop }).catch(() => {})
+    if (!inv.items(bot).some(i => FILLER_ITEMS.test(i.name))) {
+      const r2 = await topUpAt(bot, 16, c, () => move.travel(bot, c, { range: 0, label: 'back under the scaffold', maxMs: 90000 }), { shouldStop })
+      if (r2.why === 'stopped') return false
+      if (!r2.ok) continue
+    }
     const base = bot.entity.position.floored().y
     for (let i = 0; i < 9 && !act.reach(bot, p, 4.3); i++) { if (!await require('./gather').towerUp(bot, { allowZones: ['build', 'base'], builder: true })) break }
     let gone = act.reach(bot, p, 5) && await act.dig(bot, p, { force: true, allowZones: ['build', 'base'], timeoutMs: 10000, noWalk: true, reachMax: 5 })
@@ -2553,6 +2556,16 @@ function snapshotInfo (bot) {
   return { taken: !!site, at: site && site.at, file: siteFile(job), region: r, kinds: site ? site.palette.length : 0, loaded: siteLoaded(bot) }
 }
 
+// (a scaffold top-up AT a stand: the top-up may walk to the chest or the mine, so it ends back on the stand - every tower after
+//  a top-up goes through here. The pillar rose where the top-up left the bot, at home, onto our own torch, 2026-10-03; audit)
+async function topUpAt (bot, n, at, walkBack, opts = {}, slack = 0) { // (slack: how far off the stand still counts - a pillar foot 1, as its walk lands)
+  await ensureScaffold(bot, n, opts).catch(() => {})
+  if (opts.shouldStop && opts.shouldStop()) return { ok: false, why: 'stopped' }
+  const on = () => { const p = world.feetPos(bot); return world.dist2(p, at) <= slack && Math.abs(p.y - at.y) <= 1 }
+  if (on()) return { ok: true }
+  const r = await walkBack()
+  return on() ? { ok: true } : { ok: false, why: (r && r.why) || 'not back on the stand' }
+}
 // Filler blocks to stand on while building high (the planner towers with them).
 const SCAFFOLD_WANT = 32 // (THE scaffold stock a build step starts with - the smelt queue keeps cobblestone back to this)
 async function ensureScaffold (bot, n = SCAFFOLD_WANT, { shouldStop } = {}) { // (shouldStop: the caller's day - a top-up is never a night descent)
