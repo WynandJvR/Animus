@@ -36,7 +36,7 @@ function fluidAround (bot, p, skip) {
   return null
 }
 
-// Pick a mine entrance: dry, standable ground 10-30 blocks from home, outside protected zones.
+// Pick a mine entrance: dry, standable ground HOME_CLEAR-96 blocks from home, outside protected zones.
 // Would a staircase from p heading dir run near a place that has killed us underground, or under a
 // protected build? (checked 70 blocks along the way)
 function pathBad (p, dir) {
@@ -63,6 +63,10 @@ function badMinesNow (bot) {
   return (mem.get().badMines || []).filter(bm => bm.danger || (bm.day != null ? dn != null && dn - bm.day < 3 : deaths.some(d => world.dist2(d, bm) < 16)))
 }
 const ENTRANCE_R = 96
+// HOME'S GROUNDS for a mine: no stair or tunnel cell within this of home - and so no entrance either. ONE number: the
+// entrance rings began at 10 while the stairs refused anything under 24, and every mine sited 16 from home was abandoned
+// at its first step, two a day, the night's mining lost (2026-10-03)
+const HOME_CLEAR = 24
 const ORE_TUNE_R = 64 // (the ore band's tuning never walks past this: a 90-block site over a 10-block one for a better level is no bargain; audit)
 function chooseEntrance (bot, oreLv = null) {
   const home = mem.get().home || world.feetPos(bot)
@@ -72,7 +76,7 @@ function chooseEntrance (bot, oreLv = null) {
   let bestOre = null
   // (out to 96 when nothing nearer will do: deaths, given-up sites and someone else's places round home left "no safe spot"
   //  within 64, and no iron at all, 2026-10-03)
-  for (let r = 10; r <= ENTRANCE_R; r += 6) {
+  for (let r = HOME_CLEAR; r <= ENTRANCE_R; r += 6) {
     const found = []
     for (let a = 0; a < 16; a++) {
       const x = Math.round(home.x + Math.cos(a * Math.PI / 8) * r)
@@ -91,6 +95,9 @@ function chooseEntrance (bot, oreLv = null) {
       let bestDir = null
       for (const dir of [away, { x: away.z, z: away.x }, { x: -away.z, z: -away.x }]) {
         if (pathBad({ x, z }, dir)) continue
+        // (the whole flight stays off home's grounds, the entrance too: the perpendicular toward home's axis passed 23.3 from
+        //  home off a ring-24 point, and the digger refuses that - the same first-step abandon; audit)
+        { let near = false; for (let k = 0; k <= Math.max(0, y - levelFor(y)); k++) if (Math.hypot(x + dir.x * k - home.x, z + dir.z * k - home.z) < HOME_CLEAR) { near = true; break } if (near) continue }
         const lv = coveredLevel(bot, { x, y, z }, dir, levelFor(y))
         if (lv != null && (!bestDir || lv < bestDir.level)) bestDir = { dir, level: lv }
       }
@@ -648,7 +655,8 @@ async function mineFor (bot, itemName, target, ctx = {}) {
   // (never a new mine for "the wrong level": the mine was thrown away for one and a new staircase dug from the surface -
   //  four entrances round home in one night for andesite, iron and deepslate, 2026-09-30)
   if (m) m = pickLevel(m, ore, itemName)
-  if (!m && !ore && !world.openSky(bot, world.feetPos(bot)) && bot.entity.position.y < ((home && home.y) || 64) - 8) {
+  // (not under home's grounds: there every tunnel cell is refused - turn, turn, boxed in, abandoned, every trip; audit)
+  if (!m && !ore && !world.openSky(bot, world.feetPos(bot)) && bot.entity.position.y < ((home && home.y) || 64) - 8 && !(home && Math.hypot(bot.entity.position.x - home.x, bot.entity.position.z - home.z) < HOME_CLEAR)) {
     // already underground: tunnel from right here
     const me = world.feetPos(bot)
     let dir = DIRS[0]
@@ -864,7 +872,7 @@ async function digStep (bot, m, c, q) {
   //  taking it dropped the gravel under the bot into a 12-deep cave - 13 down and buried, 2026-10-03; the leg turns)
   if (fallingOverNothing(bot, c.x, c.y - 1, c.z)) { log('mine', `my floor at ${move.fmt({ x: c.x, y: c.y - 1, z: c.z })} is ${world.at(bot, c.x, c.y - 1, c.z).name} over nothing - not digging beside it`); return false }
   if (underOwnZone(q)) { log('mine', `the stairs would run under a protected build at ${move.fmt(q)}`); return false }
-  { const h = mem.get().home; if (h && Math.hypot(q.x - h.x, q.z - h.z) < 24) { log('mine', `the stairs would run under home's grounds at ${move.fmt(q)}`); return false } } // (the tunnels' own rule)
+  { const h = mem.get().home; if (h && Math.hypot(q.x - h.x, q.z - h.z) < HOME_CLEAR) { log('mine', `the stairs would run under home's grounds at ${move.fmt(q)}`); return false } } // (the tunnels' own rule)
   const cells = [{ x: q.x, y: q.y + 2, z: q.z }, { x: q.x, y: q.y + 1, z: q.z }, q]
   for (const cell of cells) {
     const f = fluidAround(bot, cell, p => cells.some(o => o.x === p.x && o.y === p.y && o.z === p.z) || (p.x === c.x && p.z === c.z))
@@ -928,7 +936,7 @@ async function openTunnelCell (bot, m, from, q) {
   if (underOwnZone(q)) return false // never under the castle or the base
   // (nor under home's grounds at any depth: the y79 legs turned and turned again until they ran 10 blocks from the bed, into
   //  the rock round an old shaft - the night's climb out came up beside it and a zombie knocked the bot down it, 2026-10-02)
-  { const h = mem.get().home; if (h && Math.hypot(q.x - h.x, q.z - h.z) < 24) return false }
+  { const h = mem.get().home; if (h && Math.hypot(q.x - h.x, q.z - h.z) < HOME_CLEAR) return false }
   // rock over the tunnel: the surface at least two above its three-high roof. A level tunnel on a hillside ran out
   // into the open slope and walled up the "cave openings" - the sky - with cobble and torches: a cut across the hill
   // that looked like a building (2026-09-24). Open ground ahead is a blocked step: the leg turns back into the hill.
