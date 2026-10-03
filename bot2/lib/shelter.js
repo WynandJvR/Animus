@@ -70,7 +70,9 @@ async function obtainBed (bot, ctx = {}) {
     await act.collectDrops(bot, { radius: 4, maxMs: 4000 })
     if (hasBedItem(bot)) return true
   }
-  const c = inv.counts(bot)
+  // (wool of one colour in the pack AND the chests - the ensure withdraws it: two light grey sheared from the pen sat in the
+  //  chest while the bed went looking for white, 2026-10-03)
+  const c = Object.assign({}, inv.counts(bot)); for (const [n, k] of Object.entries(require('./base').bankCounts())) c[n] = (c[n] || 0) + k
   const colour = Object.keys(c).find(n => /_wool$/.test(n) && c[n] >= 3)
   if (colour) return craft().ensure(bot, colour.replace('_wool', '_bed'), 1, ctx)
   // most sheep are white

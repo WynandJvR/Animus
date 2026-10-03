@@ -220,12 +220,15 @@ function furnishingInPack () {
 // (WOOL_SEARCH_MS) on the search's own trail (gather.explore: new ground each time). A bed skips every night after it
 const WOOL_SEARCH_MS = 4 * 60000
 function woolSearchDue () {
+  // (not while a sheep stands in our pen: its wool grows back and the pen's shearing brings the bed's - the day's search
+  //  went 208 blocks out with a sheep penned at home, 2026-10-03)
+  if (pen.pen() && (pen.observe(bot) || { n: 0 }).n > 0) return false
   return !shelter.hasBedItem(bot) && mem.get().woolSearchDay !== day.dayNo(bot) && world.phase(bot) === 'day' && world.ticksUntilNight(bot) > 6000
 }
 function bedObtainable () {
   if (shelter.hasBedItem(bot)) return true
   if (Object.values(bot.entities).some(e => { try { return e && e.name === 'item' && e.position && e.position.distanceTo(bot.entity.position) < 48 && /_bed$/.test(e.getDroppedItem().name) } catch { return false } })) return true
-  const c = inv.counts(bot)
+  const c = Object.assign({}, inv.counts(bot)); for (const [n, k] of Object.entries(base.bankCounts())) c[n] = (c[n] || 0) + k // (the chests' too)
   if (Object.keys(c).some(n => /_wool$/.test(n) && c[n] >= 3)) return true
   const home = mem.get().home
   if (world.findBlocks(bot, /_bed$/, { maxDistance: 48, count: 1, point: home ? new Vec3(home.x, home.y, home.z) : undefined }).length) return true
@@ -1211,7 +1214,9 @@ let cellCostPlanner = null // (the planner the memo was priced by: a new one - r
 // while the bread is short
 function penArgs () {
   const wheat = inv.count(bot, 'wheat') + base.bankCount('wheat')
-  return { woolWanted: demandWool, wheat: Math.max(0, wheat - (breadStock() < BREAD_WANTED ? 9 : 0)) }
+  // (the bed's 3 when there is none: with the build's wool skipped the pen would never be sheared for it)
+  const bedWool = mem.get().bed || shelter.hasBedItem(bot) ? 0 : 3
+  return { woolWanted: demandWool + bedWool, wheat: Math.max(0, wheat - (breadStock() < BREAD_WANTED ? 9 : 0)) }
 }
 function treesFor (tot) {
   const logs = (tot.raw.log || 0) + Math.ceil((tot.raw.fuel || 0) * 8 / 7)
