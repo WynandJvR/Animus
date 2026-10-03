@@ -466,7 +466,11 @@ function decide () {
     // (the night is free time for the mine when the build waits on stone: a bed skips it, and the mining then came out of
     //  the building daylight - the hub at 2659 waiting on smooth stone with 9 cobblestone to smelt, 2026-10-03. Short of
     //  stone for the next layers and a mine to work (or none yet: the dusk rule below starts one): mined, not slept)
-    const mineTheNight = dusk && home && dHome < 32 && build.getJob() && build.needsWork(bot) && nightFed() && inv.bestTool(bot, 'pickaxe', 8) && stoneShort()
+    // (only when a mine rule below can take the night - the existing mine near enough, or none so the dusk rule starts one;
+    //  else the bed as before: skipped with no mine rule able to fire, the bot dug a bunker beside its own bed; audit)
+    const mm0 = mem.get().mine
+    const mineCan = !held('nightMine') && (mm0 ? !!(mm0.entrance && world.dist2(mm0.entrance, home) < 48 && world.dist2(bot.entity.position, mm0.entrance) < 64) : true)
+    const mineTheNight = dusk && home && dHome < 32 && mineCan && build.getJob() && build.needsWork(bot) && nightFed() && inv.bestTool(bot, 'pickaxe', 8) && stoneShort()
     if (bed && world.dist2(bed, bot.entity.position) < (dusk ? 200 : 32) && !mineTheNight && !held('sleep')) return { name: 'sleep', why: `${night ? 'night' : 'dusk'} - my bed is ${Math.round(world.dist2(bed, bot.entity.position))}b away` }
     // a working mine next to home turns the night into mining time: go down at dusk (a short walk)
     {
