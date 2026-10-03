@@ -756,6 +756,8 @@ async function mineFor (bot, itemName, target, ctx = {}) {
         saveMine(m)
         log('mine', 'pack full - taking the haul home')
         await base().depositHaul(bot, { shouldStop: ctx.shouldStop })
+        // (no room made - the chests full, no chest to be had: down again full is a walk for nothing; audit)
+        if (inv.freeSlots(bot) <= 2) { log('mine', 'pack still full after the deposit - the trip ends'); saveMine(m); return inv.count(bot, itemName) >= target }
         await provisionForMine(bot, oreTrip ? Infinity : Math.max(0, target - inv.count(bot, itemName)))
         const down = await downTheMine(bot, m, ctx)
         if (!down.ok) { log('mine', `couldn't get back down to the face (${down.why})`); return false }

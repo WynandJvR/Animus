@@ -225,7 +225,16 @@ async function placeChest (bot) {
 }
 async function placeChestInner (bot) {
   const h = home()
-  if (!inv.has(bot, 'chest')) { if (!await craft().ensure(bot, 'chest', 1, { noWithdraw: true })) return null }
+  // (a chest made by day only, and stopped at the evening: its wood can be a walk - 116 blocks and a boat at tod 11200 for a
+  //  deposit, back through a spider, creepers, a zombie and a skeleton in the dark, dead with 155 items, 2026-10-04. Late,
+  //  the haul stays in the pack until the morning)
+  const late = () => world.phase(bot) !== 'day' || world.ticksUntilNight(bot) < 2400
+  if (!inv.has(bot, 'chest')) {
+    // (the pack's own wood is no walk - a chest and a table of it are made at home whatever the hour; audit)
+    const packWood = inv.items(bot).reduce((n, i) => n + (/_planks$/.test(i.name) ? i.count : craft().isLogName(i.name) ? 4 * i.count : 0), 0)
+    if (late() && packWood < 12) { log('base', 'the chests are full and no chest in the pack - one made in the morning; the haul stays with me'); return null }
+    if (!await craft().ensure(bot, 'chest', 1, { noWithdraw: true, shouldStop: packWood >= 12 ? undefined : late })) return null
+  }
   // making the chest may have taken us to a tree: storage goes AT home
   if (h && world.dist2(bot.entity.position, h) > 6) await move.travel(bot, h, { range: 2, label: 'home with the chest' })
   const me = world.feetPos(bot)
