@@ -2051,7 +2051,16 @@ function clusterStand (bot, c, ready, bad = new Set(), reachOf = null) {
     const inR = !reachOf || reachOf(p) ? 1 : 0
     if (!best || inR > best.inR || (inR === best.inR && (n > best.n || (n === best.n && d < best.d)))) best = { x: p.x, y: p.y, z: p.z, n, d, inR }
   }
-  if (best && reachOf && !best.inR) best.out = true
+  if (best && reachOf && !best.inR) {
+    // (every stand out of walking reach and HIGH - a roof's own top, 3+ over where the bot walks: no room to wait for a way
+    //  into; the cell goes its own way - the look-at walk, the pillar. Held as "a closed compartment", the market stalls'
+    //  upper roofs at y70 waited for good, the ground at y65, 2026-10-03. A closed room's stands stand at its floor)
+    // (and UNCOVERED - nothing of the build over it, open sky: a raised room's floor has its ceiling over it, built or to come,
+    //  and waits for its way in as before; audit)
+    const covered = () => { for (let y = best.y + 2; y <= job.box.y2; y++) if (job.index.has(key({ x: best.x, y, z: best.z }))) return true; return !world.openSky(bot, new Vec3(best.x, best.y, best.z)) }
+    if (best.y - Math.floor(me.y + 0.01) >= 3 && !covered()) return null
+    best.out = true
+  }
   return best
 }
 
