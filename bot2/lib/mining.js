@@ -631,6 +631,9 @@ async function mineFor (bot, itemName, target, ctx = {}) {
     saveMine(m)
     log('mine', `new mine at ${move.fmt(m.entrance)} heading ${m.dir.x},${m.dir.z} to y${m.level}`)
   }
+  // (room before the walk, at home: a trip set out with a full pack reached the face, said "pack full - taking the haul
+  //  home" at 0 of 11 and walked back - two 60-block crossings for nothing, 2026-10-03)
+  { const h = mem.get().home; if (inv.freeSlots(bot) <= 4 && h && world.dist3(bot.entity.position, h) < 24) { log('mine', `pack nearly full (${inv.freeSlots(bot)} free) - the haul in the chest before the walk to the mine`); await base().depositHaul(bot, { shouldStop: ctx.shouldStop }).catch(() => {}) } }
   await provisionForMine(bot)
   // an ore showing in a cave wall or a cliff first - and the vein behind it, each block dug bares the next
   if (craft().GATHER[itemName] && craft().GATHER[itemName].ore && await takeKnownOre(bot, itemName, target, ctx)) return true
