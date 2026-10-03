@@ -18,9 +18,14 @@ const searchProf = { exMs: 0, exCalls: 0, exMiss: 0, gbMs: 0, gbCalls: 0, reset 
 // (a throw inside the pathfinder's tick - caught by the patched wrapper, one path reset: counted, and said at most every
 //  10s with its first stack line - the watchdog alarms on "path_error"; patch-mc262.js)
 let pathErrors = 0; let pathErrSaid = 0
+// (when each cell last changed: the planner's block cache asks it on every hit, so a block dug or placed mid-search is read
+//  afresh - never a stale floor. Past 20000 cells the whole cache is dropped: changedEpoch)
+const changedAt = new Map(); let changedEpoch = 0
 function bindBot (b) {
   botRef = b
   try { b.on('path_reset', () => { pathGen++ }) } catch {}
+  try { b.on('chunkColumnUnload', () => { changedEpoch++ }) } catch {} // (cells the world dropped: the cache with them; audit)
+  try { b.on('blockUpdate', (o, n) => { const q = (n && n.position) || (o && o.position); if (!q) return; if (changedAt.size > 20000) { changedAt.clear(); changedEpoch++ } changedAt.set(q.x + ',' + q.y + ',' + q.z, performance.now()) }) } catch {}
   try { b.on('path_error', e => { pathErrors++; if (Date.now() - pathErrSaid > 10000) { pathErrSaid = Date.now(); require('./log').log('move', `path_error #${pathErrors}: ${e && e.message} ${((e && e.stack) || '').split(/\r?\n/)[1] || ''} - the path was reset`) } }) } catch {}
   // (a gate or door on the path refused its click - innocent once; a streak at one spot is the stuck retry the watchdog
   //  alarms on: "path_use_error at x,y,z")
@@ -175,10 +180,24 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
   // stalls on the closed leaf and the stall recovery crosses it by hand (crossDoor), as a player opens a door.
   if (!doorIds) doorIds = new Set(Object.values(md.blocksByName).filter(b => /_door$/.test(b.name) && !/iron_door/.test(b.name)).map(b => b.id))
   const getBlock0 = m.getBlock.bind(m)
+  // ONE BLOCK OBJECT A CELL, a search: the planner asked for the same cells over and over - 1.85 million block reads, 2.1s of a
+  // 2.3s search, each a fresh Block built from the world - and the way round the pit by the mine was never found in its 8s,
+  // 2026-10-03. Cached by the cell; a cell changed since (changedAt) is read afresh; an unloaded cell (no position) never
+  // kept; dropped with a path reset, as the rule memos are
+  const bcache = new Map(); let bgen = pathGen; let bep = changedEpoch
   m.getBlock = (pos, dx, dy, dz) => {
     const tg = performance.now(); searchProf.gbCalls++
-    const b = getBlock0(pos, dx, dy, dz)
+    if (bgen !== pathGen || bep !== changedEpoch || bcache.size > 50000) { bcache.clear(); bgen = pathGen; bep = changedEpoch }
+    const k = pos ? (pos.x + dx) + ',' + (pos.y + dy) + ',' + (pos.z + dz) : null
+    const hit = k ? bcache.get(k) : null
+    if (hit) { const c = changedAt.get(k); if (c === undefined || c < hit.t) { hit.b.height = hit.h; searchProf.gbMs += performance.now() - tg; return hit.b } } // (its height as read: the jump-up move adds 1 to a block it was handed - movements.js; audit)
+    const b = getBlockAdj(pos, dx, dy, dz)
+    if (k && b && b.position) bcache.set(k, { b, t: performance.now(), h: b.height })
     searchProf.gbMs += performance.now() - tg
+    return b
+  }
+  function getBlockAdj (pos, dx, dy, dz) {
+    const b = getBlock0(pos, dx, dy, dz)
     if (b && doorIds.has(b.type)) { b.safe = true; b.physical = false; b.replaceable = false; b.height = pos.y + dy }
     // (an IRON door standing OPEN - a plate holds it - is a way through while it stands open: the gate of a walled base;
     //  shut, it stays a wall - no hand opens it; foreign.byTheirGate, audit)
