@@ -294,6 +294,7 @@ const ARMOUR_GEAR = new Set(['shield', 'bucket', 'iron_chestplate', 'iron_leggin
 function ironStock () { return inv.count(bot, 'iron_ingot') + base.bankCount('iron_ingot') + inv.count(bot, 'raw_iron') + base.bankCount('raw_iron') }
 // (core: the gear that carries the fights - shield, chest, head (and the bucket, the shears) - not the legs and the feet)
 const LOW_GEAR = new Set(['iron_leggings', 'iron_boots'])
+let ironTripCore = false // (the trip decide() chose: the core's ingots only, or the whole set - audit)
 function gearIronShort (core = false) {
   // (and the shears' two when they are wanted: the build's leaves wait on them, and no other trip brings iron - audit)
   const need = ironWanted().filter(n => (ARMOUR_GEAR.has(n) || n === 'shears') && !(core && LOW_GEAR.has(n))).reduce((a, n) => a + IRON_COST[n], 0)
@@ -618,7 +619,7 @@ function decide () {
   // (ahead of the build only for the gear that carries the fights: the legs and the feet's 13 ingots took 46% of a morning
   //  after a death, the castle 2%, 2026-10-03 - they go in the castle's gaps, below)
   const ironTripOk = () => gearShort > 0 && !mem.get().ironTripDry && world.phase(bot) === 'day' && world.ticksUntilNight(bot) > 6000 && !held('ironTrip')
-  if (gearIronShort(true) > 0 && ironTripOk()) return { name: 'ironTrip', why: `${gearShort} iron short for ${wanted.filter(n => ARMOUR_GEAR.has(n)).join(', ')} - mining for it` }
+  if (gearIronShort(true) > 0 && ironTripOk()) { ironTripCore = true; return { name: 'ironTrip', why: `${gearIronShort(true)} iron short for ${wanted.filter(n => (ARMOUR_GEAR.has(n) || n === 'shears') && !LOW_GEAR.has(n)).join(', ')} - mining for it` } }
 
   // 9. the build
   // (with its own backoff: a castle step failing in 30ms was retried 26 times in a second)
@@ -657,7 +658,7 @@ function decide () {
     return { name: 'castle', why: 'working on ' + mem.get().build.name }
   }
   // 9b. the rest of the iron gear - legs and feet - in the castle's gaps (held, waiting, between rounds)
-  if (ironTripOk()) return { name: 'ironTrip', why: `${gearShort} iron short for ${wanted.filter(n => ARMOUR_GEAR.has(n)).join(', ')} - mining for it (the castle has nothing for me now)` }
+  if (ironTripOk()) { ironTripCore = false; return { name: 'ironTrip', why: `${gearShort} iron short for ${wanted.filter(n => ARMOUR_GEAR.has(n)).join(', ')} - mining for it (the castle has nothing for me now)` } }
   // 10. our own pillars and stepping stones left standing round home (a batch: one walk takes down many - LITTER_BATCH) -
   //  in the castle's gaps only (held, waiting, the day's end): tidying ahead of it took 40 minutes of a morning, the
   //  castle idle (single goal: the build; audit 2026-09-28)
@@ -1045,13 +1046,16 @@ const TASKS = {
     let made = 0
     for (const n of ironWanted()) {
       // shield and bucket come first: don't spend their ingots on something cheaper further down the list
+      // (the legs and the feet only once the core is in hand: 7 ingots with the chestplate (8) still missing made leggings,
+      //  and the core's shortfall sent the next trip out ahead of the castle again; audit)
+      if (LOW_GEAR.has(n) && gearIronShort(true) > 0) continue
       if (inv.count(bot, 'iron_ingot') < IRON_COST[n]) { if (n === 'shield' || n === 'bucket') break; continue }
       if (await craft.ensure(bot, n, 1, { noWithdraw: true })) { made++; await inv.wearBestArmor(bot) }
     }
     return made > 0
   },
   async ironTrip () {
-    const short = gearIronShort()
+    const short = gearIronShort(ironTripCore)
     if (short <= 0) return true
     const before = inv.count(bot, 'raw_iron')
     mining.resetTripTunnelled()
