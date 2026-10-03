@@ -430,18 +430,20 @@ async function ensurePick (bot) { const ok = await craft().keepTool(bot, 'pickax
 
 // Keep enough in the pack for the mine: a spare pickaxe's worth of sticks and a table.
 let provisioning = false
-async function provisionForMine (bot) {
+async function provisionForMine (bot, want = Infinity) {
   // never re-entered: a pickaxe that needs cobble that needs a mine that needs provisioning recursed
   // 7500 times in a second (2026-09-15)
   if (provisioning) return
   provisioning = true
-  try { await provisionInner(bot) } finally { provisioning = false }
+  try { await provisionInner(bot, want) } finally { provisioning = false }
 }
-async function provisionInner (bot) {
+async function provisionInner (bot, want = Infinity) {
   // sticks for every pickaxe the trip can wear out: a stone pick is ~131 blocks, and the pack's free room is the most a
   // trip digs. Four sticks were two picks: at the y20 face both wore out and the third could not be made (no wood
   // underground) - the bot climbed out digging stone by hand (2026-09-25).
-  const sticks = Math.min(64, 2 * Math.ceil(inv.freeSlots(bot) * 64 / 131) + 2)
+  // (the trip's own count when it has one: an emptied pack read as a 2000-block trip - 34 sticks for 95 cobblestone, the
+  //  chest's 6 short, and the bot walked 200 blocks out for acacia to make them, into a pillager patrol, 2026-10-03)
+  const sticks = Math.min(64, 2 * Math.ceil(Math.min(inv.freeSlots(bot) * 64, want) / 131) + 2)
   if (inv.count(bot, 'stick') < sticks) await craft().ensure(bot, 'stick', sticks).catch(() => {})
   if (!inv.has(bot, 'crafting_table')) await craft().ensure(bot, 'crafting_table', 1).catch(() => {})
   // a spare pickaxe: one wearing out mid-tunnel ends the trip (stone picks last ~130 blocks)
@@ -677,7 +679,9 @@ async function mineFor (bot, itemName, target, ctx = {}) {
   // (room before the walk, at home: a trip set out with a full pack reached the face, said "pack full - taking the haul
   //  home" at 0 of 11 and walked back - two 60-block crossings for nothing, 2026-10-03)
   { const h = mem.get().home; if (inv.freeSlots(bot) <= 4 && h && world.dist3(bot.entity.position, h) < 24) { log('mine', `pack nearly full (${inv.freeSlots(bot)} free) - the haul in the chest before the walk to the mine`); const B = base(); const g = await B.goHome(bot, { shouldStop: ctx.shouldStop }).catch(() => null); if (g && g.ok) await B.depositAll(bot, { keep: (b, i) => i.name === itemName ? Infinity : B.keepCount(b, i) }).catch(() => {}) } } // (what the trip digs stays in the pack: banked, a cobblestone trip dug its own count again; audit)
-  await provisionForMine(bot)
+  // (an ore trip digs many blocks an ore: the room's sizing for it - 4 sticks for 11 raw_iron wore both picks out; audit A2)
+  const oreTrip = !!(craft().GATHER[itemName] && craft().GATHER[itemName].ore)
+  await provisionForMine(bot, oreTrip ? Infinity : Math.max(0, target - inv.count(bot, itemName)))
   // an ore showing in a cave wall or a cliff first - and the vein behind it, each block dug bares the next
   if (craft().GATHER[itemName] && craft().GATHER[itemName].ore && await takeKnownOre(bot, itemName, target, ctx)) return true
   // get to the working face
@@ -742,7 +746,7 @@ async function mineFor (bot, itemName, target, ctx = {}) {
         saveMine(m)
         log('mine', 'pack full - taking the haul home')
         await base().depositHaul(bot, { shouldStop: ctx.shouldStop })
-        await provisionForMine(bot)
+        await provisionForMine(bot, oreTrip ? Infinity : Math.max(0, target - inv.count(bot, itemName)))
         const down = await downTheMine(bot, m, ctx)
         if (!down.ok) { log('mine', `couldn't get back down to the face (${down.why})`); return false }
         const r = await move.goTo(bot, new goals.GoalBlock(m.cursor.x, m.cursor.y, m.cursor.z), { timeoutMs: 180000, stuckMs: 20000, label: 'back to mine face' })

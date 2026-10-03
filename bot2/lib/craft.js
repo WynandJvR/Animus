@@ -431,8 +431,17 @@ async function plankUp (bot, logName, crafts) {
 function preferredWoodHeld (bot) { const c = inv.counts(bot); let best = null; let bn = 0; for (const w of WOODS) { const n = (c[w + '_planks'] || 0) + (c[w + '_log'] || 0) * 4; if (n > bn) { bn = n; best = w } } return best }
 // (the build's own species last: a boat or a table of spruce planks right after an expedition spent its haul - a species
 //  the build places is taken only when no other wood is held, banked, in sight or remembered; audit 2026-09-28)
-function preferredWood (bot, needPlanks = 1) {
+function preferredWood (bot, needPlanks = 1, { ride = false } = {}) {
   let res = new Set(); try { res = require('./materials').reservedSpecies(bot) } catch {}
+  // (another wood held or banked first - no walk)
+  const w0 = pickWood(bot, needPlanks, res, { noWalk: true })
+  if (w0) return w0
+  // A HANDFUL OF THE BUILD'S OWN WOOD held or banked before any walk - chooseRecipe's rule (RESERVED_RIDE, the tally since the
+  // last haul): it rides the build's next wood trip. Two choosers disagreed: chooseRecipe priced the trip, then this one sent
+  // 3 acacia planks for a wooden pickaxe after a tree remembered 139 blocks out, past two pillager deaths and the 187-item
+  // grave's clock, with spruce planks in the chest (2026-10-03)
+  // (opt-in: only craftItem's override, which puts it on the tally - charcoal, boats and doors never ride it; audit A1)
+  if (ride && needPlanks <= RESERVED_RIDE) for (const sp of res) if (woodStock(bot, sp) >= needPlanks && reservedSpent(bot, sp) + needPlanks <= RESERVED_RIDE) return sp
   const w = pickWood(bot, needPlanks, res)
   if (w) return w
   // nothing else anywhere: the reserved wood in hand before a walk to find oak (the last resort)
@@ -440,7 +449,7 @@ function preferredWood (bot, needPlanks = 1) {
   for (const sp of res) if ((c[sp + '_planks'] || 0) + (c[sp + '_log'] || 0) * 4 >= needPlanks) return sp
   return 'oak'
 }
-function pickWood (bot, needPlanks, avoid) {
+function pickWood (bot, needPlanks, avoid, { noWalk = false } = {}) {
   const c = inv.counts(bot)
   const WOODS = WOODS_ALL.filter(w => !avoid.has(w))
   let best = null; let bn = 0
@@ -451,6 +460,7 @@ function pickWood (bot, needPlanks, avoid) {
   let bestB = null; let bnB = 0
   for (const w of WOODS) { const n = (c[w + '_planks'] || 0) + (c[w + '_log'] || 0) * 4 + (bank[w + '_planks'] || 0) + (bank[w + '_log'] || 0) * 4; if (n > bnB) { bnB = n; bestB = w } }
   if (bestB && bnB >= needPlanks) return bestB
+  if (noWalk) return null
   // not quite enough: top up the wood already in hand when it grows in sight or where we saw it - 12 birch planks held,
   // 14 wanted, and the bot dug down through the mountain after a jungle tree below the site (2026-09-27)
   const g0 = require('./gather')
@@ -505,9 +515,14 @@ async function craftItem (bot, name, n, ctx) {
       let ing = md.items[id].name
       const total = per * crafts + (/_planks$/.test(ing) && Object.keys(need).some(k => md.items[k].name === 'stick') && inv.count(bot, 'stick') < need[md.itemsByName.stick.id] * crafts ? 2 : 0)
       if (/_planks$/.test(ing) && inv.count(bot, ing) < total) {
-        const w = preferredWood(bot, total)
+        const w = preferredWood(bot, total, { ride: true })
         const alt = md.recipes[item.id].find(rr => { const nn = recipeIngredients(rr); return Object.keys(nn).some(k => md.items[k].name === w + '_planks') })
-        if (alt) ing = w + '_planks'
+        if (alt) {
+          const chosen = ing; ing = w + '_planks'
+          // (only when the override changed the wood: chooseRecipe's own choice is on the tally already)
+          let res = null; try { res = require('./materials').reservedSpecies(bot) } catch {}
+          if (chosen !== ing && res && res.has(w)) noteReservedSpent(bot, w, Math.max(0, total - inv.count(bot, ing)))
+        }
       }
       if (inv.count(bot, ing) < per * crafts) {
         short = true

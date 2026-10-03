@@ -854,4 +854,4 @@ async function findMatching (bot, match, accept) {
   return null
 }
 
-module.exports = { towerWhy: () => towerWhy, fellMega, noteBiomes, speciesLand, climateLead, SPECIES_BIOMES, onGrounds, treeOK, wildTree, lastChopOutcome, outOfZones, chop, mine, explore, towerUp, noteResource, noteResources, forgetResource, knownResource, fellTree, pickPlants, survey, takeable }
+module.exports = { trunkBase, isNaturalTree, towerWhy: () => towerWhy, fellMega, noteBiomes, speciesLand, climateLead, SPECIES_BIOMES, onGrounds, treeOK, wildTree, lastChopOutcome, outOfZones, chop, mine, explore, towerUp, noteResource, noteResources, forgetResource, knownResource, fellTree, pickPlants, survey, takeable }

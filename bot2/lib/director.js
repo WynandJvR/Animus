@@ -114,6 +114,23 @@ function woolHolds () { const w = mem.get().buildWaiting; return !!w && /_wool$|
 // the next layers short of cobblestone (raw, through the planner: stone, smooth stone, bricks all come from it) - a stack
 function stoneShort () { try { return (mats.planFor(bot, windowNeeds()).raw.cobblestone || 0) >= 64 } catch { return false } }
 function dayStop () { return taskCancelled() || nightSoon() || bot.health <= reflex.hurtLine() || homeByDark() }
+// A TRIP FITS THE DAY when the walk to its source, the walk home from there and a minute's work all end before the rule
+// that calls the bot in: the evening rule (EVENING, a source past the grounds) or the dusk (a source round home). A
+// source not yet known is a 96-block search. Every trip the castle round picked at the day's end was ended at once by
+// those rules - the pack emptied and the shears taken for an oak_leaves trip four evenings running, the sleep the next
+// thing; a 208-block dark oak walk begun at tod 10500 and called home 8s in (2026-10-03)
+const TRIP_WORK = 1200
+function tripFitsDay (raw) {
+  if (world.phase(bot) !== 'day' || dayStop()) return false
+  const me = bot.entity.position; const home = mem.get().home || me
+  // (the mine next to home is the stone and ore's source - unknown, a cobble trip read as a 96-block search; audit A5)
+  const m = mem.get().mine
+  const src = (/^(cobblestone|cobbled_deepslate|raw_iron|coal|granite|diorite|andesite|tuff)$/.test(raw) && m && (m.cursor || m.entrance)) || gather.knownResource(raw, me, /_log$/.test(raw) ? { maxFromHome: 2000 } : undefined)
+  const walk = src ? world.walkTicks(me, src) + world.walkTicks(src, home) : world.walkTicks(me, home) + 2 * world.walkTicks({ x: 0, y: 0, z: 0 }, { x: 96, y: 0, z: 0 })
+  const roundHome = !!src && world.dist2(src, home) <= 32 && world.dist2(me, home) <= 32
+  let t = world.tod(bot); if (t >= 23000) t -= 24000
+  return (roundHome ? 12000 : EVENING) - t > walk + TRIP_WORK
+}
 // heading home: keep walking through dusk; only real night (mobs) stops a trip that is still long
 // (and at the hurt line, when food would mend it or might be found: at hp 4 the trek walked on into a river and drowned,
 //  2026-09-27 - the director heals or finds food first)
@@ -520,7 +537,11 @@ function decide () {
   // (not back into what killed us: a shooter covering the grave or a creeper at it is still there - the second walk into the
   //  skeleton valley fell 13 blocks and fought at hp 11, 2026-09-28; the grave waits for the ground to clear; audit)
   const graveCovered = g0 => coveredGrave(g0)
-  if (g && !held('grave') && (inv.bestWeapon(bot) || world.dist3(g, bot.entity.position) < 10) && !graveCovered(g)) return { name: 'grave', why: `grave ${Math.round(world.dist2(g, bot.entity.position))}b away with ${g.items} items` }
+  // (the GRAVE IS THE RE-ARM when the weapon is in it and none is in the chests: re-armed first, the tools task walked 140
+  //  blocks out for acacia to make a wooden pickaxe while the 187-item grave's twelve minutes ran out 60 blocks from home,
+  //  2026-10-03. By day, uncovered, the trip's caution on - the reflex's cover and flight as on any trip)
+  const graveArms = gg => !!gg && !!mem.get().home && world.dist2(gg, mem.get().home) < 96 && (gg.valuable || []).some(n => /_(sword|axe)$/.test(n)) && !Object.keys(base.bankCounts()).some(n => /_(sword|axe)$/.test(n)) && world.phase(bot) === 'day'
+  if (g && !held('grave') && (inv.bestWeapon(bot) || world.dist3(g, bot.entity.position) < 10 || graveArms(g)) && !graveCovered(g)) return { name: 'grave', why: `grave ${Math.round(world.dist2(g, bot.entity.position))}b away with ${g.items} items` }
 
   // 2a. our bed is not our spawn (another player slept on the account; the bed was moved): used by day, at once - a death
   //     sent the bot to someone else's base 1500 blocks from its grave while it waited for night (2026-10-02)
@@ -1491,7 +1512,7 @@ async function castleWorkInner () {
     //  its clay among them, less the coal and charcoal held and in the furnaces. One number, not a hand count; audit)
     const noFuel = (win0.raw.fuel || 0) > 0
     const raw0 = (noFuel && chain0.includes('fuel') ? 'fuel' : null) || chain0.find(r => r !== 'fuel' && win0.raw[r] > 0) || chain0.find(r => win0.raw[r] > 0)
-    const fits = r => r !== 'clay_ball' && r !== 'sand' ? world.ticksUntilNight(bot) > 2400 : (r === 'sand' ? !clay.exhausted('sand') && clay.tripFits(bot, 'sand') : !clay.exhausted() && clay.tripFits(bot))
+    const fits = r => r !== 'clay_ball' && r !== 'sand' ? tripFitsDay(r) : (r === 'sand' ? !clay.exhausted('sand') && clay.tripFits(bot, 'sand') : !clay.exhausted() && clay.tripFits(bot))
     if (raw0 && fits(raw0)) {
       log('dir', `the build waits on ${want} - ${win0.raw[raw0]} ${raw0} first, while the day is young`)
       // (a packful - see the round's gather below: the whole build's shortfall, from the cached castle status)
@@ -1569,8 +1590,7 @@ async function castleWorkInner () {
     if (!mats.hasRoute(r)) return false // (no skill for it yet: its cells wait, never a trip)
     if (r === 'clay_ball') return !clay.exhausted() && clay.tripFits(bot)
     if (r === 'sand') return !clay.exhausted('sand') && clay.tripFits(bot, 'sand')
-    if (nearDusk && /^(cobblestone|granite|raw_iron|wool|red_flower)$/.test(r)) return false
-    return true
+    return tripFitsDay(r)
   }
   // an input already in the chest that only lacks fuel (66 clay balls "waiting in the chest" while the bot went
   // for more clay, 2026-09-23): the fire is the bottleneck, not the input
@@ -1714,6 +1734,7 @@ async function gatherFor (raw, short) {
   }
 }
 async function gatherForInner (raw, short) {
+  if (dayStop()) return false
   const put = notToday.get(raw)
   if (put) { if (!(day.dayNo(bot) > put.day) || world.isNight(bot)) return false; notToday.delete(raw); log('dir', `${raw}: a new day - the trip is open again`) }
   // AN EMPTY PACK FOR THE TRIP: a trip is sized by the room in the pack, and the pack left home with what the builder

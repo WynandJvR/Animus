@@ -216,14 +216,108 @@ function fromGround (bot, p) {
   for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) for (let dy = 0; dy <= 4; dy++) if (world.standable(bot, p.x + dx, p.y - dy, p.z + dz)) return true
   return false
 }
+// THE CROWN, A PLAYER'S WAY: leaves are mostly out of reach from the ground - a crown is 40-60 leaves and the ground sees
+// the bottom layer: two oak_leaves trips brought 69 and 2 toward a build that wants 1934 (2026-09-29..10-03). Up the
+// tree's own trunk column instead - the bottom log dug, stepped into, a filler under the feet each level (towerUp, the
+// chop's own climb), every natural leaf of the kind in reach sheared at each level BEFORE the log over the head is dug
+// (the logs above keep the crown from decaying while we work), then down our own pillar from the top and the drops picked
+// up. The trunk's logs come home too. Returns the leaves got, or -1 when the tree could not be got to.
+const LEAF_LOG = { azalea: 'oak', flowering_azalea: 'oak' } // (an azalea tree's trunk is oak)
+const logReFor = s => new RegExp('^' + (LEAF_LOG[s.drops.replace(/_leaves$/, '')] || s.drops.replace(/_leaves$/, '')) + '_log$')
+function crownLeaves (bot, top, re) {
+  return world.findBlocks(bot, re, { maxDistance: 3.6, count: 80, point: top, filter: b => !persistent(b) }).length
+}
+async function shearCrown (bot, basePos, s, target, ctx = {}) {
+  const leafRe = s.blocks; const logRe = logReFor(s)
+  const before = inv.count(bot, s.drops)
+  // the column: the trunk's logs, bottom up
+  let topY = basePos.y
+  for (let dy = 1; dy < 16; dy++) { const b = world.at(bot, basePos.x, basePos.y + dy, basePos.z); if (b && logRe.test(b.name)) topY = basePos.y + dy; else break }
+  const r = await move.goTo(bot, new goals.GoalNear(basePos.x, basePos.y, basePos.z, 2), { timeoutMs: 40000, place: false, label: 'to the tree', shouldStop: ctx.shouldStop })
+  if (!r.ok && !act.reach(bot, basePos, 4.5)) return -1
+  const eye = () => bot.entity.position.offset(0, 1.62, 0)
+  const shearHere = async () => {
+    const here = world.findBlocks(bot, leafRe, { maxDistance: 4.5, count: 60, point: eye(), filter: b => !persistent(b) && gather().outOfZones(b) })
+    for (const b of here) {
+      if (inv.count(bot, s.drops) >= target || stopped(ctx) || inv.freeSlots(bot) < 1) return // (a full pack: the leaves would fall to the ground; audit B3)
+      if (act.reach(bot, b.position, 4.5)) await shearBlock(bot, b)
+    }
+  }
+  await shearHere()
+  // into the stump column: the bottom log dug, stepped into
+  const pillar = []
+  if (inv.count(bot, s.drops) < target && !stopped(ctx) && topY - basePos.y >= 1) {
+    const b0 = world.at(bot, basePos.x, basePos.y, basePos.z)
+    if (b0 && logRe.test(b0.name)) await act.dig(bot, basePos, { timeoutMs: 15000 }).catch(() => false)
+    const c0 = world.at(bot, basePos.x, basePos.y, basePos.z)
+    if (c0 && world.isAirish(c0)) await move.goTo(bot, new goals.GoalBlock(basePos.x, basePos.y, basePos.z), { timeoutMs: 8000, place: false, label: 'into the stump' })
+    const f = bot.entity.position.floored()
+    if (f.x === basePos.x && f.z === basePos.z) {
+      // up: the head's cells cleared (a log dug, a leaf sheared), a filler under the feet, the crown sheared at each level
+      for (let i = 0; i < 12 && inv.count(bot, s.drops) < target && !stopped(ctx) && inv.freeSlots(bot) >= 1; i++) {
+        // (a hostile about: down at once, the descent's way - aloft in an open column is no place to meet it)
+        if (reflex.hostiles(12).some(h => h.e.name !== 'bat')) break
+        const y0 = Math.floor(bot.entity.position.y)
+        if (y0 + 2 >= topY) break // (the top log stays over the head - it holds the crown up for the last shear, dug after it; the crown's top layer is still in reach; audit B1)
+        for (const dy of [1, 2]) {
+          const h = world.at(bot, basePos.x, y0 + dy, basePos.z)
+          if (h && logRe.test(h.name)) await act.dig(bot, new Vec3(basePos.x, y0 + dy, basePos.z), { timeoutMs: 15000, noWalk: true }).catch(() => false)
+          else if (h && world.LEAF_RE.test(h.name) && !persistent(h)) await shearBlock(bot, h) // (any leaf: another tree's ends the climb otherwise; audit B4)
+        }
+        if (!await gather().towerUp(bot, { onPlaced: c => pillar.push(c) })) break
+        await shearHere()
+      }
+      await shearHere()
+      // the trunk's last logs over the head, now the crown is in the pack
+      for (let y = Math.floor(bot.entity.position.y) + 1; y <= topY; y++) { const h = world.at(bot, basePos.x, y, basePos.z); if (h && logRe.test(h.name) && act.reach(bot, h.position, 4.5)) await act.dig(bot, h.position, { timeoutMs: 15000, noWalk: true }).catch(() => false) }
+      // down our own pillar, from the top (the chop's way: never a drop beside the body)
+      // (THE TRUNK COLUMN IS OURS - fellTree's rule: it held this tree's logs a minute ago, so filler in it now is our pillar
+      //  whatever the ledger missed - a lost block left the bot stranded up an open column; audit B2)
+      const FILL = require('./build').FILLER_ITEMS
+      const ours = c => pillar.some(q => q.x === c.x && q.y === c.y && q.z === c.z) ||
+        (c.x === basePos.x && c.z === basePos.z && c.y >= basePos.y && c.y <= topY && (b => !!b && FILL.test(b.name))(world.at(bot, c.x, c.y, c.z)))
+      for (let guard = 0; guard < 20; guard++) {
+        const me = bot.entity.position; const under = { x: Math.floor(me.x), y: Math.floor(me.y - 0.01), z: Math.floor(me.z) }
+        if (!ours(under)) break
+        if (!await act.dig(bot, new Vec3(under.x, under.y, under.z), { timeoutMs: 6000, noWalk: true }).catch(() => false)) break
+        const t0 = Date.now(); while (!bot.entity.onGround && Date.now() - t0 < 1500) await move.sleep(50)
+        const pi = pillar.findIndex(q => q.x === under.x && q.y === under.y && q.z === under.z); if (pi >= 0) pillar.splice(pi, 1)
+      }
+      if (pillar.length) log('forage', `${pillar.length} pillar block(s) left in the trunk column at ${basePos.x},${basePos.z}`)
+    }
+  }
+  await act.collectDrops(bot, { radius: 7, maxMs: 8000 })
+  const got = inv.count(bot, s.drops) - before
+  log('forage', `sheared the crown of the tree at ${move.fmt(basePos)}: +${got} ${s.drops}`)
+  return got
+}
+// The nearest wild tree of the leaves' kind with a crown worth the climb (a dozen of its leaves round the trunk's top)
+function crownTree (bot, s, skip) {
+  const logRe = logReFor(s)
+  const me = bot.entity.position; const seen = new Set()
+  const logs = world.findBlocks(bot, logRe, { maxDistance: 64, count: 60, filter: b => gather().outOfZones(b) }) // (wild trees only: the orchard's are grown for logs, and its zone refuses the climb's digs)
+  const out = []
+  for (const b of logs) {
+    const bp = gather().trunkBase(bot, b); const k = key(bp)
+    if (seen.has(k) || skip.has(k)) continue
+    seen.add(k)
+    if (Math.abs(bp.y - me.y) > 12 || !gather().isNaturalTree(bot, bp)) continue
+    let top = bp; for (let dy = 1; dy < 16; dy++) { const t = world.at(bot, bp.x, bp.y + dy, bp.z); if (t && logRe.test(t.name)) top = t.position; else break }
+    if (crownLeaves(bot, top, s.blocks) < 12) continue
+    out.push(bp)
+  }
+  return out.sort((a, b) => world.dist3(a, me) - world.dist3(b, me))[0] || null
+}
 // Walk to the nearest, cut everything in reach from there, pick up, again. Leaves: a tree's own (never persistent -
-// placed leaves are someone's hedge), from the ground - no towering into a canopy for them.
+// placed leaves are someone's hedge): the crown climbed (shearCrown) while a tree with one is in sight; else from the ground.
 async function shearTrip (bot, s, n, ctx = {}) {
   if (!await ensureShears(bot, ctx)) return 'blocked'
   const label = typeof s.drops === 'string' ? s.drops : 'grass'
   const target = inv.count(bot, s.drops) + n
   const skip = new Set()
   const t0 = Date.now(); let empty = 0; let lastKnown = null
+  const crownSkip = new Set() // (trees climbed, or that could not be got to: once a trip)
+  let noCrown = false
   const ok = b => gather().outOfZones(b) && !skip.has(key(b.position)) && !world.isWaterBlock(world.at(bot, b.position.x, b.position.y + 1, b.position.z)) && (!s.leaves || (!persistent(b) && fromGround(bot, b.position)))
   while (inv.count(bot, s.drops) < target) {
     await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
@@ -232,9 +326,15 @@ async function shearTrip (bot, s, n, ctx = {}) {
     await reflex.waitClear()
     if (inv.freeSlots(bot) <= 1) { await base().makeRoom(bot, 3); if (inv.freeSlots(bot) <= 1) return inv.count(bot, s.drops) >= target || 'cut' }
     if (!shearsHeld(bot) && !await ensureShears(bot, ctx)) return inv.count(bot, s.drops) >= target || 'cut'
+    if (s.leaves && !noCrown) {
+      const tree = crownTree(bot, s, crownSkip)
+      if (!tree) noCrown = true // (the scan is dear: once none, the ground's way for the rest of the trip; audit B5)
+      else { crownSkip.add(key(tree)); empty = 0; if (await shearCrown(bot, tree, s, target, ctx) > 0) gather().noteResource(label, tree); continue } // (a grove that gave leaves: the next trip's lead)
+    }
     const cands = world.findBlocks(bot, s.blocks, { maxDistance: 40, count: 48, filter: ok })
     if (!cands.length) {
       if (++empty > 3) { log('forage', `no ${label} to shear around here`); break }
+      noCrown = false // (a walk to new ground: its trees looked at again)
       const known = gather().knownResource(label, bot.entity.position)
       if (known && known !== lastKnown && world.dist2(known, bot.entity.position) > 40) { lastKnown = known; await move.travel(bot, known, { range: 8, shouldStop: ctx.shouldStop, label: 'to ' + label }) } else await gather().explore(bot, x => s.blocks.test(x.name), { shouldStop: ctx.shouldStop, label, legs: 2, accept: b => ok(b) })
       continue

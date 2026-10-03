@@ -672,7 +672,13 @@ function takeCover (e, label) {
   shieldDown()
   try { bot.pathfinder.setGoal(null) } catch {}
   const still = () => { for (const k of ['forward', 'back', 'left', 'right', 'sprint', 'jump']) bot.setControlState(k, false) }
-  if (!canSee(e)) return still()
+  // (out of sight of EVERY shooter about, and nothing landing: a patrol is three to five crossbows - "out of its sight, stay"
+  //  read the one picked, and the others shot the bot standing still, keys none, 16 -> 0 in 10s, twice in two minutes,
+  //  2026-10-03)
+  // (a SHOOTER's hit, not any hp lost: fire or a witch's poison tick every second and would never let the bot stay hidden;
+  //  a shooter fires only with a line to us - its hit is the proof of being seen; audit A3)
+  const hitNow = Date.now() - lastHurtAt < 2500 && !!lastHurtBy && RANGED.has(lastHurtBy.name)
+  if (!hitNow && !shootersAbout(e).some(s => canSee(s))) return still()
   const h = fleeHeading(e)
   if (h && h.hidden) { bot.setControlState('back', false); return steerTo(h, { jump: h.jump, sprint: bot.food > 6 }) }
   const f = bot.entity.position.floored(); const ck = f.x + ',' + f.y + ',' + f.z
@@ -683,15 +689,26 @@ function takeCover (e, label) {
   if (h) { bot.setControlState('back', false); return steerTo(h, { jump: h.jump, sprint: bot.food > 6 }) }
   still(); bot.setControlState('back', !pinned)
 }
+// every shooter about that can reach us - the one picked first: a patrol, never only the one the rows chose (2026-10-03)
+function shootersAbout (t) {
+  const me = bot.entity.position
+  const out = t && RANGED.has(t.name) ? [t] : []
+  for (const h of hostiles(24)) if (h.e !== t && RANGED.has(h.e.name) && Math.abs(h.e.position.y - me.y) < 12) out.push(h.e)
+  return out
+}
 function fleeHeading (t) {
   const me = bot.entity.position
-  const away = Math.atan2(me.z - t.position.z, me.x - t.position.x)
-  if (fleeMemo && fleeMemo.id === t.id && fleeMemo.at.distanceTo(me) < 1 && Math.abs(((away - fleeMemo.away) + 3 * Math.PI) % (2 * Math.PI) - Math.PI) < Math.PI / 6) return fleeMemo.best
-  const pick = fleeHeadingPick(t, me, away)
-  fleeMemo = { id: t.id, at: me.clone(), away, best: pick } // (a different mob is a different pick)
+  // (from a shooter: away from the patrol's middle, not the one picked - fled from one, the bot ran along the others' line)
+  const sh = RANGED.has(t.name) ? shootersAbout(t) : [t]
+  const cx = sh.reduce((a, e) => a + e.position.x, 0) / sh.length; const cz = sh.reduce((a, e) => a + e.position.z, 0) / sh.length
+  const away = Math.atan2(me.z - cz, me.x - cx)
+  const ids = sh.map(e => e.id).sort((a, b) => a - b).join(',') // (stable: the distance order swaps each tick in a moving patrol)
+  if (fleeMemo && fleeMemo.id === t.id && fleeMemo.ids === ids && fleeMemo.at.distanceTo(me) < 1 && Math.abs(((away - fleeMemo.away) + 3 * Math.PI) % (2 * Math.PI) - Math.PI) < Math.PI / 6) return fleeMemo.best
+  const pick = fleeHeadingPick(t, me, away, sh)
+  fleeMemo = { id: t.id, ids, at: me.clone(), away, best: pick } // (a different mob is a different pick)
   return pick
 }
-function fleeHeadingPick (t, me, away) {
+function fleeHeadingPick (t, me, away, sh = [t]) {
   // afloat: no dry step within three blocks mid-river, and "back" drifted the bot in place while drowned hit it to death
   // (2026-09-27) - swim for the nearest bank that is not toward the threat
   if (world.feetInWater(bot) && !bot.vehicle) return shoreHeading(me, away)
@@ -730,8 +747,9 @@ function fleeHeadingPick (t, me, away) {
     if (!swept) continue
     // (from a SHOOTER: a cell out of its sight first - cover beats distance; audit 2026-10-02)
     // (the body AND the head out of its sight: an overhang hides a head, not a chest; audit)
-    const sEye = t.position.offset(0, (t.height || 1.9) * 0.85, 0); const at = new Vec3(cell.x + 0.5, cell.y, cell.z + 0.5)
-    const hidden = RANGED.has(t.name) ? (!canSee({ position: at, height: 1.8 }, sEye) && !canSee({ position: at, height: 1.1 }, sEye)) : false
+    // (from EVERY shooter about: a cell out of one crossbow's sight was in the next one's, 2026-10-03)
+    const at = new Vec3(cell.x + 0.5, cell.y, cell.z + 0.5)
+    const hidden = RANGED.has(t.name) ? sh.every(s => { const sEye = s.position.offset(0, (s.height || 1.9) * 0.85, 0); return !canSee({ position: at, height: 1.8 }, sEye) && !canSee({ position: at, height: 1.1 }, sEye) }) : false
     if (!best || (hidden && !best.hidden) || (hidden === best.hidden && diff < best.diff)) best = { x: cell.x, y: cell.y, z: cell.z, jump, diff, hidden }
   }
   return best
