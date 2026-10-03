@@ -945,6 +945,10 @@ const TASKS = {
     return (await orchard.plant(bot, { demandTrees, shouldStop: dayStop })) > 0
   },
   async tools () {
+    // (room first: a full pack takes nothing from the chest and keeps no craft's result - "the server did not hand over the
+    //  result" for a stone axe twice in a row with the deposit due the decision after, 2026-10-03; makeRoom tosses junk and,
+    //  at home, banks the haul)
+    if (inv.freeSlots(bot) < 2) await base.makeRoom(bot, 3).catch(() => false)
     for (const t of missingKit()) {
       // (the bow and arrows come out of the chest: nothing here makes them)
       if (t === 'filler') {
