@@ -586,12 +586,8 @@ function decide () {
     if (!farm.farm() && !held('farm')) return { name: 'farm', why: 'no farm - bread does not run out like animals do' }
     // a farm to walk: one soil level, nothing but crops on it (the operator asked for it clean and flat)
     if (farm.farm() && farm.farmIsHome(bot) && farm.farm().water && !farm.waterNeedsFixing(bot) && world.phase(bot) === 'day' && !farm.farmLevel(bot) && !held('levelFarm')) return { name: 'levelFarm', why: `the farm is uneven or cluttered (${farm.levelWork(bot).length} fixes)` }
-    // the yard round the safehouse: holes filled, stray blocks down (a pit by the door stood for days)
     // (a stray shaft on the grounds that someone fell into: capped flush, before anything else here - see reflex's fall line)
-    // (a blast's hole on our ground: put back - craters.js)
-    if (world.phase(bot) === 'day' && dHome < 96 && !held('fillCraters')) { const n = require('./craters').open(bot).length; if (n) return { name: 'fillCraters', why: `${n} cells a blast took round home and the site - putting the ground back` } }
     if (world.phase(bot) === 'day' && (mem.get().shaftsToFill || []).length && !held('fillShaft')) return { name: 'fillShaft', why: `${mem.get().shaftsToFill.length} hole${mem.get().shaftsToFill.length > 1 ? 's' : ''} on the grounds that I fell into - capping ${mem.get().shaftsToFill.length > 1 ? 'them' : 'it'}` }
-    if (world.phase(bot) === 'day' && hut.complete(bot) && !held('levelYard')) { const n = hut.yardWork(bot).length; if (n) return { name: 'levelYard', why: `the yard has ${n} holes or stray blocks` } }
     // a watered plot still at its starting size: widen it to everything the water reaches
     if (farm.farm() && farm.farmIsHome(bot) && farm.farm().water && farm.farm().cells.length < 60 && farm.farmLevel(bot) && farm.fullPlot(bot, farm.farm()).length > farm.farm().cells.length && inv.count(bot, 'wheat_seeds') + base.bankCount('wheat_seeds') >= 8 && !held('farm')) return { name: 'farm', why: `the farm is ${farm.farm().cells.length} cells - widening it to all the water reaches` }
     if (farm.farm() && farm.farmIsHome(bot) && !farm.waterNeedsFixing(bot) && inv.count(bot, 'wheat_seeds') + base.bankCount('wheat_seeds') >= 4 && (farm.unplantedCount(bot) >= 8 || (farm.unplantedCount(bot) > 0 && breadStock() < BREAD_WANTED)) && !held('farm')) return { name: 'farm', why: `${farm.unplantedCount(bot)} farm cells unplanted and ${inv.count(bot, 'wheat_seeds')} seeds in hand` }
@@ -663,6 +659,12 @@ function decide () {
   }
   // 9b. the rest of the iron gear - legs and feet - in the castle's gaps (held, waiting, between rounds)
   if (ironTripOk()) { ironTripCore = false; return { name: 'ironTrip', why: `${gearShort} iron short for ${wanted.filter(n => ARMOUR_GEAR.has(n)).join(', ')} - mining for it (the castle has nothing for me now)` } }
+  // 9c. the grounds made good - a blast's craters put back (craters.js), the yard's holes filled and stray blocks down - in
+  //  the build's gaps: ahead of it, a new base by the world spawn spent its first hour on lighting, craters and the yard
+  //  with the hub not begun (2026-10-03); the operator: cleaning up after the build is fine. (A shaft someone can fall
+  //  into is still capped first, above.)
+  if (world.phase(bot) === 'day' && dHome < 96 && !nightSoon() && !held('fillCraters')) { const n = require('./craters').open(bot).length; if (n) return { name: 'fillCraters', why: `${n} cells a blast took round home and the site - putting the ground back` } }
+  if (dHome < 64 && world.phase(bot) === 'day' && !nightSoon() && hut.complete(bot) && !held('levelYard')) { const n = hut.yardWork(bot).length; if (n) return { name: 'levelYard', why: `the yard has ${n} holes or stray blocks` } }
   // 10. our own pillars and stepping stones left standing round home (a batch: one walk takes down many - LITTER_BATCH) -
   //  in the castle's gaps only (held, waiting, the day's end): tidying ahead of it took 40 minutes of a morning, the
   //  castle idle (single goal: the build; audit 2026-09-28)
