@@ -246,7 +246,7 @@ async function woolFor (bot, n, ctx = {}, colour = 'white') {
         log('food', `no sheep where they were seen at ${wentTo.x},${wentTo.z} - forgotten`)
         wentTo = null
       }
-      if (++empty > 4) { log('food', 'no sheep for wool nearby'); return false }
+      if (++empty > (ctx.searchLegs || 4)) { log('food', 'no sheep for wool nearby'); return false } // (searchLegs: the day's capped bed search looks until its time runs out - five looks were a minute of its four, 2026-10-03)
       const anchor = mem.get().home || bot.entity.position
       const known = (mem.get().mobs || {}).sheep ? mem.get().mobs.sheep.filter(p => world.dist2(p, anchor) < 200).sort((a, b) => world.dist2(a, bot.entity.position) - world.dist2(b, bot.entity.position))[0] : null
       const fit = bot.health >= 12 && world.phase(bot) === 'day'

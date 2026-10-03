@@ -1062,7 +1062,7 @@ const TASKS = {
       const search = !bedObtainable()
       if (search) mem.set('woolSearchDay', day.dayNo(bot))
       const t0 = Date.now()
-      const ok = await shelter.obtainBed(bot, { shouldStop: () => dayStop() || (search && Date.now() - t0 > WOOL_SEARCH_MS) })
+      const ok = await shelter.obtainBed(bot, { shouldStop: () => dayStop() || (search && Date.now() - t0 > WOOL_SEARCH_MS), searchLegs: search ? 24 : undefined })
       if (!ok) return false
     }
     if (!hut.shellComplete(bot)) return true // (carried until the safehouse stands - shelter first)
