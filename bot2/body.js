@@ -241,12 +241,18 @@ function rearm (bot) {
   lastRearmAt = Date.now()
   rearms++
   if (bot.vehicle) {
-    // (a seat a sit plugin made - GSit's armor stand under stairs the builder clicked: the dismount packet did nothing, four
-    //  minutes stuck on a hub bench, 2026-10-03; such a seat is left by sneaking, as a player does)
-    if (/armor_stand/.test(bot.vehicle.name || '')) {
-      try { bot.setControlState('sneak', true); setTimeout(() => { try { bot.setControlState('sneak', false) } catch {} }, 600) } catch {}
-    }
-    try { bot.dismount(); return 'dismount(' + (bot.vehicle.name || 'vehicle') + ')' } catch (e) { return 'dismount threw: ' + e.message }
+    // (1.21.6+: getting off anything is the sneak key held - player_input shift - and mineflayer's dismount() still sends
+    //  jump: four minutes on a sit plugin's armor-stand seat under the hub's stairs, the re-arm's dismount every 5s doing
+    //  nothing, 2026-10-03. Held ~1.5s and let go, as boat.js gets out of a boat; the old packet only on old versions; audit)
+    const name = bot.vehicle.name || 'vehicle'
+    try {
+      if (bot.supportFeature && bot.supportFeature('newPlayerInputPacket')) {
+        bot._client.write('player_input', { inputs: { shift: true } })
+        setTimeout(() => { try { bot._client.write('player_input', { inputs: { shift: false } }) } catch {} }, 1500)
+        return 'shift-dismount(' + name + ')'
+      }
+      bot.dismount(); return 'dismount(' + name + ')'
+    } catch (e) { return 'dismount threw: ' + e.message }
   }
   try {
     const conv = require('mineflayer/lib/conversions')
