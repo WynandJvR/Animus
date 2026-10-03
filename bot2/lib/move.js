@@ -1209,7 +1209,19 @@ async function escapeUpInner (bot) {
       if (ours && !world.isAirish(b)) log('move', `climbing out: taking our own ${b.name} over my head at ${bk} - the builder puts it back`)
       if (b && !world.isAirish(b) && !world.isWaterBlock(b) && !await act.dig(bot, b.position, { own: ours, force: ours, allowZones: ['farm', 'base', 'orchard', 'build'], timeoutMs: 8000, noWalk: true })) { log('move', `climbing out: can't clear ${b.name} over my head at ${fmt(b.position)}`); return false }
     }
-    if (await gather.towerUp(bot, { allowZones: ['*'] })) continue // (an escape: any zone, never a build cell)
+    // (the tower's cell an UNPLACED CELL OF THE BUILD - a hole left in the plaza's floor, the bot in it, sides a block too low:
+    //  filler is refused there, and the climb ended "no way up" for half an hour, 2026-10-04. Its own block from the pack goes
+    //  in - the builder's placing, from below - a full block only (a stair or slab from under is placed the wrong way))
+    const tc = jb && jb.index && jb.index.get(f.x + ',' + f.y + ',' + f.z)
+    // (the builder's own item for the cell and its stand-ins - the blueprint's name is not what is placed; and never an
+    //  oriented block - a log on its side, a faced furnace - from below it goes in wrong and the builder digs it out; audit)
+    const want = tc && !tc.clear ? require('./build').itemOf(tc, world.data(bot)) : null
+    const pr = (tc && tc.props) || {}
+    const oriented = Object.keys(pr).some(kk => kk === 'facing' || kk === 'rotation' || (kk === 'axis' && String(pr[kk]) !== 'y'))
+    const have = want && !oriented && !/_(stairs|slab|wall|fence|fence_gate|door|trapdoor|pane|button|plate|carpet|torch|lantern)$|^(glass_pane|iron_bars|ladder|vine)$/.test(want) ? bot.inventory.items().find(i => i.name === want || (tc.itemAlt && tc.itemAlt.test(i.name))) : null
+    const ownItem = have ? have.name : null
+    if (ownItem) log('move', `climbing out: the cell I stand in at ${fmt(f)} is the build's ${ownItem} - putting it in from below`)
+    if (await gather.towerUp(bot, ownItem ? { allowZones: ['*'], builder: true, item: ownItem } : { allowZones: ['*'] })) continue // (an escape: any zone, never a build cell but with its own block)
     // no towering here (in water a jump never clears a block; or nothing to place): a step cut into the side - the two
     // cells over a solid side block cleared, and up onto it
     if (!await stepUpSide(bot)) { log('move', `climbing out: no way up from ${fmt(bot.entity.position)} (no tower, no side to cut a step in)`); return false }

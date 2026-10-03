@@ -356,8 +356,10 @@ function inMineShaft (bot, p) {
 }
 let lastPillar = null
 let towerWhy = null // (why the last towerUp did not rise: the builder says it)
-async function towerUp (bot, { allowZones = [], onPlaced = null, builder = false } = {}) {
-  const filler = inv.items(bot).find(i => require('./build').FILLER_ITEMS.test(i.name)) // (THE scaffold list)
+async function towerUp (bot, { allowZones = [], onPlaced = null, builder = false, item = null } = {}) {
+  // (item: the block to put under us instead of filler - the escape's tower through an unplaced cell of the build puts that
+  //  cell's own block, the builder's placing from below; move.escapeUp)
+  const filler = item ? inv.items(bot).find(i => i.name === item) : inv.items(bot).find(i => require('./build').FILLER_ITEMS.test(i.name)) // (THE scaffold list)
   towerWhy = null
   if (!filler) { towerWhy = 'no filler in the pack'; return false }
   const y0 = Math.floor(bot.entity.position.y)
