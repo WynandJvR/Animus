@@ -1095,7 +1095,7 @@ function slabMerges (c, nb, p) {
   let t = null; try { t = nb.getProperties().type } catch {}
   const side = p.off[1] === 0; const cy = p.cy != null ? p.cy : 0.5
   if (t === 'bottom') return p.off[1] === -1 || (side && cy > 0.5)
-  if (t === 'top') return p.off[1] === 1 || (side && cy < 0.5)
+  if (t === 'top') return p.off[1] === 1 || (side && cy <= 0.5) // (vanilla: clickY - y > 0.5 is the top half; 0.5 itself is low)
   return false
 }
 function stateOf (b) { try { const p = b.getProperties(); const s = KEY_PROPS.filter(k => p[k] != null).map(k => `${k}=${p[k]}`).join(','); return b.name + (s ? `[${s}]` : '') } catch { return b.name } }

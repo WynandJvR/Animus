@@ -251,6 +251,10 @@ function chooseRecipe (bot, itemName, n = 1, stack = null) {
   // grounds, or out of sight (a species priced at 3s a log beat 2 of the build's spruce planks at 1e3 each: a 143-block
   // boat trip for 4 sticks, 2026-10-03). Once per ingredient, not per plank.
   const tripMemo = {}
+  const nearTrip = sp => {
+    const near = world.findBlocks(bot, new RegExp('^' + sp + '_log$'), { maxDistance: 48, count: 1 })[0]
+    return near ? world.dist3(near.position || near, bot.entity.position) / 2 : 120 // (there and back at a walk; out of sight, a trip's worth)
+  }
   // (the chests must cover the WHOLE shortfall: one acacia plank banked read "no trip", and the second plank was the trip)
   const woodTrip = (nm0, short) => {
     if (!/_(planks|log)$/.test(nm0)) return 0
@@ -259,11 +263,9 @@ function chooseRecipe (bot, itemName, n = 1, stack = null) {
     const sp = nm0.replace(/_(planks|log)$/, '')
     let t = 0
     try {
+      if (short === Infinity) return (tripMemo[mk] = nearTrip(sp))
       const banked = /_log$/.test(nm0) ? base().bankCount(sp + '_log') : base().bankCount(sp + '_planks') + 4 * base().bankCount(sp + '_log')
-      if (banked < short) {
-        const near = world.findBlocks(bot, new RegExp('^' + sp + '_log$'), { maxDistance: 48, count: 1 })[0]
-        t = near ? world.dist3(near.position || near, bot.entity.position) / 2 : 120 // (there and back at a walk; out of sight, a trip's worth)
-      }
+      if (banked < short) t = nearTrip(sp)
     } catch {}
     return (tripMemo[mk] = t)
   }
@@ -283,9 +285,11 @@ function chooseRecipe (bot, itemName, n = 1, stack = null) {
       if (/_planks$/.test(nm)) h += (have[nm.replace('_planks', '_log')] || 0) * 4
       const short = Math.max(0, per * crafts - h)
       cost += (short ? short * unitCost(nm) + woodTrip(nm, short) : 0) + per * crafts * 0.01 // (ties: the smaller order)
-      // (the build's own wood, held or not: spent here, it is fetched again for the build - three times a plank's price, so
-      //  a handful of sticks takes it before a trip, and a chest-maker's hundreds go to another wood; was 1e3 a plank)
-      if (reservedWood(nm)) cost += per * crafts * 3 * unitCost(nm)
+      // (the build's own wood, held or not: spent here, it is fetched again for the build. A handful (sticks, a table, a
+      //  tool: <=16 planks) rides the build's own wood trip - three times a plank's price; more than that is a trip of its
+      //  own for the build, as dear as a walk to another wood - 146 spruce logs became 33 chests and 288 sticks, 2026-09-28;
+      //  was 1e3 a plank, and 4 sticks went 143 blocks by boat for acacia, 2026-10-03; audit C1)
+      if (reservedWood(nm)) cost += per * crafts * 3 * unitCost(nm) + (per * crafts > 16 ? woodTrip(nm, Infinity) : 0)
     }
     if (cost < bestCost) { bestCost = cost; best = r }
   }
