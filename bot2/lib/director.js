@@ -459,6 +459,10 @@ function decide () {
       const mm = mem.get().mine
       const mineReady = mm && mm.entrance && home && world.dist2(mm.entrance, home) < 48 && inv.bestTool(bot, 'pickaxe', 8) && nightFed()
       if (mineReady && (dusk || !move.insideHut(world.feetPos(bot))) && world.dist2(bot.entity.position, mm.entrance) < Math.min(64, nightWalk) && !held('nightMine')) return { name: 'nightMine', why: `${night ? 'night' : 'dusk'} - mining through the night in the mine next to home` }
+      // NO MINE AT ALL (the last one abandoned - boxed in, blocked stairs): at dusk, at home, a new one - mining.mineFor sites it
+      // (HOME_CLEAR..96 from home). Only an existing mine was ever worked at night, and after an abandon every night was
+      // waited out in the safehouse with the build short of cobblestone (2026-10-03)
+      if (!mm && dusk && home && dHome < 32 && inv.bestTool(bot, 'pickaxe', 8) && nightFed() && !held('nightMine')) return { name: 'nightMine', why: 'dusk - no mine left, starting a new one next to home for the night' }
     }
     // inside the safehouse with furniture in the pack: set it up (the bed means sleeping, not waiting)
     if (move.insideHut(world.feetPos(bot)) && furnishingInPack().length && !held('furnish')) return { name: 'furnish', why: `night in the safehouse - putting ${furnishingInPack().join(', ')} down` }
