@@ -126,7 +126,8 @@ function make (bot, director) {
           director.setPaused(true); move.stopMoving(bot)
           const rec = snap()
           mem.update(mm => { mm.bases = Object.assign({}, mm.bases, { [nm]: rec }); for (const k of F) mm[k] = EMPTY[k] !== undefined ? clone(EMPTY[k]) : null })
-          await build.setJob(bot, schem, origin, { exactWood: !a.includes('anywood') })
+          // (a job that will not set leaves the old base as it was - never homeless with the castle's job; audit)
+          try { await build.setJob(bot, schem, origin, { exactWood: !a.includes('anywood') }) } catch (e) { mem.update(mm => { for (const k of F) mm[k] = rec[k]; delete mm.bases[nm] }); return `the new build would not set (${e.message}) - the base is as it was` }
           log('base', `base "${nm}" saved (home ${rec.home ? move.fmt(rec.home) : '-'}, ${(rec.chests || []).length} chests, build ${rec.build ? rec.build.name : '-'}) and cleared; new build ${schem} at ${move.fmt(origin)}`)
           return `saved base "${nm}"; build set: ${schem} origin ${move.fmt(origin)} - paused; restart the bot (zones are read at boot), then resume`
         }
@@ -136,13 +137,14 @@ function make (bot, director) {
           director.setPaused(true); move.stopMoving(bot)
           // (the base we leave is saved first, never dropped: its chests and their contents - audit)
           const cur = mem.get().home ? snap() : null; const curName = 'auto-' + ((mem.get().build && mem.get().build.name) || 'base')
+          if (cur && curName === nm) return `the base left would be saved as "${curName}" - the name being restored; rename it first`
           mem.update(mm => {
             if (cur) mm.bases = Object.assign({}, mm.bases, { [curName]: cur })
             for (const k of F) mm[k] = rec[k] === undefined || rec[k] === null ? (EMPTY[k] !== undefined ? clone(EMPTY[k]) : null) : rec[k]
             mm.spawnSetAt = null // (the server's spawn is the other base's bed now: set again at this bed - audit)
             delete mm.bases[nm]
           })
-          if (rec.build && rec.build.name && rec.build.origin) await build.setJob(bot, rec.build.name, rec.build.origin, { exactWood: rec.build.exactWood !== false })
+          if (rec.build && rec.build.name && rec.build.origin) await build.setJob(bot, rec.build.name, rec.build.origin, { exactWood: rec.build.exactWood === true })
           log('base', `base "${nm}" restored (home ${rec.home ? move.fmt(rec.home) : '-'}, build ${rec.build ? rec.build.name : '-'})${cur ? `; the base left saved as "${curName}"` : ''}`)
           return `restored base "${nm}"${cur ? ` (the current one saved as "${curName}")` : ''} - paused; restart the bot, then resume`
         }
