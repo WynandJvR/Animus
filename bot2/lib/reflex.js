@@ -224,9 +224,10 @@ function chargeAffordable (shooter, hs, hp) {
   //  at 2.4b, hp 17, iron sword and chestplate, a gather trip's caution took cover from a skeleton, the edge of a drop held
   //  the flight, and it shot the bot dead in 18s, 2026-10-03)
   const reachNow = shooter.d < 3.5 || (!!active && active.kind === 'fight' && fightTargetId === shooter.e.id && shooter.d < 5)
-  if (!reachNow && cautious && (hp < 18 || hs.some(h => h.e !== shooter.e && h.d < 24 && canSee(h.e)))) return false
+  const pinnedNow = !!pinnedCover && pinnedCover.id === shooter.e.id && Date.now() < pinnedCover.until // (takeCover: a flight that cannot move)
+  if (!reachNow && !pinnedNow && cautious && (hp < 18 || hs.some(h => h.e !== shooter.e && h.d < 24 && canSee(h.e)))) return false
   for (const id of fledFrom.keys()) if (!bot.entities[id]) fledFrom.delete(id) // (gone from the world: gone from the list)
-  { const f = fledFrom.get(shooter.e.id); if (!reachNow && f != null && hp < f) return false }
+  { const f = fledFrom.get(shooter.e.id); if (!reachNow && !pinnedNow && f != null && hp < f) return false }
   // (EVERY shooter about, in sight or not - a patrol's others shoot round the corner: the charge counted one and three
   //  bolts landed 0.65-0.85s apart, 20 -> 8, 2026-10-02; audit)
   const shooters = hs.filter(h => RANGED.has(h.e.name) && h.d < 24 && Math.abs(h.e.position.y - bot.entity.position.y) < 6) // (not a skeleton in the cave under us)
@@ -631,6 +632,8 @@ function creeperStrike () {
 // a pillager patrol (2026-10-02; audit)
 const wallTried = new Set()
 function hungryNow () { return bot.food <= 14 || (bot.health < 20 && bot.food < inv.REGEN_FOOD) }
+const coverTrail = [] // { t, x, z, id }: where a flight to cover has been, the last 2s
+let pinnedCover = null // { id, until }: the shooter whose cover flight is pinned
 function takeCover (e, label) {
   // COVER THAT IS NOT: still hit under it - a cave's skeleton shot round each 1-2 block wall, 20 -> 0 in 27s, eight walls
   // and two meals, never more than cover (2026-10-03). Six hp lost in the last 8s under cover is the proof: sealed in
@@ -658,6 +661,13 @@ function takeCover (e, label) {
     }
   }
   fleeTarget = e
+  // (A FLIGHT TO COVER THAT DOES NOT MOVE - the edge guard holding every step at a drop - while the shooter still sees us: 78
+  //  stopped steps and a skeleton's 18s of arrows, 2026-10-03. Pinned, the charge is weighed without the trip's caution or the
+  //  earlier flight - chargeAffordable - as a shooter in reach is; the arithmetic still decides)
+  { const now = Date.now(); const me = bot.entity.position
+    coverTrail.push({ t: now, x: me.x, z: me.z, id: e.id }); while (coverTrail.length && (now - coverTrail[0].t > 2000 || coverTrail[0].id !== e.id)) coverTrail.shift()
+    const old = coverTrail[0]
+    if (old && now - old.t >= 1500 && Math.hypot(me.x - old.x, me.z - old.z) < 0.4 && canSee(e)) pinnedCover = { id: e.id, until: now + 3000 } }
   setActive('flee', label)
   shieldDown()
   try { bot.pathfinder.setGoal(null) } catch {}
