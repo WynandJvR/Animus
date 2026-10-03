@@ -708,6 +708,7 @@ async function mineFor (bot, itemName, target, ctx = {}) {
       const back = await move.goTo(bot, new goals.GoalBlock(m.cursor.x, m.cursor.y, m.cursor.z), { timeoutMs: 30000, stuckMs: 8000, label: 'back to mine face' })
       // (one lost walk back is a strike, the stairs' three - not the mine: a knock-back by a fight and one 30s walk threw away
       //  a mine an hour old, 2026-10-03)
+      if (!back.ok && !move.isVerdict(back)) { log('mine', `back to the mine face at ${move.fmt(m.cursor)}: ${back.why} - no strike, the next trip goes on`); return false } // (a reflex's interruption is no fault of the mine: 'interrupted' counted a strike, 2026-10-03)
       if (!back.ok) { m.faceFails = (m.faceFails || 0) + 1; saveMine(m); if (m.faceFails < 3) { log('mine', `lost the mine face at ${move.fmt(m.cursor)} (${back.why}) - ${m.faceFails} of 3 before a new mine`); return false } log('mine', `lost the mine face at ${move.fmt(m.cursor)} (${back.why}) - three times now, abandoning this mine`); abandonMine(m); return false }
     }
     const b0 = broken
