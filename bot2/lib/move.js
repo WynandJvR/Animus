@@ -211,6 +211,11 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
     return b
   }
   m.exclusionAreasStep.push(block => (block && doorIds.has(block.type)) ? 4 : 0)
+  // (NEVER A BREAK THAT OPENS A FALL: a block with open air - or lava - for 4 under it, dug, is a hole the body drops into. The
+  //  planner's dig down at a web broke a cave's roof and the bot fell 37 to its death, 2026-10-05: maxDropDown prices planned
+  //  drops, not the void found under a dug floor. Tunnels and ceilings keep their floor within 3; the odd cave roof is left as a
+  //  player leaves it; audit)
+  if (dig) m.exclusionAreasBreak.push(block => { if (!block || !block.position) return 0; const p = block.position; for (let k = 1; k <= world.SAFE_DROP + 1; k++) { const u = world.at(bot, p.x, p.y - k, p.z); if (!u) return 0; if (world.isLavaBlock(u)) return 100; if (u.boundingBox === 'block' || world.isWaterBlock(u)) return 0 } return 100 })
   // (a step BESIDE a lit campfire, magma or fire at the feet: never on it (blocksToAvoid), but the body brushed onto the
   //  castle's campfires from the cells beside them and burned twice, 2026-09-30. Walked round when there is a way round)
   const hotNear = new Map(); let hotGen = pathGen
