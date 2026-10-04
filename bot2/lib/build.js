@@ -2023,7 +2023,11 @@ function ensureFoundation (bot) {
     if (!rim) holes++
     // (under a plant the top of the fill is dirt: a tulip or a rose bush stands on nothing else)
     const top = job.index.get(`${q.x},${y1},${q.z}`); const soil = !rim && !!top && (act.PLANT_RE.test(top.name) || /(rose_bush|lilac|peony|sunflower|orchid|allium|lily_of_the_valley|sapling)$/.test(top.name))
-    for (const y of q.ys) add.push({ x: q.x, y, z: q.z, hole: !rim, soil: soil && y === y1 - 1 })
+    // (a HOLE needs only its top cell - the one under the floor: a block of cobblestone clicks on a side, the gravel or the
+    //  sign stands on it, the pocket under it is sealed. The whole column from the bottom up asked for cells 3-4 under the
+    //  floor, out of reach from it - the hub's gravel columns waited on a y61 cell failing fifteen times, 2026-10-04)
+    // (and any cell of ours already laid deeper stays the job's - out of it, it would read as stray scaffold; audit)
+    for (const y of (rim ? q.ys : q.ys.filter((y, i) => i === 0 || world.isSolid(world.at(bot, q.x, y, q.z))))) add.push({ x: q.x, y, z: q.z, hole: !rim, soil: soil && y === y1 - 1 })
   }
   if (holes) log('build', `foundation: ${holes} column${holes > 1 ? 's' : ''} under a base cell that is no floor (a sign, a torch, an open trapdoor) filled - no hole into the hollow`)
   // (every hollow region lit: the 8-grid's cells in it, or - a strip the grid misses, a tower's, the west edge's - its
@@ -2059,6 +2063,7 @@ function ensureFoundation (bot) {
   { const have = new Set(add.map(key).concat(torches.map(key)))
     for (const q of saved) {
       const k = key(q); if (have.has(k) || job.index.has(k)) continue
+      if (q.h && q.t !== 't' && q.y < y1 - 1 && !world.isSolid(world.at(bot, q.x, q.y, q.z))) continue // (a hole is its top cell now - an older scan's deeper open cells are dropped; audit)
       if (q.t === 't') { if (world.isAirish(world.at(bot, q.x, y1, q.z))) torches.push({ x: q.x, y: q.y, z: q.z }); else continue } else add.push({ x: q.x, y: q.y, z: q.z, hole: !!q.h, soil: q.t === 'd' }) // (a torch only while the floor over it is still open - as the scan's own rule; audit)
       have.add(k)
     } }
