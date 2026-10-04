@@ -448,13 +448,15 @@ async function pour (bot, pos, itemName, { plans, accept, allowZones = [], timeo
     if (!held) { log('act', `pour ${itemName} at ${move.fmt(pos)}: the bucket is empty`); return false }
     const letGo = reflex.holdNoSneak() // (no crouch during the use: reflex.holdNoSneak)
     try {
-      await bot.equip(held, 'hand')
-      bot.setControlState('sneak', false)
-      await bot.lookAt(faceCentre(pick), true)
-      await ticks(bot, 2)
-      bot.activateItem()
-      await sleep(100)
-      bot.deactivateItem()
+      await reflex.pouring(async () => { // (the one click a full bucket is for: reflex's guard lets it through)
+        await bot.equip(held, 'hand')
+        bot.setControlState('sneak', false)
+        await bot.lookAt(faceCentre(pick), true)
+        await ticks(bot, 2)
+        bot.activateItem()
+        await sleep(100)
+        bot.deactivateItem()
+      })
     } catch {} finally { letGo() }
     for (let w = 0; w < 6; w++) {
       await sleep(150)

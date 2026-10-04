@@ -295,11 +295,13 @@ async function useBucketAt (bot, itemName, point, standNear) {
   if (!it) return false
   if (standNear && world.dist3(bot.entity.position, standNear) > 3.5) await move.goTo(bot, new goals.GoalNear(standNear.x, standNear.y, standNear.z, 2), { timeoutMs: 15000, label: 'to the water', dig: false })
   try {
-    await bot.equip(it, 'hand')
-    await bot.lookAt(new Vec3(point.x, point.y, point.z), true)
-    bot.activateItem()
-    await move.sleep(500)
-    bot.deactivateItem()
+    await require('./reflex').pouring(async () => { // (the watering's own click: the full-bucket guard lets it through)
+      await bot.equip(it, 'hand')
+      await bot.lookAt(new Vec3(point.x, point.y, point.z), true)
+      bot.activateItem()
+      await move.sleep(500)
+      bot.deactivateItem()
+    })
   } catch (e) { log('farm', `bucket use failed: ${e.message}`); return false }
   await move.sleep(300)
   return true

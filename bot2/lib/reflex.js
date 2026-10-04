@@ -129,6 +129,8 @@ function setActive (kind, detail) {
   } else active.detail = detail
 }
 let blocking = false
+let pourDepth = 0 // (a pour's own click is under way: act.pour / farm watering - the full-bucket guard lets it through)
+async function pouring (fn) { pourDepth++; try { return await fn() } finally { pourDepth-- } }
 function shieldUp () { if (!blocking) { try { bot.activateItem(true); blocking = true } catch {} } }
 function shieldDown () { if (blocking) { try { bot.deactivateItem() } catch {} blocking = false } }
 function clearActive () {
@@ -1912,9 +1914,28 @@ function install (b) {
   //  the hand. Two buckets went at the well in one second during a walk, the pour after found none, and the trace above could
   //  only say "the server changed the slot", 2026-10-04)
   const uses = []
+  // A FULL BUCKET IS USED ONLY BY A POUR: any other click or place with one in the hand - the pathfinder opening a gate that no
+  // longer opens, its stepping stone placed with whatever the hand held when the packet went - pours it. Two buckets went at the
+  // well in one second during a walk, 2026-10-04. Off the hand first (something harmless), unless the pour itself is clicking
+  // (pouring(): act.pour, the farm's watering); the shield's off-hand use is not the hand's
+  const FULL_BUCKET = /^(water|lava|powder_snow)_bucket$/
+  // (an EMPTY hand for a click - a gate or a door takes it whatever is held, and an empty hand uses nothing; a full pack: an
+  //  item that does nothing when used. Never an item with its own use - seeds, bone meal, a block - in the bucket's place; audit)
+  const emptyHand = async () => { try { await bot.unequip('hand') } catch { const inert = inv.items(bot).find(i => /^(stick|string|bone|flint|feather|leather|iron_ingot|gold_ingot|copper_ingot|coal|charcoal|raw_iron|raw_gold|raw_copper|clay_ball|brick|paper|book|wheat|rotten_flesh)$/.test(i.name)); if (inert) await bot.equip(inert, 'hand').catch(() => {}) } }
+
   for (const fn of ['activateItem', 'activateBlock', '_genericPlace']) {
     const orig = bot[fn]; if (typeof orig !== 'function') continue
-    bot[fn] = function (...args) { try { uses.push({ t: Date.now(), fn, held: bot.heldItem ? bot.heldItem.name : 'hand', at: String(new Error().stack).split(String.fromCharCode(10)).slice(2, 5).map(l => l.trim().replace(/^at /, '')).join(' <- ') }); if (uses.length > 6) uses.shift() } catch {} return orig.apply(this, args) }
+    bot[fn] = function (...args) {
+      const offhand = fn === 'activateItem' && args[0] === true
+      if (!pourDepth && !offhand && bot.heldItem && FULL_BUCKET.test(bot.heldItem.name)) {
+        log('inv', `a ${fn} with a ${bot.heldItem.name} in the hand outside a pour - the bucket off the hand first`)
+        // (a PLACE with a full bucket in the hand is no place: the block meant is not in it - refused, the caller's own retry
+        //  equips again; a click goes on with an empty hand; audit)
+        if (fn === '_genericPlace') return Promise.reject(new Error('a full ' + bot.heldItem.name + ' in the hand - no place'))
+        const run = (async () => { await emptyHand(); return orig.apply(this, args) })()
+        return fn === 'activateItem' ? undefined : run
+      }
+      try { uses.push({ t: Date.now(), fn, held: bot.heldItem ? bot.heldItem.name : 'hand', at: String(new Error().stack).split(String.fromCharCode(10)).slice(2, 5).map(l => l.trim().replace(/^at /, '')).join(' <- ') }); if (uses.length > 6) uses.shift() } catch {} return orig.apply(this, args) }
   }
   try {
     bot.inventory.on('updateSlot', (slot, oldItem, newItem) => {
@@ -1960,4 +1981,4 @@ function setEnabled (on) { enabled = !!on; if (!on) clearActive() }
 function underMs () { return submergedSince ? Date.now() - submergedSince : 0 }
 function airLeftMs () { return airMs }
 
-module.exports = { plannedStep: () => plannedStep(), plannedNode: () => (lastPath && lastPath[0]) || null, plannedPath: () => lastPath || [], resetPlannedPath: () => { lastPath = null }, setCautious, plannerPlacedSince, findAirReachable, _bindForTest: b => { bot = b }, _leafWayOff: (...a) => leafWayOff(...a), _jumpHurts: c => jumpHurts(c), _leafFooting: () => leafFooting, edgeStops, install, holdNoSneak, active: isActive, info, nearestThreat, lastHurt, hurtLine, edgeAhead, hostiles, onSurface, canSee, NEVER_MELEE, waitClear, setEnabled, findAir, HOSTILE, RANGED, bowReady, startDive, endDive, diveBroken, underMs, airLeftMs, AIR_MS, DIVE_HARD_MS }
+module.exports = { pouring, plannedStep: () => plannedStep(), plannedNode: () => (lastPath && lastPath[0]) || null, plannedPath: () => lastPath || [], resetPlannedPath: () => { lastPath = null }, setCautious, plannerPlacedSince, findAirReachable, _bindForTest: b => { bot = b }, _leafWayOff: (...a) => leafWayOff(...a), _jumpHurts: c => jumpHurts(c), _leafFooting: () => leafFooting, edgeStops, install, holdNoSneak, active: isActive, info, nearestThreat, lastHurt, hurtLine, edgeAhead, hostiles, onSurface, canSee, NEVER_MELEE, waitClear, setEnabled, findAir, HOSTILE, RANGED, bowReady, startDive, endDive, diveBroken, underMs, airLeftMs, AIR_MS, DIVE_HARD_MS }
