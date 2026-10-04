@@ -122,6 +122,9 @@ class Animus : Form
     Label lvName, lvPos, lvBiome, lvTime, lvThreat, lvPlayers, lvHp, lvFood, lvActivity;
     Label lkPos, lkBiome, lkTime, lkThreat, lkPlayers, lkActivity, lkHp, lkFood;
     Bar hpFill, foodFill;
+    // the build's progress at a glance (operator, 2026-10-04: "is there a quick way in the gui to see the progress of a
+    // build?" - it was only in the Build dialog's note). Read from /state.buildProgress, already polled: nothing new asked
+    Label lkBuild, lvBuild; Bar buildFill;
     Label lkHpIcon, lkFoodIcon;
     RichTextBox liveLog;
     List<Rectangle> liveTiles = new List<Rectangle>();   // painted behind the status tiles
@@ -535,6 +538,8 @@ class Animus : Form
         lkThreat = TileCap(cLive, "THREAT");    lvThreat = ValueLabel(cLive);
         lkPlayers = TileCap(cLive, "PLAYERS NEARBY"); lvPlayers = ValueLabel(cLive);
         lkActivity = TileCap(cLive, "ACTIVITY");   lvActivity = ValueLabel(cLive);
+        lkBuild = TileCap(cLive, "BUILD");         lvBuild = ValueLabel(cLive);
+        buildFill = MakeBar(cLive); buildFill.Fill = Accent; buildFill.Back = Tile;
     }
 
     // Inventory used to be a 400-character run-on sentence squeezed under the vitals.
@@ -899,8 +904,14 @@ class Animus : Form
         TileAt(lkPlayers, lvPlayers, S3, y, inner);
         y += TileH + S2;
         TileAt(lkActivity, lvActivity, S3, y, inner);
+        y += TileH + S2;
+        // (the build's tile is a bar taller: done / total over the line, the fill under it)
+        liveTiles.Add(new Rectangle(S3, y, inner, TileH + 10));
+        lkBuild.SetBounds(S3 + S3, y + 7, inner - 2 * S3, 14);
+        lvBuild.SetBounds(S3 + S3, y + 21, Math.Max(40, inner - 2 * S3), 19);
+        buildFill.SetBounds(S3 + S3, y + 44, Math.Max(40, inner - 2 * S3), 6);
         cLive.Invalidate();
-        return y + TileH;
+        return y + TileH + 10;
     }
 
     const int TileH = 46;
@@ -1055,6 +1066,7 @@ class Animus : Form
     {
         public double Frac;
         public Color Fill = Green;
+        public Color Back = Card; // (what it sits on: the card, or a tile)
         public Bar()
         {
             SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint |
@@ -1063,7 +1075,7 @@ class Animus : Form
         protected override void OnPaint(PaintEventArgs e)
         {
             Graphics g = e.Graphics;
-            using (SolidBrush bg = new SolidBrush(Card)) g.FillRectangle(bg, ClientRectangle);
+            using (SolidBrush bg = new SolidBrush(Back)) g.FillRectangle(bg, ClientRectangle);
             g.SmoothingMode = SmoothingMode.AntiAlias;
             Rectangle r = new Rectangle(0, 0, Width - 1, Height - 1);
             using (GraphicsPath p = RoundPath(r, Height / 2))
@@ -1578,6 +1590,22 @@ class Animus : Form
             tips.SetToolTip(invCanvas, invItems.Count == 0 ? "empty"
                 : string.Join("\r\n", invItems.ToArray()));
             invCanvas.Invalidate();
+
+            // the build: name, placed / total (percent), and the top few things it still waits on
+            Dictionary<string, object> bpr = Obj(st, "buildProgress");
+            if (bpr != null && D(bpr, "total") > 0)
+            {
+                double bDone = D(bpr, "done"), bTot = D(bpr, "total");
+                Dictionary<string, object> bNeed = Obj(bpr, "topStillNeeded");
+                List<string> bWait = new List<string>();
+                if (bNeed != null) foreach (KeyValuePair<string, object> kv in bNeed) { if (bWait.Count >= 3) break; bWait.Add(kv.Value + " " + kv.Key); }
+                lkBuild.Text = "BUILD · " + S(bpr, "name").ToUpperInvariant().Replace('_', ' '); // (the name on the caption: the line keeps the numbers and the waits)
+                SetVal(lvBuild, bDone.ToString("0") + " / " + bTot.ToString("0") + " (" + (100.0 * bDone / bTot).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + "%)" +
+                    (bDone >= bTot ? " · done" : bWait.Count > 0 ? " · needs " + string.Join(", ", bWait.ToArray()) : ""));
+                lvBuild.ForeColor = Txt;
+                buildFill.Frac = Math.Max(0, Math.Min(1, bDone / bTot)); buildFill.Fill = bDone >= bTot ? Green : Accent; buildFill.Invalidate();
+            }
+            else { lkBuild.Text = "BUILD"; SetVal(lvBuild, "no build"); lvBuild.ForeColor = Muted; buildFill.Frac = 0; buildFill.Invalidate(); }
 
             lastState = st;
             UpdateOverlay(st);
