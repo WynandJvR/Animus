@@ -1976,7 +1976,7 @@ function ensureFoundation (bot) {
   for (const c of job.cells) {
     if (c.y !== y1 || c.clear) continue
     const col = []
-    let ok = true; let lastKind = null // (the bottom cell's kind: a torch goes on dry ground only)
+    let ok = true; let deep = false; let lastKind = null // (the bottom cell's kind: a torch goes on dry ground only)
     for (let y = y1 - 1; ; y--) {
       const k = kindAt(bot, c.x, y, c.z)
       if (!k) return false // (a column not loaded: taken whole or not at all)
@@ -1986,10 +1986,13 @@ function ensureFoundation (bot) {
       //  stray scaffold after every restart - 44 cells left became 100, 2026-09-29)
       const laid = !!site && FOUNDATION_BLOCKS.test(k.name) && (() => { const was = snapName(c.x, y, c.z); return was !== k.name && wasOpen(bot, was) })()
       if (k.boundingBox === 'block' && !world.LEAF_RE.test(k.name) && !ledger.has(`${c.x},${y},${c.z}`) && !laid) break
-      if (y1 - y > FOUNDATION_MAX) { ok = false; break }
+      // (past the cap: a wall that deep is no foundation - but a HOLE under a cell that is no floor needs only its top cell,
+      //  and dropped whole, the hub's two gravel cells over the cave under the plaza could never go in: "nothing doable" with
+      //  the gravel in hand, 2026-10-04. Kept, marked deep - only a hole takes it)
+      if (y1 - y > FOUNDATION_MAX) { deep = true; break }
       col.push(y); lastKind = k
     }
-    if (ok && col.length) cols.push({ x: c.x, z: c.z, ys: col, dry: !/^(water|bubble_column)$/.test(lastKind.name) })
+    if (ok && col.length) cols.push({ x: c.x, z: c.z, ys: col, deep, dry: !/^(water|bubble_column)$/.test(lastKind.name) })
   }
   // THE EDGE ONLY: a one-wide wall down the rim - a column of the base with a side on anything that is not the base
   // (the outside, a courtyard) - not the whole box under it. The floor inside goes in clicked against the rim and its own
@@ -2032,6 +2035,7 @@ function ensureFoundation (bot) {
   let holes = 0
   for (const q of cols) {
     const rim = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => outer({ x: q.x + dx, z: q.z + dz }))
+    if (q.deep && (rim || !noFloor(q))) continue // (a deep column is a hole's top cell or nothing - as before the cap)
     if (!rim && !noFloor(q)) { inner.set(`${q.x},${q.z}`, q); continue }
     if (!rim) holes++
     // (under a plant the top of the fill is dirt: a tulip or a rose bush stands on nothing else)
