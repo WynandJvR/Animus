@@ -1120,7 +1120,7 @@ function pickItem (bot, c, items = inv.items(bot)) {
 // nothing to attach to either (an x-axis log in a wall needs a neighbour on its x side, where there is
 // only air): stand a thin pillar up from the ground to it. Every block is scaffold: the snapshot diff
 // finds it at the end (mem.scaffold is only a hint).
-async function placeSupport (bot, sp, j) {
+async function placeSupport (bot, sp, j, { noPillar = false } = {}) {
   const fillerName = () => { const f = inv.items(bot).find(i => FILLER_ITEMS.test(i.name)); return f && f.name }
   if (!fillerName()) return false
   const record = p => { supportsLaid++; mem.update(m => { m.scaffold = m.scaffold || []; m.scaffold.push({ x: p.x, y: p.y, z: p.z }) }) }
@@ -1133,6 +1133,9 @@ async function placeSupport (bot, sp, j) {
   if (hasNeighbour) {
     if (await act.place(bot, sp, fillerName(), { allowZones: ['build', 'base'] })) { record(sp); return true }
   }
+  // (never for a HOLE's cell: over a cave a side support has nothing under it either, and the pillar would be built from the
+  //  cave floor 20+ down, walked to in the dark and torn down there after; audit 2026-10-04)
+  if (noPillar) return false
   // 2) nothing to hang it on: a thin pillar up from whatever is below, however far that is (a fixed cap left
   //    the upper logs with no support at all). 30 is only a guard against building into open void.
   const column = [sp]
@@ -1497,7 +1500,7 @@ async function placeCell (bot, c, j = job) {
         if (sp.x === me.x && sp.z === me.z && (sp.y === me.y || sp.y === me.y + 1)) continue
         const spb = world.at(bot, sp.x, sp.y, sp.z)
         if (!spb || !(world.isAirish(spb) || world.isLiquidWater(spb))) continue
-        if (await placeSupport(bot, sp, j)) { supported = true; break }
+        if (await placeSupport(bot, sp, j, { noPillar: !!c.hole })) { supported = true; break }
       }
       if (!supported) return why('nothing to click and no temporary support would go in')
     }
