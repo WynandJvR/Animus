@@ -691,7 +691,10 @@ async function mineFor (bot, itemName, target, ctx = {}) {
   { const h = mem.get().home; if (inv.freeSlots(bot) <= 4 && h && world.dist3(bot.entity.position, h) < 24) { log('mine', `pack nearly full (${inv.freeSlots(bot)} free) - the haul in the chest before the walk to the mine`); const B = base(); const g = await B.goHome(bot, { shouldStop: ctx.shouldStop }).catch(() => null); if (g && g.ok) await B.depositAll(bot, { keep: (b, i) => i.name === itemName ? Infinity : B.keepCount(b, i) }).catch(() => {}) } } // (what the trip digs stays in the pack: banked, a cobblestone trip dug its own count again; audit)
   // (an ore trip digs many blocks an ore: the room's sizing for it - 4 sticks for 11 raw_iron wore both picks out; audit A2)
   const oreTrip = !!(craft().GATHER[itemName] && craft().GATHER[itemName].ore)
-  await provisionForMine(bot, oreTrip ? Infinity : Math.max(0, target - inv.count(bot, itemName)))
+  // (an ore's dig is the rock round it too: ~30 blocks an ore wanted, not the pack's whole room - 14 sticks for 2-6 iron,
+  //  a birch felled 100b+ out on every iron trip, 7 trees in two hours, 2026-10-04)
+  const digs = () => { const left = Math.max(0, target - inv.count(bot, itemName)); return oreTrip ? left * 30 : left }
+  await provisionForMine(bot, digs())
   // an ore showing in a cave wall or a cliff first - and the vein behind it, each block dug bares the next
   if (craft().GATHER[itemName] && craft().GATHER[itemName].ore && await takeKnownOre(bot, itemName, target, ctx)) return true
   // get to the working face
@@ -758,7 +761,7 @@ async function mineFor (bot, itemName, target, ctx = {}) {
         await base().depositHaul(bot, { shouldStop: ctx.shouldStop })
         // (no room made - the chests full, no chest to be had: down again full is a walk for nothing; audit)
         if (inv.freeSlots(bot) <= 2) { log('mine', 'pack still full after the deposit - the trip ends'); saveMine(m); return inv.count(bot, itemName) >= target }
-        await provisionForMine(bot, oreTrip ? Infinity : Math.max(0, target - inv.count(bot, itemName)))
+        await provisionForMine(bot, digs())
         const down = await downTheMine(bot, m, ctx)
         if (!down.ok) { log('mine', `couldn't get back down to the face (${down.why})`); return false }
         const r = await move.goTo(bot, new goals.GoalBlock(m.cursor.x, m.cursor.y, m.cursor.z), { timeoutMs: 180000, stuckMs: 20000, label: 'back to mine face' })
