@@ -41,6 +41,7 @@ const LITTER_BATCH = 8
 let steerSaid = null // (the wait-without-raw line, once per item)
 const strayMiss = mem.persistedMap('strayMiss') // (a stray build block that would not come up: key -> { n, day })
 let siteTidyAsked = 0 // (when the site's scaffold was last counted for the day's teardown)
+let idleTidyAsked = 0 // (and for an idle hour's: the same 5-minute bound on the site diff)
 const LITTER_CAP = 48 // (our own blocks standing round home past which the tidy goes before the castle)
 
 // Hunt an animal that is right here when the pack is low on food - a player does not walk past a
@@ -819,6 +820,14 @@ function decide () {
     seedLitter()
     const n = litter.pending(bot, mem.get().home, 96).length
     if (n >= LITTER_BATCH) return { name: 'tidy', why: `${n} blocks of ours left standing round home (pillars, stepping stones)` }
+  }
+  // NOTHING ELSE TO DO BY DAY: the site's old scaffold comes down - waited on supply in the endgame, the bot stood idle at
+  // home for whole days with ~1300 blocks of it still standing for the finish, 2026-10-04. The day's 4 minutes a time, as often
+  // as the hours stay idle (the count throttled as the day's is)
+  if (world.phase(bot) === 'day' && build.getJob() && !held('siteTidy') && Date.now() - idleTidyAsked > 300000) {
+    idleTidyAsked = Date.now()
+    const n = build.siteScaffoldTakeable(bot)
+    if (n >= 1) return { name: 'siteTidy', why: `nothing else to do - ${n} scaffold blocks of ours to take down round the site` }
   }
   return { name: 'idle', why: 'nothing to do' }
 }

@@ -2453,7 +2453,13 @@ function siteTeardownPlan (bot) {
   const air = (x, y, z) => { const b = world.at(bot, x, y, z); return !!b && world.isAirish(b) }
   const isStep = p => p.y === job.box.y1 - 1 && air(p.x, p.y + 1, p.z) && air(p.x, p.y + 2, p.z) &&
     [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => world.standable(bot, p.x + dx, p.y + 2, p.z + dz))
-  const keep = p => p.y >= bandY || sups.has(key(p)) || isStep(p)
+  // (THE ENDGAME: with a few cells left, the band is one low cell - the well's water at y64 - and "from the band up" kept every
+  //  block of the site's ~1300 scaffold while the bot stood idle for days waiting on string and wool, 2026-10-04. Then only the
+  //  scaffold within 6 across of a cell still to do is the builder's; the rest is done with)
+  const left = bandY === Infinity ? [] : job.cells.filter(c => !c.follows && cellDone(bot, c) !== true)
+  let nearLeft = null
+  if (left.length && left.length < Math.min(200, job.cells.length * 0.03)) { /* (a share as well: on a small build 200 left is still layers of work; audit) */ nearLeft = new Set(); for (const c of left) for (let dx = -6; dx <= 6; dx++) for (let dz = -6; dz <= 6; dz++) nearLeft.add((c.x + dx) + ',' + (c.z + dz)) }
+  const keep = p => (p.y >= bandY && (!nearLeft || nearLeft.has(p.x + ',' + p.z))) || sups.has(key(p)) || isStep(p)
   // (and our ledger's blocks under the snapshot's region - it starts 2 under the base: the rim bank's columns at y112-116
   //  were never in the site diff, so never taken; audit)
   const r = site.region
