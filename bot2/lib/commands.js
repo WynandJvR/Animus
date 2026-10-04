@@ -337,6 +337,10 @@ function make (bot, director) {
         }
         return out.join(' | ')
       }
+      case 'mobs': { // mobs [r] - the hostiles within r (24): name, position, distance, whether seen, on the surface
+        const r = num(0, 24); const rf = require('./reflex')
+        return JSON.stringify(rf.hostiles(r).map(h => ({ n: h.e.name, at: move.fmt(h.e.position.floored()), d: Math.round(h.d * 10) / 10, seen: rf.canSee(h.e), surface: rf.onSurface(h.e) })))
+      }
       case 'around': {
         // around [r] - a map of the cells round the bot at feet and head level (and the floor): one char per block
         const r = num(0, 4)
