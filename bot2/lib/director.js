@@ -494,7 +494,8 @@ function decide () {
   //  pillager patrol and two skeletons shot the bot four times in two minutes, each respawn walking back out to the
   //  grave, the farm, the tool chest, 2026-09-25)
   const outgunned = around.some(h => reflex.RANGED.has(h.e.name)) && !inv.offhandShield(bot) && inv.armorPoints(bot) < 8 && !reflex.bowReady()
-  const spiderNightOn = world.phase(bot) === 'night' && !!home && dHome < 24 && stringShort() && spiderNightFit() && !held('spiderNight')
+  // (from dusk: the bed takes the dusk, and a night slept from dusk never came - the first evening went to bed at 19:58)
+  const spiderNightOn = world.phase(bot) !== 'day' && !!home && dHome < 24 && stringShort() && spiderNightFit() && !held('spiderNight')
   const spidersOnly = around.length > 0 && around.every(h => SPIDER_RE.test(h.e.name)) // (the spider night's own game: no hideout from it)
   if (around.length && home && dHome < 48 && hut.shellComplete(bot) && (dim || outgunned || bot.health <= reflex.hurtLine()) && !(spiderNightOn && spidersOnly) && !held('hideout')) {
     return { name: 'hideout', why: `${around.length} hostile${around.length > 1 ? 's' : ''} around home (${around.slice(0, 3).map(h => h.e.name).join(', ')}) - waiting inside` }
@@ -921,7 +922,7 @@ const TASKS = {
     const stand = { x: ap.x, y: home.y, z: ap.z }
     const near = (h, r) => Math.abs(h.e.position.y - bot.entity.position.y) < 6 && onSurface(h.e) && world.dist2(h.e.position, home) < r
     log('dir', `a spider night: ${(build.cachedStatus(bot).need || {}).string} string short - by the door for spiders (hp ${Math.round(bot.health)}, armour ${inv.armorPoints(bot)})`)
-    while (!taskCancelled() && world.phase(bot) === 'night' && Date.now() - t0 < 3 * 60000) {
+    while (!taskCancelled() && world.phase(bot) !== 'day' && Date.now() - t0 < 3 * 60000) {
       await reflex.waitClear()
       // (out of it: hurt past a few points, or anything but a spider about - the hideout's then; never a chase off from the door)
       if (bot.health < 16 || !stringShort()) break
