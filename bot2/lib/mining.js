@@ -565,7 +565,11 @@ async function takeKnownOre (bot, itemName, target, ctx = {}) {
     const at = new (require('vec3').Vec3)(mm.cursor.x, workY(mm), mm.cursor.z)
     const w0 = webs.sort((a, b) => world.dist3(a.position, at) - world.dist3(b.position, at))[0]
     log('mine', `${webs.length} cobweb${webs.length > 1 ? 's' : ''} at the mine's level - the nearest at ${move.fmt(w0.position)}, ${Math.round(world.dist3(w0.position, at))}b from the face`)
-    ctx = Object.assign({}, ctx, { near: { point: w0.position, radius: 24 } })
+    // (EVERY web at the level, nearest first, in one trip - never the 24 round the first: the trip cut one web, found none
+    //  within 24 of it and ended with three more 40b along the same shaft, 2026-10-05 (operator: "why didn't it get all
+    //  the cobwebs in one go"). The level's band only: the spawner's cluster 30 below stays out)
+    const wy = workY(mm)
+    ctx = Object.assign({}, ctx, { near: { point: at, radius: 128 }, oreFilter: b => Math.abs(b.position.y - wy) <= 4 })
   }
   let veins = 0
   // never a tunnel mouth in the yard or under the build: near home the trip STARTS only from inside our own mine (the
