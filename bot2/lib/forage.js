@@ -323,6 +323,14 @@ function crownTree (bot, s, skip) {
 // placed leaves are someone's hedge): the crown climbed (shearCrown) while a tree with one is in sight; else from the ground.
 async function shearTrip (bot, s, n, ctx = {}) {
   if (!await ensureShears(bot, ctx)) return 'blocked'
+  // (the SPARES for the trip's leaves out of the chest before it leaves home - a pair is ~238 cuts: the one pair taken broke
+  //  in the forest with four more in the chest, the trip tried to make new ones out there and ended at dusk, 2026-10-04)
+  if (s.leaves) {
+    const want = Math.max(1, Math.min(3, Math.ceil(n / 230)))
+    const good = () => inv.items(bot).filter(i => i.name === 'shears' && inv.durabilityLeft(bot, i) > 2).length
+    for (let i = 0; i < 6 && good() < want && base().bankCount('shears') > 0; i++) { if (!await base().withdraw(bot, 'shears', 1).catch(() => 0)) break }
+    for (const it of inv.items(bot).filter(i => i.name === 'shears' && inv.durabilityLeft(bot, i) <= 2)) await bot.tossStack(it).catch(() => {})
+  }
   const label = typeof s.drops === 'string' ? s.drops : 'grass'
   const target = inv.count(bot, s.drops) + n
   const startCount = inv.count(bot, s.drops)
