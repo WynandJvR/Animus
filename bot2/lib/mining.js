@@ -574,7 +574,7 @@ async function takeKnownOre (bot, itemName, target, ctx = {}) {
       if (!r.ok && !act.reach(bot, o.position, 4.5)) {
         refused.add(k(o.position))
         const here = bot.entity.position; let more = 0
-        for (const q of ores) if (!refused.has(k(q.position)) && (world.dist3(q.position, o.position) <= 3 || world.dist3(q.position, here) <= 4)) { refused.add(k(q.position)); more++ }
+        for (const q of ores) if (!refused.has(k(q.position)) && (world.dist3(q.position, o.position) <= 3 || (world.dist3(q.position, here) <= 4 && !act.reach(bot, q.position, 4.5)))) { refused.add(k(q.position)); more++ }
         if (more) log('mine', `the walk to ${o.name} at ${move.fmt(o.position)} failed (${r.why}) - ${more} more ore${more > 1 ? 's' : ''} in that pocket left too`)
         continue
       }
