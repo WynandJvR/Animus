@@ -228,6 +228,7 @@ async function woolFor (bot, n, ctx = {}, colour = 'white') {
   const t0 = Date.now()
   let empty = 0
   let wentTo = null // (the remembered flock walked to this trip - forgotten if it is not there)
+  const walked = [] // (every remembered flock walked to this trip: none twice - the next one is the next walk)
   const shornSeen = [] // (every flock reached this trip with only shorn sheep: none walked back to; audit)
   let shornHere = false // (the flock walked to is all shorn: the next remembered one is the next walk)
   let shornWalks = 0 // (walks past a shorn flock to a woolly sheep in view: bounded - empty resets on every pick)
@@ -260,13 +261,16 @@ async function woolFor (bot, n, ctx = {}, colour = 'white') {
       const anchor = mem.get().home || bot.entity.position
       // (a wool trip goes as far as a day trip's flocks, WOOL_TRIP_REACH: the 200 of the lure left the nearest flock, 230b out,
       //  off the list; the trip's own fit (day, hp) and the day's stop hold the walk)
-      const known = (mem.get().mobs || {}).sheep ? mem.get().mobs.sheep.filter(p => world.dist2(p, anchor) < WOOL_TRIP_REACH && !shornSeen.some(q => world.dist2(p, q) < 16)).sort((a, b) => world.dist2(a, bot.entity.position) - world.dist2(b, bot.entity.position))[0] : null
+      const known = (mem.get().mobs || {}).sheep ? mem.get().mobs.sheep.filter(p => world.dist2(p, anchor) < WOOL_TRIP_REACH && !shornSeen.some(q => world.dist2(p, q) < 16) && !walked.some(q => world.dist2(p, q) < 16) && (!mem.get().home || p.y == null || p.y > mem.get().home.y - 12) && world.walkTicks(bot.entity.position, p) + world.walkTicks(p, anchor) + world.HOME_MARGIN < world.ticksUntilNight(bot)) /* (and a walk that fits the daylight left: there and home again; audit) */.sort((a, b) => world.dist2(a, bot.entity.position) - world.dist2(b, bot.entity.position))[0] : null
       const fit = bot.health >= 12 && world.phase(bot) === 'day'
       if (!fit) { log('food', `no sheep in sight and not fit to go looking (hp ${Math.round(bot.health)})`); return false }
       const woollyFar = e => { const w = sheepWool(bot, e); return !(w && w.sheared) && !list.includes(e) }
       const far = animals(bot, /^sheep$/, VIEW).find(woollyFar)
       if (far) await toInSight(bot, far, ctx)
-      else if (known && (empty === 1 || shornHere) && world.dist2(known, bot.entity.position) > 40) { wentTo = known; shornHere = false; await move.travel(bot, known, { range: 10, shouldStop: ctx.shouldStop, label: 'to sheep' }) }
+      // (EVERY remembered flock in reach, each once, nearest first - and never one fallen below home's ground: the nearest two were
+      //  in the cave under home, walked to first, and the trip explored from the cave and gave up with the woolly flocks 250b out
+      //  seen a minute before never walked to - wool off for 3 days, 2026-10-04; the pen's rule, audit)
+      else if (known && world.dist2(known, bot.entity.position) > 40) { wentTo = known; walked.push(known); shornHere = false; await move.travel(bot, known, { range: 10, shouldStop: ctx.shouldStop, label: 'to sheep' }) }
       else await gather().explore(bot, () => false, { shouldStop: () => (ctx.shouldStop && ctx.shouldStop()) || animals(bot, /^sheep$/, VIEW).some(woollyFar), label: 'animals', legs: 2 })
       continue
     }
