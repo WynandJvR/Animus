@@ -27,6 +27,9 @@ while true; do
   if [ -n "$f" ]; then ln=$(grep -a "(dir) $tn did not succeed" $L | tail -1 | grep -o '([0-9]* in a row)' | grep -o '[0-9]*'); [ -n "$ln" ] && [ "$ln" -lt 4 ] && recovered=1; fi
   # (a failure from before the last deploy is the old code's: the new code has not failed it yet - 2026-10-03)
   dep=$(cut -c1-16 $(dirname "$0")/last-deploy.txt 2>/dev/null); [ -n "$f" ] && [ -n "$dep" ] && [[ "$lf" < "$dep" ]] && recovered=1
+  # (and a streak with no new failure for 5 minutes is over: the bot went on to other work - each restart re-alarmed on the
+  #  same "4 in a row" for the rest of the 15-minute window while the bot stood its spider night, 2026-10-04)
+  [ -n "$f" ] && [ -n "$lf" ] && [[ "$lf" < "$(date -d '-5 min' +%Y-%m-%dT%H:%M:%S)" ]] && recovered=1
   [ -n "$f" ] && [ "$recovered" = 0 ] && { echo "ALARM: repeated failure: $f"; recent 15 | grep -a "did not succeed" | cut -c2-160 | tail -5; exit 0; }
   c=$(recent 10 | grep -aoE "\(dir\) -> [a-zA-Z]+" | sort | uniq -c | sort -rn | awk '$1>=6 && $3 ~ /level|fix|farm|tidy|hideout|grave/ {print; exit}')
   [ -n "$c" ] && { echo "ALARM: churn: $c in 10 min"; exit 0; }
