@@ -456,7 +456,12 @@ function decide () {
   //    Every task below walks outside; at dawn the skeletons are not burning yet (three deaths at the
   //    doorstep in one morning: grave run, harvest, grave run)
   // (at the surface around us - a zombie in a cave under home is not at the door)
-  const around = reflex.hostiles(20).filter(h => h.e.name !== 'bat' && Math.abs(h.e.position.y - bot.entity.position.y) < 6 && onSurface(h.e))
+  // (and not one boxed into a pit it cannot walk out of - walls two high on all four sides - that cannot see us: four
+  //  pillagers fell into the hole the bot died in, 11 blocks from the door, and the hideout waited on them 40 minutes and on,
+  //  2026-10-04. One that sees us is the reflex's at once, as ever)
+  const pitted = e => { const f = e.position.floored(); return [[1, 0], [-1, 0], [0, 1], [0, -1]].every(([dx, dz]) => [0, 1].every(dy => { const b = world.at(bot, f.x + dx, f.y + dy, f.z + dz); return !!b && world.isSolid(b) })) && !reflex.canSee(e) }
+  const aroundAll = reflex.hostiles(20).filter(h => h.e.name !== 'bat' && Math.abs(h.e.position.y - bot.entity.position.y) < 6 && onSurface(h.e))
+  const around = aroundAll.filter(h => !pitted(h.e))
   const dim = world.phase(bot) !== 'day' || world.tod(bot) >= 23000 || world.tod(bot) < 1500
   // (by day too when shooters stand round home and the body can't take their arrows - no shield, little armour: a
   //  pillager patrol and two skeletons shot the bot four times in two minutes, each respawn walking back out to the
@@ -476,7 +481,8 @@ function decide () {
   // despawns, and it is a few steps - but not into the mob that put it there
   {
     const g0 = graves.bestGrave(bot)
-    if (g0 && world.dist3(g0, bot.entity.position) < 10 && !around.some(h => h.d < 16) && !held('grave')) return { name: 'grave', why: `my grave is ${Math.round(world.dist3(g0, bot.entity.position))}b away - ${g0.items} items` }
+    // (the whole list here, and the grave's cover: a pit's shooters see a body passing its rim - a grave beside the hole is in their line; audit)
+    if (g0 && world.dist3(g0, bot.entity.position) < 10 && !aroundAll.some(h => h.d < 16) && !coveredGrave(g0) && !held('grave')) return { name: 'grave', why: `my grave is ${Math.round(world.dist3(g0, bot.entity.position))}b away - ${g0.items} items` }
   }
 
   // 1. night
