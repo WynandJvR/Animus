@@ -88,6 +88,15 @@ function chooseEntrance (bot, oreLv = null) {
       // (nor on the home grounds: a stairwell by the farm was a hole in the yard, on the walk home, dug at night)
       if (move.inZone({ x, y, z }, 6) || underOwnZone({ x, z }) || require('./gather').onGrounds({ x, y, z })) continue
       if (world.waterNear(bot, { x, y, z }, 4, -3, 1) || world.lavaNear(bot, { x, y: y - 2, z }, 3)) continue
+      // (never on the LIP of a drop: an entrance on the rim of an 11-deep pit was walked at from its far side every trip - the
+      //  planner's best partial path ended on a pillar in the pit, "can't reach the mine face" three times, 2026-10-05; and a
+      //  stair begun beside a drop opens into it)
+      if ([[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => world.dropAt(bot, x + dx + 0.5, y, z + dz + 0.5) > world.SAFE_DROP)) continue
+      // (and never one whose straight way from home crosses a drop - the pit between them was the walk's dead end: a few dips
+      //  allowed, more than two samples below a safe drop is a crossing; audit)
+      { const n = Math.ceil(world.dist2(home, { x, z })); let bad = 0
+        for (let i = 1; i < n && bad <= 2; i++) { const t = i / n; const gy = world.groundY(bot, Math.floor(home.x + (x - home.x) * t), Math.floor(home.z + (z - home.z) * t), y + 8); if (gy != null && y - (gy + 1) > world.SAFE_DROP) bad++ }
+        if (bad > 2) continue }
       if (badMinesNow(bot).some(bm => world.dist2(bm, { x, z }) < 12)) continue
       const away = Math.abs(x - home.x) > Math.abs(z - home.z) ? { x: Math.sign(x - home.x) || 1, z: 0 } : { x: 0, z: Math.sign(z - home.z) || 1 }
       // every open direction, the one whose covered stairs reach deepest (on a mountain top none reaches y16: the
