@@ -615,7 +615,7 @@ function decide () {
   if (dHome > 96 && !expedition() && !mining.inOwnMine(bot) && !tooHurt() && !held('goHome')) return { name: 'goHome', why: `${Math.round(dHome)}b from home` }
 
   // 5b. at home with a haul in the pack: put it in the chest (a player empties their pockets at home)
-  if (dHome < 24 && (mem.get().chests || []).length && haulSize() >= 64 && !held('deposit')) return { name: 'deposit', why: `home with ${haulSize()} items to store` }
+  if (dHome < 24 && (mem.get().chests || []).length && depositHaulSize() >= 64 && !held('deposit')) return { name: 'deposit', why: `home with ${depositHaulSize()} items to store` }
 
   // 5c. plant first (a minute of work, renewable food), then top up the food buffer while it is easy -
   //     starving first and searching second killed the bot twice
@@ -967,7 +967,7 @@ const TASKS = {
   // (not through the night from a bare start: the hut's own shelter is the reason to work on at dusk - at 56/149, no walls,
   //  the task walked the night after birch for torch sticks and a creeper killed it, 2026-09-27; nearly done, it finishes)
   async hut () { return hut.buildHut(bot, { shouldStop: () => homewardStop() || (world.phase(bot) === 'night' && !hutNearlyUp()) }) },
-  async deposit () { return base.depositAll(bot) },
+  async deposit () { return base.depositAll(bot, { keep: depositKeep }) },
   async furnish () {
     const home = mem.get().home
     const r = await base.goHome(bot, { shouldStop: homewardStop })
@@ -1340,6 +1340,13 @@ async function withdrawWindow (needs, lowY = {}) {
 }
 function countOf (name) { return mats.held(bot, name) }
 function windowNeeds () { return typeof build.nextNeeds === 'function' ? build.nextNeeds(bot, WINDOW_LAYERS) : {} }
+// THE BUILD'S OWN DRAW is no haul: the castle round withdrew the window's blocks and the deposit rule banked them straight back
+// - "16 oak_leaves taken out ... back to the build", then "home with 66 items to store", then 64 taken out again, a minute a
+// round, 2026-10-04. The window's needs (cached 30s - nextNeeds is a pass over the box) are kept by the deposit
+let winKeepMemo = { at: 0, v: {} }
+function windowKeep () { if (Date.now() - winKeepMemo.at > 30000) { let v = {}; try { v = build.getJob() ? windowNeeds() : {} } catch {} winKeepMemo = { at: Date.now(), v } } return winKeepMemo.v }
+function depositKeep (b, i) { return Math.max(base.keepCount(b, i), windowKeep()[i.name] || 0) }
+function depositHaulSize () { let n = 0; const seen = new Set(); for (const it of inv.items(bot)) { if (seen.has(it.name)) continue; seen.add(it.name); const k = depositKeep(bot, it); if (k !== Infinity) n += Math.max(0, inv.count(bot, it.name) - k) } return n }
 // the nearest natural wood growing around here (what the castle's wood cells will be made of)
 function nearestWood () {
   // (not the build's own species - wood for fuel is any other tree; preferredWood keeps the same rule)
