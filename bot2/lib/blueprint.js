@@ -217,7 +217,19 @@ async function load (name, version, { log = () => {}, prefs = null } = {}) {
   for (let y = 0; y < g.sy; y++) {
     await new Promise(r => setImmediate(r)) // (a layer at a time: the body's ticks go on between them)
     for (let z = 0; z < g.sz; z++) for (let x = 0; x < g.sx; x++) {
-    const c = g.at(x, y, z); if (!c) continue
+    let c = g.at(x, y, z)
+    // A CARPET OVER AIR - a blueprint pasted in, not built: survival will not place one on nothing (it stands on any block
+    // that is not air), and the hub's 23 bunting carpets between its lamp posts were never doable - 20 in the build's need
+    // for hours, 6 in hand, "nothing doable", 2026-10-04. A string under it - the builders' own way to float a carpet, all
+    // but invisible and walked through
+    // (only over a gap in the structure - a floor of its own lower in the column, never the bottom layer: air there is the
+    //  world's ground, and a string cell would dig it out; audit)
+    if (!c && y > 0) {
+      const up = g.at(x, y + 1, z); const ur = up && /_carpet$/.test(up.name) ? resolve(up.name, md, planner, memo) : null
+      let floorBelow = false; for (let yy = y - 1; yy >= 0 && !floorBelow; yy--) if (g.at(x, yy, z)) floorBelow = true
+      if (ur && /_carpet$/.test(ur) && !P.skip.has(ur) && md.blocksByName.tripwire && floorBelow) c = { name: 'tripwire', props: {} }
+    }
+    if (!c) continue
     let to = resolve(c.name, md, planner, memo)
     if (to && P.skip.has(to)) { report.chosen['skip ' + to] = (report.chosen['skip ' + to] || 0) + 1; to = null } else if (to && P.swap[to]) { const t = resolve(P.swap[to], md, planner, memo); const ck = to + '->' + (t || 'skip'); report.chosen[ck] = (report.chosen[ck] || 0) + 1; to = t } // (the target resolved like any block: a swap to bedrock or a spawner is never placed as typed; audit)
     // a skipped block that something stands on keeps a post in its place: the castle's lantern on a brewing stand could

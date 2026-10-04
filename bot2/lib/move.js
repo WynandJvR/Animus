@@ -1232,7 +1232,7 @@ async function escapeUpInner (bot) {
     if (await gather.towerUp(bot, ownItem ? { allowZones: ['*'], builder: true, item: ownItem } : { allowZones: ['*'] })) continue // (an escape: any zone, never a build cell but with its own block)
     // no towering here (in water a jump never clears a block; or nothing to place): a step cut into the side - the two
     // cells over a solid side block cleared, and up onto it
-    if (!await stepUpSide(bot)) { log('move', `climbing out: no way up from ${fmt(bot.entity.position)} (no tower, no side to cut a step in)`); return false }
+    if (!await stepUpSide(bot)) { log('move', `climbing out: no way up from ${fmt(bot.entity.position)} (no tower: ${gather.towerWhy() || 'refused'}; no side to cut a step in)`); return false }
   }
   // (nothing to climb out of - open above on the first pass: no "climbed out", no trap, the stuck evidence kept, so the
   //  caller goes on to the surface's own remedies and the count still builds; "from y129 to y129" looped a trap and wiped
