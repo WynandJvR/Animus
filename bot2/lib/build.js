@@ -767,7 +767,7 @@ function needsOf (bot, c, md, add) {
   const it = itemOf(c, md)
   // (water that is there but not still - runoff, level 1-8 - is no source: a bucket is still wanted. Named "water", it read
   //  as placed, nothing gathered a bucket, and the hub's well waited with flowing water in it, 2026-10-04)
-  if (!it || (b && nameOk(c, b.name) && !(/water/.test(c.name) && cellDone(bot, c) === false))) return
+  if (!it || (b && nameOk(c, b.name) && !(/^(water|lava)$/.test(c.name) && cellDone(bot, c) === false))) return
   add(it, c.count ? c.count.n : 1)
   if (c.then) add(c.then, 1)
 }
