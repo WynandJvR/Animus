@@ -1897,9 +1897,13 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       }
     }
     if (wallsMeIn(bot, c)) { holdBack.add(key(c)); log('build', `${c.name} at ${move.fmt(c)} would wall me in from ${move.fmt(world.feetPos(bot))} - later`); tpick = Date.now(); continue }
+    const hadItem = c.pour ? inv.items(bot).some(i => i.name === c.item) : true // (a pour's bucket before the try: spent into a leak is the cell's miss; audit)
     const ok = await placeCell(bot, c)
     prof.tries++; prof.ms += Date.now() - tp; prof.dist += d0; if (ok) prof.okMs += Date.now() - tp; else missed(lastPlaceFail, Date.now() - tp)
     tpick = Date.now()
+    // NO FULL BUCKET AT THE POUR is the pack's, not the cell's (as the supports' filler below): left this step, never a miss - the
+    // well's cell took nine "misses" for empty buckets and rested two hours with the water banked in the chest, 2026-10-05
+    if (!ok && c.pour && !hadItem) { log('build', `${c.name} at ${move.fmt(c)}: no ${c.item} in the pack at the pour - no miss of the cell's`); holdBack.add(key(c)); continue }
     // OUT OF FILLER FOR THE SUPPORTS is the pack's, not the cell's: topped up now (the scaffold's one getter - the chest, then
     // the mine) and the cell tried again, never a miss; none to be had ends the step on cobblestone. The hub's stairs each
     // wanted a support, the pack ran dry mid-step and 135 stairs "won't place" in ten minutes, each resting for later, 2026-10-03
