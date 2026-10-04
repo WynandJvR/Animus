@@ -1803,7 +1803,7 @@ async function gatherFor (raw, short) {
       //  that never came, 2026-10-04. The streak breaks on any day the raw was found or not put off)
       if (ANIMAL_RAW.test(raw) || n >= (CORE_RAW.test(raw) ? 4 : 2)) {
         const sk = noneStreak.get(raw); const streak = sk && d - sk.until <= 1 ? sk.n + 1 : 1
-        const hold = Math.min(streak - 1, 3)
+        const hold = CORE_RAW.test(raw) ? 0 : Math.min(streak - 1, 3) // (never the backbone: its empty trips are often a broken path or a full pack; audit)
         noneStreak.set(raw, { until: d + hold, n: streak })
         notToday.set(raw, { day: d + hold })
         log('dir', `${raw}: ${n > 1 ? n + ' trips' : 'the trip'} found none - not again ${hold ? 'for ' + (hold + 1) + ' days (' + streak + ' days running)' : 'today'}`)
