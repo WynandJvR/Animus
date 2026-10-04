@@ -2651,6 +2651,7 @@ async function topUpAt (bot, n, at, walkBack, opts = {}, slack = 0) { // (slack:
   return on() ? { ok: true } : { ok: false, why: (r && r.why) || 'not back on the stand' }
 }
 // Filler blocks to stand on while building high (the planner towers with them).
+let scaffoldMineFailAt = 0
 const SCAFFOLD_WANT = 32 // (THE scaffold stock a build step starts with - the smelt queue keeps cobblestone back to this)
 async function ensureScaffold (bot, n = SCAFFOLD_WANT, { shouldStop } = {}) { // (shouldStop: the caller's day - a top-up is never a night descent)
   // cobblestone counts: the pack carries hundreds for the walls and the planner towers on it. Asking for dirt first sent
@@ -2682,7 +2683,13 @@ async function ensureScaffold (bot, n = SCAFFOLD_WANT, { shouldStop } = {}) { //
   //  known walk; the surface dirt round home is protected ground, so "27 dirt" explored 104 blocks out, and the
   //  pathfinder stepped the bot into a roofed water pocket there - drowned with 390 items, 2026-09-28. Dirt only
   //  when the mine gave nothing.)
-  if (filler() < n / 2) {
+  // (and short of the want with the bank now EMPTY of every kind: the next top-up finds nothing either - a handful at a time
+  //  (1-9 cobblestone) the step walked the 50 blocks to the chest seven times in seven minutes, 2026-10-04. The mine's
+  //  haul now, not the next walk for a handful)
+  const bankDry = !KINDS.some(k => base.bankCount(k) > 0)
+  // (a mine trip that brought nothing rests this second trigger ten minutes - the urgent one below half still tries; audit)
+  if (filler() < n / 2 || (bankDry && filler() < n && Date.now() - scaffoldMineFailAt > 10 * 60000)) {
+    const cobbleBefore = inv.count(bot, 'cobblestone')
     const short = n - filler()
     // (room in the pack first, at the chests beside home: last round's kit filled it, the mine said "pack full" at 0 of 32
     //  and walked the haul home and back - 1.5 minutes a round, 2026-09-29. The kit comes out again right after this)
@@ -2699,6 +2706,7 @@ async function ensureScaffold (bot, n = SCAFFOLD_WANT, { shouldStop } = {}) { //
     const ask = Math.max(short, 32, Math.min(room, 256, short + fnd + whole)) // (four stacks: ~10 minutes at the face, not the half-hour a full pack would hold the building up for)
     log('build', `getting ${ask} cobblestone from the mine to scaffold with${fnd || whole ? ` (and ${fnd} foundation cells, ${whole} for the build's stone)` : ''}`)
     await require('./craft').ensure(bot, 'cobblestone', inv.count(bot, 'cobblestone') + ask, { noWithdraw: true, shouldStop }).catch(() => false)
+    if (inv.count(bot, 'cobblestone') <= cobbleBefore) scaffoldMineFailAt = Date.now()
   }
   if (filler() < n / 2) { log('build', `getting ${n - filler()} dirt to scaffold with`); await require('./craft').ensure(bot, 'dirt', inv.count(bot, 'dirt') + (n - filler()), { noWithdraw: true, shouldStop }).catch(() => false) }
   return true

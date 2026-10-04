@@ -95,6 +95,7 @@ function lidReport (bot, p) {
   } catch (e) { out.push('lid ? ' + e.message) }
   return out.join(', ')
 }
+let chestWalkSaidAt = 0
 async function openChest (bot, p) {
   const b = bot.blockAt(new Vec3(p.x, p.y, p.z))
   if (!b || !/chest|barrel/.test(b.name)) {
@@ -108,6 +109,9 @@ async function openChest (bot, p) {
     // (by travel - its legs go OUT of the build first: from inside the castle a bare planner walk to the chests timed out
     //  45s at a time, five in a row in one build step (each chest skipped in turn, none of them the problem - where the bot
     //  stood was), 2026-09-30)
+    // (WHO sent the walk, said once a minute: mid-step walks of 50b for 1-9 cobblestone, seven in seven minutes, with no
+    //  caller named - 2026-10-04)
+    if (Date.now() - chestWalkSaidAt > 60000) { chestWalkSaidAt = Date.now(); log('base', 'chest walk for: ' + String(new Error().stack).split('\n').slice(2, 7).map(l => l.trim().replace(/^at /, '')).join(' <- ')) }
     const r = await move.travel(bot, p, { range: 2, label: 'to chest', maxMs: 90000 })
     if (!r.ok) { if (move.isVerdict(r)) unreachable.set(key(p), Date.now()); log('base', `can't reach the chest at ${move.fmt(p)} (${r.why}) - skipping it for a while`); return null }
   }
