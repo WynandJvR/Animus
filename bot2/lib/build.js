@@ -1034,14 +1034,28 @@ async function goSite (bot, goal, label, { place = true, dig = (job && job.cells
 //  cleared, 2026-10-02 analysis)
 const clearFails = mem.persistedMap('clearFails')
 function skippedObstruction (b) { return (clearFails.get(key(b.position)) || 0) >= 2 }
-function unskippedObstructions (bot, opts) { return obstructions(bot, opts).filter(b => !skippedObstruction(b)) }
+// A TREE TOP LEFT FLOATING: a log whose trunk stands on nothing - its foot cut away with the band's clearing below - holds its
+// canopy up for good (leaves decay only with no log within 6). Cleared whatever the band: the hub's acacias were cut to the
+// floor's height and their tops hung over the market, operator 2026-10-04 ("random floating tree tops")
+function floatingLog (bot, b) {
+  let y = b.position.y - 1
+  for (let i = 0; i < 24; i++, y--) { const u = world.at(bot, b.position.x, y, b.position.z); if (!u) return false; if (world.LOG_RE.test(u.name)) continue; return !world.isSolid(u) || world.LEAF_RE.test(u.name) }
+  return false
+}
+function unskippedObstructions (bot, opts = {}) {
+  // (one pass over the box, split: the band's and the floating tops above it - two passes doubled the body's cost; audit)
+  const lim = opts.floatingLogs && Number.isFinite(opts.maxY)
+  let o = obstructions(bot, lim ? {} : opts)
+  if (lim) o = o.filter(b => b.position.y <= opts.maxY || (world.LOG_RE.test(b.name) && floatingLog(bot, b)))
+  return o.filter(b => !skippedObstruction(b))
+}
 
 async function clearSite (bot, { shouldStop, maxBlocks = 400, maxY = Infinity, finishing = false, leaves: takeLeaves = true } = {}) {
   // the snapshot of the untouched site comes first: after the first dig it can't be had any more
   if (!ensureSnapshot(bot)) return 0
   let cleared = 0
   for (let pass = 0; pass < 3; pass++) {
-    const all = unskippedObstructions(bot, { maxY })
+    const all = unskippedObstructions(bot, { maxY, floatingLogs: true })
     if (!all.length) break
     // trees first: cut the trunks and the leaves decay by themselves; leaves are dug by hand only
     // when they are still there well after the last trunk came down

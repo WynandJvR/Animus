@@ -1615,7 +1615,7 @@ async function castleWorkInner () {
   // Leaves don't block building unless they sit in a cell; walking cuts through them.
   phase('site clearing')
   const bandTop = minY + 4
-  const obs = build.unskippedObstructions(bot, { maxY: bandTop }).filter(b => !world.LEAF_RE.test(b.name) || j.index.has(build.key(b.position))).length
+  const obs = build.unskippedObstructions(bot, { maxY: bandTop, floatingLogs: true }).filter(b => !world.LEAF_RE.test(b.name) || j.index.has(build.key(b.position))).length
   if (obs > 0) {
     await build.ensureScaffold(bot, build.SCAFFOLD_WANT, { shouldStop: dayStop })
     const n = await build.clearSite(bot, { shouldStop: dayStop, maxBlocks: 200, maxY: bandTop })
