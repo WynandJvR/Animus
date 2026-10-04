@@ -34,8 +34,15 @@ while [ $SECONDS -lt $end ]; do
     echo "$(date +%Y-%m-%dT%H:%M) prev=$PREV new=$N" > $S/last-deploy.txt # (rollback target = prev: the snapshot is of the NEW code)
     # (and once more right before the reconnect: the checks and the snapshot above take seconds, and an edit saved in them
     #  shipped with its fingerprint unchecked - the reconnect loads bot2 from disk; 2026-09-30, audit)
+    # (THE LOCK: an edit saved between the last check and the reload - modules load from disk as the reconnect needs them -
+    #  shipped unaudited, 2026-10-04. .deploying stands from here until the reload is done: nothing is saved into bot2 while
+    #  it does; and the fingerprint is read again after - changed = said loudly, exit 4)
+    echo "$$ $(date +%H:%M:%S)" > $S/.deploying; trap "rm -f $S/.deploying" EXIT
     [ "$(fp)" = "$FP0" ] || { echo "REFUSED: bot2 changed during the deploy's own checks - not restarting"; exit 3; }
-    curl -s -m 5 -X POST -H "Content-Type: application/json" -d '{"reconnect":true}' http://127.0.0.1:3001/config; echo " deployed: $(cat $S/last-deploy.txt)"; exit 0
+    curl -s -m 5 -X POST -H "Content-Type: application/json" -d '{"reconnect":true}' http://127.0.0.1:3001/config; echo " deployed: $(cat $S/last-deploy.txt)"
+    for i in $(seq 1 30); do sleep 3; curl -s -m 3 http://127.0.0.1:3001/state | grep -q '"pos"' && break; done; sleep 30 # (the job and its modules load in the first seconds after the login)
+    [ "$(fp)" = "$FP0" ] || { echo "WARNING: bot2 changed during the reload - code NOT fingerprinted may be live; audit it or roll back to $PREV"; exit 4; }
+    exit 0
   fi
   sleep 15
 done

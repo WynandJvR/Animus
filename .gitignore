@@ -81,3 +81,4 @@ testserver/server.properties
 tools/session-scripts/rollback/
 tools/session-scripts/last-deploy.txt
 tools/session-scripts/lint/node_modules/
+tools/session-scripts/.deploying
