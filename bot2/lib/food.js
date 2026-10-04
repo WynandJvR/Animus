@@ -278,7 +278,7 @@ async function woolFor (bot, n, ctx = {}, colour = 'white') {
     if (shears && woolly(pick)) {
       const before = woolCount()
       const r = await move.goTo(bot, new goals.GoalFollow(pick, 2), { timeoutMs: 20000, stuckMs: 6000, dig: false, place: false, label: 'to sheep' })
-      if (!r.ok && pick.position.distanceTo(bot.entity.position) > 3) { shornTried.set(pick.id, Date.now()); continue }
+      if (!r.ok && pick.position.distanceTo(bot.entity.position) > 3) { log('food', `could not get to the sheep at ${move.fmt(pick.position)} (${r.why}; ${pick.position.distanceTo(bot.entity.position).toFixed(1)}b off, from ${move.fmt(bot.entity.position)}) - leaving it`); shornTried.set(pick.id, Date.now()); continue }
       try {
         await bot.equip(shears, 'hand')
         await bot.lookAt(pick.position.offset(0, 0.8, 0), true)
