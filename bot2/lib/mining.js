@@ -550,11 +550,14 @@ const underBuild = p => move.underBuild(p) // (move.js: the one rule for the gro
 // (the level a mine works at: its face's once the stairs are down, the planned one while they are still being dug - a new
 //  mine's face at its entrance (y66) read "no cobwebs at the mine's level" and the string trip never dug the stairs to the
 //  webs at y21, 2026-10-04)
+// (the webs' reach from the mine's level: 192 - a new mine 150b from the shaft's webs read "no cobwebs within 128" while spiders gave one
+//  string a night, 2026-10-05; ~7 minutes of tunnel at 3s a block)
+const WEB_R = 192
 function workY (mm) { return mm.stairsDone || mm.level == null ? mm.cursor.y : mm.level }
 async function websAtLevel (bot, mm) {
   const y = workY(mm)
   const at = new (require('vec3').Vec3)(mm.cursor.x, y, mm.cursor.z)
-  return world.scanBlocks(bot, craft().GATHER.string.blocks, { maxDistance: 128, count: 200, point: at, filter: b => Math.abs(b.position.y - y) <= 4 && !move.inForeign(b.position) })
+  return world.scanBlocks(bot, craft().GATHER.string.blocks, { maxDistance: WEB_R, count: 200, point: at, filter: b => Math.abs(b.position.y - y) <= 4 && !move.inForeign(b.position) })
 }
 async function takeKnownOre (bot, itemName, target, ctx = {}) {
   const g = craft().GATHER[itemName]
@@ -570,7 +573,7 @@ async function takeKnownOre (bot, itemName, target, ctx = {}) {
   if (g.web && !ctx.near) {
     const mm = mem.get().mine; if (!mm || !mm.cursor) return false
     const webs = await websAtLevel(bot, mm)
-    if (!webs.length) { log('mine', `no cobwebs within 128 of the mine's level at y${workY(mm)} - no string this way`); return false }
+    if (!webs.length) { log('mine', `no cobwebs within ${WEB_R} of the mine's level at y${workY(mm)} - no string this way`); return false }
     const at = new (require('vec3').Vec3)(mm.cursor.x, workY(mm), mm.cursor.z)
     const w0 = webs.sort((a, b) => world.dist3(a.position, at) - world.dist3(b.position, at))[0]
     log('mine', `${webs.length} cobweb${webs.length > 1 ? 's' : ''} at the mine's level - the nearest at ${move.fmt(w0.position)}, ${Math.round(world.dist3(w0.position, at))}b from the face`)
@@ -578,7 +581,7 @@ async function takeKnownOre (bot, itemName, target, ctx = {}) {
     //  within 24 of it and ended with three more 40b along the same shaft, 2026-10-05 (operator: "why didn't it get all
     //  the cobwebs in one go"). The level's band only: the spawner's cluster 30 below stays out)
     const wy = workY(mm)
-    ctx = Object.assign({}, ctx, { near: { point: at, radius: 128 }, oreFilter: b => Math.abs(b.position.y - wy) <= 4 })
+    ctx = Object.assign({}, ctx, { near: { point: at, radius: WEB_R }, oreFilter: b => Math.abs(b.position.y - wy) <= 4 })
   }
   let veins = 0
   // never a tunnel mouth in the yard or under the build: near home the trip STARTS only from inside our own mine (the
@@ -784,10 +787,10 @@ async function mineFor (bot, itemName, target, ctx = {}) {
   // (an ore trip digs many blocks an ore: the room's sizing for it - 4 sticks for 11 raw_iron wore both picks out; audit A2)
   const oreTrip = !!(craft().GATHER[itemName] && craft().GATHER[itemName].ore)
   // (no cobwebs at the mine's level at all: no trip - before the provisioning and the walk)
-  if (craft().GATHER[itemName] && craft().GATHER[itemName].web && !(await websAtLevel(bot, m)).length) { log('mine', `no cobwebs within 128 of the mine's level at y${workY(m)} - no ${itemName} this way`); return false }
+  if (craft().GATHER[itemName] && craft().GATHER[itemName].web && !(await websAtLevel(bot, m)).length) { log('mine', `no cobwebs within ${WEB_R} of the mine's level at y${workY(m)} - no ${itemName} this way`); return false }
   // (an ore's dig is the rock round it too: ~30 blocks an ore wanted, not the pack's whole room - 14 sticks for 2-6 iron,
   //  a birch felled 100b+ out on every iron trip, 7 trees in two hours, 2026-10-04)
-  const digs = () => { const left = Math.max(0, target - inv.count(bot, itemName)); return oreTrip ? (craft().GATHER[itemName].web ? (m.stairsDone ? 120 : 400) : left * 30) : left } /* (a new mine's web trip digs its stairs too - ~140 for 46 steps and the tunnel after; audit) */ // (webs: one tunnel to the shaft, ~2 blocks a step)
+  const digs = () => { const left = Math.max(0, target - inv.count(bot, itemName)); return oreTrip ? (craft().GATHER[itemName].web ? 2 * WEB_R + (m.stairsDone ? 0 : 3 * Math.max(0, m.cursor.y - (m.level != null ? m.level : m.cursor.y))) : left * 30) : left } /* (a new mine's web trip digs its stairs too - ~140 for 46 steps and the tunnel after; audit) */ // (webs: one tunnel to the shaft, ~2 blocks a step)
   await provisionForMine(bot, digs())
   // an ore showing in a cave wall or a cliff first - and the vein behind it, each block dug bares the next
   if (craft().GATHER[itemName] && craft().GATHER[itemName].ore && await takeKnownOre(bot, itemName, target, ctx)) return true
