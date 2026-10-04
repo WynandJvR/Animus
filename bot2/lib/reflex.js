@@ -1905,6 +1905,16 @@ function install (b) {
   //  named at once, loudly; the lava fuel only ever scoops; audit 2026-09-28)
   let lavaHeldAt = 0
   bot.on('heldItemChanged', it => { if (it && it.name === 'lava_bucket') lavaHeldAt = Date.now() })
+  // (WHERE A WATER BUCKET GOES: filled, banked, taken out, and gone by the pour at the hub's well - "no water_bucket in the
+  //  pack" four times, the chest holding only empty buckets after, 2026-10-04. Said when one leaves a slot: what took its
+  //  place, the task and the reflex, and who was running)
+  try {
+    bot.inventory.on('updateSlot', (slot, oldItem, newItem) => {
+      if (!oldItem || oldItem.name !== 'water_bucket' || (newItem && newItem.name === 'water_bucket')) return
+      let task = ''; try { const d = require('./director').current && require('./director').current(); task = d ? d.name : '' } catch {}
+      log('inv', `a water_bucket left slot ${slot} -> ${newItem ? newItem.name : 'empty'} (window ${bot.currentWindow ? bot.currentWindow.type : 'none'}, task ${task || '?'}, reflex ${active ? active.kind : 'none'}) at ${String(new Error().stack).split('\n').slice(2, 6).map(l => l.trim().replace(/^at /, '')).join(' <- ')}`)
+    })
+  } catch {}
   bot.on('blockUpdate', (o, n) => {
     if (!n || n.name !== 'lava' || !bot.entity || (o && o.name === 'lava')) return
     const held = bot.heldItem && bot.heldItem.name === 'lava_bucket'
