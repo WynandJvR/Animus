@@ -738,6 +738,7 @@ async function mine (bot, itemName, g, n, ctx = {}) {
 // RegExp when any of several will do - poppy, red tulip or rose bush for red dye).
 // ctx.filter(b): which of the plants to take (a ripe cocoa pod, a cactus's top segment); ctx.force: a plant the dig's
 // natural list lacks (cocoa, sea pickles, azaleas) - still never in a zone (outOfZones) nor a finished build cell (act.dig)
+const PLANT_FROM_HOME = 1200 // (the plants' remembered patches: as far as their lands go - forage.LAND_FAR)
 async function pickPlants (bot, re, itemName, n, ctx = {}) {
   const label = typeof itemName === 'string' ? itemName : ctx.label || (re.source.replace(/^\^\(?|\)?\$$/g, '').split('|')[0] + ' and the like')
   // (the red flowers' spots were stored as 'red flowers' before the label came from the pattern: still read, 2026-09-27)
@@ -755,7 +756,10 @@ async function pickPlants (bot, re, itemName, n, ctx = {}) {
     const b = world.findBlocks(bot, re, { maxDistance: 48, count: 24, filter: x => outOfZones(x) && !skip.has(x.position.toString()) && !world.isLiquidWater(x) && take(x) })[0]
     if (!b) {
       if (++empty > 3 || ctx.noExplore) { log('gather', `no ${label} to pick around here`); return false } // (noExplore: a trip to a far land - its rings round home are no search of it)
-      const known = knownResource(label, bot.entity.position) || (legacy && knownResource(legacy, bot.entity.position))
+      // (a patch found in its own land, past 200b - the bluets of a sunflower plain 270b out - is still the patch to go back to:
+      //  forgotten at 200, every next trip searched the picked-out ground round home and came back empty, 2026-10-04; the
+      //  director's day fit prices the same spot, PLANT_FROM_HOME)
+      const known = knownResource(label, bot.entity.position, { maxFromHome: PLANT_FROM_HOME }) || (legacy && knownResource(legacy, bot.entity.position, { maxFromHome: PLANT_FROM_HOME }))
       if (known && empty === 1 && world.dist2(known, bot.entity.position) > 40) await move.travel(bot, known, { range: 8, shouldStop: ctx.shouldStop, label: 'to ' + label })
       else await explore(bot, x => re.test(x.name), { shouldStop: ctx.shouldStop, label, legs: 2, accept: x => outOfZones(x) && take(x) })
       continue
