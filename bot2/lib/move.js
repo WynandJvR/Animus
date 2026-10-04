@@ -1009,7 +1009,11 @@ async function escapeUpInner (bot) {
   //  at night, 2026-10-03)
   {
     const litter = require('./litter')
-    const mine = u => litter.has(u) || require('./build').strayAt(bot, u)
+    // (or a LONE block of plain ground or filler with a drop on every side and nothing protected: the lower half of our own
+    //  pillar dug away by the tidy left its top block off the ledger - the descent stopped one above it, 'no way to jiggle that is
+    //  not over a drop' 52 times at dusk, 2026-10-04. The fall check below still holds the dig to a safe drop)
+    const lone = u => { const b = world.at(bot, u.x, u.y, u.z); return !!b && /^(dirt|grass_block|coarse_dirt|cobblestone|stone|cobbled_deepslate|andesite|diorite|granite|netherrack)$/.test(b.name) && !isProtected(b, 'dig') }
+    const mine = u => litter.has(u) || require('./build').strayAt(bot, u) || lone(u)
     const onTop = () => { const f = bot.entity.position.floored(); const u = { x: f.x, y: f.y - 1, z: f.z }; return bot.entity.onGround && mine(u) && [[1, 0], [-1, 0], [0, 1], [0, -1]].every(([dx, dz]) => world.dropAt(bot, f.x + dx + 0.5, f.y, f.z + dz + 0.5) > world.SAFE_DROP) ? u : null }
     // (no sky test: a canopy's leaves read as a roof, and the descent stopped after one block each escape; audit)
     if (onTop()) {
