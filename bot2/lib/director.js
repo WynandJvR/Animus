@@ -440,6 +440,17 @@ function wantedDrop () {
   const e = near.find(wantedDropOf); if (!e) return null
   try { return e.getDroppedItem().name } catch { return null }
 }
+// A SPIDER NIGHT: string comes from spiders, and they are on the surface only at night - by day the hunt found them all deep
+// in the rock, and a slept night spawns none: the hub's 23 carpets waited on string for good, 2026-10-04. While the build is
+// short of it, a fit, armed bot stays up by its own door for them instead of the bed - spiders only: anything else about,
+// or hurt, and it is the hideout's as ever (and creepers drawn to the door are 20 from the build, not on it)
+const SPIDER_RE = /^(spider|cave_spider)$/
+function stringShort () { try { const need = (build.cachedStatus(bot).need || {}).string || 0; return need > 0 && inv.count(bot, 'string') + base.bankCount('string') < need } catch { return false } }
+// (never a third night up - phantoms come for a player 3 days unslept; and never with another player online: their bed skips the
+//  night only if every player sleeps, and a bot on guard at its door kept the operator's night from passing; audit)
+function spiderNightRested () { const d = mem.get().sleptDay; return d != null && day.dayNo(bot) - d < 2 }
+function othersOnline () { try { return Object.values(bot.players).some(p => p && p.username && p.username !== bot.username) } catch { return true } }
+function spiderNightFit () { return spiderNightRested() && !othersOnline() && bot.health >= 18 && !!inv.bestWeapon(bot) && (inv.armorPoints(bot) >= 8 || !!inv.offhandShield(bot)) && inv.foodPoints(bot) >= 10 && !!hut.doorApronStep() && hut.shellComplete(bot) }
 function decide () {
   const night = world.phase(bot) === 'night'
   const dusk = world.phase(bot) === 'dusk'
@@ -483,7 +494,9 @@ function decide () {
   //  pillager patrol and two skeletons shot the bot four times in two minutes, each respawn walking back out to the
   //  grave, the farm, the tool chest, 2026-09-25)
   const outgunned = around.some(h => reflex.RANGED.has(h.e.name)) && !inv.offhandShield(bot) && inv.armorPoints(bot) < 8 && !reflex.bowReady()
-  if (around.length && home && dHome < 48 && hut.shellComplete(bot) && (dim || outgunned || bot.health <= reflex.hurtLine()) && !held('hideout')) {
+  const spiderNightOn = world.phase(bot) === 'night' && !!home && dHome < 24 && stringShort() && spiderNightFit() && !held('spiderNight')
+  const spidersOnly = around.length > 0 && around.every(h => SPIDER_RE.test(h.e.name)) // (the spider night's own game: no hideout from it)
+  if (around.length && home && dHome < 48 && hut.shellComplete(bot) && (dim || outgunned || bot.health <= reflex.hurtLine()) && !(spiderNightOn && spidersOnly) && !held('hideout')) {
     return { name: 'hideout', why: `${around.length} hostile${around.length > 1 ? 's' : ''} around home (${around.slice(0, 3).map(h => h.e.name).join(', ')}) - waiting inside` }
   }
   // evening: be home before dusk, not at it - a 100-block walk begun at dusk arrives in the dark (a zombie
@@ -530,6 +543,7 @@ function decide () {
     //  dusk is ~45s, the failure took 30, and night's 32-block limit left the bed 48b off - a bunker dug at the site and the
     //  night waited out, ~9 minutes a bed would have skipped, 2026-10-04)
     const mineFellThrough = !!failures.nightMine && Date.now() - failures.nightMine.at < 90000
+    if (spiderNightOn && !mineTheNight) return { name: 'spiderNight', why: 'night - the build is short of string: up by the door for the spiders, not the bed' }
     if (bed && world.dist2(bed, bot.entity.position) < (dusk || mineFellThrough ? 200 : 32) && !mineTheNight && !held('sleep')) return { name: 'sleep', why: `${night ? 'night' : 'dusk'} - my bed is ${Math.round(world.dist2(bed, bot.entity.position))}b away` }
     // a working mine next to home turns the night into mining time: go down at dusk (a short walk)
     {
@@ -900,6 +914,29 @@ const TASKS = {
   },
   async bunker () {
     return shelter.bunker(bot, { shouldStop: () => taskCancelled() })
+  },
+  async spiderNight () {
+    const home = mem.get().home; const ap = hut.doorApronStep(); if (!home || !ap) return false
+    const t0 = Date.now(); let kills = 0; const s0 = inv.count(bot, 'string')
+    const stand = { x: ap.x, y: home.y, z: ap.z }
+    const near = (h, r) => Math.abs(h.e.position.y - bot.entity.position.y) < 6 && onSurface(h.e) && world.dist2(h.e.position, home) < r
+    log('dir', `a spider night: ${(build.cachedStatus(bot).need || {}).string} string short - by the door for spiders (hp ${Math.round(bot.health)}, armour ${inv.armorPoints(bot)})`)
+    while (!taskCancelled() && world.phase(bot) === 'night' && Date.now() - t0 < 3 * 60000) {
+      await reflex.waitClear()
+      // (out of it: hurt past a few points, or anything but a spider about - the hideout's then; never a chase off from the door)
+      if (bot.health < 16 || !stringShort()) break
+      const hs = reflex.hostiles(24).filter(h => h.e.name !== 'bat' && near(h, 32))
+      const other = hs.find(h => !SPIDER_RE.test(h.e.name))
+      if (other) { log('dir', `spider night: a ${other.e.name} about - in`); break }
+      const sp = hs.filter(h => world.dist2(h.e.position, home) < 24).sort((a, b) => a.d - b.d)[0]
+      if (sp) await move.goTo(bot, new goals.GoalFollow(sp.e, 1.5), { timeoutMs: 12000, stuckMs: 4000, dig: false, place: false, label: 'to the spider' }).catch(() => null)
+      else if (world.dist2(bot.entity.position, stand) > 2) await move.goTo(bot, new goals.GoalNear(stand.x, stand.y, stand.z, 1), { timeoutMs: 15000, stuckMs: 5000, dig: false, place: false, label: 'to the door' }).catch(() => null)
+      else await move.sleep(1000)
+      if (sp && !sp.e.isValid) kills++
+      await act.collectDrops(bot, { radius: 8, maxMs: 4000, only: e => { try { return e.getDroppedItem().name === 'string' } catch { return false } } })
+    }
+    log('dir', `spider night over: ${kills} spider${kills === 1 ? '' : 's'} killed, +${inv.count(bot, 'string') - s0} string (hp ${Math.round(bot.health)})`)
+    return inv.count(bot, 'string') > s0 || kills > 0 || Date.now() - t0 >= 3 * 60000
   },
   async hideout () {
     const t0 = Date.now()
@@ -2051,6 +2088,8 @@ async function start (b) {
   try { mats.getPlanner(bot) } catch {}
   // respawned inside the safehouse: the door shut before anything else (a door left open under a patrol was a window
   // for their arrows at every respawn, 2026-09-26)
+  bot.on('sleep', () => { try { mem.set('sleptDay', day.dayNo(bot)) } catch {} }) // (the spider night's phantom limit: the last night slept)
+  try { if (mem.get().sleptDay == null) mem.set('sleptDay', day.dayNo(bot)) } catch {} // (none on record: counted from now, never an unlimited run)
   bot.on('spawn', () => { setTimeout(() => { try { if (bot.entity && move.insideHut(world.feetPos(bot))) hut.shutDoor(bot).catch(() => {}) } catch {} }, 1500) })
   baseZone()
   orchard.setZone()
