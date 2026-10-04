@@ -474,10 +474,14 @@ function cellDone (bot, c) {
   if (!b) return null // unloaded = unknown
   if (c.clear) return world.isAirish(b) || /(_bed|^chest|^furnace|^crafting_table|^barrel|torch|lantern|_carpet)$/.test(b.name)
   if (!nameOk(c, b.name)) return false
-  const w = wantOf(c)
-  if (!w) return true
   let p
   try { p = b.getProperties() } catch { return true }
+  // (WATERLOGGED IS A LEAK: a waterlogged wall or fence is a water source of its own, and the plaza round the hub's well ran
+  //  with water from two the bot set into the well's water - the blueprint's own waterlogged rim floods any real world.
+  //  No build wants one: the cell is done dry, 2026-10-04)
+  if (p && String(p.waterlogged) === 'true' && !/water|coral|sea_pickle|seagrass|kelp|conduit/.test(c.name)) return false // (what lives in water stays wet; audit)
+  const w = wantOf(c)
+  if (!w) return true
   for (const k in w) {
     if (k === 'axis' && axisRelaxed(c)) continue
     if (p[k] != null && String(p[k]) !== w[k]) return false
@@ -1396,6 +1400,14 @@ async function placeCell (bot, c, j = job) {
   if (!step && !world.isAirish(cur) && !world.isLiquidWater(cur) && !act.REPLACEABLE_RE.test(cur.name)) {
     if (!await timed('dig', act.dig(bot, pos, own))) return why(`could not dig the ${cur.name} in the cell${act.lastDigWhy() ? ': ' + act.lastDigWhy() : ''}`)
     cur = bot.blockAt(pos)
+  }
+  // A WATER SOURCE IN A CELL THAT IS NOT WATER: what goes in would be waterlogged - and leak (a waterlogged block broken
+  // leaves its source behind). A filler block in first takes the source, dug out after: the cell dry (flowing water runs
+  // in again, but flowing water waterlogs nothing)
+  if (!/water/.test(c.name) && /_wall$|_fence$|_fence_gate$|_slab$|_stairs$|_pane$|_bars$|_trapdoor$|_sign$|lantern$|^chain$|^ladder$|^light$|_rail$|_leaves$|^scaffolding$|_button$/.test(c.name) && cur && world.isLiquidWater(cur) && String((() => { try { return cur.getProperties().level } catch { return '' } })()) === '0') {
+    const fil = inv.items(bot).find(i => FILLER_ITEMS.test(i.name))
+    if (fil && await act.place(bot, pos, fil.name, { allowZones: ['build', 'base'] }).catch(() => false)) { await act.dig(bot, pos, own).catch(() => false); cur = bot.blockAt(pos) }
+    if (cur && world.isLiquidWater(cur) && String((() => { try { return cur.getProperties().level } catch { return '' } })()) === '0') return why('a water source in the cell - it would go in waterlogged')
   }
   // a two-block block needs its second cell clear (a scaffold block or a leaf in a door's top, a bed's head)
   const twin = c.twin && { x: c.x + c.twin[0], y: c.y + c.twin[1], z: c.z + c.twin[2] }
