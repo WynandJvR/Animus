@@ -43,6 +43,10 @@ const GATHER = {
   diamond: { blocks: /^(diamond_ore|deepslate_diamond_ore)$/, tool: 'pickaxe', tier: 3, ore: true },
   redstone: { blocks: /^(redstone_ore|deepslate_redstone_ore)$/, tool: 'pickaxe', tier: 3, ore: true },
   lapis_lazuli: { blocks: /^(lapis_ore|deepslate_lapis_ore)$/, tool: 'pickaxe', tier: 2, ore: true },
+  // STRING from a mineshaft's cobwebs, cut with a sword (shears give the web itself): the ore trip's way - down the mine's
+  // stairs, tunnelled from its own level to the webs nearest it. Spiders gave 2 string in three nights - by day they are all
+  //  deep in the rock, home's lit ground spawns none - while 30 cobwebs stood in the chunks round home, 2026-10-04
+  string: { blocks: /^cobweb$/, tool: 'sword', tier: 0, ore: true, web: true },
   dirt: { blocks: /^(dirt|grass_block|coarse_dirt|rooted_dirt)$/, tool: 'shovel', tier: 0 },
   sand: { blocks: /^sand$/, tool: 'shovel', tier: 0 },
   gravel: { blocks: /^gravel$/, tool: 'shovel', tier: 0 },
@@ -368,7 +372,9 @@ async function ensureInner (bot, name, count, ctx, depth, chain) {
     // 2) route
     let ok = false
     if (/_planks$/.test(name)) ok = await makePlanks(bot, name, short, c2)
-    else if (GATHER[name] && !craftableCheaper(bot, name)) ok = await gatherItem(bot, name, short, c2)
+    // (a web-gathered raw - string - only for the caller that asked for the trip: a bow or a rod made on the way never sends
+    //  the bot down a tunnel to a mineshaft; it hunts as before; audit)
+    else if (GATHER[name] && !(GATHER[name].web && !ctx.web) && !craftableCheaper(bot, name)) ok = await gatherItem(bot, name, short, c2)
     else if (SMELT[name]) ok = await smelt().smeltItem(bot, name, short, c2)
     // wool: shorn when there are shears (any colour counts - it is dyed), killed for otherwise
     else if (/_wool$/.test(name) && name !== 'white_wool') ok = await dyeWool(bot, name, short, c2)

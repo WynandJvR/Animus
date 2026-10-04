@@ -2046,7 +2046,7 @@ async function gatherForInner (raw, short) {
       {
         const before = inv.count(bot, raw)
         const t0 = Date.now()
-        const ok = await craft.ensure(bot, raw, before + batch, ctx)
+        const ok = await craft.ensure(bot, raw, before + batch, raw === 'string' ? Object.assign({ web: true }, ctx) : ctx) // (the build's string: the mineshaft's webs are this trip's, never a craft's)
         // a species log (exact wood) that no trip finds is searched out round this home like any forage source: its cells
         // wait instead of a daily trip for dark oak that does not grow here (audit #14) - but only a real search counts: a
         // trip cut short by dusk, danger or a full pack is not "none here" (R7, 2026-09-27)

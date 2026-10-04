@@ -537,6 +537,17 @@ async function takeKnownOre (bot, itemName, target, ctx = {}) {
   const t0 = Date.now()
   const start = inv.count(bot, itemName)
   const mouth = world.feetPos(bot) // (the stand the trip began from: where it walks back to)
+  // (WEBS lie where a mineshaft runs, rarely within 64 of home: the trip works the cluster nearest the mine's own level -
+  //  4 up or down of its face, within 128 of it - never one deep under it, a cave spider's spawner's)
+  if (g.web && !ctx.near) {
+    const mm = mem.get().mine; if (!mm || !mm.cursor) return false
+    const at = new (require('vec3').Vec3)(mm.cursor.x, mm.cursor.y, mm.cursor.z)
+    const webs = await world.scanBlocks(bot, g.blocks, { maxDistance: 128, count: 200, point: at, filter: b => Math.abs(b.position.y - mm.cursor.y) <= 4 && !move.inForeign(b.position) })
+    if (!webs.length) { log('mine', `no cobwebs within 128 of the mine's face at y${mm.cursor.y} - no string this way`); return false }
+    const w0 = webs.sort((a, b) => world.dist3(a.position, at) - world.dist3(b.position, at))[0]
+    log('mine', `${webs.length} cobweb${webs.length > 1 ? 's' : ''} at the mine's level - the nearest at ${move.fmt(w0.position)}, ${Math.round(world.dist3(w0.position, at))}b from the face`)
+    ctx = Object.assign({}, ctx, { near: { point: w0.position, radius: 24 } })
+  }
   let veins = 0
   // never a tunnel mouth in the yard or under the build: near home the trip STARTS only from inside our own mine (the
   // stairs take us down first; audit #27). Judged once, at the start - checked every turn, the first ore's tunnel led away
@@ -568,7 +579,7 @@ async function takeKnownOre (bot, itemName, target, ctx = {}) {
     }
     // through the rock to it (the planner digs its own tunnel), then the block and its vein
     if (!act.reach(bot, o.position, 4.3)) {
-      const r = await move.goTo(bot, new goals.GoalLookAtBlock(o.position, bot.world, { reach: 4 }), { timeoutMs: 120000, stuckMs: 15000, label: 'to the ore', shouldStop: ctx.shouldStop })
+      const r = await move.goTo(bot, new goals.GoalLookAtBlock(o.position, bot.world, { reach: 4 }), { timeoutMs: g.web ? Math.max(120000, world.dist3(o.position, bot.entity.position) * 3000) : 120000, stuckMs: 15000, label: 'to the ore', shouldStop: ctx.shouldStop }) /* (a web's tunnel is ~3s a block, 84 blocks to the shaft) */
       // (and the rest of that pocket with it - the ores round the one refused, and round where the walk stuck: the next
       //  nearest was the same pocket past the same flowing water under home, four walks of 73-86s each, 2026-10-04)
       if (!r.ok && !act.reach(bot, o.position, 4.5)) {
@@ -701,7 +712,7 @@ async function mineFor (bot, itemName, target, ctx = {}) {
   const oreTrip = !!(craft().GATHER[itemName] && craft().GATHER[itemName].ore)
   // (an ore's dig is the rock round it too: ~30 blocks an ore wanted, not the pack's whole room - 14 sticks for 2-6 iron,
   //  a birch felled 100b+ out on every iron trip, 7 trees in two hours, 2026-10-04)
-  const digs = () => { const left = Math.max(0, target - inv.count(bot, itemName)); return oreTrip ? left * 30 : left }
+  const digs = () => { const left = Math.max(0, target - inv.count(bot, itemName)); return oreTrip ? (craft().GATHER[itemName].web ? 120 : left * 30) : left } // (webs: one tunnel to the shaft, ~2 blocks a step)
   await provisionForMine(bot, digs())
   // an ore showing in a cave wall or a cliff first - and the vein behind it, each block dug bares the next
   if (craft().GATHER[itemName] && craft().GATHER[itemName].ore && await takeKnownOre(bot, itemName, target, ctx)) return true
@@ -731,6 +742,8 @@ async function mineFor (bot, itemName, target, ctx = {}) {
   }
   // down in the mine now: the known ore from here (from round home it waited for the stairs - #27)
   if (craft().GATHER[itemName] && craft().GATHER[itemName].ore && inOwnMine(bot) && await takeKnownOre(bot, itemName, target, ctx)) return true
+  // (webs are found, never dug for: no tunnel on the chance of one)
+  if (craft().GATHER[itemName] && craft().GATHER[itemName].web) { log('mine', `no cobwebs taken from the mine for ${itemName} (${inv.count(bot, itemName)}/${target})`); return false }
   log('mine', `mining for ${itemName} (${inv.count(bot, itemName)}/${target}) at ${move.fmt(m.cursor)}`)
   if (ctx.seal) await sealBehind(bot, m)
   let lastSave = Date.now()

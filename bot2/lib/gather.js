@@ -661,7 +661,7 @@ async function mine (bot, itemName, g, n, ctx = {}) {
   // big stone/ore orders go underground
   if ((itemName === 'cobblestone' && n > 24) || g.ore) {
     const r = await mining().mineFor(bot, itemName, target, ctx)
-    if (r || !g.ore) return inv.count(bot, itemName) >= target || r
+    if (r || !g.ore || g.web) return inv.count(bot, itemName) >= target || r // (webs: the mine's trip or nothing - no surface scan for them)
   }
   let emptyScans = 0
   const t0 = Date.now()
