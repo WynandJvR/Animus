@@ -411,9 +411,13 @@ async function pour (bot, pos, itemName, { plans, accept, allowZones = [], timeo
   const t0 = Date.now()
   const cancelled = control.token()
   let tries = 0
+  // (NEVER A WATERLOGGABLE FACE: a bucket used on a wall, a fence, a slab fills THAT block - the water goes into it, not
+  //  the cell beside it. The hub's well was poured against its own rim walls: each pour waterlogged a wall, the leak fix dug
+  //  it out, the next pour did it again - every bucket spent, the well still dry, the walls redone, 2026-10-04)
+  const loggable = b => { try { return b && Object.prototype.hasOwnProperty.call(b.getProperties() || {}, 'waterlogged') } catch { return false } }
   const refs = () => (plans || []).map(p => {
     const nb = bot.blockAt(target.offset(p.off[0], p.off[1], p.off[2]))
-    return refUsable(nb) ? { ref: nb, face: new Vec3(-p.off[0], -p.off[1], -p.off[2]) } : null
+    return refUsable(nb) && !loggable(nb) ? { ref: nb, face: new Vec3(-p.off[0], -p.off[1], -p.off[2]) } : null
   }).filter(Boolean)
   const faceCentre = ({ ref, face }) => ref.position.offset(0.5 + face.x * 0.5, 0.5 + face.y * 0.5, 0.5 + face.z * 0.5)
   // the eye past the face's plane, on the cell's side
