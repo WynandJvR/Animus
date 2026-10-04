@@ -153,7 +153,7 @@ function underground () {
 
 function note (name, ok) {
   if (ok) delete failures[name]
-  else { const f = failures[name] || (failures[name] = { n: 0, at: 0 }); f.n++; f.at = Date.now() }
+  else { const f = failures[name] || (failures[name] = { n: 0, at: 0 }); f.n++; f.at = Date.now(); f.day = day.dayNo(bot) }
 }
 // A task that just failed steps aside until the world changes (time passing is the change here:
 // position, daylight, inventory differ after other work). Backoff grows with repeated failure.
@@ -172,9 +172,13 @@ function held (name) {
   }
   return cooling(name)
 }
+// (A NEW DAY is the world changed: a failure of the evening before - the castle round at dusk with nothing that fits the
+//  hour, "did not succeed" - kept the castle cooling into the dawn after the night was slept through, an iron trip for
+//  the bot's own leggings took the whole morning and the dark oak trip never ran, 2026-10-04. Cleared at the day's turn)
 function cooling (name) {
   const f = failures[name]
   if (!f) return false
+  if (f.day != null && day.dayNo(bot) > f.day) { delete failures[name]; return false }
   return Date.now() - f.at < Math.min(15 * 60000, 30000 * Math.pow(2, Math.min(f.n - 1, 5)))
 }
 
