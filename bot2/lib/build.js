@@ -1353,6 +1353,28 @@ async function placeCell (bot, c, j = job) {
   lastPlaceFail = ''
   const pos = new Vec3(c.x, c.y, c.z)
   const own = { force: true, own: true, allowZones: ['build', 'base'], timeoutMs: 15000 }
+  // AN ANIMAL STANDING IN THE CELL: the server refuses a block where a body is - a sheep fallen into a hole in the hub's
+  // floor stood in its stone cell, "Server refused to place stone" for six hours, and the pen's leads walked to it and
+  // "lost the sheep" thirty times, 2026-10-04. A wild farm animal (never a named one - someone's) is taken, as a player
+  // would: its drops are the bot's
+  {
+    const food = require('./food')
+    const inCell = e => { const w = (e.width || 0.9) / 2; const h = e.height || 1.3; const p = e.position; return p.x + w > c.x && p.x - w < c.x + 1 && p.z + w > c.z && p.z - w < c.z + 1 && p.y + h > c.y && p.y < c.y + 1 }
+    const named = e => Array.isArray(e.metadata) && !!e.metadata[2]
+    const occ = Object.values(bot.entities).find(e => e && e !== bot.entity && e.position && food.FOOD_ANIMALS.test(e.name || '') && !named(e) && !move.inForeign(e.position) && inCell(e)) // (never one standing in someone else's place; audit)
+    if (occ) {
+      log('build', `a ${occ.name} stands in the ${c.name} cell at ${move.fmt(c)} - taking it`)
+      // (a woolly sheep shorn first: 1-3 wool, and one more when it falls - wool is scarce round home; audit)
+      const sh = inv.items(bot).find(i => i.name === 'shears'); const wl = occ.name === 'sheep' ? food.sheepWool(bot, occ) : null
+      if (sh && wl && !wl.sheared) {
+        if (occ.position.distanceTo(bot.entity.position) > 2.5) await move.goTo(bot, new goals.GoalFollow(occ, 1.5), { timeoutMs: 8000, stuckMs: 4000, dig: false, place: false, label: 'to the sheep' }).catch(() => null)
+        try { await bot.equip(sh, 'hand'); await bot.lookAt(occ.position.offset(0, 0.8, 0), true); bot.activateEntity(occ) } catch {}
+        await move.sleep(600)
+      }
+      await food.killAnimal(bot, occ, { maxMs: 20000 }).catch(() => false)
+      if (occ.isValid) return why(`a ${occ.name} stands in the cell`)
+    }
+  }
   if (c.clear) {
     // a cell that must be empty: dig out whatever is in it
     if (cellDone(bot, c)) return true
