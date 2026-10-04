@@ -356,16 +356,22 @@ async function stockInner (bot, { shouldStop } = {}, ctx = {}) {
   // (never a sheep inside the build: fallen into a hole in the hub's floor, one was walked to and "lost on the way" ~40
   //  times, and the walks to it stuck four minutes at a 21-block drop, 2026-10-04 - the builder takes it, build.placeCell)
   const inBuild = p => { const z = move.inZone(p, 0); return !!z && z.label === 'build' }
-  let wild = food().animals(bot, /^sheep$/, 48).filter(e => !inBuild(e.position))
+  // (and never one down a cave or a hole: no lead out of there - the walk "to sheep" went into the cave under home after
+  //  one at y41, the bot fell into its lake and was stuck at y34 for 8 minutes, twice, 2026-10-04. A sheep under the open
+  //  sky, at the home's own ground level or near it)
+  const home0 = mem.get().home
+  const onTop = p => { let surf = true; try { surf = require('./reflex').onSurface({ position: p }) } catch {} return surf && (!home0 || p.y > home0.y - 12) } // (the column's top ground, leaves and logs no ground - a forest flock is on top; audit)
+  const leadable = p => !inBuild(p) && onTop(p)
+  let wild = food().animals(bot, /^sheep$/, 48).filter(e => leadable(e.position))
   if (!wild.length) {
     const home = mem.get().home || bot.entity.position
-    const known = ((mem.get().mobs || {}).sheep || []).filter(q => world.dist2(q, home) < LURE_REACH && !inBuild(q)).sort((a, b) => world.dist2(a, bot.entity.position) - world.dist2(b, bot.entity.position))[0]
+    const known = ((mem.get().mobs || {}).sheep || []).filter(q => world.dist2(q, home) < LURE_REACH && !inBuild(q) && (!home0 || q.y == null || q.y > home0.y - 12)).sort((a, b) => world.dist2(a, bot.entity.position) - world.dist2(b, bot.entity.position))[0]
     if (!known) { log('pen', 'no sheep in sight or remembered near home to lead in'); return false }
     const far = world.dist2(known, centreOf(p))
     if (world.ticksUntilNight(bot) < leadTicks(far)) { log('pen', `the nearest flock is ${Math.round(far)} blocks from the pen - not enough daylight left to lead it home today`); return false }
     ctx.far = true
     await move.travel(bot, known, { range: 8, shouldStop, label: 'to sheep' })
-    wild = food().animals(bot, /^sheep$/, 48).filter(e => !inBuild(e.position))
+    wild = food().animals(bot, /^sheep$/, 48).filter(e => leadable(e.position))
     if (!wild.length) {
       mem.update(m => { if (m.mobs && m.mobs.sheep) m.mobs.sheep = m.mobs.sheep.filter(q => world.dist2(q, known) >= 32) })
       log('pen', `no sheep where they were seen at ${known.x},${known.z} - forgotten`)
