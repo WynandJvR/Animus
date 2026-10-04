@@ -2011,6 +2011,9 @@ function ensureFoundation (bot) {
   const noFloor = q => {
     const c = job.index.get(`${q.x},${y1},${q.z}`); if (!c) return false
     if (/_trapdoor$/.test(c.name) && c.props && String(c.props.open) === 'true') return true
+    // (and a block that FALLS - gravel, sand, concrete powder: over a hole it drops into it. The hub's gravel path stood over
+    //  the well's spill and the pond under the plaza: placed, fell, nine cells failed all afternoon, 2026-10-04)
+    if (/^(gravel|sand|red_sand|suspicious_sand|suspicious_gravel|[a-z_]+_concrete_powder)$/.test(c.name)) return true
     const d = md0.blocksByName[c.name]; return !!d && d.boundingBox === 'empty'
   }
   let holes = 0
