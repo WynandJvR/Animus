@@ -271,7 +271,8 @@ async function place (bot, pos, itemName, { faceHint = null, plans = null, accep
     for (const p of list) {
       const [dx, dy, dz] = p.off
       const nb = bot.blockAt(target.offset(dx, dy, dz))
-      if (refUsable(nb, useRefs && sneak)) { ref = nb; face = new Vec3(-dx, -dy, -dz); plan = p; break }
+      // (a carpet onto the string under it: the string's top is clicked, as a player floats a carpet - build.refOk's one exception)
+      if (refUsable(nb, useRefs && sneak) || (dx === 0 && dy === -1 && dz === 0 && nb && nb.name === 'tripwire' && /_carpet$/.test(itemName))) { ref = nb; face = new Vec3(-dx, -dy, -dz); plan = p; break }
     }
     if (!ref) { log('act', `place ${itemName} at ${move.fmt(pos)}: nothing solid to place against`); return false }
     // don't place into our own body - the hitbox, not the cell our feet are counted in: a player at x=527.1 is

@@ -1173,6 +1173,9 @@ function refOk (bot, c, p) {
   //  the temporary support goes in where none is - the well's top water cell, walls on all four sides, poured from the
   //  underside of a block set over it; 2026-10-04)
   if (c.pour && nb) { try { if (Object.prototype.hasOwnProperty.call(nb.getProperties() || {}, 'waterlogged')) return false } catch {} }
+  // (a carpet over its STRING clicks the string's top - the player's way to float one; string is no solid face, and the hub's
+  //  first bunting carpet over its new string was "none clickable or supportable", 2026-10-04)
+  if (/_carpet$/.test(c.name) && p.off[0] === 0 && p.off[1] === -1 && p.off[2] === 0 && nb && nb.name === 'tripwire') return true
   return act.refUsable(nb, !!c.attach || sneaksFor(c)) && !slabMerges(c, nb, p)
 }
 // A click that the server spends on the CLICKED slab: a slab of the same kind takes a second half when its open half is
