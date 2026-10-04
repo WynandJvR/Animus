@@ -630,8 +630,16 @@ function decide () {
   // FIRST THING IN THE DAY: a far trip refused for want of daylight goes before the day's rounds - asked at the end of a
   //  castle round, the dark oak trip came each day with 2300 ticks left and was "not today" three days running, the castle
   //  standing on it (2026-09-28). An expedition from here: it camps where the night finds it
-  { const ft = mem.get().farTrip
-    if (ft && world.phase(bot) === 'day' && world.ticksUntilNight(bot) > 2400 && !expedition() && !held('farTrip')) return { name: 'farTrip', why: `${ft.raw} - the far trip, first thing in the day` } }
+  // (its food first: the expedition goes with FOOD_OUT packed, and nothing else ever packs it - the food rules keep a 12-point
+  //  buffer, so "waits on food (10 pts packed, 50 wanted)" put the spruce off every morning and the trip was dropped,
+  //  2026-10-04. The food task's target is FOOD_OUT then: one number for the gate and its producer - threshold seams)
+  { let ft = mem.get().farTrip
+    if (ft && ft.day == null) { ft = Object.assign({}, ft, { day: day.dayNo(bot) }); mem.set('farTrip', ft) } // (one saved before the day was kept; audit)
+    if (ft && day.dayNo(bot) > ft.day + 1) { mem.set('farTrip', null); ft = null } // (put off at dusk, run the next day - a day later it is stale)
+    // (only when the food is all it waits on: the gear first - the iron and tools rules answer that, no packing, no retries)
+    const fit = ft && world.phase(bot) === 'day' && world.ticksUntilNight(bot) > 2400 && !expedition() && expeditionReadyBarFood()
+    if (fit && packFood < FOOD_OUT && !held('food') && !held('farTrip')) return { name: 'food', why: `${ft.raw}: the far trip waits on food - packing ${FOOD_OUT} pts (${packFood} now)` }
+    if (fit && !held('farTrip')) return { name: 'farTrip', why: `${ft.raw} - the far trip, first thing in the day` } }
   // 6. food: cook what we carry; harvest a ripe farm
   if (inv.rawFoodCount(bot) >= 3 && dHome < 64 && !held('cook')) return { name: 'cook', why: `${inv.rawFoodCount(bot)} raw food to cook` }
   // saplings on hand and room for them in the orchard (empty spots, or fewer trees than the build still needs)
@@ -960,7 +968,7 @@ const TASKS = {
     return ok
   },
   async food () {
-    return food.stockFood(bot, { targetPoints: 48, ctx: { shouldStop: dayStop } })
+    return food.stockFood(bot, { targetPoints: mem.get().farTrip ? FOOD_OUT : 48, ctx: { shouldStop: dayStop } }) // (the far trip's own line: decide's farTrip rule)
   },
   async cook () { await food.cookAll(bot, { shouldStop: dayStop }); return inv.rawFoodCount(bot) < 3 },
   async farm () { const ok = await farm.establish(bot, { shouldStop: dayStop }); baseZone(); return ok },
@@ -1063,7 +1071,9 @@ const TASKS = {
     }
     return done > 0
   },
-  async farTrip () { const ft = mem.get().farTrip; mem.set('farTrip', null); return ft ? startExpedition(ft.raw, ft.land) : false },
+  // (kept until it sets out or the day ends: cleared before the start, one refusal for food dropped it, and the packing
+  //  that answers the refusal had nothing left to pack for; a new day drops it - the castle round asks again)
+  async farTrip () { const ft = mem.get().farTrip; if (!ft) return false; const ok = await startExpedition(ft.raw, ft.land); if (ok) mem.set('farTrip', null); return ok },
   async siteTidy () { return (await build.siteScaffoldTeardown(bot, { shouldStop: dayStop })) > 0 },
   async tidy () { return (await litter.tidy(bot, { from: mem.get().home, radius: 96, shouldStop: dayStop })) > 0 },
   async levelYard () { return (await hut.levelYard(bot, { shouldStop: dayStop })) > 0 },
@@ -1616,6 +1626,9 @@ async function castleWorkInner () {
   const nearDusk = world.ticksUntilNight(bot) < 2400
   const feasible = r => {
     if (!mats.hasRoute(r)) return false // (no skill for it yet: its cells wait, never a trip)
+    // (put off for today - gatherFor refuses it at once: picked anyway, the spruce put off for food took the pick every
+    //  round and the dark oak 245b off never got one, 2026-10-04)
+    { const put = notToday.get(r); if (put && !(day.dayNo(bot) > put.day)) return false }
     if (r === 'clay_ball') return !clay.exhausted() && clay.tripFits(bot)
     if (r === 'sand') return !clay.exhausted('sand') && clay.tripFits(bot, 'sand')
     return tripFitsDay(r)
@@ -1685,6 +1698,11 @@ const EXPEDITION_HP = 14 // (out there the walk goes on only this whole: no help
 // (an axe a stack of logs: 535 of spruce wear out four stone axes - cobblestone in the pack, and the kit's table and the
 //  tools rule make the next one out there, never a wooden one of the planks - audit 2026-09-28)
 const COBBLE_OUT = 6
+// (and armour - 8 points - or a shield worn: out for nights on a naked body after the day's deaths is a grave far out; audit)
+function expeditionGuarded () { return inv.armorPoints(bot) >= 8 || !!inv.offhandShield(bot) }
+// EVERYTHING AN EXPEDITION WAITS ON BUT THE FOOD - one test for startExpedition and decide's packing rule: packed for a trip
+// that waited on armour, the food was hunted for again every time it was eaten below the line, all day (audit)
+function expeditionReadyBarFood () { return bot.health >= 16 && !!inv.bestWeapon(bot) && !!inv.bestTool(bot, 'axe', 1) && expeditionGuarded() }
 async function startExpedition (raw, land) {
   if (expedition()) return true // (one at a time: the castle loop's second ask found it already set out)
   // packed from the bank while home is a short walk (the castle loop asks from the site): the food first - the pack's
@@ -1700,9 +1718,8 @@ async function startExpedition (raw, land) {
     packed = true
   }
   const food = inv.foodPoints(bot)
-  // (and armour - 8 points - or a shield worn: out for nights on a naked body after the day's deaths is a grave far out; audit)
-  const guarded = inv.armorPoints(bot) >= 8 || inv.offhandShield(bot)
-  if (food < FOOD_OUT || bot.health < 16 || !inv.bestWeapon(bot) || !inv.bestTool(bot, 'axe', 1) || !guarded) { log('dir', `${raw}: its country is past a day's walk - an expedition waits on ${food < FOOD_OUT ? 'food (' + food + ' pts packed' + (packed ? ', the bank included' : ' (the bank not reached from here)') + ', ' + FOOD_OUT + ' wanted - cooking and the farm make the rest)' : bot.health < 16 ? 'health' : !guarded ? 'armour (8 points) or a shield - the iron gear first' : 'a weapon and an axe'}`); return false }
+  const guarded = expeditionGuarded()
+  if (food < FOOD_OUT || !expeditionReadyBarFood()) { log('dir', `${raw}: its country is past a day's walk - an expedition waits on ${food < FOOD_OUT ? 'food (' + food + ' pts packed' + (packed ? ', the bank included' : ' (the bank not reached from here)') + ', ' + FOOD_OUT + ' wanted - cooking and the farm make the rest)' : bot.health < 16 ? 'health' : !guarded ? 'armour (8 points) or a shield - the iron gear first' : 'a weapon and an axe'}`); return false }
   mem.set('expedition', { raw, to: land ? { x: land.x, z: land.z, biome: land.biome } : null, phase: 'out', at: Date.now(), nights: 0, day: day.dayNo(bot), dry: 0, packed })
   log('dir', `${raw}: its country is past a day's walk - setting out on an expedition${land ? ' toward the ' + land.biome : ''} (${food} food pts, nights camped on the way)`)
   return true
@@ -1910,7 +1927,7 @@ async function gatherForInner (raw, short) {
             // (past the daylight left - the day's round trip, or a whole day's - it sets out anyway while a real stretch of the day
             //  is left, and camps where the night finds it: waited for a dawn start, the 424b dark oak trip was "not today" every
             //  afternoon and the castle stood on it (the operator, 2026-09-28))
-            if ((o.trip > DAWN_TICKS || world.ticksUntilNight(bot) > 2400) && await startExpedition(raw, o.land)) { /* (logged there) */ } else { notToday.set(raw, { day: day.dayNo(bot) }); mem.set('farTrip', { raw, land: o.land || null }); log('dir', `${raw}: not today - too far for the daylight left - first thing tomorrow`) }
+            if ((o.trip > DAWN_TICKS || world.ticksUntilNight(bot) > 2400) && await startExpedition(raw, o.land)) { /* (logged there) */ } else { notToday.set(raw, { day: day.dayNo(bot) }); mem.set('farTrip', { raw, land: o.land || null, day: day.dayNo(bot) }); log('dir', `${raw}: not today - too far for the daylight left - first thing tomorrow`) }
           }
           forage.noteTrip(raw, inv.count(bot, raw) - before, searched ? 'no trees of it found' : `cut short (${o && o.at >= t0 ? o.outcome : 'no chop ran'})`, { searched })
         }
