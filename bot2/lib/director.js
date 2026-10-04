@@ -922,19 +922,30 @@ const TASKS = {
     const home = mem.get().home; const ap = hut.doorApronStep(); if (!home || !ap) return false
     const t0 = Date.now(); let kills = 0; const s0 = inv.count(bot, 'string')
     const stand = { x: ap.x, y: home.y, z: ap.z }
-    const near = (h, r) => Math.abs(h.e.position.y - bot.entity.position.y) < 6 && onSurface(h.e) && world.dist2(h.e.position, home) < r
+    // (the ground round home is lit - nothing spawns at the door: the spiders come out past it. The first night stood 3 minutes
+    //  by the door with a spider on the surface 34b off and no hostile within 24, 2026-10-04. Out to 40 of home for them; and
+    //  the others measured from the BODY - the hideout's own 20, a creeper's 32 - not from home)
+    const SPIDER_REACH = 40
+    const onHomeGround = h => Math.abs(h.e.position.y - home.y) < 8 && onSurface(h.e)
+    // (what sends it in: a hostile close to the body (the hideout's 20), a creeper within 32, a shooter that sees it within 28 -
+    //  one 12s follow walks into its range; checked every tick of the chase too, not between passes; audit)
+    const threat = h => h.e.name !== 'bat' && !SPIDER_RE.test(h.e.name) && onHomeGround(h) && (h.d < 20 || (h.e.name === 'creeper' && h.d < 32) || (reflex.RANGED.has(h.e.name) && h.d < 28 && reflex.canSee(h.e)))
+    const danger = () => reflex.hostiles(32).some(threat)
+    // (and never a chase onto the build: a creeper drawn to the body blows where the body is - the box and 8 round it; audit)
+    const bx = (build.getJob() || {}).box
+    const nearBuild = p => !!bx && p.x >= bx.x1 - 8 && p.x <= bx.x2 + 8 && p.z >= bx.z1 - 8 && p.z <= bx.z2 + 8
     // (from out at dusk - the bed's reach: home to the door first, one walk)
     if (world.dist2(bot.entity.position, stand) > 8) { const r = await move.travel(bot, stand, { range: 1, shouldStop: () => taskCancelled(), label: 'to the door' }).catch(() => null); if (!r || !r.ok) return false }
     log('dir', `a spider night: ${(build.cachedStatus(bot).need || {}).string} string short - by the door for spiders (hp ${Math.round(bot.health)}, armour ${inv.armorPoints(bot)})`)
     while (!taskCancelled() && world.phase(bot) !== 'day' && Date.now() - t0 < 3 * 60000) {
       await reflex.waitClear()
-      // (out of it: hurt past a few points, or anything but a spider about - the hideout's then; never a chase off from the door)
+      // (out of it: hurt past a few points, or anything but a spider close - the hideout's then)
       if (bot.health < 16 || !stringShort()) break
-      const hs = reflex.hostiles(24).filter(h => h.e.name !== 'bat' && near(h, 32))
-      const other = hs.find(h => !SPIDER_RE.test(h.e.name))
+      const hs = reflex.hostiles(SPIDER_REACH + 8).filter(h => h.e.name !== 'bat' && onHomeGround(h))
+      const other = hs.find(threat)
       if (other) { log('dir', `spider night: a ${other.e.name} about - in`); break }
-      const sp = hs.filter(h => world.dist2(h.e.position, home) < 24).sort((a, b) => a.d - b.d)[0]
-      if (sp) await move.goTo(bot, new goals.GoalFollow(sp.e, 1.5), { timeoutMs: 12000, stuckMs: 4000, dig: false, place: false, label: 'to the spider' }).catch(() => null)
+      const sp = hs.filter(h => SPIDER_RE.test(h.e.name) && world.dist2(h.e.position, home) < SPIDER_REACH && !nearBuild(h.e.position)).sort((a, b) => a.d - b.d)[0]
+      if (sp) await move.goTo(bot, new goals.GoalFollow(sp.e, 1.5), { timeoutMs: 12000, stuckMs: 4000, dig: false, place: false, label: 'to the spider', shouldStop: () => taskCancelled() || danger() || nearBuild(sp.e.position) }).catch(() => null)
       else if (world.dist2(bot.entity.position, stand) > 2) await move.goTo(bot, new goals.GoalNear(stand.x, stand.y, stand.z, 1), { timeoutMs: 15000, stuckMs: 5000, dig: false, place: false, label: 'to the door' }).catch(() => null)
       else await move.sleep(1000)
       if (sp && !sp.e.isValid) kills++
