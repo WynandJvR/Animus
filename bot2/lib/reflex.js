@@ -992,6 +992,9 @@ function noteJump (cell, who) {
   if (!cell.x && cell.x !== 0) return
   if (!jumpHeld || jumpHeld.x !== cell.x || jumpHeld.z !== cell.z || Date.now() - jumpHeld.at > 5000) log('reflex', `edge: no jump toward a ${cell.drop === Infinity ? 'bottomless' : cell.drop + '-block'} drop at ${cell.x},${cell.y},${cell.z}${who ? ' (' + who + ')' : ''}`)
   jumpHeld = Object.assign({}, cell, { at: Date.now() })
+  // (the planner's: the node the jump was for is refused to the planner two minutes - planned again, the same jump was let go
+  //  of every few seconds for four minutes at a 21-block drop, 2026-10-04; move.refuseNode)
+  if ((who === 'pathfinder' || /monitorMovement/.test(String(who || ''))) && lastPath && lastPath[0]) { try { require('./move').refuseNode(lastPath[0]) } catch {} }
 }
 let origSet = (k, v) => bot.setControlState(k, v)
 // THE PLANNER'S STEPPING STONES ARE SCAFFOLD. mineflayer-pathfinder equips a scaffold block, then places what is in

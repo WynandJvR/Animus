@@ -396,6 +396,14 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
     //  edge, and the walk to the mine gave up "stuck x3" at the same pit a dozen times, 2026-10-03)
     return dropAt(p.x, p.y + 1, p.z) > world.SAFE_DROP ? 101 : 0
   })
+  // A NODE WHOSE JUMP THE EDGE GUARD REFUSED is no way for a while: the planner planned the same jump past a 21-block drop
+  //  again and again, the guard let go of it each time - four minutes at 66,66,9, "no jump toward a 21-block drop" every few
+  //  seconds, 2026-10-04 (reflex.noteJump -> refuseNode)
+  m.exclusionAreasStep.push(block => {
+    if (!block || !block.position || !refusedNodes.size) return 0
+    const p = block.position; const t = refusedNodes.get(p.x + ',' + p.y + ',' + p.z)
+    return t && Date.now() < t ? 100 : 0
+  })
   // Swimming along a surface is fine (the feet in the top water cell, the head in air); a path node with the HEAD
   // under water is how bots drown.
   m.exclusionAreasStep.push(block => {
@@ -1549,4 +1557,11 @@ async function travel (bot, target, opts = {}) {
   return { ok: false, why: 'timeout' }
 }
 
-module.exports = { closedDoorAt, buried, legPoint, escapeUp, isVerdict, underBuild, underZone, inForeign, crossDoor, goals, bindReflex, bindBot, setZone, setZones, inZone, zones, utilitySpotOK, insideHut, setProtector, isProtected, surface, isUnderground, surfaceYHere, movementsFor, goTo, goNear, travel, stopMoving, runGoal, sleep, fmt, waitReflex }
+const refusedNodes = new Map() // "x,y,z" -> until: path nodes whose jump the edge guard refused (reflex.noteJump)
+function refuseNode (n, ms = 120000) {
+  if (!n || n.x == null) return
+  const k = Math.floor(n.x) + ',' + Math.floor(n.y) + ',' + Math.floor(n.z)
+  if (refusedNodes.size > 200) { const now = Date.now(); for (const [kk, t] of refusedNodes) if (t < now) refusedNodes.delete(kk) }
+  refusedNodes.set(k, Date.now() + ms)
+}
+module.exports = { refuseNode, closedDoorAt, buried, legPoint, escapeUp, isVerdict, underBuild, underZone, inForeign, crossDoor, goals, bindReflex, bindBot, setZone, setZones, inZone, zones, utilitySpotOK, insideHut, setProtector, isProtected, surface, isUnderground, surfaceYHere, movementsFor, goTo, goNear, travel, stopMoving, runGoal, sleep, fmt, waitReflex }
