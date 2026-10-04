@@ -1552,6 +1552,8 @@ async function placeCell (bot, c, j = job) {
 //  of every build step spent re-learning the same eight unreachable pillar tops, 2026-09-27)
 let supportsLaid = 0; let pillarLaid = 0; let pillarDug = 0 // (the builder's own supports, pillar blocks up and down - the step profile)
 const cellFails = new Map(Object.entries((mem.get().cellFails) || {})) // key -> {n, at}
+// (a cell's own-way mark - its cluster stand not reachable - outlives its counts: every rewrite of the entry keeps it)
+{ const set0 = cellFails.set.bind(cellFails); cellFails.set = (k, v) => { const p = cellFails.get(k); if (p && p.ownWay && v && v.ownWay === undefined) v = Object.assign({}, v, { ownWay: true }); return set0(k, v) } }
 // (only cells of the job are kept: a cell finished by any other way - a restart, a hand - is dropped at the next save; audit #38)
 // (no throttle of its own: memory.save coalesces a burst into one write since 5ca11ef, and the old 5s throttle DROPPED the
 //  last write of a burst - the step-end misses never reached memory and a restart brought a never-ready log back to
@@ -1812,6 +1814,9 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
         tpick = Date.now(); continue
       }
     }
+    // (and REMEMBERED with its fails: a cell object is rebuilt with the job at every restart - the leaf canopy 7 up at the hub's
+    //  market walked to the same unreachable stand on top of its own leaves after each of a day's deploys, 2 hours a try)
+    if (!c.ownWay && (cellFails.get(key(c)) || {}).ownWay) c.ownWay = true
     if (!c.foundation && !c.ownWay && !inReach(c) && ready.length > 2) {
       const st = clusterStand(bot, c, ready, badStands, reachOf)
       if (st && st.out) log('build', `the stand ${move.fmt(st)} for ${c.name} at ${move.fmt(c)} is in a closed compartment of the build I am not in (from ${move.fmt(world.feetPos(bot))}) - no other stand: tried as a last resort`)
@@ -1820,7 +1825,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
         const r = await goSite(bot, new goals.GoalBlock(st.x, st.y, st.z), 'place').catch(() => null)
         placeProf.reach += Date.now() - tw
         if (r && !r.ok) {
-          badStands.add(key(st)); if (/timeout|stuck/.test(r.why || '')) { skipTry = true; c.ownWay = true }
+          badStands.add(key(st)); if (/timeout|stuck/.test(r.why || '')) { skipTry = true; c.ownWay = true; const f0 = cellFails.get(key(c)); if (f0) { f0.ownWay = true; saveCellFails() } else { cellFails.set(key(c), { n: 0, at: 0, ownWay: true }); saveCellFails() } }
           // (the stand itself, for the next root: what stands at it, and whether a hold keeps it - a waiting hole, its column,
           //  a hole's last face, a remembered trap; audit)
           try {

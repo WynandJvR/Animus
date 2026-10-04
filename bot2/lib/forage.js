@@ -158,7 +158,12 @@ function counter (s) { return bot => inv.count(bot, s.drops) }
 async function gatherRaw (bot, raw, n, ctx = {}) {
   const s = spec(raw)
   if (!s || s.kind === 'site') { log('forage', `no gatherer for ${raw}`); return false }
-  if (exhausted(raw)) { log('forage', `${raw}: searched out round this home - not going again until one is seen`); return false }
+  if (exhausted(raw)) {
+    // (searched out round home is not the end of a plant: it grows in its own country - a trip there, as a player would)
+    const L = s.kind === 'plant' ? landLead(raw) : null
+    if (!L) { log('forage', `${raw}: searched out round this home - not going again until one is seen`); return false }
+    return landTrip(bot, raw, s, n, L, ctx)
+  }
   const count = counter(s)
   const before = count(bot)
   let r = false
@@ -178,6 +183,64 @@ async function gatherRaw (bot, raw, n, ctx = {}) {
   noteTrip(raw, got, r === 'waiting' ? 'none ready to take yet' : null, { now: r === 'waiting', searched: true })
   if (got > 0) log('forage', `${raw}: +${got} this trip`)
   return got > 0
+}
+
+// WHERE A PLANT GROWS - vanilla's flower placement, by biome. A dye flower searched out round home was the end of it: "its
+// cells wait" - the hub's 20 light gray carpets and its flower beds stood on azure bluets and oxeye daisies for an afternoon
+// while the biome map held a sunflower plain 228b off and a flower forest 461b off, 2026-10-04. The nearest land of its
+// kind the map knows (past the home's own ground, within a day's walk), each tried once a raw until it gives some
+const PLANT_BIOMES = {
+  dandelion: /^(plains|sunflower_plains|flower_forest|meadow|forest|birch_forest|old_growth_birch_forest|dark_forest|savanna|savanna_plateau|taiga|snowy_plains|cherry_grove)$/,
+  poppy: /^(plains|sunflower_plains|flower_forest|meadow|forest|birch_forest|old_growth_birch_forest|dark_forest|savanna|taiga|swamp)$/,
+  azure_bluet: /^(plains|sunflower_plains|flower_forest|meadow)$/,
+  oxeye_daisy: /^(plains|sunflower_plains|flower_forest|meadow)$/,
+  cornflower: /^(plains|sunflower_plains|flower_forest|meadow)$/,
+  red_tulip: /^(plains|sunflower_plains|flower_forest)$/,
+  orange_tulip: /^(plains|sunflower_plains|flower_forest)$/,
+  white_tulip: /^(plains|sunflower_plains|flower_forest)$/,
+  pink_tulip: /^(plains|sunflower_plains|flower_forest)$/,
+  allium: /^(flower_forest|meadow)$/,
+  lily_of_the_valley: /^flower_forest$/,
+  blue_orchid: /^swamp$/,
+  sunflower: /^sunflower_plains$/,
+  lilac: /^(flower_forest|forest|birch_forest)$/,
+  rose_bush: /^(flower_forest|forest|birch_forest)$/,
+  peony: /^(flower_forest|forest|birch_forest)$/
+}
+const LAND_NEAR = 80; const LAND_FAR = 1200
+function landLead (raw, from = null) {
+  const s = spec(raw); if (!s || s.kind !== 'plant') return null
+  const names = Object.keys(PLANT_BIOMES).filter(p => s.blocks.test(p)); if (!names.length) return null
+  const at = from || home(); if (!at) return null
+  const tried = ((mem.get().plantLandTried || {})[raw]) || []
+  let best = null
+  for (const [n, list] of Object.entries(mem.get().biomes || {})) {
+    if (!names.some(p => PLANT_BIOMES[p].test(n))) continue
+    for (const q of list) {
+      const d = world.dist2(q, at)
+      if (d < LAND_NEAR || d > LAND_FAR || tried.some(t => world.dist2(t, q) < 64 && (t.n || 1) >= 2)) continue // (a land is given up after two empty visits: flowers grow in patches; audit)
+      const p = { x: q.x, y: at.y, z: q.z } // (a height for the walk's own estimate: the home's)
+      if (world.walkTicks(at, p) * 2 + 1200 + world.HOME_MARGIN > 12000) continue // (never a land no whole day reaches and returns from; audit)
+      if (!best || d < best.d) best = { x: q.x, y: at.y, z: q.z, biome: n, d }
+    }
+  }
+  return best
+}
+async function landTrip (bot, raw, s, n, L, ctx) {
+  const me = bot.entity.position; const h = home() || me
+  const trip = world.walkTicks(me, L) + world.walkTicks(L, h) + 1200 + world.HOME_MARGIN
+  if (trip > world.ticksUntilNight(bot)) { log('forage', `${raw}: the ${L.biome} ${Math.round(L.d)}b off is too far for the daylight left`); lastCut = { raw, at: Date.now() }; return false }
+  log('forage', `${raw}: searched out round home - to the ${L.biome} ${Math.round(L.d)}b off, where it grows`)
+  const r = await move.travel(bot, { x: L.x, y: Math.floor(me.y), z: L.z }, { range: 16, shouldStop: ctx.shouldStop, label: 'to the ' + L.biome, anyY: true })
+  if (!r.ok) { lastCut = { raw, at: Date.now() }; return false } // (the walk failed or was stopped: no search of the land)
+  const count = counter(s); const before = count(bot)
+  await gather().pickPlants(bot, s.blocks, s.drops, n, Object.assign({}, ctx, { noExplore: true, filter: s.filter ? b => s.filter(bot, b) : null, force: !!s.force })).catch(() => false)
+  const got = count(bot) - before
+  if (got > 0) { noteTrip(raw, got, null, { searched: true }); log('forage', `${raw}: +${got} in the ${L.biome}`); return true }
+  let n2 = 1
+  mem.update(m => { m.plantLandTried = m.plantLandTried || {}; const list = m.plantLandTried[raw] = m.plantLandTried[raw] || []; const t = list.find(q => world.dist2(q, L) < 64); if (t) { t.n = (t.n || 1) + 1; n2 = t.n } else list.push({ x: L.x, z: L.z, n: 1 }) })
+  log('forage', `${raw}: none in the ${L.biome} at ${L.x},${L.z}${n2 >= 2 ? ' - not this land again' : ' - once more another day'}`)
+  return false
 }
 
 // ---- tools -------------------------------------------------------------------------------------------------
@@ -951,4 +1014,4 @@ async function process (bot, by, node, n, opts = {}) {
   try { return await work(bot, node, n, opts) } catch (e) { log('forage', `${by} ${node} threw: ${e.message}`); return 0 }
 }
 
-module.exports = { tripWasCut, stoppedWork, lavaFuel, lavaSites, lavaSource, lavaStands, lavaKnown, bucketsAvailable, handles, spec, gather: gatherRaw, process, exhausted, exhaustedKinds, generation, seen, watch, sightMobs, noteTrip, strip, carve, harden, compost, shearBlock, ensureShears, shearsHeld, benchSpot, shoreAt, SEARCH_TRIPS }
+module.exports = { landLead, tripWasCut, stoppedWork, lavaFuel, lavaSites, lavaSource, lavaStands, lavaKnown, bucketsAvailable, handles, spec, gather: gatherRaw, process, exhausted, exhaustedKinds, generation, seen, watch, sightMobs, noteTrip, strip, carve, harden, compost, shearBlock, ensureShears, shearsHeld, benchSpot, shoreAt, SEARCH_TRIPS }

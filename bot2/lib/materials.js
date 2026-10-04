@@ -449,7 +449,7 @@ function getPlanner (bot) {
 const OWN_TRIPS = new Set(['clay_ball', 'sand', 'cobblestone', 'log', 'fuel', 'white_wool', 'red_flower'])
 function hasRoute (raw) {
   const c = L.craft; const f = L.forage
-  if (f.exhausted(raw)) return false
+  if (f.exhausted(raw) && !(f.landLead && f.landLead(raw))) return false // (a plant searched out round home still has its own land to go to - forage.landLead)
   return OWN_TRIPS.has(raw) || !!c.GATHER[raw] || !!c.HUNT[raw] || f.handles(raw)
 }
 const unsourcedMemo = new Map(); let memoGen = null

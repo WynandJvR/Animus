@@ -754,7 +754,7 @@ async function pickPlants (bot, re, itemName, n, ctx = {}) {
     //  all, 2026-09-27)
     const b = world.findBlocks(bot, re, { maxDistance: 48, count: 24, filter: x => outOfZones(x) && !skip.has(x.position.toString()) && !world.isLiquidWater(x) && take(x) })[0]
     if (!b) {
-      if (++empty > 3) { log('gather', `no ${label} to pick around here`); return false }
+      if (++empty > 3 || ctx.noExplore) { log('gather', `no ${label} to pick around here`); return false } // (noExplore: a trip to a far land - its rings round home are no search of it)
       const known = knownResource(label, bot.entity.position) || (legacy && knownResource(legacy, bot.entity.position))
       if (known && empty === 1 && world.dist2(known, bot.entity.position) > 40) await move.travel(bot, known, { range: 8, shouldStop: ctx.shouldStop, label: 'to ' + label })
       else await explore(bot, x => re.test(x.name), { shouldStop: ctx.shouldStop, label, legs: 2, accept: x => outOfZones(x) && take(x) })
