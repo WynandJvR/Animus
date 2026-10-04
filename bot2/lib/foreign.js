@@ -36,6 +36,19 @@ let doneFrom = 0
 let died = false
 
 function boxes () { return mem.get().foreignBases || [] }
+// A PLACE THAT IS OUR OWN after all: its signs' extent inside our records (a mine given up, an area of ours) - dropped
+function pruneOurs () {
+  const bs = boxes(); if (!bs.length) return 0
+  const keep = bs.filter(x => !(x.sx1 != null && oursByRecord({ x: x.sx1, y: x.sy1, z: x.sz1 }) && oursByRecord({ x: x.sx2, y: x.sy2, z: x.sz2 })))
+  if (keep.length !== bs.length) { mem.set('foreignBases', keep); log('foreign', `${bs.length - keep.length} place(s) found to be our own work - forgotten`) }
+  return bs.length - keep.length
+}
+// (the operator's correction of a wrong record: the place round a point forgotten)
+function forgetAt (p) {
+  const bs = boxes(); const keep = bs.filter(b => !(p.x >= b.x1 && p.x <= b.x2 && p.z >= b.z1 && p.z <= b.z2 && p.y >= b.y1 && p.y <= b.y2))
+  if (keep.length !== bs.length) mem.set('foreignBases', keep)
+  return bs.length - keep.length
+}
 
 // Is this cell inside somebody else's place? (pure and cheap: the planner asks it for every node)
 function covers (p) {
@@ -190,6 +203,7 @@ function start (b) {
   // (records from before the signs' extent was kept: the extent read back off the box)
   // (ONCE: the places standing over our own work from before the ledger - its signs within ADOPT_R of home - become our own
   //  areas by their signs' extent, and the places go; after this the ledger says what is ours)
+  try { pruneOurs() } catch {} // (a place on record over our own work - a mine given up, an area of ours - goes at once)
   if (!mem.get().ownAreasTaken) {
     const h = mem.get().home; const bs = boxes()
     const mine = bs.filter(x => h && x.sx1 != null && Math.hypot((x.sx1 + x.sx2) / 2 - h.x, (x.sz1 + x.sz2) / 2 - h.z) <= ADOPT_R)
@@ -331,4 +345,4 @@ function notePlaced (pos) { if (placedHook) placedHook(pos) }
 // before the look - a far place was forgotten by distance, and the first task dug before the scan ran; 10s at most)
 function looked () { return doneFrom > spawnedAt || Date.now() - spawnedAt > 15000 }
 
-module.exports = { noteOwn, climbingOut, notePlaced, looked, start, scan, covers, near, ours, cluster, union, seenWhole, leave, MARK_RE, PAD, HOME_GROUNDS }
+module.exports = { pruneOurs, forgetAt, noteOwn, climbingOut, notePlaced, looked, start, scan, covers, near, ours, cluster, union, seenWhole, leave, MARK_RE, PAD, HOME_GROUNDS }

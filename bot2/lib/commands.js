@@ -464,6 +464,8 @@ function make (bot, director) {
         const out = found.filter(b => { const c = j && j.index.get(`${b.position.x},${b.position.y},${b.position.z}`); return !c || !re.test(c.name) })
         return `${found.length} found, ${found.length - out.length} in build cells that want them, ${out.length} stray: ${out.slice(0, 40).map(b => `${b.position.x},${b.position.y},${b.position.z}`).join(' ')}`
       })()
+      // forgetforeign x y z - the operator's correction of a wrong record: the place someone else's round that point forgotten
+      case 'forgetforeign': { const n = require('./foreign').forgetAt({ x: num(0), y: num(1), z: num(2) }); return `forgot ${n} place(s) round ${num(0)},${num(1)},${num(2)}` }
       case 'findb': {
         // findb <regex> [dist] - positions and states of matching blocks
         const re = new RegExp(a[0] || '^stone$')

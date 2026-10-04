@@ -500,7 +500,17 @@ function diedInMine (m) {
 // Give up on level i (the active one by default) and every level under it - their way in is its stairs - back to the
 // deepest level left (i-1); level 0 is the whole mine: its entrance joins the bad mines, a new one is chosen. Returns what
 // is left of the mine.
+// A MINE GIVEN UP STAYS OURS: its stairs and tunnels, torches and all, are our own hand - with the record gone the y21 level's
+// lamps read as "6 signs of a player's hand", someone else's place, and the bot stood in its own old tunnel refusing to dig
+// a block or walk out, 2026-10-04. Its box goes to our own areas (foreign.js) when the mine or a level of it is given up
+function keepOurs (box, m) {
+  if (!box) return
+  const top = m && m.entrance ? m.entrance.y - 2 : box.y2 // (the workings, never the ground over them; audit)
+  mem.update(mm => { mm.ownAreas = (mm.ownAreas || []).concat([{ x1: box.x1 - 4, x2: box.x2 + 4, y1: box.y1 - 4, y2: Math.min(box.y2 + 4, top), z1: box.z1 - 4, z2: box.z2 + 4 }]).slice(-60) })
+  try { require('./foreign').pruneOurs() } catch {}
+}
 function abandonMine (m, i = m && m.levels ? m.active : 0, danger = false) {
+  try { keepOurs(mineBox(m), m) } catch {}
   if (i > 0 && m.levels && i < m.levels.length) {
     const L = levelsOf(m)[i]
     m.badLevels = (m.badLevels || []).concat([clone(L.stairTop)]).slice(-8)
@@ -634,14 +644,17 @@ async function mendFlight (bot, top, end, ctx = {}) {
     const fy = feetAt(x, z, prev.y)
     if (fy == null) break // (a step it cannot read: left as it is)
     if (prev.y - fy > world.SAFE_DROP) {
-      const cell = { x, y: prev.y - 2, z }
+      // (never under the flight's own foot: the stair ends at its level - a cave under the last steps took three blocks at
+      //  y18-20 and the walk stuck at the foot, 2026-10-04)
+      const nf = Math.max(prev.y - 1, end.y)
+      const cell = { x, y: nf - 1, z }
       if (!air(cell.x, cell.y, cell.z) || !filler()) break
       const r = await move.goTo(bot, new goals.GoalBlock(prev.x, prev.y, prev.z), { timeoutMs: 60000, stuckMs: 12000, dig: false, place: false, label: 'to the pit in the stairs', shouldStop: ctx.shouldStop })
       if (!r.ok) break
       if (!await act.place(bot, cell, filler(), { allowZones: ['*'] })) { log('mine', `the pit in the stairs at ${move.fmt(cell)} would not take a block`); break }
       log('mine', `mended a pit in the stairs: a ${prev.y - fy}-block drop at ${move.fmt({ x, y: fy, z })} - a block at ${move.fmt(cell)}`)
       mended++
-      prev = { x, y: prev.y - 1, z }
+      prev = { x, y: nf, z }
     } else prev = { x, y: fy, z }
   }
   return mended
