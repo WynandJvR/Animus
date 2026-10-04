@@ -1403,14 +1403,19 @@ async function placeCell (bot, c, j = job) {
   // whatever else is in our cell that isn't the finished block comes out - a wrong block, the right one the wrong way
   // round (our own cell: the one dig allowed past the finished-block guard), a flower where another goes (a flower is
   // no grass tuft: the server keeps it, and the place "failed" for ever)
+  let wasWet = false // (the block taken out was waterlogged: its source stays behind - the drying below, whatever the read says)
   if (!step && !world.isAirish(cur) && !world.isLiquidWater(cur) && !act.REPLACEABLE_RE.test(cur.name)) {
+    try { wasWet = String(cur.getProperties().waterlogged) === 'true' } catch {}
     if (!await timed('dig', act.dig(bot, pos, own))) return why(`could not dig the ${cur.name} in the cell${act.lastDigWhy() ? ': ' + act.lastDigWhy() : ''}`)
     cur = bot.blockAt(pos)
   }
   // A WATER SOURCE IN A CELL THAT IS NOT WATER: what goes in would be waterlogged - and leak (a waterlogged block broken
   // leaves its source behind). A filler block in first takes the source, dug out after: the cell dry (flowing water runs
   // in again, but flowing water waterlogs nothing)
-  if (!/water/.test(c.name) && /_wall$|_fence$|_fence_gate$|_slab$|_stairs$|_pane$|_bars$|_trapdoor$|_sign$|lantern$|^chain$|^ladder$|^light$|_rail$|_leaves$|^scaffolding$|_button$/.test(c.name) && cur && world.isLiquidWater(cur) && String((() => { try { return cur.getProperties().level } catch { return '' } })()) === '0') {
+  // (read straight after the dig the cell still said air - the source's update not in yet - and the fence went back into
+  //  it waterlogged, the leak now a full source, 2026-10-04: after a wet block, a moment and a fresh read)
+  if (wasWet) { await act.sleep(300); cur = bot.blockAt(pos) }
+  if (!/water/.test(c.name) && /_wall$|_fence$|_fence_gate$|_slab$|_stairs$|_pane$|_bars$|_trapdoor$|_sign$|lantern$|^chain$|^ladder$|^light$|_rail$|_leaves$|^scaffolding$|_button$/.test(c.name) && (wasWet || (cur && world.isLiquidWater(cur) && String((() => { try { return cur.getProperties().level } catch { return '' } })()) === '0'))) { // (wet before: dried whatever the read says - the update can come later than any wait; audit)
     const fil = inv.items(bot).find(i => FILLER_ITEMS.test(i.name))
     if (fil && await act.place(bot, pos, fil.name, { allowZones: ['build', 'base'] }).catch(() => false)) { await act.dig(bot, pos, own).catch(() => false); cur = bot.blockAt(pos) }
     if (cur && world.isLiquidWater(cur) && String((() => { try { return cur.getProperties().level } catch { return '' } })()) === '0') return why('a water source in the cell - it would go in waterlogged')
