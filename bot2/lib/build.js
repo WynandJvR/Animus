@@ -1729,6 +1729,13 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     // (a liquid waits for the ground under it: water poured over the hollow's open column runs down and floods it - the
     //  castle's one base water cell sits over a hole the foundation fills first; audit 2026-09-29)
     doable = doable.filter(c => { if (!c.pour) return true; const b = world.at(bot, c.x, c.y - 1, c.z); return !!b && !world.isAirish(b) }) // (anything but air under it: ground, a slab, the pool's own water below)
+    // (and with nothing else ready, the cells a SHARED miss keeps out of the window, past their rest: only a block placed beside one
+    //  wakes it, and none ever will beside a canopy - the hub's 8 oak leaves at y75 sat 'in hand, nothing doable' for hours
+    //  behind a pour that waits on its own cell, 2026-10-04. Lowest first, the band's other holds still stand)
+    if (!doable.length) {
+      const sh = structural.filter(c => { const f = cellFails.get(key(c)); return !!f && !!f.shared && !holdAround.has(key(c)) && !compHeld.has(key(c)) && !c.pour && !sealsBelow(c) && !(waitCols.get(c.x + ',' + c.z) != null && c.y > waitCols.get(c.x + ',' + c.z)) && ALL_FACES.some(([dx, dy, dz]) => world.isSolid(world.at(bot, c.x + dx, c.y + dy, c.z + dz))) }) // (over no waiting column; and a face to click - past the band's height cap no support pillar is raised for one; audit)
+      if (sh.length) { const y0 = Math.min(...sh.map(c => c.y)); doable = sh.filter(c => c.y <= y0 + 1) }
+    }
     waiting = missingItem()
     waitingHolds = !!waiting && !!waitingCell && anchors(waitingCell)
     // (EVERY anchor in hand that is never doable - the cell under it waits - takes its miss at the step's end, not only the
