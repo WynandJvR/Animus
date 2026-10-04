@@ -145,6 +145,27 @@ async function chop (bot, re, n, ctx = {}) {
         if (!ctx.expedition && SPECIES_BIOMES[itemName.replace(/_log$/, '')]) {
           const me = bot.entity.position; const home = mem.get().home || me
           const trip = world.walkTicks(me, known) + world.walkTicks(known, home) + CHOP_TICKS + world.HOME_MARGIN
+          // ROUND HOME FIRST, before days out to the nearest grove on record: what is on record is only where the bot has
+          //  been, and the record (and the biome map's eight samples a kind) knew nothing of the country round home - three
+          //  2400-block expeditions for spruce, the third finding more than the build needed (2026-10-04). Once in three days a
+          //  species: the rings out to ~370 blocks, a few legs, then the far trip as before if none turned up
+          const today = require('./day').dayNo(bot); const sw = (mem.get().localSweep || {})[itemName]
+          if (trip > world.ticksUntilNight(bot) && (!sw || today - sw.day >= 3) && world.ticksUntilNight(bot) > 4000) {
+            mem.update(m => { m.localSweep = m.localSweep || {}; m.localSweep[itemName] = { day: today } })
+            log('gather', `the ${itemName} i know of is ${Math.round(world.dist2(known, me))}b off - looking round home first (out to ~370b)`)
+            let foundHere = false
+            for (let k = 0; k < 4; k++) {
+              if ((ctx.shouldStop && ctx.shouldStop()) || world.ticksUntilNight(bot) < 3000) break
+              await explore(bot, b => re.test(b.name), { shouldStop: ctx.shouldStop, label: itemName, rings: 11, accept: b => outOfZones(b) && isNaturalTree(bot, trunkBase(bot, b)) })
+              const near = await world.scanBlocks(bot, re, { maxDistance: world.sightReach(bot), count: 8, filter: b => wildTree(bot, b) })
+              if (near.length) { noteResource(itemName, near[0].position); log('gather', `${itemName} round home after all: ${move.fmt(near[0].position)}`); foundHere = true; break }
+            }
+            // (none round home: the far trip is handed on now, the same round - left to the loop, the chop's budget could run out
+            //  first and the expedition wait a round; audit)
+            if (!foundHere && !(ctx.shouldStop && ctx.shouldStop())) { const me2 = bot.entity.position; log('gather', `no ${itemName} round home - the far trip it is`); return end('too-far', false, { land: { x: known.x, z: known.z, biome: 'known trees' }, trip: world.walkTicks(me2, known) + world.walkTicks(known, home) + CHOP_TICKS + world.HOME_MARGIN }) }
+            emptyScans = 0
+            continue
+          }
           if (trip > world.ticksUntilNight(bot)) { log('gather', `the ${itemName} i know of is ${Math.round(world.dist2(known, me))}b off - too far to go and come back today`); return end('too-far', false, { land: { x: known.x, z: known.z, biome: 'known trees' }, trip }) }
         }
         log('gather', `no ${itemName} here - heading to where i saw some at ${move.fmt(known)}`)
