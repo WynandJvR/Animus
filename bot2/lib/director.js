@@ -1723,6 +1723,15 @@ async function startExpedition (raw, land) {
   // cobblestone for the axes (audit 2026-09-28)
   let packed = false
   if (base.distHome(bot) < 64) {
+    // (NOTHING BUT THE KIT GOES: days out, a death is a grave thousands of blocks off. The trip's pre-deposit runs only on a
+    //  64-item haul, and the build window's blocks stay by the routine rule - the third spruce expedition set out with 3 iron
+    //  blocks (27 iron), dark oak slabs and planks, gravel, seeds; the second died to a witch with 130 items. Tools, armour,
+    //  food, the boat, torches and the scaffold's footing stay - base.keepCount and SCAFFOLD_WANT, 2026-10-04)
+    if ((mem.get().chests || []).length) {
+      const fill = {}; let need = build.SCAFFOLD_WANT
+      for (const [n, c] of Object.entries(inv.counts(bot)).filter(([n]) => build.FILLER_ITEMS.test(n)).sort((a, b) => b[1] - a[1])) { const t = Math.min(c, need); if (t > 0) { fill[n] = t; need -= t } }
+      await base.depositAll(bot, { keep: (b, i) => Math.max(base.keepCount(b, i), fill[i.name] || 0) }).catch(() => false)
+    }
     for (const name of inv.GOOD_FOOD) {
       if (inv.foodPoints(bot) >= FOOD_OUT) break
       if (base.bankCount(name) > 0) await base.withdraw(bot, name, Math.min(16, base.bankCount(name))).catch(() => 0)
