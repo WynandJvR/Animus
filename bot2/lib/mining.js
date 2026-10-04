@@ -614,6 +614,39 @@ async function takeKnownOre (bot, itemName, target, ctx = {}) {
 // (reviewer 2026-09-30). A level not yet begun has its first cell in solid rock: opened by the mine's own guarded step
 // (fluid, lava, floor), never the planner's. Returns { ok, why } - why 'stopped', 'blocked' (a verdict: the caller counts
 // it as a trip that could not reach the face) or 'gone' (the level given up).
+// A PIT IN THE STAIRS, mended as a player would: one block into it. Every flight walk is walked, never dug or placed - a
+// step that falls away more than a safe drop (a floor dug out from under it) blocked the mine's stairs for good: "the stairs
+// to y21 are blocked (timeout)" three trips running, the mine and its y21 level - the cobweb trip's - about to be thrown
+// away, 2026-10-04 (a 4-deep pit at the flight's fifth step). The flight walked down from its top, step by step: where the
+// next step's floor lies more than SAFE_DROP under this one, a filler block goes in a step below this one's feet, clicked on
+// this step's own column. A straight flight only; anything it cannot read or reach, it leaves as it was.
+async function mendFlight (bot, top, end, ctx = {}) {
+  const dx = Math.sign(end.x - top.x); const dz = Math.sign(end.z - top.z)
+  if (dx && dz) return 0 // (a straight flight only)
+  const n = Math.max(Math.abs(end.x - top.x), Math.abs(end.z - top.z))
+  const air = (x, y, z) => { const b = world.at(bot, x, y, z); return !!b && world.isAirish(b) && !world.isWaterBlock(b) && !world.isLavaBlock(b) }
+  const feetAt = (x, z, from) => { for (let y = from + 1; y >= from - 8; y--) { const fl = world.at(bot, x, y - 1, z); if (air(x, y, z) && air(x, y + 1, z) && fl && world.isSolid(fl)) return y } return null }
+  const filler = () => { const it = inv.items(bot).find(i => require('./build').FILLER_ITEMS.test(i.name)); return it && it.name }
+  let prev = { x: top.x, y: top.y, z: top.z }; let mended = 0
+  for (let k = 1; k <= n; k++) {
+    if (ctx.shouldStop && ctx.shouldStop()) break
+    const x = top.x + dx * k; const z = top.z + dz * k
+    const fy = feetAt(x, z, prev.y)
+    if (fy == null) break // (a step it cannot read: left as it is)
+    if (prev.y - fy > world.SAFE_DROP) {
+      const cell = { x, y: prev.y - 2, z }
+      if (!air(cell.x, cell.y, cell.z) || !filler()) break
+      const r = await move.goTo(bot, new goals.GoalBlock(prev.x, prev.y, prev.z), { timeoutMs: 60000, stuckMs: 12000, dig: false, place: false, label: 'to the pit in the stairs', shouldStop: ctx.shouldStop })
+      if (!r.ok) break
+      if (!await act.place(bot, cell, filler(), { allowZones: ['*'] })) { log('mine', `the pit in the stairs at ${move.fmt(cell)} would not take a block`); break }
+      log('mine', `mended a pit in the stairs: a ${prev.y - fy}-block drop at ${move.fmt({ x, y: fy, z })} - a block at ${move.fmt(cell)}`)
+      mended++
+      prev = { x, y: prev.y - 1, z }
+    } else prev = { x, y: fy, z }
+  }
+  return mended
+}
+
 async function downTheMine (bot, m, ctx = {}) {
   if (!inOwnMine(bot) && world.dist3(bot.entity.position, m.entrance) > 3) await move.travel(bot, m.entrance, { range: 3, shouldStop: ctx.shouldStop, label: 'to mine', underground: true })
   const Ls = levelsOf(m)
@@ -649,7 +682,12 @@ async function downTheMine (bot, m, ctx = {}) {
   const A = Ls[m.active || 0]
   if (A && A.stairsDone && A.stairsEnd && Math.floor(bot.entity.position.y) > A.stairsEnd.y && world.dist3(world.feetPos(bot), A.stairsEnd) >= 0.5) {
     if (ctx.shouldStop && ctx.shouldStop()) return { ok: false, why: 'stopped' }
-    const r = await move.goTo(bot, new goals.GoalBlock(A.stairsEnd.x, A.stairsEnd.y, A.stairsEnd.z), walkTo(A.stairsEnd))
+    let r = await move.goTo(bot, new goals.GoalBlock(A.stairsEnd.x, A.stairsEnd.y, A.stairsEnd.z), walkTo(A.stairsEnd))
+    // (blocked: the flight walked from its top for a pit in it, and the walk once more if one was mended)
+    if (!r.ok && move.isVerdict(r) && A.stairTop) {
+      if (world.dist3(world.feetPos(bot), A.stairTop) > 2) await move.goTo(bot, new goals.GoalBlock(A.stairTop.x, A.stairTop.y, A.stairTop.z), walkTo(A.stairTop)).catch(() => null)
+      if (world.dist3(world.feetPos(bot), A.stairTop) <= 2 && await mendFlight(bot, A.stairTop, A.stairsEnd, ctx) > 0) r = await move.goTo(bot, new goals.GoalBlock(A.stairsEnd.x, A.stairsEnd.y, A.stairsEnd.z), walkTo(A.stairsEnd))
+    }
     if (!r.ok) {
       if (!move.isVerdict(r)) return { ok: false, why: r.why }
       log('mine', `the stairs to y${A.level} are blocked on the way to their foot at ${move.fmt(A.stairsEnd)} (${r.why})`)
