@@ -108,7 +108,7 @@ function diveHolds (now) {
 const fledFrom = new Map() // entity id -> hp the lost fight began at
 let fightStartHp = null; let fightTargetId = null
 const noChase = new Map() // entity id -> until: a target the chase got no nearer to (the fight row's chase check)
-let chase = null // { id, best, at }: the current chase's closest distance and when
+let chase = null // { best, at, last }: the fight's chase - its closest distance, when, and its last tick
 // (a fight is LOST when it ends - however it ends - more than 4 hp down: "fight done" when the pillager stepped out of
 //  sight left no mark, and the bot charged it again at hp 11, 2026-09-28)
 const LOST_FIGHT_HP = 4
@@ -1760,10 +1760,19 @@ function tick () {
     if (armed && (!bot.heldItem || !/_(sword|axe)$/.test(bot.heldItem.name))) { runBusy('equip a weapon', () => inv.equipWeapon(bot), 1500); return }
     // THE CHASE THAT CLOSES NOTHING: no nearer by a block in 15s (a detour round a wall takes ~10; audit) while out of reach - the target is let go a minute
     //  (noChase), the fight ends; a mob in reach or one that hit us in melee is fought where it stands
+    // (ONE CHASE for the whole fight, whichever target it is on: three pillagers below the cliff, the target switched every
+    //  1-6s and a per-target clock never ran out - the body still held on the lip, 2026-10-04. Let go, every shooter in sight
+    //  goes with it; a fight that lapses 30s starts a new chase - the eat-and-cover spells between ran 5s+; audit)
     if (d > 3.5) {
-      if (!chase || chase.id !== target.id) chase = { id: target.id, best: d, at: now }
-      else if (d < chase.best - 1) { chase.best = d; chase.at = now }
-      else if (now - chase.at > 15000) { noChase.set(target.id, now + 60000); log('reflex', `fight: no nearer the ${target.name} in 15s (${d.toFixed(1)}b) - let go a minute`); chase = null; try { bot.pathfinder.setGoal(null) } catch {} return clearActive() }
+      if (!chase || now - chase.last > 30000) chase = { best: d, at: now, last: now }
+      chase.last = now
+      if (d < chase.best - 1) { chase.best = d; chase.at = now }
+      else if (now - chase.at > 15000) {
+        noChase.set(target.id, now + 60000)
+        for (const h of hs) if (RANGED.has(h.e.name) && h.d < 24) noChase.set(h.e.id, now + 60000)
+        log('reflex', `fight: no nearer in 15s (${target.name} ${d.toFixed(1)}b) - every shooter in sight let go a minute`)
+        chase = null; try { bot.pathfinder.setGoal(null) } catch {} return clearActive()
+      }
     } else chase = null
     if (d > 2.8 && !pinned) {
       bot.pathfinder.setMovements(require('./move').movementsFor(bot, { dig: false, place: false }))
