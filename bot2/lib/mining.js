@@ -569,7 +569,15 @@ async function takeKnownOre (bot, itemName, target, ctx = {}) {
     // through the rock to it (the planner digs its own tunnel), then the block and its vein
     if (!act.reach(bot, o.position, 4.3)) {
       const r = await move.goTo(bot, new goals.GoalLookAtBlock(o.position, bot.world, { reach: 4 }), { timeoutMs: 120000, stuckMs: 15000, label: 'to the ore', shouldStop: ctx.shouldStop })
-      if (!r.ok && !act.reach(bot, o.position, 4.5)) { refused.add(k(o.position)); continue }
+      // (and the rest of that pocket with it - the ores round the one refused, and round where the walk stuck: the next
+      //  nearest was the same pocket past the same flowing water under home, four walks of 73-86s each, 2026-10-04)
+      if (!r.ok && !act.reach(bot, o.position, 4.5)) {
+        refused.add(k(o.position))
+        const here = bot.entity.position; let more = 0
+        for (const q of ores) if (!refused.has(k(q.position)) && (world.dist3(q.position, o.position) <= 3 || world.dist3(q.position, here) <= 4)) { refused.add(k(q.position)); more++ }
+        if (more) log('mine', `the walk to ${o.name} at ${move.fmt(o.position)} failed (${r.why}) - ${more} more ore${more > 1 ? 's' : ''} in that pocket left too`)
+        continue
+      }
     }
     if (!await act.dig(bot, o.position, { timeoutMs: 20000, noWalk: true })) { refused.add(k(o.position)); continue }
     veins++
