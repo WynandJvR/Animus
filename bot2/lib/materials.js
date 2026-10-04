@@ -471,13 +471,13 @@ function unsourced (item) {
 // What the build still wants, as one predicate: the whole-build status and plan worked out ONCE for a pass over the pack
 // (per stack it was a 14-42k-cell status and a full plan each - ten stacks, ten passes mid-trip; audit #8, 2026-09-27).
 // Fails closed: when the plan cannot be made, everything counts as wanted (a throw tossed build material before).
-function wantedSet (bot) {
+function wantedSet (bot, { failOpen = false } = {}) {
   try {
     const st = L.build.cachedStatus ? L.build.cachedStatus(bot) : L.build.status(bot)
     if (!st || !st.need) return () => false
     const tests = Object.keys(planFor(bot, st.need).demand).map(node => matches(node))
     return name => tests.some(t => t(name))
-  } catch { return () => true }
+  } catch { return failOpen ? null : () => true } // (failOpen: a caller that only TAKES what is wanted gets null - nothing is; audit)
 }
 function wanted (bot, name) { return wantedSet(bot)(name) }
 // a plan against the live stock (pack + chests + what is cooking)

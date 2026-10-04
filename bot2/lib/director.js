@@ -429,6 +429,17 @@ function baseZone () {
 }
 
 // ---- the decision -------------------------------------------------------------------------
+// a dropped item within 10 (a few steps, the grave rule's reach) on our level that the build still wants: its name, or null.
+// The build's plan is asked only when something lies there (wantedSet works the whole plan out)
+let wantedTest = null
+function wantedDropOf (e) { try { const it = e.getDroppedItem(); return !!it && !!wantedTest && wantedTest(it.name) } catch { return false } }
+function wantedDrop () {
+  const near = act.droppedItems(bot, 10).filter(e => Math.abs(e.position.y - bot.entity.position.y) < 4 && !act.skippedDrop(e.id)) // (one the pickup gave up on is not offered again; audit)
+  if (!near.length || !build.getJob()) return null
+  wantedTest = mats.wantedSet(bot, { failOpen: true }); if (!wantedTest) return null // (no plan: nothing is wanted - never "everything"; audit)
+  const e = near.find(wantedDropOf); if (!e) return null
+  try { return e.getDroppedItem().name } catch { return null }
+}
 function decide () {
   const night = world.phase(bot) === 'night'
   const dusk = world.phase(bot) === 'dusk'
@@ -488,6 +499,14 @@ function decide () {
     const g0 = graves.bestGrave(bot)
     // (the whole list here, and the grave's cover: a pit's shooters see a body passing its rim - a grave beside the hole is in their line; audit)
     if (g0 && world.dist3(g0, bot.entity.position) < 10 && !aroundAll.some(h => h.d < 16) && !coveredGrave(g0) && !held('grave')) return { name: 'grave', why: `my grave is ${Math.round(world.dist3(g0, bot.entity.position))}b away - ${g0.items} items` }
+  }
+  // WHAT A FIGHT DROPPED THAT THE BUILD WANTS - a spider's string - picked up as the grave is: whatever the hour, a few steps
+  // off, never into a mob. Left lying, the night's spider kills by the door gave nothing, and the day's hunt found spiders only
+  // deep in the rock: 21 string the hub's carpets wait on, "2 trips found none", 2026-10-04
+  {
+    const loot = wantedDrop()
+    // (never out of the safehouse after dark for it, and never below the hurt line - this row is before the heal; audit)
+    if (loot && !aroundAll.some(h => h.d < 16) && !((night || dusk) && move.insideHut(world.feetPos(bot))) && bot.health > reflex.hurtLine() && !held('loot')) return { name: 'loot', why: `${loot} on the ground beside me - the build wants it` }
   }
 
   // 1. night
@@ -924,6 +943,7 @@ const TASKS = {
     }
     return true
   },
+  async loot () { return (await act.collectDrops(bot, { radius: 10, maxMs: 15000, only: wantedDropOf })) > 0 },
   async heal () {
     const home = mem.get().home
     // at the hurt line (or out of daylight) with home near and the safehouse up: rest walled in; a scratch by day at

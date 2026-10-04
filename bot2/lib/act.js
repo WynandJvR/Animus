@@ -521,7 +521,7 @@ function droppedItems (bot, radius) {
 // drops we could not reach stay skipped for a while across calls (a log stuck in the leaves was walked
 // at after every single log of a tree)
 const unreachableDrops = new Map() // entity id -> time given up
-async function collectDrops (bot, { radius = 8, maxMs = 15000 } = {}) {
+async function collectDrops (bot, { radius = 8, maxMs = 15000, only = null } = {}) {
   const t0 = Date.now()
   let picked = 0
   const tried = new Set()
@@ -531,7 +531,7 @@ async function collectDrops (bot, { radius = 8, maxMs = 15000 } = {}) {
   while (Date.now() - t0 < maxMs && !cancelled()) {
     await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
     const me = bot.entity.position
-    const drops = droppedItems(bot, radius).filter(e => !tried.has(e.id) && Math.abs(e.position.y - me.y) < 6)
+    const drops = droppedItems(bot, radius).filter(e => !tried.has(e.id) && Math.abs(e.position.y - me.y) < 6 && (!only || only(e))) // (only: the drops asked for)
     if (!drops.length) break
     drops.sort((a, b) => a.position.distanceTo(me) - b.position.distanceTo(me))
     const d = drops[0]
@@ -549,4 +549,4 @@ async function collectDrops (bot, { radius = 8, maxMs = 15000 } = {}) {
   return picked
 }
 
-module.exports = { SOIL_PLANT_RE, clearsFirst, lastDigWhy: () => lastDigWhy, settleAfterClose, openSettled, digRefusal, sealsUsIn, holdsUsUp, fallBelow, stepOff, dig, digBlock, place, useOn, pour, fill, collectDrops, droppedItems, reach, inBody, sleep, ticks, refUsable, PLANT_RE, NO_REF_RE, USE_REF_RE, NO_FACE_RE, REPLACEABLE_RE }
+module.exports = { skippedDrop: id => unreachableDrops.has(id), SOIL_PLANT_RE, clearsFirst, lastDigWhy: () => lastDigWhy, settleAfterClose, openSettled, digRefusal, sealsUsIn, holdsUsUp, fallBelow, stepOff, dig, digBlock, place, useOn, pour, fill, collectDrops, droppedItems, reach, inBody, sleep, ticks, refUsable, PLANT_RE, NO_REF_RE, USE_REF_RE, NO_FACE_RE, REPLACEABLE_RE }
