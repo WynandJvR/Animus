@@ -107,6 +107,8 @@ function diveHolds (now) {
 // the pillager's death spiral (2026-09-28; audit)
 const fledFrom = new Map() // entity id -> hp the lost fight began at
 let fightStartHp = null; let fightTargetId = null
+const noChase = new Map() // entity id -> until: a target the chase got no nearer to (the fight row's chase check)
+let chase = null // { id, best, at }: the current chase's closest distance and when
 // (a fight is LOST when it ends - however it ends - more than 4 hp down: "fight done" when the pillager stepped out of
 //  sight left no mark, and the bot charged it again at hp 11, 2026-09-28)
 const LOST_FIGHT_HP = 4
@@ -1659,7 +1661,12 @@ function tick () {
   const melee = hs.filter(h => !NEVER_MELEE.has(h.e.name))
   // only what we can actually see (a mob behind the bunker wall is not a fight)
   const close = melee.find(h => h.d < 4.5 && (h.e.name !== 'spider' || !bot.time.isDay || h.d < 3) && canSee(h.e))
-  const shooter = melee.find(h => RANGED.has(h.e.name) && h.d < 14 && canSee(h.e))
+  // (never a shooter the last charge could not close on: pillagers at the foot of a 21-block cliff were "fought" 482s, the
+  //  chase's jump off the lip let go of by the edge guard every few seconds, hp 20 throughout - nothing hit either way,
+  //  2026-10-04. Cover still answers one that hits us; unreachable: chaseStalled)
+  for (const [id, t] of noChase) if (t < now) noChase.delete(id)
+  const shooterSeen = melee.find(h => RANGED.has(h.e.name) && h.d < 14 && canSee(h.e))
+  const shooter = shooterSeen && !noChase.has(shooterSeen.e.id) ? shooterSeen : null // (the charge's choice; cover answers any - audit)
   const recentlyHurt = now - lastHurtAt < 3000
   const hurtByMelee = recentlyHurt && lastHurtBy && lastHurtBy.isValid && !NEVER_MELEE.has(lastHurtBy.name) && lastHurtBy.position.distanceTo(me) < 6 ? lastHurtBy : null
   let target = close ? close.e : (hurtByMelee || null)
@@ -1680,9 +1687,9 @@ function tick () {
       return
     }
   }
-  if (!target && shooter && recentlyHurt) {
+  if (!target && shooterSeen && recentlyHurt) {
     // being shot and not going to fight it: out of its line of sight
-    takeCover(shooter.e, `cover from ${shooter.e.name} ${shooter.d.toFixed(1)}b`)
+    takeCover(shooterSeen.e, `cover from ${shooterSeen.e.name} ${shooterSeen.d.toFixed(1)}b`)
     return
   }
   // bare fists do 1 damage against 20 hp: without a weapon, back off (and let the shelter logic dig
@@ -1751,6 +1758,13 @@ function tick () {
     if (!active || active.kind !== 'fight') fightTargetId = target.id
     setActive('fight', `${target.name} ${d.toFixed(1)}b (${why})`)
     if (armed && (!bot.heldItem || !/_(sword|axe)$/.test(bot.heldItem.name))) { runBusy('equip a weapon', () => inv.equipWeapon(bot), 1500); return }
+    // THE CHASE THAT CLOSES NOTHING: no nearer by a block in 15s (a detour round a wall takes ~10; audit) while out of reach - the target is let go a minute
+    //  (noChase), the fight ends; a mob in reach or one that hit us in melee is fought where it stands
+    if (d > 3.5) {
+      if (!chase || chase.id !== target.id) chase = { id: target.id, best: d, at: now }
+      else if (d < chase.best - 1) { chase.best = d; chase.at = now }
+      else if (now - chase.at > 15000) { noChase.set(target.id, now + 60000); log('reflex', `fight: no nearer the ${target.name} in 15s (${d.toFixed(1)}b) - let go a minute`); chase = null; try { bot.pathfinder.setGoal(null) } catch {} return clearActive() }
+    } else chase = null
     if (d > 2.8 && !pinned) {
       bot.pathfinder.setMovements(require('./move').movementsFor(bot, { dig: false, place: false }))
       bot.pathfinder.setGoal(new goals.GoalFollow(target, 1.5), true)
