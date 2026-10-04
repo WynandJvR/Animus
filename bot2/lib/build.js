@@ -826,12 +826,18 @@ function cellsDone (bot) { if (!job) return false; for (const c of job.cells) if
 // SEALED BY THE BUILD: ground the build closes in - a pocket of dirt in the crawl space under a raised floor - is reached
 // only by breaking a finished block, and nothing will ever see it. Counted as an obstruction, the clearing walked at it
 // from above the floor, stalled "2.0 from the goal" round after round and placed nothing for a whole day (113 dirt under
-// the hub market's raised plaza, 2026-10-04). The rule: a flood from outside the box through every cell that is not a
-// WALL OF THE DESIGN - a cell whose block is a full opaque cube (not glass, a slab, stairs, a door/gate/trapdoor: seen
-// through or walked through) - ground included (a hill's core is reached by digging its face), over the box's own heights
-// only (under the base the earth would lead everywhere). An obstruction it never touches is sealed in once the build
-// stands. By the design and not by what is finished yet: the plaza's rim still unbuilt, a flood through the finished
-// cells only went in round its gaps and skipped 16 of 113 (audit asked for the live check). Static for the job: computed once
+// the hub market's raised plaza, 2026-10-04). The rule: a flood from outside the box through everything but the DESIGN's
+// walls, ground included (a hill's core is reached by digging its face), over the box's own heights only (under the base
+// the earth would lead everywhere). An obstruction it never touches is sealed in once the build stands. By the design and
+// not by what is finished yet: the plaza's rim still unbuilt, a flood through the finished cells went in round its gaps
+// (audit asked for the live check: 97 of 113 still counted). Static for the job and its cell list: computed once.
+// THE WALLS by half-block, as a player moves and sees: each cell is a lower and an upper half. A full opaque cube closes
+// both; a bottom slab or stair the lower, a top one the upper; a door, gate or trapdoor neither (walked through; audit).
+// The flood goes sideways half to half, up a cell's own halves, and from an upper half to the lower half of the cell
+// above. Through the plaza floor's slabs taken whole as open it reached the crawl space from above (15 of 728 sealed).
+// GLASS closes the flood like a wall but what stands right behind it is in sight: the cells round a pane the flood
+// reached count as reached. Through the beacon's glass column the flood ran the whole crawl space; a 1x1 window shows
+// the blocks round it, not dirt four cells off under the floor (2026-10-04)
 let sealedMemo = null
 function reachableFromOutside (bot) {
   // (kept while the job and its cell list stand: foundation cells added or dropped change the walls; audit)
@@ -839,26 +845,49 @@ function reachableFromOutside (bot) {
   const t0 = Date.now()
   const { box } = job; const ya = box.y1 + 1; const yb = box.y2 + 2
   const x1 = box.x1 - 1; const x2 = box.x2 + 1; const z1 = box.z1 - 1; const z2 = box.z2 + 1
-  const X = x2 - x1 + 1; const Z = z2 - z1 + 1; const Y = yb - ya + 1
-  // (a typed grid, not a Set of strings: 135k cells in ~130ms of string keys was a body-loop freeze; body first)
-  const seen = new Uint8Array(X * Y * Z); const q = new Int32Array(X * Y * Z); let qn = 0
+  const X = x2 - x1 + 1; const Z = z2 - z1 + 1; const Y = yb - ya + 1; const N = X * Y * Z
+  // (typed grids, not a Set of strings: 135k cells in ~130ms of string keys was a body-loop freeze; body first)
   const idx = (x, y, z) => ((y - ya) * Z + (z - z1)) * X + (x - x1)
-  const md = world.data(bot); const wallAt = new Uint8Array(X * Y * Z); let walls = 0
+  const md = world.data(bot); const wallAt = new Uint8Array(N); const glass = []; const glassAt = new Uint8Array(N); let walls = 0 // (bit 1 the lower half, bit 2 the upper)
   for (const c of job.cells) {
     if (c.y < ya || c.y > yb) continue
     const d = md.blocksByName[c.name]
-    // (and never a cell nothing can source: never placed, it closes nothing in; audit)
-    if (d && d.boundingBox === 'block' && !d.transparent && !unsourced(c.name) && !/_slab$|_stairs$|_door$|_fence_gate$|_trapdoor$|glass|leaves$/.test(c.name)) { wallAt[idx(c.x, c.y, c.z)] = 1; walls++ }
+    // (never a cell nothing can source: never placed, it closes nothing in; audit)
+    if (!d || d.boundingBox !== 'block' || unsourced(c.name) || /_door$|_fence_gate$|_trapdoor$|leaves$/.test(c.name)) continue
+    // (and what is seen through but not walked through as glass is: a fence, a wall, a pane, bars - a roofed cage; audit)
+    if (d.transparent || /glass|_fence$|_wall$|_pane$|_bars$/.test(c.name)) { wallAt[idx(c.x, c.y, c.z)] = 3; glassAt[idx(c.x, c.y, c.z)] = 1; glass.push(c); walls++; continue }
+    const half = /_slab$/.test(c.name) ? (c.props && c.props.type) : /_stairs$/.test(c.name) ? (c.props && c.props.half) : 'full'
+    const k = half === 'full' || half === 'double' ? 3 : half === 'bottom' ? 1 : half === 'top' ? 2 : 0
+    if (k) { wallAt[idx(c.x, c.y, c.z)] = k; walls++ }
   }
-  const push = (x, y, z) => { if (x < x1 || x > x2 || z < z1 || z > z2 || y < ya || y > yb) return; const i = idx(x, y, z); if (seen[i]) return; seen[i] = 2; if (wallAt[i]) return; seen[i] = 1; q[qn++] = i }
-  for (let y = ya; y <= yb; y++) { for (let x = x1; x <= x2; x++) { push(x, y, z1); push(x, y, z2) } for (let z = z1; z <= z2; z++) { push(x1, y, z); push(x2, y, z) } }
-  for (let z = z1; z <= z2; z++) for (let x = x1; x <= x2; x++) push(x, yb, z) // (the sky over the box)
-  for (let h = 0; h < qn; h++) {
-    const i = q[h]; const x = x1 + (i % X); const z = z1 + (Math.floor(i / X) % Z); const y = ya + Math.floor(i / (X * Z))
-    push(x + 1, y, z); push(x - 1, y, z); push(x, y + 1, z); push(x, y - 1, z); push(x, y, z + 1); push(x, y, z - 1)
+  const seen = new Uint8Array(2 * N); const q = new Int32Array(2 * N); let qn = 0
+  const visit = (x, y, z, h) => { if (x < x1 || x > x2 || z < z1 || z > z2 || y < ya || y > yb) return; const i = idx(x, y, z); if (wallAt[i] & (h ? 2 : 1)) return; const j = 2 * i + h; if (seen[j]) return; seen[j] = 1; q[qn++] = j }
+  for (let y = ya; y <= yb; y++) for (const h of [0, 1]) { for (let x = x1; x <= x2; x++) { visit(x, y, z1, h); visit(x, y, z2, h) } for (let z = z1; z <= z2; z++) { visit(x1, y, z, h); visit(x2, y, z, h) } }
+  for (let z = z1; z <= z2; z++) for (let x = x1; x <= x2; x++) visit(x, yb, z, 1) // (the sky over the box)
+  for (let n = 0; n < qn; n++) {
+    const j = q[n]; const i = j >> 1; const h = j & 1
+    const x = x1 + (i % X); const z = z1 + (Math.floor(i / X) % Z); const y = ya + Math.floor(i / (X * Z))
+    visit(x + 1, y, z, h); visit(x - 1, y, z, h); visit(x, y, z + 1, h); visit(x, y, z - 1, h); visit(x, y, z, 1 - h)
+    if (h) visit(x, y + 1, z, 0); else visit(x, y - 1, z, 1)
   }
-  let sealed = 0; for (let i = 0; i < seen.length; i++) if (!seen[i]) sealed++
-  const has = (x, y, z) => x < x1 || x > x2 || z < z1 || z > z2 || y < ya || y > yb || seen[idx(x, y, z)] === 1
+  const reached = new Uint8Array(N); for (let i = 0; i < N; i++) if (seen[2 * i] || seen[2 * i + 1]) reached[i] = 1
+  const near = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]
+  const inG = (x, y, z) => x >= x1 && x <= x2 && z >= z1 && z <= z2 && y >= ya && y <= yb
+  for (const c of glass) {
+    if (!near.some(([dx, dy, dz]) => inG(c.x + dx, c.y + dy, c.z + dz) && (seen[2 * idx(c.x + dx, c.y + dy, c.z + dz)] || seen[2 * idx(c.x + dx, c.y + dy, c.z + dz) + 1]))) continue
+    // (in sight along each axis out to 4, up to the first full wall - a glasshouse's leftovers are seen from outside; the
+    //  beacon's column sees the cell under it, not past the opaque floor beside it; audit)
+    for (const [dx, dy, dz] of near) {
+      for (let s2 = 1; s2 <= 4; s2++) {
+        const x = c.x + dx * s2; const y = c.y + dy * s2; const z = c.z + dz * s2
+        if (!inG(x, y, z)) break
+        const i = idx(x, y, z); if (wallAt[i] === 3 && !glassAt[i]) break
+        reached[i] = 1
+      }
+    }
+  }
+  let sealed = 0; for (let i = 0; i < N; i++) if (!reached[i] && wallAt[i] !== 3) sealed++
+  const has = (x, y, z) => !inG(x, y, z) || reached[idx(x, y, z)] === 1
   sealedMemo = { job, has, n: job.cells.length }
   log('build', `sealed by the design: ${sealed} cells closed in by ${walls} wall cells (${Date.now() - t0}ms)`)
   return has
