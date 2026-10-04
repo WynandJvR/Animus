@@ -1493,6 +1493,7 @@ async function placeCell (bot, c, j = job) {
         const sp = { x: c.x + p.off[0], y: c.y + p.off[1], z: c.z + p.off[2] }
         if (j.index.has(key(sp))) continue
         if (c.pour && p.off[1] === 1) continue // (a pour against an underside wants an eye below it - never from the floor beside; audit)
+        if (c.hole && p.off[1] === -1) continue // (never into the pocket under a hole - sealed by the floor, out of the teardown's reach; audit)
         if (sp.x === me.x && sp.z === me.z && (sp.y === me.y || sp.y === me.y + 1)) continue
         const spb = world.at(bot, sp.x, sp.y, sp.z)
         if (!spb || !(world.isAirish(spb) || world.isLiquidWater(spb))) continue
@@ -1680,7 +1681,9 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     // a door goes in once its floor stands (and its own two cells are ours to clear)
     doable = doable.filter(c => !c.twin || supportThere(bot, c)).concat(attached)
     // (the foundation's cells whose column below them is laid already: the wall rises bottom-up, never a block in the air)
-    doable = doable.concat(footing.filter(c => { const b = world.at(bot, c.x, c.y - 1, c.z); return b && world.isSolid(b) }))
+    // (a HOLE's cell is its top one now, over the pocket left open - never laid bottom-up: clicked on a side or a temporary
+    //  support - held for a solid block under it, the hub's gravel columns were never offered, 2026-10-04)
+    doable = doable.concat(footing.filter(c => { if (c.hole) return true; const b = world.at(bot, c.x, c.y - 1, c.z); return b && world.isSolid(b) }))
     // NEVER SEAL AN EMPTY CELL: a block placed straight over a cell still waiting for its own (coal not yet had), when that
     // cell has no other open side, closes the last way to it - the plank floor went in over the base layer's coal blocks
     // and campfires, and they failed "could not get within reach" every step after (2026-09-28). Covered only once it is
