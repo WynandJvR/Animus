@@ -767,7 +767,11 @@ function needsOf (bot, c, md, add) {
   const it = itemOf(c, md)
   // (water that is there but not still - runoff, level 1-8 - is no source: a bucket is still wanted. Named "water", it read
   //  as placed, nothing gathered a bucket, and the hub's well waited with flowing water in it, 2026-10-04)
-  if (!it || (b && nameOk(c, b.name) && !(/^(water|lava)$/.test(c.name) && cellDone(bot, c) === false))) return
+  // (and a WATERLOGGED block where no water is wanted: it reads as placed by name, so its item was never wanted, never drawn
+  //  into the pack - and the step only tries a cell whose block is in hand: the well's leaking fence waited for ever, its
+  //  spill running down into the gravel path's holes, 2026-10-04. One is wanted to set it again dry)
+  const leaks = !!b && (() => { try { return String(b.getProperties().waterlogged) === 'true' } catch { return false } })() && !/water|coral|sea_pickle|seagrass|kelp|conduit/.test(c.name)
+  if (!it || (b && nameOk(c, b.name) && !leaks && !(/^(water|lava)$/.test(c.name) && cellDone(bot, c) === false))) return
   add(it, c.count ? c.count.n : 1)
   if (c.then) add(c.then, 1)
 }

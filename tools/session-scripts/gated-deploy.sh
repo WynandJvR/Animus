@@ -5,7 +5,10 @@
 #  count; every other check stands. A hand-rolled deploy round the pause skipped the underground check, 2026-09-28)
 # (--stuck-ok: a body pinned where it stands - its own relog already put it back in the same cell - is not "away from home"
 #  or "underground" in the sense those checks guard: hp, night, threat and the rest still stand)
-S=$(cd "$(dirname "$0")" && pwd); lim=${1:-1800}; end=$((SECONDS+lim)); PAUSEDOK=$([ "$2" = "--paused-ok" ] && echo 1 || echo 0); STUCKOK=$([ "$2" = "--stuck-ok" ] && echo 1 || echo 0); NEAROK=$([ "$2" = "--near-ok" ] && echo 1 || echo 0); HUTOK=$([ "$2" = "--hut-ok" ] && echo 1 || echo 0)
+S=$(cd "$(dirname "$0")" && pwd); lim=${1:-1800}; end=$((SECONDS+lim)); PAUSEDOK=$([ "$2" = "--paused-ok" ] && echo 1 || echo 0); STUCKOK=$([ "$2" = "--stuck-ok" ] && echo 1 || echo 0); NEAROK=$([ "$2" = "--near-ok" ] || [ "$2" = "--near-fight-ok" ] && echo 1 || echo 0); FIGHTOK=$([ "$2" = "--near-fight-ok" ] && echo 1 || echo 0); HUTOK=$([ "$2" = "--hut-ok" ] && echo 1 || echo 0)
+# (--near-fight-ok: --near-ok, and a fight reflex holding the body at hp 18+ does not hold the deploy - the old code's chase
+#  of pillagers below a 21-block cliff held the body (and every deploy, the fix for it among them) for good, 2026-10-04.
+#  The threat check still stands unless the fight is the threat: an unreachable shooter at hp 18+ is not a reconnect risk)
 # (--hut-ok: a threat outside while the bot stands at home inside the safehouse (within 4 of home) - a patrol camped round
 #  the house held every deploy for 40 minutes, 2026-10-04; the rest stand)
 # (--near-ok: the build site is the workday - within 64 of home, on the surface, passes the distance check; the rest stand.
@@ -17,7 +20,7 @@ fp () { cat /c/mc-bot-lab/bot2/*.js /c/mc-bot-lab/bot2/lib/*.js | md5sum | cut -
 FP0=$(fp); echo "code fingerprint $FP0 ($(git -C /c/mc-bot-lab rev-parse --short HEAD))"
 while [ $SECONDS -lt $end ]; do
   st=$(curl -s -m 5 http://127.0.0.1:3001/state)
-  ok=$(node -e "try{const j=JSON.parse(process.argv[1]);const h=j.home;const d=h?Math.hypot(j.pos.x-h.x,j.pos.z-h.z):99;const t=j.timeOfDay;const night=!(t>=1500&&t<11400);const threat=j.threat&&(j.threat.dist==null||j.threat.dist<16);const reflex=!!j.maneuver;const stuck=process.argv[3]==='1';const near=process.argv[4]==='1';const hut=process.argv[5]==='1';console.log((stuck||!j.hazards.underground||d<8)&&!j.hazards.inWater&&(stuck||d<20||(near&&d<64&&Math.abs(j.pos.y-h.y)<=12&&j.hazards.onGround&&!j.hazards.lip))&&j.health>=14&&!night&&(!threat||(hut&&d<4))&&!reflex&&(!j.paused||process.argv[2]==='1')?'yes':'no')}catch(e){console.log('no')}" "$st" "$PAUSEDOK" "$STUCKOK" "$NEAROK" "$HUTOK")
+  ok=$(node -e "try{const j=JSON.parse(process.argv[1]);const h=j.home;const d=h?Math.hypot(j.pos.x-h.x,j.pos.z-h.z):99;const t=j.timeOfDay;const night=!(t>=1500&&t<11400);const threat=j.threat&&(j.threat.dist==null||j.threat.dist<16);const fightOk=process.argv[6]==='1'&&j.maneuver&&j.maneuver.label==='fight'&&j.health>=18;const reflex=!!j.maneuver&&!fightOk;const stuck=process.argv[3]==='1';const near=process.argv[4]==='1';const hut=process.argv[5]==='1';console.log((stuck||!j.hazards.underground||d<8)&&!j.hazards.inWater&&(stuck||d<20||(near&&d<64&&Math.abs(j.pos.y-h.y)<=12&&j.hazards.onGround&&!j.hazards.lip))&&j.health>=14&&!night&&(!threat||(hut&&d<4)||fightOk)&&!reflex&&(!j.paused||process.argv[2]==='1')?'yes':'no')}catch(e){console.log('no')}" "$st" "$PAUSEDOK" "$STUCKOK" "$NEAROK" "$HUTOK" "$FIGHTOK")
   if [ "$ok" = yes ]; then
     [ "$(fp)" = "$FP0" ] || { echo "REFUSED: bot2 changed while the gate was shut - what is on disk now is not what this deploy was started for"; exit 3; }
     cd /c/mc-bot-lab/bot2; for f in main.js lib/*.js; do node --no-lazy --check "$f" || { echo "SYNTAX FAIL $f"; exit 1; }; done
