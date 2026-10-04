@@ -495,7 +495,9 @@ function decide () {
   //  grave, the farm, the tool chest, 2026-09-25)
   const outgunned = around.some(h => reflex.RANGED.has(h.e.name)) && !inv.offhandShield(bot) && inv.armorPoints(bot) < 8 && !reflex.bowReady()
   // (from dusk: the bed takes the dusk, and a night slept from dusk never came - the first evening went to bed at 19:58)
-  const spiderNightOn = world.phase(bot) !== 'day' && !!home && dHome < 24 && stringShort() && spiderNightFit() && !held('spiderNight')
+  // (the bed's own reach - 200 at dusk, 32 at night: it stands in for the bed wherever the bed would be chosen; held to 24 of home,
+  //  the second evening went to bed from 41b out, 2026-10-04)
+  const spiderNightOn = world.phase(bot) !== 'day' && !!home && dHome < (world.phase(bot) === 'dusk' ? 200 : 32) && stringShort() && spiderNightFit() && !held('spiderNight')
   const spidersOnly = around.length > 0 && around.every(h => SPIDER_RE.test(h.e.name)) // (the spider night's own game: no hideout from it)
   if (around.length && home && dHome < 48 && hut.shellComplete(bot) && (dim || outgunned || bot.health <= reflex.hurtLine()) && !(spiderNightOn && spidersOnly) && !held('hideout')) {
     return { name: 'hideout', why: `${around.length} hostile${around.length > 1 ? 's' : ''} around home (${around.slice(0, 3).map(h => h.e.name).join(', ')}) - waiting inside` }
@@ -921,6 +923,8 @@ const TASKS = {
     const t0 = Date.now(); let kills = 0; const s0 = inv.count(bot, 'string')
     const stand = { x: ap.x, y: home.y, z: ap.z }
     const near = (h, r) => Math.abs(h.e.position.y - bot.entity.position.y) < 6 && onSurface(h.e) && world.dist2(h.e.position, home) < r
+    // (from out at dusk - the bed's reach: home to the door first, one walk)
+    if (world.dist2(bot.entity.position, stand) > 8) { const r = await move.travel(bot, stand, { range: 1, shouldStop: () => taskCancelled(), label: 'to the door' }).catch(() => null); if (!r || !r.ok) return false }
     log('dir', `a spider night: ${(build.cachedStatus(bot).need || {}).string} string short - by the door for spiders (hp ${Math.round(bot.health)}, armour ${inv.armorPoints(bot)})`)
     while (!taskCancelled() && world.phase(bot) !== 'day' && Date.now() - t0 < 3 * 60000) {
       await reflex.waitClear()
