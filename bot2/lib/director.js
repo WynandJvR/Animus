@@ -1778,6 +1778,7 @@ const ANIMAL_RAW = /^(wool|white_wool|leather|feather)$/
 //  y12, over deepslate's band, came back 0/17 every time - five minutes a round, all night, 2026-09-30. Once for an
 //  animal (they never respawn round home), twice for the rest (a vein can be missed once))
 const emptyTrips = mem.persistedMap('emptyTrips') // raw -> { day, n }
+const noneStreak = mem.persistedMap('noneStreak') // raw -> { until, n }: days running a raw's trips found none
 // (the build's backbone takes four: an empty trip can be a failed walk, a full pack, a creeper's hold - two of those and
 //  the castle's main raw would be off for the day, a bigger stall than the one this stops; audit)
 const CORE_RAW = /(_log|^log|^cobblestone|^sand|^clay_ball|^fuel|^coal|^stone|^dirt|^gravel)$/
@@ -1793,10 +1794,20 @@ async function gatherFor (raw, short) {
     // (none at all: a trip that got some fell short, and found where they are)
     // (a trip the dusk cut short counts too once it had looked - two minutes and more: the deepslate trips mined 0/17 for
     //  six minutes each and ended "stopped" at dusk, so none ever counted and the next day's round went again)
+    if (got() > had) noneStreak.delete(raw) // (found some: the streak is over)
     if (!ok && got() <= had && !notToday.has(raw) && (!dayStop() || Date.now() - t0 > 120000) && !forage.tripWasCut(raw, t0)) {
       const d = day.dayNo(bot); const e = emptyTrips.get(raw); const n = e && e.day === d ? e.n + 1 : 1
       emptyTrips.set(raw, { day: d, n })
-      if (ANIMAL_RAW.test(raw) || n >= (CORE_RAW.test(raw) ? 4 : 2)) { notToday.set(raw, { day: d }); log('dir', `${raw}: ${n > 1 ? n + ' trips' : 'the trip'} found none - not again today`) }
+      // (DAY AFTER DAY none: the hold grows a day a time (to four) - flowers round home picked out, the dandelion and bluet
+      //  trips took each morning's first hours and came back empty, and pumpkin and wool, never tried, waited for a morning
+      //  that never came, 2026-10-04. The streak breaks on any day the raw was found or not put off)
+      if (ANIMAL_RAW.test(raw) || n >= (CORE_RAW.test(raw) ? 4 : 2)) {
+        const sk = noneStreak.get(raw); const streak = sk && d - sk.until <= 1 ? sk.n + 1 : 1
+        const hold = Math.min(streak - 1, 3)
+        noneStreak.set(raw, { until: d + hold, n: streak })
+        notToday.set(raw, { day: d + hold })
+        log('dir', `${raw}: ${n > 1 ? n + ' trips' : 'the trip'} found none - not again ${hold ? 'for ' + (hold + 1) + ' days (' + streak + ' days running)' : 'today'}`)
+      }
     }
   }
 }
