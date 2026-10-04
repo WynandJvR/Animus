@@ -1908,10 +1908,19 @@ function install (b) {
   // (WHERE A WATER BUCKET GOES: filled, banked, taken out, and gone by the pour at the hub's well - "no water_bucket in the
   //  pack" four times, the chest holding only empty buckets after, 2026-10-04. Said when one leaves a slot: what took its
   //  place, the task and the reflex, and who was running)
+  // (and WHO USED IT: the last few item uses this body sent - activateItem, activateBlock, a place - with the caller and what was in
+  //  the hand. Two buckets went at the well in one second during a walk, the pour after found none, and the trace above could
+  //  only say "the server changed the slot", 2026-10-04)
+  const uses = []
+  for (const fn of ['activateItem', 'activateBlock', '_genericPlace']) {
+    const orig = bot[fn]; if (typeof orig !== 'function') continue
+    bot[fn] = function (...args) { try { uses.push({ t: Date.now(), fn, held: bot.heldItem ? bot.heldItem.name : 'hand', at: String(new Error().stack).split(String.fromCharCode(10)).slice(2, 5).map(l => l.trim().replace(/^at /, '')).join(' <- ') }); if (uses.length > 6) uses.shift() } catch {} return orig.apply(this, args) }
+  }
   try {
     bot.inventory.on('updateSlot', (slot, oldItem, newItem) => {
       if (!oldItem || oldItem.name !== 'water_bucket' || (newItem && newItem.name === 'water_bucket')) return
       let task = ''; try { const d = require('./director').info(); task = d ? d.name : '' } catch {}
+      { const u = uses.filter(x => Date.now() - x.t < 3000).pop(); if (u) log('inv', `  the last use ${Date.now() - u.t}ms before: ${u.fn} holding ${u.held} at ${u.at}`); else log('inv', '  no use of ours in the 3s before - the server took it') }
       log('inv', `a water_bucket left slot ${slot} -> ${newItem ? newItem.name : 'empty'} (window ${bot.currentWindow ? bot.currentWindow.type : 'none'}, task ${task || '?'}, reflex ${active ? active.kind : 'none'}) at ${String(new Error().stack).split('\n').slice(2, 6).map(l => l.trim().replace(/^at /, '')).join(' <- ')}`)
     })
   } catch {}
