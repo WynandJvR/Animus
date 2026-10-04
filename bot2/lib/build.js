@@ -823,8 +823,46 @@ function nextNeeds (bot, layers = 4, lowY = null) {
 }
 function cellsDone (bot) { if (!job) return false; for (const c of job.cells) if (cellDone(bot, c) !== true) return false; return true }
 
+// SEALED BY THE BUILD: the ground the finished build has closed in - a pocket of dirt under a raised floor laid over it -
+// is reached only by breaking a finished block, and nothing will ever see it. Counted as an obstruction, the clearing
+// walked at it from above the floor, stalled "2.0 from the goal" round after round and placed nothing for a whole day
+// (113 dirt under the hub's market floor, 2026-10-04). The rule: a flood from outside the box through every cell that is
+// not a finished cell of the build (ground included - a hill's core is reached by digging its face), over the box's own
+// heights only (under the base the earth would lead everywhere); an obstruction the flood never touches is sealed in
+let sealedMemo = null
+function reachableFromOutside (bot) {
+  if (sealedMemo && sealedMemo.job === job && sealedMemo.has && Date.now() - sealedMemo.at < 60000) return sealedMemo.has
+  const { box } = job; const ya = box.y1 + 1; const yb = box.y2 + 2
+  const x1 = box.x1 - 1; const x2 = box.x2 + 1; const z1 = box.z1 - 1; const z2 = box.z2 + 1
+  const X = x2 - x1 + 1; const Z = z2 - z1 + 1; const Y = yb - ya + 1
+  // (a typed grid, not a Set of strings: 135k cells in ~130ms of string keys was a body-loop freeze; body first)
+  const seen = new Uint8Array(X * Y * Z); const q = new Int32Array(X * Y * Z); let qn = 0
+  const idx = (x, y, z) => ((y - ya) * Z + (z - z1)) * X + (x - x1)
+  // (which grid cells are cells of the build never changes for the job: kept, so a cell that is none costs no string key)
+  if (!sealedMemo || sealedMemo.job !== job) {
+    const cellAt = new Uint8Array(X * Y * Z)
+    for (const c of job.cells) if (c.y >= ya && c.y <= yb) cellAt[((c.y - ya) * Z + (c.z - z1)) * X + (c.x - x1)] = 1
+    sealedMemo = { job, at: 0, has: null, cellAt }
+  }
+  const cellAt = sealedMemo.cellAt
+  // (a finished door, gate or trapdoor is a way through, not a wall: the bot walks through it, and a room behind one read
+  //  as sealed would have its leftovers skipped for good; audit)
+  const wall = (x, y, z, i) => { if (!cellAt[i]) return false; const c = job.index.get(x + ',' + y + ',' + z); if (!c) return false; const b = world.at(bot, x, y, z); return !!b && !world.isAirish(b) && !/_door$|_fence_gate$|_trapdoor$/.test(b.name) && partOk(c, b.name) }
+  const push = (x, y, z) => { if (x < x1 || x > x2 || z < z1 || z > z2 || y < ya || y > yb) return; const i = idx(x, y, z); if (seen[i]) return; seen[i] = 2; if (wall(x, y, z, i)) return; seen[i] = 1; q[qn++] = i }
+  for (let y = ya; y <= yb; y++) { for (let x = x1; x <= x2; x++) { push(x, y, z1); push(x, y, z2) } for (let z = z1; z <= z2; z++) { push(x1, y, z); push(x2, y, z) } }
+  for (let z = z1; z <= z2; z++) for (let x = x1; x <= x2; x++) push(x, yb, z) // (the sky over the box)
+  for (let h = 0; h < qn; h++) {
+    const i = q[h]; const x = x1 + (i % X); const z = z1 + (Math.floor(i / X) % Z); const y = ya + Math.floor(i / (X * Z))
+    push(x + 1, y, z); push(x - 1, y, z); push(x, y + 1, z); push(x, y - 1, z); push(x, y, z + 1); push(x, y, z - 1)
+  }
+  const has = (x, y, z) => x < x1 || x > x2 || z < z1 || z > z2 || y < ya || y > yb || seen[idx(x, y, z)] === 1
+  sealedMemo = { job, at: Date.now(), has, cellAt }
+  return has
+}
+
 // Blocks inside the footprint (above the base layer) that are not part of the schematic.
 function obstructions (bot, { maxY = Infinity } = {}) {
+  const open = reachableFromOutside(bot)
   const out = []
   const { box } = job
   for (let y = Math.min(box.y2 + 2, maxY); y >= box.y1 + 1; y--) for (let z = box.z1; z <= box.z2; z++) for (let x = box.x1; x <= box.x2; x++) {
@@ -844,6 +882,7 @@ function obstructions (bot, { maxY = Infinity } = {}) {
     // foothold): the finish takes it down. Counted as an obstruction, the clearing dug it and the next walk put it
     // back - "clearing 3 blocks (321 obstructions)" round after round for 10 minutes (2026-09-23)
     if (site && isStray(bot, x, y, z)) continue
+    if (!open(x, y, z)) continue // (sealed in by the finished build: reachableFromOutside)
     out.push(b)
   }
   return out
