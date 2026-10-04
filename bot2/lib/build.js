@@ -1166,6 +1166,10 @@ async function placeSupport (bot, sp, j) {
 function sneaksFor (c) { return !/_door$/.test(c.name) && !pairs(c) }
 function refOk (bot, c, p) {
   const nb = world.at(bot, c.x + p.off[0], c.y + p.off[1], c.z + p.off[2])
+  // (a pour never against a waterloggable block - the bucket fills that block, not the cell (act.pour): unusable here too, so
+  //  the temporary support goes in where none is - the well's top water cell, walls on all four sides, poured from the
+  //  underside of a block set over it; 2026-10-04)
+  if (c.pour && nb) { try { if (Object.prototype.hasOwnProperty.call(nb.getProperties() || {}, 'waterlogged')) return false } catch {} }
   return act.refUsable(nb, !!c.attach || sneaksFor(c)) && !slabMerges(c, nb, p)
 }
 // A click that the server spends on the CLICKED slab: a slab of the same kind takes a second half when its open half is
@@ -1488,6 +1492,7 @@ async function placeCell (bot, c, j = job) {
       for (const p of plans) {
         const sp = { x: c.x + p.off[0], y: c.y + p.off[1], z: c.z + p.off[2] }
         if (j.index.has(key(sp))) continue
+        if (c.pour && p.off[1] === 1) continue // (a pour against an underside wants an eye below it - never from the floor beside; audit)
         if (sp.x === me.x && sp.z === me.z && (sp.y === me.y || sp.y === me.y + 1)) continue
         const spb = world.at(bot, sp.x, sp.y, sp.z)
         if (!spb || !(world.isAirish(spb) || world.isLiquidWater(spb))) continue
