@@ -1911,7 +1911,7 @@ function install (b) {
   try {
     bot.inventory.on('updateSlot', (slot, oldItem, newItem) => {
       if (!oldItem || oldItem.name !== 'water_bucket' || (newItem && newItem.name === 'water_bucket')) return
-      let task = ''; try { const d = require('./director').current && require('./director').current(); task = d ? d.name : '' } catch {}
+      let task = ''; try { const d = require('./director').info(); task = d ? d.name : '' } catch {}
       log('inv', `a water_bucket left slot ${slot} -> ${newItem ? newItem.name : 'empty'} (window ${bot.currentWindow ? bot.currentWindow.type : 'none'}, task ${task || '?'}, reflex ${active ? active.kind : 'none'}) at ${String(new Error().stack).split('\n').slice(2, 6).map(l => l.trim().replace(/^at /, '')).join(' <- ')}`)
     })
   } catch {}
