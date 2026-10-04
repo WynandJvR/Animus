@@ -1252,7 +1252,10 @@ const TASKS = {
     //  the pack - another day and night 2400 blocks out, where a witch had killed the bot the day before, 2026-10-04. Asked
     //  only with a build job, of the whole build's shortfall against the stock the pack holds)
     let shortNow = null
-    if (build.getJob()) { try { const cs = build.cachedStatus(bot); shortNow = cs ? (mats.planFor(bot, cs.need).raw[e.raw] || 0) : null } catch {} }
+    // (and only a raw the build uses: a key missing from the shortfall is also one never wanted - an orchard's run keeps its own
+    //  endings; audit)
+    const buildsIt = (() => { try { return mats.reservedSpecies(bot).has(mats.speciesOf(e.raw)) } catch { return false } })()
+    if (build.getJob() && buildsIt) { try { const cs = build.cachedStatus(bot); shortNow = cs ? (mats.planFor(bot, cs.need).raw[e.raw] || 0) : null } catch {} }
     if (tripRoom() < 64) endExpedition('the pack is full')
     else if (shortNow === 0 && got > 0) endExpedition(`${inv.count(bot, e.raw)} ${e.raw} - enough for the build`)
     else if (o && o.outcome === 'none-found' && got <= 0) { e.dry++; mem.set('expedition', e); if (e.dry >= 2) { forage.noteTrip(e.raw, 0, 'none found on the expedition', { searched: true }); endExpedition('no more of it to be found') } }
