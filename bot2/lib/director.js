@@ -1248,7 +1248,13 @@ const TASKS = {
       const s1 = inv.count(bot, 'dark_oak_sapling')
       log('dir', `expedition: broke ${broke} dark oak leaves - ${s1 - s0} sapling${s1 - s0 === 1 ? '' : 's'} picked up (${s1} in the pack)`)
     }
+    // (ENOUGH FOR THE BUILD ends it as a full pack does: 25 spruce short, the third expedition held 62 and chopped on to fill
+    //  the pack - another day and night 2400 blocks out, where a witch had killed the bot the day before, 2026-10-04. Asked
+    //  only with a build job, of the whole build's shortfall against the stock the pack holds)
+    let shortNow = null
+    if (build.getJob()) { try { const cs = build.cachedStatus(bot); shortNow = cs ? (mats.planFor(bot, cs.need).raw[e.raw] || 0) : null } catch {} }
     if (tripRoom() < 64) endExpedition('the pack is full')
+    else if (shortNow === 0 && got > 0) endExpedition(`${inv.count(bot, e.raw)} ${e.raw} - enough for the build`)
     else if (o && o.outcome === 'none-found' && got <= 0) { e.dry++; mem.set('expedition', e); if (e.dry >= 2) { forage.noteTrip(e.raw, 0, 'none found on the expedition', { searched: true }); endExpedition('no more of it to be found') } }
     return got > 0 || (o && (o.outcome === 'lead' || o.outcome === 'stopped'))
   },
