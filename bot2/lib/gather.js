@@ -747,6 +747,7 @@ async function pickPlants (bot, re, itemName, n, ctx = {}) {
   const target = inv.count(bot, itemName) + n
   let empty = 0
   const skip = new Set()
+  let justForgot = false // (a spot just forgotten: the next remembered one is walked to this same trip; audit)
   let wentTo = null // (the remembered spot walked to: none there now - picked out - is forgotten, so the next nearest is the next lead)
   while (inv.count(bot, itemName) < target) {
     await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
@@ -758,13 +759,14 @@ async function pickPlants (bot, re, itemName, n, ctx = {}) {
     if (!b) {
       // (a remembered patch arrived at with none left to pick is forgotten: the nearest picked-out spot round home was walked to
       //  again and again while a sunflower plain's patch 270b out waited, 2026-10-04)
-      if (wentTo && world.dist2(wentTo, bot.entity.position) < 24) { forgetResource(label, wentTo); if (legacy) forgetResource(legacy, wentTo); log('gather', `no ${label} left at ${wentTo.x},${wentTo.z} - forgotten`); wentTo = null }
+      // (only when none of the kind stands there at all - a regrowing plant not takeable yet, a cocoa pod unripe, keeps its spot; audit)
+      if (wentTo && world.dist2(wentTo, bot.entity.position) < 24 && !world.findBlocks(bot, re, { maxDistance: 24, count: 1, point: new Vec3(wentTo.x, bot.entity.position.y, wentTo.z) }).length) { forgetResource(label, wentTo); if (legacy) forgetResource(legacy, wentTo); log('gather', `no ${label} left at ${wentTo.x},${wentTo.z} - forgotten`); wentTo = null; justForgot = true }
       if (++empty > 3 || ctx.noExplore) { log('gather', `no ${label} to pick around here`); return false } // (noExplore: a trip to a far land - its rings round home are no search of it)
       // (a patch found in its own land, past 200b - the bluets of a sunflower plain 270b out - is still the patch to go back to:
       //  forgotten at 200, every next trip searched the picked-out ground round home and came back empty, 2026-10-04; the
       //  director's day fit prices the same spot, PLANT_FROM_HOME)
       const known = knownResource(label, bot.entity.position, { maxFromHome: PLANT_FROM_HOME }) || (legacy && knownResource(legacy, bot.entity.position, { maxFromHome: PLANT_FROM_HOME }))
-      if (known && empty === 1 && world.dist2(known, bot.entity.position) > 40) { const tr = await move.travel(bot, known, { range: 8, shouldStop: ctx.shouldStop, label: 'to ' + label }); if (tr && tr.ok) wentTo = known }
+      if (known && (empty === 1 || justForgot) && world.dist2(known, bot.entity.position) > 40) { justForgot = false; const tr = await move.travel(bot, known, { range: 8, shouldStop: ctx.shouldStop, label: 'to ' + label }); if (tr && tr.ok) wentTo = known }
       else await explore(bot, x => re.test(x.name), { shouldStop: ctx.shouldStop, label, legs: 2, accept: x => outOfZones(x) && take(x) })
       continue
     }
