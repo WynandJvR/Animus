@@ -5,7 +5,7 @@
 #  count; every other check stands. A hand-rolled deploy round the pause skipped the underground check, 2026-09-28)
 # (--stuck-ok: a body pinned where it stands - its own relog already put it back in the same cell - is not "away from home"
 #  or "underground" in the sense those checks guard: hp, night, threat and the rest still stand)
-S=$(cd "$(dirname "$0")" && pwd); lim=${1:-1800}; end=$((SECONDS+lim)); PAUSEDOK=$([ "$2" = "--paused-ok" ] && echo 1 || echo 0); STUCKOK=$([ "$2" = "--stuck-ok" ] && echo 1 || echo 0); NEAROK=$([ "$2" = "--near-ok" ] || [ "$2" = "--near-fight-ok" ] && echo 1 || echo 0); FIGHTOK=$([ "$2" = "--near-fight-ok" ] && echo 1 || echo 0); HUTOK=$([ "$2" = "--hut-ok" ] && echo 1 || echo 0)
+S=$(cd "$(dirname "$0")" && pwd); lim=${1:-1800}; end=$((SECONDS+lim)); PAUSEDOK=$(echo " $* " | grep -q " --paused-ok " && echo 1 || echo 0); STUCKOK=$(echo " $* " | grep -q " --stuck-ok " && echo 1 || echo 0); NEAROK=$(echo " $* " | grep -qE " --near(-fight)?-ok " && echo 1 || echo 0); FIGHTOK=$(echo " $* " | grep -q " --near-fight-ok " && echo 1 || echo 0); HUTOK=$(echo " $* " | grep -q " --hut-ok " && echo 1 || echo 0)
 # (--near-fight-ok: --near-ok, and a fight reflex holding the body at hp 18+ does not hold the deploy - the old code's chase
 #  of pillagers below a 21-block cliff held the body (and every deploy, the fix for it among them) for good, 2026-10-04.
 #  The threat check still stands unless the fight is the threat: an unreachable shooter at hp 18+ is not a reconnect risk)
