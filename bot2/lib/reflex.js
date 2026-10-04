@@ -738,6 +738,22 @@ function safeRunDoor () {
 }
 function takeCover (e, label) {
   if (safehouseRun(e, label)) return
+  // A WITCH IS OUTRUN, NOT HIDDEN FROM: a splash potion arcs over a wall and a witch walks up to a hole - walled off at 10b,
+  // then dug in, it stood at the hole's rim and threw harming down into it, 19 -> 0 in 15s on the spruce expedition
+  // (2026-10-04). It walks at a zombie's pace and throws from ~8 blocks: a sprint away takes the bot out of its reach, and
+  // the flee holds while it is about (the rows' own range). Only when every shooter about is a witch - a skeleton's arrows
+  // still want cover
+  if (MAGIC.has(e.name) && shootersAbout(e).every(s => MAGIC.has(s.name))) {
+    fleeTarget = e
+    setActive('flee', `${label} - out of its throw`)
+    shieldDown()
+    try { bot.pathfinder.setGoal(null) } catch {}
+    const h = fleeHeading(e)
+    if (h) { bot.setControlState('back', false); return steerTo(h, { jump: h.jump, sprint: bot.food > 6 }) }
+    for (const k of ['forward', 'left', 'right', 'sprint', 'jump']) bot.setControlState(k, false)
+    bot.setControlState('back', !pinned)
+    return
+  }
   // COVER THAT IS NOT: still hit under it - a cave's skeleton shot round each 1-2 block wall, 20 -> 0 in 27s, eight walls
   // and two meals, never more than cover (2026-10-03). Six hp lost in the last 8s under cover is the proof: sealed in
   // instead, the capped hole the night and the enderman already use (pickaxe and a block in hand; never at home)
@@ -852,7 +868,7 @@ function fleeHeadingPick (t, me, away, sh = [t]) {
     // (the body AND the head out of its sight: an overhang hides a head, not a chest; audit)
     // (from EVERY shooter about: a cell out of one crossbow's sight was in the next one's, 2026-10-03)
     const at = new Vec3(cell.x + 0.5, cell.y, cell.z + 0.5)
-    const hidden = RANGED.has(t.name) ? sh.every(s => { const sEye = s.position.offset(0, (s.height || 1.9) * 0.85, 0); return !canSee({ position: at, height: 1.8 }, sEye) && !canSee({ position: at, height: 1.1 }, sEye) }) : false
+    const hidden = RANGED.has(t.name) && !MAGIC.has(t.name) ? sh.every(s => { const sEye = s.position.offset(0, (s.height || 1.9) * 0.85, 0); return !canSee({ position: at, height: 1.8 }, sEye) && !canSee({ position: at, height: 1.1 }, sEye) }) : false
     if (!best || (hidden && !best.hidden) || (hidden === best.hidden && diff < best.diff)) best = { x: cell.x, y: cell.y, z: cell.z, jump, diff, hidden }
   }
   return best
@@ -1672,7 +1688,7 @@ function tick () {
   const weak = hp <= hurtLine() || (!armed && !(target && /^(silverfish|endermite)$/.test(target.name)))
   // at night, unable to fight: running across open ground in the dark gets you surrounded - dig
   // straight down on the spot and plug the hole (a player's respawn-at-night move)
-  const nightThreat = !armed && world.phase(bot) !== 'day' ? hs.find(h => h.d < 16 && h.e.name !== 'creeper') : null
+  const nightThreat = !armed && world.phase(bot) !== 'day' ? hs.find(h => h.d < 16 && h.e.name !== 'creeper' && !MAGIC.has(h.e.name)) : null // (a witch is outrun, never dug in from: it throws down into the hole; audit)
   // digging in takes seconds: never with a mob about to hit us, never through the safehouse floor
   const nearest = hs.length ? hs[0].d : Infinity
   const inHut = require('./move').insideHut(bot.entity.position.floored())
@@ -1700,7 +1716,7 @@ function tick () {
       return
     }
   }
-  if (((target && weak) || nightThreat) && world.phase(bot) !== 'day' && nearest >= 6 && !inHut && !enclosed() && canDigInHere()) {
+  if (((target && weak && !MAGIC.has(target.name)) || nightThreat) && world.phase(bot) !== 'day' && nearest >= 6 && !inHut && !enclosed() && canDigInHere()) {
     const t = target || nightThreat.e
     setActive('dig-in', `${t.name} ${t.position.distanceTo(me).toFixed(1)}b, can't fight`)
     runBusy('dig in', g => digIn(g), 30000, null, () => { stopDig(); stopWalk() }).then(() => { if (active && active.kind === 'dig-in') clearActive() })
@@ -1760,6 +1776,15 @@ function tick () {
     // A SHOOTER THAT CAN'T SEE US is not escaped while it is still about - out of its sight is the place to be: held there,
     // still. Released, the director walked the bot back into its sight and the next bolt began it all again (audit
     // 2026-10-02). Gone (dead, past 24, down a cave) is escaped; hungry, the eat row below has its turn (out of sight)
+    // (a witch: run on, seen or not - held still out of its sight, it walks round the corner and throws; let go past 16,
+    //  twice its throw, or hungry with food in the pack once past 10; takeCover's witch rule)
+    if (active.kind === 'flee' && fleeTarget && MAGIC.has(fleeTarget.name)) {
+      const d = fleeTarget.isValid ? fleeTarget.position.distanceTo(me) : Infinity
+      if (d > 16 || (d > 10 && hungryNow() && inv.foodPoints(bot) > 0)) return clearActive()
+      const h = fleeHeading(fleeTarget)
+      if (h) steerTo(h, { jump: h.jump, sprint: bot.food > 6 }); else return clearActive()
+      return
+    }
     if (active.kind === 'flee' && fleeTarget && RANGED.has(fleeTarget.name) && !canSee(fleeTarget)) {
       const about = fleeTarget.isValid && fleeTarget.position.distanceTo(me) < 24 && Math.abs(fleeTarget.position.y - me.y) < 6
       // (hungry WITH something to eat: the eat row has its turn - hungry with nothing in the pack let go and took cover again
