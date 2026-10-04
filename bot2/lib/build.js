@@ -1571,7 +1571,11 @@ function restRound (c, ready, holdBack) {
     if (q === c || Math.abs(q.x - c.x) > 3 || Math.abs(q.z - c.z) > 3 || Math.abs(q.y - c.y) > 1) continue
     holdBack.add(key(q)); n++
     const g = cellFails.get(key(q))
-    if (f && (!g || g.n < f.n)) cellFails.set(key(q), { n: f.n, at: f.at, shared: true }) // (shared: no count of its own - a log's axis stays)
+    // (and the cell's OWN WAY with it: they lie behind the same ground, and each walked to the same unreachable stand first -
+    //  its fresh count too: a rest of hours from their old shared misses kept the new way from ever being tried, 2026-10-04)
+    // (its OWN misses stay - count and licence - and it only learns the way; one with shared misses only takes the fresh count; audit)
+    if (f && f.ownWay) { const own = g && !g.shared; cellFails.set(key(q), own ? Object.assign({}, g, { ownWay: true }) : { n: (g && g.n > f.n) ? g.n : f.n, at: f.at, shared: true, ownWay: true }) }
+    else if (f && (!g || g.n < f.n)) cellFails.set(key(q), { n: f.n, at: f.at, shared: true }) // (shared: no count of its own - a log's axis stays)
   }
   if (n) saveCellFails()
   return n
@@ -1848,7 +1852,11 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       }
     }
     if (skipTry) {
-      failed.set(key(c), (failed.get(key(c)) || 0) + 1); saveCellFails(); missed('the cluster stand not reached', Date.now() - tp); prof.tries++; prof.ms += Date.now() - tp; prof.dist += d0; tpick = Date.now()
+      // (the walk to the stand ran out and the cell goes its OWN way next: a new method starts its count afresh - one miss, the
+      //  3-minute rest. Counted on top of its history, the hub's canopy leaves came to their own way after a 2-hour rest, every
+      //  time, 2026-10-04)
+      if (c.ownWay) cellFails.set(key(c), { n: 1, at: Date.now(), ownWay: true }); else failed.set(key(c), (failed.get(key(c)) || 0) + 1)
+      saveCellFails(); missed('the cluster stand not reached', Date.now() - tp); prof.tries++; prof.ms += Date.now() - tp; prof.dist += d0; tpick = Date.now()
       // (the stand's walk ran out: the cells round it lie behind the same ground - the walled garden's 18 tries were all
       //  this branch, one door crossing each, silent; they wait for the next step)
       const n = restRound(c, ready, holdBack)
