@@ -136,7 +136,9 @@ async function chop (bot, re, n, ctx = {}) {
       }
       if (++emptyScans > 4) { log('gather', `chop ${itemName}: no trees found after exploring`); return end('none-found', false) }
       // (a species from a country of its own: the trees found there count however far out - the next trip goes straight to them)
-      const known = knownResource(itemName, bot.entity.position, SPECIES_BIOMES[itemName.replace(/_log$/, '')] ? { maxFromHome: 2000 } : undefined)
+      // (5000, not 2000: spruce remembered 2370-2430 out, round the old base, was left out and the expedition went 3750b to a
+      //  grove by the biome lead - shot dead there by a pillager with 219 items, 2026-10-04. The nearest known first)
+      const known = knownResource(itemName, bot.entity.position, SPECIES_BIOMES[itemName.replace(/_log$/, '')] ? { maxFromHome: 5000 } : undefined)
       if (known && world.dist2(known, bot.entity.position) > 40 && emptyScans === 1) {
         // (trees of a far country found on an expedition are remembered 2000b out: the same day's-trip rule as the land -
         //  too far today, and past a dawn start the next expedition goes to them)

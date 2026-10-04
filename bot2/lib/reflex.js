@@ -499,6 +499,9 @@ function canDigInHere () {
   // respawn, a skeleton about) fought the director's walk to the door seven times in a minute, and the pit it left
   // was a 5-block drop in front of the door the edge guard rightly refused - two deaths outside it (2026-09-24)
   if (require('./move').inZone(p, 1)) return false
+  // (never in POWDER SNOW: the body sinks and bobs in it, the hole holds nothing - dug in on a snowy mountain, the head rose
+  //  over the rim every second and a pillager shot it 12 -> 0 in 10s, 2026-10-04)
+  for (let dy = -3; dy <= 2; dy++) for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) { const b = world.at(bot, p.x + dx, p.y + dy, p.z + dz); if (b && b.name === 'powder_snow') return false }
   for (const dy of [1, 2, 3, 4]) {
     const b = world.at(bot, p.x, p.y - dy, p.z)
     if (!b || world.isWaterBlock(b) || world.isLavaBlock(b)) return false

@@ -125,10 +125,13 @@ function tripFitsDay (raw) {
   const me = bot.entity.position; const home = mem.get().home || me
   // (the mine next to home is the stone and ore's source - unknown, a cobble trip read as a 96-block search; audit A5)
   const m = mem.get().mine
-  const src = (/^(cobblestone|cobbled_deepslate|raw_iron|coal|granite|diorite|andesite|tuff)$/.test(raw) && m && (m.cursor || m.entrance)) || gather.knownResource(raw, me, /_log$/.test(raw) ? { maxFromHome: 2000 } : undefined) ||
+  const src = (/^(cobblestone|cobbled_deepslate|raw_iron|coal|granite|diorite|andesite|tuff)$/.test(raw) && m && (m.cursor || m.entrance)) || gather.knownResource(raw, me, /_log$/.test(raw) ? { maxFromHome: 5000 } : undefined) ||
     (/_leaves$/.test(raw) ? gather.knownResource(raw.replace(/^(flowering_)?azalea_leaves$/, 'oak_leaves').replace(/_leaves$/, '_log'), me, { filter: p => !move.inZone(p, 2) }) : null) // (leaves grow on the trees remembered - the trip's own lead; audit)
   const walk = src ? world.walkTicks(me, src) + world.walkTicks(src, home) : world.walkTicks(me, home) + 2 * world.walkTicks({ x: 0, y: 0, z: 0 }, { x: 96, y: 0, z: 0 })
   const roundHome = !!src && world.dist2(src, home) <= 32 && world.dist2(me, home) <= 32
+  // (a species log known past half a day's walk is an expedition's - the chop's too-far starts it; the day's fit is not the
+  //  question, only a real stretch of the day left, as the expedition start asks; audit)
+  if (/_log$/.test(raw) && src && world.walkTicks(me, src) > DAYLIGHT_TICKS / 2) return world.ticksUntilNight(bot) > 2400
   let t = world.tod(bot); if (t >= 23000) t -= 24000
   return (roundHome ? 12000 : EVENING) - t > walk + TRIP_WORK
 }
