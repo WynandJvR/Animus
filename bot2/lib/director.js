@@ -952,7 +952,21 @@ const TASKS = {
       if (bot.health < 16 || !stringShort()) break
       const hs = reflex.hostiles(SPIDER_REACH + 8).filter(h => h.e.name !== 'bat' && onHomeGround(h))
       const other = hs.find(threat)
-      if (other) { log('dir', `spider night: a ${other.e.name} about - in`); break }
+      // (a threat about: in and WAIT IT OUT, then out again - ended there, the next decision was the bed 4b off and the night
+      //  was slept away after one spider, 2026-10-04. Still there after 90s: the hideout's, as before)
+      if (other) {
+        // (a door-breaker - a zombie kind on hard, a vindicator always - is no wait behind a door: the hideout seals the doorway; audit)
+        const diff = bot.game && bot.game.difficulty
+        if (other.e.name === 'vindicator' || (/^(zombie|husk|zombie_villager)$/.test(other.e.name) && (!diff || diff === 'hard'))) { log('dir', `spider night: a ${other.e.name} - in for good (it breaks doors)`); break }
+        log('dir', `spider night: a ${other.e.name} about - waiting it out inside`)
+        if (!await hut.enterHut(bot, { shouldStop: () => taskCancelled() })) break
+        const tw = Date.now()
+        const still = () => reflex.hostiles(32).some(threat)
+        while (!taskCancelled() && world.phase(bot) !== 'day' && Date.now() - tw < 90000 && still()) await move.sleep(2000)
+        if (still() || taskCancelled() || world.phase(bot) === 'day') { log('dir', 'spider night: it is still about - in for good'); break }
+        log('dir', `spider night: clear after ${Math.round((Date.now() - tw) / 1000)}s - back out`)
+        continue
+      }
       const sp = hs.filter(h => SPIDER_RE.test(h.e.name) && world.dist2(h.e.position, home) < SPIDER_REACH && !nearBuild(h.e.position)).sort((a, b) => a.d - b.d)[0]
       if (sp) await move.goTo(bot, new goals.GoalFollow(sp.e, 1.5), { timeoutMs: 12000, stuckMs: 4000, dig: false, place: false, label: 'to the spider', shouldStop: () => taskCancelled() || danger() || nearBuild(sp.e.position) }).catch(() => null)
       else if (world.dist2(bot.entity.position, stand) > 2) await move.goTo(bot, new goals.GoalNear(stand.x, stand.y, stand.z, 1), { timeoutMs: 15000, stuckMs: 5000, dig: false, place: false, label: 'to the door' }).catch(() => null)
