@@ -396,8 +396,10 @@ async function towerUp (bot, { allowZones = [], onPlaced = null, builder = false
     if (Math.hypot(bot.entity.velocity.x, bot.entity.velocity.z) >= 0.01) { towerWhy = 'still moving - no jump'; return false }
     await bot.look(bot.entity.yaw, -Math.PI / 2, true)
     bot.setControlState('jump', true)
+    const g0 = bot.entity.onGround; let yMax = bot.entity.position.y
     const t0 = Date.now()
-    while (bot.entity.position.y < y0 + 1.05 && Date.now() - t0 < 800) await move.sleep(30)
+    while (bot.entity.position.y < y0 + 1.05 && Date.now() - t0 < 800) { await move.sleep(30); yMax = Math.max(yMax, bot.entity.position.y) }
+    const jumpNote = `jump: onGround ${g0}, peak y${yMax.toFixed(2)} in ${Date.now() - t0}ms, jump key ${bot.getControlState('jump')}`
     bot.setControlState('jump', false)
     // (drifted off the column mid-jump: no place onto a column it is not over - a backstop only: a body whose centre is
     //  past the edge comes down in the next column whatever we do; the settle above is what keeps it over its own)
@@ -416,7 +418,7 @@ async function towerUp (bot, { allowZones = [], onPlaced = null, builder = false
     //  down: the trunk cells filled with cobblestone and the spots were dropped, 2026-09-28)
     const up = Math.floor(bot.entity.position.y) >= y0 + 1
     { const nb = world.at(bot, x0, y0, z0); if (up || (nb && world.isSolid(nb))) { lastPillar = { x: x0, y: y0, z: z0 }; if (onPlaced) onPlaced(lastPillar); if (!builder && !inMineShaft(bot, lastPillar)) require('./litter').note(bot, lastPillar, filler.name) } }
-    if (!up) towerWhy = `the block did not go in (under me ${below ? below.name : '?'} at y${y0 - 1}, cell y${y0} ${(world.at(bot, x0, y0, z0) || {}).name || '?'}${placeErr ? ', ' + placeErr : ''}; feet y${bot.entity.position.y.toFixed(2)})`
+    if (!up) towerWhy = `the block did not go in (under me ${below ? below.name : '?'} at y${y0 - 1}, cell y${y0} ${(world.at(bot, x0, y0, z0) || {}).name || '?'}${placeErr ? ', ' + placeErr : ''}; feet y${bot.entity.position.y.toFixed(2)}; ${jumpNote})`
     return up
   } catch (e) { towerWhy = `threw: ${e && e.message}`; bot.setControlState('jump', false); bot.setControlState('forward', false); bot.setControlState('sneak', false); return false }
 }
