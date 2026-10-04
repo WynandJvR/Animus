@@ -572,6 +572,10 @@ async function takeKnownOre (bot, itemName, target, ctx = {}) {
   //  4 up or down of its face, within 128 of it - never one deep under it, a cave spider's spawner's)
   if (g.web && !ctx.near) {
     const mm = mem.get().mine; if (!mm || !mm.cursor) return false
+    // (ONLY FROM THE LEVEL, the stairs down: called at a new mine's entrance with the webs found at its planned level, the walk
+    //  to them went 150b over the surface and the planner dug straight down at the web - into a cave, a 37-block fall, dead
+    //  with 124 items, 2026-10-05. The tunnel is level work from the stairs' foot, never a shaft from the top)
+    if (!mm.stairsDone || Math.abs(Math.floor(bot.entity.position.y) - workY(mm)) > 4) return false
     const webs = await websAtLevel(bot, mm)
     if (!webs.length) { log('mine', `no cobwebs within ${WEB_R} of the mine's level at y${workY(mm)} - no string this way`); return false }
     const at = new (require('vec3').Vec3)(mm.cursor.x, workY(mm), mm.cursor.z)
@@ -602,6 +606,9 @@ async function takeKnownOre (bot, itemName, target, ctx = {}) {
     if (!ores.length) break
     const me = bot.entity.position
     const o = ores.sort((x, y) => world.dist3(x.position, me) - world.dist3(y.position, me))[0]
+    // (an ore well BELOW the feet is a planner's shaft straight down - never, but as the mine's own level work: the web trip's dig
+    //  down from the surface broke into a cave and the bot fell 37, 2026-10-05; gather's "never a shaft" rule, here too; audit)
+    { const mm = mem.get().mine; if (o.position.y < Math.floor(bot.entity.position.y) - 5 && !(inOwnMine(bot) && mm && mm.cursor && Math.abs(bot.entity.position.y - workY(mm)) <= 4)) { refused.add(k(o.position)); log('mine', `${o.name} at ${move.fmt(o.position)} lies ${Math.floor(bot.entity.position.y) - o.position.y} below me - no shaft down to it`); continue } }
     // (a pick that HARVESTS it, not any pick: the stone one worn out, the wooden one dug iron_ore 7.5s for nothing - "+0 (0/2)",
     //  the shears never made and the leaves trip with them, 2026-10-03. One made if the pack has none; else the trip says so)
     if (!inv.canHarvest(bot, o)) {
