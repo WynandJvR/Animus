@@ -114,6 +114,8 @@ function noteFightEnd () {
   if (fightTargetId != null && fightStartHp != null && bot.health < fightStartHp - LOST_FIGHT_HP) fledFrom.set(fightTargetId, Math.max(fledFrom.get(fightTargetId) || 0, fightStartHp))
 }
 function setActive (kind, detail) {
+  // (the safehouse run ends whenever the body goes to anything else - its walk left driving against a creeper's flight; audit)
+  if (safeRun && !(kind === 'flee' && /- to the safehouse$/.test(detail || ''))) { safeRun = null; try { bot.pathfinder.setGoal(null) } catch {} }
   if (kind !== 'shoot') endDraw(kind) // (the body is another reflex's now: the string goes)
   if (active && active.kind === 'fight' && kind !== 'fight') noteFightEnd()
   if (kind === 'fight' && (!active || active.kind !== 'fight')) fightStartHp = bot.health
@@ -656,7 +658,86 @@ const wallTried = new Set()
 function hungryNow () { return bot.food <= 14 || (bot.health < 20 && bot.food < inv.REGEN_FOOD) }
 const coverTrail = [] // { t, x, z, id }: where a flight to cover has been, the last 2s
 let pinnedCover = null // { id, until }: the shooter whose cover flight is pinned
+// THE SAFEHOUSE FIRST: a shooter on us within a short run of the safehouse, outside it - the run goes for the door, opened
+// on the way, shut behind us inside: a player runs indoors. Cover cells three steps out, a wall of two blocks and a dug hole
+// were all the reflex knew, and the third pillager death of the night came 8 blocks from its door, shot 12 -> 0 in a hole,
+// 2026-10-04 (the director's hideout rule could not run while the reflex held the body)
+let safeRun = null // { inside, at, lastP, lastAt } while the run lasts
+let safeDoorAt = 0
+let safeRunRefused = 0 // (a run that stood still: the cover rows for a while instead of the same blocked run again; audit)
+function safehouseRun (e, label) {
+  if (safeRun) { const s = safeRunStep(); if (s === 'go') { fleeTarget = fleeTarget || e; setActive('flee', label + ' - to the safehouse'); return true } return false }
+  const hm = require('./memory').get().hut; const mv = require('./move')
+  if (!hm || !hm.box || !hm.door || busy || Date.now() - safeRunRefused < 20000) return false
+  const me = bot.entity.position
+  if (mv.insideHut(me.floored())) return false
+  // (the recorded home cell when it lies in the hut - its centre may hold furniture; audit)
+  const h0 = require('./memory').get().home
+  const inside = h0 && mv.insideHut({ x: h0.x, y: h0.y, z: h0.z }) ? { x: h0.x, y: h0.y, z: h0.z } : { x: Math.floor((hm.box.x1 + hm.box.x2) / 2), y: hm.box.y1, z: Math.floor((hm.box.z1 + hm.box.z2) / 2) }
+  const dd = Math.hypot(me.x - inside.x - 0.5, me.z - inside.z - 0.5)
+  if (dd > 28 || Math.abs(me.y - inside.y) > 5) return false
+  // (not past the shooters: one nearer the door than us and near the straight line to it - the run would pass by it; audit)
+  const segDist = q => { const ax = inside.x + 0.5 - me.x; const az = inside.z + 0.5 - me.z; const L = ax * ax + az * az || 1; const t = Math.max(0, Math.min(1, ((q.x - me.x) * ax + (q.z - me.z) * az) / L)); return Math.hypot(me.x + t * ax - q.x, me.z + t * az - q.z) }
+  if (!safeRun && shootersAbout(e).some(s => Math.hypot(s.position.x - inside.x - 0.5, s.position.z - inside.z - 0.5) < dd && segDist(s.position) < 6)) return false
+  fleeTarget = e
+  if (!safeRun) { log('reflex', `${label} - running for the safehouse ${Math.round(dd)}b off`); safeRun = { inside, at: Date.now(), lastP: me.clone(), lastAt: Date.now() } }
+  setActive('flee', `${label} - to the safehouse`)
+  shieldDown()
+  const g = bot.pathfinder.goal
+  if (!(g instanceof goals.GoalBlock) || g.x !== inside.x || g.z !== inside.z) {
+    bot.pathfinder.setMovements(mv.movementsFor(bot, { dig: false, place: false }))
+    bot.pathfinder.setGoal(new goals.GoalBlock(inside.x, inside.y, inside.z), true)
+  }
+  safeRunDoor()
+  return true
+}
+// THE RUN'S ONE STEP, from both call sites - the shooter rows re-enter takeCover every tick under fire, and the stall and door
+// checks living only in the tick's continuation never ran there (audit): 'go' = keep running, 'off' = no run (cover rows)
+function safeRunStep () {
+  if (!safeRun) return 'off'
+  const me = bot.entity.position
+  if (require('./move').insideHut(me.floored())) {
+    const od = openDoorNear()
+    if (od && Date.now() - safeDoorAt > 250) { safeDoorAt = Date.now(); bot.activateBlock(od).catch(() => {}) }
+    if (od && Date.now() - safeRun.at < 35000) return 'go' // (held until the door is shut - takeCover must not take over first)
+    try { bot.pathfinder.setGoal(null) } catch {}
+    safeRun = null
+    return 'off'
+  }
+  if (me.distanceTo(safeRun.lastP) > 0.5) { safeRun.lastP = me.clone(); safeRun.lastAt = Date.now() }
+  if (Date.now() - safeRun.lastAt > 2000 || Date.now() - safeRun.at > 30000 || !fleeTarget || !fleeTarget.isValid) {
+    safeRun = null; safeRunRefused = Date.now()
+    try { bot.pathfinder.setGoal(null) } catch {}
+    return 'off'
+  }
+  safeRunDoor()
+  return 'go'
+}
+function openDoorNear () {
+  const p = bot.entity.position
+  for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) for (const dy of [0, 1]) {
+    const b = world.at(bot, p.x + dx, p.y + dy, p.z + dz)
+    if (!b || !/_door$/.test(b.name) || /iron_door/.test(b.name)) continue
+    let open = false; try { const o = b.getProperties().open; open = o === true || o === 'true' } catch {}
+    if (open) return b
+  }
+  return null
+}
+// the run's own door: opened in the way, shut behind once inside (pillagers and skeletons do not open doors)
+function safeRunDoor () {
+  const mv = require('./move')
+  if (Date.now() - safeDoorAt < 1000) return
+  if (!mv.insideHut(bot.entity.position.floored())) { const d = mv.closedDoorAt(bot); if (d) { safeDoorAt = Date.now(); bot.activateBlock(d).catch(() => {}) } return }
+  const p = bot.entity.position
+  for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
+    const b = world.at(bot, p.x + dx, p.y, p.z + dz)
+    if (!b || !/_door$/.test(b.name) || /iron_door/.test(b.name)) continue
+    let open = false; try { const o = b.getProperties().open; open = o === true || o === 'true' } catch {}
+    if (open) { safeDoorAt = Date.now(); bot.activateBlock(b).catch(() => {}); return }
+  }
+}
 function takeCover (e, label) {
+  if (safehouseRun(e, label)) return
   // COVER THAT IS NOT: still hit under it - a cave's skeleton shot round each 1-2 block wall, 20 -> 0 in 27s, eight walls
   // and two meals, never more than cover (2026-10-03). Six hp lost in the last 8s under cover is the proof: sealed in
   // instead, the capped hole the night and the enderman already use (pickaxe and a block in hand; never at home)
@@ -1665,6 +1746,13 @@ function tick () {
     } else if (swingReady) { bot.attack(target); lastAttackAt = now }
     return
   }
+  // the safehouse run carries on by itself: the planner walks it, the door opens and shuts - no steer away, no freeze; inside,
+  // the door shut, the ordinary out-of-sight hold takes over
+  if (safeRun && active && active.kind === 'flee') {
+    if (safeRunStep() === 'go') return
+    return clearActive()
+  }
+  if (safeRun && (!active || active.kind !== 'flee')) safeRun = null
   if (active && (active.kind === 'fight' || active.kind === 'flee')) {
     // hold the fight a moment after the last target vanishes, then release - except a flee from a shooter that still sees
     // us within its range: nothing within 8 is the point of that flee, not its end (the cover flee was cleared the tick
