@@ -606,8 +606,11 @@ async function craftItem (bot, name, n, ctx) {
 // build wants those as themselves (a cyan wool dyed purple is a cyan cell short again, and a dye spent twice; audit)
 async function dyeWool (bot, name, n, ctx) {
   const dye = name.replace(/_wool$/, '_dye')
-  if (!await ensure(bot, 'white_wool', n, ctx)) { if (!inv.count(bot, 'white_wool')) return false }
-  const m = Math.min(n, inv.count(bot, 'white_wool'))
+  // (the base: white, or a spare colour the build places nowhere - materials.spareWool; never the colour being made)
+  const sw = require('./materials').spareWool(); const isBase = i => i.name === 'white_wool' || (!!sw && sw.test(i.name) && i.name !== name)
+  const bases = () => inv.items(bot).filter(isBase).reduce((a, i) => a + i.count, 0)
+  if (bases() < n && !await ensure(bot, 'white_wool', inv.count(bot, 'white_wool') + (n - bases()), ctx)) { if (!bases()) return false }
+  const m = Math.min(n, bases())
   if (!await ensure(bot, dye, m, ctx)) return false
   return (await craftTimes(bot, name, Math.min(m, inv.count(bot, dye)), ctx)) > 0
 }
@@ -619,7 +622,8 @@ function dyedRecipe (bot, name, table) {
   if (!m) return null
   const md = world.data(bot)
   const dye = inv.items(bot).find(i => i.name === m[1] + '_dye')
-  const wool = inv.items(bot).find(i => i.name === 'white_wool') // (white only: dyeWool)
+  const sw = require('./materials').spareWool()
+  const wool = inv.items(bot).find(i => i.name === 'white_wool') || (sw ? inv.items(bot).find(i => sw.test(i.name) && i.name !== name) : null) // (white, or a spare colour: dyeWool)
   const out = md.itemsByName[name]
   if (!dye || !wool || !out) return null
   const { Recipe } = require('prismarine-recipe')(bot.registry)

@@ -398,7 +398,21 @@ const L = {
 
 // What may stand in for an item: the builder's own rule (any wood of the form, dirt for grass), the graph's
 // classes, else the exact item only.
+// SPARE WOOL as the dye's base: vanilla dyes ANY wool, not white only - the pen's flock is brown, 35 sheared, while "11 white_wool
+// short" held 17 light gray carpets, 2026-10-05. Spare = a colour the build places nowhere, as wool or carpet (the wool a
+// carpet is made of). Only when the build places no white wool itself - then white is the dye's base alone. Memo per job
+let spareMemo = { job: null, re: null }
+function spareWool () {
+  const j = L.build.getJob ? L.build.getJob() : null
+  if (!j) return null
+  if (spareMemo.job === j) return spareMemo.re
+  const used = new Set()
+  for (const c of j.cells) { const m = /^(\w+?)_(wool|carpet)$/.exec(c.name); if (m) used.add(m[1]) }
+  spareMemo = { job: j, re: used.has('white') ? null : new RegExp('^(?!(' + ['white', ...used].join('|') + ')_wool$)[a-z_]+_wool$') }
+  return spareMemo.re
+}
 function accepts (name) {
+  if (name === 'white_wool') { const sw = spareWool(); if (sw) return new RegExp('^white_wool$|' + sw.source) }
   if (exactWood() && speciesOf(name) && /_(log|wood|planks|stairs|slab|fence|fence_gate|door|trapdoor|pressure_plate|button|sign|hanging_sign)$/.test(name)) return null
   const b = L.build
   if (typeof b.acceptsFor === 'function') { const re = b.acceptsFor(name); if (re) return re }
@@ -603,7 +617,7 @@ function pickRaw (winRaw, totRaw, { blockedRaw = null, feasible = () => true, pe
   return null
 }
 
-module.exports = { reservedSpecies, isReservedWood,
+module.exports = { spareWool, reservedSpecies, isReservedWood,
   makePlanner, nodeOf, PREFER, RAW_COST, SMELT_INPUTS, CLASSES, WOODS, LOG_ANY, PLANKS_ANY, FUEL_ANY, RED_FLOWER, WOOD_FORM,
   accepts, poolRe, hasRoute, unsourced, held, banked, stock, withdrawPool, planFor, getPlanner, formFor, makeCrafts, craftNode, pickRaw,
   resetPlanner, exactWood, speciesOf, wanted, wantedSet, rawCost, copperAlt, copperBase, woodFamilyAlt, flowerClassOf, DYE_PLANTS, COMPOSTABLE, COMPOST_PER_MEAL, STRIPPED_LOG, COLOURS
