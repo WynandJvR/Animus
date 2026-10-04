@@ -394,23 +394,31 @@ async function towerUp (bot, { allowZones = [], onPlaced = null, builder = false
     // (still moving after the wait: no jump at all - the wait running out and jumping anyway drifted it into the same pit
     //  a second time, 2026-09-28 04:51)
     if (Math.hypot(bot.entity.velocity.x, bot.entity.velocity.z) >= 0.01) { towerWhy = 'still moving - no jump'; return false }
+    // (the cell the block goes into - the column's own, at y0 - is checked before the jump: between the jump's apex and the
+    //  place no time is to spare)
+    const cellB = world.at(bot, x0, y0, z0); const zn = move.inZone({ x: x0, y: y0, z: z0 })
+    if (!builder && cellB && move.isProtected(cellB, 'fill')) { log('gather', `no tower at ${x0},${y0},${z0} - a cell of the build`); return false }
+    if (zn && !allowZones.includes('*') && !allowZones.includes(zn.label)) { log('gather', `no tower at ${x0},${y0},${z0} - inside the ${zn.label}`); return false }
     await bot.look(bot.entity.yaw, -Math.PI / 2, true)
     bot.setControlState('jump', true)
+    // THE PLACE GOES IN ON THE WAY UP, the tick the feet clear the cell: the server refuses a block into a cell the body is
+    // still in, and a jump is above it ~6 ticks (y+1.0 at tick 3, apex 1.25, back through 1.0 at tick 8). Waited for on a
+    // 30ms poll to y+1.05 and placed through an unforced look (a tick more), the packet went in falling - 67 of 95 tower
+    // failures were "refused, the block is still air" from a jump that peaked at y+1.17 (2026-10-04)
     const g0 = bot.entity.onGround; let yMax = bot.entity.position.y
     const t0 = Date.now()
-    while (bot.entity.position.y < y0 + 1.05 && Date.now() - t0 < 800) { await move.sleep(30); yMax = Math.max(yMax, bot.entity.position.y) }
-    const jumpNote = `jump: onGround ${g0}, peak y${yMax.toFixed(2)} in ${Date.now() - t0}ms, jump key ${bot.getControlState('jump')}`
-    bot.setControlState('jump', false)
+    while (bot.entity.position.y <= y0 + 1.0 && Date.now() - t0 < 800) { await bot.waitForTicks(1); yMax = Math.max(yMax, bot.entity.position.y) }
+    const yAt = bot.entity.position.y; const vyAt = bot.entity.velocity.y
+    bot.setControlState('jump', false) // (take-off is past; held through the place's reply it jumped again off the new block)
     // (drifted off the column mid-jump: no place onto a column it is not over - a backstop only: a body whose centre is
     //  past the edge comes down in the next column whatever we do; the settle above is what keeps it over its own)
     if (Math.floor(bot.entity.position.x) !== x0 || Math.floor(bot.entity.position.z) !== z0) { towerWhy = 'drifted off the column in the jump'; await move.sleep(300); return false }
     const below = bot.blockAt(new Vec3(x0, y0 - 1, z0))
-    // (the cell the block goes into - the column's own, at y0)
-    const cellB = world.at(bot, x0, y0, z0); const zn = move.inZone({ x: x0, y: y0, z: z0 })
-    if (!builder && cellB && move.isProtected(cellB, 'fill')) { log('gather', `no tower at ${x0},${y0},${z0} - a cell of the build`); await move.sleep(300); return false }
-    if (zn && !allowZones.includes('*') && !allowZones.includes(zn.label)) { log('gather', `no tower at ${x0},${y0},${z0} - inside the ${zn.label}`); await move.sleep(300); return false }
     let placeErr = null
-    if (below) await bot.placeBlock(below, new Vec3(0, 1, 0)).catch(e => { placeErr = e && e.message })
+    // (forceLook: the look straight down is already set - an unforced look waits a tick for the server, a tick of the fall)
+    if (below && yAt > y0 + 1.0) await bot._placeBlockWithOptions(below, new Vec3(0, 1, 0), { swingArm: 'right', forceLook: true }).catch(e => { placeErr = e && e.message })
+    else if (below) placeErr = 'the jump never cleared the cell'
+    const jumpNote = `jump: onGround ${g0}, placed at y${yAt.toFixed(2)} vy ${vyAt.toFixed(2)}, peak y${yMax.toFixed(2)} in ${Date.now() - t0}ms`
     await move.sleep(300)
     // (every tower block but the builder's is litter until it comes down: the one ledger - litter.js. Read AFTER the
     //  settle, and a body standing a block up counts as the block's word: read straight after placeBlock - which can
