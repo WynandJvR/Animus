@@ -45,9 +45,13 @@ function pruneOurs () {
 }
 // (the operator's correction of a wrong record: the place round a point forgotten)
 function forgetAt (p) {
-  const bs = boxes(); const keep = bs.filter(b => !(p.x >= b.x1 && p.x <= b.x2 && p.z >= b.z1 && p.z <= b.z2 && p.y >= b.y1 && p.y <= b.y2))
-  if (keep.length !== bs.length) mem.set('foreignBases', keep)
-  return bs.length - keep.length
+  const bs = boxes(); const gone = bs.filter(b => p.x >= b.x1 && p.x <= b.x2 && p.z >= b.z1 && p.z <= b.z2 && p.y >= b.y1 && p.y <= b.y2)
+  if (!gone.length) return 0
+  // (and its signs our own: forgotten alone, the same marks made the same place again 30s later - an old mine of ours whose
+  //  record was already lost, 2026-10-04. The operator says it is ours: their extent, padded 2, to our own areas)
+  mem.update(mm => { mm.ownAreas = (mm.ownAreas || []).concat(gone.map(b => b.sx1 != null ? { x1: b.sx1 - 2, x2: b.sx2 + 2, y1: b.sy1 - 2, y2: b.sy2 + 2, z1: b.sz1 - 2, z2: b.sz2 + 2 } : { x1: b.x1, x2: b.x2, y1: b.y1, y2: b.y2, z1: b.z1, z2: b.z2 }) /* (an old record with no sign extent: its own box; audit) */).slice(-60) })
+  mem.set('foreignBases', bs.filter(b => !gone.includes(b)))
+  return gone.length
 }
 
 // Is this cell inside somebody else's place? (pure and cheap: the planner asks it for every node)
