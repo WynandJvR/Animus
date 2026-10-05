@@ -30,6 +30,9 @@ while true; do
   # (and a streak with no new failure for 5 minutes is over: the bot went on to other work - each restart re-alarmed on the
   #  same "4 in a row" for the rest of the 15-minute window while the bot stood its spider night, 2026-10-04)
   [ -n "$f" ] && [ -n "$lf" ] && [[ "$lf" < "$(date -d '-5 min' +%Y-%m-%dT%H:%M:%S)" ]] && recovered=1
+  # (a castle streak while the director says the build only waits on supply - "nothing to gather now" - is the wait, not a
+  #  fault: it fired every few minutes for hours in the hub's endgame on string and a resting cell, 2026-10-05)
+  [ -n "$f" ] && [ "$tn" = castle ] && recent 15 | grep -aq "(dir) nothing to gather now|(dir) .* needs [0-9]* more" && recovered=1
   [ -n "$f" ] && [ "$recovered" = 0 ] && { echo "ALARM: repeated failure: $f"; recent 15 | grep -a "did not succeed" | cut -c2-160 | tail -5; exit 0; }
   c=$(recent 10 | grep -aoE "\(dir\) -> [a-zA-Z]+" | sort | uniq -c | sort -rn | awk '$1>=6 && $3 ~ /level|fix|farm|tidy|hideout|grave/ {print; exit}')
   [ -n "$c" ] && { echo "ALARM: churn: $c in 10 min"; exit 0; }
