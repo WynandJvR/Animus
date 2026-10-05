@@ -442,18 +442,24 @@ async function pour (bot, pos, itemName, { plans, accept, allowZones = [], timeo
   }
   // (no clear line from here: a stand near the cell that has one - walked to, nothing dug or placed; none, no pour at all and
   //  the bucket kept)
-  const clearStand = () => {
-    const me = bot.entity.position.floored(); let best = null
+  // (the eye stands on the floor's own top: a slab's is half a block down; a wall's or a fence's 1.5 is no stand a walk ever
+  //  steps up onto - the top of the well's rim wall was picked, "could not reach the stand ... (timeout)", 2026-10-05.
+  //  Nearest first, a few of them: the caller walks to the next when one cannot be reached)
+  const floorTop = b => { const sh = b && b.shapes; return sh && sh.length ? Math.max(...sh.map(q => q[4])) : 1 }
+  const clearStands = () => {
+    const me = bot.entity.position.floored(); const out = []
     for (let dx = -4; dx <= 4; dx++) for (let dz = -4; dz <= 4; dz++) for (let dy = -2; dy <= 3; dy++) {
       const st = new Vec3(target.x + dx, target.y + dy, target.z + dz)
       if (st.equals(target) || !world.standable(bot, st.x, st.y, st.z)) continue
-      const eye = st.offset(0.5, bot.entity.eyeHeight || 1.62, 0.5)
+      const top = floorTop(bot.blockAt(st.offset(0, -1, 0))); if (top > 1.01) continue
+      const eye = st.offset(0.5, top - 1 + (bot.entity.eyeHeight || 1.62), 0.5)
       if (eye.distanceTo(target.offset(0.5, 0.5, 0.5)) > 4.4) continue
       if (!refs().some(r => faced(r, eye) && clear(r, eye))) continue
-      const dd = st.distanceTo(me); if (!best || dd < best.d) best = { st, d: dd }
+      out.push({ st, d: st.distanceTo(me) })
     }
-    return best && best.st
+    return out.sort((a, b) => a.d - b.d).slice(0, 3).map(o => o.st)
   }
+  const clearStand = () => clearStands()[0] || null
   // (the PROBE: a stand with a clear line exists - with the cells in asAir taken as opened? build.placeCell asks before it opens a
   //  wall of the build for a pour boxed in by its own rim; nothing walked, nothing poured)
   if (probe) return !!(refs().find(r => faced(r) && clear(r)) || clearStand())
@@ -474,12 +480,17 @@ async function pour (bot, pos, itemName, { plans, accept, allowZones = [], timeo
     if (inBody(bot, pos)) { log('act', `pour ${itemName} at ${move.fmt(pos)}: I stand in the cell`); return false }
     let pick = refs().find(r => faced(r) && clear(r))
     if (!pick) {
-      const st = noWalk ? null : clearStand()
-      if (!st) { log('act', `pour ${itemName} at ${move.fmt(pos)}: no stand near it with a clear line to a face to pour against - the bucket kept`); return false }
-      const r = await move.goTo(bot, new goals.GoalBlock(st.x, st.y, st.z), { timeoutMs: 15000, stuckMs: 6000, dig: false, place: false, allowZones, label: 'to a clear line to pour' })
-      if (!r.ok) { log('act', `pour ${itemName} at ${move.fmt(pos)}: could not reach the stand ${move.fmt(st)} with a clear line (${r.why}) - the bucket kept`); return false }
-      pick = refs().find(r2 => faced(r2) && clear(r2))
-      if (!pick) { log('act', `pour ${itemName} at ${move.fmt(pos)}: at ${move.fmt(st)} and still no clear line - the bucket kept`); return false }
+      const sts = noWalk ? [] : clearStands()
+      if (!sts.length) { log('act', `pour ${itemName} at ${move.fmt(pos)}: no stand near it with a clear line to a face to pour against - the bucket kept`); return false }
+      for (const st of sts) {
+        if (cancelled()) return false
+        const r = await move.goTo(bot, new goals.GoalBlock(st.x, st.y, st.z), { timeoutMs: 15000, stuckMs: 6000, dig: false, place: false, allowZones, label: 'to a clear line to pour' })
+        if (!r.ok) { log('act', `pour ${itemName} at ${move.fmt(pos)}: could not reach the stand ${move.fmt(st)} with a clear line (${r.why})`); continue }
+        pick = refs().find(r2 => faced(r2) && clear(r2))
+        if (pick) break
+        log('act', `pour ${itemName} at ${move.fmt(pos)}: at ${move.fmt(st)} and still no clear line`)
+      }
+      if (!pick) { log('act', `pour ${itemName} at ${move.fmt(pos)}: none of ${sts.length} stand(s) with a clear line reached - the bucket kept`); return false }
     }
     const held = inv.items(bot).find(i => i.name === itemName)
     if (!held) { log('act', `pour ${itemName} at ${move.fmt(pos)}: the bucket is empty`); return false }
