@@ -1035,7 +1035,12 @@ async function goSite (bot, goal, label, { place = true, dig = (job && job.cells
 // (kept across restarts: each restart wiped it and the same two leaves were walked for twelve times in an evening, 410s, none
 //  cleared, 2026-10-02 analysis)
 const clearFails = mem.persistedMap('clearFails')
-function skippedObstruction (b) { return (clearFails.get(key(b.position)) || 0) >= 2 }
+// (a REST, not for good: from the second miss 30 min, doubling to 12h, then tried again - the acacia logs holding a canopy
+//  over the hub's own oak missed twice on 2026-10-04 under older code and were skipped for good; their 67 leaves never
+//  decayed and the finish walked at them, 10 up, round after round, 2026-10-05. A bare number is an old entry: rested out)
+const clearMiss = k => { const v = clearFails.get(k); return typeof v === 'number' ? { n: v, at: 0 } : (v || { n: 0, at: 0 }) }
+function skippedObstruction (b) { const f = clearMiss(key(b.position)); return f.n >= 2 && Date.now() - f.at < Math.min(12 * 3600000, 30 * 60000 * Math.pow(2, f.n - 2)) }
+function missedClear (p) { const k = key(p); clearFails.set(k, { n: clearMiss(k).n + 1, at: Date.now() }) }
 // A TREE TOP LEFT FLOATING: a log whose trunk stands on nothing - its foot cut away with the band's clearing below - holds its
 // canopy up for good (leaves decay only with no log within 6). Cleared whatever the band: the hub's acacias were cut to the
 // floor's height and their tops hung over the market, operator 2026-10-04 ("random floating tree tops")
@@ -1083,12 +1088,12 @@ async function clearSite (bot, { shouldStop, maxBlocks = 400, maxY = Infinity, f
         // a leaf is taken only from where a walk gets us: towering up into a canopy for leaves put up more dirt
         // than the finish could take down (scaffold 148 -> 172 while "clearing 331 leftover leaves", 2026-09-23)
         const r = await goSite(bot, new goals.GoalLookAtBlock(cur.position, bot.world, { reach: 4 }), 'clear', { place: !world.LEAF_RE.test(cur.name) })
-        if (!r.ok && !act.reach(bot, cur.position, 5)) { clearFails.set(key(cur.position), (clearFails.get(key(cur.position)) || 0) + 1); continue }
+        if (!r.ok && !act.reach(bot, cur.position, 5)) { missedClear(cur.position); continue }
       }
       // (a wrong block in one of our cells is ours to take out; `own` lets it past the finished-block guard
       //  when it is the right material the wrong way round)
-      if (await act.dig(bot, cur.position, { force: true, own: job.index.has(key(cur.position)), allowZones: ['build', 'base'], timeoutMs: 15000 })) cleared++
-      else clearFails.set(key(cur.position), (clearFails.get(key(cur.position)) || 0) + 1)
+      if (await act.dig(bot, cur.position, { force: true, own: job.index.has(key(cur.position)), allowZones: ['build', 'base'], timeoutMs: 15000 })) { cleared++; clearFails.delete(key(cur.position)) } // (a cleared cell starts its count afresh; audit)
+      else missedClear(cur.position)
       if (inv.freeSlots(bot) <= 1) await base().tossJunk(bot)
     }
     await act.collectDrops(bot, { radius: 10, maxMs: 8000 })
