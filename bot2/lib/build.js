@@ -1790,7 +1790,10 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     doable = doable.filter(c => !sealsBelow(c) && !holdAround.has(key(c)))
     // (a liquid waits for the ground under it: water poured over the hollow's open column runs down and floods it - the
     //  castle's one base water cell sits over a hole the foundation fills first; audit 2026-09-29)
-    doable = doable.filter(c => { if (!c.pour) return true; const b = world.at(bot, c.x, c.y - 1, c.z); return !!b && !world.isAirish(b) }) // (anything but air under it: ground, a slab, the pool's own water below)
+    // (the upper water of a two-deep well has its own lower cell under it, dry: no hollow to flood - placeCell stands a
+    //  filler in the lower cell for it; the filter alone kept it out for good while the lower rested, "nothing doable" with
+    //  the well dry, 2026-10-05)
+    doable = doable.filter(c => { if (!c.pour) return true; const b = world.at(bot, c.x, c.y - 1, c.z); if (!!b && !world.isAirish(b)) return true; let yy = c.y - 1; while (yy > c.y - 64 && (job.index.get(key({ x: c.x, y: yy, z: c.z })) || {}).pour) yy--; if (yy === c.y - 1) return false; const fb = world.at(bot, c.x, yy, c.z); return !!fb && !world.isAirish(fb) /* (the pool's own cells down to ground: never over a hollow; audit) */ }) // (anything but air under it: ground, a slab, the pool's own water below - or the pool's own cell)
     // (and with nothing else ready, the cells a SHARED miss keeps out of the window, past their rest: only a block placed beside one
     //  wakes it, and none ever will beside a canopy - the hub's 8 oak leaves at y75 sat 'in hand, nothing doable' for hours
     //  behind a pour that waits on its own cell, 2026-10-04. Lowest first, the band's other holds still stand)
