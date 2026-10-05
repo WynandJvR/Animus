@@ -602,7 +602,9 @@ function detachedItems (todo, bot) {
     if (k > 0) coverMiss.delete(it) // (it turned up: a hold on "none, and the plan thinks otherwise", never a day's ban; audit)
     if (k <= 0 && !craftable(it)) detached.add(it)
     else if (k <= 0) detached.delete(it)
-    else if (detached.has(it) && k >= Math.min(low[it].n, 64)) detached.delete(it)
+    // (in the ENDGAME any stock re-attaches: no band left to hold - 2 string in the pack against 4 cells kept them all detached, and
+    //  the 4 carpets over them waited, the hub at 7834/7845, 2026-10-05)
+    else if (detached.has(it) && (k >= Math.min(low[it].n, 64) || (job && todo.length < Math.min(200, job.cells.length * 0.03)))) detached.delete(it)
   }
   for (const it of [...detached]) if (!low[it]) detached.delete(it) // (none of it left to place)
   return detached
