@@ -406,7 +406,7 @@ async function useOn (bot, pos, itemName, { accept, face = 'up', allowZones = []
 // `plans` as place(); `accept` block => bool. Verified by re-read.
 // The eye must be on the cell's side of that face: from behind it the ray meets another face first and the water lands
 // somewhere else - inside the build, on the crops (2026-09-27). A face we stand behind is no plan.
-async function pour (bot, pos, itemName, { plans, accept, allowZones = [], timeoutMs = 15000, noWalk = false } = {}) {
+async function pour (bot, pos, itemName, { plans, accept, allowZones = [], timeoutMs = 15000, noWalk = false, asAir = [], probe = false } = {}) {
   if (move.inForeign(pos)) { log('act', `won't pour ${itemName} at ${move.fmt(pos)} - someone else's place`); return false }
   const target = new Vec3(pos.x, pos.y, pos.z)
   const t0 = Date.now()
@@ -422,11 +422,41 @@ async function pour (bot, pos, itemName, { plans, accept, allowZones = [], timeo
   }).filter(Boolean)
   const faceCentre = ({ ref, face }) => ref.position.offset(0.5 + face.x * 0.5, 0.5 + face.y * 0.5, 0.5 + face.z * 0.5)
   // the eye past the face's plane, on the cell's side
-  const faced = r => {
-    const eye = bot.entity.position.offset(0, bot.entity.eyeHeight || 1.62, 0)
+  const eyeAt = p => (p || bot.entity.position).offset(0, bot.entity.eyeHeight || 1.62, 0)
+  const faced = (r, eye = eyeAt()) => {
     const c = faceCentre(r)
     return (eye.x - c.x) * r.face.x + (eye.y - c.y) * r.face.y + (eye.z - c.z) * r.face.z > 0.05
   }
+  // THE RAY CLEAR to the face: the server's bucket ray stops at the first block it meets - a rim wall between the eye and the
+  // well's floor took the water (waterlogged), twice a morning, every bucket spent and the well still dry, 2026-10-05. The
+  // line from the eye to the face's centre, sampled: through air (or water) only, but the cell itself and the block clicked
+  const clear = (r, eye = eyeAt()) => {
+    const c = faceCentre(r); const d = c.minus(eye); const len = d.norm(); if (len < 0.01) return true
+    const tk = k => k.x + ',' + k.y + ',' + k.z
+    const ok = new Set([tk(target), tk(r.ref.position), ...asAir])
+    for (let t = 0.05; t < len - 0.05; t += 0.05) { // (every 0.05: a corner the line clips is the server's hit; audit)
+      const q = eye.plus(d.scaled(t / len)).floored(); if (ok.has(tk(q))) continue
+      const b = bot.blockAt(q); if (b && !(b.boundingBox === 'empty' || /water/.test(b.name))) return false
+    }
+    return true
+  }
+  // (no clear line from here: a stand near the cell that has one - walked to, nothing dug or placed; none, no pour at all and
+  //  the bucket kept)
+  const clearStand = () => {
+    const me = bot.entity.position.floored(); let best = null
+    for (let dx = -4; dx <= 4; dx++) for (let dz = -4; dz <= 4; dz++) for (let dy = -2; dy <= 3; dy++) {
+      const st = new Vec3(target.x + dx, target.y + dy, target.z + dz)
+      if (st.equals(target) || !world.standable(bot, st.x, st.y, st.z)) continue
+      const eye = st.offset(0.5, bot.entity.eyeHeight || 1.62, 0.5)
+      if (eye.distanceTo(target.offset(0.5, 0.5, 0.5)) > 4.4) continue
+      if (!refs().some(r => faced(r, eye) && clear(r, eye))) continue
+      const dd = st.distanceTo(me); if (!best || dd < best.d) best = { st, d: dd }
+    }
+    return best && best.st
+  }
+  // (the PROBE: a stand with a clear line exists - with the cells in asAir taken as opened? build.placeCell asks before it opens a
+  //  wall of the build for a pour boxed in by its own rim; nothing walked, nothing poured)
+  if (probe) return !!(refs().find(r => faced(r) && clear(r)) || clearStand())
   while (Date.now() - t0 < timeoutMs && tries < 3) {
     await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
     if (cancelled()) return false
@@ -442,8 +472,15 @@ async function pour (bot, pos, itemName, { plans, accept, allowZones = [], timeo
     }
     // (never from inside the cell: the ray starts in it)
     if (inBody(bot, pos)) { log('act', `pour ${itemName} at ${move.fmt(pos)}: I stand in the cell`); return false }
-    const pick = refs().find(faced)
-    if (!pick) { log('act', `pour ${itemName} at ${move.fmt(pos)}: I stand behind every face it could be poured against`); return false }
+    let pick = refs().find(r => faced(r) && clear(r))
+    if (!pick) {
+      const st = noWalk ? null : clearStand()
+      if (!st) { log('act', `pour ${itemName} at ${move.fmt(pos)}: no stand near it with a clear line to a face to pour against - the bucket kept`); return false }
+      const r = await move.goTo(bot, new goals.GoalBlock(st.x, st.y, st.z), { timeoutMs: 15000, stuckMs: 6000, dig: false, place: false, allowZones, label: 'to a clear line to pour' })
+      if (!r.ok) { log('act', `pour ${itemName} at ${move.fmt(pos)}: could not reach the stand ${move.fmt(st)} with a clear line (${r.why}) - the bucket kept`); return false }
+      pick = refs().find(r2 => faced(r2) && clear(r2))
+      if (!pick) { log('act', `pour ${itemName} at ${move.fmt(pos)}: at ${move.fmt(st)} and still no clear line - the bucket kept`); return false }
+    }
     const held = inv.items(bot).find(i => i.name === itemName)
     if (!held) { log('act', `pour ${itemName} at ${move.fmt(pos)}: the bucket is empty`); return false }
     const letGo = reflex.holdNoSneak() // (no crouch during the use: reflex.holdNoSneak)

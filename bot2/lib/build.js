@@ -1384,6 +1384,7 @@ let lastPlaceFail = ''
 const placeProf = { reach: 0, dig: 0 }
 const sealSaid = new Set() // (cells covered for want of a route: said once)
 const timed = async (k, p) => { const t = Date.now(); try { return await p } finally { placeProf[k] += Date.now() - t } }
+const onFiller = new Set() // (pour cells being poured against a filler in the pour cell under them - placeCell)
 async function placeCell (bot, c, j = job) {
   const why = w => { lastPlaceFail = w; return false }
   lastPlaceFail = ''
@@ -1501,6 +1502,25 @@ async function placeCell (bot, c, j = job) {
     if (c.want && c.want.axis && !axisRelaxed(c) && failsOf(c) >= 3 && !(cellFails.get(key(c)) || {}).shared) { relaxAxis(c); log('build', `${c.name} at ${move.fmt(c)} goes in with any axis (nothing to place it against on its own side)`) }
     const plans = plansFor(c)
     if (!plans.length) return why('no face to place it against in its plan')
+    // A POUR OVER A POUR: the upper water of a two-deep well has no floor to be poured against - the cell under it is the
+    // build's too, and no temporary support ever goes into a cell of the build (audit 2026-10-05). As a player does: a
+    // filler block into the lower cell, the upper poured against its top, the filler dug straight after (ours) - the lower
+    // cell then reads undone (dry, or the upper's fall) and takes its own pour through the same line
+    const under = { x: c.x, y: c.y - 1, z: c.z }; const uc = c.pour && j.index.get(key(under))
+    if (uc && uc.pour && !onFiller.has(key(c))) {
+      const ub = world.at(bot, under.x, under.y, under.z); const fil = inv.items(bot).find(i => FILLER_ITEMS.test(i.name))
+      if (ub && (world.isAirish(ub) || world.isLiquidWater(ub))) {
+        if (!fil) return why('a pour over a pour cell, and no filler to stand in the lower one while it goes in')
+        if (!await act.place(bot, under, fil.name, { allowZones: ['build', 'base'] })) return why('a pour over a pour cell, and the filler would not go into the lower one')
+        log('build', `a filler into ${move.fmt(under)} for the pour over it at ${move.fmt(c)} - dug straight after`)
+        onFiller.add(key(c))
+        try { return await placeCell(bot, c, j) } finally {
+          onFiller.delete(key(c))
+          const fb = world.at(bot, under.x, under.y, under.z)
+          if (fb && FILLER_ITEMS.test(fb.name) && !await act.dig(bot, new Vec3(under.x, under.y, under.z), own)) log('build', `the filler at ${move.fmt(under)} would not come out - the builder takes it as a wrong block`)
+        }
+      }
+    }
     // is there something to click?
     if (!plans.some(p => refOk(bot, c, p))) {
       if (c.attach) return why('nothing to hang it on')
@@ -1530,6 +1550,25 @@ async function placeCell (bot, c, j = job) {
     const opts = { plans: usable.length ? usable : plans.filter(p => !slabMerges(c, world.at(bot, c.x + p.off[0], c.y + p.off[1], c.z + p.off[2]), p)), allowZones: ['build', 'base'], keepExit: true }
     // (a liquid source is poured from its bucket; everything else placed - a pot or a cauldron is its first step. A
     //  chest of a pair is placed standing up: a sneaking placement never pairs)
+    // A POUR BOXED IN BY ITS OWN RIM: no stand has a clear line to a face (the bucket's ray met a rim wall first and waterlogged
+    // it - the hub's well, every bucket spent, 2026-10-05). A player opens the rim: one finished, dry, solid side cell of the
+    // build - at the cell's height or one up - whose opening gives a clear line, dug (ours, the builder puts it back dry: a
+    // wall placed into flowing water takes none), then the pour; the cell over a pour cell is never opened (audit)
+    if (c.pour && !await act.pour(bot, c, item.name, Object.assign({}, opts, { probe: true }))) {
+      let opened = null
+      for (const [dx, dz] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+        for (const dy of [1, 0]) {
+          const s = { x: c.x + dx, y: c.y + dy, z: c.z + dz }; const sb = world.at(bot, s.x, s.y, s.z); const sc = j.index.get(key(s))
+          if (!sc || sc.pour || !sb || !world.isSolid(sb) || cellDone(bot, sc) !== true) continue
+          try { if (sb.getProperties().waterlogged === true || sb.getProperties().waterlogged === 'true') continue } catch {}
+          if (!await act.pour(bot, c, item.name, Object.assign({}, opts, { probe: true, asAir: [s.x + ',' + s.y + ',' + s.z] }))) continue
+          if (await act.dig(bot, new Vec3(s.x, s.y, s.z), own)) { opened = Object.assign({ name: sb.name }, s); break }
+        }
+        if (opened) break
+      }
+      if (!opened) return why('a pour with no clear line from any stand, and no rim cell to open for one')
+      log('build', `opened the ${opened.name} at ${move.fmt(opened)} for a clear line to pour ${move.fmt(c)} - the builder puts it back`)
+    }
     const ok = c.pour
       ? await act.pour(bot, c, item.name, Object.assign(opts, { accept: b => nameOk(c, b.name) && String(propsOf(b).level) === '0' }))
       : await act.place(bot, c, item.name, Object.assign(opts, { accept: b => partOk(c, b.name), sneak: !/_door$/.test(item.name) && !pairs(c), twin: c.twin || null, useRefs: !!c.attach || (!/_door$/.test(item.name) && !pairs(c)) }))
