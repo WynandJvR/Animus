@@ -1049,11 +1049,47 @@ function floatingLog (bot, b) {
   for (let i = 0; i < 24; i++, y--) { const u = world.at(bot, b.position.x, y, b.position.z); if (!u) return false; if (world.LOG_RE.test(u.name)) continue; return !world.isSolid(u) || world.LEAF_RE.test(u.name) }
   return false
 }
+// A FLOATING TOP JUST OUTSIDE THE BOX holds the site's leaves up as surely as one inside it: leaves decay only with no log
+// within 6, and the acacia log at the box's edge kept 60 leaves over the hub's oak after the one inside came down,
+// 2026-10-05. Looked for only within 6 of a natural leaf still on the site by its edge (never a whole ring: body first): a
+// floating log outside the box with a natural leaf (never a placed one - persistent) against it - a tree's cut top, nobody's
+// beam; someone else's place stays refused by the dig itself
+function floatingTopsRound (bot, obs) {
+  const { box } = job; const M = 6; const out = []; const seen = new Set()
+  const natLeaf = b => !!b && world.LEAF_RE.test(b.name) && !(propsOf(b).persistent === true || propsOf(b).persistent === 'true')
+  const inBox = (x, z) => x >= box.x1 && x <= box.x2 && z >= box.z1 && z <= box.z2
+  // (a LIVING tree's branch stands on nothing too - an acacia's side limb: the whole piece of log, corner joins and all, has
+  //  no log on the ground, or it is a tree and its leaves stay anyway; audit)
+  const liveTree = b => {
+    const q = [b.position]; const seen2 = new Set([key(b.position)])
+    while (q.length && seen2.size < 64) {
+      const lp = q.pop(); const under = world.at(bot, lp.x, lp.y - 1, lp.z)
+      if (under && world.isSolid(under) && !world.LEAF_RE.test(under.name) && !world.LOG_RE.test(under.name)) return true
+      for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
+        const n = lp.offset(dx, dy, dz); const k2 = key(n); if (seen2.has(k2)) continue
+        const nb = world.at(bot, n.x, n.y, n.z); if (nb && world.LOG_RE.test(nb.name)) { seen2.add(k2); q.push(n) }
+      }
+    }
+    return seen2.size >= 64 // (a piece too big to walk: a tree)
+  }
+  const edge = obs.filter(b => natLeaf(b) && (b.position.x - box.x1 < M || box.x2 - b.position.x < M || b.position.z - box.z1 < M || box.z2 - b.position.z < M))
+  for (const l of edge) {
+    for (let y = l.position.y - M; y <= l.position.y + M; y++) for (let z = l.position.z - M; z <= l.position.z + M; z++) for (let x = l.position.x - M; x <= l.position.x + M; x++) {
+      if (inBox(x, z)) continue
+      const k = x + ',' + y + ',' + z; if (seen.has(k)) continue; seen.add(k)
+      const b = world.at(bot, x, y, z)
+      if (!b || !world.LOG_RE.test(b.name) || !floatingLog(bot, b)) continue
+      if (ALL_FACES.some(([dx, dy, dz]) => natLeaf(world.at(bot, x + dx, y + dy, z + dz))) && !liveTree(b)) out.push(b)
+    }
+  }
+  return out
+}
 function unskippedObstructions (bot, opts = {}) {
   // (one pass over the box, split: the band's and the floating tops above it - two passes doubled the body's cost; audit)
   const lim = opts.floatingLogs && Number.isFinite(opts.maxY)
   let o = obstructions(bot, lim ? {} : opts)
   if (lim) o = o.filter(b => b.position.y <= opts.maxY || (world.LOG_RE.test(b.name) && floatingLog(bot, b)))
+  if (opts.floatingLogs && opts.finishing) o = o.concat(floatingTopsRound(bot, o)) // (the finish only: round a box ringed by forest the cubes add up; audit)
   return o.filter(b => !skippedObstruction(b))
 }
 
@@ -1062,7 +1098,7 @@ async function clearSite (bot, { shouldStop, maxBlocks = 400, maxY = Infinity, f
   if (!ensureSnapshot(bot)) return 0
   let cleared = 0
   for (let pass = 0; pass < 3; pass++) {
-    const all = unskippedObstructions(bot, { maxY, floatingLogs: true })
+    const all = unskippedObstructions(bot, { maxY, floatingLogs: true, finishing })
     if (!all.length) break
     // trees first: cut the trunks and the leaves decay by themselves; leaves are dug by hand only
     // when they are still there well after the last trunk came down
