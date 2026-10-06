@@ -1458,6 +1458,10 @@ async function descendPillar (bot) {
   myPillar = []
 }
 async function pillarTo (bot, c, first) {
+  // (feetFor keeps only the feet the walk search reaches - from a CURRENT search: after the cluster stand's walk the set
+  //  was another place's, canWalkTo read every foot reachable, and six pillar feet up on the castle's east side were walked
+  //  at - "couldn't reach its foot … (timeout/stuck)", 30-48s each, two break-outs and two traps, 2026-10-06)
+  await walkReach(bot).catch(() => null)
   const feet = feetFor(bot, c).filter(f => !footBad(f)).slice(0, 3)
   if (first && !feet.some(f => f.x === first.x && f.z === first.z)) feet.unshift(first)
   let tried = 0
@@ -1595,6 +1599,7 @@ async function placeCell (bot, c, j = job) {
       if (!act.reach(bot, pos, 4.3)) { if (st) c.noOutside = true; return why(st ? 'its outside stand was not reached' : 'no stand outside the build to place it from') }
     }
     if (!act.reach(bot, pos, 4.3)) {
+      await walkReach(bot).catch(() => null) // (a current search for feetFor's reach filter: pillarTo)
       const foot = feetFor(bot, c).find(f => !footBad(f))
       if (foot && c.y - foot.y >= 3) { pillared = true; await pillarTo(bot, c, foot) }
     }
@@ -3068,7 +3073,7 @@ async function costReport (bot, name, prefs = null) {
   return { name, total, typicalUnitSec: med, kinds: rows.length, blocks: rows.reduce((a, r) => a + r.count, 0), flagged: rows.filter(r => r.flag), top: rows.slice(0, 12) }
 }
 
-module.exports = { boxFor, costReport, missingAnchors: () => missingAnchorItems.slice(), walkModel, strayAt, siteScaffoldTakeable, wayOut, wayOutPoint, FILLER_ITEMS, SCAFFOLD_WANT, cachedStatus, exactWood, isOpenCell, INFILL_RE, infillItem, unsourced, strayBuildBlocks,
+module.exports = { boxFor, costReport, missingAnchors: () => missingAnchorItems.slice(), walkModel, walkReach, reachStandFor, strayAt, siteScaffoldTakeable, wayOut, wayOutPoint, FILLER_ITEMS, SCAFFOLD_WANT, cachedStatus, exactWood, isOpenCell, INFILL_RE, infillItem, unsourced, strayBuildBlocks,
   finishSite, woodClass, woodForm, acceptsFor, itemOf, LOG_ANY, PLANKS_ANY, ensureScaffold, unskippedObstructions, setJob, getJob, status, nextNeeds,
   buildStep, clearSite, obstructions, removeScaffold, siteScaffoldTeardown, loadSchematic, cellDone, cellsDone, inBox, placeCell, registerJob, key,
   complete, needsWork, finish, survey, scaffoldList, holesList, ensureSnapshot, snapshotInfo, snapName,

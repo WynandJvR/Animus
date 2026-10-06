@@ -1646,7 +1646,11 @@ async function castleWorkInner () {
     const strays = (await build.strayBuildBlocks(bot)).filter(p => { const m = strayMiss.get(sk(p)); return !m || m.n < 2 || today - m.day >= Math.min(8, Math.pow(2, m.n - 2)) })
     if (strays.length) {
       let n = 0
-      for (const s of strays.slice(0, 30)) { if (dayStop()) break; if (await act.dig(bot, s, { force: true, allowZones: ['build', 'base'], timeoutMs: 30000 })) { n++; strayMiss.delete(sk(s)) } else { log('dir', `stray ${s.name || 'block'} at ${sk(s)} would not come up: ${act.lastDigWhy() || 'unknown'}`); const m = strayMiss.get(sk(s)); strayMiss.set(sk(s), { n: (m ? m.n : 0) + 1, day: today }) } }
+      // (THE WALK SEARCH FIRST, as the clearing's: a stray with no stand the search reaches within a player's reach is a miss
+      //  with no walk - the dig's own look-at walk ran its 20s out at two spruce planks in the castle every round, 127s of the
+      //  evening's rounds, 2026-10-06. The search no answer (capped, from home): the dig's walk as before)
+      const noStand = async s => { if (act.reach(bot, new Vec3(s.x, s.y, s.z), 4.3)) return false; await build.walkReach(bot).catch(() => null); return build.reachStandFor(bot, s) === false }
+      for (const s of strays.slice(0, 30)) { if (dayStop()) break; const ns = await noStand(s); if (!ns && await act.dig(bot, s, { force: true, allowZones: ['build', 'base'], timeoutMs: 30000 })) { n++; strayMiss.delete(sk(s)) } else { log('dir', `stray ${s.name || 'block'} at ${sk(s)} would not come up: ${ns ? 'no stand the walk search reaches - no walk' : act.lastDigWhy() || 'unknown'}`); const m = strayMiss.get(sk(s)); strayMiss.set(sk(s), { n: (m ? m.n : 0) + 1, day: today }) } }
       await act.collectDrops(bot, { radius: 8, maxMs: 5000 })
       log('dir', `took up ${n} of ${strays.length} build blocks standing where no cell wants them (${strays.slice(0, 6).map(s => s.name + '@' + s.x + ',' + s.y + ',' + s.z).join(' ')})`)
       if (n) return true
