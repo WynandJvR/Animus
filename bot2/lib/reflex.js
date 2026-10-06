@@ -696,6 +696,40 @@ const wallTried = new Set()
 function hungryNow () { return bot.food <= 14 || (bot.health < 20 && bot.food < inv.REGEN_FOOD) }
 const coverTrail = [] // { t, x, z, id }: where a flight to cover has been, the last 2s
 let pinnedCover = null // { id, until }: the shooter whose cover flight is pinned
+let holdSaidAt = 0 // (the out-of-sight hold's line, every 30s while it lasts: a hold must be visible in the log)
+// A RELEASE THAT WALKED BACK INTO THE ARROWS: the hidden-step release, then the task's walk into sight, a hit, cover, the hold,
+// released again - hp each lap with no end (the 2026-10-02 case; audit). A ranged hit from one of the shooters about at a
+// release within 60s of it takes the release away for them 3 minutes: the hold is "till they are gone" again
+let lastRelease = null // { at, ids }
+const noRelease = new Map() // shooter id -> until
+// The first cell next to us - feet level, a step up or down, the body's own cell - that one of `sh` can see (null: none): a
+// step that would show us. Only cells a body could stand in count - a step into the rock is no step. No step at all (a capped
+// hole): the way out is dug, its sight unread - held, as the dug-in hold always was (the director dug out through the cap into
+// the arrows; audit)
+// (read once a second at most, and again at once when the body or a shooter changes cell: up to 13 cells x 2 heights x every
+//  shooter of rays on each 200ms tick for nothing - body first; audit)
+let exposedMemo = null // { at, key, res }
+function exposedStep (sh) {
+  const f = bot.entity.position.floored()
+  const key = f.x + ',' + f.y + ',' + f.z + '|' + sh.map(s => { const q = s.position.floored(); return s.id + '@' + q.x + ',' + q.y + ',' + q.z }).join(';')
+  if (exposedMemo && exposedMemo.key === key && Date.now() - exposedMemo.at < 1000) return exposedMemo.res
+  const res = exposedStepRead(sh, f)
+  exposedMemo = { at: Date.now(), key, res }
+  return res
+}
+function exposedStepRead (sh, f) {
+  let steps = 0
+  for (const [dx, dz] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    for (const dy of dx === 0 && dz === 0 ? [0] : [0, 1, -1]) {
+      const x = f.x + dx; const y = f.y + dy; const z = f.z + dz
+      if ((dx || dz) && !world.standable(bot, x, y, z)) continue
+      if (dx || dz) steps++
+      const at = new Vec3(x + 0.5, y, z + 0.5)
+      for (const s of sh) { const sEye = s.position.offset(0, (s.height || 1.9) * 0.85, 0); if (canSee({ position: at, height: 1.8 }, sEye) || canSee({ position: at, height: 1.1 }, sEye)) return `${s.name} would see ${x},${y},${z}` }
+    }
+  }
+  return steps ? null : 'no step out but by digging'
+}
 // pinned by this shooter and it is a few steps off (a short run, then the blade): cornered - see chargeAffordable
 function pinnedClose (e, d) { return !!pinnedCover && pinnedCover.id === e.id && Date.now() < pinnedCover.until && d < 6 }
 // THE SAFEHOUSE FIRST: a shooter on us within a short run of the safehouse, outside it - the run goes for the door, opened
@@ -1880,7 +1914,22 @@ function tick () {
       // (hungry WITH something to eat: the eat row has its turn - hungry with nothing in the pack let go and took cover again
       //  every 0.2s, hp 4 under a skeleton, 2026-10-02)
       if (!about || (hungryNow() && inv.foodPoints(bot) > 0)) return clearActive() // (the eat row's own hunger: one rule - audit)
+      // HIDDEN FOR GOOD IS HIDDEN: out of every shooter's sight, none of them hitting us, and a step any way still out of it -
+      // the body goes back to its task. Held "till it is gone" whatever the ground, a 1-wide tunnel in stone stood 11 minutes
+      // over a cave pocket 3 below, two skeletons and a witch 4-5b off that could not see it, the night's mine never begun and
+      // not a log line, 2026-10-07. On the EDGE of their sight (a step that would show us) the gap toward the nearest is walled
+      // once a cell, and it holds - the walk back into the arrows the hold was made for (audit 2026-10-02) - said every 30s
+      const sh = shootersAbout(fleeTarget).filter(s => s.isValid && s.position.distanceTo(me) < 24 && Math.abs(s.position.y - me.y) < 6)
+      const hitLately = now - lastHurtAt < 2500 && !!lastHurtBy && RANGED.has(lastHurtBy.name)
+      for (const [id, t] of noRelease) if (t < now) noRelease.delete(id)
+      const barred = sh.find(s => noRelease.has(s.id))
+      const seenStep = hitLately ? 'hit lately' : barred ? `released into sight of the ${barred.name} lately - holding till they go` : exposedStep(sh)
+      if (!seenStep) { log('reflex', `hidden from ${sh.length} shooter${sh.length === 1 ? '' : 's'} (${sh.slice(0, 3).map(s => s.name + ' ' + s.position.distanceTo(me).toFixed(1) + 'b').join(', ')}) and a step any way stays hidden - back to work`); lastRelease = { at: now, ids: sh.map(s => s.id) }; return clearActive() }
+      const f0 = bot.entity.position.floored(); const ck = f0.x + ',' + f0.y + ',' + f0.z
+      const near = sh.slice().sort((a, b) => a.position.distanceTo(me) - b.position.distanceTo(me))[0]
+      if (near && !busy && !wallTried.has(ck) && inv.shelterBlock(bot)) { wallTried.add(ck); if (wallTried.size > 64) wallTried.clear(); runBusy('wall off', g => wallOff(near, g), 3500, 'flee'); return }
       for (const k of ['forward', 'back', 'left', 'right', 'sprint', 'jump']) bot.setControlState(k, false)
+      if (now - holdSaidAt > 30000) { holdSaidAt = now; log('reflex', `holding out of sight ${Math.round((now - active.since) / 1000)}s - ${sh.length} shooter${sh.length === 1 ? '' : 's'} about (${sh.slice(0, 3).map(s => s.name + ' ' + s.position.distanceTo(me).toFixed(1) + 'b').join(', ')}), ${seenStep}`) }
       return
     }
     const coverFlee = active.kind === 'flee' && fleeTarget && fleeTarget.isValid && RANGED.has(fleeTarget.name) && fleeTarget.position.distanceTo(me) < 24 && canSee(fleeTarget)
@@ -1949,6 +1998,11 @@ function install (b) {
     // the server names who hurt us (damage_event's source entity - the skeleton, not its arrow); none for a fall,
     // drowning, a cactus. (It used to be the nearest hostile: a fall beside a zombie was "hit by the zombie".)
     lastHurtBy = source && source !== bot.entity ? source : null
+    if (lastHurtBy && RANGED.has(lastHurtBy.name) && lastRelease && Date.now() - lastRelease.at < 60000 && lastRelease.ids.includes(lastHurtBy.id)) {
+      for (const id of lastRelease.ids) noRelease.set(id, Date.now() + 180000)
+      log('reflex', `released into sight again - the ${lastHurtBy.name} hit me ${Math.round((Date.now() - lastRelease.at) / 1000)}s after the release: holding till they go (3 min)`)
+      lastRelease = null
+    }
     if (lastHurtBy && lastHurtBy.name === 'enderman') { provoked.set(lastHurtBy.id, Date.now()); if (provoked.size > 20) provoked.clear() }
   })
   bot.on('diggingCompleted', b => { try { lastDig = { at: Date.now(), name: b.name, pos: `${b.position.x},${b.position.y},${b.position.z}` } } catch {} })
