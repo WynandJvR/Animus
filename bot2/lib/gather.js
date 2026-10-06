@@ -334,6 +334,7 @@ async function fellMega (bot, corner, re, { allowZones = [], shouldStop, leaves 
   log('gather', `felled a mega tree at ${move.fmt(corner)} from inside (climbed ${entry.x},${entry.z} to feet y${peak}, the square's top log y${top}): +${got} logs${leafN ? `, ${leafN} leaves` : ''}${left ? `, ${left} left standing` : ''}${pillar.length ? `, ${pillar.length} pillar block(s) left` : ''}${upWhy ? ` - the climb stopped: ${upWhy}` : ''}${downWhy ? ` - the way down stopped: ${downWhy}` : ''}${missed ? ` - digs missed: ${missed}` : ''}${stranded ? ` - STRANDED at y${Math.floor(bot.entity.position.y)}, ${Math.floor(bot.entity.position.y) - y0} over the foot` : ''}`)
   return { got, stranded }
 }
+let lastDownWhy = null // (why the last climbDownPillar stopped short, for its caller to say)
 // A body standing, not in a jump or a fall (act.grounded - the dig's own rule), within a deadline
 async function landed (bot, maxMs = 1500) { const t = Date.now(); while (!act.grounded(bot) && Date.now() - t < maxMs) await move.sleep(50) }
 // THE BLOCKS THE BODY STANDS ON: the one under its centre first, then any other the hitbox (0.3 each side) rests on - solid
@@ -348,14 +349,15 @@ function standingOn (bot) {
 // says the block under the feet is ours to take - never one whose dig drops the body further than SAFE_DROP, nor onto
 // lava or into water. THE one descent: the orchard's tree pillars and the litter's climbs (build.descendPillar keeps the
 // build's own cell checks). `onDug(cell)`: each block taken. Returns the blocks taken.
-async function climbDownPillar (bot, ours, { allowZones = [], onDug = null, max = 48 } = {}) {
-  let n = 0
+// (`force`: the escape's - a seeded block the body stands on because it towered it; survival outranks inferred ownership)
+async function climbDownPillar (bot, ours, { allowZones = [], onDug = null, max = 48, force = false } = {}) {
+  let n = 0; lastDownWhy = null
   for (let guard = 0; guard < max; guard++) {
     await landed(bot)
     const under = standingOn(bot).find(c => ours(c))
     if (!under) break
-    { const bl = world.at(bot, under.x, under.y - 1, under.z); if (act.fallBelow(bot, under) > world.SAFE_DROP || !bl || world.isLavaBlock(bl) || world.isWaterBlock(bl)) break }
-    if (!await act.dig(bot, new Vec3(under.x, under.y, under.z), { noWalk: true, timeoutMs: 6000, allowZones }).catch(() => false)) break
+    { const bl = world.at(bot, under.x, under.y - 1, under.z); if (act.fallBelow(bot, under) > world.SAFE_DROP || !bl || world.isLavaBlock(bl) || world.isWaterBlock(bl)) { lastDownWhy = `a ${act.fallBelow(bot, under)}-block drop (or lava/water) under ${under.x},${under.y},${under.z}`; break } }
+    if (!await act.dig(bot, new Vec3(under.x, under.y, under.z), { noWalk: true, timeoutMs: 6000, allowZones, force }).catch(() => false)) { lastDownWhy = `${(world.at(bot, under.x, under.y, under.z) || {}).name || '?'} at ${under.x},${under.y},${under.z} would not dig: ${act.lastDigWhy() || '?'}`; break }
     const t0 = Date.now(); while (!bot.entity.onGround && Date.now() - t0 < 1500) await move.sleep(50)
     n++; if (onDug) onDug(under)
   }
@@ -1000,4 +1002,4 @@ async function findMatching (bot, match, accept) {
   return null
 }
 
-module.exports = { trunkBase, isNaturalTree, towerWhy: () => towerWhy, fellMega, megaTop, keepAxe, climbDownPillar, noteBiomes, speciesLand, climateLead, SPECIES_BIOMES, onGrounds, treeOK, wildTree, lastChopOutcome, outOfZones, chop, mine, explore, towerUp, noteResource, noteResources, forgetResource, knownResource, fellTree, pickPlants, survey, takeable }
+module.exports = { trunkBase, isNaturalTree, towerWhy: () => towerWhy, fellMega, megaTop, keepAxe, climbDownPillar, standingOn, landed, downWhy: () => lastDownWhy, noteBiomes, speciesLand, climateLead, SPECIES_BIOMES, onGrounds, treeOK, wildTree, lastChopOutcome, outOfZones, chop, mine, explore, towerUp, noteResource, noteResources, forgetResource, knownResource, fellTree, pickPlants, survey, takeable }

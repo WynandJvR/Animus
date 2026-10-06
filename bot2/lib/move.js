@@ -583,12 +583,18 @@ function arrived (bot, goal) { const f = bot.entity.position.floored(); return g
 // (only a way that is not over a drop: a random key and a jump at the castle's south rim - a strafe, which neither the jump
 //  guard's heading nor the edge brake reads, and a brake that lets go in the air - fell 5 blocks twice, 2026-09-28. The
 //  keys are the body's own frame: forward along the look, left and right across it. No safe way, no jiggle)
-async function jiggle (bot) {
+// (the keys a jiggle may press: each heading's next 1.6 blocks no drop past SAFE_DROP - THE rule the jiggle and the escape's
+//  "stranded on our own blocks" both read)
+function safeJiggles (bot) {
   const e = bot.entity; const p = e.position
   const fx = -Math.sin(e.yaw); const fz = -Math.cos(e.yaw)
   const vec = { forward: [fx, fz], back: [-fx, -fz], left: [fz, -fx], right: [-fz, fx] }
   const y = Math.floor(p.y + 0.01)
-  const safe = Object.keys(vec).filter(k => [0.8, 1.6].every(r => world.dropAt(bot, p.x + vec[k][0] * r, y, p.z + vec[k][1] * r) <= world.SAFE_DROP))
+  return Object.keys(vec).filter(k => [0.8, 1.6].every(r => world.dropAt(bot, p.x + vec[k][0] * r, y, p.z + vec[k][1] * r) <= world.SAFE_DROP))
+}
+async function jiggle (bot) {
+  const p = bot.entity.position
+  const safe = safeJiggles(bot)
   if (!safe.length) { log('move', `stuck at ${fmt(p)} - no way to jiggle that is not over a drop`); await sleep(500); return }
   const d = safe[Math.floor(Math.random() * safe.length)]
   bot.setControlState(d, true); bot.setControlState('jump', true)
@@ -1021,31 +1027,37 @@ async function escapeUpInner (bot) {
     // (or a LONE block of plain ground or filler with a drop on every side and nothing protected: the lower half of our own
     //  pillar dug away by the tidy left its top block off the ledger - the descent stopped one above it, 'no way to jiggle that is
     //  not over a drop' 52 times at dusk, 2026-10-04. The fall check below still holds the dig to a safe drop)
-    const lone = u => { const b = world.at(bot, u.x, u.y, u.z); return !!b && /^(dirt|grass_block|coarse_dirt|cobblestone|stone|cobbled_deepslate|andesite|diorite|granite|netherrack)$/.test(b.name) && !isProtected(b, 'dig') }
-    const mine = u => litter.has(u) || require('./build').strayAt(bot, u) || lone(u)
-    const onTop = () => { const f = bot.entity.position.floored(); const u = { x: f.x, y: f.y - 1, z: f.z }; return bot.entity.onGround && mine(u) && [[1, 0], [-1, 0], [0, 1], [0, -1]].every(([dx, dz]) => world.dropAt(bot, f.x + dx + 0.5, f.y, f.z + dz + 0.5) > world.SAFE_DROP) ? u : null }
+    // (never a cell of the build job, finished or not - an unfinished castle cell holding dirt read as a lone block; audit)
+    const jobCell = u => { try { const j = require('./build').getJob(); return !!(j && j.index.has(`${u.x},${u.y},${u.z}`)) } catch { return true } }
+    const lone = u => { const b = world.at(bot, u.x, u.y, u.z); return !!b && /^(dirt|grass_block|coarse_dirt|cobblestone|stone|cobbled_deepslate|andesite|diorite|granite|netherrack)$/.test(b.name) && !isProtected(b, 'dig') && !jobCell(u) }
+    // (a lone block is ours only standing alone - a drop past SAFE_DROP on every side of it: never the ground under a
+    //  stranded body, which would dig a shaft)
+    const alone = u => [[1, 0], [-1, 0], [0, 1], [0, -1]].every(([dx, dz]) => world.dropAt(bot, u.x + dx + 0.5, u.y + 1, u.z + dz + 0.5) > world.SAFE_DROP)
+    const mine = u => litter.has(u) || require('./build').strayAt(bot, u) || (lone(u) && alone(u))
+    // STRANDED ON BLOCKS OF OURS: every block the body stands on (gather.standingOn - the hitbox's, not only the cell under its
+    // centre) is ours, and no way to step that is not over a drop (safeJiggles - the jiggle's own rule). Read off the centre
+    // cell with a drop on all four sides, an L of three of our dirt blocks at y115 in a crown was no pillar: every side of
+    // the centre was not a drop, the hitbox rested on the neighbour, and the bot stood there 7 minutes - "no way to jiggle",
+    // "open above; no climb" - till the operator dug it down, 2026-10-06
+    const onTop = () => { if (!bot.entity.onGround) return null; const s = gather.standingOn(bot); return s.length && s.every(mine) && !safeJiggles(bot).length ? s : null }
     // (no sky test: a canopy's leaves read as a roof, and the descent stopped after one block each escape; audit)
+    // (the ground flag settles first: mineflayer reads onGround false a tick at a time while standing - "came down our pillar:
+    //  from X to X" three times, 2026-10-03)
+    await gather.landed(bot, 600)
     if (onTop()) {
-      log('move', `stuck on a pillar of ours at ${fmt(f0)} with a drop all round - digging down through it`)
-      for (let guard = 0; guard < 24; guard++) {
-        // (the ground flag settles first: mineflayer reads onGround false a tick at a time while standing (the body's "ground
-        //  flag corrected" lines), and the descent read that as "not on the pillar" and came down nothing - "came down our
-        //  pillar: from X to X" three times, 2026-10-03)
-        { const t0 = Date.now(); while (!bot.entity.onGround && Date.now() - t0 < 600) await sleep(50) }
-        const u = onTop(); if (!u) { if (!guard) log('move', `our pillar at ${fmt(f0)}: not on its top after all (on the ground ${bot.entity.onGround})`); break }
-        // (the fall the dig makes: to the next solid under the block - a gap the tidy left lower in the column is a drop of
-        //  its height. Up there is safe; a fall is not. Nor onto lava or into water; audit)
-        const below = world.at(bot, u.x, u.y - 1, u.z)
-        if (act.fallBelow(bot, u) > world.SAFE_DROP || !below || world.isLavaBlock(below) || world.isWaterBlock(below)) { log('move', `a gap in our pillar below me at y${u.y - 1} - staying up`); break }
-        // (a seeded block here too: the body stands on it because the escape towered it - survival outranks inferred
-        //  ownership, the grief plan's escape net; audit)
-        if (!await act.dig(bot, u, { force: true, noWalk: true, allowZones: ['*'], timeoutMs: 8000 }).catch(() => false)) { log('move', `our pillar's ${fmt(u)} would not dig: ${act.lastDigWhy() || 'no reason given'}`); break } // (said: a descent that dug nothing read "came down" in place, 2026-10-03)
-        const t0 = Date.now(); while (!bot.entity.onGround && Date.now() - t0 < 1500) await sleep(50)
+      log('move', `stuck on blocks of ours at ${fmt(f0)} with no step that is not over a drop - digging down through them`)
+      // (THE descent - gather.climbDownPillar: the block the body stands on while it is ours, each drop to the next solid
+      //  within SAFE_DROP, never onto lava or into water; force: a seeded block here too - the body stands on it because a
+      //  climb put it there, survival outranks inferred ownership, the grief plan's escape net; audit)
+      const n = await gather.climbDownPillar(bot, mine, { allowZones: ['*'], force: true, max: 24 })
+      // (nothing came down: said, and on to the ladder's other ways - never a 'came down' in place, 2026-10-03)
+      if (!n) log('move', `our blocks at ${fmt(f0)} would not come down: ${gather.downWhy() || 'no reason given'}`)
+      else {
+        clearGiveUps(f0)
+        await gather.landed(bot) // (said after landing)
+        log('move', `came down our blocks: from ${fmt(f0)} to ${fmt(bot.entity.position)} (${n} dug)`)
+        return true
       }
-      clearGiveUps(f0)
-      { const t0 = Date.now(); while (!bot.entity.onGround && Date.now() - t0 < 1500) await sleep(50) } // (said after landing)
-      log('move', `came down our pillar: from ${fmt(f0)} to ${fmt(bot.entity.position)}`)
-      return true
     }
   }
   // ENCLOSED BY THE BUILD - PROVEN, not guessed: no walk out of here even with every door taken as a
@@ -1536,7 +1548,10 @@ async function travel (bot, target, opts = {}) {
     // aim at the SURFACE of the leg point when we can see it: an x/z-only goal lets the planner route
     // through caves and come up under the destination
     const gy = world.groundY(bot, lx, lz, Math.floor(me.y) + 30)
-    const legGoal = (gy != null && !world.isWaterBlock(world.at(bot, lx, gy, lz))) ? new goals.GoalNear(lx, gy + 1, lz, 4) : new goals.GoalNearXZ(lx, lz, 4)
+    // (a leg ending at the target's own column aims at the target: its "surface" there can be a roof over it - home's leg
+    //  aimed at the safehouse roof, the planner climbed at the shut door and the walk stalled 45s on the step, 2026-10-06)
+    const atTarget = !anyY && target.y != null && Math.hypot(lx - target.x, lz - target.z) <= 4
+    const legGoal = atTarget ? new goals.GoalNear(target.x, target.y, target.z, range) : (gy != null && !world.isWaterBlock(world.at(bot, lx, gy, lz))) ? new goals.GoalNear(lx, gy + 1, lz, 4) : new goals.GoalNearXZ(lx, lz, 4)
     const edges0 = reflexRef && reflexRef.edgeStops ? reflexRef.edgeStops() : 0
     const r = await goTo(bot, legGoal, { timeoutMs: 45000, stuckMs: 10000, label: label + ' leg', shouldStop })
     const edged = !!(reflexRef && reflexRef.edgeStops) && reflexRef.edgeStops() > edges0

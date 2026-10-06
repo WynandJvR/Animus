@@ -274,6 +274,10 @@ async function ensureTool (bot, kind, ctx) {
 // "best tool" for leaves, a hoe, and a hoe's leaves drop saplings, not leaves.
 async function shearBlock (bot, b) {
   if (!b || move.isProtected(b, 'dig')) return false
+  // (never a leaf the body stands on: a leaves trip walked over a crown onto three old dirt blocks of ours, sheared the
+  //  leaves it had walked in on and stood there 7 minutes with a 4-block drop all round, 2026-10-06. gather.standingOn: the
+  //  hitbox's own, not only the centre's)
+  if (gather().standingOn(bot).some(c => c.x === b.position.x && c.y === b.position.y && c.z === b.position.z)) return false
   const sh = shearsHeld(bot)
   if (!sh) return false
   try {
@@ -350,14 +354,13 @@ async function shearCrown (bot, basePos, s, target, ctx = {}) {
       const FILL = require('./build').FILLER_ITEMS
       const ours = c => pillar.some(q => q.x === c.x && q.y === c.y && q.z === c.z) ||
         (c.x === basePos.x && c.z === basePos.z && c.y >= basePos.y && c.y <= topY && (b => !!b && FILL.test(b.name))(world.at(bot, c.x, c.y, c.z)))
-      for (let guard = 0; guard < 20; guard++) {
-        const me = bot.entity.position; const under = { x: Math.floor(me.x), y: Math.floor(me.y - 0.01), z: Math.floor(me.z) }
-        if (!ours(under)) break
-        if (!await act.dig(bot, new Vec3(under.x, under.y, under.z), { timeoutMs: 6000, noWalk: true }).catch(() => false)) break
-        const t0 = Date.now(); while (!bot.entity.onGround && Date.now() - t0 < 1500) await move.sleep(50)
-        const pi = pillar.findIndex(q => q.x === under.x && q.y === under.y && q.z === under.z); if (pi >= 0) pillar.splice(pi, 1)
-      }
-      if (pillar.length) log('forage', `${pillar.length} pillar block(s) left in the trunk column at ${basePos.x},${basePos.z}`)
+      // (THE descent - gather.climbDownPillar: the block the body stands on, the hitbox's own, each drop checked)
+      await gather().climbDownPillar(bot, ours, { max: 20, onDug: c => { const pi = pillar.findIndex(q => q.x === c.x && q.y === c.y && q.z === c.z); if (pi >= 0) pillar.splice(pi, 1) } })
+      if (pillar.length) log('forage', `${pillar.length} pillar block(s) left in the trunk column at ${basePos.x},${basePos.z}${gather().downWhy() ? ' - ' + gather().downWhy() : ''}`)
+      // (never handed on from up there: the reflexes' escape comes down blocks of ours (move.escapeUp); said here so the
+      //  next walk's stall has its cause in the log)
+      await gather().landed(bot)
+      if (Math.floor(bot.entity.position.y + 0.01) > basePos.y + world.SAFE_DROP) log('forage', `still ${Math.floor(bot.entity.position.y + 0.01) - basePos.y} up the trunk column at ${basePos.x},${basePos.z} after the crown`)
     }
   }
   await act.collectDrops(bot, { radius: 7, maxMs: 8000 })
