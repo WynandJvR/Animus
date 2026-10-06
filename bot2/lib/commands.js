@@ -91,7 +91,8 @@ function make (bot, director) {
         const p = bot.entity ? bot.entity.position : null
         return JSON.stringify({ pos: p && move.fmt(p), hp: bot.health, food: bot.food, task: d, paused: director.isPaused(), home: mem.get().home, bed: mem.get().bed, build: st && { done: st.done, total: st.total, need: st.need }, packFood: inv.foodPoints(bot) })
       }
-      case 'inventory': return Object.entries(inv.counts(bot)).map(([k, v]) => `${k} x${v}`).join(', ') || 'empty'
+      // (and what is WORN and in the off-hand: the pack alone read "golden boots only" of a body in iron, 2026-10-06)
+      case 'inventory': { const w = inv.wornArmor(bot); const off = bot.inventory.slots[45]; return (Object.entries(inv.counts(bot)).map(([k, v]) => `${k} x${v}`).join(', ') || 'empty') + ` | worn: ${['head', 'torso', 'legs', 'feet'].map(k => w[k] ? w[k].name : '-').join(', ')} (${inv.armorPoints(bot)} pts) | off-hand: ${off ? off.name : '-'}` }
       case 'decide': { const d = director.decide(); return `${d.name}: ${d.why}` }
       case 'pause': director.setPaused(true); move.stopMoving(bot); setFlag(true); return 'paused'
       case 'resume': director.setPaused(false); setFlag(false); return 'resumed'

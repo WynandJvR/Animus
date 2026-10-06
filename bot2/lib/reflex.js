@@ -107,8 +107,33 @@ function diveHolds (now) {
 // the pillager's death spiral (2026-09-28; audit)
 const fledFrom = new Map() // entity id -> hp the lost fight began at
 let fightStartHp = null; let fightTargetId = null
-const noChase = new Map() // entity id -> until: a target the chase got no nearer to (the fight row's chase check)
-let chase = null // { best, at, last }: the fight's chase - its closest distance, when, and its last tick
+const noChase = new Map() // entity id -> until: a target the engagement got nowhere with (engagementStalled) - not picked again till then
+let chase = null // { id, best, at, last, hp }: the engagement's clock - the target, its closest distance, the last progress, the last tick, the hp then
+let landedAt = 0 // (the last hit of ours the server confirmed on anything - its damage_event names us as the source)
+// AN ENGAGEMENT THAT GETS NOWHERE - fought or covered from, whichever the tick chose - ends: nothing changed for 15s (no block
+// closed, no hit of ours landed, no hp of ours lost) and the target and every shooter in sight are let go a minute (noChase),
+// the body handed back. Progress was "a block nearer" alone and only while out of reach: in a dug hole under the hillside, a
+// pillager camped 2.5-4b off above it, the chase clock reset at every tick it read 3.5b or less, fight (no path up, no swing
+// in reach) and cover (no step to take, a wall tried) took turns every few seconds, and nothing was exchanged for 11 minutes
+// while the build's walk timed out under the reflex (hp 14 throughout, 2026-10-06). Lost hp IS progress: cover that is being
+// shot through is the dig-in's to answer, never let go. ONE clock for the fight and the cover - the turns between them were
+// the stand-off; a lapse of 30s starts a new one (the eat-and-cover spells between ran 5s+; audit)
+function engagementStalled (target, d, hs, now) {
+  if (!chase || now - chase.last > 30000) chase = { id: target.id, best: d, at: now, last: now, hp: bot.health }
+  chase.last = now
+  // (the nearest mark is the target's own: another target - the patrol's next, or a zombie after the last one died in reach -
+  //  starts its own "nearer", never measured against the last one's 1b; the clock itself runs on)
+  if (chase.id !== target.id) { chase.id = target.id; chase.best = d }
+  if (bot.health > chase.hp) chase.hp = bot.health // (healed: a later loss counts from here)
+  if (d < chase.best - 1 || landedAt > chase.at || bot.health < chase.hp - 0.5) { chase.best = Math.min(d, chase.best); chase.at = now; chase.hp = bot.health; return false }
+  if (now - chase.at <= 15000) return false
+  noChase.set(target.id, now + 60000)
+  for (const h of hs) if (RANGED.has(h.e.name) && h.d < 24) noChase.set(h.e.id, now + 60000)
+  log('reflex', `${active ? active.kind : 'engagement'}: nothing exchanged in 15s (${target.name} ${d.toFixed(1)}b, no hit landed, no hp lost, no block closed) - it and every shooter in sight let go a minute`)
+  chase = null; try { bot.pathfinder.setGoal(null) } catch {}
+  clearActive()
+  return true
+}
 // (a fight is LOST when it ends - however it ends - more than 4 hp down: "fight done" when the pillager stepped out of
 //  sight left no mark, and the bot charged it again at hp 11, 2026-09-28)
 const LOST_FIGHT_HP = 4
@@ -216,6 +241,10 @@ const MOB_HP = { skeleton: 20, stray: 20, bogged: 16, pillager: 24, witch: 40, b
 //  harming 6 a splash, poison on top - and 40 hp for the heals it drinks. A shield blocks none of it: the splash
 //  shatters on it and the effect lands all the same; audit)
 const MAGIC = new Set(['witch'])
+// A WITCH'S REACH: it throws from 10 and walks after us, and the splash lands 4 round where it breaks - harming took 5 hp at
+// 12.2b, and poison and slowness the rest, 2026-10-06. Past 16 (its follow range too) it is outrun; inside, it is no place
+// to stop - for a bite either. ONE number for the flee's end and the meal's veto
+const WITCH_CLEAR = 16
 // `hs`: every hostile in range, the never-melee ones too - a ghast's fireballs land on the way in as well as a
 // skeleton's arrows; handed the melee list, the ghast was never counted and a charge under it read as free (2026-09-27)
 // A TRIP THAT IS NOT WORTH A DEATH: the director marks an optional gathering trip cautious - a charge then wants hp 18
@@ -1687,12 +1716,14 @@ function tick () {
 
   // 4. THREAT - fight what can be fought, flee what cannot
   const melee = hs.filter(h => !NEVER_MELEE.has(h.e.name))
-  // only what we can actually see (a mob behind the bunker wall is not a fight)
-  const close = melee.find(h => h.d < 4.5 && (h.e.name !== 'spider' || !bot.time.isDay || h.d < 3) && canSee(h.e))
   // (never a shooter the last charge could not close on: pillagers at the foot of a 21-block cliff were "fought" 482s, the
   //  chase's jump off the lip let go of by the edge guard every few seconds, hp 20 throughout - nothing hit either way,
-  //  2026-10-04. Cover still answers one that hits us; unreachable: chaseStalled)
+  //  2026-10-04. Cover still answers one that hits us; unreachable: engagementStalled)
   for (const [id, t] of noChase) if (t < now) noChase.delete(id)
+  // only what we can actually see (a mob behind the bunker wall is not a fight)
+  // (and not one let go: "let go a minute" that the next tick picked again as "close" was no letting go - fight 0.4s, cover,
+  //  fight, the same pillager at 4.1b, 2026-10-06. A let-go mob that hits us is taken up again at once: hurtByMelee, the cover)
+  const close = melee.find(h => h.d < 4.5 && (h.e.name !== 'spider' || !bot.time.isDay || h.d < 3) && (!noChase.has(h.e.id) || (!RANGED.has(h.e.name) && h.d < 2.5)) && canSee(h.e)) // (a let-go melee mob walking up to us is taken up again before its first hit; audit)
   const shooterSeen = melee.find(h => RANGED.has(h.e.name) && h.d < 14 && canSee(h.e))
   const shooter = shooterSeen && !noChase.has(shooterSeen.e.id) ? shooterSeen : null // (the charge's choice; cover answers any - audit)
   const recentlyHurt = now - lastHurtAt < 3000
@@ -1761,7 +1792,7 @@ function tick () {
     return
   }
   if (target && weak && hs.filter(h => h.d < 10).length) {
-    if (RANGED.has(target.name)) { takeCover(target, `hp ${Math.round(hp)} - cover from ${target.name}`); return }
+    if (RANGED.has(target.name)) { if (!engagementStalled(target, target.position.distanceTo(me), hs, now)) takeCover(target, `hp ${Math.round(hp)} - cover from ${target.name}`); return }
     fleeTarget = target
     setActive('flee', `hp ${Math.round(hp)} - ${target.name}`)
     shieldDown()
@@ -1780,28 +1811,19 @@ function tick () {
     // (at ANY distance, every tick, whatever picked it - under 5 blocks no row weighed the trade again and the fight ran to
     //  the hurt line under a patrol, 2026-10-02; audit)
     if (RANGED.has(target.name) && !chargeAffordable({ e: target, d }, hs, hp)) {
-      takeCover(target, `cover from ${target.name} ${d.toFixed(1)}b (${why})`)
+      if (!engagementStalled(target, d, hs, now)) takeCover(target, `cover from ${target.name} ${d.toFixed(1)}b (${why})`)
       return
     }
     if (!active || active.kind !== 'fight') fightTargetId = target.id
     setActive('fight', `${target.name} ${d.toFixed(1)}b (${why})`)
     if (armed && (!bot.heldItem || !/_(sword|axe)$/.test(bot.heldItem.name))) { runBusy('equip a weapon', () => inv.equipWeapon(bot), 1500); return }
-    // THE CHASE THAT CLOSES NOTHING: no nearer by a block in 15s (a detour round a wall takes ~10; audit) while out of reach - the target is let go a minute
-    //  (noChase), the fight ends; a mob in reach or one that hit us in melee is fought where it stands
-    // (ONE CHASE for the whole fight, whichever target it is on: three pillagers below the cliff, the target switched every
+    // THE CHASE THAT CLOSES NOTHING, AND THE FIGHT IN REACH THAT LANDS NOTHING: engagementStalled - no block nearer in 15s (a detour
+    //  round a wall takes ~10; audit), no hit of ours landed, no hp lost: the target is let go a minute (noChase), the fight ends
+    // (ONE CLOCK for the whole engagement, whichever target it is on: three pillagers below the cliff, the target switched every
     //  1-6s and a per-target clock never ran out - the body still held on the lip, 2026-10-04. Let go, every shooter in sight
-    //  goes with it; a fight that lapses 30s starts a new chase - the eat-and-cover spells between ran 5s+; audit)
-    if (d > 3.5) {
-      if (!chase || now - chase.last > 30000) chase = { best: d, at: now, last: now }
-      chase.last = now
-      if (d < chase.best - 1) { chase.best = d; chase.at = now }
-      else if (now - chase.at > 15000) {
-        noChase.set(target.id, now + 60000)
-        for (const h of hs) if (RANGED.has(h.e.name) && h.d < 24) noChase.set(h.e.id, now + 60000)
-        log('reflex', `fight: no nearer in 15s (${target.name} ${d.toFixed(1)}b) - every shooter in sight let go a minute`)
-        chase = null; try { bot.pathfinder.setGoal(null) } catch {} return clearActive()
-      }
-    } else chase = null
+    //  goes with it. In reach it ran too: reset there, a pillager over the rim of a dug hole at 2.5-3.7b was "fought" 301s with
+    //  no swing ever ready, 2026-10-06)
+    if (engagementStalled(target, d, hs, now)) return
     if (d > 2.8 && !pinned) {
       bot.pathfinder.setMovements(require('./move').movementsFor(bot, { dig: false, place: false }))
       bot.pathfinder.setGoal(new goals.GoalFollow(target, 1.5), true)
@@ -1830,11 +1852,13 @@ function tick () {
     // A SHOOTER THAT CAN'T SEE US is not escaped while it is still about - out of its sight is the place to be: held there,
     // still. Released, the director walked the bot back into its sight and the next bolt began it all again (audit
     // 2026-10-02). Gone (dead, past 24, down a cave) is escaped; hungry, the eat row below has its turn (out of sight)
-    // (a witch: run on, seen or not - held still out of its sight, it walks round the corner and throws; let go past 16,
-    //  twice its throw, or hungry with food in the pack once past 10; takeCover's witch rule)
+    // (a witch: run on, seen or not - held still out of its sight, it walks round the corner and throws; let go past its reach
+    //  (WITCH_CLEAR); takeCover's witch rule. Not let go at 10 when hungry: the eat row's "out of sight to eat" flee began again
+    //  the next tick and this let it go the tick after - 0.2s flights, ate nothing and ran nowhere at 13-14b, harming and poison
+    //  19 -> 0 in 27s, 2026-10-06. Only past the sprint line (food 6: no sprint, no outrunning it) does the meal come first)
     if (active.kind === 'flee' && fleeTarget && MAGIC.has(fleeTarget.name)) {
       const d = fleeTarget.isValid ? fleeTarget.position.distanceTo(me) : Infinity
-      if (d > 16 || (d > 10 && hungryNow() && inv.foodPoints(bot) > 0)) return clearActive()
+      if (d > WITCH_CLEAR || (d > 10 && bot.food <= 6 && inv.foodPoints(bot) > 0)) return clearActive()
       const h = fleeHeading(fleeTarget)
       if (h) steerTo(h, { jump: h.jump, sprint: bot.food > 6 }); else return clearActive()
       return
@@ -1868,8 +1892,13 @@ function tick () {
   //  sight (fleeHeading has nowhere): eating is then the better of two bad trades (the audit: never a veto to starve by)
   // (worked out only when a meal is due - the sight ray and the flee scan every 200ms whenever a shooter was in view cost
   //  the body for nothing; audit B3)
-  if (hungry && !hs.some(h => h.d < 8) && now - lastEatFail > 10000 && (!world.feetInWater(bot) || bot.vehicle) && inv.foodItems(bot, { desperate: bot.food <= 6, hurt: bot.health < 20 }).length) {
-    const eatShooter = hs.find(h => RANGED.has(h.e.name) && h.d < 24 && canSee(h.e))
+  // (a mob LET GO - engagementStalled: 15s of nothing exchanged - is no attacker: a pillager camped 2.5b off a dug hole and never
+  //  shot again, and the bot sat 11 minutes at hp 14, food 16, 17 bread in the pack, the hp it never regained the fight it never
+  //  had, 2026-10-06. Its hit takes it up again - the threat row, ahead of this one)
+  if (hungry && !hs.some(h => h.d < 8 && (!noChase.has(h.e.id) || h.d < 3)) && now - lastEatFail > 10000 && (!world.feetInWater(bot) || bot.vehicle) && inv.foodItems(bot, { desperate: bot.food <= 6, hurt: bot.health < 20 }).length) {
+    // (a witch past its reach is no reason to move: cover from it is distance, and the distance is had - an "out of sight to eat"
+    //  flee from one is the witch flee again, let go at once; and within it, eating is the sprint line's alone: the witch flee above)
+    const eatShooter = hs.find(h => RANGED.has(h.e.name) && h.d < 24 && !(MAGIC.has(h.e.name) && h.d > WITCH_CLEAR) && canSee(h.e))
     const cover = eatShooter && bot.food > 6 && !pinned ? fleeHeading(eatShooter.e) : null
     // in its sight with a way out: get out of sight FIRST (the cover flee - it ends when the sight is lost, and then this
     // eats); the veto alone left the bot standing in the open at hp 3, neither eating nor moving (audit B3)
@@ -1903,7 +1932,7 @@ function install (b) {
   if (bot.inventory && bot.inventory.on) bot.inventory.on('updateSlot', () => { dressFailed = null })
   { let hp0 = bot.health; bot.on('health', () => { const d = (hp0 || 0) - (bot.health || 0); if (d > 0) { hurtLog.push({ at: Date.now(), d }); while (hurtLog.length > 20) hurtLog.shift() } hp0 = bot.health }) }
   bot.on('entityHurt', (e, source) => {
-    if (e !== bot.entity) return
+    if (e !== bot.entity) { if (e && source && bot.entity && source.id === bot.entity.id) landedAt = Date.now(); return } // (a hit of ours landed: engagementStalled's progress)
     lastHurtAt = Date.now()
     // the server names who hurt us (damage_event's source entity - the skeleton, not its arrow); none for a fall,
     // drowning, a cactus. (It used to be the nearest hostile: a fall beside a zombie was "hit by the zombie".)

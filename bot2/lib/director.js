@@ -298,8 +298,25 @@ function missingKit () {
   // (only within the chest's reach: far out, "missing" a bow at home beat the walk home ten times over, audit #23)
   const bankNear = mem.get().home && bot.entity && world.dist2(bot.entity.position, mem.get().home) <= 64
   if (bankNear && !inv.has(bot, 'bow') && base.bankCount('bow') > 0) out.push('bow')
-  if (bankNear && inv.count(bot, 'arrow') < 16 && base.bankCount('arrow') > 0) out.push('arrow')
+  // (and MADE when the chest has none: a bow in the pack and no arrow anywhere through a pillager patrol, the arrows of the
+  //  morning's skeleton spent and nothing that made more - the flint and feathers that make them were tossed as junk,
+  //  2026-10-06. From flint and feathers on hand - kept now, never a trip for them: a chicken or a gravel dig brings them)
+  if (inv.count(bot, 'arrow') < 16 && (inv.has(bot, 'bow') || (bankNear && base.bankCount('bow') > 0)) && ((bankNear && base.bankCount('arrow') > 0) || arrowCrafts(bankNear) > 0)) out.push('arrow')
+  // ARMOUR WITH NO IRON FOR IT: the head and the chest - the fights' pieces - in leather from the chest's hides while that slot
+  // is bare and the iron for it is not on hand (iron goes on over it when it comes: ironWanted still asks, rank 1 < 4). A
+  // few hides of the build's - survival before the build's books; chainmail is never made, only worn when found (the dress row)
+  for (const [slot, piece, cost] of [['torso', 'leather_chestplate', 8], ['head', 'leather_helmet', 5]]) {
+    if (inv.wornArmor(bot)[slot] || inv.items(bot).some(i => i.name.endsWith('_' + inv.ARMOR_SLOTS[slot]))) continue // (a piece for it in the pack: the dress row's)
+    const iron = 'iron_' + piece.split('_')[1]
+    if (inv.count(bot, 'iron_ingot') + inv.count(bot, 'raw_iron') + (bankNear ? base.bankCount('iron_ingot') + base.bankCount('raw_iron') : 0) >= IRON_COST[iron]) continue
+    if (inv.count(bot, 'leather') + (bankNear ? base.bankCount('leather') : 0) >= cost) out.push(piece)
+  }
   return out
+}
+// how many crafts of four arrows the flint, feathers and sticks' wood to hand allow (the bank's too when it is near)
+function arrowCrafts (bankNear) {
+  const has = n => inv.count(bot, n) + (bankNear ? base.bankCount(n) : 0)
+  return Math.min(16, has('flint'), has('feather'))
 }
 
 // A GRAVE STILL COVERED by what killed us: a shooter in tracking range of it; a shooter's own grave for its first three minutes
@@ -1200,10 +1217,22 @@ const TASKS = {
         if (inv.items(bot).filter(i => build.FILLER_ITEMS.test(i.name)).reduce((k, i) => k + i.count, 0) < 16) { log('dir', 'no filler to be had for the kit'); return false }
         continue
       }
-      if (t === 'bow' || t === 'arrow') { const got = await base.withdraw(bot, t, t === 'bow' ? 1 : 64).catch(() => 0); if (!got) { log('dir', `couldn't take the ${t} from the chest`); return false } continue }
+      if (t === 'bow' || (t === 'arrow' && base.bankCount('arrow') > 0 && base.distHome(bot) <= 64)) { const got = await base.withdraw(bot, t, t === 'bow' ? 1 : 64).catch(() => 0); if (!got) { log('dir', `couldn't take the ${t} from the chest`); return false } continue }
+      if (t === 'arrow') {
+        // (made: the flint and feathers out of the chest first, as many crafts as both allow - never a gather for them)
+        const near = base.distHome(bot) <= 64
+        const n = arrowCrafts(near)
+        for (const m of ['flint', 'feather']) if (near && inv.count(bot, m) < n) await base.withdraw(bot, m, n - inv.count(bot, m)).catch(() => 0)
+        const k = Math.min(n, inv.count(bot, 'flint'), inv.count(bot, 'feather'))
+        const a0 = inv.count(bot, 'arrow')
+        if (k < 1 || !await craft.ensure(bot, 'arrow', a0 + 4 * k, { shouldStop: dayStop })) { log('dir', `couldn't make arrows (${inv.count(bot, 'flint')} flint, ${inv.count(bot, 'feather')} feathers in the pack)`); return false }
+        log('dir', `made ${inv.count(bot, 'arrow') - a0} arrows - ${inv.count(bot, 'arrow')} for the bow`)
+        continue
+      }
       // a worn-out tool still counts as "held": ask for one more than we have
       const ok = await craft.ensure(bot, t, inv.count(bot, t) + 1, { shouldStop: dayStop })
       if (!ok) { log('dir', `couldn't make ${t}`); return false }
+      if (/^leather_/.test(t)) { await inv.wearBestArmor(bot).catch(() => 0); log('dir', `made and wore a ${t} - no iron for that slot yet (armour ${inv.armorPoints(bot)})`) }
     }
     return true
   },
@@ -1277,9 +1306,14 @@ const TASKS = {
   },
   async iron () {
     // smelt raw iron, then craft the most valuable missing piece we can afford
-    if (base.bankCount('raw_iron') > 0) await base.withdraw(bot, 'raw_iron', 64)
-    if (base.bankCount('iron_ingot') > 0) await base.withdraw(bot, 'iron_ingot', 64)
-    const raw = inv.count(bot, 'raw_iron')
+    // (THE GEAR'S SHARE, not the bank's every raw iron: 64 raw withdrawn and smelted for one 3-ingot pickaxe - the build's own raw
+    //  iron (raw iron blocks; its iron cells' ingots) and the fuel spent with it. The pieces asked for, their cost, first and no more)
+    const coreShort = gearIronShort(true) > 0
+    const need = ironWanted().filter(n => !(LOW_GEAR.has(n) && coreShort)).reduce((a, n) => a + IRON_COST[n], 0)
+    if (inv.count(bot, 'iron_ingot') < need && base.bankCount('iron_ingot') > 0) await base.withdraw(bot, 'iron_ingot', need - inv.count(bot, 'iron_ingot'))
+    const rawWant = Math.max(0, need - inv.count(bot, 'iron_ingot'))
+    if (inv.count(bot, 'raw_iron') < rawWant && base.bankCount('raw_iron') > 0) await base.withdraw(bot, 'raw_iron', rawWant - inv.count(bot, 'raw_iron'))
+    const raw = Math.min(inv.count(bot, 'raw_iron'), rawWant)
     if (raw > 0) await smelt.smeltItem(bot, 'iron_ingot', raw, { noWithdraw: true })
     let made = 0
     for (const n of ironWanted()) {
