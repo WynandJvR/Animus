@@ -272,9 +272,12 @@ async function fellMega (bot, corner, re, { allowZones = [], shouldStop, leaves 
   // knockback's fall (audit 2026-10-06); stopped there, the way down takes what it reaches
   const walled = fy => [fy + 1, fy + 2].some(y => [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => { const b = world.at(bot, entry.x + dx, y, entry.z + dz); return !!b && b.boundingBox === 'block' && !world.LEAF_RE.test(b.name) }))
   const top = megaTop(bot, corner, re)
+  let peak = y0
   for (let guard = 0; guard < MEGA_SPAN + 4; guard++) {
     if (shouldStop && shouldStop()) { upWhy = 'stopped'; break }
+    await landed(bot) // (every height read off a body standing - never mid-jump)
     const fy = Math.floor(bot.entity.position.y + 0.01)
+    peak = Math.max(peak, fy)
     if (fy + 2 >= top) break
     const over = world.at(bot, entry.x, fy + 2, entry.z)
     if (!over) { upWhy = 'unloaded over the head'; break }
@@ -291,7 +294,9 @@ async function fellMega (bot, corner, re, { allowZones = [], shouldStop, leaves 
   const crown = b => { try { const pr = b.getProperties(); return pr.persistent === false || pr.persistent === 'false' } catch { return false } }
   let leafN = 0
   for (let guard = 0; guard < MEGA_SPAN + 4; guard++) {
+    await landed(bot)
     const fy = Math.floor(bot.entity.position.y + 0.01)
+    peak = Math.max(peak, fy)
     // (up to four over the feet - all the arm reaches: a climb stopped low for open air still takes a square's low logs, and
     //  orchard.trunkLog reads a square as grown only with a log that low)
     for (const dy of [4, 3, 2, 1, 0]) for (const c of cols) if (isLog(c.x, fy + dy, c.z) && act.reach(bot, { x: c.x, y: fy + dy, z: c.z }, 4.5)) await dig({ x: c.x, y: fy + dy, z: c.z })
@@ -299,8 +304,10 @@ async function fellMega (bot, corner, re, { allowZones = [], shouldStop, leaves 
       const lv = world.findBlocks(bot, world.LEAF_RE, { maxDistance: 4.5, count: 60, point: bot.entity.position.offset(0, 1.6, 0), filter: b => crown(b) && b.position.x >= corner.x - 4 && b.position.x <= corner.x + 5 && b.position.z >= corner.z - 4 && b.position.z <= corner.z + 5 })
       for (const b of lv) if (act.reach(bot, b.position, 4.5) && await act.dig(bot, b.position, { timeoutMs: 3000, noWalk: true, allowZones: zones }).catch(() => false)) leafN++
     }
-    const under = { x: Math.floor(bot.entity.position.x), y: fy - 1, z: Math.floor(bot.entity.position.z) }
-    if (!ours(under)) { if (under.y >= y0) { const b = world.at(bot, under.x, under.y, under.z); downWhy = `not over my pillar at y${under.y} (${b ? b.name : '?'} under me, at ${Math.floor(bot.entity.position.x)},${Math.floor(bot.entity.position.z)})` } break }
+    // (the block the body stands ON - the centre's, else the one the hitbox rests on: a body half over a neighbour's block
+    //  read "air under me" - standingOn)
+    const under = standingOn(bot)[0] || { x: Math.floor(bot.entity.position.x), y: fy - 1, z: Math.floor(bot.entity.position.z) }
+    if (!ours(under)) { if (under.y >= y0) { const b = world.at(bot, under.x, under.y, under.z); downWhy = `not over my pillar at y${under.y} (${b ? b.name : '?'} under me, at ${under.x},${under.z})` } break }
     if (!await dig(under)) { downWhy = `the pillar under me at y${under.y} would not come out (${act.lastDigWhy() || '?'})`; break }
     const t0 = Date.now(); while (!bot.entity.onGround && Date.now() - t0 < 1500) await move.sleep(50)
     pillar.splice(pillar.findIndex(q => q.x === under.x && q.y === under.y && q.z === under.z), 1)
@@ -309,9 +316,11 @@ async function fellMega (bot, corner, re, { allowZones = [], shouldStop, leaves 
   // under the feet - our pillar, filler in the square's columns, the tree's own logs - each drop checked (climbDownPillar).
   // Never handed to the next walk from the top: the harvest walked on from a 20-high pillar (audit 2026-10-06)
   let stranded = false
+  await landed(bot)
   if (Math.floor(bot.entity.position.y + 0.01) > y0 + world.SAFE_DROP) {
     const inSquare = c => cols.some(q => q.x === c.x && q.z === c.z) && c.y >= y0
     await climbDownPillar(bot, c => ours(c) || (inSquare(c) && (b => !!b && (FILL.test(b.name) || re.test(b.name)))(world.at(bot, c.x, c.y, c.z))), { allowZones: zones, onDug: c => { const i = pillar.findIndex(q => q.x === c.x && q.y === c.y && q.z === c.z); if (i >= 0) pillar.splice(i, 1) } })
+    await landed(bot)
     stranded = Math.floor(bot.entity.position.y + 0.01) > y0 + world.SAFE_DROP
   }
   // the ground level last (the neighbours' stumps), then what fell
@@ -322,8 +331,18 @@ async function fellMega (bot, corner, re, { allowZones = [], shouldStop, leaves 
   const got = inv.count(bot, b => re.test(b)) - before
   const left = cols.reduce((n, c) => { let k = 0; for (let y = y0; y <= y0 + MEGA_SPAN; y++) if (isLog(c.x, y, c.z)) k++; return n + k }, 0)
   const missed = Object.entries(misses).map(([w, n]) => `${n}x ${w}`).join('; ')
-  log('gather', `felled a mega tree at ${move.fmt(corner)} from inside (up ${entry.x},${entry.z} to y${top}): +${got} logs${leafN ? `, ${leafN} leaves` : ''}${left ? `, ${left} left standing` : ''}${pillar.length ? `, ${pillar.length} pillar block(s) left` : ''}${upWhy ? ` - the climb stopped: ${upWhy}` : ''}${downWhy ? ` - the way down stopped: ${downWhy}` : ''}${missed ? ` - digs missed: ${missed}` : ''}${stranded ? ` - STRANDED at y${Math.floor(bot.entity.position.y)}, ${Math.floor(bot.entity.position.y) - y0} over the foot` : ''}`)
+  log('gather', `felled a mega tree at ${move.fmt(corner)} from inside (climbed ${entry.x},${entry.z} to feet y${peak}, the square's top log y${top}): +${got} logs${leafN ? `, ${leafN} leaves` : ''}${left ? `, ${left} left standing` : ''}${pillar.length ? `, ${pillar.length} pillar block(s) left` : ''}${upWhy ? ` - the climb stopped: ${upWhy}` : ''}${downWhy ? ` - the way down stopped: ${downWhy}` : ''}${missed ? ` - digs missed: ${missed}` : ''}${stranded ? ` - STRANDED at y${Math.floor(bot.entity.position.y)}, ${Math.floor(bot.entity.position.y) - y0} over the foot` : ''}`)
   return { got, stranded }
+}
+// A body standing, not in a jump or a fall (act.grounded - the dig's own rule), within a deadline
+async function landed (bot, maxMs = 1500) { const t = Date.now(); while (!act.grounded(bot) && Date.now() - t < maxMs) await move.sleep(50) }
+// THE BLOCKS THE BODY STANDS ON: the one under its centre first, then any other the hitbox (0.3 each side) rests on - solid
+// ones only. A body half over a pillar's edge stands on its neighbour's block, and the cell under the centre is air.
+function standingOn (bot) {
+  const p = bot.entity.position; const fy = Math.floor(p.y - 0.01)
+  const cells = [{ x: Math.floor(p.x), z: Math.floor(p.z) }]
+  for (const dx of [-0.3, 0.3]) for (const dz of [-0.3, 0.3]) { const c = { x: Math.floor(p.x + dx), z: Math.floor(p.z + dz) }; if (!cells.some(q => q.x === c.x && q.z === c.z)) cells.push(c) }
+  return cells.map(c => ({ x: c.x, y: fy, z: c.z })).filter(c => world.isSolid(world.at(bot, c.x, c.y, c.z)))
 }
 // DOWN A PILLAR FROM ON TOP, a player's way: the block under the feet dug, a drop of one onto the next, while `ours(cell)`
 // says the block under the feet is ours to take - never one whose dig drops the body further than SAFE_DROP, nor onto
@@ -332,8 +351,9 @@ async function fellMega (bot, corner, re, { allowZones = [], shouldStop, leaves 
 async function climbDownPillar (bot, ours, { allowZones = [], onDug = null, max = 48 } = {}) {
   let n = 0
   for (let guard = 0; guard < max; guard++) {
-    const me = bot.entity.position; const under = { x: Math.floor(me.x), y: Math.floor(me.y - 0.01), z: Math.floor(me.z) }
-    if (!ours(under)) break
+    await landed(bot)
+    const under = standingOn(bot).find(c => ours(c))
+    if (!under) break
     { const bl = world.at(bot, under.x, under.y - 1, under.z); if (act.fallBelow(bot, under) > world.SAFE_DROP || !bl || world.isLavaBlock(bl) || world.isWaterBlock(bl)) break }
     if (!await act.dig(bot, new Vec3(under.x, under.y, under.z), { noWalk: true, timeoutMs: 6000, allowZones }).catch(() => false)) break
     const t0 = Date.now(); while (!bot.entity.onGround && Date.now() - t0 < 1500) await move.sleep(50)
@@ -517,12 +537,16 @@ async function towerUp (bot, { allowZones = [], onPlaced = null, builder = false
     if (below && yAt > y0 + 1.0) await bot._placeBlockWithOptions(below, new Vec3(0, 1, 0), { swingArm: 'right', forceLook: true }).catch(e => { placeErr = e && e.message })
     else if (below) placeErr = 'the jump never cleared the cell'
     const jumpNote = `jump: onGround ${g0}, placed at y${yAt.toFixed(2)} vy ${vyAt.toFixed(2)}, peak y${yMax.toFixed(2)} in ${Date.now() - t0}ms`
-    await move.sleep(300)
+    // LANDED, then read: "up" is a body STANDING a block up (act.grounded), never one still in the jump - read at a fixed
+    // 300ms, the jump's apex (y0+1.2) passed for a tower whose block never went in, and a felling counted a pillar block
+    // that was air: "not over my pillar ... (air under me)" at the top of a mega spruce, 2026-10-06 21:17
+    await move.sleep(150)
+    { const tl = Date.now(); while (!act.grounded(bot) && Date.now() - tl < 1200) await move.sleep(50) }
     // (every tower block but the builder's is litter until it comes down: the one ledger - litter.js. Read AFTER the
     //  settle, and a body standing a block up counts as the block's word: read straight after placeBlock - which can
     //  settle before the server's update lands - the ledger lost 3 of 9 orchard pillar blocks, and nothing took them
     //  down: the trunk cells filled with cobblestone and the spots were dropped, 2026-09-28)
-    const up = Math.floor(bot.entity.position.y) >= y0 + 1
+    const up = act.grounded(bot) && Math.floor(bot.entity.position.y + 0.01) >= y0 + 1
     { const nb = world.at(bot, x0, y0, z0); if (up || (nb && world.isSolid(nb))) { lastPillar = { x: x0, y: y0, z: z0 }; if (onPlaced) onPlaced(lastPillar); if (!builder && !inMineShaft(bot, lastPillar)) require('./litter').note(bot, lastPillar, filler.name) } }
     if (!up) towerWhy = `the block did not go in (under me ${below ? below.name : '?'} at y${y0 - 1}, cell y${y0} ${(world.at(bot, x0, y0, z0) || {}).name || '?'}${placeErr ? ', ' + placeErr : ''}; feet y${bot.entity.position.y.toFixed(2)}; ${jumpNote})`
     return up
