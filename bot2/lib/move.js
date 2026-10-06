@@ -688,9 +688,13 @@ async function crossDoor (bot, goal) {
   const inA = insideHut(sideA); const inB = insideHut(sideB)
   if (inA !== inB) {
     const meIn = insideHut(me.floored())
-    const goalIn = gp && goal.y != null ? insideHut({ x: goal.x, y: goal.y, z: goal.z }) : false
+    const goalIn = gp ? insideHut({ x: goal.x, y: goal.y != null ? goal.y : Math.floor(me.y), z: goal.z }) : false // (an x/z goal at our own height: audit)
     if (meIn) exit = inA ? sideB : sideA
     else if (goalIn) exit = inA ? sideA : sideB
+    // (standing IN the doorway - the door cell is in the wall, neither inside nor out - with the door shut in front: the
+    //  goal's side is the exit; read as "outside, goal outside" the crossing was refused and the walk stalled 33s at
+    //  its own door twice a day, 2026-10-06)
+    else if (Math.floor(me.x) === d.x && Math.floor(me.z) === d.z) exit = inA ? sideB : sideA
     // outside with the goal outside too: the hut is not on the way. (The "side toward the goal" of a west door
     // with the goal to the east is the INSIDE step: every stall beside the hut crossed in, the next walk crossed
     // out again - in/out for 90s on each trip east, 2026-09-22)
