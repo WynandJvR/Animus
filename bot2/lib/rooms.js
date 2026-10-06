@@ -25,16 +25,22 @@ function edgeOf (dx, dz) { return dx === 1 ? 'east' : dx === -1 ? 'west' : dz ==
 //  on its floor and entered or left through any edge but its panel's - the physics decides; audit)
 // opens: a door is a way through whatever its state - the walker opens it (move.crossDoor, the planner's door rule); for the
 // question "can I get there", where a door shut behind me read as a wall and the castle beyond it as out of reach (audit)
-function walkModel (w, isC = () => false, { opens = false } = {}) {
+// avoid(x,y,z): a cell the body may not stand in - never a floor, never a wall (the walk search's: a leg the body could not
+// make, a cell the planner prices out). Passed as isC it was a SOLID cell, a floor for the cell over it: a leg end marked bad
+// stood the search on air over it, 2026-10-06
+function walkModel (w, isC = () => false, { opens = false, avoid = null } = {}) {
   const passable = b => (w.bodyPassable ? w.bodyPassable(b) : w.isAirish(b)) || w.isOpenTrapdoor(b) || (/_door$|_fence_gate$/.test(b.name) && !/^iron_door$/.test(b.name))
   const air = (x, y, z) => { if (isC(x, y, z)) return false; const b = w.at(x, y, z); return !!b && passable(b) }
   const climb = (x, y, z) => { if (isC(x, y, z)) return false; const b = w.at(x, y, z); return !!b && CLIMB_RE.test(b.name) }
   // (never ON or IN a fire - a campfire, magma: the planner's blocksToAvoid; the castle's 150 campfires read as floor here and
   //  a route over one was no route to the walker; audit 2026-10-03)
   const hot = (x, y, z) => { const b = w.at(x, y, z); return !!b && /^(soul_)?campfire$|^magma_block$|(^|_)fire$/.test(b.name) }
-  const st = (x, y, z) => { if (hot(x, y - 1, z) || hot(x, y, z)) return false; if (!air(x, y, z) || !air(x, y + 1, z)) return false; if (isC(x, y - 1, z)) return true; const fb = w.at(x, y, z); if (fb && (/_door$/.test(fb.name) || w.isOpenTrapdoor(fb))) { const fl = w.at(x, y - 1, z); return !!fl && w.isSolid(fl) && !w.isOpenTrapdoor(fl) } return w.standable(x, y, z) }
+  const st = (x, y, z) => { if (hot(x, y - 1, z) || hot(x, y, z)) return false; if (!air(x, y, z) || !air(x, y + 1, z)) return false; if (avoid && avoid(x, y, z)) return false; if (isC(x, y - 1, z)) return true; const fb = w.at(x, y, z); if (fb && (/_door$/.test(fb.name) || w.isOpenTrapdoor(fb))) { const fl = w.at(x, y - 1, z); return !!fl && w.isSolid(fl) && !w.isOpenTrapdoor(fl) } return w.standable(x, y, z) }
   // (an open door's or trapdoor's plate by plateEdge - the planner's own model; a CLOSED door by its panel here)
-  const panelOf = b => { if (!b) return null; if (opens && /_door$/.test(b.name) && !/^iron_door$/.test(b.name)) return null; const v = w.plateEdge(b); if (v) return edgeOf(v[0], v[1]); if (/_door$/.test(b.name)) return doorPanel(b); return null }
+  // (opens: a CLOSED door is a way through - the crossing opens it; an OPEN one's plate is an edge, as the planner's own
+  //  panel rule has it. Both were free here: a leg ran past an open door's plate to the ladder behind it, the planner
+  //  refused that step and the leg timed out where it began, 2026-10-06)
+  const panelOf = b => { if (!b) return null; const v = w.plateEdge(b); if (v) return edgeOf(v[0], v[1]); if (opens && /_door$/.test(b.name) && !/^iron_door$/.test(b.name)) return null; if (/_door$/.test(b.name)) return doorPanel(b); return null }
   const edgeShut = (x, y, z, dx, dz) => [w.at(x, y, z), w.at(x, y + 1, z)].some(b => panelOf(b) === edgeOf(dx, dz))
   const next = p => {
     const out = []
@@ -54,9 +60,9 @@ function walkModel (w, isC = () => false, { opens = false } = {}) {
     // without it every floor served by the castle's ladders read as shut off (audit 2026-10-02)
     if (climb(p.x, p.y, p.z)) { // (a ladder at the feet - the planner's rule)
       const y = p.y + 1
-      if ((climb(p.x, y, p.z) || air(p.x, y, p.z)) && (climb(p.x, y + 1, p.z) || air(p.x, y + 1, p.z))) out.push({ x: p.x, y, z: p.z })
+      if ((climb(p.x, y, p.z) || air(p.x, y, p.z)) && (climb(p.x, y + 1, p.z) || air(p.x, y + 1, p.z)) && !(avoid && avoid(p.x, y, p.z))) out.push({ x: p.x, y, z: p.z })
     }
-    if (climb(p.x, p.y - 1, p.z)) out.push({ x: p.x, y: p.y - 1, z: p.z })
+    if (climb(p.x, p.y - 1, p.z) && !(avoid && avoid(p.x, p.y - 1, p.z))) out.push({ x: p.x, y: p.y - 1, z: p.z })
     return out
   }
   return { air, st, next }

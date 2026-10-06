@@ -1345,6 +1345,7 @@ function feetFor (bot, c) {
 let reach = null
 const badLegCells = new Map() // cell key -> when a site leg to it failed: the walk model's mismatch with the body (walkReach routes round)
 const REACH_MARGIN = 10; const REACH_CAP = 15000
+const DEAR_STEP = 50 // (a step the planner takes only with no other way: a trap's 50, under the build's 60; a campfire's side 30 is a cost)
 async function walkReach (bot) {
   if (!job || !bot.entity) return null
   const f = world.feetPos(bot)
@@ -1356,9 +1357,20 @@ async function walkReach (bot) {
   rw.at = (x, y, z) => { const k = x + ',' + y + ',' + z; let v = atM.get(k); if (v === undefined) { v = at0(x, y, z) || null; atM.set(k, v) } return v }
   rw.standable = (x, y, z) => { const k = x + ',' + y + ',' + z; let v = stM.get(k); if (v === undefined) { v = st0(x, y, z); stM.set(k, v) } return v }
   // (a cell a leg could not reach, lately: the model says walkable, the body did not get there - routed round for 10 min)
-  const W = rooms.walkModel(rw, (x, y, z) => { const t = badLegCells.get(x + ',' + y + ',' + z); return !!t && Date.now() - t < 600000 }, { opens: true }); const b = job.box
+  // (and a cell THE LEGS' OWN PLANNER prices out - the steps it takes only with no other way: under the build's floor (60), a
+  //  remembered trap or fall (50-60), a refused door, the pen, a head under water. Walked by the search at one step a cell, a
+  //  leg's end went under the castle's floor at its west rim, the planner would not go in: a 213-cell route and a timeout
+  //  2.3b short, 2026-10-06. Asked of the legs' movements themselves - one set of rules, the walker's)
+  const mv = move.movementsFor(bot, { dig: false, place: false, sprint: false }); const dearM = new Map()
+  const dear = (x, y, z) => { const k = x + ',' + y + ',' + z; let v = dearM.get(k); if (v === undefined) { v = false; try { const bk = mv.getBlock({ x, y, z }, 0, 0, 0); v = !!bk && !!bk.position && mv.exclusionStep(bk) >= DEAR_STEP } catch {} dearM.set(k, v) } return v }
+  // (a cell a leg could not reach, lately: the model says walkable, the body did not get there - routed round for 10 min.
+  //  AVOIDED, never solid: passed as a closed cell it was a floor for the cell over it - a search standing on air)
+  const avoid = (x, y, z) => { const t = badLegCells.get(x + ',' + y + ',' + z); return (!!t && Date.now() - t < 600000) || dear(x, y, z) }
+  const W = rooms.walkModel(rw, () => false, { opens: true, avoid }); const b = job.box
   const inArea = q => q.x >= b.x1 - REACH_MARGIN && q.x <= b.x2 + REACH_MARGIN && q.z >= b.z1 - REACH_MARGIN && q.z <= b.z2 + REACH_MARGIN
-  const start = [0, -1, 1].map(dy => ({ x: f.x, y: f.y + dy, z: f.z })).find(q => W.st(q.x, q.y, q.z))
+  // (where I stand is a start whatever it costs - under the floor, the way out is the walk's: the model without the avoid)
+  const W0 = rooms.walkModel(rw, () => false, { opens: true })
+  const start = [0, -1, 1].map(dy => ({ x: f.x, y: f.y + dy, z: f.z })).find(q => W0.st(q.x, q.y, q.z))
   // (no cell the walk model stands in under me - a stair, a slab's edge, a ladder: no search from here; read as a set of
   //  one, 20 cells were held at once, 2026-10-02)
   if (!start) { reach = null; return null }
