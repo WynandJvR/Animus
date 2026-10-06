@@ -217,6 +217,7 @@ function descentStart (m, fromIdx) {
   }
   return null
 }
+const MAX_LEVELS = 8 // (a chain of flights a mine holds: a staircase turned past one cave after another stops somewhere)
 function descend (m, fromIdx, target, oreY) {
   const s = descentStart(m, fromIdx)
   if (!s || target > s.start.y - 4) return false
@@ -899,6 +900,15 @@ async function mineFor (bot, itemName, target, ctx = {}) {
         if (!m.stairsDone && m.cursor.y > m.level + 12) {
           // (the ACTIVE level's stairs: a deeper level blocked within 8 of its top is dropped, not the mine)
           if (m.stairTop.y - m.cursor.y < 8) { log('mine', `the stairs are blocked at y${m.cursor.y}, ${m.active ? 'just under the level above' : 'just under the surface'} - abandoning ${m.active ? 'this level' : 'this mine'}`); abandonMine(m); return false }
+          // AN ORE TRIP GOES ON DOWN: the band it was dug for lies well under the blockage - a new flight from here, another
+          //  way (descend: clear of the stairs above), never a tunnel at the wrong depth. The iron trip met a cave at y82, its
+          //  band at y11-30, and tunnelled at y82 - caves, walling, boxed in, 0 iron in 8 minutes, 2026-10-06
+          const want = m.level
+          if (oreTrip && ore && ore.y < m.cursor.y - 12 && levelsOf(m).length < MAX_LEVELS) {
+            m.stairsDone = true; m.level = m.cursor.y; m.stairsEnd = { x: m.cursor.x, y: m.cursor.y, z: m.cursor.z }
+            if (descend(m, m.active, want, ore.y)) { saveMine(m); log('mine', `the stairs are blocked at y${levelsOf(m)[levelsOf(m).length - 2].level} - on down to y${want} another way, for the ${itemName} band at y${ore.y}`); fails = 0; turnFrom = null; turnSide = 0; continue }
+            m.stairsDone = false; m.level = want; m.stairsEnd = null // (no way on down clear of the stairs: as before)
+          }
           log('mine', `the stairs are blocked at y${m.cursor.y} - tunnelling at this depth`)
           m.oreY = m.cursor.y // (the band this level works is the one it reached - never the one it was dug for: audit)
         }

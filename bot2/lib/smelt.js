@@ -42,12 +42,21 @@ function furnacesNear (bot, maxDist = 32) {
 // THE home furnaces: every furnace round home out to the furnace bank's last ring (hut.furnaceSpots: ring k is 2k out
 // from the room, six rings). One definition - three lookups with three radii and counts (16/24, 16/32, 48/12) left
 // furnaces the loader never saw.
+function homeReach () {
+  const hp = mem.get().hutPlan
+  const half = hp ? Math.max(hp.interior.x2 - hp.interior.x1, hp.interior.z2 - hp.interior.z1) / 2 + 1 : 3
+  return Math.ceil((half + 2 * require('./hut').BANK_RINGS) * Math.SQRT2) + 1
+}
 function homeFurnaces (bot) {
   const home = mem.get().home
   if (!home) return furnacesNear(bot, 32)
-  const hp = mem.get().hutPlan
-  const half = hp ? Math.max(hp.interior.x2 - hp.interior.x1, hp.interior.z2 - hp.interior.z1) / 2 + 1 : 3
-  return world.findBlocks(bot, /^furnace$/, { maxDistance: Math.ceil((half + 2 * require('./hut').BANK_RINGS) * Math.SQRT2) + 1, count: 256, point: new Vec3(home.x, home.y, home.z) })
+  return world.findBlocks(bot, /^furnace$/, { maxDistance: homeReach(), count: 256, point: new Vec3(home.x, home.y, home.z) })
+}
+// (one of homeFurnaces' set, asked of one position without the scan: a furnace there, within its reach of home)
+function isHomeFurnace (bot, p) {
+  const home = mem.get().home; const b = world.at(bot, p.x, p.y, p.z)
+  if (!b || b.name !== 'furnace') return false
+  return home ? world.dist3({ x: p.x + 0.5, y: p.y + 0.5, z: p.z + 0.5 }, home) <= homeReach() : true
 }
 
 // THE WALK ROUND THE BANK: the furnaces in the order a player walks them - the nearest to where I stand, then the nearest
@@ -298,6 +307,51 @@ function note (fb, f, bot) {
   const fuelled = !!fuel && fuelValue(fuel.name) > 0
   markFurnace(fb.position, inp || out ? { input: inp ? inp.name : null, output: out ? out.name : null, inN: inp ? inp.count : 0, outN: out ? out.count : 0, fuel: fuelled || lit, at: Date.now() } : null)
 }
+// WHAT THE FURNACES HOLD of an item - input waiting and output made - by the ledger every open writes (note): the stock a
+// smelt in flight still is. Read nowhere, 14 raw iron loaded for the shield were "0 iron" four minutes later and an iron trip
+// went to dig what sat smelting at home, 2026-10-06 23:45. (An iron batch: raw in + ingots out is the batch whatever its
+// progress - 1:1.)
+// (only the home furnaces' entries - the set collectOf takes from: a furnace blown up, tidied or left out on an expedition
+//  was phantom iron no collect could ever take, the gear "short" for good and the iron rung looping on nothing; audit. An
+//  entry whose cell is loaded and holds no furnace is forgotten here)
+function furnaceCount (bot, name) {
+  let n = 0
+  const use = mem.get().furnaceUse || {}
+  for (const [k, u] of Object.entries(use)) {
+    if (!u || (u.input !== name && u.output !== name)) continue
+    const [x, y, z] = k.split(',').map(Number); const p = { x, y, z }
+    const b = world.at(bot, x, y, z)
+    if (b && b.name !== 'furnace') { markFurnace(p, null); continue }
+    if (!isHomeFurnace(bot, p)) continue
+    if (u.input === name) n += u.inN || 0
+    if (u.output === name) n += u.outN || 0
+  }
+  return n
+}
+// Take what the home furnaces have made of `output`, waiting while they still smelt it (deadline: 10s an item left over the
+// furnaces holding it, and the caller's stop). Returns the items taken.
+async function collectOf (bot, output, { shouldStop = null, maxWaitMs = 180000 } = {}) {
+  const use = () => mem.get().furnaceUse || {}
+  const holds = fb => { const u = use()[fkey(fb.position)]; return !!u && (u.output === output || (u.input && smeltsTo(u.input) === output)) }
+  let got = 0
+  const t0 = Date.now()
+  for (let round = 0; round < 20; round++) {
+    const furns = tour(bot, homeFurnaces(bot).filter(holds))
+    if (!furns.length) break
+    let waiting = 0
+    for (const fb of furns) {
+      if (shouldStop && shouldStop()) return got
+      const f = await openAt(bot, fb, { shouldStop })
+      if (!f) continue
+      try { const o = f.outputItem(); if (o && o.name === output) { await f.takeOutput(); got += o.count; landed(o.name, o.count) } const i = f.inputItem(); if (i && smeltsTo(i.name) === output) waiting = Math.max(waiting, i.count) } catch {} finally { try { note(fb, f, bot) } catch {} try { f.close() } catch {} }
+    }
+    if (!waiting || Date.now() - t0 > maxWaitMs) break
+    // (in 1s steps, the stop asked each - a dusk is not waited out)
+    for (let w = 0; w < Math.min(10, waiting * 10); w++) { if (shouldStop && shouldStop()) return got; await move.sleep(1000) }
+  }
+  if (got) log('smelt', `collected ${got} ${output} from the furnaces`)
+  return got
+}
 function busyFurnaces (bot) {
   const all = homeFurnaces(bot)
   const use = mem.get().furnaceUse
@@ -326,7 +380,14 @@ async function smeltItem (bot, output, count, ctx = {}) {
   }
   const survival = Object.values(inv.COOKED_OF).includes(output) // cooking a meal may burn the build's wood
   if (!await pickFuel(bot, count, { noCharcoal: output === 'charcoal', survival })) { log('smelt', `no fuel for ${count} ${output}`); return false }
+  // (furnaces to place for it, at most - as ever; furnaces to USE: every idle one there is, ~4 items each - 10s an item a
+  //  furnace, so 14 raw iron in one furnace was 140s of the gear's wait, 2026-10-06; the opens cost a few seconds each)
   const nFurn = Math.max(1, Math.min(4, Math.ceil(count / 16)))
+  // (and no more furnaces than the fuel in the pack can light: pickFuel sized it for the whole batch - a coal a furnace (8
+  //  smelts), a lava bucket one, wood ~4 smelts a furnace's share - 14 raw iron over 4 furnaces with 2 coal lit two, and
+  //  6 of the 14 never went in; audit)
+  const fuelSlots = inv.items(bot).reduce((t, i) => t + (/^(coal|charcoal|lava_bucket)$/.test(i.name) ? i.count : /_(planks|log|wood|stem)$/.test(i.name) ? i.count * fuelValue(i.name) / 4 : 0), 0)
+  const nUse = Math.max(nFurn, Math.min(Math.ceil(count / 4), Math.floor(fuelSlots)))
   let furns = furnacesNear(bot, 48)
   // furnaces live at home: away from it, walk back rather than leave a trail of furnaces across the map
   const home = mem.get().home
@@ -342,7 +403,7 @@ async function smeltItem (bot, output, count, ctx = {}) {
   if (!furns.length) return false
   // idle (unlit) furnaces first: a lit one is busy with another batch
   furns.sort((a, b) => isLit(a) - isLit(b) || (move.insideHut(b.position) ? 1 : 0) - (move.insideHut(a.position) ? 1 : 0))
-  furns = furns.slice(0, nFurn)
+  furns = furns.slice(0, Math.max(nFurn, Math.min(nUse, furns.filter(fb => !isLit(fb)).length)))
   const per = Math.ceil(count / furns.length)
   let loaded = 0
   for (const fb of furns) {
@@ -531,4 +592,4 @@ async function collectFurnaces (bot, { shouldStop = null } = {}) {
   return got
 }
 
-module.exports = { burnForCharcoal, inFlight, smeltsTo, woodSurplus, smeltItem, loadFurnaces, collectFurnaces, refuelFurnaces, placeFurnace, furnacesNear, homeFurnaces, pickFuel, putFuel, fuelValue, clearBucket, LAVA_MIN, buildNeeds }
+module.exports = { furnaceCount, collectOf, burnForCharcoal, inFlight, smeltsTo, woodSurplus, smeltItem, loadFurnaces, collectFurnaces, refuelFurnaces, placeFurnace, furnacesNear, homeFurnaces, pickFuel, putFuel, fuelValue, clearBucket, LAVA_MIN, buildNeeds }

@@ -361,16 +361,28 @@ const IRON_COST = { shield: 1, bucket: 3, iron_chestplate: 8, iron_leggings: 7, 
 //  iron trip for three days - no shears, 318 leaves waiting, no armour after a death, 2026-10-02)
 const ORE_METHOD = 'depths' // ('depths': the ore found by spheres down the column under home, 2026-10-02)
 const ARMOUR_GEAR = new Set(['shield', 'bucket', 'iron_chestplate', 'iron_leggings', 'iron_helmet', 'iron_boots'])
-function ironStock () { return inv.count(bot, 'iron_ingot') + base.bankCount('iron_ingot') + inv.count(bot, 'raw_iron') + base.bankCount('raw_iron') }
+// (THE iron we have: pack, bank AND the furnaces' raw in and ingots out - smelt.furnaceCount; one count for the trip, the
+//  task and the reserve)
+function ironIngots () { return inv.count(bot, 'iron_ingot') + base.bankCount('iron_ingot') + smelt.furnaceCount(bot, 'iron_ingot') + smelt.furnaceCount(bot, 'raw_iron') }
+function ironRaw () { return inv.count(bot, 'raw_iron') + base.bankCount('raw_iron') }
+function ironStock () { return ironIngots() + ironRaw() }
 // (core: the gear that carries the fights - shield, chest, head (and the bucket, the shears) - not the legs and the feet)
 const LOW_GEAR = new Set(['iron_leggings', 'iron_boots'])
 let ironTripCore = false // (the trip decide() chose: the core's ingots only, or the whole set - audit)
 function gearIronShort (core = false) {
   // (and the shears' two when they are wanted: the build's leaves wait on them, and no other trip brings iron - audit)
   const need = ironWanted().filter(n => (ARMOUR_GEAR.has(n) || n === 'shears') && !(core && LOW_GEAR.has(n))).reduce((a, n) => a + IRON_COST[n], 0)
-  const have = inv.count(bot, 'iron_ingot') + base.bankCount('iron_ingot') + inv.count(bot, 'raw_iron') + base.bankCount('raw_iron')
-  return Math.max(0, need - have)
+  return Math.max(0, need - ironStock())
 }
+// THE GEAR'S IRON KEPT FROM THE BUILD'S CRAFTS: the armour's pieces first - the 14 ingots smelted for the shield, chest and
+// helmet came out of the furnaces at dusk and the window's crafts made two cauldrons of them, the iron trip to start over,
+// 2026-10-06 23:54. Ingots first, then raw; only what the gear still wants, never more than there is.
+function gearIronKeep () {
+  const need = ironWanted().filter(n => ARMOUR_GEAR.has(n) || n === 'shears').reduce((a, n) => a + IRON_COST[n], 0)
+  const ingots = Math.min(need, inv.count(bot, 'iron_ingot') + base.bankCount('iron_ingot'))
+  return { iron_ingot: ingots, raw_iron: Math.min(need - ingots, ironRaw()) }
+}
+function withGearKeep (keep) { const g = gearIronKeep(); const k = Object.assign({}, keep); for (const [n, v] of Object.entries(g)) if (v > 0) k[n] = (k[n] || 0) + v; return k }
 
 // Choose a home next to the build site (or where we stand): dry open ground just outside it.
 // Score ground for a base: standable, dry (no water within 4), flat around (a base needs room),
@@ -752,8 +764,8 @@ function decide () {
   }
 
   // 8. iron gear when the iron is on hand
-  const iron = inv.count(bot, 'iron_ingot') + base.bankCount('iron_ingot')
-  const raw = inv.count(bot, 'raw_iron') + base.bankCount('raw_iron')
+  const iron = ironIngots() // (the furnaces' batch counted: the task collects it - iron())
+  const raw = ironRaw()
   const wanted = ironWanted()
   if (wanted.length && !held('iron')) {
     const cheapest = wanted.map(n => IRON_COST[n]).sort((a, b) => a - b)[0]
@@ -1310,6 +1322,8 @@ const TASKS = {
     //  iron (raw iron blocks; its iron cells' ingots) and the fuel spent with it. The pieces asked for, their cost, first and no more)
     const coreShort = gearIronShort(true) > 0
     const need = ironWanted().filter(n => !(LOW_GEAR.has(n) && coreShort)).reduce((a, n) => a + IRON_COST[n], 0)
+    // (the furnaces' iron first - a batch loaded before a restart or a dusk: taken, waited for while it smelts)
+    if (inv.count(bot, 'iron_ingot') < need && smelt.furnaceCount(bot, 'iron_ingot') + smelt.furnaceCount(bot, 'raw_iron') > 0) await smelt.collectOf(bot, 'iron_ingot', { shouldStop: dayStop }).catch(() => 0)
     if (inv.count(bot, 'iron_ingot') < need && base.bankCount('iron_ingot') > 0) await base.withdraw(bot, 'iron_ingot', need - inv.count(bot, 'iron_ingot'))
     const rawWant = Math.max(0, need - inv.count(bot, 'iron_ingot'))
     if (inv.count(bot, 'raw_iron') < rawWant && base.bankCount('raw_iron') > 0) await base.withdraw(bot, 'raw_iron', rawWant - inv.count(bot, 'raw_iron'))
@@ -1608,12 +1622,12 @@ async function processAtHome (stop = dayStop) {
   // the crafts that feed a furnace (stone -> stone bricks, to crack) are the queue's, the whole build's - after it
   phase('home: feed crafts')
   const feed = tot.crafts.filter(c => mats.SMELT_INPUTS.has(c.item))
-  if (feed.length) { await mats.makeCrafts(bot, feed, { keep: win.top, shouldStop: stop }); tot = mats.planFor(bot, st.need) }
+  if (feed.length) { await mats.makeCrafts(bot, feed, { keep: withGearKeep(win.top), shouldStop: stop }); tot = mats.planFor(bot, st.need) }
   // the window's crafts, ingredients first (planks before stairs, bricks before brick stairs)
   phase('home: window crafts')
   const win2 = mats.planFor(bot, winNeeds)
   if (win2.crafts.length) {
-    const made = await mats.makeCrafts(bot, win2.crafts, { keep: win2.top, shouldStop: stop })
+    const made = await mats.makeCrafts(bot, win2.crafts, { keep: withGearKeep(win2.top), shouldStop: stop })
     if (made) log('dir', `${made} crafts for the next layers (planned ${win2.crafts.map(c => c.crafts + 'x ' + c.item).join(', ')})`)
   }
 }
