@@ -734,6 +734,24 @@ function refreshHoldsInner (todo, bot) {
 // A ground cell of the build already full of natural ground (coarse dirt wanted, grass there): the swap list's, never band work
 const GROUND_CELL_RE = /^(coarse_dirt|dirt|grass_block|podzol|rooted_dirt|mud|mycelium)$/
 function groundHeldBy (bot, c) { if (!GROUND_CELL_RE.test(c.name)) return null; const b = world.at(bot, c.x, c.y, c.z); return b && b.name !== c.name && world.isSolid(b) && GROUND_CELL_RE.test(b.name) ? b.name : null }
+// THE CELL UNDER IT WAITS - and placing this one would close its last way in: an unfinished cell of the build under it, no
+// ground in it, a route to its item, no own miss (an own miss is the licence to cover it), and no open side of its own. The
+// step's sealsBelow (which adds its notes) and anchorable read this one rule. Pure: no logs, no swap list
+function belowWaits (bot, c) {
+  const b = job && job.index.get(key({ x: c.x, y: c.y - 1, z: c.z }))
+  if (!b || b.clear || cellDone(bot, b) === true) return null
+  const wb = world.at(bot, b.x, b.y, b.z); if (wb && world.isSolid(wb)) return null
+  if (cellUnsourced(b)) return null
+  { const f = cellFails.get(key(b)); if (f && f.n >= 1 && !f.shared) return null }
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    const x = b.x + dx; const z = b.z + dz
+    const nb = job.index.get(key({ x, y: b.y, z }))
+    if (nb && !nb.clear) continue // (a cell of the build: it will be solid)
+    const w = world.at(bot, x, b.y, z)
+    if (w && !world.isSolid(w)) return null // (an open side stays: reachable from there)
+  }
+  return b
+}
 function anchorable (bot, c, det) {
   if (bot && groundHeldBy(bot, c)) return false // (it anchors no band - the swap list's: groundHeldBy)
   if (c.attach || c.follows || c.foundation || infillCell(c) || (cellFails.get(key(c)) || {}).n >= 1) return false
@@ -743,7 +761,11 @@ function anchorable (bot, c, det) {
   { const w = waitCols.get(c.x + ',' + c.z); if (w != null && c.y > w) return false } // (the column over a waiting hole: detachedItems)
   if (holdAround.has(key(c))) return false // (it would close a waiting hole's last face: holdAround)
   if (compHeld.has(key(c))) return false // (held for a way in: it anchors no band - a held layer pinned the band with nothing doable; audit)
-  return !(det && (det.has(stepItem(bot, c)) || fallsIn(bot, c, stepItem(bot, c))))
+  if (det && (det.has(stepItem(bot, c)) || fallsIn(bot, c, stepItem(bot, c)))) return false
+  // (nor a cell that cannot go in before the cell under it - it waits on THAT one, which anchors in its stead if it can: as
+  //  an anchor it held the band until the step's end gave it a shared miss, one layer a step - oak leaves over an unplanted
+  //  tulip, then the leaves over those, "the cell under it waits" ending step after step at the castle's base, 2026-10-06)
+  return !(bot && belowWaits(bot, c))
 }
 function lowestStructural (todo, bot, det = bot ? detachedItems(todo, bot) : null) {
   let m = Infinity
@@ -1834,14 +1856,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       //  build". A solid wrong block is caught above; an item with no route at all is covered as before)
       if (det.has(stepItem(bot, b)) && !sealSaid.has('det:' + key(b))) { sealSaid.add('det:' + key(b)); log('build', `keeping ${b.name} at ${move.fmt(b)} open - out of stock; the column over it waits`) }
       if (failsOf(b) >= 1 && !(cellFails.get(key(b)) || {}).shared) { noteToSwap(b, (world.at(bot, b.x, b.y, b.z) || {}).name || 'air'); return false } // (covered, never forgotten: the endgame's worklist; audit) // (its OWN miss only: a patch's shared rest proves nothing about it, and covered it is sealed in and dropped - a hole in the wall; audit)
-      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-        const x = b.x + dx; const z = b.z + dz
-        const nb = job.index.get(key({ x, y: b.y, z }))
-        if (nb && !nb.clear) continue // (a cell of the build: it will be solid)
-        const w = world.at(bot, x, b.y, z)
-        if (w && !world.isSolid(w)) return false // (an open side stays: reachable from there)
-      }
-      return true
+      return !!belowWaits(bot, c) // (the rule itself, with anchorable: one definition - the branches above are its notes)
     }
     doable = doable.filter(c => !sealsBelow(c) && !holdAround.has(key(c)))
     // (a liquid waits for the ground under it: water poured over the hollow's open column runs down and floods it - the
@@ -1965,10 +1980,14 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     // (and REMEMBERED with its fails: a cell object is rebuilt with the job at every restart - the leaf canopy 7 up at the hub's
     //  market walked to the same unreachable stand on top of its own leaves after each of a day's deploys, 2 hours a try)
     if (!c.ownWay && (cellFails.get(key(c)) || {}).ownWay) c.ownWay = true
-    if (!c.foundation && !c.ownWay && !inReach(c) && ready.length > 2) {
+    // (a LONE far cell walks to its stand too: the stand's GoalBlock is what goSite walks in legs along the reach search's
+    //  route; left to placeCell's look-at goal, the walker alone crossed the castle - "site place: timeout after 30s", 33s a
+    //  try getting in reach with the low layers' scattered cells one a stand, 2026-10-06. Only a stand the walk model
+    //  reaches: an unknown one goes the old way)
+    if (!c.foundation && !c.ownWay && !inReach(c)) {
       const st = clusterStand(bot, c, ready, badStands, reachOf)
       if (st && st.out) log('build', `the stand ${move.fmt(st)} for ${c.name} at ${move.fmt(c)} is in a closed compartment of the build I am not in (from ${move.fmt(world.feetPos(bot))}) - no other stand: tried as a last resort`)
-      if (st && st.n >= 3) {
+      if (st && (st.n >= 3 || (st.n >= 1 && reachCurrent(bot) && reach && !reach.capped && reach.cells.has(key(st))))) {
         const tw = Date.now()
         const r = await goSite(bot, new goals.GoalBlock(st.x, st.y, st.z), 'place').catch(() => null)
         placeProf.reach += Date.now() - tw
