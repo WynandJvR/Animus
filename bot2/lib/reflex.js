@@ -144,6 +144,7 @@ function setActive (kind, detail) {
   // (the safehouse run ends whenever the body goes to anything else - its walk left driving against a creeper's flight; audit)
   if (safeRun && !(kind === 'flee' && /- to the safehouse$/.test(detail || ''))) { safeRun = null; try { bot.pathfinder.setGoal(null) } catch {} }
   if (kind !== 'shoot') endDraw(kind) // (the body is another reflex's now: the string goes)
+  if (kind !== 'flee') coverTrail.length = 0 // (only cover ticks unbroken by another row read as pinned - a pause elsewhere is no pin; audit)
   if (active && active.kind === 'fight' && kind !== 'fight') noteFightEnd()
   if (kind === 'fight' && (!active || active.kind !== 'fight')) fightStartHp = bot.health
   if (kind === 'flee' && active && active.kind === 'fight' && fleeTarget && fightStartHp != null) fledFrom.set(fleeTarget.id, Math.max(fledFrom.get(fleeTarget.id) || 0, fightStartHp))
@@ -255,6 +256,10 @@ function setCautious (on) { cautious = !!on }
 function chargeAffordable (shooter, hs, hp) {
   // (never with a creeper about: a charge walks into the fuse - a blast was 6.4 of the last death's 20; audit)
   if (hs.some(h => h.e.name === 'creeper' && h.d < 12 && canSee(h.e))) return false
+  // (CORNERED: a cover flight that cannot move with the shooter a few steps off and seeing us - every second stood there is
+  //  its arrows for nothing, and only the blade ends them. Not weighed against the hurt line: the other choice was never
+  //  "unhurt", it was standing still shot till dead - in a dug hole, a skeleton at the rim, 9 -> 0 held still, 2026-10-07)
+  if (pinnedClose(shooter.e, shooter.d) && inv.bestWeapon(bot)) return true
   // (a shooter already in sword reach is no charge: the trip's caution and an earlier flight from it are for the run IN -
   //  at 2.4b, hp 17, iron sword and chestplate, a gather trip's caution took cover from a skeleton, the edge of a drop held
   //  the flight, and it shot the bot dead in 18s, 2026-10-03)
@@ -691,6 +696,8 @@ const wallTried = new Set()
 function hungryNow () { return bot.food <= 14 || (bot.health < 20 && bot.food < inv.REGEN_FOOD) }
 const coverTrail = [] // { t, x, z, id }: where a flight to cover has been, the last 2s
 let pinnedCover = null // { id, until }: the shooter whose cover flight is pinned
+// pinned by this shooter and it is a few steps off (a short run, then the blade): cornered - see chargeAffordable
+function pinnedClose (e, d) { return !!pinnedCover && pinnedCover.id === e.id && Date.now() < pinnedCover.until && d < 6 }
 // THE SAFEHOUSE FIRST: a shooter on us within a short run of the safehouse, outside it - the run goes for the door, opened
 // on the way, shut behind us inside: a player runs indoors. Cover cells three steps out, a wall of two blocks and a dug hole
 // were all the reflex knew, and the third pillager death of the night came 8 blocks from its door, shot 12 -> 0 in a hole,
@@ -798,7 +805,10 @@ function takeCover (e, label) {
     const p0 = bot.entity.position.floored(); const solidAt = (x, y, z) => { const b = world.at(bot, x, y, z); return !!b && world.isSolid(b) }
     const sides = [[1, 0], [-1, 0], [0, 1], [0, -1]]
     const pocket = [2, 3].every(dy => sides.every(([dx, dz]) => solidAt(p0.x + dx, p0.y - dy, p0.z + dz))) && sides.some(([dx, dz]) => solidAt(p0.x + dx, p0.y - 1, p0.z + dz))
-    const biter = hostiles(6).some(h => !RANGED.has(h.e.name))
+    // (and nothing within 6 - a shooter too: digging takes seconds, and one that close walks to the rim and shoots down into
+    //  the hole before the cap - a skeleton at 5.4b, 6.5s of digging at hp 8, then held "till it is gone" with it 0.4b off at
+    //  the rim, 9 -> 0, 2026-10-07. That close, cover that cannot be had is a fight: pinnedClose)
+    const biter = hostiles(6).length > 0
     if (lost >= 6 && !busy && pocket && !biter && inv.bestTool(bot, 'pickaxe', 4) && inv.shelterBlock(bot) && !require('./move').insideHut(bot.entity.position.floored()) && !enclosed() && canDigInHere()) {
       fleeTarget = e
       setActive('dig-in', `${e.name} - cover is not stopping it (${Math.round(lost)} hp in 8s): a capped hole`)
@@ -1791,7 +1801,9 @@ function tick () {
     runBusy('dig in', g => digIn(g), 30000, null, () => { stopDig(); stopWalk() }).then(() => { if (active && active.kind === 'dig-in') clearActive() })
     return
   }
-  if (target && weak && hs.filter(h => h.d < 10).length) {
+  // (a shooter we are cornered by - pinnedClose - is fought at any hp: the fight row below; cover is what failed there)
+  const cornered = !!target && armed && RANGED.has(target.name) && pinnedClose(target, target.position.distanceTo(me))
+  if (target && weak && !cornered && hs.filter(h => h.d < 10).length) {
     if (RANGED.has(target.name)) { if (!engagementStalled(target, target.position.distanceTo(me), hs, now)) takeCover(target, `hp ${Math.round(hp)} - cover from ${target.name}`); return }
     fleeTarget = target
     setActive('flee', `hp ${Math.round(hp)} - ${target.name}`)
@@ -1804,7 +1816,7 @@ function tick () {
   }
   if (target && target.isValid) {
     const d = target.position.distanceTo(me)
-    const why = target === (close && close.e) ? 'close' : target === hurtByMelee ? 'hit me' : 'shooter'
+    const why = cornered ? 'cornered - no cover to be had' : target === (close && close.e) ? 'close' : target === hurtByMelee ? 'hit me' : 'shooter'
     // whatever picked it: never chase a shooter across open ground the arrows on the way in would make a losing trade
     // (the charge rule's own reckoning - "no shield and under two pieces" contradicted it: the bot picked the fight and
     // fled it on the same tick, flee/fight every half second under a pillager patrol, 2026-09-25)
