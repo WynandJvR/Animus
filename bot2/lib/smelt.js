@@ -50,6 +50,21 @@ function homeFurnaces (bot) {
   return world.findBlocks(bot, /^furnace$/, { maxDistance: Math.ceil((half + 2 * require('./hut').BANK_RINGS) * Math.SQRT2) + 1, count: 256, point: new Vec3(home.x, home.y, home.z) })
 }
 
+// THE WALK ROUND THE BANK: the furnaces in the order a player walks them - the nearest to where I stand, then the nearest
+// to that one. homeFurnaces comes nearest-the-home first, and round a safehouse that alternates the sides (east wall, west
+// wall, north ring...): every furnace was a walk round the hut, ~7s each - 96 cobblestone into 12 furnaces took 85s, about
+// what 481 into the bank took (84s), 2026-10-06. Arithmetic on the positions only (no world reads): a bank of 256 is 32k steps
+function tour (bot, furns) {
+  const left = furns.slice(); const out = []
+  let at = bot.entity ? bot.entity.position : null
+  while (left.length) {
+    let bi = 0
+    if (at) { let bd = Infinity; for (let i = 0; i < left.length; i++) { const p = left[i].position; const d = (p.x - at.x) ** 2 + (p.y - at.y) ** 2 + (p.z - at.z) ** 2; if (d < bd) { bd = d; bi = i } } }
+    const f = left.splice(bi, 1)[0]; out.push(f); at = f.position
+  }
+  return out
+}
+
 async function placeFurnace (bot) {
   if (!inv.has(bot, 'furnace')) { if (!await craft().ensure(bot, 'furnace', 1)) return null }
   const me = world.feetPos(bot)
@@ -379,6 +394,7 @@ async function loadFurnaces (bot, input, maxItems, { anyWood = false, shouldStop
   let furns = homeFurnaces(bot)
   // the furnace inside the safehouse stays free for charcoal (torches) and cooking when there are others
   if (furns.length >= 3) furns = furns.filter(f => !move.insideHut(f.position))
+  furns = tour(bot, furns)
   let loaded = 0
   // spread evenly: filling each furnace to 64 in turn put 130 cobble in two furnaces while twelve sat idle
   // (10 seconds an item per furnace - even spread is the whole speed-up)
@@ -466,7 +482,7 @@ async function refuelFurnaces (bot, { shouldStop = null } = {}) {
   let fed = 0
   // (no fuel anywhere: no walk round the cold furnaces to find that out again)
   if (!inv.items(bot).some(i => fuelValue(i.name) > 0) && !Object.entries(require('./base').bankCounts()).some(([n, c]) => c > 0 && fuelValue(n) > 0)) return 0
-  for (const fb of busyFurnaces(bot)) {
+  for (const fb of tour(bot, busyFurnaces(bot))) {
     if (shouldStop && shouldStop()) break
     if (isLit(fb)) continue
     const f = await openAt(bot, fb)
@@ -488,7 +504,7 @@ async function refuelFurnaces (bot, { shouldStop = null } = {}) {
 
 async function collectFurnaces (bot, { shouldStop = null } = {}) {
   const home = mem.get().home
-  const furns = home ? busyFurnaces(bot) : furnacesNear(bot, 32)
+  const furns = tour(bot, home ? busyFurnaces(bot) : furnacesNear(bot, 32))
   const first = !mem.get().furnaceUse
   if (first) mem.set('furnaceUse', {})
   let got = 0; let buckets = 0

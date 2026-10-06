@@ -586,7 +586,11 @@ function detachedItems (todo, bot) {
   const have = Object.assign({}, base().bankCounts())
   for (const [n, k] of Object.entries(inv.counts(bot))) have[n] = (have[n] || 0) + k
   const low = {} // item -> {y: its lowest cell, n: its cells in that layer and the next}
-  const band = todo.filter(c => !c.attach && !c.follows && !infillCell(c) && !((cellFails.get(key(c)) || {}).n >= 1)).map(c => [c, stepItem(bot, c)])
+  // (INFILL out of stock is a waiting hole like any: left out here, a glass pane with no sand was never a hole - no waiting
+  //  column over it, no held last face - so the stair over two empty pane cells in a wall shaft anchored the band for two
+  //  steps, and the wall block over the shaft was laid and sealed it, 2026-10-06. Infill still anchors nothing (anchorable);
+  //  only a cell no route can source stays out - sealsBelow covers it)
+  const band = todo.filter(c => !c.attach && !c.follows && !cellUnsourced(c) && !((cellFails.get(key(c)) || {}).n >= 1)).map(c => [c, stepItem(bot, c)])
   for (const [c, it] of band) if (!low[it] || c.y < low[it].y) low[it] = { y: c.y, n: 0 }
   for (const [c, it] of band) if (c.y <= low[it].y + 1) low[it].n++
   // (none in stock is detached only when it cannot be MADE from stock either: the bricks rule - a long clay-and-furnace
@@ -604,7 +608,8 @@ function detachedItems (todo, bot) {
     else if (k <= 0) detached.delete(it)
     // (in the ENDGAME any stock re-attaches: no band left to hold - 2 string in the pack against 4 cells kept them all detached, and
     //  the 4 carpets over them waited, the hub at 7834/7845, 2026-10-05)
-    else if (detached.has(it) && (k >= Math.min(low[it].n, 64) || (job && todo.length < Math.min(200, job.cells.length * 0.03)))) detached.delete(it)
+    // (infill holds no band: any of it in stock re-attaches - held for its two layers' count, panes in hand sat unplaced; audit)
+    else if (detached.has(it) && (infillItem(it) || k >= Math.min(low[it].n, 64) || (job && todo.length < Math.min(200, job.cells.length * 0.03)))) detached.delete(it)
   }
   for (const it of [...detached]) if (!low[it]) detached.delete(it) // (none of it left to place)
   return detached
@@ -1004,12 +1009,16 @@ async function goSite (bot, goal, label, { place = true, dig = (job && job.cells
         if ((i - last >= 5 && plain(route[i])) || afterDoor || climbed) { stops.push(i); last = i }
       }
       const mv = () => move.movementsFor(bot, { dig: false, place: false, sprint: false })
-      let done = 0; let why = ''
+      let done = 0; let why = ''; let from = 0
       for (const i of stops) {
         const w = route[i]
         const r = await move.goTo(bot, new goals.GoalBlock(w.x, w.y, w.z), { timeoutMs: 15000, stuckMs: 6000, label: 'site leg', movements: mv })
-        if (!r || !r.ok) { badLegCells.set(key(w), Date.now()); if (badLegCells.size > 500) badLegCells.clear(); why = `${r ? r.why : 'no answer'} on the leg to ${move.fmt(w)} from ${move.fmt(world.feetPos(bot))}, ${world.dist3(w, bot.entity.position).toFixed(1)}b short`; break }
-        done++
+        // (and the route cell the body could not step into - the one after the nearest it got to: only the leg's END marked, the
+        //  re-plan took the cell beside it through the same step, two timeouts of the same leg, 100s a try, 2026-10-06. Marked
+        //  only on the walk's own verdict (never an interrupt or a stop), with the body really at the cell before it, and never
+        //  a door or gate: a doorway marked bad makes every stand behind it unreachable for ten minutes; audit)
+        if (!r || !r.ok) { if (move.isVerdict(r)) { badLegCells.set(key(w), Date.now()); const fp = world.feetPos(bot); let j = from; for (let k = from; k <= i; k++) if (world.dist3(route[k], fp) < world.dist3(route[j], fp)) j = k; if (j < i && world.dist3(route[j], fp) <= 1.5 && !isDoorCell(route[j + 1])) badLegCells.set(key(route[j + 1]), Date.now()) } if (badLegCells.size > 500) badLegCells.clear(); why = `${r ? r.why : 'no answer'} on the leg to ${move.fmt(w)} from ${move.fmt(world.feetPos(bot))}, ${world.dist3(w, bot.entity.position).toFixed(1)}b short`; break }
+        done++; from = i
       }
       if (done === stops.length) { const r = await move.goTo(bot, goal, { timeoutMs: 15000, stuckMs: 6000, label: 'site leg', movements: mv }); if (r && r.ok) { legSaid(`legs ${stops.length + 1}/${stops.length + 1} to ${move.fmt(tgt)} (${route.length} cells${attempt ? ', re-planned ' + attempt + 'x' : ''})`); return r } why = r ? r.why : 'no answer' }
       said = `legs ${done}/${stops.length + 1} to ${move.fmt(tgt)} (${route.length} cells, try ${attempt + 1}) - ${why}`
@@ -1403,7 +1412,10 @@ async function pillarTo (bot, c, first) {
     //  both sides, and the inside one on the wall walk is the one that works. Three stuck walks of 8s in one patch cost
     //  the south wall's high cells 24-32s each, more than half the step; audit 2026-09-28)
     if (!r.ok) { if (move.isVerdict(r)) badFeet.set(key(f), Date.now()); log('build', `pillar for ${c.name} at ${move.fmt(c)}: couldn't reach its foot ${move.fmt(f)} (${r.why})`); if (/stuck|noPath/.test(r.why || '')) stuckAt.push(f); continue }
-    const r2 = await topUpAt(bot, 16, f, () => goSite(bot, new goals.GoalBlock(f.x, f.y, f.z), 'back to the foot of a pillar'), { shouldStop: stepStop }, 1)
+    // (the TOWER's own blocks, not a fixed 16: the tower rises to c.y - 1 from the foot - with 24 filler in the pack a 4-high
+    //  pillar walked 42b to the chest and back for "1 andesite", 2026-10-06. Two over it: the walk back to the foot may spend
+    //  some; audit. Short is a tower stopped, a miss like any)
+    const r2 = await topUpAt(bot, Math.max(4, c.y - f.y + 2), f, () => goSite(bot, new goals.GoalBlock(f.x, f.y, f.z), 'back to the foot of a pillar'), { shouldStop: stepStop }, 1)
     if (r2.why === 'stopped') return false
     if (!r2.ok) { log('build', `pillar for ${c.name} at ${move.fmt(c)}: not back at its foot ${move.fmt(f)} after the scaffold top-up (${r2.why})`); continue }
     // (the planner let go of first: its goal left standing, it set the controls every tick and the tower's jump never
@@ -1694,6 +1706,9 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
   let fillerTopUps = 0 // (mid-step scaffold top-ups this step: bounded)
   const compWait = new Set() // (cells this step held for a closed compartment: the profile says how many - growing, a room closed on its own work)
   let placed = 0
+  let bandRose = -Infinity // (the highest the band has risen within this step on its own misses: bandRises)
+  let placedAtRise = 0 // (placed when it last rose: a rise only after a placement since - bandRises)
+  let bandFloor = null // (the step's first band: it rises within the step at most two layers over it - bandRises)
   if (!ensureSnapshot(bot) || !ensureFoundation(bot)) return { placed, blockedOn: null, done: false }
   // (a cell that keeps failing is tried again ever more rarely - 5 min after its third miss, then 10, 20... up to 2h -
   //  never forgotten: the same window glass cells took three tries each, every step, minutes of every day, 2026-09-26)
@@ -1862,6 +1877,21 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       if (n) { saveCellFails(); log('build', `${n} cell${n > 1 ? 's' : ''} anchoring the band never doable - shared misses, the band rises past: ${Object.entries(why).map(([r, e]) => `${r} x${e.n} (${e.first.name} at ${move.fmt(e.first)})`).join(', ')}`) }
       return n
     }
+    // THE BAND RISES IN THE STEP: a step-end miss that lifts the band (an anchor never doable, the window's cells none
+    // clickable) is acted on now - returned instead, the round went home for its chores and came back a band higher, one
+    // blocker a round: "1 cell anchoring the band never doable ... the band rises past" ended a step with the walls a layer
+    // up in hand, then 3 minutes at home, 2026-10-06. Bounded: only ever higher than this step has risen before, only after a
+    // block went in since the last rise (a chain of empty passes gave layer after layer an own miss - the licence to cover a
+    // cell - and lifted the window over resting layers; audit), and at most two layers over the band the step began with
+    if (bandFloor == null) bandFloor = lowestAll
+    const bandRises = (anchor, why) => {
+      if (!(placed > placedAtRise)) return false
+      const y = lowestStructural(todo, bot, det)
+      if (!(y > lowestAll) || !(y > bandRose) || !(y <= bandFloor + 2)) return false
+      bandRose = y; placedAtRise = placed
+      log('build', `band rises within the step: y${lowestAll}${anchor ? ' (' + stepItem(bot, anchor) + '@' + anchor.x + ',' + anchor.y + ',' + anchor.z + (has(anchor) ? ', in hand' : ', not in hand') + ')' : ''} ${why} - now from y${y === Infinity ? ' none (every layer)' : y}, ${placed} placed so far`)
+      return true
+    }
     if (!doable.length) {
       // (the band as it ended the step - which layer anchors it, and by which cell: a step that ends "waiting on X" after
       //  a few blocks said nothing of what held the band down, 2026-09-28)
@@ -1870,6 +1900,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       // (an anchor IN HAND but never doable - the cell under it waits - is a miss here too; one NOT in hand is the supply's
       //  wait, which steers the gathering, and is left to hold; audit)
       missAnchors()
+      if (bandRises(anchor, 'never doable')) continue
       if (placed) log('build', `step ended: band anchored at y${lowestAll}${anchor ? ' by ' + stepItem(bot, anchor) + '@' + anchor.x + ',' + anchor.y + ',' + anchor.z + (has(anchor) ? ' (in hand)' : ' (not in hand)') : ''}, ${structural.length} structural in hand (min y${minY}), ${todo.length} todo`)
       profLog(); if (!placed) log('build', `nothing doable: lowest structural y${lowestAll}, ${todo.length} todo, ${structural.length} structural in hand (min y${minY}), ${attached.length} attached ready, ${waitingHolds ? 'waiting on ' + waiting : (waiting ? waiting + ' missing (detached - holding nothing)' : 'waiting on nothing')}`); return { placed, blockedOn: waiting, blockedHolds: waitingHolds, done: false } }
     const me = bot.entity.position
@@ -1897,6 +1928,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       //  between two unplaced z-axis logs - anchored the band round after round, 2026-09-29)
       for (const c of doable) if (c.want && c.want.axis && !axisRelaxed(c) && failsOf(c) >= 3 && !(cellFails.get(key(c)) || {}).shared) { relaxAxis(c); log('build', `${c.name} at ${move.fmt(c)} goes in with any axis (never ready with its own)`) }
       if (doable.length) saveCellFails()
+      if (bandRises(anchor, `${doable.length} doable none clickable or supportable`)) continue
       profLog(); log('build', `${placed ? `step ended after ${placed} placed - ` : ''}nothing ready${anc}: lowest y${lowestAll}, ${doable.length} doable (${doable.slice(0, 5).map(c => c.name + '@' + c.x + ',' + c.y + ',' + c.z).join(' ')}) none clickable or supportable (${doable.filter(c => holdBack.has(key(c))).length} held back this step), ${waitingHolds ? 'waiting on ' + waiting : (waiting ? waiting + ' missing (detached - holding nothing)' : 'waiting on nothing')}`); return { placed, blockedOn: waiting, blockedHolds: waitingHolds, done: false } }
     // everything within reach of where we stand first, then the nearest - a layer down counts one block, not four:
     // the walk between cells is most of a block's six seconds, and "lower first" sent the bot back and forth across the
@@ -2865,7 +2897,18 @@ async function ensureScaffold (bot, n = SCAFFOLD_WANT, { shouldStop } = {}) { //
   if (filler() >= n) return true
   const base = require('./base')
   const KINDS = ['andesite', 'diorite', 'tuff', 'dirt', 'cobbled_deepslate', 'cobblestone']
+  // (what the build does not place first: the castle's own andesite, tuff and coarse dirt went up as scaffold while its 559
+  //  andesite cells were short, and the bank ran dry of filler, 2026-10-06. Still taken last - a tower over none)
+  const need = (cachedStatus(bot) || {}).need || {}
+  // (the spare first - only what is over the build's need of it - then a second pass for the rest; audit)
+  const spare = nm => Math.max(0, base.bankCount(nm) - (need[nm] || 0))
   const fromBank = async () => {
+    for (const name of KINDS) {
+      const have = filler()
+      if (have >= n) return
+      const k = Math.min(n - have, spare(name))
+      if (k > 0) await base.withdraw(bot, name, k).catch(() => 0)
+    }
     for (const name of KINDS) {
       const have = filler()
       if (have >= n) return
