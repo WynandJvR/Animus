@@ -851,7 +851,12 @@ function nextNeeds (bot, layers = 4, lowY = null) {
   for (const c of todo) {
     if (c.attach ? !(c.y <= minY + layers || supportThere(bot, c)) : c.y > minY + layers) continue
     if (groundHeldBy(bot, c)) continue // (the swap list's: no trip for its dirt while the band has other work; audit)
-    needsOf(bot, c, md, (it, n) => { out[it] = (out[it] || 0) + n; if (lowY && !(lowY[it] <= c.y)) lowY[it] = c.y })
+    // (an item's layer for the withdraw's order is where the BAND can place it: a cell below the band's floor waits - a hole
+    //  kept open, a rest, a closed room - and ranked by its own low y the decor under the band (trapdoors, leaves, chests)
+    //  filled the pack first; the band's own stone brick stairs found no slot, the step ran 1s of a 95s round and ended
+    //  "waiting on stone_brick_stairs" with 14 in the chest, 2026-10-07. Those rank as the window's top layer)
+    const ly = Number.isFinite(minY) && c.y < minY ? minY + layers : c.y
+    needsOf(bot, c, md, (it, n) => { out[it] = (out[it] || 0) + n; if (lowY && !(lowY[it] <= ly)) lowY[it] = ly })
   }
   return out
 }

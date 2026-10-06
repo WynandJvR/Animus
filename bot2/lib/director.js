@@ -73,8 +73,16 @@ function nightSoon () { return world.phase(bot) !== 'day' }
 // the door or shoot at it. One in the caves under the mountain is not: cave skeletons 17-24 blocks off kept the bot
 // in the safehouse a whole morning, in daylight, the build standing still (2026-09-26).
 const onSurface = e => reflex.onSurface(e) // (one rule: reflex.js - the door seal asks the same question)
-const BREAD_WANTED = 32
-function breadStock () { return inv.count(bot, 'bread') + base.bankCount('bread') + Math.floor((inv.count(bot, 'wheat') + base.bankCount('wheat')) / 3) }
+// THE FOOD STOCK: every good food in the pack and the bank, in food points, the wheat as the bread it makes - the one measure
+// the farm's work is judged by. Counted in bread alone, 130 points of cooked food in the pack read as "bread short": the farm
+// re-planted ONE cell a round, four times in three minutes, a 2-minute seed walk for one cell, and harvested 0-3 plants,
+// a chore a round in the build's daylight, 2026-10-07. (32 bread's worth, as before)
+const FOOD_WANTED = 32 * 5
+function foodStock () {
+  const md = world.data(bot); const pts = n => { const f = md.foodsByName && md.foodsByName[n]; return f ? f.foodPoints : 3 }
+  let p = 0; for (const n of inv.GOOD_FOOD) { const k = inv.count(bot, n) + base.bankCount(n); if (k) p += k * pts(n) }
+  return p + Math.floor((inv.count(bot, 'wheat') + base.bankCount('wheat')) / 3) * pts('bread')
+}
 function canHeal () { return bot.food >= inv.REGEN_FOOD || inv.foodItems(bot, { hurt: true }).length > 0 }
 // At the reflex's hurt line with a way to heal: whatever we are out doing ends here (two deaths on 2026-09-23 began
 // with a trip started or carried on at hp 9-13, unarmoured, into a skeleton)
@@ -729,7 +737,7 @@ function decide () {
   if (dHome < 64 && world.phase(bot) === 'day' && !held('pen')) { const w = pen.work(bot, penArgs()); if (w && (PEN_SHORT.has(w.kind) || (w.kind === 'build' && pen.pen() && (pen.observe(bot) || { n: 0 }).n > 0) || woolHolds())) return { name: 'pen', why: w.why } }
   // (the harvest when the bread runs low, not every morning: the crop keeps on the stalk, and harvesting and
   //  replanting 71 cells took two minutes of every ten-minute day with 31 bread in the pack, 2026-09-26)
-  if (farm.farm() && dHome < 64 && farm.ripeCount(bot) >= 8 && breadStock() < BREAD_WANTED && !held('harvest')) return { name: 'harvest', why: `${farm.ripeCount(bot)} wheat ripe` }
+  if (farm.farm() && dHome < 64 && farm.ripeCount(bot) >= 8 && foodStock() < FOOD_WANTED && !held('harvest')) return { name: 'harvest', why: `${farm.ripeCount(bot)} wheat ripe` }
 
   // 7. base infrastructure - SHELTER FIRST: nothing of value (bed, bank) sits in the open, so the
   //    safehouse goes up before the bed and the chest go down inside it
@@ -760,7 +768,7 @@ function decide () {
     if (world.phase(bot) === 'day' && (mem.get().shaftsToFill || []).length && !held('fillShaft')) return { name: 'fillShaft', why: `${mem.get().shaftsToFill.length} hole${mem.get().shaftsToFill.length > 1 ? 's' : ''} on the grounds that I fell into - capping ${mem.get().shaftsToFill.length > 1 ? 'them' : 'it'}` }
     // a watered plot still at its starting size: widen it to everything the water reaches
     if (farm.farm() && farm.farmIsHome(bot) && farm.farm().water && farm.farm().cells.length < 60 && farm.farmLevel(bot) && farm.fullPlot(bot, farm.farm()).length > farm.farm().cells.length && inv.count(bot, 'wheat_seeds') + base.bankCount('wheat_seeds') >= 8 && !held('farm')) return { name: 'farm', why: `the farm is ${farm.farm().cells.length} cells - widening it to all the water reaches` }
-    if (farm.farm() && farm.farmIsHome(bot) && !farm.waterNeedsFixing(bot) && inv.count(bot, 'wheat_seeds') + base.bankCount('wheat_seeds') >= 4 && (farm.unplantedCount(bot) >= 8 || (farm.unplantedCount(bot) > 0 && breadStock() < BREAD_WANTED)) && !held('farm')) return { name: 'farm', why: `${farm.unplantedCount(bot)} farm cells unplanted and ${inv.count(bot, 'wheat_seeds')} seeds in hand` }
+    if (farm.farm() && farm.farmIsHome(bot) && !farm.waterNeedsFixing(bot) && inv.count(bot, 'wheat_seeds') + base.bankCount('wheat_seeds') >= 4 && (farm.unplantedCount(bot) >= 8 || (farm.unplantedCount(bot) > 0 && foodStock() < FOOD_WANTED)) && !held('farm')) return { name: 'farm', why: `${farm.unplantedCount(bot)} farm cells unplanted and ${inv.count(bot, 'wheat_seeds')} seeds in hand` }
   }
 
   // 8. iron gear when the iron is on hand
@@ -1451,7 +1459,7 @@ function penArgs () {
   const wheat = inv.count(bot, 'wheat') + base.bankCount('wheat')
   // (the bed's 3 when there is none: with the build's wool skipped the pen would never be sheared for it)
   const bedWool = mem.get().bed || shelter.hasBedItem(bot) ? 0 : 3
-  return { woolWanted: demandWool + bedWool, wheat: Math.max(0, wheat - (breadStock() < BREAD_WANTED ? 9 : 0)) }
+  return { woolWanted: demandWool + bedWool, wheat: Math.max(0, wheat - (foodStock() < FOOD_WANTED ? 9 : 0)) }
 }
 // (every log the orchard can grow, the class and each species - an exact-wood build asks for spruce_log and oak_log, never
 //  'log': the castle 1000 spruce logs short sized its orchard to 23 trees, 2026-10-06. In squares and singles apart, each by
