@@ -434,6 +434,29 @@ function findAirReachable (maxNodes = 400) {
   return best
 }
 
+// A cell under a roof two high that no enderman can reach into: its own head cell's top is solid, and no cell round it
+// (the eight beside, a step up or down) holds a three-tall stand. The nearest reachable by walking, within 8 - { here }
+// when it is where we stand. Null: none near (read on the enderman's tick only)
+function lowRoofRefuge (maxNodes = 300) {
+  const me = bot.entity.position.floored()
+  const air = (x, y, z) => { const b = world.at(bot, x, y, z); return !!b && world.isAirish(b) }
+  const tall = (x, y, z) => world.standable(bot, x, y, z) && air(x, y + 2, z)
+  const safe = (x, y, z) => { if (air(x, y + 2, z)) return false; for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) for (const dy of [-2, -1, 0, 1]) /* (a tall cell 2 down beside the nook still reaches in: its top overlaps our body; audit) */ { if ((dx || dz) && tall(x + dx, y + dy, z + dz)) return false } return true }
+  const k = (x, y, z) => `${x},${y},${z}`
+  const seen = new Set([k(me.x, me.y, me.z)]); const q = [{ x: me.x, y: me.y, z: me.z, d: 0 }]
+  while (q.length && seen.size < maxNodes) {
+    const c = q.shift()
+    if (world.standable(bot, c.x, c.y, c.z) && safe(c.x, c.y, c.z)) return { x: c.x, y: c.y, z: c.z, here: c.d === 0 }
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) for (const dy of [0, 1, -1]) {
+      const x = c.x + dx; const y = c.y + dy; const z = c.z + dz; const key = k(x, y, z)
+      if (seen.has(key) || Math.abs(x - me.x) > 8 || Math.abs(z - me.z) > 8 || Math.abs(y - me.y) > 3) continue
+      if (!world.standable(bot, x, y, z) || (dy === 1 && !air(c.x, c.y + 2, c.z)) || (dy === -1 && !air(x, y + 2, z))) continue // (a step up needs the head room over the cell left, down the room over the cell met)
+      if (world.dropAt(bot, x + 0.5, y, z + 0.5) > 0) continue
+      seen.add(key); q.push({ x, y, z, d: c.d + 1 })
+    }
+  }
+  return null
+}
 // Block the line of fire: the cells beside us toward the shooter, feet and head height.
 async function wallOff (e, g = 0) {
   const me = bot.entity.position.floored()
@@ -535,6 +558,10 @@ function enclosed () {
 }
 function canDigInHere () {
   const p = bot.entity.position.floored()
+  // (NOTHING HOSTILE WITHIN 6 - one rule for every dig-in: a hole takes seconds of digging and a mob that close is at its rim,
+  //  or beside us, before the cap. A skeleton at 5.4b shot down into the cover's hole, 2026-10-07 00:00; an angry enderman at
+  //  2.6b hit the bot dead 0.5s into the enderman's hole, 01:09 - that branch had no such gate)
+  if (hostiles(6).length) return false
   // not in our own ground: at home the safehouse IS the shelter. A dig-in on the door step at night (unarmed after a
   // respawn, a skeleton about) fought the director's walk to the door seven times in a minute, and the pit it left
   // was a 5-block drop in front of the door the edge guard rightly refused - two deaths outside it (2026-09-24)
@@ -839,11 +866,8 @@ function takeCover (e, label) {
     const p0 = bot.entity.position.floored(); const solidAt = (x, y, z) => { const b = world.at(bot, x, y, z); return !!b && world.isSolid(b) }
     const sides = [[1, 0], [-1, 0], [0, 1], [0, -1]]
     const pocket = [2, 3].every(dy => sides.every(([dx, dz]) => solidAt(p0.x + dx, p0.y - dy, p0.z + dz))) && sides.some(([dx, dz]) => solidAt(p0.x + dx, p0.y - 1, p0.z + dz))
-    // (and nothing within 6 - a shooter too: digging takes seconds, and one that close walks to the rim and shoots down into
-    //  the hole before the cap - a skeleton at 5.4b, 6.5s of digging at hp 8, then held "till it is gone" with it 0.4b off at
-    //  the rim, 9 -> 0, 2026-10-07. That close, cover that cannot be had is a fight: pinnedClose)
-    const biter = hostiles(6).length > 0
-    if (lost >= 6 && !busy && pocket && !biter && inv.bestTool(bot, 'pickaxe', 4) && inv.shelterBlock(bot) && !require('./move').insideHut(bot.entity.position.floored()) && !enclosed() && canDigInHere()) {
+    // (and nothing within 6, a shooter too - canDigInHere's own rule. That close, cover that cannot be had is a fight: pinnedClose)
+    if (lost >= 6 && !busy && pocket && inv.bestTool(bot, 'pickaxe', 4) && inv.shelterBlock(bot) && !require('./move').insideHut(bot.entity.position.floored()) && !enclosed() && canDigInHere()) {
       fleeTarget = e
       setActive('dig-in', `${e.name} - cover is not stopping it (${Math.round(lost)} hp in 8s): a capped hole`)
       // (and held there while the shooter is about: let go at once, the director walked out through the cap into the
@@ -1802,8 +1826,7 @@ function tick () {
   // at night, unable to fight: running across open ground in the dark gets you surrounded - dig
   // straight down on the spot and plug the hole (a player's respawn-at-night move)
   const nightThreat = !armed && world.phase(bot) !== 'day' ? hs.find(h => h.d < 16 && h.e.name !== 'creeper' && !MAGIC.has(h.e.name)) : null // (a witch is outrun, never dug in from: it throws down into the hole; audit)
-  // digging in takes seconds: never with a mob about to hit us, never through the safehouse floor
-  const nearest = hs.length ? hs[0].d : Infinity
+  // digging in takes seconds: never with a mob about to hit us (canDigInHere), never through the safehouse floor
   const inHut = require('./move').insideHut(bot.entity.position.floored())
   // AN ANGRY ENDERMAN is not out-run (it teleports beside us) nor out-fought with a stone blade (40 hp, 5-6 a hit on us) - it
   // took the bot 14 -> 0 in 16s, 2026-10-03. A player steps into WATER (it burns there and teleports off), else digs a capped
@@ -1822,14 +1845,39 @@ function tick () {
       if (!waterRun || waterRun.id !== target.id || now - waterRun.at > 1000) waterRun = { id: target.id, at: now, from: bot.entity.position.clone() }
       fleeTarget = target; setActive('flee', `enderman - into the water at ${wet.position.x},${wet.position.y},${wet.position.z}`); try { bot.pathfinder.setGoal(null) } catch {}; steerTo(wet.position, { jump: true, sprint: bot.food > 6 }); return
     }
+    // UNDER A TWO-HIGH ROOF: an enderman is three tall - it cannot stand where we can, and from no cell beside a two-high
+    // nook can it reach in. A mine's own tunnels are that; a walk of a few steps, never a dig. In one, the fight row answers
+    // what still reaches (it stands only at a tall cell's edge)
+    const roof = lowRoofRefuge()
+    if (roof && roof.here) {
+      fleeTarget = target
+      setActive('flee', 'enderman - under a two-high roof, striking what reaches in')
+      try { bot.pathfinder.setGoal(null) } catch {}
+      for (const k of ['forward', 'back', 'left', 'right', 'sprint', 'jump']) bot.setControlState(k, false)
+      const d = target.position.distanceTo(me)
+      if (armed && (!bot.heldItem || !/_(sword|axe)$/.test(bot.heldItem.name))) { if (!busy) runBusy('equip a weapon', () => inv.equipWeapon(bot), 1500); return }
+      if (armed && d < 3.4 && now - lastAttackAt > attackCooldownMs() && canSee(target)) { bot.lookAt(target.position.offset(0, 1.5, 0), true).catch(() => {}); bot.attack(target); lastAttackAt = now }
+      return
+    }
+    if (roof && !roof.here) {
+      fleeTarget = target
+      setActive('flee', `enderman ${target.position.distanceTo(me).toFixed(1)}b - under the two-high roof at ${roof.x},${roof.y},${roof.z}`)
+      shieldDown()
+      const g = bot.pathfinder.goal
+      if (!(g instanceof goals.GoalBlock) || g.x !== roof.x || g.y !== roof.y || g.z !== roof.z) {
+        bot.pathfinder.setMovements(require('./move').movementsFor(bot, { dig: false, place: false }))
+        bot.pathfinder.setGoal(new goals.GoalBlock(roof.x, roof.y, roof.z), true)
+      }
+      return
+    }
     const pick = inv.bestTool(bot, 'pickaxe', 4); const cap = inv.shelterBlock(bot)
-    if (pick && cap && !busy && !inHut && !enclosed() && canDigInHere()) {
+    if (!roof && pick && cap && !busy && !inHut && !enclosed() && canDigInHere()) {
       setActive('dig-in', `enderman ${target.position.distanceTo(me).toFixed(1)}b - no blade for it, a capped hole`)
       runBusy('dig in', g => digIn(g), 30000, null, () => { stopDig(); stopWalk() }).then(() => { if (active && active.kind === 'dig-in') clearActive() })
       return
     }
   }
-  if (((target && weak && !MAGIC.has(target.name)) || nightThreat) && world.phase(bot) !== 'day' && nearest >= 6 && !inHut && !enclosed() && canDigInHere()) {
+  if (((target && weak && !MAGIC.has(target.name)) || nightThreat) && world.phase(bot) !== 'day' && !inHut && !enclosed() && canDigInHere()) { // (nothing within 6: canDigInHere)
     const t = target || nightThreat.e
     setActive('dig-in', `${t.name} ${t.position.distanceTo(me).toFixed(1)}b, can't fight`)
     runBusy('dig in', g => digIn(g), 30000, null, () => { stopDig(); stopWalk() }).then(() => { if (active && active.kind === 'dig-in') clearActive() })
@@ -1837,7 +1885,9 @@ function tick () {
   }
   // (a shooter we are cornered by - pinnedClose - is fought at any hp: the fight row below; cover is what failed there)
   const cornered = !!target && armed && RANGED.has(target.name) && pinnedClose(target, target.position.distanceTo(me))
-  if (target && weak && !cornered && hs.filter(h => h.d < 10).length) {
+  // (never a flight from an angry enderman: it teleports beside us - the flight at hp 6 was its last two hits, 2026-10-07; the
+  //  water, the roof and the hole above, else the blade)
+  if (target && weak && !cornered && target.name !== 'enderman' && hs.filter(h => h.d < 10).length) {
     if (RANGED.has(target.name)) { if (!engagementStalled(target, target.position.distanceTo(me), hs, now)) takeCover(target, `hp ${Math.round(hp)} - cover from ${target.name}`); return }
     fleeTarget = target
     setActive('flee', `hp ${Math.round(hp)} - ${target.name}`)
@@ -1930,6 +1980,14 @@ function tick () {
       if (near && !busy && !wallTried.has(ck) && inv.shelterBlock(bot)) { wallTried.add(ck); if (wallTried.size > 64) wallTried.clear(); runBusy('wall off', g => wallOff(near, g), 3500, 'flee'); return }
       for (const k of ['forward', 'back', 'left', 'right', 'sprint', 'jump']) bot.setControlState(k, false)
       if (now - holdSaidAt > 30000) { holdSaidAt = now; log('reflex', `holding out of sight ${Math.round((now - active.since) / 1000)}s - ${sh.length} shooter${sh.length === 1 ? '' : 's'} about (${sh.slice(0, 3).map(s => s.name + ' ' + s.position.distanceTo(me).toFixed(1) + 'b').join(', ')}), ${seenStep}`) }
+      return
+    }
+    // (in or bound for the enderman's two-high nook: held there, still, while that enderman is angry and near - steered on by
+    //  the flee below, the body walked out from under the roof; off the way there, the walk ends and the threat row asks again)
+    if (active.kind === 'flee' && fleeTarget && fleeTarget.name === 'enderman' && /two-high roof/.test(active.detail || '')) {
+      const d = fleeTarget.isValid ? fleeTarget.position.distanceTo(me) : Infinity
+      if (d > 16 || now - (provoked.get(fleeTarget.id) || 0) > 30000 || !(lowRoofRefuge() || {}).here) return clearActive()
+      for (const k of ['forward', 'back', 'left', 'right', 'sprint', 'jump']) bot.setControlState(k, false)
       return
     }
     const coverFlee = active.kind === 'flee' && fleeTarget && fleeTarget.isValid && RANGED.has(fleeTarget.name) && fleeTarget.position.distanceTo(me) < 24 && canSee(fleeTarget)

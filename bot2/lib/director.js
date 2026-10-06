@@ -1349,8 +1349,13 @@ const TASKS = {
     return made > 0
   },
   async ironTrip () {
-    const short = gearIronShort(ironTripCore)
+    let short = gearIronShort(ironTripCore)
     if (short <= 0) return true
+    // THE SHIELD'S INGOT ON A TRIP OF ITS OWN: no shield and not the one ingot for it - the trip goes for that and comes home,
+    // the shield is made (the iron decision), and the next trip goes down with it in hand. Three deaths in 1.7 hours went down
+    // for all 14 of shield, chest and helmet in golden leggings and iron boots - a skeleton in the mine's caves, an enderman,
+    // 2026-10-07; the arrows of a cave are what a shield stops
+    if (!inv.hasShield(bot) && ironStock() < IRON_COST.shield) { short = Math.min(short, IRON_COST.shield - ironStock()); log('dir', `ironTrip: the shield's ${short} iron first - home with it before the rest`) }
     const before = inv.count(bot, 'raw_iron')
     mining.resetTripTunnelled()
     await gatherFor('raw_iron', short)
