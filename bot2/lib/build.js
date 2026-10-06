@@ -986,7 +986,9 @@ function underTheBuild (bot) {
   for (let y = f.y + 2; y <= Math.min(b.y1 + 1, f.y + 12); y++) { const c = job.index.get(key({ x: f.x, y, z: f.z })); if (c && cellDone(bot, c) === true) return true }
   return false
 }
-async function goSite (bot, goal, label, { place = true, dig = (job && job.cells.every(c => cellDone(bot, c) === true)) ? 'noGround' : true, doors = true } = {}) {
+// (shouldStop: the caller's day - the running step's by default. The legs never heard it: a step's walk of three re-planned
+//  attempts ran past dusk, the round ended at night on the site and the bot walled itself in there, 2026-10-06)
+async function goSite (bot, goal, label, { place = true, dig = (job && job.cells.every(c => cellDone(bot, c) === true)) ? 'noGround' : true, doors = true, shouldStop = stepStop } = {}) {
   // leaving the safehouse first: the planner never routes through its door
   if (move.insideHut(bot.entity.position.floored())) await move.crossDoor(bot, goal).catch(e => log('build', `door crossing threw: ${e.message}`))
   // UNDER THE BUILD: the plaza overhangs the mountainside, and the bot, come up the slope from a grave run or a flee,
@@ -1013,7 +1015,9 @@ async function goSite (bot, goal, label, { place = true, dig = (job && job.cells
     // (a failed leg is re-planned FROM WHERE IT LEFT US - the search's own answer from here, twice at most - before the walker
     //  takes the rest; and a climb gets its own short leg: the legs that failed climbed 3-5 a leg, 2026-10-03)
     let said = ''; const tLegs = Date.now()
+    const missedLegs = [] // (each attempt's failed leg, said with the walk's line: "re-planned 2x" hid why a 50-cell walk took 95s, 2026-10-06)
     for (let attempt = 0; attempt < 3 && Date.now() - tLegs < 90000; attempt++) { // (a minute and a half of legs at most - the long way round a courtyard)
+      if (shouldStop && shouldStop()) return { ok: false, why: 'stopped' }
       if (attempt > 0) { const prev = reach; reach = null; await walkReach(bot); if (!reach) { reach = prev; break } }
       const route = reachRoute(bot, tgt)
       if (!route || route.length <= 2) break
@@ -1034,7 +1038,8 @@ async function goSite (bot, goal, label, { place = true, dig = (job && job.cells
       let done = 0; let why = ''; let from = 0
       for (const i of stops) {
         const w = route[i]
-        const r = await move.goTo(bot, new goals.GoalBlock(w.x, w.y, w.z), { timeoutMs: 15000, stuckMs: 6000, label: 'site leg', movements: mv })
+        if (shouldStop && shouldStop()) return { ok: false, why: 'stopped' }
+        const r = await move.goTo(bot, new goals.GoalBlock(w.x, w.y, w.z), { timeoutMs: 15000, stuckMs: 6000, label: 'site leg', movements: mv, shouldStop })
         // (and the route cell the body could not step into - the one after the nearest it got to: only the leg's END marked, the
         //  re-plan took the cell beside it through the same step, two timeouts of the same leg, 100s a try, 2026-10-06. Marked
         //  only on the walk's own verdict (never an interrupt or a stop), with the body really at the cell before it, and never
@@ -1042,8 +1047,10 @@ async function goSite (bot, goal, label, { place = true, dig = (job && job.cells
         if (!r || !r.ok) { if (move.isVerdict(r)) { badLegCells.set(key(w), Date.now()); const fp = world.feetPos(bot); let j = from; for (let k = from; k <= i; k++) if (world.dist3(route[k], fp) < world.dist3(route[j], fp)) j = k; if (j < i && world.dist3(route[j], fp) <= 1.5 && !isDoorCell(route[j + 1])) badLegCells.set(key(route[j + 1]), Date.now()) } if (badLegCells.size > 500) badLegCells.clear(); why = `${r ? r.why : 'no answer'} on the leg to ${move.fmt(w)} from ${move.fmt(world.feetPos(bot))}, ${world.dist3(w, bot.entity.position).toFixed(1)}b short`; break }
         done++; from = i
       }
-      if (done === stops.length) { const r = await move.goTo(bot, goal, { timeoutMs: 15000, stuckMs: 6000, label: 'site leg', movements: mv }); if (r && r.ok) { legSaid(`legs ${stops.length + 1}/${stops.length + 1} to ${move.fmt(tgt)} (${route.length} cells${attempt ? ', re-planned ' + attempt + 'x' : ''})`); return r } why = r ? r.why : 'no answer' }
+      if (done === stops.length) { const r = await move.goTo(bot, goal, { timeoutMs: 15000, stuckMs: 6000, label: 'site leg', movements: mv, shouldStop }); if (r && r.ok) { legSaid(`legs ${stops.length + 1}/${stops.length + 1} to ${move.fmt(tgt)} (${route.length} cells${attempt ? ', re-planned ' + attempt + 'x: ' + missedLegs.join('; ') : ''}) in ${Math.round((Date.now() - tLegs) / 1000)}s`); return r } why = r ? r.why : 'no answer' }
+      if (why === 'stopped') return { ok: false, why: 'stopped' }
       said = `legs ${done}/${stops.length + 1} to ${move.fmt(tgt)} (${route.length} cells, try ${attempt + 1}) - ${why}`
+      missedLegs.push(`${done}/${stops.length + 1} legs of ${route.length} cells, ${why}`)
     }
     if (said) legSaid(said + ' - handed to the walker')
   }
@@ -1056,7 +1063,8 @@ async function goSite (bot, goal, label, { place = true, dig = (job && job.cells
   //  them. Forgotten, a walk that towered 7 up on the castle's rim and then failed left the bot on the top, a drop all
   //  round, every walk after it stuck for 25 minutes, 2026-10-03 - the chop's own rule, gather.js tFell)
   const tWalk = Date.now()
-  const r = await move.goTo(bot, goal, { timeoutMs: 30000, stuckMs: 8000, label: 'site ' + (label || ''), movements: () => siteMovements(bot, { place, dig }) })
+  if (shouldStop && shouldStop()) return { ok: false, why: 'stopped' }
+  const r = await move.goTo(bot, goal, { timeoutMs: 30000, stuckMs: 8000, label: 'site ' + (label || ''), movements: () => siteMovements(bot, { place, dig }), shouldStop })
   for (const q of reflex.plannerPlacedSince(tWalk)) if (!(job && job.index.has(key(q))) && !myPillar.some(c => c.x === q.x && c.y === q.y && c.z === q.z)) myPillar.push({ x: q.x, y: q.y, z: q.z })
   return r
 }
@@ -1152,9 +1160,18 @@ async function clearSite (bot, { shouldStop, maxBlocks = 400, maxY = Infinity, f
       const cur = world.at(bot, b.position.x, b.position.y, b.position.z)
       if (!cur || world.isAirish(cur) || world.isLiquidWater(cur)) continue
       if (!act.reach(bot, cur.position, 4.3)) {
+        // (THE WALK MODEL FIRST: a stand within reach of it that the walk search reaches is walked to in legs (a GoalBlock);
+        //  none there and it missed before, it is a miss with no walk - "site clear: timeout after 30s" three times a round,
+        //  round after round, at targets no walk got to, 2026-10-06. Its first try still walks the planner's way (a tower may
+        //  do it); the model no answer (capped, from home), the old walk)
+        await walkReach(bot).catch(() => null)
+        const st = reachStandFor(bot, cur.position)
+        // (a leaf only: a log or block the walk search misses may still be towered to at its rest's end; audit)
+        if (st === false && clearMiss(key(cur.position)).n >= 1 && world.LEAF_RE.test(cur.name)) { missedClear(cur.position); continue }
         // a leaf is taken only from where a walk gets us: towering up into a canopy for leaves put up more dirt
         // than the finish could take down (scaffold 148 -> 172 while "clearing 331 leftover leaves", 2026-09-23)
-        const r = await goSite(bot, new goals.GoalLookAtBlock(cur.position, bot.world, { reach: 4 }), 'clear', { place: !world.LEAF_RE.test(cur.name) })
+        const r = st ? await goSite(bot, new goals.GoalBlock(st.x, st.y, st.z), 'clear', { place: false, shouldStop }) : await goSite(bot, new goals.GoalLookAtBlock(cur.position, bot.world, { reach: 4 }), 'clear', { place: !world.LEAF_RE.test(cur.name), shouldStop })
+        if (r.why === 'stopped') return cleared
         if (!r.ok && !act.reach(bot, cur.position, 5)) { missedClear(cur.position); continue }
       }
       // (a wrong block in one of our cells is ours to take out; `own` lets it past the finished-block guard
@@ -1387,6 +1404,20 @@ function reachRoute (bot, p) {
 let legLast = 0; let legN = 0
 function legSaid (s) { legN++; if (Date.now() - legLast > 30000) { legLast = Date.now(); log('build', `${s}${legN > 1 ? ` [${legN} walks since the last line]` : ''}`); legN = 0 } } // (one line in 30s: the evidence)
 function canWalkTo (bot, p) { return !reachCurrent(bot) || reach.capped || reach.cells.has(key(p)) }
+// A STAND THE WALK SEARCH REACHES within a player's reach of p (the eye within 4.3 of its centre), the nearest to me: the
+// stand; false when the search is current and has none; null when it is no answer (stale, capped, none from here)
+function reachStandFor (bot, p) {
+  if (!reachCurrent(bot) || reach.capped) return null
+  const me = bot.entity.position; let best = null; let bd = Infinity
+  for (let dx = -4; dx <= 4; dx++) for (let dz = -4; dz <= 4; dz++) for (let dy = -5; dy <= 2; dy++) {
+    const s0 = { x: p.x + dx, y: p.y + dy, z: p.z + dz }
+    if (!reach.cells.has(key(s0))) continue
+    const ex = p.x - s0.x; const ey = p.y + 0.5 - (s0.y + 1.62); const ez = p.z - s0.z
+    if (ex * ex + ey * ey + ez * ez > 4.3 * 4.3) continue
+    const d = world.dist3(s0, me); if (d < bd) { bd = d; best = s0 }
+  }
+  return best || false
+}
 function footFor (bot, c) { return feetFor(bot, c)[0] || null }
 // Pillar feet the walk could not get to, skipped for half an hour by every cell (the south end's floor inside the facade:
 // three feet per cell, each tried twice, eight seconds a try, a dozen cells - a whole day, 2026-09-27)
@@ -1716,7 +1747,7 @@ function restRound (c, ready, holdBack) {
 function failsOf (c) { const f = cellFails.get(key(c)); return f ? f.n : 0 }
 let stepStop = null // (the running build step's stop - a pillar's scaffold top-up inside it keeps the step's day)
 async function buildStep (bot, opts = {}) {
-  try { return await buildStepInner(bot, opts) } finally { if (myPillar.length) await descendPillar(bot).catch(() => {}) }
+  try { return await buildStepInner(bot, opts) } finally { if (myPillar.length) await descendPillar(bot).catch(() => {}); stepStop = null } // (no stale stop for later walks: goSite's default)
 }
 async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
   stepStop = shouldStop || null
@@ -1991,6 +2022,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
         const tw = Date.now()
         const r = await goSite(bot, new goals.GoalBlock(st.x, st.y, st.z), 'place').catch(() => null)
         placeProf.reach += Date.now() - tw
+        if (r && r.why === 'stopped') break // (the step's stop, not the stand's verdict; audit)
         if (r && !r.ok) {
           badStands.add(key(st)); if (/timeout|stuck/.test(r.why || '')) { skipTry = true; c.ownWay = true; const f0 = cellFails.get(key(c)); if (f0) { f0.ownWay = true; saveCellFails() } else { cellFails.set(key(c), { n: 0, at: 0, ownWay: true }); saveCellFails() } }
           // (the stand itself, for the next root: what stands at it, and whether a hold keeps it - a waiting hole, its column,
@@ -2035,6 +2067,9 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     if (wallsMeIn(bot, c)) { holdBack.add(key(c)); log('build', `${c.name} at ${move.fmt(c)} would wall me in from ${move.fmt(world.feetPos(bot))} - later`); tpick = Date.now(); continue }
     const hadItem = c.pour ? inv.items(bot).some(i => i.name === c.item) : true // (a pour's bucket before the try: spent into a leak is the cell's miss; audit)
     const ok = await placeCell(bot, c)
+    // (a walk stopped by the step's own stop - dusk, survival - is no verdict on the cell: no miss, no rest, no own way; an
+    //  own miss lets the cell be covered over; audit 2026-10-06)
+    if (!ok && (/stopped/.test(lastPlaceFail || '') || (stepStop && stepStop()))) break
     prof.tries++; prof.ms += Date.now() - tp; prof.dist += d0; if (ok) prof.okMs += Date.now() - tp; else missed(lastPlaceFail, Date.now() - tp)
     tpick = Date.now()
     // NO FULL BUCKET AT THE POUR is the pack's, not the cell's (as the supports' filler below): left this step, never a miss - the

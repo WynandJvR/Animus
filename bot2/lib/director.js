@@ -1632,10 +1632,12 @@ async function castleWorkInner () {
     // (a stray that would not come up twice rests the day: one dark_oak_slab was tried and failed every round for an hour -
     //  eight rounds, ~30s each - and taken at the ninth, 2026-09-30; the day's rest as the tidy's and the misses' go)
     const today = day.dayNo(bot); const sk = p => p.x + ',' + p.y + ',' + p.z
-    const strays = (await build.strayBuildBlocks(bot)).filter(p => { const m = strayMiss.get(sk(p)); return !m || m.day !== today || m.n < 2 })
+    // (and the rest GROWS: its count kept across days - two misses rest a day, then 2, 4, up to 8: one stone brick no walk got
+    //  to "would not come up: no way within reach (timeout)" every round, 20-30s of each, 2026-10-06)
+    const strays = (await build.strayBuildBlocks(bot)).filter(p => { const m = strayMiss.get(sk(p)); return !m || m.n < 2 || today - m.day >= Math.min(8, Math.pow(2, m.n - 2)) })
     if (strays.length) {
       let n = 0
-      for (const s of strays.slice(0, 30)) { if (dayStop()) break; if (await act.dig(bot, s, { force: true, allowZones: ['build', 'base'], timeoutMs: 30000 })) n++; else { log('dir', `stray ${s.name || 'block'} at ${sk(s)} would not come up: ${act.lastDigWhy() || 'unknown'}`); const m = strayMiss.get(sk(s)); strayMiss.set(sk(s), { n: m && m.day === today ? m.n + 1 : 1, day: today }) } }
+      for (const s of strays.slice(0, 30)) { if (dayStop()) break; if (await act.dig(bot, s, { force: true, allowZones: ['build', 'base'], timeoutMs: 30000 })) { n++; strayMiss.delete(sk(s)) } else { log('dir', `stray ${s.name || 'block'} at ${sk(s)} would not come up: ${act.lastDigWhy() || 'unknown'}`); const m = strayMiss.get(sk(s)); strayMiss.set(sk(s), { n: (m ? m.n : 0) + 1, day: today }) } }
       await act.collectDrops(bot, { radius: 8, maxMs: 5000 })
       log('dir', `took up ${n} of ${strays.length} build blocks standing where no cell wants them (${strays.slice(0, 6).map(s => s.name + '@' + s.x + ',' + s.y + ',' + s.z).join(' ')})`)
       if (n) return true
