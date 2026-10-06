@@ -458,7 +458,7 @@ async function setJob (bot, name, origin, { exactWood: exact = true, prefs } = {
     cells.push(describe({ x: origin.x + x - st.x, y: origin.y + y - st.y, z: origin.z + z - st.z, name: b.name, props: b.getProperties() }, md))
     }
   }
-  const box = { x1: origin.x, y1: origin.y, z1: origin.z, x2: origin.x + en.x - st.x, y2: origin.y + en.y - st.y, z2: origin.z + en.z - st.z }
+  const box = boxAt(origin, st, en)
   job = { name, origin, cells, box, index: new Map(cells.map(c => [key(c), c])), exactWood: exact }
   surveyCache = null
   mem.set('build', Object.assign({ name, origin, exactWood: woodExact }, pr ? { prefs: pr } : {}))
@@ -2834,6 +2834,10 @@ async function finish (bot, { shouldStop } = {}) {
 }
 
 function getJob () { return job }
+const boxAt = (origin, st, en) => ({ x1: origin.x, y1: origin.y, z1: origin.z, x2: origin.x + en.x - st.x, y2: origin.y + en.y - st.y, z2: origin.z + en.z - st.z })
+// a build's box from its record, loaded or not (movebase right after a boot saved the hub with no box: the job was still
+// loading, and the hub read as someone else's place, 2026-10-06)
+async function boxFor (bot, name, origin, prefs) { const s = await loadSchematic(name, bot.version, prefs || null); return boxAt(origin, s.start(), s.end()) }
 function snapshotInfo (bot) {
   if (!job) return null
   const r = siteRegion(job)
@@ -2960,7 +2964,7 @@ async function costReport (bot, name, prefs = null) {
   return { name, total, typicalUnitSec: med, kinds: rows.length, blocks: rows.reduce((a, r) => a + r.count, 0), flagged: rows.filter(r => r.flag), top: rows.slice(0, 12) }
 }
 
-module.exports = { costReport, missingAnchors: () => missingAnchorItems.slice(), walkModel, strayAt, siteScaffoldTakeable, wayOut, wayOutPoint, FILLER_ITEMS, SCAFFOLD_WANT, cachedStatus, exactWood, isOpenCell, INFILL_RE, infillItem, unsourced, strayBuildBlocks,
+module.exports = { boxFor, costReport, missingAnchors: () => missingAnchorItems.slice(), walkModel, strayAt, siteScaffoldTakeable, wayOut, wayOutPoint, FILLER_ITEMS, SCAFFOLD_WANT, cachedStatus, exactWood, isOpenCell, INFILL_RE, infillItem, unsourced, strayBuildBlocks,
   finishSite, woodClass, woodForm, acceptsFor, itemOf, LOG_ANY, PLANKS_ANY, ensureScaffold, unskippedObstructions, setJob, getJob, status, nextNeeds,
   buildStep, clearSite, obstructions, removeScaffold, siteScaffoldTeardown, loadSchematic, cellDone, cellsDone, inBox, placeCell, registerJob, key,
   complete, needsWork, finish, survey, scaffoldList, holesList, ensureSnapshot, snapshotInfo, snapName,

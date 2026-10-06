@@ -111,9 +111,18 @@ function make (bot, director) {
         const F = ['home', 'bed', 'hutPlan', 'hut', 'chests', 'chestContents', 'furnaces', 'tables', 'farm', 'orchard', 'pen', 'mine', 'bunker', 'spawnSetAt', 'shaftsToFill']
         const EMPTY = { chests: [], chestContents: {}, furnaces: [], tables: [] }
         const clone = v => v === undefined || v === null ? null : JSON.parse(JSON.stringify(v))
-        const snap = () => { const m = mem.get(); const rec = {}; for (const k of F) rec[k] = clone(m[k]); rec.build = clone(m.build); const j = build.getJob(); rec.box = j && j.box ? clone(j.box) : null; return rec }
+        const snap = async () => {
+          const m = mem.get(); const rec = {}; for (const k of F) rec[k] = clone(m[k]); rec.build = clone(m.build)
+          // (the box of the build on record - never a job still loading or another one's; else from the schematic itself)
+          const j = build.getJob(); const b = m.build; const o = b && b.origin
+          rec.box = j && j.box && b && j.name === b.name && o && j.origin.x === o.x && j.origin.y === o.y && j.origin.z === o.z ? clone(j.box)
+            : b && b.name && o ? await build.boxFor(bot, b.name, o, b.prefs).catch(e => { log('base', `box for ${b.name}: ${e.message}`); return null }) : null
+          return rec
+        }
         const op = a[0]; const nm = a[1]
         if (op === 'list') return JSON.stringify(Object.fromEntries(Object.entries(mem.get().bases || {}).map(([k, v]) => [k, { home: v.home, build: v.build && v.build.name }])))
+        // (never while the boot still loads the build: its setJob finishing last left the restored base with the old build)
+        if ((op === 'save' || op === 'restore') && director.isReady && !director.isReady()) return 'still loading the build - try again in a moment'
         if (op === 'save') {
           if (!nm || a.length < 6) return 'usage: movebase save <name> <schematic> <x> <y> <z> [corner] [anywood]   (the new far build, coords the CENTRE)'
           const schem = a[2]; let origin = { x: Number(a[3]), y: Number(a[4]), z: Number(a[5]) }
@@ -124,7 +133,7 @@ function make (bot, director) {
           const h = mem.get().home
           if (h && Math.hypot(origin.x - h.x, origin.z - h.z) < 256) return `the new build is ${Math.round(Math.hypot(origin.x - h.x, origin.z - h.z))} from home - movebase is for a build 256+ away; use build`
           director.setPaused(true); move.stopMoving(bot)
-          const rec = snap()
+          const rec = await snap()
           mem.update(mm => { mm.bases = Object.assign({}, mm.bases, { [nm]: rec }); for (const k of F) mm[k] = EMPTY[k] !== undefined ? clone(EMPTY[k]) : null })
           // (a job that will not set leaves the old base as it was - never homeless with the castle's job; audit)
           try { await build.setJob(bot, schem, origin, { exactWood: !a.includes('anywood') }) } catch (e) { mem.update(mm => { for (const k of F) mm[k] = rec[k]; delete mm.bases[nm] }); return `the new build would not set (${e.message}) - the base is as it was` }
@@ -134,17 +143,25 @@ function make (bot, director) {
         if (op === 'restore') {
           if (!nm) return 'usage: movebase restore <name>'
           const rec = (mem.get().bases || {})[nm]; if (!rec) return `no saved base "${nm}"`
+          const curName = 'auto-' + ((mem.get().build && mem.get().build.name) || 'base')
+          if (mem.get().home && curName === nm) return `the base left would be saved as "${curName}" - the name being restored; rename it first`
           director.setPaused(true); move.stopMoving(bot)
           // (the base we leave is saved first, never dropped: its chests and their contents - audit)
-          const cur = mem.get().home ? snap() : null; const curName = 'auto-' + ((mem.get().build && mem.get().build.name) || 'base')
-          if (cur && curName === nm) return `the base left would be saved as "${curName}" - the name being restored; rename it first`
+          const cur = mem.get().home ? await snap() : null
+          const before = { bases: clone(mem.get().bases) }; for (const k of F) before[k] = clone(mem.get()[k])
           mem.update(mm => {
             if (cur) mm.bases = Object.assign({}, mm.bases, { [curName]: cur })
             for (const k of F) mm[k] = rec[k] === undefined || rec[k] === null ? (EMPTY[k] !== undefined ? clone(EMPTY[k]) : null) : rec[k]
             mm.spawnSetAt = null // (the server's spawn is the other base's bed now: set again at this bed - audit)
             delete mm.bases[nm]
           })
-          if (rec.build && rec.build.name && rec.build.origin) await build.setJob(bot, rec.build.name, rec.build.origin, { exactWood: rec.build.exactWood === true, prefs: rec.build.prefs || null })
+          // (a build that will not set leaves both bases as they were - audit)
+          if (rec.build && rec.build.name && rec.build.origin) {
+            try { await build.setJob(bot, rec.build.name, rec.build.origin, { exactWood: rec.build.exactWood === true, prefs: rec.build.prefs || null }) } catch (e) {
+              mem.update(mm => { for (const k of F) mm[k] = before[k]; mm.bases = before.bases || {} })
+              return `the restored build would not set (${e.message}) - the bases are as they were (paused)`
+            }
+          }
           log('base', `base "${nm}" restored (home ${rec.home ? move.fmt(rec.home) : '-'}, build ${rec.build ? rec.build.name : '-'})${cur ? `; the base left saved as "${curName}"` : ''}`)
           return `restored base "${nm}"${cur ? ` (the current one saved as "${curName}")` : ''} - paused; restart the bot, then resume`
         }

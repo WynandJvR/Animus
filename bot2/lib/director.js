@@ -58,6 +58,7 @@ async function opportunisticHunt () {
 
 let bot = null
 let paused = false
+let bootReady = false // (the boot's build load and base heal done: a movebase before it raced the load, 2026-10-06 audit)
 let current = null // {name, why, since}
 let override = null // operator-forced task name
 let lastDecisionKey = ''
@@ -2135,6 +2136,14 @@ async function start (b) {
   pen.setZone()
   const bj = mem.get().build
   if (bj) { try { await build.setJob(bot, bj.name, bj.origin, { exactWood: bj.exactWood === true }) } catch (e) { log('dir', `couldn't load build ${bj.name}: ${e.message}`) } }
+  // a saved base with no box on record gets it from its build (saved while the job was still loading: our own hub read as
+  // someone else's place, 2026-10-06) - before the foreign start, whose prune then forgets the wrong record
+  for (const [k, r] of Object.entries(mem.get().bases || {})) {
+    if (!r || r.box || !r.build || !r.build.name || !r.build.origin) continue
+    const same = q => q && !q.box && q.build && q.build.name === r.build.name && q.build.origin && q.build.origin.x === r.build.origin.x && q.build.origin.y === r.build.origin.y && q.build.origin.z === r.build.origin.z
+    try { const box = await build.boxFor(bot, r.build.name, r.build.origin, r.build.prefs); mem.update(mm => { const cur = mm.bases && mm.bases[k]; if (same(cur)) cur.box = box }); log('base', `base "${k}" box from its build: ${box.x1}..${box.x2} ${box.z1}..${box.z2}`) } catch (e) { log('base', `base "${k}" box: ${e.message}`) }
+  }
+  bootReady = true
   // someone else's place round us, known before the first decision - judged once our own build and zones are known (before
   // them, the castle's far side read as someone else's; audit). Then on its own beat
   try { foreign.start(bot); await foreign.scan() } catch (e) { log('foreign', 'start threw: ' + e.message) } // (jobs saved before the wood rule: any wood, as they were built)
@@ -2146,4 +2155,4 @@ function setPaused (p) { const was = paused; paused = !!p; if (paused) { control
 async function waitIdle (maxMs = 30000) { const t0 = Date.now(); while (running && Date.now() - t0 < maxMs) await move.sleep(200) }
 function forceTask (name) { if (!TASKS[name]) return false; override = name; control.abort(); return true }
 
-module.exports = { focus, recent, start, info, setPaused, forceTask, decide, TASKS, waitIdle, isPaused: () => paused }
+module.exports = { focus, recent, start, info, setPaused, forceTask, decide, TASKS, waitIdle, isPaused: () => paused, isReady: () => bootReady }
