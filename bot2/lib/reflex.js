@@ -1168,7 +1168,31 @@ function plannedDescent (fy) {
   return down >= 1 && down <= world.SAFE_DROP
 }
 let lipActive = false // (the lip row's word to the one sneak owner: crouch while the centre is over the drop)
+// A DROP CHOSEN: the escape's controlled step off a ledge (move.controlledDrop) - declared for ONE way: from the column the
+// body stands in (`from`, its feet level fy) into the chosen column (`cell`), and on into the one past it (`beyond`, checked
+// as a wall or a safe landing by the escape). The edge brake, the ledge crouch and the lip row stand aside only while the body
+// is in from or cell AND (the brake) the probe's column is cell or beyond - any other heading or column brakes as ever: a
+// knockback toward a deeper drop beside it is the brake's (audit 2026-10-06). Over once the body is below fy (the step is
+// taken); the time is a backstop. Returns the release.
+let chosenDrop = null
+function chooseDrop (cell, { from, beyond = null, ms = 2500 } = {}) {
+  const mine = { x: cell.x, z: cell.z, fx: from.x, fz: from.z, fy: from.y, bx: beyond ? beyond.x : null, bz: beyond ? beyond.z : null, until: Date.now() + ms }
+  chosenDrop = mine
+  return () => { if (chosenDrop === mine) chosenDrop = null }
+}
+// (is the step off suspended for a body at px,pz - and, for the brake, a probe at tx,tz?)
+function dropSuspended (px, pz, tx = null, tz = null) {
+  const d = chosenDrop
+  if (!d || !bot.entity) return false
+  if (Date.now() >= d.until || Math.floor(bot.entity.position.y + 0.01) < d.fy) { chosenDrop = null; return false }
+  const bx = Math.floor(px); const bz = Math.floor(pz)
+  if (!((bx === d.fx && bz === d.fz) || (bx === d.x && bz === d.z))) return false
+  if (tx == null) return true
+  const cx = Math.floor(tx); const cz = Math.floor(tz)
+  return (cx === d.x && cz === d.z) || (d.bx != null && cx === d.bx && cz === d.bz)
+}
 function ledgeWanted () {
+  if (bot.entity && dropSuspended(bot.entity.position.x, bot.entity.position.z)) return false
   if (lipActive) return true
   const e = bot.entity
   if (!e || bot.vehicle || !e.onGround || world.feetInWater(bot)) return false
@@ -1258,6 +1282,8 @@ function edgeBrake () {
     const drop = world.dropAt(bot, x, y, z)
     // (a column no deeper than the one we stand over is no new edge - a ledge walked along is not a cliff stepped off)
     if (drop <= world.SAFE_DROP || drop <= here) continue
+    // (the escape's chosen step off: that one way only, from its own two columns - dropSuspended)
+    if (dropSuspended(p.x, p.z, x, z)) continue
     for (const k of ['forward', 'back', 'sprint', 'jump']) if (c[k]) bot.setControlState(k, false)
     const cell = { x: Math.floor(x), z: Math.floor(z), drop }
     if (!edgeHeld || edgeHeld.x !== cell.x || edgeHeld.z !== cell.z) { edgeStopCount++; log('reflex', `edge: stopped short of a ${drop === Infinity ? 'bottomless' : drop + '-block'} drop at ${cell.x},${y},${cell.z}${active ? ' (' + active.kind + ')' : ''}`) }
@@ -1444,7 +1470,7 @@ function tick () {
   //  Back onto ground under the middle - before any fight or flee (a creeper may miss; that fall does not)
   {
     const fx = Math.floor(me.x); const fy = Math.floor(me.y - 0.01) + 1; const fz = Math.floor(me.z)
-    const dropChosen = !!takingDrop && Date.now() < takingDrop.until && takingDrop.x === fx && takingDrop.z === fz && fy === takingDrop.y + 1 // (the feet over the dug floor - never after the landing; audit)
+    const dropChosen = (!!takingDrop && Date.now() < takingDrop.until && takingDrop.x === fx && takingDrop.z === fz && fy === takingDrop.y + 1) || dropSuspended(me.x, me.z) // (the feet over the dug floor - never after the landing; or the escape's chosen step off; audit)
     if (bot.entity.onGround && !world.feetInWater(bot) && !bot.vehicle && !dropChosen && world.dropAt(bot, me.x, fy, me.z) > world.SAFE_DROP) {
       let best = null; let bd = Infinity
       for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
@@ -1981,4 +2007,4 @@ function setEnabled (on) { enabled = !!on; if (!on) clearActive() }
 function underMs () { return submergedSince ? Date.now() - submergedSince : 0 }
 function airLeftMs () { return airMs }
 
-module.exports = { pouring, plannedStep: () => plannedStep(), plannedNode: () => (lastPath && lastPath[0]) || null, plannedPath: () => lastPath || [], resetPlannedPath: () => { lastPath = null }, setCautious, plannerPlacedSince, findAirReachable, _bindForTest: b => { bot = b }, _leafWayOff: (...a) => leafWayOff(...a), _jumpHurts: c => jumpHurts(c), _leafFooting: () => leafFooting, edgeStops, install, holdNoSneak, active: isActive, info, nearestThreat, lastHurt, hurtLine, edgeAhead, hostiles, onSurface, canSee, NEVER_MELEE, waitClear, setEnabled, findAir, HOSTILE, RANGED, bowReady, startDive, endDive, diveBroken, underMs, airLeftMs, AIR_MS, DIVE_HARD_MS }
+module.exports = { chooseDrop, pouring, plannedStep: () => plannedStep(), plannedNode: () => (lastPath && lastPath[0]) || null, plannedPath: () => lastPath || [], resetPlannedPath: () => { lastPath = null }, setCautious, plannerPlacedSince, findAirReachable, _bindForTest: b => { bot = b }, _leafWayOff: (...a) => leafWayOff(...a), _jumpHurts: c => jumpHurts(c), _leafFooting: () => leafFooting, edgeStops, install, holdNoSneak, active: isActive, info, nearestThreat, lastHurt, hurtLine, edgeAhead, hostiles, onSurface, canSee, NEVER_MELEE, waitClear, setEnabled, findAir, HOSTILE, RANGED, bowReady, startDive, endDive, diveBroken, underMs, airLeftMs, AIR_MS, DIVE_HARD_MS }

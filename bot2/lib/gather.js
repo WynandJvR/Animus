@@ -484,7 +484,10 @@ async function towerUp (bot, { allowZones = [], onPlaced = null, builder = false
   const filler = item ? inv.items(bot).find(i => i.name === item) : inv.items(bot).find(i => require('./build').FILLER_ITEMS.test(i.name)) // (THE scaffold list)
   towerWhy = null
   if (!filler) { towerWhy = 'no filler in the pack'; return false }
-  const y0 = Math.floor(bot.entity.position.y)
+  // (the column read off a body STANDING: read mid-air, the cell the block goes in is the wrong one - landed first, a
+  //  deadline on the attempt; audit 2026-10-06, a scaffold column left with gaps)
+  await landed(bot, 800)
+  const y0 = Math.floor(bot.entity.position.y + 0.01)
   const above = world.at(bot, bot.entity.position.x, y0 + 2, bot.entity.position.z)
   if (!above || !world.isAirish(above)) { towerWhy = `no head room - ${above ? above.name : 'unloaded'} at y${y0 + 2}`; return false }
   // THE COLUMN we stand on, taken before the jump, and the body centred on it first, crouched (a crouch never walks off an

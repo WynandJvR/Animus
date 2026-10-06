@@ -820,9 +820,15 @@ async function goToInner (bot, goal, opts, a) {
       if (inFoot && !bj.wayOut(bot, { x: NaN, y: NaN, z: NaN }, null, false)) goalOnly = false
     } catch {}
   }
-  if (!r.ok && start && bot.entity && /stuck|timeout|noPath/.test(r.why) && !goalOnly) {
+  // THE PLACE, NOT THE GOALS: a walk that fails at once (instant noPath, three times over) is noted by where it stood and
+  // where it went. Walks to TWO different goals failing at once from one place is the body stuck there - every chest, home,
+  // the trees and explore "stuck ... (noPath)" every 2s from a scaffold top with gaps under it and from a ledge outside the
+  // castle wall, the escape never asked, 2026-10-06 22:08 - and the escape runs whatever the search's width said
+  const placeStuck = !r.ok && r.instant && bot.entity ? noteInstant(bot, goal) : 0
+  if (placeStuck && !escaping) log('move', `every walk fails at once from ${fmt(bot.entity.position)} (${placeStuck} goals) - the place is stuck, not the goals: the escape`)
+  if (!r.ok && start && bot.entity && /stuck|timeout|noPath/.test(r.why) && (!goalOnly || placeStuck)) {
     const again = stuckHereAgain(bot)
-    if (again || (underBuildFloor(bot) && bot.entity.position.distanceTo(start) < 2)) await escapeUp(bot)
+    if (again || placeStuck || (underBuildFloor(bot) && bot.entity.position.distanceTo(start) < 2)) await escapeUp(bot)
   }
   // (a walk that ARRIVED from here proves the spot no trap: its give-ups go - left on the books, the next ordinary give-up
   //  near a door the bot walked out of fine counted a trap and broke our wall; audit)
@@ -881,7 +887,7 @@ async function goToInner2 (bot, goal, opts, { timeoutMs, stuckMs, dig, place, al
     //  to the deadline; audit 2026-09-28)
     // (an interruption is the reflex taking the body - a fight, the edge brake - never a verdict on the way: counted here
     //  one fight by a known tree read "noPath" and the tree was forgotten; audit 2026-09-28)
-    if (r.why !== 'interrupted' && Date.now() - tRun < 120 && bot.entity.position.distanceTo(pRun) < 0.1) { if (++instant >= 3) return Object.assign({}, r, { ok: false, why: r.why || 'noPath' }) } else if (r.why !== 'interrupted') instant = 0
+    if (r.why !== 'interrupted' && Date.now() - tRun < 120 && bot.entity.position.distanceTo(pRun) < 0.1) { if (++instant >= 3) return Object.assign({}, r, { ok: false, why: r.why || 'noPath', instant: true }) } else if (r.why !== 'interrupted') instant = 0
     if (r.why === 'died') return r
     if (r.why === 'interrupted') { if (++interrupts > 20) return { ok: false, why: 'interrupted' }; await waitR(); continue } // (the body is busy: wait for the reflex, then go on - "interrupted", never "blocked")
     if (r.why === 'timeout') return r
@@ -968,7 +974,11 @@ function noteTrap (bot, p) {
   require('./memory').update(m => { const l = (m.trapCells || []).filter(t => t.day != null && trapLive(bot, t)); for (const c of cells) if (!l.some(t => t.x === c.x && t.y === c.y && t.z === c.z)) l.push(Object.assign(c, { day, batch }, opened.length ? { opened } : {})); m.trapCells = l.slice(-200) })
   log('move', `a trap remembered at ${fmt(p)} (${cells.length} cells) - walked round for a day`)
 }
-function clearGiveUps (p) { for (let i = giveUps.length - 1; i >= 0; i--) { const g = giveUps[i]; if (Math.abs(g.x - p.x) <= GIVEUP_NEAR && Math.abs(g.y - p.y) <= GIVEUP_NEAR && Math.abs(g.z - p.z) <= GIVEUP_NEAR) giveUps.splice(i, 1) } }
+function clearGiveUps (p) {
+  for (let i = giveUps.length - 1; i >= 0; i--) { const g = giveUps[i]; if (Math.abs(g.x - p.x) <= GIVEUP_NEAR && Math.abs(g.y - p.y) <= GIVEUP_NEAR && Math.abs(g.z - p.z) <= GIVEUP_NEAR) giveUps.splice(i, 1) }
+  // (the place's instant fails with them: out of it, it is no stuck place)
+  for (let i = instantFails.length - 1; i >= 0; i--) { const g = instantFails[i]; if (Math.abs(g.x - p.x) <= GIVEUP_NEAR && Math.abs(g.y - p.y) <= GIVEUP_NEAR && Math.abs(g.z - p.z) <= GIVEUP_NEAR) instantFails.splice(i, 1) }
+}
 async function stepUpSide (bot) {
   const act = require('./act')
   const f = bot.entity.position.floored()
@@ -1007,6 +1017,22 @@ function stuckHereAgain (bot) {
   return giveUpsNear(p, now) >= 2
 }
 let escaping = false // (its own walks give up too: never re-entered)
+// INSTANT FAILS BY PLACE: { x, y, z, t, goal } - a walk that failed at once from here, and where it was going
+const instantFails = []
+const INSTANT_MS = 3 * 60000
+function goalKey (g) { const p = g && (g.x != null ? g : g.pos || null); return g ? `${g.constructor && g.constructor.name}:${p ? Math.floor(p.x) + ',' + Math.floor(p.y) + ',' + Math.floor(p.z) : '?'}` : '?' }
+function instantGoalsNear (p, now = Date.now()) { return new Set(instantFails.filter(f => now - f.t < INSTANT_MS && Math.abs(f.x - p.x) <= GIVEUP_NEAR && Math.abs(f.y - p.y) <= GIVEUP_NEAR && Math.abs(f.z - p.z) <= GIVEUP_NEAR).map(f => f.goal)).size }
+// (noted; returns the distinct goals failing at once from here when that is two or more - a stuck place - else 0)
+function noteInstant (bot, goal) {
+  const p = bot.entity.position.floored(); const now = Date.now()
+  instantFails.push({ x: p.x, y: p.y, z: p.z, t: now, goal: goalKey(goal) })
+  while (instantFails.length > 64 || (instantFails.length && now - instantFails[0].t > INSTANT_MS)) instantFails.shift()
+  const n = instantGoalsNear(p, now)
+  return n >= 2 ? n : 0
+}
+// Is `p` (default: where the body stands) a place every walk fails from at once? THE rule base's chest marks ask: a
+// chest is no verdict from a stuck place (all twelve chests "skipping it for a while" from a scaffold top, 2026-10-06)
+function stuckPlace (bot, p = null) { const q = p || (bot && bot.entity ? bot.entity.position.floored() : null); return !!q && instantGoalsNear(q) >= 2 }
 let openSaid = null // (the "not enclosed" line, once a spot)
 async function escapeUp (bot) {
   if (escaping) return false
@@ -1262,10 +1288,137 @@ async function escapeUpInner (bot) {
   // (nothing to climb out of - open above on the first pass: no "climbed out", no trap, the stuck evidence kept, so the
   //  caller goes on to the surface's own remedies and the count still builds; "from y129 to y129" looped a trap and wiped
   //  the give-ups every minute, 2026-09-30; audit)
-  if (!climbedAny) { if (openSaid !== fmt(f0)) { openSaid = fmt(f0); log('move', `stuck at ${fmt(f0)} but not enclosed - open above; no climb`) } return false }
+  if (!climbedAny) {
+    if (openSaid !== fmt(f0)) { openSaid = fmt(f0); log('move', `stuck at ${fmt(f0)} but not enclosed - open above; no climb`) }
+    // THE LAST RUNG: no walk, no safe jiggle, nothing to climb - a controlled drop a little past the safe one (controlledDrop)
+    if (await controlledDrop(bot)) { clearGiveUps(f0); return true }
+    return false
+  }
   noteTrap(bot, f0); clearGiveUps(f0)
   log('move', `climbed out: from ${fmt(f0)} to ${fmt(bot.entity.position)}`)
   return true
+}
+
+// A CONTROLLED DROP: stranded with every walk failing and no jiggle that is not over a drop - a ledge outside the castle's
+// south wall with a 4-block drop, every walk an instant noPath for minutes, 2026-10-06 22:10 - the way a player gets down:
+// step off where the fall is SAFE_DROP+1 or +2 onto solid ground that hurts nothing more than the fall (no lava, water,
+// powder snow, magma, cactus, a campfire, a berry bush, dripstone; no hostile there), only with the health to spare
+// (DROP_HP; the fall costs drop-3). The lowest such drop; faced, walked off with the edge brake and the ledge crouch
+// standing aside for that one column (reflex.chooseDrop). One rule, logged either way.
+const DROP_HAZARD = /^(magma_block|cactus|campfire|soul_campfire|powder_snow|pointed_dripstone|sweet_berry_bush|wither_rose|fire|soul_fire|cobweb|lava|water)$/
+const DROP_HP = 16
+// (one a while: a drop that lands somewhere stuck again is no reason for the next - a chain of drops is a descent nobody
+//  chose; audit 2026-10-06)
+const DROP_EVERY_MS = 10 * 60000
+let lastDropAt = 0 // (a drop that happened)
+let dropTries = [] // (the attempts: three in DROP_EVERY_MS - one that "did not go" leaves the slot open, the tries bound it)
+// WHERE A BODY STEPPING INTO COLUMN c AT FEET LEVEL fy LANDS: the first solid under it, the fall's cells free of hazards,
+// the landing standable, nothing hazardous beside it (a berry bush, a cactus) and no hostile within 4. null: no safe landing
+// (or none within SAFE_DROP+2). A wall in the column at the start - feet or head level - is no landing but a bump: `wall`.
+function dropLanding (bot, c, fy) {
+  if ([0, 1].some(dy => { const b = world.at(bot, c.x, fy + dy, c.z); return !!b && world.isSolid(b) })) return { wall: true }
+  if (![0, 1].every(dy => { const b = world.at(bot, c.x, fy + dy, c.z); return !!b && world.isAirish(b) && !DROP_HAZARD.test(b.name) })) return null
+  let k = 1; let land = null
+  for (; k <= world.SAFE_DROP + 3; k++) {
+    const b = world.at(bot, c.x, fy - k, c.z)
+    if (!b || DROP_HAZARD.test(b.name) || world.isWaterBlock(b) || world.isLavaBlock(b)) return null
+    if (b.boundingBox === 'block') { land = b; break }
+  }
+  const drop = k - 1
+  if (!land || drop > world.SAFE_DROP + 2) return null
+  const feet = { x: c.x, y: fy - k + 1, z: c.z }
+  if (!world.standable(bot, feet.x, feet.y, feet.z)) return null
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) for (const dy of [0, 1]) { const b = world.at(bot, feet.x + dx, feet.y + dy, feet.z + dz); if (b && DROP_HAZARD.test(b.name)) return null }
+  const reflex = require('./reflex')
+  if (reflex.hostiles(24).some(h => h.e.position && world.dist3(h.e.position, { x: feet.x + 0.5, y: feet.y, z: feet.z + 0.5 }) < 4)) return null
+  return { drop, feet, land: land.name }
+}
+// WHERE A DRIFT INTO THE COLUMN PAST IT ENDS (c2): the fall carries the body on ~1.5 blocks below the ledge, so c2 is a
+// wall only solid at EVERY level from the landing's feet (feetY) up to the ledge (fy) - an overhang at ledge height with air under
+// it lets the body drift in lower down, onto a floor nobody checked (audit R4). Else its first open level at or below fy
+// down to its floor: the cells free of hazards, the drop counted from fy within SAFE_DROP+2, standable, nothing hazardous
+// beside, no hostile. null: no safe drift.
+function driftLanding (bot, c2, fy, feetY) {
+  // (scanned from fy down: the falling body enters c2 only below the ledge - its first open level there is where the drift
+  //  goes; c2 open only at fy+1, the head's level at the start, is still a wall to a body whose feet are under fy)
+  let open = null
+  for (let y = fy; y >= feetY; y--) { const b = world.at(bot, c2.x, y, c2.z); if (!b) return null; if (!world.isSolid(b)) { open = y; break } }
+  if (open == null) return { wall: true }
+  let y = open
+  for (; y > fy - (world.SAFE_DROP + 4); y--) {
+    const b = world.at(bot, c2.x, y, c2.z)
+    if (!b || DROP_HAZARD.test(b.name) || world.isWaterBlock(b) || world.isLavaBlock(b)) return null
+    if (world.isSolid(b)) break
+  }
+  const feet = { x: c2.x, y: y + 1, z: c2.z }
+  if (fy - feet.y > world.SAFE_DROP + 2 || !world.standable(bot, feet.x, feet.y, feet.z)) return null
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) for (const dy of [0, 1]) { const b = world.at(bot, feet.x + dx, feet.y + dy, feet.z + dz); if (b && DROP_HAZARD.test(b.name)) return null }
+  if (require('./reflex').hostiles(24).some(h => h.e.position && world.dist3(h.e.position, { x: feet.x + 0.5, y: feet.y, z: feet.z + 0.5 }) < 4)) return null
+  return { drop: fy - feet.y, feet }
+}
+// A STEP ON from a landing: a neighbour (not back toward the wall) the body can stand in at its level, one up with head room,
+// or down within SAFE_DROP - a landing with none is a new trap
+function stepOnFrom (bot, feet, back) {
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    if (dx === back[0] && dz === back[1]) continue
+    const x = feet.x + dx; const z = feet.z + dz
+    if (world.standable(bot, x, feet.y + 1, z) && world.isAirish(world.at(bot, feet.x, feet.y + 2, feet.z))) return true
+    for (let dy = 0; dy >= -world.SAFE_DROP; dy--) if (world.standable(bot, x, feet.y + dy, z)) return true
+  }
+  return false
+}
+async function controlledDrop (bot) {
+  const reflex = require('./reflex'); const gather = require('./gather')
+  await gather.landed(bot, 600)
+  if (!bot.entity.onGround || bot.vehicle || world.feetInWater(bot)) return false
+  if (safeJiggles(bot).length) return false
+  if (bot.health < DROP_HP) { log('move', `no controlled drop from ${fmt(bot.entity.position)}: hp ${Math.round(bot.health)} under ${DROP_HP}`); return false }
+  if (Date.now() - lastDropAt < DROP_EVERY_MS) { log('move', `no controlled drop from ${fmt(bot.entity.position)}: one ${Math.round((Date.now() - lastDropAt) / 1000)}s ago (one in ${DROP_EVERY_MS / 60000} min)`); return false }
+  dropTries = dropTries.filter(t => Date.now() - t < DROP_EVERY_MS)
+  if (dropTries.length >= 3) { log('move', `no controlled drop from ${fmt(bot.entity.position)}: ${dropTries.length} tries in ${DROP_EVERY_MS / 60000} min`); return false }
+  const p = bot.entity.position; const f = { x: Math.floor(p.x), y: Math.floor(p.y + 0.01), z: Math.floor(p.z) }
+  let best = null; const why = []
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    const c = { x: f.x + dx, z: f.z + dz }
+    const L = dropLanding(bot, c, f.y)
+    if (!L || L.wall || L.drop <= world.SAFE_DROP) continue
+    if (bot.health - (L.drop - world.SAFE_DROP) < DROP_HP - 2) { why.push(`${c.x},${c.z}: the fall costs too much`); continue }
+    // (the drift: a 4-5 fall carries the body on ~1.5 blocks - the column past it is a wall it bumps, or a landing as safe)
+    const c2 = { x: c.x + dx, z: c.z + dz }
+    const L2 = driftLanding(bot, c2, f.y, L.feet.y)
+    if (!L2) { why.push(`${c.x},${c.z}: the column past it is no safe landing`); continue }
+    // (an onward step from where it lands - no new trap)
+    if (!stepOnFrom(bot, L.feet, [-dx, -dz])) { why.push(`${c.x},${c.z}: no step on from the landing`); continue }
+    if (!best || L.drop < best.drop) best = Object.assign({ drop: L.drop, land: L.land, c, c2, dir: [dx, dz] }, L.feet)
+  }
+  if (!best) { log('move', `no controlled drop from ${fmt(f)}: no side with a ${world.SAFE_DROP + 1}-${world.SAFE_DROP + 2}-block fall onto safe ground${why.length ? ' (' + why.join('; ') + ')' : ''}`); return false }
+  dropTries.push(Date.now())
+  log('move', `stuck at ${fmt(f)} with no walk and no safe step - a controlled ${best.drop}-block drop onto the ${best.land} at ${fmt(best)} (hp ${Math.round(bot.health)})`)
+  const release = reflex.chooseDrop(best.c, { from: f, beyond: best.c2 })
+  try {
+    try { bot.pathfinder.setGoal(null) } catch {}
+    bot.setControlState('sneak', false)
+    // (along the pure heading: no sideways part carries the body into a diagonal column - the perpendicular stays f's, c's)
+    const [hx, hz] = best.dir
+    await bot.look(Math.atan2(-hx, -hz), 0, true).catch(() => {})
+    // forward only until the centre is over the chosen column - then let go for good, and a tick back against the drift
+    // (how far the centre is into c along the heading: forward held till 0.35 in - at the boundary the hitbox still rested on
+    //  the ledge and the step "did not go"; audit R5)
+    const into = () => { const q = bot.entity.position; return hx ? (hx > 0 ? q.x - best.c.x : best.c.x + 1 - q.x) : (hz > 0 ? q.z - best.c.z : best.c.z + 1 - q.z) }
+    const inC = () => into() >= 0.35
+    const t0 = Date.now()
+    bot.setControlState('forward', true)
+    while (Date.now() - t0 < 2000 && !inC() && Math.floor(bot.entity.position.y + 0.01) >= f.y) await sleep(25)
+    bot.setControlState('forward', false)
+    // (a tick back against the drift, only once in the air - on the lip it walked the body back onto the ledge)
+    { const t1 = Date.now(); while (bot.entity.onGround && Date.now() - t1 < 400) await sleep(25) }
+    if (!bot.entity.onGround) { bot.setControlState('back', true); await sleep(50); bot.setControlState('back', false) }
+    await gather.landed(bot, 2500)
+  } finally { release(); bot.setControlState('forward', false); bot.setControlState('back', false) }
+  const down = Math.floor(bot.entity.position.y + 0.01) < f.y
+  if (down) lastDropAt = Date.now()
+  log('move', down ? `dropped: from ${fmt(f)} to ${fmt(bot.entity.position)} (hp ${Math.round(bot.health)})` : `the controlled drop from ${fmt(f)} did not go: still at ${fmt(bot.entity.position)}`)
+  return down
 }
 
 async function goNear (bot, pos, range = 2, opts = {}) {
@@ -1592,4 +1745,4 @@ function refuseNode (n, ms = 120000) {
   if (refusedNodes.size > 200) { const now = Date.now(); for (const [kk, t] of refusedNodes) if (t < now) refusedNodes.delete(kk) }
   refusedNodes.set(k, Date.now() + ms)
 }
-module.exports = { refuseNode, closedDoorAt, buried, legPoint, escapeUp, isVerdict, underBuild, underZone, inForeign, crossDoor, goals, bindReflex, bindBot, setZone, setZones, inZone, zones, utilitySpotOK, insideHut, setProtector, isProtected, surface, isUnderground, surfaceYHere, movementsFor, goTo, goNear, travel, stopMoving, runGoal, sleep, fmt, waitReflex }
+module.exports = { refuseNode, closedDoorAt, buried, legPoint, escapeUp, isVerdict, stuckPlace, underBuild, underZone, inForeign, crossDoor, goals, bindReflex, bindBot, setZone, setZones, inZone, zones, utilitySpotOK, insideHut, setProtector, isProtected, surface, isUnderground, surfaceYHere, movementsFor, goTo, goNear, travel, stopMoving, runGoal, sleep, fmt, waitReflex }

@@ -75,7 +75,15 @@ function ourChest (p) {
 // torches...). Transparent full cubes (glass, leaves, ice) still let it open.
 const SEE_THROUGH_RE = /(glass|_leaves|^ice$|^frosted_ice$|^barrier$|^spawner$|^slime_block$|^honey_block$)/
 function shutsLid (b) { return !!b && world.isSolid(b) && !SEE_THROUGH_RE.test(b.name) && !/(chest|_bed|_slab|_stairs|furnace|crafting_table)$/.test(b.name) }
-const unreachable = new Map() // chest key -> time a walk to it failed
+const unreachable = new Map() // chest key -> { at, from }: when a walk to it failed, and where the walk began
+// (a mark made where EVERY walk fails at once - move.stuckPlace - is the place's verdict, not the chest's: dropped when read.
+//  From a scaffold top with gaps under it all twelve chests were "skipping it for a while", 2026-10-06 22:08)
+function badChest (p) {
+  const b = unreachable.get(key(p))
+  if (!b) return false
+  if (Date.now() - b.at >= 5 * 60000 || (b.from && move.stuckPlace(null, b.from))) { unreachable.delete(key(p)); return false }
+  return true
+}
 let lastWindowAt = 0 // (when our last chest window closed - the open-timeout diagnostic)
 // What can keep a lid shut, for the open-timeout line: the block over it, anything sitting on it (a cat on a chest keeps it
 // shut and the server says nothing), and for a double chest the other half's lid too
@@ -104,8 +112,7 @@ async function openChest (bot, p) {
   }
   if (!act.reach(bot, p, 4)) {
     // a chest we just failed to reach is skipped a while (35s stuck walks, three per castle cycle)
-    const bad = unreachable.get(key(p))
-    if (bad && Date.now() - bad < 5 * 60000) return null
+    if (badChest(p)) return null
     // (by travel - its legs go OUT of the build first: from inside the castle a bare planner walk to the chests timed out
     //  45s at a time, five in a row in one build step (each chest skipped in turn, none of them the problem - where the bot
     //  stood was), 2026-09-30)
@@ -113,9 +120,15 @@ async function openChest (bot, p) {
     //  caller named - 2026-10-04)
     if (Date.now() - chestWalkSaidAt > 60000) { chestWalkSaidAt = Date.now(); log('base', 'chest walk for: ' + String(new Error().stack).split('\n').slice(2, 7).map(l => l.trim().replace(/^at /, '')).join(' <- ')) }
     const r = await move.travel(bot, p, { range: 2, label: 'to chest', maxMs: 90000 })
-    if (!r.ok) { if (move.isVerdict(r)) unreachable.set(key(p), Date.now()); log('base', `can't reach the chest at ${move.fmt(p)} (${r.why}) - skipping it for a while`); return null }
+    if (!r.ok) {
+      const from = bot.entity.position.floored()
+      const placeStuck = move.stuckPlace(bot, from) // (every walk fails at once from here: the place, not this chest)
+      if (move.isVerdict(r) && !placeStuck) unreachable.set(key(p), { at: Date.now(), from: { x: from.x, y: from.y, z: from.z } })
+      log('base', `can't reach the chest at ${move.fmt(p)} (${r.why}) - ${placeStuck ? 'every walk fails from ' + move.fmt(from) + ': the place is stuck, not the chest' : 'skipping it for a while'}`)
+      return null
+    }
   }
-  { const bad = unreachable.get(key(p)); if (bad && Date.now() - bad < 5 * 60000) return null }
+  if (badChest(p)) return null
   unreachable.delete(key(p))
   // a chest with a full block on its lid won't open (a planner's stepping-stone of dirt: the deposit tried that chest
   // every 20 seconds for half an hour, 2026-09-27) - the block comes off first; a chest that still won't open is
@@ -139,7 +152,7 @@ async function openChest (bot, p) {
     mem.save()
     return w
   } catch (e) {
-    unreachable.set(key(p), Date.now())
+    unreachable.set(key(p), { at: Date.now(), from: null }) // (it would not open: the chest's own, wherever we stood)
     // (why it would not open, for the next one: where we stood, how far, and whether a window was still up)
     const me = bot.entity.position
     log('base', `couldn't open chest at ${move.fmt(p)}: ${e.message} - skipping it for a while (from ${move.fmt(me.floored())}, ${world.dist3(me, { x: p.x + 0.5, y: p.y + 0.5, z: p.z + 0.5 }).toFixed(1)}b, window ${bot.currentWindow ? bot.currentWindow.type || 'open' : 'none'}, sneak ${!!(bot.controlState && bot.controlState.sneak)}, holding ${bot.heldItem ? bot.heldItem.name : 'nothing'}, since the last window ${lastWindowAt ? Date.now() - lastWindowAt - 20000 : '?'}ms, ${lidReport(bot, p)})`)
