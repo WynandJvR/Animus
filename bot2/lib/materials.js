@@ -606,10 +606,17 @@ async function craftNode (bot, node, n, per, { shouldStop, keep = {} } = {}) {
 //  books (sugar cane, leather: ~30 a cell) waited behind nothing, the "longest pole" sending the day after the cows
 //  while a wall's stone was a trip away. Gathering is one trip at a time: the total is the same, the blocks come sooner,
 //  and a chain that proves impossible is found with the rest built; operator 2026-09-29)
+// A TRIP'S OWN PRICE, before its first unit: the walk out and back, the search, the tools (in rawCost's units - a cobblestone
+// is 1). Ranked by one cell's cost alone, 2 birch leaves (1.5 a cell) beat 481 spruce logs: the round banked its haul, took
+// the shears and walked off for two decor cells while the band waited, 2026-10-06
+const TRIP_COST = 60
 function pickRaw (winRaw, totRaw, { blockedRaw = null, feasible = () => true, perCell = null } = {}) {
   const cost = r => (totRaw[r] || winRaw[r] || 0) * rawCost(r)
   const per = r => (perCell && perCell[r] != null ? perCell[r] : Infinity)
-  const cands = (list, first, byCell) => Object.keys(list).filter(r => list[r] > 0 && feasible(r)).sort((a, b) => (first ? (b === first) - (a === first) : 0) || (byCell ? per(a) - per(b) : 0) || cost(b) - cost(a))
+  // (CELLS A TRIP BUYS PER EFFORT: the cells its shortfall stands for, over the trip's price plus the units' - the cheapest
+  //  cells still come first, but a handful of them is worth a trip only as much as it unlocks)
+  const rate = (list, r) => { const units = list[r] * rawCost(r); const cells = Number.isFinite(per(r)) && per(r) > 0 ? Math.max(1, units / per(r)) : list[r]; return cells / (TRIP_COST + units) }
+  const cands = (list, first, byCell) => Object.keys(list).filter(r => list[r] > 0 && feasible(r)).sort((a, b) => (first ? (b === first) - (a === first) : 0) || (byCell ? rate(list, b) - rate(list, a) : 0) || cost(b) - cost(a))
   const w = cands(winRaw, blockedRaw, true)
   if (w.length) return { raw: w[0], short: winRaw[w[0]], why: 'the next layers' }
   const t = cands(totRaw)

@@ -1437,19 +1437,7 @@ async function withdrawWindow (needs, lowY = {}) {
   // (a castle's torches, dirt and cobblestone are window needs too, and the kit's light went first; audit), and only for
   // the ones in the chest to take (else every round put the upper blocks back and took them out again; audit)
   const heads = firsts.filter(nm => countOf(nm) === 0 && stockOf(nm) > 0)
-  const room = Math.min(heads.length + 1, 6)
-  if (heads.length && inv.freeSlots(bot) < room) {
-    const keep = nm => Math.max(base.keepCount(bot, { name: nm }), build.FILLER_ITEMS.test(nm) ? build.SCAFFOLD_WANT : 0)
-    const lowHead = Math.min(...heads.map(y))
-    const above = [...new Set(inv.items(bot).map(i => i.name))].filter(nm => !firsts.includes(nm) && needs[nm] != null && y(nm) > lowHead).sort((a, b) => y(b) - y(a))
-    const back = []
-    for (const nm of above) {
-      if (inv.freeSlots(bot) >= room) break
-      const k = inv.count(bot, nm) - keep(nm)
-      if (k > 0 && await base.depositItem(bot, nm, k).catch(() => 0)) back.push(nm)
-    }
-    log('dir', `no room for ${heads.join(', ')} (the band's) - put back ${back.length ? back.join(', ') : 'nothing'} (window blocks for higher layers); ${inv.freeSlots(bot)} slots free`)
-  }
+  await roomForBand(heads, firsts, needs, y, Math.min(heads.length + 1, 6))
   for (const cap of [64, 64 * 4]) {
     for (const [name, n] of order) {
       if (inv.freeSlots(bot) < 2) return
@@ -1457,6 +1445,28 @@ async function withdrawWindow (needs, lowY = {}) {
       if (want > 0) await withdrawOf(name, want)
     }
   }
+}
+// ROOM FOR WHAT THE BAND WAITS ON - one rule for the round's withdraw and the step's wait: the window's withdraw fills the
+// pack by design (four stacks a kind, two slots left), the step's clearing and pickups take the rest, and the item the band
+// then waits on found no slot - "the pack is full - no stripped_oak_wood taken", "0 taken out of the chests, back to the
+// build", and the round went off on a trip instead, 2026-10-06. What goes back, in one deposit: first what the window places
+// none of (a trip's haul, the clearing's logs and saplings), then the window's blocks for higher layers than the band's,
+// highest first - never the kit's keep or the scaffold stock, never the waited items themselves
+async function roomForBand (heads, waited, needs, y, room) {
+  if (!heads.length || inv.freeSlots(bot) >= room) return
+  const keep = nm => Math.max(base.keepCount(bot, { name: nm }), build.FILLER_ITEMS.test(nm) ? build.SCAFFOLD_WANT : 0)
+  const lowHead = Math.min(...heads.map(y))
+  const slotsOf = nm => inv.items(bot).filter(i => i.name === nm).length - Math.ceil(keep(nm) / 64)
+  const names = [...new Set(inv.items(bot).map(i => i.name))].filter(nm => !waited.includes(nm) && keep(nm) !== Infinity && inv.count(bot, nm) > keep(nm))
+  // (never the hands' own: shears, a bucket, flint and steel, food - the next leaf trip or pour wanted them back; and the haul
+  //  by the slots it frees, the most first - a pair of shears went before a stack of logs; audit)
+  const md = bot.registry || {}
+  const haul = names.filter(nm => needs[nm] == null && !/^shears$|bucket$|^flint_and_steel$/.test(nm) && !(md.foodsByName && md.foodsByName[nm])).sort((a, b) => slotsOf(b) - slotsOf(a))
+  const upper = names.filter(nm => needs[nm] != null && y(nm) > lowHead).sort((a, b) => y(b) - y(a))
+  const back = new Map(); let free = inv.freeSlots(bot)
+  for (const nm of haul.concat(upper)) { if (free >= room) break; const s = slotsOf(nm); if (s > 0) { back.set(nm, keep(nm)); free += s } }
+  if (back.size) await base.depositAll(bot, { keep: (b, i) => back.has(i.name) ? back.get(i.name) : Infinity }).catch(() => false)
+  log('dir', `no room for ${heads.join(', ')} (the band's) - put back ${back.size ? [...back.keys()].join(', ') : 'nothing'} (the haul, then window blocks for higher layers); ${inv.freeSlots(bot)} slots free`)
 }
 function countOf (name) { return mats.held(bot, name) }
 function windowNeeds () { return typeof build.nextNeeds === 'function' ? build.nextNeeds(bot, WINDOW_LAYERS) : {} }
@@ -1731,6 +1741,7 @@ async function castleWorkInner () {
   // (the item the band waits on lies in the chests: out with it and back to the build - not a trip for the next thing on
   //  the list. 63 dirt banked while the round went for gravel, 208s, into someone else's place, 2026-10-03)
   if (steer && !blockedRaw && base.bankCount(steer) > 0) {
+    { const yl = it => nextLow[it] != null ? nextLow[it] : Infinity; await roomForBand(countOf(steer) === 0 ? [steer] : [], [steer], next, yl, 2) } // (a slot for it first: roomForBand)
     const n = Math.min(base.bankCount(steer), Math.max(16, (next[steer] || 0) - inv.count(bot, steer)))
     const got = await base.withdraw(bot, steer, n).catch(() => 0)
     log('dir', `the builder waits on ${steer} - ${got} taken out of the chests, back to the build`)
