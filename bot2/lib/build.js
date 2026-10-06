@@ -530,7 +530,6 @@ function infillCell (c) { return INFILL_RE.test(c.name) || cellUnsourced(c) }
 // cells in hand - until its stock covers its lowest layers' cells (a stack at most). Re-anchored by the first four bricks
 // out of a furnace, the band would walk down for four, run dry and jump back up every batch (audit 2026-09-28).
 const detached = new Set()
-const craftMemo = new Map() // item -> { at, ok }: craftable from stock, judged a minute at a time
 // A WAIT WITH NOTHING TO WAIT FOR: an anchor NOT in hand at a step's end, though the plan says the stock covers it - nothing
 // to gather, the round's crafts made none. No trip will ever bring it (the planner sees no shortfall), so the band would
 // hold for good: one purple wool cell held the castle from noon to dusk, the planner counting brown wool as purple
@@ -593,19 +592,15 @@ function detachedItems (todo, bot) {
   const band = todo.filter(c => !c.attach && !c.follows && !cellUnsourced(c) && !((cellFails.get(key(c)) || {}).n >= 1)).map(c => [c, stepItem(bot, c)])
   for (const [c, it] of band) if (!low[it] || c.y < low[it].y) low[it] = { y: c.y, n: 0 }
   for (const [c, it] of band) if (c.y <= low[it].y + 1) low[it].n++
-  // (none in stock is detached only when it cannot be MADE from stock either: the bricks rule - a long clay-and-furnace
-  //  chain - applied to a trapdoor six planks away sealed over cells the window's crafts would fill; audit 2026-09-29.
-  //  The verdict kept a minute per item: this runs every placement of a step, a plan each would load the body)
-  const craftable = it => {
-    const c0 = craftMemo.get(it); if (c0 && Date.now() - c0.at < 60000) return c0.ok
-    let ok = false; try { const r = require('./materials').planFor(bot, { [it]: Math.max(1, low[it].n) }); ok = !Object.keys(r.raw || {}).some(x => r.raw[x] > 0) && !(r.unknown || []).length } catch {}
-    craftMemo.set(it, { at: Date.now(), ok }); return ok
-  }
+  // NONE IN STOCK IS DETACHED, made or gathered alike: a waiting hole, kept open, its column over it waiting, the band rising
+  // past it - and back down to it once the window's crafts or a trip bring its two layers' count. (The "unless craftable from
+  // stock" exception dates from when a detached cell was COVERED - a trapdoor six planks away was sealed over, audit
+  // 2026-09-29; holes are kept open since. Left in, a craftable anchor nobody crafted held the band: stripped spruce logs,
+  // their 41 spruce logs crafted into planks by the window, anchored y126-127 with 1606 structural cells in hand, 2026-10-06)
   for (const it of Object.keys(low)) {
     const k = have[it] || 0
     if (k > 0) coverMiss.delete(it) // (it turned up: a hold on "none, and the plan thinks otherwise", never a day's ban; audit)
-    if (k <= 0 && !craftable(it)) detached.add(it)
-    else if (k <= 0) detached.delete(it)
+    if (k <= 0) detached.add(it)
     // (in the ENDGAME any stock re-attaches: no band left to hold - 2 string in the pack against 4 cells kept them all detached, and
     //  the 4 carpets over them waited, the hub at 7834/7845, 2026-10-05)
     // (infill holds no band: any of it in stock re-attaches - held for its two layers' count, panes in hand sat unplaced; audit)
